@@ -1,0 +1,15 @@
+[package]
+name = "e2e"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+task-core = { path = "../../crates/task-core" }
+tempfile = "3"
+time = "0.3"

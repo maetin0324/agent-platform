@@ -1,0 +1,22 @@
+# taskd 設定の例（ADR-0005 D7）。相対パスはこのファイルのあるディレクトリ基準。
+db = "../taskd.sqlite3"            # taskctl --db / TASKD_DB と同じファイルを指すこと
+workspace_root = "../workspaces"   # WorkspaceSpec::Local の相対パスの基準
+tick_ms = 2000
+max_concurrency = 2
+lease_grace_secs = 60              # ADR-0002 D7: リース ttl = max_wall_secs + 猶予
+idle_timeout_secs = 300            # ADR-0003 D4: 無出力タイムアウト
+kill_grace_secs = 10               # ADR-0003 D4: SIGTERM 後 SIGKILL までの猶予
+review_timeout_secs = 600          # Command チェック 1 件あたりの上限
+error_cooldown_secs = 300          # AuthFailed / Exhausted 時のプロバイダ除外時間
+
+# fake アダプタ: サブプロセスとして起動するコマンド。省略時は progress + done を返す sh スクリプト。
+[adapters.fake]
+# command = ["sh", "-c", "cat >/dev/null; echo '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'"]
+
+# プロバイダ表。上から順に優先（StaticPolicy）。Phase 3 では adapter = "fake" のみ使える。
+[[providers]]
+id = "fake-local"
+adapter = "fake"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 2
+model = "fake"

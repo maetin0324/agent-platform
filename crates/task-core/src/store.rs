@@ -72,6 +72,17 @@ pub trait TaskStore: Send + Sync {
         task_id: TaskId,
         trigger: Trigger,
         extra_event: Option<Event>,
+    ) -> Result<Outcome, StoreError> {
+        self.apply_transition_with_events(task_id, trigger, extra_event.into_iter().collect())
+    }
+    /// `apply_transition` の一般形（ADR-0005 D4）。`extra_events` を順に、`Event::Transitioned`
+    /// の直後に同一トランザクションで追記する。ディスパッチャが `WorkerFinished` や
+    /// 条件ごとの `ReviewVerdict` を遷移と原子的に記録するために使う。
+    fn apply_transition_with_events(
+        &self,
+        task_id: TaskId,
+        trigger: Trigger,
+        extra_events: Vec<Event>,
     ) -> Result<Outcome, StoreError>;
 }
 
@@ -409,14 +420,14 @@ impl TaskStore for SqliteStore {
         Ok(result)
     }
 
-    fn apply_transition(
+    fn apply_transition_with_events(
         &self,
         task_id: TaskId,
         trigger: Trigger,
-        extra_event: Option<Event>,
+        extra_events: Vec<Event>,
     ) -> Result<Outcome, StoreError> {
-        // ADR-0004 D1: 任意のトリガーを検証し、tasks の更新と Event::Transitioned
-        // (+ extra_event) の追記を単一トランザクションで行う。
+        // ADR-0004 D1 / ADR-0005 D4: 任意のトリガーを検証し、tasks の更新と
+        // Event::Transitioned (+ extra_events) の追記を単一トランザクションで行う。
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
 
@@ -488,7 +499,7 @@ impl TaskStore for SqliteStore {
         )?;
         next_seq += 1;
 
-        if let Some(event) = extra_event {
+        for event in extra_events {
             let ts = format_rfc3339(OffsetDateTime::now_utc())?;
             tx.execute(
                 "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
@@ -499,6 +510,7 @@ impl TaskStore for SqliteStore {
                     serde_json::to_string(&event)?
                 ],
             )?;
+            next_seq += 1;
         }
 
         tx.commit()?;
@@ -886,5 +898,39 @@ mod tests {
         };
         assert!(lease_worker_run_id.is_none());
         assert!(lease_expires_at.is_none());
+    }
+
+    #[test]
+    fn apply_transition_with_events_appends_transitioned_then_extras_in_order() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task(Status::Ready);
+        store.insert(&task).unwrap();
+        assert!(store.acquire_lease(task.id, "run-1", StdDuration::from_secs(60)).unwrap());
+        let extras = vec![
+            Event::WorkerFinished { run_id: "run-1".into(), outcome: "done: x".into(), usage: None },
+            Event::WorkerProgress { run_id: "run-1".into(), msg: "extra".into() },
+        ];
+        let outcome = store.apply_transition_with_events(task.id, Trigger::WorkerDone, extras).unwrap();
+        assert_eq!(outcome.next, Status::Reviewing);
+        let events = store.events_for(task.id).unwrap();
+        let tail: Vec<(u64, String)> = events[events.len() - 3..]
+            .iter()
+            .map(|(seq, e)| (*seq, match e {
+                Event::Transitioned { to, reason, .. } => format!("transitioned:{to:?}:{reason}"),
+                Event::WorkerFinished { outcome, .. } => format!("finished:{outcome}"),
+                Event::WorkerProgress { msg, .. } => format!("progress:{msg}"),
+                _ => "other".into(),
+            }))
+            .collect();
+        assert_eq!(tail, vec![
+            (1, "transitioned:Reviewing:worker_done".to_string()),
+            (2, "finished:done: x".to_string()),
+            (3, "progress:extra".to_string()),
+        ]);
+        assert!(store.get(task.id).unwrap().unwrap().lease.is_none());
+        // 無効な遷移では何も追記されない。
+        let before = store.events_for(task.id).unwrap().len();
+        assert!(store.apply_transition_with_events(task.id, Trigger::WorkerDone, vec![Event::ApprovalRequested]).is_err());
+        assert_eq!(store.events_for(task.id).unwrap().len(), before);
     }
 }

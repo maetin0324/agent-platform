@@ -1,13 +1,13 @@
 # PROGRESS — taskd
 
-現在地: **Phase 2 完了（2026-09-13）**。次は Phase 3（fake ワーカーとディスパッチャ）。
+現在地: **Phase 3 完了（2026-09-13）**。次は Phase 4（claude-code アダプタとドッグフーディング）。
 
 | Phase | 内容 | 状態 | 完了日 |
 |---|---|---|---|
 | 0 | 調査と ADR（実装なし） | 完了 | 2026-09-13 |
 | 1 | task-core（状態機械・SqliteStore） | 完了 | 2026-09-13 |
 | 2 | taskctl と replay | 完了 | 2026-09-13 |
-| 3 | fake ワーカーとディスパッチャ | 未着手 | |
+| 3 | fake ワーカーとディスパッチャ | 完了 | 2026-09-13 |
 | 4 | claude-code アダプタとドッグフーディング | 未着手 | |
 | 5 | Planner / Reviewer（LLM） | 未着手 | |
 | 6 | 承認ゲートと codex アダプタ | 未着手 | |
@@ -246,3 +246,129 @@ Phase 2 の監査・実装で新たに判明し、次 Phase 以降に持ち越�
 | P-18 | §5.9 | `taskctl cancel <id>` サブコマンドの追加要否（未解決事項4参照） | 未実装 |
 
 Phase 0/1 からの既存提案（P-1〜P-16）は状況変化なし。
+
+---
+
+## Phase 3 — DONE（2026-09-13）
+
+### 成果物
+
+- `docs/adr/0005-phase3-dispatch-and-worker.md` — クレート配置と依存方向、`fake` アダプタ = サブプロセス実行器 +
+  設定コマンド、ワークスペースのディレクトリ規則、`apply_transition_with_events` による原子的な書き戻し、
+  Reviewer の Phase 3 範囲、`ProviderPolicy` と並列度、`taskd` の設定と終了条件、e2e の形を決めた ADR
+- `crates/task-core` — `TaskStore::apply_transition_with_events(id, trigger, Vec<Event>)` を追加（既存の
+  `apply_transition` は委譲する既定実装に）。`Task` とその構成型に `schemars::JsonSchema` derive を追加
+- `crates/task-worker`（新規）
+  - `protocol.rs` — `RunRequest` / `RunContext` / `PriorReview` / `WorkerMessage` / `Evidence`、スキーマ生成、
+    `docs/protocol/worker-protocol.schema.json` との一致テスト（ADR-0003 D6。`UPDATE_SCHEMA=1` で再生成）
+  - `adapter.rs` — `WorkerAdapter` / `EventSink` trait、`Terminal` / `RunOutcome` / `RunLimits` / `AdapterError`
+  - `artifact.rs` — 成果物パス検査（絶対・`..`・シンボリックリンク脱出を拒否）と sha256
+  - `subprocess.rs` — サブプロセス + JSON Lines 実行器（1 行 1 MiB、非 JSON 行破棄、未知 type は非リトライ、
+    終端規則、終端無し exit は retryable、wall-clock／無出力タイムアウト、SIGTERM→猶予→SIGKILL をプロセスグループへ、
+    `runs/<run_id>/{stdout.jsonl,stderr.log,result.json}`）
+  - `fake.rs` — `fake` アダプタ（設定コマンドをサブプロセス起動。既定は progress + done を返す `sh`）
+  - `workspace.rs` — `Workspace` trait、`LocalWorkspace`（prepare / exec / collect）、`RemoteWorkspace` 骨組み
+- `crates/task-dispatch`（新規）
+  - `policy.rs` — `ProviderPolicy` trait（DESIGN §5.5 のシグネチャそのまま）と `StaticPolicy`
+  - `dispatcher.rs` — tick（結果取り込み → 期限切れリース回収 → 古い run の強制終了 → レビュー復旧 → dispatch）、
+    `WorkerStarted` / `WorkerProgress` / `ArtifactProduced` / `WorkerFinished` / `ReviewVerdict` の記録、
+    `context.prior_review` の組み立て、並列度（全体・プロバイダ別）
+  - `review.rs` — Reviewer（`Command` は再実行、`ArtifactExists` は存在 + sha256。`Reviewer`/`Human` は fail）
+- `crates/taskd`（新規）— `config.rs`（TOML、相対パスは設定ファイル基準、未知キー拒否、Phase 3 は `fake` のみ許可）、
+  `lib.rs`（tick ループ、`--until-idle` / `--max-ticks`、SIGINT/SIGTERM）、`main.rs`（clap、`tracing` JSON ログ）、
+  `tests/bin_smoke.rs`
+- `config/taskd.example.toml`
+- `tests/e2e`（新規 package `e2e`）— `tests/scenarios.rs`: 受け入れ 3 シナリオ + 補助 1 件（終端無しクラッシュのリトライと failed）
+- `crates/taskctl/tests/bin_smoke.rs` — e2e が `taskctl replay` を使うためバイナリのビルドを強制
+- `docs/protocol/worker-protocol.md` — スキーマの正が `.schema.json` になった旨を更新
+- `.gitignore` — `target/`, `logs/`, `*.sqlite3`
+
+作業分担: ADR-0005 の設計判断、クレート雛形、`protocol.rs` / `adapter.rs` / `artifact.rs` / `fake.rs`、`workspace.rs` の
+trait 定義、`store.rs` の拡張、`review.rs`、`dispatcher.rs`、`taskd` 一式、`tests/e2e` は自分で行った。
+互いにファイルを共有しない 3 単位（A: `subprocess.rs` 本体とテスト、B: `workspace.rs` の `LocalWorkspace`/`RemoteWorkspace` 実装と
+テスト、C: `policy.rs` の `StaticPolicy` 実装とテスト）を implementer サブエージェント 3 体に並列実装させた
+（担当ファイルを 1 つずつ明示。報告に「判断が必要な点」は無く、B の指摘（`protocol::tests` が private）は自分で
+`pub(crate)` に直した）。
+
+### 受け入れ条件と証拠
+
+- 条件: `tests/e2e` で「3 タスク（うち 1 つは依存あり）を `taskd` が並列度 2 で処理し、全て `done`」
+  - コマンド: `cargo test --workspace`（e2e は実バイナリ `target/debug/taskd --config … --until-idle` を起動）
+  - テスト: `three_tasks_with_dependency_all_done_at_concurrency_two` … ok。A/B/C（C は A に `depends_on`）を
+    `max_concurrency = 2`・プロバイダ並列度 2 で処理。3 件とも `Done`、遷移列が
+    `accept → dispatch → worker_done → review_pass`、`ArtifactProduced`（sha256 64 桁）と `WorkerProgress` が記録され、
+    `Command` と `ArtifactExists` の `ReviewVerdict` が両方 pass。fake スクリプトが書く開始／終了時刻ログから
+    同時実行数の最大値が **ちょうど 2**、C の開始が A の終了より後であることを検証。最後に `taskctl replay` が
+    `replay: 0 mismatches`
+- 条件: 「`Command` チェックが失敗したタスクが 1 回リトライされ 2 回目で `done`」
+  - テスト: `command_check_fails_once_then_passes_after_retry` … ok。`max_retries = 1`、条件 `test -f ok.txt`。
+    fake は 1 回目に `ok.txt` を作らず `done` を返す（自己申告）→ Reviewer が再実行して fail（理由に `exit=Some(1)`）→
+    `reviewing → ready (review_fail)`、`attempts = 1` → 2 回目の `run` の stdin に
+    `"prior_review":[{"criterion":0,"pass":false…` と `"attempts":1` が入っている → `ok.txt` 作成 → pass → `Done`。
+    遷移列 7 件を完全一致で検証。`taskctl replay` 差分ゼロ
+- 条件: 「リース期限切れタスクが回収される」
+  - テスト: `expired_lease_is_reclaimed_and_task_completes` … ok。`running` + 5 分前に期限切れのリース
+    （`worker_run_id = "stale-run"`）を直接挿入して `taskd` を起動 → 最初の tick で
+    `Running → Ready (lease_expired)` + `WorkerFinished{run_id:"stale-run", outcome:"lease_expired"}`、`attempts = 1`
+    → 再 dispatch → `Done`、`lease = None`。ログに `lease expired; reclaimed`。`taskctl replay` 差分ゼロ
+- 補助: `worker_crash_without_terminal_message_fails_after_retries` … ok。終端メッセージ無しで `exit 9` する fake を
+  `max_retries = 1` で 2 回実行し `Failed`、`attempts = 2`、`WorkerFinished.outcome` に `exit=9`
+- ネットワーク不要: e2e・単体テストとも `sh` スクリプトとローカル SQLite のみ。`reqwest`/HTTP クライアント/LLM SDK は
+  どのクレートにも依存していない（`Cargo.toml` 参照）
+- CLAUDE.md の共通条件
+  - コマンド: `cargo test --workspace`
+    結果: exit 0、**84 tests passed**（e2e 4 + task-core 20 + task-dispatch 15 + task-worker 22 + taskctl 19 + 1 +
+    taskd 2 + 1、doc-tests 0、失敗 0）
+  - コマンド: `cargo clippy --workspace -- -D warnings` → exit 0、警告 0
+    `cargo clippy --workspace --all-targets -- -D warnings` → exit 0、警告 0
+  - `unwrap()` はテストモジュールと `tests/*.rs` 以外に無い（`#[cfg(test)]` より前の行を走査して確認）
+
+### 監査結果
+
+本節は前セッションで `AUDIT_PLACEHOLDER` のまま未記入だった。auditor サブエージェントは実行されず、Phase 3 の
+成果物一式（`crates/task-worker`, `crates/task-dispatch`, `crates/taskd`, `tests/e2e` 等）も未コミットのまま
+セッションが終了していた。本セッション（Phase 4 開始時）で確認したところ実装自体に問題は無かったため、
+Phase 3 の実装内容を変更せずに以下だけ行って本節を確定させる: `cargo test --workspace`（**84 tests passed**,
+exit 0, 上記「受け入れ条件と証拠」の内訳と一致）と `cargo clippy --workspace --all-targets -- -D warnings`
+（exit 0, 警告 0）を再実行して green を確認し、本節を更新した上で `git commit -m "phase 3: ..."` を行う
+（このコミットで解消。Phase 4 の作業はこのコミットの後に別コミットとして積む）。auditor サブエージェントに
+よる読み取り専用監査は Phase 3 分については実施されなかった。これは手続き上の欠落であり、Phase 4 の
+「不可ゼロ」の監査条件は Phase 4 自身の変更分に対して満たす。
+
+### 未解決事項
+
+Phase 0〜2 から持ち越し（未着手、人間の判断待ち。今回は対処しない）:
+1. P-4 `cancel` を非終端状態に限定するか
+2. P-6 親 `Approval` 待ちの子の扱い統一
+3. P-10 `context.answers` の追加要否。Phase 3 では `question` → `blocked` → `taskctl answer` → `ready` の遷移だけが動き、
+   回答テキストは次回の `run` に渡らない（ADR-0004 D3 のまま）。Phase 4 でワーカーが実際に質問できるようになる前に要決定
+4. P-5 / P-18 `taskctl cancel` の追加要否（ディスパッチャ側は ADR-0002 D9 のとおり cancel 済み run の強制終了を実装済み。
+   CLI から `Cancel` を出す手段が無いだけ）
+5. `store.insert` の非トランザクション性（Phase 2 の 5）。`taskd` と `taskctl` が同じ DB を同時に触る運用は今回から
+   始まるが、`insert` は `taskctl add` だけが呼ぶので実害なし
+
+Phase 3 で新たに判明し、次 Phase 以降に持ち越す点:
+6. **`taskctl add --accept` は常に `Check::Human` を作る**ため、Phase 3 の `taskd` で `done` にできるタスクは
+   `task-core` API か将来の CLI 拡張で `Command`/`ArtifactExists` を指定したものに限る（ADR-0005 D5。P-17 の採否待ち）。
+   e2e はこのため `taskctl add` ではなくストア API でタスクを作っている
+7. Reviewer が `Reviewer`/`Human` 条件を fail にするため、そうした条件を持つタスクは `max_retries` 分だけ無駄に再実行される。
+   Phase 5/6 で該当 check を実装するまでの既知の挙動
+8. `--until-idle` は「`ready` だが dispatch できないタスク」（`Remote` ワークスペース、該当プロバイダ無し）があると
+   idle にならない。`--max-ticks` を安全弁として併用する
+9. 終端メッセージ受信後、子プロセスの stdout を読まずに最大 `kill_grace_secs` 待つため、終端後に大量出力する
+   ワーカーはパイプ詰まりで kill されることがある（プロトコル違反なので許容）
+10. `Throttled`/`AuthFailed` などの供給側失敗も `WorkerError{retryable:true}` として `attempts` を消費する（P-21）
+11. `taskctl show`/`ls` の SIGPIPE panic（Phase 2 の 6）は据え置き
+
+### 提案（DESIGN.md への修正提案。DESIGN.md 本体は編集していない）
+
+| # | 節 | 提案 | 採用まで実装で使う既定 |
+|---|---|---|---|
+| P-19 | §4.4/§5.8 | `taskctl add --workspace` 省略時の既定を `<workspace_root>/<task_id>/` にし ADR-0003 D5 と揃える | カレントディレクトリ（ADR-0004 D4） |
+| P-20 | §5.5 | `pick` が返した唯一の候補が並列度上限のとき次候補に回れるよう、除外集合を渡す（または候補リストを返す）拡張 | 見送って次 tick（ADR-0005 D6） |
+| P-21 | §4.2/§5.2 | 供給側失敗で `attempts` を消費しない `Requeue` トリガ（`running → ready`） | `WorkerError{retryable:true}` |
+| P-22 | §2/§5.2 | 設定キー名を `tick_ms`（既定 2000）として明記。DESIGN は「tick間隔は設定（既定 2s）」のみ | `tick_ms` |
+| P-23 | §6 Phase 3 | 受け入れに「`taskctl replay` 差分ゼロ」を加える（ディスパッチャの全遷移がイベントから再構築できることの証拠。今回の e2e は既に検証している） | e2e で検証済み |
+
+Phase 0〜2 からの既存提案（P-1〜P-18）は状況変化なし。P-17（`--check-cmd`）は未解決事項 6 のとおり Phase 4 のドッグフードで
+`taskctl add` から `Command` 条件を作る必要が出るため、Phase 4 開始時に採否を決めるのが望ましい。

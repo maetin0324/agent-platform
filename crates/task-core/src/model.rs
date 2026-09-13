@@ -3,13 +3,14 @@
 
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use ulid::Ulid;
 
 /// タスクの一意識別子（ULID）。DESIGN §4.1。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TaskId(pub Ulid);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct TaskId(#[schemars(with = "String")] pub Ulid);
 
 impl TaskId {
     pub fn new() -> Self {
@@ -38,7 +39,7 @@ impl std::str::FromStr for TaskId {
 }
 
 /// DESIGN §4.1 の `TaskKind`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskKind {
     Plan,
@@ -48,7 +49,7 @@ pub enum TaskKind {
 }
 
 /// ADR-0002 D1 の状態集合。終端は `done | failed | cancelled`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Draft,
@@ -69,7 +70,7 @@ impl Status {
 }
 
 /// DESIGN §5.4 の `WorkerHint`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
     Frontier,
@@ -77,14 +78,14 @@ pub enum Tier {
     Cheap,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkerHint {
     pub tier: Tier,
     pub adapter: Option<String>,
 }
 
 /// DESIGN §5.8 の境界。`Remote` は接続層プロジェクトが実装するまで型のみ。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkspaceSpec {
     Local { path: PathBuf },
@@ -92,7 +93,7 @@ pub enum WorkspaceSpec {
 }
 
 /// DESIGN §4.1 の `Budget`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Budget {
     pub max_turns: u32,
     pub max_wall_secs: u64,
@@ -101,15 +102,16 @@ pub struct Budget {
 
 /// DESIGN §4.1 の `Lease`。ADR-0002 D7: `expires_at` は
 /// `budget.max_wall_secs + 猶予` から `acquire_lease` 呼び出し側が計算する。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Lease {
     pub worker_run_id: String,
     #[serde(with = "time::serde::rfc3339")]
+    #[schemars(with = "String")]
     pub expires_at: OffsetDateTime,
 }
 
 /// DESIGN §5.3/§5.7 の `Check` 種別。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Check {
     Command { cmd: String, expect_exit: i32 },
@@ -119,14 +121,14 @@ pub enum Check {
 }
 
 /// DESIGN §4.1 の `Criterion`。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Criterion {
     pub text: String,
     pub check: Check,
 }
 
 /// DESIGN §4.4 の `ArtifactRef`。実体は `workspace/<task_id>/artifacts/` 配下。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ArtifactRef {
     pub name: String,
     pub path: String,
@@ -135,7 +137,7 @@ pub struct ArtifactRef {
 }
 
 /// DESIGN §4.1 の `Task`。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Task {
     pub id: TaskId,
     pub parent_id: Option<TaskId>,
@@ -153,13 +155,15 @@ pub struct Task {
     pub attempts: u32,
     pub lease: Option<Lease>,
     #[serde(with = "time::serde::rfc3339")]
+    #[schemars(with = "String")]
     pub created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
+    #[schemars(with = "String")]
     pub updated_at: OffsetDateTime,
 }
 
 /// DESIGN §5.3 の `usage`。取れない項目は省略可。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,

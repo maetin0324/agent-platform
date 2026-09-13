@@ -1,7 +1,7 @@
 # taskd ワーカープロトコル v1（初版）
 
 - 状態: Draft（Phase 0 初版）。規範は `docs/DESIGN.md` §5.3 と [ADR-0003](../adr/0003-worker-protocol.md)
-- JSON Schema: Phase 3 で `schemars` から `worker-protocol.schema.json` を生成してこの隣に置く。それまでは本文書 §7 の手書きスキーマを暫定の正とする
+- JSON Schema: 正は隣の `worker-protocol.schema.json`（Phase 3 で `task-worker::protocol` の Rust 型から `schemars` で生成。`task-worker` のテスト `committed_schema_matches_generated` が一致を検証し、`UPDATE_SCHEMA=1 cargo test -p task-worker` で再生成する）。本文書 §7 の手書きスキーマは説明用の抜粋
 - 末尾 §9「提案中の拡張」は DESIGN.md に反映されるまで規範ではない
 
 ## 1. 概要
@@ -145,7 +145,7 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 
 `progress` / `artifact` の受信で無出力カウンタをリセットする。
 
-## 7. JSON Schema（暫定・手書き。Phase 3 で生成版に置換）
+## 7. JSON Schema（説明用の手書き抜粋。正は `worker-protocol.schema.json`）
 
 ```json
 {

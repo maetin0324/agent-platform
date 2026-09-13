@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/task-core", "crates/taskctl"]
+members = [
+    "crates/task-core",
+    "crates/task-worker",
+    "crates/task-dispatch",
+    "crates/taskd",
+    "crates/taskctl",
+    "tests/e2e",
+]
 
 [workspace.package]
 edition = "2024"

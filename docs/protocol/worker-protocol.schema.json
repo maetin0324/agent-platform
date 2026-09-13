@@ -1,0 +1,600 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "description": "DESIGN §4.4 の `ArtifactRef`。実体は `workspace/<task_id>/artifacts/` 配下。",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "sha256",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Budget": {
+      "description": "DESIGN §4.1 の `Budget`。",
+      "properties": {
+        "max_retries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_turns": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_wall_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_turns",
+        "max_wall_secs",
+        "max_retries"
+      ],
+      "type": "object"
+    },
+    "Check": {
+      "description": "DESIGN §5.3/§5.7 の `Check` 種別。",
+      "oneOf": [
+        {
+          "properties": {
+            "cmd": {
+              "type": "string"
+            },
+            "expect_exit": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "type": {
+              "const": "command",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cmd",
+            "expect_exit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "artifact_exists",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "reviewer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "human",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Criterion": {
+      "description": "DESIGN §4.1 の `Criterion`。",
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/Check"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "check"
+      ],
+      "type": "object"
+    },
+    "Evidence": {
+      "description": "`done.evidence[]`。",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "criterion": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "stdout_tail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion",
+        "command",
+        "exit",
+        "stdout_tail"
+      ],
+      "type": "object"
+    },
+    "Lease": {
+      "description": "DESIGN §4.1 の `Lease`。ADR-0002 D7: `expires_at` は\n`budget.max_wall_secs + 猶予` から `acquire_lease` 呼び出し側が計算する。",
+      "properties": {
+        "expires_at": {
+          "type": "string"
+        },
+        "worker_run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "worker_run_id",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "PriorReview": {
+      "description": "直前のレビュー結果（`context.prior_review[]`）。",
+      "properties": {
+        "criterion": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pass": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion",
+        "pass",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "RunContext": {
+      "description": "`run.context`。未知フィールドは無視する（前方互換）。",
+      "properties": {
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "prior_review": {
+          "items": {
+            "$ref": "#/$defs/PriorReview"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "prior_review",
+        "inputs"
+      ],
+      "type": "object"
+    },
+    "Status": {
+      "description": "ADR-0002 D1 の状態集合。終端は `done | failed | cancelled`。",
+      "enum": [
+        "draft",
+        "ready",
+        "running",
+        "blocked",
+        "reviewing",
+        "done",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "Task": {
+      "description": "DESIGN §4.1 の `Task`。",
+      "properties": {
+        "acceptance": {
+          "items": {
+            "$ref": "#/$defs/Criterion"
+          },
+          "type": "array"
+        },
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/TaskKind"
+        },
+        "lease": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Lease"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "objective": {
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "worker_hint": {
+          "$ref": "#/$defs/WorkerHint"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceSpec"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "objective",
+        "acceptance",
+        "inputs",
+        "depends_on",
+        "status",
+        "priority",
+        "worker_hint",
+        "workspace",
+        "budget",
+        "attempts",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "TaskId": {
+      "description": "タスクの一意識別子（ULID）。DESIGN §4.1。",
+      "type": "string"
+    },
+    "TaskKind": {
+      "description": "DESIGN §4.1 の `TaskKind`。",
+      "enum": [
+        "plan",
+        "execute",
+        "review",
+        "approval"
+      ],
+      "type": "string"
+    },
+    "Tier": {
+      "description": "DESIGN §5.4 の `WorkerHint`。",
+      "enum": [
+        "frontier",
+        "standard",
+        "cheap"
+      ],
+      "type": "string"
+    },
+    "Usage": {
+      "description": "DESIGN §5.3 の `usage`。取れない項目は省略可。",
+      "properties": {
+        "input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WorkerHint": {
+      "properties": {
+        "adapter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier"
+        }
+      },
+      "required": [
+        "tier"
+      ],
+      "type": "object"
+    },
+    "WorkerMessage": {
+      "description": "ワーカー → taskd のメッセージ。`done` / `error` / `question` は終端（ADR-0003 D3）。",
+      "oneOf": [
+        {
+          "properties": {
+            "msg": {
+              "type": "string"
+            },
+            "type": {
+              "const": "progress",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "msg"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "description": "ワークスペース相対。絶対パス・`..`・ワークスペース外は拒否（ADR-0003 D5）。",
+              "type": "string"
+            },
+            "type": {
+              "const": "artifact",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/Evidence"
+              },
+              "type": "array"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "type": {
+              "const": "done",
+              "type": "string"
+            },
+            "usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Usage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "summary",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message",
+            "retryable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkspaceSpec": {
+      "description": "DESIGN §5.8 の境界。`Remote` は接続層プロジェクトが実装するまで型のみ。",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "local",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cluster": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "remote",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "cluster",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "run": {
+      "description": "taskd → ワーカーの `run` メッセージ（1 行）。`{\"type\":\"run\", ...}`。",
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/RunContext"
+        },
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task": {
+          "$ref": "#/$defs/Task"
+        },
+        "workspace": {
+          "description": "絶対パス。ワーカーの cwd、`artifact.path` の基準。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "task",
+        "workspace",
+        "context"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "スキーマ生成用のルート。`docs/protocol/worker-protocol.schema.json` の内容と一致する。",
+  "properties": {
+    "message": {
+      "$ref": "#/$defs/WorkerMessage"
+    },
+    "run": {
+      "$ref": "#/$defs/run"
+    }
+  },
+  "required": [
+    "run",
+    "message"
+  ],
+  "title": "ProtocolSchema",
+  "type": "object"
+}
