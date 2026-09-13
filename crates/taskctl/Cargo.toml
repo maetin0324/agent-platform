@@ -1,0 +1,17 @@
+[package]
+name = "taskctl"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "taskctl"
+path = "src/main.rs"
+
+[dependencies]
+task-core = { path = "../task-core" }
+clap = { version = "4", features = ["derive"] }
+time = { version = "0.3", features = ["formatting"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

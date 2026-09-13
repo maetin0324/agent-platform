@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::model::{Event, Status, Task, TaskId, TaskKind};
+use crate::transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 
@@ -35,6 +36,8 @@ pub enum StoreError {
     Poisoned,
     #[error("invalid stored data: {0}")]
     Invalid(String),
+    #[error(transparent)]
+    InvalidTransition(#[from] InvalidTransition),
 }
 
 pub trait TaskStore: Send + Sync {
@@ -59,6 +62,17 @@ pub trait TaskStore: Send + Sync {
     /// status=Ready かつ depends_on が全て Done かつ（親が存在し kind=Approval の場合は親が Done）
     /// を満たすタスクを priority DESC, created_at ASC で最大 limit 件返す。
     fn ready_tasks(&self, limit: usize) -> Result<Vec<Task>, StoreError>;
+    /// `transition::transition()` で検証した任意のトリガーを適用する汎用の書き込み口
+    /// （ADR-0004 D1）。タスクの取得・`transition()` の呼び出し・`tasks` 行の更新・
+    /// `Event::Transitioned` の追記（と任意の `extra_event`）を単一トランザクションで行う。
+    /// タスクが存在しない場合は `StoreError::Invalid`、遷移が無効な場合は
+    /// `StoreError::InvalidTransition` を返し、いずれもタスクの状態は変更しない。
+    fn apply_transition(
+        &self,
+        task_id: TaskId,
+        trigger: Trigger,
+        extra_event: Option<Event>,
+    ) -> Result<Outcome, StoreError>;
 }
 
 pub struct SqliteStore {
@@ -394,6 +408,102 @@ impl TaskStore for SqliteStore {
 
         Ok(result)
     }
+
+    fn apply_transition(
+        &self,
+        task_id: TaskId,
+        trigger: Trigger,
+        extra_event: Option<Event>,
+    ) -> Result<Outcome, StoreError> {
+        // ADR-0004 D1: 任意のトリガーを検証し、tasks の更新と Event::Transitioned
+        // (+ extra_event) の追記を単一トランザクションで行う。
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+
+        let json: Option<String> = tx
+            .query_row(
+                "SELECT json FROM tasks WHERE id = ?1",
+                params![task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let json = match json {
+            Some(j) => j,
+            None => return Err(StoreError::Invalid(format!("task not found: {task_id}"))),
+        };
+        let mut task = Self::row_to_task(json)?;
+
+        let view = StateView {
+            kind: task.kind,
+            status: task.status,
+            attempts: task.attempts,
+            max_retries: task.budget.max_retries,
+        };
+        let outcome = transition(&view, &trigger)?;
+
+        let now = OffsetDateTime::now_utc();
+        // ADR-0002 D1: running から出る全遷移でリースを解放する。
+        let leaving_running = view.status == Status::Running && outcome.next != Status::Running;
+        task.status = outcome.next;
+        task.attempts = outcome.attempts;
+        task.updated_at = now;
+        if leaving_running {
+            task.lease = None;
+        }
+
+        let new_json = serde_json::to_string(&task)?;
+        if leaving_running {
+            tx.execute(
+                "UPDATE tasks SET status = ?1, lease_worker_run_id = NULL, \
+                 lease_expires_at = NULL, json = ?2 WHERE id = ?3",
+                params![status_str(task.status), new_json, task_id.to_string()],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE tasks SET status = ?1, json = ?2 WHERE id = ?3",
+                params![status_str(task.status), new_json, task_id.to_string()],
+            )?;
+        }
+
+        let mut next_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM events WHERE task_id = ?1",
+            params![task_id.to_string()],
+            |row| row.get(0),
+        )?;
+
+        let transitioned = Event::Transitioned {
+            from: view.status,
+            to: outcome.next,
+            reason: outcome.reason.to_string(),
+        };
+        let ts = format_rfc3339(OffsetDateTime::now_utc())?;
+        tx.execute(
+            "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                task_id.to_string(),
+                next_seq,
+                ts,
+                serde_json::to_string(&transitioned)?
+            ],
+        )?;
+        next_seq += 1;
+
+        if let Some(event) = extra_event {
+            let ts = format_rfc3339(OffsetDateTime::now_utc())?;
+            tx.execute(
+                "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    task_id.to_string(),
+                    next_seq,
+                    ts,
+                    serde_json::to_string(&event)?
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(outcome)
+    }
 }
 
 #[cfg(test)]
@@ -661,5 +771,120 @@ mod tests {
         assert!(!second);
         let events_after = store.events_for(task.id).expect("events_for after");
         assert_eq!(events_after.len(), 1);
+    }
+
+    /// ADR-0004 D1: `apply_transition` は draft -> ready (Accept) を適用し、
+    /// tasks の status と Event::Transitioned を同一トランザクションで反映する。
+    #[test]
+    fn apply_transition_accept_moves_draft_to_ready_and_appends_event() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let task = sample_task(Status::Draft);
+        store.insert(&task).expect("insert");
+
+        let outcome = store
+            .apply_transition(task.id, Trigger::Accept, None)
+            .expect("apply_transition");
+        assert_eq!(outcome.next, Status::Ready);
+
+        let fetched = store.get(task.id).expect("get").expect("some");
+        assert_eq!(fetched.status, Status::Ready);
+
+        let events = store.events_for(task.id).expect("events_for");
+        assert_eq!(events.len(), 1);
+        match &events[0].1 {
+            Event::Transitioned { from, to, reason } => {
+                assert_eq!(*from, Status::Draft);
+                assert_eq!(*to, Status::Ready);
+                assert_eq!(reason, "accept");
+            }
+            other => panic!("expected Transitioned event, got {other:?}"),
+        }
+    }
+
+    /// ADR-0004 D1: 無効な遷移は `StoreError::InvalidTransition` を返し、
+    /// タスクの状態もイベントログも変更しない。
+    #[test]
+    fn apply_transition_rejects_invalid_trigger_without_side_effects() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let task = sample_task(Status::Done);
+        store.insert(&task).expect("insert");
+
+        let result = store.apply_transition(task.id, Trigger::Accept, None);
+        assert!(matches!(result, Err(StoreError::InvalidTransition(_))));
+
+        let fetched = store.get(task.id).expect("get").expect("some");
+        assert_eq!(fetched.status, Status::Done);
+        assert!(store.events_for(task.id).expect("events_for").is_empty());
+    }
+
+    /// ADR-0004 D2: `Approve`/`Reject` は `extra_event` として
+    /// `Event::ApprovalDecided` を同一トランザクションで追記できる。
+    #[test]
+    fn apply_transition_appends_extra_event_atomically() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut approval = sample_task(Status::Ready);
+        approval.kind = TaskKind::Approval;
+        store.insert(&approval).expect("insert");
+
+        let extra = Event::ApprovalDecided {
+            by: "human".to_string(),
+            approved: true,
+            note: None,
+        };
+        let outcome = store
+            .apply_transition(approval.id, Trigger::Approve, Some(extra.clone()))
+            .expect("apply_transition");
+        assert_eq!(outcome.next, Status::Done);
+
+        let events = store.events_for(approval.id).expect("events_for");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].1, Event::Transitioned { .. }));
+        assert_eq!(events[1].1, extra);
+    }
+
+    /// apply_transition が存在しない task_id に対して呼ばれた場合の扱い。
+    #[test]
+    fn apply_transition_missing_task_returns_invalid_error() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let result = store.apply_transition(TaskId::new(), Trigger::Accept, None);
+        assert!(matches!(result, Err(StoreError::Invalid(_))));
+    }
+
+    /// ADR-0002 D1: running から出る全遷移でリースを解放する。`apply_transition` が
+    /// 駆動する遷移（ここでは WorkerDone）でも `lease` が None になり、
+    /// `lease_worker_run_id`/`lease_expires_at` 列も NULL になることを確認する。
+    #[test]
+    fn apply_transition_releases_lease_when_leaving_running() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let task = sample_task(Status::Ready);
+        store.insert(&task).expect("insert");
+        store
+            .acquire_lease(task.id, "worker-a", StdDuration::from_secs(60))
+            .expect("acquire_lease")
+            .then_some(())
+            .expect("lease should be acquired");
+
+        let running = store.get(task.id).expect("get").expect("some");
+        assert!(running.lease.is_some());
+
+        store
+            .apply_transition(task.id, Trigger::WorkerDone, None)
+            .expect("apply_transition");
+
+        let after = store.get(task.id).expect("get").expect("some");
+        assert_eq!(after.status, Status::Reviewing);
+        assert!(after.lease.is_none());
+
+        let (lease_worker_run_id, lease_expires_at): (Option<String>, Option<String>) = {
+            let conn = store.conn.lock().expect("lock");
+            conn.query_row(
+                "SELECT lease_worker_run_id, lease_expires_at FROM tasks WHERE id = ?1",
+                params![task.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query lease columns")
+        };
+        assert!(lease_worker_run_id.is_none());
+        assert!(lease_expires_at.is_none());
     }
 }

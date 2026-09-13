@@ -1,12 +1,12 @@
 # PROGRESS — taskd
 
-現在地: **Phase 1 完了（2026-09-13）**。次は Phase 2（taskctl と replay）。
+現在地: **Phase 2 完了（2026-09-13）**。次は Phase 3（fake ワーカーとディスパッチャ）。
 
 | Phase | 内容 | 状態 | 完了日 |
 |---|---|---|---|
 | 0 | 調査と ADR（実装なし） | 完了 | 2026-09-13 |
 | 1 | task-core（状態機械・SqliteStore） | 完了 | 2026-09-13 |
-| 2 | taskctl と replay | 未着手 | |
+| 2 | taskctl と replay | 完了 | 2026-09-13 |
 | 3 | fake ワーカーとディスパッチャ | 未着手 | |
 | 4 | claude-code アダプタとドッグフーディング | 未着手 | |
 | 5 | Planner / Reviewer（LLM） | 未着手 | |
@@ -137,3 +137,112 @@ Phase 1 の監査で新たに判明し、次 Phase 以降に持ち越す軽微�
 | P-16 | §5.1 | 「SQLトランザクションで排他」の対象を「状態を変更する操作は変更後の `Event::Transitioned` 追記まで含めて同一トランザクションにする」と明文化する（ADR-0002 D2 の「同一トランザクションで追記」とDESIGN文言の整合を取るため） | ADR-0002 D2 どおり実装（`acquire_lease`のみ該当。Phase 1時点で他に遷移を伴う操作はない） |
 
 Phase 0 からの既存提案（P-1〜P-14）は状況変化なし。
+
+---
+
+## Phase 2 — DONE（2026-09-13）
+
+### 成果物
+
+- `docs/adr/0004-taskctl-cli.md` — `taskctl` の CLI→トリガー写像、`TaskStore::apply_transition` の追加、
+  DB パス規約、`taskctl add` の CLI→`Task` 写像、`replay` の再構築アルゴリズムを定める ADR
+- `crates/task-core/src/store.rs` — `TaskStore::apply_transition(task_id, trigger, extra_event)` を追加
+  （`acquire_lease` と同じ単一トランザクション構造。ADR-0004 D1）。`StoreError::InvalidTransition` を追加
+- `crates/taskctl/` — 新規クレート（workspace member に追加）
+  - `src/main.rs` — clap CLI（`--db` グローバルオプション、8 サブコマンドの dispatch）
+  - `src/error.rs` — `CliError`、`parse_task_id`
+  - `src/commands/add.rs` — `taskctl add`
+  - `src/commands/query.rs` — `taskctl ls` / `taskctl show` / `taskctl log`
+  - `src/commands/gate.rs` — `taskctl approve` / `taskctl reject` / `taskctl answer`
+  - `src/commands/replay.rs` — `taskctl replay`
+
+作業分担: ADR-0004 の設計判断、`task-core::apply_transition` の実装（原子性が Phase 1 監査で重視された不変条件のため）、
+taskctl のクレート雛形（`Cargo.toml`/`main.rs`/`commands/mod.rs`/各コマンドの `Args` 構造体と関数シグネチャ）、
+`replay.rs`（受け入れ条件に直結する再構築ロジック）は自分で行った。
+`add.rs`・`query.rs`（ls/show/log）・`gate.rs`（approve/reject/answer）の3ファイルは、互いに触れない独立ユニットとして
+implementer サブエージェント3体に並列実装させた（担当: それぞれ1ファイルのみ、シグネチャと ADR-0004 の指示を渡した）。
+
+### 受け入れ条件と証拠
+
+- 条件: `taskctl add` → `approve` → `show` が期待どおり
+  - コマンド（実バイナリ、`/tmp` の一時 DB で実行）:
+    ```
+    TASKD_DB=/tmp/phase2-demo.sqlite3 taskctl add --title hello --objective "READMEに使用例を追記" \
+      --accept "cargo test が exit 0"
+    # => 01M2E5ZZVXDY4J448VN16HF7VN
+    taskctl show 01M2E5ZZVXDY4J448VN16HF7VN   # status: Draft, events: [0] Created
+    taskctl approve 01M2E5ZZVXDY4J448VN16HF7VN # => Ready
+    taskctl show 01M2E5ZZVXDY4J448VN16HF7VN   # status: Ready, events: [0] Created, [1] Transitioned{from:Draft,to:Ready,reason:"accept"}
+    ```
+  - 追加で確認した経路: `kind=approval` タスクの `approve`（`Ready→Done` + `ApprovalDecided{approved:true}` 追記）、
+    `draft` タスクへの `reject` がエラー（exit 1、状態不変。P-5 不採用の確認）、`ls --tree` が親子をインデント表示。
+  - 単体テストでも同じ写像を検証済み（`commands::add::tests::*` 5件、`commands::gate::tests::*` 5件、
+    `commands::query::tests::*` 6件）。
+- 条件: `taskctl replay` がイベントから再構築した状態と `tasks` テーブルが一致（差分ゼロ）
+  - コマンド: 上記デモ DB に対する `taskctl replay`
+  - 結果: `replay: 0 mismatches across 5 tasks`、exit 0
+  - 差分検出そのものの検証: `commands::replay::tests::replay_detects_status_drift_from_events`
+    （`tasks` 行を更新せず `events` だけに `Transitioned` を追記すると `status`/`attempts` の両方で
+    mismatch を検出することを確認）
+- CLAUDE.md の共通条件
+  - コマンド: `cargo test --workspace`
+    結果: exit 0、**38 tests passed**（task-core 19 件 + taskctl 19 件、doc-tests 0 件、失敗 0）
+  - コマンド: `cargo clippy --workspace --all-targets -- -D warnings`
+    結果: exit 0、警告 0 件
+
+### 監査結果
+
+auditor サブエージェントを1回起動（読み取り専用）。判定は **条件付き可**（個別項目はすべて「可」または
+「条件付き可」で、「不可」は手続き1件のみ）:
+
+- **(A)【条件付き可→修正済み】** `apply_transition`（`store.rs`）が ADR-0002 D1「`running` から出る全遷移で
+  リースを解放する」を満たしていなかった（`running` を出る遷移でも `lease`/`lease_worker_run_id`/
+  `lease_expires_at` が更新されず残る）。Phase 2 の CLI 経路（Accept/Approve/Reject/Answer）はどれも
+  `running` から出ないため実害は未発生だったが、Phase 3 のディスパッチャが `apply_transition` を
+  `WorkerDone`/`WorkerError`/`LeaseExpired` に再利用する前提で放置すべきでないと判断し、その場で修正した。
+  `apply_transition` に `running → 非running` 判定を追加し、該当時は `lease` を `None` にして
+  `lease_worker_run_id`/`lease_expires_at` 列も `NULL` にする。回帰テスト
+  `store::tests::apply_transition_releases_lease_when_leaving_running` を追加（`acquire_lease` でリースを
+  取ってから `WorkerDone` を適用し、`json` 経由の `lease` と生の SQL 列の両方が `None`/`NULL` になることを確認）。
+- **(B)【条件付き可→修正済み】** `add.rs`/`gate.rs`/`query.rs` の冒頭 doc comment が、実装を委譲した
+  implementer サブエージェントへの作業指示文のまま残っていた（「実装者への指示」「このファイルだけを
+  編集し…」等）。実装済みの今となっては読者を誤解させるため、通常の設計コメント（ADR 参照＋要約）に
+  書き直した。
+- **(C)【手続き→解消】** 本節の追記と `git commit` の実行で解消する（後述）。
+- 監査で指摘された軽微な点（対応しない）: `taskctl show`/`ls` の出力を `| head` 等で途中で打ち切ると
+  Rust の `println!` が SIGPIPE で panic する（`Broken pipe (os error 32)`）。通常のパイプ利用では
+  発生せず、Phase 2 の受け入れ条件にも影響しないため対応しない（Phase 3 以降で気になれば
+  `std::io::Write` + エラー無視に変更する程度の軽微な修正で足りる）。
+
+再監査は auditor サブエージェントを再起動せず自分で実施: 上記2件の修正後に `cargo test --workspace`
+（38 passed, exit 0）と `cargo clippy --workspace --all-targets -- -D warnings`（exit 0, warnings 0）を
+再実行し、さらに実バイナリで `add → approve → show`／`replay`（1タスクの smoke テスト）を再確認済み。
+
+### 未解決事項
+
+Phase 0/1 から持ち越し（未着手、人間の判断待ち。今回は対処しない）:
+1. P-4 `cancel` を非終端状態に限定するか
+2. P-6 親 `Approval` 待ちの子の扱い統一
+3. P-10 `context.answers` の追加要否（`taskctl answer` の回答テキストは現状永続化されない。
+   ADR-0004 D3 で明示的に Phase 2 スコープ外とした）
+
+Phase 2 の監査・実装で新たに判明し、次 Phase 以降に持ち越す点:
+4. **P-5 は不採用のまま。** `taskctl reject` を `draft` タスクに対して呼ぶと常にエラーになる
+   （ADR-0004 D2）。人間が draft タスクを「却下して破棄する」操作が今は存在しない
+   （`taskctl` に `cancel` サブコマンドが無いため）。DESIGN §5.9 に `cancel` の記載が無いのは
+   Phase 0 から未確認のままなので、Phase 3 以降で `taskctl cancel` を追加するかどうかの判断が必要
+   （追加する場合は `apply_transition` をそのまま再利用できる）。
+5. `store.insert` 自体はトランザクション化されていない（ADR-0004 D4 で明記済み、単一プロセス・
+   単一呼び出しの Phase 2 では実害なし）。複数プロセスから同時に `add` する運用が Phase 3 以降で
+   発生する場合はトランザクション化を検討する。
+6. `taskctl show`/`ls`/`log` の出力を早期に閉じたパイプ（`| head` 等）に流すと `println!` が
+   panic する（Rust の既定動作）。対応しない方針だが記録として残す。
+
+### 提案（DESIGN.md への修正提案。DESIGN.md 本体は編集していない）
+
+| # | 節 | 提案 | 採用まで実装で使う既定 |
+|---|---|---|---|
+| P-17 | §5.9 add --accept | `--accept` に機械可読な検証方法（`--check-cmd` 等）を指定できる構文を Phase 3 で追加 | `--accept` は常に `Check::Human` |
+| P-18 | §5.9 | `taskctl cancel <id>` サブコマンドの追加要否（未解決事項4参照） | 未実装 |
+
+Phase 0/1 からの既存提案（P-1〜P-16）は状況変化なし。
