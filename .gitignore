@@ -2,3 +2,4 @@
 /logs/
 *.sqlite3
 *.sqlite3-journal
+examples/*/target/

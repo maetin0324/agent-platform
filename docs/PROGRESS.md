@@ -8,7 +8,7 @@
 | 1 | task-core（状態機械・SqliteStore） | 完了 | 2026-09-13 |
 | 2 | taskctl と replay | 完了 | 2026-09-13 |
 | 3 | fake ワーカーとディスパッチャ | 完了 | 2026-09-13 |
-| 4 | claude-code アダプタとドッグフーディング | 未着手 | |
+| 4 | claude-code アダプタとドッグフーディング | 完了（実機ドッグフードは人間確認待ち） | 2026-09-13 |
 | 5 | Planner / Reviewer（LLM） | 未着手 | |
 | 6 | 承認ゲートと codex アダプタ | 未着手 | |
 
@@ -372,3 +372,156 @@ Phase 3 で新たに判明し、次 Phase 以降に持ち越す点:
 
 Phase 0〜2 からの既存提案（P-1〜P-18）は状況変化なし。P-17（`--check-cmd`）は未解決事項 6 のとおり Phase 4 のドッグフードで
 `taskctl add` から `Command` 条件を作る必要が出るため、Phase 4 開始時に採否を決めるのが望ましい。
+
+---
+
+## Phase 4 — DONE（2026-09-13）
+
+### 成果物
+
+- `docs/adr/0006-phase4-claude-code-adapter.md` — `claude-code` アダプタの設計判断（プロンプト組み立て、
+  結果ファイル規約の確定、`result` メッセージの優先判定、起動コマンドと設定、taskctl 拡張を見送る判断）
+- `crates/task-worker/src/claude_code.rs`（新規）— `ClaudeCodeAdapter`, `ClaudeCodeConfig`, `build_prompt`
+  （純粋関数）。`claude` の `stream-json` 出力を解釈し `artifacts/result.json`（結果ファイル規約）と
+  `result` メッセージから `RunOutcome` を合成する。生存監視（wall-clock／無出力タイムアウト／
+  SIGTERM→SIGKILL）は `subprocess.rs` の低レベル関数を再利用
+- `crates/task-worker/src/subprocess.rs` — 上記のための可視性変更のみ（`pub(crate)`）。挙動・既存テストは無変更
+- `crates/taskd/src/config.rs` — `[adapters.claude_code]`（`command`/`extra_args`/`permission_mode`/`model`/`env`）
+  を追加。`validate()` が `adapter = "claude-code"` を受理
+- `crates/taskd/src/lib.rs` — `build_dispatcher` が設定から `ClaudeCodeAdapter` を組み立てて登録
+- `crates/taskd/examples/seed_hello_crate_task.rs`（新規）— `taskctl add` が作れない `Check::Command` 付き
+  タスクを `TaskStore` API で直接 `ready` 投入する人間向けシード実行ファイル（ADR-0006 D7。P-17 は不採用のまま）
+- `config/taskd.claude-code.example.toml`（新規）— ドッグフード用の設定例（1 provider、`adapter="claude-code"`）
+- `examples/hello-crate/`（新規）— ドッグフード対象のサンプル Rust クレート。`greet()` 関数と通るテストが
+  1 件、README.md には使用例が意図的に無い（TODO コメントのみ）。root workspace からは `exclude` と
+  自身の空 `[workspace]` の二重で除外
+- `docs/protocol/worker-protocol.md` §9 — 「提案中の拡張」から「Phase 4 で確定した CLI エージェント系
+  アダプタ専用の規約」に書き換え（旧 P-13 の確定、P-10/P-11/P-12 の扱いを整理）
+- `.gitignore` — `examples/*/target/` を追加
+
+作業分担: 独立して他ファイルに触れずに並列化できる単位は `examples/hello-crate`（新規サンプルクレート）
+のみで、閾値の「2 つ以上」に届かなかったため、implementer サブエージェントは使わず全て自分で実装した
+（ADR、`claude_code.rs` 本体とテスト、taskd の設定/配線、シード実行ファイル、サンプルクレート、
+プロトコル文書の更新はすべて相互に強く依存しており、分割してもレビューコストが増えるだけと判断）。
+
+### 受け入れ条件と証拠
+
+- 条件（DESIGN §6 Phase 4）: `claude-code` アダプタ（stream-json パース、プロンプトテンプレート、
+  タイムアウト、強制終了）
+  - コマンド: `cargo test -p task-worker claude_code`
+  - 結果: exit 0、**11 tests passed**（happy path で `done` / `result.json` 欠落 / `question` /
+    `result` の error subtype がワーカー自己申告の `done` に優先 / 不正 JSON / wall-clock タイムアウト
+    （kill されプロセスが即終了） / 無出力タイムアウト / 終端メッセージ無しでのクラッシュ / **`result`
+    メッセージを一度も観測できない場合は `artifacts/result.json` があっても信用しない**（監査で発見した
+    不具合の回帰テスト）/ **run 開始時に前回の run が残した `artifacts/result.json` を消す**（同回帰テスト）
+    / `build_prompt` がタイトル・目的・受け入れ条件・前回レビュー結果・run_id・attempt・結果ファイル規約を
+    含むこと、の 11 ケースを検証。すべて `sh` スクリプトで `claude` を模擬（ネットワーク不要）
+- 条件（DESIGN §6 Phase 4）: サンプルリポジトリ（`examples/hello-crate`）に対し「README.md に使用例を
+  追記し `cargo test` が通る」タスクが実際の Claude Code で `done` になる。証拠にコマンド出力が残る。
+  ※このPhaseだけAPI/認証が必要。人間が taskd を起動して確認する（DESIGN 本文の注記どおり）
+  - **人間による確認待ち**: 本セッションの実行環境では、`claude` を実際に起動する Bash コマンドが
+    Claude Code 自身の安全機構（分類器）に "Create Unsafe Agents" という理由で拒否され、このセッション
+    内では実行できなかった（`~/.claude/.credentials.json` があり認証自体は存在するが、ネストしたエージェント
+    の起動そのものが許可されない）。そのため実機確認は以下の手順で人間が行う:
+    ```
+    # 1. examples/hello-crate は cargo test が通る状態で用意済み（確認コマンド）
+    (cd examples/hello-crate && cargo test)   # test result: ok. 1 passed
+
+    # 2. taskd をビルドし、claude-code 用の設定でタスクを1件投入する
+    cargo build -p taskd --bin taskd --example seed_hello_crate_task
+    cargo run -p taskd --example seed_hello_crate_task -- \
+      --db /tmp/taskd-phase4-demo.sqlite3 \
+      --workspace "$(pwd)/examples/hello-crate"
+    # => 標準出力にタスク ID が出る
+
+    # 3. config/taskd.claude-code.example.toml を db パスに合わせてコピーし、taskd を起動する
+    cp config/taskd.claude-code.example.toml /tmp/taskd.toml
+    # db / workspace_root を上のパスに合わせて編集したうえで:
+    cargo run -p taskd --bin taskd -- --config /tmp/taskd.toml --until-idle
+
+    # 4. 結果を確認する
+    cargo run -p taskctl -- --db /tmp/taskd-phase4-demo.sqlite3 show <上のタスク ID>
+    cargo run -p taskctl -- --db /tmp/taskd-phase4-demo.sqlite3 replay
+    cat examples/hello-crate/runs/*/stdout.jsonl   # stream-json の生ログ（証拠）
+    ```
+    上記が `status: Done` かつ `taskctl replay` が `0 mismatches` になれば受け入れ条件を満たす。
+    本セッションでは fake の代わりに `sh` スタブで stream-json 相当のやり取りを模擬したテスト
+    （上記 11 tests）までを検証し、それ以上は行っていない。
+- CLAUDE.md の共通条件
+  - コマンド: `cargo test --workspace`
+    結果: exit 0、**98 tests passed**（task-core 20 + task-dispatch 15 + task-worker 33（既存22 +
+    claude_code 11） + taskctl 19 + 1 + taskd 5 + 1 + e2e 4、doc-tests 0、失敗 0）
+  - コマンド: `cargo clippy --workspace -- -D warnings` → exit 0、警告 0
+    `cargo clippy --workspace --all-targets --examples -- -D warnings` → exit 0、警告 0
+  - `unwrap()` はテストモジュールと `crates/taskd/examples/seed_hello_crate_task.rs`（`.expect()`/
+    `unreachable!` のみ、`unwrap()` は無い）以外に無い
+
+### 監査結果
+
+auditor サブエージェントを1回起動（読み取り専用、`cargo test --workspace` / `cargo clippy` を含め自分で
+再実行して確認済み）。初回判定は **条件付き可**。「不可」2件を修正済み、「条件付き可」の指摘のうち
+対応可能なものは合わせて修正した:
+
+- **(A)【不可→修正済み】** `claude_code.rs::terminal_from_result` が、`result` メッセージを一度も
+  観測できずに exit した場合でも `artifacts/result.json` が存在すれば読んでしまい、**クラッシュを
+  `Done` と誤判定しうる**穴があった（ADR-0006 D4「`result` を一度も観測できずに exit した場合は
+  クラッシュとして扱い `error{retryable:true}` とする」に違反）。`run_claude_code` の終端合成を
+  `match (timeout_terminal, &last_result)` に書き直し、`last_result` が `None` の場合は
+  `artifacts/result.json` を一切読まず無条件に `Error{retryable:true, "worker exited without a
+  result message (exit=…)"}` とするよう修正。回帰テスト
+  `stale_result_file_without_result_message_is_not_trusted` を追加（result.json はあるが `result`
+  行が無いケース）
+- **(B)【不可→修正済み】** リトライ時に前回の run が残した `artifacts/result.json` を今回の結果と
+  誤読しうる（ADR-0006 D3 は「この run が書いたファイル」を前提にしていたが、`LocalWorkspace::prepare`
+  は既存ファイルを消さない設計のため古いファイルが残りうる）。`run_claude_code` の起動直前に
+  `artifacts/result.json` を削除するよう修正。回帰テスト
+  `stale_result_file_from_previous_run_is_cleared_before_this_run` を追加
+- **(C)【条件付き可→修正済み】** `build_prompt` に ADR-0006 D2 が定めた `run_id`／attempt 番号の
+  埋め込みが漏れていた。`build_prompt(task, context, run_id)` に引数を追加し、
+  「(run <id>, attempt N of M)」をプロンプト冒頭に追記。既存テストを更新
+- **(D)【条件付き可→修正済み】** `tool_use` の progress 変換が D5 の「主要な input フィールドの要約」を
+  満たしていなかった（`name` のみ）。`input` を JSON 文字列化し 200 文字で切り詰めて追記するよう修正
+- **(E)【条件付き可→修正済み】** `examples/hello-crate/target/` が root の `.gitignore`（`/target/` は
+  ルート限定）で無視されず、`git add -A` でビルド成果物を巻き込みうる状態だった。`.gitignore` に
+  `examples/*/target/` を追加
+- 監査で指摘され対応しない点: 「実際の Claude Code で `done` になることの確認」自体は DESIGN §6
+  Phase 4 が最初から「人間が taskd を起動して確認する」と明記しており、本セッションのサンドボックス
+  制約（上記）により対応不能。`runs/<run_id>/result.json`（`fake`/`run_subprocess` が書く、終端
+  メッセージの生ログ）に相当するファイルを `claude-code` アダプタは書いていない点も指摘されたが、
+  `stdout.jsonl` に stream-json の全生ログが残るため実害は小さいと判断し、Phase 4 では追加しない
+  （提案 P-26 として記録）
+
+修正後の再監査は auditor サブエージェントを再起動せず自分で実施: 上記の修正後に
+`cargo test -p task-worker claude_code`（11 passed, exit 0）、`cargo test --workspace`（98 passed,
+exit 0）、`cargo clippy --workspace -- -D warnings` と `--all-targets --examples` 付き（いずれも exit 0,
+警告 0）を再実行して確認済み。
+
+### 未解決事項
+
+Phase 0〜3 から持ち越し（未着手、人間の判断待ち。今回は対処しない）:
+1. P-4 `cancel` を非終端状態に限定するか
+2. P-6 親 `Approval` 待ちの子の扱い統一
+3. P-10 `context.answers` の追加要否。`claude-code` アダプタも `question` を返せるが、`blocked` から
+   `taskctl answer` した回答は依然として次回の `run`（プロンプト）に渡らない
+4. P-5 / P-18 `taskctl cancel` の追加要否
+5. `store.insert` の非トランザクション性
+
+Phase 4 で新たに判明し、次 Phase 以降に持ち越す点:
+6. **実機ドッグフード未実施**。本セッションのサンドボックスでは `claude` サブプロセスの起動が安全機構に
+   より拒否されるため、`sh` スタブによる検証までで止めた。上記「受け入れ条件と証拠」の手順で人間が
+   実行し、`status: Done` と `taskctl replay` の差分ゼロを確認する必要がある
+7. `claude-code` アダプタは `runs/<run_id>/result.json`（終端メッセージの生ログ。`fake`/`run_subprocess`
+   は書く）を書かない。`stdout.jsonl` に全生ログがあるため実害は小さいが、揃えるなら追加が必要（P-26）
+8. Reviewer は `Reviewer`/`Human` 条件を Phase 5/6 まで fail のままにする（Phase 3 からの既知の挙動）。
+   `claude-code` のドッグフードタスクも `Command` 条件のみを使う必要がある
+9. `taskctl show`/`ls` の SIGPIPE panic（Phase 2 から据え置き）
+
+### 提案（DESIGN.md への修正提案。DESIGN.md 本体は編集していない）
+
+| # | 節 | 提案 | 採用まで実装で使う既定 |
+|---|---|---|---|
+| P-24 | §5.4 claude-code 行 | 結果ファイル規約（`artifacts/result.json`）と `result` メッセージの優先判定を表に反映（ADR-0003 P-13 の確定版） | ADR-0006 のとおり実装済み |
+| P-25 | §5.9 | `taskctl add --check-cmd`（P-17）の採否は依然未決。Phase 4 ではシード実行ファイル（`crates/taskd/examples/seed_hello_crate_task.rs`）で代替 | 未実装 |
+| P-26 | §5.4 claude-code 行 | `claude-code` アダプタも `runs/<run_id>/result.json`（終端メッセージの正規化済みログ）を書くよう揃える | `stdout.jsonl` の生ログのみ |
+
+Phase 0〜3 からの既存提案（P-1〜P-23）は状況変化なし。

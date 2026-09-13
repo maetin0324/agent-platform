@@ -1,0 +1,23 @@
+# Phase 4 ドッグフーディング用の設定例（ADR-0006）。相対パスはこのファイルのあるディレクトリ基準。
+# 使い方は docs/PROGRESS.md の Phase 4 節「人間による確認待ち」を参照。
+db = "../taskd-phase4-demo.sqlite3"
+workspace_root = "../workspaces"
+tick_ms = 2000
+max_concurrency = 1
+lease_grace_secs = 60
+idle_timeout_secs = 120           # claude-code は無出力（考え中）が長く続きうるので余裕を持たせる
+kill_grace_secs = 10
+review_timeout_secs = 600
+error_cooldown_secs = 300
+
+[adapters.claude_code]
+# command = "claude"                  # PATH 上の claude を使うなら省略可
+# permission_mode = "bypassPermissions"  # 既定。taskd は許可プロンプトに応答できない
+# model = "claude-sonnet-5"           # 省略時は claude の既定モデル
+
+[[providers]]
+id = "claude-code-local"
+adapter = "claude-code"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 1
+model = "claude-sonnet-5"

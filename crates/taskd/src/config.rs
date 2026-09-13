@@ -55,6 +55,8 @@ pub struct Config {
 pub struct AdaptersConfig {
     #[serde(default)]
     pub fake: FakeConfig,
+    #[serde(default)]
+    pub claude_code: ClaudeCodeAdapterConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -66,6 +68,46 @@ pub struct FakeConfig {
     /// 追加の環境変数。
     #[serde(default)]
     pub env: HashMap<String, String>,
+}
+
+/// `claude-code` アダプタの設定（ADR-0006 D6）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeCodeAdapterConfig {
+    /// 起動するコマンド名／パス。
+    #[serde(default = "default_claude_command")]
+    pub command: String,
+    /// 末尾に追加する引数。
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// `--permission-mode`。taskd は許可プロンプトに応答できないため既定は `bypassPermissions`。
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+    /// `--model`（省略時は claude の既定モデル）。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 追加の環境変数（例: `CLAUDE_CONFIG_DIR`）。
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+impl Default for ClaudeCodeAdapterConfig {
+    fn default() -> Self {
+        Self {
+            command: default_claude_command(),
+            extra_args: Vec::new(),
+            permission_mode: default_permission_mode(),
+            model: None,
+            env: HashMap::new(),
+        }
+    }
+}
+
+fn default_claude_command() -> String {
+    "claude".to_string()
+}
+fn default_permission_mode() -> String {
+    "bypassPermissions".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,9 +192,9 @@ impl Config {
             return Err(ConfigError::Invalid("at least one [[providers]] entry is required".into()));
         }
         for p in &self.providers {
-            if p.adapter != task_worker::FakeAdapter::ID {
+            if p.adapter != task_worker::FakeAdapter::ID && p.adapter != task_worker::ClaudeCodeAdapter::ID {
                 return Err(ConfigError::Invalid(format!(
-                    "provider {}: adapter {:?} is not available in this build (Phase 3: fake only)",
+                    "provider {}: adapter {:?} is not available in this build (Phase 4: fake, claude-code only)",
                     p.id, p.adapter
                 )));
             }
@@ -212,9 +254,35 @@ mod tests {
     fn rejects_unknown_adapter_and_missing_providers() {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(matches!(cfg.validate(), Err(ConfigError::Invalid(_))));
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"claude-code\"\n").unwrap();
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"codex\"\n").unwrap();
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("claude-code"));
+        assert!(err.contains("codex"));
         assert!(toml::from_str::<Config>("bogus = 1\n").is_err());
+    }
+
+    #[test]
+    fn loads_claude_code_dogfood_example_config() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/taskd.claude-code.example.toml"
+        ));
+        let cfg = Config::load(path).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.providers[0].adapter, "claude-code");
+        assert_eq!(cfg.adapters.claude_code.command, "claude");
+    }
+
+    #[test]
+    fn accepts_claude_code_adapter_with_default_config() {
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"claude-code\"\n").unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.adapters.claude_code.command, "claude");
+        assert_eq!(cfg.adapters.claude_code.permission_mode, "bypassPermissions");
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_claude_code_adapter_config() {
+        let text = "[[providers]]\nid = \"x\"\nadapter = \"claude-code\"\n\n[adapters.claude_code]\nbogus = 1\n";
+        assert!(toml::from_str::<Config>(text).is_err());
     }
 }

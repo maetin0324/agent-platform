@@ -3,12 +3,14 @@
 
 pub mod adapter;
 pub mod artifact;
+pub mod claude_code;
 pub mod fake;
 pub mod protocol;
 pub mod subprocess;
 pub mod workspace;
 
 pub use adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
+pub use claude_code::{ClaudeCodeAdapter, ClaudeCodeConfig};
 pub use fake::FakeAdapter;
 pub use protocol::{Evidence, PROTOCOL_VERSION, PriorReview, RunContext, RunRequest, WorkerMessage};
 pub use subprocess::{SubprocessSpec, run_subprocess};

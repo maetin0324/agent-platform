@@ -8,6 +8,7 @@ members = [
     "crates/taskctl",
     "tests/e2e",
 ]
+exclude = ["examples/hello-crate"]
 
 [workspace.package]
 edition = "2024"

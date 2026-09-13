@@ -14,7 +14,7 @@ use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal};
 use crate::protocol::{RunRequest, WorkerMessage};
 
 /// 1 行の上限（ADR-0003 D1）。
-const MAX_LINE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 /// 起動するコマンド。`program` と `args` は設定からそのまま渡す。cwd は `req.workspace`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,14 +213,14 @@ pub async fn run_subprocess(
     })
 }
 
-enum LineOutcome {
+pub(crate) enum LineOutcome {
     Eof,
     Line(Vec<u8>),
     TooLong,
 }
 
 /// `max` バイトを超える行は `TooLong` を返す（末尾の `\n` は含まない基準）。
-async fn read_line_limited<R>(reader: &mut R, max: usize) -> std::io::Result<LineOutcome>
+pub(crate) async fn read_line_limited<R>(reader: &mut R, max: usize) -> std::io::Result<LineOutcome>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -241,7 +241,7 @@ where
 }
 
 /// プロセスグループへ signal を送る。既に居なければ (`ESRCH`) 無視する。
-fn send_signal_to_group(child: &Child, sig: Signal) {
+pub(crate) fn send_signal_to_group(child: &Child, sig: Signal) {
     if let Some(pid) = child.id() {
         let pgid = Pid::from_raw(pid as i32);
         if let Err(e) = signal::killpg(pgid, sig)
@@ -253,7 +253,7 @@ fn send_signal_to_group(child: &Child, sig: Signal) {
 }
 
 /// SIGTERM を直ちに送り、`grace` 待って生きていれば SIGKILL する（ADR-0003 D4）。
-async fn kill_now(child: &mut Child, grace: Duration) -> std::io::Result<ExitStatus> {
+pub(crate) async fn kill_now(child: &mut Child, grace: Duration) -> std::io::Result<ExitStatus> {
     send_signal_to_group(child, Signal::SIGTERM);
     match tokio::time::timeout(grace, child.wait()).await {
         Ok(status) => status,
@@ -265,7 +265,7 @@ async fn kill_now(child: &mut Child, grace: Duration) -> std::io::Result<ExitSta
 }
 
 /// 終端メッセージ受信後の後始末: 最大 `grace` 待ち、まだ生きていれば kill する（仕様 6）。
-async fn reap_after_terminal(child: &mut Child, grace: Duration) -> std::io::Result<ExitStatus> {
+pub(crate) async fn reap_after_terminal(child: &mut Child, grace: Duration) -> std::io::Result<ExitStatus> {
     match tokio::time::timeout(grace, child.wait()).await {
         Ok(status) => status,
         Err(_elapsed) => kill_now(child, grace).await,

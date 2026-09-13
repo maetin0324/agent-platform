@@ -2,7 +2,8 @@
 
 - 状態: Draft（Phase 0 初版）。規範は `docs/DESIGN.md` §5.3 と [ADR-0003](../adr/0003-worker-protocol.md)
 - JSON Schema: 正は隣の `worker-protocol.schema.json`（Phase 3 で `task-worker::protocol` の Rust 型から `schemars` で生成。`task-worker` のテスト `committed_schema_matches_generated` が一致を検証し、`UPDATE_SCHEMA=1 cargo test -p task-worker` で再生成する）。本文書 §7 の手書きスキーマは説明用の抜粋
-- 末尾 §9「提案中の拡張」は DESIGN.md に反映されるまで規範ではない
+- §9 は Phase 4（ADR-0006）で確定した CLI エージェント系アダプタ（`claude-code` 等）専用の規約。§1〜§8 の
+  JSON Lines プロトコルとは別物で、DESIGN §5.4 の表への反映は `docs/PROGRESS.md` の提案 P-24 として持ち越し中
 
 ## 1. 概要
 
@@ -268,19 +269,26 @@ stdout:
 
 → taskd: `WorkerProgress` ×2, `ArtifactProduced`, `WorkerFinished{outcome: done}`, `Transitioned{running→reviewing, reason:"worker_done"}`。
 
-## 9. 提案中の拡張（DESIGN.md 未反映。採用されるまで規範ではない）
+## 9. CLI エージェント系アダプタの結果ファイル規約（Phase 4、ADR-0006 で確定）
 
-番号は ADR-0003 / `PROGRESS.md` と共通。
+`claude-code`（および将来の `codex`/`dsh`）は本文書 §1〜§8 の JSON Lines プロトコルを**話さない**。
+`claude` CLI は独自の `stream-json` イベント（`system`/`assistant`/`user`/`result`）を吐くだけであり、
+taskd はこれを直接パースできない。そこでこれらのアダプタはプロンプトでワーカー（Claude Code 自身）に
+次を指示し、アダプタが作業ディレクトリの `artifacts/result.json` を読んで本文書の `done`/`question` に
+相当する終端を合成する（旧 P-13。ADR-0006 D3 で確定。旧 P-11 の `run_id`/`attempt` はスキーマ変更せず
+プロンプト文面にのみ埋め込む。旧 P-12 の「evidence を任意化」は Phase 3 の Reviewer が `evidence` の
+内容を見ずに `Command`/`ArtifactExists` を再実行するため実質的に問題にならず、スキーマは変更しない）:
 
-- **P-10 `context.answers`**
-  ```json
-  "context":{"prior_review":[…],"inputs":[…],
-             "answers":[{"question":"Which Python?","answer":"3.12","answered_at":"2026-09-13T10:00:00Z"}]}
-  ```
-  `question` → `blocked` → `taskctl answer` の回答をワーカーへ届けるために必要。
-- **P-11 `run.run_id` / `run.attempt`**
-  ```json
-  {"type":"run","protocol":1,"run_id":"01J8…","attempt":2,"task":{…},…}
-  ```
-- **P-12 `evidence[].command / exit / stdout_tail` を任意化**。`ArtifactExists` / `Reviewer` / `Human` 条件では `{"criterion":1,"note":"artifacts/bench.json written"}` のような形を許す。
-- **P-13 結果ファイル規約**（CLI エージェント系アダプタ）。ワーカーは `artifacts/result.json` に `done` と同形（または `{"question":"…"}`）を書き、アダプタが終了後に読んで終端メッセージを合成する。
+```json
+{"summary": "...", "evidence": []}
+```
+```json
+{"question": "..."}
+```
+
+判定順序（ADR-0006 D4）: stream-json の最後の `{"type":"result",...}` が `is_error:true` か
+`subtype != "success"` なら、結果ファイルの内容によらず `error{retryable:true}` とする（自己申告の
+`done` は信用しない）。`success` の場合のみ結果ファイルを読み、無い／不正なら `error{retryable:true}`。
+
+`context.answers`（旧 P-10、`question` → `blocked` → `taskctl answer` の回答をワーカーへ渡す経路）は
+Phase 4 でも未実装のまま（`docs/PROGRESS.md` の未解決事項を参照）。
