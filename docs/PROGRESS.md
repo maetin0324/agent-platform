@@ -1,7 +1,7 @@
 # PROGRESS — taskd
 
-現在地: **Phase 6 完了（2026-09-14、実機ドッグフードは人間確認待ち）**。docs/DESIGN.md に定義された Phase は
-これで全て完了。
+現在地: **Phase 7（仕上げ）進行中**。Phase 0〜6 は完了し、Phase 4/6 の実機ドッグフードの扱いも締めた
+（本ファイル末尾「Phase 4/6 受け入れの締め」）。提案 P-1〜P-37 の採否は ADR-0009、Phase 7 の設計は ADR-0010。
 
 | Phase | 内容 | 状態 | 完了日 |
 |---|---|---|---|
@@ -9,9 +9,10 @@
 | 1 | task-core（状態機械・SqliteStore） | 完了 | 2026-09-13 |
 | 2 | taskctl と replay | 完了 | 2026-09-13 |
 | 3 | fake ワーカーとディスパッチャ | 完了 | 2026-09-13 |
-| 4 | claude-code アダプタとドッグフーディング | 完了（実機ドッグフードは人間確認待ち） | 2026-09-13 |
+| 4 | claude-code アダプタとドッグフーディング | 完了（実機ドッグフード 2026-09-14 実施、done） | 2026-09-13 |
 | 5 | Planner / Reviewer（LLM） | 完了 | 2026-09-14 |
-| 6 | 承認ゲートと codex アダプタ | 完了（実機ドッグフードは人間確認待ち） | 2026-09-14 |
+| 6 | 承認ゲートと codex アダプタ | 完了（codex 実機ドッグフードは外部制約により免除。ADR-0009 D1） | 2026-09-14 |
+| 7 | 仕上げ（ADR-0010） | 進行中 | — |
 
 ---
 
@@ -979,3 +980,46 @@ Phase 6 で新たに判明し、次 Phase 以降に持ち越す点:
   `Approval` 子をどう扱うか（自動 cancel か、放置か）を明記する | 放置（孤児化） |
 
 Phase 0〜5 からの既存提案（P-1〜P-34）は状況変化なし。
+
+---
+
+## Phase 4/6 受け入れの締め（2026-09-14）
+
+人間の判断（ADR-0009 D1）に基づき、Phase 4 と Phase 6 で「人間による確認待ち」だった受け入れ条件を締めた。
+
+### Phase 4 — claude-code の実機ドッグフード（実施、done）
+
+- 条件: `examples/hello-crate` に対し「README.md に使用例を追記し `cargo test` が通る」タスクが実際の Claude Code で `done`
+- 実行したコマンド（リポジトリを汚さないよう、HEAD `3b74cbf` でビルドしたバイナリと hello-crate のコピーをスクラッチ領域に置いて実行）:
+  ```
+  cargo build -p taskd --bin taskd --example seed_hello_crate_task -p taskctl
+  seed_hello_crate_task --db taskd.sqlite3 --workspace <copy>/hello-crate --adapter claude-code
+  # => seeded task 01M2F7VPGKWCRW7E0Q25XAF1P7 (status=ready)
+  taskd --config taskd.toml --until-idle --max-ticks 600   # adapter=claude-code, model=claude-sonnet-5（claude 2.1.270）
+  # => exit=0（17 tick で idle）
+  taskctl --db taskd.sqlite3 show 01M2F7VPGKWCRW7E0Q25XAF1P7
+  taskctl --db taskd.sqlite3 replay
+  ```
+- 出力の要点:
+  - `status: Done`、`attempts: 0`、`lease: None`
+  - 遷移: `Ready→Running (dispatch)` → `Running→Reviewing (worker_done)` → `Reviewing→Done (review_pass)`
+  - `WorkerFinished.usage = {input_tokens: 12, output_tokens: 1125}`、`WorkerProgress` 7 件（Bash/Edit/Write の tool_use と本文）
+  - Reviewer による再実行: `ReviewVerdict{criterion 0, pass, cmd="cargo test" exit=Some(0) … 1 passed}`、
+    `ReviewVerdict{criterion 1, pass, cmd="grep -q 'greet' README.md" exit=Some(0)}`
+  - `replay: 0 mismatches across 1 tasks`
+  - README.md の差分: `## Usage` 節（`hello_crate::greet("world")` を呼ぶ Rust コードブロック）を追加し TODO コメントを削除（+9/−2 行）
+  - 証拠ファイル: `runs/01M2F7W0FZBC33R3A15XXNCRGR/stdout.jsonl`（stream-json 17 行、最終行 `result` の `total_cost_usd=0.099`）、
+    `artifacts/result.json`（`evidence` 2 件をワーカーが正しい形で記載）
+- 前回（Phase 4 当時）はサンドボックスで `claude` の起動が拒否されたが、今回は拒否されなかった
+
+### Phase 6 — codex の実機ドッグフード（外部制約により免除）
+
+- 人間の判断（ADR-0009 D1）: 実装、`cargo test -p task-worker codex` の 13 件、`codex exec --json` の直接実行による
+  イベント形式の確認（Phase 6 節に記載）をもって完了とする。`taskd` 経由の実機ドッグフードは、利用可能な
+  ChatGPT アカウントでは試したモデル（gpt-5.4 / gpt-5-codex / gpt-5 / gpt-5-mini / o3 / gpt-4.1 / codex-mini-latest）が
+  全て `turn.failed` になるという**外部制約により未実施**。対応モデルを使えるアカウントが用意できたら、Phase 6 節の手順で確認できる
+
+### 提案の採否（ADR-0009）
+
+P-1〜P-37 の採否は ADR-0009 に記録し、採用分を `docs/DESIGN.md` に反映した（人間の許可による改訂）。機能に関わる採用分と
+技術的負債は Phase 7（ADR-0010）で実装する。P-12 は未実装のため提案として残し、P-20 / P-33 は供給層の担当として見送り。
