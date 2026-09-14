@@ -33,8 +33,8 @@ use tokio::task::JoinHandle;
 
 use crate::policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy};
 use crate::review::{
-    HumanVerdicts, PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, needs_reviewer_run,
-    review_task,
+    HumanVerdicts, PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, Verdict,
+    needs_reviewer_run, review_task,
 };
 
 /// ディスパッチャの設定（`taskd.toml` から組み立てる。ADR-0005 D7）。
@@ -61,6 +61,8 @@ pub struct DispatchConfig {
     pub retry_backoff_max: Duration,
     /// ADR-0010 D9（P-30）: `Reviewer` run の `pick` と合成 `Review` タスクの `worker_hint`。
     pub reviewer_hint: task_core::WorkerHint,
+    /// ADR-0011（P-38）: 同じ試行での連続 requeue の上限。達したら供給側失敗を通常の失敗（attempts 消費）として扱う。
+    pub max_requeues: u32,
 }
 
 /// 1 tick の要約（ログとテスト用）。
@@ -333,7 +335,19 @@ impl Dispatcher {
             ),
             Err(e) => match provider_failure_outcome(&e) {
                 // ADR-0010 D5（P-21）: 供給側失敗は attempts を消費せず requeue し、プロバイダを cooldown にする。
-                Some(po) => (Trigger::Requeue, format!("requeue: adapter: {e}"), None, po),
+                Some(po) if consecutive_requeues(&self.store.events_for(task_id)?) < self.config.max_requeues => {
+                    (Trigger::Requeue, format!("requeue: adapter: {e}"), None, po)
+                }
+                // ADR-0011（P-38）: 同じ試行での連続 requeue が上限に達したら、通常の失敗として attempts を消費する。
+                Some(po) => (
+                    Trigger::WorkerError { retryable: true },
+                    format!(
+                        "error(retryable=true): requeue limit ({}) reached: adapter: {e}",
+                        self.config.max_requeues
+                    ),
+                    None,
+                    po,
+                ),
                 None => (
                     Trigger::WorkerError { retryable: true },
                     format!("error(retryable=true): adapter: {e}"),
@@ -372,7 +386,7 @@ impl Dispatcher {
         &mut self,
         task_id: TaskId,
         run_id: String,
-        outcome: ReviewOutcome,
+        mut outcome: ReviewOutcome,
     ) -> Result<(), DispatchError> {
         let entry = self.reviewing.remove(&task_id);
         let Some(task) = self.store.get(task_id)? else {
@@ -382,24 +396,39 @@ impl Dispatcher {
             tracing::warn!(%task_id, status = ?task.status, "review result discarded (task no longer reviewing)");
             return Ok(());
         }
-        if let Some(pf) = &outcome.provider_failure {
-            // ADR-0010 D5（P-29）: Reviewer run の供給側失敗は判定しない。reviewing のまま次 tick に回し、
-            // プロバイダを cooldown にする（attempts を消費しない）。
-            self.store.append_event(
-                task_id,
-                &Event::WorkerProgress {
-                    run_id: run_id.clone(),
-                    msg: format!("reviewer run requeued: {}", pf.message),
-                },
-            )?;
-            if let Some(entry) = entry {
-                if let Some(provider) = entry.provider {
-                    self.policy.report(provider, &pf.outcome);
-                }
-                self.pending_subjects.insert(task_id, entry.subject);
+        if let Some(pf) = outcome.provider_failure.take() {
+            if let Some(provider) = entry.as_ref().and_then(|e| e.provider.clone()) {
+                self.policy.report(provider, &pf.outcome);
             }
-            tracing::warn!(%task_id, %run_id, reason = %pf.message, "reviewer run hit a provider failure; review deferred");
-            return Ok(());
+            let deferrals = consecutive_reviewer_requeues(&self.store.events_for(task_id)?);
+            if deferrals < self.config.max_requeues {
+                // ADR-0010 D5（P-29）: Reviewer run の供給側失敗は判定しない。reviewing のまま次 tick に回し、
+                // プロバイダを cooldown にする（attempts を消費しない）。
+                self.store.append_event(
+                    task_id,
+                    &Event::WorkerProgress {
+                        run_id: run_id.clone(),
+                        msg: format!("{REVIEWER_REQUEUED_PREFIX}{}", pf.message),
+                    },
+                )?;
+                if let Some(entry) = entry {
+                    self.pending_subjects.insert(task_id, entry.subject);
+                }
+                tracing::warn!(%task_id, %run_id, reason = %pf.message, "reviewer run hit a provider failure; review deferred");
+                return Ok(());
+            }
+            // ADR-0011（P-38）: 連続延期が上限に達したら、未判定の Reviewer 条件を fail として通常どおり判定を適用する。
+            tracing::warn!(%task_id, %run_id, reason = %pf.message, max_requeues = self.config.max_requeues, "reviewer run requeue limit reached; failing reviewer criteria");
+            for (idx, criterion) in task.acceptance.iter().enumerate() {
+                if matches!(criterion.check, Check::Reviewer) && !outcome.verdicts.iter().any(|v| v.criterion_idx == idx) {
+                    outcome.verdicts.push(Verdict {
+                        criterion_idx: idx,
+                        pass: false,
+                        reason: format!("requeue limit ({}) reached: {}", self.config.max_requeues, pf.message),
+                    });
+                }
+            }
+            outcome.verdicts.sort_by_key(|v| v.criterion_idx);
         }
         let all_pass = outcome.all_pass();
         let events: Vec<Event> = outcome
@@ -985,6 +1014,39 @@ pub fn prior_review_from_events(events: &[(u64, Event)]) -> Vec<PriorReview> {
     out
 }
 
+/// Reviewer run の供給側失敗で延期したときの `WorkerProgress.msg` の接頭辞（ADR-0010 D5）。
+const REVIEWER_REQUEUED_PREFIX: &str = "reviewer run requeued: ";
+
+/// 現在の試行での連続 requeue 回数（ADR-0011 D2）。`Transitioned` を新しい順に見て `requeue` を数え、
+/// `dispatch` は読み飛ばし、それ以外の reason で止まる。
+pub fn consecutive_requeues(events: &[(u64, Event)]) -> u32 {
+    let mut n = 0;
+    for (_, ev) in events.iter().rev() {
+        if let Event::Transitioned { reason, .. } = ev {
+            match reason.as_str() {
+                "requeue" => n += 1,
+                "dispatch" => {}
+                _ => break,
+            }
+        }
+    }
+    n
+}
+
+/// 現在の reviewing での、Reviewer run の供給側失敗による連続延期回数（ADR-0011 D2）。
+/// 最後の `Transitioned`（reviewing に入った遷移）以降の延期の `WorkerProgress` を数える。
+pub fn consecutive_reviewer_requeues(events: &[(u64, Event)]) -> u32 {
+    let mut n = 0;
+    for (_, ev) in events.iter().rev() {
+        match ev {
+            Event::Transitioned { .. } => break,
+            Event::WorkerProgress { msg, .. } if msg.starts_with(REVIEWER_REQUEUED_PREFIX) => n += 1,
+            _ => {}
+        }
+    }
+    n
+}
+
 /// ワーカー run 中のリース延長パラメータ（ADR-0010 D7）。
 #[derive(Debug, Clone, Copy)]
 struct LeaseRenewal {
@@ -1169,6 +1231,7 @@ mod tests {
                 retry_backoff_base: Duration::ZERO,
                 retry_backoff_max: Duration::ZERO,
                 reviewer_hint: crate::review::reviewer_hint(),
+                max_requeues: 5,
             },
         )
     }
@@ -1868,6 +1931,89 @@ mod tests {
             })
             .collect();
         assert_eq!(verdicts, vec![true]);
+    }
+
+    /// 常に供給側失敗（短い cooldown）を返すアダプタ。`review_only` なら Review run だけ失敗し、ワーカー run は done。
+    struct AlwaysThrottledAdapter {
+        calls: AtomicUsize,
+        review_only: bool,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for AlwaysThrottledAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, _sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+            if self.review_only && req.task.kind != TaskKind::Review {
+                return Ok(done_outcome());
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(AdapterError::Throttled { retry_after: Duration::from_millis(10) })
+        }
+    }
+
+    fn transition_reasons(store: &Arc<dyn TaskStore>, id: TaskId) -> Vec<String> {
+        store
+            .events_for(id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                Event::Transitioned { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// ADR-0011（P-38）: 同じ試行での連続 requeue が max_requeues に達したら通常の失敗として attempts を消費し、
+    /// 次の試行ではまた 0 から数える。最悪 (max_retries + 1) × (max_requeues + 1) 回で `failed` になる。
+    #[tokio::test]
+    async fn requeue_limit_turns_persistent_provider_failures_into_ordinary_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 1);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(AlwaysThrottledAdapter { calls: AtomicUsize::new(0), review_only: false });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.max_requeues = 2;
+        let report = run_until_idle(&mut d, 500).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Failed, 2));
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 6);
+        let one_attempt = ["dispatch", "requeue", "dispatch", "requeue", "dispatch", "worker_error"];
+        let expected: Vec<&str> = one_attempt.iter().chain(one_attempt.iter()).copied().collect();
+        assert_eq!(transition_reasons(&store, task.id), expected);
+        let events = store.events_for(task.id).unwrap();
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if outcome.contains("requeue limit (2) reached"))));
+
+        // max_requeues = 0 なら最初の供給側失敗から attempts を消費する。
+        let task0 = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        store.insert(&task0).unwrap();
+        d.config.max_requeues = 0;
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(transition_reasons(&store, task0.id), vec!["dispatch", "worker_error"]);
+    }
+
+    /// ADR-0011（P-38）: Reviewer run の供給側失敗による延期も max_requeues までで、超えたら Reviewer 条件を fail にして判定する。
+    #[tokio::test]
+    async fn reviewer_requeue_limit_fails_reviewer_criteria() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Reviewer, 0);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(AlwaysThrottledAdapter { calls: AtomicUsize::new(0), review_only: true });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 2);
+        d.config.max_requeues = 2;
+        let report = run_until_idle(&mut d, 500).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Failed, 1));
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 3);
+        let events = store.events_for(task.id).unwrap();
+        assert_eq!(consecutive_reviewer_requeues(&events[..events.len() - 2]), 2);
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: false, reason, .. } if reason.starts_with("requeue limit (2) reached"))));
     }
 
     /// `task_id` の直接の `Approval` 子タスクが現れるまで tick を回す（Human check の生成を待つ）。

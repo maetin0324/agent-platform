@@ -10,6 +10,7 @@ review_timeout_secs = 600          # Command チェック 1 件あたりの上�
 error_cooldown_secs = 300          # AuthFailed / Exhausted / 起動失敗時のプロバイダ除外時間
 retry_backoff_base_secs = 10       # ADR-0010 D6: リトライ前の待ち min(base·2^(attempts-1), max)。0 で無効
 retry_backoff_max_secs = 300
+max_requeues = 5                   # ADR-0011: 同じ試行での連続 requeue（供給側失敗）の上限。超えたら attempts を消費する
 
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]

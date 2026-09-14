@@ -1181,5 +1181,40 @@ auditor サブエージェントを 1 回起動（読み取り専用。`cargo te
 
 | # | 節 | 提案 | 採用まで実装で使う既定 |
 |---|---|---|---|
-| P-38 | §5.2 | 連続 `requeue` の回数（または期間）に上限を設け、超えたら `failed` にするか承認待ちに回す | 上限なし（cooldown ごとに requeue） |
-| P-39 | §5.9 | `taskctl show` で `Answered` / Human check の Approval 子 / バックオフの残り時間を読みやすく表示する | イベントの Debug 表示のみ |
+| P-38 | §5.2 | 連続 `requeue` の回数（または期間）に上限を設け、超えたら `failed` にするか承認待ちに回す | **採用・実装済み（ADR-0011、下記「Phase 7 追補」）** |
+| P-39 | §5.9 | `taskctl show` で `Answered` / Human check の Approval 子 / バックオフの残り時間を読みやすく表示する | イベントの Debug 表示のみ（人間の判断で後回し。Web GUI の検討と合わせて扱う） |
+
+---
+
+## Phase 7 追補 — 連続 requeue の上限（P-38、2026-09-14）
+
+人間の判断: 「requeue の回数はコンフィグで設定できるように。デフォルト値は 5 回くらい」。設計は ADR-0011。
+
+### 成果物
+
+- `docs/adr/0011-requeue-limit.md`
+- `crates/taskd/src/config.rs` — トップレベル設定 `max_requeues`（既定 5、0 で requeue しない）。`config/taskd.example.toml` に追記
+- `crates/task-dispatch/src/dispatcher.rs` — `DispatchConfig.max_requeues`、`consecutive_requeues`（同じ試行での連続 requeue を `events` から数える）、
+  `consecutive_reviewer_requeues`（現在の reviewing での Reviewer run 延期回数）。上限に達した供給側失敗は、ワーカー run では
+  `WorkerError{retryable:true}`（`outcome` に `requeue limit (N) reached`）、Reviewer run では未判定の Reviewer 条件を fail にして `ReviewFail`
+- テスト: dispatcher `requeue_limit_turns_persistent_provider_failures_into_ordinary_failures`、`reviewer_requeue_limit_fails_reviewer_criteria`、
+  e2e `persistent_provider_failure_stops_after_max_requeues`、taskd の設定テストに既定値 5 と `max_requeues = 0` の読み込みを追加
+
+### 受け入れの証拠
+
+- 条件: 供給側失敗が続くタスクが `max_requeues` 回の requeue の後に通常の失敗として扱われる
+  - コマンド: `cargo test -p e2e --test phase7_scenarios` → 5 passed。`persistent_provider_failure_stops_after_max_requeues`（`max_requeues = 2`,
+    `--max-retries 0`）の遷移列が `accept → dispatch → requeue → dispatch → requeue → dispatch → worker_error(Failed)`、attempts 1、replay 差分ゼロ
+  - コマンド: `cargo test -p task-dispatch requeue` → 3 passed。`max_retries = 1`, `max_requeues = 2` で run 6 回・`Failed`/attempts 2、遷移の reason 列が
+    `[dispatch, requeue, dispatch, requeue, dispatch, worker_error] × 2`。`max_requeues = 0` では `[dispatch, worker_error]`。Reviewer run は
+    延期 2 回の後 `ReviewVerdict{pass:false, reason:"requeue limit (2) reached: ..."}` で `Failed`
+- CLAUDE.md の共通条件
+  - `cargo test --workspace` を 2 回 → 2 回とも exit 0、**195 passed**、失敗 0（Phase 7 の 192 + 3）
+  - `cargo clippy --workspace -- -D warnings` / `--all-targets --examples` → いずれも exit 0
+  - 変更ファイルの非テスト `unwrap()` → 0 件
+- 監査: 変更が小さい（設定 1 項目とディスパッチャの分岐 2 箇所）ため auditor は起動していない
+
+### 未解決事項・提案
+
+- Phase 7 未解決事項 2 のうち「連続 requeue の回数に上限が無い」は解消。最悪の実行回数は 1 タスクあたり `(max_retries + 1) × (max_requeues + 1)`
+- `docs/DESIGN.md` §5.2 への反映（「連続 requeue は `max_requeues` まで。超えたら通常の失敗」）は、DESIGN.md の編集許可が得られるまで提案として残す（P-40）

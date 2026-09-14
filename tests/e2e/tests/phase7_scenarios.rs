@@ -44,6 +44,11 @@ impl Env {
     }
 
     fn write_config(&self, script: &Path) -> PathBuf {
+        self.write_config_with(script, "")
+    }
+
+    /// `extra` はトップレベルに追加する TOML 行。
+    fn write_config_with(&self, script: &Path, extra: &str) -> PathBuf {
         let path = self.root.join("taskd.toml");
         let text = format!(
             r#"db = "taskd.sqlite3"
@@ -55,6 +60,7 @@ idle_timeout_secs = 30
 kill_grace_secs = 1
 review_timeout_secs = 30
 retry_backoff_base_secs = 0
+{extra}
 
 [adapters.fake]
 command = ["sh", "{script}"]
@@ -350,6 +356,40 @@ fi"#,
     assert!(env.events(id).iter().any(|e| matches!(
         e,
         Event::WorkerFinished { outcome, .. } if outcome.starts_with("requeue: ") && outcome.contains("throttled")
+    )));
+    env.replay_is_consistent();
+}
+
+/// ADR-0011（P-38）: 供給側失敗が続く場合、`max_requeues` 回の requeue の後は通常の失敗として attempts を消費し `failed`。
+#[test]
+fn persistent_provider_failure_stops_after_max_requeues() {
+    let env = Env::new();
+    let script = env.write_script(
+        r#"cat >/dev/null
+echo '{"type":"error","message":"429 rate limited","retryable":true,"provider_failure":{"kind":"throttled","retry_after_secs":1}}'"#,
+    );
+    let config = env.write_config_with(&script, "max_requeues = 2");
+    let ws = env.workspace("ws-limit");
+    let id = env.add_approved(&["--title", "L", "--check-cmd", "true", "--max-retries", "0", "--workspace", &ws]);
+
+    env.run_taskd(&config, Duration::from_secs(60));
+    let t = env.task(id);
+    assert_eq!((t.status, t.attempts), (Status::Failed, 1), "{:?}", env.events(id));
+    assert_eq!(
+        env.transitions(id),
+        vec![
+            "Draft->Ready:accept",
+            "Ready->Running:dispatch",
+            "Running->Ready:requeue",
+            "Ready->Running:dispatch",
+            "Running->Ready:requeue",
+            "Ready->Running:dispatch",
+            "Running->Failed:worker_error",
+        ]
+    );
+    assert!(env.events(id).iter().any(|e| matches!(
+        e,
+        Event::WorkerFinished { outcome, .. } if outcome.contains("requeue limit (2) reached")
     )));
     env.replay_is_consistent();
 }

@@ -49,6 +49,9 @@ pub struct Config {
     pub retry_backoff_base_secs: u64,
     #[serde(default = "default_retry_backoff_max_secs")]
     pub retry_backoff_max_secs: u64,
+    /// ADR-0011（P-38）: 同じ試行での連続 requeue の上限。達したら供給側失敗を通常の失敗（attempts 消費）として扱う。0 で requeue しない。
+    #[serde(default = "default_max_requeues")]
+    pub max_requeues: u32,
     #[serde(default)]
     pub adapters: AdaptersConfig,
     #[serde(default)]
@@ -87,6 +90,9 @@ fn default_retry_backoff_base_secs() -> u64 {
 }
 fn default_retry_backoff_max_secs() -> u64 {
     300
+}
+fn default_max_requeues() -> u32 {
+    5
 }
 
 /// `[plan]`（DESIGN §4.2, ADR-0007 D7）。
@@ -332,6 +338,7 @@ impl Config {
             plan_auto_accept: self.plan.auto_accept,
             retry_backoff_base: Duration::from_secs(self.retry_backoff_base_secs),
             retry_backoff_max: Duration::from_secs(self.retry_backoff_max_secs),
+            max_requeues: self.max_requeues,
             reviewer_hint: WorkerHint {
                 tier: self.reviewer.tier,
                 adapter: self.reviewer.adapter.clone(),
@@ -445,10 +452,12 @@ adapter = "fake"
         let d = cfg.dispatch_config();
         assert_eq!(d.retry_backoff_base, Duration::from_secs(10));
         assert_eq!(d.retry_backoff_max, Duration::from_secs(300));
+        assert_eq!(d.max_requeues, 5);
         assert_eq!(d.reviewer_hint, WorkerHint { tier: Tier::Standard, adapter: None });
 
         let text = r#"retry_backoff_base_secs = 0
 retry_backoff_max_secs = 0
+max_requeues = 0
 [reviewer]
 adapter = "claude-code"
 tier = "cheap"
@@ -464,6 +473,7 @@ tiers = ["cheap"]
         assert!(cfg.validate().is_ok());
         let d = cfg.dispatch_config();
         assert_eq!(d.retry_backoff_base, Duration::ZERO);
+        assert_eq!(d.max_requeues, 0);
         assert_eq!(d.reviewer_hint, WorkerHint { tier: Tier::Cheap, adapter: Some("claude-code".into()) });
     }
 
