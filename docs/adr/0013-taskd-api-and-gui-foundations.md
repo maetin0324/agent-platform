@@ -127,3 +127,68 @@ cooldown に入る供給側失敗を観測した run のタスクに、`Requeue`
 - 新しい crate: `crates/task-ops`, `crates/task-api`。`taskd` に `[api]` 設定。`taskctl` は `task-ops` を使う。
 - `docs/DESIGN.md` に API 層（§5.10）と Phase 9 を追加する（人間の方針「taskd に変更が必要なら変更する」に基づく）。
 - `taskd-gui` 側の設計（Remix、BFF、画面、G フェーズ）は `docs/gui/` にあり、`run-gphases.sh` で自動進行する。
+
+## 実装メモ（Phase 9b、2026-09-14。`docs/gui/api.md` が明示していなかった点の決め）
+
+GUI から見える挙動は `docs/gui/api.md` §10 にも写してある。
+
+**D5 の追補: 書き込みトランザクションは `BEGIN IMMEDIATE`（Phase 9 監査の「不可」への対応）**
+- 監査で見つかった問題:
+  - DEFERRED トランザクションは、読んだ後に書き込みへ格上げする。
+  - WAL では、その間に別の接続が書き込むと格上げが SQLITE_BUSY で即座に失敗し、busy_timeout は効かない。
+  - taskd の実行中に `taskctl` や API から書き込むと、ディスパッチャの tick が `database is locked` で失敗し、デーモンが終了していた（Phase 9 以前からある不具合）。
+- 対応: `SqliteStore` の書き込みを全て `TransactionBehavior::Immediate` で始め、書き込みロックは busy_timeout の範囲で待つ。
+  - 対象: `apply_transition_with_events` / `create_task` / `complete_plan` / `acquire_lease` / `renew_lease` / マイグレーション。
+  - `append_event` は seq の採番と INSERT を 1 つのトランザクションに入れる。
+  - `release_lease` は読んだ json を書き戻すので、同じくトランザクションに入れる。
+- 回帰テスト:
+  - task-core `concurrent_read_then_write_transactions_on_two_connections_wait_instead_of_failing`（修正前は `DatabaseBusy` で失敗）。
+  - e2e `writes_from_taskctl_and_api_while_taskd_ticks_fast_never_hit_database_is_locked`（tick 20 ms の taskd に、taskctl と API から書き込み続ける）。
+
+**taskd への組み込み**
+- `[api] listen` があるときだけ、ディスパッチャに `SnapshotPublisher`（`watch::Sender`）を付け、API 専用の DB 接続を開いて bind する。
+- 起動失敗の扱い:
+  - `token_file` が読めない・空 → 設定読込時のエラー（exit 2）。
+  - DB 接続・bind の失敗 → 起動失敗。黙って API 無しでは動かない。
+- 停止: tick ループの終了後に shutdown を送り、SSE を閉じて最大 5 秒待つ。
+- `instance_id` は起動ごとの ULID で、スナップショットと `/health` で同じ値を使う。
+- `hostname` は `/proc/sys/kernel/hostname` → `HOSTNAME` → `"unknown"` の順で取る。
+- `awaiting_human` は、reviewing のタスクだけを残すよう毎 tick 刈り込む。
+- `GET /config` の `config_path` は `Config::load` が記録した絶対パス（`#[serde(skip)]`）。
+
+**要求の検査**
+- 順序: Host → `OPTIONS` の 405 → 認証 → POST の Origin / Content-Type / 本文サイズ。
+  - 認証が有効な構成では、未定義のパスも 404 より先に 401 になる。
+- 400 にするもの:
+  - Host ヘッダが複数ある要求、absolute-form で許可されない authority。
+  - 未知のクエリパラメータと、単一値のキーの重複（本文の `deny_unknown_fields` に揃え、BFF の誤りを早く表に出す）。
+  - 数値でない `Last-Event-ID`。
+
+**`GET /tasks/{id}` と `taskctl show --json`**
+- 両者とも `task_ops::view::task_detail` の結果を compact な JSON に直列化する。
+- 差は 2 つ: API は `runs[].files` を埋め（taskctl は `null`）、`timers.now` が応答時刻になる。
+- taskctl は `taskd.toml` を読まないので、`ViewContext` は設定の既定値を使う（`--workspace-root` で上書き）。
+
+**派生値の解釈**
+- `RunSummary.outcome_text`: `done` 以外でも接頭辞を除いた残りを入れる（`error` は文字列全体）。
+- `AttentionItem::Failed.reason`: 直近の `WorkerFinished.outcome` と、直近 run の不合格 `ReviewVerdict.reason` が両方あれば `; ` で結合する。
+- `AttentionItem::Unroutable.at`: スナップショットの `last_tick_at`。
+- `AttentionItem::RequeueLimitNear`: 一度も requeue していないタスクは含めない（`max_requeues = 1` で ready が全て並ぶのを防ぐ。監査）。
+- `InboxCounts.drafts`: draft タスクの件数（グループ数ではない。監査）。子の件数は全件から 1 回だけ集計する（draft ごとに全件を読むと二乗になっていた。監査）。
+- `DaemonSnapshot.in_flight[]` の Reviewer run の `run_id`: レビュー対象のワーカー run の id（Reviewer run 自身の id は events に残らない）。
+- SchemaTooNew の DB では taskd は exit 2（設定エラーと同じ扱い）。
+- 存在しない id の指定: `/graph?root=` は 404 `task_not_found`、`/events?task_id=` は空ページ。
+- プロバイダ集計:
+  - 最初の `GET /providers` で全イベントを走査し、以後は要求のたびに増分だけ読む（SSE のループには載せない）。
+  - `stats.runs` は `WorkerStarted` の数（実行中を含む）。
+
+**SSE**
+- 送る順は `hello` →（必要なら）`reset`。
+- 遅れの判定は `最新 id − 要求 id > 10,000`。
+
+**ファイル**
+- `run_id` の形式検査はワークスペースの canonicalize より先に行う。run ディレクトリが無ければ `run_not_found`。
+- 成果物のパスは、空・絶対パス・`..` を字句的に 403 にしてから canonicalize する（task-worker の `artifact::resolve` と同じ規則）。
+- 範囲指定:
+  - `Range` の開始がサイズ以上なら 416（空ファイルを含む）。
+  - `offset == size` は 200 で空本体。

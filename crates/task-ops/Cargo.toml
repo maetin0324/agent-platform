@@ -8,3 +8,4 @@ task-core = { path = "../task-core" }
 time = { version = "0.3", features = ["formatting"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
+schemars = "1"

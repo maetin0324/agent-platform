@@ -11,5 +11,6 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 task-core = { path = "../../crates/task-core" }
+serde_json = "1"
 tempfile = "3"
 time = "0.3"

@@ -2,16 +2,18 @@
 //! （ADR-0013 D7）。`events` から `tasks` を再構築し、実際の `tasks` テーブルと突き合わせる。
 //! `taskctl` は出力整形と exit code だけを持つ。
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use task_core::{Event, Status, Task, TaskId, TaskStore};
 
 use crate::error::OpsError;
 
 /// `replay` が検出した 1 件の食い違い。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ReplayMismatch {
     pub task_id: TaskId,
-    pub field: &'static str,
+    /// `"status"` または `"attempts"`。
+    pub field: String,
     /// `events` から再構築した値。
     pub replayed: String,
     /// `tasks` テーブルに保存されている値。
@@ -19,7 +21,7 @@ pub struct ReplayMismatch {
 }
 
 /// `replay` の結果。
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, JsonSchema)]
 pub struct ReplayReport {
     pub tasks: usize,
     pub mismatches: Vec<ReplayMismatch>,
@@ -55,7 +57,7 @@ fn diff_task(task: &Task, events: &[(u64, Event)]) -> Vec<ReplayMismatch> {
             if status != task.status {
                 mismatches.push(ReplayMismatch {
                     task_id: task.id,
-                    field: "status",
+                    field: "status".to_string(),
                     replayed: format!("{status:?}"),
                     stored: format!("{:?}", task.status),
                 });
@@ -63,7 +65,7 @@ fn diff_task(task: &Task, events: &[(u64, Event)]) -> Vec<ReplayMismatch> {
             if attempts != task.attempts {
                 mismatches.push(ReplayMismatch {
                     task_id: task.id,
-                    field: "attempts",
+                    field: "attempts".to_string(),
                     replayed: attempts.to_string(),
                     stored: task.attempts.to_string(),
                 });
@@ -71,7 +73,7 @@ fn diff_task(task: &Task, events: &[(u64, Event)]) -> Vec<ReplayMismatch> {
         }
         None => mismatches.push(ReplayMismatch {
             task_id: task.id,
-            field: "status",
+            field: "status".to_string(),
             replayed: "<no Created event>".to_string(),
             stored: format!("{:?}", task.status),
         }),

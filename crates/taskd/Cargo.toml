@@ -14,7 +14,11 @@ path = "src/main.rs"
 task-core = { path = "../task-core" }
 task-worker = { path = "../task-worker" }
 task-dispatch = { path = "../task-dispatch" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+task-ops = { path = "../task-ops" }
+task-api = { path = "../task-api" }
+time = { version = "0.3", features = ["formatting"] }
+ulid = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "net"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
@@ -23,5 +27,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 [dev-dependencies]
+serde_json = "1"
 tempfile = "3"
 time = { version = "0.3", features = ["serde", "formatting"] }

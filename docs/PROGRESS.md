@@ -1,7 +1,7 @@
 # PROGRESS — taskd
 
-現在地: **Phase 9（GUI のための基盤と HTTP API 層、ADR-0013）進行中**。Phase 0〜8 は完了。Web GUI の設計は `docs/gui/`（Fable 作成、
-人間の判断 H1〜H9 を反映中）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により進める。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
+現在地: **Phase 0〜9 完了**（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013）。Web GUI の設計は `docs/gui/`（Fable 作成、
+人間の判断 H1〜H9 を反映済み）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により G フェーズとして進める（前提: Node 24 LTS / pnpm 11）。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
 
@@ -16,7 +16,7 @@
 | 6 | 承認ゲートと codex アダプタ | 完了（codex 実機ドッグフードは外部制約により免除。ADR-0009 D1） | 2026-09-14 |
 | 7 | 仕上げ（ADR-0010）、requeue 上限（ADR-0011） | 完了 | 2026-09-14 |
 | 8 | 複数アカウント運用・evidence 任意化・`taskctl worker run`（ADR-0012） | 完了 | 2026-09-14 |
-| 9 | GUI のための基盤（task-ops・WAL・events の id）と HTTP API 層（ADR-0013） | 進行中 | — |
+| 9 | GUI のための基盤（task-ops・WAL・events の id）と HTTP API 層（ADR-0013） | 完了 | 2026-09-14 |
 
 ---
 
@@ -1378,3 +1378,199 @@ auditor サブエージェントを 1 回起動（読み取り専用）。audito
 | # | 節 | 提案 | 採用まで実装で使う既定 |
 |---|---|---|---|
 | P-41 | §4.3 / §5.3 / §5.4 / §5.5 / §5.9 / §6 非目標 | ADR-0012 を反映する: `WorkerStarted.provider`、`evidence[]` の任意フィールド、`[[providers]]` ごとの env / model（アカウント分離、taskd の環境を引き継ぐこと）、`ProviderPolicy::select` と `Selection`（§5.5 の「P-20 / P-33 は見送り」を撤回）、`taskctl worker run` の仕様（`--config` 必須・DB 非改変・exit code・中断時の kill）。§6 非目標の「複数アカウントの自動切替」は「残量推定に基づく切替」を指し、設定表の順の決定的なフォールバック（cooldown・並列度の上限）は本プロジェクトの範囲、と整理する | **DESIGN.md に反映済み（人間の許可、2026-09-14）** |
+
+---
+
+## Phase 9 — DONE（2026-09-14）
+
+人間の依頼: Web GUI（別プロジェクト `taskd-gui`）を taskd の API 層経由で動かす。デーモンの状態は DB のスナップショットではなくメモリから公開する。
+taskd に変更が必要なら変更する（H1〜H9）。設計は ADR-0013、DESIGN §5.10 / §6 Phase 9、API の仕様は `docs/gui/api.md`。
+
+### 成果物
+
+**9a（コミット `7846b76`）**
+- SQLite:
+  - WAL / busy_timeout / synchronous=NORMAL。
+  - `schema_migrations`（版数 3）と `SchemaTooNew`。
+  - `events` にグローバル id を持たせ、`events_since` / `latest_event_id` を追加。
+  - `tasks` に `title` / `updated_at` 列を追加し、`list_page` / `count_by_status` を実装。
+- `crates/task-ops`（新規）: 判断と派生値を taskctl とディスパッチャから抽出。
+- `Event` の JsonSchema（`docs/api/v1/event.schema.json`）、`ProviderThrottled`、`ProviderPolicy::cooldowns`、`[api]` の設定。
+
+**9b**
+- `crates/task-api`（新規、axum 0.8）:
+  - `docs/gui/api.md` の 25 エンドポイント、SSE。
+  - Bearer / Host / Origin / Content-Type / 本文サイズの検査、ファイル系のパス検査、problem+json。
+  - `docs/api/v1/api-v1.schema.json` と一致テスト。
+- `crates/task-ops`:
+  - `view.rs`（一覧・詳細・run・タイマー）、`inbox.rs`、`graph.rs`、`daemon.rs`。
+  - `gate.rs` の `TransitionResult.cascaded`。
+- `crates/task-dispatch/src/dispatcher.rs`: `SnapshotPublisher`。tick の最後に `DaemonSnapshot` を `watch` に送る（DB I/O 無し）。
+- `crates/taskd`:
+  - `[api]` があるときだけ、スナップショットの送り口・API 専用接続・bind を用意する（`start_api`）。
+  - graceful stop、`config_view`（env はキー名だけ）。
+  - `token_file` の読込検査（exit 2）、`Config.source_path`、SchemaTooNew は exit 2。
+- `crates/taskctl`: `taskctl show --json [--workspace-root]`。
+- **`crates/task-core/src/store.rs`（監査の「不可」への修正）**: 書き込みトランザクションを全て `BEGIN IMMEDIATE` にした。
+  - `append_event` と `release_lease` もトランザクションに入れた。
+- `tests/e2e/tests/api_scenarios.rs`（新規 6 件。実バイナリの taskd + taskctl + curl、loopback のみ）。
+- `config/taskd.example.toml` に `[api]` の例を追加。
+- 文書:
+  - ADR-0013 の「実装メモ」（D5 の追補を含む）。
+  - `docs/gui/api.md` §10（実装で確定した細部）と §3.5 / §5.1 / §6.2 / §8.4 の訂正。
+- `run-gphases.sh`（新規）: `taskd-gui` の立ち上げと G0〜G5 の自動進行。`docs/gui/`（GUI の設計一式。Fable 作成）もコミットする。
+
+**作業分担**
+- implementer 2 体を並列に使った。
+  - I1（sonnet）: task-ops のビューと `taskctl show --json`。
+  - I2（opus）: task-api。
+- 自分で行ったもの（相互に依存し、設計判断を含むため）: ディスパッチャのスナップショット、taskd への組み込み、e2e、ストアの修正、文書。
+- 実装者の報告にあった判断点は、ADR-0013 の実装メモと api.md §10 に記録した。
+
+### 受け入れ条件と証拠（DESIGN §6 Phase 9）
+
+**1. 版数 1 の DB が最新の版数に移行し、`events_for` と `replay` が変わらない。新しすぎる版数は開かない**
+- 単体テスト: `cargo test -p task-core` の `open_migrates_legacy_v1_db_and_is_idempotent` と `open_rejects_db_with_schema_version_newer_than_supported`。
+- 9a: 実 DB のコピーで v1→v3、replay 0 mismatches。
+- 監査の実測:
+  - Phase 9 前の `taskctl`（aa91dd4）で作った v1 DB を、新しい `taskctl` で開いた。
+  - 5 タスクの `log` / `show` / `ls` と `replay: 0 mismatches` が一致した。
+  - `schema_migrations` は 1,2,3、journal は wal。events は 10→10 行で md5 が一致。
+  - 版数 99 の DB は、taskd も taskctl も開かず、DB に何も書かない。
+
+**2. ファイル DB が WAL で、taskd 実行中の taskctl の書き込みが `database is locked` にならない**
+- 監査時点では**未達**だった（下記「監査結果」）。修正後の証拠:
+- 単体テスト:
+  - `open_sets_wal_journal_mode_for_file_backed_db`
+  - `concurrent_read_then_write_transactions_on_two_connections_wait_instead_of_failing`
+    - 2 接続がそれぞれ `create_task` → `apply_transition` → `append_event` を 200 回繰り返す。
+    - 修正前は `DatabaseBusy "database is locked"` で失敗した。修正後は ok。
+  - task-api の `api_reads_do_not_see_database_locked_while_another_connection_writes`（読み取り 1,000 回と書き込みの並走）。
+- e2e `writes_from_taskctl_and_api_while_taskd_ticks_fast_never_hit_database_is_locked`: ok。
+  - tick 20 ms の taskd に、taskctl の add + approve を 150 回、API の create + approve を 30 回。
+  - taskd は動き続け、全タスク `Done`。ログに `database is locked` は 0 件、replay 差分ゼロ。
+- 実バイナリで監査の再現手順を実施（tick_ms=20、`taskctl add` + `approve` を 300 回）:
+  - `taskd alive after the loop`、`300 Done`、`taskd exit=0`（SIGTERM で停止）。
+  - `database is locked` は taskd のログに 0 件、taskctl の stderr は 0 行。
+  - `replay: 0 mismatches across 300 tasks`。
+
+**3. task-ops の抽出後も、taskctl の全コマンドと e2e が無変更のテストで通る**
+- `cargo test --workspace` で 400 passed。
+- 9b では、既存の e2e（`scenarios` / `plan_scenarios` / `phase7_scenarios` / `multi_account_scenarios`）と `crates/taskctl/tests` に変更は無い。
+  - e2e 側の変更は `Cargo.toml` の dev-dependency に `serde_json` を足した 1 行だけ。
+
+**4. `[api]` が無ければリッスンしない。有効なら `/api/v1/health` が版を返す**
+- e2e `api_is_off_by_default_and_health_reports_versions_when_enabled`:
+  - `[api]` 無し: taskd は動いているが、`curl` は接続できない（status 0）。
+  - `[api]` あり: `api_version:"1"`、`schema_version:3`（= `SCHEMA_VERSION`）、`db.journal_mode:"wal"`、`Cache-Control: no-store`、CORS ヘッダ無し。
+  - `/daemon` のスナップショットの `providers` / `tick_ms`、`/config` の `db`、未定義パスの 404 も確認。
+- 監査: `ss -ltnp` で `[api]` 無しのソケットは 0 個。
+
+**5. API からの操作が状態機械を通る。無効な遷移と `expected_status` の不一致は 409（problem+json）**
+- e2e `api_mutations_go_through_the_state_machine`:
+  - 作成は 201 + `Location`。空の acceptance は 422、未知のフィールドは 400。
+  - `expected_status` 不一致は 409 `conflict`（`expected` / `actual` 付き、状態は不変）。
+  - 2 回目の approve と execute への reject は 409 `invalid_transition`（`trigger:"approve"`）。
+  - ワーカーの質問 → API で answer（空白は 422）→ `Done`、`Answered` イベントあり。
+  - Approval の approve→`done`、reject→`failed`。cancel→`cancelled`（`cascaded` は配列）、再 cancel は 409、存在しないタスクは 404。
+  - plan は 201（`kind:"plan"`、title は 1 行目）、空白の goal は 422。
+  - `Content-Type: text/plain` は 415、`Origin` 付きは 403。`POST /replay` の mismatches は `[]`。
+- task-api の `tests/operations.rs` 13 件（api.md §8.5 / §8.6 の approve 4 通り、reject 2 通り、answer 3 通り、cancel 3 通り、add の検証 5 通り、cascaded）。
+
+**6. SSE 購読中の `taskctl add` が 2 秒以内に届き、`Last-Event-ID` で再接続しても取りこぼさない**
+- e2e `sse_delivers_created_quickly_and_resumes_from_last_event_id`（実 TCP の `curl -N`）:
+  - `Created` が 2 秒以内に届く。
+  - 切断中に別タスクの add と approve を行い、`Last-Event-ID` で再接続した。`hello.cursor` は最後に受けた id、受けた id は全てそれより大きく、単調増加。取りこぼしも重複も無い。
+- task-api の `tests/stream.rs` 8 件（10,001 件の遅れで reset、17 本目は 503、切断でポーリングが止まる、shutdown で閉じる ほか）。
+
+**7. レート制限のシナリオで `/daemon` に実行中の run と cooldown が現れ、`ProviderThrottled` が残る**
+- e2e `daemon_view_shows_in_flight_runs_and_cooldowns_and_throttle_is_recorded`:
+  - 6 秒かかる run が走っている間に、別タスクが `throttled`（30 秒）になる状況を作った。
+  - `in_flight` に `{task_id, kind:"worker", provider:"fake-local"}`、`cooldowns` に `{provider:"fake-local", reason:"throttled", until > last_tick_at}`、`in_use >= 1`。
+  - `ProviderThrottled{reason:"throttled"}` がイベントに残り、`/events?types=provider_throttled` でも 1 件。attempts は 0。
+- ディスパッチャの単体テスト `tick_publishes_daemon_snapshot_to_watch`（最初の tick の前は `None`、`ticks` / `in_use` / cooldown の壁時計への換算）。
+- 監査が、`[reviewer]` 設定でレビュー中に `kind:"reviewer"` と `in_use:1` が出ることを実測。
+
+**8. token_file 必須、許可されない Host は 400、ワークスペース外の成果物は 403、env の値を出さない**
+- e2e `api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values`:
+  - `0.0.0.0` を `token_file` 無しで listen すると exit 2（`token_file is required`）。
+  - 認証: トークン無しは 401 + `WWW-Authenticate: Bearer`、誤トークンは 401、正しいトークンは 200。
+  - Host: `evil.example` は 400 `host_not_allowed`（`/health` も対象）。`localhost:<port>` は 200。
+  - `/config` / `/providers` / `/daemon` / `/health` に、プロバイダの env の値、`[adapters.fake].env` の値、トークン、`api.token` のどれも出ない。env のキー名は出る。
+  - `../outside.txt` とワークスペース外への symlink は 403 `path_forbidden`（一覧では `forbidden:true`）。中の成果物は 200。不正な `run_id` は 403。
+- 単体テスト:
+  - taskd config `api_section_defaults_to_disabled_and_requires_token_off_loopback`（token_file の欠落・空は設定エラー）。
+  - taskd lib `config_view` にキー名だけが載ること。
+  - task-api `auth_and_guards.rs` 11 件、`files.rs` 8 件。
+
+**9. `docs/api/v1/*.schema.json` が生成結果と一致する**
+- task-core `event_row_schema_matches_committed`、task-api `committed_schema_matches_generated` と `schema_endpoint_returns_the_committed_file`（全て ok）。
+
+### CLAUDE.md の共通条件
+
+- `cargo test --workspace`: exit 0、**400 passed**、失敗 0、ignored 0。
+  - 内訳: task-api 80 / task-ops 97 / task-worker 64 / task-core 50 / task-dispatch 39 / taskctl 34 / e2e 20 / taskd 16。
+  - 監査前は 396。修正で 4 件追加した。
+- `cargo clippy --workspace -- -D warnings` と `cargo clippy --workspace --all-targets -- -D warnings`: いずれも exit 0。
+- 変更・新規ファイルのテスト以外の `unwrap()` / `expect()`: 0 件（自分の走査と監査の両方）。
+
+### 監査結果
+
+auditor サブエージェントを 1 回起動した（読み取り専用。Phase 9 前のバイナリを別にビルドし、実バイナリと curl で実測）。
+- 総合判定: **不可**（受け入れ 2、テスト観点）。
+- 可: 受け入れ 1 / 4〜9、原則、セキュリティ、SSE、デーモンのスナップショット。
+- 条件付き可: taskd への組み込み、task-ops のビュー、仕様との差。
+
+**修正必須の指摘と対応**
+- **【不可 → 修正済み】taskd 実行中に taskctl / API から書き込むと、taskd が `database is locked` で終了する（Phase 9 以前からの不具合）**
+  - 原因: DEFERRED トランザクションの読み取り → 書き込みの格上げが、WAL では busy_timeout を待たずに SQLITE_BUSY になる。
+  - 対応: 書き込みトランザクションを `TransactionBehavior::Immediate` で始める。`append_event` / `release_lease` もトランザクションに入れた。
+  - 回帰テストを 2 件追加した（上記 2）。
+- **【不可 → 修正済み】§8.11 の同時アクセスのテストが読み取りと書き込み 1 本だけで、競合する書き込みを試していない**
+  - 対応: task-core の 2 接続の書き込みテストと、e2e の実 taskd + taskctl + API のテストを追加した。
+
+**「条件付き可」のうち、その場で直したもの**
+- `/inbox` の計算量が二乗: draft ごとに全件を読んでいた。子の件数を 1 回だけ集計するよう変えた。
+  - 実測: draft 1000 件で 16.1 秒 → **0.06 秒**（`/tasks` は 0.04 秒）。
+- `requeue_limit_near` が `max_requeues = 1` で、一度も requeue していない ready を全て含んでいた。`count > 0` を条件に足した（単体テスト追加、api.md §5.1 を訂正）。
+- `counts.drafts` がグループ数だった。draft タスクの件数に変えた（単体テスト追加、api.md §5.1 に明記）。
+- `taskctl show --json` が pretty 形式だった。API と同じ compact にし、api.md §3.5 / §8.4 の「byte 一致」を「同じ関数・同じ直列化。差は files / now / 設定の既定値」に訂正した。
+- SchemaTooNew の exit code が 1 だった。api.md §1.5 のとおり 2 にした。
+- Reviewer run の `in_flight[].run_id` がレビュー対象のワーカー run の id であることを、ADR と api.md §10 に明記した。
+
+**「条件付き可」のうち、記録に留めたもの**: 未解決事項 1〜3。
+
+**修正後の再監査**（auditor は再起動せず、自分で行った）
+
+| コマンド | 結果 |
+|---|---|
+| `cargo test -p task-core --lib concurrent_read_then_write`（修正前） | FAILED（DatabaseBusy） |
+| 同（修正後）と `cargo test -p task-core` | 50 passed |
+| `cargo test -p task-ops -p taskctl` | 97 + 34 passed |
+| `cargo test --workspace` | 400 passed |
+| clippy 2 種 | exit 0 |
+| 実バイナリの 300 回ループ | taskd 生存、300 Done、locked 0、replay 0 mismatches |
+| `/inbox` を draft 1000 件で 3 回 | 各 0.06 秒、`counts.drafts:1000` |
+
+### 未解決事項
+
+1. API サーバのタスクが実行中に異常終了しても、taskd は API 無しで動き続ける（停止時にだけエラーをログに出す）。`axum::serve` が Err を返すことは実際にはほぼ無い（監査で記録で可）。
+2. `taskctl show --json` は `taskd.toml` を読まない。そのため `workspace_dir` / `backoff_until` / `max_requeues` は設定の既定値で計算する（`--workspace-root` で基準だけ上書き可）。API との差は api.md §3.5 に明記した。
+3. api.md §8.4 のテストは、`taskctl` のプロセス出力ではなく、同じ `task_ops::view::task_detail` の直列化と比べている。
+4. ディスパッチャの tick のエラーは、従来どおり致命扱い。IMMEDIATE にしたので、他の接続が書き込みロックを busy_timeout（5 秒）より長く持たない限り起きない。
+5. プロバイダの集計（`/providers` の `stats`）はメモリ上の観測値。
+   - 最初の要求で全イベントを走査するので、イベントの多い DB では初回だけ遅い。
+   - Reviewer run の使用量は events に残らないため集計外（P-G14）。
+6. 未知のクエリパラメータを 400 にしたのは、BFF の誤りを早く表に出すための厳格な決め（api.md §10）。互換性のために緩める場合は v1 のまま許可へ変えられる。
+7. `docs/gui/taskd-proposals.md` の新規提案 P-G14〜P-G16（Reviewer run の使用量をイベントに残す ほか）は、人間の判断待ち。
+8. G フェーズの前提ツールがこのホストに無い: Node は v22.21.0（React Router 8 の最低は 22.22.0、推奨は 24 LTS）、pnpm は未導入。
+   - `run-gphases.sh` の preflight はこれを検出して exit 3 で止まる（実測）。
+   - bootstrap は scratchpad への試行で、初期コミットの作成・再実行時のスキップ・リンクの置換を確認した。
+
+### 提案
+
+| # | 対象 | 提案 | 採用まで実装で使う既定 |
+|---|---|---|---|
+| P-42 | DESIGN §5.1 | ストアの書き込みトランザクションは `BEGIN IMMEDIATE`（WAL で複数接続が書くための前提。ADR-0013 実装メモの D5 追補） | 実装済み（ADR に記録） |
+| P-43 | task-core | `StoreError::InvalidCursor` と `SqliteStore::journal_mode()` を追加する。現在の task-api は、cursor の誤りを文言の照合で判定し、journal_mode を rusqlite の別接続で実測している | 現状のまま（task-api 内で処理） |
+| P-44 | taskd | API サーバのタスクの異常終了を tick ループで検知し、デーモンを止めるか再起動する | 停止時のログのみ |

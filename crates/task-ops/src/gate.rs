@@ -9,14 +9,49 @@ use task_core::{Event, Status, TaskId, TaskKind, TaskStore, Trigger};
 
 use crate::derive::latest_question;
 use crate::error::OpsError;
+use crate::view::{TaskRef, task_ref};
+
+/// `events_since` を読むときの「大きめの limit」（`docs/gui/api.md` §5.7）。伝播は同一トランザクション
+/// 内で完結するので、通常はこの上限にかからない。
+const CASCADE_EVENTS_LIMIT: usize = 100_000;
 
 /// 状態変更の結果（承認・却下・回答・取り消し共通）。
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, schemars::JsonSchema)]
 pub struct TransitionResult {
     pub id: TaskId,
     pub from: Status,
     pub to: Status,
     pub reason: String,
+    /// この遷移の伝播で `cancelled` になった、対象タスク以外のタスク（`docs/gui/api.md` §5.7）。
+    #[serde(default)]
+    pub cascaded: Vec<TaskRef>,
+}
+
+/// `since_id`（遷移前の `latest_event_id()`）より後に追記されたイベントのうち、`subject` 以外の
+/// タスクに付いた `Transitioned{to: Cancelled, reason: "cancel" | "dependency_failed"}` を
+/// `TaskRef` にして返す（`docs/gui/api.md` §5.7）。
+fn collect_cascaded(store: &dyn TaskStore, subject: TaskId, since_id: u64) -> Result<Vec<TaskRef>, OpsError> {
+    let rows = store.events_since(since_id, CASCADE_EVENTS_LIMIT)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for row in rows {
+        if row.task_id == subject {
+            continue;
+        }
+        let Event::Transitioned { to, reason, .. } = &row.event else {
+            continue;
+        };
+        if *to != Status::Cancelled || (reason != "cancel" && reason != "dependency_failed") {
+            continue;
+        }
+        if !seen.insert(row.task_id) {
+            continue;
+        }
+        if let Some(t) = store.get(row.task_id)? {
+            out.push(task_ref(&t));
+        }
+    }
+    Ok(out)
 }
 
 fn check_expected(actual: Status, expected: Option<Status>) -> Result<(), OpsError> {
@@ -57,12 +92,15 @@ pub fn approve(
     };
 
     let from = task.status;
+    let since_id = store.latest_event_id()?;
     let outcome = store.apply_transition(id, trigger, extra_event)?;
+    let cascaded = collect_cascaded(store, id, since_id)?;
     Ok(TransitionResult {
         id,
         from,
         to: outcome.next,
         reason: outcome.reason.to_string(),
+        cascaded,
     })
 }
 
@@ -79,6 +117,7 @@ pub fn reject(
 
     if task.kind == TaskKind::Approval && task.status == Status::Ready {
         let from = task.status;
+        let since_id = store.latest_event_id()?;
         let outcome = store.apply_transition(
             id,
             Trigger::Reject,
@@ -88,11 +127,13 @@ pub fn reject(
                 note,
             }),
         )?;
+        let cascaded = collect_cascaded(store, id, since_id)?;
         Ok(TransitionResult {
             id,
             from,
             to: outcome.next,
             reason: outcome.reason.to_string(),
+            cascaded,
         })
     } else {
         Err(OpsError::InvalidState {
@@ -125,16 +166,19 @@ pub fn answer(
 
     let question = latest_question(&store.events_for(id)?);
     let from = task.status;
+    let since_id = store.latest_event_id()?;
     let outcome = store.apply_transition(
         id,
         Trigger::Answer,
         Some(Event::Answered { question, answer }),
     )?;
+    let cascaded = collect_cascaded(store, id, since_id)?;
     Ok(TransitionResult {
         id,
         from,
         to: outcome.next,
         reason: outcome.reason.to_string(),
+        cascaded,
     })
 }
 
@@ -154,12 +198,15 @@ pub fn cancel(store: &dyn TaskStore, id: TaskId, expected: Option<Status>) -> Re
     }
 
     let from = task.status;
+    let since_id = store.latest_event_id()?;
     let outcome = store.apply_transition(id, Trigger::Cancel, None)?;
+    let cascaded = collect_cascaded(store, id, since_id)?;
     Ok(TransitionResult {
         id,
         from,
         to: outcome.next,
         reason: outcome.reason.to_string(),
+        cascaded,
     })
 }
 
@@ -488,5 +535,66 @@ mod tests {
 
         let fetched = store.get(task.id).expect("get").expect("some");
         assert_eq!(fetched.status, Status::Ready, "no transition should have happened");
+    }
+
+    // ---- cascaded (docs/gui/api.md §5.7) ----
+
+    #[test]
+    fn reject_approval_cascades_cancel_to_its_own_children() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let approval = sample_task(TaskKind::Approval, Status::Ready);
+        store.insert(&approval).expect("insert approval");
+
+        let mut child = sample_task(TaskKind::Execute, Status::Draft);
+        child.parent_id = Some(approval.id);
+        store.insert(&child).expect("insert child");
+
+        let result = reject(&store, approval.id, None, None).expect("reject");
+        assert_eq!(result.to, Status::Failed);
+        assert_eq!(result.cascaded.len(), 1);
+        assert_eq!(result.cascaded[0].id, child.id);
+        assert_eq!(result.cascaded[0].status, Status::Cancelled);
+
+        let fetched_child = store.get(child.id).expect("get").expect("some");
+        assert_eq!(fetched_child.status, Status::Cancelled);
+    }
+
+    #[test]
+    fn cancel_cascades_dependency_failed_to_dependents() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let upstream = sample_task(TaskKind::Execute, Status::Ready);
+        store.insert(&upstream).expect("insert upstream");
+
+        let mut downstream = sample_task(TaskKind::Execute, Status::Draft);
+        downstream.depends_on = vec![upstream.id];
+        store.insert(&downstream).expect("insert downstream");
+
+        let result = cancel(&store, upstream.id, None).expect("cancel");
+        assert_eq!(result.to, Status::Cancelled);
+        assert_eq!(result.cascaded.len(), 1);
+        assert_eq!(result.cascaded[0].id, downstream.id);
+
+        let fetched_downstream = store.get(downstream.id).expect("get").expect("some");
+        assert_eq!(fetched_downstream.status, Status::Cancelled);
+    }
+
+    #[test]
+    fn cancel_without_children_or_dependents_has_empty_cascaded() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let task = sample_task(TaskKind::Execute, Status::Ready);
+        store.insert(&task).expect("insert");
+
+        let result = cancel(&store, task.id, None).expect("cancel");
+        assert!(result.cascaded.is_empty());
+    }
+
+    #[test]
+    fn approve_without_cascading_effects_has_empty_cascaded() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let task = sample_task(TaskKind::Execute, Status::Draft);
+        store.insert(&task).expect("insert");
+
+        let result = approve(&store, task.id, None, None).expect("approve");
+        assert!(result.cascaded.is_empty());
     }
 }

@@ -7,11 +7,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use task_core::{ArtifactRef, Event, Task};
 
 /// `prior_review_from_events` の要素。`task_worker::PriorReview` と同じ形（フィールド名も同じ）。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ReviewNote {
     pub criterion: usize,
     pub pass: bool,
@@ -19,7 +20,7 @@ pub struct ReviewNote {
 }
 
 /// `answers_from_events` の要素。`task_worker::Answer` と同じ形（フィールド名も同じ）。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct AnswerNote {
     pub question: String,
     pub answer: String,

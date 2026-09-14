@@ -4,10 +4,18 @@
 pub mod config;
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
-use task_core::{SqliteStore, StoreError, TaskStore};
-use task_dispatch::{DispatchError, Dispatcher, ProviderId, StaticPolicy, TickReport};
+use task_api::types::{ApiConfigView, ConfigView, ProviderConfigView, ReviewerConfigView};
+use task_api::{ApiError, ApiSettings, ApiState};
+use task_core::{SqliteStore, StoreError, StoreOptions, TaskStore};
+use task_ops::view::ViewContext;
+use task_dispatch::{DispatchError, Dispatcher, ProviderId, SnapshotPublisher, StaticPolicy, TickReport};
+use task_ops::daemon::ProviderLive;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use task_worker::{ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, WorkerAdapter};
 
 pub use config::{Config, ConfigError};
@@ -20,6 +28,8 @@ pub enum DaemonError {
     Store(#[from] StoreError),
     #[error("dispatch: {0}")]
     Dispatch(#[from] DispatchError),
+    #[error("api: {0}")]
+    Api(#[from] ApiError),
 }
 
 /// ループの終了条件。
@@ -108,6 +118,33 @@ pub fn effective_models(config: &Config) -> HashMap<ProviderId, String> {
         .collect()
 }
 
+/// ADR-0013 D4: デーモンのスナップショットに載せる `[[providers]]` の定義（`in_use` はディスパッチャが毎 tick 埋める）。
+pub fn provider_lives(config: &Config) -> Vec<ProviderLive> {
+    let models = effective_models(config);
+    config
+        .providers
+        .iter()
+        .map(|p| ProviderLive {
+            id: p.id.clone(),
+            adapter: p.adapter.clone(),
+            tiers: p.tiers.clone(),
+            concurrency: p.concurrency,
+            model: models.get(&p.id).filter(|m| !m.is_empty()).cloned(),
+            in_use: 0,
+        })
+        .collect()
+}
+
+/// スナップショットの `hostname`: `/proc/sys/kernel/hostname`（Linux）→ `HOSTNAME` → `"unknown"`。
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// 設定から `Dispatcher` を組み立てる。
 pub fn build_dispatcher(config: &Config) -> Result<Dispatcher, DaemonError> {
     let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&config.db)?);
@@ -124,9 +161,141 @@ pub fn build_dispatcher(config: &Config) -> Result<Dispatcher, DaemonError> {
     ))
 }
 
-/// tick ループ。SIGINT/SIGTERM で停止する。
+/// ADR-0013 / `docs/gui/api.md` §3.21: `GET /api/v1/config` に出す設定の要約。env は**キー名だけ**、トークンとその場所は出さない。
+pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
+    let models = effective_models(config);
+    ConfigView {
+        config_path: config.source_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+        db: config.db.display().to_string(),
+        workspace_root: config.workspace_root.display().to_string(),
+        tick_ms: config.tick_ms,
+        max_concurrency: config.max_concurrency,
+        lease_grace_secs: config.lease_grace_secs,
+        idle_timeout_secs: config.idle_timeout_secs,
+        kill_grace_secs: config.kill_grace_secs,
+        review_timeout_secs: config.review_timeout_secs,
+        error_cooldown_secs: config.error_cooldown_secs,
+        retry_backoff_base_secs: config.retry_backoff_base_secs,
+        retry_backoff_max_secs: config.retry_backoff_max_secs,
+        max_requeues: config.max_requeues,
+        plan_auto_accept: config.plan.auto_accept,
+        reviewer: ReviewerConfigView { adapter: config.reviewer.adapter.clone(), tier: config.reviewer.tier },
+        providers: config
+            .providers
+            .iter()
+            .map(|p| {
+                let mut env_keys: Vec<String> = p.env.keys().cloned().collect();
+                env_keys.sort();
+                ProviderConfigView {
+                    id: p.id.clone(),
+                    adapter: p.adapter.clone(),
+                    tiers: p.tiers.clone(),
+                    concurrency: p.concurrency,
+                    model: models.get(&p.id).filter(|m| !m.is_empty()).cloned(),
+                    env_keys,
+                }
+            })
+            .collect(),
+        api: ApiConfigView {
+            bind: listen.to_string(),
+            auth_required: config.api.token_file.is_some(),
+            allowed_hosts: config.api.allowed_hosts.clone(),
+        },
+    }
+}
+
+/// `task_api::ApiSettings` を設定から作る。`instance_id` / `started_at` はディスパッチャのスナップショットと同じ値を渡す。
+pub fn api_settings(
+    config: &Config,
+    listen: SocketAddr,
+    token: Option<String>,
+    instance_id: String,
+    started_at: String,
+) -> ApiSettings {
+    ApiSettings {
+        listen,
+        token,
+        allowed_hosts: config.api.allowed_hosts.clone(),
+        db_path: config.db.clone(),
+        busy_timeout: StoreOptions::default().busy_timeout,
+        view: ViewContext {
+            workspace_root: config.workspace_root.clone(),
+            retry_backoff_base: Duration::from_secs(config.retry_backoff_base_secs),
+            retry_backoff_max: Duration::from_secs(config.retry_backoff_max_secs),
+            max_requeues: config.max_requeues,
+        },
+        config_view: config_view(config, listen),
+        taskd_version: env!("CARGO_PKG_VERSION").to_string(),
+        instance_id,
+        started_at,
+    }
+}
+
+/// 動いている API サーバ。`stop` で graceful に止める。
+struct RunningApi {
+    stop: tokio::sync::oneshot::Sender<()>,
+    handle: tokio::task::JoinHandle<Result<(), ApiError>>,
+}
+
+impl RunningApi {
+    async fn stop(self) {
+        let _ = self.stop.send(());
+        match tokio::time::timeout(Duration::from_secs(5), self.handle).await {
+            Ok(Ok(Ok(()))) => tracing::info!("api stopped"),
+            Ok(Ok(Err(e))) => tracing::error!(error = %e, "api server failed"),
+            Ok(Err(e)) => tracing::error!(error = %e, "api task panicked"),
+            Err(_) => tracing::warn!("api did not stop within 5s"),
+        }
+    }
+}
+
+/// ADR-0013 D3 / D4: ディスパッチャにスナップショットの送り口を付け、API 専用の DB 接続を開いて bind する。
+/// 開けない・bind できないときは起動を失敗させる（黙って API 無しで動かない）。
+async fn start_api(config: &Config, listen: SocketAddr, dispatcher: &mut Dispatcher) -> Result<RunningApi, DaemonError> {
+    let token = config.api.read_token()?;
+    let instance_id = ulid::Ulid::new().to_string();
+    let started_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default();
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    dispatcher.set_snapshot_publisher(SnapshotPublisher {
+        tx,
+        instance_id: instance_id.clone(),
+        hostname: hostname(),
+        started_at: started_at.clone(),
+        tick_ms: config.tick_ms,
+        providers: provider_lives(config),
+    });
+    let settings = api_settings(config, listen, token, instance_id, started_at);
+    let state = tokio::task::spawn_blocking(move || ApiState::new(settings, rx))
+        .await
+        .map_err(|e| ApiError::Startup(e.to_string()))??;
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .map_err(|source| ApiError::Bind { addr: listen, source })?;
+    let addr = listener.local_addr().unwrap_or(listen);
+    tracing::info!(%addr, auth_required = config.api.token_file.is_some(), "api listening");
+    let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(task_api::serve_with_listener(listener, state, async move {
+        let _ = stop_rx.await;
+    }));
+    Ok(RunningApi { stop, handle })
+}
+
+/// デーモン本体。`[api]` があれば同じランタイムで HTTP API も動かし、tick ループの終了時に止める。
 pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> {
     let mut dispatcher = build_dispatcher(&config)?;
+    let api = match config.api.listen {
+        Some(listen) => Some(start_api(&config, listen, &mut dispatcher).await?),
+        None => None,
+    };
+    let result = tick_loop(&mut dispatcher, &config, opts).await;
+    if let Some(api) = api {
+        api.stop().await;
+    }
+    result
+}
+
+/// tick ループ。SIGINT/SIGTERM で停止する。
+async fn tick_loop(dispatcher: &mut Dispatcher, config: &Config, opts: RunOptions) -> Result<Exit, DaemonError> {
     let tick = config.tick();
     let mut ticks: u64 = 0;
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
@@ -214,5 +383,23 @@ model = "fake"
         assert_eq!(models["acct-a"], "model-a");
         assert_eq!(models["acct-b"], "adapter-default-model");
         assert_eq!(models["local-fake"], "fake");
+
+        // ADR-0013 D4: スナップショットの定義部分は設定の順・実効モデル（env は載せない）。
+        let lives = provider_lives(&cfg);
+        let ids: Vec<&str> = lives.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["acct-a", "acct-b", "local-fake"]);
+        assert_eq!(lives[1].model.as_deref(), Some("adapter-default-model"));
+        assert_eq!((lives[0].adapter.as_str(), lives[0].concurrency, lives[0].in_use), ("claude-code", 1, 0));
+        assert!(!hostname().is_empty());
+
+        // ADR-0013 D11: /config の要約には env のキー名だけが載り、値は載らない。
+        let view = config_view(&cfg, "127.0.0.1:7710".parse().unwrap());
+        assert_eq!(view.providers[0].env_keys, ["CLAUDE_CONFIG_DIR"]);
+        assert_eq!(view.providers[1].model.as_deref(), Some("adapter-default-model"));
+        assert_eq!((view.api.bind.as_str(), view.api.auth_required), ("127.0.0.1:7710", false));
+        let json = serde_json::to_string(&view).unwrap();
+        for secret in ["/accounts/a", "/accounts/b", "/base", "base\""] {
+            assert!(!json.contains(secret), "{secret} leaked: {json}");
+        }
     }
 }

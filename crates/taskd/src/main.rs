@@ -62,6 +62,10 @@ async fn main() -> ExitCode {
         Err(e) => {
             tracing::error!(error = %e, "taskd failed");
             eprintln!("error: {e}");
+            // docs/gui/api.md §1.5: 知らない新しいスキーマ版数の DB は、設定エラーと同じく起動時の exit 2。
+            if matches!(e, taskd::DaemonError::Store(task_core::StoreError::SchemaTooNew { .. })) {
+                return ExitCode::from(2);
+            }
             ExitCode::FAILURE
         }
     }

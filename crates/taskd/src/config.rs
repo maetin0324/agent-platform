@@ -62,6 +62,9 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
 }
 
 /// `[api]`（ADR-0013 D3 / D11）: HTTP API 層。`listen` が無ければ API を起動しない（既定）。
@@ -77,6 +80,22 @@ pub struct ApiConfig {
     /// 追加で許可する `Host` ヘッダの値（`localhost` / `127.0.0.1` / `[::1]` とポート付きの形は常に許可）。
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+}
+
+impl ApiConfig {
+    /// `token_file` の内容（前後の空白を除く）。読めない・空なら設定エラー。トークンの値はエラー文にもログにも出さない（`docs/gui/api.md` §1.1）。
+    pub fn read_token(&self) -> Result<Option<String>, ConfigError> {
+        let Some(path) = &self.token_file else {
+            return Ok(None);
+        };
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| ConfigError::Invalid(format!("[api] token_file {} cannot be read: {e}", path.display())))?;
+        let token = text.trim();
+        if token.is_empty() {
+            return Err(ConfigError::Invalid(format!("[api] token_file {} is empty", path.display())));
+        }
+        Ok(Some(token.to_string()))
+    }
 }
 
 /// `[reviewer]`（ADR-0010 D9, P-30）: `Check::Reviewer` の判定 run に使う adapter / tier。
@@ -282,6 +301,7 @@ impl Config {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let base = base.canonicalize().unwrap_or(base);
+        cfg.source_path = Some(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
         if cfg.db.is_relative() {
             cfg.db = base.join(&cfg.db);
         }
@@ -294,6 +314,10 @@ impl Config {
             cfg.api.token_file = Some(base.join(token_file));
         }
         cfg.validate()?;
+        // API を有効にするなら、トークンが読めることを起動時に確かめる（exit 2）。
+        if cfg.api.listen.is_some() {
+            cfg.api.read_token()?;
+        }
         Ok(cfg)
     }
 
@@ -580,7 +604,15 @@ tiers = ["cheap"]
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("taskd.toml");
         std::fs::write(&path, format!("[api]\nlisten = \"127.0.0.1:7700\"\ntoken_file = \"secrets/api.token\"\n{providers}")).unwrap();
+        // token_file が無い・空なら起動時の設定エラー（値は出さない）。
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(err.contains("token_file") && err.contains("cannot be read"), "{err}");
+        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        std::fs::write(dir.path().join("secrets/api.token"), " \n").unwrap();
+        assert!(Config::load(&path).unwrap_err().to_string().contains("is empty"));
+        std::fs::write(dir.path().join("secrets/api.token"), "  tok-123\n").unwrap();
         let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.api.read_token().unwrap().as_deref(), Some("tok-123"));
         assert_eq!(
             cfg.api.token_file.unwrap(),
             dir.path().canonicalize().unwrap().join("secrets/api.token")

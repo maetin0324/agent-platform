@@ -9,6 +9,8 @@
 
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use task_core::{Budget, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint, WorkspaceSpec};
 use time::OffsetDateTime;
 
@@ -16,17 +18,37 @@ use crate::error::OpsError;
 
 const TITLE_MAX_CHARS: usize = 80;
 
-/// `taskctl plan` から組み立てる新規 Plan タスクの指定。
-#[derive(Debug, Clone)]
+/// `taskctl plan` から組み立てる新規 Plan タスクの指定。API の `POST /plans` の本文でもある（`docs/gui/api.md` §3.14）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NewPlanSpec {
     /// 大目標。1行目の先頭80文字が `title` になる。
     pub goal: String,
+    #[serde(default)]
     pub workspace: Option<PathBuf>,
+    #[serde(default = "default_plan_tier")]
     pub tier: Tier,
+    #[serde(default)]
     pub priority: i32,
+    #[serde(default = "default_plan_max_turns")]
     pub max_turns: u32,
+    #[serde(default = "default_plan_max_wall_secs")]
     pub max_wall_secs: u64,
+    #[serde(default = "default_plan_max_retries")]
     pub max_retries: u32,
+}
+
+fn default_plan_tier() -> Tier {
+    Tier::Frontier
+}
+fn default_plan_max_turns() -> u32 {
+    30
+}
+fn default_plan_max_wall_secs() -> u64 {
+    900
+}
+fn default_plan_max_retries() -> u32 {
+    1
 }
 
 /// 文字列の1行目を、char境界を保ったまま先頭 `max_chars` 文字に切り詰める。

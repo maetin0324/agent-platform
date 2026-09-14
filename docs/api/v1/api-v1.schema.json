@@ -1,0 +1,2979 @@
+{
+  "$defs": {
+    "Action": {
+      "enum": [
+        "approve",
+        "reject",
+        "answer",
+        "cancel"
+      ],
+      "type": "string"
+    },
+    "AnswerBody": {
+      "additionalProperties": false,
+      "description": "`POST /tasks/{id}/answer` の本文。",
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "expected_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Status"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "type": "object"
+    },
+    "AnswerNote": {
+      "description": "`answers_from_events` の要素。`task_worker::Answer` と同じ形（フィールド名も同じ）。",
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "question",
+        "answer"
+      ],
+      "type": "object"
+    },
+    "ApiConfigView": {
+      "properties": {
+        "allowed_hosts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "auth_required": {
+          "type": "boolean"
+        },
+        "bind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bind",
+        "auth_required",
+        "allowed_hosts"
+      ],
+      "type": "object"
+    },
+    "ApprovalDecisionView": {
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "by": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ts": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "by",
+        "approved",
+        "ts"
+      ],
+      "type": "object"
+    },
+    "ApprovalItem": {
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/TaskRef"
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "criterion_idx": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "criterion_text": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceView"
+          },
+          "type": "array"
+        },
+        "last_run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "other_verdicts": {
+          "items": {
+            "$ref": "#/$defs/VerdictView"
+          },
+          "type": "array"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previous_decisions": {
+          "items": {
+            "$ref": "#/$defs/ApprovalDecisionView"
+          },
+          "type": "array"
+        },
+        "requested_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval",
+        "criterion_text",
+        "requested_at",
+        "evidence",
+        "other_verdicts",
+        "artifacts",
+        "previous_decisions"
+      ],
+      "type": "object"
+    },
+    "ApprovalLink": {
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/TaskRef"
+        },
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "criterion_idx": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "decided": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalDecisionView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "approval"
+      ],
+      "type": "object"
+    },
+    "ArtifactList": {
+      "description": "`GET /tasks/{id}/artifacts`。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ArtifactView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "ArtifactRef": {
+      "description": "DESIGN §4.4 の `ArtifactRef`。実体は `workspace/<task_id>/artifacts/` 配下。",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "sha256",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ArtifactView": {
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "forbidden": {
+          "description": "パス検査に落ちた（ワークスペース外・symlink 越え・絶対パス等）。本体の取得は 403。",
+          "type": "boolean"
+        },
+        "idx": {
+          "description": "`ArtifactProduced` の出現順（0 始まり）。`GET /tasks/{id}/artifacts/{idx}` の添字。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "sha256_current": {
+          "description": "64 MiB 以下のときだけ計算する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256_matches": {
+          "description": "記録値との一致。`exists = false` または未計算なら `null`。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ts": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "idx",
+        "run_id",
+        "ts",
+        "artifact",
+        "exists",
+        "forbidden"
+      ],
+      "type": "object"
+    },
+    "AttentionItem": {
+      "oneOf": [
+        {
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "task": {
+              "$ref": "#/$defs/TaskRef"
+            },
+            "type": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "task",
+            "reason",
+            "at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "task": {
+              "$ref": "#/$defs/TaskRef"
+            },
+            "type": {
+              "const": "requeue_limit_near",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "task",
+            "count",
+            "max",
+            "at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "hint": {
+              "$ref": "#/$defs/WorkerHint"
+            },
+            "task": {
+              "$ref": "#/$defs/TaskRef"
+            },
+            "type": {
+              "const": "unroutable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "task",
+            "hint",
+            "at"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Budget": {
+      "description": "DESIGN §4.1 の `Budget`。",
+      "properties": {
+        "max_retries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_turns": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_wall_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_turns",
+        "max_wall_secs",
+        "max_retries"
+      ],
+      "type": "object"
+    },
+    "CancelBody": {
+      "additionalProperties": false,
+      "description": "`POST /tasks/{id}/cancel` の本文。",
+      "properties": {
+        "expected_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Status"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "type": "object"
+    },
+    "Check": {
+      "description": "DESIGN §5.3/§5.7 の `Check` 種別。",
+      "oneOf": [
+        {
+          "properties": {
+            "cmd": {
+              "type": "string"
+            },
+            "expect_exit": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "type": {
+              "const": "command",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cmd",
+            "expect_exit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "artifact_exists",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "reviewer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "human",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ConfigView": {
+      "description": "`GET /config`: `taskd.toml` の要約。env の値・トークンは含めない。taskd が起動時に作る。",
+      "properties": {
+        "api": {
+          "$ref": "#/$defs/ApiConfigView"
+        },
+        "config_path": {
+          "type": "string"
+        },
+        "db": {
+          "description": "DB の絶対パス。",
+          "type": "string"
+        },
+        "error_cooldown_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "idle_timeout_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kill_grace_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lease_grace_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_concurrency": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_requeues": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "plan_auto_accept": {
+          "type": "boolean"
+        },
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ProviderConfigView"
+          },
+          "type": "array"
+        },
+        "retry_backoff_base_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retry_backoff_max_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "review_timeout_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/ReviewerConfigView"
+        },
+        "tick_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspace_root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "config_path",
+        "db",
+        "workspace_root",
+        "tick_ms",
+        "max_concurrency",
+        "lease_grace_secs",
+        "idle_timeout_secs",
+        "kill_grace_secs",
+        "review_timeout_secs",
+        "error_cooldown_secs",
+        "retry_backoff_base_secs",
+        "retry_backoff_max_secs",
+        "max_requeues",
+        "plan_auto_accept",
+        "reviewer",
+        "providers",
+        "api"
+      ],
+      "type": "object"
+    },
+    "CooldownView": {
+      "description": "`task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直したもの。",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "`\"throttled\" | \"auth_failed\" | \"exhausted\"`。",
+          "type": "string"
+        },
+        "until": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "until",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Criterion": {
+      "description": "DESIGN §4.1 の `Criterion`。",
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/Check"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "check"
+      ],
+      "type": "object"
+    },
+    "CriterionSpec": {
+      "description": "受け入れ条件 1 件の指定。現在の `taskctl add` の `--accept`/`--check-cmd`/\n`--check-artifact`/`--check-reviewer` に対応する。API の `POST /tasks` の `acceptance[]` でもある（`docs/gui/api.md` §3.4）。",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "`Check::Human`。",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "human",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`Check::Command`。",
+          "properties": {
+            "cmd": {
+              "type": "string"
+            },
+            "expect_exit": {
+              "default": 0,
+              "format": "int32",
+              "type": "integer"
+            },
+            "type": {
+              "const": "command",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cmd"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`Check::ArtifactExists`。",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "artifact_exists",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`Check::Reviewer`。",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "reviewer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CriterionView": {
+      "properties": {
+        "approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalLink"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "check": {
+          "$ref": "#/$defs/Check"
+        },
+        "idx": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "latest_verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VerdictView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "idx",
+        "text",
+        "check"
+      ],
+      "type": "object"
+    },
+    "DaemonSnapshot": {
+      "properties": {
+        "awaiting_human": {
+          "description": "人間の承認待ちでレビューを延期している reviewing タスク。",
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
+        "cooldowns": {
+          "items": {
+            "$ref": "#/$defs/CooldownView"
+          },
+          "type": "array"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "in_flight": {
+          "items": {
+            "$ref": "#/$defs/InFlight"
+          },
+          "type": "array"
+        },
+        "instance_id": {
+          "description": "起動ごとの ULID（`GET /health` の `instance_id` と同じ）。",
+          "type": "string"
+        },
+        "last_tick_at": {
+          "type": "string"
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ProviderLive"
+          },
+          "type": "array"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "tick_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ticks": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unroutable": {
+          "description": "設定に合うプロバイダが無い ready タスク（この tick の判定）。",
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "instance_id",
+        "pid",
+        "hostname",
+        "started_at",
+        "last_tick_at",
+        "ticks",
+        "tick_ms",
+        "in_flight",
+        "cooldowns",
+        "awaiting_human",
+        "unroutable",
+        "providers"
+      ],
+      "type": "object"
+    },
+    "DaemonView": {
+      "description": "`GET /daemon`。",
+      "properties": {
+        "now": {
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DaemonSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "最初の tick より前は `null`。"
+        }
+      },
+      "required": [
+        "now"
+      ],
+      "type": "object"
+    },
+    "DailyUsage": {
+      "properties": {
+        "day": {
+          "description": "`YYYY-MM-DD`（UTC）。",
+          "type": "string"
+        },
+        "input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "description": "その日に終わった run の数。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "day",
+        "runs",
+        "input_tokens",
+        "output_tokens"
+      ],
+      "type": "object"
+    },
+    "DbInfo": {
+      "properties": {
+        "busy_timeout_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "journal_mode": {
+          "description": "`PRAGMA journal_mode` の実測値（`\"wal\"` でなければ設定不備）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "journal_mode",
+        "busy_timeout_ms"
+      ],
+      "type": "object"
+    },
+    "DecisionBody": {
+      "additionalProperties": false,
+      "description": "`POST /tasks/{id}/approve`、`POST /tasks/{id}/reject` の本文。",
+      "properties": {
+        "expected_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Status"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DraftGroup": {
+      "properties": {
+        "drafts": {
+          "items": {
+            "$ref": "#/$defs/TaskSummary"
+          },
+          "type": "array"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan_summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "drafts"
+      ],
+      "type": "object"
+    },
+    "Event": {
+      "description": "DESIGN §4.3 の `Event`（追記専用）。ADR-0002 D2: `Transitioned` は遷移の\n*結果* を記録するものであり、`transition()` の入力（`Trigger`）とは別物。\n`JsonSchema` は ADR-0013 D8: `docs/api/v1/event.schema.json`（`EventRow` 経由）の契約に使う。",
+      "oneOf": [
+        {
+          "properties": {
+            "task": {
+              "$ref": "#/$defs/Task"
+            },
+            "type": {
+              "const": "created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/Status"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "to": {
+              "$ref": "#/$defs/Status"
+            },
+            "type": {
+              "const": "transitioned",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from",
+            "to",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "adapter": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "provider": {
+              "description": "どのプロバイダ（= アカウント）で実行したか（ADR-0012 D1）。導入前のイベントには無いので任意。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "worker_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "adapter",
+            "model"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "msg": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "worker_progress",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "msg"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "artifact_produced",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "artifact"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "worker_finished",
+              "type": "string"
+            },
+            "usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Usage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "criterion_idx": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pass": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "review_verdict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "criterion_idx",
+            "pass",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "approval_requested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "approved": {
+              "type": "boolean"
+            },
+            "by": {
+              "type": "string"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "approval_decided",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "by",
+            "approved"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`blocked` のタスクへの人間の回答（ADR-0010 D3, P-10）。`Transitioned{reason:\"answer\"}` と同一トランザクションで\n追記し、次の run の `context.answers` に載せる。",
+          "properties": {
+            "answer": {
+              "type": "string"
+            },
+            "question": {
+              "type": "string"
+            },
+            "type": {
+              "const": "answered",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "question",
+            "answer"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "provider": {
+              "type": "string"
+            },
+            "reason": {
+              "description": "供給側失敗の種別（ADR-0013 D9）: `throttled | auth_failed | exhausted | spawn`。\n導入前のイベントには無いので任意。このバリアントを構築している箇所は現状無い\n（`grep -rn ProviderThrottled crates` で確認済み）。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "provider_throttled",
+              "type": "string"
+            },
+            "until": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "provider",
+            "until"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EventRow": {
+      "description": "`events` テーブルの 1 行（ADR-0013 D6）。`id` はテーブル全体でのグローバル単調増加値。",
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/Event"
+        },
+        "id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "ts": {
+          "description": "DB に保存された RFC 3339 文字列そのまま。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "task_id",
+        "seq",
+        "ts",
+        "event"
+      ],
+      "type": "object"
+    },
+    "EventsPage": {
+      "description": "`GET /tasks/{id}/events`、`GET /events`。",
+      "properties": {
+        "has_more": {
+          "type": "boolean"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/EventRow"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items",
+        "has_more"
+      ],
+      "type": "object"
+    },
+    "EvidenceView": {
+      "description": "`task_worker::Evidence` と同じ形。",
+      "properties": {
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "criterion": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stdout_tail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "criterion"
+      ],
+      "type": "object"
+    },
+    "Graph": {
+      "properties": {
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/GraphEdge"
+          },
+          "type": "array"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/GraphNode"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "nodes",
+        "edges"
+      ],
+      "type": "object"
+    },
+    "GraphEdge": {
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/TaskId",
+          "description": "先行タスク。"
+        },
+        "kind": {
+          "description": "常に `\"depends_on\"`。",
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/$defs/TaskId",
+          "description": "後続タスク。"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "GraphNode": {
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "kind": {
+          "$ref": "#/$defs/TaskKind"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "status",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Health": {
+      "description": "`GET /health`（無認証）。",
+      "properties": {
+        "api_version": {
+          "description": "常に `\"1\"`。",
+          "type": "string"
+        },
+        "db": {
+          "$ref": "#/$defs/DbInfo"
+        },
+        "instance_id": {
+          "type": "string"
+        },
+        "now": {
+          "type": "string"
+        },
+        "schema_version": {
+          "description": "`schema_migrations` の最大版数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "taskd_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "schema_version",
+        "taskd_version",
+        "instance_id",
+        "started_at",
+        "now",
+        "db"
+      ],
+      "type": "object"
+    },
+    "InFlight": {
+      "description": "実行中の run（ワーカー run、またはプロバイダを使う Reviewer run）。",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/InFlightKind"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "since": {
+          "type": "string"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "provider",
+        "kind",
+        "since"
+      ],
+      "type": "object"
+    },
+    "InFlightKind": {
+      "enum": [
+        "worker",
+        "reviewer"
+      ],
+      "type": "string"
+    },
+    "Inbox": {
+      "properties": {
+        "approvals": {
+          "items": {
+            "$ref": "#/$defs/ApprovalItem"
+          },
+          "type": "array"
+        },
+        "attention": {
+          "items": {
+            "$ref": "#/$defs/AttentionItem"
+          },
+          "type": "array"
+        },
+        "counts": {
+          "$ref": "#/$defs/InboxCounts"
+        },
+        "drafts": {
+          "items": {
+            "$ref": "#/$defs/DraftGroup"
+          },
+          "type": "array"
+        },
+        "questions": {
+          "items": {
+            "$ref": "#/$defs/QuestionItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "approvals",
+        "questions",
+        "drafts",
+        "attention",
+        "counts"
+      ],
+      "type": "object"
+    },
+    "InboxCounts": {
+      "properties": {
+        "approvals": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "attention": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "by_status": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "status 名 → 件数（DB 全体）。",
+          "type": "object"
+        },
+        "drafts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "questions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "approvals",
+        "questions",
+        "drafts",
+        "attention",
+        "by_status"
+      ],
+      "type": "object"
+    },
+    "Lease": {
+      "description": "DESIGN §4.1 の `Lease`。ADR-0002 D7: `expires_at` は\n`budget.max_wall_secs + 猶予` から `acquire_lease` 呼び出し側が計算する。",
+      "properties": {
+        "expires_at": {
+          "type": "string"
+        },
+        "worker_run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "worker_run_id",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "NewPlanSpec": {
+      "additionalProperties": false,
+      "description": "`taskctl plan` から組み立てる新規 Plan タスクの指定。API の `POST /plans` の本文でもある（`docs/gui/api.md` §3.14）。",
+      "properties": {
+        "goal": {
+          "description": "大目標。1行目の先頭80文字が `title` になる。",
+          "type": "string"
+        },
+        "max_retries": {
+          "default": 1,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_turns": {
+          "default": 30,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_wall_secs": {
+          "default": 900,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "priority": {
+          "default": 0,
+          "format": "int32",
+          "type": "integer"
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier",
+          "default": "frontier"
+        },
+        "workspace": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "goal"
+      ],
+      "type": "object"
+    },
+    "NewTaskSpec": {
+      "additionalProperties": false,
+      "description": "`taskctl add` から組み立てる新規タスクの指定。API の `POST /tasks` の本文でもある（`docs/gui/api.md` §3.4）。\n省略時の既定は `taskctl add` と同じ。",
+      "properties": {
+        "acceptance": {
+          "items": {
+            "$ref": "#/$defs/CriterionSpec"
+          },
+          "type": "array"
+        },
+        "adapter": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/TaskKind",
+          "default": "execute"
+        },
+        "max_retries": {
+          "default": 2,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_turns": {
+          "default": 10,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_wall_secs": {
+          "default": 600,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "priority": {
+          "default": 0,
+          "format": "int32",
+          "type": "integer"
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier",
+          "default": "standard"
+        },
+        "title": {
+          "type": "string"
+        },
+        "workspace": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "title",
+        "objective",
+        "acceptance"
+      ],
+      "type": "object"
+    },
+    "Problem": {
+      "additionalProperties": true,
+      "description": "RFC 9457 の problem details（`application/problem+json`）。`extra` は `code` ごとの付加フィールド。",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "instance": {
+          "description": "`urn:taskd:request:<X-Request-Id>`。",
+          "type": "string"
+        },
+        "status": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        },
+        "type": {
+          "description": "`urn:taskd:problem:<code>`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "title",
+        "status",
+        "detail",
+        "code",
+        "instance"
+      ],
+      "type": "object"
+    },
+    "ProviderConfigView": {
+      "properties": {
+        "adapter": {
+          "type": "string"
+        },
+        "concurrency": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "env_keys": {
+          "description": "`[[providers]].env` のキー名だけ。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "model": {
+          "description": "実効モデル（空なら `null`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tiers": {
+          "items": {
+            "$ref": "#/$defs/Tier"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "adapter",
+        "tiers",
+        "concurrency",
+        "env_keys"
+      ],
+      "type": "object"
+    },
+    "ProviderLive": {
+      "description": "プロバイダ（`[[providers]]` の行 = アカウント）の稼働状況。`env` の値は含めない。",
+      "properties": {
+        "adapter": {
+          "type": "string"
+        },
+        "concurrency": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "in_use": {
+          "description": "実行中の run と Reviewer run の合計。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "description": "実効モデル（空なら `None`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tiers": {
+          "items": {
+            "$ref": "#/$defs/Tier"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "adapter",
+        "tiers",
+        "concurrency",
+        "in_use"
+      ],
+      "type": "object"
+    },
+    "ProviderStats": {
+      "description": "プロバイダ別の run 集計（task-api のメモリ内の観測値。再起動で再計算）。",
+      "properties": {
+        "by_day": {
+          "description": "`WorkerFinished.ts` の UTC 日付で直近 30 日（昇順。run の無い日は現れない）。",
+          "items": {
+            "$ref": "#/$defs/DailyUsage"
+          },
+          "type": "array"
+        },
+        "done": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lease_expired": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "question": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requeue": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "description": "`WorkerStarted` の数（実行中を含む）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "runs",
+        "done",
+        "question",
+        "error",
+        "requeue",
+        "lease_expired",
+        "input_tokens",
+        "output_tokens",
+        "by_day"
+      ],
+      "type": "object"
+    },
+    "ProviderView": {
+      "properties": {
+        "adapter": {
+          "type": "string"
+        },
+        "concurrency": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cooldown": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CooldownView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "スナップショットが無い、または cooldown 中でなければ `null`。"
+        },
+        "env_keys": {
+          "description": "`env` のキー名だけ（値は出さない）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "in_use": {
+          "description": "スナップショットが無ければ `null`。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stats": {
+          "$ref": "#/$defs/ProviderStats"
+        },
+        "tiers": {
+          "items": {
+            "$ref": "#/$defs/Tier"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "adapter",
+        "tiers",
+        "concurrency",
+        "env_keys",
+        "stats"
+      ],
+      "type": "object"
+    },
+    "Providers": {
+      "description": "`GET /providers`。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ProviderView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "QuestionItem": {
+      "properties": {
+        "asked_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "previous": {
+          "items": {
+            "$ref": "#/$defs/AnswerNote"
+          },
+          "type": "array"
+        },
+        "question": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "$ref": "#/$defs/TaskRef"
+        }
+      },
+      "required": [
+        "task",
+        "question",
+        "previous"
+      ],
+      "type": "object"
+    },
+    "ReplayMismatch": {
+      "description": "`replay` が検出した 1 件の食い違い。",
+      "properties": {
+        "field": {
+          "description": "`\"status\"` または `\"attempts\"`。",
+          "type": "string"
+        },
+        "replayed": {
+          "description": "`events` から再構築した値。",
+          "type": "string"
+        },
+        "stored": {
+          "description": "`tasks` テーブルに保存されている値。",
+          "type": "string"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "field",
+        "replayed",
+        "stored"
+      ],
+      "type": "object"
+    },
+    "ReplayReport": {
+      "description": "`replay` の結果。",
+      "properties": {
+        "mismatches": {
+          "items": {
+            "$ref": "#/$defs/ReplayMismatch"
+          },
+          "type": "array"
+        },
+        "tasks": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tasks",
+        "mismatches"
+      ],
+      "type": "object"
+    },
+    "ReviewNote": {
+      "description": "`prior_review_from_events` の要素。`task_worker::PriorReview` と同じ形（フィールド名も同じ）。",
+      "properties": {
+        "criterion": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pass": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion",
+        "pass",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ReviewerConfigView": {
+      "properties": {
+        "adapter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier"
+        }
+      },
+      "required": [
+        "tier"
+      ],
+      "type": "object"
+    },
+    "RunFiles": {
+      "properties": {
+        "result": {
+          "type": "boolean"
+        },
+        "stderr": {
+          "type": "boolean"
+        },
+        "stdout": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stdout",
+        "stderr",
+        "result"
+      ],
+      "type": "object"
+    },
+    "RunList": {
+      "description": "`GET /tasks/{id}/runs`。",
+      "properties": {
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/RunSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "runs"
+      ],
+      "type": "object"
+    },
+    "RunOutcomeKind": {
+      "enum": [
+        "done",
+        "question",
+        "error",
+        "requeue",
+        "lease_expired"
+      ],
+      "type": "string"
+    },
+    "RunSummary": {
+      "properties": {
+        "adapter": {
+          "type": "string"
+        },
+        "artifacts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunFiles"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`runs/<run_id>/` のファイルの有無。task-ops は `None` を入れ、task-api が埋める。"
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunOutcomeKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "progress": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewer_deferrals": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verdicts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id",
+        "adapter",
+        "model",
+        "started_at",
+        "progress",
+        "artifacts",
+        "verdicts",
+        "reviewer_deferrals"
+      ],
+      "type": "object"
+    },
+    "Status": {
+      "description": "ADR-0002 D1 の状態集合。終端は `done | failed | cancelled`。",
+      "enum": [
+        "draft",
+        "ready",
+        "running",
+        "blocked",
+        "reviewing",
+        "done",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "StreamHeartbeat": {
+      "description": "SSE `event: heartbeat`。",
+      "properties": {
+        "now": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "now"
+      ],
+      "type": "object"
+    },
+    "StreamHello": {
+      "description": "SSE `event: hello`。",
+      "properties": {
+        "cursor": {
+          "description": "送信開始位置（この id より後の `task.event` を送る）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "daemon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DaemonSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "now": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cursor",
+        "now"
+      ],
+      "type": "object"
+    },
+    "StreamReset": {
+      "description": "SSE `event: reset`。クライアントは全体を再取得する。",
+      "properties": {
+        "cursor": {
+          "description": "以後の送信開始位置（最新の id）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "`\"cursor_too_old\"` | `\"cursor_ahead\"`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "cursor"
+      ],
+      "type": "object"
+    },
+    "Task": {
+      "description": "DESIGN §4.1 の `Task`。",
+      "properties": {
+        "acceptance": {
+          "items": {
+            "$ref": "#/$defs/Criterion"
+          },
+          "type": "array"
+        },
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/TaskKind"
+        },
+        "lease": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Lease"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "objective": {
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "worker_hint": {
+          "$ref": "#/$defs/WorkerHint"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceSpec"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "objective",
+        "acceptance",
+        "inputs",
+        "depends_on",
+        "status",
+        "priority",
+        "worker_hint",
+        "workspace",
+        "budget",
+        "attempts",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "TaskDetail": {
+      "description": "`taskctl show --json` と `GET /api/v1/tasks/{id}` の本体。",
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/Action"
+          },
+          "type": "array"
+        },
+        "answers": {
+          "items": {
+            "$ref": "#/$defs/AnswerNote"
+          },
+          "type": "array"
+        },
+        "approvals": {
+          "items": {
+            "$ref": "#/$defs/ApprovalLink"
+          },
+          "type": "array"
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/TaskRef"
+          },
+          "type": "array"
+        },
+        "criteria": {
+          "items": {
+            "$ref": "#/$defs/CriterionView"
+          },
+          "type": "array"
+        },
+        "dependencies": {
+          "items": {
+            "$ref": "#/$defs/TaskRef"
+          },
+          "type": "array"
+        },
+        "dependents": {
+          "items": {
+            "$ref": "#/$defs/TaskRef"
+          },
+          "type": "array"
+        },
+        "latest_question": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prior_review": {
+          "items": {
+            "$ref": "#/$defs/ReviewNote"
+          },
+          "type": "array"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/RunSummary"
+          },
+          "type": "array"
+        },
+        "task": {
+          "$ref": "#/$defs/Task"
+        },
+        "timers": {
+          "$ref": "#/$defs/Timers"
+        },
+        "worker_run_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "task",
+        "timers",
+        "criteria",
+        "runs",
+        "prior_review",
+        "answers",
+        "approvals",
+        "dependencies",
+        "dependents",
+        "children",
+        "actions"
+      ],
+      "type": "object"
+    },
+    "TaskId": {
+      "description": "タスクの一意識別子（ULID）。DESIGN §4.1。",
+      "type": "string"
+    },
+    "TaskKind": {
+      "description": "DESIGN §4.1 の `TaskKind`。",
+      "enum": [
+        "plan",
+        "execute",
+        "review",
+        "approval"
+      ],
+      "type": "string"
+    },
+    "TaskList": {
+      "properties": {
+        "counts_by_status": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "status 名 → 件数（フィルタに関係なく DB 全体。0 件の status は現れない）。",
+          "type": "object"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/TaskSummary"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "total",
+        "counts_by_status"
+      ],
+      "type": "object"
+    },
+    "TaskRef": {
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "kind": {
+          "$ref": "#/$defs/TaskKind"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "status"
+      ],
+      "type": "object"
+    },
+    "TaskSummary": {
+      "properties": {
+        "adapter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "backoff_until": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "children": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "kind": {
+          "$ref": "#/$defs/TaskKind"
+        },
+        "lease_expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_retries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pending_children": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "priority": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "status",
+        "title",
+        "priority",
+        "tier",
+        "attempts",
+        "max_retries",
+        "depends_on",
+        "created_at",
+        "updated_at",
+        "children",
+        "pending_children"
+      ],
+      "type": "object"
+    },
+    "Tier": {
+      "description": "DESIGN §5.4 の `WorkerHint`。",
+      "enum": [
+        "frontier",
+        "standard",
+        "cheap"
+      ],
+      "type": "string"
+    },
+    "Timers": {
+      "properties": {
+        "backoff_until": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "consecutive_requeues": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "consecutive_reviewer_requeues": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lease_expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_requeues": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "now": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "now",
+        "consecutive_requeues",
+        "max_requeues",
+        "consecutive_reviewer_requeues"
+      ],
+      "type": "object"
+    },
+    "TransitionResult": {
+      "description": "状態変更の結果（承認・却下・回答・取り消し共通）。",
+      "properties": {
+        "cascaded": {
+          "default": [],
+          "description": "この遷移の伝播で `cancelled` になった、対象タスク以外のタスク（`docs/gui/api.md` §5.7）。",
+          "items": {
+            "$ref": "#/$defs/TaskRef"
+          },
+          "type": "array"
+        },
+        "from": {
+          "$ref": "#/$defs/Status"
+        },
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/$defs/Status"
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Usage": {
+      "description": "DESIGN §5.3 の `usage`。取れない項目は省略可。",
+      "properties": {
+        "input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "VerdictView": {
+      "properties": {
+        "criterion_idx": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pass": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "criterion_idx",
+        "pass",
+        "reason",
+        "ts"
+      ],
+      "type": "object"
+    },
+    "WorkerHint": {
+      "properties": {
+        "adapter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier"
+        }
+      },
+      "required": [
+        "tier"
+      ],
+      "type": "object"
+    },
+    "WorkspaceSpec": {
+      "description": "DESIGN §5.8 の境界。`Remote` は接続層プロジェクトが実装するまで型のみ。",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "local",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cluster": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "remote",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "cluster",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "スキーマ生成のルート。",
+  "properties": {
+    "answer": {
+      "$ref": "#/$defs/AnswerBody"
+    },
+    "artifact_list": {
+      "$ref": "#/$defs/ArtifactList"
+    },
+    "cancel": {
+      "$ref": "#/$defs/CancelBody"
+    },
+    "config": {
+      "$ref": "#/$defs/ConfigView"
+    },
+    "daemon": {
+      "$ref": "#/$defs/DaemonView"
+    },
+    "decision": {
+      "$ref": "#/$defs/DecisionBody"
+    },
+    "events_page": {
+      "$ref": "#/$defs/EventsPage"
+    },
+    "graph": {
+      "$ref": "#/$defs/Graph"
+    },
+    "health": {
+      "$ref": "#/$defs/Health"
+    },
+    "inbox": {
+      "$ref": "#/$defs/Inbox"
+    },
+    "new_plan": {
+      "$ref": "#/$defs/NewPlanSpec"
+    },
+    "new_task": {
+      "$ref": "#/$defs/NewTaskSpec"
+    },
+    "problem": {
+      "$ref": "#/$defs/Problem"
+    },
+    "providers": {
+      "$ref": "#/$defs/Providers"
+    },
+    "replay_report": {
+      "$ref": "#/$defs/ReplayReport"
+    },
+    "run_list": {
+      "$ref": "#/$defs/RunList"
+    },
+    "stream_daemon": {
+      "$ref": "#/$defs/DaemonSnapshot"
+    },
+    "stream_event": {
+      "$ref": "#/$defs/EventRow"
+    },
+    "stream_heartbeat": {
+      "$ref": "#/$defs/StreamHeartbeat"
+    },
+    "stream_hello": {
+      "$ref": "#/$defs/StreamHello"
+    },
+    "stream_reset": {
+      "$ref": "#/$defs/StreamReset"
+    },
+    "task": {
+      "$ref": "#/$defs/Task"
+    },
+    "task_detail": {
+      "$ref": "#/$defs/TaskDetail"
+    },
+    "task_list": {
+      "$ref": "#/$defs/TaskList"
+    },
+    "transition_result": {
+      "$ref": "#/$defs/TransitionResult"
+    }
+  },
+  "required": [
+    "health",
+    "problem",
+    "inbox",
+    "task_list",
+    "task",
+    "task_detail",
+    "events_page",
+    "run_list",
+    "artifact_list",
+    "graph",
+    "new_task",
+    "new_plan",
+    "decision",
+    "answer",
+    "cancel",
+    "transition_result",
+    "replay_report",
+    "providers",
+    "daemon",
+    "config",
+    "stream_hello",
+    "stream_event",
+    "stream_daemon",
+    "stream_heartbeat",
+    "stream_reset"
+  ],
+  "title": "ApiV1Schema",
+  "type": "object"
+}

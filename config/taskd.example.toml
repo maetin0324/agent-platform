@@ -22,6 +22,13 @@ tier = "standard"
 [plan]
 auto_accept = false
 
+# HTTP API（ADR-0013、docs/gui/api.md）。listen を書いたときだけ taskd のプロセス内で動く（既定は無効）。taskd-gui はこれを使う。
+# loopback 以外で listen するなら token_file が必須（中身 1 行が Bearer トークン。読めない・空なら起動時に exit 2）。
+# [api]
+# listen = "127.0.0.1:7710"
+# token_file = "secrets/api.token"
+# allowed_hosts = ["taskd.lab.example"]   # Host 許可リストへの追加（localhost / 127.0.0.1 / [::1] は常に許可）
+
 # fake アダプタ: サブプロセスとして起動するコマンド。省略時は progress + done を返す sh スクリプト。
 [adapters.fake]
 # command = ["sh", "-c", "cat >/dev/null; echo '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'"]

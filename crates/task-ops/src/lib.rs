@@ -7,10 +7,14 @@
 //! ワーカープロトコルの型（`task_worker::{PriorReview, Answer}`）への写像は呼び出し側で行う。
 
 pub mod add;
+pub mod daemon;
 pub mod derive;
 pub mod error;
 pub mod gate;
+pub mod graph;
+pub mod inbox;
 pub mod plan;
 pub mod replay;
+pub mod view;
 
 pub use error::OpsError;

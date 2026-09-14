@@ -32,11 +32,18 @@ use task_worker::{
     AdapterError, Answer, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RunContext, RunLimits,
     RunOutcome, RunRequest, Terminal, WorkerMessage, Workspace, WorkerAdapter,
 };
+use task_ops::daemon::{CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy, Selection};
+use crate::policy::{AdapterId, CooldownReason, ProviderId, ProviderOutcome, ProviderPolicy, Selection};
+
+/// RFC 3339 の文字列（デーモンのスナップショット用）。書式化に失敗することは実質無いが、その場合は空文字列。
+fn rfc3339(t: OffsetDateTime) -> String {
+    t.format(&Rfc3339).unwrap_or_default()
+}
 use crate::review::{
     HumanVerdicts, PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, Verdict,
     needs_reviewer_run, review_task,
@@ -130,6 +137,8 @@ struct RunEntry {
     run_id: String,
     provider: ProviderId,
     handle: JoinHandle<()>,
+    /// dispatch した時刻（デーモンのスナップショット用。ADR-0013 D4）。
+    since: OffsetDateTime,
 }
 
 struct ReviewEntry {
@@ -138,6 +147,22 @@ struct ReviewEntry {
     provider: Option<ProviderId>,
     /// レビューを延期（Reviewer run の供給側失敗）するときに次 tick へ持ち越す `done` の内容。
     subject: ReviewSubject,
+    /// レビュー対象の run（デーモンのスナップショット用）。
+    run_id: String,
+    since: OffsetDateTime,
+}
+
+/// デーモン状態をメモリから公開するための送り口（ADR-0013 D4）。taskd が `[api]` 有効時に `set_snapshot_publisher` で渡す。
+pub struct SnapshotPublisher {
+    pub tx: tokio::sync::watch::Sender<Option<DaemonSnapshot>>,
+    /// 起動ごとの ULID（API の `/health` と同じ値）。
+    pub instance_id: String,
+    pub hostname: String,
+    /// RFC 3339。
+    pub started_at: String,
+    pub tick_ms: u64,
+    /// `[[providers]]` の定義（`in_use` は毎 tick に埋める）。
+    pub providers: Vec<ProviderLive>,
 }
 
 /// run 途中のイベントをストアに追記するシンク。ワーカーの出力（heartbeat）があればリースを延長する（ADR-0010 D7）。
@@ -236,6 +261,9 @@ pub struct Dispatcher {
     awaiting_human: std::collections::HashSet<TaskId>,
     tx: mpsc::UnboundedSender<Completion>,
     rx: mpsc::UnboundedReceiver<Completion>,
+    /// tick の回数（スナップショット用）。
+    ticks: u64,
+    publisher: Option<SnapshotPublisher>,
 }
 
 impl Dispatcher {
@@ -262,6 +290,8 @@ impl Dispatcher {
             awaiting_human: std::collections::HashSet::new(),
             tx,
             rx,
+            ticks: 0,
+            publisher: None,
         }
     }
 
@@ -269,8 +299,14 @@ impl Dispatcher {
         &self.config
     }
 
+    /// ADR-0013 D4: tick ごとにデーモンのスナップショットを `watch` に送るようにする。
+    pub fn set_snapshot_publisher(&mut self, publisher: SnapshotPublisher) {
+        self.publisher = Some(publisher);
+    }
+
     /// 1 tick。tokio ランタイム内から呼ぶ（ワーカーとレビューを `tokio::spawn` する）。
     pub fn tick(&mut self) -> Result<TickReport, DispatchError> {
+        self.ticks += 1;
         let mut report = TickReport::default();
         let (finished, reviewed) = self.drain_completions()?;
         report.finished = finished;
@@ -281,7 +317,81 @@ impl Dispatcher {
         report.dispatched = self.dispatch_ready()?;
         report.in_flight = self.running.len() + self.reviewing.len();
         report.idle = self.is_idle()?;
+        self.publish_snapshot();
         Ok(report)
+    }
+
+    /// ADR-0013 D4: メモリ上の状態からスナップショットを作り `watch` に送る（DB には書かない。受け手がいなくても無害）。
+    fn publish_snapshot(&self) {
+        let Some(publisher) = &self.publisher else {
+            return;
+        };
+        let now_instant = Instant::now();
+        let now = OffsetDateTime::now_utc();
+        let mut in_flight: Vec<InFlight> = self
+            .running
+            .iter()
+            .map(|(task_id, e)| InFlight {
+                task_id: *task_id,
+                run_id: e.run_id.clone(),
+                provider: e.provider.clone(),
+                kind: InFlightKind::Worker,
+                since: rfc3339(e.since),
+            })
+            .collect();
+        in_flight.extend(self.reviewing.iter().filter_map(|(task_id, e)| {
+            e.provider.as_ref().map(|provider| InFlight {
+                task_id: *task_id,
+                run_id: e.run_id.clone(),
+                provider: provider.clone(),
+                kind: InFlightKind::Reviewer,
+                since: rfc3339(e.since),
+            })
+        }));
+        in_flight.sort_by(|a, b| a.since.cmp(&b.since).then(a.task_id.cmp(&b.task_id)));
+        let cooldowns = self
+            .policy
+            .cooldowns(now_instant)
+            .into_iter()
+            .map(|c| CooldownView {
+                provider: c.provider,
+                until: rfc3339(now + c.until.saturating_duration_since(now_instant)),
+                reason: match c.reason {
+                    CooldownReason::Throttled => "throttled",
+                    CooldownReason::AuthFailed => "auth_failed",
+                    CooldownReason::Exhausted => "exhausted",
+                }
+                .to_string(),
+            })
+            .collect();
+        let mut awaiting_human: Vec<TaskId> = self.awaiting_human.iter().copied().collect();
+        awaiting_human.sort();
+        let mut unroutable: Vec<TaskId> = self.unroutable.iter().copied().collect();
+        unroutable.sort();
+        let providers = publisher
+            .providers
+            .iter()
+            .map(|p| ProviderLive {
+                in_use: self.provider_in_use(&p.id) as u32,
+                ..p.clone()
+            })
+            .collect();
+        let snapshot = DaemonSnapshot {
+            instance_id: publisher.instance_id.clone(),
+            pid: std::process::id(),
+            hostname: publisher.hostname.clone(),
+            started_at: publisher.started_at.clone(),
+            last_tick_at: rfc3339(now),
+            ticks: self.ticks,
+            tick_ms: publisher.tick_ms,
+            in_flight,
+            cooldowns,
+            awaiting_human,
+            unroutable,
+            providers,
+        };
+        // 受け手（API）がいなければ送信は失敗するが、デーモンの動作には関係ない。
+        let _ = publisher.tx.send(Some(snapshot));
     }
 
     fn drain_completions(&mut self) -> Result<(usize, usize), DispatchError> {
@@ -594,7 +704,11 @@ impl Dispatcher {
     }
 
     fn recover_reviews(&mut self) -> Result<(), DispatchError> {
-        for task in self.store.list(Some(Status::Reviewing))? {
+        let reviewing_tasks = self.store.list(Some(Status::Reviewing))?;
+        // 承認待ちの記録は、まだ reviewing のタスクだけに保つ（cancel 等で抜けたものをスナップショットに残さない。ADR-0013 D4）。
+        self.awaiting_human
+            .retain(|id| reviewing_tasks.iter().any(|t| t.id == *id));
+        for task in reviewing_tasks {
             if self.reviewing.contains_key(&task.id) {
                 continue;
             }
@@ -718,6 +832,7 @@ impl Dispatcher {
                     run_id,
                     provider: provider_id,
                     handle,
+                    since: OffsetDateTime::now_utc(),
                 },
             );
             dispatched += 1;
@@ -806,6 +921,7 @@ impl Dispatcher {
         let produced = artifacts_for_run(&events, &run_id);
         let timeout = self.config.review_timeout;
         let entry_subject = subject.clone();
+        let entry_run_id = run_id.clone();
         let subject = subject.clone();
         let tx = self.tx.clone();
         let handle = tokio::spawn(async move {
@@ -829,6 +945,8 @@ impl Dispatcher {
                 handle,
                 provider,
                 subject: entry_subject,
+                run_id: entry_run_id,
+                since: OffsetDateTime::now_utc(),
             },
         );
         Ok(true)
@@ -2072,6 +2190,59 @@ mod tests {
         for id in unroutable {
             assert_eq!(store.get(id).unwrap().unwrap().status, Status::Ready);
         }
+    }
+
+    /// ADR-0013 D4: tick の最後にメモリ上のスナップショットが `watch` に送られる（実行中の run、プロバイダの使用数、cooldown）。
+    #[tokio::test]
+    async fn tick_publishes_daemon_snapshot_to_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::from_millis(300),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        d.set_snapshot_publisher(SnapshotPublisher {
+            tx,
+            instance_id: "inst-1".into(),
+            hostname: "host-1".into(),
+            started_at: "2026-09-14T00:00:00Z".into(),
+            tick_ms: 50,
+            providers: vec![ProviderLive {
+                id: "p1".into(),
+                adapter: "instant".into(),
+                tiers: vec![Tier::Standard],
+                concurrency: 1,
+                model: Some("m".into()),
+                in_use: 0,
+            }],
+        });
+        assert!(rx.borrow().is_none(), "nothing is published before the first tick");
+
+        d.tick().unwrap();
+        let snap = rx.borrow().clone().expect("snapshot after the first tick");
+        assert_eq!((snap.ticks, snap.instance_id.as_str(), snap.tick_ms), (1, "inst-1", 50));
+        assert_eq!(snap.pid, std::process::id());
+        assert_eq!(snap.in_flight.len(), 1);
+        assert_eq!(snap.in_flight[0].task_id, task.id);
+        assert_eq!(snap.in_flight[0].kind, InFlightKind::Worker);
+        assert_eq!(snap.in_flight[0].provider, "p1");
+        assert_eq!(snap.providers[0].in_use, 1);
+        assert!(snap.cooldowns.is_empty());
+
+        d.policy.report("p1".into(), &ProviderOutcome::Throttled { retry_after: Duration::from_secs(60) });
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        let snap = rx.borrow().clone().unwrap();
+        assert!(snap.ticks > 1);
+        assert!(snap.in_flight.is_empty());
+        assert_eq!(snap.providers[0].in_use, 0);
+        assert_eq!(snap.cooldowns.len(), 1);
+        assert_eq!((snap.cooldowns[0].provider.as_str(), snap.cooldowns[0].reason.as_str()), ("p1", "throttled"));
+        assert!(snap.cooldowns[0].until > snap.last_tick_at, "until is in the future");
     }
 
     /// `task_id` の直接の `Approval` 子タスクが現れるまで tick を回す（Human check の生成を待つ）。

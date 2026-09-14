@@ -1,0 +1,67 @@
+//! デーモンのメモリ上のスナップショット（ADR-0013 D4, `docs/gui/api.md` §3.20 / §6.2）。
+//!
+//! ディスパッチャ（task-dispatch）が tick の最後に作って `tokio::sync::watch` に送り、API（task-api）が読む。両者が依存する
+//! この crate に型を置く（task-api は task-dispatch に依存しない）。真実ではなく観測値で、DB には書かず `replay` の対象外。
+//! 時刻は RFC 3339 の文字列（`Instant` は作る側で壁時計に直す）。
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use task_core::{TaskId, Tier};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DaemonSnapshot {
+    /// 起動ごとの ULID（`GET /health` の `instance_id` と同じ）。
+    pub instance_id: String,
+    pub pid: u32,
+    pub hostname: String,
+    pub started_at: String,
+    pub last_tick_at: String,
+    pub ticks: u64,
+    pub tick_ms: u64,
+    pub in_flight: Vec<InFlight>,
+    pub cooldowns: Vec<CooldownView>,
+    /// 人間の承認待ちでレビューを延期している reviewing タスク。
+    pub awaiting_human: Vec<TaskId>,
+    /// 設定に合うプロバイダが無い ready タスク（この tick の判定）。
+    pub unroutable: Vec<TaskId>,
+    pub providers: Vec<ProviderLive>,
+}
+
+/// 実行中の run（ワーカー run、またはプロバイダを使う Reviewer run）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct InFlight {
+    pub task_id: TaskId,
+    pub run_id: String,
+    pub provider: String,
+    pub kind: InFlightKind,
+    pub since: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InFlightKind {
+    Worker,
+    Reviewer,
+}
+
+/// `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直したもの。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CooldownView {
+    pub provider: String,
+    pub until: String,
+    /// `"throttled" | "auth_failed" | "exhausted"`。
+    pub reason: String,
+}
+
+/// プロバイダ（`[[providers]]` の行 = アカウント）の稼働状況。`env` の値は含めない。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderLive {
+    pub id: String,
+    pub adapter: String,
+    pub tiers: Vec<Tier>,
+    pub concurrency: usize,
+    /// 実効モデル（空なら `None`）。
+    pub model: Option<String>,
+    /// 実行中の run と Reviewer run の合計。
+    pub in_use: u32,
+}

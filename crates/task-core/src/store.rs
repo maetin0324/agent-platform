@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -351,6 +351,9 @@ pub trait TaskStore: Send + Sync {
     fn events_since(&self, after_id: u64, limit: usize) -> Result<Vec<EventRow>, StoreError>;
     /// ADR-0013 D6: `events` の現在の最大 `id`。行が無ければ 0。
     fn latest_event_id(&self) -> Result<u64, StoreError>;
+    /// ADR-0013（Phase 9b）: 1 タスクのイベントを `seq` 昇順で、`after_seq` より後（`None` なら最初から）最大 `limit` 件、
+    /// グローバル `id` と `ts` 付きで返す（API の `GET /tasks/{id}/events` と run の要約が使う）。
+    fn event_rows_for(&self, task_id: TaskId, after_seq: Option<u64>, limit: usize) -> Result<Vec<EventRow>, StoreError>;
 
     /// ADR-0013 D10: `filter` に一致する `tasks` を `order` で keyset ページングして返す。`cursor` は
     /// 前回の `Page::next_cursor`（不透明な文字列）。不正な `cursor` は `StoreError::Invalid`。
@@ -504,7 +507,7 @@ impl SqliteStore {
 
     fn apply_migration_version(conn: &mut Connection, version: u32) -> Result<(), StoreError> {
         let sql = Self::migration_sql(version)?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(sql)?;
         let ts = format_rfc3339(OffsetDateTime::now_utc())?;
         tx.execute(
@@ -812,19 +815,13 @@ impl TaskStore for SqliteStore {
     }
 
     fn append_event(&self, task_id: TaskId, event: &Event) -> Result<u64, StoreError> {
-        let conn = self.lock()?;
-        let next_seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq), -1) + 1 FROM events WHERE task_id = ?1",
-            params![task_id.to_string()],
-            |row| row.get(0),
-        )?;
-        let ts = format_rfc3339(OffsetDateTime::now_utc())?;
-        let json = serde_json::to_string(event)?;
-        conn.execute(
-            "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
-            params![task_id.to_string(), next_seq, ts, json],
-        )?;
-        Ok(next_seq as u64)
+        let mut conn = self.lock()?;
+        // seq の採番（SELECT）と INSERT を 1 つの IMMEDIATE トランザクションにする。別接続（taskctl / API）が同じタスクに
+        // 追記しても seq が衝突せず、書き込みロックは busy_timeout で待つ（Phase 9 監査）。
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let seq = Self::append_event_tx(&tx, task_id, event)?;
+        tx.commit()?;
+        Ok(seq)
     }
 
     fn events_for(&self, task_id: TaskId) -> Result<Vec<(u64, Event)>, StoreError> {
@@ -855,7 +852,7 @@ impl TaskStore for SqliteStore {
         // `Event::Transitioned` と同一トランザクションで追記する。D8: `Dispatch`
         // は `kind == Approval` では無効（Approval は running に入らない）。
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let current: Option<(String, String, String)> = tx
             .query_row(
@@ -936,9 +933,11 @@ impl TaskStore for SqliteStore {
     }
 
     fn release_lease(&self, task_id: TaskId, worker_run_id: &str) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
+        // 読んだ json を書き戻すので、間に別接続（taskctl / API）の書き込みが挟まらないよう IMMEDIATE で囲む（Phase 9 監査）。
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let current: Option<(Option<String>, String)> = conn
+        let current: Option<(Option<String>, String)> = tx
             .query_row(
                 "SELECT lease_worker_run_id, json FROM tasks WHERE id = ?1",
                 params![task_id.to_string()],
@@ -961,11 +960,12 @@ impl TaskStore for SqliteStore {
         let new_json = serde_json::to_string(&task)?;
         let updated_at_str = format_rfc3339(task.updated_at)?;
 
-        conn.execute(
+        tx.execute(
             "UPDATE tasks SET lease_worker_run_id = NULL, lease_expires_at = NULL, json = ?1, \
              updated_at = ?2 WHERE id = ?3 AND lease_worker_run_id = ?4",
             params![new_json, updated_at_str, task_id.to_string(), worker_run_id],
         )?;
+        tx.commit()?;
 
         Ok(())
     }
@@ -1024,7 +1024,7 @@ impl TaskStore for SqliteStore {
         extra_events: Vec<Event>,
     ) -> Result<Outcome, StoreError> {
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let outcome = Self::apply_transition_tx(&tx, task_id, trigger, extra_events)?;
         tx.commit()?;
         Ok(outcome)
@@ -1039,7 +1039,7 @@ impl TaskStore for SqliteStore {
     ) -> Result<Outcome, StoreError> {
         // ADR-0007 D3: 子の insert + Created (+ Accept) と親の ReviewPass を単一トランザクションで行う。
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for child in &children {
             if child.parent_id != Some(plan_id) {
                 return Err(StoreError::Invalid(format!(
@@ -1066,7 +1066,7 @@ impl TaskStore for SqliteStore {
 
     fn create_task(&self, task: &Task, extra_events: Vec<Event>) -> Result<(), StoreError> {
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         Self::insert_tx(&tx, task)?;
         Self::append_event_tx(
             &tx,
@@ -1084,7 +1084,7 @@ impl TaskStore for SqliteStore {
 
     fn renew_lease(&self, task_id: TaskId, worker_run_id: &str, ttl: StdDuration) -> Result<bool, StoreError> {
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(mut task) = Self::get_locked(&tx, task_id)? else {
             return Ok(false);
         };
@@ -1146,6 +1146,35 @@ impl TaskStore for SqliteStore {
         let conn = self.lock()?;
         let id: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| row.get(0))?;
         Ok(id as u64)
+    }
+
+    fn event_rows_for(&self, task_id: TaskId, after_seq: Option<u64>, limit: usize) -> Result<Vec<EventRow>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, task_id, seq, ts, json FROM events WHERE task_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3",
+        )?;
+        let after: i64 = after_seq.map(u64_to_i64).unwrap_or(-1);
+        let rows = stmt.query_map(params![task_id.to_string(), after, usize_to_i64(limit)], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, seq, ts, json) = row?;
+            let event: Event = serde_json::from_str(&json)?;
+            out.push(EventRow {
+                id: id as u64,
+                task_id,
+                seq: seq as u64,
+                ts,
+                event,
+            });
+        }
+        Ok(out)
     }
 
     fn list_page(
@@ -2112,6 +2141,35 @@ mod tests {
         assert_eq!(mode.to_lowercase(), "wal");
     }
 
+    /// Phase 9 監査（受け入れ 2）: 2 つの接続（ディスパッチャと taskctl / API 相当）が、読んでから書くトランザクションを
+    /// 同じファイルに並走させても `database is locked` にならない。DEFERRED だと読み取り後の書き込みへの格上げが
+    /// busy_timeout を待たずに SQLITE_BUSY で失敗するため、書き込みトランザクションは IMMEDIATE で始める。
+    #[test]
+    fn concurrent_read_then_write_transactions_on_two_connections_wait_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("writers.sqlite3");
+        drop(SqliteStore::open(&path).unwrap());
+
+        let writer = |store: Arc<SqliteStore>| {
+            std::thread::spawn(move || -> Result<(), StoreError> {
+                for _ in 0..200 {
+                    let t = sample_task(Status::Draft);
+                    store.create_task(&t, vec![])?;
+                    store.apply_transition(t.id, crate::Trigger::Accept, None)?;
+                    store.append_event(t.id, &Event::ApprovalRequested)?;
+                }
+                Ok(())
+            })
+        };
+        let a = Arc::new(SqliteStore::open(&path).unwrap());
+        let b = Arc::new(SqliteStore::open(&path).unwrap());
+        let (ha, hb) = (writer(Arc::clone(&a)), writer(Arc::clone(&b)));
+        ha.join().unwrap().expect("writer a never sees database is locked");
+        hb.join().unwrap().expect("writer b never sees database is locked");
+        assert_eq!(a.list(Some(Status::Ready)).unwrap().len(), 400);
+        assert_eq!(b.events_since(0, 10_000).unwrap().len(), 400 * 3);
+    }
+
     /// ADR-0013 D5: 同じファイルを開いた 2 つの `SqliteStore` が、一方の書き込み中でももう一方から
     /// 読める（WAL + busy_timeout）。
     #[test]
@@ -2149,6 +2207,25 @@ mod tests {
 
     /// ADR-0013 D6: `events_since` は全タスクを跨いで id 昇順、`limit`、`after_id` を尊重し、
     /// `latest_event_id` は現在の最大 id（無ければ 0）を返す。
+    #[test]
+    fn event_rows_for_returns_one_tasks_rows_with_ids_after_seq() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let a = sample_task(Status::Draft);
+        let b = sample_task(Status::Draft);
+        store.insert(&a).unwrap();
+        store.insert(&b).unwrap();
+        store.append_event(a.id, &Event::ApprovalRequested).unwrap();
+        store.append_event(b.id, &Event::ApprovalRequested).unwrap();
+        store.append_event(a.id, &Event::ApprovalRequested).unwrap();
+        let rows = store.event_rows_for(a.id, None, 10).unwrap();
+        assert_eq!(rows.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![0, 1]);
+        assert!(rows[0].id < rows[1].id);
+        assert!(rows.iter().all(|r| r.task_id == a.id && !r.ts.is_empty()));
+        assert_eq!(store.event_rows_for(a.id, Some(0), 10).unwrap().len(), 1);
+        assert_eq!(store.event_rows_for(a.id, None, 1).unwrap().len(), 1);
+        assert!(store.event_rows_for(TaskId::new(), None, 10).unwrap().is_empty());
+    }
+
     #[test]
     fn events_since_orders_globally_and_respects_after_id_and_limit() {
         let store = SqliteStore::open_in_memory().unwrap();

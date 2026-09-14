@@ -16,6 +16,8 @@
 
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use task_core::{
     Budget, Check, Criterion, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
     WorkspaceSpec,
@@ -25,13 +27,18 @@ use time::OffsetDateTime;
 use crate::error::OpsError;
 
 /// 受け入れ条件 1 件の指定。現在の `taskctl add` の `--accept`/`--check-cmd`/
-/// `--check-artifact`/`--check-reviewer` に対応する。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `--check-artifact`/`--check-reviewer` に対応する。API の `POST /tasks` の `acceptance[]` でもある（`docs/gui/api.md` §3.4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CriterionSpec {
     /// `Check::Human`。
     Human { text: String },
     /// `Check::Command`。
-    Command { cmd: String, expect_exit: i32 },
+    Command {
+        cmd: String,
+        #[serde(default)]
+        expect_exit: i32,
+    },
     /// `Check::ArtifactExists`。
     ArtifactExists { name: String },
     /// `Check::Reviewer`。
@@ -61,22 +68,50 @@ impl CriterionSpec {
     }
 }
 
-/// `taskctl add` から組み立てる新規タスクの指定。
-#[derive(Debug, Clone)]
+/// `taskctl add` から組み立てる新規タスクの指定。API の `POST /tasks` の本文でもある（`docs/gui/api.md` §3.4）。
+/// 省略時の既定は `taskctl add` と同じ。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NewTaskSpec {
     pub title: String,
     pub objective: String,
     pub acceptance: Vec<CriterionSpec>,
+    #[serde(default = "default_kind")]
     pub kind: TaskKind,
+    #[serde(default = "default_tier")]
     pub tier: Tier,
+    #[serde(default)]
     pub priority: i32,
+    #[serde(default)]
     pub parent: Option<TaskId>,
+    #[serde(default)]
     pub depends_on: Vec<TaskId>,
+    #[serde(default = "default_max_turns")]
     pub max_turns: u32,
+    #[serde(default = "default_max_wall_secs")]
     pub max_wall_secs: u64,
+    #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    #[serde(default)]
     pub workspace: Option<PathBuf>,
+    #[serde(default)]
     pub adapter: Option<String>,
+}
+
+fn default_kind() -> TaskKind {
+    TaskKind::Execute
+}
+fn default_tier() -> Tier {
+    Tier::Standard
+}
+fn default_max_turns() -> u32 {
+    10
+}
+fn default_max_wall_secs() -> u64 {
+    600
+}
+fn default_max_retries() -> u32 {
+    2
 }
 
 fn build_acceptance(specs: Vec<CriterionSpec>) -> Result<Vec<Criterion>, OpsError> {
