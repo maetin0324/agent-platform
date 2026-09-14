@@ -45,4 +45,4 @@ Reviewer run の延期（ADR-0010 D5, P-29）は、`reviewing` に入った最�
 
 - `task-dispatch`: `consecutive_requeues` / `consecutive_reviewer_requeues`、`on_worker_finished` と `on_review_finished` の分岐。
 - `taskd`: `max_requeues` 設定。`config/taskd.example.toml` に追記。
-- `docs/DESIGN.md` への反映（§5.2 に「連続 requeue は `max_requeues` まで」）は、DESIGN.md の編集許可が得られるまで `PROGRESS.md` の提案に残す。
+- `docs/DESIGN.md` への反映（§4.2 / §5.2 / §6 Phase 7 受け入れ 8）は、人間の許可を得て 2026-09-14 に行った（P-40）。

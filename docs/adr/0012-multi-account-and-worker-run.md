@@ -91,5 +91,5 @@ taskctl [--db <db>] worker run --config <taskd.toml> --task <id> [--provider <id
 - `taskd`: `[[providers]].env`、`build_adapters` / `effective_models`、ID 重複の検証、`config/taskd.multi-account.example.toml`。
 - `task-worker`: `Evidence` の任意化、`worker-protocol.schema.json` 再生成、`docs/protocol/worker-protocol.md` の evidence の記述。
 - `taskctl`: `worker run`。
-- `docs/DESIGN.md` への反映（§5.3 evidence、§5.4 プロバイダ別 env/model、§5.5 `select`、§5.9 `worker run` の仕様）は、
-  DESIGN.md の編集許可が得られるまで `PROGRESS.md` の提案に置く。
+- `docs/DESIGN.md` への反映（§3、§4.3 `WorkerStarted.provider`、§5.2 フォールバック、§5.3 evidence、§5.4 プロバイダ別 env/model、
+  §5.5 `select` / `Selection`、§5.9 `worker run` の仕様、§6 Phase 8 の節と非目標の整理）は、人間の許可を得て 2026-09-14 に行った（P-41）。

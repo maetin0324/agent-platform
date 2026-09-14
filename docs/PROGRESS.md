@@ -2,7 +2,8 @@
 
 現在地: **Phase 8（複数アカウント運用とデバッグ CLI）完了（2026-09-14）**。docs/DESIGN.md に定義された Phase 0〜7 は全て完了し、
 人間の依頼による Phase 8（ADR-0012）を追加で実施した。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
-提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。DESIGN.md への反映待ちの提案は P-40 / P-41。
+提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
+反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
 
 | Phase | 内容 | 状態 | 完了日 |
 |---|---|---|---|
@@ -1218,7 +1219,7 @@ auditor サブエージェントを 1 回起動（読み取り専用。`cargo te
 ### 未解決事項・提案
 
 - Phase 7 未解決事項 2 のうち「連続 requeue の回数に上限が無い」は解消。最悪の実行回数は 1 タスクあたり `(max_retries + 1) × (max_requeues + 1)`
-- `docs/DESIGN.md` §5.2 への反映（「連続 requeue は `max_requeues` まで。超えたら通常の失敗」）は、DESIGN.md の編集許可が得られるまで提案として残す（P-40）
+- `docs/DESIGN.md` への反映（「連続 requeue は `max_requeues` まで。超えたら通常の失敗」）は、人間の許可を得て反映済み（P-40、2026-09-14。§4.2 / §5.2 / §6 Phase 7 受け入れ 8）
 
 ---
 
@@ -1375,4 +1376,4 @@ auditor サブエージェントを 1 回起動（読み取り専用）。audito
 
 | # | 節 | 提案 | 採用まで実装で使う既定 |
 |---|---|---|---|
-| P-41 | §4.3 / §5.3 / §5.4 / §5.5 / §5.9 / §6 非目標 | ADR-0012 を反映する: `WorkerStarted.provider`、`evidence[]` の任意フィールド、`[[providers]]` ごとの env / model（アカウント分離、taskd の環境を引き継ぐこと）、`ProviderPolicy::select` と `Selection`（§5.5 の「P-20 / P-33 は見送り」を撤回）、`taskctl worker run` の仕様（`--config` 必須・DB 非改変・exit code・中断時の kill）。§6 非目標の「複数アカウントの自動切替」は「残量推定に基づく切替」を指し、設定表の順の決定的なフォールバック（cooldown・並列度の上限）は本プロジェクトの範囲、と整理する | ADR-0012 のとおり実装済み |
+| P-41 | §4.3 / §5.3 / §5.4 / §5.5 / §5.9 / §6 非目標 | ADR-0012 を反映する: `WorkerStarted.provider`、`evidence[]` の任意フィールド、`[[providers]]` ごとの env / model（アカウント分離、taskd の環境を引き継ぐこと）、`ProviderPolicy::select` と `Selection`（§5.5 の「P-20 / P-33 は見送り」を撤回）、`taskctl worker run` の仕様（`--config` 必須・DB 非改変・exit code・中断時の kill）。§6 非目標の「複数アカウントの自動切替」は「残量推定に基づく切替」を指し、設定表の順の決定的なフォールバック（cooldown・並列度の上限）は本プロジェクトの範囲、と整理する | **DESIGN.md に反映済み（人間の許可、2026-09-14）** |

@@ -7,6 +7,8 @@
 - 初版（Phase 0〜6 の基準）
 - 2026-09-14 改訂: Phase 0〜6 で積み上がった提案 P-1〜P-37 の採否を反映し、Phase 7（仕上げ）を追加（ADR-0009）。
   採用した提案の番号を本文中に `（P-n）` で示す
+- 2026-09-14 改訂 2: 連続 requeue の上限（P-40, ADR-0011）と、複数アカウント運用・evidence の任意化・`taskctl worker run`
+  （P-41, ADR-0012）を反映し、Phase 8 を追加（いずれも人間の許可による）
 
 ---
 
@@ -81,7 +83,8 @@ agent-platform/
 │   ├── taskd/                # デーモン本体（ループ、設定読込、ログ）
 │   └── taskctl/              # CLI（add / ls / show / approve / reject / cancel / answer / log / replay / plan ...）
 ├── config/
-│   └── taskd.example.toml
+│   ├── taskd.example.toml
+│   └── taskd.multi-account.example.toml   # 複数アカウント運用の例（§5.4）
 ├── examples/
 │   └── hello-crate/          # ドッグフード対象のサンプルクレート
 └── tests/
@@ -129,7 +132,7 @@ running ──(worker done)───────────▶ reviewing
 running ──(worker asks/blocked)───▶ blocked
 running ──(worker error)──────────▶ ready | failed  (attempts+1、retryable でなければ failed)            (P-8)
 running ──(lease expired/crash)───▶ ready      (attempts+1, max_retries超えで failed)
-running ──(供給側失敗: requeue)───▶ ready      (attempts 据え置き。プロバイダは cooldown)           (P-21)
+running ──(供給側失敗: requeue)───▶ ready      (attempts 据え置き。プロバイダは cooldown。同じ試行で max_requeues 回まで) (P-21/P-40)
 reviewing ──(all checks pass)─────▶ done
 reviewing ──(check fail, retry可)─▶ ready      (レビュー結果を次回の入力に添付)
 reviewing ──(check fail, retry不可)▶ failed
@@ -139,6 +142,7 @@ blocked ──(human answers)─────────▶ ready      (回答�
 ```
 
 - `attempts` は「成功で終わらなかった実行の回数」。`worker_error` / `lease_expired` / `review_fail` だけが増やす。`requeue` / `answer` / `cancel` / `dependency_failed` は増やさない（ADR-0002 D3、ADR-0010 D1）。
+  ただし同じ試行での連続 `requeue` が設定 `max_requeues`（既定 5、0 で requeue しない）に達した後の供給側失敗は、通常の `worker_error`（Reviewer run では `review_fail`）として attempts を消費する。回数は `events` から数える（P-40、ADR-0011）。
 - `Approval` kind のタスクは `running` に入らず、`ready` から人間の `taskctl approve` で直接 `done`、`reject` で `failed`。親の `Approval` が `done` でない子は、`status` が `ready` でも **dispatch されない**（`ready_tasks` に現れない。P-6）。
 - 終端化に伴う伝播は、元の遷移と**同一トランザクション**で行う（ADR-0010 D2）:
   - `Approval` が `failed`（reject）または `cancelled` → 終端でない直接の子を `cancelled`
@@ -154,7 +158,8 @@ blocked ──(human answers)─────────▶ ready      (回答�
 ```rust
 pub enum Event {
     Created{task}, Transitioned{from,to,reason},
-    WorkerStarted{run_id, adapter, model}, WorkerProgress{run_id, msg},
+    WorkerStarted{run_id, adapter, model, provider?},             // provider = 実行したプロバイダ（アカウント）ID（P-41）
+    WorkerProgress{run_id, msg},
     ArtifactProduced{run_id, artifact}, WorkerFinished{run_id, outcome, usage},
     ReviewVerdict{run_id, criterion_idx, pass, reason},
     ApprovalRequested, ApprovalDecided{by, approved, note},
@@ -192,9 +197,9 @@ pub enum Event {
 1. 終了したワーカー／レビューの結果を取り込み、状態遷移をストアに書く
 2. 期限切れリースを回収 → `running`→`ready`（attempts+1）
 3. `ready_tasks` を `priority DESC, created_at ASC` で取得。`attempts > 0` のタスクは `updated_at + min(base·2^(attempts-1), cap)` まで見送る（P-3）
-4. 各タスクについて `WorkerHint` と設定のプロバイダ表から**アダプタ×プロバイダ**を選ぶ（§5.5 の `ProviderPolicy`）。並列度上限（全体・プロバイダ別）を超えたら待つ
+4. 各タスクについて `WorkerHint` と設定のプロバイダ表から**アダプタ×プロバイダ（= アカウント）**を選ぶ（§5.5 の `ProviderPolicy::select`）。選んだプロバイダが並列度の上限なら除外して次の候補を選び直す（設定表の順の「優先 + あふれ」。P-41）。全体の並列度上限を超えたら待つ。条件に合うプロバイダが設定に無いタスクは warn を出して `ready` のまま残し、`--until-idle` の待ち対象から外す（取得件数はその分だけ広げ、後ろの実行可能なタスクを飢餓させない）
 5. リース取得 → ワーカー起動（非同期）→ `running`。ワーカーの出力がある間はリースを延長する（P-7）
-6. ワーカー終了イベントを受けて `reviewing` へ → Reviewer 起動。供給側失敗（レート制限・認証失敗・枯渇・起動失敗）は `requeue` にしてプロバイダを cooldown にする（P-21）
+6. ワーカー終了イベントを受けて `reviewing` へ → Reviewer 起動。供給側失敗（レート制限・認証失敗・枯渇・起動失敗）は `requeue` にしてプロバイダを cooldown にする（P-21）。cooldown 中のプロバイダは 4. で飛ばされるので、次の run は別のアカウントに回りうる。同じ試行での連続 requeue は `max_requeues` まで（P-40）
 
 **LLM呼び出しは一切ここに書かない。** 選択規則は全て設定とコードで表現する。tick間隔は設定 `tick_ms`（既定 2000。P-22）。
 
@@ -211,7 +216,7 @@ pub enum Event {
 ← {"type":"error","message":"...","retryable":true,"provider_failure":{"kind":"throttled","retry_after_secs":60}}
 ```
 
-- `evidence` は受け入れ条件ごとに「何を実行して何が出たか」。Reviewer はこれと成果物だけを見る。
+- `evidence` は受け入れ条件ごとに「何を実行して何が出たか」。Reviewer はこれと成果物だけを見る。`criterion` 以外（`command` / `exit` / `stdout_tail`）は、コマンドを伴わない条件（`ArtifactExists` / `Reviewer` / `Human`）では省略してよい（P-41、旧 P-12）。
 - `usage` は取れる範囲で。取れないアダプタは省略可。
 - `context.answers`（P-10）は `blocked` から人間が `taskctl answer` した回答の履歴 `[{question, answer}]`。
 - `context.review`（P-27）は `Reviewer` check の run でのみ付く `{summary, evidence, criteria}`。
@@ -234,6 +239,7 @@ pub enum Event {
 - アダプタは**ワーカーの生存監視**（wall-clock 上限、無出力タイムアウト）と**強制終了**を必ず実装する。
 - アダプタは終端メッセージを正規化して `runs/<run_id>/result.json` に書く（P-26）。
 - アダプタは供給側の失敗（レート制限・認証失敗・枯渇）を、エラー文面の決定的な規則で `AdapterError` として分類して返す（P-21）。遷移の判断はディスパッチャが行う。
+- アダプタのインスタンスは `[[providers]]` の行（= 1 アカウント）ごとに作る。`[adapters.<種別>]` を共通設定とし、行の `env` を重ね（同名キーは行が優先。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` 等でアカウントを分離）、行の `model` が空でなければ `--model` に使う（P-41、ADR-0012 D1）。ワーカーは taskd 自身の環境を引き継ぐので、複数アカウント運用では `ANTHROPIC_API_KEY` 等を taskd の環境から外しておく。
 
 ### 5.5 Provider policy（モデル供給層との境界）
 
@@ -242,11 +248,20 @@ pub trait ProviderPolicy {
     fn pick(&self, hint: &WorkerHint, now: Instant) -> Option<(AdapterId, ProviderId)>;
     fn report(&mut self, provider: ProviderId, outcome: &ProviderOutcome); // Ok / Throttled{retry_after} / AuthFailed / Exhausted
     fn concurrency_limit(&self, provider: ProviderId) -> usize;
+
+    /// 除外集合（並列度の上限に達したプロバイダ等）付きの選択（P-41、ADR-0012 D2）。
+    /// 既定実装は `pick` から導く（選べなければ Busy）ので、上の 3 メソッドだけを実装したポリシーもそのまま動く。
+    fn select(&self, hint: &WorkerHint, now: Instant, excluded: &HashSet<ProviderId>) -> Selection { /* 既定実装 */ }
+}
+
+pub enum Selection {
+    Picked { adapter: AdapterId, provider: ProviderId },
+    Busy,                // 条件に合うプロバイダはあるが、全て cooldown 中または除外されている（一時的）
+    NoMatchingProvider,  // 条件に合うプロバイダが設定に無い（設定を直さない限り解消しない）
 }
 ```
 
-本プロジェクトでは `StaticPolicy`（設定表の優先順位、Throttled は cooldown まで除外）のみ実装。残量推定やアカウント間ルーティングは供給層側で `ProviderPolicy` を差し替える。
-（trait の拡張提案 P-20 / P-33 は供給層の担当として見送り。）
+本プロジェクトでは `StaticPolicy`（設定表の優先順位、Throttled / AuthFailed / Exhausted は cooldown まで除外、`select` は除外集合と cooldown を飛ばして次の行へ）のみ実装。残量推定に基づく配分やアカウント間の自動切替は供給層側で `ProviderPolicy` を差し替える。
 
 ### 5.6 Planner
 
@@ -291,10 +306,16 @@ taskctl cancel <id>                      # 非終端のみ（P-18）
 taskctl answer <id> "<回答>"             # blocked解除。回答は Answered イベントとして残り次回 run に渡る
 taskctl log   <id> [--follow]
 taskctl replay                          # eventsからtasksを再構築し差分を報告
-taskctl worker run --adapter fake --task <id>   # アダプタ単体実行（デバッグ用。未実装）
+taskctl worker run --config <taskd.toml> --task <id> [--provider <id> | --adapter <種別>] [--workspace <dir>]   # 1 タスクを 1 アカウントで 1 回実行（デバッグ用）
 ```
 
 出力を閉じたパイプ（`| head` 等）に流しても異常終了しないこと。
+
+`taskctl worker run`（P-41、ADR-0012 D4）はデーモンとディスパッチャを通さずに、アダプタの認証・モデル指定・プロンプト・結果ファイルを確かめるためのコマンド。
+- **DB を変えない**（リース・遷移・イベント追記をしない）。レビューも行わない。`context.prior_review` / `context.answers` はディスパッチャと同じく `events` から組み立てる。
+- プロバイダは `--provider`、`--adapter` に合う最初の行、どちらも無ければタスクの `worker_hint` に合う最初の行。
+- `running` / `reviewing` のタスクは `--workspace` 無しでは拒否する（デーモンの run と作業ディレクトリを取り合わないため）。確認用途では `--workspace` にコピーを指定することを推奨する。
+- 出力は `progress:` / `artifact:` を逐次、最後に `result: <終端メッセージの JSON>`。exit code は done=0、question=3、error=4、タスクやプロバイダの不在=1、引数の構文誤り=2、SIGINT / SIGTERM による中断=130（ワーカーのプロセスを kill してから終わる）。
 
 ---
 
@@ -356,10 +377,24 @@ LLM を使う実機確認は、認証が使える環境ならエージェント�
   5. `provider_failure` 付きの `error` を返すワーカーは attempts を消費せず `requeue` され、cooldown 後に `done`。Reviewer run の供給側失敗で `ReviewFail` にならない
   6. バックオフ期間中の再 dispatch が起きないこと、ワーカーの出力でリースが延長されること（ユニットテスト）
   7. `taskctl ls | head -n 1` が panic せず成功する。`spawn_retrying` を持たない状態で `cargo test --workspace` を連続 5 回実行して全て成功する
+  8. 供給側失敗が続くタスクは、同じ試行で `max_requeues` 回 requeue した後に通常の失敗として attempts を消費する（P-40、Phase 7 の後に追加）
+
+### Phase 8 — 複数アカウント運用とデバッグ CLI
+
+（人間の依頼により Phase 7 の後に実施し、実施後にこの節を追加した。ADR-0012）
+
+- `[[providers]]` の行ごとのアダプタ（env / model によるアカウント分離）、`ProviderPolicy::select` による上限・cooldown 時の次のアカウントへのフォールバック、条件に合うプロバイダが無いタスクの区別、`WorkerStarted.provider`、`evidence` の任意フィールド、`taskctl worker run`
+- 受け入れ（fake ワーカーとローカル SQLite で再現し、`taskctl replay` 差分ゼロを併せて確認する。実機での確認は §6 冒頭の規則に従う）:
+  1. 同じアダプタ種別の 2 アカウント（`env` が異なる）で、先頭アカウントの並列度上限をあふれた分が 2 つ目のアカウントで実行され、各 run の `WorkerStarted.provider` / `model` にアカウントごとの値が残る
+  2. レート制限・認証失敗を返したアカウントは cooldown になり、同じタスクが attempts を消費せず次のアカウントで実行される
+  3. 条件に合うプロバイダが設定に無いタスクは `taskd --until-idle` を止めず、それより優先度の低い実行可能なタスクも dispatch される
+  4. `evidence` の要素は `criterion` だけでも読め、旧形式（全フィールドあり）も読める
+  5. `taskctl worker run` が DB を変えずに 1 タスクを指定したアカウントで実行し、done / question / error の exit code を返す。SIGTERM で exit 130 とともにワーカーのプロセスが終了する
 
 ### 非目標（本プロジェクトではやらない）
 
-Web UI、リモートワークスペースの実装、予算・残量推定、複数アカウントの自動切替、マルチユーザ、通知。これらは接続層・供給層の担当。
+Web UI、リモートワークスペースの実装、予算・残量推定、残量推定に基づく複数アカウントの自動切替、マルチユーザ、通知。これらは接続層・供給層の担当。
+（設定表の順に従う決定的なフォールバック — 並列度の上限・cooldown 中のアカウントを飛ばすこと — は Phase 8 で本プロジェクトの範囲とした。どのアカウントをどれだけ使うかの最適化は供給層が `ProviderPolicy` を差し替えて行う。）
 
 ---
 
