@@ -1,5 +1,21 @@
 {
   "$defs": {
+    "Answer": {
+      "description": "以前の `question` への人間の回答（`context.answers[]`。ADR-0010 D3, P-10）。",
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "question",
+        "answer"
+      ],
+      "type": "object"
+    },
     "ArtifactRef": {
       "description": "DESIGN §4.4 の `ArtifactRef`。実体は `workspace/<task_id>/artifacts/` 配下。",
       "properties": {
@@ -197,6 +213,53 @@
       ],
       "type": "object"
     },
+    "ProviderFailure": {
+      "description": "`error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは\nattempts を消費せず `requeue` し、プロバイダを cooldown にする。",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "throttled",
+              "type": "string"
+            },
+            "retry_after_secs": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "retry_after_secs"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "auth_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "exhausted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ReviewOutput": {
       "description": "`Review` run がワークスペース直下 `artifacts/review.json` に書く出力（ADR-0007 D1/D5）。",
       "properties": {
@@ -268,6 +331,13 @@
     "RunContext": {
       "description": "`run.context`。未知フィールドは無視する（前方互換）。",
       "properties": {
+        "answers": {
+          "description": "`taskctl answer` で与えられた回答の履歴（時系列）。無ければ省略（ADR-0010 D3）。",
+          "items": {
+            "$ref": "#/$defs/Answer"
+          },
+          "type": "array"
+        },
         "inputs": {
           "items": {
             "$ref": "#/$defs/ArtifactRef"
@@ -573,6 +643,17 @@
           "properties": {
             "message": {
               "type": "string"
+            },
+            "provider_failure": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProviderFailure"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "供給側の失敗なら種別を付ける（ADR-0010 D5）。付いていれば `retryable` に関わらず `requeue` になる。"
             },
             "retryable": {
               "type": "boolean"

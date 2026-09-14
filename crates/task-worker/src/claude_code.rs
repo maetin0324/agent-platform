@@ -17,8 +17,11 @@ use tokio::process::Command;
 use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
-use crate::protocol::{Evidence, RunContext, RunRequest};
-use crate::subprocess::{LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, spawn_retrying};
+use crate::protocol::{Answer, Evidence, ProviderFailure, RunContext, RunRequest};
+use crate::provider::classify_provider_failure;
+use crate::subprocess::{
+    LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, read_tail, write_result_json,
+};
 
 /// `[adapters.claude_code]`（taskd.toml, ADR-0006 D6）。
 #[derive(Debug, Clone)]
@@ -115,6 +118,20 @@ fn prior_review_section(context: &RunContext) -> String {
     out
 }
 
+/// `context.answers` があれば「以前の質問への人間の回答」節として列挙する（ADR-0010 D3, P-10）。
+/// Review プロンプトには使わない（`build_review_prompt` からは呼ばない）。
+fn answers_section(context: &RunContext) -> String {
+    let mut out = String::new();
+    if !context.answers.is_empty() {
+        out.push_str("## Answers from a human to your earlier questions\n");
+        for Answer { question, answer } in &context.answers {
+            out.push_str(&format!("- Q: {question}\n  A: {answer}\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// `artifacts/result.json` の書式指示（ADR-0006 D3。全 kind 共通）。
 fn result_json_instructions() -> &'static str {
     "Always write `artifacts/result.json` (create the `artifacts/` directory if it does not exist \
@@ -147,6 +164,7 @@ fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> Stri
     }
     out.push('\n');
     out.push_str(&prior_review_section(context));
+    out.push_str(&answers_section(context));
     out.push_str("## Instructions\n");
     out.push_str("Work in the current directory (it is a dedicated workspace for this task). When you are done:\n");
     out.push_str(result_json_instructions());
@@ -192,6 +210,7 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String 
     out.push_str(&schema);
     out.push_str("\n```\n\n");
     out.push_str(&prior_review_section(context));
+    out.push_str(&answers_section(context));
     out.push_str(result_json_instructions());
     out
 }
@@ -290,6 +309,8 @@ struct ResultMeta {
     subtype: String,
     is_error: bool,
     usage: Option<Usage>,
+    /// `result` フィールド（文字列。エラー時の文面）。供給側失敗の分類に使う（ADR-0010 D5）。
+    result: Option<String>,
 }
 
 async fn run_claude_code(
@@ -303,6 +324,9 @@ async fn run_claude_code(
     tokio::fs::create_dir_all(&run_dir).await?;
     let stdout_log_path = run_dir.join("stdout.jsonl");
     let stderr_log_path = run_dir.join("stderr.log");
+    // `stderr_task` (below) moves a copy into its `async move` block; this one stays available for
+    // the crash-classification read after the loop (ADR-0010 D5).
+    let stderr_log_path_for_task = stderr_log_path.clone();
 
     // 前回の run（リトライ）が残した結果ファイルを、今回の run の結果と誤読しないよう先に消す
     // （監査で指摘。ADR-0006 D3 は「この run が書いたファイル」を前提にしている）。
@@ -337,7 +361,7 @@ async fn run_claude_code(
     #[cfg(unix)]
     command.process_group(0);
 
-    let mut child = spawn_retrying(&mut command).await.map_err(AdapterError::Spawn)?;
+    let mut child = command.spawn().map_err(AdapterError::Spawn)?;
 
     let stdout = child
         .stdout
@@ -350,7 +374,7 @@ async fn run_claude_code(
 
     let stderr_task = tokio::spawn(async move {
         let mut reader = stderr;
-        match tokio::fs::File::create(&stderr_log_path).await {
+        match tokio::fs::File::create(&stderr_log_path_for_task).await {
             Ok(mut file) => {
                 if let Err(e) = tokio::io::copy(&mut reader, &mut file).await {
                     warn!("failed to write worker stderr.log: {e}");
@@ -400,10 +424,12 @@ async fn run_claude_code(
             LineOutcome::Eof => break,
             LineOutcome::TooLong => {
                 // claude 自身のフォーマットは taskd が定義したものではないため、寛容に無視する（ADR-0006 D5）。
+                sink.heartbeat();
                 last_activity = Instant::now();
                 warn!("run {run_id}: discarding overlong line from claude stdout");
             }
             LineOutcome::Line(bytes) => {
+                sink.heartbeat();
                 last_activity = Instant::now();
                 stdout_file.write_all(&bytes).await?;
                 stdout_file.write_all(b"\n").await?;
@@ -427,22 +453,35 @@ async fn run_claude_code(
     }
     stdout_file.flush().await?;
 
-    let terminal = match (timeout_terminal, &last_result) {
-        (Some(t), _) => t,
+    let (terminal, provider_failure): (Terminal, Option<ProviderFailure>) = match (timeout_terminal, &last_result) {
+        // タイムアウト（wall-clock / idle）は分類しない（ADR-0010 D5）。
+        (Some(t), _) => (t, None),
         // `result` メッセージを一度も観測できずに exit した場合はクラッシュとして扱い、
         // artifacts/result.json（前回の run の名残や書きかけの内容）を一切信用しない（ADR-0006 D4）。
+        // stderr.log の末尾を供給側失敗として分類する（ADR-0010 D5）。
         (None, None) => {
             let exit_repr = match exit_status.code() {
                 Some(code) => code.to_string(),
                 None => "signal".to_string(),
             };
-            Terminal::Error {
-                message: format!("worker exited without a result message (exit={exit_repr})"),
-                retryable: true,
-            }
+            let tail = read_tail(&stderr_log_path, 4096).await;
+            let pf = classify_provider_failure(&tail);
+            (
+                Terminal::Error {
+                    message: format!("worker exited without a result message (exit={exit_repr})"),
+                    retryable: true,
+                },
+                pf,
+            )
         }
         (None, Some(meta)) => terminal_from_result(&req.workspace, meta).await,
     };
+
+    write_result_json(&run_dir, &terminal, provider_failure).await?;
+
+    if let (Terminal::Error { message, .. }, Some(pf)) = (&terminal, provider_failure) {
+        return Err(AdapterError::from_provider_failure(pf, message));
+    }
 
     Ok(RunOutcome {
         terminal,
@@ -495,10 +534,12 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
                 input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
                 output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
             });
+            let result = value.get("result").and_then(|r| r.as_str()).map(|s| s.to_string());
             *last_result = Some(ResultMeta {
                 subtype,
                 is_error,
                 usage,
+                result,
             });
         }
         _ => {}
@@ -516,29 +557,39 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-/// `result` メッセージと結果ファイルから終端を合成する（ADR-0006 D3/D4）。呼び出し元は
+/// `result` メッセージと結果ファイルから終端を合成する（ADR-0006 D3/D4, ADR-0010 D5）。呼び出し元は
 /// `result` メッセージを一度でも観測できた場合にのみこれを呼ぶ（観測できなかった場合は
-/// クラッシュとして扱い、この関数を呼ばずに `Error` にする。ADR-0006 D4）。
-async fn terminal_from_result(workspace: &Path, last_result: &ResultMeta) -> Terminal {
+/// クラッシュとして扱い、この関数を呼ばずに `Error` にする。ADR-0006 D4）。`is_error`/`subtype != "success"`
+/// のときは `result` のテキスト（無ければ `subtype`）を供給側失敗として分類する。
+async fn terminal_from_result(
+    workspace: &Path,
+    last_result: &ResultMeta,
+) -> (Terminal, Option<ProviderFailure>) {
     if last_result.is_error || last_result.subtype != "success" {
-        return Terminal::Error {
-            message: format!("claude result: {}", last_result.subtype),
-            retryable: true,
+        let text_for_classification = last_result.result.clone().unwrap_or_else(|| last_result.subtype.clone());
+        let pf = classify_provider_failure(&text_for_classification);
+        let message = match &last_result.result {
+            Some(result_text) => format!("claude result: {}: {result_text}", last_result.subtype),
+            None => format!("claude result: {}", last_result.subtype),
         };
+        return (Terminal::Error { message, retryable: true }, pf);
     }
 
     let result_path = workspace.join("artifacts").join("result.json");
     let text = match tokio::fs::read_to_string(&result_path).await {
         Ok(t) => t,
         Err(_) => {
-            return Terminal::Error {
-                message: "claude exited without artifacts/result.json".to_string(),
-                retryable: true,
-            };
+            return (
+                Terminal::Error {
+                    message: "claude exited without artifacts/result.json".to_string(),
+                    retryable: true,
+                },
+                None,
+            );
         }
     };
 
-    match serde_json::from_str::<ResultFile>(&text) {
+    let terminal = match serde_json::from_str::<ResultFile>(&text) {
         Ok(rf) => {
             if let Some(question) = rf.question {
                 Terminal::Question { text: question }
@@ -559,12 +610,12 @@ async fn terminal_from_result(workspace: &Path, last_result: &ResultMeta) -> Ter
             message: format!("artifacts/result.json is not valid JSON: {e}"),
             retryable: true,
         },
-    }
+    };
+    (terminal, None)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -587,10 +638,8 @@ mod tests {
 
     fn stub_claude(dir: &Path, script: &str) -> ClaudeCodeConfig {
         let path = dir.join("claude_stub.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
+        // ETXTBSY 対策（ADR-0010 D10）: テストプロセス自身が書き込み fd を持たないよう別プロセスで書く。
+        crate::test_support::write_executable(&path, &format!("#!/bin/sh\n{script}\n"));
         ClaudeCodeConfig {
             command: path.to_string_lossy().into_owned(),
             ..ClaudeCodeConfig::default()
@@ -630,6 +679,32 @@ mod tests {
         assert!(prompt.contains("reviewer will independently re-run"));
         assert!(prompt.contains("run-xyz"));
         assert!(prompt.contains("attempt 1 of"));
+    }
+
+    /// `context.answers`（ADR-0010 D3, P-10）は Execute/Plan プロンプトに反映される。
+    #[test]
+    fn build_prompt_includes_answers_from_human_for_execute_and_plan() {
+        let mut context = RunContext::default();
+        context.answers.push(crate::protocol::Answer {
+            question: "which crate version?".into(),
+            answer: "1.0".into(),
+        });
+
+        let execute_task = crate::protocol::tests::sample_task();
+        let execute_prompt = build_prompt(&execute_task, &context, "run-a1");
+        assert!(execute_prompt.contains("## Answers from a human to your earlier questions"));
+        assert!(execute_prompt.contains("- Q: which crate version?"));
+        assert!(execute_prompt.contains("A: 1.0"));
+
+        let mut plan_task = crate::protocol::tests::sample_task();
+        plan_task.kind = task_core::TaskKind::Plan;
+        let plan_prompt = build_prompt(&plan_task, &context, "run-a2");
+        assert!(plan_prompt.contains("## Answers from a human to your earlier questions"));
+        assert!(plan_prompt.contains("- Q: which crate version?"));
+
+        // No answers: the section must not appear at all.
+        let no_answers_prompt = build_prompt(&execute_task, &RunContext::default(), "run-a3");
+        assert!(!no_answers_prompt.contains("Answers from a human"));
     }
 
     #[test]
@@ -718,6 +793,14 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         assert!(progress.iter().any(|m| m == "working on it"));
         assert!(progress.iter().any(|m| m.starts_with("tool_use: Bash")));
         assert!(dir.path().join("runs/run-1/stdout.jsonl").is_file());
+
+        // P-26 (ADR-0010 D10): the terminal is also normalized into `runs/<run_id>/result.json`,
+        // readable by task-dispatch as a `WorkerMessage::Done`.
+        let result_json = std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
+        match serde_json::from_str::<crate::protocol::WorkerMessage>(result_json.trim()).unwrap() {
+            crate::protocol::WorkerMessage::Done { summary, .. } => assert_eq!(summary, "added usage example"),
+            other => panic!("expected done in result.json, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -781,6 +864,60 @@ echo '{"type":"result","subtype":"error_max_turns","is_error":true}'
             }
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    /// `result.is_error`（or `subtype != "success"`) のとき `result` テキストを分類する（ADR-0010 D5）。
+    /// `Throttled` が当たれば `AdapterError::Throttled` として返り、result.json は書かれる。
+    #[tokio::test]
+    async fn result_text_classified_as_throttled_surfaces_as_adapter_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"echo '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 rate limit exceeded"}'"#,
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let err = adapter
+            .run(req, "run-4b", default_limits(), &sink)
+            .await
+            .expect_err("expected a provider failure");
+        assert!(matches!(err, AdapterError::Throttled { .. }), "{err:?}");
+        assert!(dir.path().join("runs/run-4b/result.json").is_file());
+    }
+
+    /// 同じく `AuthFailed` の分類（ADR-0010 D5）。
+    #[tokio::test]
+    async fn result_text_classified_as_auth_failed_surfaces_as_adapter_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"echo '{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key · Please run /login"}'"#,
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let err = adapter
+            .run(req, "run-4c", default_limits(), &sink)
+            .await
+            .expect_err("expected a provider failure");
+        assert!(matches!(err, AdapterError::AuthFailed(_)), "{err:?}");
+        assert!(dir.path().join("runs/run-4c/result.json").is_file());
+    }
+
+    /// `result` メッセージを一度も観測できずに exit した場合も、stderr の末尾を分類する（ADR-0010 D5）。
+    #[tokio::test]
+    async fn crash_with_matching_stderr_is_classified_as_provider_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), "echo 'fatal: 401 Unauthorized' 1>&2; exit 9");
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let err = adapter
+            .run(req, "run-4d", default_limits(), &sink)
+            .await
+            .expect_err("expected a provider failure");
+        assert!(matches!(err, AdapterError::AuthFailed(_)), "{err:?}");
     }
 
     #[tokio::test]

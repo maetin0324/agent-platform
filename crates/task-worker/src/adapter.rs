@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use task_core::{ArtifactRef, Usage};
 
-use crate::protocol::{Evidence, RunRequest};
+use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 
 /// run の終端結果（ADR-0003 D3）。タイムアウト・終端無し exit も `Error{retryable:true}` に正規化する（D4）。
 #[derive(Debug, Clone, PartialEq)]
@@ -64,12 +64,30 @@ pub enum AdapterError {
     Other(String),
 }
 
+impl AdapterError {
+    /// `error.provider_failure`（プロトコル）や、CLI 系アダプタのエラー文面の分類結果を `AdapterError` に写す
+    /// （ADR-0010 D5）。遷移の判断はディスパッチャが行う。
+    pub fn from_provider_failure(failure: ProviderFailure, message: &str) -> Self {
+        match failure {
+            // `retry_after_secs: 0` で毎 tick 再 dispatch されるホットループを避けるため最低 1 秒（Phase 7 監査）。
+            ProviderFailure::Throttled { retry_after_secs } => AdapterError::Throttled {
+                retry_after: Duration::from_secs(retry_after_secs.max(1)),
+            },
+            ProviderFailure::AuthFailed => AdapterError::AuthFailed(message.to_string()),
+            ProviderFailure::Exhausted => AdapterError::Exhausted(message.to_string()),
+        }
+    }
+}
+
 /// run 途中のイベント受け口。ディスパッチャがストアへ `WorkerProgress` / `ArtifactProduced` を追記する。
 /// 同期 API（ストアは `Mutex<Connection>` で直列化されるため）。
 pub trait EventSink: Send + Sync {
     fn progress(&self, msg: &str);
     /// パス検査と sha256 計算済みの成果物（`crate::artifact::resolve` を通したもの）。
     fn artifact(&self, artifact: &ArtifactRef);
+    /// ワーカーの stdout から 1 行読むたびにアダプタが呼ぶ生存通知。ディスパッチャはこれでリースを延長する
+    /// （ADR-0010 D7, P-7）。既定は何もしない。
+    fn heartbeat(&self) {}
 }
 
 /// 何もしないシンク（テスト・デバッグ用）。

@@ -94,6 +94,13 @@ pub trait TaskStore: Send + Sync {
         children: Vec<Task>,
         accept_children: bool,
     ) -> Result<Outcome, StoreError>;
+
+    /// ADR-0010 D2: `insert` + `Event::Created` + `extra_events` を 1 トランザクションで行う。
+    fn create_task(&self, task: &Task, extra_events: Vec<Event>) -> Result<(), StoreError>;
+
+    /// ADR-0010 D2 / D7（P-7）: `status = running` かつリースの run_id が一致するときだけ `expires_at = now + ttl` に
+    /// 延長して true を返す。状態遷移ではないのでイベントは追記しない。
+    fn renew_lease(&self, task_id: TaskId, worker_run_id: &str, ttl: StdDuration) -> Result<bool, StoreError>;
 }
 
 pub struct SqliteStore {
@@ -291,39 +298,89 @@ impl SqliteStore {
             next_seq += 1;
         }
 
-        // ADR-0008 D1: Approval を reject したら、まだ終端でない直接の子を cascade cancel する。
-        if task.kind == TaskKind::Approval && trigger == Trigger::Reject {
-            Self::cascade_cancel_children_tx(tx, task_id)?;
-        }
+        Self::cascade_after_transition_tx(tx, &task, view.status, outcome.next)?;
 
         Ok(outcome)
     }
 
-    /// `parent_id` の直接の子のうち終端状態（done/failed/cancelled）でないものを `Trigger::Cancel` で
-    /// キャンセルする（ADR-0008 D1）。呼び出し元と同一トランザクションで実行する。
-    fn cascade_cancel_children_tx(tx: &Connection, parent_id: TaskId) -> Result<(), StoreError> {
-        let child_ids: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM tasks WHERE parent_id = ?1 AND status NOT IN (?2, ?3, ?4)",
-            )?;
-            let rows = stmt.query_map(
-                params![
-                    parent_id.to_string(),
-                    status_str(Status::Done),
-                    status_str(Status::Failed),
-                    status_str(Status::Cancelled),
-                ],
-                |row| row.get::<_, String>(0),
-            )?;
-            rows.collect::<Result<_, _>>()?
-        };
-        for id_str in child_ids {
-            let child_id: TaskId = id_str
-                .parse()
-                .map_err(|_| StoreError::Invalid(format!("invalid task id in tasks table: {id_str}")))?;
-            Self::apply_transition_tx(tx, child_id, Trigger::Cancel, vec![])?;
+    /// 終端化に伴う伝播（ADR-0010 D2）。呼び出し元と同一トランザクションで、再帰的に行う。
+    /// 1. `Approval` が failed/cancelled → 終端でない直接の子を `Cancel`（ADR-0008 D1 を reject 以外にも拡張）
+    /// 2. `Approval` 以外が終端 → 終端でない直接の `Approval` 子を `Cancel`（P-37）
+    /// 3. failed/cancelled → 終端でない後続（`depends_on` に含むタスク）を `DependencyFailed`（P-9、推移的）
+    fn cascade_after_transition_tx(tx: &Connection, task: &Task, from: Status, to: Status) -> Result<(), StoreError> {
+        if from.is_terminal() || !to.is_terminal() {
+            return Ok(());
+        }
+        let unsuccessful = matches!(to, Status::Failed | Status::Cancelled);
+        if task.kind == TaskKind::Approval {
+            if unsuccessful {
+                for child in Self::non_terminal_children_tx(tx, task.id, None)? {
+                    Self::transition_if_non_terminal_tx(tx, child, Trigger::Cancel)?;
+                }
+            }
+        } else {
+            for child in Self::non_terminal_children_tx(tx, task.id, Some(TaskKind::Approval))? {
+                Self::transition_if_non_terminal_tx(tx, child, Trigger::Cancel)?;
+            }
+        }
+        if unsuccessful {
+            for dependent in Self::non_terminal_dependents_tx(tx, task.id)? {
+                Self::transition_if_non_terminal_tx(tx, dependent, Trigger::DependencyFailed)?;
+            }
         }
         Ok(())
+    }
+
+    /// 伝播の途中で既に終端になったタスク（例: 子でもあり後続でもある）は飛ばす。
+    fn transition_if_non_terminal_tx(tx: &Connection, id: TaskId, trigger: Trigger) -> Result<(), StoreError> {
+        match Self::get_locked(tx, id)? {
+            Some(t) if !t.status.is_terminal() => {
+                Self::apply_transition_tx(tx, id, trigger, vec![])?;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    const NON_TERMINAL_SQL: &'static str = "status NOT IN ('done', 'failed', 'cancelled')";
+
+    fn parse_id(id_str: &str) -> Result<TaskId, StoreError> {
+        id_str
+            .parse()
+            .map_err(|_| StoreError::Invalid(format!("invalid task id in tasks table: {id_str}")))
+    }
+
+    /// `parent_id` の直接の子のうち終端でないもの（`kind` 指定があればその kind だけ）。
+    fn non_terminal_children_tx(
+        tx: &Connection,
+        parent_id: TaskId,
+        kind: Option<TaskKind>,
+    ) -> Result<Vec<TaskId>, StoreError> {
+        let sql = format!(
+            "SELECT id FROM tasks WHERE parent_id = ?1 AND {} AND (?2 IS NULL OR kind = ?2)",
+            Self::NON_TERMINAL_SQL
+        );
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map(params![parent_id.to_string(), kind.map(kind_str)], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let ids: Vec<String> = rows.collect::<Result<_, _>>()?;
+        ids.iter().map(|s| Self::parse_id(s)).collect()
+    }
+
+    /// `depends_on` に `dep_id` を含む、終端でないタスク。JSON 列を `LIKE` で絞ってから型で確認する。
+    fn non_terminal_dependents_tx(tx: &Connection, dep_id: TaskId) -> Result<Vec<TaskId>, StoreError> {
+        let sql = format!("SELECT json FROM tasks WHERE {} AND json LIKE ?1", Self::NON_TERMINAL_SQL);
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map(params![format!("%{dep_id}%")], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let t = Self::row_to_task(row?)?;
+            if t.id != dep_id && t.depends_on.contains(&dep_id) {
+                out.push(t.id);
+            }
+        }
+        Ok(out)
     }
 
     fn append_event_tx(conn: &Connection, task_id: TaskId, event: &Event) -> Result<u64, StoreError> {
@@ -536,12 +593,14 @@ impl TaskStore for SqliteStore {
     fn ready_tasks(&self, limit: usize) -> Result<Vec<Task>, StoreError> {
         let conn = self.lock()?;
 
+        // ADR-0010 D2（P-36）: dispatch されない Approval は取得件数を占有しないよう SQL 段階で除外する。
         let mut stmt = conn.prepare(
-            "SELECT json FROM tasks WHERE status = ?1 ORDER BY priority DESC, created_at ASC",
+            "SELECT json FROM tasks WHERE status = ?1 AND kind != ?2 ORDER BY priority DESC, created_at ASC",
         )?;
-        let rows = stmt.query_map(params![status_str(Status::Ready)], |row| {
-            row.get::<_, String>(0)
-        })?;
+        let rows = stmt.query_map(
+            params![status_str(Status::Ready), kind_str(TaskKind::Approval)],
+            |row| row.get::<_, String>(0),
+        )?;
 
         let mut result = Vec::new();
         for row in rows {
@@ -623,6 +682,54 @@ impl TaskStore for SqliteStore {
         let outcome = Self::apply_transition_tx(&tx, plan_id, Trigger::ReviewPass, verdict_events)?;
         tx.commit()?;
         Ok(outcome)
+    }
+
+    fn create_task(&self, task: &Task, extra_events: Vec<Event>) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        Self::insert_tx(&tx, task)?;
+        Self::append_event_tx(
+            &tx,
+            task.id,
+            &Event::Created {
+                task: Box::new(task.clone()),
+            },
+        )?;
+        for event in &extra_events {
+            Self::append_event_tx(&tx, task.id, event)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn renew_lease(&self, task_id: TaskId, worker_run_id: &str, ttl: StdDuration) -> Result<bool, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let Some(mut task) = Self::get_locked(&tx, task_id)? else {
+            return Ok(false);
+        };
+        let ours = task.status == Status::Running
+            && task.lease.as_ref().map(|l| l.worker_run_id.as_str()) == Some(worker_run_id);
+        if !ours {
+            return Ok(false);
+        }
+        let expires_at = OffsetDateTime::now_utc() + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
+        task.lease = Some(crate::model::Lease {
+            worker_run_id: worker_run_id.to_string(),
+            expires_at,
+        });
+        let affected = tx.execute(
+            "UPDATE tasks SET lease_expires_at = ?1, json = ?2 WHERE id = ?3 AND status = ?4 AND lease_worker_run_id = ?5",
+            params![
+                format_rfc3339(expires_at)?,
+                serde_json::to_string(&task)?,
+                task_id.to_string(),
+                status_str(Status::Running),
+                worker_run_id,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(affected == 1)
     }
 }
 
@@ -1175,5 +1282,161 @@ mod tests {
             store.complete_plan(plan3.id, vec![], vec![stranger], false),
             Err(StoreError::Invalid(_))
         ));
+    }
+
+    fn reasons(store: &SqliteStore, id: TaskId) -> Vec<String> {
+        store
+            .events_for(id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                Event::Transitioned { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// ADR-0010 D2: create_task は insert + Created + extra を 1 トランザクションで行い、失敗時は何も残さない。
+    #[test]
+    fn create_task_inserts_task_and_events_atomically() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task(Status::Ready);
+        store.create_task(&task, vec![Event::ApprovalRequested]).unwrap();
+        assert_eq!(store.get(task.id).unwrap().unwrap(), task);
+        let ev = store.events_for(task.id).unwrap();
+        assert_eq!(ev.len(), 2);
+        assert!(matches!(&ev[0].1, Event::Created { task: t } if t.id == task.id));
+        assert_eq!(ev[1].1, Event::ApprovalRequested);
+        // 同じ id の再作成は insert で失敗し、イベントも追記されない。
+        assert!(store.create_task(&task, vec![Event::ApprovalRequested]).is_err());
+        assert_eq!(store.events_for(task.id).unwrap().len(), 2);
+    }
+
+    /// ADR-0010 D7（P-7）: renew_lease は running かつ run_id が一致するときだけ期限を更新する。
+    #[test]
+    fn renew_lease_extends_only_the_matching_running_lease() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task(Status::Ready);
+        store.insert(&task).unwrap();
+        assert!(store.acquire_lease(task.id, "run-a", StdDuration::from_secs(5)).unwrap());
+        let before = store.get(task.id).unwrap().unwrap().lease.unwrap().expires_at;
+        assert!(store.renew_lease(task.id, "run-a", StdDuration::from_secs(3600)).unwrap());
+        let after = store.get(task.id).unwrap().unwrap().lease.unwrap();
+        assert_eq!(after.worker_run_id, "run-a");
+        assert!(after.expires_at > before + time::Duration::seconds(3000));
+        let col: String = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row("SELECT lease_expires_at FROM tasks WHERE id = ?1", params![task.id.to_string()], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(col, format_rfc3339(after.expires_at).unwrap());
+        // 別 run_id や running でないタスクには効かない。
+        assert!(!store.renew_lease(task.id, "run-b", StdDuration::from_secs(1)).unwrap());
+        store.apply_transition(task.id, Trigger::WorkerDone, None).unwrap();
+        assert!(!store.renew_lease(task.id, "run-a", StdDuration::from_secs(1)).unwrap());
+        assert!(!store.renew_lease(TaskId::new(), "run-a", StdDuration::from_secs(1)).unwrap());
+        // 状態遷移ではないのでイベントは増えない（dispatch と worker_done の 2 件だけ）。
+        assert_eq!(reasons(&store, task.id), vec!["dispatch", "worker_done"]);
+    }
+
+    /// ADR-0010 D2（P-36）: ready_tasks は Approval を返さない。
+    #[test]
+    fn ready_tasks_excludes_approval_kind() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        for _ in 0..3 {
+            let mut a = sample_task(Status::Ready);
+            a.kind = TaskKind::Approval;
+            store.insert(&a).unwrap();
+        }
+        let exec = sample_task(Status::Ready);
+        store.insert(&exec).unwrap();
+        let ready = store.ready_tasks(1).unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, exec.id);
+    }
+
+    /// ADR-0010 D1（P-4）: 終端タスクへの Cancel は無効で、状態もイベントも変わらない。
+    #[test]
+    fn cancel_is_invalid_for_terminal_tasks() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        for status in [Status::Done, Status::Failed, Status::Cancelled] {
+            let t = sample_task(status);
+            store.insert(&t).unwrap();
+            assert!(matches!(store.apply_transition(t.id, Trigger::Cancel, None), Err(StoreError::InvalidTransition(_))));
+            assert_eq!(store.get(t.id).unwrap().unwrap().status, status);
+            assert!(store.events_for(t.id).unwrap().is_empty());
+        }
+    }
+
+    /// ADR-0010 D2: Approval が cancel された場合も（reject と同じく）終端でない直接の子が cancelled になる。
+    #[test]
+    fn cancelling_an_approval_cascades_to_its_children() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut approval = sample_task(Status::Ready);
+        approval.kind = TaskKind::Approval;
+        store.insert(&approval).unwrap();
+        let mut child = sample_task(Status::Ready);
+        child.parent_id = Some(approval.id);
+        store.insert(&child).unwrap();
+        store.apply_transition(approval.id, Trigger::Cancel, None).unwrap();
+        assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Cancelled);
+        assert_eq!(reasons(&store, child.id), vec!["cancel"]);
+    }
+
+    /// ADR-0010 D2（P-37）: Approval 以外のタスクが終端になると、未決の Approval 子だけが cancelled になる。
+    #[test]
+    fn terminal_task_cancels_its_pending_approval_children_only() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let parent = sample_task(Status::Reviewing);
+        store.insert(&parent).unwrap();
+        let mut pending_approval = sample_task(Status::Ready);
+        pending_approval.kind = TaskKind::Approval;
+        pending_approval.parent_id = Some(parent.id);
+        store.insert(&pending_approval).unwrap();
+        let mut decided_approval = sample_task(Status::Done);
+        decided_approval.kind = TaskKind::Approval;
+        decided_approval.parent_id = Some(parent.id);
+        store.insert(&decided_approval).unwrap();
+        let mut exec_child = sample_task(Status::Draft);
+        exec_child.parent_id = Some(parent.id);
+        store.insert(&exec_child).unwrap();
+
+        store.apply_transition(parent.id, Trigger::ReviewPass, None).unwrap();
+        assert_eq!(store.get(pending_approval.id).unwrap().unwrap().status, Status::Cancelled);
+        assert_eq!(store.get(decided_approval.id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(store.get(exec_child.id).unwrap().unwrap().status, Status::Draft);
+    }
+
+    /// ADR-0010 D2（P-9）: 先行タスクが failed になると、終端でない後続が推移的に cancelled（dependency_failed）になる。
+    #[test]
+    fn dependency_failure_cancels_dependents_transitively() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut a = sample_task(Status::Ready);
+        a.budget.max_retries = 0;
+        store.insert(&a).unwrap();
+        let mut b = sample_task(Status::Draft);
+        b.depends_on = vec![a.id];
+        store.insert(&b).unwrap();
+        let mut c = sample_task(Status::Ready);
+        c.depends_on = vec![b.id];
+        store.insert(&c).unwrap();
+        let mut d = sample_task(Status::Done);
+        d.depends_on = vec![a.id];
+        store.insert(&d).unwrap();
+        let unrelated = sample_task(Status::Ready);
+        store.insert(&unrelated).unwrap();
+
+        assert!(store.acquire_lease(a.id, "run-a", StdDuration::from_secs(60)).unwrap());
+        let outcome = store.apply_transition(a.id, Trigger::WorkerError { retryable: false }, None).unwrap();
+        assert_eq!(outcome.next, Status::Failed);
+
+        for id in [b.id, c.id] {
+            let t = store.get(id).unwrap().unwrap();
+            assert_eq!(t.status, Status::Cancelled);
+            assert_eq!(t.attempts, 0);
+            assert_eq!(reasons(&store, id), vec!["dependency_failed"]);
+        }
+        assert_eq!(store.get(d.id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(store.get(unrelated.id).unwrap().unwrap().status, Status::Ready);
     }
 }

@@ -1,22 +1,24 @@
-//! `taskctl plan` — DESIGN.md §5.9 / ADR-0007 D6。
+//! `taskctl plan` — DESIGN.md §5.9 / ADR-0007 D6 / ADR-0010 D4（P-19）。
 //!
-//! 大目標を表す文字列 1 つから根の `Plan` タスクを組み立てて `insert` し、
-//! 同一内容を `Event::Created` として追記する。子タスクの生成はプランナー
-//! （ワーカー）の出力を Reviewer が検証・展開する経路で行うため、ここでは
-//! `acceptance = []`（暗黙のプラン検証条件のみ。ADR-0007 D4）で `Draft` の
+//! 大目標を表す文字列 1 つから根の `Plan` タスクを組み立て、`TaskStore::create_task` で
+//! `insert` + `Event::Created` を単一トランザクションとして書き込む（ADR-0010 D2）。
+//! 子タスクの生成はプランナー（ワーカー）の出力を Reviewer が検証・展開する経路で行うため、
+//! ここでは `acceptance = []`（暗黙のプラン検証条件のみ。ADR-0007 D4）で `Draft` の
 //! 1 タスクを作るだけに留める。`--parent` は受け付けない（根の Plan のみ）。
+//! `--workspace` を省略した場合は `WorkspaceSpec::Local{ path: "<task_id>" }`（相対パス、P-19）。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Args;
 use task_core::{
-    Budget, Event, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint, WorkspaceSpec,
+    Budget, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
 use crate::commands::add::TierArg;
 use crate::error::CliError;
+use crate::outln;
 
 const TITLE_MAX_CHARS: usize = 80;
 const DEFAULT_MAX_TURNS: u32 = 30;
@@ -62,13 +64,12 @@ pub fn run(store: &dyn TaskStore, args: PlanArgs) -> Result<ExitCode, CliError> 
     let tier: Tier = args.tier.into();
     let title = truncate_title(&args.goal, TITLE_MAX_CHARS);
 
+    let id = TaskId::new();
     let workspace = match args.workspace {
         Some(path) => WorkspaceSpec::Local { path },
-        None => {
-            let path = std::env::current_dir()
-                .map_err(|e| CliError::msg(format!("failed to get current directory: {e}")))?;
-            WorkspaceSpec::Local { path }
-        }
+        None => WorkspaceSpec::Local {
+            path: PathBuf::from(id.to_string()),
+        },
     };
 
     let budget = Budget {
@@ -80,7 +81,7 @@ pub fn run(store: &dyn TaskStore, args: PlanArgs) -> Result<ExitCode, CliError> 
     let now = OffsetDateTime::now_utc();
 
     let task = Task {
-        id: TaskId::new(),
+        id,
         parent_id: None,
         kind: TaskKind::Plan,
         title,
@@ -102,22 +103,16 @@ pub fn run(store: &dyn TaskStore, args: PlanArgs) -> Result<ExitCode, CliError> 
         updated_at: now,
     };
 
-    store.insert(&task)?;
-    store.append_event(
-        task.id,
-        &Event::Created {
-            task: Box::new(task.clone()),
-        },
-    )?;
+    store.create_task(&task, vec![])?;
 
-    println!("{}", task.id);
+    outln!("{}", task.id);
     Ok(ExitCode::SUCCESS)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use task_core::SqliteStore;
+    use task_core::{Event, SqliteStore};
 
     fn base_args(goal: &str) -> PlanArgs {
         PlanArgs {
@@ -209,5 +204,25 @@ mod tests {
         assert_eq!(task.worker_hint.tier, Tier::Standard);
         assert_eq!(task.budget.max_retries, 0);
         assert_eq!(task.priority, 5);
+    }
+
+    /// P-19: `--workspace` 省略時は `<task_id>`（相対パス）になる。
+    #[test]
+    fn run_without_workspace_defaults_to_relative_task_id_path() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut args = base_args("do something useful");
+        args.workspace = None;
+
+        run(&store, args).expect("run plan");
+
+        let tasks = store.list(None).expect("list tasks");
+        assert_eq!(tasks.len(), 1);
+        let task = &tasks[0];
+        assert_eq!(
+            task.workspace,
+            WorkspaceSpec::Local {
+                path: PathBuf::from(task.id.to_string())
+            }
+        );
     }
 }

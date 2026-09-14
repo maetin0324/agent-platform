@@ -1,5 +1,6 @@
 //! サブプロセス + JSON Lines の実行器（ADR-0003 D1/D3/D4/D5）。
 
+use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -11,29 +12,10 @@ use tokio::process::{Child, Command};
 use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal};
-use crate::protocol::{RunRequest, WorkerMessage};
+use crate::protocol::{ProviderFailure, RunRequest, WorkerMessage};
 
 /// 1 行の上限（ADR-0003 D1）。
 pub(crate) const MAX_LINE_BYTES: usize = 1024 * 1024;
-
-/// `Command::spawn` を、`ETXTBSY`（直前に書き込んだ実行ファイルへの exec が、書き込み直後の
-/// 過渡状態と競合して失敗することがある。CI やテストで多数のサブプロセスを並行起動すると観測される）
-/// に限り数回リトライする。それ以外のエラーは即座に返す。
-pub(crate) async fn spawn_retrying(command: &mut Command) -> std::io::Result<Child> {
-    const ETXTBSY: i32 = 26;
-    const MAX_ATTEMPTS: u32 = 5;
-    let mut attempt = 0;
-    loop {
-        match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt + 1 < MAX_ATTEMPTS => {
-                attempt += 1;
-                tokio::time::sleep(Duration::from_millis(20 * attempt as u64)).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
 
 /// 起動するコマンド。`program` と `args` は設定からそのまま渡す。cwd は `req.workspace`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +50,7 @@ pub async fn run_subprocess(
     #[cfg(unix)]
     command.process_group(0);
 
-    let mut child = spawn_retrying(&mut command).await.map_err(AdapterError::Spawn)?;
+    let mut child = command.spawn().map_err(AdapterError::Spawn)?;
 
     let payload = serde_json::to_string(req)?;
     if let Some(mut stdin) = child.stdin.take() {
@@ -106,6 +88,9 @@ pub async fn run_subprocess(
     let mut last_activity = Instant::now();
     let mut terminal: Option<Terminal> = None;
     let mut terminal_raw: Option<String> = None;
+    // `error.provider_failure`（ADR-0010 D5）。終端が `error` でこれが付いていれば、result.json を
+    // 書いた後に `AdapterError` として返す（ディスパッチャに requeue 判断をさせるため）。
+    let mut provider_failure: Option<ProviderFailure> = None;
     // true なら終端後すぐに SIGTERM→SIGKILL（タイムアウト・プロトコル違反）。
     // false なら「終端メッセージを受け取った後」の穏やかな刈り取り（仕様 6）。
     let mut force_kill = false;
@@ -140,6 +125,8 @@ pub async fn run_subprocess(
         match outcome {
             LineOutcome::Eof => break,
             LineOutcome::TooLong => {
+                // ADR-0010 D7: 1 行読むたび（読めなかった超過行も含む）に生存通知する。
+                sink.heartbeat();
                 terminal = Some(Terminal::Error {
                     message: "protocol violation: stdout line exceeds 1 MiB".into(),
                     retryable: false,
@@ -148,6 +135,7 @@ pub async fn run_subprocess(
                 break;
             }
             LineOutcome::Line(bytes) => {
+                sink.heartbeat();
                 last_activity = Instant::now();
                 stdout_file.write_all(&bytes).await?;
                 stdout_file.write_all(b"\n").await?;
@@ -175,8 +163,9 @@ pub async fn run_subprocess(
                             terminal_raw = Some(trimmed.to_string());
                             terminal = Some(Terminal::Done { summary, evidence, usage });
                         }
-                        WorkerMessage::Error { message, retryable } => {
+                        WorkerMessage::Error { message, retryable, provider_failure: pf } => {
                             terminal_raw = Some(trimmed.to_string());
+                            provider_failure = pf;
                             terminal = Some(Terminal::Error { message, retryable });
                         }
                     },
@@ -215,6 +204,12 @@ pub async fn run_subprocess(
         tokio::fs::write(&result_log_path, format!("{raw}\n")).await?;
     }
 
+    // ADR-0010 D5: 供給側失敗は result.json を書いた後（上記）に `AdapterError` として返す。
+    // 遷移の判断はここでは行わない（ディスパッチャの責務）。
+    if let (Some(Terminal::Error { message, .. }), Some(pf)) = (&terminal, provider_failure) {
+        return Err(AdapterError::from_provider_failure(pf, message));
+    }
+
     let terminal = terminal.unwrap_or_else(|| {
         let exit_repr = match exit_status.code() {
             Some(code) => code.to_string(),
@@ -230,6 +225,44 @@ pub async fn run_subprocess(
         terminal,
         exit_code: exit_status.code(),
     })
+}
+
+/// `Terminal` を `WorkerMessage` に正規化して `runs/<run_id>/result.json` に 1 行 JSON として書く
+/// （ADR-0010 D10 P-26）。`run_subprocess` はワーカーから受信した生の行をそのまま書くので使わないが、
+/// `claude-code`/`codex` は自前で終端を合成するのでこの共通ヘルパを使う。
+pub(crate) async fn write_result_json(
+    run_dir: &Path,
+    terminal: &Terminal,
+    provider_failure: Option<ProviderFailure>,
+) -> std::io::Result<()> {
+    let msg = match terminal {
+        Terminal::Done { summary, evidence, usage } => WorkerMessage::Done {
+            summary: summary.clone(),
+            evidence: evidence.clone(),
+            usage: *usage,
+        },
+        Terminal::Question { text } => WorkerMessage::Question { text: text.clone() },
+        Terminal::Error { message, retryable } => WorkerMessage::Error {
+            message: message.clone(),
+            retryable: *retryable,
+            provider_failure,
+        },
+    };
+    let text = serde_json::to_string(&msg).map_err(std::io::Error::other)?;
+    tokio::fs::write(run_dir.join("result.json"), format!("{text}\n")).await
+}
+
+/// ファイル末尾 `max` バイトを文字列として読む（供給側失敗の分類用。ADR-0010 D5）。
+/// ファイルが無い・読めない場合は空文字列を返す（分類対象が無ければ `None` になるだけで、run の
+/// 結果全体には影響させない）。
+pub(crate) async fn read_tail(path: &Path, max: usize) -> String {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(max);
+            String::from_utf8_lossy(&bytes[start..]).into_owned()
+        }
+        Err(_) => String::new(),
+    }
 }
 
 pub(crate) enum LineOutcome {
@@ -304,6 +337,7 @@ mod tests {
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
         artifacts: Mutex<Vec<ArtifactRef>>,
+        heartbeat_count: Mutex<u32>,
     }
 
     impl EventSink for RecordingSink {
@@ -315,6 +349,9 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(artifact.clone());
+        }
+        fn heartbeat(&self) {
+            *self.heartbeat_count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
         }
     }
 
@@ -367,6 +404,8 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].name, "out");
         assert_eq!(artifacts[0].sha256.len(), 64);
+        // progress・artifact・done の 3 行分は少なくとも heartbeat が呼ばれている（ADR-0010 D7）。
+        assert!(*sink.heartbeat_count.lock().unwrap() >= 3);
 
         let received = std::fs::read_to_string(dir.path().join("received.json")).unwrap();
         assert!(received.contains(r#""type":"run""#));
@@ -491,6 +530,30 @@ mod tests {
             Terminal::Done { summary, .. } => assert_eq!(summary, "ok"),
             other => panic!("expected done, got {other:?}"),
         }
+    }
+
+    /// `error.provider_failure` が付いていれば、result.json を書いた上で `AdapterError` として返す
+    /// （ADR-0010 D5）。heartbeat は observed 行数（progress + error）以上呼ばれる（D7）。
+    #[tokio::test]
+    async fn provider_failure_is_classified_and_result_json_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = sh_spec(
+            "cat >/dev/null; \
+             echo '{\"type\":\"progress\",\"msg\":\"a\"}'; \
+             echo '{\"type\":\"error\",\"message\":\"boom\",\"retryable\":true,\
+             \"provider_failure\":{\"kind\":\"throttled\",\"retry_after_secs\":7}}'",
+        );
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let err = run_subprocess(&spec, &req, "run-9", &default_limits(), &sink)
+            .await
+            .expect_err("expected provider failure to surface as an AdapterError");
+        match err {
+            AdapterError::Throttled { retry_after } => assert_eq!(retry_after, Duration::from_secs(7)),
+            other => panic!("expected Throttled, got {other:?}"),
+        }
+        assert!(dir.path().join("runs/run-9/result.json").is_file());
+        assert!(*sink.heartbeat_count.lock().unwrap() >= 2);
     }
 
     #[tokio::test]

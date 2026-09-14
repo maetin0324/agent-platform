@@ -27,12 +27,16 @@ pub enum Trigger {
     Approve,
     Reject,
     Cancel,
+    /// 供給側失敗（レート制限・認証失敗・枯渇・起動失敗）: `running → ready`、attempts 据え置き（ADR-0010 D1, P-21）。
+    Requeue,
+    /// 先行タスクが `failed`/`cancelled` になった後続: 非終端 → `cancelled`（ADR-0010 D1, P-9）。
+    DependencyFailed,
 }
 
 impl Trigger {
     /// snake_case の trigger 名。成功時の `Outcome::reason` および失敗時の
     /// `InvalidTransition` のメッセージに使う。
-    fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Trigger::Accept => "accept",
             Trigger::Dispatch => "dispatch",
@@ -46,6 +50,8 @@ impl Trigger {
             Trigger::Approve => "approve",
             Trigger::Reject => "reject",
             Trigger::Cancel => "cancel",
+            Trigger::Requeue => "requeue",
+            Trigger::DependencyFailed => "dependency_failed",
         }
     }
 }
@@ -95,12 +101,31 @@ fn retry_or_fail(s: &StateView, reason: &'static str) -> Outcome {
 /// タスクの状態機械。DESIGN.md / ADR-0002 D2,D3,D8 の遷移表を実装する純粋関数。
 pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransition> {
     match t {
-        // Cancel はどの status からでも常に成功する自己遷移も含む万能トリガー。
-        Trigger::Cancel => Ok(Outcome {
-            next: Status::Cancelled,
-            attempts: s.attempts,
-            reason: t.name(),
-        }),
+        // ADR-0010 D1（P-4 / P-9）: Cancel と DependencyFailed は非終端状態からのみ cancelled へ。
+        Trigger::Cancel | Trigger::DependencyFailed => {
+            if s.status.is_terminal() {
+                Err(invalid(s, t))
+            } else {
+                Ok(Outcome {
+                    next: Status::Cancelled,
+                    attempts: s.attempts,
+                    reason: t.name(),
+                })
+            }
+        }
+
+        // ADR-0010 D1（P-21）: 供給側失敗は attempts を消費せず ready に戻す。
+        Trigger::Requeue => {
+            if s.status == Status::Running {
+                Ok(Outcome {
+                    next: Status::Ready,
+                    attempts: s.attempts,
+                    reason: t.name(),
+                })
+            } else {
+                Err(invalid(s, t))
+            }
+        }
 
         Trigger::Accept => {
             if s.status == Status::Draft {
@@ -273,7 +298,21 @@ mod tests {
     /// そのまま再現した期待値を返す。
     fn expected_simple(kind: TaskKind, status: Status, trigger: &Trigger) -> Expected {
         match trigger {
-            Trigger::Cancel => expect_ok(Status::Cancelled),
+            // ADR-0010 D1: 非終端からのみ。
+            Trigger::Cancel | Trigger::DependencyFailed => {
+                if status.is_terminal() {
+                    expect_err()
+                } else {
+                    expect_ok(Status::Cancelled)
+                }
+            }
+            Trigger::Requeue => {
+                if status == Status::Running {
+                    expect_ok(Status::Ready)
+                } else {
+                    expect_err()
+                }
+            }
             Trigger::Accept => {
                 if status == Status::Draft {
                     expect_ok(Status::Ready)
@@ -347,6 +386,8 @@ mod tests {
             Trigger::Approve,
             Trigger::Reject,
             Trigger::Cancel,
+            Trigger::Requeue,
+            Trigger::DependencyFailed,
         ];
 
         let mut count = 0usize;
@@ -389,8 +430,8 @@ mod tests {
                 }
             }
         }
-        // 4 kinds * 8 statuses * 9 triggers
-        assert_eq!(count, 4 * 8 * 9);
+        // 4 kinds * 8 statuses * 11 triggers
+        assert_eq!(count, 4 * 8 * 11);
     }
 
     /// リトライ判定を含むトリガー (WorkerError{true/false}, LeaseExpired,
@@ -528,23 +569,38 @@ mod tests {
         assert_eq!(o1.attempts, 2);
     }
 
-    /// Cancel は終端状態からの自己遷移も含めて常に成功する。
+    /// ADR-0010 D1（P-4 / P-9 / P-21）: Cancel と DependencyFailed は非終端からのみ成功し attempts を保つ。
+    /// Requeue は running からのみ ready へ戻り attempts を保つ（max_retries に達していても failed にしない）。
     #[test]
-    fn cancel_always_succeeds_including_terminal_self_transition() {
+    fn cancel_dependency_failed_and_requeue_keep_attempts() {
         for kind in ALL_KINDS {
             for status in ALL_STATUSES {
                 let s = StateView {
                     kind,
                     status,
-                    attempts: 2,
+                    attempts: 5,
                     max_retries: 5,
                 };
-                let outcome = transition(&s, &Trigger::Cancel).unwrap_or_else(|e| {
-                    panic!("Cancel must always succeed, got Err({e}) for kind={kind:?} status={status:?}");
-                });
-                assert_eq!(outcome.next, Status::Cancelled);
-                assert_eq!(outcome.attempts, 2);
-                assert_eq!(outcome.reason, "cancel");
+                for trigger in [Trigger::Cancel, Trigger::DependencyFailed] {
+                    match transition(&s, &trigger) {
+                        Ok(outcome) => {
+                            assert!(!status.is_terminal(), "{trigger:?} from terminal {status:?} must be invalid");
+                            assert_eq!(outcome.next, Status::Cancelled);
+                            assert_eq!(outcome.attempts, 5);
+                            assert_eq!(outcome.reason, trigger.name());
+                        }
+                        Err(_) => assert!(status.is_terminal(), "{trigger:?} from {status:?} must be valid"),
+                    }
+                }
+                match transition(&s, &Trigger::Requeue) {
+                    Ok(outcome) => {
+                        assert_eq!(status, Status::Running);
+                        assert_eq!(outcome.next, Status::Ready);
+                        assert_eq!(outcome.attempts, 5);
+                        assert_eq!(outcome.reason, "requeue");
+                    }
+                    Err(_) => assert_ne!(status, Status::Running),
+                }
             }
         }
     }

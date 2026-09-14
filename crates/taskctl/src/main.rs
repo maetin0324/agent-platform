@@ -2,6 +2,7 @@
 
 mod commands;
 mod error;
+mod output;
 
 use std::env;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use clap::{Parser, Subcommand};
 use task_core::{SqliteStore, TaskStore};
 
 use commands::add::{self, AddArgs};
+use commands::cancel::{self, CancelArgs};
 use commands::gate::{self, AnswerArgs, ApproveArgs, RejectArgs};
 use commands::plan::{self, PlanArgs};
 use commands::query::{self, LogArgs, LsArgs, ShowArgs};
@@ -37,6 +39,7 @@ enum Command {
     Show(ShowArgs),
     Approve(ApproveArgs),
     Reject(RejectArgs),
+    Cancel(CancelArgs),
     Answer(AnswerArgs),
     Log(LogArgs),
     Replay(ReplayArgs),
@@ -56,6 +59,7 @@ fn dispatch(store: &dyn TaskStore, command: Command) -> Result<ExitCode, CliErro
         Command::Show(args) => query::run_show(store, args),
         Command::Approve(args) => gate::run_approve(store, args),
         Command::Reject(args) => gate::run_reject(store, args),
+        Command::Cancel(args) => cancel::run(store, args),
         Command::Answer(args) => gate::run_answer(store, args),
         Command::Log(args) => query::run_log(store, args),
         Command::Replay(args) => replay::run(store, args),

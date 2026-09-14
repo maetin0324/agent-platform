@@ -92,15 +92,8 @@ fn main() {
     };
     let workspace_display = workspace_path.display().to_string();
 
-    store.insert(&task).expect("insert task");
-    store
-        .append_event(
-            task.id,
-            &task_core::Event::Created {
-                task: Box::new(task.clone()),
-            },
-        )
-        .expect("append Created event");
+    // ADR-0010 D2: insert と Created を 1 トランザクションで。
+    store.create_task(&task, vec![]).expect("create task");
 
     println!("seeded task {} (status=ready, workspace={workspace_display})", task.id);
 }

@@ -19,8 +19,11 @@ use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 use crate::claude_code::build_prompt;
-use crate::protocol::{Evidence, RunRequest};
-use crate::subprocess::{LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, spawn_retrying};
+use crate::protocol::{Evidence, ProviderFailure, RunRequest};
+use crate::provider::classify_provider_failure;
+use crate::subprocess::{
+    LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, read_tail, write_result_json,
+};
 
 /// `[adapters.codex]`（taskd.toml, ADR-0008 D4）。
 #[derive(Debug, Clone)]
@@ -116,6 +119,9 @@ async fn run_codex(
     tokio::fs::create_dir_all(&run_dir).await?;
     let stdout_log_path = run_dir.join("stdout.jsonl");
     let stderr_log_path = run_dir.join("stderr.log");
+    // `stderr_task` (below) moves a copy into its `async move` block; this one stays available for
+    // the crash-classification read after the loop (ADR-0010 D5).
+    let stderr_log_path_for_task = stderr_log_path.clone();
 
     // 前回の run（リトライ）が残した結果ファイルを、今回の run の結果と誤読しない（ADR-0006 D3 と同じ理由）。
     let result_path = req.workspace.join("artifacts").join("result.json");
@@ -140,7 +146,7 @@ async fn run_codex(
     #[cfg(unix)]
     command.process_group(0);
 
-    let mut child = spawn_retrying(&mut command).await.map_err(AdapterError::Spawn)?;
+    let mut child = command.spawn().map_err(AdapterError::Spawn)?;
 
     let stdout = child
         .stdout
@@ -153,7 +159,7 @@ async fn run_codex(
 
     let stderr_task = tokio::spawn(async move {
         let mut reader = stderr;
-        match tokio::fs::File::create(&stderr_log_path).await {
+        match tokio::fs::File::create(&stderr_log_path_for_task).await {
             Ok(mut file) => {
                 if let Err(e) = tokio::io::copy(&mut reader, &mut file).await {
                     warn!("failed to write worker stderr.log: {e}");
@@ -169,6 +175,9 @@ async fn run_codex(
     let start = Instant::now();
     let mut last_activity = Instant::now();
     let mut last_signal: Option<TurnSignal> = None;
+    // `{"type":"error","message":...}` を観測したら保持する（ADR-0010 D5: `turn.*` を一度も観測できずに
+    // exit した場合の分類材料に使う）。
+    let mut last_error_message: Option<String> = None;
     let mut force_kill = false;
     let mut timeout_terminal: Option<Terminal> = None;
 
@@ -202,17 +211,19 @@ async fn run_codex(
         match outcome {
             LineOutcome::Eof => break,
             LineOutcome::TooLong => {
+                sink.heartbeat();
                 last_activity = Instant::now();
                 warn!("run {run_id}: discarding overlong line from codex stdout");
             }
             LineOutcome::Line(bytes) => {
+                sink.heartbeat();
                 last_activity = Instant::now();
                 stdout_file.write_all(&bytes).await?;
                 stdout_file.write_all(b"\n").await?;
                 let text = String::from_utf8_lossy(&bytes);
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    handle_line(trimmed, sink, &mut last_signal);
+                    handle_line(trimmed, sink, &mut last_signal, &mut last_error_message);
                 }
             }
         }
@@ -229,26 +240,48 @@ async fn run_codex(
     }
     stdout_file.flush().await?;
 
-    let terminal = match (timeout_terminal, &last_signal) {
-        (Some(t), _) => t,
+    let (terminal, provider_failure): (Terminal, Option<ProviderFailure>) = match (timeout_terminal, &last_signal) {
+        // タイムアウト（wall-clock / idle）は分類しない（ADR-0010 D5）。
+        (Some(t), _) => (t, None),
         // `turn.completed`/`turn.failed` を一度も観測できずに exit した場合はクラッシュとして扱い、
         // artifacts/result.json を一切信用しない（ADR-0006 D4 と同じ理由。ADR-0008 D3）。
+        // 観測できた `{"type":"error",...}` のメッセージ、無ければ stderr.log の末尾を分類する（ADR-0010 D5）。
         (None, None) => {
             let exit_repr = match exit_status.code() {
                 Some(code) => code.to_string(),
                 None => "signal".to_string(),
             };
-            Terminal::Error {
-                message: format!("worker exited without a turn.completed/turn.failed message (exit={exit_repr})"),
-                retryable: true,
+            let mut pf = last_error_message.as_deref().and_then(classify_provider_failure);
+            if pf.is_none() {
+                let tail = read_tail(&stderr_log_path, 4096).await;
+                pf = classify_provider_failure(&tail);
             }
+            (
+                Terminal::Error {
+                    message: format!("worker exited without a turn.completed/turn.failed message (exit={exit_repr})"),
+                    retryable: true,
+                },
+                pf,
+            )
         }
-        (None, Some(TurnSignal::Failed { message })) => Terminal::Error {
-            message: format!("codex turn failed: {message}"),
-            retryable: true,
-        },
-        (None, Some(TurnSignal::Completed { usage })) => terminal_from_result(&req.workspace, *usage).await,
+        (None, Some(TurnSignal::Failed { message })) => {
+            let pf = classify_provider_failure(message);
+            (
+                Terminal::Error {
+                    message: format!("codex turn failed: {message}"),
+                    retryable: true,
+                },
+                pf,
+            )
+        }
+        (None, Some(TurnSignal::Completed { usage })) => (terminal_from_result(&req.workspace, *usage).await, None),
     };
+
+    write_result_json(&run_dir, &terminal, provider_failure).await?;
+
+    if let (Terminal::Error { message, .. }, Some(pf)) = (&terminal, provider_failure) {
+        return Err(AdapterError::from_provider_failure(pf, message));
+    }
 
     Ok(RunOutcome {
         terminal,
@@ -258,7 +291,12 @@ async fn run_codex(
 
 /// codex の JSON Lines の 1 行を解釈する。既知でない `type` や JSON として不正な行は無視する
 /// （`claude_code::handle_line` と同じ方針。ADR-0008 D3）。
-fn handle_line(line: &str, sink: &dyn EventSink, last_signal: &mut Option<TurnSignal>) {
+fn handle_line(
+    line: &str,
+    sink: &dyn EventSink,
+    last_signal: &mut Option<TurnSignal>,
+    last_error_message: &mut Option<String>,
+) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         return;
     };
@@ -276,6 +314,11 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_signal: &mut Option<TurnSi
                 output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
             });
             *last_signal = Some(TurnSignal::Completed { usage });
+        }
+        "error" => {
+            if let Some(m) = value.get("message").and_then(|m| m.as_str()) {
+                *last_error_message = Some(m.to_string());
+            }
         }
         "turn.failed" => {
             // 実機（codex-cli 0.154.0）では `error` はオブジェクト（`{"message":"..."}`）で返る。
@@ -349,7 +392,6 @@ async fn terminal_from_result(workspace: &std::path::Path, usage: Option<Usage>)
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -372,10 +414,8 @@ mod tests {
 
     fn stub_codex(dir: &std::path::Path, script: &str) -> CodexConfig {
         let path = dir.join("codex_stub.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
+        // ETXTBSY 対策（ADR-0010 D10）: テストプロセス自身が書き込み fd を持たないよう別プロセスで書く。
+        crate::test_support::write_executable(&path, &format!("#!/bin/sh\n{script}\n"));
         CodexConfig {
             command: path.to_string_lossy().into_owned(),
             ..CodexConfig::default()
@@ -426,6 +466,14 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
         let progress = sink.progress.lock().unwrap();
         assert!(progress.iter().any(|m| m.contains("command_execution")));
         assert!(dir.path().join("runs/run-1/stdout.jsonl").is_file());
+
+        // P-26 (ADR-0010 D10): the terminal is also normalized into `runs/<run_id>/result.json`,
+        // readable by task-dispatch as a `WorkerMessage::Done`.
+        let result_json = std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
+        match serde_json::from_str::<crate::protocol::WorkerMessage>(result_json.trim()).unwrap() {
+            crate::protocol::WorkerMessage::Done { summary, .. } => assert_eq!(summary, "added usage example"),
+            other => panic!("expected done in result.json, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -468,6 +516,47 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
             }
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    /// `turn.failed.error.message` が供給側失敗の文言に一致すれば `AdapterError::Exhausted` として
+    /// 返る（ADR-0010 D5）。result.json も書かれる。
+    #[tokio::test]
+    async fn turn_failed_classified_as_exhausted_surfaces_as_adapter_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"echo '{"type":"turn.failed","error":{"message":"You'"'"'ve hit your usage limit"}}'"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let err = adapter
+            .run(req, "run-2c", default_limits(), &sink)
+            .await
+            .expect_err("expected a provider failure");
+        assert!(matches!(err, AdapterError::Exhausted(_)), "{err:?}");
+        assert!(dir.path().join("runs/run-2c/result.json").is_file());
+    }
+
+    /// `turn.*` を一度も観測できずに exit した場合も `{"type":"error",...}` の直前の行を分類する
+    /// （ADR-0010 D5）。
+    #[tokio::test]
+    async fn crash_with_matching_error_line_is_classified_as_provider_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"echo '{"type":"error","message":"429 Too Many Requests"}'
+exit 9
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let err = adapter
+            .run(req, "run-2d", default_limits(), &sink)
+            .await
+            .expect_err("expected a provider failure");
+        assert!(matches!(err, AdapterError::Throttled { .. }), "{err:?}");
     }
 
     #[tokio::test]
@@ -684,14 +773,11 @@ echo '{"type":"turn.completed"}'
             command: {
                 let path = dir.path().join("codex_stub.sh");
                 // 引数は改行を含みうる（プロンプト）ので NUL 区切りで記録する。
-                std::fs::write(
+                // ETXTBSY 対策（ADR-0010 D10）: 別プロセスで書く。
+                crate::test_support::write_executable(
                     &path,
                     "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\" >> \"$(dirname \"$0\")/args.log\"; done\necho '{\"type\":\"turn.completed\"}'\n",
-                )
-                .unwrap();
-                let mut perms = std::fs::metadata(&path).unwrap().permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&path, perms).unwrap();
+                );
                 path.to_string_lossy().into_owned()
             },
             extra_args: vec!["--sandbox".into(), "read-only".into()],

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-use task_core::Tier;
+use task_core::{Tier, WorkerHint};
 use task_dispatch::{DispatchConfig, ProviderSpec};
 
 #[derive(Debug, thiserror::Error)]
@@ -44,12 +44,49 @@ pub struct Config {
     pub review_timeout_secs: u64,
     #[serde(default = "default_error_cooldown_secs")]
     pub error_cooldown_secs: u64,
+    /// ADR-0010 D6（P-3）: リトライのバックオフ `min(base·2^(attempts-1), max)` 秒。`base = 0` で無効。
+    #[serde(default = "default_retry_backoff_base_secs")]
+    pub retry_backoff_base_secs: u64,
+    #[serde(default = "default_retry_backoff_max_secs")]
+    pub retry_backoff_max_secs: u64,
     #[serde(default)]
     pub adapters: AdaptersConfig,
     #[serde(default)]
     pub plan: PlanConfig,
     #[serde(default)]
+    pub reviewer: ReviewerConfig,
+    #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+}
+
+/// `[reviewer]`（ADR-0010 D9, P-30）: `Check::Reviewer` の判定 run に使う adapter / tier。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewerConfig {
+    /// 省略時は tier だけで選ぶ（設定表の優先順）。
+    #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default = "default_reviewer_tier")]
+    pub tier: Tier,
+}
+
+impl Default for ReviewerConfig {
+    fn default() -> Self {
+        Self {
+            adapter: None,
+            tier: default_reviewer_tier(),
+        }
+    }
+}
+
+fn default_reviewer_tier() -> Tier {
+    Tier::Standard
+}
+fn default_retry_backoff_base_secs() -> u64 {
+    10
+}
+fn default_retry_backoff_max_secs() -> u64 {
+    300
 }
 
 /// `[plan]`（DESIGN §4.2, ADR-0007 D7）。
@@ -251,6 +288,32 @@ impl Config {
                 return Err(ConfigError::Invalid(format!("provider {}: concurrency must be >= 1", p.id)));
             }
         }
+        // ADR-0010 D9: Reviewer run を満たせるプロバイダが無い設定は、Reviewer 条件のタスクが無音で待ち続ける原因になる。
+        let reviewer = &self.reviewer;
+        let reviewer_ok = self.providers.iter().any(|p| {
+            p.tiers.contains(&reviewer.tier) && reviewer.adapter.as_deref().is_none_or(|a| p.adapter == a)
+        });
+        if !reviewer_ok {
+            return Err(ConfigError::Invalid(format!(
+                "[reviewer] no provider offers tier {:?}{} for reviewer runs",
+                reviewer.tier,
+                reviewer.adapter.as_deref().map(|a| format!(" with adapter {a:?}")).unwrap_or_default()
+            )));
+        }
+        // Phase 7 監査: cooldown 0 だと供給側失敗の requeue が毎 tick の再 dispatch になる。
+        if self.error_cooldown_secs == 0 {
+            return Err(ConfigError::Invalid("error_cooldown_secs must be >= 1".into()));
+        }
+        // ADR-0010 D7 の前提: 無出力で強制終了された run の結果（SIGKILL までの kill_grace + 次 tick での取り込み）が、
+        // 延長後のリース期限より先に処理されること。
+        if self.kill_grace_secs * 1000 + self.tick_ms >= self.lease_grace_secs * 1000 / 2 {
+            return Err(ConfigError::Invalid(
+                "kill_grace_secs + tick_ms must be shorter than lease_grace_secs / 2 (lease renewal safety, ADR-0010 D7)".into(),
+            ));
+        }
+        if self.retry_backoff_max_secs < self.retry_backoff_base_secs {
+            return Err(ConfigError::Invalid("retry_backoff_max_secs must be >= retry_backoff_base_secs".into()));
+        }
         Ok(())
     }
 
@@ -267,6 +330,12 @@ impl Config {
             review_timeout: Duration::from_secs(self.review_timeout_secs),
             workspace_root: self.workspace_root.clone(),
             plan_auto_accept: self.plan.auto_accept,
+            retry_backoff_base: Duration::from_secs(self.retry_backoff_base_secs),
+            retry_backoff_max: Duration::from_secs(self.retry_backoff_max_secs),
+            reviewer_hint: WorkerHint {
+                tier: self.reviewer.tier,
+                adapter: self.reviewer.adapter.clone(),
+            },
         }
     }
 
@@ -366,6 +435,61 @@ adapter = "fake"
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.adapters.codex.command, "codex");
         assert!(cfg.adapters.codex.model.is_none());
+    }
+
+    /// ADR-0010 D6/D9: バックオフと `[reviewer]` の既定値・指定値が DispatchConfig に写る。
+    #[test]
+    fn backoff_and_reviewer_settings_map_to_dispatch_config() {
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(cfg.validate().is_ok());
+        let d = cfg.dispatch_config();
+        assert_eq!(d.retry_backoff_base, Duration::from_secs(10));
+        assert_eq!(d.retry_backoff_max, Duration::from_secs(300));
+        assert_eq!(d.reviewer_hint, WorkerHint { tier: Tier::Standard, adapter: None });
+
+        let text = r#"retry_backoff_base_secs = 0
+retry_backoff_max_secs = 0
+[reviewer]
+adapter = "claude-code"
+tier = "cheap"
+[[providers]]
+id = "f"
+adapter = "fake"
+[[providers]]
+id = "c"
+adapter = "claude-code"
+tiers = ["cheap"]
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.validate().is_ok());
+        let d = cfg.dispatch_config();
+        assert_eq!(d.retry_backoff_base, Duration::ZERO);
+        assert_eq!(d.reviewer_hint, WorkerHint { tier: Tier::Cheap, adapter: Some("claude-code".into()) });
+    }
+
+    /// ADR-0010 D9: Reviewer run を満たせるプロバイダが無い設定はエラー。未知キーも拒否。
+    #[test]
+    fn rejects_reviewer_without_matching_provider_and_unknown_reviewer_keys() {
+        let cfg: Config = toml::from_str("[reviewer]\nadapter = \"codex\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("[reviewer]") && err.contains("codex"), "{err}");
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\ntiers = [\"frontier\"]\n").unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("Standard"));
+        assert!(toml::from_str::<Config>("[reviewer]\nbogus = 1\n").is_err());
+        let cfg: Config = toml::from_str("retry_backoff_base_secs = 20\nretry_backoff_max_secs = 10\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    /// Phase 7 監査: cooldown 0（requeue のホットループ）と、リース延長の前提を破る猶予の組み合わせを拒否する。
+    #[test]
+    fn rejects_zero_cooldown_and_unsafe_lease_grace() {
+        let providers = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
+        let cfg: Config = toml::from_str(&format!("error_cooldown_secs = 0\n{providers}")).unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("error_cooldown_secs"));
+        let cfg: Config = toml::from_str(&format!("lease_grace_secs = 10\nkill_grace_secs = 10\n{providers}")).unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("lease_grace_secs"));
+        let cfg: Config = toml::from_str(&format!("lease_grace_secs = 60\nkill_grace_secs = 1\ntick_ms = 50\n{providers}")).unwrap();
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

@@ -43,7 +43,8 @@ taskd ◀─stdout── {"type":"progress", ...}\n
  "workspace":"/abs/path/to/workspace/<task_id>",
  "context":{
    "prior_review":[{"criterion":0,"pass":false,"reason":"cargo test exit 101: ..."}],
-   "inputs":[{"name":"spec.md","path":"inputs/spec.md","sha256":"…","kind":"doc"}]
+   "inputs":[{"name":"spec.md","path":"inputs/spec.md","sha256":"…","kind":"doc"}],
+   "answers":[{"question":"which crate version?","answer":"1.0"}]
  }}
 ```
 
@@ -54,6 +55,13 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 | `workspace` | string | ✓ | 絶対パス。ワーカーの cwd。`artifact.path` の基準 |
 | `context.prior_review` | array | ✓（空可） | 直前のレビュー結果。`{criterion: usize, pass: bool, reason: string}` |
 | `context.inputs` | array | ✓（空可） | 依存成果物の `ArtifactRef`。`prepare()` で `workspace/inputs/` に配置済み |
+| `context.answers` | array | –（省略可、空なら省略） | `taskctl answer` で記録された `question` → 人間の回答の履歴（時系列、`{question: string, answer: string}`）。ADR-0010 D3, P-10。前方互換のため未知のワーカーは無視してよい |
+
+`context.answers` は、このタスクの `Event::Answered` を時系列に並べたもの（`question` は直前の
+`WorkerFinished.outcome` の `"question: "` 接頭辞から取ったもの、無ければ空文字列）。`claude-code`/`codex`
+アダプタは、空でなければプロンプトに「以前の質問への人間の回答」節として反映する（Execute/Plan のみ。
+Review プロンプトには含めない）。JSON Lines プロトコルを直接話す `fake` 等のワーカーは、この配列を読んで
+自由に扱ってよい（taskd 側は解釈を強制しない）。
 
 ## 4. ワーカー → taskd
 
@@ -125,10 +133,30 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 {"type":"error","message":"claude exited with error_max_turns","retryable":true}
 ```
 
+```json
+{"type":"error","message":"429 rate limit exceeded","retryable":true,
+ "provider_failure":{"kind":"throttled","retry_after_secs":60}}
+```
+
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
 | `message` | string | ✓ | |
 | `retryable` | boolean | ✓ | `true` → `attempts+1` の上で `max_retries` 内なら `ready`、超過で `failed`。`false` → `failed` |
+| `provider_failure` | object | – | 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていれば `retryable` の値に関わらずディスパッチャは `attempts` を消費せず `requeue` し、そのプロバイダを cooldown にする |
+
+`provider_failure.kind` は次の 3 種のいずれか（`#[serde(tag="kind", rename_all="snake_case")]`。判定・分類は
+アダプタが行い、遷移の判断（requeue するかどうか）はディスパッチャの責務。原則: 協調判断に LLM を使わず、
+ここも決定的な規則だけで完結する）:
+
+| `kind` | 追加フィールド | 意味 |
+|---|---|---|
+| `throttled` | `retry_after_secs`（integer） | レート制限。しばらく待てば復帰しうる |
+| `auth_failed` | – | 認証切れ・未ログイン。人間の対応が要る |
+| `exhausted` | – | 利用上限・クレジット枯渇 |
+
+JSON Lines プロトコルを直接話す `fake` 等のワーカーは `provider_failure` を任意で付けてよい。
+`claude-code`/`codex` はこのプロトコルを話さないので、代わりにエラー文面を決定的な文字列規則で分類する
+（§9 参照）。
 
 ## 5. 終了規則
 
@@ -145,6 +173,23 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 | 無出力 | アダプタ設定 `idle_timeout_secs` | 300 | `error{retryable:true,"idle timeout"}` |
 
 `progress` / `artifact` の受信で無出力カウンタをリセットする。
+
+### 6.1 heartbeat（リースの延長。プロトコルのメッセージではない）
+
+`heartbeat` は本文書が定義する JSON Lines メッセージ（`progress`/`artifact`/`done`/`error`/`question`）の
+1 つではない。ワーカーの stdout から **1 行読むたび**（`progress`/`artifact` 等の既知メッセージだけでなく、
+破棄される非 JSON 行や行長超過も含む）に、アダプタ内部で `EventSink::heartbeat()` を呼ぶだけの生存通知
+である（ADR-0010 D7, P-7）。ワーカー自身がこれを送出するのではなく、アダプタが「まだ子プロセスが出力して
+いる」という事実からこの通知を合成する。
+
+ディスパッチャ（`StoreSink::heartbeat`）はこれを使って DB 上のリース（`expires_at`）を延長する
+（`renew_lease`。状態遷移ではないので `events` には記録しない）。取得時のリース ttl は
+`max_wall_secs + lease_grace` のままだが、無出力タイムアウト（`idle_timeout`）より wall-clock の方が
+大幅に長い場合でも、生きているワーカーのリースが `idle_timeout` 到達前に切れることはない
+（延長間隔を `lease_grace / 2` 以下に保つので、延長後の期限は「直前の出力時刻 + `idle_timeout` + `lease_grace / 2`」以降になる）。
+ただしこれは、無出力で強制終了された run の結果が `kill_grace`（SIGKILL までの猶予）と `tick_ms`（次 tick での取り込み）の
+分だけ遅れて処理されることを含めて `kill_grace + tick_ms < lease_grace / 2` のときに成り立つ。`taskd` は設定検証でこれを要求する
+（ADR-0010 D7）。
 
 ## 7. JSON Schema（説明用の手書き抜粋。正は `worker-protocol.schema.json`）
 
@@ -290,15 +335,49 @@ taskd はこれを直接パースできない。そこでこれらのアダプ�
 `subtype != "success"` なら、結果ファイルの内容によらず `error{retryable:true}` とする（自己申告の
 `done` は信用しない）。`success` の場合のみ結果ファイルを読み、無い／不正なら `error{retryable:true}`。
 
-`context.answers`（旧 P-10、`question` → `blocked` → `taskctl answer` の回答をワーカーへ渡す経路）は
-Phase 4 でも未実装のまま（`docs/PROGRESS.md` の未解決事項を参照）。
+`context.answers`（P-10、`question` → `blocked` → `taskctl answer` の回答をワーカーへ渡す経路）は
+Phase 7（ADR-0010 D3）で実装した。`claude-code`/`codex` のプロンプトは、空でなければ「以前の質問への
+人間の回答」節（`## Answers from a human to your earlier questions`、各回答を `- Q: ...` / `  A: ...`）を
+`prior_review` の節の近くに載せる（Execute/Plan プロンプトのみ。Review プロンプトには載せない）。
+
+**`runs/<run_id>/result.json`（P-26, ADR-0010 D10）**: `claude-code`/`codex` も、run の終端（`done`/
+`question`/`error`。供給側失敗として分類された `error` の場合は `provider_failure` 付き）を本文書 §4 の
+`WorkerMessage` に正規化し、1 行 JSON として `runs/<run_id>/result.json` に書いてから終了する
+（`fake`/`run_subprocess` がワーカーから受信した生の行をそのまま書くのと同じ役割）。これは taskd の
+再起動後にレビュー対象の `done` 内容を復元するために使われる（ADR-0007 D5）ので、CLI 系アダプタも
+同じファイルを同じ形式で書く必要がある。
+
+**エラー文面の分類（供給側失敗。ADR-0010 D5）**: `claude-code`/`codex` はワーカープロトコルの
+`provider_failure` フィールドを直接受け取れない（stream-json/JSON Lines の形式が異なるため）。代わりに
+エラー文面を決定的な文字列規則（`task_worker::provider::classify_provider_failure`。大文字小文字を無視した
+部分一致、LLM を呼ばない）で分類し、`AdapterError::{Throttled, AuthFailed, Exhausted}` として返す
+（`run()` は `result.json` を書いた後にこの `Err` を返す。遷移の判断はディスパッチャが行う）:
+
+| 分類 | 判定順 | 一致パターン（部分一致・大小無視） |
+|---|---|---|
+| `exhausted` | 1 | `usage limit`, `quota`, `credit balance` |
+| `throttled`（`retry_after_secs:60` 固定） | 2 | `rate limit`, `rate_limit`, `overloaded`、独立トークンの `429` / `529` |
+| `auth_failed` | 3 | `invalid api key`, `authentication`, `not logged in`, `/login`、独立トークンの `401` |
+
+「独立トークン」は前後の文字が英数字・`.` でなく、`:` を挟んで数字が続く位置情報（`:17`、`12:`）の一部でもないこと
+（`HTTP 429`、`status=429`、`HTTP 529: too many requests` は一致し、stderr のスタックトレースに含まれる `cli.js:4291:17` や
+`file.js:429:17` のような位置情報は一致しない）。プロトコルの `provider_failure.retry_after_secs` は最低 1 秒に切り上げる。
+
+どれにも当たらなければ分類せず、従来どおり `Terminal::Error{retryable:true}`（例:
+`The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account.` は分類対象外）。
+分類に使う文面は、`claude-code` は `result` メッセージの `result`（文字列。無ければ `subtype`）、
+`codex` は `turn.failed.error` のメッセージ。どちらも「`result`/`turn.*` を一度も観測できずに exit した
+場合」は代わりに `runs/<run_id>/stderr.log` の末尾（最大 4 KiB）を分類する（`codex` はさらに
+`{"type":"error","message":...}` 行を観測していればそれを優先する）。**wall-clock・無出力タイムアウトは
+分類しない**（供給側の問題ではなくワーカー側の停止・暴走のため）。
 
 ### 9.1 `codex` アダプタ（Phase 6、ADR-0008 D3）
 
 `codex exec --json` も同じ結果ファイル規約（`artifacts/result.json`）を使うが、正常終了の判定に使う
 JSON Lines のイベント形が `claude-code` と異なる: `claude-code` の `{"type":"result",...}` の代わりに
 `{"type":"turn.completed",...}` / `{"type":"turn.failed","error":...}` を見る。`turn.completed` を一度でも
-観測できれば結果ファイルを読み、`turn.failed` はそのまま `error{retryable:true}` にする。
+観測できれば結果ファイルを読み、`turn.failed` はそのまま `error{retryable:true}`（供給側失敗として分類
+できればディスパッチャへの `requeue` 経路。上記参照）にする。
 `turn.completed`/`turn.failed` のどちらも一度も観測できずに exit した場合はクラッシュとして扱い、
 `artifacts/result.json` を一切信用しない（§9 の判定順序と同じ考え方）。`item.*`（`item.started`/
 `item.completed` 等）は進捗としてのみ扱い、内容の構造には依存しない（実機の codex-cli 0.154.0 で

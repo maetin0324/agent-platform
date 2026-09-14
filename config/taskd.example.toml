@@ -7,7 +7,14 @@ lease_grace_secs = 60              # ADR-0002 D7: リース ttl = max_wall_secs 
 idle_timeout_secs = 300            # ADR-0003 D4: 無出力タイムアウト
 kill_grace_secs = 10               # ADR-0003 D4: SIGTERM 後 SIGKILL までの猶予
 review_timeout_secs = 600          # Command チェック 1 件あたりの上限
-error_cooldown_secs = 300          # AuthFailed / Exhausted 時のプロバイダ除外時間
+error_cooldown_secs = 300          # AuthFailed / Exhausted / 起動失敗時のプロバイダ除外時間
+retry_backoff_base_secs = 10       # ADR-0010 D6: リトライ前の待ち min(base·2^(attempts-1), max)。0 で無効
+retry_backoff_max_secs = 300
+
+# Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
+[reviewer]
+# adapter = "claude-code"
+tier = "standard"
 
 # Plan kind の子タスクを親 done と同時に ready にするか（DESIGN §4.2 plan.auto_accept、ADR-0007）。
 # false（既定）なら子は draft で挿入され、人間が `taskctl approve <child-id>` で ready にする。

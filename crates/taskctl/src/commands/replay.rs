@@ -7,6 +7,8 @@ use std::process::ExitCode;
 use clap::Args;
 use task_core::{Event, Status, Task, TaskStore};
 
+use crate::outln;
+
 #[derive(Args, Debug)]
 pub struct ReplayArgs {}
 
@@ -80,12 +82,12 @@ pub fn run(store: &dyn TaskStore, _args: ReplayArgs) -> Result<ExitCode, crate::
     }
 
     for m in &all_mismatches {
-        println!(
+        outln!(
             "MISMATCH task={} field={} replayed={} stored={}",
             m.task_id, m.field, m.expected, m.actual
         );
     }
-    println!(
+    outln!(
         "replay: {} mismatches across {} tasks",
         all_mismatches.len(),
         tasks.len()

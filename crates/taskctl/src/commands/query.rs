@@ -13,6 +13,7 @@ use clap::{Args, ValueEnum};
 use task_core::{Check, Status, Task, TaskId, TaskStore};
 
 use crate::error::CliError;
+use crate::outln;
 
 #[derive(Args, Debug)]
 pub struct LsArgs {
@@ -65,7 +66,7 @@ impl From<StatusArg> for Status {
 
 fn print_task_line(task: &Task, indent: usize) {
     let prefix = "  ".repeat(indent);
-    println!(
+    outln!(
         "{prefix}{} {:?} {:?} {}",
         task.id, task.status, task.kind, task.title
     );
@@ -102,7 +103,7 @@ fn check_kind_name(check: &Check) -> &'static str {
 fn print_events(store: &dyn TaskStore, id: TaskId) -> Result<(), CliError> {
     let events = store.events_for(id)?;
     for (seq, event) in events {
-        println!("[{seq}] {event:?}");
+        outln!("[{seq}] {event:?}");
     }
     Ok(())
 }
@@ -126,31 +127,31 @@ pub fn run_show(store: &dyn TaskStore, args: ShowArgs) -> Result<ExitCode, CliEr
         .get(id)?
         .ok_or_else(|| CliError::Message(format!("task not found: {}", args.id)))?;
 
-    println!("id: {}", task.id);
-    println!("status: {:?}", task.status);
-    println!("kind: {:?}", task.kind);
-    println!("title: {}", task.title);
-    println!("objective: {}", task.objective);
-    println!("priority: {}", task.priority);
-    println!("attempts: {}", task.attempts);
-    println!("budget: {:?}", task.budget);
-    println!("lease: {:?}", task.lease);
+    outln!("id: {}", task.id);
+    outln!("status: {:?}", task.status);
+    outln!("kind: {:?}", task.kind);
+    outln!("title: {}", task.title);
+    outln!("objective: {}", task.objective);
+    outln!("priority: {}", task.priority);
+    outln!("attempts: {}", task.attempts);
+    outln!("budget: {:?}", task.budget);
+    outln!("lease: {:?}", task.lease);
     match task.parent_id {
-        Some(parent) => println!("parent_id: {parent}"),
-        None => println!("parent_id: (none)"),
+        Some(parent) => outln!("parent_id: {parent}"),
+        None => outln!("parent_id: (none)"),
     }
     let depends_on: Vec<String> = task.depends_on.iter().map(TaskId::to_string).collect();
-    println!("depends_on: [{}]", depends_on.join(", "));
-    println!("acceptance:");
+    outln!("depends_on: [{}]", depends_on.join(", "));
+    outln!("acceptance:");
     for criterion in &task.acceptance {
-        println!(
+        outln!(
             "  - {} ({})",
             criterion.text,
             check_kind_name(&criterion.check)
         );
     }
 
-    println!("events:");
+    outln!("events:");
     print_events(store, id)?;
 
     Ok(ExitCode::SUCCESS)
@@ -173,7 +174,7 @@ pub fn run_log(store: &dyn TaskStore, args: LogArgs) -> Result<ExitCode, CliErro
         let events = store.events_for(id)?;
         for (seq, event) in &events {
             if last_seq.is_none_or(|last| *seq > last) {
-                println!("[{seq}] {event:?}");
+                outln!("[{seq}] {event:?}");
                 last_seq = Some(*seq);
             }
         }

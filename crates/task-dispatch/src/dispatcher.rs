@@ -34,7 +34,7 @@ use tokio::task::JoinHandle;
 use crate::policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy};
 use crate::review::{
     HumanVerdicts, PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, needs_reviewer_run,
-    review_task, reviewer_hint,
+    review_task,
 };
 
 /// ディスパッチャの設定（`taskd.toml` から組み立てる。ADR-0005 D7）。
@@ -55,6 +55,12 @@ pub struct DispatchConfig {
     /// DESIGN §4.2 `plan.auto_accept`: Plan の子を `draft` のまま置く（false）か、親 `done` と同一トランザクションで
     /// `ready` にする（true）か（ADR-0002 D6, ADR-0007 D3）。
     pub plan_auto_accept: bool,
+    /// ADR-0010 D6（P-3）: attempts > 0 の ready タスクは `updated_at + min(base·2^(attempts-1), max)` まで dispatch しない。
+    /// `base = 0` で無効。
+    pub retry_backoff_base: Duration,
+    pub retry_backoff_max: Duration,
+    /// ADR-0010 D9（P-30）: `Reviewer` run の `pick` と合成 `Review` タスクの `worker_hint`。
+    pub reviewer_hint: task_core::WorkerHint,
 }
 
 /// 1 tick の要約（ログとテスト用）。
@@ -99,13 +105,20 @@ struct ReviewEntry {
     handle: JoinHandle<()>,
     /// `Reviewer` run を起動する場合に選んだプロバイダ（並列度の枠を消費する）。
     provider: Option<ProviderId>,
+    /// レビューを延期（Reviewer run の供給側失敗）するときに次 tick へ持ち越す `done` の内容。
+    subject: ReviewSubject,
 }
 
-/// run 途中のイベントをストアに追記するシンク。
+/// run 途中のイベントをストアに追記するシンク。ワーカーの出力（heartbeat）があればリースを延長する（ADR-0010 D7）。
 struct StoreSink {
     store: Arc<dyn TaskStore>,
     task_id: TaskId,
     run_id: String,
+    /// 延長後の ttl（`idle_timeout + lease_grace`）。
+    lease_ttl: Duration,
+    /// 延長の最小間隔（`lease_grace / 2`）。延長後の期限は常にアダプタの無出力タイムアウトより後になる。
+    renew_every: Duration,
+    last_renew: std::sync::Mutex<Instant>,
 }
 
 impl EventSink for StoreSink {
@@ -126,6 +139,23 @@ impl EventSink for StoreSink {
         };
         if let Err(e) = self.store.append_event(self.task_id, &ev) {
             tracing::warn!(task_id = %self.task_id, error = %e, "failed to record artifact");
+        }
+    }
+
+    fn heartbeat(&self) {
+        let Ok(mut last) = self.last_renew.lock() else {
+            return;
+        };
+        if last.elapsed() < self.renew_every {
+            return;
+        }
+        *last = Instant::now();
+        match self.store.renew_lease(self.task_id, &self.run_id, self.lease_ttl) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(task_id = %self.task_id, run_id = %self.run_id, "lease not renewed (no longer running under this run)")
+            }
+            Err(e) => tracing::warn!(task_id = %self.task_id, error = %e, "failed to renew lease"),
         }
     }
 }
@@ -168,6 +198,8 @@ pub struct Dispatcher {
     pending_subjects: HashMap<TaskId, ReviewSubject>,
     /// 「`Standard` tier を提供するプロバイダが無い」警告を出した（連続 tick で繰り返さない）タスク。
     warned_no_reviewer: std::collections::HashSet<TaskId>,
+    /// 人間の承認待ちで延期中の reviewing タスク（`is_idle` 判定用。ADR-0010 D8）。
+    awaiting_human: std::collections::HashSet<TaskId>,
     tx: mpsc::UnboundedSender<Completion>,
     rx: mpsc::UnboundedReceiver<Completion>,
 }
@@ -192,6 +224,7 @@ impl Dispatcher {
             reviewing: HashMap::new(),
             pending_subjects: HashMap::new(),
             warned_no_reviewer: std::collections::HashSet::new(),
+            awaiting_human: std::collections::HashSet::new(),
             tx,
             rx,
         }
@@ -298,22 +331,16 @@ impl Dispatcher {
                 None,
                 ProviderOutcome::Ok,
             ),
-            Err(e) => {
-                let po = match &e {
-                    AdapterError::Throttled { retry_after } => ProviderOutcome::Throttled {
-                        retry_after: *retry_after,
-                    },
-                    AdapterError::AuthFailed(_) => ProviderOutcome::AuthFailed,
-                    AdapterError::Exhausted(_) => ProviderOutcome::Exhausted,
-                    _ => ProviderOutcome::Ok,
-                };
-                (
+            Err(e) => match provider_failure_outcome(&e) {
+                // ADR-0010 D5（P-21）: 供給側失敗は attempts を消費せず requeue し、プロバイダを cooldown にする。
+                Some(po) => (Trigger::Requeue, format!("requeue: adapter: {e}"), None, po),
+                None => (
                     Trigger::WorkerError { retryable: true },
                     format!("error(retryable=true): adapter: {e}"),
                     None,
-                    po,
-                )
-            }
+                    ProviderOutcome::Ok,
+                ),
+            },
         };
         self.policy.report(provider, &provider_outcome);
 
@@ -347,12 +374,31 @@ impl Dispatcher {
         run_id: String,
         outcome: ReviewOutcome,
     ) -> Result<(), DispatchError> {
-        self.reviewing.remove(&task_id);
+        let entry = self.reviewing.remove(&task_id);
         let Some(task) = self.store.get(task_id)? else {
             return Ok(());
         };
         if task.status != Status::Reviewing {
             tracing::warn!(%task_id, status = ?task.status, "review result discarded (task no longer reviewing)");
+            return Ok(());
+        }
+        if let Some(pf) = &outcome.provider_failure {
+            // ADR-0010 D5（P-29）: Reviewer run の供給側失敗は判定しない。reviewing のまま次 tick に回し、
+            // プロバイダを cooldown にする（attempts を消費しない）。
+            self.store.append_event(
+                task_id,
+                &Event::WorkerProgress {
+                    run_id: run_id.clone(),
+                    msg: format!("reviewer run requeued: {}", pf.message),
+                },
+            )?;
+            if let Some(entry) = entry {
+                if let Some(provider) = entry.provider {
+                    self.policy.report(provider, &pf.outcome);
+                }
+                self.pending_subjects.insert(task_id, entry.subject);
+            }
+            tracing::warn!(%task_id, %run_id, reason = %pf.message, "reviewer run hit a provider failure; review deferred");
             return Ok(());
         }
         let all_pass = outcome.all_pass();
@@ -541,6 +587,14 @@ impl Dispatcher {
             if self.running.contains_key(&task.id) {
                 continue;
             }
+            // ADR-0010 D6（P-3）: ready に入った時刻（DB の updated_at）からのバックオフ。
+            if task.attempts > 0 {
+                let delay = retry_backoff(self.config.retry_backoff_base, self.config.retry_backoff_max, task.attempts);
+                if OffsetDateTime::now_utc() < task.updated_at + delay {
+                    tracing::debug!(task_id = %task.id, attempts = task.attempts, delay_ms = delay.as_millis() as u64, "retry backoff; not dispatching yet");
+                    continue;
+                }
+            }
             let Some(dir) = self.task_dir(&task) else {
                 tracing::warn!(task_id = %task.id, "remote workspace is not supported; task left ready");
                 continue;
@@ -606,8 +660,12 @@ impl Dispatcher {
     ) -> JoinHandle<()> {
         let store = self.store.clone();
         let tx = self.tx.clone();
+        let lease = LeaseRenewal {
+            ttl: self.config.idle_timeout + self.config.lease_grace,
+            every: self.config.lease_grace / 2,
+        };
         tokio::spawn(async move {
-            let result = run_worker(store, adapter, task_id, dir, &run_id, limits).await;
+            let result = run_worker(store, adapter, task_id, dir, &run_id, limits, lease).await;
             let _ = tx.send(Completion::Worker {
                 task_id,
                 run_id,
@@ -634,8 +692,12 @@ impl Dispatcher {
         };
 
         let human = match self.resolve_human_approvals(&task)? {
-            Some(h) => h,
+            Some(h) => {
+                self.awaiting_human.remove(&task_id);
+                h
+            }
             None => {
+                self.awaiting_human.insert(task_id);
                 tracing::debug!(%task_id, "review deferred (waiting for human approval)");
                 return Ok(false);
             }
@@ -667,6 +729,7 @@ impl Dispatcher {
         let events = self.store.events_for(task_id)?;
         let produced = artifacts_for_run(&events, &run_id);
         let timeout = self.config.review_timeout;
+        let entry_subject = subject.clone();
         let subject = subject.clone();
         let tx = self.tx.clone();
         let handle = tokio::spawn(async move {
@@ -684,7 +747,14 @@ impl Dispatcher {
                 outcome,
             });
         });
-        self.reviewing.insert(task_id, ReviewEntry { handle, provider });
+        self.reviewing.insert(
+            task_id,
+            ReviewEntry {
+                handle,
+                provider,
+                subject: entry_subject,
+            },
+        );
         Ok(true)
     }
 
@@ -753,14 +823,8 @@ impl Dispatcher {
             created_at: now,
             updated_at: now,
         };
-        self.store.insert(&approval)?;
-        self.store.append_event(
-            approval.id,
-            &Event::Created {
-                task: Box::new(approval.clone()),
-            },
-        )?;
-        self.store.append_event(approval.id, &Event::ApprovalRequested)?;
+        // ADR-0010 D2: 挿入・Created・ApprovalRequested を 1 トランザクションで。
+        self.store.create_task(&approval, vec![Event::ApprovalRequested])?;
         tracing::info!(task_id = %task.id, approval_id = %approval.id, criterion_idx = idx, "created approval child for human check");
         Ok(approval)
     }
@@ -770,11 +834,11 @@ impl Dispatcher {
         if self.workers_in_flight() >= self.config.max_concurrency {
             return None;
         }
-        let Some((adapter_id, provider_id)) = self.policy.pick(&reviewer_hint(), Instant::now()) else {
+        let Some((adapter_id, provider_id)) = self.policy.pick(&self.config.reviewer_hint, Instant::now()) else {
             // 候補ゼロ（Standard tier を提供するプロバイダが無い、または全て cooldown 中）。設定ミスなら
             // 永久に待つことになるので、一時的な満杯（debug）と区別して warn を 1 回出す（監査指摘）。
             if self.warned_no_reviewer.insert(task.id) {
-                tracing::warn!(task_id = %task.id, hint = ?reviewer_hint(), "no provider available for the reviewer run; task stays reviewing until one appears");
+                tracing::warn!(task_id = %task.id, hint = ?self.config.reviewer_hint, "no provider available for the reviewer run; task stays reviewing until one appears");
             }
             return None;
         };
@@ -808,6 +872,7 @@ impl Dispatcher {
                     kill_grace: self.config.kill_grace,
                 },
                 sink: Box::new(sink),
+                hint: self.config.reviewer_hint.clone(),
             },
         ))
     }
@@ -831,7 +896,13 @@ impl Dispatcher {
         if !self.store.list(Some(Status::Running))?.is_empty() {
             return Ok(false);
         }
-        if !self.store.list(Some(Status::Reviewing))?.is_empty() {
+        // ADR-0010 D8: 人間の承認待ちで延期中の reviewing は、人間が操作しない限り進まないので idle とみなす。
+        if self
+            .store
+            .list(Some(Status::Reviewing))?
+            .iter()
+            .any(|t| !self.awaiting_human.contains(&t.id))
+        {
             return Ok(false);
         }
         Ok(self.store.ready_tasks(1)?.is_empty())
@@ -845,6 +916,7 @@ async fn run_worker(
     dir: PathBuf,
     run_id: &str,
     limits: RunLimits,
+    lease: LeaseRenewal,
 ) -> Result<RunOutcome, AdapterError> {
     // リース取得後の状態（running, lease あり）をワーカーに渡す。
     let task = store
@@ -871,6 +943,7 @@ async fn run_worker(
         context: RunContext {
             prior_review,
             inputs: task.inputs.clone(),
+            answers: answers_from_events(&events),
             review: None,
         },
     };
@@ -878,6 +951,9 @@ async fn run_worker(
         store,
         task_id,
         run_id: run_id.to_string(),
+        lease_ttl: lease.ttl,
+        renew_every: lease.every,
+        last_renew: std::sync::Mutex::new(Instant::now()),
     };
     adapter.run(req, run_id, limits, &sink).await
 }
@@ -909,6 +985,50 @@ pub fn prior_review_from_events(events: &[(u64, Event)]) -> Vec<PriorReview> {
     out
 }
 
+/// ワーカー run 中のリース延長パラメータ（ADR-0010 D7）。
+#[derive(Debug, Clone, Copy)]
+struct LeaseRenewal {
+    /// 延長後の ttl（`idle_timeout + lease_grace`）。
+    ttl: Duration,
+    /// 延長の最小間隔（`lease_grace / 2`）。
+    every: Duration,
+}
+
+/// ADR-0010 D6（P-3）: `min(base·2^(attempts-1), max)`。`attempts == 0` または `base == 0` なら 0。
+pub fn retry_backoff(base: Duration, max: Duration, attempts: u32) -> Duration {
+    if attempts == 0 || base.is_zero() {
+        return Duration::ZERO;
+    }
+    let factor = 1u32.checked_shl(attempts - 1).unwrap_or(u32::MAX);
+    base.checked_mul(factor).unwrap_or(max).min(max)
+}
+
+/// 供給側失敗（ADR-0010 D5）なら `ProviderPolicy::report` に渡す結果を返す。起動失敗（`Spawn`）も供給側として扱う。
+pub fn provider_failure_outcome(e: &AdapterError) -> Option<ProviderOutcome> {
+    match e {
+        AdapterError::Throttled { retry_after } => Some(ProviderOutcome::Throttled {
+            retry_after: *retry_after,
+        }),
+        AdapterError::AuthFailed(_) => Some(ProviderOutcome::AuthFailed),
+        AdapterError::Exhausted(_) | AdapterError::Spawn(_) => Some(ProviderOutcome::Exhausted),
+        AdapterError::Io(_) | AdapterError::Serde(_) | AdapterError::Other(_) => None,
+    }
+}
+
+/// そのタスクの全 `Event::Answered` を時系列で `context.answers` に写す（ADR-0010 D3, P-10）。
+pub fn answers_from_events(events: &[(u64, Event)]) -> Vec<task_worker::Answer> {
+    events
+        .iter()
+        .filter_map(|(_, ev)| match ev {
+            Event::Answered { question, answer } => Some(task_worker::Answer {
+                question: question.clone(),
+                answer: answer.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// その run で `ArtifactProduced` された成果物。
 pub fn artifacts_for_run(events: &[(u64, Event)], run_id: &str) -> Vec<ArtifactRef> {
     events
@@ -934,8 +1054,9 @@ fn subject_from_run_dir(dir: &std::path::Path, run_id: &str) -> ReviewSubject {
 }
 
 /// `Human` criterion 用の `Approval` 子タスクの `title`（既存子の照合キーにも使う。ADR-0008 D2）。
+/// ADR-0010 D8（P-35）: 試行（`attempts + 1`）を含めるので、再レビューでは新しい子が作られる。
 fn human_approval_title(task: &Task, idx: usize) -> String {
-    format!("Approval needed: {} — criterion {idx}", task.title)
+    format!("Approval needed: {} — criterion {idx} (attempt {})", task.title, task.attempts + 1)
 }
 
 /// 直近の `Event::ApprovalDecided` の `note` を `": <note>"` の形で返す（無ければ空文字列）。
@@ -965,6 +1086,7 @@ mod tests {
     use crate::policy::{ProviderSpec, StaticPolicy};
     use async_trait::async_trait;
     use task_core::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use task_worker::Evidence;
 
     /// 同プロセスで即座に終端を返すテスト用アダプタ（サブプロセスは起動しない）。
@@ -1044,6 +1166,9 @@ mod tests {
                 review_timeout: Duration::from_secs(5),
                 workspace_root: PathBuf::from("/nonexistent"),
                 plan_auto_accept: false,
+                retry_backoff_base: Duration::ZERO,
+                retry_backoff_max: Duration::ZERO,
+                reviewer_hint: crate::review::reviewer_hint(),
             },
         )
     }
@@ -1483,6 +1608,266 @@ mod tests {
             assert_eq!(report.dispatched, 0);
         }
         assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Cancelled);
+    }
+
+    fn done_outcome() -> RunOutcome {
+        RunOutcome {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            exit_code: Some(0),
+        }
+    }
+
+    /// 1 回目は供給側失敗（Throttled）、2 回目以降は `touched` を作って done を返すアダプタ。
+    struct FlakyProviderAdapter {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for FlakyProviderAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, _sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(AdapterError::Throttled { retry_after: Duration::from_millis(200) });
+            }
+            std::fs::write(req.workspace.join("touched"), "1").unwrap();
+            Ok(done_outcome())
+        }
+    }
+
+    /// ADR-0010 D5（P-21）: 供給側失敗は attempts を消費せず requeue され、cooldown 中は再 dispatch されず、明けたら done。
+    #[tokio::test]
+    async fn provider_failure_requeues_without_consuming_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(FlakyProviderAdapter { calls: AtomicUsize::new(0) });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        assert_eq!(d.tick().unwrap().dispatched, 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let second = d.tick().unwrap();
+        assert_eq!(second.finished, 1);
+        assert_eq!(second.dispatched, 0, "provider is cooling down");
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Ready, 0));
+
+        let report = run_until_idle(&mut d, 300).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Done, 0));
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 2);
+        let events = store.events_for(task.id).unwrap();
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::Transitioned { from: Status::Running, to: Status::Ready, reason } if reason == "requeue")));
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if outcome.starts_with("requeue: "))));
+    }
+
+    /// ADR-0010 D6（P-3）: attempts > 0 の ready タスクはバックオフが明けるまで dispatch されず、idle にもならない。
+    #[tokio::test]
+    async fn retry_backoff_delays_redispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Command { cmd: "test -f never".into(), expect_exit: 0 }, 1);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "claimed".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.retry_backoff_base = Duration::from_secs(3600);
+        d.config.retry_backoff_max = Duration::from_secs(3600);
+        for _ in 0..100 {
+            d.tick().unwrap();
+            let t = store.get(task.id).unwrap().unwrap();
+            if (t.status, t.attempts) == (Status::Ready, 1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(store.get(task.id).unwrap().unwrap().attempts, 1);
+        for _ in 0..5 {
+            let r = d.tick().unwrap();
+            assert_eq!(r.dispatched, 0);
+            assert!(!r.idle, "a task waiting for its backoff is not idle");
+        }
+        d.config.retry_backoff_base = Duration::ZERO;
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Failed, 2));
+
+        let (base, max) = (Duration::from_secs(10), Duration::from_secs(300));
+        assert_eq!(retry_backoff(base, max, 0), Duration::ZERO);
+        assert_eq!(retry_backoff(base, max, 1), Duration::from_secs(10));
+        assert_eq!(retry_backoff(base, max, 3), Duration::from_secs(40));
+        assert_eq!(retry_backoff(base, max, 40), max);
+    }
+
+    /// heartbeat を送りながら少し待ってから done を返すアダプタ。
+    struct HeartbeatAdapter;
+
+    #[async_trait]
+    impl WorkerAdapter for HeartbeatAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+            for _ in 0..8 {
+                sink.heartbeat();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            std::fs::write(req.workspace.join("touched"), "1").unwrap();
+            Ok(done_outcome())
+        }
+    }
+
+    /// ADR-0010 D7（P-7）: ワーカーの heartbeat でリースが `idle_timeout + lease_grace` に更新される
+    /// （取得時の `max_wall_secs + grace` より短くなり、デーモン停止時に早く回収できる）。
+    #[tokio::test]
+    async fn heartbeat_renews_the_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        store.insert(&task).unwrap();
+        let mut d = dispatcher(store.clone(), Arc::new(HeartbeatAdapter), 1);
+        d.config.lease_grace = Duration::from_millis(400);
+        let before = OffsetDateTime::now_utc();
+        assert_eq!(d.tick().unwrap().dispatched, 1);
+        let initial = store.get(task.id).unwrap().unwrap().lease.unwrap().expires_at;
+        assert!(initial > before + time::Duration::seconds(25), "acquired with max_wall_secs + grace");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let renewed = store.get(task.id).unwrap().unwrap().lease.expect("still running").expires_at;
+        assert!(renewed < initial, "renewed={renewed} initial={initial}");
+        assert!(renewed > OffsetDateTime::now_utc() + time::Duration::seconds(4), "ttl = idle_timeout(5s) + grace");
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+    }
+
+    /// 2 回目以降の run でだけ `second` を作るアダプタ。
+    struct CountingAdapter {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for CountingAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, _sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) >= 1 {
+                std::fs::write(req.workspace.join("second"), "1").unwrap();
+            }
+            Ok(done_outcome())
+        }
+    }
+
+    /// ADR-0010 D8（P-35）: Human 条件は再レビュー（attempt が進んだ後）で新しい Approval 子を要求する。
+    /// 承認待ちで延期中の reviewing しか無ければ idle になる。
+    #[tokio::test]
+    async fn human_check_requests_a_new_approval_for_each_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(dir.path(), Check::Human, 1);
+        task.acceptance.push(Criterion {
+            text: "second run".into(),
+            check: Check::Command { cmd: "test -f second".into(), expect_exit: 0 },
+        });
+        store.insert(&task).unwrap();
+        let task_id = task.id;
+        let approvals = |store: &Arc<dyn TaskStore>| -> Vec<Task> {
+            let mut v: Vec<Task> = store
+                .list(None)
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.parent_id == Some(task_id) && t.kind == TaskKind::Approval)
+                .collect();
+            v.sort_by_key(|t| t.created_at);
+            v
+        };
+        let approve = |store: &Arc<dyn TaskStore>, id: TaskId| {
+            store
+                .apply_transition(id, Trigger::Approve, Some(Event::ApprovalDecided { by: "human".into(), approved: true, note: None }))
+                .unwrap();
+        };
+        let mut d = dispatcher(store.clone(), Arc::new(CountingAdapter { calls: AtomicUsize::new(0) }), 2);
+
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle, "only a human can make progress now");
+        let first = approvals(&store);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].title.ends_with("(attempt 1)"), "{}", first[0].title);
+        assert_eq!(store.get(task_id).unwrap().unwrap().status, Status::Reviewing);
+
+        // 承認 → Command 条件が fail → attempts 1 → 2 回目の run → 新しい Approval 子を待って idle。
+        approve(&store, first[0].id);
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle);
+        let all = approvals(&store);
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert_eq!(all[0].status, Status::Done);
+        assert!(all[1].title.ends_with("(attempt 2)"), "{}", all[1].title);
+        assert_eq!(all[1].status, Status::Ready);
+        let t = store.get(task_id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Reviewing, 1));
+
+        approve(&store, all[1].id);
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(task_id).unwrap().unwrap().status, Status::Done);
+    }
+
+    /// Review run の 1 回目だけ供給側失敗を返し、以降は pass の `review.json` を書くアダプタ。
+    struct FlakyReviewerAdapter {
+        review_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for FlakyReviewerAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, _sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+            if req.task.kind == TaskKind::Review {
+                if self.review_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(AdapterError::Throttled { retry_after: Duration::from_millis(200) });
+                }
+                std::fs::create_dir_all(req.workspace.join("artifacts")).unwrap();
+                std::fs::write(
+                    req.workspace.join("artifacts/review.json"),
+                    r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"fine"}]}"#,
+                )
+                .unwrap();
+            }
+            Ok(done_outcome())
+        }
+    }
+
+    /// ADR-0010 D5（P-29）: Reviewer run の供給側失敗は ReviewFail にならず、reviewing のまま延期され後で判定される。
+    #[tokio::test]
+    async fn reviewer_run_provider_failure_defers_review_without_consuming_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Reviewer, 0);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(FlakyReviewerAdapter { review_calls: AtomicUsize::new(0) });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 2);
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Done, 0));
+        assert_eq!(adapter.review_calls.load(Ordering::SeqCst), 2);
+        let events = store.events_for(task.id).unwrap();
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.starts_with("reviewer run requeued"))));
+        let verdicts: Vec<bool> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::ReviewVerdict { pass, .. } => Some(*pass),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verdicts, vec![true]);
     }
 
     /// `task_id` の直接の `Approval` 子タスクが現れるまで tick を回す（Human check の生成を待つ）。

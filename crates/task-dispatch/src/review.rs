@@ -18,6 +18,8 @@ use std::time::Duration;
 use task_core::plan::{PlanLimits, PlanOutput, parse_and_validate};
 use task_core::{ArtifactRef, Check, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
 use task_worker::artifact::sha256_file;
+
+use crate::policy::ProviderOutcome;
 use task_worker::{
     EventSink, Evidence, PROTOCOL_VERSION, ReviewOutput, ReviewRequest, RunContext, RunLimits, RunRequest, Terminal,
     WorkerAdapter, Workspace,
@@ -44,6 +46,8 @@ pub struct ReviewerRun {
     pub run_id: String,
     pub limits: RunLimits,
     pub sink: Box<dyn EventSink>,
+    /// 合成 `Review` タスクの `worker_hint`（設定 `[reviewer]`。ADR-0010 D9）。
+    pub hint: WorkerHint,
 }
 
 /// `Plan` kind の検証パラメータ（ADR-0007 D2/D4）。
@@ -54,12 +58,21 @@ pub struct PlanCheck {
     pub limits: PlanLimits,
 }
 
+/// `Reviewer` run が供給側の失敗で判定できなかったこと（ADR-0010 D5, P-29）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewerProviderFailure {
+    pub outcome: ProviderOutcome,
+    pub message: String,
+}
+
 /// `review_task` の結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewOutcome {
     pub verdicts: Vec<Verdict>,
     /// `Plan` kind で検証に通った場合の出力（子タスクの生成に使う）。
     pub plan: Option<PlanOutput>,
+    /// `Some` のとき判定は無効。ディスパッチャは遷移を適用せず `reviewing` のまま延期する（attempts を消費しない）。
+    pub provider_failure: Option<ReviewerProviderFailure>,
 }
 
 impl ReviewOutcome {
@@ -205,6 +218,7 @@ pub async fn review_task(
     }
 
     // ADR-0007 D5 2./3.: 決定的条件が全 pass のときだけ LLM レビュー run を起動する。
+    let mut provider_failure = None;
     if !reviewer_criteria.is_empty() {
         let deterministic_ok = verdicts.iter().all(|v| v.pass);
         let reviewer_verdicts = if !deterministic_ok {
@@ -226,7 +240,14 @@ pub async fn review_task(
                         reason: "not evaluated: no reviewer run was available".to_string(),
                     })
                     .collect(),
-                Some(run) => run_reviewer(task, workspace_dir, produced, subject, &reviewer_criteria, run).await,
+                Some(run) => match run_reviewer(task, workspace_dir, produced, subject, &reviewer_criteria, run).await {
+                    Ok(v) => v,
+                    Err(pf) => {
+                        // ADR-0010 D5（P-29）: 判定そのものが無効。遷移はディスパッチャが適用しない。
+                        provider_failure = Some(pf);
+                        Vec::new()
+                    }
+                },
             }
         };
         verdicts.extend(reviewer_verdicts);
@@ -236,6 +257,7 @@ pub async fn review_task(
     ReviewOutcome {
         verdicts,
         plan: plan_output,
+        provider_failure,
     }
 }
 
@@ -255,7 +277,7 @@ fn check_plan_file(workspace_dir: &Path, check: &PlanCheck) -> (bool, String, Op
 }
 
 /// 合成した `Review` kind のタスク（永続化しない。ADR-0007 D5 3.）。
-pub fn synthetic_review_task(subject_task: &Task, run_id: &str) -> Task {
+pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHint) -> Task {
     let now = time::OffsetDateTime::now_utc();
     Task {
         id: TaskId::new(),
@@ -268,7 +290,7 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str) -> Task {
         depends_on: vec![],
         status: Status::Running,
         priority: subject_task.priority,
-        worker_hint: reviewer_hint(),
+        worker_hint: hint.clone(),
         workspace: subject_task.workspace.clone(),
         budget: subject_task.budget,
         attempts: 0,
@@ -288,16 +310,16 @@ async fn run_reviewer(
     subject: &ReviewSubject,
     criteria: &[usize],
     run: ReviewerRun,
-) -> Vec<Verdict> {
-    let fail_all = |reason: String| -> Vec<Verdict> {
-        criteria
+) -> Result<Vec<Verdict>, ReviewerProviderFailure> {
+    let fail_all = |reason: String| -> Result<Vec<Verdict>, ReviewerProviderFailure> {
+        Ok(criteria
             .iter()
             .map(|&idx| Verdict {
                 criterion_idx: idx,
                 pass: false,
                 reason: reason.clone(),
             })
-            .collect()
+            .collect())
     };
     let review_path = workspace_dir.join(REVIEW_FILE);
     // 前回のレビュー run の出力を今回の結果と誤読しない（ADR-0007 D1）。
@@ -305,11 +327,12 @@ async fn run_reviewer(
 
     let req = RunRequest {
         protocol: PROTOCOL_VERSION,
-        task: synthetic_review_task(task, &run.run_id),
+        task: synthetic_review_task(task, &run.run_id, &run.hint),
         workspace: workspace_dir.to_path_buf(),
         context: RunContext {
             prior_review: vec![],
             inputs: produced.to_vec(),
+            answers: vec![],
             review: Some(ReviewRequest {
                 summary: subject.summary.clone(),
                 evidence: subject.evidence.clone(),
@@ -323,6 +346,12 @@ async fn run_reviewer(
         Ok(o) => o,
         Err(e) => {
             run.sink.progress(&format!("adapter error: {e}"));
+            if let Some(outcome) = crate::dispatcher::provider_failure_outcome(&e) {
+                return Err(ReviewerProviderFailure {
+                    outcome,
+                    message: format!("{tag}: {e}"),
+                });
+            }
             return fail_all(format!("{tag}: adapter error: {e}"));
         }
     };
@@ -347,7 +376,7 @@ async fn run_reviewer(
         Ok(o) => o,
         Err(e) => return fail_all(format!("{tag}: {REVIEW_FILE} is not a valid ReviewOutput: {e}")),
     };
-    criteria
+    Ok(criteria
         .iter()
         .map(|&idx| match output.verdicts.iter().rev().find(|v| v.criterion == idx) {
             Some(v) => Verdict {
@@ -361,7 +390,7 @@ async fn run_reviewer(
                 reason: format!("{tag}: no verdict for criterion {idx} in {REVIEW_FILE}"),
             },
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -557,7 +586,52 @@ mod tests {
                 kill_grace: Duration::from_millis(100),
             },
             sink: Box::new(RecordingSink::default()),
+            hint: reviewer_hint(),
         }
+    }
+
+    /// 常に供給側失敗を返すレビュー用アダプタ。
+    struct ThrottledReviewer;
+
+    #[async_trait]
+    impl WorkerAdapter for ThrottledReviewer {
+        fn id(&self) -> &str {
+            "throttled"
+        }
+        async fn run(
+            &self,
+            _req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            Err(AdapterError::Throttled { retry_after: Duration::from_secs(3) })
+        }
+    }
+
+    /// ADR-0010 D5（P-29）: Reviewer run の供給側失敗は fail の判定にせず `provider_failure` として返す。
+    #[tokio::test]
+    async fn reviewer_provider_failure_is_reported_instead_of_failing_criteria() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = LocalWorkspace::new(dir.path());
+        let task = task_with(vec![Check::Command { cmd: "true".into(), expect_exit: 0 }, Check::Reviewer], dir.path());
+        let run = ReviewerRun {
+            adapter: Arc::new(ThrottledReviewer),
+            run_id: "rev-x".into(),
+            limits: RunLimits {
+                wall_clock: Duration::from_secs(5),
+                idle_timeout: Duration::from_secs(5),
+                kill_grace: Duration::from_millis(100),
+            },
+            sink: Box::new(RecordingSink::default()),
+            hint: reviewer_hint(),
+        };
+        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { reviewer: Some(run), ..Default::default() }).await;
+        let pf = out.provider_failure.expect("provider failure");
+        assert_eq!(pf.outcome, ProviderOutcome::Throttled { retry_after: Duration::from_secs(3) });
+        assert!(pf.message.contains("reviewer(rev-x)"), "{}", pf.message);
+        // 決定的条件の判定だけが残り、Reviewer 条件の verdict は作らない。
+        assert_eq!(out.verdicts.iter().map(|v| v.criterion_idx).collect::<Vec<_>>(), vec![0]);
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ ADR-0009 で採用した提案を、既存の設計原則（協調判断に LLM 
 | P-21 | 新トリガ `Requeue`: `running → ready`、attempts 据え置き、reason `"requeue"` |
 
 `replay` の attempts 復元規則（`worker_error | lease_expired | review_fail` で +1）は変えない（新しい 2 つは増やさない）。
-遷移表テストは 14 列（`WorkerError` の retryable 2 通りを含む）× 8 行 × 4 kind を網羅する。
+遷移表テストは 15 列（単純トリガ 11 + リトライ判定を伴う `LeaseExpired` / `ReviewFail` / `WorkerError{retryable: true|false}` の 4）× 8 行 × 4 kind を網羅する。
 
 ### D2. ストア（`task-core::store`）
 
@@ -67,16 +67,24 @@ ADR-0009 で採用した提案を、既存の設計原則（協調判断に LLM 
   - プロトコル（`fake` 等）: `error` メッセージに任意フィールド
     `provider_failure: {"kind":"throttled","retry_after_secs":N} | {"kind":"auth_failed"} | {"kind":"exhausted"}` を追加。
     付いていれば実行器が上記 `AdapterError` に写す。
-  - `claude-code` / `codex`: エラー文面（`result` の `result` テキスト、`turn.failed` / `error` のメッセージ）を
-    決定的な文字列規則で分類する（`429`・`rate limit`・`overloaded` → Throttled（retry_after 60 秒）、
-    `usage limit`・`quota`・`credit balance` → Exhausted、`401`・`invalid api key`・`authentication`・`not logged in`・
-    `/login` → AuthFailed）。どれにも当たらなければ従来どおり `Terminal::Error`。
+  - `claude-code` / `codex`: エラー文面（`result` の `result` テキスト、`turn.failed` / `error` のメッセージ、
+    終端シグナルを観測できずに exit した場合は `runs/<run_id>/stderr.log` の末尾 4 KiB）を決定的な文字列規則で分類する
+    （判定順 Exhausted → Throttled → AuthFailed、大文字小文字を無視）:
+    `usage limit`・`quota`・`credit balance` → Exhausted、
+    `rate limit`・`rate_limit`・`overloaded`・独立トークンの `429`/`529` → Throttled（retry_after 60 秒）、
+    `invalid api key`・`authentication`・`not logged in`・`/login`・独立トークンの `401` → AuthFailed。
+    「独立トークン」は前後が英数字・`.` でなく、`:` を挟んで数字が続く位置情報（`:17`、`12:`）の一部でもないこと
+    （`HTTP 529: too many requests` は一致、スタックトレースの `cli.js:4291:17` や `file.js:429:17` は不一致。Phase 7 監査）。
+    どれにも当たらなければ従来どおり `Terminal::Error`。wall-clock / 無出力タイムアウトは分類しない。
+  - プロトコルの `retry_after_secs` は最低 1 秒に切り上げ、設定 `error_cooldown_secs` は 1 以上を要求する（cooldown 0 による
+    毎 tick の再 dispatch を防ぐ。Phase 7 監査）。
 - ディスパッチャ: ワーカー run の結果が `Throttled | AuthFailed | Exhausted | Spawn`（起動失敗）なら `Trigger::Requeue`
   （`WorkerFinished.outcome = "requeue: <error>"`）とし、`ProviderPolicy::report` でプロバイダを cooldown にする
   （`Spawn` は `Exhausted` として報告）。cooldown 中は `pick` が候補を返さないので、ホットループにならない。
 - Reviewer run（P-29）: `review_task` の結果に `provider_failure` を持たせ、ディスパッチャはそのとき遷移を適用せず、
   `WorkerProgress{"reviewer run <id>: requeued: ..."}` を記録してプロバイダを cooldown にし、`reviewing` のまま次 tick に
-  回す（`attempts` を消費しない）。`review.json` の不正・タイムアウトは従来どおり fail（モデル側の失敗）。
+  回す（`attempts` を消費しない）。進捗メッセージの実際の文面は `reviewer run requeued: reviewer(<review_run_id>): <error>`。
+  `review.json` の不正・タイムアウトは従来どおり fail（モデル側の失敗）。
 
 ### D6. リトライのバックオフ（P-3）
 
@@ -94,6 +102,10 @@ ADR-0009 で採用した提案を、既存の設計原則（協調判断に LLM 
 安全性: アダプタは最後の出力から `idle_timeout` で強制終了する。延長後の期限は
 「最後の出力 − grace/2 + idle_timeout + grace」以降なので、生きているワーカーのリースが先に切れることはない。
 一方、デーモンが落ちた場合は最後の出力から `idle_timeout + lease_grace` 程度で回収できる（従来は `max_wall_secs + grace`）。
+
+前提（Phase 7 監査で明確化）: 無出力で強制終了された run は、SIGKILL までの `kill_grace` と次 tick での取り込み（`tick_ms`）の
+分だけ遅れて処理されるので、上の議論は `kill_grace + tick_ms < lease_grace / 2` のときに成り立つ。`taskd` の設定検証で
+この関係を要求する。破れた場合でも結果は `LeaseExpired`（attempts+1）で、タイムアウトの `Error{retryable:true}` と同等。
 
 ### D8. 承認ゲート（P-35）と `--until-idle`
 

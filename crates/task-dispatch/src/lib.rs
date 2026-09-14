@@ -9,6 +9,6 @@ pub mod review;
 pub use dispatcher::{DispatchConfig, DispatchError, Dispatcher, TickReport};
 pub use policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy, ProviderSpec, StaticPolicy};
 pub use review::{
-    PLAN_FILE, PlanCheck, REVIEW_FILE, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, Verdict, needs_reviewer_run,
-    review_task, reviewer_hint,
+    PLAN_FILE, PlanCheck, REVIEW_FILE, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerProviderFailure, ReviewerRun,
+    Verdict, needs_reviewer_run, review_task, reviewer_hint,
 };

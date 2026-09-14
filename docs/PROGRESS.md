@@ -1,7 +1,8 @@
 # PROGRESS — taskd
 
-現在地: **Phase 7（仕上げ）進行中**。Phase 0〜6 は完了し、Phase 4/6 の実機ドッグフードの扱いも締めた
-（本ファイル末尾「Phase 4/6 受け入れの締め」）。提案 P-1〜P-37 の採否は ADR-0009、Phase 7 の設計は ADR-0010。
+現在地: **Phase 7（仕上げ）完了（2026-09-14）**。docs/DESIGN.md に定義された Phase 0〜7 は全て完了。Phase 4/6 の
+実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。提案 P-1〜P-37 の採否は ADR-0009、Phase 7 の設計は ADR-0010。
+次の作業は未定義（新しい提案 P-38 / P-39 と未解決事項を人間が判断する）。
 
 | Phase | 内容 | 状態 | 完了日 |
 |---|---|---|---|
@@ -12,7 +13,7 @@
 | 4 | claude-code アダプタとドッグフーディング | 完了（実機ドッグフード 2026-09-14 実施、done） | 2026-09-13 |
 | 5 | Planner / Reviewer（LLM） | 完了 | 2026-09-14 |
 | 6 | 承認ゲートと codex アダプタ | 完了（codex 実機ドッグフードは外部制約により免除。ADR-0009 D1） | 2026-09-14 |
-| 7 | 仕上げ（ADR-0010） | 進行中 | — |
+| 7 | 仕上げ（ADR-0010） | 完了 | 2026-09-14 |
 
 ---
 
@@ -1023,3 +1024,162 @@ Phase 0〜5 からの既存提案（P-1〜P-34）は状況変化なし。
 
 P-1〜P-37 の採否は ADR-0009 に記録し、採用分を `docs/DESIGN.md` に反映した（人間の許可による改訂）。機能に関わる採用分と
 技術的負債は Phase 7（ADR-0010）で実装する。P-12 は未実装のため提案として残し、P-20 / P-33 は供給層の担当として見送り。
+
+---
+
+## Phase 7 — DONE（2026-09-14）
+
+### 成果物
+
+- `docs/adr/0009-proposal-adoption-and-phase-closure.md` / `docs/adr/0010-phase7-hardening.md`、`docs/DESIGN.md` 改訂（人間の許可による）、`CLAUDE.md`（P-34）
+- `crates/task-core`
+  - `transition.rs` — `Trigger::Requeue`（`running → ready`、attempts 据え置き）、`Trigger::DependencyFailed`（非終端 → `cancelled`）、`Cancel` を非終端限定（P-4）。遷移表テストを 4 kind × 8 status × 11 単純トリガに拡張
+  - `model.rs` — `Event::Answered{question, answer}`
+  - `store.rs` — `create_task`（insert + Created + extra を 1 トランザクション）、`renew_lease`、`ready_tasks` の Approval 除外（P-36）、
+    `cascade_after_transition_tx`（Approval の failed/cancelled → 子を cancel、Approval 以外の終端 → 未決 Approval 子を cancel（P-37）、
+    failed/cancelled → 後続を `dependency_failed` で推移的に cancel（P-9））
+- `crates/task-worker`
+  - `protocol.rs` — `Answer` / `RunContext.answers`、`ProviderFailure` / `error.provider_failure`（`worker-protocol.schema.json` 再生成）
+  - `adapter.rs` — `EventSink::heartbeat()`、`AdapterError::from_provider_failure`
+  - `provider.rs`（新規）— 供給側失敗の決定的な文字列分類（Exhausted → Throttled → AuthFailed）
+  - `subprocess.rs` / `claude_code.rs` / `codex.rs` — heartbeat、`provider_failure` と文面分類を `AdapterError` に写す、CLI 系も
+    `runs/<run_id>/result.json` を書く（P-26）、プロンプトに人間の回答節、`spawn_retrying` 削除
+  - `test_support.rs`（新規、テスト専用）— スタブを別プロセスで書き込む `write_executable`（ETXTBSY 対策）
+- `crates/task-dispatch`
+  - `dispatcher.rs` — 供給側失敗・起動失敗を `Requeue` + cooldown、バックオフ（`updated_at + min(base·2^(n-1), max)`）、
+    `StoreSink::heartbeat` によるリース延長（ttl = idle_timeout + grace、間隔 grace/2）、`context.answers`、Human check の
+    試行ごとの Approval 子（title に `(attempt n)`）と `create_task`、承認待ちのみの reviewing を idle とみなす、`[reviewer]` hint
+  - `review.rs` — Reviewer run の供給側失敗を `ReviewOutcome.provider_failure` として返し、ディスパッチャが遷移せず延期（P-29）
+- `crates/taskd` — `retry_backoff_base_secs` / `retry_backoff_max_secs`、`[reviewer] adapter / tier` と検証、seed 例を `create_task` に
+- `crates/taskctl` — `add --check-cmd/--check-artifact/--check-reviewer`（P-17）と依存先検証、`add/plan` の workspace 既定
+  `<task_id>`（P-19）、`cancel`（P-18）、`answer` の `Answered` 永続化（P-10）、`outln!` による BrokenPipe 対応
+- `tests/e2e/tests/phase7_scenarios.rs`（新規、4 シナリオ）。既存 e2e の設定に `retry_backoff_base_secs = 0`
+- `docs/protocol/worker-protocol.md` — §3.1 `context.answers`、§4.5 `provider_failure`、§6.1 heartbeat、§9 CLI 系の result.json と分類規則
+- `config/taskd.example.toml` — バックオフと `[reviewer]`
+
+作業分担: ADR・DESIGN、task-core、プロトコル型（`protocol.rs`/`adapter.rs`）、task-dispatch、taskd、e2e は自分で実装した（状態機械・
+トランザクション・ディスパッチ判断は互いに依存し設計判断を含むため）。共有型を先に入れてビルドを通した後、ファイルを共有しない
+2 単位を implementer サブエージェント 2 体に並列実装させた: 単位 A = `crates/taskctl/**`、単位 B = task-worker のアダプタ
+（`subprocess.rs`/`claude_code.rs`/`codex.rs`/新規 `provider.rs`/`test_support.rs`）と `worker-protocol.md`。両者の報告に
+「判断が必要な点」は無かった。
+
+### 受け入れ条件と証拠（DESIGN §6 Phase 7）
+
+いずれもネットワーク不要（`sh` の fake ワーカーとローカル SQLite）。e2e は実バイナリ `taskctl` / `taskd` を起動し、最後に
+`taskctl replay` が `replay: 0 mismatches` になることを確認している。
+
+1. **`taskctl answer` の回答が次 run の `context.answers` に載り done**
+   - コマンド: `cargo test -p e2e --test phase7_scenarios` → exit 0、4 passed
+   - `answer_is_delivered_in_context_answers_and_cli_checks_complete_the_task`: question で `Blocked` → `taskctl answer <id> "target v2"` →
+     `Event::Answered{question:"which version should I target?", answer:"target v2"}` → 2 回目の run の stdin に
+     `"answers":[{"question":"which version should I target?","answer":"target v2"}]` → `Done`（attempts 0）。遷移列 7 件を完全一致で検証
+   - 単体: `taskctl` `run_answer_persists_answered_event_with_question_from_worker_finished`、task-worker `build_prompt_includes_answers_from_human_for_execute_and_plan`
+2. **`taskctl add --check-cmd ... --check-artifact ...` だけで作ったタスクが done**
+   - 上記 e2e のタスクは CLI だけで作成し、`acceptance` が `Command{test -f answered.txt}` と `ArtifactExists{report.md}` であることを検証
+   - 単体: `run_check_cmd_produces_command_criterion_with_expected_text` ほか `add.rs` 7 件（条件ゼロはエラー、依存先 failed/不存在はエラー等）
+3. **cancel は非終端のみ、先行の failed が後続へ推移的に伝播**
+   - e2e `cancel_is_limited_to_non_terminal_tasks_and_failures_cancel_dependents`: A（`--check-cmd false --max-retries 0`）が `Failed` →
+     B（A に依存）・C（B に依存）の遷移がともに `["Draft->Ready:accept", "Ready->Cancelled:dependency_failed"]`。draft の D を
+     `taskctl cancel` → `Cancelled`。failed の A への `cancel` は exit 1・stderr `cannot be cancelled`・状態不変。failed な A に依存する
+     `add` は拒否。workspace 省略の D のパスが `<task_id>`（P-19）
+   - 単体: store `dependency_failure_cancels_dependents_transitively`、`cancel_is_invalid_for_terminal_tasks`、
+     `cancelling_an_approval_cascades_to_its_children`、transition `table_simple_triggers_full_cross_product`（352 ケース）と
+     `cancel_dependency_failed_and_requeue_keep_attempts`
+4. **Human check は再レビューで新しい Approval 子、親が終端なら未決 Approval 子が cancelled、`ready_tasks` は Approval を返さない**
+   - e2e `human_check_asks_again_after_a_retry_and_orphaned_approvals_are_cancelled`: `(attempt 1)` の子を承認 → Command 条件 fail →
+     attempts 1 → 2 回目の run → `(attempt 2)` の新しい子（`taskd --until-idle` は承認待ちで idle 終了）→ 承認 → `Done`。別タスク O の
+     承認待ち中に `taskctl cancel O` → O と未決の Approval 子がともに `Cancelled`
+   - 単体: dispatcher `human_check_requests_a_new_approval_for_each_attempt`、store `terminal_task_cancels_its_pending_approval_children_only`、
+     `ready_tasks_excludes_approval_kind`
+5. **`provider_failure` 付き error は attempts を消費せず requeue、cooldown 明けに done。Reviewer run の供給側失敗で ReviewFail にならない**
+   - e2e `provider_failure_requeues_without_consuming_attempts`（`--max-retries 0`）: 遷移列
+     `accept → dispatch → requeue → dispatch → worker_done → review_pass`、`WorkerFinished.outcome` が `requeue: ` で始まり `throttled` を含む、attempts 0
+   - 単体: dispatcher `provider_failure_requeues_without_consuming_attempts`（cooldown 中の tick で `dispatched == 0`）、
+     `reviewer_run_provider_failure_defers_review_without_consuming_attempts`（`reviewer run requeued` の進捗、verdict は pass 1 件のみ）、
+     review `reviewer_provider_failure_is_reported_instead_of_failing_criteria`、task-worker `provider_failure_is_classified_and_result_json_is_written`、
+     `result_text_classified_as_throttled_surfaces_as_adapter_error`、`turn_failed_classified_as_exhausted_surfaces_as_adapter_error` ほか、`provider.rs` 6 件
+6. **バックオフ中は再 dispatch されない、ワーカーの出力でリースが延長される**
+   - dispatcher `retry_backoff_delays_redispatch`（attempts 1 の ready で 5 tick とも `dispatched == 0` かつ非 idle、base を 0 にすると
+     再実行されて `Failed`/attempts 2。`retry_backoff` の値 0/10/40/上限を検証）
+   - dispatcher `heartbeat_renews_the_lease`（取得時 `max_wall + grace` の期限が heartbeat 後に `idle_timeout + grace` へ更新）、
+     store `renew_lease_extends_only_the_matching_running_lease`（別 run_id・非 running では false、イベントは増えない）
+7. **`taskctl ls | head -n 1` が panic せず成功、`spawn_retrying` 無しで `cargo test --workspace` 5 回連続成功**
+   - コマンド: 300 タスクの DB で `taskctl --db t.sqlite3 ls 2>stderr | head -n 1` → `PIPESTATUS=0 0`、stderr 0 バイト
+   - 統合テスト `crates/taskctl/tests/pipe.rs::ls_on_a_closed_pipe_exits_cleanly_without_panicking`（3000 タスク）
+   - コマンド: `for i in 1..5; cargo test --workspace` → 5 回とも `passed=190 failed=0`、`Text file busy` の出現 0。`grep -rn spawn_retrying crates/` → 0 件。
+     監査後の修正の後にも 3 回連続で `passed=192 failed=0`
+
+補足（採用した提案のうち受け入れ条件に直接出ないもの）: P-26 は claude-code / codex の `happy_path_progress_and_done_from_result_file`
+で `runs/<id>/result.json` を検証。P-30 は taskd `backoff_and_reviewer_settings_map_to_dispatch_config` と
+`rejects_reviewer_without_matching_provider_and_unknown_reviewer_keys`。原子的な挿入は store `create_task_inserts_task_and_events_atomically`。
+
+### CLAUDE.md の共通条件
+
+- `cargo test --workspace` → exit 0、**192 tests passed**（task-core 35 + task-dispatch 31 + task-worker 63 + taskctl 38 + 1 + 1 +
+  taskd 12 + 1 + e2e 10（scenarios 4 + plan_scenarios 2 + phase7_scenarios 4）、失敗 0）。Phase 6 時点の 142 から +50
+  （監査前 190、監査後の修正で `provider::tests::status_codes_inside_positions_or_numbers_do_not_match` と
+  taskd `rejects_zero_cooldown_and_unsafe_lease_grace` を追加）
+- `cargo clippy --workspace -- -D warnings` → exit 0。`cargo clippy --workspace --all-targets --examples -- -D warnings` → exit 0
+- `unwrap()` はテストコード以外に 0 件（`#[cfg(test)]` より前の行を全 `.rs`（新規ファイル含む）で走査）
+
+### 監査結果
+
+auditor サブエージェントを 1 回起動（読み取り専用。`cargo test --workspace` を 5 回連続で各 190 passed、clippy 2 種 exit 0、
+`spawn_retrying` 0 件、非テストの `unwrap()` 0 件、ネットワーク系 API の grep 0 件、300 タスクの DB での `ls | head -n 1` /
+`show | head -n 2` の PIPESTATUS `0 0`、`cancel` 2 回目の exit 1、`replay` 0 mismatches を auditor 自身が確認）。
+総合判定は **条件付き可**、「不可」は **0 件**。受け入れ条件 1・2・4 と、原則（LLM 非混入）・同一トランザクション・replay 整合・
+カスケードの停止性と二重適用・バックオフの判定・テスト以外の `unwrap()` とネットワークは「可」。
+
+「条件付き可」の指摘と対応:
+
+- **(1)【修正済み】** 供給側失敗の分類で `429`/`529`/`401` を単純な部分一致にしていたため、クラッシュ時に分類する stderr 末尾の
+  スタックトレース（`cli.js:4291:17` 等）を Throttled と誤分類し、attempts を消費しない requeue を無期限に繰り返しうる。
+  → `provider.rs` の数字コードを「独立トークン」だけ一致させる規則に変更（前後が英数字・`.` でなく、`:` を挟んで数字が続く
+  位置情報の一部でもない）。回帰テスト `status_codes_inside_positions_or_numbers_do_not_match`。ADR-0010 D5 に stderr 末尾を
+  分類に使うことと、この規則を追記
+- **(2)【修正済み】** `retry_after_secs = 0` / `error_cooldown_secs = 0` だと requeue が毎 tick の再 dispatch になる。
+  → `AdapterError::from_provider_failure` で最低 1 秒に切り上げ、`taskd` の設定検証で `error_cooldown_secs >= 1` を要求。
+  `Spawn`（起動失敗）の上限の無い requeue は ADR-0009 D2 の決定どおりで、未解決事項 2 と提案 P-38 に記録済み
+- **(3)【修正済み】** リース延長の安全性は `kill_grace + tick_ms < lease_grace / 2` が前提だが検証も文書化もされていなかった。
+  → 設定検証で要求（違反はエラー）し、ADR-0010 D7 と `worker-protocol.md` §6.1 に前提を明記。回帰テスト
+  `rejects_zero_cooldown_and_unsafe_lease_grace`（既存の設定例・e2e の設定はいずれも満たす）
+- **(5)【修正済み】** 受け入れ条件 3 の e2e が exit code 1 を確認していなかった。→ `taskctl_raw` が exit code を返すようにし、
+  `assert_eq!(code, Some(1))` に変更
+- **(9)【修正済み】** ADR-0010 の記述の不一致 3 件（D1 の列数 14→15、D5 の進捗メッセージの実際の文面、D5 のパターン一覧に
+  `rate_limit`/`529` が無い）を実装に合わせて訂正
+- **(4)(6)(7)(8)(10)【記録】** 未解決事項 8〜12 に記録（Reviewer run 延期の replay は単体テストのみ、取得時 ttl を超えて出力し続ける
+  ワーカーが回収されないことの直接のテストが無い、パイプの自動テストは `head -n 1` そのものではない、Phase 6 形式の Approval 子の
+  重複、人手の Approval 子の cancel）
+
+修正後の再監査は auditor を再起動せず自分で実施: `cargo test -p task-worker provider`（10 passed）、`cargo test --workspace` を
+3 回連続（各 `passed=192 failed=0`）、`cargo clippy --workspace -- -D warnings` と `--all-targets --examples`（いずれも exit 0）、
+変更・新規ファイルの非テスト `unwrap()` 走査（0 件）、`git diff HEAD -- docs/DESIGN.md`（差分なし。DESIGN.md の改訂は Phase 6 の締めの
+コミットで完了済み）。
+
+### 未解決事項
+
+1. P-12（`evidence[]` の各フィールドを任意に）は提案のまま。P-20 / P-33（`ProviderPolicy` の拡張）は供給層の担当として見送り
+2. 供給側失敗の分類は文字列規則なので、取りこぼし（通常の `WorkerError` になり attempts を消費）と誤検出（requeue が cooldown 間隔で
+   繰り返される）がありうる。**連続 requeue の回数に上限は無い**。起動失敗（コマンドのパス誤り等）も同様に cooldown ごとの requeue を
+   繰り返し、ログの warn と `WorkerFinished.outcome = "requeue: adapter: failed to spawn ..."` でしか気付けない（提案 P-38）
+3. `blocked → ready`（answer）の後も attempts > 0 ならバックオフを待つ（ADR-0010 D6 の既知の挙動）
+4. Approval の cancel/reject の伝播は直接の子まで（孫は対象外、ADR-0008 から変わらず）。依存先失敗の伝播は推移的
+5. 依存先失敗の伝播は非終端タスクの JSON を `LIKE` で絞って走査する（1 回の失敗につき O(非終端タスク数)）。単一ノード規模を前提
+6. `taskctl worker run`（DESIGN §5.9）は依然未実装
+7. codex の実機ドッグフードは外部制約により未実施（ADR-0009 D1）
+8. Reviewer run の供給側失敗による延期は単体テスト（`reviewer_run_provider_failure_defers_review_without_consuming_attempts`）だけで、
+   実バイナリでの `replay` 差分ゼロは確認していない（状態を変えず `WorkerProgress` を追記するだけなので影響は小さい）（監査 4）
+9. 「取得時の ttl を超えて出力し続けるワーカーが回収されない」ことを直接示すテストは無い（`heartbeat_renews_the_lease` は延長で
+   期限が更新されることまで）（監査 6）
+10. パイプの自動テストは 256 バイト読んで閉じる形で、`head -n 1` そのものは手動確認（監査 7）
+11. **移行上の注意**: Phase 6 形式（題名に `(attempt n)` が無い）の未決 Approval 子が既存 DB にあると照合できず、新しい子が重複して
+    作られる。古い子は親が終端になると P-37 の伝播で cancel される（監査 8）
+12. **利用者への注意**: `taskctl add --kind approval --parent <Approval 以外>` で人手で作った Approval 子も、親が終端になると
+    cancel される（DESIGN §4.2 の文言どおり）（監査 10）
+
+### 提案（DESIGN.md への修正提案。DESIGN.md 本体は今回以降は編集しない）
+
+| # | 節 | 提案 | 採用まで実装で使う既定 |
+|---|---|---|---|
+| P-38 | §5.2 | 連続 `requeue` の回数（または期間）に上限を設け、超えたら `failed` にするか承認待ちに回す | 上限なし（cooldown ごとに requeue） |
+| P-39 | §5.9 | `taskctl show` で `Answered` / Human check の Approval 子 / バックオフの残り時間を読みやすく表示する | イベントの Debug 表示のみ |

@@ -58,6 +58,7 @@ max_concurrency = {max_concurrency}
 lease_grace_secs = 60
 idle_timeout_secs = 30
 kill_grace_secs = 1
+retry_backoff_base_secs = 0
 review_timeout_secs = 30
 {extra}
 [adapters.fake]

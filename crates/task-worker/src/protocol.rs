@@ -31,14 +31,34 @@ pub struct ReviewRequest {
     pub criteria: Vec<usize>,
 }
 
+/// 以前の `question` への人間の回答（`context.answers[]`。ADR-0010 D3, P-10）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Answer {
+    pub question: String,
+    pub answer: String,
+}
+
 /// `run.context`。未知フィールドは無視する（前方互換）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RunContext {
     pub prior_review: Vec<PriorReview>,
     pub inputs: Vec<ArtifactRef>,
+    /// `taskctl answer` で与えられた回答の履歴（時系列）。無ければ省略（ADR-0010 D3）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<Answer>,
     /// `Reviewer` check の run でのみ `Some`（ADR-0007 D5）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewRequest>,
+}
+
+/// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは
+/// attempts を消費せず `requeue` し、プロバイダを cooldown にする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderFailure {
+    Throttled { retry_after_secs: u64 },
+    AuthFailed,
+    Exhausted,
 }
 
 /// `artifacts/review.json` の 1 判定（ADR-0007 D1/D5）。
@@ -101,6 +121,9 @@ pub enum WorkerMessage {
     Error {
         message: String,
         retryable: bool,
+        /// 供給側の失敗なら種別を付ける（ADR-0010 D5）。付いていれば `retryable` に関わらず `requeue` になる。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_failure: Option<ProviderFailure>,
     },
 }
 

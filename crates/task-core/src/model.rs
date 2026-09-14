@@ -212,6 +212,12 @@ pub enum Event {
         approved: bool,
         note: Option<String>,
     },
+    /// `blocked` のタスクへの人間の回答（ADR-0010 D3, P-10）。`Transitioned{reason:"answer"}` と同一トランザクションで
+    /// 追記し、次の run の `context.answers` に載せる。
+    Answered {
+        question: String,
+        answer: String,
+    },
     ProviderThrottled {
         provider: String,
         #[serde(with = "time::serde::rfc3339")]
