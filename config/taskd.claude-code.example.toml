@@ -10,6 +10,9 @@ kill_grace_secs = 10
 review_timeout_secs = 600
 error_cooldown_secs = 300
 
+[plan]
+auto_accept = false               # Phase 5 の受け入れ条件どおり、子タスクは人間が approve する
+
 [adapters.claude_code]
 # command = "claude"                  # PATH 上の claude を使うなら省略可
 # permission_mode = "bypassPermissions"  # 既定。taskd は許可プロンプトに応答できない

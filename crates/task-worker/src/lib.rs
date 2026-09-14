@@ -12,6 +12,9 @@ pub mod workspace;
 pub use adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 pub use claude_code::{ClaudeCodeAdapter, ClaudeCodeConfig};
 pub use fake::FakeAdapter;
-pub use protocol::{Evidence, PROTOCOL_VERSION, PriorReview, RunContext, RunRequest, WorkerMessage};
+pub use protocol::{
+    Evidence, PROTOCOL_VERSION, PriorReview, ReviewOutput, ReviewRequest, ReviewVerdictOut, RunContext, RunRequest,
+    WorkerMessage,
+};
 pub use subprocess::{SubprocessSpec, run_subprocess};
 pub use workspace::{ExecResult, LocalWorkspace, RemoteWorkspace, Workspace, WorkspaceError};

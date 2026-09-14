@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "Check": {
+      "description": "DESIGN §5.3/§5.7 の `Check` 種別。",
+      "oneOf": [
+        {
+          "properties": {
+            "cmd": {
+              "type": "string"
+            },
+            "expect_exit": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "type": {
+              "const": "command",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cmd",
+            "expect_exit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "artifact_exists",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "reviewer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "human",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Criterion": {
+      "description": "DESIGN §4.1 の `Criterion`。",
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/Check"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "check"
+      ],
+      "type": "object"
+    },
+    "NewTask": {
+      "additionalProperties": false,
+      "description": "プランナーが返す子タスク 1 件。未知フィールドは拒否する（綴り間違いの検出。ADR-0007 D2）。",
+      "properties": {
+        "acceptance": {
+          "description": "1 件以上。`check` は DESIGN §5.7 の 4 種すべて使える。",
+          "items": {
+            "$ref": "#/$defs/Criterion"
+          },
+          "type": "array"
+        },
+        "depends_on": {
+          "default": [],
+          "description": "同じ `tasks` 配列内のインデックス。",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/NewTaskKind",
+          "default": "execute"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "省略時は `Standard`。"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "objective",
+        "acceptance"
+      ],
+      "type": "object"
+    },
+    "NewTaskKind": {
+      "description": "子タスクの kind。`Approval`/`Review` はプランナーからは作れない（承認ゲートは Phase 6、\nReview kind は Reviewer の合成タスク専用。ADR-0007 D2/D5）。",
+      "enum": [
+        "execute",
+        "plan"
+      ],
+      "type": "string"
+    },
+    "Tier": {
+      "description": "DESIGN §5.4 の `WorkerHint`。",
+      "enum": [
+        "frontier",
+        "standard",
+        "cheap"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "DESIGN §5.6 の `PlanOutput{ tasks: Vec<NewTask> }`。",
+  "properties": {
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/NewTask"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "tasks"
+  ],
+  "title": "PlanOutput",
+  "type": "object"
+}

@@ -197,6 +197,74 @@
       ],
       "type": "object"
     },
+    "ReviewOutput": {
+      "description": "`Review` run がワークスペース直下 `artifacts/review.json` に書く出力（ADR-0007 D1/D5）。",
+      "properties": {
+        "verdicts": {
+          "items": {
+            "$ref": "#/$defs/ReviewVerdictOut"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "verdicts"
+      ],
+      "type": "object"
+    },
+    "ReviewRequest": {
+      "description": "`Reviewer` check のための `context.review`（ADR-0007 D5）。`RunRequest.task` は合成した `Review` kind の\nタスクで、対象タスクの `run` の `done` の内容と、判定すべき条件のインデックスを渡す。",
+      "properties": {
+        "criteria": {
+          "description": "判定すべき `task.acceptance` のインデックス（`Check::Reviewer` の条件）。",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "description": "対象 run の `done.evidence`。",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "description": "対象 run の `done.summary`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary",
+        "evidence",
+        "criteria"
+      ],
+      "type": "object"
+    },
+    "ReviewVerdictOut": {
+      "description": "`artifacts/review.json` の 1 判定（ADR-0007 D1/D5）。",
+      "properties": {
+        "criterion": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pass": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion",
+        "pass",
+        "reason"
+      ],
+      "type": "object"
+    },
     "RunContext": {
       "description": "`run.context`。未知フィールドは無視する（前方互換）。",
       "properties": {
@@ -211,6 +279,17 @@
             "$ref": "#/$defs/PriorReview"
           },
           "type": "array"
+        },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`Reviewer` check の run でのみ `Some`（ADR-0007 D5）。"
         }
       },
       "required": [
@@ -587,13 +666,18 @@
     "message": {
       "$ref": "#/$defs/WorkerMessage"
     },
+    "review_output": {
+      "$ref": "#/$defs/ReviewOutput",
+      "description": "`artifacts/review.json`（ADR-0007 D1）。"
+    },
     "run": {
       "$ref": "#/$defs/run"
     }
   },
   "required": [
     "run",
-    "message"
+    "message",
+    "review_output"
   ],
   "title": "ProtocolSchema",
   "type": "object"

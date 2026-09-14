@@ -12,6 +12,7 @@ use task_core::{SqliteStore, TaskStore};
 
 use commands::add::{self, AddArgs};
 use commands::gate::{self, AnswerArgs, ApproveArgs, RejectArgs};
+use commands::plan::{self, PlanArgs};
 use commands::query::{self, LogArgs, LsArgs, ShowArgs};
 use commands::replay::{self, ReplayArgs};
 use error::CliError;
@@ -31,6 +32,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     Add(AddArgs),
+    Plan(PlanArgs),
     Ls(LsArgs),
     Show(ShowArgs),
     Approve(ApproveArgs),
@@ -49,6 +51,7 @@ fn resolve_db_path(cli_db: Option<PathBuf>) -> PathBuf {
 fn dispatch(store: &dyn TaskStore, command: Command) -> Result<ExitCode, CliError> {
     match command {
         Command::Add(args) => add::run(store, args),
+        Command::Plan(args) => plan::run(store, args),
         Command::Ls(args) => query::run_ls(store, args),
         Command::Show(args) => query::run_show(store, args),
         Command::Approve(args) => gate::run_approve(store, args),

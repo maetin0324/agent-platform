@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use task_core::{Check, Task, Usage};
+use task_core::{Check, Task, TaskKind, Usage};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::warn;
@@ -77,9 +77,19 @@ impl WorkerAdapter for ClaudeCodeAdapter {
     }
 }
 
-/// タスクからワーカーへのプロンプトを組み立てる（ADR-0006 D2, 純粋関数）。`run_id` は
-/// スキーマ変更を避けてプロンプト文面にのみ埋め込む（旧 P-11。ADR-0006 D2 参照）。
+/// タスクからワーカーへのプロンプトを組み立てる（ADR-0006 D2, ADR-0007 D7, 純粋関数）。`run_id` は
+/// スキーマ変更を避けてプロンプト文面にのみ埋め込む（旧 P-11。ADR-0006 D2 参照）。`task.kind` で分岐する
+/// （`Plan` はプランナー用、`Review` はレビュアー用、それ以外は Phase 4 のワーカー用プロンプト。ADR-0007 D7）。
 pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
+    match task.kind {
+        TaskKind::Plan => build_plan_prompt(task, context, run_id),
+        TaskKind::Review => build_review_prompt(task, context, run_id),
+        TaskKind::Execute | TaskKind::Approval => build_execute_prompt(task, context, run_id),
+    }
+}
+
+/// 冒頭の共通部分（タイトル・run_id/attempt・目的）。
+fn prompt_header(task: &Task, run_id: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Task: {}\n\n", task.title));
     out.push_str(&format!(
@@ -88,6 +98,39 @@ pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
         task.budget.max_retries + 1
     ));
     out.push_str(&format!("## Objective\n{}\n\n", task.objective));
+    out
+}
+
+/// `context.prior_review` があれば「前回の判定」として列挙する（ADR-0006 D2）。
+fn prior_review_section(context: &RunContext) -> String {
+    let mut out = String::new();
+    if !context.prior_review.is_empty() {
+        out.push_str("## Previous attempt's review result (this is a retry)\n");
+        for pr in &context.prior_review {
+            let verdict = if pr.pass { "pass" } else { "fail" };
+            out.push_str(&format!("- criterion {}: {verdict} ({})\n", pr.criterion, pr.reason));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `artifacts/result.json` の書式指示（ADR-0006 D3。全 kind 共通）。
+fn result_json_instructions() -> &'static str {
+    "Always write `artifacts/result.json` (create the `artifacts/` directory if it does not exist \
+     yet) as a single JSON object of the form `{\"summary\": \"<what you did>\", \"evidence\": []}`. \
+     `evidence` may be left empty; if you fill it, each element must be an object of the form \
+     `{\"criterion\": <index>, \"command\": \"<what you ran>\", \"exit\": <code>, \"stdout_tail\": \"...\"}` \
+     (plain strings are not accepted). \
+     If you cannot proceed and need a decision from a human, instead write \
+     `{\"question\": \"<your question>\"}` to `artifacts/result.json` and stop there. This is a \
+     non-interactive run: you cannot ask a question any other way, and no one will read your final \
+     chat message directly.\n"
+}
+
+/// `Execute`（および `Approval`）用プロンプト（ADR-0006 D2。既存のワーカー用プロンプトのまま）。
+fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
+    let mut out = prompt_header(task, run_id);
     out.push_str("## Acceptance criteria\n");
     for (i, c) in task.acceptance.iter().enumerate() {
         let detail = match &c.check {
@@ -103,24 +146,117 @@ pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
         out.push_str(&format!("{}. {}{}\n", i, c.text, detail));
     }
     out.push('\n');
-    if !context.prior_review.is_empty() {
-        out.push_str("## Previous attempt's review result (this is a retry)\n");
-        for pr in &context.prior_review {
-            let verdict = if pr.pass { "pass" } else { "fail" };
-            out.push_str(&format!("- criterion {}: {verdict} ({})\n", pr.criterion, pr.reason));
-        }
-        out.push('\n');
-    }
+    out.push_str(&prior_review_section(context));
+    out.push_str("## Instructions\n");
+    out.push_str("Work in the current directory (it is a dedicated workspace for this task). When you are done:\n");
+    out.push_str(result_json_instructions());
+    out
+}
+
+/// `Plan` kind 用プロンプト（DESIGN §5.6, ADR-0007 D7）。目標を独立に検証可能な受け入れ条件を持つ
+/// 子タスク群に分解させ、`artifacts/plan.json` に `PlanOutput` を書かせる。
+fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
+    let mut out = prompt_header(task, run_id);
     out.push_str(
         "## Instructions\n\
-         Work in the current directory (it is a dedicated workspace for this task). \
-         When you are done, write your result to `artifacts/result.json` (create the \
-         `artifacts/` directory if it does not exist yet) as a single JSON object of the form \
-         `{\"summary\": \"<what you did>\", \"evidence\": []}`. If you cannot proceed and need a \
-         decision from a human, instead write `{\"question\": \"<your question>\"}` to \
-         `artifacts/result.json` and stop there. This is a non-interactive run: you cannot ask a \
-         question any other way, and no one will read your final chat message directly.\n",
+         Decompose this goal into a set of child tasks, each with an independently verifiable \
+         acceptance criterion or criteria (DESIGN §5.6: \"目標を、独立に検証可能な受け入れ条件を持つ \
+         子タスク群に分解せよ\"). Prefer 3 to 6 child tasks when the size of the goal makes that \
+         reasonable (DESIGN §6 Phase 5 acceptance criteria); use fewer or more only if the goal \
+         clearly requires it.\n\n",
     );
+    out.push_str(&format!(
+        "Write your decomposition to `artifacts/plan.json` (create the `artifacts/` directory if it \
+         does not exist yet) as a single JSON object of exactly this shape:\n\
+         ```json\n\
+         {{\"tasks\":[{{\"title\":\"...\",\"objective\":\"...\",\
+         \"acceptance\":[{{\"text\":\"...\",\"check\":{{\"type\":\"command\",\"cmd\":\"...\",\
+         \"expect_exit\":0}}}}],\"depends_on\":[<index into this same tasks array>],\
+         \"kind\":\"execute\"|\"plan\" (omit for \"execute\"),\
+         \"tier\":\"frontier\"|\"standard\"|\"cheap\" (optional)}}]}}\n\
+         ```\n\
+         `check` may also be `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, \
+         `{{\"type\":\"reviewer\"}}`, or `{{\"type\":\"human\"}}`. Unknown fields are rejected, so do not \
+         add any field not shown above. `depends_on` indices refer to positions within this same \
+         `tasks` array and must form a DAG (no self-reference, no cycles). Every child task must have \
+         at least one `acceptance` entry. `kind:\"plan\"` children are only allowed while the total \
+         decomposition depth stays within {} (DESIGN §5.6 \"分解の深さは上限 3\"; this plan itself \
+         already counts toward that limit). Any `command` check will later be re-run for real inside \
+         the child task's own working directory by an independent reviewer, so do not fabricate a \
+         command whose result you have not actually observed.\n\n",
+        task_core::plan::MAX_PLAN_DEPTH
+    ));
+    let schema = serde_json::to_string(&task_core::plan::schema_value())
+        .unwrap_or_else(|_| "{}".to_string());
+    out.push_str("### Schema for the `artifacts/plan.json` object\n```json\n");
+    out.push_str(&schema);
+    out.push_str("\n```\n\n");
+    out.push_str(&prior_review_section(context));
+    out.push_str(result_json_instructions());
+    out
+}
+
+/// `Review` kind 用プロンプト（DESIGN §5.7, ADR-0007 D5/D7）。対象タスクの成果物を読み取り専用で
+/// 検証し `artifacts/review.json` に判定を書かせる。
+fn build_review_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
+    let mut out = prompt_header(task, run_id);
+    out.push_str(
+        "## Instructions\n\
+         You are a reviewer independently verifying another worker's output. You must not modify any \
+         files in this directory — this is a read-only inspection of the working directory. If in \
+         doubt about whether a criterion is actually satisfied, set `pass` to false and explain why: a \
+         false pass is worse than a false fail (completion is decided by review, not by the worker's \
+         own claim).\n\n",
+    );
+    out.push_str("## Acceptance criteria of the task under review\n");
+    for (i, c) in task.acceptance.iter().enumerate() {
+        out.push_str(&format!("{}. {}\n", i, c.text));
+    }
+    out.push('\n');
+    match &context.review {
+        Some(review) => {
+            out.push_str(&format!(
+                "## Worker's self-reported summary (not to be trusted blindly)\n{}\n\n",
+                review.summary
+            ));
+            out.push_str("## Criteria you must judge in this run\n");
+            for idx in &review.criteria {
+                out.push_str(&format!("- criterion {idx}\n"));
+            }
+            out.push('\n');
+            out.push_str("## Evidence self-reported by the worker (not to be trusted blindly)\n");
+            if review.evidence.is_empty() {
+                out.push_str("(none reported)\n");
+            }
+            for e in &review.evidence {
+                out.push_str(&format!(
+                    "- criterion {}: command `{}` exit={} stdout_tail={:?}\n",
+                    e.criterion, e.command, e.exit, e.stdout_tail
+                ));
+            }
+            out.push('\n');
+        }
+        None => {
+            out.push_str("## Review context\nno review context\n\n");
+        }
+    }
+    out.push_str("## Input artifacts produced by the run under review\n");
+    if context.inputs.is_empty() {
+        out.push_str("(none)\n");
+    }
+    for a in &context.inputs {
+        out.push_str(&format!("- {} at `{}` (sha256={})\n", a.name, a.path, a.sha256));
+    }
+    out.push('\n');
+    out.push_str(
+        "## Result\n\
+         Write your verdicts to `artifacts/review.json` (create the `artifacts/` directory if it does \
+         not exist yet) as a single JSON object of exactly this shape: \
+         `{\"verdicts\":[{\"criterion\":<index>,\"pass\":<bool>,\"reason\":\"...\"}]}`. You must write \
+         exactly one verdict for each criterion listed under \"Criteria you must judge in this run\" \
+         above.\n\n",
+    );
+    out.push_str(result_json_instructions());
     out
 }
 
@@ -131,8 +267,21 @@ struct ResultFile {
     summary: Option<String>,
     #[serde(default)]
     question: Option<String>,
+    /// 生の JSON で受け、`lenient_evidence` で整形する（ADR-0006 D3: `evidence` の内容の正確さは要求しない。
+    /// Phase 5 のドッグフードで、ワーカーが文字列の配列を書いて run 全体が `error` になる事故があった）。
     #[serde(default)]
-    evidence: Vec<Evidence>,
+    evidence: serde_json::Value,
+}
+
+/// `evidence` のうち `Evidence` として読めた要素だけを残す。配列でない／要素が不正でも `done` を失敗にしない。
+fn lenient_evidence(value: serde_json::Value) -> Vec<Evidence> {
+    match value {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| serde_json::from_value::<Evidence>(item).ok())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// stream-json の最後に観測した `{"type":"result",...}`（ADR-0006 D4）。
@@ -396,7 +545,7 @@ async fn terminal_from_result(workspace: &Path, last_result: &ResultMeta) -> Ter
             } else if let Some(summary) = rf.summary {
                 Terminal::Done {
                     summary,
-                    evidence: rf.evidence,
+                    evidence: lenient_evidence(rf.evidence),
                     usage: last_result.usage,
                 }
             } else {
@@ -481,6 +630,64 @@ mod tests {
         assert!(prompt.contains("reviewer will independently re-run"));
         assert!(prompt.contains("run-xyz"));
         assert!(prompt.contains("attempt 1 of"));
+    }
+
+    #[test]
+    fn build_prompt_for_plan_kind_includes_schema_and_plan_json_instructions() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.kind = task_core::TaskKind::Plan;
+        let mut context = RunContext::default();
+        context.prior_review.push(crate::protocol::PriorReview {
+            criterion: 0,
+            pass: false,
+            reason: "tasks[2].depends_on[0] = 7 is out of range".into(),
+        });
+        let prompt = build_prompt(&task, &context, "run-plan-1");
+        assert!(prompt.contains("artifacts/plan.json"));
+        assert!(prompt.contains("\"tasks\""));
+        assert!(prompt.contains("depends_on"));
+        assert!(prompt.contains(&task_core::MAX_PLAN_DEPTH.to_string()));
+        assert!(prompt.contains("PlanOutput") || prompt.contains("NewTask"));
+        assert!(prompt.contains("tasks[2].depends_on[0] = 7 is out of range"));
+        assert!(prompt.contains("artifacts/result.json"));
+    }
+
+    #[test]
+    fn build_prompt_for_review_kind_includes_review_json_and_context() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.kind = task_core::TaskKind::Review;
+        let context = RunContext {
+            review: Some(crate::protocol::ReviewRequest {
+                summary: "added usage example".into(),
+                evidence: vec![crate::protocol::Evidence {
+                    criterion: 0,
+                    command: "cargo test".into(),
+                    exit: 0,
+                    stdout_tail: "test result: ok".into(),
+                }],
+                criteria: vec![0],
+            }),
+            inputs: vec![ArtifactRef {
+                name: "readme.diff".into(),
+                path: "artifacts/readme.diff".into(),
+                sha256: "deadbeef".into(),
+                kind: "diff".into(),
+            }],
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-review-1");
+        assert!(prompt.contains("artifacts/review.json"));
+        assert!(prompt.contains("criterion 0"));
+        assert!(prompt.contains("added usage example"));
+        assert!(prompt.contains("cargo test"));
+        assert!(prompt.contains("artifacts/readme.diff"));
+        assert!(prompt.contains("read-only"));
+
+        // context.review = None must not panic and still produces a usable prompt.
+        let none_context = RunContext::default();
+        let prompt_none = build_prompt(&task, &none_context, "run-review-2");
+        assert!(prompt_none.contains("no review context"));
+        assert!(prompt_none.contains("artifacts/review.json"));
     }
 
     #[tokio::test]
@@ -720,5 +927,33 @@ exit 9
             }
             other => panic!("expected error (stale file must be cleared, not reused), got {other:?}"),
         }
+    }
+
+    /// Phase 5 ドッグフードの回帰: `evidence` が文字列の配列など不正な形でも、`summary` があれば `done`
+    /// として扱い、読めない要素は捨てる（ADR-0006 D3）。
+    #[tokio::test]
+    async fn malformed_evidence_in_result_file_does_not_fail_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"summary":"all good","evidence":["cargo test: 4 passed",{"criterion":0,"command":"cargo test","exit":0,"stdout_tail":""},42]}' > artifacts/result.json
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#,
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-11", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Done { summary, evidence, .. } => {
+                assert_eq!(summary, "all good");
+                assert_eq!(evidence.len(), 1);
+                assert_eq!(evidence[0].command, "cargo test");
+            }
+            other => panic!("expected done, got {other:?}"),
+        }
+        let prompt = build_prompt(&crate::protocol::tests::sample_task(), &RunContext::default(), "r");
+        assert!(prompt.contains("plain strings are not accepted"));
     }
 }

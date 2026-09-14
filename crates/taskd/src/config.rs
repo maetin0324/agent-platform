@@ -47,7 +47,18 @@ pub struct Config {
     #[serde(default)]
     pub adapters: AdaptersConfig,
     #[serde(default)]
+    pub plan: PlanConfig,
+    #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+}
+
+/// `[plan]`（DESIGN §4.2, ADR-0007 D7）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanConfig {
+    /// Plan の子を親 `done` と同時に `ready` にする（true）か、人間の `taskctl approve` を待つ（false、既定）か。
+    #[serde(default)]
+    pub auto_accept: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -217,6 +228,7 @@ impl Config {
             kill_grace: Duration::from_secs(self.kill_grace_secs),
             review_timeout: Duration::from_secs(self.review_timeout_secs),
             workspace_root: self.workspace_root.clone(),
+            plan_auto_accept: self.plan.auto_accept,
         }
     }
 
@@ -248,6 +260,21 @@ mod tests {
         assert_eq!(cfg.providers[0].adapter, "fake");
         assert_eq!(cfg.tick(), Duration::from_millis(2000));
         assert_eq!(cfg.provider_specs()[0].concurrency, 2);
+        assert!(!cfg.plan.auto_accept);
+        assert!(!cfg.dispatch_config().plan_auto_accept);
+    }
+
+    #[test]
+    fn plan_auto_accept_is_parsed_and_unknown_plan_keys_are_rejected() {
+        let cfg: Config = toml::from_str(r#"[plan]
+auto_accept = true
+[[providers]]
+id = "x"
+adapter = "fake"
+"#).unwrap();
+        assert!(cfg.plan.auto_accept);
+        assert!(cfg.dispatch_config().plan_auto_accept);
+        assert!(toml::from_str::<Config>("[plan]\nbogus = 1\n").is_err());
     }
 
     #[test]

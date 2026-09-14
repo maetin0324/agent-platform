@@ -292,3 +292,99 @@ taskd はこれを直接パースできない。そこでこれらのアダプ�
 
 `context.answers`（旧 P-10、`question` → `blocked` → `taskctl answer` の回答をワーカーへ渡す経路）は
 Phase 4 でも未実装のまま（`docs/PROGRESS.md` の未解決事項を参照）。
+
+## 10. kind 別の出力ファイル（Phase 5、ADR-0007 D1/D5/D7）
+
+§1〜§9 の `run`/`done`/`error`/`question` プロトコル自体は kind によらず同じ（`task.kind` に応じて
+`RunRequest.task`/`context` の内容が変わるだけで、メッセージ形式は変更しない）。ただし `Plan` run と
+`Review` run では、ワーカーは終端メッセージ（あるいは CLI エージェント系アダプタなら §9 の
+`artifacts/result.json`）に加えて、作業ディレクトリ直下に追加のファイルを書く。ディスパッチャ側の
+Reviewer（決定的コード。LLM 呼び出しはここには書かない）がそれを読んで判定する。
+
+### 10.1 `Plan` run — `artifacts/plan.json`
+
+`task.kind == "plan"` の run では、ワーカーは分解結果を作業ディレクトリ直下 `artifacts/plan.json` に
+`PlanOutput` として書く（正の JSON Schema は隣の `plan-output.schema.json`。`task-core::plan::schema_value()`
+から生成し `task-core` のテストで一致を検証する）。概形:
+
+```json
+{"tasks":[
+  {"title":"...", "objective":"...",
+   "acceptance":[{"text":"...", "check":{"type":"command","cmd":"...","expect_exit":0}}],
+   "depends_on":[0],
+   "kind":"execute",
+   "tier":"standard"}
+]}
+```
+
+検証規則の要約（`task-core::plan::validate`、全て決定的）:
+
+- `tasks` は 1〜20 件（既定。DESIGN §6 の「3〜6 個」は受け入れ条件であって上限規則ではない）
+- 各 `title`/`objective` は空でない。`acceptance` は 1 件以上、各 `text` も空でない
+- `check` は `command` / `artifact_exists` / `reviewer` / `human` のいずれか（`task-core::Check` の 4 種）
+- `depends_on` は同じ `tasks` 配列内のインデックスで、範囲内・自己参照無し・DAG（閉路無し）
+- `kind:"plan"` の子は、その Plan 自身を含む祖先 `Plan` の数（`plan_depth`）が `MAX_PLAN_DEPTH`（3）を
+  超えない場合のみ許される
+- 未知フィールドは拒否（`#[serde(deny_unknown_fields)]`。綴り間違いの検出のため。§2 の「未知フィールドは
+  無視する」という一般規則とは意図的に逆）
+
+検証に失敗した場合、`Plan` タスクの `reviewing` は `ReviewFail` になり（`criterion_idx =
+task.acceptance.len()`。`taskctl plan` が作る Plan は `acceptance = []` なので常に `criterion 0`）、
+次回の `context.prior_review[criterion_idx].reason` に検証エラー文言（例:
+`tasks[2].depends_on[0] = 7 is out of range (0..3)`）が載ってリトライされる（`max_retries` 内。DESIGN
+§5.6「不正なら1回だけ再試行」）。全 pass なら子タスクの挿入と親のトランザクションが原子的に行われる
+（`TaskStore::complete_plan`。ADR-0007 D3）。
+
+### 10.2 `Review` run — `artifacts/review.json`
+
+`Check::Reviewer` 条件を判定する際、ディスパッチャは対象タスクとは別の run を起動する。
+`RunRequest.task` は永続化されない合成タスク（`kind = "review"`、`title = "Review: <対象 title>"`、
+`objective`/`acceptance`/`workspace`/`budget` は対象タスクと同じ）。`RunRequest.context.review` に
+`ReviewRequest{summary, evidence, criteria}` が入る（`criteria` は判定すべき `task.acceptance` の
+インデックス一覧、`summary`/`evidence` は対象 run の `done` の内容）。`context.inputs` には対象 run の
+`ArtifactProduced` が入る。run は対象タスクと同じ作業ディレクトリで実行される（成果物を直接読めるように
+するため。ワーカーには読み取り専用で振る舞うよう指示するが強制はしない。既知の制約）。
+
+ワーカーは判定結果を作業ディレクトリ直下 `artifacts/review.json` に `ReviewOutput` として書く
+（`worker-protocol.schema.json` の `review_output` 定義。正）:
+
+```json
+{"verdicts":[{"criterion":0,"pass":true,"reason":"cargo test passes and README was updated"}]}
+```
+
+`criteria` に列挙された各インデックスについて `verdicts` に必ず 1 件対応するエントリが必要。次はすべて
+該当する `Reviewer` 条件を `pass=false`（理由に原因を記録）として扱う: run の終端が `done` 以外
+（`error`/`question`/クラッシュ/タイムアウト）、`artifacts/review.json` が無い、JSON として不正、
+`criteria` のいずれかのインデックスに対応する `verdicts` エントリが欠落している。
+
+### 10.3 run 開始前のクリーンアップ
+
+リトライで前回 run の出力ファイルを今回の結果と誤読しないよう、ディスパッチャは run 開始前に
+（§9 の `artifacts/result.json` と同様に）該当ファイルを削除してから起動する: `Plan` run なら
+`artifacts/plan.json`、`Review` run なら `artifacts/review.json`。
+
+### 10.4 例: `fake` アダプタでの kind 分岐
+
+`fake` アダプタ（sh スクリプト。§1〜§8 の JSON Lines を stdin/stdout で読み書きする）は、stdin に来る
+`run` 行の `"task":{"kind":"plan", ...}` / `"kind":"review"` を見て分岐できる。例（`sh`, `jq` 前提）:
+
+```sh
+#!/bin/sh
+line=$(cat)
+kind=$(printf '%s' "$line" | jq -r '.task.kind')
+case "$kind" in
+  plan)
+    mkdir -p artifacts
+    printf '%s' '{"tasks":[{"title":"a","objective":"do a","acceptance":[{"text":"c","check":{"type":"command","cmd":"true","expect_exit":0}}]}]}' \
+      > artifacts/plan.json
+    ;;
+  review)
+    mkdir -p artifacts
+    printf '%s' '{"verdicts":[{"criterion":0,"pass":true,"reason":"looks fine"}]}' > artifacts/review.json
+    ;;
+esac
+echo '{"type":"done","summary":"ok","evidence":[]}'
+```
+
+（`claude-code` アダプタでの kind 別プロンプトは §9 と同じ「翻訳層」であり、`task-worker::claude_code::
+build_prompt` が `task.kind` で分岐する。ADR-0007 D7）

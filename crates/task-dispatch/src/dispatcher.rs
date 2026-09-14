@@ -4,8 +4,13 @@
 //! 1. 終了したワーカー／レビューの結果を取り込み、状態遷移をストアに書く
 //! 2. 期限切れリースを回収（`running → ready|failed`、`LeaseExpired`）
 //! 3. 自分が起動した run のうち、ストア上で既に `running` でない／run_id が変わったものを強制終了（cancel 等）
-//! 4. `reviewing` なのに判定中でないタスクのレビューを開始（再起動後の復旧）
+//! 4. `reviewing` なのに判定中でないタスクのレビューを開始（再起動後の復旧、または前 tick で `Reviewer` run の
+//!    枠が無く見送ったもの）
 //! 5. `ready_tasks` を `priority DESC, created_at ASC` で取り、`ProviderPolicy` と並列度上限に従って dispatch
+//!
+//! Phase 5（ADR-0007）: `Reviewer` 条件を持つタスクのレビューは、`Standard` tier のプロバイダをここで選び
+//! （並列度の枠も実行中 run と共有する）、`review.rs` がアダプタ経由で別 run を起動する。`Plan` kind の
+//! レビューが通れば `TaskStore::complete_plan` で子タスクを挿入する。
 //!
 //! **LLM 呼び出しはここに書かない。** 判断は全て設定・状態機械・ストアのクエリで決まる。
 
@@ -14,17 +19,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use task_core::{ArtifactRef, Event, Status, StoreError, Task, TaskId, TaskStore, Trigger, WorkspaceSpec};
+use task_core::plan::{PlanLimits, materialize};
+use task_core::{ArtifactRef, Event, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec};
 use task_worker::{
-    AdapterError, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RunContext, RunLimits,
-    RunOutcome, RunRequest, Terminal, Workspace, WorkerAdapter,
+    AdapterError, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RunContext, RunLimits, RunOutcome,
+    RunRequest, Terminal, WorkerMessage, Workspace, WorkerAdapter,
 };
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy};
-use crate::review::{Verdict, review_task};
+use crate::review::{
+    PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, needs_reviewer_run, review_task,
+    reviewer_hint,
+};
 
 /// ディスパッチャの設定（`taskd.toml` から組み立てる。ADR-0005 D7）。
 #[derive(Debug, Clone)]
@@ -41,6 +50,9 @@ pub struct DispatchConfig {
     pub review_timeout: Duration,
     /// `WorkspaceSpec::Local` の相対パスの基準。
     pub workspace_root: PathBuf,
+    /// DESIGN §4.2 `plan.auto_accept`: Plan の子を `draft` のまま置く（false）か、親 `done` と同一トランザクションで
+    /// `ready` にする（true）か（ADR-0002 D6, ADR-0007 D3）。
+    pub plan_auto_accept: bool,
 }
 
 /// 1 tick の要約（ログとテスト用）。
@@ -71,7 +83,7 @@ enum Completion {
     Review {
         task_id: TaskId,
         run_id: String,
-        verdicts: Vec<Verdict>,
+        outcome: ReviewOutcome,
     },
 }
 
@@ -79,6 +91,12 @@ struct RunEntry {
     run_id: String,
     provider: ProviderId,
     handle: JoinHandle<()>,
+}
+
+struct ReviewEntry {
+    handle: JoinHandle<()>,
+    /// `Reviewer` run を起動する場合に選んだプロバイダ（並列度の枠を消費する）。
+    provider: Option<ProviderId>,
 }
 
 /// run 途中のイベントをストアに追記するシンク。
@@ -110,6 +128,32 @@ impl EventSink for StoreSink {
     }
 }
 
+/// `Reviewer` run のシンク（ADR-0007 D5 6.）。進捗は対象 run の `WorkerProgress` に
+/// `reviewer run <review_run_id>: ` を付けて記録し、レビュー run の成果物は記録しない
+/// （`artifacts_for_run` が対象 run の成果物だけを返すようにするため）。
+struct ReviewerSink {
+    store: Arc<dyn TaskStore>,
+    task_id: TaskId,
+    subject_run_id: String,
+    review_run_id: String,
+}
+
+impl EventSink for ReviewerSink {
+    fn progress(&self, msg: &str) {
+        let ev = Event::WorkerProgress {
+            run_id: self.subject_run_id.clone(),
+            msg: format!("reviewer run {}: {msg}", self.review_run_id),
+        };
+        if let Err(e) = self.store.append_event(self.task_id, &ev) {
+            tracing::warn!(task_id = %self.task_id, error = %e, "failed to record reviewer progress");
+        }
+    }
+
+    fn artifact(&self, artifact: &ArtifactRef) {
+        tracing::debug!(task_id = %self.task_id, review_run_id = %self.review_run_id, name = %artifact.name, "reviewer run artifact ignored");
+    }
+}
+
 pub struct Dispatcher {
     store: Arc<dyn TaskStore>,
     policy: Box<dyn ProviderPolicy>,
@@ -117,7 +161,11 @@ pub struct Dispatcher {
     adapters: HashMap<AdapterId, Arc<dyn WorkerAdapter>>,
     config: DispatchConfig,
     running: HashMap<TaskId, RunEntry>,
-    reviewing: HashMap<TaskId, JoinHandle<()>>,
+    reviewing: HashMap<TaskId, ReviewEntry>,
+    /// レビューを開始できなかった（`Reviewer` run の枠が無い）タスクの `done` 内容。次 tick で使う。
+    pending_subjects: HashMap<TaskId, ReviewSubject>,
+    /// 「`Standard` tier を提供するプロバイダが無い」警告を出した（連続 tick で繰り返さない）タスク。
+    warned_no_reviewer: std::collections::HashSet<TaskId>,
     tx: mpsc::UnboundedSender<Completion>,
     rx: mpsc::UnboundedReceiver<Completion>,
 }
@@ -140,6 +188,8 @@ impl Dispatcher {
             config,
             running: HashMap::new(),
             reviewing: HashMap::new(),
+            pending_subjects: HashMap::new(),
+            warned_no_reviewer: std::collections::HashSet::new(),
             tx,
             rx,
         }
@@ -181,9 +231,9 @@ impl Dispatcher {
                 Completion::Review {
                     task_id,
                     run_id,
-                    verdicts,
+                    outcome,
                 } => {
-                    self.on_review_finished(task_id, run_id, verdicts)?;
+                    self.on_review_finished(task_id, run_id, outcome)?;
                     reviewed += 1;
                 }
             }
@@ -211,16 +261,23 @@ impl Dispatcher {
             return Ok(());
         }
 
+        let mut subject = ReviewSubject::default();
         let (trigger, outcome_str, usage, provider_outcome) = match result {
             Ok(RunOutcome {
-                terminal: Terminal::Done { summary, usage, .. },
+                terminal: Terminal::Done { summary, usage, evidence },
                 ..
-            }) => (
-                Trigger::WorkerDone,
-                format!("done: {summary}"),
-                usage,
-                ProviderOutcome::Ok,
-            ),
+            }) => {
+                subject = ReviewSubject {
+                    summary: summary.clone(),
+                    evidence,
+                };
+                (
+                    Trigger::WorkerDone,
+                    format!("done: {summary}"),
+                    usage,
+                    ProviderOutcome::Ok,
+                )
+            }
             Ok(RunOutcome {
                 terminal: Terminal::Question { text },
                 ..
@@ -269,8 +326,9 @@ impl Dispatcher {
         {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, next = ?outcome.next, attempts = outcome.attempts, outcome = %outcome_str, "worker finished");
-                if outcome.next == Status::Reviewing {
-                    self.spawn_review(task_id, run_id)?;
+                if outcome.next == Status::Reviewing && !self.spawn_review(task_id, run_id, &subject)? {
+                    // Reviewer run の枠が無い: 次 tick の recover_reviews で再試行する。
+                    self.pending_subjects.insert(task_id, subject);
                 }
             }
             Err(StoreError::InvalidTransition(e)) => {
@@ -285,7 +343,7 @@ impl Dispatcher {
         &mut self,
         task_id: TaskId,
         run_id: String,
-        verdicts: Vec<Verdict>,
+        outcome: ReviewOutcome,
     ) -> Result<(), DispatchError> {
         self.reviewing.remove(&task_id);
         let Some(task) = self.store.get(task_id)? else {
@@ -295,13 +353,9 @@ impl Dispatcher {
             tracing::warn!(%task_id, status = ?task.status, "review result discarded (task no longer reviewing)");
             return Ok(());
         }
-        let all_pass = verdicts.iter().all(|v| v.pass);
-        let trigger = if all_pass {
-            Trigger::ReviewPass
-        } else {
-            Trigger::ReviewFail
-        };
-        let events: Vec<Event> = verdicts
+        let all_pass = outcome.all_pass();
+        let events: Vec<Event> = outcome
+            .verdicts
             .iter()
             .map(|v| Event::ReviewVerdict {
                 run_id: run_id.clone(),
@@ -310,7 +364,33 @@ impl Dispatcher {
                 reason: v.reason.clone(),
             })
             .collect();
-        match self.store.apply_transition_with_events(task_id, trigger, events) {
+        // ADR-0007 D3/D4: Plan が全 pass なら子タスクの挿入と ReviewPass を同一トランザクションで行う。
+        let result = match (all_pass, task.kind, outcome.plan) {
+            (true, TaskKind::Plan, Some(plan)) => {
+                let children = materialize(&task, &plan, OffsetDateTime::now_utc());
+                let n = children.len();
+                let r = self
+                    .store
+                    .complete_plan(task_id, events, children, self.config.plan_auto_accept);
+                if r.is_ok() {
+                    tracing::info!(%task_id, %run_id, children = n, auto_accept = self.config.plan_auto_accept, "plan completed; children inserted");
+                }
+                r
+            }
+            (true, TaskKind::Plan, None) => {
+                // review_task は Plan kind に必ず暗黙の判定を付けるので、ここには来ないはず。
+                tracing::error!(%task_id, "plan review passed without a parsed plan; treating as failure");
+                self.store
+                    .apply_transition_with_events(task_id, Trigger::ReviewFail, events)
+            }
+            (true, _, _) => self
+                .store
+                .apply_transition_with_events(task_id, Trigger::ReviewPass, events),
+            (false, _, _) => self
+                .store
+                .apply_transition_with_events(task_id, Trigger::ReviewFail, events),
+        };
+        match result {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, all_pass, next = ?outcome.next, attempts = outcome.attempts, "review finished");
             }
@@ -373,6 +453,16 @@ impl Dispatcher {
                 entry.handle.abort();
             }
         }
+        // レビュー中に cancel されたタスクの判定（Reviewer run を含む）も中断する。
+        let ids: Vec<TaskId> = self.reviewing.keys().copied().collect();
+        for id in ids {
+            let still_reviewing = matches!(self.store.get(id)?, Some(t) if t.status == Status::Reviewing);
+            if !still_reviewing && let Some(entry) = self.reviewing.remove(&id) {
+                tracing::warn!(task_id = %id, "aborting review (task no longer reviewing)");
+                entry.handle.abort();
+                self.pending_subjects.remove(&id);
+            }
+        }
         Ok(())
     }
 
@@ -383,13 +473,58 @@ impl Dispatcher {
             }
             let events = self.store.events_for(task.id)?;
             let run_id = last_run_id(&events).unwrap_or_default();
-            self.spawn_review(task.id, run_id)?;
+            // 前 tick で見送った場合はメモリ上の done 内容、再起動後は runs/<run_id>/result.json から復元。
+            let subject = match self.pending_subjects.remove(&task.id) {
+                Some(s) => s,
+                None => self
+                    .task_dir(&task)
+                    .map(|dir| subject_from_run_dir(&dir, &run_id))
+                    .unwrap_or_default(),
+            };
+            if !self.spawn_review(task.id, run_id, &subject)? {
+                self.pending_subjects.insert(task.id, subject);
+            }
         }
         Ok(())
     }
 
+    /// 実行中の run と、プロバイダを使っているレビュー run の合計（並列度の分母）。
+    fn workers_in_flight(&self) -> usize {
+        self.running.len() + self.reviewing.values().filter(|e| e.provider.is_some()).count()
+    }
+
+    fn provider_in_use(&self, provider: &ProviderId) -> usize {
+        self.running.values().filter(|e| &e.provider == provider).count()
+            + self
+                .reviewing
+                .values()
+                .filter(|e| e.provider.as_ref() == Some(provider))
+                .count()
+    }
+
+    /// ADR-0007 D2: その Plan 自身を含む祖先 Plan の数。
+    fn plan_depth(&self, task: &Task) -> Result<u32, DispatchError> {
+        let mut depth = 0;
+        let mut current = Some(task.clone());
+        let mut hops = 0;
+        while let Some(t) = current {
+            if t.kind == TaskKind::Plan {
+                depth += 1;
+            }
+            hops += 1;
+            if hops > 64 {
+                break;
+            }
+            current = match t.parent_id {
+                Some(p) => self.store.get(p)?,
+                None => None,
+            };
+        }
+        Ok(depth)
+    }
+
     fn dispatch_ready(&mut self) -> Result<usize, DispatchError> {
-        if self.running.len() >= self.config.max_concurrency {
+        if self.workers_in_flight() >= self.config.max_concurrency {
             return Ok(0);
         }
         // 上位から見て見送りが続いても後続を試せるよう、窓は広めに取る。
@@ -398,7 +533,7 @@ impl Dispatcher {
         let now = Instant::now();
         let mut dispatched = 0;
         for task in candidates {
-            if self.running.len() >= self.config.max_concurrency {
+            if self.workers_in_flight() >= self.config.max_concurrency {
                 break;
             }
             if self.running.contains_key(&task.id) {
@@ -417,11 +552,7 @@ impl Dispatcher {
                 continue;
             };
             let limit = self.policy.concurrency_limit(provider_id.clone());
-            let used = self
-                .running
-                .values()
-                .filter(|e| e.provider == provider_id)
-                .count();
+            let used = self.provider_in_use(&provider_id);
             if used >= limit {
                 tracing::debug!(task_id = %task.id, provider = %provider_id, used, limit, "provider at capacity");
                 continue;
@@ -484,29 +615,113 @@ impl Dispatcher {
         })
     }
 
-    fn spawn_review(&mut self, task_id: TaskId, run_id: String) -> Result<(), DispatchError> {
+    /// レビューを開始する。`Reviewer` 条件があるのにプロバイダ／並列度の枠が無いときは `Ok(false)`
+    /// （タスクは `reviewing` のまま。次 tick の `recover_reviews` が再試行する。ADR-0007 D5 1.）。
+    fn spawn_review(
+        &mut self,
+        task_id: TaskId,
+        run_id: String,
+        subject: &ReviewSubject,
+    ) -> Result<bool, DispatchError> {
         let Some(task) = self.store.get(task_id)? else {
-            return Ok(());
+            return Ok(true);
         };
         let Some(dir) = self.task_dir(&task) else {
             tracing::warn!(%task_id, "cannot review task with remote workspace");
-            return Ok(());
+            return Ok(true);
         };
+
+        let reviewer = if needs_reviewer_run(&task) {
+            match self.pick_reviewer(&task, &run_id) {
+                Some(r) => Some(r),
+                None => {
+                    tracing::debug!(%task_id, "reviewer run deferred (no provider capacity)");
+                    return Ok(false);
+                }
+            }
+        } else {
+            None
+        };
+        let provider = reviewer.as_ref().map(|(p, _)| p.clone());
+        let reviewer_run = reviewer.map(|(_, r)| r);
+
+        let plan = if task.kind == TaskKind::Plan {
+            Some(PlanCheck {
+                depth: self.plan_depth(&task)?,
+                limits: PlanLimits::default(),
+            })
+        } else {
+            None
+        };
+
         let events = self.store.events_for(task_id)?;
         let produced = artifacts_for_run(&events, &run_id);
         let timeout = self.config.review_timeout;
+        let subject = subject.clone();
         let tx = self.tx.clone();
         let handle = tokio::spawn(async move {
             let ws = LocalWorkspace::new(&dir);
-            let verdicts = review_task(&task, &ws, &dir, &produced, timeout).await;
+            let extras = ReviewExtras {
+                subject,
+                plan,
+                reviewer: reviewer_run,
+            };
+            let outcome = review_task(&task, &ws, &dir, &produced, timeout, extras).await;
             let _ = tx.send(Completion::Review {
                 task_id,
                 run_id,
-                verdicts,
+                outcome,
             });
         });
-        self.reviewing.insert(task_id, handle);
-        Ok(())
+        self.reviewing.insert(task_id, ReviewEntry { handle, provider });
+        Ok(true)
+    }
+
+    /// `Reviewer` run のアダプタ／プロバイダを選ぶ（ADR-0007 D5 1.）。並列度の枠は実行中 run と共有する。
+    fn pick_reviewer(&mut self, task: &Task, subject_run_id: &str) -> Option<(ProviderId, ReviewerRun)> {
+        if self.workers_in_flight() >= self.config.max_concurrency {
+            return None;
+        }
+        let Some((adapter_id, provider_id)) = self.policy.pick(&reviewer_hint(), Instant::now()) else {
+            // 候補ゼロ（Standard tier を提供するプロバイダが無い、または全て cooldown 中）。設定ミスなら
+            // 永久に待つことになるので、一時的な満杯（debug）と区別して warn を 1 回出す（監査指摘）。
+            if self.warned_no_reviewer.insert(task.id) {
+                tracing::warn!(task_id = %task.id, hint = ?reviewer_hint(), "no provider available for the reviewer run; task stays reviewing until one appears");
+            }
+            return None;
+        };
+        self.warned_no_reviewer.remove(&task.id);
+        let adapter = match self.adapters.get(&adapter_id) {
+            Some(a) => a.clone(),
+            None => {
+                tracing::warn!(task_id = %task.id, adapter = %adapter_id, "reviewer adapter not configured");
+                return None;
+            }
+        };
+        if self.provider_in_use(&provider_id) >= self.policy.concurrency_limit(provider_id.clone()) {
+            return None;
+        }
+        let review_run_id = ulid::Ulid::new().to_string();
+        let sink = ReviewerSink {
+            store: self.store.clone(),
+            task_id: task.id,
+            subject_run_id: subject_run_id.to_string(),
+            review_run_id: review_run_id.clone(),
+        };
+        tracing::info!(task_id = %task.id, %review_run_id, adapter = %adapter_id, provider = %provider_id, "starting reviewer run");
+        Some((
+            provider_id,
+            ReviewerRun {
+                adapter,
+                run_id: review_run_id,
+                limits: RunLimits {
+                    wall_clock: Duration::from_secs(task.budget.max_wall_secs),
+                    idle_timeout: self.config.idle_timeout,
+                    kill_grace: self.config.kill_grace,
+                },
+                sink: Box::new(sink),
+            },
+        ))
     }
 
     /// ADR-0005 D3: `Local{path}` がそのタスクの作業ディレクトリ。相対なら `workspace_root` 基準。
@@ -553,6 +768,10 @@ async fn run_worker(
         .prepare(&task)
         .await
         .map_err(|e| AdapterError::Other(format!("workspace prepare: {e}")))?;
+    if task.kind == TaskKind::Plan {
+        // ADR-0007 D1: 前回の run の plan.json を今回の出力と誤読しない。
+        let _ = tokio::fs::remove_file(workspace.join(PLAN_FILE)).await;
+    }
     let events = store
         .events_for(task_id)
         .map_err(|e| AdapterError::Other(format!("store: {e}")))?;
@@ -564,6 +783,7 @@ async fn run_worker(
         context: RunContext {
             prior_review,
             inputs: task.inputs.clone(),
+            review: None,
         },
     };
     let sink = StoreSink {
@@ -610,6 +830,19 @@ pub fn artifacts_for_run(events: &[(u64, Event)], run_id: &str) -> Vec<ArtifactR
             _ => None,
         })
         .collect()
+}
+
+/// デーモン再起動後の復旧用: `runs/<run_id>/result.json`（`fake`/`run_subprocess` が書く終端メッセージ）から
+/// `done` の内容を復元する。無ければ空（ADR-0007 D5）。
+fn subject_from_run_dir(dir: &std::path::Path, run_id: &str) -> ReviewSubject {
+    let path = dir.join("runs").join(run_id).join("result.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return ReviewSubject::default();
+    };
+    match serde_json::from_str::<WorkerMessage>(&text) {
+        Ok(WorkerMessage::Done { summary, evidence, .. }) => ReviewSubject { summary, evidence },
+        _ => ReviewSubject::default(),
+    }
 }
 
 /// 最後に `WorkerStarted` した run の id。
@@ -704,6 +937,7 @@ mod tests {
                 kill_grace: Duration::from_millis(100),
                 review_timeout: Duration::from_secs(5),
                 workspace_root: PathBuf::from("/nonexistent"),
+                plan_auto_accept: false,
             },
         )
     }
@@ -820,5 +1054,201 @@ mod tests {
         let report = run_until_idle(&mut d, 200).await;
         assert!(report.idle);
         assert_eq!(store.list(Some(Status::Done)).unwrap().len(), 3);
+    }
+
+    /// `artifacts/plan.json` を書くテスト用アダプタ（Plan kind）、または `artifacts/review.json` を書く（Review kind）。
+    struct FileAdapter {
+        plan_json: String,
+        review_json: String,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for FileAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            std::fs::create_dir_all(req.workspace.join("artifacts")).unwrap();
+            match req.task.kind {
+                TaskKind::Plan => {
+                    // 2 回目以降（prior_review あり）は正しい plan を書き、1 回目は plan_json をそのまま書く。
+                    let text = if req.context.prior_review.is_empty() {
+                        self.plan_json.clone()
+                    } else {
+                        VALID_PLAN.to_string()
+                    };
+                    std::fs::write(req.workspace.join("artifacts/plan.json"), text).unwrap();
+                }
+                TaskKind::Review => {
+                    assert!(req.context.review.is_some());
+                    std::fs::write(req.workspace.join("artifacts/review.json"), &self.review_json).unwrap();
+                }
+                _ => {
+                    std::fs::write(req.workspace.join("touched"), "1").unwrap();
+                }
+            }
+            sink.progress("working");
+            tokio::time::sleep(self.delay).await;
+            Ok(RunOutcome {
+                terminal: Terminal::Done { summary: format!("{:?}", req.task.kind), evidence: vec![], usage: None },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    const VALID_PLAN: &str = r#"{"tasks":[
+        {"title":"a","objective":"do a","acceptance":[{"text":"touched","check":{"type":"command","cmd":"test -f touched","expect_exit":0}}]},
+        {"title":"b","objective":"do b","acceptance":[{"text":"touched","check":{"type":"command","cmd":"test -f touched","expect_exit":0}}],"depends_on":[0]},
+        {"title":"c","objective":"do c","acceptance":[{"text":"looks good","check":{"type":"reviewer"}}],"depends_on":[0,1],"tier":"cheap"}
+    ]}"#;
+
+    fn plan_task(dir: &std::path::Path, max_retries: u32) -> Task {
+        let mut t = new_task(dir, Check::Command { cmd: "true".into(), expect_exit: 0 }, max_retries);
+        t.kind = TaskKind::Plan;
+        t.acceptance.clear();
+        t.worker_hint.tier = Tier::Frontier;
+        t
+    }
+
+    #[tokio::test]
+    async fn plan_task_inserts_draft_children_and_they_run_after_accept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let plan = plan_task(dir.path(), 0);
+        store.insert(&plan).unwrap();
+        let adapter = Arc::new(FileAdapter {
+            plan_json: VALID_PLAN.into(),
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"fine"}]}"#.into(),
+            delay: Duration::from_millis(5),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 2);
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        let p = store.get(plan.id).unwrap().unwrap();
+        assert_eq!(p.status, Status::Done);
+        let children: Vec<Task> = store.list(Some(Status::Draft)).unwrap();
+        assert_eq!(children.len(), 3, "auto_accept=false leaves children in draft");
+        for c in &children {
+            assert_eq!(c.parent_id, Some(plan.id));
+            assert_eq!(c.workspace, plan.workspace);
+        }
+        let verdicts: Vec<(usize, bool, String)> = store
+            .events_for(plan.id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                Event::ReviewVerdict { criterion_idx, pass, reason, .. } => Some((criterion_idx, pass, reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0].0, 0);
+        assert!(verdicts[0].1);
+        assert!(verdicts[0].2.contains("3 tasks"));
+
+        // 人間が approve（Accept）すると子が順に実行され、c は Reviewer 条件を LLM run（FileAdapter）で判定して done。
+        for c in &children {
+            store.apply_transition(c.id, Trigger::Accept, None).unwrap();
+        }
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle);
+        for c in &children {
+            let t = store.get(c.id).unwrap().unwrap();
+            assert_eq!(t.status, Status::Done, "{}: {:?}", c.title, store.events_for(c.id).unwrap());
+        }
+        let c = children.iter().find(|c| c.title == "c").unwrap();
+        assert_eq!(c.worker_hint.tier, Tier::Cheap);
+        let events = store.events_for(c.id).unwrap();
+        let run_id = last_run_id(&events).unwrap();
+        let reviewer_progress = events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::WorkerProgress { run_id: r, msg } if r == &run_id && msg.starts_with("reviewer run ")))
+            .count();
+        assert!(reviewer_progress >= 2, "{events:?}");
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: true, reason, .. } if reason.contains("reviewer(") && reason.contains("fine"))));
+        // WorkerStarted はワーカー run の 1 回だけ（Reviewer run は WorkerStarted を使わない）。
+        assert_eq!(events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { .. })).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_plan_is_retried_with_prior_review_then_children_auto_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let plan = plan_task(dir.path(), 1);
+        store.insert(&plan).unwrap();
+        let adapter = Arc::new(FileAdapter {
+            plan_json: r#"{"tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"depends_on":[9]}]}"#.into(),
+            review_json: String::new(),
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.plan_auto_accept = true;
+        let report = run_until_idle(&mut d, 300).await;
+        assert!(report.idle);
+        let p = store.get(plan.id).unwrap().unwrap();
+        assert_eq!(p.status, Status::Done);
+        assert_eq!(p.attempts, 1);
+        let events = store.events_for(plan.id).unwrap();
+        let verdicts: Vec<(bool, String)> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::ReviewVerdict { pass, reason, .. } => Some((*pass, reason.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verdicts.len(), 2);
+        assert!(!verdicts[0].0 && verdicts[0].1.contains("out of range"), "{:?}", verdicts[0]);
+        assert!(verdicts[1].0);
+        // auto_accept=true: 子は ready で挿入され、その後 done まで進む（a, b は Command、c は Reviewer で review.json 無し→ fail → failed）。
+        let children: Vec<Task> = store.list(None).unwrap().into_iter().filter(|t| t.parent_id == Some(plan.id)).collect();
+        assert_eq!(children.len(), 3);
+        for c in &children {
+            let ev = store.events_for(c.id).unwrap();
+            assert!(matches!(&ev[0].1, Event::Created { task } if task.status == Status::Draft));
+            assert!(matches!(&ev[1].1, Event::Transitioned { from: Status::Draft, to: Status::Ready, reason } if reason == "accept"));
+        }
+        let by_title = |t: &str| children.iter().find(|c| c.title == t).map(|c| store.get(c.id).unwrap().unwrap()).unwrap();
+        assert_eq!(by_title("a").status, Status::Done);
+        assert_eq!(by_title("b").status, Status::Done);
+        let c = by_title("c");
+        assert_eq!(c.status, Status::Failed, "{:?}", store.events_for(c.id).unwrap());
+        assert!(store.events_for(c.id).unwrap().iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: false, reason, .. } if reason.contains("review.json"))));
+    }
+
+    #[tokio::test]
+    async fn reviewer_run_shares_concurrency_and_is_deferred_when_at_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        // 並列度 1: 実行中のワーカーがいる間は Reviewer run を開始できず、reviewing のまま待つ。
+        let r = new_task(dir.path(), Check::Reviewer, 0);
+        store.insert(&r).unwrap();
+        let adapter = Arc::new(FileAdapter {
+            plan_json: String::new(),
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"ok"}]}"#.into(),
+            delay: Duration::from_millis(150),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let first = d.tick().unwrap();
+        assert_eq!(first.dispatched, 1);
+        // ワーカーが終わるのを待ってから、次の tick で reviewing に入る。
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        // 2 つ目のタスクを ready にしておき、Reviewer run が枠を取っている間は dispatch されないことを見る。
+        let other = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        store.insert(&other).unwrap();
+        let second = d.tick().unwrap();
+        assert_eq!(second.finished, 1);
+        assert_eq!(store.get(r.id).unwrap().unwrap().status, Status::Reviewing);
+        assert_eq!(second.dispatched, 0, "reviewer run occupies the only slot");
+        let report = run_until_idle(&mut d, 300).await;
+        assert!(report.idle);
+        assert_eq!(store.get(r.id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(store.get(other.id).unwrap().unwrap().status, Status::Done);
     }
 }

@@ -84,6 +84,16 @@ pub trait TaskStore: Send + Sync {
         trigger: Trigger,
         extra_events: Vec<Event>,
     ) -> Result<Outcome, StoreError>;
+
+    /// ADR-0007 D3: Plan の子タスク群を挿入（`Created`、`accept_children` なら続けて `Accept`）し、
+    /// 親に `ReviewPass` を適用して `verdict_events` を追記する。全体が 1 トランザクション。
+    fn complete_plan(
+        &self,
+        plan_id: TaskId,
+        verdict_events: Vec<Event>,
+        children: Vec<Task>,
+        accept_children: bool,
+    ) -> Result<Outcome, StoreError>;
 }
 
 pub struct SqliteStore {
@@ -157,11 +167,9 @@ impl SqliteStore {
             None => Ok(None),
         }
     }
-}
 
-impl TaskStore for SqliteStore {
-    fn insert(&self, task: &Task) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+    /// `insert` の本体（トランザクション内でも使えるよう `Connection` を受ける）。
+    fn insert_tx(conn: &Connection, task: &Task) -> Result<(), StoreError> {
         let json = serde_json::to_string(task)?;
         let created_at = format_rfc3339(task.created_at)?;
         let (lease_worker_run_id, lease_expires_at) = match &task.lease {
@@ -188,6 +196,124 @@ impl TaskStore for SqliteStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// `apply_transition_with_events` の本体（ADR-0004 D1 / ADR-0005 D4）。`tx` 内で任意のトリガーを
+    /// 検証し、tasks の更新と Event::Transitioned (+ extra_events) の追記を行う。commit は呼び出し側。
+    fn apply_transition_tx(
+        tx: &Connection,
+        task_id: TaskId,
+        trigger: Trigger,
+        extra_events: Vec<Event>,
+    ) -> Result<Outcome, StoreError> {
+        // ADR-0004 D1 / ADR-0005 D4: 任意のトリガーを検証し、tasks の更新と
+        // Event::Transitioned (+ extra_events) の追記を単一トランザクションで行う。
+
+        let json: Option<String> = tx
+            .query_row(
+                "SELECT json FROM tasks WHERE id = ?1",
+                params![task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let json = match json {
+            Some(j) => j,
+            None => return Err(StoreError::Invalid(format!("task not found: {task_id}"))),
+        };
+        let mut task = Self::row_to_task(json)?;
+
+        let view = StateView {
+            kind: task.kind,
+            status: task.status,
+            attempts: task.attempts,
+            max_retries: task.budget.max_retries,
+        };
+        let outcome = transition(&view, &trigger)?;
+
+        let now = OffsetDateTime::now_utc();
+        // ADR-0002 D1: running から出る全遷移でリースを解放する。
+        let leaving_running = view.status == Status::Running && outcome.next != Status::Running;
+        task.status = outcome.next;
+        task.attempts = outcome.attempts;
+        task.updated_at = now;
+        if leaving_running {
+            task.lease = None;
+        }
+
+        let new_json = serde_json::to_string(&task)?;
+        if leaving_running {
+            tx.execute(
+                "UPDATE tasks SET status = ?1, lease_worker_run_id = NULL, \
+                 lease_expires_at = NULL, json = ?2 WHERE id = ?3",
+                params![status_str(task.status), new_json, task_id.to_string()],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE tasks SET status = ?1, json = ?2 WHERE id = ?3",
+                params![status_str(task.status), new_json, task_id.to_string()],
+            )?;
+        }
+
+        let mut next_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM events WHERE task_id = ?1",
+            params![task_id.to_string()],
+            |row| row.get(0),
+        )?;
+
+        let transitioned = Event::Transitioned {
+            from: view.status,
+            to: outcome.next,
+            reason: outcome.reason.to_string(),
+        };
+        let ts = format_rfc3339(OffsetDateTime::now_utc())?;
+        tx.execute(
+            "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                task_id.to_string(),
+                next_seq,
+                ts,
+                serde_json::to_string(&transitioned)?
+            ],
+        )?;
+        next_seq += 1;
+
+        for event in extra_events {
+            let ts = format_rfc3339(OffsetDateTime::now_utc())?;
+            tx.execute(
+                "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    task_id.to_string(),
+                    next_seq,
+                    ts,
+                    serde_json::to_string(&event)?
+                ],
+            )?;
+            next_seq += 1;
+        }
+
+        Ok(outcome)
+    }
+
+    fn append_event_tx(conn: &Connection, task_id: TaskId, event: &Event) -> Result<u64, StoreError> {
+        let next_seq: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM events WHERE task_id = ?1",
+            params![task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let ts = format_rfc3339(OffsetDateTime::now_utc())?;
+        let json = serde_json::to_string(event)?;
+        conn.execute(
+            "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
+            params![task_id.to_string(), next_seq, ts, json],
+        )?;
+        Ok(next_seq as u64)
+    }
+}
+
+impl TaskStore for SqliteStore {
+    fn insert(&self, task: &Task) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        Self::insert_tx(&conn, task)
     }
 
     fn get(&self, id: TaskId) -> Result<Option<Task>, StoreError> {
@@ -426,93 +552,43 @@ impl TaskStore for SqliteStore {
         trigger: Trigger,
         extra_events: Vec<Event>,
     ) -> Result<Outcome, StoreError> {
-        // ADR-0004 D1 / ADR-0005 D4: 任意のトリガーを検証し、tasks の更新と
-        // Event::Transitioned (+ extra_events) の追記を単一トランザクションで行う。
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
+        let outcome = Self::apply_transition_tx(&tx, task_id, trigger, extra_events)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
 
-        let json: Option<String> = tx
-            .query_row(
-                "SELECT json FROM tasks WHERE id = ?1",
-                params![task_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let json = match json {
-            Some(j) => j,
-            None => return Err(StoreError::Invalid(format!("task not found: {task_id}"))),
-        };
-        let mut task = Self::row_to_task(json)?;
-
-        let view = StateView {
-            kind: task.kind,
-            status: task.status,
-            attempts: task.attempts,
-            max_retries: task.budget.max_retries,
-        };
-        let outcome = transition(&view, &trigger)?;
-
-        let now = OffsetDateTime::now_utc();
-        // ADR-0002 D1: running から出る全遷移でリースを解放する。
-        let leaving_running = view.status == Status::Running && outcome.next != Status::Running;
-        task.status = outcome.next;
-        task.attempts = outcome.attempts;
-        task.updated_at = now;
-        if leaving_running {
-            task.lease = None;
-        }
-
-        let new_json = serde_json::to_string(&task)?;
-        if leaving_running {
-            tx.execute(
-                "UPDATE tasks SET status = ?1, lease_worker_run_id = NULL, \
-                 lease_expires_at = NULL, json = ?2 WHERE id = ?3",
-                params![status_str(task.status), new_json, task_id.to_string()],
+    fn complete_plan(
+        &self,
+        plan_id: TaskId,
+        verdict_events: Vec<Event>,
+        children: Vec<Task>,
+        accept_children: bool,
+    ) -> Result<Outcome, StoreError> {
+        // ADR-0007 D3: 子の insert + Created (+ Accept) と親の ReviewPass を単一トランザクションで行う。
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        for child in &children {
+            if child.parent_id != Some(plan_id) {
+                return Err(StoreError::Invalid(format!(
+                    "child {} does not belong to plan {plan_id}",
+                    child.id
+                )));
+            }
+            Self::insert_tx(&tx, child)?;
+            Self::append_event_tx(
+                &tx,
+                child.id,
+                &Event::Created {
+                    task: Box::new(child.clone()),
+                },
             )?;
-        } else {
-            tx.execute(
-                "UPDATE tasks SET status = ?1, json = ?2 WHERE id = ?3",
-                params![status_str(task.status), new_json, task_id.to_string()],
-            )?;
+            if accept_children {
+                Self::apply_transition_tx(&tx, child.id, Trigger::Accept, vec![])?;
+            }
         }
-
-        let mut next_seq: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(seq), -1) + 1 FROM events WHERE task_id = ?1",
-            params![task_id.to_string()],
-            |row| row.get(0),
-        )?;
-
-        let transitioned = Event::Transitioned {
-            from: view.status,
-            to: outcome.next,
-            reason: outcome.reason.to_string(),
-        };
-        let ts = format_rfc3339(OffsetDateTime::now_utc())?;
-        tx.execute(
-            "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                task_id.to_string(),
-                next_seq,
-                ts,
-                serde_json::to_string(&transitioned)?
-            ],
-        )?;
-        next_seq += 1;
-
-        for event in extra_events {
-            let ts = format_rfc3339(OffsetDateTime::now_utc())?;
-            tx.execute(
-                "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    task_id.to_string(),
-                    next_seq,
-                    ts,
-                    serde_json::to_string(&event)?
-                ],
-            )?;
-            next_seq += 1;
-        }
-
+        let outcome = Self::apply_transition_tx(&tx, plan_id, Trigger::ReviewPass, verdict_events)?;
         tx.commit()?;
         Ok(outcome)
     }
@@ -932,5 +1008,79 @@ mod tests {
         let before = store.events_for(task.id).unwrap().len();
         assert!(store.apply_transition_with_events(task.id, Trigger::WorkerDone, vec![Event::ApprovalRequested]).is_err());
         assert_eq!(store.events_for(task.id).unwrap().len(), before);
+    }
+
+    /// ADR-0007 D3: 子の挿入と親の ReviewPass が同一トランザクションで、accept_children に応じて
+    /// 子が draft / ready になる。親の遷移が無効なら子も挿入されない。
+    #[test]
+    fn complete_plan_inserts_children_and_passes_parent_atomically() {
+        use crate::model::TaskKind;
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut plan = sample_task(Status::Reviewing);
+        plan.kind = TaskKind::Plan;
+        store.insert(&plan).expect("insert plan");
+        let mut c1 = sample_task(Status::Draft);
+        c1.parent_id = Some(plan.id);
+        let mut c2 = sample_task(Status::Draft);
+        c2.parent_id = Some(plan.id);
+        c2.depends_on = vec![c1.id];
+        let verdict = Event::ReviewVerdict {
+            run_id: "r".into(),
+            criterion_idx: 0,
+            pass: true,
+            reason: "plan ok".into(),
+        };
+        let outcome = store
+            .complete_plan(plan.id, vec![verdict], vec![c1.clone(), c2.clone()], false)
+            .expect("complete_plan");
+        assert_eq!(outcome.next, Status::Done);
+        assert_eq!(store.get(plan.id).unwrap().unwrap().status, Status::Done);
+        let ev: Vec<Event> = store.events_for(plan.id).unwrap().into_iter().map(|(_, e)| e).collect();
+        assert!(matches!(&ev[0], Event::Transitioned { to: Status::Done, reason, .. } if reason == "review_pass"));
+        assert!(matches!(&ev[1], Event::ReviewVerdict { pass: true, .. }));
+        for c in [&c1, &c2] {
+            let got = store.get(c.id).unwrap().expect("child inserted");
+            assert_eq!(got.status, Status::Draft);
+            let ev = store.events_for(c.id).unwrap();
+            assert_eq!(ev.len(), 1);
+            assert!(matches!(&ev[0].1, Event::Created { .. }));
+        }
+        // draft の子は ready_tasks に出ない。
+        assert!(store.ready_tasks(10).unwrap().is_empty());
+
+        // accept_children = true: 子は ready、Created + Transitioned(accept)。
+        let mut plan2 = sample_task(Status::Reviewing);
+        plan2.kind = TaskKind::Plan;
+        store.insert(&plan2).expect("insert plan2");
+        let mut c3 = sample_task(Status::Draft);
+        c3.parent_id = Some(plan2.id);
+        store.complete_plan(plan2.id, vec![], vec![c3.clone()], true).expect("complete_plan 2");
+        let got = store.get(c3.id).unwrap().unwrap();
+        assert_eq!(got.status, Status::Ready);
+        let ev = store.events_for(c3.id).unwrap();
+        assert_eq!(ev.len(), 2);
+        assert!(matches!(&ev[1].1, Event::Transitioned { from: Status::Draft, to: Status::Ready, reason } if reason == "accept"));
+        assert_eq!(store.ready_tasks(10).unwrap().len(), 1);
+
+        // 親が reviewing でなければ全体がロールバックされ、子は挿入されない。
+        let mut not_reviewing = sample_task(Status::Ready);
+        not_reviewing.kind = TaskKind::Plan;
+        store.insert(&not_reviewing).unwrap();
+        let mut c4 = sample_task(Status::Draft);
+        c4.parent_id = Some(not_reviewing.id);
+        let err = store.complete_plan(not_reviewing.id, vec![], vec![c4.clone()], true).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidTransition(_)));
+        assert!(store.get(c4.id).unwrap().is_none());
+        assert!(store.events_for(c4.id).unwrap().is_empty());
+
+        // 親子関係が違う子は拒否。
+        let stranger = sample_task(Status::Draft);
+        let mut plan3 = sample_task(Status::Reviewing);
+        plan3.kind = TaskKind::Plan;
+        store.insert(&plan3).unwrap();
+        assert!(matches!(
+            store.complete_plan(plan3.id, vec![], vec![stranger], false),
+            Err(StoreError::Invalid(_))
+        ));
     }
 }

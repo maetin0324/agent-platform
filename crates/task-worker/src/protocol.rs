@@ -19,11 +19,40 @@ pub struct PriorReview {
     pub reason: String,
 }
 
+/// `Reviewer` check のための `context.review`（ADR-0007 D5）。`RunRequest.task` は合成した `Review` kind の
+/// タスクで、対象タスクの `run` の `done` の内容と、判定すべき条件のインデックスを渡す。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewRequest {
+    /// 対象 run の `done.summary`。
+    pub summary: String,
+    /// 対象 run の `done.evidence`。
+    pub evidence: Vec<Evidence>,
+    /// 判定すべき `task.acceptance` のインデックス（`Check::Reviewer` の条件）。
+    pub criteria: Vec<usize>,
+}
+
 /// `run.context`。未知フィールドは無視する（前方互換）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RunContext {
     pub prior_review: Vec<PriorReview>,
     pub inputs: Vec<ArtifactRef>,
+    /// `Reviewer` check の run でのみ `Some`（ADR-0007 D5）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewRequest>,
+}
+
+/// `artifacts/review.json` の 1 判定（ADR-0007 D1/D5）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewVerdictOut {
+    pub criterion: usize,
+    pub pass: bool,
+    pub reason: String,
+}
+
+/// `Review` run がワークスペース直下 `artifacts/review.json` に書く出力（ADR-0007 D1/D5）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewOutput {
+    pub verdicts: Vec<ReviewVerdictOut>,
 }
 
 /// taskd → ワーカーの `run` メッセージ（1 行）。`{"type":"run", ...}`。
@@ -91,6 +120,8 @@ impl WorkerMessage {
 pub struct ProtocolSchema {
     pub run: RunRequest,
     pub message: WorkerMessage,
+    /// `artifacts/review.json`（ADR-0007 D1）。
+    pub review_output: ReviewOutput,
 }
 
 /// 生成したスキーマ（`serde_json::Value`）。

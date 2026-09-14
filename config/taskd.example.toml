@@ -9,6 +9,11 @@ kill_grace_secs = 10               # ADR-0003 D4: SIGTERM 後 SIGKILL までの�
 review_timeout_secs = 600          # Command チェック 1 件あたりの上限
 error_cooldown_secs = 300          # AuthFailed / Exhausted 時のプロバイダ除外時間
 
+# Plan kind の子タスクを親 done と同時に ready にするか（DESIGN §4.2 plan.auto_accept、ADR-0007）。
+# false（既定）なら子は draft で挿入され、人間が `taskctl approve <child-id>` で ready にする。
+[plan]
+auto_accept = false
+
 # fake アダプタ: サブプロセスとして起動するコマンド。省略時は progress + done を返す sh スクリプト。
 [adapters.fake]
 # command = ["sh", "-c", "cat >/dev/null; echo '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'"]
