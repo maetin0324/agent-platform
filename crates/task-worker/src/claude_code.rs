@@ -18,7 +18,7 @@ use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 use crate::protocol::{Evidence, RunContext, RunRequest};
-use crate::subprocess::{LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited};
+use crate::subprocess::{LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, spawn_retrying};
 
 /// `[adapters.claude_code]`（taskd.toml, ADR-0006 D6）。
 #[derive(Debug, Clone)]
@@ -337,7 +337,7 @@ async fn run_claude_code(
     #[cfg(unix)]
     command.process_group(0);
 
-    let mut child = command.spawn().map_err(AdapterError::Spawn)?;
+    let mut child = spawn_retrying(&mut command).await.map_err(AdapterError::Spawn)?;
 
     let stdout = child
         .stdout

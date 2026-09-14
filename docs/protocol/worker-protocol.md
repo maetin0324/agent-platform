@@ -271,7 +271,7 @@ stdout:
 
 ## 9. CLI エージェント系アダプタの結果ファイル規約（Phase 4、ADR-0006 で確定）
 
-`claude-code`（および将来の `codex`/`dsh`）は本文書 §1〜§8 の JSON Lines プロトコルを**話さない**。
+`claude-code`・`codex`（および将来の `dsh`）は本文書 §1〜§8 の JSON Lines プロトコルを**話さない**。
 `claude` CLI は独自の `stream-json` イベント（`system`/`assistant`/`user`/`result`）を吐くだけであり、
 taskd はこれを直接パースできない。そこでこれらのアダプタはプロンプトでワーカー（Claude Code 自身）に
 次を指示し、アダプタが作業ディレクトリの `artifacts/result.json` を読んで本文書の `done`/`question` に
@@ -292,6 +292,19 @@ taskd はこれを直接パースできない。そこでこれらのアダプ�
 
 `context.answers`（旧 P-10、`question` → `blocked` → `taskctl answer` の回答をワーカーへ渡す経路）は
 Phase 4 でも未実装のまま（`docs/PROGRESS.md` の未解決事項を参照）。
+
+### 9.1 `codex` アダプタ（Phase 6、ADR-0008 D3）
+
+`codex exec --json` も同じ結果ファイル規約（`artifacts/result.json`）を使うが、正常終了の判定に使う
+JSON Lines のイベント形が `claude-code` と異なる: `claude-code` の `{"type":"result",...}` の代わりに
+`{"type":"turn.completed",...}` / `{"type":"turn.failed","error":...}` を見る。`turn.completed` を一度でも
+観測できれば結果ファイルを読み、`turn.failed` はそのまま `error{retryable:true}` にする。
+`turn.completed`/`turn.failed` のどちらも一度も観測できずに exit した場合はクラッシュとして扱い、
+`artifacts/result.json` を一切信用しない（§9 の判定順序と同じ考え方）。`item.*`（`item.started`/
+`item.completed` 等）は進捗としてのみ扱い、内容の構造には依存しない（実機の codex-cli 0.154.0 で
+`turn.failed.error` がオブジェクト（`{"message":"..."}`）で返ることを確認済み。将来この形が変わっても
+読めるよう文字列・オブジェクトの両方を受け付ける）。プロンプトは `claude-code` と共通（`build_prompt`
+を再利用）。
 
 ## 10. kind 別の出力ファイル（Phase 5、ADR-0007 D1/D5/D7）
 

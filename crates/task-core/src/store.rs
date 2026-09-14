@@ -291,7 +291,39 @@ impl SqliteStore {
             next_seq += 1;
         }
 
+        // ADR-0008 D1: Approval を reject したら、まだ終端でない直接の子を cascade cancel する。
+        if task.kind == TaskKind::Approval && trigger == Trigger::Reject {
+            Self::cascade_cancel_children_tx(tx, task_id)?;
+        }
+
         Ok(outcome)
+    }
+
+    /// `parent_id` の直接の子のうち終端状態（done/failed/cancelled）でないものを `Trigger::Cancel` で
+    /// キャンセルする（ADR-0008 D1）。呼び出し元と同一トランザクションで実行する。
+    fn cascade_cancel_children_tx(tx: &Connection, parent_id: TaskId) -> Result<(), StoreError> {
+        let child_ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM tasks WHERE parent_id = ?1 AND status NOT IN (?2, ?3, ?4)",
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    parent_id.to_string(),
+                    status_str(Status::Done),
+                    status_str(Status::Failed),
+                    status_str(Status::Cancelled),
+                ],
+                |row| row.get::<_, String>(0),
+            )?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for id_str in child_ids {
+            let child_id: TaskId = id_str
+                .parse()
+                .map_err(|_| StoreError::Invalid(format!("invalid task id in tasks table: {id_str}")))?;
+            Self::apply_transition_tx(tx, child_id, Trigger::Cancel, vec![])?;
+        }
+        Ok(())
     }
 
     fn append_event_tx(conn: &Connection, task_id: TaskId, event: &Event) -> Result<u64, StoreError> {
@@ -928,6 +960,67 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0].1, Event::Transitioned { .. }));
         assert_eq!(events[1].1, extra);
+    }
+
+    /// ADR-0008 D1: `Approval` を reject すると、まだ終端でない直接の子だけが cancelled になる。
+    /// 既に done/failed/cancelled の子や、他タスクの子は触らない。
+    #[test]
+    fn reject_cascades_cancel_to_non_terminal_direct_children_only() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut approval = sample_task(Status::Ready);
+        approval.kind = TaskKind::Approval;
+        store.insert(&approval).expect("insert approval");
+
+        let mut pending = sample_task(Status::Draft);
+        pending.parent_id = Some(approval.id);
+        store.insert(&pending).expect("insert pending child");
+
+        let mut running = sample_task(Status::Running);
+        running.parent_id = Some(approval.id);
+        running.lease = Some(crate::model::Lease {
+            worker_run_id: "run-x".into(),
+            expires_at: OffsetDateTime::now_utc() + time::Duration::seconds(60),
+        });
+        store.insert(&running).expect("insert running child");
+
+        let mut already_done = sample_task(Status::Done);
+        already_done.parent_id = Some(approval.id);
+        store.insert(&already_done).expect("insert done child");
+
+        let unrelated = sample_task(Status::Draft);
+        store.insert(&unrelated).expect("insert unrelated");
+
+        let outcome = store
+            .apply_transition(
+                approval.id,
+                Trigger::Reject,
+                Some(Event::ApprovalDecided {
+                    by: "human".to_string(),
+                    approved: false,
+                    note: None,
+                }),
+            )
+            .expect("apply_transition reject");
+        assert_eq!(outcome.next, Status::Failed);
+
+        let pending_after = store.get(pending.id).expect("get").expect("some");
+        assert_eq!(pending_after.status, Status::Cancelled);
+        assert!(
+            store
+                .events_for(pending.id)
+                .expect("events_for")
+                .iter()
+                .any(|(_, e)| matches!(e, Event::Transitioned { to: Status::Cancelled, reason, .. } if reason == "cancel"))
+        );
+
+        let running_after = store.get(running.id).expect("get").expect("some");
+        assert_eq!(running_after.status, Status::Cancelled);
+        assert!(running_after.lease.is_none(), "leaving running must release the lease");
+
+        // 既に done の子は触らない。
+        assert_eq!(store.get(already_done.id).expect("get").expect("some").status, Status::Done);
+        // 他タスクの子（parent_id が違う）も触らない。
+        assert_eq!(store.get(unrelated.id).expect("get").expect("some").status, Status::Draft);
     }
 
     /// apply_transition が存在しない task_id に対して呼ばれた場合の扱い。

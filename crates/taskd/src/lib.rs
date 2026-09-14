@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use task_core::{SqliteStore, StoreError, TaskStore};
 use task_dispatch::{AdapterId, DispatchError, Dispatcher, StaticPolicy, TickReport};
-use task_worker::{ClaudeCodeAdapter, ClaudeCodeConfig, FakeAdapter, WorkerAdapter};
+use task_worker::{ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, WorkerAdapter};
 
 pub use config::{Config, ConfigError};
 
@@ -74,6 +74,19 @@ pub fn build_dispatcher(config: &Config) -> Result<Dispatcher, DaemonError> {
             .collect(),
     });
     adapters.insert(ClaudeCodeAdapter::ID.to_string(), Arc::new(claude_code));
+    let codex = CodexAdapter::new(CodexConfig {
+        command: config.adapters.codex.command.clone(),
+        extra_args: config.adapters.codex.extra_args.clone(),
+        model: config.adapters.codex.model.clone(),
+        env: config
+            .adapters
+            .codex
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    });
+    adapters.insert(CodexAdapter::ID.to_string(), Arc::new(codex));
     Ok(Dispatcher::new(
         store,
         Box::new(policy),

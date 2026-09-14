@@ -1,13 +1,16 @@
-//! Phase 4 ドッグフード用のシード実行ファイル（ADR-0006 D7）。
+//! Phase 4 ドッグフード用のシード実行ファイル（ADR-0006 D7）。Phase 6 で `--adapter` を追加し、
+//! `codex` アダプタでも同じドッグフードタスクを投入できるようにした（ADR-0008、DESIGN §6 Phase 6:
+//! 「codex アダプタで Phase 4 と同じドッグフードタスクが通る」）。
 //!
 //! `taskctl add` は `Check::Human` しか作れない（ADR-0004 D3）ため、`examples/hello-crate` に対する
 //! `Check::Command` 付きの実タスクを、Phase 3 の `tests/e2e` と同じ方法（`TaskStore` API を直接呼ぶ）で
-//! 1 件だけ `ready` として投入する。人間が `docs/DESIGN.md` §6 Phase 4 の受け入れ条件を確認するための道具。
+//! 1 件だけ `ready` として投入する。人間が `docs/DESIGN.md` §6 Phase 4/6 の受け入れ条件を確認するための道具。
 //!
 //! 使い方:
 //! ```text
 //! cargo run -p taskd --example seed_hello_crate_task -- \
-//!   --db /path/to/taskd-demo.sqlite3 --workspace /path/to/agent-platform/examples/hello-crate
+//!   --db /path/to/taskd-demo.sqlite3 --workspace /path/to/agent-platform/examples/hello-crate \
+//!   --adapter claude-code   # または --adapter codex（省略時は claude-code）
 //! taskctl --db /path/to/taskd-demo.sqlite3 show <id を上の出力から>
 //! ```
 
@@ -24,9 +27,12 @@ struct Cli {
     /// `taskctl --db` / `taskd.toml` の `db` と同じファイルを指すこと。
     #[arg(long)]
     db: PathBuf,
-    /// `examples/hello-crate` の絶対パス。`taskd.toml` の provider が `claude-code` を使う設定である前提。
+    /// `examples/hello-crate` の絶対パス。`taskd.toml` の provider が `--adapter` に対応する設定である前提。
     #[arg(long)]
     workspace: PathBuf,
+    /// `worker_hint.adapter`（`taskd.toml` の `[[providers]]` の `adapter` と一致させること）。
+    #[arg(long, default_value = "claude-code")]
+    adapter: String,
 }
 
 fn main() {
@@ -67,7 +73,7 @@ fn main() {
         priority: 0,
         worker_hint: WorkerHint {
             tier: Tier::Standard,
-            adapter: Some("claude-code".to_string()),
+            adapter: Some(cli.adapter.clone()),
         },
         workspace: WorkspaceSpec::Local { path: cli.workspace },
         budget: Budget {

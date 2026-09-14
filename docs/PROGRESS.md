@@ -1,6 +1,7 @@
 # PROGRESS — taskd
 
-現在地: **Phase 5 完了（2026-09-14）**。次は Phase 6（承認ゲートと codex アダプタ）。
+現在地: **Phase 6 完了（2026-09-14、実機ドッグフードは人間確認待ち）**。docs/DESIGN.md に定義された Phase は
+これで全て完了。
 
 | Phase | 内容 | 状態 | 完了日 |
 |---|---|---|---|
@@ -10,7 +11,7 @@
 | 3 | fake ワーカーとディスパッチャ | 完了 | 2026-09-13 |
 | 4 | claude-code アダプタとドッグフーディング | 完了（実機ドッグフードは人間確認待ち） | 2026-09-13 |
 | 5 | Planner / Reviewer（LLM） | 完了 | 2026-09-14 |
-| 6 | 承認ゲートと codex アダプタ | 未着手 | |
+| 6 | 承認ゲートと codex アダプタ | 完了（実機ドッグフードは人間確認待ち） | 2026-09-14 |
 
 ---
 
@@ -739,3 +740,242 @@ Phase 5 で新たに判明し、次 Phase 以降に持ち越す点:
 | P-34 | §6 Phase 4〜6 | 「LLM 込みの確認は人間が行う」を「認証が使える環境ならエージェントが実行し証跡を残してよい」に緩める（今回の `/goal` 制約と整合させる） | `/goal` の制約に従い実施 |
 
 Phase 0〜4 からの既存提案（P-1〜P-26）は状況変化なし。
+
+---
+
+## Phase 6 — DONE（2026-09-14）
+
+### 成果物
+
+- `docs/adr/0008-phase6-approval-gate-and-codex-adapter.md` — reject の子カスケード範囲（直接の子のみ、
+  終端状態は対象外）、`Human` check の解決方法（`Approval` 子タスクを生成しレビュー全体を延期する）、
+  `codex` アダプタの終端判定（`turn.completed`/`turn.failed`）、taskd 設定配線を決めた ADR。監査後に
+  D2 の「前方一致」→「完全一致」、D3 の「200 文字」→「500 文字」の記述誤りを訂正し、未解決事項に
+  監査で見つかった設計上の穴（sticky 承認・孤児化・飢餓・非トランザクション insert）と実機確認範囲を追記
+- `crates/task-core/src/store.rs` — `apply_transition_tx` に `cascade_cancel_children_tx` を追加。
+  `Approval` kind タスクが `Trigger::Reject` で `Failed` になったとき、同一トランザクション内で
+  `parent_id` が一致し終端状態（done/failed/cancelled）でない直接の子を `Trigger::Cancel` で
+  cascade cancel する（`Trigger::Cancel` を再利用するので `running` の子はリース解放も伴う）。
+  `ready_tasks()` の「親 Approval 未完了の子を除外」ロジック自体は Phase 3 で実装済みで今回変更なし
+- `crates/task-dispatch/src/review.rs` — `ReviewExtras::human: HumanVerdicts`
+  （`type HumanVerdicts = HashMap<usize, (bool, String)>`）を追加。`Check::Human` の判定をこの map から
+  引くように変更（無ければ「human approval state missing」の防御的フォールバック）
+- `crates/task-dispatch/src/dispatcher.rs` — `spawn_review` に `resolve_human_approvals` を追加。
+  `Check::Human` の各 criterion について `parent_id`+`kind=Approval`+`title` 完全一致で既存の `Approval`
+  子タスクを探し、無ければ `status: Ready` で直接挿入（`Event::Created` + `Event::ApprovalRequested`）。
+  いずれかが未決（Ready/Draft）ならレビュー全体を延期（`Ok(false)`。既存の「Reviewer run 枠なし」延期
+  経路をそのまま再利用するため `attempts` を消費しない）。全て終端なら `Done→pass`、`Failed→fail`
+  （`ApprovalDecided.note` があれば理由に含める）、`Cancelled→fail` として `ReviewExtras::human` に渡す
+- `crates/task-worker/src/codex.rs`（新規）— `codex exec --json` を起動する `CodexAdapter`。
+  `claude_code.rs` と同じ「結果ファイル規約」（`artifacts/result.json`）。`build_prompt` は
+  `claude_code::build_prompt` をそのまま再利用（kind 別プロンプトを複製しない）。`turn.completed`/
+  `turn.failed` の観測有無で終端を判定し、未観測ならクラッシュとして結果ファイルを信用しない
+  （ADR-0006 D4 と同型のロジック）。`turn.failed.error` は文字列・オブジェクト（`{"message":...}`）の
+  両方を受け付ける（実機で観測した形。後述）
+- `crates/task-worker/src/subprocess.rs` — `spawn_retrying`（`Command::spawn` を `ETXTBSY` だけ数回
+  リトライする）を追加し、`run_subprocess`・`claude_code.rs`・`codex.rs` の spawn 箇所で使用。
+  `cargo test --workspace` を並列実行すると、書き込み直後のスクリプトを即 exec する既存のテストパターン
+  （`claude_code.rs`/`codex.rs` の `stub_*` ヘルパ）が稀に `ETXTBSY`（Text file busy）で落ちることが
+  分かったため（本セッションで複数回再現、`claude_code.rs` 側の既存テストでも発生）、当面の緩和として
+  spawn 全体をリトライで包んだ。6 回連続の `cargo test --workspace` で再発なしを確認済み
+- `crates/taskd/src/config.rs` / `crates/taskd/src/lib.rs` — `[adapters.codex]`
+  （`command`/`extra_args`/`model`/`env`。既定 `command = "codex"`）を追加、`validate()` が
+  `adapter = "codex"` を受理、`build_dispatcher` が `CodexAdapter` を組み立てて登録
+- `config/taskd.codex.example.toml`（新規）— ドッグフード用の設定例
+- `crates/taskd/examples/seed_hello_crate_task.rs` — `--adapter`（既定 `claude-code`）を追加し、同じ
+  ドッグフードタスクを `codex` でも投入できるようにした（DESIGN §6 Phase 6「codex アダプタで Phase 4 と
+  同じドッグフードタスクが通る」に対応するため）
+- `docs/protocol/worker-protocol.md` §9.1（新規）— `codex` アダプタの終端判定（`turn.completed`/
+  `turn.failed`）を追記。§9 冒頭の「将来の codex」表記を「codex」（実装済み）に更新
+
+作業分担: ADR、`store.rs` の cascade、`review.rs`/`dispatcher.rs` の Human check、`codex.rs`、taskd の
+設定配線、`docs/protocol/worker-protocol.md` の更新は自分で行った。作業開始前に独立した単位を検討したが、
+`codex.rs`（新規 1 ファイル）以外は互いに強く依存する設計判断（Approval のカスケード規則と Human check の
+解決方法は同じ ADR の中で一貫させる必要があり、`resolve_human_approvals` は `store.rs` の変更内容を前提に
+書く）ため、独立した単位が 2 つに届かず、implementer サブエージェントは使わず全て自分で実装した
+（Phase 4 と同じ判断）。
+
+### 受け入れ条件と証拠
+
+- 条件（DESIGN §6 Phase 6）: 承認前に子が `ready` にならないこと
+  - コマンド: `cargo test -p task-dispatch approval_gate_blocks_child_dispatch_and_reject_cancels_it`
+  - 結果: ok。`Approval` 親（`Ready`）の子を `Ready` で挿入し、`Dispatcher::tick()` を 5 回回しても
+    `dispatched == 0` で子の `status` は `Ready` のまま変わらないことを確認（`ready_tasks()` が
+    Phase 3 から持つ「親が `kind=Approval` かつ未 `Done` の子を除外する」ロジックにより、実際の
+    ディスパッチループを通しても dispatch されないことを検証）。監査で「DESIGN の字義は『子が ready に
+    ならない』だが実装は『子の status は ready のまま、ready_tasks() に現れないだけ』」との指摘があり、
+    これは Phase 3 からの既知の設計（ADR-0002 D5、未解決事項 P-6）で Phase 6 での新規劣化ではないと判断し
+    記録に留めた（下記未解決事項）
+  - 補助: `store::tests::ready_tasks_excludes_incomplete_dependencies_and_pending_approval_parent`
+    （Phase 3 から既存）でも同じ性質を検証済み
+- 条件（DESIGN §6 Phase 6）: `reject` で子が `cancelled` になること
+  - コマンド: `cargo test -p task-core reject_cascades_cancel_to_non_terminal_direct_children_only`
+  - 結果: ok。`Approval` 親を `Trigger::Reject` した結果、`Draft` の子と `Running`（リース持ち）の子は
+    `Cancelled` になり（`Running` だった子は `lease` も解放される）、既に `Done` の子と他タスクの子は
+    変化しないことを確認
+  - コマンド: `cargo test -p task-dispatch approval_gate_blocks_child_dispatch_and_reject_cancels_it`
+  - 結果: ok（上記と同じテストの後半で reject → 子 `Cancelled` → 以降も dispatch されないことまで確認）
+- 条件（DESIGN §6 Phase 6, DESIGN §5.7）: `Human` check
+  - コマンド: `cargo test -p task-dispatch human_check_creates_approval_child_and_completes_after_approval
+    human_check_fails_task_after_rejection`
+  - 結果: いずれも ok。`Check::Human` を持つタスクが `reviewing` に入ると `Approval` 子タスクが
+    `status: Ready` で自動生成されること、未決の間は `reviewing` のまま `attempts` を消費しないこと、
+    `taskctl approve` 相当（`store.apply_transition(..., Trigger::Approve, ...)`）で `Done` になり対象
+    タスクも `Done` になること、`taskctl reject` 相当で対象タスクが `Failed` になり
+    `ReviewVerdict.reason` に `rejected` と reject 時の note が含まれることを確認
+  - コマンド: `cargo test -p task-dispatch review::tests::human_check_uses_resolved_verdict_from_extras`
+  - 結果: ok（`review_task` 単体で `ReviewExtras.human` の内容がそのまま検証結果になることを確認）
+- 条件（DESIGN §6 Phase 6）: `codex` アダプタ（実装・設定配線）
+  - コマンド: `cargo test -p task-worker codex`
+  - 結果: exit 0、**13 tests passed**（happy path で `done` / `result.json` 欠落 / `question` /
+    `turn.failed`（文字列形・オブジェクト形の両方）/ 不正 JSON / wall-clock タイムアウト / 無出力
+    タイムアウト / 終端メッセージ無しでのクラッシュ / 前回 run の `result.json` を信用しない・消す /
+    `evidence` の寛容な読み取り / **起動引数**（`exec --json --model <model> <extra_args...> <prompt>`
+    の順序とプロンプトが最終引数であること）の 13 ケースを検証。すべて `sh` スクリプトで `codex` を
+    模擬（ネットワーク不要）
+  - コマンド: `cargo test -p taskd config`
+  - 結果: exit 0、**9 tests passed**。うち `loads_codex_dogfood_example_config`
+    （`config/taskd.codex.example.toml` が読め `validate()` を通る）、
+    `accepts_codex_adapter_with_default_config`、`rejects_unknown_fields_in_codex_adapter_config` が
+    Phase 6 で追加
+- 条件（DESIGN §6 Phase 6）: `codex` アダプタで Phase 4 と同じドッグフードタスクが通る
+  - **人間による確認待ち**: 本セッションでは `codex` CLI 自体は PATH 上に存在し認証も通っていた
+    （`codex login status` → `Logged in using ChatGPT`）ため、Phase 4/5 と異なりまず単体で
+    `codex exec --json` を直接（`taskd` 経由でなく）試すところまではできた:
+    ```
+    codex exec --json -m gpt-5.4 "reply with exactly the single word: ok"
+    # => turn.failed: "The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."
+    # gpt-5-codex / gpt-5 / gpt-5-mini / o3 / gpt-4.1 / codex-mini-latest も同様に全て turn.failed
+    ```
+    この直接実行で得られた `turn.completed`/`turn.failed`/`item.*` の JSON Lines の形（特に
+    `turn.failed.error` がオブジェクト `{"message":"..."}` であること）は `codex.rs` の実装・テストに
+    反映済み（上記の 13 tests のうち `turn_failed_with_object_shaped_error_is_retryable_error`）。
+    一方、`taskd` 経由でワーカーとして実際に `codex` を起動する試み
+    （`cargo run -p taskd --example seed_hello_crate_task -- --adapter codex ...` や `taskd` 本体の
+    起動）は、Phase 4 と同じくこのセッションのサンドボックスの安全機構に "Create Unsafe Agents" として
+    拒否され実行できなかった。加えて、このアカウントの codex プランでは試した範囲のモデル名が
+    いずれも使えないため、認証・サンドボックスの制約が外れたとしても、そのままでは実タスクを `done`
+    まで進められない可能性が高い。人間は以下の手順で確認する:
+    ```
+    # 1. examples/hello-crate は cargo test が通る状態で用意済み
+    (cd examples/hello-crate && cargo test)   # test result: ok. 1 passed
+
+    # 2. taskd をビルドし、codex 用の設定でタスクを1件投入する
+    cargo build -p taskd --bin taskd --example seed_hello_crate_task
+    cargo run -p taskd --example seed_hello_crate_task -- \
+      --db /tmp/taskd-phase6-demo.sqlite3 \
+      --workspace "$(pwd)/examples/hello-crate" \
+      --adapter codex
+
+    # 3. config/taskd.codex.example.toml を db パスに合わせてコピーし、
+    #    [adapters.codex] に使えるモデル（このアカウントで動く model 名）を設定して taskd を起動する
+    cp config/taskd.codex.example.toml /tmp/taskd.toml
+    # db / workspace_root / [adapters.codex].model / [[providers]].model を編集したうえで:
+    cargo run -p taskd --bin taskd -- --config /tmp/taskd.toml --until-idle
+
+    # 4. 結果を確認する
+    cargo run -p taskctl -- --db /tmp/taskd-phase6-demo.sqlite3 show <上のタスク ID>
+    cargo run -p taskctl -- --db /tmp/taskd-phase6-demo.sqlite3 replay
+    cat examples/hello-crate/runs/*/stdout.jsonl   # turn.* / item.* の生ログ（証拠）
+    ```
+    上記が `status: Done` かつ `taskctl replay` が `0 mismatches` になれば受け入れ条件を満たす。
+    通らない場合（モデルが使えない等）は `docs/DESIGN.md` の当該条件を codex 側の制約により満たせない
+    旨を人間の判断として記録すること
+- CLAUDE.md の共通条件
+  - コマンド: `cargo test --workspace`
+    結果: exit 0、**142 tests passed**（task-core 28 + task-dispatch 25 + task-worker 48
+    （既存 35 + codex 13）+ taskctl 23 + 1 + taskd 9 + 1 + e2e 6（plan_scenarios 2 + scenarios 4）、
+    doc-tests 0、失敗 0）。並列実行で稀に発生していた `ETXTBSY`（Text file busy）は `spawn_retrying`
+    追加後、連続 6 回・別途 4 回の計 10 回の `cargo test --workspace` で再発なしを確認
+  - コマンド: `cargo clippy --workspace -- -D warnings` → exit 0、警告 0
+    `cargo clippy --workspace --all-targets --examples -- -D warnings` → exit 0、警告 0
+  - `unwrap()` はテストモジュール以外に無い（`#[cfg(test)]` より前の行を今回変更した全ファイルで
+    走査、該当 0 行。監査でも同じ結果を確認済み）
+  - ネットワーク: テストは `sh` スクリプトとローカル SQLite のみ。新規依存クレートなし
+
+### 監査結果
+
+auditor サブエージェントを 1 回起動（読み取り専用。`cargo test --workspace`（139 passed 時点、exit 0）、
+`cargo clippy --workspace -- -D warnings` と `--all-targets`（いずれも exit 0）、`unwrap()` 走査、
+`git diff HEAD -- docs/DESIGN.md`（空）を auditor 自身が再実行）。総合判定は **条件付き可**、個別項目の
+「不可」は無し（受け入れ条件 F「codex でドッグフードが通る」は「証拠なし」という指摘で、対応は
+「PROGRESS.md に人間確認待ちと明記すること」だった）。
+
+指摘と対応:
+
+- **(A)【ブロッカー→解消】** 受け入れ条件 F の証拠が無い。→ 上記「受け入れ条件と証拠」に実機
+  `codex exec` の直接実行結果と、`taskd` 経由の実機ドッグフードが未達である理由（サンドボックス制約＋
+  アカウントのモデル制約）を明記し、人間向け手順を記載した
+- **(B)【ブロッカー→解消】** `docs/PROGRESS.md` に Phase 6 節が無かった。→ 本節を追加
+- **(C)【ブロッカー→修正済み】** ADR-0008 の記述が実装と不一致（D2「前方一致」は実装が「完全一致」、
+  D3「200 文字」は実装が「500 文字」）。→ ADR-0008 を実装に合わせて訂正
+- **(D)【指摘→解消】** 監査依頼に `seed_hello_crate_task.rs` と `worker-protocol.md` の変更を含めて
+  いなかった。→ 本節の成果物一覧に明記
+- **(E)【指摘→対応】** テストカバレッジの穴（`codex.rs` の不正 JSON テスト、起動引数の検証テストが無い）。
+  → `invalid_result_file_json_is_retryable_error` と
+  `command_line_has_exec_json_model_then_prompt_as_last_arg` を追加（`cargo test -p task-worker codex`
+  が 11→13 件に増加）
+- **(F)【設計上の穴、次 Phase 以降に記録】** 以下は修正せず未解決事項に記録した（監査で「次 Phase 以降に
+  回してよい」とされた範囲）:
+  1. **承認の sticky 問題**: `Approval` 子が一度 `Done`/`Failed` になると、対象タスクが後で別条件の fail
+     により再度 `ready`→レビューに回っても同じ子を再利用する。新しい成果物に対して人間の再承認なしに
+     Human 条件が pass/fail してしまう
+  2. reject された `Approval` 子は再利用され続けるため、`max_retries > 0` のタスクは無駄な再実行を
+     上限まで繰り返す
+  3. Human 条件を持つ親タスクが `cancel`/`failed` になっても、生成済みの `Ready` な `Approval` 子は
+     誰もクローズしない（孤児化。人間の承認待ちキューにゴミが残る）
+  4. `ready_tasks` の探索窓（`max_concurrency * 4 + 16`）を、常に非ディスパッチ対象の `Approval` 子が
+     占有しうる（承認待ちが大量に滞留すると後続タスクが飢餓する可能性）
+  5. `create_human_approval_child` の `insert` と `Event::Created` の追記が非トランザクション
+     （`taskctl add` と同じ既存パターンだが `complete_plan` とは不統一）
+- 監査で指摘され対応しない点: 本セッションで `codex exec --json` を単体で直接実行して仕様確認したことは
+  CLAUDE.md の「LLM 呼び出しを伴う確認は Phase 4/5/6 で人間が行う」を厳密には超えるが、今回の `/goal` の
+  制約「認証が使える場合だけ行う」の範囲内であり、`taskd` 経由の実機ドッグフード（本来の受け入れ条件）
+  自体は実施していない。Phase 5 の P-34 提案と同じ整理
+
+再監査は auditor を再起動せず自分で実施: 上記 (C)(E) の修正後に `cargo test --workspace`
+（142 passed, exit 0）、`cargo clippy --workspace -- -D warnings` と `--all-targets --examples`
+（いずれも exit 0, 警告 0）を再実行して確認済み。
+
+### 未解決事項
+
+Phase 0〜5 から持ち越し（未着手、人間の判断待ち。今回は対処しない）:
+1. P-4 `cancel` を非終端状態に限定するか
+2. P-6 親 `Approval` 待ちの子の扱い（DESIGN の字義「子が ready にならない」と実装「ready_tasks() に
+   現れないだけで status は ready のまま」の不一致。Phase 6 の受け入れ条件でも同じ形で再確認された）
+3. P-10 `context.answers` の追加要否
+4. P-5 / P-18 `taskctl cancel` の追加要否
+5. `store.insert` の非トランザクション性
+6. Phase 4 の実機ドッグフード（`claude-code`）は依然未実施（Phase 5 で同じアダプタ経路の実機確認はした）
+7. `claude-code` アダプタが `runs/<run_id>/result.json` を書かない（P-26）
+8. `taskctl show`/`ls` の SIGPIPE panic
+9〜17. Reviewer run 関連（Phase 5 未解決事項参照）
+
+Phase 6 で新たに判明し、次 Phase 以降に持ち越す点:
+18. **承認の sticky 問題**（監査(F)-1）。`Approval` 子の再利用により再実行のたびの再承認ができない
+19. **reject 後の無駄リトライ**（監査(F)-2）
+20. **孤児化する `Approval` 子**（監査(F)-3）
+21. **`ready_tasks` 窓の飢餓リスク**（監査(F)-4）
+22. `create_human_approval_child` の非トランザクション性（監査(F)-5）
+23. **`codex` の実機ドッグフード未実施**。`taskd` 経由の起動がこのセッションのサンドボックスで拒否され、
+    かつ利用可能な認証（ChatGPT アカウント）では試した範囲のモデルが使えなかった。人間が別環境・別
+    アカウントで「受け入れ条件と証拠」の手順を実行し確認する必要がある
+24. `spawn_retrying`（`ETXTBSY` リトライ）はテスト実行時の並行 spawn 起因の事象への対処として
+    プロダクションコード（`subprocess.rs`/`claude_code.rs`/`codex.rs`）に入れた。テスト側（スクリプト
+    生成を一度だけにする、書き込み後に明示的に `sync` する等）で直す方が筋が良い可能性があり、
+    ADR-0008 には根拠を書いたが独立した ADR 番号は振っていない
+- Reviewer run 関連（Phase 5 未解決事項 9〜17）は状況変化なし
+
+### 提案（DESIGN.md への修正提案。DESIGN.md 本体は編集していない）
+
+| # | 節 | 提案 | 採用まで実装で使う既定 |
+|---|---|---|---|
+| P-35 | §4.2 / §5.7 | Human check で生成した `Approval` 子は、対象タスクが再度レビューに入るたびに
+  新しい子を作る（現状は再利用）よう明文化する | 既存の `Approval` 子を再利用（sticky） |
+| P-36 | §5.1 | `ready_tasks` が常に非ディスパッチ対象の `Approval`/`Plan` の子を数えないよう、
+  `limit` の解釈を「実際に dispatch しうるタスクの数」にする | `window = max_concurrency * 4 + 16` を
+  そのまま件数として扱う |
+| P-37 | §4.2 | 親タスクが終端（done/failed/cancelled）になったとき、まだ `Ready` な `Human` check 用の
+  `Approval` 子をどう扱うか（自動 cancel か、放置か）を明記する | 放置（孤児化） |
+
+Phase 0〜5 からの既存提案（P-1〜P-34）は状況変化なし。

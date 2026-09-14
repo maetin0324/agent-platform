@@ -68,6 +68,8 @@ pub struct AdaptersConfig {
     pub fake: FakeConfig,
     #[serde(default)]
     pub claude_code: ClaudeCodeAdapterConfig,
+    #[serde(default)]
+    pub codex: CodexAdapterConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -119,6 +121,39 @@ fn default_claude_command() -> String {
 }
 fn default_permission_mode() -> String {
     "bypassPermissions".to_string()
+}
+
+/// `codex` アダプタの設定（ADR-0008 D4）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexAdapterConfig {
+    /// 起動するコマンド名／パス。
+    #[serde(default = "default_codex_command")]
+    pub command: String,
+    /// `exec --json` の後、プロンプトの前に追加する引数（ADR-0008 D3）。
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// `--model`（省略時は codex の既定モデル）。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 追加の環境変数。
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+impl Default for CodexAdapterConfig {
+    fn default() -> Self {
+        Self {
+            command: default_codex_command(),
+            extra_args: Vec::new(),
+            model: None,
+            env: HashMap::new(),
+        }
+    }
+}
+
+fn default_codex_command() -> String {
+    "codex".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -203,9 +238,12 @@ impl Config {
             return Err(ConfigError::Invalid("at least one [[providers]] entry is required".into()));
         }
         for p in &self.providers {
-            if p.adapter != task_worker::FakeAdapter::ID && p.adapter != task_worker::ClaudeCodeAdapter::ID {
+            if p.adapter != task_worker::FakeAdapter::ID
+                && p.adapter != task_worker::ClaudeCodeAdapter::ID
+                && p.adapter != task_worker::CodexAdapter::ID
+            {
                 return Err(ConfigError::Invalid(format!(
-                    "provider {}: adapter {:?} is not available in this build (Phase 4: fake, claude-code only)",
+                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex only)",
                     p.id, p.adapter
                 )));
             }
@@ -281,9 +319,9 @@ adapter = "fake"
     fn rejects_unknown_adapter_and_missing_providers() {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(matches!(cfg.validate(), Err(ConfigError::Invalid(_))));
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"codex\"\n").unwrap();
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"bogus-adapter\"\n").unwrap();
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("codex"));
+        assert!(err.contains("bogus-adapter"));
         assert!(toml::from_str::<Config>("bogus = 1\n").is_err());
     }
 
@@ -310,6 +348,29 @@ adapter = "fake"
     #[test]
     fn rejects_unknown_fields_in_claude_code_adapter_config() {
         let text = "[[providers]]\nid = \"x\"\nadapter = \"claude-code\"\n\n[adapters.claude_code]\nbogus = 1\n";
+        assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    #[test]
+    fn loads_codex_dogfood_example_config() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/taskd.codex.example.toml"));
+        let cfg = Config::load(path).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.providers[0].adapter, "codex");
+        assert_eq!(cfg.adapters.codex.command, "codex");
+    }
+
+    #[test]
+    fn accepts_codex_adapter_with_default_config() {
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"codex\"\n").unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.adapters.codex.command, "codex");
+        assert!(cfg.adapters.codex.model.is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_codex_adapter_config() {
+        let text = "[[providers]]\nid = \"x\"\nadapter = \"codex\"\n\n[adapters.codex]\nbogus = 1\n";
         assert!(toml::from_str::<Config>(text).is_err());
     }
 }

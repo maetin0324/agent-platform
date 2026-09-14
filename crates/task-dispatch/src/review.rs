@@ -7,8 +7,10 @@
 //! - `Reviewer` は、決定的条件が全て pass のときだけ、ワーカーアダプタ経由の **別 run**（合成した `Review` kind
 //!   タスク + `context.review`）を起動し、`artifacts/review.json` の判定を採る。**このモジュールは LLM を呼ばない**
 //!   （アダプタに run を依頼するだけ。どのアダプタ／プロバイダを使うかはディスパッチャが tick で決める）。
-//! - `Human` は Phase 6 まで未対応で、pass 扱いにはしない（原則 4）。
+//! - `Human` は、ディスパッチャが `Approval` 子タスクの結果を `ReviewExtras::human` として渡す
+//!   (ADR-0008 D2)。このモジュール自身はストアに触れない。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,6 +68,9 @@ impl ReviewOutcome {
     }
 }
 
+/// `Check::Human` の criterion idx ごとに解決した `(pass, reason)`（ADR-0008 D2）。
+pub type HumanVerdicts = HashMap<usize, (bool, String)>;
+
 pub const PLAN_FILE: &str = "artifacts/plan.json";
 pub const REVIEW_FILE: &str = "artifacts/review.json";
 
@@ -104,6 +109,10 @@ pub struct ReviewExtras {
     pub plan: Option<PlanCheck>,
     /// `Reviewer` 条件があり、ディスパッチャが run を用意できたときだけ `Some`。
     pub reviewer: Option<ReviewerRun>,
+    /// `Check::Human` の各 criterion idx について、ディスパッチャが `Approval` 子タスクの終端状態から
+    /// 解決した `(pass, reason)`（ADR-0008 D2）。呼び出し元は `task.acceptance` の全 `Human` criterion が
+    /// 解決済みのときだけ `review_task` を呼ぶ想定（未解決分を待つ間はレビュー全体を延期する）。
+    pub human: HumanVerdicts,
 }
 
 /// `task.acceptance` を順に判定する。`produced` はその run の `ArtifactProduced`（名前の照合に使う）。
@@ -119,6 +128,7 @@ pub async fn review_task(
         subject,
         plan,
         reviewer,
+        human,
     } = extras;
     let subject = &subject;
     let mut verdicts = Vec::with_capacity(task.acceptance.len() + 1);
@@ -168,10 +178,12 @@ pub async fn review_task(
                 reviewer_criteria.push(idx);
                 continue;
             }
-            Check::Human => (
-                false,
-                "check kind 'human' is not supported until Phase 6".to_string(),
-            ),
+            Check::Human => match human.get(&idx) {
+                Some((pass, reason)) => (*pass, reason.clone()),
+                // 呼び出し元（dispatcher::spawn_review）は Human criterion が全て解決してから呼ぶので
+                // 通常到達しない防御的フォールバック（ADR-0008 D2）。
+                None => (false, "human approval state missing".to_string()),
+            },
         };
         verdicts.push(Verdict {
             criterion_idx: idx,
@@ -467,7 +479,31 @@ mod tests {
         assert!(v[1].reason.contains("artifacts/report.md"));
         // 決定的条件に fail があるので Reviewer 条件は評価されない。
         assert!(v[3].reason.contains("not evaluated"), "{}", v[3].reason);
-        assert!(v[4].reason.contains("Phase 6"));
+        // extras.human が空なので防御的フォールバックになる（ADR-0008 D2: 通常呼び出し元が先に解決する）。
+        assert!(v[4].reason.contains("human approval state missing"), "{}", v[4].reason);
+    }
+
+    /// ADR-0008 D2: `extras.human` に解決済みの `(pass, reason)` があれば、その内容がそのまま検証結果になる。
+    #[tokio::test]
+    async fn human_check_uses_resolved_verdict_from_extras() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = LocalWorkspace::new(dir.path());
+        let task = task_with(vec![Check::Human, Check::Human], dir.path());
+        let mut human = HashMap::new();
+        human.insert(0, (true, "approved by human".to_string()));
+        human.insert(1, (false, "rejected by human: needs more work".to_string()));
+        let out = review_task(
+            &task,
+            &ws,
+            dir.path(),
+            &[],
+            Duration::from_secs(5),
+            ReviewExtras { human, ..Default::default() },
+        )
+        .await;
+        assert_eq!(out.verdicts.iter().map(|v| v.pass).collect::<Vec<_>>(), vec![true, false]);
+        assert!(out.verdicts[0].reason.contains("approved by human"));
+        assert!(out.verdicts[1].reason.contains("rejected by human"));
     }
 
     /// 同プロセスで `artifacts/review.json` を書く（または書かない）テスト用アダプタ。
@@ -553,7 +589,7 @@ mod tests {
             summary: "did the thing".into(),
             evidence: vec![Evidence { criterion: 0, command: "test -f ok.txt".into(), exit: 0, stdout_tail: String::new() }],
         };
-        let out = review_task(&task, &ws, dir.path(), &produced, Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter.clone())) }).await;
+        let out = review_task(&task, &ws, dir.path(), &produced, Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter.clone())), ..Default::default() }).await;
         assert_eq!(out.verdicts.iter().map(|v| (v.criterion_idx, v.pass)).collect::<Vec<_>>(), vec![(0, true), (1, true), (2, false)]);
         assert!(out.verdicts[1].reason.contains("reviewer(rev-1): looks right"), "{}", out.verdicts[1].reason);
         assert!(out.verdicts[2].reason.contains("missing docs"));
@@ -586,7 +622,7 @@ mod tests {
             terminal: Terminal::Done { summary: "s".into(), evidence: vec![], usage: None },
             seen: Mutex::new(vec![]),
         });
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)) }).await;
+        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)), ..Default::default() }).await;
         assert!(out.verdicts.iter().all(|v| !v.pass));
         assert!(out.verdicts[0].reason.contains("review.json not found"), "{}", out.verdicts[0].reason);
 
@@ -596,7 +632,7 @@ mod tests {
             terminal: Terminal::Error { message: "boom".into(), retryable: true },
             seen: Mutex::new(vec![]),
         });
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)) }).await;
+        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)), ..Default::default() }).await;
         assert!(out.verdicts.iter().all(|v| !v.pass && v.reason.contains("boom")));
 
         // 判定の欠落（criterion 1 が無い）。
@@ -605,12 +641,12 @@ mod tests {
             terminal: Terminal::Done { summary: "s".into(), evidence: vec![], usage: None },
             seen: Mutex::new(vec![]),
         });
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)) }).await;
+        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)), ..Default::default() }).await;
         assert_eq!(out.verdicts.iter().map(|v| v.pass).collect::<Vec<_>>(), vec![true, false]);
         assert!(out.verdicts[1].reason.contains("no verdict for criterion 1"));
 
         // reviewer run が無い（ディスパッチャが供給できなかった）。
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: None }).await;
+        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: None, ..Default::default() }).await;
         assert!(out.verdicts.iter().all(|v| !v.pass && v.reason.contains("no reviewer run")));
     }
 

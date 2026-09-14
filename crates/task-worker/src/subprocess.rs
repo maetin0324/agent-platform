@@ -16,6 +16,25 @@ use crate::protocol::{RunRequest, WorkerMessage};
 /// 1 行の上限（ADR-0003 D1）。
 pub(crate) const MAX_LINE_BYTES: usize = 1024 * 1024;
 
+/// `Command::spawn` を、`ETXTBSY`（直前に書き込んだ実行ファイルへの exec が、書き込み直後の
+/// 過渡状態と競合して失敗することがある。CI やテストで多数のサブプロセスを並行起動すると観測される）
+/// に限り数回リトライする。それ以外のエラーは即座に返す。
+pub(crate) async fn spawn_retrying(command: &mut Command) -> std::io::Result<Child> {
+    const ETXTBSY: i32 = 26;
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt + 1 < MAX_ATTEMPTS => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(20 * attempt as u64)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// 起動するコマンド。`program` と `args` は設定からそのまま渡す。cwd は `req.workspace`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubprocessSpec {
@@ -49,7 +68,7 @@ pub async fn run_subprocess(
     #[cfg(unix)]
     command.process_group(0);
 
-    let mut child = command.spawn().map_err(AdapterError::Spawn)?;
+    let mut child = spawn_retrying(&mut command).await.map_err(AdapterError::Spawn)?;
 
     let payload = serde_json::to_string(req)?;
     if let Some(mut stdin) = child.stdin.take() {

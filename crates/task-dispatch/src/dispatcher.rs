@@ -20,7 +20,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use task_core::plan::{PlanLimits, materialize};
-use task_core::{ArtifactRef, Event, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec};
+use task_core::{
+    ArtifactRef, Check, Event, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
+};
 use task_worker::{
     AdapterError, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RunContext, RunLimits, RunOutcome,
     RunRequest, Terminal, WorkerMessage, Workspace, WorkerAdapter,
@@ -31,8 +33,8 @@ use tokio::task::JoinHandle;
 
 use crate::policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy};
 use crate::review::{
-    PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, needs_reviewer_run, review_task,
-    reviewer_hint,
+    HumanVerdicts, PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, needs_reviewer_run,
+    review_task, reviewer_hint,
 };
 
 /// ディスパッチャの設定（`taskd.toml` から組み立てる。ADR-0005 D7）。
@@ -631,6 +633,14 @@ impl Dispatcher {
             return Ok(true);
         };
 
+        let human = match self.resolve_human_approvals(&task)? {
+            Some(h) => h,
+            None => {
+                tracing::debug!(%task_id, "review deferred (waiting for human approval)");
+                return Ok(false);
+            }
+        };
+
         let reviewer = if needs_reviewer_run(&task) {
             match self.pick_reviewer(&task, &run_id) {
                 Some(r) => Some(r),
@@ -665,6 +675,7 @@ impl Dispatcher {
                 subject,
                 plan,
                 reviewer: reviewer_run,
+                human,
             };
             let outcome = review_task(&task, &ws, &dir, &produced, timeout, extras).await;
             let _ = tx.send(Completion::Review {
@@ -675,6 +686,83 @@ impl Dispatcher {
         });
         self.reviewing.insert(task_id, ReviewEntry { handle, provider });
         Ok(true)
+    }
+
+    /// `task.acceptance` の各 `Check::Human` について `Approval` 子タスクを解決する（ADR-0008 D2）。
+    /// 子が無ければ作る。いずれかがまだ未決（`Ready`/`Draft`）なら `Ok(None)`（レビュー全体を延期）。
+    /// 全て終端に達していれば `idx -> (pass, reason)` を返す（`Human` criterion が無ければ空の map）。
+    fn resolve_human_approvals(&self, task: &Task) -> Result<Option<HumanVerdicts>, DispatchError> {
+        let human_indices: Vec<usize> = task
+            .acceptance
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c.check, Check::Human))
+            .map(|(idx, _)| idx)
+            .collect();
+        if human_indices.is_empty() {
+            return Ok(Some(HashMap::new()));
+        }
+
+        let existing_children = self.store.list(None)?;
+        let mut resolved = HashMap::with_capacity(human_indices.len());
+        for idx in human_indices {
+            let title = human_approval_title(task, idx);
+            let child = match existing_children
+                .iter()
+                .find(|c| c.parent_id == Some(task.id) && c.kind == TaskKind::Approval && c.title == title)
+            {
+                Some(c) => c.clone(),
+                None => self.create_human_approval_child(task, idx, &title)?,
+            };
+            match child.status {
+                Status::Done => {
+                    resolved.insert(idx, (true, format!("approved (approval task {})", child.id)));
+                }
+                Status::Failed => {
+                    let note = approval_decision_note(&self.store.events_for(child.id)?);
+                    resolved.insert(idx, (false, format!("rejected (approval task {}){note}", child.id)));
+                }
+                Status::Cancelled => {
+                    resolved.insert(idx, (false, format!("approval task {} was cancelled", child.id)));
+                }
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some(resolved))
+    }
+
+    /// `Human` criterion のための `Approval` 子タスクを新規作成する（ADR-0008 D2）。
+    fn create_human_approval_child(&self, task: &Task, idx: usize, title: &str) -> Result<Task, DispatchError> {
+        let now = OffsetDateTime::now_utc();
+        let approval = Task {
+            id: TaskId::new(),
+            parent_id: Some(task.id),
+            kind: TaskKind::Approval,
+            title: title.to_string(),
+            objective: task.acceptance[idx].text.clone(),
+            acceptance: vec![],
+            inputs: vec![],
+            depends_on: vec![],
+            status: Status::Ready,
+            priority: task.priority,
+            worker_hint: task.worker_hint.clone(),
+            workspace: task.workspace.clone(),
+            budget: task.budget,
+            attempts: 0,
+            lease: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.store.insert(&approval)?;
+        self.store.append_event(
+            approval.id,
+            &Event::Created {
+                task: Box::new(approval.clone()),
+            },
+        )?;
+        self.store.append_event(approval.id, &Event::ApprovalRequested)?;
+        tracing::info!(task_id = %task.id, approval_id = %approval.id, criterion_idx = idx, "created approval child for human check");
+        Ok(approval)
     }
 
     /// `Reviewer` run のアダプタ／プロバイダを選ぶ（ADR-0007 D5 1.）。並列度の枠は実行中 run と共有する。
@@ -843,6 +931,24 @@ fn subject_from_run_dir(dir: &std::path::Path, run_id: &str) -> ReviewSubject {
         Ok(WorkerMessage::Done { summary, evidence, .. }) => ReviewSubject { summary, evidence },
         _ => ReviewSubject::default(),
     }
+}
+
+/// `Human` criterion 用の `Approval` 子タスクの `title`（既存子の照合キーにも使う。ADR-0008 D2）。
+fn human_approval_title(task: &Task, idx: usize) -> String {
+    format!("Approval needed: {} — criterion {idx}", task.title)
+}
+
+/// 直近の `Event::ApprovalDecided` の `note` を `": <note>"` の形で返す（無ければ空文字列）。
+fn approval_decision_note(events: &[(u64, Event)]) -> String {
+    events
+        .iter()
+        .rev()
+        .find_map(|(_, e)| match e {
+            Event::ApprovalDecided { note: Some(n), .. } => Some(format!(": {n}")),
+            Event::ApprovalDecided { note: None, .. } => Some(String::new()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// 最後に `WorkerStarted` した run の id。
@@ -1250,5 +1356,149 @@ mod tests {
         assert!(report.idle);
         assert_eq!(store.get(r.id).unwrap().unwrap().status, Status::Done);
         assert_eq!(store.get(other.id).unwrap().unwrap().status, Status::Done);
+    }
+
+    /// ADR-0008 D2: `Check::Human` はディスパッチャが `Approval` 子タスクを生成して待つ。承認前は
+    /// `reviewing` のまま（`attempts` を消費しない）、承認後に `Done` になる。
+    #[tokio::test]
+    async fn human_check_creates_approval_child_and_completes_after_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Human, 1);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 2);
+
+        let approval = wait_for_approval_child(&mut d, &store, task.id).await;
+        assert_eq!(approval.status, Status::Ready);
+        assert_eq!(approval.parent_id, Some(task.id));
+        // 未決の間は reviewing のまま、attempts は消費しない。
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!(t.status, Status::Reviewing);
+        assert_eq!(t.attempts, 0);
+
+        store
+            .apply_transition(
+                approval.id,
+                Trigger::Approve,
+                Some(Event::ApprovalDecided { by: "human".into(), approved: true, note: Some("looks good".into()) }),
+            )
+            .unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!(t.status, Status::Done);
+        assert_eq!(t.attempts, 0);
+        assert!(
+            store
+                .events_for(task.id)
+                .unwrap()
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: true, reason, .. } if reason.contains("approved")))
+        );
+    }
+
+    /// ADR-0008 D2: 承認児タスクが reject されると、対象タスクの `Human` criterion は fail になる
+    /// （`max_retries=0` なので即 `Failed`）。
+    #[tokio::test]
+    async fn human_check_fails_task_after_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Human, 0);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 2);
+
+        let approval = wait_for_approval_child(&mut d, &store, task.id).await;
+        store
+            .apply_transition(
+                approval.id,
+                Trigger::Reject,
+                Some(Event::ApprovalDecided { by: "human".into(), approved: false, note: Some("not ready".into()) }),
+            )
+            .unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!(t.status, Status::Failed);
+        assert!(
+            store
+                .events_for(task.id)
+                .unwrap()
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: false, reason, .. } if reason.contains("rejected") && reason.contains("not ready")))
+        );
+    }
+
+    /// DESIGN §6 Phase 6 受け入れ: 承認前に子が `ready` にならないこと（dispatch されないこと）、
+    /// `reject` で子が `cancelled` になること。`ready_tasks` の除外は task-core 側で検証済みなので、
+    /// ここではディスパッチャの実際の tick を通して「dispatch されない」ことまで確認する。
+    #[tokio::test]
+    async fn approval_gate_blocks_child_dispatch_and_reject_cancels_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+
+        let now = OffsetDateTime::now_utc();
+        let mut approval = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        approval.kind = TaskKind::Approval;
+        approval.status = Status::Ready;
+        store.insert(&approval).unwrap();
+
+        let mut child = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        child.parent_id = Some(approval.id);
+        child.created_at = now;
+        store.insert(&child).unwrap();
+
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 2);
+
+        // 承認前: 何 tick 回しても子は dispatch されず Ready のまま。
+        for _ in 0..5 {
+            let report = d.tick().unwrap();
+            assert_eq!(report.dispatched, 0, "child must not be dispatched while its Approval parent is pending");
+        }
+        assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Ready);
+
+        // reject すると子は cancelled になり、以降も dispatch されない。
+        store
+            .apply_transition(
+                approval.id,
+                Trigger::Reject,
+                Some(Event::ApprovalDecided { by: "human".into(), approved: false, note: None }),
+            )
+            .unwrap();
+        assert_eq!(store.get(approval.id).unwrap().unwrap().status, Status::Failed);
+        assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Cancelled);
+        for _ in 0..5 {
+            let report = d.tick().unwrap();
+            assert_eq!(report.dispatched, 0);
+        }
+        assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Cancelled);
+    }
+
+    /// `task_id` の直接の `Approval` 子タスクが現れるまで tick を回す（Human check の生成を待つ）。
+    async fn wait_for_approval_child(d: &mut Dispatcher, store: &Arc<dyn TaskStore>, task_id: TaskId) -> Task {
+        for _ in 0..100 {
+            d.tick().unwrap();
+            if let Some(child) = store
+                .list(None)
+                .unwrap()
+                .into_iter()
+                .find(|t| t.parent_id == Some(task_id) && t.kind == TaskKind::Approval)
+            {
+                return child;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("approval child was not created for task {task_id}");
     }
 }
