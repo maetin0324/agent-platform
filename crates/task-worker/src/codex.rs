@@ -735,7 +735,7 @@ echo '{"type":"turn.completed"}'
             Terminal::Done { summary, evidence, .. } => {
                 assert_eq!(summary, "all good");
                 assert_eq!(evidence.len(), 1);
-                assert_eq!(evidence[0].command, "cargo test");
+                assert_eq!(evidence[0].command.as_deref(), Some("cargo test"));
             }
             other => panic!("expected done, got {other:?}"),
         }

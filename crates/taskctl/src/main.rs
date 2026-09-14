@@ -17,6 +17,7 @@ use commands::gate::{self, AnswerArgs, ApproveArgs, RejectArgs};
 use commands::plan::{self, PlanArgs};
 use commands::query::{self, LogArgs, LsArgs, ShowArgs};
 use commands::replay::{self, ReplayArgs};
+use commands::worker::{self, WorkerCommand};
 use error::CliError;
 
 #[derive(Parser, Debug)]
@@ -43,6 +44,11 @@ enum Command {
     Answer(AnswerArgs),
     Log(LogArgs),
     Replay(ReplayArgs),
+    /// `taskctl worker run` 等（デバッグ用。ADR-0012 D4）。
+    Worker {
+        #[command(subcommand)]
+        command: WorkerCommand,
+    },
 }
 
 fn resolve_db_path(cli_db: Option<PathBuf>) -> PathBuf {
@@ -63,6 +69,9 @@ fn dispatch(store: &dyn TaskStore, command: Command) -> Result<ExitCode, CliErro
         Command::Answer(args) => gate::run_answer(store, args),
         Command::Log(args) => query::run_log(store, args),
         Command::Replay(args) => replay::run(store, args),
+        Command::Worker { command } => match command {
+            WorkerCommand::Run(args) => worker::run_run(store, args),
+        },
     }
 }
 

@@ -138,7 +138,8 @@ fn result_json_instructions() -> &'static str {
      yet) as a single JSON object of the form `{\"summary\": \"<what you did>\", \"evidence\": []}`. \
      `evidence` may be left empty; if you fill it, each element must be an object of the form \
      `{\"criterion\": <index>, \"command\": \"<what you ran>\", \"exit\": <code>, \"stdout_tail\": \"...\"}` \
-     (plain strings are not accepted). \
+     (plain strings are not accepted; `command`, `exit` and `stdout_tail` may be omitted for a criterion that \
+     did not involve running a command). \
      If you cannot proceed and need a decision from a human, instead write \
      `{\"question\": \"<your question>\"}` to `artifacts/result.json` and stop there. This is a \
      non-interactive run: you cannot ask a question any other way, and no one will read your final \
@@ -248,10 +249,11 @@ fn build_review_prompt(task: &Task, context: &RunContext, run_id: &str) -> Strin
                 out.push_str("(none reported)\n");
             }
             for e in &review.evidence {
-                out.push_str(&format!(
-                    "- criterion {}: command `{}` exit={} stdout_tail={:?}\n",
-                    e.criterion, e.command, e.exit, e.stdout_tail
-                ));
+                // ADR-0012 D3: command / exit / stdout_tail は任意。
+                let command = e.command.as_deref().map(|c| format!(" command `{c}`")).unwrap_or_default();
+                let exit = e.exit.map(|x| format!(" exit={x}")).unwrap_or_default();
+                let tail = e.stdout_tail.as_deref().map(|t| format!(" stdout_tail={t:?}")).unwrap_or_default();
+                out.push_str(&format!("- criterion {}:{command}{exit}{tail}\n", e.criterion));
             }
             out.push('\n');
         }
@@ -736,9 +738,9 @@ mod tests {
                 summary: "added usage example".into(),
                 evidence: vec![crate::protocol::Evidence {
                     criterion: 0,
-                    command: "cargo test".into(),
-                    exit: 0,
-                    stdout_tail: "test result: ok".into(),
+                    command: Some("cargo test".into()),
+                    exit: Some(0),
+                    stdout_tail: Some("test result: ok".into()),
                 }],
                 criteria: vec![0],
             }),
@@ -1086,7 +1088,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             Terminal::Done { summary, evidence, .. } => {
                 assert_eq!(summary, "all good");
                 assert_eq!(evidence.len(), 1);
-                assert_eq!(evidence[0].command, "cargo test");
+                assert_eq!(evidence[0].command.as_deref(), Some("cargo test"));
             }
             other => panic!("expected done, got {other:?}"),
         }

@@ -23,4 +23,4 @@ id = "claude-code-local"
 adapter = "claude-code"
 tiers = ["frontier", "standard", "cheap"]
 concurrency = 1
-model = "claude-sonnet-5"
+model = "claude-sonnet-5"          # ADR-0012 D1: 空でなければ --model に使う（空なら [adapters.claude_code].model）

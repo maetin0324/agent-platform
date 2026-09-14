@@ -110,7 +110,8 @@ Review プロンプトには含めない）。JSON Lines プロトコルを直�
  "summary":"Added CLI parsing with clap; all tests pass.",
  "evidence":[
    {"criterion":0,"command":"cargo test","exit":0,"stdout_tail":"test result: ok. 12 passed"},
-   {"criterion":1,"command":"test -f README.md","exit":0,"stdout_tail":""}
+   {"criterion":1,"command":"test -f README.md","exit":0,"stdout_tail":""},
+   {"criterion":2}
  ],
  "usage":{"input_tokens":12345,"output_tokens":678}}
 ```
@@ -120,9 +121,9 @@ Review プロンプトには含めない）。JSON Lines プロトコルを直�
 | `summary` | string | ✓ | 人間向け要約 |
 | `evidence` | array | ✓（空可） | 受け入れ条件ごとの証拠 |
 | `evidence[].criterion` | integer | ✓ | `task.acceptance` の添字 |
-| `evidence[].command` | string | ✓ | 実行したコマンド（§9 P-12 で任意化を提案） |
-| `evidence[].exit` | integer | ✓ | 終了コード（同上） |
-| `evidence[].stdout_tail` | string | ✓ | 出力末尾（同上）。4 KiB を目安に切り詰める |
+| `evidence[].command` | string | – | 実行したコマンド。`ArtifactExists` / `Reviewer` / `Human` の条件では省略してよい（ADR-0012 D3, P-12） |
+| `evidence[].exit` | integer | – | 終了コード（同上） |
+| `evidence[].stdout_tail` | string | – | 出力末尾（同上）。4 KiB を目安に切り詰める |
 | `usage` | object | – | `input_tokens`, `output_tokens`（integer）。取れないアダプタは省略 |
 
 `done` は完了ではない。タスクは `reviewing` に入り、Reviewer が `Command` を再実行し `ArtifactExists` を検査する（DESIGN 原則 4）。
@@ -220,7 +221,7 @@ JSON Lines プロトコルを直接話す `fake` 等のワーカーは `provider
     },
     "Evidence": {
       "type": "object",
-      "required": ["criterion", "command", "exit", "stdout_tail"],
+      "required": ["criterion"],
       "properties": {
         "criterion": {"type": "integer", "minimum": 0},
         "command": {"type": "string"},
@@ -321,8 +322,8 @@ stdout:
 taskd はこれを直接パースできない。そこでこれらのアダプタはプロンプトでワーカー（Claude Code 自身）に
 次を指示し、アダプタが作業ディレクトリの `artifacts/result.json` を読んで本文書の `done`/`question` に
 相当する終端を合成する（旧 P-13。ADR-0006 D3 で確定。旧 P-11 の `run_id`/`attempt` はスキーマ変更せず
-プロンプト文面にのみ埋め込む。旧 P-12 の「evidence を任意化」は Phase 3 の Reviewer が `evidence` の
-内容を見ずに `Command`/`ArtifactExists` を再実行するため実質的に問題にならず、スキーマは変更しない）:
+プロンプト文面にのみ埋め込む。旧 P-12 の「evidence を任意化」は ADR-0012 D3 で採用し、`command` / `exit` /
+`stdout_tail` を任意にした）:
 
 ```json
 {"summary": "...", "evidence": []}

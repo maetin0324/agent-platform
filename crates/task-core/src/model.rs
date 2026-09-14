@@ -186,6 +186,9 @@ pub enum Event {
         run_id: String,
         adapter: String,
         model: String,
+        /// どのプロバイダ（= アカウント）で実行したか（ADR-0012 D1）。導入前のイベントには無いので任意。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
     },
     WorkerProgress {
         run_id: String,

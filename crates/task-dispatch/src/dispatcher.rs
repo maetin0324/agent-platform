@@ -31,7 +31,7 @@ use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy};
+use crate::policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy, Selection};
 use crate::review::{
     HumanVerdicts, PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, Verdict,
     needs_reviewer_run, review_task,
@@ -192,14 +192,17 @@ pub struct Dispatcher {
     store: Arc<dyn TaskStore>,
     policy: Box<dyn ProviderPolicy>,
     models: HashMap<ProviderId, String>,
-    adapters: HashMap<AdapterId, Arc<dyn WorkerAdapter>>,
+    /// プロバイダ（= アカウント）ごとのアダプタのインスタンス（ADR-0012 D1）。
+    adapters: HashMap<ProviderId, Arc<dyn WorkerAdapter>>,
     config: DispatchConfig,
     running: HashMap<TaskId, RunEntry>,
     reviewing: HashMap<TaskId, ReviewEntry>,
     /// レビューを開始できなかった（`Reviewer` run の枠が無い）タスクの `done` 内容。次 tick で使う。
     pending_subjects: HashMap<TaskId, ReviewSubject>,
-    /// 「`Standard` tier を提供するプロバイダが無い」警告を出した（連続 tick で繰り返さない）タスク。
-    warned_no_reviewer: std::collections::HashSet<TaskId>,
+    /// 「設定に合うプロバイダが無い」警告を出した（連続 tick で繰り返さない）タスク（ADR-0012 D2）。
+    warned_unroutable: std::collections::HashSet<TaskId>,
+    /// この tick で `NoMatchingProvider` だった ready タスク（`is_idle` で待ち対象から外す。ADR-0012 D2）。
+    unroutable: std::collections::HashSet<TaskId>,
     /// 人間の承認待ちで延期中の reviewing タスク（`is_idle` 判定用。ADR-0010 D8）。
     awaiting_human: std::collections::HashSet<TaskId>,
     tx: mpsc::UnboundedSender<Completion>,
@@ -212,7 +215,7 @@ impl Dispatcher {
         store: Arc<dyn TaskStore>,
         policy: Box<dyn ProviderPolicy>,
         models: HashMap<ProviderId, String>,
-        adapters: HashMap<AdapterId, Arc<dyn WorkerAdapter>>,
+        adapters: HashMap<ProviderId, Arc<dyn WorkerAdapter>>,
         config: DispatchConfig,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -225,7 +228,8 @@ impl Dispatcher {
             running: HashMap::new(),
             reviewing: HashMap::new(),
             pending_subjects: HashMap::new(),
-            warned_no_reviewer: std::collections::HashSet::new(),
+            warned_unroutable: std::collections::HashSet::new(),
+            unroutable: std::collections::HashSet::new(),
             awaiting_human: std::collections::HashSet::new(),
             tx,
             rx,
@@ -601,14 +605,17 @@ impl Dispatcher {
     }
 
     fn dispatch_ready(&mut self) -> Result<usize, DispatchError> {
+        self.unroutable.clear();
         if self.workers_in_flight() >= self.config.max_concurrency {
             return Ok(0);
         }
         // 上位から見て見送りが続いても後続を試せるよう、窓は広めに取る。
-        let window = self.config.max_concurrency * 4 + 16;
+        let window = self.ready_window();
         let candidates = self.store.ready_tasks(window)?;
         let now = Instant::now();
         let mut dispatched = 0;
+        // この tick で並列度の上限に達していると分かったプロバイダ（tick 内では空きが増えないので共有する）。
+        let mut full: std::collections::HashSet<ProviderId> = std::collections::HashSet::new();
         for task in candidates {
             if self.workers_in_flight() >= self.config.max_concurrency {
                 break;
@@ -628,20 +635,13 @@ impl Dispatcher {
                 tracing::warn!(task_id = %task.id, "remote workspace is not supported; task left ready");
                 continue;
             };
-            let Some((adapter_id, provider_id)) = self.policy.pick(&task.worker_hint, now) else {
-                tracing::debug!(task_id = %task.id, hint = ?task.worker_hint, "no provider available");
+            let Some((adapter_id, provider_id)) = self.select_provider(&task.worker_hint, now, task.id, &mut full) else {
                 continue;
             };
-            let Some(adapter) = self.adapters.get(&adapter_id).cloned() else {
-                tracing::warn!(task_id = %task.id, adapter = %adapter_id, "adapter not configured");
+            let Some(adapter) = self.adapters.get(&provider_id).cloned() else {
+                tracing::warn!(task_id = %task.id, provider = %provider_id, adapter = %adapter_id, "no adapter instance for provider");
                 continue;
             };
-            let limit = self.policy.concurrency_limit(provider_id.clone());
-            let used = self.provider_in_use(&provider_id);
-            if used >= limit {
-                tracing::debug!(task_id = %task.id, provider = %provider_id, used, limit, "provider at capacity");
-                continue;
-            }
 
             let run_id = ulid::Ulid::new().to_string();
             let wall = Duration::from_secs(task.budget.max_wall_secs);
@@ -656,6 +656,7 @@ impl Dispatcher {
                     run_id: run_id.clone(),
                     adapter: adapter_id.clone(),
                     model,
+                    provider: Some(provider_id.clone()),
                 },
             )?;
             let limits = RunLimits {
@@ -863,25 +864,17 @@ impl Dispatcher {
         if self.workers_in_flight() >= self.config.max_concurrency {
             return None;
         }
-        let Some((adapter_id, provider_id)) = self.policy.pick(&self.config.reviewer_hint, Instant::now()) else {
-            // 候補ゼロ（Standard tier を提供するプロバイダが無い、または全て cooldown 中）。設定ミスなら
-            // 永久に待つことになるので、一時的な満杯（debug）と区別して warn を 1 回出す（監査指摘）。
-            if self.warned_no_reviewer.insert(task.id) {
-                tracing::warn!(task_id = %task.id, hint = ?self.config.reviewer_hint, "no provider available for the reviewer run; task stays reviewing until one appears");
-            }
-            return None;
-        };
-        self.warned_no_reviewer.remove(&task.id);
-        let adapter = match self.adapters.get(&adapter_id) {
+        // ADR-0012 D2: ワーカー run と同じ手順（上限のプロバイダを飛ばして次へ、候補なしは warn）で選ぶ。
+        let hint = self.config.reviewer_hint.clone();
+        let mut full = std::collections::HashSet::new();
+        let (adapter_id, provider_id) = self.select_provider(&hint, Instant::now(), task.id, &mut full)?;
+        let adapter = match self.adapters.get(&provider_id) {
             Some(a) => a.clone(),
             None => {
-                tracing::warn!(task_id = %task.id, adapter = %adapter_id, "reviewer adapter not configured");
+                tracing::warn!(task_id = %task.id, provider = %provider_id, adapter = %adapter_id, "no adapter instance for reviewer provider");
                 return None;
             }
         };
-        if self.provider_in_use(&provider_id) >= self.policy.concurrency_limit(provider_id.clone()) {
-            return None;
-        }
         let review_run_id = ulid::Ulid::new().to_string();
         let sink = ReviewerSink {
             store: self.store.clone(),
@@ -904,6 +897,51 @@ impl Dispatcher {
                 hint: self.config.reviewer_hint.clone(),
             },
         ))
+    }
+
+    /// `ready_tasks` の取得件数。経路なしと分かっているタスク（`warned_unroutable`）の分だけ広げ、それらが窓を埋めて
+    /// 後ろの実行可能なタスクが dispatch されない・`is_idle` が誤って真になることを防ぐ（ADR-0012 監査）。
+    fn ready_window(&self) -> usize {
+        self.config.max_concurrency * 4 + 16 + self.warned_unroutable.len()
+    }
+
+    /// ADR-0012 D2（P-20 / P-33）: 並列度の上限に達したプロバイダを除外しながら選ぶ（設定表の次の行へフォールバック）。
+    /// 条件に合うプロバイダが設定に無ければ、タスクごとに 1 回 warn し `unroutable` に入れる。
+    fn select_provider(
+        &mut self,
+        hint: &task_core::WorkerHint,
+        now: Instant,
+        task_id: TaskId,
+        full: &mut std::collections::HashSet<ProviderId>,
+    ) -> Option<(AdapterId, ProviderId)> {
+        // 外部の ProviderPolicy が除外集合を無視しても止まるよう、試行回数に上限を置く。
+        for _ in 0..64 {
+            match self.policy.select(hint, now, full) {
+                Selection::Picked { adapter, provider } => {
+                    let limit = self.policy.concurrency_limit(provider.clone());
+                    if self.provider_in_use(&provider) >= limit {
+                        tracing::debug!(%task_id, %provider, limit, "provider at capacity; trying the next one");
+                        full.insert(provider);
+                        continue;
+                    }
+                    self.warned_unroutable.remove(&task_id);
+                    return Some((adapter, provider));
+                }
+                Selection::Busy => {
+                    tracing::debug!(%task_id, ?hint, "all matching providers are cooling down or at capacity");
+                    return None;
+                }
+                Selection::NoMatchingProvider => {
+                    self.unroutable.insert(task_id);
+                    if self.warned_unroutable.insert(task_id) {
+                        tracing::warn!(%task_id, ?hint, "no provider in the config matches this worker_hint; the task waits until the config changes");
+                    }
+                    return None;
+                }
+            }
+        }
+        tracing::warn!(%task_id, ?hint, "provider policy kept returning excluded providers; giving up for this tick");
+        None
     }
 
     /// ADR-0005 D3: `Local{path}` がそのタスクの作業ディレクトリ。相対なら `workspace_root` 基準。
@@ -934,7 +972,14 @@ impl Dispatcher {
         {
             return Ok(false);
         }
-        Ok(self.store.ready_tasks(1)?.is_empty())
+        // ADR-0012 D2（P-33）: 設定に合うプロバイダが無い ready タスクは、設定を直さない限り進まないので待ち対象から外す。
+        // 窓いっぱいに返ってきた場合は窓の外に実行可能なタスクが残りうるので idle にしない（次 tick で窓が広がる）。
+        let window = self.ready_window();
+        let ready = self.store.ready_tasks(window)?;
+        if ready.len() >= window {
+            return Ok(false);
+        }
+        Ok(ready.iter().all(|t| self.unroutable.contains(&t.id)))
     }
 }
 
@@ -1213,8 +1258,8 @@ mod tests {
             }],
             Duration::from_secs(1),
         );
-        let mut adapters: HashMap<AdapterId, Arc<dyn WorkerAdapter>> = HashMap::new();
-        adapters.insert("instant".into(), adapter);
+        let mut adapters: HashMap<ProviderId, Arc<dyn WorkerAdapter>> = HashMap::new();
+        adapters.insert("p1".into(), adapter);
         Dispatcher::new(
             store,
             Box::new(policy),
@@ -1255,7 +1300,7 @@ mod tests {
         let task = new_task(dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![Evidence { criterion: 0, command: "x".into(), exit: 0, stdout_tail: String::new() }], usage: None },
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![Evidence { criterion: 0, command: Some("x".into()), exit: Some(0), stdout_tail: None }], usage: None },
             delay: Duration::from_millis(10),
         });
         let mut d = dispatcher(store.clone(), adapter, 2);
@@ -2014,6 +2059,37 @@ mod tests {
         let events = store.events_for(task.id).unwrap();
         assert_eq!(consecutive_reviewer_requeues(&events[..events.len() - 2]), 2);
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: false, reason, .. } if reason.starts_with("requeue limit (2) reached"))));
+    }
+
+    /// 監査の指摘（ADR-0012 D2）: 取得窓（max_concurrency*4+16）を優先度の高い経路なしタスクが埋めても、窓の外の実行可能な
+    /// タスクが dispatch され、それが終わるまで idle にならない。
+    #[tokio::test]
+    async fn unroutable_tasks_do_not_starve_or_hide_routable_tasks_outside_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut unroutable = Vec::new();
+        for _ in 0..25 {
+            let mut t = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+            t.priority = 10;
+            t.worker_hint.adapter = Some("nonexistent".into());
+            store.insert(&t).unwrap();
+            unroutable.push(t.id);
+        }
+        let routable = new_task(dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        store.insert(&routable).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let first = d.tick().unwrap();
+        assert!(!first.idle, "a routable task is still waiting beyond the window");
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(routable.id).unwrap().unwrap().status, Status::Done);
+        for id in unroutable {
+            assert_eq!(store.get(id).unwrap().unwrap().status, Status::Ready);
+        }
     }
 
     /// `task_id` の直接の `Approval` 子タスクが現れるまで tick を回す（Human check の生成を待つ）。

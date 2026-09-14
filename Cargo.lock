@@ -867,10 +867,15 @@ name = "taskctl"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "serde_json",
  "task-core",
+ "task-dispatch",
+ "task-worker",
+ "taskd",
  "tempfile",
  "thiserror",
  "time",
+ "tokio",
 ]
 
 [[package]]

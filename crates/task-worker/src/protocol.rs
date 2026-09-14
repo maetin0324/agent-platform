@@ -86,13 +86,17 @@ pub struct RunRequest {
     pub context: RunContext,
 }
 
-/// `done.evidence[]`。
+/// `done.evidence[]`。`command` / `exit` / `stdout_tail` は、コマンドを伴わない条件（`ArtifactExists` / `Reviewer` / `Human`）では
+/// 存在しないので任意（ADR-0012 D3, P-12。必須 → 任意の緩和なので後方互換）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Evidence {
     pub criterion: usize,
-    pub command: String,
-    pub exit: i32,
-    pub stdout_tail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_tail: Option<String>,
 }
 
 /// ワーカー → taskd のメッセージ。`done` / `error` / `question` は終端（ADR-0003 D3）。
@@ -180,6 +184,19 @@ pub(crate) mod tests {
         assert!(serde_json::from_str::<WorkerMessage>(r#"{"type":"bogus"}"#).is_err());
         assert!(serde_json::from_str::<WorkerMessage>(r#"{"type":"error","message":"m"}"#).is_err());
         assert!(!serde_json::from_str::<WorkerMessage>(r#"{"type":"progress","msg":"m"}"#).unwrap().is_terminal());
+    }
+
+    /// ADR-0012 D3（P-12）: コマンドを伴わない条件の evidence は `criterion` だけでよく、旧形式（全フィールドあり）も読める。
+    #[test]
+    fn evidence_fields_other_than_criterion_are_optional() {
+        let line = r#"{"type":"done","summary":"s","evidence":[{"criterion":1},{"criterion":0,"command":"cargo test","exit":0,"stdout_tail":"ok"}]}"#;
+        let WorkerMessage::Done { evidence, .. } = serde_json::from_str::<WorkerMessage>(line).unwrap() else {
+            panic!("expected done");
+        };
+        assert_eq!(evidence[0], Evidence { criterion: 1, command: None, exit: None, stdout_tail: None });
+        assert_eq!(evidence[1].command.as_deref(), Some("cargo test"));
+        assert_eq!(evidence[1].exit, Some(0));
+        assert_eq!(serde_json::to_string(&evidence[0]).unwrap(), r#"{"criterion":1}"#);
     }
 
     #[test]

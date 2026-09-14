@@ -1,0 +1,61 @@
+# 複数アカウント運用の設定例（ADR-0012）。相対パスはこのファイルのあるディレクトリ基準。
+#
+# [[providers]] の 1 行 = 1 アカウント。上から順に優先し、並列度の上限に達した行・cooldown 中の行（レート制限・認証失敗・
+# 枯渇の後）は飛ばして次の行を使う（先頭のアカウントを上限まで使い、あふれた分が次のアカウントへ行く）。
+#
+# 事前準備（アカウントごとに 1 回。env の値はシェル展開されないので絶対パスで書く）:
+#   CLAUDE_CONFIG_DIR=/home/USER/.claude-accounts/a claude     # 起動して /login でアカウント A にログイン
+#   CLAUDE_CONFIG_DIR=/home/USER/.claude-accounts/b claude     # 同じくアカウント B
+#   CODEX_HOME=/home/USER/.codex-accounts/a codex login
+# 動作確認はデーモンを使わずに: taskctl --db <db> worker run --config <この設定> --task <id> --provider claude-b --workspace <コピー>
+#
+# 注意: ワーカーは taskd 自身の環境変数を引き継ぐ。taskd を起動する環境に ANTHROPIC_API_KEY / OPENAI_API_KEY 等があると、
+# CLAUDE_CONFIG_DIR / CODEX_HOME のログインより優先されて全アカウントが同じ認証になりうるので、外してから起動すること。
+db = "../taskd.sqlite3"
+workspace_root = "../workspaces"
+tick_ms = 2000
+max_concurrency = 4
+lease_grace_secs = 60
+idle_timeout_secs = 300
+kill_grace_secs = 10
+review_timeout_secs = 600
+error_cooldown_secs = 300
+retry_backoff_base_secs = 10
+retry_backoff_max_secs = 300
+max_requeues = 5
+
+[plan]
+auto_accept = false
+
+[reviewer]
+tier = "standard"
+
+# 全アカウント共通の設定。アカウント固有の env / model は [[providers]] 側に書く（同名キーは providers が優先）。
+[adapters.claude_code]
+# permission_mode = "bypassPermissions"
+
+[adapters.codex]
+# extra_args = []
+
+[[providers]]
+id = "claude-a"
+adapter = "claude-code"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 2
+model = "claude-sonnet-5"          # 空でなければ --model に使う
+env = { CLAUDE_CONFIG_DIR = "/home/USER/.claude-accounts/a" }
+
+[[providers]]
+id = "claude-b"
+adapter = "claude-code"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 2
+model = "claude-sonnet-5"
+env = { CLAUDE_CONFIG_DIR = "/home/USER/.claude-accounts/b" }
+
+[[providers]]
+id = "codex-a"
+adapter = "codex"
+tiers = ["standard", "cheap"]
+concurrency = 1
+env = { CODEX_HOME = "/home/USER/.codex-accounts/a" }

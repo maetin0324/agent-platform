@@ -1439,4 +1439,18 @@ mod tests {
         assert_eq!(store.get(d.id).unwrap().unwrap().status, Status::Done);
         assert_eq!(store.get(unrelated.id).unwrap().unwrap().status, Status::Ready);
     }
+
+    /// ADR-0012 D1: `WorkerStarted.provider` は任意。導入前に記録されたイベント（provider 無し）も読める。
+    #[test]
+    fn worker_started_without_provider_still_deserializes() {
+        let old = r#"{"type":"worker_started","run_id":"r","adapter":"fake","model":"m"}"#;
+        let ev: Event = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            ev,
+            Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: None }
+        );
+        let new = Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: Some("acct-a".into()) };
+        assert!(serde_json::to_string(&new).unwrap().contains(r#""provider":"acct-a""#));
+        assert_eq!(serde_json::to_string(&ev).unwrap(), old);
+    }
 }

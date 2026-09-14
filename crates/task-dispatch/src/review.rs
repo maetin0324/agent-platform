@@ -661,7 +661,7 @@ mod tests {
         let produced = vec![ArtifactRef { name: "a".into(), path: "artifacts/a".into(), sha256: "0".into(), kind: "file".into() }];
         let subject = ReviewSubject {
             summary: "did the thing".into(),
-            evidence: vec![Evidence { criterion: 0, command: "test -f ok.txt".into(), exit: 0, stdout_tail: String::new() }],
+            evidence: vec![Evidence { criterion: 0, command: Some("test -f ok.txt".into()), exit: Some(0), stdout_tail: None }],
         };
         let out = review_task(&task, &ws, dir.path(), &produced, Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter.clone())), ..Default::default() }).await;
         assert_eq!(out.verdicts.iter().map(|v| (v.criterion_idx, v.pass)).collect::<Vec<_>>(), vec![(0, true), (1, true), (2, false)]);

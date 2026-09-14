@@ -1,8 +1,8 @@
 # PROGRESS — taskd
 
-現在地: **Phase 7（仕上げ）完了（2026-09-14）**。docs/DESIGN.md に定義された Phase 0〜7 は全て完了。Phase 4/6 の
-実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。提案 P-1〜P-37 の採否は ADR-0009、Phase 7 の設計は ADR-0010。
-次の作業は未定義（新しい提案 P-38 / P-39 と未解決事項を人間が判断する）。
+現在地: **Phase 8（複数アカウント運用とデバッグ CLI）完了（2026-09-14）**。docs/DESIGN.md に定義された Phase 0〜7 は全て完了し、
+人間の依頼による Phase 8（ADR-0012）を追加で実施した。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
+提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。DESIGN.md への反映待ちの提案は P-40 / P-41。
 
 | Phase | 内容 | 状態 | 完了日 |
 |---|---|---|---|
@@ -13,7 +13,8 @@
 | 4 | claude-code アダプタとドッグフーディング | 完了（実機ドッグフード 2026-09-14 実施、done） | 2026-09-13 |
 | 5 | Planner / Reviewer（LLM） | 完了 | 2026-09-14 |
 | 6 | 承認ゲートと codex アダプタ | 完了（codex 実機ドッグフードは外部制約により免除。ADR-0009 D1） | 2026-09-14 |
-| 7 | 仕上げ（ADR-0010） | 完了 | 2026-09-14 |
+| 7 | 仕上げ（ADR-0010）、requeue 上限（ADR-0011） | 完了 | 2026-09-14 |
+| 8 | 複数アカウント運用・evidence 任意化・`taskctl worker run`（ADR-0012。DESIGN 未定義、人間の依頼） | 完了 | 2026-09-14 |
 
 ---
 
@@ -1218,3 +1219,160 @@ auditor サブエージェントを 1 回起動（読み取り専用。`cargo te
 
 - Phase 7 未解決事項 2 のうち「連続 requeue の回数に上限が無い」は解消。最悪の実行回数は 1 タスクあたり `(max_retries + 1) × (max_requeues + 1)`
 - `docs/DESIGN.md` §5.2 への反映（「連続 requeue は `max_requeues` まで。超えたら通常の失敗」）は、DESIGN.md の編集許可が得られるまで提案として残す（P-40）
+
+---
+
+## Phase 8 — DONE（2026-09-14）
+
+人間の依頼: 「複数アカウント運用は割とすぐに始めたい。それ以外（P-12、`taskctl worker run`）はいい感じに」。DESIGN.md に Phase 8 は
+定義されていない（DESIGN.md の編集許可は Phase 6 の締めの 1 回限りだった）ため、設計と受け入れの基準は ADR-0012 に置いた。
+
+### 成果物
+
+- `docs/adr/0012-multi-account-and-worker-run.md`
+- **複数アカウント運用（D1/D2）**
+  - `crates/taskd/src/config.rs` — `[[providers]].env`（アカウント固有の環境変数）、`model` を実際の `--model` に使う、プロバイダ ID の重複を拒否
+  - `crates/taskd/src/lib.rs` — `build_adapters`（`[[providers]]` の行ごとにアダプタを作り、`[adapters.<種別>]` に env / model を重ねる）、`effective_models`
+  - `crates/task-dispatch/src/policy.rs` — `Selection{Picked, Busy, NoMatchingProvider}` と `ProviderPolicy::select`（既定実装つき。
+    既存 3 メソッドは不変）、`StaticPolicy::select`（除外集合と cooldown を飛ばして設定表の次の行へ）
+  - `crates/task-dispatch/src/dispatcher.rs` — アダプタをプロバイダ ID で引く、`select_provider`（並列度の上限に達したプロバイダを
+    除外して次へフォールバック、P-20）、`NoMatchingProvider` はタスクごとに 1 回 warn し `is_idle` の待ち対象から外す（P-33）、
+    Reviewer run も同じ選択手順、`WorkerStarted.provider` を記録
+  - `crates/task-core/src/model.rs` — `Event::WorkerStarted.provider`（任意。導入前のイベントも読める）
+  - `config/taskd.multi-account.example.toml`（claude-code 2 アカウント + codex 1 アカウント、事前ログイン手順つき）、他の example の注記
+- **evidence の任意化（D3, P-12）** — `crates/task-worker/src/protocol.rs` の `Evidence{command?, exit?, stdout_tail?}`、
+  `worker-protocol.schema.json` 再生成、`claude_code.rs` のレビュー用プロンプト、`docs/protocol/worker-protocol.md` §4.4
+- **`taskctl worker run`（D4）** — `crates/taskctl/src/commands/worker.rs`（新規）、`main.rs`、`Cargo.toml`（taskd / task-worker /
+  task-dispatch / tokio / serde_json に依存）。DB を読むだけでリース・遷移・イベント追記をしない。`--provider` / `--adapter` / 自動選択、
+  `--workspace`、running・reviewing は `--workspace` 無しでは拒否、`progress:` / `artifact:` / `result: <json>`、exit code done=0 / question=3 / error=4
+- テスト: policy 3 件、taskd 3 件（`build_adapters_creates_one_adapter_per_provider_with_merged_env_and_model`、
+  `multi_account_providers_parse_and_duplicate_ids_are_rejected` ほか）、store `worker_started_without_provider_still_deserializes`、
+  protocol `evidence_fields_other_than_criterion_are_optional`、taskctl `tests/worker_run.rs` 6 件 + 単体 2 件、
+  e2e `tests/multi_account_scenarios.rs` 3 件
+
+作業分担: ADR、policy / dispatcher / taskd / task-core / evidence の変更、e2e は自分で実装した（相互に依存し設計判断を含むため）。
+`taskctl worker run`（`crates/taskctl/**` のみ）を implementer サブエージェント 1 体に並行して実装させた（報告に判断が必要な点は無し）。
+
+### 受け入れ条件と証拠（ADR-0012）
+
+1. **同じアダプタ種別の複数アカウントが、それぞれの env / model で実行される**
+   - コマンド: `cargo test -p e2e --test multi_account_scenarios` → 3 passed
+   - `second_account_runs_the_overflow_when_the_first_is_at_capacity`: fake の 2 アカウント（`env = { ACCOUNT = "a" | "b" }`, 並列度各 1、
+     全体 2）に 2 タスク → 両方 `Done`、ワーカーが見た `$ACCOUNT` が `{a, b}`、`WorkerStarted.model` が `{model-a, model-b}`、
+     `WorkerStarted.provider` が `{acct-a, acct-b}`（先頭の上限であふれた分が 2 つ目へ。P-20）、replay 差分ゼロ
+   - taskd `build_adapters_creates_one_adapter_per_provider_with_merged_env_and_model`（env の重ね合わせと優先順位、実効 model）
+2. **レート制限・認証失敗のアカウントを飛ばして次のアカウントで実行される**
+   - e2e `throttled_account_falls_back_to_the_next_account`: A が `provider_failure: throttled(300s)` → 遷移
+     `accept → dispatch → requeue → dispatch → worker_done → review_pass`、`WorkerStarted.provider` が `[acct-a, acct-b]`、attempts 0
+   - **実機（本物の Claude Code、claude 2.1.270 / claude-sonnet-5）**: 1 つ目のプロバイダの `CLAUDE_CONFIG_DIR` を空ディレクトリ
+     （未ログイン）、2 つ目を既定のログイン済みアカウントにして hello-crate の README タスクを `taskd --until-idle` で実行 →
+     1 回目の run が `Not logged in · Please run /login` を返し `requeue`（`runs/<id>/result.json` に
+     `"provider_failure":{"kind":"auth_failed"}`）→ 2 回目の run が 2 つ目のアカウントで実行され `Done`、attempts 0、
+     両 `Command` 条件の再実行 pass、`replay: 0 mismatches across 1 tasks`
+   - policy `select_falls_back_past_excluded_and_cooling_providers`
+3. **設定に合うプロバイダが無いタスクは無音で待ち続けず、`--until-idle` を止めない**
+   - e2e `task_without_a_matching_provider_does_not_block_until_idle`（tier cheap のタスクに frontier のみのプロバイダ）→ `taskd` が終了、
+     ログに `no provider in the config matches`、タスクは `Ready` のまま
+   - policy `select_distinguishes_no_matching_provider_from_busy`、`default_select_is_derived_from_pick`（`pick` しか実装しない既存ポリシーの互換）
+4. **evidence の `command` / `exit` / `stdout_tail` が任意**
+   - `cargo test -p task-worker protocol` → `evidence_fields_other_than_criterion_are_optional`（`{"criterion":1}` だけの要素と旧形式の両方を読める、
+     省略時は直列化にも出ない）、`committed_schema_matches_generated`（スキーマ再生成済み）
+5. **`taskctl worker run` がデーモン無しで 1 タスクを 1 アカウントで実行し、DB を変えない**
+   - `cargo test -p taskctl --test worker_run` → 6 passed（done=0 で `progress:` / `artifact:` / `result:` を出し stdin に `context.answers` が載る、
+     実行前後で events 件数と status が不変／question=3／`--provider` でアカウントの env が切り替わる／running は `--workspace` 必須／
+     存在しないプロバイダは exit 1／`provider_failure` 付き error は exit 4 で `provider_failure` を保持）
+   - **実機**: 上記 2 の DB で `taskctl worker run --provider acct-not-logged-in --workspace <copy>` → exit 4、
+     `result: {"type":"error",...,"provider_failure":{"kind":"auth_failed"}}`。`--provider acct-default --workspace <別 copy>` →
+     実際の Claude Code が README を編集し exit 0（コピーで `cargo test` 1 passed）。実行前後で `events` の件数 20 → 20（不変）
+
+### CLAUDE.md の共通条件
+
+- `cargo test --workspace` を 3 回連続 → 3 回とも exit 0、**215 passed**、失敗 0
+  （task-core 36 + task-dispatch 37 + task-worker 64 + taskctl 40 + 1 + 1 + 6 + 1（`worker_run_signal`）+ taskd 14 + 1 +
+  e2e 14（scenarios 4 + plan_scenarios 2 + phase7_scenarios 5 + multi_account_scenarios 3））。監査前は 213、監査後の修正で 2 件追加
+- `cargo clippy --workspace -- -D warnings` / `--all-targets --examples` → いずれも exit 0
+- 変更・新規ファイルの非テスト `unwrap()` / `expect()` → 0 件
+
+### 監査結果
+
+auditor サブエージェントを 1 回起動（読み取り専用）。auditor が自分で確認したこと:
+- `cargo test --workspace` 213 passed、clippy 2 種 exit 0、非テストの `unwrap()` / `expect()` 0 件
+- リポジトリ外のスクラッチテスト 6 件で、次の挙動を実測
+  - Reviewer run とワーカー run の相互フォールバックと会計
+  - cooldown だけの状態では idle にならない
+  - 除外を無視する外部ポリシーでも止まる
+  - `pick` しか実装しないポリシーとの互換
+  - `worker run` の後も DB ファイルのバイト列が不変
+  - 相対 workspace と reviewing の拒否
+
+判定は **不可**（修正必須 2 件）。フォールバックの正しさ・`select` の後方互換・原則違反なし・env を出力しないことは「可」、それ以外は
+「条件付き可」。
+
+修正必須の指摘と対応:
+
+- **(1)【不可→修正済み】`is_idle` が、進みうる ready タスクがあるのに idle と判定する**
+  - 原因: `ready_tasks` の取得窓（`max_concurrency*4+16`）を、優先度の高い経路なしタスクが埋めた場合に起きる。窓の外に dispatch できるタスクがあっても `is_idle` が真になり、そのタスク自体も dispatch されない。auditor が 20 件 + 1 件で再現。
+  - 対応:
+    - 取得窓を「経路なしと分かっているタスクの数」だけ広げる（dispatch と `is_idle` の両方）。
+    - `is_idle` は、窓いっぱいに返ってきたら偽にする。
+    - 回帰テスト `unroutable_tasks_do_not_starve_or_hide_routable_tasks_outside_the_window`（経路なし 25 件 + 実行可能 1 件、`max_concurrency 1`）: 1 tick 目は非 idle、実行可能なタスクは `Done`、経路なしは `Ready` のままで idle になる。
+- **(2)【不可→修正済み】`taskctl worker run` が SIGTERM / Ctrl-C で死ぬと、ワーカーの子プロセスが残る**
+  - 原因: 子は別プロセスグループで、drop が走らないため kill されない。auditor が `sleep` の残存を実測。
+  - 対応:
+    - `adapter.run` と SIGINT / SIGTERM を `tokio::select!` し、シグナルを受けたら run を drop して子を kill し、exit 130 で終わる。
+    - 回帰テスト `crates/taskctl/tests/worker_run_signal.rs::sigterm_kills_the_worker_process_and_exits_130`: 実バイナリに SIGTERM → exit 130、ワーカーの PID が消える、DB は不変。
+
+「条件付き可」のうち、その場で直したもの:
+
+- **(4)** evidence 必須の古い記述を訂正した。
+  - `worker-protocol.md` の埋め込みスキーマ（`required` を `criterion` のみに）
+  - 同 §9 の「旧 P-12 はスキーマ変更しない」
+  - ワーカー向けプロンプト（`claude_code.rs` の「command / exit / stdout_tail は省略可」）
+- **(1)(2)** ADR-0012 D1 と multi-account example に次を明記した。
+  - taskd 自身の環境が引き継がれること。`ANTHROPIC_API_KEY` 等が全アカウントの認証を上書きしうるので外すこと。
+  - `[[providers]].model` の挙動変更。
+- **(3)** 除外を無視するポリシーで試行 64 回を使い切ったときに warn を出すようにした。
+- **(5)(6)** ADR-0012 D4 に次を明記した。
+  - exit code（引数の構文誤りは clap の 2、中断は 130）
+  - 中断時の kill の範囲
+  - `ready` / `done` のタスクを本来の作業ディレクトリで実行するときの注意
+- **(8)** P-41 を拡張した。
+  - §5.5 の「見送り」を撤回する。
+  - §6 非目標との整理。
+  - §5.9 の `--config`。
+
+「条件付き可」のうち、記録に留めたもの: 未解決事項 6〜9。
+
+修正後の再監査は auditor を再起動せず、自分で行った:
+
+| コマンド | 結果 |
+|---|---|
+| `cargo test -p task-dispatch unroutable` | 1 passed |
+| `cargo test -p taskctl --test worker_run_signal --test worker_run` | 1 + 6 passed |
+| `cargo test -p task-worker claude_code` | 18 passed |
+| `cargo test --workspace` を 3 回連続 | 各 215 passed |
+| clippy 2 種 | exit 0 |
+| 非テストの `unwrap()` / `expect()` の走査 | 0 件 |
+| `sleep 60` の残存プロセス | 無し |
+
+### 未解決事項
+
+1. 割り当ては設定表の順の「優先 + あふれ」で、ラウンドロビンや残量に応じた配分はしない（残量推定・自動切替は供給層の担当）
+2. アカウントごとの使用量（トークン・費用）の集計は無い（`WorkerFinished.usage` と `WorkerStarted.provider` から後で集計はできる）
+3. `[[providers]].env` に API キーを直接書くと設定ファイルが秘密になる。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` による分離を推奨（example に記載）
+4. `taskctl worker run` はレビューを行わない（`Command` 条件の確認は手で行う）。Plan kind でも `artifacts/plan.json` の事前削除はしない
+5. Reviewer run 用の `[reviewer] adapter` は種別の指定で、特定のアカウント（プロバイダ ID）は指定できない（同じ種別の中で設定表の順に選ぶ）
+6. `worker run` の中断で kill されるのはアダプタが起動した直接の子まで。ワーカーがさらに起動したツールのプロセス等は残りうる
+   （デーモンの run の中断と同じ制約）
+7. `worker run` は `--db` と設定の `db` が独立で、パスを誤ると空の DB を作ってから「task not found」になる（`SqliteStore::open` の既存挙動）。
+   `ready` / `done` のタスクを `--workspace` 無しで実行すると、デーモンの run や記録済みの成果物（sha256）と食い違いうる（ADR-0012 D4 に注意を記載）
+8. Reviewer run の選択で `NoMatchingProvider` になった場合の `unroutable` への書き込みは tick の順序上すぐ消える（無害。`StaticPolicy` では設定検証で起きない）
+9. テストの不足（監査記録）: `worker run --adapter` の分岐、reviewing の拒否、相対 workspace の解決、Reviewer run のフォールバックと
+   並列度の会計の単体テストが無い（いずれも auditor のスクラッチテストで挙動は確認済み）。e2e のあふれシナリオの並列性の判定は緩い
+   （あふれ自体はアカウント集合 `{a, b}` で検証している）
+
+### 提案（DESIGN.md への修正提案。DESIGN.md 本体は編集していない）
+
+| # | 節 | 提案 | 採用まで実装で使う既定 |
+|---|---|---|---|
+| P-41 | §4.3 / §5.3 / §5.4 / §5.5 / §5.9 / §6 非目標 | ADR-0012 を反映する: `WorkerStarted.provider`、`evidence[]` の任意フィールド、`[[providers]]` ごとの env / model（アカウント分離、taskd の環境を引き継ぐこと）、`ProviderPolicy::select` と `Selection`（§5.5 の「P-20 / P-33 は見送り」を撤回）、`taskctl worker run` の仕様（`--config` 必須・DB 非改変・exit code・中断時の kill）。§6 非目標の「複数アカウントの自動切替」は「残量推定に基づく切替」を指し、設定表の順の決定的なフォールバック（cooldown・並列度の上限）は本プロジェクトの範囲、と整理する | ADR-0012 のとおり実装済み |

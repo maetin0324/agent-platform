@@ -208,8 +208,13 @@ pub struct ProviderConfig {
     pub tiers: Vec<Tier>,
     #[serde(default = "default_provider_concurrency")]
     pub concurrency: usize,
+    /// 空でなければ、このプロバイダの run の `--model` に使う（空なら `[adapters.<種別>].model`。ADR-0012 D1）。
     #[serde(default)]
     pub model: String,
+    /// このプロバイダ（アカウント）の run にだけ渡す環境変数。`[adapters.<種別>].env` に重ね、同名キーはこちらが優先
+    /// （例: `CLAUDE_CONFIG_DIR`、`CODEX_HOME`。ADR-0012 D1）。
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 fn default_db() -> PathBuf {
@@ -280,7 +285,12 @@ impl Config {
         if self.providers.is_empty() {
             return Err(ConfigError::Invalid("at least one [[providers]] entry is required".into()));
         }
+        let mut seen_ids = std::collections::HashSet::new();
         for p in &self.providers {
+            // ADR-0012 D1: アダプタのインスタンスはプロバイダ ID で引くので重複は許さない。
+            if !seen_ids.insert(p.id.as_str()) {
+                return Err(ConfigError::Invalid(format!("duplicate provider id {:?}", p.id)));
+            }
             if p.adapter != task_worker::FakeAdapter::ID
                 && p.adapter != task_worker::ClaudeCodeAdapter::ID
                 && p.adapter != task_worker::CodexAdapter::ID
@@ -500,6 +510,20 @@ tiers = ["cheap"]
         assert!(cfg.validate().unwrap_err().to_string().contains("lease_grace_secs"));
         let cfg: Config = toml::from_str(&format!("lease_grace_secs = 60\nkill_grace_secs = 1\ntick_ms = 50\n{providers}")).unwrap();
         assert!(cfg.validate().is_ok());
+    }
+
+    /// ADR-0012 D1: 同じアダプタ種別のプロバイダを複数並べ、それぞれに env を持たせられる。ID の重複は拒否。
+    #[test]
+    fn multi_account_providers_parse_and_duplicate_ids_are_rejected() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/taskd.multi-account.example.toml"));
+        let cfg = Config::load(path).unwrap();
+        let claude: Vec<&ProviderConfig> = cfg.providers.iter().filter(|p| p.adapter == "claude-code").collect();
+        assert!(claude.len() >= 2);
+        assert_ne!(claude[0].env.get("CLAUDE_CONFIG_DIR"), claude[1].env.get("CLAUDE_CONFIG_DIR"));
+
+        let dup = "[[providers]]\nid = \"a\"\nadapter = \"fake\"\n[[providers]]\nid = \"a\"\nadapter = \"fake\"\n";
+        let cfg: Config = toml::from_str(dup).unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("duplicate provider id"));
     }
 
     #[test]
