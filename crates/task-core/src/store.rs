@@ -13,7 +13,10 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -21,6 +24,28 @@ use crate::model::{Event, Status, Task, TaskId, TaskKind};
 use crate::transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
+const MIGRATION_0002: &str = include_str!("../migrations/0002_events_global_id.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_tasks_list_columns.sql");
+
+/// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
+/// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
+pub const SCHEMA_VERSION: u32 = 3;
+
+/// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
+#[derive(Debug, Clone, Copy)]
+pub struct StoreOptions {
+    /// `PRAGMA busy_timeout`。複数接続（ディスパッチャ・API・taskctl）が同じファイルを
+    /// 開くときにロック待ちする時間。既定は 5000 ms。
+    pub busy_timeout: StdDuration,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        Self {
+            busy_timeout: StdDuration::from_millis(5000),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -38,6 +63,226 @@ pub enum StoreError {
     Invalid(String),
     #[error(transparent)]
     InvalidTransition(#[from] InvalidTransition),
+    /// ADR-0013 D5: DB の `schema_migrations` の最大版数がこのバイナリの `SCHEMA_VERSION` より
+    /// 大きい場合に返す。DB を書き換えずに `open`/`open_with` を失敗させる。
+    #[error("db schema version {found} is newer than the {supported} this binary supports")]
+    SchemaTooNew { found: u32, supported: u32 },
+}
+
+/// `events` テーブルの 1 行（ADR-0013 D6）。`id` はテーブル全体でのグローバル単調増加値。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EventRow {
+    pub id: u64,
+    pub task_id: TaskId,
+    pub seq: u64,
+    /// DB に保存された RFC 3339 文字列そのまま。
+    pub ts: String,
+    pub event: Event,
+}
+
+/// 生成した `EventRow` の JSON Schema（`serde_json::Value`）。`docs/api/v1/event.schema.json` と
+/// 一致することを `event_row_schema_matches_committed` で検証する。
+pub fn event_row_schema_value() -> serde_json::Value {
+    let schema = schemars::schema_for!(EventRow);
+    serde_json::to_value(schema).unwrap_or(serde_json::Value::Null)
+}
+
+/// `TaskStore::list_page` のフィルタ（ADR-0013 D10）。既定は絞り込み無し。
+#[derive(Debug, Clone, Default)]
+pub struct ListFilter {
+    /// 空なら status で絞らない。
+    pub statuses: Vec<Status>,
+    /// 空なら kind で絞らない。
+    pub kinds: Vec<TaskKind>,
+    pub parent_id: Option<TaskId>,
+    /// true なら `parent_id IS NULL` のタスクのみ（`parent_id` フィルタとは独立に AND で効く）。
+    pub root_only: bool,
+    /// `title` に対する部分一致（大小文字区別）。`%` / `_` はリテラルとして扱う。
+    pub title_contains: Option<String>,
+}
+
+/// `TaskStore::list_page` の並び順（ADR-0013 D10）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListOrder {
+    /// `priority DESC, created_at ASC, id ASC`（ディスパッチ順）。
+    Dispatch,
+    /// `updated_at DESC, id DESC`。
+    UpdatedDesc,
+    /// `created_at DESC, id DESC`。
+    CreatedDesc,
+}
+
+/// keyset ページングの 1 ページ。
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    /// 次ページがあれば `Some`。`list_page` にそのまま渡せる不透明な文字列。
+    pub next_cursor: Option<String>,
+    /// 同じフィルタでの総件数（cursor に依らない）。
+    pub total: u64,
+}
+
+/// `list_page` の cursor の内側の表現。`{priority, created_at, updated_at, id}` を JSON にして
+/// バイト列を 16 進エンコードしたものが `cursor` 文字列（不透明・実装依存。`ListOrder` ごとに
+/// 必要な列だけを使って keyset 述語を組み立てる）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CursorPayload {
+    priority: i64,
+    created_at: String,
+    updated_at: String,
+    id: String,
+}
+
+impl CursorPayload {
+    fn from_task(task: &Task) -> Result<Self, StoreError> {
+        Ok(Self {
+            priority: task.priority as i64,
+            created_at: format_rfc3339(task.created_at)?,
+            updated_at: format_rfc3339(task.updated_at)?,
+            id: task.id.to_string(),
+        })
+    }
+}
+
+fn encode_cursor(payload: &CursorPayload) -> Result<String, StoreError> {
+    let json = serde_json::to_vec(payload)?;
+    let mut out = String::with_capacity(json.len() * 2);
+    for byte in json {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    Ok(out)
+}
+
+fn decode_cursor(cursor: &str) -> Result<CursorPayload, StoreError> {
+    let invalid = || StoreError::Invalid(format!("invalid cursor: {cursor}"));
+    if cursor.is_empty() || !cursor.len().is_multiple_of(2) || !cursor.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let bytes_chars: Vec<char> = cursor.chars().collect();
+    let mut bytes = Vec::with_capacity(bytes_chars.len() / 2);
+    for pair in bytes_chars.chunks(2) {
+        let s: String = pair.iter().collect();
+        let byte = u8::from_str_radix(&s, 16).map_err(|_| invalid())?;
+        bytes.push(byte);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| invalid())
+}
+
+fn usize_to_i64(v: usize) -> i64 {
+    i64::try_from(v).unwrap_or(i64::MAX)
+}
+
+fn u64_to_i64(v: u64) -> i64 {
+    i64::try_from(v).unwrap_or(i64::MAX)
+}
+
+fn escape_like(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '%' | '_' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// `ListFilter` を `WHERE` 述語と束縛パラメータに変換する（`cursor` の keyset 述語は含まない）。
+fn filter_predicate(filter: &ListFilter) -> (String, Vec<SqlValue>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<SqlValue> = Vec::new();
+
+    if !filter.statuses.is_empty() {
+        let placeholders = vec!["?"; filter.statuses.len()].join(", ");
+        clauses.push(format!("status IN ({placeholders})"));
+        for s in &filter.statuses {
+            params.push(SqlValue::Text(status_str(*s).to_string()));
+        }
+    }
+    if !filter.kinds.is_empty() {
+        let placeholders = vec!["?"; filter.kinds.len()].join(", ");
+        clauses.push(format!("kind IN ({placeholders})"));
+        for k in &filter.kinds {
+            params.push(SqlValue::Text(kind_str(*k).to_string()));
+        }
+    }
+    if filter.root_only {
+        clauses.push("parent_id IS NULL".to_string());
+    }
+    if let Some(parent_id) = filter.parent_id {
+        clauses.push("parent_id = ?".to_string());
+        params.push(SqlValue::Text(parent_id.to_string()));
+    }
+    if let Some(needle) = &filter.title_contains {
+        clauses.push("title LIKE ? ESCAPE '\\'".to_string());
+        params.push(SqlValue::Text(format!("%{}%", escape_like(needle))));
+    }
+
+    if clauses.is_empty() {
+        ("1=1".to_string(), params)
+    } else {
+        (clauses.join(" AND "), params)
+    }
+}
+
+fn order_by_sql(order: ListOrder) -> &'static str {
+    match order {
+        ListOrder::Dispatch => "priority DESC, created_at ASC, id ASC",
+        ListOrder::UpdatedDesc => "updated_at DESC, id DESC",
+        ListOrder::CreatedDesc => "created_at DESC, id DESC",
+    }
+}
+
+/// `cursor` より後（= 次ページ側）の行だけを選ぶ keyset 述語。`order_by_sql` と対にして使う。
+fn keyset_predicate(order: ListOrder, cursor: &CursorPayload) -> (String, Vec<SqlValue>) {
+    match order {
+        ListOrder::Dispatch => (
+            "(priority < ?) OR (priority = ? AND created_at > ?) OR \
+             (priority = ? AND created_at = ? AND id > ?)"
+                .to_string(),
+            vec![
+                SqlValue::Integer(cursor.priority),
+                SqlValue::Integer(cursor.priority),
+                SqlValue::Text(cursor.created_at.clone()),
+                SqlValue::Integer(cursor.priority),
+                SqlValue::Text(cursor.created_at.clone()),
+                SqlValue::Text(cursor.id.clone()),
+            ],
+        ),
+        ListOrder::UpdatedDesc => (
+            "(updated_at < ?) OR (updated_at = ? AND id < ?)".to_string(),
+            vec![
+                SqlValue::Text(cursor.updated_at.clone()),
+                SqlValue::Text(cursor.updated_at.clone()),
+                SqlValue::Text(cursor.id.clone()),
+            ],
+        ),
+        ListOrder::CreatedDesc => (
+            "(created_at < ?) OR (created_at = ? AND id < ?)".to_string(),
+            vec![
+                SqlValue::Text(cursor.created_at.clone()),
+                SqlValue::Text(cursor.created_at.clone()),
+                SqlValue::Text(cursor.id.clone()),
+            ],
+        ),
+    }
+}
+
+fn parse_status(s: &str) -> Result<Status, StoreError> {
+    match s {
+        "draft" => Ok(Status::Draft),
+        "ready" => Ok(Status::Ready),
+        "running" => Ok(Status::Running),
+        "blocked" => Ok(Status::Blocked),
+        "reviewing" => Ok(Status::Reviewing),
+        "done" => Ok(Status::Done),
+        "failed" => Ok(Status::Failed),
+        "cancelled" => Ok(Status::Cancelled),
+        other => Err(StoreError::Invalid(format!("invalid status in tasks table: {other}"))),
+    }
 }
 
 pub trait TaskStore: Send + Sync {
@@ -101,6 +346,23 @@ pub trait TaskStore: Send + Sync {
     /// ADR-0010 D2 / D7（P-7）: `status = running` かつリースの run_id が一致するときだけ `expires_at = now + ttl` に
     /// 延長して true を返す。状態遷移ではないのでイベントは追記しない。
     fn renew_lease(&self, task_id: TaskId, worker_run_id: &str, ttl: StdDuration) -> Result<bool, StoreError>;
+
+    /// ADR-0013 D6: `events` を `id` 昇順で `after_id` より後、最大 `limit` 件返す。
+    fn events_since(&self, after_id: u64, limit: usize) -> Result<Vec<EventRow>, StoreError>;
+    /// ADR-0013 D6: `events` の現在の最大 `id`。行が無ければ 0。
+    fn latest_event_id(&self) -> Result<u64, StoreError>;
+
+    /// ADR-0013 D10: `filter` に一致する `tasks` を `order` で keyset ページングして返す。`cursor` は
+    /// 前回の `Page::next_cursor`（不透明な文字列）。不正な `cursor` は `StoreError::Invalid`。
+    fn list_page(
+        &self,
+        filter: &ListFilter,
+        order: ListOrder,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Page<Task>, StoreError>;
+    /// ADR-0013 D10: `tasks` の件数を `status` ごとに集計する（0 件の status は含まない）。
+    fn count_by_status(&self) -> Result<Vec<(Status, u64)>, StoreError>;
 }
 
 pub struct SqliteStore {
@@ -136,19 +398,130 @@ fn format_rfc3339(t: OffsetDateTime) -> Result<String, StoreError> {
 impl SqliteStore {
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, &StoreOptions::default())
     }
 
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
-        Self::from_connection(conn)
+        Self::open_with(path, StoreOptions::default())
     }
 
-    fn from_connection(conn: Connection) -> Result<Self, StoreError> {
-        conn.execute_batch(MIGRATION_0001)?;
+    /// ADR-0013 D5: `path` の DB を `options` の PRAGMA 設定で開き、マイグレーションを適用する。
+    /// DB の版数がこのバイナリの知る `SCHEMA_VERSION` より新しければ `StoreError::SchemaTooNew` を
+    /// 返し、DB には何も書かない。
+    pub fn open_with(path: &Path, options: StoreOptions) -> Result<Self, StoreError> {
+        let conn = Connection::open(path)?;
+        Self::from_connection(conn, &options)
+    }
+
+    /// 現在の DB のスキーマ版数（`schema_migrations` の最大 `version`。行が無ければ 0）。
+    pub fn schema_version(&self) -> Result<u32, StoreError> {
+        let conn = self.lock()?;
+        let v: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(v as u32)
+    }
+
+    fn from_connection(mut conn: Connection, options: &StoreOptions) -> Result<Self, StoreError> {
+        Self::configure_pragmas(&conn, options)?;
+        Self::migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// ADR-0013 D5: WAL・busy_timeout・synchronous=NORMAL を設定する。`foreign_keys` は変えない。
+    /// インメモリ DB では `journal_mode` が `memory` のまま返ることがあるが、エラーにはしない。
+    fn configure_pragmas(conn: &Connection, options: &StoreOptions) -> Result<(), StoreError> {
+        conn.busy_timeout(options.busy_timeout)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        let _journal_mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        Ok(())
+    }
+
+    fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
+    /// ADR-0013 D5: `schema_migrations` を導入し、未適用の版を 1 つずつ 1 トランザクションで
+    /// 適用する。既存 DB（`schema_migrations` が無く `tasks` がある）は版数 1 とみなす。
+    fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
+        let migrations_table_existed = Self::table_exists(conn, "schema_migrations")?;
+        if !migrations_table_existed {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (\
+                 version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+            )?;
+        }
+
+        let mut current: u32 = if migrations_table_existed {
+            let v: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )?;
+            v as u32
+        } else {
+            0
+        };
+
+        if current > SCHEMA_VERSION {
+            return Err(StoreError::SchemaTooNew {
+                found: current,
+                supported: SCHEMA_VERSION,
+            });
+        }
+
+        if current == 0 && !migrations_table_existed && Self::table_exists(conn, "tasks")? {
+            // 既存 DB（Phase 1〜8 で作られた、schema_migrations の無い DB）は版数 1 が
+            // 適用済みとみなす。0001_init.sql は再実行しない。
+            Self::mark_migration_applied(conn, 1)?;
+            current = 1;
+        }
+
+        for version in (current + 1)..=SCHEMA_VERSION {
+            Self::apply_migration_version(conn, version)?;
+        }
+
+        Ok(())
+    }
+
+    fn migration_sql(version: u32) -> Result<&'static str, StoreError> {
+        match version {
+            1 => Ok(MIGRATION_0001),
+            2 => Ok(MIGRATION_0002),
+            3 => Ok(MIGRATION_0003),
+            other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
+        }
+    }
+
+    fn apply_migration_version(conn: &mut Connection, version: u32) -> Result<(), StoreError> {
+        let sql = Self::migration_sql(version)?;
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        let ts = format_rfc3339(OffsetDateTime::now_utc())?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+            params![version, ts],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn mark_migration_applied(conn: &Connection, version: u32) -> Result<(), StoreError> {
+        let ts = format_rfc3339(OffsetDateTime::now_utc())?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+            params![version, ts],
+        )?;
+        Ok(())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
@@ -179,6 +552,7 @@ impl SqliteStore {
     fn insert_tx(conn: &Connection, task: &Task) -> Result<(), StoreError> {
         let json = serde_json::to_string(task)?;
         let created_at = format_rfc3339(task.created_at)?;
+        let updated_at = format_rfc3339(task.updated_at)?;
         let (lease_worker_run_id, lease_expires_at) = match &task.lease {
             Some(lease) => (
                 Some(lease.worker_run_id.clone()),
@@ -188,8 +562,8 @@ impl SqliteStore {
         };
         conn.execute(
             "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
-             lease_worker_run_id, lease_expires_at, json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             lease_worker_run_id, lease_expires_at, json, title, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 task.id.to_string(),
                 status_str(task.status),
@@ -200,6 +574,8 @@ impl SqliteStore {
                 lease_worker_run_id,
                 lease_expires_at,
                 json,
+                task.title,
+                updated_at,
             ],
         )?;
         Ok(())
@@ -248,16 +624,17 @@ impl SqliteStore {
         }
 
         let new_json = serde_json::to_string(&task)?;
+        let updated_at_str = format_rfc3339(task.updated_at)?;
         if leaving_running {
             tx.execute(
                 "UPDATE tasks SET status = ?1, lease_worker_run_id = NULL, \
-                 lease_expires_at = NULL, json = ?2 WHERE id = ?3",
-                params![status_str(task.status), new_json, task_id.to_string()],
+                 lease_expires_at = NULL, json = ?2, title = ?3, updated_at = ?4 WHERE id = ?5",
+                params![status_str(task.status), new_json, task.title, updated_at_str, task_id.to_string()],
             )?;
         } else {
             tx.execute(
-                "UPDATE tasks SET status = ?1, json = ?2 WHERE id = ?3",
-                params![status_str(task.status), new_json, task_id.to_string()],
+                "UPDATE tasks SET status = ?1, json = ?2, title = ?3, updated_at = ?4 WHERE id = ?5",
+                params![status_str(task.status), new_json, task.title, updated_at_str, task_id.to_string()],
             )?;
         }
 
@@ -517,15 +894,17 @@ impl TaskStore for SqliteStore {
 
         let new_json = serde_json::to_string(&task)?;
         let expires_at_str = format_rfc3339(expires_at)?;
+        let updated_at_str = format_rfc3339(now)?;
 
         let affected = tx.execute(
             "UPDATE tasks SET status = ?1, lease_worker_run_id = ?2, lease_expires_at = ?3, \
-             json = ?4 WHERE id = ?5 AND status = ?6",
+             json = ?4, updated_at = ?5 WHERE id = ?6 AND status = ?7",
             params![
                 status_str(Status::Running),
                 worker_run_id,
                 expires_at_str,
                 new_json,
+                updated_at_str,
                 task_id.to_string(),
                 status_str(Status::Ready),
             ],
@@ -580,11 +959,12 @@ impl TaskStore for SqliteStore {
         task.lease = None;
         task.updated_at = OffsetDateTime::now_utc();
         let new_json = serde_json::to_string(&task)?;
+        let updated_at_str = format_rfc3339(task.updated_at)?;
 
         conn.execute(
-            "UPDATE tasks SET lease_worker_run_id = NULL, lease_expires_at = NULL, json = ?1 \
-             WHERE id = ?2 AND lease_worker_run_id = ?3",
-            params![new_json, task_id.to_string(), worker_run_id],
+            "UPDATE tasks SET lease_worker_run_id = NULL, lease_expires_at = NULL, json = ?1, \
+             updated_at = ?2 WHERE id = ?3 AND lease_worker_run_id = ?4",
+            params![new_json, updated_at_str, task_id.to_string(), worker_run_id],
         )?;
 
         Ok(())
@@ -731,12 +1111,117 @@ impl TaskStore for SqliteStore {
         tx.commit()?;
         Ok(affected == 1)
     }
+
+    fn events_since(&self, after_id: u64, limit: usize) -> Result<Vec<EventRow>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, task_id, seq, ts, json FROM events WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![u64_to_i64(after_id), usize_to_i64(limit)], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, task_id, seq, ts, json) = row?;
+            let task_id = Self::parse_id(&task_id)?;
+            let event: Event = serde_json::from_str(&json)?;
+            out.push(EventRow {
+                id: id as u64,
+                task_id,
+                seq: seq as u64,
+                ts,
+                event,
+            });
+        }
+        Ok(out)
+    }
+
+    fn latest_event_id(&self) -> Result<u64, StoreError> {
+        let conn = self.lock()?;
+        let id: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| row.get(0))?;
+        Ok(id as u64)
+    }
+
+    fn list_page(
+        &self,
+        filter: &ListFilter,
+        order: ListOrder,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Page<Task>, StoreError> {
+        let conn = self.lock()?;
+        let (filter_sql, filter_params) = filter_predicate(filter);
+
+        let total: i64 = {
+            let sql = format!("SELECT COUNT(*) FROM tasks WHERE {filter_sql}");
+            conn.query_row(&sql, params_from_iter(filter_params.iter()), |row| row.get(0))?
+        };
+
+        let mut where_sql = format!("({filter_sql})");
+        let mut query_params = filter_params;
+        if let Some(c) = cursor {
+            let payload = decode_cursor(c)?;
+            let (keyset_sql, keyset_params) = keyset_predicate(order, &payload);
+            where_sql.push_str(&format!(" AND ({keyset_sql})"));
+            query_params.extend(keyset_params);
+        }
+
+        let order_sql = order_by_sql(order);
+        let fetch_limit = usize_to_i64(limit.saturating_add(1));
+        let sql = format!("SELECT json FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ?");
+        query_params.push(SqlValue::Integer(fetch_limit));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| row.get::<_, String>(0))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(Self::row_to_task(row?)?);
+        }
+
+        let has_more = items.len() > limit;
+        if has_more {
+            items.truncate(limit);
+        }
+        let next_cursor = if has_more {
+            match items.last() {
+                Some(last) => Some(encode_cursor(&CursorPayload::from_task(last)?)?),
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        Ok(Page {
+            items,
+            next_cursor,
+            total: total as u64,
+        })
+    }
+
+    fn count_by_status(&self) -> Result<Vec<(Status, u64)>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (s, c) = row?;
+            out.push((parse_status(&s)?, c as u64));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{ArtifactRef, Budget, Check, Criterion, Tier, WorkerHint, WorkspaceSpec};
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::Barrier;
 
@@ -1452,5 +1937,449 @@ mod tests {
         let new = Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: Some("acct-a".into()) };
         assert!(serde_json::to_string(&new).unwrap().contains(r#""provider":"acct-a""#));
         assert_eq!(serde_json::to_string(&ev).unwrap(), old);
+    }
+
+    // ---- ADR-0013 D5/D6/D9/D10: schema migrations, PRAGMA, events の global id, list_page ----
+
+    /// 版数 1 の DB（`schema_migrations` が無く `tasks`/`events` だけがある）を素の `Connection` で
+    /// 作る。`0001_init.sql` だけを適用し、`insert_tx`/`append_event_tx` を経由しない生の SQL で
+    /// タスクと events を書く。
+    fn insert_legacy_task(conn: &Connection, task: &Task) {
+        let json = serde_json::to_string(task).unwrap();
+        let created_at = format_rfc3339(task.created_at).unwrap();
+        let (lease_worker_run_id, lease_expires_at): (Option<String>, Option<String>) = match &task.lease {
+            Some(l) => (Some(l.worker_run_id.clone()), Some(format_rfc3339(l.expires_at).unwrap())),
+            None => (None, None),
+        };
+        conn.execute(
+            "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
+             lease_worker_run_id, lease_expires_at, json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                task.id.to_string(),
+                status_str(task.status),
+                kind_str(task.kind),
+                task.parent_id.map(|p| p.to_string()),
+                task.priority,
+                created_at,
+                lease_worker_run_id,
+                lease_expires_at,
+                json,
+            ],
+        )
+        .unwrap();
+    }
+
+    fn insert_legacy_event(conn: &Connection, task_id: TaskId, seq: u64, event: &Event) {
+        let ts = format_rfc3339(OffsetDateTime::now_utc()).unwrap();
+        let json = serde_json::to_string(event).unwrap();
+        conn.execute(
+            "INSERT INTO events (task_id, seq, ts, json) VALUES (?1, ?2, ?3, ?4)",
+            params![task_id.to_string(), seq, ts, json],
+        )
+        .unwrap();
+    }
+
+    /// ADR-0013 D5/D6: 版数 1 の DB を `open` すると版数 3 に上がり、`events` の rowid 順が
+    /// `events_since` の id 順に保たれ、`events_for` は移行前と同一の結果を返し、`title`/
+    /// `updated_at` 列が埋まる。2 回目の `open` は何も再適用しない（`schema_migrations` の
+    /// `applied_at` が変わらない）。
+    #[test]
+    fn open_migrates_legacy_v1_db_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sqlite3");
+
+        let a = sample_task(Status::Draft);
+        let b = sample_task(Status::Ready);
+        let mut expected_a: Vec<(u64, Event)> = Vec::new();
+        let mut expected_b: Vec<(u64, Event)> = Vec::new();
+        let mut expected_global: Vec<(TaskId, u64)> = Vec::new();
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            insert_legacy_task(&conn, &a);
+            insert_legacy_task(&conn, &b);
+
+            // events は task をまたいで rowid 順をばらして挿入する（各 task 内の seq 順は保つ）。
+            let ev = Event::Created { task: Box::new(a.clone()) };
+            insert_legacy_event(&conn, a.id, 0, &ev);
+            expected_a.push((0, ev));
+            expected_global.push((a.id, 0));
+
+            let ev = Event::Created { task: Box::new(b.clone()) };
+            insert_legacy_event(&conn, b.id, 0, &ev);
+            expected_b.push((0, ev));
+            expected_global.push((b.id, 0));
+
+            let ev = Event::Transitioned { from: Status::Draft, to: Status::Ready, reason: "accept".into() };
+            insert_legacy_event(&conn, a.id, 1, &ev);
+            expected_a.push((1, ev));
+            expected_global.push((a.id, 1));
+
+            let ev = Event::ApprovalRequested;
+            insert_legacy_event(&conn, b.id, 1, &ev);
+            expected_b.push((1, ev));
+            expected_global.push((b.id, 1));
+
+            let ev = Event::WorkerProgress { run_id: "r".into(), msg: "go".into() };
+            insert_legacy_event(&conn, a.id, 2, &ev);
+            expected_a.push((2, ev));
+            expected_global.push((a.id, 2));
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+
+        let since = store.events_since(0, 100).unwrap();
+        assert_eq!(since.len(), 5);
+        let got_order: Vec<(TaskId, u64)> = since.iter().map(|r| (r.task_id, r.seq)).collect();
+        assert_eq!(got_order, expected_global, "events_since id order must match original rowid order");
+        assert!(since.windows(2).all(|w| w[0].id < w[1].id));
+
+        assert_eq!(store.events_for(a.id).unwrap(), expected_a);
+        assert_eq!(store.events_for(b.id).unwrap(), expected_b);
+
+        let (title_a, updated_at_a): (String, String) = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT title, updated_at FROM tasks WHERE id = ?1",
+                params![a.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(title_a, a.title);
+        assert_eq!(updated_at_a, format_rfc3339(a.updated_at).unwrap());
+
+        let applied_before: Vec<(i64, String)> = {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT version, applied_at FROM schema_migrations ORDER BY version")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        drop(store);
+
+        let store2 = SqliteStore::open(&path).unwrap();
+        assert_eq!(store2.schema_version().unwrap(), SCHEMA_VERSION);
+        let applied_after: Vec<(i64, String)> = {
+            let conn = store2.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT version, applied_at FROM schema_migrations ORDER BY version")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(applied_before, applied_after, "second open must not re-apply migrations");
+    }
+
+    /// ADR-0013 D5: `schema_migrations` の最大版数がこのバイナリの `SCHEMA_VERSION` より大きい DB は
+    /// `StoreError::SchemaTooNew` で開けない。
+    #[test]
+    fn open_rejects_db_with_schema_version_newer_than_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("toonew.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
+                 INSERT INTO schema_migrations (version, applied_at) VALUES (99, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let result = SqliteStore::open(&path);
+        assert!(matches!(
+            result,
+            Err(StoreError::SchemaTooNew { found: 99, supported }) if supported == SCHEMA_VERSION
+        ));
+    }
+
+    /// ADR-0013 D5: ファイル DB では `PRAGMA journal_mode` が `wal` になる。
+    #[test]
+    fn open_sets_wal_journal_mode_for_file_backed_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.sqlite3");
+        let store = SqliteStore::open(&path).unwrap();
+        let mode: String = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    /// ADR-0013 D5: 同じファイルを開いた 2 つの `SqliteStore` が、一方の書き込み中でももう一方から
+    /// 読める（WAL + busy_timeout）。
+    #[test]
+    fn two_connections_read_and_write_the_same_file_concurrently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent.sqlite3");
+        // 先に一度開いてファイルとスキーマを作っておく。
+        drop(SqliteStore::open(&path).unwrap());
+
+        let store_a = Arc::new(SqliteStore::open(&path).unwrap());
+        let store_b = Arc::new(SqliteStore::open(&path).unwrap());
+
+        let writer = {
+            let store_a = Arc::clone(&store_a);
+            std::thread::spawn(move || {
+                for _ in 0..20 {
+                    let t = sample_task(Status::Draft);
+                    store_a.insert(&t).unwrap();
+                }
+            })
+        };
+        let reader = {
+            let store_b = Arc::clone(&store_b);
+            std::thread::spawn(move || {
+                for _ in 0..20 {
+                    store_b.list(None).unwrap();
+                }
+            })
+        };
+        writer.join().unwrap();
+        reader.join().unwrap();
+
+        assert_eq!(store_a.list(None).unwrap().len(), 20);
+    }
+
+    /// ADR-0013 D6: `events_since` は全タスクを跨いで id 昇順、`limit`、`after_id` を尊重し、
+    /// `latest_event_id` は現在の最大 id（無ければ 0）を返す。
+    #[test]
+    fn events_since_orders_globally_and_respects_after_id_and_limit() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let a = sample_task(Status::Draft);
+        let b = sample_task(Status::Draft);
+        store.insert(&a).unwrap();
+        store.insert(&b).unwrap();
+        assert_eq!(store.latest_event_id().unwrap(), 0);
+
+        store.append_event(a.id, &Event::ApprovalRequested).unwrap();
+        store.append_event(b.id, &Event::ApprovalRequested).unwrap();
+        store
+            .append_event(a.id, &Event::WorkerProgress { run_id: "r".into(), msg: "x".into() })
+            .unwrap();
+
+        let all = store.events_since(0, 100).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(all[0].task_id, a.id);
+        assert_eq!(all[1].task_id, b.id);
+        assert_eq!(all[2].task_id, a.id);
+
+        assert_eq!(store.latest_event_id().unwrap(), 3);
+
+        let limited = store.events_since(0, 2).unwrap();
+        assert_eq!(limited.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 2]);
+
+        let after = store.events_since(1, 100).unwrap();
+        assert_eq!(after.iter().map(|r| r.id).collect::<Vec<_>>(), vec![2, 3]);
+
+        let none = store.events_since(3, 100).unwrap();
+        assert!(none.is_empty());
+    }
+
+    fn task_with(title: &str, status: Status, kind: TaskKind, priority: i32, parent: Option<TaskId>) -> Task {
+        let mut t = sample_task(status);
+        t.title = title.to_string();
+        t.kind = kind;
+        t.priority = priority;
+        t.parent_id = parent;
+        t
+    }
+
+    /// ADR-0013 D10: `ListFilter` の各条件（複数 status、kind、parent、root_only、title_contains。
+    /// `%` を含む検索語のエスケープ込み）。
+    #[test]
+    fn list_page_filters_by_status_kind_parent_root_only_and_title() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let root = task_with("root", Status::Ready, TaskKind::Plan, 0, None);
+        store.insert(&root).unwrap();
+        let child_exec_ready = task_with("child a", Status::Ready, TaskKind::Execute, 0, Some(root.id));
+        store.insert(&child_exec_ready).unwrap();
+        let child_exec_done = task_with("child b", Status::Done, TaskKind::Execute, 0, Some(root.id));
+        store.insert(&child_exec_done).unwrap();
+        let child_approval = task_with("approve 100%", Status::Ready, TaskKind::Approval, 0, Some(root.id));
+        store.insert(&child_approval).unwrap();
+        let other_root = task_with("other_root", Status::Draft, TaskKind::Execute, 0, None);
+        store.insert(&other_root).unwrap();
+
+        // statuses: 複数指定は OR。
+        let f = ListFilter { statuses: vec![Status::Ready, Status::Draft], ..Default::default() };
+        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
+        assert_eq!(ids, [root.id, child_exec_ready.id, child_approval.id, other_root.id].into_iter().collect());
+        assert_eq!(page.total, 4);
+
+        // kind
+        let f = ListFilter { kinds: vec![TaskKind::Approval], ..Default::default() };
+        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), vec![child_approval.id]);
+        assert_eq!(page.total, 1);
+
+        // parent
+        let f = ListFilter { parent_id: Some(root.id), ..Default::default() };
+        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
+        assert_eq!(ids, [child_exec_ready.id, child_exec_done.id, child_approval.id].into_iter().collect());
+        assert_eq!(page.total, 3);
+
+        // root_only
+        let f = ListFilter { root_only: true, ..Default::default() };
+        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
+        assert_eq!(ids, [root.id, other_root.id].into_iter().collect());
+        assert_eq!(page.total, 2);
+
+        // title_contains: リテラルな '%' を含む検索語（エスケープが効いているか）。
+        let percent_task = task_with("100% done", Status::Ready, TaskKind::Execute, 0, None);
+        store.insert(&percent_task).unwrap();
+        let no_percent_task = task_with("100 done", Status::Ready, TaskKind::Execute, 0, None);
+        store.insert(&no_percent_task).unwrap();
+        let f = ListFilter { title_contains: Some("100%".to_string()), ..Default::default() };
+        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
+        assert_eq!(ids, [child_approval.id, percent_task.id].into_iter().collect());
+        assert!(!ids.contains(&no_percent_task.id));
+    }
+
+    /// ADR-0013 D10: 3 つの並び順。`updated_at` は遷移後に変わるので `UpdatedDesc` の順序も変わる。
+    #[test]
+    fn list_page_orders_dispatch_updated_desc_created_desc_and_reacts_to_transitions() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..5i32 {
+            let mut t = sample_task(Status::Ready);
+            t.priority = i;
+            t.title = format!("t{i}");
+            store.insert(&t).unwrap();
+            ids.push(t.id);
+            std::thread::sleep(StdDuration::from_millis(2));
+        }
+        let expected_desc: Vec<TaskId> = ids.iter().rev().copied().collect();
+
+        let page = store.list_page(&ListFilter::default(), ListOrder::Dispatch, None, 10).unwrap();
+        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), expected_desc);
+
+        let page = store.list_page(&ListFilter::default(), ListOrder::CreatedDesc, None, 10).unwrap();
+        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), expected_desc);
+
+        let page = store.list_page(&ListFilter::default(), ListOrder::UpdatedDesc, None, 10).unwrap();
+        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), expected_desc);
+
+        // ids[0] は priority 最小・最も古い。cancel して updated_at を更新すると UpdatedDesc の先頭になる。
+        store.apply_transition(ids[0], Trigger::Cancel, None).unwrap();
+        let page = store.list_page(&ListFilter::default(), ListOrder::UpdatedDesc, None, 10).unwrap();
+        assert_eq!(page.items[0].id, ids[0]);
+        // Dispatch 順は status を見ないので変わらない（cancelled でも一覧には出る）。
+        let page = store.list_page(&ListFilter::default(), ListOrder::Dispatch, None, 10).unwrap();
+        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), expected_desc);
+    }
+
+    /// ADR-0013 D10: `limit` より多い件数を cursor で辿ると、重複・欠落なく全件を1回ずつ得られる。
+    #[test]
+    fn list_page_cursor_chains_without_duplicates_or_gaps() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        for i in 0..7i32 {
+            let mut t = sample_task(Status::Ready);
+            t.priority = i % 3;
+            store.insert(&t).unwrap();
+        }
+
+        let full = store.list_page(&ListFilter::default(), ListOrder::Dispatch, None, 100).unwrap();
+        assert_eq!(full.total, 7);
+
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = store.list_page(&ListFilter::default(), ListOrder::Dispatch, cursor.as_deref(), 3).unwrap();
+            assert_eq!(page.total, 7);
+            seen.extend(page.items.iter().map(|t| t.id));
+            if page.next_cursor.is_none() {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+        assert_eq!(seen, full.items.iter().map(|t| t.id).collect::<Vec<_>>());
+        let unique: HashSet<_> = seen.iter().collect();
+        assert_eq!(unique.len(), 7);
+    }
+
+    /// ADR-0013 D10: 不正な cursor は `StoreError::Invalid`。
+    #[test]
+    fn list_page_rejects_invalid_cursor() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert!(matches!(
+            store.list_page(&ListFilter::default(), ListOrder::Dispatch, Some("not-a-cursor"), 10),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.list_page(&ListFilter::default(), ListOrder::Dispatch, Some("abc"), 10),
+            Err(StoreError::Invalid(_))
+        ));
+        // 偶数長・16進として妥当だが JSON として不正。
+        assert!(matches!(
+            store.list_page(&ListFilter::default(), ListOrder::Dispatch, Some("00"), 10),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+
+    /// ADR-0013 D10: status ごとの件数集計。0 件の status は含まない。
+    #[test]
+    fn count_by_status_aggregates_present_statuses_only() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.insert(&sample_task(Status::Ready)).unwrap();
+        store.insert(&sample_task(Status::Ready)).unwrap();
+        store.insert(&sample_task(Status::Draft)).unwrap();
+
+        let counts = store.count_by_status().unwrap();
+        let map: HashMap<Status, u64> = counts.into_iter().collect();
+        assert_eq!(map.get(&Status::Ready), Some(&2));
+        assert_eq!(map.get(&Status::Draft), Some(&1));
+        assert_eq!(map.get(&Status::Done), None);
+    }
+
+    /// ADR-0013 D9: `ProviderThrottled.reason` は往復し、`reason` の無い旧 JSON も読める。
+    #[test]
+    fn provider_throttled_reason_roundtrips_and_reads_legacy_json() {
+        let old = r#"{"type":"provider_throttled","provider":"acct-a","until":"2024-01-01T00:00:00Z"}"#;
+        let ev: Event = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            ev,
+            Event::ProviderThrottled {
+                provider: "acct-a".into(),
+                until: OffsetDateTime::parse("2024-01-01T00:00:00Z", &Rfc3339).unwrap(),
+                reason: None,
+            }
+        );
+        assert_eq!(serde_json::to_string(&ev).unwrap(), old);
+
+        let with_reason = Event::ProviderThrottled {
+            provider: "acct-a".into(),
+            until: OffsetDateTime::parse("2024-01-01T00:00:00Z", &Rfc3339).unwrap(),
+            reason: Some("throttled".into()),
+        };
+        let json = serde_json::to_string(&with_reason).unwrap();
+        assert!(json.contains(r#""reason":"throttled""#));
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, with_reason);
+    }
+
+    /// ADR-0013 D8: 生成した `EventRow` の JSON Schema とコミット済みファイルの一致。
+    /// `UPDATE_SCHEMA=1` で再生成。
+    #[test]
+    fn event_row_schema_matches_committed() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/api/v1/event.schema.json");
+        let generated = serde_json::to_string_pretty(&event_row_schema_value()).unwrap() + "\n";
+        if std::env::var_os("UPDATE_SCHEMA").is_some() {
+            std::fs::write(path, &generated).unwrap();
+        }
+        let committed = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read {path}: {e} (run with UPDATE_SCHEMA=1 to generate)"));
+        assert_eq!(committed, generated, "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-core`");
     }
 }

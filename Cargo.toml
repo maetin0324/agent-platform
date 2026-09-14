@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/task-core",
+    "crates/task-ops",
     "crates/task-worker",
     "crates/task-dispatch",
     "crates/taskd",

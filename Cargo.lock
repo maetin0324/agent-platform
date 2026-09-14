@@ -835,6 +835,7 @@ dependencies = [
  "serde",
  "serde_json",
  "task-core",
+ "task-ops",
  "task-worker",
  "tempfile",
  "thiserror",
@@ -842,6 +843,16 @@ dependencies = [
  "tokio",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "task-ops"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "task-core",
+ "thiserror",
+ "time",
 ]
 
 [[package]]
@@ -870,6 +881,7 @@ dependencies = [
  "serde_json",
  "task-core",
  "task-dispatch",
+ "task-ops",
  "task-worker",
  "taskd",
  "tempfile",

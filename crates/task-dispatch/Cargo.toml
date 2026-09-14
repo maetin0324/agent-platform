@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 task-core = { path = "../task-core" }
+task-ops = { path = "../task-ops" }
 task-worker = { path = "../task-worker" }
 tokio = { version = "1", features = ["time", "sync", "macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }

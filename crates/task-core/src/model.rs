@@ -171,7 +171,8 @@ pub struct Usage {
 
 /// DESIGN §4.3 の `Event`（追記専用）。ADR-0002 D2: `Transitioned` は遷移の
 /// *結果* を記録するものであり、`transition()` の入力（`Trigger`）とは別物。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `JsonSchema` は ADR-0013 D8: `docs/api/v1/event.schema.json`（`EventRow` 経由）の契約に使う。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     Created {
@@ -224,6 +225,12 @@ pub enum Event {
     ProviderThrottled {
         provider: String,
         #[serde(with = "time::serde::rfc3339")]
+        #[schemars(with = "String")]
         until: OffsetDateTime,
+        /// 供給側失敗の種別（ADR-0013 D9）: `throttled | auth_failed | exhausted | spawn`。
+        /// 導入前のイベントには無いので任意。このバリアントを構築している箇所は現状無い
+        /// （`grep -rn ProviderThrottled crates` で確認済み）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }

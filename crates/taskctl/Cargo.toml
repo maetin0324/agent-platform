@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 task-core = { path = "../task-core" }
+task-ops = { path = "../task-ops" }
 task-worker = { path = "../task-worker" }
 task-dispatch = { path = "../task-dispatch" }
 taskd = { path = "../taskd" }

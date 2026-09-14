@@ -27,6 +27,22 @@ pub struct ProviderSpec {
     pub model: String,
 }
 
+/// cooldown に入った理由（ADR-0013 D4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CooldownReason {
+    Throttled,
+    AuthFailed,
+    Exhausted,
+}
+
+/// `ProviderPolicy::cooldowns` の 1 件（ADR-0013 D4）。デーモン状態として API に公開する観測値。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cooldown {
+    pub provider: ProviderId,
+    pub until: Instant,
+    pub reason: CooldownReason,
+}
+
 /// `ProviderPolicy::select` の結果（ADR-0012 D2, P-20 / P-33）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
@@ -51,6 +67,12 @@ pub trait ProviderPolicy: Send {
             _ => Selection::Busy,
         }
     }
+
+    /// ADR-0013 D4: `now` 時点で cooldown 中のプロバイダ（デーモン状態として API に公開する）。既定実装は空
+    /// （cooldown を持たない、または公開しないポリシーはそのまま動く）。
+    fn cooldowns(&self, _now: Instant) -> Vec<Cooldown> {
+        Vec::new()
+    }
 }
 
 /// 設定表の優先順位どおりに選ぶ。Throttled は cooldown まで除外。
@@ -58,7 +80,7 @@ pub trait ProviderPolicy: Send {
 pub struct StaticPolicy {
     providers: Vec<ProviderSpec>,
     error_cooldown: Duration,
-    cooldown_until: HashMap<ProviderId, Instant>,
+    cooldown_until: HashMap<ProviderId, (Instant, CooldownReason)>,
 }
 
 impl StaticPolicy {
@@ -87,7 +109,7 @@ impl StaticPolicy {
     }
 
     fn cooling_down(&self, p: &ProviderSpec, now: Instant) -> bool {
-        self.cooldown_until.get(&p.id).is_some_and(|until| *until > now)
+        self.cooldown_until.get(&p.id).is_some_and(|(until, _)| *until > now)
     }
 }
 
@@ -108,14 +130,34 @@ impl ProviderPolicy for StaticPolicy {
             ProviderOutcome::Throttled { retry_after } => {
                 let until = Instant::now() + *retry_after;
                 tracing::debug!(%provider, ?until, "policy: throttled");
-                self.cooldown_until.insert(provider, until);
+                self.cooldown_until.insert(provider, (until, CooldownReason::Throttled));
             }
             ProviderOutcome::AuthFailed | ProviderOutcome::Exhausted => {
                 let until = Instant::now() + self.error_cooldown;
+                let reason = if *outcome == ProviderOutcome::AuthFailed {
+                    CooldownReason::AuthFailed
+                } else {
+                    CooldownReason::Exhausted
+                };
                 tracing::debug!(%provider, ?until, ?outcome, "policy: error cooldown");
-                self.cooldown_until.insert(provider, until);
+                self.cooldown_until.insert(provider, (until, reason));
             }
         }
+    }
+
+    fn cooldowns(&self, now: Instant) -> Vec<Cooldown> {
+        let mut out: Vec<Cooldown> = self
+            .cooldown_until
+            .iter()
+            .filter(|(_, (until, _))| *until > now)
+            .map(|(provider, (until, reason))| Cooldown {
+                provider: provider.clone(),
+                until: *until,
+                reason: *reason,
+            })
+            .collect();
+        out.sort_by(|a, b| a.provider.cmp(&b.provider));
+        out
     }
 
     fn concurrency_limit(&self, provider: ProviderId) -> usize {
@@ -369,6 +411,32 @@ mod tests {
         assert_eq!(policy.select(&hint(Tier::Frontier, Some("claude-code")), now, &HashSet::new()), Selection::NoMatchingProvider);
         policy.report("p1".into(), &ProviderOutcome::Exhausted);
         assert_eq!(policy.select(&hint(Tier::Frontier, None), now, &HashSet::new()), Selection::Busy);
+    }
+
+    /// ADR-0013 D4: `cooldowns` は期限内のものだけを理由つきで返し、期限が過ぎたものは返さない。
+    #[test]
+    fn cooldowns_lists_active_cooldowns_with_reasons() {
+        let mut policy = StaticPolicy::new(
+            vec![
+                spec("a", "claude-code", &[Tier::Standard], 1),
+                spec("b", "claude-code", &[Tier::Standard], 1),
+                spec("c", "codex", &[Tier::Standard], 1),
+            ],
+            Duration::from_secs(300),
+        );
+        let now = Instant::now();
+        assert!(policy.cooldowns(now).is_empty());
+        policy.report("b".into(), &ProviderOutcome::Throttled { retry_after: Duration::from_secs(60) });
+        policy.report("a".into(), &ProviderOutcome::AuthFailed);
+        policy.report("c".into(), &ProviderOutcome::Exhausted);
+        let active = policy.cooldowns(Instant::now());
+        assert_eq!(
+            active.iter().map(|c| (c.provider.as_str(), c.reason)).collect::<Vec<_>>(),
+            vec![("a", CooldownReason::AuthFailed), ("b", CooldownReason::Throttled), ("c", CooldownReason::Exhausted)]
+        );
+        // throttled（60 秒）だけが先に切れる。
+        let later = Instant::now() + Duration::from_secs(120);
+        assert_eq!(policy.cooldowns(later).iter().map(|c| c.provider.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
     }
 
     /// `select` を実装しない既存のポリシー（供給層）は、`pick` からの既定実装で従来どおり動く。

@@ -3,8 +3,9 @@
 //! デーモンとディスパッチャを経由せず、1 タスクを 1 つのプロバイダ（アカウント）のアダプタで
 //! 1 回だけ実行する。**状態は変えない**: リースを取らず、遷移もイベントの追記もしない
 //! （DB は読むだけ）。レビューも行わない。`context.prior_review` / `context.answers` は
-//! ディスパッチャと同じ関数（`task_dispatch::dispatcher::{prior_review_from_events,
-//! answers_from_events}`）で events から組み立てる。
+//! ディスパッチャと同じ派生関数（`task_ops::derive::{prior_review_from_events,
+//! answers_from_events}`）で events から組み立て、ワーカープロトコルの型
+//! （`task_worker::{PriorReview, Answer}`）へ写す（ADR-0013 D7）。
 //!
 //! プロバイダは `--provider`（ID 指定）/ `--adapter`（種別の先頭行）/ どちらも省略
 //! （`StaticPolicy::select` に `worker_hint` を渡す、cooldown なし）の順で決める。
@@ -19,12 +20,12 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
 use task_core::{ArtifactRef, Event, Status, Task, TaskId, TaskStore, WorkspaceSpec};
-use task_dispatch::dispatcher::{answers_from_events, prior_review_from_events};
 use task_dispatch::policy::Selection;
 use task_dispatch::{ProviderPolicy, StaticPolicy};
+use task_ops::derive::{AnswerNote, ReviewNote, answers_from_events, prior_review_from_events};
 use task_worker::{
-    AdapterError, EventSink, LocalWorkspace, PROTOCOL_VERSION, ProviderFailure, RunContext, RunLimits, RunOutcome,
-    RunRequest, Terminal, WorkerAdapter, WorkerMessage, Workspace,
+    Answer, AdapterError, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, ProviderFailure, RunContext,
+    RunLimits, RunOutcome, RunRequest, Terminal, WorkerAdapter, WorkerMessage, Workspace,
 };
 use taskd::Config;
 
@@ -172,9 +173,9 @@ async fn execute(
         task: task.clone(),
         workspace: prepared.clone(),
         context: RunContext {
-            prior_review: prior_review_from_events(events),
+            prior_review: to_prior_review(prior_review_from_events(events)),
             inputs: task.inputs.clone(),
-            answers: answers_from_events(events),
+            answers: to_answers(answers_from_events(events)),
             review: None,
         },
     };
@@ -214,6 +215,30 @@ async fn execute(
         serde_json::to_string(&message).map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
     outln!("result: {json}");
     Ok(ExitCode::from(exit))
+}
+
+/// `task_ops::derive::ReviewNote` をワーカープロトコルの `task_worker::PriorReview` に写す
+/// （ADR-0013 D7: task-ops は task_worker に依存しないため、この写像は呼び出し側で行う）。
+fn to_prior_review(notes: Vec<ReviewNote>) -> Vec<PriorReview> {
+    notes
+        .into_iter()
+        .map(|n| PriorReview {
+            criterion: n.criterion,
+            pass: n.pass,
+            reason: n.reason,
+        })
+        .collect()
+}
+
+/// `task_ops::derive::AnswerNote` をワーカープロトコルの `task_worker::Answer` に写す。
+fn to_answers(notes: Vec<AnswerNote>) -> Vec<Answer> {
+    notes
+        .into_iter()
+        .map(|n| Answer {
+            question: n.question,
+            answer: n.answer,
+        })
+        .collect()
 }
 
 /// アダプタの結果を、出す `WorkerMessage` と exit code に正規化する（ADR-0012 D4 の表）。

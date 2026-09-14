@@ -1,7 +1,7 @@
 # PROGRESS — taskd
 
-現在地: **Phase 8（複数アカウント運用とデバッグ CLI）完了（2026-09-14）**。docs/DESIGN.md に定義された Phase 0〜7 は全て完了し、
-人間の依頼による Phase 8（ADR-0012）を追加で実施した。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
+現在地: **Phase 9（GUI のための基盤と HTTP API 層、ADR-0013）進行中**。Phase 0〜8 は完了。Web GUI の設計は `docs/gui/`（Fable 作成、
+人間の判断 H1〜H9 を反映中）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により進める。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
 
@@ -15,7 +15,8 @@
 | 5 | Planner / Reviewer（LLM） | 完了 | 2026-09-14 |
 | 6 | 承認ゲートと codex アダプタ | 完了（codex 実機ドッグフードは外部制約により免除。ADR-0009 D1） | 2026-09-14 |
 | 7 | 仕上げ（ADR-0010）、requeue 上限（ADR-0011） | 完了 | 2026-09-14 |
-| 8 | 複数アカウント運用・evidence 任意化・`taskctl worker run`（ADR-0012。DESIGN 未定義、人間の依頼） | 完了 | 2026-09-14 |
+| 8 | 複数アカウント運用・evidence 任意化・`taskctl worker run`（ADR-0012） | 完了 | 2026-09-14 |
+| 9 | GUI のための基盤（task-ops・WAL・events の id）と HTTP API 層（ADR-0013） | 進行中 | — |
 
 ---
 

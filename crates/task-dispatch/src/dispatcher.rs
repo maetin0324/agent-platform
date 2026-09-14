@@ -23,9 +23,14 @@ use task_core::plan::{PlanLimits, materialize};
 use task_core::{
     ArtifactRef, Check, Event, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
 };
+use task_ops::derive::{
+    AnswerNote, REVIEWER_REQUEUED_PREFIX, ReviewNote, answers_from_events, approval_decision_note,
+    artifacts_for_run, consecutive_requeues, consecutive_reviewer_requeues, human_approval_title, last_run_id,
+    prior_review_from_events, retry_backoff,
+};
 use task_worker::{
-    AdapterError, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RunContext, RunLimits, RunOutcome,
-    RunRequest, Terminal, WorkerMessage, Workspace, WorkerAdapter,
+    AdapterError, Answer, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RunContext, RunLimits,
+    RunOutcome, RunRequest, Terminal, WorkerMessage, Workspace, WorkerAdapter,
 };
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
@@ -36,6 +41,30 @@ use crate::review::{
     HumanVerdicts, PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, Verdict,
     needs_reviewer_run, review_task,
 };
+
+/// `task_ops::derive::ReviewNote` をワーカープロトコルの `task_worker::PriorReview` に写す
+/// （ADR-0013 D7: task-ops は task_worker に依存しないため、この写像は dispatcher 側で行う）。
+fn to_prior_review(notes: Vec<ReviewNote>) -> Vec<PriorReview> {
+    notes
+        .into_iter()
+        .map(|n| PriorReview {
+            criterion: n.criterion,
+            pass: n.pass,
+            reason: n.reason,
+        })
+        .collect()
+}
+
+/// `task_ops::derive::AnswerNote` をワーカープロトコルの `task_worker::Answer` に写す。
+fn to_answers(notes: Vec<AnswerNote>) -> Vec<Answer> {
+    notes
+        .into_iter()
+        .map(|n| Answer {
+            question: n.question,
+            answer: n.answer,
+        })
+        .collect()
+}
 
 /// ディスパッチャの設定（`taskd.toml` から組み立てる。ADR-0005 D7）。
 #[derive(Debug, Clone)]
@@ -303,6 +332,8 @@ impl Dispatcher {
         }
 
         let mut subject = ReviewSubject::default();
+        // ADR-0013 D9: 供給側失敗なら種別（ProviderThrottled.reason）を、result を消費する前に取っておく。
+        let failure_reason = result.as_ref().err().and_then(provider_failure_reason);
         let (trigger, outcome_str, usage, provider_outcome) = match result {
             Ok(RunOutcome {
                 terminal: Terminal::Done { summary, usage, evidence },
@@ -360,16 +391,23 @@ impl Dispatcher {
                 ),
             },
         };
-        self.policy.report(provider, &provider_outcome);
+        self.policy.report(provider.clone(), &provider_outcome);
 
         let finished = Event::WorkerFinished {
             run_id: run_id.clone(),
             outcome: outcome_str.clone(),
             usage,
         };
+        let mut events = vec![finished];
+        // ADR-0013 D9: cooldown に入った供給側失敗を、遷移と同じトランザクションで記録する。
+        if let Some(reason) = failure_reason
+            && let Some(ev) = self.provider_throttled_event(&provider, &provider_outcome, reason)
+        {
+            events.push(ev);
+        }
         match self
             .store
-            .apply_transition_with_events(task_id, trigger, vec![finished])
+            .apply_transition_with_events(task_id, trigger, events)
         {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, next = ?outcome.next, attempts = outcome.attempts, outcome = %outcome_str, "worker finished");
@@ -400,9 +438,13 @@ impl Dispatcher {
             tracing::warn!(%task_id, status = ?task.status, "review result discarded (task no longer reviewing)");
             return Ok(());
         }
+        let mut throttled_events = Vec::new();
         if let Some(pf) = outcome.provider_failure.take() {
             if let Some(provider) = entry.as_ref().and_then(|e| e.provider.clone()) {
-                self.policy.report(provider, &pf.outcome);
+                self.policy.report(provider.clone(), &pf.outcome);
+                if let Some(ev) = self.provider_throttled_event(&provider, &pf.outcome, cooldown_reason_name(&pf.outcome)) {
+                    throttled_events.push(ev);
+                }
             }
             let deferrals = consecutive_reviewer_requeues(&self.store.events_for(task_id)?);
             if deferrals < self.config.max_requeues {
@@ -415,6 +457,9 @@ impl Dispatcher {
                         msg: format!("{REVIEWER_REQUEUED_PREFIX}{}", pf.message),
                     },
                 )?;
+                for ev in &throttled_events {
+                    self.store.append_event(task_id, ev)?;
+                }
                 if let Some(entry) = entry {
                     self.pending_subjects.insert(task_id, entry.subject);
                 }
@@ -444,6 +489,7 @@ impl Dispatcher {
                 pass: v.pass,
                 reason: v.reason.clone(),
             })
+            .chain(throttled_events)
             .collect();
         // ADR-0007 D3/D4: Plan が全 pass なら子タスクの挿入と ReviewPass を同一トランザクションで行う。
         let result = match (all_pass, task.kind, outcome.plan) {
@@ -899,6 +945,27 @@ impl Dispatcher {
         ))
     }
 
+    /// ADR-0013 D9: cooldown に入った供給側失敗の `ProviderThrottled`。期限はポリシーの `cooldowns()` から取り、
+    /// ポリシーが公開しない場合は `Throttled.retry_after` から計算する（どちらも無ければ記録しない）。
+    fn provider_throttled_event(&self, provider: &str, outcome: &ProviderOutcome, reason: &str) -> Option<Event> {
+        let now = Instant::now();
+        let until = self
+            .policy
+            .cooldowns(now)
+            .into_iter()
+            .find(|c| c.provider == provider)
+            .map(|c| c.until)
+            .or(match outcome {
+                ProviderOutcome::Throttled { retry_after } => Some(now + *retry_after),
+                _ => None,
+            })?;
+        Some(Event::ProviderThrottled {
+            provider: provider.to_string(),
+            until: OffsetDateTime::now_utc() + until.saturating_duration_since(now),
+            reason: Some(reason.to_string()),
+        })
+    }
+
     /// `ready_tasks` の取得件数。経路なしと分かっているタスク（`warned_unroutable`）の分だけ広げ、それらが窓を埋めて
     /// 後ろの実行可能なタスクが dispatch されない・`is_idle` が誤って真になることを防ぐ（ADR-0012 監査）。
     fn ready_window(&self) -> usize {
@@ -1009,7 +1076,7 @@ async fn run_worker(
     let events = store
         .events_for(task_id)
         .map_err(|e| AdapterError::Other(format!("store: {e}")))?;
-    let prior_review = prior_review_from_events(&events);
+    let prior_review = to_prior_review(prior_review_from_events(&events));
     let req = RunRequest {
         protocol: PROTOCOL_VERSION,
         task: task.clone(),
@@ -1017,7 +1084,7 @@ async fn run_worker(
         context: RunContext {
             prior_review,
             inputs: task.inputs.clone(),
-            answers: answers_from_events(&events),
+            answers: to_answers(answers_from_events(&events)),
             review: None,
         },
     };
@@ -1032,66 +1099,6 @@ async fn run_worker(
     adapter.run(req, run_id, limits, &sink).await
 }
 
-/// 直前のレビュー（最後に `ReviewVerdict` を記録した run の全判定）を `context.prior_review` に写す。
-pub fn prior_review_from_events(events: &[(u64, Event)]) -> Vec<PriorReview> {
-    let mut by_run: HashMap<&str, Vec<PriorReview>> = HashMap::new();
-    let mut last_run: Option<&str> = None;
-    for (_, ev) in events {
-        if let Event::ReviewVerdict {
-            run_id,
-            criterion_idx,
-            pass,
-            reason,
-        } = ev
-        {
-            by_run.entry(run_id.as_str()).or_default().push(PriorReview {
-                criterion: *criterion_idx,
-                pass: *pass,
-                reason: reason.clone(),
-            });
-            last_run = Some(run_id.as_str());
-        }
-    }
-    let mut out = last_run
-        .and_then(|r| by_run.remove(r))
-        .unwrap_or_default();
-    out.sort_by_key(|p| p.criterion);
-    out
-}
-
-/// Reviewer run の供給側失敗で延期したときの `WorkerProgress.msg` の接頭辞（ADR-0010 D5）。
-const REVIEWER_REQUEUED_PREFIX: &str = "reviewer run requeued: ";
-
-/// 現在の試行での連続 requeue 回数（ADR-0011 D2）。`Transitioned` を新しい順に見て `requeue` を数え、
-/// `dispatch` は読み飛ばし、それ以外の reason で止まる。
-pub fn consecutive_requeues(events: &[(u64, Event)]) -> u32 {
-    let mut n = 0;
-    for (_, ev) in events.iter().rev() {
-        if let Event::Transitioned { reason, .. } = ev {
-            match reason.as_str() {
-                "requeue" => n += 1,
-                "dispatch" => {}
-                _ => break,
-            }
-        }
-    }
-    n
-}
-
-/// 現在の reviewing での、Reviewer run の供給側失敗による連続延期回数（ADR-0011 D2）。
-/// 最後の `Transitioned`（reviewing に入った遷移）以降の延期の `WorkerProgress` を数える。
-pub fn consecutive_reviewer_requeues(events: &[(u64, Event)]) -> u32 {
-    let mut n = 0;
-    for (_, ev) in events.iter().rev() {
-        match ev {
-            Event::Transitioned { .. } => break,
-            Event::WorkerProgress { msg, .. } if msg.starts_with(REVIEWER_REQUEUED_PREFIX) => n += 1,
-            _ => {}
-        }
-    }
-    n
-}
-
 /// ワーカー run 中のリース延長パラメータ（ADR-0010 D7）。
 #[derive(Debug, Clone, Copy)]
 struct LeaseRenewal {
@@ -1101,16 +1108,29 @@ struct LeaseRenewal {
     every: Duration,
 }
 
-/// ADR-0010 D6（P-3）: `min(base·2^(attempts-1), max)`。`attempts == 0` または `base == 0` なら 0。
-pub fn retry_backoff(base: Duration, max: Duration, attempts: u32) -> Duration {
-    if attempts == 0 || base.is_zero() {
-        return Duration::ZERO;
+/// `ProviderThrottled.reason` に書く供給側失敗の種別（ADR-0013 D9）。供給側失敗でなければ `None`。
+fn provider_failure_reason(e: &AdapterError) -> Option<&'static str> {
+    match e {
+        AdapterError::Throttled { .. } => Some("throttled"),
+        AdapterError::AuthFailed(_) => Some("auth_failed"),
+        AdapterError::Exhausted(_) => Some("exhausted"),
+        AdapterError::Spawn(_) => Some("spawn"),
+        AdapterError::Io(_) | AdapterError::Serde(_) | AdapterError::Other(_) => None,
     }
-    let factor = 1u32.checked_shl(attempts - 1).unwrap_or(u32::MAX);
-    base.checked_mul(factor).unwrap_or(max).min(max)
+}
+
+/// Reviewer run の供給側失敗（`ProviderOutcome` しか残っていない）の種別名（ADR-0013 D9）。
+fn cooldown_reason_name(outcome: &ProviderOutcome) -> &'static str {
+    match outcome {
+        ProviderOutcome::Throttled { .. } => "throttled",
+        ProviderOutcome::AuthFailed => "auth_failed",
+        ProviderOutcome::Exhausted => "exhausted",
+        ProviderOutcome::Ok => "ok",
+    }
 }
 
 /// 供給側失敗（ADR-0010 D5）なら `ProviderPolicy::report` に渡す結果を返す。起動失敗（`Spawn`）も供給側として扱う。
+/// `AdapterError`/`ProviderOutcome` は `task-dispatch`/`task-worker` の型なので、`task-ops` には移さない。
 pub fn provider_failure_outcome(e: &AdapterError) -> Option<ProviderOutcome> {
     match e {
         AdapterError::Throttled { retry_after } => Some(ProviderOutcome::Throttled {
@@ -1120,31 +1140,6 @@ pub fn provider_failure_outcome(e: &AdapterError) -> Option<ProviderOutcome> {
         AdapterError::Exhausted(_) | AdapterError::Spawn(_) => Some(ProviderOutcome::Exhausted),
         AdapterError::Io(_) | AdapterError::Serde(_) | AdapterError::Other(_) => None,
     }
-}
-
-/// そのタスクの全 `Event::Answered` を時系列で `context.answers` に写す（ADR-0010 D3, P-10）。
-pub fn answers_from_events(events: &[(u64, Event)]) -> Vec<task_worker::Answer> {
-    events
-        .iter()
-        .filter_map(|(_, ev)| match ev {
-            Event::Answered { question, answer } => Some(task_worker::Answer {
-                question: question.clone(),
-                answer: answer.clone(),
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
-/// その run で `ArtifactProduced` された成果物。
-pub fn artifacts_for_run(events: &[(u64, Event)], run_id: &str) -> Vec<ArtifactRef> {
-    events
-        .iter()
-        .filter_map(|(_, ev)| match ev {
-            Event::ArtifactProduced { run_id: r, artifact } if r == run_id => Some(artifact.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 /// デーモン再起動後の復旧用: `runs/<run_id>/result.json`（`fake`/`run_subprocess` が書く終端メッセージ）から
@@ -1158,33 +1153,6 @@ fn subject_from_run_dir(dir: &std::path::Path, run_id: &str) -> ReviewSubject {
         Ok(WorkerMessage::Done { summary, evidence, .. }) => ReviewSubject { summary, evidence },
         _ => ReviewSubject::default(),
     }
-}
-
-/// `Human` criterion 用の `Approval` 子タスクの `title`（既存子の照合キーにも使う。ADR-0008 D2）。
-/// ADR-0010 D8（P-35）: 試行（`attempts + 1`）を含めるので、再レビューでは新しい子が作られる。
-fn human_approval_title(task: &Task, idx: usize) -> String {
-    format!("Approval needed: {} — criterion {idx} (attempt {})", task.title, task.attempts + 1)
-}
-
-/// 直近の `Event::ApprovalDecided` の `note` を `": <note>"` の形で返す（無ければ空文字列）。
-fn approval_decision_note(events: &[(u64, Event)]) -> String {
-    events
-        .iter()
-        .rev()
-        .find_map(|(_, e)| match e {
-            Event::ApprovalDecided { note: Some(n), .. } => Some(format!(": {n}")),
-            Event::ApprovalDecided { note: None, .. } => Some(String::new()),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-/// 最後に `WorkerStarted` した run の id。
-pub fn last_run_id(events: &[(u64, Event)]) -> Option<String> {
-    events.iter().rev().find_map(|(_, ev)| match ev {
-        Event::WorkerStarted { run_id, .. } => Some(run_id.clone()),
-        _ => None,
-    })
 }
 
 #[cfg(test)]
@@ -1769,6 +1737,11 @@ mod tests {
         let events = store.events_for(task.id).unwrap();
         assert!(events.iter().any(|(_, e)| matches!(e, Event::Transitioned { from: Status::Running, to: Status::Ready, reason } if reason == "requeue")));
         assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if outcome.starts_with("requeue: "))));
+        // ADR-0013 D9: cooldown の開始が期限と種別つきで残る。
+        assert!(events.iter().any(|(_, e)| matches!(
+            e,
+            Event::ProviderThrottled { provider, until, reason } if provider == "p1" && reason.as_deref() == Some("throttled") && *until > OffsetDateTime::now_utc() - time::Duration::seconds(5)
+        )), "{events:?}");
     }
 
     /// ADR-0010 D6（P-3）: attempts > 0 の ready タスクはバックオフが明けるまで dispatch されず、idle にもならない。
@@ -1968,6 +1941,10 @@ mod tests {
         assert_eq!(adapter.review_calls.load(Ordering::SeqCst), 2);
         let events = store.events_for(task.id).unwrap();
         assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.starts_with("reviewer run requeued"))));
+        assert!(events.iter().any(|(_, e)| matches!(
+            e,
+            Event::ProviderThrottled { provider, reason, .. } if provider == "p1" && reason.as_deref() == Some("throttled")
+        )), "{events:?}");
         let verdicts: Vec<bool> = events
             .iter()
             .filter_map(|(_, e)| match e {
@@ -2057,7 +2034,12 @@ mod tests {
         assert_eq!((t.status, t.attempts), (Status::Failed, 1));
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 3);
         let events = store.events_for(task.id).unwrap();
-        assert_eq!(consecutive_reviewer_requeues(&events[..events.len() - 2]), 2);
+        // 最後の遷移（review_fail）の直前までで数える（その後ろには ReviewVerdict と ProviderThrottled が続く）。
+        let last_transition = events
+            .iter()
+            .rposition(|(_, e)| matches!(e, Event::Transitioned { .. }))
+            .unwrap();
+        assert_eq!(consecutive_reviewer_requeues(&events[..last_transition]), 2);
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: false, reason, .. } if reason.starts_with("requeue limit (2) reached"))));
     }
 

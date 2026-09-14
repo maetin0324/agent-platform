@@ -9,6 +9,8 @@
   採用した提案の番号を本文中に `（P-n）` で示す
 - 2026-09-14 改訂 2: 連続 requeue の上限（P-40, ADR-0011）と、複数アカウント運用・evidence の任意化・`taskctl worker run`
   （P-41, ADR-0012）を反映し、Phase 8 を追加（いずれも人間の許可による）
+- 2026-09-14 改訂 3: Web GUI（別プロジェクト `taskd-gui`）のために、taskd の HTTP API 層（§5.10）と基盤（`task-ops`、SQLite の WAL と
+  スキーマ版数、events のグローバル id）を追加し、Phase 9 を追加（ADR-0013。人間の方針「GUI のために taskd の変更が必要なら変更する」による）
 
 ---
 
@@ -58,7 +60,9 @@
 補助クレート（P-2、ADR-0001 D3）: `ulid`（ID）、`time`（RFC3339）、`sha2`（成果物ハッシュ）、`thiserror`（エラー型）、
 `toml`、`nix`（プロセスグループへのシグナル）、`async-trait`。テスト用に `tempfile`。
 
-禁止: Web UI、ORM、分散DB、メッセージブローカー。
+API 層（§5.10）: `axum`（HTTP/JSON + SSE）。taskd のプロセス内で `[api]` 設定時だけ動く。
+
+禁止: Web UI（別プロジェクト `taskd-gui`。taskd は §5.10 の HTTP API までを提供する）、ORM、分散DB、メッセージブローカー。
 
 ---
 
@@ -80,6 +84,8 @@ agent-platform/
 │   ├── task-core/            # ドメインモデル、状態機械、イベント、SQLiteストア（純粋ロジック。LLM・プロセス起動なし）
 │   ├── task-dispatch/        # 決定的ディスパッチャ、リース管理、リトライ、並列度制御、Reviewer
 │   ├── task-worker/          # ワーカープロトコル、アダプタ（fake / claude-code / codex / dsh / openai-compat）、Workspace
+│   ├── task-ops/             # 人間の操作（approve / reject / answer / cancel / add / plan / replay）の判断と検証、イベントからの派生値
+│   ├── task-api/             # HTTP/JSON + SSE の API 層（§5.10。GUI の BFF と curl 向け。協調判断はしない）
 │   ├── taskd/                # デーモン本体（ループ、設定読込、ログ）
 │   └── taskctl/              # CLI（add / ls / show / approve / reject / cancel / answer / log / replay / plan ...）
 ├── config/
@@ -188,7 +194,11 @@ pub enum Event {
   `ready_tasks(limit)`（deps全て `done` かつ `status=ready` かつ親Approval充足、`kind != approval`。P-36）,
   `apply_transition(_with_events)(task_id, trigger, events)`, `complete_plan(plan_id, verdicts, children, accept_children)`。
 - **状態を変更する操作は、変更後の `Event::Transitioned` と関連イベント（`WorkerFinished`, `ReviewVerdict`, `ApprovalDecided`, `Answered` …）の追記、および §4.2 の伝播まで含めて同一トランザクションで行う**（P-16）。
-- マイグレーションは `migrations/NNNN_*.sql` を起動時に適用。
+- GUI / API のための読み取り（ADR-0013）: `events_since(after_id, limit)`（`events` のグローバル単調 id による全タスク横断の追尾）、
+  `list_page(filter, order, cursor, limit)`（keyset ページング）、`count_by_status()`。
+- マイグレーションは `migrations/NNNN_*.sql` を起動時に適用し、`schema_migrations` 表で版数を管理する。バイナリの知らない新しい版数の DB は
+  開かない（`SchemaTooNew`）。接続は WAL・明示的な busy_timeout・`synchronous=NORMAL`（ディスパッチャ・API・`taskctl` の同時アクセスのため。
+  WAL はネットワークファイルシステム上では使えないので DB はローカルディスクに置く）。
 
 ### 5.2 Dispatcher (`task-dispatch`)
 
@@ -317,6 +327,28 @@ taskctl worker run --config <taskd.toml> --task <id> [--provider <id> | --adapte
 - `running` / `reviewing` のタスクは `--workspace` 無しでは拒否する（デーモンの run と作業ディレクトリを取り合わないため）。確認用途では `--workspace` にコピーを指定することを推奨する。
 - 出力は `progress:` / `artifact:` を逐次、最後に `result: <終端メッセージの JSON>`。exit code は done=0、question=3、error=4、タスクやプロバイダの不在=1、引数の構文誤り=2、SIGINT / SIGTERM による中断=130（ワーカーのプロセスを kill してから終わる）。
 
+`taskctl` の操作の判断と検証は `task-ops`（§5.10 の API と共有）にあり、`taskctl` は引数解析と出力整形だけを持つ（ADR-0013 D7）。
+
+### 5.10 API 層（`task-api`。ADR-0013）
+
+Web GUI（別プロジェクト `taskd-gui`。Remix のサーバが BFF として呼ぶ）と `curl` のための HTTP API。仕様の詳細は `docs/gui/api.md`、
+型の JSON Schema は `docs/api/v1/*.schema.json`（コミットし、生成との一致をテストする）。
+
+- **位置**: taskd のデーモンプロセス内で、設定 `[api]`（`listen`、`token_file`、`allowed_hosts`）があるときだけリッスンする（既定は無効）。
+  API は自分専用の SQLite 接続を使う。taskd が止まっている間は API も無い（`taskctl` は従来どおり DB を直接使える）。
+- **形**: `/api/v1`、HTTP/JSON、エラーは `application/problem+json`。一覧は keyset ページング。変更系は `expected_status` による楽観的検査。
+  通知は SSE（`events` のグローバル id をカーソルにし、`Last-Event-ID` で再開。taskctl の書き込みも同じ経路で届く）。gRPC / WebSocket は使わない。
+- **協調判断をしない**: 読み取りはストアのクエリ、状態変更は `task-ops` → `TaskStore::apply_transition(_with_events)` / `create_task` だけ。
+  LLM 呼び出し、ワーカーの起動、`Check::Command` の実行はしない（原則 1〜4）。
+- **デーモンの状態**: ディスパッチャが tick ごとにメモリ上のスナップショット（実行中の run、プロバイダの cooldown と使用数、承認待ちで延期中、
+  経路なし、最終 tick）を `tokio::sync::watch` で API に渡し、`GET /api/v1/daemon` と SSE で返す。DB には書かない（観測値であり `replay` の対象外）。
+  cooldown は `ProviderPolicy::cooldowns()`（既定実装つき）で取る。
+- **セキュリティ**: 既定のバインドは loopback。loopback 以外では `token_file` 必須（`Authorization: Bearer`）。`Host` を許可リストで検査し、
+  CORS は出さない（ブラウザは taskd を直接呼ばない）。run のログと成果物は、記録済みのパスと ULID 形式の `run_id` を作業ディレクトリに結合して
+  `canonicalize` し、作業ディレクトリ外を返さない。`[[providers]].env` の値とトークンは返さない。
+
+SQLite は WAL・明示的な busy_timeout・スキーマ版数（知らない新しい版の DB は開かない）で、ディスパッチャ・API・`taskctl` の同時アクセスに備える（§5.1、ADR-0013 D5）。
+
 ---
 
 ## 6. 実装フェーズと受け入れ条件
@@ -391,9 +423,27 @@ LLM を使う実機確認は、認証が使える環境ならエージェント�
   4. `evidence` の要素は `criterion` だけでも読め、旧形式（全フィールドあり）も読める
   5. `taskctl worker run` が DB を変えずに 1 タスクを指定したアカウントで実行し、done / question / error の exit code を返す。SIGTERM で exit 130 とともにワーカーのプロセスが終了する
 
+### Phase 9 — GUI のための基盤と HTTP API 層
+
+（人間の依頼により追加。ADR-0013。GUI 本体は別プロジェクト `taskd-gui` で、`run-gphases.sh` により G フェーズとして進める）
+
+- 9a 基盤: SQLite の WAL・busy_timeout・スキーマ版数、`events` のグローバル id と `events_since`、`task-ops` の抽出、`Event` の JSON Schema、
+  `ProviderThrottled` の記録、一覧のページング
+- 9b API: `task-api`（§5.10）、デーモン状態の公開、API 型の JSON Schema、`taskctl show --json`
+- 受け入れ（fake ワーカーとローカル SQLite で再現し、`taskctl replay` 差分ゼロを併せて確認する）:
+  1. 版数 1 の既存 DB を開くと最新の版数に移行し、移行の前後で `events_for` と `taskctl replay` の結果が変わらない。知らない新しい版数の DB は開かない
+  2. ファイル DB が WAL になり、`taskd` の実行中に `taskctl` で書き込んでも `database is locked` にならない
+  3. `taskctl` の全コマンドと e2e が `task-ops` の抽出後も無変更のテストで通る（挙動が変わらない）
+  4. `[api]` が無い設定ではリッスンしない。有効にすると `curl /api/v1/health` が `api_version` と `schema_version` を返す
+  5. API から approve / reject / answer / cancel / タスク作成 / plan を行うと状態機械を通って遷移し、無効な遷移は 409（problem+json）、`expected_status` の不一致は 409
+  6. SSE を購読中に `taskctl add` すると 2 秒以内に `Created` が届き、`Last-Event-ID` で再接続しても取りこぼさない
+  7. fake ワーカーのレート制限シナリオで `GET /api/v1/daemon` に実行中の run とプロバイダの cooldown が現れ、`ProviderThrottled` がイベントに残る
+  8. loopback 以外で `token_file` 無しは設定エラー、許可されない `Host` は 400、作業ディレクトリ外を指す成果物は 403、`env` の値は応答に含まれない
+  9. `docs/api/v1/*.schema.json` が生成結果と一致する
+
 ### 非目標（本プロジェクトではやらない）
 
-Web UI、リモートワークスペースの実装、予算・残量推定、残量推定に基づく複数アカウントの自動切替、マルチユーザ、通知。これらは接続層・供給層の担当。
+Web UI（HTTP API 層は §5.10 で本プロジェクトの範囲。UI は別プロジェクト `taskd-gui`）、リモートワークスペースの実装、予算・残量推定、残量推定に基づく複数アカウントの自動切替、マルチユーザ、通知。これらは接続層・供給層の担当。
 （設定表の順に従う決定的なフォールバック — 並列度の上限・cooldown 中のアカウントを飛ばすこと — は Phase 8 で本プロジェクトの範囲とした。どのアカウントをどれだけ使うかの最適化は供給層が `ProviderPolicy` を差し替えて行う。）
 
 ---

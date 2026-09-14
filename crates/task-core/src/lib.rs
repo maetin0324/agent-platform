@@ -11,5 +11,8 @@ pub use model::{
     Usage, WorkerHint, WorkspaceSpec,
 };
 pub use plan::{MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput};
-pub use store::{SqliteStore, StoreError, TaskStore};
+pub use store::{
+    EventRow, ListFilter, ListOrder, Page, SCHEMA_VERSION, SqliteStore, StoreError, StoreOptions,
+    TaskStore, event_row_schema_value,
+};
 pub use transition::{InvalidTransition, Outcome, StateView, Trigger, transition};

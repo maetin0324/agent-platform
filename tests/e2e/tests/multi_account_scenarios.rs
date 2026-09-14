@@ -231,6 +231,11 @@ fi"#,
     assert_eq!(env.transition_reasons(id), vec!["accept", "dispatch", "requeue", "dispatch", "worker_done", "review_pass"]);
     assert_eq!(env.started_models(id), vec!["model-a", "model-b"]);
     assert_eq!(env.started_providers(id), vec!["acct-a", "acct-b"]);
+    // ADR-0013 D9: A の cooldown の開始が期限と種別つきでイベントに残る。
+    assert!(env.events(id).iter().any(|e| matches!(
+        e,
+        Event::ProviderThrottled { provider, reason, .. } if provider == "acct-a" && reason.as_deref() == Some("throttled")
+    )));
     assert_eq!(std::fs::read_to_string(PathBuf::from(&ws).join("account.txt")).unwrap(), "b");
     env.replay_is_consistent();
 }

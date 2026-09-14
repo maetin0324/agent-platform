@@ -59,7 +59,24 @@ pub struct Config {
     #[serde(default)]
     pub reviewer: ReviewerConfig,
     #[serde(default)]
+    pub api: ApiConfig,
+    #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+}
+
+/// `[api]`（ADR-0013 D3 / D11）: HTTP API 層。`listen` が無ければ API を起動しない（既定）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiConfig {
+    /// 例: `"127.0.0.1:7700"`。
+    #[serde(default)]
+    pub listen: Option<std::net::SocketAddr>,
+    /// Bearer トークンを書いたファイル（前後の空白は除く）。loopback 以外で `listen` するときは必須。相対パスは設定ファイル基準。
+    #[serde(default)]
+    pub token_file: Option<PathBuf>,
+    /// 追加で許可する `Host` ヘッダの値（`localhost` / `127.0.0.1` / `[::1]` とポート付きの形は常に許可）。
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 /// `[reviewer]`（ADR-0010 D9, P-30）: `Check::Reviewer` の判定 run に使う adapter / tier。
@@ -271,6 +288,11 @@ impl Config {
         if cfg.workspace_root.is_relative() {
             cfg.workspace_root = base.join(&cfg.workspace_root);
         }
+        if let Some(token_file) = &cfg.api.token_file
+            && token_file.is_relative()
+        {
+            cfg.api.token_file = Some(base.join(token_file));
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -314,6 +336,15 @@ impl Config {
                 "[reviewer] no provider offers tier {:?}{} for reviewer runs",
                 reviewer.tier,
                 reviewer.adapter.as_deref().map(|a| format!(" with adapter {a:?}")).unwrap_or_default()
+            )));
+        }
+        // ADR-0013 D11: loopback 以外で API をリッスンするならトークンを必須にする。
+        if let Some(listen) = self.api.listen
+            && !listen.ip().is_loopback()
+            && self.api.token_file.is_none()
+        {
+            return Err(ConfigError::Invalid(format!(
+                "[api] listen = {listen} is not a loopback address; token_file is required"
             )));
         }
         // Phase 7 監査: cooldown 0 だと供給側失敗の requeue が毎 tick の再 dispatch になる。
@@ -524,6 +555,36 @@ tiers = ["cheap"]
         let dup = "[[providers]]\nid = \"a\"\nadapter = \"fake\"\n[[providers]]\nid = \"a\"\nadapter = \"fake\"\n";
         let cfg: Config = toml::from_str(dup).unwrap();
         assert!(cfg.validate().unwrap_err().to_string().contains("duplicate provider id"));
+    }
+
+    /// ADR-0013 D3 / D11: `[api]` は既定で無効。loopback 以外はトークンファイル必須。相対パスは設定ファイル基準。
+    #[test]
+    fn api_section_defaults_to_disabled_and_requires_token_off_loopback() {
+        let providers = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
+        let cfg: Config = toml::from_str(providers).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.api.listen.is_none());
+
+        let cfg: Config = toml::from_str(&format!("[api]\nlisten = \"127.0.0.1:7700\"\n{providers}")).unwrap();
+        assert!(cfg.validate().is_ok());
+        let cfg: Config = toml::from_str(&format!("[api]\nlisten = \"[::1]:7700\"\n{providers}")).unwrap();
+        assert!(cfg.validate().is_ok());
+
+        let cfg: Config = toml::from_str(&format!("[api]\nlisten = \"0.0.0.0:7700\"\n{providers}")).unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("token_file is required"));
+        let cfg: Config =
+            toml::from_str(&format!("[api]\nlisten = \"0.0.0.0:7700\"\ntoken_file = \"api.token\"\n{providers}")).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert!(toml::from_str::<Config>("[api]\nbogus = 1\n").is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(&path, format!("[api]\nlisten = \"127.0.0.1:7700\"\ntoken_file = \"secrets/api.token\"\n{providers}")).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            cfg.api.token_file.unwrap(),
+            dir.path().canonicalize().unwrap().join("secrets/api.token")
+        );
     }
 
     #[test]
