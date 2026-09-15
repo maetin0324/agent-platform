@@ -410,6 +410,29 @@ strong = 設計判断（雛形の選択、BFF の骨格、CSRF・認証、配布
   5. `pnpm audit --audit-level=high` が 0 件。`pnpm release` が `dist/taskd-gui-<version>.tar.gz` を作り、空ディレクトリに展開して `pnpm install --prod --frozen-lockfile --offline --ignore-scripts && node server.js` で `/` が 200（Playwright の smoke）
   6. `deploy/taskd-gui.service` と README の導入手順がある。（任意）`docker build` が通る。（実験）Node SEA の試行結果が PROGRESS に記録されている（成否は問わない）
 
+### Phase G6 — 使い方ページ（light, 40）
+
+- 目的: **「この GUI で何ができるか」が画面から分かる**ようにする。taskd の概念（タスクの状態、受け入れ条件、承認、Plan、プロバイダ、run）を
+  GUI の操作と結びつけて説明する。仕様に無い機能は書かない（`docs/taskd-api-v1.md` と `docs/DESIGN.md` の範囲だけ）。
+- 実装:
+  - `/help` ルート（ナビゲーションに「使い方」）。SSR・CSP・a11y は他の画面と同じ規則。新しい依存は足さない。
+  - 内容（この順で節を作り、`id` を付けて `/help#<id>` で飛べるようにする）:
+    1. `#flow` 3 分で分かる流れ: タスクを作る → 承認 → taskd がワーカーを起動 → taskd が受け入れ条件を判定 → done（人間が触るのは承認・回答・取り消しだけ）
+    2. `#screens` 画面ごとの説明: 受信箱 / 一覧 / 詳細 / DAG / プロバイダ / デーモン。「何を見る画面か」「いつ開くか」を 1〜2 文ずつ
+    3. `#acceptance` 受け入れ条件の 4 種類（`command` / `artifact_exists` / `reviewer` / `human`）の使い分けと書き方の例。**判定は taskd が自分で再実行する**こと（ワーカーの自己申告は信じない）を明記
+    4. `#status` 状態の一覧（draft / ready / running / blocked / reviewing / done / failed / cancelled）と、それぞれで人間ができること（`actions` と対応させる）
+    5. `#glossary` 用語集: タスク / run / プロバイダ（アカウント）/ リース / requeue / cooldown / Plan / Approval / 成果物
+    6. `#trouble` 困ったとき: taskd が止まっているときの画面、401 / 403 / 409 / 422 の意味、run のログと成果物の見方、`docs/taskd-requests.md` に書く場面
+  - 受信箱が空のとき（初回起動時）に「使い方を見る」への導線を出す。
+  - 各画面の見出しの隣に `/help#<id>` へのリンク（`?`）を置く。
+- 受け入れ:
+  1. `/help` が 200 で、上の 6 節の見出しと `id` が全て存在する（Playwright）
+  2. ナビゲーションから 1 クリックで開ける。受信箱が空のとき導線が出て、押すと `/help` に遷移する
+  3. `/help` 内のリンク（`/tasks/new`、`/providers` 等）が全て 200（リンク切れが無いことを Playwright で確認）
+  4. `@axe-core/playwright` で `/help` の critical / serious が 0 件、CSP 違反 0 件
+  5. 受け入れ条件・状態・用語の説明が `docs/taskd-api-v1.md` の語と一致している（§5.4 の `actions`、§3.4 の条件の型名、状態名）
+  6. `pnpm lint` / `pnpm typecheck` / `pnpm test` / `pnpm build` / `pnpm e2e` が exit 0、`pnpm gen:types` の差分ゼロ
+
 ## 11. 人間の決定（決定済み）
 
 | # | 事項 | 決定 |
