@@ -2591,6 +2591,13 @@
     },
     "TaskRef": {
       "properties": {
+        "actions": {
+          "description": "今この状態で許される操作（ADR-0015 D4。GUI は §5.4 の規則を再実装しない）。",
+          "items": {
+            "$ref": "#/$defs/Action"
+          },
+          "type": "array"
+        },
         "id": {
           "$ref": "#/$defs/TaskId"
         },
@@ -2608,12 +2615,20 @@
         "id",
         "title",
         "kind",
-        "status"
+        "status",
+        "actions"
       ],
       "type": "object"
     },
     "TaskSummary": {
       "properties": {
+        "actions": {
+          "description": "今この状態で許される操作（ADR-0015 D4）。",
+          "items": {
+            "$ref": "#/$defs/Action"
+          },
+          "type": "array"
+        },
         "adapter": {
           "type": [
             "string",
@@ -2707,7 +2722,8 @@
         "created_at",
         "updated_at",
         "children",
-        "pending_children"
+        "pending_children",
+        "actions"
       ],
       "type": "object"
     },

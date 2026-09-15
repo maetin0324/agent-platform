@@ -5,6 +5,7 @@ pub mod config;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -133,6 +134,53 @@ pub fn provider_lives(config: &Config) -> Vec<ProviderLive> {
             in_use: 0,
         })
         .collect()
+}
+
+/// ADR-0013 D5 の前提（DB はローカルディスク）を破っている場合に警告するための、ネットワーク FS の一覧。
+const NETWORK_FILESYSTEMS: &[&str] = &[
+    "nfs", "nfs4", "cifs", "smb3", "9p", "afs", "ceph", "lustre", "gpfs", "beegfs", "glusterfs",
+];
+
+/// `/proc/self/mountinfo` の内容から、`target` を含む最長一致のマウント点のファイルシステム種別を返す。
+fn filesystem_type_in(mountinfo: &str, target: &Path) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for line in mountinfo.lines() {
+        let Some((before, after)) = line.split_once(" - ") else {
+            continue;
+        };
+        let Some(mount_point) = before.split_whitespace().nth(4) else {
+            continue;
+        };
+        let Some(fstype) = after.split_whitespace().next() else {
+            continue;
+        };
+        if target.starts_with(mount_point) && best.as_ref().is_none_or(|(len, _)| mount_point.len() > *len) {
+            best = Some((mount_point.len(), fstype.to_string()));
+        }
+    }
+    best.map(|(_, fstype)| fstype)
+}
+
+/// ADR-0015 D3: DB がネットワーク FS 上なら警告する（起動は止めない。判定できない環境では何もしない）。
+fn warn_if_db_on_network_filesystem(db: &Path) {
+    let dir = db.parent().unwrap_or(Path::new("."));
+    let Ok(target) = dir.canonicalize() else {
+        return;
+    };
+    let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return;
+    };
+    let Some(fstype) = filesystem_type_in(&mountinfo, &target) else {
+        return;
+    };
+    if NETWORK_FILESYSTEMS.contains(&fstype.as_str()) || fstype.starts_with("fuse.") {
+        tracing::warn!(
+            db = %db.display(),
+            filesystem = %fstype,
+            "the database is on a network filesystem; SQLite WAL needs a local disk (ADR-0013 D5). \
+             Expect stalls, `database is locked` and possible corruption"
+        );
+    }
 }
 
 /// スナップショットの `hostname`: `/proc/sys/kernel/hostname`（Linux）→ `HOSTNAME` → `"unknown"`。
@@ -282,6 +330,7 @@ async fn start_api(config: &Config, listen: SocketAddr, dispatcher: &mut Dispatc
 
 /// デーモン本体。`[api]` があれば同じランタイムで HTTP API も動かし、tick ループの終了時に止める。
 pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> {
+    warn_if_db_on_network_filesystem(&config.db);
     let mut dispatcher = build_dispatcher(&config)?;
     let api = match config.api.listen {
         Some(listen) => Some(start_api(&config, listen, &mut dispatcher).await?),
@@ -301,9 +350,16 @@ async fn tick_loop(dispatcher: &mut Dispatcher, config: &Config, opts: RunOption
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    // ADR-0015 D2: tick の所要時間を測り、遅い tick を警告する（止まっているのがディスパッチャか API かの切り分け用）。
+    let slow_tick = std::cmp::max(Duration::from_secs(1), tick * 2);
     loop {
+        let tick_started = std::time::Instant::now();
         let report: TickReport = dispatcher.tick()?;
+        let tick_elapsed = tick_started.elapsed();
         ticks += 1;
+        if tick_elapsed >= slow_tick {
+            tracing::warn!(ticks, duration_ms = tick_elapsed.as_millis() as u64, ?report, "slow tick");
+        }
         if report.reclaimed + report.dispatched + report.finished + report.reviewed > 0 {
             tracing::info!(ticks, ?report, "tick");
         } else {
@@ -391,6 +447,16 @@ model = "fake"
         assert_eq!(lives[1].model.as_deref(), Some("adapter-default-model"));
         assert_eq!((lives[0].adapter.as_str(), lives[0].concurrency, lives[0].in_use), ("claude-code", 1, 0));
         assert!(!hostname().is_empty());
+
+        // ADR-0015 D3: マウント点の最長一致でファイルシステム種別を引く。
+        let mountinfo = "\
+25 30 0:24 / / rw,relatime shared:1 - ext4 /dev/mapper/root rw
+26 25 0:52 / /home rw,relatime shared:2 - nfs4 server:/home rw,vers=4.2
+27 26 0:53 / /home/u/local rw,relatime shared:3 - ext4 /dev/sdb1 rw";
+        assert_eq!(filesystem_type_in(mountinfo, Path::new("/var/lib/taskd")).as_deref(), Some("ext4"));
+        assert_eq!(filesystem_type_in(mountinfo, Path::new("/home/u/workspace")).as_deref(), Some("nfs4"));
+        assert_eq!(filesystem_type_in(mountinfo, Path::new("/home/u/local/db")).as_deref(), Some("ext4"));
+        assert_eq!(filesystem_type_in("garbage", Path::new("/home")), None);
 
         // ADR-0013 D11: /config の要約には env のキー名だけが載り、値は載らない。
         let view = config_view(&cfg, "127.0.0.1:7710".parse().unwrap());

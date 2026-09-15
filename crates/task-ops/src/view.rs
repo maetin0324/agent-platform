@@ -39,6 +39,8 @@ pub struct TaskRef {
     pub title: String,
     pub kind: TaskKind,
     pub status: Status,
+    /// 今この状態で許される操作（ADR-0015 D4。GUI は §5.4 の規則を再実装しない）。
+    pub actions: Vec<Action>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -60,6 +62,8 @@ pub struct TaskSummary {
     pub backoff_until: Option<String>,
     pub children: u32,
     pub pending_children: u32,
+    /// 今この状態で許される操作（ADR-0015 D4）。
+    pub actions: Vec<Action>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -187,6 +191,7 @@ pub fn task_ref(task: &Task) -> TaskRef {
         title: task.title.clone(),
         kind: task.kind,
         status: task.status,
+        actions: actions(task),
     }
 }
 
@@ -298,6 +303,7 @@ pub(crate) fn build_task_summary(
         backoff_until: backoff_until_str(task, ctx, now),
         children,
         pending_children,
+        actions: actions(task),
     }
 }
 

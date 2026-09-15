@@ -19,9 +19,16 @@ use crate::state::ApiState;
 
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 const HEALTH_PATH: &str = "/api/v1/health";
+const STREAM_PATH: &str = "/api/v1/stream";
+/// これ以上かかった要求は `warn` で記録する（ADR-0015 D1）。SSE は対象外。
+const SLOW_REQUEST: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(crate) async fn guard(State(state): State<ApiState>, req: Request, next: Next) -> Response {
     let request_id = Ulid::new().to_string();
+    // ADR-0015 D1: 所要時間を測る。パス以外（クエリ・本体）は記録しない。
+    let started = std::time::Instant::now();
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
     let mut response = match check_request(&state, &req) {
         Ok(()) => next.run(req).await,
         Err(problem) => problem.into_response(),
@@ -34,6 +41,14 @@ pub(crate) async fn guard(State(state): State<ApiState>, req: Request, next: Nex
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         headers.insert(X_REQUEST_ID, value);
+    }
+    let elapsed = started.elapsed();
+    let duration_ms = elapsed.as_millis() as u64;
+    let status = response.status().as_u16();
+    if elapsed >= SLOW_REQUEST && path != STREAM_PATH {
+        tracing::warn!(%request_id, %method, %path, status, duration_ms, "slow api request");
+    } else {
+        tracing::debug!(%request_id, %method, %path, status, duration_ms, "api request");
     }
     response
 }
