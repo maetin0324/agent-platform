@@ -9,7 +9,7 @@
 |---|---|---|---|
 | G0 | 骨組みと前提の確定 | **DONE** | 2026-09-15 |
 | G1 | 読み取りとストリーム | **DONE** | 2026-09-15 |
-| G2 | 操作 | 未着手 | — |
+| G2 | 操作 | **DONE** | 2026-09-15 |
 | G3 | ログ・成果物・DAG | 未着手 | — |
 | G4 | プロバイダとデーモン | 未着手 | — |
 | G5 | 認証・配布・仕上げ | 未着手 | — |
@@ -28,11 +28,19 @@ G1 の未解決事項（下記）のうち、G2 着手前に効いてくるも�
 - G0-P1: `docs/DESIGN.md` §0 / §10 の「React 19.3」は「React 19.2 以上（cooldown 7 日を満たす最新）」と読み替えた（ADR-0003 D2）。文言を「19.2+」にすると実態と合う。
 - G0-P2: `docs/DESIGN.md` §10 Phase G0 の「shadcn/ui（`-t react-router`）」: `shadcn init -t react-router` は新規プロジェクト生成用で、既存プロジェクトには `components.json` を置くだけでよい。G0 の記述を「`components.json` と `lib/utils.ts` を置く」に緩めるとよい（ADR-0003 D8）。
 - G1-P1: `docs/DESIGN.md` §6.3 の 3「`task.event` / `daemon` を受けたら再検証（250ms デバウンス）」は、`daemon` が毎 tick 届く前提と併せて読むと「一定間隔ごとに必ず 1 回発火するスロットル」だと明記した方が誤解が無い（素朴な trailing debounce だと `tick_ms < debounceMs` のとき永久に発火しないライブロックになる。ADR-0004 D2 で実装済みだが DESIGN 本文には無い）。
+- G2-P1: `docs/DESIGN.md` §8.2「CSRF … React Router の middleware で実装」は、React Router 8 が document request の変更系に対して middleware より前に独自の Origin 検査を行い
+  **400** を返すため、そのままでは受け入れ条件 7（403）を満たせない。「Express 層（`server/app.ts`）で 403、`.data` request は root middleware」と書き換えるのが実態に合う（ADR-0005 D1）。
+- G2-P2: `docs/DESIGN.md` §6.3 の 2「`TransitionResult` を flash に載せて」は、クッキーのセッションではなく action の戻り値（`actionData`）で実現した（ADR-0005 D2）。
+  併せて「action が 4xx を返したときも loader を再検証する（React Router の既定は再検証しない）」を §4.3 の「409 は再取得」の実装上の注意として明記するとよい。
+- G2-P3: `docs/DESIGN.md` §4.4「GUI 側の検証は『必須欄が空』程度に留め」は、`required` を付けると taskd の 422 文言が一度も見えず受け入れ条件 5 と両立しない。「GUI 側の検証はしない」に寄せる（ADR-0005 D5）。
+- G2-P4: `docs/DESIGN.md` §10 Phase G2 の受け入れ条件 1「親タスクが SSE 経由で `done` に変わる」に時間の上限が無い。条件 5 と同様に上限（例: 30 秒）を書くと e2e の判定が一意になる。
+  また条件 3「回答 → `ready`」は fake ワーカーがすぐ拾って再び `blocked` になるため、判定は `TransitionResult.to` と `answered` イベントで行った旨を明記するとよい。
 - G1-P2: `docs/DESIGN.md` §6.5「500 にしない」は React Router の本番ビルドが素の `Error` を ErrorBoundary に渡す前に汎用 500 へサニタイズすることと衝突しやすい（ADR-0004 D6）。「loader は taskd のエラーを `Response` として投げること」と実装上の注意を明記すると、次に同じ罠を踏まずに済む。
 
 ## taskd への依頼（`docs/taskd-requests.md` の要約）
 
-（なし）
+- R1（G2、調査依頼・BLOCKED ではない）: ブラウザ + SSE 中継が接続している間、変更系 `POST` の直後に taskd の tick が 10〜30 秒止まる現象を e2e で 5 回観測
+  （API 単体の curl では再現しない）。詳細と証拠は `docs/taskd-requests.md` R1。
 
 ## 節の書式（各フェーズで使う）
 
@@ -220,3 +228,85 @@ G1 の未解決事項（下記）のうち、G2 着手前に効いてくるも�
 ### taskd への依頼
 - なし。`GET /inbox`・`GET /tasks`・`GET /tasks/{id}`・`GET /tasks/{id}/events`・`GET /stream` は `docs/taskd-api-v1.md` の記載どおりに動作した
   （フィールド名・ページング・SSE のイベント種別・エラー形状のいずれも文書と実挙動が一致）。
+
+## Phase G2 — DONE（2026-09-15）
+
+### 成果物
+- 状態変更: `app/taskd/actions.server.ts`（フォーム → `POST /tasks/{id}/{approve|reject|answer|cancel}` の本文の写し `applyTransition`、`readTransitionForm`、`toActionError`（problem+json → `ActionError`）、`transitionData`）、
+  `app/taskd/route-actions.server.ts`（各ルートの action 本体 `runTaskAction` / `runInboxAction`（`task_id` 複数を直列）/ `createTask` / `createPlan` / `runReplay`）、
+  `app/taskd/action-types.ts`（`TransitionOutcome` / `ActionError` / `CreateFailure` / `ReplayOutcome`。クライアントからも import 可）、`app/taskd/forms.ts`（純粋な `formString`）。
+- 画面: `app/routes/tasks.$id.tsx`（操作節: `detail.actions` にある操作だけフォームを出す。hidden `intent` / `expected_status`=描画時の status、approve/reject の note、answer の質問文と回答欄、cancel）、
+  `app/routes/inbox.tsx`（承認待ち: note + 承認/却下、質問: 回答、draft: 受け入れ/取り消し/「この Plan の子を全部受け入れ」（原子性なしを明記）、注意: 取り消し）、
+  `app/routes/tasks.new.tsx`（`NewTaskSpec` と 1:1 のフォーム。受け入れ条件ビルダー、depends_on の候補チェックボックス + 自由入力欄、422 の `errors[]` をフィールド下に）、
+  `app/routes/plans.new.tsx`（`NewPlanSpec` のフォーム、`GET /config` の `plan_auto_accept` の説明）、`app/routes/daemon.tsx`（`GET /daemon` + `GET /config` の表示と replay ボタン。G2 の最小限、本格版は G4）、
+  `app/components/Flash.tsx`（`TransitionFlash`（`cascaded` の id をリンクで列挙）/ `ErrorFlash`（409 は「状態が変わりました」）/ `FieldErrors`）、`app/lib/revalidate.ts`（4xx の action 後も再検証）。
+- セキュリティ: `app/middleware/security.server.ts` に `csrfViolation`（純粋関数）/ `csrfCheck`（root middleware、`.data` request 用）/ `expressCsrfGuard`（Express 層、document request 用。React Router 組み込みの 400 より前に 403）。
+  `server/app.ts` に `expressCsrfGuard` を登録。`app/root.tsx` の middleware を `[hostCheck, csrfCheck, securityHeaders]` に。ナビゲーションに「新規タスク」「新規 Plan」「デーモン」。
+- テスト: 単体 7 ファイル 55 件を追加（`actions` 15、`security.csrf` 10、`tasks.new` 9、`plans.new` 5、`tasks.detail.action` 7、`inbox.action` 4、`daemon` 5）。`e2e/g2.spec.ts`（8 シナリオ = 受け入れ条件 1〜8）。
+  `e2e/g0.spec.ts` に `beforeAll`（`basic` が 7710 を掴んだままでも `dev` を起動できるように）。
+- 文書: `docs/adr/0005-g2-decisions.md`（D1〜D7）、`docs/taskd-requests.md` R1（調査依頼）。
+
+### 受け入れ条件と証拠（docs/DESIGN.md §10 Phase G2。`pnpm e2e` の `e2e/g2.spec.ts`、実 taskd `basic` + fake ワーカー並走）
+1. **受信箱で Approval を note 付きで承認 → `approval_decided`（approved: true、note）、親が SSE 経由で `done`、`replay` 0 mismatches** — `g2.spec.ts:80` pass（34.3s）。
+   受信箱の `approval-note` に `looks good from the GUI` を入れ `approval-approve` → flash `flash-to`=`done`、`approval-item` 0 件。`GET /tasks/<approval-id>/events` に
+   `{type: approval_decided, approved: true, note: "looks good from the GUI"}`、`GET /tasks/<approval-id>` の status `done`。別タブで開いていた親 Human-B の `task-status` が
+   リロード無しで `reviewing` → `done`（このランでは約 30 秒。G2-U1 の停止に当たった。停止しないランは 0.5 秒）。`taskctl basic replay` → `0 mismatches`。
+2. **2 つのページで同じ Approval を開き、片方で承認 → もう片方は「状態が変わりました」（409）、状態は不変** — `g2.spec.ts:127` pass（2.9s）。専用の Approval（`kind=approval`、`ready`）を作り、
+   古いタブ（`/events` を abort して再検証を止めたもの）と新しいタブで開く。新しいタブで承認 → `done`。古いタブで承認 → `flash` の `data-flash-kind=error`、`flash-conflict` に「状態が変わりました」、
+   `data-flash-code` は `conflict`。action 後の再検証で古いタブも `done` 表示。`approval_decided` は 1 件のまま。
+3. **blocked に回答 → `ready`、`answered` の `question` が画面の質問文と一致** — `g2.spec.ts:167` pass（1.5s）。Blocked-C の詳細で `action-question` の文（`which environment should this target?`）を読み、
+   `action-answer` に回答 → flash `blocked` → `ready`。`GET /tasks/<id>/events` の最後の `answered` の `answer` が入力値、`question` が画面の文に含まれる。
+4. **後続を持つ `ready` を cancel → flash に `cascaded` の後続 id、後続が `cancelled`（`dependency_failed`）** — `g2.spec.ts:192` pass（1.4s）。draft の依存先 → それに依存する `ready`（Cancel-Target-G2）→ その後続 `ready`（Downstream-G2）を
+   taskctl で作り、GUI で Cancel-Target-G2 を取り消し → `flash-to`=`cancelled`、`flash-cascaded-id` = [Downstream-G2 の id]。API で Downstream-G2 は `cancelled`、最後の `transitioned` が `reason: dependency_failed`。
+5. **作成フォーム: 条件ゼロ → 422 文言そのまま、存在しない depends_on → `dependency <id> does not exist`、正しい入力 → `draft` → 承認 → 30 秒以内に `done`** — `g2.spec.ts:253` pass（3.9s）。
+   `field-error-acceptance` に `at least one acceptance criterion is required (--accept, --check-cmd, --check-artifact, or --check-reviewer)`、flash の `data-flash-code=validation`。
+   `depends_on_extra` に `01HZZZZZZZZZZZZZZZZZZZZZZZ` → `field-error-depends_on` に `dependency 01HZZZZZZZZZZZZZZZZZZZZZZZ does not exist`。正しい入力 → `/tasks/<ULID>` に遷移、`task-status`=`draft` →
+   `action-approve` → flash `ready` → `task-status` がリロード無しで `done`（このランでは約 3 秒。停止に当たったランでは 26.3 秒で通過）。
+6. **Plan フォーム → `draft` の Plan。`plan.auto_accept = false` の説明** — `g2.spec.ts:294` pass（1.4s）。`plan-auto-accept` に `plan.auto_accept = false` と「draft」、空 goal → `field-error-goal` に `goal must not be blank`、
+   goal 入力 → `/tasks/<id>` で `task-kind`=`plan`、`task-status`=`draft`（API でも同じ）。
+7. **`curl -X POST -H 'Origin: http://evil.example' -d 'intent=cancel' http://127.0.0.1:7700/tasks/<id>` が 403、状態不変** — `g2.spec.ts:319` pass（234ms）。draft を 1 件作り、curl の `%{http_code}` = `403`、
+   `Sec-Fetch-Site: cross-site` でも `403`、API の status は `draft` のまま。（React Router 組み込みの検査だと 400 になるため Express 層で 403 にした。ADR-0005 D1）
+8. **デーモン画面の replay → `0 mismatches`** — `g2.spec.ts:381` pass（857ms）。`/daemon` の `daemon-pid` 表示、`replay-button` → `replay-result` に `0 mismatches across N tasks`（`taskctl replay` の N と一致）。
+
+### 共通条件
+- `pnpm lint` exit 0（`Checked 61 files`）/ `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0 / `pnpm test` **91 passed**（13 ファイル。G1 までの 36 + G2 の 55）/ `pnpm build` exit 0
+- `pnpm gen:types && git diff --exit-code app/taskd/types.ts` 差分ゼロ（exit 0）
+- `pnpm e2e`: **間欠的に失敗する**（G2-U1）。実測: 単独セッションでの初回フルラン 21 passed (1.6m) exit 0。auditor による 2 回のフルランでは 20 passed/1 failed・19 passed/2 failed
+  （落ちたのは受け入れ条件 1 または 5。原因はいずれも `POST .../.data` 直後に taskd への `GET .../.data` が `503`（15 秒タイムアウト）で応答し、その後 taskd が復帰するというもの）。
+  自分の再検証でも 1 回で 20 passed/1 failed（条件 5 の `flash-to`="ready" が 5 秒以内に出ない。BFF ログで `GET .../.data status:503 ms:15005.8` を確認）。
+  3 回中 3 回とも GUI 側の契約違反（トークン露出・`/stream` の放置・SQLite アクセス等）は見当たらず、`docs/taskd-requests.md` R1（taskd 側の間欠停止）に一致する。
+  条件を単独実行すれば通る（例: `pnpm e2e -g "受け入れ条件 5"` は 3.5s で pass）。
+
+### 監査結果
+- auditor の判定: **条件付き可**（「不可」ゼロ）。受け入れ条件 1〜8 は全て「満たしている」（auditor 自身が `lint`/`typecheck`/`test`/`build`/`gen:types` 差分ゼロと、`pnpm e2e` を 2 回フル実行、
+  さらに条件 5 のみの単独実行で確認）。禁止事項（SQLite・crate 依存・仕様外挙動・ブラウザ直接呼び出し・トークン露出・`dangerouslySetInnerHTML`/CDN・テストの外部ネットワーク・版固定）は「重い違反は無し」。
+- 条件と対応:
+  1. 「`pnpm e2e` の間欠失敗を PROGRESS の証拠欄に反映する」→ **対応済み**（上の「共通条件」に実測を記載。G2-U1 として記録済みのものと一致することを確認）。
+  2. 「G2 のコミットを G3 の変更と混ぜない」→ **対応済み**。監査時点で作業ツリーに G3 の途中成果（`app/routes.ts` が未作成の `tasks.$id.runs.$runId.tsx` を参照）が混在し `pnpm build` が失敗する状態だったため、
+     G3 分（新規ファイル・`package.json`/`pnpm-lock.yaml`・`app/routes.ts`/`app/root.tsx`/`app/routes/tasks.$id.tsx` への追加分）を一時的に退避し、G2 のみの状態で
+     `lint`/`typecheck`/`test`（91 passed）/`build`/`gen:types`（差分ゼロ）/`e2e` を再実行してから本コミットを作成した。
+  3. 軽微な指摘（`inbox.tsx` の attention 区画での cancel 可否判定の GUI 側再実装、作成フォームの既定値の焼き込み）→ 下の「未解決事項」に記載（実装変更は必須とされていない）。
+
+### 未解決事項
+- **G2-U1: e2e 中の taskd の間欠的な停止**（`docs/taskd-requests.md` R1）— ブラウザ + SSE 中継が接続している間、変更系 `POST` の直後に taskd の tick・SSE・（時に）API が 10〜30 秒止まる。
+  監査を含め計 5 回の e2e フルランで複数回観測（条件 1 / 3 / 5 のどこかに当たる。単独実行では再現しない）。API 単体の curl、GUI 経由 SSE 3〜4 本、`.data` 連打では再現しない。GUI 側の契約違反は見つからず
+  （上流 `/stream` は 8 秒以内に閉じる、SQLite は開かない）。受け入れ条件 1 の e2e の待ちを 60 秒にしてある。条件 5（30 秒）は通ることも落ちることもある（taskd の停止時間次第）。
+- **G2-U6: `inbox.tsx` の attention 区画の cancel 判定を GUI が再実装している**（auditor 指摘）— `app/routes/inbox.tsx` が `item.task.status` を見て `!== done/failed/cancelled` を
+  自前で判定し cancel ボタンの表示を決めている（`docs/taskd-api-v1.md` §5.4 の「非終端」規則の GUI 側再実装。`Inbox` 型に `actions` が無いための回避）。原則に忠実にするなら、
+  押して 409 を見せる（他区画と同じ扱いにする）か、taskd に `Inbox` への `actions` 追加を依頼するのが良い。次フェーズ以降で検討する。
+- **G2-U7: 作成フォームの既定値の焼き込み**（auditor 指摘）— `tasks.new.tsx`/`plans.new.tsx` が `max_turns=30`/`max_wall_secs=900`/`max_retries=1`/`kind=execute`/`tier=standard` を
+  `defaultValue` として常に明示送信しており、ADR-0005 D5「空欄は本文から省いて taskd の既定を使う」と不整合（taskd 側の既定が変わっても GUI 経由の作成だけ旧値のままになる）。次フェーズで解消を検討する。
+- **G2-U2: デーモン画面は最小限** — `in_flight` 等は件数のみ、遅延判定・経過時間・停止/復旧バナー・`awaiting_human` / `unroutable` の照合は G4（ADR-0005 D6）。
+- **G2-U3: 受信箱の「この Plan の子を全部受け入れ」は単体テストのみ** — e2e では Plan の draft 子 2 件を GUI で一括受理するシナリオを入れていない（受け入れ条件に無い）。
+- **G2-U4: CSRF 検査の入口が 2 つ** — Express 層（document request）と root middleware（`.data` request）。規則は `csrfViolation` の 1 か所だが、G5 で認証（セッションクッキー）を入れるときに
+  Express 層へ寄せるか再検討する（G0-U の Host 検査の適用範囲と同じ論点）。
+- **G2-U5: `TaskdClient` のタイムアウト 15 秒** — G2-U1 の停止に当たると loader が 503 `unavailable` を投げ、画面が「taskd に接続できません」に切り替わる（root の 5 秒再検証で復帰する）。
+  停止の原因が分かるまでは変えない。
+- G1 からの引き継ぎ（G1-U1 SSE 常時再検証の負荷、G1-U2 仮想スクロールと行数一致テスト、G1-U3 接続断表示、G1-U4 `@testing-library/react` 未導入）と G0 からの引き継ぎ（`/assets` の Host 検査、`pnpm dev` の CSP）は
+  G2 では対処していない。G1-U4 は G2 でも不要だった（フォームの DOM 検証は Playwright、単体は純粋関数と mock-taskd）。
+
+### 提案
+- 上の「提案」節の G2-P1（CSRF の実装層）、G2-P2（flash と 4xx 後の再検証）、G2-P3（GUI 側の検証はしない）、G2-P4（受け入れ条件 1 の時間上限と条件 3 の判定方法）。
+
+### taskd への依頼
+- R1（調査依頼）: 上記 G2-U1。`docs/taskd-requests.md` R1 に現象・証拠・再現しない条件・依頼内容を記載。要求ごとのログ（`X-Request-Id`・所要時間）が taskd 側にあると切り分けやすい。

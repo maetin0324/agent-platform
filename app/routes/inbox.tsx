@@ -1,7 +1,10 @@
-import { Link } from "react-router";
+import { data, Form, Link, useNavigation } from "react-router";
+import { TransitionFlash } from "~/components/Flash";
+import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { isTaskdUnavailable, taskdErrorResponse } from "~/taskd/errors";
+import { runInboxAction } from "~/taskd/route-actions.server";
 import type { AttentionItem, Inbox } from "~/taskd/types";
 import type { Route } from "./+types/inbox";
 
@@ -26,12 +29,24 @@ export async function loadInbox(client: TaskdClient, request: Request): Promise<
 }
 
 /** `/`（受信箱、docs/DESIGN.md §4.1）。 */
+// 409 / 422 の action 後も再検証する（docs/adr/0005 D2）。
+export const shouldRevalidate = revalidateAfterActionErrors;
+
 export async function loader({ request }: Route.LoaderArgs): Promise<Inbox | null> {
   return loadInbox(getTaskdClient(), request);
 }
 
-export default function InboxPage({ loaderData }: Route.ComponentProps) {
+export async function action({ request }: Route.ActionArgs) {
+  const form = await request.formData();
+  const outcomes = await runInboxAction(getTaskdClient(), form, request.signal);
+  const status = outcomes.every((o) => o.ok) ? 200 : (outcomes.find((o) => !o.ok)?.error.status ?? 500);
+  return data(outcomes, { status });
+}
+
+export default function InboxPage({ loaderData, actionData }: Route.ComponentProps) {
   const inbox = loaderData;
+  const navigation = useNavigation();
+  const submitting = navigation.state !== "idle";
   if (!inbox) {
     return (
       <p className="text-sm text-gray-500" data-testid="inbox-unavailable">
@@ -41,6 +56,10 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
   }
   return (
     <div className="space-y-8">
+      {actionData?.map((o) => (
+        <TransitionFlash key={`${o.taskId}-${o.intent}`} outcome={o} />
+      ))}
+
       <section aria-labelledby="approvals-heading" data-testid="approvals-section">
         <h2 id="approvals-heading" className="text-lg font-semibold">
           承認待ち（{inbox.counts.approvals}）
@@ -82,6 +101,39 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
                     以前の判定: {item.previous_decisions.map((d) => (d.approved ? "承認" : "却下")).join(", ")}
                   </p>
                 )}
+                <Form method="post" className="mt-2 flex flex-col gap-1">
+                  <input type="hidden" name="task_id" value={item.approval.id} />
+                  <input type="hidden" name="expected_status" value="ready" />
+                  <textarea
+                    name="note"
+                    data-testid="approval-note"
+                    rows={2}
+                    className="rounded border px-2 py-1 text-sm"
+                  />
+                  <p className="text-xs text-gray-500">却下の note は次の run の prior_review に届きます。</p>
+                  <div className="flex gap-2">
+                    <button
+                      type="submit"
+                      name="intent"
+                      value="approve"
+                      disabled={submitting}
+                      data-testid="approval-approve"
+                      className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                    >
+                      承認
+                    </button>
+                    <button
+                      type="submit"
+                      name="intent"
+                      value="reject"
+                      disabled={submitting}
+                      data-testid="approval-reject"
+                      className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                    >
+                      却下
+                    </button>
+                  </div>
+                </Form>
               </li>
             ))}
           </ul>
@@ -108,6 +160,25 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
                   </Link>
                 </p>
                 <p data-testid="question-text">{item.question}</p>
+                <Form method="post" className="mt-2 flex flex-col gap-1">
+                  <input type="hidden" name="task_id" value={item.task.id} />
+                  <input type="hidden" name="expected_status" value="blocked" />
+                  <input type="hidden" name="intent" value="answer" />
+                  <textarea
+                    name="answer"
+                    data-testid="question-answer"
+                    rows={3}
+                    className="rounded border px-2 py-1 text-sm"
+                  />
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    data-testid="question-answer-submit"
+                    className="w-fit rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                  >
+                    回答する
+                  </button>
+                </Form>
               </li>
             ))}
           </ul>
@@ -136,13 +207,58 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
                 {group.plan_summary && <p className="text-gray-600">{group.plan_summary}</p>}
                 <ul className="mt-2 space-y-1">
                   {group.drafts.map((draft) => (
-                    <li key={draft.id} data-testid="draft-item">
+                    <li key={draft.id} data-testid="draft-item" className="flex flex-col gap-1">
                       <Link to={`/tasks/${draft.id}`} className="hover:underline">
                         {draft.title}
                       </Link>
+                      <Form method="post" className="flex gap-2">
+                        <input type="hidden" name="task_id" value={draft.id} />
+                        <input type="hidden" name="expected_status" value="draft" />
+                        <button
+                          type="submit"
+                          name="intent"
+                          value="approve"
+                          disabled={submitting}
+                          data-testid="draft-approve"
+                          className="rounded border px-2 py-0.5 text-xs disabled:text-gray-400"
+                        >
+                          受け入れ
+                        </button>
+                        <button
+                          type="submit"
+                          name="intent"
+                          value="cancel"
+                          disabled={submitting}
+                          data-testid="draft-cancel"
+                          className="rounded border px-2 py-0.5 text-xs disabled:text-gray-400"
+                        >
+                          取り消し
+                        </button>
+                      </Form>
                     </li>
                   ))}
                 </ul>
+                {group.drafts.length > 0 && (
+                  <Form method="post" className="mt-2 flex flex-col gap-1">
+                    {group.drafts.map((draft) => (
+                      <input key={draft.id} type="hidden" name="task_id" value={draft.id} />
+                    ))}
+                    <input type="hidden" name="expected_status" value="draft" />
+                    <button
+                      type="submit"
+                      name="intent"
+                      value="approve"
+                      disabled={submitting}
+                      data-testid="draft-approve-all"
+                      className="w-fit rounded border px-2 py-0.5 text-xs disabled:text-gray-400"
+                    >
+                      この Plan の子を全部受け入れ
+                    </button>
+                    <p className="text-xs text-gray-500">
+                      子ごとに順に承認します（途中で失敗しても残りは続行、原子性はありません）。
+                    </p>
+                  </Form>
+                )}
               </li>
             ))}
           </ul>
@@ -170,6 +286,21 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
                   </Link>
                 </p>
                 <p>{attentionText(item)}</p>
+                {item.task.status !== "done" && item.task.status !== "failed" && item.task.status !== "cancelled" && (
+                  <Form method="post" className="mt-2">
+                    <input type="hidden" name="task_id" value={item.task.id} />
+                    <input type="hidden" name="expected_status" value={item.task.status} />
+                    <input type="hidden" name="intent" value="cancel" />
+                    <button
+                      type="submit"
+                      disabled={submitting}
+                      data-testid="attention-cancel"
+                      className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                    >
+                      取り消し
+                    </button>
+                  </Form>
+                )}
               </li>
             ))}
           </ul>

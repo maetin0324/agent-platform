@@ -29,6 +29,17 @@ function startDev(): void {
   execFileSync(TASKD_SH, ["start", "dev"], { cwd: REPO_ROOT, stdio: "pipe" });
 }
 
+test.beforeAll(() => {
+  // G1 / G2 の e2e が `basic` を 7710 に残したままだと `start dev` が「別プロセスが応答中」で失敗し、
+  // 受け入れ条件 4 の停止 / 復旧も検証できない。先に止めてから `dev` を（未起動なら）起動する。
+  try {
+    execFileSync(TASKD_SH, ["stop", "basic"], { cwd: REPO_ROOT, stdio: "pipe" });
+  } catch {
+    // 動いていなければ何もしない
+  }
+  startDev();
+});
+
 /** `Host` ヘッダを任意の値にして GET する（Node の http.request なら上書きできる）。 */
 function getWithHost(hostHeader: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {

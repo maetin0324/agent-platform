@@ -5,6 +5,9 @@ export default [
   index("routes/inbox.tsx"),
   route("healthz", "routes/healthz.ts"),
   route("tasks", "routes/tasks.tsx"),
+  route("tasks/new", "routes/tasks.new.tsx"),
   route("tasks/:id", "routes/tasks.$id.tsx"),
+  route("plans/new", "routes/plans.new.tsx"),
+  route("daemon", "routes/daemon.tsx"),
   route("events", "routes/events.ts"),
 ] satisfies RouteConfig;

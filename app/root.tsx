@@ -1,18 +1,22 @@
 import { useEffect } from "react";
 import { isRouteErrorResponse, Links, Meta, Outlet, Scripts, ScrollRestoration, useRevalidator } from "react-router";
+import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { version as guiVersion } from "../package.json";
 import type { Route } from "./+types/root";
 import "./app.css";
 import { useTaskdStream } from "~/hooks/useTaskdStream";
-import { hostCheck, securityHeaders } from "~/middleware/security.server";
+import { csrfCheck, hostCheck, securityHeaders } from "~/middleware/security.server";
 import { useNonce } from "~/nonce";
 import { getTaskdClient } from "~/taskd/client.server";
 import type { TaskdRouteErrorData } from "~/taskd/errors";
 import { loadHealth } from "~/taskd/health.server";
 import type { InboxCounts } from "~/taskd/types";
 
-// 全ルートに効くサーバ middleware（docs/DESIGN.md §8.2）。順序: Host 検査 → nonce とヘッダ。
-export const middleware: Route.MiddlewareFunction[] = [hostCheck, securityHeaders];
+// 全ルートに効くサーバ middleware（docs/DESIGN.md §8.2）。順序: Host 検査 → CSRF 検査（変更系のみ）→ nonce とヘッダ。
+export const middleware: Route.MiddlewareFunction[] = [hostCheck, csrfCheck, securityHeaders];
+
+// 409 / 422 の action 後も再検証する（docs/adr/0005 D2）。
+export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs) {
   const client = getTaskdClient();
@@ -90,6 +94,15 @@ export default function App({ loaderData }: Route.ComponentProps) {
           </a>
           <a href="/tasks" className="hover:underline">
             一覧
+          </a>
+          <a href="/tasks/new" className="hover:underline">
+            新規タスク
+          </a>
+          <a href="/plans/new" className="hover:underline">
+            新規 Plan
+          </a>
+          <a href="/daemon" className="hover:underline">
+            デーモン
           </a>
         </nav>
       </header>

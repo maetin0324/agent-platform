@@ -1,8 +1,12 @@
-import { Form, isRouteErrorResponse, Link, useSearchParams } from "react-router";
+import { Form, isRouteErrorResponse, Link, useNavigation, useSearchParams } from "react-router";
+import { TransitionFlash } from "~/components/Flash";
+import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
+import { transitionData } from "~/taskd/actions.server";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
+import { runTaskAction } from "~/taskd/route-actions.server";
 import type { Action, Event, EventsPage, TaskDetail, TaskRef } from "~/taskd/types";
 import type { Route } from "./+types/tasks.$id";
 
@@ -62,6 +66,9 @@ export function meta(_: Route.MetaArgs) {
   return [{ title: "タスク詳細 - taskd-gui" }];
 }
 
+// 409 / 422 の action 後も再検証する（docs/adr/0005 D2）。
+export const shouldRevalidate = revalidateAfterActionErrors;
+
 export async function loader({ params, request }: Route.LoaderArgs): Promise<TaskDetailData> {
   try {
     return await loadTaskDetail(getTaskdClient(), params.id, request);
@@ -70,11 +77,19 @@ export async function loader({ params, request }: Route.LoaderArgs): Promise<Tas
   }
 }
 
-export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
+export async function action({ request, params }: Route.ActionArgs) {
+  const form = await request.formData();
+  const outcome = await runTaskAction(getTaskdClient(), params.id, form, request.signal);
+  return transitionData(outcome);
+}
+
+export default function TaskDetailPage({ loaderData, actionData }: Route.ComponentProps) {
   const { detail, events } = loaderData;
   const { task } = detail;
   const [searchParams] = useSearchParams();
   const selectedTypes = new Set(searchParams.getAll("types"));
+  const navigation = useNavigation();
+  const submitting = navigation.state !== "idle";
 
   return (
     <div className="space-y-8">
@@ -299,20 +314,92 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
         <h2 id="actions-heading" className="text-lg font-semibold">
           操作
         </h2>
-        <p className="text-sm text-gray-500">操作は Phase G2 で実装します。</p>
-        <div className="mt-2 flex flex-wrap gap-2">
-          {detail.actions.map((action) => (
-            <button
-              key={action}
-              type="button"
-              disabled
-              data-testid={`action-${action}`}
-              className="rounded border px-3 py-1 text-sm text-gray-400"
-            >
-              {ACTION_LABELS[action]}
-            </button>
-          ))}
-        </div>
+        <TransitionFlash outcome={actionData} />
+        {detail.actions.length === 0 ? (
+          <p className="text-sm text-gray-500">できる操作はありません。</p>
+        ) : (
+          <div className="mt-2 flex flex-wrap gap-4">
+            {detail.actions.includes("approve") && (
+              <Form method="post" className="flex flex-col gap-1">
+                <input type="hidden" name="intent" value="approve" />
+                <input type="hidden" name="expected_status" value={task.status} />
+                <textarea
+                  name="note"
+                  data-testid="action-note-approve"
+                  rows={2}
+                  className="rounded border px-2 py-1 text-sm"
+                />
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  data-testid="action-approve"
+                  className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                >
+                  {ACTION_LABELS.approve}
+                </button>
+              </Form>
+            )}
+            {detail.actions.includes("reject") && (
+              <Form method="post" className="flex flex-col gap-1">
+                <input type="hidden" name="intent" value="reject" />
+                <input type="hidden" name="expected_status" value={task.status} />
+                <textarea
+                  name="note"
+                  data-testid="action-note-reject"
+                  rows={2}
+                  className="rounded border px-2 py-1 text-sm"
+                />
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  data-testid="action-reject"
+                  className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                >
+                  {ACTION_LABELS.reject}
+                </button>
+              </Form>
+            )}
+            {detail.actions.includes("answer") && (
+              <Form method="post" className="flex flex-col gap-1">
+                {detail.latest_question && (
+                  <p className="text-sm" data-testid="action-question">
+                    {detail.latest_question}
+                  </p>
+                )}
+                <input type="hidden" name="intent" value="answer" />
+                <input type="hidden" name="expected_status" value={task.status} />
+                <textarea
+                  name="answer"
+                  data-testid="action-answer"
+                  rows={3}
+                  className="rounded border px-2 py-1 text-sm"
+                />
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  data-testid="action-answer-submit"
+                  className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                >
+                  回答する
+                </button>
+              </Form>
+            )}
+            {detail.actions.includes("cancel") && (
+              <Form method="post" className="flex flex-col gap-1">
+                <input type="hidden" name="intent" value="cancel" />
+                <input type="hidden" name="expected_status" value={task.status} />
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  data-testid="action-cancel"
+                  className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                >
+                  {ACTION_LABELS.cancel}
+                </button>
+              </Form>
+            )}
+          </div>
+        )}
       </section>
 
       {detail.worker_run_hint && (
