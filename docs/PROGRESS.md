@@ -1663,3 +1663,51 @@ auditor サブエージェントを 1 回起動した（読み取り専用。Pha
 | # | 対象 | 提案 | 採用まで実装で使う既定 |
 |---|---|---|---|
 | P-45 | DESIGN §4.3 / §5.1 | ADR-0014 を反映する: `WorkerStarted` / `WorkerFinished` の `role`（Reviewer run も記録）、`tasks.objective` 列と一覧検索、タスク作成時の title / objective / parent の検証 | 実装済み（ADR-0014 に記録） |
+
+---
+
+## Phase 9 追補 2 — R1（GUI 接続中の停止）の調査と観測可能性（ADR-0015、2026-09-15）
+
+`taskd-gui` の `docs/taskd-requests.md` R1「ブラウザ + SSE が接続している間、変更系 `POST` の直後に taskd の tick・SSE・API が 10〜30 秒止まる」の調査。
+人間の判断は「taskd 側で調査して直す」。
+
+### 結論: DB がネットワークファイルシステム（NFS）上にあったため
+
+`taskd-gui` の fixture は `.run/<name>/taskd.sqlite3` を使う。`/home` は **NFSv4** で、ADR-0013 D5 の前提（SQLite の WAL はローカルディスク）を破っていた。
+
+| DB の置き場 | G2 の e2e（8 シナリオ）を 3 回 | 遅い tick | 遅い API 要求 |
+|---|---|---|---|
+| NFS（`/home/.../.run`） | 断続的に失敗（1〜2 件 / 回） | **19.3 秒・24.5 秒**（24.5 秒のうち 24.5 秒が `dispatch_ready`） | 0 件 |
+| ローカル ext4（`/local/rmaeda/taskd-gui-run` へ symlink） | **3 回とも 8/8 passed** | 0 件 | 0 件 |
+
+- 止まっていたのは **ディスパッチャの `dispatch_ready`**（リース取得・イベント追記の書き込みトランザクション）で、API 層ではない。
+  1 秒を超えた API 要求は 1 件も記録されていない。GUI が見た「API が 15 秒返らない」は BFF 側のタイムアウトの観測で、その時刻の taskd に遅い要求は無かった。
+- 単独のシナリオ実行（3 回）では再現しない。フルスイート（ブラウザ + SSE + 並列再検証 + NFS への他の I/O）でだけ出る。GUI の報告と一致する。
+- 合成負荷（taskd + taskctl + SSE + ポーリング 3 本を 12 回）では、NFS でも最悪 817 ms（ローカルは 458 ms）で停止には至らなかった。
+
+### 入れた変更（ADR-0015）
+
+- **起動時の警告**: DB がネットワーク FS 上なら `warn`（`/proc/self/mountinfo` の最長一致。同じマウント点に autofs と実体が並ぶ場合は後の行を採る）。
+- **要求ごとの所要時間**: `method` / `path` / `status` / `duration_ms` / `request_id`（既定 `debug`、1 秒超は `warn`）。`GET /stream` は対象外。
+- **tick の所要時間**: `max(1 秒, tick_ms × 2)` 超で `warn`。段階ごとの内訳（`drain` / `reclaim` / `abort` / `recover` / `dispatch` / `idle`）と、
+  `dispatch_ready` の中の段階（`ready_tasks` / `task_dir` / `acquire_lease` / `append_worker_started`）が 500 ms 超なら `warn`。
+- `TaskRef` / `TaskSummary` の `actions`（G2-U6 への対応。ADR-0015 D4）。
+
+### 受け入れの証拠
+
+- `cargo test --workspace`: 406 passed（`actions` 追加後も同数）。clippy 2 種 exit 0。
+- taskd 単体テスト `filesystem_type_in`（マウント点の最長一致、autofs と実体が並ぶ場合）。
+- 実測ログ: `slow tick phases total_ms=24522 dispatch_ms=24517`（NFS）、ローカルでは 3 回の全実行で該当ログ 0 件。
+
+### GUI 側へ返す答え（`taskd-gui` の `docs/taskd-requests.md` R1）
+
+- taskd の不具合ではなく **DB の置き場所**が原因。`.run` をローカルディスクに置けば解消する（実測 3/3 成功）。
+- `scripts/taskd.sh` の `RUN_ROOT` を環境変数で上書きできるようにし、既定をローカルディスク（例 `/local/<user>/taskd-gui-run`）にするのが良い。
+- 調査のため `taskd-gui/.run` は `/local/rmaeda/taskd-gui-run` へのシンボリックリンクにしてある（`.gitignore` 済みで git には出ない）。
+
+### 未解決事項
+
+1. NFS 上で `dispatch_ready` が 20 秒級で止まる正確な機構（ロック待ちか fsync か）は特定していない。ローカルディスクで解消するため深追いしない。
+   再発時は `slow dispatcher step` の内訳で `acquire_lease` / `append_worker_started` のどちらかが分かる。
+2. ディスパッチャの tick は非同期ランタイムのスレッド上で同期的に DB を触るため、遅い I/O では tick の間そのスレッドを占有する（API は別タスクなので影響しない）。
+   `spawn_blocking` に載せる案はあるが、今回の停止は API に波及していないので変えていない。
