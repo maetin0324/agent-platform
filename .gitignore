@@ -1,0 +1,7 @@
+node_modules/
+build/
+.run/
+dist/
+test-results/
+playwright-report/
+.react-router/
