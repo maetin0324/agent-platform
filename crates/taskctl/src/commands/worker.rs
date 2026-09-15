@@ -566,6 +566,8 @@ mod tests {
             reviewer: Default::default(),
             api: Default::default(),
             providers: vec![],
+            providers_include: None,
+            providers_dir: None,
             clusters,
             roles: vec![],
             delegation: Default::default(),

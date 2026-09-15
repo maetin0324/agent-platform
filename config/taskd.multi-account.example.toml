@@ -3,6 +3,12 @@
 # [[providers]] の 1 行 = 1 アカウント。上から順に優先し、並列度の上限に達した行・cooldown 中の行（レート制限・認証失敗・
 # 枯渇の後）は飛ばして次の行を使う（先頭のアカウントを上限まで使い、あふれた分が次のアカウントへ行く）。
 #
+# GUI/API からアカウントを追加・変更・削除したい場合（ADR-0017、Phase 11）は、下のコメントを外して
+# providers_include を設定する。POST/PATCH/DELETE /api/v1/providers... は providers.d/<id>.toml
+# （1 アカウント 1 ファイル、[[providers]] の 1 行と同じ形）を書き、POST /api/v1/reload の後の次の tick から
+# 使われる。管理系エンドポイントは token_file が無くても常に認証を要求するので、使うなら [api] token_file も設定すること。
+# providers_include = "providers.d/*.toml"
+#
 # 事前準備（アカウントごとに 1 回。env の値はシェル展開されないので絶対パスで書く）:
 #   CLAUDE_CONFIG_DIR=/home/USER/.claude-accounts/a claude     # 起動して /login でアカウント A にログイン
 #   CLAUDE_CONFIG_DIR=/home/USER/.claude-accounts/b claude     # 同じくアカウント B

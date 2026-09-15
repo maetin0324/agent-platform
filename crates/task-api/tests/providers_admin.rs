@@ -1,0 +1,162 @@
+//! ADR-0017（Phase 11）: `POST/PATCH/DELETE /providers...` のファイル書き込み部分（`reload`/`check` は taskd 側の
+//! 実行が要るので `tests/e2e/tests/provider_admin_scenarios.rs` で実バイナリを使って検証する）。
+//! ここでは task-api だけで完結する部分 — 認証・検証・409/404・**id のパストラバーサル防止**（監査で発見した穴の回帰テスト）
+//! ・変更系すべてへの `Origin` 拒否（同じく監査で発見した穴の回帰テスト）を確認する。
+
+mod common;
+
+use common::*;
+use serde_json::json;
+
+/// `providers_dir` に使う一時ディレクトリを別に用意する（`TestEnv` 自身の一時ディレクトリとは独立。
+/// 戻り値の `TempDir` を drop すると消えるので、呼び出し側で `TestEnv` と同じスコープに保持すること）。
+fn env_with_providers_dir() -> (TestEnv, tempfile::TempDir, std::path::PathBuf) {
+    let providers_tmp = tempfile::tempdir().expect("tempdir");
+    let dir = providers_tmp.path().join("providers.d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let env = TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        providers_dir: Some(dir.clone()),
+        ..Default::default()
+    });
+    (env, providers_tmp, dir)
+}
+
+fn auth() -> String {
+    format!("Bearer {TOKEN}")
+}
+
+#[tokio::test]
+async fn create_requires_token_validates_id_and_adapter_and_rejects_duplicates() {
+    let (env, _providers_tmp, dir) = env_with_providers_dir();
+    let app = env.router();
+
+    // トークン無しは 401（loopback でも。ADR-0017 D1）。
+    let resp = send(&app, post_json("/api/v1/providers", &json!({"id": "x", "adapter": "fake"}))).await;
+    assert_problem(&resp, 401, "unauthorized");
+
+    let auth = auth();
+    // 不正な id / adapter は 400。
+    let resp = send(&app, post_json_with("/api/v1/providers", &json!({"id": "../x", "adapter": "fake"}), &[("authorization", &auth)])).await;
+    assert_problem(&resp, 400, "bad_request");
+    let resp = send(&app, post_json_with("/api/v1/providers", &json!({"id": "x", "adapter": "bogus"}), &[("authorization", &auth)])).await;
+    assert_problem(&resp, 400, "bad_request");
+
+    // 正常作成。
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/providers",
+            &json!({"id": "acct-b", "adapter": "fake", "env": {"K": "secret-value"}}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_eq!(resp.status, 201, "{}", resp.text());
+    assert_eq!(resp.header("location"), Some("/api/v1/providers/acct-b"));
+    assert_eq!(resp.json()["env_keys"], json!(["K"]));
+    assert!(resp.json().get("env").is_none());
+    assert!(!resp.text().contains("secret-value"));
+    assert!(dir.join("acct-b.toml").exists());
+
+    // 重複 id は 409。
+    let resp = send(&app, post_json_with("/api/v1/providers", &json!({"id": "acct-b", "adapter": "fake"}), &[("authorization", &auth)])).await;
+    assert_problem(&resp, 409, "provider_exists");
+}
+
+/// 監査で発見: `PATCH`/`DELETE` が id の検証を通さず、`..` で `providers_dir` の外のファイルを読み書き・削除できた。
+#[tokio::test]
+async fn patch_and_delete_reject_path_traversal_ids_without_touching_files_outside_providers_dir() {
+    let (env, providers_tmp, dir) = env_with_providers_dir();
+    let app = env.router();
+    let auth = auth();
+
+    // providers_dir の外（親ディレクトリ）に被害者ファイルを置く。
+    let victim = providers_tmp.path().join("victim.toml");
+    std::fs::write(&victim, "id = \"victim\"\nadapter = \"fake\"\nsecret = \"should-not-move\"\n").unwrap();
+
+    for traversal_id in ["..%2Fvictim", "..%2F..%2Fvictim"] {
+        let path = format!("/api/v1/providers/{traversal_id}");
+        let resp = send(&app, patch_json_with(&path, &json!({"concurrency": 2}), &[("authorization", &auth)])).await;
+        assert_problem(&resp, 404, "provider_not_found");
+        let resp = send(&app, delete_with(&path, &[("authorization", &auth)])).await;
+        assert_problem(&resp, 404, "provider_not_found");
+    }
+
+    // 被害者ファイルは無傷、providers_dir の外に何も作られていない。
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "id = \"victim\"\nadapter = \"fake\"\nsecret = \"should-not-move\"\n");
+    assert!(!dir.join("victim.toml").exists());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "providers_dir must stay empty");
+}
+
+#[tokio::test]
+async fn patch_updates_only_given_fields_and_unknown_id_is_404() {
+    let (env, _providers_tmp, dir) = env_with_providers_dir();
+    let app = env.router();
+    let auth = auth();
+    std::fs::write(dir.join("acct-b.toml"), "id = \"acct-b\"\nadapter = \"fake\"\nconcurrency = 1\nmodel = \"m1\"\n").unwrap();
+
+    let resp = send(&app, patch_json_with("/api/v1/providers/acct-b", &json!({"concurrency": 5}), &[("authorization", &auth)])).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let v = resp.json();
+    assert_eq!((v["concurrency"].clone(), v["model"].clone()), (json!(5), json!("m1")), "unspecified fields are kept");
+
+    let resp = send(&app, patch_json_with("/api/v1/providers/does-not-exist", &json!({"concurrency": 2}), &[("authorization", &auth)])).await;
+    assert_problem(&resp, 404, "provider_not_found");
+    let resp = send(&app, delete_with("/api/v1/providers/does-not-exist", &[("authorization", &auth)])).await;
+    assert_problem(&resp, 404, "provider_not_found");
+}
+
+#[tokio::test]
+async fn delete_removes_the_file_and_second_delete_is_404() {
+    let (env, _providers_tmp, dir) = env_with_providers_dir();
+    let app = env.router();
+    let auth = auth();
+    std::fs::write(dir.join("acct-b.toml"), "id = \"acct-b\"\nadapter = \"fake\"\n").unwrap();
+
+    let resp = send(&app, delete_with("/api/v1/providers/acct-b", &[("authorization", &auth)])).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    assert!(!dir.join("acct-b.toml").exists());
+
+    let resp = send(&app, delete_with("/api/v1/providers/acct-b", &[("authorization", &auth)])).await;
+    assert_problem(&resp, 404, "provider_not_found");
+}
+
+/// 監査で発見: `Origin` 拒否が `POST` だけに掛かっていて `PATCH`/`DELETE` を素通りしていた（回帰テスト）。
+#[tokio::test]
+async fn patch_and_delete_reject_requests_carrying_an_origin_header() {
+    let (env, _providers_tmp, dir) = env_with_providers_dir();
+    let app = env.router();
+    let auth = auth();
+    std::fs::write(dir.join("acct-b.toml"), "id = \"acct-b\"\nadapter = \"fake\"\n").unwrap();
+
+    let resp = send(
+        &app,
+        patch_json_with(
+            "/api/v1/providers/acct-b",
+            &json!({"concurrency": 2}),
+            &[("authorization", &auth), ("origin", "http://evil.example")],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 403, "origin_forbidden");
+
+    let resp = send(&app, delete_with("/api/v1/providers/acct-b", &[("authorization", &auth), ("origin", "http://evil.example")])).await;
+    assert_problem(&resp, 403, "origin_forbidden");
+
+    // Origin 無しなら通る（ファイルはまだ残っている）。
+    let resp = send(&app, delete_with("/api/v1/providers/acct-b", &[("authorization", &auth)])).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+}
+
+#[tokio::test]
+async fn admin_endpoints_are_unavailable_without_providers_dir_configured() {
+    let env = TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        ..Default::default()
+    });
+    let app = env.router();
+    let auth = auth();
+    let resp = send(&app, post_json_with("/api/v1/providers", &json!({"id": "x", "adapter": "fake"}), &[("authorization", &auth)])).await;
+    assert_problem(&resp, 409, "providers_admin_unavailable");
+}

@@ -62,6 +62,14 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// ADR-0017 M1: `providers.d/*.toml`（1 ファイル 1 アカウント）を追加で読み込む glob。末尾は必ず `/*.toml`。
+    /// 相対パスは設定ファイル基準。マッチしたファイルはファイル名昇順で `providers` に追記してから `validate()` を通す。
+    #[serde(default)]
+    pub providers_include: Option<String>,
+    /// `providers_include` を解決したディレクトリの絶対パス（`Config::load` が計算。TOML には書かない。
+    /// `POST /api/v1/providers` 等が書き込む先）。
+    #[serde(skip)]
+    pub providers_dir: Option<PathBuf>,
     /// ADR-0018: コマンドを実行するクラスタ。`WorkspaceSpec::Remote{cluster, path}` の `cluster` がここの `id` を指す。
     #[serde(default)]
     pub clusters: Vec<ClusterConfig>,
@@ -387,6 +395,39 @@ fn default_provider_concurrency() -> usize {
     1
 }
 
+/// `providers_include` の glob（`<dir>/*.toml` の形だけを受け付ける）からディレクトリを取り出し、
+/// 相対なら `base` 基準で絶対化する（ADR-0017 M1）。
+fn providers_include_dir(pattern: &str, base: &Path) -> Result<PathBuf, ConfigError> {
+    let dir_part = pattern
+        .strip_suffix("*.toml")
+        .ok_or_else(|| ConfigError::Invalid(format!("providers_include must end with \"*.toml\" (got {pattern:?})")))?;
+    let dir_part = dir_part.strip_suffix('/').unwrap_or(dir_part);
+    let dir = PathBuf::from(dir_part);
+    Ok(if dir.is_relative() { base.join(dir) } else { dir })
+}
+
+/// `dir` 配下の `*.toml` をファイル名昇順で読み、それぞれを 1 件の `ProviderConfig`（`[[providers]]` の 1 行と同じ形）として
+/// 解析する（ADR-0017 M1）。`dir` が無ければ空のまま（アカウントをまだ 1 つも追加していない状態）。
+pub fn load_provider_files(dir: &Path) -> Result<Vec<ProviderConfig>, ConfigError> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|source| ConfigError::Read { path: dir.to_path_buf(), source })?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .collect();
+    paths.sort();
+    let mut providers = Vec::with_capacity(paths.len());
+    for path in paths {
+        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read { path: path.clone(), source })?;
+        let provider: ProviderConfig = toml::from_str(&text)?;
+        providers.push(provider);
+    }
+    Ok(providers)
+}
+
 impl Config {
     /// ファイルから読み、相対パスを設定ファイルのディレクトリ基準で絶対化する。
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
@@ -412,6 +453,11 @@ impl Config {
             && token_file.is_relative()
         {
             cfg.api.token_file = Some(base.join(token_file));
+        }
+        if let Some(pattern) = &cfg.providers_include {
+            let dir = providers_include_dir(pattern, &base)?;
+            cfg.providers.extend(load_provider_files(&dir)?);
+            cfg.providers_dir = Some(dir);
         }
         cfg.validate()?;
         // API を有効にするなら、トークンが読めることを起動時に確かめる（exit 2）。
@@ -919,5 +965,74 @@ max_tree_depth = 2
     fn rejects_unknown_fields_in_codex_adapter_config() {
         let text = "[[providers]]\nid = \"x\"\nadapter = \"codex\"\n\n[adapters.codex]\nbogus = 1\n";
         assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    /// ADR-0017 M1: `providers_include` が `providers.d/*.toml` をファイル名昇順で読み、
+    /// `[[providers]]` と合わせて重複 id を検出する。
+    #[test]
+    fn providers_include_merges_files_in_filename_order_and_still_rejects_duplicate_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "providers_include = \"providers.d/*.toml\"\n[[providers]]\nid = \"inline\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("providers.d")).unwrap();
+        std::fs::write(
+            dir.path().join("providers.d/b-acct.toml"),
+            "id = \"b-acct\"\nadapter = \"claude-code\"\nconcurrency = 2\n[env]\nCLAUDE_CONFIG_DIR = \"/x/b\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("providers.d/a-acct.toml"),
+            "id = \"a-acct\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+
+        let cfg = Config::load(&path).unwrap();
+        let ids: Vec<&str> = cfg.providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["inline", "a-acct", "b-acct"], "providers.d files load in filename order after inline ones");
+        let b = cfg.providers.iter().find(|p| p.id == "b-acct").unwrap();
+        assert_eq!(b.concurrency, 2);
+        assert_eq!(b.env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/x/b"));
+        assert_eq!(cfg.providers_dir.as_deref(), Some(dir.path().join("providers.d").canonicalize().unwrap().as_path()));
+
+        // 重複 id（inline と providers.d の両方に "inline"）は既存の検証がそのまま拒否する。
+        std::fs::write(
+            dir.path().join("providers.d/dup.toml"),
+            "id = \"inline\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(err.contains("duplicate provider id"), "{err}");
+    }
+
+    /// `providers_include` は末尾が `*.toml` である glob だけを受け付ける。
+    #[test]
+    fn providers_include_rejects_patterns_not_ending_in_glob_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "providers_include = \"providers.d/*.yaml\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(err.contains("must end with"), "{err}");
+    }
+
+    /// `providers.d/` がまだ無い（1 つもアカウントを追加していない）ときは空のまま、inline だけで起動できる。
+    #[test]
+    fn providers_include_with_missing_directory_is_empty_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "providers_include = \"providers.d/*.toml\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.providers.len(), 1);
     }
 }

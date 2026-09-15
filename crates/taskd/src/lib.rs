@@ -5,7 +5,7 @@ pub mod config;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use task_dispatch::{DispatchError, Dispatcher, ProviderId, SnapshotPublisher, St
 use task_ops::daemon::ProviderLive;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use task_worker::{ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, WorkerAdapter};
+use task_worker::{ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, WorkerAdapter, Workspace};
 
 pub use config::{Config, ConfigError};
 
@@ -125,13 +125,18 @@ pub fn provider_lives(config: &Config) -> Vec<ProviderLive> {
     config
         .providers
         .iter()
-        .map(|p| ProviderLive {
-            id: p.id.clone(),
-            adapter: p.adapter.clone(),
-            tiers: p.tiers.clone(),
-            concurrency: p.concurrency,
-            model: models.get(&p.id).filter(|m| !m.is_empty()).cloned(),
-            in_use: 0,
+        .map(|p| {
+            let mut env_keys: Vec<String> = p.env.keys().cloned().collect();
+            env_keys.sort();
+            ProviderLive {
+                id: p.id.clone(),
+                adapter: p.adapter.clone(),
+                tiers: p.tiers.clone(),
+                concurrency: p.concurrency,
+                model: models.get(&p.id).filter(|m| !m.is_empty()).cloned(),
+                env_keys,
+                in_use: 0,
+            }
         })
         .collect()
 }
@@ -292,6 +297,7 @@ pub fn api_settings(
     token: Option<String>,
     instance_id: String,
     started_at: String,
+    admin_tx: Option<tokio::sync::mpsc::Sender<task_api::AdminRequest>>,
 ) -> ApiSettings {
     ApiSettings {
         listen,
@@ -310,6 +316,8 @@ pub fn api_settings(
         taskd_version: env!("CARGO_PKG_VERSION").to_string(),
         instance_id,
         started_at,
+        providers_dir: config.providers_dir.clone(),
+        admin_tx,
     }
 }
 
@@ -333,7 +341,11 @@ impl RunningApi {
 
 /// ADR-0013 D3 / D4: ディスパッチャにスナップショットの送り口を付け、API 専用の DB 接続を開いて bind する。
 /// 開けない・bind できないときは起動を失敗させる（黙って API 無しで動かない）。
-async fn start_api(config: &Config, listen: SocketAddr, dispatcher: &mut Dispatcher) -> Result<RunningApi, DaemonError> {
+async fn start_api(
+    config: &Config,
+    listen: SocketAddr,
+    dispatcher: &mut Dispatcher,
+) -> Result<(RunningApi, tokio::sync::mpsc::Receiver<task_api::AdminRequest>), DaemonError> {
     let token = config.api.read_token()?;
     let instance_id = ulid::Ulid::new().to_string();
     let started_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default();
@@ -346,7 +358,10 @@ async fn start_api(config: &Config, listen: SocketAddr, dispatcher: &mut Dispatc
         tick_ms: config.tick_ms,
         providers: provider_lives(config),
     });
-    let settings = api_settings(config, listen, token, instance_id, started_at);
+    // ADR-0017 M2: `reload`/`check` は API 側では実行できない（task-worker/task-dispatch に依存しない
+    // 境界を守るため）。taskd の tick ループへ委譲するチャネルを作り、送信側だけ API に渡す。
+    let (admin_tx, admin_rx) = tokio::sync::mpsc::channel(8);
+    let settings = api_settings(config, listen, token, instance_id, started_at, Some(admin_tx));
     let state = tokio::task::spawn_blocking(move || ApiState::new(settings, rx))
         .await
         .map_err(|e| ApiError::Startup(e.to_string()))??;
@@ -359,26 +374,35 @@ async fn start_api(config: &Config, listen: SocketAddr, dispatcher: &mut Dispatc
     let handle = tokio::spawn(task_api::serve_with_listener(listener, state, async move {
         let _ = stop_rx.await;
     }));
-    Ok(RunningApi { stop, handle })
+    Ok((RunningApi { stop, handle }, admin_rx))
 }
 
 /// デーモン本体。`[api]` があれば同じランタイムで HTTP API も動かし、tick ループの終了時に止める。
 pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> {
     warn_if_db_on_network_filesystem(&config.db);
     let mut dispatcher = build_dispatcher(&config)?;
-    let api = match config.api.listen {
-        Some(listen) => Some(start_api(&config, listen, &mut dispatcher).await?),
-        None => None,
+    let (api, admin_rx) = match config.api.listen {
+        Some(listen) => {
+            let (api, admin_rx) = start_api(&config, listen, &mut dispatcher).await?;
+            (Some(api), Some(admin_rx))
+        }
+        None => (None, None),
     };
-    let result = tick_loop(&mut dispatcher, &config, opts).await;
+    let result = tick_loop(&mut dispatcher, &config, opts, admin_rx).await;
     if let Some(api) = api {
         api.stop().await;
     }
     result
 }
 
-/// tick ループ。SIGINT/SIGTERM で停止する。
-async fn tick_loop(dispatcher: &mut Dispatcher, config: &Config, opts: RunOptions) -> Result<Exit, DaemonError> {
+/// tick ループ。SIGINT/SIGTERM で停止する。`admin_rx` があれば `POST /api/v1/reload` /
+/// `POST /api/v1/providers/{id}/check`（ADR-0017 M2）も同じループで受ける。
+async fn tick_loop(
+    dispatcher: &mut Dispatcher,
+    config: &Config,
+    opts: RunOptions,
+    mut admin_rx: Option<tokio::sync::mpsc::Receiver<task_api::AdminRequest>>,
+) -> Result<Exit, DaemonError> {
     let tick = config.tick();
     let mut ticks: u64 = 0;
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
@@ -415,6 +439,12 @@ async fn tick_loop(dispatcher: &mut Dispatcher, config: &Config, opts: RunOption
                 None => std::future::pending::<()>().await,
             }
         };
+        let admin = async {
+            match admin_rx.as_mut() {
+                Some(rx) => rx.recv().await,
+                None => std::future::pending::<Option<task_api::AdminRequest>>().await,
+            }
+        };
         tokio::select! {
             _ = tokio::time::sleep(tick) => {}
             _ = tokio::signal::ctrl_c() => {
@@ -425,8 +455,133 @@ async fn tick_loop(dispatcher: &mut Dispatcher, config: &Config, opts: RunOption
                 tracing::info!("SIGTERM; exiting");
                 return Ok(Exit::Signal);
             }
+            req = admin => {
+                // ADR-0017 M2: 処理後は select に戻らず即座にループの先頭（次の `dispatcher.tick()`）へ進む
+                // ので、reload の効果は「次の tick から」になる。`tick_ms` の残りを待たない。
+                if let Some(req) = req {
+                    handle_admin_request(dispatcher, config, req).await;
+                }
+            }
         }
     }
+}
+
+/// ADR-0017 M2: API から委譲された `reload`/`check` を処理する。`reload` はその場で（`Dispatcher` を直接
+/// 差し替えるだけの軽い処理）、`check` は最大 30 秒かかりうるので tick をブロックしないよう `tokio::spawn` する。
+async fn handle_admin_request(dispatcher: &mut Dispatcher, config: &Config, req: task_api::AdminRequest) {
+    match req {
+        task_api::AdminRequest::Reload { reply } => {
+            let result = reload_providers(dispatcher, config);
+            if result.is_ok() {
+                tracing::info!(who = "admin", "providers reloaded");
+            } else {
+                tracing::warn!(who = "admin", ?result, "reload rejected");
+            }
+            let _ = reply.send(result);
+        }
+        task_api::AdminRequest::Check { provider_id, reply } => {
+            let config_path = config.source_path.clone();
+            tokio::spawn(async move {
+                let outcome = check_provider(config_path, provider_id).await;
+                let _ = reply.send(outcome);
+            });
+        }
+    }
+}
+
+/// `Config::load` を読み直し、稼働中のプロバイダ選定・アダプタ一式・次 tick のスナップショット提供元を差し替える。
+/// 失敗したら稼働中の状態には触れない（古い設定のまま動き続ける）。
+fn reload_providers(dispatcher: &mut Dispatcher, config: &Config) -> Result<(), String> {
+    let path = config
+        .source_path
+        .clone()
+        .ok_or_else(|| "config was not loaded from a file; cannot reload".to_string())?;
+    let new_config = Config::load(&path).map_err(|e| e.to_string())?;
+    let policy = StaticPolicy::new(
+        new_config.provider_specs(),
+        Duration::from_secs(new_config.error_cooldown_secs),
+    );
+    let adapters = build_adapters(&new_config);
+    let models = effective_models(&new_config);
+    dispatcher.reload_providers(Box::new(policy), models, adapters);
+    dispatcher.set_snapshot_providers(provider_lives(&new_config));
+    Ok(())
+}
+
+/// ADR-0017 D2: 1 アカウントだけ短い疎通確認を行う。`Dispatcher`/DB には触れない（タスク・イベントに残さない）。
+/// 設定は毎回 `Config::load` で読み直すので、`reload` 前の `providers.d/` の新規ファイルも確認できる。
+async fn check_provider(
+    config_path: Option<PathBuf>,
+    provider_id: String,
+) -> Result<task_api::ProviderCheckResult, task_api::CheckError> {
+    let path = config_path
+        .ok_or_else(|| task_api::CheckError::Unavailable("config was not loaded from a file; cannot check".into()))?;
+    let config = Config::load(&path).map_err(|e| task_api::CheckError::ConfigInvalid(e.to_string()))?;
+    if !config.providers.iter().any(|p| p.id == provider_id) {
+        return Err(task_api::CheckError::NotFound);
+    }
+    let adapters = build_adapters(&config);
+    let adapter = adapters.get(&provider_id).ok_or(task_api::CheckError::NotFound)?.clone();
+
+    let dir = std::env::temp_dir().join(format!("taskd-provider-check-{}", ulid::Ulid::new()));
+    let now = OffsetDateTime::now_utc();
+    let task = task_core::Task {
+        id: task_core::TaskId::new(),
+        parent_id: None,
+        kind: task_core::TaskKind::Execute,
+        title: "provider check".into(),
+        objective: "Reply with a short confirmation that you are ready. Do not change any files.".into(),
+        acceptance: vec![task_core::Criterion { text: "reply".into(), check: task_core::Check::Human }],
+        inputs: vec![],
+        depends_on: vec![],
+        status: task_core::Status::Ready,
+        priority: 0,
+        worker_hint: task_core::WorkerHint { tier: task_core::Tier::Standard, adapter: None },
+        workspace: task_core::WorkspaceSpec::Local { path: dir.clone() },
+        budget: task_core::Budget { max_turns: 1, max_wall_secs: 30, max_retries: 0 },
+        attempts: 0,
+        lease: None,
+        created_at: now,
+        updated_at: now,
+        role: None,
+        aggregate: false,
+    };
+    let prepared = task_worker::LocalWorkspace::new(dir.clone())
+        .prepare(&task)
+        .await
+        .map_err(|e| task_api::CheckError::Unavailable(format!("failed to prepare check workspace: {e}")))?;
+    let run_id = task_core::TaskId::new().to_string();
+    let req = task_worker::RunRequest {
+        protocol: task_worker::PROTOCOL_VERSION,
+        task,
+        workspace: prepared,
+        context: task_worker::RunContext {
+            prior_review: vec![],
+            inputs: vec![],
+            answers: vec![],
+            review: None,
+            role: None,
+            children: vec![],
+        },
+    };
+    let limits = task_worker::RunLimits {
+        wall_clock: Duration::from_secs(30),
+        idle_timeout: Duration::from_secs(config.idle_timeout_secs.min(30)),
+        kill_grace: Duration::from_secs(config.kill_grace_secs),
+    };
+    let result = adapter.run(req, &run_id, limits, &task_worker::adapter::NullSink).await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    Ok(match result {
+        Ok(outcome) => match outcome.terminal {
+            task_worker::Terminal::Done { .. } | task_worker::Terminal::Question { .. } => task_api::ProviderCheckResult::Ok,
+            task_worker::Terminal::Error { .. } => task_api::ProviderCheckResult::SpawnFailed,
+        },
+        Err(task_worker::AdapterError::AuthFailed(_)) => task_api::ProviderCheckResult::AuthFailed,
+        Err(task_worker::AdapterError::Throttled { .. } | task_worker::AdapterError::Exhausted(_)) => {
+            task_api::ProviderCheckResult::Throttled
+        }
+        Err(_) => task_api::ProviderCheckResult::SpawnFailed,
+    })
 }
 
 #[cfg(test)]

@@ -107,6 +107,25 @@ impl ApiProblem {
         Self::new(StatusCode::NOT_FOUND, "not_found", "no such endpoint")
     }
 
+    /// ADR-0017: 指定した provider id が `providers.d/` に無い。
+    pub(crate) fn provider_not_found(id: &str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "provider_not_found", format!("provider not found: {id}"))
+    }
+
+    /// ADR-0017 D1: `POST /api/v1/providers` の id が既に `providers.d/<id>.toml` にある。
+    pub(crate) fn provider_exists(id: &str) -> Self {
+        Self::new(StatusCode::CONFLICT, "provider_exists", format!("provider already exists: {id}"))
+    }
+
+    /// ADR-0017 M1: `providers_include` が未設定で、管理系の書き込みができない。
+    pub(crate) fn providers_admin_unavailable() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "providers_admin_unavailable",
+            "the [api] provider admin endpoints require `providers_include` to be configured in taskd.toml",
+        )
+    }
+
     pub(crate) fn method_not_allowed() -> Self {
         Self::new(
             StatusCode::METHOD_NOT_ALLOWED,

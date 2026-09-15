@@ -56,6 +56,8 @@ pub(crate) struct Inner {
     /// ADR-0016 M3: `POST /tasks` の省略値を埋める `[[roles]]`。
     pub(crate) roles: Vec<task_core::RoleSpec>,
     pub(crate) taskd_version: String,
+    pub(crate) providers_dir: Option<std::path::PathBuf>,
+    pub(crate) admin_tx: Option<tokio::sync::mpsc::Sender<crate::admin::AdminRequest>>,
     pub(crate) instance_id: String,
     pub(crate) started_at: String,
     pub(crate) daemon: watch::Receiver<Option<DaemonSnapshot>>,
@@ -87,6 +89,8 @@ impl ApiState {
             config_view: settings.config_view,
             roles: settings.roles,
             taskd_version: settings.taskd_version,
+            providers_dir: settings.providers_dir,
+            admin_tx: settings.admin_tx,
             instance_id: settings.instance_id,
             started_at: settings.started_at,
             daemon,

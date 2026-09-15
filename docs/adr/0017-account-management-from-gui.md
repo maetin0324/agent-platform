@@ -1,7 +1,7 @@
 # ADR-0017: GUI からのアカウント管理
 
 - 日付: 2026-09-15
-- 状態: **Proposed**（設計のみ。実装は人間の判断を待つ）
+- 状態: **Accepted**（Phase 11 実装済み。D1〜D4 を実装、細部は末尾の「実装メモ」M1〜M5 参照）
 - 関連: ADR-0012（複数アカウント）、ADR-0013 D11（秘密を出さない）、ADR-0015（観測可能性）、DESIGN §5.5 / §6 Phase 11
 
 ## 文脈
@@ -57,3 +57,43 @@
 
 - 設定: `[providers] include` の追加、`providers.d/`。API: 管理系エンドポイント 5 本と `reload`。
 - 受け入れ条件は Phase 11（DESIGN §6）に書く。
+
+## 実装メモ（Phase 11、2026-09-15）
+
+D1〜D4 の決定は変えていない。実装時に決めた細部:
+
+- **M1（TOML キー名の変更）**: `[providers] include = "providers.d/*.toml"` は文字どおりには実装しなかった。
+  TOML は同じキー `providers` を配列テーブル（`[[providers]]`）と単純テーブル（`[providers]`）の両方には束縛できないため、
+  文字どおりの構文は既存の `[[providers]]`（23 ファイルが使用: 全 example config、e2e シナリオ、`taskctl worker run` のテスト等）を
+  破壊的に置き換える必要があった。代わりにトップレベルのフラットな任意キー `providers_include: Option<String>`
+  （末尾が `/*.toml` である glob 文字列。既定 `None`）を追加し、`[[providers]]` は無変更のまま両立させた。
+  `Config::load` は `providers_include` があれば、そのディレクトリの `*.toml` をファイル名昇順で読み、各ファイルを
+  1 件の `ProviderConfig`（`[[providers]]` の 1 行と同じ形）として `deny_unknown_fields` で解析し、
+  `cfg.providers` に追記してから既存の `validate()`（重複 id・アダプタ種別・concurrency）を通す。
+- **M2（管理 API の実行境界）**: DESIGN §5.10 は task-api に「LLM 呼び出し・ワーカー起動・`Check::Command` 実行をしない」ことを求めている。
+  `POST/PATCH/DELETE /api/v1/providers...` は `providers.d/<id>.toml` へのファイル読み書きだけなので task-api 内で完結させた
+  （ワーカーもLLMも起動しない）。`POST /api/v1/reload` と `POST /api/v1/providers/{id}/check` は、それぞれ「稼働中の
+  `Dispatcher` の再構築」と「実際に 1 回ワーカーを起動する疎通確認」で、どちらも task-worker/task-dispatch への依存が要る
+  （task-api の `Cargo.toml` に両クレートへの依存は追加していない）。そこで task-api に `AdminRequest`
+  （`Reload{reply}` / `Check{provider_id, reply}`、`tokio::mpsc` + `oneshot`）を新設し、`ApiSettings.admin_tx` 経由で
+  taskd（既に task-worker/task-dispatch に依存している）へ委譲する。taskd の `tick_loop` が `admin_rx` を
+  `tokio::select!` の1腕として受け、`Reload` はその場で（`Config::load` の再読込→`StaticPolicy`/アダプタ/実効モデルの
+  再構築→`Dispatcher::reload_providers` で差し替え）処理し、`Check` は tick をブロックしないよう `tokio::spawn` した
+  タスクで処理する（`Config::load` を再読込し、対象 1 件だけの使い捨てアダプタを組み立て、`/tmp` 配下の使い捨て
+  ワークスペースで 30 秒・1 ターンの合成タスクを実行し、結果を `ok`/`auth_failed`/`throttled`/`spawn_failed` に写す。
+  タスク／イベントには残さない、D2 のとおり）。
+- **M3（管理系のトークン必須）**: 既存の `guard` ミドルウェアは `token_file` 未設定（loopback 限定構成）なら全エンドポイントで
+  認証をスキップする。5 本の管理エンドポイントだけは、ハンドラの先頭で `token_digest` の有無に関わらず bearer を検査する
+  `require_admin` を呼び、`token_file` 未設定なら 401 にする（D1「loopback でも管理操作にはトークンを要求する」）。
+  読み取り系（`GET /providers` 等）は既存のグローバル guard のままで無変更。
+  運用上の含意: 管理 API を使いたい運用者は loopback 限定構成でも `[api].token_file` を設定する必要がある
+  （`Config::validate()` では強制しない。管理 API を使わない運用は今までどおりトークン無しで動く）。
+- **M4（`GET /providers` / `GET /config` の反映元）**: `reload` は `Dispatcher` の `policy`/`adapters`/`models` を
+  差し替えるのに加えて、次の tick のスナップショットに乗る `ProviderLive` 一覧（`env_keys` を追加）も更新する
+  （`Dispatcher::set_snapshot_providers`）。`GET /providers` と `GET /config` は、起動時に固定される
+  `config_view.providers`（`ApiState.inner` は不変）ではなく、**スナップショットがあればそちらを優先**して
+  プロバイダの id/adapter/tiers/concurrency/model/env_keys を組み立てるよう変更した。これにより `ApiState.inner` に
+  可変状態（`Mutex`）を足さずに reload の結果が読み取り系に反映される（起動直後、最初の tick 前だけ `config_view` に
+  フォールバック）。
+- **M5（監査ログ）**: D4 のとおり、管理操作は `tracing::info!(who = "admin", op = ..., provider_id = ...)` で記録し、
+  `env` の値や `token_file` の中身は一切ログに出さない。タスクの `Event` 列には混ぜない。

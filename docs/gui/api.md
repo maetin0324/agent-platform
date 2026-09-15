@@ -30,6 +30,9 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 - `token_file` の内容（前後の空白を除いた 1 行）がトークン。ファイルが読めない・空 → 設定エラー。トークンはログにも API にも出さない。
 - SSE の同時接続数の上限は task-api の定数 16（設定キーにしない）。
 - API は**自分専用の `SqliteStore` 接続**を持ち、DB 呼び出しは `spawn_blocking` で行う（ディスパッチャの接続と Mutex を共有しない。ADR-0013 D3）。
+- `providers_include = "providers.d/*.toml"`（トップレベル、`[[providers]]` と併用可。ADR-0017 M1）を設定すると、
+  §3.24〜3.28 のプロバイダ管理エンドポイントが `providers.d/<id>.toml`（1 アカウント 1 ファイル、ファイル名昇順で
+  `[[providers]]` の後ろに連結）を読み書きできるようになる。未設定なら 5 本とも 409。
 
 ### 1.2 プロトコルと共通規約
 
@@ -50,13 +53,13 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 ### 1.3 認証（Bearer）
 
 - `token_file` が設定されていれば全エンドポイント（`GET /health` を除く）で `Authorization: Bearer <token>` を要求する。無ければ 401 `unauthorized`（`WWW-Authenticate: Bearer realm="taskd"`）。比較は定数時間。
-- `token_file` が無い（= loopback のみ）場合は認証しない。
+- `token_file` が無い（= loopback のみ）場合は認証しない。**ただし管理系エンドポイント（`POST/PATCH/DELETE /providers...`、`POST /reload`）は例外**で、`token_file` が無くても常に 401 にする（ADR-0017 D1: loopback でも管理操作にはトークンを要求する）。管理 API を使うには `token_file` の設定が要る。
 - `GET /health` は常に無認証（版とスキーマ版数だけを返す。G0 の疎通確認用）。ただし Host 検査は受ける。
 
 ### 1.4 Host 検査・Origin・CSRF
 
 - 全要求で `Host` ヘッダを許可リスト（`localhost`、`127.0.0.1`、`[::1]`、`listen` のホスト、`allowed_hosts`。ポートは無視）と照合し、外れれば 400 `host_not_allowed`。DNS rebinding 対策。
-- 変更系（`POST`）に `Origin` ヘッダが付いていれば 403 `origin_forbidden`。ブラウザから直接呼ばれる設計ではないので、`Origin` の存在自体を「想定外の呼び出し」とみなす（`curl` と Node の `fetch` は `Origin` を送らない）。
+- 変更系（`POST`/`PATCH`/`DELETE`。Phase 11 で `PATCH`/`DELETE` が増えた）に `Origin` ヘッダが付いていれば 403 `origin_forbidden`。ブラウザから直接呼ばれる設計ではないので、`Origin` の存在自体を「想定外の呼び出し」とみなす（`curl` と Node の `fetch` は `Origin` を送らない）。Content-Type / 本文サイズの検査は本文を伴う `POST`/`PATCH` だけ（`DELETE` は本文を取らない）。
 - `Content-Type: application/json` の要求（1.2）と合わせて、フォーム送信型の CSRF は成立しない。
 
 ### 1.5 エラー
@@ -106,7 +109,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（26）
+## 2. エンドポイント一覧（31）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -136,6 +139,11 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 24 | GET | `/config` | `taskd.toml` の要約（秘密は出さない） | `ConfigView` | 設定（taskd が起動時に渡す） |
 | 25 | GET | `/schema` | `api-v1.schema.json` の内容 | `application/schema+json` | `include_str!` |
 | 26 | GET | `/clusters` | `[[clusters]]` の定義 + 接続の有無 + cooldown（ADR-0018、Phase 12） | `Clusters` | 設定 + スナップショット |
+| 27 | POST | `/providers` | `providers.d/<id>.toml` を作る（ADR-0017、Phase 11。**管理系: トークン必須**） | 201 `ProviderConfigView`（`Location`） | taskd（ファイル書き込みのみ） |
+| 28 | PATCH | `/providers/{id}` | 並列度・tier・model・env を変更する（**管理系**） | 200 `ProviderConfigView` | taskd（ファイル書き込みのみ） |
+| 29 | DELETE | `/providers/{id}` | `providers.d/<id>.toml` を消す（**管理系**） | 200 `{}` | taskd（ファイル削除のみ） |
+| 30 | POST | `/providers/{id}/check` | そのアカウントの env で短い疎通確認を 1 回行う（**管理系**） | 200 `ProviderCheckResponse` | taskd（`task-worker` 経由。タスク・イベントには残らない） |
+| 31 | POST | `/reload` | 設定と `providers.d/` を読み直し、稼働中のプロバイダ選定・アダプタを差し替える（**管理系**） | 200 `ReloadResult` | taskd（`Dispatcher` の差し替え） |
 
 ---
 
@@ -339,6 +347,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 `items[]` は `[[providers]]` の順。定義（`id` / `adapter` / `tiers` / `concurrency` / `model` = 実効モデル / `env_keys` = **キー名だけ**）は設定から、`in_use` と `cooldown` はスナップショット（無ければ `null`）、`stats` は §5.8 の集計。
 
+ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップショットに乗った一覧（`providers.d/` を含む）を優先して返す。最初の tick が来る前だけ起動時に固定した一覧にフォールバックする。`GET /config` の `providers[]` も同じ規則。
+
 ### 3.20 `GET /daemon` → 200 `DaemonView`
 
 ```json
@@ -375,6 +385,48 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 - ディスパッチャは 1 tick に 1 回、設定の全クラスタに `ssh -o BatchMode=yes -O check <host>` を実行する（unix ソケットを見るだけ。ネットワークにも認証にも触れない）。
   接続が戻れば cooldown はその tick で解ける。
 - GUI は `connected == false` のクラスタに「`scripts/cluster-login.sh <host>` でログインし直してください」と出す。受信箱の `attention[].cluster_unavailable`（§5.1 (d)）と対。
+
+### 3.24〜3.28 プロバイダ管理（ADR-0017、Phase 11。**すべて管理系: `token_file` 未設定でも 401**）
+
+設計は ADR-0017。`taskd.toml` を直接書き換えず、`providers_include`（例: `providers_include = "providers.d/*.toml"`）が指す
+ディレクトリに 1 アカウント 1 ファイル（`providers.d/<id>.toml`。`[[providers]]` の 1 行と同じ形）を読み書きする。
+反映（実際の dispatch と `GET /providers`/`GET /config` への表示）は `POST /reload` を呼んだ**次の tick から**で、
+実行中の run には影響しない。`providers_include` が設定されていない構成では、この 5 本は全て 409
+`providers_admin_unavailable` を返す。
+
+#### 3.24 `POST /providers` → 201 `ProviderConfigView`（`Location: /api/v1/providers/{id}`）
+
+要求本文: `{"id": "acct-b", "adapter": "fake"|"claude-code"|"codex", "tiers"?: [...], "concurrency"?: 1, "model"?: "", "env"?: {...}}`
+（`tiers`/`concurrency`/`model` は省略可、`[[providers]]` と同じ既定）。`id` は 1〜64 文字の ASCII 英数字・`-`・`_`
+（`providers.d/<id>.toml` のファイル名になるため、パス区切りは拒否）。`adapter` は既知の 3 種類のみ。
+`id` が既にあれば 409 `provider_exists`。応答・ログとも `env` は `env_keys`（キー名だけ）で、値は一切出さない。
+
+#### 3.25 `PATCH /providers/{id}` → 200 `ProviderConfigView`
+
+要求本文は `{"tiers"?, "concurrency"?, "model"?, "env"?}`（渡したフィールドだけ上書き。`id`/`adapter` は変更不可）。
+存在しない `id` は 404 `provider_not_found`。
+
+#### 3.26 `DELETE /providers/{id}` → 200 `{}`
+
+`providers.d/<id>.toml` を削除する。存在しない `id` は 404 `provider_not_found`。
+
+#### 3.27 `POST /providers/{id}/check` → 200 `ProviderCheckResponse`
+
+```json
+{"result": "ok" | "auth_failed" | "throttled" | "spawn_failed", "checked_at": "…"}
+```
+
+そのアカウントの env で短い run（30 秒・1 ターン）を 1 回だけ行い、疎通を確かめる（ADR-0017 D2）。`Dispatcher`/DB には
+一切触れない（タスクにもイベント列にも残らない、観測値）。存在しない `id` は 404 `provider_not_found`。設定の
+再読込自体が失敗した（`providers.d/` の壊れた TOML 等）場合は 400。**taskd（`task-worker` に依存する側）が実行し、
+task-api 自身はワーカーを起動しない**（DESIGN §5.10 の境界。ADR-0017 M2）。
+
+#### 3.28 `POST /reload` → 200 `ReloadResult`（`{"reloaded": true}`）
+
+`taskd.toml` と `providers_include` の指すディレクトリを読み直し、`StaticPolicy`・アダプタ一式・`GET /providers`/
+`GET /config` に出る一覧を差し替える。**cooldown はメモリ上（`StaticPolicy` の内部状態）なので reload で消える**
+（ADR-0017 D1）。設定の検証に失敗したら 400 を返し、稼働中の状態には触れない（古い設定のまま動き続ける）。
+実行中の run はそれぞれ差し替え前のアダプタの参照を既に掴んでいるので、reload の影響を受けない。
 
 ---
 
@@ -643,6 +695,10 @@ pub struct RoleConfigView { pub id: String, pub tier: Option<Tier>, pub adapter:
 pub struct DelegationLimits { pub max_delegate_per_run: usize, pub max_tree_depth: u32, pub max_tree_runs: u32 }
 pub struct ReviewerConfigView { pub adapter: Option<String>, pub tier: Tier }
 pub struct ProviderConfigView { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>, pub env_keys: Vec<String> }
+// Phase 11（ADR-0017）: プロバイダ管理。`ProviderConfigView` は §3.24/§3.25 の応答にも使う。
+pub struct ReloadResult { pub reloaded: bool }
+pub struct ProviderCheckResponse { pub result: ProviderCheckResult, pub checked_at: String }
+pub enum ProviderCheckResult { Ok, AuthFailed, Throttled, SpawnFailed } // snake_case で直列化（"ok" | "auth_failed" | "throttled" | "spawn_failed"）
 pub struct ClusterConfigView { pub id: String, pub host: String, pub concurrency: usize, pub sync: String, pub delete_on_push: bool, pub has_setup: bool, pub env_keys: Vec<String>, pub rsync_excludes: Vec<String> }
 pub struct ApiConfigView { pub bind: String, pub auth_required: bool, pub allowed_hosts: Vec<String> }
 pub struct StreamHello { pub cursor: u64, pub now: String, pub daemon: Option<DaemonSnapshot> }
@@ -657,6 +713,7 @@ pub struct ApiV1Schema {
     pub transition_result: TransitionResult, pub replay_report: ReplayReport, pub providers: Providers, pub daemon: DaemonView,
     pub config: ConfigView, pub stream_hello: StreamHello, pub stream_event: EventRow, pub stream_daemon: DaemonSnapshot,
     pub stream_heartbeat: StreamHeartbeat, pub stream_reset: StreamReset, pub clusters: Clusters /* Phase 12 */,
+    pub provider_config: ProviderConfigView, pub reload: ReloadResult, pub provider_check: ProviderCheckResponse /* Phase 11 */,
 }
 ```
 

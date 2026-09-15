@@ -89,10 +89,14 @@ fn check_request(state: &ApiState, req: &Request) -> Result<(), ApiProblem> {
         check_bearer(req.headers(), expected)?;
     }
 
-    if req.method() == Method::POST {
-        if req.headers().contains_key(header::ORIGIN) {
-            return Err(ApiProblem::origin_forbidden());
-        }
+    // ADR-0017 で PATCH/DELETE（プロバイダ管理）が加わるまでは変更系 = POST だけだった。`Origin` の拒否は
+    // 本文の有無に関わらず全ての変更系メソッドに掛ける（監査で発見: PATCH/DELETE が POST 専用のこのチェックを素通りしていた）。
+    let is_mutating = matches!(*req.method(), Method::POST | Method::PATCH | Method::DELETE);
+    if is_mutating && req.headers().contains_key(header::ORIGIN) {
+        return Err(ApiProblem::origin_forbidden());
+    }
+    // Content-Type / 本文サイズは本文を伴うメソッド（POST・PATCH）だけ検査する（DELETE は本文を取らない）。
+    if matches!(*req.method(), Method::POST | Method::PATCH) {
         if !is_json_content_type(req.headers()) {
             return Err(ApiProblem::unsupported_media_type());
         }
@@ -116,7 +120,7 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
         .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
 }
 
-fn check_bearer(headers: &HeaderMap, expected: &[u8; 32]) -> Result<(), ApiProblem> {
+pub(crate) fn check_bearer(headers: &HeaderMap, expected: &[u8; 32]) -> Result<(), ApiProblem> {
     let presented = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -127,6 +131,15 @@ fn check_bearer(headers: &HeaderMap, expected: &[u8; 32]) -> Result<(), ApiProbl
     match presented {
         Some(token) if constant_time_eq(&token_digest(token), expected) => Ok(()),
         _ => Err(ApiProblem::unauthorized()),
+    }
+}
+
+/// ADR-0017 D1: 管理系エンドポイントは `token_file` 未設定（loopback 限定構成）でも認証をスキップしない
+/// （通常のガードは `token_digest` が無ければ全て通す。管理系はここで別に検査する）。
+pub(crate) fn require_admin(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiProblem> {
+    match &state.inner.token_digest {
+        Some(expected) => check_bearer(headers, expected),
+        None => Err(ApiProblem::unauthorized()),
     }
 }
 

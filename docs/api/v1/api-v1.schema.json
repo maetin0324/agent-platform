@@ -2167,6 +2167,32 @@
       ],
       "type": "object"
     },
+    "ProviderCheckResponse": {
+      "description": "`POST /api/v1/providers/{id}/check` の応答（ADR-0017 D2）。",
+      "properties": {
+        "checked_at": {
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/$defs/ProviderCheckResult"
+        }
+      },
+      "required": [
+        "result",
+        "checked_at"
+      ],
+      "type": "object"
+    },
+    "ProviderCheckResult": {
+      "description": "`POST /api/v1/providers/{id}/check` の結果（ADR-0017 D2）。",
+      "enum": [
+        "ok",
+        "auth_failed",
+        "throttled",
+        "spawn_failed"
+      ],
+      "type": "string"
+    },
     "ProviderConfigView": {
       "properties": {
         "adapter": {
@@ -2220,6 +2246,14 @@
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "env_keys": {
+          "default": [],
+          "description": "`env` のキー名だけ（値は出さない）。古いスナップショットには無いので既定は空（ADR-0017 M4）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "id": {
           "type": "string"
@@ -2430,6 +2464,18 @@
         "task",
         "question",
         "previous"
+      ],
+      "type": "object"
+    },
+    "ReloadResult": {
+      "description": "`POST /api/v1/reload` の応答（ADR-0017 D1）。",
+      "properties": {
+        "reloaded": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reloaded"
       ],
       "type": "object"
     },
@@ -3453,8 +3499,18 @@
     "problem": {
       "$ref": "#/$defs/Problem"
     },
+    "provider_check": {
+      "$ref": "#/$defs/ProviderCheckResponse"
+    },
+    "provider_config": {
+      "$ref": "#/$defs/ProviderConfigView",
+      "description": "`POST /api/v1/providers` と `PATCH /api/v1/providers/{id}` の応答（ADR-0017）。"
+    },
     "providers": {
       "$ref": "#/$defs/Providers"
+    },
+    "reload": {
+      "$ref": "#/$defs/ReloadResult"
     },
     "replay_report": {
       "$ref": "#/$defs/ReplayReport"
@@ -3509,6 +3565,9 @@
     "transition_result",
     "replay_report",
     "providers",
+    "provider_config",
+    "reload",
+    "provider_check",
     "clusters",
     "daemon",
     "config",

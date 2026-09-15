@@ -1,6 +1,6 @@
 # PROGRESS — taskd
 
-現在地: **Phase 0〜10・12 完了、Phase 11 着手中**（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
+現在地: **Phase 0〜12 完了**（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
 人間の判断 H1〜H9 を反映済み）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により G フェーズとして進める（前提: Node 24 LTS / pnpm 11）。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
@@ -18,7 +18,7 @@
 | 8 | 複数アカウント運用・evidence 任意化・`taskctl worker run`（ADR-0012） | 完了 | 2026-09-14 |
 | 9 | GUI のための基盤（task-ops・WAL・events の id）と HTTP API 層（ADR-0013）、追補 P-G14〜P-G16（ADR-0014） | 完了 | 2026-09-14（追補 2026-09-15） |
 | 10 | 役割と委譲（組織的な木構造。ADR-0016） | 完了 | 2026-09-15 |
-| 11 | GUI からのアカウント管理（ADR-0017） | 着手中 | — |
+| 11 | GUI からのアカウント管理（ADR-0017） | 完了 | 2026-09-15 |
 | 12 | クラスタでのコマンド実行（ssh + ControlMaster。ADR-0018） | 完了 | 2026-09-15 |
 
 ---
@@ -2043,3 +2043,170 @@ auditor サブエージェントを1回起動（読み取り専用）。総合�
 - P-54: `taskctl` が `TASKD_CONFIG`（または `--db` と同じ優先順位の既定パス）で `taskd.toml` を見つけられるようにし、`add --role` で `--config` を省けるようにする。
 - P-55: 子待ちの親を `DaemonSnapshot`（`awaiting_children[]`）に出し、GUI の DAG 画面で「部下待ち」と表示する（ADR-0016 D5 の入口。API は `TaskDetail.delegated` と `children` で足りる）。
 - P-56: `aggregate = false` の親は子の成否を問わず `done` になる（M5）。「子が 1 件でも failed なら親を `review_fail` にする」設定を足すかは運用を見て決める。
+
+---
+
+## Phase 11 — DONE（2026-09-15）
+
+設計は ADR-0017（Proposed → **Accepted**。D1〜D4 を実装。細部は ADR-0017 末尾の「実装メモ」M1〜M5 に記録した。
+本文の決定は変えていない）。GUI 側の画面は対象外（DESIGN §6 Phase 11 のとおり taskd の API と設定だけ）。
+
+### 成果物
+
+- `taskd::config`: `Config.providers_include: Option<String>`（末尾 `/*.toml` の glob）と `Config.providers_dir`（解決した絶対パス）。
+  `Config::load` が glob 先の `*.toml` をファイル名昇順で読み、`[[providers]]`（既存の inline 配列、無変更）に追記してから既存の `validate()`
+  （重複 id・アダプタ種別・concurrency）を通す（ADR-0017 M1。`[providers] include = …` という文字どおりの構文は
+  `[[providers]]` との TOML 上の衝突のため採らず、フラットな `providers_include` にした。既存の 23 ファイルの `[[providers]]` は無変更）。
+- `task-api::admin`（新規）: `AdminRequest{Reload, Check}`（`tokio::mpsc` + `oneshot`）、`ProviderCheckResult`（ok/auth_failed/throttled/spawn_failed）、
+  `CheckError`、`ProviderConfigFile`（`providers.d/<id>.toml` の中身。task-api は taskd に依存できないので独立した型）、
+  `ProviderCreateBody`/`ProviderPatchBody`（既定値の穴埋め・patch の適用）、id/adapter の検証（パストラバーサル防止）、
+  ファイル読み書きのヘルパ。単体テスト 4 件。
+- `task-api`: `ApiSettings`/`Inner` に `providers_dir: Option<PathBuf>` と `admin_tx: Option<mpsc::Sender<AdminRequest>>` を追加。
+  ルート 5 本（`POST/PATCH/DELETE /providers...`、`POST /providers/{id}/check`、`POST /reload`）。`create`/`patch`/`delete` は
+  `providers.d/` へのファイル読み書きだけで完結（LLM もワーカーも起動しない、DESIGN §5.10 の境界を守る。`task-api` の
+  `Cargo.toml` は `task-worker`/`task-dispatch` に依存していない。`toml` crate だけ追加）。`reload`/`check` は
+  `AdminRequest` で taskd（`task-worker`/`task-dispatch` に依存する側）へ委譲する。`middleware::require_admin` で
+  5 本とも `token_digest` の有無に関わらず bearer を検査（`token_file` 未設定でも 401。既存の `guard` は素通しするので別立て）。
+  `GET /providers`/`GET /config` は reload 後の一覧をスナップショット（`ProviderLive` に `env_keys` を追加）から
+  優先して組み立てる（最初の tick 前だけ起動時の静的値にフォールバック。ADR-0017 M4）。新しい応答型
+  `ReloadResult`/`ProviderCheckResponse` をスキーマに追加。`patch_provider`/`delete_provider` は `valid_provider_id` を
+  通してから初めてファイルパスを組み立てる（監査で発見したパストラバーサルの修正）。`middleware.rs` の `Origin` 拒否は
+  `POST`/`PATCH`/`DELETE` の全変更系に掛ける（同じく監査で発見した穴の修正）。回帰テスト
+  `crates/task-api/tests/providers_admin.rs`（新規、6 件: トークン必須・id/adapter 検証・409/404・パストラバーサル拒否・
+  Origin 拒否・`providers_dir` 未設定時の 409）。
+- `task-ops::daemon::ProviderLive`: `env_keys: Vec<String>` を追加（`#[serde(default)]` で旧スナップショットも読める）。
+- `task-dispatch::Dispatcher`: `reload_providers(policy, models, adapters)`（差し替えるだけ。実行中の run は差し替え前の
+  `Arc<dyn WorkerAdapter>` を既に掴んでいるので影響を受けない）と `set_snapshot_providers(providers)`（次 tick のスナップショットに乗る一覧を差し替え）を追加。
+- `taskd`: `tick_loop` に `admin_rx: Option<mpsc::Receiver<AdminRequest>>` を追加し、既存の `tokio::select!` に 4 本目の腕として組み込んだ
+  （処理後は select に戻らず即座に次の `dispatcher.tick()` へ進むので「reload は次の tick から」になる）。`Reload` はその場で
+  `Config::load` の再読込 → `StaticPolicy`/アダプタ/実効モデルの再構築 → `Dispatcher::reload_providers` + `set_snapshot_providers`。
+  `Check` は tick をブロックしないよう `tokio::spawn` し、`Config::load` を再読込して対象 1 件だけの使い捨てアダプタを組み立て、
+  `/tmp` 配下の使い捨てワークスペースで 30 秒・1 ターンの合成タスクを `NullSink` で実行し、結果を 4 種類に写す
+  （タスク・イベントには残さない。`taskctl worker run` と同じ「`Dispatcher` を経由せず直接 `WorkerAdapter::run`」パターン）。
+- `config/taskd.multi-account.example.toml`: `providers_include` のコメント付き使用例を追加。
+- `docs/gui/api.md`: §1.1（`providers_include`）、§1.3（管理系はトークン必須）、§2（エンドポイント 26→31）、§3.19（reload 後の一覧の出所）、
+  §3.24〜3.28（5 本の新エンドポイント）、§6.2（`ReloadResult`/`ProviderCheckResponse`/`ProviderCheckResult`、`ApiV1Schema` への追加）を更新。
+- `docs/api/v1/api-v1.schema.json` を `UPDATE_SCHEMA=1 cargo test -p task-api` で再生成。
+
+**作業分担**: 本 Phase は「設定の glob 読み込み」「task-api の境界を守る委譲の仕組み（チャネル設計）」「`Dispatcher` の差し替え」
+「taskd の tick ループへの統合」が全て互いに強く依存する 1 つの設計判断の実装であり、ファイルを共有せず独立に分割できる
+単位が 2 つに届かなかったため、implementer サブエージェントは使わず全て自分で実装した（Phase 4 と同じ判断）。
+
+### 受け入れ条件と証拠（DESIGN §6 Phase 11。fake アダプタとローカル SQLite で再現。外部ネットワークには出ない）
+
+**1. `POST /api/v1/providers` が `providers.d/<id>.toml` を作り、`POST /api/v1/reload` の後の tick から新しいアカウントが使われる。実行中の run は影響を受けない**
+- `tests/e2e/tests/provider_admin_scenarios.rs::provider_lifecycle_create_check_patch_delete_and_reload_routes_new_account`（実バイナリ）:
+  `acct-a`（concurrency 1）を長時間タスク（8 秒 sleep）で埋めてから `POST /providers` で `acct-b` を作成 → reload 前は
+  `GET /providers` に出ないことを確認 → `POST /reload` → 直後に `GET /providers` に `acct-b`/`acct-c-authfail` が現れる →
+  新規タスクを approve すると `WorkerStarted.provider == "acct-b"`（acct-a が埋まっているので溢れた分が新アカウントへ）→
+  acct-a 側の長時間タスクはそのまま `Done` まで完走し、その `WorkerStarted.provider == "acct-a"` のまま（reload の影響を受けない）。
+
+**2. 管理系はトークン無しで 401（loopback でも）。読み取り系は従来どおり**
+- `tests/e2e/tests/provider_admin_scenarios.rs::admin_endpoints_require_token_even_without_token_file_on_loopback`（実バイナリ、
+  `token_file` を設定しない loopback 構成）: `GET /providers` は 200、`POST /providers`・`POST /reload`・`POST /providers/x/check`・
+  `PATCH /providers/x`・`DELETE /providers/x` は全て 401 `unauthorized`。
+
+**3. `env` の値・`token_file` の中身は、応答にもログにも出ない**
+- 同 e2e テストの `provider_lifecycle_…` 内: `POST /providers` の応答が `env_keys`（キー名だけ）を返し `env` フィールド自体が
+  無いこと、応答本文に実際の値の文字列が含まれないことを確認。taskd の stderr ログ（`Proc.log_text()`）にも env の値と
+  admin token の値が出ないことを `grep` 相当（`contains` の否定）で確認。
+- 型レベルの保証: `ProviderConfigFile.to_view()`（`crates/task-api/src/admin.rs`）が返す `ProviderConfigView` は
+  フィールドに `env: HashMap` を持たず `env_keys: Vec<String>` だけなので、呼び出し側が値を漏らす余地が無い
+  （`admin.rs::tests::write_then_read_round_trips` は `ProviderConfigFile` のファイル往復を検証するテストで、
+  `to_view()` 自体は直接検証していない。上の e2e テストが `to_view()` 経由の応答で確認している）。
+
+**4. `POST /api/v1/providers/{id}/check` が 4 種類の結果を返す（fake アダプタで `ok` と `auth_failed` を再現）**
+- 同 e2e テスト内: `env.AUTH_FAIL=1` を持つアカウントの `check` が `"auth_failed"`、通常アカウントの `check` が `"ok"` を返すことを確認（受け入れ条件の文言どおり `ok`/`auth_failed` を実機で再現）。
+  `throttled`/`spawn_failed` は `crates/taskd/src/lib.rs::check_provider` のマッピングをコードレビューで確認: `AdapterError::Throttled | Exhausted → Throttled`、
+  それ以外（`Spawn`/`Io`/`Serde`/`Other`）は**ワイルドカード `Err(_) => SpawnFailed`**（`AdapterError` の全バリアントを名指しで網羅する
+  `match` ではない。監査で指摘: 将来 `AdapterError` にバリアントが増えても無言で `spawn_failed` に落ちる。挙動として問題は無いが
+  コンパイラの網羅性チェックが効かない点は未解決事項に記録した）。`Terminal::Error`（プロトコル上のワーカー自己申告エラー）も
+  一律 `spawn_failed` に写す。fake アダプタでの `throttled`/`spawn_failed` の直接再現は未実施（受け入れ条件は `ok`/`auth_failed` の
+  再現だけを求めている）。
+
+**5. 重複 id の追加は 409、存在しない id の変更・削除は 404、`reload` で cooldown が消える**
+- 同 e2e テスト内: `POST /providers`（既存 id）→ 409 `provider_exists`。`PATCH`/`DELETE /providers/does-not-exist` → 404 `provider_not_found`。
+- `tests/e2e/tests/provider_admin_scenarios.rs::reload_clears_provider_cooldown`（実バイナリ）: throttled を返す fake アダプタで
+  `acct-a` を cooldown に入れ、`GET /providers` の `cooldown` が非 `null` になることを確認 → `POST /reload` → `cooldown` が
+  `null` に戻ることを確認（`StaticPolicy` を作り直すため）。
+
+**6. `cargo test --workspace` と clippy が通り、`docs/api/v1/api-v1.schema.json` が再生成されている**
+- `cargo test --workspace` → **exit 0、485 passed、0 failed、1 ignored**（`ssh_cluster_manual`。Phase 12 と同じ、人が実クラスタで回すもの）。
+  ベースライン（Phase 10 コミット時点）は 469、本 Phase で +16（`task-api::admin` 単体 4 + `taskd::config` の
+  `providers_include` 単体 3 + e2e `provider_admin_scenarios` 3 + 監査後に追加した `task-api::tests::providers_admin`（下記「監査結果」参照）6）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → exit 0、警告 0。
+- `UPDATE_SCHEMA=1 cargo test -p task-api schema::` でスキーマを再生成し、その後 `UPDATE_SCHEMA` 無しの
+  `committed_schema_matches_generated` が通ることを確認（差分ゼロ、+59 行: `ReloadResult`/`ProviderCheckResponse`/`ProviderCheckResult`/
+  `ProviderLive.env_keys` 等）。
+
+### CLAUDE.md の共通条件
+
+- ディスパッチャ・ストアに LLM 呼び出しは無い（`task-dispatch::Dispatcher::reload_providers`/`set_snapshot_providers` はフィールドの
+  差し替えのみ。`task-api` は `task-worker`/`task-dispatch` に依存しない設計を維持し、`Cargo.toml` の依存は `toml` の追加だけ）。
+- `unwrap()` はテスト以外に無い（変更・新規の `src/` 13 ファイルについて `#[cfg(test)]` より前の `unwrap()` を機械的に走査して 0 件。
+  監査後の修正分・`crates/task-api/src/middleware.rs` を含め再走査済み）。
+- テストは外部ネットワークに出ない（e2e は `curl` で 127.0.0.1 の空きポートへ、ワーカーは `sh` スクリプト。`check` の疎通確認も
+  同じ fake アダプタを起動するだけ）。
+- DESIGN.md は編集していない（`providers_include` の構文が ADR-0017 D1 の例と異なる点は下の「提案」に記録）。
+
+### 監査結果
+
+auditor サブエージェントを1回起動（読み取り専用、`cargo test --workspace`・clippy・e2e を自分で再実行、加えて taskd を
+実際に `/tmp` で起動して `curl` で挙動を確認）。総合判定は **条件付き可**。受け入れ条件1〜6は全て個別に「満たしている」。
+CLAUDE.md 禁止事項（LLM 呼び出し・`unwrap()`）も違反なし。一方でセキュリティ上の指摘 2 件があり、その場で修正した:
+
+- **(A)【要修正→修正済み】** `PATCH /providers/{id}` と `DELETE /providers/{id}` が `create_provider` と同じ id 検証
+  （`valid_provider_id`）を通していなかった。`Params<String>`（axum の `Path` 抽出）はパーセントデコード後の値をそのまま渡すため、
+  `id = "..%2Fvictim"` のような要求で `providers_dir` の**外**にある任意の `.toml` を読み書き・削除できた（監査は実機で
+  `DELETE /providers/..%2Fvictim` が外部ファイルを実際に消すこと、`PATCH` が外部ファイルの内容を `providers.d/` 配下に
+  コピーし、その後 `reload` すると稼働中プロバイダとして注入されることまで確認した）。`handlers.rs` の `patch_provider`/
+  `delete_provider` の先頭で `valid_provider_id(&id)` を呼び、無効なら（パス構築より前に）404 `provider_not_found` を返すよう修正。
+  回帰テスト `crates/task-api/tests/providers_admin.rs::patch_and_delete_reject_path_traversal_ids_without_touching_files_outside_providers_dir`
+  を追加（`..%2Fvictim` / `..%2F..%2Fvictim` の両方で 404、被害者ファイルが無傷、`providers_dir` に何も作られないことを確認）。
+- **(B)【要修正→修正済み】** `Origin` ヘッダの拒否（`middleware.rs::check_request`）が `Method::POST` だけに掛かっており、
+  Phase 11 で新設した `PATCH`/`DELETE` を素通りしていた（実機で `PATCH`/`DELETE /providers/...` に `Origin: http://evil.example`
+  を付けても 200 で成立することを確認）。`is_mutating`（POST/PATCH/DELETE）で `Origin` 拒否を判定し、Content-Type / 本文サイズの
+  検査は本文を伴う POST/PATCH だけに限定するよう修正（DELETE は本文を取らないため）。`docs/gui/api.md` §1.4 も合わせて更新。
+  回帰テスト `providers_admin.rs::patch_and_delete_reject_requests_carrying_an_origin_header` を追加。
+- 監査が指摘した文言の不正確さ2件（条件3の証拠が`to_view()`を直接検証しないテストを挙げていた、条件4の「全バリアントを
+  網羅するmatch」という表現が実際はワイルドカード`_`だった）も本節上部の証拠テキストを訂正して解消した。
+- 監査が「無視してよい」とした軽微な点: `create/patch/delete` のファイル I/O 失敗を `ApiProblem::internal(e.to_string())` で
+  返しており、`providers.d/…` の絶対パスが管理者（トークン保持者）に見える。秘密の値・`token_file` の中身は出ないため
+  対応不要と判断（未解決事項に記録）。
+
+再監査は auditor サブエージェントを再起動せず自分で実施: 上記2件の修正後に `cargo test --workspace`（**485 passed**,
+exit 0）、`cargo clippy --workspace --all-targets -- -D warnings`（exit 0, 警告0）、`cargo test -p e2e --test provider_admin_scenarios`
+（3 passed）、`cargo test -p task-api --test providers_admin`（新規回帰テスト含め 6 passed）を再実行して確認した。
+
+### 未解決事項
+
+- Phase 10 から持ち越し（未着手、人間の判断待ち。今回は対処しない）: P-4、P-6、P-10、P-5/P-18、`store.insert` の非トランザクション性、
+  子待ちの親の再起動時 `ReviewVerdict` 二重記録（M5）、`aggregate=false` の子失敗が親に伝わらない（M5/P-56）。
+- **人間による確認待ちは無い**: Phase 11 の `check`/`reload`/CRUD は全て fake アダプタとローカルファイルシステムで検証済みで、
+  実際の Claude Code / Codex 固有の挙動には依存しない（`check` が実行するのは `taskctl worker run` と同じ既存の
+  アダプタ起動経路なので、Phase 4/6 で既にドッグフード済みの経路の再利用）。
+- `POST /reload` は `Config::load` を同期的に（`tick_loop` の中で）呼ぶ。`providers.d/` に大量のファイルがあると
+  その分だけ 1 tick が伸びる（通常運用では無視できる量だが、数百ファイル規模なら `spawn_blocking` 化を検討）。
+- `check` は毎回ゼロから `Config::load` し直すため、`providers_include` の壊れた TOML が 1 つでもあると `check` 全体が失敗する
+  （`ConfigInvalid` として 400 を返す。該当ファイルを直すまで他のアカウントの `check` もできない）。
+- `PATCH /providers/{id}` は `id`/`adapter` を変更できない設計にした（ADR-0017 D1 の文言どおり「並列度・tier・model」が対象。
+  `adapter` を変えたい場合は削除して作り直す運用になる）。
+- `providers.d/` にアカウントを追加しても、`reload` を呼ばない限り `taskctl add`/`taskctl worker run --provider` からは
+  見えない（`taskd.toml` を直接読むため）。GUI/API 経由の運用に閉じるなら実害は無い。
+- `EVENT_TYPES`（`task-api::query`）に Phase 12 の `cluster_unavailable` が無い（Phase 10 から持ち越し、本 Phase でも未対応。
+  別の追補で直す）。
+- 監査で軽微と判断され対応しなかった点: `create`/`patch`/`delete` のファイル I/O 失敗（ディスク書き込みエラー等、通常は
+  起きない）を `ApiProblem::internal(e.to_string())` でそのまま返しており、`providers.d/…` の絶対パスが管理トークン保持者に
+  見える。秘密の値・`token_file` の中身は出ないため実害は小さいと判断した。
+
+### 提案（DESIGN.md への修正提案。DESIGN.md 本体は編集していない）
+
+- P-57: DESIGN §6 Phase 11 の `[providers] include = "providers.d/*.toml"` という構文例を、実装した
+  `providers_include = "providers.d/*.toml"`（トップレベルのフラットなキー）に合わせて訂正する（ADR-0017 M1。
+  `[[providers]]` との TOML 上の衝突を避けるため。既存の `[[providers]]` 利用箇所（23 ファイル）を破壊的に変えない判断）。
+- P-58: §4.3 `Event` または新しい非イベント型として、`check` の結果を `DaemonSnapshot` に「最後に確認した時刻と結果」として
+  残す拡張（ADR-0017 D2 の 3 番目の箇条「最後の確認時刻と結果」を GUI に出す入口。現状は `check` の HTTP 応答にしか残らず、
+  ページを閉じると消える）。
+- P-59: `providers_include` のディレクトリ監視（`inotify` 等）を足し、`providers.d/` への直接の手書き編集も
+  `reload` 無しで拾えるようにする提案（現状は API 経由の変更も含め `reload` 明示が必須で、これは ADR-0017 D1 の
+  意図どおりだが、運用上「手で編集して忘れずに reload する」手間が残る）。

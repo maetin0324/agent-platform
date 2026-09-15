@@ -12,8 +12,8 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use futures_util::StreamExt;
 use serde_json::Value;
 use task_api::{
-    ApiConfigView, ApiSettings, ApiState, ClusterConfigView, ConfigView, ProviderConfigView, ReviewerConfigView,
-    RoleConfigView,
+    AdminRequest, ApiConfigView, ApiSettings, ApiState, ClusterConfigView, ConfigView, ProviderConfigView,
+    ReviewerConfigView, RoleConfigView,
 };
 use task_core::{
     Budget, Check, Criterion, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
@@ -22,7 +22,7 @@ use task_core::{
 use task_ops::daemon::{ClusterLive, CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
 use task_ops::view::ViewContext;
 use time::OffsetDateTime;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tower::ServiceExt;
 
 pub const HOST: &str = "127.0.0.1:7710";
@@ -34,6 +34,10 @@ pub struct EnvOptions {
     pub allowed_hosts: Vec<String>,
     /// ADR-0016 D1: `POST /tasks` の省略値を埋める `[[roles]]`。
     pub roles: Vec<task_core::RoleSpec>,
+    /// ADR-0017 M1: `providers.d/` の書き込み先。`None` なら管理系の作成/変更/削除は使えない。
+    pub providers_dir: Option<PathBuf>,
+    /// ADR-0017 M2: `reload`/`check` を受け取るチャネルの送信側。`None` ならどちらも使えない。
+    pub admin_tx: Option<mpsc::Sender<AdminRequest>>,
 }
 
 pub struct TestEnv {
@@ -184,6 +188,8 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         taskd_version: "0.9.0-test".into(),
         instance_id: "01J9ZX5T3K8Q7W6V5R4P3N2M1H".into(),
         started_at: "2026-09-14T00:00:00Z".into(),
+        providers_dir: options.providers_dir,
+        admin_tx: options.admin_tx,
     }
 }
 
@@ -263,6 +269,7 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
                 tiers: vec![Tier::Frontier, Tier::Standard],
                 concurrency: 2,
                 model: Some("claude-sonnet-5".into()),
+                env_keys: vec!["CLAUDE_CONFIG_DIR".into()],
                 in_use: 1,
             },
             ProviderLive {
@@ -271,6 +278,7 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
                 tiers: vec![Tier::Frontier],
                 concurrency: 1,
                 model: None,
+                env_keys: vec![],
                 in_use: 0,
             },
         ],
@@ -301,6 +309,44 @@ pub fn post_json(path: &str, body: &Value) -> Request<Body> {
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .expect("request")
+}
+
+/// `post_json` にヘッダを足す（`authorization` を渡す admin エンドポイントのテスト用）。
+pub fn post_json_with(path: &str, body: &Value, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut request = post_json(path, body);
+    for (name, value) in headers {
+        request.headers_mut().insert(
+            axum::http::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+            axum::http::HeaderValue::from_str(value).expect("header value"),
+        );
+    }
+    request
+}
+
+pub fn patch_json_with(path: &str, body: &Value, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut request = Request::patch(path)
+        .header("host", HOST)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    for (name, value) in headers {
+        request.headers_mut().insert(
+            axum::http::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+            axum::http::HeaderValue::from_str(value).expect("header value"),
+        );
+    }
+    request
+}
+
+pub fn delete_with(path: &str, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut request = Request::delete(path).header("host", HOST).body(Body::empty()).expect("request");
+    for (name, value) in headers {
+        request.headers_mut().insert(
+            axum::http::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+            axum::http::HeaderValue::from_str(value).expect("header value"),
+        );
+    }
+    request
 }
 
 pub struct Resp {

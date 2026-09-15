@@ -455,6 +455,27 @@ impl Dispatcher {
         self.publisher = Some(publisher);
     }
 
+    /// ADR-0017 M2: `POST /api/v1/reload` — 稼働中のプロバイダ選定・アダプタ一式を丸ごと差し替える。
+    /// 実行中の run はそれぞれ差し替え前のアダプタの `Arc` を既に掴んでいるので影響を受けない（D1）。
+    pub fn reload_providers(
+        &mut self,
+        policy: Box<dyn ProviderPolicy>,
+        models: HashMap<ProviderId, String>,
+        adapters: HashMap<ProviderId, Arc<dyn WorkerAdapter>>,
+    ) {
+        self.policy = policy;
+        self.models = models;
+        self.adapters = adapters;
+    }
+
+    /// ADR-0017 M4: 次 tick のスナップショットに乗るプロバイダ一覧を差し替える（`reload_providers` とあわせて呼ぶ）。
+    /// `set_snapshot_publisher` より前（`publisher` が無い状態）で呼んでも無害（何もしない）。
+    pub fn set_snapshot_providers(&mut self, providers: Vec<ProviderLive>) {
+        if let Some(publisher) = self.publisher.as_mut() {
+            publisher.providers = providers;
+        }
+    }
+
     /// 1 tick。tokio ランタイム内から呼ぶ（ワーカーとレビューを `tokio::spawn` する）。
     pub fn tick(&mut self) -> Result<TickReport, DispatchError> {
         self.ticks += 1;
@@ -2962,6 +2983,7 @@ mod tests {
                 tiers: vec![Tier::Standard],
                 concurrency: 1,
                 model: Some("m".into()),
+                env_keys: vec![],
                 in_use: 0,
             }],
         });

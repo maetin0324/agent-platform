@@ -65,6 +65,9 @@ pub struct ProviderLive {
     pub concurrency: usize,
     /// 実効モデル（空なら `None`）。
     pub model: Option<String>,
+    /// `env` のキー名だけ（値は出さない）。古いスナップショットには無いので既定は空（ADR-0017 M4）。
+    #[serde(default)]
+    pub env_keys: Vec<String>,
     /// 実行中の run と Reviewer run の合計。
     pub in_use: u32,
 }

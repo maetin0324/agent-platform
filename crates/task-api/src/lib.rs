@@ -13,8 +13,9 @@ use std::time::Duration;
 
 use task_ops::daemon::DaemonSnapshot;
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
+mod admin;
 mod files;
 mod handlers;
 mod middleware;
@@ -26,6 +27,7 @@ mod state;
 mod stats;
 pub mod types;
 
+pub use admin::{AdminRequest, CheckError, ProviderCheckResult};
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};
 pub use stats::classify_outcome;
@@ -75,6 +77,11 @@ pub struct ApiSettings {
     pub instance_id: String,
     /// RFC 3339。
     pub started_at: String,
+    /// ADR-0017 M1: `providers.d/<id>.toml` の書き込み先。`providers_include` が未設定なら `None`
+    /// （そのときは管理系の作成/変更/削除が使えない）。
+    pub providers_dir: Option<PathBuf>,
+    /// ADR-0017 M2: `reload` / `check` を taskd（ワーカー起動ができる側）へ委譲するチャネル。`None` なら両方使えない。
+    pub admin_tx: Option<mpsc::Sender<AdminRequest>>,
 }
 
 impl std::fmt::Debug for ApiSettings {
@@ -91,6 +98,8 @@ impl std::fmt::Debug for ApiSettings {
             .field("taskd_version", &self.taskd_version)
             .field("instance_id", &self.instance_id)
             .field("started_at", &self.started_at)
+            .field("providers_dir", &self.providers_dir)
+            .field("admin_tx", &self.admin_tx.as_ref().map(|_| "<sender>"))
             .finish()
     }
 }

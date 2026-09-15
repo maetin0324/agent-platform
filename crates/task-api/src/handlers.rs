@@ -8,7 +8,7 @@ use axum::extract::{FromRequestParts, Path, RawQuery, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -19,14 +19,19 @@ use task_ops::plan::NewPlanSpec;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::admin::{
+    AdminRequest, ProviderCreateBody, ProviderPatchBody, read_provider_file, valid_adapter, valid_provider_id,
+    write_provider_file,
+};
 use crate::files::{self, FileRequest, FileTarget, RunFile};
+use crate::middleware::require_admin;
 use crate::problem::{ApiProblem, ops_problem, store_problem};
 use crate::query::{QueryParams, event_type_name, parse_snake, parse_task_id};
 use crate::schema::API_V1_SCHEMA_JSON;
 use crate::state::ApiState;
 use crate::types::{
     AnswerBody, ArtifactList, CancelBody, ClusterView, Clusters, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
-    ProviderView, Providers, RunList, ValidationError,
+    ProviderCheckResponse, ProviderConfigView, ProviderView, Providers, ReloadResult, RunList, ValidationError,
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
@@ -57,7 +62,10 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/graph", get(graph))
         .route("/api/v1/events", get(events))
         .route("/api/v1/stream", get(crate::sse::stream))
-        .route("/api/v1/providers", get(providers))
+        .route("/api/v1/providers", get(providers).post(create_provider))
+        .route("/api/v1/providers/{id}", patch(patch_provider).delete(delete_provider))
+        .route("/api/v1/providers/{id}/check", post(check_provider))
+        .route("/api/v1/reload", post(reload))
         .route("/api/v1/clusters", get(clusters))
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
@@ -665,15 +673,31 @@ async fn graph(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRes
 
 // ---- 22. GET /providers ----
 
+/// ADR-0017 M4: `reload` 後は `config_view.providers`（起動時に固定）ではなく、次 tick のスナップショットに
+/// 乗った一覧を正とする（`Dispatcher::set_snapshot_providers` が更新する）。最初の tick 前だけ静的な値にフォールバックする。
+fn current_providers(state: &ApiState, snapshot: Option<&task_ops::daemon::DaemonSnapshot>) -> Vec<ProviderConfigView> {
+    match snapshot {
+        Some(s) if !s.providers.is_empty() || state.inner.config_view.providers.is_empty() => s
+            .providers
+            .iter()
+            .map(|p| ProviderConfigView {
+                id: p.id.clone(),
+                adapter: p.adapter.clone(),
+                tiers: p.tiers.clone(),
+                concurrency: p.concurrency,
+                model: p.model.clone(),
+                env_keys: p.env_keys.clone(),
+            })
+            .collect(),
+        _ => state.inner.config_view.providers.clone(),
+    }
+}
+
 async fn providers(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
-    let ids: Vec<String> = state
-        .inner
-        .config_view
-        .providers
-        .iter()
-        .map(|p| p.id.clone())
-        .collect();
+    let snapshot = state.snapshot();
+    let providers = current_providers(&state, snapshot.as_ref());
+    let ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
     let inner = Arc::clone(&state.inner);
     let today = OffsetDateTime::now_utc().date();
     let stats = state
@@ -683,11 +707,7 @@ async fn providers(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Ap
             Ok(ids.iter().map(|id| guard.view(id, today)).collect::<Vec<_>>())
         })
         .await?;
-    let snapshot = state.snapshot();
-    let items = state
-        .inner
-        .config_view
-        .providers
+    let items = providers
         .iter()
         .zip(stats)
         .map(|(provider, stats)| ProviderView {
@@ -709,6 +729,158 @@ async fn providers(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Ap
         })
         .collect();
     Ok(json_response(StatusCode::OK, &Providers { items }))
+}
+
+// ---- 27〜31. プロバイダ管理（ADR-0017） ----
+
+async fn create_provider(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let Some(dir) = state.inner.providers_dir.clone() else {
+        return Err(ApiProblem::providers_admin_unavailable());
+    };
+    let create: ProviderCreateBody = read_json(body, false).await?;
+    if !valid_provider_id(&create.id) {
+        return Err(ApiProblem::bad_request(
+            "id must be 1-64 ASCII alphanumeric/-/_ characters",
+        ));
+    }
+    if !valid_adapter(&create.adapter) {
+        return Err(ApiProblem::bad_request("adapter must be one of fake, claude-code, codex"));
+    }
+    if create.concurrency.is_some_and(|c| c == 0) {
+        return Err(ApiProblem::bad_request("concurrency must be >= 1"));
+    }
+    let path = crate::admin::provider_file_path(&dir, &create.id);
+    if path.exists() {
+        return Err(ApiProblem::provider_exists(&create.id));
+    }
+    let file = create.into_file();
+    write_provider_file(&dir, &file).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    tracing::info!(who = "admin", op = "provider_create", provider_id = %file.id, adapter = %file.adapter, "admin: provider created");
+    let mut response = json_response(StatusCode::CREATED, &file.to_view());
+    if let Ok(location) = HeaderValue::from_str(&format!("/api/v1/providers/{}", file.id)) {
+        response.headers_mut().insert(header::LOCATION, location);
+    }
+    Ok(response)
+}
+
+async fn patch_provider(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let Some(dir) = state.inner.providers_dir.clone() else {
+        return Err(ApiProblem::providers_admin_unavailable());
+    };
+    // id はファイル名に使う（`provider_file_path`）。`create_provider` と同じ検証をここでも通さないと、
+    // `..%2F` のような id でディレクトリの外のファイルを読み書きできてしまう（監査で発見）。
+    if !valid_provider_id(&id) {
+        return Err(ApiProblem::provider_not_found(&id));
+    }
+    let path = crate::admin::provider_file_path(&dir, &id);
+    if !path.exists() {
+        return Err(ApiProblem::provider_not_found(&id));
+    }
+    let patch: ProviderPatchBody = read_json(body, true).await?;
+    if patch.concurrency.is_some_and(|c| c == 0) {
+        return Err(ApiProblem::bad_request("concurrency must be >= 1"));
+    }
+    let current = read_provider_file(&path).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    let updated = patch.apply(current);
+    write_provider_file(&dir, &updated).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    tracing::info!(who = "admin", op = "provider_patch", provider_id = %id, "admin: provider patched");
+    Ok(json_response(StatusCode::OK, &updated.to_view()))
+}
+
+async fn delete_provider(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let Some(dir) = state.inner.providers_dir.clone() else {
+        return Err(ApiProblem::providers_admin_unavailable());
+    };
+    // id はファイル名に使う（`provider_file_path`）。`create_provider` と同じ検証をここでも通さないと、
+    // `..%2F` のような id でディレクトリの外のファイルを削除できてしまう（監査で発見）。
+    if !valid_provider_id(&id) {
+        return Err(ApiProblem::provider_not_found(&id));
+    }
+    let path = crate::admin::provider_file_path(&dir, &id);
+    if !path.exists() {
+        return Err(ApiProblem::provider_not_found(&id));
+    }
+    std::fs::remove_file(&path).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    tracing::info!(who = "admin", op = "provider_delete", provider_id = %id, "admin: provider deleted");
+    Ok(json_response(StatusCode::OK, &serde_json::json!({})))
+}
+
+async fn reload(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::providers_admin_unavailable());
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx.send(AdminRequest::Reload { reply: reply_tx }).await.is_err() {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
+        Ok(Ok(Ok(()))) => {
+            tracing::info!(who = "admin", op = "reload", "admin: providers reloaded");
+            Ok(json_response(StatusCode::OK, &ReloadResult { reloaded: true }))
+        }
+        Ok(Ok(Err(message))) => Err(ApiProblem::bad_request(format!("invalid config: {message}"))),
+        Ok(Err(_)) => Err(ApiProblem::internal("taskd dropped the reload request")),
+        Err(_) => Err(ApiProblem::internal("reload timed out")),
+    }
+}
+
+async fn check_provider(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::providers_admin_unavailable());
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx
+        .send(AdminRequest::Check { provider_id: id.clone(), reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the check request")),
+        Err(_) => return Err(ApiProblem::internal("check timed out")),
+    };
+    match outcome {
+        Ok(result) => {
+            tracing::info!(who = "admin", op = "provider_check", provider_id = %id, result = ?result, "admin: provider checked");
+            Ok(json_response(
+                StatusCode::OK,
+                &ProviderCheckResponse { result, checked_at: now_rfc3339() },
+            ))
+        }
+        Err(crate::admin::CheckError::NotFound) => Err(ApiProblem::provider_not_found(&id)),
+        Err(crate::admin::CheckError::ConfigInvalid(message)) => {
+            Err(ApiProblem::bad_request(format!("invalid config: {message}")))
+        }
+        Err(crate::admin::CheckError::Unavailable(message)) => Err(ApiProblem::internal(message)),
+    }
 }
 
 // ---- 23. GET /clusters ----
@@ -764,7 +936,10 @@ async fn daemon(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
 
 async fn config(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
-    Ok(json_response(StatusCode::OK, &state.inner.config_view))
+    let snapshot = state.snapshot();
+    let mut view = state.inner.config_view.clone();
+    view.providers = current_providers(&state, snapshot.as_ref());
+    Ok(json_response(StatusCode::OK, &view))
 }
 
 async fn schema(RawQuery(raw): RawQuery) -> ApiResult {
@@ -835,6 +1010,8 @@ mod tests {
             taskd_version: "test".into(),
             instance_id: "01J00000000000000000000000".into(),
             started_at: "2026-09-14T00:00:00Z".into(),
+            providers_dir: None,
+            admin_tx: None,
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))

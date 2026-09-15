@@ -120,6 +120,19 @@ pub struct Providers {
     pub items: Vec<ProviderView>,
 }
 
+/// `POST /api/v1/reload` の応答（ADR-0017 D1）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReloadResult {
+    pub reloaded: bool,
+}
+
+/// `POST /api/v1/providers/{id}/check` の応答（ADR-0017 D2）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderCheckResponse {
+    pub result: crate::admin::ProviderCheckResult,
+    pub checked_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderView {
     pub id: String,
