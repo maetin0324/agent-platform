@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+/* 外部フォント・CDN は読まない（docs/DESIGN.md §8.2 CSP）。システムフォントを使う。 */
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+}
+
+html,
+body {
+  @apply bg-white text-gray-900;
+}

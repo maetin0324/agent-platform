@@ -1,0 +1,48 @@
+{
+  "name": "taskd-gui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web GUI for taskd (BFF over taskd HTTP API v1)",
+  "packageManager": "pnpm@11.27.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "react-router build",
+    "dev": "NODE_ENV=development node --conditions development server.js",
+    "start": "node server.js",
+    "typecheck": "react-router typegen && tsc -b",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "gen:types": "node scripts/gen-types.mjs"
+  },
+  "dependencies": {
+    "@react-router/express": "8.3.1",
+    "@react-router/node": "8.3.1",
+    "clsx": "2.1.1",
+    "express": "5.2.1",
+    "isbot": "5.2.2",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router": "8.3.1",
+    "tailwind-merge": "3.6.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@playwright/test": "1.63.0",
+    "@react-router/dev": "8.3.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/express": "5.0.6",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "json-schema-to-typescript": "16.0.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vitest": "5.0.0"
+  }
+}

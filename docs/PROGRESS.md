@@ -7,7 +7,7 @@
 
 | フェーズ | 内容 | 状態 | 完了日 |
 |---|---|---|---|
-| G0 | 骨組みと前提の確定 | 未着手 | — |
+| G0 | 骨組みと前提の確定 | **DONE** | 2026-09-15 |
 | G1 | 読み取りとストリーム | 未着手 | — |
 | G2 | 操作 | 未着手 | — |
 | G3 | ログ・成果物・DAG | 未着手 | — |
@@ -22,7 +22,8 @@
 
 ## 提案（`docs/DESIGN.md` / `docs/taskd-api-v1.md` への変更提案。採否は人間）
 
-（なし）
+- G0-P1: `docs/DESIGN.md` §0 / §10 の「React 19.3」は「React 19.2 以上（cooldown 7 日を満たす最新）」と読み替えた（ADR-0003 D2）。文言を「19.2+」にすると実態と合う。
+- G0-P2: `docs/DESIGN.md` §10 Phase G0 の「shadcn/ui（`-t react-router`）」: `shadcn init -t react-router` は新規プロジェクト生成用で、既存プロジェクトには `components.json` を置くだけでよい。G0 の記述を「`components.json` と `lib/utils.ts` を置く」に緩めるとよい（ADR-0003 D8）。
 
 ## taskd への依頼（`docs/taskd-requests.md` の要約）
 
