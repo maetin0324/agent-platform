@@ -481,16 +481,23 @@ LLM を使う実機確認は、認証が使える環境ならエージェント�
   4. 再読込で cooldown が消えること、`[[providers]]` の重複 id を拒否することのテスト
   5. GUI からアカウントを追加すると、ログイン手順（コピーできるコマンド）が表示される
 
-### Phase 12 — 複数クラスタへの投入（ssh。ADR-0018。設計のみ、未着手）
+### Phase 12 — クラスタでのコマンド実行（ssh + ControlMaster。ADR-0018）
 
-- `[[clusters]]`、`task-remote`（ssh でワーカーを起動し JSON Lines を中継、rsync による往復同期）、リモートでの `Check::Command` 実行、クラスタごとの並列度と cooldown
-- 受け入れ（**ssh 先を localhost にして行い、外部ネットワークに出ない**）:
-  1. `WorkspaceSpec::Remote{cluster, path}` のタスクが、ssh 越しの fake ワーカーで実行され `done` になる。`WorkerStarted` にクラスタが残る
-  2. run の前後で rsync が往復し、リモートで作られた成果物がローカルの sha256 で判定される。`sync = "none"` では同期しない
-  3. `Check::Command` がリモート側で実行される（ローカルには無いファイルを使う条件が通る）
-  4. ssh の失敗（宛先不達・`setup` の失敗）は供給側失敗として requeue され、そのクラスタが cooldown に入り、attempts を消費しない
-  5. クラスタとプロバイダの並列度が両方守られる。設定に無い `cluster` のタスクは `unroutable` として扱われ、`--until-idle` を止めない
-  6. `taskctl replay` の差分ゼロ
+人間の判断: **LLM は手元で動かし、クラスタで実行するのはコマンドだけ**。pegasus / sirius は 2 要素認証なので、ssh を張るのは人の操作で、
+taskd は `ControlMaster` の多重接続を借りるだけ（対話的な認証は行わない）。
+
+- `[[clusters]]`（host / remote_workdir / concurrency / sync / setup / env）、`Task.exec_site`、`.taskd/remote-exec`（ワーカー用のラッパ）、
+  リモートでの `Check::Command` 実行、rsync による往復同期（`sync = "none"` で無効）、クラスタごとの並列度と cooldown、`Event::ClusterUnavailable`
+- 受け入れ（**ssh 先を `localhost` にして行い、外部ネットワークに出ない**）:
+  1. `exec_site` を指定したタスクの `Check::Command` が ssh 越しに実行される（リモートにしか無いファイルを使う条件が通り、ローカルだけで済ませた run は落ちる）
+  2. 多重接続が無いクラスタのタスクは、供給側失敗として requeue され（attempts を消費しない）、そのクラスタが cooldown に入り、
+     `Event::ClusterUnavailable` が残る。GUI の「注意」に「ログインし直してください」が出る
+  3. `sync = "rsync"` では run の前後で往復し、リモートで作られた成果物がローカルの sha256 で判定される。`sync = "none"` では同期しない
+  4. `.taskd/remote-exec <cmd>` がクラスタで実行され、終了コードと出力がそのまま返る。同期対象から外れている
+  5. クラスタとプロバイダの並列度が両方守られる。設定に無い `exec_site` のタスクは `unroutable` として扱われ、`--until-idle` を止めない
+  6. ssh 自身の失敗（終了コード 255）は供給側失敗、リモートコマンドの非ゼロ終了は判定の失敗として区別される
+  7. `taskctl replay` の差分ゼロ
+- 運用の道具: `config/ssh-config.example`、`scripts/cluster-login.sh`（人が 2 要素認証を通して接続を張る）、`scripts/cluster-check.sh`（前提と共有 FS の判定）
 
 ### 非目標（本プロジェクトではやらない）
 

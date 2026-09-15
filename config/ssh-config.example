@@ -1,0 +1,31 @@
+# クラスタ用の ~/.ssh/config の雛形（ADR-0018 D2 / D6）。
+#
+# pegasus / sirius は 2 要素認証なので、接続を張るのは人。taskd は「張られている接続を借りる」だけで、
+# 対話的な認証は行わない（常に BatchMode=yes）。そのため ControlMaster による多重化が前提になる。
+#
+# 使い方:
+#   1. 下の Host 名・HostName・User を自分の環境に合わせて ~/.ssh/config に追記する
+#   2. mkdir -p ~/.ssh/cm && chmod 700 ~/.ssh/cm
+#   3. scripts/cluster-login.sh pegasus   # ここで 2 要素認証を通す（1 回だけ）
+#   4. scripts/cluster-check.sh pegasus   # 接続と前提（rsync・共有 FS など）を確認する
+#
+# ControlPersist を過ぎると接続は自動で閉じる。閉じたら taskd はそのクラスタを cooldown にし、
+# GUI の「注意」に「ログインし直してください」と出す（ADR-0018 D2）。
+
+Host pegasus
+    HostName pegasus.example.jp        # ← 実際のホスト名に直す
+    User rmaeda                        # ← 実際のログイン名に直す
+    ControlMaster auto
+    ControlPath ~/.ssh/cm/%r@%h:%p
+    ControlPersist 8h
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+
+Host sirius
+    HostName sirius.example.jp         # ← 実際のホスト名に直す
+    User rmaeda
+    ControlMaster auto
+    ControlPath ~/.ssh/cm/%r@%h:%p
+    ControlPersist 8h
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
