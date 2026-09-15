@@ -87,8 +87,39 @@ G5 は「認証・配布・仕上げ」（strong）。非 loopback バインド�
 - e2e はこの taskd に対して GUI を 2 回起動する（`TASKD_API_TOKEN_FILE` あり / 無し）。GUI の stderr は `.run/auth/gui.log` / `.run/auth/gui-notoken.log` に落とし、
   受け入れ条件 2 の `grep -r "<token>" build/ .run/*/gui*.log` を e2e の中で実行する。
 
+### D13. `scripts/taskd.sh` の `.run/` の実体はローカルディスクに置き、`TASKD_RUN_ROOT` で上書きできる
+
+- 背景: `docs/taskd-requests.md` R1（GUI 接続中に taskd の tick が 10〜30 秒止まる）の原因は taskd ではなく、`.run/` が NFS 上の `$HOME` にあり
+  SQLite の WAL がネットワーク FS で動いていたこと（taskd の ADR-0013 D5、ADR-0015）。
+- 決定: `RUN_ROOT` の優先順は `$TASKD_RUN_ROOT` > 既存の `$ROOT/.run` シンボリックリンクの先 > `${TMPDIR:-/tmp}/taskd-gui-run-$USER`。
+  `taskd.sh` は起動のたびに `RUN_ROOT` を作り `$ROOT/.run` をそこへのリンクにする（`.run` が既に実ディレクトリならそれを使う。中身を勝手に移さない）。
+  `RUN_ROOT` が `nfs*` / `cifs` / `fuse*` 上なら stderr に警告を出す（止めはしない）。
+- e2e・GUI・`capture-fixtures.sh` は従来どおり `$ROOT/.run/...` を参照する（リンク越し）。パスを環境変数で配る必要が無い。
+- 代替案「`RUN_ROOT` を `/tmp` 直下に固定し `.run` を廃止」は、既存 spec の `.run/auth/api.token` 等の参照を全て書き換える必要があり採らない。
+
+### D14. `TaskRef` / `TaskSummary` の `actions`（taskd ADR-0015 D4）を取り込み、受信箱 attention 区画の cancel 判定を `actions` に置き換える
+
+- `pnpm gen:types` を再生成し（`Action` 型、`TaskRef.actions`、`TaskSummary.actions`）、`test/fixtures/api/*.json` を `scripts/capture-fixtures.sh` で再採取した。
+- `app/routes/inbox.tsx` の attention 区画は `item.task.status !== done/failed/cancelled` の自前判定（G2-U6。§5.4 の規則の GUI 側再実装）を
+  `item.task.actions.includes("cancel")` に置き換える。他の区画は従来どおり `actions` を見ている。
+- `docs/taskd-api-v1.md` は GUI 側で書き換えない（CLAUDE.md）。taskd の `docs/gui/api.md` との同期（§5.4 と §6.2 の `actions` 追記）は PROGRESS の「taskd への依頼」に書く。
+
+### D15. 未定義パス・静的アセット・middleware が途中で返す応答にもヘッダと Host 検査を掛ける（G0 監査の引き継ぎ、G5 監査の指摘 1）
+
+- React Router の root middleware は**一致したルートがあるとき**しか走らない。未定義パスは middleware を通らず素の 404 HTML（CSP 無し、nonce 無しの inline script）になり、
+  `server.js` の `express.static` が配る `build/client` は React Router に届かない。`authCheck` が投げる 302 / 401 も後段の `securityHeaders` を通らない。
+- 決定:
+  1. catch-all ルート `app/routes/$.tsx`（`route("*")`）を置き、loader で 404 の `Response` を投げる。root middleware が走り、root の `ErrorBoundary` が nonce 付きで 404 を描く。
+  2. `server.js` に Express 層の middleware を置き（静的配信より前）、`X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` / 既定の CSP
+     `default-src 'none'; frame-ancestors 'none'; base-uri 'none'` を全応答に付け、`Host` が許可リスト外なら 400 で返す。許可リストの規則は `app/config.server.ts` と同じ
+     （loopback 名 + バインドのホスト + `TASKD_GUI_ALLOWED_HOSTS`）。React Router の応答が同名ヘッダを持てば上書きされる（HTML は nonce 付き CSP のまま）。
+  3. `authCheck` の 401 にも `X-Content-Type-Options: nosniff` を直接付ける（Express 層に依らず単体で正しい応答にする）。
+- root middleware の `hostCheck` は残す（開発サーバ `server/app.ts` 経由でも効くように）。二重だが害は無い。
+- 未認証時の root loader は `taskdApiUrl` も返さない（D5「接続先を出さない」を hydration payload まで含めて満たす。G5 監査の指摘 2）。
+
 ## 3. 影響
 
 - 追加ファイル: `app/auth.server.ts`、`app/routes/login.tsx`、`app/routes/logout.ts`、`e2e/test.ts`、`e2e/g5.spec.ts`、`e2e/g5-a11y.spec.ts`、`e2e/g5-release.spec.ts`、
   `scripts/release.sh`、`deploy/taskd-gui.service`、`Dockerfile`、`README.md`、`test/taskd/auth.toml.tmpl`、`test/unit/auth.test.ts`。
-- 変更: `server.js`（起動時検証）、`app/root.tsx`（middleware・loader・バナー・ログアウト）、`app/routes.ts`、`scripts/taskd.sh`（`fixture auth`）、`package.json`（`release`、`@axe-core/playwright`）。
+- 変更: `server.js`（起動時検証）、`app/root.tsx`（middleware・loader・バナー・ログアウト）、`app/routes.ts`、`app/routes/inbox.tsx`（D14）、`scripts/taskd.sh`（`fixture auth`、D13 の `RUN_ROOT`）、
+  `app/taskd/types.ts` と `test/fixtures/api/*.json`（再生成・再採取）、`package.json`（`release`、`@axe-core/playwright`）、`e2e/g0〜g4.spec.ts`（`./test` からの import）。

@@ -61,7 +61,7 @@ describe("runTaskAction", () => {
       from: "ready",
       to: "cancelled",
       reason: "cancelled",
-      cascaded: [{ id: "T2", kind: "execute", status: "cancelled", title: "child" }],
+      cascaded: [{ id: "T2", kind: "execute", status: "cancelled", title: "child", actions: [] }],
     };
     mock.on("POST", "/api/v1/tasks/T1/cancel", (_req, res, body) => {
       expect(JSON.parse(body)).toEqual({ expected_status: "ready" });

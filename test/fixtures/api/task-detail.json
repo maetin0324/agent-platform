@@ -1,7 +1,7 @@
 {
     "task": {
-        "id": "01M2HJDBRRMKXSF3YJYQ2PYTJ0",
-        "parent_id": "01M2HJD8P9Q444J57384N98HGV",
+        "id": "01M2JK4ARAKZJYVEMSQTSHPERK",
+        "parent_id": "01M2JK4AETAFK7PVXEV2SNNXAG",
         "kind": "approval",
         "title": "Approval needed: Human-B \u2014 criterion 0 (attempt 1)",
         "objective": "someone signs off",
@@ -25,12 +25,12 @@
         },
         "attempts": 0,
         "lease": null,
-        "created_at": "2026-09-15T03:40:16.536749794Z",
-        "updated_at": "2026-09-15T03:40:16.536749794Z"
+        "created_at": "2026-09-15T13:12:03.594262553Z",
+        "updated_at": "2026-09-15T13:12:03.594262553Z"
     },
-    "workspace_dir": "/home/rmaeda/workspace/taskd-gui/.run/basic/workspaces/ws-b",
+    "workspace_dir": "/local/rmaeda/taskd-gui-run/basic/workspaces/ws-b",
     "timers": {
-        "now": "2026-09-15T03:40:25.491965692Z",
+        "now": "2026-09-15T13:12:04.746093481Z",
         "lease_expires_at": null,
         "backoff_until": null,
         "consecutive_requeues": 0,
@@ -51,5 +51,5 @@
         "reject",
         "cancel"
     ],
-    "worker_run_hint": "taskctl worker run --config <taskd.toml> --task 01M2HJDBRRMKXSF3YJYQ2PYTJ0"
+    "worker_run_hint": "taskctl worker run --config <taskd.toml> --task 01M2JK4ARAKZJYVEMSQTSHPERK"
 }

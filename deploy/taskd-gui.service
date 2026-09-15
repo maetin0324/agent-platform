@@ -1,0 +1,30 @@
+[Unit]
+Description=taskd-gui (Web GUI BFF over taskd HTTP API v1)
+# taskd 本体の systemd unit 名は環境ごとに異なる。実際の unit 名に置き換えること（例: taskd.service）。
+After=network.target taskd.service
+Wants=taskd.service
+
+[Service]
+Type=simple
+User=taskd
+WorkingDirectory=/opt/taskd-gui
+Environment=TASKD_API_URL=http://127.0.0.1:7710
+Environment=TASKD_API_TOKEN_FILE=/etc/taskd/api.token
+Environment=TASKD_GUI_BIND=127.0.0.1:7700
+# 非 loopback で公開する場合は TASKD_GUI_PASSWORD_FILE と（任意で）TASKD_GUI_SESSION_SECRET_FILE / TASKD_GUI_ALLOWED_HOSTS も設定する。
+# Environment=TASKD_GUI_PASSWORD_FILE=/etc/taskd/gui-password
+# Environment=TASKD_GUI_SESSION_SECRET_FILE=/etc/taskd/gui-session-secret
+# Environment=TASKD_GUI_ALLOWED_HOSTS=gui.example.internal
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=2
+
+# ハードニング
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/taskd-gui
+
+[Install]
+WantedBy=multi-user.target

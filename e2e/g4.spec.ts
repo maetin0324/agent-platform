@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "@playwright/test";
 import type { Inbox, TaskDetail, TaskList } from "~/taskd/types";
+import { expect, test } from "./test";
 
 // Phase G4 の受け入れ条件 1〜4（docs/DESIGN.md §10 Phase G4、docs/adr/0007-g4-decisions.md）。
 // `multi-account` は cooldown がプロセス内メモリのみで DB から再構築できないため（ADR-0007 D1）、

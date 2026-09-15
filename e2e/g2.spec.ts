@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, type Page, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import type { EventRow, EventsPage, Task, TaskDetail, TaskList } from "~/taskd/types";
+import { expect, test } from "./test";
 
 // Phase G2 の受け入れ条件 1〜8（docs/DESIGN.md §10 Phase G2、docs/adr/0005 D7）。
 // `scripts/taskd.sh fixture basic && scripts/taskd.sh start basic` の実 taskd（fake ワーカー並走）に対して検証する。

@@ -1,5 +1,16 @@
 import { useEffect } from "react";
-import { isRouteErrorResponse, Links, Meta, Outlet, Scripts, ScrollRestoration, useRevalidator } from "react-router";
+import {
+  Form,
+  isRouteErrorResponse,
+  Links,
+  Meta,
+  Outlet,
+  Scripts,
+  ScrollRestoration,
+  useRevalidator,
+  useRouteLoaderData,
+} from "react-router";
+import { authCheck, sessionContext } from "~/auth.server";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { version as guiVersion } from "../package.json";
 import type { Route } from "./+types/root";
@@ -8,18 +19,31 @@ import { useTaskdStream } from "~/hooks/useTaskdStream";
 import { csrfCheck, hostCheck, securityHeaders } from "~/middleware/security.server";
 import { useNonce } from "~/nonce";
 import { getTaskdClient } from "~/taskd/client.server";
-import type { TaskdRouteErrorData } from "~/taskd/errors";
+import { TaskdError, type TaskdRouteErrorData } from "~/taskd/errors";
 import { loadHealth } from "~/taskd/health.server";
 import type { InboxCounts } from "~/taskd/types";
 
-// 全ルートに効くサーバ middleware（docs/DESIGN.md §8.2）。順序: Host 検査 → CSRF 検査（変更系のみ）→ nonce とヘッダ。
-export const middleware: Route.MiddlewareFunction[] = [hostCheck, csrfCheck, securityHeaders];
+// 全ルートに効くサーバ middleware（docs/DESIGN.md §8.2）。順序: Host 検査 → 認証（docs/adr/0008 D1）→ CSRF 検査（変更系のみ）→ nonce とヘッダ。
+export const middleware: Route.MiddlewareFunction[] = [hostCheck, authCheck, csrfCheck, securityHeaders];
 
 // 409 / 422 の action 後も再検証する（docs/adr/0005 D2）。
 export const shouldRevalidate = revalidateAfterActionErrors;
 
-export async function loader({ request }: Route.LoaderArgs) {
+export async function loader({ request, context }: Route.LoaderArgs) {
+  const session = context.get(sessionContext);
   const client = getTaskdClient();
+  // 未認証（= /login を描画中）は taskd を呼ばない。ログイン前に taskd の版や接続先を出さない（docs/adr/0008 D5）
+  if (!session.authenticated) {
+    return {
+      health: null,
+      unavailable: false,
+      problem: null,
+      counts: null,
+      session,
+      // 接続先も出さない（hydration payload にも載せない）
+      gui: { version: guiVersion, taskdApiUrl: "" },
+    };
+  }
   const state = await loadHealth(client, request.signal);
   // タイトルバーの承認待ちバッジ用（docs/DESIGN.md §4.1, §6.2, ADR-0004 D1）。
   // `/`（inbox ルート）が別途 `GET /inbox` を全項目のために呼ぶので、ここでは counts だけを使う。
@@ -28,12 +52,15 @@ export async function loader({ request }: Route.LoaderArgs) {
   if (!state.unavailable && state.health) {
     try {
       counts = (await client.get<{ counts: InboxCounts }>("/inbox", { signal: request.signal })).counts;
-    } catch {
+    } catch (e) {
       counts = null;
+      // `GET /health` は taskd 側で無認証なので、トークンが無い・違うことに最初に気づくのはここ（docs/adr/0008 D6）。
+      // 401 だけはバナーで知らせる（他は子ルートの ErrorBoundary が個別に出す）。
+      if (e instanceof TaskdError && e.status === 401) state.problem = `${e.status} ${e.code}`;
     }
   }
   // トークンは含めない。baseUrl は接続先の表示用（loopback が既定）。
-  return { ...state, counts, gui: { version: guiVersion, taskdApiUrl: client.baseUrl } };
+  return { ...state, counts, session, gui: { version: guiVersion, taskdApiUrl: client.baseUrl } };
 }
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -58,9 +85,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
 const RECHECK_MS = 5_000;
 
 export default function App({ loaderData }: Route.ComponentProps) {
-  const { health, unavailable, problem, counts, gui } = loaderData;
+  const { health, unavailable, problem, counts, gui, session } = loaderData;
   const revalidator = useRevalidator();
   const disconnected = unavailable || health === null;
+  const showBanner = disconnected || problem !== null;
 
   // taskd 停止中は 5 秒ごとに root だけ再検証し、復旧したらバナーを消す（§6.5）
   useEffect(() => {
@@ -72,7 +100,16 @@ export default function App({ loaderData }: Route.ComponentProps) {
   }, [disconnected, revalidator]);
 
   // SSE（`/events`）を root で 1 本だけ張り、`task.event` / `daemon` / `reset` を受けたらルートを再検証する（docs/DESIGN.md §6.3, ADR-0004 D2）。
-  useTaskdStream();
+  useTaskdStream({ enabled: session.authenticated });
+
+  // 未認証（/login）: ナビゲーションもフッタも出さない（docs/adr/0008 D5）
+  if (!session.authenticated) {
+    return (
+      <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-4">
+        <Outlet />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-4">
@@ -110,9 +147,16 @@ export default function App({ loaderData }: Route.ComponentProps) {
           <a href="/graph" className="hover:underline">
             DAG
           </a>
+          {session.enabled && (
+            <Form method="post" action="/logout">
+              <button type="submit" data-testid="logout" className="hover:underline">
+                ログアウト
+              </button>
+            </Form>
+          )}
         </nav>
       </header>
-      {disconnected && <TaskdBanner taskdApiUrl={gui.taskdApiUrl} problem={problem} />}
+      {showBanner && <TaskdBanner taskdApiUrl={gui.taskdApiUrl} problem={problem} />}
       <main className="flex-1 py-4">
         <Outlet />
       </main>
@@ -153,16 +197,21 @@ export function TaskdBanner({ taskdApiUrl, problem }: { taskdApiUrl: string; pro
       data-testid="taskd-banner"
       className="my-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900"
     >
-      <p className="font-semibold">taskd に接続できません（{taskdApiUrl}）</p>
+      <p className="font-semibold">
+        {problem ? `taskd が要求を拒否しました（${taskdApiUrl}）` : `taskd に接続できません（${taskdApiUrl}）`}
+      </p>
       <p>
-        {problem ? `taskd の応答: ${problem}。` : "taskd が起動しているか、TASKD_API_URL を確認してください。"}
-        操作はできません。taskctl は従来どおり使えます。5 秒ごとに再接続を試みます。
+        {problem
+          ? `taskd の応答: ${problem}。TASKD_API_TOKEN_FILE が taskd の token_file と一致しているか確認してください。`
+          : "taskd が起動しているか、TASKD_API_URL を確認してください。5 秒ごとに再接続を試みます。"}
+        操作はできません。taskctl は従来どおり使えます。
       </p>
     </div>
   );
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
+  const rootData = useRouteLoaderData("root") as Route.ComponentProps["loaderData"] | undefined;
   // `/tasks` 等の子ルートが taskd のエラーを `Response` として投げてここまで来たとき（`taskdErrorResponse`、
   // docs/adr/0004 D6）、汎用のエラー画面ではなく `/` と同じバナー等を出す（`/` 自身は inbox.tsx が catch する
   // のでここには来ない）。本番ビルドは素の Error を渡す前に汎用 500 へサニタイズするため、`Response` 以外は
@@ -173,6 +222,17 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="container mx-auto p-4 pt-16">
           <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+        </main>
+      );
+    }
+    // taskd の 401（トークン無し・不一致）は接続不可と同じ形のバナーで知らせる（docs/adr/0008 D6）
+    if (data.status === 401) {
+      return (
+        <main className="container mx-auto p-4 pt-16">
+          <TaskdBanner
+            taskdApiUrl={rootData?.gui.taskdApiUrl ?? ""}
+            problem={`${data.status} ${data.code ?? "unauthorized"}`}
+          />
         </main>
       );
     }

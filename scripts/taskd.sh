@@ -6,21 +6,47 @@
 #   scripts/taskd.sh status <name>         起動中か、/health が返るか
 #   scripts/taskd.sh logs <name>           .run/<name>/taskd.log を表示
 #   scripts/taskd.sh taskctl <name> ...    taskctl --db .run/<name>/taskd.sqlite3 ... を実行
-#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（basic / unroutable。multi-account は設定のみで DB は作らない。docs/adr/0007 D1）
-# 環境変数: TASKD_REPO、TASKD_API_LISTEN（既定 127.0.0.1:7710）
+#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（basic / unroutable / auth。multi-account は設定のみで DB は作らない。docs/adr/0007 D1）
+# 環境変数: TASKD_REPO、TASKD_API_LISTEN（既定 127.0.0.1:7710）、TASKD_RUN_ROOT（.run の実体。既定はローカルディスク、下記）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASKD_REPO="$(cd "${TASKD_REPO:-$ROOT/../agent-platform}" 2>/dev/null && pwd || echo "${TASKD_REPO:-$ROOT/../agent-platform}")"
 TASKD_BIN="$TASKD_REPO/target/debug/taskd"
 TASKCTL_BIN="$TASKD_REPO/target/debug/taskctl"
-RUN_ROOT="$ROOT/.run"
+# .run/ の実体（docs/adr/0008 D13）。SQLite の WAL はネットワーク FS（NFS 等）上では tick が数十秒止まる（taskd-requests.md R1 の回答、
+# taskd の ADR-0013 D5）ので、既定をローカルディスク（$TMPDIR か /tmp）にし、$ROOT/.run はそこへのシンボリックリンクにする。
+# 優先順: $TASKD_RUN_ROOT > 既存の $ROOT/.run のリンク先 > ${TMPDIR:-/tmp}/taskd-gui-run-$USER。e2e と GUI は常に $ROOT/.run 経由で参照する。
+RUN_LINK="$ROOT/.run"
+if [ -n "${TASKD_RUN_ROOT:-}" ]; then
+  RUN_ROOT="$TASKD_RUN_ROOT"
+elif [ -L "$RUN_LINK" ]; then
+  RUN_ROOT="$(readlink -f "$RUN_LINK")"
+else
+  RUN_ROOT="${TMPDIR:-/tmp}/taskd-gui-run-$(id -un)"
+fi
 API_LISTEN="${TASKD_API_LISTEN:-127.0.0.1:7710}"
 TMPL="$ROOT/test/taskd/taskd.toml.tmpl"
 DEFAULT_WORKER="$ROOT/test/taskd/fake-worker.sh"
 
 usage() { sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 die() { echo "taskd.sh: $*" >&2; exit 1; }
+# $RUN_ROOT を作り、$ROOT/.run をそこへのリンクにする（既に実ディレクトリなら中身を保ったまま使い、ネットワーク FS なら警告）。
+ensure_run_root() {
+  mkdir -p "$RUN_ROOT"
+  if [ -L "$RUN_LINK" ]; then
+    [ "$(readlink -f "$RUN_LINK")" = "$(readlink -f "$RUN_ROOT")" ] || { rm -f "$RUN_LINK"; ln -s "$RUN_ROOT" "$RUN_LINK"; }
+  elif [ -d "$RUN_LINK" ]; then
+    RUN_ROOT="$RUN_LINK"
+  elif [ ! -e "$RUN_LINK" ]; then
+    ln -s "$RUN_ROOT" "$RUN_LINK"
+  fi
+  local fstype; fstype="$(stat -f -c %T "$RUN_ROOT" 2>/dev/null || echo unknown)"
+  case "$fstype" in
+    nfs*|cifs|smb*|fuse*) echo "taskd.sh: warning: $RUN_ROOT is on $fstype; SQLite WAL needs a local disk (set TASKD_RUN_ROOT). See docs/taskd-requests.md R1" >&2 ;;
+  esac
+}
+ensure_run_root
 need_name() { [ $# -ge 1 ] && [ -n "$1" ] || die "name is required"; }
 run_dir() { echo "$RUN_ROOT/$1"; }
 pid_of() { local f; f="$(run_dir "$1")/taskd.pid"; [ -f "$f" ] && cat "$f" || true; }
@@ -101,7 +127,8 @@ cmd_fixture() {
     basic) fixture_basic ;;
     multi-account) fixture_multi_account ;;
     unroutable) fixture_unroutable ;;
-    *) die "unknown fixture scenario '$scenario' (known: basic, multi-account, unroutable)" ;;
+    auth) fixture_auth ;;
+    *) die "unknown fixture scenario '$scenario' (known: basic, multi-account, unroutable, auth)" ;;
   esac
 }
 
@@ -195,6 +222,33 @@ fixture_unroutable() {
 
   echo "fixture 'unroutable' built at $dir"
   echo "  unroutable: $tu (ready; no provider matches the cheap tier)"
+}
+
+# auth（docs/DESIGN.md §10 Phase G5 受け入れ条件 2、docs/adr/0008 D12）: `[api] token_file = "api.token"` の設定で起動する taskd。
+# `.run/auth/api.token` に乱数トークンを書く（GUI 側は TASKD_API_TOKEN_FILE=.run/auth/api.token を渡す）。DB は done×1 の最小限。
+fixture_auth() {
+  local name="auth" dir; dir="$(run_dir "$name")"
+  [ -x "$TASKD_BIN" ] && [ -x "$TASKCTL_BIN" ] || die "binaries not found; run 'scripts/taskd.sh build' first"
+  alive "$name" && die "taskd '$name' is running; stop it first (scripts/taskd.sh stop $name)"
+  rm -rf "$dir"
+  mkdir -p "$dir/workspaces"
+  cp "$DEFAULT_WORKER" "$dir/fake-worker.sh"
+  chmod +x "$dir/fake-worker.sh"
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/api.token"
+  chmod 600 "$dir/api.token"
+  sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$ROOT/test/taskd/auth.toml.tmpl" > "$dir/taskd.toml"
+
+  local db="$dir/taskd.sqlite3"
+  tc() { "$TASKCTL_BIN" --db "$db" "$@"; }
+  local ta
+  ta=$(tc add --title "Auth-A" --objective "token-protected taskd" --check-cmd "true" --workspace ws-auth)
+  tc approve "$ta" >/dev/null
+
+  "$TASKD_BIN" --config "$dir/taskd.toml" --until-idle --log-format text >> "$dir/taskd.log" 2>&1
+
+  echo "fixture 'auth' built at $dir"
+  echo "  token file: $dir/api.token (pass it to the GUI as TASKD_API_TOKEN_FILE)"
+  echo "  task: $ta (done)"
 }
 
 [ $# -ge 1 ] || usage

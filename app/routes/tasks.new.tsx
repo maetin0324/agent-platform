@@ -241,6 +241,7 @@ export default function NewTaskPage({ loaderData, actionData }: Route.ComponentP
               <div key={row.id} data-testid="criterion-row" className="flex items-center gap-2">
                 <select
                   name="criterion_type"
+                  aria-label="受け入れ条件の種類"
                   value={row.type}
                   onChange={(e) => updateRow(row.id, { type: e.target.value as CriterionSpec["type"] })}
                   className="rounded border px-2 py-1 text-sm"
@@ -253,6 +254,7 @@ export default function NewTaskPage({ loaderData, actionData }: Route.ComponentP
                 </select>
                 <input
                   name="criterion_value"
+                  aria-label="受け入れ条件の内容"
                   type="text"
                   value={row.value}
                   onChange={(e) => updateRow(row.id, { value: e.target.value })}

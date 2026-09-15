@@ -8,7 +8,16 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
 
 ## 調査依頼（API の不足・仕様違いではないので BLOCKED にはしない）
 
-### R1: GUI（ブラウザ + SSE 中継）が接続している間、taskd の tick が 10〜30 秒止まることがある（2026-09-15、Phase G2 の e2e で 5 回観測）
+### R1 — 回答済み（2026-09-15、taskd の ADR-0015 / PROGRESS phase 9）
+
+- **原因は taskd ではなく DB の置き場所**。`.run/` が NFS 上の `$HOME` にあり、SQLite の WAL がネットワーク FS で動いていた（taskd の ADR-0013 D5）。
+  `.run` をローカルディスクに置くと G2 の e2e はフルスイート 3 回とも 8/8 で通り、停止は 1 度も起きなかった。
+- **GUI 側の対応（Phase G5、docs/adr/0008 D13）**: `scripts/taskd.sh` の `RUN_ROOT` を `TASKD_RUN_ROOT` で上書きできるようにし、既定をローカルディスク
+  （`${TMPDIR:-/tmp}/taskd-gui-run-$USER`）にして `.run` はそこへのシンボリックリンクにした。ネットワーク FS 上なら警告を出す。
+- **taskd 側の対応**: 遅い要求（1 秒超）・遅い tick・DB がネットワーク FS 上にある場合の警告ログ（ADR-0015）。
+- 以下は原文（記録のため残す）。
+
+### R1（原文）: GUI（ブラウザ + SSE 中継）が接続している間、taskd の tick が 10〜30 秒止まることがある（2026-09-15、Phase G2 の e2e で 5 回観測）
 
 - **現象**: `scripts/taskd.sh fixture basic && scripts/taskd.sh start basic` の直後〜数十秒の間に GUI から承認 / 回答 / 作成→承認を行うと、
   taskd の API は `POST` に 200 で応答するのに、その後 10〜30 秒の間 (1) ディスパッチャが遷移を進めない（Approval 子を承認しても親が `reviewing` のまま、

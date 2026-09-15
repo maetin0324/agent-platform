@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "@playwright/test";
 import type { TaskList } from "~/taskd/types";
+import { expect, test } from "./test";
 
 // Phase G1 の受け入れ条件 2〜5（docs/DESIGN.md §10 Phase G1）。
 // `scripts/taskd.sh fixture basic && scripts/taskd.sh start basic` で作った既知の DB に対して検証する。

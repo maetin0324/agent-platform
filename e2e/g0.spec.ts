@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "@playwright/test";
 import type { Health } from "~/taskd/types";
+import { expect, test } from "./test";
 
 // Phase G0 作業単位 B（結合テスト）。docs/DESIGN.md §10 Phase G0 の受け入れ条件 4・5 を実 taskd（scripts/taskd.sh start dev）に対して検証する。
 // このテストは taskd を `dev` として起動したまま終える（try/finally で保証する）。
@@ -30,12 +30,14 @@ function startDev(): void {
 }
 
 test.beforeAll(() => {
-  // G1 / G2 の e2e が `basic` を 7710 に残したままだと `start dev` が「別プロセスが応答中」で失敗し、
-  // 受け入れ条件 4 の停止 / 復旧も検証できない。先に止めてから `dev` を（未起動なら）起動する。
-  try {
-    execFileSync(TASKD_SH, ["stop", "basic"], { cwd: REPO_ROOT, stdio: "pipe" });
-  } catch {
-    // 動いていなければ何もしない
+  // 他の spec（や前回のラン）が `basic` / `auth` 等を 7710 に残したままだと `start dev` が「別プロセスが応答中」で失敗し、
+  // 受け入れ条件 4 の停止 / 復旧も検証できない。既知のインスタンスを全て止めてから `dev` を起動する。
+  for (const name of ["basic", "multi-account", "unroutable", "auth"]) {
+    try {
+      execFileSync(TASKD_SH, ["stop", name], { cwd: REPO_ROOT, stdio: "pipe" });
+    } catch {
+      // 動いていなければ何もしない
+    }
   }
   startDev();
 });

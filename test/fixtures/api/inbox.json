@@ -2,29 +2,37 @@
     "approvals": [
         {
             "approval": {
-                "id": "01M2HJDBRRMKXSF3YJYQ2PYTJ0",
+                "id": "01M2JK4ARAKZJYVEMSQTSHPERK",
                 "title": "Approval needed: Human-B \u2014 criterion 0 (attempt 1)",
                 "kind": "approval",
-                "status": "ready"
+                "status": "ready",
+                "actions": [
+                    "approve",
+                    "reject",
+                    "cancel"
+                ]
             },
             "parent": {
-                "id": "01M2HJD8P9Q444J57384N98HGV",
+                "id": "01M2JK4AETAFK7PVXEV2SNNXAG",
                 "title": "Human-B",
                 "kind": "execute",
-                "status": "reviewing"
+                "status": "reviewing",
+                "actions": [
+                    "cancel"
+                ]
             },
             "criterion_text": "someone signs off",
             "criterion_idx": 0,
             "attempt": 1,
-            "requested_at": "2026-09-15T03:40:16.540168946Z",
+            "requested_at": "2026-09-15T13:12:03.594532684Z",
             "last_run": {
-                "run_id": "01M2HJDB7A4GBA0V771T6NENKP",
+                "run_id": "01M2JK4AHYS1QGGXJREAH4F655",
                 "role": "worker",
                 "adapter": "fake",
                 "model": "fake",
                 "provider": "fake-local",
-                "started_at": "2026-09-15T03:40:16.07670367Z",
-                "finished_at": "2026-09-15T03:40:16.50538978Z",
+                "started_at": "2026-09-15T13:12:03.3906985Z",
+                "finished_at": "2026-09-15T13:12:03.593844333Z",
                 "outcome": "done",
                 "outcome_text": "fixture done",
                 "usage": null,
@@ -47,49 +55,35 @@
     "questions": [
         {
             "task": {
-                "id": "01M2HJD9B3GTZKKC4H5B31NBYR",
+                "id": "01M2JK4AF8C9HBR6MHEMKMCAD7",
                 "title": "Blocked-C",
                 "kind": "execute",
-                "status": "blocked"
+                "status": "blocked",
+                "actions": [
+                    "answer",
+                    "cancel"
+                ]
             },
             "question": "which environment should this target?",
-            "asked_at": "2026-09-15T03:40:17.216251969Z",
-            "run_id": "01M2HJDBV32CYKMF5TGK3SXHBA",
+            "asked_at": "2026-09-15T13:12:03.803016166Z",
+            "run_id": "01M2JK4ARF7MRVQDYWNQY7Z9K6",
             "previous": []
         }
     ],
     "drafts": [
         {
             "parent": {
-                "id": "01M2HJDA0NXSK913B8389XXM3A",
+                "id": "01M2JK4AFP076W0A7MZVV5Q24E",
                 "title": "fixture plan goal: build two small things",
                 "kind": "plan",
-                "status": "done"
+                "status": "done",
+                "actions": []
             },
             "plan_summary": "planned",
             "drafts": [
                 {
-                    "id": "01M2HJDCQT08KYBS5WKV5VWDHM",
-                    "parent_id": "01M2HJDA0NXSK913B8389XXM3A",
-                    "kind": "execute",
-                    "status": "draft",
-                    "title": "Plan-Child-1",
-                    "priority": 0,
-                    "tier": "standard",
-                    "adapter": null,
-                    "attempts": 0,
-                    "max_retries": 1,
-                    "depends_on": [],
-                    "created_at": "2026-09-15T03:40:17.53011488Z",
-                    "updated_at": "2026-09-15T03:40:17.53011488Z",
-                    "lease_expires_at": null,
-                    "backoff_until": null,
-                    "children": 0,
-                    "pending_children": 0
-                },
-                {
-                    "id": "01M2HJDCQTZH17ZRJNP32DFCQ5",
-                    "parent_id": "01M2HJDA0NXSK913B8389XXM3A",
+                    "id": "01M2JK4BBW0Z0YEKDS98AJQN78",
+                    "parent_id": "01M2JK4AFP076W0A7MZVV5Q24E",
                     "kind": "execute",
                     "status": "draft",
                     "title": "Plan-Child-2",
@@ -99,14 +93,41 @@
                     "attempts": 0,
                     "max_retries": 1,
                     "depends_on": [
-                        "01M2HJDCQT08KYBS5WKV5VWDHM"
+                        "01M2JK4BBW2Q1W258S9DJ6KKVG"
                     ],
-                    "created_at": "2026-09-15T03:40:17.53011488Z",
-                    "updated_at": "2026-09-15T03:40:17.53011488Z",
+                    "created_at": "2026-09-15T13:12:04.220569668Z",
+                    "updated_at": "2026-09-15T13:12:04.220569668Z",
                     "lease_expires_at": null,
                     "backoff_until": null,
                     "children": 0,
-                    "pending_children": 0
+                    "pending_children": 0,
+                    "actions": [
+                        "approve",
+                        "cancel"
+                    ]
+                },
+                {
+                    "id": "01M2JK4BBW2Q1W258S9DJ6KKVG",
+                    "parent_id": "01M2JK4AFP076W0A7MZVV5Q24E",
+                    "kind": "execute",
+                    "status": "draft",
+                    "title": "Plan-Child-1",
+                    "priority": 0,
+                    "tier": "standard",
+                    "adapter": null,
+                    "attempts": 0,
+                    "max_retries": 1,
+                    "depends_on": [],
+                    "created_at": "2026-09-15T13:12:04.220569668Z",
+                    "updated_at": "2026-09-15T13:12:04.220569668Z",
+                    "lease_expires_at": null,
+                    "backoff_until": null,
+                    "children": 0,
+                    "pending_children": 0,
+                    "actions": [
+                        "approve",
+                        "cancel"
+                    ]
                 }
             ]
         }
@@ -115,13 +136,14 @@
         {
             "type": "failed",
             "task": {
-                "id": "01M2HJDAM91QFBCJ9KBF001HWZ",
+                "id": "01M2JK4AG5M8HEQVQJ0SJE09BE",
                 "title": "Failed-E",
                 "kind": "execute",
-                "status": "failed"
+                "status": "failed",
+                "actions": []
             },
             "reason": "error(retryable=false): deliberate non-retryable failure",
-            "at": "2026-09-15T03:40:17.820059831Z"
+            "at": "2026-09-15T13:12:04.011807884Z"
         }
     ],
     "counts": {
@@ -131,7 +153,7 @@
         "attention": 1,
         "by_status": {
             "blocked": 1,
-            "done": 4,
+            "done": 5,
             "draft": 2,
             "failed": 1,
             "ready": 1,

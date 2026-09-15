@@ -12,13 +12,14 @@
 | G2 | 操作 | **DONE** | 2026-09-15 |
 | G3 | ログ・成果物・DAG | **DONE** | 2026-09-15 |
 | G4 | プロバイダとデーモン | **DONE** | 2026-09-15 |
-| G5 | 認証・配布・仕上げ | 未着手 | — |
+| G5 | 認証・配布・仕上げ | **DONE** | 2026-09-15 |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
 ## 引き継ぎ（前のフェーズから）
 
-G1 の未解決事項（下記）のうち、G2 着手前に効いてくるものを引き継ぐ:
+G5 完了時点で次フェーズ（あれば）に引き継ぐもの: G3-U1（`/graph` スクリーンショットの環境依存）、G4-U1〜U4、G5-U1〜U8（Node SEA の残り、CSP の `style-src`、
+`docker build` 未実行、`docs/taskd-api-v1.md` の同期）。以下は G1 からの引き継ぎ（記録のため残す）:
 - **SSE 常時再検証の負荷**（G1-U1）: `daemon` が tick ごとに届くため、画面を開いている間 taskd への要求がタブあたり毎秒約 7 回発生する。G2 で操作（承認・却下等）を増やすと相対的に無視できるが、G4（デーモン画面・プロバイダ画面）で複数タブを想定するなら再検討が要る。
 - **仮想スクロールと一覧の行数一致テスト**（G1-U2）: `/tasks` の一覧は `@tanstack/react-virtual` で可視領域だけ DOM に出すため、SSR 直後の HTML には `task-row` が 0 件。件数が可視範囲（初期は 12 行程度）を超えるとテストがスクロール操作無しでは行数を数えられない。G2 以降で一覧の件数が増える fixture を作る場合は要注意。
 - **`/tasks/:id` の操作ボタンは無効表示のみ**（G1 は表示だけ、実装は G2）。
@@ -40,7 +41,8 @@ G1 の未解決事項（下記）のうち、G2 着手前に効いてくるも�
 ## taskd への依頼（`docs/taskd-requests.md` の要約）
 
 - R1（G2、調査依頼・BLOCKED ではない）: ブラウザ + SSE 中継が接続している間、変更系 `POST` の直後に taskd の tick が 10〜30 秒止まる現象を e2e で 5 回観測
-  （API 単体の curl では再現しない）。詳細と証拠は `docs/taskd-requests.md` R1。
+  （API 単体の curl では再現しない）。詳細と証拠は `docs/taskd-requests.md` R1。**回答済み（G5）**: 原因は NFS 上の DB。GUI 側は `scripts/taskd.sh` の `RUN_ROOT` をローカルディスクにした（ADR-0008 D13）。
+- G5: `docs/taskd-api-v1.md`（GUI 側のコピー）を taskd の `docs/gui/api.md`（ADR-0015、`actions`）に同期してほしい（GUI 側では書き換えない規則）。
 
 ## 節の書式（各フェーズで使う）
 
@@ -503,3 +505,149 @@ G1 の未解決事項（下記）のうち、G2 着手前に効いてくるも�
 ### taskd への依頼
 - なし。`GET /providers`・`GET /daemon` は `docs/taskd-api-v1.md` §3.19〜§3.21 の記載どおりに動作した。`ProviderFailure::Throttled` によるフォールバックと
   cooldown の記録（`ProviderThrottled` イベント）、`awaiting_human`/`unroutable` の毎 tick 再計算も文書と実挙動が一致した。
+
+## Phase G5 — DONE（2026-09-15）
+
+前セッションが `PARTIAL` で残した状態（実装と文書の下書きはあるが検証・監査・コミット前。implementer の成果 2 単位が worktree に未マージ）から再開し、
+worktree の取り込み → taskd の更新（`actions`）の取り込み → 全検証 → 監査 → コミットまでを行った。
+
+### 成果物
+- 認証（docs/DESIGN.md §8.2、ADR-0008 D1〜D6）: `app/auth.server.ts`（`readAuthConfig`: 非 loopback バインドでパスワードファイル無しなら例外、パスワードファイル明示で
+  loopback でも認証を要求 / `verifyPassword`: SHA-256 ダイジェスト同士の `timingSafeEqual` / `issueSessionCookie`・`hasValidSession`・`clearSessionCookie`: react-router の
+  `createCookie`（HMAC 署名、`HttpOnly; SameSite=Strict; Path=/`、https なら `Secure`、`Max-Age` 24h）/ `authCheck` middleware: 未認証は `/events`・`/files/*` が 401、
+  他は 302 `/login?next=`、`/login`・`/logout`・`/healthz` は対象外 / `safeNextPath`: 同一オリジンの絶対パスだけ）。`app/routes/login.tsx`（フォーム。失敗は 1 秒待って
+  status 401 で再描画）、`app/routes/logout.ts`（POST でクッキー削除 → `/login`）。`app/root.tsx`: middleware 順序を Host → 認証 → CSRF → ヘッダに、未認証時は
+  taskd を呼ばずナビゲーションもフッタも出さない、ナビゲーションにログアウト、taskd の 401 をバナー（「taskd が要求を拒否しました … 401 unauthorized」）で表示
+  （root loader の `GET /inbox` が 401 のとき、または子ルートが 401 の `Response` を投げたときの `ErrorBoundary`）。`app/hooks/useTaskdStream.ts` に `enabled` オプション
+  （未認証時は `/events` を張らない）。`server.js`: 起動時検証（非 loopback + パスワードファイル無し → exit 2、パスワード / セッション鍵 / トークンの各ファイルが
+  読めない・空 → exit 2）、起動ログに auth / token の有無（値は出さない）。
+- トークン（§8.1）: `TaskdClient.fromEnv` は G0 から `TASKD_API_TOKEN_FILE` を読んでいたので変更なし。`scripts/taskd.sh fixture auth`（`test/taskd/auth.toml.tmpl` =
+  既定テンプレート + `[api] token_file = "api.token"`。`.run/auth/api.token` に 32 バイトの乱数を hex で書く）を追加。
+- CSP / a11y（§8.2、ADR-0008 D7/D8）: `e2e/test.ts`（全 spec が import する `test` ラッパー。auto fixture がコンソールの CSP 違反を集め、各シナリオ終了時に 0 件を assert）、
+  `e2e/g5-a11y.spec.ts`（`@axe-core/playwright` 4.13.0 で 6 画面を走査、critical / serious 0 件と CSP ヘッダの有無）。`biome.json` に `!.claude`（サブエージェントの
+  worktree が `.claude/worktrees/` に作られると Biome が「nested root」で止まるため）、`.gitignore` に `.claude/worktrees/`。
+- 配布（§9、ADR-0008 D9〜D11）: `scripts/release.sh`（`pnpm release` → `dist/taskd-gui-<version>.tar.gz`）、`deploy/taskd-gui.service`、`README.md`（導入手順・環境変数・
+  セキュリティ要点）、`Dockerfile` + `.dockerignore`（任意。build は未実行）、`e2e/g5-release.spec.ts`（tar を空ディレクトリに展開 → `pnpm install --prod --frozen-lockfile
+  --ignore-scripts --offline` → `node server.js` → `/` が 200）。
+- taskd の更新の取り込み（ADR-0008 D14）: `pnpm gen:types` を再生成（`Action` 型、`TaskRef.actions`、`TaskSummary.actions`。taskd の ADR-0015 D4）、
+  `scripts/capture-fixtures.sh` で `test/fixtures/api/*.json` を再採取、`app/routes/inbox.tsx` の attention 区画の cancel 判定を `item.task.actions.includes("cancel")` に
+  置き換え（G2-U6 の解消。§5.4 の規則の GUI 側再実装をやめた）。`test/unit/tasks.loader.test.ts` / `tasks.detail.action.test.ts` のサンプルに `actions` を追加。
+- R1 の恒久対応（ADR-0008 D13）: `scripts/taskd.sh` の `RUN_ROOT` を `TASKD_RUN_ROOT` で上書き可能にし、既定をローカルディスク（`${TMPDIR:-/tmp}/taskd-gui-run-$USER`）に、
+  `.run` はそこへのシンボリックリンクにした（既存のリンクがあればその先を使う）。ネットワーク FS（nfs/cifs/fuse）上なら警告。`docs/taskd-requests.md` の R1 を回答済みに更新。
+- 監査後の修正（ADR-0008 D15。G0 監査からの引き継ぎ「G5 の条件 3 までに解消」の完了）: catch-all ルート `app/routes/$.tsx`（`route("*")`。未定義パスも root middleware を通り、
+  root の ErrorBoundary が nonce 付き CSP で 404 を描く）、`server.js` に Express 層の Host 検査（許可リスト外は 400。静的アセットにも効く）と既定ヘッダ
+  （`writeHead` 直前に「無ければ」付ける: CSP `default-src 'none'; frame-ancestors 'none'; base-uri 'none'`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`）。
+  `authCheck` の 401 に nosniff。未認証時の root loader は `taskdApiUrl` も返さない（`/login` の hydration payload に接続先が載らない）。
+- Node SEA の実験（ADR-0008 D11）: 結果は下の「未解決事項」G5-U1 に記録。
+- テスト: `test/unit/auth.test.ts`（15 件）、`e2e/g5.spec.ts`（受け入れ条件 1〜3。0.0.0.0 バインドの GUI を spec 内で起動）。
+- 文書: `docs/adr/0008-g5-decisions.md`（D1〜D14）。
+- 実装単位: 「配布一式（release.sh / service / README / Dockerfile / release smoke）」と「CSP ガード + a11y スキャン（e2e/test.ts / 既存 spec の import 差し替え /
+  g5-a11y.spec.ts）」は互いに（そして認証とも）ファイルを共有しない独立単位だったので、前セッションで implementer 2 体を worktree で並列実行した。その成果は worktree に
+  未マージのまま残っていたので、このセッションで main に取り込み（`e2e/g5-release.spec.ts` の import を `./test` に統一、`e2e/g5-a11y.spec.ts` の worktree 固有の
+  パス解決を除去）、worktree とブランチを削除した。認証・トークン・root の変更・`server.js`・`scripts/taskd.sh`・`e2e/g5.spec.ts`・`actions` の取り込み・RUN_ROOT は
+  設計判断とファイル共有のため自分で実装した。
+
+### 受け入れ条件と証拠（docs/DESIGN.md §10 Phase G5）
+1. **非 loopback バインドのパスワード認証** — `e2e/g5.spec.ts`「受け入れ条件 1」3 シナリオ（`pnpm e2e` に含む、全て pass）:
+   (a) `TASKD_GUI_BIND=0.0.0.0:7731 TASKD_GUI_PASSWORD_FILE= node server.js` → **exit 2**、stderr に `TASKD_GUI_PASSWORD_FILE is required`。
+   (b) `TASKD_GUI_BIND=0.0.0.0:7721` + パスワードファイルで起動した GUI に対し、未ログインの `GET /` → **302 `/login`**、`GET /tasks?limit=5` → 302 `/login?next=%2Ftasks%3Flimit%3D5`、
+   クッキー無しの `GET /events` → **401** 本文 `unauthorized`、`/login` は 200 で CSP ヘッダあり。
+   (c) ブラウザで誤パスワード → 1 秒以上待って `login-error` 表示（`POST /login` の status **401**、本文「パスワードが違います」）。正しいパスワードで `POST /login` → 302 `/tasks`、
+   `Set-Cookie: __taskd_gui_session=…; HttpOnly; SameSite=Strict; Path=/`（http なので `Secure` 無し）。クッキー付きで `/` が 200、ログアウトで再び 302。
+   単体: `test/unit/auth.test.ts` 15 件（設定の読み取り・loopback 判定・定数時間比較・クッキー発行/検証/失効・`next` の検証・middleware の 302/401/通過）。
+2. **BFF → taskd のトークン** — `scripts/taskd.sh fixture auth && start auth`（`[api] token_file = "api.token"`、32 バイト hex）。`e2e/g5.spec.ts`「受け入れ条件 2」3 シナリオ（全て pass）:
+   前提確認として taskd 自身への `GET /api/v1/inbox` がトークン無しで **401**。`TASKD_API_TOKEN_FILE=.run/auth/api.token` の GUI（7722）で `/tasks` が 200、バナー無し、
+   `Auth-A` が表示、フッタに `api_version 1`。トークン無しの GUI（7723）で `/` が **401** でバナーに **`unauthorized`**（「taskd が要求を拒否しました … 401 unauthorized」）。
+   トークン文字列で `build/` 配下全ファイルと `.run/*/gui*.log`（2 本以上）を走査 → **一致 0 件**。HTML 本文にも含まれない。
+3. **Host 検査と CSP** — `e2e/g5.spec.ts`「受け入れ条件 3」: `Host: evil.example` の `GET /` → **400**。`/`, `/tasks`, `/tasks/new`, `/plans/new`, `/daemon`, `/providers`, `/graph`, `/healthz` の
+   応答に `Content-Security-Policy`（`default-src 'self'` … `frame-ancestors 'none'`）と `X-Content-Type-Options: nosniff`。`e2e/g5-a11y.spec.ts` でも 6 画面（`/tasks/<id>` 含む）で確認。
+   監査の指摘 1 を受けて追加（ADR-0008 D15）: 未定義パス `/no-such-page` → **404** で `Content-Security-Policy` に `nonce-` を含み `nosniff`、本文に「404」（`e2e/g5.spec.ts` 条件 3 で assert）。
+   `Host: evil.example` の `/assets/` → **400**（同 spec）。未ログインの 302 `/` と 401 `/events` にも CSP（`default-src 'none'`）と `nosniff`（同 spec 条件 1）。
+   curl での自己再監査（GUI 7705、パスワード付き）: `/`→302、`/assets/x.js`→302、`/events`→401 の各応答に CSP 1 本 + nosniff + `Referrer-Policy`、ログイン後の `/` と `/nope`（404）は
+   nonce 付き CSP 1 本、実アセット `/assets/entry.client-*.js` は 200 + `immutable` + CSP `default-src 'none'` + nosniff、`Host: evil.example` のアセット要求は 400、
+   `/login` の HTML に `7710` は 0 件。
+   **CSP 違反 0 件**: `e2e/test.ts` の auto fixture（`page.on("console")` / `pageerror` で `Content Security Policy` を含むメッセージを収集し teardown で `[]` を assert）を
+   全 spec（g0〜g5、`./test` から import）に適用。`pnpm e2e` 全シナリオが pass = 全シナリオで違反 0 件。
+4. **a11y** — `e2e/g5-a11y.spec.ts`「受け入れ条件 4」6 シナリオ（`/`, `/tasks`, `/tasks/<id>`, `/tasks/new`, `/providers`, `/daemon`）で `@axe-core/playwright` 4.13.0 の
+   critical / serious が **0 件**。初回ランでは **critical 3 件**（`/` の `textarea[name=note]`・`textarea[name=answer]` に label 無し、`/tasks/new` の `select[name=criterion_type]` に
+   accessible name 無し）を検出 → `aria-label` を付与（`criterion_value` にも付与）→ 再ランで 0 件。moderate / minor は annotation に記録（下記 G5-U3）。
+5. **依存の監査とリリース** — `pnpm audit --audit-level=high` → **`No known vulnerabilities found`、exit 0**（registry への問い合わせなので e2e の外で 1 回実行）。
+   `pnpm release`（`scripts/release.sh`）→ `dist/taskd-gui-0.1.0.tar.gz`（`build/`, `server.js`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `README.md`,
+   `deploy/taskd-gui.service`, `Dockerfile`）。`e2e/g5-release.spec.ts` 1 シナリオ: `dist/release-smoke-*/` に展開 → `pnpm install --prod --frozen-lockfile --ignore-scripts --offline`
+   → `node server.js`（7703）→ `GET /` が **200**、フッタに `taskd-gui 0.1.0`（pass）。
+6. **配布文書** — `deploy/taskd-gui.service`（非 root、`ProtectSystem=strict` 等）、`README.md`（導入手順・環境変数表・SSH ポートフォワード・セキュリティ要点）。
+   （任意）`docker build` は **未実行**（ADR-0008 D10。registry へのアクセスが要る。`Dockerfile` と `.dockerignore` は同梱）。（実験）Node SEA は下記 G5-U1 に記録。
+
+### 共通条件
+- `pnpm lint` exit 0（`Checked 90 files`）/ `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0 / `pnpm test` **141 passed**（19 ファイル。G4 までの 126 + `auth.test.ts` 15）/
+  `pnpm build` exit 0 / `pnpm e2e` **51 passed（exit 0、5.4 分。監査後の修正込みの最終ラン）**（G0 5 + G1 8 + G2 8 + G3 5 + G4 5 + G5 20: `g5-a11y` 12（CSP ヘッダ 6 + a11y 6）+ `g5-release` 1 + `g5` 7）。
+  経緯: 1 回目 49 passed / 2 failed（a11y の critical 3 件 → `aria-label` で修正）、2 回目 6 passed / 12 failed（1 回目が残した `auth` インスタンスが 7710 を占有。G5-U8 で解消）、
+  3 回目 51 passed（監査者の再実行も 51 passed / 5.5 分）。監査後に D15 の修正と spec の追記を入れて 4 回目 51 passed。全シナリオが `e2e/test.ts` の CSP ガードを通過（違反 0 件）
+- `pnpm gen:types && git diff --exit-code app/taskd/types.ts` 差分ゼロ（exit 0。taskd の schema の更新（`actions`）を取り込んで再生成した後の状態）
+
+### 監査結果
+- auditor の判定: **条件付き可**（「不可」ゼロ）。受け入れ条件 1・2・4・5・6 と共通完了条件 1・2・4 は「満たしている」、条件 3 は「部分的に満たしている」、
+  共通条件 5（`git status` クリーン + `phase G5:` コミット）は監査時点では未達（コミット前なので想定どおり）。禁止事項 9 項目は全て「違反ゼロ」。
+  auditor 自身が `lint`（89 files）/ `typecheck` / `test`（141 passed）/ `build` / `gen:types` 差分ゼロ / `pnpm audit`（0 件）/ `pnpm e2e`（**51 passed / 5.5 分**）を再実行し、
+  GUI を 7705 で起動して 302 / 401 / CSP / `Host` を curl でも確認した。ファイルの変更無し、taskd インスタンスは監査前後とも全停止。
+- 指摘と対応:
+  1. **（重要）未定義パスの 404 HTML・静的アセット・302/401 応答に CSP / nosniff / Host 検査が掛からない**（G0 監査で「G5 の条件 3 までに解消」と約束していた項目が未解消で、
+     未解決事項にも再掲されていなかった）→ **コードで修正**（ADR-0008 D15: catch-all ルート + Express 層の Host 検査と既定ヘッダ + 401 の nosniff）。
+     最初の実装（全応答に `setHeader`）は React Router のアダプタが `appendHeader` で足すため CSP が 2 本になった（複数 CSP は交差 = 最も厳しい方で画面が壊れる）ので、
+     `writeHead` 直前に「無いときだけ」付ける方式に直した。curl による再監査の結果は条件 3 の証拠に記載。`e2e/g5.spec.ts` に `/no-such-page` 404 + nonce CSP、`Host: evil` のアセット 400、
+     302 / 401 のヘッダの assert を追加。
+  2. **ADR-0008 D5「接続先を出さない」と実装の不一致**（未認証時も `gui.taskdApiUrl` を返し、`/login` の hydration payload に `127.0.0.1:7710` が載る）→ **修正済み**
+     （未認証時は `taskdApiUrl: ""`。curl で `/login` の HTML に `7710` が 0 件）。
+  3. `docs/taskd-api-v1.md` が taskd の `docs/gui/api.md` より古い → 既に G5-U6 と「taskd への依頼」に記載（GUI 側では書き換えない）。
+  4. `readGuiConfig` がバインドホストを無条件に許可するため `0.0.0.0` バインドでは `Host: 0.0.0.0` が通る → 下記 G5-U9 として記録、README の非 loopback 節に
+     `TASKD_GUI_ALLOWED_HOSTS` の設定を推奨として追記。
+  5. `pnpm e2e` の所要時間の差（5.2 分 vs 5.5 分）→ 件数・exit code は一致。記述を更新。
+- 修正後の自己再監査: `pnpm lint` exit 0（90 files）、`pnpm typecheck` exit 0、`pnpm test` 141 passed、`pnpm build` exit 0、`pnpm e2e` 51 passed（4 回目）、curl の結果は条件 3 の証拠に記載。
+  auditor の再起動は行っていない（「不可」が無く、指摘 1・2 は自分で再検証できる範囲）。
+
+### 未解決事項
+- **G5-U1: Node SEA の実験結果（ADR-0008 D11。成否は問わない）** — 手順と結果:
+  1. `rolldown` 1.2.7（vite 8 の推移的依存。新しい依存は足していない）で `server.js` をそのまま `--format cjs` にバンドル → **失敗**（`Top-level await is currently not supported
+     with the 'cjs' output format`。`server.js` の `await import(...)` 3 箇所）。
+  2. TLA を静的 import に置き換え vite の開発分岐を外した入口（`sea-entry.mjs`）を `--format cjs --inlineDynamicImports` でバンドル → **成功**。リポジトリ内から解決すると
+     **4.16 MB の単一 CJS**（react-dom/server, express, react-router 等を同梱。外部 `require` は Node 組み込みと `debug` の任意依存 `supports-color` のみ）。
+     `node_modules` の無いディレクトリに置いて `node server-full.cjs` → `GET /` が **200**。
+  3. `node --experimental-sea-config sea-config.json` → `sea-prep.blob`（206 KB / 4.2 MB）を生成 **成功**。
+  4. 実行ファイルへの注入は **未達**: Node 24.21 に `--build-sea` は無く、注入には npm の `postject` が要る（未インストール。取得に registry アクセスが要るので行わなかった）。
+  5. 別途、`build/client`（静的アセット）は SEA の `assets` として埋め込み `sea.getAsset()` で配信する作りに `server.js` を変える必要がある（今の `express.static` はディスク前提）。
+  結論: 「サーバ 1 ファイル化」は可能、「単一バイナリ」は postject とアセット埋め込みの 2 点が残る。G6 以降の任意項目として扱う。
+- **G5-U2: CSP の `style-src 'unsafe-inline'` は外せない**（ADR-0008 D7）— `@xyflow/react` と `@tanstack/react-virtual` がインライン style 属性を使い、属性は nonce で許可できない。
+  `style-src-elem`（nonce）/ `style-src-attr 'unsafe-inline'` に分ける案は CodeMirror の `style-mod` への `EditorView.cspNonce` 配線が必要で未着手。
+- **G5-U3: a11y の moderate / minor は列挙していない** — `e2e/g5-a11y.spec.ts` は `test.info().annotations` に記録するが `list` reporter には出ない。件数を把握するには
+  `--reporter=json` で 1 回走らせて集計する（ゲートは critical / serious のみ。ADR-0008 D8）。
+- **G5-U4: `docker build` 未実行**（ADR-0008 D10）。`Dockerfile` は `node:24-slim` + corepack 前提で、`pnpm install --frozen-lockfile` に registry が要る。
+- **G5-U5: TLS 終端を前に置く構成は想定外** — `Secure` は要求 URL が `https:` のときだけ付き、`trust proxy` は無効（ADR-0008 D3）。リバースプロキシ配下では
+  `X-Forwarded-Proto` を見ないので `Secure` が付かない。README に注記済み。
+- **G5-U6: `docs/taskd-api-v1.md` が taskd の `docs/gui/api.md` より古い** — taskd の ADR-0015 D4 で §5.4 / §6.2 に `TaskRef` / `TaskSummary` の `actions` が追記されたが、
+  GUI 側のコピーは bootstrap 時のまま。CLAUDE.md により GUI 側では書き換えない（`app/taskd/types.ts` は再生成済みで `actions` を含む）。同期は「taskd への依頼」に記載。
+- **G5-U7: release smoke の `--offline` install は環境依存** — pnpm の store はファイルシステムごとに分かれるため、展開先を `dist/`（リポジトリと同じ FS）にしてある。
+  store が温まっていない環境（CI の初回）では `--offline` が失敗する。CI では `pnpm fetch` 等で先に store を作るか、`--offline` を落とす。
+- **G5-U8: `pnpm e2e` は約 6.5 分で、spec の実行順（alphabetical: g0 → g1 → … → g5-a11y → g5-release → g5）と taskd インスタンスの引き渡しに依存している** —
+  当初 `e2e/g5.spec.ts` が `auth`（7710）を残して終わる作りだったため、2 回目のランで g0 の `start dev` と各 fixture が「別プロセスが応答中」で連鎖的に失敗した
+  （12 failed）。g5 の afterAll で全インスタンスを止め、g0 の beforeAll で既知のインスタンスを全て止めるようにして解消。spec を追加するときは同じ規約に従うこと。
+- **G5-U9: `Host` 許可リストにバインドのホストが無条件で入る** — `TASKD_GUI_BIND=0.0.0.0:7700` なら `Host: 0.0.0.0` が通る（`app/config.server.ts` と `server.js` の両方）。
+  実害は DNS rebinding で `0.0.0.0` を名乗る必要がある点で限定的だが、非 loopback 公開時は `TASKD_GUI_ALLOWED_HOSTS` を設定し、`0.0.0.0` / `::` はリストに入れない
+  ようにするのがよい（次フェーズで検討）。
+- 引き継ぎ（未対処）: G4-U1〜U4 はそのまま。G3-U1（`/graph` のスクリーンショット比較の環境依存）もそのまま。G2-U6 は本フェーズで解消（ADR-0008 D14）。
+
+### 提案
+- G5-P1: `docs/DESIGN.md` §8.2「非 loopback → パスワード必須、loopback → 認証無し」に「`TASKD_GUI_PASSWORD_FILE` が明示されていれば loopback でも認証を要求する（opt-in）」を追記する
+  （ADR-0008 D2。設定したのに効かない状態を避けるため）。
+- G5-P2: §8.2 CSP の「`style-src 'unsafe-inline'` … G5 で外せるか確認」→ 確認結果は「外せない（style 属性）」。次の一手として「`style-src-elem 'self' 'nonce-…'; style-src-attr 'unsafe-inline'`
+  に分割し CodeMirror に `cspNonce` を配線する」を任意項目として書くとよい。
+- G5-P3: §10 Phase G5 条件 5 の `pnpm install --prod --frozen-lockfile --ignore-scripts` は、e2e の「外部ネットワークに出ない」規則と合わせて `--offline`（開発機の store を使う）と明記するとよい。
+- G5-P4: §9 / §10 の「`node --build-sea`」は Node 24 には無い（`--experimental-sea-config` + `postject`）。文言を直すか、単一バイナリを G6 以降の任意項目に移す。
+- G5-P5: §10.0 の環境前提に「`.run/`（taskd の DB）はローカルディスクに置く（NFS 不可）。`scripts/taskd.sh` の `TASKD_RUN_ROOT`」を追記する（R1 の教訓。ADR-0008 D13）。
+- G5-P6: §8.2「失敗は 1 秒待つ」は同時多数の試行に対しては抑止にならない（待つだけで並列度は制限しない）。単一利用者・loopback 前提なら十分だが、非 loopback 公開時は
+  前段（SSH / リバースプロキシ）でのレート制限を README に推奨として書いた。DESIGN 側にも「レート制限は前段で」と明記するとよい。
+
+### taskd への依頼
+- BLOCKED になる不足・仕様違いは無し。`[api] token_file` 付きの taskd は `docs/taskd-api-v1.md` §1.3 のとおり `GET /health` だけ無認証で、他はトークン無しで 401 `unauthorized` を返した。
+- **依頼（文書の同期）**: GUI 側の `docs/taskd-api-v1.md` は taskd の `docs/gui/api.md`（ADR-0015 で `actions` を §5.4 / §6.2 に追記、運用ログの節を追加）より古い。GUI 側では書き換えない
+  規則なので、taskd 側（または人間）でコピーを更新してほしい（G5-U6）。
+- R1 は回答済み（原因は NFS 上の DB。GUI 側は ADR-0008 D13 で対応）。`docs/taskd-requests.md` を更新した。

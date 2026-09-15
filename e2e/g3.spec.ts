@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, type Page, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import type { TaskDetail, TaskList } from "~/taskd/types";
+import { expect, test } from "./test";
 
 // Phase G3 の受け入れ条件 1・3・4・6・7（docs/DESIGN.md §10 Phase G3、docs/adr/0006-g3-decisions.md D6）。
 // 条件 2（stream-json の整形）と条件 5（mock-taskd の 403）は Playwright ではなく `pnpm test`

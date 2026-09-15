@@ -139,6 +139,7 @@ export type WorkspaceSpec =
  * run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。
  */
 export type RunRole = "worker" | "reviewer";
+export type Action = "approve" | "reject" | "answer" | "cancel";
 export type RunOutcomeKind = "done" | "question" | "error" | "requeue" | "lease_expired";
 export type AttentionItem =
   | {
@@ -182,7 +183,6 @@ export type CriterionSpec =
       text: string;
       type: "reviewer";
     };
-export type Action = "approve" | "reject" | "answer" | "cancel";
 
 /**
  * スキーマ生成のルート。
@@ -538,6 +538,10 @@ export interface ApprovalItem {
   requested_at: string;
 }
 export interface TaskRef {
+  /**
+   * 今この状態で許される操作（ADR-0015 D4。GUI は §5.4 の規則を再実装しない）。
+   */
+  actions: Action[];
   id: TaskId;
   kind: TaskKind;
   status: Status;
@@ -611,6 +615,10 @@ export interface DraftGroup {
   plan_summary?: string | null;
 }
 export interface TaskSummary {
+  /**
+   * 今この状態で許される操作（ADR-0015 D4）。
+   */
+  actions: Action[];
   adapter?: string | null;
   attempts: number;
   backoff_until?: string | null;

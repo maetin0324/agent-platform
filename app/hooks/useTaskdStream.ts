@@ -49,6 +49,8 @@ export function createStreamController(revalidate: () => void, debounceMs = DEFA
 
 export interface UseTaskdStreamOptions {
   taskId?: string | null;
+  /** false なら張らない（未認証で /login を描画しているとき）。既定 true */
+  enabled?: boolean;
 }
 
 /** `/events` に対する `EventSource` を張り、`task.event` / `daemon` / `reset` を受けたら再検証する。root で 1 回だけ呼ぶ。 */
@@ -56,7 +58,11 @@ export function useTaskdStream(options?: UseTaskdStreamOptions): void {
   const revalidator = useRevalidator();
   const taskId = options?.taskId;
 
+  const enabled = options?.enabled ?? true;
+
   useEffect(() => {
+    // 未認証（/login 描画中）は `/events` が 401 になるだけなので張らない（docs/adr/0008 D1）
+    if (!enabled) return;
     const url = taskId ? `/events?task_id=${encodeURIComponent(taskId)}` : "/events";
     const eventSource = new EventSource(url);
     const controller = createStreamController(() => revalidator.revalidate());
@@ -75,5 +81,5 @@ export function useTaskdStream(options?: UseTaskdStreamOptions): void {
       controller.dispose();
     };
     // `revalidator` は `useRevalidator()` が返す安定した参照ではないため依存から外す（再接続は `taskId` の変化だけで十分）。
-  }, [taskId, revalidator.revalidate]);
+  }, [taskId, enabled, revalidator.revalidate]);
 }

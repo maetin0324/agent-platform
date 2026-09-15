@@ -106,6 +106,7 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
                   <input type="hidden" name="expected_status" value="ready" />
                   <textarea
                     name="note"
+                    aria-label="判定の note（任意）"
                     data-testid="approval-note"
                     rows={2}
                     className="rounded border px-2 py-1 text-sm"
@@ -166,6 +167,7 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
                   <input type="hidden" name="intent" value="answer" />
                   <textarea
                     name="answer"
+                    aria-label="回答"
                     data-testid="question-answer"
                     rows={3}
                     className="rounded border px-2 py-1 text-sm"
@@ -286,7 +288,7 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
                   </Link>
                 </p>
                 <p>{attentionText(item)}</p>
-                {item.task.status !== "done" && item.task.status !== "failed" && item.task.status !== "cancelled" && (
+                {item.task.actions.includes("cancel") && (
                   <Form method="post" className="mt-2">
                     <input type="hidden" name="task_id" value={item.task.id} />
                     <input type="hidden" name="expected_status" value={item.task.status} />

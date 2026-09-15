@@ -4,6 +4,8 @@ import { index, type RouteConfig, route } from "@react-router/dev/routes";
 export default [
   index("routes/inbox.tsx"),
   route("healthz", "routes/healthz.ts"),
+  route("login", "routes/login.tsx"),
+  route("logout", "routes/logout.ts"),
   route("tasks", "routes/tasks.tsx"),
   route("tasks/new", "routes/tasks.new.tsx"),
   route("tasks/:id", "routes/tasks.$id.tsx"),
@@ -15,4 +17,6 @@ export default [
   route("events", "routes/events.ts"),
   route("files/tasks/:id/runs/:runId/:name", "routes/files.runs.ts"),
   route("files/tasks/:id/artifacts/:idx", "routes/files.artifacts.ts"),
+  // 未定義パスも root middleware を通す（docs/adr/0008 D15）。必ず最後に置く
+  route("*", "routes/$.tsx"),
 ] satisfies RouteConfig;
