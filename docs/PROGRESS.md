@@ -17,6 +17,9 @@
 | 7 | 仕上げ（ADR-0010）、requeue 上限（ADR-0011） | 完了 | 2026-09-14 |
 | 8 | 複数アカウント運用・evidence 任意化・`taskctl worker run`（ADR-0012） | 完了 | 2026-09-14 |
 | 9 | GUI のための基盤（task-ops・WAL・events の id）と HTTP API 層（ADR-0013）、追補 P-G14〜P-G16（ADR-0014） | 完了 | 2026-09-14（追補 2026-09-15） |
+| 10 | 役割と委譲（組織的な木構造。ADR-0016） | 設計のみ | — |
+| 11 | GUI からのアカウント管理（ADR-0017） | 設計のみ | — |
+| 12 | 複数クラスタへの投入（ssh。ADR-0018） | 設計のみ | — |
 
 ---
 
@@ -1719,3 +1722,41 @@ auditor サブエージェントを 1 回起動した（読み取り専用。Pha
 - `taskd-gui` 側も同じ許可で `docs/DESIGN.md` に G5-P1〜P6 を反映し、`docs/taskd-api-v1.md` を taskd の `docs/gui/api.md` と同期した
   （GUI のエージェントはこの 2 ファイルを編集できない規約のため、オーケストレータが行った）。
 - P-43（`StoreError::InvalidCursor` と `SqliteStore::journal_mode()`）は未実装のまま提案に残す。
+
+---
+
+## Phase 10〜12 の設計（2026-09-15、実装は未着手）
+
+人間の指摘: 「当初は (1) 会社組織のような木構造でエージェントを走らせる基盤、(2) GUI から claude / codex の複数アカウントを管理する仕組み、
+(3) pegasus / sirius など複数クラスタへのタスク投入が欲しかったが、今の形で実現できるか分からない」。人間の判断は「まず設計だけ 3 つ分」、
+クラスタ実行の形は「ログインノードで ssh 実行」。
+
+### 現状の対応（率直な棚卸し）
+
+| 狙い | 今できること | 足りないこと |
+|---|---|---|
+| 木構造の実行 | Plan が子タスクに分解（深さ 3）、`parent_id` / `depends_on` の DAG、Approval 子、GUI の DAG 画面 | 役割（部長 / 実装者 / レビュア）の概念、実行中の追加分解、子の結果の集約、木全体の予算 |
+| 複数アカウント | アカウントごとの `[[providers]]`、上限・cooldown での決定的フォールバック、使用量と cooldown の可視化 | GUI からの追加・ログイン導線・疎通確認、設定の再読込。残量推定は引き続き非目標 |
+| 複数クラスタ | `WorkspaceSpec::Remote` の**型だけ**（ディスパッチャは警告して `ready` のまま） | 実行系が丸ごと未実装（ssh 起動、ワークスペース同期、リモートでの条件判定、クラスタごとの並列度と cooldown） |
+
+### 書いた設計
+
+- `docs/adr/0016-roles-and-delegation.md`（Proposed）: `Task.role` と `[[roles]]`、ワーカープロトコルの `delegate`（実行中の委譲、上限つき）、
+  集約 run（`aggregate`）、木全体の予算。状態機械と kind は増やさない。
+- `docs/adr/0017-account-management-from-gui.md`（Proposed）: `providers.d/*.toml` と `include`、管理系 API（追加・変更・削除・再読込・疎通確認）、
+  ログインは手順の案内と疎通確認まで（対話は肩代わりしない）、秘密は出さない。
+- `docs/adr/0018-remote-clusters-over-ssh.md`（Proposed）: `[[clusters]]`、ssh 越しに同じワーカープロトコルを流す、rsync による往復同期、
+  リモートでの `Check::Command` 実行、プロバイダ × クラスタの二次元の並列度、ssh の失敗は供給側失敗として cooldown。
+- DESIGN §6 に Phase 10 / 11 / 12 の受け入れ条件を追加し、非目標から「リモートワークスペースの実装」を外した（ジョブスケジューラ経由と
+  クラスタ常駐は引き続き非目標）。
+
+### 未解決事項（実装に入る前に決めること）
+
+1. Phase 10〜12 の**順序**。クラスタ投入（12）が一番大きい穴で、木構造（10）は既存の Plan で部分的に代替できる。
+2. Phase 12 のテスト方針: ssh 先を localhost にして行う（外部ネットワークに出ない規則を守る）。実クラスタでの確認は人間の実機作業になる。
+3. Phase 10 の `delegate` はワーカープロトコルの版を上げる。既存のアダプタ（claude-code / codex）のプロンプトも変わる。
+4. Phase 11 の管理系 API は、loopback でもトークンを要求する（現在は loopback なら認証無し）。運用手順が変わる。
+
+### GUI 側
+
+- `taskd-gui` の DESIGN §10 に **Phase G6（使い方ページ）** を定義した（`/help`、6 節構成、受け入れ条件 6 項目）。`run-gphases.sh` の既定フェーズに G6 を足した。

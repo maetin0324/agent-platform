@@ -461,9 +461,42 @@ LLM を使う実機確認は、認証が使える環境ならエージェント�
   8. loopback 以外で `token_file` 無しは設定エラー、許可されない `Host` は 400、作業ディレクトリ外を指す成果物は 403、`env` の値は応答に含まれない
   9. `docs/api/v1/*.schema.json` が生成結果と一致する
 
+### Phase 10 — 役割と委譲（組織的な木構造。ADR-0016。設計のみ、未着手）
+
+- `Task.role` と `[[roles]]` の既定、ワーカープロトコルの `delegate`（実行中の子タスクの提案）、集約 run、木全体の予算
+- 受け入れ:
+  1. `[[roles]]` に定義した役割の既定（tier / adapter / 指示文）が run に反映され、`WorkerStarted` から役割が追える
+  2. fake ワーカーが `delegate` で子 2 件を提案すると、検証を通ったものだけが子として挿入され、`Event::Delegated` が残る。上限（深さ・件数・木の run 数）を超える提案は拒否され理由が `WorkerProgress` に残る
+  3. 子が全て終端になるまで親は `reviewing` のまま。`aggregate = true` の親は最後に 1 回だけ run し、`artifacts/summary.md` が受け入れ条件で判定される
+  4. 木全体の予算を超えたら新しい `delegate` を拒否し、実行中の子は完走する
+  5. `taskctl replay` の差分ゼロ（`Delegated` は状態を変えない）
+
+### Phase 11 — GUI からのアカウント管理（ADR-0017。設計のみ、未着手）
+
+- `providers.d/*.toml` と `[providers] include`、管理系 API（追加・変更・削除・再読込・疎通確認）、GUI の画面
+- 受け入れ:
+  1. `POST /api/v1/providers` が `providers.d/<id>.toml` を作り、`POST /api/v1/reload` の後の tick から新しいアカウントが使われる。実行中の run は影響を受けない
+  2. 管理系はトークン必須（loopback でも）。`env` の値・`token_file` の中身は応答にもログにも出ない
+  3. `POST /api/v1/providers/{id}/check` が `ok` / `auth_failed` / `throttled` / `spawn_failed` を 30 秒以内に返す（fake アダプタで検証）
+  4. 再読込で cooldown が消えること、`[[providers]]` の重複 id を拒否することのテスト
+  5. GUI からアカウントを追加すると、ログイン手順（コピーできるコマンド）が表示される
+
+### Phase 12 — 複数クラスタへの投入（ssh。ADR-0018。設計のみ、未着手）
+
+- `[[clusters]]`、`task-remote`（ssh でワーカーを起動し JSON Lines を中継、rsync による往復同期）、リモートでの `Check::Command` 実行、クラスタごとの並列度と cooldown
+- 受け入れ（**ssh 先を localhost にして行い、外部ネットワークに出ない**）:
+  1. `WorkspaceSpec::Remote{cluster, path}` のタスクが、ssh 越しの fake ワーカーで実行され `done` になる。`WorkerStarted` にクラスタが残る
+  2. run の前後で rsync が往復し、リモートで作られた成果物がローカルの sha256 で判定される。`sync = "none"` では同期しない
+  3. `Check::Command` がリモート側で実行される（ローカルには無いファイルを使う条件が通る）
+  4. ssh の失敗（宛先不達・`setup` の失敗）は供給側失敗として requeue され、そのクラスタが cooldown に入り、attempts を消費しない
+  5. クラスタとプロバイダの並列度が両方守られる。設定に無い `cluster` のタスクは `unroutable` として扱われ、`--until-idle` を止めない
+  6. `taskctl replay` の差分ゼロ
+
 ### 非目標（本プロジェクトではやらない）
 
-Web UI（HTTP API 層は §5.10 で本プロジェクトの範囲。UI は別プロジェクト `taskd-gui`）、リモートワークスペースの実装、予算・残量推定、残量推定に基づく複数アカウントの自動切替、マルチユーザ、通知。これらは接続層・供給層の担当。
+Web UI（HTTP API 層は §5.10 で本プロジェクトの範囲。UI は別プロジェクト `taskd-gui`）、予算・残量推定、残量推定に基づく複数アカウントの自動切替、マルチユーザ、通知。これらは接続層・供給層の担当。
+（**リモートワークスペースの実装は非目標から外した**。人間の当初の狙い「複数クラスタへのタスク投入」に必要なため、Phase 12 / ADR-0018 で本プロジェクトの範囲とする。
+ジョブスケジューラ経由の投入と、クラスタ側に taskd を常駐させる構成は引き続き採らない。）
 （設定表の順に従う決定的なフォールバック — 並列度の上限・cooldown 中のアカウントを飛ばすこと — は Phase 8 で本プロジェクトの範囲とした。どのアカウントをどれだけ使うかの最適化は供給層が `ProviderPolicy` を差し替えて行う。）
 
 ---
