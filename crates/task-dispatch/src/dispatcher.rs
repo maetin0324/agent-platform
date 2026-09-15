@@ -40,6 +40,19 @@ use tokio::task::JoinHandle;
 
 use crate::policy::{AdapterId, CooldownReason, ProviderId, ProviderOutcome, ProviderPolicy, Selection};
 
+/// これを超えた tick は段階ごとの所要時間を `warn` で出す（ADR-0015 D2）。
+const SLOW_TICK: Duration = Duration::from_secs(1);
+
+/// tick の中の 1 段階がこれを超えたら `warn`（ADR-0015 D2。遅いのが DB かファイルかを切り分ける）。
+const SLOW_STEP: Duration = Duration::from_millis(500);
+
+fn log_slow_step(step: &'static str, started: Instant) {
+    let elapsed = started.elapsed();
+    if elapsed >= SLOW_STEP {
+        tracing::warn!(step, duration_ms = elapsed.as_millis() as u64, "slow dispatcher step");
+    }
+}
+
 /// RFC 3339 の文字列（デーモンのスナップショット用）。書式化に失敗することは実質無いが、その場合は空文字列。
 fn rfc3339(t: OffsetDateTime) -> String {
     t.format(&Rfc3339).unwrap_or_default()
@@ -310,16 +323,42 @@ impl Dispatcher {
     pub fn tick(&mut self) -> Result<TickReport, DispatchError> {
         self.ticks += 1;
         let mut report = TickReport::default();
+        // ADR-0015 D2: 遅い tick の内訳を出せるよう、段階ごとに所要時間を測る。
+        let started = Instant::now();
+        let mut at = Instant::now();
+        let lap = |at: &mut Instant| {
+            let d = at.elapsed().as_millis() as u64;
+            *at = Instant::now();
+            d
+        };
         let (finished, reviewed) = self.drain_completions()?;
+        let drain_ms = lap(&mut at);
         report.finished = finished;
         report.reviewed = reviewed;
         report.reclaimed = self.reclaim_expired_leases()?;
+        let reclaim_ms = lap(&mut at);
         self.abort_stale_runs()?;
+        let abort_ms = lap(&mut at);
         self.recover_reviews()?;
+        let recover_ms = lap(&mut at);
         report.dispatched = self.dispatch_ready()?;
+        let dispatch_ms = lap(&mut at);
         report.in_flight = self.running.len() + self.reviewing.len();
         report.idle = self.is_idle()?;
+        let idle_ms = lap(&mut at);
         self.publish_snapshot();
+        if started.elapsed() >= SLOW_TICK {
+            tracing::warn!(
+                total_ms = started.elapsed().as_millis() as u64,
+                drain_ms,
+                reclaim_ms,
+                abort_ms,
+                recover_ms,
+                dispatch_ms,
+                idle_ms,
+                "slow tick phases"
+            );
+        }
         Ok(report)
     }
 
@@ -793,7 +832,9 @@ impl Dispatcher {
         }
         // 上位から見て見送りが続いても後続を試せるよう、窓は広めに取る。
         let window = self.ready_window();
+        let ready_started = Instant::now();
         let candidates = self.store.ready_tasks(window)?;
+        log_slow_step("ready_tasks", ready_started);
         let now = Instant::now();
         let mut dispatched = 0;
         // この tick で並列度の上限に達していると分かったプロバイダ（tick 内では空きが増えないので共有する）。
@@ -813,10 +854,12 @@ impl Dispatcher {
                     continue;
                 }
             }
+            let dir_started = Instant::now();
             let Some(dir) = self.task_dir(&task) else {
                 tracing::warn!(task_id = %task.id, "remote workspace is not supported; task left ready");
                 continue;
             };
+            log_slow_step("task_dir", dir_started);
             let Some((adapter_id, provider_id)) = self.select_provider(&task.worker_hint, now, task.id, &mut full) else {
                 continue;
             };
@@ -828,10 +871,14 @@ impl Dispatcher {
             let run_id = ulid::Ulid::new().to_string();
             let wall = Duration::from_secs(task.budget.max_wall_secs);
             let ttl = wall + self.config.lease_grace;
-            if !self.store.acquire_lease(task.id, &run_id, ttl)? {
+            let lease_started = Instant::now();
+            let acquired = self.store.acquire_lease(task.id, &run_id, ttl)?;
+            log_slow_step("acquire_lease", lease_started);
+            if !acquired {
                 continue;
             }
             let model = self.models.get(&provider_id).cloned().unwrap_or_default();
+            let event_started = Instant::now();
             self.store.append_event(
                 task.id,
                 &Event::WorkerStarted {
@@ -842,6 +889,7 @@ impl Dispatcher {
                     role: None,
                 },
             )?;
+            log_slow_step("append_worker_started", event_started);
             let limits = RunLimits {
                 wall_clock: wall,
                 idle_timeout: self.config.idle_timeout,

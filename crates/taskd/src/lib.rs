@@ -154,7 +154,8 @@ fn filesystem_type_in(mountinfo: &str, target: &Path) -> Option<String> {
         let Some(fstype) = after.split_whitespace().next() else {
             continue;
         };
-        if target.starts_with(mount_point) && best.as_ref().is_none_or(|(len, _)| mount_point.len() > *len) {
+        // 同じマウント点の行が複数ある場合（autofs → nfs4 など）は後の行が有効なので `>=` で上書きする。
+        if target.starts_with(mount_point) && best.as_ref().is_none_or(|(len, _)| mount_point.len() >= *len) {
             best = Some((mount_point.len(), fstype.to_string()));
         }
     }
@@ -455,6 +456,12 @@ model = "fake"
 27 26 0:53 / /home/u/local rw,relatime shared:3 - ext4 /dev/sdb1 rw";
         assert_eq!(filesystem_type_in(mountinfo, Path::new("/var/lib/taskd")).as_deref(), Some("ext4"));
         assert_eq!(filesystem_type_in(mountinfo, Path::new("/home/u/workspace")).as_deref(), Some("nfs4"));
+        // 同じマウント点に autofs と実体が並ぶ場合は後の行（実体）を採る。
+        let autofs_first = "\
+25 30 0:24 / / rw,relatime shared:1 - ext4 /dev/mapper/root rw
+26 25 0:51 / /home rw,relatime shared:2 - autofs systemd-1 rw
+27 25 0:52 / /home rw,relatime shared:3 - nfs4 server:/home rw,vers=4.2";
+        assert_eq!(filesystem_type_in(autofs_first, Path::new("/home/u/x")).as_deref(), Some("nfs4"));
         assert_eq!(filesystem_type_in(mountinfo, Path::new("/home/u/local/db")).as_deref(), Some("ext4"));
         assert_eq!(filesystem_type_in("garbage", Path::new("/home")), None);
 
