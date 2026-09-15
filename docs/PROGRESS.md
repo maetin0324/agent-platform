@@ -1571,9 +1571,9 @@ auditor サブエージェントを 1 回起動した（読み取り専用。Pha
 
 | # | 対象 | 提案 | 採用まで実装で使う既定 |
 |---|---|---|---|
-| P-42 | DESIGN §5.1 | ストアの書き込みトランザクションは `BEGIN IMMEDIATE`（WAL で複数接続が書くための前提。ADR-0013 実装メモの D5 追補） | 実装済み（ADR に記録） |
+| P-42 | DESIGN §5.1 | ストアの書き込みトランザクションは `BEGIN IMMEDIATE`（WAL で複数接続が書くための前提。ADR-0013 実装メモの D5 追補） | **DESIGN.md に反映済み（人間の許可、2026-09-15）** |
 | P-43 | task-core | `StoreError::InvalidCursor` と `SqliteStore::journal_mode()` を追加する。現在の task-api は、cursor の誤りを文言の照合で判定し、journal_mode を rusqlite の別接続で実測している | 現状のまま（task-api 内で処理） |
-| P-44 | taskd | API サーバのタスクの異常終了を tick ループで検知し、デーモンを止めるか再起動する | 停止時のログのみ |
+| P-44 | taskd | API サーバのタスクの異常終了を tick ループで検知し、デーモンを止めるか再起動する | 停止時のログのみ。**現状の挙動として DESIGN §5.10 に明記（2026-09-15）** |
 
 ---
 
@@ -1662,7 +1662,7 @@ auditor サブエージェントを 1 回起動した（読み取り専用。Pha
 
 | # | 対象 | 提案 | 採用まで実装で使う既定 |
 |---|---|---|---|
-| P-45 | DESIGN §4.3 / §5.1 | ADR-0014 を反映する: `WorkerStarted` / `WorkerFinished` の `role`（Reviewer run も記録）、`tasks.objective` 列と一覧検索、タスク作成時の title / objective / parent の検証 | 実装済み（ADR-0014 に記録） |
+| P-45 | DESIGN §4.3 / §5.1 | ADR-0014 を反映する: `WorkerStarted` / `WorkerFinished` の `role`（Reviewer run も記録）、`tasks.objective` 列と一覧検索、タスク作成時の title / objective / parent の検証 | **DESIGN.md に反映済み（人間の許可、2026-09-15）** |
 
 ---
 
@@ -1711,3 +1711,11 @@ auditor サブエージェントを 1 回起動した（読み取り専用。Pha
    再発時は `slow dispatcher step` の内訳で `acquire_lease` / `append_worker_started` のどちらかが分かる。
 2. ディスパッチャの tick は非同期ランタイムのスレッド上で同期的に DB を触るため、遅い I/O では tick の間そのスレッドを占有する（API は別タスクなので影響しない）。
    `spawn_blocking` に載せる案はあるが、今回の停止は API に波及していないので変えていない。
+
+### Phase 9 追補 2 の後処理（2026-09-15）
+
+- 人間の許可を得て、P-42 / P-44 / P-45 を `docs/DESIGN.md` に反映した（§4.3 の `role` と `ProviderThrottled.reason`、§5.1 の `BEGIN IMMEDIATE`・
+  `objective` 列と `text_contains`、§5.9 の補足（作成時の検証と `show --json`）、§5.10 の `actions`・観測可能性・API 異常終了時の挙動）。
+- `taskd-gui` 側も同じ許可で `docs/DESIGN.md` に G5-P1〜P6 を反映し、`docs/taskd-api-v1.md` を taskd の `docs/gui/api.md` と同期した
+  （GUI のエージェントはこの 2 ファイルを編集できない規約のため、オーケストレータが行った）。
+- P-43（`StoreError::InvalidCursor` と `SqliteStore::journal_mode()`）は未実装のまま提案に残す。

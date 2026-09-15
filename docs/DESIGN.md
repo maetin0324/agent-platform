@@ -164,18 +164,20 @@ blocked ──(human answers)─────────▶ ready      (回答�
 ```rust
 pub enum Event {
     Created{task}, Transitioned{from,to,reason},
-    WorkerStarted{run_id, adapter, model, provider?},             // provider = 実行したプロバイダ（アカウント）ID（P-41）
+    WorkerStarted{run_id, adapter, model, provider?, role?},      // provider = プロバイダ（アカウント）ID（P-41）、role = worker | reviewer（P-45）
     WorkerProgress{run_id, msg},
-    ArtifactProduced{run_id, artifact}, WorkerFinished{run_id, outcome, usage},
+    ArtifactProduced{run_id, artifact}, WorkerFinished{run_id, outcome, usage, role?},
     ReviewVerdict{run_id, criterion_idx, pass, reason},
     ApprovalRequested, ApprovalDecided{by, approved, note},
     Answered{question, answer},                                   // P-10
-    ProviderThrottled{provider, until},
+    ProviderThrottled{provider, until, reason?},                   // reason = throttled | auth_failed | exhausted | spawn
 }
 ```
 
 `events(task_id, seq, ts, json)` テーブル。現在状態 `tasks` テーブルは派生ビューとして扱い、`taskctl replay` でイベントから再構築できること（Phase 2 の受け入れ条件）。
 `Transitioned.reason` は必ずトリガの機械可読名（`"review_fail"` など）で、`replay` はこれで `attempts` を復元する。
+`role` は省略時がワーカー run（既存のイベントと同じ直列化）。`Reviewer` run も `WorkerStarted` / `WorkerFinished` を対象タスクに残し、
+アカウント別の使用量の集計に含める（P-45、ADR-0014 D1）。ワーカー run を前提にする派生値（直近 run、質問文、受信箱）は `role` で Reviewer run を除く。
 
 ### 4.4 Artifact
 
@@ -194,8 +196,13 @@ pub enum Event {
   `ready_tasks(limit)`（deps全て `done` かつ `status=ready` かつ親Approval充足、`kind != approval`。P-36）,
   `apply_transition(_with_events)(task_id, trigger, events)`, `complete_plan(plan_id, verdicts, children, accept_children)`。
 - **状態を変更する操作は、変更後の `Event::Transitioned` と関連イベント（`WorkerFinished`, `ReviewVerdict`, `ApprovalDecided`, `Answered` …）の追記、および §4.2 の伝播まで含めて同一トランザクションで行う**（P-16）。
+- **書き込みトランザクションは `BEGIN IMMEDIATE` で始める**（P-42、ADR-0015）。WAL では、読んでから書くトランザクションを DEFERRED で始めると、
+  途中で他の接続が書いた場合に書き込みへの格上げが busy_timeout を待たずに `SQLITE_BUSY` で失敗する。`append_event` の採番と挿入、
+  `release_lease` の読み書きも 1 つのトランザクションに入れる。
 - GUI / API のための読み取り（ADR-0013）: `events_since(after_id, limit)`（`events` のグローバル単調 id による全タスク横断の追尾）、
-  `list_page(filter, order, cursor, limit)`（keyset ページング）、`count_by_status()`。
+  `list_page(filter, order, cursor, limit)`（keyset ページング。`text_contains` は `title` と `objective` の部分一致で、
+  SQLite の LIKE なので ASCII の大文字小文字は区別しない。P-45）、`count_by_status()`、`event_rows_for(task_id, after_seq, limit)`。
+  `tasks` には一覧のための非正規化列 `title` / `updated_at` / `objective` を持つ。
 - マイグレーションは `migrations/NNNN_*.sql` を起動時に適用し、`schema_migrations` 表で版数を管理する。バイナリの知らない新しい版数の DB は
   開かない（`SchemaTooNew`）。接続は WAL・明示的な busy_timeout・`synchronous=NORMAL`（ディスパッチャ・API・`taskctl` の同時アクセスのため。
   WAL はネットワークファイルシステム上では使えないので DB はローカルディスクに置く）。
@@ -329,6 +336,12 @@ taskctl worker run --config <taskd.toml> --task <id> [--provider <id> | --adapte
 
 `taskctl` の操作の判断と検証は `task-ops`（§5.10 の API と共有）にあり、`taskctl` は引数解析と出力整形だけを持つ（ADR-0013 D7）。
 
+### 5.9 の補足: タスク作成時の検証（`task-ops`。P-45、ADR-0014 D3）
+
+`taskctl add` と `POST /api/v1/tasks` は同じ関数を通り、次を検証する（順に）: `title` / `objective` が空白だけでないこと、受け入れ条件が 1 つ以上あること、
+`parent` が存在すること、`depends_on` が存在し `failed` / `cancelled` でないこと。違反は何も挿入せずエラー（API は 422、CLI は exit 1）。
+`taskctl show --json` は `GET /api/v1/tasks/{id}` と同じ型・同じ直列化で出す（差は API が埋める `runs[].files` と `timers.now`、および CLI が設定を読まないこと）。
+
 ### 5.10 API 層（`task-api`。ADR-0013）
 
 Web GUI（別プロジェクト `taskd-gui`。Remix のサーバが BFF として呼ぶ）と `curl` のための HTTP API。仕様の詳細は `docs/gui/api.md`、
@@ -346,6 +359,13 @@ Web GUI（別プロジェクト `taskd-gui`。Remix のサーバが BFF とし�
 - **セキュリティ**: 既定のバインドは loopback。loopback 以外では `token_file` 必須（`Authorization: Bearer`）。`Host` を許可リストで検査し、
   CORS は出さない（ブラウザは taskd を直接呼ばない）。run のログと成果物は、記録済みのパスと ULID 形式の `run_id` を作業ディレクトリに結合して
   `canonicalize` し、作業ディレクトリ外を返さない。`[[providers]].env` の値とトークンは返さない。
+
+- **今できる操作**: `TaskDetail` だけでなく `TaskRef` / `TaskSummary` にも `actions`（`approve` / `reject` / `answer` / `cancel`）を入れる。
+  GUI は受信箱・一覧・DAG・依存関係のどこから来た参照でも、この規則を再実装しない（ADR-0015 D4）。
+- **観測可能性**（ADR-0015 D1〜D3）: API は要求ごとに `method` / `path` / `status` / `duration_ms` / `request_id` を記録し、1 秒を超えたものを警告する
+  （`GET /stream` は対象外）。デーモンは `max(1 秒, tick_ms × 2)` を超えた tick と、その中の遅い段階を警告する。DB がネットワークファイルシステム上にあれば
+  起動時に警告する（WAL はローカルディスク前提。§5.1）。
+- **API の異常終了**: API サーバのタスクが落ちてもデーモンは動き続け、停止時にエラーをログに出す（tick ループでは監視しない。実際に落ちるのは稀）。
 
 SQLite は WAL・明示的な busy_timeout・スキーマ版数（知らない新しい版の DB は開かない）で、ディスパッチャ・API・`taskctl` の同時アクセスに備える（§5.1、ADR-0013 D5）。
 
