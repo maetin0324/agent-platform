@@ -6,7 +6,7 @@
 #   scripts/taskd.sh status <name>         起動中か、/health が返るか
 #   scripts/taskd.sh logs <name>           .run/<name>/taskd.log を表示
 #   scripts/taskd.sh taskctl <name> ...    taskctl --db .run/<name>/taskd.sqlite3 ... を実行
-#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（シナリオは各フェーズで追加。G0 では骨組みのみ）
+#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（basic / unroutable。multi-account は設定のみで DB は作らない。docs/adr/0007 D1）
 # 環境変数: TASKD_REPO、TASKD_API_LISTEN（既定 127.0.0.1:7710）
 set -euo pipefail
 
@@ -33,12 +33,13 @@ cmd_build() {
   [ -x "$TASKD_BIN" ] && [ -x "$TASKCTL_BIN" ] || die "binaries not found after build"
 }
 
-# .run/<name>/ を用意する（既存の DB は残す）。fake-worker.sh が無ければ $2（既定は既定のもの）を置く。
+# .run/<name>/ を用意する（既存の DB は残す）。fake-worker.sh / taskd.toml が既に無ければ既定のものを置く
+# （fixture が独自の設定・ワーカーを用意済み（multi-account / unroutable）ならそれを残す。docs/adr/0007 D1）。
 prepare() {
   local name="$1" worker_src="${2:-$DEFAULT_WORKER}" dir; dir="$(run_dir "$name")"
   mkdir -p "$dir/workspaces"
   [ -f "$dir/fake-worker.sh" ] || cp "$worker_src" "$dir/fake-worker.sh"
-  sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$TMPL" > "$dir/taskd.toml"
+  [ -f "$dir/taskd.toml" ] || sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$TMPL" > "$dir/taskd.toml"
 }
 
 cmd_start() {
@@ -91,14 +92,16 @@ cmd_taskctl() {
   "$TASKCTL_BIN" --db "$(run_dir "$name")/taskd.sqlite3" "$@"
 }
 
-# fixture <scenario>: .run/<scenario>/ を作り直し、taskctl と taskd --until-idle で既知の DB を作る。
-# シナリオはフェーズごとに case を追加する（G1: basic、G4: multi-account / unroutable）。
+# fixture <scenario>: .run/<scenario>/ を作り直し、taskctl と taskd --until-idle で既知の DB を作る
+# （multi-account は例外で設定のみ。docs/adr/0007 D1）。シナリオはフェーズごとに case を追加する（G1: basic、G4: multi-account / unroutable）。
 cmd_fixture() {
   [ $# -ge 1 ] || die "scenario is required"
   local scenario="$1"
   case "$scenario" in
     basic) fixture_basic ;;
-    *) die "unknown fixture scenario '$scenario' (known: basic)" ;;
+    multi-account) fixture_multi_account ;;
+    unroutable) fixture_unroutable ;;
+    *) die "unknown fixture scenario '$scenario' (known: basic, multi-account, unroutable)" ;;
   esac
 }
 
@@ -152,6 +155,46 @@ fixture_basic() {
   echo "  plan: $tp (done; 2 draft children)"
   echo "  failed: $te"
   echo "  artifacts: $tg (done; note.md/data.json/image.png)"
+}
+
+# multi-account（docs/DESIGN.md §10 Phase G4、docs/adr/0007 D1/D4）: 設定と workspace を用意するだけで DB は作らない
+# （他の fixture と違う: cooldown はプロセス内メモリのみで DB から再構築できないため、スロットルを起こす
+# taskctl add/approve は e2e が `start multi-account` した後の生きたプロセスに対して直接行う）。
+fixture_multi_account() {
+  local name="multi-account" dir; dir="$(run_dir "$name")"
+  alive "$name" && die "taskd '$name' is running; stop it first (scripts/taskd.sh stop $name)"
+  rm -rf "$dir"
+  mkdir -p "$dir/workspaces"
+  cp "$ROOT/test/taskd/fixtures/multi-account-worker.sh" "$dir/fake-worker.sh"
+  chmod +x "$dir/fake-worker.sh"
+  sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$ROOT/test/taskd/multi-account.toml.tmpl" > "$dir/taskd.toml"
+  echo "fixture 'multi-account' prepared at $dir (config only; DB is empty)"
+  echo "  providers: acct-a (throttles), acct-b (falls back and succeeds)"
+  echo "  start it (scripts/taskd.sh start multi-account) and taskctl add/approve against the running process"
+}
+
+# unroutable（docs/DESIGN.md §10 Phase G4、docs/adr/0007 D2）: cheap タスクに frontier だけのプロバイダを与え、
+# --until-idle で ready のまま残す（unroutable 判定は毎 tick 現在の DB から計算するので、basic と同じく再起動しても保たれる）。
+fixture_unroutable() {
+  local name="unroutable" dir; dir="$(run_dir "$name")"
+  [ -x "$TASKD_BIN" ] && [ -x "$TASKCTL_BIN" ] || die "binaries not found; run 'scripts/taskd.sh build' first"
+  alive "$name" && die "taskd '$name' is running; stop it first (scripts/taskd.sh stop $name)"
+  rm -rf "$dir"
+  mkdir -p "$dir/workspaces/ws-u"
+  cp "$DEFAULT_WORKER" "$dir/fake-worker.sh"
+  sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$ROOT/test/taskd/unroutable.toml.tmpl" > "$dir/taskd.toml"
+
+  local db="$dir/taskd.sqlite3"
+  tc() { "$TASKCTL_BIN" --db "$db" "$@"; }
+
+  local tu
+  tu=$(tc add --title "Unroutable-U" --objective "cheap task with no matching provider" --tier cheap --check-cmd "true" --workspace "$dir/workspaces/ws-u")
+  tc approve "$tu" >/dev/null
+
+  "$TASKD_BIN" --config "$dir/taskd.toml" --until-idle --log-format text >> "$dir/taskd.log" 2>&1
+
+  echo "fixture 'unroutable' built at $dir"
+  echo "  unroutable: $tu (ready; no provider matches the cheap tier)"
 }
 
 [ $# -ge 1 ] || usage

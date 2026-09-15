@@ -10,6 +10,7 @@ export default [
   route("tasks/:id/runs/:runId", "routes/tasks.$id.runs.$runId.tsx"),
   route("plans/new", "routes/plans.new.tsx"),
   route("daemon", "routes/daemon.tsx"),
+  route("providers", "routes/providers.tsx"),
   route("graph", "routes/graph.tsx"),
   route("events", "routes/events.ts"),
   route("files/tasks/:id/runs/:runId/:name", "routes/files.runs.ts"),

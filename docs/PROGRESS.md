@@ -11,7 +11,7 @@
 | G1 | 読み取りとストリーム | **DONE** | 2026-09-15 |
 | G2 | 操作 | **DONE** | 2026-09-15 |
 | G3 | ログ・成果物・DAG | **DONE** | 2026-09-15 |
-| G4 | プロバイダとデーモン | 未着手 | — |
+| G4 | プロバイダとデーモン | **DONE** | 2026-09-15 |
 | G5 | 認証・配布・仕上げ | 未着手 | — |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
@@ -421,3 +421,85 @@ G1 の未解決事項（下記）のうち、G2 着手前に効いてくるも�
 - なし。`GET /tasks/{id}/runs`、ファイル系（`GET /tasks/{id}/runs/{run_id}/{stdout,stderr,result}`、`GET /tasks/{id}/artifacts[/{idx}]`）、`GET /graph` は
   `docs/taskd-api-v1.md` の記載どおりに動作した。`ArtifactProduced` がワーカーからの明示的な `{"type":"artifact",...}` メッセージでのみ記録される点
   （taskd がファイルシステムを自動スキャンしない）は §3.9 の記述と整合しており、fixture 側で対応した。
+
+## Phase G4 — DONE（2026-09-15）
+
+### 成果物
+- 画面: `app/routes/providers.tsx`（`/providers`。`loadProviders(client, request)` が `GET /providers` をそのまま返す。`Providers.items[]` を表で表示。
+  `env_keys` はキー名のみ、値は出さない。cooldown の残り時間だけは taskd が値を返さないので `fetchedAt`（BFF がリクエスト前後に取った時刻）と `cooldown.until` の差分を
+  `app/lib/time-delta.ts` で表示専用に計算する）。
+  `app/routes/daemon.tsx`（G2 の最小限版を拡張: `in_flight` の内訳表（task へのリンク・run_id・provider・経過時間）、`cooldowns` の内訳表（provider・reason・残り時間）、
+  `awaiting_human` / `unroutable` の一覧（task へのリンク）、`docs/taskd-api-v1.md` §3.20 が明記する「`last_tick_at` が `now` から `3 × tick_ms` 以上古ければ GUI が
+  遅延と表示する」規則どおりのバナーを追加。`loadDaemon` のシグネチャ・返り値は変更していない）。
+  `app/lib/time-delta.ts`（`secondsBetween`/`formatDuration`。表示専用の単純な時刻差分計算。docs/adr/0007 D3）。
+  `app/routes.ts` に `/providers` を登録、`app/root.tsx` のナビゲーションに「プロバイダ」を追加。
+- fixture: `scripts/taskd.sh` に `fixture multi-account`（`test/taskd/multi-account.toml.tmpl` + `test/taskd/fixtures/multi-account-worker.sh`。taskd 本体の e2e
+  `throttled_account_falls_back_to_the_next_account` を移植。**cooldown がプロセス内メモリのみで DB から再構築できないため（下記「監査結果」前の設計判断）、
+  他の fixture と違い DB は作らず設定だけを用意する**）と `fixture unroutable`（`test/taskd/unroutable.toml.tmpl`。cheap タスクに frontier だけのプロバイダ、
+  `--until-idle` で ready のまま残す）を追加。`prepare()` が既存の `taskd.toml` を無条件に上書きしていたバグを修正（`fixture unroutable`/`multi-account` の
+  カスタム設定が `scripts/taskd.sh start` のたびに既定のテンプレートへ戻ってしまうのを直した）。
+  `test/taskd/fixtures/basic-worker.sh` に `Slow-H`（20 秒 sleep してから done。受け入れ条件 4 の in_flight 表示用）を追加。
+- テスト: `test/unit/providers.test.ts`（`loadProviders` の単体テスト 3 件）、`test/unit/time-delta.test.ts`（5 件）。既存 `test/unit/daemon.test.ts` は無改修で通過。
+  `e2e/g4.spec.ts`（受け入れ条件 1〜4 の 5 シナリオ。`multi-account` は生きたプロセスを維持したまま `taskctl add`/`approve` でスロットルを起こす。`apiGet` は
+  Node の `fetch` の keep-alive コネクションプールが直前に stop したプロセスのソケットを再利用して失敗する事象（実測）を避けるため `node:http` を `agent: false` で
+  直接使う）。
+- 文書: `docs/adr/0007-g4-decisions.md`（D1〜D8。cooldown の非永続化という taskd 側の実装事実、それに伴う fixture 設計、awaiting_human/unroutable が毎 tick
+  再計算されること、GUI 側での経過時間・残り時間表示が派生値の再計算に当たらない根拠、multi-account/unroutable/Slow-H の各設計、停止/復旧バナーの流用）。
+- 実装単位: `/providers` 画面と `/daemon` 画面拡張は互いにファイルを共有しない独立した単位だったため、implementer サブエージェント 2 体を並列実行した
+  （担当: `app/routes/providers.tsx` + `test/unit/providers.test.ts` / `app/routes/daemon.tsx` のみ）。`app/routes.ts` の登録、`app/lib/time-delta.ts`、
+  `scripts/taskd.sh` の fixture 追加、`e2e/g4.spec.ts` は設計判断とファイル共有（複数ルートから import される、順序依存の taskd 操作を要する）のため自分で実装した。
+
+### 受け入れ条件と証拠（docs/DESIGN.md §10 Phase G4。`e2e/g4.spec.ts`、実 taskd `multi-account`/`basic`/`unroutable` に対して検証）
+1. **`/providers` で `acct-a` が requeue 1・cooldown 残り時間表示、`acct-b` が done 1、tokens 合計が runs の usage と一致** — `e2e/g4.spec.ts:117` pass（0.7s）。
+   `multi-account` を起動後、taskctl で `Fallback-MA`（`max-retries 0`）を作成・承認。`GET /providers` の `acct-a.stats.requeue`=1・`done`=0、`acct-b.stats.done`=1・`requeue`=0、
+   `acct-a.cooldown`={reason: "throttled", until: 約5分後} を確認済み（手動 curl でも同じ値を確認: 実装前の検証で `acct-a` の run が `outcome:"requeue"`・`usage:null`、
+   `acct-b` の run が `outcome:"done"`・`usage:{input_tokens:120,output_tokens:40}`）。画面の `provider-tokens`（acct-a + acct-b の合計）が `GET /tasks/<id>/runs` の
+   2 run の usage 合計と一致することを確認。
+2. **`/daemon` に pid/hostname/ticks が表示され、5 秒後の再読込で ticks が増える。fixture (b) の親（Human-B）が awaiting_human に 1 件。fixture unroutable では
+   受信箱の注意と /daemon の unroutable に同じ id** — `e2e/g4.spec.ts:163,197` pass（6.0s / 0.7s）。`basic` で `daemon-pid`/`daemon-hostname` が非空、
+   `daemon-ticks` が 5 秒後の reload で増加、`awaiting-human-item` に Human-B の id へのリンクが 1 件。`unroutable` フィクスチャでは `GET /inbox` の
+   `attention[0].task.title`=`"Unroutable-U"` の id が、受信箱の `attention-item` と `/daemon` の `unroutable-item` の両方に同じ href（`/tasks/<id>`）で出る。
+3. **`stop <name>` → 5 秒以内に全ページでバナー、`start` → 5 秒以内に消え、SSE が再接続して task.event が再び届く** — `e2e/g4.spec.ts:217` pass（3.1s）。
+   `/tasks` を開いた状態で `stop basic` → `reload()` で 5 秒未満（実測 1 秒未満）にバナー表示、`/daemon`・`/providers` への遷移でもバナー（root と各ルートの
+   `ErrorBoundary` の両方が出すため `taskd-banner` が 2 要素になりうる。ADR-0007 D8）。`start basic` → `/tasks` への遷移で 5 秒以内にバナー消失、
+   `waitForResponse` で `/events` が 200 に戻ることを確認。復旧後に `taskctl add` した `Reconnect-Check` がリロード無しで `/tasks` に表示されることを確認
+   （root の `useTaskdStream` が再接続後の `task.event` を受けて再検証）。
+4. **20 秒ワーカー実行中は in_flight に task/run_id/provider/経過時間が出て、終了後に消える** — `e2e/g4.spec.ts:275` pass（21.9s）。`Slow-H` を承認後、
+   `WorkerStarted` を確認してから `/daemon` を開くと `in-flight-row`（`data-task-id`）に `in-flight-provider`=`fake-local`、`in-flight-run-id` が非空、
+   `in-flight-elapsed` が数値を含む文字列で表示。`done` になった後に reload すると同じ行が 0 件になる。
+
+### 共通条件
+- `pnpm lint` exit 0（`Checked 81 files`）/ `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0 / `pnpm test` **126 passed**（18 ファイル。G3 までの 118 + G4 の 8）/
+  `pnpm build` exit 0 / `pnpm gen:types && git diff --exit-code app/taskd/types.ts` 差分ゼロ（exit 0。G4 は API 追加が無いため型生成物への影響なし）
+- `pnpm e2e`: **31 件中 29〜31 passed**（直近 2 回のフルラン）。`e2e/g4.spec.ts` の 5 シナリオは 2 回とも 5/5 pass。落ちたのは両回とも `e2e/g2.spec.ts`
+  （受け入れ条件 2 または 5）で、G2-U1（`docs/taskd-requests.md` R1、taskd の間欠停止）と一致するパターン（`toHaveText`/`toHaveAttribute` のタイムアウト、
+  または keep-alive コネクションの再利用に起因する `fetch failed`）。G4 の変更・fixture が原因の失敗は観測していない。
+
+### 監査結果
+- G4 の作業セッションは監査前に中断したため、G4 単独の auditor 監査は未実施。G5 の auditor 監査（1 回）に「G4 の受け入れ条件 1〜4 の実装が
+  `docs/DESIGN.md` §10 Phase G4 と一致するか」の確認を含めて依頼し、その結果を G5 の節に記す。
+
+### 未解決事項
+- **G4-U1: `multi-account` フィクスチャは他と非対称**（設計上の制約であり不具合ではない）— cooldown が taskd プロセス内メモリのみで DB から再構築できないため
+  （ADR-0007 D1）、`scripts/taskd.sh fixture multi-account` は DB を作らず設定だけを用意し、スロットルを起こす操作は `e2e/g4.spec.ts` が生きたプロセスに対して
+  直接行う。他の fixture（`--until-idle` で DB を作ってから任意のタイミングで `start`）と挙動が異なる点を知らずに使うと「DB が空で驚く」ことになりうるので、
+  `scripts/taskd.sh` のコメントと ADR-0007 D1/D4 に明記した。
+- **G4-U2: `taskd-banner` が 2 重に描画されるルートがある** — `/daemon`・`/providers` は自身の `ErrorBoundary` でも `TaskdBanner` を出すため、root のものと合わせて
+  DOM に 2 つ描画される（表示内容は同じ）。G0〜G3 では単一ルートでしか確認していなかったため気づいていなかった。実害は無い（見た目は同じバナーが縦に並ぶだけ）が、
+  G5 で a11y チェック（`@axe-core/playwright`）を入れる際に `[role=alert]` の重複が指摘される可能性があるので留意する。
+- **G4-U3: `/providers` の cooldown 残り時間の基準時刻は BFF のリクエスト時刻**（`fetchedAt`）— `Providers` 応答自体に `now` が無いため、loader が
+  `new Date().toISOString()` を挟んで基準にしている。`/daemon` は `DaemonView.now`（taskd 自身の時刻）を使っており基準が異なる（後者の方が正確）。
+  タブを開いたまま長時間放置すると `/providers` の残り時間はページ再読込までのブラウザ・サーバ間のクロックのずれの影響を受けうる（実運用で問題になるほどの
+  ずれは想定していない）。
+- **G4-U4: `/daemon` の in_flight・cooldowns テーブルの行数が多くなった場合の表示は未検証** — G4 の fixture 規模（同時 1〜2 件）でしか確認していない。
+  G5 以降でプロバイダ数・同時実行数が増える場面があれば、テーブルの折り返し・ページングを検討する。
+- G0〜G3 からの引き継ぎ（`/assets` の Host 検査適用範囲、`pnpm dev` の CSP、G2-U1 taskd 間欠停止、G2-U2〜U7、G3-U1〜U8）は G4 では対処していない。
+
+### 提案
+- 上の「提案」節の G0-P1/P2、G1-P1/P2、G2-P1〜P4、G3-P1/P2 に加え、G4-P1: `docs/taskd-api-v1.md` §3.20 の cooldown の説明に「`ProviderPolicy` の実装（`StaticPolicy`）は
+  プロセス内メモリのみで、`ProviderThrottled` イベントから起動時に再構築されない」という実装事実を明記すると、GUI 側だけでなく `taskctl` 利用者にも
+  「プロセスを再起動すると cooldown が消える」という挙動が文書から分かるようになる（ADR-0013 D9 は `reason` の語彙は定義しているが、この非永続性には触れていない）。
+
+### taskd への依頼
+- なし。`GET /providers`・`GET /daemon` は `docs/taskd-api-v1.md` §3.19〜§3.21 の記載どおりに動作した。`ProviderFailure::Throttled` によるフォールバックと
+  cooldown の記録（`ProviderThrottled` イベント）、`awaiting_human`/`unroutable` の毎 tick 再計算も文書と実挙動が一致した。

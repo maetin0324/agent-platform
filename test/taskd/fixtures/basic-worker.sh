@@ -36,6 +36,13 @@ case "$KIND" in
         touch artifacts/out.txt
         echo '{"type":"done","summary":"slow done","evidence":[]}'
         ;;
+      Slow-H)
+        # G4 受け入れ条件 4（in_flight 表示）: 20 秒 sleep してから done。fixture 本体（--until-idle）には含めない
+        # （含めると fixture 構築が 20 秒延び、かつ in_flight を観測できないまま終わる。docs/adr/0007 D6）。
+        sleep 20
+        touch artifacts/out.txt
+        echo '{"type":"done","summary":"slow-h done","evidence":[]}'
+        ;;
       Artifacts-G)
         # G3 受け入れ条件 3/4/5（成果物ビューア）: Markdown（信用できないスクリプトを含む）・JSON・PNG。
         # `ArtifactProduced` は taskd が自動検出せず、ワーカーが `{"type":"artifact",...}` を明示的に送る必要がある

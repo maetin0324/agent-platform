@@ -104,6 +104,9 @@ export default function App({ loaderData }: Route.ComponentProps) {
           <a href="/daemon" className="hover:underline">
             デーモン
           </a>
+          <a href="/providers" className="hover:underline">
+            プロバイダ
+          </a>
           <a href="/graph" className="hover:underline">
             DAG
           </a>
