@@ -46,7 +46,8 @@ pub enum WorkerCommand {
 #[derive(Args, Debug)]
 pub struct WorkerRunArgs {
     /// `taskd.toml`。
-    #[arg(long)]
+    /// P-54: 省略時は環境変数 `TASKD_CONFIG` を見る。
+    #[arg(long, env = "TASKD_CONFIG")]
     pub config: PathBuf,
 
     /// 実行するタスクの ID。

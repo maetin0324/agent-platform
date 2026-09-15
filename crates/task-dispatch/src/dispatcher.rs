@@ -2852,6 +2852,72 @@ mod tests {
         }
     }
 
+    /// ADR-0018 D5（監査の「確認不能」の解消）: 並列度は「プロバイダ」と「クラスタ」の両方で守る。
+    /// クラスタの上限（1）が全体の上限（3）とプロバイダの上限（3）より小さいとき、そのクラスタのタスクは
+    /// 1 件ずつしか走らない。ローカル実行のタスクはクラスタの枠を消費しない。
+    #[tokio::test]
+    async fn cluster_and_provider_concurrency_are_both_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        // 同じクラスタを指すリモートのタスク 2 件と、ローカルのタスク 1 件。
+        let mut remote_ids = Vec::new();
+        for _ in 0..2 {
+            let mut t = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+            t.workspace = WorkspaceSpec::Remote { cluster: "slow".into(), path: dir.path().to_path_buf() };
+            store.insert(&t).unwrap();
+            remote_ids.push(t.id);
+        }
+        let local = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        store.insert(&local).unwrap();
+
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::from_millis(400),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 3);
+        // Remote のタスクの写しは `workspace_root/<task_id>`（ADR-0018 D1）。テストでは実体のある場所にする。
+        d.config.workspace_root = dir.path().to_path_buf();
+        d.config.clusters.insert(
+            "slow".into(),
+            ClusterSpec {
+                id: "slow".into(),
+                // 実際に ssh はせず、多重接続の確認だけが通ればよいので localhost 向けの Host 名を使う。
+                host: "taskd-localhost".into(),
+                concurrency: 1,
+                sync: SyncMode::None,
+                delete_on_push: false,
+                setup: vec![],
+                env: vec![],
+                rsync_excludes: vec![],
+            },
+        );
+        if !control_master_alive_blocking(&["ssh".to_string()], "taskd-localhost") {
+            eprintln!("skip: taskd-localhost への多重接続が無い");
+            return;
+        }
+
+        let report = d.tick().unwrap();
+        // クラスタの上限が 1 なので、リモートは 1 件だけ。ローカルの 1 件は別枠で走る。
+        assert_eq!(report.dispatched, 2, "{report:?}");
+        let running_remote = remote_ids
+            .iter()
+            .filter(|id| store.get(**id).unwrap().unwrap().status == Status::Running)
+            .count();
+        assert_eq!(running_remote, 1, "クラスタの上限 1 を超えない");
+        assert_eq!(store.get(local.id).unwrap().unwrap().status, Status::Running, "ローカルはクラスタの枠を使わない");
+
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle);
+        for id in &remote_ids {
+            assert_eq!(
+                store.get(*id).unwrap().unwrap().status,
+                Status::Done,
+                "{:?}",
+                store.events_for(*id).unwrap()
+            );
+        }
+    }
+
     /// ADR-0018 実装メモ M1〜M3: 多重接続の無いクラスタは 1 tick に 1 回の `ssh -O check` で分かり、スナップショットの `clusters[]` に
     /// `connected: false` と `cooldown_until` で現れる。タスクは ready のまま（attempts 不変）、`ClusterUnavailable` に host が入り、
     /// 人待ちなので idle を止めない。ssh 先が無いことを使うので外部ネットワークには出ない。

@@ -116,7 +116,9 @@ pub struct Task {
     pub status: Status,
     pub priority: i32,
     pub worker_hint: WorkerHint,    // 要求能力: Tier { Frontier | Standard | Cheap } と任意のadapter指定
-    pub workspace: WorkspaceSpec,   // Local{path} | Remote{cluster, path}（Remoteは未実装、型だけ）
+    pub role: Option<String>,       // ADR-0016: 役割（[[roles]] の既定と指示文を引く。状態機械は見ない）
+    pub aggregate: bool,            // ADR-0016: 子が全て終端になった後に集約 run を 1 回だけ行う
+    pub workspace: WorkspaceSpec,   // Local{path} | Remote{cluster, path}（Remote = クラスタでコマンドを実行。ADR-0018）
     pub budget: Budget,             // max_turns, max_wall_secs, max_retries
     pub attempts: u32,
     pub lease: Option<Lease>,       // { worker_run_id, expires_at }
@@ -157,20 +159,23 @@ blocked ──(human answers)─────────▶ ready      (回答�
 - `Plan` kind のタスクはワーカー（プランナー）の出力として**子タスク群のJSON**を返す。スキーマ検証を通れば子タスクを `draft` で挿入し、プランタスク自身は `reviewing` → `done`。子の `draft`→`ready` は設定 `plan.auto_accept` が true なら自動、false なら人間の承認。
 
 遷移は `task-core` 内の純粋関数 `fn transition(state, trigger) -> Result<outcome, Invalid>` として実装し、**全遷移を表駆動でテストする**。
-入力は追記ログの `Event` ではなく `Trigger`（Accept / Dispatch / WorkerDone / WorkerQuestion / WorkerError{retryable} / LeaseExpired / Requeue / ReviewPass / ReviewFail / Answer / Approve / Reject / Cancel / DependencyFailed）とする（ADR-0002 D2）。
+入力は追記ログの `Event` ではなく `Trigger`（Accept / Dispatch / WorkerDone / WorkerQuestion / WorkerError{retryable} / LeaseExpired / Requeue / ReviewPass / ReviewFail / Answer / Approve / Reject / Cancel / DependencyFailed / Aggregate）とする（ADR-0002 D2、ADR-0016 M1）。
+`Aggregate` は `reviewing → ready`（attempts 据え置き、reason `"aggregate"`）で、`aggregate = true` の親が子の完了後に集約 run を 1 回だけ行うために使う。
 
 ### 4.3 Event（追記専用）
 
 ```rust
 pub enum Event {
     Created{task}, Transitioned{from,to,reason},
-    WorkerStarted{run_id, adapter, model, provider?, role?},      // provider = プロバイダ（アカウント）ID（P-41）、role = worker | reviewer（P-45）
+    WorkerStarted{run_id, adapter, model, provider?, role?, task_role?},  // provider = アカウント ID（P-41）、role = worker | reviewer（P-45）、task_role = タスクの役割（ADR-0016）
     WorkerProgress{run_id, msg},
     ArtifactProduced{run_id, artifact}, WorkerFinished{run_id, outcome, usage, role?},
     ReviewVerdict{run_id, criterion_idx, pass, reason},
     ApprovalRequested, ApprovalDecided{by, approved, note},
     Answered{question, answer},                                   // P-10
     ProviderThrottled{provider, until, reason?},                   // reason = throttled | auth_failed | exhausted | spawn
+    ClusterUnavailable{cluster, host, reason},                     // ADR-0018: ssh の多重接続が無く、人のログイン待ち
+    Delegated{run_id, task_ids},                                   // ADR-0016: run 中に提案された子タスクの挿入
 }
 ```
 
@@ -225,16 +230,19 @@ pub enum Event {
 オーケストレータ→ワーカーは**サブプロセス起動＋stdin/stdout の JSON Lines**。すべてのアダプタはこの形に正規化する。
 
 ```
-→ {"type":"run","protocol":1,"task":{...Task...},"workspace":"/abs/path","context":{"prior_review":[...],"inputs":[...],"answers":[...],"review":{...}}}
+→ {"type":"run","protocol":2,"task":{...Task...},"workspace":"/abs/path","context":{"prior_review":[...],"inputs":[...],"answers":[...],"review":{...},"role":{...},"children":[...]}}
 ← {"type":"progress","msg":"..."}
 ← {"type":"artifact","name":"bench.json","path":"artifacts/bench.json"}
 ← {"type":"question","text":"..."}            # → タスクを blocked にする
 ← {"type":"done","summary":"...","evidence":[{"criterion":0,"command":"cargo test","exit":0,"stdout_tail":"..."}],"usage":{"input_tokens":..,"output_tokens":..}}
 ← {"type":"error","message":"...","retryable":true,"provider_failure":{"kind":"throttled","retry_after_secs":60}}
+← {"type":"delegate","tasks":[{"title":"...","objective":"...","acceptance":[...],"role":"implementer","depends_on":[0]}]}   # ADR-0016: 実行中の委譲
 ```
 
 - `evidence` は受け入れ条件ごとに「何を実行して何が出たか」。Reviewer はこれと成果物だけを見る。`criterion` 以外（`command` / `exit` / `stdout_tail`）は、コマンドを伴わない条件（`ArtifactExists` / `Reviewer` / `Human`）では省略してよい（P-41、旧 P-12）。
 - `usage` は取れる範囲で。取れないアダプタは省略可。
+- `context.role` は `[[roles]]` から引いた役割の指示文、`context.children` は集約 run（`aggregate`）で渡す子の一覧（ADR-0016）。
+- `delegate` は run 中に子タスクを提案する（上限: 1 run の件数 / 木の深さ / 木の run 数）。CLI 系アダプタは `artifacts/delegate.json` に書く規約（ADR-0016 M8）。
 - `context.answers`（P-10）は `blocked` から人間が `taskctl answer` した回答の履歴 `[{question, answer}]`。
 - `context.review`（P-27）は `Reviewer` check の run でのみ付く `{summary, evidence, criteria}`。
 - `error.provider_failure`（任意、P-21）は供給側の失敗を示し、付いていれば `requeue` になる。
@@ -341,6 +349,7 @@ taskctl worker run --config <taskd.toml> --task <id> [--provider <id> | --adapte
 `taskctl add` と `POST /api/v1/tasks` は同じ関数を通り、次を検証する（順に）: `title` / `objective` が空白だけでないこと、受け入れ条件が 1 つ以上あること、
 `parent` が存在すること、`depends_on` が存在し `failed` / `cancelled` でないこと。違反は何も挿入せずエラー（API は 422、CLI は exit 1）。
 `taskctl show --json` は `GET /api/v1/tasks/{id}` と同じ型・同じ直列化で出す（差は API が埋める `runs[].files` と `timers.now`、および CLI が設定を読まないこと）。
+`taskctl` の `--config` は環境変数 `TASKD_CONFIG` でも渡せる（P-54。`add --role` で `[[roles]]` の既定を引くときに使う）。
 
 ### 5.9 の補足 2: クラスタでのコマンド実行（ADR-0018、Phase 12）
 
@@ -348,6 +357,8 @@ taskctl worker run --config <taskd.toml> --task <id> [--provider <id> | --adapte
 
 - `path` はクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。taskd は `workspace_root/<task_id>` に写しを持つ。
 - 順序: pull（クラスタ → 写し）→ ワーカーが写しを編集 → push（写し → クラスタ。既定では削除しない）→ `Check::Command` をクラスタで実行 → pull。
+  同期の両方向で `.taskd/` / `runs/` / `inputs/`（taskd の管理用）は除外する（P-46）。`artifacts/` は双方向に同期する（成果物はクラスタで作られることがある）。
+- `TaskDetail.workspace_dir` は Remote のタスクでは**写し**（`workspace_root/<task_id>`）を指す。GUI が run のログを開く経路になる（P-48）。
 - 接続は**人が張った ssh の多重接続（`ControlMaster`）を借りる**。`BatchMode=yes` で対話的な認証は行わない。
   接続が無ければそのクラスタを cooldown にし、`Event::ClusterUnavailable` を残し、そのタスクは「人待ち」として `--until-idle` の待ち対象から外す。
 - 並列度は「プロバイダ（アカウント）」と「クラスタ」の二次元。`ssh` 自体の失敗（終了コード 255）は供給側失敗、リモートコマンドの非ゼロ終了は判定の失敗。
@@ -496,7 +507,7 @@ LLM を使う実機確認は、認証が使える環境ならエージェント�
 
 設計は ADR-0017。**GUI 側の画面は別フェーズ（G フェーズ）**。ここでは taskd の API と設定の仕組みだけを作る。
 
-- `[providers] include = "providers.d/*.toml"` と `providers.d/<id>.toml`（1 アカウント 1 ファイル）
+- `providers_include = "providers.d/*.toml"`（トップレベルのキー。`[[providers]]` との TOML 上の衝突を避けるため）と `providers.d/<id>.toml`（1 アカウント 1 ファイル）
 - 管理系 API（**loopback でもトークン必須**）: `POST /api/v1/providers`、`PATCH /api/v1/providers/{id}`、
   `DELETE /api/v1/providers/{id}`、`POST /api/v1/reload`、`POST /api/v1/providers/{id}/check`
 - `check` は、そのアカウントの env で短い run（30 秒 / 1 ターン）を 1 回だけ行い、`ok` / `auth_failed` / `throttled` /

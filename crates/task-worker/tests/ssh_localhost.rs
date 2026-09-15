@@ -155,3 +155,59 @@ async fn missing_control_master_is_unreachable() {
     let err = ws.exec("true", Duration::from_secs(10)).await.expect_err("unreachable");
     assert!(matches!(err, task_worker::WorkspaceError::Unreachable(_)), "{err:?}");
 }
+
+/// ADR-0018 D4（監査の「確認不能」の解消）: `sync = "none"`（共有ファイルシステム）では rsync を一切呼ばない。
+/// リモートのパスを手元のディレクトリと同じにして、同期なしでもコマンドの結果が見えることを確かめる。
+#[tokio::test]
+async fn sync_none_does_not_rsync_and_uses_the_same_directory() {
+    let local = tempfile::tempdir().unwrap();
+    let mut s = settings(local.path().to_path_buf());
+    s.sync = SyncMode::None;
+    // rsync が呼ばれたら失敗する（存在しないコマンド）。
+    s.rsync_command = vec!["taskd-rsync-must-not-run".to_string()];
+    let ws = SshWorkspace::new(local.path(), s);
+    if !available(&ws).await {
+        return;
+    }
+    let t = task(local.path());
+    ws.prepare(&t).await.expect("prepare（pull を呼ばない）");
+
+    // 共有 FS 前提なので、手元に置いたファイルがそのままリモートのコマンドから見える。
+    std::fs::write(local.path().join("shared.txt"), "same filesystem\n").unwrap();
+    let r = ws.exec("cat shared.txt", Duration::from_secs(30)).await.expect("exec");
+    assert_eq!((r.exit, r.stdout_tail.trim()), (Some(0), "same filesystem"), "{r:?}");
+
+    // リモートで作った成果物も、同じディレクトリなのでそのまま collect できる。
+    let r = ws
+        .exec("mkdir -p artifacts && printf 'x\\n' > artifacts/out.txt", Duration::from_secs(30))
+        .await
+        .expect("exec artifact");
+    assert_eq!(r.exit, Some(0), "{r:?}");
+    let artifacts = ws.collect(&t).await.expect("collect");
+    assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+}
+
+/// P-46: 同期の両方向で、taskd の管理用ディレクトリ（`runs/` など）はやり取りしない。
+#[tokio::test]
+async fn management_directories_are_never_synced() {
+    let local = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let remote_dir = remote.path().join("project");
+    let ws = SshWorkspace::new(local.path(), settings(remote_dir.clone()));
+    if !available(&ws).await {
+        return;
+    }
+    std::fs::create_dir_all(&remote_dir).unwrap();
+    let t = task(local.path());
+    ws.prepare(&t).await.expect("prepare");
+
+    // 手元の run のログはクラスタへ送らない。
+    std::fs::create_dir_all(local.path().join("runs/abc")).unwrap();
+    std::fs::write(local.path().join("runs/abc/stdout.jsonl"), "{}\n").unwrap();
+    ws.push().await.expect("push");
+    assert!(!remote_dir.join("runs").exists(), "runs/ はクラスタへ送らない");
+
+    // pull（--delete 付き）でも手元の run のログは消えない。
+    ws.pull().await.expect("pull");
+    assert!(local.path().join("runs/abc/stdout.jsonl").exists(), "pull で手元の runs/ を消さない");
+}

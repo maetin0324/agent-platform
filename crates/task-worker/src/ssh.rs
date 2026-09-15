@@ -21,6 +21,11 @@ pub enum SyncMode {
     None,
 }
 
+/// 同期の両方向で常に除外するもの（P-46）。taskd が写しに作る管理用のディレクトリで、
+/// クラスタ側の既存プロジェクトに持ち込まないし、`--delete` 付きの pull で手元から消してもいけない。
+/// `artifacts/` は**除外しない**（成果物はクラスタで作られることがあり、受け入れ条件の照合に要る）。
+pub const SYNC_ALWAYS_EXCLUDED: [&str; 3] = [".taskd/", "runs/", "inputs/"];
+
 /// 1 タスク分のリモート実行の設定。
 #[derive(Debug, Clone)]
 pub struct SshSettings {
@@ -183,8 +188,11 @@ impl SshWorkspace {
         }
         args.push("-e".into());
         args.push(self.ssh_base().join(" "));
-        args.push("--exclude".into());
-        args.push(".taskd/".into());
+        // P-46: taskd の管理用ディレクトリ（ラッパ・run のログ・入力）はクラスタへ送らない。
+        for pattern in SYNC_ALWAYS_EXCLUDED {
+            args.push("--exclude".into());
+            args.push(pattern.into());
+        }
         for pattern in &self.settings.rsync_excludes {
             args.push("--exclude".into());
             args.push(pattern.clone());
@@ -205,8 +213,11 @@ impl SshWorkspace {
         args.extend(["-a".into(), "--delete".into()]);
         args.push("-e".into());
         args.push(self.ssh_base().join(" "));
-        args.push("--exclude".into());
-        args.push(".taskd/".into());
+        // P-46: `--delete` で手元の run のログ・入力を消さない（クラスタ側には無いため）。
+        for pattern in SYNC_ALWAYS_EXCLUDED {
+            args.push("--exclude".into());
+            args.push(pattern.into());
+        }
         for pattern in &self.settings.rsync_excludes {
             args.push("--exclude".into());
             args.push(pattern.clone());

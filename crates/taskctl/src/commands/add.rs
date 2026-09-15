@@ -78,7 +78,8 @@ pub struct AddArgs {
     pub aggregate: bool,
 
     /// `[[roles]]` を読む `taskd.toml`。`--role` の既定をここから解決する。
-    #[arg(long)]
+    /// P-54: 省略時は環境変数 `TASKD_CONFIG` を見る。
+    #[arg(long, env = "TASKD_CONFIG")]
     pub config: Option<PathBuf>,
 
     /// ワークスペースのローカルパス。省略時は `<task_id>`（相対パス、P-19）。

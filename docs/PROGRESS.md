@@ -2210,3 +2210,39 @@ exit 0）、`cargo clippy --workspace --all-targets -- -D warnings`（exit 0, �
 - P-59: `providers_include` のディレクトリ監視（`inotify` 等）を足し、`providers.d/` への直接の手書き編集も
   `reload` 無しで拾えるようにする提案（現状は API 経由の変更も含め `reload` 明示が必須で、これは ADR-0017 D1 の
   意図どおりだが、運用上「手で編集して忘れずに reload する」手間が残る）。
+
+## Phase 10〜12 の追補（積み残しの修正と DESIGN 反映、2026-09-15）
+
+人間の指示「(a) 積み残しと DESIGN 反映 → (b) GUI の G6 / G7 → (c) 実機確認」の (a)。
+
+### 直したもの
+
+- **`EVENT_TYPES` に `cluster_unavailable`**（Phase 10・11 から持ち越していた不整合）。`GET /events?types=cluster_unavailable` が使える。
+- **P-46（同期の除外）**: `.taskd/` / `runs/` / `inputs/` を**両方向**で除外する（`SYNC_ALWAYS_EXCLUDED`）。
+  - push: taskd の管理用ディレクトリをクラスタの既存プロジェクトに持ち込まない。
+  - pull: `--delete` で手元の run のログを消さない（これが無いと消えていた）。
+  - `artifacts/` は**除外しない**（成果物はクラスタで作られることがあり、受け入れ条件の照合に要る）。ADR-0018 D4 を改訂。
+- **P-54（`TASKD_CONFIG`）**: `taskctl` の `--config` を環境変数でも渡せる（`clap` の `env` 機能を有効化）。`add --role` で毎回 `--config` を書かずに済む。
+- **監査の「確認不能」だったテスト 3 件**:
+  - `sync_none_does_not_rsync_and_uses_the_same_directory`（`sync = "none"` では rsync を呼ばない。呼んだら失敗する偽コマンドで確認）
+  - `management_directories_are_never_synced`（P-46 の両方向）
+  - `cluster_and_provider_concurrency_are_both_enforced`（クラスタ上限 1・全体 3 で、リモートは 1 件ずつ、ローカルは別枠）
+
+### DESIGN.md への反映（人間の許可のもと）
+
+- §4.1 `Task` に `role` / `aggregate`、`workspace` の説明を実態に（P-53）。
+- §4.2 の `Trigger` 一覧に `Aggregate`（`reviewing → ready`、attempts 据え置き）（P-51）。
+- §4.3 `Event` に `ClusterUnavailable` / `Delegated`、`WorkerStarted.task_role`（P-51）。
+- §5.3 のプロトコルを v2 に（`delegate` メッセージ、`context.role` / `context.children`、`artifacts/delegate.json` 規約）（P-52）。
+- §5.9 の補足に `TASKD_CONFIG`（P-54）、補足 2 に同期の除外（P-46）と「Remote の `workspace_dir` は写し」（P-48）。
+- §6 Phase 11 の `providers_include` の表記訂正（P-57）。
+
+### 証拠
+
+- `cargo test --workspace`: **488 passed**、0 failed、1 ignored（`ssh_cluster_manual`。実クラスタが要る）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0。
+
+### 残した提案
+
+- P-56（`aggregate = false` の親は子の失敗を引き継がない）と P-58 / P-59（`check` の結果を残す、`providers.d/` の監視）は、
+  運用を見てから決める。P-47 / P-49 / P-50 / P-55 は GUI・運用側の判断。
