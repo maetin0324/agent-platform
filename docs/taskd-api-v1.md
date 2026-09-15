@@ -1,6 +1,7 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-15 Phase 10（ADR-0016 役割と委譲）— `POST /tasks` の `role` / `aggregate`、`TaskDetail.role` / `delegated[]`、`GET /config` の `roles[]` / `delegation`、イベント種別 `delegated` を追加（全て追加のみ。v1 のまま）
 - 提供者: **taskd**（crate `task-api`、axum）。taskd のデーモンプロセス内で、`taskd.toml` に `[api]` 節があるときだけ動く
 - 利用者: `taskd-gui` の BFF（Remix = React Router framework mode のサーバ側 loader / action）と `curl`。**ブラウザは直接呼ばない**
 - 正の型定義: Rust（`task-core` / `task-ops` / `task-api`、`serde` + `schemars`）。JSON Schema を `docs/api/v1/api-v1.schema.json` にコミットし、
@@ -29,6 +30,9 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 - `token_file` の内容（前後の空白を除いた 1 行）がトークン。ファイルが読めない・空 → 設定エラー。トークンはログにも API にも出さない。
 - SSE の同時接続数の上限は task-api の定数 16（設定キーにしない）。
 - API は**自分専用の `SqliteStore` 接続**を持ち、DB 呼び出しは `spawn_blocking` で行う（ディスパッチャの接続と Mutex を共有しない。ADR-0013 D3）。
+- `providers_include = "providers.d/*.toml"`（トップレベル、`[[providers]]` と併用可。ADR-0017 M1）を設定すると、
+  §3.24〜3.28 のプロバイダ管理エンドポイントが `providers.d/<id>.toml`（1 アカウント 1 ファイル、ファイル名昇順で
+  `[[providers]]` の後ろに連結）を読み書きできるようになる。未設定なら 5 本とも 409。
 
 ### 1.2 プロトコルと共通規約
 
@@ -49,13 +53,13 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 ### 1.3 認証（Bearer）
 
 - `token_file` が設定されていれば全エンドポイント（`GET /health` を除く）で `Authorization: Bearer <token>` を要求する。無ければ 401 `unauthorized`（`WWW-Authenticate: Bearer realm="taskd"`）。比較は定数時間。
-- `token_file` が無い（= loopback のみ）場合は認証しない。
+- `token_file` が無い（= loopback のみ）場合は認証しない。**ただし管理系エンドポイント（`POST/PATCH/DELETE /providers...`、`POST /reload`）は例外**で、`token_file` が無くても常に 401 にする（ADR-0017 D1: loopback でも管理操作にはトークンを要求する）。管理 API を使うには `token_file` の設定が要る。
 - `GET /health` は常に無認証（版とスキーマ版数だけを返す。G0 の疎通確認用）。ただし Host 検査は受ける。
 
 ### 1.4 Host 検査・Origin・CSRF
 
 - 全要求で `Host` ヘッダを許可リスト（`localhost`、`127.0.0.1`、`[::1]`、`listen` のホスト、`allowed_hosts`。ポートは無視）と照合し、外れれば 400 `host_not_allowed`。DNS rebinding 対策。
-- 変更系（`POST`）に `Origin` ヘッダが付いていれば 403 `origin_forbidden`。ブラウザから直接呼ばれる設計ではないので、`Origin` の存在自体を「想定外の呼び出し」とみなす（`curl` と Node の `fetch` は `Origin` を送らない）。
+- 変更系（`POST`/`PATCH`/`DELETE`。Phase 11 で `PATCH`/`DELETE` が増えた）に `Origin` ヘッダが付いていれば 403 `origin_forbidden`。ブラウザから直接呼ばれる設計ではないので、`Origin` の存在自体を「想定外の呼び出し」とみなす（`curl` と Node の `fetch` は `Origin` を送らない）。Content-Type / 本文サイズの検査は本文を伴う `POST`/`PATCH` だけ（`DELETE` は本文を取らない）。
 - `Content-Type: application/json` の要求（1.2）と合わせて、フォーム送信型の CSRF は成立しない。
 
 ### 1.5 エラー
@@ -105,7 +109,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（25）
+## 2. エンドポイント一覧（31）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -134,6 +138,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 23 | GET | `/daemon` | ディスパッチャのメモリ上のスナップショット | `DaemonView` | `tokio::sync::watch` |
 | 24 | GET | `/config` | `taskd.toml` の要約（秘密は出さない） | `ConfigView` | 設定（taskd が起動時に渡す） |
 | 25 | GET | `/schema` | `api-v1.schema.json` の内容 | `application/schema+json` | `include_str!` |
+| 26 | GET | `/clusters` | `[[clusters]]` の定義 + 接続の有無 + cooldown（ADR-0018、Phase 12） | `Clusters` | 設定 + スナップショット |
+| 27 | POST | `/providers` | `providers.d/<id>.toml` を作る（ADR-0017、Phase 11。**管理系: トークン必須**） | 201 `ProviderConfigView`（`Location`） | taskd（ファイル書き込みのみ） |
+| 28 | PATCH | `/providers/{id}` | 並列度・tier・model・env を変更する（**管理系**） | 200 `ProviderConfigView` | taskd（ファイル書き込みのみ） |
+| 29 | DELETE | `/providers/{id}` | `providers.d/<id>.toml` を消す（**管理系**） | 200 `{}` | taskd（ファイル削除のみ） |
+| 30 | POST | `/providers/{id}/check` | そのアカウントの env で短い疎通確認を 1 回行う（**管理系**） | 200 `ProviderCheckResponse` | taskd（`task-worker` 経由。タスク・イベントには残らない） |
+| 31 | POST | `/reload` | 設定と `providers.d/` を読み直し、稼働中のプロバイダ選定・アダプタを差し替える（**管理系**） | 200 `ReloadResult` | taskd（`Dispatcher` の差し替え） |
 
 ---
 
@@ -188,12 +198,20 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
                {"type":"reviewer","text":"the diff is minimal"}],
  "kind":"execute","tier":"standard","adapter":null,"priority":0,
  "parent":null,"depends_on":["01J…"],
- "max_turns":10,"max_wall_secs":600,"max_retries":2,"workspace":null}
+ "max_turns":10,"max_wall_secs":600,"max_retries":2,"workspace":null,
+ "role":"lead","aggregate":false}
 ```
 
 - `acceptance[]` は `task_ops::add::CriterionSpec`（`Human{text}` / `Command{cmd, expect_exit}` / `ArtifactExists{name}` / `Reviewer{text}`）を `#[serde(tag = "type", rename_all = "snake_case")]` で表したもの。
-- 省略可能なフィールドと既定は `taskctl add` と同じ: `kind=execute`、`tier=standard`、`adapter=null`、`priority=0`、`parent=null`、`depends_on=[]`、
-  `max_turns=10`、`max_wall_secs=600`、`max_retries=2`、`workspace=null`（→ `Local{path: "<task_id>"}`、相対）。`title` / `objective` / `acceptance` は必須。
+- 省略可能なフィールドと既定は `taskctl add` と同じ: `kind=execute`、`priority=0`、`parent=null`、`depends_on=[]`、
+  `max_retries=2`、`workspace=null`（→ `Local{path: "<task_id>"}`、相対）、`role=null`、`aggregate=false`。`title` / `objective` / `acceptance` は必須。
+- **`tier` / `max_turns` / `max_wall_secs` / `adapter` は Phase 10 から任意**（ADR-0016 D1 / M3）。省略時は
+  **`role` に一致する `[[roles]]` の既定 → 全体の既定**（`tier=standard`、`max_turns=10`、`max_wall_secs=600`、`adapter=null`）の順で埋める。
+  書いた値は常に役割の既定より優先する。`max_retries` に役割の既定は無い（常に 2）。
+- `role` は自由記述の役割名（ADR-0016 D1）。`[[roles]]` に無い名前でもエラーにせず、名前だけ保存する（既定も指示文も付かない）。
+  状態機械は `role` を見ない。`GET /config` の `roles[]` が設定にある役割の一覧。
+- `aggregate`（ADR-0016 D3）: true の親は、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を書く。
+  応答の `Task` では **false のとき省略される**（`#[serde(skip_serializing_if)]`。`role` も `null` のとき省略）。
 - `acceptance` は**クライアントが並べた順**で保存する（CLI は accept → cmd → artifact → reviewer の固定順で渡す。並びに意味は無い）。
   `command` の `text` は `` `<cmd>` exits 0 ``（現状の `CriterionSpec::into_criterion` は `expect_exit` に関わらずこの文。CLI も常に `expect_exit = 0`）、`artifact_exists` の `text` は `artifact <name> exists`。整形は task-ops が行う。
 - 初期 `status`: `kind=approval` なら `ready`、それ以外 `draft`。`Created` イベントと同一トランザクション（`task_ops::add::create_task(store, spec, now) -> Task`）。
@@ -210,7 +228,13 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 - `taskctl show --json <id>` と**同じ型・同じ直列化**（task-ops の `TaskDetail` を compact な JSON で出す。ADR-0013 D12）。差は次の 3 点（Phase 9b で確定）:
   API は `runs[].files` を埋める（taskctl は `null`）、`timers.now` は応答時刻、taskctl は `taskd.toml` を読まないので
   `workspace_dir` / `timers.backoff_until` / `timers.max_requeues` は設定の既定値で計算する（`--workspace-root` で基準だけ上書き可）。
-- `workspace_dir` は `WorkspaceSpec::Local{path}` を `workspace_root` で絶対化した文字列（`canonicalize` はしない。存在しなくてもよい）。`Remote` は `null`。
+- `workspace_dir` は `WorkspaceSpec::Local{path}` を `workspace_root` で絶対化した文字列（`canonicalize` はしない。存在しなくてもよい）。
+  `Remote{cluster, path}` では**手元の写し** `workspace_root/<task_id>`（run のログ `runs/` と成果物はここ。クラスタ側のパスは `task.workspace.path`。ADR-0018 D1、Phase 12）。
+- `cluster` は `WorkspaceSpec::Remote` の `cluster`（`[[clusters]] id`）。`Local` は `null`（Phase 12）。
+- `role` は `task.role` と同じ値を最上位にも出したもの（GUI の表示用。Phase 10、ADR-0016 D1）。役割が無ければ `null`。
+- `delegated[]` は、このタスクの run が `delegate` で作った子の履歴（`Event::Delegated` の出現順。Phase 10、ADR-0016 D2）。
+  1 要素は `{run_id, ts, tasks: TaskRef[]}` で、`ts` はイベントの `ts`、`tasks` は子の**現在の**状態（既に存在しない ID は落とす）。
+  委譲された子は `children[]` にも出る（`delegated[]` はどの run が作ったかを足すだけ）。
 - `timers.now` は応答時刻。クライアントは `lease_expires_at - now` 等をこの `now` 基準で計算する（時計ずれ対策）。
 - `runs[].files` は task-api が `<workspace_dir>/runs/<run_id>/` を `stat` して埋める（task-ops は `null`）。
 - `actions` は今この状態で許される操作（§5.4）。GUI はボタンの表示にこれを使い、押した結果の 409 も正常系として扱う。
@@ -223,6 +247,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `after_seq` | −1 | この `seq` より大きいものから |
 | `limit` | 500（最大 5000） | |
 | `types` | 全て | `Event` の `type` 名をカンマ区切り（例 `transitioned,worker_finished`）。未知の名前は 400 |
+
+`types` の語彙（`Event` の `type`、12 種）: `created`、`transitioned`、`worker_started`、`worker_progress`、`artifact_produced`、
+`worker_finished`、`review_verdict`、`approval_requested`、`approval_decided`、`answered`、`provider_throttled`、
+`delegated`（Phase 10。`{run_id, task_ids}`。状態は変えないので `replay` は無視する）。
 
 - `seq` 昇順。`has_more` が true なら最後の `seq` を `after_seq` に入れて続きを取る。
 - `items[].id` はグローバル id（ADR-0013 D6）。`items[].ts` は `events.ts`。
@@ -319,6 +347,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 `items[]` は `[[providers]]` の順。定義（`id` / `adapter` / `tiers` / `concurrency` / `model` = 実効モデル / `env_keys` = **キー名だけ**）は設定から、`in_use` と `cooldown` はスナップショット（無ければ `null`）、`stats` は §5.8 の集計。
 
+ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップショットに乗った一覧（`providers.d/` を含む）を優先して返す。最初の tick が来る前だけ起動時に固定した一覧にフォールバックする。`GET /config` の `providers[]` も同じ規則。
+
 ### 3.20 `GET /daemon` → 200 `DaemonView`
 
 ```json
@@ -337,12 +367,66 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ### 3.21 `GET /config` → 200 `ConfigView`
 
-`taskd.toml` の要約。`db`（絶対パス）、`workspace_root`、`tick_ms`、`max_concurrency`、`lease_grace_secs`、`idle_timeout_secs`、`kill_grace_secs`、`review_timeout_secs`、`error_cooldown_secs`、`retry_backoff_base_secs`、`retry_backoff_max_secs`、`max_requeues`、`plan.auto_accept`、`reviewer{adapter, tier}`、`providers[]{id, adapter, tiers, concurrency, model, env_keys}`、`api{bind, auth_required, allowed_hosts}`、`config_path`。
-`[[providers]].env` の**値**、`[adapters.*].env` の値、`token_file` のパスと内容は出さない。`task-api` は `taskd` crate に依存しないので、この型は task-api に置き、taskd が起動時に値を作って `ApiState` に渡す。
+`taskd.toml` の要約。`db`（絶対パス）、`workspace_root`、`tick_ms`、`max_concurrency`、`lease_grace_secs`、`idle_timeout_secs`、`kill_grace_secs`、`review_timeout_secs`、`error_cooldown_secs`、`retry_backoff_base_secs`、`retry_backoff_max_secs`、`max_requeues`、`plan.auto_accept`、`reviewer{adapter, tier}`、`providers[]{id, adapter, tiers, concurrency, model, env_keys}`、`clusters[]{id, host, concurrency, sync, delete_on_push, has_setup, env_keys, rsync_excludes}`（Phase 12）、
+`roles[]{id, tier, adapter, max_turns, max_wall_secs, has_instructions}`（Phase 10。`[[roles]]` の順）、
+`delegation{max_delegate_per_run, max_tree_depth, max_tree_runs}`（Phase 10。既定 8 / 5 / 100）、`api{bind, auth_required, allowed_hosts}`、`config_path`。
+`[[providers]].env` の**値**、`[adapters.*].env` の値、`[[clusters]].env` の値と `setup` の中身、`[[roles]].instructions` の**本文**（有無だけを `has_instructions` で出す）、`token_file` のパスと内容は出さない。`task-api` は `taskd` crate に依存しないので、この型は task-api に置き、taskd が起動時に値を作って `ApiState` に渡す。
 
 ### 3.22 `GET /schema` → 200 `application/schema+json`
 
 コミット済み `docs/api/v1/api-v1.schema.json` を `include_str!` で返す（開発・型生成の確認用。GUI の型生成はリポジトリのファイルから行い、この応答には依存しない）。
+
+### 3.23 `GET /clusters` → 200 `Clusters`（ADR-0018、Phase 12）
+
+`items[]` は `[[clusters]]` の順。定義（`id` / `host` / `concurrency` / `sync` / `delete_on_push` / `has_setup` = `setup` の有無 / `env_keys` = **キー名だけ** / `rsync_excludes`）は設定から、
+`in_use`（そのクラスタで走っている run + 判定の数）/ `connected`（この tick の `ssh -O check` の結果 = 人が張った多重接続があるか）/ `cooldown_until` / `cooldown_remaining_secs` は
+スナップショットから（無ければ `null`）。`env` の値と `setup` の中身は出さない（ADR-0018 D7）。
+
+- ディスパッチャは 1 tick に 1 回、設定の全クラスタに `ssh -o BatchMode=yes -O check <host>` を実行する（unix ソケットを見るだけ。ネットワークにも認証にも触れない）。
+  接続が戻れば cooldown はその tick で解ける。
+- GUI は `connected == false` のクラスタに「`scripts/cluster-login.sh <host>` でログインし直してください」と出す。受信箱の `attention[].cluster_unavailable`（§5.1 (d)）と対。
+
+### 3.24〜3.28 プロバイダ管理（ADR-0017、Phase 11。**すべて管理系: `token_file` 未設定でも 401**）
+
+設計は ADR-0017。`taskd.toml` を直接書き換えず、`providers_include`（例: `providers_include = "providers.d/*.toml"`）が指す
+ディレクトリに 1 アカウント 1 ファイル（`providers.d/<id>.toml`。`[[providers]]` の 1 行と同じ形）を読み書きする。
+反映（実際の dispatch と `GET /providers`/`GET /config` への表示）は `POST /reload` を呼んだ**次の tick から**で、
+実行中の run には影響しない。`providers_include` が設定されていない構成では、この 5 本は全て 409
+`providers_admin_unavailable` を返す。
+
+#### 3.24 `POST /providers` → 201 `ProviderConfigView`（`Location: /api/v1/providers/{id}`）
+
+要求本文: `{"id": "acct-b", "adapter": "fake"|"claude-code"|"codex", "tiers"?: [...], "concurrency"?: 1, "model"?: "", "env"?: {...}}`
+（`tiers`/`concurrency`/`model` は省略可、`[[providers]]` と同じ既定）。`id` は 1〜64 文字の ASCII 英数字・`-`・`_`
+（`providers.d/<id>.toml` のファイル名になるため、パス区切りは拒否）。`adapter` は既知の 3 種類のみ。
+`id` が既にあれば 409 `provider_exists`。応答・ログとも `env` は `env_keys`（キー名だけ）で、値は一切出さない。
+
+#### 3.25 `PATCH /providers/{id}` → 200 `ProviderConfigView`
+
+要求本文は `{"tiers"?, "concurrency"?, "model"?, "env"?}`（渡したフィールドだけ上書き。`id`/`adapter` は変更不可）。
+存在しない `id` は 404 `provider_not_found`。
+
+#### 3.26 `DELETE /providers/{id}` → 200 `{}`
+
+`providers.d/<id>.toml` を削除する。存在しない `id` は 404 `provider_not_found`。
+
+#### 3.27 `POST /providers/{id}/check` → 200 `ProviderCheckResponse`
+
+```json
+{"result": "ok" | "auth_failed" | "throttled" | "spawn_failed", "checked_at": "…"}
+```
+
+そのアカウントの env で短い run（30 秒・1 ターン）を 1 回だけ行い、疎通を確かめる（ADR-0017 D2）。`Dispatcher`/DB には
+一切触れない（タスクにもイベント列にも残らない、観測値）。存在しない `id` は 404 `provider_not_found`。設定の
+再読込自体が失敗した（`providers.d/` の壊れた TOML 等）場合は 400。**taskd（`task-worker` に依存する側）が実行し、
+task-api 自身はワーカーを起動しない**（DESIGN §5.10 の境界。ADR-0017 M2）。
+
+#### 3.28 `POST /reload` → 200 `ReloadResult`（`{"reloaded": true}`）
+
+`taskd.toml` と `providers_include` の指すディレクトリを読み直し、`StaticPolicy`・アダプタ一式・`GET /providers`/
+`GET /config` に出る一覧を差し替える。**cooldown はメモリ上（`StaticPolicy` の内部状態）なので reload で消える**
+（ADR-0017 D1）。設定の検証に失敗したら 400 を返し、稼働中の状態には触れない（古い設定のまま動き続ける）。
+実行中の run はそれぞれ差し替え前のアダプタの参照を既に掴んでいるので、reload の影響を受けない。
 
 ---
 
@@ -393,7 +477,7 @@ data: {"reason":"cursor_too_old","cursor":20000}
 | `approvals[]` | `kind == approval && status == ready` | `parent` = `parent_id` のタスク（無ければ `null`）。`criterion_idx` / `attempt` は title を `Approval needed: <title> — criterion <idx> (attempt <n>)` として解析（`task_ops::parse_human_approval_title`。ディスパッチャの `human_approval_title` と対）。解析できなければ `null`。`criterion_text` = 親の `acceptance[idx].text`（無ければ approval の `objective`）。`requested_at` = `ApprovalRequested` の `ts`（無ければ `created_at`）。`last_run` = 親の `last_run_id` の `RunSummary`。`evidence` = `<ws>/runs/<run_id>/result.json` が `done` なら `evidence[]`（task-api が読む。読めなければ `[]`）。`other_verdicts` = 親の同 run の `ReviewVerdict`。`artifacts` = `artifacts_for_run`。`previous_decisions` = 親の他の Approval 子（同じ `criterion_idx`）の `ApprovalDecided` | `requested_at` 昇順 |
 | `questions[]` | `status == blocked` | `question` = §5.5。`asked_at` = その `WorkerFinished` の `ts`。`run_id` = 同。`previous` = `answers_from_events`（`AnswerNote` の履歴） | `asked_at` 昇順 |
 | `drafts[]` | `status == draft` を `parent_id` でまとめる | `parent` = Plan 等（`null` = 根）。`plan_summary` = 親の直近 `WorkerFinished.outcome` が `done: ` 始まりならその後ろ。`drafts` = `TaskSummary` | 親の `created_at` 昇順、根は最後 |
-| `attention[]` | (a) `failed` かつ `updated_at >= now − 24h`、(b) `ready && max_requeues > 0 && consecutive_requeues > 0 && consecutive_requeues >= max_requeues − 1`（一度も requeue していないものは含めない）、(c) スナップショットの `unroutable` | (a) `reason` = 直近 `WorkerFinished.outcome` と、直近 run の fail の `ReviewVerdict.reason` を（あるものだけ）`; ` で結合。(b) `count` / `max`。(c) `hint` = `worker_hint`、`at` = スナップショットの `last_tick_at` | `at` 降順 |
+| `attention[]` | (a) `failed` かつ `updated_at >= now − 24h`、(b) `ready && max_requeues > 0 && consecutive_requeues > 0 && consecutive_requeues >= max_requeues − 1`（一度も requeue していないものは含めない）、(c) スナップショットの `unroutable`、(d) `WorkspaceSpec::Remote` で終端でないタスクの `ClusterUnavailable` が `ts >= now − 24h` にあるクラスタ（**クラスタごとに 1 件**。スナップショットがあり `clusters[].connected == true` なら出さない — 接続が戻っていれば用済み。Phase 12） | (a) `reason` = 直近 `WorkerFinished.outcome` と、直近 run の fail の `ReviewVerdict.reason` を（あるものだけ）`; ` で結合。(b) `count` / `max`。(c) `hint` = `worker_hint`、`at` = スナップショットの `last_tick_at`。(d) `cluster` / `host`（イベントの `host`。空なら `clusters[].host`）/ `at` = 最新の `ts` / `tasks` = 該当タスク数。GUI は「`scripts/cluster-login.sh <host>` でログインし直してください」と出す | `at` 降順 |
 | `counts` | 上の件数 + `count_by_status()` | `drafts` は **draft タスクの件数**（グループ数ではない）。他は各区画の要素数 | |
 
 ### 5.2 run の要約（`task_ops::runs(events) -> Vec<RunSummary>`）
@@ -451,8 +535,8 @@ data: {"reason":"cursor_too_old","cursor":20000}
 | `task-core`（既存） | `Task`, `TaskId`, `TaskKind`, `Status`, `Tier`, `WorkerHint`, `WorkspaceSpec`, `Budget`, `Lease`, `Check`, `Criterion`, `ArtifactRef`, `Usage`, `Event` | serde 表現そのまま。`Event` は Phase 9a で `JsonSchema` を derive 済み（`until` は `#[schemars(with = "String")]`）。`ProviderThrottled.reason: Option<String>`（任意フィールド、語彙 `throttled \| auth_failed \| exhausted \| spawn`。ADR-0013 D9） |
 | `task-core`（Phase 9a、実装済み） | `EventRow { id: u64, task_id: TaskId, seq: u64, ts: String, event: Event }`、`ListFilter { statuses, kinds, parent_id, root_only, text_contains }`、`ListOrder { Dispatch, UpdatedDesc, CreatedDesc }`、`Page<T> { items, next_cursor, total }`、`SCHEMA_VERSION` | `events_since` / `list_page` / `count_by_status` の型。`EventRow` は `docs/api/v1/event.schema.json` のルート |
 | `task-ops`（Phase 9a、実装済み） | `add::{NewTaskSpec, CriterionSpec, create_task}`、`plan::{NewPlanSpec, create_plan}`、`gate::{TransitionResult, approve, reject, answer, cancel}`、`replay::{ReplayReport, ReplayMismatch, replay}`、`derive::{ReviewNote, AnswerNote, …}`、`OpsError` | 9b で `Deserialize` / `Serialize` / `JsonSchema` を付ける（`NewTaskSpec` / `NewPlanSpec` は `deny_unknown_fields` + `#[serde(default)]`、`CriterionSpec` は `tag = "type"`、`ReplayMismatch.field` は `&'static str` のまま文字列に出る） |
-| `task-ops`（Phase 9b で追加） | `TaskRef`, `TaskSummary`, `TaskList`, `TaskDetail`, `Timers`, `CriterionView`, `VerdictView`, `RunSummary`, `RunFiles`, `RunOutcomeKind`, `ApprovalLink`, `ApprovalDecisionView`, `Action`, `Inbox`, `InboxCounts`, `ApprovalItem`, `EvidenceView`, `QuestionItem`, `DraftGroup`, `AttentionItem`, `Graph`, `GraphNode`, `GraphEdge`, `TransitionResult.cascaded`, `DaemonSnapshot`, `InFlight`, `InFlightKind`, `CooldownView`, `ProviderLive` | ビュー型。全て `JsonSchema`。`DaemonSnapshot` は task-dispatch が作り task-api が読むので、両者が依存する task-ops に置く（ADR-0013 D3/D4 の依存方向を満たす）。`CooldownView` は `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直した写し |
-| `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema` | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
+| `task-ops`（Phase 9b で追加） | `TaskRef`, `TaskSummary`, `TaskList`, `TaskDetail`, `Timers`, `CriterionView`, `VerdictView`, `RunSummary`, `RunFiles`, `RunOutcomeKind`, `ApprovalLink`, `ApprovalDecisionView`, `Action`, `Inbox`, `InboxCounts`, `ApprovalItem`, `EvidenceView`, `QuestionItem`, `DraftGroup`, `AttentionItem`, `Graph`, `GraphNode`, `GraphEdge`, `DelegatedView`（Phase 10）, `TransitionResult.cascaded`, `DaemonSnapshot`, `InFlight`, `InFlightKind`, `CooldownView`, `ProviderLive` | ビュー型。全て `JsonSchema`。`DaemonSnapshot` は task-dispatch が作り task-api が読むので、両者が依存する task-ops に置く（ADR-0013 D3/D4 の依存方向を満たす）。`CooldownView` は `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直した写し |
+| `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `RoleConfigView`（Phase 10）, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema` | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
 
 ### 6.2 Rust 表記（serde の属性はコメントで示す。`JsonSchema` は全て derive）
 
@@ -464,6 +548,9 @@ pub enum ListOrder { Dispatch, UpdatedDesc, CreatedDesc }
 pub struct Page<T> { pub items: Vec<T>, pub next_cursor: Option<String>, pub total: u64 }
 // Event::ProviderThrottled { provider: String, until: OffsetDateTime, #[serde(default, skip_serializing_if = "Option::is_none")] reason: Option<String> }
 // Event::WorkerStarted / WorkerFinished に #[serde(default, skip_serializing_if = "Option::is_none")] role: Option<RunRole>（None = ワーカー run。ADR-0014 D1）
+// Phase 10（ADR-0016）: Task に #[serde(default, skip_serializing_if = "Option::is_none")] role: Option<String> と
+//   #[serde(default, skip_serializing_if = "std::ops::Not::not")] aggregate: bool（false と null は直列化で省かれる）。
+//   Event::Delegated { run_id: String, task_ids: Vec<TaskId> } を追加（type 名 `delegated`）
 // #[serde(rename_all = "snake_case")] pub enum RunRole { Worker, Reviewer }
 
 // ---- task-ops: 参照・一覧 ----
@@ -479,12 +566,16 @@ pub struct TaskList { pub items: Vec<TaskSummary>, pub next_cursor: Option<Strin
 
 // ---- task-ops: 詳細（taskctl show --json と同一）----
 pub struct TaskDetail {
-    pub task: Task, pub workspace_dir: Option<String>, pub timers: Timers, pub criteria: Vec<CriterionView>,
+    pub task: Task, pub workspace_dir: Option<String>, pub cluster: Option<String> /* Phase 12 */,
+    pub role: Option<String> /* Phase 10 */, pub delegated: Vec<DelegatedView> /* Phase 10 */,
+    pub timers: Timers, pub criteria: Vec<CriterionView>,
     pub runs: Vec<RunSummary>, pub prior_review: Vec<ReviewNote>, pub answers: Vec<AnswerNote>,
     pub latest_question: Option<String>, pub approvals: Vec<ApprovalLink>,
     pub dependencies: Vec<TaskRef>, pub dependents: Vec<TaskRef>, pub children: Vec<TaskRef>,
     pub actions: Vec<Action>, pub worker_run_hint: Option<String>,
 }
+/// Phase 10（ADR-0016 D2）: 1 回の `delegate`（`Event::Delegated`）の要約。`tasks` は子の現在の状態（消えた ID は落とす）。
+pub struct DelegatedView { pub run_id: String, pub ts: String, pub tasks: Vec<TaskRef> }
 pub struct Timers { pub now: String, pub lease_expires_at: Option<String>, pub backoff_until: Option<String>,
     pub consecutive_requeues: u32, pub max_requeues: u32, pub consecutive_reviewer_requeues: u32 }
 pub struct CriterionView { pub idx: usize, pub text: String, pub check: Check, pub latest_verdict: Option<VerdictView>, pub approval: Option<ApprovalLink> }
@@ -519,16 +610,22 @@ pub enum AttentionItem {
     Failed { task: TaskRef, reason: String, at: String },
     RequeueLimitNear { task: TaskRef, count: u32, max: u32, at: String },
     Unroutable { task: TaskRef, hint: WorkerHint, at: String },
+    ClusterUnavailable { cluster: String, host: String, at: String, tasks: u32 },   // Phase 12（ADR-0018）
 }
 
 // ---- task-ops: 操作の入力（実装済みの型に 9b で serde / JsonSchema を付ける。POST /tasks, POST /plans の本文そのもの）----
 // #[serde(deny_unknown_fields)]
 pub struct NewTaskSpec {
     pub title: String, pub objective: String, pub acceptance: Vec<CriterionSpec>,
-    #[serde(default)] pub kind: TaskKind /* execute */, #[serde(default)] pub tier: Tier /* standard */,
+    #[serde(default)] pub kind: TaskKind /* execute */,
+    // Phase 10（ADR-0016 M3）: tier / max_turns / max_wall_secs / adapter は Option になった（省略時は役割の既定 → 全体の既定）
+    #[serde(default)] pub tier: Option<Tier> /* 既定 standard */,
     #[serde(default)] pub priority: i32, #[serde(default)] pub parent: Option<TaskId>, #[serde(default)] pub depends_on: Vec<TaskId>,
-    #[serde(default = "10")] pub max_turns: u32, #[serde(default = "600")] pub max_wall_secs: u64, #[serde(default = "2")] pub max_retries: u32,
-    #[serde(default)] pub workspace: Option<PathBuf> /* JSON では文字列 */, #[serde(default)] pub adapter: Option<String>,
+    #[serde(default)] pub max_turns: Option<u32> /* 既定 10 */, #[serde(default)] pub max_wall_secs: Option<u64> /* 既定 600 */,
+    #[serde(default = "2")] pub max_retries: u32,
+    #[serde(default)] pub role: Option<String> /* Phase 10 */, #[serde(default)] pub aggregate: bool /* Phase 10 */,
+    #[serde(default)] pub workspace: Option<PathBuf> /* JSON では文字列 */,
+    #[serde(default)] pub cluster: Option<String> /* Phase 12 */, #[serde(default)] pub adapter: Option<String>,
 }
 // #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CriterionSpec { Human { text: String }, Command { cmd: String, #[serde(default)] expect_exit: i32 }, ArtifactExists { name: String }, Reviewer { text: String } }
@@ -547,13 +644,16 @@ pub struct GraphEdge { pub from: TaskId, pub to: TaskId, pub kind: String /* "de
 // ---- task-ops: デーモンのスナップショット（task-dispatch が作り、task-api が読む）----
 pub struct DaemonSnapshot { pub instance_id: String, pub pid: u32, pub hostname: String, pub started_at: String, pub last_tick_at: String,
     pub ticks: u64, pub tick_ms: u64, pub in_flight: Vec<InFlight>, pub cooldowns: Vec<CooldownView>,
-    pub awaiting_human: Vec<TaskId>, pub unroutable: Vec<TaskId>, pub providers: Vec<ProviderLive> }
+    pub awaiting_human: Vec<TaskId>, pub unroutable: Vec<TaskId>, pub providers: Vec<ProviderLive>,
+    #[serde(default)] pub clusters: Vec<ClusterLive> /* Phase 12 */ }
 pub struct InFlight { pub task_id: TaskId, pub run_id: String, pub provider: String, pub kind: InFlightKind, pub since: String }
 // #[serde(rename_all = "snake_case")]
 pub enum InFlightKind { Worker, Reviewer }
 /// `task_dispatch::policy::Cooldown{provider, until: Instant, reason: CooldownReason}`（実装済み）を壁時計に直したもの。
 pub struct CooldownView { pub provider: String, pub until: String, pub reason: String /* "throttled" | "auth_failed" | "exhausted" */ }
 pub struct ProviderLive { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>, pub in_use: u32 }
+/// Phase 12（ADR-0018）: `[[clusters]]` の稼働状況（`id` 昇順）。`connected` はこの tick の `ssh -O check` の結果。
+pub struct ClusterLive { pub id: String, pub host: String, pub concurrency: usize, pub in_use: u32, pub connected: bool, pub cooldown_until: Option<String> }
 
 // ---- task-api ----
 pub struct Health { pub api_version: String, pub schema_version: u32, pub taskd_version: String, pub instance_id: String,
@@ -578,12 +678,28 @@ pub struct ProviderStats { pub runs: u64, pub done: u64, pub question: u64, pub 
     pub input_tokens: u64, pub output_tokens: u64, pub by_day: Vec<DailyUsage> }
 pub struct DailyUsage { pub day: String /* YYYY-MM-DD */, pub runs: u64, pub input_tokens: u64, pub output_tokens: u64 }
 pub struct DaemonView { pub now: String, pub snapshot: Option<DaemonSnapshot> }
+// Phase 12（ADR-0018）
+pub struct Clusters { pub items: Vec<ClusterView> }
+pub struct ClusterView { pub id: String, pub host: String, pub concurrency: usize, pub sync: String /* "rsync" | "none" */, pub delete_on_push: bool,
+    pub has_setup: bool, pub env_keys: Vec<String>, pub rsync_excludes: Vec<String>,
+    pub in_use: Option<u32>, pub connected: Option<bool>, pub cooldown_until: Option<String>, pub cooldown_remaining_secs: Option<u64> }
 pub struct ConfigView { pub config_path: String, pub db: String, pub workspace_root: String, pub tick_ms: u64, pub max_concurrency: usize,
     pub lease_grace_secs: u64, pub idle_timeout_secs: u64, pub kill_grace_secs: u64, pub review_timeout_secs: u64, pub error_cooldown_secs: u64,
     pub retry_backoff_base_secs: u64, pub retry_backoff_max_secs: u64, pub max_requeues: u32, pub plan_auto_accept: bool,
-    pub reviewer: ReviewerConfigView, pub providers: Vec<ProviderConfigView>, pub api: ApiConfigView }
+    pub reviewer: ReviewerConfigView, pub providers: Vec<ProviderConfigView>, #[serde(default)] pub clusters: Vec<ClusterConfigView> /* Phase 12 */,
+    #[serde(default)] pub roles: Vec<RoleConfigView> /* Phase 10 */, #[serde(default)] pub delegation: DelegationLimits /* Phase 10 */, pub api: ApiConfigView }
+/// Phase 10（ADR-0016 D1）: `[[roles]]` 1 行。`instructions` の**本文は出さない**（有無だけ）。
+pub struct RoleConfigView { pub id: String, pub tier: Option<Tier>, pub adapter: Option<String>, pub max_turns: Option<u32>,
+    pub max_wall_secs: Option<u64>, pub has_instructions: bool }
+/// Phase 10（ADR-0016 D2）: task-core の型。既定は 8 / 5 / 100。
+pub struct DelegationLimits { pub max_delegate_per_run: usize, pub max_tree_depth: u32, pub max_tree_runs: u32 }
 pub struct ReviewerConfigView { pub adapter: Option<String>, pub tier: Tier }
 pub struct ProviderConfigView { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>, pub env_keys: Vec<String> }
+// Phase 11（ADR-0017）: プロバイダ管理。`ProviderConfigView` は §3.24/§3.25 の応答にも使う。
+pub struct ReloadResult { pub reloaded: bool }
+pub struct ProviderCheckResponse { pub result: ProviderCheckResult, pub checked_at: String }
+pub enum ProviderCheckResult { Ok, AuthFailed, Throttled, SpawnFailed } // snake_case で直列化（"ok" | "auth_failed" | "throttled" | "spawn_failed"）
+pub struct ClusterConfigView { pub id: String, pub host: String, pub concurrency: usize, pub sync: String, pub delete_on_push: bool, pub has_setup: bool, pub env_keys: Vec<String>, pub rsync_excludes: Vec<String> }
 pub struct ApiConfigView { pub bind: String, pub auth_required: bool, pub allowed_hosts: Vec<String> }
 pub struct StreamHello { pub cursor: u64, pub now: String, pub daemon: Option<DaemonSnapshot> }
 pub struct StreamHeartbeat { pub now: String }
@@ -596,7 +712,8 @@ pub struct ApiV1Schema {
     pub new_task: NewTaskSpec, pub new_plan: NewPlanSpec, pub decision: DecisionBody, pub answer: AnswerBody, pub cancel: CancelBody,
     pub transition_result: TransitionResult, pub replay_report: ReplayReport, pub providers: Providers, pub daemon: DaemonView,
     pub config: ConfigView, pub stream_hello: StreamHello, pub stream_event: EventRow, pub stream_daemon: DaemonSnapshot,
-    pub stream_heartbeat: StreamHeartbeat, pub stream_reset: StreamReset,
+    pub stream_heartbeat: StreamHeartbeat, pub stream_reset: StreamReset, pub clusters: Clusters /* Phase 12 */,
+    pub provider_config: ProviderConfigView, pub reload: ReloadResult, pub provider_check: ProviderCheckResponse /* Phase 11 */,
 }
 ```
 
@@ -668,10 +785,12 @@ pub struct ApiV1Schema {
 **派生値**
 - `RunSummary.outcome_text`: `done` 以外（`question` / `requeue`）でも接頭辞を除いた残りを入れる。`error` は文字列全体、`lease_expired` は `null`。
 - `DaemonSnapshot.in_flight[]` の `kind: "reviewer"` の `run_id` は **Reviewer run 自身の id**（`WorkerStarted{role: reviewer}` と同じ。ADR-0014 D1）。
+- `DaemonSnapshot.unroutable[]` は「設定に合うプロバイダ／クラスタが無い」タスクだけ。クラスタの多重接続待ち（cooldown 中を含む）のタスクは
+  ここには**入らない**（Phase 12。受信箱の `attention[].cluster_unavailable` が代わりに知らせる。ADR-0018 実装メモ M8）。
 - `Providers.items[].stats`:
   - 最初の `GET /providers` で全イベントを走査し、以後は要求のたびに増分だけ読む（taskd のメモリ上の観測値。再起動で再計算）。
   - `runs` は `WorkerStarted` の数（実行中を含む）。`by_day[].runs` はその日に終わった run の数。
-- Remote ワークスペースの `runs[].files` は `null` ではなく全て `false`。64 MiB を超える成果物は `sha256_current` と `sha256_matches` が `null`。
+- Remote ワークスペースの `runs[].files` とファイル系エンドポイントは、手元の写し `workspace_root/<task_id>` を見る（Phase 12 で変更。それ以前は全て `false` / 404 `remote workspace`）。写しが無ければ 404 `file_not_found`（`workspace directory does not exist`）。64 MiB を超える成果物は `sha256_current` と `sha256_matches` が `null`。
 
 **SSE**
 - 送る順は `hello` →（必要なら）`reset` → `task.event` …。

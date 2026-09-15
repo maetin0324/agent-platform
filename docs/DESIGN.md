@@ -433,6 +433,32 @@ strong = 設計判断（雛形の選択、BFF の骨格、CSRF・認証、配布
   5. 受け入れ条件・状態・用語の説明が `docs/taskd-api-v1.md` の語と一致している（§5.4 の `actions`、§3.4 の条件の型名、状態名）
   6. `pnpm lint` / `pnpm typecheck` / `pnpm test` / `pnpm build` / `pnpm e2e` が exit 0、`pnpm gen:types` の差分ゼロ
 
+### Phase G7 — クラスタと委譲の表示（light, 50）
+
+taskd の Phase 10（役割と委譲）と Phase 12（クラスタでのコマンド実行）で増えた情報を画面に出す。
+API は揃っているので、GUI は表示と導線だけを足す（判断・再計算はしない）。
+
+- **クラスタ**（ADR-0018、`GET /clusters`、`DaemonSnapshot.clusters[]`）:
+  - `/clusters` ルート（ナビゲーションに「クラスタ」）。各クラスタの `id` / `host` / `connected` / `cooldown_until` /
+    `in_use` / `concurrency` / `sync` / `delete_on_push` を表で出す。`env` の値は API が返さないので出さない
+  - `connected: false` のときだけ、そのクラスタの行に**赤い注意**と「手元で `scripts/cluster-login.sh <host>` を実行してください」を出す（P-47）
+  - 受信箱の `attention` の `cluster_unavailable` を専用の見た目で出し、押すと `/clusters` に飛ぶ
+  - タスク詳細に `cluster`（Remote のとき）と、`workspace_dir` が**写し**であることの注記（P-48）
+- **役割と委譲**（ADR-0016）:
+  - タスク詳細に `role` と `delegated[]`（どの run がどの子を作ったか）。子は `children[]` へのリンクにする
+  - 一覧と DAG のノードに役割を出す（色分けはせず、テキストのラベル）。DAG では委譲で生まれた子を親の下に寄せる
+  - 作成フォームに `role`（`GET /config` の `roles[]` から選ぶ。自由入力も可）と `aggregate` のチェックボックス
+- 受け入れ:
+  1. `/clusters` が 200 で、fixture の 2 クラスタ（接続あり / 無し）が出る。`connected: false` の行にだけログインの案内が出る
+  2. 受信箱に `cluster_unavailable` の項目が出て、押すと `/clusters` に遷移する
+  3. Remote のタスクの詳細に `cluster` と写しの注記が出て、run のログが開ける
+  4. 委譲のあるタスクの詳細に `role` と `delegated[]` が出て、子のリンクから子の詳細に飛べる
+  5. 作成フォームで `role` と `aggregate` を指定して作ると、`POST /tasks` の本文にそれが載る（空欄なら送らない）
+  6. `@axe-core/playwright` で `/clusters` の critical / serious が 0 件、CSP 違反 0 件
+  7. `pnpm lint` / `typecheck` / `test` / `build` / `e2e` が exit 0、`pnpm gen:types` の差分ゼロ
+- fixture: `scripts/taskd.sh fixture clusters`（`[[clusters]]` を 2 つ持つ設定。1 つは届かない host にして `connected: false` を作る）と、
+  委譲のあるタスク（fake ワーカーが `delegate` で子 2 件を作る）を含む `fixture delegation`
+
 ## 11. 人間の決定（決定済み）
 
 | # | 事項 | 決定 |
