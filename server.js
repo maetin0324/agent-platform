@@ -64,7 +64,7 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     const ms = Number(process.hrtime.bigint() - start) / 1e6;
     process.stderr.write(
-      `${JSON.stringify({ ts: new Date().toISOString(), method: req.method, path: req.path, status: res.statusCode, ms: Math.round(ms * 10) / 10 })}\n`,
+      `${JSON.stringify({ ts: new Date().toISOString(), method: req.method, path: req.originalUrl.split("?")[0], status: res.statusCode, ms: Math.round(ms * 10) / 10 })}\n`,
     );
   });
   next();
