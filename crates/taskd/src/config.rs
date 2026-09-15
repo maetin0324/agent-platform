@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use task_core::{Tier, WorkerHint};
-use task_dispatch::{DispatchConfig, ProviderSpec};
+use task_dispatch::{ClusterSpec, DispatchConfig, ProviderSpec};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -62,6 +62,9 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// ADR-0018: コマンドを実行するクラスタ。`WorkspaceSpec::Remote{cluster, path}` の `cluster` がここの `id` を指す。
+    #[serde(default)]
+    pub clusters: Vec<ClusterConfig>,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -96,6 +99,41 @@ impl ApiConfig {
         }
         Ok(Some(token.to_string()))
     }
+}
+
+/// `[[clusters]]`（ADR-0018）: ssh でコマンドを実行するクラスタ。接続は人が張った ControlMaster を借りる。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterConfig {
+    /// タスクの `WorkspaceSpec::Remote{cluster}` が指す名前。
+    pub id: String,
+    /// `~/.ssh/config` の `Host` 名（`ControlMaster` の設定が要る）。
+    pub host: String,
+    /// このクラスタで同時に走らせる run の上限。
+    #[serde(default = "default_cluster_concurrency")]
+    pub concurrency: usize,
+    /// `rsync`（既定）か `none`（共有ファイルシステム）。
+    #[serde(default = "default_cluster_sync")]
+    pub sync: String,
+    /// push（手元 → クラスタ）で手元に無いファイルを消すか。既定 false（既存プロジェクトを壊さない）。
+    #[serde(default)]
+    pub delete_on_push: bool,
+    /// コマンドの前に流す準備（`module load ...` など）。
+    #[serde(default)]
+    pub setup: Vec<String>,
+    /// リモートで `export` する環境変数。
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// `rsync` から除外するパターン（`.taskd/` は常に除外）。
+    #[serde(default)]
+    pub rsync_excludes: Vec<String>,
+}
+
+fn default_cluster_concurrency() -> usize {
+    2
+}
+fn default_cluster_sync() -> String {
+    "rsync".to_string()
 }
 
 /// `[reviewer]`（ADR-0010 D9, P-30）: `Check::Reviewer` の判定 run に使う adapter / tier。
@@ -371,6 +409,28 @@ impl Config {
                 "[api] listen = {listen} is not a loopback address; token_file is required"
             )));
         }
+        // ADR-0018: クラスタの id は重複させない。sync は rsync / none のみ。並列度は 1 以上。
+        let mut cluster_ids = std::collections::HashSet::new();
+        for c in &self.clusters {
+            if c.id.trim().is_empty() {
+                return Err(ConfigError::Invalid("[[clusters]] id must not be empty".to_string()));
+            }
+            if !cluster_ids.insert(&c.id) {
+                return Err(ConfigError::Invalid(format!("duplicate cluster id: {}", c.id)));
+            }
+            if c.host.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!("[[clusters]] {}: host must not be empty", c.id)));
+            }
+            if !matches!(c.sync.as_str(), "rsync" | "none") {
+                return Err(ConfigError::Invalid(format!(
+                    "[[clusters]] {}: sync must be \"rsync\" or \"none\" (got {:?})",
+                    c.id, c.sync
+                )));
+            }
+            if c.concurrency == 0 {
+                return Err(ConfigError::Invalid(format!("[[clusters]] {}: concurrency must be >= 1", c.id)));
+            }
+        }
         // Phase 7 監査: cooldown 0 だと供給側失敗の requeue が毎 tick の再 dispatch になる。
         if self.error_cooldown_secs == 0 {
             return Err(ConfigError::Invalid("error_cooldown_secs must be >= 1".into()));
@@ -408,7 +468,34 @@ impl Config {
                 tier: self.reviewer.tier,
                 adapter: self.reviewer.adapter.clone(),
             },
+            clusters: self.cluster_specs(),
+            // ADR-0018 D2: 多重接続が無いクラスタは、プロバイダの cooldown と同じ長さだけ外す。
+            cluster_cooldown: Duration::from_secs(self.error_cooldown_secs),
         }
+    }
+
+    /// ADR-0018: `[[clusters]]` を task-dispatch の型に写す（`env` はキー順で決定的に並べる）。
+    pub fn cluster_specs(&self) -> HashMap<String, ClusterSpec> {
+        self.clusters
+            .iter()
+            .map(|c| {
+                let mut env: Vec<(String, String)> = c.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                env.sort();
+                (
+                    c.id.clone(),
+                    ClusterSpec {
+                        id: c.id.clone(),
+                        host: c.host.clone(),
+                        concurrency: c.concurrency,
+                        sync: if c.sync == "none" { task_worker::SyncMode::None } else { task_worker::SyncMode::Rsync },
+                        delete_on_push: c.delete_on_push,
+                        setup: c.setup.clone(),
+                        env,
+                        rsync_excludes: c.rsync_excludes.clone(),
+                    },
+                )
+            })
+            .collect()
     }
 
     pub fn provider_specs(&self) -> Vec<ProviderSpec> {

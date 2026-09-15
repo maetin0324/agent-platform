@@ -342,6 +342,17 @@ taskctl worker run --config <taskd.toml> --task <id> [--provider <id> | --adapte
 `parent` が存在すること、`depends_on` が存在し `failed` / `cancelled` でないこと。違反は何も挿入せずエラー（API は 422、CLI は exit 1）。
 `taskctl show --json` は `GET /api/v1/tasks/{id}` と同じ型・同じ直列化で出す（差は API が埋める `runs[].files` と `timers.now`、および CLI が設定を読まないこと）。
 
+### 5.9 の補足 2: クラスタでのコマンド実行（ADR-0018、Phase 12）
+
+`WorkspaceSpec::Remote{cluster, path}` のタスクは、**コマンドだけをクラスタで実行する**（ワーカー＝LLM は taskd のホストで動く）。
+
+- `path` はクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。taskd は `workspace_root/<task_id>` に写しを持つ。
+- 順序: pull（クラスタ → 写し）→ ワーカーが写しを編集 → push（写し → クラスタ。既定では削除しない）→ `Check::Command` をクラスタで実行 → pull。
+- 接続は**人が張った ssh の多重接続（`ControlMaster`）を借りる**。`BatchMode=yes` で対話的な認証は行わない。
+  接続が無ければそのクラスタを cooldown にし、`Event::ClusterUnavailable` を残し、そのタスクは「人待ち」として `--until-idle` の待ち対象から外す。
+- 並列度は「プロバイダ（アカウント）」と「クラスタ」の二次元。`ssh` 自体の失敗（終了コード 255）は供給側失敗、リモートコマンドの非ゼロ終了は判定の失敗。
+- ワーカーがクラスタでコマンドを流すためのラッパ `.taskd/remote-exec` を run ごとに置く（同期対象からは外す）。
+
 ### 5.10 API 層（`task-api`。ADR-0013）
 
 Web GUI（別プロジェクト `taskd-gui`。Remix のサーバが BFF として呼ぶ）と `curl` のための HTTP API。仕様の詳細は `docs/gui/api.md`、
@@ -486,15 +497,16 @@ LLM を使う実機確認は、認証が使える環境ならエージェント�
 人間の判断: **LLM は手元で動かし、クラスタで実行するのはコマンドだけ**。pegasus / sirius は 2 要素認証なので、ssh を張るのは人の操作で、
 taskd は `ControlMaster` の多重接続を借りるだけ（対話的な認証は行わない）。
 
-- `[[clusters]]`（host / remote_workdir / concurrency / sync / setup / env）、`Task.exec_site`、`.taskd/remote-exec`（ワーカー用のラッパ）、
+- `[[clusters]]`（host / concurrency / sync / delete_on_push / setup / env / rsync_excludes）、既存の `WorkspaceSpec::Remote{cluster, path}` の実装、`.taskd/remote-exec`（ワーカー用のラッパ）、
   リモートでの `Check::Command` 実行、rsync による往復同期（`sync = "none"` で無効）、クラスタごとの並列度と cooldown、`Event::ClusterUnavailable`
 - 受け入れ（**ssh 先を `localhost` にして行い、外部ネットワークに出ない**）:
-  1. `exec_site` を指定したタスクの `Check::Command` が ssh 越しに実行される（リモートにしか無いファイルを使う条件が通り、ローカルだけで済ませた run は落ちる）
+  1. `WorkspaceSpec::Remote` のタスクで、run の前に pull・後に push が行われ、`Check::Command` が ssh 越しに実行される（クラスタにしか無いファイルを使う条件が通る）
   2. 多重接続が無いクラスタのタスクは、供給側失敗として requeue され（attempts を消費しない）、そのクラスタが cooldown に入り、
      `Event::ClusterUnavailable` が残る。GUI の「注意」に「ログインし直してください」が出る
-  3. `sync = "rsync"` では run の前後で往復し、リモートで作られた成果物がローカルの sha256 で判定される。`sync = "none"` では同期しない
+  3. `sync = "rsync"` では pull → run → push → 判定 → pull の順で往復し、クラスタで作られた成果物がローカルの sha256 で判定される。`sync = "none"` では同期しない。
+     **既存プロジェクトを指すタスクで push が既存ファイルを消さない**（`delete_on_push = false` が既定）
   4. `.taskd/remote-exec <cmd>` がクラスタで実行され、終了コードと出力がそのまま返る。同期対象から外れている
-  5. クラスタとプロバイダの並列度が両方守られる。設定に無い `exec_site` のタスクは `unroutable` として扱われ、`--until-idle` を止めない
+  5. クラスタとプロバイダの並列度が両方守られる。設定に無い `cluster` のタスクは `unroutable` として扱われ、`--until-idle` を止めない
   6. ssh 自身の失敗（終了コード 255）は供給側失敗、リモートコマンドの非ゼロ終了は判定の失敗として区別される
   7. `taskctl replay` の差分ゼロ
 - 運用の道具: `config/ssh-config.example`、`scripts/cluster-login.sh`（人が 2 要素認証を通して接続を張る）、`scripts/cluster-check.sh`（前提と共有 FS の判定）

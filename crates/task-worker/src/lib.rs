@@ -24,5 +24,5 @@ pub use protocol::{
 };
 pub use provider::classify_provider_failure;
 pub use subprocess::{SubprocessSpec, run_subprocess};
-pub use ssh::{SshSettings, SshWorkspace, SyncMode};
+pub use ssh::{SshSettings, SshWorkspace, SyncMode, control_master_alive_blocking};
 pub use workspace::{ExecResult, LocalWorkspace, RemoteWorkspace, Workspace, WorkspaceError};

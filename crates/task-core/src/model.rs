@@ -236,6 +236,11 @@ pub enum Event {
         question: String,
         answer: String,
     },
+    /// ADR-0018 D2: クラスタへの ssh 多重接続が無く、そのクラスタでは実行できない（人のログイン待ち）。
+    ClusterUnavailable {
+        cluster: String,
+        reason: String,
+    },
     ProviderThrottled {
         provider: String,
         #[serde(with = "time::serde::rfc3339")]

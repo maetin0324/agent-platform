@@ -149,6 +149,7 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::ApprovalDecided { .. } => "approval_decided",
         Event::Answered { .. } => "answered",
         Event::ProviderThrottled { .. } => "provider_throttled",
+        Event::ClusterUnavailable { .. } => "cluster_unavailable",
     }
 }
 

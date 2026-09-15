@@ -94,6 +94,10 @@ pub struct NewTaskSpec {
     pub max_retries: u32,
     #[serde(default)]
     pub workspace: Option<PathBuf>,
+    /// ADR-0018: 指定すると `WorkspaceSpec::Remote{cluster, path}` になり、コマンドはそのクラスタで実行される。
+    /// `workspace` がクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。
+    #[serde(default)]
+    pub cluster: Option<String>,
     #[serde(default)]
     pub adapter: Option<String>,
 }
@@ -170,9 +174,15 @@ pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime
     validate_depends_on(store, &spec.depends_on)?;
 
     let id = TaskId::new();
-    let workspace = match spec.workspace {
-        Some(path) => WorkspaceSpec::Local { path },
-        None => WorkspaceSpec::Local {
+    let workspace = match (spec.cluster, spec.workspace) {
+        // ADR-0018: クラスタ指定。path はクラスタ側の作業ディレクトリ（絶対パスで指定する）。
+        (Some(cluster), Some(path)) => WorkspaceSpec::Remote { cluster, path },
+        (Some(cluster), None) => WorkspaceSpec::Remote {
+            cluster,
+            path: PathBuf::from(id.to_string()),
+        },
+        (None, Some(path)) => WorkspaceSpec::Local { path },
+        (None, None) => WorkspaceSpec::Local {
             path: PathBuf::from(id.to_string()),
         },
     };
@@ -231,6 +241,7 @@ mod tests {
             max_wall_secs: 600,
             max_retries: 2,
             workspace: Some(PathBuf::from("/tmp/workspace")),
+            cluster: None,
             adapter: None,
         }
     }
@@ -396,6 +407,33 @@ mod tests {
         let result = create_task(&store, spec, now());
         assert!(matches!(result, Err(OpsError::Validation(_))));
         assert!(store.list(None).expect("list tasks").is_empty());
+    }
+
+    /// ADR-0018: `cluster` を指定すると `WorkspaceSpec::Remote` になり、`workspace` はクラスタ側のパスになる。
+    #[test]
+    fn create_task_with_cluster_makes_a_remote_workspace() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut spec = base_spec();
+        spec.cluster = Some("pegasus".to_string());
+        spec.workspace = Some(PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"));
+        let task = create_task(&store, spec, now()).expect("create");
+        assert_eq!(
+            task.workspace,
+            task_core::WorkspaceSpec::Remote {
+                cluster: "pegasus".to_string(),
+                path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            }
+        );
+
+        // workspace を省略するとタスク ID のディレクトリ（クラスタ側の相対パス）になる。
+        let mut spec = base_spec();
+        spec.cluster = Some("pegasus".to_string());
+        spec.workspace = None;
+        let task = create_task(&store, spec, now()).expect("create");
+        assert_eq!(
+            task.workspace,
+            task_core::WorkspaceSpec::Remote { cluster: "pegasus".to_string(), path: PathBuf::from(task.id.to_string()) }
+        );
     }
 
     /// ADR-0014 D3（P-G16）: 空白だけの title / objective、存在しない親は検証エラーで、何も挿入しない。

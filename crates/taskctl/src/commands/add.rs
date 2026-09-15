@@ -68,6 +68,10 @@ pub struct AddArgs {
     /// ワークスペースのローカルパス。省略時は `<task_id>`（相対パス、P-19）。
     #[arg(long)]
     pub workspace: Option<PathBuf>,
+    /// ADR-0018: クラスタ（`[[clusters]] id`）でコマンドを実行する。`--workspace` にはクラスタ側の
+    /// 作業ディレクトリ（既存プロジェクトでよい）を絶対パスで指定する。
+    #[arg(long)]
+    pub cluster: Option<String>,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +165,7 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         max_wall_secs: args.max_wall_secs,
         max_retries: args.max_retries,
         workspace: args.workspace,
+        cluster: args.cluster,
         adapter: None,
     };
 
@@ -192,6 +197,7 @@ mod tests {
             max_wall_secs: 600,
             max_retries: 2,
             workspace: Some(PathBuf::from("/tmp/workspace")),
+            cluster: None,
         }
     }
 

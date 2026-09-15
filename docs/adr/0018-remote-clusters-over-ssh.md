@@ -17,14 +17,18 @@
 
 ## 決定
 
-### D1. LLM はローカル、リモートで実行するのは「コマンド」だけ
+### D1. LLM はローカル、リモートで実行するのは「コマンド」だけ。**プロジェクトはクラスタ側が正**
 
 - ワーカー（claude-code / codex）は**これまでどおり taskd のホストで動く**。クラスタ側に CLI も認証情報も置かない。
 - クラスタで実行するのは次の 2 つ:
   1. **受け入れ条件の `Check::Command`**（taskd が判定のために自分で実行するもの）
   2. **ワーカーが実行を頼むコマンド**（D3 のラッパ経由）
-- `WorkspaceSpec` は変えない。代わりにタスクに**実行サイト**を持たせる: `Task.exec_site: Option<String>`（`None` = ローカル、`Some("pegasus")` = そのクラスタ）。
-  ワークスペースの実体はローカルにあり、クラスタから見えるかどうかは D4 で決める。
+- 場所の表し方は**既存の `WorkspaceSpec::Remote { cluster, path }` をそのまま使う**（新しいフィールドを足さない）。
+  - `path` は**クラスタ側の作業ディレクトリ**で、タスクごとに人が指定する。**すでにあるプロジェクト**（例
+    `/work/NBB/rmaeda/workspace/rust/benchfs`）を指してよい。
+  - taskd はそれを `workspace_root/<task_id>` に**写し**として持つ。ワーカー（LLM）はこの写しを読み書きし、
+    run のログ（`runs/`）と成果物の照合はこれまでどおり手元で行う。
+  - **真実はクラスタ側**。写しは run のたびに作り直される前提で扱う。
 
 ### D2. 接続は `ControlMaster` 前提。無ければ「人待ち」
 
@@ -39,19 +43,30 @@
 
 ### D3. ワーカーがクラスタでコマンドを実行する手段（ラッパ）
 
-- `exec_site` のあるタスクでは、run の開始時にワークスペース直下へ **`.taskd/remote-exec`**（実行可能なスクリプト）を置く。
+- `WorkspaceSpec::Remote` のタスクでは、run の開始時に写しの直下へ **`.taskd/remote-exec`**（実行可能なスクリプト）を置く。
   中身は `ssh -o BatchMode=yes <host> -- 'cd <remote_workdir> && <setup> && "$@"'` 相当で、引数のコマンドをクラスタで実行して標準出力・終了コードをそのまま返す。
 - `RunRequest.task` にその存在と使い方を書いた指示文を足す（「重い処理・クラスタ上のデータを使う処理は `.taskd/remote-exec <cmd>` で実行すること」）。
   ワーカーが従うかは保証しないが、**受け入れ条件はクラスタ側で判定される**ので、ローカルだけで済ませたタスクは条件で落ちる。
 - `.taskd/remote-exec` は run ごとに作り直し、`rsync` の同期対象から外す。
 
-### D4. ワークスペースの同期は「共有なら何もしない、そうでなければ rsync」
+### D4. 同期は「pull してから作業し、push してから判定する」。既定では消さない
 
-- `[[clusters]] sync = "none" | "rsync"`（既定 `"rsync"`）。
-- `"rsync"`: run の前に `rsync -a --delete --exclude .taskd/ <local>/ <host>:<remote>/`、run の後に `rsync -a <host>:<remote>/ <local>/`。
-  受け入れ条件の判定の**前**にも取り込む（成果物の sha256 はローカルで計算する。真実はローカルの DB とワークスペース）。
-- `"none"`: 共有ファイルシステムを前提に何もしない。`remote_workdir` はローカルのワークスペースと同じパスを指すこと。
-- どちらかは**クラスタごとに人が設定する**。判定材料は `scripts/cluster-check.sh`（D6）が出す。
+`[[clusters]] sync = "rsync" | "none"`（既定 `"rsync"`）、`delete_on_push`（既定 **false**）。
+
+run 1 回の順序（`sync = "rsync"` のとき）:
+
+1. **pull**: `rsync -a <host>:<path>/ <mirror>/`（クラスタ → 手元の写し。手元側は `--delete` してよい＝写しなので）
+2. ワーカー（LLM）が**手元の写し**で作業する
+3. **push**: `rsync -a <mirror>/ <host>:<path>/`（手元 → クラスタ）。
+   **既定では `--delete` を付けない**（既存プロジェクトのファイルを消さないため）。taskd 専用の作業ディレクトリなら
+   `delete_on_push = true` にしてよい
+4. **判定**: `Check::Command` をクラスタで実行する（2 で編集した内容が反映済み）
+5. **pull**: 判定で生まれた成果物を取り込み、`Check::ArtifactExists` と sha256 は手元で判定する
+
+- `.taskd/`（ラッパ置き場）は両方向で同期から外す。`rsync_excludes` で `.git/` 等を足せる。
+- `sync = "none"`: 共有ファイルシステムのとき。`path` が手元からも同じパスで見えることが前提。
+- 競合について: pull から push までの間にクラスタ側で第三者が変更すると、push で上書きしうる（`--delete` 無しなので消しはしない）。
+  タスクの作業ディレクトリは 1 つのタスクが占有する前提とし、重なる場合は人が `depends_on` で直列化する。
 
 ### D5. 並列度・失敗・時間
 
@@ -84,6 +99,6 @@
 
 ## 結果
 
-- 新しい設定 `[[clusters]]`、`Task.exec_site`、`Event::ClusterUnavailable`、`.taskd/remote-exec`。
-- `Check::Command` の実行場所が「ワークスペース」から「タスクの実行サイト」に変わる（ローカルのタスクは従来どおり）。
+- 新しい設定 `[[clusters]]`、`Event::ClusterUnavailable`、`.taskd/remote-exec`。タスク側は既存の `WorkspaceSpec::Remote` のまま。
+- `Check::Command` の実行場所が、`WorkspaceSpec::Remote` のタスクではクラスタになる（`Local` のタスクは従来どおり手元）。
 - テストは **ssh 先を `localhost` にして行う**（外部ネットワークに出ない。CLAUDE.md の規則）。実クラスタでの確認は人の操作を伴う手順として記録する。

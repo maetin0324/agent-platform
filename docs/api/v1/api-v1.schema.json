@@ -1228,6 +1228,27 @@
           "type": "object"
         },
         {
+          "description": "ADR-0018 D2: クラスタへの ssh 多重接続が無く、そのクラスタでは実行できない（人のログイン待ち）。",
+          "properties": {
+            "cluster": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "const": "cluster_unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cluster",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "provider": {
               "type": "string"
@@ -1648,6 +1669,14 @@
         },
         "adapter": {
           "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cluster": {
+          "default": null,
+          "description": "ADR-0018: 指定すると `WorkspaceSpec::Remote{cluster, path}` になり、コマンドはそのクラスタで実行される。\n`workspace` がクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。",
           "type": [
             "string",
             "null"

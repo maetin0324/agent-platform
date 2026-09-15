@@ -35,6 +35,12 @@ pub struct SshSettings {
     /// リモートで `export` する環境変数（値は決定的な順で並べる）。
     pub env: Vec<(String, String)>,
     pub sync: SyncMode,
+    /// push（手元 → クラスタ）で、手元に無いファイルをクラスタ側から消すか（ADR-0018 D4）。
+    /// **既定は false**。既存プロジェクトを指すタスクでファイルを失わないため。taskd 専用の作業ディレクトリなら true にしてよい。
+    pub delete_on_push: bool,
+    /// `exec` の前に push、後に pull するか（既定 true）。判定コマンドが手元の編集を見て、
+    /// その結果の成果物が手元に戻るようにするため（ADR-0018 D4）。
+    pub sync_around_exec: bool,
     /// `rsync` から除外するパターン（`.taskd/` は常に除外する）。
     pub rsync_excludes: Vec<String>,
     /// `ssh` の起動コマンド（テストで差し替える。既定は `["ssh"]`）。
@@ -52,6 +58,8 @@ impl SshSettings {
             setup: Vec::new(),
             env: Vec::new(),
             sync: SyncMode::Rsync,
+            delete_on_push: false,
+            sync_around_exec: true,
             rsync_excludes: Vec::new(),
             ssh_command: vec!["ssh".to_string()],
             rsync_command: vec!["rsync".to_string()],
@@ -161,14 +169,18 @@ impl SshWorkspace {
         Ok(result)
     }
 
-    /// ローカル → リモート（run の前）。
+    /// 手元の写し → クラスタ（作業のあと、判定の前。ADR-0018 D4）。
+    /// 既定では `--delete` を付けない（既存プロジェクトのファイルを消さない）。
     pub async fn push(&self) -> Result<(), WorkspaceError> {
         if self.settings.sync == SyncMode::None {
             return Ok(());
         }
         self.ensure_remote_dir().await?;
         let mut args = self.settings.rsync_command.clone();
-        args.extend(["-a".into(), "--delete".into()]);
+        args.push("-a".into());
+        if self.settings.delete_on_push {
+            args.push("--delete".into());
+        }
         args.push("-e".into());
         args.push(self.ssh_base().join(" "));
         args.push("--exclude".into());
@@ -182,13 +194,15 @@ impl SshWorkspace {
         self.run_rsync(&args, "push").await
     }
 
-    /// リモート → ローカル（run の後、判定の前）。
+    /// クラスタ → 手元の写し（run の前と、判定の後。ADR-0018 D4）。
+    /// 写しは taskd が作り直してよいので、こちらは `--delete` してよい。
     pub async fn pull(&self) -> Result<(), WorkspaceError> {
         if self.settings.sync == SyncMode::None {
             return Ok(());
         }
+        self.ensure_remote_dir().await?;
         let mut args = self.settings.rsync_command.clone();
-        args.push("-a".into());
+        args.extend(["-a".into(), "--delete".into()]);
         args.push("-e".into());
         args.push(self.ssh_base().join(" "));
         args.push("--exclude".into());
@@ -260,6 +274,22 @@ impl SshWorkspace {
     }
 }
 
+/// tick（同期の文脈）から呼ぶ、多重接続の有無の確認（ADR-0018 D2）。`ssh -O check` は unix ソケットを見るだけで即座に返る。
+pub fn control_master_alive_blocking(ssh_command: &[String], host: &str) -> bool {
+    let Some((program, rest)) = ssh_command.split_first() else {
+        return false;
+    };
+    std::process::Command::new(program)
+        .args(rest)
+        .args(["-o", "BatchMode=yes", "-O", "check", host])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// 外部コマンドを 1 つ動かし、末尾の出力と終了コードを返す（`LocalWorkspace::exec` と同じ流儀）。
 async fn run_command(args: &[String], timeout: Duration) -> Result<ExecResult, WorkspaceError> {
     let Some((program, rest)) = args.split_first() else {
@@ -293,18 +323,27 @@ async fn run_command(args: &[String], timeout: Duration) -> Result<ExecResult, W
 
 #[async_trait]
 impl Workspace for SshWorkspace {
-    /// ローカル側を用意してから、リモートへ送る（`sync = "none"` なら送らない）。
+    /// **クラスタ側が正**（ADR-0018 D1）。手元の写しを用意し、クラスタの内容を取り込んでから、
+    /// run に必要なディレクトリを作る。既存プロジェクトを指していても壊さない。
     async fn prepare(&self, task: &Task) -> Result<PathBuf, WorkspaceError> {
-        let dir = self.local.prepare(task).await?;
-        self.push().await?;
-        Ok(dir)
+        tokio::fs::create_dir_all(self.local.dir()).await?;
+        self.pull().await?;
+        self.local.prepare(task).await
     }
 
-    /// コマンドはクラスタで実行する（ADR-0018 D1）。
+    /// コマンドはクラスタで実行する（ADR-0018 D1）。前後に同期して、手元の編集が反映され、
+    /// リモートで生まれたファイルが手元に戻るようにする。
     async fn exec(&self, cmd: &str, timeout: Duration) -> Result<ExecResult, WorkspaceError> {
+        if self.settings.sync_around_exec {
+            self.push().await?;
+        }
         let script = self.remote_script(cmd, timeout);
         // ssh 自体のタイムアウトは、リモートの timeout より少し長くする。
-        self.run_ssh(&script, timeout + Duration::from_secs(30)).await
+        let result = self.run_ssh(&script, timeout + Duration::from_secs(30)).await?;
+        if self.settings.sync_around_exec {
+            self.pull().await?;
+        }
+        Ok(result)
     }
 
     /// リモートの結果を取り込んでから、ローカルで sha256 を計算する（真実はローカル。ADR-0018 D4）。

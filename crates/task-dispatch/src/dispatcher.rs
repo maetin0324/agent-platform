@@ -30,7 +30,8 @@ use task_ops::derive::{
 };
 use task_worker::{
     AdapterError, Answer, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RunContext, RunLimits,
-    RunOutcome, RunRequest, Terminal, WorkerMessage, Workspace, WorkerAdapter,
+    RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal, WorkerMessage, Workspace, WorkerAdapter,
+    control_master_alive_blocking,
 };
 use task_ops::daemon::{CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
 use time::OffsetDateTime;
@@ -50,6 +51,35 @@ fn log_slow_step(step: &'static str, started: Instant) {
     let elapsed = started.elapsed();
     if elapsed >= SLOW_STEP {
         tracing::warn!(step, duration_ms = elapsed.as_millis() as u64, "slow dispatcher step");
+    }
+}
+
+/// ADR-0018: コマンドを実行するクラスタ 1 つ分の設定（`taskd::config::ClusterConfig` の写し。task-dispatch は taskd に依存しない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterSpec {
+    pub id: String,
+    /// `~/.ssh/config` の `Host` 名。
+    pub host: String,
+    /// このクラスタで同時に走らせる run の上限。
+    pub concurrency: usize,
+    pub sync: SyncMode,
+    pub delete_on_push: bool,
+    pub setup: Vec<String>,
+    /// 決定的な順に並べた環境変数。
+    pub env: Vec<(String, String)>,
+    pub rsync_excludes: Vec<String>,
+}
+
+impl ClusterSpec {
+    /// このタスクの写し（ローカル）とリモートのパスから、ワーカー用の設定を作る。
+    fn ssh_settings(&self, remote_path: &std::path::Path) -> SshSettings {
+        let mut settings = SshSettings::new(self.id.clone(), self.host.clone(), remote_path);
+        settings.sync = self.sync;
+        settings.delete_on_push = self.delete_on_push;
+        settings.setup = self.setup.clone();
+        settings.env = self.env.clone();
+        settings.rsync_excludes = self.rsync_excludes.clone();
+        settings
     }
 }
 
@@ -110,6 +140,10 @@ pub struct DispatchConfig {
     pub retry_backoff_max: Duration,
     /// ADR-0010 D9（P-30）: `Reviewer` run の `pick` と合成 `Review` タスクの `worker_hint`。
     pub reviewer_hint: task_core::WorkerHint,
+    /// ADR-0018: `WorkspaceSpec::Remote{cluster}` が指すクラスタ。キーは `cluster` の名前。
+    pub clusters: HashMap<String, ClusterSpec>,
+    /// ADR-0018 D2: 多重接続が無いクラスタを、この時間だけ dispatch の対象から外す。
+    pub cluster_cooldown: Duration,
     /// ADR-0011（P-38）: 同じ試行での連続 requeue の上限。達したら供給側失敗を通常の失敗（attempts 消費）として扱う。
     pub max_requeues: u32,
 }
@@ -152,6 +186,8 @@ struct RunEntry {
     handle: JoinHandle<()>,
     /// dispatch した時刻（デーモンのスナップショット用。ADR-0013 D4）。
     since: OffsetDateTime,
+    /// ADR-0018: コマンドを実行するクラスタ（ローカル実行なら `None`）。並列度の会計に使う。
+    cluster: Option<String>,
 }
 
 struct ReviewEntry {
@@ -162,6 +198,8 @@ struct ReviewEntry {
     subject: ReviewSubject,
     /// レビュー対象の run（デーモンのスナップショット用）。
     run_id: String,
+    /// ADR-0018: 判定コマンドを実行するクラスタ（ローカルなら `None`）。
+    cluster: Option<String>,
     /// Reviewer run を起動した場合のその run の id（スナップショットの `in_flight` 用。ADR-0014 D1）。
     review_run_id: Option<String>,
     since: OffsetDateTime,
@@ -276,6 +314,8 @@ pub struct Dispatcher {
     awaiting_human: std::collections::HashSet<TaskId>,
     tx: mpsc::UnboundedSender<Completion>,
     rx: mpsc::UnboundedReceiver<Completion>,
+    /// ADR-0018 D2: 多重接続が無いクラスタの cooldown（この時刻まで dispatch しない）。
+    cluster_cooldown: HashMap<String, Instant>,
     /// tick の回数（スナップショット用）。
     ticks: u64,
     publisher: Option<SnapshotPublisher>,
@@ -305,6 +345,7 @@ impl Dispatcher {
             awaiting_human: std::collections::HashSet::new(),
             tx,
             rx,
+            cluster_cooldown: HashMap::new(),
             ticks: 0,
             publisher: None,
         }
@@ -360,6 +401,28 @@ impl Dispatcher {
             );
         }
         Ok(report)
+    }
+
+    /// ADR-0018 D2: 多重接続が無いクラスタを cooldown にし、理由をタスクのイベントに残す（人にログインを促すため）。
+    fn mark_cluster_unavailable(&mut self, task_id: TaskId, spec: &ClusterSpec) -> Result<(), DispatchError> {
+        let first = self
+            .cluster_cooldown
+            .insert(spec.id.clone(), Instant::now() + self.config.cluster_cooldown)
+            .is_none();
+        if first {
+            tracing::warn!(
+                cluster = %spec.id, host = %spec.host,
+                "no ssh ControlMaster connection; run `scripts/cluster-login.sh {}` to log in again", spec.host
+            );
+        }
+        self.store.append_event(
+            task_id,
+            &Event::ClusterUnavailable {
+                cluster: spec.id.clone(),
+                reason: format!("no ssh ControlMaster connection to {} (host {})", spec.id, spec.host),
+            },
+        )?;
+        Ok(())
     }
 
     /// ADR-0013 D4: メモリ上の状態からスナップショットを作り `watch` に送る（DB には書かない。受け手がいなくても無害）。
@@ -854,9 +917,42 @@ impl Dispatcher {
                     continue;
                 }
             }
+            // ADR-0018: リモート実行のタスクは、クラスタの設定・cooldown・並列度・多重接続を先に確かめる。
+            let cluster = match &task.workspace {
+                WorkspaceSpec::Local { .. } => None,
+                WorkspaceSpec::Remote { cluster, .. } => match self.cluster_of(&task) {
+                    Some(resolved) => Some(resolved),
+                    None => {
+                        if self.warned_unroutable.insert(task.id) {
+                            tracing::warn!(task_id = %task.id, %cluster, "no such cluster in the config; task left ready");
+                        }
+                        self.unroutable.insert(task.id);
+                        continue;
+                    }
+                },
+            };
+            if let Some((spec, _)) = &cluster {
+                if self.cluster_cooldown.get(&spec.id).is_some_and(|until| *until > now) {
+                    // ADR-0018 D2: 人がログインするまで進まないので、待ち対象には数えない（`--until-idle` を止めない）。
+                    self.unroutable.insert(task.id);
+                    continue;
+                }
+                if self.cluster_in_use(&spec.id) >= spec.concurrency {
+                    continue;
+                }
+                let check_started = Instant::now();
+                let alive = control_master_alive_blocking(&SshSettings::new(&spec.id, &spec.host, "/").ssh_command, &spec.host);
+                log_slow_step("cluster_control_master", check_started);
+                if !alive {
+                    let spec = spec.clone();
+                    self.mark_cluster_unavailable(task.id, &spec)?;
+                    self.unroutable.insert(task.id);
+                    continue;
+                }
+            }
             let dir_started = Instant::now();
             let Some(dir) = self.task_dir(&task) else {
-                tracing::warn!(task_id = %task.id, "remote workspace is not supported; task left ready");
+                tracing::warn!(task_id = %task.id, "cannot resolve the workspace directory; task left ready");
                 continue;
             };
             log_slow_step("task_dir", dir_started);
@@ -896,7 +992,8 @@ impl Dispatcher {
                 kill_grace: self.config.kill_grace,
             };
             tracing::info!(task_id = %task.id, %run_id, adapter = %adapter_id, provider = %provider_id, "dispatching");
-            let handle = self.spawn_worker(task.id, run_id.clone(), provider_id.clone(), adapter, dir, limits);
+            let remote = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path));
+            let handle = self.spawn_worker(task.id, run_id.clone(), provider_id.clone(), adapter, dir, limits, remote);
             self.running.insert(
                 task.id,
                 RunEntry {
@@ -904,6 +1001,7 @@ impl Dispatcher {
                     provider: provider_id,
                     handle,
                     since: OffsetDateTime::now_utc(),
+                    cluster: cluster.map(|(spec, _)| spec.id),
                 },
             );
             dispatched += 1;
@@ -911,6 +1009,7 @@ impl Dispatcher {
         Ok(dispatched)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_worker(
         &self,
         task_id: TaskId,
@@ -919,6 +1018,7 @@ impl Dispatcher {
         adapter: Arc<dyn WorkerAdapter>,
         dir: PathBuf,
         limits: RunLimits,
+        remote: Option<SshSettings>,
     ) -> JoinHandle<()> {
         let store = self.store.clone();
         let tx = self.tx.clone();
@@ -927,7 +1027,7 @@ impl Dispatcher {
             every: self.config.lease_grace / 2,
         };
         tokio::spawn(async move {
-            let result = run_worker(store, adapter, task_id, dir, &run_id, limits, lease).await;
+            let result = run_worker(store, adapter, task_id, dir, &run_id, limits, lease, remote).await;
             let _ = tx.send(Completion::Worker {
                 task_id,
                 run_id,
@@ -990,6 +1090,10 @@ impl Dispatcher {
             None
         };
 
+        // ADR-0018: 判定コマンドもクラスタで実行する。
+        let cluster = self.cluster_of(&task);
+        let remote_settings = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path));
+        let cluster_id = cluster.as_ref().map(|(spec, _)| spec.id.clone());
         let events = self.store.events_for(task_id)?;
         let produced = artifacts_for_run(&events, &run_id);
         // ADR-0014 D1: Reviewer run も対象タスクに WorkerStarted（role: reviewer）を残す（アカウント別の集計に含めるため）。
@@ -1011,15 +1115,19 @@ impl Dispatcher {
         let entry_run_id = run_id.clone();
         let subject = subject.clone();
         let tx = self.tx.clone();
+        let remote_review = remote_settings.clone();
         let handle = tokio::spawn(async move {
-            let ws = LocalWorkspace::new(&dir);
+            let ws: Box<dyn Workspace> = match remote_review {
+                Some(settings) => Box::new(SshWorkspace::new(&dir, settings)),
+                None => Box::new(LocalWorkspace::new(&dir)),
+            };
             let extras = ReviewExtras {
                 subject,
                 plan,
                 reviewer: reviewer_run,
                 human,
             };
-            let outcome = review_task(&task, &ws, &dir, &produced, timeout, extras).await;
+            let outcome = review_task(&task, ws.as_ref(), &dir, &produced, timeout, extras).await;
             let _ = tx.send(Completion::Review {
                 task_id,
                 run_id,
@@ -1035,6 +1143,7 @@ impl Dispatcher {
                 run_id: entry_run_id,
                 review_run_id: review_run.map(|(_, id, _)| id),
                 since: OffsetDateTime::now_utc(),
+                cluster: cluster_id,
             },
         );
         Ok(true)
@@ -1225,8 +1334,27 @@ impl Dispatcher {
             } else {
                 self.config.workspace_root.join(path)
             }),
-            WorkspaceSpec::Remote { .. } => None,
+            // ADR-0018 D1: クラスタ側が正で、手元は写し（`workspace_root/<task_id>`）。
+            WorkspaceSpec::Remote { .. } => Some(self.config.workspace_root.join(task.id.to_string())),
         }
+    }
+
+    /// ADR-0018: `WorkspaceSpec::Remote` のタスクのクラスタ設定とリモートのパス。ローカルのタスクは `None`。
+    fn cluster_of(&self, task: &Task) -> Option<(ClusterSpec, PathBuf)> {
+        match &task.workspace {
+            WorkspaceSpec::Local { .. } => None,
+            WorkspaceSpec::Remote { cluster, path } => self
+                .config
+                .clusters
+                .get(cluster)
+                .map(|spec| (spec.clone(), path.clone())),
+        }
+    }
+
+    /// そのクラスタで走っている run の数（ADR-0018 D5: プロバイダとクラスタの二次元）。
+    fn cluster_in_use(&self, cluster: &str) -> usize {
+        self.running.values().filter(|e| e.cluster.as_deref() == Some(cluster)).count()
+            + self.reviewing.values().filter(|e| e.cluster.as_deref() == Some(cluster)).count()
     }
 
     fn is_idle(&self) -> Result<bool, DispatchError> {
@@ -1256,6 +1384,7 @@ impl Dispatcher {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_worker(
     store: Arc<dyn TaskStore>,
     adapter: Arc<dyn WorkerAdapter>,
@@ -1264,17 +1393,31 @@ async fn run_worker(
     run_id: &str,
     limits: RunLimits,
     lease: LeaseRenewal,
+    remote: Option<SshSettings>,
 ) -> Result<RunOutcome, AdapterError> {
     // リース取得後の状態（running, lease あり）をワーカーに渡す。
     let task = store
         .get(task_id)
         .map_err(|e| AdapterError::Other(format!("store: {e}")))?
         .ok_or_else(|| AdapterError::Other("task vanished".into()))?;
-    let ws = LocalWorkspace::new(&dir);
-    let workspace = ws
-        .prepare(&task)
-        .await
-        .map_err(|e| AdapterError::Other(format!("workspace prepare: {e}")))?;
+    // ADR-0018 D1/D3: リモート実行のタスクは、クラスタの内容を写しに取り込み、ラッパを置く。
+    let workspace = match &remote {
+        Some(settings) => {
+            let ws = SshWorkspace::new(&dir, settings.clone());
+            let prepared = ws
+                .prepare(&task)
+                .await
+                .map_err(|e| workspace_error_to_adapter(e, "workspace prepare"))?;
+            ws.write_remote_exec_helper()
+                .await
+                .map_err(|e| workspace_error_to_adapter(e, "remote-exec helper"))?;
+            prepared
+        }
+        None => LocalWorkspace::new(&dir)
+            .prepare(&task)
+            .await
+            .map_err(|e| AdapterError::Other(format!("workspace prepare: {e}")))?,
+    };
     if task.kind == TaskKind::Plan {
         // ADR-0007 D1: 前回の run の plan.json を今回の出力と誤読しない。
         let _ = tokio::fs::remove_file(workspace.join(PLAN_FILE)).await;
@@ -1312,6 +1455,17 @@ struct LeaseRenewal {
     ttl: Duration,
     /// 延長の最小間隔（`lease_grace / 2`）。
     every: Duration,
+}
+
+/// ADR-0018 D5: ワークスペースの失敗をアダプタの失敗に写す。`Unreachable`（ssh / rsync 自体の失敗）は
+/// 供給側失敗（`Spawn`）にして、attempts を消費せず requeue されるようにする。
+fn workspace_error_to_adapter(e: task_worker::WorkspaceError, context: &str) -> AdapterError {
+    match e {
+        task_worker::WorkspaceError::Unreachable(msg) => {
+            AdapterError::Spawn(std::io::Error::other(format!("{context}: {msg}")))
+        }
+        other => AdapterError::Other(format!("{context}: {other}")),
+    }
 }
 
 /// `ProviderThrottled.reason` に書く供給側失敗の種別（ADR-0013 D9）。供給側失敗でなければ `None`。
@@ -1450,6 +1604,8 @@ mod tests {
                 retry_backoff_base: Duration::ZERO,
                 retry_backoff_max: Duration::ZERO,
                 reviewer_hint: crate::review::reviewer_hint(),
+                clusters: HashMap::new(),
+                cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
             },
         )

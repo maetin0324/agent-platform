@@ -58,11 +58,22 @@ async fn pushes_runs_and_pulls_over_ssh() {
     }
     let t = task(local.path());
 
+    // クラスタ側に既にあるプロジェクトを指す（ADR-0018 D1: クラスタが正）。
+    std::fs::create_dir_all(&remote_dir).unwrap();
+    std::fs::write(remote_dir.join("existing.txt"), "already here\n").unwrap();
+
     let dir = ws.prepare(&t).await.expect("prepare");
     assert_eq!(dir, local.path().canonicalize().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(local.path().join("existing.txt")).unwrap(),
+        "already here\n",
+        "prepare が pull して既存プロジェクトを写す"
+    );
+
     std::fs::write(local.path().join("input.txt"), "hello\n").unwrap();
     ws.push().await.expect("push");
     assert!(remote_dir.join("input.txt").exists(), "rsync でリモートに届く");
+    assert!(remote_dir.join("existing.txt").exists(), "既定の push は既存ファイルを消さない");
 
     // コマンドはリモートで動く（リモートにしか無いファイルを読める）。
     std::fs::write(remote_dir.join("only-remote.txt"), "remote\n").unwrap();
@@ -87,6 +98,26 @@ async fn pushes_runs_and_pulls_over_ssh() {
     // 失敗するコマンドの終了コードはそのまま返る（接続の問題ではなく判定の失敗）。
     let r = ws.exec("exit 3", Duration::from_secs(30)).await.expect("exec exit 3");
     assert_eq!(r.exit, Some(3), "{r:?}");
+}
+
+/// ADR-0018 D4: `delete_on_push = true`（taskd 専用の作業ディレクトリ向け）のときだけ、手元に無いものを消す。
+#[tokio::test]
+async fn push_deletes_only_when_asked() {
+    let local = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let remote_dir = remote.path().join("work");
+    let mut s = settings(remote_dir.clone());
+    s.delete_on_push = true;
+    let ws = SshWorkspace::new(local.path(), s);
+    if !available(&ws).await {
+        return;
+    }
+    std::fs::create_dir_all(&remote_dir).unwrap();
+    std::fs::write(remote_dir.join("stale.txt"), "old\n").unwrap();
+    std::fs::write(local.path().join("new.txt"), "new\n").unwrap();
+    ws.push().await.expect("push");
+    assert!(remote_dir.join("new.txt").exists());
+    assert!(!remote_dir.join("stale.txt").exists(), "delete_on_push = true では消える");
 }
 
 #[tokio::test]

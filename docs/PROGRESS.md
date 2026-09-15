@@ -19,7 +19,7 @@
 | 9 | GUI のための基盤（task-ops・WAL・events の id）と HTTP API 層（ADR-0013）、追補 P-G14〜P-G16（ADR-0014） | 完了 | 2026-09-14（追補 2026-09-15） |
 | 10 | 役割と委譲（組織的な木構造。ADR-0016） | 設計のみ | — |
 | 11 | GUI からのアカウント管理（ADR-0017） | 設計のみ | — |
-| 12 | 複数クラスタへの投入（ssh。ADR-0018） | 設計のみ | — |
+| 12 | クラスタでのコマンド実行（ssh + ControlMaster。ADR-0018） | 実装中（基盤は完了） | — |
 
 ---
 
@@ -1776,3 +1776,19 @@ auditor サブエージェントを 1 回起動した（読み取り専用。Pha
 
 → `sync = "rsync"`（両クラスタとも）。`remote_workdir` は `/work/NBB/rmaeda`。`~/.ssh/config`（fern03）に `pegasus` / `sirius` を
 `ControlPersist 8h` で追加済み。接続を張るのは人（`scripts/cluster-login.sh <host>`）。
+
+### Phase 12 の実装（第 1 段階、2026-09-15）
+
+- `task-worker`: `SshWorkspace`（pull → コマンドは ssh で実行 → push、`.taskd/remote-exec` の生成、`control_master_alive`）。
+  `WorkspaceError::Unreachable`（ssh / rsync 自体の失敗＝供給側失敗）と `Remote` を追加。
+- `task-core`: `Event::ClusterUnavailable{cluster, reason}`。
+- `taskd`: `[[clusters]]`（id / host / concurrency / sync / delete_on_push / setup / env / rsync_excludes）と検証。
+- `task-dispatch`: `ClusterSpec`、クラスタごとの並列度、dispatch 前の多重接続の確認、無ければ cooldown + `ClusterUnavailable` +
+  「人待ち」として idle の待ち対象から外す。判定（`Check::Command`）と run の両方でクラスタを使う。
+- `task-ops` / `taskctl`: `NewTaskSpec.cluster` と `taskctl add --cluster`（`--workspace` がクラスタ側のパス）。
+- テスト: task-worker の `ssh_localhost`（実 ssh、4 件）、`ssh_cluster_manual`（`#[ignore]`、実クラスタ用）、
+  e2e `cluster_scenarios`（実バイナリ + localhost、3 件）。`cargo test --workspace` **414 passed**、clippy 2 種 exit 0。
+- 実機確認: pegasus03 と sirius02 で `/work/NBB/rmaeda` に同期 → コマンドがクラスタで実行 → 成果物が手元に戻ることを確認。
+
+残り（第 2 段階）: GUI への反映（`ClusterUnavailable` を受信箱の「注意」に出す、クラスタ画面）、API の `/clusters`、
+`taskctl worker run` のクラスタ対応、実クラスタでの本番タスク。

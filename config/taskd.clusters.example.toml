@@ -1,0 +1,49 @@
+# クラスタでコマンドを実行する設定の例（ADR-0018、Phase 12）。相対パスはこのファイルのあるディレクトリ基準。
+#
+# 前提:
+#   - ワーカー（claude-code / codex）は **このホストで動く**。クラスタで実行するのは「コマンド」だけ。
+#   - クラスタへの ssh は**人が張る**（2 要素認証）。taskd は ControlMaster の多重接続を借りるだけで、
+#     対話的な認証は行わない。張り方: scripts/cluster-login.sh pegasus
+#   - ~/.ssh/config に ControlMaster の設定が要る（config/ssh-config.example）。
+#
+# タスクの作り方:
+#   taskctl add --title "benchfs のベンチ" --objective "..." \
+#     --cluster pegasus --workspace /work/NBB/rmaeda/workspace/rust/benchfs \
+#     --check-cmd "cargo test --release"
+#   → クラスタ側の /work/.../benchfs が正で、taskd は workspaces/<task_id> に写しを作る。
+#     run の前に pull、ワーカーが写しを編集、判定の前に push、`--check-cmd` はクラスタで実行される。
+
+db = "../taskd.sqlite3"
+workspace_root = "../workspaces"
+tick_ms = 2000
+max_concurrency = 2
+
+[api]
+listen = "127.0.0.1:7710"
+
+[adapters.claude_code]
+permission_mode = "bypassPermissions"
+
+[[providers]]
+id = "claude-default"
+adapter = "claude-code"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 2
+model = "claude-sonnet-5"
+
+[[clusters]]
+id = "pegasus"
+host = "pegasus"                  # ~/.ssh/config の Host 名
+concurrency = 2                   # このクラスタで同時に走らせる run の上限
+sync = "rsync"                    # 共有ファイルシステムなら "none"
+delete_on_push = false            # 既定 false。既存プロジェクトのファイルを消さない
+# setup = ["module load python/3.12"]
+# env = { OMP_NUM_THREADS = "8" }
+# rsync_excludes = [".git/", "target/"]
+
+[[clusters]]
+id = "sirius"
+host = "sirius"
+concurrency = 2
+sync = "rsync"
+delete_on_push = false
