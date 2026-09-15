@@ -1760,3 +1760,19 @@ auditor サブエージェントを 1 回起動した（読み取り専用。Pha
 ### GUI 側
 
 - `taskd-gui` の DESIGN §10 に **Phase G6（使い方ページ）** を定義した（`/help`、6 節構成、受け入れ条件 6 項目）。`run-gphases.sh` の既定フェーズに G6 を足した。
+
+### Phase 12 の前提調査（2026-09-15、実機）
+
+人間が fern03 → pegasus / sirius の ControlMaster 接続を張った状態で `scripts/cluster-check.sh` を実行した結果。
+
+| | pegasus | sirius |
+|---|---|---|
+| ssh（多重接続） | `Master running` で借りられる | 同じ |
+| ホスト | pegasus03、Linux 5.15 | sirius02、Linux 5.14（EL9） |
+| ホーム | `/home/NBB/rmaeda`（Lustre） | `/home/NBB/rmaeda`（別の Lustre） |
+| 作業ディレクトリ | **`/work/NBB/rmaeda` 直下を使う**（人間の方針。ホームでは作業しない）。Lustre、空き 7.5 TB | 同じ方針。Lustre、空き 61 TB |
+| 道具 | rsync / python3 / git / bash あり | 同じ |
+| 共有 FS | fern03（NFS）・pegasus（Lustre）・sirius（別 Lustre）は**すべて別**。pegasus に書いた印は sirius から見えない | 同じ |
+
+→ `sync = "rsync"`（両クラスタとも）。`remote_workdir` は `/work/NBB/rmaeda`。`~/.ssh/config`（fern03）に `pegasus` / `sirius` を
+`ControlPersist 8h` で追加済み。接続を張るのは人（`scripts/cluster-login.sh <host>`）。

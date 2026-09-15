@@ -33,21 +33,24 @@ else
 fi
 
 echo "== 手元とクラスタでファイルが共有されているか"
-probe="$(mktemp "${TMPDIR:-/tmp}/taskd-probe-XXXXXX")"
+# 手元で印を書き、リモートから同じ内容が見えるかで判定する（見えれば sync = "none" が使える）。
 marker="taskd-shared-fs-probe-$$-$(date +%s)"
-echo "$marker" > "$probe"
+probe_dir="${workdir:-$HOME}"
 if [ -n "$workdir" ]; then
-  shared_probe="$workdir/.taskd-shared-probe"
-  cp "$probe" "$shared_probe" 2>/dev/null &&
-    { run "grep -q '$marker' '$shared_probe' && echo '共有されています（sync = \"none\" を使えます）' || echo '共有されていません（sync = \"rsync\"）'";
-      rm -f "$shared_probe"; } ||
-    echo "   remote_workdir に手元から書けないので判定できません（別のファイルシステムの可能性が高い: sync = \"rsync\"）"
+  # リモートの作業ディレクトリと同じパスが手元にもあるか（共有 FS なら同じパスで見えるのが普通）
+  if [ -d "$workdir" ] && [ -w "$workdir" ]; then
+    echo "$marker" > "$workdir/.taskd-shared-probe"
+    run "grep -q '$marker' '$workdir/.taskd-shared-probe' 2>/dev/null && echo '共有されています（sync = \"none\" を使えます）' || echo '共有されていません（sync = \"rsync\"）'"
+    rm -f "$workdir/.taskd-shared-probe"
+  else
+    echo "   $workdir は手元に無い（または書けない）ので、共有されていません: sync = \"rsync\""
+  fi
 else
-  home_probe="$HOME/.taskd-shared-probe"
-  cp "$probe" "$home_probe"
-  run "grep -q '$marker' '$home_probe' 2>/dev/null && echo 'ホームが共有されています（sync = \"none\" を検討できます）' || echo 'ホームは共有されていません（sync = \"rsync\"）'"
-  rm -f "$home_probe"
+  echo "   remote_workdir を渡すと判定します（手元に同じパスがあるかで見ます）"
 fi
-rm -f "$probe"
+
+echo "== ファイルシステム（手元とリモート）"
+printf "   手元    : "; df -PT "$HOME" 2>/dev/null | tail -1
+printf "   リモート: "; run "df -PT '${workdir:-\$HOME}' 2>/dev/null | tail -1"
 
 echo "== まとめ: 上の結果を taskd.toml の [[clusters]] に書きます（host / remote_workdir / sync / concurrency）"
