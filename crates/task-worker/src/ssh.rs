@@ -1,0 +1,315 @@
+//! クラスタ上でコマンドを実行する `Workspace`（ADR-0018）。
+//!
+//! **ワーカー（LLM）は手元で動く。** ここで行うのは「コマンドをクラスタで実行すること」と「ファイルの同期」だけ。
+//! 接続は**人が張った `ControlMaster` の多重接続を借りる**（`BatchMode=yes` で、対話的な認証は絶対に行わない）。
+//! 接続が無ければ `WorkspaceError::Unreachable` を返し、呼び出し側（ディスパッチャ）が供給側失敗として扱う。
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use task_core::{ArtifactRef, Task};
+
+use crate::workspace::{ExecResult, LocalWorkspace, Workspace, WorkspaceError};
+
+/// ワークスペースの同期方法（ADR-0018 D4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    /// run の前後で rsync を往復させる（既定）。
+    Rsync,
+    /// 共有ファイルシステム。何もしない。
+    None,
+}
+
+/// 1 タスク分のリモート実行の設定。
+#[derive(Debug, Clone)]
+pub struct SshSettings {
+    /// 設定の `[[clusters]] id`（ログとイベントに出す）。
+    pub cluster: String,
+    /// `~/.ssh/config` の `Host` 名。
+    pub host: String,
+    /// このタスクのリモート作業ディレクトリ（`remote_workdir` + タスクのディレクトリ名）。
+    pub remote_dir: PathBuf,
+    /// コマンドの前に流す準備（`module load ...` など）。
+    pub setup: Vec<String>,
+    /// リモートで `export` する環境変数（値は決定的な順で並べる）。
+    pub env: Vec<(String, String)>,
+    pub sync: SyncMode,
+    /// `rsync` から除外するパターン（`.taskd/` は常に除外する）。
+    pub rsync_excludes: Vec<String>,
+    /// `ssh` の起動コマンド（テストで差し替える。既定は `["ssh"]`）。
+    pub ssh_command: Vec<String>,
+    /// `rsync` の起動コマンド（同上）。
+    pub rsync_command: Vec<String>,
+}
+
+impl SshSettings {
+    pub fn new(cluster: impl Into<String>, host: impl Into<String>, remote_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            cluster: cluster.into(),
+            host: host.into(),
+            remote_dir: remote_dir.into(),
+            setup: Vec::new(),
+            env: Vec::new(),
+            sync: SyncMode::Rsync,
+            rsync_excludes: Vec::new(),
+            ssh_command: vec!["ssh".to_string()],
+            rsync_command: vec!["rsync".to_string()],
+        }
+    }
+}
+
+/// `sh` に渡す 1 引数としての安全な引用（シングルクォートで囲み、中の `'` を `'\''` にする）。
+fn shq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// ローカルの作業ディレクトリを持ちつつ、コマンドをリモートで実行するワークスペース。
+#[derive(Debug, Clone)]
+pub struct SshWorkspace {
+    local: LocalWorkspace,
+    settings: SshSettings,
+}
+
+impl SshWorkspace {
+    pub fn new(dir: impl Into<PathBuf>, settings: SshSettings) -> Self {
+        Self { local: LocalWorkspace::new(dir), settings }
+    }
+
+    pub fn dir(&self) -> &Path {
+        self.local.dir()
+    }
+
+    pub fn settings(&self) -> &SshSettings {
+        &self.settings
+    }
+
+    /// `ssh` に必ず付ける引数（対話的な認証を禁じる）。
+    fn ssh_base(&self) -> Vec<String> {
+        let mut args = self.settings.ssh_command.clone();
+        args.push("-o".into());
+        args.push("BatchMode=yes".into());
+        args
+    }
+
+    /// 人が張った多重接続があるか（ADR-0018 D2）。無ければ taskd は何もできない。
+    pub async fn control_master_alive(&self) -> bool {
+        let mut args = self.ssh_base();
+        args.push("-O".into());
+        args.push("check".into());
+        args.push(self.settings.host.clone());
+        let Some((program, rest)) = args.split_first() else {
+            return false;
+        };
+        match tokio::process::Command::new(program)
+            .args(rest)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+        {
+            Ok(status) => status.success(),
+            Err(_) => false,
+        }
+    }
+
+    /// リモートで走らせるスクリプト（作業ディレクトリへ移動 → env → setup → コマンド）。
+    fn remote_script(&self, cmd: &str, timeout: Duration) -> String {
+        let mut script = String::new();
+        script.push_str(&format!("cd {} && ", shq(&self.settings.remote_dir.to_string_lossy())));
+        for (k, v) in &self.settings.env {
+            script.push_str(&format!("export {k}={} && ", shq(v)));
+        }
+        for line in &self.settings.setup {
+            script.push_str(&format!("{{ {line}; }} && "));
+        }
+        // ローカル側の timeout に加えて、リモートでも kill する（二重の安全弁。ADR-0018 D5）。
+        let secs = timeout.as_secs().max(1);
+        script.push_str(&format!("timeout -k 5 {secs} sh -c {}", shq(cmd)));
+        script
+    }
+
+    /// リモートの作業ディレクトリを作る。
+    async fn ensure_remote_dir(&self) -> Result<(), WorkspaceError> {
+        let dir = self.settings.remote_dir.to_string_lossy().to_string();
+        let out = self.run_ssh(&format!("mkdir -p {}", shq(&dir)), Duration::from_secs(60)).await?;
+        if out.exit != Some(0) {
+            return Err(WorkspaceError::Remote(format!(
+                "cannot create the remote directory {dir} on {}: {}",
+                self.settings.cluster,
+                out.stderr_tail.trim()
+            )));
+        }
+        Ok(())
+    }
+
+    /// `ssh` で 1 コマンド。終了コード 255 は ssh 自身の失敗（= 接続の問題）として `Unreachable` にする。
+    async fn run_ssh(&self, script: &str, timeout: Duration) -> Result<ExecResult, WorkspaceError> {
+        let mut args = self.ssh_base();
+        args.push(self.settings.host.clone());
+        args.push(script.to_string());
+        let result = run_command(&args, timeout).await?;
+        if result.exit == Some(255) {
+            return Err(WorkspaceError::Unreachable(format!(
+                "ssh to {} ({}) failed: {}",
+                self.settings.cluster,
+                self.settings.host,
+                result.stderr_tail.trim()
+            )));
+        }
+        Ok(result)
+    }
+
+    /// ローカル → リモート（run の前）。
+    pub async fn push(&self) -> Result<(), WorkspaceError> {
+        if self.settings.sync == SyncMode::None {
+            return Ok(());
+        }
+        self.ensure_remote_dir().await?;
+        let mut args = self.settings.rsync_command.clone();
+        args.extend(["-a".into(), "--delete".into()]);
+        args.push("-e".into());
+        args.push(self.ssh_base().join(" "));
+        args.push("--exclude".into());
+        args.push(".taskd/".into());
+        for pattern in &self.settings.rsync_excludes {
+            args.push("--exclude".into());
+            args.push(pattern.clone());
+        }
+        args.push(format!("{}/", self.local.dir().to_string_lossy()));
+        args.push(format!("{}:{}/", self.settings.host, self.settings.remote_dir.to_string_lossy()));
+        self.run_rsync(&args, "push").await
+    }
+
+    /// リモート → ローカル（run の後、判定の前）。
+    pub async fn pull(&self) -> Result<(), WorkspaceError> {
+        if self.settings.sync == SyncMode::None {
+            return Ok(());
+        }
+        let mut args = self.settings.rsync_command.clone();
+        args.push("-a".into());
+        args.push("-e".into());
+        args.push(self.ssh_base().join(" "));
+        args.push("--exclude".into());
+        args.push(".taskd/".into());
+        for pattern in &self.settings.rsync_excludes {
+            args.push("--exclude".into());
+            args.push(pattern.clone());
+        }
+        args.push(format!("{}:{}/", self.settings.host, self.settings.remote_dir.to_string_lossy()));
+        args.push(format!("{}/", self.local.dir().to_string_lossy()));
+        self.run_rsync(&args, "pull").await
+    }
+
+    async fn run_rsync(&self, args: &[String], direction: &str) -> Result<(), WorkspaceError> {
+        let result = run_command(args, Duration::from_secs(3600)).await?;
+        match result.exit {
+            Some(0) => Ok(()),
+            // rsync の 255 / 12 は ssh の失敗（接続の問題）。
+            Some(255) | Some(12) => Err(WorkspaceError::Unreachable(format!(
+                "rsync {direction} to {} failed: {}",
+                self.settings.cluster,
+                result.stderr_tail.trim()
+            ))),
+            other => Err(WorkspaceError::Remote(format!(
+                "rsync {direction} to {} exited with {other:?}: {}",
+                self.settings.cluster,
+                result.stderr_tail.trim()
+            ))),
+        }
+    }
+
+    /// ワーカーがクラスタでコマンドを実行するためのラッパ `.taskd/remote-exec`（ADR-0018 D3）。
+    pub async fn write_remote_exec_helper(&self) -> Result<PathBuf, WorkspaceError> {
+        let dir = self.local.dir().join(".taskd");
+        tokio::fs::create_dir_all(&dir).await?;
+        let path = dir.join("remote-exec");
+        let ssh = self.ssh_base().join(" ");
+        let remote = self.settings.remote_dir.to_string_lossy().to_string();
+        let mut prefix = String::new();
+        for (k, v) in &self.settings.env {
+            prefix.push_str(&format!("export {k}={} && ", shq(v)));
+        }
+        for line in &self.settings.setup {
+            prefix.push_str(&format!("{{ {line}; }} && "));
+        }
+        let script = format!(
+            "#!/bin/sh\n\
+             # taskd が run ごとに作るラッパ（ADR-0018 D3）。クラスタ {cluster} でコマンドを実行する。\n\
+             # 使い方: .taskd/remote-exec <コマンド ...>\n\
+             set -u\n\
+             if [ $# -eq 0 ]; then echo \"usage: $0 <command...>\" >&2; exit 2; fi\n\
+             cmd=\"$*\"\n\
+             exec {ssh} {host} \"cd {remote_q} && {prefix}sh -c \\\"$cmd\\\"\"\n",
+            cluster = self.settings.cluster,
+            ssh = ssh,
+            host = self.settings.host,
+            remote_q = remote,
+            prefix = prefix,
+        );
+        tokio::fs::write(&path, script).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = tokio::fs::metadata(&path).await?.permissions();
+            perms.set_mode(0o755);
+            tokio::fs::set_permissions(&path, perms).await?;
+        }
+        Ok(path)
+    }
+}
+
+/// 外部コマンドを 1 つ動かし、末尾の出力と終了コードを返す（`LocalWorkspace::exec` と同じ流儀）。
+async fn run_command(args: &[String], timeout: Duration) -> Result<ExecResult, WorkspaceError> {
+    let Some((program, rest)) = args.split_first() else {
+        return Err(WorkspaceError::Remote("empty command".to_string()));
+    };
+    let mut command = tokio::process::Command::new(program);
+    command.args(rest);
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    command.kill_on_drop(true);
+    let child = command.output();
+    match tokio::time::timeout(timeout, child).await {
+        Ok(out) => {
+            let out = out?;
+            Ok(ExecResult {
+                exit: out.status.code(),
+                stdout_tail: crate::workspace::tail_utf8_lossy(&out.stdout),
+                stderr_tail: crate::workspace::tail_utf8_lossy(&out.stderr),
+                timed_out: false,
+            })
+        }
+        Err(_) => Ok(ExecResult {
+            exit: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            timed_out: true,
+        }),
+    }
+}
+
+#[async_trait]
+impl Workspace for SshWorkspace {
+    /// ローカル側を用意してから、リモートへ送る（`sync = "none"` なら送らない）。
+    async fn prepare(&self, task: &Task) -> Result<PathBuf, WorkspaceError> {
+        let dir = self.local.prepare(task).await?;
+        self.push().await?;
+        Ok(dir)
+    }
+
+    /// コマンドはクラスタで実行する（ADR-0018 D1）。
+    async fn exec(&self, cmd: &str, timeout: Duration) -> Result<ExecResult, WorkspaceError> {
+        let script = self.remote_script(cmd, timeout);
+        // ssh 自体のタイムアウトは、リモートの timeout より少し長くする。
+        self.run_ssh(&script, timeout + Duration::from_secs(30)).await
+    }
+
+    /// リモートの結果を取り込んでから、ローカルで sha256 を計算する（真実はローカル。ADR-0018 D4）。
+    async fn collect(&self, task: &Task) -> Result<Vec<ArtifactRef>, WorkspaceError> {
+        self.pull().await?;
+        self.local.collect(task).await
+    }
+}

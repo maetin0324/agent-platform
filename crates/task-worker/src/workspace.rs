@@ -18,6 +18,12 @@ pub enum WorkspaceError {
     InputNotFound(String),
     #[error("remote workspace is not implemented (cluster={0})")]
     RemoteUnsupported(String),
+    /// ADR-0018 D5: ssh / rsync 自体の失敗（接続が無い・認証を求められた・宛先に届かない）。供給側失敗として扱う。
+    #[error("cluster is unreachable: {0}")]
+    Unreachable(String),
+    /// リモート側の準備に失敗した（ディレクトリが作れない・rsync が異常終了した）。
+    #[error("remote error: {0}")]
+    Remote(String),
 }
 
 /// `Workspace::exec` の結果。`exit` は signal 終了・タイムアウト時 `None`。
@@ -71,7 +77,7 @@ pub struct RemoteWorkspace {
 
 const TAIL_BYTES: usize = 4096;
 
-fn tail_utf8_lossy(bytes: &[u8]) -> String {
+pub(crate) fn tail_utf8_lossy(bytes: &[u8]) -> String {
     let start = bytes.len().saturating_sub(TAIL_BYTES);
     String::from_utf8_lossy(&bytes[start..]).into_owned()
 }

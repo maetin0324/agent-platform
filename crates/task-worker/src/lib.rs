@@ -11,6 +11,7 @@ pub mod provider;
 pub mod subprocess;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod ssh;
 pub mod workspace;
 
 pub use adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
@@ -23,4 +24,5 @@ pub use protocol::{
 };
 pub use provider::classify_provider_failure;
 pub use subprocess::{SubprocessSpec, run_subprocess};
+pub use ssh::{SshSettings, SshWorkspace, SyncMode};
 pub use workspace::{ExecResult, LocalWorkspace, RemoteWorkspace, Workspace, WorkspaceError};
