@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # taskd-gui 自動進行ランナー（G フェーズ）。run-phases.sh と同じく、フェーズごとに新しい claude -p セッションで /goal を回す。
 # GUI 本体は別リポジトリ（既定 /home/rmaeda/workspace/taskd-gui）。無ければ docs/gui/ から立ち上げる（docs/gui/bootstrap/README.md）。
-# 使い方: tmux 内で  ./run-gphases.sh                  （G0〜G6）
+# 使い方: tmux 内で  ./run-gphases.sh                  （G0〜G7）
 #                   PHASES="G1 G2" ./run-gphases.sh     （一部だけ）
 #                   BOOTSTRAP_ONLY=1 ./run-gphases.sh   （前提確認と taskd-gui の立ち上げだけ）
 set -uo pipefail
@@ -10,7 +10,7 @@ TASKD_REPO="$(cd "$(dirname "$0")" && pwd)"
 export TASKD_REPO
 GUI_REPO="${GUI_REPO:-/home/rmaeda/workspace/taskd-gui}"
 
-PHASES="${PHASES:-G0 G1 G2 G3 G4 G5 G6}"
+PHASES="${PHASES:-G0 G1 G2 G3 G4 G5 G6 G7}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
 RETRY_SLEEP="${RETRY_SLEEP:-900}"        # 失敗後の待ち（秒）。レート制限回復待ちを兼ねる
 LIGHT_MODEL="${LIGHT_MODEL:-sonnet}"      # G1, G3, G4, G6 のメインセッション
@@ -27,7 +27,7 @@ export TASKD_GUI_BIND="${TASKD_GUI_BIND:-127.0.0.1:7700}"
 
 # docs/gui/bootstrap/README.md §2 のフェーズ表。
 model_for()    { case "$1" in G0|G2|G5) echo "$STRONG_MODEL";; *) echo "$LIGHT_MODEL";; esac; }
-maxturns_for() { case "$1" in G0|G2|G5) echo 60;; G4|G6) echo 40;; *) echo 50;; esac; }
+maxturns_for() { case "$1" in G0|G2|G5) echo 60;; G4|G6) echo 40;; *) echo 50;; esac; }  # G1/G3/G7 は 50
 phase_done()    { grep -q  "^## Phase $1 — DONE" docs/PROGRESS.md 2>/dev/null; }
 phase_stopped() { grep -qE "^## Phase $1 — (BLOCKED|PARTIAL)" docs/PROGRESS.md 2>/dev/null; }
 
