@@ -9,7 +9,7 @@ if [ -z "$host" ]; then
   exit 2
 fi
 
-mkdir -p ~/.ssh/cm && chmod 700 ~/.ssh/cm
+chmod 700 ~/.ssh 2>/dev/null || true
 
 if ssh -o BatchMode=yes -O check "$host" 2>/dev/null; then
   echo "既に接続があります（$host）。張り直す場合は: ssh -O exit $host"
