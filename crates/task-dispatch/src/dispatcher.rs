@@ -31,9 +31,9 @@ use task_ops::derive::{
 use task_worker::{
     AdapterError, Answer, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RunContext, RunLimits,
     RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal, WorkerMessage, Workspace, WorkerAdapter,
-    control_master_alive_blocking,
+    control_master_alive_blocking, remote_exec_instructions,
 };
-use task_ops::daemon::{CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
+use task_ops::daemon::{ClusterLive, CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::mpsc;
@@ -72,7 +72,7 @@ pub struct ClusterSpec {
 
 impl ClusterSpec {
     /// このタスクの写し（ローカル）とリモートのパスから、ワーカー用の設定を作る。
-    fn ssh_settings(&self, remote_path: &std::path::Path) -> SshSettings {
+    pub fn ssh_settings(&self, remote_path: &std::path::Path) -> SshSettings {
         let mut settings = SshSettings::new(self.id.clone(), self.host.clone(), remote_path);
         settings.sync = self.sync;
         settings.delete_on_push = self.delete_on_push;
@@ -310,12 +310,17 @@ pub struct Dispatcher {
     warned_unroutable: std::collections::HashSet<TaskId>,
     /// この tick で `NoMatchingProvider` だった ready タスク（`is_idle` で待ち対象から外す。ADR-0012 D2）。
     unroutable: std::collections::HashSet<TaskId>,
+    /// ADR-0018 D2（監査 4-1）: この tick でクラスタの多重接続が無い／cooldown 中のため待っている ready タスク。「人のログイン待ち」で
+    /// 経路なし（`unroutable`）とは別物。`is_idle` の待ち対象から外すだけで、スナップショットには出さない（受信箱の (d) が知らせる）。
+    cluster_waiting: std::collections::HashSet<TaskId>,
     /// 人間の承認待ちで延期中の reviewing タスク（`is_idle` 判定用。ADR-0010 D8）。
     awaiting_human: std::collections::HashSet<TaskId>,
     tx: mpsc::UnboundedSender<Completion>,
     rx: mpsc::UnboundedReceiver<Completion>,
     /// ADR-0018 D2: 多重接続が無いクラスタの cooldown（この時刻まで dispatch しない）。
     cluster_cooldown: HashMap<String, Instant>,
+    /// ADR-0018 D2: この tick の `ssh -O check` の結果（クラスタ id → 多重接続があるか）。`refresh_cluster_liveness` が埋める。
+    cluster_connected: HashMap<String, bool>,
     /// tick の回数（スナップショット用）。
     ticks: u64,
     publisher: Option<SnapshotPublisher>,
@@ -342,10 +347,12 @@ impl Dispatcher {
             pending_subjects: HashMap::new(),
             warned_unroutable: std::collections::HashSet::new(),
             unroutable: std::collections::HashSet::new(),
+            cluster_waiting: std::collections::HashSet::new(),
             awaiting_human: std::collections::HashSet::new(),
             tx,
             rx,
             cluster_cooldown: HashMap::new(),
+            cluster_connected: HashMap::new(),
             ticks: 0,
             publisher: None,
         }
@@ -382,6 +389,8 @@ impl Dispatcher {
         let abort_ms = lap(&mut at);
         self.recover_reviews()?;
         let recover_ms = lap(&mut at);
+        self.refresh_cluster_liveness();
+        let cluster_ms = lap(&mut at);
         report.dispatched = self.dispatch_ready()?;
         let dispatch_ms = lap(&mut at);
         report.in_flight = self.running.len() + self.reviewing.len();
@@ -395,6 +404,7 @@ impl Dispatcher {
                 reclaim_ms,
                 abort_ms,
                 recover_ms,
+                cluster_ms,
                 dispatch_ms,
                 idle_ms,
                 "slow tick phases"
@@ -419,10 +429,31 @@ impl Dispatcher {
             task_id,
             &Event::ClusterUnavailable {
                 cluster: spec.id.clone(),
+                host: spec.host.clone(),
                 reason: format!("no ssh ControlMaster connection to {} (host {})", spec.id, spec.host),
             },
         )?;
         Ok(())
+    }
+
+    /// ADR-0018 D2: 設定の全クラスタについて、多重接続の有無を 1 tick に 1 回調べる（`ssh -O check` は unix ソケットを
+    /// 見るだけで即座に返る。ネットワークにも認証にも触れない）。結果は dispatch の判断とスナップショットの `connected` に使う。
+    /// 接続が戻っていれば cooldown を解く（人がログインし直したら、次の tick から再開できるように）。
+    fn refresh_cluster_liveness(&mut self) {
+        if self.config.clusters.is_empty() {
+            return;
+        }
+        let ssh_command = SshSettings::new("", "", "/").ssh_command;
+        let mut specs: Vec<(String, String)> =
+            self.config.clusters.values().map(|c| (c.id.clone(), c.host.clone())).collect();
+        specs.sort();
+        for (id, host) in specs {
+            let alive = control_master_alive_blocking(&ssh_command, &host);
+            self.cluster_connected.insert(id.clone(), alive);
+            if alive && self.cluster_cooldown.remove(&id).is_some() {
+                tracing::info!(cluster = %id, %host, "ssh ControlMaster connection is back; cluster cooldown cleared");
+            }
+        }
     }
 
     /// ADR-0013 D4: メモリ上の状態からスナップショットを作り `watch` に送る（DB には書かない。受け手がいなくても無害）。
@@ -480,6 +511,25 @@ impl Dispatcher {
                 ..p.clone()
             })
             .collect();
+        // ADR-0018: クラスタの稼働状況（id 昇順）。`env` の値や `setup` は含めない。
+        let mut clusters: Vec<ClusterLive> = self
+            .config
+            .clusters
+            .values()
+            .map(|spec| ClusterLive {
+                id: spec.id.clone(),
+                host: spec.host.clone(),
+                concurrency: spec.concurrency,
+                in_use: self.cluster_in_use(&spec.id) as u32,
+                connected: self.cluster_connected.get(&spec.id).copied().unwrap_or(false),
+                cooldown_until: self
+                    .cluster_cooldown
+                    .get(&spec.id)
+                    .filter(|until| **until > now_instant)
+                    .map(|until| rfc3339(now + until.saturating_duration_since(now_instant))),
+            })
+            .collect();
+        clusters.sort_by(|a, b| a.id.cmp(&b.id));
         let snapshot = DaemonSnapshot {
             instance_id: publisher.instance_id.clone(),
             pid: std::process::id(),
@@ -493,6 +543,7 @@ impl Dispatcher {
             awaiting_human,
             unroutable,
             providers,
+            clusters,
         };
         // 受け手（API）がいなければ送信は失敗するが、デーモンの動作には関係ない。
         let _ = publisher.tx.send(Some(snapshot));
@@ -890,6 +941,7 @@ impl Dispatcher {
 
     fn dispatch_ready(&mut self) -> Result<usize, DispatchError> {
         self.unroutable.clear();
+        self.cluster_waiting.clear();
         if self.workers_in_flight() >= self.config.max_concurrency {
             return Ok(0);
         }
@@ -934,19 +986,18 @@ impl Dispatcher {
             if let Some((spec, _)) = &cluster {
                 if self.cluster_cooldown.get(&spec.id).is_some_and(|until| *until > now) {
                     // ADR-0018 D2: 人がログインするまで進まないので、待ち対象には数えない（`--until-idle` を止めない）。
-                    self.unroutable.insert(task.id);
+                    self.cluster_waiting.insert(task.id);
                     continue;
                 }
                 if self.cluster_in_use(&spec.id) >= spec.concurrency {
                     continue;
                 }
-                let check_started = Instant::now();
-                let alive = control_master_alive_blocking(&SshSettings::new(&spec.id, &spec.host, "/").ssh_command, &spec.host);
-                log_slow_step("cluster_control_master", check_started);
+                // この tick の `refresh_cluster_liveness` の結果を使う（1 tick に 1 回だけ `ssh -O check` を呼ぶ）。
+                let alive = self.cluster_connected.get(&spec.id).copied().unwrap_or(false);
                 if !alive {
                     let spec = spec.clone();
                     self.mark_cluster_unavailable(task.id, &spec)?;
-                    self.unroutable.insert(task.id);
+                    self.cluster_waiting.insert(task.id);
                     continue;
                 }
             }
@@ -1380,7 +1431,9 @@ impl Dispatcher {
         if ready.len() >= window {
             return Ok(false);
         }
-        Ok(ready.iter().all(|t| self.unroutable.contains(&t.id)))
+        Ok(ready
+            .iter()
+            .all(|t| self.unroutable.contains(&t.id) || self.cluster_waiting.contains(&t.id)))
     }
 }
 
@@ -1396,11 +1449,12 @@ async fn run_worker(
     remote: Option<SshSettings>,
 ) -> Result<RunOutcome, AdapterError> {
     // リース取得後の状態（running, lease あり）をワーカーに渡す。
-    let task = store
+    let mut task = store
         .get(task_id)
         .map_err(|e| AdapterError::Other(format!("store: {e}")))?
         .ok_or_else(|| AdapterError::Other("task vanished".into()))?;
-    // ADR-0018 D1/D3: リモート実行のタスクは、クラスタの内容を写しに取り込み、ラッパを置く。
+    // ADR-0018 D1/D3: リモート実行のタスクは、クラスタの内容を写しに取り込み、ラッパを置き、その使い方を指示文に足す
+    // （DB のタスクは変えない。ワーカーに渡す写しだけ）。
     let workspace = match &remote {
         Some(settings) => {
             let ws = SshWorkspace::new(&dir, settings.clone());
@@ -1411,6 +1465,7 @@ async fn run_worker(
             ws.write_remote_exec_helper()
                 .await
                 .map_err(|e| workspace_error_to_adapter(e, "remote-exec helper"))?;
+            task.objective.push_str(&remote_exec_instructions(settings));
             prepared
         }
         None => LocalWorkspace::new(&dir)
@@ -2492,6 +2547,112 @@ mod tests {
         for id in unroutable {
             assert_eq!(store.get(id).unwrap().unwrap().status, Status::Ready);
         }
+    }
+
+    /// ADR-0018 実装メモ M1〜M3: 多重接続の無いクラスタは 1 tick に 1 回の `ssh -O check` で分かり、スナップショットの `clusters[]` に
+    /// `connected: false` と `cooldown_until` で現れる。タスクは ready のまま（attempts 不変）、`ClusterUnavailable` に host が入り、
+    /// 人待ちなので idle を止めない。ssh 先が無いことを使うので外部ネットワークには出ない。
+    #[tokio::test]
+    async fn offline_cluster_is_reported_in_the_snapshot_and_the_event_carries_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        task.workspace = WorkspaceSpec::Remote { cluster: "offline".into(), path: PathBuf::from("/remote/project") };
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.clusters.insert(
+            "offline".into(),
+            ClusterSpec {
+                id: "offline".into(),
+                host: "taskd-no-such-host-for-tests".into(),
+                concurrency: 1,
+                sync: SyncMode::Rsync,
+                delete_on_push: false,
+                setup: vec![],
+                env: vec![],
+                rsync_excludes: vec![],
+            },
+        );
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        d.set_snapshot_publisher(SnapshotPublisher {
+            tx,
+            instance_id: "inst-1".into(),
+            hostname: "host-1".into(),
+            started_at: "2026-09-15T00:00:00Z".into(),
+            tick_ms: 50,
+            providers: vec![],
+        });
+
+        let report = d.tick().unwrap();
+        assert_eq!(report.dispatched, 0);
+        assert!(report.idle, "a task waiting for a human login does not keep the daemon from going idle");
+
+        let snap = rx.borrow().clone().expect("snapshot published");
+        assert_eq!(snap.clusters.len(), 1, "{snap:?}");
+        let live = &snap.clusters[0];
+        assert_eq!(
+            (live.id.as_str(), live.host.as_str(), live.concurrency, live.in_use, live.connected),
+            ("offline", "taskd-no-such-host-for-tests", 1, 0, false)
+        );
+        let until = live.cooldown_until.clone().expect("cooldown_until");
+        assert!(until > snap.last_tick_at, "cooldown ends after the tick: {until} vs {}", snap.last_tick_at);
+        assert!(!snap.unroutable.contains(&task.id), "人待ちは経路なしではない（監査 4-1）: {snap:?}");
+        assert!(d.cluster_waiting.contains(&task.id));
+
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Ready, 0));
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::ClusterUnavailable { cluster, host, .. } if cluster == "offline" && host == "taskd-no-such-host-for-tests"
+            )),
+            "{events:?}"
+        );
+        // 2 tick 目: cooldown 中は再度イベントを足さない（1 件のまま）。
+        d.tick().unwrap();
+        let again = store.events_for(task.id).unwrap();
+        assert_eq!(
+            again.iter().filter(|(_, e)| matches!(e, Event::ClusterUnavailable { .. })).count(),
+            1,
+            "{again:?}"
+        );
+    }
+
+    /// ADR-0018 実装メモ M1: 接続が戻っていれば、その tick で cooldown が解ける。`taskd-localhost` への多重接続が無い環境では skip。
+    #[tokio::test]
+    async fn cluster_cooldown_is_cleared_once_the_control_master_is_back() {
+        if !control_master_alive_blocking(&["ssh".to_string()], "taskd-localhost") {
+            eprintln!("skip: taskd-localhost への多重接続が無い");
+            return;
+        }
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.clusters.insert(
+            "local".into(),
+            ClusterSpec {
+                id: "local".into(),
+                host: "taskd-localhost".into(),
+                concurrency: 1,
+                sync: SyncMode::Rsync,
+                delete_on_push: false,
+                setup: vec![],
+                env: vec![],
+                rsync_excludes: vec![],
+            },
+        );
+        d.cluster_cooldown.insert("local".into(), Instant::now() + Duration::from_secs(3600));
+        d.refresh_cluster_liveness();
+        assert_eq!(d.cluster_connected.get("local"), Some(&true));
+        assert!(!d.cluster_cooldown.contains_key("local"), "cooldown is cleared when the connection is back");
     }
 
     /// ADR-0013 D4: tick の最後にメモリ上のスナップショットが `watch` に送られる（実行中の run、プロバイダの使用数、cooldown）。

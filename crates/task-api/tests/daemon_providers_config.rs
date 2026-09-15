@@ -1,5 +1,5 @@
-//! api.md §8.9（daemon の watch）、`GET /providers`（設定 + スナップショット + 集計）、`GET /config`、
-//! api.md §8.10（`GET /schema`）。
+//! api.md §8.9（daemon の watch）、`GET /providers`（設定 + スナップショット + 集計）、`GET /clusters`（ADR-0018
+//! 受け入れ条件8）、`GET /config`、api.md §8.10（`GET /schema`）。
 
 mod common;
 
@@ -135,6 +135,52 @@ async fn providers_combine_config_snapshot_and_incremental_stats() {
 }
 
 #[tokio::test]
+async fn clusters_combine_config_and_snapshot() {
+    let env = TestEnv::new();
+    let app = env.router();
+
+    let before = send(&app, get("/api/v1/clusters")).await;
+    assert_eq!(before.status, 200, "{}", before.text());
+    let text = before.text();
+    assert!(!text.contains("\"env\""), "{text}");
+    assert!(!text.contains("\"setup\""), "{text}");
+    let items = before.json()["items"].as_array().cloned().expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], "pegasus");
+    assert_eq!(items[0]["host"], "pegasus");
+    assert_eq!(items[0]["concurrency"], 2);
+    assert_eq!(items[0]["sync"], "rsync");
+    assert_eq!(items[0]["delete_on_push"], false);
+    assert_eq!(items[0]["has_setup"], true);
+    assert_eq!(items[0]["env_keys"], json!(["OMP_NUM_THREADS"]));
+    assert_eq!(items[0]["rsync_excludes"], json!([".git/"]));
+    assert!(items[0]["in_use"].is_null(), "no snapshot yet");
+    assert!(items[0]["connected"].is_null(), "no snapshot yet");
+    assert!(items[0]["cooldown_until"].is_null(), "no snapshot yet");
+    assert!(items[0]["cooldown_remaining_secs"].is_null(), "no snapshot yet");
+
+    env.daemon_tx.send(Some(snapshot(1))).expect("send snapshot");
+    let after = send(&app, get("/api/v1/clusters")).await;
+    let items = after.json()["items"].as_array().cloned().expect("items");
+    assert_eq!(items[0]["in_use"], 1);
+    assert_eq!(items[0]["connected"], false);
+    assert_eq!(items[0]["cooldown_until"], "2099-01-01T00:00:00Z");
+    assert!(
+        items[0]["cooldown_remaining_secs"].as_u64().expect("remaining secs") > 0,
+        "{}",
+        items[0]
+    );
+}
+
+#[tokio::test]
+async fn clusters_endpoint_rejects_query_parameters() {
+    let env = TestEnv::new();
+    let app = env.router();
+    let resp = send(&app, get("/api/v1/clusters?x=1")).await;
+    assert_problem(&resp, 400, "bad_request");
+}
+
+#[tokio::test]
 async fn config_is_returned_as_given_and_secrets_never_appear() {
     let env = TestEnv::with(EnvOptions {
         token: Some(TOKEN.into()),
@@ -145,8 +191,12 @@ async fn config_is_returned_as_given_and_secrets_never_appear() {
     let resp = send(&app, get_with("/api/v1/config", &[("authorization", &auth)])).await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     assert_eq!(resp.json(), serde_json::to_value(config_view()).expect("json"));
+    assert_eq!(resp.json()["clusters"][0]["has_setup"], true);
+    let text = resp.text();
+    assert!(!text.contains("\"setup\""), "{text}");
+    assert!(!text.contains("\"env\""), "{text}");
 
-    for path in ["/api/v1/config", "/api/v1/providers", "/api/v1/daemon", "/api/v1/health", "/api/v1/events"] {
+    for path in ["/api/v1/config", "/api/v1/providers", "/api/v1/clusters", "/api/v1/daemon", "/api/v1/health", "/api/v1/events"] {
         let resp = send(&app, get_with(path, &[("authorization", &auth)])).await;
         assert_eq!(resp.status, 200, "{path}");
         assert!(!resp.text().contains(TOKEN), "{path} leaks the token");

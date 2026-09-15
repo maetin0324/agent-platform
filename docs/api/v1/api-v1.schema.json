@@ -393,6 +393,37 @@
             "at"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0018 D2: 直近 24 時間に `ClusterUnavailable` があったクラスタ（人がログインし直すまで用件が続く）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "cluster": {
+              "type": "string"
+            },
+            "host": {
+              "type": "string"
+            },
+            "tasks": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "cluster_unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cluster",
+            "host",
+            "at",
+            "tasks"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -506,11 +537,212 @@
         }
       ]
     },
+    "ClusterConfigView": {
+      "description": "`[[clusters]]` 1 行の要約（ADR-0018 D7: `env` の値は出さない）。",
+      "properties": {
+        "concurrency": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "delete_on_push": {
+          "type": "boolean"
+        },
+        "env_keys": {
+          "description": "`env` のキー名だけ（昇順）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "has_setup": {
+          "description": "`setup` が 1 行以上あるか（中身は出さない）。",
+          "type": "boolean"
+        },
+        "host": {
+          "description": "`~/.ssh/config` の `Host` 名。",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "rsync_excludes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sync": {
+          "description": "`\"rsync\"` | `\"none\"`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "host",
+        "concurrency",
+        "sync",
+        "delete_on_push",
+        "has_setup",
+        "env_keys",
+        "rsync_excludes"
+      ],
+      "type": "object"
+    },
+    "ClusterLive": {
+      "description": "クラスタ（`[[clusters]]` の行）の稼働状況（ADR-0018 D2 / D5）。`env` の値・`setup` の中身は含めない。",
+      "properties": {
+        "concurrency": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "connected": {
+          "description": "この tick で `ssh -O check` が成功した（人が張った多重接続がある）。",
+          "type": "boolean"
+        },
+        "cooldown_until": {
+          "description": "多重接続が無くて cooldown 中なら、その終わり（RFC 3339）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host": {
+          "description": "`~/.ssh/config` の `Host` 名。",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "in_use": {
+          "description": "このクラスタで走っている run（ワーカー run + 判定）の数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "host",
+        "concurrency",
+        "in_use",
+        "connected"
+      ],
+      "type": "object"
+    },
+    "ClusterView": {
+      "description": "設定（`[[clusters]]`）とスナップショット（`ClusterLive`）を結合したもの。`env` の値は出さない。",
+      "properties": {
+        "concurrency": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "connected": {
+          "description": "この tick で `ssh -O check` が成功したか。スナップショットが無ければ `null`。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "cooldown_remaining_secs": {
+          "description": "`cooldown_until − now`（秒）。過ぎていれば両方 `null`。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cooldown_until": {
+          "description": "cooldown 中ならその終わり（RFC 3339）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delete_on_push": {
+          "type": "boolean"
+        },
+        "env_keys": {
+          "description": "`env` のキー名だけ（昇順）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "has_setup": {
+          "description": "`setup` が 1 行以上あるか（中身は出さない）。",
+          "type": "boolean"
+        },
+        "host": {
+          "description": "`~/.ssh/config` の `Host` 名。",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "in_use": {
+          "description": "スナップショットが無ければ `null`。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rsync_excludes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sync": {
+          "description": "`\"rsync\"` | `\"none\"`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "host",
+        "concurrency",
+        "sync",
+        "delete_on_push",
+        "has_setup",
+        "env_keys",
+        "rsync_excludes"
+      ],
+      "type": "object"
+    },
+    "Clusters": {
+      "description": "`GET /clusters`（ADR-0018 受け入れ条件8）。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ClusterView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
     "ConfigView": {
       "description": "`GET /config`: `taskd.toml` の要約。env の値・トークンは含めない。taskd が起動時に作る。",
       "properties": {
         "api": {
           "$ref": "#/$defs/ApiConfigView"
+        },
+        "clusters": {
+          "default": [],
+          "description": "ADR-0018: `[[clusters]]` の要約（`env` はキー名だけ、`setup` は有無だけ）。",
+          "items": {
+            "$ref": "#/$defs/ClusterConfigView"
+          },
+          "type": "array"
         },
         "config_path": {
           "type": "string"
@@ -772,6 +1004,14 @@
           "description": "人間の承認待ちでレビューを延期している reviewing タスク。",
           "items": {
             "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
+        "clusters": {
+          "default": [],
+          "description": "ADR-0018: `[[clusters]]` の稼働状況（`id` 昇順）。第 2 段階で追加したので、古いスナップショットには無い。",
+          "items": {
+            "$ref": "#/$defs/ClusterLive"
           },
           "type": "array"
         },
@@ -1231,6 +1471,11 @@
           "description": "ADR-0018 D2: クラスタへの ssh 多重接続が無く、そのクラスタでは実行できない（人のログイン待ち）。",
           "properties": {
             "cluster": {
+              "type": "string"
+            },
+            "host": {
+              "default": "",
+              "description": "`~/.ssh/config` の `Host` 名（`scripts/cluster-login.sh <host>` を案内するため）。第 1 段階の行には無いので任意。",
               "type": "string"
             },
             "reason": {
@@ -2498,6 +2743,13 @@
           },
           "type": "array"
         },
+        "cluster": {
+          "description": "ADR-0018: `WorkspaceSpec::Remote` のクラスタ（`[[clusters]] id`）。ローカルのタスクは `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "criteria": {
           "items": {
             "$ref": "#/$defs/CriterionView"
@@ -2547,6 +2799,7 @@
           ]
         },
         "workspace_dir": {
+          "description": "手元の作業ディレクトリ（絶対パス）。`WorkspaceSpec::Remote` では写し `workspace_root/<task_id>`（run のログはここ。ADR-0018 D1）。",
           "type": [
             "string",
             "null"
@@ -2907,7 +3160,7 @@
       "type": "object"
     },
     "WorkspaceSpec": {
-      "description": "DESIGN §5.8 の境界。`Remote` は接続層プロジェクトが実装するまで型のみ。",
+      "description": "DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。\ntaskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。",
       "oneOf": [
         {
           "properties": {
@@ -2959,6 +3212,9 @@
     },
     "cancel": {
       "$ref": "#/$defs/CancelBody"
+    },
+    "clusters": {
+      "$ref": "#/$defs/Clusters"
     },
     "config": {
       "$ref": "#/$defs/ConfigView"
@@ -3046,6 +3302,7 @@
     "transition_result",
     "replay_report",
     "providers",
+    "clusters",
     "daemon",
     "config",
     "stream_hello",

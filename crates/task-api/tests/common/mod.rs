@@ -11,12 +11,12 @@ use axum::body::{Body, BodyDataStream};
 use axum::http::{HeaderMap, Request, StatusCode};
 use futures_util::StreamExt;
 use serde_json::Value;
-use task_api::{ApiConfigView, ApiSettings, ApiState, ConfigView, ProviderConfigView, ReviewerConfigView};
+use task_api::{ApiConfigView, ApiSettings, ApiState, ClusterConfigView, ConfigView, ProviderConfigView, ReviewerConfigView};
 use task_core::{
     Budget, Check, Criterion, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
     WorkspaceSpec,
 };
-use task_ops::daemon::{CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
+use task_ops::daemon::{ClusterLive, CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
 use task_ops::view::ViewContext;
 use time::OffsetDateTime;
 use tokio::sync::watch;
@@ -139,6 +139,16 @@ pub fn config_view() -> ConfigView {
                 env_keys: vec!["CLAUDE_CONFIG_DIR".into()],
             },
         ],
+        clusters: vec![ClusterConfigView {
+            id: "pegasus".into(),
+            host: "pegasus".into(),
+            concurrency: 2,
+            sync: "rsync".into(),
+            delete_on_push: false,
+            has_setup: true,
+            env_keys: vec!["OMP_NUM_THREADS".into()],
+            rsync_excludes: vec![".git/".into()],
+        }],
         api: ApiConfigView {
             bind: HOST.into(),
             auth_required: false,
@@ -221,6 +231,14 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
         }],
         awaiting_human: vec![],
         unroutable: vec![],
+        clusters: vec![ClusterLive {
+            id: "pegasus".into(),
+            host: "pegasus".into(),
+            concurrency: 2,
+            in_use: 1,
+            connected: false,
+            cooldown_until: Some("2099-01-01T00:00:00Z".into()),
+        }],
         providers: vec![
             ProviderLive {
                 id: "claude-a".into(),

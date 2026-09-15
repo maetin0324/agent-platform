@@ -1809,3 +1809,124 @@ env PHASES="12 10 11" STRONG_MODEL=fable ./run-phases.sh    # tmux の中で
 - 実運用で動かしていた taskd（`/local/rmaeda/taskd`、ポート 7710）と GUI（7700）は、フェーズ実行とポートが衝突しないよう停止した。
   再開は `/local/rmaeda/taskd/taskd.toml` で taskd を起動し、`taskd-gui` で `node server.js`。
 - GUI 側（`ClusterUnavailable` の表示、クラスタ画面、使い方ページ G6）は `taskd-gui` の G フェーズで行う（`run-gphases.sh`）。
+
+---
+
+## Phase 12 — DONE（2026-09-15）
+
+人間の判断: **LLM は手元で動かし、クラスタで実行するのはコマンドだけ**（ADR-0018）。第 1 段階（`SshWorkspace`、`[[clusters]]`、`taskctl add --cluster`、
+`Event::ClusterUnavailable`、受け入れ 1〜7）はコミット `df3ff13` / `9ec4ddf` で済み。本節は**第 2 段階（DESIGN §6 Phase 12 の 8〜12）**の完了報告。
+設計の細部は ADR-0018 末尾の「実装メモ（第 2 段階）」M1〜M7 に記録した（本文の決定は変えていない）。
+
+### 成果物
+
+- `task-dispatch`（dispatcher.rs）: 1 tick に 1 回、設定の全クラスタに `ssh -o BatchMode=yes -O check <host>`（`refresh_cluster_liveness`。M1）。結果を dispatch の判断と
+  `DaemonSnapshot.clusters[]`（`ClusterLive{id, host, concurrency, in_use, connected, cooldown_until}`。M2）に使う。接続が戻れば cooldown を解く。
+  `ClusterUnavailable` に `host` を入れる（M3）。`run_worker` はワーカーに渡すタスクの写しの `objective` に `.taskd/remote-exec` の使い方を足す（D3、M7）。
+- `task-core`: `Event::ClusterUnavailable{cluster, host, reason}`（`host` は `#[serde(default)]`）。`WorkspaceSpec` の doc を現状に合わせた。
+- `task-ops`: `daemon::ClusterLive`、`inbox::AttentionItem::ClusterUnavailable{cluster, host, at, tasks}`（クラスタごとに 1 件、直近 24 時間、
+  接続が戻っていれば出さない。M4）、`view::TaskDetail.cluster` と Remote の `workspace_dir` = 写し `workspace_root/<task_id>`（M5）。
+- `task-api`: `GET /api/v1/clusters`（`Clusters{items: Vec<ClusterView>}`。設定 + スナップショット。`env` の値と `setup` の中身は出さない）、
+  `ConfigView.clusters[]`（`ClusterConfigView`）、ファイル系エンドポイントが Remote では写しを見る、`ApiV1Schema.clusters`。エンドポイントは 26 に。
+- `taskd`: `config_view` に `clusters`（`has_setup` / `env_keys` だけ）。
+- `taskctl`: `worker run --cluster <id>`（M6。写しは `workspace_root/<task_id>`、クラスタ側パスは `--workspace` かタスクの `Remote.path`、
+  多重接続が無ければアダプタを起動せず `result: {"type":"error",...}` と exit 4、run 後に push。DB は読むだけ）。
+- `task-worker`: `remote_exec_instructions`（D3 の指示文）。
+- 文書: `docs/gui/api.md`（§2 一覧 26、§3.5、§3.21、§3.23 新設、§5.1 (d)、§6.2、§10）、ADR-0018 実装メモ、`config/taskd.clusters.example.toml` の使い方。
+  スキーマ再生成: `docs/api/v1/api-v1.schema.json`、`docs/api/v1/event.schema.json`、`docs/protocol/worker-protocol.schema.json`。
+- テスト: task-dispatch `offline_cluster_is_reported_in_the_snapshot_and_the_event_carries_the_host`、task-ops の受信箱 3 件と `task_detail_reports_cluster_and_mirror_for_remote_workspaces`、
+  task-api `clusters_combine_config_and_snapshot` / `clusters_endpoint_rejects_query_parameters`（+ `/config` の秘密非漏洩確認）、taskctl `resolve_cluster_target_*` 6 件、
+  e2e `cluster_scenarios` に `worker_run_cluster_*` 2 件、e2e `api_scenarios` に `clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster`。
+
+**作業分担**: 共通基盤（イベント・スナップショット・ConfigView・view/files・ディスパッチャ・文書）は自分。互いにファイルを共有しない 3 単位を implementer（sonnet）3 体で並列に:
+A `taskctl worker run --cluster`（worker.rs + e2e 追記）、B 受信箱の `cluster_unavailable`（inbox.rs）、C `GET /clusters`（task-api）。3 体とも「判断が必要な点」なし。
+
+### 受け入れ条件と証拠（DESIGN §6 Phase 12。ssh 先は `taskd-localhost` = 127.0.0.1。外部ネットワークには出ない）
+
+**1〜7（第 1 段階、回帰確認）**
+- 実行: `cargo test --workspace` → e2e `cluster_scenarios` 5 passed（1: `remote_task_syncs_runs_and_is_checked_on_the_cluster`、2: `missing_control_master_records_cluster_unavailable_and_does_not_block_idle`、
+  5: `unknown_cluster_is_unroutable`、+ 今回の 2 件）、task-worker `ssh_localhost` 4 passed（3・4・6）。7 は e2e の各シナリオ末尾の `replay: 0 mismatches` と、実機確認の `replay: 0 mismatches across 1 tasks`。
+
+**8. `GET /api/v1/clusters`**
+- 条件: 設定の一覧（id / host / concurrency / sync / delete_on_push / setup の有無）+ `connected` + cooldown の残り。`env` の値は返さない。
+- 実行: `cargo test -p task-api` → `clusters_combine_config_and_snapshot`（スナップショット前は `in_use`/`connected`/`cooldown_*` が null、後は 1 / false / 2099 年 / 残り秒 > 0。応答に `"env"` と `"setup"` のキーが無い）、
+  `clusters_endpoint_rejects_query_parameters`（`?x=1` → 400）。e2e `clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster`（実バイナリ + curl。`connected: false`、`cooldown_until` あり、
+  `has_setup: true`、`env_keys: ["SECRET_CLUSTER_VALUE"]`、本文に `cluster-s3cr3t-value` が無い。`/config` にも無い）。
+- 実機: pegasus 設定で taskd + API を起動し `curl /api/v1/clusters` → `pegasus connected=True in_use=1 cooldown_until=None`、`offline connected=False`。
+
+**9. 受信箱の `attention[].cluster_unavailable`**
+- 条件: 直近 24 時間に `ClusterUnavailable` があるクラスタを 1 件ずつ（`cluster` / `host` / `at` / 対象タスク数）。
+- 実行: `cargo test -p task-ops` → `inbox_attention_cluster_unavailable_groups_remote_tasks_by_cluster`（2 タスク → 1 件、`tasks == 2`、`host` はイベントから）、
+  `..._drops_outside_24h_window`（`now + 25h` で消える）、`..._hidden_once_reconnected_and_host_filled_from_snapshot`（`connected: true` で消える。第 1 段階の空 `host` はスナップショットで補完）。
+  e2e 上記シナリオ: `type == "cluster_unavailable"`, `cluster == "offline"`, `host == "taskd-no-such-host-for-tests"`, `tasks == 1`, `counts.attention == attention.len()`。
+
+**10. `taskctl worker run --cluster <id>`**
+- 条件: クラスタ側の作業ディレクトリに対して 1 回の run。DB は変更しない。多重接続が無ければ exit 4 と理由。
+- 実行: `cargo test -p taskctl` → `resolve_cluster_target_*` 6 件。e2e `worker_run_cluster_executes_one_run_against_the_cluster_dir`（exit 0、`"type":"done"`、push で `answer.txt` がクラスタ側に、pull で写しに `secret.txt`、
+  status / attempts / events 件数が前後で不変）、`worker_run_cluster_without_control_master_exits_4`（exit 4、`ControlMaster` の理由）。
+- 実機（pegasus03、fake アダプタ、`/work/NBB/rmaeda/taskd-test/phase12-stage2-<ts>`。確認後に削除）:
+  `taskctl worker run --config ... --task <id> --cluster pegasus` → `progress: pushed to cluster pegasus:/work/...`、`result: {"type":"done",...}`、exit 0。クラスタ側に `answer.txt`。
+  `taskctl log <id> | wc -l` → 1（Created のみ。DB 不変）。`--cluster offline` → `result: {"type":"error","message":"no ssh ControlMaster connection to offline (host taskd-no-such-host-for-tests); run scripts/cluster-login.sh ...","retryable":true}`、exit 4。
+
+**11. `taskctl show --json` と `GET /tasks/{id}` の `cluster`**
+- 実行: `cargo test -p task-ops` → `task_detail_reports_cluster_and_mirror_for_remote_workspaces`（Remote: `cluster = "pegasus"`、`workspace_dir = <root>/<id>`。Local: `cluster = null`）。
+  e2e 上記シナリオ: API の `detail.cluster == "offline"`、`workspace_dir == <root>/workspaces/<id>`、`task.workspace.path == <クラスタ側パス>`、`taskctl show --json` の `cluster == "offline"`。
+- 実機: `show --json` → `cluster = pegasus`; API `/tasks/{id}` → `cluster = pegasus`, `workspace_dir = /tmp/p12-real/workspaces/<id>`。
+
+**12. テスト・clippy・スキーマ再生成**
+- `cargo test --workspace` → **exit 0、431 passed、0 failed、1 ignored**（`ssh_cluster_manual`。実クラスタ用で人が回す。監査前は 430、監査の指摘で 1 件追加）。
+- `cargo clippy --workspace -- -D warnings` → exit 0。`cargo clippy --workspace --all-targets -- -D warnings` → exit 0。
+- `UPDATE_SCHEMA=1` で 3 スキーマを再生成し、その後 `UPDATE_SCHEMA` 無しの `cargo test --workspace` で一致テスト（`committed_schema_matches_generated` ×2、`event_row_schema_matches_committed`、
+  `schema_endpoint_returns_the_committed_file`）が通ることを確認。
+
+### CLAUDE.md の共通条件
+- ディスパッチャ・ストアに LLM 呼び出しは無い（`ssh -O check` は unix ソケットの確認。API は設定とスナップショットの結合だけで I/O 無し）。
+- `unwrap()` はテスト以外に無い（`grep -n "unwrap()"` の該当は全て `mod tests` 内）。
+- テストは外部ネットワークに出ない（ssh 先は `taskd-localhost` と、存在しないホスト名）。実機確認は人が張った pegasus の多重接続を借りて fake アダプタで行い、上に証跡を残した。
+
+### 監査結果
+
+auditor（opus、1 回）の判定: **条件付き可**（「不可」の項目ゼロ）。auditor は自分で `cargo test --workspace`（430 passed / 0 failed / 1 ignored）、
+`cargo clippy --workspace -- -D warnings` とクリーンな target での `--all-targets`（ともに exit 0）、`UPDATE_SCHEMA` なしのスキーマ一致テスト、
+e2e `cluster_scenarios` の `--nocapture`（`skip:` が出ない＝ssh 依存テストが実際に走った）を実行した。
+
+- 受け入れ 8〜12: すべて「満たしている」（各条件の根拠はファイル:行と自分で走らせたテスト）。
+- 第 1 段階 1〜7 の回帰: 1・2・4・6・7 は「満たしている」。3 は `sync = "none"` を通るテストが無く、5 は「クラスタとプロバイダの並列度が両方守られる」自動テストが無いため
+  **「コード根拠のみ（一部確認不能）」**（実装: `ssh.rs` の早期 return、`dispatcher.rs` の `cluster_in_use >= spec.concurrency`）。
+- 設計原則（ディスパッチに LLM を使わない・状態は DB・ワーカーはステートレス・レビュアーが完了を決める）への明確な違反は無し。
+- 指摘と対応:
+  - 4-1 **「人のログイン待ち」を `unroutable` に混ぜていたため、受信箱で同じタスクが `unroutable` と `cluster_unavailable` の 2 件に出る** →
+    **修正**（ADR-0018 M8）: ディスパッチャに別集合 `cluster_waiting` を設け、`is_idle` の待ち対象から外すだけにした。`DaemonSnapshot.unroutable` は
+    「設定に合うプロバイダ／クラスタが無い」タスクだけ（api.md §10 に追記）。単体テスト `offline_cluster_is_reported_in_the_snapshot_...` で
+    `unroutable` に入らないことを確認。
+  - 4-2 **受信箱 (d) が終端を含む全 Remote タスクのイベント列を読む** → **修正**: 終端でないタスクに絞った（M4、api.md §5.1 (d)）。
+  - 4-3 `refresh_cluster_liveness` の「接続が戻ったら cooldown を解く」分岐にテストが無い → **追加**: `cluster_cooldown_is_cleared_once_the_control_master_is_back`
+    （`taskd-localhost` への多重接続が無ければ skip）。毎 tick・全クラスタで fork する点は、tick_ms=2000・クラスタ 2 つで 1 秒に 1 回の `ssh -O check`
+    （unix ソケット確認）であり、実測の tick 内訳（`cluster_ms`）で追えるようにしたので現状維持（提案 P-49 に記録）。
+  - 4-4 ワーカーに渡す `objective` が DB と違う（D3 の指示文）→ 意図した挙動（M7）。`RunRequest` を run のログに残す案は提案 P-50。
+  - 4-5 push が `runs/` / `artifacts/` / `inputs/` を既存プロジェクトに書く → 提案 P-46（ADR-0018 D4 の改訂になるため人間の判断）。
+  - 4-6 未コミット・監査欄が空 → 本節を埋めてコミット（`phase 12:`）。
+  - 4-7 pegasus03 での実機確認は auditor には再現不能（2 要素認証）→ 上の「受け入れ条件と証拠」に出力を転記した。証跡ファイルはリポジトリに置いていない。
+
+**修正後の再監査（自分で実施）**: `cargo test --workspace` → exit 0、**431 passed、0 failed、1 ignored**（`ssh_cluster_manual`）。`cargo clippy --workspace -- -D warnings` / `--all-targets` → exit 0。
+受信箱の e2e シナリオで `attention` に `cluster_unavailable` が 1 件だけ（`unroutable` は出ない）ことを確認。
+
+### 未解決事項
+
+- **監査の「確認不能」**: `sync = "none"`（共有 FS）を通るテストが無い（実装は早期 return のみ）。クラスタ × プロバイダの二次元の並列度を守ることの自動テストが無い。
+- **人間による確認待ち: 実クラスタでの本番タスク（LLM ワーカー）**。第 2 段階の実機確認は fake アダプタで行った。claude-code を使う本番タスクは、
+  `config/taskd.clusters.example.toml` の手順で人が投入して確認する（ワーカーが `.taskd/remote-exec` を使うかは指示文で促すだけで保証しない。D3）。
+- GUI 側（`ClusterUnavailable` の「注意」表示、クラスタ画面、使い方ページ G6）は `taskd-gui` の G フェーズ（`run-gphases.sh`）。API は本節で揃った。
+- 引き継ぎ（Phase 10〜12 設計節の「未解決事項」1・3・4）: Phase 10 の `delegate` はプロトコル版の更新を伴う、Phase 11 の管理系 API は loopback でもトークン必須。本 Phase では触れていない。
+- `worker run --cluster` の写しはデーモンと同じ `workspace_root/<task_id>` なので、タスクが `running` / `reviewing` の間は拒否する（別の写しを指定する手段は無い）。
+
+### 提案（DESIGN.md への修正提案。DESIGN.md 本体は編集していない）
+
+- P-46: push（写し → クラスタ）から `runs/` / `artifacts/` / `inputs/` を既定で除外する。現状は `.taskd/` だけが除外で、`LocalWorkspace::prepare` が作るこれらの
+  ディレクトリ（run のログを含む）が既存プロジェクトのクラスタ側ディレクトリに写る（実機確認で観測）。ADR-0018 D4 の変更になるので提案に留める。
+- P-47: `DaemonSnapshot.clusters[]` の `connected` を GUI の「クラスタ」画面の主表示にし、`false` のときだけ「`scripts/cluster-login.sh <host>`」を出す（api.md §3.23 に記述済み。GUI 側の採否）。
+- P-48: DESIGN §6 Phase 12 の 11 に「Remote の `workspace_dir` は写し」を追記する（ADR-0018 M5 で決めた。GUI が run のログを開く経路になる）。
+- P-49: `ssh -O check` を「ready な Remote タスクがあるクラスタ」だけに絞る（監査 4-3）。今は全クラスタを毎 tick 確認する（`connected` を GUI に常時出すため）。
+  クラスタ数が増えたら絞る。
+- P-50: `RunRequest`（ワーカーが実際に受け取った指示）を `runs/<run_id>/request.json` に残す（監査 4-4）。D3 の指示文の追記を後から再現できるようにする。
+- 未整備のテスト（監査の「確認不能」）: `sync = "none"` の経路と、クラスタ × プロバイダの並列度を両方守ること。Phase 12 の追補として足す価値がある。

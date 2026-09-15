@@ -25,8 +25,8 @@ use crate::query::{QueryParams, event_type_name, parse_snake, parse_task_id};
 use crate::schema::API_V1_SCHEMA_JSON;
 use crate::state::ApiState;
 use crate::types::{
-    AnswerBody, ArtifactList, CancelBody, DaemonView, DbInfo, DecisionBody, EventsPage, Health, ProviderView, Providers,
-    RunList, ValidationError,
+    AnswerBody, ArtifactList, CancelBody, ClusterView, Clusters, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
+    ProviderView, Providers, RunList, ValidationError,
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
@@ -58,6 +58,7 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/events", get(events))
         .route("/api/v1/stream", get(crate::sse::stream))
         .route("/api/v1/providers", get(providers))
+        .route("/api/v1/clusters", get(clusters))
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -707,7 +708,45 @@ async fn providers(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Ap
     Ok(json_response(StatusCode::OK, &Providers { items }))
 }
 
-// ---- 23. GET /daemon, 24. GET /config, 25. GET /schema ----
+// ---- 23. GET /clusters ----
+
+async fn clusters(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
+    no_query(&raw)?;
+    let snapshot = state.snapshot();
+    let now = OffsetDateTime::now_utc();
+    let items = state
+        .inner
+        .config_view
+        .clusters
+        .iter()
+        .map(|cluster| {
+            let live = snapshot.as_ref().and_then(|s| s.clusters.iter().find(|live| live.id == cluster.id));
+            let (cooldown_until, cooldown_remaining_secs) = live
+                .and_then(|live| live.cooldown_until.as_ref())
+                .and_then(|until| OffsetDateTime::parse(until, &Rfc3339).ok())
+                .filter(|until| *until > now)
+                .map(|until| (Some(rfc3339(until)), Some((until - now).whole_seconds().max(0) as u64)))
+                .unwrap_or((None, None));
+            ClusterView {
+                id: cluster.id.clone(),
+                host: cluster.host.clone(),
+                concurrency: cluster.concurrency,
+                sync: cluster.sync.clone(),
+                delete_on_push: cluster.delete_on_push,
+                has_setup: cluster.has_setup,
+                env_keys: cluster.env_keys.clone(),
+                rsync_excludes: cluster.rsync_excludes.clone(),
+                in_use: live.map(|live| live.in_use),
+                connected: live.map(|live| live.connected),
+                cooldown_until,
+                cooldown_remaining_secs,
+            }
+        })
+        .collect();
+    Ok(json_response(StatusCode::OK, &Clusters { items }))
+}
+
+// ---- 24. GET /daemon, 25. GET /config, 26. GET /schema ----
 
 async fn daemon(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
@@ -780,6 +819,7 @@ mod tests {
                     tier: task_core::Tier::Standard,
                 },
                 providers: vec![],
+                clusters: vec![],
                 api: ApiConfigView {
                     bind: "127.0.0.1:7710".into(),
                     auth_required: false,

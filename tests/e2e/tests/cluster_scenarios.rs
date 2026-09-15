@@ -4,6 +4,8 @@
 //! 1. `WorkspaceSpec::Remote` のタスクが、pull → run → push → クラスタでの判定 → pull を通って done になる
 //! 2. 多重接続が無いクラスタのタスクは dispatch されず、`ClusterUnavailable` が残り、`--until-idle` を止めない
 //! 3. 設定に無いクラスタのタスクは経路なしとして扱われる
+//! 10. `taskctl worker run --cluster <id>` が、デーモン無しでクラスタ側の作業ディレクトリに対して
+//!     1 回 run する（DB は変えない）。多重接続が無ければ exit 4 と理由。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -215,4 +217,91 @@ fn unknown_cluster_is_unroutable() {
 
     assert_eq!(env.task(id).status, Status::Ready);
     assert!(log.contains("no such cluster in the config"), "{log}");
+}
+
+/// 受け入れ 10: `taskctl worker run --cluster` はデーモン無しでクラスタ側のディレクトリに対して
+/// 1 回だけ run する。pull でクラスタのファイルが写しに来て、push で編集結果がクラスタに届く。
+/// DB は一切変わらない（status/attempts/events の件数が実行前後で不変）。
+#[test]
+fn worker_run_cluster_executes_one_run_against_the_cluster_dir() {
+    if !control_master_alive(HOST) {
+        eprintln!("skip: {HOST} への多重接続が無い");
+        return;
+    }
+    let env = Env::new();
+    let script = env.write_script();
+    let remote = env.root.join("worker-run-cluster-project");
+    std::fs::create_dir_all(&remote).unwrap();
+    std::fs::write(remote.join("secret.txt"), "cluster-only\n").unwrap();
+
+    let config = env.write_config(
+        &script,
+        &format!("[[clusters]]\nid = \"local\"\nhost = \"{HOST}\"\nconcurrency = 2\n"),
+    );
+    let id = env.add_remote("worker run cluster", "local", &remote, "true");
+
+    let task_before = env.task(id);
+    let events_before = env.events(id);
+
+    let out = Command::new(bin("taskctl"))
+        .arg("--db")
+        .arg(&env.db)
+        .args([
+            "worker",
+            "run",
+            "--config",
+            config.to_str().unwrap(),
+            "--task",
+            &id.to_string(),
+            "--cluster",
+            "local",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(0), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
+    assert!(stdout.contains("cluster=local"), "{stdout}");
+    assert!(remote.join("answer.txt").exists(), "push でクラスタ側に answer.txt が届く");
+
+    let mirror = env.root.join("workspaces").join(id.to_string());
+    assert!(mirror.join("secret.txt").exists(), "pull でクラスタの内容が写しに来る");
+
+    let task_after = env.task(id);
+    let events_after = env.events(id);
+    assert_eq!((task_after.status, task_after.attempts), (task_before.status, task_before.attempts));
+    assert_eq!(events_after.len(), events_before.len(), "DB のイベントは増えない");
+}
+
+/// 受け入れ 10: 多重接続が無いクラスタでは、アダプタを起動せず exit 4 と理由（ssh 接続は不要なので常に走る）。
+#[test]
+fn worker_run_cluster_without_control_master_exits_4() {
+    let env = Env::new();
+    let script = env.write_script();
+    let remote = env.root.join("offline-worker-run-project");
+    std::fs::create_dir_all(&remote).unwrap();
+    let config = env.write_config(
+        &script,
+        "[[clusters]]\nid = \"offline\"\nhost = \"taskd-no-such-host-for-tests\"\nconcurrency = 1\n",
+    );
+    let id = env.add_remote("offline worker run", "offline", &remote, "true");
+
+    let out = Command::new(bin("taskctl"))
+        .arg("--db")
+        .arg(&env.db)
+        .args([
+            "worker",
+            "run",
+            "--config",
+            config.to_str().unwrap(),
+            "--task",
+            &id.to_string(),
+            "--cluster",
+            "offline",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(4), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("ControlMaster"), "{stdout}");
 }

@@ -12,20 +12,25 @@
 //! 作業ディレクトリは `--workspace` があればそれ、無ければタスクの `WorkspaceSpec::Local`
 //! （相対なら `workspace_root` 基準）。タスクが `running`/`reviewing` のときは、デーモンの
 //! run と作業ディレクトリを取り合うため `--workspace` 指定なしでは拒否する。
+//!
+//! `--cluster <id>`（ADR-0018 受け入れ 10）: `[[clusters]] id` を指定すると、そのクラスタ側の
+//! ディレクトリに対して 1 回 run する（デーモンを介さない動作確認）。DB はここでも変えない。
+//! 多重接続（`ControlMaster`）が無ければ何も実行せず exit 4 で理由を返す。
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
 use task_core::{ArtifactRef, Event, Status, Task, TaskId, TaskStore, WorkspaceSpec};
 use task_dispatch::policy::Selection;
-use task_dispatch::{ProviderPolicy, StaticPolicy};
+use task_dispatch::{ClusterSpec, ProviderPolicy, StaticPolicy};
 use task_ops::derive::{AnswerNote, ReviewNote, answers_from_events, prior_review_from_events};
 use task_worker::{
     Answer, AdapterError, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, ProviderFailure, RunContext,
-    RunLimits, RunOutcome, RunRequest, Terminal, WorkerAdapter, WorkerMessage, Workspace,
+    RunLimits, RunOutcome, RunRequest, SshWorkspace, Terminal, WorkerAdapter, WorkerMessage, Workspace,
+    WorkspaceError, remote_exec_instructions,
 };
 use taskd::Config;
 
@@ -57,8 +62,84 @@ pub struct WorkerRunArgs {
     pub adapter: Option<String>,
 
     /// 作業ディレクトリ。省略時はタスクの workspace（相対なら `workspace_root` 基準）。
+    /// `--cluster` と併用時は「クラスタ側」のパス（`taskctl add --cluster` と同じ意味）。
     #[arg(long)]
     pub workspace: Option<PathBuf>,
+
+    /// クラスタ ID（`[[clusters]] id`）。指定すると、クラスタ側のディレクトリに対して 1 回だけ
+    /// run する（pull → run → push。ADR-0018 D1/D4）。デーモンを介さない動作確認で、DB は変えない。
+    /// 多重接続（`ControlMaster`）が無ければ何も実行せず exit 4 で理由を返す。
+    #[arg(long)]
+    pub cluster: Option<String>,
+}
+
+/// `--cluster` を解決した先（ADR-0018 受け入れ 10）。
+#[derive(Debug)]
+struct ClusterTarget {
+    spec: ClusterSpec,
+    /// クラスタ側の作業ディレクトリ。
+    remote_path: PathBuf,
+    /// 手元の写し（デーモンと同じ `workspace_root/<task_id>`）。
+    mirror_dir: PathBuf,
+    /// タスクの `WorkspaceSpec::Remote{cluster}` と `--cluster` が食い違うときの警告（呼び出し側が stderr に出す）。
+    warning: Option<String>,
+}
+
+/// `--cluster <id>` の解決（純関数）。`config.cluster_specs()` に無ければエラー。クラスタ側パスは
+/// `--workspace`（あれば）かタスクの `WorkspaceSpec::Remote{path}`。`Local` タスクに `--workspace` が
+/// 無ければエラー。手元の写しはデーモンと共有するため、タスクが `running`/`reviewing` なら
+/// `--workspace` の有無に関係なく拒否する。
+fn resolve_cluster_target(
+    config: &Config,
+    task: &Task,
+    cluster_id: &str,
+    workspace_arg: Option<&Path>,
+) -> Result<ClusterTarget, CliError> {
+    let mut specs = config.cluster_specs();
+    let spec = specs
+        .remove(cluster_id)
+        .ok_or_else(|| CliError::msg(format!("cluster not found in config: {cluster_id}")))?;
+
+    if matches!(task.status, Status::Running | Status::Reviewing) {
+        return Err(CliError::msg(format!(
+            "task {} is {:?}; stop taskd or wait before `worker run --cluster`",
+            task.id, task.status
+        )));
+    }
+
+    let mut warning = None;
+    let remote_path = if let Some(path) = workspace_arg {
+        if let WorkspaceSpec::Remote { cluster, .. } = &task.workspace
+            && cluster != cluster_id
+        {
+            warning = Some(format!(
+                "task {} workspace targets cluster {cluster:?}; overriding with --cluster {cluster_id:?}",
+                task.id
+            ));
+        }
+        path.to_path_buf()
+    } else {
+        match &task.workspace {
+            WorkspaceSpec::Remote { cluster, path } => {
+                if cluster != cluster_id {
+                    warning = Some(format!(
+                        "task {} workspace targets cluster {cluster:?}; overriding with --cluster {cluster_id:?}",
+                        task.id
+                    ));
+                }
+                path.clone()
+            }
+            WorkspaceSpec::Local { .. } => {
+                return Err(CliError::msg(format!(
+                    "task {} has a local workspace; pass --workspace <cluster-side path> with --cluster",
+                    task.id
+                )));
+            }
+        }
+    };
+
+    let mirror_dir = config.workspace_root.join(task.id.to_string());
+    Ok(ClusterTarget { spec, remote_path, mirror_dir, warning })
 }
 
 /// 選ばれたプロバイダ（`--provider`/`--adapter`/`select` のいずれか）。
@@ -83,6 +164,31 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
 
     let (provider_id, adapter_kind) = select_provider(&config, &task, &args)?;
 
+    let adapters = taskd::build_adapters(&config);
+    let adapter = adapters
+        .get(&provider_id)
+        .ok_or_else(|| CliError::msg(format!("provider {provider_id} has no adapter instance")))?;
+    let model = taskd::effective_models(&config).get(&provider_id).cloned().unwrap_or_default();
+
+    let selected = Selected {
+        provider_id,
+        adapter_kind,
+        model,
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError::msg(format!("failed to start tokio runtime: {e}")))?;
+
+    if let Some(cluster_id) = &args.cluster {
+        let target = resolve_cluster_target(&config, &task, cluster_id, args.workspace.as_deref())?;
+        if let Some(warning) = &target.warning {
+            eprintln!("warning: {warning}");
+        }
+        return rt.block_on(execute_on_cluster(&task, &events, target, &config, &selected, adapter.as_ref()));
+    }
+
     if args.workspace.is_none() && matches!(task.status, Status::Running | Status::Reviewing) {
         return Err(CliError::msg(format!(
             "task {task_id} is {:?}; pass --workspace to avoid racing the daemon's own run",
@@ -100,23 +206,6 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
             }
         },
     };
-
-    let adapters = taskd::build_adapters(&config);
-    let adapter = adapters
-        .get(&provider_id)
-        .ok_or_else(|| CliError::msg(format!("provider {provider_id} has no adapter instance")))?;
-    let model = taskd::effective_models(&config).get(&provider_id).cloned().unwrap_or_default();
-
-    let selected = Selected {
-        provider_id,
-        adapter_kind,
-        model,
-    };
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| CliError::msg(format!("failed to start tokio runtime: {e}")))?;
 
     rt.block_on(execute(&task, &events, workspace_dir, &config, &selected, adapter.as_ref()))
 }
@@ -215,6 +304,112 @@ async fn execute(
         serde_json::to_string(&message).map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
     outln!("result: {json}");
     Ok(ExitCode::from(exit))
+}
+
+/// `--cluster <id>`: クラスタ側の作業ディレクトリに対して 1 回だけ run する（ADR-0018 受け入れ 10）。
+/// `SshWorkspace` を経由すること以外は `execute` と同じ（DB は変えない。リースも取らない）。
+async fn execute_on_cluster(
+    task: &Task,
+    events: &[(u64, Event)],
+    target: ClusterTarget,
+    config: &Config,
+    selected: &Selected,
+    adapter: &dyn WorkerAdapter,
+) -> Result<ExitCode, CliError> {
+    let settings = target.spec.ssh_settings(&target.remote_path);
+    let ws = SshWorkspace::new(&target.mirror_dir, settings.clone());
+
+    if !ws.control_master_alive().await {
+        return unreachable_result(format!(
+            "no ssh ControlMaster connection to {} (host {}); run scripts/cluster-login.sh {}",
+            target.spec.id, target.spec.host, target.spec.host
+        ));
+    }
+
+    let prepared = match ws.prepare(task).await {
+        Ok(p) => p,
+        Err(WorkspaceError::Unreachable(msg)) => return unreachable_result(msg),
+        Err(e) => return Err(CliError::msg(format!("failed to prepare workspace: {e}"))),
+    };
+    ws.write_remote_exec_helper()
+        .await
+        .map_err(|e| CliError::msg(format!("failed to write .taskd/remote-exec: {e}")))?;
+
+    // ADR-0018 D3: DB のタスクは変えない。渡す写しの `objective` だけにラッパの使い方を足す。
+    let mut run_task = task.clone();
+    run_task.objective.push_str(&remote_exec_instructions(&settings));
+
+    let run_id = TaskId::new().to_string();
+    let req = RunRequest {
+        protocol: PROTOCOL_VERSION,
+        task: run_task,
+        workspace: prepared.clone(),
+        context: RunContext {
+            prior_review: to_prior_review(prior_review_from_events(events)),
+            inputs: task.inputs.clone(),
+            answers: to_answers(answers_from_events(events)),
+            review: None,
+        },
+    };
+
+    outln!(
+        "worker run: task={} provider={} adapter={} model={} workspace={} run_id={run_id} cluster={} remote={}:{}",
+        task.id,
+        selected.provider_id,
+        selected.adapter_kind,
+        selected.model,
+        prepared.display(),
+        target.spec.id,
+        target.spec.host,
+        target.remote_path.display(),
+    );
+
+    let limits = RunLimits {
+        wall_clock: Duration::from_secs(task.budget.max_wall_secs),
+        idle_timeout: Duration::from_secs(config.idle_timeout_secs),
+        kill_grace: Duration::from_secs(config.kill_grace_secs),
+    };
+
+    let sink = PrintSink;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|e| CliError::msg(format!("failed to install SIGTERM handler: {e}")))?;
+    let finished = tokio::select! {
+        result = adapter.run(req, &run_id, limits, &sink) => Some(result),
+        _ = tokio::signal::ctrl_c() => None,
+        _ = sigterm.recv() => None,
+    };
+    let Some(result) = finished else {
+        eprintln!("worker run interrupted; the worker process was killed");
+        return Ok(ExitCode::from(130));
+    };
+
+    // ADR-0018 D4: run が終わった（アダプタ自体が Ok を返した）ら、手元の編集をクラスタへ push する。
+    if result.is_ok() {
+        match ws.push().await {
+            Ok(()) => outln!("progress: pushed to cluster {}:{}", target.spec.id, target.remote_path.display()),
+            Err(WorkspaceError::Unreachable(msg)) => return unreachable_result(msg),
+            Err(e) => return Err(CliError::msg(format!("failed to push to cluster: {e}"))),
+        }
+    }
+
+    let (message, exit) = normalize_outcome(result);
+    let json =
+        serde_json::to_string(&message).map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
+    outln!("result: {json}");
+    Ok(ExitCode::from(exit))
+}
+
+/// ssh / rsync 自体が失敗した（多重接続が無い等）ときの表示（ADR-0018 D5: 供給側失敗と同じ形）。
+/// アダプタは起動しない／起動できなかったので、`WorkerMessage::Error{retryable: true}` を出して exit 4。
+fn unreachable_result(message: String) -> Result<ExitCode, CliError> {
+    let msg = WorkerMessage::Error {
+        message,
+        retryable: true,
+        provider_failure: None,
+    };
+    let json = serde_json::to_string(&msg).map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
+    outln!("result: {json}");
+    Ok(ExitCode::from(4))
 }
 
 /// `task_ops::derive::ReviewNote` をワーカープロトコルの `task_worker::PriorReview` に写す
@@ -335,5 +530,127 @@ mod tests {
 
         let (msg, _) = normalize_outcome(Err(AdapterError::Other("boom".into())));
         assert!(matches!(msg, WorkerMessage::Error { provider_failure: None, .. }));
+    }
+
+    /// `Config` を toml を経由せず直接組み立てる（taskctl は `toml` crate に依存していないため）。
+    fn cluster_config(clusters: Vec<taskd::config::ClusterConfig>) -> Config {
+        Config {
+            db: PathBuf::from("taskd.sqlite3"),
+            workspace_root: PathBuf::from("workspaces"),
+            tick_ms: 2000,
+            max_concurrency: 2,
+            lease_grace_secs: 60,
+            idle_timeout_secs: 30,
+            kill_grace_secs: 5,
+            review_timeout_secs: 60,
+            error_cooldown_secs: 30,
+            retry_backoff_base_secs: 10,
+            retry_backoff_max_secs: 300,
+            max_requeues: 3,
+            adapters: Default::default(),
+            plan: Default::default(),
+            reviewer: Default::default(),
+            api: Default::default(),
+            providers: vec![],
+            clusters,
+            source_path: None,
+        }
+    }
+
+    fn cluster(id: &str, host: &str) -> taskd::config::ClusterConfig {
+        taskd::config::ClusterConfig {
+            id: id.into(),
+            host: host.into(),
+            concurrency: 1,
+            sync: "rsync".into(),
+            delete_on_push: false,
+            setup: vec![],
+            env: std::collections::HashMap::new(),
+            rsync_excludes: vec![],
+        }
+    }
+
+    fn task_fixture(status: Status, workspace: WorkspaceSpec) -> Task {
+        let now = time::OffsetDateTime::now_utc();
+        Task {
+            id: TaskId::new(),
+            parent_id: None,
+            kind: task_core::TaskKind::Execute,
+            title: "t".into(),
+            objective: "o".into(),
+            acceptance: vec![],
+            inputs: vec![],
+            depends_on: vec![],
+            status,
+            priority: 0,
+            worker_hint: task_core::WorkerHint { tier: task_core::Tier::Standard, adapter: None },
+            workspace,
+            budget: task_core::Budget { max_turns: 1, max_wall_secs: 30, max_retries: 0 },
+            attempts: 0,
+            lease: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn resolve_cluster_target_errors_when_cluster_missing() {
+        let config = cluster_config(vec![]);
+        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into() });
+        let err = resolve_cluster_target(&config, &task, "local", None).unwrap_err();
+        assert!(err.to_string().contains("cluster not found in config: local"), "{err}");
+    }
+
+    #[test]
+    fn resolve_cluster_target_requires_workspace_arg_for_local_task() {
+        let config = cluster_config(vec![cluster("local", "h")]);
+        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into() });
+        let err = resolve_cluster_target(&config, &task, "local", None).unwrap_err();
+        assert!(err.to_string().contains("has a local workspace"), "{err}");
+    }
+
+    #[test]
+    fn resolve_cluster_target_uses_task_remote_path_without_workspace_arg() {
+        let config = cluster_config(vec![cluster("local", "h")]);
+        let task = task_fixture(
+            Status::Ready,
+            WorkspaceSpec::Remote { cluster: "local".into(), path: "/remote/proj".into() },
+        );
+        let target = resolve_cluster_target(&config, &task, "local", None).unwrap();
+        assert_eq!(target.remote_path, PathBuf::from("/remote/proj"));
+        assert_eq!(target.mirror_dir, config.workspace_root.join(task.id.to_string()));
+        assert!(target.warning.is_none());
+        assert_eq!(target.spec.host, "h");
+    }
+
+    #[test]
+    fn resolve_cluster_target_workspace_arg_overrides_task_path() {
+        let config = cluster_config(vec![cluster("local", "h")]);
+        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into() });
+        let target = resolve_cluster_target(&config, &task, "local", Some(Path::new("/remote/other"))).unwrap();
+        assert_eq!(target.remote_path, PathBuf::from("/remote/other"));
+        assert!(target.warning.is_none());
+    }
+
+    #[test]
+    fn resolve_cluster_target_warns_when_task_targets_a_different_cluster() {
+        let config = cluster_config(vec![cluster("local", "h")]);
+        let task = task_fixture(
+            Status::Ready,
+            WorkspaceSpec::Remote { cluster: "other".into(), path: "/remote/proj".into() },
+        );
+        let target = resolve_cluster_target(&config, &task, "local", None).unwrap();
+        assert_eq!(target.remote_path, PathBuf::from("/remote/proj"));
+        assert!(target.warning.as_deref().unwrap().contains("other"));
+    }
+
+    #[test]
+    fn resolve_cluster_target_rejects_running_or_reviewing_task_even_with_workspace_arg() {
+        let config = cluster_config(vec![cluster("local", "h")]);
+        for status in [Status::Running, Status::Reviewing] {
+            let task = task_fixture(status, WorkspaceSpec::Local { path: "/tmp/x".into() });
+            let err = resolve_cluster_target(&config, &task, "local", Some(Path::new("/remote/x"))).unwrap_err();
+            assert!(err.to_string().contains("stop taskd or wait"), "{err}");
+        }
     }
 }

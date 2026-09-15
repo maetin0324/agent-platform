@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use task_api::types::{ApiConfigView, ConfigView, ProviderConfigView, ReviewerConfigView};
+use task_api::types::{ApiConfigView, ClusterConfigView, ConfigView, ProviderConfigView, ReviewerConfigView};
 use task_api::{ApiError, ApiSettings, ApiState};
 use task_core::{SqliteStore, StoreError, StoreOptions, TaskStore};
 use task_ops::view::ViewContext;
@@ -242,6 +242,24 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                     concurrency: p.concurrency,
                     model: models.get(&p.id).filter(|m| !m.is_empty()).cloned(),
                     env_keys,
+                }
+            })
+            .collect(),
+        clusters: config
+            .clusters
+            .iter()
+            .map(|c| {
+                let mut env_keys: Vec<String> = c.env.keys().cloned().collect();
+                env_keys.sort();
+                ClusterConfigView {
+                    id: c.id.clone(),
+                    host: c.host.clone(),
+                    concurrency: c.concurrency,
+                    sync: c.sync.clone(),
+                    delete_on_push: c.delete_on_push,
+                    has_setup: !c.setup.is_empty(),
+                    env_keys,
+                    rsync_excludes: c.rsync_excludes.clone(),
                 }
             })
             .collect(),

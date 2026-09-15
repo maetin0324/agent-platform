@@ -1,6 +1,6 @@
 //! `task-api`: taskd の HTTP API v1（`docs/gui/api.md`、ADR-0013 D2〜D4 / D8 / D11）。
 //!
-//! - `/api/v1` 配下の 25 エンドポイント。JSON で応答し、エラーは `application/problem+json`、通知は SSE。
+//! - `/api/v1` 配下の 26 エンドポイント。JSON で応答し、エラーは `application/problem+json`、通知は SSE。
 //! - ハンドラは協調判断をしない。読み取りはストアのクエリと `task-ops` のビュー、状態変更は `task-ops` 経由だけ。
 //!   LLM 呼び出し・ワーカーの起動・`Check::Command` の実行はしない（DESIGN.md 原則 1〜4）。
 //! - DB は API 専用の `SqliteStore` 接続を 1 つ持ち、呼び出しは `spawn_blocking` で行う（ADR-0013 D3）。
@@ -30,9 +30,10 @@ pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_sch
 pub use state::{ApiState, StreamTuning};
 pub use stats::classify_outcome;
 pub use types::{
-    AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ConfigView, DaemonView, DailyUsage, DbInfo,
-    DecisionBody, EventsPage, Health, Problem, ProviderConfigView, ProviderStats, ProviderView, Providers,
-    ReviewerConfigView, RunList, StreamHeartbeat, StreamHello, StreamReset, ValidationError,
+    AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterView, Clusters,
+    ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, Health, Problem, ProviderConfigView,
+    ProviderStats, ProviderView, Providers, ReviewerConfigView, RunList, StreamHeartbeat, StreamHello, StreamReset,
+    ValidationError,
 };
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。

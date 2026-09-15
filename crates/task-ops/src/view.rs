@@ -79,7 +79,10 @@ pub struct TaskList {
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct TaskDetail {
     pub task: Task,
+    /// 手元の作業ディレクトリ（絶対パス）。`WorkspaceSpec::Remote` では写し `workspace_root/<task_id>`（run のログはここ。ADR-0018 D1）。
     pub workspace_dir: Option<String>,
+    /// ADR-0018: `WorkspaceSpec::Remote` のクラスタ（`[[clusters]] id`）。ローカルのタスクは `null`。
+    pub cluster: Option<String>,
     pub timers: Timers,
     pub criteria: Vec<CriterionView>,
     pub runs: Vec<RunSummary>,
@@ -573,7 +576,12 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
             };
             Some(abs.to_string_lossy().into_owned())
         }
-        WorkspaceSpec::Remote { .. } => None,
+        // ADR-0018 D1: クラスタ側が正で、手元は写し。run のログ（`runs/`）は写しに置かれる。
+        WorkspaceSpec::Remote { .. } => Some(ctx.workspace_root.join(task.id.to_string()).to_string_lossy().into_owned()),
+    };
+    let cluster = match &task.workspace {
+        WorkspaceSpec::Local { .. } => None,
+        WorkspaceSpec::Remote { cluster, .. } => Some(cluster.clone()),
     };
 
     let task_actions = actions(&task);
@@ -586,6 +594,7 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
     Ok(TaskDetail {
         task,
         workspace_dir,
+        cluster,
         timers: timers_view,
         criteria,
         runs: run_summaries,
@@ -1077,6 +1086,29 @@ mod tests {
     }
 
     // ---- task_detail ----
+
+    /// ADR-0018 実装メモ M5: Remote のタスクは `cluster` にクラスタ id、`workspace_dir` に手元の写し（`workspace_root/<task_id>`）が出る。
+    /// Local のタスクは `cluster: None`。
+    #[test]
+    fn task_detail_reports_cluster_and_mirror_for_remote_workspaces() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut remote = sample_task(TaskKind::Execute, Status::Ready);
+        remote.workspace = WorkspaceSpec::Remote { cluster: "pegasus".into(), path: PathBuf::from("/work/NBB/x/project") };
+        store.insert(&remote).expect("insert");
+        let local = sample_task(TaskKind::Execute, Status::Ready);
+        store.insert(&local).expect("insert");
+
+        let ctx = view_ctx();
+        let detail = task_detail(&store, remote.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        assert_eq!(detail.cluster.as_deref(), Some("pegasus"));
+        assert_eq!(
+            detail.workspace_dir.as_deref(),
+            Some(format!("/tmp/workspaces/{}", remote.id).as_str()),
+            "the mirror where runs/ live"
+        );
+        let detail = task_detail(&store, local.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        assert_eq!(detail.cluster, None);
+    }
 
     #[test]
     fn task_detail_missing_task_returns_not_found() {

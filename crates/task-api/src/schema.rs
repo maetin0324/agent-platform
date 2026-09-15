@@ -14,8 +14,8 @@ use task_ops::replay::ReplayReport;
 use task_ops::view::{TaskDetail, TaskList};
 
 use crate::types::{
-    AnswerBody, ArtifactList, CancelBody, ConfigView, DaemonView, DecisionBody, EventsPage, Health, Problem, Providers,
-    RunList, StreamHeartbeat, StreamHello, StreamReset,
+    AnswerBody, ArtifactList, CancelBody, Clusters, ConfigView, DaemonView, DecisionBody, EventsPage, Health, Problem,
+    Providers, RunList, StreamHeartbeat, StreamHello, StreamReset,
 };
 
 /// コミット済みのスキーマ（`GET /schema` の本体）。
@@ -42,6 +42,7 @@ pub struct ApiV1Schema {
     pub transition_result: TransitionResult,
     pub replay_report: ReplayReport,
     pub providers: Providers,
+    pub clusters: Clusters,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

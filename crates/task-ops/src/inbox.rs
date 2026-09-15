@@ -1,10 +1,10 @@
 //! 受信箱（`docs/gui/api.md` §3.2 / §5.1 / §6.2）。原則 5「人間は承認待ちキューだけを見ればよい」の画面の元データ。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use schemars::JsonSchema;
 use serde::Serialize;
-use task_core::{ArtifactRef, Event, Status, Task, TaskId, TaskKind, TaskStore, WorkerHint};
+use task_core::{ArtifactRef, Event, Status, Task, TaskId, TaskKind, TaskStore, WorkerHint, WorkspaceSpec};
 use time::OffsetDateTime;
 
 use crate::daemon::DaemonSnapshot;
@@ -77,6 +77,8 @@ pub enum AttentionItem {
     Failed { task: TaskRef, reason: String, at: String },
     RequeueLimitNear { task: TaskRef, count: u32, max: u32, at: String },
     Unroutable { task: TaskRef, hint: WorkerHint, at: String },
+    /// ADR-0018 D2: 直近 24 時間に `ClusterUnavailable` があったクラスタ（人がログインし直すまで用件が続く）。
+    ClusterUnavailable { cluster: String, host: String, at: String, tasks: u32 },
 }
 
 fn attention_at(item: &AttentionItem) -> &str {
@@ -84,6 +86,7 @@ fn attention_at(item: &AttentionItem) -> &str {
         AttentionItem::Failed { at, .. } => at,
         AttentionItem::RequeueLimitNear { at, .. } => at,
         AttentionItem::Unroutable { at, .. } => at,
+        AttentionItem::ClusterUnavailable { at, .. } => at,
     }
 }
 
@@ -376,6 +379,63 @@ fn build_attention(
                 });
             }
         }
+    }
+
+    // (d) 直近 24 時間に `ClusterUnavailable` があったクラスタを 1 件ずつ出す（ADR-0018 D2）。
+    // ワークスペースが `Remote` で**終端でない**タスクだけを対象にする（`Local` はクラスタと無関係。done / failed / cancelled の
+    // タスクはもうクラスタを待っていないので、イベント列を読まない。監査 4-2: 走査を待っているタスクの数に抑える）。
+    let mut cluster_agg: HashMap<String, (OffsetDateTime, String, String, HashSet<TaskId>)> = HashMap::new();
+    for t in all_tasks.iter() {
+        if t.status.is_terminal() || !matches!(t.workspace, WorkspaceSpec::Remote { .. }) {
+            continue;
+        }
+        let rows = store.event_rows_for(t.id, None, view::ALL_EVENTS)?;
+        for r in &rows {
+            let Event::ClusterUnavailable { cluster: ev_cluster, host, .. } = &r.event else {
+                continue;
+            };
+            let Ok(ts) = OffsetDateTime::parse(&r.ts, &time::format_description::well_known::Rfc3339) else {
+                continue;
+            };
+            if ts < cutoff {
+                continue;
+            }
+            let entry = cluster_agg
+                .entry(ev_cluster.clone())
+                .or_insert_with(|| (ts, r.ts.clone(), host.clone(), HashSet::new()));
+            entry.3.insert(t.id);
+            if ts > entry.0 {
+                entry.0 = ts;
+                entry.1 = r.ts.clone();
+                entry.2 = host.clone();
+            }
+        }
+    }
+
+    let mut cluster_ids: Vec<String> = cluster_agg.keys().cloned().collect();
+    cluster_ids.sort();
+    for cluster_id in cluster_ids {
+        // 接続が戻っている（人が再度ログインした）なら、この呼びかけはもう不要。
+        if let Some(snap) = snapshot
+            && snap.clusters.iter().any(|c| c.id == cluster_id && c.connected)
+        {
+            continue;
+        }
+        let (_, latest_ts, latest_host, task_ids) = &cluster_agg[&cluster_id];
+        let host = if !latest_host.is_empty() {
+            latest_host.clone()
+        } else {
+            snapshot
+                .and_then(|snap| snap.clusters.iter().find(|c| c.id == cluster_id))
+                .map(|c| c.host.clone())
+                .unwrap_or_default()
+        };
+        items.push(AttentionItem::ClusterUnavailable {
+            cluster: cluster_id,
+            host,
+            at: latest_ts.clone(),
+            tasks: task_ids.len() as u32,
+        });
     }
 
     items.sort_by(|a, b| attention_at(b).cmp(attention_at(a)));
@@ -739,6 +799,7 @@ mod tests {
             cooldowns: vec![],
             awaiting_human: vec![],
             unroutable: vec![stuck.id],
+            clusters: vec![],
             providers: vec![],
         };
         let with_snapshot = inbox(&store, Some(&snapshot), &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
@@ -812,5 +873,164 @@ mod tests {
             })
             .collect();
         assert_eq!(near, vec![(requeued.id, 1)]);
+    }
+
+    fn remote_task(status: Status, cluster: &str) -> Task {
+        let mut t = sample_task(TaskKind::Execute, status);
+        t.workspace = WorkspaceSpec::Remote { cluster: cluster.to_string(), path: "workspace".into() };
+        t
+    }
+
+    fn cluster_unavailable_find<'a>(items: &'a [AttentionItem], cluster: &str) -> Option<(&'a str, &'a str, u32)> {
+        items.iter().find_map(|a| match a {
+            AttentionItem::ClusterUnavailable { cluster: c, host, at, tasks } if c == cluster => {
+                Some((host.as_str(), at.as_str(), *tasks))
+            }
+            _ => None,
+        })
+    }
+
+    /// ADR-0018 D2 / 受け入れ条件 9: `Remote` タスク 2 件で `ClusterUnavailable` が起きたら、クラスタ 1 件にまとまる。
+    /// `Local` タスクの同イベントは対象外。
+    #[test]
+    fn inbox_attention_cluster_unavailable_groups_remote_tasks_by_cluster() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+
+        let remote1 = remote_task(Status::Ready, "pegasus");
+        store.insert(&remote1).expect("insert remote1");
+        store
+            .append_event(
+                remote1.id,
+                &Event::ClusterUnavailable {
+                    cluster: "pegasus".into(),
+                    host: "pegasus".into(),
+                    reason: "no multiplexed connection".into(),
+                },
+            )
+            .expect("cluster unavailable 1");
+
+        let remote2 = remote_task(Status::Ready, "pegasus");
+        store.insert(&remote2).expect("insert remote2");
+        store
+            .append_event(
+                remote2.id,
+                &Event::ClusterUnavailable {
+                    cluster: "pegasus".into(),
+                    host: "pegasus".into(),
+                    reason: "no multiplexed connection".into(),
+                },
+            )
+            .expect("cluster unavailable 2");
+
+        let local = sample_task(TaskKind::Execute, Status::Ready);
+        store.insert(&local).expect("insert local");
+        store
+            .append_event(
+                local.id,
+                &Event::ClusterUnavailable {
+                    cluster: "pegasus".into(),
+                    host: "pegasus".into(),
+                    reason: "no multiplexed connection".into(),
+                },
+            )
+            .expect("cluster unavailable local");
+
+        let ctx = view_ctx();
+        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let (host, at, tasks) = cluster_unavailable_find(&result.attention, "pegasus").expect("cluster item present");
+        assert_eq!(host, "pegasus");
+        assert_eq!(tasks, 2, "only the remote tasks count, the local one does not");
+        assert!(!at.is_empty());
+        assert_eq!(result.counts.attention, result.attention.len() as u32);
+    }
+
+    /// 24h の窓の外（`now` を +25h にする）になったら消える。
+    #[test]
+    fn inbox_attention_cluster_unavailable_drops_outside_24h_window() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let remote = remote_task(Status::Ready, "sirius");
+        store.insert(&remote).expect("insert remote");
+        store
+            .append_event(
+                remote.id,
+                &Event::ClusterUnavailable {
+                    cluster: "sirius".into(),
+                    host: "sirius".into(),
+                    reason: "no multiplexed connection".into(),
+                },
+            )
+            .expect("cluster unavailable");
+
+        let ctx = view_ctx();
+        let now = OffsetDateTime::now_utc();
+        let fresh = inbox(&store, None, &ctx, now, &no_evidence).expect("inbox");
+        assert!(cluster_unavailable_find(&fresh.attention, "sirius").is_some());
+
+        let later = now + time::Duration::hours(25);
+        let expired = inbox(&store, None, &ctx, later, &no_evidence).expect("inbox");
+        assert!(cluster_unavailable_find(&expired.attention, "sirius").is_none());
+    }
+
+    /// スナップショットの `clusters[].connected == true` なら「ログインし直してください」の呼びかけは用済みなので消える。
+    /// `connected == false` なら残る。第 1 段階の行（`host: ""`）はスナップショットの `host` で補われる。
+    #[test]
+    fn inbox_attention_cluster_unavailable_hidden_once_reconnected_and_host_filled_from_snapshot() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let remote = remote_task(Status::Ready, "pegasus");
+        store.insert(&remote).expect("insert remote");
+        store
+            .append_event(
+                remote.id,
+                &Event::ClusterUnavailable {
+                    cluster: "pegasus".into(),
+                    host: String::new(),
+                    reason: "no multiplexed connection".into(),
+                },
+            )
+            .expect("cluster unavailable");
+
+        let ctx = view_ctx();
+        let now = OffsetDateTime::now_utc();
+
+        let disconnected_snapshot = DaemonSnapshot {
+            instance_id: "01J000000000000000000000AA".into(),
+            pid: 1,
+            hostname: "host".into(),
+            started_at: view::to_rfc3339(now),
+            last_tick_at: view::to_rfc3339(now),
+            ticks: 1,
+            tick_ms: 2000,
+            in_flight: vec![],
+            cooldowns: vec![],
+            awaiting_human: vec![],
+            unroutable: vec![],
+            clusters: vec![crate::daemon::ClusterLive {
+                id: "pegasus".into(),
+                host: "pegasus".into(),
+                concurrency: 1,
+                in_use: 0,
+                connected: false,
+                cooldown_until: None,
+            }],
+            providers: vec![],
+        };
+        let still_present = inbox(&store, Some(&disconnected_snapshot), &ctx, now, &no_evidence).expect("inbox");
+        let (host, _, _) =
+            cluster_unavailable_find(&still_present.attention, "pegasus").expect("item present while disconnected");
+        assert_eq!(host, "pegasus", "host filled from the snapshot's cluster entry");
+
+        let connected_snapshot = DaemonSnapshot {
+            clusters: vec![crate::daemon::ClusterLive {
+                id: "pegasus".into(),
+                host: "pegasus".into(),
+                concurrency: 1,
+                in_use: 0,
+                connected: true,
+                cooldown_until: None,
+            }],
+            ..disconnected_snapshot
+        };
+        let hidden = inbox(&store, Some(&connected_snapshot), &ctx, now, &no_evidence).expect("inbox");
+        assert!(cluster_unavailable_find(&hidden.attention, "pegasus").is_none());
     }
 }

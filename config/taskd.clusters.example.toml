@@ -12,6 +12,12 @@
 #     --check-cmd "cargo test --release"
 #   → クラスタ側の /work/.../benchfs が正で、taskd は workspaces/<task_id> に写しを作る。
 #     run の前に pull、ワーカーが写しを編集、判定の前に push、`--check-cmd` はクラスタで実行される。
+#
+# 動作確認と観測（Phase 12 第 2 段階）:
+#   taskctl --db ../taskd.sqlite3 worker run --config taskd.toml --task <id> --cluster pegasus
+#     → デーモン無しで 1 回 run（pull → run → push）。DB は変えない。多重接続が無ければ exit 4。
+#   curl -s http://127.0.0.1:7710/api/v1/clusters     → 接続の有無（connected）と cooldown
+#   curl -s http://127.0.0.1:7710/api/v1/inbox        → attention[] の type = "cluster_unavailable"（ログインし直しの案内）
 
 db = "../taskd.sqlite3"
 workspace_root = "../workspaces"

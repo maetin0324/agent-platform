@@ -112,9 +112,10 @@ async fn missing_runs_files_workspaces_and_tasks_are_404() {
         path: "/scratch/x".into(),
     };
     env.store.create_task(&remote, vec![]).expect("create");
+    // ADR-0018 D1: Remote の run ファイルは写し `workspace_root/<task_id>` にある。写しがまだ無ければ 404。
     let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stdout", remote.id))).await;
     let problem = assert_problem(&resp, 404, "file_not_found");
-    assert_eq!(problem["detail"], "remote workspace");
+    assert_eq!(problem["detail"], "workspace directory does not exist");
 
     let no_workspace = new_task(TaskKind::Execute, Status::Running);
     env.store.create_task(&no_workspace, vec![]).expect("create");

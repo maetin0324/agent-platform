@@ -274,6 +274,20 @@ impl SshWorkspace {
     }
 }
 
+/// ワーカーへ渡す指示文（ADR-0018 D3）。`RunRequest.task.objective` の末尾に足し、`.taskd/remote-exec` の存在と使い方を伝える。
+/// ワーカーが従うかは保証しない（受け入れ条件はクラスタ側で判定されるので、手元だけで済ませた仕事は条件で落ちる）。
+pub fn remote_exec_instructions(settings: &SshSettings) -> String {
+    format!(
+        "\n\n[taskd] このタスクの正はクラスタ `{cluster}`（ssh host `{host}`）の `{dir}` です。手元の作業ディレクトリはその写しで、\
+         run の後にクラスタへ同期され、受け入れ条件のコマンドはクラスタ側で実行されます。\
+         重い処理・クラスタ上のデータやモジュールを使う処理は `.taskd/remote-exec <コマンド ...>` で実行してください\
+         （クラスタの作業ディレクトリで実行され、終了コードと出力がそのまま返ります）。",
+        cluster = settings.cluster,
+        host = settings.host,
+        dir = settings.remote_dir.to_string_lossy(),
+    )
+}
+
 /// tick（同期の文脈）から呼ぶ、多重接続の有無の確認（ADR-0018 D2）。`ssh -O check` は unix ソケットを見るだけで即座に返る。
 pub fn control_master_alive_blocking(ssh_command: &[String], host: &str) -> bool {
     let Some((program, rest)) = ssh_command.split_first() else {

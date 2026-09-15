@@ -665,3 +665,83 @@ fn writes_from_taskctl_and_api_while_taskd_ticks_fast_never_hit_database_is_lock
     assert!(!daemon.log_text().contains("database is locked"), "{}", daemon.log_text());
     env.replay_is_consistent();
 }
+
+/// Phase 12 第 2 段階（ADR-0018 実装メモ）8・9・11: `GET /clusters`、受信箱の `attention[].cluster_unavailable`、`TaskDetail.cluster`。
+/// 多重接続が**無い**クラスタを使うので、ssh の設定も外部ネットワークも要らない。
+#[test]
+fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
+    let env = Env::new();
+    let script = env.write_script(r#"cat >/dev/null; echo '{"type":"done","summary":"unused","evidence":[]}'"#);
+    let config = env.write_config(&script, &env.api_listen(), "");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(
+        "\n[[clusters]]\nid = \"offline\"\nhost = \"taskd-no-such-host-for-tests\"\nconcurrency = 1\n\
+         setup = [\"true\"]\nenv = { SECRET_CLUSTER_VALUE = \"cluster-s3cr3t-value\" }\nrsync_excludes = [\".git/\"]\n",
+    );
+    std::fs::write(&config, text).unwrap();
+    let remote = env.workspace("remote-project");
+    let id = env.add(&["--title", "offline work", "--check-cmd", "true", "--cluster", "offline", "--workspace", &remote]);
+
+    let mut daemon = env.start_taskd(&config);
+    env.wait_api(&mut daemon);
+    env.taskctl(&["approve", &id.to_string()]);
+
+    // 8. /clusters: 設定 + 接続の有無 + cooldown。env の値は出ない。
+    let mut clusters = Value::Null;
+    let seen = wait_until(Duration::from_secs(10), || {
+        clusters = env.get("/clusters").json();
+        clusters["items"][0]["cooldown_until"].is_string()
+    });
+    assert!(seen, "the offline cluster never entered cooldown: {clusters}");
+    let c = &clusters["items"][0];
+    assert_eq!(c["id"], "offline", "{clusters}");
+    assert_eq!(c["host"], "taskd-no-such-host-for-tests");
+    assert_eq!(c["connected"], false);
+    assert_eq!(c["in_use"], 0);
+    assert_eq!(c["concurrency"], 1);
+    assert_eq!(c["sync"], "rsync");
+    assert_eq!(c["delete_on_push"], false);
+    assert_eq!(c["has_setup"], true);
+    assert_eq!(c["env_keys"], json!(["SECRET_CLUSTER_VALUE"]));
+    assert_eq!(c["rsync_excludes"], json!([".git/"]));
+    assert!(c["cooldown_remaining_secs"].as_u64().is_some(), "{clusters}");
+    assert!(!clusters.to_string().contains("cluster-s3cr3t-value"), "env values must not leak: {clusters}");
+    let config_view = env.get("/config");
+    assert!(!config_view.body.contains("cluster-s3cr3t-value"), "{}", config_view.body);
+    assert!(!config_view.body.contains("\"setup\""), "{}", config_view.body);
+    assert_eq!(config_view.json()["clusters"][0]["has_setup"], true, "{}", config_view.body);
+    let snap = env.get("/daemon").json()["snapshot"].clone();
+    assert_eq!(snap["clusters"][0]["connected"], false, "{snap}");
+    assert_eq!(snap["clusters"][0]["host"], "taskd-no-such-host-for-tests", "{snap}");
+
+    // 9. 受信箱の注意: クラスタごとに 1 件、host と対象タスク数。
+    let inbox = env.get("/inbox").json();
+    let attention = inbox["attention"].as_array().unwrap_or_else(|| panic!("{inbox}"));
+    let items: Vec<&Value> = attention.iter().filter(|a| a["type"] == "cluster_unavailable").collect();
+    assert_eq!(items.len(), 1, "{inbox}");
+    // ADR-0018 M8: 人のログイン待ちは経路なし（unroutable）ではないので、同じタスクが 2 件に出ない。
+    assert!(!attention.iter().any(|a| a["type"] == "unroutable"), "{inbox}");
+    assert_eq!(items[0]["cluster"], "offline");
+    assert_eq!(items[0]["host"], "taskd-no-such-host-for-tests");
+    assert_eq!(items[0]["tasks"], 1);
+    assert!(items[0]["at"].is_string(), "{inbox}");
+    assert_eq!(inbox["counts"]["attention"].as_u64().unwrap() as usize, attention.len());
+
+    // 11. 詳細にクラスタが出る（API と `taskctl show --json` の両方）。`workspace_dir` は手元の写し。
+    let detail = env.get(&format!("/tasks/{id}")).json();
+    assert_eq!(detail["cluster"], "offline", "{detail}");
+    assert_eq!(
+        detail["workspace_dir"],
+        env.root.join("workspaces").join(id.to_string()).to_string_lossy().as_ref(),
+        "{detail}"
+    );
+    assert_eq!(detail["task"]["workspace"]["path"], remote, "{detail}");
+    let show: Value = serde_json::from_str(env.taskctl(&["show", "--json", &id.to_string()]).trim()).unwrap();
+    assert_eq!(show["cluster"], "offline", "{show}");
+
+    // タスクは ready のまま（attempts も消費しない）。
+    let t = env.task(id);
+    assert_eq!((t.status, t.attempts), (Status::Ready, 0));
+    drop(daemon);
+    env.replay_is_consistent();
+}

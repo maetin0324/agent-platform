@@ -84,7 +84,8 @@ pub struct WorkerHint {
     pub adapter: Option<String>,
 }
 
-/// DESIGN §5.8 の境界。`Remote` は接続層プロジェクトが実装するまで型のみ。
+/// DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
+/// taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkspaceSpec {
@@ -239,6 +240,9 @@ pub enum Event {
     /// ADR-0018 D2: クラスタへの ssh 多重接続が無く、そのクラスタでは実行できない（人のログイン待ち）。
     ClusterUnavailable {
         cluster: String,
+        /// `~/.ssh/config` の `Host` 名（`scripts/cluster-login.sh <host>` を案内するため）。第 1 段階の行には無いので任意。
+        #[serde(default)]
+        host: String,
         reason: String,
     },
     ProviderThrottled {

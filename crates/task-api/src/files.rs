@@ -54,15 +54,15 @@ pub(crate) fn is_ulid_text(value: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'))
 }
 
-/// ワークスペースの canonical パス。存在しない・`Remote` は 404 `file_not_found`。
+/// ワークスペースの canonical パス。存在しなければ 404 `file_not_found`。
+/// `Remote` は手元の写し `root/<task_id>`（run のログと成果物はそこにある。ADR-0018 D1）。
 pub(crate) fn canonical_workspace(task: &Task, root: &Path) -> Result<PathBuf, ApiProblem> {
-    match &task.workspace {
-        WorkspaceSpec::Local { path } => root
-            .join(path)
-            .canonicalize()
-            .map_err(|_| ApiProblem::file_not_found("workspace directory does not exist")),
-        WorkspaceSpec::Remote { .. } => Err(ApiProblem::file_not_found("remote workspace")),
-    }
+    let dir = match &task.workspace {
+        WorkspaceSpec::Local { path } => root.join(path),
+        WorkspaceSpec::Remote { .. } => root.join(task.id.to_string()),
+    };
+    dir.canonicalize()
+        .map_err(|_| ApiProblem::file_not_found("workspace directory does not exist"))
 }
 
 /// `candidate` を canonicalize し、`ws` 配下の通常ファイルであることを確かめる。

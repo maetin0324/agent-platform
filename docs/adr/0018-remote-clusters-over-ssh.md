@@ -102,3 +102,33 @@ run 1 回の順序（`sync = "rsync"` のとき）:
 - 新しい設定 `[[clusters]]`、`Event::ClusterUnavailable`、`.taskd/remote-exec`。タスク側は既存の `WorkspaceSpec::Remote` のまま。
 - `Check::Command` の実行場所が、`WorkspaceSpec::Remote` のタスクではクラスタになる（`Local` のタスクは従来どおり手元）。
 - テストは **ssh 先を `localhost` にして行う**（外部ネットワークに出ない。CLAUDE.md の規則）。実クラスタでの確認は人の操作を伴う手順として記録する。
+
+## 実装メモ（第 2 段階、2026-09-15。DESIGN §6 Phase 12 の 8〜12）
+
+第 1 段階（`SshWorkspace`、`[[clusters]]`、`taskctl add --cluster`、`Event::ClusterUnavailable`）に続き、GUI と運用から見える部分を入れた。
+本文の決定は変えていない。実装で決めた細部を記す。
+
+- **M1. 接続の有無は 1 tick に 1 回、全クラスタについて調べる。** ディスパッチャは tick の dispatch 直前に `ssh -o BatchMode=yes -O check <host>` を
+  設定の全クラスタに実行し（unix ソケットを見るだけで、ネットワークにも認証にも触れない）、結果を `DaemonSnapshot.clusters[].connected` と
+  dispatch の判断（D2）の両方に使う。dispatch のたびに調べていた第 1 段階の呼び出しはこれに置き換えた（1 tick に 1 回だけ fork する）。
+  **接続が戻っていれば、そのクラスタの cooldown はその tick で解く**（人がログインし直したら次の tick から再開する。cooldown は「人待ち」の
+  時間であって罰ではない）。
+- **M2. スナップショットに `clusters[]`（`ClusterLive{id, host, concurrency, in_use, connected, cooldown_until}`）を足した。** `GET /clusters` と
+  `GET /daemon` / SSE `daemon` に出る。`env` の値・`setup` の中身は含めない（D7）。`#[serde(default)]` で古いスナップショットとも互換。
+- **M3. `Event::ClusterUnavailable` に `host` を足した**（`#[serde(default)]`。第 1 段階の行では空文字）。受信箱の `attention[].cluster_unavailable` が
+  「`scripts/cluster-login.sh <host>` を実行してください」と出すための値で、`reason` の文字列を解析せずに取れるようにした。
+- **M4. 受信箱の `cluster_unavailable` はクラスタごとに 1 件で、接続が戻っていれば出さない。** 対象は `WorkspaceSpec::Remote` で終端でないタスクの
+  `ClusterUnavailable`（直近 24 時間。終端のタスクはもう待っていないのでイベント列を読まない）。スナップショットの `clusters[].connected == true` なら、呼びかけの用が済んでいるので出さない
+  （`docs/gui/api.md` §5.1 (d)）。
+- **M5. `TaskDetail.workspace_dir` は Remote でも `null` にせず、手元の写し `workspace_root/<task_id>` を返す。** run のログ（`runs/`）と成果物はそこにある。
+  併せて `TaskDetail.cluster`（`[[clusters]] id`）を足し、API のファイル系エンドポイントも Remote では写しを見るようにした（第 1 段階までは 404）。
+  クラスタ側のパスは `task.workspace.path` で引き続き見える。
+- **M6. `taskctl worker run --cluster <id>`。** 写しは `workspace_root/<task_id>`（ディスパッチャと同じ）。クラスタ側のパスは `--workspace`
+  （`taskctl add --cluster` と同じ意味）か、タスクの `WorkspaceSpec::Remote.path`。多重接続が無ければアダプタを起動せずに `result: {"type":"error",...}` と
+  **exit 4**。run の後に push して、クラスタ側にも編集結果を届ける（判定はしない）。DB は読むだけ。タスクが `running` / `reviewing` なら写しを
+  デーモンと取り合うので拒否する。
+- **M7. D3 の指示文。** `run_worker` と `worker run --cluster` は、ワーカーに渡すタスクの写しの `objective` 末尾に `.taskd/remote-exec` の存在と
+  使い方（`task_worker::remote_exec_instructions`）を足す。DB のタスクは変えない。
+- **M8. 「人のログイン待ち」は `unroutable` に混ぜない**（監査の指摘）。多重接続が無い／cooldown 中のクラスタを待つ ready タスクは、
+  ディスパッチャ内の別の集合（`cluster_waiting`）で `--until-idle` の待ち対象から外す。`DaemonSnapshot.unroutable` は「設定に合うプロバイダ／
+  クラスタが無い」タスクだけになり、受信箱で同じタスクが `unroutable` と `cluster_unavailable` の 2 件に出ることは無い。

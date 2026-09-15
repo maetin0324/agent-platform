@@ -190,6 +190,9 @@ pub struct ConfigView {
     pub plan_auto_accept: bool,
     pub reviewer: ReviewerConfigView,
     pub providers: Vec<ProviderConfigView>,
+    /// ADR-0018: `[[clusters]]` の要約（`env` はキー名だけ、`setup` は有無だけ）。
+    #[serde(default)]
+    pub clusters: Vec<ClusterConfigView>,
     pub api: ApiConfigView,
 }
 
@@ -209,6 +212,54 @@ pub struct ProviderConfigView {
     pub model: Option<String>,
     /// `[[providers]].env` のキー名だけ。
     pub env_keys: Vec<String>,
+}
+
+/// `[[clusters]]` 1 行の要約（ADR-0018 D7: `env` の値は出さない）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterConfigView {
+    pub id: String,
+    /// `~/.ssh/config` の `Host` 名。
+    pub host: String,
+    pub concurrency: usize,
+    /// `"rsync"` | `"none"`。
+    pub sync: String,
+    pub delete_on_push: bool,
+    /// `setup` が 1 行以上あるか（中身は出さない）。
+    pub has_setup: bool,
+    /// `env` のキー名だけ（昇順）。
+    pub env_keys: Vec<String>,
+    pub rsync_excludes: Vec<String>,
+}
+
+/// `GET /clusters`（ADR-0018 受け入れ条件8）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Clusters {
+    pub items: Vec<ClusterView>,
+}
+
+/// 設定（`[[clusters]]`）とスナップショット（`ClusterLive`）を結合したもの。`env` の値は出さない。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterView {
+    pub id: String,
+    /// `~/.ssh/config` の `Host` 名。
+    pub host: String,
+    pub concurrency: usize,
+    /// `"rsync"` | `"none"`。
+    pub sync: String,
+    pub delete_on_push: bool,
+    /// `setup` が 1 行以上あるか（中身は出さない）。
+    pub has_setup: bool,
+    /// `env` のキー名だけ（昇順）。
+    pub env_keys: Vec<String>,
+    pub rsync_excludes: Vec<String>,
+    /// スナップショットが無ければ `null`。
+    pub in_use: Option<u32>,
+    /// この tick で `ssh -O check` が成功したか。スナップショットが無ければ `null`。
+    pub connected: Option<bool>,
+    /// cooldown 中ならその終わり（RFC 3339）。
+    pub cooldown_until: Option<String>,
+    /// `cooldown_until − now`（秒）。過ぎていれば両方 `null`。
+    pub cooldown_remaining_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

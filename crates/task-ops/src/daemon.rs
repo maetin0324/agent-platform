@@ -25,6 +25,9 @@ pub struct DaemonSnapshot {
     /// 設定に合うプロバイダが無い ready タスク（この tick の判定）。
     pub unroutable: Vec<TaskId>,
     pub providers: Vec<ProviderLive>,
+    /// ADR-0018: `[[clusters]]` の稼働状況（`id` 昇順）。第 2 段階で追加したので、古いスナップショットには無い。
+    #[serde(default)]
+    pub clusters: Vec<ClusterLive>,
 }
 
 /// 実行中の run（ワーカー run、またはプロバイダを使う Reviewer run）。
@@ -64,4 +67,19 @@ pub struct ProviderLive {
     pub model: Option<String>,
     /// 実行中の run と Reviewer run の合計。
     pub in_use: u32,
+}
+
+/// クラスタ（`[[clusters]]` の行）の稼働状況（ADR-0018 D2 / D5）。`env` の値・`setup` の中身は含めない。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterLive {
+    pub id: String,
+    /// `~/.ssh/config` の `Host` 名。
+    pub host: String,
+    pub concurrency: usize,
+    /// このクラスタで走っている run（ワーカー run + 判定）の数。
+    pub in_use: u32,
+    /// この tick で `ssh -O check` が成功した（人が張った多重接続がある）。
+    pub connected: bool,
+    /// 多重接続が無くて cooldown 中なら、その終わり（RFC 3339）。
+    pub cooldown_until: Option<String>,
 }
