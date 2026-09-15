@@ -17,7 +17,8 @@
     "format": "biome format --write .",
     "test": "vitest run",
     "e2e": "playwright test",
-    "gen:types": "node scripts/gen-types.mjs"
+    "gen:types": "node scripts/gen-types.mjs",
+    "release": "bash scripts/release.sh"
   },
   "dependencies": {
     "@codemirror/lang-json": "6.0.2",
@@ -39,6 +40,7 @@
     "tailwind-merge": "3.6.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@biomejs/biome": "2.5.12",
     "@playwright/test": "1.63.0",
     "@react-router/dev": "8.3.1",
