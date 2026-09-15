@@ -2246,3 +2246,50 @@ exit 0）、`cargo clippy --workspace --all-targets -- -D warnings`（exit 0, �
 
 - P-56（`aggregate = false` の親は子の失敗を引き継がない）と P-58 / P-59（`check` の結果を残す、`providers.d/` の監視）は、
   運用を見てから決める。P-47 / P-49 / P-50 / P-55 は GUI・運用側の判断。
+
+## 実機確認（本物の Claude Code。2026-09-15）
+
+人間の指示「(c) 実機確認」。fake アダプタでしか確かめていなかった 2 つを、本物の claude-code（claude-sonnet-5）で通した。
+
+### 1. 委譲（Phase 10、ADR-0016）— 成功
+
+設定 `/local/rmaeda/taskd-delegation/taskd.toml`（`[[roles]] lead / implementer`、`[delegation]` の既定）。
+タスク: 「index.html と style.css を作る。自分では書かず 2 つの子に委譲する」（`--role lead --aggregate`、
+受け入れは `artifact_exists` が 2 つ）。
+
+- 親の run が `artifacts/delegate.json` を書き、**子 2 件が実際に挿入された**（ログ: `delegated child tasks inserted`）。
+  子は `index.html を作成する` / `style.css を作成する`。どちらも role は implementer。
+- 子 2 件が並列で実行され `done`。親は子が終わるまで `reviewing` のまま待ち、その後**集約 run**（3 回目の run）が走って
+  `artifacts/summary.md` を書き、受け入れ条件（2 つの artifact）が両方 pass して `done`。
+- `taskctl show --json` に `role: lead` / `aggregate: true` / `delegated[]`（run ごとの子の一覧）が出る。
+- `taskctl ls --tree` で親子が出る。`replay: 0 mismatches across 3 tasks`。
+
+### 2. クラスタでのコマンド実行（Phase 12、ADR-0018）— 成功
+
+設定 `/local/rmaeda/taskd-cluster/taskd.toml`（`[[clusters]] pegasus`、`sync = "rsync"`、`setup` で `~/.cargo/bin` を PATH に、
+`rsync_excludes = ["target/", ".git/"]`）。pegasus の `/work/NBB/rmaeda/taskd-demo` に、テストが落ちる小さな Rust プロジェクトを用意した。
+
+- pull → ワーカー（手元の claude-code）が写しの `src/main.rs` を修正 → push → **判定コマンドが pegasus で実行**され `exit=0`。
+  約 40 秒で `done`（attempts 0）。
+- pegasus 側の `src/main.rs` が実際に `a + b` に直り、クラスタ上で `cargo test` が 1 passed。
+- クラスタ側のディレクトリに持ち込まれたのは `artifacts/` だけで、`runs/` / `inputs/` / `.taskd/` は入っていない（P-46 のとおり）。
+- `taskctl show --json` に `cluster: pegasus`、`workspace_dir` は写し（`workspaces/<task_id>`）。`replay: 0 mismatches`。
+
+### 分かった限界（設計の見直しが要る）
+
+**大きなプロジェクトは rsync で写せない。** 人間が挙げた `/work/NBB/rmaeda/workspace/rust/benchfs` は **263 GB**
+（`target` 30 GB と `.git` 184 MB を除いても 232 GB。`src` 自体は 2.2 MB）。ADR-0018 D4 の「pull → 編集 → push」は
+この規模を想定していない。次のいずれかが要る（P-60 として提案に記録）:
+
+1. `rsync_includes`（ソースだけを写す許可リスト。`src/**`, `Cargo.toml` など）を設定に足す
+2. 写しを持たず、ワーカーが `.taskd/remote-exec` 越しにクラスタ上で直接作業する「リモート専用」モード
+   （LLM のファイル編集もリモートで行う必要があるため、アダプタ側の作業ディレクトリの扱いを変える必要がある）
+3. クラスタ側で `git worktree` を切り、ソースだけを対象にする
+
+あわせて、クラスタ側に `cargo` が PATH に無い（`~/.cargo/bin`）ことが分かったので、`[[clusters]] setup` で毎回通す必要がある。
+
+### 提案
+
+| # | 対象 | 提案 | 現状 |
+|---|---|---|---|
+| P-60 | ADR-0018 D4 / DESIGN §5.9 補足 2 | 大きなプロジェクト向けの同期方法（`rsync_includes` / リモート専用モード / worktree）。上の 3 案から選ぶ | 全体 rsync のみ。263 GB のプロジェクトでは使えない |
