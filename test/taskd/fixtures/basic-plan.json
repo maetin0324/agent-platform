@@ -1,0 +1,15 @@
+{
+  "tasks": [
+    {
+      "title": "Plan-Child-1",
+      "objective": "first child of the fixture plan",
+      "acceptance": [{ "text": "child 1 done", "check": { "type": "command", "cmd": "true", "expect_exit": 0 } }]
+    },
+    {
+      "title": "Plan-Child-2",
+      "objective": "second child of the fixture plan",
+      "acceptance": [{ "text": "child 2 done", "check": { "type": "command", "cmd": "true", "expect_exit": 0 } }],
+      "depends_on": [0]
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+    "items": [
+        {
+            "id": 21,
+            "task_id": "01M2HJDBRRMKXSF3YJYQ2PYTJ0",
+            "seq": 0,
+            "ts": "2026-09-15T03:40:16.539901877Z",
+            "event": {
+                "type": "created",
+                "task": {
+                    "id": "01M2HJDBRRMKXSF3YJYQ2PYTJ0",
+                    "parent_id": "01M2HJD8P9Q444J57384N98HGV",
+                    "kind": "approval",
+                    "title": "Approval needed: Human-B \u2014 criterion 0 (attempt 1)",
+                    "objective": "someone signs off",
+                    "acceptance": [],
+                    "inputs": [],
+                    "depends_on": [],
+                    "status": "ready",
+                    "priority": 0,
+                    "worker_hint": {
+                        "tier": "standard",
+                        "adapter": null
+                    },
+                    "workspace": {
+                        "kind": "local",
+                        "path": "ws-b"
+                    },
+                    "budget": {
+                        "max_turns": 10,
+                        "max_wall_secs": 600,
+                        "max_retries": 2
+                    },
+                    "attempts": 0,
+                    "lease": null,
+                    "created_at": "2026-09-15T03:40:16.536749794Z",
+                    "updated_at": "2026-09-15T03:40:16.536749794Z"
+                }
+            }
+        },
+        {
+            "id": 22,
+            "task_id": "01M2HJDBRRMKXSF3YJYQ2PYTJ0",
+            "seq": 1,
+            "ts": "2026-09-15T03:40:16.540168946Z",
+            "event": {
+                "type": "approval_requested"
+            }
+        }
+    ],
+    "has_more": false
+}

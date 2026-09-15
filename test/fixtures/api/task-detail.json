@@ -1,0 +1,55 @@
+{
+    "task": {
+        "id": "01M2HJDBRRMKXSF3YJYQ2PYTJ0",
+        "parent_id": "01M2HJD8P9Q444J57384N98HGV",
+        "kind": "approval",
+        "title": "Approval needed: Human-B \u2014 criterion 0 (attempt 1)",
+        "objective": "someone signs off",
+        "acceptance": [],
+        "inputs": [],
+        "depends_on": [],
+        "status": "ready",
+        "priority": 0,
+        "worker_hint": {
+            "tier": "standard",
+            "adapter": null
+        },
+        "workspace": {
+            "kind": "local",
+            "path": "ws-b"
+        },
+        "budget": {
+            "max_turns": 10,
+            "max_wall_secs": 600,
+            "max_retries": 2
+        },
+        "attempts": 0,
+        "lease": null,
+        "created_at": "2026-09-15T03:40:16.536749794Z",
+        "updated_at": "2026-09-15T03:40:16.536749794Z"
+    },
+    "workspace_dir": "/home/rmaeda/workspace/taskd-gui/.run/basic/workspaces/ws-b",
+    "timers": {
+        "now": "2026-09-15T03:40:25.491965692Z",
+        "lease_expires_at": null,
+        "backoff_until": null,
+        "consecutive_requeues": 0,
+        "max_requeues": 5,
+        "consecutive_reviewer_requeues": 0
+    },
+    "criteria": [],
+    "runs": [],
+    "prior_review": [],
+    "answers": [],
+    "latest_question": null,
+    "approvals": [],
+    "dependencies": [],
+    "dependents": [],
+    "children": [],
+    "actions": [
+        "approve",
+        "reject",
+        "cancel"
+    ],
+    "worker_run_hint": "taskctl worker run --config <taskd.toml> --task 01M2HJDBRRMKXSF3YJYQ2PYTJ0"
+}

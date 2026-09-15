@@ -9,6 +9,7 @@
     "includes": [
       "**",
       "!app/taskd/types.ts",
+      "!test/fixtures/api",
       "!.run",
       "!build",
       "!.react-router",

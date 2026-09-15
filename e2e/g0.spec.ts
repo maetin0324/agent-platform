@@ -84,10 +84,10 @@ test.describe("Phase G0 受け入れ条件 4（後半）: taskd 停止中のバ�
       await expect(banner).toBeVisible();
       await expect(banner).toContainText("taskd に接続できません");
 
-      // 例外ページ（ErrorBoundary）になっていないことを確認する
-      const h1 = page.locator("h1");
-      await expect(h1).not.toContainText("エラー");
-      await expect(h1).not.toContainText("500");
+      // 例外ページ（root の ErrorBoundary）になっていないことを確認する（G1 で `/` は受信箱になり、
+      // 見出しは h1 ではなく h2 になったので本文全体で判定する）
+      const body = page.locator("body");
+      await expect(body).not.toContainText("予期しないエラーが起きました");
 
       startDev();
 
@@ -139,7 +139,9 @@ test.describe("セキュリティヘッダと CSP", () => {
     expect(headers["referrer-policy"]).toBe("no-referrer");
     expect(headers["cache-control"]).toBe("no-store");
 
-    await page.waitForLoadState("networkidle");
+    // G1 から root が `/events` に SSE 接続を張ったまま保持するため（意図的な常時接続。docs/DESIGN.md §6.3）、
+    // "networkidle" には到達しない。代わりに hydration とスクリプト実行が済むのを待つ固定の猶予を置く。
+    await page.waitForTimeout(1_000);
 
     const cspViolations = [...consoleErrors, ...pageErrors].filter((m) => m.includes("Content Security Policy"));
     expect(cspViolations).toEqual([]);

@@ -50,3 +50,34 @@ export class TaskdUnavailable extends Error {
 export function isTaskdUnavailable(e: unknown): e is TaskdUnavailable {
   return e instanceof TaskdUnavailable || (e instanceof Error && e.name === "TaskdUnavailable");
 }
+
+/**
+ * ErrorBoundary に渡す構造化データ（docs/adr/0004-g1-decisions.md D6）。
+ * React Router の本番ビルドは、loader が投げた「素の Error」を ErrorBoundary に渡す前に
+ * 汎用の 500（`Unexpected Server Error`）にサニタイズする。`TaskdUnavailable` / `TaskdError` を
+ * そのまま投げても本番では判別できないため、`Response` として投げて `isRouteErrorResponse` /
+ * `error.data` 経由で判別できるようにする（`Response` は例外的にサニタイズされない）。
+ */
+export interface TaskdRouteErrorData {
+  kind: "unavailable" | "taskd_error";
+  baseUrl?: string;
+  status?: number;
+  code?: string;
+  detail?: string;
+}
+
+/**
+ * `TaskdUnavailable` / `TaskdError` を、loader から投げる（または resource route がそのまま返す）ための
+ * `Response` に変換する。それ以外の例外はそのまま re-throw する（真に予期しないエラーは 500 のままでよい）。
+ */
+export function taskdErrorResponse(e: unknown): Response {
+  if (isTaskdUnavailable(e)) {
+    const data: TaskdRouteErrorData = { kind: "unavailable", baseUrl: e.baseUrl };
+    return new Response(JSON.stringify(data), { status: 503, headers: { "Content-Type": "application/json" } });
+  }
+  if (e instanceof TaskdError) {
+    const data: TaskdRouteErrorData = { kind: "taskd_error", status: e.status, code: e.code, detail: e.detail };
+    return new Response(JSON.stringify(data), { status: e.status, headers: { "Content-Type": "application/json" } });
+  }
+  throw e;
+}
