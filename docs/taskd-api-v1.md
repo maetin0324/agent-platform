@@ -419,6 +419,8 @@ data: {"reason":"cursor_too_old","cursor":20000}
 
 `approve`: `status == draft` または `kind == approval && status == ready`。`reject`: `kind == approval && status == ready`。`answer`: `status == blocked`。`cancel`: 非終端。
 
+この結果は `TaskDetail.actions` だけでなく、**`TaskRef` と `TaskSummary` にも入る**（ADR-0015 D4）。受信箱・一覧・DAG・依存関係のどこから来た参照でも、GUI は `actions` を見るだけでよく、この規則を再実装しない。
+
 ### 5.5 質問文（`task_ops::latest_question(events)`）
 
 `events_for` を後ろから見て最初の `WorkerFinished{outcome}` のうち `"question: "` で始まるものの接頭辞を除いた文字列。無ければ空文字列（現在の `gate.rs::latest_question` をそのまま移す）。
@@ -465,13 +467,13 @@ pub struct Page<T> { pub items: Vec<T>, pub next_cursor: Option<String>, pub tot
 // #[serde(rename_all = "snake_case")] pub enum RunRole { Worker, Reviewer }
 
 // ---- task-ops: 参照・一覧 ----
-pub struct TaskRef { pub id: TaskId, pub title: String, pub kind: TaskKind, pub status: Status }
+pub struct TaskRef { pub id: TaskId, pub title: String, pub kind: TaskKind, pub status: Status, pub actions: Vec<Action> }
 pub struct TaskSummary {
     pub id: TaskId, pub parent_id: Option<TaskId>, pub kind: TaskKind, pub status: Status, pub title: String,
     pub priority: i32, pub tier: Tier, pub adapter: Option<String>, pub attempts: u32, pub max_retries: u32,
     pub depends_on: Vec<TaskId>, pub created_at: String, pub updated_at: String,
     pub lease_expires_at: Option<String>, pub backoff_until: Option<String>,
-    pub children: u32, pub pending_children: u32,
+    pub children: u32, pub pending_children: u32, pub actions: Vec<Action>,
 }
 pub struct TaskList { pub items: Vec<TaskSummary>, pub next_cursor: Option<String>, pub total: u64, pub counts_by_status: BTreeMap<Status, u64> }
 
@@ -683,6 +685,11 @@ pub struct ApiV1Schema {
   - `Range` の開始がサイズ以上なら 416（空ファイルを含む）。
   - `bytes` 以外の単位は無視して全体を 200 で返す。形が不正なら 416。
   - `offset` / `length` は常に 200。
+
+**運用ログ（ADR-0015）**
+- API は要求ごとに `method` / `path` / `status` / `duration_ms` / `request_id`（= `X-Request-Id`）を記録する。既定は `debug`、**1 秒以上かかった要求は `warn`**（`slow api request`）。`GET /stream` は長時間つなぐのが正常なので警告の対象外。
+- デーモンは `max(1 秒, tick_ms × 2)` を超えた tick を `warn`（`slow tick`）で記録する。
+- DB がネットワークファイルシステム（NFS など）上にあると起動時に `warn`。SQLite の WAL はローカルディスクを前提にしている（ADR-0013 D5）。GUI の fixture もローカルディスクに置くこと。
 
 **起動**
 - taskd は `[api]` の `token_file` が読めない・空なら exit 2。DB が知らない新しい版数でも exit 2。

@@ -646,6 +646,9 @@ worktree の取り込み → taskd の更新（`actions`）の取り込み → �
 - G5-P6: §8.2「失敗は 1 秒待つ」は同時多数の試行に対しては抑止にならない（待つだけで並列度は制限しない）。単一利用者・loopback 前提なら十分だが、非 loopback 公開時は
   前段（SSH / リバースプロキシ）でのレート制限を README に推奨として書いた。DESIGN 側にも「レート制限は前段で」と明記するとよい。
 
+- **G5-P1〜P6 は 2026-09-15 に人間の許可を得て `docs/DESIGN.md` に反映済み**（GUI のエージェントは編集できない規約のため、taskd 側のオーケストレータが行った）。
+  あわせて `docs/taskd-api-v1.md` を taskd の `docs/gui/api.md` と同期した（G5-U6 の解消）。
+
 ### taskd への依頼
 - BLOCKED になる不足・仕様違いは無し。`[api] token_file` 付きの taskd は `docs/taskd-api-v1.md` §1.3 のとおり `GET /health` だけ無認証で、他はトークン無しで 401 `unauthorized` を返した。
 - **依頼（文書の同期）**: GUI 側の `docs/taskd-api-v1.md` は taskd の `docs/gui/api.md`（ADR-0015 で `actions` を §5.4 / §6.2 に追記、運用ログの節を追加）より古い。GUI 側では書き換えない

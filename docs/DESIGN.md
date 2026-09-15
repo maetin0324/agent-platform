@@ -251,10 +251,11 @@ GUI の全操作は taskd の `POST` → `task-ops` → `TaskStore::apply_transi
 |---|---|
 | バインド | 既定 `127.0.0.1:7700`（`TASKD_GUI_BIND`）。SSH: `ssh -L 7700:127.0.0.1:7700 host` |
 | 非 loopback | `TASKD_GUI_PASSWORD_FILE` が無ければ起動を拒否（exit 2、stderr に理由）。あれば `/login` でパスワードを受け、署名付き `HttpOnly; SameSite=Strict; Path=/`（https なら `Secure`）のセッションクッキーを発行。署名鍵は `TASKD_GUI_SESSION_SECRET_FILE`、無ければプロセスごとに乱数（再起動でログアウト）。パスワード比較は定数時間、失敗は 1 秒待つ |
-| loopback | 認証無し（従来どおり） |
+| loopback | 認証無し（従来どおり）。ただし `TASKD_GUI_PASSWORD_FILE` を明示したら loopback でも認証を要求する（設定したのに効かない状態を避ける。ADR-GUI-0008 D2、G5-P1） |
 | DNS rebinding | `Host` を許可リスト（`localhost`, `127.0.0.1`, `[::1]`, バインドのホスト, `TASKD_GUI_ALLOWED_HOSTS`）で検査。外れれば 400 |
+| ログインの失敗 | 1 秒待ってから 401 を返す。並列度は制限しないので、非 loopback 公開時のレート制限は前段（SSH / リバースプロキシ）で行う（G5-P6） |
 | CSRF | 変更系（action）は `Origin` があれば自分のオリジンと一致、`Sec-Fetch-Site` があれば `same-origin` / `none` であること。違えば 403。`SameSite=Strict` と併用 |
-| CSP | `default-src 'self'; script-src 'self' 'nonce-<r>'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`。nonce は middleware が要求ごとに生成し `<Scripts nonce>` / `<ScrollRestoration nonce>` に渡す（React Router の SSR が出す hydration スクリプトのため）。`style-src 'unsafe-inline'` は Tailwind と React Flow / CodeMirror のインラインスタイルのため（G5 で外せるか確認） |
+| CSP | `default-src 'self'; script-src 'self' 'nonce-<r>'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`。nonce は middleware が要求ごとに生成し `<Scripts nonce>` / `<ScrollRestoration nonce>` に渡す（React Router の SSR が出す hydration スクリプトのため）。`style-src 'unsafe-inline'` は外せない（`@xyflow/react` / `@tanstack/react-virtual` が style 属性を使い、属性は nonce で許可できない。G5-P2。次の一手は `style-src-elem`（nonce）と `style-src-attr 'unsafe-inline'` への分割 + CodeMirror への `cspNonce` 配線で、任意項目）。従来の説明: Tailwind と React Flow / CodeMirror のインラインスタイルのため（G5 で外せるか確認） |
 | その他ヘッダ | `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`（HTML と `.data`）。`build/client` のハッシュ付きアセットだけ `immutable` |
 
 ### 8.3 成果物・ログの描画（LLM が書いた信用できない内容）
@@ -281,7 +282,7 @@ GUI の全操作は taskd の `POST` → `task-ops` → `TaskStore::apply_transi
 | リリース物 | `dist/taskd-gui-<version>.tar.gz` = `build/` + `server.js` + `package.json` + `pnpm-lock.yaml` + `README.md` + `deploy/taskd-gui.service`（systemd の例）。展開先で `pnpm install --prod --frozen-lockfile --ignore-scripts` |
 | systemd | `deploy/taskd-gui.service`（`User=taskd`、`Environment=...`、`ExecStart=/usr/bin/node server.js`、`Restart=on-failure`）。taskd 本体の unit の `After=` に置く |
 | コンテナ | 任意。`Dockerfile`（`node:24-slim`、非 root、`build/` と本番依存だけ）。`TASKD_API_URL` でホストの taskd を指す（`--network host` か loopback のポートフォワード） |
-| 単一バイナリ | Node SEA は実験項目（ADR-GUI-0002 D6）。G5 で `esbuild`/`rolldown` によるサーバ 1 ファイル化 + `node --build-sea` を試し、結果を PROGRESS に記録する。失敗しても G5 は完了できる |
+| 単一バイナリ | Node SEA は実験項目（ADR-GUI-0002 D6）。G5 で `rolldown` によるサーバ 1 ファイル化（4.16 MB の CJS、`node_modules` 無しで起動）と `node --experimental-sea-config` までを確認した。Node 24 に `--build-sea` は無く、実行ファイルへの注入には `postject`、静的アセットには `sea.getAsset()` への置き換えが要る（G5-P4）。残りは G6 以降の任意項目。以下は当初の記述: G5 で `esbuild`/`rolldown` によるサーバ 1 ファイル化 + `node --build-sea` を試し、結果を PROGRESS に記録する。失敗しても G5 は完了できる |
 | 開発 | `pnpm dev`（`react-router dev`、HMR）。taskd は `scripts/taskd.sh start dev` で起動 |
 | 版 | `package.json` の `version`。`GET /healthz` と画面のフッタに GUI の版と taskd の `taskd_version` / `api_version` / `schema_version` を出す |
 
@@ -297,6 +298,8 @@ GUI の全操作は taskd の `POST` → `task-ops` → `TaskStore::apply_transi
   `retry_backoff_base_secs = 0`、`[plan] auto_accept = false`、`[[providers]] id = "fake-local" adapter = "fake" concurrency = 2 model = "fake"`、**`[api] listen = "127.0.0.1:7710"`**）と DB・`workspaces/` を作って
   `taskd --config .run/<name>/taskd.toml --log-format text` をバックグラウンドで起動する（pid を `.run/<name>/taskd.pid`、ログを `.run/<name>/taskd.log`）。`stop` / `status` / `logs` もある。
   `scripts/taskd.sh fixture <scenario>` は `taskctl`（`--db .run/<name>/taskd.sqlite3`）と `taskd --until-idle` で既知の DB を作る（シナリオは各フェーズで定義。taskd の `tests/e2e/tests/*.rs` と同じ流儀）。
+- **`.run/`（taskd の DB）はローカルディスクに置く**。`/home` などのネットワークファイルシステム（NFS）では SQLite の WAL が正しく働かず、
+  ディスパッチャが 10〜30 秒止まることがある（taskd の ADR-0013 D5 / ADR-0015、`docs/taskd-requests.md` R1）。`scripts/taskd.sh` は `TASKD_RUN_ROOT` で置き場を決め、既定はローカルディスク（G5-P5、ADR-GUI-0008 D13）。
 - GUI は `TASKD_API_URL=http://127.0.0.1:7710` で taskd を指す。結合テスト（Playwright）は**その実 taskd** に対して行う。単体テストは `test/mock-taskd/`（プロセス内 HTTP サーバ、固定応答）で動く。
 - **テストは外部ネットワークに出ない。** 例外は `pnpm install`（パッケージ取得）と `pnpm exec playwright install chromium`（ブラウザ取得）の 2 つだけで、どちらもテスト実行中ではなく準備で行う。
 - G0 で **`GET /api/v1/health` の `api_version == "1"`** と **`$TASKD_REPO/docs/api/v1/api-v1.schema.json` の存在**を確認する。無ければ G0 は BLOCKED（下記）。
@@ -404,7 +407,7 @@ strong = 設計判断（雛形の選択、BFF の骨格、CSRF・認証、配布
   2. taskd を `token_file` 付きで起動し、GUI に `TASKD_API_TOKEN_FILE` を渡すと動く。渡さないとバナーに `unauthorized`。`grep -r "<token>" build/ .run/*/gui.log` が 0 件（トークンが HTML・ログに出ない）
   3. `curl -H 'Host: evil.example'` が 400。全ページの応答に `Content-Security-Policy` があり、Playwright の全シナリオでコンソールに CSP 違反が 0 件
   4. `@axe-core/playwright` で `/`、`/tasks`、`/tasks/<id>`、`/tasks/new`、`/providers`、`/daemon` の critical / serious が 0 件
-  5. `pnpm audit --audit-level=high` が 0 件。`pnpm release` が `dist/taskd-gui-<version>.tar.gz` を作り、空ディレクトリに展開して `pnpm install --prod --frozen-lockfile --ignore-scripts && node server.js` で `/` が 200（Playwright の smoke）
+  5. `pnpm audit --audit-level=high` が 0 件。`pnpm release` が `dist/taskd-gui-<version>.tar.gz` を作り、空ディレクトリに展開して `pnpm install --prod --frozen-lockfile --offline --ignore-scripts && node server.js` で `/` が 200（Playwright の smoke）
   6. `deploy/taskd-gui.service` と README の導入手順がある。（任意）`docker build` が通る。（実験）Node SEA の試行結果が PROGRESS に記録されている（成否は問わない）
 
 ## 11. 人間の決定（決定済み）
