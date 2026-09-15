@@ -54,6 +54,8 @@ fn sample_task(i: usize) -> Task {
         lease: None,
         created_at: now,
         updated_at: now,
+        role: None,
+        aggregate: false,
     }
 }
 

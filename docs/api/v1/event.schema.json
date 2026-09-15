@@ -204,6 +204,13 @@
             "run_id": {
               "type": "string"
             },
+            "task_role": {
+              "description": "ADR-0016 D1: run 開始時のタスクの役割名（`Task.role`）。役割の無いタスク・導入前のイベントには無い。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "const": "worker_started",
               "type": "string"
@@ -388,6 +395,30 @@
           "type": "object"
         },
         {
+          "description": "ADR-0016 D2: 実行中の run が `delegate` で提案し、検証を通って挿入された子タスク。状態は変えない（`replay` は無視する）。",
+          "properties": {
+            "run_id": {
+              "type": "string"
+            },
+            "task_ids": {
+              "items": {
+                "$ref": "#/$defs/TaskId"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "delegated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "task_ids"
+          ],
+          "type": "object"
+        },
+        {
           "description": "ADR-0018 D2: クラスタへの ssh 多重接続が無く、そのクラスタでは実行できない（人のログイン待ち）。",
           "properties": {
             "cluster": {
@@ -489,6 +520,10 @@
           },
           "type": "array"
         },
+        "aggregate": {
+          "description": "ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。",
+          "type": "boolean"
+        },
         "attempts": {
           "format": "uint32",
           "minimum": 0,
@@ -544,6 +579,13 @@
         "priority": {
           "format": "int32",
           "type": "integer"
+        },
+        "role": {
+          "description": "ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。\n導入前のタスクには無いので任意。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "status": {
           "$ref": "#/$defs/Status"

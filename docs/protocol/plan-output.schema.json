@@ -110,6 +110,13 @@
         "objective": {
           "type": "string"
         },
+        "role": {
+          "description": "ADR-0016 D1 / M10: 子の役割名（任意）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tier": {
           "anyOf": [
             {

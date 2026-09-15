@@ -161,6 +161,38 @@ pub struct Task {
     #[serde(with = "time::serde::rfc3339")]
     #[schemars(with = "String")]
     pub updated_at: OffsetDateTime,
+    /// ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。
+    /// 導入前のタスクには無いので任意。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub aggregate: bool,
+}
+
+/// ADR-0016 D1: `[[roles]]` の 1 行。役割ごとの既定（タスクの値 > 役割の既定 > 全体の既定）とプロンプトに前置きする指示文。
+/// 純粋なデータ。taskd の設定から写し、task-ops（作成時の既定）とディスパッチャ（run 時の指示文）が使う。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RoleSpec {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wall_secs: Option<u64>,
+    /// ワーカーのプロンプトに前置きする指示文（何を任され、何を任せてよいか）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+impl RoleSpec {
+    /// `roles` から `id` の行を探す。
+    pub fn find<'a>(roles: &'a [RoleSpec], id: &str) -> Option<&'a RoleSpec> {
+        roles.iter().find(|r| r.id == id)
+    }
 }
 
 /// DESIGN §5.3 の `usage`。取れない項目は省略可。
@@ -202,6 +234,9 @@ pub enum Event {
         /// ADR-0014 D1: `None` はワーカー run、`Some(Reviewer)` は Reviewer run（ワーカー run に `Some(Worker)` は書かない）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<RunRole>,
+        /// ADR-0016 D1: run 開始時のタスクの役割名（`Task.role`）。役割の無いタスク・導入前のイベントには無い。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_role: Option<String>,
     },
     WorkerProgress {
         run_id: String,
@@ -236,6 +271,11 @@ pub enum Event {
     Answered {
         question: String,
         answer: String,
+    },
+    /// ADR-0016 D2: 実行中の run が `delegate` で提案し、検証を通って挿入された子タスク。状態は変えない（`replay` は無視する）。
+    Delegated {
+        run_id: String,
+        task_ids: Vec<TaskId>,
     },
     /// ADR-0018 D2: クラスタへの ssh 多重接続が無く、そのクラスタでは実行できない（人のログイン待ち）。
     ClusterUnavailable {

@@ -751,6 +751,15 @@
           "description": "DB の絶対パス。",
           "type": "string"
         },
+        "delegation": {
+          "$ref": "#/$defs/DelegationLimits",
+          "default": {
+            "max_delegate_per_run": 8,
+            "max_tree_depth": 5,
+            "max_tree_runs": 100
+          },
+          "description": "ADR-0016 D2: `[delegation]` の上限。"
+        },
         "error_cooldown_secs": {
           "format": "uint64",
           "minimum": 0,
@@ -807,6 +816,14 @@
         },
         "reviewer": {
           "$ref": "#/$defs/ReviewerConfigView"
+        },
+        "roles": {
+          "default": [],
+          "description": "ADR-0016 D1: `[[roles]]` の要約（指示文の本文は出さない）。",
+          "items": {
+            "$ref": "#/$defs/RoleConfigView"
+          },
+          "type": "array"
         },
         "tick_ms": {
           "format": "uint64",
@@ -1182,6 +1199,60 @@
       },
       "type": "object"
     },
+    "DelegatedView": {
+      "description": "ADR-0016 D2: 1 回の `delegate`（`Event::Delegated`）の要約。",
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "tasks": {
+          "description": "子の現在の状態。既に存在しない ID は落とす。",
+          "items": {
+            "$ref": "#/$defs/TaskRef"
+          },
+          "type": "array"
+        },
+        "ts": {
+          "description": "イベントの ts（`EventRow.ts`）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "ts",
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "DelegationLimits": {
+      "description": "委譲の上限（ADR-0016 D2。既定 8 / 5 / 100）。",
+      "properties": {
+        "max_delegate_per_run": {
+          "description": "1 run あたりの件数（複数の `delegate` をまたいで数える）。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_tree_depth": {
+          "description": "木の深さ（根 = 1）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_tree_runs": {
+          "description": "木全体のワーカー run 数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_delegate_per_run",
+        "max_tree_depth",
+        "max_tree_runs"
+      ],
+      "type": "object"
+    },
     "DraftGroup": {
       "properties": {
         "drafts": {
@@ -1283,6 +1354,13 @@
             },
             "run_id": {
               "type": "string"
+            },
+            "task_role": {
+              "description": "ADR-0016 D1: run 開始時のタスクの役割名（`Task.role`）。役割の無いタスク・導入前のイベントには無い。",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "type": {
               "const": "worker_started",
@@ -1464,6 +1542,30 @@
             "type",
             "question",
             "answer"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0016 D2: 実行中の run が `delegate` で提案し、検証を通って挿入された子タスク。状態は変えない（`replay` は無視する）。",
+          "properties": {
+            "run_id": {
+              "type": "string"
+            },
+            "task_ids": {
+              "items": {
+                "$ref": "#/$defs/TaskId"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "delegated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "task_ids"
           ],
           "type": "object"
         },
@@ -1914,10 +2016,16 @@
         },
         "adapter": {
           "default": null,
+          "description": "省略時は役割の既定 → 指定なし。",
           "type": [
             "string",
             "null"
           ]
+        },
+        "aggregate": {
+          "default": false,
+          "description": "ADR-0016 D3: 委譲した子が全て終端になった後に集約 run を 1 回行う。",
+          "type": "boolean"
         },
         "cluster": {
           "default": null,
@@ -1945,16 +2053,24 @@
           "type": "integer"
         },
         "max_turns": {
-          "default": 10,
+          "default": null,
+          "description": "省略時は役割の既定 → 10。",
           "format": "uint32",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "max_wall_secs": {
-          "default": 600,
+          "default": null,
+          "description": "省略時は役割の既定 → 600。",
           "format": "uint64",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "objective": {
           "type": "string"
@@ -1975,9 +2091,25 @@
           "format": "int32",
           "type": "integer"
         },
+        "role": {
+          "default": null,
+          "description": "ADR-0016 D1: 役割名（自由記述）。`[[roles]]` にあれば省略値の既定と run 時の指示文が効く。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tier": {
-          "$ref": "#/$defs/Tier",
-          "default": "standard"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "省略時は役割の既定 → `standard`（ADR-0016 D1 / M3: タスクの値 > 役割の既定 > 全体の既定）。"
         },
         "title": {
           "type": "string"
@@ -2388,6 +2520,55 @@
       ],
       "type": "object"
     },
+    "RoleConfigView": {
+      "description": "`[[roles]]` 1 行の要約（ADR-0016 D1）。`instructions` は**本文を出さない**（プロンプトの中身は設定ファイルにだけ置く）。",
+      "properties": {
+        "adapter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_instructions": {
+          "description": "指示文が 1 文字以上あるか（中身は出さない）。",
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "max_turns": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_wall_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "has_instructions"
+      ],
+      "type": "object"
+    },
     "RunFiles": {
       "properties": {
         "result": {
@@ -2625,6 +2806,10 @@
           },
           "type": "array"
         },
+        "aggregate": {
+          "description": "ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。",
+          "type": "boolean"
+        },
         "attempts": {
           "format": "uint32",
           "minimum": 0,
@@ -2680,6 +2865,13 @@
         "priority": {
           "format": "int32",
           "type": "integer"
+        },
+        "role": {
+          "description": "ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。\n導入前のタスクには無いので任意。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "status": {
           "$ref": "#/$defs/Status"
@@ -2756,6 +2948,13 @@
           },
           "type": "array"
         },
+        "delegated": {
+          "description": "ADR-0016 D2: 各 run が `delegate` で作った子（`Event::Delegated` の順）。",
+          "items": {
+            "$ref": "#/$defs/DelegatedView"
+          },
+          "type": "array"
+        },
         "dependencies": {
           "items": {
             "$ref": "#/$defs/TaskRef"
@@ -2779,6 +2978,13 @@
             "$ref": "#/$defs/ReviewNote"
           },
           "type": "array"
+        },
+        "role": {
+          "description": "ADR-0016 D1: `Task.role`（GUI の表示用に最上位にも出す）。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "runs": {
           "items": {
@@ -2808,6 +3014,7 @@
       },
       "required": [
         "task",
+        "delegated",
         "timers",
         "criteria",
         "runs",

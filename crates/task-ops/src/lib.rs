@@ -8,6 +8,7 @@
 
 pub mod add;
 pub mod daemon;
+pub mod delegate;
 pub mod derive;
 pub mod error;
 pub mod gate;

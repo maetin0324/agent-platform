@@ -347,6 +347,14 @@ pub trait TaskStore: Send + Sync {
     /// ADR-0010 D2: `insert` + `Event::Created` + `extra_events` を 1 トランザクションで行う。
     fn create_task(&self, task: &Task, extra_events: Vec<Event>) -> Result<(), StoreError>;
 
+    /// ADR-0016 D2 / M2: 実行中の委譲。子タスク群を挿入（`Created` → `Accept` で `ready`）し、親に
+    /// `Event::Delegated{run_id, task_ids}` を追記する。全体が 1 トランザクション。親の状態は変えない。
+    /// 子の `parent_id` が `parent_id` と違えば `StoreError::Invalid`。
+    fn delegate_children(&self, parent_id: TaskId, run_id: &str, children: Vec<Task>) -> Result<Vec<TaskId>, StoreError>;
+
+    /// `parent_id` を親に持つタスク（終端を含む）を `created_at` 昇順（同時刻は挿入順）で返す（ADR-0016 M5 / M6）。
+    fn children(&self, parent_id: TaskId) -> Result<Vec<Task>, StoreError>;
+
     /// ADR-0010 D2 / D7（P-7）: `status = running` かつリースの run_id が一致するときだけ `expires_at = now + ttl` に
     /// 延長して true を返す。状態遷移ではないのでイベントは追記しない。
     fn renew_lease(&self, task_id: TaskId, worker_run_id: &str, ttl: StdDuration) -> Result<bool, StoreError>;
@@ -1089,6 +1097,57 @@ impl TaskStore for SqliteStore {
         Ok(())
     }
 
+    fn delegate_children(&self, parent_id: TaskId, run_id: &str, children: Vec<Task>) -> Result<Vec<TaskId>, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if Self::get_locked(&tx, parent_id)?.is_none() {
+            return Err(StoreError::Invalid(format!("task not found: {parent_id}")));
+        }
+        let mut ids = Vec::with_capacity(children.len());
+        for child in &children {
+            if child.parent_id != Some(parent_id) {
+                return Err(StoreError::Invalid(format!(
+                    "child {} does not belong to task {parent_id}",
+                    child.id
+                )));
+            }
+            Self::insert_tx(&tx, child)?;
+            Self::append_event_tx(
+                &tx,
+                child.id,
+                &Event::Created {
+                    task: Box::new(child.clone()),
+                },
+            )?;
+            if child.status == Status::Draft {
+                Self::apply_transition_tx(&tx, child.id, Trigger::Accept, vec![])?;
+            }
+            ids.push(child.id);
+        }
+        Self::append_event_tx(
+            &tx,
+            parent_id,
+            &Event::Delegated {
+                run_id: run_id.to_string(),
+                task_ids: ids.clone(),
+            },
+        )?;
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    fn children(&self, parent_id: TaskId) -> Result<Vec<Task>, StoreError> {
+        let conn = self.lock()?;
+        // 同じトランザクションで挿入した子（created_at が同じ）は挿入順（rowid）で返す。
+        let mut stmt = conn.prepare("SELECT json FROM tasks WHERE parent_id = ?1 ORDER BY created_at ASC, rowid ASC")?;
+        let rows = stmt.query_map(params![parent_id.to_string()], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(Self::row_to_task(row?)?);
+        }
+        Ok(out)
+    }
+
     fn renew_lease(&self, task_id: TaskId, worker_run_id: &str, ttl: StdDuration) -> Result<bool, StoreError> {
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1301,6 +1360,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 
@@ -1818,6 +1879,40 @@ mod tests {
     }
 
     /// ADR-0010 D2: create_task は insert + Created + extra を 1 トランザクションで行い、失敗時は何も残さない。
+    /// ADR-0016 M2: 委譲された子は Created → Accept で ready になり、親に Delegated が残る。全て 1 トランザクション。
+    #[test]
+    fn delegate_children_inserts_ready_children_and_records_delegated_on_the_parent() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let parent = sample_task(Status::Running);
+        store.insert(&parent).unwrap();
+        let mut a = sample_task(Status::Draft);
+        a.parent_id = Some(parent.id);
+        let mut b = sample_task(Status::Draft);
+        b.parent_id = Some(parent.id);
+        b.depends_on = vec![a.id];
+        let ids = store.delegate_children(parent.id, "run-1", vec![a.clone(), b.clone()]).unwrap();
+        assert_eq!(ids, vec![a.id, b.id]);
+        for id in &ids {
+            let t = store.get(*id).unwrap().unwrap();
+            assert_eq!(t.status, Status::Ready);
+            assert_eq!(reasons(&store, *id), vec!["accept"]);
+        }
+        let children = store.children(parent.id).unwrap();
+        assert_eq!(children.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
+        let events = store.events_for(parent.id).unwrap();
+        assert!(matches!(&events.last().unwrap().1, Event::Delegated { run_id, task_ids } if run_id == "run-1" && *task_ids == ids));
+        assert_eq!(store.get(parent.id).unwrap().unwrap().status, Status::Running);
+        // 親が違う子は拒否され、何も挿入されない。
+        let mut stray = sample_task(Status::Draft);
+        stray.parent_id = Some(a.id);
+        assert!(store.delegate_children(parent.id, "run-2", vec![stray.clone()]).is_err());
+        assert!(store.get(stray.id).unwrap().is_none());
+        assert_eq!(store.children(parent.id).unwrap().len(), 2);
+        // ready_tasks は a を返し、b は a が done になるまで返さない。
+        let ready = store.ready_tasks(10).unwrap();
+        assert_eq!(ready.iter().map(|t| t.id).collect::<Vec<_>>(), vec![a.id]);
+    }
+
     #[test]
     fn create_task_inserts_task_and_events_atomically() {
         let store = SqliteStore::open_in_memory().unwrap();
@@ -1968,9 +2063,9 @@ mod tests {
         let ev: Event = serde_json::from_str(old).unwrap();
         assert_eq!(
             ev,
-            Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: None, role: None }
+            Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: None, role: None , task_role: None}
         );
-        let new = Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: Some("acct-a".into()), role: None };
+        let new = Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: Some("acct-a".into()), role: None , task_role: None};
         assert!(serde_json::to_string(&new).unwrap().contains(r#""provider":"acct-a""#));
         assert_eq!(serde_json::to_string(&ev).unwrap(), old);
     }
@@ -1988,6 +2083,7 @@ mod tests {
             model: "m".into(),
             provider: Some("acct-a".into()),
             role: Some(crate::RunRole::Reviewer),
+            task_role: None,
         };
         let json = serde_json::to_string(&reviewer).unwrap();
         assert!(json.contains(r#""role":"reviewer""#), "{json}");

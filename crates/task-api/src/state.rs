@@ -53,6 +53,8 @@ pub(crate) struct Inner {
     pub(crate) busy_timeout_ms: u64,
     pub(crate) view: ViewContext,
     pub(crate) config_view: ConfigView,
+    /// ADR-0016 M3: `POST /tasks` の省略値を埋める `[[roles]]`。
+    pub(crate) roles: Vec<task_core::RoleSpec>,
     pub(crate) taskd_version: String,
     pub(crate) instance_id: String,
     pub(crate) started_at: String,
@@ -83,6 +85,7 @@ impl ApiState {
             busy_timeout_ms: u64::try_from(settings.busy_timeout.as_millis()).unwrap_or(u64::MAX),
             view: settings.view,
             config_view: settings.config_view,
+            roles: settings.roles,
             taskd_version: settings.taskd_version,
             instance_id: settings.instance_id,
             started_at: settings.started_at,

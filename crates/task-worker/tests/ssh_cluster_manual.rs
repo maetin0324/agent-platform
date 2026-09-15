@@ -30,6 +30,8 @@ fn task(dir: &std::path::Path) -> Task {
         lease: None,
         created_at: now,
         updated_at: now,
+        role: None,
+        aggregate: false,
     }
 }
 

@@ -64,6 +64,7 @@ fn started(run_id: &str, provider: Option<&str>) -> Event {
         model: "claude-sonnet-5".into(),
         provider: provider.map(str::to_string),
         role: None,
+        task_role: None,
     }
 }
 

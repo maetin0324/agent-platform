@@ -183,6 +183,7 @@ mod tests {
             model: "m".into(),
             provider: None,
             role,
+            task_role: None,
         };
         let finished = |run_id: &str, outcome: &str, role| Event::WorkerFinished {
             run_id: run_id.into(),
@@ -374,6 +375,7 @@ mod tests {
                     model: "m".into(),
                     provider: None,
                     role: None,
+                    task_role: None,
                 },
             ),
             (
@@ -384,6 +386,7 @@ mod tests {
                     model: "m".into(),
                     provider: None,
                     role: None,
+                    task_role: None,
                 },
             ),
         ];
@@ -415,6 +418,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 

@@ -1,6 +1,7 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-15 Phase 10（ADR-0016 役割と委譲）— `POST /tasks` の `role` / `aggregate`、`TaskDetail.role` / `delegated[]`、`GET /config` の `roles[]` / `delegation`、イベント種別 `delegated` を追加（全て追加のみ。v1 のまま）
 - 提供者: **taskd**（crate `task-api`、axum）。taskd のデーモンプロセス内で、`taskd.toml` に `[api]` 節があるときだけ動く
 - 利用者: `taskd-gui` の BFF（Remix = React Router framework mode のサーバ側 loader / action）と `curl`。**ブラウザは直接呼ばない**
 - 正の型定義: Rust（`task-core` / `task-ops` / `task-api`、`serde` + `schemars`）。JSON Schema を `docs/api/v1/api-v1.schema.json` にコミットし、
@@ -189,12 +190,20 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
                {"type":"reviewer","text":"the diff is minimal"}],
  "kind":"execute","tier":"standard","adapter":null,"priority":0,
  "parent":null,"depends_on":["01J…"],
- "max_turns":10,"max_wall_secs":600,"max_retries":2,"workspace":null}
+ "max_turns":10,"max_wall_secs":600,"max_retries":2,"workspace":null,
+ "role":"lead","aggregate":false}
 ```
 
 - `acceptance[]` は `task_ops::add::CriterionSpec`（`Human{text}` / `Command{cmd, expect_exit}` / `ArtifactExists{name}` / `Reviewer{text}`）を `#[serde(tag = "type", rename_all = "snake_case")]` で表したもの。
-- 省略可能なフィールドと既定は `taskctl add` と同じ: `kind=execute`、`tier=standard`、`adapter=null`、`priority=0`、`parent=null`、`depends_on=[]`、
-  `max_turns=10`、`max_wall_secs=600`、`max_retries=2`、`workspace=null`（→ `Local{path: "<task_id>"}`、相対）。`title` / `objective` / `acceptance` は必須。
+- 省略可能なフィールドと既定は `taskctl add` と同じ: `kind=execute`、`priority=0`、`parent=null`、`depends_on=[]`、
+  `max_retries=2`、`workspace=null`（→ `Local{path: "<task_id>"}`、相対）、`role=null`、`aggregate=false`。`title` / `objective` / `acceptance` は必須。
+- **`tier` / `max_turns` / `max_wall_secs` / `adapter` は Phase 10 から任意**（ADR-0016 D1 / M3）。省略時は
+  **`role` に一致する `[[roles]]` の既定 → 全体の既定**（`tier=standard`、`max_turns=10`、`max_wall_secs=600`、`adapter=null`）の順で埋める。
+  書いた値は常に役割の既定より優先する。`max_retries` に役割の既定は無い（常に 2）。
+- `role` は自由記述の役割名（ADR-0016 D1）。`[[roles]]` に無い名前でもエラーにせず、名前だけ保存する（既定も指示文も付かない）。
+  状態機械は `role` を見ない。`GET /config` の `roles[]` が設定にある役割の一覧。
+- `aggregate`（ADR-0016 D3）: true の親は、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を書く。
+  応答の `Task` では **false のとき省略される**（`#[serde(skip_serializing_if)]`。`role` も `null` のとき省略）。
 - `acceptance` は**クライアントが並べた順**で保存する（CLI は accept → cmd → artifact → reviewer の固定順で渡す。並びに意味は無い）。
   `command` の `text` は `` `<cmd>` exits 0 ``（現状の `CriterionSpec::into_criterion` は `expect_exit` に関わらずこの文。CLI も常に `expect_exit = 0`）、`artifact_exists` の `text` は `artifact <name> exists`。整形は task-ops が行う。
 - 初期 `status`: `kind=approval` なら `ready`、それ以外 `draft`。`Created` イベントと同一トランザクション（`task_ops::add::create_task(store, spec, now) -> Task`）。
@@ -214,6 +223,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 - `workspace_dir` は `WorkspaceSpec::Local{path}` を `workspace_root` で絶対化した文字列（`canonicalize` はしない。存在しなくてもよい）。
   `Remote{cluster, path}` では**手元の写し** `workspace_root/<task_id>`（run のログ `runs/` と成果物はここ。クラスタ側のパスは `task.workspace.path`。ADR-0018 D1、Phase 12）。
 - `cluster` は `WorkspaceSpec::Remote` の `cluster`（`[[clusters]] id`）。`Local` は `null`（Phase 12）。
+- `role` は `task.role` と同じ値を最上位にも出したもの（GUI の表示用。Phase 10、ADR-0016 D1）。役割が無ければ `null`。
+- `delegated[]` は、このタスクの run が `delegate` で作った子の履歴（`Event::Delegated` の出現順。Phase 10、ADR-0016 D2）。
+  1 要素は `{run_id, ts, tasks: TaskRef[]}` で、`ts` はイベントの `ts`、`tasks` は子の**現在の**状態（既に存在しない ID は落とす）。
+  委譲された子は `children[]` にも出る（`delegated[]` はどの run が作ったかを足すだけ）。
 - `timers.now` は応答時刻。クライアントは `lease_expires_at - now` 等をこの `now` 基準で計算する（時計ずれ対策）。
 - `runs[].files` は task-api が `<workspace_dir>/runs/<run_id>/` を `stat` して埋める（task-ops は `null`）。
 - `actions` は今この状態で許される操作（§5.4）。GUI はボタンの表示にこれを使い、押した結果の 409 も正常系として扱う。
@@ -226,6 +239,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `after_seq` | −1 | この `seq` より大きいものから |
 | `limit` | 500（最大 5000） | |
 | `types` | 全て | `Event` の `type` 名をカンマ区切り（例 `transitioned,worker_finished`）。未知の名前は 400 |
+
+`types` の語彙（`Event` の `type`、12 種）: `created`、`transitioned`、`worker_started`、`worker_progress`、`artifact_produced`、
+`worker_finished`、`review_verdict`、`approval_requested`、`approval_decided`、`answered`、`provider_throttled`、
+`delegated`（Phase 10。`{run_id, task_ids}`。状態は変えないので `replay` は無視する）。
 
 - `seq` 昇順。`has_more` が true なら最後の `seq` を `after_seq` に入れて続きを取る。
 - `items[].id` はグローバル id（ADR-0013 D6）。`items[].ts` は `events.ts`。
@@ -340,8 +357,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ### 3.21 `GET /config` → 200 `ConfigView`
 
-`taskd.toml` の要約。`db`（絶対パス）、`workspace_root`、`tick_ms`、`max_concurrency`、`lease_grace_secs`、`idle_timeout_secs`、`kill_grace_secs`、`review_timeout_secs`、`error_cooldown_secs`、`retry_backoff_base_secs`、`retry_backoff_max_secs`、`max_requeues`、`plan.auto_accept`、`reviewer{adapter, tier}`、`providers[]{id, adapter, tiers, concurrency, model, env_keys}`、`clusters[]{id, host, concurrency, sync, delete_on_push, has_setup, env_keys, rsync_excludes}`（Phase 12）、`api{bind, auth_required, allowed_hosts}`、`config_path`。
-`[[providers]].env` の**値**、`[adapters.*].env` の値、`[[clusters]].env` の値と `setup` の中身、`token_file` のパスと内容は出さない。`task-api` は `taskd` crate に依存しないので、この型は task-api に置き、taskd が起動時に値を作って `ApiState` に渡す。
+`taskd.toml` の要約。`db`（絶対パス）、`workspace_root`、`tick_ms`、`max_concurrency`、`lease_grace_secs`、`idle_timeout_secs`、`kill_grace_secs`、`review_timeout_secs`、`error_cooldown_secs`、`retry_backoff_base_secs`、`retry_backoff_max_secs`、`max_requeues`、`plan.auto_accept`、`reviewer{adapter, tier}`、`providers[]{id, adapter, tiers, concurrency, model, env_keys}`、`clusters[]{id, host, concurrency, sync, delete_on_push, has_setup, env_keys, rsync_excludes}`（Phase 12）、
+`roles[]{id, tier, adapter, max_turns, max_wall_secs, has_instructions}`（Phase 10。`[[roles]]` の順）、
+`delegation{max_delegate_per_run, max_tree_depth, max_tree_runs}`（Phase 10。既定 8 / 5 / 100）、`api{bind, auth_required, allowed_hosts}`、`config_path`。
+`[[providers]].env` の**値**、`[adapters.*].env` の値、`[[clusters]].env` の値と `setup` の中身、`[[roles]].instructions` の**本文**（有無だけを `has_instructions` で出す）、`token_file` のパスと内容は出さない。`task-api` は `taskd` crate に依存しないので、この型は task-api に置き、taskd が起動時に値を作って `ApiState` に渡す。
 
 ### 3.22 `GET /schema` → 200 `application/schema+json`
 
@@ -464,8 +483,8 @@ data: {"reason":"cursor_too_old","cursor":20000}
 | `task-core`（既存） | `Task`, `TaskId`, `TaskKind`, `Status`, `Tier`, `WorkerHint`, `WorkspaceSpec`, `Budget`, `Lease`, `Check`, `Criterion`, `ArtifactRef`, `Usage`, `Event` | serde 表現そのまま。`Event` は Phase 9a で `JsonSchema` を derive 済み（`until` は `#[schemars(with = "String")]`）。`ProviderThrottled.reason: Option<String>`（任意フィールド、語彙 `throttled \| auth_failed \| exhausted \| spawn`。ADR-0013 D9） |
 | `task-core`（Phase 9a、実装済み） | `EventRow { id: u64, task_id: TaskId, seq: u64, ts: String, event: Event }`、`ListFilter { statuses, kinds, parent_id, root_only, text_contains }`、`ListOrder { Dispatch, UpdatedDesc, CreatedDesc }`、`Page<T> { items, next_cursor, total }`、`SCHEMA_VERSION` | `events_since` / `list_page` / `count_by_status` の型。`EventRow` は `docs/api/v1/event.schema.json` のルート |
 | `task-ops`（Phase 9a、実装済み） | `add::{NewTaskSpec, CriterionSpec, create_task}`、`plan::{NewPlanSpec, create_plan}`、`gate::{TransitionResult, approve, reject, answer, cancel}`、`replay::{ReplayReport, ReplayMismatch, replay}`、`derive::{ReviewNote, AnswerNote, …}`、`OpsError` | 9b で `Deserialize` / `Serialize` / `JsonSchema` を付ける（`NewTaskSpec` / `NewPlanSpec` は `deny_unknown_fields` + `#[serde(default)]`、`CriterionSpec` は `tag = "type"`、`ReplayMismatch.field` は `&'static str` のまま文字列に出る） |
-| `task-ops`（Phase 9b で追加） | `TaskRef`, `TaskSummary`, `TaskList`, `TaskDetail`, `Timers`, `CriterionView`, `VerdictView`, `RunSummary`, `RunFiles`, `RunOutcomeKind`, `ApprovalLink`, `ApprovalDecisionView`, `Action`, `Inbox`, `InboxCounts`, `ApprovalItem`, `EvidenceView`, `QuestionItem`, `DraftGroup`, `AttentionItem`, `Graph`, `GraphNode`, `GraphEdge`, `TransitionResult.cascaded`, `DaemonSnapshot`, `InFlight`, `InFlightKind`, `CooldownView`, `ProviderLive` | ビュー型。全て `JsonSchema`。`DaemonSnapshot` は task-dispatch が作り task-api が読むので、両者が依存する task-ops に置く（ADR-0013 D3/D4 の依存方向を満たす）。`CooldownView` は `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直した写し |
-| `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema` | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
+| `task-ops`（Phase 9b で追加） | `TaskRef`, `TaskSummary`, `TaskList`, `TaskDetail`, `Timers`, `CriterionView`, `VerdictView`, `RunSummary`, `RunFiles`, `RunOutcomeKind`, `ApprovalLink`, `ApprovalDecisionView`, `Action`, `Inbox`, `InboxCounts`, `ApprovalItem`, `EvidenceView`, `QuestionItem`, `DraftGroup`, `AttentionItem`, `Graph`, `GraphNode`, `GraphEdge`, `DelegatedView`（Phase 10）, `TransitionResult.cascaded`, `DaemonSnapshot`, `InFlight`, `InFlightKind`, `CooldownView`, `ProviderLive` | ビュー型。全て `JsonSchema`。`DaemonSnapshot` は task-dispatch が作り task-api が読むので、両者が依存する task-ops に置く（ADR-0013 D3/D4 の依存方向を満たす）。`CooldownView` は `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直した写し |
+| `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `RoleConfigView`（Phase 10）, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema` | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
 
 ### 6.2 Rust 表記（serde の属性はコメントで示す。`JsonSchema` は全て derive）
 
@@ -477,6 +496,9 @@ pub enum ListOrder { Dispatch, UpdatedDesc, CreatedDesc }
 pub struct Page<T> { pub items: Vec<T>, pub next_cursor: Option<String>, pub total: u64 }
 // Event::ProviderThrottled { provider: String, until: OffsetDateTime, #[serde(default, skip_serializing_if = "Option::is_none")] reason: Option<String> }
 // Event::WorkerStarted / WorkerFinished に #[serde(default, skip_serializing_if = "Option::is_none")] role: Option<RunRole>（None = ワーカー run。ADR-0014 D1）
+// Phase 10（ADR-0016）: Task に #[serde(default, skip_serializing_if = "Option::is_none")] role: Option<String> と
+//   #[serde(default, skip_serializing_if = "std::ops::Not::not")] aggregate: bool（false と null は直列化で省かれる）。
+//   Event::Delegated { run_id: String, task_ids: Vec<TaskId> } を追加（type 名 `delegated`）
 // #[serde(rename_all = "snake_case")] pub enum RunRole { Worker, Reviewer }
 
 // ---- task-ops: 参照・一覧 ----
@@ -492,12 +514,16 @@ pub struct TaskList { pub items: Vec<TaskSummary>, pub next_cursor: Option<Strin
 
 // ---- task-ops: 詳細（taskctl show --json と同一）----
 pub struct TaskDetail {
-    pub task: Task, pub workspace_dir: Option<String>, pub timers: Timers, pub criteria: Vec<CriterionView>,
+    pub task: Task, pub workspace_dir: Option<String>, pub cluster: Option<String> /* Phase 12 */,
+    pub role: Option<String> /* Phase 10 */, pub delegated: Vec<DelegatedView> /* Phase 10 */,
+    pub timers: Timers, pub criteria: Vec<CriterionView>,
     pub runs: Vec<RunSummary>, pub prior_review: Vec<ReviewNote>, pub answers: Vec<AnswerNote>,
     pub latest_question: Option<String>, pub approvals: Vec<ApprovalLink>,
     pub dependencies: Vec<TaskRef>, pub dependents: Vec<TaskRef>, pub children: Vec<TaskRef>,
     pub actions: Vec<Action>, pub worker_run_hint: Option<String>,
 }
+/// Phase 10（ADR-0016 D2）: 1 回の `delegate`（`Event::Delegated`）の要約。`tasks` は子の現在の状態（消えた ID は落とす）。
+pub struct DelegatedView { pub run_id: String, pub ts: String, pub tasks: Vec<TaskRef> }
 pub struct Timers { pub now: String, pub lease_expires_at: Option<String>, pub backoff_until: Option<String>,
     pub consecutive_requeues: u32, pub max_requeues: u32, pub consecutive_reviewer_requeues: u32 }
 pub struct CriterionView { pub idx: usize, pub text: String, pub check: Check, pub latest_verdict: Option<VerdictView>, pub approval: Option<ApprovalLink> }
@@ -539,10 +565,15 @@ pub enum AttentionItem {
 // #[serde(deny_unknown_fields)]
 pub struct NewTaskSpec {
     pub title: String, pub objective: String, pub acceptance: Vec<CriterionSpec>,
-    #[serde(default)] pub kind: TaskKind /* execute */, #[serde(default)] pub tier: Tier /* standard */,
+    #[serde(default)] pub kind: TaskKind /* execute */,
+    // Phase 10（ADR-0016 M3）: tier / max_turns / max_wall_secs / adapter は Option になった（省略時は役割の既定 → 全体の既定）
+    #[serde(default)] pub tier: Option<Tier> /* 既定 standard */,
     #[serde(default)] pub priority: i32, #[serde(default)] pub parent: Option<TaskId>, #[serde(default)] pub depends_on: Vec<TaskId>,
-    #[serde(default = "10")] pub max_turns: u32, #[serde(default = "600")] pub max_wall_secs: u64, #[serde(default = "2")] pub max_retries: u32,
-    #[serde(default)] pub workspace: Option<PathBuf> /* JSON では文字列 */, #[serde(default)] pub adapter: Option<String>,
+    #[serde(default)] pub max_turns: Option<u32> /* 既定 10 */, #[serde(default)] pub max_wall_secs: Option<u64> /* 既定 600 */,
+    #[serde(default = "2")] pub max_retries: u32,
+    #[serde(default)] pub role: Option<String> /* Phase 10 */, #[serde(default)] pub aggregate: bool /* Phase 10 */,
+    #[serde(default)] pub workspace: Option<PathBuf> /* JSON では文字列 */,
+    #[serde(default)] pub cluster: Option<String> /* Phase 12 */, #[serde(default)] pub adapter: Option<String>,
 }
 // #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CriterionSpec { Human { text: String }, Command { cmd: String, #[serde(default)] expect_exit: i32 }, ArtifactExists { name: String }, Reviewer { text: String } }
@@ -603,7 +634,13 @@ pub struct ClusterView { pub id: String, pub host: String, pub concurrency: usiz
 pub struct ConfigView { pub config_path: String, pub db: String, pub workspace_root: String, pub tick_ms: u64, pub max_concurrency: usize,
     pub lease_grace_secs: u64, pub idle_timeout_secs: u64, pub kill_grace_secs: u64, pub review_timeout_secs: u64, pub error_cooldown_secs: u64,
     pub retry_backoff_base_secs: u64, pub retry_backoff_max_secs: u64, pub max_requeues: u32, pub plan_auto_accept: bool,
-    pub reviewer: ReviewerConfigView, pub providers: Vec<ProviderConfigView>, #[serde(default)] pub clusters: Vec<ClusterConfigView> /* Phase 12 */, pub api: ApiConfigView }
+    pub reviewer: ReviewerConfigView, pub providers: Vec<ProviderConfigView>, #[serde(default)] pub clusters: Vec<ClusterConfigView> /* Phase 12 */,
+    #[serde(default)] pub roles: Vec<RoleConfigView> /* Phase 10 */, #[serde(default)] pub delegation: DelegationLimits /* Phase 10 */, pub api: ApiConfigView }
+/// Phase 10（ADR-0016 D1）: `[[roles]]` 1 行。`instructions` の**本文は出さない**（有無だけ）。
+pub struct RoleConfigView { pub id: String, pub tier: Option<Tier>, pub adapter: Option<String>, pub max_turns: Option<u32>,
+    pub max_wall_secs: Option<u64>, pub has_instructions: bool }
+/// Phase 10（ADR-0016 D2）: task-core の型。既定は 8 / 5 / 100。
+pub struct DelegationLimits { pub max_delegate_per_run: usize, pub max_tree_depth: u32, pub max_tree_runs: u32 }
 pub struct ReviewerConfigView { pub adapter: Option<String>, pub tier: Tier }
 pub struct ProviderConfigView { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>, pub env_keys: Vec<String> }
 pub struct ClusterConfigView { pub id: String, pub host: String, pub concurrency: usize, pub sync: String, pub delete_on_push: bool, pub has_setup: bool, pub env_keys: Vec<String>, pub rsync_excludes: Vec<String> }

@@ -1,9 +1,13 @@
-# taskd ワーカープロトコル v1（初版）
+# taskd ワーカープロトコル v1/v2
 
-- 状態: Draft（Phase 0 初版）。規範は `docs/DESIGN.md` §5.3 と [ADR-0003](../adr/0003-worker-protocol.md)
+- 状態: Draft（Phase 0 初版、Phase 10 で v2 に拡張）。規範は `docs/DESIGN.md` §5.3 と [ADR-0003](../adr/0003-worker-protocol.md)、
+  v2 の追加分は [ADR-0016](../adr/0016-roles-and-delegation.md)（役割と委譲、実装メモ M3/M4/M8/M9）
 - JSON Schema: 正は隣の `worker-protocol.schema.json`（Phase 3 で `task-worker::protocol` の Rust 型から `schemars` で生成。`task-worker` のテスト `committed_schema_matches_generated` が一致を検証し、`UPDATE_SCHEMA=1 cargo test -p task-worker` で再生成する）。本文書 §7 の手書きスキーマは説明用の抜粋
 - §9 は Phase 4（ADR-0006）で確定した CLI エージェント系アダプタ（`claude-code` 等）専用の規約。§1〜§8 の
   JSON Lines プロトコルとは別物で、DESIGN §5.4 の表への反映は `docs/PROGRESS.md` の提案 P-24 として持ち越し中
+- **v2（ADR-0016 M9, Phase 10）**: `run.protocol` を `2` に上げた。追加は `delegate` メッセージ（§4.x）、
+  `context.role` / `context.children`（§3.1）、`task.role` / `task.aggregate`。全て**追加のみ**で、`protocol`
+  フィールドの値は検査していないため v1 のワーカー（この節を実装しないもの）はそのまま動く
 
 ## 1. 概要
 
@@ -38,30 +42,39 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 
 ```json
 {"type":"run",
- "protocol":1,
- "task":{ "...": "task-core::Task を serde でそのまま直列化したもの" },
+ "protocol":2,
+ "task":{ "...": "task-core::Task を serde でそのまま直列化したもの（role・aggregate を含む）" },
  "workspace":"/abs/path/to/workspace/<task_id>",
  "context":{
    "prior_review":[{"criterion":0,"pass":false,"reason":"cargo test exit 101: ..."}],
    "inputs":[{"name":"spec.md","path":"inputs/spec.md","sha256":"…","kind":"doc"}],
-   "answers":[{"question":"which crate version?","answer":"1.0"}]
+   "answers":[{"question":"which crate version?","answer":"1.0"}],
+   "role":{"id":"lead","instructions":"You coordinate the work of others."},
+   "children":[{"id":"01J9…","title":"implement parser","role":"implementer","status":"done",
+                "outcome":"done","artifacts":[{"name":"parser.rs","path":"artifacts/parser.rs","sha256":"…","kind":"rs"}],
+                "workspace":"/abs/path/to/workspace/<child_task_id>"}]
  }}
 ```
 
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `protocol` | integer | ✓ | `1` |
-| `task` | object | ✓ | `Task`（id, kind, title, objective, acceptance[], inputs[], depends_on[], status, priority, worker_hint, workspace, budget, attempts, …） |
+| `protocol` | integer | ✓ | `1`（v1）または `2`（v2, ADR-0016 M9）。ワーカーはこの値を検査する必要はない |
+| `task` | object | ✓ | `Task`（id, kind, title, objective, acceptance[], inputs[], depends_on[], status, priority, worker_hint, workspace, budget, attempts, `role`, `aggregate`, …）。`task.role`（`Option<string>`）はタスクの役割名、`task.aggregate`（`bool`。既定 false）は集約 run の親かどうか（ADR-0016 D1/D3） |
 | `workspace` | string | ✓ | 絶対パス。ワーカーの cwd。`artifact.path` の基準 |
 | `context.prior_review` | array | ✓（空可） | 直前のレビュー結果。`{criterion: usize, pass: bool, reason: string}` |
 | `context.inputs` | array | ✓（空可） | 依存成果物の `ArtifactRef`。`prepare()` で `workspace/inputs/` に配置済み |
 | `context.answers` | array | –（省略可、空なら省略） | `taskctl answer` で記録された `question` → 人間の回答の履歴（時系列、`{question: string, answer: string}`）。ADR-0010 D3, P-10。前方互換のため未知のワーカーは無視してよい |
+| `context.role` | object | –（省略可。v2, ADR-0016 D1/M3） | タスクに役割があるときだけ `Some`。`{id: string, instructions: string}`（`instructions` は `[[roles]]` に指示文が無ければ空文字列）。`claude-code`/`codex` はプロンプトの前置きにする（`## Role: <id>`） |
+| `context.children` | array | –（省略可。空なら省略。v2, ADR-0016 D3/M4） | 集約 run（`task.aggregate == true` の親の、子が全て終端になった後の run）でのみ非空。`ChildSummary`: `{id, title, role?, status, outcome?, artifacts: ArtifactRef[], workspace?}` |
 
 `context.answers` は、このタスクの `Event::Answered` を時系列に並べたもの（`question` は直前の
 `WorkerFinished.outcome` の `"question: "` 接頭辞から取ったもの、無ければ空文字列）。`claude-code`/`codex`
 アダプタは、空でなければプロンプトに「以前の質問への人間の回答」節として反映する（Execute/Plan のみ。
 Review プロンプトには含めない）。JSON Lines プロトコルを直接話す `fake` 等のワーカーは、この配列を読んで
 自由に扱ってよい（taskd 側は解釈を強制しない）。
+
+`context.role` / `context.children` も同様に、JSON Lines を直接話すワーカーは自由に解釈してよい
+（taskd 側は解釈を強制しない）。`claude-code`/`codex` の反映のしかたは §9 M8 を参照。
 
 ## 4. ワーカー → taskd
 
@@ -159,6 +172,48 @@ JSON Lines プロトコルを直接話す `fake` 等のワーカーは `provider
 `claude-code`/`codex` はこのプロトコルを話さないので、代わりにエラー文面を決定的な文字列規則で分類する
 （§9 参照）。
 
+### 4.6 `delegate`（任意回、非終端。v2, ADR-0016 D2）
+
+```json
+{"type":"delegate","tasks":[
+  {"title":"implement the parser","objective":"...","acceptance":[{"text":"cargo test passes","check":{"type":"command","cmd":"cargo test","expect_exit":0}}],"role":"implementer","depends_on":[]},
+  {"title":"write docs","objective":"...","acceptance":[{"text":"README updated","check":{"type":"artifact_exists","name":"README.md"}}],"depends_on":[0]}
+]}
+```
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `tasks` | array | ✓（空も可だが意味がない） | `DelegateTask` の配列。1 回の `delegate` メッセージにつき複数件でよく、同じ run が複数回 `delegate` を送ってもよい |
+
+`DelegateTask`（`task-core::DelegateTask`）:
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `title` | string | ✓ | 空文字列は不合格 |
+| `objective` | string | ✓ | 空文字列は不合格 |
+| `acceptance` | array | ✓（1 件以上） | `task-core::Criterion` の配列（`text` + `check`）。空配列は不合格 |
+| `role` | string | – | 役割名（`[[roles]]` にあれば既定と指示文が効く。無くても自由記述として許される） |
+| `depends_on` | array | –（省略可、空なら省略） | 各要素は整数（同じ `tasks` 配列内のインデックス）か、既存タスクの ID（文字列）。混在可 |
+| `tier` | string | – | `frontier` / `standard` / `cheap`。省略時は役割の既定 → 親の tier |
+
+未知フィールドは拒否する（`deny_unknown_fields`。綴り間違いの検出のため。§2 の「未知フィールドは無視する」
+という一般規則とは意図的に逆。`Plan` の `NewTask` と同じ方針）。
+
+taskd 側の扱い（ADR-0016 D2, 実装メモ M2/M6/M7）:
+
+- ディスパッチャは受け取った提案を、ストアを見ない検証（空欄、`depends_on` の範囲・自己参照・閉路、ID の
+  書式）と、ストアを見る検証（既存 ID の依存が存在し `failed`/`cancelled` でないこと、依頼元の祖先や自分
+  自身に依存していないこと、木の深さ・件数・run 数の上限）の両方を通ったものだけを子タスクとして挿入する。
+  挿入は `draft` → 同じトランザクションで `Accept`（`ready`）、`Event::Delegated{run_id, task_ids}` を記録する
+  （`plan.auto_accept` は見ない）。
+- 上限（設定 `[delegation]`。既定値）: `max_delegate_per_run`（8。同じ run の複数の `delegate` をまたいで数える）、
+  `max_tree_depth`（5。根 = 1）、`max_tree_runs`（100。根から全ての子孫の `WorkerStarted` の合計）。
+- 拒否した提案は挿入せず、理由を `WorkerProgress{msg: "delegate rejected: tasks[i] \"<title>\": <reason>"}` として
+  残す。**run 自体は失敗しない**（拒否は run の terminal に影響しない）。
+- 親は run を続けてよい。親が `done` を返しても、委譲した子が全て終端になるまで親は `reviewing` のまま
+  （`task.aggregate == true` なら M4 の集約 run、`false` なら子の成否を問わず `done` になる）。
+- 自分の親（祖先を含む）や自分自身を `depends_on` に指定することはできない。
+
 ## 5. 終了規則
 
 1. 終端メッセージ（`done` / `error` / `question`）は run につき 1 つ。終端後の行は捨てる。
@@ -236,6 +291,42 @@ JSON Lines プロトコルを直接話す `fake` 等のワーカーは `provider
         "output_tokens": {"type": "integer", "minimum": 0}
       }
     },
+    "RoleContext": {
+      "description": "v2, ADR-0016 D1/M3. Short excerpt only; the authoritative shape is worker-protocol.schema.json.",
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string"},
+        "instructions": {"type": "string"}
+      }
+    },
+    "ChildSummary": {
+      "description": "v2, ADR-0016 D3/M4. Short excerpt only; the authoritative shape is worker-protocol.schema.json.",
+      "type": "object",
+      "required": ["id", "title", "status"],
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "role": {"type": "string"},
+        "status": {"type": "string"},
+        "outcome": {"type": "string"},
+        "artifacts": {"type": "array", "items": {"$ref": "#/$defs/ArtifactRef"}},
+        "workspace": {"type": "string"}
+      }
+    },
+    "DelegateTask": {
+      "description": "v2, ADR-0016 D2/M7. Short excerpt only; the authoritative shape is worker-protocol.schema.json.",
+      "type": "object",
+      "required": ["title", "objective", "acceptance"],
+      "properties": {
+        "title": {"type": "string"},
+        "objective": {"type": "string"},
+        "acceptance": {"type": "array", "description": "task-core::Criterion[]"},
+        "role": {"type": "string"},
+        "depends_on": {"type": "array", "description": "each item is an integer index into this tasks array, or a string task id"},
+        "tier": {"type": "string"}
+      }
+    },
     "RunRequest": {
       "type": "object",
       "required": ["type", "protocol", "task", "workspace", "context"],
@@ -301,7 +392,7 @@ JSON Lines プロトコルを直接話す `fake` 等のワーカーは `provider
 stdin:
 
 ```json
-{"type":"run","protocol":1,"task":{"id":"01J8…","kind":"execute","title":"add README example","acceptance":[{"text":"cargo test exits 0","check":{"command":{"cmd":"cargo test","expect_exit":0}}}],"budget":{"max_turns":20,"max_wall_secs":600,"max_retries":1},"attempts":0},"workspace":"/srv/ws/01J8…","context":{"prior_review":[],"inputs":[]}}
+{"type":"run","protocol":2,"task":{"id":"01J8…","kind":"execute","title":"add README example","acceptance":[{"text":"cargo test exits 0","check":{"command":{"cmd":"cargo test","expect_exit":0}}}],"budget":{"max_turns":20,"max_wall_secs":600,"max_retries":1},"attempts":0},"workspace":"/srv/ws/01J8…","context":{"prior_review":[],"inputs":[]}}
 ```
 
 stdout:
@@ -309,11 +400,13 @@ stdout:
 ```json
 {"type":"progress","msg":"editing README.md"}
 {"type":"artifact","name":"readme.diff","path":"artifacts/readme.diff","kind":"diff"}
+{"type":"delegate","tasks":[{"title":"double-check the wording","objective":"proofread the new README section","acceptance":[{"text":"a human approves","check":{"type":"human"}}],"role":"reviewer"}]}
 {"type":"progress","msg":"running cargo test"}
 {"type":"done","summary":"Added usage example to README","evidence":[{"criterion":0,"command":"cargo test","exit":0,"stdout_tail":"test result: ok. 3 passed"}]}
 ```
 
-→ taskd: `WorkerProgress` ×2, `ArtifactProduced`, `WorkerFinished{outcome: done}`, `Transitioned{running→reviewing, reason:"worker_done"}`。
+→ taskd: `WorkerProgress` ×2, `ArtifactProduced`, `Event::Delegated{run_id, task_ids}`（§4.6 の検証を通ればそれだけ）,
+`WorkerFinished{outcome: done}`, `Transitioned{running→reviewing, reason:"worker_done"}`。
 
 ## 9. CLI エージェント系アダプタの結果ファイル規約（Phase 4、ADR-0006 で確定）
 
@@ -347,6 +440,17 @@ Phase 7（ADR-0010 D3）で実装した。`claude-code`/`codex` のプロンプ�
 （`fake`/`run_subprocess` がワーカーから受信した生の行をそのまま書くのと同じ役割）。これは taskd の
 再起動後にレビュー対象の `done` 内容を復元するために使われる（ADR-0007 D5）ので、CLI 系アダプタも
 同じファイルを同じ形式で書く必要がある。
+
+**`artifacts/delegate.json`（ADR-0016 M8, v2）**: `claude-code`/`codex` は §4.6 の `delegate` メッセージの
+プロトコルを話さないので、代わりに作業ディレクトリ直下 `artifacts/delegate.json` を使う。形式は
+`{"tasks":[…]}`（`tasks` は §4.6 の `DelegateTask` と同じ形）。run 開始時（`artifacts/result.json` を消す
+のと同じタイミング）に前回の run が残したファイルを消し、run の終わり（終端を決めた直後、`result.json` を
+書く前）に存在すれば読んで、§4.6 と同じ検証・挿入の経路に渡す。ファイルが無ければ何もしない。JSON として
+読めない場合は run を失敗させず、`WorkerProgress{msg:"delegate.json ignored: <error>"}` を残して無視する。
+プロンプトには役割の指示文（`## Role: <id>`）、`artifacts/delegate.json` の書き方の指示、集約 run
+（`task.aggregate == true` で子が全て終端になった後の run）なら `## Delegated child tasks` 節（各子を
+`title` / `role` / `status` / 直近 run の `outcome` / `workspace` / `artifacts` で列挙し、`artifacts/summary.md`
+を書くよう指示）を足す（`task_worker::claude_code::build_prompt` / `codex::run_codex` が共通で使う）。
 
 **エラー文面の分類（供給側失敗。ADR-0010 D5）**: `claude-code`/`codex` はワーカープロトコルの
 `provider_failure` フィールドを直接受け取れない（stream-json/JSON Lines の形式が異なるため）。代わりに

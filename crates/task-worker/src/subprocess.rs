@@ -149,6 +149,7 @@ pub async fn run_subprocess(
                 match serde_json::from_str::<WorkerMessage>(trimmed) {
                     Ok(msg) => match msg {
                         WorkerMessage::Progress { msg } => sink.progress(&msg),
+                        WorkerMessage::Delegate { tasks } => sink.delegate(&tasks),
                         WorkerMessage::Artifact { name, path, kind } => {
                             match crate::artifact::resolve(&req.workspace, &name, &path, kind.as_deref()) {
                                 Ok(aref) => sink.artifact(&aref),

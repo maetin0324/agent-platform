@@ -5,6 +5,7 @@ pub mod adapter;
 pub mod artifact;
 pub mod claude_code;
 pub mod codex;
+pub mod delegate_file;
 pub mod fake;
 pub mod protocol;
 pub mod provider;
@@ -17,10 +18,11 @@ pub mod workspace;
 pub use adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 pub use claude_code::{ClaudeCodeAdapter, ClaudeCodeConfig};
 pub use codex::{CodexAdapter, CodexConfig};
+pub use delegate_file::{DELEGATE_FILE, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
 pub use protocol::{
-    Answer, Evidence, PROTOCOL_VERSION, PriorReview, ProviderFailure, ReviewOutput, ReviewRequest, ReviewVerdictOut,
-    RunContext, RunRequest, WorkerMessage,
+    Answer, ChildSummary, Evidence, PROTOCOL_VERSION, PriorReview, ProviderFailure, ReviewOutput, ReviewRequest,
+    ReviewVerdictOut, RoleContext, RunContext, RunRequest, WorkerMessage,
 };
 pub use provider::classify_provider_failure;
 pub use subprocess::{SubprocessSpec, run_subprocess};

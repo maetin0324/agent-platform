@@ -81,6 +81,8 @@ fn sigterm_kills_the_worker_process_and_exits_130() {
         lease: None,
         created_at: now,
         updated_at: now,
+        role: None,
+        aggregate: false,
     };
     store.create_task(&task, vec![]).unwrap();
     let script = root.join("worker.sh");

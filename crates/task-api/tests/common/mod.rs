@@ -11,7 +11,10 @@ use axum::body::{Body, BodyDataStream};
 use axum::http::{HeaderMap, Request, StatusCode};
 use futures_util::StreamExt;
 use serde_json::Value;
-use task_api::{ApiConfigView, ApiSettings, ApiState, ClusterConfigView, ConfigView, ProviderConfigView, ReviewerConfigView};
+use task_api::{
+    ApiConfigView, ApiSettings, ApiState, ClusterConfigView, ConfigView, ProviderConfigView, ReviewerConfigView,
+    RoleConfigView,
+};
 use task_core::{
     Budget, Check, Criterion, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
     WorkspaceSpec,
@@ -29,6 +32,8 @@ pub const TOKEN: &str = "s3cret-token-value";
 pub struct EnvOptions {
     pub token: Option<String>,
     pub allowed_hosts: Vec<String>,
+    /// ADR-0016 D1: `POST /tasks` の省略値を埋める `[[roles]]`。
+    pub roles: Vec<task_core::RoleSpec>,
 }
 
 pub struct TestEnv {
@@ -149,6 +154,15 @@ pub fn config_view() -> ConfigView {
             env_keys: vec!["OMP_NUM_THREADS".into()],
             rsync_excludes: vec![".git/".into()],
         }],
+        roles: vec![RoleConfigView {
+            id: "lead".into(),
+            tier: Some(Tier::Frontier),
+            adapter: None,
+            max_turns: Some(40),
+            max_wall_secs: None,
+            has_instructions: true,
+        }],
+        delegation: task_core::DelegationLimits::default(),
         api: ApiConfigView {
             bind: HOST.into(),
             auth_required: false,
@@ -166,6 +180,7 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         busy_timeout: Duration::from_millis(5000),
         view: view_context(workspace_root),
         config_view: config_view(),
+        roles: options.roles,
         taskd_version: "0.9.0-test".into(),
         instance_id: "01J9ZX5T3K8Q7W6V5R4P3N2M1H".into(),
         started_at: "2026-09-14T00:00:00Z".into(),
@@ -205,6 +220,8 @@ pub fn new_task(kind: TaskKind, status: Status) -> Task {
         lease: None,
         created_at: now,
         updated_at: now,
+        role: None,
+        aggregate: false,
     }
 }
 

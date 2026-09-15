@@ -177,6 +177,7 @@ mod tests {
             model: "m".into(),
             provider: provider.map(str::to_string),
             role: None,
+            task_role: None,
         }
     }
 
@@ -237,6 +238,7 @@ mod tests {
                 model: "m".into(),
                 provider: Some("claude-b".into()),
                 role,
+                task_role: None,
             },
         ));
         stats.apply(&row(

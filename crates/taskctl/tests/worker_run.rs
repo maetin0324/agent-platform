@@ -35,6 +35,8 @@ fn sample_task(status: Status, workspace: WorkspaceSpec) -> Task {
         lease: None,
         created_at: now,
         updated_at: now,
+        role: None,
+        aggregate: false,
     }
 }
 

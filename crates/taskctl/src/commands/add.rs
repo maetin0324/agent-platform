@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, ValueEnum};
-use task_core::{TaskId, TaskKind, TaskStore, Tier};
-use task_ops::add::{CriterionSpec, NewTaskSpec, create_task};
+use task_core::{RoleSpec, TaskId, TaskKind, TaskStore, Tier};
+use task_ops::add::{CriterionSpec, NewTaskSpec, create_task_with_roles};
 use time::OffsetDateTime;
 
 use crate::error::{CliError, parse_task_id};
@@ -42,8 +42,9 @@ pub struct AddArgs {
     #[arg(long, value_enum, default_value = "execute")]
     pub kind: KindArg,
 
-    #[arg(long, value_enum, default_value = "standard")]
-    pub tier: TierArg,
+    /// 省略時は役割（--role）の既定 → standard（ADR-0016 D1）。
+    #[arg(long, value_enum)]
+    pub tier: Option<TierArg>,
 
     #[arg(long, default_value_t = 0)]
     pub priority: i32,
@@ -56,14 +57,29 @@ pub struct AddArgs {
     #[arg(long = "depends-on")]
     pub depends_on: Vec<String>,
 
-    #[arg(long, default_value_t = 10)]
-    pub max_turns: u32,
+    /// 省略時は役割（--role）の既定 → 10（ADR-0016 D1）。
+    #[arg(long)]
+    pub max_turns: Option<u32>,
 
-    #[arg(long, default_value_t = 600)]
-    pub max_wall_secs: u64,
+    /// 省略時は役割（--role）の既定 → 600（ADR-0016 D1）。
+    #[arg(long)]
+    pub max_wall_secs: Option<u64>,
 
     #[arg(long, default_value_t = 2)]
     pub max_retries: u32,
+
+    /// ADR-0016 D1: 役割名（自由記述）。`--config` があれば `[[roles]]` の既定（tier / adapter / 予算）を
+    /// 埋め、run 時に指示文が前置きされる。`--config` が無いときは名前だけ保存する。
+    #[arg(long)]
+    pub role: Option<String>,
+
+    /// ADR-0016 D3: 委譲した子が全て終端になった後に集約 run を 1 回行い、`artifacts/summary.md` を書かせる。
+    #[arg(long, default_value_t = false)]
+    pub aggregate: bool,
+
+    /// `[[roles]]` を読む `taskd.toml`。`--role` の既定をここから解決する。
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 
     /// ワークスペースのローカルパス。省略時は `<task_id>`（相対パス、P-19）。
     #[arg(long)]
@@ -138,8 +154,28 @@ fn build_criteria(args: &mut AddArgs) -> Vec<CriterionSpec> {
     acceptance
 }
 
+/// `--config` があれば `[[roles]]` を読む。無ければ空（役割名だけ保存する。`--role` があれば警告）。
+fn load_roles(config: Option<&PathBuf>, role: Option<&str>) -> Result<Vec<RoleSpec>, CliError> {
+    match config {
+        Some(path) => {
+            let config = taskd::Config::load(path)
+                .map_err(|e| CliError::msg(format!("failed to load config {}: {e}", path.display())))?;
+            Ok(config.role_specs())
+        }
+        None => {
+            if role.is_some() {
+                eprintln!(
+                    "warning: --role given without --config; role defaults and instructions are not applied at creation"
+                );
+            }
+            Ok(Vec::new())
+        }
+    }
+}
+
 pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliError> {
     let acceptance = build_criteria(&mut args);
+    let roles = load_roles(args.config.as_ref(), args.role.as_deref())?;
 
     let parent = match &args.parent {
         Some(s) => Some(parse_task_id(s)?),
@@ -157,19 +193,21 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         objective: args.objective,
         acceptance,
         kind: args.kind.into(),
-        tier: args.tier.into(),
+        tier: args.tier.map(Into::into),
         priority: args.priority,
         parent,
         depends_on,
         max_turns: args.max_turns,
         max_wall_secs: args.max_wall_secs,
         max_retries: args.max_retries,
+        role: args.role,
+        aggregate: args.aggregate,
         workspace: args.workspace,
         cluster: args.cluster,
         adapter: None,
     };
 
-    let task = create_task(store, spec, OffsetDateTime::now_utc())?;
+    let task = create_task_with_roles(store, spec, &roles, OffsetDateTime::now_utc())?;
 
     outln!("{}", task.id);
     Ok(ExitCode::SUCCESS)
@@ -189,13 +227,16 @@ mod tests {
             check_artifact: vec![],
             check_reviewer: vec![],
             kind: KindArg::Execute,
-            tier: TierArg::Standard,
+            tier: Some(TierArg::Standard),
             priority: 0,
             parent: None,
             depends_on: vec![],
-            max_turns: 10,
-            max_wall_secs: 600,
+            max_turns: Some(10),
+            max_wall_secs: Some(600),
             max_retries: 2,
+            role: None,
+            aggregate: false,
+            config: None,
             workspace: Some(PathBuf::from("/tmp/workspace")),
             cluster: None,
         }
@@ -275,6 +316,80 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open store");
         let mut args = base_args();
         args.accept = vec![];
+
+        let result = run(&store, args);
+        assert!(matches!(result, Err(CliError::Message(_))));
+        assert!(store.list(None).expect("list tasks").is_empty());
+    }
+
+    /// ADR-0016 D1 / M3: `--role` + `--config` で、省略した tier / 予算が役割の既定になる。
+    #[test]
+    fn run_with_role_and_config_applies_role_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &config_path,
+            r#"[[roles]]
+id = "lead"
+tier = "frontier"
+max_turns = 40
+max_wall_secs = 1800
+instructions = "You lead the work."
+
+[[providers]]
+id = "fake-local"
+adapter = "fake"
+"#,
+        )
+        .expect("write config");
+
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut args = base_args();
+        args.role = Some("lead".to_string());
+        args.config = Some(config_path);
+        args.tier = None;
+        args.max_turns = None;
+        args.max_wall_secs = None;
+
+        run(&store, args).expect("run add");
+
+        let tasks = store.list(None).expect("list tasks");
+        let task = &tasks[0];
+        assert_eq!(task.role.as_deref(), Some("lead"));
+        assert_eq!(task.worker_hint.tier, Tier::Frontier);
+        assert_eq!((task.budget.max_turns, task.budget.max_wall_secs), (40, 1800));
+        // --max-retries は役割の既定を持たない（既定 2 のまま）。
+        assert_eq!(task.budget.max_retries, 2);
+        assert!(!task.aggregate);
+    }
+
+    /// `--config` 無しの `--role` は役割名だけを保存する（既定は全体の既定。警告は stderr）。
+    #[test]
+    fn run_with_role_but_no_config_stores_the_name_only() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut args = base_args();
+        args.role = Some("lead".to_string());
+        args.aggregate = true;
+        args.tier = None;
+        args.max_turns = None;
+        args.max_wall_secs = None;
+
+        run(&store, args).expect("run add");
+
+        let tasks = store.list(None).expect("list tasks");
+        let task = &tasks[0];
+        assert_eq!(task.role.as_deref(), Some("lead"));
+        assert_eq!(task.worker_hint.tier, Tier::Standard);
+        assert_eq!((task.budget.max_turns, task.budget.max_wall_secs), (10, 600));
+        assert!(task.aggregate);
+    }
+
+    /// 読めない `--config` はエラー（何も挿入しない）。
+    #[test]
+    fn run_with_unreadable_config_errors_and_inserts_nothing() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut args = base_args();
+        args.config = Some(PathBuf::from("/nonexistent/taskd.toml"));
 
         let result = run(&store, args);
         assert!(matches!(result, Err(CliError::Message(_))));

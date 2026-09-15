@@ -85,6 +85,8 @@ fn main() {
         lease: None,
         created_at: now,
         updated_at: now,
+        role: None,
+        aggregate: false,
     };
 
     let WorkspaceSpec::Local { path: workspace_path } = &task.workspace else {

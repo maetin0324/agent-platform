@@ -19,6 +19,7 @@ use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 use crate::claude_code::build_prompt;
+use crate::delegate_file::{clear_delegate_file, forward_delegate_file};
 use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
@@ -126,6 +127,7 @@ async fn run_codex(
     // 前回の run（リトライ）が残した結果ファイルを、今回の run の結果と誤読しない（ADR-0006 D3 と同じ理由）。
     let result_path = req.workspace.join("artifacts").join("result.json");
     let _ = tokio::fs::remove_file(&result_path).await;
+    clear_delegate_file(&req.workspace).await;
 
     let prompt = build_prompt(&req.task, &req.context, run_id);
 
@@ -277,6 +279,8 @@ async fn run_codex(
         (None, Some(TurnSignal::Completed { usage })) => (terminal_from_result(&req.workspace, *usage).await, None),
     };
 
+    forward_delegate_file(&req.workspace, sink).await;
+
     write_result_json(&run_dir, &terminal, provider_failure).await?;
 
     if let (Terminal::Error { message, .. }, Some(pf)) = (&terminal, provider_failure) {
@@ -395,7 +399,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use task_core::ArtifactRef;
+    use task_core::{ArtifactRef, DelegateTask};
 
     use super::*;
     use crate::protocol::{PROTOCOL_VERSION, RunContext};
@@ -403,6 +407,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
+        delegated: Mutex<Vec<Vec<DelegateTask>>>,
     }
 
     impl EventSink for RecordingSink {
@@ -410,6 +415,9 @@ mod tests {
             self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
         }
         fn artifact(&self, _artifact: &ArtifactRef) {}
+        fn delegate(&self, tasks: &[DelegateTask]) {
+            self.delegated.lock().unwrap_or_else(|e| e.into_inner()).push(tasks.to_vec());
+        }
     }
 
     fn stub_codex(dir: &std::path::Path, script: &str) -> CodexConfig {
@@ -797,5 +805,27 @@ echo '{"type":"turn.completed"}'
         assert_eq!(&args[4..6], ["--sandbox", "read-only"]);
         let prompt = args[6];
         assert!(prompt.contains("# Task:"), "prompt should be the last arg: {prompt}");
+    }
+
+    /// ADR-0016 M8: `codex` も run の終わりに `artifacts/delegate.json` があれば `sink.delegate` を 1 回呼ぶ。
+    #[tokio::test]
+    async fn delegate_json_written_by_worker_is_forwarded_to_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"summary":"delegated two subtasks","evidence":[]}' > artifacts/result.json
+printf '%s' '{"tasks":[{"title":"a","objective":"do a","acceptance":[{"text":"c","check":{"type":"human"}}]},{"title":"b","objective":"do b","acceptance":[{"text":"c","check":{"type":"human"}}]}]}' > artifacts/delegate.json
+echo '{"type":"turn.completed"}'
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-13", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let delegated = sink.delegated.lock().unwrap();
+        assert_eq!(delegated.len(), 1);
+        assert_eq!(delegated[0].len(), 2);
     }
 }

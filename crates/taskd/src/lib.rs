@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use task_api::types::{ApiConfigView, ClusterConfigView, ConfigView, ProviderConfigView, ReviewerConfigView};
+use task_api::types::{ApiConfigView, ClusterConfigView, ConfigView, ProviderConfigView, ReviewerConfigView, RoleConfigView};
 use task_api::{ApiError, ApiSettings, ApiState};
 use task_core::{SqliteStore, StoreError, StoreOptions, TaskStore};
 use task_ops::view::ViewContext;
@@ -263,6 +263,20 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                 }
             })
             .collect(),
+        // ADR-0016 D1: 指示文は**本文を出さない**（有無だけ）。
+        roles: config
+            .roles
+            .iter()
+            .map(|r| RoleConfigView {
+                id: r.id.clone(),
+                tier: r.tier,
+                adapter: r.adapter.clone(),
+                max_turns: r.max_turns,
+                max_wall_secs: r.max_wall_secs,
+                has_instructions: r.instructions.as_ref().is_some_and(|s| !s.is_empty()),
+            })
+            .collect(),
+        delegation: config.delegation_limits(),
         api: ApiConfigView {
             bind: listen.to_string(),
             auth_required: config.api.token_file.is_some(),
@@ -292,6 +306,7 @@ pub fn api_settings(
             max_requeues: config.max_requeues,
         },
         config_view: config_view(config, listen),
+        roles: config.role_specs(),
         taskd_version: env!("CARGO_PKG_VERSION").to_string(),
         instance_id,
         started_at,

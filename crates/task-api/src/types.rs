@@ -193,7 +193,25 @@ pub struct ConfigView {
     /// ADR-0018: `[[clusters]]` の要約（`env` はキー名だけ、`setup` は有無だけ）。
     #[serde(default)]
     pub clusters: Vec<ClusterConfigView>,
+    /// ADR-0016 D1: `[[roles]]` の要約（指示文の本文は出さない）。
+    #[serde(default)]
+    pub roles: Vec<RoleConfigView>,
+    /// ADR-0016 D2: `[delegation]` の上限。
+    #[serde(default)]
+    pub delegation: task_core::DelegationLimits,
     pub api: ApiConfigView,
+}
+
+/// `[[roles]]` 1 行の要約（ADR-0016 D1）。`instructions` は**本文を出さない**（プロンプトの中身は設定ファイルにだけ置く）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RoleConfigView {
+    pub id: String,
+    pub tier: Option<Tier>,
+    pub adapter: Option<String>,
+    pub max_turns: Option<u32>,
+    pub max_wall_secs: Option<u64>,
+    /// 指示文が 1 文字以上あるか（中身は出さない）。
+    pub has_instructions: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

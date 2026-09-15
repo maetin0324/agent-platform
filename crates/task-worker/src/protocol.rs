@@ -6,10 +6,11 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{ArtifactRef, Task, Usage};
+use task_core::{ArtifactRef, DelegateTask, Status, Task, TaskId, Usage};
 
-/// `run.protocol`。非互換変更で上げる。
-pub const PROTOCOL_VERSION: u32 = 1;
+/// `run.protocol`。v2（ADR-0016 M9）: `delegate` メッセージ、`context.role`、`context.children`、`task.role` / `task.aggregate` を追加。
+/// 全て追加のみで v1 のワーカーはそのまま動く。
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// 直前のレビュー結果（`context.prior_review[]`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -38,6 +39,34 @@ pub struct Answer {
     pub answer: String,
 }
 
+/// `context.role`（ADR-0016 D1 / M3）: タスクの役割と `[[roles]]` の指示文。アダプタはプロンプトの前置きにする。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RoleContext {
+    pub id: String,
+    /// 設定に指示文が無ければ空。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
+}
+
+/// `context.children[]`（ADR-0016 D3 / M4）: 集約 run に渡す、委譲した子の要約。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChildSummary {
+    pub id: TaskId,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub status: Status,
+    /// 直近のワーカー run の `WorkerFinished.outcome`（無ければ省略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// 子のワークスペースに残った成果物（`ArtifactProduced` の一覧。パスは子のワークスペース相対）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
+    /// 子のワークスペース（絶対パス。集約 run が成果物を読むため）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<PathBuf>,
+}
+
 /// `run.context`。未知フィールドは無視する（前方互換）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RunContext {
@@ -49,6 +78,12 @@ pub struct RunContext {
     /// `Reviewer` check の run でのみ `Some`（ADR-0007 D5）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewRequest>,
+    /// タスクに役割があるときだけ `Some`（ADR-0016 D1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<RoleContext>,
+    /// 集約 run（`aggregate = true` の親の、子が全て終端になった後の run）でのみ非空（ADR-0016 D3）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ChildSummary>,
 }
 
 /// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは
@@ -105,6 +140,11 @@ pub struct Evidence {
 pub enum WorkerMessage {
     Progress {
         msg: String,
+    },
+    /// ADR-0016 D2: 実行中の委譲の提案（任意回、非終端）。taskd は検証を通ったものだけ子タスクとして挿入し、
+    /// 拒否した提案は理由を `WorkerProgress` に残す。run は失敗しない。
+    Delegate {
+        tasks: Vec<DelegateTask>,
     },
     Artifact {
         name: String,
@@ -199,6 +239,19 @@ pub(crate) mod tests {
         assert_eq!(serde_json::to_string(&evidence[0]).unwrap(), r#"{"criterion":1}"#);
     }
 
+    /// ADR-0016 D2: `delegate` は非終端で、`tasks` は `DelegateTask`。`depends_on` は整数と ID 文字列を混ぜられる。
+    #[test]
+    fn delegate_message_parses_and_is_not_terminal() {
+        let line = r#"{"type":"delegate","tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"role":"implementer"},
+            {"title":"b","objective":"o","acceptance":[{"text":"c","check":{"type":"command","cmd":"true","expect_exit":0}}],"depends_on":[0]}]}"#;
+        let m: WorkerMessage = serde_json::from_str(line).unwrap();
+        assert!(!m.is_terminal());
+        let WorkerMessage::Delegate { tasks } = m else { panic!("expected delegate") };
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].role.as_deref(), Some("implementer"));
+        assert_eq!(tasks[1].depends_on, vec![task_core::DelegateDep::Index(0)]);
+    }
+
     #[test]
     fn run_request_serializes_with_type_tag() {
         let req = RunRequest {
@@ -209,7 +262,7 @@ pub(crate) mod tests {
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["type"], "run");
-        assert_eq!(v["protocol"], 1);
+        assert_eq!(v["protocol"], 2);
         assert_eq!(v["task"]["kind"], "execute");
         let back: RunRequest = serde_json::from_value(v).unwrap();
         assert_eq!(back, req);
@@ -249,6 +302,8 @@ pub(crate) mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 }

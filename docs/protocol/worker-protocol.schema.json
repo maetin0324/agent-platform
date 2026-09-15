@@ -132,6 +132,53 @@
         }
       ]
     },
+    "ChildSummary": {
+      "description": "`context.children[]`（ADR-0016 D3 / M4）: 集約 run に渡す、委譲した子の要約。",
+      "properties": {
+        "artifacts": {
+          "description": "子のワークスペースに残った成果物（`ArtifactProduced` の一覧。パスは子のワークスペース相対）。",
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "outcome": {
+          "description": "直近のワーカー run の `WorkerFinished.outcome`（無ければ省略）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "type": "string"
+        },
+        "workspace": {
+          "description": "子のワークスペース（絶対パス。集約 run が成果物を読むため）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "status"
+      ],
+      "type": "object"
+    },
     "Criterion": {
       "description": "DESIGN §4.1 の `Criterion`。",
       "properties": {
@@ -145,6 +192,68 @@
       "required": [
         "text",
         "check"
+      ],
+      "type": "object"
+    },
+    "DelegateDep": {
+      "anyOf": [
+        {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "`delegate.tasks[].depends_on[]` の 1 要素（ADR-0016 M7）: 同じ配列内のインデックス（整数）か、既存タスクの ID（文字列）。"
+    },
+    "DelegateTask": {
+      "additionalProperties": false,
+      "description": "ワーカーが提案する子タスク 1 件。未知フィールドは拒否する（Plan の `NewTask` と同じ方針）。",
+      "properties": {
+        "acceptance": {
+          "description": "1 件以上。",
+          "items": {
+            "$ref": "#/$defs/Criterion"
+          },
+          "type": "array"
+        },
+        "depends_on": {
+          "items": {
+            "$ref": "#/$defs/DelegateDep"
+          },
+          "type": "array"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "role": {
+          "description": "役割名（任意。`[[roles]]` にあれば既定と指示文が効く）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "省略時は役割の既定 → 親の tier。"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "objective",
+        "acceptance"
       ],
       "type": "object"
     },
@@ -334,6 +443,22 @@
       ],
       "type": "object"
     },
+    "RoleContext": {
+      "description": "`context.role`（ADR-0016 D1 / M3）: タスクの役割と `[[roles]]` の指示文。アダプタはプロンプトの前置きにする。",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instructions": {
+          "description": "設定に指示文が無ければ空。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
     "RunContext": {
       "description": "`run.context`。未知フィールドは無視する（前方互換）。",
       "properties": {
@@ -341,6 +466,13 @@
           "description": "`taskctl answer` で与えられた回答の履歴（時系列）。無ければ省略（ADR-0010 D3）。",
           "items": {
             "$ref": "#/$defs/Answer"
+          },
+          "type": "array"
+        },
+        "children": {
+          "description": "集約 run（`aggregate = true` の親の、子が全て終端になった後の run）でのみ非空（ADR-0016 D3）。",
+          "items": {
+            "$ref": "#/$defs/ChildSummary"
           },
           "type": "array"
         },
@@ -366,6 +498,17 @@
             }
           ],
           "description": "`Reviewer` check の run でのみ `Some`（ADR-0007 D5）。"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoleContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "タスクに役割があるときだけ `Some`（ADR-0016 D1）。"
         }
       },
       "required": [
@@ -396,6 +539,10 @@
             "$ref": "#/$defs/Criterion"
           },
           "type": "array"
+        },
+        "aggregate": {
+          "description": "ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。",
+          "type": "boolean"
         },
         "attempts": {
           "format": "uint32",
@@ -452,6 +599,13 @@
         "priority": {
           "format": "int32",
           "type": "integer"
+        },
+        "role": {
+          "description": "ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。\n導入前のタスクには無いので任意。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "status": {
           "$ref": "#/$defs/Status"
@@ -566,6 +720,26 @@
           "required": [
             "type",
             "msg"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0016 D2: 実行中の委譲の提案（任意回、非終端）。taskd は検証を通ったものだけ子タスクとして挿入し、\n拒否した提案は理由を `WorkerProgress` に残す。run は失敗しない。",
+          "properties": {
+            "tasks": {
+              "items": {
+                "$ref": "#/$defs/DelegateTask"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "delegate",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tasks"
           ],
           "type": "object"
         },

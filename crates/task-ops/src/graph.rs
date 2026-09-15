@@ -198,6 +198,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 

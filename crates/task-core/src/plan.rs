@@ -40,6 +40,9 @@ pub struct NewTask {
     /// 省略時は `Standard`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
+    /// ADR-0016 D1 / M10: 子の役割名（任意）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// DESIGN §5.6 の `PlanOutput{ tasks: Vec<NewTask> }`。
@@ -226,6 +229,8 @@ pub fn materialize(parent: &Task, plan: &PlanOutput, now: OffsetDateTime) -> Vec
             lease: None,
             created_at: now,
             updated_at: now,
+            role: t.role.clone(),
+            aggregate: false,
         })
         .collect()
 }
@@ -256,6 +261,7 @@ mod tests {
             depends_on: deps,
             kind: NewTaskKind::Execute,
             tier: None,
+            role: None,
         }
     }
 
@@ -288,6 +294,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 

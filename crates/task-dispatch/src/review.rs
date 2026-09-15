@@ -138,7 +138,12 @@ pub struct ReviewExtras {
     /// 解決した `(pass, reason)`（ADR-0008 D2）。呼び出し元は `task.acceptance` の全 `Human` criterion が
     /// 解決済みのときだけ `review_task` を呼ぶ想定（未解決分を待つ間はレビュー全体を延期する）。
     pub human: HumanVerdicts,
+    /// ADR-0016 D3 / M4: 集約 run のレビューなら true。暗黙の条件「`artifacts/summary.md` が存在する」を
+    /// `criterion_idx = acceptance.len()`（Plan の暗黙条件があればその次）に加える。
+    pub aggregate: bool,
 }
+
+pub const SUMMARY_FILE: &str = "artifacts/summary.md";
 
 /// `task.acceptance` を順に判定する。`produced` はその run の `ArtifactProduced`（名前の照合に使う）。
 pub async fn review_task(
@@ -154,6 +159,7 @@ pub async fn review_task(
         plan,
         reviewer,
         human,
+        aggregate,
     } = extras;
     let subject = &subject;
     let mut verdicts = Vec::with_capacity(task.acceptance.len() + 1);
@@ -224,6 +230,25 @@ pub async fn review_task(
         plan_output = parsed;
         verdicts.push(Verdict {
             criterion_idx: task.acceptance.len(),
+            pass,
+            reason,
+        });
+    }
+
+    // ADR-0016 D3 / M4: 集約 run は artifacts/summary.md を作っていなければならない（暗黙の条件）。
+    if aggregate {
+        let idx = task.acceptance.len() + usize::from(plan.is_some());
+        let full = workspace_dir.join(SUMMARY_FILE);
+        let (pass, reason) = if full.is_file() {
+            match sha256_file(&full) {
+                Ok(sha) => (true, format!("path={SUMMARY_FILE} sha256={sha}")),
+                Err(e) => (false, format!("path={SUMMARY_FILE} unreadable: {e}")),
+            }
+        } else {
+            (false, format!("aggregate run did not produce {SUMMARY_FILE}"))
+        };
+        verdicts.push(Verdict {
+            criterion_idx: idx,
             pass,
             reason,
         });
@@ -319,6 +344,8 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHin
         }),
         created_at: now,
         updated_at: now,
+        role: None,
+        aggregate: false,
     }
 }
 
@@ -372,6 +399,8 @@ async fn run_reviewer_inner(
                 evidence: subject.evidence.clone(),
                 criteria: criteria.to_vec(),
             }),
+            role: None,
+            children: Vec::new(),
         },
     };
     let tag = format!("reviewer({})", run.run_id);
@@ -477,6 +506,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 

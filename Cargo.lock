@@ -1059,6 +1059,7 @@ version = "0.1.0"
 dependencies = [
  "schemars",
  "serde",
+ "serde_json",
  "task-core",
  "thiserror",
  "time",

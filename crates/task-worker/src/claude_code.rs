@@ -17,6 +17,7 @@ use tokio::process::Command;
 use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
+use crate::delegate_file::{clear_delegate_file, forward_delegate_file};
 use crate::protocol::{Answer, Evidence, ProviderFailure, RunContext, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
@@ -91,8 +92,9 @@ pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
     }
 }
 
-/// 冒頭の共通部分（タイトル・run_id/attempt・目的）。
-fn prompt_header(task: &Task, run_id: &str) -> String {
+/// 冒頭の共通部分（タイトル・run_id/attempt・役割・目的）。`context.role` があれば `## Objective` の前に
+/// `## Role: <id>` と指示文（無ければ id だけ）を出す（ADR-0016 D1 / M3）。
+fn prompt_header(task: &Task, context: &RunContext, run_id: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Task: {}\n\n", task.title));
     out.push_str(&format!(
@@ -100,7 +102,49 @@ fn prompt_header(task: &Task, run_id: &str) -> String {
         task.attempts + 1,
         task.budget.max_retries + 1
     ));
+    if let Some(role) = &context.role {
+        out.push_str(&format!("## Role: {}\n", role.id));
+        if !role.instructions.is_empty() {
+            out.push_str(&role.instructions);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
     out.push_str(&format!("## Objective\n{}\n\n", task.objective));
+    out
+}
+
+/// `context.children` があれば「集約 run」節を足す（ADR-0016 D3 / M4）。
+fn children_section(context: &RunContext) -> String {
+    let mut out = String::new();
+    if context.children.is_empty() {
+        return out;
+    }
+    out.push_str("## Delegated child tasks (this is the aggregate run)\n");
+    for c in &context.children {
+        let role = c.role.as_deref().unwrap_or("-");
+        let status = serde_json::to_string(&c.status).unwrap_or_default();
+        let status = status.trim_matches('"');
+        let outcome = c.outcome.as_deref().unwrap_or("-");
+        let workspace = c
+            .workspace
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let artifacts = if c.artifacts.is_empty() {
+            "-".to_string()
+        } else {
+            c.artifacts.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(",")
+        };
+        out.push_str(&format!(
+            "- {} [{role}] status={status} outcome={outcome} workspace={workspace} artifacts={artifacts}\n",
+            c.title
+        ));
+    }
+    out.push_str(
+        "\nSummarize the results of the delegated child tasks in `artifacts/summary.md`. \
+         The reviewer will check that `artifacts/summary.md` exists.\n\n",
+    );
     out
 }
 
@@ -146,9 +190,24 @@ fn result_json_instructions() -> &'static str {
      chat message directly.\n"
 }
 
+/// 実行中の委譲の方法（ADR-0016 D2 / M8）。
+fn delegation_instructions() -> &'static str {
+    "If you want to delegate part of this work to another agent, write `artifacts/delegate.json` \
+     (create the `artifacts/` directory if it does not exist yet) as a single JSON object of the form \
+     `{\"tasks\":[{\"title\":\"...\",\"objective\":\"...\",\"acceptance\":[{\"text\":\"...\",\
+     \"check\":{\"type\":\"command\",\"cmd\":\"...\",\"expect_exit\":0}}],\"role\":\"<optional>\",\
+     \"depends_on\":[<index into this array, or an existing task id>]}]}`. `check` may also be \
+     `{\"type\":\"artifact_exists\",\"name\":\"...\"}`, `{\"type\":\"reviewer\"}`, or `{\"type\":\"human\"}`. \
+     taskd will validate this after this run ends and insert whatever proposals pass validation as child \
+     tasks (how many are accepted per run is limited by configuration; any rejected proposal has its \
+     reason recorded as an event you cannot see, but a human can). A task cannot list its own parent or \
+     itself in `depends_on`. This task will not be considered done until any children you delegated have \
+     finished.\n"
+}
+
 /// `Execute`（および `Approval`）用プロンプト（ADR-0006 D2。既存のワーカー用プロンプトのまま）。
 fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
-    let mut out = prompt_header(task, run_id);
+    let mut out = prompt_header(task, context, run_id);
     out.push_str("## Acceptance criteria\n");
     for (i, c) in task.acceptance.iter().enumerate() {
         let detail = match &c.check {
@@ -166,8 +225,11 @@ fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> Stri
     out.push('\n');
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
+    out.push_str(&children_section(context));
     out.push_str("## Instructions\n");
-    out.push_str("Work in the current directory (it is a dedicated workspace for this task). When you are done:\n");
+    out.push_str("Work in the current directory (it is a dedicated workspace for this task). ");
+    out.push_str(delegation_instructions());
+    out.push_str("When you are done:\n");
     out.push_str(result_json_instructions());
     out
 }
@@ -175,7 +237,7 @@ fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> Stri
 /// `Plan` kind 用プロンプト（DESIGN §5.6, ADR-0007 D7）。目標を独立に検証可能な受け入れ条件を持つ
 /// 子タスク群に分解させ、`artifacts/plan.json` に `PlanOutput` を書かせる。
 fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
-    let mut out = prompt_header(task, run_id);
+    let mut out = prompt_header(task, context, run_id);
     out.push_str(
         "## Instructions\n\
          Decompose this goal into a set of child tasks, each with an independently verifiable \
@@ -219,7 +281,7 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String 
 /// `Review` kind 用プロンプト（DESIGN §5.7, ADR-0007 D5/D7）。対象タスクの成果物を読み取り専用で
 /// 検証し `artifacts/review.json` に判定を書かせる。
 fn build_review_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
-    let mut out = prompt_header(task, run_id);
+    let mut out = prompt_header(task, context, run_id);
     out.push_str(
         "## Instructions\n\
          You are a reviewer independently verifying another worker's output. You must not modify any \
@@ -334,6 +396,7 @@ async fn run_claude_code(
     // （監査で指摘。ADR-0006 D3 は「この run が書いたファイル」を前提にしている）。
     let result_path = req.workspace.join("artifacts").join("result.json");
     let _ = tokio::fs::remove_file(&result_path).await;
+    clear_delegate_file(&req.workspace).await;
 
     let prompt = build_prompt(&req.task, &req.context, run_id);
 
@@ -479,6 +542,8 @@ async fn run_claude_code(
         (None, Some(meta)) => terminal_from_result(&req.workspace, meta).await,
     };
 
+    forward_delegate_file(&req.workspace, sink).await;
+
     write_result_json(&run_dir, &terminal, provider_failure).await?;
 
     if let (Terminal::Error { message, .. }, Some(pf)) = (&terminal, provider_failure) {
@@ -621,7 +686,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use task_core::ArtifactRef;
+    use task_core::{ArtifactRef, DelegateTask};
 
     use super::*;
     use crate::protocol::{PROTOCOL_VERSION, RunContext};
@@ -629,6 +694,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
+        delegated: Mutex<Vec<Vec<DelegateTask>>>,
     }
 
     impl EventSink for RecordingSink {
@@ -636,6 +702,9 @@ mod tests {
             self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
         }
         fn artifact(&self, _artifact: &ArtifactRef) {}
+        fn delegate(&self, tasks: &[DelegateTask]) {
+            self.delegated.lock().unwrap_or_else(|e| e.into_inner()).push(tasks.to_vec());
+        }
     }
 
     fn stub_claude(dir: &Path, script: &str) -> ClaudeCodeConfig {
@@ -1094,5 +1163,98 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         }
         let prompt = build_prompt(&crate::protocol::tests::sample_task(), &RunContext::default(), "r");
         assert!(prompt.contains("plain strings are not accepted"));
+    }
+
+    /// ADR-0016 D1 / M3: `context.role` があれば `## Role: <id>` と指示文がプロンプトに入る。無ければ入らない。
+    #[test]
+    fn build_prompt_includes_role_header_when_present_and_omits_it_when_absent() {
+        let task = crate::protocol::tests::sample_task();
+        let context = RunContext {
+            role: Some(crate::protocol::RoleContext {
+                id: "lead".into(),
+                instructions: "You coordinate the work of others.".into(),
+            }),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-role-1");
+        assert!(prompt.contains("## Role: lead"));
+        assert!(prompt.contains("You coordinate the work of others."));
+
+        let no_role_prompt = build_prompt(&task, &RunContext::default(), "run-role-2");
+        assert!(!no_role_prompt.contains("## Role"));
+    }
+
+    /// ADR-0016 D3 / M4: `context.children` が非空なら集約 run の節が入り、成果物のまとめ方の指示が付く。
+    /// 無ければ節自体が出ない。
+    #[test]
+    fn build_prompt_includes_children_section_only_when_present() {
+        let task = crate::protocol::tests::sample_task();
+        let context = RunContext {
+            children: vec![crate::protocol::ChildSummary {
+                id: task_core::TaskId::new(),
+                title: "implement parser".into(),
+                role: Some("implementer".into()),
+                status: task_core::Status::Done,
+                outcome: Some("done".into()),
+                artifacts: vec![],
+                workspace: Some(std::path::PathBuf::from("/tmp/child-ws")),
+            }],
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-agg-1");
+        assert!(prompt.contains("## Delegated child tasks (this is the aggregate run)"));
+        assert!(prompt.contains("implement parser"));
+        assert!(prompt.contains("artifacts/summary.md"));
+
+        let no_children_prompt = build_prompt(&task, &RunContext::default(), "run-agg-2");
+        assert!(!no_children_prompt.contains("Delegated child tasks"));
+        assert!(!no_children_prompt.contains("artifacts/summary.md"));
+    }
+
+    /// ADR-0016 M8: run の終わりに `artifacts/delegate.json` があれば、`sink.delegate` が 1 回呼ばれる。
+    #[tokio::test]
+    async fn delegate_json_written_by_worker_is_forwarded_to_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"summary":"delegated two subtasks","evidence":[]}' > artifacts/result.json
+printf '%s' '{"tasks":[{"title":"a","objective":"do a","acceptance":[{"text":"c","check":{"type":"human"}}]},{"title":"b","objective":"do b","acceptance":[{"text":"c","check":{"type":"human"}}]}]}' > artifacts/delegate.json
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#,
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-delegate-1", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let delegated = sink.delegated.lock().unwrap();
+        assert_eq!(delegated.len(), 1);
+        assert_eq!(delegated[0].len(), 2);
+    }
+
+    /// 壊れた `artifacts/delegate.json` は `progress` に警告を残すだけで run は失敗させない（ADR-0016 M8）。
+    #[tokio::test]
+    async fn malformed_delegate_json_is_ignored_and_run_still_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"summary":"done, but wrote bad delegate.json","evidence":[]}' > artifacts/result.json
+printf 'not json' > artifacts/delegate.json
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#,
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-delegate-2", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Done { .. } => {}
+            other => panic!("expected done, got {other:?}"),
+        }
+        assert!(sink.delegated.lock().unwrap().is_empty());
+        let progress = sink.progress.lock().unwrap();
+        assert!(progress.iter().any(|m| m.contains("delegate.json ignored")), "{progress:?}");
     }
 }

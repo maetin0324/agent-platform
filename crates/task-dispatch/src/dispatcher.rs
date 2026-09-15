@@ -19,19 +19,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use task_core::plan::{PlanLimits, materialize};
+use task_core::plan::{PlanLimits, PlanOutput, materialize};
 use task_core::{
-    ArtifactRef, Check, Event, RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
+    ArtifactRef, Check, DelegateTask, DelegationLimits, Event, RoleSpec, RunRole, Status, StoreError, Task, TaskId,
+    TaskKind, TaskStore, Trigger, WorkspaceSpec,
 };
+use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
     AnswerNote, REVIEWER_REQUEUED_PREFIX, ReviewNote, answers_from_events, approval_decision_note,
     artifacts_for_run, consecutive_requeues, consecutive_reviewer_requeues, human_approval_title, last_run_id,
     prior_review_from_events, retry_backoff,
 };
 use task_worker::{
-    AdapterError, Answer, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RunContext, RunLimits,
-    RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal, WorkerMessage, Workspace, WorkerAdapter,
-    control_master_alive_blocking, remote_exec_instructions,
+    AdapterError, Answer, ChildSummary, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RoleContext,
+    RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal, WorkerMessage,
+    Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
 };
 use task_ops::daemon::{ClusterLive, CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
 use time::OffsetDateTime;
@@ -146,6 +148,10 @@ pub struct DispatchConfig {
     pub cluster_cooldown: Duration,
     /// ADR-0011（P-38）: 同じ試行での連続 requeue の上限。達したら供給側失敗を通常の失敗（attempts 消費）として扱う。
     pub max_requeues: u32,
+    /// ADR-0016 D1: `[[roles]]`。run 開始時に `RunContext.role`（指示文）を載せ、委譲された子の既定に使う。
+    pub roles: Vec<RoleSpec>,
+    /// ADR-0016 D2: 委譲の上限（1 run の件数・木の深さ・木の run 数）。
+    pub delegation: DelegationLimits,
 }
 
 /// 1 tick の要約（ログとテスト用）。
@@ -190,6 +196,19 @@ struct RunEntry {
     cluster: Option<String>,
 }
 
+/// ADR-0016 M5: 子待ちの親について覚えておくもの。
+struct AwaitingChildren {
+    run_id: String,
+    plan: Option<PlanOutput>,
+}
+
+/// run 開始時に決める、ワーカーに渡す追加の文脈（ADR-0016 D1 / D3）。
+#[derive(Default)]
+struct RunExtras {
+    role: Option<RoleContext>,
+    children: Vec<ChildSummary>,
+}
+
 struct ReviewEntry {
     handle: JoinHandle<()>,
     /// `Reviewer` run を起動する場合に選んだプロバイダ（並列度の枠を消費する）。
@@ -228,6 +247,64 @@ struct StoreSink {
     /// 延長の最小間隔（`lease_grace / 2`）。延長後の期限は常にアダプタの無出力タイムアウトより後になる。
     renew_every: Duration,
     last_renew: std::sync::Mutex<Instant>,
+    /// ADR-0016 D2: 委譲の検証に使う `[[roles]]` と上限、この run で既に受け入れた件数。
+    roles: Vec<RoleSpec>,
+    delegation: DelegationLimits,
+    delegated_this_run: std::sync::atomic::AtomicUsize,
+}
+
+impl StoreSink {
+    fn note(&self, msg: String) {
+        let ev = Event::WorkerProgress {
+            run_id: self.run_id.clone(),
+            msg,
+        };
+        if let Err(e) = self.store.append_event(self.task_id, &ev) {
+            tracing::warn!(task_id = %self.task_id, error = %e, "failed to record delegation note");
+        }
+    }
+
+    /// ADR-0016 D2 / M2 / M6: 提案を検証し、通ったものだけ子として挿入する。拒否理由は `WorkerProgress` に残し、run は失敗させない。
+    fn delegate_impl(&self, tasks: &[DelegateTask]) -> Result<(), String> {
+        let parent = self
+            .store
+            .get(self.task_id)
+            .map_err(|e| format!("store: {e}"))?
+            .ok_or_else(|| "task vanished".to_string())?;
+        let ours = parent.status == Status::Running
+            && parent.lease.as_ref().map(|l| l.worker_run_id.as_str()) == Some(self.run_id.as_str());
+        if !ours {
+            return Err("task is no longer running under this run".to_string());
+        }
+        let already = self.delegated_this_run.load(std::sync::atomic::Ordering::SeqCst);
+        let outcome = plan_delegation(
+            self.store.as_ref(),
+            &parent,
+            tasks,
+            already,
+            &self.roles,
+            &self.delegation,
+            OffsetDateTime::now_utc(),
+        )
+        .map_err(|e| format!("validation: {e}"))?;
+        for reason in &outcome.rejected {
+            self.note(format!("delegate rejected: {reason}"));
+        }
+        if outcome.accepted.is_empty() {
+            return Ok(());
+        }
+        let n = outcome.accepted.len();
+        let ids = self
+            .store
+            .delegate_children(self.task_id, &self.run_id, outcome.accepted)
+            .map_err(|e| format!("insert: {e}"))?;
+        self.delegated_this_run
+            .fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+        let listed: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        self.note(format!("delegated {n} child task(s): {}", listed.join(", ")));
+        tracing::info!(task_id = %self.task_id, run_id = %self.run_id, children = n, "delegated child tasks inserted");
+        Ok(())
+    }
 }
 
 impl EventSink for StoreSink {
@@ -248,6 +325,13 @@ impl EventSink for StoreSink {
         };
         if let Err(e) = self.store.append_event(self.task_id, &ev) {
             tracing::warn!(task_id = %self.task_id, error = %e, "failed to record artifact");
+        }
+    }
+
+    fn delegate(&self, tasks: &[DelegateTask]) {
+        if let Err(reason) = self.delegate_impl(tasks) {
+            tracing::warn!(task_id = %self.task_id, run_id = %self.run_id, %reason, "delegate proposal ignored");
+            self.note(format!("delegate ignored: {reason}"));
         }
     }
 
@@ -315,6 +399,9 @@ pub struct Dispatcher {
     cluster_waiting: std::collections::HashSet<TaskId>,
     /// 人間の承認待ちで延期中の reviewing タスク（`is_idle` 判定用。ADR-0010 D8）。
     awaiting_human: std::collections::HashSet<TaskId>,
+    /// ADR-0016 D2 / M5: レビューは全 pass だが、委譲した子が終端になるのを待っている reviewing タスク。
+    /// 値はその run の id と、Plan kind なら検証済みの plan（子が終わってから `complete_plan` する）。
+    awaiting_children: HashMap<TaskId, AwaitingChildren>,
     tx: mpsc::UnboundedSender<Completion>,
     rx: mpsc::UnboundedReceiver<Completion>,
     /// ADR-0018 D2: 多重接続が無いクラスタの cooldown（この時刻まで dispatch しない）。
@@ -349,6 +436,7 @@ impl Dispatcher {
             unroutable: std::collections::HashSet::new(),
             cluster_waiting: std::collections::HashSet::new(),
             awaiting_human: std::collections::HashSet::new(),
+            awaiting_children: HashMap::new(),
             tx,
             rx,
             cluster_cooldown: HashMap::new(),
@@ -383,6 +471,7 @@ impl Dispatcher {
         let drain_ms = lap(&mut at);
         report.finished = finished;
         report.reviewed = reviewed;
+        self.settle_awaiting_children()?;
         report.reclaimed = self.reclaim_expired_leases()?;
         let reclaim_ms = lap(&mut at);
         self.abort_stale_runs()?;
@@ -775,6 +864,35 @@ impl Dispatcher {
             }))
             .chain(throttled_events)
             .collect();
+        // ADR-0016 D2 / M5: 全 pass でも委譲した子が終端でなければ、判定だけ記録して reviewing のまま待つ。
+        if all_pass {
+            let pending = pending_children(self.store.as_ref(), task_id).map_err(ops_to_store)?;
+            if pending > 0 {
+                for ev in &events {
+                    self.store.append_event(task_id, ev)?;
+                }
+                self.store.append_event(
+                    task_id,
+                    &Event::WorkerProgress {
+                        run_id: run_id.clone(),
+                        msg: format!("waiting for {pending} delegated child task(s) before completing"),
+                    },
+                )?;
+                self.awaiting_children.insert(
+                    task_id,
+                    AwaitingChildren {
+                        run_id: run_id.clone(),
+                        plan: outcome.plan,
+                    },
+                );
+                tracing::info!(%task_id, %run_id, pending, "review passed; waiting for delegated children");
+                return Ok(());
+            }
+            // ADR-0016 D3 / M4: 子が全て終端で、まだ集約 run をしていなければ集約 run を予約する。
+            if self.needs_aggregate_run(&task)? {
+                return self.schedule_aggregate_run(task_id, &run_id, events);
+            }
+        }
         // ADR-0007 D3/D4: Plan が全 pass なら子タスクの挿入と ReviewPass を同一トランザクションで行う。
         let result = match (all_pass, task.kind, outcome.plan) {
             (true, TaskKind::Plan, Some(plan)) => {
@@ -809,6 +927,88 @@ impl Dispatcher {
                 tracing::warn!(%task_id, error = %e, "review result could not be applied");
             }
             Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
+
+    /// ADR-0016 M4: `aggregate = true` で、Approval 以外の子が 1 件以上あり、まだ集約遷移をしていないか。
+    fn needs_aggregate_run(&self, task: &Task) -> Result<bool, DispatchError> {
+        if !task.aggregate {
+            return Ok(false);
+        }
+        let has_children = self
+            .store
+            .children(task.id)?
+            .iter()
+            .any(|c| c.kind != TaskKind::Approval);
+        if !has_children {
+            return Ok(false);
+        }
+        let events = self.store.events_for(task.id)?;
+        Ok(!has_aggregate_transition(&events))
+    }
+
+    /// ADR-0016 M1 / M4: `Aggregate`（reviewing → ready、attempts 据え置き）を適用し、次の dispatch を集約 run にする。
+    fn schedule_aggregate_run(&mut self, task_id: TaskId, run_id: &str, mut events: Vec<Event>) -> Result<(), DispatchError> {
+        let children = self.store.children(task_id)?.len();
+        events.push(Event::WorkerProgress {
+            run_id: run_id.to_string(),
+            msg: format!("all {children} delegated child task(s) finished; scheduling the aggregate run"),
+        });
+        match self.store.apply_transition_with_events(task_id, Trigger::Aggregate, events) {
+            Ok(outcome) => {
+                tracing::info!(%task_id, %run_id, next = ?outcome.next, "aggregate run scheduled");
+            }
+            Err(StoreError::InvalidTransition(e)) => {
+                tracing::warn!(%task_id, error = %e, "aggregate transition could not be applied");
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
+
+    /// ADR-0016 M5: 子待ちの親を毎 tick 数え直し、全て終端になったら集約 run（M4）か `ReviewPass`（Plan なら `complete_plan`）。
+    fn settle_awaiting_children(&mut self) -> Result<(), DispatchError> {
+        let ids: Vec<TaskId> = self.awaiting_children.keys().copied().collect();
+        for task_id in ids {
+            let Some(task) = self.store.get(task_id)? else {
+                self.awaiting_children.remove(&task_id);
+                continue;
+            };
+            if task.status != Status::Reviewing {
+                self.awaiting_children.remove(&task_id);
+                continue;
+            }
+            let pending = pending_children(self.store.as_ref(), task_id).map_err(ops_to_store)?;
+            if pending > 0 {
+                continue;
+            }
+            let Some(waiting) = self.awaiting_children.remove(&task_id) else {
+                continue;
+            };
+            if self.needs_aggregate_run(&task)? {
+                self.schedule_aggregate_run(task_id, &waiting.run_id, Vec::new())?;
+                continue;
+            }
+            let result = match (task.kind, waiting.plan) {
+                (TaskKind::Plan, Some(plan)) => {
+                    let children = materialize(&task, &plan, OffsetDateTime::now_utc());
+                    self.store
+                        .complete_plan(task_id, Vec::new(), children, self.config.plan_auto_accept)
+                }
+                _ => self
+                    .store
+                    .apply_transition_with_events(task_id, Trigger::ReviewPass, Vec::new()),
+            };
+            match result {
+                Ok(outcome) => {
+                    tracing::info!(%task_id, run_id = %waiting.run_id, next = ?outcome.next, "delegated children finished; parent completed");
+                }
+                Err(StoreError::InvalidTransition(e)) => {
+                    tracing::warn!(%task_id, error = %e, "parent completion could not be applied");
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         Ok(())
     }
@@ -884,7 +1084,7 @@ impl Dispatcher {
         self.awaiting_human
             .retain(|id| reviewing_tasks.iter().any(|t| t.id == *id));
         for task in reviewing_tasks {
-            if self.reviewing.contains_key(&task.id) {
+            if self.reviewing.contains_key(&task.id) || self.awaiting_children.contains_key(&task.id) {
                 continue;
             }
             let events = self.store.events_for(task.id)?;
@@ -1034,6 +1234,7 @@ impl Dispatcher {
                     model,
                     provider: Some(provider_id.clone()),
                     role: None,
+                    task_role: task.role.clone(),
                 },
             )?;
             log_slow_step("append_worker_started", event_started);
@@ -1044,7 +1245,8 @@ impl Dispatcher {
             };
             tracing::info!(task_id = %task.id, %run_id, adapter = %adapter_id, provider = %provider_id, "dispatching");
             let remote = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path));
-            let handle = self.spawn_worker(task.id, run_id.clone(), provider_id.clone(), adapter, dir, limits, remote);
+            let extras = self.run_extras(&task)?;
+            let handle = self.spawn_worker(task.id, run_id.clone(), provider_id.clone(), adapter, dir, limits, remote, extras);
             self.running.insert(
                 task.id,
                 RunEntry {
@@ -1060,6 +1262,50 @@ impl Dispatcher {
         Ok(dispatched)
     }
 
+    /// ADR-0016 D1 / D3: run 開始時にワーカーへ渡す役割の指示文と、集約 run なら子の要約。
+    fn run_extras(&self, task: &Task) -> Result<RunExtras, DispatchError> {
+        let role = task.role.as_deref().map(|id| RoleContext {
+            id: id.to_string(),
+            instructions: RoleSpec::find(&self.config.roles, id)
+                .and_then(|r| r.instructions.clone())
+                .unwrap_or_default(),
+        });
+        let events = self.store.events_for(task.id)?;
+        let children = if task.aggregate && has_aggregate_transition(&events) {
+            let mut out = Vec::new();
+            for child in self.store.children(task.id)? {
+                if child.kind == TaskKind::Approval {
+                    continue;
+                }
+                let child_events = self.store.events_for(child.id)?;
+                let outcome = child_events.iter().rev().find_map(|(_, e)| match e {
+                    Event::WorkerFinished { outcome, role: None, .. } => Some(outcome.clone()),
+                    _ => None,
+                });
+                let artifacts = child_events
+                    .iter()
+                    .filter_map(|(_, e)| match e {
+                        Event::ArtifactProduced { artifact, .. } => Some(artifact.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                out.push(ChildSummary {
+                    id: child.id,
+                    title: child.title.clone(),
+                    role: child.role.clone(),
+                    status: child.status,
+                    outcome,
+                    artifacts,
+                    workspace: self.task_dir(&child),
+                });
+            }
+            out
+        } else {
+            Vec::new()
+        };
+        Ok(RunExtras { role, children })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn_worker(
         &self,
@@ -1070,6 +1316,7 @@ impl Dispatcher {
         dir: PathBuf,
         limits: RunLimits,
         remote: Option<SshSettings>,
+        extras: RunExtras,
     ) -> JoinHandle<()> {
         let store = self.store.clone();
         let tx = self.tx.clone();
@@ -1077,8 +1324,10 @@ impl Dispatcher {
             ttl: self.config.idle_timeout + self.config.lease_grace,
             every: self.config.lease_grace / 2,
         };
+        let roles = self.config.roles.clone();
+        let delegation = self.config.delegation;
         tokio::spawn(async move {
-            let result = run_worker(store, adapter, task_id, dir, &run_id, limits, lease, remote).await;
+            let result = run_worker(store, adapter, task_id, dir, &run_id, limits, lease, remote, extras, roles, delegation).await;
             let _ = tx.send(Completion::Worker {
                 task_id,
                 run_id,
@@ -1140,6 +1389,8 @@ impl Dispatcher {
         } else {
             None
         };
+        // ADR-0016 M4: 集約 run のレビューには暗黙の条件「artifacts/summary.md がある」が加わる。
+        let aggregate = task.aggregate && has_aggregate_transition(&self.store.events_for(task_id)?);
 
         // ADR-0018: 判定コマンドもクラスタで実行する。
         let cluster = self.cluster_of(&task);
@@ -1158,6 +1409,7 @@ impl Dispatcher {
                     model,
                     provider: Some(provider_id.clone()),
                     role: Some(RunRole::Reviewer),
+                    task_role: None,
                 },
             )?;
         }
@@ -1177,6 +1429,7 @@ impl Dispatcher {
                 plan,
                 reviewer: reviewer_run,
                 human,
+                aggregate,
             };
             let outcome = review_task(&task, ws.as_ref(), &dir, &produced, timeout, extras).await;
             let _ = tx.send(Completion::Review {
@@ -1264,6 +1517,8 @@ impl Dispatcher {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         };
         // ADR-0010 D2: 挿入・Created・ApprovalRequested を 1 トランザクションで。
         self.store.create_task(&approval, vec![Event::ApprovalRequested])?;
@@ -1420,7 +1675,7 @@ impl Dispatcher {
             .store
             .list(Some(Status::Reviewing))?
             .iter()
-            .any(|t| !self.awaiting_human.contains(&t.id))
+            .any(|t| !self.awaiting_human.contains(&t.id) && !self.awaiting_children.contains_key(&t.id))
         {
             return Ok(false);
         }
@@ -1447,6 +1702,9 @@ async fn run_worker(
     limits: RunLimits,
     lease: LeaseRenewal,
     remote: Option<SshSettings>,
+    extras: RunExtras,
+    roles: Vec<RoleSpec>,
+    delegation: DelegationLimits,
 ) -> Result<RunOutcome, AdapterError> {
     // リース取得後の状態（running, lease あり）をワーカーに渡す。
     let mut task = store
@@ -1490,6 +1748,8 @@ async fn run_worker(
             inputs: task.inputs.clone(),
             answers: to_answers(answers_from_events(&events)),
             review: None,
+            role: extras.role,
+            children: extras.children,
         },
     };
     let sink = StoreSink {
@@ -1499,6 +1759,9 @@ async fn run_worker(
         lease_ttl: lease.ttl,
         renew_every: lease.every,
         last_renew: std::sync::Mutex::new(Instant::now()),
+        roles,
+        delegation,
+        delegated_this_run: std::sync::atomic::AtomicUsize::new(0),
     };
     adapter.run(req, run_id, limits, &sink).await
 }
@@ -1554,6 +1817,21 @@ pub fn provider_failure_outcome(e: &AdapterError) -> Option<ProviderOutcome> {
         AdapterError::AuthFailed(_) => Some(ProviderOutcome::AuthFailed),
         AdapterError::Exhausted(_) | AdapterError::Spawn(_) => Some(ProviderOutcome::Exhausted),
         AdapterError::Io(_) | AdapterError::Serde(_) | AdapterError::Other(_) => None,
+    }
+}
+
+/// ADR-0016 M4: イベント列に集約遷移（`Transitioned{reason: "aggregate"}`）があるか。以後の run は集約 run。
+fn has_aggregate_transition(events: &[(u64, Event)]) -> bool {
+    events
+        .iter()
+        .any(|(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == "aggregate"))
+}
+
+/// task-ops の読み取りエラーをディスパッチャのエラーに写す（検証以外の失敗は来ない想定）。
+fn ops_to_store(e: task_ops::OpsError) -> DispatchError {
+    match e {
+        task_ops::OpsError::Store(inner) => DispatchError::Store(inner),
+        other => DispatchError::Store(StoreError::Invalid(other.to_string())),
     }
 }
 
@@ -1627,6 +1905,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 
@@ -1662,6 +1942,8 @@ mod tests {
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
+                roles: Vec::new(),
+                delegation: DelegationLimits::default(),
             },
         )
     }
@@ -2709,6 +2991,271 @@ mod tests {
     }
 
     /// `task_id` の直接の `Approval` 子タスクが現れるまで tick を回す（Human check の生成を待つ）。
+    /// ADR-0016: 親 run で `delegate` を出し、子 run は少し待って done、集約 run は `artifacts/summary.md` を書くアダプタ。
+    struct DelegatingAdapter {
+        proposals: Vec<DelegateTask>,
+        child_delay: Duration,
+        seen_role: std::sync::Mutex<Option<RoleContext>>,
+        aggregate_children: AtomicUsize,
+        write_summary: bool,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for DelegatingAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            let done = |summary: &str| {
+                Ok(RunOutcome {
+                    terminal: Terminal::Done { summary: summary.into(), evidence: vec![], usage: None },
+                    exit_code: Some(0),
+                })
+            };
+            // 提案した子は role = implementer。親（lead / 役割なし）と区別する。
+            if req.task.role.as_deref() == Some("implementer") {
+                tokio::time::sleep(self.child_delay).await;
+                return done("child");
+            }
+            *self.seen_role.lock().unwrap() = req.context.role.clone();
+            if !req.context.children.is_empty() {
+                self.aggregate_children.store(req.context.children.len(), Ordering::SeqCst);
+                if self.write_summary {
+                    std::fs::create_dir_all(req.workspace.join("artifacts")).unwrap();
+                    std::fs::write(req.workspace.join("artifacts/summary.md"), "# summary\n").unwrap();
+                }
+                return done("aggregated");
+            }
+            sink.delegate(&self.proposals);
+            done("delegated")
+        }
+    }
+
+    fn proposal(title: &str, deps: Vec<task_core::DelegateDep>) -> DelegateTask {
+        DelegateTask {
+            title: title.into(),
+            objective: format!("do {title}"),
+            acceptance: vec![Criterion { text: "c".into(), check: Check::Command { cmd: "true".into(), expect_exit: 0 } }],
+            role: Some("implementer".into()),
+            depends_on: deps,
+            tier: None,
+        }
+    }
+
+    fn roles() -> Vec<RoleSpec> {
+        vec![
+            RoleSpec {
+                id: "lead".into(),
+                instructions: Some("You lead; delegate implementation.".into()),
+                ..RoleSpec::default()
+            },
+            RoleSpec { id: "implementer".into(), tier: Some(Tier::Cheap), ..RoleSpec::default() },
+        ]
+    }
+
+    fn progress_msgs(store: &Arc<dyn TaskStore>, id: TaskId) -> Vec<String> {
+        store
+            .events_for(id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkerProgress { msg, .. } => Some(msg),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 受け入れ 1〜3・5: 役割の指示文が run に載り、`delegate` の検証を通った 2 件だけが子になり、親は子が終わるまで
+    /// reviewing のまま、`aggregate = true` なら最後に 1 回だけ集約 run が走って summary.md が暗黙の条件で判定される。
+    #[tokio::test]
+    async fn delegate_inserts_validated_children_and_aggregate_parent_runs_once_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 1);
+        parent.role = Some("lead".into());
+        parent.aggregate = true;
+        store.insert(&parent).unwrap();
+        let mut bad_title = proposal("", vec![]);
+        bad_title.title = "  ".into();
+        let adapter = Arc::new(DelegatingAdapter {
+            proposals: vec![
+                proposal("a", vec![]),
+                proposal("b", vec![task_core::DelegateDep::Index(0)]),
+                bad_title,
+                proposal("self", vec![task_core::DelegateDep::Id(parent.id.to_string())]),
+            ],
+            child_delay: Duration::from_millis(30),
+            seen_role: std::sync::Mutex::new(None),
+            aggregate_children: AtomicUsize::new(0),
+            write_summary: true,
+        });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 4);
+        d.config.roles = roles();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle);
+
+        let p = store.get(parent.id).unwrap().unwrap();
+        assert_eq!(p.status, Status::Done, "{:?}", store.events_for(parent.id).unwrap());
+        assert_eq!(p.attempts, 0, "aggregate does not consume attempts");
+        let children = store.children(parent.id).unwrap();
+        assert_eq!(children.len(), 2, "only the two valid proposals were inserted");
+        assert_eq!(children[0].title, "a");
+        assert_eq!(children[1].title, "b");
+        assert_eq!(children[1].depends_on, vec![children[0].id]);
+        assert_eq!(children[0].role.as_deref(), Some("implementer"));
+        assert_eq!(children[0].worker_hint.tier, Tier::Cheap, "role default applied to the child");
+        for c in &children {
+            assert_eq!(store.get(c.id).unwrap().unwrap().status, Status::Done);
+        }
+
+        let events = store.events_for(parent.id).unwrap();
+        let delegated: Vec<Vec<TaskId>> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::Delegated { task_ids, .. } => Some(task_ids.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(delegated, vec![vec![children[0].id, children[1].id]]);
+        let msgs = progress_msgs(&store, parent.id);
+        assert!(msgs.iter().any(|m| m.starts_with("delegate rejected: tasks[2]") && m.contains("title")), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.starts_with("delegate rejected: tasks[3]") && m.contains("delegating task itself")), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.starts_with("waiting for ") && m.contains("delegated child task")), "{msgs:?}");
+        assert_eq!(
+            transition_reasons(&store, parent.id),
+            vec!["dispatch", "worker_done", "aggregate", "dispatch", "worker_done", "review_pass"]
+        );
+        // 親の run は 2 回（最初 + 集約）。役割名が WorkerStarted に残り、指示文が RunContext に載る。
+        let started: Vec<Option<String>> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkerStarted { role: None, task_role, .. } => Some(task_role.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, vec![Some("lead".to_string()), Some("lead".to_string())]);
+        let role = adapter.seen_role.lock().unwrap().clone().expect("role context");
+        assert_eq!(role.id, "lead");
+        assert_eq!(role.instructions, "You lead; delegate implementation.");
+        assert_eq!(adapter.aggregate_children.load(Ordering::SeqCst), 2, "aggregate run saw both children");
+        // 集約 run のレビューには暗黙の summary.md 条件（idx = acceptance.len()）が入る。
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { criterion_idx: 1, pass: true, reason, .. } if reason.contains("summary.md"))), "{events:?}");
+    }
+
+    /// 受け入れ 3: `aggregate = false` の親は子が終わるまで reviewing のまま、終わったら run を増やさず done。
+    #[tokio::test]
+    async fn non_aggregate_parent_stays_reviewing_until_children_finish_then_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        store.insert(&parent).unwrap();
+        let adapter = Arc::new(DelegatingAdapter {
+            proposals: vec![proposal("slow", vec![])],
+            child_delay: Duration::from_millis(400),
+            seen_role: std::sync::Mutex::new(None),
+            aggregate_children: AtomicUsize::new(0),
+            write_summary: false,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 4);
+        // 親の run と判定が終わり、子がまだ走っている間に観察する。
+        let mut observed_waiting = false;
+        for _ in 0..200 {
+            let r = d.tick().unwrap();
+            let p = store.get(parent.id).unwrap().unwrap();
+            let child_running = store.children(parent.id).unwrap().iter().any(|c| c.status == Status::Running);
+            if p.status == Status::Reviewing && child_running && d.awaiting_children.contains_key(&parent.id) {
+                observed_waiting = true;
+                break;
+            }
+            if r.idle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(observed_waiting, "parent should be reviewing while its delegated child runs");
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle);
+        let p = store.get(parent.id).unwrap().unwrap();
+        assert_eq!(p.status, Status::Done);
+        assert_eq!(transition_reasons(&store, parent.id), vec!["dispatch", "worker_done", "review_pass"]);
+        let events = store.events_for(parent.id).unwrap();
+        assert_eq!(events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. })).count(), 1);
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::Delegated { .. })));
+    }
+
+    /// 受け入れ 2: 上限（1 run の件数・木の深さ・木の run 数）を超える提案は拒否され、理由が WorkerProgress に残り、親は失敗しない。
+    #[tokio::test]
+    async fn delegation_limits_reject_with_reasons_and_do_not_fail_the_run() {
+        async fn run_with(limits: DelegationLimits, proposals: Vec<DelegateTask>, depth: u32) -> (Vec<String>, usize, Status) {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+            // depth 個の祖先の下に親を置く（根 = 深さ 1）。
+            let mut ancestor: Option<TaskId> = None;
+            for _ in 1..depth {
+                let mut a = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+                a.parent_id = ancestor;
+                a.status = Status::Done;
+                store.insert(&a).unwrap();
+                ancestor = Some(a.id);
+            }
+            let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+            parent.parent_id = ancestor;
+            store.insert(&parent).unwrap();
+            let adapter = Arc::new(DelegatingAdapter {
+                proposals,
+                child_delay: Duration::from_millis(1),
+                seen_role: std::sync::Mutex::new(None),
+                aggregate_children: AtomicUsize::new(0),
+                write_summary: false,
+            });
+            let mut d = dispatcher(store.clone(), adapter, 4);
+            d.config.delegation = limits;
+            let report = run_until_idle(&mut d, 400).await;
+            assert!(report.idle);
+            let p = store.get(parent.id).unwrap().unwrap();
+            (progress_msgs(&store, parent.id), store.children(parent.id).unwrap().len(), p.status)
+        }
+
+        // 1 run の件数: 2 件のうち 1 件だけ。
+        let (msgs, n, status) = run_with(
+            DelegationLimits { max_delegate_per_run: 1, ..DelegationLimits::default() },
+            vec![proposal("a", vec![]), proposal("b", vec![])],
+            1,
+        )
+        .await;
+        assert_eq!(n, 1, "{msgs:?}");
+        assert_eq!(status, Status::Done);
+        assert!(msgs.iter().any(|m| m.contains("delegate rejected: tasks[1]") && m.contains("per-run delegation limit (1)")), "{msgs:?}");
+
+        // 木の深さ: 深さ 2 の親は max_tree_depth = 2 で子を作れない。
+        let (msgs, n, status) = run_with(
+            DelegationLimits { max_tree_depth: 2, ..DelegationLimits::default() },
+            vec![proposal("a", vec![])],
+            2,
+        )
+        .await;
+        assert_eq!(n, 0, "{msgs:?}");
+        assert_eq!(status, Status::Done);
+        assert!(msgs.iter().any(|m| m.contains("delegate rejected") && m.contains("tree depth would become 3 (max 2)")), "{msgs:?}");
+
+        // 木の run 数: 親自身の run が 1 回目なので max_tree_runs = 1 で拒否。
+        let (msgs, n, status) = run_with(
+            DelegationLimits { max_tree_runs: 1, ..DelegationLimits::default() },
+            vec![proposal("a", vec![])],
+            1,
+        )
+        .await;
+        assert_eq!(n, 0, "{msgs:?}");
+        assert_eq!(status, Status::Done);
+        assert!(msgs.iter().any(|m| m.contains("delegate rejected") && m.contains("worker runs (max 1)")), "{msgs:?}");
+    }
+
     async fn wait_for_approval_child(d: &mut Dispatcher, store: &Arc<dyn TaskStore>, task_id: TaskId) -> Task {
         for _ in 0..100 {
             d.tick().unwrap();

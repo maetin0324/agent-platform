@@ -283,9 +283,12 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
 async fn create_task(State(state): State<ApiState>, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
     no_query(&raw)?;
     let spec: NewTaskSpec = read_json(body, false).await?;
+    // ADR-0016 M3: 省略された tier / adapter / 予算は `[[roles]]` の既定 → 全体の既定で埋める。
+    let roles = state.inner.roles.clone();
     let task = state
         .blocking(move |store| {
-            task_ops::add::create_task(store, spec, OffsetDateTime::now_utc()).map_err(|e| ops_problem(store, e, None))
+            task_ops::add::create_task_with_roles(store, spec, &roles, OffsetDateTime::now_utc())
+                .map_err(|e| ops_problem(store, e, None))
         })
         .await?;
     Ok(created_task(&task))
@@ -820,12 +823,15 @@ mod tests {
                 },
                 providers: vec![],
                 clusters: vec![],
+                roles: vec![],
+                delegation: task_core::DelegationLimits::default(),
                 api: ApiConfigView {
                     bind: "127.0.0.1:7710".into(),
                     auth_required: false,
                     allowed_hosts: vec![],
                 },
             },
+            roles: vec![],
             taskd_version: "test".into(),
             instance_id: "01J00000000000000000000000".into(),
             started_at: "2026-09-14T00:00:00Z".into(),

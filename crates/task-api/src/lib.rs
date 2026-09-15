@@ -32,8 +32,8 @@ pub use stats::classify_outcome;
 pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterView, Clusters,
     ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, Health, Problem, ProviderConfigView,
-    ProviderStats, ProviderView, Providers, ReviewerConfigView, RunList, StreamHeartbeat, StreamHello, StreamReset,
-    ValidationError,
+    ProviderStats, ProviderView, Providers, ReviewerConfigView, RoleConfigView, RunList, StreamHeartbeat, StreamHello,
+    StreamReset, ValidationError,
 };
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
@@ -68,6 +68,8 @@ pub struct ApiSettings {
     pub busy_timeout: Duration,
     pub view: task_ops::view::ViewContext,
     pub config_view: ConfigView,
+    /// ADR-0016 D1 / M3: `[[roles]]`。`POST /tasks` で省略された `tier` / `adapter` / 予算の既定に使う。
+    pub roles: Vec<task_core::RoleSpec>,
     pub taskd_version: String,
     /// ディスパッチャのスナップショットと同じ値。
     pub instance_id: String,
@@ -85,6 +87,7 @@ impl std::fmt::Debug for ApiSettings {
             .field("busy_timeout", &self.busy_timeout)
             .field("view", &self.view)
             .field("config_view", &self.config_view)
+            .field("roles", &self.roles)
             .field("taskd_version", &self.taskd_version)
             .field("instance_id", &self.instance_id)
             .field("started_at", &self.started_at)

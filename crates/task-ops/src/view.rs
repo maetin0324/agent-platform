@@ -83,6 +83,10 @@ pub struct TaskDetail {
     pub workspace_dir: Option<String>,
     /// ADR-0018: `WorkspaceSpec::Remote` のクラスタ（`[[clusters]] id`）。ローカルのタスクは `null`。
     pub cluster: Option<String>,
+    /// ADR-0016 D1: `Task.role`（GUI の表示用に最上位にも出す）。
+    pub role: Option<String>,
+    /// ADR-0016 D2: 各 run が `delegate` で作った子（`Event::Delegated` の順）。
+    pub delegated: Vec<DelegatedView>,
     pub timers: Timers,
     pub criteria: Vec<CriterionView>,
     pub runs: Vec<RunSummary>,
@@ -95,6 +99,16 @@ pub struct TaskDetail {
     pub children: Vec<TaskRef>,
     pub actions: Vec<Action>,
     pub worker_run_hint: Option<String>,
+}
+
+/// ADR-0016 D2: 1 回の `delegate`（`Event::Delegated`）の要約。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct DelegatedView {
+    pub run_id: String,
+    /// イベントの ts（`EventRow.ts`）。
+    pub ts: String,
+    /// 子の現在の状態。既に存在しない ID は落とす。
+    pub tasks: Vec<TaskRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -340,6 +354,7 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                 model,
                 provider,
                 role,
+                ..
             } => {
                 if !by_run.contains_key(run_id) {
                     order.push(run_id.clone());
@@ -591,10 +606,25 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
         Some(format!("taskctl worker run --config <taskd.toml> --task {id}"))
     };
 
+    let delegated: Vec<DelegatedView> = rows
+        .iter()
+        .filter_map(|r| match &r.event {
+            Event::Delegated { run_id, task_ids } => Some(DelegatedView {
+                run_id: run_id.clone(),
+                ts: r.ts.clone(),
+                tasks: task_ids.iter().filter_map(|tid| by_id.get(tid).map(task_ref)).collect(),
+            }),
+            _ => None,
+        })
+        .collect();
+    let role = task.role.clone();
+
     Ok(TaskDetail {
         task,
         workspace_dir,
         cluster,
+        role,
+        delegated,
         timers: timers_view,
         criteria,
         runs: run_summaries,
@@ -686,6 +716,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 
@@ -715,6 +747,7 @@ mod tests {
             model: "claude-sonnet-5".to_string(),
             provider: provider.map(str::to_string),
             role: None,
+            task_role: None,
         }
     }
 
@@ -742,6 +775,7 @@ mod tests {
                 model: "m".into(),
                 provider: Some("acct-b".into()),
                 role: Some(RunRole::Reviewer),
+                task_role: None,
             },
             Event::WorkerFinished {
                 run_id: "rev-1".into(),
@@ -1108,6 +1142,38 @@ mod tests {
         );
         let detail = task_detail(&store, local.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         assert_eq!(detail.cluster, None);
+    }
+
+    /// ADR-0016 D1/D2: `role` はトップレベルにも出て、`delegated` は `Event::Delegated` から組み立てる。
+    #[test]
+    fn task_detail_reports_role_and_delegated_children() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut parent = sample_task(TaskKind::Execute, Status::Running);
+        parent.role = Some("lead".to_string());
+        store.insert(&parent).expect("insert parent");
+
+        let mut child = sample_task(TaskKind::Execute, Status::Ready);
+        child.parent_id = Some(parent.id);
+        store.insert(&child).expect("insert child");
+
+        let missing_child = TaskId::new();
+        store
+            .append_event(
+                parent.id,
+                &Event::Delegated {
+                    run_id: "run-1".into(),
+                    task_ids: vec![child.id, missing_child],
+                },
+            )
+            .expect("append delegated");
+
+        let ctx = view_ctx();
+        let detail = task_detail(&store, parent.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        assert_eq!(detail.role.as_deref(), Some("lead"));
+        assert_eq!(detail.delegated.len(), 1);
+        assert_eq!(detail.delegated[0].run_id, "run-1");
+        assert_eq!(detail.delegated[0].tasks.len(), 1, "missing child id is dropped");
+        assert_eq!(detail.delegated[0].tasks[0].id, child.id);
     }
 
     #[test]

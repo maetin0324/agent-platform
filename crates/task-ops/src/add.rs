@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    Budget, Check, Criterion, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
+    Budget, Check, Criterion, RoleSpec, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
     WorkspaceSpec,
 };
 use time::OffsetDateTime;
@@ -78,26 +78,36 @@ pub struct NewTaskSpec {
     pub acceptance: Vec<CriterionSpec>,
     #[serde(default = "default_kind")]
     pub kind: TaskKind,
-    #[serde(default = "default_tier")]
-    pub tier: Tier,
+    /// 省略時は役割の既定 → `standard`（ADR-0016 D1 / M3: タスクの値 > 役割の既定 > 全体の既定）。
+    #[serde(default)]
+    pub tier: Option<Tier>,
     #[serde(default)]
     pub priority: i32,
     #[serde(default)]
     pub parent: Option<TaskId>,
     #[serde(default)]
     pub depends_on: Vec<TaskId>,
-    #[serde(default = "default_max_turns")]
-    pub max_turns: u32,
-    #[serde(default = "default_max_wall_secs")]
-    pub max_wall_secs: u64,
+    /// 省略時は役割の既定 → 10。
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    /// 省略時は役割の既定 → 600。
+    #[serde(default)]
+    pub max_wall_secs: Option<u64>,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// ADR-0016 D1: 役割名（自由記述）。`[[roles]]` にあれば省略値の既定と run 時の指示文が効く。
+    #[serde(default)]
+    pub role: Option<String>,
+    /// ADR-0016 D3: 委譲した子が全て終端になった後に集約 run を 1 回行う。
+    #[serde(default)]
+    pub aggregate: bool,
     #[serde(default)]
     pub workspace: Option<PathBuf>,
     /// ADR-0018: 指定すると `WorkspaceSpec::Remote{cluster, path}` になり、コマンドはそのクラスタで実行される。
     /// `workspace` がクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。
     #[serde(default)]
     pub cluster: Option<String>,
+    /// 省略時は役割の既定 → 指定なし。
     #[serde(default)]
     pub adapter: Option<String>,
 }
@@ -105,17 +115,13 @@ pub struct NewTaskSpec {
 fn default_kind() -> TaskKind {
     TaskKind::Execute
 }
-fn default_tier() -> Tier {
-    Tier::Standard
-}
-fn default_max_turns() -> u32 {
-    10
-}
-fn default_max_wall_secs() -> u64 {
-    600
-}
+/// 全体の既定（`taskctl add` と API で共通）。
+pub const DEFAULT_TIER: Tier = Tier::Standard;
+pub const DEFAULT_MAX_TURNS: u32 = 10;
+pub const DEFAULT_MAX_WALL_SECS: u64 = 600;
+pub const DEFAULT_MAX_RETRIES: u32 = 2;
 fn default_max_retries() -> u32 {
-    2
+    DEFAULT_MAX_RETRIES
 }
 
 fn build_acceptance(specs: Vec<CriterionSpec>) -> Result<Vec<Criterion>, OpsError> {
@@ -150,8 +156,20 @@ fn validate_depends_on(store: &dyn TaskStore, depends_on: &[TaskId]) -> Result<(
     Ok(())
 }
 
-/// `spec` から `Task` を組み立て、`store.create_task` で原子的に挿入する。
+/// `spec` から `Task` を組み立て、`store.create_task` で原子的に挿入する（役割の既定は無し = 全体の既定だけ）。
 pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime) -> Result<Task, OpsError> {
+    create_task_with_roles(store, spec, &[], now)
+}
+
+/// ADR-0016 D1 / M3: `spec` の省略値を `roles`（`[[roles]]`）の既定 → 全体の既定の順で埋めてから挿入する。
+/// `spec.role` が `roles` に無くてもエラーにしない（役割名は自由記述。既定と指示文が無いだけ）。
+pub fn create_task_with_roles(
+    store: &dyn TaskStore,
+    spec: NewTaskSpec,
+    roles: &[RoleSpec],
+    now: OffsetDateTime,
+) -> Result<Task, OpsError> {
+    let role = spec.role.as_deref().and_then(|r| RoleSpec::find(roles, r));
     let status = if spec.kind == TaskKind::Approval {
         Status::Ready
     } else {
@@ -188,8 +206,14 @@ pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime
     };
 
     let budget = Budget {
-        max_turns: spec.max_turns,
-        max_wall_secs: spec.max_wall_secs,
+        max_turns: spec
+            .max_turns
+            .or(role.and_then(|r| r.max_turns))
+            .unwrap_or(DEFAULT_MAX_TURNS),
+        max_wall_secs: spec
+            .max_wall_secs
+            .or(role.and_then(|r| r.max_wall_secs))
+            .unwrap_or(DEFAULT_MAX_WALL_SECS),
         max_retries: spec.max_retries,
     };
 
@@ -205,8 +229,8 @@ pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime
         status,
         priority: spec.priority,
         worker_hint: WorkerHint {
-            tier: spec.tier,
-            adapter: spec.adapter,
+            tier: spec.tier.or(role.and_then(|r| r.tier)).unwrap_or(DEFAULT_TIER),
+            adapter: spec.adapter.or_else(|| role.and_then(|r| r.adapter.clone())),
         },
         workspace,
         budget,
@@ -214,6 +238,8 @@ pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime
         lease: None,
         created_at: now,
         updated_at: now,
+        role: spec.role,
+        aggregate: spec.aggregate,
     };
 
     store.create_task(&task, vec![])?;
@@ -233,13 +259,15 @@ mod tests {
                 text: "it works".to_string(),
             }],
             kind: TaskKind::Execute,
-            tier: Tier::Standard,
+            tier: None,
             priority: 0,
             parent: None,
             depends_on: vec![],
-            max_turns: 10,
-            max_wall_secs: 600,
+            max_turns: None,
+            max_wall_secs: None,
             max_retries: 2,
+            role: None,
+            aggregate: false,
             workspace: Some(PathBuf::from("/tmp/workspace")),
             cluster: None,
             adapter: None,
@@ -284,6 +312,53 @@ mod tests {
             Event::Created { task: created } => assert_eq!(created.id, task.id),
             other => panic!("expected Created event, got {other:?}"),
         }
+    }
+
+    /// ADR-0016 D1 / M3: タスクの値 > 役割の既定 > 全体の既定。設定に無い役割は名前だけ保存する。
+    #[test]
+    fn create_task_with_roles_fills_omitted_values_from_the_role_then_global_defaults() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let roles = vec![RoleSpec {
+            id: "lead".to_string(),
+            tier: Some(Tier::Frontier),
+            adapter: Some("claude-code".to_string()),
+            max_turns: Some(40),
+            max_wall_secs: None,
+            instructions: Some("you lead".to_string()),
+        }];
+        let mut spec = base_spec();
+        spec.role = Some("lead".to_string());
+        spec.aggregate = true;
+        spec.max_turns = Some(7);
+        let task = create_task_with_roles(&store, spec, &roles, now()).expect("create");
+        assert_eq!(task.role.as_deref(), Some("lead"));
+        assert!(task.aggregate);
+        assert_eq!(task.worker_hint.tier, Tier::Frontier, "role default");
+        assert_eq!(task.worker_hint.adapter.as_deref(), Some("claude-code"), "role default");
+        assert_eq!(task.budget.max_turns, 7, "task value wins");
+        assert_eq!(task.budget.max_wall_secs, 600, "global default");
+        let json = serde_json::to_value(&task).unwrap();
+        assert_eq!(json["role"], "lead");
+        assert_eq!(json["aggregate"], true);
+
+        let mut spec = base_spec();
+        spec.role = Some("nobody".to_string());
+        let task = create_task_with_roles(&store, spec, &roles, now()).expect("unknown role is allowed");
+        assert_eq!(task.role.as_deref(), Some("nobody"));
+        assert_eq!(task.worker_hint.tier, Tier::Standard);
+        assert_eq!(task.budget.max_turns, 10);
+        let json = serde_json::to_value(&task).unwrap();
+        assert!(json.get("aggregate").is_none(), "false is omitted: {json}");
+
+        // 役割なしの JSON（旧クライアント）はそのまま読める。
+        let spec: NewTaskSpec = serde_json::from_str(
+            r#"{"title":"t","objective":"o","acceptance":[{"type":"human","text":"x"}],"tier":"cheap","max_turns":3}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.tier, Some(Tier::Cheap));
+        assert_eq!(spec.max_turns, Some(3));
+        assert_eq!(spec.max_wall_secs, None);
+        assert!(spec.role.is_none());
     }
 
     #[test]

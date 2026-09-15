@@ -266,6 +266,8 @@ async fn execute(
             inputs: task.inputs.clone(),
             answers: to_answers(answers_from_events(events)),
             review: None,
+            role: None,
+            children: Vec::new(),
         },
     };
 
@@ -349,6 +351,8 @@ async fn execute_on_cluster(
             inputs: task.inputs.clone(),
             answers: to_answers(answers_from_events(events)),
             review: None,
+            role: None,
+            children: Vec::new(),
         },
     };
 
@@ -479,6 +483,16 @@ impl EventSink for PrintSink {
     fn artifact(&self, artifact: &ArtifactRef) {
         outln!("artifact: {} {} sha256={}", artifact.name, artifact.path, artifact.sha256);
     }
+
+    /// ADR-0016 D2: `worker run` は DB を変えないので、提案は表示するだけで子タスクは挿入しない。
+    fn delegate(&self, tasks: &[task_core::DelegateTask]) {
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        outln!(
+            "delegate: {} task(s) proposed (not inserted; worker run does not write the DB): {}",
+            tasks.len(),
+            titles.join(", ")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +567,8 @@ mod tests {
             api: Default::default(),
             providers: vec![],
             clusters,
+            roles: vec![],
+            delegation: Default::default(),
             source_path: None,
         }
     }
@@ -590,6 +606,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 

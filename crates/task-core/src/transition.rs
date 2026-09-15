@@ -31,6 +31,8 @@ pub enum Trigger {
     Requeue,
     /// 先行タスクが `failed`/`cancelled` になった後続: 非終端 → `cancelled`（ADR-0010 D1, P-9）。
     DependencyFailed,
+    /// 委譲した子が全て終端になり、集約 run を行う親: `reviewing → ready`、attempts 据え置き（ADR-0016 D3 / M1）。
+    Aggregate,
 }
 
 impl Trigger {
@@ -52,6 +54,7 @@ impl Trigger {
             Trigger::Cancel => "cancel",
             Trigger::Requeue => "requeue",
             Trigger::DependencyFailed => "dependency_failed",
+            Trigger::Aggregate => "aggregate",
         }
     }
 }
@@ -117,6 +120,19 @@ pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransiti
         // ADR-0010 D1（P-21）: 供給側失敗は attempts を消費せず ready に戻す。
         Trigger::Requeue => {
             if s.status == Status::Running {
+                Ok(Outcome {
+                    next: Status::Ready,
+                    attempts: s.attempts,
+                    reason: t.name(),
+                })
+            } else {
+                Err(invalid(s, t))
+            }
+        }
+
+        // ADR-0016 M1: 集約 run は attempts を消費せず ready に戻す（reviewing からのみ）。
+        Trigger::Aggregate => {
+            if s.status == Status::Reviewing {
                 Ok(Outcome {
                     next: Status::Ready,
                     attempts: s.attempts,
@@ -313,6 +329,13 @@ mod tests {
                     expect_err()
                 }
             }
+            Trigger::Aggregate => {
+                if status == Status::Reviewing {
+                    expect_ok(Status::Ready)
+                } else {
+                    expect_err()
+                }
+            }
             Trigger::Accept => {
                 if status == Status::Draft {
                     expect_ok(Status::Ready)
@@ -373,7 +396,7 @@ mod tests {
         }
     }
 
-    /// status,kind × 単純トリガー(9種)の直積を全網羅する。
+    /// status,kind × 単純トリガー(12種)の直積を全網羅する。
     #[test]
     fn table_simple_triggers_full_cross_product() {
         let simple_triggers = [
@@ -388,6 +411,7 @@ mod tests {
             Trigger::Cancel,
             Trigger::Requeue,
             Trigger::DependencyFailed,
+            Trigger::Aggregate,
         ];
 
         let mut count = 0usize;
@@ -430,8 +454,8 @@ mod tests {
                 }
             }
         }
-        // 4 kinds * 8 statuses * 11 triggers
-        assert_eq!(count, 4 * 8 * 11);
+        // 4 kinds * 8 statuses * 12 triggers
+        assert_eq!(count, 4 * 8 * 12);
     }
 
     /// リトライ判定を含むトリガー (WorkerError{true/false}, LeaseExpired,

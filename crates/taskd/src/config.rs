@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-use task_core::{Tier, WorkerHint};
+use task_core::{DelegationLimits, RoleSpec, Tier, WorkerHint};
 use task_dispatch::{ClusterSpec, DispatchConfig, ProviderSpec};
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +65,12 @@ pub struct Config {
     /// ADR-0018: コマンドを実行するクラスタ。`WorkspaceSpec::Remote{cluster, path}` の `cluster` がここの `id` を指す。
     #[serde(default)]
     pub clusters: Vec<ClusterConfig>,
+    /// ADR-0016 D1: 役割ごとの既定と指示文。タスクの値 > 役割の既定 > 全体の既定。
+    #[serde(default)]
+    pub roles: Vec<RoleConfig>,
+    /// ADR-0016 D2: 実行中の委譲の上限。
+    #[serde(default)]
+    pub delegation: DelegationConfig,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -99,6 +105,62 @@ impl ApiConfig {
         }
         Ok(Some(token.to_string()))
     }
+}
+
+/// `[[roles]]`（ADR-0016 D1）: 役割ごとの既定。タスクに書かれた値 > ここの既定 > 全体の既定の順に効く。
+/// `id` は自由記述で、ここに無い役割名をタスクに付けてもよい（既定も指示文も無いだけ）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleConfig {
+    /// タスクの `role` が指す名前（例 `"lead"` / `"implementer"` / `"reviewer"`）。
+    pub id: String,
+    #[serde(default)]
+    pub tier: Option<Tier>,
+    /// 省略時は tier だけで選ぶ（fake / claude-code / codex）。
+    #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_wall_secs: Option<u64>,
+    /// ワーカーのプロンプトに前置きする指示文（何を任され、何を任せてよいか）。`GET /config` には**出さない**。
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
+/// `[delegation]`（ADR-0016 D2 / M6）: 実行中の委譲の上限。既定は `task_core::DelegationLimits::default()` と同じ。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationConfig {
+    /// 1 run あたりに受け付ける提案の件数（複数の `delegate` メッセージをまたいで数える）。
+    #[serde(default = "default_max_delegate_per_run")]
+    pub max_delegate_per_run: usize,
+    /// 木の深さ（根 = 1）。
+    #[serde(default = "default_max_tree_depth")]
+    pub max_tree_depth: u32,
+    /// 木全体のワーカー run 数。
+    #[serde(default = "default_max_tree_runs")]
+    pub max_tree_runs: u32,
+}
+
+impl Default for DelegationConfig {
+    fn default() -> Self {
+        Self {
+            max_delegate_per_run: default_max_delegate_per_run(),
+            max_tree_depth: default_max_tree_depth(),
+            max_tree_runs: default_max_tree_runs(),
+        }
+    }
+}
+
+fn default_max_delegate_per_run() -> usize {
+    task_core::DelegationLimits::default().max_delegate_per_run
+}
+fn default_max_tree_depth() -> u32 {
+    task_core::DelegationLimits::default().max_tree_depth
+}
+fn default_max_tree_runs() -> u32 {
+    task_core::DelegationLimits::default().max_tree_runs
 }
 
 /// `[[clusters]]`（ADR-0018）: ssh でコマンドを実行するクラスタ。接続は人が張った ControlMaster を借りる。
@@ -431,6 +493,42 @@ impl Config {
                 return Err(ConfigError::Invalid(format!("[[clusters]] {}: concurrency must be >= 1", c.id)));
             }
         }
+        // ADR-0016 D1: 役割の id は重複させない。adapter は providers と同じ判定。上限は 1 以上。
+        let mut role_ids = std::collections::HashSet::new();
+        for r in &self.roles {
+            if r.id.trim().is_empty() {
+                return Err(ConfigError::Invalid("[[roles]] id must not be empty".to_string()));
+            }
+            if !role_ids.insert(&r.id) {
+                return Err(ConfigError::Invalid(format!("duplicate role id: {}", r.id)));
+            }
+            if let Some(adapter) = &r.adapter
+                && adapter != task_worker::FakeAdapter::ID
+                && adapter != task_worker::ClaudeCodeAdapter::ID
+                && adapter != task_worker::CodexAdapter::ID
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "[[roles]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex only)",
+                    r.id
+                )));
+            }
+            if r.max_turns == Some(0) {
+                return Err(ConfigError::Invalid(format!("[[roles]] {}: max_turns must be >= 1", r.id)));
+            }
+            if r.max_wall_secs == Some(0) {
+                return Err(ConfigError::Invalid(format!("[[roles]] {}: max_wall_secs must be >= 1", r.id)));
+            }
+        }
+        // ADR-0016 D2 / M6: 0 の上限は「委譲を止める」ではなく設定ミス（拒否理由が毎回出るだけ）なので拒否する。
+        if self.delegation.max_delegate_per_run == 0 {
+            return Err(ConfigError::Invalid("[delegation] max_delegate_per_run must be >= 1".to_string()));
+        }
+        if self.delegation.max_tree_depth == 0 {
+            return Err(ConfigError::Invalid("[delegation] max_tree_depth must be >= 1".to_string()));
+        }
+        if self.delegation.max_tree_runs == 0 {
+            return Err(ConfigError::Invalid("[delegation] max_tree_runs must be >= 1".to_string()));
+        }
         // Phase 7 監査: cooldown 0 だと供給側失敗の requeue が毎 tick の再 dispatch になる。
         if self.error_cooldown_secs == 0 {
             return Err(ConfigError::Invalid("error_cooldown_secs must be >= 1".into()));
@@ -471,6 +569,32 @@ impl Config {
             clusters: self.cluster_specs(),
             // ADR-0018 D2: 多重接続が無いクラスタは、プロバイダの cooldown と同じ長さだけ外す。
             cluster_cooldown: Duration::from_secs(self.error_cooldown_secs),
+            roles: self.role_specs(),
+            delegation: self.delegation_limits(),
+        }
+    }
+
+    /// ADR-0016 D1: `[[roles]]` を task-core の型に写す（設定の順）。
+    pub fn role_specs(&self) -> Vec<RoleSpec> {
+        self.roles
+            .iter()
+            .map(|r| RoleSpec {
+                id: r.id.clone(),
+                tier: r.tier,
+                adapter: r.adapter.clone(),
+                max_turns: r.max_turns,
+                max_wall_secs: r.max_wall_secs,
+                instructions: r.instructions.clone(),
+            })
+            .collect()
+    }
+
+    /// ADR-0016 D2: `[delegation]` を task-core の型に写す。
+    pub fn delegation_limits(&self) -> DelegationLimits {
+        DelegationLimits {
+            max_delegate_per_run: self.delegation.max_delegate_per_run,
+            max_tree_depth: self.delegation.max_tree_depth,
+            max_tree_runs: self.delegation.max_tree_runs,
         }
     }
 
@@ -704,6 +828,91 @@ tiers = ["cheap"]
             cfg.api.token_file.unwrap(),
             dir.path().canonicalize().unwrap().join("secrets/api.token")
         );
+    }
+
+    /// ADR-0016 D1 / D2: `[[roles]]` と `[delegation]` を読み、task-core の型と DispatchConfig に写す。
+    #[test]
+    fn roles_and_delegation_are_parsed_and_mapped() {
+        let providers = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
+        // 既定（節を書かなければ空の役割表と DelegationLimits の既定）。
+        let cfg: Config = toml::from_str(providers).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.roles.is_empty());
+        assert_eq!(cfg.delegation_limits(), task_core::DelegationLimits::default());
+        assert_eq!(cfg.delegation_limits(), DelegationLimits { max_delegate_per_run: 8, max_tree_depth: 5, max_tree_runs: 100 });
+
+        let text = format!(
+            r#"[[roles]]
+id = "lead"
+tier = "frontier"
+max_turns = 40
+max_wall_secs = 1800
+instructions = "You lead the work. Delegate implementation."
+
+[[roles]]
+id = "implementer"
+adapter = "fake"
+
+[delegation]
+max_delegate_per_run = 3
+max_tree_depth = 2
+
+{providers}"#
+        );
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert!(cfg.validate().is_ok());
+        let specs = cfg.role_specs();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].id, "lead");
+        assert_eq!(specs[0].tier, Some(Tier::Frontier));
+        assert_eq!((specs[0].max_turns, specs[0].max_wall_secs), (Some(40), Some(1800)));
+        assert!(specs[0].instructions.as_deref().unwrap().starts_with("You lead"));
+        assert_eq!(specs[0].adapter, None);
+        assert_eq!(specs[1].adapter.as_deref(), Some("fake"));
+        assert_eq!(specs[1].tier, None);
+        // 書いていない値は既定のまま。
+        let limits = cfg.delegation_limits();
+        assert_eq!(limits, DelegationLimits { max_delegate_per_run: 3, max_tree_depth: 2, max_tree_runs: 100 });
+        let d = cfg.dispatch_config();
+        assert_eq!(d.roles, specs);
+        assert_eq!(d.delegation, limits);
+
+        assert!(toml::from_str::<Config>("[[roles]]\nid = \"a\"\nbogus = 1\n").is_err());
+        assert!(toml::from_str::<Config>("[delegation]\nbogus = 1\n").is_err());
+    }
+
+    /// ADR-0016: 役割 id の重複、未知の adapter、0 の上限は設定エラー。
+    #[test]
+    fn rejects_duplicate_roles_unknown_role_adapter_and_zero_limits() {
+        let providers = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
+        let dup = format!("[[roles]]\nid = \"lead\"\n[[roles]]\nid = \"lead\"\n{providers}");
+        let cfg: Config = toml::from_str(&dup).unwrap();
+        assert_eq!(cfg.validate().unwrap_err().to_string(), "invalid config: duplicate role id: lead");
+
+        let bogus = format!("[[roles]]\nid = \"lead\"\nadapter = \"bogus\"\n{providers}");
+        let cfg: Config = toml::from_str(&bogus).unwrap();
+        assert_eq!(
+            cfg.validate().unwrap_err().to_string(),
+            "invalid config: [[roles]] lead: adapter \"bogus\" is not available in this build (fake, claude-code, codex only)"
+        );
+
+        let empty = format!("[[roles]]\nid = \"  \"\n{providers}");
+        let cfg: Config = toml::from_str(&empty).unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("id must not be empty"));
+
+        let zero_turns = format!("[[roles]]\nid = \"lead\"\nmax_turns = 0\n{providers}");
+        let cfg: Config = toml::from_str(&zero_turns).unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("max_turns must be >= 1"));
+        let zero_wall = format!("[[roles]]\nid = \"lead\"\nmax_wall_secs = 0\n{providers}");
+        let cfg: Config = toml::from_str(&zero_wall).unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("max_wall_secs must be >= 1"));
+
+        for key in ["max_delegate_per_run", "max_tree_depth", "max_tree_runs"] {
+            let text = format!("[delegation]\n{key} = 0\n{providers}");
+            let cfg: Config = toml::from_str(&text).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert_eq!(err, format!("invalid config: [delegation] {key} must be >= 1"));
+        }
     }
 
     #[test]

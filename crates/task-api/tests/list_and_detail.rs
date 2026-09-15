@@ -153,6 +153,7 @@ async fn detail_matches_task_ops_task_detail_byte_for_byte() {
                 model: "m".into(),
                 provider: Some("claude-a".into()),
                 role: None,
+                task_role: None,
             },
             Event::WorkerProgress {
                 run_id: run_id.clone(),
@@ -205,6 +206,7 @@ async fn runs_list_fills_files_from_the_run_directory() {
         model: "m".into(),
         provider: None,
         role: None,
+        task_role: None,
     };
     env.seed_with(&task, vec![started(&first), started(&second)]);
     let run_dir = env.workspace(&task).join("runs").join(&first);

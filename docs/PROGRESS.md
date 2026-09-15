@@ -1,6 +1,6 @@
 # PROGRESS — taskd
 
-現在地: **Phase 0〜9 完了**（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装）。Web GUI の設計は `docs/gui/`（Fable 作成、
+現在地: **Phase 0〜10・12 完了、Phase 11 着手中**（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
 人間の判断 H1〜H9 を反映済み）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により G フェーズとして進める（前提: Node 24 LTS / pnpm 11）。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
@@ -17,9 +17,9 @@
 | 7 | 仕上げ（ADR-0010）、requeue 上限（ADR-0011） | 完了 | 2026-09-14 |
 | 8 | 複数アカウント運用・evidence 任意化・`taskctl worker run`（ADR-0012） | 完了 | 2026-09-14 |
 | 9 | GUI のための基盤（task-ops・WAL・events の id）と HTTP API 層（ADR-0013）、追補 P-G14〜P-G16（ADR-0014） | 完了 | 2026-09-14（追補 2026-09-15） |
-| 10 | 役割と委譲（組織的な木構造。ADR-0016） | 設計のみ | — |
-| 11 | GUI からのアカウント管理（ADR-0017） | 設計のみ | — |
-| 12 | クラスタでのコマンド実行（ssh + ControlMaster。ADR-0018） | 実装中（基盤は完了） | — |
+| 10 | 役割と委譲（組織的な木構造。ADR-0016） | 完了 | 2026-09-15 |
+| 11 | GUI からのアカウント管理（ADR-0017） | 着手中 | — |
+| 12 | クラスタでのコマンド実行（ssh + ControlMaster。ADR-0018） | 完了 | 2026-09-15 |
 
 ---
 
@@ -1930,3 +1930,116 @@ e2e `cluster_scenarios` の `--nocapture`（`skip:` が出ない＝ssh 依存テ
   クラスタ数が増えたら絞る。
 - P-50: `RunRequest`（ワーカーが実際に受け取った指示）を `runs/<run_id>/request.json` に残す（監査 4-4）。D3 の指示文の追記を後から再現できるようにする。
 - 未整備のテスト（監査の「確認不能」）: `sync = "none"` の経路と、クラスタ × プロバイダの並列度を両方守ること。Phase 12 の追補として足す価値がある。
+
+---
+
+## Phase 10 — DONE（2026-09-15）
+
+設計は ADR-0016（Proposed → **Accepted**。D1〜D3 を実装。D4「木の予算」と D5「GUI」は本 Phase の受け入れ条件に無く未実装）。実装で決めた細部は ADR-0016 末尾の
+「実装メモ」M1〜M10 に記録した（本文の決定は変えていない）。**状態機械の状態集合と `TaskKind` は変えていない**。追加したのは遷移 1 本
+（`Trigger::Aggregate`: `reviewing → ready`、attempts 据え置き、reason `"aggregate"`。ADR-0010 が `Requeue` / `DependencyFailed` を足したのと同じ「遷移表への追加」）。
+
+### 成果物
+
+- `task-core`: `Task.role: Option<String>` / `Task.aggregate: bool`（`json` 内。列は増やさない。旧行は既定で読める）、`RoleSpec`（`[[roles]]` 1 行の純粋型）、
+  `Event::Delegated{run_id, task_ids}`、`Event::WorkerStarted.task_role`、`Trigger::Aggregate`、`delegate.rs`（`DelegateTask` / `DelegateDep`（配列内インデックス or 既存 ID）/
+  `DelegationLimits`（8 / 5 / 100）/ `validate_each`（空欄・範囲外・自己参照・閉路・ID 書式）/ `materialize_delegated`（タスクの値 > 役割の既定 > 親））、
+  `TaskStore::children` / `delegate_children`（子の `Created` → `Accept` と親の `Delegated` を 1 トランザクション）、`NewTask.role`（plan.json）。
+- `task-worker`: プロトコル **v2**（`delegate` メッセージ、`context.role{id, instructions}`、`context.children[]`。全て追加のみ）、`EventSink::delegate`（既定 no-op）、
+  `subprocess` が `delegate` をシンクに流す、`delegate_file.rs`（claude-code / codex 用の `artifacts/delegate.json`。run 開始時に消し、終了時に読んでシンクへ）、
+  プロンプトに `## Role`・委譲の方法・集約 run の `## Delegated child tasks` と `artifacts/summary.md` の指示。
+- `task-ops`: `add.rs`（`NewTaskSpec.tier/max_turns/max_wall_secs/adapter` を `Option` にし、`role` / `aggregate` を追加。`create_task_with_roles` が役割 → 全体の既定で埋める）、
+  `delegate.rs`（ストアを見る検証: 木の深さ・木の run 数・1 run の件数・既存 ID の存在／終端／自己参照／祖先）、`view.rs`（`TaskDetail.role` / `delegated[]{run_id, ts, tasks}`）。
+- `task-dispatch`: `StoreSink::delegate`（リースが自分の run か確認 → `plan_delegation` → 通ったものだけ `delegate_children`、拒否理由は `WorkerProgress{"delegate rejected: tasks[i] \"<title>\": <reason>"}`）、
+  子待ち（`awaiting_children`。全 pass でも終端でない子があれば判定だけ記録して `reviewing` のまま、毎 tick 数え直す）、集約 run（`needs_aggregate_run` → `Trigger::Aggregate` →
+  次の run に `context.children`、レビューに暗黙条件 `artifacts/summary.md`）、`WorkerStarted.task_role`、`RunContext.role` の指示文。`is_idle` と `recover_reviews` は子待ちを除外。
+- `taskd`: `[[roles]]`（id / tier / adapter / max_turns / max_wall_secs / instructions）と `[delegation]`（3 上限）、検証（重複 id・未知 adapter・0 の上限）、`dispatch_config()` へ配線、
+  `ConfigView.roles[]`（`has_instructions` だけ。本文は出さない）/ `delegation`。
+- `taskctl`: `add --role <id> --aggregate [--config taskd.toml]`（`--tier` / `--max-turns` / `--max-wall-secs` は省略可になり、役割の既定 → 全体の既定）。`--config` 無しの `--role` は名前だけ保存し警告。
+  `worker run` は `delegate` の提案を表示するだけ（DB を変えない）。
+- `task-api`: `ApiSettings.roles`、`POST /tasks` が `create_task_with_roles`、`GET /tasks/{id}` の `role` / `delegated`、`GET /config` の `roles` / `delegation`、イベント種別 `delegated`。
+- 文書: `docs/protocol/worker-protocol.md`（v2、§3.1 / §4.6 / §7 / §8 / §9）、`docs/gui/api.md`（§3.4 / §3.5 / §3.6 / §3.21 / §6.2）、`config/taskd.example.toml`、
+  スキーマ再生成 4 件（`worker-protocol.schema.json`、`plan-output.schema.json`、`api-v1.schema.json`、`event.schema.json`）。
+
+**作業分担**: 基盤（task-core・プロトコル・`add.rs`・`DispatchConfig`）と単位 B（ディスパッチャ・review、設計判断を含む）と e2e は自分。互いにファイルを共有しない 3 単位を implementer で並列に:
+A `task-ops/delegate.rs` + `view.rs`（sonnet）、C 設定・taskctl・API・api.md（opus）、D LLM アダプタ・`delegate_file.rs`・プロトコル文書（sonnet）。
+A・D は「判断が必要な点」を報告（空の提案は空結果 / 到達不能な防御分岐を残す / タイムアウト経路でも delegate.json を読む / 外側の未知フィールド拒否）→ いずれも現状維持で採用、ADR 追加は不要と判断。
+C はセッション切替のため報告が届かなかったが、作業ツリーの成果を確認して自分で引き継いだ（e2e の旧 `protocol:1` 期待値と clippy の重複属性を修正）。
+
+### 受け入れ条件と証拠（DESIGN §6 Phase 10。全てローカルの fake ワーカー。外部ネットワークには出ない）
+
+**1. `[[roles]]` の既定が run に反映され、`WorkerStarted` から役割が追える**
+- 実行: `cargo test -p task-ops` → `create_task_with_roles_fills_omitted_values_from_the_role_then_global_defaults`（タスクの値 7 > 役割の 40、役割の tier / adapter、全体の既定 600。設定に無い役割は名前だけ）。
+  `cargo test -p taskctl` → `run_with_role_and_config_applies_role_defaults` / `run_with_role_but_no_config_stores_the_name_only`。`cargo test -p task-api --test roles`（`POST /tasks` の `role` で tier / max_turns が既定に、`GET /config` に `roles[]` と `delegation`、`instructions` 本文が無い）。
+  `cargo test -p task-dispatch` → `delegate_inserts_validated_children_and_aggregate_parent_runs_once_more`（`WorkerStarted.task_role == Some("lead")` ×2、`RunContext.role.instructions` が設定の文と一致）。
+  e2e `lead_delegates_children_waits_for_them_and_aggregates_once`（実バイナリ: `taskctl add --config … --role lead --aggregate` → tier frontier / max_turns 40 / max_wall_secs 600、fake が `context.role.instructions` を progress に書き戻した文が一致、`WorkerStarted.task_role` が 2 run とも `lead`）。
+
+**2. fake の `delegate` → 検証を通ったものだけ挿入、`Delegated`、上限超過は拒否して理由が `WorkerProgress`、タスクは失敗しない**
+- 実行: `cargo test -p task-ops` → `delegate::tests` 7 件（採用と依存の写像、1 run の件数、木の深さ、木の run 数（Reviewer run は数えない）、自己参照・祖先・存在しない ID・failed 依存の拒否、`pending_children`）。
+  `cargo test -p task-core` → `delegate::tests` 3 件（`depends_on` の整数／ID、空欄・範囲外・自己参照・閉路・ID 書式の 1 件ごとの判定、`materialize_delegated`）、`delegate_children_inserts_ready_children_and_records_delegated_on_the_parent`。
+  `cargo test -p task-dispatch` → `delegation_limits_reject_with_reasons_and_do_not_fail_the_run`（`max_delegate_per_run = 1` で 2 件中 1 件、`max_tree_depth = 2` で深さ 2 の親は 0 件、`max_tree_runs = 1` で 0 件。いずれも理由が `WorkerProgress` に残り親は `done`）。
+  e2e 上記: 4 件提案（有効 2、空欄 1、自己参照 1）→ 子 2 件、`Event::Delegated{task_ids: [a, b]}`、`delegate rejected: tasks[2] …title must not be empty`、`delegate rejected: tasks[3] …delegating task itself`。
+
+**3. 子が全て終端になるまで親は `reviewing`。`aggregate = true` は最後に 1 回だけ run し `summary.md` が判定される。`aggregate = false` は従来どおり**
+- 実行: `cargo test -p task-dispatch` → `non_aggregate_parent_stays_reviewing_until_children_finish_then_completes`（子が `running` の間 親は `reviewing` かつ `awaiting_children` に居る → 子 done 後 `review_pass`、run は 1 回）、
+  `delegate_inserts_validated_children_and_aggregate_parent_runs_once_more`（遷移 `dispatch, worker_done, aggregate, dispatch, worker_done, review_pass`、attempts 0、集約 run が `context.children` 2 件を受け取り、
+  `ReviewVerdict{criterion_idx: 1（= acceptance.len()）, pass: true, reason ∋ "summary.md"}`）。`cargo test -p task-core` → 遷移表 4 × 8 × 12 の全網羅に `Aggregate` を含む。
+  e2e 2 件: `--aggregate` あり（`Reviewing->Ready:aggregate` を含む 7 遷移、`artifacts/summary.md` が実在、`waiting for 2 delegated child task(s)`）／なし（4 遷移、`WorkerStarted` 1 回、`summary.md` 無し）。
+
+**4. 循環・自己参照（自分自身や祖先を `depends_on` にする）は拒否**
+- 実行: `cargo test -p task-ops` → `rejects_self_and_ancestor_and_missing_dependencies_but_accepts_others`。`cargo test -p task-core` → `validate_each_reports_per_item_and_marks_cycles`（配列内の自己参照・閉路）。e2e の `self-ref` 提案の拒否。
+
+**5. `taskctl show --json` と `GET /tasks/{id}` に `role` と `delegated`**
+- 実行: `cargo test -p task-ops` → `task_detail_reports_role_and_delegated_children`。e2e: `show --json` の `role == "lead"`、`task.aggregate == true`、`delegated[0].tasks` 2 件（`impl-a`）；API の `role == "lead"`、`delegated[0].tasks[1].title == "impl-b"`、`status == "done"`。
+
+**6. `replay` 差分ゼロ、`cargo test --workspace`、clippy**
+- e2e 2 シナリオとも `replay: 0 mismatches`。`cargo test -p task-ops` → `replay_aggregate_transition_does_not_bump_attempts`。
+- `cargo test --workspace` → **exit 0、469 passed、0 failed、1 ignored**（`ssh_cluster_manual`。Phase 12 と同じ、人が実クラスタで回すもの）。ベースラインは 431。
+- `cargo clippy --workspace -- -D warnings` → exit 0。`cargo clippy --workspace --all-targets -- -D warnings` → exit 0。
+- スキーマ 4 件を `UPDATE_SCHEMA=1` で再生成し、その後 `UPDATE_SCHEMA` 無しの `cargo test --workspace` で一致テストが通ることを確認（上の 469 に含む）。
+
+### CLAUDE.md の共通条件
+- ディスパッチャ・ストアに LLM 呼び出しは無い（委譲の検証は `task_core::validate_each` と `task_ops::delegate::plan_delegation` の決定的な規則だけ）。
+- `unwrap()` はテスト以外に無い（変更した 13 ファイルについて `#[cfg(test)]` より前の `unwrap()` を数えて 0）。
+- テストは外部ネットワークに出ない（e2e の API は 127.0.0.1 の空きポート、ワーカーは `sh` スクリプト）。
+- DESIGN.md は編集していない（§4.2 / §4.3 / §5.3 への追記は下の「提案」）。
+
+### 監査結果
+
+auditor サブエージェントを1回起動（読み取り専用）。総合判定は **条件付き可**。受け入れ条件1〜6は全て個別に「可」、「不可」はゼロ:
+
+- 条件1〜6: PROGRESS に書かれたテスト（`task-ops`/`task-core`/`task-dispatch`/`task-api`/`taskctl`/e2e）の実在と検証内容の一致を、テストの中身を読んで確認。いずれも「可」。
+- `cargo test --workspace` を別 `CARGO_TARGET_DIR` でフルビルドし直して再検証: exit 0、469 passed / 0 failed / 1 ignored（`ssh_cluster_manual` のみ、実クラスタ要）。PROGRESS の申告と完全一致。
+- `cargo clippy --workspace --all-targets --offline -- -D warnings` をフルビルドで再検証: exit 0、警告 0（138 crate を Checking、`e2e` crate も含む。キャッシュによる偽陽性でないことを確認）。
+- ディスパッチャ・ストアへの LLM 呼び出し: なし（`task-dispatch`/`task-core` の `Cargo.toml` に HTTP/LLM 依存なし、`Command::new` 等の外部呼び出しなし）。委譲の判断は `task_core::validate_each` と `task_ops::delegate::plan_delegation` の決定的規則のみ。
+- `unwrap()`（テスト以外）: 変更された全 `.rs` の `#[cfg(test)]` より前を機械的に走査し 0 件。
+- 状態機械の状態集合と `TaskKind`: 未変更。`transition.rs` の差分は `Trigger::Aggregate`（`reviewing → ready`、attempts 据え置き、reason `"aggregate"`）の1本のみ。全網羅テストは 4×8×11 → 4×8×12 に更新済み。
+- 要注意点として指摘され対応不要と判断したもの:
+  1. 「状態機械は変えない」という DESIGN §6 Phase 10 の文言に対し、`Trigger::Aggregate` の追加は厳密には状態機械への変更にあたる。ADR-0016 M1 が ADR-0010 の前例（`Requeue`/`DependencyFailed` を同様に遷移表へ追加した実績）を根拠として既に記録済みであり、`aggregate=true` の親が attempts を消費せず `reviewing → ready` する手段が他に無いため必要な追加と判断し、追認する。DESIGN.md 本体は未編集（P-51 として提案済み）。
+  2. 子待ちの親（`awaiting_children`）はメモリ上の状態で、再起動時に `recover_reviews` が再レビューする際 `ReviewVerdict` が二重記録され、`Check::Reviewer` を持つ親では実 LLM run が再課金されうる。M5 / 未解決事項に既記載、Phase 10 の受け入れ条件には無い。
+  3. `aggregate=false` の親は子の成否を問わず `done` になる（M5 / P-56）。運用を見て設定を足すかは今後の判断。
+- Phase 10 に起因しないため指摘対象外とした点（監査で確認、既存の未解決事項どおり）: `EVENT_TYPES` に `cluster_unavailable` が無い（Phase 12 由来）、`protocol.rs` 冒頭コメントが「v1」のまま（文言のみ）。
+
+再監査は auditor サブエージェントを再起動せず自分で実施: 上記の指摘はいずれも「不可」ではなく対応不要と判断したため、追加の修正は行っていない。本節の追記後に `git add -A && git commit -m "phase 10: ..."` を実行して手続き上の未了（未コミット）を解消する。
+
+### 未解決事項
+
+- **人間による確認待ち: 実際の claude-code / codex での委譲**。LLM アダプタの委譲は `artifacts/delegate.json` 規約（ADR-0016 M8）とプロンプトの指示文で実装したが、本セッションでは
+  fake アダプタでの検証まで。実 LLM が `delegate.json` を正しく書くか、役割の指示文が期待どおり効くかは、認証が使える環境で人が
+  `config/taskd.example.toml` の `[[roles]]` を有効にし、`taskctl add --role lead --aggregate --config taskd.toml …` で確認する。
+- ADR-0016 D4（木の予算 `tree_max_wall_secs` / `tree_max_tokens`）は未実装（Phase 10 の受け入れ条件に無い）。
+- 子待ちの親（`awaiting_children`）はメモリ上。再起動後は既存の `recover_reviews` が再レビューして再び子待ちに入る（判定が二重に記録される。M5）。
+- Plan kind の親は run 中に `delegate` できるが、`aggregate = true` の Plan は集約しない（Plan の子は `complete_plan` で `ReviewPass` と同時に挿入されるため、判定時に子が無い）。
+- `taskctl add` は `taskd.toml` を読む手段が `--config` だけ。役割の既定を効かせたい `add` には毎回 `--config` が要る（`TASKD_CONFIG` のような環境変数は無い）。
+- 引き継ぎ（Phase 12 から）: `sync = "none"` の経路とクラスタ × プロバイダの並列度の自動テストが無い。Phase 11 の管理系 API は loopback でもトークン必須（本 Phase では触れていない）。
+  `task-api` の `EVENT_TYPES`（`types` クエリの語彙）に Phase 12 の `cluster_unavailable` が無い（本 Phase では `delegated` だけ足した。Phase 11 か追補で直す）。
+
+### 提案（DESIGN.md への修正提案。DESIGN.md 本体は編集していない）
+
+- P-51: §4.2 の遷移表に `reviewing ──(children done & aggregate)──▶ ready（attempts 据え置き）` と、Trigger 一覧に `Aggregate` を追記する（ADR-0016 M1）。
+  §4.3 の `Event` に `Delegated{run_id, task_ids}`、`WorkerStarted.task_role?`、Phase 12 の `ClusterUnavailable{cluster, host, reason}` を追記する。
+- P-52: §5.3 のプロトコル例を v2 にし、`← {"type":"delegate","tasks":[…]}` と `context.role` / `context.children` を足す。§5.4 の claude-code / codex 行に `artifacts/delegate.json` 規約を足す（ADR-0016 M8）。
+- P-53: §4.1 `Task` に `role: Option<String>` と `aggregate: bool` を追記する。
+- P-54: `taskctl` が `TASKD_CONFIG`（または `--db` と同じ優先順位の既定パス）で `taskd.toml` を見つけられるようにし、`add --role` で `--config` を省けるようにする。
+- P-55: 子待ちの親を `DaemonSnapshot`（`awaiting_children[]`）に出し、GUI の DAG 画面で「部下待ち」と表示する（ADR-0016 D5 の入口。API は `TaskDetail.delegated` と `children` で足りる）。
+- P-56: `aggregate = false` の親は子の成否を問わず `done` になる（M5）。「子が 1 件でも failed なら親を `review_fail` にする」設定を足すかは運用を見て決める。

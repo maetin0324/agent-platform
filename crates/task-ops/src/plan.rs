@@ -100,6 +100,8 @@ pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime
         lease: None,
         created_at: now,
         updated_at: now,
+        role: None,
+        aggregate: false,
     };
 
     store.create_task(&task, vec![])?;

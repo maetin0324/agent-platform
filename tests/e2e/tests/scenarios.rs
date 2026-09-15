@@ -104,6 +104,8 @@ model = "fake"
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         };
         self.store.insert(&task).unwrap();
         self.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();
@@ -294,7 +296,7 @@ echo '{"type":"done","summary":"attempt '"$N"'","evidence":[{"criterion":0,"comm
     assert!(run0.contains(r#""prior_review":[]"#));
     assert!(run1.contains(r#""prior_review":[{"criterion":0,"pass":false"#), "{run1}");
     assert!(run1.contains(r#""attempts":1"#));
-    assert!(run1.starts_with(r#"{"type":"run","protocol":1"#));
+    assert!(run1.starts_with(r#"{"type":"run","protocol":2"#));
     env.replay_is_consistent();
 }
 
@@ -325,6 +327,8 @@ fn expired_lease_is_reclaimed_and_task_completes() {
         lease: Some(Lease { worker_run_id: "stale-run".into(), expires_at: now - time::Duration::minutes(5) }),
         created_at: now,
         updated_at: now,
+        role: None,
+        aggregate: false,
     };
     env.store.insert(&task).unwrap();
     env.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();

@@ -88,6 +88,9 @@ pub trait EventSink: Send + Sync {
     /// ワーカーの stdout から 1 行読むたびにアダプタが呼ぶ生存通知。ディスパッチャはこれでリースを延長する
     /// （ADR-0010 D7, P-7）。既定は何もしない。
     fn heartbeat(&self) {}
+    /// `delegate` メッセージ（LLM アダプタでは `artifacts/delegate.json`）の提案（ADR-0016 D2）。ディスパッチャが検証して
+    /// 子タスクを挿入する。既定は何もしない（`taskctl worker run` など DB を変えない文脈）。
+    fn delegate(&self, _tasks: &[task_core::DelegateTask]) {}
 }
 
 /// 何もしないシンク（テスト・デバッグ用）。

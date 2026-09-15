@@ -142,6 +142,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 
@@ -239,5 +241,36 @@ mod tests {
         let (status, attempts) = replay_status_and_attempts(&events).expect("some state");
         assert_eq!(status, Status::Running);
         assert_eq!(attempts, 1, "dispatch はリトライ回数を増やさない");
+    }
+
+    /// ADR-0016 D3: `Trigger::Aggregate`（reviewing -> ready, `reason: "aggregate"`）は attempts を増やさない。
+    #[test]
+    fn replay_aggregate_transition_does_not_bump_attempts() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let task = sample_task(Status::Reviewing);
+        store.insert(&task).expect("insert");
+        store
+            .append_event(
+                task.id,
+                &Event::Created {
+                    task: Box::new(task.clone()),
+                },
+            )
+            .expect("append created");
+        store
+            .append_event(
+                task.id,
+                &Event::Transitioned {
+                    from: Status::Reviewing,
+                    to: Status::Ready,
+                    reason: "aggregate".to_string(),
+                },
+            )
+            .expect("append transitioned");
+
+        let events = store.events_for(task.id).expect("events_for");
+        let (status, attempts) = replay_status_and_attempts(&events).expect("some state");
+        assert_eq!(status, Status::Ready);
+        assert_eq!(attempts, 0, "aggregate はリトライ回数を増やさない");
     }
 }

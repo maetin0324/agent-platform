@@ -532,6 +532,8 @@ mod tests {
             lease: None,
             created_at: now,
             updated_at: now,
+            role: None,
+            aggregate: false,
         }
     }
 
@@ -557,6 +559,7 @@ mod tests {
                     model: "m".into(),
                     provider: Some("claude-a".into()),
                     role: None,
+                    task_role: None,
                 },
             )
             .expect("started");

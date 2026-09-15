@@ -22,6 +22,29 @@ tier = "standard"
 [plan]
 auto_accept = false
 
+# 役割（ADR-0016 D1）。タスクの `role` がここの `id` を指すと、省略された tier / adapter / 予算がこの既定で埋まり
+# （タスクの値 > 役割の既定 > 全体の既定）、run のプロンプトに `instructions` が `## Role` として前置きされる。
+# 役割名は自由記述なので、ここに無い名前をタスクに付けてもよい（既定も指示文も無いだけ）。
+# `taskctl add --role lead --config <このファイル>` / API の `POST /tasks` の `"role"` で指定する。
+# [[roles]]
+# id = "lead"
+# tier = "frontier"
+# max_turns = 40
+# max_wall_secs = 1800
+# instructions = "あなたは取りまとめ役。実装は delegate で部下に任せ、自分は分割とレビューに集中する。"
+#
+# [[roles]]
+# id = "implementer"
+# tier = "standard"
+# max_turns = 20
+# instructions = "あなたは実装担当。受け取った範囲だけを実装し、終わったら summary を書く。"
+
+# 実行中の委譲の上限（ADR-0016 D2 / M6）。既定は下の値。超える提案は拒否され、理由が WorkerProgress に残る（run は失敗しない）。
+[delegation]
+max_delegate_per_run = 8   # 1 run が提案できる子の件数（複数の delegate メッセージをまたいで数える）
+max_tree_depth = 5         # 木の深さ（根 = 1）
+max_tree_runs = 100        # 木全体のワーカー run 数
+
 # HTTP API（ADR-0013、docs/gui/api.md）。listen を書いたときだけ taskd のプロセス内で動く（既定は無効）。taskd-gui はこれを使う。
 # loopback 以外で listen するなら token_file が必須（中身 1 行が Bearer トークン。読めない・空なら起動時に exit 2）。
 # [api]
