@@ -316,7 +316,17 @@ fn taskctl_plan_generates_children_that_complete_after_human_approval() {
     let c_events = env.store.events_for(c.id).unwrap();
     assert!(c_events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { criterion_idx: 0, pass: true, reason, .. } if reason.contains("reviewer(") && reason.contains("tests cover the parser"))), "{c_events:?}");
     assert!(c_events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.starts_with("reviewer run ") && msg.contains("started"))), "{c_events:?}");
-    assert_eq!(c_events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { .. })).count(), 1);
+    // ADR-0014 D1（P-G14）: WorkerStarted はワーカー run の 1 回と、provider 付きで記録する Reviewer run の 1 回。
+    assert_eq!(c_events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. })).count(), 1);
+    assert_eq!(
+        c_events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::WorkerStarted { role: Some(task_core::RunRole::Reviewer), provider: Some(_), .. }))
+            .count(),
+        1,
+        "{c_events:?}"
+    );
+    assert!(c_events.iter().any(|(_, e)| matches!(e, Event::WorkerFinished { role: Some(task_core::RunRole::Reviewer), outcome, .. } if outcome.starts_with("done: "))), "{c_events:?}");
     let review_run = std::fs::read_to_string(dir.join("review-run.json")).unwrap();
     assert!(review_run.contains(r#""kind":"review""#), "{review_run}");
     assert!(review_run.contains(r#""title":"Review: C""#), "{review_run}");

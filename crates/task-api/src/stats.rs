@@ -85,7 +85,7 @@ impl StatsState {
                 self.providers.entry(provider.clone()).or_default().runs += 1;
                 self.open_runs.insert(run_id.clone(), provider);
             }
-            Event::WorkerFinished { run_id, outcome, usage } => {
+            Event::WorkerFinished { run_id, outcome, usage, .. } => {
                 let provider = self
                     .open_runs
                     .remove(run_id)
@@ -176,6 +176,7 @@ mod tests {
             adapter: "fake".into(),
             model: "m".into(),
             provider: provider.map(str::to_string),
+            role: None,
         }
     }
 
@@ -184,6 +185,7 @@ mod tests {
             run_id: run_id.into(),
             outcome: outcome.into(),
             usage,
+            role: None,
         }
     }
 
@@ -219,5 +221,36 @@ mod tests {
 
         let later = Date::from_calendar_date(2026, time::Month::November, 1).unwrap_or(Date::MIN);
         assert!(stats.view("claude-a", later).by_day.is_empty());
+    }
+
+    /// ADR-0014 D1（P-G14）: Reviewer run（role: reviewer）もプロバイダの集計に入る。
+    #[test]
+    fn reviewer_runs_are_counted_for_their_provider() {
+        let mut stats = StatsState::default();
+        let role = Some(task_core::RunRole::Reviewer);
+        stats.apply(&row(
+            1,
+            "2026-09-14T00:00:00Z",
+            Event::WorkerStarted {
+                run_id: "rev".into(),
+                adapter: "fake".into(),
+                model: "m".into(),
+                provider: Some("claude-b".into()),
+                role,
+            },
+        ));
+        stats.apply(&row(
+            2,
+            "2026-09-14T00:01:00Z",
+            Event::WorkerFinished {
+                run_id: "rev".into(),
+                outcome: "done: reviewed".into(),
+                usage: Some(Usage { input_tokens: Some(3), output_tokens: Some(4) }),
+                role,
+            },
+        ));
+        let today = Date::from_calendar_date(2026, time::Month::September, 14).unwrap_or(Date::MIN);
+        let b = stats.view("claude-b", today);
+        assert_eq!((b.runs, b.done, b.input_tokens, b.output_tokens), (1, 1, 3, 4));
     }
 }

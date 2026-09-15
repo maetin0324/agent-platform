@@ -1,6 +1,6 @@
 # PROGRESS — taskd
 
-現在地: **Phase 0〜9 完了**（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013）。Web GUI の設計は `docs/gui/`（Fable 作成、
+現在地: **Phase 0〜9 完了**（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装）。Web GUI の設計は `docs/gui/`（Fable 作成、
 人間の判断 H1〜H9 を反映済み）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により G フェーズとして進める（前提: Node 24 LTS / pnpm 11）。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
@@ -16,7 +16,7 @@
 | 6 | 承認ゲートと codex アダプタ | 完了（codex 実機ドッグフードは外部制約により免除。ADR-0009 D1） | 2026-09-14 |
 | 7 | 仕上げ（ADR-0010）、requeue 上限（ADR-0011） | 完了 | 2026-09-14 |
 | 8 | 複数アカウント運用・evidence 任意化・`taskctl worker run`（ADR-0012） | 完了 | 2026-09-14 |
-| 9 | GUI のための基盤（task-ops・WAL・events の id）と HTTP API 層（ADR-0013） | 完了 | 2026-09-14 |
+| 9 | GUI のための基盤（task-ops・WAL・events の id）と HTTP API 層（ADR-0013）、追補 P-G14〜P-G16（ADR-0014） | 完了 | 2026-09-14（追補 2026-09-15） |
 
 ---
 
@@ -1574,3 +1574,92 @@ auditor サブエージェントを 1 回起動した（読み取り専用。Pha
 | P-42 | DESIGN §5.1 | ストアの書き込みトランザクションは `BEGIN IMMEDIATE`（WAL で複数接続が書くための前提。ADR-0013 実装メモの D5 追補） | 実装済み（ADR に記録） |
 | P-43 | task-core | `StoreError::InvalidCursor` と `SqliteStore::journal_mode()` を追加する。現在の task-api は、cursor の誤りを文言の照合で判定し、journal_mode を rusqlite の別接続で実測している | 現状のまま（task-api 内で処理） |
 | P-44 | taskd | API サーバのタスクの異常終了を tick ループで検知し、デーモンを止めるか再起動する | 停止時のログのみ |
+
+---
+
+## Phase 9 追補 — Reviewer run のイベント記録・objective の検索・作成時の検証（P-G14〜P-G16、ADR-0014、2026-09-15）
+
+人間の判断: 「P-G14〜16 は推奨通りで、GUI も Fable の言った通りで」。
+- `docs/gui/taskd-proposals.md` には明示の「推奨」欄が無く、各行の本文が Fable の提案内容だったため、3 件とも提案どおり採用と解釈した。
+- GUI 側は ADR-GUI-0002 §4 の確認事項 5 点を Fable の案どおり確定した: Remix = React Router 8 framework mode、Node 24 LTS ランタイムでの配布、Node 24 への更新が前提、pnpm 11、TypeScript 7。`/health` は無認証のまま（DESIGN-GUI §11 の H10 / H11）。
+
+### 成果物
+
+- `docs/adr/0014-reviewer-run-events-objective-search-create-validation.md`
+- **P-G14（D1）Reviewer run のイベント記録**
+  - `task-core`: `RunRole { Worker, Reviewer }` と、`WorkerStarted` / `WorkerFinished` の任意フィールド `role`（`None` = ワーカー run。既存イベントの JSON は不変）。
+  - `task-dispatch`:
+    - `review.rs` の `ReviewerRunRecord`（Reviewer run 自身の outcome / usage）。
+    - `dispatcher.rs` は起動時に `WorkerStarted{role: reviewer, provider}` を、`on_review_finished` で `WorkerFinished{role: reviewer}` を記録する（判定の適用・延期・破棄のどれでも。延期の上限に達したら outcome を `error(retryable=false): requeue limit …` に）。
+    - スナップショットの `in_flight` の Reviewer run の `run_id` は Reviewer run 自身の id。
+  - `task-ops`:
+    - `derive::is_reviewer` を追加。`last_run_id` / `latest_question` と、受信箱の質問・Plan の要約・失敗の理由は Reviewer run を除く。
+    - `RunSummary.role` を追加し、Reviewer run も run 一覧に出す。
+  - `task-api`: プロバイダの集計は役割を区別せず Reviewer run も数える（パターンの追従のみ）。
+- **P-G15（D2）objective の検索**
+  - マイグレーション `0004_tasks_objective_column.sql`（`SCHEMA_VERSION = 4`）、挿入時に `objective` 列を書く。
+  - `ListFilter.title_contains` → `text_contains`（`title` または `objective` の LIKE）。
+- **P-G16（D3）作成時の検証**
+  - `task_ops::add::create_task` が、空白だけの `title` / `objective` と存在しない `parent` を拒否する（`taskctl add` も同じ）。
+  - task-api の `errors[].field` の推定を追加した。
+- スキーマ再生成: `docs/api/v1/event.schema.json`、`docs/api/v1/api-v1.schema.json`。
+- GUI 側の文書:
+  - `docs/gui/api.md`（§3.1 / §3.3 / §3.4 / §5.2 / §5.8 / §6.1 / §6.2 / §9 / §10）
+  - `docs/gui/taskd-proposals.md`（P-G14〜16 を採用に）
+  - `docs/gui/DESIGN-GUI.md`（§3.1 / §4.5 / §11 H10・H11）
+  - `docs/gui/adr/0002-frontend-stack.md`（§4 を確認済みに）
+- 作業分担: 変更が task-core の `Event` から全クレートに波及し、コンパイルの破壊が同時に起きるため、サブエージェントは使わず自分で順に実装した。
+
+### 受け入れの証拠
+
+**P-G14**
+- ディスパッチャ `reviewer_run_records_worker_started_and_finished_with_reviewer_role`:
+  - `WorkerStarted` は 2 件（ワーカー run は `role: None`、Reviewer run は `role: reviewer` で `provider: p1`）。
+  - Reviewer run の `WorkerFinished` は `done: …`。
+  - `ReviewVerdict` はワーカー run に付き、`last_run_id` はワーカー run のまま。
+- ディスパッチャ `reviewer_run_provider_failure_defers_review_without_consuming_attempts`（拡張）: Reviewer run の outcome が `[requeue: …, done: …]`。
+- task-ops `last_run_id_and_latest_question_ignore_reviewer_runs`、`runs_include_reviewer_runs_with_role`。
+- task-api `reviewer_runs_are_counted_for_their_provider`: runs 1、done 1、tokens 3 / 4。
+- task-core `run_events_role_is_optional_and_reviewer_serializes_explicitly`: `role` 無しの旧 JSON を読め、再直列化しても同じ JSON。
+- e2e `plan_scenarios`（実バイナリ）: C の events にワーカー run の `WorkerStarted` 1 件、`provider` 付きの Reviewer run 1 件、Reviewer run の `WorkerFinished` は `done: `。
+
+**P-G15**
+- task-core `list_page_filters_by_status_kind_parent_root_only_and_title`: objective の `billing` で当たる。`BILLING` でも当たる（SQLite の LIKE は ASCII の大文字小文字を区別しない）。
+- task-core `open_migrates_legacy_v1_db_and_is_idempotent`: v1 → v4 で objective が埋まる。
+- **実 DB**: Phase 9 時点のバイナリが作った v3 の DB（300 タスク、2400 イベント）のコピーを新しい `taskctl` で開いた。
+  - 版数 `[1,2,3]` → `[1,2,3,4]`。events は 2400 のまま。
+  - objective は 300 行全てで json と一致。
+  - `replay: 0 mismatches across 300 tasks`。
+- e2e `api_mutations_go_through_the_state_machine`: `GET /tasks?q=api` が objective で 1 件当たる。
+
+**P-G16**
+- task-ops `create_task_rejects_blank_title_or_objective_and_missing_parent`（3 通りとも検証エラーで何も挿入しない。存在する親なら作れる）。
+- task-api `validation_field_is_inferred_from_task_ops_messages`。
+- e2e: `POST /tasks` の空白 title → 422 `field:"title"`、存在しない parent → 422 `field:"parent"`。
+- CLI（実バイナリ）: `taskctl add --title "  " …` → `error: title must not be blank`、exit 1。存在しない `--parent` → `error: parent … does not exist`、exit 1。
+
+**共通**
+- `cargo test --workspace --no-fail-fast`: exit 0、**406 passed**、失敗 0、ignored 0。
+  - 内訳: task-api 81 / task-ops 100 / task-worker 64 / task-core 51 / task-dispatch 40 / taskctl 34 / e2e 20 / taskd 16。
+- `cargo clippy --workspace -- -D warnings`、`--all-targets`: いずれも exit 0。
+- 変更ファイルのテスト以外の `unwrap()` / `expect()`: 0 件。
+- 監査: auditor は起動していない（Phase 7 追補と同じく、追補は変更点ごとの回帰テストと実 DB の移行で自己検証した）。
+
+### 意図した挙動の変更で直した既存テスト
+
+- ディスパッチャ `plan_task_inserts_draft_children_and_they_run_after_accept` と e2e `taskctl_plan_generates_children_that_complete_after_human_approval`。
+  - 変更前: 「WorkerStarted はワーカー run の 1 回だけ（Reviewer run は使わない）」。
+  - 変更後: ワーカー run 1 回 + Reviewer run 1 回。
+- task-core の一覧のテスト: `title_contains` → `text_contains`（ASCII の大文字小文字を区別しないことを明示）。
+
+### 未解決事項
+
+1. デーモンが Reviewer run の途中で止まると、その run の `WorkerFinished` は残らない。一覧では未完了の run に見える（ワーカー run の `lease_expired` のような回収は無い）。
+2. Phase 9 の `api.md` §3.3 は `q` を「大文字小文字を区別する」と書いていたが、実装は当初から ASCII は区別しない（SQLite の LIKE）。文書を実装に合わせた。非 ASCII は区別される。
+3. Node 24 LTS / pnpm 11 の導入は人間の作業（ADR-GUI-0002 §4 で確認済み）。導入後に `./run-gphases.sh` で G フェーズを始める。
+
+### 提案
+
+| # | 対象 | 提案 | 採用まで実装で使う既定 |
+|---|---|---|---|
+| P-45 | DESIGN §4.3 / §5.1 | ADR-0014 を反映する: `WorkerStarted` / `WorkerFinished` の `role`（Reviewer run も記録）、`tasks.objective` 列と一覧検索、タスク作成時の title / objective / parent の検証 | 実装済み（ADR-0014 に記録） |

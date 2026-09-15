@@ -401,6 +401,7 @@ mod tests {
                     run_id: "run-1".to_string(),
                     outcome: "question: which version?".to_string(),
                     usage: None,
+                    role: None,
                 },
             )
             .expect("append worker finished");

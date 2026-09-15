@@ -220,6 +220,12 @@ pub(crate) fn validation_field(message: &str) -> Option<&'static str> {
         Some("depends_on")
     } else if message.starts_with("goal ") {
         Some("goal")
+    } else if message.starts_with("title ") {
+        Some("title")
+    } else if message.starts_with("objective ") {
+        Some("objective")
+    } else if message.starts_with("parent ") {
+        Some("parent")
     } else {
         None
     }
@@ -287,6 +293,9 @@ mod tests {
         );
         assert_eq!(validation_field("dependency 01J does not exist"), Some("depends_on"));
         assert_eq!(validation_field("goal must not be blank"), Some("goal"));
+        assert_eq!(validation_field("title must not be blank"), Some("title"));
+        assert_eq!(validation_field("objective must not be blank"), Some("objective"));
+        assert_eq!(validation_field("parent 01J does not exist"), Some("parent"));
         assert_eq!(validation_field("graph has too many nodes"), None);
     }
 

@@ -154,7 +154,19 @@ pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime
         Status::Draft
     };
 
+    // ADR-0014 D3（P-G16）: 空白だけの title / objective と、存在しない親を拒否する（taskctl add も同じ関数を通る）。
+    if spec.title.trim().is_empty() {
+        return Err(OpsError::Validation("title must not be blank".to_string()));
+    }
+    if spec.objective.trim().is_empty() {
+        return Err(OpsError::Validation("objective must not be blank".to_string()));
+    }
     let acceptance = build_acceptance(spec.acceptance)?;
+    if let Some(parent) = spec.parent
+        && store.get(parent)?.is_none()
+    {
+        return Err(OpsError::Validation(format!("parent {parent} does not exist")));
+    }
     validate_depends_on(store, &spec.depends_on)?;
 
     let id = TaskId::new();
@@ -384,6 +396,32 @@ mod tests {
         let result = create_task(&store, spec, now());
         assert!(matches!(result, Err(OpsError::Validation(_))));
         assert!(store.list(None).expect("list tasks").is_empty());
+    }
+
+    /// ADR-0014 D3（P-G16）: 空白だけの title / objective、存在しない親は検証エラーで、何も挿入しない。
+    #[test]
+    fn create_task_rejects_blank_title_or_objective_and_missing_parent() {
+        type Mutate = fn(&mut NewTaskSpec);
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let cases: Vec<(Mutate, &str)> = vec![
+            (|s| s.title = "  ".into(), "title must not be blank"),
+            (|s| s.objective = "\n".into(), "objective must not be blank"),
+            (|s| s.parent = Some(TaskId::new()), "does not exist"),
+        ];
+        for (mutate, expected) in cases {
+            let mut spec = base_spec();
+            mutate(&mut spec);
+            match create_task(&store, spec, now()) {
+                Err(OpsError::Validation(msg)) => assert!(msg.contains(expected), "{msg}"),
+                other => panic!("expected a validation error containing {expected:?}, got {other:?}"),
+            }
+        }
+        assert!(store.list(None).expect("list tasks").is_empty());
+
+        let parent = create_task(&store, base_spec(), now()).expect("parent");
+        let mut child = base_spec();
+        child.parent = Some(parent.id);
+        assert_eq!(create_task(&store, child, now()).expect("child").parent_id, Some(parent.id));
     }
 
     #[test]

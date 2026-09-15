@@ -22,13 +22,13 @@
 | P-G12 | **置換** | 外部利用向けの crate タグ付け（`task-core-vX.Y`）、rusqlite の更新 | D12。GUI が crate に依存しないので不要（H1）。契約は HTTP API v1 と `api-v1.schema.json`。rusqlite の更新は GUI と無関係になったので taskd 側の任意 |
 | P-G13 | **後回し** | `by` の記録（`"human:<name>"` / `"gui"`） | D12（H9）。当面 `"human"` 固定 |
 
-## 本改訂で追加した提案（採否は人間。`api.md` §9 の未決に対応）
+## 本改訂で追加した提案（人間の判断で 3 件とも採用。taskd の ADR-0014 で実装）
 
 | # | 状態 | 提案 | 理由 | 代替 |
 |---|---|---|---|---|
-| P-G14 | **新規** | **Reviewer run の使用量をイベントに残す**: Reviewer run にも `WorkerStarted{run_id, adapter, model, provider}` / `WorkerFinished{run_id, outcome, usage}` を対象タスクに追記する（`run_id` は review run の id。`kind` の区別は `WorkerProgress` の接頭辞ではなく `WorkerStarted` に `role: worker \| reviewer` を任意フィールドで持たせる） | 現状 Reviewer run は `ReviewerSink` が進捗を対象 run に付け替えるだけで、アカウント別のトークン集計（DESIGN-GUI §1 の目的 3）から漏れる | 集計外のまま（`api.md` §5.8 の注記どおり）。GUI は「Reviewer run は含まない」と表示 |
-| P-G15 | **新規** | `tasks` に `objective` の非正規化列を追加し `GET /tasks?q=` の対象にする | 一覧の検索が title だけでは不足する場合がある | title のみ（現在の決定）。全文検索（FTS5）は非目標のまま |
-| P-G16 | **新規** | `task_ops::add::create_task` / `plan::create_plan` に `title` / `objective` の空白検査と `parent` の存在検査を足す（CLI も同じ関数を通るので `taskctl add --title ""` が拒否されるようになる） | API 越しに空タイトルや孤児の子を作れてしまう。GUI はフォームで防ぐが、契約として taskd 側で拒否する方が安全 | 現状のまま（Phase 9a は挙動を変えない方針）。`api.md` §9 の未決 6 |
+| P-G14 | **採用**（ADR-0014 D1） | **Reviewer run の使用量をイベントに残す**: Reviewer run にも `WorkerStarted{run_id, adapter, model, provider}` / `WorkerFinished{run_id, outcome, usage}` を対象タスクに追記する（`run_id` は review run の id。`kind` の区別は `WorkerProgress` の接頭辞ではなく `WorkerStarted` に `role: worker \| reviewer` を任意フィールドで持たせる） | 現状 Reviewer run は `ReviewerSink` が進捗を対象 run に付け替えるだけで、アカウント別のトークン集計（DESIGN-GUI §1 の目的 3）から漏れる | 集計外のまま（`api.md` §5.8 の注記どおり）。GUI は「Reviewer run は含まない」と表示 |
+| P-G15 | **採用**（ADR-0014 D2） | `tasks` に `objective` の非正規化列を追加し `GET /tasks?q=` の対象にする | 一覧の検索が title だけでは不足する場合がある | title のみ（現在の決定）。全文検索（FTS5）は非目標のまま |
+| P-G16 | **採用**（ADR-0014 D3） | `task_ops::add::create_task` / `plan::create_plan` に `title` / `objective` の空白検査と `parent` の存在検査を足す（CLI も同じ関数を通るので `taskctl add --title ""` が拒否されるようになる） | API 越しに空タイトルや孤児の子を作れてしまう。GUI はフォームで防ぐが、契約として taskd 側で拒否する方が安全 | 現状のまま（Phase 9a は挙動を変えない方針）。`api.md` §9 の未決 6 |
 
 ## ADR-0013 と `api.md` の間で実装者が確認すべき細部（`api.md` を正とする提案）
 
@@ -36,17 +36,17 @@
 |---|---|---|---|
 | `DaemonSnapshot` の置き場 | 記述なし（D3: task-api は task-dispatch に依存しない） | `task-ops`（task-dispatch と task-api の両方が依存する） | 依存方向 task-dispatch → task-ops ← task-api |
 | `[api]` の設定キー | `token_file`、Host の「設定値」 | `listen` / `token_file` / `allowed_hosts`（Phase 9a の `ApiConfig` と同じ。SSE 上限は定数 16） | 推奨 `listen = "127.0.0.1:7710"`（GUI は 7700） |
-| `/health` の認証 | 記述なし | 無認証（版と `journal_mode` のみ） | G0 の疎通確認用。問題があれば認証必須に |
+| `/health` の認証 | 記述なし | 無認証（版と `journal_mode` のみ） | G0 の疎通確認用。人間が確認し、無認証のまま |
 | スキーマファイル | `docs/api/v1/*.schema.json` | `event.schema.json`（9a、済み）+ `api-v1.schema.json`（9b、ルート `ApiV1Schema`）。GUI は後者だけを読む | 型の重複生成を避けるため API 全体は 1 ファイル |
 | 操作の入力・結果の型名 | 記述なし | Phase 9a の実装名をそのまま使う: `NewTaskSpec` / `CriterionSpec` / `NewPlanSpec` / `TransitionResult`（9b で `cascaded` 追加）/ `ReplayReport` / `ReviewNote` / `AnswerNote` / `OpsError` | `api.md` §6 |
-| `POST /tasks` の検証 | 記述なし | task-ops と同じ 2 種だけ（条件ゼロ、`depends_on`）。追加は P-G16 | 挙動を変えない |
+| `POST /tasks` の検証 | 記述なし | `title` / `objective` の空白、条件ゼロ、`parent` の存在、`depends_on`（P-G16 採用。ADR-0014 D3） | `taskctl add` も同じ関数を通る |
 | `GET /events`（全体、`after_id`） | SSE のみ言及 | 追加（`events_since` そのもの。`curl` とテスト用） | 実装コストは小 |
 | `GET /config` | 記述なし | 追加。`task-api` の `ConfigView` に taskd が起動時に値を詰める | env の値・トークンは出さない |
 | 変更系の `Origin` 拒否 | D11 に無し | `Origin` があれば 403 | ブラウザからの直接呼び出しは設計上無い |
 | `RunOutcomeKind` | 記述なし | `done \| question \| error \| requeue \| lease_expired` | `lease_expired` は `reclaim_expired_leases` の `WorkerFinished.outcome` |
 | `TransitionResult.from` | `Outcome{next, attempts, reason}` に `from` は無い | task-ops が遷移前のタスクから取る | |
 | プロバイダの集計 | 記述なし | `task-api` のメモリ内集計（起動時に全走査、以後増分） | 真実ではない観測値 |
-| `q` の対象 | D10 は `title` 列のみ | `title` のみ | P-G15 参照 |
+| `q` の対象 | D10 は `title` 列のみ | `title` と `objective`（ADR-0014 D2） | P-G15 採用 |
 
 ## 優先順位（Phase 9 の実装順。ADR-0013「実装の順序」と同じ）
 

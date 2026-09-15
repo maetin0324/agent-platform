@@ -26,10 +26,11 @@ use crate::transition::{InvalidTransition, Outcome, StateView, Trigger, transiti
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_events_global_id.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_tasks_list_columns.sql");
+const MIGRATION_0004: &str = include_str!("../migrations/0004_tasks_objective_column.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -97,8 +98,9 @@ pub struct ListFilter {
     pub parent_id: Option<TaskId>,
     /// true なら `parent_id IS NULL` のタスクのみ（`parent_id` フィルタとは独立に AND で効く）。
     pub root_only: bool,
-    /// `title` に対する部分一致（大小文字区別）。`%` / `_` はリテラルとして扱う。
-    pub title_contains: Option<String>,
+    /// `title` または `objective` に対する部分一致（SQLite の LIKE なので ASCII の大文字小文字は区別しない。ADR-0014 D2）。
+    /// `%` / `_` はリテラルとして扱う。
+    pub text_contains: Option<String>,
 }
 
 /// `TaskStore::list_page` の並び順（ADR-0013 D10）。
@@ -216,9 +218,11 @@ fn filter_predicate(filter: &ListFilter) -> (String, Vec<SqlValue>) {
         clauses.push("parent_id = ?".to_string());
         params.push(SqlValue::Text(parent_id.to_string()));
     }
-    if let Some(needle) = &filter.title_contains {
-        clauses.push("title LIKE ? ESCAPE '\\'".to_string());
-        params.push(SqlValue::Text(format!("%{}%", escape_like(needle))));
+    if let Some(needle) = &filter.text_contains {
+        clauses.push("(title LIKE ? ESCAPE '\\' OR objective LIKE ? ESCAPE '\\')".to_string());
+        let pattern = format!("%{}%", escape_like(needle));
+        params.push(SqlValue::Text(pattern.clone()));
+        params.push(SqlValue::Text(pattern));
     }
 
     if clauses.is_empty() {
@@ -501,6 +505,7 @@ impl SqliteStore {
             1 => Ok(MIGRATION_0001),
             2 => Ok(MIGRATION_0002),
             3 => Ok(MIGRATION_0003),
+            4 => Ok(MIGRATION_0004),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -565,8 +570,8 @@ impl SqliteStore {
         };
         conn.execute(
             "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
-             lease_worker_run_id, lease_expires_at, json, title, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             lease_worker_run_id, lease_expires_at, json, title, updated_at, objective) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 task.id.to_string(),
                 status_str(task.status),
@@ -579,6 +584,8 @@ impl SqliteStore {
                 json,
                 task.title,
                 updated_at,
+                // objective は作成後に変わらないので、列を書くのは挿入時だけ（ADR-0014 D2）。
+                task.objective,
             ],
         )?;
         Ok(())
@@ -1697,7 +1704,7 @@ mod tests {
         store.insert(&task).unwrap();
         assert!(store.acquire_lease(task.id, "run-1", StdDuration::from_secs(60)).unwrap());
         let extras = vec![
-            Event::WorkerFinished { run_id: "run-1".into(), outcome: "done: x".into(), usage: None },
+            Event::WorkerFinished { run_id: "run-1".into(), outcome: "done: x".into(), usage: None, role: None },
             Event::WorkerProgress { run_id: "run-1".into(), msg: "extra".into() },
         ];
         let outcome = store.apply_transition_with_events(task.id, Trigger::WorkerDone, extras).unwrap();
@@ -1961,11 +1968,30 @@ mod tests {
         let ev: Event = serde_json::from_str(old).unwrap();
         assert_eq!(
             ev,
-            Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: None }
+            Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: None, role: None }
         );
-        let new = Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: Some("acct-a".into()) };
+        let new = Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: Some("acct-a".into()), role: None };
         assert!(serde_json::to_string(&new).unwrap().contains(r#""provider":"acct-a""#));
         assert_eq!(serde_json::to_string(&ev).unwrap(), old);
+    }
+
+    /// ADR-0014 D1: `role` は任意。無ければワーカー run で、既存のイベントの直列化は変わらない。Reviewer run は `"role":"reviewer"`。
+    #[test]
+    fn run_events_role_is_optional_and_reviewer_serializes_explicitly() {
+        let old = r#"{"type":"worker_finished","run_id":"r","outcome":"done: x","usage":null}"#;
+        let ev: Event = serde_json::from_str(old).unwrap();
+        assert_eq!(ev, Event::WorkerFinished { run_id: "r".into(), outcome: "done: x".into(), usage: None, role: None });
+        assert_eq!(serde_json::to_string(&ev).unwrap(), old);
+        let reviewer = Event::WorkerStarted {
+            run_id: "rv".into(),
+            adapter: "fake".into(),
+            model: "m".into(),
+            provider: Some("acct-a".into()),
+            role: Some(crate::RunRole::Reviewer),
+        };
+        let json = serde_json::to_string(&reviewer).unwrap();
+        assert!(json.contains(r#""role":"reviewer""#), "{json}");
+        assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), reviewer);
     }
 
     // ---- ADR-0013 D5/D6/D9/D10: schema migrations, PRAGMA, events の global id, list_page ----
@@ -2068,16 +2094,18 @@ mod tests {
         assert_eq!(store.events_for(a.id).unwrap(), expected_a);
         assert_eq!(store.events_for(b.id).unwrap(), expected_b);
 
-        let (title_a, updated_at_a): (String, String) = {
+        let (title_a, updated_at_a, objective_a): (String, String, String) = {
             let conn = store.conn.lock().unwrap();
             conn.query_row(
-                "SELECT title, updated_at FROM tasks WHERE id = ?1",
+                "SELECT title, updated_at, objective FROM tasks WHERE id = ?1",
                 params![a.id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap()
         };
         assert_eq!(title_a, a.title);
+        // ADR-0014 D2: マイグレーション 0004 が既存行の objective を json から埋める。
+        assert_eq!(objective_a, a.objective);
         assert_eq!(updated_at_a, format_rfc3339(a.updated_at).unwrap());
 
         let applied_before: Vec<(i64, String)> = {
@@ -2269,7 +2297,7 @@ mod tests {
         t
     }
 
-    /// ADR-0013 D10: `ListFilter` の各条件（複数 status、kind、parent、root_only、title_contains。
+    /// ADR-0013 D10: `ListFilter` の各条件（複数 status、kind、parent、root_only、text_contains。
     /// `%` を含む検索語のエスケープ込み）。
     #[test]
     fn list_page_filters_by_status_kind_parent_root_only_and_title() {
@@ -2312,16 +2340,26 @@ mod tests {
         assert_eq!(ids, [root.id, other_root.id].into_iter().collect());
         assert_eq!(page.total, 2);
 
-        // title_contains: リテラルな '%' を含む検索語（エスケープが効いているか）。
+        // text_contains: リテラルな '%' を含む検索語（エスケープが効いているか）。
         let percent_task = task_with("100% done", Status::Ready, TaskKind::Execute, 0, None);
         store.insert(&percent_task).unwrap();
         let no_percent_task = task_with("100 done", Status::Ready, TaskKind::Execute, 0, None);
         store.insert(&no_percent_task).unwrap();
-        let f = ListFilter { title_contains: Some("100%".to_string()), ..Default::default() };
+        let f = ListFilter { text_contains: Some("100%".to_string()), ..Default::default() };
         let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
         let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
         assert_eq!(ids, [child_approval.id, percent_task.id].into_iter().collect());
         assert!(!ids.contains(&no_percent_task.id));
+
+        // ADR-0014 D2: text_contains は objective も対象にする（ASCII の大文字小文字は区別しない）。
+        let mut by_objective = task_with("plain title", Status::Ready, TaskKind::Execute, 0, None);
+        by_objective.objective = "migrate the billing service".to_string();
+        store.insert(&by_objective).unwrap();
+        let f = ListFilter { text_contains: Some("billing".to_string()), ..Default::default() };
+        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), vec![by_objective.id]);
+        let f = ListFilter { text_contains: Some("BILLING".to_string()), ..Default::default() };
+        assert_eq!(store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap().total, 1);
     }
 
     /// ADR-0013 D10: 3 つの並び順。`updated_at` は遷移後に変わるので `UpdatedDesc` の順序も変わる。

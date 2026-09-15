@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::Serialize;
-use task_core::{ArtifactRef, Event, Task};
+use task_core::{ArtifactRef, Event, RunRole, Task};
 
 /// `prior_review_from_events` の要素。`task_worker::PriorReview` と同じ形（フィールド名も同じ）。
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -118,10 +118,15 @@ pub fn artifacts_for_run(events: &[(u64, Event)], run_id: &str) -> Vec<ArtifactR
         .collect()
 }
 
-/// 最後に `WorkerStarted` した run の id。
+/// `role` が Reviewer run を指すか（`None` はワーカー run。ADR-0014 D1）。
+pub fn is_reviewer(role: Option<RunRole>) -> bool {
+    role == Some(RunRole::Reviewer)
+}
+
+/// 最後に `WorkerStarted` した**ワーカー** run の id（Reviewer run は除く。ADR-0014 D1）。
 pub fn last_run_id(events: &[(u64, Event)]) -> Option<String> {
     events.iter().rev().find_map(|(_, ev)| match ev {
-        Event::WorkerStarted { run_id, .. } => Some(run_id.clone()),
+        Event::WorkerStarted { run_id, role, .. } if !is_reviewer(*role) => Some(run_id.clone()),
         _ => None,
     })
 }
@@ -151,13 +156,15 @@ pub fn approval_decision_note(events: &[(u64, Event)]) -> String {
 
 /// 直近の `WorkerFinished{outcome}` のうち `"question: "` で始まるものから、接頭辞を
 /// 除いた質問文を取り出す（ADR-0010 D3）。`events_for` を後ろから見て最初に見つかった
-/// ものを使う。無ければ空文字列。
+/// ものを使う。無ければ空文字列。Reviewer run の `WorkerFinished` は見ない（ADR-0014 D1）。
 pub fn latest_question(events: &[(u64, Event)]) -> String {
     events
         .iter()
         .rev()
         .find_map(|(_, event)| match event {
-            Event::WorkerFinished { outcome, .. } => outcome.strip_prefix("question: ").map(str::to_string),
+            Event::WorkerFinished { outcome, role, .. } if !is_reviewer(*role) => {
+                outcome.strip_prefix("question: ").map(str::to_string)
+            }
             _ => None,
         })
         .unwrap_or_default()
@@ -166,6 +173,36 @@ pub fn latest_question(events: &[(u64, Event)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0014 D1: Reviewer run の `WorkerStarted` / `WorkerFinished` は、ワーカー run を前提にする派生値から除く。
+    #[test]
+    fn last_run_id_and_latest_question_ignore_reviewer_runs() {
+        let started = |run_id: &str, role| Event::WorkerStarted {
+            run_id: run_id.into(),
+            adapter: "fake".into(),
+            model: "m".into(),
+            provider: None,
+            role,
+        };
+        let finished = |run_id: &str, outcome: &str, role| Event::WorkerFinished {
+            run_id: run_id.into(),
+            outcome: outcome.into(),
+            usage: None,
+            role,
+        };
+        let events: Vec<(u64, Event)> = vec![
+            started("run-1", None),
+            finished("run-1", "question: which version?", None),
+            started("rev-1", Some(RunRole::Reviewer)),
+            finished("rev-1", "question: reviewer asked instead of judging", Some(RunRole::Reviewer)),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, e)| (i as u64, e))
+        .collect();
+        assert_eq!(last_run_id(&events).as_deref(), Some("run-1"));
+        assert_eq!(latest_question(&events), "which version?");
+    }
 
     fn verdict(run_id: &str, criterion_idx: usize, pass: bool, reason: &str) -> Event {
         Event::ReviewVerdict {
@@ -336,6 +373,7 @@ mod tests {
                     adapter: "fake".into(),
                     model: "m".into(),
                     provider: None,
+                    role: None,
                 },
             ),
             (
@@ -345,6 +383,7 @@ mod tests {
                     adapter: "fake".into(),
                     model: "m".into(),
                     provider: None,
+                    role: None,
                 },
             ),
         ];
@@ -409,6 +448,7 @@ mod tests {
                 run_id: "run-1".into(),
                 outcome: "question: which version?".into(),
                 usage: None,
+                role: None,
             },
         )];
         assert_eq!(latest_question(&events), "which version?");

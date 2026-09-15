@@ -341,6 +341,17 @@ esac"#,
     assert!(created.header("location").unwrap_or_default().ends_with(&format!("/api/v1/tasks/{id}")));
     env.post("/tasks", json!({"title": "x", "objective": "y", "acceptance": []}))
         .assert_problem(422, "validation");
+    // ADR-0014 D3（P-G16）: 空白だけの title と存在しない親は 422（field 付き）で、何も作らない。
+    let human = json!([{"type": "human", "text": "t"}]);
+    let v = env.post("/tasks", json!({"title": "  ", "objective": "y", "acceptance": human})).assert_problem(422, "validation");
+    assert_eq!(v["errors"][0]["field"], "title", "{v}");
+    let v = env
+        .post("/tasks", json!({"title": "x", "objective": "y", "acceptance": human, "parent": TaskId::new().to_string()}))
+        .assert_problem(422, "validation");
+    assert_eq!(v["errors"][0]["field"], "parent", "{v}");
+    // ADR-0014 D2（P-G15）: q は objective も対象（最初のタスクは title "ask me"、objective "api"）。
+    let found = env.get("/tasks?q=api").json();
+    assert_eq!((found["total"].as_u64(), found["items"][0]["id"].as_str()), (Some(1), Some(id.to_string().as_str())), "{found}");
     env.post("/tasks", json!({"title": "x", "objective": "y", "acceptance": [{"type": "human", "text": "t"}], "bogus": 1}))
         .assert_problem(400, "bad_request");
 

@@ -169,6 +169,14 @@ pub struct Usage {
     pub output_tokens: Option<u64>,
 }
 
+/// run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunRole {
+    Worker,
+    Reviewer,
+}
+
 /// DESIGN §4.3 の `Event`（追記専用）。ADR-0002 D2: `Transitioned` は遷移の
 /// *結果* を記録するものであり、`transition()` の入力（`Trigger`）とは別物。
 /// `JsonSchema` は ADR-0013 D8: `docs/api/v1/event.schema.json`（`EventRow` 経由）の契約に使う。
@@ -190,6 +198,9 @@ pub enum Event {
         /// どのプロバイダ（= アカウント）で実行したか（ADR-0012 D1）。導入前のイベントには無いので任意。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
+        /// ADR-0014 D1: `None` はワーカー run、`Some(Reviewer)` は Reviewer run（ワーカー run に `Some(Worker)` は書かない）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<RunRole>,
     },
     WorkerProgress {
         run_id: String,
@@ -203,6 +214,9 @@ pub enum Event {
         run_id: String,
         outcome: String,
         usage: Option<Usage>,
+        /// ADR-0014 D1: `WorkerStarted.role` と同じ（`None` はワーカー run）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<RunRole>,
     },
     ReviewVerdict {
         run_id: String,

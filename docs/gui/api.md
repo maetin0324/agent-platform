@@ -144,12 +144,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 ### 3.1 `GET /health` → 200 `Health`
 
 ```json
-{"api_version":"1","schema_version":3,"taskd_version":"0.9.0","instance_id":"01J…",
+{"api_version":"1","schema_version":4,"taskd_version":"0.9.0","instance_id":"01J…",
  "started_at":"…","now":"…","db":{"journal_mode":"wal","busy_timeout_ms":5000}}
 ```
 
 - `api_version` は `"1"` 固定。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
-- `schema_version` は `schema_migrations` の最大版数（= `task_core::SCHEMA_VERSION`。Phase 9a で 3: 0001 init / 0002 events id / 0003 tasks の title・updated_at 列）。
+- `schema_version` は `schema_migrations` の最大版数（= `task_core::SCHEMA_VERSION`。現在 4: 0001 init / 0002 events id / 0003 tasks の title・updated_at 列 / 0004 tasks の objective 列（ADR-0014 D2））。
 - `journal_mode` は `PRAGMA journal_mode` の実測値（`"wal"` でなければ設定不備。GUI は警告を出す）。
 - 無認証（1.3）。DB のパスは出さない（`GET /config` に出す）。
 
@@ -165,7 +165,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `kind` | `TaskKind`、複数可 | 全て | |
 | `parent` | `TaskId` | — | 直接の子だけ（`ListFilter.parent_id`） |
 | `root_only` | bool | false | `parent_id IS NULL` のものだけ。`parent` と AND で効く（同時指定は空になるだけで、エラーではない） |
-| `q` | 文字列（最大 200 文字） | — | `title` の部分一致（`ListFilter.title_contains`。**大文字小文字を区別する**。`%` `_` はリテラル）。`objective` は対象外（`tasks.title` 列だけが索引付き。ADR-0013 D10） |
+| `q` | 文字列（最大 200 文字） | — | `title` **または `objective`** の部分一致（`ListFilter.text_contains`。SQLite の LIKE なので **ASCII の大文字小文字は区別しない**。`%` `_` はリテラル。ADR-0014 D2） |
 | `order` | `dispatch` / `updated_desc` / `created_desc` | `updated_desc` | `ListOrder` と同じ: `dispatch` = `priority DESC, created_at ASC, id ASC`（`ready_tasks` と同じ）。`updated_desc` = `updated_at DESC, id DESC`。`created_desc` = `created_at DESC, id DESC` |
 | `limit` | 1..=500 | 100 | |
 | `cursor` | 不透明文字列 | — | 前応答の `next_cursor`（`Page<T>.next_cursor` をそのまま）。解読できない cursor は 400 |
@@ -197,8 +197,11 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 - `acceptance` は**クライアントが並べた順**で保存する（CLI は accept → cmd → artifact → reviewer の固定順で渡す。並びに意味は無い）。
   `command` の `text` は `` `<cmd>` exits 0 ``（現状の `CriterionSpec::into_criterion` は `expect_exit` に関わらずこの文。CLI も常に `expect_exit = 0`）、`artifact_exists` の `text` は `artifact <name> exists`。整形は task-ops が行う。
 - 初期 `status`: `kind=approval` なら `ready`、それ以外 `draft`。`Created` イベントと同一トランザクション（`task_ops::add::create_task(store, spec, now) -> Task`）。
-- 422 `validation`（`OpsError::Validation` の文言そのまま。task-ops の検証はこの 2 種だけで、`title` / `objective` の空検査や `parent` の存在検査は**しない**（CLI と同じ。§9 の未決 6））:
+- 422 `validation`（`OpsError::Validation` の文言そのまま。`taskctl add` も同じ関数を通る。検査はこの順。ADR-0014 D3）:
+  - `title` が空白だけ → `title must not be blank`（`field: "title"`）
+  - `objective` が空白だけ → `objective must not be blank`（`field: "objective"`）
   - `acceptance` が空 → `at least one acceptance criterion is required (--accept, --check-cmd, --check-artifact, or --check-reviewer)`（`field: "acceptance"`）
+  - `parent` が存在しない → `parent <id> does not exist`（`field: "parent"`）
   - `depends_on[i]` が存在しない → `dependency <id> does not exist`、`failed` / `cancelled` → `dependency <id> has status Failed and cannot be depended on`（`Failed` / `Cancelled` は `{:?}` 表記。`field: "depends_on"`）
 - 検証に失敗したら何も挿入しない。
 
@@ -403,7 +406,7 @@ data: {"reason":"cursor_too_old","cursor":20000}
   - `lease_expired`（完全一致）→ `lease_expired`
   - それ以外（`error(retryable=…): …`）→ `error`
 - `WorkerFinished` が無い run は `finished_at = null, outcome = null`（実行中、または回収前）。
-- Reviewer run は `WorkerStarted` / `WorkerFinished` を持たない（対象 run の `WorkerProgress` に `reviewer run <id>: ` 接頭辞で残るだけ）ので一覧には現れない。`reviewer run requeued: ` で始まる `WorkerProgress` は `RunSummary.reviewer_deferrals` に数える。
+- Reviewer run も `WorkerStarted` / `WorkerFinished`（`role: "reviewer"`）を持つので一覧に現れ、`RunSummary.role` が `reviewer` になる（ADR-0014 D1。`role` の無いイベントは `worker`）。Reviewer run の進捗（`WorkerProgress`）は従来どおり対象 run に `reviewer run <id>: ` 接頭辞で付き、`reviewer run requeued: ` で始まるものは対象 run の `RunSummary.reviewer_deferrals` に数える。Reviewer run の `outcome` もワーカー run と同じ接頭辞の規則。
 
 ### 5.3 タイマー（`task_ops::timers(task, events, config, now)`）
 
@@ -433,7 +436,7 @@ data: {"reason":"cursor_too_old","cursor":20000}
 - 起動時に `events_since(0, 5000)` を繰り返して全イベントを 1 回走査し、以後は SSE と同じポーリングループの増分で更新する。**メモリ内の観測値**で、真実ではない（再起動で再計算）。
 - `WorkerStarted{run_id, provider}` で run 表に `provider`（`null` なら `"unknown"`）を登録し、`WorkerFinished{run_id, outcome, usage}` で閉じる。分類は §5.2。`input_tokens` / `output_tokens` は `usage` の和（`null` は 0）。
 - `by_day` は `WorkerFinished.ts` の UTC 日付で直近 30 日。
-- Reviewer run の使用量は events に残らないため**集計外**（§8 の未決 1）。
+- Reviewer run（`role: reviewer`）も同じ規則で集計に**含める**（ADR-0014 D1）。
 
 ---
 
@@ -444,7 +447,7 @@ data: {"reason":"cursor_too_old","cursor":20000}
 | 出所 | 型 | 備考 |
 |---|---|---|
 | `task-core`（既存） | `Task`, `TaskId`, `TaskKind`, `Status`, `Tier`, `WorkerHint`, `WorkspaceSpec`, `Budget`, `Lease`, `Check`, `Criterion`, `ArtifactRef`, `Usage`, `Event` | serde 表現そのまま。`Event` は Phase 9a で `JsonSchema` を derive 済み（`until` は `#[schemars(with = "String")]`）。`ProviderThrottled.reason: Option<String>`（任意フィールド、語彙 `throttled \| auth_failed \| exhausted \| spawn`。ADR-0013 D9） |
-| `task-core`（Phase 9a、実装済み） | `EventRow { id: u64, task_id: TaskId, seq: u64, ts: String, event: Event }`、`ListFilter { statuses, kinds, parent_id, root_only, title_contains }`、`ListOrder { Dispatch, UpdatedDesc, CreatedDesc }`、`Page<T> { items, next_cursor, total }`、`SCHEMA_VERSION` | `events_since` / `list_page` / `count_by_status` の型。`EventRow` は `docs/api/v1/event.schema.json` のルート |
+| `task-core`（Phase 9a、実装済み） | `EventRow { id: u64, task_id: TaskId, seq: u64, ts: String, event: Event }`、`ListFilter { statuses, kinds, parent_id, root_only, text_contains }`、`ListOrder { Dispatch, UpdatedDesc, CreatedDesc }`、`Page<T> { items, next_cursor, total }`、`SCHEMA_VERSION` | `events_since` / `list_page` / `count_by_status` の型。`EventRow` は `docs/api/v1/event.schema.json` のルート |
 | `task-ops`（Phase 9a、実装済み） | `add::{NewTaskSpec, CriterionSpec, create_task}`、`plan::{NewPlanSpec, create_plan}`、`gate::{TransitionResult, approve, reject, answer, cancel}`、`replay::{ReplayReport, ReplayMismatch, replay}`、`derive::{ReviewNote, AnswerNote, …}`、`OpsError` | 9b で `Deserialize` / `Serialize` / `JsonSchema` を付ける（`NewTaskSpec` / `NewPlanSpec` は `deny_unknown_fields` + `#[serde(default)]`、`CriterionSpec` は `tag = "type"`、`ReplayMismatch.field` は `&'static str` のまま文字列に出る） |
 | `task-ops`（Phase 9b で追加） | `TaskRef`, `TaskSummary`, `TaskList`, `TaskDetail`, `Timers`, `CriterionView`, `VerdictView`, `RunSummary`, `RunFiles`, `RunOutcomeKind`, `ApprovalLink`, `ApprovalDecisionView`, `Action`, `Inbox`, `InboxCounts`, `ApprovalItem`, `EvidenceView`, `QuestionItem`, `DraftGroup`, `AttentionItem`, `Graph`, `GraphNode`, `GraphEdge`, `TransitionResult.cascaded`, `DaemonSnapshot`, `InFlight`, `InFlightKind`, `CooldownView`, `ProviderLive` | ビュー型。全て `JsonSchema`。`DaemonSnapshot` は task-dispatch が作り task-api が読むので、両者が依存する task-ops に置く（ADR-0013 D3/D4 の依存方向を満たす）。`CooldownView` は `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直した写し |
 | `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema` | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
@@ -454,10 +457,12 @@ data: {"reason":"cursor_too_old","cursor":20000}
 ```rust
 // ---- task-core（実装済み）----
 pub struct EventRow { pub id: u64, pub task_id: TaskId, pub seq: u64, pub ts: String, pub event: Event }
-pub struct ListFilter { pub statuses: Vec<Status>, pub kinds: Vec<TaskKind>, pub parent_id: Option<TaskId>, pub root_only: bool, pub title_contains: Option<String> }
+pub struct ListFilter { pub statuses: Vec<Status>, pub kinds: Vec<TaskKind>, pub parent_id: Option<TaskId>, pub root_only: bool, pub text_contains: Option<String> }
 pub enum ListOrder { Dispatch, UpdatedDesc, CreatedDesc }
 pub struct Page<T> { pub items: Vec<T>, pub next_cursor: Option<String>, pub total: u64 }
 // Event::ProviderThrottled { provider: String, until: OffsetDateTime, #[serde(default, skip_serializing_if = "Option::is_none")] reason: Option<String> }
+// Event::WorkerStarted / WorkerFinished に #[serde(default, skip_serializing_if = "Option::is_none")] role: Option<RunRole>（None = ワーカー run。ADR-0014 D1）
+// #[serde(rename_all = "snake_case")] pub enum RunRole { Worker, Reviewer }
 
 // ---- task-ops: 参照・一覧 ----
 pub struct TaskRef { pub id: TaskId, pub title: String, pub kind: TaskKind, pub status: Status }
@@ -482,7 +487,7 @@ pub struct Timers { pub now: String, pub lease_expires_at: Option<String>, pub b
     pub consecutive_requeues: u32, pub max_requeues: u32, pub consecutive_reviewer_requeues: u32 }
 pub struct CriterionView { pub idx: usize, pub text: String, pub check: Check, pub latest_verdict: Option<VerdictView>, pub approval: Option<ApprovalLink> }
 pub struct VerdictView { pub run_id: String, pub criterion_idx: usize, pub pass: bool, pub reason: String, pub ts: String }
-pub struct RunSummary { pub run_id: String, pub adapter: String, pub model: String, pub provider: Option<String>,
+pub struct RunSummary { pub run_id: String, pub role: RunRole /* worker | reviewer */, pub adapter: String, pub model: String, pub provider: Option<String>,
     pub started_at: String, pub finished_at: Option<String>, pub outcome: Option<RunOutcomeKind>, pub outcome_text: Option<String>,
     pub usage: Option<Usage>, pub progress: u32, pub artifacts: u32, pub verdicts: u32, pub reviewer_deferrals: u32,
     pub files: Option<RunFiles> }
@@ -628,14 +633,14 @@ pub struct ApiV1Schema {
 
 ---
 
-## 9. 未決・確認事項
+## 9. 未決・確認事項（2026-09-14 に 1・3・5・6 を決定。1・3・6 は ADR-0014、5 は人間の確認）
 
-1. **Reviewer run の使用量**: `WorkerStarted` / `WorkerFinished` が記録されないため、アカウント別のトークン集計から漏れる。Reviewer run にも同じイベント（または `ReviewerRunFinished{run_id, provider, usage}`）を残すかは taskd 側の判断（P-G14 として `taskd-proposals.md` に追加）。
+1. **Reviewer run の使用量**（**決定: 記録して集計に含める**。P-G14 / ADR-0014 D1）: `WorkerStarted` / `WorkerFinished` が記録されないため、アカウント別のトークン集計から漏れる。Reviewer run にも同じイベント（または `ReviewerRunFinished{run_id, provider, usage}`）を残すかは taskd 側の判断（P-G14 として `taskd-proposals.md` に追加）。
 2. **一括承認**（Plan の子を全部 Accept）: API には置かない。GUI が 1 件ずつ `POST /tasks/{id}/approve` を直列に呼ぶ（原子性が無いことを UI に明記）。
-3. **`q` の対象**: `title` のみ。`objective` の検索が要るなら `tasks.objective` 列の追加を提案する。
+3. **`q` の対象**（**決定: `title` と `objective`**。P-G15 / ADR-0014 D2）: `title` のみ。`objective` の検索が要るなら `tasks.objective` 列の追加を提案する。
 4. **`StaticPolicy` が cooldown の理由を保持するか**: `Cooldown.reason` は `Option`。保持しない実装でも仕様は満たす。
-5. **`/health` を無認証にすること**: 版と `journal_mode` だけを返す。問題があれば認証必須に変える（GUI は G0 の疎通確認をトークン付きで行えばよい）。
-6. **`POST /tasks` の追加検証**（`title` / `objective` の空白、`parent` の存在、`workspace` の空文字）: Phase 9a の task-ops は CLI と同じく検査しない。API 越しでも同じにしてある（挙動を変えない）。GUI 側はフォームの必須欄で防ぐ。taskd 側で足すなら task-ops に置き CLI も同じ関数を通す（提案として `taskd-proposals.md` P-G16）。
+5. **`/health` を無認証にすること**（**決定: 無認証のまま**。人間の確認）: 版と `journal_mode` だけを返す。問題があれば認証必須に変える（GUI は G0 の疎通確認をトークン付きで行えばよい）。
+6. **`POST /tasks` の追加検証**（**決定: `title` / `objective` の空白と `parent` の存在を検査する**。P-G16 / ADR-0014 D3）（`title` / `objective` の空白、`parent` の存在、`workspace` の空文字）: Phase 9a の task-ops は CLI と同じく検査しない。API 越しでも同じにしてある（挙動を変えない）。GUI 側はフォームの必須欄で防ぐ。taskd 側で足すなら task-ops に置き CLI も同じ関数を通す（提案として `taskd-proposals.md` P-G16）。
 
 ---
 
@@ -656,11 +661,11 @@ pub struct ApiV1Schema {
 **存在しない id**
 - `/events?task_id=<存在しない id>` → 200 で空のページ。
 - `/graph?root=<存在しない id>` → 404 `task_not_found`。
-- 422 の `errors[].field` は、推定できるときだけ（`acceptance` / `depends_on` / `goal` / `answer`）。
+- 422 の `errors[].field` は、推定できるときだけ（`title` / `objective` / `acceptance` / `parent` / `depends_on` / `goal` / `answer`）。
 
 **派生値**
 - `RunSummary.outcome_text`: `done` 以外（`question` / `requeue`）でも接頭辞を除いた残りを入れる。`error` は文字列全体、`lease_expired` は `null`。
-- `DaemonSnapshot.in_flight[]` の `kind: "reviewer"` の `run_id` は、**レビュー対象のワーカー run の id**（Reviewer run 自身の id は events に残らないため）。
+- `DaemonSnapshot.in_flight[]` の `kind: "reviewer"` の `run_id` は **Reviewer run 自身の id**（`WorkerStarted{role: reviewer}` と同じ。ADR-0014 D1）。
 - `Providers.items[].stats`:
   - 最初の `GET /providers` で全イベントを走査し、以後は要求のたびに増分だけ読む（taskd のメモリ上の観測値。再起動で再計算）。
   - `runs` は `WorkerStarted` の数（実行中を含む）。`by_day[].runs` はその日に終わった run の数。

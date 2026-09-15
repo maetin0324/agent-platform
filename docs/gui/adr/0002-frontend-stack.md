@@ -1,7 +1,7 @@
 # ADR-GUI-0002: フロントエンドスタック — React + Remix（React Router framework mode）
 
 - 日付: 2026-09-14（初版 Proposed → 同日 人間の決定で改訂。一次情報の確認日も 2026-09-14）
-- 状態: **Accepted**（人間の決定 H2「React を使い、Remix を採用する」。§3 の解釈に対する確認事項が §4 にある）
+- 状態: **Accepted**（人間の決定 H2「React を使い、Remix を採用する」。§4 の確認事項は 2026-09-14 に全て本 ADR の案どおり確定。DESIGN-GUI §11 の H11）
 - 関連: [ADR-GUI-0001](0001-architecture-boundary.md) / `docs/gui/DESIGN-GUI.md` §6, §8, §9, §10 / `docs/gui/api.md`
 
 ## 1. 文脈
@@ -128,14 +128,14 @@ React Router v8 framework mode を指す。
 | 型生成 | `json-schema-to-typescript` 16.0.0（`pnpm gen:types`）。生成物 `app/taskd/types.ts` をコミット、CI で差分ゼロ |
 | 実行時検証 | 入れない（zod 等）。契約は taskd の schema。BFF は taskd の応答を信頼する |
 
-## 4. 人間に確認すべき点
+## 4. 人間に確認すべき点（2026-09-14 確認済み: 全て本 ADR の案どおり）
 
 1. **「Remix」の解釈**: 本 ADR は「Remix = React Router v8 framework mode」と解釈した。もし意図が Remix 3（React を使わない新フレームワーク）なら、
-   「React を使う」と両立しないため再設計になる。**確認を求める**（返答が無ければ本 ADR のとおり進める）。
-2. **配布形態**: GUI は Node 24 ランタイムを必要とする（単一バイナリではない）。許容できるか。Node SEA は実験項目。
-3. **Node の版**: 開発機の Node は `v22.21.0` で、React Router 8 の最低 `22.22.0` を満たさない。Node 24 LTS への更新が前提（`docs/gui/bootstrap/README.md`）。
-4. **pnpm 11 か 12 か**: 11.x にした（12 は公開 3 週間）。12 でよければ変える。
-5. **TypeScript 7**: 7.0 系は programmatic API が未整備（7.1 予定）。本スタックはそれに依存しないが、問題が出れば 6.0.x に下げる方針でよいか。
+   「React を使う」と両立しないため再設計になる。→ **確認済み**: 本 ADR の解釈（React Router 8 framework mode）で進める。
+2. **配布形態**: GUI は Node 24 ランタイムを必要とする（単一バイナリではない）。許容できるか。Node SEA は実験項目。→ **確認済み**: 許容（Node 24 ランタイム + `build/`。SEA は実験項目のまま）。
+3. **Node の版**: 開発機の Node は `v22.21.0` で、React Router 8 の最低 `22.22.0` を満たさない。Node 24 LTS への更新が前提（`docs/gui/bootstrap/README.md`）。→ **確認済み**: 更新する（人間がホストで実施。`run-gphases.sh` の preflight が検査する）。
+4. **pnpm 11 か 12 か**: 11.x にした（12 は公開 3 週間）。12 でよければ変える。→ **確認済み**: pnpm 11。
+5. **TypeScript 7**: 7.0 系は programmatic API が未整備（7.1 予定）。本スタックはそれに依存しないが、問題が出れば 6.0.x に下げる方針でよいか。→ **確認済み**: この方針でよい。
 
 ## 5. スタック一覧（Remix 前提で組み直したもの）
 

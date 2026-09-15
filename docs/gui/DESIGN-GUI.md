@@ -55,7 +55,7 @@
 | `taskctl add` の検証と既定値（条件 1 つ以上、`depends_on` の存在と非 failed/cancelled、`kind=execute` / `tier=standard` / `max_turns=10` / `max_wall_secs=600` / `max_retries=2`、workspace 既定 `<task_id>`、`Approval` は `ready` で作る）、`plan` の既定（`tier=frontier` / 30 / 900 / 1、title = 1 行目 80 文字） | `crates/taskctl/src/commands/{add,plan}.rs` |
 | `WorkerFinished.outcome` の書式: `done: <summary>` / `question: <text>` / `error(retryable=<bool>): <msg>` / `requeue: adapter: <e>` / `lease_expired` | `crates/task-dispatch/src/dispatcher.rs` |
 | Human check の Approval 子の title: `Approval needed: <title> — criterion <idx> (attempt <attempts+1>)`。Reviewer run の延期は対象 run の `WorkerProgress` に `reviewer run requeued: ` 接頭辞 | 同上 |
-| Reviewer run は `WorkerStarted` / `WorkerFinished` を残さない（進捗だけ `reviewer run <id>: ` 接頭辞で対象 run に付く）→ Reviewer run の使用量はイベントから集計できない | 同上 `ReviewerSink` |
+| Reviewer run は `WorkerStarted` / `WorkerFinished` を残さない（進捗だけ `reviewer run <id>: ` 接頭辞で対象 run に付く）→ ADR-0014（P-G14）で `role: reviewer` 付きで記録するよう変更済み。Reviewer run も run 一覧と使用量の集計に現れる | 同上 `ReviewerSink` |
 | アダプタ ID は `"fake"` / `"claude-code"` / `"codex"`。設定は `[adapters.fake|claude_code|codex]` と `[[providers]]{id, adapter, tiers, concurrency, model, env}` | `crates/taskd/src/config.rs` |
 | `taskd --config <toml> [--until-idle] [--max-ticks N] [--log-format json|text]`。`taskctl --db <path>`（`TASKD_DB`）。`taskctl worker run` の exit code: done=0 / question=3 / error=4 / 130 | `crates/taskd/src/main.rs`、`crates/taskctl/src/main.rs`、ADR-0012 |
 | ファイル: `<ws>/artifacts/`、`<ws>/runs/<run_id>/{stdout.jsonl, stderr.log, result.json}`。`<ws>` は `WorkspaceSpec::Local{path}`（相対なら `workspace_root` 基準） | `task-worker/src/{workspace,subprocess}.rs`、DESIGN §4.4 |
@@ -126,7 +126,7 @@ G フェーズは「taskd API v1 は `api.md` のとおり実装済み」を前�
 | id / adapter / tiers / concurrency / 実効 model / `env_keys`（**値は出さない**） | 設定（`ProviderView`） |
 | 実行中の run 数（`in_use / concurrency`） | デーモンのスナップショット |
 | cooldown 中か、いつまで、理由（throttled / auth_failed / exhausted / spawn） | スナップショット `cooldown`（履歴は `ProviderThrottled` イベント） |
-| run 数、done / question / error / requeue / lease_expired の内訳、input / output tokens（日別・累計） | `stats`（taskd がイベントから集計。Reviewer run は集計外） |
+| run 数、done / question / error / requeue / lease_expired の内訳、input / output tokens（日別・累計） | `stats`（taskd がイベントから集計。Reviewer run も含む。ADR-0014） |
 
 ### 4.6 デーモン — `GET /daemon`、`GET /config`、`POST /replay`
 
@@ -420,6 +420,8 @@ strong = 設計判断（雛形の選択、BFF の骨格、CSRF・認証、配布
 | H7 | 型共有 | schemars → `docs/api/v1/*.schema.json`（taskd がコミット）→ TS |
 | H8 | パッケージ管理 | pnpm、`minimumReleaseAge` 7 日 |
 | H9 | 複数人利用 | 当面単一トークン。`by` は `"human"` のまま |
+| H10 | taskd への追加提案 P-G14〜P-G16 | 提案どおり採用（Reviewer run のイベント記録、`q` の objective 検索、作成時の検証）。taskd の ADR-0014 で実装済み |
+| H11 | ADR-GUI-0002 §4 の確認事項 | Fable の案どおり確定: Remix = React Router 8 framework mode、Node 24 LTS ランタイム + `build/` での配布（単一バイナリは実験項目）、Node 24 への更新が前提、pnpm 11、TypeScript 7（問題があれば 6.0.x）。`/health` は無認証のまま |
 
 ADR-0013 で不採用・後回し: P-G4（DB スナップショット表）、P-G12（crate タグ）、P-G8 / P-G10 / P-G13。
 

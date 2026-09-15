@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use task_core::plan::{PlanLimits, materialize};
 use task_core::{
-    ArtifactRef, Check, Event, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
+    ArtifactRef, Check, Event, RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
 };
 use task_ops::derive::{
     AnswerNote, REVIEWER_REQUEUED_PREFIX, ReviewNote, answers_from_events, approval_decision_note,
@@ -149,6 +149,8 @@ struct ReviewEntry {
     subject: ReviewSubject,
     /// レビュー対象の run（デーモンのスナップショット用）。
     run_id: String,
+    /// Reviewer run を起動した場合のその run の id（スナップショットの `in_flight` 用。ADR-0014 D1）。
+    review_run_id: Option<String>,
     since: OffsetDateTime,
 }
 
@@ -342,7 +344,7 @@ impl Dispatcher {
         in_flight.extend(self.reviewing.iter().filter_map(|(task_id, e)| {
             e.provider.as_ref().map(|provider| InFlight {
                 task_id: *task_id,
-                run_id: e.run_id.clone(),
+                run_id: e.review_run_id.clone().unwrap_or_else(|| e.run_id.clone()),
                 provider: provider.clone(),
                 kind: InFlightKind::Reviewer,
                 since: rfc3339(e.since),
@@ -507,6 +509,7 @@ impl Dispatcher {
             run_id: run_id.clone(),
             outcome: outcome_str.clone(),
             usage,
+            role: None,
         };
         let mut events = vec![finished];
         // ADR-0013 D9: cooldown に入った供給側失敗を、遷移と同じトランザクションで記録する。
@@ -541,11 +544,21 @@ impl Dispatcher {
         mut outcome: ReviewOutcome,
     ) -> Result<(), DispatchError> {
         let entry = self.reviewing.remove(&task_id);
+        // ADR-0014 D1: Reviewer run の終わりを WorkerFinished{role: reviewer} として残す（判定の適用・延期・破棄のどれでも）。
+        let mut reviewer_finished = outcome.reviewer_run.take().map(|r| Event::WorkerFinished {
+            run_id: r.run_id,
+            outcome: r.outcome,
+            usage: r.usage,
+            role: Some(RunRole::Reviewer),
+        });
         let Some(task) = self.store.get(task_id)? else {
             return Ok(());
         };
         if task.status != Status::Reviewing {
             tracing::warn!(%task_id, status = ?task.status, "review result discarded (task no longer reviewing)");
+            if let Some(ev) = &reviewer_finished {
+                self.store.append_event(task_id, ev)?;
+            }
             return Ok(());
         }
         let mut throttled_events = Vec::new();
@@ -567,6 +580,9 @@ impl Dispatcher {
                         msg: format!("{REVIEWER_REQUEUED_PREFIX}{}", pf.message),
                     },
                 )?;
+                if let Some(ev) = &reviewer_finished {
+                    self.store.append_event(task_id, ev)?;
+                }
                 for ev in &throttled_events {
                     self.store.append_event(task_id, ev)?;
                 }
@@ -578,6 +594,12 @@ impl Dispatcher {
             }
             // ADR-0011（P-38）: 連続延期が上限に達したら、未判定の Reviewer 条件を fail として通常どおり判定を適用する。
             tracing::warn!(%task_id, %run_id, reason = %pf.message, max_requeues = self.config.max_requeues, "reviewer run requeue limit reached; failing reviewer criteria");
+            if let Some(Event::WorkerFinished { outcome: finished_outcome, .. }) = reviewer_finished.as_mut() {
+                *finished_outcome = format!(
+                    "error(retryable=false): requeue limit ({}) reached: {}",
+                    self.config.max_requeues, pf.message
+                );
+            }
             for (idx, criterion) in task.acceptance.iter().enumerate() {
                 if matches!(criterion.check, Check::Reviewer) && !outcome.verdicts.iter().any(|v| v.criterion_idx == idx) {
                     outcome.verdicts.push(Verdict {
@@ -590,15 +612,14 @@ impl Dispatcher {
             outcome.verdicts.sort_by_key(|v| v.criterion_idx);
         }
         let all_pass = outcome.all_pass();
-        let events: Vec<Event> = outcome
-            .verdicts
-            .iter()
-            .map(|v| Event::ReviewVerdict {
+        let events: Vec<Event> = reviewer_finished
+            .into_iter()
+            .chain(outcome.verdicts.iter().map(|v| Event::ReviewVerdict {
                 run_id: run_id.clone(),
                 criterion_idx: v.criterion_idx,
                 pass: v.pass,
                 reason: v.reason.clone(),
-            })
+            }))
             .chain(throttled_events)
             .collect();
         // ADR-0007 D3/D4: Plan が全 pass なら子タスクの挿入と ReviewPass を同一トランザクションで行う。
@@ -654,6 +675,7 @@ impl Dispatcher {
                 run_id: lease.worker_run_id.clone(),
                 outcome: "lease_expired".to_string(),
                 usage: None,
+                role: None,
             };
             match self
                 .store
@@ -817,6 +839,7 @@ impl Dispatcher {
                     adapter: adapter_id.clone(),
                     model,
                     provider: Some(provider_id.clone()),
+                    role: None,
                 },
             )?;
             let limits = RunLimits {
@@ -906,6 +929,8 @@ impl Dispatcher {
             None
         };
         let provider = reviewer.as_ref().map(|(p, _)| p.clone());
+        // ADR-0014 D1: (provider, Reviewer run の id, adapter) — WorkerStarted の記録と in_flight に使う。
+        let review_run = reviewer.as_ref().map(|(p, r)| (p.clone(), r.run_id.clone(), r.adapter.id().to_string()));
         let reviewer_run = reviewer.map(|(_, r)| r);
 
         let plan = if task.kind == TaskKind::Plan {
@@ -919,6 +944,20 @@ impl Dispatcher {
 
         let events = self.store.events_for(task_id)?;
         let produced = artifacts_for_run(&events, &run_id);
+        // ADR-0014 D1: Reviewer run も対象タスクに WorkerStarted（role: reviewer）を残す（アカウント別の集計に含めるため）。
+        if let Some((provider_id, review_run_id, adapter_id)) = &review_run {
+            let model = self.models.get(provider_id).cloned().unwrap_or_default();
+            self.store.append_event(
+                task_id,
+                &Event::WorkerStarted {
+                    run_id: review_run_id.clone(),
+                    adapter: adapter_id.clone(),
+                    model,
+                    provider: Some(provider_id.clone()),
+                    role: Some(RunRole::Reviewer),
+                },
+            )?;
+        }
         let timeout = self.config.review_timeout;
         let entry_subject = subject.clone();
         let entry_run_id = run_id.clone();
@@ -946,6 +985,7 @@ impl Dispatcher {
                 provider,
                 subject: entry_subject,
                 run_id: entry_run_id,
+                review_run_id: review_run.map(|(_, id, _)| id),
                 since: OffsetDateTime::now_utc(),
             },
         );
@@ -1598,8 +1638,12 @@ mod tests {
             .count();
         assert!(reviewer_progress >= 2, "{events:?}");
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: true, reason, .. } if reason.contains("reviewer(") && reason.contains("fine"))));
-        // WorkerStarted はワーカー run の 1 回だけ（Reviewer run は WorkerStarted を使わない）。
-        assert_eq!(events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { .. })).count(), 1);
+        // WorkerStarted はワーカー run の 1 回と、ADR-0014 D1 で記録する Reviewer run の 1 回。
+        assert_eq!(events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. })).count(), 1);
+        assert_eq!(
+            events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { role: Some(RunRole::Reviewer), .. })).count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2071,6 +2115,60 @@ mod tests {
             })
             .collect();
         assert_eq!(verdicts, vec![true]);
+        // ADR-0014 D1: 延期した Reviewer run も、成功した Reviewer run も WorkerFinished{role: reviewer} を残す。
+        let reviewer_outcomes: Vec<&str> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkerFinished { outcome, role: Some(RunRole::Reviewer), .. } => Some(outcome.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reviewer_outcomes.len(), 2, "{events:?}");
+        assert!(reviewer_outcomes[0].starts_with("requeue: "), "{reviewer_outcomes:?}");
+        assert!(reviewer_outcomes[1].starts_with("done: "), "{reviewer_outcomes:?}");
+    }
+
+    /// ADR-0014 D1（P-G14）: Reviewer run も対象タスクに WorkerStarted / WorkerFinished（role: reviewer、provider つき）を残す。
+    /// ReviewVerdict はワーカー run に付き、ワーカー run を前提にする `last_run_id` は Reviewer run を見ない。
+    #[tokio::test]
+    async fn reviewer_run_records_worker_started_and_finished_with_reviewer_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let r = new_task(dir.path(), Check::Reviewer, 0);
+        store.insert(&r).unwrap();
+        let adapter = Arc::new(FileAdapter {
+            plan_json: String::new(),
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"ok"}]}"#.into(),
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 2);
+        let report = run_until_idle(&mut d, 300).await;
+        assert!(report.idle);
+        assert_eq!(store.get(r.id).unwrap().unwrap().status, Status::Done);
+        let events = store.events_for(r.id).unwrap();
+        let started: Vec<(String, Option<RunRole>, Option<String>)> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkerStarted { run_id, role, provider, .. } => Some((run_id.clone(), *role, provider.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started.len(), 2, "{events:?}");
+        assert_eq!((started[0].1, started[1].1), (None, Some(RunRole::Reviewer)));
+        assert_eq!(started[1].2.as_deref(), Some("p1"));
+        let reviewer_finished: Vec<&str> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkerFinished { run_id, outcome, role: Some(RunRole::Reviewer), .. } if *run_id == started[1].0 => {
+                    Some(outcome.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reviewer_finished.len(), 1, "{events:?}");
+        assert!(reviewer_finished[0].starts_with("done: "), "{reviewer_finished:?}");
+        assert_eq!(last_run_id(&events).as_deref(), Some(started[0].0.as_str()));
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { run_id, pass: true, .. } if *run_id == started[0].0)));
     }
 
     /// 常に供給側失敗（短い cooldown）を返すアダプタ。`review_only` なら Review run だけ失敗し、ワーカー run は done。

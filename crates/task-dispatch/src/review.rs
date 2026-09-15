@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use task_core::plan::{PlanLimits, PlanOutput, parse_and_validate};
-use task_core::{ArtifactRef, Check, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
+use task_core::{ArtifactRef, Check, Status, Task, TaskId, TaskKind, Tier, Usage, WorkerHint};
 use task_worker::artifact::sha256_file;
 
 use crate::policy::ProviderOutcome;
@@ -73,6 +73,18 @@ pub struct ReviewOutcome {
     pub plan: Option<PlanOutput>,
     /// `Some` のとき判定は無効。ディスパッチャは遷移を適用せず `reviewing` のまま延期する（attempts を消費しない）。
     pub provider_failure: Option<ReviewerProviderFailure>,
+    /// Reviewer run を起動した場合の、その run 自身の結果（ADR-0014 D1。ディスパッチャが `WorkerFinished{role: reviewer}` にする）。
+    pub reviewer_run: Option<ReviewerRunRecord>,
+}
+
+/// Reviewer run 自身の終わり方（ADR-0014 D1）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewerRunRecord {
+    pub run_id: String,
+    /// `WorkerFinished.outcome` と同じ接頭辞の規則（`done: ` / `question: ` / `error(retryable=…): ` / `requeue: `）。
+    pub outcome: String,
+    /// `done` の `usage`（それ以外は `None`）。
+    pub usage: Option<Usage>,
 }
 
 impl ReviewOutcome {
@@ -219,6 +231,7 @@ pub async fn review_task(
 
     // ADR-0007 D5 2./3.: 決定的条件が全 pass のときだけ LLM レビュー run を起動する。
     let mut provider_failure = None;
+    let mut reviewer_run = None;
     if !reviewer_criteria.is_empty() {
         let deterministic_ok = verdicts.iter().all(|v| v.pass);
         let reviewer_verdicts = if !deterministic_ok {
@@ -240,14 +253,19 @@ pub async fn review_task(
                         reason: "not evaluated: no reviewer run was available".to_string(),
                     })
                     .collect(),
-                Some(run) => match run_reviewer(task, workspace_dir, produced, subject, &reviewer_criteria, run).await {
-                    Ok(v) => v,
-                    Err(pf) => {
-                        // ADR-0010 D5（P-29）: 判定そのものが無効。遷移はディスパッチャが適用しない。
-                        provider_failure = Some(pf);
-                        Vec::new()
+                Some(run) => {
+                    let (result, record) =
+                        run_reviewer(task, workspace_dir, produced, subject, &reviewer_criteria, run).await;
+                    reviewer_run = Some(record);
+                    match result {
+                        Ok(v) => v,
+                        Err(pf) => {
+                            // ADR-0010 D5（P-29）: 判定そのものが無効。遷移はディスパッチャが適用しない。
+                            provider_failure = Some(pf);
+                            Vec::new()
+                        }
                     }
-                },
+                }
             }
         };
         verdicts.extend(reviewer_verdicts);
@@ -258,6 +276,7 @@ pub async fn review_task(
         verdicts,
         plan: plan_output,
         provider_failure,
+        reviewer_run,
     }
 }
 
@@ -303,6 +322,7 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHin
     }
 }
 
+/// Reviewer run を実行し、判定と、その run 自身の結果（`WorkerFinished` 用。ADR-0014 D1）を返す。
 async fn run_reviewer(
     task: &Task,
     workspace_dir: &Path,
@@ -310,6 +330,20 @@ async fn run_reviewer(
     subject: &ReviewSubject,
     criteria: &[usize],
     run: ReviewerRun,
+) -> (Result<Vec<Verdict>, ReviewerProviderFailure>, ReviewerRunRecord) {
+    let mut record = ReviewerRunRecord { run_id: run.run_id.clone(), outcome: String::new(), usage: None };
+    let result = run_reviewer_inner(task, workspace_dir, produced, subject, criteria, run, &mut record).await;
+    (result, record)
+}
+
+async fn run_reviewer_inner(
+    task: &Task,
+    workspace_dir: &Path,
+    produced: &[ArtifactRef],
+    subject: &ReviewSubject,
+    criteria: &[usize],
+    run: ReviewerRun,
+    record: &mut ReviewerRunRecord,
 ) -> Result<Vec<Verdict>, ReviewerProviderFailure> {
     let fail_all = |reason: String| -> Result<Vec<Verdict>, ReviewerProviderFailure> {
         Ok(criteria
@@ -347,24 +381,30 @@ async fn run_reviewer(
         Err(e) => {
             run.sink.progress(&format!("adapter error: {e}"));
             if let Some(outcome) = crate::dispatcher::provider_failure_outcome(&e) {
+                record.outcome = format!("requeue: adapter: {e}");
                 return Err(ReviewerProviderFailure {
                     outcome,
                     message: format!("{tag}: {e}"),
                 });
             }
+            record.outcome = format!("error(retryable=false): adapter error: {e}");
             return fail_all(format!("{tag}: adapter error: {e}"));
         }
     };
     match outcome.terminal {
-        Terminal::Done { summary, .. } => {
+        Terminal::Done { summary, usage, .. } => {
             run.sink.progress(&format!("done: {summary}"));
+            record.outcome = format!("done: {summary}");
+            record.usage = usage;
         }
         Terminal::Question { text } => {
             run.sink.progress(&format!("question: {text}"));
+            record.outcome = format!("question: {text}");
             return fail_all(format!("{tag}: reviewer asked a question instead of judging: {text}"));
         }
         Terminal::Error { message, retryable } => {
             run.sink.progress(&format!("error(retryable={retryable}): {message}"));
+            record.outcome = format!("error(retryable={retryable}): {message}");
             return fail_all(format!("{tag}: reviewer run failed: {message}"));
         }
     }

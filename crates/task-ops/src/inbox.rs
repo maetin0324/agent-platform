@@ -215,7 +215,8 @@ fn build_questions(store: &dyn TaskStore, all_tasks: &[Task]) -> Result<Vec<Ques
         let mut asked_at: Option<String> = None;
         let mut run_id: Option<String> = None;
         for r in rows.iter().rev() {
-            if let Event::WorkerFinished { run_id: rid, outcome, .. } = &r.event
+            if let Event::WorkerFinished { run_id: rid, outcome, role, .. } = &r.event
+                && !derive::is_reviewer(*role)
                 && outcome.starts_with("question: ")
             {
                 asked_at = Some(r.ts.clone());
@@ -266,7 +267,9 @@ fn build_drafts(
             Some(p) => {
                 let rows = store.event_rows_for(p.id, None, view::ALL_EVENTS)?;
                 rows.iter().rev().find_map(|r| match &r.event {
-                    Event::WorkerFinished { outcome, .. } => outcome.strip_prefix("done: ").map(str::to_string),
+                    Event::WorkerFinished { outcome, role, .. } if !derive::is_reviewer(*role) => {
+                        outcome.strip_prefix("done: ").map(str::to_string)
+                    }
                     _ => None,
                 })
             }
@@ -323,7 +326,7 @@ fn build_attention(
 
         let mut reasons: Vec<String> = Vec::new();
         if let Some(outcome) = rows.iter().rev().find_map(|r| match &r.event {
-            Event::WorkerFinished { outcome, .. } => Some(outcome.clone()),
+            Event::WorkerFinished { outcome, role, .. } if !derive::is_reviewer(*role) => Some(outcome.clone()),
             _ => None,
         }) {
             reasons.push(outcome);
@@ -493,6 +496,7 @@ mod tests {
                     adapter: "claude-code".into(),
                     model: "m".into(),
                     provider: Some("claude-a".into()),
+                    role: None,
                 },
             )
             .expect("started");
@@ -503,6 +507,7 @@ mod tests {
                     run_id: "run-1".into(),
                     outcome: "done: implemented".into(),
                     usage: None,
+                    role: None,
                 },
             )
             .expect("finished");
@@ -613,6 +618,7 @@ mod tests {
                     run_id: "run-7".into(),
                     outcome: "question: which version?".into(),
                     usage: None,
+                    role: None,
                 },
             )
             .expect("finished");
@@ -640,6 +646,7 @@ mod tests {
                     run_id: "run-1".into(),
                     outcome: "done: built the plan".into(),
                     usage: None,
+                    role: None,
                 },
             )
             .expect("finished");
@@ -679,6 +686,7 @@ mod tests {
                     run_id: "run-1".into(),
                     outcome: "error(retryable=false): boom".into(),
                     usage: None,
+                    role: None,
                 },
             )
             .expect("finished");

@@ -18,6 +18,7 @@ fn blocked_task(env: &TestEnv) -> Task {
             run_id: ulid::Ulid::new().to_string(),
             outcome: "question: which db?".into(),
             usage: None,
+            role: None,
         }],
     );
     task

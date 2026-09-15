@@ -190,6 +190,17 @@
                 "null"
               ]
             },
+            "role": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunRole"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0014 D1: `None` はワーカー run、`Some(Reviewer)` は Reviewer run（ワーカー run に `Some(Worker)` は書かない）。"
+            },
             "run_id": {
               "type": "string"
             },
@@ -250,6 +261,17 @@
           "properties": {
             "outcome": {
               "type": "string"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunRole"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0014 D1: `WorkerStarted.role` と同じ（`None` はワーカー run）。"
             },
             "run_id": {
               "type": "string"
@@ -409,6 +431,14 @@
         "expires_at"
       ],
       "type": "object"
+    },
+    "RunRole": {
+      "description": "run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。",
+      "enum": [
+        "worker",
+        "reviewer"
+      ],
+      "type": "string"
     },
     "Status": {
       "description": "ADR-0002 D1 の状態集合。終端は `done | failed | cancelled`。",

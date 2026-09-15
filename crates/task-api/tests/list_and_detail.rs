@@ -152,6 +152,7 @@ async fn detail_matches_task_ops_task_detail_byte_for_byte() {
                 adapter: "fake".into(),
                 model: "m".into(),
                 provider: Some("claude-a".into()),
+                role: None,
             },
             Event::WorkerProgress {
                 run_id: run_id.clone(),
@@ -203,6 +204,7 @@ async fn runs_list_fills_files_from_the_run_directory() {
         adapter: "fake".into(),
         model: "m".into(),
         provider: None,
+        role: None,
     };
     env.seed_with(&task, vec![started(&first), started(&second)]);
     let run_dir = env.workspace(&task).join("runs").join(&first);
@@ -236,6 +238,7 @@ async fn inbox_returns_the_task_ops_inbox_as_json() {
             run_id: ulid::Ulid::new().to_string(),
             outcome: "question: which db?".into(),
             usage: None,
+            role: None,
         }],
     );
 

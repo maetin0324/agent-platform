@@ -11,8 +11,8 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::Serialize;
 use task_core::{
-    Check, Event, EventRow, ListFilter, ListOrder, Status, Task, TaskId, TaskKind, TaskStore, Tier, Usage,
-    WorkspaceSpec,
+    Check, Event, EventRow, ListFilter, ListOrder, RunRole, Status, Task, TaskId, TaskKind, TaskStore, Tier,
+    Usage, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -121,6 +121,8 @@ pub struct VerdictView {
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct RunSummary {
     pub run_id: String,
+    /// ワーカー run か Reviewer run か（ADR-0014 D1。イベントに `role` が無ければ `worker`）。
+    pub role: RunRole,
     pub adapter: String,
     pub model: String,
     pub provider: Option<String>,
@@ -328,12 +330,14 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                 adapter,
                 model,
                 provider,
+                role,
             } => {
                 if !by_run.contains_key(run_id) {
                     order.push(run_id.clone());
                 }
                 by_run.entry(run_id.clone()).or_insert_with(|| RunSummary {
                     run_id: run_id.clone(),
+                    role: role.unwrap_or(RunRole::Worker),
                     adapter: adapter.clone(),
                     model: model.clone(),
                     provider: provider.clone(),
@@ -367,7 +371,7 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                     r.verdicts += 1;
                 }
             }
-            Event::WorkerFinished { run_id, outcome, usage } => {
+            Event::WorkerFinished { run_id, outcome, usage, .. } => {
                 if let Some(r) = by_run.get_mut(run_id) {
                     r.finished_at = Some(row.ts.clone());
                     r.usage = *usage;
@@ -695,6 +699,7 @@ mod tests {
             adapter: "claude-code".to_string(),
             model: "claude-sonnet-5".to_string(),
             provider: provider.map(str::to_string),
+            role: None,
         }
     }
 
@@ -703,10 +708,46 @@ mod tests {
             run_id: run_id.to_string(),
             outcome: outcome.to_string(),
             usage: None,
+            role: None,
         }
     }
 
     // ---- runs ----
+
+    /// ADR-0014 D1: Reviewer run も一覧に現れ、`role` で区別される（イベントに `role` が無ければ worker）。
+    #[test]
+    fn runs_include_reviewer_runs_with_role() {
+        let task_id = TaskId::new();
+        let events = vec![
+            started("run-1", Some("acct-a")),
+            finished("run-1", "done: implemented"),
+            Event::WorkerStarted {
+                run_id: "rev-1".into(),
+                adapter: "claude-code".into(),
+                model: "m".into(),
+                provider: Some("acct-b".into()),
+                role: Some(RunRole::Reviewer),
+            },
+            Event::WorkerFinished {
+                run_id: "rev-1".into(),
+                outcome: "done: reviewed".into(),
+                usage: Some(Usage { input_tokens: Some(5), output_tokens: Some(7) }),
+                role: Some(RunRole::Reviewer),
+            },
+        ];
+        let rows: Vec<EventRow> = events
+            .into_iter()
+            .enumerate()
+            .map(|(i, event)| EventRow { id: i as u64 + 1, task_id, seq: i as u64, ts: format!("2026-09-14T00:00:0{i}Z"), event })
+            .collect();
+        let runs = runs(&rows);
+        assert_eq!(runs.len(), 2);
+        assert_eq!((runs[0].run_id.as_str(), runs[0].role), ("run-1", RunRole::Worker));
+        assert_eq!((runs[1].run_id.as_str(), runs[1].role), ("rev-1", RunRole::Reviewer));
+        assert_eq!(runs[1].provider.as_deref(), Some("acct-b"));
+        assert_eq!((runs[1].outcome, runs[1].outcome_text.as_deref()), (Some(RunOutcomeKind::Done), Some("reviewed")));
+        assert_eq!(runs[1].usage.and_then(|u| u.input_tokens), Some(5));
+    }
 
     #[test]
     fn runs_classifies_done_outcome_with_provider_and_outcome_text() {
@@ -1076,6 +1117,7 @@ mod tests {
                     run_id: "r1".into(),
                     outcome: "question: which version?".into(),
                     usage: None,
+                    role: None,
                 },
             )
             .expect("append worker finished");

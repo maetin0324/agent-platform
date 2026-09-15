@@ -7,8 +7,8 @@ pub mod store;
 pub mod transition;
 
 pub use model::{
-    ArtifactRef, Budget, Check, Criterion, Event, Lease, Status, Task, TaskId, TaskKind, Tier,
-    Usage, WorkerHint, WorkspaceSpec,
+    ArtifactRef, Budget, Check, Criterion, Event, Lease, RunRole, Status, Task, TaskId, TaskKind,
+    Tier, Usage, WorkerHint, WorkspaceSpec,
 };
 pub use plan::{MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput};
 pub use store::{

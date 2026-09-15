@@ -243,7 +243,7 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
             return Err(ApiProblem::bad_request("query parameter `q` must be at most 200 characters"));
         }
         if !text.is_empty() {
-            filter.title_contains = Some(text.to_string());
+            filter.text_contains = Some(text.to_string());
         }
     }
     let order = match query.single("order")? {

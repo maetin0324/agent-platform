@@ -1030,6 +1030,17 @@
                 "null"
               ]
             },
+            "role": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunRole"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0014 D1: `None` はワーカー run、`Some(Reviewer)` は Reviewer run（ワーカー run に `Some(Worker)` は書かない）。"
+            },
             "run_id": {
               "type": "string"
             },
@@ -1090,6 +1101,17 @@
           "properties": {
             "outcome": {
               "type": "string"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunRole"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0014 D1: `WorkerStarted.role` と同じ（`None` はワーカー run）。"
             },
             "run_id": {
               "type": "string"
@@ -2136,6 +2158,14 @@
       ],
       "type": "string"
     },
+    "RunRole": {
+      "description": "run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。",
+      "enum": [
+        "worker",
+        "reviewer"
+      ],
+      "type": "string"
+    },
     "RunSummary": {
       "properties": {
         "adapter": {
@@ -2198,6 +2228,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "role": {
+          "$ref": "#/$defs/RunRole",
+          "description": "ワーカー run か Reviewer run か（ADR-0014 D1。イベントに `role` が無ければ `worker`）。"
+        },
         "run_id": {
           "type": "string"
         },
@@ -2222,6 +2256,7 @@
       },
       "required": [
         "run_id",
+        "role",
         "adapter",
         "model",
         "started_at",
