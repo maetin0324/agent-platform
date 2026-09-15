@@ -472,25 +472,43 @@ LLM を使う実機確認は、認証が使える環境ならエージェント�
   8. loopback 以外で `token_file` 無しは設定エラー、許可されない `Host` は 400、作業ディレクトリ外を指す成果物は 403、`env` の値は応答に含まれない
   9. `docs/api/v1/*.schema.json` が生成結果と一致する
 
-### Phase 10 — 役割と委譲（組織的な木構造。ADR-0016。設計のみ、未着手）
+### Phase 10 — 役割と委譲（組織的な木構造。ADR-0016）
 
-- `Task.role` と `[[roles]]` の既定、ワーカープロトコルの `delegate`（実行中の子タスクの提案）、集約 run、木全体の予算
+設計は ADR-0016。**状態機械と `TaskKind` は変えない**（役割は属性、委譲は子タスクの挿入で表す）。
+
+- `Task.role: Option<String>` と設定 `[[roles]]`（id / tier / adapter / max_turns / max_wall_secs / 指示文）。
+  タスクの値 > 役割の既定 > 全体の既定の順に効く。`RunRequest.task` に役割と指示文を載せる
+- ワーカープロトコルに `{"type":"delegate","tasks":[…]}`（実行中の子タスクの提案）。上限は設定
+  `max_delegate_per_run`（既定 8）/ `max_tree_depth`（既定 5）/ `max_tree_runs`（既定 100）
+- `Event::Delegated{run_id, task_ids}`。親は子が全て終端になるまで `reviewing` のまま（`pending_children > 0` の一般規則）
+- `Task.aggregate: bool`。true の親は子が全て終端になった後に 1 回だけ run し、`artifacts/summary.md` を作る
 - 受け入れ:
-  1. `[[roles]]` に定義した役割の既定（tier / adapter / 指示文）が run に反映され、`WorkerStarted` から役割が追える
-  2. fake ワーカーが `delegate` で子 2 件を提案すると、検証を通ったものだけが子として挿入され、`Event::Delegated` が残る。上限（深さ・件数・木の run 数）を超える提案は拒否され理由が `WorkerProgress` に残る
-  3. 子が全て終端になるまで親は `reviewing` のまま。`aggregate = true` の親は最後に 1 回だけ run し、`artifacts/summary.md` が受け入れ条件で判定される
-  4. 木全体の予算を超えたら新しい `delegate` を拒否し、実行中の子は完走する
-  5. `taskctl replay` の差分ゼロ（`Delegated` は状態を変えない）
+  1. `[[roles]]` の既定が run に反映され、`WorkerStarted` から役割が追える（`taskctl add --role lead` と API の `role`）
+  2. fake ワーカーが `delegate` で子 2 件を提案すると、`task-ops` の検証を通ったものだけが子として挿入され、`Event::Delegated` が残る。
+     上限（1 run の件数・木の深さ・木の run 数）を超える提案は拒否され、理由が `WorkerProgress` に残る（タスクは失敗しない）
+  3. 子が全て終端になるまで親は `reviewing` のまま。`aggregate = true` の親は最後に 1 回だけ run し、`artifacts/summary.md` が
+     受け入れ条件で判定される。`aggregate = false` の親は従来どおり
+  4. 循環・自己参照の提案（自分自身や祖先を `depends_on` にする）は拒否される
+  5. `taskctl show --json` と `GET /api/v1/tasks/{id}` に `role` と `delegated`（この run が作った子）が出る
+  6. `taskctl replay` の差分ゼロ（`Delegated` は状態を変えない）、`cargo test --workspace` と clippy が通る
 
-### Phase 11 — GUI からのアカウント管理（ADR-0017。設計のみ、未着手）
+### Phase 11 — アカウント管理の API（ADR-0017）
 
-- `providers.d/*.toml` と `[providers] include`、管理系 API（追加・変更・削除・再読込・疎通確認）、GUI の画面
+設計は ADR-0017。**GUI 側の画面は別フェーズ（G フェーズ）**。ここでは taskd の API と設定の仕組みだけを作る。
+
+- `[providers] include = "providers.d/*.toml"` と `providers.d/<id>.toml`（1 アカウント 1 ファイル）
+- 管理系 API（**loopback でもトークン必須**）: `POST /api/v1/providers`、`PATCH /api/v1/providers/{id}`、
+  `DELETE /api/v1/providers/{id}`、`POST /api/v1/reload`、`POST /api/v1/providers/{id}/check`
+- `check` は、そのアカウントの env で短い run（30 秒 / 1 ターン）を 1 回だけ行い、`ok` / `auth_failed` / `throttled` /
+  `spawn_failed` を返す。タスクにもイベントにも残さない（観測値）
 - 受け入れ:
-  1. `POST /api/v1/providers` が `providers.d/<id>.toml` を作り、`POST /api/v1/reload` の後の tick から新しいアカウントが使われる。実行中の run は影響を受けない
-  2. 管理系はトークン必須（loopback でも）。`env` の値・`token_file` の中身は応答にもログにも出ない
-  3. `POST /api/v1/providers/{id}/check` が `ok` / `auth_failed` / `throttled` / `spawn_failed` を 30 秒以内に返す（fake アダプタで検証）
-  4. 再読込で cooldown が消えること、`[[providers]]` の重複 id を拒否することのテスト
-  5. GUI からアカウントを追加すると、ログイン手順（コピーできるコマンド）が表示される
+  1. `POST /api/v1/providers` が `providers.d/<id>.toml` を作り、`POST /api/v1/reload` の後の tick から新しいアカウントが使われる。
+     実行中の run は影響を受けない（テストは fake アダプタで行う）
+  2. 管理系はトークン無しで 401（loopback でも）。読み取り系は従来どおり
+  3. `env` の値・`token_file` の中身は、応答にもログにも出ない（`grep` で確認する）
+  4. `POST /api/v1/providers/{id}/check` が 4 種類の結果を返す（fake アダプタで `ok` と `auth_failed` を再現）
+  5. 重複 id の追加は 409、存在しない id の変更・削除は 404、`reload` で cooldown が消えることのテスト
+  6. `cargo test --workspace` と clippy が通り、`docs/api/v1/api-v1.schema.json` が再生成されている
 
 ### Phase 12 — クラスタでのコマンド実行（ssh + ControlMaster。ADR-0018）
 
@@ -510,6 +528,18 @@ taskd は `ControlMaster` の多重接続を借りるだけ（対話的な認証
   6. ssh 自身の失敗（終了コード 255）は供給側失敗、リモートコマンドの非ゼロ終了は判定の失敗として区別される
   7. `taskctl replay` の差分ゼロ
 - 運用の道具: `config/ssh-config.example`、`scripts/cluster-login.sh`（人が 2 要素認証を通して接続を張る）、`scripts/cluster-check.sh`（前提と共有 FS の判定）
+
+**第 1 段階（2026-09-15 実装済み）**: 上の 1〜7 と、`[[clusters]]`、`SshWorkspace`、`taskctl add --cluster`、`Event::ClusterUnavailable`。
+
+**第 2 段階（残り。ここが Phase 12 の完了条件）**:
+  8. `GET /api/v1/clusters` が、設定の一覧（id / host / concurrency / sync / delete_on_push / setup の有無）に、
+     いま多重接続があるか（`connected`）と cooldown の残りを付けて返す。`env` の値は返さない
+  9. 受信箱の `attention` に、`ClusterUnavailable` が直近 24 時間にあるクラスタを 1 件ずつ出す
+     （`type: "cluster_unavailable"`、`cluster` / `host` / `at` / 対象タスク数。GUI が「ログインし直してください」と出せる形）
+  10. `taskctl worker run --cluster <id>` が、クラスタ側の作業ディレクトリに対して 1 回の run を実行する
+      （デーモン無しの動作確認。DB は変更しない。多重接続が無ければ exit 4 と理由）
+  11. `taskctl show --json` と `GET /api/v1/tasks/{id}` に、そのタスクのクラスタ（`workspace_dir` と並ぶ `cluster`）が出る
+  12. 上を含めて `cargo test --workspace` と clippy が通り、`docs/api/v1/api-v1.schema.json` が再生成されている
 
 ### 非目標（本プロジェクトではやらない）
 

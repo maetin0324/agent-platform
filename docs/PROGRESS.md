@@ -1792,3 +1792,20 @@ auditor サブエージェントを 1 回起動した（読み取り専用。Pha
 
 残り（第 2 段階）: GUI への反映（`ClusterUnavailable` を受信箱の「注意」に出す、クラスタ画面）、API の `/clusters`、
 `taskctl worker run` のクラスタ対応、実クラスタでの本番タスク。
+
+### 次に走らせるフェーズ（2026-09-15）
+
+人間の指示: **Phase 12 の残り → Phase 10 → Phase 11 の順で、`run-phases.sh` に自動で進めさせる**。
+
+```
+cd ~/workspace/agent-platform
+env PHASES="12 10 11" STRONG_MODEL=fable ./run-phases.sh    # tmux の中で
+```
+
+- 受け入れ条件は DESIGN §6 の各 Phase に書いた（Phase 12 は「第 2 段階」が残り）。
+- Phase 12 の e2e（`cluster_scenarios`）は `taskd-localhost` への ssh 多重接続が要る。無ければ skip される（失敗はしない）。
+  張り直しは `./scripts/cluster-login.sh taskd-localhost`。実クラスタ（pegasus / sirius）の確認は人の操作を伴うので、
+  `ssh_cluster_manual` は `#[ignore]` のまま。
+- 実運用で動かしていた taskd（`/local/rmaeda/taskd`、ポート 7710）と GUI（7700）は、フェーズ実行とポートが衝突しないよう停止した。
+  再開は `/local/rmaeda/taskd/taskd.toml` で taskd を起動し、`taskd-gui` で `node server.js`。
+- GUI 側（`ClusterUnavailable` の表示、クラスタ画面、使い方ページ G6）は `taskd-gui` の G フェーズで行う（`run-gphases.sh`）。
