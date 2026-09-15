@@ -7,7 +7,11 @@ export default [
   route("tasks", "routes/tasks.tsx"),
   route("tasks/new", "routes/tasks.new.tsx"),
   route("tasks/:id", "routes/tasks.$id.tsx"),
+  route("tasks/:id/runs/:runId", "routes/tasks.$id.runs.$runId.tsx"),
   route("plans/new", "routes/plans.new.tsx"),
   route("daemon", "routes/daemon.tsx"),
+  route("graph", "routes/graph.tsx"),
   route("events", "routes/events.ts"),
+  route("files/tasks/:id/runs/:runId/:name", "routes/files.runs.ts"),
+  route("files/tasks/:id/artifacts/:idx", "routes/files.artifacts.ts"),
 ] satisfies RouteConfig;

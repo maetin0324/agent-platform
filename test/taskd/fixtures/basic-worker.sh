@@ -24,6 +24,30 @@ case "$KIND" in
       Failed-E)
         echo '{"type":"error","message":"deliberate non-retryable failure","retryable":false}'
         ;;
+      Slow-F)
+        # G3 受け入れ条件 7（追尾）: 2 秒おきに progress を 5 回出す（合計 10 秒）。taskd 独自プロトコルの行
+        # なので stdout.jsonl 上は claude-code/codex のどちらでもなく raw 表示になる。
+        i=1
+        while [ "$i" -le 5 ]; do
+          echo "{\"type\":\"progress\",\"msg\":\"tick $i\"}"
+          sleep 2
+          i=$((i + 1))
+        done
+        touch artifacts/out.txt
+        echo '{"type":"done","summary":"slow done","evidence":[]}'
+        ;;
+      Artifacts-G)
+        # G3 受け入れ条件 3/4/5（成果物ビューア）: Markdown（信用できないスクリプトを含む）・JSON・PNG。
+        # `ArtifactProduced` は taskd が自動検出せず、ワーカーが `{"type":"artifact",...}` を明示的に送る必要がある
+        # （docs/taskd-api-v1.md、crates/task-worker/src/protocol.rs の `WorkerMessage::Artifact`）。
+        printf '# note\n\nsome text.\n\n<script>alert(1)</script>\n' > artifacts/note.md
+        printf '{"hello":"world"}' > artifacts/data.json
+        printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' | base64 -d > artifacts/image.png
+        echo '{"type":"artifact","name":"note.md","path":"artifacts/note.md","kind":"markdown"}'
+        echo '{"type":"artifact","name":"data.json","path":"artifacts/data.json","kind":"json"}'
+        echo '{"type":"artifact","name":"image.png","path":"artifacts/image.png","kind":"image"}'
+        echo '{"type":"done","summary":"artifacts done","evidence":[]}'
+        ;;
       *)
         touch artifacts/out.txt
         echo '{"type":"done","summary":"fixture done","evidence":[]}'

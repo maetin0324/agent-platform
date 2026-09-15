@@ -138,6 +138,11 @@ fixture_basic() {
   te=$(tc add --title "Failed-E" --objective "always fails" --check-cmd "true" --workspace ws-e)
   tc approve "$te" >/dev/null
 
+  # G3（成果物ビューア）: Markdown・JSON・PNG を出す done タスク（docs/adr/0006-g3-decisions.md D6）。
+  local tg
+  tg=$(tc add --title "Artifacts-G" --objective "produce a markdown, json and png artifact" --check-cmd "test -f artifacts/data.json" --workspace ws-g)
+  tc approve "$tg" >/dev/null
+
   "$TASKD_BIN" --config "$dir/taskd.toml" --until-idle --log-format text >> "$dir/taskd.log" 2>&1
 
   echo "fixture 'basic' built at $dir"
@@ -146,6 +151,7 @@ fixture_basic() {
   echo "  blocked: $tq"
   echo "  plan: $tp (done; 2 draft children)"
   echo "  failed: $te"
+  echo "  artifacts: $tg (done; note.md/data.json/image.png)"
 }
 
 [ $# -ge 1 ] || usage

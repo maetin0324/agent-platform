@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadTaskDetail } from "~/routes/tasks.$id";
 import { TaskdClient } from "~/taskd/client.server";
 import { TaskdError } from "~/taskd/errors";
-import type { EventsPage, TaskDetail } from "~/taskd/types";
+import type { ArtifactList, EventsPage, TaskDetail } from "~/taskd/types";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
@@ -68,20 +68,26 @@ const eventsPage: EventsPage = {
   ],
 };
 
+const artifactList: ArtifactList = { items: [] };
+
 describe("loadTaskDetail", () => {
-  it("calls GET /tasks/{id} and GET /tasks/{id}/events and returns {detail, events} as-is", async () => {
+  it("calls GET /tasks/{id} and GET /tasks/{id}/events and GET /tasks/{id}/artifacts, returns them as-is", async () => {
     mock.on("GET", "/api/v1/tasks/T1", (_req, res) => {
       sendJson(res, 200, taskDetail);
     });
     mock.on("GET", "/api/v1/tasks/T1/events", (_req, res) => {
       sendJson(res, 200, eventsPage);
     });
+    mock.on("GET", "/api/v1/tasks/T1/artifacts", (_req, res) => {
+      sendJson(res, 200, artifactList);
+    });
 
     const result = await loadTaskDetail(client, "T1", new Request("http://gui.invalid/tasks/T1"));
 
-    expect(result).toEqual({ detail: taskDetail, events: eventsPage });
+    expect(result).toEqual({ detail: taskDetail, events: eventsPage, artifacts: artifactList });
     expect(mock.requests.some((r) => r.method === "GET" && r.url === "/api/v1/tasks/T1")).toBe(true);
     expect(mock.requests.some((r) => r.method === "GET" && r.url.startsWith("/api/v1/tasks/T1/events"))).toBe(true);
+    expect(mock.requests.some((r) => r.method === "GET" && r.url === "/api/v1/tasks/T1/artifacts")).toBe(true);
   });
 
   it("forwards the `types` search param to GET /tasks/{id}/events", async () => {
@@ -90,6 +96,9 @@ describe("loadTaskDetail", () => {
     });
     mock.on("GET", "/api/v1/tasks/T1/events", (_req, res) => {
       sendJson(res, 200, eventsPage);
+    });
+    mock.on("GET", "/api/v1/tasks/T1/artifacts", (_req, res) => {
+      sendJson(res, 200, artifactList);
     });
 
     await loadTaskDetail(client, "T1", new Request("http://gui.invalid/tasks/T1?types=transitioned"));
@@ -103,6 +112,9 @@ describe("loadTaskDetail", () => {
       sendProblem(res, { status: 404, code: "task_not_found", detail: "task MISSING not found" });
     });
     mock.on("GET", "/api/v1/tasks/MISSING/events", (_req, res) => {
+      sendProblem(res, { status: 404, code: "task_not_found", detail: "task MISSING not found" });
+    });
+    mock.on("GET", "/api/v1/tasks/MISSING/artifacts", (_req, res) => {
       sendProblem(res, { status: 404, code: "task_not_found", detail: "task MISSING not found" });
     });
 

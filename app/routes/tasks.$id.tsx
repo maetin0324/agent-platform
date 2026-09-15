@@ -1,5 +1,11 @@
+import { useEffect, useState } from "react";
 import { Form, isRouteErrorResponse, Link, useNavigation, useSearchParams } from "react-router";
+import { CodeViewer } from "~/components/CodeViewer";
 import { TransitionFlash } from "~/components/Flash";
+import { ImageViewer } from "~/components/ImageViewer";
+import { MarkdownViewer } from "~/components/MarkdownViewer";
+import { Sha256Badge } from "~/components/Sha256Badge";
+import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
 import { transitionData } from "~/taskd/actions.server";
@@ -7,7 +13,7 @@ import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { runTaskAction } from "~/taskd/route-actions.server";
-import type { Action, Event, EventsPage, TaskDetail, TaskRef } from "~/taskd/types";
+import type { Action, ArtifactList, ArtifactView, Event, EventsPage, TaskDetail, TaskRef } from "~/taskd/types";
 import type { Route } from "./+types/tasks.$id";
 
 /**
@@ -37,29 +43,31 @@ const ACTION_LABELS: Record<Action, string> = {
 export interface TaskDetailData {
   detail: TaskDetail;
   events: EventsPage;
+  artifacts: ArtifactList;
 }
 
 /**
- * `/tasks/:id`（タスク詳細、docs/DESIGN.md §4.3）の loader 本体。`GET /tasks/{id}` と
- * `GET /tasks/{id}/events` を並列に呼び、応答をそのまま返す（派生値は taskd 側で計算済み。GUI は再計算しない）。
+ * `/tasks/:id`（タスク詳細、docs/DESIGN.md §4.3）の loader 本体。`GET /tasks/{id}`・`GET /tasks/{id}/events`・
+ * `GET /tasks/{id}/artifacts` を並列に呼び、応答をそのまま返す（派生値は taskd 側で計算済み。GUI は再計算しない）。
  * taskd 停止中・タスクが無い（404 `task_not_found`）等は呼び出し側（`loader`）が `Response` に変換して投げる
  * （docs/adr/0004-g1-decisions.md D6。本番ビルドは素の Error を ErrorBoundary に渡す前に汎用 500 へ
  * サニタイズするため、`Response` として投げないと taskd 停止中でもバナーではなく 500 になってしまう）。
- * G1 の範囲: 生ログ・成果物本体・DAG は出さない（`docs/adr/0004-g1-decisions.md` D4）。`GET /tasks/{id}/artifacts` は呼ばない。
+ * 生ログ本体は `/tasks/:id/runs/:runId`（別ルート）、DAG は `/graph`（docs/adr/0006-g3-decisions.md D4）。
  */
 export async function loadTaskDetail(client: TaskdClient, taskId: string, request: Request): Promise<TaskDetailData> {
   const url = new URL(request.url);
   // フォームは `types` チェックボックスごとに 1 つずつ付ける（`?types=a&types=b`）。
   // taskd 側はカンマ区切りの単一パラメータを期待する（docs/taskd-api-v1.md §3.6）ので、ここで結合する。
   const types = url.searchParams.getAll("types");
-  const [detail, events] = await Promise.all([
+  const [detail, events, artifacts] = await Promise.all([
     client.get<TaskDetail>(`/tasks/${taskId}`, { signal: request.signal }),
     client.get<EventsPage>(`/tasks/${taskId}/events`, {
       query: { types: types.length > 0 ? types.join(",") : undefined },
       signal: request.signal,
     }),
+    client.get<ArtifactList>(`/tasks/${taskId}/artifacts`, { signal: request.signal }),
   ]);
-  return { detail, events };
+  return { detail, events, artifacts };
 }
 
 export function meta(_: Route.MetaArgs) {
@@ -84,7 +92,7 @@ export async function action({ request, params }: Route.ActionArgs) {
 }
 
 export default function TaskDetailPage({ loaderData, actionData }: Route.ComponentProps) {
-  const { detail, events } = loaderData;
+  const { detail, events, artifacts } = loaderData;
   const { task } = detail;
   const [searchParams] = useSearchParams();
   const selectedTypes = new Set(searchParams.getAll("types"));
@@ -118,6 +126,11 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
             親: <Link to={`/tasks/${task.parent_id}`}>{task.parent_id}</Link>
           </p>
         )}
+        <p className="mt-2 text-sm">
+          <Link to={`/graph?root=${task.id}`} data-testid="task-graph-link">
+            DAG で見る
+          </Link>
+        </p>
         <TaskRefList label="dependencies" testId="dependencies" refs={detail.dependencies} />
         <TaskRefList label="dependents" testId="dependents" refs={detail.dependents} />
         <TaskRefList label="children" testId="children" refs={detail.children} />
@@ -194,6 +207,7 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
                   <th className="p-1">artifacts</th>
                   <th className="p-1">verdicts</th>
                   <th className="p-1">files</th>
+                  <th className="p-1">ログ</th>
                 </tr>
               </thead>
               <tbody>
@@ -222,6 +236,11 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
                             .filter((k) => run.files?.[k as keyof typeof run.files])
                             .join(", ") || "-"
                         : "-"}
+                    </td>
+                    <td className="p-1">
+                      <Link to={`/tasks/${task.id}/runs/${run.run_id}`} data-testid="run-log-link">
+                        ログ
+                      </Link>
                     </td>
                   </tr>
                 ))}
@@ -402,6 +421,21 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
         )}
       </section>
 
+      <section aria-labelledby="artifacts-heading" data-testid="artifacts-section">
+        <h2 id="artifacts-heading" className="text-lg font-semibold">
+          成果物
+        </h2>
+        {artifacts.items.length === 0 ? (
+          <p className="mt-2 text-sm text-gray-500">ありません。</p>
+        ) : (
+          <ul className="mt-2 space-y-2">
+            {artifacts.items.map((artifact) => (
+              <ArtifactRow key={artifact.idx} taskId={task.id} artifact={artifact} />
+            ))}
+          </ul>
+        )}
+      </section>
+
       {detail.worker_run_hint && (
         <section aria-labelledby="worker-run-hint-heading" data-testid="worker-run-hint-section">
           <h2 id="worker-run-hint-heading" className="text-lg font-semibold">
@@ -441,6 +475,92 @@ function TaskRefList({ label, testId, refs }: { label: string; testId: string; r
         </ul>
       )}
     </div>
+  );
+}
+
+/**
+ * 成果物 1 件の行（docs/adr/0006-g3-decisions.md D3/D4）。本体は「開く」を押したときだけ
+ * `/files/tasks/:id/artifacts/:idx` を fetch し、taskd が返した実際の `Content-Type` でビューアを選ぶ
+ * （拡張子からの推測はしない。taskd の値をそのまま使う）。403（`forbidden`）は一覧の `ArtifactView.forbidden`
+ * だけで判定し、本体を取りに行かない。
+ */
+function ArtifactRow({ taskId, artifact }: { taskId: string; artifact: ArtifactView }) {
+  const [open, setOpen] = useState(false);
+  const [body, setBody] = useState<{ contentType: string; content?: string } | null>(null);
+  const href = `/files/tasks/${taskId}/artifacts/${artifact.idx}`;
+  const canOpen = artifact.exists && !artifact.forbidden;
+  const statusMessage = artifactStatusMessage(artifact);
+
+  useEffect(() => {
+    if (!open || body || !canOpen) return;
+    let cancelled = false;
+    (async () => {
+      const res = await fetch(href);
+      const contentType = res.headers.get("content-type") ?? "application/octet-stream";
+      if (pickViewer(contentType, artifact.artifact.name) === "image") {
+        if (!cancelled) setBody({ contentType });
+        return;
+      }
+      const content = await res.text();
+      if (!cancelled) setBody({ contentType, content });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, body, canOpen, href, artifact.artifact.name]);
+
+  return (
+    <li data-testid="artifact-item" className="rounded border p-2 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="font-mono" data-testid="artifact-name">
+            {artifact.artifact.name}
+          </p>
+          <p className="text-xs text-gray-500">
+            {artifact.artifact.kind} · run {artifact.run_id}
+          </p>
+        </div>
+        {canOpen && (
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setOpen((v) => !v)}
+              data-testid="artifact-toggle"
+              className="rounded border px-2 py-0.5"
+            >
+              {open ? "閉じる" : "開く"}
+            </button>
+            <a
+              href={`${href}?download=1`}
+              download
+              data-testid="artifact-download"
+              className="rounded border px-2 py-0.5"
+            >
+              保存
+            </a>
+          </div>
+        )}
+      </div>
+      {statusMessage && (
+        <p data-testid={artifact.forbidden ? "artifact-forbidden" : "artifact-missing"} className="mt-1 text-red-700">
+          {statusMessage}
+        </p>
+      )}
+      <Sha256Badge
+        recorded={artifact.artifact.sha256}
+        current={artifact.sha256_current}
+        matches={artifact.sha256_matches}
+      />
+      {open &&
+        body &&
+        (pickViewer(body.contentType, artifact.artifact.name) === "image" ? (
+          <ImageViewer src={href} alt={artifact.artifact.name} />
+        ) : pickViewer(body.contentType, artifact.artifact.name) === "markdown" ? (
+          <MarkdownViewer content={body.content ?? ""} />
+        ) : (
+          <CodeViewer content={body.content ?? ""} json={isJson(body.contentType)} />
+        ))}
+    </li>
   );
 }
 

@@ -10,7 +10,7 @@
 | G0 | 骨組みと前提の確定 | **DONE** | 2026-09-15 |
 | G1 | 読み取りとストリーム | **DONE** | 2026-09-15 |
 | G2 | 操作 | **DONE** | 2026-09-15 |
-| G3 | ログ・成果物・DAG | 未着手 | — |
+| G3 | ログ・成果物・DAG | **DONE** | 2026-09-15 |
 | G4 | プロバイダとデーモン | 未着手 | — |
 | G5 | 認証・配布・仕上げ | 未着手 | — |
 
@@ -310,3 +310,114 @@ G1 の未解決事項（下記）のうち、G2 着手前に効いてくるも�
 
 ### taskd への依頼
 - R1（調査依頼）: 上記 G2-U1。`docs/taskd-requests.md` R1 に現象・証拠・再現しない条件・依頼内容を記載。要求ごとのログ（`X-Request-Id`・所要時間）が taskd 側にあると切り分けやすい。
+
+## Phase G3 — DONE（2026-09-15）
+
+### 成果物
+- ログビューア: `app/lib/stream-json.ts`（`classifyStreamJsonLine`。claude-code の `assistant`/`result`、codex の `item.*`/`turn.*`/`error`/`thread.started` を
+  `utterance`/`tool`/`result`/`raw` の 4 種に正規化。taskd 独自ワーカープロトコルや不正 JSON は全て `raw`）、`test/fixtures/stream-json/{claude-code,codex,fake}.jsonl`
+  （`crates/task-worker/src/{claude_code,codex}.rs` のテストの行を転記）、`test/unit/stream-json.test.ts`（10 件）。
+  `app/routes/tasks.$id.runs.$runId.tsx`（`/tasks/:id/runs/:runId`。`GET /tasks/{id}/runs` から対象 run を探し、`stdout.jsonl`/`stderr.log`/`result.json` を
+  loader が taskd から取得して SSR、実行中の run は `?offset=` を 1 秒ごとに叩いて追尾。stdout は構造化/生テキストの切替可）。
+- ファイル中継: `app/routes/files.runs.ts`（`/files/tasks/:id/runs/:runId/:name`）、`app/routes/files.artifacts.ts`（`/files/tasks/:id/artifacts/:idx`）。
+  どちらも `TaskdClient.file()` の応答を許可リストのヘッダ（`content-type`/`content-disposition`/`content-length`/`content-range`/`accept-ranges`/`x-taskd-sha256`/
+  `x-taskd-sha256-current`/`x-taskd-size`）だけ中継し `x-content-type-options: nosniff` を付与、taskd の非 2xx は `taskdErrorResponse` でそのまま返す。
+  `test/unit/files.route.test.ts`（8 件。403 `path_forbidden` の非スロー中継、503 unreachable、Range/offset/download クエリの転送、`X-Taskd-Sha256` 系ヘッダの中継を含む）。
+- 成果物ビューア: `app/components/{CodeViewer,MarkdownViewer,ImageViewer,Sha256Badge}.tsx`（CodeMirror 6 読み取り専用 / `react-markdown`+`remark-gfm` / `<img>` /
+  sha256 不一致バッジ）、`app/lib/artifact-view.ts`（`pickViewer`/`isJson`/`artifactStatusMessage` の純粋関数）、`test/unit/artifact-view.test.ts`（9 件）。
+  `app/routes/tasks.$id.tsx` に成果物一覧セクションと `ArtifactRow`（開く/保存、`ArtifactList` の `forbidden`/`sha256_matches` をそのまま表示）を追加、
+  loader が `GET /tasks/{id}/artifacts` も並列取得。
+- DAG: `app/routes/graph.tsx`（`/graph`。`GET /graph` をそのまま取得、`@xyflow/react` + `@dagrejs/dagre` はクライアント専用でマウント後に描画、SSR はプレースホルダ）、
+  `app/lib/graph-layout.ts`（`layoutGraph`: dagre で層状配置し、`parent_id` の子は配置後のバウンディングボックスから group ノードを合成。色 = `Status`、太枠 = `kind=plan`）。
+- fixture: `test/taskd/fixtures/basic-worker.sh` に `Slow-F`（2 秒おきに progress を 5 回、追尾用）、`Artifacts-G`（`note.md`（`<script>alert(1)</script>` 込み）/
+  `data.json`/`image.png` を明示的な `{"type":"artifact",...}` メッセージで登録）を追加、`scripts/taskd.sh` の `fixture_basic` に `Artifacts-G` を追加（`Slow-F` は
+  `--until-idle` の対象にすると追尾の検証ができなくなるため e2e 側で都度作成）。
+- e2e: `e2e/g3.spec.ts`（受け入れ条件 1・3・4・6・7 の 5 シナリオ）、`e2e/g3.spec.ts-snapshots/graph-basic-chromium-linux.png`（スクリーンショットのベースライン、
+  今回のランで新規作成）。
+- 文書: `docs/adr/0006-g3-decisions.md`（D1〜D7: `/files/...` の 2 ルート、stream-json 分類の設計、ビューアの構成、成果物セクションの実装、DAG のレイアウト、
+  fixture の追加、保存はネイティブ `<a download>`）。
+- 新規依存: `@xyflow/react` 12.11.6、`@dagrejs/dagre` 3.1.1、`@codemirror/view` 6.43.11、`@codemirror/state` 6.7.4、`@codemirror/lang-json` 6.0.2、
+  `react-markdown` 10.1.0、`remark-gfm` 4.0.1（全て ADR-0002 D7 で選定済みの版、`pnpm install` で 7 日 cooldown を通過）。
+
+### 受け入れ条件と証拠（docs/DESIGN.md §10 Phase G3）
+1. **(a) の run を開くと stdout.jsonl の行数が実ファイルの `wc -l` と一致し、result.json が整形表示される** — `e2e/g3.spec.ts:81` pass（1.2s）。
+   `(a) = Chain-A2`（`depends_on` 1 本、run 1 件）。`.run/basic/workspaces/ws-a2/runs/<run_id>/stdout.jsonl` を Node で読んで求めた行数（1 行）と
+   `[data-testid=stdout-line]` の件数が一致。`result-section` に `fixture done` を含む整形表示。
+2. **`pnpm test`: stream-json の整形が claude-code の例で「発話/ツール呼び出し/結果」の3種、fake の JSON Lines は生表示** — `test/unit/stream-json.test.ts` 10 件 pass。
+   `claude-code.jsonl` の3行がそれぞれ `utterance`（text="working on it"）/`tool`（label="Bash"）/`result`（isError=false）、`fake.jsonl` の全行が `raw`（生表示）。
+   `codex.jsonl` も 4 行とも対応する種別（`thread.started`→raw、`item.started`→tool、`turn.completed`→result、`turn.failed`→result isError=true）。
+3. **Markdown はテキスト表示（script 未実行）、JSON は CodeMirror、PNG は `<img>`、保存ファイルの sha256 が `X-Taskd-Sha256` と一致** — `e2e/g3.spec.ts:95` pass（1.6s）。
+   `page.on("dialog")` は 1 度も呼ばれず（`<script>alert(1)</script>` はテキストとして描画、`markdown-viewer` 内に `<script>` 要素 0 件）、`data.json` は `code-viewer`、
+   `image.png` は `image-viewer`（`<img src="/files/.../artifacts/2">`）。`artifact-download` をクリックしてダウンロードしたファイルの sha256 が、同じ URL への
+   `page.request.get` で得た `X-Taskd-Sha256` ヘッダと一致。
+4. **成果物ファイルを fixture 後に書き換える → sha256 不一致の警告** — `e2e/g3.spec.ts:149` pass（0.9s）。`.run/basic/workspaces/ws-g/artifacts/data.json` を
+   Node で直接書き換えてから `/tasks/<id>` を開くと `[data-testid=sha256-mismatch]` が表示（taskd が都度計算し直す `sha256_matches` をそのまま見せているだけ）。
+5. **mock-taskd で 403 `path_forbidden` → 「アクセスできません（path_forbidden）」** — DESIGN 本文が「実 taskd での細工 DB は taskd 側のテストに任せる」と明記しているため
+   Playwright ではなく単体テストで確認: `test/unit/files.route.test.ts`（本体の 403 が資源ルートでそのまま中継されることを mock-taskd で確認）+
+   `test/unit/artifact-view.test.ts`（`artifactStatusMessage({forbidden:true,...})` が文字列「アクセスできません（path_forbidden）」を返すことを確認。
+   この文字列が画面の唯一の出所であり、DOM 描画ライブラリ非導入の制約下でも文言の一致を検証できる）。
+6. **`/graph` で (a) の depends_on の辺が1本、Plan の子2件が group の中、スクリーンショットをベースラインとしてコミット** — `e2e/g3.spec.ts:166` pass（2.0s）。
+   `(a) = Chain-A3`（`root=<id>&depth=1` で辺 1 本）。Plan の子 2 件（`Plan-Child-1/2`）の DOM 上の bounding box が `group-<planId>` の bounding box に収まることを確認。
+   `e2e/g3.spec.ts-snapshots/graph-basic-chromium-linux.png` を今回のランで新規作成しコミット（2 回目のランで差分ゼロを確認）。
+7. **追尾: 10秒かけて progress を5回出す run を開くと、リロード無しで行が増える** — `e2e/g3.spec.ts:208` pass（11.5s）。`Slow-F` を e2e 内で `taskctl add`/`approve` し
+   （fixture 本体には含めない。含めると `--until-idle` で先に終わってしまい追尾を検証できないため）、`WorkerStarted` 直後に run ページを開いて
+   `[data-testid=stdout-line]` の件数が増えることを `expect.poll` で確認。
+
+### 共通条件
+- `pnpm lint` exit 0（`Checked 76 files`）/ `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0 / `pnpm test` **118 passed**（16 ファイル。G2 までの 91 + G3 の 27）/
+  `pnpm build` exit 0 / `pnpm e2e` **26 passed（exit 0、2.1〜2.4分）**（G0 5 + G1 8 + G2 8 + G3 5）。監査時点までに G2-U1（taskd の間欠停止）に当たらないフルランを
+  複数回確認（自分の初回ラン、監査者の再実行とも 26 passed / exit 0）。`e2e/g3.spec.ts` 単体でも 5/5 pass。
+- `pnpm gen:types && git diff --exit-code app/taskd/types.ts` 差分ゼロ（exit 0）
+
+### 監査結果
+- auditor の判定: **条件付き可**（「不可」ゼロ）。受け入れ条件 1〜7 は全て「満たしている」（条件 5 は「部分的に満たしている」との留保付き。下記 G3-U5）。
+  禁止事項（SQLite・crate 依存・仕様外挙動・派生値の GUI 再計算・ブラウザ直接呼び出し・トークン露出・`dangerouslySetInnerHTML`/`eval`/CDN・テストの外部ネットワーク・版固定）は「違反ゼロ」。
+  auditor 自身が `lint`/`typecheck`/`test`（118 passed）/`build`/`gen:types` 差分ゼロ/`pnpm e2e`（26 passed）を再実行し、`/files/...` のヘッダ中継・Range・404/416・
+  `Host` 検査・`/graph` の実データ（12 nodes/3 edges）を curl でも確認済み。
+- 指摘と対応:
+  1. **「共通条件」の `pnpm e2e` の記述が「25 passed/1 failed」のままで DESIGN §10.0 の共通完了条件（exit 0）と矛盾して見える** → **修正済み**（上の「共通条件」を実測の
+     `26 passed / exit 0` に書き換え）。
+  2. **`docs/adr/0006-g3-decisions.md` D5 の本文が「`parent_id` を dagre の `compound` group ノードにする」と書いており、実装（後付けのバウンディングボックス合成、
+     compound は使わない）と正反対** → **修正済み**（D5 を実装に合わせて書き直した。ADR は実装前に書く決まりだが、今回は記述の誤りの訂正として扱う）。
+  3. 受け入れ条件 5 のカバレッジ不足（下記 G3-U5）、DESIGN §6.2/§6.3(4)「ビューアは `/files/...` を fetch」と実装（run 詳細 loader が stdout/stderr/result 本体を
+     直接取得して SSR する。ADR-0006 D4 に理由あり）の差分、G3-U4 の過小申告（stdout も含め 3 本を再検証毎に全文取得）、`Content-Encoding` 未中継、
+     `hideAttribution` のライセンス確認、`files.artifacts.ts` 冒頭コメントの参照節誤り（§3.16→§3.8/§3.9 の意）→ 下の「未解決事項」「提案」に記載。
+- 修正後の自己検証: `pnpm lint` exit 0、`pnpm typecheck` exit 0、`pnpm test` 118 passed、`pnpm build` exit 0、`pnpm gen:types` 差分ゼロ。auditor の再起動は行っていない
+  （指摘は全て文書修正で対応可能で、コードの再検証を要する「不可」相当の項目が無かったため。CLAUDE.md「同じアプローチを3回失敗したら」には該当しない）。
+
+### 未解決事項
+- **G3-U1: `/graph` のスクリーンショット比較は環境依存の可能性** — `toHaveScreenshot` はフォントレンダリング等でマシンが変わると閾値超過になりうる
+  （`maxDiffPixelRatio: 0.02` で緩めてはいる）。CI 環境を用意する際は同じ chromium 版・同じ OS イメージで再生成する。
+- **G3-U2: DAG のレイアウトは compound（親子の入れ子）ではなく後付けの group 矩形** — `app/lib/graph-layout.ts` は dagre に `depends_on` の辺だけを渡してフラット配置し、
+  `parent_id` の子はレイアウト後にバウンディングボックスから group を合成する（docs/adr/0006 D5）。ノード数が増えて子が離れた位置に層状配置されると、group の矩形が
+  無関係なノードと重なる可能性がある（G3 の fixture 規模では発生しない）。G4/G5 でノード数が増える場面があれば dagre の compound 機能への切り替えを検討する。
+- **G3-U3: run のタイムライン（`/tasks/:id` のイベント）と生ログの往来が手動** — 生ログページから元のタスク詳細への「戻る」リンクはあるが、run 一覧の他の run への
+  直接遷移は無い（`/tasks/:id` に戻ってから別の run を選び直す）。G4 以降で使い勝手が問題になれば run セレクタを追加する。
+- **G3-U4: run 詳細（`/tasks/:id/runs/:runId`）の loader は stdout / stderr / result の 3 本すべてを再検証のたびに全文取得する**（監査指摘、当初の記載は stderr のみと
+  過小申告していた）。`?offset=` は追尾専用として使い、末尾表示は `GET .../stderr` の全文を取ってから末尾 200 行を切る（ADR-0006 D4）。SSE 由来の再検証（G1-U1）と重なると
+  実行中の run のページで数百 ms 間隔の全文再取得が発生する（監査時の e2e ログで実測: 約 430ms 間隔）。ログが大きくなる実運用では `?offset=` を使った末尾取得へ切り替えを検討する。
+- **G3-U5: 受け入れ条件 5（403 `path_forbidden` → 画面表示）の通し検証が無い**（監査指摘）— `test/unit/files.route.test.ts`（資源ルートが 403 を素通しする）と
+  `test/unit/artifact-view.test.ts`（`artifactStatusMessage` が文言を返す）に分かれており、「一覧が forbidden:false を返した後に本体だけ 403 になる」ケースを
+  通しでは検証していない。加えて `app/routes/tasks.$id.tsx` の `ArtifactRow` は成果物本体の `fetch` で `res.ok` を見ずに `res.text()` してしまうため、
+  そのケースでは taskd の `{"kind":"taskd_error",...}` の JSON がそのまま本文として表示される（`app/routes/tasks.$id.runs.$runId.tsx` の `readFileText` は例外を
+  `null` に握りつぶすので、run のログ側は逆にセクションごと消える）。DOM テストライブラリ未導入（G1-U4）下の妥協だが、次フェーズで `res.ok` を見て
+  `artifactStatusMessage` 相当の表示に倒す修正を検討する。
+- **G3-U6: `files.artifacts.ts` / `files.runs.ts` は `Content-Length` のみ中継し `Content-Encoding` を中継しない**（監査指摘、軽微）— 現在の taskd は圧縮しないため実害は無いが、
+  将来 `Content-Encoding: gzip` 等を返すようになると Node の `fetch` が展開して長さが食い違う。taskd 側が圧縮を返すようになったら対応する。
+- **G3-U7: `app/routes/graph.tsx` の `proOptions={{ hideAttribution: true }}`**（監査指摘）— React Flow (`@xyflow/react`) の帰属表示を消しており、xyflow の利用規約では
+  非表示は Pro 購読者向けとされている。CLAUDE.md/DESIGN の禁止事項ではないが、ライセンス面は人間の確認を推奨する。
+- **G3-U8: `app/routes/files.artifacts.ts` 冒頭コメントの参照節が誤り**（監査指摘、軽微）— `docs/taskd-api-v1.md §3.16` を挙げているが §3.16 は `GET /graph`。
+  正しくは §3.8/§3.9（`GET /tasks/{id}/artifacts[/{idx}]`）。次に触るときにコメントを直す。
+- G0〜G2 からの引き継ぎ（`/assets` の Host 検査適用範囲、`pnpm dev` の CSP、G2-U1 taskd 間欠停止、G2-U2〜U7）は G3 では対処していない。
+
+### 提案
+- 上の「提案」節の G0-P1/P2、G1-P1/P2、G2-P1〜P4 に加え、G3-P1: `docs/adr/0002` D7 が挙げた `@codemirror/lang-markdown` は導入していない
+  （Markdown は `react-markdown` が描画し、CodeMirror 側で Markdown を表示する用途が無いため）。表として更新するなら D7 から該当行を削るのが実態に合う。
+- G3-P2（監査指摘）: `docs/DESIGN.md` §6.2 のルート表 / §6.3 の 4「ビューアは `/files/...` を `fetch` して表示する」は、run 詳細の生ログ・result.json については
+  loader がサーバ側で `/files/...` 相当（`TaskdClient.file()`）を取得して SSR する実装（ADR-0006 D4。SSR 一貫性と `?offset=` 追尾の都合）と食い違う。
+  「成果物本体（画像等）はブラウザが `/files/...` を直接参照、run のテキストログは loader が取得して SSR する」と書き分けると実態に合う。
+
+### taskd への依頼
+- なし。`GET /tasks/{id}/runs`、ファイル系（`GET /tasks/{id}/runs/{run_id}/{stdout,stderr,result}`、`GET /tasks/{id}/artifacts[/{idx}]`）、`GET /graph` は
+  `docs/taskd-api-v1.md` の記載どおりに動作した。`ArtifactProduced` がワーカーからの明示的な `{"type":"artifact",...}` メッセージでのみ記録される点
+  （taskd がファイルシステムを自動スキャンしない）は §3.9 の記述と整合しており、fixture 側で対応した。
