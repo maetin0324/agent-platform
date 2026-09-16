@@ -152,6 +152,7 @@ async fn detail_matches_task_ops_task_detail_byte_for_byte() {
                 adapter: "fake".into(),
                 model: "m".into(),
                 provider: Some("claude-a".into()),
+                account: None,
                 role: None,
                 task_role: None,
             },
@@ -207,6 +208,7 @@ async fn runs_list_fills_files_from_the_run_directory() {
         adapter: "fake".into(),
         model: "m".into(),
         provider: None,
+        account: None,
         role: None,
         task_role: None,
     };

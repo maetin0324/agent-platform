@@ -800,6 +800,7 @@ mod tests {
             adapter: "claude-code".to_string(),
             model: "claude-sonnet-5".to_string(),
             provider: provider.map(str::to_string),
+            account: None,
             role: None,
             task_role: None,
         }
@@ -828,6 +829,7 @@ mod tests {
                 adapter: "claude-code".into(),
                 model: "m".into(),
                 provider: Some("acct-b".into()),
+                account: None,
                 role: Some(RunRole::Reviewer),
                 task_role: None,
             },

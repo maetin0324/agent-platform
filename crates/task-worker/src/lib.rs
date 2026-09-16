@@ -3,6 +3,7 @@
 
 pub mod adapter;
 pub mod artifact;
+pub mod claude_account;
 pub mod claude_code;
 pub mod codex;
 pub mod delegate_file;
@@ -16,6 +17,9 @@ pub mod ssh;
 pub mod workspace;
 
 pub use adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
+pub use claude_account::{
+    AccountCheck, AccountCheckResult, LoginError, LoginOutcome, LoginResult, LoginSession, check_account, start_login,
+};
 pub use claude_code::{ClaudeCodeAdapter, ClaudeCodeConfig};
 pub use codex::{CodexAdapter, CodexConfig};
 pub use delegate_file::{DELEGATE_FILE, clear_delegate_file, forward_delegate_file};

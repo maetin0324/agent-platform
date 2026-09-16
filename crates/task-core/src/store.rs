@@ -2063,11 +2063,61 @@ mod tests {
         let ev: Event = serde_json::from_str(old).unwrap();
         assert_eq!(
             ev,
-            Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: None, role: None , task_role: None}
+            Event::WorkerStarted {
+                run_id: "r".into(),
+                adapter: "fake".into(),
+                model: "m".into(),
+                provider: None,
+                account: None,
+                role: None,
+                task_role: None,
+            }
         );
-        let new = Event::WorkerStarted { run_id: "r".into(), adapter: "fake".into(), model: "m".into(), provider: Some("acct-a".into()), role: None , task_role: None};
+        let new = Event::WorkerStarted {
+            run_id: "r".into(),
+            adapter: "fake".into(),
+            model: "m".into(),
+            provider: Some("acct-a".into()),
+            account: None,
+            role: None,
+            task_role: None,
+        };
         assert!(serde_json::to_string(&new).unwrap().contains(r#""provider":"acct-a""#));
         assert_eq!(serde_json::to_string(&ev).unwrap(), old);
+    }
+
+    /// ADR-0024 D4: `WorkerStarted.account` は任意。導入前のイベント（account 無し）も読め、
+    /// 新しいイベントは `account` を含めて往復する。
+    #[test]
+    fn worker_started_account_round_trips_and_old_events_still_deserialize() {
+        let old = r#"{"type":"worker_started","run_id":"r","adapter":"claude-code","model":"m","provider":"claude-pool"}"#;
+        let ev: Event = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            ev,
+            Event::WorkerStarted {
+                run_id: "r".into(),
+                adapter: "claude-code".into(),
+                model: "m".into(),
+                provider: Some("claude-pool".into()),
+                account: None,
+                role: None,
+                task_role: None,
+            }
+        );
+        assert_eq!(serde_json::to_string(&ev).unwrap(), old);
+
+        let with_account = Event::WorkerStarted {
+            run_id: "r2".into(),
+            adapter: "claude-code".into(),
+            model: "m".into(),
+            provider: Some("claude-pool".into()),
+            account: Some("acct-a".into()),
+            role: None,
+            task_role: None,
+        };
+        let json = serde_json::to_string(&with_account).unwrap();
+        assert!(json.contains(r#""account":"acct-a""#), "{json}");
+        assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), with_account);
     }
 
     /// ADR-0014 D1: `role` は任意。無ければワーカー run で、既存のイベントの直列化は変わらない。Reviewer run は `"role":"reviewer"`。
@@ -2082,6 +2132,7 @@ mod tests {
             adapter: "fake".into(),
             model: "m".into(),
             provider: Some("acct-a".into()),
+            account: None,
             role: Some(crate::RunRole::Reviewer),
             task_role: None,
         };

@@ -1,6 +1,6 @@
 # PROGRESS — taskd
 
-現在地: **Phase 0〜12 完了**（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
+現在地: **Phase 0〜13 完了**（Phase 13 = Claude アカウントのプールと残量に基づく負荷分散、GUI からの登録・ログイン。ADR-0024）（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
 人間の判断 H1〜H9 を反映済み）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により G フェーズとして進める（前提: Node 24 LTS / pnpm 11）。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
@@ -20,6 +20,7 @@
 | 10 | 役割と委譲（組織的な木構造。ADR-0016） | 完了 | 2026-09-15 |
 | 11 | GUI からのアカウント管理（ADR-0017） | 完了 | 2026-09-15 |
 | 12 | クラスタでのコマンド実行（ssh + ControlMaster。ADR-0018） | 完了 | 2026-09-15 |
+| 13 | Claude アカウントのプール（`CLAUDE_SECURESTORAGE_CONFIG_DIR`）・残量に基づく負荷分散・GUI からのプロバイダ登録とログイン（ADR-0024） | 完了（実アカウントでの `rate_limit_event` 記録は人のログイン待ち） | 2026-09-16 |
 
 ---
 
@@ -2547,3 +2548,63 @@ P-47（`clusters[].connected` を GUI の主表示に）は **G7 で実装済み
 
 - `cargo test --workspace` 40 個の test binary すべて ok、`cargo clippy --workspace --all-targets -- -D warnings` exit 0。
 - GUI: `pnpm typecheck` / `build` exit 0、`pnpm test` **152 passed**、`pnpm e2e` **63 passed**、`pnpm gen:types` 差分ゼロ。
+
+## Phase 13 — Claude アカウントのプールと残量に基づく負荷分散（ADR-0024。2026-09-16）
+
+人間の依頼: GUI からプロバイダを登録できるようにし、`CLAUDE_SECURESTORAGE_CONFIG_DIR` で複数の Claude アカウントを使い分け、
+アカウントの残量からロードバランスする。ADR-0022 D1（管理画面を作らない）、ADR-0017 D2（ログインを肩代わりしない）/ D3（残量に基づく自動切替をしない）を
+人間の指示として上書きした（ADR-0024「以前の決定との関係」）。
+
+### 事実の確認（実装前）
+
+- `claude` 2.1.273 のバイナリに `CLAUDE_SECURESTORAGE_CONFIG_DIR` がある（`grep -a`）。
+- `claude -p … --output-format stream-json --verbose`（haiku、1 ターン）の出力に `{"type":"rate_limit_event","rate_limit_info":{…,"unifiedWindows":{"five_hour":{"utilization":0.14,…},"seven_day":{"utilization":0.24,…}}}}` が 1 行出る
+  → ヘッドレスで残量の実測値が取れる（status line は不要）。
+- `claude auth login` は認可 URL を出して標準入力から 1 行読む（パイプでも読む。誤ったコードで `Login failed: … 400`、exit 1）→ GUI からログインを中継できる。
+
+### 成果物
+
+- task-core: `RateWindow` / `RateLimitObservation`（`rate_limit_event` の解析）、`Event::WorkerStarted.account`（任意）。スキーマ再生成。
+- task-worker: `EventSink::rate_limit`、`WorkerAdapter::with_env`、claude-code の `rate_limit_event` 転送、`claude_account`（`check_account`、`start_login` / `LoginSession`）。
+- task-dispatch: `accounts`（`scan_accounts`、`AccountBook` と `.taskd-usage.json` への保存、`evaluate` / `select_account` = ADR-0024 D3）、ディスパッチャへの統合
+  （プールのプロバイダはアカウントを選んで env を重ねる、アカウントが無ければ満杯扱いでフォールバック、プール経由の失敗はアカウントを cooldown、スナップショットの `accounts`）。
+- taskd: `[accounts]`、`[[providers]].account_pool`、検証、`accounts_admin`（確認・ログイン中継・削除。tick を止めない）、reload での `[accounts]` 変更の拒否。
+- task-api: `GET/POST /accounts`、`DELETE /accounts/{id}`、`POST /accounts/{id}/check`、`POST/DELETE /accounts/{id}/login`、`POST /accounts/{id}/login/code`、
+  プロバイダ管理の `account_pool`、アカウント別の集計。`docs/gui/api.md` §3.29〜3.35（`scripts/sync-gui-docs.sh` で GUI 側へ同期）。
+- taskctl: `worker run --account`。config: `taskd.multi-account.example.toml` に `[accounts]` の例。
+
+### 監査（auditor）と修正
+
+監査で B1（期限切れログインの処理が tick ループ自身が読むチャネルへの await 送信で止まりうる）、B2（ログイン再開始の失敗で `login_pending` が残る）、
+B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_pool` を 422 にしない、削除の競合と観測値の残骸、集計の error の数え方、500 の誤り、reload で `[accounts]` が反映されないのに黙る、
+起動失敗でアカウントを cooldown にする 等）と N1〜N12 の指摘があり、すべて修正してテストを足した。細部の決定は ADR-0024「実装メモ」M1〜M7。
+監査後に `.removed/` を 0700 で作るよう直した。
+
+### 受け入れ条件と証拠
+
+1. **残量の多いアカウントに割り当て、`WorkerStarted.account` と env が一致** — `dispatcher::tests::pool_run_goes_to_the_account_with_more_headroom_and_sets_the_env`、
+   e2e `account_pool_scenarios::account_selection_follows_headroom_and_survives_restart_and_throttle_only_cools_the_account`（実バイナリ + スタブの claude）: ok。
+2. **throttled はアカウントだけ cooldown、次の run はもう片方、プロバイダは cooldown にならない** — `throttled_account_cools_down_without_cooling_the_provider`、
+   e2e `throttled_account_cools_down_alone_and_the_next_run_uses_the_other_account`（`/daemon` の `cooldowns` が空のまま）: ok。起動失敗はプロバイダ側: `spawn_failure_on_pool_run_cools_the_provider_not_the_account`: ok。
+3. **観測値が run の途中で反映、再起動後も残る** — `mid_run_rate_limit_observation_lands_in_the_book_and_the_snapshot`、`account_book_is_persisted_and_reloaded_after_restart`: ok。
+4. **追加 → login → login/code → logged_in、管理系はトークン無しで 401** — e2e `http_login_flow_ends_with_logged_in_true_and_management_requires_a_token`、
+   `accounts_admin::management_routes_all_require_a_token`: ok。
+5. **GUI** — GUI 側 PROGRESS「Phase G8」（`e2e/g8.spec.ts` 1 passed ほか）。
+6. **共通条件** — `cargo test --workspace`: 42 バイナリ **599 passed / 0 failed / 2 ignored**（ignored は実クラスタが要る 2 件）。
+   `cargo clippy --workspace --all-targets -- -D warnings`: exit 0。`scripts/sync-gui-docs.sh --check`: up to date。
+7. **実機（このホスト、本物の claude 2.1.273）** — 運用中の taskd（`~/taskd/taskd.toml` に `[accounts]` と `claude-pool` を追加）に対して API で:
+   `POST /accounts {"id":"probe"}` → 201（`drwx------`）、`POST /accounts/probe/login` → 本物の `https://claude.com/cai/oauth/authorize?…` が返り `login_pending: true`、
+   `DELETE …/login` → 200（`claude auth login` のプロセスは残らない）、`POST /accounts/probe/check` → `auth_failed`（detail `Not logged in · Please run /login`）、
+   taskd のログに `oauth/authorize` は 0 件、`DELETE /accounts/probe` → 200（`.removed/` へ移動）。
+   **未確認**: ログイン済みアカウントでの `rate_limit_event` の記録と、2 アカウント間の実際の振り分け。認可はアカウントの持ち主が行う必要があるので、人が GUI の「アカウント」画面からログインした後に確認する。
+
+### 未解決事項
+
+- U13-1: Reviewer run の起動失敗（Spawn）は `ReviewerProviderFailure` が理由を持たないため、プールでもアカウント側の cooldown になりうる（ワーカー run は修正済み）。
+- U13-2: 実アカウントでの負荷分散の確認（上記 7）。
+- U13-3: `taskd` をこの Claude Code のセッションから起動すると `CLAUDECODE` 等がワーカーに引き継がれる。運用中の taskd はこれらを外して起動した。systemd の unit 化で解消するのがよい。
+
+### 提案
+
+- P-62: DESIGN.md §6 の非目標「残量推定に基づく複数アカウントの自動切替」を「推定はしない。Claude Code が stream-json で出す実測値（`rate_limit_event`）による選択は ADR-0024 で行う」に改め、
+  §5.4 / §5.5 にアカウントのプール（`[accounts]`、`account_pool`、`with_env`）を、§6 に Phase 13 の節を足す。CLAUDE.md の「予算管理の実装（別プロジェクト）」も「課金額の予算管理」と明確化する。

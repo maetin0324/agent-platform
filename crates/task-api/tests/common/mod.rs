@@ -38,6 +38,9 @@ pub struct EnvOptions {
     pub providers_dir: Option<PathBuf>,
     /// ADR-0017 M2: `reload`/`check` を受け取るチャネルの送信側。`None` ならどちらも使えない。
     pub admin_tx: Option<mpsc::Sender<AdminRequest>>,
+    /// ADR-0024 D1: `[accounts] claude_dir`。`None` なら `[accounts]` 無しの構成。
+    pub accounts_root: Option<PathBuf>,
+    pub max_runs_per_account: usize,
 }
 
 pub struct TestEnv {
@@ -139,6 +142,7 @@ pub fn config_view() -> ConfigView {
                 concurrency: 2,
                 model: Some("claude-sonnet-5".into()),
                 env_keys: vec!["CLAUDE_CONFIG_DIR".into()],
+                account_pool: false,
             },
             ProviderConfigView {
                 id: "claude-b".into(),
@@ -147,6 +151,7 @@ pub fn config_view() -> ConfigView {
                 concurrency: 1,
                 model: None,
                 env_keys: vec!["CLAUDE_CONFIG_DIR".into()],
+                account_pool: false,
             },
         ],
         clusters: vec![ClusterConfigView {
@@ -191,6 +196,8 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         started_at: "2026-09-14T00:00:00Z".into(),
         providers_dir: options.providers_dir,
         admin_tx: options.admin_tx,
+        accounts_root: options.accounts_root,
+        max_runs_per_account: options.max_runs_per_account,
     }
 }
 
@@ -256,6 +263,9 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
         awaiting_human: vec![],
         awaiting_children: vec![],
         unroutable: vec![],
+        accounts_root: None,
+        max_runs_per_account: None,
+        accounts: vec![],
         clusters: vec![ClusterLive {
             id: "pegasus".into(),
             host: "pegasus".into(),
@@ -279,6 +289,7 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
                     result: "ok".into(),
                     detail: Some("ready".into()),
                 }),
+                account_pool: false,
             },
             ProviderLive {
                 id: "claude-b".into(),
@@ -289,6 +300,7 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
                 env_keys: vec![],
                 in_use: 0,
                 last_check: None,
+                account_pool: false,
             },
         ],
     }

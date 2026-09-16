@@ -126,6 +126,45 @@ impl ApiProblem {
         )
     }
 
+    /// ADR-0024 D5: 指定した account id が `[accounts] claude_dir` に無い。
+    pub(crate) fn account_not_found(id: &str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "account_not_found", format!("account not found: {id}"))
+    }
+
+    /// ADR-0024 D5: `POST /api/v1/accounts` の id が既にディレクトリとして存在する。
+    pub(crate) fn account_exists(id: &str) -> Self {
+        Self::new(StatusCode::CONFLICT, "account_exists", format!("account already exists: {id}"))
+    }
+
+    /// ADR-0024 D5: `[accounts]` が設定されていない。
+    pub(crate) fn accounts_unavailable() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "accounts_unavailable",
+            "the [accounts] section is not configured in taskd.toml",
+        )
+    }
+
+    /// ADR-0024 D5: `in_use > 0` のアカウントは削除できない。
+    pub(crate) fn account_in_use(id: &str) -> Self {
+        Self::new(StatusCode::CONFLICT, "account_in_use", format!("account is in use: {id}"))
+    }
+
+    /// ADR-0024 D5/D7: `login/code` を呼んだが進行中のログインが無い。
+    pub(crate) fn login_not_started() -> Self {
+        Self::new(StatusCode::CONFLICT, "login_not_started", "no login is in progress for this account")
+    }
+
+    /// ADR-0024 D5/D7: `login` の開始自体に失敗した（15 秒以内に URL が出ない等）。
+    pub(crate) fn login_failed(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, "login_failed", detail)
+    }
+
+    /// ADR-0024 D5: `account_pool = true` だが `adapter != "claude-code"`（API 側で判定できる範囲）。
+    pub(crate) fn invalid_provider(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_provider", detail)
+    }
+
     pub(crate) fn method_not_allowed() -> Self {
         Self::new(
             StatusCode::METHOD_NOT_ALLOWED,

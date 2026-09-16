@@ -65,3 +65,18 @@ adapter = "codex"
 tiers = ["standard", "cheap"]
 concurrency = 1
 env = { CODEX_HOME = "/home/USER/.codex-accounts/a" }
+
+# ADR-0024（Phase 13）: 上の [[providers]] の env による複数アカウントとは別の仕組み。CLAUDE_SECURESTORAGE_CONFIG_DIR
+# を使ったプールで、claude_dir の下のディレクトリ（GUI/API から追加・ログインできる）から taskd 自身が残量を見て
+# 自動でアカウントを選ぶ（ADR-0024 D1〜D3）。1 つの claude-code プロバイダの下に何アカウントでもぶら下げられる。
+# [accounts]
+# claude_dir = "claude-accounts"      # 相対ならこのファイル基準。各 <id>/ が 1 アカウント（GUI の「アカウントを追加」等で作る）
+# max_runs_per_account = 2            # 1 アカウントで同時に走らせる run の上限
+# check_model = "haiku"               # 手動確認（POST /accounts/{id}/check）に使うモデル
+#
+# [[providers]]
+# id = "claude-pool"
+# adapter = "claude-code"
+# tiers = ["frontier", "standard", "cheap"]
+# concurrency = 4                     # プロバイダ全体の上限（プールのアカウント数とは別軸）
+# account_pool = true                 # [accounts] が要る。claude-code 以外では設定エラー

@@ -184,6 +184,7 @@ mod tests {
             adapter: "fake".into(),
             model: "m".into(),
             provider: None,
+            account: None,
             role,
             task_role: None,
         };
@@ -376,6 +377,7 @@ mod tests {
                     adapter: "fake".into(),
                     model: "m".into(),
                     provider: None,
+                    account: None,
                     role: None,
                     task_role: None,
                 },
@@ -387,6 +389,7 @@ mod tests {
                     adapter: "fake".into(),
                     model: "m".into(),
                     provider: None,
+                    account: None,
                     role: None,
                     task_role: None,
                 },

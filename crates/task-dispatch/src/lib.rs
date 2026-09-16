@@ -2,11 +2,20 @@
 //! `ProviderPolicy`（§5.5）、Reviewer（§5.7。`Command`/`ArtifactExists`/`Plan` 検証は決定的、`Reviewer` はアダプタ経由の別 run）。
 //! **LLM 呼び出しはここに書かない。**
 
+pub mod accounts;
 pub mod dispatcher;
 pub mod policy;
 pub mod review;
 
-pub use dispatcher::{ClusterSpec, DispatchConfig, DispatchError, Dispatcher, SnapshotPublisher, TickReport};
+pub use accounts::{
+    AccountBook, AccountCandidate, AccountCheckRecord, AccountCooldown, AccountCooldownReason, AccountDir,
+    AccountEvaluation, AccountState, EXHAUSTED_UTILIZATION, ExcludedReason, FIVE_HOUR_SECS, IN_USE_PENALTY,
+    MIN_WEEK_FRACTION, ObservationSource, SEVEN_DAY_SECS, cooldown_for_failure, evaluate, scan_accounts,
+    select_account, valid_account_id,
+};
+pub use dispatcher::{
+    AccountsRuntimeConfig, ClusterSpec, DispatchConfig, DispatchError, Dispatcher, SnapshotPublisher, TickReport,
+};
 pub use policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy, ProviderSpec, StaticPolicy};
 pub use review::{
     PLAN_FILE, PlanCheck, REVIEW_FILE, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerProviderFailure, ReviewerRun,

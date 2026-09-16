@@ -22,6 +22,73 @@ pub enum AdminRequest {
         provider_id: String,
         reply: oneshot::Sender<Result<ProviderCheckOutcome, CheckError>>,
     },
+    /// ADR-0024 D6: プールのアカウントを 1 つ確認する（`[accounts].check_model` を使う）。
+    AccountCheck {
+        id: String,
+        reply: oneshot::Sender<Result<AccountCheckOutcome, AccountAdminError>>,
+    },
+    /// ADR-0024 D7: `claude auth login` を開始し、認可 URL を返す。
+    AccountLoginStart {
+        id: String,
+        reply: oneshot::Sender<Result<AccountLoginStartOutcome, AccountAdminError>>,
+    },
+    /// ADR-0024 D7: 認可コードを渡して待つ。
+    AccountLoginCode {
+        id: String,
+        code: String,
+        reply: oneshot::Sender<Result<AccountLoginCodeOutcome, AccountAdminError>>,
+    },
+    /// ADR-0024 D7: 進行中のログインを止める（無ければ何もしない）。
+    AccountLoginCancel {
+        id: String,
+        reply: oneshot::Sender<Result<(), AccountAdminError>>,
+    },
+    /// S2+S8: `DELETE /accounts/{id}`。taskd 側（ディスパッチャの権威ある `account_in_use`）で行う
+    /// （task-api のスナップショット由来の `in_use` はレースしうるため。ADR-0024 D5 の実装をここへ寄せる）。
+    AccountRemove {
+        id: String,
+        reply: oneshot::Sender<Result<(), AccountAdminError>>,
+    },
+}
+
+/// ADR-0024 D6: `POST /accounts/{id}/check` の結果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountCheckOutcome {
+    pub result: ProviderCheckResult,
+    pub detail: Option<String>,
+    /// 観測できた `rate_limit_event`（あれば）。`AccountUsageView` に写す（`source = "check"`）。
+    pub observation: Option<task_core::RateLimitObservation>,
+}
+
+/// ADR-0024 D7: `POST /accounts/{id}/login` の結果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountLoginStartOutcome {
+    pub url: String,
+    /// Unix 秒（10 分後）。
+    pub expires_at_unix: i64,
+}
+
+/// ADR-0024 D7: `POST /accounts/{id}/login/code` の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountLoginCodeOutcome {
+    pub ok: bool,
+    /// 認可コード・URL は含まない。
+    pub detail: Option<String>,
+}
+
+/// アカウント管理系の要求が完了できなかった理由（ハンドラが HTTP へ写す）。
+#[derive(Debug, Clone)]
+pub enum AccountAdminError {
+    /// 指定した id のアカウントディレクトリが無い。
+    NotFound,
+    /// `[accounts]` が設定されていない、または taskd 側に届かなかった。
+    Unavailable(String),
+    /// `login/code` を呼んだが進行中のログインが無い。
+    LoginNotStarted,
+    /// `login` の開始自体に失敗した（15 秒以内に URL が出ない等）。
+    LoginFailed(String),
+    /// S2+S8: `DELETE /accounts/{id}` で `account_in_use > 0`（ディスパッチャの権威ある値）。
+    InUse,
 }
 
 /// `check` が終わったときの結果（ADR-0022 M1 で `detail` を追加）。
@@ -67,6 +134,9 @@ pub struct ProviderConfigFile {
     pub model: String,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0024 D2: `[accounts]` のプールから選ぶ（`adapter = "claude-code"` かつ `[accounts]` があるときだけ有効）。
+    #[serde(default)]
+    pub account_pool: bool,
 }
 
 impl ProviderConfigFile {
@@ -80,6 +150,7 @@ impl ProviderConfigFile {
             concurrency: self.concurrency,
             model: (!self.model.is_empty()).then(|| self.model.clone()),
             env_keys,
+            account_pool: self.account_pool,
         }
     }
 }
@@ -105,6 +176,9 @@ pub struct ProviderCreateBody {
     pub model: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0024 D2: 既定 `false`。`true` は `adapter = "claude-code"` かつ `[accounts]` があるときだけ有効。
+    #[serde(default)]
+    pub account_pool: bool,
 }
 
 impl ProviderCreateBody {
@@ -116,6 +190,7 @@ impl ProviderCreateBody {
             concurrency: self.concurrency.unwrap_or_else(default_concurrency),
             model: self.model.unwrap_or_default(),
             env: self.env,
+            account_pool: self.account_pool,
         }
     }
 }
@@ -132,6 +207,9 @@ pub struct ProviderPatchBody {
     pub model: Option<String>,
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
+    /// ADR-0024 D2: 渡したときだけ上書き。
+    #[serde(default)]
+    pub account_pool: Option<bool>,
 }
 
 impl ProviderPatchBody {
@@ -147,6 +225,9 @@ impl ProviderPatchBody {
         }
         if let Some(env) = &self.env {
             file.env = env.clone();
+        }
+        if let Some(account_pool) = self.account_pool {
+            file.account_pool = account_pool;
         }
         file
     }
@@ -232,11 +313,13 @@ mod tests {
             concurrency: None,
             model: None,
             env: HashMap::new(),
+            account_pool: false,
         };
         let file = body.into_file();
         assert_eq!(file.tiers, default_tiers());
         assert_eq!(file.concurrency, 1);
         assert_eq!(file.model, "");
+        assert!(!file.account_pool);
     }
 
     #[test]
@@ -248,16 +331,21 @@ mod tests {
             concurrency: 2,
             model: "m1".into(),
             env: HashMap::from([("K".to_string(), "v".to_string())]),
+            account_pool: false,
         };
         let patch = ProviderPatchBody {
             concurrency: Some(5),
             ..Default::default()
         };
-        let patched = patch.apply(file);
+        let patched = patch.apply(file.clone());
         assert_eq!(patched.concurrency, 5);
         assert_eq!(patched.tiers, vec![Tier::Standard]);
         assert_eq!(patched.model, "m1");
         assert_eq!(patched.env.get("K"), Some(&"v".to_string()));
+        assert!(!patched.account_pool);
+
+        let pool_patch = ProviderPatchBody { account_pool: Some(true), ..Default::default() };
+        assert!(pool_patch.apply(file).account_pool);
     }
 
     #[test]
@@ -270,11 +358,13 @@ mod tests {
             concurrency: 3,
             model: "".into(),
             env: HashMap::from([("CLAUDE_CONFIG_DIR".to_string(), "/x".to_string())]),
+            account_pool: true,
         };
         write_provider_file(dir.path(), &file).unwrap_or_else(|e| panic!("write: {e}"));
         let read = read_provider_file(&provider_file_path(dir.path(), "acct-b")).unwrap_or_else(|e| panic!("read: {e}"));
         assert_eq!(read.id, "acct-b");
         assert_eq!(read.concurrency, 3);
         assert_eq!(read.env.get("CLAUDE_CONFIG_DIR"), Some(&"/x".to_string()));
+        assert!(read.account_pool);
     }
 }

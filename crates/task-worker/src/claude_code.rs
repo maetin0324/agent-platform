@@ -7,11 +7,12 @@
 
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use task_core::{Check, Task, TaskKind, Usage};
+use task_core::{Check, RateLimitObservation, Task, TaskKind, Usage};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::warn;
@@ -78,6 +79,14 @@ impl WorkerAdapter for ClaudeCodeAdapter {
         sink: &dyn EventSink,
     ) -> Result<RunOutcome, AdapterError> {
         run_claude_code(&self.config, &req, run_id, &limits, sink).await
+    }
+
+    /// ADR-0024 D2: `extra` を `config.env` の末尾に足した複製を返す。同名キーは後勝ち（`envs()` に渡す順で
+    /// 最後に指定した値が使われる）ので、末尾に足すだけで `extra` が既存の同名キーに勝つ。
+    fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut config = self.config.clone();
+        config.env.extend(extra.iter().cloned());
+        Some(Arc::new(ClaudeCodeAdapter::new(config)))
     }
 }
 
@@ -559,6 +568,14 @@ async fn run_claude_code(
     })
 }
 
+/// 壁時計の Unix 秒（ADR-0024 D4: 観測時刻は taskd の壁時計）。`claude_account` の確認・ログイン中継からも使う。
+pub(crate) fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// stream-json の 1 行を解釈する。既知でない `type` や JSON として不正な行は無視する（ADR-0006 D5）。
 fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<ResultMeta>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -567,6 +584,11 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
     let Some(ty) = value.get("type").and_then(|t| t.as_str()) else {
         return;
     };
+    if ty == "rate_limit_event"
+        && let Some(obs) = RateLimitObservation::from_stream_json(&value, now_unix_secs())
+    {
+        sink.rate_limit(obs);
+    }
     match ty {
         "assistant" => {
             if let Some(content) = value.pointer("/message/content").and_then(|c| c.as_array()) {
@@ -689,7 +711,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use task_core::{ArtifactRef, DelegateTask};
+    use task_core::{ArtifactRef, DelegateTask, RateLimitObservation};
 
     use super::*;
     use crate::protocol::{PROTOCOL_VERSION, RunContext};
@@ -698,6 +720,7 @@ mod tests {
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
         delegated: Mutex<Vec<Vec<DelegateTask>>>,
+        rate_limits: Mutex<Vec<RateLimitObservation>>,
     }
 
     impl EventSink for RecordingSink {
@@ -707,6 +730,9 @@ mod tests {
         fn artifact(&self, _artifact: &ArtifactRef) {}
         fn delegate(&self, tasks: &[DelegateTask]) {
             self.delegated.lock().unwrap_or_else(|e| e.into_inner()).push(tasks.to_vec());
+        }
+        fn rate_limit(&self, obs: RateLimitObservation) {
+            self.rate_limits.lock().unwrap_or_else(|e| e.into_inner()).push(obs);
         }
     }
 
@@ -1259,5 +1285,61 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert!(sink.delegated.lock().unwrap().is_empty());
         let progress = sink.progress.lock().unwrap();
         assert!(progress.iter().any(|m| m.contains("delegate.json ignored")), "{progress:?}");
+    }
+
+    /// ADR-0024 D4: `rate_limit_event` を解析すると `sink.rate_limit` に観測値が渡る。ADR に載っている
+    /// 実測の行そのものを使う。
+    #[tokio::test]
+    async fn rate_limit_event_line_is_forwarded_to_the_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"mkdir -p artifacts
+echo '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1789605600,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.14,"resetsAt":1789605600},"seven_day":{"utilization":0.24,"resetsAt":1790031600}}}}'
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#,
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-rate-1", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let observed = sink.rate_limits.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        let obs = &observed[0];
+        assert_eq!(obs.five_hour.map(|w| w.utilization), Some(0.14));
+        assert_eq!(obs.seven_day.map(|w| w.utilization), Some(0.24));
+        assert_eq!(obs.status.as_deref(), Some("allowed"));
+    }
+
+    /// ADR-0024 D2: `with_env` の追加分は、既存の同名キーより後に環境を組み立てるので勝つ。
+    #[tokio::test]
+    async fn with_env_overrides_a_same_name_key_already_in_config_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("env-seen.txt");
+        let mut config = stub_claude(
+            dir.path(),
+            &format!(
+                r#"mkdir -p artifacts
+printf '%s' "$CLAUDE_SECURESTORAGE_CONFIG_DIR" > {out}
+printf '%s' '{{"summary":"ok","evidence":[]}}' > artifacts/result.json
+echo '{{"type":"result","subtype":"success","is_error":false}}'
+"#,
+                out = out_file.display()
+            ),
+        );
+        config.env.push(("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(), "old-account-dir".to_string()));
+        let base = ClaudeCodeAdapter::new(config);
+        let with_env = base
+            .with_env(&[("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(), "new-account-dir".to_string())])
+            .expect("claude-code supports with_env");
+
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = with_env.run(req, "run-env-1", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let seen = std::fs::read_to_string(&out_file).unwrap();
+        assert_eq!(seen, "new-account-dir");
     }
 }

@@ -231,6 +231,10 @@ pub enum Event {
         /// どのプロバイダ（= アカウント）で実行したか（ADR-0012 D1）。導入前のイベントには無いので任意。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
+        /// プール（`account_pool = true`）で選ばれた Claude アカウントの id（ADR-0024 D4）。プールを使わない
+        /// プロバイダ・導入前のイベントには無い。`provider`（アダプタ×プロバイダ行）とは別軸。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
         /// ADR-0014 D1: `None` はワーカー run、`Some(Reviewer)` は Reviewer run（ワーカー run に `Some(Worker)` は書かない）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<RunRole>,

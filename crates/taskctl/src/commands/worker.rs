@@ -72,6 +72,13 @@ pub struct WorkerRunArgs {
     /// 多重接続（`ControlMaster`）が無ければ何も実行せず exit 4 で理由を返す。
     #[arg(long)]
     pub cluster: Option<String>,
+
+    /// ADR-0024 D2: `account_pool = true` のプロバイダで使うアカウント id（`[accounts] claude_dir` の下の
+    /// ディレクトリ）。省略時は `<claude_dir>/.taskd-usage.json`（永続化された観測値。taskd が更新するのと
+    /// 同じファイル）を読むだけで選ぶ（in_use は分からないので 0 として扱う）。`account_pool` でないプロバイダに
+    /// 指定するとエラー。
+    #[arg(long)]
+    pub account: Option<String>,
 }
 
 /// `--cluster` を解決した先（ADR-0018 受け入れ 10）。
@@ -148,6 +155,44 @@ struct Selected {
     provider_id: String,
     adapter_kind: String,
     model: String,
+    /// ADR-0024 D2: `account_pool` のプロバイダで使うアカウント（プールを使わなければ `None`）。
+    account: Option<String>,
+}
+
+/// ADR-0024 D2: `account_pool = true` のプロバイダのアカウントを決める。`--account` があればそれ、無ければ
+/// `<claude_dir>/.taskd-usage.json`（永続化された観測値）を読み取り専用で見て選ぶ（`in_use` は 0 扱い）。
+/// `account_pool` でないプロバイダに `--account` を渡したらエラー。
+fn resolve_account(config: &Config, provider_id: &str, args: &WorkerRunArgs) -> Result<Option<String>, CliError> {
+    let is_pool = config.providers.iter().any(|p| p.id == provider_id && p.account_pool);
+    if !is_pool {
+        if args.account.is_some() {
+            return Err(CliError::msg(format!("provider {provider_id} does not have account_pool = true; --account is not applicable")));
+        }
+        return Ok(None);
+    }
+    let accounts = config
+        .accounts
+        .as_ref()
+        .ok_or_else(|| CliError::msg(format!("provider {provider_id} has account_pool = true but [accounts] is not configured")))?;
+    if let Some(id) = &args.account {
+        if !task_dispatch::valid_account_id(id) {
+            return Err(CliError::msg(format!("invalid --account id: {id}")));
+        }
+        if !accounts.claude_dir.join(id).is_dir() {
+            return Err(CliError::msg(format!("account not found: {id} (looked in {})", accounts.claude_dir.display())));
+        }
+        return Ok(Some(id.clone()));
+    }
+    let dirs = task_dispatch::scan_accounts(&accounts.claude_dir);
+    let book = task_dispatch::AccountBook::load(&accounts.claude_dir.join(".taskd-usage.json"));
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let candidates: Vec<task_dispatch::AccountCandidate<'_>> = dirs
+        .iter()
+        .map(|d| task_dispatch::AccountCandidate { id: d.id.as_str(), logged_in: d.logged_in, in_use: 0 })
+        .collect();
+    task_dispatch::select_account(&candidates, &book, accounts.max_runs_per_account, now)
+        .map(Some)
+        .ok_or_else(|| CliError::msg(format!("no eligible account in the pool for provider {provider_id}")))
 }
 
 pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, CliError> {
@@ -164,17 +209,36 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
     let events = store.events_for(task_id)?;
 
     let (provider_id, adapter_kind) = select_provider(&config, &task, &args)?;
+    let account = resolve_account(&config, &provider_id, &args)?;
 
     let adapters = taskd::build_adapters(&config);
-    let adapter = adapters
+    let base_adapter = adapters
         .get(&provider_id)
         .ok_or_else(|| CliError::msg(format!("provider {provider_id} has no adapter instance")))?;
+    // ADR-0024 D2: アカウントが決まっていれば、taskd の dispatch と同じように env の末尾に重ねる。
+    let effective_adapter: std::sync::Arc<dyn WorkerAdapter> = match &account {
+        Some(account_id) => {
+            // B3: `resolve_account` は `account_pool` のプロバイダでしか `Some` を返さない（そのときは
+            // `[accounts]` が要る、と検証済み）はずだが、`.expect()` は使わず、万一の不整合はエラーとして返す。
+            let accounts = config
+                .accounts
+                .as_ref()
+                .ok_or_else(|| CliError::msg(format!("provider {provider_id} resolved an account but [accounts] is not configured")))?;
+            let dir = accounts.claude_dir.join(account_id);
+            base_adapter
+                .with_env(&[("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(), dir.display().to_string())])
+                .ok_or_else(|| CliError::msg(format!("adapter for provider {provider_id} does not support account pools")))?
+        }
+        None => base_adapter.clone(),
+    };
+    let adapter = effective_adapter.as_ref();
     let model = taskd::effective_models(&config).get(&provider_id).cloned().unwrap_or_default();
 
     let selected = Selected {
         provider_id,
         adapter_kind,
         model,
+        account,
     };
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -187,7 +251,7 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
         if let Some(warning) = &target.warning {
             eprintln!("warning: {warning}");
         }
-        return rt.block_on(execute_on_cluster(&task, &events, target, &config, &selected, adapter.as_ref()));
+        return rt.block_on(execute_on_cluster(&task, &events, target, &config, &selected, adapter));
     }
 
     if args.workspace.is_none() && matches!(task.status, Status::Running | Status::Reviewing) {
@@ -208,7 +272,7 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
         },
     };
 
-    rt.block_on(execute(&task, &events, workspace_dir, &config, &selected, adapter.as_ref()))
+    rt.block_on(execute(&task, &events, workspace_dir, &config, &selected, adapter))
 }
 
 /// `--provider` / `--adapter` / どちらも省略（`select`、cooldown なし）の順でプロバイダを決める
@@ -273,11 +337,12 @@ async fn execute(
     };
 
     outln!(
-        "worker run: task={} provider={} adapter={} model={} workspace={} run_id={run_id}",
+        "worker run: task={} provider={} adapter={} model={} account={} workspace={} run_id={run_id}",
         task.id,
         selected.provider_id,
         selected.adapter_kind,
         selected.model,
+        selected.account.as_deref().unwrap_or("-"),
         prepared.display(),
     );
 
@@ -572,6 +637,7 @@ mod tests {
             clusters,
             roles: vec![],
             delegation: Default::default(),
+            accounts: None,
             source_path: None,
         }
     }
@@ -677,5 +743,111 @@ mod tests {
             let err = resolve_cluster_target(&config, &task, "local", Some(Path::new("/remote/x"))).unwrap_err();
             assert!(err.to_string().contains("stop taskd or wait"), "{err}");
         }
+    }
+
+    // ---- ADR-0024 D2: resolve_account ----
+
+    fn args_fixture(account: Option<&str>) -> WorkerRunArgs {
+        WorkerRunArgs {
+            config: PathBuf::from("taskd.toml"),
+            task: "01J000000000000000000000AA".into(),
+            provider: None,
+            adapter: None,
+            workspace: None,
+            cluster: None,
+            account: account.map(str::to_string),
+        }
+    }
+
+    fn pool_provider_config(accounts_dir: &Path, max_runs_per_account: usize) -> Config {
+        let mut config = cluster_config(vec![]);
+        config.providers = vec![taskd::config::ProviderConfig {
+            id: "pool".into(),
+            adapter: "claude-code".into(),
+            tiers: vec![task_core::Tier::Standard],
+            concurrency: 1,
+            model: String::new(),
+            env: Default::default(),
+            account_pool: true,
+        }];
+        config.accounts = Some(taskd::config::AccountsConfig {
+            claude_dir: accounts_dir.to_path_buf(),
+            max_runs_per_account,
+            check_model: "haiku".into(),
+        });
+        config
+    }
+
+    #[test]
+    fn resolve_account_non_pool_provider_ignores_missing_account_and_rejects_explicit_one() {
+        let config = cluster_config(vec![]);
+        assert_eq!(resolve_account(&config, "p1", &args_fixture(None)).unwrap(), None);
+        let err = resolve_account(&config, "p1", &args_fixture(Some("a"))).unwrap_err();
+        assert!(err.to_string().contains("does not have account_pool"), "{err}");
+    }
+
+    #[test]
+    fn resolve_account_pool_provider_without_accounts_section_errors() {
+        let mut config = cluster_config(vec![]);
+        config.providers = vec![taskd::config::ProviderConfig {
+            id: "pool".into(),
+            adapter: "claude-code".into(),
+            tiers: vec![task_core::Tier::Standard],
+            concurrency: 1,
+            model: String::new(),
+            env: Default::default(),
+            account_pool: true,
+        }];
+        let err = resolve_account(&config, "pool", &args_fixture(None)).unwrap_err();
+        assert!(err.to_string().contains("[accounts] is not configured"), "{err}");
+    }
+
+    #[test]
+    fn resolve_account_explicit_flag_validates_the_id_and_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("b")).unwrap();
+        let config = pool_provider_config(tmp.path(), 2);
+
+        assert_eq!(resolve_account(&config, "pool", &args_fixture(Some("b"))).unwrap(), Some("b".into()));
+
+        let err = resolve_account(&config, "pool", &args_fixture(Some("missing"))).unwrap_err();
+        assert!(err.to_string().contains("account not found"), "{err}");
+
+        let err = resolve_account(&config, "pool", &args_fixture(Some("../x"))).unwrap_err();
+        assert!(err.to_string().contains("invalid --account id"), "{err}");
+    }
+
+    #[test]
+    fn resolve_account_without_flag_picks_the_account_with_more_headroom_from_the_persisted_book() {
+        let tmp = tempfile::tempdir().unwrap();
+        for id in ["a", "b"] {
+            std::fs::create_dir_all(tmp.path().join(id)).unwrap();
+            std::fs::write(tmp.path().join(id).join(".credentials.json"), "{}").unwrap();
+        }
+        let mut book = task_dispatch::AccountBook::load(&tmp.path().join(".taskd-usage.json"));
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let window = |u: f64| task_core::RateLimitObservation {
+            five_hour: Some(task_core::RateWindow { utilization: u, resets_at: now + 90_000 }),
+            seven_day: None,
+            status: None,
+            resets_at: None,
+            observed_at: now,
+        };
+        book.record_observation("a", window(0.9), task_dispatch::ObservationSource::Run);
+        book.record_observation("b", window(0.1), task_dispatch::ObservationSource::Run);
+        book.save().unwrap();
+
+        let config = pool_provider_config(tmp.path(), 2);
+        assert_eq!(resolve_account(&config, "pool", &args_fixture(None)).unwrap(), Some("b".into()));
+    }
+
+    #[test]
+    fn resolve_account_no_eligible_account_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        // ディレクトリはあるがログインしていない（.credentials.json が無い）ので選べない。
+        std::fs::create_dir_all(tmp.path().join("a")).unwrap();
+        let config = pool_provider_config(tmp.path(), 2);
+        let err = resolve_account(&config, "pool", &args_fixture(None)).unwrap_err();
+        assert!(err.to_string().contains("no eligible account"), "{err}");
     }
 }

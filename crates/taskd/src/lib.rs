@@ -1,6 +1,7 @@
 //! taskd: デーモン本体（DESIGN §3, §5.2, ADR-0005 D7）。設定読込、ログ初期化、tick ループ。
 //! 判断ロジックは `task-dispatch` にあり、ここはループと配線だけ。
 
+mod accounts_admin;
 pub mod config;
 
 use std::collections::{BTreeMap, HashMap};
@@ -138,6 +139,7 @@ pub fn provider_lives(config: &Config) -> Vec<ProviderLive> {
                 in_use: 0,
                 // ADR-0022 D2: 確認の記録は Dispatcher 側（SnapshotPublisher.provider_checks）が持つ。
                 last_check: None,
+                account_pool: p.account_pool,
             }
         })
         .collect()
@@ -201,8 +203,9 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// 設定から `Dispatcher` を組み立てる。
+/// 設定から `Dispatcher` を組み立てる。`[accounts]` があればディレクトリを 0700 で作る（ADR-0024 D1）。
 pub fn build_dispatcher(config: &Config) -> Result<Dispatcher, DaemonError> {
+    config.ensure_accounts_dir()?;
     let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&config.db)?);
     let policy = StaticPolicy::new(
         config.provider_specs(),
@@ -213,6 +216,7 @@ pub fn build_dispatcher(config: &Config) -> Result<Dispatcher, DaemonError> {
         Box::new(policy),
         effective_models(config),
         build_adapters(config),
+        config.account_pool_providers(),
         config.dispatch_config(),
     ))
 }
@@ -249,6 +253,7 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                     concurrency: p.concurrency,
                     model: models.get(&p.id).filter(|m| !m.is_empty()).cloned(),
                     env_keys,
+                    account_pool: p.account_pool,
                 }
             })
             .collect(),
@@ -321,6 +326,8 @@ pub fn api_settings(
         started_at,
         providers_dir: config.providers_dir.clone(),
         admin_tx,
+        accounts_root: config.accounts.as_ref().map(|a| a.claude_dir.clone()),
+        max_runs_per_account: config.accounts.as_ref().map(|a| a.max_runs_per_account).unwrap_or(0),
     }
 }
 
@@ -409,6 +416,9 @@ async fn tick_loop(
 ) -> Result<Exit, DaemonError> {
     // ADR-0022 D2: `check` は spawn した先で終わるので、結果をここへ戻してスナップショットに載せる。
     let (check_tx, mut check_rx) = tokio::sync::mpsc::channel::<(String, ProviderCheckView)>(16);
+    // ADR-0024 D5〜D7: アカウントの確認・ログイン中継も同様に、spawn した先の結果をここへ戻す。
+    let (account_tx, mut account_rx) = tokio::sync::mpsc::channel::<accounts_admin::AccountAdminEvent>(16);
+    let login_sessions = accounts_admin::new_sessions();
     let tick = config.tick();
     let mut ticks: u64 = 0;
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
@@ -417,6 +427,12 @@ async fn tick_loop(
     // ADR-0015 D2: tick の所要時間を測り、遅い tick を警告する（止まっているのがディスパッチャか API かの切り分け用）。
     let slow_tick = std::cmp::max(Duration::from_secs(1), tick * 2);
     loop {
+        // ADR-0024 D7 / B1: 10 分を超えたログイン中継を打ち切る（tick をブロックしない軽い処理）。
+        // `expire_stale_logins` はチャネルを使わない（このループ自身が drain するチャネルへ `await` で
+        // 送るとデッドロックしうるため）。打ち切った id は戻り値で受け取り、ここで直接反映する。
+        for id in accounts_admin::expire_stale_logins(&login_sessions, accounts_admin::LOGIN_EXPIRY).await {
+            dispatcher.set_account_login_pending(&id, false);
+        }
         let tick_started = std::time::Instant::now();
         let report: TickReport = dispatcher.tick()?;
         let tick_elapsed = tick_started.elapsed();
@@ -465,13 +481,25 @@ async fn tick_loop(
                 // ADR-0017 M2: 処理後は select に戻らず即座にループの先頭（次の `dispatcher.tick()`）へ進む
                 // ので、reload の効果は「次の tick から」になる。`tick_ms` の残りを待たない。
                 if let Some(req) = req {
-                    handle_admin_request(dispatcher, config, req, check_tx.clone()).await;
+                    handle_admin_request(dispatcher, config, req, check_tx.clone(), login_sessions.clone(), account_tx.clone()).await;
                 }
             }
             // ADR-0022 D2: 終わった `check` の結果を受け取り、次の tick のスナップショットに載せる。
             Some((provider_id, check)) = check_rx.recv() => {
                 tracing::info!(who = "admin", provider_id = %provider_id, result = %check.result, "provider check recorded");
                 dispatcher.set_provider_check(&provider_id, check);
+            }
+            // ADR-0024 D4〜D7: アカウントの確認・ログイン中継の結果を `AccountBook` / `login_pending` に反映する。
+            Some(event) = account_rx.recv() => {
+                match event {
+                    accounts_admin::AccountAdminEvent::Checked { id, result, detail, observation } => {
+                        tracing::info!(who = "admin", op = "account_check", account_id = %id, result = %result, "account check recorded");
+                        dispatcher.record_account_check(&id, &result, detail, observation);
+                    }
+                    accounts_admin::AccountAdminEvent::LoginPending { id, pending } => {
+                        dispatcher.set_account_login_pending(&id, pending);
+                    }
+                }
             }
         }
     }
@@ -484,6 +512,8 @@ async fn handle_admin_request(
     config: &Config,
     req: task_api::AdminRequest,
     check_tx: tokio::sync::mpsc::Sender<(String, ProviderCheckView)>,
+    login_sessions: accounts_admin::LoginSessions,
+    account_tx: tokio::sync::mpsc::Sender<accounts_admin::AccountAdminEvent>,
 ) {
     match req {
         task_api::AdminRequest::Reload { reply } => {
@@ -511,26 +541,72 @@ async fn handle_admin_request(
                 let _ = reply.send(outcome);
             });
         }
+        task_api::AdminRequest::AccountCheck { id, reply } => {
+            accounts_admin::spawn_check(config, id, account_tx, reply);
+        }
+        task_api::AdminRequest::AccountLoginStart { id, reply } => {
+            accounts_admin::spawn_login_start(config, login_sessions, id, account_tx, reply);
+        }
+        task_api::AdminRequest::AccountLoginCode { id, code, reply } => {
+            accounts_admin::spawn_login_code(login_sessions, id, code, account_tx, reply);
+        }
+        task_api::AdminRequest::AccountLoginCancel { id, reply } => {
+            accounts_admin::spawn_login_cancel(login_sessions, id, account_tx, reply);
+        }
+        // S2+S8: cheap な fs 操作（ディレクトリの rename）だけなので spawn せず、ここで直接（同期的に）行う。
+        // ディスパッチャの権威ある `account_in_use` を使うため `&mut Dispatcher` が要る。
+        task_api::AdminRequest::AccountRemove { id, reply } => {
+            let result = accounts_admin::remove_account(config, dispatcher, &login_sessions, &id).await;
+            if result.is_ok() {
+                tracing::info!(who = "admin", op = "account_remove", account_id = %id, "admin: account removed");
+            } else {
+                tracing::warn!(who = "admin", op = "account_remove", account_id = %id, ?result, "account remove rejected");
+            }
+            let _ = reply.send(result);
+        }
     }
 }
 
 /// `Config::load` を読み直し、稼働中のプロバイダ選定・アダプタ一式・次 tick のスナップショット提供元を差し替える。
 /// 失敗したら稼働中の状態には触れない（古い設定のまま動き続ける）。
+///
+/// S7: `[accounts]` は reload の対象外（`Dispatcher::accounts` はプロセス起動時に固定され、`AccountBook` の
+/// 保存先もそこから決まる）。`claude_dir` / `max_runs_per_account` / `check_model` のどれかが変わっていたら、
+/// 反映されない値のまま動き続けるより、エラーにしてタスクを止めずに知らせる（400。再起動が必要と伝える）。
 fn reload_providers(dispatcher: &mut Dispatcher, config: &Config) -> Result<(), String> {
     let path = config
         .source_path
         .clone()
         .ok_or_else(|| "config was not loaded from a file; cannot reload".to_string())?;
     let new_config = Config::load(&path).map_err(|e| e.to_string())?;
+    if accounts_section_changed(&config.accounts, &new_config.accounts) {
+        return Err(
+            "[accounts] changed (claude_dir / max_runs_per_account / check_model); \
+             this section is not reloaded, restart taskd to apply the change"
+                .to_string(),
+        );
+    }
     let policy = StaticPolicy::new(
         new_config.provider_specs(),
         Duration::from_secs(new_config.error_cooldown_secs),
     );
     let adapters = build_adapters(&new_config);
     let models = effective_models(&new_config);
-    dispatcher.reload_providers(Box::new(policy), models, adapters);
+    dispatcher.reload_providers(Box::new(policy), models, adapters, new_config.account_pool_providers());
     dispatcher.set_snapshot_providers(provider_lives(&new_config));
     Ok(())
+}
+
+/// S7: `claude_dir` / `max_runs_per_account` / `check_model` のどれかが変わっていれば `true`
+/// （`None` ⇔ `Some` の変化も含む）。
+fn accounts_section_changed(old: &Option<config::AccountsConfig>, new: &Option<config::AccountsConfig>) -> bool {
+    match (old, new) {
+        (None, None) => false,
+        (Some(o), Some(n)) => {
+            o.claude_dir != n.claude_dir || o.max_runs_per_account != n.max_runs_per_account || o.check_model != n.check_model
+        }
+        _ => true,
+    }
 }
 
 /// ADR-0022 D2: `ProviderCheckResult` の serde 名（`GET /providers` の `last_check.result` に出る文字列）。
@@ -714,5 +790,38 @@ model = "fake"
         for secret in ["/accounts/a", "/accounts/b", "/base", "base\""] {
             assert!(!json.contains(secret), "{secret} leaked: {json}");
         }
+    }
+
+    /// S7: `[accounts]` は reload の対象外。`claude_dir` / `max_runs_per_account` / `check_model` のどれかが
+    /// 変わっていたら `reload` はエラー（400 に写る文字列）を返し、稼働中の状態には触れない。
+    #[test]
+    fn reload_providers_rejects_changes_to_the_accounts_section() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let accounts_dir = dir.path().join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap_or_else(|e| panic!("{e}"));
+        let config_path = dir.path().join("taskd.toml");
+        let db = dir.path().join("taskd.db");
+        let ws = dir.path().join("ws");
+        let write_config = |max_runs: u32| {
+            std::fs::write(
+                &config_path,
+                format!(
+                    "db = {db:?}\nworkspace_root = {ws:?}\n[accounts]\nclaude_dir = {accounts_dir:?}\nmax_runs_per_account = {max_runs}\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n"
+                ),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        };
+        write_config(2);
+        let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
+        let mut dispatcher = build_dispatcher(&config).unwrap_or_else(|e| panic!("{e}"));
+
+        // [accounts] が変わっていなければ通る。
+        assert!(reload_providers(&mut dispatcher, &config).is_ok());
+
+        // max_runs_per_account を変えると、次の reload はエラーになる。
+        write_config(3);
+        let err = reload_providers(&mut dispatcher, &config).unwrap_err();
+        assert!(err.contains("[accounts]"), "{err}");
+        assert!(err.contains("restart"), "{err}");
     }
 }

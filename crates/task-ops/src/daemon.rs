@@ -32,6 +32,62 @@ pub struct DaemonSnapshot {
     /// ADR-0018: `[[clusters]]` の稼働状況（`id` 昇順）。第 2 段階で追加したので、古いスナップショットには無い。
     #[serde(default)]
     pub clusters: Vec<ClusterLive>,
+    /// ADR-0024 D1/D5: `[accounts] claude_dir` の絶対パス（`[accounts]` が無ければ `None`）。
+    #[serde(default)]
+    pub accounts_root: Option<String>,
+    /// ADR-0024 D1: `[accounts] max_runs_per_account`（`[accounts]` が無ければ `None`）。
+    #[serde(default)]
+    pub max_runs_per_account: Option<usize>,
+    /// ADR-0024: プールのアカウント（`id` 昇順）。`[accounts]` が無ければ空。
+    #[serde(default)]
+    pub accounts: Vec<AccountLive>,
+}
+
+/// ADR-0024: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountLive {
+    pub id: String,
+    /// `.credentials.json` の有無。
+    pub logged_in: bool,
+    /// 実行中の run（ワーカー run + このアカウントを使う Reviewer run）の数。
+    pub in_use: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AccountUsageLive>,
+    /// ADR-0024 D3 のスコア。除外されていれば `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    /// `"not_logged_in" | "at_capacity" | "cooldown" | "five_hour_exhausted" | "seven_day_exhausted" | "rejected"`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown: Option<AccountCooldownLive>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<ProviderCheckView>,
+    /// 進行中のログイン中継（ADR-0024 D7）があるか。
+    #[serde(default)]
+    pub login_pending: bool,
+}
+
+/// `RateLimitObservation` の観測値部分（Unix 秒のまま。壁時計の文字列化は task-api が行う）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountUsageLive {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<task_core::RateWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seven_day: Option<task_core::RateWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    pub observed_at: i64,
+    /// `"run" | "check"`。
+    pub source: String,
+}
+
+/// アカウントの cooldown（Unix 秒）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountCooldownLive {
+    pub until: i64,
+    /// `"auth_failed" | "throttled" | "exhausted"`。
+    pub reason: String,
 }
 
 /// 実行中の run（ワーカー run、またはプロバイダを使う Reviewer run）。
@@ -78,6 +134,9 @@ pub struct ProviderLive {
     /// taskd を再起動すると消える（イベントにも DB にも残さない）。一度も確認していなければ `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check: Option<ProviderCheckView>,
+    /// ADR-0024 D2: `[accounts]` のプールから選ぶか。古いスナップショットには無いので既定 `false`。
+    #[serde(default)]
+    pub account_pool: bool,
 }
 
 /// ADR-0022 D2: 1 回の疎通確認の記録。

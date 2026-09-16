@@ -153,6 +153,9 @@ pub struct ProviderView {
     /// または taskd を再起動した後は `null`（メモリだけに持つ観測値）。
     pub last_check: Option<task_ops::daemon::ProviderCheckView>,
     pub stats: ProviderStats,
+    /// ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。
+    #[serde(default)]
+    pub account_pool: bool,
 }
 
 /// プロバイダ別の run 集計（task-api のメモリ内の観測値。再起動で再計算）。
@@ -249,6 +252,9 @@ pub struct ProviderConfigView {
     pub model: Option<String>,
     /// `[[providers]].env` のキー名だけ。
     pub env_keys: Vec<String>,
+    /// ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。
+    #[serde(default)]
+    pub account_pool: bool,
 }
 
 /// `[[clusters]]` 1 行の要約（ADR-0018 D7: `env` の値は出さない）。
@@ -328,4 +334,114 @@ pub struct StreamReset {
     pub reason: String,
     /// 以後の送信開始位置（最新の id）。
     pub cursor: u64,
+}
+
+// ---- Phase 13（ADR-0024）: Claude アカウントのプール ----
+
+/// `GET /accounts`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountList {
+    /// `[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `null`。
+    pub root: Option<String>,
+    pub max_runs_per_account: usize,
+    /// `id` 昇順。
+    pub items: Vec<AccountView>,
+}
+
+/// 1 アカウント（`GET /accounts` の要素、`POST /accounts` の応答）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountView {
+    pub id: String,
+    /// アカウントディレクトリの絶対パス（ログイン手順に要る。秘密の中身は含まない）。
+    pub dir: String,
+    /// `.credentials.json` の有無（中身は読まない）。
+    pub logged_in: bool,
+    /// 実行中の run の数。最初の tick 前は `0`。
+    pub in_use: u32,
+    pub usage: Option<AccountUsageView>,
+    /// ADR-0024 D3 のスコア。除外なら `null`。
+    pub score: Option<f64>,
+    /// `"not_logged_in" | "at_capacity" | "cooldown" | "five_hour_exhausted" | "seven_day_exhausted" | "rejected"`。
+    pub excluded_reason: Option<String>,
+    pub cooldown: Option<AccountCooldownView>,
+    pub last_check: Option<task_ops::daemon::ProviderCheckView>,
+    /// ADR-0024 D7: 進行中のログイン中継があるか。
+    pub login_pending: bool,
+    pub stats: AccountStats,
+}
+
+/// `RateLimitObservation` を RFC 3339 に直したもの。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountUsageView {
+    pub five_hour: Option<RateWindowView>,
+    pub seven_day: Option<RateWindowView>,
+    pub status: Option<String>,
+    pub observed_at: String,
+    /// `"run" | "check"`。
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RateWindowView {
+    pub utilization: f64,
+    pub resets_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountCooldownView {
+    pub until: String,
+    /// `"auth_failed" | "throttled" | "exhausted"`。
+    pub reason: String,
+}
+
+/// `WorkerStarted.account` / `WorkerFinished` から集計（task-api のメモリ内の観測値。再起動で再計算）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountStats {
+    pub runs: u64,
+    pub done: u64,
+    pub error: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// `POST /accounts` の要求本文。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccountCreateBody {
+    pub id: String,
+}
+
+/// `POST /accounts/{id}/check` の応答（ADR-0024 D6）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountCheckResponse {
+    pub result: crate::admin::ProviderCheckResult,
+    pub checked_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AccountUsageView>,
+}
+
+/// `POST /accounts/{id}/login` の応答（ADR-0024 D7）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountLoginStart {
+    pub url: String,
+    /// 10 分後（RFC 3339）。
+    pub expires_at: String,
+}
+
+/// `POST /accounts/{id}/login/code` の要求本文。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccountLoginCodeBody {
+    pub code: String,
+}
+
+/// `POST /accounts/{id}/login/code` の応答。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AccountLoginResult {
+    /// `"ok" | "failed"`。
+    pub result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }

@@ -2,10 +2,11 @@
 //! アダプタはワーカー固有の事情を閉じ込め、結果を `RunOutcome` に正規化して返す。
 //! 状態遷移の判断はアダプタでは行わない（task-dispatch の責務）。
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use task_core::{ArtifactRef, Usage};
+use task_core::{ArtifactRef, RateLimitObservation, Usage};
 
 use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 
@@ -91,6 +92,10 @@ pub trait EventSink: Send + Sync {
     /// `delegate` メッセージ（LLM アダプタでは `artifacts/delegate.json`）の提案（ADR-0016 D2）。ディスパッチャが検証して
     /// 子タスクを挿入する。既定は何もしない（`taskctl worker run` など DB を変えない文脈）。
     fn delegate(&self, _tasks: &[task_core::DelegateTask]) {}
+    /// claude-code アダプタが stream-json の `rate_limit_event` を解析するたびに呼ぶ（ADR-0024 D4）。
+    /// ディスパッチャはプールのアカウントで走っている run のシンクから、この値を `AccountBook` に記録する。
+    /// 既定は何もしない（`fake` アダプタや `taskctl worker run` の観測用途など）。
+    fn rate_limit(&self, _obs: RateLimitObservation) {}
 }
 
 /// 何もしないシンク（テスト・デバッグ用）。
@@ -114,4 +119,11 @@ pub trait WorkerAdapter: Send + Sync {
         limits: RunLimits,
         sink: &dyn EventSink,
     ) -> Result<RunOutcome, AdapterError>;
+
+    /// `extra` を環境の末尾に重ねた複製を返す（ADR-0024 D2: taskd の環境 < アダプタの環境 < プロバイダの環境 <
+    /// アカウント）。プール（`account_pool = true`）で選んだアカウントの `CLAUDE_SECURESTORAGE_CONFIG_DIR` を
+    /// 足すために使う。既定は `None`（この経路をサポートしないアダプタ）。
+    fn with_env(&self, _extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
+        None
+    }
 }

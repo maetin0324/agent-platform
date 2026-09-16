@@ -15,6 +15,7 @@ use task_ops::daemon::DaemonSnapshot;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 
+mod accounts;
 mod admin;
 mod files;
 mod handlers;
@@ -27,7 +28,10 @@ mod state;
 mod stats;
 pub mod types;
 
-pub use admin::{AdminRequest, CheckError, ProviderCheckOutcome, ProviderCheckResult};
+pub use admin::{
+    AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome, AdminRequest,
+    CheckError, ProviderCheckOutcome, ProviderCheckResult,
+};
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};
 pub use stats::classify_outcome;
@@ -82,6 +86,11 @@ pub struct ApiSettings {
     pub providers_dir: Option<PathBuf>,
     /// ADR-0017 M2: `reload` / `check` を taskd（ワーカー起動ができる側）へ委譲するチャネル。`None` なら両方使えない。
     pub admin_tx: Option<mpsc::Sender<AdminRequest>>,
+    /// ADR-0024 D1: `[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `None`
+    /// （そのときは `GET /accounts` が `{root: null, items: []}`、管理系は 409 `accounts_unavailable`）。
+    pub accounts_root: Option<PathBuf>,
+    /// ADR-0024 D1: `[accounts] max_runs_per_account`。
+    pub max_runs_per_account: usize,
 }
 
 impl std::fmt::Debug for ApiSettings {
@@ -100,6 +109,8 @@ impl std::fmt::Debug for ApiSettings {
             .field("started_at", &self.started_at)
             .field("providers_dir", &self.providers_dir)
             .field("admin_tx", &self.admin_tx.as_ref().map(|_| "<sender>"))
+            .field("accounts_root", &self.accounts_root)
+            .field("max_runs_per_account", &self.max_runs_per_account)
             .finish()
     }
 }

@@ -567,6 +567,7 @@ mod tests {
                     adapter: "claude-code".into(),
                     model: "m".into(),
                     provider: Some("claude-a".into()),
+                    account: None,
                     role: None,
                     task_role: None,
                 },
@@ -814,6 +815,9 @@ mod tests {
             unroutable: vec![stuck.id],
             clusters: vec![],
             providers: vec![],
+            accounts_root: None,
+            max_runs_per_account: None,
+            accounts: vec![],
         };
         let with_snapshot = inbox(&store, Some(&snapshot), &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
         assert!(
@@ -1027,6 +1031,9 @@ mod tests {
                 cooldown_until: None,
             }],
             providers: vec![],
+            accounts_root: None,
+            max_runs_per_account: None,
+            accounts: vec![],
         };
         let still_present = inbox(&store, Some(&disconnected_snapshot), &ctx, now, &no_evidence).expect("inbox");
         let (host, _, _) =

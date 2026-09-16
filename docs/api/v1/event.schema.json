@@ -177,6 +177,13 @@
         },
         {
           "properties": {
+            "account": {
+              "description": "プール（`account_pool = true`）で選ばれた Claude アカウントの id（ADR-0024 D4）。プールを使わない\nプロバイダ・導入前のイベントには無い。`provider`（アダプタ×プロバイダ行）とは別軸。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "adapter": {
               "type": "string"
             },

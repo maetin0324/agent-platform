@@ -8,7 +8,7 @@ use axum::extract::{FromRequestParts, Path, RawQuery, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -20,8 +20,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::admin::{
-    AdminRequest, ProviderCreateBody, ProviderPatchBody, read_provider_file, valid_adapter, valid_provider_id,
-    write_provider_file,
+    AccountAdminError, AdminRequest, ProviderCreateBody, ProviderPatchBody, read_provider_file, valid_adapter,
+    valid_provider_id, write_provider_file,
 };
 use crate::files::{self, FileRequest, FileTarget, RunFile};
 use crate::middleware::require_admin;
@@ -30,8 +30,10 @@ use crate::query::{QueryParams, event_type_name, parse_snake, parse_task_id};
 use crate::schema::API_V1_SCHEMA_JSON;
 use crate::state::ApiState;
 use crate::types::{
-    AnswerBody, ArtifactList, CancelBody, ClusterView, Clusters, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
-    ProviderCheckResponse, ProviderConfigView, ProviderView, Providers, ReloadResult, RunList, ValidationError,
+    AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult, AccountLoginStart,
+    AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody, ClusterView, Clusters, DaemonView, DbInfo,
+    DecisionBody, EventsPage, Health, ProviderCheckResponse, ProviderConfigView, ProviderView, Providers,
+    ReloadResult, RunList, ValidationError,
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
@@ -39,6 +41,8 @@ type ApiResult = Result<Response, ApiProblem>;
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const TITLE_QUERY_MAX_CHARS: usize = 200;
+/// ADR-0024 D2: `account_pool = true` を受け付けるアダプタ（`crate::admin::KNOWN_ADAPTERS` の一員）。
+const CLAUDE_CODE_ADAPTER: &str = "claude-code";
 
 pub(crate) fn router(state: ApiState) -> Router {
     Router::new()
@@ -68,6 +72,11 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/providers/{id}", patch(patch_provider).delete(delete_provider))
         .route("/api/v1/providers/{id}/check", post(check_provider))
         .route("/api/v1/reload", post(reload))
+        .route("/api/v1/accounts", get(accounts).post(create_account))
+        .route("/api/v1/accounts/{id}", delete(delete_account))
+        .route("/api/v1/accounts/{id}/check", post(check_account))
+        .route("/api/v1/accounts/{id}/login", post(start_account_login).delete(cancel_account_login))
+        .route("/api/v1/accounts/{id}/login/code", post(submit_account_login_code))
         .route("/api/v1/clusters", get(clusters))
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
@@ -709,6 +718,7 @@ fn current_providers(state: &ApiState, snapshot: Option<&task_ops::daemon::Daemo
                 concurrency: p.concurrency,
                 model: p.model.clone(),
                 env_keys: p.env_keys.clone(),
+                account_pool: p.account_pool,
             })
             .collect(),
         _ => state.inner.config_view.providers.clone(),
@@ -753,6 +763,7 @@ async fn providers(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Ap
                 .and_then(|s| s.providers.iter().find(|live| live.id == provider.id))
                 .and_then(|live| live.last_check.clone()),
             stats,
+            account_pool: provider.account_pool,
         })
         .collect();
     Ok(json_response(StatusCode::OK, &Providers { items }))
@@ -777,6 +788,13 @@ async fn create_provider(State(state): State<ApiState>, headers: HeaderMap, RawQ
     }
     if create.concurrency.is_some_and(|c| c == 0) {
         return Err(ApiProblem::bad_request("concurrency must be >= 1"));
+    }
+    // ADR-0024 D2 / S1: `account_pool = true` は claude-code だけ、かつ `[accounts]` が設定済みのときだけ有効。
+    if create.account_pool && create.adapter != CLAUDE_CODE_ADAPTER {
+        return Err(ApiProblem::invalid_provider("account_pool = true requires adapter = \"claude-code\""));
+    }
+    if create.account_pool && state.inner.accounts_root.is_none() {
+        return Err(ApiProblem::invalid_provider("account_pool = true requires the [accounts] section to be configured"));
     }
     let path = crate::admin::provider_file_path(&dir, &create.id);
     if path.exists() {
@@ -819,6 +837,13 @@ async fn patch_provider(
     }
     let current = read_provider_file(&path).map_err(|e| ApiProblem::internal(e.to_string()))?;
     let updated = patch.apply(current);
+    // ADR-0024 D2 / S1: patch 後の組み合わせも検証する（`id`/`adapter` は patch で変わらない）。
+    if updated.account_pool && updated.adapter != CLAUDE_CODE_ADAPTER {
+        return Err(ApiProblem::invalid_provider("account_pool = true requires adapter = \"claude-code\""));
+    }
+    if updated.account_pool && state.inner.accounts_root.is_none() {
+        return Err(ApiProblem::invalid_provider("account_pool = true requires the [accounts] section to be configured"));
+    }
     write_provider_file(&dir, &updated).map_err(|e| ApiProblem::internal(e.to_string()))?;
     tracing::info!(who = "admin", op = "provider_patch", provider_id = %id, "admin: provider patched");
     Ok(json_response(StatusCode::OK, &updated.to_view()))
@@ -914,6 +939,330 @@ async fn check_provider(
             Err(ApiProblem::bad_request(format!("invalid config: {message}")))
         }
         Err(crate::admin::CheckError::Unavailable(message)) => Err(ApiProblem::internal(message)),
+    }
+}
+
+// ---- Phase 13（ADR-0024）: Claude アカウントのプール ----
+
+/// D3.29 `GET /accounts`: フィルタシステムのスキャン（`logged_in`・`dir`）+ スナップショットの観測値 + 集計を merge する。
+/// 読み取りなので認証は不要（管理系は 3.30 以降）。
+async fn accounts(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
+    no_query(&raw)?;
+    let Some(root) = state.inner.accounts_root.clone() else {
+        return Ok(json_response(StatusCode::OK, &AccountList { root: None, max_runs_per_account: 0, items: Vec::new() }));
+    };
+    let snapshot = state.snapshot();
+    let dirs = crate::accounts::scan_accounts(&root);
+    let ids: Vec<String> = dirs.iter().map(|d| d.id.clone()).collect();
+    let inner = Arc::clone(&state.inner);
+    let stats = state
+        .blocking(move |store| {
+            let mut guard = inner.account_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.catch_up(store).map_err(store_problem)?;
+            Ok(ids.iter().map(|id| guard.view(id)).collect::<Vec<_>>())
+        })
+        .await?;
+    let items = dirs
+        .iter()
+        .zip(stats)
+        .map(|(d, stats)| {
+            let live = snapshot.as_ref().and_then(|s| s.accounts.iter().find(|a| a.id == d.id));
+            AccountView {
+                id: d.id.clone(),
+                dir: d.dir.display().to_string(),
+                logged_in: d.logged_in,
+                in_use: live.map(|l| l.in_use).unwrap_or(0),
+                usage: live.and_then(|l| l.usage.as_ref()).map(crate::accounts::usage_view_from_live),
+                score: live.and_then(|l| l.score),
+                excluded_reason: live.and_then(|l| l.excluded_reason.clone()),
+                cooldown: live.and_then(|l| l.cooldown.as_ref()).map(crate::accounts::cooldown_view_from_live),
+                last_check: live.and_then(|l| l.last_check.clone()),
+                login_pending: live.map(|l| l.login_pending).unwrap_or(false),
+                stats,
+            }
+        })
+        .collect();
+    Ok(json_response(
+        StatusCode::OK,
+        &AccountList {
+            root: Some(root.display().to_string()),
+            max_runs_per_account: state.inner.max_runs_per_account,
+            items,
+        },
+    ))
+}
+
+/// 3.30 `POST /accounts`: ディレクトリを 0700 で作る。task-api 自身は `Dispatcher`/`AccountBook` に触れない
+/// （次の選択のタイミングで taskd がディレクトリを見つける。ADR-0024 D1）。
+async fn create_account(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let Some(root) = state.inner.accounts_root.clone() else {
+        return Err(ApiProblem::accounts_unavailable());
+    };
+    let create: AccountCreateBody = read_json(body, false).await?;
+    if !crate::accounts::valid_account_id(&create.id) {
+        return Err(ApiProblem::bad_request("id must be 1-64 ASCII alphanumeric/-/_ characters"));
+    }
+    let dir = root.join(&create.id);
+    // N7: `exists()` してから作る（TOCTOU）のではなく、`DirBuilder::create` の `AlreadyExists` を使って
+    // 作成そのものを排他にする。親（`root`）は先に `create_dir_all` で用意する（無ければ）。
+    std::fs::create_dir_all(&root).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(ApiProblem::account_exists(&create.id)),
+        Err(e) => return Err(ApiProblem::internal(e.to_string())),
+    }
+    tracing::info!(who = "admin", op = "account_create", account_id = %create.id, "admin: account created");
+    let view = AccountView {
+        id: create.id.clone(),
+        dir: dir.display().to_string(),
+        logged_in: false,
+        in_use: 0,
+        usage: None,
+        score: None,
+        excluded_reason: None,
+        cooldown: None,
+        last_check: None,
+        login_pending: false,
+        stats: AccountStats::default(),
+    };
+    let mut response = json_response(StatusCode::CREATED, &view);
+    if let Ok(location) = HeaderValue::from_str(&format!("/api/v1/accounts/{}", create.id)) {
+        response.headers_mut().insert(header::LOCATION, location);
+    }
+    Ok(response)
+}
+
+/// 3.31 `DELETE /accounts/{id}`: taskd 側へ委譲する（S2+S8）。`<claude_dir>/.removed/<id>-<unix秒>/` へ移す
+/// （認証ファイルは消さない）。task-api 自身はファイルを動かさない: スナップショットの `in_use` はポーリング
+/// 間隔だけ古くなりうる（レース）ので、`account_in_use`（running/reviewing を直接見る、ディスパッチャの
+/// 権威ある値）を持つ taskd 側でチェックしてから移動する。
+async fn delete_account(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    if state.inner.accounts_root.is_none() {
+        return Err(ApiProblem::accounts_unavailable());
+    }
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::accounts_unavailable());
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx
+        .send(AdminRequest::AccountRemove { id: id.clone(), reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
+        Ok(Ok(Ok(()))) => {
+            tracing::info!(who = "admin", op = "account_delete", account_id = %id, "admin: account removed");
+            Ok(json_response(StatusCode::OK, &serde_json::json!({})))
+        }
+        Ok(Ok(Err(e))) => Err(account_admin_error(&id, e)),
+        Ok(Err(_)) => Err(ApiProblem::internal("taskd dropped the account remove request")),
+        Err(_) => Err(ApiProblem::internal("account remove timed out")),
+    }
+}
+
+fn account_admin_error(id: &str, err: AccountAdminError) -> ApiProblem {
+    match err {
+        AccountAdminError::NotFound => ApiProblem::account_not_found(id),
+        // S6: taskd 側の都合で完了できなかった（`[accounts]` 未設定・チャネルが閉じている等）のは
+        // サーバの内部エラーではなく、GUI が「アカウント管理は使えない」と表示すべき状態。
+        AccountAdminError::Unavailable(_) => ApiProblem::accounts_unavailable(),
+        AccountAdminError::LoginNotStarted => ApiProblem::login_not_started(),
+        AccountAdminError::LoginFailed(message) => ApiProblem::login_failed(message),
+        AccountAdminError::InUse => ApiProblem::account_in_use(id),
+    }
+}
+
+/// 3.32 `POST /accounts/{id}/check`（ADR-0024 D6）: taskd 側で実行する（task-api はプロセスを起動しない）。
+async fn check_account(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    if state.inner.accounts_root.is_none() {
+        return Err(ApiProblem::accounts_unavailable());
+    }
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::accounts_unavailable());
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx
+        .send(AdminRequest::AccountCheck { id: id.clone(), reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    let outcome = match tokio::time::timeout(std::time::Duration::from_secs(70), reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the check request")),
+        Err(_) => return Err(ApiProblem::internal("check timed out")),
+    };
+    match outcome {
+        Ok(outcome) => {
+            tracing::info!(who = "admin", op = "account_check", account_id = %id, result = ?outcome.result, "admin: account checked");
+            Ok(json_response(
+                StatusCode::OK,
+                &AccountCheckResponse {
+                    result: outcome.result,
+                    checked_at: now_rfc3339(),
+                    detail: outcome.detail,
+                    usage: outcome
+                        .observation
+                        .as_ref()
+                        .map(|obs| crate::accounts::usage_view_from_observation(obs, "check")),
+                },
+            ))
+        }
+        Err(e) => Err(account_admin_error(&id, e)),
+    }
+}
+
+/// 3.33 `POST /accounts/{id}/login`（ADR-0024 D7）: `claude auth login` を開始し、認可 URL を返す。
+async fn start_account_login(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    if state.inner.accounts_root.is_none() {
+        return Err(ApiProblem::accounts_unavailable());
+    }
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::accounts_unavailable());
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx
+        .send(AdminRequest::AccountLoginStart { id: id.clone(), reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    let outcome = match tokio::time::timeout(std::time::Duration::from_secs(20), reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the login request")),
+        Err(_) => return Err(ApiProblem::internal("login start timed out")),
+    };
+    match outcome {
+        Ok(started) => {
+            // D5: URL・認可コードはログに出さない。
+            tracing::info!(who = "admin", op = "account_login_start", account_id = %id, "admin: account login started");
+            Ok(json_response(
+                StatusCode::OK,
+                &AccountLoginStart {
+                    url: started.url,
+                    expires_at: crate::accounts::rfc3339_unix(started.expires_at_unix),
+                },
+            ))
+        }
+        Err(e) => Err(account_admin_error(&id, e)),
+    }
+}
+
+/// 3.34 `POST /accounts/{id}/login/code`（ADR-0024 D7）: コードは受け取ってもログにも応答にも出さない。
+async fn submit_account_login_code(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    if state.inner.accounts_root.is_none() {
+        return Err(ApiProblem::accounts_unavailable());
+    }
+    let AccountLoginCodeBody { code } = read_json(body, false).await?;
+    if code.trim().is_empty() {
+        return Err(ApiProblem::validation(vec![ValidationError {
+            field: Some("code".to_string()),
+            message: "code must not be blank".to_string(),
+        }]));
+    }
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::accounts_unavailable());
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx
+        .send(AdminRequest::AccountLoginCode { id: id.clone(), code, reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the login code request")),
+        Err(_) => return Err(ApiProblem::internal("login code timed out")),
+    };
+    match outcome {
+        Ok(result) => {
+            tracing::info!(who = "admin", op = "account_login_code", account_id = %id, ok = result.ok, "admin: account login code submitted");
+            Ok(json_response(
+                StatusCode::OK,
+                &AccountLoginResult {
+                    result: if result.ok { "ok" } else { "failed" }.to_string(),
+                    detail: result.detail,
+                },
+            ))
+        }
+        Err(e) => Err(account_admin_error(&id, e)),
+    }
+}
+
+/// 3.35 `DELETE /accounts/{id}/login`: 進行中のログインを止める（無ければ何もしない）。
+async fn cancel_account_login(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    if state.inner.accounts_root.is_none() {
+        return Err(ApiProblem::accounts_unavailable());
+    }
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::accounts_unavailable());
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx
+        .send(AdminRequest::AccountLoginCancel { id: id.clone(), reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
+        Ok(Ok(Ok(()))) => {
+            tracing::info!(who = "admin", op = "account_login_cancel", account_id = %id, "admin: account login cancelled");
+            Ok(json_response(StatusCode::OK, &serde_json::json!({})))
+        }
+        Ok(Ok(Err(e))) => Err(account_admin_error(&id, e)),
+        Ok(Err(_)) => Err(ApiProblem::internal("taskd dropped the login cancel request")),
+        Err(_) => Err(ApiProblem::internal("login cancel timed out")),
     }
 }
 
@@ -1047,6 +1396,8 @@ mod tests {
             started_at: "2026-09-14T00:00:00Z".into(),
             providers_dir: None,
             admin_tx: None,
+            accounts_root: None,
+            max_runs_per_account: 0,
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))

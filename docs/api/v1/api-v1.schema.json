@@ -1,5 +1,418 @@
 {
   "$defs": {
+    "AccountCheckResponse": {
+      "description": "`POST /accounts/{id}/check` の応答（ADR-0024 D6）。",
+      "properties": {
+        "checked_at": {
+          "type": "string"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "$ref": "#/$defs/ProviderCheckResult"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUsageView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "result",
+        "checked_at"
+      ],
+      "type": "object"
+    },
+    "AccountCooldownLive": {
+      "description": "アカウントの cooldown（Unix 秒）。",
+      "properties": {
+        "reason": {
+          "description": "`\"auth_failed\" | \"throttled\" | \"exhausted\"`。",
+          "type": "string"
+        },
+        "until": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "until",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "AccountCooldownView": {
+      "properties": {
+        "reason": {
+          "description": "`\"auth_failed\" | \"throttled\" | \"exhausted\"`。",
+          "type": "string"
+        },
+        "until": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "until",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "AccountList": {
+      "description": "`GET /accounts`。",
+      "properties": {
+        "items": {
+          "description": "`id` 昇順。",
+          "items": {
+            "$ref": "#/$defs/AccountView"
+          },
+          "type": "array"
+        },
+        "max_runs_per_account": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "root": {
+          "description": "`[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "max_runs_per_account",
+        "items"
+      ],
+      "type": "object"
+    },
+    "AccountLive": {
+      "description": "ADR-0024: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。",
+      "properties": {
+        "cooldown": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountCooldownLive"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "excluded_reason": {
+          "description": "`\"not_logged_in\" | \"at_capacity\" | \"cooldown\" | \"five_hour_exhausted\" | \"seven_day_exhausted\" | \"rejected\"`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "in_use": {
+          "description": "実行中の run（ワーカー run + このアカウントを使う Reviewer run）の数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCheckView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logged_in": {
+          "description": "`.credentials.json` の有無。",
+          "type": "boolean"
+        },
+        "login_pending": {
+          "default": false,
+          "description": "進行中のログイン中継（ADR-0024 D7）があるか。",
+          "type": "boolean"
+        },
+        "score": {
+          "description": "ADR-0024 D3 のスコア。除外されていれば `None`。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUsageLive"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "logged_in",
+        "in_use"
+      ],
+      "type": "object"
+    },
+    "AccountLoginResult": {
+      "description": "`POST /accounts/{id}/login/code` の応答。",
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "description": "`\"ok\" | \"failed\"`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
+    "AccountLoginStart": {
+      "description": "`POST /accounts/{id}/login` の応答（ADR-0024 D7）。",
+      "properties": {
+        "expires_at": {
+          "description": "10 分後（RFC 3339）。",
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "AccountStats": {
+      "description": "`WorkerStarted.account` / `WorkerFinished` から集計（task-api のメモリ内の観測値。再起動で再計算）。",
+      "properties": {
+        "done": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "runs",
+        "done",
+        "error",
+        "input_tokens",
+        "output_tokens"
+      ],
+      "type": "object"
+    },
+    "AccountUsageLive": {
+      "description": "`RateLimitObservation` の観測値部分（Unix 秒のまま。壁時計の文字列化は task-api が行う）。",
+      "properties": {
+        "five_hour": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "seven_day": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "description": "`\"run\" | \"check\"`。",
+          "type": "string"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "observed_at",
+        "source"
+      ],
+      "type": "object"
+    },
+    "AccountUsageView": {
+      "description": "`RateLimitObservation` を RFC 3339 に直したもの。",
+      "properties": {
+        "five_hour": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateWindowView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "seven_day": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateWindowView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "description": "`\"run\" | \"check\"`。",
+          "type": "string"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "observed_at",
+        "source"
+      ],
+      "type": "object"
+    },
+    "AccountView": {
+      "description": "1 アカウント（`GET /accounts` の要素、`POST /accounts` の応答）。",
+      "properties": {
+        "cooldown": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountCooldownView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dir": {
+          "description": "アカウントディレクトリの絶対パス（ログイン手順に要る。秘密の中身は含まない）。",
+          "type": "string"
+        },
+        "excluded_reason": {
+          "description": "`\"not_logged_in\" | \"at_capacity\" | \"cooldown\" | \"five_hour_exhausted\" | \"seven_day_exhausted\" | \"rejected\"`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "in_use": {
+          "description": "実行中の run の数。最初の tick 前は `0`。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCheckView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logged_in": {
+          "description": "`.credentials.json` の有無（中身は読まない）。",
+          "type": "boolean"
+        },
+        "login_pending": {
+          "description": "ADR-0024 D7: 進行中のログイン中継があるか。",
+          "type": "boolean"
+        },
+        "score": {
+          "description": "ADR-0024 D3 のスコア。除外なら `null`。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "stats": {
+          "$ref": "#/$defs/AccountStats"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUsageView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "dir",
+        "logged_in",
+        "in_use",
+        "login_pending",
+        "stats"
+      ],
+      "type": "object"
+    },
     "Action": {
       "enum": [
         "approve",
@@ -1018,6 +1431,22 @@
     },
     "DaemonSnapshot": {
       "properties": {
+        "accounts": {
+          "default": [],
+          "description": "ADR-0024: プールのアカウント（`id` 昇順）。`[accounts]` が無ければ空。",
+          "items": {
+            "$ref": "#/$defs/AccountLive"
+          },
+          "type": "array"
+        },
+        "accounts_root": {
+          "default": null,
+          "description": "ADR-0024 D1/D5: `[accounts] claude_dir` の絶対パス（`[accounts]` が無ければ `None`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "awaiting_children": {
           "default": [],
           "description": "ADR-0023 D3: 委譲した子が終わるのを待っている親（`reviewing` のまま。id 昇順）。\n「自分の判定待ち」と区別するための観測値。古いスナップショットには無いので既定は空。",
@@ -1062,6 +1491,16 @@
         },
         "last_tick_at": {
           "type": "string"
+        },
+        "max_runs_per_account": {
+          "default": null,
+          "description": "ADR-0024 D1: `[accounts] max_runs_per_account`（`[accounts]` が無ければ `None`）。",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "pid": {
           "format": "uint32",
@@ -1342,6 +1781,13 @@
         },
         {
           "properties": {
+            "account": {
+              "description": "プール（`account_pool = true`）で選ばれた Claude アカウントの id（ADR-0024 D4）。プールを使わない\nプロバイダ・導入前のイベントには無い。`provider`（アダプタ×プロバイダ行）とは別軸。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "adapter": {
               "type": "string"
             },
@@ -2285,6 +2731,11 @@
     },
     "ProviderConfigView": {
       "properties": {
+        "account_pool": {
+          "default": false,
+          "description": "ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。",
+          "type": "boolean"
+        },
         "adapter": {
           "type": "string"
         },
@@ -2329,6 +2780,11 @@
     "ProviderLive": {
       "description": "プロバイダ（`[[providers]]` の行 = アカウント）の稼働状況。`env` の値は含めない。",
       "properties": {
+        "account_pool": {
+          "default": false,
+          "description": "ADR-0024 D2: `[accounts]` のプールから選ぶか。古いスナップショットには無いので既定 `false`。",
+          "type": "boolean"
+        },
         "adapter": {
           "type": "string"
         },
@@ -2455,6 +2911,11 @@
     },
     "ProviderView": {
       "properties": {
+        "account_pool": {
+          "default": false,
+          "description": "ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。",
+          "type": "boolean"
+        },
         "adapter": {
           "type": "string"
         },
@@ -2576,6 +3037,42 @@
         "task",
         "question",
         "previous"
+      ],
+      "type": "object"
+    },
+    "RateWindow": {
+      "description": "1 つの枠（5 時間 / 7 日）の観測値。",
+      "properties": {
+        "resets_at": {
+          "description": "枠がリセットされる時刻（Unix 秒、`resetsAt`）",
+          "format": "int64",
+          "type": "integer"
+        },
+        "utilization": {
+          "description": "0.0〜1.0（`unifiedWindows.<w>.utilization`）",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "utilization",
+        "resets_at"
+      ],
+      "type": "object"
+    },
+    "RateWindowView": {
+      "properties": {
+        "resets_at": {
+          "type": "string"
+        },
+        "utilization": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "utilization",
+        "resets_at"
       ],
       "type": "object"
     },
@@ -3620,6 +4117,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "スキーマ生成のルート。",
   "properties": {
+    "account": {
+      "$ref": "#/$defs/AccountView"
+    },
+    "account_check": {
+      "$ref": "#/$defs/AccountCheckResponse"
+    },
+    "account_list": {
+      "$ref": "#/$defs/AccountList",
+      "description": "Phase 13（ADR-0024）: Claude アカウントのプール。"
+    },
+    "account_login_result": {
+      "$ref": "#/$defs/AccountLoginResult"
+    },
+    "account_login_start": {
+      "$ref": "#/$defs/AccountLoginStart"
+    },
     "answer": {
       "$ref": "#/$defs/AnswerBody"
     },
@@ -3732,6 +4245,11 @@
     "reload",
     "provider_check",
     "clusters",
+    "account_list",
+    "account",
+    "account_check",
+    "account_login_start",
+    "account_login_result",
     "daemon",
     "config",
     "stream_hello",

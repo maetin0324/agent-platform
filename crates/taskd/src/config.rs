@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use task_core::{DelegationLimits, RoleSpec, Tier, WorkerHint};
-use task_dispatch::{ClusterSpec, DispatchConfig, ProviderSpec};
+use task_dispatch::{AccountsRuntimeConfig, ClusterSpec, DispatchConfig, ProviderSpec};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -79,9 +79,33 @@ pub struct Config {
     /// ADR-0016 D2: 実行中の委譲の上限。
     #[serde(default)]
     pub delegation: DelegationConfig,
+    /// ADR-0024 D1: Claude アカウントのプール。無ければ `account_pool = true` のプロバイダは設定エラー。
+    #[serde(default)]
+    pub accounts: Option<AccountsConfig>,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+}
+
+/// `[accounts]`（ADR-0024 D1）: `claude_dir` の下の 1 ディレクトリが 1 アカウント。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountsConfig {
+    /// 相対なら設定ファイル基準。`Config::load` が絶対化する。
+    pub claude_dir: PathBuf,
+    /// 1 アカウントで同時に走らせる run の上限。
+    #[serde(default = "default_max_runs_per_account")]
+    pub max_runs_per_account: usize,
+    /// D6 の確認に使うモデル（枠はアカウント単位なので最も安いモデルでよい）。
+    #[serde(default = "default_check_model")]
+    pub check_model: String,
+}
+
+fn default_max_runs_per_account() -> usize {
+    2
+}
+fn default_check_model() -> String {
+    "haiku".to_string()
 }
 
 /// `[api]`（ADR-0013 D3 / D11）: HTTP API 層。`listen` が無ければ API を起動しない（既定）。
@@ -386,6 +410,10 @@ pub struct ProviderConfig {
     /// （例: `CLAUDE_CONFIG_DIR`、`CODEX_HOME`。ADR-0012 D1）。
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0024 D2: `true` なら `[accounts]` のプールから残量に基づいてアカウントを選ぶ。`adapter = "claude-code"`
+    /// かつ `[accounts]` があるときだけ有効（既定 `false`）。
+    #[serde(default)]
+    pub account_pool: bool,
 }
 
 fn default_db() -> PathBuf {
@@ -486,6 +514,11 @@ impl Config {
             cfg.providers.extend(load_provider_files(&dir)?);
             cfg.providers_dir = Some(dir);
         }
+        if let Some(accounts) = &mut cfg.accounts
+            && accounts.claude_dir.is_relative()
+        {
+            accounts.claude_dir = base.join(&accounts.claude_dir);
+        }
         cfg.validate()?;
         // API を有効にするなら、トークンが読めることを起動時に確かめる（exit 2）。
         if cfg.api.listen.is_some() {
@@ -522,6 +555,26 @@ impl Config {
             if p.concurrency == 0 {
                 return Err(ConfigError::Invalid(format!("provider {}: concurrency must be >= 1", p.id)));
             }
+            // ADR-0024 D2: `account_pool = true` は claude-code だけ、かつ `[accounts]` が設定されている必要がある。
+            if p.account_pool {
+                if p.adapter != task_worker::ClaudeCodeAdapter::ID {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider {}: account_pool = true requires adapter = \"claude-code\"",
+                        p.id
+                    )));
+                }
+                if self.accounts.is_none() {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider {}: account_pool = true requires an [accounts] section",
+                        p.id
+                    )));
+                }
+            }
+        }
+        if let Some(accounts) = &self.accounts
+            && accounts.max_runs_per_account == 0
+        {
+            return Err(ConfigError::Invalid("[accounts] max_runs_per_account must be >= 1".into()));
         }
         // ADR-0010 D9: Reviewer run を満たせるプロバイダが無い設定は、Reviewer 条件のタスクが無音で待ち続ける原因になる。
         let reviewer = &self.reviewer;
@@ -661,7 +714,46 @@ impl Config {
             cluster_cooldown: Duration::from_secs(self.error_cooldown_secs),
             roles: self.role_specs(),
             delegation: self.delegation_limits(),
+            accounts: self.accounts.as_ref().map(|a| AccountsRuntimeConfig {
+                root: a.claude_dir.clone(),
+                max_runs_per_account: a.max_runs_per_account,
+                check_model: a.check_model.clone(),
+                fallback_cooldown_secs: self.error_cooldown_secs,
+            }),
         }
+    }
+
+    /// ADR-0024 D1: `[accounts] claude_dir` の下の `account_pool = true` のプロバイダ id（重複なし）。
+    pub fn account_pool_providers(&self) -> std::collections::HashSet<String> {
+        self.providers
+            .iter()
+            .filter(|p| p.account_pool)
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    /// ADR-0024 D1: `[accounts] claude_dir` を 0700 で作る（無ければ）。`[accounts]` が無ければ何もしない。
+    pub fn ensure_accounts_dir(&self) -> Result<(), ConfigError> {
+        let Some(accounts) = &self.accounts else {
+            return Ok(());
+        };
+        if accounts.claude_dir.exists() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&accounts.claude_dir).map_err(|source| ConfigError::Read {
+            path: accounts.claude_dir.clone(),
+            source,
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(&accounts.claude_dir, perms).map_err(|source| ConfigError::Read {
+                path: accounts.claude_dir.clone(),
+                source,
+            })?;
+        }
+        Ok(())
     }
 
     /// ADR-0016 D1: `[[roles]]` を task-core の型に写す（設定の順）。
@@ -1204,5 +1296,118 @@ max_tree_depth = 2
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.providers.len(), 1);
+    }
+
+    // ---- ADR-0024: [accounts] / account_pool ----
+
+    /// `account_pool = true` は `adapter = "claude-code"` かつ `[accounts]` を要求する（ADR-0024 D2）。
+    #[test]
+    fn account_pool_requires_claude_code_adapter_and_accounts_section() {
+        // account_pool のプロバイダはあるが [accounts] が無い。
+        let cfg: Config = toml::from_str(
+            "[[providers]]\nid = \"pool\"\nadapter = \"claude-code\"\naccount_pool = true\n",
+        )
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("[accounts]"), "{err}");
+
+        // [accounts] はあるが adapter が claude-code でない。
+        let cfg: Config = toml::from_str(
+            "[accounts]\nclaude_dir = \"acct\"\n[[providers]]\nid = \"pool\"\nadapter = \"fake\"\naccount_pool = true\n",
+        )
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("claude-code"), "{err}");
+
+        // 両方あれば通る。
+        let cfg: Config = toml::from_str(
+            "[accounts]\nclaude_dir = \"acct\"\n[[providers]]\nid = \"pool\"\nadapter = \"claude-code\"\naccount_pool = true\n",
+        )
+        .unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.account_pool_providers(), ["pool".to_string()].into());
+    }
+
+    /// `[accounts]` の既定値と、相対 `claude_dir` の解決（設定ファイル基準）。
+    #[test]
+    fn accounts_section_defaults_and_relative_claude_dir_is_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "[accounts]\nclaude_dir = \"claude-accounts\"\n[[providers]]\nid = \"pool\"\nadapter = \"claude-code\"\naccount_pool = true\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let accounts = cfg.accounts.as_ref().unwrap();
+        assert!(accounts.claude_dir.is_absolute());
+        assert_eq!(accounts.claude_dir, dir.path().canonicalize().unwrap().join("claude-accounts"));
+        assert_eq!(accounts.max_runs_per_account, 2);
+        assert_eq!(accounts.check_model, "haiku");
+
+        let d = cfg.dispatch_config();
+        let runtime = d.accounts.expect("dispatch_config carries [accounts]");
+        assert_eq!(runtime.root, accounts.claude_dir);
+        assert_eq!(runtime.max_runs_per_account, 2);
+        assert_eq!(runtime.check_model, "haiku");
+        assert_eq!(runtime.fallback_cooldown_secs, cfg.error_cooldown_secs);
+    }
+
+    /// `max_runs_per_account = 0` は設定エラー。未知キーも拒否。
+    #[test]
+    fn accounts_section_rejects_zero_max_runs_and_unknown_keys() {
+        let cfg: Config = toml::from_str(
+            "[accounts]\nclaude_dir = \"acct\"\nmax_runs_per_account = 0\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("max_runs_per_account"), "{err}");
+
+        assert!(toml::from_str::<Config>("[accounts]\nbogus = 1\n").is_err());
+        assert!(toml::from_str::<Config>("[accounts]\n").is_err()); // claude_dir is required
+    }
+
+    /// `ensure_accounts_dir` は `[accounts] claude_dir` を 0700 で作る（無ければ）。`[accounts]` が無ければ何もしない。
+    #[test]
+    fn ensure_accounts_dir_creates_the_directory_with_0700() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "[accounts]\nclaude_dir = \"claude-accounts\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let claude_dir = cfg.accounts.as_ref().unwrap().claude_dir.clone();
+        assert!(!claude_dir.exists());
+        cfg.ensure_accounts_dir().unwrap();
+        assert!(claude_dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&claude_dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+        }
+        // 既にあれば触らない（既存の中身・権限を壊さない）。
+        cfg.ensure_accounts_dir().unwrap();
+
+        // [accounts] 無しは no-op。
+        let no_accounts: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(no_accounts.ensure_accounts_dir().is_ok());
+    }
+
+    /// 例の設定ファイルにコメントアウトされた `[accounts]` / `account_pool` の節も構文として妥当なことを確認する
+    /// （読み込み自体は動かないが `toml` として壊れていないことは grep で確認できる）。
+    #[test]
+    fn multi_account_example_mentions_account_pool_commented_out() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/taskd.multi-account.example.toml"
+        ));
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("# [accounts]"));
+        assert!(text.contains("# account_pool = true"));
+        // 既存の受け入れ条件（Config::load が通る）はコメントアウトされているので変わらない。
+        assert!(Config::load(path).is_ok());
     }
 }
