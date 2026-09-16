@@ -155,6 +155,27 @@ test.describe("受け入れ条件 4・5: 委譲のあるタスクの詳細、作
     await expect(page.getByTestId("task-title")).toHaveText("Delegated-Child-1");
   });
 
+  test("一覧の行と DAG のノードに役割のラベルが出る（taskd-requests R2 対応後）", async ({ page }) => {
+    // 一覧: TaskSummary.role をそのまま出す（追加の GET /tasks/{id} は呼ばない）。
+    await page.goto("/tasks?q=Lead-Delegator");
+    const leadRow = page.getByTestId("task-row").filter({ hasText: "Lead-Delegator" });
+    await expect(leadRow.getByTestId("task-role")).toHaveText("lead");
+    await page.goto("/tasks?q=Delegated-Child-1");
+    const childRow = page.getByTestId("task-row").filter({ hasText: "Delegated-Child-1" });
+    await expect(childRow.getByTestId("task-role")).toHaveText("implementer");
+
+    // DAG: ノードのラベル 2 行目に役割（GraphNode.role）。
+    const leadId = await idOf("Lead-Delegator");
+    await page.goto(`/graph?root=${leadId}`);
+    await expect(page.getByTestId("graph-canvas")).toBeVisible();
+    const leadNode = page.locator(`.react-flow__node[data-id="${leadId}"]`);
+    await expect(leadNode).toContainText("Lead-Delegator");
+    await expect(leadNode).toContainText("[lead]");
+    await expect(page.locator(".react-flow__node").filter({ hasText: "Delegated-Child-1" })).toContainText(
+      "[implementer]",
+    );
+  });
+
   test("作成フォームで role と aggregate を指定すると POST /tasks の本文にそれが載る（空欄なら送らない）", async ({
     page,
   }) => {

@@ -1,13 +1,14 @@
 #!/bin/sh
 # scripts/taskd.sh fixture basic 用の fake ワーカー（docs/adr/0004 D5）。
-# stdin に RunRequest の JSON が 1 行来る。task.kind / task.title で分岐する（tests/e2e/tests/plan_scenarios.rs と同じ流儀。
-# 実 taskd の crate には依存しない。grep/cut だけで最初に現れる "kind" / "title" を取る）。
+# stdin に RunRequest の JSON が来る。task.kind / task.title で分岐する（tests/e2e/tests/plan_scenarios.rs と同じ流儀）。
+# 中身は read-run-request.mjs で解析する（grep で「最初に現れる "kind"」を取ると、条件や成果物の kind を
+# 拾ったり、直列化の細部が変わったときに静かに壊れる。G7-U3）。実 taskd の crate には依存しない。
 # @PLAN_JSON@ は scripts/taskd.sh が絶対パスに置換する。
 set -u
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 RUN=$(mktemp)
 cat >"$RUN"
-KIND=$(grep -o '"kind":"[a-z]*"' "$RUN" | head -1 | cut -d'"' -f4)
-TITLE=$(grep -o '"title":"[^"]*"' "$RUN" | head -1 | cut -d'"' -f4)
+eval "$(node "$HERE/read-run-request.mjs" <"$RUN")"
 rm -f "$RUN"
 mkdir -p artifacts
 

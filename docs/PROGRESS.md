@@ -2424,3 +2424,15 @@ P-56 はこれで解決（「子が 1 件でも failed なら親を review_fail�
   3. `on_child_failure_ignore_keeps_the_old_behaviour`: `"ignore"` では子が failed のままでも親が done（`child_failed` 遷移なし）。
 - スキーマ再生成（`event.schema.json` / `api-v1.schema.json`）、`gui/docs/taskd-api-v1.md` 同期、`gui/app/taskd/types.ts` 再生成まで同じコミット。
   GUI 側の `pnpm typecheck` exit 0 / `pnpm test` 147 passed。
+
+## GUI: 役割ラベルと fixture の頑丈化（2026-09-16）
+
+人間の指示「役割ラベルは欲しいです。またワーカーが壊れやすいのも直して下さい」（G7-U1 / G7-U3 / G7-U4 の片付け）。
+詳細は `gui/docs/PROGRESS.md` の「G7 の後の追補」。
+
+- 一覧（`/tasks`）の行と DAG（`/graph`）のノードに役割のテキストラベル。taskd 側の R2 対応（`TaskSummary.role` /
+  `GraphNode.role`）により、追加の `GET /tasks/{id}` 無しで出せる。
+- fixture の fake ワーカーが `RunRequest` を `grep`/`cut` で読んでいたのをやめ、`read-run-request.mjs` で一度だけ解析する。
+  taskd 側の直列化（compact / pretty、フィールドの順）に依存しなくなった。
+- 証拠: GUI の `pnpm lint` / `typecheck` / `build` exit 0、`pnpm test` **151 passed**、`pnpm e2e` **63 passed**、
+  `pnpm gen:types` 差分ゼロ。`scripts/taskd.sh fixture delegation` / `fixture basic` を作り直して同じ結果。

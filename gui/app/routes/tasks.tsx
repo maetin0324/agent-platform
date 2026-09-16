@@ -187,6 +187,10 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                 </Link>
                 <span className="w-20">{item.status}</span>
                 <span className="w-20">{item.kind}</span>
+                {/* 役割（ADR-0016 D1、taskd-requests R2）。色分けはせずテキストのラベルだけ。役割なしは空欄。 */}
+                <span className="w-24 truncate text-xs text-gray-600" data-testid="task-role" title={item.role ?? ""}>
+                  {item.role ?? ""}
+                </span>
                 <span className="w-12 text-right">{item.priority}</span>
                 <span className="w-44 text-xs text-gray-500">{item.updated_at}</span>
               </div>

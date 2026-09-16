@@ -64,6 +64,9 @@ cmd_build() {
 prepare() {
   local name="$1" worker_src="${2:-$DEFAULT_WORKER}" dir; dir="$(run_dir "$name")"
   mkdir -p "$dir/workspaces"
+  # fixture のワーカーは RunRequest を read-run-request.mjs で解析する（G7-U3）。ワーカーは .run/<name>/ に
+  # 写して使うので、読み取り役も同じディレクトリに置く（ワーカー側は自分の隣を見る）。
+  cp "$ROOT/test/taskd/fixtures/read-run-request.mjs" "$dir/read-run-request.mjs"
   [ -f "$dir/fake-worker.sh" ] || cp "$worker_src" "$dir/fake-worker.sh"
   [ -f "$dir/taskd.toml" ] || sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$TMPL" > "$dir/taskd.toml"
 }
@@ -300,6 +303,7 @@ fixture_delegation() {
   rm -rf "$dir"
   mkdir -p "$dir/workspaces"
   cp "$ROOT/test/taskd/fixtures/delegation-worker.sh" "$dir/fake-worker.sh"
+  cp "$ROOT/test/taskd/fixtures/read-run-request.mjs" "$dir/read-run-request.mjs"
   chmod +x "$dir/fake-worker.sh"
   sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$ROOT/test/taskd/delegation.toml.tmpl" > "$dir/taskd.toml"
 

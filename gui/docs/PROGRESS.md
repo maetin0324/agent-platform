@@ -837,12 +837,10 @@ worktree の取り込み → taskd の更新（`actions`）の取り込み → �
   **2026-09-16 追記: taskd が R2 に対応した**（`TaskSummary.role` / `GraphNode.role`。`docs/taskd-requests.md` の「対応済み R2」、
   `app/taskd/types.ts` も生成済み）。次のフェーズで一覧・DAG のラベルを実装できる。
 - **G7-U2**: `e2e/g0.spec.ts`/`e2e/g6.spec.ts` の事前停止リストに `clusters`/`delegation` を追加済み（監査指摘、上記「監査結果」参照）。
-- **G7-U3**: `test/taskd/fixtures/delegation-worker.sh` の `grep -q '"children":\[{'` は `serde_json::to_string`（空白無しの compact 出力、
-  `crates/task-worker/src/subprocess.rs`）に依存している。taskd 側が将来 pretty-print 等に変えれば静かに壊れる（集約 run が summary.md を
-  書かなくなる）。fixture 専用のスクリプトであり GUI 本体には影響しないため今回は直していない。
-- **G7-U4**: `app/lib/graph-layout.ts` の単体テストに、委譲で生まれた子（`parent_id` が委譲元）のグルーピングを検証するケースが無い
-  （ADR-0010 D4 の主張は `fixture delegation` の実データ（`GET /graph`）で手動確認したのみ）。次フェーズで `graph-layout.test.ts` があれば
-  1 件追加するとよい。
+- **G7-U3**: ~~`test/taskd/fixtures/delegation-worker.sh` の `grep -q '"children":\[{'` は compact 出力に依存している~~
+  → **2026-09-16 解消**（下の「G7 の後の追補」参照）。
+- **G7-U4**: ~~`app/lib/graph-layout.ts` の単体テストに、委譲で生まれた子のグルーピングを検証するケースが無い~~
+  → **2026-09-16 解消**（`test/unit/graph-layout.test.ts` を新設。下の「G7 の後の追補」参照）。
 - G0〜G6 からの引き継ぎ（`/assets` の Host 検査、`pnpm dev` の CSP、G2-U1 taskd 間欠停止、G2-U2〜U7、G3-U1〜U8、G4-U1〜U4、G5-U1〜U9、
   G6-U2）は G7 では対処していない。
 
@@ -853,3 +851,34 @@ worktree の取り込み → taskd の更新（`actions`）の取り込み → �
 - R2（新規）: `TaskSummary`（`GET /tasks`）と `GraphNode`（`GET /graph`）に `role: Option<String>`（`TaskDetail.role` と同じ規則）を
   追加してほしい。詳細は `docs/taskd-requests.md` R2（エンドポイント / 期待 / 実際 / できないこと）。GUI 側は現時点でこれを回避していない
   （一覧・DAG への役割ラベル表示は保留、G7-U1）。
+
+## G7 の後の追補（2026-09-16）
+
+人間の指示「役割ラベルは欲しいです。またワーカーが壊れやすいのも直して下さい」。フェーズではなく、G7 の未解決事項の片付け。
+
+### 1. 一覧と DAG の役割ラベル（G7-U1、`docs/taskd-requests.md` R2 の対応後）
+
+taskd が `TaskSummary.role` と `GraphNode.role` を足したので、**追加の `GET /tasks/{id}` 無しで**出せるようになった。
+
+- `app/routes/tasks.tsx`: 行に `data-testid="task-role"` の列（テキストのみ。色分けはしない。役割が無ければ空欄）。
+- `app/lib/graph-layout.ts`: ノードのラベルを 2 行にし、2 行目に `[<役割>]`（`whiteSpace: pre-line`）。役割が無ければ従来どおり 1 行。
+- 証拠: `test/unit/graph-layout.test.ts`（新規 4 件。役割ラベル / `role` の無い応答 / **委譲の子の group 化（G7-U4）** / 端が無い辺の除去）、
+  `e2e/g7.spec.ts` に「一覧の行と DAG のノードに役割のラベルが出る」を追加（`fixture delegation` の実 taskd で lead / implementer を確認）。
+
+### 2. fixture のワーカーが壊れやすい問題（G7-U3）
+
+`RunRequest` の JSON を `grep`/`cut` で読んでいたため、taskd 側の直列化の細部に依存していた
+（`basic-worker.sh` の `"kind"` は条件や成果物の `kind` を拾う可能性もあった）。
+
+- `test/taskd/fixtures/read-run-request.mjs`（新規）で **一度だけきちんと JSON を解析**し、
+  `TITLE` / `TASK_ID` / `KIND` / `ROLE` / `INSTRUCTIONS` / `CHILDREN` / `CHILD_TITLES` を `sh` の変数として渡す
+  （値はシングルクォートで安全に囲む。引用符を含む指示文でも壊れない）。
+- `delegation-worker.sh` と `basic-worker.sh` はこれを `eval` するだけにした。`scripts/taskd.sh` は
+  ワーカーを `.run/<name>/` に写すときに読み取り役も一緒に置く。
+- 証拠: `scripts/taskd.sh fixture delegation` / `fixture basic` を作り直して同じ結果
+  （summary.md は子のタイトルまで書けるようになった）。`pnpm e2e` **63 passed**（フルスイート）。
+
+### 共通条件
+
+`pnpm lint` exit 0（98 files）/ `pnpm typecheck` exit 0 / `pnpm test` **151 passed**（21 ファイル）/ `pnpm build` exit 0 /
+`pnpm e2e` **63 passed（6.1 分）** / `pnpm gen:types` 差分ゼロ。

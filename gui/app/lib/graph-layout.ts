@@ -104,7 +104,8 @@ export function layoutGraph(graph: Graph): LayoutResult {
       position,
       parentId: groupRect ? `group-${node.parent_id}` : undefined,
       extent: groupRect ? "parent" : undefined,
-      data: { label: node.title },
+      // 役割はテキストのラベルとして 2 行目に出す（色分けはしない。docs/DESIGN.md §10 Phase G7、taskd-requests R2）。
+      data: { label: node.role ? `${node.title}\n[${node.role}]` : node.title },
       style: {
         width: NODE_WIDTH,
         height: NODE_HEIGHT,
@@ -117,6 +118,8 @@ export function layoutGraph(graph: Graph): LayoutResult {
         alignItems: "center",
         justifyContent: "center",
         textAlign: "center",
+        flexDirection: "column",
+        whiteSpace: "pre-line",
       },
     });
   }
