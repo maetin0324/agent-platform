@@ -40,11 +40,15 @@ DB を直接読む、`crates/` を import する、といった近道は取ら�
 | `gui/scripts/gen-types.mjs` の `TASKD_REPO` 既定 | `../agent-platform` | `gui/` の親（= リポジトリの根） |
 | GUI の作業ルール（`gui/CLAUDE.md`） | `git add -A` | `git add -A .`（`gui/` の外を巻き込まない） |
 
-### D4. 仕様書の写しは script で同期する
+### D4. API 仕様の写しは script で同期する
 
-`docs/gui/` が正で、`gui/docs/` はその写し（`docs/gui/bootstrap/README.md` §1 の対応表）。symlink にすると
-`docker build` のコンテキスト外を指すので、**写しのまま `scripts/sync-gui-docs.sh` で更新する**。
-`run-gphases.sh` は各フェーズの前にこれを実行する。ずれは 1 つの `git diff` で見える。
+taskd が正であるファイルは **`docs/gui/api.md` → `gui/docs/taskd-api-v1.md` の 1 つだけ**。これを
+`scripts/sync-gui-docs.sh`（`--check` でずれの検出だけ）で更新し、`run-gphases.sh` が各フェーズの前に実行する。
+symlink にしないのは `gui/Dockerfile` の `COPY . .` がビルドコンテキストの外を追えないため。
+
+`gui/docs/DESIGN.md`（立ち上げ時に `docs/gui/DESIGN-GUI.md` から作った）と `gui/docs/adr/*` は**写しではない**。
+GUI 側が自分で育てる文書なので同期の対象にしない（実際 G5 の決定が GUI 側にだけ入っている）。
+GUI から taskd への提案は今までどおり `gui/docs/taskd-requests.md` と `docs/gui/taskd-proposals.md` で行う。
 
 ## 結果
 
