@@ -834,6 +834,8 @@ worktree の取り込み → taskd の更新（`actions`）の取り込み → �
   「一覧と DAG のノードに役割を出す（色分けはせず、テキストのラベル）」は未実装（`docs/taskd-requests.md` R2、`docs/adr/0010-g7-decisions.md` D5）。
   番号付き受け入れ条件（1〜7）には含まれないため DONE の判定には影響しないが、taskd 側で `role` フィールドが追加され次第、次フェーズ以降で
   一覧・DAG のノードラベルを実装したい。
+  **2026-09-16 追記: taskd が R2 に対応した**（`TaskSummary.role` / `GraphNode.role`。`docs/taskd-requests.md` の「対応済み R2」、
+  `app/taskd/types.ts` も生成済み）。次のフェーズで一覧・DAG のラベルを実装できる。
 - **G7-U2**: `e2e/g0.spec.ts`/`e2e/g6.spec.ts` の事前停止リストに `clusters`/`delegation` を追加済み（監査指摘、上記「監査結果」参照）。
 - **G7-U3**: `test/taskd/fixtures/delegation-worker.sh` の `grep -q '"children":\[{'` は `serde_json::to_string`（空白無しの compact 出力、
   `crates/task-worker/src/subprocess.rs`）に依存している。taskd 側が将来 pretty-print 等に変えれば静かに壊れる（集約 run が summary.md を
