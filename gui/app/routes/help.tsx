@@ -66,7 +66,14 @@ const GLOSSARY: { term: string; text: string }[] = [
   },
   { term: "リース", text: "running 中のタスクに taskd が与える実行権限の期限。切れると requeue に回る。" },
   { term: "requeue", text: "run が失敗する・リースが切れるなどでタスクが再び実行待ちに戻ること。" },
-  { term: "cooldown", text: "プロバイダがスロットル等で一時的に使えない期間。解けると自動で再び使われる。" },
+  {
+    term: "cooldown",
+    text: "プロバイダ（またはアカウント）がスロットル等で一時的に使えない期間。解けると自動で再び使われる。",
+  },
+  {
+    term: "account_pool",
+    text: "claude-code のプロバイダが、単一の env ではなく [accounts] のアカウントのプールから残量で選んで実行する設定。",
+  },
   {
     term: "Plan",
     text: "複数の子タスクをまとめる親タスク（kind=plan）。子タスクは draft で作られ、人間が受け入れて進める。",
@@ -116,7 +123,13 @@ const SCREENS: { href: string | null; icon: IconName; title: string; text: strin
     href: "/providers",
     icon: "cpu",
     title: "プロバイダ",
-    text: "各アカウントの利用状況（done / requeue の件数、トークン、cooldown）を見る画面。動きが遅い・偏っていると感じたら開く。",
+    text: "各アカウントの利用状況（done / requeue の件数、トークン、cooldown）を見る画面。追加・編集・削除・疎通確認もここで行う（管理系 API のトークンが要る）。動きが遅い・偏っていると感じたら開く。",
+  },
+  {
+    href: "/accounts",
+    icon: "users",
+    title: "アカウント",
+    text: "account_pool = true のプロバイダが使う Claude アカウントのプール（ログイン状態・5 時間枠/週次枠の使用率・score）を見る画面。追加・ログイン・残量確認・削除もここで行う（管理系 API のトークンが要る）。",
   },
   {
     href: "/clusters",
@@ -333,6 +346,14 @@ export default function HelpPage() {
               taskd への認証（トークン）が無い・違う場合はバナーで知らせる。GUI
               自身のログインが切れている場合、通常のページはログイン画面に 戻るが、SSE や成果物の取得はその場で 401
               になる。
+            </dd>
+          </div>
+          <div className="py-3">
+            <dt className="font-semibold text-fg">401（プロバイダ・アカウントの追加/編集/削除）</dt>
+            <dd className="mt-0.5 text-fg-muted">
+              管理系 API（プロバイダ・アカウントの追加/編集/削除、reload）はトークンが必須。
+              <code>TASKD_API_TOKEN_FILE</code> を taskd の <code>[api] token_file</code> と同じ内容にして GUI
+              を再起動する。
             </dd>
           </div>
           <div className="py-3">

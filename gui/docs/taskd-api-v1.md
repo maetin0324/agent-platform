@@ -467,6 +467,85 @@ task-api 自身はワーカーを起動しない**（DESIGN §5.10 の境界。A
 `GET /config` に出る一覧を差し替える。**cooldown はメモリ上（`StaticPolicy` の内部状態）なので reload で消える**
 （ADR-0017 D1）。設定の検証に失敗したら 400 を返し、稼働中の状態には触れない（古い設定のまま動き続ける）。
 実行中の run はそれぞれ差し替え前のアダプタの参照を既に掴んでいるので、reload の影響を受けない。
+**`[accounts]` は reload の対象外**（ADR-0024。S7）: `claude_dir` / `max_runs_per_account` / `check_model` の
+どれかが読み直した設定で変わっていれば、この reload 自体を 400 で拒否する（`detail` に再起動が必要な旨を書く。
+`[accounts]` 以外の変更は反映されない）。プロバイダの `[[providers]]` / `providers.d/` だけの変更は従来どおり通る。
+
+### 3.29〜3.35 Claude アカウントのプール（ADR-0024、Phase 13）
+
+設計は ADR-0024。`[accounts] claude_dir` の下の 1 ディレクトリ（`<claude_dir>/<id>/`）が 1 アカウントで、
+`account_pool = true` のプロバイダ（claude-code のみ）の run は、残量（Claude Code が stream-json の `rate_limit_event` で出す
+`five_hour` / `seven_day` の `utilization`）から選んだアカウントの `CLAUDE_SECURESTORAGE_CONFIG_DIR` で起動する（選び方は ADR-0024 D3）。
+`[accounts]` が無い構成では、`GET /accounts` は `{"root": null, "items": []}`、管理系は 409 `accounts_unavailable`。
+**3.30 以降はすべて管理系**（`token_file` 未設定でも 401。ADR-0017 M3）。`id` の規則はプロバイダと同じ（1〜64 文字の ASCII 英数字・`-`・`_`）。
+
+#### 3.29 `GET /accounts` → 200 `AccountList`
+
+```json
+{"root": "/home/u/taskd/claude-accounts", "max_runs_per_account": 2,
+ "items": [{"id": "a", "dir": "/home/u/taskd/claude-accounts/a", "logged_in": true, "in_use": 1,
+   "usage": {"five_hour": {"utilization": 0.14, "resets_at": "…"}, "seven_day": {"utilization": 0.24, "resets_at": "…"},
+             "status": "allowed", "observed_at": "…", "source": "run"},
+   "score": 0.81, "excluded_reason": null, "cooldown": null,
+   "last_check": {"at": "…", "result": "ok", "detail": "ok"}, "login_pending": false,
+   "stats": {"runs": 12, "done": 10, "error": 1, "input_tokens": 1234, "output_tokens": 567}}]}
+```
+
+- `items[]` は `id` の昇順。`logged_in` は `.credentials.json` の有無（中身は読まない）。
+- `usage` / `score` / `excluded_reason` / `cooldown` / `last_check` / `login_pending` / `in_use` はスナップショットの観測値（最初の tick 前は `null` / `false` / 0）。
+  `usage` と `cooldown` は `<claude_dir>/.taskd-usage.json` にも保存され、再起動後も残る（`last_check` も同じ）。
+- `excluded_reason`（選ばれない理由）: `not_logged_in` / `at_capacity` / `cooldown` / `five_hour_exhausted` / `seven_day_exhausted` / `rejected`。選べるなら `null` で `score` が入る。
+- `cooldown.reason`: `auth_failed`（再ログインが必要）/ `throttled` / `exhausted`。
+- `stats` は `WorkerStarted.account` と対応する `WorkerFinished` から集計（§5.8 のプロバイダ集計と同じ規則）。
+- 時刻はすべて RFC 3339。
+
+#### 3.30 `POST /accounts` → 201 `AccountView`
+
+要求本文 `{"id": "b"}`。`<claude_dir>/<id>/` を 0700 で作る。既にあれば 409 `account_exists`。作っただけでは `logged_in: false`（3.33 でログインする）。
+
+#### 3.31 `DELETE /accounts/{id}` → 200 `{}`
+
+ディレクトリを `<claude_dir>/.removed/<id>-<unix秒>/` に移す（認証ファイルは消さない。人が後で片付ける）。
+`in_use > 0` なら 409 `account_in_use`、無ければ 404 `account_not_found`。進行中のログインは止める。
+**実装は taskd 側で行う**（`AdminRequest::AccountRemove` 経由。`in_use` はディスパッチャの権威ある値
+`account_in_use`（running/reviewing を直接見る）で判定するので、task-api のスナップショット経由のレースが無い。
+`admin_tx` が無い構成は 409 `accounts_unavailable`）。応答の形・ステータスコードは変わらない。
+
+#### 3.32 `POST /accounts/{id}/check` → 200 `AccountCheckResponse`
+
+```json
+{"result": "ok" | "auth_failed" | "throttled" | "spawn_failed", "checked_at": "…", "detail": "ok",
+ "usage": {"five_hour": {…}, "seven_day": {…}, "status": "allowed", "observed_at": "…", "source": "check"}}
+```
+
+そのアカウントで `claude -p … --max-turns 1 --model <[accounts].check_model>` を 1 回だけ（60 秒まで）実行し、`rate_limit_event` を観測値として記録する。
+**自動では走らない**（ADR-0022 D3 と同じ理由）。taskd 側で実行する（task-api はプロセスを起動しない）。
+
+#### 3.33 `POST /accounts/{id}/login` → 200 `AccountLoginStart`
+
+`{"url": "https://claude.com/cai/oauth/authorize?…", "expires_at": "…"}`。taskd が `claude auth login` を
+`CLAUDE_SECURESTORAGE_CONFIG_DIR=<dir>` で起動し、出力から認可 URL を取り出して返す（15 秒以内に出なければ 502 `login_failed`）。
+人はこの URL を自分のブラウザで開いて認可し、表示されたコードを 3.34 で渡す。10 分で打ち切る。既に進行中なら古い方を止めてやり直す。
+
+#### 3.34 `POST /accounts/{id}/login/code` → 200 `AccountLoginResult`
+
+要求本文 `{"code": "…"}`。`{"result": "ok" | "failed", "detail": "…"}`。コードを `claude auth login` の標準入力に渡し、終了を 30 秒まで待つ。
+exit 0 かつ `.credentials.json` ができたら `ok`。進行中のログインが無ければ 409 `login_not_started`。**コードはログにも応答にも出さない**。
+
+#### 3.35 `DELETE /accounts/{id}/login` → 200 `{}`
+
+進行中のログインを止める（無ければ何もしない）。
+
+#### プロバイダ管理への追加（3.19 / 3.24 / 3.25）
+
+`ProviderView` / `ProviderConfigView` / `POST /providers` / `PATCH /providers/{id}` の本文に `account_pool: bool`（既定 `false`）を追加。
+`true` は `adapter = "claude-code"` かつ `[accounts]` ありのときだけ有効。`adapter != "claude-code"` はもちろん、
+**`[accounts]` が設定されていない構成（`GET /accounts` の `root: null`）で `account_pool = true` を
+`POST`/`PATCH /providers` に渡した時点で** 422 `invalid_provider` を返す（S1。`create`/`patch` の時点で拒否する。
+reload を待たない）。
+プール経由の run の失敗は、原因がアカウント側（throttled/auth_failed/exhausted）ならアカウントを cooldown に
+しプロバイダは cooldown にしない。**Spawn 失敗（起動できない）はアカウントの責任ではないので、通常どおり
+プロバイダを cooldown にする**（ADR-0024 D4、S10）。
 
 ---
 
@@ -576,11 +655,13 @@ data: {"reason":"cursor_too_old","cursor":20000}
 
 | 出所 | 型 | 備考 |
 |---|---|---|
-| `task-core`（既存） | `Task`, `TaskId`, `TaskKind`, `Status`, `Tier`, `WorkerHint`, `WorkspaceSpec`, `Budget`, `Lease`, `Check`, `Criterion`, `ArtifactRef`, `Usage`, `Event` | serde 表現そのまま。`Event` は Phase 9a で `JsonSchema` を derive 済み（`until` は `#[schemars(with = "String")]`）。`ProviderThrottled.reason: Option<String>`（任意フィールド、語彙 `throttled \| auth_failed \| exhausted \| spawn`。ADR-0013 D9） |
+| `task-core`（既存） | `Task`, `TaskId`, `TaskKind`, `Status`, `Tier`, `WorkerHint`, `WorkspaceSpec`, `Budget`, `Lease`, `Check`, `Criterion`, `ArtifactRef`, `Usage`, `Event` | serde 表現そのまま。`Event` は Phase 9a で `JsonSchema` を derive 済み（`until` は `#[schemars(with = "String")]`）。`ProviderThrottled.reason: Option<String>`（任意フィールド、語彙 `throttled \| auth_failed \| exhausted \| spawn`。ADR-0013 D9）。`Event::WorkerStarted.account: Option<String>`（Phase 13、ADR-0024 D4） |
+| `task-core`（Phase 13、実装済み） | `RateWindow { utilization: f64, resets_at: i64 }`、`RateLimitObservation { five_hour, seven_day, status, resets_at, observed_at }` | `rate_limit_event` の観測値（ADR-0024 D4）。`AccountUsageLive`/`AccountUsageView` はこれを壁時計に直したもの |
 | `task-core`（Phase 9a、実装済み） | `EventRow { id: u64, task_id: TaskId, seq: u64, ts: String, event: Event }`、`ListFilter { statuses, kinds, parent_id, root_only, text_contains }`、`ListOrder { Dispatch, UpdatedDesc, CreatedDesc }`、`Page<T> { items, next_cursor, total }`、`SCHEMA_VERSION` | `events_since` / `list_page` / `count_by_status` の型。`EventRow` は `docs/api/v1/event.schema.json` のルート |
 | `task-ops`（Phase 9a、実装済み） | `add::{NewTaskSpec, CriterionSpec, create_task}`、`plan::{NewPlanSpec, create_plan}`、`gate::{TransitionResult, approve, reject, answer, cancel}`、`replay::{ReplayReport, ReplayMismatch, replay}`、`derive::{ReviewNote, AnswerNote, …}`、`OpsError` | 9b で `Deserialize` / `Serialize` / `JsonSchema` を付ける（`NewTaskSpec` / `NewPlanSpec` は `deny_unknown_fields` + `#[serde(default)]`、`CriterionSpec` は `tag = "type"`、`ReplayMismatch.field` は `&'static str` のまま文字列に出る） |
-| `task-ops`（Phase 9b で追加） | `TaskRef`, `TaskSummary`, `TaskList`, `TaskDetail`, `Timers`, `CriterionView`, `VerdictView`, `RunSummary`, `RunFiles`, `RunOutcomeKind`, `ApprovalLink`, `ApprovalDecisionView`, `Action`, `Inbox`, `InboxCounts`, `ApprovalItem`, `EvidenceView`, `QuestionItem`, `DraftGroup`, `AttentionItem`, `Graph`, `GraphNode`, `GraphEdge`, `DelegatedView`（Phase 10）, `TransitionResult.cascaded`, `DaemonSnapshot`, `InFlight`, `InFlightKind`, `CooldownView`, `ProviderLive` | ビュー型。全て `JsonSchema`。`DaemonSnapshot` は task-dispatch が作り task-api が読むので、両者が依存する task-ops に置く（ADR-0013 D3/D4 の依存方向を満たす）。`CooldownView` は `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直した写し |
+| `task-ops`（Phase 9b で追加） | `TaskRef`, `TaskSummary`, `TaskList`, `TaskDetail`, `Timers`, `CriterionView`, `VerdictView`, `RunSummary`, `RunFiles`, `RunOutcomeKind`, `ApprovalLink`, `ApprovalDecisionView`, `Action`, `Inbox`, `InboxCounts`, `ApprovalItem`, `EvidenceView`, `QuestionItem`, `DraftGroup`, `AttentionItem`, `Graph`, `GraphNode`, `GraphEdge`, `DelegatedView`（Phase 10）, `TransitionResult.cascaded`, `DaemonSnapshot`, `InFlight`, `InFlightKind`, `CooldownView`, `ProviderLive`, `AccountLive`, `AccountUsageLive`, `AccountCooldownLive`（Phase 13） | ビュー型。全て `JsonSchema`。`DaemonSnapshot` は task-dispatch が作り task-api が読むので、両者が依存する task-ops に置く（ADR-0013 D3/D4 の依存方向を満たす）。`CooldownView` は `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直した写し |
 | `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `RoleConfigView`（Phase 10）, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema` | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
+| `task-api`（Phase 13、ADR-0024） | `AccountList`, `AccountView`, `AccountUsageView`, `RateWindowView`, `AccountCooldownView`, `AccountStats`, `AccountCreateBody`, `AccountCheckResponse`, `AccountLoginStart`, `AccountLoginCodeBody`, `AccountLoginResult` | `GET/POST /accounts`・`DELETE /accounts/{id}`・`POST /accounts/{id}/check`・`POST`/`DELETE /accounts/{id}/login`・`POST /accounts/{id}/login/code` の要求・応答 |
 
 ### 6.2 Rust 表記（serde の属性はコメントで示す。`JsonSchema` は全て derive）
 
@@ -698,16 +779,24 @@ pub struct DaemonSnapshot { pub instance_id: String, pub pid: u32, pub hostname:
     pub ticks: u64, pub tick_ms: u64, pub in_flight: Vec<InFlight>, pub cooldowns: Vec<CooldownView>,
     pub awaiting_human: Vec<TaskId>, pub awaiting_children: Vec<TaskId> /* ADR-0023: 委譲した子を待っている親 */,
     pub unroutable: Vec<TaskId>, pub providers: Vec<ProviderLive>,
-    #[serde(default)] pub clusters: Vec<ClusterLive> /* Phase 12 */ }
+    #[serde(default)] pub clusters: Vec<ClusterLive> /* Phase 12 */,
+    #[serde(default)] pub accounts_root: Option<String> /* Phase 13 */, #[serde(default)] pub max_runs_per_account: Option<usize> /* Phase 13 */,
+    #[serde(default)] pub accounts: Vec<AccountLive> /* Phase 13 */ }
 pub struct InFlight { pub task_id: TaskId, pub run_id: String, pub provider: String, pub kind: InFlightKind, pub since: String }
 // #[serde(rename_all = "snake_case")]
 pub enum InFlightKind { Worker, Reviewer }
 /// `task_dispatch::policy::Cooldown{provider, until: Instant, reason: CooldownReason}`（実装済み）を壁時計に直したもの。
 pub struct CooldownView { pub provider: String, pub until: String, pub reason: String /* "throttled" | "auth_failed" | "exhausted" */ }
 pub struct ProviderLive { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>,
-    pub env_keys: Vec<String> /* ADR-0017 */, pub in_use: u32, pub last_check: Option<ProviderCheckView> /* ADR-0022 */ }
+    pub env_keys: Vec<String> /* ADR-0017 */, pub in_use: u32, pub last_check: Option<ProviderCheckView> /* ADR-0022 */,
+    #[serde(default)] pub account_pool: bool /* Phase 13 */ }
 /// Phase 12（ADR-0018）: `[[clusters]]` の稼働状況（`id` 昇順）。`connected` はこの tick の `ssh -O check` の結果。
 pub struct ClusterLive { pub id: String, pub host: String, pub concurrency: usize, pub in_use: u32, pub connected: bool, pub cooldown_until: Option<String> }
+/// Phase 13（ADR-0024）: プールの 1 アカウントの稼働状況（`AccountView` から `dir`/`logged_in`/`stats` を除いたもの。Unix 秒のまま）。
+pub struct AccountLive { pub id: String, pub logged_in: bool, pub in_use: u32, pub usage: Option<AccountUsageLive>, pub score: Option<f64>,
+    pub excluded_reason: Option<String>, pub cooldown: Option<AccountCooldownLive>, pub last_check: Option<ProviderCheckView>, pub login_pending: bool }
+pub struct AccountUsageLive { pub five_hour: Option<RateWindow>, pub seven_day: Option<RateWindow>, pub status: Option<String>, pub observed_at: i64, pub source: String }
+pub struct AccountCooldownLive { pub until: i64, pub reason: String }
 
 // ---- task-api ----
 pub struct Health { pub api_version: String, pub schema_version: u32, pub taskd_version: String, pub instance_id: String,
@@ -728,7 +817,8 @@ pub struct ArtifactView { pub idx: usize, pub run_id: String, pub ts: String, pu
 pub struct Providers { pub items: Vec<ProviderView> }
 pub struct ProviderView { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>,
     pub env_keys: Vec<String>, pub in_use: Option<u32>, pub cooldown: Option<CooldownView>,
-    pub last_check: Option<ProviderCheckView> /* ADR-0022 */, pub stats: ProviderStats }
+    pub last_check: Option<ProviderCheckView> /* ADR-0022 */, pub stats: ProviderStats,
+    #[serde(default)] pub account_pool: bool /* Phase 13 */ }
 /// ADR-0022 D2: 直近の疎通確認（`{at, result}`）。task-ops の `ProviderLive.last_check` と同じ型。
 pub struct ProviderCheckView { pub at: String, pub result: String }
 pub struct ProviderStats { pub runs: u64, pub done: u64, pub question: u64, pub error: u64, pub requeue: u64, pub lease_expired: u64,
@@ -751,11 +841,25 @@ pub struct RoleConfigView { pub id: String, pub tier: Option<Tier>, pub adapter:
 /// Phase 10（ADR-0016 D2）: task-core の型。既定は 8 / 5 / 100。
 pub struct DelegationLimits { pub max_delegate_per_run: usize, pub max_tree_depth: u32, pub max_tree_runs: u32 }
 pub struct ReviewerConfigView { pub adapter: Option<String>, pub tier: Tier }
-pub struct ProviderConfigView { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>, pub env_keys: Vec<String> }
+pub struct ProviderConfigView { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>, pub env_keys: Vec<String>, #[serde(default)] pub account_pool: bool /* Phase 13 */ }
 // Phase 11（ADR-0017）: プロバイダ管理。`ProviderConfigView` は §3.24/§3.25 の応答にも使う。
 pub struct ReloadResult { pub reloaded: bool }
 pub struct ProviderCheckResponse { pub result: ProviderCheckResult, pub checked_at: String }
 pub enum ProviderCheckResult { Ok, AuthFailed, Throttled, SpawnFailed } // snake_case で直列化（"ok" | "auth_failed" | "throttled" | "spawn_failed"）
+// Phase 13（ADR-0024）: Claude アカウントのプール。ProviderConfigView / ProviderView に `account_pool: bool` を追加。
+pub struct AccountList { pub root: Option<String>, pub max_runs_per_account: usize, pub items: Vec<AccountView> }
+pub struct AccountView { pub id: String, pub dir: String, pub logged_in: bool, pub in_use: u32, pub usage: Option<AccountUsageView>,
+    pub score: Option<f64>, pub excluded_reason: Option<String>, pub cooldown: Option<AccountCooldownView>,
+    pub last_check: Option<ProviderCheckView>, pub login_pending: bool, pub stats: AccountStats }
+pub struct AccountUsageView { pub five_hour: Option<RateWindowView>, pub seven_day: Option<RateWindowView>, pub status: Option<String>,
+    pub observed_at: String, pub source: String /* "run" | "check" */ }
+pub struct RateWindowView { pub utilization: f64, pub resets_at: String }
+pub struct AccountCooldownView { pub until: String, pub reason: String /* "auth_failed" | "throttled" | "exhausted" */ }
+pub struct AccountStats { pub runs: u64, pub done: u64, pub error: u64, pub input_tokens: u64, pub output_tokens: u64 }
+pub struct AccountCheckResponse { pub result: ProviderCheckResult, pub checked_at: String, pub detail: Option<String>, pub usage: Option<AccountUsageView> }
+pub struct AccountLoginStart { pub url: String, pub expires_at: String }
+pub struct AccountLoginResult { pub result: String /* "ok" | "failed" */, pub detail: Option<String> }
+// DaemonSnapshot に `#[serde(default)] pub accounts: Vec<AccountLive>` を追加（AccountView から dir / logged_in / stats を除いた観測値）。
 pub struct ClusterConfigView { pub id: String, pub host: String, pub concurrency: usize, pub sync: String, pub delete_on_push: bool, pub has_setup: bool, pub env_keys: Vec<String>, pub rsync_excludes: Vec<String> }
 pub struct ApiConfigView { pub bind: String, pub auth_required: bool, pub allowed_hosts: Vec<String> }
 pub struct StreamHello { pub cursor: u64, pub now: String, pub daemon: Option<DaemonSnapshot> }
@@ -771,6 +875,8 @@ pub struct ApiV1Schema {
     pub config: ConfigView, pub stream_hello: StreamHello, pub stream_event: EventRow, pub stream_daemon: DaemonSnapshot,
     pub stream_heartbeat: StreamHeartbeat, pub stream_reset: StreamReset, pub clusters: Clusters /* Phase 12 */,
     pub provider_config: ProviderConfigView, pub reload: ReloadResult, pub provider_check: ProviderCheckResponse /* Phase 11 */,
+    pub account_list: AccountList, pub account: AccountView, pub account_check: AccountCheckResponse,
+    pub account_login_start: AccountLoginStart, pub account_login_result: AccountLoginResult, /* Phase 13 */
 }
 ```
 

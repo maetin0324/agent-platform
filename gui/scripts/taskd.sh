@@ -6,7 +6,7 @@
 #   scripts/taskd.sh status <name>         起動中か、/health が返るか
 #   scripts/taskd.sh logs <name>           .run/<name>/taskd.log を表示
 #   scripts/taskd.sh taskctl <name> ...    taskctl --db .run/<name>/taskd.sqlite3 ... を実行
-#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（basic / unroutable / auth / clusters / delegation。multi-account は設定のみで DB は作らない。docs/adr/0007 D1）
+#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（basic / unroutable / auth / clusters / delegation / accounts。multi-account は設定のみで DB は作らない。docs/adr/0007 D1）
 # 環境変数: TASKD_REPO、TASKD_API_LISTEN（既定 127.0.0.1:7710）、TASKD_RUN_ROOT（.run の実体。既定はローカルディスク、下記）
 set -euo pipefail
 
@@ -133,7 +133,8 @@ cmd_fixture() {
     auth) fixture_auth ;;
     clusters) fixture_clusters ;;
     delegation) fixture_delegation ;;
-    *) die "unknown fixture scenario '$scenario' (known: basic, multi-account, unroutable, auth, clusters, delegation)" ;;
+    accounts) fixture_accounts ;;
+    *) die "unknown fixture scenario '$scenario' (known: basic, multi-account, unroutable, auth, clusters, delegation, accounts)" ;;
   esac
 }
 
@@ -323,6 +324,28 @@ fixture_delegation() {
 
   echo "fixture 'delegation' built at $dir"
   echo "  lead: $tl (done; delegated 2 children, aggregate run wrote summary.md)"
+}
+
+# accounts（gui/docs/adr/0012-provider-and-account-management.md D4、e2e/g8.spec.ts）: 管理系 API（token_file 必須）+
+# providers_include（プロバイダの追加/編集/削除）+ [accounts]（Claude アカウントのプール、claude はスタブ）。
+# DB は空のまま起動する（e2e が GUI からプロバイダ・アカウントを作る）。
+fixture_accounts() {
+  local name="accounts" dir; dir="$(run_dir "$name")"
+  [ -x "$TASKD_BIN" ] && [ -x "$TASKCTL_BIN" ] || die "binaries not found; run 'scripts/taskd.sh build' first"
+  alive "$name" && die "taskd '$name' is running; stop it first (scripts/taskd.sh stop $name)"
+  rm -rf "$dir"
+  mkdir -p "$dir/workspaces"
+  cp "$DEFAULT_WORKER" "$dir/fake-worker.sh"
+  chmod +x "$dir/fake-worker.sh"
+  cp "$ROOT/test/taskd/fixtures/claude-stub.sh" "$dir/claude-stub.sh"
+  chmod +x "$dir/claude-stub.sh"
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/api.token"
+  chmod 600 "$dir/api.token"
+  sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$ROOT/test/taskd/accounts.toml.tmpl" > "$dir/taskd.toml"
+
+  echo "fixture 'accounts' prepared at $dir (empty DB; providers.d/ and claude-accounts/ are created on demand)"
+  echo "  token file: $dir/api.token (pass it to the GUI as TASKD_API_TOKEN_FILE)"
+  echo "  claude stub: $dir/claude-stub.sh (auth login + -p rate_limit_event/result)"
 }
 
 [ $# -ge 1 ] || usage

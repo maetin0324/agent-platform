@@ -15,6 +15,7 @@
 | G5 | 認証・配布・仕上げ | **DONE** | 2026-09-15 |
 | G6 | 使い方ページ | **DONE** | 2026-09-16 |
 | G7 | クラスタと委譲の表示 | **DONE** | 2026-09-16 |
+| G8 | プロバイダの登録と Claude アカウント（プール・ログイン・残量）の画面 | **DONE** | 2026-09-16 |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
@@ -934,3 +935,38 @@ taskd 側 ADR-0022 の決定（人間の回答）に合わせた小さな追加�
 
 - A3-U1: g7 のクラスタ 4 件をこのホストで回すには、人が `taskd-localhost` の ssh 設定（`HostName 127.0.0.1`・ControlMaster）と `ssh -MNf taskd-localhost` を用意する必要がある。
 - A3-U2: ダークモードは OS の設定に従うだけで、画面上の切り替えは無い（ADR-0011 D1）。
+
+## Phase G8 — DONE（2026-09-16）
+
+人間の依頼「GUI からプロバイダを登録できるようにして下さい」ほか（taskd 側 ADR-0024 / Phase 13）。設計は `docs/adr/0012-provider-and-account-management.md`。
+G6-P1（アカウント管理画面）は taskd 側 ADR-0022 D1 で「作らない」としていたが、人間の依頼で作った。
+
+### 成果物
+
+- `app/taskd/types.ts` 再生成（`account_pool`、`AccountList` ほか）。`TaskdClient.patch` / `delete`。
+- `/providers`: 追加・編集・削除（`<details>` の確認付き）・疎通確認。変更の後は同じ action で `POST /reload` まで行い、両方の結果を flash に出す。401 はトークンの設定方法を案内。
+- `/accounts`（新規、ナビ「運用」）: 5 時間枠・週次枠の使用率バー、スコアと除外理由、実行中、cooldown、最後の確認、集計。追加・ログイン（URL → コード）・確認・中止・削除。
+  認可コードが平文 HTTP を通る旨の注意を表示。
+- `app/taskd/providers-admin.server.ts` / `accounts-admin.server.ts`（action の中継）、`Flash.tsx` に管理系の結果表示、`/help` にアカウントとプロバイダ管理の説明。
+- `scripts/taskd.sh fixture accounts`（トークン・`providers_include`・`[accounts]`・スタブの `claude`）、`test/taskd/accounts.toml.tmpl`、`test/taskd/fixtures/claude-stub.sh`。
+
+### 実装で決めた細部
+
+- **フォームは `useFetcher()`**: root の SSE が tick ごとに `revalidate()` するため、`<Form>` の `actionData` は数百 ms で消える
+  （ログイン URL のように二度と出せない表示が消え、e2e も不安定になった）。`/providers` と `/accounts` のフォームは `fetcher.Form` と `fetcher.data` を使う。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint` exit 0（112 files、warning 1 = 既存規則の optional chain の提案）/ `pnpm typecheck` exit 0 / `pnpm test` **187 passed**（24 ファイル）/ `pnpm build` exit 0 /
+  `pnpm gen:types` を 2 回実行して `app/taskd/types.ts` が同一（taskd のスキーマ追加分の差分のみ）。
+- `e2e/g8.spec.ts`（`TASKD_GUI_BIND=127.0.0.1:7800 TASKD_API_URL=http://127.0.0.1:7810` + `fixture accounts`）**1 passed**:
+  GUI からプロバイダ `pool`（claude-code、`account_pool`）追加 → reload 成功 → カードに account_pool → アカウント `a` 追加（未ログイン）→ ログイン開始で URL →
+  誤ったコードで failed → やり直して正しいコード → ログイン済み → 確認で 42% / 18% のバー → アカウント削除 → プロバイダ削除。
+- 既存の e2e（最終コードで、運用中の taskd / GUI を止めて実行）: g0 5 / g1 8 / g2 8 / g3 5 / g4 5 / g5-a11y 12 / g5 7 / g5-release 1 / g6 5 / g7 3 passed。
+  g7 のクラスタ 4 件は従来どおり `taskd-localhost` の ssh 多重接続がこのホストに無く未実行（追補 3 の A3-U1）。
+- ライト / ダークのスクリーンショット（`/accounts`、`/providers`、ログイン中の表示、`/help`）を目視確認。
+- 実機: 運用中の GUI（LAN 公開、パスワード認証、`TASKD_API_TOKEN_FILE` 付き）を新しいビルドで起動し直した。
+
+### 未解決事項
+
+- G8-U1: 実アカウントでのログインは人が行う（認可はアカウントの持ち主の操作が要る）。

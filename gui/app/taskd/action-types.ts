@@ -1,4 +1,15 @@
-import type { Action, ReplayReport, TransitionResult } from "./types";
+import type {
+  AccountCheckResponse,
+  AccountLoginResult,
+  AccountLoginStart,
+  AccountView,
+  Action,
+  ProviderCheckResponse,
+  ProviderConfigView1,
+  ReloadResult,
+  ReplayReport,
+  TransitionResult,
+} from "./types";
 
 /**
  * action（状態変更）の結果をコンポーネントに渡す型（docs/DESIGN.md §6.3 の 2、docs/adr/0005 D2）。
@@ -34,3 +45,43 @@ export interface CreateFailure {
 
 /** `POST /replay` の結果。taskd のエラー（503 `replay_in_progress` を含む）は例外にせず `{ok:false, error}` にする。 */
 export type ReplayOutcome = { ok: true; report: ReplayReport } | { ok: false; error: ActionError };
+
+/**
+ * プロバイダ管理（ADR-GUI-0012 D2）: `POST/PATCH/DELETE /providers...` の結果。
+ * taskd のエラーは例外にせず `{ok:false, error}` にする（401 `unauthorized` を含む。`ErrorFlash` が案内文を足す）。
+ */
+export type ProviderOpOutcome =
+  | { ok: true; op: "create" | "patch"; id: string; provider: ProviderConfigView1 }
+  | { ok: true; op: "delete"; id: string }
+  | { ok: false; op: "create" | "patch" | "delete"; id: string; error: ActionError };
+
+export type ProviderCheckOutcome =
+  | { ok: true; op: "check"; id: string; result: ProviderCheckResponse }
+  | { ok: false; op: "check"; id: string; error: ActionError };
+
+/** `POST /reload`。プロバイダの追加・変更・削除が 2xx のときだけ続けて呼ぶ（ADR-GUI-0012 D2）。 */
+export type ReloadOutcome = { ok: true; result: ReloadResult } | { ok: false; error: ActionError };
+
+/** `/providers` の action が返すデータ。`reload` は `op` が create/patch/delete で成功したときだけ入る。 */
+export interface ProviderActionResult {
+  op: ProviderOpOutcome | ProviderCheckOutcome;
+  reload?: ReloadOutcome;
+}
+
+/**
+ * アカウントのプール管理（ADR-GUI-0012 D3）: `/accounts...` の結果。taskd のエラーは例外にせず
+ * `{ok:false, error}` にする（401 `unauthorized` を含む）。
+ */
+export type AccountOpOutcome =
+  | { ok: true; op: "create"; id: string; account: AccountView }
+  | { ok: true; op: "delete"; id: string }
+  | { ok: true; op: "check"; id: string; result: AccountCheckResponse }
+  | { ok: true; op: "login_start"; id: string; login: AccountLoginStart }
+  | { ok: true; op: "login_code"; id: string; result: AccountLoginResult }
+  | { ok: true; op: "login_cancel"; id: string }
+  | {
+      ok: false;
+      op: "create" | "delete" | "check" | "login_start" | "login_code" | "login_cancel";
+      id: string;
+      error: ActionError;
+    };

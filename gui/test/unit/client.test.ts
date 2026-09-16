@@ -174,6 +174,69 @@ describe("TaskdClient.post", () => {
   });
 });
 
+describe("TaskdClient.patch", () => {
+  it("sends application/json body via PATCH and returns the parsed JSON response", async () => {
+    mock.on("PATCH", "/api/v1/providers/acct-a", (_req, res, body) => {
+      const received = JSON.parse(body) as unknown;
+      sendJson(res, 200, { id: "acct-a", received });
+    });
+
+    const result = await client.patch<{ id: string; received: unknown }>("/providers/acct-a", { concurrency: 3 });
+
+    const req = mock.requests.at(-1);
+    expect(req?.method).toBe("PATCH");
+    expect(req?.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(req?.body ?? "")).toEqual({ concurrency: 3 });
+    expect(result.id).toBe("acct-a");
+  });
+
+  it("converts problem+json errors to TaskdError, same as post", async () => {
+    mock.on("PATCH", "/api/v1/providers/missing", (_req, res) => {
+      sendProblem(res, { status: 404, code: "provider_not_found", detail: "no such provider" });
+    });
+
+    let error: unknown;
+    try {
+      await client.patch("/providers/missing", {});
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(TaskdError);
+    expect((error as TaskdError).status).toBe(404);
+    expect((error as TaskdError).code).toBe("provider_not_found");
+  });
+});
+
+describe("TaskdClient.delete", () => {
+  it("sends DELETE and returns the parsed JSON response", async () => {
+    mock.on("DELETE", "/api/v1/providers/acct-a", (_req, res) => {
+      sendJson(res, 200, {});
+    });
+
+    const result = await client.delete<Record<string, never>>("/providers/acct-a");
+
+    const req = mock.requests.at(-1);
+    expect(req?.method).toBe("DELETE");
+    expect(req?.headers.accept).toBe("application/json");
+    expect(result).toEqual({});
+  });
+
+  it("converts problem+json errors to TaskdError, same as post", async () => {
+    mock.on("DELETE", "/api/v1/providers/inuse", (_req, res) => {
+      sendProblem(res, { status: 409, code: "account_in_use", detail: "in use" });
+    });
+
+    let error: unknown;
+    try {
+      await client.delete("/providers/inuse");
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(TaskdError);
+    expect((error as TaskdError).status).toBe(409);
+  });
+});
+
 describe("TaskdClient.stream", () => {
   it("sends accept/last-event-id and query, and can be read; abort ends the read", async () => {
     mock.on("GET", "/api/v1/stream", (_req, res) => {

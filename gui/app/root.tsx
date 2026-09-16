@@ -212,6 +212,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     items: [
       { href: "/daemon", label: "デーモン", icon: "activity" },
       { href: "/providers", label: "プロバイダ", icon: "cpu" },
+      { href: "/accounts", label: "アカウント", icon: "users" },
       { href: "/clusters", label: "クラスタ", icon: "server" },
     ],
   },

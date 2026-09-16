@@ -5,6 +5,10 @@
  */
 
 /**
+ * `POST /api/v1/providers/{id}/check` の結果（ADR-0017 D2）。
+ */
+export type ProviderCheckResult = "ok" | "auth_failed" | "throttled" | "spawn_failed";
+/**
  * ADR-0002 D1 の状態集合。終端は `done | failed | cancelled`。
  */
 export type Status = "draft" | "ready" | "running" | "blocked" | "reviewing" | "done" | "failed" | "cancelled";
@@ -34,6 +38,11 @@ export type Event =
       type: "transitioned";
     }
   | {
+      /**
+       * プール（`account_pool = true`）で選ばれた Claude アカウントの id（ADR-0024 D4）。プールを使わない
+       * プロバイダ・導入前のイベントには無い。`provider`（アダプタ×プロバイダ行）とは別軸。
+       */
+      account?: string | null;
       adapter: string;
       model: string;
       /**
@@ -217,15 +226,16 @@ export type CriterionSpec =
       text: string;
       type: "reviewer";
     };
-/**
- * `POST /api/v1/providers/{id}/check` の結果（ADR-0017 D2）。
- */
-export type ProviderCheckResult = "ok" | "auth_failed" | "throttled" | "spawn_failed";
 
 /**
  * スキーマ生成のルート。
  */
 export interface ApiV1Schema {
+  account: AccountView;
+  account_check: AccountCheckResponse;
+  account_list: AccountList;
+  account_login_result: AccountLoginResult;
+  account_login_start: AccountLoginStart;
   answer: AnswerBody;
   artifact_list: ArtifactList;
   cancel: CancelBody;
@@ -255,6 +265,134 @@ export interface ApiV1Schema {
   task_detail: TaskDetail;
   task_list: TaskList;
   transition_result: TransitionResult;
+}
+/**
+ * 1 アカウント（`GET /accounts` の要素、`POST /accounts` の応答）。
+ */
+export interface AccountView {
+  cooldown?: AccountCooldownView | null;
+  /**
+   * アカウントディレクトリの絶対パス（ログイン手順に要る。秘密の中身は含まない）。
+   */
+  dir: string;
+  /**
+   * `"not_logged_in" | "at_capacity" | "cooldown" | "five_hour_exhausted" | "seven_day_exhausted" | "rejected"`。
+   */
+  excluded_reason?: string | null;
+  id: string;
+  /**
+   * 実行中の run の数。最初の tick 前は `0`。
+   */
+  in_use: number;
+  last_check?: ProviderCheckView | null;
+  /**
+   * `.credentials.json` の有無（中身は読まない）。
+   */
+  logged_in: boolean;
+  /**
+   * ADR-0024 D7: 進行中のログイン中継があるか。
+   */
+  login_pending: boolean;
+  /**
+   * ADR-0024 D3 のスコア。除外なら `null`。
+   */
+  score?: number | null;
+  stats: AccountStats;
+  usage?: AccountUsageView | null;
+}
+export interface AccountCooldownView {
+  /**
+   * `"auth_failed" | "throttled" | "exhausted"`。
+   */
+  reason: string;
+  until: string;
+}
+/**
+ * ADR-0022 D2: 1 回の疎通確認の記録。
+ */
+export interface ProviderCheckView {
+  /**
+   * 確認した時刻（RFC 3339）。
+   */
+  at: string;
+  /**
+   * 人が読むための一行の手がかり（ワーカーの返答や失敗の理由。ADR-0022 M1）。無ければ `null`。
+   */
+  detail?: string | null;
+  /**
+   * `ok` / `auth_failed` / `throttled` / `spawn_failed`（`task_api::ProviderCheckResult` の serde 名）。
+   */
+  result: string;
+}
+/**
+ * `WorkerStarted.account` / `WorkerFinished` から集計（task-api のメモリ内の観測値。再起動で再計算）。
+ */
+export interface AccountStats {
+  done: number;
+  error: number;
+  input_tokens: number;
+  output_tokens: number;
+  runs: number;
+}
+/**
+ * `RateLimitObservation` を RFC 3339 に直したもの。
+ */
+export interface AccountUsageView {
+  five_hour?: RateWindowView | null;
+  observed_at: string;
+  seven_day?: RateWindowView | null;
+  /**
+   * `"run" | "check"`。
+   */
+  source: string;
+  status?: string | null;
+}
+export interface RateWindowView {
+  resets_at: string;
+  utilization: number;
+}
+/**
+ * `POST /accounts/{id}/check` の応答（ADR-0024 D6）。
+ */
+export interface AccountCheckResponse {
+  checked_at: string;
+  detail?: string | null;
+  result: ProviderCheckResult;
+  usage?: AccountUsageView | null;
+}
+/**
+ * Phase 13（ADR-0024）: Claude アカウントのプール。
+ */
+export interface AccountList {
+  /**
+   * `id` 昇順。
+   */
+  items: AccountView[];
+  max_runs_per_account: number;
+  /**
+   * `[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `null`。
+   */
+  root?: string | null;
+}
+/**
+ * `POST /accounts/{id}/login/code` の応答。
+ */
+export interface AccountLoginResult {
+  detail?: string | null;
+  /**
+   * `"ok" | "failed"`。
+   */
+  result: string;
+}
+/**
+ * `POST /accounts/{id}/login` の応答（ADR-0024 D7）。
+ */
+export interface AccountLoginStart {
+  /**
+   * 10 分後（RFC 3339）。
+   */
+  expires_at: string;
+  url: string;
 }
 /**
  * `POST /tasks/{id}/answer` の本文。
@@ -440,6 +578,10 @@ export interface DelegationLimits {
   on_child_failure: "retry_then_ask" | "ignore";
 }
 export interface ProviderConfigView {
+  /**
+   * ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。
+   */
+  account_pool?: boolean;
   adapter: string;
   concurrency: number;
   /**
@@ -483,6 +625,14 @@ export interface DaemonView {
 }
 export interface DaemonSnapshot {
   /**
+   * ADR-0024: プールのアカウント（`id` 昇順）。`[accounts]` が無ければ空。
+   */
+  accounts?: AccountLive[];
+  /**
+   * ADR-0024 D1/D5: `[accounts] claude_dir` の絶対パス（`[accounts]` が無ければ `None`）。
+   */
+  accounts_root?: string | null;
+  /**
    * ADR-0023 D3: 委譲した子が終わるのを待っている親（`reviewing` のまま。id 昇順）。
    * 「自分の判定待ち」と区別するための観測値。古いスナップショットには無いので既定は空。
    */
@@ -503,6 +653,10 @@ export interface DaemonSnapshot {
    */
   instance_id: string;
   last_tick_at: string;
+  /**
+   * ADR-0024 D1: `[accounts] max_runs_per_account`（`[accounts]` が無ければ `None`）。
+   */
+  max_runs_per_account?: number | null;
   pid: number;
   providers: ProviderLive[];
   started_at: string;
@@ -512,6 +666,71 @@ export interface DaemonSnapshot {
    * 設定に合うプロバイダが無い ready タスク（この tick の判定）。
    */
   unroutable: TaskId[];
+}
+/**
+ * ADR-0024: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。
+ */
+export interface AccountLive {
+  cooldown?: AccountCooldownLive | null;
+  /**
+   * `"not_logged_in" | "at_capacity" | "cooldown" | "five_hour_exhausted" | "seven_day_exhausted" | "rejected"`。
+   */
+  excluded_reason?: string | null;
+  id: string;
+  /**
+   * 実行中の run（ワーカー run + このアカウントを使う Reviewer run）の数。
+   */
+  in_use: number;
+  last_check?: ProviderCheckView | null;
+  /**
+   * `.credentials.json` の有無。
+   */
+  logged_in: boolean;
+  /**
+   * 進行中のログイン中継（ADR-0024 D7）があるか。
+   */
+  login_pending?: boolean;
+  /**
+   * ADR-0024 D3 のスコア。除外されていれば `None`。
+   */
+  score?: number | null;
+  usage?: AccountUsageLive | null;
+}
+/**
+ * アカウントの cooldown（Unix 秒）。
+ */
+export interface AccountCooldownLive {
+  /**
+   * `"auth_failed" | "throttled" | "exhausted"`。
+   */
+  reason: string;
+  until: number;
+}
+/**
+ * `RateLimitObservation` の観測値部分（Unix 秒のまま。壁時計の文字列化は task-api が行う）。
+ */
+export interface AccountUsageLive {
+  five_hour?: RateWindow | null;
+  observed_at: number;
+  seven_day?: RateWindow | null;
+  /**
+   * `"run" | "check"`。
+   */
+  source: string;
+  status?: string | null;
+}
+/**
+ * 1 つの枠（5 時間 / 7 日）の観測値。
+ */
+export interface RateWindow {
+  /**
+   * 枠がリセットされる時刻（Unix 秒、`resetsAt`）
+   */
+  resets_at: number;
+  /**
+   * 0.0〜1.0（`unifiedWindows.<w>.utilization`）
+   */
+  utilization: number;
 }
 /**
  * クラスタ（`[[clusters]]` の行）の稼働状況（ADR-0018 D2 / D5）。`env` の値・`setup` の中身は含めない。
@@ -561,6 +780,10 @@ export interface InFlight {
  * プロバイダ（`[[providers]]` の行 = アカウント）の稼働状況。`env` の値は含めない。
  */
 export interface ProviderLive {
+  /**
+   * ADR-0024 D2: `[accounts]` のプールから選ぶか。古いスナップショットには無いので既定 `false`。
+   */
+  account_pool?: boolean;
   adapter: string;
   concurrency: number;
   /**
@@ -582,23 +805,6 @@ export interface ProviderLive {
    */
   model?: string | null;
   tiers: Tier[];
-}
-/**
- * ADR-0022 D2: 1 回の疎通確認の記録。
- */
-export interface ProviderCheckView {
-  /**
-   * 確認した時刻（RFC 3339）。
-   */
-  at: string;
-  /**
-   * 人が読むための一行の手がかり（ワーカーの返答や失敗の理由。ADR-0022 M1）。無ければ `null`。
-   */
-  detail?: string | null;
-  /**
-   * `ok` / `auth_failed` / `throttled` / `spawn_failed`（`task_api::ProviderCheckResult` の serde 名）。
-   */
-  result: string;
 }
 /**
  * `POST /tasks/{id}/approve`、`POST /tasks/{id}/reject` の本文。
@@ -990,6 +1196,10 @@ export interface ProviderCheckResponse {
  * `POST /api/v1/providers` と `PATCH /api/v1/providers/{id}` の応答（ADR-0017）。
  */
 export interface ProviderConfigView1 {
+  /**
+   * ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。
+   */
+  account_pool?: boolean;
   adapter: string;
   concurrency: number;
   /**
@@ -1010,6 +1220,10 @@ export interface Providers {
   items: ProviderView[];
 }
 export interface ProviderView {
+  /**
+   * ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。
+   */
+  account_pool?: boolean;
   adapter: string;
   concurrency: number;
   /**
