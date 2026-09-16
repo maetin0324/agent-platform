@@ -1102,6 +1102,10 @@ export interface TaskDetail {
    * 手元の作業ディレクトリ（絶対パス）。`WorkspaceSpec::Remote` では写し `workspace_root/<task_id>`（run のログはここ。ADR-0018 D1）。
    */
   workspace_dir?: string | null;
+  /**
+   * ADR-0019 D2: `sync = "worktree"` のクラスタで動くタスクの worktree。人はここを見て diff / commit する。
+   */
+  worktree?: WorktreeView | null;
 }
 export interface ApprovalLink {
   approval: TaskRef;
@@ -1145,6 +1149,23 @@ export interface Timers {
   lease_expires_at?: string | null;
   max_requeues: number;
   now: string;
+}
+/**
+ * ADR-0019 D2: クラスタ側の worktree（taskd はここだけを触り、commit はしない）。
+ */
+export interface WorktreeView {
+  /**
+   * worktree のブランチ（`taskd/<task_id>`）。taskd は commit しないので、変更は作業ツリーに残る。
+   */
+  branch: string;
+  /**
+   * worktree のパス（クラスタ上）。
+   */
+  dir: string;
+  /**
+   * 元のリポジトリ（`WorkspaceSpec::Remote.path`）。
+   */
+  project: string;
 }
 export interface TaskList {
   /**

@@ -722,6 +722,9 @@ worktree の取り込み → taskd の更新（`actions`）の取り込み → �
   追従済みだが、対応する画面（`/clusters`、タスク詳細の `role`/`delegated[]`、作成フォームの `role`/`aggregate`、プロバイダ管理 UI）は未実装。
   `docs/DESIGN.md` §10 Phase G7（クラスタと委譲の表示）が対応する範囲。プロバイダ管理（ADR-0017、`POST/PATCH/DELETE /providers`、`POST /reload`）は
   DESIGN のどの G フェーズにも明記が無いため、次フェーズ着手前に人間に確認したい（下記「提案」G6-P1）。
+  taskd 側は本フェーズの作業中も開発が続いており、監査後にさらに ADR-0019（`TaskDetail.worktree`、`sync = "worktree"` のクラスタ）が追加された
+  （任意フィールドで既存コードに影響なし。`pnpm gen:types` を再実行して取り込み、コミットに含めた）。次フェーズ開始時は着手前に必ず
+  `pnpm gen:types && git diff --exit-code app/taskd/types.ts` を実行し、この時点からの追加分が無いか確認すること。
 - **G6-U2: `/help` の `#trouble` はテスト用の DB や taskd の crate に触れない一般的な内容に留めている** — 「run のログと成果物の見方」「409/422 の意味」等は
   DESIGN の記述どおりだが、実際に taskd が返しうる `code`（`db_busy`、`too_many_streams` 等）はカバーしていない。困ったときの一次情報は
   `docs/taskd-api-v1.md` §1.5 のエラー表であり、`/help` はそこへの入口として最小限にとどめた（意図的な絞り込み、ADR-0009 D4 の延長）。
