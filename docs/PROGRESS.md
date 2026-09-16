@@ -2319,6 +2319,10 @@ P-60 の 3 案のうち **3（worktree）** を採り、ADR-0019 として実装
 - `cargo test -p taskd --lib worktree`: 2 passed（設定の解釈・`ClusterSpec` への写し・不正な `sync` と自動削除の拒否。
   `config/taskd.clusters.example.toml` もこのテストで読む）。
 - `cargo test -p task-ops worktree`: 1 passed（`TaskDetail.worktree` のパスとブランチ、rsync のクラスタでは `null`）。
+- `cargo test -p e2e --test cluster_scenarios`: **6 passed**。うち新規 1 件
+  （`worktree_cluster_runs_in_a_worktree_and_leaves_the_repository_alone`。実バイナリの taskd で
+  git リポジトリ → worktree → 写しは追跡ファイルだけ → 判定は worktree 内 → 元のリポジトリは `original` のまま、
+  worktree のブランチ `taskd/<task_id>` に未コミットの編集が残る）。
 - `cargo test --workspace`: **全 test result ok**、0 failed（`ssh_cluster_manual` の 2 件は `#[ignore]`）。
 - `cargo clippy --workspace --all-targets -- -D warnings`: exit 0。
 

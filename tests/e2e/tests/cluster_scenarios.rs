@@ -305,3 +305,69 @@ fn worker_run_cluster_without_control_master_exits_4() {
     assert_eq!(out.status.code(), Some(4), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("ControlMaster"), "{stdout}");
 }
+
+/// ADR-0019: `sync = "worktree"` を実バイナリで通す。クラスタ側のリポジトリから worktree を切り、
+/// **追跡ファイルだけ**を写して run し、判定は worktree の中で走り、元のリポジトリの作業ツリーは変わらない。
+#[test]
+fn worktree_cluster_runs_in_a_worktree_and_leaves_the_repository_alone() {
+    if !control_master_alive(HOST) {
+        eprintln!("skip: {HOST} への多重接続が無い");
+        return;
+    }
+    let env = Env::new();
+    // fake ワーカー: 追跡ファイルを編集する（判定はクラスタ側の worktree でこの編集を見る）。
+    let script = env.root.join("fake-editor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nset -u\ncat >/dev/null\necho edited > tracked.txt\necho '{\"type\":\"done\",\"summary\":\"edited\",\"evidence\":[]}'\n",
+    )
+    .unwrap();
+
+    // クラスタ側のリポジトリ: 追跡ファイル 1 件と、巨大データに見立てた未追跡ファイル 1 件。
+    let repo = env.root.join("cluster-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("tracked.txt"), "original\n").unwrap();
+    std::fs::write(repo.join("untracked-huge.bin"), "x".repeat(4096)).unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "taskd@example.com"],
+        vec!["config", "user.name", "taskd"],
+        vec!["add", "tracked.txt"],
+        vec!["commit", "-q", "-m", "initial"],
+    ] {
+        let out = Command::new("git").args(&args).current_dir(&repo).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    let config = env.write_config(
+        &script,
+        &format!("[[clusters]]\nid = \"local\"\nhost = \"{HOST}\"\nconcurrency = 1\nsync = \"worktree\"\n"),
+    );
+    let id = env.add_remote("worktree work", "local", &repo, "grep -q edited tracked.txt");
+
+    env.run_taskd(&config, Duration::from_secs(120));
+
+    let t = env.task(id);
+    assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
+
+    // 手元の写しには追跡ファイルだけが来る。
+    let mirror = env.root.join("workspaces").join(id.to_string());
+    assert!(mirror.join("tracked.txt").exists(), "追跡ファイルは写しに来る");
+    assert!(!mirror.join("untracked-huge.bin").exists(), "未追跡の巨大データは持ち込まれない");
+
+    // 編集は worktree のブランチにだけ入る。元のリポジトリの作業ツリーは変わらない（ADR-0019 D3）。
+    let worktree = repo.join(".taskd-worktrees").join(id.to_string());
+    assert_eq!(std::fs::read_to_string(worktree.join("tracked.txt")).unwrap().trim(), "edited");
+    assert_eq!(std::fs::read_to_string(repo.join("tracked.txt")).unwrap(), "original\n", "元のリポジトリは触らない");
+    let branch = Command::new("git").args(["rev-parse", "--abbrev-ref", "HEAD"]).current_dir(&worktree).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), format!("taskd/{id}"));
+    // taskd は commit しない（変更は作業ツリーに残る。ADR-0019 D2）。
+    let status = Command::new("git").args(["status", "--porcelain"]).current_dir(&worktree).output().unwrap();
+    assert!(String::from_utf8_lossy(&status.stdout).contains("tracked.txt"), "commit せず作業ツリーに残す");
+
+    // 後片付け（本番では人の操作。テストの tempdir は消えるが、worktree の登録を残さないため）。
+    let _ = Command::new("git")
+        .args(["worktree", "remove", "--force", worktree.to_str().unwrap()])
+        .current_dir(&repo)
+        .output();
+}
