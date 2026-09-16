@@ -22,7 +22,12 @@ const STATUS_ROWS: { status: string; meaning: string; canDo: string }[] = [
     canDo: "kind=approval なら承認／却下、それ以外は取り消しのみ（実行開始は taskd が行う）",
   },
   { status: "running", meaning: "ワーカーが実行中。", canDo: "取り消しのみ（待つ）" },
-  { status: "blocked", meaning: "ワーカーが人間への質問を残して止まっている。", canDo: "回答／取り消し" },
+  {
+    status: "blocked",
+    meaning:
+      "人間への質問を残して止まっている（ワーカーが聞いた場合と、委譲した子が失敗して親がやり直せなかった場合がある）。",
+    canDo: "回答／取り消し",
+  },
   {
     status: "reviewing",
     meaning: "受け入れ条件を taskd（またはレビュー run）が判定中。",

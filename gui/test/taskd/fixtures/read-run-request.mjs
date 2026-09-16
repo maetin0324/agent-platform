@@ -24,7 +24,9 @@ process.stdin.on("end", () => {
   }
   const task = request.task ?? {};
   const context = request.context ?? {};
+  /** @type {Array<{ title?: string }>} */
   const children = Array.isArray(context.children) ? context.children : [];
+  /** @param {unknown} value @returns {string} sh のシングルクォート文字列 */
   const quote = (value) => `'${String(value ?? "").replaceAll("'", `'\\''`)}'`;
   const lines = [
     `TITLE=${quote(task.title)}`,
