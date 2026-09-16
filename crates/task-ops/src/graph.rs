@@ -24,6 +24,8 @@ pub struct GraphNode {
     pub status: Status,
     pub kind: TaskKind,
     pub parent_id: Option<TaskId>,
+    /// ADR-0016 D1 の `Task.role`（GUI-R2: DAG のノードに役割のラベルを出すため）。
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -136,6 +138,7 @@ pub fn graph(
             status: t.status,
             kind: t.kind,
             parent_id: t.parent_id,
+            role: t.role.clone(),
         })
         .collect();
 
@@ -218,6 +221,22 @@ mod tests {
         assert_eq!(g.edges[0].from, a.id);
         assert_eq!(g.edges[0].to, b.id);
         assert_eq!(g.edges[0].kind, "depends_on");
+    }
+
+    /// GUI-R2（ADR-0016 D1）: DAG のノードにも `role` が出る（詳細を N+1 で引かなくてよい）。
+    #[test]
+    fn graph_nodes_carry_the_role() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut lead = sample_task(TaskKind::Execute, Status::Running);
+        lead.role = Some("lead".to_string());
+        store.insert(&lead).expect("insert lead");
+        let plain = sample_task(TaskKind::Execute, Status::Ready);
+        store.insert(&plain).expect("insert plain");
+
+        let g = graph(&store, None, None, true).expect("graph");
+        let role_of = |id| g.nodes.iter().find(|n| n.id == id).expect("in graph").role.clone();
+        assert_eq!(role_of(lead.id).as_deref(), Some("lead"));
+        assert_eq!(role_of(plain.id), None);
     }
 
     #[test]

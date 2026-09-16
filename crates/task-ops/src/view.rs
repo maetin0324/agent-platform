@@ -76,6 +76,8 @@ pub struct TaskSummary {
     pub backoff_until: Option<String>,
     pub children: u32,
     pub pending_children: u32,
+    /// ADR-0016 D1 の `Task.role`（GUI-R2: 一覧の各行に役割のラベルを出すため。`TaskDetail.role` と同じ値）。
+    pub role: Option<String>,
     /// 今この状態で許される操作（ADR-0015 D4）。
     pub actions: Vec<Action>,
 }
@@ -347,6 +349,7 @@ pub(crate) fn build_task_summary(
         backoff_until: backoff_until_str(task, ctx, now),
         children,
         pending_children,
+        role: task.role.clone(),
         actions: actions(task),
     }
 }
@@ -1226,6 +1229,31 @@ mod tests {
         );
         let detail = task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         assert_eq!(detail.worktree.expect("worktree").dir, format!("/work/NBB/x/wt/{}", on_worktree.id));
+    }
+
+    /// GUI-R2（ADR-0016 D1）: 一覧の各行にも `role` が出る（詳細を N+1 で引かなくてよい）。
+    #[test]
+    fn task_list_items_carry_the_role() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut lead = sample_task(TaskKind::Execute, Status::Ready);
+        lead.role = Some("lead".to_string());
+        store.insert(&lead).expect("insert");
+        let plain = sample_task(TaskKind::Execute, Status::Ready);
+        store.insert(&plain).expect("insert");
+
+        let list = task_list(
+            &store,
+            &ListFilter::default(),
+            ListOrder::CreatedDesc,
+            None,
+            100,
+            &view_ctx(),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("task_list");
+        let role_of = |id| list.items.iter().find(|t| t.id == id).expect("in list").role.clone();
+        assert_eq!(role_of(lead.id).as_deref(), Some("lead"));
+        assert_eq!(role_of(plain.id), None);
     }
 
     /// ADR-0016 D1/D2: `role` はトップレベルにも出て、`delegated` は `Event::Delegated` から組み立てる。

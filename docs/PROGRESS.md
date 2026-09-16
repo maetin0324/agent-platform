@@ -2379,3 +2379,16 @@ TASKD_CLUSTER_HOST=pegasus TASKD_CLUSTER_PROJECT=/work/NBB/rmaeda/workspace/rust
   `pnpm e2e` **62 passed（5.8 分）** / `pnpm gen:types` 差分ゼロ（`gui/` の親を自動で見る）。
 - `git check-ignore`: `gui/node_modules` / `gui/build` / `gui/.react-router` は `gui/.gitignore` で無視されている。
 - 旧ディレクトリは `/home/rmaeda/workspace/taskd-gui.merged-2026-09-16` に改名して残した（取り込みを確認したら人が消してよい）。
+
+### GUI からの依頼 R2 への対応（同日）
+
+`gui/docs/taskd-requests.md` R2「`TaskSummary` / `GraphNode` に `role` が無いので、一覧と DAG に役割ラベルを出せない」に対応した
+（DESIGN §10 Phase G7 の実装項目のうち、API 制約で残っていた 1 つ）。
+
+- `TaskSummary.role` と `GraphNode.role` に `Task.role` をそのまま出す（追加のみ。v1 のまま）。`skip_serializing_if` は付けず、
+  `adapter` など既存の任意フィールドと同じく `null` を出す。
+- `docs/gui/api.md` §3.3 / §3.16、`docs/api/v1/api-v1.schema.json`（再生成）、`gui/docs/taskd-api-v1.md`（`scripts/sync-gui-docs.sh`）、
+  `gui/app/taskd/types.ts`（`pnpm gen:types`）まで**同じコミットで**揃う（ADR-0020 の狙いどおり）。
+- 証拠: `cargo test --workspace` 40 binary すべて ok（`task_list_items_carry_the_role` / `graph_nodes_carry_the_role` を追加）、
+  `cargo clippy --workspace --all-targets -- -D warnings` exit 0、GUI の `pnpm typecheck` exit 0 / `pnpm test` 147 passed。
+- 一覧・DAG に実際にラベルを出すのは GUI 側の作業（次に G フェーズを回すときに拾える。`gui/docs/PROGRESS.md` G7-U1）。

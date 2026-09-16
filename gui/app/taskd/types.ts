@@ -675,6 +675,10 @@ export interface GraphNode {
   id: TaskId;
   kind: TaskKind;
   parent_id?: TaskId | null;
+  /**
+   * ADR-0016 D1 の `Task.role`（GUI-R2: DAG のノードに役割のラベルを出すため）。
+   */
+  role?: string | null;
   status: Status;
   title: string;
 }
@@ -818,6 +822,10 @@ export interface TaskSummary {
   parent_id?: TaskId | null;
   pending_children: number;
   priority: number;
+  /**
+   * ADR-0016 D1 の `Task.role`（GUI-R2: 一覧の各行に役割のラベルを出すため。`TaskDetail.role` と同じ値）。
+   */
+  role?: string | null;
   status: Status;
   tier: Tier;
   title: string;

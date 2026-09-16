@@ -183,6 +183,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 - `TaskStore::list_page(&ListFilter, ListOrder, cursor, limit) -> Page<Task>` をそのまま使い、`Task` を `TaskSummary` に写す（`children` / `pending_children` / `backoff_until` の付加は task-ops）。
 - `total` は `Page.total`（同じフィルタでの総件数。cursor に依らない）。
 - `items[].children` / `pending_children` は `parent_id` で集計（`pending` = 非終端）。`backoff_until` は §5.3。
+- `items[].role` は `Task.role`（ADR-0016 D1）。一覧の行に役割のラベルを出すための値で、`TaskDetail.role` と同じ（GUI-R2。役割なしは `null`）。
 - `counts_by_status` は**フィルタに関係なく** DB 全体の status 別件数（`count_by_status()` の `Vec<(Status, u64)>` をオブジェクトに。0 件の status は現れない）。タイトルバーの件数表示用。
 - 空のときは `{"items":[],"next_cursor":null,"total":0,"counts_by_status":{…}}`。
 
@@ -334,7 +335,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `depth` | 無制限 | `root` からの最大ホップ数 |
 | `include_terminal` | true | false で `done|failed|cancelled` を除く（辺も除く） |
 
-`nodes[] = {id, title, status, kind, parent_id}`、`edges[] = {from, to, kind: "depends_on"}`（`from` = 先行、`to` = 後続）。親子は `parent_id` で表し、辺にしない。レイアウトはクライアント。上限 5,000 ノード（超えたら 422 `validation`、`detail` で `root` の指定を促す）。
+`nodes[] = {id, title, status, kind, parent_id, role}`（`role` は `Task.role`。ノードに役割のラベルを出すための値。役割なしは `null`。GUI-R2）、
+`edges[] = {from, to, kind: "depends_on"}`（`from` = 先行、`to` = 後続）。親子は `parent_id` で表し、辺にしない。レイアウトはクライアント。上限 5,000 ノード（超えたら 422 `validation`、`detail` で `root` の指定を促す）。
 
 ### 3.17 `GET /events` → 200 `EventsPage`
 
@@ -568,7 +570,7 @@ pub struct TaskSummary {
     pub priority: i32, pub tier: Tier, pub adapter: Option<String>, pub attempts: u32, pub max_retries: u32,
     pub depends_on: Vec<TaskId>, pub created_at: String, pub updated_at: String,
     pub lease_expires_at: Option<String>, pub backoff_until: Option<String>,
-    pub children: u32, pub pending_children: u32, pub actions: Vec<Action>,
+    pub children: u32, pub pending_children: u32, pub role: Option<String> /* GUI-R2 */, pub actions: Vec<Action>,
 }
 pub struct TaskList { pub items: Vec<TaskSummary>, pub next_cursor: Option<String>, pub total: u64, pub counts_by_status: BTreeMap<Status, u64> }
 
@@ -649,7 +651,8 @@ pub struct TransitionResult { pub id: TaskId, pub from: Status, pub to: Status, 
 pub struct ReplayReport { pub tasks: usize, pub mismatches: Vec<ReplayMismatch> }
 pub struct ReplayMismatch { pub task_id: TaskId, pub field: String /* "status" | "attempts" */, pub replayed: String, pub stored: String }
 pub struct Graph { pub nodes: Vec<GraphNode>, pub edges: Vec<GraphEdge> }
-pub struct GraphNode { pub id: TaskId, pub title: String, pub status: Status, pub kind: TaskKind, pub parent_id: Option<TaskId> }
+pub struct GraphNode { pub id: TaskId, pub title: String, pub status: Status, pub kind: TaskKind, pub parent_id: Option<TaskId>,
+                      pub role: Option<String> /* GUI-R2 */ }
 pub struct GraphEdge { pub from: TaskId, pub to: TaskId, pub kind: String /* "depends_on" */ }
 
 // ---- task-ops: デーモンのスナップショット（task-dispatch が作り、task-api が読む）----

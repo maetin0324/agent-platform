@@ -4,7 +4,17 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
 
 ## 未対応
 
-### R2（2026-09-16、Phase G7）: `TaskSummary` / `GraphNode` に `role` が無い
+## 対応済み
+
+### R2 — 対応済み（2026-09-16、taskd 側で追加）
+
+- `TaskSummary` と `GraphNode` に `role: Option<String>` を足した（`Task.role` そのまま。役割が無ければ `null`）。
+  既存フィールドの意味は変えていないので v1 のまま（追加のみ）。`docs/taskd-api-v1.md` §3.3 / §3.16、スキーマ、`app/taskd/types.ts` に反映済み。
+- `skip_serializing_if` は付けていない。`TaskSummary.adapter` など既存の任意フィールドと同じく **`null` を出す**（生成される型は `string | null`）。
+- これで一覧の行と DAG のノードに、追加の `GET /tasks/{id}` 無しで役割ラベルを出せる（DESIGN §10 Phase G7 の残り 1 項目）。
+- 以下は原文（記録のため残す）。
+
+### R2（原文、2026-09-16、Phase G7）: `TaskSummary` / `GraphNode` に `role` が無い
 
 - **エンドポイント**: `GET /tasks`（`TaskList.items[]` = `TaskSummary`）、`GET /graph`（`Graph.nodes[]` = `GraphNode`）。
 - **期待（docs/DESIGN.md §10 Phase G7）**: 「一覧と DAG のノードに役割を出す（色分けはせず、テキストのラベル）」。
@@ -26,8 +36,6 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
   頼らない」方針とも衝突するため行っていない（`docs/adr/0010-g7-decisions.md` D5）。
 - **依頼**: `TaskSummary` と `GraphNode` に、`TaskDetail.role` と同じ規則の `role: Option<String>`（`#[serde(skip_serializing_if = "Option::is_none")]`）
   を追加してほしい。追加のみで v1 のまま拡張できる想定（ADR-0016 と同じ流儀）。
-
-## 対応済み
 
 ## 調査依頼（API の不足・仕様違いではないので BLOCKED にはしない）
 
