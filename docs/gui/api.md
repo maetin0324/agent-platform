@@ -1,6 +1,7 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-16 ADR-0021（委譲した子の失敗）— イベント種別 `question_raised`、`GET /config` の `delegation.on_child_failure` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-15 Phase 10（ADR-0016 役割と委譲）— `POST /tasks` の `role` / `aggregate`、`TaskDetail.role` / `delegated[]`、`GET /config` の `roles[]` / `delegation`、イベント種別 `delegated` を追加（全て追加のみ。v1 のまま）
 - 提供者: **taskd**（crate `task-api`、axum）。taskd のデーモンプロセス内で、`taskd.toml` に `[api]` 節があるときだけ動く
 - 利用者: `taskd-gui` の BFF（Remix = React Router framework mode のサーバ側 loader / action）と `curl`。**ブラウザは直接呼ばない**
@@ -257,9 +258,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `limit` | 500（最大 5000） | |
 | `types` | 全て | `Event` の `type` 名をカンマ区切り（例 `transitioned,worker_finished`）。未知の名前は 400 |
 
-`types` の語彙（`Event` の `type`、12 種）: `created`、`transitioned`、`worker_started`、`worker_progress`、`artifact_produced`、
+`types` の語彙（`Event` の `type`、14 種）: `created`、`transitioned`、`worker_started`、`worker_progress`、`artifact_produced`、
 `worker_finished`、`review_verdict`、`approval_requested`、`approval_decided`、`answered`、`provider_throttled`、
-`delegated`（Phase 10。`{run_id, task_ids}`。状態は変えないので `replay` は無視する）。
+`cluster_unavailable`（Phase 12。`{cluster, host, reason}`）、
+`delegated`（Phase 10。`{run_id, task_ids}`。状態は変えないので `replay` は無視する）、
+`question_raised`（ADR-0021。`{run_id, text}`。ディスパッチャが人に出した質問。同じトランザクションの
+`transitioned{to: "blocked", reason: "child_failed"}` と対。状態は変えないので `replay` は無視する）。
 
 - `seq` 昇順。`has_more` が true なら最後の `seq` を `after_seq` に入れて続きを取る。
 - `items[].id` はグローバル id（ADR-0013 D6）。`items[].ts` は `events.ts`。
@@ -379,7 +383,8 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 
 `taskd.toml` の要約。`db`（絶対パス）、`workspace_root`、`tick_ms`、`max_concurrency`、`lease_grace_secs`、`idle_timeout_secs`、`kill_grace_secs`、`review_timeout_secs`、`error_cooldown_secs`、`retry_backoff_base_secs`、`retry_backoff_max_secs`、`max_requeues`、`plan.auto_accept`、`reviewer{adapter, tier}`、`providers[]{id, adapter, tiers, concurrency, model, env_keys}`、`clusters[]{id, host, concurrency, sync, delete_on_push, has_setup, env_keys, rsync_excludes}`（Phase 12）、
 `roles[]{id, tier, adapter, max_turns, max_wall_secs, has_instructions}`（Phase 10。`[[roles]]` の順）、
-`delegation{max_delegate_per_run, max_tree_depth, max_tree_runs}`（Phase 10。既定 8 / 5 / 100）、`api{bind, auth_required, allowed_hosts}`、`config_path`。
+`delegation{max_delegate_per_run, max_tree_depth, max_tree_runs, on_child_failure}`（Phase 10 / ADR-0021。既定 8 / 5 / 100 /
+`"retry_then_ask"`。`on_child_failure` は `"retry_then_ask"` か `"ignore"`）、`api{bind, auth_required, allowed_hosts}`、`config_path`。
 `[[providers]].env` の**値**、`[adapters.*].env` の値、`[[clusters]].env` の値と `setup` の中身、`[[roles]].instructions` の**本文**（有無だけを `has_instructions` で出す）、`token_file` のパスと内容は出さない。`task-api` は `taskd` crate に依存しないので、この型は task-api に置き、taskd が起動時に値を作って `ApiState` に渡す。
 
 ### 3.22 `GET /schema` → 200 `application/schema+json`
@@ -485,7 +490,7 @@ data: {"reason":"cursor_too_old","cursor":20000}
 | 区画 | 抽出 | 各項目の埋め方 | 並び |
 |---|---|---|---|
 | `approvals[]` | `kind == approval && status == ready` | `parent` = `parent_id` のタスク（無ければ `null`）。`criterion_idx` / `attempt` は title を `Approval needed: <title> — criterion <idx> (attempt <n>)` として解析（`task_ops::parse_human_approval_title`。ディスパッチャの `human_approval_title` と対）。解析できなければ `null`。`criterion_text` = 親の `acceptance[idx].text`（無ければ approval の `objective`）。`requested_at` = `ApprovalRequested` の `ts`（無ければ `created_at`）。`last_run` = 親の `last_run_id` の `RunSummary`。`evidence` = `<ws>/runs/<run_id>/result.json` が `done` なら `evidence[]`（task-api が読む。読めなければ `[]`）。`other_verdicts` = 親の同 run の `ReviewVerdict`。`artifacts` = `artifacts_for_run`。`previous_decisions` = 親の他の Approval 子（同じ `criterion_idx`）の `ApprovalDecided` | `requested_at` 昇順 |
-| `questions[]` | `status == blocked` | `question` = §5.5。`asked_at` = その `WorkerFinished` の `ts`。`run_id` = 同。`previous` = `answers_from_events`（`AnswerNote` の履歴） | `asked_at` 昇順 |
+| `questions[]` | `status == blocked` | `question` = §5.5。`asked_at` = その `WorkerFinished`（または `QuestionRaised`）の `ts`。`run_id` = 同。`previous` = `answers_from_events`（`AnswerNote` の履歴） | `asked_at` 昇順 |
 | `drafts[]` | `status == draft` を `parent_id` でまとめる | `parent` = Plan 等（`null` = 根）。`plan_summary` = 親の直近 `WorkerFinished.outcome` が `done: ` 始まりならその後ろ。`drafts` = `TaskSummary` | 親の `created_at` 昇順、根は最後 |
 | `attention[]` | (a) `failed` かつ `updated_at >= now − 24h`、(b) `ready && max_requeues > 0 && consecutive_requeues > 0 && consecutive_requeues >= max_requeues − 1`（一度も requeue していないものは含めない）、(c) スナップショットの `unroutable`、(d) `WorkspaceSpec::Remote` で終端でないタスクの `ClusterUnavailable` が `ts >= now − 24h` にあるクラスタ（**クラスタごとに 1 件**。スナップショットがあり `clusters[].connected == true` なら出さない — 接続が戻っていれば用済み。Phase 12） | (a) `reason` = 直近 `WorkerFinished.outcome` と、直近 run の fail の `ReviewVerdict.reason` を（あるものだけ）`; ` で結合。(b) `count` / `max`。(c) `hint` = `worker_hint`、`at` = スナップショットの `last_tick_at`。(d) `cluster` / `host`（イベントの `host`。空なら `clusters[].host`）/ `at` = 最新の `ts` / `tasks` = 該当タスク数。GUI は「`scripts/cluster-login.sh <host>` でログインし直してください」と出す | `at` 降順 |
 | `counts` | 上の件数 + `count_by_status()` | `drafts` は **draft タスクの件数**（グループ数ではない）。他は各区画の要素数 | |
@@ -517,7 +522,11 @@ data: {"reason":"cursor_too_old","cursor":20000}
 
 ### 5.5 質問文（`task_ops::latest_question(events)`）
 
-`events_for` を後ろから見て最初の `WorkerFinished{outcome}` のうち `"question: "` で始まるものの接頭辞を除いた文字列。無ければ空文字列（現在の `gate.rs::latest_question` をそのまま移す）。
+`events_for` を後ろから見て最初に見つかった質問。次の 2 つを同じように扱う:
+- `WorkerFinished{outcome}` が `"question: "` で始まるもの（ワーカーが聞いた。接頭辞を除いた文字列）
+- `QuestionRaised{text}`（ディスパッチャが聞いた。ADR-0021 D2。委譲した子が失敗し、親がやり直せなかったとき）
+
+無ければ空文字列。
 
 ### 5.6 検証（`task_ops::add::create_task` / `task_ops::plan::create_plan` の中）
 
@@ -561,6 +570,9 @@ pub struct Page<T> { pub items: Vec<T>, pub next_cursor: Option<String>, pub tot
 // Phase 10（ADR-0016）: Task に #[serde(default, skip_serializing_if = "Option::is_none")] role: Option<String> と
 //   #[serde(default, skip_serializing_if = "std::ops::Not::not")] aggregate: bool（false と null は直列化で省かれる）。
 //   Event::Delegated { run_id: String, task_ids: Vec<TaskId> } を追加（type 名 `delegated`）
+// ADR-0021: Event::QuestionRaised { run_id: String, text: String } を追加（type 名 `question_raised`）。
+//   委譲した子が失敗し、親がやり直せなかったときにディスパッチャが出す質問。`TaskDetail.latest_question` /
+//   `Inbox.questions[]` はこれも見る（`WorkerFinished{outcome: "question: …"}` と同じ扱い）。
 // #[serde(rename_all = "snake_case")] pub enum RunRole { Worker, Reviewer }
 
 // ---- task-ops: 参照・一覧 ----

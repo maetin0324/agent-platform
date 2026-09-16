@@ -44,6 +44,11 @@ auto_accept = false
 max_delegate_per_run = 8   # 1 run が提案できる子の件数（複数の delegate メッセージをまたいで数える）
 max_tree_depth = 5         # 木の深さ（根 = 1）
 max_tree_runs = 100        # 木全体のワーカー run 数
+# 委譲した子が failed になったときの親の扱い（ADR-0021）。
+#   "retry_then_ask"（既定）… 親をやり直す（attempts を 1 つ使い、次の run は子の結果を見られる）。
+#                              やり直せない（max_retries に達した）なら blocked にして人に質問する。親は failed にしない。
+#   "ignore"              … 子の失敗を見ずに親を完了させる（ADR-0016 M5 までの挙動）。
+on_child_failure = "retry_then_ask"
 
 # HTTP API（ADR-0013、docs/gui/api.md）。listen を書いたときだけ taskd のプロセス内で動く（既定は無効）。taskd-gui はこれを使う。
 # loopback 以外で listen するなら token_file が必須（中身 1 行が Bearer トークン。読めない・空なら起動時に exit 2）。

@@ -165,6 +165,8 @@ pub fn latest_question(events: &[(u64, Event)]) -> String {
             Event::WorkerFinished { outcome, role, .. } if !is_reviewer(*role) => {
                 outcome.strip_prefix("question: ").map(str::to_string)
             }
+            // ADR-0021 D2: ディスパッチャが出した質問（run の終了ではない）。
+            Event::QuestionRaised { text, .. } => Some(text.clone()),
             _ => None,
         })
         .unwrap_or_default()

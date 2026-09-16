@@ -756,7 +756,8 @@
           "default": {
             "max_delegate_per_run": 8,
             "max_tree_depth": 5,
-            "max_tree_runs": 100
+            "max_tree_runs": 100,
+            "on_child_failure": "retry_then_ask"
           },
           "description": "ADR-0016 D2: `[delegation]` の上限。"
         },
@@ -1244,12 +1245,17 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "on_child_failure": {
+          "$ref": "#/$defs/OnChildFailure",
+          "description": "ADR-0021 D4: 委譲した子が失敗したときの親の扱い。"
         }
       },
       "required": [
         "max_delegate_per_run",
         "max_tree_depth",
-        "max_tree_runs"
+        "max_tree_runs",
+        "on_child_failure"
       ],
       "type": "object"
     },
@@ -1542,6 +1548,28 @@
             "type",
             "question",
             "answer"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0021 D2: ディスパッチャが人間に出した質問（run の終了ではないので `WorkerFinished` は使わない）。\n状態は変えない（`replay` は無視する）。同じトランザクションの `Transitioned{to: blocked}` と対で記録する。",
+          "properties": {
+            "run_id": {
+              "description": "この質問のきっかけになった run（親の直近の run）。",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "question_raised",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "text"
           ],
           "type": "object"
         },
@@ -2135,6 +2163,21 @@
         "acceptance"
       ],
       "type": "object"
+    },
+    "OnChildFailure": {
+      "description": "ADR-0021: 委譲した子が `failed` になったとき、親をどうするか。",
+      "oneOf": [
+        {
+          "const": "retry_then_ask",
+          "description": "既定: 親をやり直す（attempts 消費）。やり直せないなら人間に質問して待つ（`blocked`）。**親を failed にはしない**。",
+          "type": "string"
+        },
+        {
+          "const": "ignore",
+          "description": "ADR-0016 M5 までの挙動: 子の失敗を見ずに親を完了させる。",
+          "type": "string"
+        }
+      ]
     },
     "Problem": {
       "additionalProperties": true,

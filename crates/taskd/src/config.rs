@@ -149,6 +149,10 @@ pub struct DelegationConfig {
     /// 木全体のワーカー run 数。
     #[serde(default = "default_max_tree_runs")]
     pub max_tree_runs: u32,
+    /// ADR-0021 D4: 委譲した子が `failed` になったときの親の扱い。
+    /// `"retry_then_ask"`（既定。やり直し → 駄目なら人に質問して `blocked`）か `"ignore"`（子の失敗を見ない）。
+    #[serde(default = "default_on_child_failure")]
+    pub on_child_failure: String,
 }
 
 impl Default for DelegationConfig {
@@ -157,8 +161,13 @@ impl Default for DelegationConfig {
             max_delegate_per_run: default_max_delegate_per_run(),
             max_tree_depth: default_max_tree_depth(),
             max_tree_runs: default_max_tree_runs(),
+            on_child_failure: default_on_child_failure(),
         }
     }
+}
+
+fn default_on_child_failure() -> String {
+    "retry_then_ask".to_string()
 }
 
 fn default_max_delegate_per_run() -> usize {
@@ -594,6 +603,13 @@ impl Config {
             }
         }
         // ADR-0016 D2 / M6: 0 の上限は「委譲を止める」ではなく設定ミス（拒否理由が毎回出るだけ）なので拒否する。
+        // ADR-0021 D4: 知らない値は設定エラー（黙って既定に落とさない）。
+        if !matches!(self.delegation.on_child_failure.as_str(), "retry_then_ask" | "ignore") {
+            return Err(ConfigError::Invalid(format!(
+                "[delegation] on_child_failure must be \"retry_then_ask\" or \"ignore\" (got {:?})",
+                self.delegation.on_child_failure
+            )));
+        }
         if self.delegation.max_delegate_per_run == 0 {
             return Err(ConfigError::Invalid("[delegation] max_delegate_per_run must be >= 1".to_string()));
         }
@@ -669,6 +685,10 @@ impl Config {
             max_delegate_per_run: self.delegation.max_delegate_per_run,
             max_tree_depth: self.delegation.max_tree_depth,
             max_tree_runs: self.delegation.max_tree_runs,
+            on_child_failure: match self.delegation.on_child_failure.as_str() {
+                "ignore" => task_core::OnChildFailure::Ignore,
+                _ => task_core::OnChildFailure::RetryThenAsk,
+            },
         }
     }
 
@@ -1000,7 +1020,15 @@ tiers = ["cheap"]
         assert!(cfg.validate().is_ok());
         assert!(cfg.roles.is_empty());
         assert_eq!(cfg.delegation_limits(), task_core::DelegationLimits::default());
-        assert_eq!(cfg.delegation_limits(), DelegationLimits { max_delegate_per_run: 8, max_tree_depth: 5, max_tree_runs: 100 });
+        assert_eq!(
+            cfg.delegation_limits(),
+            DelegationLimits {
+                max_delegate_per_run: 8,
+                max_tree_depth: 5,
+                max_tree_runs: 100,
+                on_child_failure: task_core::OnChildFailure::RetryThenAsk,
+            }
+        );
 
         let text = format!(
             r#"[[roles]]
@@ -1033,13 +1061,40 @@ max_tree_depth = 2
         assert_eq!(specs[1].tier, None);
         // 書いていない値は既定のまま。
         let limits = cfg.delegation_limits();
-        assert_eq!(limits, DelegationLimits { max_delegate_per_run: 3, max_tree_depth: 2, max_tree_runs: 100 });
+        assert_eq!(
+            limits,
+            DelegationLimits {
+                max_delegate_per_run: 3,
+                max_tree_depth: 2,
+                max_tree_runs: 100,
+                on_child_failure: task_core::OnChildFailure::RetryThenAsk,
+            }
+        );
         let d = cfg.dispatch_config();
         assert_eq!(d.roles, specs);
         assert_eq!(d.delegation, limits);
 
         assert!(toml::from_str::<Config>("[[roles]]\nid = \"a\"\nbogus = 1\n").is_err());
         assert!(toml::from_str::<Config>("[delegation]\nbogus = 1\n").is_err());
+    }
+
+    /// ADR-0021 D4: `on_child_failure` は `retry_then_ask`（既定）と `ignore` だけ。知らない値は設定エラー。
+    #[test]
+    fn delegation_on_child_failure_is_parsed_and_validated() {
+        let with = |v: &str| {
+            format!("[delegation]\non_child_failure = \"{v}\"\n[[providers]]\nid = \"p\"\nadapter = \"fake\"\n")
+        };
+        let cfg: Config = toml::from_str(&with("ignore")).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.delegation_limits().on_child_failure, task_core::OnChildFailure::Ignore);
+
+        let cfg: Config = toml::from_str(&with("retry_then_ask")).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.delegation_limits().on_child_failure, task_core::OnChildFailure::RetryThenAsk);
+
+        let cfg: Config = toml::from_str(&with("fail_parent")).unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("on_child_failure"), "{err}");
     }
 
     /// ADR-0016: 役割 id の重複、未知の adapter、0 の上限は設定エラー。

@@ -272,6 +272,13 @@ pub enum Event {
         question: String,
         answer: String,
     },
+    /// ADR-0021 D2: ディスパッチャが人間に出した質問（run の終了ではないので `WorkerFinished` は使わない）。
+    /// 状態は変えない（`replay` は無視する）。同じトランザクションの `Transitioned{to: blocked}` と対で記録する。
+    QuestionRaised {
+        /// この質問のきっかけになった run（親の直近の run）。
+        run_id: String,
+        text: String,
+    },
     /// ADR-0016 D2: 実行中の run が `delegate` で提案し、検証を通って挿入された子タスク。状態は変えない（`replay` は無視する）。
     Delegated {
         run_id: String,

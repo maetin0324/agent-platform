@@ -93,6 +93,14 @@ export type Event =
       type: "answered";
     }
   | {
+      /**
+       * この質問のきっかけになった run（親の直近の run）。
+       */
+      run_id: string;
+      text: string;
+      type: "question_raised";
+    }
+  | {
       run_id: string;
       task_ids: TaskId[];
       type: "delegated";
@@ -426,6 +434,10 @@ export interface DelegationLimits {
    * 木全体のワーカー run 数。
    */
   max_tree_runs: number;
+  /**
+   * ADR-0021 D4: 委譲した子が失敗したときの親の扱い。
+   */
+  on_child_failure: "retry_then_ask" | "ignore";
 }
 export interface ProviderConfigView {
   adapter: string;

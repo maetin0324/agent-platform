@@ -33,6 +33,9 @@ pub enum Trigger {
     DependencyFailed,
     /// 委譲した子が全て終端になり、集約 run を行う親: `reviewing → ready`、attempts 据え置き（ADR-0016 D3 / M1）。
     Aggregate,
+    /// 委譲した子が失敗した親（ADR-0021 D1）: やり直せるなら `reviewing → ready`（attempts 消費）、
+    /// やり直せないなら `reviewing → blocked`（人間の判断待ち）。**`failed` にはしない**。
+    ChildFailed,
 }
 
 impl Trigger {
@@ -55,6 +58,7 @@ impl Trigger {
             Trigger::Requeue => "requeue",
             Trigger::DependencyFailed => "dependency_failed",
             Trigger::Aggregate => "aggregate",
+            Trigger::ChildFailed => "child_failed",
         }
     }
 }
@@ -138,6 +142,29 @@ pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransiti
                     attempts: s.attempts,
                     reason: t.name(),
                 })
+            } else {
+                Err(invalid(s, t))
+            }
+        }
+
+        // ADR-0021 D1: 子の失敗は親が引き継がない。やり直せるなら ready、やり直せないなら人間に投げる（blocked）。
+        Trigger::ChildFailed => {
+            if s.status == Status::Reviewing {
+                let attempts = s.attempts + 1;
+                if attempts <= s.max_retries {
+                    Ok(Outcome {
+                        next: Status::Ready,
+                        attempts,
+                        reason: t.name(),
+                    })
+                } else {
+                    // attempts は据え置き（人が答えたら、その回答を持って走り直せるようにする）。
+                    Ok(Outcome {
+                        next: Status::Blocked,
+                        attempts: s.attempts,
+                        reason: t.name(),
+                    })
+                }
             } else {
                 Err(invalid(s, t))
             }
@@ -521,6 +548,39 @@ mod tests {
                     }
                 }
 
+                // ADR-0021 D1: ChildFailed は Reviewing でのみ成功。やり直せるなら Ready（attempts +1）、
+                // やり直せないなら **Failed ではなく Blocked**（attempts 据え置き）。
+                for &(attempts, max_retries, expect_retry) in &retry_cases {
+                    count += 1;
+                    let s = StateView {
+                        kind,
+                        status,
+                        attempts,
+                        max_retries,
+                    };
+                    let got = transition(&s, &Trigger::ChildFailed);
+                    if status == Status::Reviewing {
+                        let outcome = got.unwrap_or_else(|e| {
+                            panic!(
+                                "expected Ok for kind={kind:?} status={status:?} trigger=ChildFailed attempts={attempts} max_retries={max_retries}, got Err({e})"
+                            )
+                        });
+                        if expect_retry {
+                            assert_eq!(outcome.next, Status::Ready);
+                            assert_eq!(outcome.attempts, attempts + 1);
+                        } else {
+                            assert_eq!(outcome.next, Status::Blocked, "子の失敗で親を failed にしない");
+                            assert_eq!(outcome.attempts, attempts, "人の回答を待つ間は attempts を増やさない");
+                        }
+                        assert_eq!(outcome.reason, "child_failed");
+                    } else {
+                        let err = got.unwrap_err();
+                        assert_eq!(err.status, status);
+                        assert_eq!(err.kind, kind);
+                        assert_eq!(err.trigger, "child_failed");
+                    }
+                }
+
                 // WorkerError{retryable}: Running でのみ成功。
                 // retryable=false は常に Failed (retry 判定を無視)。
                 for &(attempts, max_retries, expect_retry) in &retry_cases {
@@ -559,8 +619,9 @@ mod tests {
             }
         }
 
-        // 4 kinds * 8 statuses * (4 retry_cases * 2 non_worker_error_triggers + 4 retry_cases * 2 worker_error retryable)
-        assert_eq!(count, 4 * 8 * (4 * 2 + 4 * 2));
+        // 4 kinds * 8 statuses * (4 retry_cases * 2 non_worker_error_triggers + 4 retry_cases * 1 child_failed
+        //                          + 4 retry_cases * 2 worker_error retryable)
+        assert_eq!(count, 4 * 8 * (4 * 2 + 4 + 4 * 2));
     }
 
     /// 仕様の境界値の具体例をそのままテストする:

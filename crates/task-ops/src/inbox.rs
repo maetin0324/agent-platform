@@ -218,13 +218,21 @@ fn build_questions(store: &dyn TaskStore, all_tasks: &[Task]) -> Result<Vec<Ques
         let mut asked_at: Option<String> = None;
         let mut run_id: Option<String> = None;
         for r in rows.iter().rev() {
-            if let Event::WorkerFinished { run_id: rid, outcome, role, .. } = &r.event
-                && !derive::is_reviewer(*role)
-                && outcome.starts_with("question: ")
-            {
-                asked_at = Some(r.ts.clone());
-                run_id = Some(rid.clone());
-                break;
+            match &r.event {
+                Event::WorkerFinished { run_id: rid, outcome, role, .. }
+                    if !derive::is_reviewer(*role) && outcome.starts_with("question: ") =>
+                {
+                    asked_at = Some(r.ts.clone());
+                    run_id = Some(rid.clone());
+                    break;
+                }
+                // ADR-0021 D2: ディスパッチャが出した質問（委譲した子が失敗し、やり直せなかった）。
+                Event::QuestionRaised { run_id: rid, .. } => {
+                    asked_at = Some(r.ts.clone());
+                    run_id = Some(rid.clone());
+                    break;
+                }
+                _ => {}
             }
         }
 

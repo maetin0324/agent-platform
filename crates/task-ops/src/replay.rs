@@ -38,10 +38,10 @@ fn replay_status_and_attempts(events: &[(u64, Event)]) -> Option<(Status, u32)> 
             }
             Event::Transitioned { to, reason, .. } => {
                 let (_, attempts) = state.unwrap_or((*to, 0));
-                let bump = matches!(
-                    reason.as_str(),
-                    "worker_error" | "lease_expired" | "review_fail"
-                );
+                let bump = matches!(reason.as_str(), "worker_error" | "lease_expired" | "review_fail")
+                    // ADR-0021 D1: `child_failed` は「やり直し」のときだけ attempts を使う
+                    // （人の判断待ち = blocked に落ちるときは据え置き）。
+                    || (reason == "child_failed" && *to == Status::Ready);
                 state = Some((*to, if bump { attempts + 1 } else { attempts }));
             }
             _ => {}
@@ -272,5 +272,28 @@ mod tests {
         let (status, attempts) = replay_status_and_attempts(&events).expect("some state");
         assert_eq!(status, Status::Ready);
         assert_eq!(attempts, 0, "aggregate はリトライ回数を増やさない");
+    }
+
+    /// ADR-0021 D1: `child_failed` は **ready に戻るときだけ** attempts を使う（blocked は人の判断待ちなので据え置き）。
+    #[test]
+    fn replay_child_failed_bumps_attempts_only_when_it_retries() {
+        let replayed = |to: Status| {
+            let store = SqliteStore::open_in_memory().expect("open");
+            let task = sample_task(Status::Reviewing);
+            store.insert(&task).expect("insert");
+            store
+                .append_event(task.id, &Event::Created { task: Box::new(task.clone()) })
+                .expect("append created");
+            store
+                .append_event(
+                    task.id,
+                    &Event::Transitioned { from: Status::Reviewing, to, reason: "child_failed".to_string() },
+                )
+                .expect("append transitioned");
+            let events = store.events_for(task.id).expect("events_for");
+            replay_status_and_attempts(&events).expect("some state")
+        };
+        assert_eq!(replayed(Status::Ready), (Status::Ready, 1), "やり直しは attempts を使う");
+        assert_eq!(replayed(Status::Blocked), (Status::Blocked, 0), "人に聞くときは使わない");
     }
 }

@@ -159,8 +159,10 @@ blocked ──(human answers)─────────▶ ready      (回答�
 - `Plan` kind のタスクはワーカー（プランナー）の出力として**子タスク群のJSON**を返す。スキーマ検証を通れば子タスクを `draft` で挿入し、プランタスク自身は `reviewing` → `done`。子の `draft`→`ready` は設定 `plan.auto_accept` が true なら自動、false なら人間の承認。
 
 遷移は `task-core` 内の純粋関数 `fn transition(state, trigger) -> Result<outcome, Invalid>` として実装し、**全遷移を表駆動でテストする**。
-入力は追記ログの `Event` ではなく `Trigger`（Accept / Dispatch / WorkerDone / WorkerQuestion / WorkerError{retryable} / LeaseExpired / Requeue / ReviewPass / ReviewFail / Answer / Approve / Reject / Cancel / DependencyFailed / Aggregate）とする（ADR-0002 D2、ADR-0016 M1）。
+入力は追記ログの `Event` ではなく `Trigger`（Accept / Dispatch / WorkerDone / WorkerQuestion / WorkerError{retryable} / LeaseExpired / Requeue / ReviewPass / ReviewFail / Answer / Approve / Reject / Cancel / DependencyFailed / Aggregate / ChildFailed）とする（ADR-0002 D2、ADR-0016 M1、ADR-0021 D1）。
 `Aggregate` は `reviewing → ready`（attempts 据え置き、reason `"aggregate"`）で、`aggregate = true` の親が子の完了後に集約 run を 1 回だけ行うために使う。
+`ChildFailed` は委譲した子が失敗した親に使い、やり直せるなら `reviewing → ready`（attempts 消費）、やり直せないなら
+`reviewing → blocked`（attempts 据え置き、人の判断待ち）。**親を `failed` にはしない**（ADR-0021）。
 
 ### 4.3 Event（追記専用）
 
@@ -176,6 +178,7 @@ pub enum Event {
     ProviderThrottled{provider, until, reason?},                   // reason = throttled | auth_failed | exhausted | spawn
     ClusterUnavailable{cluster, host, reason},                     // ADR-0018: ssh の多重接続が無く、人のログイン待ち
     Delegated{run_id, task_ids},                                   // ADR-0016: run 中に提案された子タスクの挿入
+    QuestionRaised{run_id, text},                                  // ADR-0021: ディスパッチャが人に出した質問（run の終了ではない）
 }
 ```
 
@@ -497,7 +500,9 @@ LLM を使う実機確認は、認証が使える環境ならエージェント�
   タスクの値 > 役割の既定 > 全体の既定の順に効く。`RunRequest.task` に役割と指示文を載せる
 - ワーカープロトコルに `{"type":"delegate","tasks":[…]}`（実行中の子タスクの提案）。上限は設定
   `max_delegate_per_run`（既定 8）/ `max_tree_depth`（既定 5）/ `max_tree_runs`（既定 100）
-- `Event::Delegated{run_id, task_ids}`。親は子が全て終端になるまで `reviewing` のまま（`pending_children > 0` の一般規則）
+- `Event::Delegated{run_id, task_ids}`。親は子が全て終端になるまで `reviewing` のまま（`pending_children > 0` の一般規則）。
+  委譲した子が `failed` になったら、親は**失敗を引き継がず**やり直す（`Trigger::ChildFailed`）。やり直せなければ
+  `blocked` にして `Event::QuestionRaised` で人に聞く（ADR-0021。設定 `[delegation] on_child_failure`）
 - `Task.aggregate: bool`。true の親は子が全て終端になった後に 1 回だけ run し、`artifacts/summary.md` を作る
 - 受け入れ:
   1. `[[roles]]` の既定が run に反映され、`WorkerStarted` から役割が追える（`taskctl add --role lead` と API の `role`）

@@ -45,6 +45,19 @@ pub struct DelegationLimits {
     pub max_tree_depth: u32,
     /// 木全体のワーカー run 数。
     pub max_tree_runs: u32,
+    /// ADR-0021 D4: 委譲した子が失敗したときの親の扱い。
+    pub on_child_failure: OnChildFailure,
+}
+
+/// ADR-0021: 委譲した子が `failed` になったとき、親をどうするか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OnChildFailure {
+    /// 既定: 親をやり直す（attempts 消費）。やり直せないなら人間に質問して待つ（`blocked`）。**親を failed にはしない**。
+    #[default]
+    RetryThenAsk,
+    /// ADR-0016 M5 までの挙動: 子の失敗を見ずに親を完了させる。
+    Ignore,
 }
 
 impl Default for DelegationLimits {
@@ -53,6 +66,7 @@ impl Default for DelegationLimits {
             max_delegate_per_run: 8,
             max_tree_depth: 5,
             max_tree_runs: 100,
+            on_child_failure: OnChildFailure::RetryThenAsk,
         }
     }
 }

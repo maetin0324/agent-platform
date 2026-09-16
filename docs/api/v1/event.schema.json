@@ -395,6 +395,28 @@
           "type": "object"
         },
         {
+          "description": "ADR-0021 D2: ディスパッチャが人間に出した質問（run の終了ではないので `WorkerFinished` は使わない）。\n状態は変えない（`replay` は無視する）。同じトランザクションの `Transitioned{to: blocked}` と対で記録する。",
+          "properties": {
+            "run_id": {
+              "description": "この質問のきっかけになった run（親の直近の run）。",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "question_raised",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
           "description": "ADR-0016 D2: 実行中の run が `delegate` で提案し、検証を通って挿入された子タスク。状態は変えない（`replay` は無視する）。",
           "properties": {
             "run_id": {

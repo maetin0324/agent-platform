@@ -2392,3 +2392,35 @@ TASKD_CLUSTER_HOST=pegasus TASKD_CLUSTER_PROJECT=/work/NBB/rmaeda/workspace/rust
 - 証拠: `cargo test --workspace` 40 binary すべて ok（`task_list_items_carry_the_role` / `graph_nodes_carry_the_role` を追加）、
   `cargo clippy --workspace --all-targets -- -D warnings` exit 0、GUI の `pnpm typecheck` exit 0 / `pnpm test` 147 passed。
 - 一覧・DAG に実際にラベルを出すのは GUI 側の作業（次に G フェーズを回すときに拾える。`gui/docs/PROGRESS.md` G7-U1）。
+
+## ADR-0021: 委譲した子が失敗したときの親の扱い（2026-09-16）
+
+人間の判断「親がこの失敗を引き継ぐのではなく、自動でリトライするか、リトライできないなら人間に判断を投げるという形がいいですね」。
+P-56 はこれで解決（「子が 1 件でも failed なら親を review_fail」案は採らない）。
+
+### 入れたもの
+
+- `Trigger::ChildFailed`（状態機械。`reviewing` からのみ）: やり直せるなら `→ ready`（attempts +1）、やり直せないなら
+  **`→ blocked`（attempts 据え置き）**。`failed` は作らない。
+- `Event::QuestionRaised{run_id, text}`: ディスパッチャが人に出す質問。run の終了ではないので `WorkerFinished` は使わない。
+  `latest_question` と受信箱の `questions[]` は両方を見る。
+- ディスパッチャ: 委譲した子が全員終端になった時点で、**新たに** `failed` になった子（`Event::Delegated` の id だけを見る。
+  前回の `child_failed` 遷移より後に失敗したものだけ）があれば、集約・完了より先にやり直し／質問を行う。
+  やり直しの run には `context.children`（誰が何で失敗したか）を渡す。
+- 設定 `[delegation] on_child_failure = "retry_then_ask"`（既定）| `"ignore"`（ADR-0016 M5 までの挙動）。知らない値は起動時エラー。
+- `replay`: `child_failed` は **ready に戻るときだけ** attempts を数える。
+
+### 証拠
+
+- `cargo test --workspace`: 40 個の test binary すべて ok、0 failed。`cargo clippy --workspace --all-targets -- -D warnings` exit 0。
+- 状態機械の全網羅テストを 4×8×(8+4+8) に拡張（`ChildFailed` は attempts を絡めるので retry 側の網羅に入れた）。
+- `tests/e2e/tests/delegation_scenarios.rs`（実バイナリの taskd + fake ワーカー）**5 passed**。新規 3 件:
+  1. `a_failed_child_makes_the_parent_retry_instead_of_inheriting_the_failure`:
+     `Reviewing->Ready:child_failed` → やり直しの run が失敗した子を見て代わりを委譲 → 集約 run → **親は done**、attempts 1。
+     古い失敗は数え直さない（D3）ので、代わりの子が成功すれば親は完了できる。`replay` 差分ゼロ。
+  2. `when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing`（`--max-retries 0`）:
+     `Reviewing->Blocked:child_failed` + `QuestionRaised`（失敗した子の id と `taskctl answer <id>` の案内）。
+     `GET /api/v1/inbox` の `questions[]` に出る。`taskctl answer` の後、親は代わりの子を立てて done。`replay` 差分ゼロ。
+  3. `on_child_failure_ignore_keeps_the_old_behaviour`: `"ignore"` では子が failed のままでも親が done（`child_failed` 遷移なし）。
+- スキーマ再生成（`event.schema.json` / `api-v1.schema.json`）、`gui/docs/taskd-api-v1.md` 同期、`gui/app/taskd/types.ts` 再生成まで同じコミット。
+  GUI 側の `pnpm typecheck` exit 0 / `pnpm test` 147 passed。

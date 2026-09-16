@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use task_core::plan::{PlanLimits, PlanOutput, materialize};
 use task_core::{
-    ArtifactRef, Check, DelegateTask, DelegationLimits, Event, RoleSpec, RunRole, Status, StoreError, Task, TaskId,
-    TaskKind, TaskStore, Trigger, WorkspaceSpec,
+    ArtifactRef, Check, DelegateTask, DelegationLimits, Event, OnChildFailure, RoleSpec, RunRole, Status, StoreError,
+    Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
 };
 use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
@@ -880,7 +880,7 @@ impl Dispatcher {
             outcome.verdicts.sort_by_key(|v| v.criterion_idx);
         }
         let all_pass = outcome.all_pass();
-        let events: Vec<Event> = reviewer_finished
+        let mut events: Vec<Event> = reviewer_finished
             .into_iter()
             .chain(outcome.verdicts.iter().map(|v| Event::ReviewVerdict {
                 run_id: run_id.clone(),
@@ -912,6 +912,10 @@ impl Dispatcher {
                     },
                 );
                 tracing::info!(%task_id, %run_id, pending, "review passed; waiting for delegated children");
+                return Ok(());
+            }
+            // ADR-0021 D1: 子が失敗していたら、集約・完了より先に「やり直す or 人に聞く」。
+            if self.escalate_failed_children(&task, &run_id, &mut events)? {
                 return Ok(());
             }
             // ADR-0016 D3 / M4: 子が全て終端で、まだ集約 run をしていなければ集約 run を予約する。
@@ -974,6 +978,117 @@ impl Dispatcher {
         Ok(!has_aggregate_transition(&events))
     }
 
+    /// ADR-0021 D1/D3: 委譲した子（`Event::Delegated`）のうち、**前回この親が子の失敗を扱ってから後に** `failed` に
+    /// なったもの。一度扱った失敗は数え直さない（親が別の子に割り当て直して成功したのに、古い失敗で止まらないため）。
+    /// 返り値は id 順の `(子, 直近のワーカー run の outcome)`。
+    fn newly_failed_delegated_children(&self, task_id: TaskId) -> Result<Vec<(Task, Option<String>)>, DispatchError> {
+        let events = self.store.events_for(task_id)?;
+        // 直近に子の失敗を扱った時点（グローバル id。イベント id は単調増加）。
+        let handled_at = events
+            .iter()
+            .rev()
+            .find_map(|(id, e)| match e {
+                Event::Transitioned { reason, .. } if reason == Trigger::ChildFailed.name() => Some(*id),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let mut delegated: Vec<TaskId> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::Delegated { task_ids, .. } => Some(task_ids.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        delegated.sort();
+        delegated.dedup();
+
+        let mut out = Vec::new();
+        for id in delegated {
+            let Some(child) = self.store.get(id)? else { continue };
+            if child.status != Status::Failed {
+                continue;
+            }
+            let child_events = self.store.events_for(id)?;
+            let failed_at = child_events.iter().rev().find_map(|(eid, e)| match e {
+                Event::Transitioned { to: Status::Failed, .. } => Some(*eid),
+                _ => None,
+            });
+            // 既に扱った失敗（id が前回の child_failed より前）は数えない。
+            if failed_at.is_some_and(|at| at <= handled_at) {
+                continue;
+            }
+            let outcome = child_events.iter().rev().find_map(|(_, e)| match e {
+                Event::WorkerFinished { outcome, role: None, .. } => Some(outcome.clone()),
+                _ => None,
+            });
+            out.push((child, outcome));
+        }
+        Ok(out)
+    }
+
+    /// ADR-0021 D1/D2: 委譲した子が失敗していたら、親をやり直す（attempts に余裕があるとき）か、
+    /// 人間に質問して待つ（`blocked`）。**親を `failed` にはしない。** 扱ったら `true`（`events` も記録済み）。
+    /// `events`（判定結果など、まだ記録していないもの）は、**扱ったときだけ**同じトランザクションで一緒に記録する。
+    /// 扱わなかったときは触らない（呼び出し側がそのまま使う）。
+    fn escalate_failed_children(
+        &mut self,
+        task: &Task,
+        run_id: &str,
+        events: &mut Vec<Event>,
+    ) -> Result<bool, DispatchError> {
+        if self.config.delegation.on_child_failure == OnChildFailure::Ignore {
+            return Ok(false);
+        }
+        let failed = self.newly_failed_delegated_children(task.id)?;
+        if failed.is_empty() {
+            return Ok(false);
+        }
+        let mut events = std::mem::take(events);
+        let listed = failed
+            .iter()
+            .map(|(child, outcome)| {
+                format!("{} ({}): {}", child.title, child.id, outcome.as_deref().unwrap_or("(no outcome recorded)"))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        // 状態機械と同じ判定（ADR-0021 D1）。ここで分かるのは「やり直せるか」だけ。
+        let will_retry = task.attempts < task.budget.max_retries;
+        if will_retry {
+            events.push(Event::WorkerProgress {
+                run_id: run_id.to_string(),
+                msg: format!(
+                    "{} delegated child task(s) failed; retrying this task (attempt {}/{}): {listed}",
+                    failed.len(),
+                    task.attempts + 1,
+                    task.budget.max_retries,
+                ),
+            });
+        } else {
+            let text = format!(
+                "委譲した子タスクが失敗し、やり直し（max_retries = {}）でも解決しませんでした。どうしますか。\n\
+                 失敗した子: {listed}\n\
+                 回答するとこのタスクは指示を持って再開します: taskctl answer {} \"…\"",
+                task.budget.max_retries, task.id,
+            );
+            events.push(Event::QuestionRaised { run_id: run_id.to_string(), text });
+        }
+        match self.store.apply_transition_with_events(task.id, Trigger::ChildFailed, events) {
+            Ok(outcome) => {
+                tracing::info!(
+                    task_id = %task.id, %run_id, next = ?outcome.next, failed = failed.len(),
+                    "delegated child task(s) failed; parent retries or asks a human (ADR-0021)"
+                );
+            }
+            Err(StoreError::InvalidTransition(e)) => {
+                tracing::warn!(task_id = %task.id, error = %e, "child_failed transition could not be applied");
+                return Ok(false);
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(true)
+    }
+
     /// ADR-0016 M1 / M4: `Aggregate`（reviewing → ready、attempts 据え置き）を適用し、次の dispatch を集約 run にする。
     fn schedule_aggregate_run(&mut self, task_id: TaskId, run_id: &str, mut events: Vec<Event>) -> Result<(), DispatchError> {
         let children = self.store.children(task_id)?.len();
@@ -1012,6 +1127,10 @@ impl Dispatcher {
             let Some(waiting) = self.awaiting_children.remove(&task_id) else {
                 continue;
             };
+            // ADR-0021 D1: 子が失敗していたら、集約・完了より先に「やり直す or 人に聞く」。
+            if self.escalate_failed_children(&task, &waiting.run_id, &mut Vec::new())? {
+                continue;
+            }
             if self.needs_aggregate_run(&task)? {
                 self.schedule_aggregate_run(task_id, &waiting.run_id, Vec::new())?;
                 continue;
@@ -1297,7 +1416,8 @@ impl Dispatcher {
                 .unwrap_or_default(),
         });
         let events = self.store.events_for(task.id)?;
-        let children = if task.aggregate && has_aggregate_transition(&events) {
+        // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
+        let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
             let mut out = Vec::new();
             for child in self.store.children(task.id)? {
                 if child.kind == TaskKind::Approval {
@@ -1851,6 +1971,14 @@ fn has_aggregate_transition(events: &[(u64, Event)]) -> bool {
     events
         .iter()
         .any(|(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == "aggregate"))
+}
+
+/// ADR-0021 D1: イベント列に子の失敗による遷移（`Transitioned{reason: "child_failed"}`）があるか。
+/// 以後の run は「子が失敗した後のやり直し」なので、子の結果（`context.children`）を渡す。
+fn has_child_failed_transition(events: &[(u64, Event)]) -> bool {
+    events
+        .iter()
+        .any(|(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == Trigger::ChildFailed.name()))
 }
 
 /// task-ops の読み取りエラーをディスパッチャのエラーに写す（検証以外の失敗は来ない想定）。

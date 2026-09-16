@@ -86,6 +86,11 @@ impl Env {
     }
 
     fn write_config(&self, script: &Path) -> PathBuf {
+        self.write_config_with(script, "")
+    }
+
+    /// `extra_delegation` は `[delegation]` に足す行（ADR-0021 D4 の `on_child_failure` など）。
+    fn write_config_with(&self, script: &Path, extra_delegation: &str) -> PathBuf {
         let path = self.root.join("taskd.toml");
         let text = format!(
             r#"db = "taskd.sqlite3"
@@ -105,6 +110,7 @@ listen = "127.0.0.1:{port}"
 max_delegate_per_run = 8
 max_tree_depth = 5
 max_tree_runs = 100
+{extra_delegation}
 
 [[roles]]
 id = "lead"
@@ -129,6 +135,7 @@ model = "fake"
 "#,
             port = self.port,
             instructions = LEAD_INSTRUCTIONS,
+            extra_delegation = extra_delegation,
             script = script.display()
         );
         std::fs::write(&path, text).unwrap();
@@ -439,5 +446,246 @@ fn non_aggregate_lead_completes_after_children_without_another_run() {
         assert_eq!(c.status, Status::Done);
     }
     assert!(!dir.join("artifacts/summary.md").exists());
+    env.replay_is_consistent();
+}
+
+/// ADR-0021: 委譲した子が失敗したときの親の fake ワーカー。
+/// - lead（子の一覧なし）: `impl-ok` と `impl-broken` を委譲して done
+/// - lead（子の一覧に failed があり、まだ代わりを立てていない = やり直し run）: 代わりの子 `impl-fixed` を委譲して done
+/// - lead（子の一覧あり、代わりを立てた後 = 集約 run）: `artifacts/summary.md` を書いて done
+/// - implementer: `impl-broken` だけ retryable=false で失敗。ほかは `<title>.txt` を作って done
+fn worker_script_with_a_failing_child() -> String {
+    r##"RUN=$(mktemp)
+cat > "$RUN"
+ROLE=$(grep -o '"role":"[a-z]*"' "$RUN" | head -1 | cut -d'"' -f4)
+TITLE=$(grep -o '"title":"[^"]*"' "$RUN" | head -1 | cut -d'"' -f4)
+HAS_CHILDREN=$(grep -c '"children":\[[^]]' "$RUN" || true)
+HAS_FAILED_CHILD=$(grep -c '"status":"failed"' "$RUN" || true)
+HAS_REPLACEMENT=$(grep -c '"title":"impl-fixed"' "$RUN" || true)
+mkdir -p artifacts
+case "$ROLE" in
+  lead)
+    if [ "$HAS_CHILDREN" != "0" ] && [ "$HAS_FAILED_CHILD" != "0" ] && [ "$HAS_REPLACEMENT" = "0" ]; then
+      echo '{"type":"progress","msg":"a delegated child failed; delegating a replacement"}'
+      echo '{"type":"delegate","tasks":[{"title":"impl-fixed","objective":"redo the failed unit","acceptance":[{"text":"file exists","check":{"type":"command","cmd":"test -f impl-fixed.txt","expect_exit":0}}],"role":"implementer"}]}'
+      echo '{"type":"done","summary":"re-delegated","evidence":[]}'
+    elif [ "$HAS_CHILDREN" != "0" ]; then
+      printf '# Summary\n\nall children done.\n' > artifacts/summary.md
+      echo '{"type":"artifact","name":"summary.md","path":"artifacts/summary.md"}'
+      echo '{"type":"done","summary":"aggregated","evidence":[]}'
+    else
+      echo '{"type":"delegate","tasks":['\
+'{"title":"impl-ok","objective":"this one works","acceptance":[{"text":"file exists","check":{"type":"command","cmd":"test -f impl-ok.txt","expect_exit":0}}],"role":"implementer"},'\
+'{"title":"impl-broken","objective":"this one fails","acceptance":[{"text":"file exists","check":{"type":"command","cmd":"test -f impl-broken.txt","expect_exit":0}}],"role":"implementer"}'\
+']}'
+      echo '{"type":"done","summary":"delegated","evidence":[]}'
+    fi
+    ;;
+  implementer)
+    if [ "$TITLE" = "impl-broken" ]; then
+      echo '{"type":"error","message":"cannot do it","retryable":false}'
+    else
+      touch "$TITLE.txt"
+      echo '{"type":"done","summary":"did '"$TITLE"'","evidence":[]}'
+    fi
+    ;;
+  *)
+    echo '{"type":"error","message":"unexpected role '"$ROLE"'","retryable":false}'
+    ;;
+esac
+rm -f "$RUN"
+"##
+    .to_string()
+}
+
+/// ADR-0021 D1/D3: 委譲した子が失敗したら、親は**失敗を引き継がず**やり直す（attempts 消費、`reviewing → ready`）。
+/// やり直しの run は `context.children` で失敗した子を見られる。一度扱った失敗は数え直さないので、
+/// 親が代わりの子を立てて成功すれば、古い失敗があっても親は完了できる。
+#[test]
+fn a_failed_child_makes_the_parent_retry_instead_of_inheriting_the_failure() {
+    let env = Env::new();
+    let script = env.write_script(&worker_script_with_a_failing_child());
+    let config = env.write_config(&script);
+    let dir = env.root.join("workspaces").join("lead-retry");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let id: TaskId = env
+        .taskctl(&[
+            "add", "--config", config.to_str().unwrap(), "--role", "lead", "--aggregate",
+            "--max-retries", "1",
+            "--title", "lead with a failing child",
+            "--objective", "delegate two units; one of them fails",
+            "--check-cmd", "true",
+            "--workspace", dir.to_str().unwrap(),
+        ])
+        .trim()
+        .parse()
+        .unwrap();
+    env.taskctl(&["approve", &id.to_string()]);
+
+    let daemon = env.start_taskd(&config);
+    wait_done(&env, &daemon, id);
+    drop(daemon);
+
+    let parent = env.task(id);
+    assert_eq!(
+        parent.status,
+        Status::Done,
+        "親は子の失敗を引き継がない: {:?}\n{:?}",
+        env.transitions(id),
+        env.progress(id)
+    );
+    assert_eq!(parent.attempts, 1, "やり直しで attempts を 1 つ使う");
+
+    // reviewing → ready(child_failed) → もう一度 run → 代わりの子 → 集約 run → done。
+    let transitions = env.transitions(id);
+    assert!(transitions.contains(&"Reviewing->Ready:child_failed".to_string()), "{transitions:?}");
+    assert!(!transitions.iter().any(|t| t.ends_with("->Failed:child_failed")), "{transitions:?}");
+    assert_eq!(transitions.last().map(String::as_str), Some("Reviewing->Done:review_pass"), "{transitions:?}");
+
+    // やり直しの run は子の結果を見ている（fake が failed を見つけて代わりを委譲した）。
+    let progress = env.progress(id);
+    assert!(
+        progress.iter().any(|m| m.starts_with("a delegated child failed; delegating a replacement")),
+        "{progress:?}"
+    );
+    assert!(
+        progress.iter().any(|m| m.contains("delegated child task(s) failed; retrying this task (attempt 1/1)")),
+        "{progress:?}"
+    );
+
+    // 子は 3 件（impl-ok / impl-broken=failed / impl-fixed）。古い失敗は 2 度目の判定には出てこない。
+    let children = env.children_of(id);
+    let failed: Vec<&str> = children
+        .iter()
+        .filter(|c| c.status == Status::Failed)
+        .map(|c| c.title.as_str())
+        .collect();
+    assert_eq!(failed, vec!["impl-broken"], "{children:?}");
+    assert_eq!(children.len(), 3, "{children:?}");
+    assert!(dir.join("artifacts/summary.md").is_file(), "集約 run まで進む");
+    env.replay_is_consistent();
+}
+
+/// ADR-0021 D1/D2: やり直せない（`max_retries = 0`）なら、親は `failed` ではなく `blocked` になり、
+/// 受信箱に質問が出る。人が `taskctl answer` すると再開する。
+#[test]
+fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
+    let env = Env::new();
+    let script = env.write_script(&worker_script_with_a_failing_child());
+    let config = env.write_config(&script);
+    let dir = env.root.join("workspaces").join("lead-ask");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let id: TaskId = env
+        .taskctl(&[
+            "add", "--config", config.to_str().unwrap(), "--role", "lead", "--aggregate",
+            "--max-retries", "0",
+            "--title", "lead that cannot retry",
+            "--objective", "delegate two units; one of them fails",
+            "--check-cmd", "true",
+            "--workspace", dir.to_str().unwrap(),
+        ])
+        .trim()
+        .parse()
+        .unwrap();
+    env.taskctl(&["approve", &id.to_string()]);
+
+    let daemon = env.start_taskd(&config);
+    let blocked = wait_until(Duration::from_secs(60), || env.task(id).status == Status::Blocked);
+    assert!(blocked, "親は人の判断待ちになる\n{}", daemon.log_text());
+
+    let parent = env.task(id);
+    assert_eq!(parent.attempts, 0, "人の回答を待つ間は attempts を増やさない");
+    let transitions = env.transitions(id);
+    assert!(transitions.contains(&"Reviewing->Blocked:child_failed".to_string()), "{transitions:?}");
+
+    // 質問が残り、受信箱と詳細に出る。
+    let question = env.events(id).into_iter().find_map(|e| match e {
+        Event::QuestionRaised { text, .. } => Some(text),
+        _ => None,
+    });
+    let question = question.expect("QuestionRaised");
+    assert!(question.contains("impl-broken"), "{question}");
+    assert!(question.contains(&format!("taskctl answer {id}")), "{question}");
+
+    let (status, inbox) = env.get("/inbox");
+    assert_eq!(status, 200);
+    let questions = inbox["questions"].as_array().expect("questions");
+    let item = questions
+        .iter()
+        .find(|q| q["task"]["id"] == id.to_string())
+        .unwrap_or_else(|| panic!("parent should be in the inbox questions: {inbox}"));
+    assert!(item["question"].as_str().unwrap_or_default().contains("impl-broken"), "{item}");
+    assert!(item["asked_at"].is_string(), "{item}");
+
+    // 人が答えると再開し、代わりの子を立てて完了する（失敗のまま終わらない）。
+    env.taskctl(&["answer", &id.to_string(), "impl-broken は別の分け方でやり直して"]);
+    wait_done(&env, &daemon, id);
+    drop(daemon);
+
+    let parent = env.task(id);
+    assert_eq!(parent.status, Status::Done, "回答の後は進める");
+    assert!(env.children_of(id).iter().any(|c| c.title == "impl-fixed"), "{:?}", env.children_of(id));
+    env.replay_is_consistent();
+}
+
+/// ADR-0021 D4: `on_child_failure = "ignore"` なら ADR-0016 M5 までの挙動（子の失敗を見ずに親を完了させる）。
+#[test]
+fn on_child_failure_ignore_keeps_the_old_behaviour() {
+    let env = Env::new();
+    // 子の一覧があれば必ず集約する（やり直しの分岐を持たない）単純な lead。
+    let script = env.write_script(
+        r##"RUN=$(mktemp)
+cat > "$RUN"
+ROLE=$(grep -o '"role":"[a-z]*"' "$RUN" | head -1 | cut -d'"' -f4)
+TITLE=$(grep -o '"title":"[^"]*"' "$RUN" | head -1 | cut -d'"' -f4)
+HAS_CHILDREN=$(grep -c '"children":\[[^]]' "$RUN" || true)
+mkdir -p artifacts
+case "$ROLE" in
+  lead)
+    if [ "$HAS_CHILDREN" != "0" ]; then
+      printf '# Summary\n\nchildren finished.\n' > artifacts/summary.md
+      echo '{"type":"artifact","name":"summary.md","path":"artifacts/summary.md"}'
+      echo '{"type":"done","summary":"aggregated","evidence":[]}'
+    else
+      echo '{"type":"delegate","tasks":[{"title":"impl-broken","objective":"this one fails","acceptance":[{"text":"file exists","check":{"type":"command","cmd":"test -f impl-broken.txt","expect_exit":0}}],"role":"implementer"}]}'
+      echo '{"type":"done","summary":"delegated","evidence":[]}'
+    fi
+    ;;
+  implementer)
+    echo '{"type":"error","message":"cannot do it","retryable":false}'
+    ;;
+esac
+rm -f "$RUN"
+"##,
+    );
+    let config = env.write_config_with(&script, "on_child_failure = \"ignore\"");
+    let dir = env.root.join("workspaces").join("lead-ignore");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let id: TaskId = env
+        .taskctl(&[
+            "add", "--config", config.to_str().unwrap(), "--role", "lead", "--aggregate",
+            "--title", "lead that ignores child failures",
+            "--objective", "delegate one unit that fails",
+            "--check-cmd", "true",
+            "--workspace", dir.to_str().unwrap(),
+        ])
+        .trim()
+        .parse()
+        .unwrap();
+    env.taskctl(&["approve", &id.to_string()]);
+
+    let daemon = env.start_taskd(&config);
+    wait_done(&env, &daemon, id);
+    drop(daemon);
+
+    let parent = env.task(id);
+    assert_eq!(parent.status, Status::Done);
+    assert_eq!(parent.attempts, 0);
+    let transitions = env.transitions(id);
+    assert!(!transitions.iter().any(|t| t.contains("child_failed")), "{transitions:?}");
+    assert!(env.children_of(id).iter().any(|c| c.status == Status::Failed), "子は失敗したまま");
     env.replay_is_consistent();
 }

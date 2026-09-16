@@ -130,7 +130,8 @@ async fn config_shows_roles_without_instruction_text_and_delegation_limits() {
     );
     assert_eq!(
         config["delegation"],
-        json!({"max_delegate_per_run": 8, "max_tree_depth": 5, "max_tree_runs": 100})
+        // ADR-0021 D4: `on_child_failure` も出す（GUI が「子が失敗したらどうなるか」を説明できるように）。
+        json!({"max_delegate_per_run": 8, "max_tree_depth": 5, "max_tree_runs": 100, "on_child_failure": "retry_then_ask"})
     );
     assert!(config["roles"][0].get("instructions").is_none(), "{config}");
     // 指示文の本文はどこにも出ない（`has_instructions` の真偽だけ）。

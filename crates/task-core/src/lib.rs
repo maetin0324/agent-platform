@@ -7,7 +7,9 @@ pub mod plan;
 pub mod store;
 pub mod transition;
 
-pub use delegate::{DelegateDep, DelegateError, DelegateTask, DelegationLimits, materialize_delegated, validate_each};
+pub use delegate::{
+    DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, materialize_delegated, validate_each,
+};
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, Event, Lease, RoleSpec, RunRole, Status, Task, TaskId, TaskKind,
     Tier, Usage, WorkerHint, WorkspaceSpec,
