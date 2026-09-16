@@ -182,7 +182,7 @@ pub struct ClusterConfig {
     /// このクラスタで同時に走らせる run の上限。
     #[serde(default = "default_cluster_concurrency")]
     pub concurrency: usize,
-    /// `rsync`（既定）か `none`（共有ファイルシステム）。
+    /// `worktree`（ADR-0019 D4 の既定の選択。git 管理下のプロジェクト）、`rsync`（設定の既定）、`none`（共有ファイルシステム）。
     #[serde(default = "default_cluster_sync")]
     pub sync: String,
     /// push（手元 → クラスタ）で手元に無いファイルを消すか。既定 false（既存プロジェクトを壊さない）。
@@ -197,6 +197,18 @@ pub struct ClusterConfig {
     /// `rsync` から除外するパターン（`.taskd/` は常に除外）。
     #[serde(default)]
     pub rsync_excludes: Vec<String>,
+    /// ADR-0019 D1: worktree を置く親ディレクトリ（既定は `<project>/.taskd-worktrees`）。`sync = "worktree"` のときだけ使う。
+    #[serde(default)]
+    pub worktree_root: Option<PathBuf>,
+    /// ADR-0019 D1: worktree を切り出す元（既定 `HEAD`）。
+    #[serde(default = "default_worktree_base")]
+    pub worktree_base: String,
+    /// ADR-0019 D1: sparse-checkout で残すパス（空なら全追跡ファイル）。巨大な追跡データを外すのに使う。
+    #[serde(default)]
+    pub worktree_paths: Vec<String>,
+    /// ADR-0019 D2: worktree をいつ消すか。`"never"`（既定、人が消す）のみ実装。
+    #[serde(default = "default_remove_worktree_when")]
+    pub remove_worktree_when: String,
 }
 
 fn default_cluster_concurrency() -> usize {
@@ -204,6 +216,12 @@ fn default_cluster_concurrency() -> usize {
 }
 fn default_cluster_sync() -> String {
     "rsync".to_string()
+}
+fn default_worktree_base() -> String {
+    "HEAD".to_string()
+}
+fn default_remove_worktree_when() -> String {
+    "never".to_string()
 }
 
 /// `[reviewer]`（ADR-0010 D9, P-30）: `Check::Reviewer` の判定 run に使う adapter / tier。
@@ -529,11 +547,21 @@ impl Config {
             if c.host.trim().is_empty() {
                 return Err(ConfigError::Invalid(format!("[[clusters]] {}: host must not be empty", c.id)));
             }
-            if !matches!(c.sync.as_str(), "rsync" | "none") {
+            if !matches!(c.sync.as_str(), "rsync" | "none" | "worktree") {
                 return Err(ConfigError::Invalid(format!(
-                    "[[clusters]] {}: sync must be \"rsync\" or \"none\" (got {:?})",
+                    "[[clusters]] {}: sync must be \"worktree\", \"rsync\" or \"none\" (got {:?})",
                     c.id, c.sync
                 )));
+            }
+            // ADR-0019 D2: 自動削除は実装しない（実行結果を消してしまわないため）。
+            if c.remove_worktree_when != "never" {
+                return Err(ConfigError::Invalid(format!(
+                    "[[clusters]] {}: remove_worktree_when must be \"never\" (got {:?}); remove the worktree by hand",
+                    c.id, c.remove_worktree_when
+                )));
+            }
+            if c.worktree_base.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!("[[clusters]] {}: worktree_base must not be empty", c.id)));
             }
             if c.concurrency == 0 {
                 return Err(ConfigError::Invalid(format!("[[clusters]] {}: concurrency must be >= 1", c.id)));
@@ -657,12 +685,35 @@ impl Config {
                         id: c.id.clone(),
                         host: c.host.clone(),
                         concurrency: c.concurrency,
-                        sync: if c.sync == "none" { task_worker::SyncMode::None } else { task_worker::SyncMode::Rsync },
+                        sync: match c.sync.as_str() {
+                            "none" => task_worker::SyncMode::None,
+                            "worktree" => task_worker::SyncMode::Worktree,
+                            _ => task_worker::SyncMode::Rsync,
+                        },
                         delete_on_push: c.delete_on_push,
                         setup: c.setup.clone(),
                         env,
                         rsync_excludes: c.rsync_excludes.clone(),
+                        worktree: task_worker::WorktreeSettings {
+                            root: c.worktree_root.clone(),
+                            base: c.worktree_base.clone(),
+                            paths: c.worktree_paths.clone(),
+                            ..Default::default()
+                        },
                     },
+                )
+            })
+            .collect()
+    }
+
+    /// ADR-0019 D2: `TaskDetail.worktree` を組み立てるのに要る分だけを写す。
+    pub fn cluster_view_infos(&self) -> HashMap<String, task_ops::view::ClusterViewInfo> {
+        self.clusters
+            .iter()
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    task_ops::view::ClusterViewInfo { sync: c.sync.clone(), worktree_root: c.worktree_root.clone() },
                 )
             })
             .collect()
@@ -721,6 +772,70 @@ adapter = "fake"
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("bogus-adapter"));
         assert!(toml::from_str::<Config>("bogus = 1\n").is_err());
+    }
+
+    /// ADR-0019: `sync = "worktree"` が読めて、worktree の設定が `ClusterSpec` と `ViewContext` に写ること。
+    /// 例の設定ファイル（config/taskd.clusters.example.toml）もここで一度読んで、書き間違いを拾う。
+    #[test]
+    fn parses_worktree_sync_and_maps_it_to_the_worker_settings() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/taskd.clusters.example.toml"));
+        let cfg = Config::load(path).unwrap();
+        cfg.validate().unwrap();
+        let specs = cfg.cluster_specs();
+        assert_eq!(specs["pegasus"].sync, task_worker::SyncMode::Worktree);
+
+        let cfg: Config = toml::from_str(
+            r#"[[providers]]
+id = "x"
+adapter = "fake"
+[[clusters]]
+id = "pegasus"
+host = "pegasus"
+sync = "worktree"
+worktree_root = "/work/NBB/rmaeda/.taskd-worktrees"
+worktree_base = "origin/main"
+worktree_paths = ["src", "Cargo.toml"]
+"#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let spec = &cfg.cluster_specs()["pegasus"];
+        assert_eq!(spec.sync, task_worker::SyncMode::Worktree);
+        assert_eq!(spec.worktree.root.as_deref(), Some(Path::new("/work/NBB/rmaeda/.taskd-worktrees")));
+        assert_eq!(spec.worktree.base, "origin/main");
+        assert_eq!(spec.worktree.paths, vec!["src".to_string(), "Cargo.toml".to_string()]);
+        assert_eq!(spec.worktree.branch_prefix, "taskd/");
+        let view = &cfg.cluster_view_infos()["pegasus"];
+        assert_eq!(view.sync, "worktree");
+        assert_eq!(view.worktree_root.as_deref(), Some(Path::new("/work/NBB/rmaeda/.taskd-worktrees")));
+    }
+
+    /// 既定は `sync = "rsync"` のまま（ADR-0018 からの互換）。知らない sync と自動削除は設定エラー。
+    #[test]
+    fn rejects_unknown_sync_modes_and_worktree_auto_removal() {
+        let base = |extra: &str| {
+            format!(
+                r#"[[providers]]
+id = "x"
+adapter = "fake"
+[[clusters]]
+id = "c"
+host = "h"
+{extra}
+"#
+            )
+        };
+        let cfg: Config = toml::from_str(&base("")).unwrap();
+        assert_eq!(cfg.clusters[0].sync, "rsync");
+        assert_eq!(cfg.cluster_specs()["c"].sync, task_worker::SyncMode::Rsync);
+
+        let cfg: Config = toml::from_str(&base(r#"sync = "worktre""#)).unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("sync must be"), "{err}");
+
+        let cfg: Config = toml::from_str(&base(r#"remove_worktree_when = "done""#)).unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("remove_worktree_when"), "{err}");
     }
 
     #[test]

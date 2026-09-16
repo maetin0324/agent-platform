@@ -107,6 +107,7 @@ pub fn view_context(workspace_root: &std::path::Path) -> ViewContext {
         retry_backoff_base: Duration::from_secs(30),
         retry_backoff_max: Duration::from_secs(600),
         max_requeues: 5,
+        clusters: Default::default(),
     }
 }
 

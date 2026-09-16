@@ -191,6 +191,8 @@ fn task_detail_json(store: &dyn TaskStore, id: TaskId, workspace_root: Option<Pa
         retry_backoff_base: Duration::from_secs(10),
         retry_backoff_max: Duration::from_secs(300),
         max_requeues: 5,
+        // `taskd.toml` を読まないので `[[clusters]]` は分からない（worktree は `null` になる）。
+        clusters: Default::default(),
     };
     let detail = view::task_detail(store, id, &ctx, OffsetDateTime::now_utc())?;
     // `GET /api/v1/tasks/{id}` と同じ compact な直列化（docs/gui/api.md §3.5）。整形は `jq` 等で行う。

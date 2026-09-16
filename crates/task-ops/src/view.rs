@@ -31,7 +31,21 @@ pub struct ViewContext {
     pub retry_backoff_base: Duration,
     pub retry_backoff_max: Duration,
     pub max_requeues: u32,
+    /// ADR-0019 D2: `[[clusters]]` のうちビューに要る分（worktree のパスとブランチを出すため）。id → 設定。
+    pub clusters: std::collections::HashMap<String, ClusterViewInfo>,
 }
+
+/// ADR-0019 D2: `TaskDetail.worktree` を組み立てるのに要るクラスタの設定。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ClusterViewInfo {
+    /// `"worktree"` のときだけ `TaskDetail.worktree` が出る（`"rsync"` / `"none"` では `null`）。
+    pub sync: String,
+    /// worktree を置く親ディレクトリ。`None` なら `<project>/.taskd-worktrees`。
+    pub worktree_root: Option<PathBuf>,
+}
+
+/// worktree のブランチ名の接頭辞（ADR-0019 D2）。`task_worker::WorktreeSettings::default().branch_prefix` と同じ値。
+pub const WORKTREE_BRANCH_PREFIX: &str = "taskd/";
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct TaskRef {
@@ -99,6 +113,19 @@ pub struct TaskDetail {
     pub children: Vec<TaskRef>,
     pub actions: Vec<Action>,
     pub worker_run_hint: Option<String>,
+    /// ADR-0019 D2: `sync = "worktree"` のクラスタで動くタスクの worktree。人はここを見て diff / commit する。
+    pub worktree: Option<WorktreeView>,
+}
+
+/// ADR-0019 D2: クラスタ側の worktree（taskd はここだけを触り、commit はしない）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct WorktreeView {
+    /// 元のリポジトリ（`WorkspaceSpec::Remote.path`）。
+    pub project: String,
+    /// worktree のパス（クラスタ上）。
+    pub dir: String,
+    /// worktree のブランチ（`taskd/<task_id>`）。taskd は commit しないので、変更は作業ツリーに残る。
+    pub branch: String,
 }
 
 /// ADR-0016 D2: 1 回の `delegate`（`Event::Delegated`）の要約。
@@ -598,6 +625,22 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
         WorkspaceSpec::Local { .. } => None,
         WorkspaceSpec::Remote { cluster, .. } => Some(cluster.clone()),
     };
+    // ADR-0019 D2: `sync = "worktree"` のクラスタなら、worktree のパスとブランチを出す（人が diff / commit する場所）。
+    let worktree = match &task.workspace {
+        WorkspaceSpec::Remote { cluster, path } => ctx
+            .clusters
+            .get(cluster)
+            .filter(|c| c.sync == "worktree")
+            .map(|c| {
+                let root = c.worktree_root.clone().unwrap_or_else(|| path.join(".taskd-worktrees"));
+                WorktreeView {
+                    project: path.to_string_lossy().into_owned(),
+                    dir: root.join(task.id.to_string()).to_string_lossy().into_owned(),
+                    branch: format!("{WORKTREE_BRANCH_PREFIX}{}", task.id),
+                }
+            }),
+        WorkspaceSpec::Local { .. } => None,
+    };
 
     let task_actions = actions(&task);
     let worker_run_hint = if task.status.is_terminal() {
@@ -637,6 +680,7 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
         children: children_refs,
         actions: task_actions,
         worker_run_hint,
+        worktree,
     })
 }
 
@@ -673,6 +717,7 @@ mod tests {
             retry_backoff_base: StdDuration::from_secs(10),
             retry_backoff_max: StdDuration::from_secs(300),
             max_requeues: 5,
+            clusters: Default::default(),
         }
     }
 
@@ -1142,6 +1187,45 @@ mod tests {
         );
         let detail = task_detail(&store, local.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         assert_eq!(detail.cluster, None);
+    }
+
+    /// ADR-0019 D2: `sync = "worktree"` のクラスタでは、worktree のパスとブランチを出す（人が diff / commit する場所）。
+    /// `rsync` / `none` のクラスタと Local のタスクでは `null`。
+    #[test]
+    fn task_detail_reports_the_worktree_for_worktree_clusters() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut on_worktree = sample_task(TaskKind::Execute, Status::Ready);
+        on_worktree.workspace =
+            WorkspaceSpec::Remote { cluster: "pegasus".into(), path: PathBuf::from("/work/NBB/x/benchfs") };
+        store.insert(&on_worktree).expect("insert");
+        let mut on_rsync = sample_task(TaskKind::Execute, Status::Ready);
+        on_rsync.workspace = WorkspaceSpec::Remote { cluster: "sirius".into(), path: PathBuf::from("/work/NBB/x/scratch") };
+        store.insert(&on_rsync).expect("insert");
+
+        let mut ctx = view_ctx();
+        ctx.clusters.insert(
+            "pegasus".to_string(),
+            ClusterViewInfo { sync: "worktree".to_string(), worktree_root: None },
+        );
+        ctx.clusters
+            .insert("sirius".to_string(), ClusterViewInfo { sync: "rsync".to_string(), worktree_root: None });
+
+        let detail = task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        let wt = detail.worktree.expect("worktree cluster");
+        assert_eq!(wt.project, "/work/NBB/x/benchfs");
+        assert_eq!(wt.dir, format!("/work/NBB/x/benchfs/.taskd-worktrees/{}", on_worktree.id));
+        assert_eq!(wt.branch, format!("taskd/{}", on_worktree.id));
+
+        let detail = task_detail(&store, on_rsync.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        assert_eq!(detail.worktree, None, "rsync のクラスタには worktree が無い");
+
+        // worktree_root を設定したらそちらが親になる。
+        ctx.clusters.insert(
+            "pegasus".to_string(),
+            ClusterViewInfo { sync: "worktree".to_string(), worktree_root: Some(PathBuf::from("/work/NBB/x/wt")) },
+        );
+        let detail = task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        assert_eq!(detail.worktree.expect("worktree").dir, format!("/work/NBB/x/wt/{}", on_worktree.id));
     }
 
     /// ADR-0016 D1/D2: `role` はトップレベルにも出て、`delegated` は `Event::Delegated` から組み立てる。

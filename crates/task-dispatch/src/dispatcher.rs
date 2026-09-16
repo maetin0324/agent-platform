@@ -70,17 +70,22 @@ pub struct ClusterSpec {
     /// 決定的な順に並べた環境変数。
     pub env: Vec<(String, String)>,
     pub rsync_excludes: Vec<String>,
+    /// ADR-0019 D1: `sync = "worktree"` のときの設定。
+    pub worktree: task_worker::WorktreeSettings,
 }
 
 impl ClusterSpec {
     /// このタスクの写し（ローカル）とリモートのパスから、ワーカー用の設定を作る。
-    pub fn ssh_settings(&self, remote_path: &std::path::Path) -> SshSettings {
+    /// `task_id` は worktree のディレクトリ名とブランチ名に使う（ADR-0019 D2）。
+    pub fn ssh_settings(&self, remote_path: &std::path::Path, task_id: task_core::TaskId) -> SshSettings {
         let mut settings = SshSettings::new(self.id.clone(), self.host.clone(), remote_path);
         settings.sync = self.sync;
         settings.delete_on_push = self.delete_on_push;
         settings.setup = self.setup.clone();
         settings.env = self.env.clone();
         settings.rsync_excludes = self.rsync_excludes.clone();
+        settings.worktree = self.worktree.clone();
+        settings.task_id = task_id.to_string();
         settings
     }
 }
@@ -1265,7 +1270,7 @@ impl Dispatcher {
                 kill_grace: self.config.kill_grace,
             };
             tracing::info!(task_id = %task.id, %run_id, adapter = %adapter_id, provider = %provider_id, "dispatching");
-            let remote = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path));
+            let remote = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path, task.id));
             let extras = self.run_extras(&task)?;
             let handle = self.spawn_worker(task.id, run_id.clone(), provider_id.clone(), adapter, dir, limits, remote, extras);
             self.running.insert(
@@ -1415,7 +1420,7 @@ impl Dispatcher {
 
         // ADR-0018: 判定コマンドもクラスタで実行する。
         let cluster = self.cluster_of(&task);
-        let remote_settings = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path));
+        let remote_settings = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path, task.id));
         let cluster_id = cluster.as_ref().map(|(spec, _)| spec.id.clone());
         let events = self.store.events_for(task_id)?;
         let produced = artifacts_for_run(&events, &run_id);
@@ -2889,6 +2894,7 @@ mod tests {
                 setup: vec![],
                 env: vec![],
                 rsync_excludes: vec![],
+                worktree: Default::default(),
             },
         );
         if !control_master_alive_blocking(&["ssh".to_string()], "taskd-localhost") {
@@ -2944,6 +2950,7 @@ mod tests {
                 setup: vec![],
                 env: vec![],
                 rsync_excludes: vec![],
+                worktree: Default::default(),
             },
         );
         let (tx, rx) = tokio::sync::watch::channel(None);
@@ -3016,6 +3023,7 @@ mod tests {
                 setup: vec![],
                 env: vec![],
                 rsync_excludes: vec![],
+                worktree: Default::default(),
             },
         );
         d.cluster_cooldown.insert("local".into(), Instant::now() + Duration::from_secs(3600));

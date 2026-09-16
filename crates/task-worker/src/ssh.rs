@@ -12,13 +12,35 @@ use task_core::{ArtifactRef, Task};
 
 use crate::workspace::{ExecResult, LocalWorkspace, Workspace, WorkspaceError};
 
-/// ワークスペースの同期方法（ADR-0018 D4）。
+/// ワークスペースの同期方法（ADR-0018 D4、ADR-0019 D1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncMode {
-    /// run の前後で rsync を往復させる（既定）。
+    /// run の前後で rsync を往復させる。git 管理外の小さなディレクトリ向け。
     Rsync,
     /// 共有ファイルシステム。何もしない。
     None,
+    /// クラスタ側で `git worktree` を切り、その中だけを rsync する（ADR-0019）。
+    /// 未追跡の巨大データを持ち込まない。git 管理下のプロジェクトの既定の選び方。
+    Worktree,
+}
+
+/// ADR-0019 D1: worktree の設定。`SyncMode::Worktree` のときだけ使う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSettings {
+    /// worktree を置く親ディレクトリ（既定は `<project>/.taskd-worktrees`）。
+    pub root: Option<PathBuf>,
+    /// 切り出す元（既定 `HEAD`）。
+    pub base: String,
+    /// sparse-checkout で残すパス（空なら全追跡ファイル）。
+    pub paths: Vec<String>,
+    /// ブランチ名の接頭辞（既定 `taskd/`）。
+    pub branch_prefix: String,
+}
+
+impl Default for WorktreeSettings {
+    fn default() -> Self {
+        Self { root: None, base: "HEAD".to_string(), paths: Vec::new(), branch_prefix: "taskd/".to_string() }
+    }
 }
 
 /// 同期の両方向で常に除外するもの（P-46）。taskd が写しに作る管理用のディレクトリで、
@@ -40,6 +62,10 @@ pub struct SshSettings {
     /// リモートで `export` する環境変数（値は決定的な順で並べる）。
     pub env: Vec<(String, String)>,
     pub sync: SyncMode,
+    /// ADR-0019: `sync = "worktree"` のときの設定。
+    pub worktree: WorktreeSettings,
+    /// タスク ID（worktree のディレクトリ名とブランチ名に使う。ADR-0019 D2）。
+    pub task_id: String,
     /// push（手元 → クラスタ）で、手元に無いファイルをクラスタ側から消すか（ADR-0018 D4）。
     /// **既定は false**。既存プロジェクトを指すタスクでファイルを失わないため。taskd 専用の作業ディレクトリなら true にしてよい。
     pub delete_on_push: bool,
@@ -63,12 +89,33 @@ impl SshSettings {
             setup: Vec::new(),
             env: Vec::new(),
             sync: SyncMode::Rsync,
+            worktree: WorktreeSettings::default(),
+            task_id: String::new(),
             delete_on_push: false,
             sync_around_exec: true,
             rsync_excludes: Vec::new(),
             ssh_command: vec!["ssh".to_string()],
             rsync_command: vec!["rsync".to_string()],
         }
+    }
+
+    /// ADR-0019 D1: 同期とコマンド実行の対象。`worktree` のときは worktree のパス、それ以外は `remote_dir`。
+    pub fn effective_remote_dir(&self) -> PathBuf {
+        match self.sync {
+            SyncMode::Worktree => self.worktree_dir(),
+            _ => self.remote_dir.clone(),
+        }
+    }
+
+    /// worktree のパス（`worktree_root`/`<task_id>`。既定の root は `<project>/.taskd-worktrees`）。
+    pub fn worktree_dir(&self) -> PathBuf {
+        let root = self.worktree.root.clone().unwrap_or_else(|| self.remote_dir.join(".taskd-worktrees"));
+        root.join(&self.task_id)
+    }
+
+    /// worktree のブランチ名（ADR-0019 D2: taskd は commit しない。人が見てから扱う）。
+    pub fn worktree_branch(&self) -> String {
+        format!("{}{}", self.worktree.branch_prefix, self.task_id)
     }
 }
 
@@ -95,6 +142,65 @@ impl SshWorkspace {
 
     pub fn settings(&self) -> &SshSettings {
         &self.settings
+    }
+
+    /// ADR-0019 D1: 同期とコマンド実行の対象。`worktree` のときは worktree のパス、それ以外は `remote_dir`。
+    pub fn effective_remote_dir(&self) -> PathBuf {
+        self.settings.effective_remote_dir()
+    }
+
+    /// worktree のパス（`worktree_root`/`<task_id>`。既定の root は `<project>/.taskd-worktrees`）。
+    fn worktree_dir(&self) -> PathBuf {
+        self.settings.worktree_dir()
+    }
+
+    /// worktree のブランチ名（ADR-0019 D2: taskd は commit しない。人が見てから扱う）。
+    pub fn worktree_branch(&self) -> String {
+        self.settings.worktree_branch()
+    }
+
+    /// ADR-0019 D1: クラスタ側に worktree を用意する（既にあれば再利用）。sparse-checkout の指定があれば絞る。
+    async fn ensure_worktree(&self) -> Result<(), WorkspaceError> {
+        if self.settings.task_id.is_empty() {
+            return Err(WorkspaceError::Remote(
+                "sync = \"worktree\" needs the task id (the worktree directory and branch are named after it)".to_string(),
+            ));
+        }
+        let project = self.settings.remote_dir.to_string_lossy().to_string();
+        let wt = self.worktree_dir().to_string_lossy().to_string();
+        let branch = self.worktree_branch();
+        let base = &self.settings.worktree.base;
+        let mut script = format!(
+            "set -e\n\
+             cd {project} 2>/dev/null || {{ echo \"no such directory: {project}\" >&2; exit 66; }}\n\
+             git rev-parse --git-dir >/dev/null 2>&1 || {{ echo \"not a git repository\" >&2; exit 65; }}\n\
+             if [ ! -e {wt}/.git ]; then git worktree add -B {branch} {wt} {base} >/dev/null; fi\n",
+            project = shq(&project),
+            wt = shq(&wt),
+            branch = shq(&branch),
+            base = shq(base),
+        );
+        if !self.settings.worktree.paths.is_empty() {
+            let paths: Vec<String> = self.settings.worktree.paths.iter().map(|p| shq(p)).collect();
+            script.push_str(&format!(
+                "git -C {wt} sparse-checkout set --cone {paths} >/dev/null\n",
+                wt = shq(&wt),
+                paths = paths.join(" ")
+            ));
+        }
+        let out = self.run_ssh(&script, Duration::from_secs(600)).await?;
+        match out.exit {
+            Some(0) => Ok(()),
+            Some(65) => Err(WorkspaceError::Remote(format!(
+                "{project} on {} is not a git repository; use sync = \"rsync\" for this cluster (ADR-0019 D3)",
+                self.settings.cluster
+            ))),
+            other => Err(WorkspaceError::Remote(format!(
+                "cannot prepare the git worktree on {} (exit {other:?}): {}",
+                self.settings.cluster,
+                out.stderr_tail.trim()
+            ))),
+        }
     }
 
     /// `ssh` に必ず付ける引数（対話的な認証を禁じる）。
@@ -130,7 +236,7 @@ impl SshWorkspace {
     /// リモートで走らせるスクリプト（作業ディレクトリへ移動 → env → setup → コマンド）。
     fn remote_script(&self, cmd: &str, timeout: Duration) -> String {
         let mut script = String::new();
-        script.push_str(&format!("cd {} && ", shq(&self.settings.remote_dir.to_string_lossy())));
+        script.push_str(&format!("cd {} && ", shq(&self.effective_remote_dir().to_string_lossy())));
         for (k, v) in &self.settings.env {
             script.push_str(&format!("export {k}={} && ", shq(v)));
         }
@@ -145,7 +251,11 @@ impl SshWorkspace {
 
     /// リモートの作業ディレクトリを作る。
     async fn ensure_remote_dir(&self) -> Result<(), WorkspaceError> {
-        let dir = self.settings.remote_dir.to_string_lossy().to_string();
+        // worktree のときは `git worktree add` が作るので、ここでは作らない。
+        if self.settings.sync == SyncMode::Worktree {
+            return self.ensure_worktree().await;
+        }
+        let dir = self.effective_remote_dir().to_string_lossy().to_string();
         let out = self.run_ssh(&format!("mkdir -p {}", shq(&dir)), Duration::from_secs(60)).await?;
         if out.exit != Some(0) {
             return Err(WorkspaceError::Remote(format!(
@@ -198,7 +308,7 @@ impl SshWorkspace {
             args.push(pattern.clone());
         }
         args.push(format!("{}/", self.local.dir().to_string_lossy()));
-        args.push(format!("{}:{}/", self.settings.host, self.settings.remote_dir.to_string_lossy()));
+        args.push(format!("{}:{}/", self.settings.host, self.effective_remote_dir().to_string_lossy()));
         self.run_rsync(&args, "push").await
     }
 
@@ -222,7 +332,7 @@ impl SshWorkspace {
             args.push("--exclude".into());
             args.push(pattern.clone());
         }
-        args.push(format!("{}:{}/", self.settings.host, self.settings.remote_dir.to_string_lossy()));
+        args.push(format!("{}:{}/", self.settings.host, self.effective_remote_dir().to_string_lossy()));
         args.push(format!("{}/", self.local.dir().to_string_lossy()));
         self.run_rsync(&args, "pull").await
     }
@@ -251,7 +361,7 @@ impl SshWorkspace {
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join("remote-exec");
         let ssh = self.ssh_base().join(" ");
-        let remote = self.settings.remote_dir.to_string_lossy().to_string();
+        let remote = self.effective_remote_dir().to_string_lossy().to_string();
         let mut prefix = String::new();
         for (k, v) in &self.settings.env {
             prefix.push_str(&format!("export {k}={} && ", shq(v)));
@@ -288,14 +398,25 @@ impl SshWorkspace {
 /// ワーカーへ渡す指示文（ADR-0018 D3）。`RunRequest.task.objective` の末尾に足し、`.taskd/remote-exec` の存在と使い方を伝える。
 /// ワーカーが従うかは保証しない（受け入れ条件はクラスタ側で判定されるので、手元だけで済ませた仕事は条件で落ちる）。
 pub fn remote_exec_instructions(settings: &SshSettings) -> String {
-    format!(
+    let base = format!(
         "\n\n[taskd] このタスクの正はクラスタ `{cluster}`（ssh host `{host}`）の `{dir}` です。手元の作業ディレクトリはその写しで、\
          run の後にクラスタへ同期され、受け入れ条件のコマンドはクラスタ側で実行されます。\
          重い処理・クラスタ上のデータやモジュールを使う処理は `.taskd/remote-exec <コマンド ...>` で実行してください\
          （クラスタの作業ディレクトリで実行され、終了コードと出力がそのまま返ります）。",
         cluster = settings.cluster,
         host = settings.host,
-        dir = settings.remote_dir.to_string_lossy(),
+        dir = settings.effective_remote_dir().to_string_lossy(),
+    );
+    // ADR-0019 D1/D3: worktree では、手元に来ているのは追跡ファイルだけで、元のリポジトリは触らない。
+    if settings.sync != SyncMode::Worktree {
+        return base;
+    }
+    format!(
+        "{base}\n\
+         これは `{project}` から切り出した git worktree（ブランチ `{branch}`）です。追跡ファイルだけが入っているので、\
+         手元に見えないファイル（未追跡の巨大データなど）はクラスタ側にあります。元のリポジトリの作業ツリーは触らないでください。",
+        project = settings.remote_dir.to_string_lossy(),
+        branch = settings.worktree_branch(),
     )
 }
 
@@ -361,6 +482,9 @@ impl Workspace for SshWorkspace {
     async fn exec(&self, cmd: &str, timeout: Duration) -> Result<ExecResult, WorkspaceError> {
         if self.settings.sync_around_exec {
             self.push().await?;
+        } else if self.settings.sync == SyncMode::Worktree {
+            // push を挟まない設定でも worktree だけは用意する（無ければ `cd` で落ちる）。
+            self.ensure_remote_dir().await?;
         }
         let script = self.remote_script(cmd, timeout);
         // ssh 自体のタイムアウトは、リモートの timeout より少し長くする。

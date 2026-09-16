@@ -363,6 +363,12 @@ taskctl worker run --config <taskd.toml> --task <id> [--provider <id> | --adapte
   接続が無ければそのクラスタを cooldown にし、`Event::ClusterUnavailable` を残し、そのタスクは「人待ち」として `--until-idle` の待ち対象から外す。
 - 並列度は「プロバイダ（アカウント）」と「クラスタ」の二次元。`ssh` 自体の失敗（終了コード 255）は供給側失敗、リモートコマンドの非ゼロ終了は判定の失敗。
 - ワーカーがクラスタでコマンドを流すためのラッパ `.taskd/remote-exec` を run ごとに置く（同期対象からは外す）。
+- **同期は 3 通り（`[[clusters]] sync`。ADR-0019）**: `worktree`（git 管理下のプロジェクトの既定の選択）、`rsync`、`none`（共有 FS）。
+  `worktree` では、クラスタ側で `git worktree add -B taskd/<task_id>` を切り、**その中だけ**を同期・実行の対象にする。
+  追跡ファイルしか checkout されないので未追跡の巨大データを持ち込まず（実測: benchfs は 263 GB 中 220 GB が未追跡）、
+  `worktree_paths` の sparse-checkout でさらに絞れる。元のリポジトリの作業ツリーには触らない。
+  taskd は commit も push もしない（変更は worktree に残り、diff / commit / `git worktree remove` は人の操作）。
+  `TaskDetail.worktree` にパスとブランチを出す。git リポジトリでないディレクトリにこれを指定した run は供給側失敗になる。
 
 ### 5.10 API 層（`task-api`。ADR-0013）
 

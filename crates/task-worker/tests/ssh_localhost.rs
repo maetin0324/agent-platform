@@ -211,3 +211,83 @@ async fn management_directories_are_never_synced() {
     ws.pull().await.expect("pull");
     assert!(local.path().join("runs/abc/stdout.jsonl").exists(), "pull で手元の runs/ を消さない");
 }
+
+/// ADR-0019: `sync = "worktree"` は、クラスタ側で git worktree を切り、その中だけを同期・実行する。
+/// 未追跡の巨大データは worktree に入らない（= 手元に来ない）。
+#[tokio::test]
+async fn worktree_sync_only_brings_tracked_files() {
+    let local = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let project = remote.path().join("project");
+
+    // クラスタ側のリポジトリを作る: 追跡ファイル 1 つと、巨大データに見立てた未追跡ファイル。
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() { println!(\"hi\") }\n").unwrap();
+    std::fs::write(project.join("huge-data.bin"), vec![0u8; 1024 * 64]).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").args(args).current_dir(&project).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "taskd@example.com"]);
+    git(&["config", "user.name", "taskd"]);
+    git(&["add", "src/main.rs"]);
+    git(&["commit", "-q", "-m", "initial"]);
+
+    let mut s = settings(project.clone());
+    s.sync = SyncMode::Worktree;
+    s.task_id = "01TESTWORKTREE0000000000AA".to_string();
+    let ws = SshWorkspace::new(local.path(), s);
+    if !available(&ws).await {
+        return;
+    }
+    let t = task(local.path());
+    ws.prepare(&t).await.expect("prepare（worktree を作って pull）");
+
+    // 追跡ファイルだけが手元に来る。未追跡の巨大データは来ない。
+    assert!(local.path().join("src/main.rs").exists(), "追跡ファイルは写しに来る");
+    assert!(!local.path().join("huge-data.bin").exists(), "未追跡のデータは持ち込まれない");
+
+    // worktree はブランチ taskd/<task_id> で、元のプロジェクトとは別ディレクトリ。
+    let wt = project.join(".taskd-worktrees/01TESTWORKTREE0000000000AA");
+    assert!(wt.join("src/main.rs").exists(), "worktree が切られている");
+    let branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&wt)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "taskd/01TESTWORKTREE0000000000AA");
+
+    // 手元の編集は worktree に push され、コマンドは worktree の中で走る。元のプロジェクトは変わらない。
+    std::fs::write(local.path().join("src/main.rs"), "fn main() { println!(\"edited\") }\n").unwrap();
+    let r = ws.exec("grep -c edited src/main.rs && pwd", Duration::from_secs(60)).await.expect("exec");
+    assert_eq!(r.exit, Some(0), "{r:?}");
+    assert!(r.stdout_tail.contains(".taskd-worktrees"), "worktree の中で実行される: {r:?}");
+    assert_eq!(
+        std::fs::read_to_string(project.join("src/main.rs")).unwrap(),
+        "fn main() { println!(\"hi\") }\n",
+        "元のプロジェクトのファイルは変わらない（ADR-0019 D3）"
+    );
+    assert_eq!(std::fs::read_to_string(wt.join("src/main.rs")).unwrap().trim(), "fn main() { println!(\"edited\") }");
+}
+
+/// ADR-0019 D3: git 管理外のディレクトリに `sync = "worktree"` を指定したら、理由の分かるエラーにする。
+#[tokio::test]
+async fn worktree_sync_on_a_non_git_directory_explains_itself() {
+    let local = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let plain = remote.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+
+    let mut s = settings(plain);
+    s.sync = SyncMode::Worktree;
+    s.task_id = "01TESTNOTGIT000000000000AA".to_string();
+    let ws = SshWorkspace::new(local.path(), s);
+    if !available(&ws).await {
+        return;
+    }
+    let err = ws.pull().await.expect_err("git リポジトリではない");
+    let msg = err.to_string();
+    assert!(msg.contains("not a git repository"), "{msg}");
+    assert!(msg.contains("rsync"), "対処（sync = \"rsync\"）を示す: {msg}");
+}

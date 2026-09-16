@@ -2293,3 +2293,49 @@ exit 0）、`cargo clippy --workspace --all-targets -- -D warnings`（exit 0, �
 | # | 対象 | 提案 | 現状 |
 |---|---|---|---|
 | P-60 | ADR-0018 D4 / DESIGN §5.9 補足 2 | 大きなプロジェクト向けの同期方法（`rsync_includes` / リモート専用モード / worktree）。上の 3 案から選ぶ | 全体 rsync のみ。263 GB のプロジェクトでは使えない |
+
+## ADR-0019: git worktree による同期（2026-09-16）
+
+人間の判断「rsync でサイズが大きすぎる問題は、git worktree を切る方針で。git 管理外のプロジェクトはほぼ存在しない」。
+P-60 の 3 案のうち **3（worktree）** を採り、ADR-0019 として実装した。
+
+### 入れたもの
+
+- `[[clusters]] sync = "worktree"`（`rsync` / `none` に続く 3 つ目）と `worktree_root` / `worktree_base` /
+  `worktree_paths`（sparse-checkout）/ `remove_worktree_when`（`"never"` のみ。taskd は worktree を消さない）。
+- `SshWorkspace`: `sync = "worktree"` のとき、同期とコマンド実行の対象を **worktree** にする
+  （`git worktree add -B taskd/<task_id> <worktree_dir> <base>`、任意で `git sparse-checkout set --cone`）。
+  元のリポジトリの作業ツリーには触らない。taskd は commit も push もしない。
+  git リポジトリでないディレクトリを指したら「`sync = "rsync"` に変えてください」と言う供給側失敗にする（D3）。
+- ワーカーへの指示文に「これは worktree（ブランチ `taskd/<task_id>`）で、追跡ファイルだけが入っている」を足した。
+- `TaskDetail.worktree = {project, dir, branch}`（`GET /api/v1/tasks/{id}`。スキーマも再生成）。
+  `sync = "worktree"` のクラスタのタスクだけに出る。GUI はここを「クラスタで結果を見る場所」として出せる。
+
+### 証拠
+
+- `cargo test -p task-worker --test ssh_localhost`: **8 passed**。うち新規 2 件
+  （`worktree_sync_only_brings_tracked_files` = 未追跡ファイルは持ち込まれない／ブランチ名／元のプロジェクトが変わらないこと、
+  `worktree_sync_on_a_non_git_directory_explains_itself` = 対処つきのエラー）。
+- `cargo test -p taskd --lib worktree`: 2 passed（設定の解釈・`ClusterSpec` への写し・不正な `sync` と自動削除の拒否。
+  `config/taskd.clusters.example.toml` もこのテストで読む）。
+- `cargo test -p task-ops worktree`: 1 passed（`TaskDetail.worktree` のパスとブランチ、rsync のクラスタでは `null`）。
+- `cargo test --workspace`: **全 test result ok**、0 failed（`ssh_cluster_manual` の 2 件は `#[ignore]`）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0。
+
+### 実機確認（pegasus の benchfs、2026-09-16）
+
+```
+TASKD_CLUSTER_HOST=pegasus TASKD_CLUSTER_PROJECT=/work/NBB/rmaeda/workspace/rust/benchfs \
+  cargo test -p task-worker --test ssh_cluster_manual -- --ignored --nocapture worktree
+```
+
+- `worktree_paths = ["src", "Cargo.toml"]` で **prepare 6.5 秒、手元の写し 3 MB**（263 GB のリポジトリから）。
+- コマンドは `/work/.../benchfs/.taskd-worktrees/<task_id>` の中、ブランチ `taskd/<task_id>` で実行された。
+- 実行後の benchfs は `git status` が確認前と同じ（`?? ior_integration/io500/` のみ）で、`git worktree list` も元のまま
+  （確認用の worktree はテストの最後に `git worktree remove` した）。
+
+### 残した提案
+
+- P-60 は解決（worktree を採用）。`rsync_includes` とリモート専用モードは実装しない。
+- P-61（新）: `worktree_paths` を指定したとき、受け入れ条件のコマンドが sparse-checkout の外を参照すると失敗する。
+  いまは人が `worktree_paths` を正しく選ぶ前提。必要になったら「判定の前だけ sparse を解く」などを検討する。

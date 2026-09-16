@@ -75,3 +75,68 @@ async fn cluster_round_trip() {
         .expect("cleanup");
     assert_eq!(r.exit, Some(0), "{r:?}");
 }
+
+/// ADR-0019: 実クラスタの既存リポジトリ（既定 benchfs）で `sync = "worktree"` を確かめる。
+/// 実行:
+/// ```sh
+/// TASKD_CLUSTER_HOST=pegasus TASKD_CLUSTER_PROJECT=/work/NBB/rmaeda/workspace/rust/benchfs \
+///   cargo test -p task-worker --test ssh_cluster_manual -- --ignored --nocapture worktree
+/// ```
+/// 後片付け（`git worktree remove`）はテストの最後に行う（ADR-0019 D2 の運用では人が行うが、確認用の worktree は残さない）。
+#[tokio::test]
+#[ignore = "実クラスタが要る（TASKD_CLUSTER_HOST / TASKD_CLUSTER_PROJECT と多重接続）"]
+async fn cluster_worktree_brings_only_the_sparse_paths() {
+    let host = std::env::var("TASKD_CLUSTER_HOST").expect("TASKD_CLUSTER_HOST");
+    let project = PathBuf::from(std::env::var("TASKD_CLUSTER_PROJECT").expect("TASKD_CLUSTER_PROJECT"));
+    let local = tempfile::tempdir().unwrap();
+    let task_id = TaskId::new();
+
+    let mut settings = SshSettings::new(host.clone(), host.clone(), project.clone());
+    settings.sync = SyncMode::Worktree;
+    settings.task_id = task_id.to_string();
+    settings.worktree.paths = vec!["src".to_string(), "Cargo.toml".to_string()];
+    let ws = SshWorkspace::new(local.path(), settings.clone());
+
+    assert!(ws.control_master_alive().await, "多重接続が要る: scripts/cluster-login.sh {host}");
+    let mut t = task(local.path());
+    t.id = task_id;
+    let started = std::time::Instant::now();
+    ws.prepare(&t).await.expect("prepare（worktree を切って pull）");
+    println!("prepare took {:?}", started.elapsed());
+
+    // sparse-checkout で指定した分だけが手元に来る。巨大なベンチ結果は来ない。
+    assert!(local.path().join("src").is_dir(), "src が来る");
+    assert!(local.path().join("Cargo.toml").is_file(), "Cargo.toml が来る");
+    assert!(
+        !local.path().join("lib/pluvio/examples/mpi_example/results").exists(),
+        "sparse-checkout の外（39 GB のベンチ結果）は来ない"
+    );
+    let size = std::process::Command::new("du").args(["-sm", &local.path().to_string_lossy()]).output().unwrap();
+    println!("mirror size: {}", String::from_utf8_lossy(&size.stdout).trim());
+
+    // コマンドは worktree の中で走る。元のリポジトリの作業ツリーには触らない。
+    let r = ws.exec("pwd && git rev-parse --abbrev-ref HEAD", Duration::from_secs(120)).await.expect("exec");
+    println!("remote pwd/branch:\n{}", r.stdout_tail);
+    assert_eq!(r.exit, Some(0), "{r:?}");
+    assert!(r.stdout_tail.contains(&format!("taskd/{task_id}")), "ブランチは taskd/<task_id>: {r:?}");
+
+    // 後片付け: 確認用の worktree とブランチを消す（本番の運用では人が行う。ADR-0019 D2）。
+    let wt = settings.worktree_dir();
+    let cleanup = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            &host,
+            &format!(
+                "git -C {} worktree remove --force {} && git -C {} branch -D taskd/{}",
+                project.display(),
+                wt.display(),
+                project.display(),
+                task_id
+            ),
+        ])
+        .output()
+        .unwrap();
+    println!("cleanup: {}{}", String::from_utf8_lossy(&cleanup.stdout), String::from_utf8_lossy(&cleanup.stderr));
+    assert!(cleanup.status.success(), "worktree の後片付けに失敗した");
+}

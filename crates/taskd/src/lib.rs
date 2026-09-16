@@ -310,6 +310,7 @@ pub fn api_settings(
             retry_backoff_base: Duration::from_secs(config.retry_backoff_base_secs),
             retry_backoff_max: Duration::from_secs(config.retry_backoff_max_secs),
             max_requeues: config.max_requeues,
+            clusters: config.cluster_view_infos(),
         },
         config_view: config_view(config, listen),
         roles: config.role_specs(),

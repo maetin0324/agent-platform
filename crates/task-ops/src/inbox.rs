@@ -496,6 +496,7 @@ mod tests {
             retry_backoff_base: StdDuration::from_secs(10),
             retry_backoff_max: StdDuration::from_secs(300),
             max_requeues: 5,
+            clusters: Default::default(),
         }
     }
 

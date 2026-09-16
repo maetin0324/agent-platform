@@ -976,6 +976,7 @@ mod tests {
                 retry_backoff_base: Duration::from_secs(0),
                 retry_backoff_max: Duration::from_secs(0),
                 max_requeues: 5,
+                clusters: Default::default(),
             },
             config_view: ConfigView {
                 config_path: String::new(),

@@ -3056,6 +3056,17 @@
             "string",
             "null"
           ]
+        },
+        "worktree": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorktreeView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0019 D2: `sync = \"worktree\"` のクラスタで動くタスクの worktree。人はここを見て diff / commit する。"
         }
       },
       "required": [
@@ -3452,6 +3463,29 @@
           "type": "object"
         }
       ]
+    },
+    "WorktreeView": {
+      "description": "ADR-0019 D2: クラスタ側の worktree（taskd はここだけを触り、commit はしない）。",
+      "properties": {
+        "branch": {
+          "description": "worktree のブランチ（`taskd/<task_id>`）。taskd は commit しないので、変更は作業ツリーに残る。",
+          "type": "string"
+        },
+        "dir": {
+          "description": "worktree のパス（クラスタ上）。",
+          "type": "string"
+        },
+        "project": {
+          "description": "元のリポジトリ（`WorkspaceSpec::Remote.path`）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "dir",
+        "branch"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

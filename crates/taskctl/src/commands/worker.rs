@@ -319,7 +319,7 @@ async fn execute_on_cluster(
     selected: &Selected,
     adapter: &dyn WorkerAdapter,
 ) -> Result<ExitCode, CliError> {
-    let settings = target.spec.ssh_settings(&target.remote_path);
+    let settings = target.spec.ssh_settings(&target.remote_path, task.id);
     let ws = SshWorkspace::new(&target.mirror_dir, settings.clone());
 
     if !ws.control_master_alive().await {
@@ -586,6 +586,10 @@ mod tests {
             setup: vec![],
             env: std::collections::HashMap::new(),
             rsync_excludes: vec![],
+            worktree_root: None,
+            worktree_base: "HEAD".into(),
+            worktree_paths: vec![],
+            remove_worktree_when: "never".into(),
         }
     }
 
