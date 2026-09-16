@@ -2507,3 +2507,43 @@ P-47（`clusters[].connected` を GUI の主表示に）は **G7 で実装済み
 ### 残った提案
 
 - **無し**（P-46〜P-60 は全て決着）。以後の判断待ちは `gui/docs/PROGRESS.md` の各フェーズの「提案」（G0-P1/P2 など GUI 内部の話）だけ。
+
+## 実機確認（本物の claude-code + pegasus。2026-09-16）
+
+人間の指示「実機で一度動かして確認して下さい」。`/local/rmaeda/taskd-live` に本番相当の構成（claude-code の実アカウント、
+`[api]` 有効・トークン必須、`[[clusters]] pegasus sync = "worktree"`）を作り、GUI も繋いで一周した。
+
+### 確かめたこと（すべて成功）
+
+1. **worktree でのクラスタ実行（ADR-0019）**: pegasus の `/work/NBB/rmaeda/taskd-live-demo`（git 管理、3 MB の未追跡ファイル入り）に
+   「`mean()` が空スライスで NaN を返すのを直す」タスクを投げた。約 50 秒で `done`。
+   - 受け入れ条件 `cargo test` は**クラスタ側の worktree で実行**された（判定の evidence:
+     `Compiling taskd-live-demo (/work/0/NBB/rmaeda/taskd-live-demo/.taskd-worktrees/01M2NAXD…)`、2 passed）。
+   - 手元の写しに未追跡の 3 MB ファイルは**来ていない**。元のリポジトリの `src/lib.rs` は**未変更**、`main` は元のコミットのまま。
+     変更はブランチ `taskd/01M2NAXD…` の worktree に未コミットで残った（ADR-0019 D2 のとおり）。
+   - `taskctl show --json --config` に `worktree{project, dir, branch}` が出た。
+2. **委譲（ADR-0016）と「部下待ち」（ADR-0023 D3）**: `--role lead --aggregate` の親が実 claude-code で
+   `artifacts/delegate.json` を書き、子 2 件が挿入・並列実行された。子が走っている間、`GET /api/v1/daemon` の
+   `awaiting_children` に**親の id が出ている**ことを実機で確認（`Reviewing → Ready: aggregate` → 集約 run → `done`）。
+   集約 run は子の成果物を読んで `artifacts/summary.md` を書いた。
+3. **GUI**: `/daemon` に「部下待ち（awaiting_children）」、`/clusters` に pegasus `connected`、
+   タスク詳細に `role: lead` と委譲の子リンク 2 件、run ログ画面に「ワーカーに渡した指示（request.json）」が出た。
+4. `taskctl replay`: **0 mismatches across 7 tasks**。
+
+### 実機でしか分からなかった不具合（修正済み）
+
+- **ADR-0023 D2 の穴**: `request.json` を `run_subprocess` にだけ書いていたため、**fake アダプタでしか残らなかった**
+  （claude-code / codex は自前の実行経路）。共有ヘルパ `write_run_request` にして 3 アダプタ全部から呼ぶようにし、
+  claude-code / codex は **`prompt.txt`（実際に渡した文面）** も残すようにした（`stdout.jsonl` に最初のプロンプトは残らないことも確認）。
+  `GET …/runs/{run_id}/prompt`（エンドポイント 33）と `RunFiles.prompt`、GUI の表示を追加。
+- **ADR-0022 の `check` の分類が誤り**: 実アカウントで `spawn_failed` が返った。ワーカープロトコル上のエラーを
+  `spawn_failed` に写していたため。`check` が見たいのは「CLI が起動して応答するか」だけなので `ok` とし、理由を
+  `detail`（新規）に入れるようにした。あわせて `max_turns` を 1 → 3（1 ターンでは健全なアカウントでも `error_max_turns` になる）。
+  修正後: `{"result":"ok","detail":"Confirmed ready; no files were changed."}`、約 15 秒。
+- （設計の穴ではないが記録）**委譲する親の受け入れ条件は、親自身の run の直後に判定される**（子が終わる前）。
+  子の成果を条件に書くと 1 回目は必ず落ちる。`--aggregate` の暗黙条件（`artifacts/summary.md`）か、親自身が満たせる条件を書く。
+
+### 証拠（実機の後に再実行）
+
+- `cargo test --workspace` 40 個の test binary すべて ok、`cargo clippy --workspace --all-targets -- -D warnings` exit 0。
+- GUI: `pnpm typecheck` / `build` exit 0、`pnpm test` **152 passed**、`pnpm e2e` **63 passed**、`pnpm gen:types` 差分ゼロ。

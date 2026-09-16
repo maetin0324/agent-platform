@@ -27,7 +27,7 @@ mod state;
 mod stats;
 pub mod types;
 
-pub use admin::{AdminRequest, CheckError, ProviderCheckResult};
+pub use admin::{AdminRequest, CheckError, ProviderCheckOutcome, ProviderCheckResult};
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};
 pub use stats::classify_outcome;

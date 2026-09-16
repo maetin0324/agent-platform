@@ -22,6 +22,8 @@ export interface RunDetailData {
   result: string | null;
   /// ADR-0023 D2: ワーカーに渡した指示（`runs/<run_id>/request.json`）。導入前の run には無いので `null`。
   request: string | null;
+  /// ADR-0023 M1: claude-code / codex に実際に渡した文面（`runs/<run_id>/prompt.txt`）。fake には無い。
+  prompt: string | null;
 }
 
 async function readFileText(client: TaskdClient, path: string, signal: AbortSignal): Promise<string | null> {
@@ -52,13 +54,14 @@ export async function loadRunDetail(
   }
   const files = run.files;
   const base = `/tasks/${taskId}/runs/${runId}`;
-  const [stdout, stderr, result, requestJson] = await Promise.all([
+  const [stdout, stderr, result, requestJson, promptText] = await Promise.all([
     files?.stdout ? readFileText(client, `${base}/stdout`, request.signal) : Promise.resolve(null),
     files?.stderr ? readFileText(client, `${base}/stderr`, request.signal) : Promise.resolve(null),
     files?.result ? readFileText(client, `${base}/result`, request.signal) : Promise.resolve(null),
     files?.request ? readFileText(client, `${base}/request`, request.signal) : Promise.resolve(null),
+    files?.prompt ? readFileText(client, `${base}/prompt`, request.signal) : Promise.resolve(null),
   ]);
-  return { taskId, run, stdout, stderr, result, request: requestJson };
+  return { taskId, run, stdout, stderr, result, request: requestJson, prompt: promptText };
 }
 
 export function meta(_: Route.MetaArgs) {
@@ -86,7 +89,7 @@ function stderrTail(content: string, maxLines = 200): string {
 }
 
 export default function RunDetailPage({ loaderData }: Route.ComponentProps) {
-  const { taskId, run, stdout, stderr, result, request } = loaderData;
+  const { taskId, run, stdout, stderr, result, request, prompt } = loaderData;
   const [rawMode, setRawMode] = useState(false);
   const [lines, setLines] = useState<string[]>(() => splitLines(stdout ?? ""));
   const offsetRef = useRef(new TextEncoder().encode(stdout ?? "").length);
@@ -189,7 +192,22 @@ export default function RunDetailPage({ loaderData }: Route.ComponentProps) {
         </section>
       )}
 
-      {/* ADR-0023 D2: この run でワーカーに渡した指示そのもの。既定は畳んでおく（長いので）。 */}
+      {/* ADR-0023 M1: claude-code / codex に実際に渡した文面。人が読むのはこちらが早い。 */}
+      {prompt !== null && (
+        <section aria-labelledby="prompt-heading" data-testid="prompt-section">
+          <h2 id="prompt-heading" className="text-lg font-semibold">
+            ワーカーに渡した文面（prompt.txt）
+          </h2>
+          <details>
+            <summary className="cursor-pointer text-sm text-gray-600" data-testid="prompt-toggle">
+              開く
+            </summary>
+            <CodeViewer content={prompt} />
+          </details>
+        </section>
+      )}
+
+      {/* ADR-0023 D2: この run でワーカーに渡した指示そのもの（構造）。既定は畳んでおく（長いので）。 */}
       {request !== null && (
         <section aria-labelledby="request-heading" data-testid="request-section">
           <h2 id="request-heading" className="text-lg font-semibold">

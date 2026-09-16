@@ -197,6 +197,9 @@ pub struct RunFiles {
     /// ADR-0023 D2: `runs/<run_id>/request.json`（ワーカーに渡した指示）。導入前の run には無いので既定は false。
     #[serde(default)]
     pub request: bool,
+    /// ADR-0023 M1: `runs/<run_id>/prompt.txt`（claude-code / codex が実際に渡した文面）。fake には無い。
+    #[serde(default)]
+    pub prompt: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]

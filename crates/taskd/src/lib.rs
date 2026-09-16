@@ -500,10 +500,11 @@ async fn handle_admin_request(
             tokio::spawn(async move {
                 let outcome = check_provider(config_path, provider_id.clone()).await;
                 // ADR-0022 D2: 確認できたときだけ記録する（設定エラー・taskd 側の都合は「確認の結果」ではない）。
-                if let Ok(result) = &outcome {
+                if let Ok(outcome) = &outcome {
                     let check = ProviderCheckView {
                         at: OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default(),
-                        result: provider_check_result_name(result).to_string(),
+                        result: provider_check_result_name(&outcome.result).to_string(),
+                        detail: outcome.detail.clone(),
                     };
                     let _ = check_tx.send((provider_id, check)).await;
                 }
@@ -547,7 +548,7 @@ fn provider_check_result_name(result: &task_api::ProviderCheckResult) -> &'stati
 async fn check_provider(
     config_path: Option<PathBuf>,
     provider_id: String,
-) -> Result<task_api::ProviderCheckResult, task_api::CheckError> {
+) -> Result<task_api::ProviderCheckOutcome, task_api::CheckError> {
     let path = config_path
         .ok_or_else(|| task_api::CheckError::Unavailable("config was not loaded from a file; cannot check".into()))?;
     let config = Config::load(&path).map_err(|e| task_api::CheckError::ConfigInvalid(e.to_string()))?;
@@ -572,7 +573,9 @@ async fn check_provider(
         priority: 0,
         worker_hint: task_core::WorkerHint { tier: task_core::Tier::Standard, adapter: None },
         workspace: task_core::WorkspaceSpec::Local { path: dir.clone() },
-        budget: task_core::Budget { max_turns: 1, max_wall_secs: 30, max_retries: 0 },
+        // ADR-0022 M1: 1 ターンではワーカープロトコル（`artifacts/result.json` を書く）を完了できず、
+        // 健全なアカウントでも `error_max_turns` になる。人が読む信号にするため少しだけ余裕を持たせる。
+        budget: task_core::Budget { max_turns: 3, max_wall_secs: 30, max_retries: 0 },
         attempts: 0,
         lease: None,
         created_at: now,
@@ -605,17 +608,32 @@ async fn check_provider(
     };
     let result = adapter.run(req, &run_id, limits, &task_worker::adapter::NullSink).await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
+    // ADR-0022 M1（実機確認で修正）: 見ているのは「このアカウントで CLI が起動して応答するか」だけ。
+    // ワーカープロトコル上のエラー（`Terminal::Error`。1 ターンでは result.json を書けない等）は
+    // **アカウントの問題ではない**ので `ok` とし、理由を `detail` に残す。起動できない・認証切れ・
+    // 枯渇は `AdapterError` 側で分かる。
     Ok(match result {
         Ok(outcome) => match outcome.terminal {
-            task_worker::Terminal::Done { .. } | task_worker::Terminal::Question { .. } => task_api::ProviderCheckResult::Ok,
-            task_worker::Terminal::Error { .. } => task_api::ProviderCheckResult::SpawnFailed,
+            task_worker::Terminal::Done { summary, .. } => (task_api::ProviderCheckResult::Ok, Some(summary)),
+            task_worker::Terminal::Question { text } => (task_api::ProviderCheckResult::Ok, Some(text)),
+            task_worker::Terminal::Error { message, .. } => (task_api::ProviderCheckResult::Ok, Some(message)),
         },
-        Err(task_worker::AdapterError::AuthFailed(_)) => task_api::ProviderCheckResult::AuthFailed,
-        Err(task_worker::AdapterError::Throttled { .. } | task_worker::AdapterError::Exhausted(_)) => {
-            task_api::ProviderCheckResult::Throttled
+        Err(e @ task_worker::AdapterError::AuthFailed(_)) => (task_api::ProviderCheckResult::AuthFailed, Some(e.to_string())),
+        Err(e @ (task_worker::AdapterError::Throttled { .. } | task_worker::AdapterError::Exhausted(_))) => {
+            (task_api::ProviderCheckResult::Throttled, Some(e.to_string()))
         }
-        Err(_) => task_api::ProviderCheckResult::SpawnFailed,
+        Err(e) => (task_api::ProviderCheckResult::SpawnFailed, Some(e.to_string())),
     })
+    .map(|(result, detail)| task_api::ProviderCheckOutcome { result, detail: detail.map(|d| truncate_detail(&d)) })
+}
+
+/// `detail` は人が読む手がかりなので短くする（1 行・200 文字まで）。
+fn truncate_detail(text: &str) -> String {
+    let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= 200 {
+        return one_line;
+    }
+    one_line.chars().take(199).collect::<String>() + "…"
 }
 
 #[cfg(test)]

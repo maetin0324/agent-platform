@@ -2231,6 +2231,13 @@
         "checked_at": {
           "type": "string"
         },
+        "detail": {
+          "description": "ADR-0022 M1: 人が読むための一行の手がかり（ワーカーの返答、失敗の理由）。無ければ `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "result": {
           "$ref": "#/$defs/ProviderCheckResult"
         }
@@ -2257,6 +2264,13 @@
         "at": {
           "description": "確認した時刻（RFC 3339）。",
           "type": "string"
+        },
+        "detail": {
+          "description": "人が読むための一行の手がかり（ワーカーの返答や失敗の理由。ADR-0022 M1）。無ければ `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "result": {
           "description": "`ok` / `auth_failed` / `throttled` / `spawn_failed`（`task_api::ProviderCheckResult` の serde 名）。",
@@ -2715,6 +2729,11 @@
     },
     "RunFiles": {
       "properties": {
+        "prompt": {
+          "default": false,
+          "description": "ADR-0023 M1: `runs/<run_id>/prompt.txt`（claude-code / codex が実際に渡した文面）。fake には無い。",
+          "type": "boolean"
+        },
         "request": {
           "default": false,
           "description": "ADR-0023 D2: `runs/<run_id>/request.json`（ワーカーに渡した指示）。導入前の run には無いので既定は false。",

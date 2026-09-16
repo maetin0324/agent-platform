@@ -48,3 +48,13 @@ Phase 11（ADR-0017）で管理 API は揃ったが、3 つ保留が残ってい
 
 - P-58 は D2 として実装する。P-59 と G6-P1 は「やらない」で閉じる。
 - 実装が増えるのは `ProviderLive.last_check` と、それを埋める経路（check の完了 → tick ループ → スナップショット）だけ。
+
+## 実装メモ（実機確認 2026-09-16 で修正）
+
+- **M1（結果の分類が誤っていた）**: 実機で `check` が `spawn_failed` を返したが、同じアカウントで本番の run は成功していた。
+  原因は「ワーカープロトコル上のエラー（`Terminal::Error`）を `spawn_failed` に写していた」こと。`check` が見たいのは
+  **このアカウントで CLI が起動して応答するか**だけなので、`Terminal::Error` は `ok` とし、理由を `detail`（一行、200 文字まで）に入れる。
+  起動できない・認証切れ・枯渇は `AdapterError` 側で分かる（`spawn_failed` / `auth_failed` / `throttled`）。
+- **M2（ターン数）**: `max_turns = 1` では健全なアカウントでも `error_max_turns` になる（`artifacts/result.json` を書けないため）。
+  3 ターンにして、正常時は `detail` にワーカーの返答（例「Confirmed ready; no files were changed.」）が出るようにした。約 15 秒。
+- `ProviderCheckResponse.detail` と `ProviderLive.last_check.detail` を追加（追加のみ。v1 のまま）。

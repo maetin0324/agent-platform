@@ -47,3 +47,13 @@ Phase 12 と Phase 10 の監査で挙がった 3 つの積み残し。
 - 「このワーカーは何を言われて何をしたか」が run ごとに 1 組（`request.json` と `stdout.jsonl`）で追える。
 - 木構造で走らせたとき、親が何を待っているのかが画面で分かる。
 - API はエンドポイントが 1 本増える（追加のみ。v1 のまま）。
+
+## 実装メモ（実機確認 2026-09-16 で修正）
+
+- **M1（D2 の穴）**: `request.json` を `run_subprocess` にだけ書いていたため、**fake アダプタでしか残らなかった**
+  （claude-code / codex は自前の実行経路を持つ）。実機で初めて分かった。共有ヘルパ `write_run_request` を作り、
+  3 つのアダプタすべてから呼ぶようにした。
+  あわせて claude-code / codex は **`prompt.txt`（実際に渡した文面 = `build_prompt` の結果）** も書く。
+  これらのアダプタに渡るのは `RunRequest` そのものではなくそこから組み立てたプロンプトなので、人が「何を言われたか」を
+  読むにはこちらが要る（`stdout.jsonl` には最初のプロンプトが残らないことを実機で確認した）。
+  `GET /tasks/{id}/runs/{run_id}/prompt`（エンドポイント 33）と `RunFiles.prompt` を追加。

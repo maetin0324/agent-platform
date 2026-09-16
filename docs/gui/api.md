@@ -1,6 +1,8 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-16 実機確認の反映 — エンドポイント 33（`runs/{run_id}/prompt`）、`RunFiles.prompt`、
+  `ProviderCheckResponse.detail` / `last_check.detail` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-16 ADR-0023（run の指示の保存・子待ちの可視化）— エンドポイント 32（`runs/{run_id}/request`）、`RunFiles.request`、
   `DaemonSnapshot.awaiting_children[]` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-16 ADR-0022（疎通確認の記録）— `GET /providers` の `last_check` を追加（追加のみ。v1 のまま）
@@ -149,6 +151,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 30 | POST | `/providers/{id}/check` | そのアカウントの env で短い疎通確認を 1 回行う（**管理系**） | 200 `ProviderCheckResponse` | taskd（`task-worker` 経由。タスク・イベントには残らない） |
 | 31 | POST | `/reload` | 設定と `providers.d/` を読み直し、稼働中のプロバイダ選定・アダプタを差し替える（**管理系**） | 200 `ReloadResult` | taskd（`Dispatcher` の差し替え） |
 | 32 | GET | `/tasks/{id}/runs/{run_id}/request` | `runs/<run_id>/request.json`（ワーカーに渡した `RunRequest`。ADR-0023 D2） | `application/json` | ファイル |
+| 33 | GET | `/tasks/{id}/runs/{run_id}/prompt` | `runs/<run_id>/prompt.txt`（claude-code / codex に実際に渡した文面。ADR-0023 M1） | `text/plain` | ファイル |
 
 ---
 
@@ -276,14 +279,15 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 §5.2 の規則で events から組み立て、`files` を埋める。`started_at` 昇順。
 
-### 3.8 ファイル系: `GET /tasks/{id}/runs/{run_id}/{stdout|stderr|result|request}`、`GET /tasks/{id}/artifacts/{idx}`
+### 3.8 ファイル系: `GET /tasks/{id}/runs/{run_id}/{stdout|stderr|result|request|prompt}`、`GET /tasks/{id}/artifacts/{idx}`
 
 **パス解決（ユーザ入力のパスは受け取らない。ADR-0013 D11）**
 
 1. `<ws>` = `WorkspaceSpec::Local{path}`（相対なら `workspace_root` 基準）を `canonicalize`。失敗（存在しない）→ 404 `file_not_found`。`Remote` → 404 `file_not_found`（`detail: "remote workspace"`）。
 2. run: `run_id` が `^[0-9A-HJKMNP-TV-Z]{26}$` に一致しなければ 403 `path_forbidden`。対象 = `<ws>/runs/<run_id>/{stdout.jsonl|stderr.log|result.json|request.json}`。
    `request.json` は**ワーカーに渡した `RunRequest`**（objective・役割の指示文・クラスタ用の追記・前回の判定・人の回答・子の結果。ADR-0023 D2）。
-   秘密は含まれない（`[[providers]].env` の値やトークンは `RunRequest` に入らない）。run のディレクトリごと無ければ 404 `run_not_found`。
+   `prompt.txt` は claude-code / codex に**実際に渡した文面**（`build_prompt` の結果。ADR-0023 M1。fake アダプタの run には無い）。
+   どちらにも秘密は含まれない（`[[providers]].env` の値やトークンは `RunRequest` に入らない）。run のディレクトリごと無ければ 404 `run_not_found`。
 3. 成果物: `idx` は `GET /tasks/{id}/artifacts` の `items[].idx`（`ArtifactProduced` の出現順、0 始まり）。範囲外 → 404 `artifact_not_found`。対象 = `<ws>` + 記録された `ArtifactRef.path`。
 4. 対象を `canonicalize` し、`<ws>` の canonical パスで始まらなければ 403 `path_forbidden`（symlink でワークスペース外へ出るものを弾く）。ファイルでなければ（ディレクトリ等）403。存在しなければ 404 `file_not_found`。
 5. ワークスペースの**外は絶対に出さない**が、中は信頼境界の内側とする。
@@ -367,7 +371,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 `items[]` は `[[providers]]` の順。定義（`id` / `adapter` / `tiers` / `concurrency` / `model` = 実効モデル / `env_keys` = **キー名だけ**）は設定から、`in_use` と `cooldown` と `last_check` はスナップショット（無ければ `null`）、`stats` は §5.8 の集計。
 
-`last_check`（ADR-0022 D2）は直近の `POST /providers/{id}/check` の結果 `{at, result}`（`result` は §3.27 と同じ 4 値）。
+`last_check`（ADR-0022 D2）は直近の `POST /providers/{id}/check` の結果 `{at, result, detail}`
+（`result` は §3.27 と同じ 4 値、`detail` は人が読む一行。ADR-0022 M1）。
 **メモリだけに持つ観測値**で、taskd を再起動すると `null` に戻る（イベントにも DB にも残さない）。自動では走らないので、
 値が入るのは人が `check` を叩いた後だけ。`reload` でプロバイダ表を差し替えても、同じ `id` の記録は残る。
 
@@ -441,8 +446,13 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 #### 3.27 `POST /providers/{id}/check` → 200 `ProviderCheckResponse`
 
 ```json
-{"result": "ok" | "auth_failed" | "throttled" | "spawn_failed", "checked_at": "…"}
+{"result": "ok" | "auth_failed" | "throttled" | "spawn_failed", "checked_at": "…", "detail": "Confirmed ready; …"}
 ```
+
+`detail`（ADR-0022 M1）は人が読むための一行（ワーカーの返答、または失敗の理由）。`GET /providers` の `last_check.detail` にも同じ値が出る。
+**見ているのは「このアカウントで CLI が起動して応答するか」だけ**なので、ワーカープロトコル上のエラー（`Terminal::Error`）は
+アカウントの問題ではなく `ok` として扱い、理由を `detail` に入れる。起動できない・認証切れ・枯渇はそれぞれ
+`spawn_failed` / `auth_failed` / `throttled`。
 
 そのアカウントの env で短い run（30 秒・1 ターン）を 1 回だけ行い、疎通を確かめる（ADR-0017 D2）。DB には
 一切触れない（タスクにもイベント列にも残らない、観測値）。結果は**次の tick のスナップショット**にも載り、
@@ -624,7 +634,8 @@ pub struct RunSummary { pub run_id: String, pub role: RunRole /* worker | review
     pub started_at: String, pub finished_at: Option<String>, pub outcome: Option<RunOutcomeKind>, pub outcome_text: Option<String>,
     pub usage: Option<Usage>, pub progress: u32, pub artifacts: u32, pub verdicts: u32, pub reviewer_deferrals: u32,
     pub files: Option<RunFiles> }
-pub struct RunFiles { pub stdout: bool, pub stderr: bool, pub result: bool, pub request: bool /* ADR-0023 */ }
+pub struct RunFiles { pub stdout: bool, pub stderr: bool, pub result: bool,
+    pub request: bool /* ADR-0023 D2 */, pub prompt: bool /* ADR-0023 M1 */ }
 // #[serde(rename_all = "snake_case")]
 pub enum RunOutcomeKind { Done, Question, Error, Requeue, LeaseExpired }
 pub struct ReviewNote { pub criterion: usize, pub pass: bool, pub reason: String }   // task_ops::derive（実装済み）。task_worker::PriorReview への写像はディスパッチャ側

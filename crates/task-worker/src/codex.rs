@@ -130,6 +130,9 @@ async fn run_codex(
     clear_delegate_file(&req.workspace).await;
 
     let prompt = build_prompt(&req.task, &req.context, run_id);
+    // ADR-0023 D2 / M1: この run で何を渡したかを残す（`request.json` は構造、`prompt.txt` は実際の文面）。
+    crate::subprocess::write_run_request(&run_dir, req, run_id).await;
+    crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
 
     let mut command = Command::new(&config.command);
     command.arg("exec").arg("--json");

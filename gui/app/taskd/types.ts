@@ -592,6 +592,10 @@ export interface ProviderCheckView {
    */
   at: string;
   /**
+   * 人が読むための一行の手がかり（ワーカーの返答や失敗の理由。ADR-0022 M1）。無ければ `null`。
+   */
+  detail?: string | null;
+  /**
    * `ok` / `auth_failed` / `throttled` / `spawn_failed`（`task_api::ProviderCheckResult` の serde 名）。
    */
   result: string;
@@ -806,6 +810,10 @@ export interface RunSummary {
 }
 export interface RunFiles {
   /**
+   * ADR-0023 M1: `runs/<run_id>/prompt.txt`（claude-code / codex が実際に渡した文面）。fake には無い。
+   */
+  prompt?: boolean;
+  /**
    * ADR-0023 D2: `runs/<run_id>/request.json`（ワーカーに渡した指示）。導入前の run には無いので既定は false。
    */
   request?: boolean;
@@ -972,6 +980,10 @@ export interface Problem {
  */
 export interface ProviderCheckResponse {
   checked_at: string;
+  /**
+   * ADR-0022 M1: 人が読むための一行の手がかり（ワーカーの返答、失敗の理由）。無ければ `null`。
+   */
+  detail?: string | null;
   result: ProviderCheckResult;
 }
 /**

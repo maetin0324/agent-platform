@@ -277,6 +277,7 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
                 last_check: Some(task_ops::daemon::ProviderCheckView {
                     at: "2026-09-16T01:00:00Z".into(),
                     result: "ok".into(),
+                    detail: Some("ready".into()),
                 }),
             },
             ProviderLive {

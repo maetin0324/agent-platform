@@ -3260,12 +3260,12 @@ mod tests {
 
         // ADR-0022 D2: 疎通確認の結果はスナップショットにだけ載る（DB には書かない）。
         assert!(snap.providers[0].last_check.is_none(), "確認する前は空");
-        d.set_provider_check("p1", ProviderCheckView { at: "2026-09-16T02:00:00Z".into(), result: "ok".into() });
+        d.set_provider_check("p1", ProviderCheckView { at: "2026-09-16T02:00:00Z".into(), result: "ok".into(), detail: None });
         d.tick().unwrap();
         let snap = rx.borrow().clone().unwrap();
         assert_eq!(
             snap.providers[0].last_check,
-            Some(ProviderCheckView { at: "2026-09-16T02:00:00Z".into(), result: "ok".into() })
+            Some(ProviderCheckView { at: "2026-09-16T02:00:00Z".into(), result: "ok".into(), detail: None })
         );
 
         // reload でプロバイダ表を差し替えても、残った id の記録は保つ。消えた id の記録は落とす。

@@ -180,6 +180,7 @@ async fn detail_matches_task_ops_task_detail_byte_for_byte() {
             stderr: false,
             result: false,
             request: false,
+            prompt: false,
         });
     }
     let expected_bytes = serde_json::to_vec(&expected).expect("serialize");
@@ -220,8 +221,14 @@ async fn runs_list_fills_files_from_the_run_directory() {
     let body = send(&app, get(&format!("/api/v1/tasks/{}/runs", task.id))).await.json();
     let runs = body["runs"].as_array().expect("runs");
     assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0]["files"], json!({"stdout": true, "stderr": false, "result": true, "request": true}));
-    assert_eq!(runs[1]["files"], json!({"stdout": false, "stderr": false, "result": false, "request": false}));
+    assert_eq!(
+        runs[0]["files"],
+        json!({"stdout": true, "stderr": false, "result": true, "request": true, "prompt": false})
+    );
+    assert_eq!(
+        runs[1]["files"],
+        json!({"stdout": false, "stderr": false, "result": false, "request": false, "prompt": false})
+    );
 
     // ADR-0023 D2: `GET …/runs/{run_id}/request` は application/json で中身を返す。
     let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{first}/request", task.id))).await;

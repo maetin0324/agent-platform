@@ -20,8 +20,16 @@ pub enum AdminRequest {
     /// 1 アカウントだけ短い疎通確認を行う（タスク・イベントには残さない。ADR-0017 D2）。
     Check {
         provider_id: String,
-        reply: oneshot::Sender<Result<ProviderCheckResult, CheckError>>,
+        reply: oneshot::Sender<Result<ProviderCheckOutcome, CheckError>>,
     },
+}
+
+/// `check` が終わったときの結果（ADR-0022 M1 で `detail` を追加）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCheckOutcome {
+    pub result: ProviderCheckResult,
+    /// 人が読むための一行の手がかり（ワーカーの返答や失敗の理由）。
+    pub detail: Option<String>,
 }
 
 /// `POST /api/v1/providers/{id}/check` の結果（ADR-0017 D2）。

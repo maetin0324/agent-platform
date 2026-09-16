@@ -130,7 +130,7 @@ async fn providers_combine_config_snapshot_and_incremental_stats() {
     assert_eq!(items[0]["in_use"], 1);
     assert!(items[0]["cooldown"].is_null());
     // ADR-0022 D2: 一度 check したアカウントには「いつ・どうだったか」が出る。していないものは null のまま。
-    assert_eq!(items[0]["last_check"], json!({"at": "2026-09-16T01:00:00Z", "result": "ok"}));
+    assert_eq!(items[0]["last_check"], json!({"at": "2026-09-16T01:00:00Z", "result": "ok", "detail": "ready"}));
     assert!(items[1]["last_check"].is_null());
     assert_eq!(items[0]["stats"]["question"], 1);
     assert_eq!(items[0]["stats"]["by_day"][0]["runs"], 2);

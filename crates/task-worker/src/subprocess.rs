@@ -25,6 +25,28 @@ pub struct SubprocessSpec {
     pub env: Vec<(String, String)>,
 }
 
+/// ADR-0023 D2: ワーカーに渡した指示そのものを `runs/<run_id>/` に残す（後から「何を言われて何をしたか」を追える）。
+/// **全アダプタから呼ぶ**（fake は `RunRequest` をそのまま stdin に渡し、claude-code / codex は
+/// そこから組み立てたプロンプトを渡すので、後者は `prompt.txt` も書く。ADR-0023 M1）。
+/// 秘密は入らない（`RunRequest` に `env` の値やトークンは含まれない。ADR-0013 D11）。書けなくても run は続ける。
+pub(crate) async fn write_run_request(run_dir: &Path, req: &RunRequest, run_id: &str) {
+    match serde_json::to_string_pretty(req) {
+        Ok(pretty) => {
+            if let Err(e) = tokio::fs::write(run_dir.join("request.json"), format!("{pretty}\n")).await {
+                tracing::warn!(%run_id, error = %e, "could not write runs/<run_id>/request.json");
+            }
+        }
+        Err(e) => tracing::warn!(%run_id, error = %e, "could not serialize the run request"),
+    }
+}
+
+/// ADR-0023 M1: claude-code / codex が実際に渡した文面（`build_prompt` の結果）を残す。
+pub(crate) async fn write_run_prompt(run_dir: &Path, prompt: &str, run_id: &str) {
+    if let Err(e) = tokio::fs::write(run_dir.join("prompt.txt"), prompt).await {
+        tracing::warn!(%run_id, error = %e, "could not write runs/<run_id>/prompt.txt");
+    }
+}
+
 pub async fn run_subprocess(
     spec: &SubprocessSpec,
     req: &RunRequest,
@@ -37,13 +59,7 @@ pub async fn run_subprocess(
     let stdout_log_path = run_dir.join("stdout.jsonl");
     let stderr_log_path = run_dir.join("stderr.log");
     let result_log_path = run_dir.join("result.json");
-    // ADR-0023 D2: ワーカーに渡した指示そのものを残す（後から「何を言われて何をしたか」を追えるように）。
-    // 秘密は入らない（`RunRequest` に `env` の値やトークンは含まれない。ADR-0013 D11）。書けなくても run は続ける。
-    if let Ok(pretty) = serde_json::to_string_pretty(req)
-        && let Err(e) = tokio::fs::write(run_dir.join("request.json"), format!("{pretty}\n")).await
-    {
-        tracing::warn!(%run_id, error = %e, "could not write runs/<run_id>/request.json");
-    }
+    write_run_request(&run_dir, req, run_id).await;
 
     let mut command = Command::new(&spec.program);
     command

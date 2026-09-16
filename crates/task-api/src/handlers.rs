@@ -49,6 +49,7 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/tasks/{id}/events", get(task_events))
         .route("/api/v1/tasks/{id}/runs", get(task_runs))
         .route("/api/v1/tasks/{id}/runs/{run_id}/request", get(run_request))
+        .route("/api/v1/tasks/{id}/runs/{run_id}/prompt", get(run_prompt))
         .route("/api/v1/tasks/{id}/runs/{run_id}/stdout", get(run_stdout))
         .route("/api/v1/tasks/{id}/runs/{run_id}/stderr", get(run_stderr))
         .route("/api/v1/tasks/{id}/runs/{run_id}/result", get(run_result))
@@ -468,6 +469,16 @@ async fn run_result(
     run_file(state, params, raw, headers, RunFile::Result).await
 }
 
+/// ADR-0023 M1: claude-code / codex が実際に渡したプロンプト文面。
+async fn run_prompt(
+    State(state): State<ApiState>,
+    Params(params): Params<(String, String)>,
+    RawQuery(raw): RawQuery,
+    headers: HeaderMap,
+) -> ApiResult {
+    run_file(state, params, raw, headers, RunFile::Prompt).await
+}
+
 /// ADR-0023 D2: ワーカーに渡した `RunRequest`。
 async fn run_request(
     State(state): State<ApiState>,
@@ -884,11 +895,18 @@ async fn check_provider(
         Err(_) => return Err(ApiProblem::internal("check timed out")),
     };
     match outcome {
-        Ok(result) => {
-            tracing::info!(who = "admin", op = "provider_check", provider_id = %id, result = ?result, "admin: provider checked");
+        Ok(outcome) => {
+            tracing::info!(
+                who = "admin", op = "provider_check", provider_id = %id, result = ?outcome.result,
+                detail = outcome.detail.as_deref().unwrap_or(""), "admin: provider checked"
+            );
             Ok(json_response(
                 StatusCode::OK,
-                &ProviderCheckResponse { result, checked_at: now_rfc3339() },
+                &ProviderCheckResponse {
+                    result: outcome.result,
+                    checked_at: now_rfc3339(),
+                    detail: outcome.detail,
+                },
             ))
         }
         Err(crate::admin::CheckError::NotFound) => Err(ApiProblem::provider_not_found(&id)),

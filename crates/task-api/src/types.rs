@@ -131,6 +131,9 @@ pub struct ReloadResult {
 pub struct ProviderCheckResponse {
     pub result: crate::admin::ProviderCheckResult,
     pub checked_at: String,
+    /// ADR-0022 M1: 人が読むための一行の手がかり（ワーカーの返答、失敗の理由）。無ければ `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
