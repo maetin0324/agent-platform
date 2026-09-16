@@ -1,5 +1,6 @@
 import { data, Form, Link, useNavigation } from "react-router";
 import { TransitionFlash } from "~/components/Flash";
+import { HelpLink } from "~/components/HelpLink";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
@@ -54,8 +55,29 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
       </p>
     );
   }
+  const isEmpty =
+    inbox.counts.approvals === 0 &&
+    inbox.counts.questions === 0 &&
+    inbox.counts.drafts === 0 &&
+    inbox.counts.attention === 0;
+
   return (
     <div className="space-y-8">
+      <h1 className="text-xl font-semibold">
+        受信箱
+        <HelpLink anchor="screens" label="画面ごとの説明" />
+      </h1>
+
+      {isEmpty && (
+        <p className="rounded border border-gray-200 bg-gray-50 p-3 text-sm" data-testid="inbox-empty-help">
+          対応が要る項目はありません。初めて使うなら
+          <Link to="/help" className="mx-1 font-semibold hover:underline" data-testid="inbox-help-onboarding-link">
+            使い方を見る
+          </Link>
+          とこの GUI で何ができるかが分かります。
+        </p>
+      )}
+
       {actionData?.map((o) => (
         <TransitionFlash key={`${o.taskId}-${o.intent}`} outcome={o} />
       ))}
@@ -275,36 +297,50 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
           <p className="text-sm text-gray-500">ありません。</p>
         ) : (
           <ul className="mt-2 space-y-3">
-            {inbox.attention.map((item) => (
-              <li
-                key={`${item.type}-${item.task.id}`}
-                data-testid="attention-item"
-                data-attention-type={item.type}
-                className="rounded border border-red-300 bg-red-50 p-3 text-sm"
-              >
-                <p className="font-semibold">
-                  <Link to={`/tasks/${item.task.id}`} className="hover:underline">
-                    {item.task.title}
-                  </Link>
-                </p>
-                <p>{attentionText(item)}</p>
-                {item.task.actions.includes("cancel") && (
-                  <Form method="post" className="mt-2">
-                    <input type="hidden" name="task_id" value={item.task.id} />
-                    <input type="hidden" name="expected_status" value={item.task.status} />
-                    <input type="hidden" name="intent" value="cancel" />
-                    <button
-                      type="submit"
-                      disabled={submitting}
-                      data-testid="attention-cancel"
-                      className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
-                    >
-                      取り消し
-                    </button>
-                  </Form>
-                )}
-              </li>
-            ))}
+            {inbox.attention.map((item) =>
+              item.type === "cluster_unavailable" ? (
+                // クラスタの表示・遷移（/clusters）は Phase G7 の範囲（docs/DESIGN.md §10 Phase G7）。
+                // ここでは受信箱の一覧として崩れないよう、taskd が返す情報のみを表示する。
+                <li
+                  key={`cluster_unavailable-${item.cluster}`}
+                  data-testid="attention-item"
+                  data-attention-type={item.type}
+                  className="rounded border border-red-300 bg-red-50 p-3 text-sm"
+                >
+                  <p className="font-semibold">{item.cluster}</p>
+                  <p>{attentionText(item)}</p>
+                </li>
+              ) : (
+                <li
+                  key={`${item.type}-${item.task.id}`}
+                  data-testid="attention-item"
+                  data-attention-type={item.type}
+                  className="rounded border border-red-300 bg-red-50 p-3 text-sm"
+                >
+                  <p className="font-semibold">
+                    <Link to={`/tasks/${item.task.id}`} className="hover:underline">
+                      {item.task.title}
+                    </Link>
+                  </p>
+                  <p>{attentionText(item)}</p>
+                  {item.task.actions.includes("cancel") && (
+                    <Form method="post" className="mt-2">
+                      <input type="hidden" name="task_id" value={item.task.id} />
+                      <input type="hidden" name="expected_status" value={item.task.status} />
+                      <input type="hidden" name="intent" value="cancel" />
+                      <button
+                        type="submit"
+                        disabled={submitting}
+                        data-testid="attention-cancel"
+                        className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                      >
+                        取り消し
+                      </button>
+                    </Form>
+                  )}
+                </li>
+              ),
+            )}
           </ul>
         )}
       </section>
@@ -320,6 +356,8 @@ function attentionText(item: AttentionItem): string {
       return `requeue が上限間近: ${item.count}/${item.max}`;
     case "unroutable":
       return `経路なし（hint: tier=${item.hint.tier}）`;
+    case "cluster_unavailable":
+      return `クラスタに接続できません（host: ${item.host}、対象 ${item.tasks} 件）`;
     default:
       return "";
   }

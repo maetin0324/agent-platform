@@ -1,4 +1,5 @@
 import { isRouteErrorResponse } from "react-router";
+import { HelpLink } from "~/components/HelpLink";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { TaskdBanner } from "~/root";
@@ -46,7 +47,10 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
 
   return (
     <div className="space-y-8">
-      <h1 className="text-xl font-semibold">プロバイダ</h1>
+      <h1 className="text-xl font-semibold">
+        プロバイダ
+        <HelpLink anchor="screens" label="画面ごとの説明" />
+      </h1>
 
       <section aria-labelledby="providers-heading" data-testid="providers-section">
         <h2 id="providers-heading" className="text-lg font-semibold">

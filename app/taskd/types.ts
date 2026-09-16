@@ -45,6 +45,10 @@ export type Event =
        */
       role?: RunRole | null;
       run_id: string;
+      /**
+       * ADR-0016 D1: run 開始時のタスクの役割名（`Task.role`）。役割の無いタスク・導入前のイベントには無い。
+       */
+      task_role?: string | null;
       type: "worker_started";
     }
   | {
@@ -89,6 +93,20 @@ export type Event =
       type: "answered";
     }
   | {
+      run_id: string;
+      task_ids: TaskId[];
+      type: "delegated";
+    }
+  | {
+      cluster: string;
+      /**
+       * `~/.ssh/config` の `Host` 名（`scripts/cluster-login.sh <host>` を案内するため）。第 1 段階の行には無いので任意。
+       */
+      host?: string;
+      reason: string;
+      type: "cluster_unavailable";
+    }
+  | {
       provider: string;
       /**
        * 供給側失敗の種別（ADR-0013 D9）: `throttled | auth_failed | exhausted | spawn`。
@@ -123,7 +141,8 @@ export type Check =
  */
 export type TaskKind = "plan" | "execute" | "review" | "approval";
 /**
- * DESIGN §5.8 の境界。`Remote` は接続層プロジェクトが実装するまで型のみ。
+ * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
+ * taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
  */
 export type WorkspaceSpec =
   | {
@@ -160,6 +179,13 @@ export type AttentionItem =
       hint: WorkerHint;
       task: TaskRef;
       type: "unroutable";
+    }
+  | {
+      at: string;
+      cluster: string;
+      host: string;
+      tasks: number;
+      type: "cluster_unavailable";
     };
 /**
  * 受け入れ条件 1 件の指定。現在の `taskctl add` の `--accept`/`--check-cmd`/
@@ -183,6 +209,10 @@ export type CriterionSpec =
       text: string;
       type: "reviewer";
     };
+/**
+ * `POST /api/v1/providers/{id}/check` の結果（ADR-0017 D2）。
+ */
+export type ProviderCheckResult = "ok" | "auth_failed" | "throttled" | "spawn_failed";
 
 /**
  * スキーマ生成のルート。
@@ -191,6 +221,7 @@ export interface ApiV1Schema {
   answer: AnswerBody;
   artifact_list: ArtifactList;
   cancel: CancelBody;
+  clusters: Clusters;
   config: ConfigView;
   daemon: DaemonView;
   decision: DecisionBody;
@@ -201,7 +232,10 @@ export interface ApiV1Schema {
   new_plan: NewPlanSpec;
   new_task: NewTaskSpec;
   problem: Problem;
+  provider_check: ProviderCheckResponse;
+  provider_config: ProviderConfigView1;
   providers: Providers;
+  reload: ReloadResult;
   replay_report: ReplayReport;
   run_list: RunList;
   stream_daemon: DaemonSnapshot;
@@ -266,15 +300,67 @@ export interface CancelBody {
   expected_status?: Status | null;
 }
 /**
+ * `GET /clusters`（ADR-0018 受け入れ条件8）。
+ */
+export interface Clusters {
+  items: ClusterView[];
+}
+/**
+ * 設定（`[[clusters]]`）とスナップショット（`ClusterLive`）を結合したもの。`env` の値は出さない。
+ */
+export interface ClusterView {
+  concurrency: number;
+  /**
+   * この tick で `ssh -O check` が成功したか。スナップショットが無ければ `null`。
+   */
+  connected?: boolean | null;
+  /**
+   * `cooldown_until − now`（秒）。過ぎていれば両方 `null`。
+   */
+  cooldown_remaining_secs?: number | null;
+  /**
+   * cooldown 中ならその終わり（RFC 3339）。
+   */
+  cooldown_until?: string | null;
+  delete_on_push: boolean;
+  /**
+   * `env` のキー名だけ（昇順）。
+   */
+  env_keys: string[];
+  /**
+   * `setup` が 1 行以上あるか（中身は出さない）。
+   */
+  has_setup: boolean;
+  /**
+   * `~/.ssh/config` の `Host` 名。
+   */
+  host: string;
+  id: string;
+  /**
+   * スナップショットが無ければ `null`。
+   */
+  in_use?: number | null;
+  rsync_excludes: string[];
+  /**
+   * `"rsync"` | `"none"`。
+   */
+  sync: string;
+}
+/**
  * `GET /config`: `taskd.toml` の要約。env の値・トークンは含めない。taskd が起動時に作る。
  */
 export interface ConfigView {
   api: ApiConfigView;
+  /**
+   * ADR-0018: `[[clusters]]` の要約（`env` はキー名だけ、`setup` は有無だけ）。
+   */
+  clusters?: ClusterConfigView[];
   config_path: string;
   /**
    * DB の絶対パス。
    */
   db: string;
+  delegation?: DelegationLimits;
   error_cooldown_secs: number;
   idle_timeout_secs: number;
   kill_grace_secs: number;
@@ -287,6 +373,10 @@ export interface ConfigView {
   retry_backoff_max_secs: number;
   review_timeout_secs: number;
   reviewer: ReviewerConfigView;
+  /**
+   * ADR-0016 D1: `[[roles]]` の要約（指示文の本文は出さない）。
+   */
+  roles?: RoleConfigView[];
   tick_ms: number;
   workspace_root: string;
 }
@@ -294,6 +384,48 @@ export interface ApiConfigView {
   allowed_hosts: string[];
   auth_required: boolean;
   bind: string;
+}
+/**
+ * `[[clusters]]` 1 行の要約（ADR-0018 D7: `env` の値は出さない）。
+ */
+export interface ClusterConfigView {
+  concurrency: number;
+  delete_on_push: boolean;
+  /**
+   * `env` のキー名だけ（昇順）。
+   */
+  env_keys: string[];
+  /**
+   * `setup` が 1 行以上あるか（中身は出さない）。
+   */
+  has_setup: boolean;
+  /**
+   * `~/.ssh/config` の `Host` 名。
+   */
+  host: string;
+  id: string;
+  rsync_excludes: string[];
+  /**
+   * `"rsync"` | `"none"`。
+   */
+  sync: string;
+}
+/**
+ * ADR-0016 D2: `[delegation]` の上限。
+ */
+export interface DelegationLimits {
+  /**
+   * 1 run あたりの件数（複数の `delegate` をまたいで数える）。
+   */
+  max_delegate_per_run: number;
+  /**
+   * 木の深さ（根 = 1）。
+   */
+  max_tree_depth: number;
+  /**
+   * 木全体のワーカー run 数。
+   */
+  max_tree_runs: number;
 }
 export interface ProviderConfigView {
   adapter: string;
@@ -314,6 +446,20 @@ export interface ReviewerConfigView {
   tier: Tier;
 }
 /**
+ * `[[roles]]` 1 行の要約（ADR-0016 D1）。`instructions` は**本文を出さない**（プロンプトの中身は設定ファイルにだけ置く）。
+ */
+export interface RoleConfigView {
+  adapter?: string | null;
+  /**
+   * 指示文が 1 文字以上あるか（中身は出さない）。
+   */
+  has_instructions: boolean;
+  id: string;
+  max_turns?: number | null;
+  max_wall_secs?: number | null;
+  tier?: Tier | null;
+}
+/**
  * `GET /daemon`。
  */
 export interface DaemonView {
@@ -328,6 +474,10 @@ export interface DaemonSnapshot {
    * 人間の承認待ちでレビューを延期している reviewing タスク。
    */
   awaiting_human: TaskId[];
+  /**
+   * ADR-0018: `[[clusters]]` の稼働状況（`id` 昇順）。第 2 段階で追加したので、古いスナップショットには無い。
+   */
+  clusters?: ClusterLive[];
   cooldowns: CooldownView[];
   hostname: string;
   in_flight: InFlight[];
@@ -345,6 +495,29 @@ export interface DaemonSnapshot {
    * 設定に合うプロバイダが無い ready タスク（この tick の判定）。
    */
   unroutable: TaskId[];
+}
+/**
+ * クラスタ（`[[clusters]]` の行）の稼働状況（ADR-0018 D2 / D5）。`env` の値・`setup` の中身は含めない。
+ */
+export interface ClusterLive {
+  concurrency: number;
+  /**
+   * この tick で `ssh -O check` が成功した（人が張った多重接続がある）。
+   */
+  connected: boolean;
+  /**
+   * 多重接続が無くて cooldown 中なら、その終わり（RFC 3339）。
+   */
+  cooldown_until?: string | null;
+  /**
+   * `~/.ssh/config` の `Host` 名。
+   */
+  host: string;
+  id: string;
+  /**
+   * このクラスタで走っている run（ワーカー run + 判定）の数。
+   */
+  in_use: number;
 }
 /**
  * `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直したもの。
@@ -373,6 +546,10 @@ export interface InFlight {
 export interface ProviderLive {
   adapter: string;
   concurrency: number;
+  /**
+   * `env` のキー名だけ（値は出さない）。古いスナップショットには無いので既定は空（ADR-0017 M4）。
+   */
+  env_keys?: string[];
   id: string;
   /**
    * 実行中の run と Reviewer run の合計。
@@ -416,6 +593,10 @@ export interface EventRow {
  */
 export interface Task {
   acceptance: Criterion[];
+  /**
+   * ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。
+   */
+  aggregate?: boolean;
   attempts: number;
   budget: Budget;
   created_at: string;
@@ -427,6 +608,11 @@ export interface Task {
   objective: string;
   parent_id?: TaskId | null;
   priority: number;
+  /**
+   * ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。
+   * 導入前のタスクには無いので任意。
+   */
+  role?: string | null;
   status: Status;
   title: string;
   updated_at: string;
@@ -675,22 +861,44 @@ export interface NewPlanSpec {
  */
 export interface NewTaskSpec {
   acceptance: CriterionSpec[];
+  /**
+   * 省略時は役割の既定 → 指定なし。
+   */
   adapter?: string | null;
+  /**
+   * ADR-0016 D3: 委譲した子が全て終端になった後に集約 run を 1 回行う。
+   */
+  aggregate?: boolean;
+  /**
+   * ADR-0018: 指定すると `WorkspaceSpec::Remote{cluster, path}` になり、コマンドはそのクラスタで実行される。
+   * `workspace` がクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。
+   */
+  cluster?: string | null;
   depends_on?: TaskId[];
   /**
    * DESIGN §4.1 の `TaskKind`。
    */
   kind?: "plan" | "execute" | "review" | "approval";
   max_retries?: number;
-  max_turns?: number;
-  max_wall_secs?: number;
+  /**
+   * 省略時は役割の既定 → 10。
+   */
+  max_turns?: number | null;
+  /**
+   * 省略時は役割の既定 → 600。
+   */
+  max_wall_secs?: number | null;
   objective: string;
   parent?: TaskId | null;
   priority?: number;
   /**
-   * DESIGN §5.4 の `WorkerHint`。
+   * ADR-0016 D1: 役割名（自由記述）。`[[roles]]` にあれば省略値の既定と run 時の指示文が効く。
    */
-  tier?: "frontier" | "standard" | "cheap";
+  role?: string | null;
+  /**
+   * 省略時は役割の既定 → `standard`（ADR-0016 D1 / M3: タスクの値 > 役割の既定 > 全体の既定）。
+   */
+  tier?: Tier | null;
   title: string;
   workspace?: string | null;
 }
@@ -711,6 +919,30 @@ export interface Problem {
    */
   type: string;
   [k: string]: unknown;
+}
+/**
+ * `POST /api/v1/providers/{id}/check` の応答（ADR-0017 D2）。
+ */
+export interface ProviderCheckResponse {
+  checked_at: string;
+  result: ProviderCheckResult;
+}
+/**
+ * `POST /api/v1/providers` と `PATCH /api/v1/providers/{id}` の応答（ADR-0017）。
+ */
+export interface ProviderConfigView1 {
+  adapter: string;
+  concurrency: number;
+  /**
+   * `[[providers]].env` のキー名だけ。
+   */
+  env_keys: string[];
+  id: string;
+  /**
+   * 実効モデル（空なら `null`）。
+   */
+  model?: string | null;
+  tiers: Tier[];
 }
 /**
  * `GET /providers`。
@@ -769,6 +1001,12 @@ export interface DailyUsage {
    * その日に終わった run の数。
    */
   runs: number;
+}
+/**
+ * `POST /api/v1/reload` の応答（ADR-0017 D1）。
+ */
+export interface ReloadResult {
+  reloaded: boolean;
 }
 /**
  * `replay` の結果。
@@ -839,15 +1077,30 @@ export interface TaskDetail {
   answers: AnswerNote[];
   approvals: ApprovalLink[];
   children: TaskRef[];
+  /**
+   * ADR-0018: `WorkspaceSpec::Remote` のクラスタ（`[[clusters]] id`）。ローカルのタスクは `null`。
+   */
+  cluster?: string | null;
   criteria: CriterionView[];
+  /**
+   * ADR-0016 D2: 各 run が `delegate` で作った子（`Event::Delegated` の順）。
+   */
+  delegated: DelegatedView[];
   dependencies: TaskRef[];
   dependents: TaskRef[];
   latest_question?: string | null;
   prior_review: ReviewNote[];
+  /**
+   * ADR-0016 D1: `Task.role`（GUI の表示用に最上位にも出す）。
+   */
+  role?: string | null;
   runs: RunSummary[];
   task: Task;
   timers: Timers;
   worker_run_hint?: string | null;
+  /**
+   * 手元の作業ディレクトリ（絶対パス）。`WorkspaceSpec::Remote` では写し `workspace_root/<task_id>`（run のログはここ。ADR-0018 D1）。
+   */
   workspace_dir?: string | null;
 }
 export interface ApprovalLink {
@@ -862,6 +1115,20 @@ export interface CriterionView {
   idx: number;
   latest_verdict?: VerdictView | null;
   text: string;
+}
+/**
+ * ADR-0016 D2: 1 回の `delegate`（`Event::Delegated`）の要約。
+ */
+export interface DelegatedView {
+  run_id: string;
+  /**
+   * 子の現在の状態。既に存在しない ID は落とす。
+   */
+  tasks: TaskRef[];
+  /**
+   * イベントの ts（`EventRow.ts`）。
+   */
+  ts: string;
 }
 /**
  * `prior_review_from_events` の要素。`task_worker::PriorReview` と同じ形（フィールド名も同じ）。

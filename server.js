@@ -94,6 +94,7 @@ const DEFAULT_HEADERS = [
   ["Referrer-Policy", "no-referrer"],
 ];
 app.use((req, res, next) => {
+  /** @type {(...args: any[]) => any} */
   const writeHead = res.writeHead.bind(res);
   res.writeHead = (...args) => {
     for (const [name, value] of DEFAULT_HEADERS) if (!res.hasHeader(name)) res.setHeader(name, value);

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Form, isRouteErrorResponse, Link, useNavigation, useSearchParams } from "react-router";
 import { CodeViewer } from "~/components/CodeViewer";
 import { TransitionFlash } from "~/components/Flash";
+import { HelpLink } from "~/components/HelpLink";
 import { ImageViewer } from "~/components/ImageViewer";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Sha256Badge } from "~/components/Sha256Badge";
@@ -104,6 +105,7 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
       <section aria-labelledby="header-heading" data-testid="header-section">
         <h1 id="header-heading" className="text-xl font-semibold">
           <span data-testid="task-id">{task.id}</span>
+          <HelpLink anchor="screens" label="画面ごとの説明" />
         </h1>
         <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
           <DlItem label="kind" value={task.kind} testId="task-kind" />

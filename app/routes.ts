@@ -14,6 +14,7 @@ export default [
   route("daemon", "routes/daemon.tsx"),
   route("providers", "routes/providers.tsx"),
   route("graph", "routes/graph.tsx"),
+  route("help", "routes/help.tsx"),
   route("events", "routes/events.ts"),
   route("files/tasks/:id/runs/:runId/:name", "routes/files.runs.ts"),
   route("files/tasks/:id/artifacts/:idx", "routes/files.artifacts.ts"),

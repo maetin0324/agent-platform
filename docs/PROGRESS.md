@@ -13,13 +13,15 @@
 | G3 | ログ・成果物・DAG | **DONE** | 2026-09-15 |
 | G4 | プロバイダとデーモン | **DONE** | 2026-09-15 |
 | G5 | 認証・配布・仕上げ | **DONE** | 2026-09-15 |
+| G6 | 使い方ページ | **DONE** | 2026-09-16 |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
 ## 引き継ぎ（前のフェーズから）
 
-G5 完了時点で次フェーズ（あれば）に引き継ぐもの: G3-U1（`/graph` スクリーンショットの環境依存）、G4-U1〜U4、G5-U1〜U8（Node SEA の残り、CSP の `style-src`、
-`docker build` 未実行、`docs/taskd-api-v1.md` の同期）。以下は G1 からの引き継ぎ（記録のため残す）:
+G6 完了時点で次フェーズ（あれば）に引き継ぐもの: G3-U1（`/graph` スクリーンショットの環境依存）、G4-U1〜U4、G5-U1〜U8（Node SEA の残り、CSP の `style-src`、
+`docker build` 未実行、`docs/taskd-api-v1.md` の同期）、G6-U1（taskd のスキーマが Phase 10〜12 まで進んでいることが `pnpm gen:types` で判明。
+`app/taskd/types.ts` は追従済みだが、対応する画面（G7: クラスタ・委譲の表示）は未実装）。以下は G1 からの引き継ぎ（記録のため残す）:
 - **SSE 常時再検証の負荷**（G1-U1）: `daemon` が tick ごとに届くため、画面を開いている間 taskd への要求がタブあたり毎秒約 7 回発生する。G2 で操作（承認・却下等）を増やすと相対的に無視できるが、G4（デーモン画面・プロバイダ画面）で複数タブを想定するなら再検討が要る。
 - **仮想スクロールと一覧の行数一致テスト**（G1-U2）: `/tasks` の一覧は `@tanstack/react-virtual` で可視領域だけ DOM に出すため、SSR 直後の HTML には `task-row` が 0 件。件数が可視範囲（初期は 12 行程度）を超えるとテストがスクロール操作無しでは行数を数えられない。G2 以降で一覧の件数が増える fixture を作る場合は要注意。
 - **`/tasks/:id` の操作ボタンは無効表示のみ**（G1 は表示だけ、実装は G2）。
@@ -654,3 +656,81 @@ worktree の取り込み → taskd の更新（`actions`）の取り込み → �
 - **依頼（文書の同期）**: GUI 側の `docs/taskd-api-v1.md` は taskd の `docs/gui/api.md`（ADR-0015 で `actions` を §5.4 / §6.2 に追記、運用ログの節を追加）より古い。GUI 側では書き換えない
   規則なので、taskd 側（または人間）でコピーを更新してほしい（G5-U6）。
 - R1 は回答済み（原因は NFS 上の DB。GUI 側は ADR-0008 D13 で対応）。`docs/taskd-requests.md` を更新した。
+
+## Phase G6 — DONE（2026-09-16）
+
+### 成果物
+- 画面: `app/routes/help.tsx`（`/help`。loader 無しの静的ページ、docs/adr/0009-g6-decisions.md D1）。6 節（`#flow` 3 分で分かる流れ、`#screens` 画面ごとの説明、
+  `#acceptance` 受け入れ条件の 4 種類、`#status` 状態と人間ができること、`#glossary` 用語集、`#trouble` 困ったとき）。内容は `docs/taskd-api-v1.md` §3.4 / §5.4 と
+  `app/taskd/types.ts` の `Status` の語彙に合わせた（D2〜D4）。
+  `app/components/HelpLink.tsx`（各画面の見出し横の `/help#screens` への「?」リンク。対象は DESIGN §10 Phase G6 が列挙する 6 画面だけ、ADR-0009 D2）。
+  `app/routes.ts` に `/help` を登録、`app/root.tsx` のナビゲーションに「使い方」を追加。
+  `app/routes/inbox.tsx`: `h1` を新設して HelpLink を追加、受信箱の 4 区画（承認待ち・質問・draft・注意）が全て 0 件のとき「使い方を見る」への導線
+  （`inbox-empty-help` / `inbox-help-onboarding-link`）を表示（ADR-0009 D3）。`app/routes/tasks.tsx` / `app/routes/tasks.$id.tsx` / `app/routes/providers.tsx` /
+  `app/routes/daemon.tsx` の見出しに HelpLink を追加、`app/routes/graph.tsx` は `h1`（これまで無かった）を新設して HelpLink を追加。
+- taskd のスキーマ追従（G7 の先取りはしない、ADR-0009 D5）: taskd 側が `docs/taskd-api-v1.md` の反映（Phase 10 役割と委譲）より先の Phase 11（プロバイダ管理）・
+  Phase 12（クラスタ）まで進んでいたため、`pnpm gen:types` で `app/taskd/types.ts` を再生成すると `AttentionItem` に `cluster_unavailable`（`task` を持たない）、
+  `TaskDetail` に必須の `delegated` が増えて型が壊れた。画面機能は実装せず、型を壊さない最小限の対応だけ行った:
+  `app/routes/inbox.tsx` の注意区画で `item.type === "cluster_unavailable"` を先に分岐（`/clusters` への遷移や専用の見た目は実装しない）、
+  `e2e/g4.spec.ts` の unroutable フィクスチャ検索を型ガード付きに、`test/unit/tasks.detail.loader.test.ts` のフィクスチャに `delegated: []` を追加。
+  `test/fixtures/api/*.json` は `scripts/capture-fixtures.sh` を実 taskd（`fixture basic`）に対して再実行しただけ（手書き修正ではない）。
+- 既存バグの修正: `server.js` の `res.writeHead` 差し替え箇所が TypeScript 7 のオーバーロード解決に失敗して `pnpm typecheck` が exit 1 だった
+  （G6 の変更前から存在。`git stash` で確認済み）。ロジックは変えず JSDoc の型注釈だけ直した（ADR-0009 D6）。
+- テスト: `e2e/g6.spec.ts`（受け入れ条件 1〜4 の 5 シナリオ）。`e2e/g3.spec.ts-snapshots/graph-basic-chromium-linux.png` を `graph.tsx` への `h1` 追加に伴い再生成。
+- 文書: `docs/adr/0009-g6-decisions.md`（D1〜D6）。
+- 実装単位: G6 は `/help` 1 画面が中心で、既存画面への `HelpLink` 追加・型追従の後始末は互いにファイルを共有しない独立単位ではなかった
+  （`inbox.tsx` は HelpLink・空受信箱導線・`cluster_unavailable` 対応の 3 つが同じファイルに重なる、型追従は複数ファイルに波及する）ため、implementer は使わず自分で実装した。
+
+### 受け入れ条件と証拠（docs/DESIGN.md §10 Phase G6。`e2e/g6.spec.ts`、実 taskd `basic` に対して検証）
+1. **`/help` が 200 で、6 節の見出しと `id` が全て存在する** — `e2e/g6.spec.ts:46`「受け入れ条件 1」pass。`page.goto("/help")` の応答 status 200、
+   `#flow` / `#screens` / `#acceptance` / `#status` / `#glossary` / `#trouble` の各見出しテキストを確認。
+2. **ナビゲーションから 1 クリックで開ける。受信箱が空のとき導線が出て、押すと `/help` に遷移する** — `e2e/g6.spec.ts:57,64`「受け入れ条件 2」2 シナリオ pass。
+   `/tasks` から `使い方`（exact）リンクをクリックして `/help` に遷移。`basic`（承認待ち等が存在）では `inbox-empty-help` が 0 件、`dev`（タスクを足していない
+   常に空の instance）に切り替えると `inbox-empty-help` が表示され `inbox-help-onboarding-link` のクリックで `/help` に遷移。
+3. **`/help` 内のリンクが全て 200** — `e2e/g6.spec.ts:83`「受け入れ条件 3」pass。本文内の `/` 始まりリンク（`/`, `/tasks`, `/tasks/new`, `/plans/new`,
+   `/daemon`, `/providers`, `/graph`）を全て `page.request.get` して status 200 を確認。
+4. **`@axe-core/playwright` で `/help` の critical / serious が 0 件、CSP 違反 0 件** — `e2e/g6.spec.ts:103`「受け入れ条件 4」pass（gating な violation 0 件）。
+   CSP 違反 0 件は `e2e/test.ts` の auto fixture が全 spec に効かせている（`pnpm e2e` 全シナリオ pass = 違反 0 件、ADR-0008 D7）。
+   既存の `e2e/g5-a11y.spec.ts`（`/`, `/tasks`, `/tasks/<id>`, `/tasks/new`, `/providers`, `/daemon`）も再実行し 12 passed（HelpLink・`h1` 追加による回帰なし）。
+5. **受け入れ条件・状態・用語の説明が `docs/taskd-api-v1.md` の語と一致** — auditor が確認（下記監査結果）: `command`/`artifact_exists`/`reviewer`/`human` の型名と
+   例が §3.4 と一致、`expect_exit` 既定 0 が taskd の JSON Schema の `default` と一致、状態 8 種が `app/taskd/types.ts` の `Status` と一致、
+   人間ができることが §5.4 の `actions` 規則（approve: draft または approval&ready、reject: approval&ready、answer: blocked、cancel: 非終端）と一致。
+6. **`pnpm lint` / `pnpm typecheck` / `pnpm test` / `pnpm build` / `pnpm e2e` が exit 0、`pnpm gen:types` の差分ゼロ** — 下記「共通条件」参照。
+
+### 共通条件
+- `pnpm lint` exit 0（`Checked 93 files`）/ `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0 / `pnpm test` **141 passed**（19 ファイル。G5 までと同数、
+  G6 は新規の単体テストを追加していない。静的ページと型のみの変更のため e2e でカバー）/ `pnpm build` exit 0
+- `pnpm e2e` **56 passed（exit 0、約 5.6 分）**（G0 5 + G1 8 + G2 8 + G3 5 + G4 5 + G5 20 + G6 5）。監査者による再実行でも 56 passed（8.3 分）。
+- `pnpm gen:types && git diff --exit-code app/taskd/types.ts`: コミット前は差分あり（taskd 側のスキーマが Phase 11/12 まで進んでいたため、型を再生成して取り込んだ。
+  上の「成果物」参照）。コミット後に再実行して差分ゼロを確認（下記コミット後の検証）。
+
+### 監査結果
+- auditor の判定: **条件付き可**（「不可」ゼロ）。受け入れ条件 1〜6 は全て「満たしている」。禁止事項（SQLite 直読み・crate 依存・仕様外挙動・ブラウザ直接呼び出し・
+  トークン露出・`dangerouslySetInnerHTML`/`eval`/CDN・テストの外部ネットワーク・依存の新規追加）は「違反なし」。`cluster_unavailable` 対応は
+  「最小限に留まっており G7 の先取りは無い」、`server.js` の修正は「挙動変更なし（JSDoc 1 行のみ）」と確認済み。auditor 自身が `lint`/`typecheck`/`test`（141 passed）/
+  `build`/`pnpm e2e`（56 passed）/`gen:types`（taskd `../agent-platform` のスキーマとバイト一致）を再実行して確認した。
+- 指摘と対応:
+  1. 「`docs/PROGRESS.md` に Phase G6 の節が無い」→ **本コミットで対応**（この節を追加）。
+  2. 「`docs/adr/0009-g6-decisions.md` D6 の記述が実コード（JSDoc のインライン注釈）と食い違う」→ **修正済み**（D6 を実コードに合わせて書き直した）。
+  3. 軽微指摘「`/help` の 401 の説明がページ遷移（302）と `/events`/`/files/*` の直接 401 を区別していない」→ **修正済み**（`#trouble` の 401 説明を書き直し、
+     通常ページはログイン画面に戻ること、SSE・成果物取得はその場で 401 になることを明記）。
+- 修正後の自己再検証: `pnpm lint` exit 0、`pnpm typecheck` exit 0、`pnpm test` 141 passed、`pnpm build` exit 0、`e2e/g6.spec.ts` 5 passed、
+  `e2e/g3.spec.ts` の DAG スクリーンショットも pass（再生成後）。auditor の再起動は行っていない（「不可」が無く、指摘は全て自分で再検証できる範囲）。
+
+### 未解決事項
+- **G6-U1: taskd のスキーマが Phase 10（役割と委譲）・11（プロバイダ管理）・12（クラスタ）まで進んでいる**（上の「成果物」参照）— `app/taskd/types.ts` は
+  追従済みだが、対応する画面（`/clusters`、タスク詳細の `role`/`delegated[]`、作成フォームの `role`/`aggregate`、プロバイダ管理 UI）は未実装。
+  `docs/DESIGN.md` §10 Phase G7（クラスタと委譲の表示）が対応する範囲。プロバイダ管理（ADR-0017、`POST/PATCH/DELETE /providers`、`POST /reload`）は
+  DESIGN のどの G フェーズにも明記が無いため、次フェーズ着手前に人間に確認したい（下記「提案」G6-P1）。
+- **G6-U2: `/help` の `#trouble` はテスト用の DB や taskd の crate に触れない一般的な内容に留めている** — 「run のログと成果物の見方」「409/422 の意味」等は
+  DESIGN の記述どおりだが、実際に taskd が返しうる `code`（`db_busy`、`too_many_streams` 等）はカバーしていない。困ったときの一次情報は
+  `docs/taskd-api-v1.md` §1.5 のエラー表であり、`/help` はそこへの入口として最小限にとどめた（意図的な絞り込み、ADR-0009 D4 の延長）。
+- G0〜G5 からの引き継ぎ（`/assets` の Host 検査、`pnpm dev` の CSP、G2-U1 taskd 間欠停止、G2-U2〜U7、G3-U1〜U8、G4-U1〜U4、G5-U1〜U9）は G6 では対処していない。
+
+### 提案
+- 上の「提案」節の G0-P1/P2、G1-P1/P2、G2-P1〜P4、G3-P1/P2 に加え、G6-P1: `docs/DESIGN.md` §10 に taskd の ADR-0017（プロバイダ管理、Phase 11）に対応する
+  GUI フェーズの記載が無い（G7 はクラスタと委譲＝Phase 10 と 12 だけを扱う）。`GET/POST/PATCH/DELETE /providers`・`POST /providers/{id}/check`・
+  `POST /reload` を GUI から操作可能にするかどうか、するなら G7 に含めるか新しい G8 にするかを人間に決めてほしい。
+
+### taskd への依頼
+- なし。`docs/taskd-api-v1.md` §3.4 / §5.4 に書かれた語彙・規則は `/help` の記述と実際の `app/taskd/types.ts` のどちらとも一致した。

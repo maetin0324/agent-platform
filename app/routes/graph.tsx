@@ -2,6 +2,7 @@ import { ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
 import { Form, isRouteErrorResponse, useSearchParams } from "react-router";
+import { HelpLink } from "~/components/HelpLink";
 import { layoutGraph } from "~/lib/graph-layout";
 import { TaskdBanner } from "~/root";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
@@ -51,6 +52,10 @@ export default function GraphPage({ loaderData }: Route.ComponentProps) {
 
   return (
     <div className="flex h-[calc(100vh-10rem)] flex-col gap-2">
+      <h1 className="text-xl font-semibold">
+        DAG
+        <HelpLink anchor="screens" label="画面ごとの説明" />
+      </h1>
       <Form method="get" className="flex flex-wrap items-end gap-3 text-sm" data-testid="graph-filter-form">
         <label className="flex flex-col gap-1">
           root

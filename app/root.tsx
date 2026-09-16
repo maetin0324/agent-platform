@@ -147,6 +147,9 @@ export default function App({ loaderData }: Route.ComponentProps) {
           <a href="/graph" className="hover:underline">
             DAG
           </a>
+          <a href="/help" className="hover:underline">
+            使い方
+          </a>
           {session.enabled && (
             <Form method="post" action="/logout">
               <button type="submit" data-testid="logout" className="hover:underline">

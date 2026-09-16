@@ -1,6 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState } from "react";
 import { Form, Link, useFetcher, useSearchParams } from "react-router";
+import { HelpLink } from "~/components/HelpLink";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { taskdErrorResponse } from "~/taskd/errors";
@@ -113,7 +114,10 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="text-lg font-semibold">タスク一覧</h2>
+        <h2 className="text-lg font-semibold">
+          タスク一覧
+          <HelpLink anchor="screens" label="画面ごとの説明" />
+        </h2>
         <p data-testid="tasks-total" className="text-sm text-gray-600">
           {taskList.total} 件
         </p>

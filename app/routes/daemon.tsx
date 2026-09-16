@@ -1,5 +1,6 @@
 import { data, Form, isRouteErrorResponse, Link, useNavigation } from "react-router";
 import { ErrorFlash } from "~/components/Flash";
+import { HelpLink } from "~/components/HelpLink";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { TaskdBanner } from "~/root";
@@ -62,7 +63,10 @@ export default function DaemonPage({ loaderData, actionData }: Route.ComponentPr
 
   return (
     <div className="space-y-8">
-      <h1 className="text-xl font-semibold">デーモン</h1>
+      <h1 className="text-xl font-semibold">
+        デーモン
+        <HelpLink anchor="screens" label="画面ごとの説明" />
+      </h1>
 
       <section aria-labelledby="daemon-heading" data-testid="daemon-section">
         <h2 id="daemon-heading" className="text-lg font-semibold">

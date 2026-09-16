@@ -185,8 +185,8 @@ test.describe("受け入れ条件 2b: unroutable フィクスチャ", () => {
     sh("fixture", "unroutable");
     sh("start", "unroutable");
     const inbox = await apiGet<Inbox>("/inbox");
-    const item = inbox.attention.find((a) => a.task.title === "Unroutable-U");
-    if (!item) throw new Error("unroutable task not found in /inbox attention");
+    const item = inbox.attention.find((a) => a.type !== "cluster_unavailable" && a.task.title === "Unroutable-U");
+    if (!item || item.type === "cluster_unavailable") throw new Error("unroutable task not found in /inbox attention");
     unroutableId = item.task.id;
   });
 

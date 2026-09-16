@@ -53,6 +53,7 @@ const taskDetail: TaskDetail = {
   children: [],
   actions: ["cancel"],
   worker_run_hint: null,
+  delegated: [],
 };
 
 const eventsPage: EventsPage = {
