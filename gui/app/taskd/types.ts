@@ -568,10 +568,28 @@ export interface ProviderLive {
    */
   in_use: number;
   /**
+   * ADR-0022 D2: 直近の疎通確認（`POST /providers/{id}/check`）の結果。**メモリだけに持つ観測値**で、
+   * taskd を再起動すると消える（イベントにも DB にも残さない）。一度も確認していなければ `None`。
+   */
+  last_check?: ProviderCheckView | null;
+  /**
    * 実効モデル（空なら `None`）。
    */
   model?: string | null;
   tiers: Tier[];
+}
+/**
+ * ADR-0022 D2: 1 回の疎通確認の記録。
+ */
+export interface ProviderCheckView {
+  /**
+   * 確認した時刻（RFC 3339）。
+   */
+  at: string;
+  /**
+   * `ok` / `auth_failed` / `throttled` / `spawn_failed`（`task_api::ProviderCheckResult` の serde 名）。
+   */
+  result: string;
 }
 /**
  * `POST /tasks/{id}/approve`、`POST /tasks/{id}/reject` の本文。
@@ -986,6 +1004,11 @@ export interface ProviderView {
    * スナップショットが無ければ `null`。
    */
   in_use?: number | null;
+  /**
+   * ADR-0022 D2: 直近の `POST /providers/{id}/check` の結果（`{at, result}`）。まだ確認していない、
+   * または taskd を再起動した後は `null`（メモリだけに持つ観測値）。
+   */
+  last_check?: ProviderCheckView | null;
   model?: string | null;
   stats: ProviderStats;
   tiers: Tier[];

@@ -725,6 +725,11 @@ async fn providers(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Ap
                 .as_ref()
                 .and_then(|s| s.cooldowns.iter().find(|c| c.provider == provider.id))
                 .cloned(),
+            // ADR-0022 D2: スナップショットに載っている確認の記録（無ければ null）。
+            last_check: snapshot
+                .as_ref()
+                .and_then(|s| s.providers.iter().find(|live| live.id == provider.id))
+                .and_then(|live| live.last_check.clone()),
             stats,
         })
         .collect();

@@ -21,8 +21,8 @@
 ## 引き継ぎ（前のフェーズから）
 
 G7 完了時点で次フェーズ（あれば）に引き継ぐもの: G7-U1（`TaskSummary`/`GraphNode` に `role` が無く、一覧・DAG のノードへの役割ラベル表示は
-未実装。`docs/taskd-requests.md` R2、`docs/adr/0010-g7-decisions.md` D5）、G6-P1（プロバイダ管理 UI、ADR-0017 相当。DESIGN のどの G フェーズにも
-明記が無いまま）、G3-U1（`/graph` スクリーンショットの環境依存）、G4-U1〜U4、G5-U1〜U8（Node SEA の残り、CSP の `style-src`、
+未実装 → **2026-09-16 解消**）、G6-P1（プロバイダ管理 UI → **2026-09-16「作らない」で決着**。taskd 側 ADR-0022 D1。
+一人で使い、信頼されたネットワークで localhost に閉じる前提のため、管理操作は `curl` と設定ファイルの直接編集で行う）、G3-U1（`/graph` スクリーンショットの環境依存）、G4-U1〜U4、G5-U1〜U8（Node SEA の残り、CSP の `style-src`、
 `docker build` 未実行）。以下は G1 からの引き継ぎ（記録のため残す）:
 - **SSE 常時再検証の負荷**（G1-U1）: `daemon` が tick ごとに届くため、画面を開いている間 taskd への要求がタブあたり毎秒約 7 回発生する。G2 で操作（承認・却下等）を増やすと相対的に無視できるが、G4（デーモン画面・プロバイダ画面）で複数タブを想定するなら再検討が要る。
 - **仮想スクロールと一覧の行数一致テスト**（G1-U2）: `/tasks` の一覧は `@tanstack/react-virtual` で可視領域だけ DOM に出すため、SSR 直後の HTML には `task-row` が 0 件。件数が可視範囲（初期は 12 行程度）を超えるとテストがスクロール操作無しでは行数を数えられない。G2 以降で一覧の件数が増える fixture を作る場合は要注意。
@@ -882,3 +882,16 @@ taskd が `TaskSummary.role` と `GraphNode.role` を足したので、**追加�
 
 `pnpm lint` exit 0（98 files）/ `pnpm typecheck` exit 0 / `pnpm test` **151 passed**（21 ファイル）/ `pnpm build` exit 0 /
 `pnpm e2e` **63 passed（6.1 分）** / `pnpm gen:types` 差分ゼロ。
+
+## 追補 2: 疎通確認の表示（2026-09-16）
+
+taskd 側 ADR-0022 の決定（人間の回答）に合わせた小さな追加。
+
+- **G6-P1 は「作らない」で決着**: アカウント管理の画面（追加・編集・削除・疎通確認・ログイン手順）は作らない。
+  一人で使い、信頼されたネットワークで localhost に閉じる運用のため、管理操作は `curl`（管理 API は loopback でも
+  トークンが要る）と `providers.d/` の直接編集で行う。`/providers` は読み取り専用のまま。
+- **`/providers` に「最後の疎通確認」を追加**（`GET /providers` の `last_check`。taskd 側 ADR-0022 D2）。
+  `result（at）` を出し、まだ確認していなければ「未確認」。自動では走らないので、値が入るのは人が
+  `POST /api/v1/providers/{id}/check` を叩いた後だけ。taskd を再起動すると「未確認」に戻る（メモリ上の観測値）。
+- 証拠: `e2e/g4.spec.ts` に「叩いていないアカウントは未確認」を追加。`pnpm lint` / `typecheck` / `build` exit 0、
+  `pnpm test` 151 passed、`pnpm e2e` **63 passed**、`pnpm gen:types` 差分ゼロ。

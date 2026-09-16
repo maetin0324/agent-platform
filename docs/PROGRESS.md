@@ -2436,3 +2436,38 @@ P-56 はこれで解決（「子が 1 件でも failed なら親を review_fail�
   taskd 側の直列化（compact / pretty、フィールドの順）に依存しなくなった。
 - 証拠: GUI の `pnpm lint` / `typecheck` / `build` exit 0、`pnpm test` **151 passed**、`pnpm e2e` **63 passed**、
   `pnpm gen:types` 差分ゼロ。`scripts/taskd.sh fixture delegation` / `fixture basic` を作り直して同じ結果。
+
+## ADR-0022: 疎通確認の記録・監視・管理画面の判断（2026-09-16）
+
+人間の回答（P-58 / P-59 / GUI の G6-P1）:
+「一人で使う想定で、信頼されたネットワークで localhost に閉じるので管理画面は要らない」「check の結果はスナップショットのみ」
+「check は手動のみ」「`providers.d/` は今のまま明示 reload」。
+
+### 決定（ADR-0022）
+
+- **D1**: GUI のアカウント管理画面は作らない（G6-P1 を「作らない」で閉じる）。管理操作は `curl` + 設定ファイルの直接編集。
+- **D2**: `check` の結果は `DaemonSnapshot` にだけ持つ（**P-58 を採用**）。`GET /providers` の `last_check{at, result}`。
+  taskd 再起動で消える。イベントにも DB にも残さない。`reload` で表を差し替えても同じ id の記録は保つ。
+- **D3**: `check` は手動のときだけ。起動時の一括確認も定期実行もしない（1 回ごとに実 API を 1 ターン消費するため）。
+- **D4**: `providers.d/` のディレクトリ監視はしない（**P-59 は却下**）。`notify` の依存も mtime 走査も足さない。
+
+### 実装（D2 のみ）
+
+- `ProviderLive.last_check: Option<ProviderCheckView{at, result}>`、`SnapshotPublisher.provider_checks`（id → 記録）。
+- taskd: `check` は `tokio::spawn` の先で終わるので、結果を mpsc で tick ループに戻して `Dispatcher::set_provider_check` に渡す。
+  確認できたときだけ記録する（設定エラーや taskd 側の都合は「確認の結果」ではない）。
+- `GET /providers` の `ProviderView.last_check`。GUI の `/providers` に「最後の疎通確認」（未確認なら「未確認」）。
+
+### 証拠
+
+- `cargo test --workspace`: 40 個の test binary すべて ok、0 failed。`cargo clippy --workspace --all-targets -- -D warnings` exit 0。
+- `crates/task-api/tests/daemon_providers_config.rs`: スナップショット前は `last_check` が `null`、
+  確認済みのアカウントには `{at, result}`、していないアカウントは `null`。
+- `crates/task-dispatch`（`tick_publishes_daemon_snapshot_to_watch` を拡張）: `set_provider_check` が次の tick のスナップショットに載り、
+  `set_snapshot_providers`（= reload 相当）で残った id の記録は保たれ、消えた id の記録は落ちる。
+- GUI: `pnpm test` 151 passed / `pnpm e2e` **63 passed**（`e2e/g4.spec.ts` に「未確認」表示の確認を追加）/ `gen:types` 差分ゼロ。
+
+### 残った提案
+
+- なし（P-56 は ADR-0021、P-58 は本 ADR の D2、P-59 と G6-P1 は「やらない」で決着）。
+  P-47 / P-49 / P-50 / P-55 は GUI・運用側の判断として引き続き保留。

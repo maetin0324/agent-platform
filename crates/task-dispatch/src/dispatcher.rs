@@ -35,7 +35,7 @@ use task_worker::{
     RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal, WorkerMessage,
     Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
 };
-use task_ops::daemon::{ClusterLive, CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
+use task_ops::daemon::{ClusterLive, CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderCheckView, ProviderLive};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::mpsc;
@@ -240,6 +240,9 @@ pub struct SnapshotPublisher {
     pub tick_ms: u64,
     /// `[[providers]]` の定義（`in_use` は毎 tick に埋める）。
     pub providers: Vec<ProviderLive>,
+    /// ADR-0022 D2: プロバイダ id → 直近の疎通確認。`reload` でプロバイダ表を差し替えても保持する
+    /// （確認した事実は設定の書き換えでは古くならない）。taskd を再起動すると消える。
+    pub provider_checks: HashMap<String, ProviderCheckView>,
 }
 
 /// run 途中のイベントをストアに追記するシンク。ワーカーの出力（heartbeat）があればリースを延長する（ADR-0010 D7）。
@@ -477,7 +480,17 @@ impl Dispatcher {
     /// `set_snapshot_publisher` より前（`publisher` が無い状態）で呼んでも無害（何もしない）。
     pub fn set_snapshot_providers(&mut self, providers: Vec<ProviderLive>) {
         if let Some(publisher) = self.publisher.as_mut() {
+            // ADR-0022 D2: 消えた id の確認記録は落とし、残った id の記録は保つ。
+            let ids: std::collections::HashSet<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+            publisher.provider_checks.retain(|id, _| ids.contains(id.as_str()));
             publisher.providers = providers;
+        }
+    }
+
+    /// ADR-0022 D2: 疎通確認の結果をスナップショットに載せる（DB には書かない）。次の tick から `GET /providers` に出る。
+    pub fn set_provider_check(&mut self, provider_id: &str, check: ProviderCheckView) {
+        if let Some(publisher) = self.publisher.as_mut() {
+            publisher.provider_checks.insert(provider_id.to_string(), check);
         }
     }
 
@@ -623,6 +636,7 @@ impl Dispatcher {
             .iter()
             .map(|p| ProviderLive {
                 in_use: self.provider_in_use(&p.id) as u32,
+                last_check: publisher.provider_checks.get(&p.id).cloned(),
                 ..p.clone()
             })
             .collect();
@@ -3089,6 +3103,7 @@ mod tests {
             started_at: "2026-09-15T00:00:00Z".into(),
             tick_ms: 50,
             providers: vec![],
+            provider_checks: Default::default(),
         });
 
         let report = d.tick().unwrap();
@@ -3187,7 +3202,9 @@ mod tests {
                 model: Some("m".into()),
                 env_keys: vec![],
                 in_use: 0,
+                last_check: None,
             }],
+            provider_checks: Default::default(),
         });
         assert!(rx.borrow().is_none(), "nothing is published before the first tick");
 
@@ -3212,6 +3229,59 @@ mod tests {
         assert_eq!(snap.cooldowns.len(), 1);
         assert_eq!((snap.cooldowns[0].provider.as_str(), snap.cooldowns[0].reason.as_str()), ("p1", "throttled"));
         assert!(snap.cooldowns[0].until > snap.last_tick_at, "until is in the future");
+
+        // ADR-0022 D2: 疎通確認の結果はスナップショットにだけ載る（DB には書かない）。
+        assert!(snap.providers[0].last_check.is_none(), "確認する前は空");
+        d.set_provider_check("p1", ProviderCheckView { at: "2026-09-16T02:00:00Z".into(), result: "ok".into() });
+        d.tick().unwrap();
+        let snap = rx.borrow().clone().unwrap();
+        assert_eq!(
+            snap.providers[0].last_check,
+            Some(ProviderCheckView { at: "2026-09-16T02:00:00Z".into(), result: "ok".into() })
+        );
+
+        // reload でプロバイダ表を差し替えても、残った id の記録は保つ。消えた id の記録は落とす。
+        d.set_snapshot_providers(vec![
+            ProviderLive {
+                id: "p1".into(),
+                adapter: "instant".into(),
+                tiers: vec![Tier::Standard],
+                concurrency: 2,
+                model: Some("m2".into()),
+                env_keys: vec![],
+                in_use: 0,
+                last_check: None,
+            },
+            ProviderLive {
+                id: "p2".into(),
+                adapter: "instant".into(),
+                tiers: vec![Tier::Standard],
+                concurrency: 1,
+                model: None,
+                env_keys: vec![],
+                in_use: 0,
+                last_check: None,
+            },
+        ]);
+        d.tick().unwrap();
+        let snap = rx.borrow().clone().unwrap();
+        assert_eq!(snap.providers[0].last_check.as_ref().map(|c| c.result.as_str()), Some("ok"), "p1 の記録は残る");
+        assert!(snap.providers[1].last_check.is_none(), "p2 はまだ確認していない");
+
+        d.set_snapshot_providers(vec![ProviderLive {
+            id: "p2".into(),
+            adapter: "instant".into(),
+            tiers: vec![Tier::Standard],
+            concurrency: 1,
+            model: None,
+            env_keys: vec![],
+            in_use: 0,
+            last_check: None,
+        }]);
+        d.tick().unwrap();
+        let snap = rx.borrow().clone().unwrap();
+        assert_eq!(snap.providers.len(), 1);
+        assert!(snap.providers[0].last_check.is_none(), "消えた p1 の記録は残さない");
     }
 
     /// `task_id` の直接の `Approval` 子タスクが現れるまで tick を回す（Human check の生成を待つ）。

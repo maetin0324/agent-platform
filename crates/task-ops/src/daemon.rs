@@ -70,6 +70,19 @@ pub struct ProviderLive {
     pub env_keys: Vec<String>,
     /// 実行中の run と Reviewer run の合計。
     pub in_use: u32,
+    /// ADR-0022 D2: 直近の疎通確認（`POST /providers/{id}/check`）の結果。**メモリだけに持つ観測値**で、
+    /// taskd を再起動すると消える（イベントにも DB にも残さない）。一度も確認していなければ `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<ProviderCheckView>,
+}
+
+/// ADR-0022 D2: 1 回の疎通確認の記録。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderCheckView {
+    /// 確認した時刻（RFC 3339）。
+    pub at: String,
+    /// `ok` / `auth_failed` / `throttled` / `spawn_failed`（`task_api::ProviderCheckResult` の serde 名）。
+    pub result: String,
 }
 
 /// クラスタ（`[[clusters]]` の行）の稼働状況（ADR-0018 D2 / D5）。`env` の値・`setup` の中身は含めない。

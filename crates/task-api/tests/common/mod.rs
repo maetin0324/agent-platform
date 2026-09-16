@@ -272,6 +272,11 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
                 model: Some("claude-sonnet-5".into()),
                 env_keys: vec!["CLAUDE_CONFIG_DIR".into()],
                 in_use: 1,
+                // ADR-0022 D2: 一度 check した後のスナップショット（`GET /providers` の last_check に出る）。
+                last_check: Some(task_ops::daemon::ProviderCheckView {
+                    at: "2026-09-16T01:00:00Z".into(),
+                    result: "ok".into(),
+                }),
             },
             ProviderLive {
                 id: "claude-b".into(),
@@ -281,6 +286,7 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
                 model: None,
                 env_keys: vec![],
                 in_use: 0,
+                last_check: None,
             },
         ],
     }

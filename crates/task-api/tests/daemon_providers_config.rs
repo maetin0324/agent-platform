@@ -110,6 +110,7 @@ async fn providers_combine_config_snapshot_and_incremental_stats() {
     assert_eq!(items[0]["model"], "claude-sonnet-5");
     assert_eq!(items[0]["env_keys"], json!(["CLAUDE_CONFIG_DIR"]));
     assert!(items[0]["in_use"].is_null() && items[0]["cooldown"].is_null(), "no snapshot yet");
+    assert!(items[0]["last_check"].is_null(), "ADR-0022 D2: スナップショットが無ければ確認の記録も無い");
     assert_eq!(
         items[0]["stats"],
         json!({"runs": 2, "done": 1, "question": 0, "error": 0, "requeue": 0, "lease_expired": 0,
@@ -128,6 +129,9 @@ async fn providers_combine_config_snapshot_and_incremental_stats() {
     let items = send(&app, get("/api/v1/providers")).await.json()["items"].as_array().cloned().expect("items");
     assert_eq!(items[0]["in_use"], 1);
     assert!(items[0]["cooldown"].is_null());
+    // ADR-0022 D2: 一度 check したアカウントには「いつ・どうだったか」が出る。していないものは null のまま。
+    assert_eq!(items[0]["last_check"], json!({"at": "2026-09-16T01:00:00Z", "result": "ok"}));
+    assert!(items[1]["last_check"].is_null());
     assert_eq!(items[0]["stats"]["question"], 1);
     assert_eq!(items[0]["stats"]["by_day"][0]["runs"], 2);
     assert_eq!(items[1]["in_use"], 0);

@@ -14,7 +14,7 @@ use task_api::{ApiError, ApiSettings, ApiState};
 use task_core::{SqliteStore, StoreError, StoreOptions, TaskStore};
 use task_ops::view::ViewContext;
 use task_dispatch::{DispatchError, Dispatcher, ProviderId, SnapshotPublisher, StaticPolicy, TickReport};
-use task_ops::daemon::ProviderLive;
+use task_ops::daemon::{ProviderCheckView, ProviderLive};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use task_worker::{ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, WorkerAdapter, Workspace};
@@ -136,6 +136,8 @@ pub fn provider_lives(config: &Config) -> Vec<ProviderLive> {
                 model: models.get(&p.id).filter(|m| !m.is_empty()).cloned(),
                 env_keys,
                 in_use: 0,
+                // ADR-0022 D2: 確認の記録は Dispatcher 側（SnapshotPublisher.provider_checks）が持つ。
+                last_check: None,
             }
         })
         .collect()
@@ -358,6 +360,7 @@ async fn start_api(
         started_at: started_at.clone(),
         tick_ms: config.tick_ms,
         providers: provider_lives(config),
+        provider_checks: std::collections::HashMap::new(),
     });
     // ADR-0017 M2: `reload`/`check` は API 側では実行できない（task-worker/task-dispatch に依存しない
     // 境界を守るため）。taskd の tick ループへ委譲するチャネルを作り、送信側だけ API に渡す。
@@ -404,6 +407,8 @@ async fn tick_loop(
     opts: RunOptions,
     mut admin_rx: Option<tokio::sync::mpsc::Receiver<task_api::AdminRequest>>,
 ) -> Result<Exit, DaemonError> {
+    // ADR-0022 D2: `check` は spawn した先で終わるので、結果をここへ戻してスナップショットに載せる。
+    let (check_tx, mut check_rx) = tokio::sync::mpsc::channel::<(String, ProviderCheckView)>(16);
     let tick = config.tick();
     let mut ticks: u64 = 0;
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
@@ -460,8 +465,13 @@ async fn tick_loop(
                 // ADR-0017 M2: 処理後は select に戻らず即座にループの先頭（次の `dispatcher.tick()`）へ進む
                 // ので、reload の効果は「次の tick から」になる。`tick_ms` の残りを待たない。
                 if let Some(req) = req {
-                    handle_admin_request(dispatcher, config, req).await;
+                    handle_admin_request(dispatcher, config, req, check_tx.clone()).await;
                 }
+            }
+            // ADR-0022 D2: 終わった `check` の結果を受け取り、次の tick のスナップショットに載せる。
+            Some((provider_id, check)) = check_rx.recv() => {
+                tracing::info!(who = "admin", provider_id = %provider_id, result = %check.result, "provider check recorded");
+                dispatcher.set_provider_check(&provider_id, check);
             }
         }
     }
@@ -469,7 +479,12 @@ async fn tick_loop(
 
 /// ADR-0017 M2: API から委譲された `reload`/`check` を処理する。`reload` はその場で（`Dispatcher` を直接
 /// 差し替えるだけの軽い処理）、`check` は最大 30 秒かかりうるので tick をブロックしないよう `tokio::spawn` する。
-async fn handle_admin_request(dispatcher: &mut Dispatcher, config: &Config, req: task_api::AdminRequest) {
+async fn handle_admin_request(
+    dispatcher: &mut Dispatcher,
+    config: &Config,
+    req: task_api::AdminRequest,
+    check_tx: tokio::sync::mpsc::Sender<(String, ProviderCheckView)>,
+) {
     match req {
         task_api::AdminRequest::Reload { reply } => {
             let result = reload_providers(dispatcher, config);
@@ -483,7 +498,15 @@ async fn handle_admin_request(dispatcher: &mut Dispatcher, config: &Config, req:
         task_api::AdminRequest::Check { provider_id, reply } => {
             let config_path = config.source_path.clone();
             tokio::spawn(async move {
-                let outcome = check_provider(config_path, provider_id).await;
+                let outcome = check_provider(config_path, provider_id.clone()).await;
+                // ADR-0022 D2: 確認できたときだけ記録する（設定エラー・taskd 側の都合は「確認の結果」ではない）。
+                if let Ok(result) = &outcome {
+                    let check = ProviderCheckView {
+                        at: OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default(),
+                        result: provider_check_result_name(result).to_string(),
+                    };
+                    let _ = check_tx.send((provider_id, check)).await;
+                }
                 let _ = reply.send(outcome);
             });
         }
@@ -507,6 +530,16 @@ fn reload_providers(dispatcher: &mut Dispatcher, config: &Config) -> Result<(), 
     dispatcher.reload_providers(Box::new(policy), models, adapters);
     dispatcher.set_snapshot_providers(provider_lives(&new_config));
     Ok(())
+}
+
+/// ADR-0022 D2: `ProviderCheckResult` の serde 名（`GET /providers` の `last_check.result` に出る文字列）。
+fn provider_check_result_name(result: &task_api::ProviderCheckResult) -> &'static str {
+    match result {
+        task_api::ProviderCheckResult::Ok => "ok",
+        task_api::ProviderCheckResult::AuthFailed => "auth_failed",
+        task_api::ProviderCheckResult::Throttled => "throttled",
+        task_api::ProviderCheckResult::SpawnFailed => "spawn_failed",
+    }
 }
 
 /// ADR-0017 D2: 1 アカウントだけ短い疎通確認を行う。`Dispatcher`/DB には触れない（タスク・イベントに残さない）。

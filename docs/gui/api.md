@@ -1,6 +1,7 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-16 ADR-0022（疎通確認の記録）— `GET /providers` の `last_check` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-16 ADR-0021（委譲した子の失敗）— イベント種別 `question_raised`、`GET /config` の `delegation.on_child_failure` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-15 Phase 10（ADR-0016 役割と委譲）— `POST /tasks` の `role` / `aggregate`、`TaskDetail.role` / `delegated[]`、`GET /config` の `roles[]` / `delegation`、イベント種別 `delegated` を追加（全て追加のみ。v1 のまま）
 - 提供者: **taskd**（crate `task-api`、axum）。taskd のデーモンプロセス内で、`taskd.toml` に `[api]` 節があるときだけ動く
@@ -359,7 +360,11 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ### 3.19 `GET /providers` → 200 `Providers`
 
-`items[]` は `[[providers]]` の順。定義（`id` / `adapter` / `tiers` / `concurrency` / `model` = 実効モデル / `env_keys` = **キー名だけ**）は設定から、`in_use` と `cooldown` はスナップショット（無ければ `null`）、`stats` は §5.8 の集計。
+`items[]` は `[[providers]]` の順。定義（`id` / `adapter` / `tiers` / `concurrency` / `model` = 実効モデル / `env_keys` = **キー名だけ**）は設定から、`in_use` と `cooldown` と `last_check` はスナップショット（無ければ `null`）、`stats` は §5.8 の集計。
+
+`last_check`（ADR-0022 D2）は直近の `POST /providers/{id}/check` の結果 `{at, result}`（`result` は §3.27 と同じ 4 値）。
+**メモリだけに持つ観測値**で、taskd を再起動すると `null` に戻る（イベントにも DB にも残さない）。自動では走らないので、
+値が入るのは人が `check` を叩いた後だけ。`reload` でプロバイダ表を差し替えても、同じ `id` の記録は残る。
 
 ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップショットに乗った一覧（`providers.d/` を含む）を優先して返す。最初の tick が来る前だけ起動時に固定した一覧にフォールバックする。`GET /config` の `providers[]` も同じ規則。
 
@@ -431,8 +436,10 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 {"result": "ok" | "auth_failed" | "throttled" | "spawn_failed", "checked_at": "…"}
 ```
 
-そのアカウントの env で短い run（30 秒・1 ターン）を 1 回だけ行い、疎通を確かめる（ADR-0017 D2）。`Dispatcher`/DB には
-一切触れない（タスクにもイベント列にも残らない、観測値）。存在しない `id` は 404 `provider_not_found`。設定の
+そのアカウントの env で短い run（30 秒・1 ターン）を 1 回だけ行い、疎通を確かめる（ADR-0017 D2）。DB には
+一切触れない（タスクにもイベント列にも残らない、観測値）。結果は**次の tick のスナップショット**にも載り、
+`GET /providers` の `last_check` として読める（ADR-0022 D2。taskd の再起動で消える）。
+**自動では走らない**（起動時の一括確認も定期実行もしない。1 回ごとに実際の API 呼び出しを 1 ターン消費するため。ADR-0022 D3）。存在しない `id` は 404 `provider_not_found`。設定の
 再読込自体が失敗した（`providers.d/` の壊れた TOML 等）場合は 400。**taskd（`task-worker` に依存する側）が実行し、
 task-api 自身はワーカーを起動しない**（DESIGN §5.10 の境界。ADR-0017 M2）。
 
@@ -677,7 +684,8 @@ pub struct InFlight { pub task_id: TaskId, pub run_id: String, pub provider: Str
 pub enum InFlightKind { Worker, Reviewer }
 /// `task_dispatch::policy::Cooldown{provider, until: Instant, reason: CooldownReason}`（実装済み）を壁時計に直したもの。
 pub struct CooldownView { pub provider: String, pub until: String, pub reason: String /* "throttled" | "auth_failed" | "exhausted" */ }
-pub struct ProviderLive { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>, pub in_use: u32 }
+pub struct ProviderLive { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>,
+    pub env_keys: Vec<String> /* ADR-0017 */, pub in_use: u32, pub last_check: Option<ProviderCheckView> /* ADR-0022 */ }
 /// Phase 12（ADR-0018）: `[[clusters]]` の稼働状況（`id` 昇順）。`connected` はこの tick の `ssh -O check` の結果。
 pub struct ClusterLive { pub id: String, pub host: String, pub concurrency: usize, pub in_use: u32, pub connected: bool, pub cooldown_until: Option<String> }
 
@@ -699,7 +707,10 @@ pub struct ArtifactView { pub idx: usize, pub run_id: String, pub ts: String, pu
     pub size: Option<u64>, pub sha256_current: Option<String>, pub sha256_matches: Option<bool> }
 pub struct Providers { pub items: Vec<ProviderView> }
 pub struct ProviderView { pub id: String, pub adapter: String, pub tiers: Vec<Tier>, pub concurrency: usize, pub model: Option<String>,
-    pub env_keys: Vec<String>, pub in_use: Option<u32>, pub cooldown: Option<CooldownView>, pub stats: ProviderStats }
+    pub env_keys: Vec<String>, pub in_use: Option<u32>, pub cooldown: Option<CooldownView>,
+    pub last_check: Option<ProviderCheckView> /* ADR-0022 */, pub stats: ProviderStats }
+/// ADR-0022 D2: 直近の疎通確認（`{at, result}`）。task-ops の `ProviderLive.last_check` と同じ型。
+pub struct ProviderCheckView { pub at: String, pub result: String }
 pub struct ProviderStats { pub runs: u64, pub done: u64, pub question: u64, pub error: u64, pub requeue: u64, pub lease_expired: u64,
     pub input_tokens: u64, pub output_tokens: u64, pub by_day: Vec<DailyUsage> }
 pub struct DailyUsage { pub day: String /* YYYY-MM-DD */, pub runs: u64, pub input_tokens: u64, pub output_tokens: u64 }

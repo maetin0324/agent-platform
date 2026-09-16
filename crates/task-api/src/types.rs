@@ -146,6 +146,9 @@ pub struct ProviderView {
     pub in_use: Option<u32>,
     /// スナップショットが無い、または cooldown 中でなければ `null`。
     pub cooldown: Option<CooldownView>,
+    /// ADR-0022 D2: 直近の `POST /providers/{id}/check` の結果（`{at, result}`）。まだ確認していない、
+    /// または taskd を再起動した後は `null`（メモリだけに持つ観測値）。
+    pub last_check: Option<task_ops::daemon::ProviderCheckView>,
     pub stats: ProviderStats,
 }
 

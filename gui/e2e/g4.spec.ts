@@ -132,6 +132,10 @@ test.describe("受け入れ条件 1: プロバイダ画面（multi-account）", 
     await expect(rowA.getByTestId("provider-cooldown-reason")).toHaveText("throttled");
     await expect(rowB.getByTestId("provider-cooldown-remaining")).toHaveCount(0);
 
+    // ADR-0022 D2: 疎通確認は自動では走らないので、叩いていないアカウントは「未確認」。
+    await expect(rowA.getByTestId("provider-last-check")).toHaveText("未確認");
+    await expect(rowB.getByTestId("provider-last-check")).toHaveText("未確認");
+
     const runs = await apiGet<{ runs: { usage: { input_tokens: number; output_tokens: number } | null }[] }>(
       `/tasks/${fallbackId}/runs`,
     );

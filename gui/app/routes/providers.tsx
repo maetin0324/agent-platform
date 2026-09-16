@@ -78,6 +78,13 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
                     label="env_keys（キー名のみ）"
                     value={item.env_keys.length > 0 ? item.env_keys.join(", ") : "-"}
                   />
+                  {/* ADR-0022 D2: 直近の疎通確認。手動で `POST /providers/{id}/check` を叩いたときだけ入り、
+                      taskd を再起動すると消える（メモリ上の観測値）。 */}
+                  <DlItem
+                    label="最後の疎通確認"
+                    value={item.last_check ? `${item.last_check.result}（${item.last_check.at}）` : "未確認"}
+                    testId="provider-last-check"
+                  />
                 </dl>
 
                 <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
