@@ -36,10 +36,16 @@ pub struct ShowArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// `--json` のときの `ViewContext.workspace_root`。省略時は `./workspaces`
-    /// （`taskctl` には `taskd.toml` の設定が無いための既定値。`run_show_json` の doc を参照）。
+    /// `--json` のときの `ViewContext.workspace_root`。省略時は `--config` の値、それも無ければ `./workspaces`
+    /// （`task_detail_json` の doc を参照）。
     #[arg(long)]
     pub workspace_root: Option<PathBuf>,
+
+    /// `--json` を `GET /api/v1/tasks/{id}` と完全に同じにするための `taskd.toml`（P-54: 省略時は環境変数 `TASKD_CONFIG`）。
+    /// これがあると `workspace_root` / リトライの待ち / `max_requeues` が設定の値になり、`[[clusters]]` が分かるので
+    /// `sync = "worktree"` のタスクに `worktree` が出る（ADR-0019 D2）。
+    #[arg(long, env = "TASKD_CONFIG")]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -138,7 +144,7 @@ pub fn run_show(store: &dyn TaskStore, args: ShowArgs) -> Result<ExitCode, CliEr
     let id = crate::error::parse_task_id(&args.id)?;
 
     if args.json {
-        return run_show_json(store, id, args.workspace_root);
+        return run_show_json(store, id, args.workspace_root, args.config.as_ref());
     }
 
     let task = store
@@ -179,28 +185,55 @@ pub fn run_show(store: &dyn TaskStore, args: ShowArgs) -> Result<ExitCode, CliEr
 /// する（`GET /api/v1/tasks/{id}` と同一。`docs/gui/api.md` §3.5）。出力そのものをテストしやすい
 /// よう `run_show_json` から分離してある。
 ///
-/// `taskctl` には `taskd.toml` を読む仕組みが無いため、`ViewContext` は次の既定値で作る
+/// `--config`（または `TASKD_CONFIG`）があれば、`ViewContext` はその `taskd.toml` から作る
+/// （= API と同じ値。`[[clusters]]` も分かるので `worktree` が出る）。無ければ次の既定値で作る
 /// （`taskd.toml` の対応する既定値と同じ。`taskd::config` の `default_workspace_root` /
 /// `default_retry_backoff_base_secs` / `default_retry_backoff_max_secs` / `default_max_requeues`）:
 /// - `workspace_root`: `./workspaces`（`--workspace-root` で上書き可）
 /// - `retry_backoff`: base 10 秒 / max 300 秒
 /// - `max_requeues`: 5
-fn task_detail_json(store: &dyn TaskStore, id: TaskId, workspace_root: Option<PathBuf>) -> Result<String, CliError> {
-    let ctx = ViewContext {
-        workspace_root: workspace_root.unwrap_or_else(|| PathBuf::from("./workspaces")),
-        retry_backoff_base: Duration::from_secs(10),
-        retry_backoff_max: Duration::from_secs(300),
-        max_requeues: 5,
-        // `taskd.toml` を読まないので `[[clusters]]` は分からない（worktree は `null` になる）。
-        clusters: Default::default(),
+/// - `clusters`: 空（`worktree` は `null` になる）
+fn task_detail_json(
+    store: &dyn TaskStore,
+    id: TaskId,
+    workspace_root: Option<PathBuf>,
+    config: Option<&PathBuf>,
+) -> Result<String, CliError> {
+    let config = match config {
+        Some(path) => Some(
+            taskd::Config::load(path)
+                .map_err(|e| CliError::msg(format!("failed to load config {}: {e}", path.display())))?,
+        ),
+        None => None,
+    };
+    let ctx = match &config {
+        Some(c) => ViewContext {
+            workspace_root: workspace_root.unwrap_or_else(|| c.workspace_root.clone()),
+            retry_backoff_base: Duration::from_secs(c.retry_backoff_base_secs),
+            retry_backoff_max: Duration::from_secs(c.retry_backoff_max_secs),
+            max_requeues: c.max_requeues,
+            clusters: c.cluster_view_infos(),
+        },
+        None => ViewContext {
+            workspace_root: workspace_root.unwrap_or_else(|| PathBuf::from("./workspaces")),
+            retry_backoff_base: Duration::from_secs(10),
+            retry_backoff_max: Duration::from_secs(300),
+            max_requeues: 5,
+            clusters: Default::default(),
+        },
     };
     let detail = view::task_detail(store, id, &ctx, OffsetDateTime::now_utc())?;
     // `GET /api/v1/tasks/{id}` と同じ compact な直列化（docs/gui/api.md §3.5）。整形は `jq` 等で行う。
     serde_json::to_string(&detail).map_err(|e| CliError::msg(format!("failed to encode task detail: {e}")))
 }
 
-fn run_show_json(store: &dyn TaskStore, id: TaskId, workspace_root: Option<PathBuf>) -> Result<ExitCode, CliError> {
-    let json = task_detail_json(store, id, workspace_root)?;
+fn run_show_json(
+    store: &dyn TaskStore,
+    id: TaskId,
+    workspace_root: Option<PathBuf>,
+    config: Option<&PathBuf>,
+) -> Result<ExitCode, CliError> {
+    let json = task_detail_json(store, id, workspace_root, config)?;
     outln!("{json}");
     Ok(ExitCode::SUCCESS)
 }
@@ -342,6 +375,7 @@ mod tests {
                 id: task.id.to_string(),
                 json: false,
                 workspace_root: None,
+                config: None,
             },
         );
         assert!(result.is_ok());
@@ -358,6 +392,7 @@ mod tests {
                 id: missing_id,
                 json: false,
                 workspace_root: None,
+                config: None,
             },
         );
         assert!(result.is_err());
@@ -375,6 +410,7 @@ mod tests {
                 id: task.id.to_string(),
                 json: true,
                 workspace_root: None,
+                config: None,
             },
         );
         assert!(result.is_ok());
@@ -386,11 +422,61 @@ mod tests {
         let task = sample_task(Status::Draft, None);
         store.insert(&task).expect("insert task");
 
-        let json = task_detail_json(&store, task.id, None).expect("task_detail_json");
+        let json = task_detail_json(&store, task.id, None, None).expect("task_detail_json");
         let value: serde_json::Value = serde_json::from_str(&json).expect("output must be valid json");
         assert_eq!(value["task"]["id"], serde_json::Value::String(task.id.to_string()));
         let actions = value["actions"].as_array().expect("actions must be an array");
         assert!(!actions.is_empty(), "a draft task should have at least the `approve` action");
+    }
+
+    /// ADR-0019 D2 / P-54: `--config`（`TASKD_CONFIG`）を渡すと `taskctl show --json` が API と同じ値になる。
+    /// `sync = "worktree"` のクラスタのタスクには `worktree`（パスとブランチ）が出る。
+    #[test]
+    fn task_detail_json_with_a_config_reports_the_worktree() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut task = sample_task(Status::Ready, None);
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("/work/NBB/x/benchfs"),
+        };
+        store.insert(&task).expect("insert task");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &config_path,
+            r#"workspace_root = "ws"
+max_requeues = 3
+[[providers]]
+id = "p"
+adapter = "fake"
+[[clusters]]
+id = "pegasus"
+host = "pegasus"
+sync = "worktree"
+"#,
+        )
+        .expect("write config");
+
+        let json = task_detail_json(&store, task.id, None, Some(&config_path)).expect("task_detail_json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(value["worktree"]["branch"], serde_json::Value::String(format!("taskd/{}", task.id)));
+        assert_eq!(
+            value["worktree"]["dir"],
+            serde_json::Value::String(format!("/work/NBB/x/benchfs/.taskd-worktrees/{}", task.id))
+        );
+        // 設定の値が効く（既定の 5 ではなく 3）。workspace_root も設定ファイル基準の絶対パスになる。
+        assert_eq!(value["timers"]["max_requeues"], serde_json::json!(3));
+        assert!(
+            value["workspace_dir"].as_str().expect("workspace_dir").starts_with(&dir.path().to_string_lossy().to_string()),
+            "{}",
+            value["workspace_dir"]
+        );
+
+        // `--config` が無ければ今までどおり（`worktree` は null）。
+        let json = task_detail_json(&store, task.id, None, None).expect("task_detail_json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(value["worktree"], serde_json::Value::Null);
     }
 
     #[test]
@@ -404,6 +490,7 @@ mod tests {
                 id: missing_id,
                 json: true,
                 workspace_root: None,
+                config: None,
             },
         );
         assert!(result.is_err());

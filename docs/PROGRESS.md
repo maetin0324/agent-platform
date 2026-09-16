@@ -2340,6 +2340,13 @@ TASKD_CLUSTER_HOST=pegasus TASKD_CLUSTER_PROJECT=/work/NBB/rmaeda/workspace/rust
 - 実行後の benchfs は `git status` が確認前と同じ（`?? ior_integration/io500/` のみ）で、`git worktree list` も元のまま
   （確認用の worktree はテストの最後に `git worktree remove` した）。
 
+### あわせて入れたもの
+
+- `taskctl show --json --config <taskd.toml>`（または `TASKD_CONFIG`）で、`taskctl` の出力が `GET /api/v1/tasks/{id}` と
+  完全に同じ値になる（`workspace_root` / リトライの待ち / `max_requeues` / `worktree`）。`--config` 無しの挙動は今までどおり。
+- `scripts/cluster-check.sh` が「git 管理下か → どの `sync` を使うか」「追跡ファイル数・全体の大きさ・`.git` の大きさ」を出す。
+- `scripts/sync-gui-docs.sh`（ADR-0020 D4）: `docs/gui/api.md` → GUI 側の写しの一方向同期（`--check` でずれの検出）。
+
 ### 残した提案
 
 - P-60 は解決（worktree を採用）。`rsync_includes` とリモート専用モードは実装しない。
