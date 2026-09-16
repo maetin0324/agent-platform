@@ -810,6 +810,7 @@ mod tests {
             in_flight: vec![],
             cooldowns: vec![],
             awaiting_human: vec![],
+            awaiting_children: vec![],
             unroutable: vec![stuck.id],
             clusters: vec![],
             providers: vec![],
@@ -1015,6 +1016,7 @@ mod tests {
             in_flight: vec![],
             cooldowns: vec![],
             awaiting_human: vec![],
+            awaiting_children: vec![],
             unroutable: vec![],
             clusters: vec![crate::daemon::ClusterLive {
                 id: "pegasus".into(),

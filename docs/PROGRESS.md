@@ -1925,10 +1925,12 @@ e2e `cluster_scenarios` の `--nocapture`（`skip:` が出ない＝ssh 依存テ
 - P-46: push（写し → クラスタ）から `runs/` / `artifacts/` / `inputs/` を既定で除外する。現状は `.taskd/` だけが除外で、`LocalWorkspace::prepare` が作るこれらの
   ディレクトリ（run のログを含む）が既存プロジェクトのクラスタ側ディレクトリに写る（実機確認で観測）。ADR-0018 D4 の変更になるので提案に留める。
 - P-47: `DaemonSnapshot.clusters[]` の `connected` を GUI の「クラスタ」画面の主表示にし、`false` のときだけ「`scripts/cluster-login.sh <host>`」を出す（api.md §3.23 に記述済み。GUI 側の採否）。
+  → **対応済み**（GUI の Phase G7。`gui/app/routes/clusters.tsx` がそのとおりに実装し、e2e で確認済み）。
 - P-48: DESIGN §6 Phase 12 の 11 に「Remote の `workspace_dir` は写し」を追記する（ADR-0018 M5 で決めた。GUI が run のログを開く経路になる）。
 - P-49: `ssh -O check` を「ready な Remote タスクがあるクラスタ」だけに絞る（監査 4-3）。今は全クラスタを毎 tick 確認する（`connected` を GUI に常時出すため）。
-  クラスタ数が増えたら絞る。
+  クラスタ数が増えたら絞る。 → **ADR-0023 D1 で決着**（絞らずに 5 秒に 1 回へ間引いた。アイドル中も `connected` を最新に保つため）。
 - P-50: `RunRequest`（ワーカーが実際に受け取った指示）を `runs/<run_id>/request.json` に残す（監査 4-4）。D3 の指示文の追記を後から再現できるようにする。
+  → **ADR-0023 D2 で実装**（API とGUI からも開ける）。
 - 未整備のテスト（監査の「確認不能」）: `sync = "none"` の経路と、クラスタ × プロバイダの並列度を両方守ること。Phase 12 の追補として足す価値がある。
 
 ---
@@ -2042,6 +2044,7 @@ auditor サブエージェントを1回起動（読み取り専用）。総合�
 - P-53: §4.1 `Task` に `role: Option<String>` と `aggregate: bool` を追記する。
 - P-54: `taskctl` が `TASKD_CONFIG`（または `--db` と同じ優先順位の既定パス）で `taskd.toml` を見つけられるようにし、`add --role` で `--config` を省けるようにする。
 - P-55: 子待ちの親を `DaemonSnapshot`（`awaiting_children[]`）に出し、GUI の DAG 画面で「部下待ち」と表示する（ADR-0016 D5 の入口。API は `TaskDetail.delegated` と `children` で足りる）。
+  → **ADR-0023 D3 で実装**（デーモン画面の一覧と DAG のノードの印）。
 - P-56: `aggregate = false` の親は子の成否を問わず `done` になる（M5）。「子が 1 件でも failed なら親を `review_fail` にする」設定を足すかは運用を見て決める。
 
 ---
@@ -2471,3 +2474,36 @@ P-56 はこれで解決（「子が 1 件でも failed なら親を review_fail�
 
 - なし（P-56 は ADR-0021、P-58 は本 ADR の D2、P-59 と G6-P1 は「やらない」で決着）。
   P-47 / P-49 / P-50 / P-55 は GUI・運用側の判断として引き続き保留。
+
+## ADR-0023: P-49 / P-50 / P-55（2026-09-16）
+
+人間の回答: P-49 =「5 秒に 1 回に間引く」、P-50 =「API と GUI からも開けるように」、P-55 =「実装する」。
+P-47（`clusters[].connected` を GUI の主表示に）は **G7 で実装済み**だったので「対応済み」で閉じた（`gui/app/routes/clusters.tsx`）。
+
+### 入れたもの
+
+- **D1（P-49）**: クラスタの `ssh -O check` は 5 秒に 1 回（`CLUSTER_LIVENESS_INTERVAL`）。tick の中の同期処理が減る
+  （クラスタ 2 つ・tick 2 秒なら毎秒 1 回 → 0.4 回）。間引いた回は前回の結果を使う。判定が古くて外れても、
+  ssh が 255 を返して供給側失敗（attempts を消費しない cooldown）になるだけ。
+- **D2（P-50）**: `run_subprocess` が `runs/<run_id>/request.json` にワーカーへ渡した `RunRequest` を整形して書く
+  （claude-code / codex / fake すべて同じ経路）。`GET /api/v1/tasks/{id}/runs/{run_id}/request`（エンドポイント 32）と
+  `RunSummary.files.request` を追加し、GUI の run ログ画面に「ワーカーに渡した指示（request.json）」を折りたたみで出す。
+  秘密は入らない（`RunRequest` に `env` の値やトークンは含まれない）。`runs/` は同期対象外なので、クラスタのタスクでも手元にだけ残る。
+- **D3（P-55）**: `DaemonSnapshot.awaiting_children[]`（id 昇順）。GUI のデーモン画面に一覧と件数、DAG のノードに「部下待ち」。
+  GUI 側で `reviewing` かつ子が非終端という再計算はしない。
+
+### 証拠
+
+- `cargo test --workspace`: 40 個の test binary すべて ok、0 failed。`cargo clippy --workspace --all-targets -- -D warnings` exit 0。
+- `task-dispatch`: `cluster_cooldown_is_cleared_once_the_control_master_is_back` に「5 秒以内の 2 回目は確認し直さない／
+  間隔を過ぎたら確認し直す」を追加。`non_aggregate_parent_stays_reviewing_until_children_finish_then_completes` に
+  「子待ちの親がスナップショットの `awaiting_children` に出る／子が終われば消える」を追加。
+- `task-worker`: `runs/<run_id>/request.json` が JSON として読め、`task.id` が一致し、整形されていること。
+- `task-api`: `runs[].files.request` が true/false で出ること、`GET …/runs/{run_id}/request` が 200 `application/json`、
+  run のディレクトリごと無ければ 404 `run_not_found`。
+- GUI: `pnpm lint` / `typecheck` / `build` exit 0、`pnpm test` **152 passed**（`graph-layout.test.ts` に「部下待ち」の表示を追加）、
+  `pnpm e2e` **63 passed**、`pnpm gen:types` 差分ゼロ。
+
+### 残った提案
+
+- **無し**（P-46〜P-60 は全て決着）。以後の判断待ちは `gui/docs/PROGRESS.md` の各フェーズの「提案」（G0-P1/P2 など GUI 内部の話）だけ。

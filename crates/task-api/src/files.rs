@@ -34,6 +34,8 @@ pub(crate) enum RunFile {
     Stdout,
     Stderr,
     Result,
+    /// ADR-0023 D2: ワーカーに渡した `RunRequest`（`run_subprocess` が書く）。
+    Request,
 }
 
 impl RunFile {
@@ -42,6 +44,7 @@ impl RunFile {
             RunFile::Stdout => "stdout.jsonl",
             RunFile::Stderr => "stderr.log",
             RunFile::Result => "result.json",
+            RunFile::Request => "request.json",
         }
     }
 }
@@ -129,6 +132,7 @@ pub(crate) fn run_files(task: &Task, root: &Path, run_id: &str) -> RunFiles {
         stdout: has(RunFile::Stdout),
         stderr: has(RunFile::Stderr),
         result: has(RunFile::Result),
+        request: has(RunFile::Request),
     }
 }
 

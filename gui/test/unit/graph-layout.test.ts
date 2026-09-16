@@ -71,6 +71,22 @@ describe("layoutGraph", () => {
     expect(order.indexOf("group-01LEAD")).toBeLessThan(order.indexOf("01C1"));
   });
 
+  it("部下待ちの親はラベルに「部下待ち」が付く（ADR-0023 D3。GUI 側では判定しない）", () => {
+    const graph: Graph = {
+      nodes: [
+        node("01LEAD", { title: "Lead-Delegator", role: "lead", status: "reviewing" }),
+        node("01OTHER", { title: "Reviewing-Alone", status: "reviewing" }),
+      ],
+      edges: [],
+    };
+    const result = layoutGraph(graph, { awaitingChildren: ["01LEAD"] });
+    expect(labelOf(result, "01LEAD")).toBe("Lead-Delegator\n[lead] 部下待ち");
+    // 同じ reviewing でも、スナップショットに載っていなければ印は付かない。
+    expect(labelOf(result, "01OTHER")).toBe("Reviewing-Alone");
+    // 印を渡さなければ従来どおり。
+    expect(labelOf(layoutGraph(graph), "01LEAD")).toBe("Lead-Delegator\n[lead]");
+  });
+
   it("両端が nodes に無い辺は落とす", () => {
     const graph: Graph = {
       nodes: [node("01A"), node("01B")],

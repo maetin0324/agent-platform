@@ -92,6 +92,11 @@ export default function DaemonPage({ loaderData, actionData }: Route.ComponentPr
               <DlItem label="tick_ms" value={String(snapshot.tick_ms)} />
               <DlItem label="in_flight" value={String(snapshot.in_flight.length)} />
               <DlItem label="awaiting_human" value={String(snapshot.awaiting_human.length)} />
+              <DlItem
+                label="部下待ち（awaiting_children）"
+                value={String(snapshot.awaiting_children?.length ?? 0)}
+                testId="daemon-awaiting-children-count"
+              />
               <DlItem label="unroutable" value={String(snapshot.unroutable.length)} />
             </dl>
 
@@ -177,6 +182,24 @@ export default function DaemonPage({ loaderData, actionData }: Route.ComponentPr
                 <ul className="mt-1 space-y-1 text-sm">
                   {snapshot.awaiting_human.map((id) => (
                     <li key={id} data-testid="awaiting-human-item">
+                      <Link to={`/tasks/${id}`} className="hover:underline">
+                        {id}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* ADR-0023 D3: 委譲した子を待っている親。`reviewing` でも「自分の判定待ち」とは別物。 */}
+            <div className="mt-4">
+              <h3 className="text-sm font-semibold">部下待ち（awaiting_children）</h3>
+              {(snapshot.awaiting_children?.length ?? 0) === 0 ? (
+                <p className="mt-1 text-sm text-gray-500">委譲した子を待っているタスクはありません。</p>
+              ) : (
+                <ul className="mt-1 space-y-1 text-sm">
+                  {(snapshot.awaiting_children ?? []).map((id) => (
+                    <li key={id} data-testid="awaiting-children-item">
                       <Link to={`/tasks/${id}`} className="hover:underline">
                         {id}
                       </Link>

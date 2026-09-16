@@ -37,6 +37,13 @@ pub async fn run_subprocess(
     let stdout_log_path = run_dir.join("stdout.jsonl");
     let stderr_log_path = run_dir.join("stderr.log");
     let result_log_path = run_dir.join("result.json");
+    // ADR-0023 D2: ワーカーに渡した指示そのものを残す（後から「何を言われて何をしたか」を追えるように）。
+    // 秘密は入らない（`RunRequest` に `env` の値やトークンは含まれない。ADR-0013 D11）。書けなくても run は続ける。
+    if let Ok(pretty) = serde_json::to_string_pretty(req)
+        && let Err(e) = tokio::fs::write(run_dir.join("request.json"), format!("{pretty}\n")).await
+    {
+        tracing::warn!(%run_id, error = %e, "could not write runs/<run_id>/request.json");
+    }
 
     let mut command = Command::new(&spec.program);
     command
@@ -415,6 +422,13 @@ mod tests {
         assert!(run_dir.join("stdout.jsonl").is_file());
         assert!(run_dir.join("stderr.log").is_file());
         assert!(run_dir.join("result.json").is_file());
+
+        // ADR-0023 D2: ワーカーに渡した指示そのものが残る（stdin に書いたものと同じ内容）。
+        let request = std::fs::read_to_string(run_dir.join("request.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&request).expect("request.json は JSON");
+        assert_eq!(parsed["type"], "run");
+        assert_eq!(parsed["task"]["id"], req.task.id.to_string());
+        assert!(request.contains('\n'), "人が読めるよう整形して書く");
     }
 
     #[tokio::test]

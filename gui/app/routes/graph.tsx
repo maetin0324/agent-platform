@@ -7,33 +7,44 @@ import { layoutGraph } from "~/lib/graph-layout";
 import { TaskdBanner } from "~/root";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import type { Graph } from "~/taskd/types";
+import type { DaemonView, Graph } from "~/taskd/types";
 import type { Route } from "./+types/graph";
 
 /**
  * `/graph`（DAG、docs/DESIGN.md §4.2, §6.2, docs/adr/0006-g3-decisions.md D5）。
  * `GET /graph` をそのまま返す（レイアウト・色分けは表示のためだけで、taskd の判断値は増やさない）。
+ * ADR-0023 D3: 「部下待ち」は `GET /daemon` の `awaiting_children` をそのまま使う（GUI 側で状態を組み立て直さない）。
  */
-export async function loadGraph(client: TaskdClient, request: Request): Promise<Graph> {
+export interface GraphData {
+  graph: Graph;
+  awaitingChildren: string[];
+}
+
+export async function loadGraph(client: TaskdClient, request: Request): Promise<GraphData> {
   const url = new URL(request.url);
   const root = url.searchParams.get("root");
   const depth = url.searchParams.get("depth");
   const includeTerminal = url.searchParams.get("include_terminal");
-  return client.get<Graph>("/graph", {
-    query: {
-      root: root ?? undefined,
-      depth: depth ?? undefined,
-      include_terminal: includeTerminal ?? undefined,
-    },
-    signal: request.signal,
-  });
+  const [graph, daemon] = await Promise.all([
+    client.get<Graph>("/graph", {
+      query: {
+        root: root ?? undefined,
+        depth: depth ?? undefined,
+        include_terminal: includeTerminal ?? undefined,
+      },
+      signal: request.signal,
+    }),
+    // デーモンが止まっていても DAG は出す（「部下待ち」の印が付かないだけ）。
+    client.get<DaemonView>("/daemon", { signal: request.signal }).catch(() => null),
+  ]);
+  return { graph, awaitingChildren: daemon?.snapshot?.awaiting_children ?? [] };
 }
 
 export function meta(_: Route.MetaArgs) {
   return [{ title: "DAG - taskd-gui" }];
 }
 
-export async function loader({ request }: Route.LoaderArgs): Promise<Graph> {
+export async function loader({ request }: Route.LoaderArgs): Promise<GraphData> {
   try {
     return await loadGraph(getTaskdClient(), request);
   } catch (e) {
@@ -42,12 +53,12 @@ export async function loader({ request }: Route.LoaderArgs): Promise<Graph> {
 }
 
 export default function GraphPage({ loaderData }: Route.ComponentProps) {
-  const graph = loaderData;
+  const { graph, awaitingChildren } = loaderData;
   // `@xyflow/react` は ResizeObserver 等のブラウザ API に依存するクライアント専用の描画なので、
   // マウント後にだけ本体を描く（SSR とハイドレーション直後は同じプレースホルダを出す。ADR-0006 D5）。
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
-  const { nodes, edges } = useMemo(() => layoutGraph(graph), [graph]);
+  const { nodes, edges } = useMemo(() => layoutGraph(graph, { awaitingChildren }), [graph, awaitingChildren]);
   const [searchParams] = useSearchParams();
 
   return (

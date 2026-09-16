@@ -48,6 +48,7 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/tasks/{id}", get(task_detail))
         .route("/api/v1/tasks/{id}/events", get(task_events))
         .route("/api/v1/tasks/{id}/runs", get(task_runs))
+        .route("/api/v1/tasks/{id}/runs/{run_id}/request", get(run_request))
         .route("/api/v1/tasks/{id}/runs/{run_id}/stdout", get(run_stdout))
         .route("/api/v1/tasks/{id}/runs/{run_id}/stderr", get(run_stderr))
         .route("/api/v1/tasks/{id}/runs/{run_id}/result", get(run_result))
@@ -438,7 +439,7 @@ async fn task_runs(State(state): State<ApiState>, Params(id): Params<String>, Ra
     Ok(json_response(StatusCode::OK, &list))
 }
 
-// ---- 8〜10. GET /tasks/{id}/runs/{run_id}/{stdout|stderr|result} ----
+// ---- 8〜10 + 32. GET /tasks/{id}/runs/{run_id}/{stdout|stderr|result|request} ----
 
 async fn run_stdout(
     State(state): State<ApiState>,
@@ -465,6 +466,16 @@ async fn run_result(
     headers: HeaderMap,
 ) -> ApiResult {
     run_file(state, params, raw, headers, RunFile::Result).await
+}
+
+/// ADR-0023 D2: ワーカーに渡した `RunRequest`。
+async fn run_request(
+    State(state): State<ApiState>,
+    Params(params): Params<(String, String)>,
+    RawQuery(raw): RawQuery,
+    headers: HeaderMap,
+) -> ApiResult {
+    run_file(state, params, raw, headers, RunFile::Request).await
 }
 
 async fn run_file(

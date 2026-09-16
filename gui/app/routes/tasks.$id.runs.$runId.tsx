@@ -20,6 +20,8 @@ export interface RunDetailData {
   stdout: string | null;
   stderr: string | null;
   result: string | null;
+  /// ADR-0023 D2: ワーカーに渡した指示（`runs/<run_id>/request.json`）。導入前の run には無いので `null`。
+  request: string | null;
 }
 
 async function readFileText(client: TaskdClient, path: string, signal: AbortSignal): Promise<string | null> {
@@ -50,12 +52,13 @@ export async function loadRunDetail(
   }
   const files = run.files;
   const base = `/tasks/${taskId}/runs/${runId}`;
-  const [stdout, stderr, result] = await Promise.all([
+  const [stdout, stderr, result, requestJson] = await Promise.all([
     files?.stdout ? readFileText(client, `${base}/stdout`, request.signal) : Promise.resolve(null),
     files?.stderr ? readFileText(client, `${base}/stderr`, request.signal) : Promise.resolve(null),
     files?.result ? readFileText(client, `${base}/result`, request.signal) : Promise.resolve(null),
+    files?.request ? readFileText(client, `${base}/request`, request.signal) : Promise.resolve(null),
   ]);
-  return { taskId, run, stdout, stderr, result };
+  return { taskId, run, stdout, stderr, result, request: requestJson };
 }
 
 export function meta(_: Route.MetaArgs) {
@@ -83,7 +86,7 @@ function stderrTail(content: string, maxLines = 200): string {
 }
 
 export default function RunDetailPage({ loaderData }: Route.ComponentProps) {
-  const { taskId, run, stdout, stderr, result } = loaderData;
+  const { taskId, run, stdout, stderr, result, request } = loaderData;
   const [rawMode, setRawMode] = useState(false);
   const [lines, setLines] = useState<string[]>(() => splitLines(stdout ?? ""));
   const offsetRef = useRef(new TextEncoder().encode(stdout ?? "").length);
@@ -183,6 +186,21 @@ export default function RunDetailPage({ loaderData }: Route.ComponentProps) {
             result.json
           </h2>
           <CodeViewer content={result} json />
+        </section>
+      )}
+
+      {/* ADR-0023 D2: この run でワーカーに渡した指示そのもの。既定は畳んでおく（長いので）。 */}
+      {request !== null && (
+        <section aria-labelledby="request-heading" data-testid="request-section">
+          <h2 id="request-heading" className="text-lg font-semibold">
+            ワーカーに渡した指示（request.json）
+          </h2>
+          <details>
+            <summary className="cursor-pointer text-sm text-gray-600" data-testid="request-toggle">
+              開く
+            </summary>
+            <CodeViewer content={request} json />
+          </details>
         </section>
       )}
     </div>

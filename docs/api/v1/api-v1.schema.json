@@ -1018,6 +1018,14 @@
     },
     "DaemonSnapshot": {
       "properties": {
+        "awaiting_children": {
+          "default": [],
+          "description": "ADR-0023 D3: 委譲した子が終わるのを待っている親（`reviewing` のまま。id 昇順）。\n「自分の判定待ち」と区別するための観測値。古いスナップショットには無いので既定は空。",
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
         "awaiting_human": {
           "description": "人間の承認待ちでレビューを延期している reviewing タスク。",
           "items": {
@@ -2707,6 +2715,11 @@
     },
     "RunFiles": {
       "properties": {
+        "request": {
+          "default": false,
+          "description": "ADR-0023 D2: `runs/<run_id>/request.json`（ワーカーに渡した指示）。導入前の run には無いので既定は false。",
+          "type": "boolean"
+        },
         "result": {
           "type": "boolean"
         },

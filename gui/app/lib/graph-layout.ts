@@ -15,6 +15,14 @@ const NODE_HEIGHT = 44;
 const GROUP_PADDING = 28;
 const GROUP_LABEL_HEIGHT = 24;
 
+/** ノードのラベル: 1 行目がタイトル、2 行目に役割と状態の補足（ADR-0023 D3）。 */
+function nodeLabel(node: GraphNode, awaitingChildren: boolean): string {
+  const marks: string[] = [];
+  if (node.role) marks.push(`[${node.role}]`);
+  if (awaitingChildren) marks.push("部下待ち");
+  return marks.length > 0 ? `${node.title}\n${marks.join(" ")}` : node.title;
+}
+
 const STATUS_COLOR: Record<Status, string> = {
   draft: "#e5e7eb",
   ready: "#fde68a",
@@ -31,8 +39,15 @@ export interface LayoutResult {
   edges: Edge[];
 }
 
+/** `layoutGraph` に渡す、taskd のスナップショット由来の印（ADR-0023 D3）。 */
+export interface LayoutMarks {
+  /** `DaemonSnapshot.awaiting_children`（委譲した子を待っている親）。 */
+  awaitingChildren?: string[];
+}
+
 /** `graph.nodes` / `graph.edges` から React Flow の nodes/edges を組み立てる（純粋関数、DOM に依存しない）。 */
-export function layoutGraph(graph: Graph): LayoutResult {
+export function layoutGraph(graph: Graph, marks: LayoutMarks = {}): LayoutResult {
+  const awaitingChildren = new Set(marks.awaitingChildren ?? []);
   const byId = new Map<string, GraphNode>(graph.nodes.map((n) => [n.id, n]));
 
   const g = new dagre.graphlib.Graph();
@@ -105,7 +120,8 @@ export function layoutGraph(graph: Graph): LayoutResult {
       parentId: groupRect ? `group-${node.parent_id}` : undefined,
       extent: groupRect ? "parent" : undefined,
       // 役割はテキストのラベルとして 2 行目に出す（色分けはしない。docs/DESIGN.md §10 Phase G7、taskd-requests R2）。
-      data: { label: node.role ? `${node.title}\n[${node.role}]` : node.title },
+      // 「部下待ち」は taskd のスナップショットの値をそのまま出す（ADR-0023 D3。GUI 側で判定しない）。
+      data: { label: nodeLabel(node, awaitingChildren.has(node.id)) },
       style: {
         width: NODE_WIDTH,
         height: NODE_HEIGHT,

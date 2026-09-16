@@ -90,6 +90,9 @@ impl ClusterSpec {
     }
 }
 
+/// ADR-0023 D1: クラスタの多重接続を確認する間隔（`ssh -O check`）。tick がこれより長ければ毎 tick になる。
+const CLUSTER_LIVENESS_INTERVAL: Duration = Duration::from_secs(5);
+
 /// RFC 3339 の文字列（デーモンのスナップショット用）。書式化に失敗することは実質無いが、その場合は空文字列。
 fn rfc3339(t: OffsetDateTime) -> String {
     t.format(&Rfc3339).unwrap_or_default()
@@ -414,8 +417,10 @@ pub struct Dispatcher {
     rx: mpsc::UnboundedReceiver<Completion>,
     /// ADR-0018 D2: 多重接続が無いクラスタの cooldown（この時刻まで dispatch しない）。
     cluster_cooldown: HashMap<String, Instant>,
-    /// ADR-0018 D2: この tick の `ssh -O check` の結果（クラスタ id → 多重接続があるか）。`refresh_cluster_liveness` が埋める。
+    /// ADR-0018 D2: 直近の `ssh -O check` の結果（クラスタ id → 多重接続があるか）。`refresh_cluster_liveness` が埋める。
     cluster_connected: HashMap<String, bool>,
+    /// ADR-0023 D1: 最後に `ssh -O check` を回した時刻（`CLUSTER_LIVENESS_INTERVAL` に 1 回だけ回す）。
+    last_cluster_liveness: Option<Instant>,
     /// tick の回数（スナップショット用）。
     ticks: u64,
     publisher: Option<SnapshotPublisher>,
@@ -449,6 +454,7 @@ impl Dispatcher {
             rx,
             cluster_cooldown: HashMap::new(),
             cluster_connected: HashMap::new(),
+            last_cluster_liveness: None,
             ticks: 0,
             publisher: None,
         }
@@ -571,6 +577,15 @@ impl Dispatcher {
         if self.config.clusters.is_empty() {
             return;
         }
+        // ADR-0023 D1: tick ごとではなく 5 秒に 1 回。外れた判定で dispatch しても、ssh が 255 を返して
+        // 供給側失敗（attempts を消費しない cooldown）になるだけなので、多少古くても困らない。
+        let now = Instant::now();
+        if let Some(last) = self.last_cluster_liveness
+            && now.duration_since(last) < CLUSTER_LIVENESS_INTERVAL
+        {
+            return;
+        }
+        self.last_cluster_liveness = Some(now);
         let ssh_command = SshSettings::new("", "", "/").ssh_command;
         let mut specs: Vec<(String, String)> =
             self.config.clusters.values().map(|c| (c.id.clone(), c.host.clone())).collect();
@@ -629,6 +644,9 @@ impl Dispatcher {
             .collect();
         let mut awaiting_human: Vec<TaskId> = self.awaiting_human.iter().copied().collect();
         awaiting_human.sort();
+        // ADR-0023 D3: 委譲した子を待っている親（`reviewing` のまま）。GUI が「判定中」と区別して出せるように。
+        let mut awaiting_children: Vec<TaskId> = self.awaiting_children.keys().copied().collect();
+        awaiting_children.sort();
         let mut unroutable: Vec<TaskId> = self.unroutable.iter().copied().collect();
         unroutable.sort();
         let providers = publisher
@@ -670,6 +688,7 @@ impl Dispatcher {
             in_flight,
             cooldowns,
             awaiting_human,
+            awaiting_children,
             unroutable,
             providers,
             clusters,
@@ -3173,6 +3192,15 @@ mod tests {
         d.refresh_cluster_liveness();
         assert_eq!(d.cluster_connected.get("local"), Some(&true));
         assert!(!d.cluster_cooldown.contains_key("local"), "cooldown is cleared when the connection is back");
+
+        // ADR-0023 D1: 5 秒以内の 2 回目は `ssh -O check` を回さず、前回の結果をそのまま使う。
+        d.cluster_connected.insert("local".into(), false);
+        d.refresh_cluster_liveness();
+        assert_eq!(d.cluster_connected.get("local"), Some(&false), "間引いた回は確認し直さない");
+        // 前回の確認を古くすると、次の呼び出しで確認し直す。
+        d.last_cluster_liveness = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.refresh_cluster_liveness();
+        assert_eq!(d.cluster_connected.get("local"), Some(&true), "間隔を過ぎたら確認し直す");
     }
 
     /// ADR-0013 D4: tick の最後にメモリ上のスナップショットが `watch` に送られる（実行中の run、プロバイダの使用数、cooldown）。
@@ -3457,6 +3485,17 @@ mod tests {
             write_summary: false,
         });
         let mut d = dispatcher(store.clone(), adapter, 4);
+        // ADR-0023 D3: 子待ちの親はスナップショットの `awaiting_children` にも出る。
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        d.set_snapshot_publisher(SnapshotPublisher {
+            tx,
+            instance_id: "inst-1".into(),
+            hostname: "host-1".into(),
+            started_at: "2026-09-16T00:00:00Z".into(),
+            tick_ms: 10,
+            providers: vec![],
+            provider_checks: Default::default(),
+        });
         // 親の run と判定が終わり、子がまだ走っている間に観察する。
         let mut observed_waiting = false;
         for _ in 0..200 {
@@ -3473,10 +3512,20 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(observed_waiting, "parent should be reviewing while its delegated child runs");
+        assert_eq!(
+            rx.borrow().as_ref().map(|s| s.awaiting_children.clone()),
+            Some(vec![parent.id]),
+            "ADR-0023 D3: 子待ちの親がスナップショットに出る（GUI が「判定中」と区別できる）"
+        );
         let report = run_until_idle(&mut d, 400).await;
         assert!(report.idle);
         let p = store.get(parent.id).unwrap().unwrap();
         assert_eq!(p.status, Status::Done);
+        assert_eq!(
+            rx.borrow().as_ref().map(|s| s.awaiting_children.clone()),
+            Some(vec![]),
+            "子が終われば待ちも消える"
+        );
         assert_eq!(transition_reasons(&store, parent.id), vec!["dispatch", "worker_done", "review_pass"]);
         let events = store.events_for(parent.id).unwrap();
         assert_eq!(events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. })).count(), 1);

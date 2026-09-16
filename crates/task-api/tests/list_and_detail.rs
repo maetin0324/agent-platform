@@ -179,6 +179,7 @@ async fn detail_matches_task_ops_task_detail_byte_for_byte() {
             stdout: true,
             stderr: false,
             result: false,
+            request: false,
         });
     }
     let expected_bytes = serde_json::to_vec(&expected).expect("serialize");
@@ -213,12 +214,22 @@ async fn runs_list_fills_files_from_the_run_directory() {
     std::fs::create_dir_all(&run_dir).expect("run dir");
     std::fs::write(run_dir.join("stdout.jsonl"), "{}\n").expect("stdout");
     std::fs::write(run_dir.join("result.json"), "{}\n").expect("result");
+    // ADR-0023 D2: ワーカーに渡した指示（`run_subprocess` が書く）。
+    std::fs::write(run_dir.join("request.json"), "{}\n").expect("request");
 
     let body = send(&app, get(&format!("/api/v1/tasks/{}/runs", task.id))).await.json();
     let runs = body["runs"].as_array().expect("runs");
     assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0]["files"], json!({"stdout": true, "stderr": false, "result": true}));
-    assert_eq!(runs[1]["files"], json!({"stdout": false, "stderr": false, "result": false}));
+    assert_eq!(runs[0]["files"], json!({"stdout": true, "stderr": false, "result": true, "request": true}));
+    assert_eq!(runs[1]["files"], json!({"stdout": false, "stderr": false, "result": false, "request": false}));
+
+    // ADR-0023 D2: `GET …/runs/{run_id}/request` は application/json で中身を返す。
+    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{first}/request", task.id))).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    assert_eq!(resp.header("content-type"), Some("application/json"));
+    // run のディレクトリごと無い run は 404（既存の stdout/stderr/result と同じ扱い）。
+    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{second}/request", task.id))).await;
+    assert_problem(&resp, 404, "run_not_found");
 }
 
 #[tokio::test]

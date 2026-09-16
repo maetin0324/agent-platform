@@ -483,6 +483,11 @@ export interface DaemonView {
 }
 export interface DaemonSnapshot {
   /**
+   * ADR-0023 D3: 委譲した子が終わるのを待っている親（`reviewing` のまま。id 昇順）。
+   * 「自分の判定待ち」と区別するための観測値。古いスナップショットには無いので既定は空。
+   */
+  awaiting_children?: TaskId[];
+  /**
    * 人間の承認待ちでレビューを延期している reviewing タスク。
    */
   awaiting_human: TaskId[];
@@ -800,6 +805,10 @@ export interface RunSummary {
   verdicts: number;
 }
 export interface RunFiles {
+  /**
+   * ADR-0023 D2: `runs/<run_id>/request.json`（ワーカーに渡した指示）。導入前の run には無いので既定は false。
+   */
+  request?: boolean;
   result: boolean;
   stderr: boolean;
   stdout: boolean;

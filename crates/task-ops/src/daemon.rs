@@ -22,6 +22,10 @@ pub struct DaemonSnapshot {
     pub cooldowns: Vec<CooldownView>,
     /// 人間の承認待ちでレビューを延期している reviewing タスク。
     pub awaiting_human: Vec<TaskId>,
+    /// ADR-0023 D3: 委譲した子が終わるのを待っている親（`reviewing` のまま。id 昇順）。
+    /// 「自分の判定待ち」と区別するための観測値。古いスナップショットには無いので既定は空。
+    #[serde(default)]
+    pub awaiting_children: Vec<TaskId>,
     /// 設定に合うプロバイダが無い ready タスク（この tick の判定）。
     pub unroutable: Vec<TaskId>,
     pub providers: Vec<ProviderLive>,

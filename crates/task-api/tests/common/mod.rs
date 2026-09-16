@@ -254,6 +254,7 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
             reason: "throttled".into(),
         }],
         awaiting_human: vec![],
+        awaiting_children: vec![],
         unroutable: vec![],
         clusters: vec![ClusterLive {
             id: "pegasus".into(),

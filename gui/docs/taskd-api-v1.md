@@ -1,6 +1,8 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-16 ADR-0023（run の指示の保存・子待ちの可視化）— エンドポイント 32（`runs/{run_id}/request`）、`RunFiles.request`、
+  `DaemonSnapshot.awaiting_children[]` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-16 ADR-0022（疎通確認の記録）— `GET /providers` の `last_check` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-16 ADR-0021（委譲した子の失敗）— イベント種別 `question_raised`、`GET /config` の `delegation.on_child_failure` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-15 Phase 10（ADR-0016 役割と委譲）— `POST /tasks` の `role` / `aggregate`、`TaskDetail.role` / `delegated[]`、`GET /config` の `roles[]` / `delegation`、イベント種別 `delegated` を追加（全て追加のみ。v1 のまま）
@@ -146,6 +148,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 29 | DELETE | `/providers/{id}` | `providers.d/<id>.toml` を消す（**管理系**） | 200 `{}` | taskd（ファイル削除のみ） |
 | 30 | POST | `/providers/{id}/check` | そのアカウントの env で短い疎通確認を 1 回行う（**管理系**） | 200 `ProviderCheckResponse` | taskd（`task-worker` 経由。タスク・イベントには残らない） |
 | 31 | POST | `/reload` | 設定と `providers.d/` を読み直し、稼働中のプロバイダ選定・アダプタを差し替える（**管理系**） | 200 `ReloadResult` | taskd（`Dispatcher` の差し替え） |
+| 32 | GET | `/tasks/{id}/runs/{run_id}/request` | `runs/<run_id>/request.json`（ワーカーに渡した `RunRequest`。ADR-0023 D2） | `application/json` | ファイル |
 
 ---
 
@@ -273,12 +276,14 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 §5.2 の規則で events から組み立て、`files` を埋める。`started_at` 昇順。
 
-### 3.8 ファイル系: `GET /tasks/{id}/runs/{run_id}/{stdout|stderr|result}`、`GET /tasks/{id}/artifacts/{idx}`
+### 3.8 ファイル系: `GET /tasks/{id}/runs/{run_id}/{stdout|stderr|result|request}`、`GET /tasks/{id}/artifacts/{idx}`
 
 **パス解決（ユーザ入力のパスは受け取らない。ADR-0013 D11）**
 
 1. `<ws>` = `WorkspaceSpec::Local{path}`（相対なら `workspace_root` 基準）を `canonicalize`。失敗（存在しない）→ 404 `file_not_found`。`Remote` → 404 `file_not_found`（`detail: "remote workspace"`）。
-2. run: `run_id` が `^[0-9A-HJKMNP-TV-Z]{26}$` に一致しなければ 403 `path_forbidden`。対象 = `<ws>/runs/<run_id>/{stdout.jsonl|stderr.log|result.json}`。
+2. run: `run_id` が `^[0-9A-HJKMNP-TV-Z]{26}$` に一致しなければ 403 `path_forbidden`。対象 = `<ws>/runs/<run_id>/{stdout.jsonl|stderr.log|result.json|request.json}`。
+   `request.json` は**ワーカーに渡した `RunRequest`**（objective・役割の指示文・クラスタ用の追記・前回の判定・人の回答・子の結果。ADR-0023 D2）。
+   秘密は含まれない（`[[providers]].env` の値やトークンは `RunRequest` に入らない）。run のディレクトリごと無ければ 404 `run_not_found`。
 3. 成果物: `idx` は `GET /tasks/{id}/artifacts` の `items[].idx`（`ArtifactProduced` の出現順、0 始まり）。範囲外 → 404 `artifact_not_found`。対象 = `<ws>` + 記録された `ArtifactRef.path`。
 4. 対象を `canonicalize` し、`<ws>` の canonical パスで始まらなければ 403 `path_forbidden`（symlink でワークスペース外へ出るものを弾く）。ファイルでなければ（ディレクトリ等）403。存在しなければ 404 `file_not_found`。
 5. ワークスペースの**外は絶対に出さない**が、中は信頼境界の内側とする。
@@ -374,12 +379,15 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 {"now":"…","snapshot":{"instance_id":"01J…","pid":1234,"hostname":"lab-01","started_at":"…","last_tick_at":"…","ticks":8812,"tick_ms":2000,
   "in_flight":[{"task_id":"01J…","run_id":"01J…","provider":"claude-a","kind":"worker","since":"…"}],
   "cooldowns":[{"provider":"claude-b","until":"…","reason":"throttled"}],
-  "awaiting_human":["01J…"],"unroutable":[],
+  "awaiting_human":["01J…"],"awaiting_children":["01J…"],"unroutable":[],
   "providers":[{"id":"claude-a","adapter":"claude-code","tiers":["frontier","standard","cheap"],"concurrency":2,"model":"claude-sonnet-5","in_use":1}]}}
 ```
 
 - ディスパッチャが tick の最後に `DaemonSnapshot` を `tokio::sync::watch` に送り、API は最新値を読む（I/O 無し。ADR-0013 D4）。DB には書かない。
 - 最初の tick より前は `snapshot: null`。
+- `awaiting_human[]` は承認待ちで延期中のタスク、`awaiting_children[]` は**委譲した子が終わるのを待っている親**
+  （どちらも `reviewing` のままだが理由が違う。ADR-0023 D3）。GUI はこれを見て「判定中」と「部下待ち」を区別する
+  （`reviewing` かつ子が非終端、という再計算を GUI 側でしない）。
 - cooldown は `ProviderPolicy::cooldowns(now) -> Vec<Cooldown{provider, until: Instant, reason: CooldownReason}>`（既定実装は空。Phase 9a で `StaticPolicy` が実装済み）で取り、`Instant` を壁時計に直す。`reason` の語彙は `throttled | auth_failed | exhausted`（`Spawn` は `provider_failure_outcome` が `Exhausted` に写すので cooldown の理由としては現れない。`ProviderThrottled.reason` には `spawn` も入りうる）。
 - `last_tick_at` が `now` から `3 × tick_ms` 以上古ければ GUI は「ディスパッチャが遅延」と表示する（API は判定しない）。
 - API に繋がらないこと自体が「taskd 停止」を意味する（GUI 側で表示）。
@@ -616,7 +624,7 @@ pub struct RunSummary { pub run_id: String, pub role: RunRole /* worker | review
     pub started_at: String, pub finished_at: Option<String>, pub outcome: Option<RunOutcomeKind>, pub outcome_text: Option<String>,
     pub usage: Option<Usage>, pub progress: u32, pub artifacts: u32, pub verdicts: u32, pub reviewer_deferrals: u32,
     pub files: Option<RunFiles> }
-pub struct RunFiles { pub stdout: bool, pub stderr: bool, pub result: bool }
+pub struct RunFiles { pub stdout: bool, pub stderr: bool, pub result: bool, pub request: bool /* ADR-0023 */ }
 // #[serde(rename_all = "snake_case")]
 pub enum RunOutcomeKind { Done, Question, Error, Requeue, LeaseExpired }
 pub struct ReviewNote { pub criterion: usize, pub pass: bool, pub reason: String }   // task_ops::derive（実装済み）。task_worker::PriorReview への写像はディスパッチャ側
@@ -677,7 +685,8 @@ pub struct GraphEdge { pub from: TaskId, pub to: TaskId, pub kind: String /* "de
 // ---- task-ops: デーモンのスナップショット（task-dispatch が作り、task-api が読む）----
 pub struct DaemonSnapshot { pub instance_id: String, pub pid: u32, pub hostname: String, pub started_at: String, pub last_tick_at: String,
     pub ticks: u64, pub tick_ms: u64, pub in_flight: Vec<InFlight>, pub cooldowns: Vec<CooldownView>,
-    pub awaiting_human: Vec<TaskId>, pub unroutable: Vec<TaskId>, pub providers: Vec<ProviderLive>,
+    pub awaiting_human: Vec<TaskId>, pub awaiting_children: Vec<TaskId> /* ADR-0023: 委譲した子を待っている親 */,
+    pub unroutable: Vec<TaskId>, pub providers: Vec<ProviderLive>,
     #[serde(default)] pub clusters: Vec<ClusterLive> /* Phase 12 */ }
 pub struct InFlight { pub task_id: TaskId, pub run_id: String, pub provider: String, pub kind: InFlightKind, pub since: String }
 // #[serde(rename_all = "snake_case")]
