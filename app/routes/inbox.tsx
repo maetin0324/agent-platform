@@ -299,15 +299,19 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
           <ul className="mt-2 space-y-3">
             {inbox.attention.map((item) =>
               item.type === "cluster_unavailable" ? (
-                // クラスタの表示・遷移（/clusters）は Phase G7 の範囲（docs/DESIGN.md §10 Phase G7）。
-                // ここでは受信箱の一覧として崩れないよう、taskd が返す情報のみを表示する。
+                // `AttentionItem` の他のバリアントと違い `task` を持たない（クラスタ単位の集約）ので別枝のまま
+                // にする（ADR-0009 D5）。押すと `/clusters` に遷移する（Phase G7、ADR-0010 D7）。
                 <li
                   key={`cluster_unavailable-${item.cluster}`}
                   data-testid="attention-item"
                   data-attention-type={item.type}
                   className="rounded border border-red-300 bg-red-50 p-3 text-sm"
                 >
-                  <p className="font-semibold">{item.cluster}</p>
+                  <p className="font-semibold">
+                    <Link to="/clusters" className="hover:underline" data-testid="attention-cluster-link">
+                      {item.cluster}
+                    </Link>
+                  </p>
                   <p>{attentionText(item)}</p>
                 </li>
               ) : (

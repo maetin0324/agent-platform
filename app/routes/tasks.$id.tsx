@@ -118,11 +118,20 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
           />
           <DlItem label="attempts / max_retries" value={`${task.attempts} / ${task.budget.max_retries}`} />
           <DlItem label="workspace_dir" value={detail.workspace_dir ?? "(remote)"} />
+          <DlItem label="role" value={detail.role ?? "-"} testId="task-role" />
           <DlItem
             label="budget"
             value={`max_turns=${task.budget.max_turns}, max_wall_secs=${task.budget.max_wall_secs}, max_retries=${task.budget.max_retries}`}
           />
         </dl>
+        {detail.cluster && (
+          <p className="mt-2 text-sm" data-testid="task-cluster">
+            cluster: <Link to="/clusters">{detail.cluster}</Link>
+            <span className="ml-2 text-xs text-gray-500" data-testid="task-workspace-note">
+              workspace_dir はクラスタ側ではなく手元の写しです（クラスタ側の元のパスは表示されません）。
+            </span>
+          </p>
+        )}
         {task.parent_id && (
           <p className="mt-2 text-sm" data-testid="task-parent">
             親: <Link to={`/tasks/${task.parent_id}`}>{task.parent_id}</Link>
@@ -249,6 +258,40 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
               </tbody>
             </table>
           </div>
+        )}
+      </section>
+
+      <section aria-labelledby="delegated-heading" data-testid="delegated-section">
+        <h2 id="delegated-heading" className="text-lg font-semibold">
+          委譲
+        </h2>
+        {detail.delegated.length === 0 ? (
+          <p className="mt-2 text-sm text-gray-500">ありません。</p>
+        ) : (
+          <ul className="mt-2 space-y-2">
+            {detail.delegated.map((group) => (
+              <li
+                key={group.run_id}
+                data-testid="delegated-group"
+                data-run-id={group.run_id}
+                className="rounded border p-2 text-sm"
+              >
+                <p className="text-xs text-gray-500">
+                  run <Link to={`/tasks/${task.id}/runs/${group.run_id}`}>{group.run_id}</Link> · {group.ts}
+                </p>
+                <ul className="mt-1 space-y-1">
+                  {group.tasks.map((child) => (
+                    <li key={child.id}>
+                      <Link to={`/tasks/${child.id}`} data-testid="delegated-child-link" className="hover:underline">
+                        {child.title}
+                      </Link>
+                      （{child.status}）
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
         )}
       </section>
 

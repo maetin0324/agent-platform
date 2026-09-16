@@ -113,7 +113,10 @@ pnpm dev
 ```
 
 - `pnpm test` — 単体テスト（Vitest。`test/mock-taskd/` を使い、外部ネットワークには出ない）
-- `pnpm e2e` — 結合テスト（Playwright。`scripts/taskd.sh start dev` 等の実 taskd に対して行う）
+- `pnpm e2e` — 結合テスト（Playwright。`scripts/taskd.sh start dev` 等の実 taskd に対して行う）。
+  `e2e/g7.spec.ts` の `scripts/taskd.sh fixture clusters` は `~/.ssh/config` の `taskd-localhost`（localhost への ssh 多重接続）を使う
+  （docs/adr/0010 D1）。無ければ `ssh -MNf taskd-localhost` を先に張っておくこと（無いと `fixture clusters` が明確に失敗する。
+  外部ネットワークには出ない）
 - `pnpm lint` / `pnpm typecheck`
 - `pnpm release` — `dist/taskd-gui-<version>.tar.gz` を作る（`scripts/release.sh`）
 - `scripts/taskd.sh` が作る `.run/`（taskd の DB・ログ）はローカルディスク（既定 `${TMPDIR:-/tmp}/taskd-gui-run-$USER`）へのシンボリックリンク。

@@ -180,6 +180,17 @@ export default function HelpPage() {
           </div>
           <div>
             <dt className="font-semibold">
+              <Link to="/clusters" className="hover:underline">
+                クラスタ
+              </Link>
+            </dt>
+            <dd>
+              リモートで実行するタスクが使う `[[clusters]]`
+              の接続状況（connected・cooldown）を見る画面。受信箱の「クラスタに接続できません」から開くことが多い。
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold">
               <Link to="/daemon" className="hover:underline">
                 デーモン
               </Link>

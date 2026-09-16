@@ -6,7 +6,7 @@
 #   scripts/taskd.sh status <name>         起動中か、/health が返るか
 #   scripts/taskd.sh logs <name>           .run/<name>/taskd.log を表示
 #   scripts/taskd.sh taskctl <name> ...    taskctl --db .run/<name>/taskd.sqlite3 ... を実行
-#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（basic / unroutable / auth。multi-account は設定のみで DB は作らない。docs/adr/0007 D1）
+#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（basic / unroutable / auth / clusters / delegation。multi-account は設定のみで DB は作らない。docs/adr/0007 D1）
 # 環境変数: TASKD_REPO、TASKD_API_LISTEN（既定 127.0.0.1:7710）、TASKD_RUN_ROOT（.run の実体。既定はローカルディスク、下記）
 set -euo pipefail
 
@@ -128,7 +128,9 @@ cmd_fixture() {
     multi-account) fixture_multi_account ;;
     unroutable) fixture_unroutable ;;
     auth) fixture_auth ;;
-    *) die "unknown fixture scenario '$scenario' (known: basic, multi-account, unroutable, auth)" ;;
+    clusters) fixture_clusters ;;
+    delegation) fixture_delegation ;;
+    *) die "unknown fixture scenario '$scenario' (known: basic, multi-account, unroutable, auth, clusters, delegation)" ;;
   esac
 }
 
@@ -249,6 +251,74 @@ fixture_auth() {
   echo "fixture 'auth' built at $dir"
   echo "  token file: $dir/api.token (pass it to the GUI as TASKD_API_TOKEN_FILE)"
   echo "  task: $ta (done)"
+}
+
+# clusters（docs/DESIGN.md §10 Phase G7、docs/adr/0018 [taskd]）: [[clusters]] を 2 つ持つ設定
+# （`local` は `~/.ssh/config` の `taskd-localhost`（localhost への多重接続、connected: true）、
+# `offline` は到達しない host で connected: false）。`local` 向けのタスクは実際に push → run → 判定 → pull を
+# localhost 相手に行う（agent-platform の tests/e2e/tests/cluster_scenarios.rs と同じ流儀。外部ネットワークには出ない）。
+# ssh の多重接続が無い環境では作れない（あらかじめ `ssh -MNf taskd-localhost` 等で張っておくこと）。
+fixture_clusters() {
+  local name="clusters" dir; dir="$(run_dir "$name")"
+  [ -x "$TASKD_BIN" ] && [ -x "$TASKCTL_BIN" ] || die "binaries not found; run 'scripts/taskd.sh build' first"
+  alive "$name" && die "taskd '$name' is running; stop it first (scripts/taskd.sh stop $name)"
+  command -v ssh >/dev/null || die "ssh not found; the clusters fixture needs it (docs/adr/0018 [taskd])"
+  command -v rsync >/dev/null || die "rsync not found; the clusters fixture needs it (docs/adr/0018 [taskd])"
+  ssh -o BatchMode=yes -O check taskd-localhost >/dev/null 2>&1 ||
+    die "no ssh control master for 'taskd-localhost'; run 'ssh -MNf taskd-localhost' first (see ~/.ssh/config)"
+  rm -rf "$dir"
+  mkdir -p "$dir/workspaces" "$dir/remote/cluster-local-project" "$dir/remote/cluster-offline-project"
+  cp "$ROOT/test/taskd/fixtures/clusters-worker.sh" "$dir/fake-worker.sh"
+  chmod +x "$dir/fake-worker.sh"
+  printf 'cluster-only\n' > "$dir/remote/cluster-local-project/secret.txt"
+  sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$ROOT/test/taskd/clusters.toml.tmpl" > "$dir/taskd.toml"
+
+  local db="$dir/taskd.sqlite3"
+  tc() { "$TASKCTL_BIN" --db "$db" "$@"; }
+
+  local tl to
+  tl=$(tc add --title "Cluster-Local" --objective "runs on a reachable cluster" \
+    --check-cmd "grep -q cluster-only answer.txt" --cluster local --workspace "$dir/remote/cluster-local-project")
+  tc approve "$tl" >/dev/null
+  to=$(tc add --title "Cluster-Offline" --objective "cluster is unreachable" \
+    --check-cmd "true" --cluster offline --workspace "$dir/remote/cluster-offline-project")
+  tc approve "$to" >/dev/null
+
+  "$TASKD_BIN" --config "$dir/taskd.toml" --until-idle --max-ticks 2000 --log-format text >> "$dir/taskd.log" 2>&1
+
+  echo "fixture 'clusters' built at $dir"
+  echo "  local (connected): $tl (done via ssh taskd-localhost)"
+  echo "  offline (unreachable): $to (ready; ClusterUnavailable)"
+}
+
+# delegation（docs/DESIGN.md §10 Phase G7、docs/adr/0016 [taskd]）: role=lead, aggregate=true の親が
+# `delegate` で 2 件の role=implementer の子を作り、子が終端になった後の集約 run が artifacts/summary.md を書く。
+fixture_delegation() {
+  local name="delegation" dir; dir="$(run_dir "$name")"
+  [ -x "$TASKD_BIN" ] && [ -x "$TASKCTL_BIN" ] || die "binaries not found; run 'scripts/taskd.sh build' first"
+  alive "$name" && die "taskd '$name' is running; stop it first (scripts/taskd.sh stop $name)"
+  rm -rf "$dir"
+  mkdir -p "$dir/workspaces"
+  cp "$ROOT/test/taskd/fixtures/delegation-worker.sh" "$dir/fake-worker.sh"
+  chmod +x "$dir/fake-worker.sh"
+  sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$ROOT/test/taskd/delegation.toml.tmpl" > "$dir/taskd.toml"
+
+  local db="$dir/taskd.sqlite3"
+  tc() { "$TASKCTL_BIN" --db "$db" "$@"; }
+
+  local tl
+  # 受け入れ条件は committer は初回の delegate run でも即 pass する必要がある（子が終端になるまで待つ・
+  # 集約 run を予約するのは all_pass=true の場合だけ、crates/task-dispatch/src/dispatcher.rs の
+  # `settle_awaiting_children` / `needs_aggregate_run`）。summary.md の存在確認はここでは行わない
+  # （fixture 構築後に GUI/e2e 側が `artifacts` 一覧で確認する）。
+  tl=$(tc add --title "Lead-Delegator" --objective "delegates work to two implementers" \
+    --check-cmd "true" --role lead --aggregate --config "$dir/taskd.toml" --workspace ws-lead)
+  tc approve "$tl" >/dev/null
+
+  "$TASKD_BIN" --config "$dir/taskd.toml" --until-idle --log-format text >> "$dir/taskd.log" 2>&1
+
+  echo "fixture 'delegation' built at $dir"
+  echo "  lead: $tl (done; delegated 2 children, aggregate run wrote summary.md)"
 }
 
 [ $# -ge 1 ] || usage

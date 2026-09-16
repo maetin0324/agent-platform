@@ -4,6 +4,29 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
 
 ## 未対応
 
+### R2（2026-09-16、Phase G7）: `TaskSummary` / `GraphNode` に `role` が無い
+
+- **エンドポイント**: `GET /tasks`（`TaskList.items[]` = `TaskSummary`）、`GET /graph`（`Graph.nodes[]` = `GraphNode`）。
+- **期待（docs/DESIGN.md §10 Phase G7）**: 「一覧と DAG のノードに役割を出す（色分けはせず、テキストのラベル）」。
+- **実際（`docs/taskd-api-v1.md` §3.2 の `TaskSummary` 定義、§3.9 の `Graph`/`GraphNode` 定義。`app/taskd/types.ts` の生成結果とも一致）**:
+  ```
+  pub struct TaskSummary {
+      pub id: TaskId, pub parent_id: Option<TaskId>, pub kind: TaskKind, pub status: Status, pub title: String,
+      pub priority: i32, pub tier: Tier, pub adapter: Option<String>, pub attempts: u32, pub max_retries: u32,
+      pub depends_on: Vec<TaskId>, pub created_at: String, pub updated_at: String,
+      pub lease_expires_at: Option<String>, pub backoff_until: Option<String>,
+      pub children: u32, pub pending_children: u32, pub actions: Vec<Action>,
+  }
+  pub struct GraphNode { pub id: TaskId, pub title: String, pub status: Status, pub kind: TaskKind, pub parent_id: Option<TaskId> }
+  ```
+  どちらにも `role` が無い。`role` は `TaskDetail`（`GET /tasks/{id}`）にしか出ない（ADR-0016 D1「GUI の表示用に最上位にも出す」は詳細画面の
+  ことだけを指しており、一覧・DAG には及んでいない）。
+- **できないこと**: 一覧の各行・DAG の各ノードに役割のテキストラベルを出せない。行・ノードごとに追加で `GET /tasks/{id}` を呼べば埋まるが、
+  一覧・DAG は 1 回の取得で完結する設計（`docs/taskd-api-v1.md` の意図）に反する N+1 呼び出しになり、CLAUDE.md の「taskd API の仕様外の挙動に
+  頼らない」方針とも衝突するため行っていない（`docs/adr/0010-g7-decisions.md` D5）。
+- **依頼**: `TaskSummary` と `GraphNode` に、`TaskDetail.role` と同じ規則の `role: Option<String>`（`#[serde(skip_serializing_if = "Option::is_none")]`）
+  を追加してほしい。追加のみで v1 のまま拡張できる想定（ADR-0016 と同じ流儀）。
+
 ## 対応済み
 
 ## 調査依頼（API の不足・仕様違いではないので BLOCKED にはしない）

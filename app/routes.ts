@@ -13,6 +13,7 @@ export default [
   route("plans/new", "routes/plans.new.tsx"),
   route("daemon", "routes/daemon.tsx"),
   route("providers", "routes/providers.tsx"),
+  route("clusters", "routes/clusters.tsx"),
   route("graph", "routes/graph.tsx"),
   route("help", "routes/help.tsx"),
   route("events", "routes/events.ts"),

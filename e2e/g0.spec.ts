@@ -32,7 +32,7 @@ function startDev(): void {
 test.beforeAll(() => {
   // 他の spec（や前回のラン）が `basic` / `auth` 等を 7710 に残したままだと `start dev` が「別プロセスが応答中」で失敗し、
   // 受け入れ条件 4 の停止 / 復旧も検証できない。既知のインスタンスを全て止めてから `dev` を起動する。
-  for (const name of ["basic", "multi-account", "unroutable", "auth"]) {
+  for (const name of ["basic", "multi-account", "unroutable", "auth", "clusters", "delegation"]) {
     try {
       execFileSync(TASKD_SH, ["stop", name], { cwd: REPO_ROOT, stdio: "pipe" });
     } catch {

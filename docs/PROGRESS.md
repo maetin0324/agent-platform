@@ -14,14 +14,16 @@
 | G4 | プロバイダとデーモン | **DONE** | 2026-09-15 |
 | G5 | 認証・配布・仕上げ | **DONE** | 2026-09-15 |
 | G6 | 使い方ページ | **DONE** | 2026-09-16 |
+| G7 | クラスタと委譲の表示 | **DONE** | 2026-09-16 |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
 ## 引き継ぎ（前のフェーズから）
 
-G6 完了時点で次フェーズ（あれば）に引き継ぐもの: G3-U1（`/graph` スクリーンショットの環境依存）、G4-U1〜U4、G5-U1〜U8（Node SEA の残り、CSP の `style-src`、
-`docker build` 未実行、`docs/taskd-api-v1.md` の同期）、G6-U1（taskd のスキーマが Phase 10〜12 まで進んでいることが `pnpm gen:types` で判明。
-`app/taskd/types.ts` は追従済みだが、対応する画面（G7: クラスタ・委譲の表示）は未実装）。以下は G1 からの引き継ぎ（記録のため残す）:
+G7 完了時点で次フェーズ（あれば）に引き継ぐもの: G7-U1（`TaskSummary`/`GraphNode` に `role` が無く、一覧・DAG のノードへの役割ラベル表示は
+未実装。`docs/taskd-requests.md` R2、`docs/adr/0010-g7-decisions.md` D5）、G6-P1（プロバイダ管理 UI、ADR-0017 相当。DESIGN のどの G フェーズにも
+明記が無いまま）、G3-U1（`/graph` スクリーンショットの環境依存）、G4-U1〜U4、G5-U1〜U8（Node SEA の残り、CSP の `style-src`、
+`docker build` 未実行）。以下は G1 からの引き継ぎ（記録のため残す）:
 - **SSE 常時再検証の負荷**（G1-U1）: `daemon` が tick ごとに届くため、画面を開いている間 taskd への要求がタブあたり毎秒約 7 回発生する。G2 で操作（承認・却下等）を増やすと相対的に無視できるが、G4（デーモン画面・プロバイダ画面）で複数タブを想定するなら再検討が要る。
 - **仮想スクロールと一覧の行数一致テスト**（G1-U2）: `/tasks` の一覧は `@tanstack/react-virtual` で可視領域だけ DOM に出すため、SSR 直後の HTML には `task-row` が 0 件。件数が可視範囲（初期は 12 行程度）を超えるとテストがスクロール操作無しでは行数を数えられない。G2 以降で一覧の件数が増える fixture を作る場合は要注意。
 - **`/tasks/:id` の操作ボタンは無効表示のみ**（G1 は表示だけ、実装は G2）。
@@ -737,3 +739,115 @@ worktree の取り込み → taskd の更新（`actions`）の取り込み → �
 
 ### taskd への依頼
 - なし。`docs/taskd-api-v1.md` §3.4 / §5.4 に書かれた語彙・規則は `/help` の記述と実際の `app/taskd/types.ts` のどちらとも一致した。
+
+## Phase G7 — DONE（2026-09-16）
+
+### 成果物
+- クラスタ画面: `app/routes/clusters.tsx`（新規、`/clusters`。`GET /clusters` を 1 回呼ぶだけ、`cooldown_remaining_secs` 等は taskd 側で計算済みなので
+  再計算しない。`id/host/connected/cooldown_until/in_use/concurrency/sync/delete_on_push` を表で出し、`connected === false` の行にだけ
+  「手元で `scripts/cluster-login.sh <host>` を実行してください」を出す）。`app/routes.ts`（`providers` の後・`graph` の前に登録）、
+  `app/root.tsx`（ナビゲーションに「クラスタ」を追加）、`app/routes/help.tsx`（`#screens` に `/clusters` の説明を追加）。
+- 受信箱: `app/routes/inbox.tsx` の `cluster_unavailable`（G6 で最小限だった暫定対応）を、クラスタ名を `/clusters` へのリンクにして
+  `data-testid="attention-cluster-link"` を押すと遷移するようにした。
+- タスク詳細: `app/routes/tasks.$id.tsx` に `role`（`task-role`）、`cluster`（Remote のときだけ、`/clusters` へのリンク + workspace_dir が
+  写しであることの注記 `task-workspace-note`）、`delegated[]` を表示する新セクション「委譲」（`delegated-section`。run ごとにグループ化し、
+  子タスクへのリンク `delegated-child-link`）を追加。既存の `children`（`TaskRefList`）は変更なし。
+- 作成フォーム: `app/routes/tasks.new.tsx` に `role`（`<input list="role-options">` + `GET /config` の `roles[]` から作る `<datalist>`。
+  自由入力可、`[[roles]]` に無い名前でも送る）と `aggregate`（チェックボックス、未チェックならフォームから省く）を追加、`buildNewTaskSpec` を拡張。
+  `app/taskd/route-actions.server.ts` の `createTask` は `NewTaskSpec` に対して既に汎用なので変更なし。
+- fixture: `scripts/taskd.sh` に `fixture clusters`（`~/.ssh/config` の `taskd-localhost` への実際の ssh 多重接続を使い、`local`（接続あり）/
+  `offline`（`taskd-no-such-host-for-tests`、接続なし）の 2 クラスタを作る。`local` 向けタスクは push → run → 判定 → pull を実際に localhost 相手に行う）
+  と `fixture delegation`（`role=lead, aggregate=true` の親が `delegate` で 2 件の `role=implementer` の子を作り、子が終端になった後の集約 run が
+  `artifacts/summary.md` を書く）を追加。`test/taskd/clusters.toml.tmpl`、`test/taskd/delegation.toml.tmpl`、
+  `test/taskd/fixtures/{clusters,delegation}-worker.sh`（新規）。
+- テスト: `test/unit/clusters.test.ts`（2 件）、`test/unit/tasks.new.test.ts` に `role`/`aggregate` のケース 4 件追加、`e2e/g7.spec.ts`
+  （受け入れ条件 1〜6 の 6 シナリオ）。`e2e/g0.spec.ts`・`e2e/g6.spec.ts` の「事前に止めるインスタンス」一覧に `clusters`/`delegation` を追加
+  （G7-U2、監査指摘、後述）。
+- 文書: `docs/adr/0010-g7-decisions.md`（D1〜D8）、`docs/taskd-requests.md` R2（`TaskSummary`/`GraphNode` に `role` が無い依頼）、
+  README.md に `fixture clusters` の ssh 前提を追記。
+- 実装単位: 3 つの独立した単位（互いにファイルを共有しない）を implementer サブエージェントに並列で担当させた: (A) `/clusters` 新規ルート +
+  ナビゲーション + 受信箱の `cluster_unavailable`（`app/routes/clusters.tsx` 新規, `app/routes.ts`, `app/root.tsx`, `app/routes/inbox.tsx`）、
+  (B) タスク詳細への `role`/`cluster`/`delegated[]` 追加（`app/routes/tasks.$id.tsx` のみ）、(C) 作成フォームへの `role`/`aggregate` 追加
+  （`app/routes/tasks.new.tsx` のみ）。fixture 構築（`scripts/taskd.sh` とワーカースクリプト）、ADR、e2e、監査後の横断的な仕上げ
+  （HelpLink 追加、`/help` の `#screens` 更新、README、`e2e/g0.spec.ts`/`e2e/g6.spec.ts` の停止リスト）は設計判断・複数ファイル横断のため自分で行った。
+
+### 受け入れ条件と証拠（docs/DESIGN.md §10 Phase G7。`e2e/g7.spec.ts`、実 taskd `clusters`/`delegation` に対して検証）
+1. **`/clusters` が 200 で、fixture の 2 クラスタ（接続あり/無し）が出る。`connected: false` の行にだけログインの案内が出る** —
+   `e2e/g7.spec.ts:79`「受け入れ条件 1」pass。`cluster-row` 2 件、`local`（host `taskd-localhost`）が `cluster-connected`=`connected`・
+   `cluster-login-hint` 0 件、`offline`（host `taskd-no-such-host-for-tests`）が `cluster-connected`=`disconnected`・`cluster-login-hint` に
+   `scripts/cluster-login.sh taskd-no-such-host-for-tests` を含む。curl でも `GET /api/v1/clusters` の応答と一致を確認済み。
+2. **受信箱に `cluster_unavailable` の項目が出て、押すと `/clusters` に遷移する** — `e2e/g7.spec.ts:102`「受け入れ条件 2」pass。
+   `attention-item[data-attention-type=cluster_unavailable]` 1 件、`attention-cluster-link` クリックで `/clusters` に遷移。
+3. **Remote のタスクの詳細に `cluster` と写しの注記が出て、run のログが開ける** — `e2e/g7.spec.ts:110`「受け入れ条件 3」pass。
+   `Cluster-Local`（`task-status`=`done`）の `task-cluster` に `local`、`task-workspace-note` が表示、`run-log-link` から
+   `/tasks/<id>/runs/<run_id>` に遷移して `used the cluster file`（実際に ssh 越しに push/pull・判定された run のログ）を確認。
+4. **委譲のあるタスクの詳細に `role` と `delegated[]` が出て、子のリンクから子の詳細に飛べる** — `e2e/g7.spec.ts:141`「受け入れ条件 4」pass。
+   `Lead-Delegator` の `task-role`=`lead`、`delegated-group` 1 件、`delegated-child-link` 2 件（`Delegated-Child-1`/`-2`）、クリックで
+   子タスクの詳細（`task-title`=`Delegated-Child-1`）に遷移。
+5. **作成フォームで `role` と `aggregate` を指定して作ると、`POST /tasks` の本文にそれが載る（空欄なら送らない）** —
+   `e2e/g7.spec.ts:158`「受け入れ条件 5」pass。`role=reviewer-custom` + `aggregate` チェックで作成 → `GET /tasks/<id>` の `role`=`reviewer-custom`、
+   `task.aggregate`=`true`。空欄で作成 → `role` 省略（`null`）、`task.aggregate` 省略（既定 `false`）。単体テスト
+   （`test/unit/tasks.new.test.ts`）で `buildNewTaskSpec` のケース 4 件（値あり/空欄 × role/aggregate）も確認。
+6. **`@axe-core/playwright` で `/clusters` の critical / serious が 0 件、CSP 違反 0 件** — `e2e/g7.spec.ts:122`「受け入れ条件 6」pass
+   （gating な violation 0 件）。CSP 違反 0 件は `e2e/test.ts` の auto fixture が全 spec に効かせている。
+7. **`pnpm lint` / `typecheck` / `test` / `build` / `e2e` が exit 0、`pnpm gen:types` の差分ゼロ** — 下記「共通条件」参照。
+
+### 共通条件
+- `pnpm lint` exit 0（`Checked 96 files`）/ `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0 / `pnpm test` **147 passed**（20 ファイル。
+  G6 までの 141 + G7 の `clusters.test.ts` 2 件 + `tasks.new.test.ts` 追加 4 件）/ `pnpm build` exit 0
+- `pnpm e2e` **62 passed（exit 0、約 7.3 分）**（G0 5 + G1 8 + G2 8 + G3 5 + G4 5 + G5 20 + G6 5 + G7 6）。監査者による別ランでも 62 passed。
+  `e2e/g7.spec.ts` の `fixture clusters` は `~/.ssh/config` の `taskd-localhost`（localhost への ssh 多重接続）が張られている環境が前提
+  （この環境には既にあった。無ければ `ssh -MNf taskd-localhost` を先に張る。README に追記済み）。
+- `pnpm gen:types && git diff --exit-code app/taskd/types.ts` 差分ゼロ（exit 0。着手前・実装後・監査後の 3 回とも確認）
+- `scripts/taskd.sh build && scripts/taskd.sh start dev` → `curl /api/v1/health` の `api_version` が `"1"`（G0 の前提確認、着手時に実施）
+
+### 監査結果
+- auditor の判定: **条件付き可**（番号付き受け入れ条件 1〜7 は全て「可」。「不可」ゼロ）。禁止事項（SQLite・crate 依存・仕様外挙動・
+  ブラウザ直接呼び出し・トークン露出・`dangerouslySetInnerHTML`/`eval`/CDN・テストの外部ネットワーク・依存の新規追加・版固定）は
+  「違反は 1 件も見つからなかった」（auditor 自身が `lint`/`typecheck`/`test`（147 passed）/`build`/`pnpm e2e`（62 passed、フルスイート）/
+  `gen:types`（差分ゼロ）を再実行し、加えて実 taskd に対する curl・GUI の HTML・`build/client/` のクライアントバンドルを直接検査して確認した）。
+  「DAG では委譲で生まれた子を親の下に寄せる」（ADR-0010 D4）は既存の `layoutGraph` の `parent_id` グルーピングで満たされることを
+  `GET /graph` の実データで裏取り済み。
+- 判断が必要な点として auditor に問うた「一覧・DAG への role ラベル表示を N+1 無しに満たす抜け道が無いか」（ADR-0010 D5）への回答: **妥当**。
+  `GET /tasks` のクエリにも `role` 列は無く、`GraphNode` にも無く、SSE の `EventRow` から組み立てる案は DESIGN §6.3
+  「イベント本体から状態を組み立てない」に反するため、`GET /tasks/{id}` の N+1 呼び出し以外に道は無いと確認した。
+- 指摘と対応（全て軽微、番号付き受け入れ条件には非該当。修正後の再監査は自分で実施 — 最大1回の枠内）:
+  1. 「`/clusters` に他画面と同じ `HelpLink` が無い」→ **修正済み**（`app/routes/clusters.tsx` に `<HelpLink anchor="screens" .../>` 追加）。
+  2. 「`/help` の `#screens` に `/clusters` の項目が無い」→ **修正済み**（`app/routes/help.tsx` に追加）。
+  3. 「`inbox.tsx` の `cluster_unavailable` 分岐のコメントが G6 時点のまま陳腐化」→ **修正済み**（実装済みの内容に合わせて書き直した）。
+  4. 「README に `fixture clusters` の ssh 前提が書かれておらず、他者・CI が再現できない」→ **修正済み**（README に追記）。
+  5. 「`e2e/g0.spec.ts`/`e2e/g6.spec.ts` の事前停止リストに `clusters`/`delegation` が無く、中断時に次回の `start dev`/`start basic` が
+     失敗しうる」→ **修正済み**（両ファイルのリストに追加）。
+  6. 軽微指摘（`fixture delegation` の fake ワーカーの `grep` が RunRequest の JSON 直列化形式に依存して脆い、`graph-layout.ts` の
+     単体テストに委譲の子のケースが無い）→ 下の「未解決事項」G7-U3/U4 に記載（実装変更は必須とされていない）。
+  7. **手続き上の要判断**（監査指摘 A）: 「一覧と DAG のノードに役割を出す」（DESIGN §10 Phase G7 の実装節の 1 項目）が未実装のまま
+     フェーズを DONE にしてよいか → 人間の判断のため下記に明記する（下記「未解決事項」G7-U1 と「taskd への依頼」R2 を参照）。
+     判断: 番号付き受け入れ条件 1〜7 にはこの項目は含まれておらず（4 が求めるのは詳細画面の `role`/`delegated[]` のみ）、`TaskSummary` /
+     `GraphNode` に `role` が無いという確認済みの API 制約により、GUI 側の workaround（N+1 の `GET /tasks/{id}`）を使わずに満たす方法が無い。
+     CLAUDE.md の「回避しない」原則に従い `docs/taskd-requests.md` R2 に記録し、DESIGN 本文を書き換えずに DONE として進める
+     （G6 のプロバイダ管理 UI の扱い、ADR-0009 D5/G6-P1 と同じ前例）。
+- 修正後の自己再検証: `pnpm lint`/`typecheck` exit 0、`pnpm test` 147 passed、`pnpm build` exit 0、`pnpm e2e` **62 passed (7.3分)**、
+  `pnpm gen:types` 差分ゼロ。auditor の再起動は行っていない（「不可」が無く、指摘は全て自分で再検証できる範囲）。
+
+### 未解決事項
+- **G7-U1: `TaskSummary`（`GET /tasks` の一覧行）と `GraphNode`（`GET /graph` のノード）に `role` が無い** — DESIGN §10 Phase G7 の実装節
+  「一覧と DAG のノードに役割を出す（色分けはせず、テキストのラベル）」は未実装（`docs/taskd-requests.md` R2、`docs/adr/0010-g7-decisions.md` D5）。
+  番号付き受け入れ条件（1〜7）には含まれないため DONE の判定には影響しないが、taskd 側で `role` フィールドが追加され次第、次フェーズ以降で
+  一覧・DAG のノードラベルを実装したい。
+- **G7-U2**: `e2e/g0.spec.ts`/`e2e/g6.spec.ts` の事前停止リストに `clusters`/`delegation` を追加済み（監査指摘、上記「監査結果」参照）。
+- **G7-U3**: `test/taskd/fixtures/delegation-worker.sh` の `grep -q '"children":\[{'` は `serde_json::to_string`（空白無しの compact 出力、
+  `crates/task-worker/src/subprocess.rs`）に依存している。taskd 側が将来 pretty-print 等に変えれば静かに壊れる（集約 run が summary.md を
+  書かなくなる）。fixture 専用のスクリプトであり GUI 本体には影響しないため今回は直していない。
+- **G7-U4**: `app/lib/graph-layout.ts` の単体テストに、委譲で生まれた子（`parent_id` が委譲元）のグルーピングを検証するケースが無い
+  （ADR-0010 D4 の主張は `fixture delegation` の実データ（`GET /graph`）で手動確認したのみ）。次フェーズで `graph-layout.test.ts` があれば
+  1 件追加するとよい。
+- G0〜G6 からの引き継ぎ（`/assets` の Host 検査、`pnpm dev` の CSP、G2-U1 taskd 間欠停止、G2-U2〜U7、G3-U1〜U8、G4-U1〜U4、G5-U1〜U9、
+  G6-U2）は G7 では対処していない。
+
+### 提案（`docs/DESIGN.md` / `docs/taskd-api-v1.md` への変更提案。採否は人間）
+- 上の「提案」節の G0-P1/P2、G1-P1/P2、G2-P1〜P4、G3-P1/P2、G6-P1 に加えて新規提案は無し（G7 は DESIGN の記述どおりに実装できた）。
+
+### taskd への依頼
+- R2（新規）: `TaskSummary`（`GET /tasks`）と `GraphNode`（`GET /graph`）に `role: Option<String>`（`TaskDetail.role` と同じ規則）を
+  追加してほしい。詳細は `docs/taskd-requests.md` R2（エンドポイント / 期待 / 実際 / できないこと）。GUI 側は現時点でこれを回避していない
+  （一覧・DAG への役割ラベル表示は保留、G7-U1）。

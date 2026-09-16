@@ -28,15 +28,12 @@ const HELP_SECTIONS = [
 ];
 
 test.beforeAll(() => {
-  try {
-    sh("stop", "dev");
-  } catch {
-    // 動いていなければ何もしない
-  }
-  try {
-    sh("stop", "basic");
-  } catch {
-    // 動いていなければ何もしない
+  for (const name of ["dev", "basic", "clusters", "delegation"]) {
+    try {
+      sh("stop", name);
+    } catch {
+      // 動いていなければ何もしない
+    }
   }
   sh("fixture", "basic");
   sh("start", "basic");

@@ -152,6 +152,11 @@ export function buildNewTaskSpec(form: FormData): NewTaskSpec {
   const priority = numberField(form, "priority");
   if (priority !== undefined) spec.priority = priority;
 
+  const role = formString(form, "role");
+  if (role) spec.role = role;
+
+  if (form.get("aggregate") != null) spec.aggregate = true;
+
   const parent = formString(form, "parent");
   if (parent) spec.parent = parent;
 
@@ -334,6 +339,30 @@ export default function NewTaskPage({ loaderData, actionData }: Route.ComponentP
               type="number"
               className="mt-1 w-full rounded border px-2 py-1 text-sm"
             />
+          </div>
+          <div>
+            <label htmlFor="role" className="block text-sm font-medium">
+              role
+            </label>
+            <input
+              id="role"
+              name="role"
+              type="text"
+              list="role-options"
+              data-testid="role-input"
+              className="mt-1 w-full rounded border px-2 py-1 text-sm"
+            />
+            <datalist id="role-options">
+              {(config.roles ?? []).map((r) => (
+                <option key={r.id} value={r.id} />
+              ))}
+            </datalist>
+          </div>
+          <div className="flex items-center gap-2 sm:col-span-1">
+            <input id="aggregate" name="aggregate" type="checkbox" data-testid="aggregate-checkbox" />
+            <label htmlFor="aggregate" className="text-sm font-medium">
+              aggregate（委譲した子が全て終わったら集約 run を 1 回行う）
+            </label>
           </div>
         </div>
 

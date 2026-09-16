@@ -144,6 +144,9 @@ export default function App({ loaderData }: Route.ComponentProps) {
           <a href="/providers" className="hover:underline">
             プロバイダ
           </a>
+          <a href="/clusters" className="hover:underline">
+            クラスタ
+          </a>
           <a href="/graph" className="hover:underline">
             DAG
           </a>

@@ -127,6 +127,8 @@ describe("buildNewTaskSpec", () => {
         ["max_wall_secs", "120"],
         ["max_retries", "0"],
         ["workspace", "ws-x"],
+        ["role", "reviewer-a"],
+        ["aggregate", "on"],
       ]),
     );
     expect(spec).toEqual({
@@ -143,7 +145,53 @@ describe("buildNewTaskSpec", () => {
       max_wall_secs: 120,
       max_retries: 0,
       workspace: "ws-x",
+      role: "reviewer-a",
+      aggregate: true,
     });
+  });
+
+  it("role: sets spec.role when filled, any free-text name is accepted (not limited to [[roles]])", () => {
+    const spec = buildNewTaskSpec(
+      form([
+        ["title", "t"],
+        ["objective", "o"],
+        ["role", "not-a-known-role"],
+      ]),
+    );
+    expect(spec.role).toBe("not-a-known-role");
+  });
+
+  it("role: omits spec.role when the field is empty", () => {
+    const spec = buildNewTaskSpec(
+      form([
+        ["title", "t"],
+        ["objective", "o"],
+        ["role", ""],
+      ]),
+    );
+    expect(spec.role).toBeUndefined();
+  });
+
+  it("aggregate: sets spec.aggregate = true when the checkbox is present", () => {
+    const spec = buildNewTaskSpec(
+      form([
+        ["title", "t"],
+        ["objective", "o"],
+        ["aggregate", "on"],
+      ]),
+    );
+    expect(spec.aggregate).toBe(true);
+  });
+
+  it("aggregate: omits spec.aggregate (not false) when the checkbox is absent", () => {
+    const spec = buildNewTaskSpec(
+      form([
+        ["title", "t"],
+        ["objective", "o"],
+      ]),
+    );
+    expect(spec.aggregate).toBeUndefined();
+    expect("aggregate" in spec).toBe(false);
   });
 });
 
