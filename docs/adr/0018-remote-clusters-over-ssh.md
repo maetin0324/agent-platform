@@ -52,6 +52,8 @@
 ### D4. 同期は「pull してから作業し、push してから判定する」。既定では消さない
 
 `[[clusters]] sync = "rsync" | "none"`（既定 `"rsync"`）、`delete_on_push`（既定 **false**）。
+**この D4 は ADR-0019 で改訂した**: `sync = "worktree"` が加わり、git 管理下のプロジェクトではそれが既定の選び方になる
+（丸ごとの rsync は 263 GB のリポジトリでは成り立たなかった）。以下の記述は `sync = "rsync"` のときのものとして読む。
 
 run 1 回の順序（`sync = "rsync"` のとき）:
 

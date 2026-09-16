@@ -32,6 +32,22 @@ else
   echo "   （remote_workdir を渡すと、存在・書き込み可否・ファイルシステムを確認します）"
 fi
 
+echo "== git リポジトリか（ADR-0019: sync の選び方）"
+if [ -n "$workdir" ]; then
+  run "cd '$workdir' 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null" | {
+    read -r top rest
+    if [ -n "${top:-}" ]; then
+      echo "   git 管理下です（root: $top）→ sync = \"worktree\" を使えます（追跡ファイルだけを写します）"
+      run "cd '$workdir' && echo '   追跡ファイル数: '\$(git ls-files | wc -l); echo '   全体の大きさ  : '\$(du -sh . 2>/dev/null | cut -f1); echo '   .git の大きさ : '\$(du -sh .git 2>/dev/null | cut -f1)"
+      echo "   （追跡ファイルにも巨大なものがある場合は worktree_paths で絞ります: 例 worktree_paths = [\"src\", \"Cargo.toml\"]）"
+    else
+      echo "   git 管理外です → sync = \"rsync\"（大きなディレクトリなら rsync_excludes で減らす）"
+    fi
+  }
+else
+  echo "   （remote_workdir を渡すと判定します）"
+fi
+
 echo "== 手元とクラスタでファイルが共有されているか"
 # 手元で印を書き、リモートから同じ内容が見えるかで判定する（見えれば sync = "none" が使える）。
 marker="taskd-shared-fs-probe-$$-$(date +%s)"
