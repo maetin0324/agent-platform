@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# taskd（$TASKD_REPO、既定 ../agent-platform）を fake ワーカー + [api] の設定で扱う補助スクリプト（docs/DESIGN.md §10.0）。
+# taskd（$TASKD_REPO、既定は gui/ の親 = リポジトリの根。ADR-0020）を fake ワーカー + [api] の設定で扱う補助スクリプト（docs/DESIGN.md §10.0）。
 #   scripts/taskd.sh build                 cargo build -p taskd -p taskctl
 #   scripts/taskd.sh start <name>          .run/<name>/ に taskd.toml と DB・workspaces/ を作りバックグラウンド起動
 #   scripts/taskd.sh stop <name>           停止（SIGTERM → 猶予後 SIGKILL）
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TASKD_REPO="$(cd "${TASKD_REPO:-$ROOT/../agent-platform}" 2>/dev/null && pwd || echo "${TASKD_REPO:-$ROOT/../agent-platform}")"
+TASKD_REPO="$(cd "${TASKD_REPO:-$ROOT/..}" 2>/dev/null && pwd || echo "${TASKD_REPO:-$ROOT/..}")"
 TASKD_BIN="$TASKD_REPO/target/debug/taskd"
 TASKCTL_BIN="$TASKD_REPO/target/debug/taskctl"
 # .run/ の実体（docs/adr/0008 D13）。SQLite の WAL はネットワーク FS（NFS 等）上では tick が数十秒止まる（taskd-requests.md R1 の回答、
@@ -256,7 +256,7 @@ fixture_auth() {
 # clusters（docs/DESIGN.md §10 Phase G7、docs/adr/0018 [taskd]）: [[clusters]] を 2 つ持つ設定
 # （`local` は `~/.ssh/config` の `taskd-localhost`（localhost への多重接続、connected: true）、
 # `offline` は到達しない host で connected: false）。`local` 向けのタスクは実際に push → run → 判定 → pull を
-# localhost 相手に行う（agent-platform の tests/e2e/tests/cluster_scenarios.rs と同じ流儀。外部ネットワークには出ない）。
+# localhost 相手に行う（taskd 側の tests/e2e/tests/cluster_scenarios.rs と同じ流儀。外部ネットワークには出ない）。
 # ssh の多重接続が無い環境では作れない（あらかじめ `ssh -MNf taskd-localhost` 等で張っておくこと）。
 fixture_clusters() {
   local name="clusters" dir; dir="$(run_dir "$name")"

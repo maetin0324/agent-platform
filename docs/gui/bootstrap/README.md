@@ -1,14 +1,14 @@
-# `taskd-gui` リポジトリの立ち上げ（bootstrap）
+# GUI（`gui/`）の立ち上げ（bootstrap）
 
-オーケストレータが `run-gphases.sh` で `/home/rmaeda/workspace/taskd-gui` を作り、本ディレクトリと `docs/gui/` のファイルをコピーしてから、
-G フェーズを `claude -p "/goal …"` で 1 フェーズずつ回す。GUI の設計は `docs/gui/DESIGN-GUI.md`、taskd の API は `docs/gui/api.md`。
+オーケストレータが `run-gphases.sh` で `gui/`（ADR-0020 以降は **この taskd リポジトリの中**。既定 `$TASKD_REPO/gui`）を作り、
+本ディレクトリと `docs/gui/` のファイルをコピーしてから、G フェーズを `claude -p "/goal …"` で 1 フェーズずつ回す。GUI の設計は `docs/gui/DESIGN-GUI.md`、taskd の API は `docs/gui/api.md`。
 
 ## 1. コピー先の対応
 
-| taskd リポジトリ（コピー元） | `taskd-gui` リポジトリ（コピー先） | 備考 |
+| コピー元（taskd 側） | コピー先（`gui/`） | 備考 |
 |---|---|---|
 | `docs/gui/DESIGN-GUI.md` | `docs/DESIGN.md` | GUI の設計。§10 がフェーズと受け入れ条件 |
-| `docs/gui/api.md` | `docs/taskd-api-v1.md` | taskd HTTP API v1 の仕様（GUI から見た契約） |
+| `docs/gui/api.md` | `docs/taskd-api-v1.md` | taskd HTTP API v1 の仕様（GUI から見た契約）。**以後も `scripts/sync-gui-docs.sh` で一方向に同期する**（ADR-0020 D4） |
 | `docs/gui/adr/0001-architecture-boundary.md` | `docs/adr/0001-architecture-boundary.md` | |
 | `docs/gui/adr/0002-frontend-stack.md` | `docs/adr/0002-frontend-stack.md` | |
 | `docs/gui/taskd-proposals.md` | `docs/taskd-proposals.md` | 参考（採否の履歴） |
@@ -42,7 +42,7 @@ G5 strong 60
 - `PHASES="${PHASES:-G0 G1 G2 G3 G4 G5}"`、上の表を `model_for` / `maxturns_for` で引く（`case "$1" in G0|G2|G5) …`）。
 - `GOAL="$(sed -e "s/__N__/${N#G}/g" -e "s/__MAXTURNS__/$(maxturns_for "$N")/g" docs/GOAL_TEMPLATE.md)"`（テンプレートの見出しは `Phase G__N__` なので **数字だけ**を入れる）。
 - `phase_done()    { grep -q  "^## Phase $1 — DONE" docs/PROGRESS.md; }`、`phase_stopped()` は `BLOCKED|PARTIAL`（`$1` は `G0` 等）。
-- `cd /home/rmaeda/workspace/taskd-gui`。`export TASKD_REPO=/home/rmaeda/workspace/agent-platform`。
+- `cd $TASKD_REPO/gui`（`TASKD_REPO` は taskd リポジトリの根。`gen:types` は省略時に `gui/` の親を見る）。
 - 各フェーズの前に `scripts/taskd.sh stop dev >/dev/null 2>&1 || true`（前回の taskd が残っていたら止める。G0 の前はスクリプトが無いので無視）。
 - `CLAUDE_CODE_SUBAGENT_MODEL` は taskd と同じ既定（sonnet）。implementer は frontmatter で sonnet、auditor は opus。
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # taskd-gui 自動進行ランナー（G フェーズ）。run-phases.sh と同じく、フェーズごとに新しい claude -p セッションで /goal を回す。
-# GUI 本体は別リポジトリ（既定 /home/rmaeda/workspace/taskd-gui）。無ければ docs/gui/ から立ち上げる（docs/gui/bootstrap/README.md）。
+# GUI 本体は同じリポジトリの gui/（ADR-0020。既定 $TASKD_REPO/gui）。無ければ docs/gui/ から立ち上げる（docs/gui/bootstrap/README.md）。
 # 使い方: tmux 内で  ./run-gphases.sh                  （G0〜G7）
 #                   PHASES="G1 G2" ./run-gphases.sh     （一部だけ）
-#                   BOOTSTRAP_ONLY=1 ./run-gphases.sh   （前提確認と taskd-gui の立ち上げだけ）
+#                   BOOTSTRAP_ONLY=1 ./run-gphases.sh   （前提確認と gui/ の立ち上げだけ）
 set -uo pipefail
 
 TASKD_REPO="$(cd "$(dirname "$0")" && pwd)"
 export TASKD_REPO
-GUI_REPO="${GUI_REPO:-/home/rmaeda/workspace/taskd-gui}"
+GUI_REPO="${GUI_REPO:-$TASKD_REPO/gui}"   # ADR-0020: taskd と同じリポジトリの gui/
 
 PHASES="${PHASES:-G0 G1 G2 G3 G4 G5 G6 G7}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
@@ -17,7 +17,7 @@ LIGHT_MODEL="${LIGHT_MODEL:-sonnet}"      # G1, G3, G4, G6 のメインセッシ
 STRONG_MODEL="${STRONG_MODEL:-opus}"      # G0, G2, G5 のメインセッション。Fable が使えるなら fable
 BOOTSTRAP_ONLY="${BOOTSTRAP_ONLY:-0}"
 SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-0}"     # 前提ツールの確認を飛ばす（立ち上げの試験用）
-LOGDIR="$TASKD_REPO/logs/gphases"; mkdir -p "$LOGDIR"   # taskd 側の logs/ は .gitignore 済み（GUI リポジトリを汚さない）
+LOGDIR="$TASKD_REPO/logs/gphases"; mkdir -p "$LOGDIR"   # logs/ は .gitignore 済み
 
 # implementer は frontmatter で sonnet 固定。auditor は opus 固定。
 # それ以外（Explore など model 未指定のもの）の上限をここで決める。
@@ -65,14 +65,14 @@ preflight() {
   log "preflight: ok (node $(node --version), pnpm $(pnpm --version))"
 }
 
-# docs/gui/bootstrap/README.md §1 の対応表でコピーし、初期コミットを作る。既に git リポジトリなら何もしない（GUI 側の写しは GUI 側が持つ）。
+# docs/gui/bootstrap/README.md §1 の対応表でコピーし、初期コミットを作る。既に立ち上がっていれば何もしない。
 bootstrap() {
-  if [ -d "$GUI_REPO/.git" ]; then
-    log "bootstrap: $GUI_REPO is already a git repository, skip"
+  if [ -f "$GUI_REPO/package.json" ] || [ -f "$GUI_REPO/docs/PROGRESS.md" ]; then
+    log "bootstrap: $GUI_REPO is already set up, skip"
     return
   fi
   if [ -d "$GUI_REPO" ] && [ -n "$(ls -A "$GUI_REPO" 2>/dev/null)" ]; then
-    die "bootstrap: $GUI_REPO exists, is not empty and is not a git repository; refusing to overwrite"
+    die "bootstrap: $GUI_REPO exists, is not empty and has no package.json; refusing to overwrite"
   fi
   local src="$TASKD_REPO/docs/gui"
   log "bootstrap: creating $GUI_REPO from $src"
@@ -105,9 +105,15 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
 EOF
   printf '%s\n' node_modules/ build/ .run/ dist/ test-results/ playwright-report/ .react-router/ > "$GUI_REPO/.gitignore"
 
-  ( cd "$GUI_REPO" && git init -q -b main && git add -A && git commit -q -m "bootstrap: design, api spec, rules" ) \
-    || die "bootstrap: initial commit failed"
-  log "bootstrap: initial commit $(git -C "$GUI_REPO" rev-parse --short HEAD)"
+  # ADR-0020: gui/ が taskd と同じリポジトリの中なら、そこにコミットする（git init はしない）。外を指すなら従来どおり独立したリポジトリにする。
+  case "$GUI_REPO/" in
+    "$TASKD_REPO"/*) ( cd "$TASKD_REPO" && git add -A "$GUI_REPO" && git commit -q -m "bootstrap: gui design, api spec, rules" ) \
+                       || die "bootstrap: initial commit failed"
+                     log "bootstrap: initial commit $(git -C "$TASKD_REPO" rev-parse --short HEAD)" ;;
+    *)               ( cd "$GUI_REPO" && git init -q -b main && git add -A && git commit -q -m "bootstrap: design, api spec, rules" ) \
+                       || die "bootstrap: initial commit failed"
+                     log "bootstrap: initial commit $(git -C "$GUI_REPO" rev-parse --short HEAD)" ;;
+  esac
 }
 
 if [ "$SKIP_PREFLIGHT" = "1" ]; then log "preflight: skipped"; else preflight; fi
@@ -115,10 +121,12 @@ bootstrap
 if [ "$BOOTSTRAP_ONLY" = "1" ]; then log "BOOTSTRAP_ONLY=1; not running phases"; exit 0; fi
 
 cd "$GUI_REPO" || die "cannot cd to $GUI_REPO"
-[ -z "$(git status --porcelain)" ] || log "warning: $GUI_REPO has uncommitted changes"
+[ -z "$(git status --porcelain .)" ] || log "warning: $GUI_REPO has uncommitted changes"
 
 for N in $PHASES; do
   if phase_done "$N"; then log "phase $N: already DONE, skip"; continue; fi
+  # ADR-0020 D4: taskd が正の API 仕様を GUI 側の写しに反映してからフェーズに入る。
+  "$TASKD_REPO/scripts/sync-gui-docs.sh" >> "$LOGDIR/runner.log" 2>&1 || log "warning: sync-gui-docs.sh failed"
   GOAL="$(sed -e "s/__N__/${N#G}/g" -e "s/__MAXTURNS__/$(maxturns_for "$N")/g" docs/GOAL_TEMPLATE.md)"
   MODEL="$(model_for "$N")"
   attempt=0

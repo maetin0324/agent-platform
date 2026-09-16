@@ -1,12 +1,12 @@
 // pnpm gen:types — taskd がコミットする docs/api/v1/api-v1.schema.json から app/taskd/types.ts を生成する（docs/taskd-api-v1.md §7）。
-// 実行時に taskd の API は呼ばない。$TASKD_REPO（既定 ../agent-platform）のファイルだけを読む。
+// 実行時に taskd の API は呼ばない。$TASKD_REPO（既定は gui/ の親 = リポジトリの根。ADR-0020）のファイルだけを読む。
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const taskdRepo = path.resolve(process.env.TASKD_REPO ?? path.join(root, "..", "agent-platform"));
+const taskdRepo = path.resolve(process.env.TASKD_REPO ?? path.join(root, ".."));
 const schema = path.join(taskdRepo, "docs", "api", "v1", "api-v1.schema.json");
 const out = path.join(root, "app", "taskd", "types.ts");
 

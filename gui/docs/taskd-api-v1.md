@@ -226,11 +226,19 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 ### 3.5 `GET /tasks/{id}` → 200 `TaskDetail`
 
 - `taskctl show --json <id>` と**同じ型・同じ直列化**（task-ops の `TaskDetail` を compact な JSON で出す。ADR-0013 D12）。差は次の 3 点（Phase 9b で確定）:
-  API は `runs[].files` を埋める（taskctl は `null`）、`timers.now` は応答時刻、taskctl は `taskd.toml` を読まないので
-  `workspace_dir` / `timers.backoff_until` / `timers.max_requeues` は設定の既定値で計算する（`--workspace-root` で基準だけ上書き可）。
+  API は `runs[].files` を埋める（taskctl は `null`）、`timers.now` は応答時刻、taskctl は `--config <taskd.toml>`
+  （または `TASKD_CONFIG`）を渡さない限り `workspace_dir` / `timers.backoff_until` / `timers.max_requeues` / `worktree` を
+  設定の既定値で計算する（`--workspace-root` で基準だけ上書き可）。`--config` を渡せば API と同じ値になる。
 - `workspace_dir` は `WorkspaceSpec::Local{path}` を `workspace_root` で絶対化した文字列（`canonicalize` はしない。存在しなくてもよい）。
   `Remote{cluster, path}` では**手元の写し** `workspace_root/<task_id>`（run のログ `runs/` と成果物はここ。クラスタ側のパスは `task.workspace.path`。ADR-0018 D1、Phase 12）。
 - `cluster` は `WorkspaceSpec::Remote` の `cluster`（`[[clusters]] id`）。`Local` は `null`（Phase 12）。
+- `worktree` は `sync = "worktree"` のクラスタで動くタスクだけに出る（ADR-0019 D2）。
+  `{project, dir, branch}` = 元のリポジトリ / クラスタ上の worktree のパス（既定 `<project>/.taskd-worktrees/<task_id>`、
+  `worktree_root` があればその下）/ ブランチ `taskd/<task_id>`。**taskd は commit しない**ので、変更は worktree の作業ツリーに残る。
+  GUI はここを「クラスタで結果を見る場所」として出す（`git -C <dir> diff`、`git -C <dir> commit`、`git worktree remove <dir>` は人の操作）。
+  `sync = "rsync"` / `"none"` のクラスタと Local のタスクでは `null`。
+  `taskctl show --json` は `--config <taskd.toml>`（または `TASKD_CONFIG`）を渡したときだけ `worktree` を出せる
+  （`[[clusters]]` を知らないと worktree のパスが決まらないため）。
 - `role` は `task.role` と同じ値を最上位にも出したもの（GUI の表示用。Phase 10、ADR-0016 D1）。役割が無ければ `null`。
 - `delegated[]` は、このタスクの run が `delegate` で作った子の履歴（`Event::Delegated` の出現順。Phase 10、ADR-0016 D2）。
   1 要素は `{run_id, ts, tasks: TaskRef[]}` で、`ts` はイベントの `ts`、`tasks` は子の**現在の**状態（既に存在しない ID は落とす）。
@@ -573,7 +581,10 @@ pub struct TaskDetail {
     pub latest_question: Option<String>, pub approvals: Vec<ApprovalLink>,
     pub dependencies: Vec<TaskRef>, pub dependents: Vec<TaskRef>, pub children: Vec<TaskRef>,
     pub actions: Vec<Action>, pub worker_run_hint: Option<String>,
+    pub worktree: Option<WorktreeView> /* ADR-0019 */,
 }
+/// ADR-0019 D2: クラスタ側の worktree。taskd はここだけを触り、commit はしない。
+pub struct WorktreeView { pub project: String, pub dir: String, pub branch: String }
 /// Phase 10（ADR-0016 D2）: 1 回の `delegate`（`Event::Delegated`）の要約。`tasks` は子の現在の状態（消えた ID は落とす）。
 pub struct DelegatedView { pub run_id: String, pub ts: String, pub tasks: Vec<TaskRef> }
 pub struct Timers { pub now: String, pub lease_expires_at: Option<String>, pub backoff_until: Option<String>,

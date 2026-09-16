@@ -1,7 +1,11 @@
-# taskd-gui
+# taskd-gui（このリポジトリの `gui/`）
 
-taskd（`../agent-platform`、環境変数 `TASKD_REPO` で上書き可）の Web GUI。React + Remix（= React Router 8 framework mode、SSR）の Node サーバが BFF として
+taskd の Web GUI。React + Remix（= React Router 8 framework mode、SSR）の Node サーバが BFF として
 taskd の HTTP API v1 を呼ぶ。SQLite には触らない。
+
+taskd 本体はこのディレクトリの親（`..`、環境変数 `TASKD_REPO` で上書き可）にある **同じ git リポジトリ**（ADR-0020）。
+同居していても境界は変わらない: **GUI から taskd に入る依存は作らない**（Rust のコードを読み書きしない、`crates/` を import しない、
+DB を開かない）。契約は `docs/taskd-api-v1.md` と `app/taskd/types.ts` だけ。
 
 ## 最初に読むもの（毎セッション）
 1. `docs/DESIGN.md` — 設計。§6 アーキテクチャ、§8 セキュリティ、§10 のフェーズと受け入れ条件。ここに書かれた設計原則とフェーズ順は変更しない
@@ -17,7 +21,7 @@ taskd の HTTP API v1 を呼ぶ。SQLite には触らない。
   - `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`（G1 以降は `pnpm e2e` も）を実行し、出力の要点を報告に含める
   - `pnpm gen:types && git diff --exit-code app/taskd/types.ts` が差分ゼロであることを確認する
   - `docs/PROGRESS.md` を更新（完了日、証拠コマンドと結果、監査結果、未解決事項、提案、taskd への依頼）
-  - `git add -A && git commit -m "phase G<N>: <summary>"`
+  - `git add -A . && git commit -m "phase G<N>: <summary>"`（**`.` を付ける**。taskd 側の変更を巻き込まないため。ADR-0020 D3）
 - 同じアプローチを 3 回失敗したら、`docs/PROGRESS.md` に状況を書き、報告本文で人間に質問する
 - **taskd の API が足りない・仕様と違うと分かったら、GUI 側で回避しない。** `docs/taskd-requests.md` に「エンドポイント / 期待（`docs/taskd-api-v1.md` の節）/ 実際（`curl` の出力）/ できないこと」を書き、
   `docs/PROGRESS.md` に `## Phase G<N> — BLOCKED` を書いてコミットし、止まる

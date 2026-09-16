@@ -2352,3 +2352,30 @@ TASKD_CLUSTER_HOST=pegasus TASKD_CLUSTER_PROJECT=/work/NBB/rmaeda/workspace/rust
 - P-60 は解決（worktree を採用）。`rsync_includes` とリモート専用モードは実装しない。
 - P-61（新）: `worktree_paths` を指定したとき、受け入れ条件のコマンドが sparse-checkout の外を参照すると失敗する。
   いまは人が `worktree_paths` を正しく選ぶ前提。必要になったら「判定の前だけ sparse を解く」などを検討する。
+
+## ADR-0020: taskd と GUI を 1 つのリポジトリに（2026-09-16）
+
+人間の指示「taskd と taskd-gui が別々のプロジェクトなのは使いづらいので、一つの directory にまとめて git も一つで管理できるようにして下さい」。
+
+### やったこと
+
+- `git subtree add --prefix=gui`（squash しない）で `/home/rmaeda/workspace/taskd-gui` を取り込んだ。
+  **GUI の 14 コミットはそのまま残り**、追跡ファイルは取り込み前の `main` と完全一致（`git ls-tree -r` の比較）。
+  コミット数 34（taskd）+ 14（GUI）+ 1（マージ）= **56**。
+- 無視されている作業物（`node_modules` 255 MB、`build`、`dist`、`.react-router`、`test-results`、`.run`）は `gui/` へ移した
+  （`gui/.gitignore` がそのまま効くので、リポジトリには入らない）。
+- 経路の既定値（ADR-0020 D3）: `run-gphases.sh` の `GUI_REPO` → `$TASKD_REPO/gui`、bootstrap は `package.json` の有無で判定して
+  `git init` をしない（gui/ が taskd の中なら親リポジトリにコミットする）、`gui/scripts/gen-types.mjs` と `gui/scripts/taskd.sh` の
+  `TASKD_REPO` 既定 → `gui/` の親、`gui/CLAUDE.md` のコミット手順 → `git add -A .`（taskd 側を巻き込まない）。
+- `scripts/sync-gui-docs.sh`（ADR-0020 D4）を各フェーズの前に実行するようにし、`docs/gui/api.md` → `gui/docs/taskd-api-v1.md` を同期した
+  （ADR-0019 の worktree の節が GUI 側の写しに反映された）。
+- ルートに `README.md` を追加（構成図、ディレクトリ表、起動手順、クラスタの `sync` の選び方）。
+- `docs/DESIGN.md` の「別プロジェクト `taskd-gui`」という記述を「`gui/`（別プロセス・別言語、依存は作らない）」に直した。
+
+### 証拠（すべて新しい配置で実行）
+
+- `cargo test --workspace`: 40 個の test binary すべて `ok`、0 failed。
+- GUI: `pnpm lint` exit 0（96 files）/ `pnpm typecheck` exit 0 / `pnpm test` **147 passed**（20 files）/ `pnpm build` exit 0 /
+  `pnpm e2e` **62 passed（5.8 分）** / `pnpm gen:types` 差分ゼロ（`gui/` の親を自動で見る）。
+- `git check-ignore`: `gui/node_modules` / `gui/build` / `gui/.react-router` は `gui/.gitignore` で無視されている。
+- 旧ディレクトリは `/home/rmaeda/workspace/taskd-gui.merged-2026-09-16` に改名して残した（取り込みを確認したら人が消してよい）。

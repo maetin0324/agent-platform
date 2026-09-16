@@ -9,7 +9,7 @@
   採用した提案の番号を本文中に `（P-n）` で示す
 - 2026-09-14 改訂 2: 連続 requeue の上限（P-40, ADR-0011）と、複数アカウント運用・evidence の任意化・`taskctl worker run`
   （P-41, ADR-0012）を反映し、Phase 8 を追加（いずれも人間の許可による）
-- 2026-09-14 改訂 3: Web GUI（別プロジェクト `taskd-gui`）のために、taskd の HTTP API 層（§5.10）と基盤（`task-ops`、SQLite の WAL と
+- 2026-09-14 改訂 3: Web GUI（`gui/`。当時は別プロジェクト `taskd-gui`。2026-09-16 に ADR-0020 で同じリポジトリへ）のために、taskd の HTTP API 層（§5.10）と基盤（`task-ops`、SQLite の WAL と
   スキーマ版数、events のグローバル id）を追加し、Phase 9 を追加（ADR-0013。人間の方針「GUI のために taskd の変更が必要なら変更する」による）
 
 ---
@@ -62,7 +62,7 @@
 
 API 層（§5.10）: `axum`（HTTP/JSON + SSE）。taskd のプロセス内で `[api]` 設定時だけ動く。
 
-禁止: Web UI（別プロジェクト `taskd-gui`。taskd は §5.10 の HTTP API までを提供する）、ORM、分散DB、メッセージブローカー。
+禁止: Web UI（`gui/` の別プロセス・別言語。taskd の Rust 側は §5.10 の HTTP API までを提供する。同じリポジトリでも依存は作らない。ADR-0020）、ORM、分散DB、メッセージブローカー。
 
 ---
 
@@ -372,7 +372,7 @@ taskctl worker run --config <taskd.toml> --task <id> [--provider <id> | --adapte
 
 ### 5.10 API 層（`task-api`。ADR-0013）
 
-Web GUI（別プロジェクト `taskd-gui`。Remix のサーバが BFF として呼ぶ）と `curl` のための HTTP API。仕様の詳細は `docs/gui/api.md`、
+Web GUI（`gui/`。Remix のサーバが BFF として呼ぶ別プロセス）と `curl` のための HTTP API。仕様の詳細は `docs/gui/api.md`、
 型の JSON Schema は `docs/api/v1/*.schema.json`（コミットし、生成との一致をテストする）。
 
 - **位置**: taskd のデーモンプロセス内で、設定 `[api]`（`listen`、`token_file`、`allowed_hosts`）があるときだけリッスンする（既定は無効）。
@@ -473,7 +473,7 @@ LLM を使う実機確認は、認証が使える環境ならエージェント�
 
 ### Phase 9 — GUI のための基盤と HTTP API 層
 
-（人間の依頼により追加。ADR-0013。GUI 本体は別プロジェクト `taskd-gui` で、`run-gphases.sh` により G フェーズとして進める）
+（人間の依頼により追加。ADR-0013。GUI 本体は `gui/`（ADR-0020 以前は別リポジトリ `taskd-gui`）で、`run-gphases.sh` により G フェーズとして進める）
 
 - 9a 基盤: SQLite の WAL・busy_timeout・スキーマ版数、`events` のグローバル id と `events_since`、`task-ops` の抽出、`Event` の JSON Schema、
   `ProviderThrottled` の記録、一覧のページング
@@ -560,7 +560,7 @@ taskd は `ControlMaster` の多重接続を借りるだけ（対話的な認証
 
 ### 非目標（本プロジェクトではやらない）
 
-Web UI（HTTP API 層は §5.10 で本プロジェクトの範囲。UI は別プロジェクト `taskd-gui`）、予算・残量推定、残量推定に基づく複数アカウントの自動切替、マルチユーザ、通知。これらは接続層・供給層の担当。
+Web UI（HTTP API 層は §5.10 で Rust 側の範囲。UI は `gui/` の別プロセス）、予算・残量推定、残量推定に基づく複数アカウントの自動切替、マルチユーザ、通知。これらは接続層・供給層の担当。
 （**リモートワークスペースの実装は非目標から外した**。人間の当初の狙い「複数クラスタへのタスク投入」に必要なため、Phase 12 / ADR-0018 で本プロジェクトの範囲とする。
 ジョブスケジューラ経由の投入と、クラスタ側に taskd を常駐させる構成は引き続き採らない。）
 （設定表の順に従う決定的なフォールバック — 並列度の上限・cooldown 中のアカウントを飛ばすこと — は Phase 8 で本プロジェクトの範囲とした。どのアカウントをどれだけ使うかの最適化は供給層が `ProviderPolicy` を差し替えて行う。）
