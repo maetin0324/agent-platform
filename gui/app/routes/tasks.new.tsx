@@ -1,6 +1,21 @@
 import { useRef, useState } from "react";
 import { data, Form, redirect, useNavigation } from "react-router";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
+import { StatusBadge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
+import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import {
+  checkboxClass,
+  chipLabelClass,
+  hintClass,
+  inputClass,
+  labelClass,
+  selectClass,
+  textareaClass,
+} from "~/components/ui/form";
+import { Icon } from "~/components/ui/Icon";
+import { EmptyState, PageHeader } from "~/components/ui/misc";
+import { cn } from "~/lib/utils";
 import type { CreateFailure } from "~/taskd/action-types";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
@@ -219,245 +234,261 @@ export default function NewTaskPage({ loaderData, actionData }: Route.ComponentP
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold">タスク作成</h1>
+      <PageHeader
+        icon="plus"
+        title="タスク作成"
+        description="NewTaskSpec を taskd にそのまま送信します。入力の検証は taskd 側で行われます。"
+      />
       <ErrorFlash error={error} />
 
       <Form method="post" data-testid="new-task-form" className="space-y-6">
-        <div>
-          <label htmlFor="title" className="block text-sm font-medium">
-            title
-          </label>
-          <input id="title" name="title" type="text" className="mt-1 w-full rounded border px-2 py-1 text-sm" />
-          <FieldErrors error={error} field="title" />
-        </div>
+        <Card>
+          <CardHeader icon="file" title="基本" description="タスクの名前と目的" />
+          <CardBody className="space-y-4">
+            <div>
+              <label htmlFor="title" className={labelClass}>
+                title
+              </label>
+              <input id="title" name="title" type="text" className={cn(inputClass, "mt-1.5")} />
+              <p className={cn(hintClass, "mt-1")}>タスク一覧・詳細に表示される短い名前。</p>
+              <FieldErrors error={error} field="title" />
+            </div>
 
-        <div>
-          <label htmlFor="objective" className="block text-sm font-medium">
-            objective
-          </label>
-          <textarea id="objective" name="objective" rows={4} className="mt-1 w-full rounded border px-2 py-1 text-sm" />
-          <FieldErrors error={error} field="objective" />
-        </div>
+            <div>
+              <label htmlFor="objective" className={labelClass}>
+                objective
+              </label>
+              <textarea id="objective" name="objective" rows={4} className={cn(textareaClass, "mt-1.5 w-full")} />
+              <p className={cn(hintClass, "mt-1")}>担当するエージェントに渡す目的の説明。</p>
+              <FieldErrors error={error} field="objective" />
+            </div>
+          </CardBody>
+        </Card>
 
-        <fieldset>
-          <legend className="text-sm font-medium">受け入れ条件</legend>
-          <div className="mt-2 space-y-2">
-            {rows.map((row) => (
-              <div key={row.id} data-testid="criterion-row" className="flex items-center gap-2">
-                <select
-                  name="criterion_type"
-                  aria-label="受け入れ条件の種類"
-                  value={row.type}
-                  onChange={(e) => updateRow(row.id, { type: e.target.value as CriterionSpec["type"] })}
-                  className="rounded border px-2 py-1 text-sm"
+        <Card>
+          <CardHeader icon="checkCircle" title="受け入れ条件" description="taskd が完了を判定する条件（1 つ以上）" />
+          <CardBody className="space-y-3">
+            <fieldset className="space-y-2">
+              <legend className="sr-only">受け入れ条件</legend>
+              {rows.map((row) => (
+                <div
+                  key={row.id}
+                  data-testid="criterion-row"
+                  className="flex flex-col gap-2 rounded-lg border border-border bg-surface-2/50 p-3 sm:flex-row sm:items-center"
                 >
-                  {CRITERION_TYPES.map((opt) => (
+                  <select
+                    name="criterion_type"
+                    aria-label="受け入れ条件の種類"
+                    value={row.type}
+                    onChange={(e) => updateRow(row.id, { type: e.target.value as CriterionSpec["type"] })}
+                    className={cn(selectClass, "sm:w-44")}
+                  >
+                    {CRITERION_TYPES.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    name="criterion_value"
+                    aria-label="受け入れ条件の内容"
+                    type="text"
+                    value={row.value}
+                    onChange={(e) => updateRow(row.id, { value: e.target.value })}
+                    className={cn(inputClass, "flex-1")}
+                    placeholder={row.type === "command" ? "cargo test" : "text"}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    data-testid="remove-criterion"
+                    onClick={() => removeRow(row.id)}
+                    className="self-end sm:self-auto"
+                  >
+                    <Icon name="x" />
+                    削除
+                  </Button>
+                </div>
+              ))}
+            </fieldset>
+            <Button type="button" variant="secondary" size="sm" data-testid="add-criterion" onClick={addRow}>
+              <Icon name="plus" />
+              条件を追加
+            </Button>
+            <FieldErrors error={error} field="acceptance" />
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader icon="settings" title="分類・設定" description="種別・優先度・担当ロールなど" />
+          <CardBody>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <div>
+                <label htmlFor="kind" className={labelClass}>
+                  kind
+                </label>
+                <select id="kind" name="kind" defaultValue="execute" className={cn(selectClass, "mt-1.5 w-full")}>
+                  {KIND_OPTIONS.map((opt) => (
                     <option key={opt.value} value={opt.value}>
                       {opt.label}
                     </option>
                   ))}
                 </select>
-                <input
-                  name="criterion_value"
-                  aria-label="受け入れ条件の内容"
-                  type="text"
-                  value={row.value}
-                  onChange={(e) => updateRow(row.id, { value: e.target.value })}
-                  className="flex-1 rounded border px-2 py-1 text-sm"
-                  placeholder={row.type === "command" ? "cargo test" : "text"}
-                />
-                <button
-                  type="button"
-                  data-testid="remove-criterion"
-                  onClick={() => removeRow(row.id)}
-                  className="rounded border px-2 py-1 text-sm text-gray-600"
-                >
-                  削除
-                </button>
               </div>
-            ))}
-          </div>
-          <button
-            type="button"
-            data-testid="add-criterion"
-            onClick={addRow}
-            className="mt-2 rounded border px-2 py-1 text-sm"
-          >
-            条件を追加
-          </button>
-          <FieldErrors error={error} field="acceptance" />
-        </fieldset>
-
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <div>
-            <label htmlFor="kind" className="block text-sm font-medium">
-              kind
-            </label>
-            <select
-              id="kind"
-              name="kind"
-              defaultValue="execute"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            >
-              {KIND_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label htmlFor="tier" className="block text-sm font-medium">
-              tier
-            </label>
-            <select
-              id="tier"
-              name="tier"
-              defaultValue="standard"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            >
-              {TIER_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label htmlFor="adapter" className="block text-sm font-medium">
-              adapter
-            </label>
-            <input id="adapter" name="adapter" type="text" className="mt-1 w-full rounded border px-2 py-1 text-sm" />
-          </div>
-          <div>
-            <label htmlFor="priority" className="block text-sm font-medium">
-              priority
-            </label>
-            <input
-              id="priority"
-              name="priority"
-              type="number"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-          </div>
-          <div>
-            <label htmlFor="role" className="block text-sm font-medium">
-              role
-            </label>
-            <input
-              id="role"
-              name="role"
-              type="text"
-              list="role-options"
-              data-testid="role-input"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-            <datalist id="role-options">
-              {(config.roles ?? []).map((r) => (
-                <option key={r.id} value={r.id} />
-              ))}
-            </datalist>
-          </div>
-          <div className="flex items-center gap-2 sm:col-span-1">
-            <input id="aggregate" name="aggregate" type="checkbox" data-testid="aggregate-checkbox" />
-            <label htmlFor="aggregate" className="text-sm font-medium">
-              aggregate（委譲した子が全て終わったら集約 run を 1 回行う）
-            </label>
-          </div>
-        </div>
-
-        <div>
-          <label htmlFor="parent" className="block text-sm font-medium">
-            parent（id）
-          </label>
-          <input id="parent" name="parent" type="text" className="mt-1 w-full rounded border px-2 py-1 text-sm" />
-          <FieldErrors error={error} field="parent" />
-        </div>
-
-        <fieldset>
-          <legend className="text-sm font-medium">depends_on</legend>
-          {candidates.items.length === 0 ? (
-            <p className="mt-1 text-sm text-gray-500">候補はありません。</p>
-          ) : (
-            <div className="mt-1 max-h-48 space-y-1 overflow-y-auto rounded border p-2 text-sm">
-              {candidates.items.map((item) => (
-                <label key={item.id} className="flex items-center gap-2">
-                  <input type="checkbox" name="depends_on" value={item.id} />
-                  {item.title}（{item.status}）
+              <div>
+                <label htmlFor="tier" className={labelClass}>
+                  tier
                 </label>
-              ))}
+                <select id="tier" name="tier" defaultValue="standard" className={cn(selectClass, "mt-1.5 w-full")}>
+                  {TIER_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="adapter" className={labelClass}>
+                  adapter
+                </label>
+                <input id="adapter" name="adapter" type="text" className={cn(inputClass, "mt-1.5 w-full")} />
+              </div>
+              <div>
+                <label htmlFor="priority" className={labelClass}>
+                  priority
+                </label>
+                <input id="priority" name="priority" type="number" className={cn(inputClass, "mt-1.5 w-full")} />
+              </div>
+              <div className="col-span-2">
+                <label htmlFor="role" className={labelClass}>
+                  role
+                </label>
+                <input
+                  id="role"
+                  name="role"
+                  type="text"
+                  list="role-options"
+                  data-testid="role-input"
+                  className={cn(inputClass, "mt-1.5 w-full")}
+                />
+                <datalist id="role-options">
+                  {(config.roles ?? []).map((r) => (
+                    <option key={r.id} value={r.id} />
+                  ))}
+                </datalist>
+              </div>
+              <div className="col-span-2 sm:col-span-4">
+                <label htmlFor="aggregate" className={chipLabelClass}>
+                  <input
+                    id="aggregate"
+                    name="aggregate"
+                    type="checkbox"
+                    data-testid="aggregate-checkbox"
+                    className={checkboxClass}
+                  />
+                  aggregate（委譲した子が全て終わったら集約 run を 1 回行う）
+                </label>
+              </div>
             </div>
-          )}
-          <label htmlFor="depends_on_extra" className="mt-2 block text-xs text-gray-500">
-            追加の依存 id（空白またはカンマ区切り）
-          </label>
-          <input
-            id="depends_on_extra"
-            name="depends_on_extra"
-            type="text"
-            className="mt-1 w-full rounded border px-2 py-1 text-sm"
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader
+            icon="gitBranch"
+            title="依存・ワークスペース"
+            description="親タスク・依存タスク・作業ディレクトリ"
           />
-          <FieldErrors error={error} field="depends_on" />
-        </fieldset>
+          <CardBody className="space-y-4">
+            <div>
+              <label htmlFor="parent" className={labelClass}>
+                parent（id）
+              </label>
+              <input id="parent" name="parent" type="text" className={cn(inputClass, "mt-1.5 w-full")} />
+              <FieldErrors error={error} field="parent" />
+            </div>
 
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <div>
-            <label htmlFor="max_turns" className="block text-sm font-medium">
-              max_turns
-            </label>
-            <input
-              id="max_turns"
-              name="max_turns"
-              type="number"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-          </div>
-          <div>
-            <label htmlFor="max_wall_secs" className="block text-sm font-medium">
-              max_wall_secs
-            </label>
-            <input
-              id="max_wall_secs"
-              name="max_wall_secs"
-              type="number"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-          </div>
-          <div>
-            <label htmlFor="max_retries" className="block text-sm font-medium">
-              max_retries
-            </label>
-            <input
-              id="max_retries"
-              name="max_retries"
-              type="number"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-          </div>
-          <div>
-            <label htmlFor="workspace" className="block text-sm font-medium">
-              workspace
-            </label>
-            <input
-              id="workspace"
-              name="workspace"
-              type="text"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-          </div>
+            <fieldset>
+              <legend className={labelClass}>depends_on</legend>
+              {candidates.items.length === 0 ? (
+                <EmptyState className="mt-2 py-4" title="候補はありません。" />
+              ) : (
+                <div className="mt-1.5 max-h-48 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
+                  {candidates.items.map((item) => (
+                    <label
+                      key={item.id}
+                      className="flex items-center gap-2 rounded-md px-1.5 py-1 text-sm text-fg hover:bg-surface-2/60"
+                    >
+                      <input type="checkbox" name="depends_on" value={item.id} className={checkboxClass} />
+                      <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                      <StatusBadge status={item.status} />
+                    </label>
+                  ))}
+                </div>
+              )}
+              <label htmlFor="depends_on_extra" className={cn(hintClass, "mt-2 block")}>
+                追加の依存 id（空白またはカンマ区切り）
+              </label>
+              <input
+                id="depends_on_extra"
+                name="depends_on_extra"
+                type="text"
+                className={cn(inputClass, "mt-1.5 w-full")}
+              />
+              <FieldErrors error={error} field="depends_on" />
+            </fieldset>
+
+            <div>
+              <label htmlFor="workspace" className={labelClass}>
+                workspace
+              </label>
+              <input id="workspace" name="workspace" type="text" className={cn(inputClass, "mt-1.5 w-full")} />
+              <p className={cn(hintClass, "mt-1")}>
+                workspace は <code className="font-mono">{config.workspace_root}</code> からの相対パス（空ならタスク
+                id）。
+              </p>
+            </div>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader icon="clock" title="予算" description="実行のターン数・時間・再試行の上限" />
+          <CardBody>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+              <div>
+                <label htmlFor="max_turns" className={labelClass}>
+                  max_turns
+                </label>
+                <input id="max_turns" name="max_turns" type="number" className={cn(inputClass, "mt-1.5 w-full")} />
+              </div>
+              <div>
+                <label htmlFor="max_wall_secs" className={labelClass}>
+                  max_wall_secs
+                </label>
+                <input
+                  id="max_wall_secs"
+                  name="max_wall_secs"
+                  type="number"
+                  className={cn(inputClass, "mt-1.5 w-full")}
+                />
+              </div>
+              <div>
+                <label htmlFor="max_retries" className={labelClass}>
+                  max_retries
+                </label>
+                <input id="max_retries" name="max_retries" type="number" className={cn(inputClass, "mt-1.5 w-full")} />
+              </div>
+            </div>
+          </CardBody>
+        </Card>
+
+        <div className="flex justify-end">
+          <Button type="submit" variant="primary" size="md" data-testid="submit" disabled={submitting}>
+            <Icon name="send" />
+            作成
+          </Button>
         </div>
-        <p className="text-xs text-gray-500">
-          workspace は <code>{config.workspace_root}</code> からの相対パス（空ならタスク id）。
-        </p>
-
-        <button
-          type="submit"
-          data-testid="submit"
-          disabled={submitting}
-          className="rounded border bg-gray-900 px-4 py-2 text-sm text-white disabled:opacity-50"
-        >
-          作成
-        </button>
       </Form>
     </div>
   );

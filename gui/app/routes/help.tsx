@@ -1,4 +1,13 @@
+import type { ReactNode } from "react";
 import { Link } from "react-router";
+import { StatusBadge } from "~/components/ui/badge";
+import { Card, CardBody } from "~/components/ui/card";
+import { tableClass, tdClass, thClass, theadClass, trHoverClass } from "~/components/ui/form";
+import { Icon, type IconName } from "~/components/ui/Icon";
+import { PageHeader } from "~/components/ui/misc";
+import type { Tone } from "~/components/ui/tone";
+import { TONE_ICON_WRAP } from "~/components/ui/tone";
+import { cn } from "~/lib/utils";
 import type { Route } from "./+types/help";
 
 /**
@@ -69,57 +78,100 @@ const GLOSSARY: { term: string; text: string }[] = [
   },
 ];
 
+const TOC = [
+  { id: "flow", heading: "3 分で分かる流れ", icon: "play" },
+  { id: "screens", heading: "画面ごとの説明", icon: "layers" },
+  { id: "acceptance", heading: "受け入れ条件", icon: "checkCircle" },
+  { id: "status", heading: "状態", icon: "activity" },
+  { id: "glossary", heading: "用語集", icon: "book" },
+  { id: "trouble", heading: "困ったとき", icon: "help" },
+] satisfies { id: string; heading: string; icon: IconName }[];
+
+const SCREENS: { href: string | null; icon: IconName; title: string; text: string }[] = [
+  {
+    href: "/",
+    icon: "inbox",
+    title: "受信箱",
+    text: "人間の対応が要る項目（承認待ち・質問・受け入れ待ちの draft・注意）だけを集めた画面。まずここを開く。",
+  },
+  {
+    href: "/tasks",
+    icon: "list",
+    title: "一覧",
+    text: "全タスクを状態・条件で絞り込んで見る画面。特定のタスクを探すときに開く。",
+  },
+  {
+    href: null,
+    icon: "file",
+    title: "詳細（/tasks/<id>）",
+    text: "1 件のタスクの受け入れ条件・run・イベントの流れ・成果物を見る画面。一覧や受信箱から個々のタスクを開くと表示される。",
+  },
+  {
+    href: "/graph",
+    icon: "network",
+    title: "DAG",
+    text: "タスク同士の依存関係と Plan の親子関係を図で見る画面。全体の進み具合を俯瞰したいときに開く。",
+  },
+  {
+    href: "/providers",
+    icon: "cpu",
+    title: "プロバイダ",
+    text: "各アカウントの利用状況（done / requeue の件数、トークン、cooldown）を見る画面。動きが遅い・偏っていると感じたら開く。",
+  },
+  {
+    href: "/clusters",
+    icon: "server",
+    title: "クラスタ",
+    text: "リモートで実行するタスクが使う `[[clusters]]` の接続状況（connected・cooldown）を見る画面。受信箱の「クラスタに接続できません」から開くことが多い。",
+  },
+  {
+    href: "/daemon",
+    icon: "activity",
+    title: "デーモン",
+    text: "taskd 本体の状態（pid・tick・実行中の run・承認待ち・経路なしのタスク）と replay を見る画面。taskd 自体の様子を確認したいときに開く。",
+  },
+];
+
 export default function HelpPage() {
   return (
-    <div className="max-w-3xl space-y-10">
-      <h1 className="text-xl font-semibold">使い方</h1>
+    <div className="max-w-3xl space-y-8">
+      <PageHeader
+        as="h1"
+        icon="book"
+        title="使い方"
+        description="taskd-gui の使い方をひとまとめにしたドキュメントです。"
+      />
 
-      <nav aria-label="使い方の目次" className="text-sm">
-        <ul className="flex flex-wrap gap-x-4 gap-y-1 text-blue-700">
-          <li>
-            <a href="#flow" className="hover:underline">
-              3 分で分かる流れ
-            </a>
-          </li>
-          <li>
-            <a href="#screens" className="hover:underline">
-              画面ごとの説明
-            </a>
-          </li>
-          <li>
-            <a href="#acceptance" className="hover:underline">
-              受け入れ条件
-            </a>
-          </li>
-          <li>
-            <a href="#status" className="hover:underline">
-              状態
-            </a>
-          </li>
-          <li>
-            <a href="#glossary" className="hover:underline">
-              用語集
-            </a>
-          </li>
-          <li>
-            <a href="#trouble" className="hover:underline">
-              困ったとき
-            </a>
-          </li>
+      <nav aria-label="使い方の目次" className="rounded-xl border border-border bg-surface-2/50 p-3">
+        <ul className="flex flex-wrap gap-1.5 text-sm">
+          {TOC.map((item) => (
+            <li key={item.id}>
+              <a
+                href={`#${item.id}`}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-1.5 font-medium text-fg-muted shadow-xs transition-colors hover:border-primary-border hover:bg-primary-soft hover:text-primary-soft-fg"
+              >
+                <Icon name={item.icon} className="size-3.5 text-fg-subtle" />
+                {item.heading}
+              </a>
+            </li>
+          ))}
         </ul>
       </nav>
 
-      <section aria-labelledby="flow" data-testid="help-flow-section">
-        <h2 id="flow" className="text-lg font-semibold">
-          3 分で分かる流れ
-        </h2>
-        <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">
+      <Section id="flow" icon="play" tone="primary" heading="3 分で分かる流れ" testId="help-flow-section">
+        <ol className="list-decimal space-y-1.5 pl-5 text-sm text-fg">
           <li>
-            <Link to="/tasks/new" className="hover:underline">
+            <Link
+              to="/tasks/new"
+              className="text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+            >
               タスクを作る
             </Link>
             （または{" "}
-            <Link to="/plans/new" className="hover:underline">
+            <Link
+              to="/plans/new"
+              className="text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+            >
               Plan を作る
             </Link>
             ）
@@ -129,217 +181,227 @@ export default function HelpPage() {
           <li>taskd が受け入れ条件を自分で判定する（ワーカーの自己申告は信じない。再実行して確かめる）</li>
           <li>条件を満たせば done。満たせなければ requeue して再試行するか failed になる</li>
         </ol>
-        <p className="mt-2 text-sm text-gray-600">
-          人間が触るのは<strong>承認・回答・取り消し</strong>だけ。何をいつ動かすかは taskd が決める。
+        <p className="mt-3 text-sm text-fg-muted">
+          人間が触るのは<strong className="font-semibold text-fg">承認・回答・取り消し</strong>だけ。何をいつ動かすかは
+          taskd が決める。
         </p>
-      </section>
+      </Section>
 
-      <section aria-labelledby="screens" data-testid="help-screens-section">
-        <h2 id="screens" className="text-lg font-semibold">
-          画面ごとの説明
-        </h2>
-        <dl className="mt-2 space-y-3 text-sm">
-          <div>
-            <dt className="font-semibold">
-              <Link to="/" className="hover:underline">
-                受信箱
-              </Link>
-            </dt>
-            <dd>
-              人間の対応が要る項目（承認待ち・質問・受け入れ待ちの draft・注意）だけを集めた画面。まずここを開く。
-            </dd>
-          </div>
-          <div>
-            <dt className="font-semibold">
-              <Link to="/tasks" className="hover:underline">
-                一覧
-              </Link>
-            </dt>
-            <dd>全タスクを状態・条件で絞り込んで見る画面。特定のタスクを探すときに開く。</dd>
-          </div>
-          <div>
-            <dt className="font-semibold">詳細（/tasks/&lt;id&gt;）</dt>
-            <dd>
-              1
-              件のタスクの受け入れ条件・run・イベントの流れ・成果物を見る画面。一覧や受信箱から個々のタスクを開くと表示される。
-            </dd>
-          </div>
-          <div>
-            <dt className="font-semibold">
-              <Link to="/graph" className="hover:underline">
-                DAG
-              </Link>
-            </dt>
-            <dd>タスク同士の依存関係と Plan の親子関係を図で見る画面。全体の進み具合を俯瞰したいときに開く。</dd>
-          </div>
-          <div>
-            <dt className="font-semibold">
-              <Link to="/providers" className="hover:underline">
-                プロバイダ
-              </Link>
-            </dt>
-            <dd>
-              各アカウントの利用状況（done / requeue
-              の件数、トークン、cooldown）を見る画面。動きが遅い・偏っていると感じたら開く。
-            </dd>
-          </div>
-          <div>
-            <dt className="font-semibold">
-              <Link to="/clusters" className="hover:underline">
-                クラスタ
-              </Link>
-            </dt>
-            <dd>
-              リモートで実行するタスクが使う `[[clusters]]`
-              の接続状況（connected・cooldown）を見る画面。受信箱の「クラスタに接続できません」から開くことが多い。
-            </dd>
-          </div>
-          <div>
-            <dt className="font-semibold">
-              <Link to="/daemon" className="hover:underline">
-                デーモン
-              </Link>
-            </dt>
-            <dd>
-              taskd 本体の状態（pid・tick・実行中の run・承認待ち・経路なしのタスク）と replay を見る画面。taskd
-              自体の様子を確認したいときに開く。
-            </dd>
-          </div>
-        </dl>
-      </section>
-
-      <section aria-labelledby="acceptance" data-testid="help-acceptance-section">
-        <h2 id="acceptance" className="text-lg font-semibold">
-          受け入れ条件
-        </h2>
-        <p className="mt-2 text-sm text-gray-600">
-          タスクの受け入れ条件（acceptance）は 4 種類。<strong>判定は taskd が自分で再実行して確かめる</strong>
-          （ワーカーが「テストを通した」と言っても、それだけでは信じない）。
-        </p>
-        <dl className="mt-2 space-y-2 text-sm">
-          <div>
-            <dt className="font-mono font-semibold">command</dt>
-            <dd>
-              シェルコマンドを実行し、終了コードが期待値（既定 0）と一致すれば通る。 例:{" "}
-              <code className="text-xs">{'{"type":"command","cmd":"cargo test","expect_exit":0}'}</code>
-            </dd>
-          </div>
-          <div>
-            <dt className="font-mono font-semibold">artifact_exists</dt>
-            <dd>
-              指定した名前の成果物が taskd に登録されていれば通る。 例:{" "}
-              <code className="text-xs">{'{"type":"artifact_exists","name":"bench.json"}'}</code>
-            </dd>
-          </div>
-          <div>
-            <dt className="font-mono font-semibold">reviewer</dt>
-            <dd>
-              別立てのレビュー run（自動）が判定する。人間の承認ではない。 例:{" "}
-              <code className="text-xs">{'{"type":"reviewer","text":"the diff is minimal"}'}</code>
-            </dd>
-          </div>
-          <div>
-            <dt className="font-mono font-semibold">human</dt>
-            <dd>
-              人間が Approval の子タスクで承認／却下して判定する（
-              <Link to="/" className="hover:underline">
-                受信箱
-              </Link>
-              の「承認待ち」に出る）。 例:{" "}
-              <code className="text-xs">{'{"type":"human","text":"reviewer is happy"}'}</code>
-            </dd>
-          </div>
-        </dl>
-      </section>
-
-      <section aria-labelledby="status" data-testid="help-status-section">
-        <h2 id="status" className="text-lg font-semibold">
-          状態
-        </h2>
-        <table className="mt-2 w-full text-left text-sm">
-          <thead>
-            <tr className="text-xs text-gray-500">
-              <th className="pr-2">状態</th>
-              <th className="pr-2">意味</th>
-              <th className="pr-2">人間ができること</th>
-            </tr>
-          </thead>
-          <tbody>
-            {STATUS_ROWS.map((row) => (
-              <tr key={row.status}>
-                <td className="pr-2 font-mono">{row.status}</td>
-                <td className="pr-2">{row.meaning}</td>
-                <td className="pr-2">{row.canDo}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-
-      <section aria-labelledby="glossary" data-testid="help-glossary-section">
-        <h2 id="glossary" className="text-lg font-semibold">
-          用語集
-        </h2>
-        <dl className="mt-2 space-y-2 text-sm">
-          {GLOSSARY.map((entry) => (
-            <div key={entry.term}>
-              <dt className="font-semibold">{entry.term}</dt>
-              <dd>{entry.text}</dd>
+      <Section id="screens" icon="layers" tone="teal" heading="画面ごとの説明" testId="help-screens-section">
+        <dl className="divide-y divide-border">
+          {SCREENS.map((s) => (
+            <div key={s.title} className="py-3 first:pt-0 last:pb-0">
+              <dt className="flex items-center gap-3 font-semibold text-fg">
+                <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-surface-2 text-fg-subtle ring-1 ring-border">
+                  <Icon name={s.icon} className="size-4" />
+                </span>
+                {s.href ? (
+                  <Link to={s.href} className="hover:underline">
+                    {s.title}
+                  </Link>
+                ) : (
+                  s.title
+                )}
+              </dt>
+              <dd className="mt-0.5 pl-11 text-sm text-fg-muted">{s.text}</dd>
             </div>
           ))}
         </dl>
-      </section>
+      </Section>
 
-      <section aria-labelledby="trouble" data-testid="help-trouble-section">
-        <h2 id="trouble" className="text-lg font-semibold">
-          困ったとき
-        </h2>
-        <dl className="mt-2 space-y-2 text-sm">
+      <Section
+        id="acceptance"
+        icon="checkCircle"
+        tone="success"
+        heading="受け入れ条件"
+        testId="help-acceptance-section"
+      >
+        <p className="text-sm text-fg-muted">
+          タスクの受け入れ条件（acceptance）は 4 種類。
+          <strong className="font-semibold text-fg">判定は taskd が自分で再実行して確かめる</strong>
+          （ワーカーが「テストを通した」と言っても、それだけでは信じない）。
+        </p>
+        <dl className="mt-3 space-y-3 text-sm">
           <div>
-            <dt className="font-semibold">taskd が止まっている</dt>
-            <dd>
+            <dt>
+              <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-xs font-semibold text-fg">
+                command
+              </code>
+            </dt>
+            <dd className="mt-1 text-fg-muted">
+              シェルコマンドを実行し、終了コードが期待値（既定 0）と一致すれば通る。 例:{" "}
+              <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-xs">
+                {'{"type":"command","cmd":"cargo test","expect_exit":0}'}
+              </code>
+            </dd>
+          </div>
+          <div>
+            <dt>
+              <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-xs font-semibold text-fg">
+                artifact_exists
+              </code>
+            </dt>
+            <dd className="mt-1 text-fg-muted">
+              指定した名前の成果物が taskd に登録されていれば通る。 例:{" "}
+              <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-xs">
+                {'{"type":"artifact_exists","name":"bench.json"}'}
+              </code>
+            </dd>
+          </div>
+          <div>
+            <dt>
+              <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-xs font-semibold text-fg">
+                reviewer
+              </code>
+            </dt>
+            <dd className="mt-1 text-fg-muted">
+              別立てのレビュー run（自動）が判定する。人間の承認ではない。 例:{" "}
+              <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-xs">
+                {'{"type":"reviewer","text":"the diff is minimal"}'}
+              </code>
+            </dd>
+          </div>
+          <div>
+            <dt>
+              <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-xs font-semibold text-fg">human</code>
+            </dt>
+            <dd className="mt-1 text-fg-muted">
+              人間が Approval の子タスクで承認／却下して判定する（
+              <Link
+                to="/"
+                className="text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+              >
+                受信箱
+              </Link>
+              の「承認待ち」に出る）。 例:{" "}
+              <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-xs">
+                {'{"type":"human","text":"reviewer is happy"}'}
+              </code>
+            </dd>
+          </div>
+        </dl>
+      </Section>
+
+      <Section id="status" icon="activity" tone="info" heading="状態" testId="help-status-section">
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className={tableClass}>
+            <thead className={theadClass}>
+              <tr>
+                <th className={thClass}>状態</th>
+                <th className={thClass}>意味</th>
+                <th className={thClass}>人間ができること</th>
+              </tr>
+            </thead>
+            <tbody>
+              {STATUS_ROWS.map((row) => (
+                <tr key={row.status} className={trHoverClass}>
+                  <td className={tdClass}>
+                    <StatusBadge status={row.status} />
+                  </td>
+                  <td className={cn(tdClass, "text-fg-muted")}>{row.meaning}</td>
+                  <td className={cn(tdClass, "text-fg-muted")}>{row.canDo}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Section>
+
+      <Section id="glossary" icon="book" tone="neutral" heading="用語集" testId="help-glossary-section">
+        <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
+          {GLOSSARY.map((entry) => (
+            <div key={entry.term}>
+              <dt className="font-semibold text-fg">{entry.term}</dt>
+              <dd className="mt-0.5 text-fg-muted">{entry.text}</dd>
+            </div>
+          ))}
+        </dl>
+      </Section>
+
+      <Section id="trouble" icon="help" tone="warning" heading="困ったとき" testId="help-trouble-section">
+        <dl className="divide-y divide-border text-sm">
+          <div className="py-3 first:pt-0">
+            <dt className="font-semibold text-fg">taskd が止まっている</dt>
+            <dd className="mt-0.5 text-fg-muted">
               画面上部に「taskd に接続できません」という赤い帯が出て操作できなくなる。5
               秒ごとに自動で再接続を試みるので、taskd を起動すれば自動で消える。
             </dd>
           </div>
-          <div>
-            <dt className="font-semibold">401</dt>
-            <dd>
+          <div className="py-3">
+            <dt className="font-semibold text-fg">401</dt>
+            <dd className="mt-0.5 text-fg-muted">
               taskd への認証（トークン）が無い・違う場合はバナーで知らせる。GUI
               自身のログインが切れている場合、通常のページはログイン画面に 戻るが、SSE や成果物の取得はその場で 401
               になる。
             </dd>
           </div>
-          <div>
-            <dt className="font-semibold">403</dt>
-            <dd>不正なリクエスト元（CSRF）として拒否された、またはファイルの参照先がワークスペースの外に出ている。</dd>
+          <div className="py-3">
+            <dt className="font-semibold text-fg">403</dt>
+            <dd className="mt-0.5 text-fg-muted">
+              不正なリクエスト元（CSRF）として拒否された、またはファイルの参照先がワークスペースの外に出ている。
+            </dd>
           </div>
-          <div>
-            <dt className="font-semibold">409</dt>
-            <dd>
+          <div className="py-3">
+            <dt className="font-semibold text-fg">409</dt>
+            <dd className="mt-0.5 text-fg-muted">
               他の人・他のタブが先に状態を変えた、またはその状態ではその操作ができない。画面が最新の状態に更新されるので、それを見て操作をやり直す。
             </dd>
           </div>
-          <div>
-            <dt className="font-semibold">422</dt>
-            <dd>入力内容が taskd の検証に落ちた。フォームの該当欄の下にメッセージが出る。</dd>
+          <div className="py-3">
+            <dt className="font-semibold text-fg">422</dt>
+            <dd className="mt-0.5 text-fg-muted">
+              入力内容が taskd の検証に落ちた。フォームの該当欄の下にメッセージが出る。
+            </dd>
           </div>
-          <div>
-            <dt className="font-semibold">run のログと成果物の見方</dt>
-            <dd>
+          <div className="py-3">
+            <dt className="font-semibold text-fg">run のログと成果物の見方</dt>
+            <dd className="mt-0.5 text-fg-muted">
               タスク詳細の run 一覧から個々の run
               を開くと標準出力・標準エラー・判定結果が見える。成果物はタスク詳細の一覧から開く／保存する。
             </dd>
           </div>
-          <div>
-            <dt className="font-semibold">docs/taskd-requests.md に書く場面</dt>
-            <dd>
+          <div className="py-3 last:pb-0">
+            <dt className="font-semibold text-fg">docs/taskd-requests.md に書く場面</dt>
+            <dd className="mt-0.5 text-fg-muted">
               taskd の応答が `docs/taskd-api-v1.md` の記載と違う、または足りないと分かったとき、GUI
               側の開発者がそこに現象と証拠を記録して taskd 側に依頼する（GUI では回避しない）。
             </dd>
           </div>
         </dl>
-      </section>
+      </Section>
     </div>
+  );
+}
+
+/** 節（3 分で分かる流れ・画面ごとの説明・…）の共通の見た目。見出しの id・文字列、section の data-testid は呼び出し側が渡す。 */
+function Section({
+  id,
+  icon,
+  tone,
+  heading,
+  testId,
+  children,
+}: {
+  id: string;
+  icon: IconName;
+  tone: Tone;
+  heading: string;
+  testId: string;
+  children: ReactNode;
+}) {
+  return (
+    <section aria-labelledby={id} data-testid={testId} className="scroll-mt-20">
+      <Card>
+        <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+          <span className={cn("grid size-8 shrink-0 place-items-center rounded-lg", TONE_ICON_WRAP[tone])}>
+            <Icon name={icon} className="size-4" />
+          </span>
+          <h2 id={id} className="text-[0.95rem] font-semibold text-fg">
+            {heading}
+          </h2>
+        </div>
+        <CardBody>{children}</CardBody>
+      </Card>
+    </section>
   );
 }

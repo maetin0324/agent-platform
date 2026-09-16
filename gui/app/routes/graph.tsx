@@ -1,9 +1,15 @@
-import { ReactFlow } from "@xyflow/react";
+import { Background, Controls, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
 import { Form, isRouteErrorResponse, useSearchParams } from "react-router";
 import { HelpLink } from "~/components/HelpLink";
+import { Button } from "~/components/ui/button";
+import { Card, CardBody } from "~/components/ui/card";
+import { inputClass, labelClass } from "~/components/ui/form";
+import { Icon } from "~/components/ui/Icon";
+import { PageHeader } from "~/components/ui/misc";
 import { layoutGraph } from "~/lib/graph-layout";
+import { cn } from "~/lib/utils";
 import { TaskdBanner } from "~/root";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
@@ -62,51 +68,73 @@ export default function GraphPage({ loaderData }: Route.ComponentProps) {
   const [searchParams] = useSearchParams();
 
   return (
-    <div className="flex h-[calc(100vh-10rem)] flex-col gap-2">
-      <h1 className="text-xl font-semibold">
-        DAG
-        <HelpLink anchor="screens" label="画面ごとの説明" />
-      </h1>
-      <Form method="get" className="flex flex-wrap items-end gap-3 text-sm" data-testid="graph-filter-form">
-        <label className="flex flex-col gap-1">
-          root
-          <input name="root" defaultValue={searchParams.get("root") ?? ""} className="rounded border px-2 py-1" />
-        </label>
-        <label className="flex flex-col gap-1">
-          depth
-          <input
-            name="depth"
-            type="number"
-            min={0}
-            defaultValue={searchParams.get("depth") ?? ""}
-            className="w-20 rounded border px-2 py-1"
-          />
-        </label>
-        <button type="submit" className="rounded border px-3 py-1">
-          絞り込み
-        </button>
-      </Form>
-      <p className="text-xs text-gray-500" data-testid="graph-summary">
+    <div className="flex h-[calc(100vh-8rem)] min-h-[36rem] flex-col gap-4">
+      <PageHeader
+        as="h1"
+        icon="network"
+        title={
+          <>
+            DAG
+            <HelpLink anchor="screens" label="画面ごとの説明" />
+          </>
+        }
+        description="depends_on の辺と親子関係をグラフで表示します（GET /graph をそのまま描画。レイアウト・色分けは表示のためだけ）。"
+        className="shrink-0 pb-0"
+      />
+
+      <Card className="shrink-0">
+        <CardBody>
+          <Form method="get" className="flex flex-wrap items-end gap-3 text-sm" data-testid="graph-filter-form">
+            <label className="flex flex-col gap-1">
+              <span className={labelClass}>root</span>
+              <input name="root" defaultValue={searchParams.get("root") ?? ""} className={cn(inputClass, "w-64")} />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className={labelClass}>depth</span>
+              <input
+                name="depth"
+                type="number"
+                min={0}
+                defaultValue={searchParams.get("depth") ?? ""}
+                className={cn(inputClass, "w-20")}
+              />
+            </label>
+            <Button type="submit" variant="primary" size="sm">
+              <Icon name="filter" />
+              絞り込み
+            </Button>
+          </Form>
+        </CardBody>
+      </Card>
+
+      <p className="shrink-0 text-xs text-fg-subtle" data-testid="graph-summary">
         {graph.nodes.length} ノード / {graph.edges.length} 辺
       </p>
-      <div className="flex-1 rounded border" data-testid="graph-canvas">
-        {mounted ? (
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            fitView
-            proOptions={{ hideAttribution: true }}
-            nodesConnectable={false}
-          />
-        ) : (
-          <div
-            className="flex h-full items-center justify-center text-sm text-gray-500"
-            data-testid="graph-placeholder"
-          >
-            読み込み中…
-          </div>
-        )}
-      </div>
+
+      <Card className="flex-1 overflow-hidden">
+        <div className="h-full w-full" data-testid="graph-canvas">
+          {mounted ? (
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              fitView
+              proOptions={{ hideAttribution: true }}
+              nodesConnectable={false}
+              colorMode="system"
+            >
+              <Background gap={18} size={1} />
+              <Controls />
+            </ReactFlow>
+          ) : (
+            <div
+              className="flex h-full items-center justify-center text-sm text-fg-subtle"
+              data-testid="graph-placeholder"
+            >
+              読み込み中…
+            </div>
+          )}
+        </div>
+      </Card>
     </div>
   );
 }
@@ -126,14 +154,14 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
         <h1 className="text-xl font-semibold">
           {data.status === 404 ? "タスクが見つかりません" : `エラー ${data.status}`}
         </h1>
-        <p className="mt-2 text-sm text-gray-600">{data.detail}</p>
+        <p className="mt-2 text-sm text-fg-muted">{data.detail}</p>
       </main>
     );
   }
   return (
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
-      <p className="mt-2 text-sm text-gray-600">予期しないエラーが起きました。</p>
+      <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
     </main>
   );
 }

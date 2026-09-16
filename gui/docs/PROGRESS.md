@@ -895,3 +895,42 @@ taskd 側 ADR-0022 の決定（人間の回答）に合わせた小さな追加�
   `POST /api/v1/providers/{id}/check` を叩いた後だけ。taskd を再起動すると「未確認」に戻る（メモリ上の観測値）。
 - 証拠: `e2e/g4.spec.ts` に「叩いていないアカウントは未確認」を追加。`pnpm lint` / `typecheck` / `build` exit 0、
   `pnpm test` 151 passed、`pnpm e2e` **63 passed**、`pnpm gen:types` 差分ゼロ。
+
+## 追補 3: 画面デザインの刷新（2026-09-16）
+
+人間の依頼「taskd-gui の画面デザインが簡素すぎるので現代のウェブサイトのデザインくらいリッチにして下さい」。フェーズではなく見た目だけの変更
+（ルート・loader / action・API 呼び出し・data-testid・表示文字列・見出しレベルは変えない）。設計判断は `docs/adr/0011-visual-design-system.md`。
+
+### 成果物
+
+- `app/app.css`: セマンティックなデザイントークン（CSS 変数 → Tailwind 4 の `@theme inline`）、`prefers-color-scheme` によるダークモード、
+  日本語向けシステムフォントのフォールバック、`.markdown` の本文スタイル、背景の淡いグラデーション。
+- `app/components/ui/`（新規）: `Icon`（直書き SVG、aria-hidden）/ `button`（`Button`・`buttonClass`）/ `card` / `badge`（`StatusBadge`・`KindBadge`・`RoleLabel`）/
+  `misc`（`PageHeader`・`SectionTitle`・`EmptyState`・`Alert`・`StatCard`・`DataList`）/ `form`（入力・表のクラス）/ `tone`。**新しい依存は無し**。
+- `app/root.tsx`: 左サイドバー（グループ分けしたナビ・現在地の強調・承認待ちバッジ・taskd の接続状態・ログアウト）、狭い画面では上部の横スクロールバー。
+  同じリンク・data-testid を 2 つ描かない（ADR-0011 D3）。エラー画面をカード化。
+- 全画面（受信箱・一覧・詳細・run・作成・Plan・デーモン・プロバイダ・クラスタ・DAG・使い方・ログイン）をカード・バッジ・アイコン・空状態で作り直した。
+  DAG は React Flow の `colorMode="system"`・Background・Controls、ノード色をトークンに揃え、キャンバスを `min-h-[36rem]` にした。CodeMirror はトークンのテーマ。
+- `e2e/g3.spec.ts-snapshots/graph-basic-chromium-linux.png`: 見た目の変更に合わせてベースラインを更新（`--update-snapshots` はこのテストだけ。更新後の画像を目視確認）。
+
+### 途中で直したこと（e2e が見つけたもの）
+
+- `/help` の a11y（g6）: (1) 表示時のフェードインで不透明度を変えていたため、axe が途中の薄い文字色を測って color-contrast 4.2 になった →
+  アニメーションは位置だけにした。(2) `<dl>` 直下の `<div>` にアイコンの `<span>` があり definition-list 違反 → アイコンを `<dt>` の中へ。
+  (3) 本文中のリンクが色だけで区別されていた（link-in-text-block）→ 下線を付けた。
+- DAG のキャンバスが 1280×720 で 324px と低くなった → 高さの計算と最小高さを見直した。
+
+### 証拠
+
+- `pnpm lint` exit 0（105 files）/ `pnpm typecheck` exit 0 / `pnpm test` **152 passed**（21 ファイル）/ `pnpm build` exit 0 / `pnpm gen:types` 後 `git diff --exit-code app/taskd/types.ts` 差分ゼロ。
+- `pnpm e2e`（この環境のメモリ監視でフルスイートのバックグラウンド実行が止められるため spec ごとに前景で実行。最終コードで）:
+  g0 5 / g1 8 / g2 8 / g3 5 / g4 5 / g5-a11y 12 / g5 7 / g5-release 1 / g6 5 / g7 3 = **59 passed、0 failed**。
+  **g7 のクラスタ 4 件は未実行**: `fixture clusters` が `~/.ssh/config` の `taskd-localhost`（localhost への ssh 多重接続、ADR-0010 D1）を前提にしており、
+  このホスト（home-dev）には無いため `taskd.sh: no ssh control master for 'taskd-localhost'` で fixture を作れない（1 failed + 3 did not run）。
+  代わりに実運用の taskd（pegasus / sirius、未接続）に対して `/clusters` をログインして開き、2 枚のカード・`disconnected`・ログイン案内の表示をライト / ダークで目視確認した。
+- ライト / ダーク両方の全画面スクリーンショットを目視確認（1440×900）。
+
+### 未解決事項
+
+- A3-U1: g7 のクラスタ 4 件をこのホストで回すには、人が `taskd-localhost` の ssh 設定（`HostName 127.0.0.1`・ControlMaster）と `ssh -MNf taskd-localhost` を用意する必要がある。
+- A3-U2: ダークモードは OS の設定に従うだけで、画面上の切り替えは無い（ADR-0011 D1）。

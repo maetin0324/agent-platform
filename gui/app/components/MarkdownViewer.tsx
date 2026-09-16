@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
  */
 export function MarkdownViewer({ content }: { content: string }) {
   return (
-    <div data-testid="markdown-viewer">
+    <div data-testid="markdown-viewer" className="markdown rounded-lg border border-border bg-surface p-4">
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
     </div>
   );

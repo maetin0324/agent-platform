@@ -1,10 +1,14 @@
 import { isRouteErrorResponse } from "react-router";
 import { HelpLink } from "~/components/HelpLink";
+import { Badge } from "~/components/ui/badge";
+import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import type { Tone } from "~/components/ui/tone";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import type { Clusters } from "~/taskd/types";
+import type { Clusters, ClusterView } from "~/taskd/types";
 import type { Route } from "./+types/clusters";
 
 /**
@@ -43,68 +47,93 @@ export default function ClustersPage({ loaderData }: Route.ComponentProps) {
 
   return (
     <div className="space-y-8">
-      <h1 className="text-xl font-semibold">
-        クラスタ
-        <HelpLink anchor="screens" label="画面ごとの説明" />
-      </h1>
+      <PageHeader
+        icon="server"
+        title={
+          <>
+            クラスタ
+            <HelpLink anchor="screens" label="画面ごとの説明" />
+          </>
+        }
+        description="リモートクラスタの接続状態・並列度・cooldown をまとめて確認します。"
+      />
 
-      <section aria-labelledby="clusters-heading" data-testid="clusters-section">
-        <h2 id="clusters-heading" className="text-lg font-semibold">
+      <section aria-labelledby="clusters-heading" data-testid="clusters-section" className="space-y-4">
+        <SectionTitle icon="server" id="clusters-heading" count={clusters.items.length}>
           クラスタ一覧
-        </h2>
+        </SectionTitle>
         {clusters.items.length === 0 ? (
-          <p className="mt-2 text-sm text-gray-500">クラスタがありません</p>
+          <EmptyState icon="server" title="クラスタがありません">
+            `[[clusters]]` を設定すると、接続状態や並列度がここに表示されます。
+          </EmptyState>
         ) : (
-          <ul className="mt-2 space-y-4">
+          <div className="grid gap-4 xl:grid-cols-2">
             {clusters.items.map((item) => (
-              <li
-                key={item.id}
-                data-testid="cluster-row"
-                data-cluster-id={item.id}
-                className="rounded border p-3 text-sm"
-              >
-                <dl className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
-                  <DlItem label="id" value={item.id} testId="cluster-id" />
-                  <DlItem label="host" value={item.host} testId="cluster-host" />
-                  <DlItem
-                    label="connected"
-                    value={item.connected === true ? "connected" : item.connected === false ? "disconnected" : "-"}
-                    testId="cluster-connected"
-                  />
-                  <DlItem label="cooldown until" value={item.cooldown_until ?? "-"} testId="cluster-cooldown-until" />
-                  <DlItem
-                    label="in_use"
-                    value={item.in_use == null ? "-" : String(item.in_use)}
-                    testId="cluster-in-use"
-                  />
-                  <DlItem label="concurrency" value={String(item.concurrency)} testId="cluster-concurrency" />
-                  <DlItem label="sync" value={item.sync} testId="cluster-sync" />
-                  <DlItem label="delete_on_push" value={String(item.delete_on_push)} testId="cluster-delete-on-push" />
-                </dl>
-
-                {item.connected === false && (
-                  <div
-                    className="mt-2 rounded border border-red-300 bg-red-50 p-2 text-sm"
-                    data-testid="cluster-login-hint"
-                  >
-                    手元で `scripts/cluster-login.sh {item.host}` を実行してください
-                  </div>
-                )}
-              </li>
+              <ClusterCard key={item.id} item={item} />
             ))}
-          </ul>
+          </div>
         )}
       </section>
     </div>
   );
 }
 
-function DlItem({ label, value, testId }: { label: string; value: string; testId?: string }) {
+function ClusterCard({ item }: { item: ClusterView }) {
+  const tone: Tone = item.connected === true ? "success" : item.connected === false ? "danger" : "neutral";
+  const connectedLabel = item.connected === true ? "connected" : item.connected === false ? "disconnected" : "-";
+
   return (
-    <div>
-      <dt className="text-xs text-gray-500">{label}</dt>
-      <dd data-testid={testId}>{value}</dd>
-    </div>
+    <Card data-testid="cluster-row" data-cluster-id={item.id} className="hover:shadow-md">
+      <CardHeader
+        icon="server"
+        tone={tone}
+        title={
+          <Mono className="text-sm font-semibold text-fg" data-testid="cluster-id">
+            {item.id}
+          </Mono>
+        }
+        description={
+          <span data-testid="cluster-host" className="break-all">
+            {item.host}
+          </span>
+        }
+        actions={
+          <Badge tone={tone} dot pulse={item.connected === true} data-testid="cluster-connected">
+            {connectedLabel}
+          </Badge>
+        }
+      />
+      <CardBody className="space-y-4">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3">
+          <DataItem label="sync">
+            <span data-testid="cluster-sync">{item.sync}</span>
+          </DataItem>
+          <DataItem label="concurrency">
+            <span data-testid="cluster-concurrency">{item.concurrency}</span>
+          </DataItem>
+          <DataItem label="in_use">
+            <span data-testid="cluster-in-use">{item.in_use == null ? "-" : item.in_use}</span>
+          </DataItem>
+          <DataItem label="cooldown until">
+            <span data-testid="cluster-cooldown-until" className="text-fg-subtle">
+              {item.cooldown_until ?? "-"}
+            </span>
+          </DataItem>
+          <DataItem label="delete_on_push">
+            <span data-testid="cluster-delete-on-push">{String(item.delete_on_push)}</span>
+          </DataItem>
+        </dl>
+
+        {item.connected === false && (
+          <Alert tone="danger" title="未接続です" data-testid="cluster-login-hint">
+            <p>手元で次のコマンドを実行してください（2 要素認証を通して多重接続を張ります）。</p>
+            <pre className="mt-2 overflow-x-auto rounded-lg border border-danger-border bg-surface px-3 py-2 font-mono text-xs text-fg">
+              scripts/cluster-login.sh {item.host}
+            </pre>
+          </Alert>
+        )}
+      </CardBody>
+    </Card>
   );
 }
 
@@ -125,7 +154,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     return (
       <main className="p-4">
         <h1 className="text-xl font-semibold">エラー {data.status}</h1>
-        <p className="mt-2 text-sm text-gray-600">{data.detail}</p>
+        <p className="mt-2 text-sm text-fg-muted">{data.detail}</p>
       </main>
     );
   }
@@ -133,7 +162,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   return (
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
-      <p className="mt-2 text-sm text-gray-600">予期しないエラーが起きました。</p>
+      <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
     </main>
   );
 }

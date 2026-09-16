@@ -7,11 +7,17 @@ import {
   Outlet,
   Scripts,
   ScrollRestoration,
+  useLocation,
   useRevalidator,
   useRouteLoaderData,
 } from "react-router";
 import { authCheck, sessionContext } from "~/auth.server";
+import { Badge } from "~/components/ui/badge";
+import { buttonClass } from "~/components/ui/button";
+import { Icon, type IconName } from "~/components/ui/Icon";
+import { Alert } from "~/components/ui/misc";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
+import { cn } from "~/lib/utils";
 import { version as guiVersion } from "../package.json";
 import type { Route } from "./+types/root";
 import "./app.css";
@@ -70,10 +76,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="color-scheme" content="light dark" />
         <Meta />
         <Links />
       </head>
-      <body className="min-h-screen bg-white text-gray-900">
+      <body className="min-h-screen bg-bg font-sans text-fg antialiased">
         {children}
         <ScrollRestoration nonce={nonce} />
         <Scripts nonce={nonce} />
@@ -105,114 +112,263 @@ export default function App({ loaderData }: Route.ComponentProps) {
   // 未認証（/login）: ナビゲーションもフッタも出さない（docs/adr/0008 D5）
   if (!session.authenticated) {
     return (
-      <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-4">
+      <div className="flex min-h-screen flex-col px-4">
         <Outlet />
       </div>
     );
   }
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-4">
-      <header className="flex items-center justify-between border-b py-3">
-        <a href="/" className="text-lg font-semibold">
-          taskd-gui
-        </a>
-        <nav className="flex items-center gap-4 text-sm text-gray-600">
-          <a href="/" className="hover:underline">
-            受信箱
-            {counts && counts.approvals > 0 && (
-              <span
-                data-testid="approvals-badge"
-                className="ml-1 rounded-full bg-red-600 px-1.5 py-0.5 text-xs font-semibold text-white"
-              >
-                {counts.approvals}
-              </span>
+    <div className="min-h-screen lg:grid lg:grid-cols-[16rem_1fr]">
+      <Sidebar
+        approvals={counts?.approvals ?? 0}
+        connected={!disconnected && problem === null}
+        taskdVersion={health?.taskd_version ?? null}
+        logoutEnabled={session.enabled}
+      />
+      <div className="flex min-w-0 flex-col">
+        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
+          {showBanner && <TaskdBanner taskdApiUrl={gui.taskdApiUrl} problem={problem} />}
+          <div className="animate-fade-in">
+            <Outlet />
+          </div>
+        </main>
+        <footer
+          className="mx-auto w-full max-w-6xl border-t border-border px-4 py-5 text-xs text-fg-subtle sm:px-6 lg:px-10"
+          data-testid="footer"
+        >
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="font-medium text-fg-muted">taskd-gui {gui.version}</span>
+            {health && (
+              <>
+                <span aria-hidden="true">·</span>taskd {health.taskd_version} · api_version {health.api_version} ·
+                schema_version {health.schema_version}
+              </>
             )}
+          </p>
+          {health && (
+            <dl
+              className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 rounded-lg border border-border bg-surface/60 px-4 py-3 sm:grid-cols-4"
+              data-testid="health"
+            >
+              <div>
+                <dt className="text-fg-subtle">taskd_version</dt>
+                <dd className="font-mono text-fg-muted" data-testid="taskd_version">
+                  {health.taskd_version}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-fg-subtle">api_version</dt>
+                <dd className="font-mono text-fg-muted" data-testid="api_version">
+                  {health.api_version}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-fg-subtle">schema_version</dt>
+                <dd className="font-mono text-fg-muted" data-testid="schema_version">
+                  {health.schema_version}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-fg-subtle">db.journal_mode</dt>
+                <dd className="font-mono text-fg-muted" data-testid="journal_mode">
+                  {health.db.journal_mode}
+                  {health.db.journal_mode !== "wal" && (
+                    <Badge tone="warning" className="ml-2 font-sans">
+                      wal ではありません（設定不備）
+                    </Badge>
+                  )}
+                </dd>
+              </div>
+            </dl>
+          )}
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+type NavItem = { href: string; label: string; icon: IconName; badge?: "approvals" };
+
+/** ナビゲーションのグループ（docs/adr/0011 D3）。リンク先・文言は従来と同じ。 */
+const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
+  {
+    label: "作業",
+    items: [
+      { href: "/", label: "受信箱", icon: "inbox", badge: "approvals" },
+      { href: "/tasks", label: "一覧", icon: "list" },
+      { href: "/graph", label: "DAG", icon: "network" },
+    ],
+  },
+  {
+    label: "作成",
+    items: [
+      { href: "/tasks/new", label: "新規タスク", icon: "plus" },
+      { href: "/plans/new", label: "新規 Plan", icon: "sparkles" },
+    ],
+  },
+  {
+    label: "運用",
+    items: [
+      { href: "/daemon", label: "デーモン", icon: "activity" },
+      { href: "/providers", label: "プロバイダ", icon: "cpu" },
+      { href: "/clusters", label: "クラスタ", icon: "server" },
+    ],
+  },
+  { label: "ヘルプ", items: [{ href: "/help", label: "使い方", icon: "book" }] },
+];
+
+function isActive(pathname: string, href: string): boolean {
+  if (href === "/") return pathname === "/";
+  if (href === "/tasks") return pathname === "/tasks" || (pathname.startsWith("/tasks/") && pathname !== "/tasks/new");
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+function Sidebar({
+  approvals,
+  connected,
+  taskdVersion,
+  logoutEnabled,
+}: {
+  approvals: number;
+  connected: boolean;
+  taskdVersion: string | null;
+  logoutEnabled: boolean;
+}) {
+  const { pathname } = useLocation();
+  return (
+    <aside className="sticky top-0 z-30 border-b border-border bg-surface/80 backdrop-blur-xl lg:h-screen lg:border-r lg:border-b-0">
+      <div className="flex h-full flex-wrap items-center lg:flex-col lg:flex-nowrap lg:items-stretch lg:px-3 lg:py-5">
+        <div className="order-1 px-4 pt-3 lg:order-none lg:px-2 lg:pt-0">
+          <a href="/" className="group flex items-center gap-2.5 rounded-lg no-underline">
+            <span className="grid size-8 place-items-center rounded-lg bg-linear-to-br from-primary via-primary to-teal text-white shadow-md ring-1 ring-white/20 transition-transform group-hover:scale-105 dark:text-bg">
+              <Icon name="zap" className="size-4" strokeWidth={2.2} />
+            </span>
+            <span className="text-[0.95rem] font-bold tracking-tight text-fg">taskd-gui</span>
           </a>
-          <a href="/tasks" className="hover:underline">
-            一覧
-          </a>
-          <a href="/tasks/new" className="hover:underline">
-            新規タスク
-          </a>
-          <a href="/plans/new" className="hover:underline">
-            新規 Plan
-          </a>
-          <a href="/daemon" className="hover:underline">
-            デーモン
-          </a>
-          <a href="/providers" className="hover:underline">
-            プロバイダ
-          </a>
-          <a href="/clusters" className="hover:underline">
-            クラスタ
-          </a>
-          <a href="/graph" className="hover:underline">
-            DAG
-          </a>
-          <a href="/help" className="hover:underline">
-            使い方
-          </a>
-          {session.enabled && (
+        </div>
+
+        <nav
+          aria-label="メイン"
+          className="order-3 mt-2 flex w-full items-center gap-1 overflow-x-auto px-3 pb-2 lg:order-none lg:mt-7 lg:flex-1 lg:flex-col lg:items-stretch lg:gap-5 lg:overflow-visible lg:px-0 lg:pb-0"
+        >
+          {NAV_GROUPS.map((group) => (
+            <div key={group.label} className="contents lg:block">
+              <p className="hidden px-3 pb-1.5 text-[0.7rem] font-semibold uppercase tracking-wider text-fg-subtle lg:block">
+                {group.label}
+              </p>
+              <ul className="contents lg:flex lg:flex-col lg:gap-0.5">
+                {group.items.map((item) => {
+                  const active = isActive(pathname, item.href);
+                  return (
+                    <li key={item.href} className="shrink-0">
+                      <a
+                        href={item.href}
+                        aria-current={active ? "page" : undefined}
+                        className={cn(
+                          "group relative flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm font-medium no-underline transition-colors",
+                          active
+                            ? "bg-primary-soft text-primary-soft-fg"
+                            : "text-fg-muted hover:bg-surface-2 hover:text-fg",
+                        )}
+                      >
+                        {active && (
+                          <span
+                            aria-hidden="true"
+                            className="absolute inset-y-1.5 -left-3 hidden w-1 rounded-r-full bg-primary lg:block"
+                          />
+                        )}
+                        <Icon
+                          name={item.icon}
+                          className={cn("size-4", active ? "text-primary" : "text-fg-subtle group-hover:text-fg-muted")}
+                        />
+                        {item.label}
+                        {item.badge === "approvals" && approvals > 0 && (
+                          <span
+                            data-testid="approvals-badge"
+                            className="ml-auto min-w-5 rounded-full bg-danger px-1.5 py-0.5 text-center text-[0.7rem] leading-none font-bold text-white tabular-nums shadow-sm dark:text-bg"
+                          >
+                            {approvals}
+                          </span>
+                        )}
+                      </a>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </nav>
+
+        {/* 接続状態とログアウト。同じ要素を 2 つ描かない（data-testid の重複を避ける。docs/adr/0011 D3）ので、狭い画面では order で右上へ寄せる */}
+        <div className="order-2 ml-auto flex items-center gap-2 px-4 pt-3 lg:order-none lg:ml-0 lg:mt-4 lg:block lg:space-y-2 lg:border-t lg:border-border lg:px-1 lg:pt-4">
+          <ConnectionPill connected={connected} taskdVersion={taskdVersion} />
+          {logoutEnabled && (
             <Form method="post" action="/logout">
-              <button type="submit" data-testid="logout" className="hover:underline">
+              <button
+                type="submit"
+                data-testid="logout"
+                className="flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+              >
+                <Icon name="logout" className="size-4 text-fg-subtle" />
                 ログアウト
               </button>
             </Form>
           )}
-        </nav>
-      </header>
-      {showBanner && <TaskdBanner taskdApiUrl={gui.taskdApiUrl} problem={problem} />}
-      <main className="flex-1 py-4">
-        <Outlet />
-      </main>
-      <footer className="border-t py-2 text-xs text-gray-500" data-testid="footer">
-        taskd-gui {gui.version}
-        {health && (
-          <>
-            {" · "}taskd {health.taskd_version} · api_version {health.api_version} · schema_version{" "}
-            {health.schema_version}
-          </>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function ConnectionPill({
+  connected,
+  taskdVersion,
+  className,
+}: {
+  connected: boolean;
+  taskdVersion: string | null;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-2 rounded-lg border border-border bg-surface-2/60 px-3 py-2 text-xs text-fg-muted",
+        className,
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "size-2 rounded-full",
+          connected ? "bg-success text-success animate-pulse-dot" : "bg-danger text-danger",
         )}
-        {health && (
-          <dl className="mt-1 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-0.5" data-testid="health">
-            <dt>taskd_version</dt>
-            <dd data-testid="taskd_version">{health.taskd_version}</dd>
-            <dt>api_version</dt>
-            <dd data-testid="api_version">{health.api_version}</dd>
-            <dt>schema_version</dt>
-            <dd data-testid="schema_version">{health.schema_version}</dd>
-            <dt>db.journal_mode</dt>
-            <dd data-testid="journal_mode">
-              {health.db.journal_mode}
-              {health.db.journal_mode !== "wal" && (
-                <span className="ml-2 rounded bg-amber-100 px-1 text-amber-900">wal ではありません（設定不備）</span>
-              )}
-            </dd>
-          </dl>
-        )}
-      </footer>
+      />
+      <span className="font-medium text-fg">{connected ? "taskd 接続中" : "taskd 未接続"}</span>
+      {connected && taskdVersion && (
+        <span className="ml-auto hidden font-mono text-fg-subtle sm:inline">v{taskdVersion}</span>
+      )}
     </div>
   );
 }
 
 export function TaskdBanner({ taskdApiUrl, problem }: { taskdApiUrl: string; problem: string | null }) {
   return (
-    <div
+    <Alert
       role="alert"
       data-testid="taskd-banner"
-      className="my-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900"
+      tone="danger"
+      icon={problem ? "lock" : "wifiOff"}
+      className="mb-6"
+      title={problem ? `taskd が要求を拒否しました（${taskdApiUrl}）` : `taskd に接続できません（${taskdApiUrl}）`}
     >
-      <p className="font-semibold">
-        {problem ? `taskd が要求を拒否しました（${taskdApiUrl}）` : `taskd に接続できません（${taskdApiUrl}）`}
-      </p>
       <p>
         {problem
           ? `taskd の応答: ${problem}。TASKD_API_TOKEN_FILE が taskd の token_file と一致しているか確認してください。`
           : "taskd が起動しているか、TASKD_API_URL を確認してください。5 秒ごとに再接続を試みます。"}
         操作はできません。taskctl は従来どおり使えます。
       </p>
-    </div>
+    </Alert>
   );
 }
 
@@ -226,7 +382,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     const data = error.data as TaskdRouteErrorData;
     if (data.kind === "unavailable") {
       return (
-        <main className="container mx-auto p-4 pt-16">
+        <main className="mx-auto max-w-3xl p-4 pt-16">
           <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
@@ -234,7 +390,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     // taskd の 401（トークン無し・不一致）は接続不可と同じ形のバナーで知らせる（docs/adr/0008 D6）
     if (data.status === 401) {
       return (
-        <main className="container mx-auto p-4 pt-16">
+        <main className="mx-auto max-w-3xl p-4 pt-16">
           <TaskdBanner
             taskdApiUrl={rootData?.gui.taskdApiUrl ?? ""}
             problem={`${data.status} ${data.code ?? "unauthorized"}`}
@@ -243,9 +399,10 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       );
     }
     return (
-      <main className="container mx-auto p-4 pt-16">
-        <h1 className="text-xl font-semibold">{data.status === 404 ? "404" : `エラー ${data.status}`}</h1>
-        <p>{data.detail}</p>
+      <main className="mx-auto max-w-3xl p-4 pt-16">
+        <ErrorPanel title={data.status === 404 ? "404" : `エラー ${data.status}`}>
+          <p>{data.detail}</p>
+        </ErrorPanel>
       </main>
     );
   }
@@ -265,14 +422,31 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     stack = error.stack;
   }
   return (
-    <main className="container mx-auto p-4 pt-16">
-      <h1 className="text-xl font-semibold">{message}</h1>
-      <p>{details}</p>
-      {stack && (
-        <pre className="w-full overflow-x-auto p-4 text-xs">
-          <code>{stack}</code>
-        </pre>
-      )}
+    <main className="mx-auto max-w-3xl p-4 pt-16">
+      <ErrorPanel title={message}>
+        <p>{details}</p>
+        {stack && (
+          <pre className="mt-3 w-full overflow-x-auto rounded-lg border border-border bg-surface-2 p-4 text-xs">
+            <code>{stack}</code>
+          </pre>
+        )}
+      </ErrorPanel>
     </main>
+  );
+}
+
+function ErrorPanel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-2xl border border-border bg-surface p-8 shadow-md">
+      <span className="grid size-11 place-items-center rounded-xl bg-danger-soft text-danger-soft-fg ring-1 ring-danger-border">
+        <Icon name="alert" className="size-5" />
+      </span>
+      <h1 className="mt-4 text-2xl font-bold tracking-tight text-fg">{title}</h1>
+      <div className="mt-2 text-sm text-fg-muted">{children}</div>
+      <a href="/" className={buttonClass({ variant: "secondary", className: "mt-6" })}>
+        <Icon name="arrowLeft" />
+        受信箱へ戻る
+      </a>
+    </div>
   );
 }

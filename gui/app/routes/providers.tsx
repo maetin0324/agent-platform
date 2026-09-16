@@ -1,11 +1,15 @@
 import { isRouteErrorResponse } from "react-router";
 import { HelpLink } from "~/components/HelpLink";
+import { Badge } from "~/components/ui/badge";
+import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import type { Tone } from "~/components/ui/tone";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { TaskdBanner } from "~/root";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import type { Providers } from "~/taskd/types";
+import type { Providers, ProviderView } from "~/taskd/types";
 import type { Route } from "./+types/providers";
 
 /**
@@ -47,86 +51,128 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
 
   return (
     <div className="space-y-8">
-      <h1 className="text-xl font-semibold">
-        プロバイダ
-        <HelpLink anchor="screens" label="画面ごとの説明" />
-      </h1>
+      <PageHeader
+        icon="cpu"
+        title={
+          <>
+            プロバイダ
+            <HelpLink anchor="screens" label="画面ごとの説明" />
+          </>
+        }
+        description="接続先プロバイダの稼働状況・累積 usage・直近の疎通確認をまとめて確認します。"
+      />
 
-      <section aria-labelledby="providers-heading" data-testid="providers-section">
-        <h2 id="providers-heading" className="text-lg font-semibold">
+      <section aria-labelledby="providers-heading" data-testid="providers-section" className="space-y-4">
+        <SectionTitle icon="cpu" id="providers-heading" count={providers.items.length}>
           プロバイダ一覧
-        </h2>
+        </SectionTitle>
         {providers.items.length === 0 ? (
-          <p className="mt-2 text-sm text-gray-500">プロバイダがありません</p>
+          <EmptyState icon="cpu" title="プロバイダがありません" />
         ) : (
-          <ul className="mt-2 space-y-4">
+          <div className="grid gap-4 xl:grid-cols-2">
             {providers.items.map((item) => (
-              <li
-                key={item.id}
-                data-testid="provider-row"
-                data-provider-id={item.id}
-                className="rounded border p-3 text-sm"
-              >
-                <dl className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
-                  <DlItem label="id" value={item.id} />
-                  <DlItem label="adapter" value={item.adapter} />
-                  <DlItem label="tiers" value={item.tiers.join(", ")} />
-                  <DlItem label="concurrency" value={String(item.concurrency)} />
-                  <DlItem label="model" value={item.model ?? "-"} />
-                  <DlItem label="in_use" value={item.in_use == null ? "-" : String(item.in_use)} />
-                  <DlItem
-                    label="env_keys（キー名のみ）"
-                    value={item.env_keys.length > 0 ? item.env_keys.join(", ") : "-"}
-                  />
-                  {/* ADR-0022 D2: 直近の疎通確認。手動で `POST /providers/{id}/check` を叩いたときだけ入り、
-                      taskd を再起動すると消える（メモリ上の観測値）。 */}
-                  <DlItem
-                    label="最後の疎通確認"
-                    value={item.last_check ? `${item.last_check.result}（${item.last_check.at}）` : "未確認"}
-                    testId="provider-last-check"
-                  />
-                </dl>
-
-                <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
-                  <DlItem label="runs" value={String(item.stats.runs)} />
-                  <DlItem label="done" value={String(item.stats.done)} testId="provider-done" />
-                  <DlItem label="question" value={String(item.stats.question)} />
-                  <DlItem label="error" value={String(item.stats.error)} />
-                  <DlItem label="requeue" value={String(item.stats.requeue)} testId="provider-requeue" />
-                  <DlItem label="lease_expired" value={String(item.stats.lease_expired)} />
-                  <DlItem
-                    label="tokens (input+output)"
-                    value={String(item.stats.input_tokens + item.stats.output_tokens)}
-                    testId="provider-tokens"
-                  />
-                </dl>
-
-                {item.cooldown && (
-                  <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
-                    <DlItem label="cooldown reason" value={item.cooldown.reason} testId="provider-cooldown-reason" />
-                    <DlItem
-                      label="cooldown remaining"
-                      value={formatDuration(secondsBetween(fetchedAt, item.cooldown.until))}
-                      testId="provider-cooldown-remaining"
-                    />
-                    <DlItem label="cooldown until" value={item.cooldown.until} />
-                  </dl>
-                )}
-              </li>
+              <ProviderCard key={item.id} item={item} fetchedAt={fetchedAt} />
             ))}
-          </ul>
+          </div>
         )}
       </section>
     </div>
   );
 }
 
-function DlItem({ label, value, testId }: { label: string; value: string; testId?: string }) {
+function ProviderCard({ item, fetchedAt }: { item: ProviderView; fetchedAt: string }) {
+  const tone: Tone = item.cooldown ? "warning" : "success";
+
   return (
-    <div>
-      <dt className="text-xs text-gray-500">{label}</dt>
-      <dd data-testid={testId}>{value}</dd>
-    </div>
+    <Card data-testid="provider-row" data-provider-id={item.id} className="hover:shadow-md">
+      <CardHeader
+        icon="cpu"
+        tone={tone}
+        title={<Mono className="text-sm font-semibold text-fg">{item.id}</Mono>}
+        description={item.adapter}
+        actions={
+          <Badge tone={tone} dot pulse={!!item.cooldown}>
+            {item.cooldown ? "cooldown" : "利用可"}
+          </Badge>
+        }
+      />
+      <CardBody className="space-y-4">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3">
+          <DataItem label="tiers">
+            <div className="flex flex-wrap gap-1">
+              {item.tiers.map((tier) => (
+                <Badge key={tier} tone="neutral">
+                  {tier}
+                </Badge>
+              ))}
+            </div>
+          </DataItem>
+          <DataItem label="concurrency">{item.concurrency}</DataItem>
+          <DataItem label="model">{item.model ?? "-"}</DataItem>
+          <DataItem label="in_use">{item.in_use == null ? "-" : item.in_use}</DataItem>
+          <DataItem label="env_keys（キー名のみ）" wide>
+            {item.env_keys.length > 0 ? (
+              <div className="flex flex-wrap gap-1">
+                {item.env_keys.map((key) => (
+                  <Mono key={key} className="rounded bg-surface-2 px-1.5 py-0.5">
+                    {key}
+                  </Mono>
+                ))}
+              </div>
+            ) : (
+              "-"
+            )}
+          </DataItem>
+        </dl>
+
+        <dl className="grid grid-cols-3 gap-x-4 gap-y-3 text-sm sm:grid-cols-4">
+          <DataItem label="runs">{item.stats.runs}</DataItem>
+          <DataItem label="done">
+            <span data-testid="provider-done">{item.stats.done}</span>
+          </DataItem>
+          <DataItem label="question">{item.stats.question}</DataItem>
+          <DataItem label="error">{item.stats.error}</DataItem>
+          <DataItem label="requeue">
+            <span data-testid="provider-requeue">{item.stats.requeue}</span>
+          </DataItem>
+          <DataItem label="lease_expired">{item.stats.lease_expired}</DataItem>
+          <DataItem label="tokens (input+output)" wide>
+            <span data-testid="provider-tokens" className="tabular-nums">
+              {item.stats.input_tokens + item.stats.output_tokens}
+            </span>
+          </DataItem>
+        </dl>
+
+        {/* ADR-0022 D2: 直近の疎通確認。手動で `POST /providers/{id}/check` を叩いたときだけ入り、
+            taskd を再起動すると消える（メモリ上の観測値）。 */}
+        <Alert
+          tone={item.last_check ? (item.last_check.result === "ok" ? "success" : "danger") : "neutral"}
+          title="最後の疎通確認"
+        >
+          <span data-testid="provider-last-check">
+            {item.last_check ? `${item.last_check.result}（${item.last_check.at}）` : "未確認"}
+          </span>
+        </Alert>
+
+        {item.cooldown && (
+          <Alert tone="warning" title="cooldown">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
+              <DataItem label="reason">
+                <span data-testid="provider-cooldown-reason">{item.cooldown.reason}</span>
+              </DataItem>
+              <DataItem label="remaining">
+                <span data-testid="provider-cooldown-remaining" className="tabular-nums">
+                  {formatDuration(secondsBetween(fetchedAt, item.cooldown.until))}
+                </span>
+              </DataItem>
+              <DataItem label="until">
+                <span className="text-fg-subtle">{item.cooldown.until}</span>
+              </DataItem>
+            </dl>
+          </Alert>
+        )}
+      </CardBody>
+    </Card>
   );
 }
 
@@ -147,7 +193,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     return (
       <main className="p-4">
         <h1 className="text-xl font-semibold">エラー {data.status}</h1>
-        <p className="mt-2 text-sm text-gray-600">{data.detail}</p>
+        <p className="mt-2 text-sm text-fg-muted">{data.detail}</p>
       </main>
     );
   }
@@ -155,7 +201,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   return (
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
-      <p className="mt-2 text-sm text-gray-600">予期しないエラーが起きました。</p>
+      <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
     </main>
   );
 }

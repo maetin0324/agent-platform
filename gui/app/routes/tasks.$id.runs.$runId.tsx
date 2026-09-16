@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { isRouteErrorResponse, Link } from "react-router";
 import { CodeViewer } from "~/components/CodeViewer";
+import { Badge } from "~/components/ui/badge";
+import { buttonClass } from "~/components/ui/button";
+import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { Icon } from "~/components/ui/Icon";
+import { Alert } from "~/components/ui/misc";
 import { classifyStreamJsonLine, type FormattedLine } from "~/lib/stream-json";
 import { TaskdBanner } from "~/root";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
@@ -76,7 +81,7 @@ export async function loader({ params, request }: Route.LoaderArgs): Promise<Run
   }
 }
 
-/** `wc -l` と同じ数え方（末尾の改行 1 つは行として数えない）。 */
+/** `wc -l` と同じ数え方(末尾の改行 1 つは行として数えない)。 */
 function splitLines(content: string): string[] {
   const lines = content.split("\n");
   if (lines.at(-1) === "") lines.pop();
@@ -95,7 +100,7 @@ export default function RunDetailPage({ loaderData }: Route.ComponentProps) {
   const offsetRef = useRef(new TextEncoder().encode(stdout ?? "").length);
   const running = !run.finished_at;
 
-  // 実行中の run は `?offset=` で追尾する（DESIGN §4.3）。1 秒ごとに新着分だけ取りに行く。
+  // 実行中の run は `?offset=` で追尾する(DESIGN §4.3)。1 秒ごとに新着分だけ取りに行く。
   useEffect(() => {
     if (!running) return;
     let cancelled = false;
@@ -124,101 +129,177 @@ export default function RunDetailPage({ loaderData }: Route.ComponentProps) {
 
   return (
     <div className="space-y-6">
-      <p>
-        <Link to={`/tasks/${taskId}`}>← タスク詳細</Link>
-      </p>
-      <section data-testid="run-header">
-        <h1 className="text-xl font-semibold" data-testid="run-id">
-          run {run.run_id}
+      <Link
+        to={`/tasks/${taskId}`}
+        className="inline-flex items-center gap-1.5 text-sm font-medium text-fg-muted hover:text-fg"
+      >
+        <Icon name="arrowLeft" />← タスク詳細
+      </Link>
+
+      <section data-testid="run-header" className="rounded-2xl border border-border bg-surface p-6 shadow-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone={running ? "primary" : "neutral"} dot pulse={running}>
+            {running ? "実行中" : "終了"}
+          </Badge>
+          <Badge tone="neutral">{run.role}</Badge>
+        </div>
+        <h1 className="mt-2 text-xl font-semibold text-fg" data-testid="run-id">
+          run <span className="font-mono text-base text-fg-subtle">{run.run_id}</span>
         </h1>
-        <p className="text-sm text-gray-600">
+        <p className="mt-1 text-sm text-fg-muted">
           {run.adapter} / {run.provider ?? "-"} / {run.model} — {run.started_at} 〜 {run.finished_at ?? "実行中"}
         </p>
       </section>
 
       <section aria-labelledby="stdout-heading" data-testid="stdout-section">
-        <div className="flex items-center justify-between">
-          <h2 id="stdout-heading" className="text-lg font-semibold">
-            stdout.jsonl（{lines.length} 行）
-          </h2>
-          <button
-            type="button"
-            onClick={() => setRawMode((v) => !v)}
-            className="rounded border px-2 py-0.5 text-sm"
-            data-testid="stdout-toggle-raw"
-          >
-            {rawMode ? "構造化表示" : "生テキスト"}
-          </button>
-        </div>
-        {rawMode ? (
-          <CodeViewer content={lines.join("\n")} />
-        ) : (
-          <ul className="mt-2 space-y-1 text-sm" data-testid="stdout-lines">
-            {formatted.map((entry, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: 行は追尾で末尾に追加されるだけで並び替えない
-              <li key={i} data-testid="stdout-line" data-line-kind={entry.kind} className="rounded border p-1">
-                {entry.kind === "utterance" && <p>{entry.text}</p>}
-                {entry.kind === "tool" && (
-                  <p>
-                    <span className="font-mono text-xs text-gray-500">tool:</span> {entry.label}
-                    {entry.detail ? ` ${entry.detail}` : ""}
-                  </p>
-                )}
-                {entry.kind === "result" && (
-                  <p className={entry.isError ? "text-red-700" : "text-green-700"}>result: {entry.text}</p>
-                )}
-                {entry.kind === "raw" && <p className="font-mono text-xs">{entry.text}</p>}
-              </li>
-            ))}
-          </ul>
-        )}
+        <Card>
+          <CardHeader
+            icon="terminal"
+            title={
+              <h2 id="stdout-heading" className="text-[0.95rem] font-semibold text-fg">
+                stdout.jsonl（{lines.length} 行）
+              </h2>
+            }
+            actions={
+              <button
+                type="button"
+                onClick={() => setRawMode((v) => !v)}
+                className={buttonClass({ variant: "secondary", size: "xs" })}
+                data-testid="stdout-toggle-raw"
+              >
+                <Icon name="code" />
+                {rawMode ? "構造化表示" : "生テキスト"}
+              </button>
+            }
+          />
+          <CardBody className={rawMode ? "p-0" : undefined}>
+            {rawMode ? (
+              <CodeViewer content={lines.join("\n")} />
+            ) : (
+              <ul
+                className="space-y-1.5 rounded-lg bg-surface-2 p-3 font-mono text-xs leading-relaxed text-fg"
+                data-testid="stdout-lines"
+              >
+                {formatted.map((entry, i) => (
+                  <li
+                    // biome-ignore lint/suspicious/noArrayIndexKey: 行は追尾で末尾に追加されるだけで並び替えない
+                    key={i}
+                    data-testid="stdout-line"
+                    data-line-kind={entry.kind}
+                    className="rounded-md border border-border-strong/40 bg-surface/40 px-2.5 py-1.5"
+                  >
+                    {entry.kind === "utterance" && <p className="whitespace-pre-wrap">{entry.text}</p>}
+                    {entry.kind === "tool" && (
+                      <p>
+                        <span className="text-fg-subtle">tool:</span> {entry.label}
+                        {entry.detail ? ` ${entry.detail}` : ""}
+                      </p>
+                    )}
+                    {entry.kind === "result" && (
+                      <p className={entry.isError ? "text-danger" : "text-success"}>result: {entry.text}</p>
+                    )}
+                    {entry.kind === "raw" && <p className="text-fg-subtle">{entry.text}</p>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardBody>
+        </Card>
       </section>
 
       {stderr !== null && (
         <section aria-labelledby="stderr-heading" data-testid="stderr-section">
-          <h2 id="stderr-heading" className="text-lg font-semibold">
-            stderr.log（末尾）
-          </h2>
-          <CodeViewer content={stderrTail(stderr)} />
+          <Card>
+            <CardHeader
+              icon="alert"
+              tone="warning"
+              title={
+                <h2 id="stderr-heading" className="text-[0.95rem] font-semibold text-fg">
+                  stderr.log（末尾）
+                </h2>
+              }
+            />
+            <CardBody className="p-0">
+              <CodeViewer content={stderrTail(stderr)} />
+            </CardBody>
+          </Card>
         </section>
       )}
 
       {result !== null && (
         <section aria-labelledby="result-heading" data-testid="result-section">
-          <h2 id="result-heading" className="text-lg font-semibold">
-            result.json
-          </h2>
-          <CodeViewer content={result} json />
+          <Card>
+            <CardHeader
+              icon="checkCircle"
+              tone="success"
+              title={
+                <h2 id="result-heading" className="text-[0.95rem] font-semibold text-fg">
+                  result.json
+                </h2>
+              }
+            />
+            <CardBody className="p-0">
+              <CodeViewer content={result} json />
+            </CardBody>
+          </Card>
         </section>
       )}
 
       {/* ADR-0023 M1: claude-code / codex に実際に渡した文面。人が読むのはこちらが早い。 */}
       {prompt !== null && (
         <section aria-labelledby="prompt-heading" data-testid="prompt-section">
-          <h2 id="prompt-heading" className="text-lg font-semibold">
-            ワーカーに渡した文面（prompt.txt）
-          </h2>
-          <details>
-            <summary className="cursor-pointer text-sm text-gray-600" data-testid="prompt-toggle">
-              開く
-            </summary>
-            <CodeViewer content={prompt} />
-          </details>
+          <Card>
+            <CardHeader
+              icon="message"
+              title={
+                <h2 id="prompt-heading" className="text-[0.95rem] font-semibold text-fg">
+                  ワーカーに渡した文面（prompt.txt）
+                </h2>
+              }
+            />
+            <CardBody>
+              <details>
+                <summary
+                  className="cursor-pointer text-sm font-medium text-fg-muted hover:text-fg"
+                  data-testid="prompt-toggle"
+                >
+                  開く
+                </summary>
+                <div className="mt-3">
+                  <CodeViewer content={prompt} />
+                </div>
+              </details>
+            </CardBody>
+          </Card>
         </section>
       )}
 
-      {/* ADR-0023 D2: この run でワーカーに渡した指示そのもの（構造）。既定は畳んでおく（長いので）。 */}
+      {/* ADR-0023 D2: この run でワーカーに渡した指示そのもの(構造)。既定は畳んでおく(長いので)。 */}
       {request !== null && (
         <section aria-labelledby="request-heading" data-testid="request-section">
-          <h2 id="request-heading" className="text-lg font-semibold">
-            ワーカーに渡した指示（request.json）
-          </h2>
-          <details>
-            <summary className="cursor-pointer text-sm text-gray-600" data-testid="request-toggle">
-              開く
-            </summary>
-            <CodeViewer content={request} json />
-          </details>
+          <Card>
+            <CardHeader
+              icon="file"
+              title={
+                <h2 id="request-heading" className="text-[0.95rem] font-semibold text-fg">
+                  ワーカーに渡した指示（request.json）
+                </h2>
+              }
+            />
+            <CardBody>
+              <details>
+                <summary
+                  className="cursor-pointer text-sm font-medium text-fg-muted hover:text-fg"
+                  data-testid="request-toggle"
+                >
+                  開く
+                </summary>
+                <div className="mt-3">
+                  <CodeViewer content={request} json />
+                </div>
+              </details>
+            </CardBody>
+          </Card>
         </section>
       )}
     </div>
@@ -236,18 +317,18 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       );
     }
     return (
-      <main className="p-4">
-        <h1 className="text-xl font-semibold">
+      <main className="mx-auto max-w-2xl space-y-3 p-6">
+        <h1 className="text-xl font-semibold text-fg">
           {data.status === 404 ? "run が見つかりません" : `エラー ${data.status}`}
         </h1>
-        <p className="mt-2 text-sm text-gray-600">{data.detail}</p>
+        <Alert tone="danger">{data.detail}</Alert>
       </main>
     );
   }
   return (
-    <main className="p-4">
-      <h1 className="text-xl font-semibold">エラー</h1>
-      <p className="mt-2 text-sm text-gray-600">予期しないエラーが起きました。</p>
+    <main className="mx-auto max-w-2xl space-y-3 p-6">
+      <h1 className="text-xl font-semibold text-fg">エラー</h1>
+      <Alert tone="danger">予期しないエラーが起きました。</Alert>
     </main>
   );
 }

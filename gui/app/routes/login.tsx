@@ -8,6 +8,9 @@ import {
   sleep,
   verifyPassword,
 } from "~/auth.server";
+import { Button } from "~/components/ui/button";
+import { inputClass, labelClass } from "~/components/ui/form";
+import { Icon } from "~/components/ui/Icon";
 import type { Route } from "./+types/login";
 
 /** 非 loopback（またはパスワード明示）のときのログイン画面（docs/DESIGN.md §8.2、docs/adr/0008 D1〜D4）。 */
@@ -41,36 +44,50 @@ export default function LoginPage({ loaderData, actionData }: Route.ComponentPro
   const next = actionData?.next ?? loaderData.next;
   const error = actionData?.error;
   return (
-    <main className="mx-auto max-w-sm py-16">
-      <h1 className="mb-4 text-xl font-semibold">taskd-gui にログイン</h1>
-      <Form method="post" className="flex flex-col gap-3">
-        <input type="hidden" name="next" value={next} />
-        <label htmlFor="password" className="text-sm font-medium">
-          パスワード
-        </label>
-        <input
-          id="password"
-          name="password"
-          type="password"
-          autoComplete="current-password"
-          required
-          className="rounded border px-2 py-1"
-          aria-describedby={error ? "login-error" : undefined}
-          aria-invalid={error ? true : undefined}
-        />
-        {error && (
-          <p id="login-error" role="alert" data-testid="login-error" className="text-sm text-red-700">
-            {error}
-          </p>
-        )}
-        <button
-          type="submit"
-          data-testid="login-submit"
-          className="rounded bg-gray-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-gray-700"
-        >
-          ログイン
-        </button>
-      </Form>
+    <main className="flex min-h-screen items-center justify-center px-4 py-16">
+      <div className="w-full max-w-sm">
+        <div className="mb-6 flex flex-col items-center gap-3 text-center">
+          <span className="grid size-12 place-items-center rounded-2xl bg-linear-to-br from-primary via-primary to-teal text-white shadow-md ring-1 ring-white/20 dark:text-bg">
+            <Icon name="zap" className="size-6" strokeWidth={2.2} />
+          </span>
+          <p className="text-lg font-bold tracking-tight text-fg">taskd-gui</p>
+        </div>
+        <div className="rounded-2xl border border-border bg-surface p-6 shadow-md sm:p-8">
+          <h1 className="text-xl font-semibold text-fg">taskd-gui にログイン</h1>
+          <Form method="post" className="mt-6 flex flex-col gap-4">
+            <input type="hidden" name="next" value={next} />
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="password" className={labelClass}>
+                パスワード
+              </label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                required
+                className={inputClass}
+                aria-describedby={error ? "login-error" : undefined}
+                aria-invalid={error ? true : undefined}
+              />
+            </div>
+            {error && (
+              <p
+                id="login-error"
+                role="alert"
+                data-testid="login-error"
+                className="flex items-start gap-1.5 text-sm text-danger"
+              >
+                <Icon name="alert" className="mt-0.5 size-4 shrink-0" />
+                {error}
+              </p>
+            )}
+            <Button type="submit" data-testid="login-submit" variant="primary" size="md">
+              ログイン
+            </Button>
+          </Form>
+        </div>
+      </div>
     </main>
   );
 }

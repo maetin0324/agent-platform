@@ -1,6 +1,12 @@
+import type { ReactNode } from "react";
 import { data, Form, Link, useNavigation } from "react-router";
 import { TransitionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { Button } from "~/components/ui/button";
+import { hintClass, textareaClass } from "~/components/ui/form";
+import { Icon, type IconName } from "~/components/ui/Icon";
+import { Alert, EmptyState, PageHeader, SectionTitle, StatCard } from "~/components/ui/misc";
+import type { Tone } from "~/components/ui/tone";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
@@ -50,9 +56,9 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
   const submitting = navigation.state !== "idle";
   if (!inbox) {
     return (
-      <p className="text-sm text-gray-500" data-testid="inbox-unavailable">
+      <Alert tone="danger" icon="wifiOff" data-testid="inbox-unavailable">
         taskd に接続できないため受信箱を表示できません。
-      </p>
+      </Alert>
     );
   }
   const isEmpty =
@@ -63,67 +69,101 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
 
   return (
     <div className="space-y-8">
-      <h1 className="text-xl font-semibold">
-        受信箱
-        <HelpLink anchor="screens" label="画面ごとの説明" />
-      </h1>
+      <PageHeader
+        as="h1"
+        icon="inbox"
+        title={
+          <>
+            受信箱
+            <HelpLink anchor="screens" label="画面ごとの説明" />
+          </>
+        }
+        description="人間の対応が要る項目（承認待ち・質問・受け入れ待ちの draft・注意）だけを集めた画面です。"
+      />
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <StatCard label="承認待ち" value={inbox.counts.approvals} icon="checkCircle" tone="warning" />
+        <StatCard label="質問" value={inbox.counts.questions} icon="message" tone="info" />
+        <StatCard label="受け入れ待ちの draft" value={inbox.counts.drafts} icon="file" tone="neutral" />
+        <StatCard label="注意" value={inbox.counts.attention} icon="alert" tone="danger" />
+      </div>
 
       {isEmpty && (
-        <p className="rounded border border-gray-200 bg-gray-50 p-3 text-sm" data-testid="inbox-empty-help">
+        <Alert tone="info" icon="sparkles" data-testid="inbox-empty-help">
           対応が要る項目はありません。初めて使うなら
-          <Link to="/help" className="mx-1 font-semibold hover:underline" data-testid="inbox-help-onboarding-link">
+          <Link
+            to="/help"
+            className="mx-1 font-semibold underline underline-offset-2"
+            data-testid="inbox-help-onboarding-link"
+          >
             使い方を見る
           </Link>
           とこの GUI で何ができるかが分かります。
-        </p>
+        </Alert>
       )}
 
-      {actionData?.map((o) => (
-        <TransitionFlash key={`${o.taskId}-${o.intent}`} outcome={o} />
-      ))}
+      {actionData && actionData.length > 0 && (
+        <div className="space-y-2">
+          {actionData.map((o) => (
+            <TransitionFlash key={`${o.taskId}-${o.intent}`} outcome={o} />
+          ))}
+        </div>
+      )}
 
-      <section aria-labelledby="approvals-heading" data-testid="approvals-section">
-        <h2 id="approvals-heading" className="text-lg font-semibold">
-          承認待ち（{inbox.counts.approvals}）
-        </h2>
+      <SectionCard
+        sectionTestId="approvals-section"
+        headingId="approvals-heading"
+        icon="checkCircle"
+        tone="warning"
+        heading={`承認待ち（${inbox.counts.approvals}）`}
+      >
         {inbox.approvals.length === 0 ? (
-          <p className="text-sm text-gray-500">ありません。</p>
+          <EmptyState title="ありません。" />
         ) : (
-          <ul className="mt-2 space-y-3">
+          <ul className="space-y-3">
             {inbox.approvals.map((item) => (
               <li
                 key={item.approval.id}
                 data-testid="approval-item"
-                className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
+                className="rounded-lg border border-border bg-surface p-4 text-sm shadow-xs transition-shadow hover:shadow-sm"
               >
-                <p className="font-semibold" data-testid="approval-title">
+                <p className="font-semibold text-fg" data-testid="approval-title">
                   <Link to={`/tasks/${item.approval.id}`} className="hover:underline">
                     {item.approval.title}
                   </Link>
                 </p>
                 {item.parent && (
-                  <p className="text-gray-600" data-testid="approval-parent-title">
-                    親: <Link to={`/tasks/${item.parent.id}`}>{item.parent.title}</Link>（{item.parent.status}）
+                  <p
+                    className="mt-1 flex flex-wrap items-center gap-1.5 text-fg-muted"
+                    data-testid="approval-parent-title"
+                  >
+                    親:{" "}
+                    <Link to={`/tasks/${item.parent.id}`} className="hover:underline">
+                      {item.parent.title}
+                    </Link>
+                    （{item.parent.status}）
                   </p>
                 )}
-                <p data-testid="approval-criterion-text">条件: {item.criterion_text}</p>
+                <p className="mt-1 text-fg" data-testid="approval-criterion-text">
+                  条件: {item.criterion_text}
+                </p>
                 {item.last_run?.outcome_text && (
-                  <p className="text-gray-600" data-testid="approval-summary">
+                  <p className="mt-1 text-fg-muted" data-testid="approval-summary">
                     直近 run の要約: {item.last_run.outcome_text}
                   </p>
                 )}
                 {item.other_verdicts.length > 0 && (
-                  <p className="text-gray-600">
+                  <p className="mt-1 text-fg-muted">
                     同 run の他条件:{" "}
                     {item.other_verdicts.map((v) => `#${v.criterion_idx} ${v.pass ? "pass" : "fail"}`).join(", ")}
                   </p>
                 )}
                 {item.previous_decisions.length > 0 && (
-                  <p className="text-gray-600">
+                  <p className="mt-1 text-fg-muted">
                     以前の判定: {item.previous_decisions.map((d) => (d.approved ? "承認" : "却下")).join(", ")}
                   </p>
                 )}
-                <Form method="post" className="mt-2 flex flex-col gap-1">
+                <Form method="post" className="mt-3 flex flex-col gap-2 border-t border-border pt-3">
                   <input type="hidden" name="task_id" value={item.approval.id} />
                   <input type="hidden" name="expected_status" value="ready" />
                   <textarea
@@ -131,59 +171,69 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
                     aria-label="判定の note（任意）"
                     data-testid="approval-note"
                     rows={2}
-                    className="rounded border px-2 py-1 text-sm"
+                    placeholder="判定の note（任意）"
+                    className={textareaClass}
                   />
-                  <p className="text-xs text-gray-500">却下の note は次の run の prior_review に届きます。</p>
+                  <p className={hintClass}>却下の note は次の run の prior_review に届きます。</p>
                   <div className="flex gap-2">
-                    <button
+                    <Button
                       type="submit"
                       name="intent"
                       value="approve"
+                      variant="success"
+                      size="sm"
                       disabled={submitting}
                       data-testid="approval-approve"
-                      className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
                     >
+                      <Icon name="check" />
                       承認
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="submit"
                       name="intent"
                       value="reject"
+                      variant="danger"
+                      size="sm"
                       disabled={submitting}
                       data-testid="approval-reject"
-                      className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
                     >
+                      <Icon name="x" />
                       却下
-                    </button>
+                    </Button>
                   </div>
                 </Form>
               </li>
             ))}
           </ul>
         )}
-      </section>
+      </SectionCard>
 
-      <section aria-labelledby="questions-heading" data-testid="questions-section">
-        <h2 id="questions-heading" className="text-lg font-semibold">
-          質問（{inbox.counts.questions}）
-        </h2>
+      <SectionCard
+        sectionTestId="questions-section"
+        headingId="questions-heading"
+        icon="message"
+        tone="info"
+        heading={`質問（${inbox.counts.questions}）`}
+      >
         {inbox.questions.length === 0 ? (
-          <p className="text-sm text-gray-500">ありません。</p>
+          <EmptyState title="ありません。" />
         ) : (
-          <ul className="mt-2 space-y-3">
+          <ul className="space-y-3">
             {inbox.questions.map((item) => (
               <li
                 key={item.task.id}
                 data-testid="question-item"
-                className="rounded border border-sky-300 bg-sky-50 p-3 text-sm"
+                className="rounded-lg border border-border bg-surface p-4 text-sm shadow-xs transition-shadow hover:shadow-sm"
               >
-                <p className="font-semibold">
+                <p className="font-semibold text-fg">
                   <Link to={`/tasks/${item.task.id}`} className="hover:underline">
                     {item.task.title}
                   </Link>
                 </p>
-                <p data-testid="question-text">{item.question}</p>
-                <Form method="post" className="mt-2 flex flex-col gap-1">
+                <p className="mt-1 text-fg" data-testid="question-text">
+                  {item.question}
+                </p>
+                <Form method="post" className="mt-3 flex flex-col gap-2 border-t border-border pt-3">
                   <input type="hidden" name="task_id" value={item.task.id} />
                   <input type="hidden" name="expected_status" value="blocked" />
                   <input type="hidden" name="intent" value="answer" />
@@ -192,34 +242,45 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
                     aria-label="回答"
                     data-testid="question-answer"
                     rows={3}
-                    className="rounded border px-2 py-1 text-sm"
+                    placeholder="回答"
+                    className={textareaClass}
                   />
-                  <button
+                  <Button
                     type="submit"
+                    variant="primary"
+                    size="sm"
                     disabled={submitting}
                     data-testid="question-answer-submit"
-                    className="w-fit rounded border px-3 py-1 text-sm disabled:text-gray-400"
+                    className="w-fit"
                   >
+                    <Icon name="send" />
                     回答する
-                  </button>
+                  </Button>
                 </Form>
               </li>
             ))}
           </ul>
         )}
-      </section>
+      </SectionCard>
 
-      <section aria-labelledby="drafts-heading" data-testid="drafts-section">
-        <h2 id="drafts-heading" className="text-lg font-semibold">
-          受け入れ待ちの draft（{inbox.counts.drafts}）
-        </h2>
+      <SectionCard
+        sectionTestId="drafts-section"
+        headingId="drafts-heading"
+        icon="file"
+        tone="neutral"
+        heading={`受け入れ待ちの draft（${inbox.counts.drafts}）`}
+      >
         {inbox.drafts.length === 0 ? (
-          <p className="text-sm text-gray-500">ありません。</p>
+          <EmptyState title="ありません。" />
         ) : (
-          <ul className="mt-2 space-y-4">
+          <ul className="space-y-4">
             {inbox.drafts.map((group) => (
-              <li key={group.parent?.id ?? "root"} data-testid="draft-group" className="rounded border p-3 text-sm">
-                <p className="font-semibold">
+              <li
+                key={group.parent?.id ?? "root"}
+                data-testid="draft-group"
+                className="rounded-lg border border-border bg-surface p-4 text-sm shadow-xs"
+              >
+                <p className="font-semibold text-fg">
                   {group.parent ? (
                     <Link to={`/tasks/${group.parent.id}`} className="hover:underline">
                       {group.parent.title}
@@ -228,57 +289,65 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
                     "（親なし）"
                   )}
                 </p>
-                {group.plan_summary && <p className="text-gray-600">{group.plan_summary}</p>}
-                <ul className="mt-2 space-y-1">
+                {group.plan_summary && <p className="mt-1 text-fg-muted">{group.plan_summary}</p>}
+                <ul className="mt-3 space-y-2 divide-y divide-border">
                   {group.drafts.map((draft) => (
-                    <li key={draft.id} data-testid="draft-item" className="flex flex-col gap-1">
+                    <li
+                      key={draft.id}
+                      data-testid="draft-item"
+                      className="flex flex-wrap items-center justify-between gap-2 pt-2 first:pt-0"
+                    >
                       <Link to={`/tasks/${draft.id}`} className="hover:underline">
                         {draft.title}
                       </Link>
                       <Form method="post" className="flex gap-2">
                         <input type="hidden" name="task_id" value={draft.id} />
                         <input type="hidden" name="expected_status" value="draft" />
-                        <button
+                        <Button
                           type="submit"
                           name="intent"
                           value="approve"
+                          variant="success"
+                          size="xs"
                           disabled={submitting}
                           data-testid="draft-approve"
-                          className="rounded border px-2 py-0.5 text-xs disabled:text-gray-400"
                         >
                           受け入れ
-                        </button>
-                        <button
+                        </Button>
+                        <Button
                           type="submit"
                           name="intent"
                           value="cancel"
+                          variant="danger"
+                          size="xs"
                           disabled={submitting}
                           data-testid="draft-cancel"
-                          className="rounded border px-2 py-0.5 text-xs disabled:text-gray-400"
                         >
                           取り消し
-                        </button>
+                        </Button>
                       </Form>
                     </li>
                   ))}
                 </ul>
                 {group.drafts.length > 0 && (
-                  <Form method="post" className="mt-2 flex flex-col gap-1">
+                  <Form method="post" className="mt-3 flex flex-col gap-1 border-t border-border pt-3">
                     {group.drafts.map((draft) => (
                       <input key={draft.id} type="hidden" name="task_id" value={draft.id} />
                     ))}
                     <input type="hidden" name="expected_status" value="draft" />
-                    <button
+                    <Button
                       type="submit"
                       name="intent"
                       value="approve"
+                      variant="soft"
+                      size="xs"
                       disabled={submitting}
                       data-testid="draft-approve-all"
-                      className="w-fit rounded border px-2 py-0.5 text-xs disabled:text-gray-400"
+                      className="w-fit"
                     >
                       この Plan の子を全部受け入れ
-                    </button>
-                    <p className="text-xs text-gray-500">
+                    </Button>
+                    <p className={hintClass}>
                       子ごとに順に承認します（途中で失敗しても残りは続行、原子性はありません）。
                     </p>
                   </Form>
@@ -287,16 +356,19 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
             ))}
           </ul>
         )}
-      </section>
+      </SectionCard>
 
-      <section aria-labelledby="attention-heading" data-testid="attention-section">
-        <h2 id="attention-heading" className="text-lg font-semibold">
-          注意（{inbox.counts.attention}）
-        </h2>
+      <SectionCard
+        sectionTestId="attention-section"
+        headingId="attention-heading"
+        icon="alert"
+        tone="danger"
+        heading={`注意（${inbox.counts.attention}）`}
+      >
         {inbox.attention.length === 0 ? (
-          <p className="text-sm text-gray-500">ありません。</p>
+          <EmptyState title="ありません。" />
         ) : (
-          <ul className="mt-2 space-y-3">
+          <ul className="space-y-3">
             {inbox.attention.map((item) =>
               item.type === "cluster_unavailable" ? (
                 // `AttentionItem` の他のバリアントと違い `task` を持たない（クラスタ単位の集約）ので別枝のまま
@@ -305,41 +377,43 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
                   key={`cluster_unavailable-${item.cluster}`}
                   data-testid="attention-item"
                   data-attention-type={item.type}
-                  className="rounded border border-red-300 bg-red-50 p-3 text-sm"
+                  className="rounded-lg border border-danger-border bg-danger-soft p-4 text-sm shadow-xs"
                 >
-                  <p className="font-semibold">
+                  <p className="font-semibold text-danger-soft-fg">
                     <Link to="/clusters" className="hover:underline" data-testid="attention-cluster-link">
                       {item.cluster}
                     </Link>
                   </p>
-                  <p>{attentionText(item)}</p>
+                  <p className="mt-1 text-fg">{attentionText(item)}</p>
                 </li>
               ) : (
                 <li
                   key={`${item.type}-${item.task.id}`}
                   data-testid="attention-item"
                   data-attention-type={item.type}
-                  className="rounded border border-red-300 bg-red-50 p-3 text-sm"
+                  className="rounded-lg border border-danger-border bg-danger-soft p-4 text-sm shadow-xs"
                 >
-                  <p className="font-semibold">
+                  <p className="font-semibold text-danger-soft-fg">
                     <Link to={`/tasks/${item.task.id}`} className="hover:underline">
                       {item.task.title}
                     </Link>
                   </p>
-                  <p>{attentionText(item)}</p>
+                  <p className="mt-1 text-fg">{attentionText(item)}</p>
                   {item.task.actions.includes("cancel") && (
-                    <Form method="post" className="mt-2">
+                    <Form method="post" className="mt-3 border-t border-danger-border/60 pt-3">
                       <input type="hidden" name="task_id" value={item.task.id} />
                       <input type="hidden" name="expected_status" value={item.task.status} />
                       <input type="hidden" name="intent" value="cancel" />
-                      <button
+                      <Button
                         type="submit"
+                        variant="danger"
+                        size="sm"
                         disabled={submitting}
                         data-testid="attention-cancel"
-                        className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
                       >
+                        <Icon name="ban" />
                         取り消し
-                      </button>
+                      </Button>
                     </Form>
                   )}
                 </li>
@@ -347,8 +421,34 @@ export default function InboxPage({ loaderData, actionData }: Route.ComponentPro
             )}
           </ul>
         )}
-      </section>
+      </SectionCard>
     </div>
+  );
+}
+
+/** 節（承認待ち・質問・draft・注意）の共通の見た目。見出しの文字列・id、section の data-testid は呼び出し側が渡す。 */
+function SectionCard({
+  sectionTestId,
+  headingId,
+  icon,
+  tone,
+  heading,
+  children,
+}: {
+  sectionTestId: string;
+  headingId: string;
+  icon: IconName;
+  tone: Tone;
+  heading: string;
+  children: ReactNode;
+}) {
+  return (
+    <section aria-labelledby={headingId} data-testid={sectionTestId} className="space-y-3">
+      <SectionTitle id={headingId} icon={icon} tone={tone}>
+        {heading}
+      </SectionTitle>
+      {children}
+    </section>
   );
 }
 

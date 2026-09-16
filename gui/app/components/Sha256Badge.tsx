@@ -15,7 +15,7 @@ export function Sha256Badge({
   return (
     <p
       data-testid="sha256-mismatch"
-      className="my-2 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+      className="my-2 rounded-lg border border-danger-border bg-danger-soft px-3 py-2 text-sm text-danger-soft-fg"
     >
       sha256 が一致しません（記録: {recorded} / 現在: {current ?? "-"}）
     </p>

@@ -1,5 +1,11 @@
 import { data, Form, redirect, useNavigation } from "react-router";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
+import { Button } from "~/components/ui/button";
+import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { hintClass, inputClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
+import { Icon } from "~/components/ui/Icon";
+import { Alert, PageHeader } from "~/components/ui/misc";
+import { cn } from "~/lib/utils";
 import type { CreateFailure } from "~/taskd/action-types";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
@@ -90,113 +96,116 @@ export default function NewPlanPage({ loaderData, actionData }: Route.ComponentP
   const error = actionData && !actionData.ok ? actionData.error : null;
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-xl font-semibold">Plan 作成</h1>
+    <div className="space-y-6">
+      <PageHeader
+        icon="sparkles"
+        title="Plan 作成"
+        description="NewPlanSpec を taskd に送信します。Plan は taskd が子タスクに分解します。"
+      />
 
-      <p data-testid="plan-auto-accept" className="rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+      <Alert tone={config.plan_auto_accept ? "success" : "info"} data-testid="plan-auto-accept">
         {config.plan_auto_accept
           ? "plan.auto_accept = true: Plan が作った子タスクは自動で ready になります"
           : "plan.auto_accept = false: Plan が作った子タスクは draft のまま受信箱に来ます（人が承認すると ready になります）"}
-      </p>
+      </Alert>
 
       <ErrorFlash error={error} />
 
-      <Form method="post" data-testid="new-plan-form" className="space-y-4">
-        <div>
-          <label htmlFor="goal" className="block text-sm font-medium">
-            goal
-          </label>
-          <textarea id="goal" name="goal" rows={4} className="mt-1 w-full rounded border px-2 py-1 text-sm" />
-          <FieldErrors error={error} field="goal" />
+      <Form method="post" data-testid="new-plan-form" className="space-y-6">
+        <Card>
+          <CardHeader icon="file" title="基本" description="Plan の目的と作業ディレクトリ" />
+          <CardBody className="space-y-4">
+            <div>
+              <label htmlFor="goal" className={labelClass}>
+                goal
+              </label>
+              <textarea id="goal" name="goal" rows={4} className={cn(textareaClass, "mt-1.5 w-full")} />
+              <p className={cn(hintClass, "mt-1")}>taskd が分解する Plan 全体の目的。</p>
+              <FieldErrors error={error} field="goal" />
+            </div>
+
+            <div>
+              <label htmlFor="workspace" className={labelClass}>
+                workspace
+              </label>
+              <input id="workspace" name="workspace" type="text" className={cn(inputClass, "mt-1.5 w-full")} />
+              <FieldErrors error={error} field="workspace" />
+            </div>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader icon="clock" title="予算" description="子タスクに引き継ぐ既定の優先度・実行上限" />
+          <CardBody>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <div>
+                <label htmlFor="tier" className={labelClass}>
+                  tier
+                </label>
+                <select id="tier" name="tier" defaultValue="frontier" className={cn(selectClass, "mt-1.5 w-full")}>
+                  {TIERS.map((tier) => (
+                    <option key={tier} value={tier}>
+                      {tier}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="priority" className={labelClass}>
+                  priority
+                </label>
+                <input id="priority" name="priority" type="number" className={cn(inputClass, "mt-1.5 w-full")} />
+              </div>
+
+              <div>
+                <label htmlFor="max_turns" className={labelClass}>
+                  max_turns
+                </label>
+                <input
+                  id="max_turns"
+                  name="max_turns"
+                  type="number"
+                  defaultValue={30}
+                  className={cn(inputClass, "mt-1.5 w-full")}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="max_wall_secs" className={labelClass}>
+                  max_wall_secs
+                </label>
+                <input
+                  id="max_wall_secs"
+                  name="max_wall_secs"
+                  type="number"
+                  defaultValue={900}
+                  className={cn(inputClass, "mt-1.5 w-full")}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="max_retries" className={labelClass}>
+                  max_retries
+                </label>
+                <input
+                  id="max_retries"
+                  name="max_retries"
+                  type="number"
+                  defaultValue={1}
+                  className={cn(inputClass, "mt-1.5 w-full")}
+                />
+              </div>
+            </div>
+          </CardBody>
+        </Card>
+
+        <div className="flex justify-end">
+          <Button type="submit" variant="primary" size="md" data-testid="submit" disabled={submitting}>
+            <Icon name="send" />
+            作成
+          </Button>
         </div>
-
-        <div>
-          <label htmlFor="workspace" className="block text-sm font-medium">
-            workspace
-          </label>
-          <input id="workspace" name="workspace" type="text" className="mt-1 w-full rounded border px-2 py-1 text-sm" />
-          <FieldErrors error={error} field="workspace" />
-        </div>
-
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <div>
-            <label htmlFor="tier" className="block text-sm font-medium">
-              tier
-            </label>
-            <select
-              id="tier"
-              name="tier"
-              defaultValue="frontier"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            >
-              {TIERS.map((tier) => (
-                <option key={tier} value={tier}>
-                  {tier}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label htmlFor="priority" className="block text-sm font-medium">
-              priority
-            </label>
-            <input
-              id="priority"
-              name="priority"
-              type="number"
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="max_turns" className="block text-sm font-medium">
-              max_turns
-            </label>
-            <input
-              id="max_turns"
-              name="max_turns"
-              type="number"
-              defaultValue={30}
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="max_wall_secs" className="block text-sm font-medium">
-              max_wall_secs
-            </label>
-            <input
-              id="max_wall_secs"
-              name="max_wall_secs"
-              type="number"
-              defaultValue={900}
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="max_retries" className="block text-sm font-medium">
-              max_retries
-            </label>
-            <input
-              id="max_retries"
-              name="max_retries"
-              type="number"
-              defaultValue={1}
-              className="mt-1 w-full rounded border px-2 py-1 text-sm"
-            />
-          </div>
-        </div>
-
-        <button
-          type="submit"
-          data-testid="submit"
-          disabled={submitting}
-          className="rounded border px-4 py-1.5 text-sm font-medium disabled:opacity-50"
-        >
-          作成
-        </button>
       </Form>
     </div>
   );

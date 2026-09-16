@@ -23,15 +23,17 @@ function nodeLabel(node: GraphNode, awaitingChildren: boolean): string {
   return marks.length > 0 ? `${node.title}\n${marks.join(" ")}` : node.title;
 }
 
-const STATUS_COLOR: Record<Status, string> = {
-  draft: "#e5e7eb",
-  ready: "#fde68a",
-  running: "#93c5fd",
-  blocked: "#fde68a",
-  reviewing: "#93c5fd",
-  done: "#86efac",
-  failed: "#fca5a5",
-  cancelled: "#d1d5db",
+// status ごとの帯・枠の色は app.css のトークン（docs/adr/0011 D4）に揃える。CSS 変数文字列をそのまま
+// インラインスタイルに使う（bg-* 等の Tailwind クラスは React Flow の style prop には効かないため）。
+const STATUS_COLOR: Record<Status, { accent: string; border: string; background: string }> = {
+  draft: { accent: "var(--neutral-soft-fg)", border: "var(--neutral-border)", background: "var(--neutral-soft)" },
+  ready: { accent: "var(--info)", border: "var(--info-border)", background: "var(--info-soft)" },
+  running: { accent: "var(--primary)", border: "var(--primary-border)", background: "var(--primary-soft)" },
+  blocked: { accent: "var(--warning)", border: "var(--warning-border)", background: "var(--warning-soft)" },
+  reviewing: { accent: "var(--teal)", border: "var(--teal-border)", background: "var(--teal-soft)" },
+  done: { accent: "var(--success)", border: "var(--success-border)", background: "var(--success-soft)" },
+  failed: { accent: "var(--danger)", border: "var(--danger-border)", background: "var(--danger-soft)" },
+  cancelled: { accent: "var(--neutral-soft-fg)", border: "var(--neutral-border)", background: "var(--neutral-soft)" },
 };
 
 export interface LayoutResult {
@@ -99,9 +101,9 @@ export function layoutGraph(graph: Graph, marks: LayoutMarks = {}): LayoutResult
       style: {
         width: rect.w,
         height: rect.h,
-        border: "1px dashed #9ca3af",
-        borderRadius: 8,
-        background: "rgba(0,0,0,0.02)",
+        border: "1px dashed var(--border-strong)",
+        borderRadius: 12,
+        background: "color-mix(in srgb, var(--primary) 6%, transparent)",
       },
       data: { label: "" },
       selectable: false,
@@ -122,20 +124,28 @@ export function layoutGraph(graph: Graph, marks: LayoutMarks = {}): LayoutResult
       // 役割はテキストのラベルとして 2 行目に出す（色分けはしない。docs/DESIGN.md §10 Phase G7、taskd-requests R2）。
       // 「部下待ち」は taskd のスナップショットの値をそのまま出す（ADR-0023 D3。GUI 側で判定しない）。
       data: { label: nodeLabel(node, awaitingChildren.has(node.id)) },
+      // 角丸・細い枠・左に status 色の帯（モダンな見た目）。kind=plan は枠を太くする意味づけを維持する
+      // （docs/adr/0011 D4。色は STATUS_COLOR 経由で app.css のトークンに揃える）。
       style: {
         width: NODE_WIDTH,
         height: NODE_HEIGHT,
-        background: STATUS_COLOR[node.status],
-        border: node.kind === "plan" ? "3px solid #1f2937" : "1px solid #1f2937",
-        borderRadius: 6,
+        background: STATUS_COLOR[node.status].background,
+        border:
+          node.kind === "plan"
+            ? `3px solid ${STATUS_COLOR[node.status].accent}`
+            : `1px solid ${STATUS_COLOR[node.status].border}`,
+        borderLeft: `4px solid ${STATUS_COLOR[node.status].accent}`,
+        borderRadius: 10,
+        boxShadow: "0 1px 2px hsl(var(--shadow-color) / 0.08)",
         fontSize: 12,
-        padding: 4,
+        padding: "4px 8px",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         textAlign: "center",
         flexDirection: "column",
         whiteSpace: "pre-line",
+        color: "var(--fg)",
       },
     });
   }

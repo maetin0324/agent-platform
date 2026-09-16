@@ -2,6 +2,14 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState } from "react";
 import { Form, Link, useFetcher, useSearchParams } from "react-router";
 import { HelpLink } from "~/components/HelpLink";
+import { KindBadge, RoleLabel, StatusBadge, statusTone } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
+import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { checkboxClass, chipLabelClass, inputClass, labelClass, selectClass, theadClass } from "~/components/ui/form";
+import { Icon } from "~/components/ui/Icon";
+import { EmptyState, PageHeader } from "~/components/ui/misc";
+import { TONE_SOFT, TONE_SOLID_BG } from "~/components/ui/tone";
+import { cn } from "~/lib/utils";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { taskdErrorResponse } from "~/taskd/errors";
@@ -22,7 +30,7 @@ const ORDERS = [
   { value: "created_desc", label: "作成が新しい順" },
 ] as const;
 
-const ROW_HEIGHT_PX = 48;
+const ROW_HEIGHT_PX = 56;
 const SCROLL_HEIGHT_PX = 480;
 
 /**
@@ -112,103 +120,187 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
   const selectedStatuses = new Set(searchParams.getAll("status"));
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h2 className="text-lg font-semibold">
-          タスク一覧
-          <HelpLink anchor="screens" label="画面ごとの説明" />
-        </h2>
-        <p data-testid="tasks-total" className="text-sm text-gray-600">
+    <div className="space-y-6">
+      <PageHeader
+        as="h2"
+        icon="list"
+        title={
+          <>
+            タスク一覧
+            <HelpLink anchor="screens" label="画面ごとの説明" />
+          </>
+        }
+        description="taskd に登録されたタスクを状態・種別・キーワードで絞り込んで確認します（GET /tasks をそのまま表示）。"
+      />
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <p data-testid="tasks-total" className="text-sm font-semibold text-fg">
           {taskList.total} 件
         </p>
-        <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500" data-testid="tasks-counts-by-status">
+        <ul className="flex flex-wrap gap-1.5" data-testid="tasks-counts-by-status">
           {Object.entries(taskList.counts_by_status).map(([status, count]) => (
-            <li key={status}>
-              {status}: {count}
+            <li
+              key={status}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium",
+                TONE_SOFT[statusTone(status)],
+              )}
+            >
+              <span
+                aria-hidden="true"
+                className={cn("size-1.5 shrink-0 rounded-full", TONE_SOLID_BG[statusTone(status)])}
+              />
+              {status}: <span className="tabular-nums font-semibold">{count}</span>
             </li>
           ))}
         </ul>
       </div>
 
-      <Form method="get" className="space-y-2 rounded border p-3 text-sm" data-testid="tasks-filter-form">
-        <fieldset>
-          <legend className="font-semibold">status</legend>
-          <div className="flex flex-wrap gap-3">
-            {ALL_STATUSES.map((status) => (
-              <label key={status} className="flex items-center gap-1">
-                <input type="checkbox" name="status" value={status} defaultChecked={selectedStatuses.has(status)} />
-                {status}
-              </label>
-            ))}
-          </div>
-        </fieldset>
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-1">
-            q:
-            <input type="text" name="q" defaultValue={searchParams.get("q") ?? ""} maxLength={200} />
-          </label>
-          <label className="flex items-center gap-1">
-            order:
-            <select name="order" defaultValue={searchParams.get("order") ?? "updated_desc"}>
-              {ORDERS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="submit" className="rounded border px-2 py-1">
-            絞り込み
-          </button>
-        </div>
-      </Form>
-
-      <div
-        ref={scrollRef}
-        data-testid="task-list-scroll"
-        className="overflow-auto rounded border"
-        style={{ height: SCROLL_HEIGHT_PX }}
-      >
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
-          {virtualizer.getVirtualItems().map((virtualRow) => {
-            const item = items[virtualRow.index];
-            if (!item) return null;
-            return (
-              <div
-                key={item.id}
-                data-testid="task-row"
-                data-task-id={item.id}
-                className="absolute left-0 top-0 flex w-full items-center gap-4 border-b px-2 text-sm"
-                style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}
-              >
-                <span className="w-56 truncate font-mono text-xs">{item.id}</span>
-                <Link to={`/tasks/${item.id}`} className="flex-1 truncate hover:underline">
-                  {item.title}
-                </Link>
-                <span className="w-20">{item.status}</span>
-                <span className="w-20">{item.kind}</span>
-                {/* 役割（ADR-0016 D1、taskd-requests R2）。色分けはせずテキストのラベルだけ。役割なしは空欄。 */}
-                <span className="w-24 truncate text-xs text-gray-600" data-testid="task-role" title={item.role ?? ""}>
-                  {item.role ?? ""}
-                </span>
-                <span className="w-12 text-right">{item.priority}</span>
-                <span className="w-44 text-xs text-gray-500">{item.updated_at}</span>
+      <Card>
+        <CardHeader
+          icon="filter"
+          title="絞り込み"
+          description="status・キーワード・並び順を指定して GET /tasks に転送します（GUI 側では再計算しません）。"
+        />
+        <CardBody>
+          <Form method="get" className="space-y-4" data-testid="tasks-filter-form">
+            <fieldset>
+              <legend className={labelClass}>status</legend>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {ALL_STATUSES.map((status) => (
+                  <label key={status} className={chipLabelClass}>
+                    <input
+                      type="checkbox"
+                      name="status"
+                      value={status}
+                      defaultChecked={selectedStatuses.has(status)}
+                      className={checkboxClass}
+                    />
+                    {status}
+                  </label>
+                ))}
               </div>
-            );
-          })}
+            </fieldset>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex items-center gap-2 text-sm text-fg-muted">
+                q:
+                <span className="relative">
+                  <Icon
+                    name="search"
+                    className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-fg-subtle"
+                  />
+                  <input
+                    type="text"
+                    name="q"
+                    defaultValue={searchParams.get("q") ?? ""}
+                    maxLength={200}
+                    className={cn(inputClass, "w-56 pl-8")}
+                  />
+                </span>
+              </label>
+              <label className="flex items-center gap-2 text-sm text-fg-muted">
+                order:
+                <select
+                  name="order"
+                  defaultValue={searchParams.get("order") ?? "updated_desc"}
+                  className={cn(selectClass, "w-44")}
+                >
+                  {ORDERS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <Button type="submit" variant="primary" size="sm">
+                <Icon name="filter" />
+                絞り込み
+              </Button>
+            </div>
+          </Form>
+        </CardBody>
+      </Card>
+
+      <Card className="overflow-hidden">
+        <div className={cn(theadClass, "flex items-center gap-4 border-b border-border px-4 py-2.5 sm:px-5")}>
+          <span className="w-40 shrink-0">ID</span>
+          <span className="min-w-0 flex-1">タイトル</span>
+          <span className="w-28 shrink-0">状態</span>
+          <span className="w-20 shrink-0">種別</span>
+          <span className="w-24 shrink-0">役割</span>
+          <span className="w-10 shrink-0 text-right">優先度</span>
+          <span className="w-32 shrink-0">更新日時</span>
         </div>
-      </div>
+        <div
+          ref={scrollRef}
+          data-testid="task-list-scroll"
+          className="overflow-auto"
+          style={{ height: SCROLL_HEIGHT_PX }}
+        >
+          {items.length === 0 ? (
+            <div className="flex h-full items-center justify-center p-6">
+              <EmptyState icon="list" title="タスクが見つかりません">
+                条件を変えて絞り込んでください。
+              </EmptyState>
+            </div>
+          ) : (
+            <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+              {virtualizer.getVirtualItems().map((virtualRow) => {
+                const item = items[virtualRow.index];
+                if (!item) return null;
+                return (
+                  <div
+                    key={item.id}
+                    data-testid="task-row"
+                    data-task-id={item.id}
+                    className="absolute left-0 top-0 flex w-full items-center gap-4 border-b border-border px-4 text-sm transition-colors hover:bg-surface-2/60 sm:px-5"
+                    style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}
+                  >
+                    <span className="w-40 shrink-0 truncate font-mono text-xs text-fg-subtle" title={item.id}>
+                      {item.id}
+                    </span>
+                    <Link
+                      to={`/tasks/${item.id}`}
+                      className="min-w-0 flex-1 truncate font-medium text-fg no-underline hover:text-primary hover:underline"
+                    >
+                      {item.title}
+                    </Link>
+                    <span className="w-28 shrink-0">
+                      <StatusBadge status={item.status} />
+                    </span>
+                    <span className="w-20 shrink-0">
+                      <KindBadge kind={item.kind} />
+                    </span>
+                    {/* 役割（ADR-0016 D1、taskd-requests R2）。色分けはせずテキストのラベルだけ。役割なしは空欄。 */}
+                    <span className="w-24 shrink-0 truncate" data-testid="task-role" title={item.role ?? ""}>
+                      {item.role ? <RoleLabel role={item.role} /> : ""}
+                    </span>
+                    <span className="w-10 shrink-0 text-right tabular-nums text-fg-muted">{item.priority}</span>
+                    <span className="w-32 shrink-0 truncate text-xs text-fg-subtle" title={item.updated_at}>
+                      {item.updated_at}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </Card>
 
       {nextCursor !== null && (
-        <button
-          type="button"
-          data-testid="load-more"
-          onClick={handleLoadMore}
-          disabled={fetcher.state !== "idle"}
-          className="rounded border px-3 py-1 text-sm"
-        >
-          さらに読む
-        </button>
+        <div className="flex justify-center">
+          <Button
+            type="button"
+            data-testid="load-more"
+            variant="secondary"
+            size="sm"
+            onClick={handleLoadMore}
+            disabled={fetcher.state !== "idle"}
+          >
+            <Icon name="chevronDown" />
+            さらに読む
+          </Button>
+        </div>
       )}
     </div>
   );

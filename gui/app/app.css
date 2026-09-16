@@ -1,12 +1,364 @@
 @import "tailwindcss";
 
-/* 外部フォント・CDN は読まない（docs/DESIGN.md §8.2 CSP）。システムフォントを使う。 */
-@theme {
-  --font-sans:
-    ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+/*
+ * デザイントークン（docs/adr/0011-visual-design-system.md D1）。画面側は生の色（gray-* 等）ではなくここのトークンを使う。
+ * ライト / ダークは OS の設定（prefers-color-scheme）に従う。値は本文・補助文字とも WCAG AA（4.5:1）以上。
+ */
+:root {
+  color-scheme: light;
+  --bg: #f6f7fb;
+  --surface: #ffffff;
+  --surface-2: #f1f3f9;
+  --surface-3: #e8ebf3;
+  --border: #e2e5ee;
+  --border-strong: #cdd2de;
+  --fg: #0f1729;
+  --fg-muted: #4b5567;
+  --fg-subtle: #5f6878;
+  --ring: #6366f1;
+
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-fg: #ffffff;
+  --primary-soft: #eef0ff;
+  --primary-soft-fg: #3730a3;
+  --primary-border: #c7cbfb;
+
+  --success: #16a34a;
+  --success-soft: #ecfdf3;
+  --success-soft-fg: #166534;
+  --success-border: #b7ebc9;
+
+  --warning: #d97706;
+  --warning-soft: #fff8eb;
+  --warning-soft-fg: #92400e;
+  --warning-border: #f8d9a0;
+
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --danger-soft: #fef2f2;
+  --danger-soft-fg: #991b1b;
+  --danger-border: #f7c4c4;
+
+  --info: #2563eb;
+  --info-soft: #eff5ff;
+  --info-soft-fg: #1e40af;
+  --info-border: #c3d6fb;
+
+  --teal: #0d9488;
+  --teal-soft: #ecfdfa;
+  --teal-soft-fg: #115e59;
+  --teal-border: #b2e8e0;
+
+  --neutral-soft: #f1f3f7;
+  --neutral-soft-fg: #3f4756;
+  --neutral-border: #dde1e9;
+
+  --shadow-color: 222 47% 11%;
+  --glow-1: rgb(99 102 241 / 0.1);
+  --glow-2: rgb(20 184 166 / 0.07);
 }
 
-html,
-body {
-  @apply bg-white text-gray-900;
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0a0c12;
+    --surface: #11141c;
+    --surface-2: #171b25;
+    --surface-3: #1f2430;
+    --border: #232835;
+    --border-strong: #323949;
+    --fg: #e8eaf1;
+    --fg-muted: #aab1c0;
+    --fg-subtle: #959cad;
+    --ring: #818cf8;
+
+    --primary: #7c83f7;
+    --primary-hover: #959bf9;
+    --primary-fg: #0a0c12;
+    --primary-soft: rgb(124 131 247 / 0.14);
+    --primary-soft-fg: #c3c7fd;
+    --primary-border: rgb(124 131 247 / 0.35);
+
+    --success: #34d399;
+    --success-soft: rgb(52 211 153 / 0.12);
+    --success-soft-fg: #86efbf;
+    --success-border: rgb(52 211 153 / 0.3);
+
+    --warning: #fbbf24;
+    --warning-soft: rgb(251 191 36 / 0.12);
+    --warning-soft-fg: #fcd87a;
+    --warning-border: rgb(251 191 36 / 0.3);
+
+    --danger: #f87171;
+    --danger-hover: #fb8f8f;
+    --danger-soft: rgb(248 113 113 / 0.12);
+    --danger-soft-fg: #fca5a5;
+    --danger-border: rgb(248 113 113 / 0.32);
+
+    --info: #60a5fa;
+    --info-soft: rgb(96 165 250 / 0.12);
+    --info-soft-fg: #a5c8fd;
+    --info-border: rgb(96 165 250 / 0.32);
+
+    --teal: #2dd4bf;
+    --teal-soft: rgb(45 212 191 / 0.12);
+    --teal-soft-fg: #8ce9dc;
+    --teal-border: rgb(45 212 191 / 0.3);
+
+    --neutral-soft: rgb(148 163 184 / 0.12);
+    --neutral-soft-fg: #c4cad6;
+    --neutral-border: rgb(148 163 184 / 0.26);
+
+    --shadow-color: 0 0% 0%;
+    --glow-1: rgb(99 102 241 / 0.16);
+    --glow-2: rgb(20 184 166 / 0.08);
+  }
+}
+
+/* 外部フォント・CDN は読まない（docs/DESIGN.md §8.2 CSP）。システムフォントを使い、日本語のフォールバックを並べる。 */
+@theme {
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+    "Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", Meiryo, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
+    "Noto Color Emoji";
+  --font-mono:
+    ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, "HackGen Console NF", monospace;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-ring: var(--ring);
+
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-fg: var(--primary-fg);
+  --color-primary-soft: var(--primary-soft);
+  --color-primary-soft-fg: var(--primary-soft-fg);
+  --color-primary-border: var(--primary-border);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-soft-fg: var(--success-soft-fg);
+  --color-success-border: var(--success-border);
+
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-soft-fg: var(--warning-soft-fg);
+  --color-warning-border: var(--warning-border);
+
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-soft-fg: var(--danger-soft-fg);
+  --color-danger-border: var(--danger-border);
+
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-soft-fg: var(--info-soft-fg);
+  --color-info-border: var(--info-border);
+
+  --color-teal: var(--teal);
+  --color-teal-soft: var(--teal-soft);
+  --color-teal-soft-fg: var(--teal-soft-fg);
+  --color-teal-border: var(--teal-border);
+
+  --color-neutral-soft: var(--neutral-soft);
+  --color-neutral-soft-fg: var(--neutral-soft-fg);
+  --color-neutral-border: var(--neutral-border);
+
+  --shadow-xs: 0 1px 2px hsl(var(--shadow-color) / 0.05);
+  --shadow-sm: 0 1px 2px hsl(var(--shadow-color) / 0.06), 0 1px 3px hsl(var(--shadow-color) / 0.08);
+  --shadow-md: 0 2px 4px hsl(var(--shadow-color) / 0.05), 0 6px 16px hsl(var(--shadow-color) / 0.08);
+  --shadow-lg: 0 8px 24px hsl(var(--shadow-color) / 0.1), 0 2px 6px hsl(var(--shadow-color) / 0.06);
+
+  --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+  --animate-fade-in: fade-in 0.25s ease-out both;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 0%, transparent);
+  }
+}
+
+/* 不透明度は変えない（途中で a11y 検査やスクリーンショットが走ると文字色が薄く測られるため）。位置だけを動かす。 */
+@keyframes fade-in {
+  from {
+    transform: translateY(4px);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  *,
+  ::before,
+  ::after,
+  ::backdrop {
+    border-color: var(--border);
+  }
+
+  html,
+  body {
+    background-color: var(--bg);
+    color: var(--fg);
+  }
+
+  body {
+    font-feature-settings: "palt" 1;
+    background-image:
+      radial-gradient(60rem 30rem at 85% -10%, var(--glow-1), transparent 70%),
+      radial-gradient(40rem 24rem at 10% -5%, var(--glow-2), transparent 70%);
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--primary) 25%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    accent-color: var(--primary);
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+  }
+
+  * {
+    scrollbar-color: var(--border-strong) transparent;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-pulse-dot,
+    .animate-fade-in {
+      animation: none;
+    }
+  }
+}
+
+/* Markdown（成果物ビューア・使い方ページ）の本文。typography プラグインは入れず、必要な要素だけ整える。 */
+@layer components {
+  .markdown {
+    color: var(--fg);
+    font-size: 0.9375rem;
+    line-height: 1.75;
+  }
+  .markdown > * + * {
+    margin-top: 0.85em;
+  }
+  .markdown h1,
+  .markdown h2,
+  .markdown h3,
+  .markdown h4 {
+    font-weight: 650;
+    line-height: 1.35;
+    letter-spacing: -0.01em;
+    margin-top: 1.6em;
+  }
+  .markdown h1 {
+    font-size: 1.5rem;
+  }
+  .markdown h2 {
+    font-size: 1.25rem;
+    padding-bottom: 0.3em;
+    border-bottom: 1px solid var(--border);
+  }
+  .markdown h3 {
+    font-size: 1.075rem;
+  }
+  .markdown a {
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: color-mix(in srgb, var(--primary) 40%, transparent);
+  }
+  .markdown a:hover {
+    text-decoration-color: var(--primary);
+  }
+  .markdown ul {
+    list-style: disc;
+    padding-left: 1.4em;
+  }
+  .markdown ol {
+    list-style: decimal;
+    padding-left: 1.4em;
+  }
+  .markdown li + li {
+    margin-top: 0.3em;
+  }
+  .markdown li::marker {
+    color: var(--fg-subtle);
+  }
+  .markdown blockquote {
+    border-left: 3px solid var(--primary-border);
+    background: var(--primary-soft);
+    padding: 0.6em 1em;
+    border-radius: 0 0.5rem 0.5rem 0;
+    color: var(--fg-muted);
+  }
+  .markdown :not(pre) > code {
+    font-size: 0.85em;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    padding: 0.1em 0.4em;
+  }
+  .markdown pre {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    padding: 0.9em 1.1em;
+    overflow-x: auto;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+  }
+  .markdown table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+  }
+  .markdown th,
+  .markdown td {
+    border: 1px solid var(--border);
+    padding: 0.45em 0.75em;
+    text-align: left;
+    vertical-align: top;
+  }
+  .markdown th {
+    background: var(--surface-2);
+    font-weight: 600;
+  }
+  .markdown hr {
+    border-color: var(--border);
+  }
 }

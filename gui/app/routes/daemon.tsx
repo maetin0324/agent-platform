@@ -1,6 +1,12 @@
+import type { ReactNode } from "react";
 import { data, Form, isRouteErrorResponse, Link, useNavigation } from "react-router";
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
+import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { Icon } from "~/components/ui/Icon";
+import { Alert, DataItem, DataList, EmptyState, Mono, PageHeader, SectionTitle, StatCard } from "~/components/ui/misc";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { TaskdBanner } from "~/root";
@@ -63,240 +69,338 @@ export default function DaemonPage({ loaderData, actionData }: Route.ComponentPr
 
   return (
     <div className="space-y-8">
-      <h1 className="text-xl font-semibold">
-        デーモン
-        <HelpLink anchor="screens" label="画面ごとの説明" />
-      </h1>
+      <PageHeader
+        icon="activity"
+        title={
+          <>
+            デーモン
+            <HelpLink anchor="screens" label="画面ごとの説明" />
+          </>
+        }
+        description="ディスパッチャの稼働状況・設定の要約・replay をここでまとめて確認します。"
+      />
 
-      <section aria-labelledby="daemon-heading" data-testid="daemon-section">
-        <h2 id="daemon-heading" className="text-lg font-semibold">
+      <section aria-labelledby="daemon-heading" data-testid="daemon-section" className="space-y-4">
+        <SectionTitle icon="activity" id="daemon-heading">
           デーモンの状態
-        </h2>
+        </SectionTitle>
         {snapshot ? (
           <>
             {secondsBetween(snapshot.last_tick_at, daemon.now) * 1000 >= 3 * snapshot.tick_ms && (
-              <p
-                data-testid="daemon-delayed"
-                className="mt-2 rounded border border-red-300 bg-red-50 p-2 text-sm text-red-700"
-              >
+              <Alert tone="danger" data-testid="daemon-delayed">
                 ディスパッチャが遅延しています（last_tick_at が {3 * snapshot.tick_ms}ms 以上前です）。
-              </p>
+              </Alert>
             )}
-            <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
-              <DlItem label="pid" value={String(snapshot.pid)} testId="daemon-pid" />
-              <DlItem label="hostname" value={snapshot.hostname} testId="daemon-hostname" />
-              <DlItem label="instance_id" value={snapshot.instance_id} />
-              <DlItem label="started_at" value={snapshot.started_at} />
-              <DlItem label="ticks" value={String(snapshot.ticks)} testId="daemon-ticks" />
-              <DlItem label="last_tick_at" value={snapshot.last_tick_at} testId="daemon-last-tick-at" />
-              <DlItem label="tick_ms" value={String(snapshot.tick_ms)} />
-              <DlItem label="in_flight" value={String(snapshot.in_flight.length)} />
-              <DlItem label="awaiting_human" value={String(snapshot.awaiting_human.length)} />
-              <DlItem
-                label="部下待ち（awaiting_children）"
-                value={String(snapshot.awaiting_children?.length ?? 0)}
-                testId="daemon-awaiting-children-count"
+
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+              <StatCard
+                icon="hash"
+                label="ticks"
+                value={<span data-testid="daemon-ticks">{snapshot.ticks}</span>}
+                hint={`tick_ms ${snapshot.tick_ms}`}
               />
-              <DlItem label="unroutable" value={String(snapshot.unroutable.length)} />
-            </dl>
+              <StatCard
+                icon="activity"
+                label="in_flight"
+                value={snapshot.in_flight.length}
+                tone={snapshot.in_flight.length > 0 ? "primary" : "neutral"}
+              />
+              <StatCard
+                icon="clock"
+                label="cooldowns"
+                value={snapshot.cooldowns.length}
+                tone={snapshot.cooldowns.length > 0 ? "warning" : "neutral"}
+              />
+              <StatCard
+                icon="user"
+                label="awaiting_human"
+                value={snapshot.awaiting_human.length}
+                tone={snapshot.awaiting_human.length > 0 ? "teal" : "neutral"}
+              />
+              <StatCard
+                icon="users"
+                label="部下待ち（awaiting_children）"
+                value={
+                  <span data-testid="daemon-awaiting-children-count">{snapshot.awaiting_children?.length ?? 0}</span>
+                }
+                tone={(snapshot.awaiting_children?.length ?? 0) > 0 ? "teal" : "neutral"}
+              />
+              <StatCard
+                icon="alert"
+                label="unroutable"
+                value={snapshot.unroutable.length}
+                tone={snapshot.unroutable.length > 0 ? "danger" : "neutral"}
+              />
+            </div>
 
-            <div className="mt-4">
-              <h3 className="text-sm font-semibold">in_flight</h3>
+            <Card>
+              <CardHeader icon="server" title="インスタンス" description="このデーモンプロセスの識別情報" />
+              <CardBody>
+                <DataList>
+                  <DataItem label="pid">
+                    <span data-testid="daemon-pid">{snapshot.pid}</span>
+                  </DataItem>
+                  <DataItem label="hostname">
+                    <span data-testid="daemon-hostname">{snapshot.hostname}</span>
+                  </DataItem>
+                  <DataItem label="instance_id">
+                    <Mono className="break-all">{snapshot.instance_id}</Mono>
+                  </DataItem>
+                  <DataItem label="started_at">
+                    <span className="text-fg-subtle">{snapshot.started_at}</span>
+                  </DataItem>
+                  <DataItem label="last_tick_at">
+                    <span data-testid="daemon-last-tick-at" className="text-fg-subtle">
+                      {snapshot.last_tick_at}
+                    </span>
+                  </DataItem>
+                </DataList>
+              </CardBody>
+            </Card>
+
+            <SubSection icon="activity" tone="primary" heading="in_flight">
               {snapshot.in_flight.length === 0 ? (
-                <p className="mt-1 text-sm text-gray-500">実行中の run はありません。</p>
+                <EmptyState icon="checkCircle" title="実行中の run はありません。" />
               ) : (
-                <table className="mt-1 w-full text-left text-sm">
-                  <thead>
-                    <tr className="text-xs text-gray-500">
-                      <th className="pr-2">task</th>
-                      <th className="pr-2">run_id</th>
-                      <th className="pr-2">provider</th>
-                      <th className="pr-2">経過</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {snapshot.in_flight.map((item) => (
-                      <tr key={item.run_id} data-testid="in-flight-row" data-task-id={item.task_id}>
-                        <td className="pr-2">
-                          <Link
-                            to={`/tasks/${item.task_id}`}
-                            data-testid="in-flight-task-link"
-                            className="hover:underline"
-                          >
-                            {item.task_id}
-                          </Link>
-                        </td>
-                        <td className="pr-2" data-testid="in-flight-run-id">
-                          {item.run_id}
-                        </td>
-                        <td className="pr-2" data-testid="in-flight-provider">
-                          {item.provider}
-                        </td>
-                        <td className="pr-2" data-testid="in-flight-elapsed">
-                          {formatDuration(secondsBetween(item.since, daemon.now))}
-                        </td>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[36rem] text-left text-sm">
+                    <thead>
+                      <tr className="text-xs font-medium text-fg-subtle">
+                        <th className="pr-2 pb-2">task</th>
+                        <th className="pr-2 pb-2">run_id</th>
+                        <th className="pr-2 pb-2">provider</th>
+                        <th className="pr-2 pb-2">経過</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {snapshot.in_flight.map((item) => (
+                        <tr key={item.run_id} data-testid="in-flight-row" data-task-id={item.task_id}>
+                          <td className="py-2 pr-2">
+                            <Link
+                              to={`/tasks/${item.task_id}`}
+                              data-testid="in-flight-task-link"
+                              className="font-medium text-primary hover:underline"
+                            >
+                              {item.task_id}
+                            </Link>
+                          </td>
+                          <td className="py-2 pr-2" data-testid="in-flight-run-id">
+                            <Mono>{item.run_id}</Mono>
+                          </td>
+                          <td className="py-2 pr-2" data-testid="in-flight-provider">
+                            <Badge tone="primary">{item.provider}</Badge>
+                          </td>
+                          <td className="py-2 pr-2 tabular-nums text-fg-muted" data-testid="in-flight-elapsed">
+                            {formatDuration(secondsBetween(item.since, daemon.now))}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
-            </div>
+            </SubSection>
 
-            <div className="mt-4">
-              <h3 className="text-sm font-semibold">cooldowns</h3>
+            <SubSection icon="clock" tone="warning" heading="cooldowns">
               {snapshot.cooldowns.length === 0 ? (
-                <p className="mt-1 text-sm text-gray-500">cooldown 中のプロバイダはありません。</p>
+                <EmptyState icon="checkCircle" title="cooldown 中のプロバイダはありません。" />
               ) : (
-                <table className="mt-1 w-full text-left text-sm">
-                  <thead>
-                    <tr className="text-xs text-gray-500">
-                      <th className="pr-2">provider</th>
-                      <th className="pr-2">reason</th>
-                      <th className="pr-2">残り</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {snapshot.cooldowns.map((cooldown) => (
-                      <tr
-                        key={cooldown.provider}
-                        data-testid="daemon-cooldown-row"
-                        data-provider-id={cooldown.provider}
-                      >
-                        <td className="pr-2">{cooldown.provider}</td>
-                        <td className="pr-2">{cooldown.reason}</td>
-                        <td className="pr-2" data-testid="daemon-cooldown-remaining">
-                          {formatDuration(secondsBetween(daemon.now, cooldown.until))}
-                        </td>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[28rem] text-left text-sm">
+                    <thead>
+                      <tr className="text-xs font-medium text-fg-subtle">
+                        <th className="pr-2 pb-2">provider</th>
+                        <th className="pr-2 pb-2">reason</th>
+                        <th className="pr-2 pb-2">残り</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {snapshot.cooldowns.map((cooldown) => (
+                        <tr
+                          key={cooldown.provider}
+                          data-testid="daemon-cooldown-row"
+                          data-provider-id={cooldown.provider}
+                        >
+                          <td className="py-2 pr-2 font-medium text-fg">{cooldown.provider}</td>
+                          <td className="py-2 pr-2 text-fg-muted">{cooldown.reason}</td>
+                          <td className="py-2 pr-2 tabular-nums" data-testid="daemon-cooldown-remaining">
+                            {formatDuration(secondsBetween(daemon.now, cooldown.until))}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
-            </div>
+            </SubSection>
 
-            <div className="mt-4">
-              <h3 className="text-sm font-semibold">awaiting_human</h3>
+            <SubSection icon="user" tone="teal" heading="awaiting_human">
               {snapshot.awaiting_human.length === 0 ? (
-                <p className="mt-1 text-sm text-gray-500">人間の承認待ちはありません。</p>
+                <EmptyState icon="checkCircle" title="人間の承認待ちはありません。" />
               ) : (
-                <ul className="mt-1 space-y-1 text-sm">
+                <ul className="space-y-1.5 text-sm">
                   {snapshot.awaiting_human.map((id) => (
                     <li key={id} data-testid="awaiting-human-item">
-                      <Link to={`/tasks/${id}`} className="hover:underline">
+                      <Link
+                        to={`/tasks/${id}`}
+                        className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline"
+                      >
                         {id}
                       </Link>
                     </li>
                   ))}
                 </ul>
               )}
-            </div>
+            </SubSection>
 
             {/* ADR-0023 D3: 委譲した子を待っている親。`reviewing` でも「自分の判定待ち」とは別物。 */}
-            <div className="mt-4">
-              <h3 className="text-sm font-semibold">部下待ち（awaiting_children）</h3>
+            <SubSection icon="users" tone="teal" heading="部下待ち（awaiting_children）">
               {(snapshot.awaiting_children?.length ?? 0) === 0 ? (
-                <p className="mt-1 text-sm text-gray-500">委譲した子を待っているタスクはありません。</p>
+                <EmptyState icon="checkCircle" title="委譲した子を待っているタスクはありません。" />
               ) : (
-                <ul className="mt-1 space-y-1 text-sm">
+                <ul className="space-y-1.5 text-sm">
                   {(snapshot.awaiting_children ?? []).map((id) => (
                     <li key={id} data-testid="awaiting-children-item">
-                      <Link to={`/tasks/${id}`} className="hover:underline">
+                      <Link
+                        to={`/tasks/${id}`}
+                        className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline"
+                      >
                         {id}
                       </Link>
                     </li>
                   ))}
                 </ul>
               )}
-            </div>
+            </SubSection>
 
-            <div className="mt-4">
-              <h3 className="text-sm font-semibold">unroutable</h3>
+            <SubSection icon="alert" tone="danger" heading="unroutable">
               {snapshot.unroutable.length === 0 ? (
-                <p className="mt-1 text-sm text-gray-500">経路の無いタスクはありません。</p>
+                <EmptyState icon="checkCircle" title="経路の無いタスクはありません。" />
               ) : (
-                <ul className="mt-1 space-y-1 text-sm">
+                <ul className="space-y-1.5 text-sm">
                   {snapshot.unroutable.map((id) => (
                     <li key={id} data-testid="unroutable-item">
-                      <Link to={`/tasks/${id}`} className="hover:underline">
+                      <Link
+                        to={`/tasks/${id}`}
+                        className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline"
+                      >
                         {id}
                       </Link>
                     </li>
                   ))}
                 </ul>
               )}
-            </div>
+            </SubSection>
           </>
         ) : (
-          <p className="mt-2 text-sm text-gray-500">最初の tick を待っています</p>
+          <EmptyState icon="clock" title="最初の tick を待っています" />
         )}
       </section>
 
-      <section aria-labelledby="config-heading" data-testid="config-section">
-        <h2 id="config-heading" className="text-lg font-semibold">
+      <section aria-labelledby="config-heading" data-testid="config-section" className="space-y-4">
+        <SectionTitle icon="settings" id="config-heading">
           設定の要約
-        </h2>
-        <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
-          <DlItem label="config_path" value={config.config_path} />
-          <DlItem label="db" value={config.db} />
-          <DlItem label="workspace_root" value={config.workspace_root} />
-          <DlItem label="tick_ms" value={String(config.tick_ms)} />
-          <DlItem label="max_concurrency" value={String(config.max_concurrency)} />
-          <DlItem label="plan_auto_accept" value={String(config.plan_auto_accept)} />
-          <DlItem label="api.bind" value={config.api.bind} />
-          <DlItem label="api.auth_required" value={String(config.api.auth_required)} />
-        </dl>
+        </SectionTitle>
+        <Card>
+          <CardBody>
+            <DataList>
+              <DataItem label="config_path" wide>
+                <span className="break-all" title={config.config_path}>
+                  {config.config_path}
+                </span>
+              </DataItem>
+              <DataItem label="db" wide>
+                <span className="break-all" title={config.db}>
+                  {config.db}
+                </span>
+              </DataItem>
+              <DataItem label="workspace_root" wide>
+                <span className="break-all" title={config.workspace_root}>
+                  {config.workspace_root}
+                </span>
+              </DataItem>
+              <DataItem label="tick_ms">{config.tick_ms}</DataItem>
+              <DataItem label="max_concurrency">{config.max_concurrency}</DataItem>
+              <DataItem label="plan_auto_accept">
+                <Badge tone={config.plan_auto_accept ? "success" : "neutral"}>{String(config.plan_auto_accept)}</Badge>
+              </DataItem>
+              <DataItem label="api.bind">
+                <Mono>{config.api.bind}</Mono>
+              </DataItem>
+              <DataItem label="api.auth_required">
+                <Badge tone={config.api.auth_required ? "success" : "neutral"}>
+                  {String(config.api.auth_required)}
+                </Badge>
+              </DataItem>
+            </DataList>
+          </CardBody>
+        </Card>
       </section>
 
-      <section aria-labelledby="replay-heading" data-testid="replay-section">
-        <h2 id="replay-heading" className="text-lg font-semibold">
+      <section aria-labelledby="replay-heading" data-testid="replay-section" className="space-y-4">
+        <SectionTitle icon="rotate" id="replay-heading">
           replay
-        </h2>
-        <p className="mt-2 text-sm text-gray-600">
-          全タスクをイベントから再構築して `tasks` との差分を検査します（DB は変更しません）。
-        </p>
-        <Form method="post" className="mt-2">
-          <input type="hidden" name="intent" value="replay" />
-          <button
-            type="submit"
-            disabled={submitting}
-            data-testid="replay-button"
-            className="rounded border px-3 py-1 text-sm disabled:text-gray-400"
-          >
-            replay
-          </button>
-        </Form>
-        {actionData &&
-          (actionData.ok ? (
-            <div className="mt-2" data-testid="replay-result">
-              {actionData.report.mismatches.length} mismatches across {actionData.report.tasks} tasks
-              {actionData.report.mismatches.length > 0 && (
-                <ul className="mt-2 space-y-1 text-sm">
-                  {actionData.report.mismatches.map((mismatch) => (
-                    <li
-                      key={`${mismatch.task_id}-${mismatch.field}`}
-                      data-testid="replay-mismatch"
-                      className="rounded border p-1 font-mono text-xs"
-                    >
-                      {`{"id":"${mismatch.task_id}","field":"${mismatch.field}","replayed":"${mismatch.replayed}","stored":"${mismatch.stored}"}`}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          ) : (
-            <ErrorFlash error={actionData.error} />
-          ))}
+        </SectionTitle>
+        <Card>
+          <CardBody className="space-y-4">
+            <p className="text-sm text-fg-muted">
+              全タスクをイベントから再構築して `tasks` との差分を検査します（DB は変更しません）。
+            </p>
+            <Form method="post">
+              <input type="hidden" name="intent" value="replay" />
+              <Button type="submit" variant="primary" disabled={submitting} data-testid="replay-button">
+                <Icon name="rotate" />
+                replay
+              </Button>
+            </Form>
+            {actionData &&
+              (actionData.ok ? (
+                <Alert
+                  tone={actionData.report.mismatches.length > 0 ? "warning" : "success"}
+                  data-testid="replay-result"
+                >
+                  {actionData.report.mismatches.length} mismatches across {actionData.report.tasks} tasks
+                  {actionData.report.mismatches.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {actionData.report.mismatches.map((mismatch) => (
+                        <li
+                          key={`${mismatch.task_id}-${mismatch.field}`}
+                          data-testid="replay-mismatch"
+                          className="rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs text-fg"
+                        >
+                          {`{"id":"${mismatch.task_id}","field":"${mismatch.field}","replayed":"${mismatch.replayed}","stored":"${mismatch.stored}"}`}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Alert>
+              ) : (
+                <ErrorFlash error={actionData.error} />
+              ))}
+          </CardBody>
+        </Card>
       </section>
     </div>
   );
 }
 
-function DlItem({ label, value, testId }: { label: string; value: string; testId?: string }) {
+/** デーモン画面のサブセクション。見出しは h3 のまま Card に収める（見出しレベルは変えない）。 */
+function SubSection({
+  icon,
+  tone,
+  heading,
+  children,
+}: {
+  icon: Parameters<typeof CardHeader>[0]["icon"];
+  tone: Parameters<typeof CardHeader>[0]["tone"];
+  heading: string;
+  children: ReactNode;
+}) {
   return (
-    <div>
-      <dt className="text-xs text-gray-500">{label}</dt>
-      <dd data-testid={testId}>{value}</dd>
-    </div>
+    <Card>
+      <CardHeader icon={icon} tone={tone} title={<h3 className="text-[0.95rem] font-semibold text-fg">{heading}</h3>} />
+      <CardBody>{children}</CardBody>
+    </Card>
   );
 }
 
@@ -317,7 +421,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     return (
       <main className="p-4">
         <h1 className="text-xl font-semibold">エラー {data.status}</h1>
-        <p className="mt-2 text-sm text-gray-600">{data.detail}</p>
+        <p className="mt-2 text-sm text-fg-muted">{data.detail}</p>
       </main>
     );
   }
@@ -325,7 +429,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   return (
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
-      <p className="mt-2 text-sm text-gray-600">予期しないエラーが起きました。</p>
+      <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
     </main>
   );
 }

@@ -1,4 +1,5 @@
 import { Link } from "react-router";
+import { Alert } from "~/components/ui/misc";
 import type { ActionError, TransitionOutcome } from "~/taskd/action-types";
 
 /**
@@ -12,14 +13,12 @@ export function TransitionFlash({ outcome }: { outcome: TransitionOutcome | unde
     const { result } = outcome;
     const cascaded = result.cascaded ?? [];
     return (
-      <div
-        role="status"
-        data-testid="flash"
-        data-flash-kind="ok"
-        className="my-2 rounded border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-900"
-      >
+      <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
         <p>
-          <span data-testid="flash-intent">{outcome.intent}</span>: <Link to={`/tasks/${result.id}`}>{result.id}</Link>{" "}
+          <span data-testid="flash-intent">{outcome.intent}</span>:{" "}
+          <Link to={`/tasks/${result.id}`} className="underline underline-offset-2">
+            {result.id}
+          </Link>{" "}
           <span data-testid="flash-from">{result.from}</span> → <span data-testid="flash-to">{result.to}</span>（reason:{" "}
           {result.reason}）
         </p>
@@ -33,7 +32,7 @@ export function TransitionFlash({ outcome }: { outcome: TransitionOutcome | unde
             ))}
           </p>
         )}
-      </div>
+      </Alert>
     );
   }
   return <ErrorFlash error={outcome.error} />;
@@ -42,12 +41,13 @@ export function TransitionFlash({ outcome }: { outcome: TransitionOutcome | unde
 export function ErrorFlash({ error }: { error: ActionError | undefined | null }) {
   if (!error) return null;
   return (
-    <div
+    <Alert
       role="alert"
       data-testid="flash"
       data-flash-kind="error"
       data-flash-code={error.code}
-      className="my-2 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900"
+      tone="danger"
+      className="my-2"
     >
       {error.conflict ? (
         <p className="font-semibold" data-testid="flash-conflict">
@@ -60,13 +60,13 @@ export function ErrorFlash({ error }: { error: ActionError | undefined | null })
       )}
       <p data-testid="flash-detail">{error.detail}</p>
       {error.messages.length > 1 && (
-        <ul className="list-disc pl-5">
+        <ul className="list-disc space-y-0.5 pl-5">
           {error.messages.map((m) => (
             <li key={m}>{m}</li>
           ))}
         </ul>
       )}
-    </div>
+    </Alert>
   );
 }
 
@@ -75,7 +75,7 @@ export function FieldErrors({ error, field }: { error: ActionError | undefined |
   const messages = error?.fields[field];
   if (!messages || messages.length === 0) return null;
   return (
-    <ul className="mt-1 text-xs text-red-700" data-testid={`field-error-${field}`}>
+    <ul className="mt-1 space-y-0.5 text-xs text-danger" data-testid={`field-error-${field}`}>
       {messages.map((m) => (
         <li key={m}>{m}</li>
       ))}
