@@ -1,0 +1,163 @@
+{
+    "approvals": [
+        {
+            "approval": {
+                "id": "01M2KQJJBBG83DWH7Y8AWNMK0K",
+                "title": "Approval needed: Human-B \u2014 criterion 0 (attempt 1)",
+                "kind": "approval",
+                "status": "ready",
+                "actions": [
+                    "approve",
+                    "reject",
+                    "cancel"
+                ]
+            },
+            "parent": {
+                "id": "01M2KQJJ24F1WYT0Z600TV0RRE",
+                "title": "Human-B",
+                "kind": "execute",
+                "status": "reviewing",
+                "actions": [
+                    "cancel"
+                ]
+            },
+            "criterion_text": "someone signs off",
+            "criterion_idx": 0,
+            "attempt": 1,
+            "requested_at": "2026-09-15T23:48:58.859781378Z",
+            "last_run": {
+                "run_id": "01M2KQJJ4YADZQ5TFGHDDM1YZZ",
+                "role": "worker",
+                "adapter": "fake",
+                "model": "fake",
+                "provider": "fake-local",
+                "started_at": "2026-09-15T23:48:58.655038826Z",
+                "finished_at": "2026-09-15T23:48:58.859090799Z",
+                "outcome": "done",
+                "outcome_text": "fixture done",
+                "usage": null,
+                "progress": 0,
+                "artifacts": 0,
+                "verdicts": 0,
+                "reviewer_deferrals": 0,
+                "files": {
+                    "stdout": true,
+                    "stderr": true,
+                    "result": true
+                }
+            },
+            "evidence": [],
+            "other_verdicts": [],
+            "artifacts": [],
+            "previous_decisions": []
+        }
+    ],
+    "questions": [
+        {
+            "task": {
+                "id": "01M2KQJJ2Q4PNPSDCCCXYN76ZJ",
+                "title": "Blocked-C",
+                "kind": "execute",
+                "status": "blocked",
+                "actions": [
+                    "answer",
+                    "cancel"
+                ]
+            },
+            "question": "which environment should this target?",
+            "asked_at": "2026-09-15T23:48:59.065243552Z",
+            "run_id": "01M2KQJJBCRYC0RM8MK1335YNQ",
+            "previous": []
+        }
+    ],
+    "drafts": [
+        {
+            "parent": {
+                "id": "01M2KQJJ38YF9N8E5FPZK6NJPC",
+                "title": "fixture plan goal: build two small things",
+                "kind": "plan",
+                "status": "done",
+                "actions": []
+            },
+            "plan_summary": "planned",
+            "drafts": [
+                {
+                    "id": "01M2KQJJR61JTS592RTPMWW1QP",
+                    "parent_id": "01M2KQJJ38YF9N8E5FPZK6NJPC",
+                    "kind": "execute",
+                    "status": "draft",
+                    "title": "Plan-Child-2",
+                    "priority": 0,
+                    "tier": "standard",
+                    "adapter": null,
+                    "attempts": 0,
+                    "max_retries": 1,
+                    "depends_on": [
+                        "01M2KQJJR6T5XY4RD5BHWBGVBQ"
+                    ],
+                    "created_at": "2026-09-15T23:48:59.270160722Z",
+                    "updated_at": "2026-09-15T23:48:59.270160722Z",
+                    "lease_expires_at": null,
+                    "backoff_until": null,
+                    "children": 0,
+                    "pending_children": 0,
+                    "actions": [
+                        "approve",
+                        "cancel"
+                    ]
+                },
+                {
+                    "id": "01M2KQJJR6T5XY4RD5BHWBGVBQ",
+                    "parent_id": "01M2KQJJ38YF9N8E5FPZK6NJPC",
+                    "kind": "execute",
+                    "status": "draft",
+                    "title": "Plan-Child-1",
+                    "priority": 0,
+                    "tier": "standard",
+                    "adapter": null,
+                    "attempts": 0,
+                    "max_retries": 1,
+                    "depends_on": [],
+                    "created_at": "2026-09-15T23:48:59.270160722Z",
+                    "updated_at": "2026-09-15T23:48:59.270160722Z",
+                    "lease_expires_at": null,
+                    "backoff_until": null,
+                    "children": 0,
+                    "pending_children": 0,
+                    "actions": [
+                        "approve",
+                        "cancel"
+                    ]
+                }
+            ]
+        }
+    ],
+    "attention": [
+        {
+            "type": "failed",
+            "task": {
+                "id": "01M2KQJJ3PA1ZPGQGVVP5R601D",
+                "title": "Failed-E",
+                "kind": "execute",
+                "status": "failed",
+                "actions": []
+            },
+            "reason": "error(retryable=false): deliberate non-retryable failure",
+            "at": "2026-09-15T23:48:59.272626439Z"
+        }
+    ],
+    "counts": {
+        "approvals": 1,
+        "questions": 1,
+        "drafts": 2,
+        "attention": 1,
+        "by_status": {
+            "blocked": 1,
+            "done": 5,
+            "draft": 2,
+            "failed": 1,
+            "ready": 1,
+            "reviewing": 1
+        }
+    }
+}

@@ -1,0 +1,4 @@
+{"type":"thread.started"}
+{"type":"item.started","item":{"type":"command_execution","command":"cargo test"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}
+{"type":"turn.failed","error":"sandbox denied write"}

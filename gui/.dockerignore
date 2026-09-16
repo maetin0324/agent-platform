@@ -1,0 +1,11 @@
+node_modules
+build
+dist
+.run
+test-results
+playwright-report
+.react-router
+.git
+.claude
+*.tsbuildinfo
+.env

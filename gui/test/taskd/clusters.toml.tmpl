@@ -1,0 +1,45 @@
+# scripts/taskd.sh fixture clusters 用の taskd.toml（docs/DESIGN.md §10 Phase G7、ADR-0018）。
+# 2 つの [[clusters]]（`local` は localhost への ssh 多重接続で connected: true、`offline` は
+# 到達しない host で connected: false）を持つ。secret.txt はクラスタ側にしか無く、判定コマンドも
+# クラスタ側で走る（agent-platform の tests/e2e/tests/cluster_scenarios.rs と同じ流儀）。
+db = "taskd.sqlite3"
+workspace_root = "workspaces"
+tick_ms = 200
+max_concurrency = 2
+lease_grace_secs = 60
+idle_timeout_secs = 30
+kill_grace_secs = 1
+review_timeout_secs = 30
+error_cooldown_secs = 1
+retry_backoff_base_secs = 0
+retry_backoff_max_secs = 0
+max_requeues = 5
+
+[plan]
+auto_accept = false
+
+[reviewer]
+tier = "standard"
+
+[api]
+listen = "@API_LISTEN@"
+
+[adapters.fake]
+command = ["sh", "@RUN_DIR@/fake-worker.sh"]
+
+[[providers]]
+id = "fake-local"
+adapter = "fake"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 2
+model = "fake"
+
+[[clusters]]
+id = "local"
+host = "taskd-localhost"
+concurrency = 2
+
+[[clusters]]
+id = "offline"
+host = "taskd-no-such-host-for-tests"
+concurrency = 1

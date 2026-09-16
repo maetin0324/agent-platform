@@ -1,0 +1,8 @@
+# pnpm の設定（docs/adr/0002 D9、人間の決定 H8）。
+packages:
+  - "."
+# 公開から 7 日（10080 分）未満の版は使わない（サプライチェーン対策）
+minimumReleaseAge: 10080
+# 依存の install スクリプトは許可リストにあるものだけ実行し、未知のものがあれば install を失敗させる
+strictDepBuilds: true
+allowBuilds: {}
