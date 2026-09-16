@@ -56,10 +56,10 @@ if [ -n "$workdir" ]; then
   # リモートの作業ディレクトリと同じパスが手元にもあるか（共有 FS なら同じパスで見えるのが普通）
   if [ -d "$workdir" ] && [ -w "$workdir" ]; then
     echo "$marker" > "$workdir/.taskd-shared-probe"
-    run "grep -q '$marker' '$workdir/.taskd-shared-probe' 2>/dev/null && echo '共有されています（sync = \"none\" を使えます）' || echo '共有されていません（sync = \"rsync\"）'"
+    run "grep -q '$marker' '$workdir/.taskd-shared-probe' 2>/dev/null && echo '共有されています（sync = \"none\" を使えます）' || echo '共有されていません（sync = \"none\" は使えません。上の git の判定に従ってください）'"
     rm -f "$workdir/.taskd-shared-probe"
   else
-    echo "   $workdir は手元に無い（または書けない）ので、共有されていません: sync = \"rsync\""
+    echo "   $workdir は手元に無い（または書けない）ので共有されていません（sync = \"none\" は使えません。上の git の判定に従ってください）"
   fi
 else
   echo "   remote_workdir を渡すと判定します（手元に同じパスがあるかで見ます）"
@@ -69,4 +69,5 @@ echo "== ファイルシステム（手元とリモート）"
 printf "   手元    : "; df -PT "$HOME" 2>/dev/null | tail -1
 printf "   リモート: "; run "df -PT '${workdir:-\$HOME}' 2>/dev/null | tail -1"
 
-echo "== まとめ: 上の結果を taskd.toml の [[clusters]] に書きます（host / remote_workdir / sync / concurrency）"
+echo "== まとめ: 上の結果を taskd.toml の [[clusters]] に書きます"
+echo "   host / concurrency / sync（worktree なら worktree_paths も）/ setup（module load や PATH）"
