@@ -2313,9 +2313,11 @@ P-60 の 3 案のうち **3（worktree）** を採り、ADR-0019 として実装
 
 ### 証拠
 
-- `cargo test -p task-worker --test ssh_localhost`: **8 passed**。うち新規 2 件
+- `cargo test -p task-worker --test ssh_localhost`: **9 passed**。うち新規 3 件
   （`worktree_sync_only_brings_tracked_files` = 未追跡ファイルは持ち込まれない／ブランチ名／元のプロジェクトが変わらないこと、
-  `worktree_sync_on_a_non_git_directory_explains_itself` = 対処つきのエラー）。
+  `worktree_sync_on_a_non_git_directory_explains_itself` = 対処つきのエラー、
+  `two_tasks_can_create_worktrees_of_the_same_repository_at_once` = 同じリポジトリへの同時作成。
+  git の worktree 管理は共有なので、リモート側で `flock`（あれば）を取ってから `git worktree add` する）。
 - `cargo test -p taskd --lib worktree`: 2 passed（設定の解釈・`ClusterSpec` への写し・不正な `sync` と自動削除の拒否。
   `config/taskd.clusters.example.toml` もこのテストで読む）。
 - `cargo test -p task-ops worktree`: 1 passed（`TaskDetail.worktree` のパスとブランチ、rsync のクラスタでは `null`）。

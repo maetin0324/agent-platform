@@ -291,3 +291,53 @@ async fn worktree_sync_on_a_non_git_directory_explains_itself() {
     assert!(msg.contains("not a git repository"), "{msg}");
     assert!(msg.contains("rsync"), "対処（sync = \"rsync\"）を示す: {msg}");
 }
+
+/// 同じリポジトリに対して 2 つのタスクが同時に worktree を作っても、両方とも成立する
+/// （クラスタの並列度が 1 より大きいときに起きる。git の worktree 管理は共有なので remote 側で flock する）。
+#[tokio::test]
+async fn two_tasks_can_create_worktrees_of_the_same_repository_at_once() {
+    let remote = tempfile::tempdir().unwrap();
+    let project = remote.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("f.txt"), "v1\n").unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "taskd@example.com"],
+        vec!["config", "user.name", "taskd"],
+        vec!["add", "f.txt"],
+        vec!["commit", "-q", "-m", "initial"],
+    ] {
+        let out = std::process::Command::new("git").args(&args).current_dir(&project).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    let make = |task_id: &str| {
+        let local = tempfile::tempdir().unwrap();
+        let mut s = settings(project.clone());
+        s.sync = SyncMode::Worktree;
+        s.task_id = task_id.to_string();
+        let ws = SshWorkspace::new(local.path(), s);
+        (local, ws)
+    };
+    let (local_a, a) = make("01TESTCONCURRENT00000000AA");
+    let (local_b, b) = make("01TESTCONCURRENT00000000BB");
+    if !available(&a).await {
+        return;
+    }
+    let task_a = task(local_a.path());
+    let task_b = task(local_b.path());
+    let (ra, rb) = tokio::join!(a.prepare(&task_a), b.prepare(&task_b));
+    ra.expect("task A の worktree");
+    rb.expect("task B の worktree");
+
+    assert!(local_a.path().join("f.txt").exists());
+    assert!(local_b.path().join("f.txt").exists());
+    let list = std::process::Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    let list = String::from_utf8_lossy(&list.stdout);
+    assert!(list.contains("01TESTCONCURRENT00000000AA"), "{list}");
+    assert!(list.contains("01TESTCONCURRENT00000000BB"), "{list}");
+}

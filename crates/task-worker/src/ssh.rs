@@ -170,24 +170,34 @@ impl SshWorkspace {
         let wt = self.worktree_dir().to_string_lossy().to_string();
         let branch = self.worktree_branch();
         let base = &self.settings.worktree.base;
-        let mut script = format!(
-            "set -e\n\
-             cd {project} 2>/dev/null || {{ echo \"no such directory: {project}\" >&2; exit 66; }}\n\
-             git rev-parse --git-dir >/dev/null 2>&1 || {{ echo \"not a git repository\" >&2; exit 65; }}\n\
-             if [ ! -e {wt}/.git ]; then git worktree add -B {branch} {wt} {base} >/dev/null; fi\n",
-            project = shq(&project),
+        let mut inner = format!(
+            "if [ ! -e {wt}/.git ]; then git worktree add -B {branch} {wt} {base} >/dev/null; fi\n",
             wt = shq(&wt),
             branch = shq(&branch),
             base = shq(base),
         );
         if !self.settings.worktree.paths.is_empty() {
             let paths: Vec<String> = self.settings.worktree.paths.iter().map(|p| shq(p)).collect();
-            script.push_str(&format!(
+            inner.push_str(&format!(
                 "git -C {wt} sparse-checkout set --cone {paths} >/dev/null\n",
                 wt = shq(&wt),
                 paths = paths.join(" ")
             ));
         }
+        // 同じリポジトリに対して複数のタスクが同時に worktree を作ることがある（クラスタの並列度 > 1）。
+        // git の worktree 管理は共有なので、あれば `flock` で直列化する（無ければそのまま実行する）。
+        let script = format!(
+            "set -e\n\
+             cd {project} 2>/dev/null || {{ echo \"no such directory: {project}\" >&2; exit 66; }}\n\
+             gitdir=$(git rev-parse --git-common-dir 2>/dev/null) || {{ echo \"not a git repository\" >&2; exit 65; }}\n\
+             if command -v flock >/dev/null 2>&1; then\n\
+               exec 9>\"$gitdir/taskd-worktree.lock\"\n\
+               flock 9\n\
+             fi\n\
+             {inner}",
+            project = shq(&project),
+            inner = inner,
+        );
         let out = self.run_ssh(&script, Duration::from_secs(600)).await?;
         match out.exit {
             Some(0) => Ok(()),
