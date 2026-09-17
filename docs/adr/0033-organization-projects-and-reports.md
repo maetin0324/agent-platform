@@ -58,7 +58,13 @@ tasks += project_id TEXT NULL, milestone_id TEXT NULL, assignee TEXT NULL   -- a
   **SPEC §7 のアジャイル**: 途中目標の達成ごとに人が判定し、Go を出すか再設計する。
 - 案件の仕事の木 = `tasks WHERE project_id = ?`（既存の `parent_id` / `depends_on` がそのまま DAG）。
 - `assignee` が無いタスクは従来どおり `worker_hint` で配る（互換）。`assignee` があれば、そのノードの `genre` から
-  役割・分野を解決する（ADR-0027 の解決順 task > role > genre.default_role > parent の**前に** assignee を置く）。
+  役割・分野を解決する。
+- **優先順（Phase 23 の監査 D-2 で確定）**: `assignee` は「誰の仕事か」であって「どうやるか」ではない。
+  **タスクが明示した `role` が勝ち**、`assignee` 由来の既定（genre → `default_role` → tier / adapter / 予算）は
+  **`role` が無いときだけ**埋める。つまり解決順は task > role > **assignee** > genre.default_role > parent。
+  ADR-0016 D1「タスクの値 > 役割の既定」に揃える。`role` がその `assignee` の分野に属さなければ従来の整合検証（422）。
+- ディスパッチャが作る派生タスク（`Approval`、合成 `Review`）は親の `project_id` / `milestone_id` を**必ず継ぐ**
+  （案件の仕事の木から子が消えないように。監査 D-3）。
 
 ### D3. 報告（`reports`）は下から上へ。各段で親がレビューして圧縮する
 
