@@ -21,7 +21,9 @@ use crate::error::OpsError;
 
 /// 対話用 run の予算（ADR-0033 D4「budget は小さめ」）。返事 1 回ぶんなので短く切る。
 /// 役割の既定（`[[roles]]`）より**こちらが勝つ**: 対話は「ひと言返す」仕事で、実装 run の予算とは別物。
-pub const CONVERSATION_MAX_TURNS: u32 = 6;
+/// Phase 28: 実機で `error_max_turns`（6 ターンで打ち切り）が起きたため 10 に上げた（読むだけでも数ターン
+/// 使う。ADR-0033 D4 追記 / 実機の一本目、2026-09-17）。`max_wall_secs` は変えない。
+pub const CONVERSATION_MAX_TURNS: u32 = 10;
 pub const CONVERSATION_MAX_WALL_SECS: u64 = 300;
 pub const CONVERSATION_MAX_RETRIES: u32 = 1;
 /// 対話用タスクの優先度（人が画面の前で待っているので、通常のタスクより少しだけ前に出す）。
@@ -761,6 +763,40 @@ mod tests {
         store.apply_transition(first.id, Trigger::ReviewPass, None).expect("pass");
         let ready: Vec<TaskId> = store.ready_tasks(10).expect("ready").iter().map(|t| t.id).collect();
         assert!(ready.contains(&second.id), "1 通目が done なら 2 通目が ready: {ready:?}");
+    }
+
+    /// P-78（ADR-0033 D4 / Phase 28）: 対話タスクの `depends_on` は返事を送った順に返すための直列化だけが
+    /// 目的で、前の対話タスクの成否には意味が無い。前が `failed` に落ちても、次の対話タスクは
+    /// `cancelled`（`DependencyFailed`）にならず、`ready` になる。
+    #[test]
+    fn a_failed_conversation_task_does_not_cancel_the_next_one() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        seed_org(&store);
+        let (roles, genres) = specs();
+
+        let first = start(&store, "secretary", None, "1 通目", &roles, &genres, now())
+            .expect("start")
+            .task;
+        let second = start(&store, "secretary", None, "2 通目", &roles, &genres, now())
+            .expect("start")
+            .task;
+        assert_eq!(second.depends_on, vec![first.id]);
+
+        // 1 通目が失敗（非 retryable なので即 `Failed`）しても、2 通目は `cancelled` に連鎖しない。
+        store
+            .acquire_lease(first.id, "run-1", std::time::Duration::from_secs(60))
+            .expect("lease");
+        store
+            .apply_transition(first.id, Trigger::WorkerError { retryable: false }, None)
+            .expect("fail");
+        assert_eq!(store.get(first.id).expect("get").expect("some").status, Status::Failed);
+        assert_eq!(
+            store.get(second.id).expect("get").expect("some").status,
+            Status::Ready,
+            "対話タスクは DependencyFailed の対象から外れる"
+        );
+        let ready: Vec<TaskId> = store.ready_tasks(10).expect("ready").iter().map(|t| t.id).collect();
+        assert!(ready.contains(&second.id), "前が failed でも次は ready になる: {ready:?}");
     }
 
     /// R4（migration 0007）: 1 往復の両方の行に、それを起こした対話用タスクの id が入る。

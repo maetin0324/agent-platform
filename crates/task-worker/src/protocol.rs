@@ -12,6 +12,7 @@ use task_core::{ArtifactRef, DelegateTask, GenreSpec, Status, Task, TaskId, Usag
 /// v3（ADR-0027 D1）: `context.available_genres`、`task.genre`、`delegate` の `tasks[].genre` を追加。
 /// v4（ADR-0033 D4/D6）: `context.node` / `context.memory` / `context.conversation` / `context.standing_rules` /
 /// `context.organization`、`delegate` の `tasks[].assignee`、結果ファイルの `memory` を追加。
+/// Phase 28（ADR-0033 D4 追記）: `context.conversation_addressee` を追加（対話 run は返事だけ。委譲不可）。
 /// 全て追加のみで v1〜v3 のワーカーはそのまま動く。
 pub const PROTOCOL_VERSION: u32 = 4;
 
@@ -141,6 +142,17 @@ pub struct ConversationTurn {
     pub text: String,
 }
 
+/// `context.conversation_addressee`（ADR-0033 D4 / Phase 28）: この run が対話用タスクなら、相手が
+/// 秘書かそれ以外かを表す。対話でない run では `None`。この値そのものは判断せず、`preamble::render`
+/// が対話専用の指示文（作業を始めない・委譲不可）を出し分けるためだけに使う純粋なデータ
+/// （判定はディスパッチャが `task.conversation` と組織図から決定的に行う。DESIGN 原則 1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationAddressee {
+    Secretary,
+    Other,
+}
+
 /// `context.organization[]`（ADR-0033 D4 / Phase 24）: 組織図。分解・委譲できる run に渡し、
 /// 「どの課に何を振るか」を `assignee` で指定させる。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -206,6 +218,10 @@ pub struct RunContext {
     /// ADR-0033 D4: 分解・委譲できる run に渡す組織図（どの課に何を振るかを `assignee` で決めさせる）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub organization: Vec<OrgNodeContext>,
+    /// ADR-0033 D4（Phase 28）: 対話用タスクの run にだけ `Some`。委譲・`Question` を使わせず、
+    /// 返事だけを求める前置き（`preamble::conversation_instructions`）を出すための印。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_addressee: Option<ConversationAddressee>,
 }
 
 /// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは

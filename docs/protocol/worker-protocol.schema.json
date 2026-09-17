@@ -179,6 +179,14 @@
       ],
       "type": "object"
     },
+    "ConversationAddressee": {
+      "description": "`context.conversation_addressee`（ADR-0033 D4 / Phase 28）: この run が対話用タスクなら、相手が\n秘書かそれ以外かを表す。対話でない run では `None`。この値そのものは判断せず、`preamble::render`\nが対話専用の指示文（作業を始めない・委譲不可）を出し分けるためだけに使う純粋なデータ\n（判定はディスパッチャが `task.conversation` と組織図から決定的に行う。DESIGN 原則 1）。",
+      "enum": [
+        "secretary",
+        "other"
+      ],
+      "type": "string"
+    },
     "ConversationTurn": {
       "description": "`context.conversation[]`（ADR-0033 D4 / Phase 24）: この案件でのこのノードと人の直近のやり取り。",
       "properties": {
@@ -678,6 +686,17 @@
             "$ref": "#/$defs/ConversationTurn"
           },
           "type": "array"
+        },
+        "conversation_addressee": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConversationAddressee"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D4（Phase 28）: 対話用タスクの run にだけ `Some`。委譲・`Question` を使わせず、\n返事だけを求める前置き（`preamble::conversation_instructions`）を出すための印。"
         },
         "inputs": {
           "items": {

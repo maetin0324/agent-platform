@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::message::{Message, MessageId, MessageRole};
+use crate::message::{Message, MessageId, MessageRole, is_conversation};
 use crate::model::{Event, Status, Task, TaskId, TaskKind};
 use crate::org::{
     Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
@@ -971,6 +971,14 @@ impl SqliteStore {
         }
         if unsuccessful {
             for dependent in Self::non_terminal_dependents_tx(tx, task.id)? {
+                // P-78（ADR-0033 D4 / Phase 28）: 対話タスクは `DependencyFailed` の対象から外す
+                // （直列化の順番待ちだけなので、前の対話タスクの失敗を理由に次を `cancelled` にしない。
+                // `ready_tasks` 側が「終端に達していれば進めてよい」を見る）。
+                if let Some(dep_task) = Self::get_locked(tx, dependent)?
+                    && is_conversation(&dep_task)
+                {
+                    continue;
+                }
                 Self::transition_if_non_terminal_tx(tx, dependent, Trigger::DependencyFailed)?;
             }
         }
@@ -1252,10 +1260,15 @@ impl TaskStore for SqliteStore {
         for row in rows {
             let task = Self::row_to_task(row?)?;
 
+            // P-78（ADR-0033 D4 / Phase 28）: 対話タスクの `depends_on` は返事を送った順に返すための
+            // 直列化だけが目的で、前の対話タスクの成否には意味が無い。前の対話タスクが終端に達していれば
+            // （`done` だけでなく `failed` / `cancelled` でも）次の対話タスクへ進めてよい。
+            let is_conv = is_conversation(&task);
             let mut deps_done = true;
             for dep_id in &task.depends_on {
                 match Self::get_locked(&conn, *dep_id)? {
                     Some(dep) if dep.status == Status::Done => {}
+                    Some(dep) if is_conv && dep.status.is_terminal() => {}
                     _ => {
                         deps_done = false;
                         break;

@@ -108,6 +108,13 @@ messages(id ULID PK, node_id, project_id NULL, role TEXT /* user | node */, text
   `task_id` = 親タスク）、委譲のたびに `approvals`（同じタスク・同じ鍵の決定）と `standing_rules`
   （鍵を先頭に含む規則）を**前方一致で**引いて、`once` / `standing` なら通し、`denied` なら通さない。
   **バッチは分ける**: 同じ部宛ての提案はその場で子にし、部またぎの提案だけを質問にする。
+- **対話 run は返事だけ（委譲・Question 不可）**（Phase 28。実機の一本目で秘書が返事の代わりに委譲し、
+  子の失敗で `blocked` に落ちた事故から確定）。対話 run（`task.conversation.is_some()`）は
+  `delegate.json` を受け付けず（子を作らず、理由を `progress` で返す）、`Question` 終端も出さない
+  （そのまま `Done` の返事になる。人に聞きたいことは返事の本文に書く）。**作業（委譲・実装・調査・多ターンの
+  分解）は、人が方針と途中目標を承認してから、上の「秘書が計画の run を起こす」経路で始まる**。対話タスクの
+  `depends_on`（直列化）は順番だけを守り、前が失敗しても後続を巻き込まない（P-78。`DependencyFailed` を
+  対話タスクだけ免除）。予算は `max_turns` を 6 → 10 に上げた（読むだけでも数ターン使うため）。
 
 ### D5. 認可（`approvals`）— 「今回だけ」と「今後ずっと」
 

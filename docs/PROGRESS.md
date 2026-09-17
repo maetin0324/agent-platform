@@ -3895,8 +3895,108 @@ Phase 24 と 25 の監査で見つかった逸脱を、決定済みの方針ど�
 
 ### 提案
 
-- P-78: U27-3 のとおり、対話タスクの依存の失敗の扱い（`cancelled` にするか、`ready` のまま残すか）を
-  決めたい。今は他のタスクと同じ規則に従っている。
+- P-78: **解消（Phase 28）**。U27-3 のとおり、対話タスクの依存の失敗の扱い（`cancelled` にするか、`ready`
+  のまま残すか）を決めたい、としていた点は「`ready` のまま進める（直列化の順番だけを見る。前が
+  `failed` / `cancelled` でも次を `cancelled` にしない）」に決めて実装した。詳細は Phase 28 を参照。
 - P-79: 部をまたぐ委譲の認可の鍵を「部 → 部」（`cross-department: research -> coding`）にすると、SPEC §3.1
   の「部をまたぐ連携」の粒度に合う（今は課 → 課）。GUI で「連携の認可」を編集させるなら、そのときに
   一緒に決めたい（U27-5）。
+
+## Phase 28 — 対話 run は返事だけをする（実機の一本目で判明。2026-09-17）
+
+### 実機で起きたこと（証跡）
+
+本番 taskd、本物の Claude で SPEC §6 の一本（「Pluvio を基盤に用いた新たな研究テーマの模索、検証」）を
+通したところ、`POST /projects` → 秘書の対話タスク（`conversation`、`max_turns = 6`）が起きた。秘書は
+SPEC §7 の「(a) 理解の確認 (b) 方針 (c) 最初の途中目標の提案」を**返す代わりに仕事を始めた**:
+`delegate.json` で research-survey に 2 回委譲し（子は失敗）、1 回目の run は `error_max_turns` で落ち、
+再試行で「最終試行なので自分の一般知識で候補 6 件のレポートを書いた」と返事した。さらに子の失敗で
+`on_child_failure = "retry_then_ask"` が効き、対話タスクが **`blocked`** になった。**対話 run が通常の
+実行 run と同じ道具（委譲・子タスク・多ターンの作業）を持っているのが原因**。SPEC §7 は「途中目標の
+達成ごとに人が判定し Go を出す」アジャイルで、秘書が勝手に走るのは仕様違反。
+
+### 決定と実装（ADR-0033 D4 追記）
+
+1. **対話 run は委譲できない**: `task.conversation.is_some()` の run では `StoreSink::delegate_impl`
+   （`task-dispatch`）が子を作らず、`「対話では委譲できない。返事に『次にやりたいこと』として書け」`を
+   `WorkerProgress` に残す。`run_extras` も対話 run には `available_genres` / `organization` を渡さない
+   （`delegate.json` を書かせる余地自体を消す）。`plan.json` は対話タスクが常に `TaskKind::Execute` なので
+   元々読まれない。
+2. **対話 run は `Question` を出さない**: `on_worker_finished`（`task-dispatch`）で、対話 run の
+   `Terminal::Question { text }` は `Trigger::WorkerDone`（`text` をそのまま `summary`）として扱う。
+   `approvals` の行は作らず、対話の即時報告（`TerminalReport::Question`）も作らない（レビューが通れば
+   通常の `Done` 報告に一本化される）。
+3. **`retry_then_ask` から対話タスクを除外**: `escalate_failed_children` の先頭で
+   `task_core::is_conversation(task)` なら即 `Ok(false)`（対話タスクは 1 で子を作れないので元々起きない
+   はずだが、念のため）。
+4. **P-78 を解消**: `task-core::SqliteStore`
+   - `ready_tasks`: 依存先が `Done` でなくても、**依存元が対話タスクなら**依存先が終端（`Done` /
+     `Failed` / `Cancelled` のいずれか）に達していれば進めてよい。
+   - `cascade_after_transition_tx`: `DependencyFailed` の伝播先が対話タスクなら**スキップ**する
+     （`cancelled` にしない）。
+   - 対話タスクの `depends_on` は「返事を送った順に返す」ための直列化だけが目的で、前の対話タスクの
+     成否には意味が無いので、両方を組み合わせて「順番は守るが、前が失敗しても次は進める」にした。
+5. **前置きの指示**（`task-worker::preamble`）: `RunContext.conversation_addressee`
+   （`Option<ConversationAddressee>`、`Secretary` / `Other`）を新設。対話 run にだけディスパッチャが
+   （担当ノードの `OrgKind` から決定的に）埋め、`preamble::render` が**末尾に**指示を足す。秘書宛ては
+   SPEC §7 の (a)〜(d)、それ以外は「聞かれたことに答え、必要なら次にやりたいことを書く」。対話でない
+   run（`None`）では 1 バイトも増えない（バイト一致のテストで確認）。
+6. **予算**: `task_ops::conversation::CONVERSATION_MAX_TURNS` を `6` → `10` に（`error_max_turns` の再発防止。
+   `max_wall_secs` は 300 のまま）。
+
+`ConversationAddressee` はプロトコル v4 に追加フィールドとして載せた（`PROTOCOL_VERSION` は 4 のまま。
+追加のみで前方互換）。`docs/protocol/worker-protocol.schema.json` は `UPDATE_SCHEMA=1 cargo test -p
+task-worker` で再生成し、`docs/protocol/worker-protocol.md` も対応する行を足した。
+
+### 受け入れ条件ごとの証拠
+
+- 対話 run の `delegate.json` が子を作らず、`progress` に理由が出る:
+  `cargo test -p task-dispatch --lib dispatcher::tests::a_conversation_run_cannot_delegate`。
+- 対話 run の `Question` が `Done` の返事になり `approvals` に行ができない:
+  `cargo test -p task-dispatch --lib dispatcher::tests::a_conversation_run_turns_a_question_into_a_reply_without_an_approval`。
+- 前の対話タスクが `failed` でも次の対話タスクが `ready` になる（P-78）:
+  `cargo test -p task-ops --lib conversation::tests::a_failed_conversation_task_does_not_cancel_the_next_one`。
+- 前置きに対話の指示が入る（対話タスクだけ）。通常タスクの前置きは不変（バイト一致）:
+  `cargo test -p task-worker --lib preamble::tests::conversation_runs_get_a_reply_only_instruction_appended_at_the_end`、
+  既存の `an_empty_context_renders_nothing_at_all` / `a_role_only_context_renders_exactly_the_old_role_section`
+  が引き続き通る（1 バイトも変わっていないことの回帰）。
+- 対話 run には委譲の道具そのものが渡らず、相手に応じて `conversation_addressee` が付く:
+  `cargo test -p task-dispatch --lib dispatcher::tests::conversation_runs_get_no_delegation_tools_but_get_the_addressee`。
+- **共通条件** — `cargo test --workspace`: **964 passed**、`grep -c "^test result: FAILED"` = **0**
+  （Phase 27 の 959 から +5）。`cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。
+  テスト以外に `unwrap()` / `expect()` は無い（触った 8 ファイルの追加分を diff で機械的に確認）。
+  ディスパッチャ・ストアに LLM 呼び出しは無い。
+
+### 判断したこと（指示に無い細部）
+
+- **`ConversationAddressee` は `NodeContext` ではなく `RunContext` 直下の新フィールドにした**
+  （`RunContext.conversation` が既に「直近のやり取り」の名前で埋まっているので、`NodeContext` に
+  `kind: OrgKind` を足すより名前の衝突が無く、`preamble` の分岐に必要な情報だけを渡す最小の型にした）。
+- **`Question` → `Done` の変換は `on_worker_finished` の match の中で `task_core::is_conversation(&task)`
+  ガード付きの枝を先に置いた**（既存の `Terminal::Question` の枝より前）。`ReviewSubject` は通常の
+  `Done` と同じ形（`summary = text`、`evidence = []`）にして、対話タスクの空の受け入れ条件がそのまま
+  素通り（既存の「対話は自動でレビューを通る」経路）で `Done` になるようにした。新しい終端の種類は
+  作っていない。
+- **即時の `TerminalReport::Question` 報告も対話 run では止めた**（`!task_core::is_conversation(&task)`
+  を条件に足した）。決定に明記は無いが、`Question` を `Done` 扱いにする以上、報告の側だけ「質問」の
+  ままだと GUI に矛盾した表示（`approvals` には無いのに `reports` には `question` 種別がある）が出るため。
+  レビューが通れば通常の `Done` 報告が 1 件だけ作られる。
+- **`retry_then_ask` の除外は「対話タスクなら」（子の有無を見ない）にした**。1 の変更で対話タスクは
+  子を持てないはずだが、二重の安全策として型（`is_conversation`）だけで止めた方が壊れにくい。
+
+### 未解決事項
+
+- U28-1: `cargo test --workspace` はローカルの偽アダプタでのみ確認した。実機（本物の Claude、ローカル
+  Qwen 経由の ACP）での再実行は、この作業単位の範囲外（実機の一本を再度通すのは別の作業）。
+  Phase 27 の U27-4 の手順がそのまま使える。
+- U28-2: 対話 run の `Question` を `Done` にする変更で、`context.answers[]`（`taskctl answer` 由来の
+  過去の回答履歴）は対話 run には今までどおり渡る（変更していない）が、対話 run はそもそも `Question`
+  で止まらなくなったので、対話タスクに対して `taskctl answer` を打つ経路は実質使われなくなる
+  （エラーにはしていない。呼んでも無害）。
+
+### 提案
+
+- P-80: `ConversationAddressee` は現状 `Secretary` / `Other` の 2 値だが、SPEC §3.1 の「部をまたぐ連携は
+  秘書が認める」に合わせて `Department` を分けたい場面が出るかもしれない（部の対話と課の対話で指示文を
+  変えたいケースが出たら）。今は「秘書とそれ以外」で十分という判断（実機の事故はどちらも「返事の代わりに
+  仕事をした」なので）。

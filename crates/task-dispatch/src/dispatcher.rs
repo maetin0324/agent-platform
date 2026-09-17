@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use task_core::plan::{PlanLimits, PlanOutput, materialize};
 use task_core::{
-    AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec, OnChildFailure,
+    AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec, OnChildFailure, OrgKind,
     RateLimitObservation, RoleSpec, RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger,
     WorkspaceSpec,
 };
@@ -32,10 +32,10 @@ use task_ops::derive::{
     prior_review_from_events, retry_backoff,
 };
 use task_worker::{
-    AdapterError, Answer, ChildSummary, ConversationTurn, EventSink, GenreContext, LocalWorkspace, MemoryContext,
-    MemoryDir, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, RoleContext, RunContext, RunLimits,
-    RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal, WorkerMessage, Workspace, WorkerAdapter,
-    control_master_alive_blocking, remote_exec_instructions,
+    AdapterError, Answer, ChildSummary, ConversationAddressee, ConversationTurn, EventSink, GenreContext,
+    LocalWorkspace, MemoryContext, MemoryDir, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview,
+    RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal,
+    WorkerMessage, Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
 };
 use task_ops::daemon::{
     AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot, InFlight,
@@ -274,7 +274,7 @@ struct AwaitingChildren {
 }
 
 /// run 開始時に決める、ワーカーに渡す追加の文脈（ADR-0016 D1 / D3, ADR-0027 D1）。
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct RunExtras {
     role: Option<RoleContext>,
     children: Vec<ChildSummary>,
@@ -290,6 +290,8 @@ struct RunExtras {
     standing_rules: Vec<String>,
     /// ADR-0033 D4: 分解・委譲できる run に渡す組織図。
     organization: Vec<OrgNodeContext>,
+    /// ADR-0033 D4（Phase 28）: 対話用タスクの run だけ `Some`（相手が秘書かそれ以外か）。
+    conversation_addressee: Option<ConversationAddressee>,
 }
 
 struct ReviewEntry {
@@ -371,6 +373,11 @@ impl StoreSink {
             && parent.lease.as_ref().map(|l| l.worker_run_id.as_str()) == Some(self.run_id.as_str());
         if !ours {
             return Err("task is no longer running under this run".to_string());
+        }
+        // ADR-0033 D4 / Phase 28: 対話 run は返事だけをする。委譲は受け付けず、理由を `progress` に残す
+        // （実機で秘書が返事の代わりに research-survey へ委譲し、対話タスクが `blocked` に落ちた事故の再発防止）。
+        if task_core::is_conversation(&parent) {
+            return Err("対話では委譲できない。返事に『次にやりたいこと』として書け".to_string());
         }
         // ADR-0033 D4 / D5 / SPEC §3.1: 部をまたぐ連携は秘書が認める。別の部の課を `assignee` にした提案は
         // **子を作らずに**質問（`approvals` の 1 行になる固定の形）を残し、run の終わりに `Question` 終端へ
@@ -1192,6 +1199,19 @@ impl Dispatcher {
                     ProviderOutcome::Ok,
                 )
             }
+            // ADR-0033 D4 / Phase 28: 対話 run は `Question` を出さない。人に聞きたいことは返事に書けば
+            // よいので、そのまま `Done` 扱いにする（`approvals` の行は作らない。実機で秘書が「最終試行なので
+            // 自分の一般知識で答えた」まま `Question` の代わりに走った事故の反省）。
+            Ok(RunOutcome {
+                terminal: Terminal::Question { text },
+                ..
+            }) if task_core::is_conversation(&task) => {
+                subject = ReviewSubject {
+                    summary: text.clone(),
+                    evidence: Vec::new(),
+                };
+                (Trigger::WorkerDone, format!("done: {text}"), None, ProviderOutcome::Ok)
+            }
             Ok(RunOutcome {
                 terminal: Terminal::Question { text },
                 ..
@@ -1306,7 +1326,10 @@ impl Dispatcher {
                 self.record_conversation_reply(&task, &run_id, &outcome_str, outcome.next);
                 // ADR-0034 D2（監査 M-1〜M-3）: `question` は run の終端でそのまま届ける。`done` はレビューを
                 // 通って `Status::Done` になってから（`on_review_finished` 側）作るので、ここでは作らない。
-                if matches!(terminal_report, Some(crate::reports::TerminalReport::Question { .. }))
+                // Phase 28: 対話 run の `Question` は `Done` 扱い（上の match）なので、ここでは報告しない
+                // （レビューが通れば `on_review_finished` 側が通常の `Done` 報告を作る）。
+                if !task_core::is_conversation(&task)
+                    && matches!(terminal_report, Some(crate::reports::TerminalReport::Question { .. }))
                     && let Some(question) = terminal_report.as_ref()
                     && let Err(e) = crate::reports::record_run_report(
                         self.store.as_ref(),
@@ -1706,6 +1729,12 @@ impl Dispatcher {
         events: &mut Vec<Event>,
     ) -> Result<bool, DispatchError> {
         if self.config.delegation.on_child_failure == OnChildFailure::Ignore {
+            return Ok(false);
+        }
+        // ADR-0033 D4 / Phase 28: 対話タスクは委譲できない（子を持たない）ので、そもそも子の失敗は
+        // 起きないはずだが、念のため `retry_then_ask` の対象から外す（対話タスクが `blocked` に落ちる
+        // 経路を完全に断つ）。
+        if task_core::is_conversation(task) {
             return Ok(false);
         }
         let failed = self.newly_failed_delegated_children(task.id)?;
@@ -2144,7 +2173,9 @@ impl Dispatcher {
         // ADR-0027 D1 / ADR-0028 D3: 委譲の指示文を出す run（Execute/Approval）と、子の分野を選べる
         // Plan run（`build_plan_prompt` も同じ節を出す）にだけ使える分野の一覧を渡す
         // （プロンプト側の条件と同じ。`claude_code::build_prompt` 参照）。
-        let available_genres = if matches!(task.kind, TaskKind::Execute | TaskKind::Approval | TaskKind::Plan) {
+        // ADR-0033 D4 / Phase 28: 対話 run は委譲できないので渡さない（`delegate.json` を書かせない）。
+        let is_conv = task_core::is_conversation(task);
+        let available_genres = if !is_conv && matches!(task.kind, TaskKind::Execute | TaskKind::Approval | TaskKind::Plan) {
             self.config.genres.iter().map(GenreContext::from).collect()
         } else {
             Vec::new()
@@ -2210,6 +2241,17 @@ impl Dispatcher {
         } else {
             org.iter().map(OrgNodeContext::from).collect()
         };
+        // ADR-0033 D4 / Phase 28: 対話 run にだけ、相手が秘書かそれ以外かを渡す（`preamble` が
+        // 「作業を始めるな、返事だけ書け」の指示文を出し分けるためだけの印。担当が組織に無ければ
+        // 秘書以外扱いにする。判定は決定的で LLM は使わない）。
+        let conversation_addressee = if is_conv {
+            Some(match assigned {
+                Some(n) if n.kind == OrgKind::Secretary => ConversationAddressee::Secretary,
+                _ => ConversationAddressee::Other,
+            })
+        } else {
+            None
+        };
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
         let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
@@ -2253,6 +2295,7 @@ impl Dispatcher {
             conversation,
             standing_rules,
             organization,
+            conversation_addressee,
         })
     }
 
@@ -2843,6 +2886,7 @@ async fn run_worker(
             // ADR-0033 D5（Phase 26）: 担当宛て + 全員向けの永続の認可。
             standing_rules: extras.standing_rules,
             organization: extras.organization,
+            conversation_addressee: extras.conversation_addressee,
         },
     };
     let sink = StoreSink {
@@ -6039,6 +6083,139 @@ mod tests {
         assert_eq!(children.len(), 1, "同じ部の中なら子ができる");
         assert_eq!(children[0].assignee.as_deref(), Some("research-data"));
         assert_eq!(children[0].title, "任せたい仕事");
+    }
+
+    /// Phase 28（ADR-0033 D4 追記）: 対話 run は委譲できない。実機で秘書が返事の代わりに research-survey へ
+    /// 委譲し、対話タスクが `blocked` に落ちた事故の再発防止。`delegate` は子を作らず、理由が
+    /// `WorkerProgress` に残る。
+    #[tokio::test]
+    async fn a_conversation_run_cannot_delegate() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let started = task_ops::conversation::start(
+            store.as_ref(),
+            "research-survey",
+            None,
+            "調べて",
+            &[],
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let adapter = Arc::new(PersonAdapter {
+            terminal: Terminal::Done { summary: "やっておきます".into(), evidence: vec![], usage: None },
+            seen: Arc::new(StdMutex::new(None)),
+            memory: None,
+            proposals: vec![delegate_to("research-data")],
+        });
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 40).await;
+
+        let children: Vec<Task> = store.children(started.task.id).unwrap();
+        assert!(children.is_empty(), "対話 run は委譲できない: {children:?}");
+        let notes: Vec<String> = store
+            .events_for(started.task.id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkerProgress { msg, .. } => Some(msg),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notes.iter().any(|m| m.contains("対話では委譲できない")),
+            "{notes:?}"
+        );
+        assert_eq!(store.get(started.task.id).unwrap().unwrap().status, Status::Done);
+    }
+
+    /// Phase 28（ADR-0033 D4 追記）: 対話 run は `Question` を出さない。そのまま `Done` の返事になり、
+    /// `approvals` の行はできない（実機で「最終試行なので自分の一般知識で答えた」まま走った事故の反省）。
+    #[tokio::test]
+    async fn a_conversation_run_turns_a_question_into_a_reply_without_an_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let started = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "この案件をお願いします",
+            &[],
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let adapter = Arc::new(person_adapter(Terminal::Question {
+            text: "予算とクラスタを教えてください".into(),
+        }));
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 40).await;
+
+        assert_eq!(
+            store.get(started.task.id).unwrap().unwrap().status,
+            Status::Done,
+            "Question は Done 扱い"
+        );
+        let thread = store.message_list("secretary", None, 20).unwrap();
+        let reply = thread.last().expect("a reply");
+        assert_eq!(reply.role, MessageRole::Node);
+        assert_eq!(reply.text, "予算とクラスタを教えてください");
+        assert!(
+            store.approval_list(None, None, None).unwrap().is_empty(),
+            "approvals の行はできない"
+        );
+    }
+
+    /// Phase 28（ADR-0033 D4 追記）: 対話 run には委譲の道具（`available_genres` / `organization`）を渡さない。
+    /// 相手が秘書かそれ以外かで `conversation_addressee` を出し分ける。通常タスクには付かない。
+    #[test]
+    fn conversation_runs_get_no_delegation_tools_but_get_the_addressee() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let to_secretary = task_ops::conversation::start(store.as_ref(), "secretary", None, "hi", &[], &[], OffsetDateTime::now_utc())
+            .unwrap()
+            .task;
+        let to_survey = task_ops::conversation::start(
+            store.as_ref(),
+            "research-survey",
+            None,
+            "hi",
+            &[],
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
+
+        let adapter = Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
+
+        let extras = d.run_extras(&to_secretary).unwrap();
+        assert!(extras.available_genres.is_empty(), "対話 run は委譲できない: {extras:?}");
+        assert!(extras.organization.is_empty());
+        assert_eq!(extras.conversation_addressee, Some(ConversationAddressee::Secretary));
+
+        let extras = d.run_extras(&to_survey).unwrap();
+        assert_eq!(extras.conversation_addressee, Some(ConversationAddressee::Other));
+
+        // 通常タスク（対話由来でない）には付かない。
+        let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
+        let extras = d.run_extras(&ordinary).unwrap();
+        assert_eq!(extras.conversation_addressee, None);
     }
 
     /// ADR-0033 D5（Phase 26）: `Question` で終わった run は既存の `Blocked` / `answers[]` に加えて、

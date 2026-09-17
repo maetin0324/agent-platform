@@ -11,6 +11,8 @@
 //! 4. 直近のやり取り（`context.conversation`）
 //! 5. 役割の指示文（`context.role`。ADR-0016 D1 からある既存の節）
 //! 6. 記憶の書き方の指示（記憶が有効な run にだけ）
+//! 7. 対話専用の指示（`context.conversation_addressee`。Phase 28: 対話 run は返事だけをする。
+//!    末尾に足す。ADR-0033 D4 追記）
 //!
 //! 検索ハーネス（`local-deep-research`）はこの前置きを**一切使わない**（ADR-0029 / ADR-0033 D6:
 //! 検索に渡す問いを濁さないため。Phase 27 の監査 M-2）。
@@ -20,13 +22,14 @@
 
 use task_core::MessageRole;
 
-use crate::protocol::RunContext;
+use crate::protocol::{ConversationAddressee, RunContext};
 
 /// 前置き（役割の指示文を含む）。`claude-code` / `codex` / `acp` / `paperqa` が使う。
 pub fn render(context: &RunContext) -> String {
     let mut out = person_sections(context);
     out.push_str(&role_section(context));
     out.push_str(&memory_instructions(context));
+    out.push_str(&conversation_instructions(context));
     out
 }
 
@@ -105,6 +108,31 @@ fn memory_instructions(context: &RunContext) -> String {
         .to_string()
 }
 
+/// 節 7: 対話専用の指示（Phase 28 / ADR-0033 D4 追記）。実機で秘書が「返事の代わりに仕事を始めた」
+/// （委譲・多ターンの調査・最終試行での代筆）ため、対話 run には**返事だけをする**ことを明示する。
+/// 秘書宛てには SPEC §7 の (a)〜(d)、それ以外のノード宛てには「聞かれたことに答える」に文面を分ける。
+/// 対話でない run（`conversation_addressee` が `None`）では何も出さない。
+fn conversation_instructions(context: &RunContext) -> String {
+    match context.conversation_addressee {
+        Some(ConversationAddressee::Secretary) => {
+            "## これは対話です (this is a conversation, not a work order)\n\
+             この返事では作業を始めないでください。委譲・実装・調査は、人が方針と途中目標を承認してから \
+             始まります。返事には次を、人が数十秒で読める分量で書いてください: \
+             (a) 理解の確認 (b) 方針 (c) 最初の途中目標の提案 (d) 判断を仰ぎたいこと。\
+             ファイルの作成や大きな探索は不要です。\n\n"
+                .to_string()
+        }
+        Some(ConversationAddressee::Other) => {
+            "## これは対話です (this is a conversation, not a work order)\n\
+             この返事では作業を始めないでください。委譲・実装・調査は、人が方針と途中目標を承認してから \
+             始まります。聞かれたことに答え、必要なら次にやりたいことを書いてください。\
+             ファイルの作成や大きな探索は不要です。\n\n"
+                .to_string()
+        }
+        None => String::new(),
+    }
+}
+
 /// やり取りの 1 行化（前置きの箇条書きを崩さないため。中身は削らない）。
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -178,6 +206,36 @@ mod tests {
             ..RunContext::default()
         };
         assert_eq!(render(&bare), "## Role: lead\n\n");
+    }
+
+    /// Phase 28（ADR-0033 D4 追記）: 対話 run にだけ、末尾に「返事だけをする」指示が付く。
+    /// 秘書宛ては (a)〜(d)、それ以外は「聞かれたことに答える」。通常タスクの前置きは 1 バイトも変わらない。
+    #[test]
+    fn conversation_runs_get_a_reply_only_instruction_appended_at_the_end() {
+        let ordinary = full_context();
+        let ordinary_out = render(&ordinary);
+        assert!(!ordinary_out.contains("これは対話です"), "{ordinary_out}");
+
+        let secretary = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Secretary),
+            ..ordinary.clone()
+        };
+        let out = render(&secretary);
+        assert!(out.starts_with(&ordinary_out), "対話の指示は末尾に足すだけ: {out}");
+        assert!(out.contains("この返事では作業を始めないでください"));
+        assert!(out.contains("(a) 理解の確認"));
+        assert!(out.contains("(d) 判断を仰ぎたいこと"));
+
+        let other = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Other),
+            ..RunContext::default()
+        };
+        let out = render(&other);
+        assert!(out.contains("聞かれたことに答え"));
+        assert!(!out.contains("(a) 理解の確認"), "{out}");
+
+        // 対話でない run（既定値の `None`）では何も足さない。
+        assert_eq!(render(&RunContext::default()), "");
     }
 
     /// 記憶が空（ファイルが無い）なら記憶の節は出ないが、書き方の指示は出る（次から覚えられるように）。
