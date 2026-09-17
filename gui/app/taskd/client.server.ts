@@ -164,6 +164,9 @@ export class TaskdClient {
       { method: "DELETE", headers: this.#headers({ Accept: "application/json" }), signal: options.signal },
       this.#timeoutMs,
     );
+    // 204（本文なし）は `res.json()` が空文字列のパースで例外を投げるため素通しする（Phase 23 の
+    // `DELETE /org/{id}` が該当。docs/taskd-api-v1.md §3.45。他の DELETE は 200 `{}` を返す）。
+    if (res.status === 204) return {} as T;
     return (await res.json()) as T;
   }
 

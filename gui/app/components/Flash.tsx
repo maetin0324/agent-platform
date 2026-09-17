@@ -3,6 +3,8 @@ import { Alert } from "~/components/ui/misc";
 import type {
   AccountOpOutcome,
   ActionError,
+  OrgOpOutcome,
+  ProjectOpOutcome,
   ProviderActionResult,
   SecretActionResult,
   TransitionOutcome,
@@ -201,6 +203,41 @@ export function SecretActionFlash({ result }: { result: SecretActionResult | und
           </Alert>
         ))}
     </div>
+  );
+}
+
+const ORG_OP_LABEL: Record<string, string> = { create: "追加", patch: "変更", delete: "削除" };
+
+/**
+ * 「組織」画面の action の結果（ADR-0033 D1）。DB が正なので `reload` は無い
+ * （`ProviderActionFlash` / `SecretActionFlash` との対比。`ClusterConnectOutcome` の扱いと同じ）。
+ */
+export function OrgActionFlash({ outcome }: { outcome: OrgOpOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  return (
+    <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+      <p data-testid="flash-org-op">
+        {ORG_OP_LABEL[outcome.op] ?? outcome.op}: <span className="font-mono">{outcome.id}</span>
+      </p>
+    </Alert>
+  );
+}
+
+const PROJECT_OP_LABEL: Record<string, string> = {
+  project_status: "案件の状態を変更",
+  milestone_create: "途中目標を追加",
+  milestone_status: "途中目標の状態を変更",
+};
+
+/** 「案件」画面の action の結果（ADR-0033 D2）。案件・途中目標の操作は管理系ではない（3.42〜3.49 の前書き）。 */
+export function ProjectActionFlash({ outcome }: { outcome: ProjectOpOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  return (
+    <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+      <p data-testid="flash-project-op">{PROJECT_OP_LABEL[outcome.op] ?? outcome.op}</p>
+    </Alert>
   );
 }
 

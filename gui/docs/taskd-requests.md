@@ -4,6 +4,33 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
 
 ## 未対応
 
+### R3（2026-09-17、Phase G13a）: `TaskSummary` に `assignee` / `project_id` / `milestone_id` が無い
+
+- **エンドポイント**: `GET /tasks`（`TaskList.items[]` = `TaskSummary`）。
+- **期待（ADR-0033 D1「組織の木」、SPEC §3.2「誰が何を抱えているか」）**: 組織の木の各ノードに「抱えている仕事の数」を出すには、
+  タスクの `assignee`（組織のノード id）を横断的に数えられる必要がある。
+- **実際（`docs/gui/api.md` §3.3 の `TaskSummary` 定義、Phase 23 で `assignee`/`project_id`/`milestone_id` が追加されたのは
+  `Task`（`GET /tasks/{id}`）と `ProjectTaskView`（`GET /projects/{id}` の `tasks[]`）だけ）**:
+  ```
+  pub struct TaskSummary {
+      pub id: TaskId, pub parent_id: Option<TaskId>, pub kind: TaskKind, pub status: Status, pub title: String,
+      pub priority: i32, pub tier: Tier, pub adapter: Option<String>, pub attempts: u32, pub max_retries: u32,
+      pub depends_on: Vec<TaskId>, pub created_at: String, pub updated_at: String,
+      pub lease_expires_at: Option<String>, pub backoff_until: Option<String>,
+      pub children: u32, pub pending_children: u32, pub role: Option<String>, pub genre: Option<String>,
+      pub actions: Vec<Action>,
+  }
+  ```
+  `assignee` が無い。`GET /tasks` にも `?assignee=` フィルタは無い（`docs/gui/api.md` §3.3 の一覧はクエリに `assignee` を含まない）。
+- **できないこと**: 「組織の木の各ノードが抱えている仕事の数」を、1 回の `GET /tasks` で横断的に数えられない。
+  今回（`/org` の loader、`app/routes/org.tsx` / `app/lib/org-tree.ts`）は `GET /projects` の全件を `GET /projects/{id}`
+  で束ね、その `tasks[].assignee`（`ProjectTaskView`）を集計する代替で対応した。**この代替では `project_id` の無い
+  （案件に属さない）タスクへの割り当ては数えられない**。案件数ぶんの N+1 呼び出しにもなる。
+- **依頼**: `TaskSummary` に `assignee: Option<String>`（`Task.assignee` と同じ規則。`role`/`genre` を足した R2 と同じ流儀）を足し、
+  可能なら `GET /tasks` に `?assignee=<org_node_id>` フィルタ（`?parent=`/`?project=` と同じ形）を足してほしい。
+  1 回の `GET /tasks?assignee=<id>` （またはフィルタ無しで一覧を取って `assignee` で数える）で組織の木の全ノードの
+  ワークロードが求まるようになる。
+
 ## 対応済み
 
 ### R2 — 対応済み（2026-09-16、taskd 側で追加）

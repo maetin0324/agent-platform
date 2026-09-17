@@ -221,6 +221,19 @@ describe("TaskdClient.delete", () => {
     expect(result).toEqual({});
   });
 
+  it("204 with an empty body (no JSON) does not throw — returns {} (docs/taskd-api-v1.md §3.45)", async () => {
+    // `DELETE /org/{id}` は `StatusCode::NO_CONTENT.into_response()`（本文なし）で返る。他の DELETE
+    // （providers 等）は 200 `{}` だが、`res.json()` は空文字列の解析に失敗するので 204 は素通しする。
+    mock.on("DELETE", "/api/v1/org/coding-poc", (_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+
+    const result = await client.delete<Record<string, never>>("/org/coding-poc");
+
+    expect(result).toEqual({});
+  });
+
   it("converts problem+json errors to TaskdError, same as post", async () => {
     mock.on("DELETE", "/api/v1/providers/inuse", (_req, res) => {
       sendProblem(res, { status: 409, code: "account_in_use", detail: "in use" });
