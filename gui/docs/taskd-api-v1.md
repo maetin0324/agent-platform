@@ -97,6 +97,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `run_not_found` / `artifact_not_found` / `file_not_found` | 404 | run ディレクトリ / 成果物の添字 / ファイルが無い |
 | `not_found` | 404 | 未定義のパス |
 | `org_node_not_found` / `project_not_found` / `milestone_not_found` | 404 | 組織のノード / 案件 / 途中目標が無い（ADR-0033、§3.42〜3.49。ULID でない案件・途中目標の id もここ） |
+| `report_not_found` | 404 | 報告が無い（ADR-0033 D3、§3.50〜3.53。ULID でない id もここ） |
 | `method_not_allowed` | 405 | |
 | `conflict` | 409 | `expected_status` 不一致。`expected`, `actual` |
 | `invalid_transition` | 409 | 状態機械または task-ops の写像が拒否。`task_status`, `kind`, `trigger`（`InvalidTransition{status, kind, trigger}` の写し。`trigger` は `Trigger::name()`） |
@@ -818,6 +819,53 @@ SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validat
 - 状態は `proposed` / `approved` / `in_progress` / `reached` / `redesigned`。達成ごとに人が判定し、
   Go を出すか再設計する（SPEC §7 のアジャイル）。
 - 無い案件・無い途中目標は 404 `project_not_found` / `milestone_not_found`。
+
+### 3.50〜3.53 報告（ADR-0033 D3、Phase 25）
+
+報告は**下から上へ**流れる。生成は決定的（run の `done` / `error` / `question` から taskd が 1 件作る。LLM は呼ばない）、
+**圧縮だけが LLM**（親ノードが子の報告 4 件、または最古が 2 時間を過ぎたら「まとめの run」を 1 回起こし、その `done` が
+親の報告になる。`sources` に子の id が入る）。**悪い知らせ（`bad_news`）は圧縮を待たず、各祖先に複製されて秘書まで届く**
+（SPEC §2.4）。人が見るのは `level = 0`（秘書）の報告。
+
+- **読み取り（3.50 / 3.51）は通常の認証**、**既読と通知（3.52 / 3.53）は管理系**（`token_file` 未設定でも 401）。
+
+#### 3.50 `GET /reports` → 200 `ReportList`
+
+```
+GET /api/v1/reports?project=<ULID>&node=<org id>&level=<n>&unread=true&limit=50
+```
+
+- 新しい順（`created_at` 降順、同値は id 降順）。`limit` の既定は 50、上限 500。知らないクエリキーは 400。
+- `level=0&unread=true` が**秘書レベルの未読**（GUI の「報告の流れ」の既定）。
+- `Report`: `{id, project_id?, node_id, task_id?, kind, level, headline, body, sources[], read_at?, created_at}`。
+  `kind` は `progress` / `result` / `bad_news` / `proposal` / `question`。`project_id` が無いものは「案件なし」
+  （クラスタが落ちた等、案件に紐づかない悪い知らせ）。
+
+#### 3.51 `GET /reports/{id}` → 200 `ReportDetail`
+
+- `{report, sources_expanded[]}`。`sources_expanded` は `report.sources` の順に引いた元の報告（消えていたものは飛ばす）。
+- 無い id・ULID でない id は 404 `report_not_found`。
+
+#### 3.52 `POST /reports/read` → 200 `{updated}`（**管理系**）
+
+- 本文 `{"ids": ["<report id>", …]}`。既に既読のものは触らない（`updated` は未読から既読に変わった件数）。
+- ULID でない id は 404 `report_not_found`。
+
+#### 3.53 `POST /reports/notified` → 200 `{last_notified_at}`（**管理系**）
+
+- GUI がブラウザ通知を出したときに呼ぶ。次の通知は**2 時間後**まで出ない（SPEC §3.5「通知は数時間単位」）。
+- `last_notified_at` は **API プロセスのメモリ**にある観測値で、DB には書かない（taskd を再起動すると「まだ通知していない」に戻る）。
+
+#### `GET /daemon` への追加（3.20）
+
+`DaemonSnapshot.reports`（古いスナップショットには無いので `null` でもよい）:
+
+```
+reports: { unread_secretary: u32, unread_bad_news: u32, last_notified_at?: String, notify_now: bool }
+```
+
+`notify_now` は決定的に決まる: **`bad_news` の未読があれば即 true**、無ければ「未読があり、前回の通知から 2 時間以上経った」とき true。
+この 1 フィールドだけはディスパッチャではなく**API が応答を組むときに埋める**（`last_notified_at` が API 側にあるため）。
 
 ---
 

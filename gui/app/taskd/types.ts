@@ -246,6 +246,14 @@ export type OrgKind = "secretary" | "department" | "section";
  * 案件の状態（ADR-0033 D2）。
  */
 export type ProjectStatus = ("active" | "paused" | "done") | "proposed";
+/**
+ * 報告の一意識別子（ULID）。
+ */
+export type ReportId = string;
+/**
+ * 報告の種類（ADR-0033 D3）。
+ */
+export type ReportKind = "progress" | "result" | "bad_news" | "proposal" | "question";
 
 /**
  * スキーマ生成のルート。
@@ -286,6 +294,11 @@ export interface ApiV1Schema {
   providers: Providers;
   reload: ReloadResult;
   replay_report: ReplayReport;
+  report_detail: ReportDetail;
+  report_list: ReportList;
+  reports_notified: ReportsNotifiedResult;
+  reports_read: ReportsReadBody;
+  reports_read_result: ReportsReadResult;
   run_list: RunList;
   secret_put: SecretPutResult;
   secrets: SecretList;
@@ -786,6 +799,12 @@ export interface DaemonSnapshot {
   max_runs_per_account?: number | null;
   pid: number;
   providers: ProviderLive[];
+  /**
+   * ADR-0033 D3（Phase 25）: 秘書レベルの未読の報告と通知の判定。**API が応答を組むときに埋める**
+   * 唯一のフィールド（`last_notified_at` は `POST /reports/notified` が進める API プロセスの観測値で、
+   * ディスパッチャは知らない）。ディスパッチャが送るスナップショットでは常に `None`。
+   */
+  reports?: ReportsLive | null;
   started_at: string;
   tick_ms: number;
   ticks: number;
@@ -945,6 +964,27 @@ export interface ProviderLive {
    */
   model?: string | null;
   tiers: Tier[];
+}
+/**
+ * 未読の件数（`DaemonSnapshot.reports` と GUI の通知判定に使う観測値。ADR-0033 D3）。
+ */
+export interface ReportsLive {
+  /**
+   * 前回 GUI が通知した時刻（RFC 3339）。`POST /reports/notified` が進める。
+   */
+  last_notified_at?: string | null;
+  /**
+   * 「前回の通知から 2 時間以上経ち未読がある」か「`bad_news` の未読がある」。
+   */
+  notify_now: boolean;
+  /**
+   * そのうち `bad_news` の件数（0 でなければ即通知）。
+   */
+  unread_bad_news: number;
+  /**
+   * 秘書レベル（`level = 0`）の未読の件数。
+   */
+  unread_secretary: number;
 }
 /**
  * `POST /tasks/{id}/approve`、`POST /tasks/{id}/reject` の本文。
@@ -1644,6 +1684,78 @@ export interface ReplayMismatch {
    */
   stored: string;
   task_id: TaskId;
+}
+/**
+ * `GET /reports/{id}` の応答（`sources` の中身も展開して返す）。
+ */
+export interface ReportDetail {
+  report: Report;
+  /**
+   * `report.sources` の順に引いた元の報告（見つからなかったものは飛ばす）。
+   */
+  sources_expanded: Report[];
+}
+/**
+ * 1 件の報告。
+ */
+export interface Report {
+  body?: string;
+  created_at: string;
+  headline: string;
+  id: ReportId;
+  kind: ReportKind;
+  /**
+   * 組織の木の深さ（秘書 = 0）。GUI は `level = 0` を「人が見る報告」として扱う。
+   */
+  level: number;
+  /**
+   * 報告した組織のノード（`org_nodes.id`）。
+   */
+  node_id: string;
+  /**
+   * 案件。`None` は「案件なし」（クラスタの障害など、案件に紐づかない悪い知らせ）。
+   * `reports.project_id` は NOT NULL なので、DB には空文字列として書く（migration は足さない。ADR-0034）。
+   */
+  project_id?: ProjectId | null;
+  read_at?: string | null;
+  /**
+   * 元になった報告の id（まとめなら子の報告、悪い知らせの複製なら 1 段下の報告）。
+   */
+  sources?: ReportId[];
+  /**
+   * 元になったタスク（まとめの報告では、そのまとめの run のタスク）。
+   */
+  task_id?: TaskId | null;
+}
+/**
+ * Phase 25（ADR-0033 D3）: 報告（生成は決定的、圧縮は別 run）。
+ */
+export interface ReportList {
+  items: Report[];
+}
+/**
+ * `POST /reports/notified` の応答。
+ */
+export interface ReportsNotifiedResult {
+  /**
+   * 進めた後の通知時刻（RFC 3339）。
+   */
+  last_notified_at: string;
+}
+/**
+ * `POST /reports/read` の本文。
+ */
+export interface ReportsReadBody {
+  ids: string[];
+}
+/**
+ * `POST /reports/read` の応答。
+ */
+export interface ReportsReadResult {
+  /**
+   * 未読から既読に変わった件数。
+   */
+  updated: number;
 }
 /**
  * `GET /tasks/{id}/runs`。
