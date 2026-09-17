@@ -4,6 +4,7 @@ import type {
   AccountLoginStart,
   AccountView,
   Action,
+  ApprovalDecideResult,
   ClusterConnectResult,
   ClusterConnectStart,
   MessageAccepted,
@@ -17,6 +18,7 @@ import type {
   ReportsNotifiedResult,
   ReportsReadResult,
   SecretPutResult,
+  StandingRule,
   TransitionResult,
 } from "./types";
 
@@ -163,6 +165,25 @@ export type ConversationOpOutcome =
   | { ok: true; op: "send"; accepted: MessageAccepted }
   | { ok: true; op: "new_project"; project: Project }
   | { ok: false; op: "send" | "new_project"; error: ActionError };
+
+/**
+ * 認可の決定（ADR-0033 D5、docs/taskd-api-v1.md §3.57。**管理系**、`token_file` 未設定でも 401）:
+ * `POST /approvals/{id}/decide` の結果。`once`/`standing`/`denied` のいずれでも同じ形（`result.approval.decision`
+ * を見て画面に出す）。taskd のエラーは例外にせず `{ok:false, error}` にする。
+ */
+export type ApprovalOpOutcome =
+  | { ok: true; op: "decide"; id: string; result: ApprovalDecideResult }
+  | { ok: false; op: "decide"; id: string; error: ActionError };
+
+/**
+ * 永続の認可の追加・削除（ADR-0033 D5、docs/taskd-api-v1.md §3.59〜3.60。**管理系**）:
+ * `POST /standing-rules` / `DELETE /standing-rules/{id}` の結果。taskd のエラーは例外にせず
+ * `{ok:false, error}` にする（401 `unauthorized` を含む）。
+ */
+export type StandingRuleOpOutcome =
+  | { ok: true; op: "create"; id: string; rule: StandingRule }
+  | { ok: true; op: "delete"; id: string }
+  | { ok: false; op: "create" | "delete"; id: string; error: ActionError };
 
 export type AccountOpOutcome =
   | { ok: true; op: "create"; id: string; adapter: AccountAdapter; account: AccountView }

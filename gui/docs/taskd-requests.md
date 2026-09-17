@@ -51,6 +51,26 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
   または `GET /projects/{id}` / `GET /tasks` に `?exclude=conversation` のような絞り込み）を足してほしい。
   どちらも足されるまでは、GUI は (a) 送った直後の返事にだけリンクを出し、(b) 対話用タスクも仕事の木に描いたままにする。
 
+### R5（2026-09-17、Phase G13d）: `GET /approvals?pending=false` が絞り込まない
+
+- **エンドポイント**: `GET /approvals?pending=`（§3.56）。
+- **期待（`docs/taskd-api-v1.md` §3.56「`pending=true` で未決定だけ」）**: `pending=false` は「決定済みだけ」（`decision IS NOT NULL`）に
+  絞り込むと読める（`GUI`は「上に未決の要求、下に決めたものの履歴」を作るのに使う想定だった）。
+- **実際（実機で確認。使い捨ての taskd、`config/org.example.toml` + 偽アダプタ）**: `pending=true` は正しく未決定だけに絞れるが、
+  `pending=false` は**フィルタ無しと同じ全件**を返す（`decision` が付いた行も付いていない行も両方入る）。
+  ```
+  # 1 件を once で決定した直後
+  $ curl .../approvals?pending=true   # -> 未決定 1 件だけ（正しい）
+  $ curl .../approvals?pending=false  # -> 決定済み 1 件 + 未決定 1 件（全 2 件。決定済みだけにならない）
+  ```
+- **できないこと**: `pending=false` に頼って「決めたものの履歴」を作ると、未決の要求まで混ざって二重に表示される。
+- **GUI 側の対応（回避ではなく、ドキュメント化されたフィールドで代替）**: `GET /approvals`（フィルタ無し）を 1 回だけ呼び、
+  応答に必ず含まれる `Approval.decision`（§3.56「`decision` は once/standing/denied（未決定は無い）」）の有無で
+  GUI 側で pending / decided に分けた（`app/lib/approvals.ts` の `splitApprovals`。`filterReportsByKind` 等、既存の
+  「ドキュメント化されたフィールド値で GUI 側が分ける」パターンと同じ）。**新しい判断値は作っていない**。
+- **依頼**: `pending=false` が `decision IS NOT NULL` で絞り込まれるように直してほしい（`pending=true` の実装を参考に）。
+  直ったら GUI 側は `pending=true` / `pending=false` の 2 回呼びに戻せる（クエリの絞り込みを taskd に任せる方が本来の設計）。
+
 ## 対応済み
 
 ### R2 — 対応済み（2026-09-16、taskd 側で追加）

@@ -3,11 +3,13 @@ import { Alert } from "~/components/ui/misc";
 import type {
   AccountOpOutcome,
   ActionError,
+  ApprovalOpOutcome,
   OrgOpOutcome,
   ProjectOpOutcome,
   ProviderActionResult,
   ReportOpOutcome,
   SecretActionResult,
+  StandingRuleOpOutcome,
   TransitionOutcome,
 } from "~/taskd/action-types";
 
@@ -260,6 +262,43 @@ export function ReportActionFlash({ outcome }: { outcome: ReportOpOutcome | unde
         {REPORT_OP_LABEL[outcome.op] ?? outcome.op}
         {outcome.op === "reports_read" && <>（{outcome.result.updated} 件）</>}
       </p>
+    </Alert>
+  );
+}
+
+const APPROVAL_DECISION_LABEL: Record<string, string> = {
+  once: "今回だけ",
+  standing: "今後ずっと",
+  denied: "認めない",
+};
+
+/**
+ * 「認可」画面の action の結果（SPEC §3.6、ADR-0033 D5）: `POST /approvals/{id}/decide`。
+ * `standing` で答えたときは、続けて足された永続の認可があることも出す。
+ */
+export function ApprovalActionFlash({ outcome }: { outcome: ApprovalOpOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  const decision = outcome.result.approval.decision;
+  return (
+    <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+      <p data-testid="flash-approval-op">
+        答えました: {decision ? (APPROVAL_DECISION_LABEL[decision] ?? decision) : "決定"}
+        {outcome.result.standing_rule && <>（永続の認可に追加しました）</>}
+      </p>
+    </Alert>
+  );
+}
+
+const STANDING_RULE_OP_LABEL: Record<string, string> = { create: "追加", delete: "削除" };
+
+/** 「永続の認可」の追加・削除の結果（ADR-0033 D5、docs/taskd-api-v1.md §3.59〜3.60）。 */
+export function StandingRuleActionFlash({ outcome }: { outcome: StandingRuleOpOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  return (
+    <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+      <p data-testid="flash-standing-rule-op">{STANDING_RULE_OP_LABEL[outcome.op] ?? outcome.op}</p>
     </Alert>
   );
 }

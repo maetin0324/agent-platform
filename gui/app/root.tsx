@@ -17,6 +17,7 @@ import { Badge } from "~/components/ui/badge";
 import { buttonClass } from "~/components/ui/button";
 import { Icon, type IconName } from "~/components/ui/Icon";
 import { Alert } from "~/components/ui/misc";
+import { approvalsPendingCount } from "~/lib/approvals";
 import { reportsBadgeTone } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
@@ -48,6 +49,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       problem: null,
       counts: null,
       reportsLive: null,
+      approvalsPending: 0,
       session,
       // 接続先も出さない（hydration payload にも載せない）
       gui: { version: guiVersion, taskdApiUrl: "" },
@@ -62,6 +64,9 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   // API が応答を組むときに埋める唯一のフィールドなので、SSE の `daemon` イベントで root が再検証されるたびに
   // ここで拾い直す（`useTaskdStream` が `task.event`/`daemon`/`reset` のいずれでも root を revalidate する）。
   let reportsLive: ReportsLive | null = null;
+  // 「認可」ナビのバッジ（ADR-0033 D5、docs/taskd-api-v1.md §3.20 の追加。`DaemonSnapshot.approvals_pending`
+  // も `reports` と同じく API が応答を組むときに埋める）。taskd に届かないときは 0（バッジを出さない）。
+  let approvalsPending = 0;
   if (!state.unavailable && state.health) {
     try {
       counts = (await client.get<{ counts: InboxCounts }>("/inbox", { signal: request.signal })).counts;
@@ -74,13 +79,22 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     try {
       const daemon = await client.get<DaemonView>("/daemon", { signal: request.signal });
       reportsLive = daemon.snapshot?.reports ?? null;
+      approvalsPending = approvalsPendingCount(daemon);
     } catch {
       // バッジと通知が出ないだけにする（他の画面のバナー・ErrorBoundary が状況を伝える）。
       reportsLive = null;
+      approvalsPending = 0;
     }
   }
   // トークンは含めない。baseUrl は接続先の表示用（loopback が既定）。
-  return { ...state, counts, reportsLive, session, gui: { version: guiVersion, taskdApiUrl: client.baseUrl } };
+  return {
+    ...state,
+    counts,
+    reportsLive,
+    approvalsPending,
+    session,
+    gui: { version: guiVersion, taskdApiUrl: client.baseUrl },
+  };
 }
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -106,7 +120,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 const RECHECK_MS = 5_000;
 
 export default function App({ loaderData }: Route.ComponentProps) {
-  const { health, unavailable, problem, counts, reportsLive, gui, session } = loaderData;
+  const { health, unavailable, problem, counts, reportsLive, approvalsPending, gui, session } = loaderData;
   const revalidator = useRevalidator();
   const disconnected = unavailable || health === null;
   const showBanner = disconnected || problem !== null;
@@ -138,6 +152,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
       <Sidebar
         approvals={counts?.approvals ?? 0}
         reportsLive={reportsLive}
+        approvalsPending={approvalsPending}
         connected={!disconnected && problem === null}
         taskdVersion={health?.taskd_version ?? null}
         logoutEnabled={session.enabled}
@@ -204,13 +219,13 @@ export default function App({ loaderData }: Route.ComponentProps) {
   );
 }
 
-type NavItem = { href: string; label: string; icon: IconName; badge?: "approvals" | "reports" };
+type NavItem = { href: string; label: string; icon: IconName; badge?: "approvals" | "reports" | "org_approvals" };
 
 /**
  * ナビゲーションのグループ（docs/adr/0011 D3、Phase G13a で SPEC §4 の順に組み替え。ADR-0033 D8）。
- * 先頭は SPEC §4 の 6 画面の順（秘書・組織・案件・報告・認可・成果物）。秘書・報告・認可・成果物は
- * G13b までプレースホルダ（`~/components/Placeholder.tsx`）。既存のタスク・プロバイダ・アカウント・
- * クラスタの画面は「裏方」区画にまとめて下げる（人が見る単位は案件と組織になり、タスクは裏方に下がる）。
+ * 先頭は SPEC §4 の 6 画面の順（秘書・組織・案件・報告・認可・成果物）。成果物は G13c、認可は G13d で実物になった。
+ * 既存のタスク・プロバイダ・アカウント・クラスタの画面は「裏方」区画にまとめて下げる
+ * （人が見る単位は案件と組織になり、タスクは裏方に下がる）。
  */
 const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
@@ -220,7 +235,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { href: "/org", label: "組織", icon: "users" },
       { href: "/projects", label: "案件", icon: "folder" },
       { href: "/reports", label: "報告", icon: "send", badge: "reports" },
-      { href: "/approvals", label: "認可", icon: "shield" },
+      { href: "/approvals", label: "認可", icon: "shield", badge: "org_approvals" },
       { href: "/artifacts", label: "成果物", icon: "file" },
     ],
   },
@@ -253,11 +268,13 @@ function Sidebar({
   approvals,
   reportsLive,
   connected,
+  approvalsPending,
   taskdVersion,
   logoutEnabled,
 }: {
   approvals: number;
   reportsLive: ReportsLive | null;
+  approvalsPending: number;
   connected: boolean;
   taskdVersion: string | null;
   logoutEnabled: boolean;
@@ -330,6 +347,14 @@ function Sidebar({
                             )}
                           >
                             {unreadSecretary}
+                          </span>
+                        )}
+                        {item.badge === "org_approvals" && approvalsPending > 0 && (
+                          <span
+                            data-testid="approvals-pending-badge"
+                            className="ml-auto min-w-5 rounded-full bg-danger px-1.5 py-0.5 text-center text-[0.7rem] leading-none font-bold text-white tabular-nums shadow-sm dark:text-bg"
+                          >
+                            {approvalsPending}
                           </span>
                         )}
                       </a>
