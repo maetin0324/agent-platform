@@ -660,6 +660,8 @@ mod tests {
             clusters,
             roles: vec![],
             genres: vec![],
+            org_include: None,
+            org: vec![],
             delegation: Default::default(),
             accounts: None,
             secrets: None,
@@ -708,6 +710,9 @@ mod tests {
             role: None,
             genre: None,
             aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
         }
     }
 

@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
-    WorkspaceSpec,
+    Budget, Check, Criterion, GenreSpec, MilestoneId, ProjectId, RoleSpec, Status, Task, TaskId, TaskKind, TaskStore,
+    Tier, WorkerHint, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -106,6 +106,16 @@ pub struct NewTaskSpec {
     /// ADR-0016 D3: 委譲した子が全て終端になった後に集約 run を 1 回行う。
     #[serde(default)]
     pub aggregate: bool,
+    /// ADR-0033 D2: このタスクが属する案件。存在しない案件はエラー。
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
+    /// ADR-0033 D2: このタスクが属する途中目標。`project_id` と同じ案件のものであること。
+    #[serde(default)]
+    pub milestone_id: Option<MilestoneId>,
+    /// ADR-0033 D2: 割り当てる組織のノード（`org_nodes.id`）。既定の解決で役割・分野より先に見る。
+    /// 存在しないノードはエラー。
+    #[serde(default)]
+    pub assignee: Option<String>,
     #[serde(default)]
     pub workspace: Option<PathBuf>,
     /// ADR-0018: 指定すると `WorkspaceSpec::Remote{cluster, path}` になり、コマンドはそのクラスタで実行される。
@@ -161,6 +171,33 @@ fn validate_depends_on(store: &dyn TaskStore, depends_on: &[TaskId]) -> Result<(
     Ok(())
 }
 
+/// ADR-0033 D2: `project_id` / `milestone_id` の整合（存在すること、途中目標がその案件のものであること）。
+fn validate_project_and_milestone(store: &dyn TaskStore, spec: &NewTaskSpec) -> Result<(), OpsError> {
+    let project = match spec.project_id {
+        Some(id) => {
+            let Some(project) = store.project_get(id)? else {
+                return Err(OpsError::Validation(format!("project {id} does not exist")));
+            };
+            Some(project)
+        }
+        None => None,
+    };
+    if let Some(milestone_id) = spec.milestone_id {
+        let Some(project) = project else {
+            return Err(OpsError::Validation(
+                "milestone_id requires project_id".to_string(),
+            ));
+        };
+        if !store.milestone_list(project.id)?.iter().any(|m| m.id == milestone_id) {
+            return Err(OpsError::Validation(format!(
+                "milestone {milestone_id} does not belong to project {}",
+                project.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `spec` から `Task` を組み立て、`store.create_task` で原子的に挿入する（役割・分野の既定は無し = 全体の既定だけ）。
 pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime) -> Result<Task, OpsError> {
     create_task_with_roles(store, spec, &[], &[], now)
@@ -193,10 +230,25 @@ pub fn create_task_with_roles(
             )));
         }
     }
+    // ADR-0033 D2: `assignee` があれば、その組織ノードの分野（`org_nodes.genre`）→ その分野の
+    // `default_role` → 役割の既定、を**役割・分野より先に**見る（解決は決定的。LLM は使わない）。
+    // `assignee` が無ければ `org_role` は `None` のままなので、従来の解決順がそのまま残る。
+    let (assignee_genre, org_role) = match spec.assignee.as_deref() {
+        Some(assignee) => {
+            let org = store.org_list()?;
+            if !org.iter().any(|n| n.id == assignee) {
+                return Err(OpsError::Validation(format!("assignee {assignee:?} is not an org node")));
+            }
+            task_core::assignee_defaults(&org, assignee, roles, genres)
+        }
+        None => (None, None),
+    };
+    validate_project_and_milestone(store, &spec)?;
     let genre_id = spec
         .genre
         .clone()
-        .or_else(|| spec.role.as_deref().and_then(|r| GenreSpec::unique_for_role(genres, r)));
+        .or_else(|| spec.role.as_deref().and_then(|r| GenreSpec::unique_for_role(genres, r)))
+        .or(assignee_genre);
     let genre_role = genre_id
         .as_deref()
         .and_then(|g| GenreSpec::find(genres, g))
@@ -241,11 +293,13 @@ pub fn create_task_with_roles(
     let budget = Budget {
         max_turns: spec
             .max_turns
+            .or(org_role.and_then(|r| r.max_turns))
             .or(role.and_then(|r| r.max_turns))
             .or(genre_role.and_then(|r| r.max_turns))
             .unwrap_or(DEFAULT_MAX_TURNS),
         max_wall_secs: spec
             .max_wall_secs
+            .or(org_role.and_then(|r| r.max_wall_secs))
             .or(role.and_then(|r| r.max_wall_secs))
             .or(genre_role.and_then(|r| r.max_wall_secs))
             .unwrap_or(DEFAULT_MAX_WALL_SECS),
@@ -266,11 +320,13 @@ pub fn create_task_with_roles(
         worker_hint: WorkerHint {
             tier: spec
                 .tier
+                .or(org_role.and_then(|r| r.tier))
                 .or(role.and_then(|r| r.tier))
                 .or(genre_role.and_then(|r| r.tier))
                 .unwrap_or(DEFAULT_TIER),
             adapter: spec
                 .adapter
+                .or_else(|| org_role.and_then(|r| r.adapter.clone()))
                 .or_else(|| role.and_then(|r| r.adapter.clone()))
                 .or_else(|| genre_role.and_then(|r| r.adapter.clone())),
         },
@@ -283,6 +339,9 @@ pub fn create_task_with_roles(
         role: spec.role,
         genre: genre_id,
         aggregate: spec.aggregate,
+        project_id: spec.project_id,
+        milestone_id: spec.milestone_id,
+        assignee: spec.assignee,
     };
 
     store.create_task(&task, vec![])?;
@@ -312,6 +371,9 @@ mod tests {
             role: None,
             genre: None,
             aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
             workspace: Some(PathBuf::from("/tmp/workspace")),
             cluster: None,
             adapter: None,
@@ -403,6 +465,174 @@ mod tests {
         assert_eq!(spec.max_turns, Some(3));
         assert_eq!(spec.max_wall_secs, None);
         assert!(spec.role.is_none());
+    }
+
+
+    // ---- ADR-0033 D2（Phase 23）: assignee から先に解決する ----
+
+    fn org_node(id: &str, parent: Option<&str>, kind: task_core::OrgKind, genre: Option<&str>) -> task_core::OrgNode {
+        let now = OffsetDateTime::now_utc();
+        task_core::OrgNode {
+            id: id.into(),
+            parent_id: parent.map(str::to_string),
+            name: id.into(),
+            kind,
+            genre: genre.map(str::to_string),
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn org_store() -> SqliteStore {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        store
+            .org_upsert(&org_node("secretary", None, task_core::OrgKind::Secretary, None))
+            .expect("secretary");
+        store
+            .org_upsert(&org_node("research", Some("secretary"), task_core::OrgKind::Department, None))
+            .expect("department");
+        store
+            .org_upsert(&org_node(
+                "research-survey",
+                Some("research"),
+                task_core::OrgKind::Section,
+                Some("literature"),
+            ))
+            .expect("section");
+        store
+    }
+
+    fn literature_setup() -> (Vec<RoleSpec>, Vec<GenreSpec>) {
+        let roles = vec![
+            RoleSpec {
+                id: "literature-reader".into(),
+                tier: Some(Tier::Cheap),
+                adapter: Some("paperqa".into()),
+                max_turns: Some(5),
+                max_wall_secs: Some(1200),
+                instructions: None,
+            },
+            RoleSpec {
+                id: "lead".into(),
+                tier: Some(Tier::Frontier),
+                adapter: Some("claude-code".into()),
+                ..RoleSpec::default()
+            },
+        ];
+        let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
+        (roles, genres)
+    }
+
+    /// `assignee` があれば、そのノードの分野 →`default_role`→ 役割の既定で `WorkerHint` が埋まる。
+    #[test]
+    fn assignee_fills_the_worker_hint_from_the_org_nodes_genre() {
+        let store = org_store();
+        let (roles, genres) = literature_setup();
+        let mut spec = base_spec();
+        spec.assignee = Some("research-survey".into());
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
+        assert_eq!(task.assignee.as_deref(), Some("research-survey"));
+        assert_eq!(task.genre.as_deref(), Some("literature"), "the node's genre is adopted");
+        assert_eq!(task.worker_hint.tier, Tier::Cheap);
+        assert_eq!(task.worker_hint.adapter.as_deref(), Some("paperqa"));
+        assert_eq!(task.budget.max_turns, 5);
+        assert_eq!(task.budget.max_wall_secs, 1200);
+        assert_eq!(task.role, None, "assignee does not invent a role name");
+    }
+
+    /// タスク自身の値は `assignee` より強い。`role` を明示したら、その役割・分野が優先される。
+    #[test]
+    fn explicit_values_still_win_over_the_assignee() {
+        let store = org_store();
+        let (roles, genres) = literature_setup();
+        let mut spec = base_spec();
+        spec.assignee = Some("research-survey".into());
+        spec.tier = Some(Tier::Frontier);
+        spec.max_turns = Some(33);
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
+        assert_eq!(task.worker_hint.tier, Tier::Frontier, "the task value wins");
+        assert_eq!(task.budget.max_turns, 33);
+        assert_eq!(task.worker_hint.adapter.as_deref(), Some("paperqa"), "still filled from the assignee");
+
+        let mut spec = base_spec();
+        spec.assignee = Some("research-survey".into());
+        spec.role = Some("lead".into());
+        spec.genre = Some("literature".into());
+        let err = create_task_with_roles(&store, spec, &roles, &genres, now()).unwrap_err();
+        assert!(err.to_string().contains("is not one of genre"), "{err}");
+    }
+
+    /// 分野を持たないノード（部）や `assignee` 無しでは、従来の解決順がそのまま残る。
+    #[test]
+    fn without_an_assignee_nothing_changes() {
+        let store = org_store();
+        let (roles, genres) = literature_setup();
+        let task = create_task_with_roles(&store, base_spec(), &roles, &genres, now()).expect("create");
+        assert_eq!(task.worker_hint.tier, Tier::Standard, "global default");
+        assert_eq!(task.worker_hint.adapter, None);
+        assert_eq!(task.budget.max_turns, DEFAULT_MAX_TURNS);
+        assert_eq!(task.assignee, None);
+
+        let mut spec = base_spec();
+        spec.assignee = Some("research".into());
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
+        assert_eq!(task.assignee.as_deref(), Some("research"));
+        assert_eq!(task.genre, None, "a department has no genre");
+        assert_eq!(task.worker_hint.tier, Tier::Standard);
+    }
+
+    /// 知らない `assignee`・存在しない案件・案件違いの途中目標は 422 相当の検証エラー。
+    #[test]
+    fn unknown_assignee_project_or_milestone_is_rejected() {
+        let store = org_store();
+        let (roles, genres) = literature_setup();
+        let mut spec = base_spec();
+        spec.assignee = Some("nobody".into());
+        let err = create_task_with_roles(&store, spec, &roles, &genres, now()).unwrap_err();
+        assert!(err.to_string().contains("is not an org node"), "{err}");
+
+        let mut spec = base_spec();
+        spec.project_id = Some(task_core::ProjectId::new());
+        let err = create_task_with_roles(&store, spec, &roles, &genres, now()).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+
+        let now_ts = OffsetDateTime::now_utc();
+        let project = task_core::Project {
+            id: task_core::ProjectId::new(),
+            title: "t".into(),
+            request: "r".into(),
+            status: task_core::ProjectStatus::Active,
+            secretary_summary: None,
+            created_at: now_ts,
+            updated_at: now_ts,
+        };
+        store.project_create(&project).unwrap();
+        let other = task_core::Project { id: task_core::ProjectId::new(), ..project.clone() };
+        store.project_create(&other).unwrap();
+        let milestone = store
+            .milestone_create(other.id, "m", "", task_core::MilestoneStatus::Approved)
+            .unwrap();
+
+        let mut spec = base_spec();
+        spec.project_id = Some(project.id);
+        spec.milestone_id = Some(milestone.id);
+        let err = create_task_with_roles(&store, spec, &roles, &genres, now()).unwrap_err();
+        assert!(err.to_string().contains("does not belong to project"), "{err}");
+
+        let mut spec = base_spec();
+        spec.milestone_id = Some(milestone.id);
+        let err = create_task_with_roles(&store, spec, &roles, &genres, now()).unwrap_err();
+        assert!(err.to_string().contains("milestone_id requires project_id"), "{err}");
+
+        // 正しい組み合わせは通り、列にも載る。
+        let mut spec = base_spec();
+        spec.project_id = Some(other.id);
+        spec.milestone_id = Some(milestone.id);
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
+        assert_eq!(task.project_id, Some(other.id));
+        assert_eq!(task.milestone_id, Some(milestone.id));
     }
 
     fn genre(id: &str, default_role: Option<&str>, roles: &[&str]) -> GenreSpec {

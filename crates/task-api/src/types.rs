@@ -2,7 +2,10 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{ArtifactRef, EventRow, Status, Tier};
+use task_core::{
+    ArtifactRef, EventRow, Milestone, MilestoneId, MilestoneStatus, OrgKind, OrgNode, Project, ProjectStatus,
+    Status, TaskId, Tier,
+};
 use task_ops::daemon::{CooldownView, DaemonSnapshot};
 use task_ops::view::RunSummary;
 
@@ -586,4 +589,118 @@ pub struct ClusterConnectResult {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+// ---- ADR-0033 D1/D2（Phase 23）: 組織・案件・途中目標 ----
+
+/// `GET /org` の応答。木は GUI が `parent_id` で組む（順序は `position`、同値なら `id` の昇順）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct OrgList {
+    pub items: Vec<OrgNode>,
+}
+
+/// `POST /org` の要求本文（管理系）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OrgCreateBody {
+    pub id: String,
+    pub name: String,
+    pub kind: OrgKind,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub genre: Option<String>,
+    #[serde(default)]
+    pub brief: Option<String>,
+    #[serde(default)]
+    pub position: Option<i64>,
+}
+
+/// `PATCH /org/{id}` の要求本文（管理系）。書いた項目だけを変える。
+/// `genre` は `null` を書けば「分野なし」にできる（書かなければ今の値のまま）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OrgPatchBody {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub kind: Option<OrgKind>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub genre: Option<Option<String>>,
+    #[serde(default)]
+    pub brief: Option<String>,
+    #[serde(default)]
+    pub position: Option<i64>,
+}
+
+/// 「書かなかった」と「`null` を書いた」を区別するための小道具（`Option<Option<T>>`）。
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
+/// `GET /projects` の応答（`created_at` の降順）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectList {
+    pub items: Vec<Project>,
+}
+
+/// `POST /projects` の要求本文。作られた案件は `status = "proposed"`（秘書の返事待ち）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCreateBody {
+    pub title: String,
+    pub request: String,
+}
+
+/// `PATCH /projects/{id}` の要求本文。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectPatchBody {
+    pub status: ProjectStatus,
+}
+
+/// `GET /projects/{id}` の応答。案件 + 途中目標 + その案件のタスクの要約（GUI の「仕事の木」用）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectDetail {
+    pub project: Project,
+    pub milestones: Vec<Milestone>,
+    /// 仕事の木を描くのに必要な最小限だけ（詳細は `GET /tasks/{id}`）。
+    pub tasks: Vec<ProjectTaskView>,
+}
+
+/// 仕事の木の 1 ノード（ADR-0033 D2: DAG は既存の `parent_id` / `depends_on` がそのまま）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectTaskView {
+    pub id: TaskId,
+    pub title: String,
+    pub status: Status,
+    pub parent_id: Option<TaskId>,
+    pub depends_on: Vec<TaskId>,
+    pub assignee: Option<String>,
+    pub milestone_id: Option<MilestoneId>,
+}
+
+/// `POST /projects/{id}/milestones` の要求本文。`seq` はストアが採番する。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MilestoneCreateBody {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 省略時は `proposed`（秘書が提案し、人が承認する。SPEC §7）。
+    #[serde(default)]
+    pub status: Option<MilestoneStatus>,
+}
+
+/// `PATCH /milestones/{id}` の要求本文。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MilestonePatchBody {
+    pub status: MilestoneStatus,
 }

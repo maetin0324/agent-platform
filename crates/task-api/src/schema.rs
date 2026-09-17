@@ -16,8 +16,9 @@ use task_ops::view::{TaskDetail, TaskList};
 use crate::types::{
     AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView, AnswerBody, ArtifactList,
     CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters, ConfigView, DaemonView, DecisionBody,
-    EventsPage, Health, Problem, ProviderCheckResponse, ProviderConfigView, Providers, ReloadResult, RunList,
-    SecretList, SecretPutResult, StreamHeartbeat, StreamHello, StreamReset,
+    EventsPage, Health, MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, Problem,
+    ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody, ProviderCheckResponse, ProviderConfigView,
+    Providers, ReloadResult, RunList, SecretList, SecretPutResult, StreamHeartbeat, StreamHello, StreamReset,
 };
 
 /// コミット済みのスキーマ（`GET /schema` の本体）。
@@ -61,6 +62,17 @@ pub struct ApiV1Schema {
     pub account_check: AccountCheckResponse,
     pub account_login_start: AccountLoginStart,
     pub account_login_result: AccountLoginResult,
+    /// Phase 23（ADR-0033 D1）: 組織（一つ、役割の木）。
+    pub org_list: OrgList,
+    pub org_create: OrgCreateBody,
+    pub org_patch: OrgPatchBody,
+    /// Phase 23（ADR-0033 D2）: 案件と途中目標。
+    pub project_list: ProjectList,
+    pub project_create: ProjectCreateBody,
+    pub project_patch: ProjectPatchBody,
+    pub project_detail: ProjectDetail,
+    pub milestone_create: MilestoneCreateBody,
+    pub milestone_patch: MilestonePatchBody,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

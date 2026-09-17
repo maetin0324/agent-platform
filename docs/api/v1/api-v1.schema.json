@@ -2615,6 +2615,107 @@
       ],
       "type": "object"
     },
+    "Milestone": {
+      "description": "途中目標（ADR-0033 D2）。`seq` は案件の中での通し番号（1 始まり。ストアが採番する）。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/MilestoneId"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/MilestoneStatus"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "seq",
+        "title",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "MilestoneCreateBody": {
+      "additionalProperties": false,
+      "description": "`POST /projects/{id}/milestones` の要求本文。`seq` はストアが採番する。",
+      "properties": {
+        "description": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "省略時は `proposed`（秘書が提案し、人が承認する。SPEC §7）。"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    },
+    "MilestoneId": {
+      "description": "途中目標の一意識別子（ULID）。",
+      "type": "string"
+    },
+    "MilestonePatchBody": {
+      "additionalProperties": false,
+      "description": "`PATCH /milestones/{id}` の要求本文。",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/MilestoneStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "MilestoneStatus": {
+      "description": "途中目標の状態（ADR-0033 D2。SPEC §7 のアジャイル: 達成ごとに人が判定し、Go か再設計）。",
+      "enum": [
+        "proposed",
+        "approved",
+        "in_progress",
+        "reached",
+        "redesigned"
+      ],
+      "type": "string"
+    },
     "NewPlanSpec": {
       "additionalProperties": false,
       "description": "`taskctl plan` から組み立てる新規 Plan タスクの指定。API の `POST /plans` の本文でもある（`docs/gui/api.md` §3.14）。",
@@ -2686,6 +2787,14 @@
           "description": "ADR-0016 D3: 委譲した子が全て終端になった後に集約 run を 1 回行う。",
           "type": "boolean"
         },
+        "assignee": {
+          "default": null,
+          "description": "ADR-0033 D2: 割り当てる組織のノード（`org_nodes.id`）。既定の解決で役割・分野より先に見る。\n存在しないノードはエラー。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "cluster": {
           "default": null,
           "description": "ADR-0018: 指定すると `WorkspaceSpec::Remote{cluster, path}` になり、コマンドはそのクラスタで実行される。\n`workspace` がクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。",
@@ -2739,6 +2848,18 @@
             "null"
           ]
         },
+        "milestone_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ADR-0033 D2: このタスクが属する途中目標。`project_id` と同じ案件のものであること。"
+        },
         "objective": {
           "type": "string"
         },
@@ -2757,6 +2878,18 @@
           "default": 0,
           "format": "int32",
           "type": "integer"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ADR-0033 D2: このタスクが属する案件。存在しない案件はエラー。"
         },
         "role": {
           "default": null,
@@ -2811,6 +2944,188 @@
         }
       ]
     },
+    "OrgCreateBody": {
+      "additionalProperties": false,
+      "description": "`POST /org` の要求本文（管理系）。",
+      "properties": {
+        "brief": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "genre": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/OrgKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "position": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "OrgKind": {
+      "description": "組織のノードの種類（ADR-0033 D1）。`secretary` は根で 1 つだけ。",
+      "enum": [
+        "secretary",
+        "department",
+        "section"
+      ],
+      "type": "string"
+    },
+    "OrgList": {
+      "description": "`GET /org` の応答。木は GUI が `parent_id` で組む（順序は `position`、同値なら `id` の昇順）。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/OrgNode"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "OrgNode": {
+      "description": "組織の 1 ノード（＝ SPEC §3.2 の「人」）。",
+      "properties": {
+        "brief": {
+          "default": "",
+          "description": "担当の一言（プロンプトに前置きされる）。",
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "genre": {
+          "description": "ADR-0027/0028 の `[[genres]] id`。その「人」が仕事に使うハーネスの束。部は持たなくてよい。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "英小文字ケバブの id（`secretary` / `coding-frontend` 等）。設定の種とも API とも同じ文字列。",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/OrgKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent_id": {
+          "description": "親ノードの id。`secretary`（根）だけが `None`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "position": {
+          "default": 0,
+          "description": "同じ親の中での並び順（GUI の組織図の表示順）。",
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "OrgPatchBody": {
+      "additionalProperties": false,
+      "description": "`PATCH /org/{id}` の要求本文（管理系）。書いた項目だけを変える。\n`genre` は `null` を書けば「分野なし」にできる（書かなければ今の値のまま）。",
+      "properties": {
+        "brief": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "genre": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrgKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "position": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Problem": {
       "additionalProperties": true,
       "description": "RFC 9457 の problem details（`application/problem+json`）。`extra` は `code` ごとの付加フィールド。",
@@ -2846,6 +3161,193 @@
         "detail",
         "code",
         "instance"
+      ],
+      "type": "object"
+    },
+    "Project": {
+      "description": "案件（SPEC §3.3）。仕事の木は `tasks WHERE project_id = ?`。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "request": {
+          "description": "人が投げた依頼文そのまま。",
+          "type": "string"
+        },
+        "secretary_summary": {
+          "description": "秘書の理解確認・方針（Phase 24 で秘書が書く）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ProjectStatus"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "request",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "ProjectCreateBody": {
+      "additionalProperties": false,
+      "description": "`POST /projects` の要求本文。作られた案件は `status = \"proposed\"`（秘書の返事待ち）。",
+      "properties": {
+        "request": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "request"
+      ],
+      "type": "object"
+    },
+    "ProjectDetail": {
+      "description": "`GET /projects/{id}` の応答。案件 + 途中目標 + その案件のタスクの要約（GUI の「仕事の木」用）。",
+      "properties": {
+        "milestones": {
+          "items": {
+            "$ref": "#/$defs/Milestone"
+          },
+          "type": "array"
+        },
+        "project": {
+          "$ref": "#/$defs/Project"
+        },
+        "tasks": {
+          "description": "仕事の木を描くのに必要な最小限だけ（詳細は `GET /tasks/{id}`）。",
+          "items": {
+            "$ref": "#/$defs/ProjectTaskView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "project",
+        "milestones",
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "案件の一意識別子（ULID）。`TaskId` と同じ形。",
+      "type": "string"
+    },
+    "ProjectList": {
+      "description": "`GET /projects` の応答（`created_at` の降順）。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/Project"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "ProjectPatchBody": {
+      "additionalProperties": false,
+      "description": "`PATCH /projects/{id}` の要求本文。",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/ProjectStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "ProjectStatus": {
+      "description": "案件の状態（ADR-0033 D2）。",
+      "oneOf": [
+        {
+          "enum": [
+            "active",
+            "paused",
+            "done"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "proposed",
+          "description": "秘書が理解確認と方針を出し、人の返事待ち。",
+          "type": "string"
+        }
+      ]
+    },
+    "ProjectTaskView": {
+      "description": "仕事の木の 1 ノード（ADR-0033 D2: DAG は既存の `parent_id` / `depends_on` がそのまま）。",
+      "properties": {
+        "assignee": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depends_on": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "milestone_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "status",
+        "depends_on"
       ],
       "type": "object"
     },
@@ -3760,6 +4262,13 @@
           "description": "ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。",
           "type": "boolean"
         },
+        "assignee": {
+          "description": "ADR-0033 D2: 割り当てられた組織のノード（`org_nodes.id`）。あれば `worker_hint` の解決で\n役割・分野より先に見る。無ければ従来どおり（互換）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "attempts": {
           "format": "uint32",
           "minimum": 0,
@@ -3806,6 +4315,17 @@
             }
           ]
         },
+        "milestone_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D2: このタスクが属する途中目標（`project_id` の案件のもの）。"
+        },
         "objective": {
           "type": "string"
         },
@@ -3822,6 +4342,17 @@
         "priority": {
           "format": "int32",
           "type": "integer"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D2: このタスクが属する案件。導入前のタスク・案件に属さないタスクには無い。"
         },
         "role": {
           "description": "ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。\n導入前のタスクには無いので任意。",
@@ -4479,14 +5010,43 @@
     "inbox": {
       "$ref": "#/$defs/Inbox"
     },
+    "milestone_create": {
+      "$ref": "#/$defs/MilestoneCreateBody"
+    },
+    "milestone_patch": {
+      "$ref": "#/$defs/MilestonePatchBody"
+    },
     "new_plan": {
       "$ref": "#/$defs/NewPlanSpec"
     },
     "new_task": {
       "$ref": "#/$defs/NewTaskSpec"
     },
+    "org_create": {
+      "$ref": "#/$defs/OrgCreateBody"
+    },
+    "org_list": {
+      "$ref": "#/$defs/OrgList",
+      "description": "Phase 23（ADR-0033 D1）: 組織（一つ、役割の木）。"
+    },
+    "org_patch": {
+      "$ref": "#/$defs/OrgPatchBody"
+    },
     "problem": {
       "$ref": "#/$defs/Problem"
+    },
+    "project_create": {
+      "$ref": "#/$defs/ProjectCreateBody"
+    },
+    "project_detail": {
+      "$ref": "#/$defs/ProjectDetail"
+    },
+    "project_list": {
+      "$ref": "#/$defs/ProjectList",
+      "description": "Phase 23（ADR-0033 D2）: 案件と途中目標。"
+    },
+    "project_patch": {
+      "$ref": "#/$defs/ProjectPatchBody"
     },
     "provider_check": {
       "$ref": "#/$defs/ProviderCheckResponse"
@@ -4574,6 +5134,15 @@
     "account_check",
     "account_login_start",
     "account_login_result",
+    "org_list",
+    "org_create",
+    "org_patch",
+    "project_list",
+    "project_create",
+    "project_patch",
+    "project_detail",
+    "milestone_create",
+    "milestone_patch",
     "daemon",
     "config",
     "stream_hello",

@@ -12,6 +12,11 @@ retry_backoff_base_secs = 10       # ADR-0010 D6: リトライ前の待ち min(b
 retry_backoff_max_secs = 300
 max_requeues = 5                   # ADR-0011: 同じ試行での連続 requeue（供給側失敗）の上限。超えたら attempts を消費する
 
+# 組織図の種（ADR-0033 D1、SPEC §3.2）。指したファイルの `[[org]]` を、**DB の `org_nodes` が空のときだけ**
+# 蒔く。以後の編集は GUI（`POST/PATCH/DELETE /api/v1/org`）から行い、この設定は再読込されない。
+# 書かなければ種を蒔かない（組織を使わない従来どおりの運用）。例は `config/org.example.toml`。
+# org_include = "org.toml"
+
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]
 # adapter = "claude-code"

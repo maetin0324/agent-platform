@@ -4,6 +4,7 @@
 pub mod accounts;
 pub mod delegate;
 pub mod model;
+pub mod org;
 pub mod plan;
 pub mod store;
 pub mod transition;
@@ -15,6 +16,10 @@ pub use delegate::{
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, Lease, RoleSpec, RunRole, Status, Task, TaskId,
     TaskKind, Tier, Usage, WorkerHint, WorkspaceSpec,
+};
+pub use org::{
+    Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
+    assignee_defaults, valid_org_id, validate_upsert,
 };
 pub use plan::{MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput};
 pub use store::{

@@ -172,6 +172,16 @@ pub struct Task {
     /// ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub aggregate: bool,
+    /// ADR-0033 D2: このタスクが属する案件。導入前のタスク・案件に属さないタスクには無い。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<crate::org::ProjectId>,
+    /// ADR-0033 D2: このタスクが属する途中目標（`project_id` の案件のもの）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone_id: Option<crate::org::MilestoneId>,
+    /// ADR-0033 D2: 割り当てられた組織のノード（`org_nodes.id`）。あれば `worker_hint` の解決で
+    /// 役割・分野より先に見る。無ければ従来どおり（互換）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 /// ADR-0016 D1: `[[roles]]` の 1 行。役割ごとの既定（タスクの値 > 役割の既定 > 全体の既定）とプロンプトに前置きする指示文。

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-use task_core::{AccountAdapter, DelegationLimits, RoleSpec, Tier, WorkerHint};
+use task_core::{AccountAdapter, DelegationLimits, OrgKind, OrgNode, RoleSpec, Tier, WorkerHint, valid_org_id};
 use task_dispatch::{AccountsRuntimeConfig, ClusterSpec, DispatchConfig, ProviderSpec};
 
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +79,14 @@ pub struct Config {
     /// ADR-0027 D1: 分野ごとの説明と既定の役割。タスクの値 > 役割の既定 > 分野の既定（`default_role` の役割）> 親の値。
     #[serde(default)]
     pub genres: Vec<GenreConfig>,
+    /// ADR-0033 D1: 組織図の**種**を書いたファイル（`[[org]]` の並び）。相対パスは設定ファイル基準。
+    /// 省略したら種を蒔かない。蒔くのは **DB の `org_nodes` が空のときだけ**で、以後は DB が正
+    /// （編集は GUI → API → DB。設定は再読込しない。ADR-0024 の accounts と同じ扱い）。
+    #[serde(default)]
+    pub org_include: Option<String>,
+    /// `org_include` を読んだ結果（`Config::load` が埋める。TOML の `[taskd]` には書かない）。
+    #[serde(skip)]
+    pub org: Vec<OrgSeedConfig>,
     /// ADR-0016 D2: 実行中の委譲の上限。
     #[serde(default)]
     pub delegation: DelegationConfig,
@@ -225,6 +233,38 @@ pub struct GenreConfig {
     /// この分野に属する役割 id の一覧。`genre` と `role` を両方指定したタスクは、`role` がここに無ければ設定エラー。
     #[serde(default)]
     pub roles: Vec<String>,
+}
+
+/// `org_include` の指すファイルの中身（ADR-0033 D1）。`[[org]]` の 1 行 = 組織の 1 ノード。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrgSeedFile {
+    #[serde(default)]
+    pub org: Vec<OrgSeedConfig>,
+}
+
+/// `[[org]]` の 1 行（ADR-0033 D1）。DB が空のときだけ蒔かれる種。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrgSeedConfig {
+    /// 英小文字ケバブ（`secretary` / `coding-frontend` 等）。
+    pub id: String,
+    /// 日本語の役職名（SPEC §3.2 の言葉）。
+    pub name: String,
+    /// `secretary` / `department` / `section`。根の `secretary` は 1 つだけ。
+    pub kind: OrgKind,
+    /// 親の id。`secretary` 以外は必須（`Config::validate` が確認する）。
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// ADR-0027/0028 の `[[genres]] id`。持たなくてよい（部は課に振る）。
+    #[serde(default)]
+    pub genre: Option<String>,
+    /// 担当の一言。
+    #[serde(default)]
+    pub brief: String,
+    /// 同じ親の中での並び順。省略したらファイルの並び順（0 始まり）。
+    #[serde(default)]
+    pub position: Option<i64>,
 }
 
 /// `[delegation]`（ADR-0016 D2 / M6）: 実行中の委譲の上限。既定は `task_core::DelegationLimits::default()` と同じ。
@@ -789,6 +829,16 @@ impl Config {
         {
             cfg.api.token_file = Some(base.join(token_file));
         }
+        // ADR-0033 D1: 組織図の種。ファイルが無ければ設定エラー（書いたのに読めないのは事故なので黙らない）。
+        if let Some(org_include) = &cfg.org_include {
+            let path = {
+                let p = PathBuf::from(org_include);
+                if p.is_relative() { base.join(p) } else { p }
+            };
+            let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read { path: path.clone(), source })?;
+            let file: OrgSeedFile = toml::from_str(&text)?;
+            cfg.org = file.org;
+        }
         if let Some(pattern) = &cfg.providers_include {
             let dir = providers_include_dir(pattern, &base)?;
             cfg.providers.extend(load_provider_files(&dir)?);
@@ -843,6 +893,33 @@ impl Config {
             cfg.api.read_token()?;
         }
         Ok(cfg)
+    }
+
+    /// ADR-0033 D1: `[[org]]` の種を `OrgNode` に写す（`position` を省略した行はファイルの並び順）。
+    /// 親が先に来るよう、`parent_id` の依存順（secretary → 部 → 課）に並べ替えて返す。
+    pub fn org_nodes(&self, now: time::OffsetDateTime) -> Vec<OrgNode> {
+        let mut nodes: Vec<OrgNode> = self
+            .org
+            .iter()
+            .enumerate()
+            .map(|(i, seed)| OrgNode {
+                id: seed.id.clone(),
+                parent_id: seed.parent_id.clone(),
+                name: seed.name.clone(),
+                kind: seed.kind,
+                genre: seed.genre.clone(),
+                brief: seed.brief.clone(),
+                position: seed.position.unwrap_or(i as i64),
+                created_at: now,
+                updated_at: now,
+            })
+            .collect();
+        nodes.sort_by_key(|n| match n.kind {
+            OrgKind::Secretary => 0,
+            OrgKind::Department => 1,
+            OrgKind::Section => 2,
+        });
+        nodes
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -1054,6 +1131,65 @@ impl Config {
                         g.id
                     )));
                 }
+            }
+        }
+        // ADR-0033 D1: 組織図の種。id は重複させず英小文字ケバブ、`secretary` はちょうど 1 つ、
+        // それ以外の親は同じファイル内に居ること、`genre` は `[[genres]]` にあること。
+        // 木としての整合（循環・種類の順序）はストアの `org_upsert` が最終的に見る。
+        let mut org_ids = std::collections::HashSet::new();
+        let mut secretaries = 0usize;
+        for node in &self.org {
+            if !valid_org_id(&node.id) {
+                return Err(ConfigError::Invalid(format!(
+                    "[[org]] id {:?} must be lowercase kebab-case",
+                    node.id
+                )));
+            }
+            if !org_ids.insert(node.id.as_str()) {
+                return Err(ConfigError::Invalid(format!("duplicate org id: {}", node.id)));
+            }
+            if node.name.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!("[[org]] {}: name must not be empty", node.id)));
+            }
+            if node.kind == OrgKind::Secretary {
+                secretaries += 1;
+            }
+            if let Some(genre) = &node.genre
+                && !genre_ids.contains(genre)
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "[[org]] {}: genre {genre:?} is not defined in [[genres]]",
+                    node.id
+                )));
+            }
+        }
+        if !self.org.is_empty() && secretaries != 1 {
+            return Err(ConfigError::Invalid(format!(
+                "[[org]] must contain exactly one node with kind = \"secretary\" (found {secretaries})"
+            )));
+        }
+        for node in &self.org {
+            match (&node.parent_id, node.kind) {
+                (Some(parent), _) if !org_ids.contains(parent.as_str()) => {
+                    return Err(ConfigError::Invalid(format!(
+                        "[[org]] {}: parent_id {parent:?} is not one of the [[org]] entries",
+                        node.id
+                    )));
+                }
+                (Some(_), OrgKind::Secretary) => {
+                    return Err(ConfigError::Invalid(format!(
+                        "[[org]] {}: the secretary is the root and must not have a parent_id",
+                        node.id
+                    )));
+                }
+                (None, OrgKind::Secretary) => {}
+                (None, _) => {
+                    return Err(ConfigError::Invalid(format!(
+                        "[[org]] {}: parent_id is required (only the secretary is a root)",
+                        node.id
+                    )));
+                }
+                _ => {}
             }
         }
         // ADR-0016 D2 / M6: 0 の上限は「委譲を止める」ではなく設定ミス（拒否理由が毎回出るだけ）なので拒否する。
@@ -1292,6 +1428,139 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `config/org.example.toml` が指す分野（`coding` / `literature`）を持つ最小の設定。
+    const ORG_TEST_GENRES: &str = r#"
+[[providers]]
+id = "x"
+adapter = "fake"
+
+[[roles]]
+id = "implementer"
+
+[[roles]]
+id = "literature-reader"
+
+[[genres]]
+id = "coding"
+description = "コードを書く"
+default_role = "implementer"
+roles = ["implementer"]
+
+[[genres]]
+id = "literature"
+description = "関連研究の調査"
+default_role = "literature-reader"
+roles = ["literature-reader"]
+"#;
+
+    // ---- ADR-0033 D1（Phase 23）: 組織図の種 ----
+
+    /// 例の設定（`config/org.example.toml`）が読め、SPEC §3.2 の 10 ノードになる。
+    /// `genre` は実在する分野 id（`coding` / `literature`）だけを指す。
+    #[test]
+    fn loads_the_org_example_and_maps_it_to_org_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/org.example.toml"),
+            dir.path().join("org.toml"),
+        )
+        .unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(&path, format!("db = \"t.sqlite3\"\norg_include = \"org.toml\"\n{}", ORG_TEST_GENRES)).unwrap();
+
+        let cfg = Config::load(&path).unwrap();
+        let ids: Vec<&str> = cfg.org.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "secretary",
+                "coding",
+                "coding-frontend",
+                "coding-performance",
+                "coding-poc",
+                "research",
+                "research-survey",
+                "research-writing",
+                "research-data",
+                "infra",
+            ]
+        );
+        let nodes = cfg.org_nodes(time::OffsetDateTime::now_utc());
+        assert_eq!(nodes.len(), 10);
+        // 親が子より先に来る（secretary → 部 → 課）。
+        let order: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(order[0], "secretary");
+        assert!(order.iter().position(|id| *id == "coding") < order.iter().position(|id| *id == "coding-poc"));
+        let survey = nodes.iter().find(|n| n.id == "research-survey").unwrap();
+        assert_eq!(survey.kind, OrgKind::Section);
+        assert_eq!(survey.genre.as_deref(), Some("literature"));
+        assert_eq!(survey.parent_id.as_deref(), Some("research"));
+        assert!(!survey.brief.is_empty());
+        // 分野を当てていないノードもある（まだその分野が無い）。
+        assert_eq!(nodes.iter().find(|n| n.id == "research-writing").unwrap().genre, None);
+        assert_eq!(nodes.iter().filter(|n| n.kind == OrgKind::Secretary).count(), 1);
+    }
+
+    /// `[[genres]]` に無い分野・重複 id・秘書が 0 か 2・知らない親は設定エラー。
+    #[test]
+    fn rejects_org_seeds_that_do_not_form_one_tree() {
+        let base = "db = \"t.sqlite3\"\norg_include = \"org.toml\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
+        let load = |org: &str| -> Result<Config, ConfigError> {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("org.toml"), org).unwrap();
+            let path = dir.path().join("taskd.toml");
+            std::fs::write(&path, base).unwrap();
+            Config::load(&path)
+        };
+        let secretary = "[[org]]\nid = \"secretary\"\nname = \"秘書\"\nkind = \"secretary\"\n";
+        load(secretary).expect("a lone secretary is fine");
+
+        let err = load(&format!("{secretary}[[org]]\nid = \"coding\"\nname = \"部\"\nkind = \"department\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parent_id is required"), "{err}");
+
+        let err = load("[[org]]\nid = \"coding\"\nname = \"部\"\nkind = \"department\"\nparent_id = \"secretary\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exactly one node"), "{err}");
+
+        let err = load(&format!("{secretary}{secretary}")).unwrap_err().to_string();
+        assert!(err.contains("duplicate org id"), "{err}");
+
+        let err = load(&format!(
+            "{secretary}[[org]]\nid = \"coding\"\nname = \"部\"\nkind = \"department\"\nparent_id = \"nobody\"\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("is not one of the [[org]] entries"), "{err}");
+
+        let err = load(&format!(
+            "{secretary}[[org]]\nid = \"X\"\nname = \"部\"\nkind = \"department\"\nparent_id = \"secretary\"\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("kebab-case"), "{err}");
+
+        let err = load(&format!(
+            "{secretary}[[org]]\nid = \"c\"\nname = \"課\"\nkind = \"section\"\nparent_id = \"secretary\"\ngenre = \"nope\"\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("is not defined in [[genres]]"), "{err}");
+    }
+
+    /// `org_include` を書かなければ種は空、書いたのにファイルが無ければ設定エラー。
+    #[test]
+    fn org_include_is_optional_but_must_exist_when_written() {
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(cfg.org.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(&path, "db = \"t.sqlite3\"\norg_include = \"missing.toml\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(matches!(Config::load(&path), Err(ConfigError::Read { .. })));
+    }
 
     #[test]
     fn loads_example_config_and_resolves_relative_paths() {

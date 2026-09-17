@@ -337,6 +337,11 @@ pub fn materialize_delegated(
                 role: t.role.clone(),
                 genre: defaults.genre,
                 aggregate: false,
+                // ADR-0033 D2: 案件の仕事の木は `tasks WHERE project_id = ?` なので、分解した子も
+                // 同じ案件・途中目標に属する（担当は Phase 24 で計画が指定するまで空）。
+                project_id: parent.project_id,
+                milestone_id: parent.milestone_id,
+                assignee: None,
             }
         })
         .collect()
@@ -398,6 +403,9 @@ mod tests {
             role: Some("lead".into()),
             genre: Some("coding".into()),
             aggregate: true,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
         }
     }
 

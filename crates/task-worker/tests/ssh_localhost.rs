@@ -33,6 +33,9 @@ fn task(dir: &std::path::Path) -> Task {
         role: None,
         genre: None,
         aggregate: false,
+        project_id: None,
+        milestone_id: None,
+        assignee: None,
     }
 }
 

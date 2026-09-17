@@ -1,0 +1,92 @@
+# 組織図の種（ADR-0033 D1、SPEC §3.2）。`taskd.toml` の `org_include = "org.toml"` が指すファイル。
+#
+# **このファイルは DB の `org_nodes` が空のときにだけ読まれる**。一度蒔いたら以後は DB が正で、
+# 役職を足す・分ける・消すのは GUI（`POST/PATCH/DELETE /api/v1/org`）から行う。ここを書き換えても
+# 既にある組織は変わらない（ADR-0024 の accounts と同じ「DB が正」の扱い）。
+#
+# 各行の意味:
+#   id        英小文字ケバブ。API と GUI で使う不変の名前。
+#   name      人が読む役職名（SPEC §3.2 の言葉）。
+#   kind      secretary（根。1 つだけ）/ department（部）/ section（課）。
+#   parent_id secretary 以外は必須。
+#   genre     その「人」が仕事に使うハーネスの束（`[[genres]] id`）。部は持たなくてよい（課に振る）。
+#             ここに書く id は taskd.toml の `[[genres]]` に存在すること（設定検証で確かめる）。
+#   brief     担当の一言。run のプロンプトに前置きされる。
+#   position  同じ親の中での並び順（省略したらこのファイルの並び順）。
+
+[[org]]
+id = "secretary"
+name = "秘書"
+kind = "secretary"
+# 対話用の分野は Phase 24（ADR-0033 D4）で当てる。それまでは分野を持たない。
+brief = "案件を受け取り、組織に流し、報告を集めて人に渡す。部をまたぐ連携はここが認める。"
+
+[[org]]
+id = "coding"
+name = "コーディング部"
+kind = "department"
+parent_id = "secretary"
+brief = "実装の案件を受け持ち、課に振り分ける。"
+
+[[org]]
+id = "coding-frontend"
+name = "フロントエンドデザイン課"
+kind = "section"
+parent_id = "coding"
+genre = "coding"
+brief = "画面と使い勝手を作る。"
+
+[[org]]
+id = "coding-performance"
+name = "パフォーマンス課"
+kind = "section"
+parent_id = "coding"
+genre = "coding"
+brief = "速さと資源の使い方を測り、直す。"
+
+[[org]]
+id = "coding-poc"
+name = "PoC・R&D 課"
+kind = "section"
+parent_id = "coding"
+genre = "coding"
+brief = "小さく作って確かめる。研究の検証コードはここ。"
+
+[[org]]
+id = "research"
+name = "研究部"
+kind = "department"
+parent_id = "secretary"
+brief = "調査・実験・執筆の案件を受け持ち、課に振り分ける。"
+
+[[org]]
+id = "research-survey"
+name = "関連研究調査課"
+kind = "section"
+parent_id = "research"
+genre = "literature"
+brief = "関連研究を洗い、先行研究との差分を言語化する。"
+
+[[org]]
+id = "research-writing"
+name = "論文執筆課"
+kind = "section"
+parent_id = "research"
+# 執筆に当てる分野はまだ無い（`[[genres]]` に追加したらここに書く）。
+brief = "結果を framing し、論文の形にする。"
+
+[[org]]
+id = "research-data"
+name = "データ整理課"
+kind = "section"
+parent_id = "research"
+# 整理に当てる分野はまだ無い。
+brief = "実験の生データを整え、図表にする。"
+
+[[org]]
+id = "infra"
+name = "インフラ部"
+kind = "department"
+parent_id = "secretary"
+# クラスタ作業に当てる分野はまだ無い（課を足すときに `genre` を当てる）。
+brief = "クラスタとジョブの面倒を見る。悪い知らせは早く上げる。"

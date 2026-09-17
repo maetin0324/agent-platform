@@ -21,6 +21,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::model::{Event, Status, Task, TaskId, TaskKind};
+use crate::org::{
+    Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
+};
 use crate::transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
@@ -28,10 +31,11 @@ const MIGRATION_0002: &str = include_str!("../migrations/0002_events_global_id.s
 const MIGRATION_0003: &str = include_str!("../migrations/0003_tasks_list_columns.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_tasks_objective_column.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_tasks_genre_column.sql");
+const MIGRATION_0006: &str = include_str!("../migrations/0006_organization.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +73,16 @@ pub enum StoreError {
     /// 大きい場合に返す。DB を書き換えずに `open`/`open_with` を失敗させる。
     #[error("db schema version {found} is newer than the {supported} this binary supports")]
     SchemaTooNew { found: u32, supported: u32 },
+    /// ADR-0033 D1: 使用中のため消せない（組織のノードが未終了のタスクを抱えている）。API は 409。
+    #[error("{kind} {id} is still in use: {detail}")]
+    InUse {
+        kind: &'static str,
+        id: String,
+        detail: String,
+    },
+    /// ADR-0033 D1: 組織の検証に落ちた（API は 422）。
+    #[error(transparent)]
+    Org(#[from] OrgError),
 }
 
 /// `events` テーブルの 1 行（ADR-0013 D6）。`id` はテーブル全体でのグローバル単調増加値。
@@ -99,6 +113,8 @@ pub struct ListFilter {
     /// ADR-0027 D1: 空なら genre で絞らない。完全一致（`kinds` と同じ形）。
     pub genres: Vec<String>,
     pub parent_id: Option<TaskId>,
+    /// ADR-0033 D2: 案件で絞る（案件の仕事の木 = `tasks WHERE project_id = ?`）。
+    pub project_id: Option<ProjectId>,
     /// true なら `parent_id IS NULL` のタスクのみ（`parent_id` フィルタとは独立に AND で効く）。
     pub root_only: bool,
     /// `title` または `objective` に対する部分一致（SQLite の LIKE なので ASCII の大文字小文字は区別しない。ADR-0014 D2）。
@@ -227,6 +243,10 @@ fn filter_predicate(filter: &ListFilter) -> (String, Vec<SqlValue>) {
     if let Some(parent_id) = filter.parent_id {
         clauses.push("parent_id = ?".to_string());
         params.push(SqlValue::Text(parent_id.to_string()));
+    }
+    if let Some(project_id) = filter.project_id {
+        clauses.push("project_id = ?".to_string());
+        params.push(SqlValue::Text(project_id.to_string()));
     }
     if let Some(needle) = &filter.text_contains {
         clauses.push("(title LIKE ? ESCAPE '\\' OR objective LIKE ? ESCAPE '\\')".to_string());
@@ -388,6 +408,43 @@ pub trait TaskStore: Send + Sync {
     ) -> Result<Page<Task>, StoreError>;
     /// ADR-0013 D10: `tasks` の件数を `status` ごとに集計する（0 件の status は含まない）。
     fn count_by_status(&self) -> Result<Vec<(Status, u64)>, StoreError>;
+
+    // ---- ADR-0033 D1: 組織（`org_nodes`）。DB が正で、設定は空のときの種蒔きにしか使わない ----
+
+    /// 全ノードを `position`、同値なら `id` の昇順で返す（木は呼び出し側が `parent_id` で組む）。
+    fn org_list(&self) -> Result<Vec<OrgNode>, StoreError>;
+    /// 1 ノード。無ければ `None`。
+    fn org_get(&self, id: &str) -> Result<Option<OrgNode>, StoreError>;
+    /// 挿入または更新。`crate::org::validate_upsert` を通してから書く（secretary は 1 つ、親は既存、
+    /// 自分を祖先にできない、secretary > department > section）。`created_at` は既存行のものを保つ。
+    fn org_upsert(&self, node: &OrgNode) -> Result<OrgNode, StoreError>;
+    /// 削除。そのノードを `assignee` に持つ未終了タスクがあれば `StoreError::InUse`、
+    /// 子ノードがあっても `StoreError::InUse`（木を宙ぶらりんにしない）。無い id は `Ok(false)`。
+    fn org_delete(&self, id: &str) -> Result<bool, StoreError>;
+
+    // ---- ADR-0033 D2: 案件（`projects`）と途中目標（`milestones`）----
+
+    /// 案件を作る（`status` は呼び出し側が決める。API は `proposed`）。
+    fn project_create(&self, project: &Project) -> Result<(), StoreError>;
+    fn project_get(&self, id: ProjectId) -> Result<Option<Project>, StoreError>;
+    /// `created_at` の降順（新しい案件が先）。
+    fn project_list(&self) -> Result<Vec<Project>, StoreError>;
+    /// 状態だけを変える（`updated_at` も更新）。無い案件は `Ok(false)`。
+    fn project_set_status(&self, id: ProjectId, status: ProjectStatus) -> Result<bool, StoreError>;
+
+    /// 途中目標を作る。`seq` はその案件の最大 + 1 をストアが採番し、確定した行を返す。
+    /// 案件が無ければ `StoreError::Invalid`。
+    fn milestone_create(
+        &self,
+        project_id: ProjectId,
+        title: &str,
+        description: &str,
+        status: MilestoneStatus,
+    ) -> Result<Milestone, StoreError>;
+    /// その案件の途中目標を `seq` 昇順で返す。
+    fn milestone_list(&self, project_id: ProjectId) -> Result<Vec<Milestone>, StoreError>;
+    /// 状態だけを変える。無い途中目標は `Ok(false)`。
+    fn milestone_set_status(&self, id: MilestoneId, status: MilestoneStatus) -> Result<bool, StoreError>;
 }
 
 pub struct SqliteStore {
@@ -418,6 +475,10 @@ fn kind_str(k: TaskKind) -> &'static str {
 
 fn format_rfc3339(t: OffsetDateTime) -> Result<String, StoreError> {
     Ok(t.format(&Rfc3339)?)
+}
+
+fn parse_rfc3339(s: &str) -> Result<OffsetDateTime, StoreError> {
+    Ok(OffsetDateTime::parse(s, &Rfc3339)?)
 }
 
 impl SqliteStore {
@@ -525,6 +586,7 @@ impl SqliteStore {
             3 => Ok(MIGRATION_0003),
             4 => Ok(MIGRATION_0004),
             5 => Ok(MIGRATION_0005),
+            6 => Ok(MIGRATION_0006),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -549,6 +611,99 @@ impl SqliteStore {
             params![version, ts],
         )?;
         Ok(())
+    }
+
+    // ---- ADR-0033 D1/D2: 組織・案件の行と型の間の変換（rusqlite の行変換は `rusqlite::Error` しか
+    // 返せないので、解析の失敗は内側の `Result<_, StoreError>` に載せて返す）----
+
+    fn org_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<OrgNode, StoreError>> {
+        let id: String = row.get(0)?;
+        let kind_col: String = row.get(3)?;
+        let created_at: String = row.get(7)?;
+        let updated_at: String = row.get(8)?;
+        let Some(kind) = OrgKind::parse(&kind_col) else {
+            return Ok(Err(StoreError::Invalid(format!(
+                "invalid org node kind in org_nodes: {kind_col}"
+            ))));
+        };
+        Ok((|| {
+            Ok(OrgNode {
+                id,
+                parent_id: row.get(1)?,
+                name: row.get(2)?,
+                kind,
+                genre: row.get(4)?,
+                brief: row.get(5)?,
+                position: row.get(6)?,
+                created_at: parse_rfc3339(&created_at)?,
+                updated_at: parse_rfc3339(&updated_at)?,
+            })
+        })())
+    }
+
+    fn org_list_tx(conn: &Connection) -> Result<Vec<OrgNode>, StoreError> {
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at \
+             FROM org_nodes ORDER BY position ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], Self::org_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
+    fn project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Project, StoreError>> {
+        let id: String = row.get(0)?;
+        let status_col: String = row.get(3)?;
+        let created_at: String = row.get(5)?;
+        let updated_at: String = row.get(6)?;
+        let (Ok(id), Some(status)) = (id.parse::<ProjectId>(), ProjectStatus::parse(&status_col)) else {
+            return Ok(Err(StoreError::Invalid(format!(
+                "invalid project row: id={id} status={status_col}"
+            ))));
+        };
+        Ok((|| {
+            Ok(Project {
+                id,
+                title: row.get(1)?,
+                request: row.get(2)?,
+                status,
+                secretary_summary: row.get(4)?,
+                created_at: parse_rfc3339(&created_at)?,
+                updated_at: parse_rfc3339(&updated_at)?,
+            })
+        })())
+    }
+
+    fn milestone_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Milestone, StoreError>> {
+        let id: String = row.get(0)?;
+        let project_id: String = row.get(1)?;
+        let status_col: String = row.get(5)?;
+        let created_at: String = row.get(6)?;
+        let updated_at: String = row.get(7)?;
+        let (Ok(id), Ok(project_id), Some(status)) = (
+            id.parse::<MilestoneId>(),
+            project_id.parse::<ProjectId>(),
+            MilestoneStatus::parse(&status_col),
+        ) else {
+            return Ok(Err(StoreError::Invalid(format!(
+                "invalid milestone row: id={id} project_id={project_id} status={status_col}"
+            ))));
+        };
+        Ok((|| {
+            Ok(Milestone {
+                id,
+                project_id,
+                seq: row.get(2)?,
+                title: row.get(3)?,
+                description: row.get(4)?,
+                status,
+                created_at: parse_rfc3339(&created_at)?,
+                updated_at: parse_rfc3339(&updated_at)?,
+            })
+        })())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
@@ -589,8 +744,9 @@ impl SqliteStore {
         };
         conn.execute(
             "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
-             lease_worker_run_id, lease_expires_at, json, title, updated_at, objective, genre) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             lease_worker_run_id, lease_expires_at, json, title, updated_at, objective, genre, \
+             project_id, milestone_id, assignee) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 task.id.to_string(),
                 status_str(task.status),
@@ -606,6 +762,10 @@ impl SqliteStore {
                 // objective / genre は作成後に変わらないので、列を書くのは挿入時だけ（ADR-0014 D2, ADR-0027 D1）。
                 task.objective,
                 task.genre,
+                // ADR-0033 D2: 案件・途中目標・担当も作成後に変わらないので、列を書くのは挿入時だけ。
+                task.project_id.map(|p| p.to_string()),
+                task.milestone_id.map(|m| m.to_string()),
+                task.assignee.clone(),
             ],
         )?;
         Ok(())
@@ -1322,12 +1482,244 @@ impl TaskStore for SqliteStore {
         }
         Ok(out)
     }
+
+    // ---- ADR-0033 D1: 組織 ----
+
+    fn org_list(&self) -> Result<Vec<OrgNode>, StoreError> {
+        let conn = self.lock()?;
+        Self::org_list_tx(&conn)
+    }
+
+    fn org_get(&self, id: &str) -> Result<Option<OrgNode>, StoreError> {
+        let conn = self.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at \
+                 FROM org_nodes WHERE id = ?1",
+                params![id],
+                Self::org_row,
+            )
+            .optional()?;
+        row.transpose()
+    }
+
+    fn org_upsert(&self, node: &OrgNode) -> Result<OrgNode, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = Self::org_list_tx(&tx)?;
+        crate::org::validate_upsert(&existing, node)?;
+        let previous = existing.iter().find(|n| n.id == node.id);
+        let mut stored = node.clone();
+        if let Some(previous) = previous {
+            stored.created_at = previous.created_at;
+        }
+        tx.execute(
+            "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
+             kind = excluded.kind, genre = excluded.genre, brief = excluded.brief, \
+             position = excluded.position, updated_at = excluded.updated_at",
+            params![
+                stored.id,
+                stored.parent_id,
+                stored.name,
+                stored.kind.as_str(),
+                stored.genre,
+                stored.brief,
+                stored.position,
+                format_rfc3339(stored.created_at)?,
+                format_rfc3339(stored.updated_at)?,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(stored)
+    }
+
+    fn org_delete(&self, id: &str) -> Result<bool, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM org_nodes WHERE id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+        // ADR-0033 D1: 「消すときに仕事を抱えていたら 409」。抱えている＝未終了のタスクの assignee。
+        let open_tasks: i64 = tx.query_row(
+            &format!("SELECT COUNT(*) FROM tasks WHERE assignee = ?1 AND {}", Self::NON_TERMINAL_SQL),
+            params![id],
+            |row| row.get(0),
+        )?;
+        if open_tasks > 0 {
+            return Err(StoreError::InUse {
+                kind: "org node",
+                id: id.to_string(),
+                detail: format!("{open_tasks} task(s) assigned to it have not finished"),
+            });
+        }
+        let children: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM org_nodes WHERE parent_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if children > 0 {
+            return Err(StoreError::InUse {
+                kind: "org node",
+                id: id.to_string(),
+                detail: format!("{children} child node(s) still report to it"),
+            });
+        }
+        tx.execute("DELETE FROM org_nodes WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    // ---- ADR-0033 D2: 案件と途中目標 ----
+
+    fn project_create(&self, project: &Project) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO projects (id, title, request, status, secretary_summary, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                project.id.to_string(),
+                project.title,
+                project.request,
+                project.status.as_str(),
+                project.secretary_summary,
+                format_rfc3339(project.created_at)?,
+                format_rfc3339(project.updated_at)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn project_get(&self, id: ProjectId) -> Result<Option<Project>, StoreError> {
+        let conn = self.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT id, title, request, status, secretary_summary, created_at, updated_at \
+                 FROM projects WHERE id = ?1",
+                params![id.to_string()],
+                Self::project_row,
+            )
+            .optional()?;
+        row.transpose()
+    }
+
+    fn project_list(&self) -> Result<Vec<Project>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, request, status, secretary_summary, created_at, updated_at \
+             FROM projects ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], Self::project_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
+    fn project_set_status(&self, id: ProjectId, status: ProjectStatus) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let affected = conn.execute(
+            "UPDATE projects SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                status.as_str(),
+                format_rfc3339(OffsetDateTime::now_utc())?,
+                id.to_string()
+            ],
+        )?;
+        Ok(affected == 1)
+    }
+
+    fn milestone_create(
+        &self,
+        project_id: ProjectId,
+        title: &str,
+        description: &str,
+        status: MilestoneStatus,
+    ) -> Result<Milestone, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            params![project_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::Invalid(format!("project not found: {project_id}")));
+        }
+        let seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM milestones WHERE project_id = ?1",
+            params![project_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let now = OffsetDateTime::now_utc();
+        let milestone = Milestone {
+            id: MilestoneId::new(),
+            project_id,
+            seq,
+            title: title.to_string(),
+            description: description.to_string(),
+            status,
+            created_at: now,
+            updated_at: now,
+        };
+        tx.execute(
+            "INSERT INTO milestones (id, project_id, seq, title, description, status, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                milestone.id.to_string(),
+                milestone.project_id.to_string(),
+                milestone.seq,
+                milestone.title,
+                milestone.description,
+                milestone.status.as_str(),
+                format_rfc3339(milestone.created_at)?,
+                format_rfc3339(milestone.updated_at)?,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(milestone)
+    }
+
+    fn milestone_list(&self, project_id: ProjectId) -> Result<Vec<Milestone>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, seq, title, description, status, created_at, updated_at \
+             FROM milestones WHERE project_id = ?1 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(params![project_id.to_string()], Self::milestone_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
+    fn milestone_set_status(&self, id: MilestoneId, status: MilestoneStatus) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let affected = conn.execute(
+            "UPDATE milestones SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                status.as_str(),
+                format_rfc3339(OffsetDateTime::now_utc())?,
+                id.to_string()
+            ],
+        )?;
+        Ok(affected == 1)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{ArtifactRef, Budget, Check, Criterion, Tier, WorkerHint, WorkspaceSpec};
+    use crate::org::OrgError;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::Barrier;
@@ -1375,6 +1767,9 @@ mod tests {
             role: None,
             genre: None,
             aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
         }
     }
 
@@ -2745,5 +3140,242 @@ mod tests {
         let committed = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {path}: {e} (run with UPDATE_SCHEMA=1 to generate)"));
         assert_eq!(committed, generated, "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-core`");
+    }
+
+    // ---- ADR-0033 D1/D2（Phase 23）: 組織・案件・途中目標 ----
+
+    fn org_node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
+        let now = OffsetDateTime::now_utc();
+        OrgNode {
+            id: id.to_string(),
+            parent_id: parent.map(str::to_string),
+            name: format!("{id} の人"),
+            kind,
+            genre: None,
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn seed_secretary(store: &SqliteStore) {
+        store.org_upsert(&org_node("secretary", None, OrgKind::Secretary)).expect("secretary");
+    }
+
+    /// 版数 5 の DB を開くと 6 が適用され、もう一度開いても何も起きない（冪等）。既存行は壊れない。
+    #[test]
+    fn open_migrates_schema_5_db_to_6_and_reapplying_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema5.sqlite3");
+        let task = sample_task(Status::Draft);
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in [MIGRATION_0001, MIGRATION_0002, MIGRATION_0003, MIGRATION_0004, MIGRATION_0005] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
+                 INSERT INTO schema_migrations (version, applied_at) VALUES \
+                 (1, '2020-01-01T00:00:00Z'), (2, '2020-01-01T00:00:00Z'), (3, '2020-01-01T00:00:00Z'), \
+                 (4, '2020-01-01T00:00:00Z'), (5, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+            let json = serde_json::to_string(&task).unwrap();
+            let created_at = format_rfc3339(task.created_at).unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
+                 lease_worker_run_id, lease_expires_at, json, title, updated_at, objective, genre) \
+                 VALUES (?1,?2,?3,?4,?5,?6,NULL,NULL,?7,?8,?9,?10,NULL)",
+                params![
+                    task.id.to_string(),
+                    status_str(task.status),
+                    kind_str(task.kind),
+                    task.parent_id.map(|p| p.to_string()),
+                    task.priority,
+                    created_at,
+                    json,
+                    task.title,
+                    created_at,
+                    task.objective,
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 6);
+        let got = store.get(task.id).unwrap().expect("old row still readable");
+        assert_eq!(got.project_id, None);
+        assert_eq!(got.milestone_id, None);
+        assert_eq!(got.assignee, None);
+        assert!(store.org_list().unwrap().is_empty());
+        seed_secretary(&store);
+        drop(store);
+
+        // 2 回目に開いても 0006 は再適用されず（適用済み）、中身も残る。
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.org_list().unwrap().len(), 1);
+        let applied: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version = 6", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(applied, 1, "migration 6 must be recorded exactly once");
+    }
+
+    #[test]
+    fn org_nodes_round_trip_and_upsert_keeps_created_at() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_secretary(&store);
+        let mut coding = org_node("coding", Some("secretary"), OrgKind::Department);
+        coding.position = 2;
+        coding.brief = "コードを書く".into();
+        let stored = store.org_upsert(&coding).unwrap();
+        assert_eq!(store.org_get("coding").unwrap().as_ref(), Some(&stored));
+
+        let mut renamed = stored.clone();
+        renamed.name = "コーディング部".into();
+        renamed.genre = Some("coding".into());
+        renamed.created_at = OffsetDateTime::now_utc() + time::Duration::days(1);
+        let updated = store.org_upsert(&renamed).unwrap();
+        assert_eq!(updated.created_at, stored.created_at, "created_at is kept on update");
+        assert_eq!(updated.name, "コーディング部");
+        assert_eq!(updated.genre.as_deref(), Some("coding"));
+
+        // 並び順は position（同値なら id）の昇順。
+        let mut infra = org_node("infra", Some("secretary"), OrgKind::Department);
+        infra.position = 1;
+        store.org_upsert(&infra).unwrap();
+        let ids: Vec<String> = store.org_list().unwrap().into_iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec!["secretary".to_string(), "infra".into(), "coding".into()]);
+    }
+
+    #[test]
+    fn org_upsert_rejects_a_second_secretary_and_cycles() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_secretary(&store);
+        store.org_upsert(&org_node("coding", Some("secretary"), OrgKind::Department)).unwrap();
+        store.org_upsert(&org_node("poc", Some("coding"), OrgKind::Section)).unwrap();
+
+        let err = store.org_upsert(&org_node("boss", None, OrgKind::Secretary)).unwrap_err();
+        assert!(matches!(err, StoreError::Org(OrgError::DuplicateSecretary { .. })), "{err}");
+        let err = store
+            .org_upsert(&org_node("coding", Some("coding"), OrgKind::Department))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Org(OrgError::Cycle { .. })), "{err}");
+        let err = store.org_upsert(&org_node("x", Some("ghost"), OrgKind::Section)).unwrap_err();
+        assert!(matches!(err, StoreError::Org(OrgError::UnknownParent { .. })), "{err}");
+        assert_eq!(store.org_list().unwrap().len(), 3, "nothing was written by the failed upserts");
+    }
+
+    #[test]
+    fn org_delete_refuses_while_a_task_is_open_or_children_remain() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_secretary(&store);
+        store.org_upsert(&org_node("coding", Some("secretary"), OrgKind::Department)).unwrap();
+        store.org_upsert(&org_node("poc", Some("coding"), OrgKind::Section)).unwrap();
+
+        let mut task = sample_task(Status::Ready);
+        task.assignee = Some("poc".into());
+        store.insert(&task).unwrap();
+
+        let err = store.org_delete("poc").unwrap_err();
+        assert!(matches!(err, StoreError::InUse { .. }), "{err}");
+        // 子を抱えた部も消せない。
+        let err = store.org_delete("coding").unwrap_err();
+        assert!(matches!(err, StoreError::InUse { .. }), "{err}");
+        // タスクが終端になれば消せる。
+        store.apply_transition(task.id, Trigger::Cancel, None).unwrap();
+        assert!(store.org_delete("poc").unwrap());
+        assert!(store.org_get("poc").unwrap().is_none());
+        assert!(!store.org_delete("poc").unwrap(), "deleting a missing node is Ok(false)");
+    }
+
+    fn sample_project() -> Project {
+        let now = OffsetDateTime::now_utc();
+        Project {
+            id: ProjectId::new(),
+            title: "Pluvio の新テーマ".into(),
+            request: "Pluvio を基盤に用いた新たな研究テーマの模索、検証".into(),
+            status: ProjectStatus::Proposed,
+            secretary_summary: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn projects_and_milestones_round_trip() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let project = sample_project();
+        store.project_create(&project).unwrap();
+        assert_eq!(store.project_get(project.id).unwrap().as_ref(), Some(&project));
+        assert_eq!(store.project_list().unwrap().len(), 1);
+
+        assert!(store.project_set_status(project.id, ProjectStatus::Active).unwrap());
+        let got = store.project_get(project.id).unwrap().unwrap();
+        assert_eq!(got.status, ProjectStatus::Active);
+        assert!(!store.project_set_status(ProjectId::new(), ProjectStatus::Done).unwrap());
+
+        let first = store
+            .milestone_create(project.id, "関連研究を棚卸しする", "候補を 3 本", MilestoneStatus::Proposed)
+            .unwrap();
+        let second = store
+            .milestone_create(project.id, "小さな検証を回す", "", MilestoneStatus::Proposed)
+            .unwrap();
+        assert_eq!((first.seq, second.seq), (1, 2), "seq is numbered per project");
+        assert_eq!(
+            store.milestone_list(project.id).unwrap().iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        assert!(store.milestone_set_status(second.id, MilestoneStatus::Approved).unwrap());
+        assert_eq!(store.milestone_list(project.id).unwrap()[1].status, MilestoneStatus::Approved);
+        assert!(!store.milestone_set_status(MilestoneId::new(), MilestoneStatus::Reached).unwrap());
+
+        let err = store
+            .milestone_create(ProjectId::new(), "無い案件", "", MilestoneStatus::Proposed)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)), "{err}");
+    }
+
+    #[test]
+    fn tasks_can_be_listed_by_project() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let project = sample_project();
+        store.project_create(&project).unwrap();
+        let milestone = store
+            .milestone_create(project.id, "最初の途中目標", "", MilestoneStatus::Approved)
+            .unwrap();
+
+        let mut mine = sample_task(Status::Ready);
+        mine.project_id = Some(project.id);
+        mine.milestone_id = Some(milestone.id);
+        mine.assignee = Some("poc".into());
+        store.insert(&mine).unwrap();
+        store.insert(&sample_task(Status::Ready)).unwrap();
+
+        let filter = ListFilter { project_id: Some(project.id), ..ListFilter::default() };
+        let page = store.list_page(&filter, ListOrder::CreatedDesc, None, 10).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].id, mine.id);
+        let back = store.get(mine.id).unwrap().unwrap();
+        assert_eq!(back.project_id, Some(project.id));
+        assert_eq!(back.milestone_id, Some(milestone.id));
+        assert_eq!(back.assignee.as_deref(), Some("poc"));
+    }
+
+    /// ADR-0033 D2: 既存の JSON（3 つの列を持たない）もそのまま読める。
+    #[test]
+    fn tasks_without_the_new_fields_still_deserialize() {
+        let task = sample_task(Status::Draft);
+        let mut json: serde_json::Value = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        assert!(!obj.contains_key("project_id"), "None is skipped on serialization");
+        obj.remove("genre");
+        let back: Task = serde_json::from_value(json).unwrap();
+        assert_eq!(back.project_id, None);
+        assert_eq!(back.assignee, None);
     }
 }

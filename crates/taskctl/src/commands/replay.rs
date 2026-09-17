@@ -83,6 +83,9 @@ mod tests {
             role: None,
             genre: None,
             aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
         };
         store.insert(&task).expect("insert");
         store

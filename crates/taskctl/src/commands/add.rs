@@ -221,6 +221,10 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         role: args.role,
         genre: args.genre,
         aggregate: args.aggregate,
+        // ADR-0033 D2: 案件・途中目標・担当は GUI（API）から付ける。`taskctl add` は引数を増やさない。
+        project_id: None,
+        milestone_id: None,
+        assignee: None,
         workspace: args.workspace,
         cluster: args.cluster,
         adapter: None,

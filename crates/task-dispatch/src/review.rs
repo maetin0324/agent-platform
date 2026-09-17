@@ -349,6 +349,9 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHin
         role: None,
         genre: None,
         aggregate: false,
+        project_id: None,
+        milestone_id: None,
+        assignee: None,
     }
 }
 
@@ -514,6 +517,9 @@ mod tests {
             role: None,
             genre: None,
             aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
         }
     }
 

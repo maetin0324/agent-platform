@@ -2133,6 +2133,9 @@ impl Dispatcher {
             role: None,
             genre: None,
             aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
         };
         // ADR-0010 D2: 挿入・Created・ApprovalRequested を 1 トランザクションで。
         self.store.create_task(&approval, vec![Event::ApprovalRequested])?;
@@ -2667,6 +2670,9 @@ mod tests {
             role: None,
             genre: None,
             aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
         }
     }
 

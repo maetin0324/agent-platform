@@ -518,6 +518,14 @@
       ],
       "type": "object"
     },
+    "MilestoneId": {
+      "description": "途中目標の一意識別子（ULID）。",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "案件の一意識別子（ULID）。`TaskId` と同じ形。",
+      "type": "string"
+    },
     "RunRole": {
       "description": "run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。",
       "enum": [
@@ -552,6 +560,13 @@
         "aggregate": {
           "description": "ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。",
           "type": "boolean"
+        },
+        "assignee": {
+          "description": "ADR-0033 D2: 割り当てられた組織のノード（`org_nodes.id`）。あれば `worker_hint` の解決で\n役割・分野より先に見る。無ければ従来どおり（互換）。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "attempts": {
           "format": "uint32",
@@ -599,6 +614,17 @@
             }
           ]
         },
+        "milestone_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D2: このタスクが属する途中目標（`project_id` の案件のもの）。"
+        },
         "objective": {
           "type": "string"
         },
@@ -615,6 +641,17 @@
         "priority": {
           "format": "int32",
           "type": "integer"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D2: このタスクが属する案件。導入前のタスク・案件に属さないタスクには無い。"
         },
         "role": {
           "description": "ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。\n導入前のタスクには無いので任意。",

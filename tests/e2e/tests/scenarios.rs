@@ -107,6 +107,9 @@ model = "fake"
             role: None,
             genre: None,
             aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
         };
         self.store.insert(&task).unwrap();
         self.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();
@@ -332,6 +335,9 @@ fn expired_lease_is_reclaimed_and_task_completes() {
         role: None,
         genre: None,
         aggregate: false,
+        project_id: None,
+        milestone_id: None,
+        assignee: None,
     };
     env.store.insert(&task).unwrap();
     env.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();

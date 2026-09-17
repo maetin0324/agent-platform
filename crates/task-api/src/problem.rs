@@ -231,6 +231,30 @@ impl ApiProblem {
         Self::new(StatusCode::BAD_GATEWAY, "cluster_connect_failed", detail)
     }
 
+    // ---- ADR-0033 D1/D2（Phase 23）: 組織・案件・途中目標 ----
+
+    pub(crate) fn org_node_not_found(id: &str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "org_node_not_found", format!("org node not found: {id}"))
+    }
+
+    /// `POST /org` の id が既にある（更新は `PATCH /org/{id}`）。
+    pub(crate) fn org_node_exists(id: &str) -> Self {
+        Self::new(StatusCode::CONFLICT, "org_node_exists", format!("org node already exists: {id}"))
+    }
+
+    /// ADR-0033 D1: 仕事を抱えている（または子を持つ）ノードは消せない。
+    pub(crate) fn org_node_in_use(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "org_node_in_use", detail)
+    }
+
+    pub(crate) fn project_not_found(id: &str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "project_not_found", format!("project not found: {id}"))
+    }
+
+    pub(crate) fn milestone_not_found(id: &str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "milestone_not_found", format!("milestone not found: {id}"))
+    }
+
     /// この Problem の HTTP ステータス（`put_secret` が解析エラーだけを差し替えるために見る）。
     pub(crate) fn status(&self) -> StatusCode {
         self.status
@@ -407,6 +431,12 @@ pub(crate) fn store_problem(err: StoreError) -> ApiProblem {
             .with_extra("kind", t.kind)
             .with_extra("trigger", t.trigger),
         StoreError::Sqlite(e) if is_busy(e) => ApiProblem::db_busy(),
+        // ADR-0033 D1: 使用中は 409、組織の検証違反は 422（`OpsError::Validation` と同じ形）。
+        StoreError::InUse { .. } => ApiProblem::org_node_in_use(err.to_string()),
+        StoreError::Org(_) => ApiProblem::validation(vec![ValidationError {
+            field: None,
+            message: err.to_string(),
+        }]),
         _ => ApiProblem::internal(err.to_string()),
     }
 }

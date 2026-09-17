@@ -3184,3 +3184,111 @@ D-3（`ensure_secrets_dir` の create → chmod の間の一瞬と、既にあ�
 
 - P-69: DESIGN §5.9 補足 2（クラスタ）に `auth` の 3 種と「taskd が接続を張る場合がある」ことを足す
   （ADR-0018 D2 の「人待ち」だけを書いている現状と実装がずれるため）。
+
+---
+
+## Phase 23 — 組織と案件のモデル（ADR-0033 D1/D2。2026-09-17）
+
+`docs/SPEC.md` の「組織（一つ、役割の木）」と「案件・途中目標」を taskd の第一級エンティティにした。
+既存の `tasks` は**実行基盤として残し、その上に載せた**（ADR-0033 §1「載せ替え」）。人が見る単位は案件と
+組織になり、タスクは裏方に下がる。判断は全て決定的で、ディスパッチャ・ストアに LLM 呼び出しは足していない
+（DESIGN 原則 1）。
+
+### 成果物
+
+- **migration 0006（`SCHEMA_VERSION = 6`）** — ADR-0033 D1〜D5 の**全テーブルを 1 回で**作る
+  （`org_nodes` / `projects` / `milestones` / `reports` / `messages` / `approvals` / `standing_rules`）。
+  後続 Phase（24〜26）が並行で載るので、今回使わない表・列も先に用意した。`tasks` に
+  `project_id` / `milestone_id` / `assignee` を追加し、0004/0005 と同じ流儀で既存行を json から 1 回だけ埋める。
+  索引: `tasks(project_id)` / `reports(project_id, level, read_at)` / `messages(node_id, project_id, created_at)` /
+  `approvals(decision)` / `org_nodes(parent_id)` / `milestones(project_id, seq)` / `projects(status)`。
+- **`crates/task-core/src/org.rs`（新規）** — `OrgNode` / `OrgKind` / `Project` / `ProjectId` / `ProjectStatus` /
+  `Milestone` / `MilestoneId` / `MilestoneStatus`、決定的な検証 `validate_upsert`、`assignee_defaults`。
+  I/O も LLM も無い純粋なデータと関数（ADR-0001 D2）。
+- **`TaskStore` の 11 メソッド** — `org_list / org_get / org_upsert / org_delete`、
+  `project_create / project_get / project_list / project_set_status`、
+  `milestone_create / milestone_list / milestone_set_status`。`ListFilter` に `project_id` を追加。
+  実装は `SqliteStore` の 1 つだけ（`grep -rn "impl TaskStore for"` で確認。テスト用の fake は無かった）。
+- **`Task` の 3 フィールド**（`#[serde(default, skip_serializing_if = "Option::is_none")]`）。導入前の JSON も
+  DB 行もそのまま読める。分解した子（`plan::materialize` / `delegate::materialize_delegated`）は親の
+  `project_id` / `milestone_id` を継ぐ（案件の仕事の木が途切れないため。`assignee` は Phase 24 で計画が付ける）。
+- **種蒔き** — `config/org.example.toml`（SPEC §3.2 の 10 ノード。`genre` は実在する分野 id だけ:
+  `coding` を 3 課、`literature` を関連研究調査課。論文執筆課・データ整理課・インフラ部・秘書は分野なし）と
+  `org_include`（任意）。`taskd::seed_org_if_empty` が **`org_nodes` が空のときだけ**蒔く。以後は DB が正。
+- **`assignee` の解決** — `task_ops::add::create_task_with_roles` で、`assignee` があれば
+  **組織ノードの `genre` → その分野の `default_role` → その役割**を、役割・分野より**先に**見て
+  `tier` / `adapter` / 予算を埋める。タスク自身に書いた値は常に強い。`assignee` が無ければ `org_list()` すら
+  呼ばず、ADR-0027 の解決順がそのまま残る（既存テストは 1 件も変えていない）。
+- **API 10 本**（`docs/gui/api.md` §2 の表 40〜49、§3.42〜3.49）。組織の編集だけが管理系。
+- **`GET /tasks?project=<ULID>`** を追加（`GET /projects/{id}` と同じ絞り込み）。
+
+### 受け入れ条件と証拠
+
+1. **migration と冪等性** — `cargo test -p task-core`
+   （`open_migrates_schema_5_db_to_6_and_reapplying_is_idempotent`: 版数 5 の DB を開くと 6 になり、既存行の
+   3 列は NULL のまま読める。2 回目に開いても `schema_migrations` の版数 6 は 1 行のまま、蒔いた組織も残る）。
+2. **ストアの CRUD と規則** — 同上。`org_nodes_round_trip_and_upsert_keeps_created_at`（更新で `created_at` を
+   保つ、並びは `position` → `id`）、`org_upsert_rejects_a_second_secretary_and_cycles`（失敗した upsert は
+   何も書かない）、`org_delete_refuses_while_a_task_is_open_or_children_remain`（`StoreError::InUse`。
+   タスクが終端になれば消せる）、`projects_and_milestones_round_trip`（`seq` は案件ごとに 1 から）、
+   `tasks_can_be_listed_by_project`、`tasks_without_the_new_fields_still_deserialize`。
+   組織の検証は `crates/task-core/src/org.rs` の 6 件（秘書 1 人・親・種類の順序・循環・id の形・`assignee_defaults`）。
+3. **種蒔き** — `cargo test -p taskd --lib`
+   （`seeds_the_org_once_into_an_empty_db_and_never_again`: 空 DB に `config/org.example.toml` から **10 ノード**、
+   GUI で名前を変えた後の 2 回目は **0 件**で上書きしない。`without_org_include_nothing_is_seeded`。
+   設定の検証は `loads_the_org_example_and_maps_it_to_org_nodes` と
+   `rejects_org_seeds_that_do_not_form_one_tree`（秘書が 0 か 2・親なし・知らない親・知らない分野・id の形））。
+4. **`assignee` の解決** — `cargo test -p task-ops`
+   （`assignee_fills_the_worker_hint_from_the_org_nodes_genre`: `research-survey` → `literature` →
+   `literature-reader` → `tier = cheap` / `adapter = paperqa` / `max_turns = 5`。
+   `explicit_values_still_win_over_the_assignee`、`without_an_assignee_nothing_changes`、
+   `unknown_assignee_project_or_milestone_is_rejected`）。**既存の解決順テストは 1 行も変えていない**。
+5. **API** — `cargo test -p task-api --test organization` **8 passed**（正常系、管理系の 401 を
+   **トークンあり構成と `token_file` 未設定構成の両方**で、404、409 ×2（使用中・id 重複）、422（検証）、
+   `POST /tasks` の 3 フィールド、`GET /tasks?project=`）。
+   `GET /schema` は `UPDATE_SCHEMA=1 cargo test -p task-api` で再生成（`docs/api/v1/api-v1.schema.json`。
+   `Task` が変わったので `docs/api/v1/event.schema.json` と
+   `docs/protocol/worker-protocol.schema.json` も `UPDATE_SCHEMA=1` で再生成した）。
+6. **共通条件** — `cargo test --workspace`: **846 passed / `grep -c "^test result: FAILED"` = 0**
+   （Phase 22 の 816 から +30）。`cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。
+   テスト以外に `unwrap()` / `expect()` は無い（触った全ファイルで `#[cfg(test)]` より前を機械的に確認）。
+   ディスパッチャ・ストアに LLM 呼び出しは無い。
+
+### 判断したこと（ADR-0033 に無い細部）
+
+- **`assignee` の置き場所**: ADR は「`task-dispatch` / `task-worker` の解決順の前に置く」と書いているが、
+  `tier` / `adapter` / 予算が決まるのは**タスク作成時**（`task_ops::add::create_task_with_roles`）と
+  **委譲時**（`task_core::delegate::resolve_child_defaults`）の 2 か所で、ディスパッチャは決まった
+  `worker_hint` を使うだけだった。今回は前者に入れた。後者（委譲）は `DelegateTask` に `assignee` が無いので
+  手を付けていない（Phase 24 の `PlanOutput.assignee` と一緒に入れるのが自然）。
+- **`assignee` のノードが分野を持つとき、タスクの `genre` にもそれを採る**（タスクが `genre` を明示していない
+  ときだけ）。「そのノードの `genre` から役割・分野を解決する」（D2）の素直な実装で、run のプロンプトに
+  分野の説明が前置きされる効果も付く。
+- **`org_delete` は子ノードがあっても 409**。ADR は「仕事を抱えていたら 409」としか書いていないが、
+  親を消して子が宙に浮くと `GET /org` が木にならないため。
+- **PATCH の `genre: null`** で分野を外せる（`Option<Option<String>>`）。他の項目は「書いたものだけ変える」。
+- **`kind` の親子関係**は `secretary` > `department` > `section` を強制した（部の下に部は置けない）。
+  循環の検査を種類の検査より先に置き、「自分の子孫にぶら下げた」は `Cycle` として報告する。
+- **`org_include` は書いたのにファイルが無ければ設定エラー**（`providers_include` の「ディレクトリが無ければ空」
+  とは別扱い。1 ファイル指定なので、読めないのは事故）。
+
+### 未解決事項
+
+- U23-1: `scripts/sync-gui-docs.sh --check` は **out of date**（`gui/` 側の写しに §3.42〜3.49 と表の 40〜49 が
+  無い）。今回の指示で同期スクリプトは実行していない。G13（GUI）の担当が同期する。
+- U23-2: `reports` / `messages` / `approvals` / `standing_rules` は**表だけ**作った。読み書きするコードは
+  Phase 24〜26。空の表が 1 つも使われない状態で migration が入っている。
+- U23-3: `taskctl add` に `--project` / `--assignee` を足していない（API と GUI からだけ付けられる）。
+  CLI から案件に紐づけたくなったら足す。
+- U23-4: 秘書の `genre` は空のまま（対話用の分野は ADR-0033 D4 = Phase 24）。論文執筆課・データ整理課・
+  インフラ部も当てる分野がまだ無い。
+- U23-5: `PATCH /milestones/{id}` は更新後の行を返すために案件を総なめする（`milestone_get` を trait に
+  足さなかったため）。件数が増えたら 1 本足す。
+
+### 提案
+
+- P-70: `docs/DESIGN.md` §0〜§1 の「タスク管理層」という枠組みは SPEC に置き換わった（ADR-0033 冒頭）。
+  DESIGN.md は CLAUDE.md の規約で編集しないので、SPEC を上位文書とする一文を人間の判断で入れるか、
+  DESIGN.md を「実行基盤の設計」に改題するかを決めたい。
+- P-71: `ConfigView`（`GET /config`）に組織は出していない（DB が正なので `GET /org` を見ればよい）。
+  GUI が「設定に書いた種」と「今の組織」の差を見せたくなったら、`org_include` のパスだけ出す案がある。

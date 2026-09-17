@@ -88,6 +88,9 @@ fn main() {
         role: None,
         genre: None,
         aggregate: false,
+        project_id: None,
+        milestone_id: None,
+        assignee: None,
     };
 
     let WorkspaceSpec::Local { path: workspace_path } = &task.workspace else {

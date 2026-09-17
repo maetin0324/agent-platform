@@ -103,6 +103,9 @@ pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime
         role: None,
         genre: None,
         aggregate: false,
+        project_id: None,
+        milestone_id: None,
+        assignee: None,
     };
 
     store.create_task(&task, vec![])?;

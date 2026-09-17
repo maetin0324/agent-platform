@@ -96,9 +96,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `task_not_found` | 404 | タスクが無い |
 | `run_not_found` / `artifact_not_found` / `file_not_found` | 404 | run ディレクトリ / 成果物の添字 / ファイルが無い |
 | `not_found` | 404 | 未定義のパス |
+| `org_node_not_found` / `project_not_found` / `milestone_not_found` | 404 | 組織のノード / 案件 / 途中目標が無い（ADR-0033、§3.42〜3.49。ULID でない案件・途中目標の id もここ） |
 | `method_not_allowed` | 405 | |
 | `conflict` | 409 | `expected_status` 不一致。`expected`, `actual` |
 | `invalid_transition` | 409 | 状態機械または task-ops の写像が拒否。`task_status`, `kind`, `trigger`（`InvalidTransition{status, kind, trigger}` の写し。`trigger` は `Trigger::name()`） |
+| `org_node_exists` | 409 | `POST /org` の `id` が既にある（更新は `PATCH /org/{id}`） |
+| `org_node_in_use` | 409 | 消そうとした組織のノードが未終了のタスクを抱えている、または子を持つ（ADR-0033 D1） |
 | `payload_too_large` | 413 | 本文 > 1 MiB |
 | `unsupported_media_type` | 415 | 変更系で `Content-Type` が JSON でない |
 | `range_not_satisfiable` | 416 | ファイル系の `Range` / `offset` がサイズを超える。`Content-Range: bytes */<size>` |
@@ -123,7 +126,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（39）
+## 2. エンドポイント一覧（49）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -166,6 +169,16 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 37 | POST | `/clusters/{id}/connect` | 接続を開始する（コード不要で張れれば即完了。ADR-0032、Phase 22。**管理系**） | 200 `ClusterConnectStart` | taskd（`ssh -M -N` の起動・借用） |
 | 38 | POST | `/clusters/{id}/connect/code` | 進行中の接続に検証コード（TOTP 等）を渡す（**管理系**） | 200 `ClusterConnectResult` | taskd（`SSH_ASKPASS` 経由の中継） |
 | 39 | DELETE | `/clusters/{id}/connect` | 進行中の接続を取り消す、または張った接続を切る（**管理系**） | 200 `{}` | taskd（子プロセスの終了） |
+| 40 | GET | `/org` | 組織（一つ、役割の木）の全ノード（ADR-0033 D1、Phase 23） | `OrgList` | store `org_list` |
+| 41 | POST | `/org` | 役職を足す（**管理系**） | 201 `OrgNode`（`Location`） | store `org_upsert` |
+| 42 | PATCH | `/org/{id}` | 役職を変える・付け替える（**管理系**） | 200 `OrgNode` | store `org_upsert` |
+| 43 | DELETE | `/org/{id}` | 役職を消す。仕事を抱えていたら 409（**管理系**） | 204 | store `org_delete` |
+| 44 | GET | `/projects` | 案件の一覧（新しい順。ADR-0033 D2） | `ProjectList` | store `project_list` |
+| 45 | POST | `/projects` | 案件を投げる（`status = proposed`） | 201 `Project`（`Location`） | store `project_create` |
+| 46 | GET | `/projects/{id}` | 案件 + 途中目標 + 仕事の木 | `ProjectDetail` | store（`project_id` で絞った `tasks`） |
+| 47 | PATCH | `/projects/{id}` | 案件の状態を変える | 200 `Project` | store `project_set_status` |
+| 48 | POST | `/projects/{id}/milestones` | 途中目標を足す（`seq` はストアが採番） | 201 `Milestone`（`Location`） | store `milestone_create` |
+| 49 | PATCH | `/milestones/{id}` | 途中目標の状態を変える（SPEC §7 のアジャイル） | 200 `Milestone` | store `milestone_set_status` |
 
 ---
 
@@ -197,6 +210,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `kind` | `TaskKind`、複数可 | 全て | |
 | `genre` | 文字列（自由記述）、複数可（`kind` と同じ形） | 全て | `Task.genre` の完全一致（`ListFilter.genres`。ADR-0027 D1）。列挙型の検証はしない |
 | `parent` | `TaskId` | — | 直接の子だけ（`ListFilter.parent_id`） |
+| `project` | `ProjectId`（ULID） | — | その案件のタスクだけ（`ListFilter.project_id`。ADR-0033 D2）。ULID でなければ 400 |
 | `root_only` | bool | false | `parent_id IS NULL` のものだけ。`parent` と AND で効く（同時指定は空になるだけで、エラーではない） |
 | `q` | 文字列（最大 200 文字） | — | `title` **または `objective`** の部分一致（`ListFilter.text_contains`。SQLite の LIKE なので **ASCII の大文字小文字は区別しない**。`%` `_` はリテラル。ADR-0014 D2） |
 | `order` | `dispatch` / `updated_desc` / `created_desc` | `updated_desc` | `ListOrder` と同じ: `dispatch` = `priority DESC, created_at ASC, id ASC`（`ready_tasks` と同じ）。`updated_desc` = `updated_at DESC, id DESC`。`created_desc` = `created_at DESC, id DESC` |
@@ -224,7 +238,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
  "kind":"execute","tier":"standard","adapter":null,"priority":0,
  "parent":null,"depends_on":["01J…"],
  "max_turns":10,"max_wall_secs":600,"max_retries":2,"workspace":null,
- "role":"lead","genre":null,"aggregate":false}
+ "role":"lead","genre":null,"aggregate":false,
+ "project_id":null,"milestone_id":null,"assignee":null}
 ```
 
 - `acceptance[]` は `task_ops::add::CriterionSpec`（`Human{text}` / `Command{cmd, expect_exit}` / `ArtifactExists{name}` / `Reviewer{text}`）を `#[serde(tag = "type", rename_all = "snake_case")]` で表したもの。
@@ -236,6 +251,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
   書いた値は常に役割の既定より優先する。`max_retries` に役割・分野の既定は無い（常に 2）。
 - `role` は自由記述の役割名（ADR-0016 D1）。`[[roles]]` に無い名前でもエラーにせず、名前だけ保存する（既定も指示文も付かない）。
   状態機械は `role` を見ない。`GET /config` の `roles[]` が設定にある役割の一覧。
+- **`project_id` / `milestone_id` / `assignee` は Phase 23 から任意**（ADR-0033 D2）。`project_id` はその案件の
+  仕事の木にタスクを載せる（`GET /projects/{id}` に出る）。`milestone_id` は `project_id` と同じ案件のもので
+  あること（違えば 422）。`assignee` は `GET /org` のノード id で、**省略された `tier` / `adapter` / 予算は
+  役割・分野より先にここから埋まる**（ノードの `genre` → その分野の `default_role` → その役割の既定）。
+  タスク自身に書いた値の方が常に強い。知らない `assignee` / 無い案件 / 案件違いの途中目標は 422 `validation`。
+  3 つとも省略した従来の本文はそのまま通る（互換）。
 - `genre` は分野の id（ADR-0027 D1）。**`[[genres]]` が 1 件でも設定されている taskd では常に検証する**
   （taskd は起動時に完全な設定を持つので、`taskctl add --config` 無しのような「検証しない」緩さは API には無い）。
   `genre` を省略し `role` が指定されていれば、その役割を含む分野がちょうど 1 つだけあるとき、その分野を継ぐ
@@ -721,6 +742,83 @@ task-api 自身は ssh を起動しない（DESIGN §5.10 の境界）。未知�
 進行中の接続セッションを取り消す（ssh の子プロセスをプロセスグループごと落とす）、または既に張った接続を切る
 （`ssh -O exit <host>` を `BatchMode=yes` で呼ぶ）。無ければ何もしない。
 
+### 3.42〜3.49 組織・案件・途中目標（ADR-0033 D1/D2、Phase 23）
+
+SPEC §3.2〜§3.3 の「組織（一つ、役割の木）」と「案件・仕事の木」を第一級のエンティティにしたもの。
+既存の `tasks` は実行基盤として残り、案件の仕事の木は `tasks WHERE project_id = ?`（DAG は従来どおり
+`parent_id` / `depends_on`）。**組織の編集（3.43〜3.45）だけが管理系**（`token_file` 未設定でも 401）で、
+読み取りと案件・途中目標の操作は通常の要求（トークンを設定した taskd では、他の全要求と同じくトークンが要る）。
+
+#### 3.42 `GET /org` → 200 `OrgList`
+
+```json
+{"items":[{"id":"secretary","parent_id":null,"name":"秘書","kind":"secretary","brief":"…",
+           "position":0,"created_at":"…","updated_at":"…"},
+          {"id":"research-survey","parent_id":"research","name":"関連研究調査課","kind":"section",
+           "genre":"literature","brief":"…","position":6,"created_at":"…","updated_at":"…"}]}
+```
+
+- 並びは `position` 昇順、同値なら `id` 昇順。**木は GUI が `parent_id` で組む**（API は入れ子にしない）。
+- `kind` は `secretary`（根。1 つだけ）/ `department`（部）/ `section`（課）。
+- `genre` は `[[genres]] id`（無ければ項目ごと出ない）。その「人」が仕事に使うハーネスの束（ADR-0027/0028）。
+- 初期の形は `org_include` が指すファイル（`config/org.example.toml`）から、**DB の `org_nodes` が空のときだけ**
+  蒔かれる。以後は DB が正で、設定を書き換えても反映されない（ADR-0033 D1）。
+
+#### 3.43 `POST /org` → 201 `OrgNode`（`Location: /api/v1/org/{id}`）（**管理系**）
+
+要求本文 `{"id":"coding-poc","name":"PoC・R&D 課","kind":"section","parent_id":"coding","genre":"coding","brief":"…","position":4}`。
+`brief` と `position` は省略可（既定 `""` / `0`）。
+
+- `id` は英小文字ケバブ（`[a-z0-9-]`、1〜64 文字、先頭末尾は `-` でない）。
+- 既にある `id` は 409 `org_node_exists`（更新は 3.44）。
+- 検証に落ちたら 422 `validation`: 秘書が 2 人、秘書に親がある、秘書以外に親が無い、親が存在しない、
+  自分を祖先にする、種類の順序違反（`secretary` > `department` > `section`）。
+
+#### 3.44 `PATCH /org/{id}` → 200 `OrgNode`（**管理系**）
+
+`{"name":…, "kind":…, "parent_id":…, "genre":…, "brief":…, "position":…}` のうち**書いた項目だけ**を変える。
+`"genre": null` と書けば分野を外せる（書かなければ今の値のまま）。無い id は 404 `org_node_not_found`。
+検証は 3.43 と同じ（付け替えで木が壊れるなら 422）。
+
+#### 3.45 `DELETE /org/{id}` → 204（**管理系**）
+
+- そのノードを `assignee` に持つ**未終了のタスク**があれば 409 `org_node_in_use`（SPEC の「消すときに仕事を
+  抱えていたら」。ADR-0033 D1）。
+- 子ノードが残っていても 409 `org_node_in_use`（木を宙ぶらりんにしない）。
+- 無い id は 404 `org_node_not_found`。
+
+#### 3.46 `GET /projects` → 200 `ProjectList` / `POST /projects` → 201 `Project`
+
+要求本文 `{"title":"Pluvio の新テーマ","request":"Pluvio を基盤に用いた新たな研究テーマの模索、検証"}`。
+作られた案件は必ず `status = "proposed"`（秘書が理解確認・方針・最初の途中目標を返すまで人の返事待ち。
+SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validation`。
+一覧は `created_at` の降順。
+
+#### 3.47 `GET /projects/{id}` → 200 `ProjectDetail`
+
+```json
+{"project":{…Project…},
+ "milestones":[{"id":"01J…","project_id":"01J…","seq":1,"title":"関連研究を棚卸し","description":"",
+                "status":"proposed","created_at":"…","updated_at":"…"}],
+ "tasks":[{"id":"01J…","title":"調べる","status":"ready","parent_id":null,"depends_on":[],
+           "assignee":"research-survey","milestone_id":"01J…"}]}
+```
+
+`tasks` は**仕事の木を描くのに必要な分だけ**（詳細は `GET /tasks/{id}`）。`project_id` が一致するタスクだけが
+入り、他の案件・案件に属さないタスクは出ない。ULID でない id・無い案件は 404 `project_not_found`。
+
+#### 3.48 `PATCH /projects/{id}` → 200 `Project`
+
+`{"status":"proposed"|"active"|"paused"|"done"}`。知らない値は 400 `bad_request`（本文の解析で落ちる）。
+
+#### 3.49 途中目標: `POST /projects/{id}/milestones` → 201 `Milestone` / `PATCH /milestones/{id}` → 200 `Milestone`
+
+- 作成の本文は `{"title":"…","description":"…","status":"proposed"}`（`description` と `status` は省略可。
+  既定は `""` と `proposed`）。`seq` は**その案件の中での通し番号**をストアが採番する（1 始まり）。
+- 状態は `proposed` / `approved` / `in_progress` / `reached` / `redesigned`。達成ごとに人が判定し、
+  Go を出すか再設計する（SPEC §7 のアジャイル）。
+- 無い案件・無い途中目標は 404 `project_not_found` / `milestone_not_found`。
+
 ---
 
 ## 4. SSE `GET /stream`
@@ -1092,6 +1190,39 @@ pub struct SecretPutResult { pub id: String, pub updated_at: String, pub fingerp
 // を追加（環境変数名 -> 秘密 id）。`GET /config` のビュー型（`ProviderConfigView` 等）には出さない
 // （id への参照であっても、それが「その環境変数が秘密に紐づいている」という設定上の事実を漏らすだけで
 // 値は漏れないが、今回は追加しない実装判断。知りたければ `GET /secrets` の `used_by` を見る）。
+
+// ---- Phase 23（ADR-0033 D1/D2）: 組織・案件・途中目標。`OrgNode` / `Project` / `Milestone` は task-core の型 ----
+pub struct OrgNode { pub id: String, pub parent_id: Option<String>, pub name: String, pub kind: OrgKind /* secretary|department|section */,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub genre: Option<String>,
+    #[serde(default)] pub brief: String, #[serde(default)] pub position: i64, pub created_at: String, pub updated_at: String }
+pub struct OrgList { pub items: Vec<OrgNode> /* position 昇順、同値は id 昇順 */ }
+#[serde(deny_unknown_fields)]
+pub struct OrgCreateBody { pub id: String, pub name: String, pub kind: OrgKind, #[serde(default)] pub parent_id: Option<String>,
+    #[serde(default)] pub genre: Option<String>, #[serde(default)] pub brief: Option<String>, #[serde(default)] pub position: Option<i64> }
+#[serde(deny_unknown_fields)]
+pub struct OrgPatchBody { /* 書いた項目だけ変える。genre は null で外せる（Option<Option<String>>） */
+    #[serde(default)] pub name: Option<String>, #[serde(default)] pub kind: Option<OrgKind>, #[serde(default)] pub parent_id: Option<String>,
+    #[serde(default, deserialize_with = "double_option")] pub genre: Option<Option<String>>,
+    #[serde(default)] pub brief: Option<String>, #[serde(default)] pub position: Option<i64> }
+pub struct Project { pub id: ProjectId, pub title: String, pub request: String, pub status: ProjectStatus /* proposed|active|paused|done */,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub secretary_summary: Option<String>, pub created_at: String, pub updated_at: String }
+pub struct ProjectList { pub items: Vec<Project> /* created_at 降順 */ }
+#[serde(deny_unknown_fields)]
+pub struct ProjectCreateBody { pub title: String, pub request: String }
+#[serde(deny_unknown_fields)]
+pub struct ProjectPatchBody { pub status: ProjectStatus }
+pub struct ProjectDetail { pub project: Project, pub milestones: Vec<Milestone>, pub tasks: Vec<ProjectTaskView> }
+pub struct ProjectTaskView { pub id: TaskId, pub title: String, pub status: Status, pub parent_id: Option<TaskId>,
+    pub depends_on: Vec<TaskId>, pub assignee: Option<String>, pub milestone_id: Option<MilestoneId> }
+pub struct Milestone { pub id: MilestoneId, pub project_id: ProjectId, pub seq: i64, pub title: String, #[serde(default)] pub description: String,
+    pub status: MilestoneStatus /* proposed|approved|in_progress|reached|redesigned */, pub created_at: String, pub updated_at: String }
+#[serde(deny_unknown_fields)]
+pub struct MilestoneCreateBody { pub title: String, #[serde(default)] pub description: Option<String>, #[serde(default)] pub status: Option<MilestoneStatus> }
+#[serde(deny_unknown_fields)]
+pub struct MilestonePatchBody { pub status: MilestoneStatus }
+// `Task` に `#[serde(default, skip_serializing_if = "Option::is_none")]` の
+// `project_id: Option<ProjectId>` / `milestone_id: Option<MilestoneId>` / `assignee: Option<String>` を追加
+// （`NewTaskSpec` にも同名の任意フィールド）。導入前の JSON・DB 行はそのまま読める。
 
 /// スキーマ生成のルート（`task_worker::ProtocolSchema` と同じ流儀。1 フィールド = 1 公開型）。
 pub struct ApiV1Schema {

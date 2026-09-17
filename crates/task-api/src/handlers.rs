@@ -12,7 +12,10 @@ use axum::routing::{delete, get, patch, post, put};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use task_core::{EventRow, ListFilter, ListOrder, SqliteStore, Status, StoreError, Task, TaskId, TaskKind, TaskStore};
+use task_core::{
+    EventRow, ListFilter, ListOrder, Milestone, MilestoneId, MilestoneStatus, OrgNode, Project, ProjectId,
+    ProjectStatus, SqliteStore, Status, StoreError, Task, TaskId, TaskKind, TaskStore,
+};
 use task_ops::OpsError;
 use task_ops::add::NewTaskSpec;
 use task_ops::plan::NewPlanSpec;
@@ -33,8 +36,9 @@ use crate::types::{
     AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult, AccountLoginStart,
     AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody, ClusterConnectCodeBody, ClusterConnectResult,
     ClusterConnectStart, ClusterView, Clusters, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
-    ProviderCheckResponse, ProviderConfigView, ProviderView, Providers, ReloadResult, RunList, SecretList,
-    SecretPutBody, SecretPutResult, SecretView, ValidationError,
+    MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail,
+    ProjectList, ProjectPatchBody, ProjectTaskView, ProviderCheckResponse, ProviderConfigView, ProviderView,
+    Providers, ReloadResult, RunList, SecretList, SecretPutBody, SecretPutResult, SecretView, ValidationError,
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
@@ -42,6 +46,8 @@ type ApiResult = Result<Response, ApiProblem>;
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const TITLE_QUERY_MAX_CHARS: usize = 200;
+/// ADR-0033 D2: `GET /projects/{id}` が返す仕事の木の上限（GUI が一目で見る図なので十分に大きく取る）。
+const PROJECT_TASKS_LIMIT: usize = 2_000;
 
 /// ADR-0024 D2 / ADR-0025 D1: `account_pool = true` は claude-code/codex だけ、かつ `[accounts]` にそのアダプタの
 /// 根ディレクトリが設定済みのときだけ有効。
@@ -97,6 +103,12 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/clusters/{id}/connect/code", post(submit_cluster_connect_code))
         .route("/api/v1/secrets", get(secrets_list))
         .route("/api/v1/secrets/{id}", put(put_secret).delete(delete_secret))
+        .route("/api/v1/org", get(org_list).post(create_org_node))
+        .route("/api/v1/org/{id}", patch(patch_org_node).delete(delete_org_node))
+        .route("/api/v1/projects", get(project_list).post(create_project))
+        .route("/api/v1/projects/{id}", get(project_detail).patch(patch_project))
+        .route("/api/v1/projects/{id}/milestones", post(create_milestone))
+        .route("/api/v1/milestones/{id}", patch(patch_milestone))
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -237,6 +249,307 @@ async fn method_not_allowed() -> ApiProblem {
     ApiProblem::method_not_allowed()
 }
 
+
+// ---- ADR-0033 D1/D2（Phase 23）: 組織・案件・途中目標 ----
+//
+// 読み取り（`GET /org`、`GET /projects`、`GET /projects/{id}`）は他の読み取りと同じで無認証でよい。
+// 組織の編集（POST/PATCH/DELETE `/org`）は**管理系**なので `token_file` 未設定でも 401（ADR-0017 D1 と同じ規律）。
+// 案件と途中目標の作成・状態変更は人の操作（`POST /tasks` と同じ扱い）なので通常の認証だけ。
+
+/// `id` を組織のノードとして読む（存在しなければ 404）。
+fn load_org_node(store: &SqliteStore, id: &str) -> Result<OrgNode, ApiProblem> {
+    store
+        .org_get(id)
+        .map_err(store_problem)?
+        .ok_or_else(|| ApiProblem::org_node_not_found(id))
+}
+
+fn parse_project_id(raw: &str) -> Result<ProjectId, ApiProblem> {
+    raw.parse::<ProjectId>().map_err(|_| ApiProblem::project_not_found(raw))
+}
+
+fn parse_milestone_id(raw: &str) -> Result<MilestoneId, ApiProblem> {
+    raw.parse::<MilestoneId>().map_err(|_| ApiProblem::milestone_not_found(raw))
+}
+
+async fn org_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
+    no_query(&raw)?;
+    let items = state
+        .blocking(|store| store.org_list().map_err(store_problem))
+        .await?;
+    Ok(json_response(StatusCode::OK, &OrgList { items }))
+}
+
+async fn create_org_node(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let create: OrgCreateBody = read_json(body, false).await?;
+    let node = state
+        .blocking(move |store| {
+            if store.org_get(&create.id).map_err(store_problem)?.is_some() {
+                return Err(ApiProblem::org_node_exists(&create.id));
+            }
+            let now = OffsetDateTime::now_utc();
+            let node = OrgNode {
+                id: create.id,
+                parent_id: create.parent_id,
+                name: create.name,
+                kind: create.kind,
+                genre: create.genre,
+                brief: create.brief.unwrap_or_default(),
+                position: create.position.unwrap_or(0),
+                created_at: now,
+                updated_at: now,
+            };
+            store.org_upsert(&node).map_err(store_problem)
+        })
+        .await?;
+    tracing::info!(who = "admin", op = "org_create", org_id = %node.id, "admin: org node created");
+    let mut response = json_response(StatusCode::CREATED, &node);
+    if let Ok(location) = HeaderValue::from_str(&format!("/api/v1/org/{}", node.id)) {
+        response.headers_mut().insert(header::LOCATION, location);
+    }
+    Ok(response)
+}
+
+async fn patch_org_node(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let patch: OrgPatchBody = read_json(body, true).await?;
+    let node = state
+        .blocking(move |store| {
+            let mut node = load_org_node(store, &id)?;
+            if let Some(name) = patch.name {
+                node.name = name;
+            }
+            if let Some(kind) = patch.kind {
+                node.kind = kind;
+            }
+            if let Some(parent_id) = patch.parent_id {
+                node.parent_id = Some(parent_id);
+            }
+            if let Some(genre) = patch.genre {
+                node.genre = genre;
+            }
+            if let Some(brief) = patch.brief {
+                node.brief = brief;
+            }
+            if let Some(position) = patch.position {
+                node.position = position;
+            }
+            node.updated_at = OffsetDateTime::now_utc();
+            store.org_upsert(&node).map_err(store_problem)
+        })
+        .await?;
+    tracing::info!(who = "admin", op = "org_patch", org_id = %node.id, "admin: org node updated");
+    Ok(json_response(StatusCode::OK, &node))
+}
+
+async fn delete_org_node(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    state
+        .blocking(move |store| {
+            load_org_node(store, &id)?;
+            store.org_delete(&id).map_err(store_problem)?;
+            tracing::info!(who = "admin", op = "org_delete", org_id = %id, "admin: org node deleted");
+            Ok(())
+        })
+        .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn project_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
+    no_query(&raw)?;
+    let items = state
+        .blocking(|store| store.project_list().map_err(store_problem))
+        .await?;
+    Ok(json_response(StatusCode::OK, &ProjectList { items }))
+}
+
+async fn create_project(State(state): State<ApiState>, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
+    no_query(&raw)?;
+    let create: ProjectCreateBody = read_json(body, false).await?;
+    if create.title.trim().is_empty() {
+        return Err(ApiProblem::validation(vec![ValidationError {
+            field: Some("title".into()),
+            message: "title must not be blank".into(),
+        }]));
+    }
+    if create.request.trim().is_empty() {
+        return Err(ApiProblem::validation(vec![ValidationError {
+            field: Some("request".into()),
+            message: "request must not be blank".into(),
+        }]));
+    }
+    let project = state
+        .blocking(move |store| {
+            let now = OffsetDateTime::now_utc();
+            let project = Project {
+                id: ProjectId::new(),
+                title: create.title,
+                request: create.request,
+                // ADR-0033 D2: 作った直後は `proposed`（秘書が理解確認と方針を返すまで人の返事待ち）。
+                status: ProjectStatus::Proposed,
+                secretary_summary: None,
+                created_at: now,
+                updated_at: now,
+            };
+            store.project_create(&project).map_err(store_problem)?;
+            Ok(project)
+        })
+        .await?;
+    let mut response = json_response(StatusCode::CREATED, &project);
+    if let Ok(location) = HeaderValue::from_str(&format!("/api/v1/projects/{}", project.id)) {
+        response.headers_mut().insert(header::LOCATION, location);
+    }
+    Ok(response)
+}
+
+async fn project_detail(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    let project_id = parse_project_id(&id)?;
+    let detail = state
+        .blocking(move |store| {
+            let Some(project) = store.project_get(project_id).map_err(store_problem)? else {
+                return Err(ApiProblem::project_not_found(&project_id.to_string()));
+            };
+            let milestones = store.milestone_list(project_id).map_err(store_problem)?;
+            // ADR-0033 D2: 案件の仕事の木 = `tasks WHERE project_id = ?`（DAG は `parent_id` / `depends_on`）。
+            let filter = ListFilter { project_id: Some(project_id), ..ListFilter::default() };
+            let page = store
+                .list_page(&filter, ListOrder::CreatedDesc, None, PROJECT_TASKS_LIMIT)
+                .map_err(store_problem)?;
+            let tasks = page
+                .items
+                .into_iter()
+                .map(|task| ProjectTaskView {
+                    id: task.id,
+                    title: task.title,
+                    status: task.status,
+                    parent_id: task.parent_id,
+                    depends_on: task.depends_on,
+                    assignee: task.assignee,
+                    milestone_id: task.milestone_id,
+                })
+                .collect();
+            Ok(ProjectDetail { project, milestones, tasks })
+        })
+        .await?;
+    Ok(json_response(StatusCode::OK, &detail))
+}
+
+async fn patch_project(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    let project_id = parse_project_id(&id)?;
+    let patch: ProjectPatchBody = read_json(body, false).await?;
+    let project = state
+        .blocking(move |store| {
+            if !store.project_set_status(project_id, patch.status).map_err(store_problem)? {
+                return Err(ApiProblem::project_not_found(&project_id.to_string()));
+            }
+            store
+                .project_get(project_id)
+                .map_err(store_problem)?
+                .ok_or_else(|| ApiProblem::project_not_found(&project_id.to_string()))
+        })
+        .await?;
+    Ok(json_response(StatusCode::OK, &project))
+}
+
+async fn create_milestone(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    let project_id = parse_project_id(&id)?;
+    let create: MilestoneCreateBody = read_json(body, false).await?;
+    if create.title.trim().is_empty() {
+        return Err(ApiProblem::validation(vec![ValidationError {
+            field: Some("title".into()),
+            message: "title must not be blank".into(),
+        }]));
+    }
+    let milestone: Milestone = state
+        .blocking(move |store| {
+            if store.project_get(project_id).map_err(store_problem)?.is_none() {
+                return Err(ApiProblem::project_not_found(&project_id.to_string()));
+            }
+            store
+                .milestone_create(
+                    project_id,
+                    &create.title,
+                    create.description.as_deref().unwrap_or(""),
+                    create.status.unwrap_or(MilestoneStatus::Proposed),
+                )
+                .map_err(store_problem)
+        })
+        .await?;
+    let mut response = json_response(StatusCode::CREATED, &milestone);
+    if let Ok(location) = HeaderValue::from_str(&format!("/api/v1/milestones/{}", milestone.id)) {
+        response.headers_mut().insert(header::LOCATION, location);
+    }
+    Ok(response)
+}
+
+async fn patch_milestone(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    let milestone_id = parse_milestone_id(&id)?;
+    let patch: MilestonePatchBody = read_json(body, false).await?;
+    let milestone = state
+        .blocking(move |store| {
+            if !store.milestone_set_status(milestone_id, patch.status).map_err(store_problem)? {
+                return Err(ApiProblem::milestone_not_found(&milestone_id.to_string()));
+            }
+            // 更新後の行を返す（案件が分からないと引けないので、状態を変えた後に案件ごと引き直す）。
+            for project in store.project_list().map_err(store_problem)? {
+                if let Some(found) = store
+                    .milestone_list(project.id)
+                    .map_err(store_problem)?
+                    .into_iter()
+                    .find(|m| m.id == milestone_id)
+                {
+                    return Ok(found);
+                }
+            }
+            Err(ApiProblem::milestone_not_found(&milestone_id.to_string()))
+        })
+        .await?;
+    Ok(json_response(StatusCode::OK, &milestone))
+}
+
 // ---- 1. GET /health ----
 
 async fn health(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
@@ -300,7 +613,7 @@ async fn inbox(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRes
 async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     let query = QueryParams::parse(
         raw.as_deref(),
-        &["status", "kind", "genre", "parent", "root_only", "q", "order", "limit", "cursor"],
+        &["status", "kind", "genre", "parent", "project", "root_only", "q", "order", "limit", "cursor"],
     )?;
     let mut filter = ListFilter::default();
     for status in query.list("status") {
@@ -314,6 +627,12 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
         filter.genres.push(genre.to_string());
     }
     filter.parent_id = query.task_id("parent")?;
+    // ADR-0033 D2: 案件で絞る（案件の仕事の木。`GET /projects/{id}` は同じ絞り込みを使う）。
+    if let Some(raw) = query.single("project")? {
+        filter.project_id = Some(raw.parse::<ProjectId>().map_err(|_| {
+            ApiProblem::bad_request("query parameter `project` must be a ULID")
+        })?);
+    }
     filter.root_only = query.bool("root_only")?.unwrap_or(false);
     if let Some(text) = query.single("q")? {
         if text.chars().count() > TITLE_QUERY_MAX_CHARS {

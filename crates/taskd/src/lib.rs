@@ -371,6 +371,7 @@ pub fn build_dispatcher(config: &Config, masters: ClusterMasters) -> Result<Disp
     config.ensure_accounts_dir()?;
     config.ensure_secrets_dir()?;
     let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&config.db)?);
+    seed_org_if_empty(store.as_ref(), config)?;
     let policy = StaticPolicy::new(
         config.provider_specs(),
         std::time::Duration::from_secs(config.error_cooldown_secs),
@@ -385,6 +386,26 @@ pub fn build_dispatcher(config: &Config, masters: ClusterMasters) -> Result<Disp
     );
     dispatcher.set_cluster_connector(cluster_connector(masters));
     Ok(dispatcher)
+}
+
+
+/// ADR-0033 D1: 組織図の種を蒔く。**`org_nodes` が空のときだけ**書き、それ以外は何もしない
+/// （以後の編集は GUI → API → DB。設定は再読込しない）。蒔いた件数を返す。
+pub fn seed_org_if_empty(store: &dyn TaskStore, config: &Config) -> Result<usize, DaemonError> {
+    if config.org.is_empty() {
+        return Ok(0);
+    }
+    if !store.org_list()?.is_empty() {
+        tracing::debug!("org: org_nodes is not empty; the config seed is not applied (the DB wins)");
+        return Ok(0);
+    }
+    let now = OffsetDateTime::now_utc();
+    let nodes = config.org_nodes(now);
+    for node in &nodes {
+        store.org_upsert(node)?;
+    }
+    tracing::info!(count = nodes.len(), "org: seeded the organization from the config");
+    Ok(nodes.len())
 }
 
 /// ADR-0032 D2: taskd が張った ssh master を保持する場所。`ClusterMaster` を落とすと接続も切れるので、
@@ -955,6 +976,9 @@ async fn check_provider(
         role: None,
         genre: None,
         aggregate: false,
+        project_id: None,
+        milestone_id: None,
+        assignee: None,
     };
     let prepared = task_worker::LocalWorkspace::new(dir.clone())
         .prepare(&task)
@@ -1013,6 +1037,83 @@ fn truncate_detail(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- ADR-0033 D1（Phase 23）: 組織図の種蒔き ----
+
+    /// 空の DB には例の組織図（10 ノード）が入り、2 回目は何もしない（以後は DB が正）。
+    #[test]
+    fn seeds_the_org_once_into_an_empty_db_and_never_again() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/org.example.toml"),
+            dir.path().join("org.toml"),
+        )
+        .unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "db = \"taskd.sqlite3\"\nworkspace_root = \"ws\"\norg_include = \"org.toml\"\n{}",
+                r#"
+[[providers]]
+id = "x"
+adapter = "fake"
+
+[[roles]]
+id = "implementer"
+
+[[roles]]
+id = "literature-reader"
+
+[[genres]]
+id = "coding"
+description = "コードを書く"
+default_role = "implementer"
+roles = ["implementer"]
+
+[[genres]]
+id = "literature"
+description = "関連研究の調査"
+default_role = "literature-reader"
+roles = ["literature-reader"]
+"#
+            ),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let store = SqliteStore::open(&config.db).unwrap();
+
+        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 10);
+        let nodes = store.org_list().unwrap();
+        assert_eq!(nodes.len(), 10);
+        let secretary = nodes.iter().find(|n| n.id == "secretary").unwrap();
+        assert_eq!(secretary.kind, task_core::OrgKind::Secretary);
+        assert_eq!(secretary.parent_id, None);
+        assert_eq!(nodes.iter().find(|n| n.id == "coding-poc").unwrap().genre.as_deref(), Some("coding"));
+
+        // 人が GUI で名前を変えても、次の起動で設定に戻されない。
+        let mut renamed = secretary.clone();
+        renamed.name = "本人".into();
+        store.org_upsert(&renamed).unwrap();
+        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 0);
+        assert_eq!(store.org_get("secretary").unwrap().unwrap().name, "本人");
+        assert_eq!(store.org_list().unwrap().len(), 10);
+    }
+
+    /// `org_include` が無い設定では何も蒔かない。
+    #[test]
+    fn without_org_include_nothing_is_seeded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("taskd.sqlite3");
+        let config: Config = toml::from_str(&format!(
+            "db = \"{}\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+            db.display()
+        ))
+        .unwrap();
+        let store = SqliteStore::open(&config.db).unwrap();
+        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 0);
+        assert!(store.org_list().unwrap().is_empty());
+    }
 
     /// ADR-0012 D1: 同じ claude-code を使う 2 アカウントが、それぞれの env と model を持つアダプタになる。
     #[test]
