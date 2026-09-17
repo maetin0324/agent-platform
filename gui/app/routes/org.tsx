@@ -10,7 +10,7 @@ import {
 import { OrgActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge, StatusBadge } from "~/components/ui/badge";
-import { Button } from "~/components/ui/button";
+import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
@@ -131,7 +131,7 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="SPEC §3.2「組織（一つ、役割の木）」。誰が何を抱えているかを見て、ノードを選ぶと詳細が出ます（「話す」は G13b）。"
+        description="SPEC §3.2「組織（一つ、役割の木）」。誰が何を抱えているかを見て、ノードを選ぶと詳細が出ます。SPEC §4「ノードを選ぶとその『人』に直接話せる」。"
       />
 
       <OrgActionFlash outcome={fetcher.data} />
@@ -394,10 +394,15 @@ function OrgNodeDetail({
           </DataItem>
         </dl>
 
-        <Button variant="ghost" size="sm" disabled data-testid="org-node-talk" title="G13b で実装します">
+        {/* SPEC §4 の 2「ノードを選ぶとその『人』に直接話せる」（Phase G13b-2）。 */}
+        <Link
+          to={node.id === "secretary" ? "/org/secretary" : `/org/${encodeURIComponent(node.id)}`}
+          data-testid="org-talk"
+          className={buttonClass({ variant: "secondary", size: "sm" })}
+        >
           <Icon name="message" />
-          話す（G13b）
-        </Button>
+          話す
+        </Link>
 
         <div>
           <p className={labelClass}>抱えているタスク</p>

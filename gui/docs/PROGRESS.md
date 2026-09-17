@@ -1398,3 +1398,123 @@ taskd 側の Phase 25（ADR-0033 D3、ADR-0034: 報告の生成・圧縮）へ�
   何度も通知しない」重複排除を自前で持つ前提になっている。§3.53 に「GUI 側で最後に通知した未読件数の組を
   覚えておき、変化があったときだけ通知を出すことを想定している」と明記すると、次に触る人がこの前提を
   再発見しなくて済む。
+## Phase G13b-2 — 秘書との対話（2026-09-17）
+
+taskd 側 Phase 24（ADR-0033 D4/D6: `messages`、`POST/GET /org/{id}/messages`、`POST /projects` の最初の返事）への
+追従。SPEC §4 の 1「秘書との対話 — 案件を投げる、状況を聞く、方針を変える」と 2「組織の木 — ノードを選ぶと
+その『人』に直接話せる」、§3.4「口出し」を実装し、G13a で置いた `/org/secretary` のプレースホルダと
+`/org` の無効な「話す（G13b）」ボタンを実物に置き換えた。**taskd 側は Phase 24 のブランチ
+（`worktree-agent-ab88f57bd6139007d`、`e8f097a`）をこの worktree に取り込んでビルドした**（衝突は Phase 25 と
+同じ行に触っていた 4 ファイル＋文書 3 ファイル。どちらも残す形で解決し、`cargo test --workspace` で確認した）。
+
+### 成果物
+
+- **`app/lib/conversation.ts`（新規、純粋関数）**: `projectTitleFromText`（本文の先頭 40 字、超えたら `…`。
+  改行は空白に潰す）、`replyArrived`（ポーリングの終了条件: 送った発言（202 の `message_id`）より後ろに
+  `role = "node"` の行が入ったか。`message_id` が分からないとき＝案件を作った直後は「一覧の最後が node」）、
+  `CONVERSATION_POLL_MS = 2500` / `CONVERSATION_WAIT_LIMIT_MS = 10 分`、`SECRETARY_NODE_ID`、`ConversationData`。
+- **`app/taskd/conversation.server.ts`（新規、中継）**: `loadConversation`（`GET /org` + `GET /projects` +
+  `GET /org/{id}/messages?project=&limit=200` を束ねる。`GET /org` だけは落ちても続ける＝名前の表示にしか
+  使わないため。`?project=` が空文字のときは「案件なし」として送らない）、`sendMessage`（`POST /org/{id}/messages`。
+  **管理系**。202 の `{message_id, task_id}` をそのまま返す）、`startProjectFromMessage`（`POST /projects`
+  `{title: 先頭 40 字, request: 本文}`。作った後に GUI から続けて話しかけない＝taskd が秘書の最初の返事を
+  自分で起こすため）、`buildMessagePostBody`、`runConversationAction`（フォームの `new_project` の有無だけで
+  どちらを呼ぶか決める。本文の中身は読まない）。
+- **`app/components/Conversation.tsx`（新規、画面）**: 左に案件の選択（「案件なし（雑談）」を含む `<select>`。
+  選ぶと `?project=` に GET）、中央にそのノード・その案件のやり取り（古い順、`role` で左右に分け、
+  **node の返事は `MarkdownViewer` で描く**）、下に入力欄・送信・（秘書のときだけ）「新しい案件として投げる」。
+  送信 → 202 → **「考え中」を出して `GET` を 2.5 秒ごとに引き直し**（`useRevalidator`）、返事が入ったら止める。
+  10 分で諦めて案内を出す（`conversation-timeout`）。返事に `run_id` があり、それが**その画面で送った発言への
+  返事**なら `/tasks/{task_id}`（202 が返したタスク）へのリンクを出す。それ以外は run id をそのまま見せる
+  （`Message` に `task_id` が無いため。taskd への依頼 R4）。
+- **ルート**: `app/routes/org.secretary.tsx`（プレースホルダを置き換え。相手は `secretary` 固定）と
+  `app/routes/org.$id.tsx`（新規。`/org/:id`）。どちらも同じ中継・同じ部品で、action は
+  `POST /org/{id}/messages` の結果を **202 のまま**返し、「新しい案件として」のときだけ
+  `/org/…?project=<新しい案件>&waiting=1` へ redirect する（`waiting=1` は「秘書の最初の返事を待つ」印）。
+  `app/routes.ts` への追加は 1 行（`org/:id`。静的な `org/secretary` を先に置く）。
+- **導線**: `/org` のノード詳細の「話す」を有効化（`org-talk` → `/org/:id`、秘書は `/org/secretary`）。
+  `/projects/:id` の仕事の木の下に、担当の付いたタスクごとの「担当に話す」（`work-tree-talk` →
+  `/org/{assignee}?project={project}`）。`/projects` の新規フォームは残したまま、
+  「秘書に話しかけても同じです」の案内を足した（`project-new-secretary-hint`）。
+- **`help.tsx`**: 画面の説明「秘書」を実物の説明に差し替え、用語集に「秘書」「口出し」「対話（messages）」を
+  SPEC の言葉で追加。
+- testid: `conversation` / `conversation-project-select`（`conversation-project-form`）/ `conversation-message`
+  （`data-role`）/ `conversation-input` / `conversation-send` / `conversation-thinking` /
+  `conversation-new-project-toggle` / `conversation-run-link` / `conversation-timeout` / `org-talk` /
+  `work-tree-talk`（`work-tree-assignees`）/ `project-new-secretary-hint`。
+
+### 判断したこと（ADR は起こしていない。GUI の中の話）
+
+- **「案件を投げる」は明示のトグルにした**（SPEC §4 の「案件を選ばず本文を送るとそれが新しい案件」を、
+  トグルの**既定値**で表現）。`/org/secretary` で案件を選んでいなければ「新しい案件として投げる」は
+  最初から入っており、案件を選ぶと外れる。action は本文を読まず、フォームの値だけで `POST /projects` と
+  `POST /org/{id}/messages` を切り替える（GUI 側で新しい判断をしない、という既存の方針に合わせた）。
+- **返事待ちはポーリング（2.5 秒）**。SSE（`GET /stream` の `task.event`）でも終端は拾えるが、`messages` に
+  行が入るのは run の終端処理の中なので、結局 `GET /org/{id}/messages` を引き直すことになる。
+  引き直しは既存の `useRevalidator`（loader の再検証）で足り、新しい購読を足さずに済む。
+- **「考え中」の終了条件は 202 の `message_id` を基準にする**（件数の増減ではなく）。再検証で一覧が入れ替わっても
+  判定がぶれない。案件を作った直後だけは自分の発言の id が分からない（`POST /projects` は返さない）ので、
+  「一覧の最後が node の発言」を使う。
+- **10 分で諦める**。run が落ちた場合は taskd が「返事できませんでした: …」を返事として入れる（実機で確認）ので
+  通常は止まるが、万一何も入らないときに永久にポーリングしないための保険。
+- **`/projects` の新規フォームは残した**（SPEC は「秘書に話しかけても同じ」であって、フォームを消せとは言っていない。
+  `title` を自分で決めたいときのために残し、案内文で対話と同じであることを書いた）。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint`（biome、139 files）exit 0 / `pnpm typecheck` exit 0 / `pnpm build` exit 0。
+- `pnpm test` **302 passed**（31 ファイル。G13a の 281 から +21）。新規 `test/unit/conversation.test.ts` **21 件**:
+  `projectTitleFromText`（40 字まで・超えたら `…`）、`replyArrived`（未反映・返事前・返事後・前の返事は数えない・
+  id が無いとき）、`loadConversation`（3 本を束ねる／`?project=` が付く／空の `?project=` は送らない／
+  `GET /org` が落ちても出す／404 `org_node_not_found` と 401 をそのまま投げる）、`buildMessagePostBody`、
+  `sendMessage`（202 の素通し・本文・401・404）、`startProjectFromMessage`（`POST /projects` の本文が
+  `{先頭 40 字, 本文}`・続けて `/messages` を呼ばない・422）、`runConversationAction`（トグルの有無で呼び分け）。
+- `pnpm gen:types` を 2 回実行して同一、かつコミット済みの `app/taskd/types.ts` と同一（Phase 24 取り込み後に
+  1 度再生成してある）。`scripts/sync-gui-docs.sh --check` = `up to date`。
+- **実機での見た目と動作の確認**（使い捨ての taskd を 127.0.0.1:17911、GUI を 127.0.0.1:17901 に立てた。
+  **運用中の 7710 / 7700 には触れていない**）。構成: Phase 24 を取り込んだこのブランチを `cargo build`、
+  `org_include = config/org.example.toml`、`[memory] dir`、`[[genres]] secretary / coding / literature`、
+  全役割を偽アダプタ `fake`（LLM は呼ばない。`done` の `summary` に秘書の返事の形の Markdown を出すだけ）に
+  当て、`[api] token_file` あり。Playwright（light / dark）で確認したこと:
+  - `/org/secretary`: 空のスレッドで「新しい案件として投げる」が**既定で入っている**。本文だけ書いて送ると
+    `POST /projects` → `?project=<id>&waiting=1` へ移り、**「考え中」が出て**、2.5 秒ごとの再検証の後に
+    **秘書の返事が Markdown（`## 理解の確認` / `## 大まかな方針` / `## 最初の途中目標（提案）` の 3 見出し）で
+    画面に出た**。案件名は本文の先頭 40 字 + `…`。案件の選択も作った案件に切り替わり、トグルは外れる。
+  - 続けて同じスレッドに「状況を教えてください。」と送ると `user → node → user → node` の順に並び
+    （SPEC §3.4「先週の議論の続きとして話せる」）、2 通目の返事には「この返事を作った run（裏方）」の
+    `/tasks/:id` リンクが出た。「案件なし」に切り替えるとやり取りは 0 件（混ざらない）。
+  - `/org?selected=coding-poc` の「話す」→ `/org/coding-poc` に遷移し、案件なしの雑談として送って返事が出た
+    （分野を持つノードなので `coding` の役割で run。秘書以外にはトグルが出ない）。
+  - `/projects/:id`: 仕事の木の下に「担当: 秘書」＋「担当に話す」（→ `/org/secretary?project=…`）が出る。
+  - `/projects`: 「秘書に話しかけても同じです」の案内が出る。`/help#screens` の秘書の説明も更新済み。
+  - **失敗した run**（偽アダプタをわざと壊し、終端メッセージを出さずに終わらせた）: 返事として
+    `返事できませんでした: error(retryable=true): worker exited without terminal message (exit=0)` が
+    画面に出て「考え中」が止まった（再試行ぶん 2 行入る）。
+  - light / dark 両方でスクリーンショットを取得。確認後に taskd・GUI とも停止し、使い捨てディレクトリは削除済み。
+- e2e（`pnpm e2e`）は運用中の taskd / GUI（7700/7710）と衝突するため今回も実行していない（上記は別ポートの
+  使い捨て環境で行った）。
+
+### 未解決事項
+
+- G13b-2-U1: **過去の返事から裏方の run へのリンクが出せない**（`Message` に `task_id` が無い。taskd への依頼 R4(a)）。
+  今はその画面で送った発言への返事にだけリンクが出て、それ以外は run id をそのまま見せている。
+- G13b-2-U2: **対話用タスクが案件の仕事の木・タスク一覧に混ざる**（taskd 側 U24-4、依頼 R4(b)）。
+  実機でも `対話: …[秘書]` のノードが仕事の木に出る。`title` の前置きで除くのは文書に無い挙動に頼ることになるので
+  やっていない。
+- G13b-2-U3: 返事待ちはポーリング（2.5 秒）で、SSE は使っていない。返事が 1 秒以内に入ると「考え中」は一瞬しか
+  出ない（実機で 1 度、`waitForSelector` が拾えないほど短かった）。
+- G13b-2-U4: DOM を描画する unit テストが無い（G10-U1 と同じ）。画面側の分岐（左右の振り分け、Markdown、
+  「考え中」、トグルの既定値）は純粋関数のテストと Playwright の目視でのみ確認している。
+- G13b-2-U5: 失敗した run は**再試行のたびに**「返事できませんでした: …」が 1 行ずつ入る（実機で 2 行）。
+  人から見ると同じ文言が並ぶ。taskd 側で最後の 1 回だけにするか、GUI で畳むかは決めていない。
+- G13b-2-U6: `/reports` と通知（G13b-1）は別の担当が並行して作業中のため触っていない。`/approvals` と
+  `/artifacts` はプレースホルダのまま（taskd 側 Phase 26 待ち）。
+
+### 提案（`docs/gui/api.md` への変更提案。採否は人間）
+
+- G13b-2-P1: §3.55（`POST /org/{id}/messages`）に、**返事の待ち方の推奨**（`message_id` より後ろに
+  `role = "node"` が入るまで `GET` を引き直す）を 1 行書いておくと、次に触る人が件数の増減で判定して
+  ぶれる実装をしなくて済む。
+- G13b-2-P2: §3.46（`POST /projects`）の応答に、秘書の最初の対話の `message_id` / `task_id` を含める
+  （または 3.54 の `Message` に `task_id` を足す）と、案件を作った直後の「考え中」も
+  同じ基準（自分の発言の id）で終われる。今は「一覧の最後が node」で代用している。

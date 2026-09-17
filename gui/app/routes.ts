@@ -9,6 +9,8 @@ export default [
   // SPEC §4 の画面（Phase G13a、ADR-0033 D8）。秘書・報告・認可・成果物は G13b まではプレースホルダ
   route("org/secretary", "routes/org.secretary.tsx"),
   route("org", "routes/org.tsx"),
+  // 組織の木から選んだ「人」との対話（SPEC §3.4、Phase G13b-2）。静的な org/secretary を先に置く
+  route("org/:id", "routes/org.$id.tsx"),
   route("projects", "routes/projects.tsx"),
   route("projects/:id", "routes/projects.$id.tsx"),
   route("reports", "routes/reports.tsx"),
