@@ -1,0 +1,102 @@
+# `web-research` 分野（ADR-0029）を使った、Web・OSS・製品・仕様の調査（Local Deep Research）の設定例。
+# `related-research`/`literature`（PaperQA2、ADR-0027、config/taskd.research.example.toml）とは分けたまま。
+# 相対パスはこのファイルのあるディレクトリ基準。コピーして書き換えて使うこと
+# （`taskctl ... --config <このファイルのコピー>`）。
+#
+# 前提:
+#   - `uv` の隔離環境などに local-deep-research（`ldr-web`/`ldr-mcp` は使わず、プログラム的な API だけを
+#     使う）を入れた venv があること（例 `~/taskd/ldr/.venv`）。一発実行の CLI は無いので、`command` には
+#     その venv の python 実行ファイルそのものを指す（`crates/task-worker/src/local_deep_research_run.py`
+#     を taskd が `<python> <スクリプト> <入力 JSON>` の形で起動する。ADR-0029 D1）。
+#   - LLM はトンネル越しのローカル Qwen 等（OpenAI 互換エンドポイント）に向ける。`settings` の
+#     `llm.provider`/`llm.openai_endpoint.url`/`llm.openai_endpoint.api_key`/`llm.model` で指定する
+#     （`api_key` は使われないダミーでよい）。
+#   - 検索エンジン（`search.tool`）はホストの事情に強く左右される（実機確認: このホストでは一般的な
+#     Web エンジンが軒並み塞がれていた — mojeek は 403、SearXNG 経由の duckduckgo は CAPTCHA、brave は
+#     レート制限、qwant はアクセス拒否、google/wikipedia の web エンジンは 0 件。SearXNG 単体で
+#     `engines = ["bing"]` に絞ると結果は返るが無関係なノイズだった）。**鍵無しで確実に動いたのは
+#     `search.tool = "wikipedia"`**（実機確認: 出典 3 件、引用付きの要約が返った）ので、これを既定にする。
+#     エンジンの選択は `settings` の 1 行を変えるだけで、アダプタ自体は検索エンジンに依存しない。
+#     代替（コメントアウト、必要なものだけ有効にする）:
+#       - このホストの SearXNG（`http://127.0.0.1:8888`）で他のエンジンを有効にする。
+#         LDR は既定でプライベート/loopback の SearXNG URL を拒否するので、使うなら
+#         `env` に `LDR_SEARCH_ALLOW_PRIVATE_ENGINE_URLS = "true"` を足すこと。
+#       - 鍵付きの検索 API（Brave / Tavily / Serper 等）を `settings` に足す。
+#       - 分野特化のエンジン（`github` / `stackexchange` / `openalex` / `arxiv` 等）に絞る。
+#   - `settings` の値は TOML の型を混ぜず全て文字列で書く。数値・真偽値・JSON 配列/オブジェクト
+#     （`engines = "[\"bing\"]"` のような形）に見えるものはランナー（Python）側で変換する（ADR-0029 D1/D3）。
+
+db = "../taskd-web-research-demo.sqlite3"
+workspace_root = "../workspaces"
+tick_ms = 2000
+max_concurrency = 2
+lease_grace_secs = 60
+idle_timeout_secs = 300
+kill_grace_secs = 10
+review_timeout_secs = 600
+error_cooldown_secs = 300
+
+[plan]
+auto_accept = false
+
+# `[adapters.local_deep_research]` は共通設定（ADR-0029 D1）。行ごとの上書きは `model`（`settings` の
+# `llm.model` を上書き）と `env` だけ（`paperqa`/`acp` と同じ作り）。
+[adapters.local_deep_research]
+command = "/home/u/taskd/ldr/.venv/bin/python"
+mode = "quick"
+iterations = 2
+questions_per_iteration = 2
+# LDR がプライベート/loopback の SearXNG URL を使うときだけ必要（上のコメント参照）。既定
+# （`search.tool = "wikipedia"`）では使わないので空のままでよい。
+env = {}
+
+[adapters.local_deep_research.settings]
+"llm.provider" = "openai_endpoint"
+"llm.openai_endpoint.url" = "http://127.0.0.1:18000/v1"
+"llm.openai_endpoint.api_key" = "unused"
+"llm.model" = "qwen3.8-27b"
+"search.tool" = "wikipedia"
+# SearXNG に切り替える場合の代替（このホストでは `engines` を絞らないとノイズが出る。上のコメント参照）:
+# "search.tool" = "searxng"
+# "search.engine.web.searxng.default_params.instance_url" = "http://127.0.0.1:8888"
+# "search.engine.web.searxng.default_params.max_results" = "5"
+# "search.engine.web.searxng.default_params.engines" = "[\"bing\"]"
+
+[[providers]]
+id = "ldr-qwen"
+adapter = "local-deep-research"
+tiers = ["cheap"]
+concurrency = 1
+# 空でなければ `settings` の `llm.model` を上書きする（ADR-0029 D1）。空なら `[adapters.local_deep_research].settings` のまま。
+model = "qwen3.8-27b"
+
+[[providers]]
+id = "local-fake"
+adapter = "fake"
+tiers = ["standard", "cheap"]
+concurrency = 2
+
+# Web 調査の役割（ADR-0029 D2）。役割名は自由記述で、下の [[genres]] の roles に含めれば分野に属する。
+[[roles]]
+id = "web-scout"
+adapter = "local-deep-research"
+tier = "cheap"
+instructions = "あなたは Web 調査担当。問いに対して、出典 URL 付きで分かったことと分からなかったことを書く。"
+
+# 分野（ADR-0027 D1、ADR-0029 D2）。`related-research`/`literature`（PaperQA2）とは分けたまま。
+# 親（Planner/lead）は ADR-0028 の manifest（`capabilities`/`input_artifacts`/`output_artifacts`）を見て、
+# 論文の確認は `literature`、実装・製品・仕様の確認は `web-research` に投げる。
+[[genres]]
+id = "web-research"
+description = "Web・OSS・製品・仕様・技術報告の調査（論文以外）"
+capabilities = ["Web 検索（SearXNG）", "OSS 実装・製品・仕様の確認", "複数ソースの突き合わせ"]
+input_artifacts = ["question"]
+output_artifacts = ["report.md"]
+default_role = "web-scout"
+roles = ["web-scout"]
+
+[delegation]
+max_delegate_per_run = 8
+max_tree_depth = 5
+max_tree_runs = 100
+on_child_failure = "retry_then_ask"

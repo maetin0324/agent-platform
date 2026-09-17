@@ -22,8 +22,8 @@ use task_ops::daemon::{ProviderCheckView, ProviderLive};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use task_worker::{
-    AcpAdapter, AcpConfig, ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, PaperQaAdapter,
-    PaperQaConfig, WorkerAdapter, Workspace,
+    AcpAdapter, AcpConfig, ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, LdrAdapter,
+    LdrConfig, PaperQaAdapter, PaperQaConfig, WorkerAdapter, Workspace,
 };
 
 pub use config::{Config, ConfigError};
@@ -130,7 +130,24 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     extra_args: base.extra_args.clone(),
                 }))
             }
-            // `Config::validate` が fake / claude-code / codex / acp / paperqa 以外を拒否している。
+            LdrAdapter::ID => {
+                let base = &config.adapters.local_deep_research;
+                // ADR-0029 D1: 行ごとの上書きは `model`（`settings` の `llm.model` を上書き）と `env` だけ
+                // （`ProviderConfig.settings` は `paperqa` 専用フィールドなので LDR では再利用しない。
+                // taskd 側の実装判断。行ごとに調査対象を変えたければ `[[roles]]`/`[[genres]]` で使い分ける）。
+                let mut settings: Vec<(String, String)> = base.settings.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                settings.sort();
+                Arc::new(LdrAdapter::new(LdrConfig {
+                    command: base.command.clone(),
+                    mode: base.mode,
+                    iterations: base.iterations,
+                    questions_per_iteration: base.questions_per_iteration,
+                    settings,
+                    model: effective_model(&p.model, &None),
+                    env: merged_env(&base.env, &p.env),
+                }))
+            }
+            // `Config::validate` が fake / claude-code / codex / acp / paperqa / local-deep-research 以外を拒否している。
             _ => {
                 let mut fake = FakeAdapter::new(config.adapters.fake.command.clone());
                 fake.set_env(merged_env(&config.adapters.fake.env, &p.env));
@@ -1040,6 +1057,64 @@ tiers = ["standard"]
         assert_eq!(cfg.providers[0].settings.as_deref(), Some("/opt/paperqa/settings/qwen-local"));
         assert!(cfg.providers[1].settings.is_none());
         assert_eq!(cfg.adapters.paperqa.settings.as_deref(), Some("/opt/paperqa/settings/base"));
+    }
+
+    /// ADR-0029 D1: `local-deep-research` プロバイダの行は `[adapters.local_deep_research]` の env に重ね、
+    /// `model` は行の値がそのまま（`[adapters.local_deep_research]` にモデルの既定値は無い。`acp`/`paperqa`
+    /// と同じ理由）。行ごとの `settings` の上書きは無い（taskd 側の実装判断。`ProviderConfig.settings` は
+    /// `paperqa` 専用のまま）。
+    #[test]
+    fn build_adapters_wires_a_local_deep_research_provider_with_merged_env() {
+        let text = r#"
+[adapters.local_deep_research]
+command = "/opt/ldr/.venv/bin/python"
+mode = "detailed"
+iterations = 3
+env = { SHARED = "base", OPENAI_BASE_URL = "http://old:1/v1" }
+
+[adapters.local_deep_research.settings]
+"llm.provider" = "openai_endpoint"
+"search.tool" = "wikipedia"
+
+[[providers]]
+id = "ldr-qwen"
+adapter = "local-deep-research"
+tiers = ["standard"]
+model = "qwen3.8-27b"
+env = { OPENAI_BASE_URL = "http://127.0.0.1:18000/v1" }
+
+[[providers]]
+id = "ldr-default"
+adapter = "local-deep-research"
+tiers = ["standard"]
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        cfg.validate().unwrap();
+        let adapters = build_adapters(&cfg);
+        assert_eq!(adapters.len(), 2);
+        assert_eq!(adapters["ldr-qwen"].id(), "local-deep-research");
+        assert_eq!(adapters["ldr-default"].id(), "local-deep-research");
+
+        let models = effective_models(&cfg);
+        assert_eq!(models["ldr-qwen"], "qwen3.8-27b");
+        // 行に model が無ければ空文字（`[adapters.local_deep_research]` にモデルの既定値が無い）。
+        assert_eq!(models["ldr-default"], "");
+
+        let merged = merged_env(&cfg.adapters.local_deep_research.env, &cfg.providers[0].env);
+        assert_eq!(
+            merged,
+            vec![
+                ("OPENAI_BASE_URL".to_string(), "http://127.0.0.1:18000/v1".to_string()),
+                ("SHARED".to_string(), "base".to_string()),
+            ]
+        );
+
+        assert_eq!(
+            cfg.adapters.local_deep_research.settings.get("llm.provider").map(String::as_str),
+            Some("openai_endpoint")
+        );
+        assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Detailed);
+        assert_eq!(cfg.adapters.local_deep_research.iterations, Some(3));
     }
 
     /// S7: `[accounts]` は reload の対象外。`claude_dir` / `max_runs_per_account` / `check_model` のどれかが

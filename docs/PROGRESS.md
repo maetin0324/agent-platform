@@ -1,6 +1,6 @@
 # PROGRESS — taskd
 
-現在地: **Phase 0〜18 完了**（Phase 13 = Claude アカウントのプールと残量に基づく負荷分散、GUI からの登録・ログイン。ADR-0024）（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
+現在地: **Phase 0〜19 完了**（Phase 13 = Claude アカウントのプールと残量に基づく負荷分散、GUI からの登録・ログイン。ADR-0024）（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
 人間の判断 H1〜H9 を反映済み）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により G フェーズとして進める（前提: Node 24 LTS / pnpm 11）。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
@@ -26,6 +26,7 @@
 | 16 | タスクの分野（genre）でハーネスを切り替える（ADR-0027 D1/D2） | 完了 | 2026-09-17 |
 | 17 | 関連研究調査のハーネス（PaperQA2。`paperqa` アダプタ。ADR-0027 D3/D4） | 完了（実機で 1 周確認） | 2026-09-17 |
 | 18 | 分野を能力レジストリにする（capabilities・入出力・Planner の分野選択。ADR-0028） | 完了 | 2026-09-17 |
+| 19 | `web-research` 分野と Local Deep Research のハーネス（ADR-0029） | 完了（実機で 1 周確認。検索先は環境依存） | 2026-09-17 |
 
 ---
 
@@ -2798,3 +2799,56 @@ B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_po
 - P-63: DESIGN §5.4 のアダプタ表に `acp`（Phase 15）を足す。
 - P-64: DESIGN §4 のタスクに `genre` を足し、§5.4 に「分野 → 役割 → アダプタ」の解決順を書く。
 - P-65: DESIGN §5.4 のアダプタ表に `paperqa` を足す（ワーカープロトコルを話さない実行器は、アダプタが結果ファイルを書く旨も）。
+
+## Phase 19 — web-research 分野と Local Deep Research（ADR-0029。2026-09-17）
+
+人間の依頼「web-research を足して下さい」。人間の調査の結論「論文は PaperQA2、Web・実装・製品・仕様は Local Deep Research」に従う。
+
+### 実装前に実機で確かめた事実
+
+- `local-deep-research` 1.10.7（`~/taskd/ldr/.venv`）。**一発実行の CLI は無い**（`ldr-web` と `ldr-mcp` だけ）。使うのは Python API
+  （`quick_summary` / `detailed_research` / `generate_report`）。
+- **LDR はプライベート IP の SearXNG を既定で拒否する**。`LDR_SEARCH_ALLOW_PRIVATE_ENGINE_URLS=true` 等が要る（エラー文が対処法を出す）。
+- **このホストからは一般 Web 検索がほぼ使えない**: `mojeek` 403、SearXNG 経由でも `duckduckgo` は CAPTCHA、`brave` はレート制限、
+  `qwant` は拒否、`google` と `wikipedia` は 0 件、`bing` は 10 件返るが**内容が無関係**（`GekkoFS` で別企業のポータル）。
+  到達できるのは個別 API（`wikipedia` / `arxiv` / `github` / `stackexchange` / `openalex` …）。
+- 経路の確認: `search.tool = "wikipedia"` + ローカル Qwen で `quick_summary` が**出典 3 件・1797 文字の要約**を返した。
+
+### 成果物
+
+- `local-deep-research` アダプタ（`crates/task-worker/src/local_deep_research.rs`）。LDR に CLI が無いので、
+  **アダプタが実行用の Python を `include_str!` で持ち**、run ごとに `runs/<run_id>/ldr_run.py` へ書き出して venv の python で起動する
+  （外部に置くファイルは venv だけ。スクリプトは taskd と同じ版で進む）。契約は「入力 JSON → `progress:` 行 → 最後に `TASKD_RESULT {json}`、
+  `artifacts/report.md` を書く」。アダプタが `artifacts/result.json` を書き、`report.md` を成果物として申告する（ADR-0027 D3 と同じ形）。
+- 設定 `[adapters.local_deep_research]`（command / mode / iterations / questions_per_iteration / env / settings テーブル）。
+  `settings` の値は文字列で、数値・真偽値・**JSON 配列**（`"[\"bing\"]"`）をランナーが変換する。行ごとの上書きは `model`（→ `llm.model`）と `env`。
+- `config/taskd.web-research.example.toml`（`web-research` 分野・`web-scout` 役割・プロバイダ・検索先の選び方のコメント付き）。
+- GUI のプロバイダ追加の選択肢に `local-deep-research` を追加。
+
+### 受け入れ条件と証拠
+
+1. **スタブでの写し替えと終端合成** — `local_deep_research::tests` 12 件（進捗・成果物申告・`TASKD_RESULT` 欠如・空レポート・非 0 終了・
+   壁時計超過でのプロセスグループ停止・入力 JSON の組み立て・`model` の上書き・env の上書き・認証失敗の分類・設定値の変換・見出しの回帰）: ok。
+2. **設定と行ごとの上書き** — taskd の config テスト 6 件と `build_adapters` のテスト: ok。
+3. **分野の manifest** — Phase 18 の仕組みをそのまま使用（`web-research` の manifest 付き例を同梱）。
+4. **実機（SearXNG 不調のため Wikipedia + トンネル越しの Qwen3.8-27B、使い捨ての taskd）** —
+   `--genre web-research` のタスクが**デーモン経由で `done`**。`artifacts/report.md` に出典付き（`https://en.wikipedia.org/wiki/Kubernetes`）の
+   調査結果が入り、成果物として登録され、受け入れ条件 `artifact_exists report.md` を通過。
+5. **共通条件** — `cargo test --workspace` **738 passed / 0 failed**、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、
+   GUI は lint / typecheck / build exit 0・unit **201 passed**、`scripts/sync-gui-docs.sh --check` up to date。
+
+### 実装中に直したもの（実機で判明）
+
+- レポートの見出しが `# # <タイトル>` と二重になっていた（アダプタが作る問いが既に `# ...` で始まるため）。既に見出しなら足さないようにした（回帰テスト付き）。
+
+### 未解決事項
+
+- U19-1: **このホストには実用的な一般 Web 検索が無い**。既定は `wikipedia`。実用には (a) SearXNG で使えるエンジンを増やす、
+  (b) 鍵のある API（Brave / Tavily / Serper）を設定に足す、(c) 目的に応じて `github` / `stackexchange` / `openalex` を使う、のいずれか。
+- U19-2: 検索が 0 件でも「レポートは書けた」ので `done` になる。調査タスクの受け入れ条件は `artifact_exists` ではなく
+  `Check::Reviewer`（別 run が中身を判定）にした方がよい。運用の指針として README / 使い方に書く価値がある。
+- U19-3: browser / data-analysis / presentation の各分野は未実装（人間の調査の優先度どおり次の候補）。
+
+### 提案
+
+- P-66: DESIGN §5.4 のアダプタ表に `local-deep-research` を足す（`paperqa` と同じく「ワーカープロトコルを話さない実行器はアダプタが結果ファイルを書く」型）。

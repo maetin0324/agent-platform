@@ -261,7 +261,7 @@ impl ProviderPatchBody {
     }
 }
 
-pub const KNOWN_ADAPTERS: [&str; 5] = ["fake", "claude-code", "codex", "acp", "paperqa"];
+pub const KNOWN_ADAPTERS: [&str; 6] = ["fake", "claude-code", "codex", "acp", "paperqa", "local-deep-research"];
 
 /// ファイル名に安全に使える id か（`providers.d/<id>.toml` のパストラバーサル防止）。
 pub fn valid_provider_id(id: &str) -> bool {

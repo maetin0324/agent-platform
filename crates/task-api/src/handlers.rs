@@ -835,7 +835,7 @@ async fn create_provider(State(state): State<ApiState>, headers: HeaderMap, RawQ
     }
     if !valid_adapter(&create.adapter) {
         return Err(ApiProblem::bad_request(
-            "adapter must be one of fake, claude-code, codex, acp, paperqa",
+            "adapter must be one of fake, claude-code, codex, acp, paperqa, local-deep-research",
         ));
     }
     if create.concurrency.is_some_and(|c| c == 0) {

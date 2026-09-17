@@ -368,6 +368,8 @@ pub struct AdaptersConfig {
     pub acp: AcpAdapterConfig,
     #[serde(default)]
     pub paperqa: PaperQaAdapterConfig,
+    #[serde(default)]
+    pub local_deep_research: LdrAdapterConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -560,6 +562,52 @@ impl Default for PaperQaAdapterConfig {
 
 fn default_paperqa_command() -> String {
     "pqa".to_string()
+}
+
+/// `local-deep-research` アダプタの設定（ADR-0029 D1）。フィールドの意味は
+/// `task_worker::LdrConfig`（`crates/task-worker/src/local_deep_research.rs`）と同じ。
+/// `[[providers]] adapter = "local-deep-research"` の行ごとの上書きは `model`/`env` だけ
+/// （`ProviderConfig` の既存フィールドを再利用。`paperqa`/`acp` と同じ作り）。`settings` は行では
+/// 上書きしない（`ProviderConfig.settings` は `paperqa` 専用のフィールドで、LDR では再利用しない。
+/// 必要になれば別 ADR で行ごとの上書きを足す）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LdrAdapterConfig {
+    /// 起動するコマンド（LDR を入れた venv の python）。既定 `"python3"`。
+    #[serde(default = "default_ldr_command")]
+    pub command: String,
+    /// `quick`（既定）| `detailed` | `report`。
+    #[serde(default)]
+    pub mode: task_worker::LdrMode,
+    #[serde(default)]
+    pub iterations: Option<u32>,
+    #[serde(default)]
+    pub questions_per_iteration: Option<u32>,
+    /// `settings_override` に渡すキー。値は文字列で書き、数値・真偽値・JSON 配列/オブジェクトに見える
+    /// ものはランナー（Python）側で変換する（ADR-0029 D1/D3: TOML の型を混ぜない）。
+    #[serde(default)]
+    pub settings: HashMap<String, String>,
+    /// 追加の環境変数（例: `search.tool` に対応する SearXNG の URL 等は `settings` 側。ここは
+    /// LiteLLM/OpenAI 互換エンドポイントの鍵など、プロセス環境変数として渡すもの）。
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+impl Default for LdrAdapterConfig {
+    fn default() -> Self {
+        Self {
+            command: default_ldr_command(),
+            mode: task_worker::LdrMode::default(),
+            iterations: None,
+            questions_per_iteration: None,
+            settings: HashMap::new(),
+            env: HashMap::new(),
+        }
+    }
+}
+
+fn default_ldr_command() -> String {
+    "python3".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -760,9 +808,10 @@ impl Config {
                 && p.adapter != task_worker::CodexAdapter::ID
                 && p.adapter != task_worker::AcpAdapter::ID
                 && p.adapter != task_worker::PaperQaAdapter::ID
+                && p.adapter != task_worker::LdrAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex, acp, paperqa only)",
+                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research only)",
                     p.id, p.adapter
                 )));
             }
@@ -895,9 +944,10 @@ impl Config {
                 && adapter != task_worker::CodexAdapter::ID
                 && adapter != task_worker::AcpAdapter::ID
                 && adapter != task_worker::PaperQaAdapter::ID
+                && adapter != task_worker::LdrAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "[[roles]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp, paperqa only)",
+                    "[[roles]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research only)",
                     r.id
                 )));
             }
@@ -1380,6 +1430,77 @@ host = "h"
         assert!(toml::from_str::<Config>(text).is_err());
     }
 
+    /// ADR-0029 D1: `[adapters.local_deep_research]` の既定値（`python3` を素の状態で使う。mode 既定 quick）。
+    #[test]
+    fn accepts_local_deep_research_adapter_with_default_config() {
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\n").unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.adapters.local_deep_research.command, "python3");
+        assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Quick);
+        assert!(cfg.adapters.local_deep_research.iterations.is_none());
+        assert!(cfg.adapters.local_deep_research.questions_per_iteration.is_none());
+        assert!(cfg.adapters.local_deep_research.settings.is_empty());
+        assert!(cfg.adapters.local_deep_research.env.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_local_deep_research_adapter_config() {
+        let text =
+            "[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\n\n[adapters.local_deep_research]\nbogus = 1\n";
+        assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    /// ADR-0029 D1: `mode`/`iterations`/`questions_per_iteration`/`settings`/`env` を読める。
+    #[test]
+    fn reads_local_deep_research_adapter_settings() {
+        let text = "[adapters.local_deep_research]\n\
+             command = \"/home/u/taskd/ldr/.venv/bin/python\"\n\
+             mode = \"detailed\"\n\
+             iterations = 2\n\
+             questions_per_iteration = 2\n\
+             env = { OPENAI_API_KEY = \"unused\" }\n\
+             \n\
+             [adapters.local_deep_research.settings]\n\
+             \"llm.provider\" = \"openai_endpoint\"\n\
+             \"search.engine.web.searxng.default_params.engines\" = \"[\\\"bing\\\"]\"\n\
+             \n\
+             [[providers]]\n\
+             id = \"ldr\"\n\
+             adapter = \"local-deep-research\"\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.adapters.local_deep_research.command, "/home/u/taskd/ldr/.venv/bin/python");
+        assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Detailed);
+        assert_eq!(cfg.adapters.local_deep_research.iterations, Some(2));
+        assert_eq!(cfg.adapters.local_deep_research.questions_per_iteration, Some(2));
+        assert_eq!(
+            cfg.adapters.local_deep_research.settings.get("llm.provider").map(String::as_str),
+            Some("openai_endpoint")
+        );
+        assert_eq!(
+            cfg.adapters
+                .local_deep_research
+                .settings
+                .get("search.engine.web.searxng.default_params.engines")
+                .map(String::as_str),
+            Some("[\"bing\"]")
+        );
+        assert_eq!(cfg.adapters.local_deep_research.env.get("OPENAI_API_KEY").map(String::as_str), Some("unused"));
+    }
+
+    /// ADR-0029 D1: `local-deep-research` の行には `paperqa` 専用の `settings`（`ProviderConfig.settings`）を
+    /// 書けない（`paperqa` の行だけで意味を持つフィールドのまま。LDR の設定は `[adapters.local_deep_research]`
+    /// の table 側だけで持つ、という taskd 側の実装判断）。
+    #[test]
+    fn rejects_row_level_settings_field_for_local_deep_research_provider() {
+        let cfg: Config = toml::from_str(
+            "[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\nsettings = \"whatever\"\n",
+        )
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("settings is only allowed when adapter"), "{err}");
+    }
+
     /// ADR-0027 D3: `settings` は `adapter = "paperqa"` の行だけで意味を持つ。行ごとに上書きできる
     /// （`acp` の `command`/`args` と同じ作り）。
     #[test]
@@ -1468,6 +1589,32 @@ host = "h"
         assert!(!coding.capabilities.is_empty());
         assert!(!coding.input_artifacts.is_empty());
         assert!(!coding.output_artifacts.is_empty());
+    }
+
+    /// ADR-0029 D1/D2: Web 調査（Local Deep Research）の例の設定ファイルが読め、検証を通る。
+    /// `web-research` 分野の manifest は ADR-0029 D2 のとおり。
+    #[test]
+    fn loads_web_research_example_config() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/taskd.web-research.example.toml"
+        ));
+        let cfg = Config::load(path).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.adapters.local_deep_research.command, "/home/u/taskd/ldr/.venv/bin/python");
+        assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Quick);
+        assert_eq!(
+            cfg.adapters.local_deep_research.settings.get("search.tool").map(String::as_str),
+            Some("wikipedia")
+        );
+        let ldr_provider = cfg.providers.iter().find(|p| p.adapter == "local-deep-research").expect("ldr provider");
+        assert_eq!(ldr_provider.model, "qwen3.8-27b");
+        let genre = cfg.genres.iter().find(|g| g.id == "web-research").expect("web-research genre");
+        assert_eq!(genre.default_role.as_deref(), Some("web-scout"));
+        assert_eq!(genre.roles, vec!["web-scout".to_string()]);
+        assert_eq!(genre.output_artifacts, vec!["report.md".to_string()]);
+        let role = cfg.roles.iter().find(|r| r.id == "web-scout").expect("web-scout role");
+        assert_eq!(role.adapter.as_deref(), Some("local-deep-research"));
     }
 
     /// ADR-0010 D6/D9: バックオフと `[reviewer]` の既定値・指定値が DispatchConfig に写る。
@@ -1678,7 +1825,7 @@ max_tree_depth = 2
         let cfg: Config = toml::from_str(&bogus).unwrap();
         assert_eq!(
             cfg.validate().unwrap_err().to_string(),
-            "invalid config: [[roles]] lead: adapter \"bogus\" is not available in this build (fake, claude-code, codex, acp, paperqa only)"
+            "invalid config: [[roles]] lead: adapter \"bogus\" is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research only)"
         );
 
         let empty = format!("[[roles]]\nid = \"  \"\n{providers}");

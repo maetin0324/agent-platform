@@ -448,14 +448,16 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 
 #### 3.24 `POST /providers` → 201 `ProviderConfigView`（`Location: /api/v1/providers/{id}`）
 
-要求本文: `{"id": "acct-b", "adapter": "fake"|"claude-code"|"codex"|"acp"|"paperqa", "tiers"?: [...], "concurrency"?: 1, "model"?: "", "env"?: {...}}`
+要求本文: `{"id": "acct-b", "adapter": "fake"|"claude-code"|"codex"|"acp"|"paperqa"|"local-deep-research", "tiers"?: [...], "concurrency"?: 1, "model"?: "", "env"?: {...}}`
 （`tiers`/`concurrency`/`model` は省略可、`[[providers]]` と同じ既定）。`id` は 1〜64 文字の ASCII 英数字・`-`・`_`
-（`providers.d/<id>.toml` のファイル名になるため、パス区切りは拒否）。`adapter` は既知の 5 種類のみ。
+（`providers.d/<id>.toml` のファイル名になるため、パス区切りは拒否）。`adapter` は既知の 6 種類のみ。
 `id` が既にあれば 409 `provider_exists`。応答・ログとも `env` は `env_keys`（キー名だけ）で、値は一切出さない。
 **`command`/`args`（ADR-0026 D2: `adapter = "acp"` の行だけが持つ実行ファイル／引数の上書き）と `settings`
 （ADR-0027 D3: `adapter = "paperqa"` の行だけが持つ PaperQA 設定ファイルの上書き）は本文に含められない**
 （含まれていたら値を見る前に 422 `invalid_provider`。実行するコマンド／設定を HTTP から差し替えられないように
-するため。`providers.d/<id>.toml` は人が直接編集する。ADR-0026 D7、ADR-0027 D3）。
+するため。`providers.d/<id>.toml` は人が直接編集する。ADR-0026 D7、ADR-0027 D3）。`local-deep-research` の
+`[adapters.local_deep_research].settings`（ADR-0029 D1）は行ごとの上書きが無く、そもそも `ProviderConfig` に
+対応するフィールドが無いので、この制約の対象外（本文に置けるフィールドは他アダプタと同じ）。
 
 #### 3.25 `PATCH /providers/{id}` → 200 `ProviderConfigView`
 
