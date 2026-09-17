@@ -110,6 +110,7 @@ model = "fake"
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         };
         self.store.insert(&task).unwrap();
         self.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();
@@ -300,8 +301,9 @@ echo '{"type":"done","summary":"attempt '"$N"'","evidence":[{"criterion":0,"comm
     assert!(run0.contains(r#""prior_review":[]"#));
     assert!(run1.contains(r#""prior_review":[{"criterion":0,"pass":false"#), "{run1}");
     assert!(run1.contains(r#""attempts":1"#));
-    // ADR-0027 D1: protocol は 3（context.available_genres / task.genre / delegate の genre を追加）。
-    assert!(run1.starts_with(r#"{"type":"run","protocol":3"#));
+    // ADR-0033 D4/D6: protocol は 4（context.node / memory / conversation / standing_rules /
+    // organization、delegate の assignee、結果ファイルの memory を追加）。いずれも追加のみ。
+    assert!(run1.starts_with(r#"{"type":"run","protocol":4"#));
     env.replay_is_consistent();
 }
 
@@ -338,6 +340,7 @@ fn expired_lease_is_reclaimed_and_task_completes() {
         project_id: None,
         milestone_id: None,
         assignee: None,
+        conversation: None,
     };
     env.store.insert(&task).unwrap();
     env.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();

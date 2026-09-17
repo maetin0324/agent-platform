@@ -12,7 +12,9 @@ pub mod codex_account;
 pub mod delegate_file;
 pub mod fake;
 pub mod local_deep_research;
+pub mod memory;
 pub mod paperqa;
+pub mod preamble;
 pub mod protocol;
 pub mod provider;
 pub mod subprocess;
@@ -35,10 +37,12 @@ pub use codex_account::{CodexLoginSession, check_account_codex, start_login_code
 pub use delegate_file::{DELEGATE_FILE, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
 pub use local_deep_research::{EvidenceThresholds, LdrAdapter, LdrConfig, LdrMode};
+pub use memory::{MEMORY_MAX_CHARS, MemoryDir, MemoryUpdate, read_result_memory};
 pub use paperqa::{PaperQaAdapter, PaperQaConfig};
 pub use protocol::{
-    Answer, ChildSummary, Evidence, GenreContext, GenreRoleContext, PROTOCOL_VERSION, PriorReview, ProviderFailure,
-    ReviewOutput, ReviewRequest, ReviewVerdictOut, RoleContext, RunContext, RunRequest, WorkerMessage,
+    Answer, ChildSummary, ConversationTurn, Evidence, GenreContext, GenreRoleContext, MemoryContext, NodeContext,
+    OrgNodeContext, PROTOCOL_VERSION, PriorReview, ProviderFailure, ReviewOutput, ReviewRequest, ReviewVerdictOut,
+    RoleContext, RunContext, RunRequest, WorkerMessage,
 };
 pub use provider::classify_provider_failure;
 pub use subprocess::{SubprocessSpec, run_subprocess};

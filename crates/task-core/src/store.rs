@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::message::{Message, MessageId, MessageRole};
 use crate::model::{Event, Status, Task, TaskId, TaskKind};
 use crate::org::{
     Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
@@ -454,6 +455,20 @@ pub trait TaskStore: Send + Sync + crate::report::ReportStore {
     fn milestone_list(&self, project_id: ProjectId) -> Result<Vec<Milestone>, StoreError>;
     /// 状態だけを変える。無い途中目標は `Ok(false)`。
     fn milestone_set_status(&self, id: MilestoneId, status: MilestoneStatus) -> Result<bool, StoreError>;
+
+    // ---- ADR-0033 D4: 対話（`messages`）----
+
+    /// 1 行を追記する（対話は追記専用。更新も削除もしない）。
+    fn message_append(&self, message: &Message) -> Result<(), StoreError>;
+    /// `node_id` とのやり取りを**古い順**（`created_at` 昇順、同時刻は `id` 昇順）で最大 `limit` 件返す。
+    /// `project_id` が `Some` ならその案件の行だけ、`None` なら案件に紐づかない行だけ（雑談）。
+    /// 件数が `limit` を超えるときは**新しい方**を残す（直近のやり取りを渡すため）。
+    fn message_list(
+        &self,
+        node_id: &str,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<Message>, StoreError>;
 }
 
 pub struct SqliteStore {
@@ -711,6 +726,41 @@ impl SqliteStore {
                 status,
                 created_at: parse_rfc3339(&created_at)?,
                 updated_at: parse_rfc3339(&updated_at)?,
+            })
+        })())
+    }
+
+    /// ADR-0033 D4（Phase 24）: `messages` の 1 行。
+    fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Message, StoreError>> {
+        let id: String = row.get(0)?;
+        let project_id: Option<String> = row.get(2)?;
+        let role_col: String = row.get(3)?;
+        let created_at: String = row.get(6)?;
+        let (Ok(id), Some(role)) = (id.parse::<MessageId>(), MessageRole::parse(&role_col)) else {
+            return Ok(Err(StoreError::Invalid(format!(
+                "invalid message row: id={id} role={role_col}"
+            ))));
+        };
+        let project_id = match project_id {
+            Some(raw) => match raw.parse::<ProjectId>() {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    return Ok(Err(StoreError::Invalid(format!(
+                        "invalid message row: id={id} project_id={raw}"
+                    ))));
+                }
+            },
+            None => None,
+        };
+        Ok((|| {
+            Ok(Message {
+                id,
+                node_id: row.get(1)?,
+                project_id,
+                role,
+                text: row.get(4)?,
+                run_id: row.get(5)?,
+                created_at: parse_rfc3339(&created_at)?,
             })
         })())
     }
@@ -1753,6 +1803,55 @@ impl TaskStore for SqliteStore {
         )?;
         Ok(affected == 1)
     }
+
+    // ---- ADR-0033 D4（Phase 24）: 対話 ----
+
+    fn message_append(&self, message: &Message) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO messages (id, node_id, project_id, role, text, run_id, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                message.id.to_string(),
+                message.node_id,
+                message.project_id.map(|p| p.to_string()),
+                message.role.as_str(),
+                message.text,
+                message.run_id,
+                format_rfc3339(message.created_at)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn message_list(
+        &self,
+        node_id: &str,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<Message>, StoreError> {
+        let conn = self.lock()?;
+        // 新しい順に `limit` 件取ってから古い順に戻す（直近のやり取りを時系列で渡すため）。
+        let sql = match project_id {
+            Some(_) => {
+                "SELECT id, node_id, project_id, role, text, run_id, created_at FROM messages \
+                 WHERE node_id = ?1 AND project_id = ?2 ORDER BY created_at DESC, id DESC LIMIT ?3"
+            }
+            None => {
+                "SELECT id, node_id, project_id, role, text, run_id, created_at FROM messages \
+                 WHERE node_id = ?1 AND project_id IS NULL ORDER BY created_at DESC, id DESC LIMIT ?3"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let project = project_id.map(|p| p.to_string()).unwrap_or_default();
+        let rows = stmt.query_map(params![node_id, project, limit as i64], Self::message_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        out.reverse();
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -1810,6 +1909,7 @@ mod tests {
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         }
     }
 
@@ -3370,6 +3470,62 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// ADR-0033 D4（Phase 24）: 対話の追記と一覧（案件ごと・ノードごと・件数上限・古い順）。
+    #[test]
+    fn messages_are_appended_and_listed_oldest_first_per_node_and_project() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let project = sample_project();
+        store.project_create(&project).unwrap();
+        let other_project = sample_project();
+        store.project_create(&other_project).unwrap();
+        let base = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+
+        let append = |node: &str, project_id: Option<ProjectId>, role, text: &str, n: i64| {
+            let m = Message {
+                id: MessageId::new(),
+                node_id: node.into(),
+                project_id,
+                role,
+                text: text.into(),
+                run_id: if role == MessageRole::Node { Some(format!("run-{n}")) } else { None },
+                created_at: base + std::time::Duration::from_secs(n as u64),
+            };
+            store.message_append(&m).unwrap();
+            m
+        };
+
+        let q = append("secretary", Some(project.id), MessageRole::User, "この案件をお願い", 1);
+        let a = append("secretary", Some(project.id), MessageRole::Node, "承知しました", 2);
+        append("secretary", Some(other_project.id), MessageRole::User, "別の案件", 3);
+        append("research-survey", Some(project.id), MessageRole::User, "別の人", 4);
+        append("secretary", None, MessageRole::User, "案件に紐づかない雑談", 5);
+
+        // 案件ごと・ノードごとに分かれ、古い順に並ぶ。
+        let thread = store.message_list("secretary", Some(project.id), 20).unwrap();
+        assert_eq!(thread.iter().map(|m| m.id).collect::<Vec<_>>(), vec![q.id, a.id]);
+        assert_eq!(thread[0].role, MessageRole::User);
+        assert_eq!(thread[1].run_id.as_deref(), Some("run-2"));
+        assert_eq!(thread[1].project_id, Some(project.id));
+        assert_eq!(store.message_list("secretary", Some(other_project.id), 20).unwrap().len(), 1);
+        assert_eq!(store.message_list("research-survey", Some(project.id), 20).unwrap().len(), 1);
+        // `project_id = None` は案件に紐づかない行だけ（案件の行は混ざらない）。
+        let chat = store.message_list("secretary", None, 20).unwrap();
+        assert_eq!(chat.len(), 1);
+        assert_eq!(chat[0].text, "案件に紐づかない雑談");
+        assert!(store.message_list("ghost", Some(project.id), 20).unwrap().is_empty());
+
+        // 件数上限は「新しい方を残して古い順に返す」。
+        for n in 10..20 {
+            append("secretary", Some(project.id), MessageRole::User, &format!("m{n}"), n);
+        }
+        let last3 = store.message_list("secretary", Some(project.id), 3).unwrap();
+        assert_eq!(
+            last3.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+            vec!["m17", "m18", "m19"]
+        );
+        assert!(store.message_list("secretary", Some(project.id), 0).unwrap().is_empty());
     }
 
     #[test]

@@ -2627,6 +2627,124 @@
       ],
       "type": "object"
     },
+    "Message": {
+      "description": "対話の 1 行（`messages` テーブル。ADR-0033 D4）。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/MessageId"
+        },
+        "node_id": {
+          "description": "話し相手（`org_nodes.id`）。",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "案件（案件に紐づかない雑談なら `None`）。"
+        },
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "run_id": {
+          "description": "`role = node` のとき、その返事を作った run（`Event::WorkerStarted.run_id`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "node_id",
+        "role",
+        "text",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "MessageAccepted": {
+      "description": "`POST /org/{id}/messages` の応答（202）。返事は待たずに、GUI が `GET /org/{id}/messages` で拾う。",
+      "properties": {
+        "message_id": {
+          "description": "入った `role = \"user\"` の行の id。",
+          "type": "string"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId",
+          "description": "そのノードの run を起こすために作られた対話用タスク。"
+        }
+      },
+      "required": [
+        "message_id",
+        "task_id"
+      ],
+      "type": "object"
+    },
+    "MessageId": {
+      "description": "対話の 1 行の識別子（ULID）。",
+      "type": "string"
+    },
+    "MessageList": {
+      "description": "`GET /org/{id}/messages` の応答（古い順）。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/Message"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "MessagePostBody": {
+      "additionalProperties": false,
+      "description": "`POST /org/{id}/messages` の要求本文。",
+      "properties": {
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "この案件についての話なら案件の id（省略すると案件に紐づかない雑談になる）。"
+        },
+        "text": {
+          "description": "本文（空白だけは 422）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "MessageRole": {
+      "description": "誰が言ったか（ADR-0033 D4）。`user` = 人、`node` = 組織のノード（その run の返事）。",
+      "enum": [
+        "user",
+        "node"
+      ],
+      "type": "string"
+    },
     "Milestone": {
       "description": "途中目標（ADR-0033 D2）。`seq` は案件の中での通し番号（1 始まり。ストアが採番する）。",
       "properties": {
@@ -4512,6 +4630,17 @@
         "budget": {
           "$ref": "#/$defs/Budget"
         },
+        "conversation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MessageId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D4（Phase 24）: 対話由来のタスクなら、きっかけになった人の発言（`messages.id`）。\nrun が終わると、その結果が `assignee` のノードの返事として `messages` に入る。\n**DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。"
+        },
         "created_at": {
           "type": "string"
         },
@@ -5245,6 +5374,16 @@
     "inbox": {
       "$ref": "#/$defs/Inbox"
     },
+    "message_accepted": {
+      "$ref": "#/$defs/MessageAccepted"
+    },
+    "message_list": {
+      "$ref": "#/$defs/MessageList"
+    },
+    "message_post": {
+      "$ref": "#/$defs/MessagePostBody",
+      "description": "Phase 24（ADR-0033 D4）: 対話（`POST /org/{id}/messages` と `GET /org/{id}/messages`）。"
+    },
     "milestone_create": {
       "$ref": "#/$defs/MilestoneCreateBody"
     },
@@ -5399,6 +5538,9 @@
     "reports_read",
     "reports_read_result",
     "reports_notified",
+    "message_post",
+    "message_accepted",
+    "message_list",
     "daemon",
     "config",
     "stream_hello",

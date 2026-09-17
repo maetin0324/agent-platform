@@ -256,6 +256,24 @@ pub fn assignee_defaults<'a>(
     (Some(genre), role)
 }
 
+/// ADR-0033 D4（Phase 24）: そのノードが属する「部」の id。`department` 自身はその id、`section` は
+/// 親を辿って最初に見つかる `department`、`secretary` は `None`（部に属さない）。知らない id も `None`。
+/// 「部をまたぐ連携は秘書が認める」（SPEC §3.1）の判定に使う決定的な関数。
+pub fn department_of(org: &[OrgNode], id: &str) -> Option<String> {
+    let mut cursor = org.iter().find(|n| n.id == id);
+    for _ in 0..=org.len() {
+        let node = cursor?;
+        match node.kind {
+            OrgKind::Department => return Some(node.id.clone()),
+            OrgKind::Secretary => return None,
+            OrgKind::Section => {
+                cursor = node.parent_id.as_deref().and_then(|p| org.iter().find(|n| n.id == p));
+            }
+        }
+    }
+    None
+}
+
 /// 案件の状態（ADR-0033 D2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -480,6 +498,28 @@ mod tests {
         let mut blank = node("secretary", None, OrgKind::Secretary);
         blank.name = "   ".into();
         assert!(matches!(validate_upsert(&existing, &blank), Err(OrgError::BlankName)));
+    }
+
+    #[test]
+    fn department_of_walks_up_to_the_first_department() {
+        let org = vec![
+            node("secretary", None, OrgKind::Secretary),
+            node("coding", Some("secretary"), OrgKind::Department),
+            node("coding-poc", Some("coding"), OrgKind::Section),
+            node("research", Some("secretary"), OrgKind::Department),
+            node("research-survey", Some("research"), OrgKind::Section),
+        ];
+        assert_eq!(department_of(&org, "coding-poc").as_deref(), Some("coding"));
+        assert_eq!(department_of(&org, "coding").as_deref(), Some("coding"));
+        assert_eq!(department_of(&org, "research-survey").as_deref(), Some("research"));
+        assert_eq!(department_of(&org, "secretary"), None);
+        assert_eq!(department_of(&org, "ghost"), None);
+        // 親の連鎖が閉じた壊れたデータでも止まる。
+        let broken = vec![
+            node("a", Some("b"), OrgKind::Section),
+            node("b", Some("a"), OrgKind::Section),
+        ];
+        assert_eq!(department_of(&broken, "a"), None);
     }
 
     #[test]

@@ -60,6 +60,7 @@ fn sample_task(i: usize) -> Task {
         project_id: None,
         milestone_id: None,
         assignee: None,
+        conversation: None,
     }
 }
 

@@ -142,6 +142,8 @@ fn compaction_task(
         project_id,
         milestone_id: None,
         assignee: Some(node.id.clone()),
+        // ADR-0033 D4（Phase 24）: まとめの run は対話の返事ではない。
+        conversation: None,
     }
 }
 

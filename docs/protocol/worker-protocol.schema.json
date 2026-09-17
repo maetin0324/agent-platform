@@ -179,6 +179,22 @@
       ],
       "type": "object"
     },
+    "ConversationTurn": {
+      "description": "`context.conversation[]`（ADR-0033 D4 / Phase 24）: この案件でのこのノードと人の直近のやり取り。",
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "text"
+      ],
+      "type": "object"
+    },
     "Criterion": {
       "description": "DESIGN §4.1 の `Criterion`。",
       "properties": {
@@ -218,6 +234,13 @@
             "$ref": "#/$defs/Criterion"
           },
           "type": "array"
+        },
+        "assignee": {
+          "description": "ADR-0033 D4（Phase 24）: 割り当てる組織のノード（`org_nodes.id`）。「誰の仕事か」を表す。\n`role` を書かなかったときだけ、そのノードの分野が既定（tier / adapter / 予算）の解決に使われる\n（タスクの値 > 役割の既定 > 分野の既定 > 親の値。ADR-0016 D1 の優先順に合わせる）。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "depends_on": {
           "items": {
@@ -374,9 +397,99 @@
       ],
       "type": "object"
     },
+    "MemoryContext": {
+      "description": "`context.memory`（ADR-0033 D6 / Phase 24）: 案件をまたぐ記憶と、この案件の引き出し。\nどちらも `<memory_dir>/<node_id>/…` のファイルの中身（字数で切ったもの）。",
+      "properties": {
+        "notes": {
+          "description": "`notes.md`（クラスタの使い方、人の好み、直近の相談）。",
+          "type": "string"
+        },
+        "project": {
+          "description": "`projects/<project_id>.md`（この案件だけの事）。",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "MessageId": {
+      "description": "対話の 1 行の識別子（ULID）。",
+      "type": "string"
+    },
+    "MessageRole": {
+      "description": "誰が言ったか（ADR-0033 D4）。`user` = 人、`node` = 組織のノード（その run の返事）。",
+      "enum": [
+        "user",
+        "node"
+      ],
+      "type": "string"
+    },
     "MilestoneId": {
       "description": "途中目標の一意識別子（ULID）。",
       "type": "string"
+    },
+    "NodeContext": {
+      "description": "`context.node`（ADR-0033 D4 / Phase 24）: この run をしている「人」（組織のノード）。\nプロンプトの一番前に「あなたは誰で、何の担当か」として置かれる。",
+      "properties": {
+        "brief": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "OrgKind": {
+      "description": "組織のノードの種類（ADR-0033 D1）。`secretary` は根で 1 つだけ。",
+      "enum": [
+        "secretary",
+        "department",
+        "section"
+      ],
+      "type": "string"
+    },
+    "OrgNodeContext": {
+      "description": "`context.organization[]`（ADR-0033 D4 / Phase 24）: 組織図。分解・委譲できる run に渡し、\n「どの課に何を振るか」を `assignee` で指定させる。",
+      "properties": {
+        "brief": {
+          "type": "string"
+        },
+        "genre": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/OrgKind",
+          "description": "`secretary` / `department` / `section`。"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind"
+      ],
+      "type": "object"
     },
     "PriorReview": {
       "description": "直前のレビュー結果（`context.prior_review[]`）。",
@@ -559,9 +672,45 @@
           },
           "type": "array"
         },
+        "conversation": {
+          "description": "ADR-0033 D4: 担当のノードとのこの案件での直近のやり取り（古い順）。",
+          "items": {
+            "$ref": "#/$defs/ConversationTurn"
+          },
+          "type": "array"
+        },
         "inputs": {
           "items": {
             "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "memory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D6: `[memory]` を設定し、担当が決まっている run にだけ載る長期記憶。"
+        },
+        "node": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D4: `task.assignee` の組織ノード（担当が無いタスクでは `None`）。"
+        },
+        "organization": {
+          "description": "ADR-0033 D4: 分解・委譲できる run に渡す組織図（どの課に何を振るかを `assignee` で決めさせる）。",
+          "items": {
+            "$ref": "#/$defs/OrgNodeContext"
           },
           "type": "array"
         },
@@ -592,6 +741,13 @@
             }
           ],
           "description": "タスクに役割があるときだけ `Some`（ADR-0016 D1）。"
+        },
+        "standing_rules": {
+          "description": "ADR-0033 D5: 「今後ずっと」の認可（永続の認可）。**Phase 26 が埋める。今は常に空**。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -641,6 +797,17 @@
         },
         "budget": {
           "$ref": "#/$defs/Budget"
+        },
+        "conversation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MessageId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D4（Phase 24）: 対話由来のタスクなら、きっかけになった人の発言（`messages.id`）。\nrun が終わると、その結果が `assignee` のノードの返事として `messages` に入る。\n**DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。"
         },
         "created_at": {
           "type": "string"
