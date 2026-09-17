@@ -429,15 +429,20 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 
 #### 3.24 `POST /providers` → 201 `ProviderConfigView`（`Location: /api/v1/providers/{id}`）
 
-要求本文: `{"id": "acct-b", "adapter": "fake"|"claude-code"|"codex", "tiers"?: [...], "concurrency"?: 1, "model"?: "", "env"?: {...}}`
+要求本文: `{"id": "acct-b", "adapter": "fake"|"claude-code"|"codex"|"acp", "tiers"?: [...], "concurrency"?: 1, "model"?: "", "env"?: {...}}`
 （`tiers`/`concurrency`/`model` は省略可、`[[providers]]` と同じ既定）。`id` は 1〜64 文字の ASCII 英数字・`-`・`_`
-（`providers.d/<id>.toml` のファイル名になるため、パス区切りは拒否）。`adapter` は既知の 3 種類のみ。
+（`providers.d/<id>.toml` のファイル名になるため、パス区切りは拒否）。`adapter` は既知の 4 種類のみ。
 `id` が既にあれば 409 `provider_exists`。応答・ログとも `env` は `env_keys`（キー名だけ）で、値は一切出さない。
+**`command`/`args`（ADR-0026 D2: `adapter = "acp"` の行だけが持つ実行ファイル／引数の上書き）は本文に含められない**
+（含まれていたら値を見る前に 422 `invalid_provider`。実行するコマンドを HTTP から差し替えられないようにするため。
+`providers.d/<id>.toml` は人が直接編集する。ADR-0026 D7）。
 
 #### 3.25 `PATCH /providers/{id}` → 200 `ProviderConfigView`
 
 要求本文は `{"tiers"?, "concurrency"?, "model"?, "env"?}`（渡したフィールドだけ上書き。`id`/`adapter` は変更不可）。
-存在しない `id` は 404 `provider_not_found`。
+存在しない `id` は 404 `provider_not_found`。**`command`/`args` は 3.24 と同じく本文に含められない**（422
+`invalid_provider`。含まれていたらファイルには一切触れない）。ファイルに人が直接書いた `command`/`args` は、
+これらを含まない PATCH では変更されずそのまま残る。
 
 #### 3.26 `DELETE /providers/{id}` → 200 `{}`
 

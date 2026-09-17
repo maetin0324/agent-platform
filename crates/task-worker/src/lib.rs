@@ -1,6 +1,7 @@
 //! task-worker: ワーカープロトコル（DESIGN §5.3, ADR-0003）、アダプタ（§5.4）、
 //! ワークスペース（§5.8）。ディスパッチ判断はここに書かない（それは task-dispatch）。
 
+pub mod acp;
 pub mod adapter;
 pub mod artifact;
 pub mod claude_account;
@@ -17,6 +18,7 @@ pub(crate) mod test_support;
 pub mod ssh;
 pub mod workspace;
 
+pub use acp::{AcpAdapter, AcpConfig, AcpPermission};
 pub use adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 pub use claude_account::{
     AccountCheck, AccountCheckResult, LoginError, LoginOutcome, LoginResult, LoginSession, check_account, start_login,

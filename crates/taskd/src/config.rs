@@ -334,6 +334,8 @@ pub struct AdaptersConfig {
     pub claude_code: ClaudeCodeAdapterConfig,
     #[serde(default)]
     pub codex: CodexAdapterConfig,
+    #[serde(default)]
+    pub acp: AcpAdapterConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -420,6 +422,64 @@ fn default_codex_command() -> String {
     "codex".to_string()
 }
 
+/// `acp` アダプタの設定（ADR-0026 D2）。最初の実装は `opencode acp`。`command`/`args`/`env`/`model` は
+/// `[[providers]]` の行ごとに上書きできる（別の ACP エージェントを同居させるため。行の値は `ProviderConfig`
+/// の `command`/`args`/`env`/`model` にある）。ここには `model` は無い（ACP はモデルを CLI フラグではなく
+/// `session/set_config_option` で渡すので、行の `model` が空なら `None` になるだけで、この節に既定値を置く
+/// 意味が無い。ADR-0026 D3）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpAdapterConfig {
+    /// 起動する ACP エージェントの実行ファイル。既定 `"opencode"`。
+    #[serde(default = "default_acp_command")]
+    pub command: String,
+    /// コマンドへの引数。既定 `["acp"]`。
+    #[serde(default = "default_acp_args")]
+    pub args: Vec<String>,
+    /// 追加の環境変数（共通分。行の `env` を重ねる。同名キーは行が優先）。
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// `session/request_permission` への即答。`"allow"`（既定）| `"deny"`。
+    #[serde(default = "default_acp_permission")]
+    pub permission: task_worker::AcpPermission,
+    /// `session/set_config_option` の `configId`（`session/new` の `configOptions[].id` と対にする）。
+    /// 既定 `"model"`（opencode 1.18.31 で確認済み。ADR-0026 D3）。
+    #[serde(default = "default_acp_model_option_id")]
+    pub model_option_id: String,
+    /// `initialize` の応答を待つ上限（秒）。初回はエージェント側のプロバイダ取得で数分かかりうる。既定 300。
+    #[serde(default = "default_acp_startup_timeout_secs")]
+    pub startup_timeout_secs: u64,
+}
+
+impl Default for AcpAdapterConfig {
+    fn default() -> Self {
+        Self {
+            command: default_acp_command(),
+            args: default_acp_args(),
+            env: HashMap::new(),
+            permission: default_acp_permission(),
+            model_option_id: default_acp_model_option_id(),
+            startup_timeout_secs: default_acp_startup_timeout_secs(),
+        }
+    }
+}
+
+fn default_acp_command() -> String {
+    "opencode".to_string()
+}
+fn default_acp_args() -> Vec<String> {
+    vec!["acp".to_string()]
+}
+fn default_acp_permission() -> task_worker::AcpPermission {
+    task_worker::AcpPermission::Allow
+}
+fn default_acp_model_option_id() -> String {
+    "model".to_string()
+}
+fn default_acp_startup_timeout_secs() -> u64 {
+    300
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
@@ -440,6 +500,13 @@ pub struct ProviderConfig {
     /// かつ `[accounts]` があるときだけ有効（既定 `false`）。
     #[serde(default)]
     pub account_pool: bool,
+    /// ADR-0026 D2: `adapter = "acp"` のときだけ意味を持つ、この行の ACP エージェント実行ファイルの上書き
+    /// （省略時は `[adapters.acp].command`）。他のアダプタで指定すると `Config::validate` が設定エラーにする。
+    #[serde(default)]
+    pub command: Option<String>,
+    /// ADR-0026 D2: 上と同じ（引数）。省略時は `[adapters.acp].args`。
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
 }
 
 fn default_db() -> PathBuf {
@@ -579,14 +646,23 @@ impl Config {
             if p.adapter != task_worker::FakeAdapter::ID
                 && p.adapter != task_worker::ClaudeCodeAdapter::ID
                 && p.adapter != task_worker::CodexAdapter::ID
+                && p.adapter != task_worker::AcpAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex only)",
+                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex, acp only)",
                     p.id, p.adapter
                 )));
             }
             if p.concurrency == 0 {
                 return Err(ConfigError::Invalid(format!("provider {}: concurrency must be >= 1", p.id)));
+            }
+            // ADR-0026 D2: `command`/`args` は `adapter = "acp"` の行だけで意味を持つ。他のアダプタに書いたら
+            // 静かに無視せず設定エラーにする（書いた本人の勘違いを早く見つけるため）。
+            if p.adapter != task_worker::AcpAdapter::ID && (p.command.is_some() || p.args.is_some()) {
+                return Err(ConfigError::Invalid(format!(
+                    "provider {}: command/args are only allowed when adapter = \"acp\" (ADR-0026 D2)",
+                    p.id
+                )));
             }
             // ADR-0024 D2 / ADR-0025 D1: `account_pool = true` は claude-code か codex だけ、かつ `[accounts]` に
             // そのアダプタの根ディレクトリが設定されている必要がある。
@@ -697,9 +773,10 @@ impl Config {
                 && adapter != task_worker::FakeAdapter::ID
                 && adapter != task_worker::ClaudeCodeAdapter::ID
                 && adapter != task_worker::CodexAdapter::ID
+                && adapter != task_worker::AcpAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "[[roles]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex only)",
+                    "[[roles]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp only)",
                     r.id
                 )));
             }
@@ -1048,6 +1125,69 @@ host = "h"
         assert!(cfg.adapters.codex.model.is_none());
     }
 
+    /// ADR-0026 D2: `[adapters.acp]` の既定値（opencode を素の状態で使う）。
+    #[test]
+    fn accepts_acp_adapter_with_default_config() {
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"acp\"\n").unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.adapters.acp.command, "opencode");
+        assert_eq!(cfg.adapters.acp.args, vec!["acp".to_string()]);
+        assert_eq!(cfg.adapters.acp.permission, task_worker::AcpPermission::Allow);
+        assert_eq!(cfg.adapters.acp.model_option_id, "model");
+        assert_eq!(cfg.adapters.acp.startup_timeout_secs, 300);
+        assert!(cfg.adapters.acp.env.is_empty());
+        assert!(cfg.providers[0].command.is_none());
+        assert!(cfg.providers[0].args.is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_acp_adapter_config() {
+        let text = "[[providers]]\nid = \"x\"\nadapter = \"acp\"\n\n[adapters.acp]\nbogus = 1\n";
+        assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    /// ADR-0026 D2: `permission` は `AcpPermission` の `allow`/`deny` 以外は設定エラー（deny_unknown ではなく
+    /// serde の enum 検証で拒否される）。
+    #[test]
+    fn rejects_unknown_acp_permission_value() {
+        let text = "[[providers]]\nid = \"x\"\nadapter = \"acp\"\n\n[adapters.acp]\npermission = \"maybe\"\n";
+        assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    /// ADR-0026 D2: `command`/`args` は `adapter = "acp"` の行だけで意味を持つ。行ごとに上書きできる。
+    #[test]
+    fn command_and_args_are_only_allowed_on_acp_providers_and_override_per_row() {
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\ncommand = \"whatever\"\n").unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("command/args are only allowed when adapter"), "{err}");
+
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"codex\"\nargs = [\"x\"]\n").unwrap();
+        assert!(cfg.validate().is_err());
+
+        let cfg: Config = toml::from_str(
+            "[[providers]]\nid = \"x\"\nadapter = \"acp\"\ncommand = \"goose\"\nargs = [\"acp\"]\n",
+        )
+        .unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.providers[0].command.as_deref(), Some("goose"));
+        assert_eq!(cfg.providers[0].args.as_deref(), Some(&["acp".to_string()][..]));
+    }
+
+    /// ADR-0026 D6: 冷スタート用の例の設定ファイルが読め、Phase 15 の設定検証を通る。
+    #[test]
+    fn loads_acp_opencode_example_config() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/taskd.acp-opencode.example.toml"
+        ));
+        let cfg = Config::load(path).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.providers[0].adapter, "acp");
+        assert_eq!(cfg.adapters.acp.command, "opencode");
+        assert_eq!(cfg.adapters.acp.permission, task_worker::AcpPermission::Allow);
+        assert_eq!(cfg.providers[0].env.get("OPENCODE_DISABLE_PROJECT_CONFIG").map(String::as_str), Some("1"));
+    }
+
     /// ADR-0010 D6/D9: バックオフと `[reviewer]` の既定値・指定値が DispatchConfig に写る。
     #[test]
     fn backoff_and_reviewer_settings_map_to_dispatch_config() {
@@ -1256,7 +1396,7 @@ max_tree_depth = 2
         let cfg: Config = toml::from_str(&bogus).unwrap();
         assert_eq!(
             cfg.validate().unwrap_err().to_string(),
-            "invalid config: [[roles]] lead: adapter \"bogus\" is not available in this build (fake, claude-code, codex only)"
+            "invalid config: [[roles]] lead: adapter \"bogus\" is not available in this build (fake, claude-code, codex, acp only)"
         );
 
         let empty = format!("[[roles]]\nid = \"  \"\n{providers}");

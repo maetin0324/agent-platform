@@ -18,7 +18,10 @@ use task_dispatch::{DispatchError, Dispatcher, ProviderId, SnapshotPublisher, St
 use task_ops::daemon::{ProviderCheckView, ProviderLive};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use task_worker::{ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, WorkerAdapter, Workspace};
+use task_worker::{
+    AcpAdapter, AcpConfig, ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, WorkerAdapter,
+    Workspace,
+};
 
 pub use config::{Config, ConfigError};
 
@@ -92,7 +95,23 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     env: merged_env(&base.env, &p.env),
                 }))
             }
-            // `Config::validate` が fake / claude-code / codex 以外を拒否している。
+            AcpAdapter::ID => {
+                let base = &config.adapters.acp;
+                Arc::new(AcpAdapter::new(AcpConfig {
+                    // ADR-0026 D2: `command`/`args` は行ごとに上書きできる（別の ACP エージェントを同居させる
+                    // ため）。`Config::validate` が acp 以外の行での指定を拒否している。
+                    command: p.command.clone().unwrap_or_else(|| base.command.clone()),
+                    args: p.args.clone().unwrap_or_else(|| base.args.clone()),
+                    env: merged_env(&base.env, &p.env),
+                    permission: base.permission,
+                    // ADR-0026 D3: `[adapters.acp]` にモデルの既定値は無い（CLI の `--model` フラグではなく
+                    // `session/set_config_option` で渡すので、行の `model` が空ならモデル指定なしになるだけ）。
+                    model: effective_model(&p.model, &None),
+                    model_option_id: base.model_option_id.clone(),
+                    startup_timeout: Duration::from_secs(base.startup_timeout_secs),
+                }))
+            }
+            // `Config::validate` が fake / claude-code / codex / acp 以外を拒否している。
             _ => {
                 let mut fake = FakeAdapter::new(config.adapters.fake.command.clone());
                 fake.set_env(merged_env(&config.adapters.fake.env, &p.env));
@@ -113,6 +132,7 @@ pub fn effective_models(config: &Config) -> HashMap<ProviderId, String> {
             let adapter_model = match p.adapter.as_str() {
                 ClaudeCodeAdapter::ID => config.adapters.claude_code.model.clone(),
                 CodexAdapter::ID => config.adapters.codex.model.clone(),
+                // ADR-0026 D3: acp には `[adapters.acp].model` が無い。行の `model` が空なら `None` になる。
                 _ => None,
             };
             (p.id.clone(), effective_model(&p.model, &adapter_model).unwrap_or_default())
@@ -806,6 +826,59 @@ model = "fake"
         for secret in ["/accounts/a", "/accounts/b", "/base", "base\""] {
             assert!(!json.contains(secret), "{secret} leaked: {json}");
         }
+    }
+
+    /// ADR-0026 D2/D3: `acp` プロバイダの行は `[adapters.acp]` の env に重ね、`command`/`args` は行の値が
+    /// 優先し、`model` は行の値がそのまま（`[adapters.acp]` にモデルの既定値は無い）。
+    #[test]
+    fn build_adapters_wires_an_acp_provider_with_merged_env_and_row_model() {
+        let text = r#"
+[adapters.acp]
+env = { SHARED = "base", OPENCODE_DISABLE_PROJECT_CONFIG = "1" }
+permission = "deny"
+model_option_id = "model"
+startup_timeout_secs = 120
+
+[[providers]]
+id = "opencode-qwen"
+adapter = "acp"
+tiers = ["standard"]
+model = "qwen-local/qwen3.8-27b"
+env = { OPENCODE_CONFIG = "/x/qwen.json" }
+
+[[providers]]
+id = "opencode-default"
+adapter = "acp"
+tiers = ["standard"]
+command = "goose"
+args = ["acp"]
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        cfg.validate().unwrap();
+        let adapters = build_adapters(&cfg);
+        assert_eq!(adapters.len(), 2);
+        assert_eq!(adapters["opencode-qwen"].id(), "acp");
+        assert_eq!(adapters["opencode-default"].id(), "acp");
+
+        let models = effective_models(&cfg);
+        assert_eq!(models["opencode-qwen"], "qwen-local/qwen3.8-27b");
+        // 行に model が無ければ空文字（`[adapters.acp]` にモデルの既定値が無いため、他のアダプタのような
+        // フォールバックは起きない）。
+        assert_eq!(models["opencode-default"], "");
+
+        let merged = merged_env(&cfg.adapters.acp.env, &cfg.providers[0].env);
+        assert_eq!(
+            merged,
+            vec![
+                ("OPENCODE_CONFIG".to_string(), "/x/qwen.json".to_string()),
+                ("OPENCODE_DISABLE_PROJECT_CONFIG".to_string(), "1".to_string()),
+                ("SHARED".to_string(), "base".to_string()),
+            ]
+        );
+
+        // 行の command/args が [adapters.acp] の既定（opencode/["acp"]）を上書きする。
+        assert_eq!(cfg.providers[1].command.as_deref(), Some("goose"));
+        assert_eq!(cfg.providers[1].args.as_deref(), Some(&["acp".to_string()][..]));
     }
 
     /// S7: `[accounts]` は reload の対象外。`claude_dir` / `max_runs_per_account` / `check_model` のどれかが

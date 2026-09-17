@@ -179,6 +179,33 @@ async fn read_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Re
     serde_json::from_slice(text).map_err(|e| ApiProblem::bad_request(format!("invalid JSON body: {e}")))
 }
 
+/// ADR-0026 D7: `command`/`args` は `[[providers]]`/`providers.d/*.toml` の行にしか書けない。実行するコマンドを
+/// HTTP から差し替えられると `[api]` のトークンだけで任意コマンド実行に道が開くので、`POST /providers` と
+/// `PATCH /providers/{id}` の本文にこのどちらかのキーがあれば、値の型や中身を見る前に拒否する。
+fn reject_provider_command_and_args(map: &serde_json::Map<String, serde_json::Value>) -> Result<(), ApiProblem> {
+    if map.contains_key("command") || map.contains_key("args") {
+        return Err(ApiProblem::invalid_provider(
+            "command and args cannot be set through the admin API; edit providers.d/<id>.toml by hand (ADR-0026 D7)",
+        ));
+    }
+    Ok(())
+}
+
+/// `read_json` と同じだが、先に §ADR-0026 D7 の `command`/`args` 拒否を通す（`ProviderCreateBody`/
+/// `ProviderPatchBody` はこのキーを知らないので、素の `read_json` では黙って無視されてしまう）。
+async fn read_provider_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Result<T, ApiProblem> {
+    let bytes = read_body(body).await?;
+    let text: &[u8] = if empty_is_object && bytes.iter().all(u8::is_ascii_whitespace) {
+        b"{}"
+    } else {
+        &bytes
+    };
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(text) {
+        reject_provider_command_and_args(&map)?;
+    }
+    serde_json::from_slice(text).map_err(|e| ApiProblem::bad_request(format!("invalid JSON body: {e}")))
+}
+
 fn load_task(store: &SqliteStore, id: TaskId) -> Result<Task, ApiProblem> {
     store
         .get(id)
@@ -791,14 +818,14 @@ async fn create_provider(State(state): State<ApiState>, headers: HeaderMap, RawQ
     let Some(dir) = state.inner.providers_dir.clone() else {
         return Err(ApiProblem::providers_admin_unavailable());
     };
-    let create: ProviderCreateBody = read_json(body, false).await?;
+    let create: ProviderCreateBody = read_provider_json(body, false).await?;
     if !valid_provider_id(&create.id) {
         return Err(ApiProblem::bad_request(
             "id must be 1-64 ASCII alphanumeric/-/_ characters",
         ));
     }
     if !valid_adapter(&create.adapter) {
-        return Err(ApiProblem::bad_request("adapter must be one of fake, claude-code, codex"));
+        return Err(ApiProblem::bad_request("adapter must be one of fake, claude-code, codex, acp"));
     }
     if create.concurrency.is_some_and(|c| c == 0) {
         return Err(ApiProblem::bad_request("concurrency must be >= 1"));
@@ -843,7 +870,7 @@ async fn patch_provider(
     if !path.exists() {
         return Err(ApiProblem::provider_not_found(&id));
     }
-    let patch: ProviderPatchBody = read_json(body, true).await?;
+    let patch: ProviderPatchBody = read_provider_json(body, true).await?;
     if patch.concurrency.is_some_and(|c| c == 0) {
         return Err(ApiProblem::bad_request("concurrency must be >= 1"));
     }

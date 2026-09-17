@@ -790,6 +790,8 @@ mod tests {
             model: String::new(),
             env: Default::default(),
             account_pool: true,
+            command: None,
+            args: None,
         }];
         config.accounts = Some(taskd::config::AccountsConfig {
             claude_dir: Some(accounts_dir.to_path_buf()),
@@ -808,6 +810,49 @@ mod tests {
         assert!(err.to_string().contains("does not have account_pool"), "{err}");
     }
 
+    /// ADR-0026 D5: acp はアカウントのプールを使わない（`Config::validate` が `account_pool = true` を
+    /// claude-code/codex 以外で拒否しているので、acp プロバイダは常に `is_pool = false` になる）。
+    /// `--account` 無しなら無視され、`--account` を付けたらエラーになる（他の非プールプロバイダと同じ扱い）。
+    #[test]
+    fn resolve_account_ignores_or_rejects_account_flag_for_acp_provider() {
+        let mut config = cluster_config(vec![]);
+        config.providers = vec![taskd::config::ProviderConfig {
+            id: "opencode-qwen".into(),
+            adapter: "acp".into(),
+            tiers: vec![task_core::Tier::Standard],
+            concurrency: 1,
+            model: "qwen-local/qwen3.8-27b".into(),
+            env: Default::default(),
+            account_pool: false,
+            command: None,
+            args: None,
+        }];
+        assert_eq!(resolve_account(&config, "opencode-qwen", "acp", &args_fixture(None)).unwrap(), None);
+        let err = resolve_account(&config, "opencode-qwen", "acp", &args_fixture(Some("a"))).unwrap_err();
+        assert!(err.to_string().contains("does not have account_pool"), "{err}");
+    }
+
+    /// ADR-0026 D2: `taskctl worker run` の `build_adapters` 経由でも acp プロバイダのアダプタが引ける
+    /// （`select_provider` / `resolve_account` を通した後の配線が壊れていないことの確認）。
+    #[test]
+    fn build_adapters_resolves_an_instance_for_an_acp_provider_selected_by_worker_run() {
+        let mut config = cluster_config(vec![]);
+        config.providers = vec![taskd::config::ProviderConfig {
+            id: "opencode-qwen".into(),
+            adapter: "acp".into(),
+            tiers: vec![task_core::Tier::Standard],
+            concurrency: 1,
+            model: "qwen-local/qwen3.8-27b".into(),
+            env: Default::default(),
+            account_pool: false,
+            command: None,
+            args: None,
+        }];
+        let adapters = taskd::build_adapters(&config);
+        let adapter = adapters.get("opencode-qwen").expect("acp provider has an adapter instance");
+        assert_eq!(adapter.id(), "acp");
+    }
+
     #[test]
     fn resolve_account_pool_provider_without_accounts_section_errors() {
         let mut config = cluster_config(vec![]);
@@ -819,6 +864,8 @@ mod tests {
             model: String::new(),
             env: Default::default(),
             account_pool: true,
+            command: None,
+            args: None,
         }];
         let err = resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap_err();
         assert!(err.to_string().contains("[accounts] is not configured"), "{err}");
@@ -889,6 +936,8 @@ mod tests {
             model: String::new(),
             env: Default::default(),
             account_pool: true,
+            command: None,
+            args: None,
         }];
         config.accounts = Some(taskd::config::AccountsConfig {
             claude_dir: None,

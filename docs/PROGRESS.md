@@ -1,6 +1,6 @@
 # PROGRESS — taskd
 
-現在地: **Phase 0〜14 完了**（Phase 13 = Claude アカウントのプールと残量に基づく負荷分散、GUI からの登録・ログイン。ADR-0024）（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
+現在地: **Phase 0〜15 完了**（Phase 13 = Claude アカウントのプールと残量に基づく負荷分散、GUI からの登録・ログイン。ADR-0024）（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
 人間の判断 H1〜H9 を反映済み）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により G フェーズとして進める（前提: Node 24 LTS / pnpm 11）。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
@@ -22,6 +22,7 @@
 | 12 | クラスタでのコマンド実行（ssh + ControlMaster。ADR-0018） | 完了 | 2026-09-15 |
 | 13 | Claude アカウントのプール（`CLAUDE_SECURESTORAGE_CONFIG_DIR`）・残量に基づく負荷分散・GUI からのプロバイダ登録とログイン（ADR-0024） | 完了（実機で確認済み。下記 Phase 13 の追記） | 2026-09-16 |
 | 14 | codex アカウントもプールに入れる（`CODEX_HOME`・デバイス認証・`token_count` の残量。ADR-0025） | 完了（実機はログイン前まで確認） | 2026-09-17 |
+| 15 | 汎用 ACP ワーカーアダプタ（最初の実装は opencode。OpenAI 互換 LLM をワーカーに使う。ADR-0026） | 完了（実機で 1 周確認） | 2026-09-17 |
 
 ---
 
@@ -2677,3 +2678,60 @@ B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_po
   GUI は `pnpm typecheck` / `pnpm test`（192 passed）/ `pnpm build` 通過。実機: 運用中の taskd を入れ替えて
   `POST /accounts/<id>/login?adapter=codex` が `AAAA-9AAAA` 形のコードを返し、GUI の画面にも大きな等幅で表示されることを
   ブラウザで確認（`account-login-user-code`）。
+
+## Phase 15 — 汎用 ACP ワーカーアダプタ（ADR-0026。2026-09-17）
+
+人間の依頼「OpenAI API 互換の任意の LLM をワーカーに指定できるようにしたいので、opencode を動かせるようにしたい」。
+人間の設計相談の結論（`opencode run` を包むのではなく、汎用 ACP アダプタを足してその最初の実装に opencode を使う）を採用し、
+実装順も人間の選択で**最初から汎用 ACP**。
+
+### 実装前に実機で確かめた事実
+
+- `opencode` 1.18.31 の `opencode acp` は stdio の JSON-RPC。`initialize` に `protocolVersion: 2` を送っても **1 を返す**（ACP v1）。
+- `session/new` の応答に `configOptions`（`id: "model"` の select）があり、モデルは `session/set_config_option` で選ぶ。
+  **フィールド名は `configId`**（`optionId` は `-32602 Invalid params`。ADR-0026 D3 に実機の結果として明記）。
+- opencode の設定は `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` / `OPENCODE_DISABLE_PROJECT_CONFIG` で差し替えられる。
+- OpenAI 互換の相手は pegasus クラスタの vLLM（`qwen3.8-27b` = `Qwen/Qwen3.8-27B-FP8`、`max_model_len` 262144）を
+  `ssh -J pegasus -L 18000:127.0.0.1:18000 bnode150` で手元に引いて使った（ログインノードからは bnode150:18000 に直接届かないので踏み台越し）。
+
+### 成果物
+
+- `crates/task-worker/src/acp.rs`（新規）: `AcpAdapter` / `AcpConfig` / `AcpPermission`。JSON-RPC は自前（既存アダプタと同じ
+  `tokio::process` + `read_line_limited` の作りに合わせるため。SDK は `async-process` 前提で生存管理の流儀が合わない）。
+  ACP は運搬・観測・生存管理だけで、終端は従来どおり `artifacts/result.json`、委譲は `artifacts/delegate.json`。
+- taskd: `[adapters.acp]`、`[[providers]].command` / `args`（acp 行だけ）、`build_adapters` への配線、`acp` を既知アダプタに追加。
+- task-api / GUI: `POST /providers` の adapter に `acp`、GUI の選択肢に `acp`。**`command` / `args` は管理 API から書けない**（422）。
+- 設定例: `config/taskd.acp-opencode.example.toml` と `config/opencode.openai-compat.example.json`。
+
+### 実装中に直したもの
+
+- **進捗イベントの粒度**（実機で判明）: 本文がトークン単位で届き、1 タスクで **259 件・平均 9 文字**の `progress` になっていた。
+  改行か 400 文字までまとめてから出すようにし（`ChunkBuffer`）、同じ課題で **17 件**・読める単位になった。ツール呼び出しの前には溜め分を先に出し、最後に出し切る。
+
+### 受け入れ条件と証拠
+
+1. **スタブでの写し替えと終端合成** — `acp::tests`（16 件。progress / question / error / 版不一致 / 権限 allow・deny / 壁時計・無出力での
+   プロセスグループ停止 / delegate 転送 / モデル指定 / 分類 / `with_env` / チャンクのまとめ）: ok。
+2. **権限即答とキャンセル** — 上記テストに含む（`wall_clock_exceeded_cancels_then_kills_the_process_group` は `/proc/<pid>` の消滅を確認）。
+3. **版が V1 でなければ spawn_failed** — `protocol_version_mismatch_is_a_spawn_failure`: ok。
+4. **設定** — taskd の config テスト（既定値、`command`/`args` は acp 行だけ、例の設定が読める）と `build_adapters` のテスト: ok。
+5. **実機（本物の opencode + トンネルした Qwen3.8-27B）** — 使い捨ての taskd（`scratchpad/acprun`、運用中の taskd には触れていない）で:
+   - `taskctl worker run` … `done`（`artifacts/ok.txt` を作り `test -f` で自己検証、`result.json` の evidence つき）。
+   - **デーモン経由で 1 周** … タスク「`artifacts/greet.sh` を作り `sh` で実行すると `hi` を出す」を投入 → `WorkerStarted{adapter: "acp", provider: "opencode-qwen", model: "qwen-local/qwen3.8-27b"}` →
+     受け入れ条件 `test "$(sh artifacts/greet.sh)" = hi` を taskd が実行 → **`done`**（progress 16 件）。
+6. **共通条件** — `cargo test --workspace` **665 passed / 0 failed**、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、
+   GUI は lint / typecheck / test（193 passed）/ build / `gen:types` 差分ゼロ、`scripts/sync-gui-docs.sh --check` up to date。
+
+### 未解決事項
+
+- U15-1: トンネル（`ssh -J pegasus -L 18000:127.0.0.1:18000 bnode150`）が切れると、この provider は使えない。`~/.ssh/config` の
+  `ControlPersist 10` も短い。常用するなら systemd か autossh で張り続ける仕組みが要る。
+- U15-2: `Usage`（トークン数）は ACP v1 の標準に無いので常に `None`。プロバイダ画面の集計にも出ない。
+- U15-3: `ProviderConfigView` に `command` / `args` は出していない（API から書けないだけでなく、読み取りにも出していない）。GUI で見たくなったら別途判断する。
+- U15-4: goose など別の ACP エージェントは未検証（`[[providers]]` を 1 行足せば載る想定）。
+
+### 提案
+
+- P-63: `docs/DESIGN.md` §5.4 のアダプタ表に `acp`（汎用 ACP。最初の実装は opencode。ACP は運搬・観測・生存管理だけで、終端は結果ファイル規約）を足す。
+  併せて `[[providers]].command` / `args` と `[adapters.acp]` を §5.4 の設定の説明に入れる。`openai-compat` の行は「最小ループを自前で育てるより
+  ACP エージェントに任せる」と注記して残す。

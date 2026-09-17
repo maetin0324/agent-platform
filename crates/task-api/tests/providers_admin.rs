@@ -160,3 +160,95 @@ async fn admin_endpoints_are_unavailable_without_providers_dir_configured() {
     let resp = send(&app, post_json_with("/api/v1/providers", &json!({"id": "x", "adapter": "fake"}), &[("authorization", &auth)])).await;
     assert_problem(&resp, 409, "providers_admin_unavailable");
 }
+
+/// ADR-0026 D7: `adapter = "acp"` は `POST /providers` の既知アダプタに入っている。
+#[tokio::test]
+async fn create_accepts_the_acp_adapter() {
+    let (env, _providers_tmp, dir) = env_with_providers_dir();
+    let app = env.router();
+    let auth = auth();
+
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/providers",
+            &json!({"id": "opencode-qwen", "adapter": "acp", "tiers": ["standard"], "model": "qwen-local/qwen3.8-27b"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_eq!(resp.status, 201, "{}", resp.text());
+    assert_eq!(resp.json()["adapter"], json!("acp"));
+    let written = std::fs::read_to_string(dir.join("opencode-qwen.toml")).unwrap();
+    assert!(written.contains("adapter = \"acp\""), "{written}");
+    // ADR-0026 D7: 管理 API は command/args を書かない。
+    assert!(!written.contains("command"), "{written}");
+    assert!(!written.contains("args"), "{written}");
+}
+
+/// ADR-0026 D7: `command`/`args` は管理 API から書けない。`POST`/`PATCH` の本文にあれば拒否する
+/// （実行するコマンドを HTTP から差し替えられないようにする。`providers.d/<id>.toml` は人が直接編集する）。
+#[tokio::test]
+async fn create_and_patch_reject_command_and_args_in_the_body() {
+    let (env, _providers_tmp, dir) = env_with_providers_dir();
+    let app = env.router();
+    let auth = auth();
+
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/providers",
+            &json!({"id": "opencode-qwen", "adapter": "acp", "command": "opencode"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 422, "invalid_provider");
+    assert!(!dir.join("opencode-qwen.toml").exists(), "create must not write a file when rejected");
+
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/providers",
+            &json!({"id": "opencode-qwen", "adapter": "acp", "args": ["acp", "--verbose"]}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 422, "invalid_provider");
+
+    // 既存の行に対する PATCH も同様に拒否し、ファイルは変わらない。
+    std::fs::write(
+        dir.join("opencode-qwen.toml"),
+        "id = \"opencode-qwen\"\nadapter = \"acp\"\ncommand = \"opencode\"\nargs = [\"acp\"]\n",
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(dir.join("opencode-qwen.toml")).unwrap();
+    let resp = send(
+        &app,
+        patch_json_with(
+            "/api/v1/providers/opencode-qwen",
+            &json!({"command": "goose"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 422, "invalid_provider");
+    let after = std::fs::read_to_string(dir.join("opencode-qwen.toml")).unwrap();
+    assert_eq!(before, after, "a rejected PATCH must not touch the file");
+
+    // command/args を持たない PATCH は通り、既存の値（人が書いた分）はファイル上に残る。
+    let resp = send(
+        &app,
+        patch_json_with(
+            "/api/v1/providers/opencode-qwen",
+            &json!({"concurrency": 2}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let written = std::fs::read_to_string(dir.join("opencode-qwen.toml")).unwrap();
+    assert!(written.contains("command = \"opencode\""), "{written}");
+    assert!(written.contains("args = [\"acp\"]"), "{written}");
+}
