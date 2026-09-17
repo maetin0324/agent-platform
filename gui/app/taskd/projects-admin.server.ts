@@ -15,11 +15,16 @@ import type {
 
 /**
  * 「案件」画面（`/projects`, `/projects/:id`）からの中継（ADR-0033 D2、docs/taskd-api-v1.md §3.46〜3.49）。
- * 組織の編集とは違い**管理系ではない**（通常の要求。トークンを設定した taskd では他の全要求と同じくトークンが要る）。
- * GUI 側では検証しない: taskd が 404 / 422 / 400 を返したらその文言をそのまま画面に出す。
+ * `POST /projects`（案件の作成）は Phase 27（M-4）で**管理系**になった（`token_file` 未設定でも 401。
+ * v1 の破壊的変更、docs/gui/api.md 冒頭の変更点一覧）。`GET /projects` / `PATCH /projects/{id}` /
+ * `POST /projects/{id}/milestones` / `PATCH /milestones/{id}` は引き続き通常の要求（トークンを設定した
+ * taskd では他の全要求と同じくトークンが要る）。管理系かどうかで GUI 側の中継コードは変わらない
+ * （`TaskdClient` はどちらも同じ `Authorization` ヘッダを付けるだけ。401 の案内文も `Flash.tsx` の
+ * `error.code === "unauthorized"` の 1 か所に集約されているので、管理系になっても揃っている）。
+ * GUI 側では検証しない: taskd が 401 / 404 / 422 / 400 を返したらその文言をそのまま画面に出す。
  */
 
-/** `POST /projects`。`title` / `request` は空でもそのまま送り、taskd の 422 文言を出す（ADR-0005 D5）。 */
+/** `POST /projects`（管理系）。`title` / `request` は空でもそのまま送り、taskd の 422 文言を出す（ADR-0005 D5）。 */
 export async function createProject(
   client: TaskdClient,
   input: ProjectCreateBody,

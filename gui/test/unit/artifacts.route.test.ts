@@ -80,7 +80,15 @@ describe("loadArtifacts", () => {
       project: project(),
       milestones: [],
       tasks: [
-        { id: "t1", title: "survey", status: "done", parent_id: null, depends_on: [], assignee: "research-survey" },
+        {
+          id: "t1",
+          title: "survey",
+          status: "done",
+          parent_id: null,
+          depends_on: [],
+          assignee: "research-survey",
+          conversation: false,
+        },
       ],
     };
     const artifacts: ArtifactList = {
@@ -153,8 +161,24 @@ describe("loadArtifacts", () => {
       project: project(),
       milestones: [],
       tasks: [
-        { id: "t1", title: "survey", status: "done", parent_id: null, depends_on: [], assignee: null },
-        { id: "t2", title: "poc", status: "running", parent_id: null, depends_on: [], assignee: null },
+        {
+          id: "t1",
+          title: "survey",
+          status: "done",
+          parent_id: null,
+          depends_on: [],
+          assignee: null,
+          conversation: false,
+        },
+        {
+          id: "t2",
+          title: "poc",
+          status: "running",
+          parent_id: null,
+          depends_on: [],
+          assignee: null,
+          conversation: false,
+        },
       ],
     };
     mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [project()] } satisfies ProjectList));

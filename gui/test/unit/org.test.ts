@@ -8,7 +8,7 @@ import {
   deleteOrgNode,
   patchOrgNode,
 } from "~/taskd/org-admin.server";
-import type { OrgList, OrgNode, ProjectDetail, ProjectList, StandingRuleList } from "~/taskd/types";
+import type { OrgList, OrgNode, StandingRuleList, TaskList } from "~/taskd/types";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
@@ -95,8 +95,10 @@ describe("buildOrgPatchInput", () => {
   });
 });
 
+const emptyTaskList: TaskList = { items: [], total: 0, next_cursor: null, counts_by_status: {} };
+
 describe("loadOrg", () => {
-  it("GET /org と、各案件の GET /projects/{id} の tasks から抱えている仕事を数える", async () => {
+  it("GET /org と、1 回の GET /tasks（limit=500）の assignee から抱えている仕事を数える（GUI-R3、Phase 27）", async () => {
     const org: OrgList = {
       items: [
         orgNode("secretary", { kind: "secretary" }),
@@ -106,16 +108,9 @@ describe("loadOrg", () => {
     };
     mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, org));
     mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, { genres: [{ id: "coding" }] }));
-    mock.on("GET", "/api/v1/projects", (_req, res) =>
+    mock.on("GET", "/api/v1/tasks", (_req, res) =>
       sendJson(res, 200, {
-        items: [{ id: "p1", title: "Pluvio", request: "…", status: "active", created_at: "…", updated_at: "…" }],
-      } satisfies ProjectList),
-    );
-    mock.on("GET", "/api/v1/projects/p1", (_req, res) =>
-      sendJson(res, 200, {
-        project: { id: "p1", title: "Pluvio", request: "…", status: "active", created_at: "…", updated_at: "…" },
-        milestones: [],
-        tasks: [
+        items: [
           {
             id: "t1",
             title: "PoC",
@@ -123,7 +118,17 @@ describe("loadOrg", () => {
             parent_id: null,
             depends_on: [],
             assignee: "coding-poc",
-            milestone_id: null,
+            conversation: false,
+            kind: "execute",
+            priority: 0,
+            tier: "standard",
+            attempts: 0,
+            max_retries: 0,
+            created_at: "…",
+            updated_at: "…",
+            children: 0,
+            pending_children: 0,
+            actions: [],
           },
           {
             id: "t2",
@@ -132,10 +137,42 @@ describe("loadOrg", () => {
             parent_id: null,
             depends_on: [],
             assignee: "coding-poc",
-            milestone_id: null,
+            conversation: false,
+            kind: "execute",
+            priority: 0,
+            tier: "standard",
+            attempts: 0,
+            max_retries: 0,
+            created_at: "…",
+            updated_at: "…",
+            children: 0,
+            pending_children: 0,
+            actions: [],
+          },
+          {
+            id: "chat",
+            title: "対話: …[秘書]",
+            status: "done",
+            parent_id: null,
+            depends_on: [],
+            assignee: "secretary",
+            conversation: true,
+            kind: "execute",
+            priority: 0,
+            tier: "standard",
+            attempts: 0,
+            max_retries: 0,
+            created_at: "…",
+            updated_at: "…",
+            children: 0,
+            pending_children: 0,
+            actions: [],
           },
         ],
-      } satisfies ProjectDetail),
+        total: 3,
+        next_cursor: null,
+        counts_by_status: {},
+      } satisfies TaskList),
     );
 
     const result = await loadOrg(client, new Request("http://gui.invalid/org"));
@@ -143,8 +180,12 @@ describe("loadOrg", () => {
     expect(result.org).toEqual(org);
     expect(result.genres).toEqual(["coding"]);
     expect(result.workload["coding-poc"]).toEqual({ open: 1, total: 2 });
-    expect(result.assignedTasks).toHaveLength(2);
-    expect(result.assignedTasks[0]).toMatchObject({ project_id: "p1", project_title: "Pluvio" });
+    // 対話用タスク（conversation: true）は数えない・一覧にも出さない。
+    expect(result.workload.secretary).toBeUndefined();
+    expect(result.tasksByAssignee["coding-poc"]?.map((t) => t.id)).toEqual(["t1", "t2"]);
+    expect(result.tasksByAssignee.secretary).toBeUndefined();
+    const req = mock.requests.find((r) => r.url.startsWith("/api/v1/tasks"));
+    expect(req?.url).toContain("limit=500");
   });
 
   it("GET /config が失敗しても組織は返す（genres は空になる）", async () => {
@@ -152,7 +193,7 @@ describe("loadOrg", () => {
     mock.on("GET", "/api/v1/config", (_req, res) =>
       sendProblem(res, { status: 500, code: "internal", detail: "boom" }),
     );
-    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/tasks", (_req, res) => sendJson(res, 200, emptyTaskList));
 
     const result = await loadOrg(client, new Request("http://gui.invalid/org"));
     expect(result.genres).toEqual([]);
@@ -162,7 +203,7 @@ describe("loadOrg", () => {
   it("?selected= が無ければ GET /standing-rules を呼ばない（standingRules は空）", async () => {
     mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
     mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, { genres: [] }));
-    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/tasks", (_req, res) => sendJson(res, 200, emptyTaskList));
 
     const result = await loadOrg(client, new Request("http://gui.invalid/org"));
     expect(result.standingRules).toEqual([]);
@@ -172,7 +213,7 @@ describe("loadOrg", () => {
   it("?selected=<node> があれば GET /standing-rules?node=<node> を呼ぶ（ADR-0033 D5、§3.58）", async () => {
     mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
     mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, { genres: [] }));
-    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/tasks", (_req, res) => sendJson(res, 200, emptyTaskList));
     mock.on("GET", "/api/v1/standing-rules", (_req, res) =>
       sendJson(res, 200, {
         items: [{ id: "s1", node_id: "coding-poc", rule: "毎回聞かずに進めてよい", created_at: "…" }],
@@ -190,7 +231,7 @@ describe("loadOrg", () => {
   it("GET /standing-rules が失敗しても組織は返す（standingRules は空になる）", async () => {
     mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
     mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, { genres: [] }));
-    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/tasks", (_req, res) => sendJson(res, 200, emptyTaskList));
     mock.on("GET", "/api/v1/standing-rules", (_req, res) =>
       sendProblem(res, { status: 500, code: "internal", detail: "boom" }),
     );

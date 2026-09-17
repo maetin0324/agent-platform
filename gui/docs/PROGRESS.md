@@ -1765,3 +1765,100 @@ main（`70986b5`、phase 26）に `git merge --ff-only` してから着手。
 - G13d-P1: `docs/taskd-requests.md` R5 のとおり、`GET /approvals?pending=false` を
   `decision IS NOT NULL` で絞り込むよう直してほしい。直り次第 GUI 側は 2 回呼び（`pending=true` / `pending=false`）に
   戻し、`GET /approvals` 全件取得をやめられる。
+
+## Phase G13e — Phase 27 への追従（2026-09-17）
+
+taskd 側 Phase 27（ADR-0033/0034 の仕上げ、R3/R4/R5 の解決、`POST /projects` の管理系化）に追従した。
+まず `git merge --ff-only main`（`2adea0e`）でこの worktree を Phase 27 まで進めてからビルド・着手した。
+
+### 成果物
+
+- `bash scripts/sync-gui-docs.sh` と `pnpm gen:types` を実行し、`gui/docs/taskd-api-v1.md` と
+  `app/taskd/types.ts`（`TaskSummary.assignee`/`.conversation`、`ProjectTaskView.conversation`、
+  `Message.task_id`、`schema_version = 7` 等）を taskd 側の Phase 27 に合わせた。
+- **`gui/docs/taskd-requests.md`**: R3・R4・R5 を「対応済み」に移した（各節に taskd 側の対応と GUI 側
+  Phase G13e での追従を要約し、原文は下に残した）。
+- **対話用タスクを裏方に隠す（R3。SPEC「タスクは裏方」/ ADR-0033 D8）**:
+  - `app/lib/work-tree.ts::projectTasksToGraph` が `conversation: true` のタスクを仕事の木から**完全に除外**
+    （`/projects/:id`）。`app/routes/projects.$id.tsx` は `workTasks`（対話用を除いた配列）を件数表示・
+    「担当に話す」一覧にも使うよう揃えた。
+  - `app/routes/tasks.tsx`（`/tasks`）は既定で対話用タスクを一覧から隠し、「対話用も表示」チェックボックス
+    （`show_conversation=1`、`data-testid="tasks-show-conversation"`）で表示できるようにした。`GET /tasks`
+    には送らない（taskd に絞り込みは無いので、`items` を受け取った後 GUI 側の表示だけを切り替える）。
+  - `app/lib/org-tree.ts`: `flattenProjectTasks`/`AssignedTaskView`（G13a が `GET /projects/{id}` を
+    案件数ぶん束ねていた代替実装）を削除し、`countWorkload` / 新設の `tasksByAssignee` を
+    **`TaskSummary[]`**（`GET /tasks?limit=500` を 1 回。`app/routes/tasks.new.tsx` と同じ「全件を 1 回で」
+    パターン）から計算する形に直した（N+1 の解消）。どちらも `conversation: true` を数えない・含めない。
+  - `app/routes/org.tsx::loadOrg` は `GET /projects`/`GET /projects/{id}` の束ねをやめ、`GET /tasks` を
+    1 回呼ぶだけにした。組織ノード詳細の「抱えているタスク」一覧は `TaskSummary` を直接使うため、
+    `TaskSummary` に `project_id` が無く**案件名の列は落とした**（トレードオフ。taskd-requests.md R3 に記録）。
+- **返事から裏方の run へ（R4）**: `app/components/Conversation.tsx` が `Message.task_id` を直接使うよう
+  変更し、`Waiting`/`replyLink`/`linkedIndex`（「その画面で送った直後の発言にだけ」というヒューリスティック）
+  を削除した。過去の返事（画面を開き直した後のもの）にも `/tasks/:id` へのリンクが出る。
+- **認可の 2 回呼び（R5）**: `app/routes/approvals.tsx::loadApprovals` を `GET /approvals?pending=true` /
+  `?pending=false` の 2 回呼びに戻し、`app/lib/approvals.ts::splitApprovals`（G13d の回避策）を削除した。
+- **`POST /projects` の管理系化（Phase 27 M-4）の確認**: 401 の応答は他の管理系（`POST /org` 等）と同じ
+  `code: "unauthorized"` で、案内文は `app/components/Flash.tsx` の 1 か所（`error.code === "unauthorized"`）
+  に集約されているため、エンドポイントごとに揃える作業は不要だった（確認のみ）。
+  `app/taskd/projects-admin.server.ts` の冒頭コメントが「管理系ではない」のままだったので Phase 27 に
+  合わせて書き直した。
+- unit テスト: `test/unit/org-tree.test.ts`（`countWorkload`/`tasksByAssignee` が対話用を除くこと、
+  `TaskSummary` ベースへの書き換え）、`test/unit/work-tree.test.ts`（対話用タスクの除外、対話用タスクを
+  指す `parent_id`/`depends_on` の扱い）、`test/unit/org.test.ts`（`loadOrg` が 1 回の `GET /tasks?limit=500`
+  で組むこと）、`test/unit/approvals.test.ts`（`pending=true`/`pending=false` の 2 回呼び）、
+  `test/unit/projects.test.ts`（`POST /projects` の 401）。既存の `ProjectTaskView`/`TaskSummary` を使う
+  テストフィクスチャ（`test/fixtures/api/*.json` 含む）に `conversation` フィールドを足した。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint`（biome、152 files）exit 0 / `pnpm typecheck` exit 0 / `pnpm test` **391 passed**（35 ファイル。
+  G13d の 369 から純増ではなく、`splitApprovals`/`flattenProjectTasks` 系のテストを削って書き換えた差分込み）。
+  `pnpm build` exit 0。
+- `pnpm gen:types` を 2 回実行して同一（`diff` ゼロ）。`scripts/sync-gui-docs.sh --check` = `up to date`。
+- **実機での見た目と動作の確認**（使い捨ての taskd を 127.0.0.1:17940、GUI を 127.0.0.1:17962 に立てた。
+  **運用中の 7710 / 7700 には触れていない**。確認後、taskd・GUI とも停止し使い捨てディレクトリは削除済み）。
+  main（Phase 27 込み）を `cargo build -p taskd -p taskctl` し、`config/org.example.toml` を `org_include`、
+  `[[roles]]` を全部 `fake` アダプタのまま、`[api] token_file` あり。`POST /projects` で「Pluvio の新テーマ」
+  案件を作り（秘書の最初の返事が自動で入る＝対話用タスク 1 件目）、`POST /org/coding-poc/messages` で
+  もう 1 件（対話用タスク 2 件目）、`POST /tasks` で `research-survey`/`coding-poc` 宛ての普通のタスク 2 件を
+  作って承認した（Approval needed の子タスクが自動でできるので、この案件のタスクは合計 6 件: 対話用 2 件 +
+  普通 2 件 + その承認子 2 件）。Playwright（light / dark、Chromium）で確認したこと:
+  - `/projects/:id`: 「仕事の木」の見出しの件数が **4**（対話用 2 件を除いた数）で、木にも
+    「対話に…」のノードは描かれない。下の「担当に話す」一覧も 4 行（対話用の 2 件を含まない）。
+  - `/tasks?q=対話`: 既定（「対話用も表示」オフ）では 0 件（「対話用タスクしかありません。上の
+    「対話用も表示」を付けてください。」の案内）。チェックを付けて絞り込み直すと、対話用タスク 2 件
+    （`対話: 状況を教えてください。` / `対話: Pluvio を基盤に用いた…`）が一覧に出た。
+  - `/org?selected=coding-poc`: 「抱えている仕事（未終了）0 / 担当した仕事（累計）2」（対話用タスクを
+    含めれば 3 になるところ、正しく 2）。「抱えているタスク」一覧も対話用タスクを含まない 2 件で、
+    案件名の列は無い（トレードオフどおり）。
+  - `/org/secretary?project=<id>`: 画面を**開き直した後**（そのセッションで送った発言ではない）の秘書の
+    最初の返事に「この返事を作った run（裏方）」のリンクが出て、`href` が `/tasks/<対話用タスクの id>`
+    （R4 が「送った直後だけ」の制約を解消したことの直接確認）。
+  - light / dark 両方でスクリーンショットを確認。コンソールエラーは 0 件（dev モードの vite HMR
+    WebSocket の CSP 警告と React の hydration mismatch 警告のみで、いずれも `pnpm dev`（HMR 有効）
+    特有のもの。`pnpm build && pnpm start` の本番相当では出ない経路）。
+  - `GET /approvals` の 2 回呼びは、この案件のシナリオでは認可の要求が発生しなかったため実機では
+    確認できていない（unit テストで `pending=true`/`pending=false` の 2 リクエストが飛ぶことを確認済み）。
+
+### 判断したこと（ADR は起こしていない。GUI の中の話）
+
+- **組織ノード詳細の「抱えているタスク」一覧から案件名の列を落とした**（`TaskSummary` に `project_id` が
+  無いため。N+1 をやめる代わりのトレードオフ。taskd-requests.md R3 に明記した）。
+- **`/tasks` の「対話用も表示」はクライアント側だけの絞り込み**（`GET /tasks` にクエリを送らない）。
+  taskd に `?conversation=` のような絞り込みは無く、`TaskSummary.conversation` は一覧の応答に既に
+  含まれているので、GUI 側で弾くだけで済む（`filterReportsByKind` 等、既存の「ドキュメント化された
+  フィールド値で GUI 側が分ける」パターンと同じ）。
+- **`/tasks` の総件数・status 別件数（`counts_by_status`）はそのまま**（対話用を除いた表示件数と
+  一致しないことがある）。taskd から返る値をそのまま出す既存方針（GUI 側では再計算しない）を優先した。
+
+### 未解決事項
+
+- G13e-U1: `TaskSummary` に `project_id` が無いため、組織ノード詳細の「抱えているタスク」一覧は
+  案件名を出せない（G13a-U1 の裏返し。taskd 側に `project_id` を足すかは taskd-requests.md R3 の
+  対応済みメモに記録した程度に留めた）。
+- G13e-U2: `/tasks` の「N 件」表示は対話用を含む全件のままで、既定表示（対話用を除く）の見た目の件数と
+  ずれることがある（上記「判断したこと」参照）。
+- G13e-U3: `GET /approvals` の 2 回呼びへの回帰は unit テストのみで、実機では認可の要求を再現できず
+  未確認（fake ワーカーが `question` を返すよう仕込めば再現できるが、今回は他の受け入れ条件を優先した）。
+- G13e-U4: DOM を描画する unit テストは無い（G10-U1/G13d-U2 と同じ）。今回の変更（トグル、リンクの
+  出し分け）も純粋関数のテストと Playwright の目視でのみ確認している。

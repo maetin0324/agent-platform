@@ -15,6 +15,7 @@ const task = (id: string, over: Partial<ProjectTaskView> = {}): ProjectTaskView 
   depends_on: [],
   assignee: null,
   milestone_id: null,
+  conversation: false,
   ...over,
 });
 
@@ -68,5 +69,23 @@ describe("projectTasksToGraph", () => {
   it("存在しないタスクを指す depends_on の辺は layoutGraph 側が捨てる前提でそのまま渡す", () => {
     const graph = projectTasksToGraph([task("t1", { depends_on: ["gone"] })], new Map());
     expect(graph.edges).toEqual([{ from: "gone", kind: "depends_on", to: "t1" }]);
+  });
+
+  it("対話用タスク（conversation）は仕事の木から完全に外す（GUI-R3、Phase 27）", () => {
+    const graph = projectTasksToGraph(
+      [task("work", { title: "調べる" }), task("chat", { title: "対話: 秘書", conversation: true })],
+      new Map(),
+    );
+    expect(graph.nodes.map((n) => n.id)).toEqual(["work"]);
+  });
+
+  it("対話用タスクを指す depends_on / parent_id は既存の欠落扱い（layoutGraph 側）にそのまま乗る", () => {
+    const graph = projectTasksToGraph(
+      [task("chat", { conversation: true }), task("work", { parent_id: "chat", depends_on: ["chat"] })],
+      new Map(),
+    );
+    expect(graph.nodes.map((n) => n.id)).toEqual(["work"]);
+    expect(graph.nodes[0].parent_id).toBe("chat");
+    expect(graph.edges).toEqual([{ from: "chat", kind: "depends_on", to: "work" }]);
   });
 });

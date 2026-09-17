@@ -28,6 +28,7 @@ const sampleTaskList: TaskList = {
       backoff_until: null,
       children: 0,
       pending_children: 0,
+      conversation: false,
       actions: ["cancel"],
     },
   ],

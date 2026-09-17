@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildOrgTree, countWorkload, flattenProjectTasks } from "~/lib/org-tree";
-import type { OrgNode, Project, ProjectTaskView } from "~/taskd/types";
+import { buildOrgTree, countWorkload, tasksByAssignee } from "~/lib/org-tree";
+import type { OrgNode, TaskSummary } from "~/taskd/types";
 
 /**
- * `buildOrgTree` / `countWorkload` / `flattenProjectTasks`（`/org` の loader が使う純粋関数）のテスト。
+ * `buildOrgTree` / `countWorkload` / `tasksByAssignee`（`/org` の loader が使う純粋関数）のテスト。
  * `GET /org` は平らな配列（position 昇順）を返すだけなので、木に組む・件数を数える判断は
  * すべて GUI 側のこの純粋関数に閉じている（docs/gui/api.md §3.42）。
  */
@@ -79,53 +79,35 @@ describe("buildOrgTree", () => {
   });
 });
 
-const projectTask = (id: string, over: Partial<ProjectTaskView> = {}): ProjectTaskView => ({
+const task = (id: string, over: Partial<TaskSummary> = {}): TaskSummary => ({
   id,
-  title: id,
-  status: "running",
   parent_id: null,
+  kind: "execute",
+  status: "running",
+  title: id,
+  priority: 0,
+  tier: "standard",
+  attempts: 0,
+  max_retries: 0,
   depends_on: [],
-  assignee: null,
-  milestone_id: null,
-  ...over,
-});
-
-const project = (id: string, title = id): Project => ({
-  id,
-  title,
-  request: "…",
-  status: "active",
   created_at: "2026-09-17T00:00:00Z",
   updated_at: "2026-09-17T00:00:00Z",
-});
-
-describe("flattenProjectTasks", () => {
-  it("各案件の tasks に project_id / project_title を添えて 1 本の配列にする", () => {
-    const flat = flattenProjectTasks([
-      { project: project("p1", "Pluvio"), tasks: [projectTask("t1"), projectTask("t2")] },
-      { project: project("p2", "Other"), tasks: [projectTask("t3")] },
-    ]);
-    expect(flat).toEqual([
-      { ...projectTask("t1"), project_id: "p1", project_title: "Pluvio" },
-      { ...projectTask("t2"), project_id: "p1", project_title: "Pluvio" },
-      { ...projectTask("t3"), project_id: "p2", project_title: "Other" },
-    ]);
-  });
+  children: 0,
+  pending_children: 0,
+  conversation: false,
+  actions: [],
+  assignee: null,
+  ...over,
 });
 
 describe("countWorkload", () => {
   it("assignee ごとに、終端でない（open）ものと全体（total）を数える", () => {
-    const tasks = flattenProjectTasks([
-      {
-        project: project("p1"),
-        tasks: [
-          projectTask("t1", { assignee: "coding-poc", status: "running" }),
-          projectTask("t2", { assignee: "coding-poc", status: "done" }),
-          projectTask("t3", { assignee: "research-survey", status: "blocked" }),
-          projectTask("t4", { assignee: null, status: "running" }),
-        ],
-      },
-    ]);
+    const tasks = [
+      task("t1", { assignee: "coding-poc", status: "running" }),
+      task("t2", { assignee: "coding-poc", status: "done" }),
+      task("t3", { assignee: "research-survey", status: "blocked" }),
+      task("t4", { assignee: null, status: "running" }),
+    ];
     const counts = countWorkload(tasks);
     expect(counts.get("coding-poc")).toEqual({ open: 1, total: 2 });
     expect(counts.get("research-survey")).toEqual({ open: 1, total: 1 });
@@ -134,7 +116,34 @@ describe("countWorkload", () => {
   });
 
   it("assignee が無いタスクは数えない", () => {
-    const tasks = flattenProjectTasks([{ project: project("p1"), tasks: [projectTask("t1")] }]);
-    expect(countWorkload(tasks).size).toBe(0);
+    expect(countWorkload([task("t1")]).size).toBe(0);
+  });
+
+  it("対話用タスク（conversation）は数えない（GUI-R3、Phase 27）", () => {
+    const tasks = [
+      task("chat", { assignee: "secretary", conversation: true, status: "running" }),
+      task("work", { assignee: "secretary", conversation: false, status: "running" }),
+    ];
+    const counts = countWorkload(tasks);
+    expect(counts.get("secretary")).toEqual({ open: 1, total: 1 });
+  });
+});
+
+describe("tasksByAssignee", () => {
+  it("assignee ごとにグループ化する", () => {
+    const tasks = [
+      task("t1", { assignee: "coding-poc" }),
+      task("t2", { assignee: "coding-poc" }),
+      task("t3", { assignee: "research-survey" }),
+    ];
+    const grouped = tasksByAssignee(tasks);
+    expect(grouped.get("coding-poc")?.map((t) => t.id)).toEqual(["t1", "t2"]);
+    expect(grouped.get("research-survey")?.map((t) => t.id)).toEqual(["t3"]);
+  });
+
+  it("assignee が無い・対話用のタスクは含めない", () => {
+    const tasks = [task("t1", { assignee: null }), task("t2", { assignee: "coding-poc", conversation: true })];
+    const grouped = tasksByAssignee(tasks);
+    expect(grouped.size).toBe(0);
   });
 });
