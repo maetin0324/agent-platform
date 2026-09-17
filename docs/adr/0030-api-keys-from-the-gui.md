@@ -86,5 +86,5 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily" }   # 行�
 3. 値がログ・API 応答・`GET /config` のどこにも出ない（テストで確認）。
 4. GUI の「アカウント」画面から API キーを追加・更新・削除でき、保存後に `reload` が走る。
 5. 実機: Tavily か Exa の鍵を GUI から入れ、`search.tool` をそのエンジンにした `web-research` のタスクが `done` になる
-   （**鍵は人間が用意する**ので、鍵が届くまではここだけ保留）。
+   （**鍵は人間が用意する**ので、鍵が届くまではここだけ保留）。→ **2026-09-17 に充足**（PROGRESS の Phase 20 を見よ）。
 6. `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / GUI の検査一式。

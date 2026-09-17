@@ -71,9 +71,17 @@ command = "/home/u/taskd/ldr/.venv/bin/python"
 mode = "quick"
 iterations = 2
 questions_per_iteration = 2
-# LDR がプライベート/loopback の SearXNG URL を使うときだけ必要（上のコメント参照）。既定
-# （`search.tool = "wikipedia"`）では使わないので空のままでよい。
-env = {}
+# `RES_OPTIONS = "single-request"`: glibc に A と AAAA を**順番に**問い合わせさせる。
+# 実機（2026-09-17）で判明した罠 — ルータの DNS が A/AAAA の並行送信を取りこぼすと、プロセスで
+# 最初の名前解決だけが必ず 5.01 秒かかる。LDR の DNS ピン留めは 5 秒で fail-closed するため、
+# **全検索エンジンが例外を握りつぶして「0 件」を返す**（鍵の問題に見えるが鍵は関係ない）。
+# LDR は run ごとに新しいプロセスなので毎回この 1 回目に当たる。同じ症状（どのエンジンでも 0 件、
+# `curl` では成功）なら、まず `python -c "import socket,time;t=time.time();
+# socket.getaddrinfo('api.tavily.com',None,socket.AF_UNSPEC,socket.SOCK_STREAM,0,0);print(time.time()-t)"`
+# を**新しいプロセスで**測ること。5 秒台ならこれ。
+# LDR がプライベート/loopback の SearXNG URL を使うときは `LDR_SEARCH_ALLOW_PRIVATE_ENGINE_URLS`
+# もここに足す（上のコメント参照）。
+env = { RES_OPTIONS = "single-request" }
 # ADR-0030 D2: Tavily / Exa のような鍵付き検索エンジンを使う場合の環境変数名 → 秘密 id の対応
 # （値は書かない。`taskctl`/GUI で `PUT /secrets/tavily` 等に入れる）。LDR は `LDR_` + 設定キーを
 # 大文字化し `.` を `_` にした環境変数で上書きできる（実機確認、ADR-0030 文脈）ので、
@@ -87,7 +95,7 @@ env = {}
 "llm.openai_endpoint.url" = "http://127.0.0.1:18000/v1"
 "llm.openai_endpoint.api_key" = "unused"
 "llm.model" = "qwen3.8-27b"
-"search.tool" = "wikipedia"
+"search.tool" = "tavily"
 # SearXNG に切り替える場合の代替（このホストでは `engines` を絞らないとノイズが出る。上のコメント参照）:
 # "search.tool" = "searxng"
 # "search.engine.web.searxng.default_params.instance_url" = "http://127.0.0.1:8888"

@@ -2901,8 +2901,12 @@ B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_po
    422・404・409・401 の伝播 / reload 失敗の個別報告 / delete→reload / 未設定エントリの passthrough）。
    使い捨ての taskd（`[secrets] dir` + `[adapters.fake] env_from_secrets`）に対して Playwright で light/dark のスクリーンショットを取り、
    画面から追加（flash「保存: newkey」＋「reload: 反映しました」）→ カード出現 → 削除 → カード消滅までを実地確認した。
-5. **実機（鍵を入れた web-research）** — **保留**。人間が Tavily / Exa の鍵を用意する予定。鍵が届いたら
-   GUI から入れ、`search.tool` を切り替えて ADR-0031 受け入れ条件 4 と同時に確認する。
+5. **実機（鍵を入れた web-research）** — **充足（2026-09-17 夕）**。人間が GUI の `/accounts` →「API キー」から
+   `tavily` と `exa` を入力（保存のたびに `reload` が走ったことを daemon ログの `op=secret_put` →
+   `op=reload` で確認。`secrets/` は 0700、ファイルは 0600、`GET /secrets` は fingerprint だけを返し値は出さない）。
+   `search.tool = "tavily"` の `web-research` タスク `01M2Q6RNTX7RPK733V7DKB1ANT` が**デーモン経由で `done`**
+   （出典 18 件・引用 16 件・16 ドメイン。詳細は Phase 21 受け入れ条件 4）。
+   なお最初の実行は失敗し、その追い込みで下の DNS の真因が判明した（Phase 21 の節）。
 6. **共通条件** — `cargo test --workspace` **777 passed / 0 failed**、
    `cargo clippy --workspace --all-targets -- -D warnings` exit 0、
    GUI は `pnpm lint`（115 files, no fixes）/ `pnpm typecheck` / `pnpm build` すべて exit 0、
@@ -2941,16 +2945,18 @@ B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_po
    （0 件のときだけ別メッセージ。成果物は残る）/ `gate_missing_counts_is_treated_as_all_zero_and_fails_with_default_thresholds`。
 3. **閾値を全部 0 にすると従来どおり `done`** — `gate_all_zero_thresholds_still_done_even_with_empty_counts` /
    `gate_missing_counts_is_done_when_all_thresholds_are_zero`。
-4. **実機 — 「落ちる側」だけ確認済み。「通る側」は未達（U21-2）**。
+4. **実機 — 落ちる側・通る側の両方を確認済み（2026-09-17 夕、鍵到着後）**。
    - 落ちる側（確認済み）: `wikipedia` を使った `web-research` タスク（`ws-gate5` / `ws-gate6`）がデーモン経由で
      `{"type":"error","message":"web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)","retryable":true}`
      になり、`counts: {"queries": 1, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}` が
      `research.json` に残った。**Phase 19 の `done` と同じ入力で、今回は `done` にならない**（これが直したかったこと）。
-   - 通る側（**未達**）: ADR-0031 §4-4 は「鍵が届くまでは `wikipedia` でゲートに落ちる / 通る**両方**を確認する」と書いているが、
-     下の切り分けのとおり Wikipedia が時間帯によって 0 件しか返さないため、実機で「通る」側を作れていない。
-     つまり**ゲートが正当な `done` を塞いでいないこと（偽陽性が無いこと）の実機裏取りが無い**。
-     スタブでの `happy_path_progress_report_and_result_files`（3 成果物・`counts.sources == 3` で `done`）が代替。
-     鍵（Tavily / Exa）が届いた時点で Phase 20 受け入れ条件 5 と同時に埋める。
+   - 通る側（確認済み）: 人間が GUI から Tavily / Exa の鍵を入れ、下の「DNS」の修正を入れた後、
+     同じ問い（etcd と Kubernetes）の `web-research` タスク `01M2Q6RNTX7RPK733V7DKB1ANT` が
+     **`--check-artifact report.md` と `--check-reviewer` の両方を通って `done`**（`attempts: 0`。再試行なし）。
+     `research.json` の実測は
+     `{"queries": 1, "search_results": 19, "sources": 18, "sources_cited": 16, "unique_domains": 16}` で、
+     閾値（5 / 3 / 2 / 2）をすべて満たす。`report.md` は 18 件の出典を `[n]` で引用した報告になった。
+     **ゲートが正当な `done` を塞いでいないこと（偽陽性が無いこと）を実機で確認できた。**
 5. **共通条件** — `cargo test -p task-worker local_deep_research` **23 passed**（Phase 19 の 12 件 → 23 件）、
    `cargo test --workspace` **777 passed / 0 failed**、`cargo clippy --workspace --all-targets -- -D warnings` exit 0。
 
@@ -2972,9 +2978,50 @@ B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_po
 3. 同じものを**タスクの作業ディレクトリ（cwd）**で実行 → また 0 件。
 4. 3 と**同時刻に**、新しいディレクトリでもう一度実行（対照実験） → **こちらも 0 件**（`counts.queries: 1, search_results: 0`）。
 
-**結論: cwd は関係ない。Wikipedia（LDR 経由）が時間帯によって 0 件を返す。** 2 が成功したのは時間帯の差。
-これは U19-1（このホストに実用的な一般 Web 検索が無い）そのもので、**まさにゲートが捕まえるべき事象**だった。
-鍵付き API（Tavily / Exa）に切り替えるまで、`web-research` の実機確認は不安定なままになる。
+このときの結論は「cwd は関係ない。Wikipedia が時間帯によって 0 件を返す」だったが、**これは誤りだった**。
+真因は下の DNS の問題で、2 が成功したのは「同じプロセスで既に名前解決を済ませていた（キャッシュに乗っていた）」ため。
+
+### 真因: このホストの DNS と LDR の DNS ピン留めの 5 秒（2026-09-17 夕、鍵の到着後に判明）
+
+鍵を入れても Tavily で `search_results: 0` のまま失敗したので追い込んだ結果、**鍵も検索 API も無関係**で、
+原因は名前解決だった。
+
+```
+socket.getaddrinfo(host, AF_INET)   → 0.02s
+socket.getaddrinfo(host, AF_INET6)  → 0.02s
+socket.getaddrinfo(host, AF_UNSPEC) → 5.01s   ← プロセスで最初の 1 回だけ、どのホストでも
+```
+
+glibc は A と AAAA を 1 つの UDP ソケットで並行送信するが、このホストの DNS（`192.168.1.1`）がそれを取りこぼし、
+片方が resolv.conf の既定タイムアウト 5 秒を食う（glibc の single-request 問題）。一方 LDR の SSRF 対策
+（`security/dns_pinning.py`）は `_RESOLVE_TIMEOUT_SECONDS = 5` で **fail-closed**。つまり 0.01 秒差で必ず負け、
+
+```
+requests.ConnectionError: DNS resolution failed while pinning host api.tavily.com
+```
+
+を投げる。**検索エンジン側がこの例外を握りつぶして `[]` を返す**ので、利用者からは「0 件」にしか見えない。
+`api.tavily.com` / `api.exa.ai` / `en.wikipedia.org` の**すべてで再現**した。LDR は run ごとに新しいプロセスなので、
+毎回この「プロセスで最初の 1 回」に当たる。`curl` に同じペイロードを投げると Tavily は HTTP 200 を返す（鍵は正常）。
+
+**したがって U19-1（「このホストからは一般 Web 検索が実用にならない」。mojeek 403 / DuckDuckGo CAPTCHA /
+brave レート制限 / Wikipedia 0 件…）の記述も、少なくとも 0 件系はこの DNS が原因だった可能性が高い。**
+ADR-0029 の「実測」はこの前提で読み直す必要がある。
+
+**対処（root も `/etc/resolv.conf` の変更も不要）**: glibc は `RES_OPTIONS` を読むので、アダプタの `env` に入れる。
+
+```
+RES_OPTIONS=''                     AF_UNSPEC cold: 5.02s
+RES_OPTIONS='single-request'       AF_UNSPEC cold: 0.01s   ✓
+```
+
+`[adapters.local_deep_research].env = { RES_OPTIONS = "single-request" }`（`config/taskd.web-research.example.toml`
+にも同じ注意書き付きで入れた）。これを入れた直後の再実行が上記の `done` である。
+
+**教訓**: 「検索が 0 件」を検索エンジン側の事情（レート制限・CAPTCHA・鍵）だと決めつけた。実際には
+HTTP に到達すらしていなかった。次に同じ症状を見たら、**新しいプロセスで** `AF_UNSPEC` の名前解決時間を測ること。
+なお、この切り分けができたのは ADR-0031 のゲートが「0 件なのに done」を止めていたからで、
+**ゲートが無ければ、それらしい report.md が `done` になって真因に気づかないままだった**。
 
 ### コミット前の監査で直したもの（別文脈の auditor による指摘）
 
@@ -3000,8 +3047,7 @@ D-3（`ensure_secrets_dir` の create → chmod の間の一瞬と、既にあ�
 ### 未解決事項
 
 - U19-2 は**解消**（0 件でも `done` になる経路をゲートで塞いだ）。U19-1 は残る（鍵待ち）。
-- **U21-2（受け入れ条件 4 の未達）**: ゲートの「通る側」を実機で確認できていない（上記）。鍵が届くまで Phase 21 は
-  「条件付き完了」として扱う。
+- U21-2 は**解消**（2026-09-17 夕。鍵到着後に「通る側」を実機で確認。上記）。
 - U21-1: LDR の LangGraph エージェントによる query routing（レビューの提案）は入れていない。
   Tavily / Exa を実際に回して測ってから、必要なら別 ADR で検討する（ADR-0031 §3）。
 - U21-3: browser / data-analysis / presentation の各分野は引き続き未実装（U19-3）。

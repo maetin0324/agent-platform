@@ -91,6 +91,20 @@ manifest を見て、論文の確認は `related-research`、実装・製品の�
   (c) 分野の目的に合わせて `github` / `stackexchange` / `openalex` 等の個別エンジンを指定する。
   既定の例の設定は **`search.tool = "wikipedia"`（鍵なしで必ず動く）**にし、コメントで (a)(b)(c) を案内する。
 
+## 2.5 訂正（2026-09-17 夕）
+
+**§1 の「このホストからは一般 Web 検索がほぼ使えない」という実測（mojeek 403 / DuckDuckGo CAPTCHA /
+brave レート制限 / google・wikipedia 0 件）は、少なくとも 0 件になった分については誤診だった。**
+
+真因は LDR の DNS ピン留め（`security/dns_pinning.py`、`_RESOLVE_TIMEOUT_SECONDS = 5`）と、このホストの
+DNS の相性。glibc が A と AAAA を 1 つの UDP ソケットで並行送信すると `192.168.1.1` が片方を落とし、
+**プロセスで最初の名前解決だけが必ず 5.01 秒**かかる。LDR は 5 秒で fail-closed して
+`ConnectionError: DNS resolution failed while pinning host ...` を投げ、各検索エンジンがその例外を握りつぶして
+`[]` を返すため、利用者からは「0 件」にしか見えない。LDR は run ごとに新しいプロセスなので毎回これに当たる。
+
+対処はアダプタの `env` に `RES_OPTIONS = "single-request"`（glibc に順次問い合わせをさせる。root 不要）。
+詳細と実測値は `docs/PROGRESS.md` の Phase 21 と ADR-0031 §4-4。
+
 ## 3. 採らない
 
 - `ldr-web`（Flask の画面）や `ldr-mcp`（MCP サーバ）を常駐させて HTTP / MCP で叩く

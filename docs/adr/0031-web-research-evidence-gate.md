@@ -89,5 +89,13 @@ min_domains = 2           # 出典の異なるドメイン数
    `search_results == 0` のときは別のメッセージになる。`report.md` は残る。
 3. 閾値を全部 0 にすると従来どおり `done` になる。
 4. 実機（鍵が届いたら）: Tavily を既定にした `web-research` のタスクが `done` になり、`research.json` の件数がゲートを満たす。
-   鍵が届くまでは `wikipedia` で「ゲートに落ちる / 通る」両方を確認する。
+   → **2026-09-17 に充足**。落ちる側（`search_results: 0` で `retryable` な Error）と通る側
+   （`search_results: 19 / sources: 18 / cited: 16 / domains: 16` で `done`）の両方を実機で確認した。
+
+   併せて判明: このホストで**どの検索エンジンでも 0 件になっていた真因は DNS** だった。glibc の A/AAAA 並行送信を
+   ルータの DNS が取りこぼしてプロセス最初の名前解決が 5.01 秒かかり、LDR の DNS ピン留め
+   （`_RESOLVE_TIMEOUT_SECONDS = 5`）が fail-closed して例外を投げ、検索エンジンがそれを握りつぶしていた。
+   アダプタの `env` に `RES_OPTIONS = "single-request"` を入れると直る。**§1 と ADR-0029 の「無料の一般 Web 検索が
+   使えない」という実測は、この前提で読み直す必要がある**（少なくとも 0 件系はこれが原因の可能性が高い）。
+   この切り分けができたのは D2 のゲートが「0 件なのに done」を止めていたからである。
 5. `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / GUI の検査一式。
