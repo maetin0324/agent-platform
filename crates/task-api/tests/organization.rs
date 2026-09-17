@@ -408,10 +408,11 @@ async fn project_detail_returns_the_milestones_and_the_work_tree() {
     .await;
     assert_eq!(outsider.status.as_u16(), 201);
 
-    // `GET /tasks?project=` も同じ絞り込み。
+    // `GET /tasks?project=` も同じ絞り込み。Phase 24（ADR-0033 D4）から、案件を作った直後に
+    // 秘書への対話用タスクが 1 件できるので、この案件のタスクは 2 + 1 件。
     let listed = send(&app, g(&format!("/api/v1/tasks?project={project_id}"))).await;
     assert_eq!(listed.status.as_u16(), 200, "{}", listed.text());
-    assert_eq!(listed.json()["total"], 2);
+    assert_eq!(listed.json()["total"], 3);
     assert_problem(&send(&app, g("/api/v1/tasks?project=nope")).await, 400, "bad_request");
 
     let resp = send(&app, g(&format!("/api/v1/projects/{project_id}"))).await;
@@ -420,7 +421,12 @@ async fn project_detail_returns_the_milestones_and_the_work_tree() {
     assert_eq!(detail["project"]["id"], Value::String(project_id));
     assert_eq!(detail["milestones"].as_array().expect("milestones").len(), 1);
     let tasks = detail["tasks"].as_array().cloned().expect("tasks");
-    assert_eq!(tasks.len(), 2, "only the tasks of this project: {detail}");
+    assert_eq!(tasks.len(), 3, "only the tasks of this project: {detail}");
+    assert_eq!(
+        tasks.iter().filter(|t| t["title"].as_str().is_some_and(|t| t.starts_with("対話: "))).count(),
+        1,
+        "Phase 24: 秘書への最初の対話が 1 件入る"
+    );
     let child_view = tasks.iter().find(|t| t["id"] == child["id"]).expect("child in the tree");
     assert_eq!(child_view["parent_id"], parent["id"]);
     assert_eq!(child_view["depends_on"], json!([parent["id"]]));

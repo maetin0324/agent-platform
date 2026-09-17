@@ -171,6 +171,7 @@ fn compaction_task(
         project_id,
         milestone_id: None,
         assignee: Some(node.id.clone()),
+        conversation: None,
     }
 }
 

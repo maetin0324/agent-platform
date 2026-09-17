@@ -3473,3 +3473,138 @@ Phase 25 の監査で見つかった逸脱を修正した。設計判断は決�
 `cargo test -p task-core` → **100 passed / 0 failed**。`cargo test --workspace` の
 `grep -c "^test result: FAILED"` は **0**。`cargo clippy --workspace --all-targets -- -D warnings`
 は **exit 0**。
+
+---
+
+## Phase 24 — 対話と記憶（ADR-0033 D4/D6。2026-09-17）
+
+SPEC §3.4「組織の木を見て誰に言うかを決め、その担当に直接言う。相手は人なので先週の議論の続きとして
+話せる」と §3.2「各ノードは長期記憶を持つ」「記憶は案件をまたぐ」、そして §7「秘書が最初にすること」を
+入れた。**新しいプロトコルは作っていない**: 話しかけると既存の `tasks` に対話用タスクが 1 件できるだけで、
+返事は既存の結果ファイル（`artifacts/result.json` の `summary`）。判断は全て決定的で、ディスパッチャ・
+ストアに LLM 呼び出しは足していない（DESIGN 原則 1）。migration も足していない（Phase 23 の表を使う）。
+
+### 成果物
+
+- **`crates/task-core/src/message.rs`（新規）** — `Message` / `MessageId` / `MessageRole{User,Node}`、
+  対話用分野の id（`CONVERSATION_GENRE = "secretary"`）、`conversation_title`（`"対話: <先頭 40 字>"`）、
+  `failure_reply`（`"返事できませんでした: …"`）、対話由来の判定。純粋なデータと関数だけ。
+- **`TaskStore` の 2 メソッド** — `message_append` / `message_list(node_id, project_id, limit)`。
+  一覧は**古い順**で、上限を超えるときは**新しい方**を残す（直近のやり取りを渡すため）。
+  `project_id = None` は案件に紐づかない行だけ（案件の行は混ざらない）。
+- **`crates/task-ops/src/conversation.rs`（新規）** — `start`（`messages` に `role = user` を入れ、
+  対話用タスクを作って `Accept` まで進める）、`record_reply`（run の終わりを `role = node` の行にする）、
+  `cross_department_question`（SPEC §3.1「部をまたぐ連携は秘書が認める」の決定的な判定）。
+- **API 2 本**（`docs/gui/api.md` §2 の表 50〜51、§3.50〜3.51）— `GET /org/{id}/messages`（読み取り）と
+  `POST /org/{id}/messages`（**管理系**、202 `{message_id, task_id}`）。実装は
+  `crates/task-api/src/conversation.rs`（新規。`handlers.rs` にはルート 2 行と `POST /projects` の 1 行だけ）。
+- **秘書の最初の返事** — `POST /projects` の直後に、秘書ノードへ `request` を本文とした対話を 1 回起こす。
+  返事に (a) 理解の確認 (b) 大まかな方針 (c) 最初の途中目標の提案 を含めるのは**プロンプトの仕事**で、
+  `config/org.example.toml` の秘書の `brief` と `config/taskd.example.toml` の `[[roles]] secretary` の
+  `instructions` に書いた。コードは対話を起こすだけ。
+- **対話用分野** — `config/taskd.example.toml` に `[[roles]] id = "secretary"`（`adapter = "claude-code"`、
+  `tier = "standard"`）と `[[genres]] id = "secretary"`（ADR-0028 の形）を足し、`config/org.example.toml` の
+  秘書に `genre = "secretary"` を当てた。**分野を持たないノード**（部・論文執筆課・データ整理課・インフラ部）に
+  話しかけたときは、この対話用分野で run する（決定的なフォールバック）。
+- **`crates/task-worker/src/preamble.rs`（新規）** — 前置きを 1 か所で組む。並びは
+  役職と brief → 永続の認可（Phase 26 が埋める。今は空）→ 記憶 → 直近のやり取り → 役割の指示文 →
+  記憶の書き方。`claude-code` / `codex` / `acp`（`claude_code::build_prompt` を共有）と `paperqa` は
+  `render`、`local-deep-research` は `render_without_role` を使う。
+- **`crates/task-worker/src/memory.rs`（新規）** — `[memory] dir` の下の `<node_id>/notes.md` と
+  `<node_id>/projects/<project_id>.md`。run の前に各 8,000 字（**新しい方＝末尾**を残す）で読み、run の後に
+  結果ファイルの `memory` を `- <日付>: <一行>` で追記する。ディレクトリは 0700。
+- **`RunContext` の 5 フィールド**（`node` / `memory` / `conversation` / `standing_rules` / `organization`）と
+  **`Task.conversation`**、**`DelegateTask.assignee`** / **`PlanOutput.tasks[].assignee`**。
+  全て `#[serde(default, skip_serializing_if = …)]` で、空なら JSON に出ない。`PROTOCOL_VERSION` は 4。
+- **`assignee` の解決**（`task_core::delegate::ChildSpec` / `resolve_child_defaults`）— 分野は
+  明示 > `role` が一意に属する分野 > **担当のノードの分野** > 親の分野。`role` を書いたときは
+  tier / アダプタ / 予算はその役割が勝ち、`assignee` は「誰の仕事か」だけを表す（ADR-0016 D1 の優先順。
+  監査 D-2 の指摘に合わせた）。組織に無い id は担当にしない。
+- **部をまたぐ委譲**（SPEC §3.1）— `delegate.json` の `assignee` が委譲元と別の部なら、子を作らずに
+  `Event::QuestionRaised` を残し、run の終わりに `Trigger::WorkerQuestion` へ回す（既存の `Question` 終端に
+  乗せただけ。`approvals` への接続は Phase 26）。
+
+### 受け入れ条件と証拠
+
+1. **store の対話** — `cargo test -p task-core`
+   （`messages_are_appended_and_listed_oldest_first_per_node_and_project`: ノードごと・案件ごとに分かれ、
+   古い順、`limit` は新しい方を残す、`project = None` に案件の行は混ざらない、知らないノードは空）。
+2. **対話（偽アダプタで run まで）** — `cargo test -p task-dispatch`
+   （`a_conversation_run_answers_in_messages_and_writes_its_memory`: 対話用タスクが `done` になり、
+   `summary` が `role = node` の行（`run_id` 付き）になる。前置きに役職・brief・記憶・直近のやり取りが載る。
+   `a_failed_conversation_run_says_it_could_not_answer`: `Error` の run は「返事できませんでした: …」）。
+   API 側は `cargo test -p task-api --test conversation` **7 passed**（202 の形、対話用タスクの中身、
+   未知のノードは 404、空文の 422、管理系の 401 を**トークンあり構成と `token_file` 未設定構成の両方**で、
+   案件ごとのスレッド）。
+3. **秘書の最初の返事** — 同上 `creating_a_project_asks_the_secretary_first`（`POST /projects` の直後に
+   秘書の対話用タスクが **1 件**でき、依頼文がそのまま `role = user` の行になる）。
+   `a_project_can_be_created_without_an_organization`（秘書がいない構成でも 201）。
+4. **記憶** — `cargo test -p task-worker`（`memory::tests` 5 件: 無ければ空、日付付き箇条書きで追記、
+   空や形違いは何もしない、8,000 字で切って新しい方を残す、0700）と `cargo test -p task-dispatch`
+   （`without_a_memory_dir_nothing_is_read_or_written`）。設定は `cargo test -p taskd --lib`
+   （`memory_dir_is_resolved_created_with_0700_and_passed_to_the_dispatcher`）。
+5. **前置き** — `cargo test -p task-worker`（`preamble::tests` 4 件: 並び、**空の `RunContext` では空文字**、
+   役割だけのときは Phase 23 と同じ `## Role:` 節、記憶が空でも書き方の指示は出る）。
+   `build_prompt_puts_the_person_preamble_between_the_run_line_and_the_objective` で
+   `build_prompt` の出力が Phase 23 と変わらないことも見ている（既存のプロンプトのテストは 1 件も変えていない）。
+6. **計画・委譲の `assignee` と部またぎ** — `cargo test -p task-core`
+   （`materialize_records_the_assignee_and_uses_its_genre_only_when_no_role_is_given`、
+   `materialize_carries_the_assignee_and_uses_its_genre_only_without_a_role`）、`cargo test -p task-ops`
+   （`a_delegation_to_another_department_becomes_a_question`）、`cargo test -p task-dispatch`
+   （`a_delegation_across_departments_asks_the_secretary_instead_of_creating_children`: 子は 0 件で親は
+   `blocked`、`a_delegation_inside_the_same_department_still_creates_children`: 同じ部なら子ができる）。
+7. **共通条件** — `cargo test --workspace`: **882 passed / `grep -c "^test result: FAILED"` = 0**
+   （Phase 23 の 846 から +36）。`cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。
+   テスト以外に `unwrap()` / `expect()` は無い（新規 5 ファイルと触った全ファイルで確認）。
+   ディスパッチャ・ストアに LLM 呼び出しは無い。`UPDATE_SCHEMA=1` で `docs/api/v1/*.json` と
+   `docs/protocol/*.json` を再生成（`Task` と `RunContext` と `PlanOutput` が変わったため 4 ファイル）。
+
+### 判断したこと（ADR-0033 に無い細部）
+
+- **対話由来の印は `Task.conversation: Option<MessageId>`**（`json` 列の中だけ。DB の列も migration も
+  足していない）。指示は「足りなければ `inputs` で表す」だったが、`inputs` は
+  `Workspace::prepare` が**実ファイルとして `inputs/<name>` に配置する**列で、偽の項目を入れると run が
+  `input artifact not found` で落ちる（実際に落として気付いた）。`Task` の任意フィールドなら導入前の
+  JSON・DB 行はそのまま読め、列は増えない。
+- **対話用タスクに受け入れ条件は無い**（`acceptance: []`）。返事に合否は無いので、レビューは素通りして
+  そのまま `done` になる。`task_ops::add` は空の `acceptance` を拒否するので、対話用タスクは
+  `task_ops::conversation` が `Task` を直接組み立てる（`create_task` → `Trigger::Accept` で `ready`）。
+- **対話用 run の予算は役割の既定より強い**（`max_turns = 6` / `max_wall_secs = 300` / `max_retries = 1`）。
+  「ひと言返す」仕事なので、実装 run 用の大きな予算を引き継がない。`tier` / `adapter` は役割の既定に従う。
+  優先度は 1（人が画面の前で待っているので、通常のタスクより少しだけ前に出す）。
+- **記憶は末尾（新しい方）を 8,000 字残す**。追記なので末尾が直近の内容。切ったときは先頭に
+  `…（古い記憶は省略）` を置き、行の途中で切れた断片は捨てる。
+- **記憶の追記はディスパッチャが結果ファイルを読んで行う**（アダプタごとに実装しない）。`run` の終わり方に
+  依らず 1 回試し、`[memory]` が無い・担当がいない・`memory` が無い・形が違うときは何もしない。
+- **`local-deep-research` だけ役割の指示文を前置きしない**（`preamble::render_without_role`）。ADR-0029 /
+  Phase 19 で「検索エンジンに渡す問いを役割の文面で濁さない」と決めてテストもあるため。記憶と直近の
+  やり取りは載せる（「人」であることは分野に依らない）。
+- **組織図は `available_genres` を渡す run にだけ渡す**（Execute / Approval / Plan）。Reviewer run と
+  `taskctl worker run`、プロバイダの疎通確認には渡さない（判定は成果物と条件だけで決める）。
+- **部をまたぐ委譲の質問は run の自己申告より優先する**。委譲を止めた run が `done` を返しても、
+  子が作られていないので `Question` に倒す（`Trigger::WorkerQuestion`）。
+- **`GET /org/{id}/messages` の `project`**: ULID でない文字列は 404 `project_not_found`、存在しない
+  ULID は**空の一覧**（スレッドが無いだけ）。
+
+### 未解決事項
+
+- U24-1: `scripts/sync-gui-docs.sh --check` は **out of date** のまま（Phase 23 の U23-1 に §3.50〜3.51 と
+  表の 50〜51 が加わった）。今回も同期スクリプトは実行していない。G13（GUI）の担当が同期する。
+- U24-2: `context.standing_rules` は**常に空**（Phase 26 が埋める）。前置きの節も今は出ない。
+- U24-3: `question` で終わった対話 run の本文は、そのまま返事として `messages` に入るだけで
+  `approvals` に繋がっていない（Phase 26）。人が答える経路は従来の `POST /tasks/{id}/answer`。
+- U24-4: 対話用タスクは `GET /tasks` にも出る（裏方のはずのタスク一覧に「対話: …」が混ざる）。
+  GUI（G13）で隠すか、`GET /tasks` に「対話を除く」絞り込みを足すかは G13 の担当と決めたい。
+- U24-5: 記憶の中身は誰も要約しない（際限なく伸び、前置きでは末尾 8,000 字だけ見える）。
+  溜まってから「記憶の圧縮 run」を考える（報告の圧縮＝Phase 25 と同じ形にできるはず）。
+- U24-6: 秘書の返事は `projects.secretary_summary` に書いていない（`messages` にしか残らない）。
+  GUI が案件の画面で「秘書の理解と方針」を出したくなったら、返事を写すか列を消すかを決める。
+- U24-7: 実機確認（ローカル Qwen で秘書の最初の返事まで通す）は未実施。ADR-0033 §4 の「実機」の行。
+
+### 提案
+
+- P-74: `messages` に `task_id` 列を足すと、対話の 1 往復と run を GUI から直接たどれる（今は
+  `Task.conversation` → 人の発言 id、返事 → `run_id` の 2 段で辿る必要がある）。Phase 25/26 の表と
+  一緒に migration を足すなら、そのときに。
+- P-75: 対話用分野の id を `secretary` 固定にしたが、これは「対話に使うハーネス」であってノードの役職では
+  ない。`[[genres]] id = "conversation"` に改名した方が読みやすい（今は SPEC の言葉に寄せた）。

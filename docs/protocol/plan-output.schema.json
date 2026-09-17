@@ -93,6 +93,13 @@
           },
           "type": "array"
         },
+        "assignee": {
+          "description": "ADR-0033 D4（Phase 24）: 子を割り当てる組織のノード（`org_nodes.id`。SPEC §3.3「案件は組織の上から\n入り、分解されて下へ流れる」）。プランナーは普段これだけを書けばよく、`role` は必要なときだけ書く。\n`role` を書いたときは tier / adapter / 予算はその役割が勝ち、`assignee` は「誰の仕事か」だけを表す。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "depends_on": {
           "default": [],
           "description": "同じ `tasks` 配列内のインデックス。",

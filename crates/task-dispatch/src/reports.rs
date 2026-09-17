@@ -279,6 +279,7 @@ mod tests {
             project_id: project,
             milestone_id: None,
             assignee: assignee.map(str::to_string),
+            conversation: None,
         }
     }
 

@@ -36,6 +36,7 @@ fn task(dir: &std::path::Path) -> Task {
         project_id: None,
         milestone_id: None,
         assignee: None,
+        conversation: None,
     }
 }
 

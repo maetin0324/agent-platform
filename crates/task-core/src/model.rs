@@ -182,6 +182,11 @@ pub struct Task {
     /// 役割・分野より先に見る。無ければ従来どおり（互換）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
+    /// ADR-0033 D4（Phase 24）: 対話由来のタスクなら、きっかけになった人の発言（`messages.id`）。
+    /// run が終わると、その結果が `assignee` のノードの返事として `messages` に入る。
+    /// **DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<crate::message::MessageId>,
 }
 
 /// ADR-0016 D1: `[[roles]]` の 1 行。役割ごとの既定（タスクの値 > 役割の既定 > 全体の既定）とプロンプトに前置きする指示文。

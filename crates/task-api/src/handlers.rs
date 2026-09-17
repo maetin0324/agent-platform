@@ -105,6 +105,11 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/secrets/{id}", put(put_secret).delete(delete_secret))
         .route("/api/v1/org", get(org_list).post(create_org_node))
         .route("/api/v1/org/{id}", patch(patch_org_node).delete(delete_org_node))
+        // ADR-0033 D4（Phase 24）: 対話。実装は `crate::conversation`。
+        .route(
+            "/api/v1/org/{id}/messages",
+            get(crate::conversation::list_messages).post(crate::conversation::post_message),
+        )
         .route("/api/v1/projects", get(project_list).post(create_project))
         .route("/api/v1/projects/{id}", get(project_detail).patch(patch_project))
         .route("/api/v1/projects/{id}/milestones", post(create_milestone))
@@ -399,6 +404,8 @@ async fn create_project(State(state): State<ApiState>, RawQuery(raw): RawQuery, 
             message: "request must not be blank".into(),
         }]));
     }
+    let roles = state.inner.roles.clone();
+    let genres = state.inner.genres.clone();
     let project = state
         .blocking(move |store| {
             let now = OffsetDateTime::now_utc();
@@ -413,6 +420,9 @@ async fn create_project(State(state): State<ApiState>, RawQuery(raw): RawQuery, 
                 updated_at: now,
             };
             store.project_create(&project).map_err(store_problem)?;
+            // SPEC §7 / ADR-0033 D4: 案件を受けたら、秘書が最初に「理解の確認・大まかな方針・最初の
+            // 途中目標の提案」を返す。ここは対話を 1 回起こすだけ（中身はプロンプトの仕事）。
+            crate::conversation::greet_the_secretary(store, &project, &roles, &genres);
             Ok(project)
         })
         .await?;

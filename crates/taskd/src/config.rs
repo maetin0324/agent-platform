@@ -99,9 +99,22 @@ pub struct Config {
     /// ADR-0030 D1: GUI から預かる API キー等の置き場所。無ければこの機能は無効（管理 API は 409）。
     #[serde(default)]
     pub secrets: Option<SecretsConfig>,
+    /// ADR-0033 D6: 組織のノードごとの長期記憶の置き場所。無ければ記憶を読まないし書かない。
+    #[serde(default)]
+    pub memory: Option<MemoryConfig>,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+}
+
+/// `[memory]`（ADR-0033 D6）: 組織のノードごとの長期記憶。`<dir>/<node_id>/notes.md` と
+/// `<dir>/<node_id>/projects/<project_id>.md`。中身は run の前に前置きされ、結果ファイルの `memory` が
+/// 日付付きの箇条書きで追記される。人の好みや相談の中身が入るので `dir` は 0700 で作る。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryConfig {
+    /// 相対なら設定ファイル基準。`Config::load` が絶対化する。
+    pub dir: PathBuf,
 }
 
 /// `[secrets]`（ADR-0030 D1）: 1 秘密 = 1 ファイル（ファイル名 = id、中身 = 値 1 行）。`dir` を 0700 で作る。
@@ -865,6 +878,12 @@ impl Config {
         {
             secrets.dir = base.join(&secrets.dir);
         }
+        // ADR-0033 D6: `[memory] dir` も同じ扱い。
+        if let Some(memory) = &mut cfg.memory
+            && memory.dir.is_relative()
+        {
+            memory.dir = base.join(&memory.dir);
+        }
         // ADR-0027 D3: `[adapters.paperqa]` のパス設定は、他のパス設定と同じく設定ファイルのディレクトリ基準で
         // 絶対化する。`settings` は `pqa -s` に渡す文字列（拡張子無し）だが、パスの形をしているので同様に扱う。
         if let Some(dir) = &cfg.adapters.paperqa.paper_directory
@@ -1261,6 +1280,8 @@ impl Config {
                 check_model: a.check_model.clone(),
                 fallback_cooldown_secs: self.error_cooldown_secs,
             }),
+            // ADR-0033 D6: `[memory]` が無ければ記憶を読まないし書かない。
+            memory_dir: self.memory.as_ref().map(|m| m.dir.clone()),
         }
     }
 
@@ -1295,6 +1316,15 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// ADR-0033 D6: `[memory] dir` を 0700 で作る（無ければ）。`[memory]` が無ければ何もしない。
+    pub fn ensure_memory_dir(&self) -> Result<(), ConfigError> {
+        let Some(memory) = &self.memory else {
+            return Ok(());
+        };
+        task_worker::memory::create_dir_all_0700(&memory.dir)
+            .map_err(|source| ConfigError::Read { path: memory.dir.clone(), source })
     }
 
     /// ADR-0030 D1: `[secrets] dir` を 0700 で作る（無ければ）。`[secrets]` が無ければ何もしない。
@@ -1444,6 +1474,15 @@ id = "implementer"
 [[roles]]
 id = "literature-reader"
 
+[[roles]]
+id = "secretary"
+
+[[genres]]
+id = "secretary"
+description = "人と話す"
+default_role = "secretary"
+roles = ["secretary"]
+
 [[genres]]
 id = "coding"
 description = "コードを書く"
@@ -1495,6 +1534,8 @@ roles = ["literature-reader"]
         let order: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(order[0], "secretary");
         assert!(order.iter().position(|id| *id == "coding") < order.iter().position(|id| *id == "coding-poc"));
+        // ADR-0033 D4（Phase 24）: 秘書は対話用の分野を持つ。
+        assert_eq!(nodes.iter().find(|n| n.id == "secretary").unwrap().genre.as_deref(), Some("secretary"));
         let survey = nodes.iter().find(|n| n.id == "research-survey").unwrap();
         assert_eq!(survey.kind, OrgKind::Section);
         assert_eq!(survey.genre.as_deref(), Some("literature"));
@@ -2633,6 +2674,42 @@ roles = ["lead"]
         assert!(no_secrets.secrets.is_none());
         // 未知キーは拒否。
         assert!(toml::from_str::<Config>("[secrets]\nbogus = 1\n").is_err());
+    }
+
+    /// ADR-0033 D6（Phase 24）: `[memory] dir` は設定ファイル基準で絶対化され、0700 で作られ、
+    /// `dispatch_config()` に渡る。`[memory]` が無ければ記憶は無効（`memory_dir = None`）。
+    #[test]
+    fn memory_dir_is_resolved_created_with_0700_and_passed_to_the_dispatcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[memory]\ndir = \"memory\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let memory = cfg.memory.as_ref().expect("[memory]");
+        assert!(memory.dir.is_absolute());
+        assert_eq!(memory.dir, dir.path().join("memory"));
+        assert_eq!(cfg.dispatch_config().memory_dir.as_ref(), Some(&memory.dir));
+
+        cfg.ensure_memory_dir().unwrap();
+        assert!(memory.dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&memory.dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // 2 回目は何もしない（既にある）。
+        cfg.ensure_memory_dir().unwrap();
+
+        let without: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(without.memory.is_none());
+        assert!(without.dispatch_config().memory_dir.is_none());
+        assert!(without.ensure_memory_dir().is_ok());
+        // 知らないキーは拒否する（他の節と同じ）。
+        assert!(toml::from_str::<Config>("[memory]\ndir = \"m\"\nbogus = 1\n").is_err());
     }
 
     /// `ensure_secrets_dir` は `[secrets] dir` を 0700 で作る（無ければ）。`[secrets]` が無ければ何もしない。

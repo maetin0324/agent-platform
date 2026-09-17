@@ -219,8 +219,9 @@ pub fn plan_delegation(
         }
     }
 
-    // 5. 組み立て。
-    let accepted = task_core::materialize_delegated(parent, proposals, &accepted_indices, roles, genres, now);
+    // 5. 組み立て。ADR-0033 D4: `assignee` の解決に組織図が要る（ストアの読み取りだけ。LLM は使わない）。
+    let org = store.org_list()?;
+    let accepted = task_core::materialize_delegated(parent, proposals, &accepted_indices, &org, roles, genres, now);
 
     Ok(DelegationOutcome { accepted, rejected })
 }
@@ -252,6 +253,7 @@ mod tests {
             genre: None,
             depends_on: deps,
             tier: None,
+            assignee: None,
         }
     }
 
@@ -288,6 +290,7 @@ mod tests {
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         }
     }
 

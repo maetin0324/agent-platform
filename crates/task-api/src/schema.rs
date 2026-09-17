@@ -13,6 +13,7 @@ use task_ops::plan::NewPlanSpec;
 use task_ops::replay::ReplayReport;
 use task_ops::view::{TaskDetail, TaskList};
 
+use crate::conversation::{MessageAccepted, MessageList, MessagePostBody};
 use crate::types::{
     AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView, AnswerBody, ArtifactList,
     CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters, ConfigView, DaemonView, DecisionBody,
@@ -79,6 +80,10 @@ pub struct ApiV1Schema {
     pub reports_read: crate::reports::ReportsReadBody,
     pub reports_read_result: crate::reports::ReportsReadResult,
     pub reports_notified: crate::reports::ReportsNotifiedResult,
+    /// Phase 24（ADR-0033 D4）: 対話（`POST /org/{id}/messages` と `GET /org/{id}/messages`）。
+    pub message_post: MessagePostBody,
+    pub message_accepted: MessageAccepted,
+    pub message_list: MessageList,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,
