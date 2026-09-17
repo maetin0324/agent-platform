@@ -401,9 +401,9 @@ pub fn seed_org_if_empty(store: &dyn TaskStore, config: &Config) -> Result<usize
     }
     let now = OffsetDateTime::now_utc();
     let nodes = config.org_nodes(now);
-    for node in &nodes {
-        store.org_upsert(node)?;
-    }
+    // 監査 D-4: 1 トランザクションで蒔く。途中の 1 件が不正でも部分的に書かれた組織が残らない
+    // （残ると次回起動時は `org_list` が空でなくなり、二度と補完されない）。
+    store.org_seed(&nodes)?;
     tracing::info!(count = nodes.len(), "org: seeded the organization from the config");
     Ok(nodes.len())
 }
@@ -1098,6 +1098,54 @@ roles = ["literature-reader"]
         assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 0);
         assert_eq!(store.org_get("secretary").unwrap().unwrap().name, "本人");
         assert_eq!(store.org_list().unwrap().len(), 10);
+    }
+
+    /// 監査 D-4: `org_include` の並びに木としての不整合（種類の順序。`Config::load` は循環・順序までは
+    /// 見ない。org.rs のコメント参照）があれば、`seed_org_if_empty` は 1 件も書かずにエラーを返す
+    /// （部分的に蒔かれた組織が残ると、次回起動時は `org_list` が空でなくなり二度と補完されない）。
+    #[test]
+    fn seed_org_if_empty_writes_nothing_when_one_node_breaks_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("org.toml"),
+            r#"
+[[org]]
+id = "secretary"
+name = "秘書"
+kind = "secretary"
+
+[[org]]
+id = "research"
+name = "研究部"
+kind = "department"
+parent_id = "secretary"
+
+[[org]]
+id = "research-survey"
+name = "調査課"
+kind = "section"
+parent_id = "research"
+
+[[org]]
+id = "research-survey-sub"
+name = "壊れた子"
+kind = "section"
+parent_id = "research-survey"
+"#,
+        )
+        .unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "db = \"taskd.sqlite3\"\nworkspace_root = \"ws\"\norg_include = \"org.toml\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let store = SqliteStore::open(&config.db).unwrap();
+
+        let err = seed_org_if_empty(&store, &config).unwrap_err();
+        assert!(err.to_string().contains("placed under"), "{err}");
+        assert!(store.org_list().unwrap().is_empty(), "nothing is written on failure");
     }
 
     /// `org_include` が無い設定では何も蒔かない。

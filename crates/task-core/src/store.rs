@@ -418,6 +418,12 @@ pub trait TaskStore: Send + Sync {
     /// 挿入または更新。`crate::org::validate_upsert` を通してから書く（secretary は 1 つ、親は既存、
     /// 自分を祖先にできない、secretary > department > section）。`created_at` は既存行のものを保つ。
     fn org_upsert(&self, node: &OrgNode) -> Result<OrgNode, StoreError>;
+    /// 監査 D-4: 設定からの種蒔き専用。`nodes` を渡された順に検証しながら**1 トランザクション**で書く
+    /// （後の要素は前の要素を `existing` に含めて検証できるので、`secretary` → `department` → `section`
+    /// の順に並んでいれば通る）。途中の 1 件でも `crate::org::validate_upsert` に落ちたら、それより前の
+    /// 分も含めて何も書かない（部分的に蒔かれた組織が残ると、次回起動時は `org_list` が空でなくなり
+    /// 補完されないため）。
+    fn org_seed(&self, nodes: &[OrgNode]) -> Result<(), StoreError>;
     /// 削除。そのノードを `assignee` に持つ未終了タスクがあれば `StoreError::InUse`、
     /// 子ノードがあっても `StoreError::InUse`（木を宙ぶらりんにしない）。無い id は `Ok(false)`。
     fn org_delete(&self, id: &str) -> Result<bool, StoreError>;
@@ -1533,6 +1539,36 @@ impl TaskStore for SqliteStore {
         )?;
         tx.commit()?;
         Ok(stored)
+    }
+
+    fn org_seed(&self, nodes: &[OrgNode]) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut existing = Self::org_list_tx(&tx)?;
+        for node in nodes {
+            crate::org::validate_upsert(&existing, node)?;
+            tx.execute(
+                "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
+                 kind = excluded.kind, genre = excluded.genre, brief = excluded.brief, \
+                 position = excluded.position, updated_at = excluded.updated_at",
+                params![
+                    node.id,
+                    node.parent_id,
+                    node.name,
+                    node.kind.as_str(),
+                    node.genre,
+                    node.brief,
+                    node.position,
+                    format_rfc3339(node.created_at)?,
+                    format_rfc3339(node.updated_at)?,
+                ],
+            )?;
+            existing.push(node.clone());
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn org_delete(&self, id: &str) -> Result<bool, StoreError> {
@@ -3250,6 +3286,32 @@ mod tests {
         store.org_upsert(&infra).unwrap();
         let ids: Vec<String> = store.org_list().unwrap().into_iter().map(|n| n.id).collect();
         assert_eq!(ids, vec!["secretary".to_string(), "infra".into(), "coding".into()]);
+    }
+
+    /// 監査 D-4: `org_seed` は 1 トランザクション。途中の 1 件が不正（親が居ない）なら、それより前の
+    /// 行も含めて何も書かれない（部分的に蒔かれた組織が残らない）。全件が正しければ渡した順に入る。
+    #[test]
+    fn org_seed_writes_nothing_when_one_node_is_invalid() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let nodes = vec![
+            org_node("secretary", None, OrgKind::Secretary),
+            org_node("coding", Some("secretary"), OrgKind::Department),
+            // 親が存在しない: この 1 件が不正。
+            org_node("orphan", Some("ghost"), OrgKind::Section),
+        ];
+        let err = store.org_seed(&nodes).unwrap_err();
+        assert!(matches!(err, StoreError::Org(OrgError::UnknownParent { .. })), "{err}");
+        assert!(store.org_list().unwrap().is_empty(), "nothing is written on failure");
+
+        let ok_nodes = vec![
+            org_node("secretary", None, OrgKind::Secretary),
+            org_node("coding", Some("secretary"), OrgKind::Department),
+            org_node("poc", Some("coding"), OrgKind::Section),
+        ];
+        store.org_seed(&ok_nodes).unwrap();
+        // `org_list` は position（同値なら id）の昇順で返す。全ノードが position = 0 なので id 順になる。
+        let ids: Vec<String> = store.org_list().unwrap().into_iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec!["coding".to_string(), "poc".into(), "secretary".into()]);
     }
 
     #[test]

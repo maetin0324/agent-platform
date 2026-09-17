@@ -230,9 +230,11 @@ pub fn create_task_with_roles(
             )));
         }
     }
-    // ADR-0033 D2: `assignee` があれば、その組織ノードの分野（`org_nodes.genre`）→ その分野の
-    // `default_role` → 役割の既定、を**役割・分野より先に**見る（解決は決定的。LLM は使わない）。
-    // `assignee` が無ければ `org_role` は `None` のままなので、従来の解決順がそのまま残る。
+    // ADR-0033 D2（監査 D-2）: `assignee` があれば、その組織ノードの分野（`org_nodes.genre`）→ その分野の
+    // `default_role` を引いて `org_role` に持つ。ただし解決順は task > role > assignee > genre.default_role >
+    // 全体の既定なので、`org_role` が効くのは **`spec.role` が明示されていないとき** だけ（下の budget /
+    // worker_hint の組み立てで `role` を `org_role` より先に見る）。`assignee` が無ければ `org_role` は
+    // `None` のまま。
     let (assignee_genre, org_role) = match spec.assignee.as_deref() {
         Some(assignee) => {
             let org = store.org_list()?;
@@ -289,18 +291,20 @@ pub fn create_task_with_roles(
         },
     };
 
-    // ADR-0027 D1: tier / adapter / budget = タスクの値 > 役割の既定 > 分野の既定（`default_role` の役割）> 全体の既定。
+    // ADR-0033 D2（監査 D-2）: tier / adapter / budget = タスクの値 > 役割の既定（`role` を明示） >
+    // `assignee` 由来の既定（ノードの分野の `default_role`）> 分野の既定（`genre` から引いた `default_role`）>
+    // 全体の既定。`role` が `assignee` より先に来る（ADR-0016 D1「タスクの値 > 役割の既定」に揃える）。
     let budget = Budget {
         max_turns: spec
             .max_turns
-            .or(org_role.and_then(|r| r.max_turns))
             .or(role.and_then(|r| r.max_turns))
+            .or(org_role.and_then(|r| r.max_turns))
             .or(genre_role.and_then(|r| r.max_turns))
             .unwrap_or(DEFAULT_MAX_TURNS),
         max_wall_secs: spec
             .max_wall_secs
-            .or(org_role.and_then(|r| r.max_wall_secs))
             .or(role.and_then(|r| r.max_wall_secs))
+            .or(org_role.and_then(|r| r.max_wall_secs))
             .or(genre_role.and_then(|r| r.max_wall_secs))
             .unwrap_or(DEFAULT_MAX_WALL_SECS),
         max_retries: spec.max_retries,
@@ -320,14 +324,14 @@ pub fn create_task_with_roles(
         worker_hint: WorkerHint {
             tier: spec
                 .tier
-                .or(org_role.and_then(|r| r.tier))
                 .or(role.and_then(|r| r.tier))
+                .or(org_role.and_then(|r| r.tier))
                 .or(genre_role.and_then(|r| r.tier))
                 .unwrap_or(DEFAULT_TIER),
             adapter: spec
                 .adapter
-                .or_else(|| org_role.and_then(|r| r.adapter.clone()))
                 .or_else(|| role.and_then(|r| r.adapter.clone()))
+                .or_else(|| org_role.and_then(|r| r.adapter.clone()))
                 .or_else(|| genre_role.and_then(|r| r.adapter.clone())),
         },
         workspace,
@@ -555,6 +559,26 @@ mod tests {
         assert_eq!(task.worker_hint.tier, Tier::Frontier, "the task value wins");
         assert_eq!(task.budget.max_turns, 33);
         assert_eq!(task.worker_hint.adapter.as_deref(), Some("paperqa"), "still filled from the assignee");
+
+        // 監査 D-2: `role` を明示すると、`role` の tier/adapter が `assignee` 由来の既定より勝つ
+        // （解決順は task > role > assignee > genre.default_role）。`role` に無いフィールド（ここでは
+        // `max_turns`）は次の階層（assignee の既定）まで降りて埋まる。`assignee` は常に記録される。
+        let mut spec = base_spec();
+        spec.assignee = Some("research-survey".into());
+        spec.role = Some("lead".into());
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("role wins over assignee");
+        assert_eq!(task.role.as_deref(), Some("lead"));
+        assert_eq!(task.assignee.as_deref(), Some("research-survey"), "assignee is still recorded");
+        assert_eq!(task.worker_hint.tier, Tier::Frontier, "the role's tier wins over the assignee's default");
+        assert_eq!(
+            task.worker_hint.adapter.as_deref(),
+            Some("claude-code"),
+            "the role's adapter wins over the assignee's default"
+        );
+        assert_eq!(
+            task.budget.max_turns, 5,
+            "the role has no max_turns of its own, so the assignee's default fills it"
+        );
 
         let mut spec = base_spec();
         spec.assignee = Some("research-survey".into());

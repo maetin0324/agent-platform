@@ -220,6 +220,18 @@ pub fn validate_upsert(existing: &[OrgNode], node: &OrgNode) -> Result<(), OrgEr
             parent: parent.kind.as_str(),
         });
     }
+    // 監査 D-1: `kind` を変える更新（`PATCH`）は、自分自身と親だけでなく、既にぶら下がっている子とも
+    // 整合しなければならない。そうしないと「department → section」のような変更で、既存の子（section）
+    // が「section の下に section」という壊れた木を作ってしまう（そのまま気づかれず、以後その子は
+    // 名前の変更すら拒否され続ける）。
+    for child in existing.iter().filter(|n| n.parent_id.as_deref() == Some(node.id.as_str())) {
+        if node.kind.depth() >= child.kind.depth() {
+            return Err(OrgError::BadNesting {
+                child: child.kind.as_str(),
+                parent: node.kind.as_str(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -405,6 +417,29 @@ mod tests {
             Err(OrgError::BadNesting { .. })
         ));
         validate_upsert(&existing, &node("perf", Some("coding"), OrgKind::Section)).expect("ok");
+    }
+
+    /// 監査 D-1: `PATCH /org/{id}` で `kind` を変える更新は、既にぶら下がっている子とも整合しなければ
+    /// ならない。子を持つ `department` を `section` に変えようとすると「section の下に section」になり
+    /// 拒否される。子が無ければ通る。
+    #[test]
+    fn changing_kind_is_rejected_if_it_would_break_an_existing_childs_nesting() {
+        let existing = vec![
+            node("secretary", None, OrgKind::Secretary),
+            node("coding", Some("secretary"), OrgKind::Department),
+            node("frontend", Some("coding"), OrgKind::Section),
+        ];
+        // coding（部）を section に変えると、既にぶら下がる frontend（課）が「section の下の section」になる。
+        assert!(matches!(
+            validate_upsert(&existing, &node("coding", Some("secretary"), OrgKind::Section)),
+            Err(OrgError::BadNesting { .. })
+        ));
+        // 子が無ければ kind を変えても通る。
+        let childless = vec![
+            node("secretary", None, OrgKind::Secretary),
+            node("infra", Some("secretary"), OrgKind::Department),
+        ];
+        validate_upsert(&childless, &node("infra", Some("secretary"), OrgKind::Section)).expect("no children, ok");
     }
 
     #[test]

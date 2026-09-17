@@ -349,9 +349,10 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHin
         role: None,
         genre: None,
         aggregate: false,
-        project_id: None,
-        milestone_id: None,
-        assignee: None,
+        // ADR-0033 D2（監査 D-3）: 派生タスクは親の案件・途中目標・担当を継ぐ。
+        project_id: subject_task.project_id,
+        milestone_id: subject_task.milestone_id,
+        assignee: subject_task.assignee.clone(),
     }
 }
 
@@ -521,6 +522,21 @@ mod tests {
             milestone_id: None,
             assignee: None,
         }
+    }
+
+    /// ADR-0033 D2（監査 D-3）: 合成 `Review` タスクは親の `project_id` / `milestone_id` / `assignee` を継ぐ。
+    #[test]
+    fn synthetic_review_task_inherits_the_subjects_project_milestone_and_assignee() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut subject = task_with(vec![Check::Reviewer], dir.path());
+        subject.project_id = Some(ProjectId::new());
+        subject.milestone_id = Some(MilestoneId::new());
+        subject.assignee = Some("research-survey".into());
+        let hint = WorkerHint { tier: Tier::Standard, adapter: None };
+        let review = synthetic_review_task(&subject, "run-1", &hint);
+        assert_eq!(review.project_id, subject.project_id);
+        assert_eq!(review.milestone_id, subject.milestone_id);
+        assert_eq!(review.assignee, subject.assignee);
     }
 
     async fn plain_review(task: &Task, ws: &LocalWorkspace, dir: &Path, produced: &[ArtifactRef], t: Duration) -> Vec<Verdict> {

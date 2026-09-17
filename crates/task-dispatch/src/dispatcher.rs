@@ -2133,9 +2133,10 @@ impl Dispatcher {
             role: None,
             genre: None,
             aggregate: false,
-            project_id: None,
-            milestone_id: None,
-            assignee: None,
+            // ADR-0033 D2（監査 D-3）: 派生タスクは親の案件・途中目標・担当を継ぐ（仕事の木から子が消えないように）。
+            project_id: task.project_id,
+            milestone_id: task.milestone_id,
+            assignee: task.assignee.clone(),
         };
         // ADR-0010 D2: 挿入・Created・ApprovalRequested を 1 トランザクションで。
         self.store.create_task(&approval, vec![Event::ApprovalRequested])?;
@@ -3072,6 +3073,29 @@ mod tests {
                 .iter()
                 .any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: true, reason, .. } if reason.contains("approved")))
         );
+    }
+
+    /// ADR-0033 D2（監査 D-3）: 承認子タスクは親の `project_id` / `milestone_id` / `assignee` を継ぐ
+    /// （案件の仕事の木から子が消えないように）。
+    #[tokio::test]
+    async fn human_check_approval_child_inherits_the_parents_project_milestone_and_assignee() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(dir.path(), Check::Human, 1);
+        task.project_id = Some(ProjectId::new());
+        task.milestone_id = Some(MilestoneId::new());
+        task.assignee = Some("research-survey".into());
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 2);
+
+        let approval = wait_for_approval_child(&mut d, &store, task.id).await;
+        assert_eq!(approval.project_id, task.project_id);
+        assert_eq!(approval.milestone_id, task.milestone_id);
+        assert_eq!(approval.assignee, task.assignee);
     }
 
     /// ADR-0008 D2: 承認児タスクが reject されると、対象タスクの `Human` criterion は fail になる

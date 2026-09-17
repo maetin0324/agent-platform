@@ -3292,3 +3292,47 @@ D-3（`ensure_secrets_dir` の create → chmod の間の一瞬と、既にあ�
   DESIGN.md を「実行基盤の設計」に改題するかを決めたい。
 - P-71: `ConfigView`（`GET /config`）に組織は出していない（DB が正なので `GET /org` を見ればよい）。
   GUI が「設定に書いた種」と「今の組織」の差を見せたくなったら、`org_include` のパスだけ出す案がある。
+
+### 監査で直したもの
+
+Phase 23（コミット `e09951d`）の監査で見つかった 4 件の逸脱を修正した。判断は ADR-0033 D2 に追記済み
+（優先順と、派生タスクが `project_id` を継ぐこと）。
+
+- **D-1（推奨・対応済み）**: `crates/task-core/src/org.rs` の `validate_upsert` は自分と親だけを見ており、
+  `PATCH /org/{id}` で `kind` を変えると、既にぶら下がる子の入れ子が壊れても気づかなかった（例: 部を課に
+  変えると、既存の子の課が「課の下の課」になり、以後その子は名前変更すら 422 で拒否され続ける）。
+  `existing` の中から「自分を親に持つノード」を 1 ループで検査し、変更後の `kind` で入れ子の規則
+  （`secretary > department > section`）に違反するなら `OrgError::BadNesting` にした。
+  テスト: `changing_kind_is_rejected_if_it_would_break_an_existing_childs_nesting`
+  （子を持つ部を課に変えようとすると拒否される／子が無ければ通る）。
+- **D-2（必須・対応済み）**: `crates/task-ops/src/add.rs` の `create_task_with_roles` は
+  `.or(org_role...)` が `.or(role...)` より先にあり、`role` を明示しても `assignee` 由来の既定
+  （分野の `default_role`）に上書きされていた。解決順を **task > role > assignee > genre.default_role >
+  全体の既定** に直した（`tier` / `adapter` / `max_turns` / `max_wall_secs` の 4 箇所）。
+  `assignee` は常に `tasks.assignee` として記録される（「どうやるか」ではなく「誰の仕事か」）。
+  テスト: `explicit_values_still_win_over_the_assignee` に、`role = "lead"` を明示したときその
+  `tier`（Frontier）/`adapter`（claude-code）が `assignee`（research-survey → literature-reader:
+  Cheap/paperqa）より勝つことの検証を追加（`role` に無いフィールド `max_turns` は次の階層まで降りて
+  `assignee` の既定で埋まることも確認）。
+- **D-3（必須・対応済み）**: ディスパッチャが作る派生タスクが `project_id` / `milestone_id: None` を
+  固定で入れており、案件の仕事の木から子が消えていた。
+  `crates/task-dispatch/src/dispatcher.rs` の `create_human_approval_child`（承認子タスク）と
+  `crates/task-dispatch/src/review.rs` の `synthetic_review_task`（合成 `Review`）を、親の
+  `project_id` / `milestone_id` / `assignee` を継ぐように直した。
+  テスト: `dispatcher::tests::human_check_approval_child_inherits_the_parents_project_milestone_and_assignee`、
+  `review::tests::synthetic_review_task_inherits_the_subjects_project_milestone_and_assignee`。
+- **D-4（任意・対応済み）**: `crates/taskd/src/lib.rs` の `seed_org_if_empty` はノードごとに `org_upsert`
+  を呼んでおり、途中で失敗すると部分的に蒔かれた組織が残り、`org_list()` が空でなくなるので次回起動でも
+  補完されなかった。`TaskStore` に `org_seed(&[OrgNode])`（渡された順に検証しながら 1 トランザクションで
+  書き、途中の 1 件でも失敗すれば何も書かない）を足し、`seed_org_if_empty` から使うように変えた。
+  テスト: `task-core` の `store::tests::org_seed_writes_nothing_when_one_node_is_invalid`、
+  `taskd` の `tests::seed_org_if_empty_writes_nothing_when_one_node_breaks_the_tree`
+  （`Config::load` は木としての整合＝種類の順序までは見ないので、config 検証を通り抜けて
+  ストア側の `validate_upsert` が初めて拒否するケースを再現した）。
+- **U23-1 への追記**: `scripts/sync-gui-docs.sh --check` の同期に加えて、`pnpm gen:types` も
+  （`Task` に手を入れていないので今回の 4 件では新たな差分は出していないが、G13 担当は両方を実行すること）。
+
+証拠: `cargo test --workspace` **851 passed / `grep -c "^test result: FAILED"` = 0**（Phase 23 完了時の
+846 から、D-1〜D-4 のテスト 5 件を追加して +5 = 851）。`cargo clippy --workspace --all-targets -- -D warnings`
+**exit 0**。テスト以外に `unwrap()` / `expect()` は無い（触った 6 ファイルすべて `#[cfg(test)]` より前を
+機械的に確認）。ディスパッチャ・ストアに LLM 呼び出しは追加していない。
