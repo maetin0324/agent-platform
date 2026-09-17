@@ -1003,3 +1003,10 @@ G6-P1（アカウント管理画面）は taskd 側 ADR-0022 D1 で「作らな�
 ### 未解決事項
 
 - G9-U1: 実際の codex アカウントでのログインは人が行う（未実施）。
+
+## 追補: ACP アダプタ（taskd Phase 15 / ADR-0026）への追従（2026-09-17）
+
+- `/providers` の adapter 選択肢に `acp` を追加（`ADAPTER_OPTIONS`、unit テスト 1 件追加）。`command` / `args` は管理 API から書けないので GUI にも出さない。
+- `docs/taskd-api-v1.md` は `scripts/sync-gui-docs.sh` で同期済み（§3.24 / §3.25 の adapter 一覧と 422 の条件）。
+- 証拠: `pnpm lint` / `pnpm typecheck` / `pnpm build` exit 0、`pnpm test` **193 passed**、`pnpm gen:types` 差分ゼロ（スキーマ変更なし）。
+  e2e は運用中の taskd / GUI（7700 / 7710）と衝突するため今回は実行していない（GUI の変更は選択肢 1 つの追加のみ）。

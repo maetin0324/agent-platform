@@ -96,7 +96,9 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 const TIER_OPTIONS: Tier[] = ["frontier", "standard", "cheap"];
-const ADAPTER_OPTIONS = ["fake", "claude-code", "codex"] as const;
+// ADR-0026 D7: "acp"（opencode 等の ACP エージェント経由の OpenAI 互換 LLM）を追加。
+// `command`/`args` はこのフォームには無い（管理 API から設定できない。providers.d/<id>.toml を人が直接編集する）。
+export const ADAPTER_OPTIONS = ["fake", "claude-code", "codex", "acp"] as const;
 
 export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
   const { providers, fetchedAt } = loaderData;

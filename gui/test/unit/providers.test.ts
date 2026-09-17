@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadProviders } from "~/routes/providers";
+import { ADAPTER_OPTIONS, loadProviders } from "~/routes/providers";
 import { TaskdClient } from "~/taskd/client.server";
 import type { Providers } from "~/taskd/types";
 import { type MockTaskd, sendJson, startMockTaskd } from "../mock-taskd/server";
@@ -62,6 +62,12 @@ const providersView: Providers = {
     },
   ],
 };
+
+describe("ADAPTER_OPTIONS", () => {
+  it("includes acp (ADR-0026) alongside the existing adapters", () => {
+    expect(ADAPTER_OPTIONS).toEqual(["fake", "claude-code", "codex", "acp"]);
+  });
+});
 
 describe("loadProviders", () => {
   it("calls GET /providers and returns {providers, fetchedAt} as-is", async () => {
