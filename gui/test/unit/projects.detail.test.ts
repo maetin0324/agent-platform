@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadProjectDetail } from "~/routes/projects.$id";
 import { TaskdClient } from "~/taskd/client.server";
 import { createMilestone, patchMilestoneStatus, patchProjectStatus } from "~/taskd/projects-admin.server";
-import type { Milestone, OrgList, Project, ProjectDetail, Report, ReportList } from "~/taskd/types";
+import type {
+  ArtifactList,
+  Milestone,
+  OrgList,
+  Project,
+  ProjectDetail,
+  Report,
+  ReportList,
+  TaskDetail,
+} from "~/taskd/types";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
@@ -127,6 +136,104 @@ describe("loadProjectDetail", () => {
 
     const result = await loadProjectDetail(client, "p1", new Request("http://gui.invalid/projects/p1"));
     expect(result.reports).toEqual({ items: [] });
+  });
+
+  it("GET /projects/{id} の tasks ぶん GET /tasks/{id} と GET /tasks/{id}/artifacts を束ね、成果物一覧（artifactRows）を組む（Phase G13c）", async () => {
+    const detail: ProjectDetail = {
+      project: project(),
+      milestones: [],
+      tasks: [
+        {
+          id: "t1",
+          title: "survey",
+          status: "done",
+          parent_id: null,
+          depends_on: [],
+          assignee: "research-survey",
+        },
+      ],
+    };
+    const org: OrgList = {
+      items: [
+        {
+          id: "research-survey",
+          parent_id: "research",
+          name: "関連研究調査課",
+          kind: "section",
+          position: 0,
+          created_at: "…",
+          updated_at: "…",
+        },
+      ],
+    };
+    const taskDetail: TaskDetail = {
+      task: {
+        id: "t1",
+        kind: "execute",
+        status: "done",
+        title: "survey",
+        objective: "survey",
+        priority: 0,
+        attempts: 1,
+        created_at: "…",
+        updated_at: "…",
+        acceptance: [],
+        depends_on: [],
+        inputs: [],
+        worker_hint: { tier: "standard" },
+        budget: { max_retries: 3, max_turns: 10, max_wall_secs: 600 },
+        workspace: { kind: "local", path: "lab/pluvio-survey" },
+        assignee: "research-survey",
+      },
+      workspace_dir: "/home/user/workspace/lab/pluvio-survey",
+      timers: { now: "…", consecutive_requeues: 0, consecutive_reviewer_requeues: 0, max_requeues: 3 },
+      criteria: [],
+      runs: [],
+      prior_review: [],
+      answers: [],
+      latest_question: null,
+      approvals: [],
+      dependencies: [],
+      dependents: [],
+      children: [],
+      actions: [],
+      worker_run_hint: null,
+      delegated: [],
+    };
+    const artifacts: ArtifactList = {
+      items: [
+        {
+          idx: 0,
+          run_id: "run1",
+          ts: "2026-09-17T00:00:00Z",
+          artifact: { name: "report.md", path: "artifacts/report.md", sha256: "abc", kind: "markdown" },
+          exists: true,
+          forbidden: false,
+          size: 10,
+          sha256_current: "abc",
+          sha256_matches: true,
+        },
+      ],
+    };
+    mock.on("GET", "/api/v1/projects/p1", (_req, res) => sendJson(res, 200, detail));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, org));
+    mock.on("GET", "/api/v1/reports", (_req, res) => sendJson(res, 200, { items: [] } satisfies ReportList));
+    mock.on("GET", "/api/v1/tasks/t1", (_req, res) => sendJson(res, 200, taskDetail));
+    mock.on("GET", "/api/v1/tasks/t1/artifacts", (_req, res) => sendJson(res, 200, artifacts));
+
+    const result = await loadProjectDetail(client, "p1", new Request("http://gui.invalid/projects/p1"));
+
+    expect(result.artifactRows).toHaveLength(1);
+    expect(result.artifactRows[0]).toMatchObject({
+      taskId: "t1",
+      taskTitle: "survey",
+      assigneeName: "関連研究調査課",
+      workspace: {
+        text: "/home/user/workspace/lab/pluvio-survey",
+        vscodeHref: "vscode://file//home/user/workspace/lab/pluvio-survey",
+      },
+    });
+    expect(result.artifactRows[0].artifact).toEqual(artifacts.items[0]);
   });
 
   it("404 project_not_found は例外として投げる（loader が Response に変換する）", async () => {

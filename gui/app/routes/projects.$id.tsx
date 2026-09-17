@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { data, isRouteErrorResponse, useFetcher } from "react-router";
+import { ArtifactsList } from "~/components/ArtifactsList";
 import { ProjectActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { ReportsList } from "~/components/ReportsList";
@@ -11,6 +12,12 @@ import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
 import { WorkTree } from "~/components/WorkTree";
+import {
+  buildProjectArtifactRows,
+  type ProjectArtifactRow,
+  type TaskArtifactBundle,
+  workspacePlace,
+} from "~/lib/artifacts";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { projectTasksToGraph } from "~/lib/work-tree";
 import { TaskdBanner } from "~/root";
@@ -19,12 +26,21 @@ import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { formString } from "~/taskd/forms";
 import { createMilestone, patchMilestoneStatus, patchProjectStatus } from "~/taskd/projects-admin.server";
-import type { MilestoneStatus, OrgList, ProjectDetail, ProjectStatus, ReportList } from "~/taskd/types";
+import type {
+  ArtifactList,
+  MilestoneStatus,
+  OrgList,
+  ProjectDetail,
+  ProjectStatus,
+  ReportList,
+  TaskDetail,
+  TaskId,
+} from "~/taskd/types";
 import type { Route } from "./+types/projects.$id";
 
 /**
- * `/projects/:id`（案件の詳細・途中目標・仕事の木・報告、SPEC §3.3・§3.5、ADR-0033 D2/D3、
- * docs/gui/api.md §3.47〜3.51）。
+ * `/projects/:id`（案件の詳細・途中目標・仕事の木・報告・成果物、SPEC §3.3・§3.5・§3.7、ADR-0033 D2/D3、
+ * docs/gui/api.md §3.47〜3.51、Phase G13c）。
  * 「仕事の木」は `GET /projects/{id}` の `tasks`（`ProjectTaskView`、`parent_id` / `depends_on` は既存の DAG
  * と同じ辺の作り方）を `/graph` と同じ `layoutGraph`（`~/components/WorkTree.tsx`）で描く。
  * 各ノードには `assignee` の組織ノードの名前を出す（`GET /org` と突き合わせる。組織のノード名を出すだけで、
@@ -32,13 +48,47 @@ import type { Route } from "./+types/projects.$id";
  * 「報告」タブは `GET /reports?project=<id>`（**全レベル**。`level` を付けない。`/reports` の既定は秘書
  * レベルの未読だけだが、案件詳細ではこの案件のすべての段の報告を見せる。G13b-1 の依頼どおり）を
  * `/reports` と同じ `ReportsList` で出す。
+ * 「成果物」節は `~/routes/artifacts.tsx`（横断一覧）と同じ組み立て（`~/lib/artifacts.ts::buildProjectArtifactRows`。
+ * taskd への問い合わせ自体は各 loader に閉じる私的ヘルパー。下記コメント参照）で、この案件のタスクぶんだけを
+ * `~/components/ArtifactsList.tsx` で出す（G13b-1 の「報告」タブと同じ作り）。
  */
 
 export interface ProjectDetailData {
   detail: ProjectDetail;
   org: OrgList;
   reports: ReportList;
+  artifactRows: ProjectArtifactRow[];
   fetchedAt: string;
+}
+
+/**
+ * 1 タスクぶんの成果物 + 置き場所を束ねる（N+1。`GET /tasks/{id}` と `GET /tasks/{id}/artifacts`）。
+ * `~/routes/artifacts.tsx` に同じ形の私的ヘルパーがある（React Router のクライアントバンドル除去は
+ * `loader`/`action` 等に限られるため、公開関数から `.server.ts` モジュールを参照しない。重複はこの小ささでは許容する）。
+ */
+async function loadTaskArtifactBundles(
+  client: TaskdClient,
+  taskIds: readonly TaskId[],
+  signal: AbortSignal | undefined,
+): Promise<Map<TaskId, TaskArtifactBundle>> {
+  const entries = await Promise.all(
+    taskIds.map(async (id) => {
+      const [detail, list] = await Promise.all([
+        client.get<TaskDetail>(`/tasks/${encodeURIComponent(id)}`, { signal }).catch(() => null as TaskDetail | null),
+        client
+          .get<ArtifactList>(`/tasks/${encodeURIComponent(id)}/artifacts`, { signal })
+          .catch(() => ({ items: [] }) as ArtifactList),
+      ]);
+      const bundle: TaskArtifactBundle = {
+        workspace: detail
+          ? workspacePlace(detail.task.workspace, detail.workspace_dir)
+          : { text: "-", vscodeHref: null },
+        artifacts: list.items,
+      };
+      return [id, bundle] as const;
+    }),
+  );
+  return new Map(entries);
 }
 
 export async function loadProjectDetail(client: TaskdClient, id: string, request: Request): Promise<ProjectDetailData> {
@@ -49,7 +99,14 @@ export async function loadProjectDetail(client: TaskdClient, id: string, request
       .get<ReportList>("/reports", { query: { project: id }, signal: request.signal })
       .catch(() => ({ items: [] }) as ReportList),
   ]);
-  return { detail, org, reports, fetchedAt: new Date().toISOString() };
+  const orgById = new Map(org.items.map((n) => [n.id, n]));
+  const bundles = await loadTaskArtifactBundles(
+    client,
+    detail.tasks.map((t) => t.id),
+    request.signal,
+  );
+  const artifactRows = buildProjectArtifactRows(detail.tasks, bundles, orgById);
+  return { detail, org, reports, artifactRows, fetchedAt: new Date().toISOString() };
 }
 
 export const shouldRevalidate = revalidateAfterActionErrors;
@@ -117,7 +174,7 @@ const MILESTONE_STATUS_TONE: Record<MilestoneStatus, Tone> = {
 };
 
 export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) {
-  const { detail, org, reports, fetchedAt } = loaderData;
+  const { detail, org, reports, artifactRows, fetchedAt } = loaderData;
   const { project, milestones, tasks } = detail;
   const fetcher = useFetcher<ProjectOpOutcome>();
   const submitting = fetcher.state !== "idle";
@@ -316,6 +373,22 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           <EmptyState icon="send" title="この案件の報告はまだありません" />
         ) : (
           <ReportsList items={reports.items} projects={[project]} org={org.items} fetchedAt={fetchedAt} />
+        )}
+      </section>
+
+      <section aria-labelledby="project-artifacts-heading" data-testid="artifacts-section" className="space-y-4">
+        <SectionTitle icon="file" id="project-artifacts-heading" count={artifactRows.length}>
+          成果物
+        </SectionTitle>
+        <p className="text-xs text-fg-subtle">
+          SPEC §2.2「調査結果の文書と見るべき関連研究へのリンクがまとまって読める」／§3.7「コードは
+          <code>~/workspace/…</code>
+          のリポジトリ、文書は GUI で読める形」。この案件のタスクの成果物を横断して見られます。
+        </p>
+        {artifactRows.length === 0 ? (
+          <EmptyState icon="file" title="この案件の成果物はまだありません" />
+        ) : (
+          <ArtifactsList rows={artifactRows} fetchedAt={fetchedAt} />
         )}
       </section>
     </div>
