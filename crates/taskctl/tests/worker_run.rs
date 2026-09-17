@@ -41,6 +41,7 @@ fn sample_task(status: Status, workspace: WorkspaceSpec) -> Task {
         project_id: None,
         milestone_id: None,
         assignee: None,
+        conversation: None,
     }
 }
 

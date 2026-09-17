@@ -342,6 +342,7 @@ pub fn create_task_with_roles(
         project_id: spec.project_id,
         milestone_id: spec.milestone_id,
         assignee: spec.assignee,
+        conversation: None,
     };
 
     store.create_task(&task, vec![])?;

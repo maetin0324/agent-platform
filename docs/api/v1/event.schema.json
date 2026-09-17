@@ -518,6 +518,10 @@
       ],
       "type": "object"
     },
+    "MessageId": {
+      "description": "対話の 1 行の識別子（ULID）。",
+      "type": "string"
+    },
     "MilestoneId": {
       "description": "途中目標の一意識別子（ULID）。",
       "type": "string"
@@ -575,6 +579,17 @@
         },
         "budget": {
           "$ref": "#/$defs/Budget"
+        },
+        "conversation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MessageId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D4（Phase 24）: 対話由来のタスクなら、きっかけになった人の発言（`messages.id`）。\nrun が終わると、その結果が `assignee` のノードの返事として `messages` に入る。\n**DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。"
         },
         "created_at": {
           "type": "string"

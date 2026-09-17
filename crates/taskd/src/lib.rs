@@ -365,11 +365,12 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// 設定から `Dispatcher` を組み立てる。`[accounts]`/`[secrets]` があればディレクトリを 0700 で作る
-/// （ADR-0024 D1、ADR-0030 D1）。
+/// 設定から `Dispatcher` を組み立てる。`[accounts]`/`[secrets]`/`[memory]` があればディレクトリを 0700 で作る
+/// （ADR-0024 D1、ADR-0030 D1、ADR-0033 D6）。
 pub fn build_dispatcher(config: &Config, masters: ClusterMasters) -> Result<Dispatcher, DaemonError> {
     config.ensure_accounts_dir()?;
     config.ensure_secrets_dir()?;
+    config.ensure_memory_dir()?;
     let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&config.db)?);
     seed_org_if_empty(store.as_ref(), config)?;
     let policy = StaticPolicy::new(
@@ -979,6 +980,7 @@ async fn check_provider(
         project_id: None,
         milestone_id: None,
         assignee: None,
+        conversation: None,
     };
     let prepared = task_worker::LocalWorkspace::new(dir.clone())
         .prepare(&task)
@@ -997,6 +999,8 @@ async fn check_provider(
             role: None,
             children: vec![],
             available_genres: vec![],
+            // プロバイダの疎通確認なので、役職・記憶・やり取り・組織図は渡さない（ADR-0033 D4 / D6）。
+            ..task_worker::RunContext::default()
         },
     };
     let limits = task_worker::RunLimits {
@@ -1064,6 +1068,15 @@ id = "implementer"
 
 [[roles]]
 id = "literature-reader"
+
+[[roles]]
+id = "secretary"
+
+[[genres]]
+id = "secretary"
+description = "人と話す"
+default_role = "secretary"
+roles = ["secretary"]
 
 [[genres]]
 id = "coding"

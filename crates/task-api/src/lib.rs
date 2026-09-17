@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, watch};
 
 mod accounts;
 mod admin;
+pub mod conversation;
 mod files;
 mod handlers;
 mod middleware;
@@ -31,6 +32,7 @@ mod state;
 mod stats;
 pub mod types;
 
+pub use conversation::{MessageAccepted, MessageList, MessagePostBody};
 pub use admin::{
     AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome, AdminRequest,
     CheckError, ClusterAdminError, ClusterConnectCodeOutcome, ClusterConnectStartOutcome, ProviderCheckOutcome,

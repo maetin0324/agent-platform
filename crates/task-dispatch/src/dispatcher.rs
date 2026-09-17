@@ -32,9 +32,10 @@ use task_ops::derive::{
     prior_review_from_events, retry_backoff,
 };
 use task_worker::{
-    AdapterError, Answer, ChildSummary, EventSink, GenreContext, LocalWorkspace, PROTOCOL_VERSION, PriorReview,
-    RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal,
-    WorkerMessage, Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
+    AdapterError, Answer, ChildSummary, ConversationTurn, EventSink, GenreContext, LocalWorkspace, MemoryContext,
+    MemoryDir, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, RoleContext, RunContext, RunLimits,
+    RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal, WorkerMessage, Workspace, WorkerAdapter,
+    control_master_alive_blocking, remote_exec_instructions,
 };
 use task_ops::daemon::{
     AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot, InFlight,
@@ -200,6 +201,8 @@ pub struct DispatchConfig {
     pub delegation: DelegationLimits,
     /// ADR-0024: `[accounts]` が設定されていればプール選択を有効にする。
     pub accounts: Option<AccountsRuntimeConfig>,
+    /// ADR-0033 D6（Phase 24）: `[memory] dir`（絶対パス）。`None` なら記憶を読まないし書かない。
+    pub memory_dir: Option<PathBuf>,
 }
 
 /// 1 tick の要約（ログとテスト用）。
@@ -248,6 +251,15 @@ struct RunEntry {
     account_adapter: Option<AccountAdapter>,
 }
 
+
+/// ADR-0033 D4（Phase 24）: この run の途中で「部をまたぐ委譲」を止めたときに `StoreSink` が残した質問。
+fn cross_department_question_of(events: &[(u64, Event)], run_id: &str) -> Option<String> {
+    events.iter().rev().find_map(|(_, e)| match e {
+        Event::QuestionRaised { run_id: r, text } if r == run_id => Some(text.clone()),
+        _ => None,
+    })
+}
+
 /// ADR-0016 M5: 子待ちの親について覚えておくもの。
 struct AwaitingChildren {
     run_id: String,
@@ -261,6 +273,14 @@ struct RunExtras {
     children: Vec<ChildSummary>,
     /// ADR-0027 D1: 委譲できる run（`build_execute_prompt` を使う run）にだけ非空。
     available_genres: Vec<GenreContext>,
+    /// ADR-0033 D4: `task.assignee` の組織ノード（担当が無いタスクでは `None`）。
+    node: Option<NodeContext>,
+    /// ADR-0033 D6: `[memory]` を設定し、担当が決まっている run にだけ載る長期記憶。
+    memory: Option<MemoryContext>,
+    /// ADR-0033 D4: 担当のノードとのこの案件での直近のやり取り（古い順）。
+    conversation: Vec<ConversationTurn>,
+    /// ADR-0033 D4: 分解・委譲できる run に渡す組織図。
+    organization: Vec<OrgNodeContext>,
 }
 
 struct ReviewEntry {
@@ -342,6 +362,23 @@ impl StoreSink {
             && parent.lease.as_ref().map(|l| l.worker_run_id.as_str()) == Some(self.run_id.as_str());
         if !ours {
             return Err("task is no longer running under this run".to_string());
+        }
+        // ADR-0033 D4 / SPEC §3.1: 部をまたぐ連携は秘書が認める。別の部の課を `assignee` にした提案が
+        // あれば、**子を作らずに**質問を残し、run の終わりに `Question` 終端へ回す（Phase 26 が
+        // `approvals` に繋ぐ）。判定は組織図だけを見る決定的なもので、LLM は使わない。
+        let org = self.store.org_list().map_err(|e| format!("store: {e}"))?;
+        if let Some(question) = task_ops::conversation::cross_department_question(&org, &parent, tasks) {
+            self.store
+                .append_event(
+                    self.task_id,
+                    &Event::QuestionRaised {
+                        run_id: self.run_id.clone(),
+                        text: question,
+                    },
+                )
+                .map_err(|e| format!("store: {e}"))?;
+            self.note("delegate deferred: 部をまたぐ委譲は秘書の認可が要る（子は作っていない）".to_string());
+            return Ok(());
         }
         let already = self.delegated_this_run.load(std::sync::atomic::Ordering::SeqCst);
         let outcome = plan_delegation(
@@ -1063,7 +1100,13 @@ impl Dispatcher {
         let mut subject = ReviewSubject::default();
         // ADR-0013 D9: 供給側失敗なら種別（ProviderThrottled.reason）を、result を消費する前に取っておく。
         let failure_reason = result.as_ref().err().and_then(provider_failure_reason);
-        let (trigger, outcome_str, usage, provider_outcome) = match result {
+        // ADR-0033 D6（Phase 24）: 結果ファイルの `memory` を、この run の担当の記憶に追記する
+        // （run の終わり方に依らず。ファイル I/O だけで、覚える中身を決めるのはワーカー側）。
+        self.absorb_memory(&task);
+        // ADR-0033 D4 / SPEC §3.1: 部をまたぐ委譲を試みた run は、子を作らずに秘書へ聞く終わり方にする
+        // （`StoreSink::delegate_impl` が `QuestionRaised` を残している）。
+        let cross_department = cross_department_question_of(&self.store.events_for(task_id)?, &run_id);
+        let (mut trigger, mut outcome_str, usage, provider_outcome) = match result {
             Ok(RunOutcome {
                 terminal: Terminal::Done { summary, usage, evidence },
                 ..
@@ -1120,6 +1163,14 @@ impl Dispatcher {
                 ),
             },
         };
+        // ADR-0033 D4: 部をまたぐ委譲の質問は、run の自己申告の終わり方より優先する（子は作られていない）。
+        if let Some(question) = &cross_department
+            && !matches!(trigger, Trigger::WorkerQuestion)
+        {
+            trigger = Trigger::WorkerQuestion;
+            outcome_str = format!("question: {question}");
+            subject = ReviewSubject::default();
+        }
         // ADR-0024 D4 / S10: プール経由の run の失敗は、原因がアカウント側（throttled/auth_failed/exhausted）なら
         // アカウントを cooldown にしプロバイダは cooldown にしない。`Spawn` 失敗（起動できない）はアカウントの
         // 責任ではないので、通常どおりプロバイダを cooldown にする（`failure_reason == Some("spawn")`）。
@@ -1149,6 +1200,9 @@ impl Dispatcher {
                 }
             }
         }
+        // ADR-0033 D4（Phase 24）: 対話用タスクの run なら、`summary`（質問なら本文、失敗なら理由）を
+        // そのノードの返事として `messages` に残す。対話由来でないタスクでは何もしない。
+        self.record_conversation_reply(&task, &run_id, &outcome_str);
         match self
             .store
             .apply_transition_with_events(task_id, trigger, events)
@@ -1166,6 +1220,51 @@ impl Dispatcher {
             Err(e) => return Err(e.into()),
         }
         Ok(())
+    }
+
+
+    /// ADR-0033 D6（Phase 24）: `artifacts/result.json` の `memory` を担当の記憶に追記する。
+    /// `[memory]` を設定していない・担当がいない・`memory` が無いときは何もしない。失敗しても run は壊さない。
+    fn absorb_memory(&self, task: &Task) {
+        let (Some(dir), Some(node_id)) = (&self.config.memory_dir, task.assignee.as_deref()) else {
+            return;
+        };
+        let Some(workspace) = self.task_dir(task) else {
+            return;
+        };
+        let Some(update) = task_worker::read_result_memory(&workspace) else {
+            return;
+        };
+        let today = OffsetDateTime::now_utc().date().to_string();
+        let project = task.project_id.map(|p| p.to_string());
+        if let Err(e) = MemoryDir::new(dir).append(node_id, project.as_deref(), &update, &today) {
+            tracing::warn!(task_id = %task.id, error = %e, "failed to append to the node's memory");
+        }
+    }
+
+    /// ADR-0033 D4（Phase 24）: 対話用タスクの run の終わりを、そのノードの返事として `messages` に残す。
+    /// `outcome_str` は `done: <summary>` / `question: <text>` / `error(...): <message>` のいずれか。
+    fn record_conversation_reply(&self, task: &Task, run_id: &str, outcome_str: &str) {
+        if !task_core::is_conversation(task) {
+            return;
+        }
+        let text = if let Some(summary) = outcome_str.strip_prefix("done: ") {
+            summary.to_string()
+        } else if let Some(question) = outcome_str.strip_prefix("question: ") {
+            // Phase 26 が `approvals` に繋ぐまでは、質問も返事としてそのまま見せる。
+            question.to_string()
+        } else {
+            task_core::failure_reply(outcome_str)
+        };
+        if let Err(e) = task_ops::conversation::record_reply(
+            self.store.as_ref(),
+            task,
+            run_id,
+            &text,
+            OffsetDateTime::now_utc(),
+        ) {
+            tracing::warn!(task_id = %task.id, error = %e, "failed to record the conversation reply");
+        }
     }
 
     fn on_review_finished(
@@ -1300,7 +1399,8 @@ impl Dispatcher {
         // ADR-0007 D3/D4: Plan が全 pass なら子タスクの挿入と ReviewPass を同一トランザクションで行う。
         let result = match (all_pass, task.kind, outcome.plan) {
             (true, TaskKind::Plan, Some(plan)) => {
-                let children = materialize(&task, &plan, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
+                let org = self.store.org_list()?;
+                let children = materialize(&task, &plan, &org, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
                 let n = children.len();
                 let r = self
                     .store
@@ -1511,7 +1611,8 @@ impl Dispatcher {
             }
             let result = match (task.kind, waiting.plan) {
                 (TaskKind::Plan, Some(plan)) => {
-                    let children = materialize(&task, &plan, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
+                    let org = self.store.org_list()?;
+                let children = materialize(&task, &plan, &org, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
                     self.store
                         .complete_plan(task_id, Vec::new(), children, self.config.plan_auto_accept)
                 }
@@ -1854,6 +1955,45 @@ impl Dispatcher {
         } else {
             Vec::new()
         };
+        // ADR-0033 D4 / D6（Phase 24）: この run をする「人」（担当のノード）、その記憶、この案件での
+        // 直近のやり取り、そして分解・委譲できる run には組織図。全てストアとファイルの読み取りだけで、
+        // LLM は使わない（DESIGN 原則 1）。
+        let org = if task.assignee.is_some() || !available_genres.is_empty() {
+            self.store.org_list()?
+        } else {
+            Vec::new()
+        };
+        let assigned = task
+            .assignee
+            .as_deref()
+            .and_then(|id| org.iter().find(|n| n.id == id));
+        let node = assigned.map(|n| NodeContext {
+            id: n.id.clone(),
+            name: n.name.clone(),
+            brief: n.brief.clone(),
+        });
+        let memory = match (&self.config.memory_dir, assigned) {
+            (Some(dir), Some(n)) => Some(MemoryDir::new(dir).load(
+                &n.id,
+                task.project_id.map(|p| p.to_string()).as_deref(),
+            )),
+            _ => None,
+        };
+        let conversation = match assigned {
+            Some(n) => self
+                .store
+                .message_list(&n.id, task.project_id, task_ops::conversation::CONVERSATION_HISTORY)?
+                .iter()
+                .map(|m| ConversationTurn { role: m.role, text: m.text.clone() })
+                .collect(),
+            None => Vec::new(),
+        };
+        // 分解・委譲できる run（`available_genres` を渡す run と同じ条件）にだけ組織図を渡す。
+        let organization = if available_genres.is_empty() {
+            Vec::new()
+        } else {
+            org.iter().map(OrgNodeContext::from).collect()
+        };
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
         let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
@@ -1888,7 +2028,15 @@ impl Dispatcher {
         } else {
             Vec::new()
         };
-        Ok(RunExtras { role, children, available_genres })
+        Ok(RunExtras {
+            role,
+            children,
+            available_genres,
+            node,
+            memory,
+            conversation,
+            organization,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2136,6 +2284,7 @@ impl Dispatcher {
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         };
         // ADR-0010 D2: 挿入・Created・ApprovalRequested を 1 トランザクションで。
         self.store.create_task(&approval, vec![Event::ApprovalRequested])?;
@@ -2470,6 +2619,12 @@ async fn run_worker(
             role: extras.role,
             children: extras.children,
             available_genres: extras.available_genres,
+            node: extras.node,
+            memory: extras.memory,
+            conversation: extras.conversation,
+            // ADR-0033 D5: 永続の認可は Phase 26 が埋める（今は常に空）。
+            standing_rules: Vec::new(),
+            organization: extras.organization,
         },
     };
     let sink = StoreSink {
@@ -2673,6 +2828,7 @@ mod tests {
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         }
     }
 
@@ -2713,6 +2869,7 @@ mod tests {
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
                 accounts: None,
+                memory_dir: None,
             },
         )
     }
@@ -4142,6 +4299,7 @@ mod tests {
             genre: None,
             depends_on: deps,
             tier: None,
+            assignee: None,
         }
     }
 
@@ -4632,6 +4790,7 @@ mod tests {
                     check_model: "haiku".into(),
                     fallback_cooldown_secs: 300,
                 }),
+                memory_dir: None,
             },
         )
     }
@@ -4965,5 +5124,304 @@ mod tests {
         let used_account = snapshot.accounts.iter().find(|a| a.usage.is_some());
         let usage = used_account.expect("observation survives restart").usage.as_ref().unwrap();
         assert_eq!(usage.five_hour.map(|w| w.utilization), Some(0.33));
+    }
+
+    // ---- ADR-0033 D4 / D6（Phase 24）: 対話と記憶 ----
+
+    /// 渡された `RunContext` を記録し、結果ファイルに `memory` を書いてから終端を返す。
+    /// `proposals` があれば委譲も提案する。
+    struct PersonAdapter {
+        terminal: Terminal,
+        seen: Arc<StdMutex<Option<RunContext>>>,
+        memory: Option<&'static str>,
+        proposals: Vec<DelegateTask>,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for PersonAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            *self.seen.lock().unwrap() = Some(req.context.clone());
+            if let Some(memory) = self.memory {
+                let artifacts = req.workspace.join("artifacts");
+                std::fs::create_dir_all(&artifacts).unwrap();
+                std::fs::write(artifacts.join("result.json"), memory).unwrap();
+            }
+            if !self.proposals.is_empty() && req.task.assignee.as_deref() == Some("research-survey") {
+                sink.delegate(&self.proposals);
+            }
+            Ok(RunOutcome { terminal: self.terminal.clone(), exit_code: Some(0) })
+        }
+    }
+
+    fn person_adapter(terminal: Terminal) -> PersonAdapter {
+        PersonAdapter {
+            terminal,
+            seen: Arc::new(StdMutex::new(None)),
+            memory: None,
+            proposals: Vec::new(),
+        }
+    }
+
+    fn org_node_of(id: &str, parent: Option<&str>, kind: OrgKind, genre: Option<&str>) -> OrgNode {
+        let now = OffsetDateTime::now_utc();
+        OrgNode {
+            id: id.into(),
+            parent_id: parent.map(str::to_string),
+            name: format!("{id} 課"),
+            kind,
+            genre: genre.map(str::to_string),
+            brief: format!("{id} の担当"),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn seed_conversation_org(store: &dyn TaskStore) {
+        for n in [
+            org_node_of("secretary", None, OrgKind::Secretary, Some("secretary")),
+            org_node_of("research", Some("secretary"), OrgKind::Department, None),
+            org_node_of("research-survey", Some("research"), OrgKind::Section, None),
+            org_node_of("research-data", Some("research"), OrgKind::Section, None),
+            org_node_of("coding", Some("secretary"), OrgKind::Department, None),
+            org_node_of("coding-poc", Some("coding"), OrgKind::Section, None),
+        ] {
+            store.org_upsert(&n).unwrap();
+        }
+    }
+
+    fn person_dispatcher(
+        store: Arc<dyn TaskStore>,
+        adapter: Arc<dyn WorkerAdapter>,
+        workspace_root: PathBuf,
+        memory_dir: Option<PathBuf>,
+    ) -> Dispatcher {
+        let mut d = dispatcher(store, adapter, 2);
+        d.config.workspace_root = workspace_root;
+        d.config.memory_dir = memory_dir;
+        d.config.genres = vec![GenreSpec {
+            id: "secretary".into(),
+            description: "人と話す".into(),
+            default_role: Some("secretary".into()),
+            roles: vec!["secretary".into()],
+            ..GenreSpec::default()
+        }];
+        d
+    }
+
+    fn assigned_task(workspace_root: &std::path::Path, name: &str, assignee: &str) -> Task {
+        let dir = workspace_root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut task = new_task(&dir, Check::Human, 0);
+        task.assignee = Some(assignee.to_string());
+        task
+    }
+
+    fn delegate_to(assignee: &str) -> DelegateTask {
+        DelegateTask {
+            title: "任せたい仕事".into(),
+            objective: "やっておいて".into(),
+            acceptance: vec![Criterion { text: "できた".into(), check: Check::Human }],
+            role: None,
+            genre: None,
+            depends_on: vec![],
+            tier: None,
+            assignee: Some(assignee.to_string()),
+        }
+    }
+
+    /// ADR-0033 D4: 話しかけると対話用タスクができ、run の `summary` が `role = node` の行になる
+    /// （`run_id` 付き）。前置きには役職と brief・記憶・直近のやり取りが載る。
+    /// ADR-0033 D6: 結果ファイルの `memory` が日付付きの箇条書きで追記される。
+    #[tokio::test]
+    async fn a_conversation_run_answers_in_messages_and_writes_its_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        let memory_root = dir.path().join("memory");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        // 先週覚えたこと。
+        task_worker::MemoryDir::new(&memory_root)
+            .append(
+                "secretary",
+                None,
+                &task_worker::MemoryUpdate { notes: vec!["人は図より表が好き".into()], project: vec![] },
+                "2026-09-10",
+            )
+            .unwrap();
+
+        let started = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "先週の続きを教えて",
+            &[],
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let seen = Arc::new(StdMutex::new(None));
+        let adapter = Arc::new(PersonAdapter {
+            terminal: Terminal::Done { summary: "3 本の候補が出ています".into(), evidence: vec![], usage: None },
+            seen: seen.clone(),
+            memory: Some(r#"{"summary":"ok","evidence":[],"memory":{"notes":["pegasus は pjsub"]}}"#),
+            proposals: Vec::new(),
+        });
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, Some(memory_root.clone()));
+        run_until_idle(&mut d, 40).await;
+
+        // 1. 返事が `role = node` の行になり、run_id が付く。
+        let thread = store.message_list("secretary", None, 20).unwrap();
+        assert_eq!(thread.len(), 2, "{thread:?}");
+        assert_eq!(thread[0].role, MessageRole::User);
+        assert_eq!(thread[1].role, MessageRole::Node);
+        assert_eq!(thread[1].text, "3 本の候補が出ています");
+        assert!(thread[1].run_id.is_some(), "返事には run_id が付く");
+        assert_eq!(store.get(started.task.id).unwrap().unwrap().status, Status::Done);
+
+        // 2. 前置きに役職・brief・記憶・直近のやり取りが載っている。
+        let context = seen.lock().unwrap().clone().expect("the run happened");
+        let node = context.node.clone().expect("node context");
+        assert_eq!(node.id, "secretary");
+        assert_eq!(node.brief, "secretary の担当");
+        assert_eq!(context.memory.clone().expect("memory").notes, "- 2026-09-10: 人は図より表が好き\n");
+        assert_eq!(context.conversation.len(), 1, "run が始まる時点では人の発言だけ");
+        assert_eq!(context.conversation[0].text, "先週の続きを教えて");
+        let preamble = task_worker::preamble::render(&context);
+        assert!(preamble.contains("## あなた: secretary 課 (secretary)"), "{preamble}");
+        assert!(preamble.contains("- 2026-09-10: 人は図より表が好き"), "{preamble}");
+        assert!(preamble.contains("- 人: 先週の続きを教えて"), "{preamble}");
+
+        // 3. 結果ファイルの `memory` が追記されている（古い記憶の後ろに）。
+        let notes = std::fs::read_to_string(memory_root.join("secretary/notes.md")).unwrap();
+        assert_eq!(notes.lines().count(), 2, "{notes}");
+        assert!(notes.lines().next().unwrap().contains("人は図より表が好き"), "{notes}");
+        assert!(notes.lines().next_back().unwrap().contains("pegasus は pjsub"), "{notes}");
+    }
+
+    /// ADR-0033 D6: `[memory]` を設定していない構成では記憶を読まないし書かない。
+    #[tokio::test]
+    async fn without_a_memory_dir_nothing_is_read_or_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        task_ops::conversation::start(store.as_ref(), "secretary", None, "やあ", &[], &[], OffsetDateTime::now_utc())
+            .unwrap();
+
+        let seen = Arc::new(StdMutex::new(None));
+        let adapter = Arc::new(PersonAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            seen: seen.clone(),
+            memory: Some(r#"{"summary":"ok","memory":{"notes":["覚えて"]}}"#),
+            proposals: Vec::new(),
+        });
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 40).await;
+
+        let context = seen.lock().unwrap().clone().expect("the run happened");
+        assert!(context.memory.is_none(), "記憶を渡さない");
+        assert!(context.node.is_some(), "役職は記憶とは別に渡る");
+        assert!(!dir.path().join("memory").exists(), "書きもしない");
+    }
+
+    /// ADR-0033 D4: run が `Error` に終わったら「返事できませんでした: …」を返事にする。
+    #[tokio::test]
+    async fn a_failed_conversation_run_says_it_could_not_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        task_ops::conversation::start(store.as_ref(), "secretary", None, "調子はどう", &[], &[], OffsetDateTime::now_utc())
+            .unwrap();
+
+        let adapter = Arc::new(person_adapter(Terminal::Error {
+            message: "harness died".into(),
+            retryable: false,
+        }));
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 40).await;
+
+        let thread = store.message_list("secretary", None, 20).unwrap();
+        let reply = thread.last().expect("a reply");
+        assert_eq!(reply.role, MessageRole::Node);
+        assert!(reply.text.starts_with("返事できませんでした: "), "{}", reply.text);
+        assert!(reply.text.contains("harness died"), "{}", reply.text);
+    }
+
+    /// ADR-0033 D4 / SPEC §3.1: 別の部の課へ委譲しようとしたら、子は作られず、親は質問して止まる。
+    #[tokio::test]
+    async fn a_delegation_across_departments_asks_the_secretary_instead_of_creating_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let task = assigned_task(&workspace_root, "t1", "research-survey");
+        store.create_task(&task, vec![]).unwrap();
+
+        let adapter = Arc::new(PersonAdapter {
+            terminal: Terminal::Done { summary: "delegated".into(), evidence: vec![], usage: None },
+            seen: Arc::new(StdMutex::new(None)),
+            memory: None,
+            proposals: vec![delegate_to("coding-poc")],
+        });
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 40).await;
+
+        assert!(store.children(task.id).unwrap().is_empty(), "子は作られない");
+        let after = store.get(task.id).unwrap().unwrap();
+        assert_eq!(after.status, Status::Blocked, "秘書の返事待ちで止まる");
+        let question = task_ops::derive::latest_question(&store.events_for(task.id).unwrap());
+        assert!(question.contains("部をまたぐ委譲"), "{question}");
+        assert!(question.contains("research-survey 課"), "{question}");
+        assert!(question.contains("coding-poc 課"), "{question}");
+    }
+
+    /// 同じ部の中の委譲は、これまでどおり子タスクになる（規則が効きすぎないこと）。担当も子に残る。
+    #[tokio::test]
+    async fn a_delegation_inside_the_same_department_still_creates_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let task = assigned_task(&workspace_root, "t2", "research-survey");
+        store.create_task(&task, vec![]).unwrap();
+
+        let adapter = Arc::new(PersonAdapter {
+            terminal: Terminal::Done { summary: "delegated".into(), evidence: vec![], usage: None },
+            seen: Arc::new(StdMutex::new(None)),
+            memory: None,
+            proposals: vec![delegate_to("research-data")],
+        });
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 10).await;
+
+        // Human check の承認用の子（`kind = approval`）は数に入れない。
+        let children: Vec<Task> = store
+            .children(task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.kind == TaskKind::Execute)
+            .collect();
+        assert_eq!(children.len(), 1, "同じ部の中なら子ができる");
+        assert_eq!(children[0].assignee.as_deref(), Some("research-data"));
+        assert_eq!(children[0].title, "任せたい仕事");
     }
 }

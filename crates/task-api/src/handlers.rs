@@ -42,7 +42,7 @@ use crate::types::{
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
-type ApiResult = Result<Response, ApiProblem>;
+pub(crate) type ApiResult = Result<Response, ApiProblem>;
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const TITLE_QUERY_MAX_CHARS: usize = 200;
@@ -105,6 +105,11 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/secrets/{id}", put(put_secret).delete(delete_secret))
         .route("/api/v1/org", get(org_list).post(create_org_node))
         .route("/api/v1/org/{id}", patch(patch_org_node).delete(delete_org_node))
+        // ADR-0033 D4（Phase 24）: 対話。実装は `crate::conversation`。
+        .route(
+            "/api/v1/org/{id}/messages",
+            get(crate::conversation::list_messages).post(crate::conversation::post_message),
+        )
         .route("/api/v1/projects", get(project_list).post(create_project))
         .route("/api/v1/projects/{id}", get(project_detail).patch(patch_project))
         .route("/api/v1/projects/{id}/milestones", post(create_milestone))
@@ -131,7 +136,7 @@ pub(crate) fn now_rfc3339() -> String {
     rfc3339(OffsetDateTime::now_utc())
 }
 
-fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
+pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
     match serde_json::to_vec(value) {
         Ok(body) => {
             let mut response = Response::new(Body::from(body));
@@ -186,7 +191,7 @@ async fn read_body(body: Body) -> Result<Vec<u8>, ApiProblem> {
 }
 
 /// JSON 本文を解析する。構文誤り・未知フィールド・型誤りは 400。`empty_is_object` なら空本体を `{}` とみなす。
-async fn read_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Result<T, ApiProblem> {
+pub(crate) async fn read_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Result<T, ApiProblem> {
     let bytes = read_body(body).await?;
     let text: &[u8] = if empty_is_object && bytes.iter().all(u8::is_ascii_whitespace) {
         b"{}"
@@ -237,7 +242,7 @@ fn load_task(store: &SqliteStore, id: TaskId) -> Result<Task, ApiProblem> {
         .ok_or_else(|| ApiProblem::task_not_found(id))
 }
 
-fn no_query(raw: &Option<String>) -> Result<(), ApiProblem> {
+pub(crate) fn no_query(raw: &Option<String>) -> Result<(), ApiProblem> {
     QueryParams::parse(raw.as_deref(), &[]).map(|_| ())
 }
 
@@ -398,6 +403,8 @@ async fn create_project(State(state): State<ApiState>, RawQuery(raw): RawQuery, 
             message: "request must not be blank".into(),
         }]));
     }
+    let roles = state.inner.roles.clone();
+    let genres = state.inner.genres.clone();
     let project = state
         .blocking(move |store| {
             let now = OffsetDateTime::now_utc();
@@ -412,6 +419,9 @@ async fn create_project(State(state): State<ApiState>, RawQuery(raw): RawQuery, 
                 updated_at: now,
             };
             store.project_create(&project).map_err(store_problem)?;
+            // SPEC §7 / ADR-0033 D4: 案件を受けたら、秘書が最初に「理解の確認・大まかな方針・最初の
+            // 途中目標の提案」を返す。ここは対話を 1 回起こすだけ（中身はプロンプトの仕事）。
+            crate::conversation::greet_the_secretary(store, &project, &roles, &genres);
             Ok(project)
         })
         .await?;

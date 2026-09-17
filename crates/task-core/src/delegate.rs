@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::model::{Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
+use crate::org::OrgNode;
 
 /// `delegate.tasks[].depends_on[]` の 1 要素（ADR-0016 M7）: 同じ配列内のインデックス（整数）か、既存タスクの ID（文字列）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -38,6 +39,11 @@ pub struct DelegateTask {
     /// 省略時は役割の既定 → 親の tier。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
+    /// ADR-0033 D4（Phase 24）: 割り当てる組織のノード（`org_nodes.id`）。「誰の仕事か」を表す。
+    /// `role` を書かなかったときだけ、そのノードの分野が既定（tier / adapter / 予算）の解決に使われる
+    /// （タスクの値 > 役割の既定 > 分野の既定 > 親の値。ADR-0016 D1 の優先順に合わせる）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 /// 委譲の上限（ADR-0016 D2。既定 8 / 5 / 100）。
@@ -224,11 +230,25 @@ fn validate_one(index: usize, t: &DelegateTask, len: usize, genres: &[GenreSpec]
     Ok(())
 }
 
-/// `resolve_child_defaults` が決めた、子タスクの分野・tier・アダプタ・budget の既定（ADR-0016 D1 / ADR-0027 D1 /
-/// ADR-0028 D3）。
+/// `resolve_child_defaults` に渡す、子タスクが明示した値（ADR-0016 D1 / ADR-0027 D1 / ADR-0033 D4）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChildSpec<'a> {
+    /// 明示された分野（`delegate.json` / `plan.json` の `genre`）。
+    pub genre: Option<&'a str>,
+    /// 明示された役割（`role`）。**書いてあれば tier / adapter / 予算はこれが勝つ**（ADR-0016 D1）。
+    pub role: Option<&'a str>,
+    pub tier: Option<Tier>,
+    /// ADR-0033 D4: 割り当てる組織のノード。`role` が無いときだけ既定の解決に効く。
+    pub assignee: Option<&'a str>,
+}
+
+/// `resolve_child_defaults` が決めた、子タスクの分野・担当・tier・アダプタ・budget の既定
+/// （ADR-0016 D1 / ADR-0027 D1 / ADR-0028 D3 / ADR-0033 D4）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedChildDefaults {
     pub genre: Option<String>,
+    /// ADR-0033 D4: 子に記録する担当（渡した `assignee` が組織にあればその id、無ければ `None`）。
+    pub assignee: Option<String>,
     pub tier: Tier,
     pub adapter: Option<String>,
     pub max_turns: u32,
@@ -237,22 +257,32 @@ pub struct ResolvedChildDefaults {
 
 /// 子タスクの分野と `tier` / `adapter` / `budget` の既定を決める（ADR-0016 D1, ADR-0027 D1, ADR-0028 D3）。
 /// 委譲（`materialize_delegated`）と Planner（`plan::materialize`）の両方が使う共通の決め方:
-/// - 分野: `explicit_genre`（明示）> `role_id` が一意に属する分野 > `parent.genre`。
+/// - 分野: `explicit_genre`（明示）> `role_id` が一意に属する分野 > `assignee` のノードの分野 > `parent.genre`。
 /// - `tier` / `adapter` / `max_turns` / `max_wall_secs`: タスクの値（`task_tier`。budget 側は呼び出し元に
 ///   フィールドが無いので常に次点から） > 役割（`role_id`）の既定 > 分野の既定（決めた分野の `default_role`
 ///   の役割）の既定 > 親の値。
 pub fn resolve_child_defaults(
     parent: &Task,
-    explicit_genre: Option<&str>,
-    role_id: Option<&str>,
-    task_tier: Option<Tier>,
+    child: ChildSpec<'_>,
+    org: &[OrgNode],
     roles: &[RoleSpec],
     genres: &[GenreSpec],
 ) -> ResolvedChildDefaults {
+    let ChildSpec { genre: explicit_genre, role: role_id, tier: task_tier, assignee } = child;
     let role = role_id.and_then(|r| RoleSpec::find(roles, r));
+    // ADR-0033 D4: 担当は組織にある id だけ記録する（知らない id は「誰の仕事か」を表さない）。
+    let assignee = assignee.filter(|a| org.iter().any(|n| &n.id == a)).map(str::to_string);
+    // 分野: 明示 > `role` が一意に属する分野 > 担当の分野 > 親の分野。`role` を書いたときは
+    // その役割の既定が勝つので、担当の分野は「role が無いとき」にだけ効く（ADR-0016 D1 の優先順）。
     let genre = explicit_genre
         .map(str::to_string)
         .or_else(|| role_id.and_then(|r| GenreSpec::unique_for_role(genres, r)))
+        .or_else(|| {
+            assignee
+                .as_deref()
+                .and_then(|a| org.iter().find(|n| n.id == a))
+                .and_then(|n| n.genre.clone())
+        })
         .or_else(|| parent.genre.clone());
     let genre_role = genre
         .as_deref()
@@ -277,6 +307,7 @@ pub fn resolve_child_defaults(
             .or_else(|| genre_role.and_then(|r| r.max_wall_secs))
             .unwrap_or(parent.budget.max_wall_secs),
         genre,
+        assignee,
     }
 }
 
@@ -291,6 +322,7 @@ pub fn materialize_delegated(
     parent: &Task,
     tasks: &[DelegateTask],
     accepted: &[usize],
+    org: &[OrgNode],
     roles: &[RoleSpec],
     genres: &[GenreSpec],
     now: OffsetDateTime,
@@ -300,8 +332,18 @@ pub fn materialize_delegated(
         .iter()
         .map(|&i| {
             let t = &tasks[i];
-            let defaults =
-                resolve_child_defaults(parent, t.genre.as_deref(), t.role.as_deref(), t.tier, roles, genres);
+            let defaults = resolve_child_defaults(
+                parent,
+                ChildSpec {
+                    genre: t.genre.as_deref(),
+                    role: t.role.as_deref(),
+                    tier: t.tier,
+                    assignee: t.assignee.as_deref(),
+                },
+                org,
+                roles,
+                genres,
+            );
             let depends_on: Vec<TaskId> = t
                 .depends_on
                 .iter()
@@ -341,7 +383,8 @@ pub fn materialize_delegated(
                 // 同じ案件・途中目標に属する（担当は Phase 24 で計画が指定するまで空）。
                 project_id: parent.project_id,
                 milestone_id: parent.milestone_id,
-                assignee: None,
+                assignee: defaults.assignee,
+                conversation: None,
             }
         })
         .collect()
@@ -368,6 +411,7 @@ mod tests {
             genre: None,
             depends_on: deps,
             tier: None,
+            assignee: None,
         }
     }
 
@@ -406,6 +450,7 @@ mod tests {
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         }
     }
 
@@ -511,7 +556,7 @@ mod tests {
         c.tier = Some(Tier::Standard);
         c.role = Some("implementer".into());
         let tasks = vec![a, b, c];
-        let out = materialize_delegated(&p, &tasks, &[0, 1], &roles, &[], OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &tasks, &[0, 1], &[], &roles, &[], OffsetDateTime::now_utc());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].parent_id, Some(p.id));
         assert_eq!(out[0].status, Status::Draft);
@@ -529,7 +574,7 @@ mod tests {
         assert_eq!(out[1].worker_hint.tier, Tier::Frontier);
         assert_eq!(out[1].worker_hint.adapter.as_deref(), Some("fake"));
         // タスクの tier は役割の既定より優先。
-        let out = materialize_delegated(&p, &tasks, &[2], &roles, &[], OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &tasks, &[2], &[], &roles, &[], OffsetDateTime::now_utc());
         assert_eq!(out[0].worker_hint.tier, Tier::Standard);
     }
 
@@ -546,13 +591,13 @@ mod tests {
         let mut explicit = dt("explicit", vec![]);
         explicit.role = Some("implementer".into()); // coding の役割
         explicit.genre = Some("literature".into());
-        let out = materialize_delegated(&p, &[explicit], &[0], &[], &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[explicit], &[0], &[], &[], &genres, OffsetDateTime::now_utc());
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
 
         // 2. genre 未指定・role がちょうど 1 つの分野に属する: その分野を継ぐ。
         let mut by_role = dt("by-role", vec![]);
         by_role.role = Some("literature-scout".into());
-        let out = materialize_delegated(&p, &[by_role], &[0], &[], &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[by_role], &[0], &[], &[], &genres, OffsetDateTime::now_utc());
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
 
         // 3. role が複数の分野に属する（一意に決まらない）: 親の分野を継ぐ。
@@ -562,12 +607,12 @@ mod tests {
         ];
         let mut ambiguous = dt("ambiguous", vec![]);
         ambiguous.role = Some("shared".into());
-        let out = materialize_delegated(&p, &[ambiguous], &[0], &[], &ambiguous_genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[ambiguous], &[0], &[], &[], &ambiguous_genres, OffsetDateTime::now_utc());
         assert_eq!(out[0].genre.as_deref(), Some("coding"), "falls back to the parent's genre");
 
         // 4. genre も role も無い: 親の分野を継ぐ。
         let none_of_either = dt("neither", vec![]);
-        let out = materialize_delegated(&p, &[none_of_either], &[0], &[], &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[none_of_either], &[0], &[], &[], &genres, OffsetDateTime::now_utc());
         assert_eq!(out[0].genre.as_deref(), Some("coding"));
     }
 
@@ -587,7 +632,7 @@ mod tests {
         let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
         let mut t = dt("investigate", vec![]);
         t.genre = Some("literature".into());
-        let out = materialize_delegated(&p, &[t], &[0], &roles, &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[t], &[0], &[], &roles, &genres, OffsetDateTime::now_utc());
         assert_eq!(out[0].role, None, "genre alone must not set the task's role");
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
         assert_eq!(out[0].worker_hint.tier, Tier::Standard);
@@ -623,7 +668,7 @@ mod tests {
         let mut t = dt("impl", vec![]);
         t.role = Some("implementer".into());
         t.genre = Some("coding".into());
-        let out = materialize_delegated(&p, &[t], &[0], &roles, &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[t], &[0], &[], &roles, &genres, OffsetDateTime::now_utc());
         // adapter は role（implementer）の既定が優先（parent の "fake" にも分野の既定にも負けない）。
         assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("codex"));
         // tier は role（implementer）に既定が無いので、分野の既定役割（lead）の tier を借りる
@@ -631,5 +676,72 @@ mod tests {
         assert_eq!(out[0].worker_hint.tier, Tier::Cheap);
         // max_turns も role に無いので分野の既定役割から。
         assert_eq!(out[0].budget.max_turns, 20);
+    }
+
+    /// ADR-0033 D4（Phase 24）: `assignee` は「誰の仕事か」として記録され、**`role` が無いときだけ**
+    /// そのノードの分野が既定（tier / adapter / 予算）の解決に効く（ADR-0016 D1 の優先順に合わせる）。
+    #[test]
+    fn materialize_records_the_assignee_and_uses_its_genre_only_when_no_role_is_given() {
+        use crate::org::{OrgKind, OrgNode};
+        let now = OffsetDateTime::now_utc();
+        let node = |id: &str, genre_id: Option<&str>| OrgNode {
+            id: id.into(),
+            parent_id: Some("research".into()),
+            name: id.into(),
+            kind: OrgKind::Section,
+            genre: genre_id.map(str::to_string),
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let org = vec![node("research-survey", Some("literature")), node("research-data", None)];
+        let roles = vec![
+            RoleSpec {
+                id: "literature-reader".into(),
+                tier: Some(Tier::Cheap),
+                adapter: Some("paperqa".into()),
+                max_turns: Some(5),
+                ..RoleSpec::default()
+            },
+            RoleSpec {
+                id: "writer".into(),
+                tier: Some(Tier::Standard),
+                adapter: Some("claude-code".into()),
+                ..RoleSpec::default()
+            },
+        ];
+        let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
+        let p = parent();
+
+        // 1. assignee だけ: そのノードの分野 → default_role の既定が効く。
+        let mut t = dt("survey", vec![]);
+        t.assignee = Some("research-survey".into());
+        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, now);
+        assert_eq!(out[0].assignee.as_deref(), Some("research-survey"));
+        assert_eq!(out[0].genre.as_deref(), Some("literature"));
+        assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("paperqa"));
+        assert_eq!(out[0].worker_hint.tier, Tier::Cheap);
+        assert_eq!(out[0].budget.max_turns, 5);
+
+        // 2. assignee + role: tier / adapter / 予算は role が勝ち、assignee は担当としてだけ残る。
+        let mut t = dt("survey", vec![]);
+        t.assignee = Some("research-survey".into());
+        t.role = Some("writer".into());
+        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, now);
+        assert_eq!(out[0].assignee.as_deref(), Some("research-survey"));
+        assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("claude-code"));
+        assert_eq!(out[0].worker_hint.tier, Tier::Standard);
+
+        // 3. 分野を持たないノード・組織に無い id は既定を変えない（知らない id は担当にもしない）。
+        let mut t = dt("tidy", vec![]);
+        t.assignee = Some("research-data".into());
+        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, now);
+        assert_eq!(out[0].assignee.as_deref(), Some("research-data"));
+        assert_eq!(out[0].genre, p.genre);
+        let mut t = dt("ghost", vec![]);
+        t.assignee = Some("nobody".into());
+        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, now);
+        assert_eq!(out[0].assignee, None);
     }
 }

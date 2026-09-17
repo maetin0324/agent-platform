@@ -91,6 +91,7 @@ fn main() {
         project_id: None,
         milestone_id: None,
         assignee: None,
+        conversation: None,
     };
 
     let WorkspaceSpec::Local { path: workspace_path } = &task.workspace else {

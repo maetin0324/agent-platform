@@ -190,7 +190,10 @@ impl WorkerAdapter for LdrAdapter {
 /// 人間の回答履歴は短い補足として後ろに付ける（検索語としての邪魔が少ない）。
 /// 役割の指示文とタイトルは `runs/<run_id>/request.json` に残るので記録は失われない。
 pub fn build_query(task: &Task, context: &RunContext) -> String {
-    let mut out = task.objective.trim().to_string();
+    // ADR-0033 D4 / D6（Phase 24）: 「人」であることは分野に依らないので、記憶と直近のやり取りは前置きする。
+    // 役割の指示文だけは載せない（ADR-0029 / Phase 19: 検索エンジンに渡す問いを役割の文面で濁さない）。
+    let mut out = crate::preamble::render_without_role(context);
+    out.push_str(task.objective.trim());
     if !context.answers.is_empty() {
         out.push_str("\n\n補足（人間の回答）:");
         for Answer { question, answer } in &context.answers {

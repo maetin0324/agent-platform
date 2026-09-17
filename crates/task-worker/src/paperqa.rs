@@ -107,20 +107,16 @@ impl WorkerAdapter for PaperQaAdapter {
 
 /// タスクの目的から `pqa ask` に渡す問いを組み立てる（ADR-0027 D3）。`claude_code::build_prompt` は
 /// コーディング用の文面（受け入れ条件・`artifacts/result.json` の書式指示・委譲の案内）なので流用せず、
-/// 素の目的 + 役割の指示文 + 人間の回答履歴だけを使う（PaperQA2 はワーカープロトコルを話さない調査エンジン
+/// 素の目的 + 前置き（役割の指示文・記憶・直近のやり取り）+ 人間の回答履歴だけを使う（PaperQA2 は
+/// ワーカープロトコルを話さない調査エンジン
 /// であり、結果ファイルの書式やコマンド再実行の話をしても意味がないため）。`request.json`/`prompt.txt` は
 /// 他のアダプタと同じ共有ヘルパ（`subprocess::write_run_request`/`write_run_prompt`）で残す。
 pub fn build_question(task: &Task, context: &RunContext) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n\n", task.title));
-    if let Some(role) = &context.role {
-        out.push_str(&format!("## Role: {}\n", role.id));
-        if !role.instructions.is_empty() {
-            out.push_str(&role.instructions);
-            out.push('\n');
-        }
-        out.push('\n');
-    }
+    // ADR-0033 D4 / D6（Phase 24）: 前置き（役職と brief・永続の認可・記憶・直近のやり取り・役割の指示文）は
+    // `crate::preamble` が 1 か所で組む。`RunContext` が Phase 23 までの中身なら出力は変わらない。
+    out.push_str(&crate::preamble::render(context));
     out.push_str(&task.objective);
     out.push('\n');
     if !context.answers.is_empty() {

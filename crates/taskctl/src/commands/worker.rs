@@ -355,6 +355,9 @@ async fn execute(
             role: None,
             children: Vec::new(),
             available_genres: Vec::new(),
+            // `taskctl worker run` は DB を変えない手動実行なので、役職・記憶・やり取り・組織図は渡さない
+            // （ADR-0033 D4 / D6: 記憶の追記はディスパッチャの仕事）。
+            ..RunContext::default()
         },
     };
 
@@ -442,6 +445,9 @@ async fn execute_on_cluster(
             role: None,
             children: Vec::new(),
             available_genres: Vec::new(),
+            // `taskctl worker run` は DB を変えない手動実行なので、役職・記憶・やり取り・組織図は渡さない
+            // （ADR-0033 D4 / D6: 記憶の追記はディスパッチャの仕事）。
+            ..RunContext::default()
         },
     };
 
@@ -665,6 +671,7 @@ mod tests {
             delegation: Default::default(),
             accounts: None,
             secrets: None,
+            memory: None,
             source_path: None,
         }
     }
@@ -713,6 +720,7 @@ mod tests {
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         }
     }
 

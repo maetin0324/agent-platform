@@ -270,6 +270,7 @@ pub fn new_task(kind: TaskKind, status: Status) -> Task {
         project_id: None,
         milestone_id: None,
         assignee: None,
+        conversation: None,
     }
 }
 

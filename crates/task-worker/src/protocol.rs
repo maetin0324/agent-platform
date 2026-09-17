@@ -10,8 +10,10 @@ use task_core::{ArtifactRef, DelegateTask, GenreSpec, Status, Task, TaskId, Usag
 
 /// `run.protocol`。v2（ADR-0016 M9）: `delegate` メッセージ、`context.role`、`context.children`、`task.role` / `task.aggregate` を追加。
 /// v3（ADR-0027 D1）: `context.available_genres`、`task.genre`、`delegate` の `tasks[].genre` を追加。
-/// 全て追加のみで v1/v2 のワーカーはそのまま動く。
-pub const PROTOCOL_VERSION: u32 = 3;
+/// v4（ADR-0033 D4/D6）: `context.node` / `context.memory` / `context.conversation` / `context.standing_rules` /
+/// `context.organization`、`delegate` の `tasks[].assignee`、結果ファイルの `memory` を追加。
+/// 全て追加のみで v1〜v3 のワーカーはそのまま動く。
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// 直前のレビュー結果（`context.prior_review[]`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -110,6 +112,64 @@ pub struct ChildSummary {
     pub workspace: Option<PathBuf>,
 }
 
+/// `context.node`（ADR-0033 D4 / Phase 24）: この run をしている「人」（組織のノード）。
+/// プロンプトの一番前に「あなたは誰で、何の担当か」として置かれる。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeContext {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub brief: String,
+}
+
+/// `context.memory`（ADR-0033 D6 / Phase 24）: 案件をまたぐ記憶と、この案件の引き出し。
+/// どちらも `<memory_dir>/<node_id>/…` のファイルの中身（字数で切ったもの）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryContext {
+    /// `notes.md`（クラスタの使い方、人の好み、直近の相談）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    /// `projects/<project_id>.md`（この案件だけの事）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
+}
+
+/// `context.conversation[]`（ADR-0033 D4 / Phase 24）: この案件でのこのノードと人の直近のやり取り。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConversationTurn {
+    pub role: task_core::MessageRole,
+    pub text: String,
+}
+
+/// `context.organization[]`（ADR-0033 D4 / Phase 24）: 組織図。分解・委譲できる run に渡し、
+/// 「どの課に何を振るか」を `assignee` で指定させる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OrgNodeContext {
+    pub id: String,
+    pub name: String,
+    /// `secretary` / `department` / `section`。
+    pub kind: task_core::OrgKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub brief: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genre: Option<String>,
+}
+
+impl From<&task_core::OrgNode> for OrgNodeContext {
+    fn from(n: &task_core::OrgNode) -> Self {
+        Self {
+            id: n.id.clone(),
+            name: n.name.clone(),
+            kind: n.kind,
+            parent_id: n.parent_id.clone(),
+            brief: n.brief.clone(),
+            genre: n.genre.clone(),
+        }
+    }
+}
+
 /// `run.context`。未知フィールドは無視する（前方互換）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RunContext {
@@ -131,6 +191,21 @@ pub struct RunContext {
     /// その役割の一覧を渡す。委譲できない run（`Plan`/`Review`）や `[[genres]]` が空の設定では空。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_genres: Vec<GenreContext>,
+    /// ADR-0033 D4: `task.assignee` の組織ノード（担当が無いタスクでは `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeContext>,
+    /// ADR-0033 D6: `[memory]` を設定し、担当が決まっている run にだけ載る長期記憶。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryContext>,
+    /// ADR-0033 D4: 担当のノードとのこの案件での直近のやり取り（古い順）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation: Vec<ConversationTurn>,
+    /// ADR-0033 D5: 「今後ずっと」の認可（永続の認可）。**Phase 26 が埋める。今は常に空**。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standing_rules: Vec<String>,
+    /// ADR-0033 D4: 分解・委譲できる run に渡す組織図（どの課に何を振るかを `assignee` で決めさせる）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub organization: Vec<OrgNodeContext>,
 }
 
 /// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは
@@ -312,7 +387,7 @@ pub(crate) mod tests {
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["type"], "run");
-        assert_eq!(v["protocol"], 3);
+        assert_eq!(v["protocol"], 4);
         assert_eq!(v["task"]["kind"], "execute");
         let back: RunRequest = serde_json::from_value(v).unwrap();
         assert_eq!(back, req);
@@ -399,6 +474,7 @@ pub(crate) mod tests {
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         }
     }
 }

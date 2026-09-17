@@ -352,6 +352,7 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHin
         project_id: None,
         milestone_id: None,
         assignee: None,
+        conversation: None,
     }
 }
 
@@ -409,6 +410,9 @@ async fn run_reviewer_inner(
             children: Vec::new(),
             // ADR-0027 D1: Reviewer run は委譲しない（M8 相当）。
             available_genres: Vec::new(),
+            // ADR-0033 D4 / D6: Reviewer run は「人」ではなく独立した判定なので、役職・記憶・やり取り・
+            // 組織図は渡さない（判定は成果物と条件だけで決める）。
+            ..RunContext::default()
         },
     };
     let tag = format!("reviewer({})", run.run_id);
@@ -520,6 +524,7 @@ mod tests {
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         }
     }
 
