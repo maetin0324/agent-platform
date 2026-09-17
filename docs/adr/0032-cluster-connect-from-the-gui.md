@@ -34,9 +34,12 @@ ADR-0018 は「**taskd から対話的な認証は絶対に行わない**」「�
   実測したプロンプト: `(rmaeda@130.158.241.2) Verification code: `（末尾に改行なし）。
   → 既存のログイン中継（`claude_account.rs`）のような pty / 改行なしプロンプトの読み取りは**不要**。
 - **`~/.ssh/config` は全 Host が `ControlPersist 10`（10 秒）**。`ssh -M -N -f` で張って離すと、
-  最後のクライアントが去った 10 秒後に master が消える。**`-f` を付けずに master プロセスを保持し続ければ、
-  `ControlPersist` の値に関係なく接続が生きる**ことを fern03 で確認した（`-O check` → `Master running (pid=…)`、
-  別プロセスの `ssh -o BatchMode=yes fern03 -- hostname` が成功）。
+  最後のクライアントが去った 10 秒後に master が消える。`-f` を付けずに保持した子が master になり続けることを
+  fern03 で確認した（`-O check` → `Master running (pid=…)`、別プロセスの `ssh -o BatchMode=yes fern03 -- hostname`
+  が成功）。**ただしこの測定では `-o ControlPersist=no` を明示していた**。実装はそれを渡さないので、
+  実際には次の項目のとおり ssh が自分を切り離す。**「`ControlPersist` に依存しない」という当初の結論は誤り**（D2 の訂正）。
+- **`ControlPersist` があると `ssh -M -N` は認証後に自分を切り離す**（D2 の訂正を見よ）。実測: sirius に
+  正しいコードを入れた直後、`ssh -M -N sirius` が PPID 1 で生き残り、taskd が起こした前面のプロセスは終了していた。
 - **FIFO（名前付きパイプ）で秘密をディスクに落とさずに受け渡せる**ことを確認した。偽 ssh を使った配管の実験で、
   プロンプトが出て行き、コードが戻り、FIFO のサイズは 0 のまま（`prw-------`、中身はカーネルのパイプバッファ）。
 
@@ -66,12 +69,21 @@ auth = "manual"        # 既定。taskd は接続を張らない（ADR-0018 D2 �
 - `"publickey"` と `"totp"` の違いは**人の入力が要るかどうかだけ**で、ssh の呼び方は同じ
   （`auth` で `PreferredAuthentications` 等をいじったりはしない。ssh の設定は人の `~/.ssh/config` が正。ADR-0018 D7）。
 
-### D2. 接続は taskd が `ssh -M -N` の子プロセスを**保持する**ことで張る
+### D2. 接続は taskd が `ssh -M -N` を起こして張る（子を保持できるなら保持する）
 
-- `-f`（バックグラウンド化）は使わない。taskd がその子プロセスを持ち続け、それが master になる。
-  したがって **`ControlPersist` の値に依存しない**（実機の `ControlPersist 10` でも切れない）。
-- 子が死んだら接続も終わる。**taskd を止めれば接続も閉じる**（ADR-0018 の「人が張った接続を借りる」から、
-  「taskd が張った接続を taskd が使う」に変わる。借りる側の仕組み＝`-O check` と `BatchMode=yes` は**そのまま**）。
+> **訂正（2026-09-17、実機で判明）**: 当初この節は「`-f` を付けずに子を保持すれば `ControlPersist` に依存しない」と
+> 書いていた。**これは誤り**だった。`~/.ssh/config` に `ControlPersist` があると、**ssh は認証が済んだ時点で
+> 自分をバックグラウンドへ切り離す**（master は `setsid` して PPID 1 になり、こちらが起こした前面のプロセスは
+> 終了する）。最初の検証で切れなかったのは、そのとき `-o ControlPersist=no` を明示して測っていたためで、
+> 実装はそれを渡していなかった。**「子が終了した」は失敗を意味しない**ので、子の終了を見たら必ずもう一度
+> `-O check` を見てから判定する。切るときは `ssh -O exit`（保持している子があればそれも落とす）。
+
+- `-f`（バックグラウンド化）は使わない。ssh が自分で切り離さない構成（`ControlPersist` 無し）なら、
+  taskd が持ち続ける子がそのまま master になる。切り離す構成なら taskd に持ち物は無く、接続は ssh 側が持つ。
+- 保持している子が死んだら接続も終わる。**taskd を止めれば、taskd が保持している接続は閉じる**。
+  切り離された master は taskd を止めても残るので、`DELETE .../connect` の `ssh -O exit` で閉じる。
+- ADR-0018 の「人が張った接続を借りる」から「taskd が張った接続を taskd が使う」に変わるが、
+  借りる側の仕組み＝`-O check` と `BatchMode=yes` は**そのまま**。
 - 人が `scripts/cluster-login.sh` で張った master があるなら、taskd はそれをこれまでどおり借りる。
   **接続の有無の判定は今までどおり `ssh -o BatchMode=yes -O check <host>` の 1 本**（`refresh_cluster_liveness`）。
   張り方が増えるだけで、見方は増やさない。

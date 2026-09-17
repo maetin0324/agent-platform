@@ -138,8 +138,9 @@ pub fn spawn_connect_code(
         // 成否にかかわらずセッションは終わったので pending を降ろす。
         let _ = events.send(ClusterConnectPending { id: id.clone(), pending: false }).await;
         match result {
+            // `None` は失敗ではない（ssh が `ControlPersist` で master を切り離した場合。保持する子が無いだけ）。
             Ok(master) => {
-                hold_master(&masters, &id, Some(master));
+                hold_master(&masters, &id, master);
                 tracing::info!(who = "admin", op = "cluster_connect_code", cluster = %id, "cluster: connected");
                 let _ = reply.send(Ok(ClusterConnectCodeOutcome { ok: true, detail: None }));
             }

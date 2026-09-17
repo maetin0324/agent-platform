@@ -96,7 +96,13 @@ impl ClusterConnectSession {
     /// N6 相当: `trim` して空、または制御文字を含むコードは ssh に渡さずに `InvalidCode` を返す
     /// （`claude_account.rs::LoginSession::submit_code` と同じ注入防止）。この場合 `self` はここで
     /// 消費され、`Drop` がプロセスグループを kill し一時ディレクトリを消す（ssh には何も渡らない）。
-    pub async fn submit_code(mut self, code: &str, wait: Duration) -> Result<ClusterMaster, ClusterConnectError> {
+    /// 戻り値が `None` なのは失敗ではない。ssh が `ControlPersist` で自分を切り離したため
+    /// **保持すべき子プロセスが無い**という意味（接続自体は成立している。上の実機の注記を見よ）。
+    pub async fn submit_code(
+        mut self,
+        code: &str,
+        wait: Duration,
+    ) -> Result<Option<ClusterMaster>, ClusterConnectError> {
         let trimmed = code.trim();
         if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
             return Err(ClusterConnectError::InvalidCode);
@@ -123,12 +129,7 @@ impl ClusterConnectSession {
         };
         let outcome = poll_until_connected_or_timeout(&ssh_command, &host, child, wait).await;
         match outcome {
-            PollOutcome::Connected => match self.into_master() {
-                Some(master) => Ok(master),
-                None => Err(ClusterConnectError::Failed(
-                    "cluster connect session lost its child process".to_string(),
-                )),
-            },
+            PollOutcome::Connected => Ok(self.into_master()),
             PollOutcome::TimedOut | PollOutcome::ChildExited => {
                 let detail = self.stderr_detail();
                 self.cancel().await;
@@ -153,8 +154,10 @@ impl ClusterConnectSession {
 
     /// 認証済みの child を `ClusterMaster` として取り出す。一時ディレクトリは（`self` の残りとともに）
     /// この関数を抜けたときの `Drop` で消える（child は既に取り出しているので kill はされない）。
+    /// 生きている子だけを `ClusterMaster` にする。ssh が切り離した後の抜け殻を掴むと、
+    /// `Drop` が既に終了したプロセスグループへ signal を送るだけの無意味な保持になる。
     fn into_master(mut self) -> Option<ClusterMaster> {
-        self.child.take().map(|child| ClusterMaster { child })
+        self.child.take().and_then(master_if_alive)
     }
 
     fn stderr_detail(&self) -> String {
@@ -257,7 +260,10 @@ async fn start_publickey(
             // 接続できたので、stderr の中継タスクは master の寿命の間そのまま走らせておく
             // （もう監視する必要はない。参照を手放すだけで abort はしない）。
             drop(err_task);
-            Ok(ClusterConnectStart::Connected(Some(ClusterMaster { child })))
+            // ssh が自分を切り離した（`ControlPersist` あり）場合、この子はもう終了している。
+            // そのときは持つべき master が無い（接続は切り離された側が持っている）ので `None` を返す。
+            // 切るときは `ssh -O exit` を使う（`disconnect`）。
+            Ok(ClusterConnectStart::Connected(master_if_alive(child)))
         }
         PollOutcome::TimedOut | PollOutcome::ChildExited => {
             let detail = finish_stderr(&mut child, stderr_buf, err_task).await;
@@ -404,6 +410,15 @@ enum PollOutcome {
 }
 
 /// `-O check` を `CHECK_POLL_INTERVAL` 間隔でポーリングしつつ、子の終了も同時に見る（ADR-0032 D2/D4）。
+/// 子がまだ生きていれば `ClusterMaster` として保持する。既に終了していれば `None`
+/// （ssh が `ControlPersist` で master を切り離した後。接続は生きているが、こちらに持ち物は無い）。
+fn master_if_alive(mut child: Child) -> Option<ClusterMaster> {
+    match child.try_wait() {
+        Ok(Some(_)) => None,
+        _ => Some(ClusterMaster { child }),
+    }
+}
+
 async fn poll_until_connected_or_timeout(
     ssh_command: &[String],
     host: &str,
@@ -414,7 +429,15 @@ async fn poll_until_connected_or_timeout(
     loop {
         if let Ok(Some(status)) = child.try_wait() {
             let _ = status;
-            return PollOutcome::ChildExited;
+            // **実機で判明（2026-09-17、sirius）**: `~/.ssh/config` に `ControlPersist` があると、
+            // ssh は認証が済んだ時点で**自分をバックグラウンドへ切り離す**（master は setsid して PPID 1 になり、
+            // こちらが持っていた子プロセスは終了する）。つまり「子が終了した」は失敗とは限らない。
+            // 必ずもう一度 `-O check` を見てから判定する（これを見ないと、接続できているのに失敗を返す）。
+            return if check_master(ssh_command, host).await {
+                PollOutcome::Connected
+            } else {
+                PollOutcome::ChildExited
+            };
         }
         if check_master(ssh_command, host).await {
             return PollOutcome::Connected;
@@ -666,6 +689,66 @@ mod tests {
     }
 
     // ---- 5. totp、正しいコードで繋がる ----
+
+    /// 偽 ssh が「認証が済んだら**自分を切り離して終了する**」（`ControlPersist` があるときの本物の挙動）。
+    ///
+    /// `-O check` は**前面の子が消えてから**しか成功しないようにしてある。こうしないと
+    /// 「認証済みファイルを書いてから exit するまでの隙間」で普通の成功経路を通ってしまい、
+    /// 肝心の「子の終了を観測した後」の分岐を踏まないテストになる（実際に一度そうなった）。
+    fn daemonizing_askpass_script(state: &Path, prompt: &str, expected_code: &str) -> String {
+        format!(
+            "#!/bin/sh\nSTATE={state:?}\n{preamble}\
+             if [ \"$is_master\" -ge 2 ]; then\n  \
+               echo $$ > \"$STATE/masterpid\"\n  \
+               code=$(\"$SSH_ASKPASS\" \"{prompt}\")\n  \
+               if [ \"$code\" = \"{expected_code}\" ]; then echo ok > \"$STATE/authed\"; fi\n  \
+               exit 0\nfi\n\
+             if [ \"$is_check\" = 1 ]; then\n  \
+               [ -f \"$STATE/authed\" ] || exit 1\n  \
+               if [ -f \"$STATE/masterpid\" ] && kill -0 \"$(cat \"$STATE/masterpid\")\" 2>/dev/null; then exit 1; fi\n  \
+               exit 0\nfi\n\
+             exit 1\n",
+            preamble = preamble(),
+        )
+    }
+
+    /// **実機の回帰（2026-09-17、sirius）**: `~/.ssh/config` に `ControlPersist` があると、ssh は認証が済んだ
+    /// 時点で自分をバックグラウンドへ切り離す（master は PPID 1 になり、こちらの子は終了する）。
+    /// 「子が終了した＝失敗」と決めつけていたため、**接続できているのに失敗を返していた**
+    /// （人間の報告「一回接続に失敗しましたという表記が出てから接続に成功しています」。
+    /// 実際には 1 回目で繋がっていて、失敗表示だけが誤りだった）。子の終了後に必ず `-O check` を見る。
+    #[tokio::test]
+    async fn totp_succeeds_when_ssh_backgrounds_itself_after_authenticating() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let prompt = "(rmaeda@130.158.241.2) Verification code: ";
+        let ssh = fake_ssh(dir.path(), "ssh", &daemonizing_askpass_script(state.path(), prompt, "123456"));
+        let result =
+            start_connect(&ssh, "cluster-host", true, Duration::from_secs(5), Duration::from_secs(5)).await.unwrap();
+        let ClusterConnectStart::NeedsCode { session, .. } = result else {
+            panic!("expected NeedsCode");
+        };
+        match session.submit_code("123456", Duration::from_secs(5)).await {
+            // 保持する子は無い（ssh が切り離した）が、**接続は成功している**。
+            Ok(master) => assert!(master.is_none(), "the child exited, so there is nothing to hold"),
+            Err(e) => panic!("expected success even though the child exited, got {e:?}"),
+        }
+    }
+
+    /// 切り離されても**間違ったコードなら失敗のまま**（上の修正で失敗を握りつぶしていないこと）。
+    #[tokio::test]
+    async fn totp_still_fails_when_the_code_is_wrong_and_ssh_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let prompt = "(rmaeda@130.158.241.2) Verification code: ";
+        let ssh = fake_ssh(dir.path(), "ssh", &daemonizing_askpass_script(state.path(), prompt, "123456"));
+        let result =
+            start_connect(&ssh, "cluster-host", true, Duration::from_secs(5), Duration::from_secs(5)).await.unwrap();
+        let ClusterConnectStart::NeedsCode { session, .. } = result else {
+            panic!("expected NeedsCode");
+        };
+        assert!(session.submit_code("000000", Duration::from_secs(2)).await.is_err());
+    }
 
     #[tokio::test]
     async fn totp_submit_code_connects_with_the_right_code() {

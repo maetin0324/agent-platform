@@ -3114,7 +3114,7 @@ D-3（`ensure_secrets_dir` の create → chmod の間の一瞬と、既にあ�
    （トークンあり・`token_file` 未設定の両構成で 401、未知 id は 404、409/409/422/502 の写像、
    空・空白・制御文字のコードが 422 で `admin_tx` に届かない、型違いの本文で値が反射しない、
    `GET /clusters` に `prompt` が出ない）。
-3. **偽 ssh での一連の流れ** — `cargo test -p task-worker cluster_login` **10 passed**
+3. **偽 ssh での一連の流れ** — `cargo test -p task-worker cluster_login` **12 passed**
    （`Connected(None)` / 遅れて成功 / タイムアウトで子が残らない / プロンプトがそのまま返る / コード送信で成功 /
    空・制御文字は ssh に渡らない / `cancel` で子と一時ディレクトリが消える / `-O exit`）。
    taskd 側の受け手は `cargo test -p taskd cluster_admin` **5 passed**。
@@ -3122,7 +3122,7 @@ D-3（`ensure_secrets_dir` の create → chmod の間の一瞬と、既にあ�
    `publickey_cluster_auto_connect_failure_gets_a_distinguishable_reason`（cooldown 中に 2 回呼ばれないことも）/
    `manual_and_totp_clusters_are_not_auto_connected_even_with_a_hook`。
 5. **GUI** — G12 を見よ。
-6. **実機** — **半分だけ充足**:
+6. **実機** — **充足**（`publickey` と `totp` の両方。`totp` は下記の不具合を直した後）:
    - `auth = "publickey"`（fern03、本番 taskd）: **接続できた**。`POST /clusters/fern03/connect` が **0.22 秒**で
      `{"kind":"connected"}`。飾りでないことを 3 通りで確認 — `ssh -O check fern03` → `Master running (pid=809664)`、
      `ssh -o BatchMode=yes fern03 -- uptime` → `up 32 days`（本当に fern03 で実行されている）、
@@ -3131,8 +3131,8 @@ D-3（`ensure_secrets_dir` の create → chmod の間の一瞬と、既にあ�
      `POST /clusters/sirius/connect` が 0.56 秒で
      `{"kind":"needs_code","prompt":"(rmaeda@130.158.241.2) Verification code: ","expires_at":"…"}` を返し、
      `connect_pending` も立った（その後 `DELETE` で取り消し、宙ぶらりんの ssh が残らないことも確認）。
-     **実際の検証コードで接続が成立するところは未確認**（コードは人間しか出せない。U22-1）。
-7. **共通条件** — `cargo test --workspace` **814 passed / FAILED 行 0**、
+     その後、**人間が GUI から実際の TOTP を入れて接続が成立した**（下記の不具合を挟んで）。
+7. **共通条件** — `cargo test --workspace` **816 passed / FAILED 行 0**、
    `cargo clippy --workspace --all-targets -- -D warnings` exit 0、`scripts/sync-gui-docs.sh --check` up to date。
 
 ### 結合時に直したもの（並行実装の突き合わせ）
@@ -3151,9 +3151,30 @@ D-3（`ensure_secrets_dir` の create → chmod の間の一瞬と、既にあ�
   200 `{ok: false, detail}` を返す。ADR-0032 D5 の意図（422 は「taskd が ssh に渡すことすら拒んだ」ときだけ、
   ssh の認証結果は `ok` で伝える）からしてドキュメントの方が誤りなので、そちらを直した。
 
+### 実機の TOTP で見つかった不具合（人間の報告「一回接続に失敗しましたという表記が出てから接続に成功しています」）
+
+**ADR-0032 D2 の前提が誤っていた。** `~/.ssh/config` に `ControlPersist` があると、**ssh は認証が済んだ時点で
+自分をバックグラウンドへ切り離す**（master は `setsid` して PPID 1 になり、taskd が起こした前面のプロセスは終了する）。
+実装は「子が終了した＝失敗」と決めつけていたため、**1 回目で接続できていたのに失敗を表示していた**。
+
+- 証跡: daemon ログに `cluster: connect failed { error: "ssh did not connect: " }`（detail が空＝stderr も空）が
+  コード送信と同じ秒に記録される一方、`ssh -O check sirius` は `Master running (pid=829810)` を返し、
+  `ps -o ppid -p 829810` は **PPID 1**。成功のログは 1 行も無いのに `GET /clusters` は `connected: true`
+  （`refresh_cluster_liveness` が後から気づいたため）。人間が見た「失敗してから成功」はこれ。
+- **なぜ最初の検証で気づかなかったか**: fern03 で「子を保持すれば切れない」ことを測ったとき、
+  **私が `-o ControlPersist=no` を明示していた**。実装はそれを渡さない。自分の測定条件と実装条件がずれていた。
+- 直したもの: 子の終了を見たら**必ずもう一度 `-O check` を見てから**判定する。接続できていれば成功とし、
+  保持すべき子が無い場合は `ClusterMaster` を持たない（`submit_code` の戻り値を `Option<ClusterMaster>` に変更）。
+  切るときは `ssh -O exit`（`disconnect`）で閉じる。ADR-0032 D2 と §1 の「実機で確かめた事実」に訂正を書いた。
+- 回帰テスト: `totp_succeeds_when_ssh_backgrounds_itself_after_authenticating` と
+  `totp_still_fails_when_the_code_is_wrong_and_ssh_exits`。
+  **最初に書いた回帰テストは効き目が無かった**（修正を戻しても通った）。偽 ssh が「認証済みの印を書く」のと
+  「終了する」の間で競合し、普通の成功経路を通っていたため。`-O check` が**前面の子が消えてからしか成功しない**
+  ようにして、修正を外すと落ちることを確認してから採用した。
+
 ### 未解決事項
 
-- **U22-1**: 実機の TOTP で接続が成立するところが未確認（受け入れ条件 6 の後半）。人間がコードを入れるまで保留。
+- U22-1 は**解消**（実機の TOTP で接続が成立した。受け入れ条件 6 は充足）。
 - U22-2: 自動接続はディスパッチループを最大 8 秒止める。今のところ実測 1 秒未満なので問題になっていないが、
   遅いホストを `auth = "publickey"` にすると tick が詰まる。詰まるようなら非同期化（フックを spawn して
   次の tick で結果を見る）を検討する。
