@@ -319,7 +319,10 @@ fn parse_status(s: &str) -> Result<Status, StoreError> {
     }
 }
 
-pub trait TaskStore: Send + Sync {
+/// ADR-0033 D3: 報告（`reports`）の読み書きは `crate::report::ReportStore` にあり、`TaskStore` はそれを
+/// supertrait として要求する（ディスパッチャの `Arc<dyn TaskStore>` から報告を追記できるようにするため。
+/// 実装は `report.rs` にあり、この表の SQL はここには無い）。
+pub trait TaskStore: Send + Sync + crate::report::ReportStore {
     fn insert(&self, task: &Task) -> Result<(), StoreError>;
     fn get(&self, id: TaskId) -> Result<Option<Task>, StoreError>;
     fn list(&self, filter: Option<Status>) -> Result<Vec<Task>, StoreError>;
@@ -473,11 +476,11 @@ fn kind_str(k: TaskKind) -> &'static str {
     }
 }
 
-fn format_rfc3339(t: OffsetDateTime) -> Result<String, StoreError> {
+pub(crate) fn format_rfc3339(t: OffsetDateTime) -> Result<String, StoreError> {
     Ok(t.format(&Rfc3339)?)
 }
 
-fn parse_rfc3339(s: &str) -> Result<OffsetDateTime, StoreError> {
+pub(crate) fn parse_rfc3339(s: &str) -> Result<OffsetDateTime, StoreError> {
     Ok(OffsetDateTime::parse(s, &Rfc3339)?)
 }
 
@@ -706,7 +709,8 @@ impl SqliteStore {
         })())
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
+    /// ADR-0033 D3: `report.rs`（`reports` 表の SQL）も同じ接続を使うので crate 内に公開する。
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
         self.conn.lock().map_err(|_| StoreError::Poisoned)
     }
 

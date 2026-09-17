@@ -42,7 +42,7 @@ use crate::types::{
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
-type ApiResult = Result<Response, ApiProblem>;
+pub(crate) type ApiResult = Result<Response, ApiProblem>;
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const TITLE_QUERY_MAX_CHARS: usize = 200;
@@ -109,6 +109,7 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/projects/{id}", get(project_detail).patch(patch_project))
         .route("/api/v1/projects/{id}/milestones", post(create_milestone))
         .route("/api/v1/milestones/{id}", patch(patch_milestone))
+        .merge(crate::reports::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -131,7 +132,7 @@ pub(crate) fn now_rfc3339() -> String {
     rfc3339(OffsetDateTime::now_utc())
 }
 
-fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
+pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
     match serde_json::to_vec(value) {
         Ok(body) => {
             let mut response = Response::new(Body::from(body));
@@ -186,7 +187,7 @@ async fn read_body(body: Body) -> Result<Vec<u8>, ApiProblem> {
 }
 
 /// JSON 本文を解析する。構文誤り・未知フィールド・型誤りは 400。`empty_is_object` なら空本体を `{}` とみなす。
-async fn read_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Result<T, ApiProblem> {
+pub(crate) async fn read_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Result<T, ApiProblem> {
     let bytes = read_body(body).await?;
     let text: &[u8] = if empty_is_object && bytes.iter().all(u8::is_ascii_whitespace) {
         b"{}"
@@ -237,7 +238,7 @@ fn load_task(store: &SqliteStore, id: TaskId) -> Result<Task, ApiProblem> {
         .ok_or_else(|| ApiProblem::task_not_found(id))
 }
 
-fn no_query(raw: &Option<String>) -> Result<(), ApiProblem> {
+pub(crate) fn no_query(raw: &Option<String>) -> Result<(), ApiProblem> {
     QueryParams::parse(raw.as_deref(), &[]).map(|_| ())
 }
 
@@ -1959,9 +1960,17 @@ async fn daemon(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
         StatusCode::OK,
         &DaemonView {
             now: now_rfc3339(),
-            snapshot: state.snapshot(),
+            // ADR-0033 D3: `reports` だけは API が埋める（`last_notified_at` は API のメモリにある）。
+            snapshot: daemon_snapshot_with_reports(&state),
         },
     ))
+}
+
+/// ADR-0033 D3: ディスパッチャのスナップショットに、秘書レベルの未読の報告と通知の判定を載せる。
+fn daemon_snapshot_with_reports(state: &ApiState) -> Option<task_ops::daemon::DaemonSnapshot> {
+    let mut snapshot = state.snapshot()?;
+    snapshot.reports = crate::reports::reports_live(&state.inner.store, crate::reports::last_notified_at(state));
+    Some(snapshot)
 }
 
 async fn config(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {

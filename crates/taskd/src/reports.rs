@@ -1,0 +1,353 @@
+//! 報告の圧縮（ADR-0033 D3。Phase 25）。
+//!
+//! 親ノードにたまった子の報告を、**レビュー用の run 1 回**で 1 件にまとめる。判断（何件たまったか、
+//! 最古が何時間経ったか）は決定的で、まとめる中身だけが LLM の仕事（`Check::Reviewer` と同じ「別 run」の形）。
+//!
+//! ここは `tick_loop` の中から同期で呼ばれる（B1: チャネルに送らない）。やることは
+//! 「`reports` を読む」「まとめのタスクを `tasks` に 1 件作る」だけで、LLM もワーカーも起動しない。
+//! 起こした run が `done` になると、ディスパッチャ（`task-dispatch` の `reports` モジュール）が
+//! その `summary` を親ノードの報告にし、`sources` に子の報告を入れる。
+
+use std::path::Path;
+
+use serde::Deserialize;
+use task_core::report::{self, Report};
+use task_core::{
+    Budget, ListFilter, ListOrder, OrgNode, ProjectId, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Tier,
+    WorkerHint, WorkspaceSpec,
+};
+use time::OffsetDateTime;
+
+/// まとめの run の予算（短い読み書きだけなので小さく取る）。
+const COMPACTION_BUDGET: Budget = Budget {
+    max_turns: 8,
+    max_wall_secs: 600,
+    max_retries: 1,
+};
+
+/// 開いているまとめタスクを探すときに見る件数の上限。
+const OPEN_TASK_SCAN: usize = 500;
+
+/// `[reports]`（ADR-0033 D3）。閾値だけを持つ。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReportsConfig {
+    /// 子の報告がこの件数たまったら、まとめの run を 1 回起こす。
+    #[serde(default = "default_compress_after")]
+    pub compress_after: usize,
+    /// 件数に満たなくても、最古の報告がこの秒数を過ぎたら起こす（既定 2 時間）。
+    #[serde(default = "default_compress_after_secs")]
+    pub compress_after_secs: u64,
+}
+
+fn default_compress_after() -> usize {
+    report::DEFAULT_COMPRESS_AFTER
+}
+
+fn default_compress_after_secs() -> u64 {
+    report::DEFAULT_COMPRESS_AFTER_SECS
+}
+
+impl Default for ReportsConfig {
+    fn default() -> Self {
+        Self {
+            compress_after: default_compress_after(),
+            compress_after_secs: default_compress_after_secs(),
+        }
+    }
+}
+
+/// 親になっているノード（子を 1 つ以上持つノード）。
+fn parents(org: &[OrgNode]) -> Vec<&OrgNode> {
+    org.iter()
+        .filter(|n| org.iter().any(|c| c.parent_id.as_deref() == Some(n.id.as_str())))
+        .collect()
+}
+
+/// 案件ごとに分ける（`None` = 案件なし）。並びは入力（古い順）のまま。
+fn group_by_project(pending: Vec<Report>) -> Vec<(Option<ProjectId>, Vec<Report>)> {
+    let mut groups: Vec<(Option<ProjectId>, Vec<Report>)> = Vec::new();
+    for report in pending {
+        match groups.iter_mut().find(|(p, _)| *p == report.project_id) {
+            Some((_, items)) => items.push(report),
+            None => groups.push((report.project_id, vec![report])),
+        }
+    }
+    groups
+}
+
+/// そのノード・その案件のまとめタスクが既に開いている（終端でない）か。
+/// 同じ報告を二重にまとめないための決定的な検査。
+fn has_open_compaction_task(
+    store: &dyn TaskStore,
+    node_id: &str,
+    project_id: Option<ProjectId>,
+) -> Result<bool, StoreError> {
+    let filter = ListFilter {
+        statuses: vec![
+            Status::Draft,
+            Status::Ready,
+            Status::Running,
+            Status::Blocked,
+            Status::Reviewing,
+        ],
+        project_id,
+        ..ListFilter::default()
+    };
+    let page = store.list_page(&filter, ListOrder::UpdatedDesc, None, OPEN_TASK_SCAN)?;
+    Ok(page.items.iter().any(|t| {
+        t.role.as_deref() == Some(report::COMPACTION_ROLE)
+            && t.assignee.as_deref() == Some(node_id)
+            && t.project_id == project_id
+    }))
+}
+
+/// まとめの run のタスク（`kind = execute`、担当は親ノード）。
+/// 受け入れ条件は置かない: 出力は「1 件の報告」そのもので、決定的に確かめられるものが無いため
+/// （レビューは条件ゼロで全 pass = `done`。報告自体は run の終端の時点で作られる）。
+fn compaction_task(
+    node: &OrgNode,
+    project_id: Option<ProjectId>,
+    pending: &[Report],
+    workspace_root: &Path,
+    now: OffsetDateTime,
+) -> Task {
+    let id = TaskId::new();
+    Task {
+        id,
+        parent_id: None,
+        kind: TaskKind::Execute,
+        title: format!("報告のまとめ: {}", node.name),
+        objective: report::compaction_objective(node, pending),
+        acceptance: Vec::new(),
+        inputs: Vec::new(),
+        depends_on: Vec::new(),
+        status: Status::Ready,
+        priority: 0,
+        worker_hint: WorkerHint {
+            tier: Tier::Standard,
+            adapter: None,
+        },
+        workspace: WorkspaceSpec::Local {
+            path: workspace_root.join(id.to_string()),
+        },
+        budget: COMPACTION_BUDGET,
+        attempts: 0,
+        lease: None,
+        created_at: now,
+        updated_at: now,
+        role: Some(report::COMPACTION_ROLE.to_string()),
+        genre: node.genre.clone(),
+        aggregate: false,
+        project_id,
+        milestone_id: None,
+        assignee: Some(node.id.clone()),
+    }
+}
+
+/// tick ごとに 1 回呼ぶ。閾値を超えた親ノード × 案件ごとに、まとめのタスクを 1 件ずつ作る。
+/// 作ったタスクの id を返す（テストとログのため）。**LLM は呼ばない**。
+pub fn schedule_report_compaction(
+    store: &dyn TaskStore,
+    config: &ReportsConfig,
+    workspace_root: &Path,
+    now: OffsetDateTime,
+) -> Result<Vec<TaskId>, StoreError> {
+    let org = store.org_list()?;
+    let mut created = Vec::new();
+    for node in parents(&org) {
+        let pending = store.report_unreviewed_children(&node.id)?;
+        if pending.is_empty() {
+            continue;
+        }
+        for (project_id, items) in group_by_project(pending) {
+            if !report::compaction_due(&items, now, config.compress_after, config.compress_after_secs) {
+                continue;
+            }
+            if has_open_compaction_task(store, &node.id, project_id)? {
+                continue;
+            }
+            let task = compaction_task(node, project_id, &items, workspace_root, now);
+            store.create_task(&task, vec![task_core::Event::Created { task: Box::new(task.clone()) }])?;
+            tracing::info!(
+                node = %node.id,
+                task_id = %task.id,
+                reports = items.len(),
+                "reports: scheduled a compaction run"
+            );
+            created.push(task.id);
+        }
+    }
+    Ok(created)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use task_core::org::OrgKind;
+    use task_core::report::{ReportKind, ReportStore};
+    use task_core::{Report, ReportFilter, ReportId, SqliteStore};
+
+    fn org_node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
+        let now = OffsetDateTime::now_utc();
+        OrgNode {
+            id: id.into(),
+            parent_id: parent.map(str::to_string),
+            name: id.into(),
+            kind,
+            genre: None,
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn store_with_org() -> SqliteStore {
+        let store = SqliteStore::open_in_memory().expect("open");
+        for n in [
+            org_node("secretary", None, OrgKind::Secretary),
+            org_node("coding", Some("secretary"), OrgKind::Department),
+            org_node("coding-poc", Some("coding"), OrgKind::Section),
+        ] {
+            store.org_upsert(&n).expect("seed");
+        }
+        store
+    }
+
+    fn child_report(project: Option<ProjectId>, at: OffsetDateTime, n: usize) -> Report {
+        Report {
+            id: ReportId::new(),
+            project_id: project,
+            node_id: "coding-poc".into(),
+            task_id: None,
+            kind: ReportKind::Result,
+            level: 2,
+            headline: format!("結果 {n}"),
+            body: format!("本文 {n}"),
+            sources: Vec::new(),
+            read_at: None,
+            created_at: at,
+        }
+    }
+
+    #[test]
+    fn four_reports_schedule_a_run_but_three_do_not() {
+        let store = store_with_org();
+        let now = OffsetDateTime::now_utc();
+        let project = ProjectId::new();
+        let cfg = ReportsConfig::default();
+        let root = std::path::PathBuf::from("/tmp/taskd-test");
+
+        for n in 0..3 {
+            store.report_append(&child_report(Some(project), now, n)).expect("append");
+        }
+        assert!(
+            schedule_report_compaction(&store, &cfg, &root, now)
+                .expect("schedule")
+                .is_empty(),
+            "3 件では起きない"
+        );
+
+        store.report_append(&child_report(Some(project), now, 3)).expect("append");
+        let created = schedule_report_compaction(&store, &cfg, &root, now).expect("schedule");
+        assert_eq!(created.len(), 1, "4 件で起きる");
+
+        let task = store.get(created[0]).expect("get").expect("some");
+        assert_eq!(task.kind, TaskKind::Execute);
+        assert_eq!(task.assignee.as_deref(), Some("coding"));
+        assert_eq!(task.project_id, Some(project));
+        assert_eq!(task.role.as_deref(), Some(report::COMPACTION_ROLE));
+        for n in 0..4 {
+            assert!(task.objective.contains(&format!("結果 {n}")), "{}", task.objective);
+            assert!(task.objective.contains(&format!("本文 {n}")), "{}", task.objective);
+        }
+
+        // 開いているまとめがある間は二重に作らない。
+        assert!(
+            schedule_report_compaction(&store, &cfg, &root, now)
+                .expect("schedule")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_old_report_schedules_a_run_even_below_the_count() {
+        let store = store_with_org();
+        let now = OffsetDateTime::now_utc();
+        let cfg = ReportsConfig::default();
+        let root = std::path::PathBuf::from("/tmp/taskd-test");
+        store
+            .report_append(&child_report(Some(ProjectId::new()), now - time::Duration::hours(1), 0))
+            .expect("append");
+        assert!(
+            schedule_report_compaction(&store, &cfg, &root, now)
+                .expect("schedule")
+                .is_empty(),
+            "1 時間では起きない"
+        );
+        let created = schedule_report_compaction(&store, &cfg, &root, now + time::Duration::hours(2)).expect("schedule");
+        assert_eq!(created.len(), 1, "2 時間経過で起きる");
+    }
+
+    #[test]
+    fn reports_of_different_projects_get_one_run_each() {
+        let store = store_with_org();
+        let now = OffsetDateTime::now_utc();
+        let cfg = ReportsConfig::default();
+        let root = std::path::PathBuf::from("/tmp/taskd-test");
+        let a = ProjectId::new();
+        let b = ProjectId::new();
+        for n in 0..4 {
+            store.report_append(&child_report(Some(a), now, n)).expect("append");
+            store.report_append(&child_report(Some(b), now, n)).expect("append");
+        }
+        let created = schedule_report_compaction(&store, &cfg, &root, now).expect("schedule");
+        assert_eq!(created.len(), 2);
+        let projects: Vec<_> = created
+            .iter()
+            .filter_map(|id| store.get(*id).ok().flatten())
+            .filter_map(|t| t.project_id)
+            .collect();
+        assert!(projects.contains(&a) && projects.contains(&b));
+    }
+
+    #[test]
+    fn once_the_summary_exists_the_children_are_no_longer_pending() {
+        let store = store_with_org();
+        let now = OffsetDateTime::now_utc();
+        let project = ProjectId::new();
+        let cfg = ReportsConfig::default();
+        let root = std::path::PathBuf::from("/tmp/taskd-test");
+        let children: Vec<Report> = (0..4).map(|n| child_report(Some(project), now, n)).collect();
+        store.report_append_all(&children).expect("append");
+        let created = schedule_report_compaction(&store, &cfg, &root, now).expect("schedule");
+        assert_eq!(created.len(), 1);
+
+        // まとめの run が done になったときに作られる報告（`task-dispatch` と同じ形）を手で入れる。
+        let summary = Report {
+            id: ReportId::new(),
+            project_id: Some(project),
+            node_id: "coding".into(),
+            task_id: Some(created[0]),
+            kind: ReportKind::Result,
+            level: 1,
+            headline: "まとめ".into(),
+            body: "まとめ本文".into(),
+            sources: children.iter().map(|c| c.id).collect(),
+            read_at: None,
+            created_at: now,
+        };
+        store.report_append(&summary).expect("append");
+        assert!(store.report_unreviewed_children("coding").expect("pending").is_empty());
+
+        // まとめの報告は、その 1 段上（秘書）のレビュー対象になる。
+        let up = store.report_unreviewed_children("secretary").expect("pending");
+        assert_eq!(up.len(), 1);
+        assert_eq!(up[0].id, summary.id);
+        assert_eq!(
+            store.report_list(&ReportFilter::default()).expect("list").len(),
+            5
+        );
+    }
+}

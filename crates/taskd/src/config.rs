@@ -90,6 +90,9 @@ pub struct Config {
     /// ADR-0016 D2: 実行中の委譲の上限。
     #[serde(default)]
     pub delegation: DelegationConfig,
+    /// ADR-0033 D3: 報告の圧縮の閾値（`compress_after` / `compress_after_secs`）。
+    #[serde(default)]
+    pub reports: crate::reports::ReportsConfig,
     /// ADR-0024 D1: Claude アカウントのプール。無ければ `account_pool = true` のプロバイダは設定エラー。
     #[serde(default)]
     pub accounts: Option<AccountsConfig>,

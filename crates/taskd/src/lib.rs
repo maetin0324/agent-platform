@@ -4,6 +4,8 @@
 mod accounts_admin;
 mod cluster_admin;
 pub mod config;
+/// ADR-0033 D3（Phase 25）: 報告の圧縮（まとめの run を起こす決定的な判断）。
+pub mod reports;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -718,6 +720,23 @@ async fn tick_loop(
             cluster_admin::expire_stale_cluster_sessions(&cluster_sessions, cluster_admin::SESSION_EXPIRY).await
         {
             dispatcher.set_cluster_connect_pending(&id, false);
+        }
+        // ADR-0033 D3 / B1: 報告の圧縮（まとめの run を起こすかの決定的な判断）。チャネルには送らず、
+        // tick の直前にストアを見るだけ（LLM もワーカーも起動しない。起動するのは次の tick の dispatch）。
+        {
+            let store = dispatcher.store();
+            match reports::schedule_report_compaction(
+                store.as_ref(),
+                &config.reports,
+                &config.workspace_root,
+                OffsetDateTime::now_utc(),
+            ) {
+                Ok(created) if !created.is_empty() => {
+                    tracing::info!(count = created.len(), "reports: compaction runs scheduled");
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "reports: could not schedule the compaction runs"),
+            }
         }
         let tick_started = std::time::Instant::now();
         let report: TickReport = dispatcher.tick()?;

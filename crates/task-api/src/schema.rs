@@ -73,6 +73,12 @@ pub struct ApiV1Schema {
     pub project_detail: ProjectDetail,
     pub milestone_create: MilestoneCreateBody,
     pub milestone_patch: MilestonePatchBody,
+    /// Phase 25（ADR-0033 D3）: 報告（生成は決定的、圧縮は別 run）。
+    pub report_list: crate::reports::ReportList,
+    pub report_detail: crate::reports::ReportDetail,
+    pub reports_read: crate::reports::ReportsReadBody,
+    pub reports_read_result: crate::reports::ReportsReadResult,
+    pub reports_notified: crate::reports::ReportsNotifiedResult,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

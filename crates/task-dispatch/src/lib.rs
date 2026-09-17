@@ -5,6 +5,8 @@
 pub mod accounts;
 pub mod dispatcher;
 pub mod policy;
+/// ADR-0033 D3（Phase 25）: run の終端から決定的に作る報告。
+pub(crate) mod reports;
 pub mod review;
 
 pub use accounts::{
