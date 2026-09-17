@@ -16,7 +16,9 @@ pub mod error;
 pub mod gate;
 pub mod graph;
 pub mod inbox;
+pub mod memory;
 pub mod plan;
+pub mod project_plan;
 pub mod replay;
 pub mod view;
 

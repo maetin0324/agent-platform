@@ -686,6 +686,8 @@ pub struct ProjectTaskView {
     pub milestone_id: Option<MilestoneId>,
     /// 対話用タスク（人への返事のための run）か。GUI は仕事の木から隠せる（GUI-R3）。
     pub conversation: bool,
+    /// GUI 監査 H4（Phase 29）: 裏方タスクの印（`TaskSummary.support` と同じ規則）。
+    pub support: Option<String>,
 }
 
 /// `POST /projects/{id}/milestones` の要求本文。`seq` はストアが採番する。

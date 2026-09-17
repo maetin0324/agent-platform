@@ -2801,6 +2801,38 @@
       ],
       "type": "object"
     },
+    "MemoryView": {
+      "description": "`GET /org/{id}/memory` の応答。",
+      "properties": {
+        "notes": {
+          "description": "`notes.md` の全文（無ければ空文字列）。",
+          "type": "string"
+        },
+        "notes_path": {
+          "description": "`notes.md` の絶対パス（人がファイルを直接編集するため）。",
+          "type": "string"
+        },
+        "project": {
+          "description": "`?project=` を指定したときだけ `Some`（その引き出し `projects/<project_id>.md` の全文、無ければ\n空文字列）。指定しなければ `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_path": {
+          "description": "`?project=` を指定したときだけ `Some`。指定しなければ `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "notes",
+        "notes_path"
+      ],
+      "type": "object"
+    },
     "Message": {
       "description": "対話の 1 行（`messages` テーブル。ADR-0033 D4）。",
       "properties": {
@@ -3595,6 +3627,45 @@
       ],
       "type": "object"
     },
+    "ProjectPlanAccepted": {
+      "description": "`POST /projects/{id}/plan` の応答（202）。",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    },
+    "ProjectPlanBody": {
+      "additionalProperties": false,
+      "description": "`POST /projects/{id}/plan` の要求本文。",
+      "properties": {
+        "milestone_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "分解の対象にする途中目標。省略すると `approved` / `in_progress` のものを文脈として渡すだけで、\n特定の 1 件をこのタスクに紐づけない。"
+        },
+        "note": {
+          "default": null,
+          "description": "人の一言（任意）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ProjectStatus": {
       "description": "案件の状態（ADR-0033 D2）。",
       "oneOf": [
@@ -3657,6 +3728,13 @@
         },
         "status": {
           "$ref": "#/$defs/Status"
+        },
+        "support": {
+          "description": "GUI 監査 H4（Phase 29）: 裏方タスクの印（`TaskSummary.support` と同じ規則）。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "title": {
           "type": "string"
@@ -4008,6 +4086,17 @@
     },
     "QuestionItem": {
       "properties": {
+        "approval_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "GUI 監査対応 Phase 29: 対応する未決の `approvals` の id（`POST /approvals/{id}/decide` へ\nGUI が直接リンクできるように）。無ければ `null`（`approvals` の行がまだ無い、または既に決定済み）。"
+        },
         "asked_at": {
           "type": [
             "string",
@@ -5340,6 +5429,13 @@
         "status": {
           "$ref": "#/$defs/Status"
         },
+        "support": {
+          "description": "GUI 監査 H4（Phase 29）: 裏方タスクの印（`\"conversation\"` | `\"compaction\"` | `\"approval\"` |\n`\"review\"` | `null`）。`task_core::support_kind` の決定的な判定。GUI はこれで仕事の木から裏方を外せる。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tier": {
           "$ref": "#/$defs/Tier"
         },
@@ -5653,6 +5749,10 @@
     "inbox": {
       "$ref": "#/$defs/Inbox"
     },
+    "memory": {
+      "$ref": "#/$defs/MemoryView",
+      "description": "GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。"
+    },
     "message_accepted": {
       "$ref": "#/$defs/MessageAccepted"
     },
@@ -5700,6 +5800,13 @@
     },
     "project_patch": {
       "$ref": "#/$defs/ProjectPatchBody"
+    },
+    "project_plan": {
+      "$ref": "#/$defs/ProjectPlanBody",
+      "description": "GUI 監査対応 Phase 29（ADR-0033 D4 追記）: 分解を起こす（`POST /projects/{id}/plan`）。"
+    },
+    "project_plan_accepted": {
+      "$ref": "#/$defs/ProjectPlanAccepted"
     },
     "provider_check": {
       "$ref": "#/$defs/ProviderCheckResponse"
@@ -5819,6 +5926,9 @@
     "project_detail",
     "milestone_create",
     "milestone_patch",
+    "project_plan",
+    "project_plan_accepted",
+    "memory",
     "report_list",
     "report_detail",
     "reports_read",

@@ -23,8 +23,10 @@ mod approvals;
 pub mod conversation;
 mod files;
 mod handlers;
+pub mod memory;
 mod middleware;
 mod problem;
+pub mod project_plan;
 mod query;
 mod reports;
 pub mod schema;
@@ -38,6 +40,8 @@ pub use approvals::{
     ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody, StandingRuleList,
 };
 pub use conversation::{MessageAccepted, MessageList, MessagePostBody};
+pub use memory::MemoryView;
+pub use project_plan::{ProjectPlanAccepted, ProjectPlanBody};
 pub use admin::{
     AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome, AdminRequest,
     CheckError, ClusterAdminError, ClusterConnectCodeOutcome, ClusterConnectStartOutcome, ProviderCheckOutcome,
@@ -113,6 +117,9 @@ pub struct ApiSettings {
     /// ADR-0030 D3: 秘密 id → それを使っている adapter/provider の `env_from_secrets`（`GET /secrets` の
     /// `used_by`）。taskd が設定から導いて渡す（task-api は再計算しない）。
     pub secret_usage: HashMap<String, Vec<types::SecretUse>>,
+    /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory] dir` の絶対パス。`None` なら `GET /org/{id}/memory`
+    /// は 409 `memory_unavailable`。
+    pub memory_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ApiSettings {
@@ -136,6 +143,7 @@ impl std::fmt::Debug for ApiSettings {
             .field("max_runs_per_account", &self.max_runs_per_account)
             .field("secrets_dir", &self.secrets_dir)
             .field("secret_usage", &self.secret_usage.keys().collect::<Vec<_>>())
+            .field("memory_dir", &self.memory_dir)
             .finish()
     }
 }

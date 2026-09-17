@@ -12,3 +12,4 @@ schemars = "1"
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"

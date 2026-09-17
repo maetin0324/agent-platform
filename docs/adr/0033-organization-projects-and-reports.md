@@ -115,6 +115,16 @@ messages(id ULID PK, node_id, project_id NULL, role TEXT /* user | node */, text
   分解）は、人が方針と途中目標を承認してから、上の「秘書が計画の run を起こす」経路で始まる**。対話タスクの
   `depends_on`（直列化）は順番だけを守り、前が失敗しても後続を巻き込まない（P-78。`DependencyFailed` を
   対話タスクだけ免除）。予算は `max_turns` を 6 → 10 に上げた（読むだけでも数ターン使うため）。
+- **分解は人が `POST /projects/{id}/plan` で起こす**（Phase 29。GUI の「この方針で進める」ボタンの入口。
+  GUI 監査で「案件が分解されて組織を流れる、を GUI から起動も観察もできない」と判定されたため）。
+  対話 run は返事だけ（上の項目）なので、人が秘書の返事を読んで方針に納得したら、この API で明示的に
+  分解を起こす。案件の `request`、途中目標（`approved` / `in_progress` のもの。`milestone_id` を指定すれば
+  それ）、人の一言（`note`）、秘書との直近のやり取り（`messages` 最大 20 件）を 1 つの `goal` にまとめ、
+  既存の `kind = plan` の仕組み（`task_ops::add::create_support_task`）にそのまま渡すだけ（新しいタスクの
+  種類は作らない）。`assignee = secretary`、`role` / `genre` は秘書の分野から解決する。案件が `proposed`
+  なら `active` に、指定した途中目標があれば `in_progress` にする。プランナーの出力（`PlanOutput.tasks[]`）
+  から作る子は、上の「秘書が計画の run を起こす」と同じ経路（`materialize` が親の `project_id` /
+  `milestone_id` を継ぎ、`assignee` はこの run のプロンプト＝組織図と manifest から秘書が振る）。
 
 ### D5. 認可（`approvals`）— 「今回だけ」と「今後ずっと」
 

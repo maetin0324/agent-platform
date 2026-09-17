@@ -114,6 +114,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/projects/{id}", get(project_detail).patch(patch_project))
         .route("/api/v1/projects/{id}/milestones", post(create_milestone))
         .route("/api/v1/milestones/{id}", patch(patch_milestone))
+        .merge(crate::project_plan::routes())
+        .merge(crate::memory::routes())
         .merge(crate::reports::routes())
         .merge(crate::approvals::routes())
         .route("/api/v1/daemon", get(daemon))
@@ -271,7 +273,7 @@ fn load_org_node(store: &SqliteStore, id: &str) -> Result<OrgNode, ApiProblem> {
         .ok_or_else(|| ApiProblem::org_node_not_found(id))
 }
 
-fn parse_project_id(raw: &str) -> Result<ProjectId, ApiProblem> {
+pub(crate) fn parse_project_id(raw: &str) -> Result<ProjectId, ApiProblem> {
     raw.parse::<ProjectId>().map_err(|_| ApiProblem::project_not_found(raw))
 }
 
@@ -483,6 +485,7 @@ async fn project_detail(
                 .into_iter()
                 .map(|task| ProjectTaskView {
                     conversation: task_core::is_conversation(&task),
+                    support: task_core::support_kind(&task).map(str::to_string),
                     id: task.id,
                     title: task.title,
                     status: task.status,
@@ -2098,6 +2101,7 @@ mod tests {
             max_runs_per_account: 0,
             secrets_dir: None,
             secret_usage: std::collections::HashMap::new(),
+            memory_dir: None,
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))

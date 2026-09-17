@@ -17,13 +17,31 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use ulid::Ulid;
 
-use crate::model::TaskId;
+use crate::message::is_conversation;
+use crate::model::{Task, TaskId, TaskKind};
 use crate::org::{OrgKind, OrgNode, ProjectId};
 use crate::store::{SqliteStore, StoreError, format_rfc3339, parse_rfc3339};
 
 /// 圧縮（まとめ）の run に付ける役割名。`[[roles]]` に無くてよい（役割の既定が引けないだけ）。
 /// ディスパッチャはこの値で「まとめの run」を見分け、その `done` を親ノードの報告にする。
 pub const COMPACTION_ROLE: &str = "report-compressor";
+
+/// GUI 監査 H4（Phase 29）: 裏方タスクの印。`TaskSummary.support` / `ProjectTaskView.support` に写す。
+/// 判定は決定的で優先順あり: 対話 > 圧縮（`role == report-compressor`）> 承認（`kind == approval`）>
+/// 合成レビュー（`kind == review`）。どれでもなければ `None`（人が見る「仕事の木」の本体）。
+pub fn support_kind(task: &Task) -> Option<&'static str> {
+    if is_conversation(task) {
+        Some("conversation")
+    } else if task.role.as_deref() == Some(COMPACTION_ROLE) {
+        Some("compaction")
+    } else if task.kind == TaskKind::Approval {
+        Some("approval")
+    } else if task.kind == TaskKind::Review {
+        Some("review")
+    } else {
+        None
+    }
+}
 
 /// `[reports] compress_after` の既定（ADR-0033 D3）。
 pub const DEFAULT_COMPRESS_AFTER: usize = 4;
@@ -966,4 +984,59 @@ mod tests {
         assert_eq!(store.report_unread_counts(0).expect("counts"), (1, 1));
     }
 
+    fn plain_task(kind: TaskKind) -> Task {
+        use crate::model::{Budget, Check, Criterion, Status, Tier, WorkerHint, WorkspaceSpec};
+        let now = OffsetDateTime::now_utc();
+        Task {
+            id: TaskId::new(),
+            parent_id: None,
+            kind,
+            title: "t".into(),
+            objective: "o".into(),
+            acceptance: vec![Criterion { text: "c".into(), check: Check::Human }],
+            inputs: vec![],
+            depends_on: vec![],
+            status: Status::Draft,
+            priority: 0,
+            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
+            workspace: WorkspaceSpec::Local { path: "ws".into() },
+            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            attempts: 0,
+            lease: None,
+            created_at: now,
+            updated_at: now,
+            role: None,
+            genre: None,
+            aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
+            conversation: None,
+        }
+    }
+
+    /// GUI 監査 H4（Phase 29）: 裏方タスクの印の優先順（対話 > 圧縮 > 承認 > 合成レビュー）。
+    #[test]
+    fn support_kind_classifies_background_tasks_by_a_fixed_priority() {
+        let mut plain = plain_task(TaskKind::Execute);
+        assert_eq!(support_kind(&plain), None, "人が見る本体の仕事には印を付けない");
+
+        plain.conversation = Some(crate::message::MessageId::new());
+        assert_eq!(support_kind(&plain), Some("conversation"));
+
+        let mut compaction = plain_task(TaskKind::Execute);
+        compaction.role = Some(COMPACTION_ROLE.to_string());
+        assert_eq!(support_kind(&compaction), Some("compaction"));
+
+        let approval = plain_task(TaskKind::Approval);
+        assert_eq!(support_kind(&approval), Some("approval"));
+
+        let review = plain_task(TaskKind::Review);
+        assert_eq!(support_kind(&review), Some("review"));
+
+        // 対話が最優先（他の条件と重なっても対話が勝つ）。
+        let mut both = plain_task(TaskKind::Approval);
+        both.conversation = Some(crate::message::MessageId::new());
+        assert_eq!(support_kind(&both), Some("conversation"));
+    }
 }

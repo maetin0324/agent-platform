@@ -4023,3 +4023,126 @@ Phase 28 の前の一本目（同じ依頼、`01M2RBJBPQS3ZKG04YHGD9D5WS`）で�
 - research-survey（`web-research` = LDR）の失敗は Tavily ではなく **LDR の LLM 先（pegasus 経由の Qwen、`127.0.0.1:18000`）が
   落ちている**ため（`TASKD_RESULT {"summary": "Error: Connection error."…}`）。pegasus は TOTP が要るので夜には張り直せない。
   証拠ゲート（ADR-0031）が「0 件なのに done」を止めた。**朝、pegasus に接続すれば research-survey は動く**。
+
+## Phase 29 — GUI が一本を通すための API（GUI 監査対応。2026-09-17）
+
+GUI の監査（SPEC §4 との突き合わせ、実機操作あり）で「案件が分解されて組織を流れる、を GUI から起動も
+観察もできない」と判定された。Phase 28 で対話 run から委譲・`Question` を外した結果、人が方針に納得した
+後に分解そのものを起こす入口が taskd 側に無かった。今回はその入口と、GUI 監査で見つかった 3 つの小さな
+断線（質問と認可が別々に見える、裏方タスクが仕事の木に混ざる、記憶を確認する窓口が無い）を埋めた。
+判断は全て決定的で、ディスパッチャ・ストアに LLM 呼び出しは足していない（DESIGN 原則 1）。migration は
+足していない（既存の表をそのまま使う）。
+
+### 成果物
+
+1. **分解を起こす: `POST /projects/{id}/plan`**（`crates/task-ops/src/project_plan.rs` 新規、
+   `crates/task-api/src/project_plan.rs` 新規）
+   - 案件の `request`、途中目標（`approved` / `in_progress` のもの。`milestone_id` を指定すればそれだけ）、
+     `note`、秘書との直近のやり取り（`message_list` 最大 20 件）を `compose_goal`（純粋関数）で
+     1 つの `goal` にまとめ、`kind = plan` のタスクを `task_ops::add::create_support_task` で作る
+     （**新しいタスクの種類は作らない**。既存の plan の仕組みをそのまま使う）。`assignee = <その案件の秘書>`、
+     `role` / `genre` は秘書の分野から解決する（既存の `assignee` の解決順）。受け入れ条件は空で、
+     作った時点から `ready`。
+   - プランナーの出力から作られる子は親の `project_id` / `milestone_id` を継ぐことを確認した
+     （`task_core::plan::materialize`。Phase 23 の監査 D-3 で既に実装済みだったので直していない。
+     `crates/task-core/src/plan.rs` に確認用のテストを追加した）。
+   - 案件の `status` が `proposed` なら `active` に、`milestone_id` を明示していればその途中目標を
+     `in_progress` にする。応答は 202 `{task_id}`。**管理系**（`token_file` 未設定でも 401。`POST /projects`
+     と同じ規律）。
+2. **質問と認可の一本化（GUI 監査 H2）**: `task_ops::gate::answer`（`crates/task-ops/src/gate.rs`）が、
+   タスクを再開する同じ関数呼び出しの中で、そのタスクの未決の `approvals` を `once` + 同じ答えで
+   決定済みにする（`settle_pending_approvals`。approvals が無ければ何もしない）。`POST /approvals/{id}/decide`
+   は Phase 26 から既にこの経路（`gate::answer`）に相乗りしているので、これで双方向が揃う。
+3. **記憶を読む: `GET /org/{id}/memory?project=`**（`crates/task-ops/src/memory.rs` 新規、
+   `crates/task-api/src/memory.rs` 新規）— `<memory_dir>/<node_id>/notes.md` と
+   `projects/<project_id>.md` の**全文**（前置き用の 8,000 字カットとは別）。無ければ空文字列 / `null`。
+   `[memory]` 未設定は 409 `memory_unavailable`。**書き込み API は無い**（記憶はワーカーが書く。人が
+   直したければ応答の `notes_path` / `project_path` のファイルを編集する）。`ApiState` / `ApiSettings` に
+   `memory_dir: Option<PathBuf>` を足し、`taskd::lib::api_settings` が `config.memory` から渡す。
+4. **裏方タスクの印（GUI 監査 H4）**: `task_core::support_kind(task) -> Option<&'static str>`
+   （`crates/task-core/src/report.rs`）が、対話 > 圧縮（`role == report-compressor`）> 承認
+   （`kind == approval`）> 合成レビュー（`kind == review`）の決定的な優先順で 1 つだけ判定する。
+   `TaskSummary.support` / `ProjectTaskView.support` に写した（既存の `conversation: bool` はそのまま残す）。
+5. **`GET /inbox` の質問に `approval_id`**: `QuestionItem.approval_id: Option<ApprovalId>`
+   （`crates/task-ops/src/inbox.rs`）。未決の `approvals` を 1 回だけ読み、`task_id` で引く。無ければ `null`。
+
+### 受け入れ条件ごとの証拠
+
+- plan タスクが正しい `goal` / `project_id` / `assignee` で作られる: `cargo test -p task-ops --lib project_plan::`
+  **6 passed**（`goal` の組み立て、`ready` で作られ秘書に割り当たること、`milestone_id` を明示したときの
+  `in_progress`、明示しないときは `approved`/`in_progress` だけを文脈に含めること、直近 20 件への切り詰め、
+  未知の途中目標・秘書不在の検証エラー）。
+- 偽プランナーの出力から作られる子が案件に属する: `cargo test -p task-core --lib plan::tests::materialize_carries_the_parents_project_and_milestone_id`、
+  `cargo test -p task-api --test project_plan children_materialized_from_the_plan_output_stay_in_the_same_project`。
+- `status` の遷移、401、404: `cargo test -p task-api --test project_plan` **6 passed**
+  （作成直後の `active` 化、途中目標の `in_progress` 化、管理系の 401 をトークンあり構成と
+  `token_file` 未設定構成の両方で、無い案件は 404、他の案件の途中目標は 422）。
+- `answer` の後に `GET /approvals?pending=true` にそのタスクの行が無い:
+  `cargo test -p task-ops --lib gate::tests::answer_settles_the_tasks_pending_approvals_as_once_with_the_same_answer`、
+  `cargo test -p task-api --test approvals answering_a_task_directly_also_settles_its_pending_approval`。
+- 記憶の読み取り: `cargo test -p task-ops --lib memory::` **2 passed**、
+  `cargo test -p task-api --test memory` **4 passed**（全文を返す・8,000 字カットとは別、`[memory]` 未設定の
+  409、未知のノードの 404、書き込み API が無い＝405）。
+- 裏方タスクの印: `cargo test -p task-core --lib report::tests::support_kind_classifies_background_tasks_by_a_fixed_priority`、
+  `cargo test -p task-ops --lib view::tests::task_list_items_carry_the_support_kind`、
+  `cargo test -p task-api --test organization`（`ProjectTaskView.support` が対話タスクに付き、通常のタスクには
+  付かないことを既存テストに追加）。
+- `GET /inbox` の `approval_id`: `cargo test -p task-ops --lib inbox::tests::inbox_questions_carry_the_id_of_their_pending_approval`
+  （未決の approval だけが付き、決定済みには付かないこと）。
+- **共通条件** — `cargo test --workspace`（`--no-fail-fast`。1 つの schema drift が最初の `--fail-fast` 実行を
+  止めていたため、テスト自体は全て通ることを確認してから schema を再生成した）: **988 passed**、
+  `grep -c "^test result: FAILED"` = **0**（Phase 28 の 964 から +24）。
+  `cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。テスト以外に `unwrap()` / `expect()`
+  は無い（触った・追加した全ファイルの `#[cfg(test)]` より前を機械的に確認）。ディスパッチャ・ストアに
+  LLM 呼び出しは無い。`UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::` で
+  `docs/api/v1/api-v1.schema.json` を再生成（`TaskSummary.support` / `ProjectTaskView.support` /
+  `Inbox.questions[].approval_id` と、`ProjectPlanBody` / `ProjectPlanAccepted` / `MemoryView` を追加）。
+  `docs/protocol/*.json` は変化なし（`Task` / `RunContext` / `PlanOutput` に手を入れていない）。
+
+### 判断したこと（指示に無い細部）
+
+- **`GET /org/{id}/memory?project=` の `project` はストアの `projects` 表と照合しない**。記憶の引き出しは
+  ファイルが正で、`projects` 行が消えても読めてよい（記憶は「案件をまたぐ」設計であり、案件の削除機能も
+  無い）ため、`GET /org/{id}/messages?project=` と違い ULID の妥当性検証も存在確認もしない
+  （空文字列だけ「指定なし」に丸める）。
+- **`POST /projects/{id}/plan` の予算は旧 `taskctl plan` の既定（Frontier / 30 ターン / 900 秒 / 1 retry）を
+  タスクの明示値として入れた**。`assignee`（秘書）の分野・役割の既定より先に効かせる（考える仕事なので
+  予算を絞りたくない。ADR-0007 D6 の値をそのまま踏襲）。`adapter` だけは明示せず、秘書の分野・役割の
+  既定に委ねる。
+- **`milestone_id` を明示しないときの `goal` への文脈は `approved` / `in_progress` の全件**（1 件に絞らない）。
+  SPEC §7 のアジャイルでは複数の途中目標が並行することがあり、どれから手を付けるかを秘書の計画の run に
+  委ねる方が「分解は秘書が決める」という既存の設計（ADR-0033 D4）に合うと判断した。
+- **`settle_pending_approvals` は `task_ops::approval::decide` を呼ばない**（直接 `store.approval_decide`
+  を呼ぶ）。`decide` は決定のたびに `gate::answer` を呼び直す設計なので、`answer` の中から `decide` を
+  呼ぶと循環する。ストアへの書き込みだけをその場で完結させた。
+- **`support_kind` の優先順は指示のとおり固定**（対話 > 圧縮 > 承認 > 合成レビュー）。合成レビューの判定は
+  `TaskKind::Review`（`review.rs` の合成タスク専用の kind）そのもので、`title` の文字列規約は使っていない
+  （指示の「無ければ `title` の規約ではなく `TaskKind` で」に対応。実際には `TaskKind::Review` が既にあり、
+  規約に頼る必要が無かった）。
+
+### 未解決事項
+
+- U29-1: `docs/gui/api.md` §2 の番号付き一覧（51 件のまま）は更新していない（Phase 25〜27 の監査 U26-5 /
+  U27-1 と同じ判断: GUI 側の同期作業とまとめて行う方が、既存の抜けと衝突しない）。§3 には 3.61〜3.62 の節を
+  追加した。
+- U29-2: `scripts/sync-gui-docs.sh --check` は実行していない（指示どおり）。`gui/docs/taskd-api-v1.md` に
+  今回の変更が無い。GUI の担当が同期する。
+- U29-3: `POST /projects/{id}/plan` を呼んでも、秘書の計画の run が実際に良い分解を作るかは実機
+  （本物の Claude、ローカル Qwen）でまだ確かめていない（偽アダプタでの通しのみ）。Phase 27/28 の
+  U27-4 と同じ手順（ACP に切り替えて確認）が使える。
+- U29-4: `POST /projects/{id}/plan` は何度でも呼べる（同じ案件・同じ途中目標に対して plan タスクが複数
+  `ready` になり得る）。二重に走らせないための「開いている plan タスクがあれば待たせる」仕組みは今回
+  入れていない（対話の直列化ほど頻繁に事故る場面が今は想像しづらいため）。GUI 側でボタンを一度きりの
+  操作にするか、taskd 側で防ぐかは今後の判断。
+- U29-5: `GET /org/{id}/memory` は読み取り専用だが、ファイルパスを応答に含めるので、taskd プロセスと
+  同じマシン上で人がエディタを開ける前提になっている（ADR-0033 D6 の「人が直したければファイルを編集する」
+  という設計をそのまま踏襲した）。リモートで taskd を動かす運用では GUI からの直接編集が要るかもしれない
+  （今回のスコープ外）。
+
+### 提案
+
+- P-81: `support` フィールドが増えたことで `TaskSummary.conversation` は完全に `support == "conversation"`
+  の下位互換になった。GUI 側の移行が済んだら `conversation` を消せる（今回は互換のため両方残した）。
+- P-82: U29-4 のとおり、`POST /projects/{id}/plan` の多重起動を防ぐなら、対話の直列化
+  （`task_ops::conversation::open_conversation_tasks`）と同じ形（同じ案件・同じ秘書の開いている plan タスクを
+  `depends_on` に入れる）が流用できる。頻度を見てから ADR にする。

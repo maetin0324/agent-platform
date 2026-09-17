@@ -49,6 +49,8 @@ pub struct EnvOptions {
     pub secrets_dir: Option<PathBuf>,
     /// ADR-0030 D3: 秘密 id → `used_by`（`GET /secrets` の `used_by`）。
     pub secret_usage: std::collections::HashMap<String, Vec<task_api::SecretUse>>,
+    /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory] dir`。`None` なら `GET /org/{id}/memory` は 409。
+    pub memory_dir: Option<PathBuf>,
 }
 
 pub struct TestEnv {
@@ -228,6 +230,7 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         max_runs_per_account: options.max_runs_per_account,
         secrets_dir: options.secrets_dir,
         secret_usage: options.secret_usage,
+        memory_dir: options.memory_dir,
     }
 }
 

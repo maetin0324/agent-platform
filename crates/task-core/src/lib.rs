@@ -30,7 +30,7 @@ pub use org::{
     assignee_defaults, department_of, valid_org_id, validate_upsert,
 };
 pub use report::{
-    COMPACTION_ROLE, Report, ReportFilter, ReportId, ReportKind, ReportStore, ReportsLive,
+    COMPACTION_ROLE, Report, ReportFilter, ReportId, ReportKind, ReportStore, ReportsLive, support_kind,
 };
 pub use plan::{MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput};
 pub use store::{
