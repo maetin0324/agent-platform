@@ -127,7 +127,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（49）
+## 2. エンドポイント一覧（51）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -180,6 +180,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 47 | PATCH | `/projects/{id}` | 案件の状態を変える | 200 `Project` | store `project_set_status` |
 | 48 | POST | `/projects/{id}/milestones` | 途中目標を足す（`seq` はストアが採番） | 201 `Milestone`（`Location`） | store `milestone_create` |
 | 49 | PATCH | `/milestones/{id}` | 途中目標の状態を変える（SPEC §7 のアジャイル） | 200 `Milestone` | store `milestone_set_status` |
+| 50 | GET | `/org/{id}/messages` | そのノードとのやり取り（古い順。ADR-0033 D4、Phase 24） | `MessageList` | store `message_list` |
+| 51 | POST | `/org/{id}/messages` | そのノードに話しかける（**管理系**） | 202 `MessageAccepted` | `task_ops::conversation::start` |
 
 ---
 
@@ -867,6 +869,49 @@ reports: { unread_secretary: u32, unread_bad_news: u32, last_notified_at?: Strin
 `notify_now` は決定的に決まる: **`bad_news` の未読があれば即 true**、無ければ「未読があり、前回の通知から 2 時間以上経った」とき true。
 この 1 フィールドだけはディスパッチャではなく**API が応答を組むときに埋める**（`last_notified_at` が API 側にあるため）。
 
+#### 3.54〜3.55 対話（ADR-0033 D4、Phase 24）
+
+SPEC §3.4「組織の木を見て誰に言うかを決め、その担当に直接言う。相手は人なので先週の議論の続きとして話せる」。
+**新しいプロトコルは足していない**: 話しかけると `messages` に `role = "user"` の行が 1 つ入り、そのノードの
+run を 1 回起こすための**対話用タスク**（`kind = "execute"`、受け入れ条件なし、`assignee` = そのノード、
+`title` = `"対話: <本文の先頭 40 字>"`）が `ready` で 1 件できる。返事はその run の `artifacts/result.json` の
+`summary` で、ディスパッチャが `role = "node"` の行として（`run_id` 付きで）足す。
+
+#### 3.54 `GET /org/{id}/messages?project=<ULID>&limit=<n>` → 200 `MessageList`
+
+```json
+{"items":[{"id":"01J…","node_id":"secretary","project_id":"01J…","role":"user",
+           "text":"この案件をお願いします","created_at":"…"},
+          {"id":"01J…","node_id":"secretary","project_id":"01J…","role":"node",
+           "text":"理解の確認です。…","run_id":"01J…","created_at":"…"}]}
+```
+
+- 並びは**古い順**（`created_at` 昇順、同値は `id` 昇順）。`limit`（既定 50、上限 500）を超えるときは
+  **新しい方**を残す（直近のやり取りを読むため）。
+- `project` を書けばその案件のスレッド、書かなければ**案件に紐づかない雑談**だけ（混ざらない）。
+- 無いノードは 404 `org_node_not_found`、ULID でない `project` は 404 `project_not_found`
+  （存在しない案件の ULID は空の一覧）。
+- 読み取りなので管理系ではない（トークンを設定した taskd では他の読み取りと同じくトークンが要る）。
+- GUI はここをポーリングするか、`GET /stream` のイベントを見て引き直す（返事は同期では返らない）。
+
+#### 3.55 `POST /org/{id}/messages` → 202 `MessageAccepted`（**管理系**）
+
+要求本文 `{"text":"先週の続きで、隣接分野も見てほしい","project_id":"01J…"}`（`project_id` は省略可）。
+応答は `{"message_id":"01J…","task_id":"01J…"}`。
+
+- **202**（同期で返事を待たない）。返事が入ったかは 3.54 で見る。
+- 人格を持つノードに指示を出す経路なので**管理系**（`token_file` 未設定でも 401。`POST /org` と同じ規律）。
+- 無いノードは 404 `org_node_not_found`。空白だけの `text`・存在しない `project_id` は 422 `validation`。
+- run の道具立ては決定的に決まる: そのノードの `genre` → 無ければ**対話用分野**（`[[genres]] id = "secretary"`）
+  → その分野の `default_role` → 役割の `tier` / `adapter`。予算は対話用の小さい既定
+  （`max_turns = 6` / `max_wall_secs = 300` / `max_retries = 1`）で、役割の既定より優先する。
+- run のプロンプトには、ノードの `brief`・そのノードの長期記憶（ADR-0033 D6）・**この案件のこのノードとの
+  直近のやり取り（既定 20 件）**が前置きされる。
+- run が `error` に終わったときの返事は `"返事できませんでした: <理由>"`。`question` は本文をそのまま返事にする
+  （`approvals` への接続は Phase 26）。
+- **秘書の最初の返事**: `POST /projects`（3.46）で案件を作ると、その直後に秘書ノードへ `request` を本文と
+  した対話が 1 回自動で起きる（SPEC §7）。秘書がいない構成（組織を種蒔きしていない）では何も起きない。
+
 ---
 
 ## 4. SSE `GET /stream`
@@ -1272,6 +1317,19 @@ pub struct MilestonePatchBody { pub status: MilestoneStatus }
 // `project_id: Option<ProjectId>` / `milestone_id: Option<MilestoneId>` / `assignee: Option<String>` を追加
 // （`NewTaskSpec` にも同名の任意フィールド）。導入前の JSON・DB 行はそのまま読める。
 
+// ---- Phase 24（ADR-0033 D4）: 対話。`Message` は task-core の型 ----
+pub struct Message { pub id: MessageId /* ULID */, pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub project_id: Option<ProjectId>,
+    pub role: MessageRole /* user|node */, pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub run_id: Option<String> /* role = node のときの run */,
+    pub created_at: String }
+pub struct MessageList { pub items: Vec<Message> /* created_at 昇順（古い順） */ }
+#[serde(deny_unknown_fields)]
+pub struct MessagePostBody { pub text: String, #[serde(default)] pub project_id: Option<ProjectId> }
+pub struct MessageAccepted { pub message_id: String /* ULID */, pub task_id: TaskId /* 対話用タスク */ }
+// `Task` に `#[serde(default, skip_serializing_if = "Option::is_none")]` の
+// `conversation: Option<MessageId>`（対話由来ならきっかけの発言）を追加。**DB の列は増やしていない**。
+
 /// スキーマ生成のルート（`task_worker::ProtocolSchema` と同じ流儀。1 フィールド = 1 公開型）。
 pub struct ApiV1Schema {
     pub health: Health, pub problem: Problem, pub inbox: Inbox, pub task_list: TaskList, pub task: Task, pub task_detail: TaskDetail,
@@ -1285,6 +1343,10 @@ pub struct ApiV1Schema {
     pub account_login_start: AccountLoginStart, pub account_login_result: AccountLoginResult, /* Phase 13 */
     pub secrets: SecretList, pub secret_put: SecretPutResult, /* Phase 20 */
     pub cluster_connect_start: ClusterConnectStart, pub cluster_connect_result: ClusterConnectResult, /* Phase 22, ADR-0032 */
+    pub org_list: OrgList, pub org_create: OrgCreateBody, pub org_patch: OrgPatchBody, /* Phase 23, ADR-0033 D1 */
+    pub project_list: ProjectList, pub project_create: ProjectCreateBody, pub project_patch: ProjectPatchBody,
+    pub project_detail: ProjectDetail, pub milestone_create: MilestoneCreateBody, pub milestone_patch: MilestonePatchBody,
+    pub message_post: MessagePostBody, pub message_accepted: MessageAccepted, pub message_list: MessageList, /* Phase 24, ADR-0033 D4 */
 }
 ```
 
