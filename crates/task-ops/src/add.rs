@@ -215,6 +215,41 @@ pub fn create_task_with_roles(
     genres: &[GenreSpec],
     now: OffsetDateTime,
 ) -> Result<Task, OpsError> {
+    let task = build_task(store, spec, roles, genres, true, now)?;
+    store.create_task(&task, vec![])?;
+    Ok(task)
+}
+
+/// ADR-0034 D3（Phase 25 の監査 L-4）: **受け入れ条件を持たない裏方のタスク**（報告のまとめ run）を、
+/// 上と**同じ解決順**（タスクの値 > 役割の既定 > `assignee` 由来 > 分野の既定 > 全体の既定）で作る。
+///
+/// 通常の作成経路との違いは 2 つだけ: 受け入れ条件が空でもよい（出力は「1 件の報告」そのもので、決定的に
+/// 確かめられるものが無い。条件ゼロのレビューは全 pass = `done`）、そして人の承認を待たずに `ready` で
+/// 始まる（起こしたのは人ではなく tick ループの決定的な判断）。`Event::Created` を 1 件残す。
+/// `spec.role` が `[[roles]]` に無い構成でも落ちない（既定が埋まらないだけ）。
+pub fn create_support_task(
+    store: &dyn TaskStore,
+    spec: NewTaskSpec,
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+    now: OffsetDateTime,
+) -> Result<Task, OpsError> {
+    let mut task = build_task(store, spec, roles, genres, false, now)?;
+    task.status = Status::Ready;
+    store.create_task(&task, vec![task_core::Event::Created { task: Box::new(task.clone()) }])?;
+    Ok(task)
+}
+
+/// `spec` を検証して `Task` を組み立てる（挿入はしない）。`require_acceptance = false` なら
+/// 受け入れ条件が空でもよい（`create_support_task` 専用）。
+fn build_task(
+    store: &dyn TaskStore,
+    spec: NewTaskSpec,
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+    require_acceptance: bool,
+    now: OffsetDateTime,
+) -> Result<Task, OpsError> {
     let role = spec.role.as_deref().and_then(|r| RoleSpec::find(roles, r));
     if !genres.is_empty()
         && let Some(g) = &spec.genre
@@ -269,7 +304,11 @@ pub fn create_task_with_roles(
     if spec.objective.trim().is_empty() {
         return Err(OpsError::Validation("objective must not be blank".to_string()));
     }
-    let acceptance = build_acceptance(spec.acceptance)?;
+    let acceptance = if require_acceptance {
+        build_acceptance(spec.acceptance)?
+    } else {
+        spec.acceptance.into_iter().map(CriterionSpec::into_criterion).collect()
+    };
     if let Some(parent) = spec.parent
         && store.get(parent)?.is_none()
     {
@@ -348,8 +387,6 @@ pub fn create_task_with_roles(
         assignee: spec.assignee,
         conversation: None,
     };
-
-    store.create_task(&task, vec![])?;
     Ok(task)
 }
 

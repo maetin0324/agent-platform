@@ -107,6 +107,29 @@ async fn talking_to_a_node_returns_202_and_makes_one_ready_conversation_task() {
     assert_eq!(items[0]["role"], "user");
     assert_eq!(items[0]["text"], "先週の続きで、隣接分野も見てほしい");
     assert!(items[0].get("run_id").is_none(), "人の発言に run_id は無い");
+    // R4（migration 0007）: 人の発言の行にも対話用タスクの id が入る。
+    assert_eq!(items[0]["task_id"], json!(task_id.to_string()));
+
+    // R3: `GET /tasks` の行に `assignee` と `conversation` が出る（GUI が仕事の木から隠せる）。
+    let row = send(&app, g("/api/v1/tasks")).await.json()["items"][0].clone();
+    assert_eq!(row["id"], json!(task_id.to_string()));
+    assert_eq!(row["assignee"], "research-survey");
+    assert_eq!(row["conversation"], true);
+
+    // 2 通目は 1 通目の後ろに並ぶ（監査 M-3: 返事は送った順に返る）。
+    let second = send(
+        &app,
+        p("/api/v1/org/research-survey/messages", &json!({"text": "追加で 1 点"})),
+    )
+    .await;
+    assert_eq!(second.status.as_u16(), 202, "{}", second.text());
+    let second_id: task_core::TaskId = second.json()["task_id"].as_str().expect("task_id").parse().expect("ulid");
+    let second_task = env.store.get(second_id).expect("get").expect("task");
+    assert_eq!(second_task.depends_on, vec![task_id]);
+    assert!(
+        !env.store.ready_tasks(10).expect("ready").iter().any(|t| t.id == second_id),
+        "1 通目が終わるまで run しない"
+    );
 }
 
 /// run が終わると `summary` が `role = node` の行になり（`run_id` 付き）、やり取りが古い順に積み上がる。
@@ -236,13 +259,13 @@ async fn creating_a_project_asks_the_secretary_first() {
     assert_eq!(task.status, Status::Ready);
     assert_eq!(task.genre.as_deref(), Some("secretary"));
     assert!(task.title.starts_with("対話: "));
-    assert_eq!(
-        env.store
-            .message_list("secretary", task.project_id, 20)
-            .expect("list")[0]
-            .role,
-        MessageRole::User
-    );
+    let thread = env.store.message_list("secretary", task.project_id, 20).expect("list");
+    assert_eq!(thread[0].role, MessageRole::User);
+    assert_eq!(thread[0].task_id, Some(task.id), "R4: 1 往復と run を 1 段で辿れる");
+    // R3: 案件の仕事の木からも対話用タスクが分かる。
+    let detail = send(&app, g(&format!("/api/v1/projects/{project_id}"))).await.json();
+    assert_eq!(detail["tasks"][0]["conversation"], true, "{detail}");
+    assert_eq!(detail["tasks"][0]["assignee"], "secretary");
 }
 
 /// 秘書がいない構成（組織を種蒔きしていない）でも案件は作れる（対話が起きないだけ）。

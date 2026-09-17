@@ -141,6 +141,18 @@ async fn approvals_are_listed_oldest_first_and_can_be_filtered() {
     let resp = send(&app, g("/api/v1/approvals")).await;
     assert_eq!(resp.json()["items"].as_array().map(Vec::len), Some(2));
 
+    // R5（Phase 27）: `pending=false` は**決定済みだけ**（以前は全件を返していた）。
+    let resp = send(&app, g("/api/v1/approvals?pending=false")).await;
+    let items = resp.json()["items"].as_array().cloned().expect("items");
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["id"], a.id.to_string());
+    assert_eq!(items[0]["decision"], "once");
+    // 他の絞り込みと AND で効く。
+    let resp = send(&app, g("/api/v1/approvals?pending=false&node=secretary")).await;
+    assert_eq!(resp.json()["items"].as_array().map(Vec::len), Some(0));
+    let resp = send(&app, g(&format!("/api/v1/approvals?pending=false&project={project}"))).await;
+    assert_eq!(resp.json()["items"].as_array().map(Vec::len), Some(1));
+
     // 知らないクエリは 400。
     let resp = send(&app, g("/api/v1/approvals?nope=1")).await;
     assert_eq!(resp.status.as_u16(), 400);

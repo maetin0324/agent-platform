@@ -1618,6 +1618,38 @@ roles = ["literature-reader"]
         assert_eq!(cfg.provider_specs()[0].concurrency, 2);
         assert!(!cfg.plan.auto_accept);
         assert!(!cfg.dispatch_config().plan_auto_accept);
+        cfg.validate().unwrap();
+        // 監査 M-1: 役割は tier だけ（`fake` のプロバイダでもそのまま回る）で、分野は
+        // `config/org.example.toml` の課が使う 3 つが揃っている。
+        assert!(cfg.roles.iter().all(|r| r.adapter.is_none()), "{:?}", cfg.roles);
+        let mut genres: Vec<&str> = cfg.genres.iter().map(|g| g.id.as_str()).collect();
+        genres.sort_unstable();
+        assert_eq!(genres, vec!["coding", "literature", "secretary"]);
+    }
+
+    /// 監査 M-1: 例の設定 2 つ（`taskd.example.toml` + `org.example.toml`）を**組み合わせて**読める。
+    /// 組織の `genre` が `[[genres]]` に無ければ `validate` が弾くので、これが噛み合いの回帰になる。
+    #[test]
+    fn the_two_example_files_load_together_through_org_include() {
+        let config_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config"));
+        let dir = tempfile::tempdir().unwrap();
+        let example = std::fs::read_to_string(config_dir.join("taskd.example.toml")).unwrap();
+        let enabled = example.replace("# org_include = \"org.toml\"", "org_include = \"org.toml\"");
+        assert!(enabled.contains("\norg_include = \"org.toml\""), "org_include の行が見つからない");
+        std::fs::write(dir.path().join("taskd.toml"), enabled).unwrap();
+        std::fs::copy(config_dir.join("org.example.toml"), dir.path().join("org.toml")).unwrap();
+
+        let cfg = Config::load(&dir.path().join("taskd.toml")).unwrap();
+        cfg.validate().unwrap();
+        let ids: Vec<&str> = cfg.org.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"secretary") && ids.contains(&"coding-poc") && ids.contains(&"research-survey"));
+        assert_eq!(cfg.org.iter().filter(|n| n.kind == task_core::OrgKind::Secretary).count(), 1);
+        // 課の分野はすべて `[[genres]]` にある（`validate` が見ているのと同じ条件を明示しておく）。
+        for node in &cfg.org {
+            if let Some(genre) = &node.genre {
+                assert!(cfg.genres.iter().any(|g| &g.id == genre), "{genre} が [[genres]] に無い");
+            }
+        }
     }
 
     #[test]

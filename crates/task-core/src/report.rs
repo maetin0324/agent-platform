@@ -110,8 +110,8 @@ impl ReportKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Report {
     pub id: ReportId,
-    /// 案件。`None` は「案件なし」（クラスタの障害など、案件に紐づかない悪い知らせ）。
-    /// `reports.project_id` は NOT NULL なので、DB には空文字列として書く（migration は足さない。ADR-0034）。
+    /// 案件。`None` は「案件なし」（クラスタの障害など、案件に紐づかない悪い知らせ）。DB でも NULL
+    /// （migration 0007 で NOT NULL を外した。ADR-0034 D1 の「将来」の項）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
     /// 報告した組織のノード（`org_nodes.id`）。
@@ -505,7 +505,7 @@ pub trait ReportStore: Send + Sync {
 
 fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Report, StoreError>> {
     let id: String = row.get(0)?;
-    let project_id: String = row.get(1)?;
+    let project_id: Option<String> = row.get(1)?;
     let node_id: String = row.get(2)?;
     let task_id: Option<String> = row.get(3)?;
     let kind_col: String = row.get(4)?;
@@ -521,18 +521,15 @@ fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Report, Sto
     let Some(kind) = ReportKind::parse(&kind_col) else {
         return Ok(Err(StoreError::Invalid(format!("invalid report kind: {kind_col}"))));
     };
-    // 案件なしは空文字列（`reports.project_id` は NOT NULL。ADR-0034）。
-    let project_id = if project_id.is_empty() {
-        None
-    } else {
-        match project_id.parse::<ProjectId>() {
+    // 案件なしは NULL（migration 0007 で NOT NULL を外した。ADR-0034 D1 の「将来」の項）。
+    let project_id = match project_id {
+        None => None,
+        Some(raw) => match raw.parse::<ProjectId>() {
             Ok(v) => Some(v),
             Err(_) => {
-                return Ok(Err(StoreError::Invalid(format!(
-                    "invalid report project_id: {project_id}"
-                ))));
+                return Ok(Err(StoreError::Invalid(format!("invalid report project_id: {raw}"))));
             }
-        }
+        },
     };
     let task_id = match task_id {
         None => None,
@@ -584,7 +581,7 @@ fn insert_report_tx(conn: &Connection, report: &Report) -> Result<(), StoreError
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             report.id.to_string(),
-            report.project_id.map(|p| p.to_string()).unwrap_or_default(),
+            report.project_id.map(|p| p.to_string()),
             report.node_id,
             report.task_id.map(|t| t.to_string()),
             report.kind.as_str(),

@@ -279,6 +279,19 @@ fn parse_milestone_id(raw: &str) -> Result<MilestoneId, ApiProblem> {
     raw.parse::<MilestoneId>().map_err(|_| ApiProblem::milestone_not_found(raw))
 }
 
+/// 監査 L-1: 組織のノードの `genre` は設定の `[[genres]]` にあるものだけ（分野を 1 つも設定していない
+/// 構成では検証しない。`POST /tasks` の `genre` と同じ規律。ADR-0027 D1）。
+fn validate_genre(state: &ApiState, genre: Option<&str>) -> Result<(), ApiProblem> {
+    let Some(genre) = genre else { return Ok(()) };
+    if state.inner.genres.is_empty() || state.inner.genres.iter().any(|g| g.id == genre) {
+        return Ok(());
+    }
+    Err(ApiProblem::validation(vec![ValidationError {
+        field: Some("genre".into()),
+        message: format!("unknown genre: {genre:?}"),
+    }]))
+}
+
 async fn org_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
     let items = state
@@ -296,6 +309,8 @@ async fn create_org_node(
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let create: OrgCreateBody = read_json(body, false).await?;
+    // 監査 L-1: `genre` は `[[genres]]` にあるものだけ受ける（`genres` が空の設定では検証しない）。
+    validate_genre(&state, create.genre.as_deref())?;
     let node = state
         .blocking(move |store| {
             if store.org_get(&create.id).map_err(store_problem)?.is_some() {
@@ -334,6 +349,9 @@ async fn patch_org_node(
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let patch: OrgPatchBody = read_json(body, true).await?;
+    if let Some(genre) = &patch.genre {
+        validate_genre(&state, genre.as_deref())?;
+    }
     let node = state
         .blocking(move |store| {
             let mut node = load_org_node(store, &id)?;
@@ -390,8 +408,16 @@ async fn project_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) ->
     Ok(json_response(StatusCode::OK, &ProjectList { items }))
 }
 
-async fn create_project(State(state): State<ApiState>, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
+/// 案件を作る。**管理系**（`token_file` 未設定でも 401）: 直後に秘書の run を起こす経路なので、
+/// `POST /org/{id}/messages` と同じ規律にする（監査 M-4）。
+async fn create_project(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let create: ProjectCreateBody = read_json(body, false).await?;
     if create.title.trim().is_empty() {
         return Err(ApiProblem::validation(vec![ValidationError {
@@ -456,6 +482,7 @@ async fn project_detail(
                 .items
                 .into_iter()
                 .map(|task| ProjectTaskView {
+                    conversation: task_core::is_conversation(&task),
                     id: task.id,
                     title: task.title,
                     status: task.status,

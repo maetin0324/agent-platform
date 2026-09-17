@@ -453,6 +453,22 @@ taskd はこれを直接パースできない。そこでこれらのアダプ�
   **何もしない**（run は失敗させない）。案件に属さない run の `project[]` は行き先が無いので捨てる。
 - 追記は決定的なファイル操作だけで、何を覚えるかを決めるのはワーカー（**LLM に書かせるのはここだけ**）。
   プロンプトの前置きの末尾にその指示が入る。
+- 検索ハーネス（`local-deep-research`）はこの前置きを出さないので、記憶の追記も起きない（ADR-0033 D6）。
+
+**`report`（v4 で追加、ADR-0034 D7, Phase 27）**: `done` の結果が「提案」なのか「ただの結果」なのかを
+ワーカーが**自分で宣言**できる（任意。書かなければ従来どおり）。
+
+```json
+{"summary": "...", "evidence": [], "report": {"kind": "proposal"}}
+```
+
+- `kind` は `"result"` / `"proposal"` / `"bad_news"` / `"question"`。taskd は**固定表で写すだけ**で、
+  判断はしない（DESIGN 原則 1）: `"proposal"` → 報告の `kind = proposal`、**それ以外・未知の値・欠落は
+  `result`**。`bad_news` / `question` の報告は従来どおりタスクの終端遷移から作られる（ADR-0034 D2）ので、
+  `done` を返しながら `"bad_news"` を名乗っても悪い知らせにはならない。
+- 効くのは「レビューを通って `Status::Done` になった」ときの報告 1 件だけ。`assignee` の無いタスク・
+  対話用タスクは報告を作らないので、宣言も無視される。
+- `PROTOCOL_VERSION` は 4 のまま（追加のみで、既存のワーカーは何も変えなくてよい）。
 
 判定順序（ADR-0006 D4）: stream-json の最後の `{"type":"result",...}` が `is_error:true` か
 `subtype != "success"` なら、結果ファイルの内容によらず `error{retryable:true}` とする（自己申告の
@@ -474,7 +490,11 @@ Phase 7（ADR-0010 D3）で実装した。`claude-code`/`codex` のプロンプ�
 プロトコルを話さないので、代わりに作業ディレクトリ直下 `artifacts/delegate.json` を使う。形式は
 `{"tasks":[…]}`（`tasks` は §4.6 の `DelegateTask` と同じ形。v4 から `tasks[].assignee`（組織ノードの id）を
 書ける。`role` を書かなければそのノードの分野から tier / アダプタ / 予算が決まる。**自分と別の部の課へ
-委譲しようとした提案は子を作らず、親の run が秘書への `question` で終わる**。SPEC §3.1 / ADR-0033 D4）。run 開始時（`artifacts/result.json` を消す
+委譲しようとした提案は子を作らず、親の run が秘書への `question` で終わる**。SPEC §3.1 / ADR-0033 D4。
+Phase 27 から、同じバッチの**同じ部宛ての提案はその場で子になり**、部またぎの提案だけが
+`approvals` の 1 行（`cross-department: <from> -> <to>: <理由>`）になる。人が「今回だけ」/「今後ずっと」で
+認めた後に同じ提案を出せば、その run では子が作られる。ワーカーには
+`WorkerProgress{msg:"delegated N child task(s)（M 件は秘書の認可待ち）: …"}` として見える）。run 開始時（`artifacts/result.json` を消す
 のと同じタイミング）に前回の run が残したファイルを消し、run の終わり（終端を決めた直後、`result.json` を
 書く前）に存在すれば読んで、§4.6 と同じ検証・挿入の経路に渡す。ファイルが無ければ何もしない。JSON として
 読めない場合は run を失敗させず、`WorkerProgress{msg:"delegate.json ignored: <error>"}` を残して無視する。

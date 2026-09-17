@@ -12,6 +12,9 @@
 //! 5. 役割の指示文（`context.role`。ADR-0016 D1 からある既存の節）
 //! 6. 記憶の書き方の指示（記憶が有効な run にだけ）
 //!
+//! 検索ハーネス（`local-deep-research`）はこの前置きを**一切使わない**（ADR-0029 / ADR-0033 D6:
+//! 検索に渡す問いを濁さないため。Phase 27 の監査 M-2）。
+//!
 //! `RunContext` が既定値（Phase 23 までの中身しか無い）のときの出力は、Phase 23 の
 //! `claude_code::prompt_header` が出していた文字列と**バイト単位で同じ**になる（既存テストがそれを見る）。
 
@@ -23,15 +26,6 @@ use crate::protocol::RunContext;
 pub fn render(context: &RunContext) -> String {
     let mut out = person_sections(context);
     out.push_str(&role_section(context));
-    out.push_str(&memory_instructions(context));
-    out
-}
-
-/// 役割の指示文を**含まない**前置き（`local-deep-research` 用）。ADR-0029 / Phase 19 の決定により、
-/// 検索エンジンに渡す問いには役割の指示文を載せない（`build_query` のテストがそれを見る）。
-/// 記憶と直近のやり取りは載せる（「人」であることは分野に依らないため）。
-pub fn render_without_role(context: &RunContext) -> String {
-    let mut out = person_sections(context);
     out.push_str(&memory_instructions(context));
     out
 }
@@ -169,7 +163,6 @@ mod tests {
     #[test]
     fn an_empty_context_renders_nothing_at_all() {
         assert_eq!(render(&RunContext::default()), "");
-        assert_eq!(render_without_role(&RunContext::default()), "");
     }
 
     /// 役割だけがあるときは、Phase 23 の `prompt_header` と同じ `## Role:` 節だけを出す。
@@ -185,8 +178,6 @@ mod tests {
             ..RunContext::default()
         };
         assert_eq!(render(&bare), "## Role: lead\n\n");
-        // 役割抜きの版には役割が出ない。
-        assert_eq!(render_without_role(&with_instructions), "");
     }
 
     /// 記憶が空（ファイルが無い）なら記憶の節は出ないが、書き方の指示は出る（次から覚えられるように）。

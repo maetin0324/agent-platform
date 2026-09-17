@@ -88,7 +88,8 @@ reports(id ULID PK, project_id, node_id, task_id NULL, kind TEXT, level INTEGER,
 ### D4. 対話（`conversations` / `messages`）— 秘書にも、どの「人」にも話せる
 
 ```
-messages(id ULID PK, node_id, project_id NULL, role TEXT /* user | node */, text TEXT, run_id NULL, created_at)
+messages(id ULID PK, node_id, project_id NULL, role TEXT /* user | node */, text TEXT, run_id NULL,
+         created_at, task_id NULL /* Phase 27 / migration 0007: 1 往復を起こした対話用タスク */)
 ```
 
 - 人がノードに話しかける → そのノードの `genre` の**対話用ハーネス**で run を 1 回起こす。
@@ -102,6 +103,11 @@ messages(id ULID PK, node_id, project_id NULL, role TEXT /* user | node */, text
   プロンプトに渡し、「どの課に何を振るか」を秘書に決めさせる。ディスパッチはこれまでどおり決定的。
 - **部をまたぐ連携は秘書が認める**（SPEC §3.1）: 課のタスクが別の部の課へ委譲（`delegate.json`）しようとしたら、
   同じ部の中でなければ**自動では受けず、秘書への `question` にする**（D5 の認可の一種）。
+  Phase 27（監査 H-1 / H-2）で認可に接続した: 質問は `approvals` の 1 行として
+  **`"cross-department: <from_node> -> <to_node>: <理由>"`** の固定の形にし（`node_id` = 委譲元、
+  `task_id` = 親タスク）、委譲のたびに `approvals`（同じタスク・同じ鍵の決定）と `standing_rules`
+  （鍵を先頭に含む規則）を**前方一致で**引いて、`once` / `standing` なら通し、`denied` なら通さない。
+  **バッチは分ける**: 同じ部宛ての提案はその場で子にし、部またぎの提案だけを質問にする。
 
 ### D5. 認可（`approvals`）— 「今回だけ」と「今後ずっと」
 
@@ -115,6 +121,8 @@ standing_rules(id ULID PK, node_id NULL /* NULL = 全員 */, rule TEXT, created_
   人が `once` で答えれば従来どおり `answers[]` として次の run に渡る。`standing` で答えれば、
   **答えを `standing_rules` に 1 行追加**し、以後そのノード（または全員）の run のプロンプトに常に前置きされる
   （SPEC §3.6「永続の認可は文字で記録してエージェントに注入する」）。
+  例外は**部をまたぐ委譲の質問**（D4 の最終項）で、`standing` のときは答えの文ではなく**質問の鍵**
+  （`"cross-department: <from> -> <to>"`）をそのまま規則にする（委譲の照合が前方一致でできるように。Phase 27）。
 - 自動判定・自動化は**今回はやらない**（規則がまだ無い。溜まってから ADR にする）。
 
 ### D6. 記憶（ノードごとのファイル）— 案件をまたぐ
@@ -129,6 +137,9 @@ standing_rules(id ULID PK, node_id NULL /* NULL = 全員 */, rule TEXT, created_
   （結果ファイル規約の拡張。ワーカーが「覚えておくべきこと」を箇条書きで返す。**LLM に書かせるのはここだけ**）。
 - DESIGN 原則 2「状態はエージェントの外に置く」は守られる: ハーネスのプロセスは相変わらずステートレスで、
   記憶はファイルにあり、注入されるだけ。「人」らしさは**注入される記憶と brief** で作る。
+- **検索ハーネス（`local-deep-research`）は例外**: 問いを濁さないため、記憶・やり取り・役職・`memory` の
+  書式指示を**一切載せない**（渡すのは素の `objective` だけ。ADR-0029 / Phase 19 の実機の回帰）。
+  記憶の追記もしない（書式を教えていないので書いてこない）。Phase 27 の監査 M-2 で確定。
 
 ### D7. LLM source（SPEC §8 追記）は、今回は**名前だけ**揃える
 

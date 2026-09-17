@@ -20,6 +20,9 @@ fn question_node_id(store: &dyn TaskStore, task: &Task) -> Result<Option<String>
 
 /// `Question` で終わった run を `approvals` に 1 件追記する（組織がまだ無い = 種を蒔いていない DB では
 /// 宛先が決められないので何もしない）。
+///
+/// Phase 27: **同じタスク・同じ文面の未決の行があれば増やさない**（部をまたぐ委譲は run をやり直すたびに
+/// 同じ質問が上がるので、認可の一覧が同じ行で埋まらないようにする。決定的な文字列の一致だけで判断する）。
 pub(crate) fn record_question_approval(
     store: &dyn TaskStore,
     task: &Task,
@@ -29,6 +32,13 @@ pub(crate) fn record_question_approval(
     let Some(node_id) = question_node_id(store, task)? else {
         return Ok(None);
     };
+    if let Some(open) = store
+        .approval_list(Some(true), None, Some(&node_id))?
+        .into_iter()
+        .find(|a| a.task_id == Some(task.id) && a.question == text)
+    {
+        return Ok(Some(open));
+    }
     let approval = Approval {
         id: ApprovalId::new(),
         project_id: task.project_id,
@@ -115,7 +125,7 @@ mod tests {
         assert_eq!(approval.question, "どのクラスタを使いますか");
         assert!(approval.is_pending());
 
-        let listed = store.approval_list(true, None, None).expect("list");
+        let listed = store.approval_list(Some(true), None, None).expect("list");
         assert_eq!(listed, vec![approval]);
     }
 
@@ -138,6 +148,6 @@ mod tests {
             record_question_approval(&store, &t, "続けますか", OffsetDateTime::now_utc()).expect("record"),
             None
         );
-        assert!(store.approval_list(false, None, None).expect("list").is_empty());
+        assert!(store.approval_list(None, None, None).expect("list").is_empty());
     }
 }

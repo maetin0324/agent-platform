@@ -33,10 +33,11 @@ const MIGRATION_0003: &str = include_str!("../migrations/0003_tasks_list_columns
 const MIGRATION_0004: &str = include_str!("../migrations/0004_tasks_objective_column.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_tasks_genre_column.sql");
 const MIGRATION_0006: &str = include_str!("../migrations/0006_organization.sql");
+const MIGRATION_0007: &str = include_str!("../migrations/0007_messages_task_id_and_reports_project.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -613,6 +614,7 @@ impl SqliteStore {
             4 => Ok(MIGRATION_0004),
             5 => Ok(MIGRATION_0005),
             6 => Ok(MIGRATION_0006),
+            7 => Ok(MIGRATION_0007),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -754,6 +756,19 @@ impl SqliteStore {
             },
             None => None,
         };
+        // migration 0007（R4）: 対話用タスクの id。導入前の行は NULL。
+        let task_id: Option<String> = row.get(7)?;
+        let task_id = match task_id {
+            Some(raw) => match raw.parse::<TaskId>() {
+                Ok(t) => Some(t),
+                Err(_) => {
+                    return Ok(Err(StoreError::Invalid(format!(
+                        "invalid message row: id={id} task_id={raw}"
+                    ))));
+                }
+            },
+            None => None,
+        };
         Ok((|| {
             Ok(Message {
                 id,
@@ -762,6 +777,7 @@ impl SqliteStore {
                 role,
                 text: row.get(4)?,
                 run_id: row.get(5)?,
+                task_id,
                 created_at: parse_rfc3339(&created_at)?,
             })
         })())
@@ -1812,8 +1828,8 @@ impl TaskStore for SqliteStore {
     fn message_append(&self, message: &Message) -> Result<(), StoreError> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO messages (id, node_id, project_id, role, text, run_id, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages (id, node_id, project_id, role, text, run_id, created_at, task_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 message.id.to_string(),
                 message.node_id,
@@ -1822,6 +1838,7 @@ impl TaskStore for SqliteStore {
                 message.text,
                 message.run_id,
                 format_rfc3339(message.created_at)?,
+                message.task_id.map(|t| t.to_string()),
             ],
         )?;
         Ok(())
@@ -1837,11 +1854,11 @@ impl TaskStore for SqliteStore {
         // 新しい順に `limit` 件取ってから古い順に戻す（直近のやり取りを時系列で渡すため）。
         let sql = match project_id {
             Some(_) => {
-                "SELECT id, node_id, project_id, role, text, run_id, created_at FROM messages \
+                "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id FROM messages \
                  WHERE node_id = ?1 AND project_id = ?2 ORDER BY created_at DESC, id DESC LIMIT ?3"
             }
             None => {
-                "SELECT id, node_id, project_id, role, text, run_id, created_at FROM messages \
+                "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id FROM messages \
                  WHERE node_id = ?1 AND project_id IS NULL ORDER BY created_at DESC, id DESC LIMIT ?3"
             }
         };
@@ -3306,9 +3323,10 @@ mod tests {
         store.org_upsert(&org_node("secretary", None, OrgKind::Secretary)).expect("secretary");
     }
 
-    /// 版数 5 の DB を開くと 6 が適用され、もう一度開いても何も起きない（冪等）。既存行は壊れない。
+    /// 版数 5 の DB を開くと以後の migration（6, 7）が適用され、もう一度開いても何も起きない（冪等）。
+    /// 既存行は壊れない。
     #[test]
-    fn open_migrates_schema_5_db_to_6_and_reapplying_is_idempotent() {
+    fn open_migrates_schema_5_db_to_the_current_version_and_reapplying_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("schema5.sqlite3");
         let task = sample_task(Status::Draft);
@@ -3347,7 +3365,7 @@ mod tests {
         }
 
         let store = SqliteStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         let got = store.get(task.id).unwrap().expect("old row still readable");
         assert_eq!(got.project_id, None);
         assert_eq!(got.milestone_id, None);
@@ -3356,16 +3374,85 @@ mod tests {
         seed_secretary(&store);
         drop(store);
 
-        // 2 回目に開いても 0006 は再適用されず（適用済み）、中身も残る。
+        // 2 回目に開いても 0006 / 0007 は再適用されず（適用済み）、中身も残る。
         let store = SqliteStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(store.org_list().unwrap().len(), 1);
-        let applied: i64 = {
+        let applied = |version: u32| -> i64 {
             let conn = store.conn.lock().unwrap();
-            conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version = 6", [], |r| r.get(0))
-                .unwrap()
+            conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version = ?1", params![version], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
-        assert_eq!(applied, 1, "migration 6 must be recorded exactly once");
+        assert_eq!(applied(6), 1, "migration 6 must be recorded exactly once");
+        assert_eq!(applied(7), 1, "migration 7 must be recorded exactly once");
+    }
+
+    /// Phase 27 / migration 0007: 版数 6 の DB（`reports.project_id` が NOT NULL、案件なしは空文字列。
+    /// ADR-0034 D1）を開くと、空文字列の行が NULL になって `None` として読め、`messages.task_id` が増える。
+    #[test]
+    fn migration_0007_turns_the_empty_project_sentinel_into_null_and_adds_message_task_id() {
+        use crate::report::{ReportKind, ReportStore};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema6.sqlite3");
+        let report_id = crate::report::ReportId::new();
+        let kept_id = crate::report::ReportId::new();
+        let project = sample_project();
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in [
+                MIGRATION_0001,
+                MIGRATION_0002,
+                MIGRATION_0003,
+                MIGRATION_0004,
+                MIGRATION_0005,
+                MIGRATION_0006,
+            ] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
+                 INSERT INTO schema_migrations (version, applied_at) VALUES \
+                 (1, '2020-01-01T00:00:00Z'), (2, '2020-01-01T00:00:00Z'), (3, '2020-01-01T00:00:00Z'), \
+                 (4, '2020-01-01T00:00:00Z'), (5, '2020-01-01T00:00:00Z'), (6, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+            for (id, project_id) in [(report_id, String::new()), (kept_id, project.id.to_string())] {
+                conn.execute(
+                    "INSERT INTO reports (id, project_id, node_id, task_id, kind, level, headline, body, \
+                     sources, read_at, created_at) VALUES (?1, ?2, 'infra', NULL, 'bad_news', 1, 'h', 'b', \
+                     '[]', NULL, '2026-09-17T00:00:00Z')",
+                    params![id.to_string(), project_id],
+                )
+                .unwrap();
+            }
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let migrated = store.report_get(report_id).unwrap().expect("old row still readable");
+        assert_eq!(migrated.project_id, None, "空文字列のセンチネルは NULL になる");
+        assert_eq!(migrated.kind, ReportKind::BadNews);
+        assert_eq!(
+            store.report_get(kept_id).unwrap().map(|r| r.project_id),
+            Some(Some(project.id)),
+            "案件付きの行はそのまま"
+        );
+        // `messages.task_id` が増えているので、書いて読み戻せる。
+        let task_id = TaskId::new();
+        let message = Message {
+            id: MessageId::new(),
+            node_id: "secretary".into(),
+            project_id: None,
+            role: MessageRole::User,
+            text: "こんにちは".into(),
+            run_id: None,
+            task_id: Some(task_id),
+            created_at: OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),
+        };
+        store.message_append(&message).unwrap();
+        assert_eq!(store.message_list("secretary", None, 10).unwrap()[0].task_id, Some(task_id));
     }
 
     #[test]
@@ -3485,6 +3572,7 @@ mod tests {
         store.project_create(&other_project).unwrap();
         let base = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
 
+        let task_id = TaskId::new();
         let append = |node: &str, project_id: Option<ProjectId>, role, text: &str, n: i64| {
             let m = Message {
                 id: MessageId::new(),
@@ -3493,6 +3581,7 @@ mod tests {
                 role,
                 text: text.into(),
                 run_id: if role == MessageRole::Node { Some(format!("run-{n}")) } else { None },
+                task_id: Some(task_id),
                 created_at: base + std::time::Duration::from_secs(n as u64),
             };
             store.message_append(&m).unwrap();
@@ -3511,6 +3600,9 @@ mod tests {
         assert_eq!(thread[0].role, MessageRole::User);
         assert_eq!(thread[1].run_id.as_deref(), Some("run-2"));
         assert_eq!(thread[1].project_id, Some(project.id));
+        // R4（migration 0007）: 1 往復の両方の行に、それを起こした対話用タスクの id が入る。
+        assert_eq!(thread[0].task_id, Some(task_id));
+        assert_eq!(thread[1].task_id, Some(task_id));
         assert_eq!(store.message_list("secretary", Some(other_project.id), 20).unwrap().len(), 1);
         assert_eq!(store.message_list("research-survey", Some(project.id), 20).unwrap().len(), 1);
         // `project_id = None` は案件に紐づかない行だけ（案件の行は混ざらない）。

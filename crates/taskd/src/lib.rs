@@ -729,7 +729,8 @@ async fn tick_loop(
             match reports::schedule_report_compaction(
                 store.as_ref(),
                 &config.reports,
-                &config.workspace_root,
+                &config.role_specs(),
+                &config.genre_specs(),
                 OffsetDateTime::now_utc(),
             ) {
                 Ok(created) if !created.is_empty() => {

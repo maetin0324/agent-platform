@@ -83,6 +83,10 @@ pub struct TaskSummary {
     pub role: Option<String>,
     /// ADR-0027 D1 の `Task.genre`（`role` と同じ理由で一覧に出す。`TaskDetail.genre` と同じ値）。
     pub genre: Option<String>,
+    /// ADR-0033 D2 の `Task.assignee`（組織のノード id。GUI-R3: 一覧に「誰の仕事か」を出すため）。
+    pub assignee: Option<String>,
+    /// 対話用タスク（人への返事のための run）か（GUI-R3: 仕事の木や一覧から隠せるように）。
+    pub conversation: bool,
     /// 今この状態で許される操作（ADR-0015 D4）。
     pub actions: Vec<Action>,
 }
@@ -367,6 +371,8 @@ pub(crate) fn build_task_summary(
         pending_children,
         role: task.role.clone(),
         genre: task.genre.clone(),
+        assignee: task.assignee.clone(),
+        conversation: task_core::is_conversation(task),
         actions: actions(task),
     }
 }

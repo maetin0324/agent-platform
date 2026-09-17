@@ -72,6 +72,16 @@ pub(crate) fn terminal_report(result: &Result<RunOutcome, AdapterError>) -> Opti
     }
 }
 
+/// ADR-0034 D7: 結果ファイルの `report.kind`（ワーカーの自己申告）を `ReportKind` に写す**固定表**。
+/// `"proposal"` だけが `Proposal` になり、それ以外・未知の値・欠落は `Result`（従来の規則）。
+/// 判断（この結果が提案に値するか）はしない（DESIGN 原則 1）。
+pub(crate) fn declared_kind(declared: Option<&str>) -> report::ReportKind {
+    match declared {
+        Some("proposal") => report::ReportKind::Proposal,
+        _ => report::ReportKind::Result,
+    }
+}
+
 /// その run が出した成果物の一覧（`ArtifactProduced` イベントから。決定的）。
 fn artifacts_of_run(store: &dyn TaskStore, task_id: TaskId, run_id: &str) -> Result<Vec<String>, StoreError> {
     let mut out = Vec::new();
@@ -92,8 +102,13 @@ pub(crate) fn record_run_report(
     task: &Task,
     run_id: &str,
     terminal: &TerminalReport,
+    declared: Option<&str>,
     now: OffsetDateTime,
 ) -> Result<Option<Report>, StoreError> {
+    // 監査 M-6: 対話用タスク（人への返事）は報告にしない。返事は `messages` に残り、GUI の「対話」で読む。
+    if task_core::is_conversation(task) {
+        return Ok(None);
+    }
     let Some(assignee) = task.assignee.as_deref() else {
         return Ok(None);
     };
@@ -124,7 +139,7 @@ pub(crate) fn record_run_report(
             } else {
                 Vec::new()
             };
-            report::report_for_done(
+            let mut done = report::report_for_done(
                 assignee,
                 level,
                 task.project_id,
@@ -135,7 +150,11 @@ pub(crate) fn record_run_report(
                 &artifacts,
                 sources,
                 now,
-            )
+            );
+            // ADR-0034 D7: ワーカーが宣言した `report.kind` を**固定表で写すだけ**（判断はしない。
+            // 未知・欠落は従来どおり `result`）。
+            done.kind = declared_kind(declared);
+            done
         }
         TerminalReport::Error { message, retryable } => report::report_for_error(
             assignee,
@@ -306,7 +325,7 @@ mod tests {
         let task = task(Some("coding-poc"), Some(project));
         store.insert(&task).expect("insert");
         let terminal = terminal_report(&done("ベンチが 1.8 倍速くなった")).expect("terminal");
-        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
             .expect("record")
             .expect("some");
         assert_eq!(report.kind, report::ReportKind::Result);
@@ -320,13 +339,60 @@ mod tests {
         assert_eq!(all.len(), 1);
     }
 
+    /// ADR-0034 D7（Phase 27）: ワーカーが `report.kind` を宣言したら、**固定表で写すだけ**。
+    /// `"proposal"` 以外・未知・欠落は従来どおり `result`。
+    #[test]
+    fn a_worker_can_declare_its_done_result_as_a_proposal() {
+        let store = store_with_org();
+        let task = task(Some("coding-poc"), Some(ProjectId::new()));
+        store.insert(&task).expect("insert");
+        let terminal = terminal_report(&done("この framing で論文が書けそう")).expect("terminal");
+        let report = record_run_report(
+            store.as_ref(),
+            &task,
+            "run-1",
+            &terminal,
+            Some("proposal"),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("record")
+        .expect("some");
+        assert_eq!(report.kind, report::ReportKind::Proposal);
+        // 固定表（未知・欠落は `result`。`bad_news` / `question` を `done` から名乗らせはしない）。
+        assert_eq!(declared_kind(Some("proposal")), report::ReportKind::Proposal);
+        assert_eq!(declared_kind(Some("bad_news")), report::ReportKind::Result);
+        assert_eq!(declared_kind(Some("bogus")), report::ReportKind::Result);
+        assert_eq!(declared_kind(None), report::ReportKind::Result);
+    }
+
+    /// 監査 M-6（Phase 27）: 対話用タスク（人への返事）は報告を作らない。
+    #[test]
+    fn a_conversation_task_produces_no_report() {
+        let store = store_with_org();
+        let mut task = task(Some("coding-poc"), Some(ProjectId::new()));
+        task.conversation = Some(task_core::MessageId::new());
+        store.insert(&task).expect("insert");
+        for terminal in [
+            terminal_report(&done("順調です")).expect("terminal"),
+            TerminalReport::Error { message: "落ちた".into(), retryable: false },
+            TerminalReport::Question { text: "どちらにしますか".into() },
+        ] {
+            assert_eq!(
+                record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
+                    .expect("record"),
+                None
+            );
+        }
+        assert!(store.report_list(&task_core::ReportFilter::default()).expect("list").is_empty());
+    }
+
     #[test]
     fn a_task_without_an_assignee_produces_no_report() {
         let store = store_with_org();
         let task = task(None, Some(ProjectId::new()));
         store.insert(&task).expect("insert");
         let terminal = terminal_report(&done("できました")).expect("terminal");
-        let made = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+        let made = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
             .expect("record");
         assert!(made.is_none());
         assert!(store.report_list(&task_core::ReportFilter::default()).expect("list").is_empty());
@@ -339,7 +405,7 @@ mod tests {
         let task = task(Some("no-such-node"), Some(ProjectId::new()));
         store.insert(&task).expect("insert");
         let terminal = terminal_report(&done("できました")).expect("terminal");
-        let made = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+        let made = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
             .expect("record");
         assert!(made.is_none());
         assert!(store.report_list(&task_core::ReportFilter::default()).expect("list").is_empty());
@@ -358,7 +424,7 @@ mod tests {
             exit_code: Some(1),
         });
         let terminal = terminal_report(&result).expect("terminal");
-        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
             .expect("record")
             .expect("some");
         assert_eq!(report.kind, report::ReportKind::BadNews);
@@ -387,7 +453,7 @@ mod tests {
             exit_code: Some(0),
         });
         let terminal = terminal_report(&result).expect("terminal");
-        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
             .expect("record")
             .expect("some");
         assert_eq!(report.kind, report::ReportKind::Question);
@@ -457,7 +523,7 @@ mod tests {
         store.insert(&compaction).expect("insert");
 
         let terminal = terminal_report(&done("PoC は 1.8 倍速く、論文の framing は X で書けそう")).expect("terminal");
-        let summary = record_run_report(store.as_ref(), &compaction, "run-1", &terminal, now)
+        let summary = record_run_report(store.as_ref(), &compaction, "run-1", &terminal, None, now)
             .expect("record")
             .expect("some");
         assert_eq!(summary.node_id, "coding");
@@ -474,7 +540,7 @@ mod tests {
         assert_eq!(up.iter().map(|r| r.id).collect::<Vec<_>>(), vec![summary.id]);
 
         // まとめる対象が 1 件も無ければ報告を作らない（やり直しで二重に作らないため）。
-        let again = record_run_report(store.as_ref(), &compaction, "run-2", &terminal, now).expect("record");
+        let again = record_run_report(store.as_ref(), &compaction, "run-2", &terminal, None, now).expect("record");
         assert!(again.is_none());
     }
 
@@ -521,14 +587,14 @@ mod tests {
         store.insert(&compaction_b).expect("insert");
 
         let terminal = terminal_report(&done("A の案件のまとめ")).expect("terminal");
-        let summary_a = record_run_report(store.as_ref(), &compaction_a, "run-a", &terminal, now)
+        let summary_a = record_run_report(store.as_ref(), &compaction_a, "run-a", &terminal, None, now)
             .expect("record")
             .expect("some");
         assert_eq!(summary_a.sources, vec![child_a.id], "A のまとめには A の子だけが入る");
 
         // B は A のまとめが done になった後でも、自分の子だけをまとめて done にできる。
         let terminal_b = terminal_report(&done("B の案件のまとめ")).expect("terminal");
-        let summary_b = record_run_report(store.as_ref(), &compaction_b, "run-b", &terminal_b, now)
+        let summary_b = record_run_report(store.as_ref(), &compaction_b, "run-b", &terminal_b, None, now)
             .expect("record")
             .expect("some");
         assert_eq!(summary_b.sources, vec![child_b.id], "B のまとめには B の子だけが入る");

@@ -3,14 +3,16 @@
 //!
 //! 「話しかける」は**新しいプロトコルを作らない**: 既存の `tasks` に `kind = execute` の対話用タスクを
 //! 1 件作り、その run の `summary` を返事にする。対話由来であることは `Task.conversation`（`json` 列の中の
-//! 任意フィールド）で表す。**DB の列は増やさない**（migration も無い。ADR-0033 D4 / Phase 24 の指示）。
+//! 任意フィールド）で表す（`tasks` の列は増やしていない。ADR-0033 D4 / Phase 24 の指示）。
+//! Phase 27（GUI からの依頼 R4）で `messages.task_id` だけを migration 0007 で足し、1 往復とその run を
+//! GUI から 1 段で辿れるようにした。
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use ulid::Ulid;
 
-use crate::model::Task;
+use crate::model::{Task, TaskId};
 use crate::org::ProjectId;
 
 /// 対話の 1 行の識別子（ULID）。
@@ -82,6 +84,10 @@ pub struct Message {
     /// `role = node` のとき、その返事を作った run（`Event::WorkerStarted.run_id`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// この 1 往復を起こした対話用タスク（GUI からの依頼 R4 / Phase 24 の P-74。migration 0007）。
+    /// `role = user` の行にも `role = node` の行にも**同じ id** が入る。導入前の行は `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<TaskId>,
     #[serde(with = "time::serde::rfc3339")]
     #[schemars(with = "String")]
     pub created_at: OffsetDateTime,

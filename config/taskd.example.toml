@@ -14,7 +14,9 @@ max_requeues = 5                   # ADR-0011: 同じ試行での連続 requeue�
 
 # 組織図の種（ADR-0033 D1、SPEC §3.2）。指したファイルの `[[org]]` を、**DB の `org_nodes` が空のときだけ**
 # 蒔く。以後の編集は GUI（`POST/PATCH/DELETE /api/v1/org`）から行い、この設定は再読込されない。
-# 書かなければ種を蒔かない（組織を使わない従来どおりの運用）。例は `config/org.example.toml`。
+# 書かなければ種を蒔かない（組織を使わない従来どおりの運用）。
+# `config/org.example.toml` をこのファイルと同じディレクトリに `org.toml` として置けば、下の
+# `[[genres]]`（coding / literature）とそのまま噛み合う（監査 M-1。分野の不整合は起動時に弾かれる）。
 # org_include = "org.toml"
 
 # 組織のノードごとの長期記憶（ADR-0033 D6、SPEC §3.2「各ノードは長期記憶を持つ」「記憶は案件をまたぐ」）。
@@ -39,39 +41,42 @@ auto_accept = false
 # （タスクの値 > 役割の既定 > 全体の既定）、run のプロンプトに `instructions` が `## Role` として前置きされる。
 # 役割名は自由記述なので、ここに無い名前をタスクに付けてもよい（既定も指示文も無いだけ）。
 # `taskctl add --role lead --config <このファイル>` / API の `POST /tasks` の `"role"` で指定する。
-# [[roles]]
-# id = "lead"
-# tier = "frontier"
-# max_turns = 40
-# max_wall_secs = 1800
-# instructions = "あなたは取りまとめ役。実装は delegate で部下に任せ、自分は分割とレビューに集中する。"
 #
-# [[roles]]
-# id = "implementer"
-# tier = "standard"
-# max_turns = 20
-# instructions = "あなたは実装担当。受け取った範囲だけを実装し、終わったら summary を書く。"
-#
+# ここに並ぶ役割は `adapter` を書かずに **tier だけ**にしてある（Phase 27 / 監査 M-1）: この例の
+# `[[providers]]` は `fake` なので、そのまま起動して組織・案件・対話の流れを一通り試せる。実機の
+# ハーネスに切り替えるときは、役割ごとに `adapter = "claude-code"` などを足す。
+[[roles]]
+id = "lead"
+tier = "frontier"
+max_turns = 40
+max_wall_secs = 1800
+instructions = "あなたは取りまとめ役。実装は delegate で部下に任せ、自分は分割とレビューに集中する。"
+
+[[roles]]
+id = "implementer"
+tier = "standard"
+max_turns = 20
+instructions = "あなたは実装担当。受け取った範囲だけを実装し、終わったら summary を書く。"
+
 # 対話用の役割（ADR-0033 D4）。組織のノードに話しかけたときの run はこの役割で走る（そのノードが自分の
 # 分野を持っていれば、そちらの `default_role` が使われる）。秘書の返事の作法をここに書く。
 [[roles]]
 id = "secretary"
 tier = "standard"
-adapter = "claude-code"
 instructions = """あなたは人の秘書。案件を受け取り、組織に流し、報告を集めて人に渡す。部をまたぐ連携はあなたが認める。
 案件の依頼を受けたら、返事に (a) 案件の理解の確認 (b) 大まかな方針 (c) 最初の途中目標の提案 を必ず含め、
 分からないことは質問する。長々と書かず、人が数十秒で読める分量にする。"""
 
-# 調査分野の役割の例（ADR-0027）。役割名は自由記述で、下の [[genres]] roles に含めれば分野に属する。
-# [[roles]]
-# id = "literature-scout"
-# tier = "cheap"
-# instructions = "あなたは調査担当。広く候補論文を探し、見落としが無いか洗い出す（深読みはしない）。"
-#
-# [[roles]]
-# id = "literature-reader"
-# tier = "standard"
-# instructions = "あなたは精読担当。候補論文を読み込み、引用付きで要点と新規性への影響をまとめる。"
+# 調査分野の役割（ADR-0027）。役割名は自由記述で、下の [[genres]] roles に含めれば分野に属する。
+[[roles]]
+id = "literature-scout"
+tier = "cheap"
+instructions = "あなたは調査担当。広く候補論文を探し、見落としが無いか洗い出す（深読みはしない）。"
+
+[[roles]]
+id = "literature-reader"
+tier = "standard"
+instructions = "あなたは精読担当。候補論文を読み込み、引用付きで要点と新規性への影響をまとめる。"
 
 # 分野（ADR-0027 D1）。タスクの `genre` がここの `id` を指すと、role が省略されたときの既定として
 # `default_role` の役割（tier / adapter / 予算）が使われ（タスクの値 > 役割の既定 > 分野の既定 > 親の値）、
@@ -95,23 +100,24 @@ output_artifacts = ["返事（result.json の summary）", "plan.json"]
 default_role = "secretary"
 roles = ["secretary"]
 
-# [[genres]]
-# id = "coding"
-# description = "コードを書く・直す・テストする"
-# capabilities = ["ソースコードの読み書き", "テストの実行", "パッチの作成"]
-# input_artifacts = ["issue description", "repository"]
-# output_artifacts = ["diff", "test results"]
-# default_role = "implementer"
-# roles = ["lead", "implementer"]
-#
-# [[genres]]
-# id = "literature"
-# description = "関連研究の調査・先行研究の確認・新規性の検討"
-# capabilities = ["学術文献の検索", "引用グラフの探索", "PDF 全文からの根拠抽出"]
-# input_artifacts = ["question", "pdf", "bibliography"]
-# output_artifacts = ["answer.md", "citations.json"]
-# default_role = "literature-reader"
-# roles = ["literature-scout", "literature-reader"]
+# `config/org.example.toml` の課が使う分野（監査 M-1: 例の設定 2 つを組み合わせてそのまま起動できる）。
+[[genres]]
+id = "coding"
+description = "コードを書く・直す・テストする"
+capabilities = ["ソースコードの読み書き", "テストの実行", "パッチの作成"]
+input_artifacts = ["issue description", "repository"]
+output_artifacts = ["diff", "test results"]
+default_role = "implementer"
+roles = ["lead", "implementer"]
+
+[[genres]]
+id = "literature"
+description = "関連研究の調査・先行研究の確認・新規性の検討"
+capabilities = ["学術文献の検索", "引用グラフの探索", "PDF 全文からの根拠抽出"]
+input_artifacts = ["question", "pdf", "bibliography"]
+output_artifacts = ["answer.md", "citations.json"]
+default_role = "literature-reader"
+roles = ["literature-scout", "literature-reader"]
 
 # 実行中の委譲の上限（ADR-0016 D2 / M6）。既定は下の値。超える提案は拒否され、理由が WorkerProgress に残る（run は失敗しない）。
 [delegation]

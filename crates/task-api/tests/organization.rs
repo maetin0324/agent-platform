@@ -213,6 +213,24 @@ async fn org_validation_is_reported_as_422_and_duplicate_ids_as_409() {
     .await;
     assert_problem(&resp, 422, "validation");
 
+    // 監査 L-1: `genre` は `[[genres]]` にあるものだけ（POST も PATCH も 422）。
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/org",
+            &json!({"id": "ghost-genre", "name": "?", "kind": "section", "parent_id": "research", "genre": "bogus"}),
+            &h,
+        ),
+    )
+    .await;
+    let problem = assert_problem(&resp, 422, "validation");
+    assert!(problem.to_string().contains("unknown genre"), "{problem}");
+    let resp = send(&app, pa("/api/v1/org/research-survey", &json!({"genre": "bogus"}))).await;
+    assert_problem(&resp, 422, "validation");
+    // 設定にある分野は通る。
+    let resp = send(&app, pa("/api/v1/org/research-survey", &json!({"genre": "coding"}))).await;
+    assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
+
     // 既にある id は 409（更新は PATCH）。
     let resp = send(
         &app,
@@ -239,6 +257,12 @@ async fn org_admin_endpoints_require_a_token() {
         "unauthorized",
     );
     assert_problem(&send(&app, delete_with("/api/v1/org/secretary", &[])).await, 401, "unauthorized");
+    // 監査 M-4: 案件の作成も管理系（トークンありの構成でも、トークン無しの要求は 401）。
+    assert_problem(
+        &send(&app, post_json_with("/api/v1/projects", &json!({"title": "t", "request": "r"}), &[])).await,
+        401,
+        "unauthorized",
+    );
     // 同じ構成でも、トークンを出せば通る。
     let a = auth();
     let h = headers(&a);
@@ -259,10 +283,15 @@ async fn org_admin_endpoints_require_a_token_when_token_file_is_not_configured()
         "unauthorized",
     );
     assert_problem(&send(&app, delete_with("/api/v1/org/secretary", &[])).await, 401, "unauthorized");
-    // 同じ構成でも、読み取りと案件の作成は通る（管理系ではない）。
+    // 監査 M-4: 案件の作成も管理系（直後に秘書の run を起こすため）。
+    assert_problem(
+        &send(&app, post_json("/api/v1/projects", &json!({"title": "t", "request": "r"}))).await,
+        401,
+        "unauthorized",
+    );
+    // 同じ構成でも読み取りは通る（管理系ではない）。
     assert_eq!(send(&app, get("/api/v1/org")).await.status.as_u16(), 200);
-    let resp = send(&app, post_json("/api/v1/projects", &json!({"title": "t", "request": "r"}))).await;
-    assert_eq!(resp.status.as_u16(), 201, "{}", resp.text());
+    assert_eq!(send(&app, get("/api/v1/projects")).await.status.as_u16(), 200);
 }
 
 #[tokio::test]

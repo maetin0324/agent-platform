@@ -12,14 +12,13 @@
 //! 経つまで次のまとめを作らない(バックオフ)。子の報告は `sources` に入るまで「レビュー待ち」のままなので、
 //! まとめが失敗し続けても tick ごとに新しいタスクが積み上がることはない。
 
-use std::path::Path;
-
 use serde::Deserialize;
 use task_core::report::{self, Report};
 use task_core::{
-    Budget, ListFilter, ListOrder, OrgNode, ProjectId, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Tier,
-    WorkerHint, WorkspaceSpec,
+    Budget, GenreSpec, ListFilter, ListOrder, OrgNode, ProjectId, RoleSpec, Status, StoreError, TaskId,
+    TaskKind, TaskStore,
 };
+use task_ops::add::NewTaskSpec;
 use time::OffsetDateTime;
 
 /// まとめの run の予算（短い読み書きだけなので小さく取る）。
@@ -131,47 +130,36 @@ fn has_recently_failed_compaction_task(
     }))
 }
 
-/// まとめの run のタスク（`kind = execute`、担当は親ノード）。
+/// まとめの run のタスクの指定（`kind = execute`、担当は親ノード）。
 /// 受け入れ条件は置かない: 出力は「1 件の報告」そのもので、決定的に確かめられるものが無いため
 /// （レビューは条件ゼロで全 pass = `done`。報告自体は run の終端の時点で作られる）。
-fn compaction_task(
-    node: &OrgNode,
-    project_id: Option<ProjectId>,
-    pending: &[Report],
-    workspace_root: &Path,
-    now: OffsetDateTime,
-) -> Task {
-    let id = TaskId::new();
-    Task {
-        id,
-        parent_id: None,
-        kind: TaskKind::Execute,
+///
+/// 監査 L-4（Phase 27）: tier / アダプタ / 分野は自分で決めず、`task_ops::add::create_support_task` の
+/// 解決順（タスクの値 > 役割の既定 > `assignee` 由来 > 分野の既定 > 全体の既定）に任せる。
+/// `role = report-compressor` が `[[roles]]` に無い構成でも落ちない（既定が埋まらないだけ）。
+fn compaction_spec(node: &OrgNode, project_id: Option<ProjectId>, pending: &[Report]) -> NewTaskSpec {
+    NewTaskSpec {
         title: format!("報告のまとめ: {}", node.name),
         objective: report::compaction_objective(node, pending),
         acceptance: Vec::new(),
-        inputs: Vec::new(),
-        depends_on: Vec::new(),
-        status: Status::Ready,
+        kind: TaskKind::Execute,
+        tier: None,
         priority: 0,
-        worker_hint: WorkerHint {
-            tier: Tier::Standard,
-            adapter: None,
-        },
-        workspace: WorkspaceSpec::Local {
-            path: workspace_root.join(id.to_string()),
-        },
-        budget: COMPACTION_BUDGET,
-        attempts: 0,
-        lease: None,
-        created_at: now,
-        updated_at: now,
+        parent: None,
+        depends_on: Vec::new(),
+        max_turns: Some(COMPACTION_BUDGET.max_turns),
+        max_wall_secs: Some(COMPACTION_BUDGET.max_wall_secs),
+        max_retries: COMPACTION_BUDGET.max_retries,
         role: Some(report::COMPACTION_ROLE.to_string()),
-        genre: node.genre.clone(),
+        genre: None,
         aggregate: false,
         project_id,
         milestone_id: None,
         assignee: Some(node.id.clone()),
-        conversation: None,
+        // 作業ディレクトリは `workspace_root/<task_id>`（相対パスをディスパッチャが解決する）。
+        workspace: None,
+        cluster: None,
+        adapter: None,
     }
 }
 
@@ -180,7 +168,8 @@ fn compaction_task(
 pub fn schedule_report_compaction(
     store: &dyn TaskStore,
     config: &ReportsConfig,
-    workspace_root: &Path,
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
     now: OffsetDateTime,
 ) -> Result<Vec<TaskId>, StoreError> {
     let org = store.org_list()?;
@@ -202,8 +191,16 @@ pub fn schedule_report_compaction(
                 tracing::debug!(node = %node.id, ?project_id, "reports: backing off after a recently failed compaction run");
                 continue;
             }
-            let task = compaction_task(node, project_id, &items, workspace_root, now);
-            store.create_task(&task, vec![task_core::Event::Created { task: Box::new(task.clone()) }])?;
+            let spec = compaction_spec(node, project_id, &items);
+            // 作成経路の検証（案件が消えている等）で落ちたら、その組だけ諦めて次へ進む
+            // （1 つの案件の不整合で他のノードのまとめまで止めない）。
+            let task = match task_ops::add::create_support_task(store, spec, roles, genres, now) {
+                Ok(task) => task,
+                Err(e) => {
+                    tracing::warn!(node = %node.id, ?project_id, error = %e, "reports: could not create the compaction task");
+                    continue;
+                }
+            };
             tracing::info!(
                 node = %node.id,
                 task_id = %task.id,
@@ -250,6 +247,22 @@ mod tests {
         store
     }
 
+    /// 案件を 1 件作って id を返す（まとめタスクの作成経路が案件の実在を検証するため）。
+    fn seed_project(store: &SqliteStore) -> ProjectId {
+        let now = OffsetDateTime::now_utc();
+        let project = task_core::Project {
+            id: ProjectId::new(),
+            title: "案件".into(),
+            request: "依頼".into(),
+            status: task_core::ProjectStatus::Active,
+            secretary_summary: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store.project_create(&project).expect("project");
+        project.id
+    }
+
     fn child_report(project: Option<ProjectId>, at: OffsetDateTime, n: usize) -> Report {
         Report {
             id: ReportId::new(),
@@ -270,22 +283,21 @@ mod tests {
     fn four_reports_schedule_a_run_but_three_do_not() {
         let store = store_with_org();
         let now = OffsetDateTime::now_utc();
-        let project = ProjectId::new();
+        let project = seed_project(&store);
         let cfg = ReportsConfig::default();
-        let root = std::path::PathBuf::from("/tmp/taskd-test");
 
         for n in 0..3 {
             store.report_append(&child_report(Some(project), now, n)).expect("append");
         }
         assert!(
-            schedule_report_compaction(&store, &cfg, &root, now)
+            schedule_report_compaction(&store, &cfg, &[], &[], now)
                 .expect("schedule")
                 .is_empty(),
             "3 件では起きない"
         );
 
         store.report_append(&child_report(Some(project), now, 3)).expect("append");
-        let created = schedule_report_compaction(&store, &cfg, &root, now).expect("schedule");
+        let created = schedule_report_compaction(&store, &cfg, &[], &[], now).expect("schedule");
         assert_eq!(created.len(), 1, "4 件で起きる");
 
         let task = store.get(created[0]).expect("get").expect("some");
@@ -300,7 +312,7 @@ mod tests {
 
         // 開いているまとめがある間は二重に作らない。
         assert!(
-            schedule_report_compaction(&store, &cfg, &root, now)
+            schedule_report_compaction(&store, &cfg, &[], &[], now)
                 .expect("schedule")
                 .is_empty()
         );
@@ -311,17 +323,16 @@ mod tests {
         let store = store_with_org();
         let now = OffsetDateTime::now_utc();
         let cfg = ReportsConfig::default();
-        let root = std::path::PathBuf::from("/tmp/taskd-test");
         store
-            .report_append(&child_report(Some(ProjectId::new()), now - time::Duration::hours(1), 0))
+            .report_append(&child_report(Some(seed_project(&store)), now - time::Duration::hours(1), 0))
             .expect("append");
         assert!(
-            schedule_report_compaction(&store, &cfg, &root, now)
+            schedule_report_compaction(&store, &cfg, &[], &[], now)
                 .expect("schedule")
                 .is_empty(),
             "1 時間では起きない"
         );
-        let created = schedule_report_compaction(&store, &cfg, &root, now + time::Duration::hours(2)).expect("schedule");
+        let created = schedule_report_compaction(&store, &cfg, &[], &[], now + time::Duration::hours(2)).expect("schedule");
         assert_eq!(created.len(), 1, "2 時間経過で起きる");
     }
 
@@ -330,9 +341,8 @@ mod tests {
     fn a_recently_failed_compaction_task_backs_off_until_compress_after_secs_passes() {
         let store = store_with_org();
         let now = OffsetDateTime::now_utc();
-        let project = ProjectId::new();
+        let project = seed_project(&store);
         let cfg = ReportsConfig::default();
-        let root = std::path::PathBuf::from("/tmp/taskd-test");
 
         for n in 0..4 {
             store.report_append(&child_report(Some(project), now, n)).expect("append");
@@ -350,13 +360,24 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let mut failed = compaction_task(&node, Some(project), &[], &root, now - time::Duration::minutes(10));
-        failed.status = Status::Failed;
-        failed.updated_at = now - time::Duration::minutes(10);
-        store.insert(&failed).expect("insert");
+        let failed = task_ops::add::create_support_task(
+            &store,
+            compaction_spec(&node, Some(project), &[]),
+            &[],
+            &[],
+            now - time::Duration::minutes(10),
+        )
+        .expect("support task");
+        store
+            .acquire_lease(failed.id, "run-failed", std::time::Duration::from_secs(60))
+            .expect("lease");
+        let outcome = store
+            .apply_transition(failed.id, task_core::Trigger::WorkerError { retryable: false }, None)
+            .expect("fail");
+        assert_eq!(outcome.next, Status::Failed);
 
         assert!(
-            schedule_report_compaction(&store, &cfg, &root, now)
+            schedule_report_compaction(&store, &cfg, &[], &[], now)
                 .expect("schedule")
                 .is_empty(),
             "失敗直後はバックオフされ、次のまとめを作らない"
@@ -364,7 +385,7 @@ mod tests {
 
         // `compress_after_secs` が経てば作られる。
         let later = now + time::Duration::seconds(cfg.compress_after_secs as i64) + time::Duration::minutes(11);
-        let created = schedule_report_compaction(&store, &cfg, &root, later).expect("schedule");
+        let created = schedule_report_compaction(&store, &cfg, &[], &[], later).expect("schedule");
         assert_eq!(created.len(), 1, "バックオフ期間を過ぎればまた作られる");
     }
 
@@ -373,14 +394,13 @@ mod tests {
         let store = store_with_org();
         let now = OffsetDateTime::now_utc();
         let cfg = ReportsConfig::default();
-        let root = std::path::PathBuf::from("/tmp/taskd-test");
-        let a = ProjectId::new();
-        let b = ProjectId::new();
+        let a = seed_project(&store);
+        let b = seed_project(&store);
         for n in 0..4 {
             store.report_append(&child_report(Some(a), now, n)).expect("append");
             store.report_append(&child_report(Some(b), now, n)).expect("append");
         }
-        let created = schedule_report_compaction(&store, &cfg, &root, now).expect("schedule");
+        let created = schedule_report_compaction(&store, &cfg, &[], &[], now).expect("schedule");
         assert_eq!(created.len(), 2);
         let projects: Vec<_> = created
             .iter()
@@ -394,12 +414,11 @@ mod tests {
     fn once_the_summary_exists_the_children_are_no_longer_pending() {
         let store = store_with_org();
         let now = OffsetDateTime::now_utc();
-        let project = ProjectId::new();
+        let project = seed_project(&store);
         let cfg = ReportsConfig::default();
-        let root = std::path::PathBuf::from("/tmp/taskd-test");
         let children: Vec<Report> = (0..4).map(|n| child_report(Some(project), now, n)).collect();
         store.report_append_all(&children).expect("append");
-        let created = schedule_report_compaction(&store, &cfg, &root, now).expect("schedule");
+        let created = schedule_report_compaction(&store, &cfg, &[], &[], now).expect("schedule");
         assert_eq!(created.len(), 1);
 
         // まとめの run が done になったときに作られる報告（`task-dispatch` と同じ形）を手で入れる。

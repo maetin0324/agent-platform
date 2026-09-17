@@ -19,6 +19,10 @@ ADR-0033 D3 が決めた「生成は決定的、圧縮だけ LLM、悪い知ら�
 - 採らなかった案: 0007 で列を NULL 可にする（並行する Phase 24 と migration 版数を取り合う）。
 - 将来: 次に `reports` を触る migration があれば NULL 可に直してよい（読み書きは 1 か所 `task-core/src/report.rs`）。
 
+**Phase 27 で解消**: migration 0007（`messages.task_id` を足す回）で `reports` を作り直し、`project_id` を
+NULL 可にした（SQLite は列の NOT NULL を落とせないので表を作り直して写す）。空文字列のセンチネルは
+`NULLIF(project_id, '')` で NULL に直し、モデルの読み書きは素直な `Option<ProjectId>` になった。
+
 ## D2. 生成の対象は「タスクの終端状態」（監査で改訂。当初は「run の終端」だった）
 
 当初の D2 は「`done` / `error` / `question` という run の終端で作る」だったが、監査（Phase 25 後）で
@@ -121,6 +125,13 @@ ADR-0033 D3 が決めた「生成は決定的、圧縮だけ LLM、悪い知ら�
 - **実装は Phase 24（結果ファイルの `memory` 拡張）のマージ後に行う**。結果ファイルのスキーマを
   同時に 2 つの Phase が触ると、`docs/protocol/worker-protocol.schema.json` の生成元が競合するため。
   Phase 25 の時点ではコード変更は入れず、この ADR に決定だけ記録する。
+
+**Phase 27 で実装**: 結果ファイルの規約に `"report": {"kind": "result"|"proposal"|"bad_news"|"question"}` を
+足した（任意。`PROTOCOL_VERSION` は 4 のまま — 追加だけで、既存のワーカーは何も変えなくてよい）。
+読むのは `task_worker::read_result_report_kind`（ファイル I/O だけ）、写すのは
+`task_dispatch::reports::declared_kind`（固定表: `"proposal"` → `Proposal`、それ以外・未知・欠落 →
+`Result`）。宣言が効くのは `Done` → `Status::Done` の報告だけで、`bad_news` / `question` の生成規則
+（D2）は変わらない（`done` を名乗って悪い知らせに化けることはない）。
 
 ## 3. 採らない
 

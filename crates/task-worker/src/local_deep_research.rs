@@ -190,9 +190,9 @@ impl WorkerAdapter for LdrAdapter {
 /// 人間の回答履歴は短い補足として後ろに付ける（検索語としての邪魔が少ない）。
 /// 役割の指示文とタイトルは `runs/<run_id>/request.json` に残るので記録は失われない。
 pub fn build_query(task: &Task, context: &RunContext) -> String {
-    // ADR-0033 D4 / D6（Phase 24）: 「人」であることは分野に依らないので、記憶と直近のやり取りは前置きする。
-    // 役割の指示文だけは載せない（ADR-0029 / Phase 19: 検索エンジンに渡す問いを役割の文面で濁さない）。
-    let mut out = crate::preamble::render_without_role(context);
+    // ADR-0029 / Phase 19 / ADR-0033 D6（Phase 27 の監査 M-2）: 検索ハーネスに渡すのは**素の目的だけ**。
+    // 役職・記憶・直近のやり取り・記憶の書式指示は載せない（問いを濁すと検索が何も返さない）。
+    let mut out = String::new();
     out.push_str(task.objective.trim());
     if !context.answers.is_empty() {
         out.push_str("\n\n補足（人間の回答）:");
@@ -782,8 +782,9 @@ while true; do sleep 0.1; done
 
     /// 実機の回帰（2026-09-17）: 検索に渡す問いにタイトルの見出しや役割の指示文を入れると、検索が
     /// 何も返さなくなる。素の目的だけを渡す（人間の回答があれば短い補足として足す）。
+    /// Phase 27（監査 M-2）: 役職・brief・記憶・直近のやり取りも載せない（ADR-0033 D6 に追記）。
     #[test]
-    fn build_query_sends_only_the_objective_not_the_title_or_role_instructions() {
+    fn build_query_sends_only_the_objective_not_the_title_role_memory_or_conversation() {
         let mut task = crate::protocol::tests::sample_task();
         task.title = "gate pass check".into();
         task.objective = "What is Kubernetes and what problem does it solve?".into();
@@ -792,12 +793,30 @@ while true; do sleep 0.1; done
                 id: "web-scout".into(),
                 instructions: "あなたは Web 調査担当。出典 URL を付ける。".into(),
             }),
+            node: Some(crate::protocol::NodeContext {
+                id: "research-survey".into(),
+                name: "関連研究調査課".into(),
+                brief: "関連研究を洗う。".into(),
+            }),
+            memory: Some(crate::protocol::MemoryContext {
+                notes: "- 2026-09-10: pegasus は pjsub で投げる".into(),
+                project: "- 2026-09-16: Pluvio は非同期ランタイム基盤".into(),
+            }),
+            conversation: vec![crate::protocol::ConversationTurn {
+                role: task_core::MessageRole::User,
+                text: "先週の続きを".into(),
+            }],
+            standing_rules: vec!["1 ノードで始めてよい".into()],
             ..Default::default()
         };
         let query = build_query(&task, &context);
         assert_eq!(query, "What is Kubernetes and what problem does it solve?");
         assert!(!query.contains("gate pass check"), "{query}");
         assert!(!query.contains("Web 調査担当"), "{query}");
+        assert!(!query.contains("関連研究調査課"), "{query}");
+        assert!(!query.contains("pjsub"), "{query}");
+        assert!(!query.contains("先週の続きを"), "{query}");
+        assert!(!query.contains("覚えておくこと"), "{query}");
 
         context.answers = vec![Answer { question: "対象は?".into(), answer: "v1.31".into() }];
         let with_answers = build_query(&task, &context);

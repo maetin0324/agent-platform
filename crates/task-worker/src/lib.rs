@@ -17,6 +17,7 @@ pub mod paperqa;
 pub mod preamble;
 pub mod protocol;
 pub mod provider;
+pub mod result_report;
 pub mod subprocess;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -45,6 +46,7 @@ pub use protocol::{
     RoleContext, RunContext, RunRequest, WorkerMessage,
 };
 pub use provider::classify_provider_failure;
+pub use result_report::{ReportDeclaration, read_result_report_kind, report_kind_from_result_json};
 pub use subprocess::{SubprocessSpec, run_subprocess};
 pub use ssh::{
     SYNC_ALWAYS_EXCLUDED, SshSettings, SshWorkspace, SyncMode, WorktreeSettings, control_master_alive_blocking,

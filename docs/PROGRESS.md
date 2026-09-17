@@ -3461,6 +3461,10 @@ Phase 25 の監査で見つかった逸脱を修正した。設計判断は決�
   "report-compressor"` は `[[roles]]` に登録する運用が前提になっておらず、`task_ops::create_task_with_roles`
   相当の経路（ADR-0033 D2 の assignee 解決順）に寄せるには、`[[roles]]` 未登録でも落ちないことの確認を
   含めた設計判断が要る。次に触る担当への申し送りとする。
+  → **Phase 27 で解消**: `task_ops::add::create_support_task`（受け入れ条件が空でもよい裏方タスク用の
+  作成経路。既定の解決順は `create_task_with_roles` と同じ実装を共有する）を足し、
+  `taskd/src/reports.rs` は `NewTaskSpec` を組んでそこに通すだけにした。`role = "report-compressor"` が
+  `[[roles]]` に無くても落ちない（既定が埋まらないだけ。`&[]` の roles / genres でのテストがそれを見る）。
 - **ADR-0034 の更新**: D2 を「タスクの終端状態に合わせる」規則へ書き換え、D3 に「まとめの run はレビューでは
   なく要約（差し戻しの経路は無い）」を明記、D3a（新設）に H-2 のバックオフを記録、D6 に「`last_notified_at`
   は複数の GUI クライアントで共有される」「`POST /reports/notified` は管理系トークン必須」を追記、
@@ -3593,19 +3597,29 @@ SPEC §3.4「組織の木を見て誰に言うかを決め、その担当に直�
 - U24-2: `context.standing_rules` は**常に空**（Phase 26 が埋める）。前置きの節も今は出ない。
 - U24-3: `question` で終わった対話 run の本文は、そのまま返事として `messages` に入るだけで
   `approvals` に繋がっていない（Phase 26）。人が答える経路は従来の `POST /tasks/{id}/answer`。
+  → **解消**（Phase 26 で `Question` 終端を `approvals` に接続し、Phase 27 で部をまたぐ委譲の質問を
+  `approvals` の行として構造化した。人が答えると次の run で委譲が通る）。
 - U24-4: 対話用タスクは `GET /tasks` にも出る（裏方のはずのタスク一覧に「対話: …」が混ざる）。
   GUI（G13）で隠すか、`GET /tasks` に「対話を除く」絞り込みを足すかは G13 の担当と決めたい。
+  → **解消**（Phase 27 / GUI-R3: `TaskSummary.conversation` と `ProjectTaskView.conversation` を足し、
+  GUI が真偽値で隠せるようにした。API 側の絞り込みは足していない）。
 - U24-5: 記憶の中身は誰も要約しない（際限なく伸び、前置きでは末尾 8,000 字だけ見える）。
   溜まってから「記憶の圧縮 run」を考える（報告の圧縮＝Phase 25 と同じ形にできるはず）。
 - U24-6: 秘書の返事は `projects.secretary_summary` に書いていない（`messages` にしか残らない）。
   GUI が案件の画面で「秘書の理解と方針」を出したくなったら、返事を写すか列を消すかを決める。
 - U24-7: 実機確認（ローカル Qwen で秘書の最初の返事まで通す）は未実施。ADR-0033 §4 の「実機」の行。
+  → **半分解消**（Phase 27）: `config/taskd.example.toml` + `config/org.example.toml` + 偽アダプタで
+  **実プロセスの taskd を起動し、`POST /projects` から秘書の返事が `messages` に入るところまで通した**
+  （証拠は Phase 27 の節の受け入れ条件 5）。**ローカル Qwen（ACP / 実 LLM）での確認はまだ**
+  （この環境から pegasus へ出られないため。手順は下の U27-4）。
 
 ### 提案
 
 - P-74: `messages` に `task_id` 列を足すと、対話の 1 往復と run を GUI から直接たどれる（今は
   `Task.conversation` → 人の発言 id、返事 → `run_id` の 2 段で辿る必要がある）。Phase 25/26 の表と
   一緒に migration を足すなら、そのときに。
+  → **実装した**（Phase 27 / GUI-R4。migration 0007 で `messages.task_id` を追加。`role = user` の行にも
+  `role = node` の行にも同じ対話用タスクの id が入る）。
 - P-75: 対話用分野の id を `secretary` 固定にしたが、これは「対話に使うハーネス」であってノードの役職では
   ない。`[[genres]] id = "conversation"` に改名した方が読みやすい（今は SPEC の言葉に寄せた）。
 
@@ -3713,8 +3727,176 @@ LLM 呼び出しは足していない（DESIGN 原則 1）。
 
 ### 提案
 
-- P-74: U26-2 のとおり、`standing_rules.rule` に質問文を含めるかどうかは人間の判断を仰ぎたい
-  （現状は ADR-0033 D5 の文言に忠実な「答えのみ」）。
-- P-75: `POST /approvals/{id}/decide` の応答に `report` を含めて、決定がどの報告（`kind = question`）に
-  対応するかを GUI が直接たどれるようにする案がある（今は `task_id` で `GET /reports?node=` を引き直す
-  必要がある）。
+- P-76（Phase 27 で番号を直した。もとは P-74 で Phase 24 の提案と重複していた）: U26-2 のとおり、
+  `standing_rules.rule` に質問文を含めるかどうかは人間の判断を仰ぎたい（現状は ADR-0033 D5 の文言に
+  忠実な「答えのみ」）。**Phase 27 で部分的に解消**: 部をまたぐ委譲の認可だけは、答えの文ではなく
+  質問の鍵（`cross-department: <from> -> <to>`）を規則にした（照合できる形が必要だったため）。
+  それ以外の質問は今も「答えのみ」。
+- P-77（もとは P-75。同じ重複）: `POST /approvals/{id}/decide` の応答に `report` を含めて、決定がどの
+  報告（`kind = question`）に対応するかを GUI が直接たどれるようにする案がある（今は `task_id` で
+  `GET /reports?node=` を引き直す必要がある）。
+
+---
+
+## Phase 27 — 結合の仕上げ（Phase 24/25 監査対応、R3/R4、ADR-0034 D7。2026-09-17）
+
+Phase 24 と 25 の監査で見つかった逸脱を、決定済みの方針どおりに直した。新しい ADR は起こしていない
+（既存の ADR-0033 D4/D5/D6 と ADR-0034 D1/D3/D7 に「Phase 27 で解消」の節を足した）。ディスパッチャ・
+ストアに LLM 呼び出しは足していない（DESIGN 原則 1）。migration は 1 本だけ足した（0007。指示で許可された範囲）。
+
+### 受け入れ条件ごとの証拠
+
+1. **部をまたぐ委譲が認可で通る（H-1 / H-2。必須）**
+   - 質問を**構造化**した: `approvals.question` が `"cross-department: <from_node> -> <to_node>: <理由（提案の title）>"`
+     の固定の形（`node_id` = 委譲元、`task_id` = 親タスク）。照合の鍵は `"cross-department: <from> -> <to>"`
+     で、**文字列の前方一致だけ**で決定的に判定する（`task_ops::conversation::{CrossDepartment,
+     cross_department_key, cross_authorization, split_delegation}`）。
+   - `delegate_impl`（`task-dispatch`）は委譲のたびに `approvals`（同じ `task_id`・同じ鍵の決定）と
+     `standing_rules`（`node_id = from` または全員向けで鍵を先頭に含む規則）を引き、`once` / `standing`
+     なら**その場で子を作る**、`denied` なら作らない（`answers[]` の「認めない」が従来どおりワーカーに見える）、
+     まだ聞いていなければ質問にする。
+   - **バッチを分けた**: 同じ部宛ての提案はその場で子になり、部またぎの提案だけが質問になる（Phase 24 は
+     1 件でも部またぎがあると全件止まっていた）。ワーカーには
+     `delegated N child task(s)（M 件は秘書の認可待ち）: …` が `WorkerProgress` として見える。
+   - `decide` で `standing` と答えたとき、この形の質問だけは `standing_rules.rule` に**質問の鍵**を入れる
+     （それ以外の質問は従来どおり答えの文。`task_ops::approval::decide`）。
+   - 証拠: `cargo test -p task-ops --lib conversation`（`a_delegation_to_another_department_becomes_a_question_and_the_batch_is_split`、
+     `once_standing_and_denied_decide_whether_the_next_run_may_delegate_across_departments`）、
+     `cargo test -p task-dispatch --lib dispatcher`
+     （`a_delegation_across_departments_asks_the_secretary_instead_of_creating_children` は質問文と
+     `approvals` の行を、`an_authorized_cross_department_delegation_goes_through_on_the_next_run` は
+     once / standing / denied の 3 通りを 1 本で、`a_batch_with_one_crossing_still_creates_the_same_department_children`
+     はバッチ分割を見る）。
+2. **対話の細部（M-3 / M-4 / M-5 / M-6 / L-1 / L-6。必須）**
+   - **M-3 直列化**: `conversation::start` が同じ `node_id` × `project_id` の未終了の対話タスクを
+     `depends_on` に入れる。テスト: `a_second_message_waits_for_the_first_reply`（`task-ops`。2 通目は
+     `ready_tasks` に出ず、1 通目が `done` になると出る）、`task-api --test conversation` でも
+     `depends_on` と `ready_tasks` を確認。
+   - **M-4**: `POST /projects` を管理系（`require_admin`）にした。テスト:
+     `org_admin_endpoints_require_a_token` と `..._when_token_file_is_not_configured` の**両構成で 401**。
+     `docs/gui/api.md` §3.42〜3.46 を修正。
+   - **M-5**: 「返事できませんでした: …」は**タスクが `Failed` に落ちたときだけ**書く
+     （`record_conversation_reply` を遷移の後に移し、`outcome.next` を見る）。テスト:
+     `a_retried_conversation_run_answers_only_once`（retryable な失敗 → 成功で、返事は 1 行だけ）。
+   - **M-6**: 対話用タスクは報告を作らない（`record_run_report` の入口で除外）。テスト:
+     `a_conversation_task_produces_no_report`（done / error / question の 3 通りで `None`）。
+   - **L-1**: `POST/PATCH /org` の `genre` は `ApiState.genres`（`[[genres]]`）にあるものだけ。無い id は
+     422 `validation`（分野を 1 つも設定していない taskd では検証しない）。テスト:
+     `org_validation_is_reported_as_422_and_duplicate_ids_as_409` に POST / PATCH の両方を追加。
+   - **L-6**: 直近のやり取りの最後の `user` 行が `objective` と同じなら落とす（今回の本文を二重に載せない）。
+     テスト: `the_recent_turns_keep_the_past_but_drop_this_very_message`（前回の 2 行だけが残る）。
+3. **LDR は記憶もやり取りも載せない（M-2。必須）**
+   - `local_deep_research::build_query` は **`objective`（+ 人間の回答の補足）だけ**。
+     `preamble::render_without_role` は**関数ごと削除**した（唯一の呼び出し元が消えたため）。
+   - ADR-0033 D6 に「検索ハーネス（LDR）は問いを濁さないため、記憶・やり取り・`memory` の書式指示を
+     載せない。記憶の追記もしない」の 1 行を追加。
+   - テスト: `build_query_sends_only_the_objective_not_the_title_role_memory_or_conversation`
+     （役職・brief・記憶・やり取り・永続の認可・書式指示のどれも入らないことを見る）。
+4. **小さな API の追従（R3 / R4 / R5 / ADR-0034 D7 / L-4）**
+   - **R3**: `TaskSummary.assignee: Option<String>` と `TaskSummary.conversation: bool`、
+     `ProjectTaskView.conversation: bool`。
+   - **R4**: `Message.task_id: Option<TaskId>`（`role = user` の行にも `role = node` の行にも同じ id）。
+     **migration 0007**（`SCHEMA_VERSION = 7`）で `messages.task_id TEXT NULL` を足し、**同じ migration で
+     `reports` を作り直して `project_id` を NULL 可**にした（ADR-0034 D1 の負債。空文字列センチネルは
+     `NULLIF` で NULL に直し、読み書きは素直な `Option<ProjectId>` になった）。
+     テスト: `migration_0007_turns_the_empty_project_sentinel_into_null_and_adds_message_task_id`、
+     `open_migrates_schema_5_db_to_the_current_version_and_reapplying_is_idempotent`（版数 5 → 7 の通し）。
+   - **R5**（作業中に GUI から追加。`gui/docs/taskd-requests.md` R5）: `GET /approvals?pending=false` が
+     絞り込まず全件を返していた。`ApprovalStore::approval_list` の第 1 引数を `bool` から
+     **`Option<bool>`**（`Some(true)` = 未決定だけ / `Some(false)` = **決定済みだけ** / `None` = 全件）に変え、
+     API は `pending` クエリをそのまま渡す。テスト: `task-core` の
+     `list_filters_by_pending_project_and_node_oldest_first`（`Some(false)` が決定済み 1 件だけ）と
+     `task-api --test approvals` の `approvals_are_listed_oldest_first_and_can_be_filtered`
+     （`pending=false` / `pending=false&node=` / `pending=false&project=`）。
+   - **ADR-0034 D7**: 結果ファイルに `"report": {"kind": …}` を足した。読むのは
+     `task_worker::read_result_report_kind`（新モジュール `result_report.rs`。ファイル I/O だけ）、写すのは
+     `task_dispatch::reports::declared_kind`（固定表: `"proposal"` → `Proposal`、それ以外・未知・欠落 →
+     `Result`）。`PROTOCOL_VERSION` は 4 のまま（追加のみ）。テスト: `result_report::tests` 2 件と
+     `a_worker_can_declare_its_done_result_as_a_proposal`（`proposal` を宣言した done が `kind = proposal` に
+     なり、固定表の他の入力は `result`）。
+   - **L-4**: まとめタスクの作成を `task_ops::add::create_support_task`（新規。受け入れ条件が空でもよく、
+     `Status::Ready` + `Event::Created` で作る。既定の解決順は `create_task_with_roles` と同じ `build_task` を
+     共有）に通した。`schedule_report_compaction` の引数は `workspace_root` → `roles` / `genres` に変わり、
+     作業ディレクトリは相対パス（ディスパッチャが `workspace_root` 基準で解決する既存の規約）になった。
+     `role = "report-compressor"` が `[[roles]]` に無くても落ちない（テストは `&[]` の roles / genres で通す）。
+5. **例の設定（M-1 / L-3）と実プロセスでの通し**
+   - `config/taskd.example.toml`: `[[roles]]` の `lead` / `implementer` / `literature-scout` /
+     `literature-reader` と `[[genres]]` の `coding` / `literature` のコメントを外し、**すべての役割から
+     `adapter` を消した**（tier だけ。`[[providers]]` が `fake` なのでそのまま回る）。`secretary` の役割も
+     `adapter = "claude-code"` を外した。
+   - `cargo test -p taskd --lib config`: `loads_example_config_and_resolves_relative_paths` に
+     `validate()` と「役割に adapter が無い」「分野は coding / literature / secretary の 3 つ」を追加、
+     `the_two_example_files_load_together_through_org_include`（新規。`taskd.example.toml` の
+     `org_include` を有効にして `org.example.toml` を `org.toml` として置き、`load` + `validate` が通り、
+     組織の 10 ノードの `genre` がすべて `[[genres]]` にあることを見る）。
+   - **実プロセスでの通し**（偽アダプタ。LLM は呼んでいない）: 上の 2 ファイルを使い捨てディレクトリに置いて
+     `./target/debug/taskd --config …` を起動し、`GET /health` → `schema_version = 7`、
+     `GET /org` → 10 ノード（`secretary`…`infra`）、`POST /projects` はトークン無しで **401**・トークンありで
+     **201**、8 秒後に `GET /org/secretary/messages?project=…` が
+     `user`（依頼文）→ `node`（`fake`、`run_id` 付き）の 2 行で、**両方に同じ `task_id`**（R4）。
+     `GET /reports` は空（M-6: 対話は報告を作らない）、`GET /tasks` の行は
+     `assignee = secretary` / `conversation = true`（R3）、`POST /org` に `genre = "bogus"` は 422（L-1）。
+6. **共通条件** — `cargo test --workspace`: **959 passed**、`grep -c "^test result: FAILED"` = **0**
+   （Phase 26 の 940 から +19）。`cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。
+   テスト以外に `unwrap()` / `expect()` は無い（触った 15 ファイルを `#[cfg(test)]` の手前まで機械的に確認）。
+   ディスパッチャ・ストアに LLM 呼び出しは無い。`UPDATE_SCHEMA=1` で `docs/api/v1/api-v1.schema.json` を
+   再生成（`Message.task_id` / `TaskSummary.assignee` / `TaskSummary.conversation` /
+   `ProjectTaskView.conversation` と `Report.project_id` の説明。`docs/protocol/*.json` は変化なし）。
+   `docs/gui/api.md` を更新（§3.1 の `schema_version = 7`、§3.3 の `assignee` / `conversation`、
+   §3.42〜3.47、§3.54〜3.55、§3.56。`sync-gui-docs.sh` は指示どおり実行していない）。
+
+### 判断したこと（指示に無い細部）
+
+- **部をまたぐ委譲の質問は「1 件の委譲につき 1 行」**。`StoreSink::delegate_impl` が部またぎごとに
+  `Event::QuestionRaised` を出し、run の終わりにその全件（同じ文面は 1 回）を `approvals` の行にする。
+  `Trigger::WorkerQuestion` の `outcome` 文字列は複数行を `\n` で連ねる（人が読む `latest_question` は
+  従来どおり 1 つの文字列）。
+- **同じタスク・同じ文面の未決の認可は増やさない**（`record_question_approval`）。委譲は run をやり直す
+  たびに同じ質問を上げるので、認可の一覧が同じ行で埋まらないようにした（判断は文字列の一致だけ）。
+- **`cross_authorization` は「決定の新しい順」で後勝ち**（`decided_at`、無ければ `created_at` の最大）。
+  人が答え直せる（`approval_decide` は上書きを許す）ので、最後の決定に従う。
+- **対話の直列化は「未終了の対話タスク**すべて**を `depends_on` に入れる」**（最新 1 件だけではない）。
+  普通は 1 件しか開いていないが、競合で 2 件できても順序が保たれる。
+- **`approval_list` の第 1 引数を三値にした**（R5）。`bool` のままオプションを増やすより、`None` =
+  絞り込み無しが呼び出し側で読みやすい（`task_ops::conversation` は `None`、`approvals_pending` は
+  `Some(true)`）。
+- **例の設定の役割から `adapter` を全部外した**（指示は `secretary` だけだったが、`lead` /
+  `implementer` などを有効にすると同じ問題（`claude-code` が無い環境で回らない）が起きるため揃えた）。
+  実機に移すときは役割ごとに足す、とコメントに書いた。
+- **`schedule_report_compaction` は作成経路の検証失敗（案件が消えている等）でその組だけ諦める**
+  （`continue` + `warn!`）。1 つの案件の不整合で他のノードのまとめまで止めないため。返り値の型は
+  `Result<Vec<TaskId>, StoreError>` のまま。
+
+### 未解決事項
+
+- U27-1: `scripts/sync-gui-docs.sh --check` は実行していない（指示による）。`gui/docs/taskd-api-v1.md` に
+  Phase 27 の変更（`TaskSummary.assignee` / `conversation`、`Message.task_id`、`POST /projects` の管理系化、
+  `pending=false`）が無い。GUI の担当が同期する。`gui/docs/taskd-requests.md` の R5 も、依頼が済んだので
+  「対応済み」へ移すのは GUI 側（`gui/**` は触らない約束）。
+- U27-2: **`POST /projects` を管理系にしたのは v1 の破壊的変更**（今まで `token_file` 未設定の loopback
+  構成ではトークン無しで案件を作れた）。GUI は BFF からトークン付きで呼ぶので影響しないが、`curl` の
+  手順書を持っている人には影響する。
+- U27-3: 対話の直列化は `depends_on` なので、**1 通目の対話タスクが `failed` / `cancelled` になると
+  2 通目が `DependencyFailed` で `cancelled` になる**（ADR-0010 D1 の既存の規則）。「返事が来ないまま次の
+  質問も消える」ので、対話タスクだけ依存の失敗を無視する（または `blocked` にする）べきかは人間の判断を
+  仰ぎたい（P-78）。
+- U27-4: **ローカル Qwen（実 LLM）での実機確認は未実施**。この環境から pegasus に出られないため、偽
+  アダプタでの通し（受け入れ条件 5）までしかできていない。手順: `config/taskd.example.toml` の
+  `[[providers]]` を ACP（ADR-0026）に替え、`[[roles]] secretary` に `adapter = "acp"` を足して
+  `POST /projects` → `GET /org/secretary/messages` を見る。見るべきは (a) 返事に案件の理解・方針・
+  最初の途中目標が入るか (b) `standing` の答えが次の run の前置き（`## 永続の認可`）に現れるか。
+- U27-5: 部をまたぐ委譲の認可は**「同じ委譲元 → 同じ委譲先」の組でしか効かない**（鍵が id の対だから）。
+  「研究部からコーディング部へは全部よい」のような粗い規則は、`standing_rules` に手で
+  `cross-department: research-survey -> coding-poc` のような行を並べることになる。前方一致なので
+  `cross-department: research-survey -> coding` のような部単位の鍵は**効かない**（委譲先は課の id）。
+- U27-6: `record_run_report` の `declared`（ワーカーの `report.kind`）は**ワーカー run の作業ディレクトリを
+  レビュー後に読み直している**。`reviewing` の間にワークスペースを消す運用（今は無い）を入れると宣言が
+  失われる（報告の `kind` が `result` に戻るだけで、run は壊れない）。
+
+### 提案
+
+- P-78: U27-3 のとおり、対話タスクの依存の失敗の扱い（`cancelled` にするか、`ready` のまま残すか）を
+  決めたい。今は他のタスクと同じ規則に従っている。
+- P-79: 部をまたぐ委譲の認可の鍵を「部 → 部」（`cross-department: research -> coding`）にすると、SPEC §3.1
+  の「部をまたぐ連携」の粒度に合う（今は課 → 課）。GUI で「連携の認可」を編集させるなら、そのときに
+  一緒に決めたい（U27-5）。

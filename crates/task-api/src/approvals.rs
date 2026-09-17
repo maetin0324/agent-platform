@@ -1,6 +1,7 @@
 //! 認可の API（ADR-0033 D5。Phase 26。`docs/gui/api.md` §3.56〜3.60）。
 //!
-//! - `GET /approvals?pending=&project=&node=` — 一覧（読み取り、通常の認証）。
+//! - `GET /approvals?pending=&project=&node=` — 一覧（読み取り、通常の認証）。`pending` は三値:
+//!   `true` = 未決定だけ、`false` = 決定済みだけ、省略 = 全件（GUI からの依頼 R5。Phase 27）。
 //! - `POST /approvals/{id}/decide` — 人が `once` / `standing` / `denied` で答える（**管理系**）。
 //!   タスクの再開は既存の「質問に答える」経路（`task_ops::gate::answer`）に相乗りする（`task_ops::approval`）。
 //! - `GET /standing-rules?node=` — 一覧（読み取り）。
@@ -90,14 +91,15 @@ fn parse_standing_rule_id(raw: &str) -> Result<StandingRuleId, ApiProblem> {
 /// ADR-0033 D5: スナップショットに載せる未決定の認可の件数（`GET /daemon` から呼ぶ）。
 pub(crate) fn approvals_pending(store: &SqliteStore) -> u32 {
     store
-        .approval_list(true, None, None)
+        .approval_list(Some(true), None, None)
         .map(|items| u32::try_from(items.len()).unwrap_or(u32::MAX))
         .unwrap_or(0)
 }
 
 pub(crate) async fn list_approvals(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     let query = QueryParams::parse(raw.as_deref(), &["pending", "project", "node"])?;
-    let pending_only = query.bool("pending")?.unwrap_or(false);
+    // R5（Phase 27）: `pending=true` は未決定だけ、`pending=false` は**決定済みだけ**、省略で全件。
+    let pending = query.bool("pending")?;
     let project_id = match query.single("project")? {
         Some(raw) => Some(
             raw.parse::<ProjectId>()
@@ -109,7 +111,7 @@ pub(crate) async fn list_approvals(State(state): State<ApiState>, RawQuery(raw):
     let items = state
         .blocking(move |store| {
             store
-                .approval_list(pending_only, project_id, node_id.as_deref())
+                .approval_list(pending, project_id, node_id.as_deref())
                 .map_err(store_problem)
         })
         .await?;

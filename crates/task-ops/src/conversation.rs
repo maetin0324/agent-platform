@@ -9,10 +9,11 @@
 
 use std::path::PathBuf;
 
+use task_core::approval::{Approval, Decision, StandingRule};
 use task_core::{
-    Budget, CONVERSATION_GENRE, GenreSpec, Message, MessageId, MessageRole, OrgNode, ProjectId, RoleSpec, Status,
-    Task, TaskId, TaskKind, TaskStore, Tier, Trigger, WorkerHint, WorkspaceSpec, conversation_title, department_of,
-    failure_reply,
+    Budget, CONVERSATION_GENRE, DelegateTask, GenreSpec, ListFilter, ListOrder, Message, MessageId, MessageRole,
+    OrgNode, ProjectId, RoleSpec, Status, Task, TaskId, TaskKind, TaskStore, Tier, Trigger, WorkerHint,
+    WorkspaceSpec, conversation_title, department_of, failure_reply,
 };
 use time::OffsetDateTime;
 
@@ -27,6 +28,8 @@ pub const CONVERSATION_MAX_RETRIES: u32 = 1;
 pub const CONVERSATION_PRIORITY: i32 = 1;
 /// run の前置きに載せる直近のやり取りの既定件数（ADR-0033 D4）。
 pub const CONVERSATION_HISTORY: usize = 20;
+/// 直列化（Phase 27 の監査 M-3）のために見る「終端でないタスク」の件数の上限。
+const OPEN_TASK_SCAN: usize = 500;
 
 /// `start` の結果。API は 202 で `{message_id, task_id}` を返す。
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +64,11 @@ pub fn start(
         return Err(OpsError::Validation(format!("project {project_id} does not exist")));
     }
 
+    // 監査 M-3: 同じノード・同じ案件に未終了の対話タスクがあれば、その後ろに並べる（返事は送った順に返る）。
+    let depends_on = open_conversation_tasks(store, &node.id, project_id)?;
+
+    let mut task = conversation_task(&node, project_id, text, roles, genres, now);
+    task.depends_on = depends_on;
     let message = Message {
         id: MessageId::new(),
         node_id: node.id.clone(),
@@ -68,11 +76,15 @@ pub fn start(
         role: MessageRole::User,
         text: text.to_string(),
         run_id: None,
+        // R4（migration 0007）: 人の発言も返事も、同じ対話用タスクの id を持つ。
+        task_id: Some(task.id),
         created_at: now,
     };
     store.message_append(&message)?;
-
-    let task = conversation_task(&node, &message, roles, genres, now);
+    let task = Task {
+        conversation: Some(message.id),
+        ..task
+    };
     store.create_task(&task, vec![])?;
     // 対話用タスクは人が承認するものではない（話しかけた時点が承認）。draft のままだと run が起きない。
     store.apply_transition(task.id, Trigger::Accept, None)?;
@@ -80,10 +92,41 @@ pub fn start(
     Ok(StartedConversation { message, task })
 }
 
-/// 対話用タスクを組み立てる（純粋。ストアは見ない）。
+/// 監査 M-3: そのノード・その案件の、まだ終端に達していない対話用タスク（古い順）。
+/// 新しい対話タスクの `depends_on` に入れて、返事が送った順に返るようにする。
+fn open_conversation_tasks(
+    store: &dyn TaskStore,
+    node_id: &str,
+    project_id: Option<ProjectId>,
+) -> Result<Vec<TaskId>, OpsError> {
+    let filter = ListFilter {
+        statuses: vec![
+            Status::Draft,
+            Status::Ready,
+            Status::Running,
+            Status::Blocked,
+            Status::Reviewing,
+        ],
+        project_id,
+        ..ListFilter::default()
+    };
+    let page = store.list_page(&filter, ListOrder::CreatedDesc, None, OPEN_TASK_SCAN)?;
+    let mut open: Vec<&Task> = page
+        .items
+        .iter()
+        .filter(|t| {
+            task_core::is_conversation(t) && t.assignee.as_deref() == Some(node_id) && t.project_id == project_id
+        })
+        .collect();
+    open.sort_by_key(|t| t.created_at);
+    Ok(open.iter().map(|t| t.id).collect())
+}
+
+/// 対話用タスクを組み立てる（純粋。ストアは見ない）。`conversation`（人の発言 id）は呼び出し側が入れる。
 fn conversation_task(
     node: &OrgNode,
-    message: &Message,
+    project_id: Option<ProjectId>,
+    text: &str,
     roles: &[RoleSpec],
     genres: &[GenreSpec],
     now: OffsetDateTime,
@@ -99,8 +142,8 @@ fn conversation_task(
         id,
         parent_id: None,
         kind: TaskKind::Execute,
-        title: conversation_title(&message.text),
-        objective: message.text.clone(),
+        title: conversation_title(text),
+        objective: text.to_string(),
         // 受け入れ条件は無い（返事に合否は無い。レビューは素通りする）。
         acceptance: vec![],
         inputs: vec![],
@@ -126,11 +169,11 @@ fn conversation_task(
         role: role.map(|r| r.id.clone()),
         genre: genre.map(|g| g.id.clone()),
         aggregate: false,
-        project_id: message.project_id,
+        project_id,
         milestone_id: None,
         assignee: Some(node.id.clone()),
-        // 対話由来の印（`json` 列の中だけ。DB の列は増やさない。`task_core::message` 参照）。
-        conversation: Some(message.id),
+        // 対話由来の印（`tasks` の列は増やさない。`task_core::message` 参照）。呼び出し側が入れる。
+        conversation: None,
     }
 }
 
@@ -162,55 +205,164 @@ pub fn record_reply(
         role: MessageRole::Node,
         text,
         run_id: Some(run_id.to_string()),
+        // R4（migration 0007）: 人の発言の行と同じ対話用タスクの id。
+        task_id: Some(task.id),
         created_at: now,
     };
     store.message_append(&message)?;
     Ok(Some(message))
 }
 
-/// SPEC §3.1「部をまたぐ連携は秘書が認める」（ADR-0033 D4 最終項）。委譲の提案のうち、委譲元とは
-/// **別の部**のノードを `assignee` にしているものがあれば、子を作らずに人（秘書）へ聞くための質問文を返す。
-///
-/// 判定は決定的で、組織図の `department` の祖先だけを見る:
-/// - 委譲元に担当が無い / 担当が秘書（部に属さない）なら、この規則は効かない（誰にでも振れる）。
-/// - 提案に `assignee` が無い、または組織に無い id なら、この規則は効かない（従来の委譲のまま）。
-pub fn cross_department_question(
-    org: &[OrgNode],
-    parent: &Task,
-    proposals: &[task_core::DelegateTask],
-) -> Option<String> {
-    let from = parent.assignee.as_deref()?;
-    let from_dept = department_of(org, from)?;
-    let name = |id: &str| {
-        org.iter()
-            .find(|n| n.id == id)
-            .map(|n| n.name.clone())
-            .unwrap_or_else(|| id.to_string())
-    };
-    let mut crossings: Vec<String> = Vec::new();
-    for proposal in proposals {
-        let Some(to) = proposal.assignee.as_deref() else {
-            continue;
-        };
-        let Some(to_dept) = department_of(org, to) else {
-            continue;
-        };
-        if to_dept == from_dept {
-            continue;
-        }
-        let line = format!("{} から {}（{}）へ委譲したい。認めるか", name(from), name(to), name(&to_dept));
-        if !crossings.contains(&line) {
-            crossings.push(line);
-        }
+// ---- SPEC §3.1「部をまたぐ連携は秘書が認める」（ADR-0033 D4 最終項 + D5。Phase 27 で認可に接続）----
+
+/// 部をまたぐ委譲の質問の先頭（`approvals.question` と `standing_rules.rule` の照合の鍵）。
+/// Phase 27: 質問を人が読む自由文から**構造化した固定の形**に変えた。これが無いと、人が答えても
+/// 次の run で同じ質問に戻る（Phase 24 の監査 H-1: 永久ループ）。
+pub const CROSS_DEPARTMENT_PREFIX: &str = "cross-department: ";
+
+/// 部をまたぐ委譲 1 件。`question` は `"cross-department: <from> -> <to>: <理由>"`、
+/// 照合の鍵は `"cross-department: <from> -> <to>"`（前方一致で決定的に照合する）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossDepartment {
+    /// 委譲元のノード（`task.assignee`）。
+    pub from: String,
+    /// 委譲先のノード（提案の `assignee`）。
+    pub to: String,
+    /// 理由（提案の `title`）。
+    pub title: String,
+}
+
+impl CrossDepartment {
+    /// 認可を照合する鍵（`approvals.question` の先頭 / `standing_rules.rule` の先頭）。
+    pub fn key(&self) -> String {
+        format!("{CROSS_DEPARTMENT_PREFIX}{} -> {}", self.from, self.to)
     }
-    if crossings.is_empty() {
+
+    /// `approvals.question` に入れる文面（鍵 + 理由）。
+    pub fn question(&self) -> String {
+        format!("{}: {}", self.key(), self.title)
+    }
+}
+
+/// 質問文（`approvals.question`）が部をまたぐ委譲のものなら、その照合の鍵を返す。
+/// `"cross-department: <from> -> <to>: <理由>"` の 3 つ目の `:` より前まで（ノードの id に `:` は使わない）。
+pub fn cross_department_key(question: &str) -> Option<String> {
+    let rest = question.strip_prefix(CROSS_DEPARTMENT_PREFIX)?;
+    let pair = rest.split(':').next().unwrap_or(rest).trim_end();
+    if pair.is_empty() {
         return None;
     }
-    Some(format!(
-        "部をまたぐ委譲は秘書の認可が要ります（SPEC §3.1）。\n{}\n認めるなら `taskctl answer {} \"認める\"` のように答えてください。",
-        crossings.join("\n"),
-        parent.id,
-    ))
+    Some(format!("{CROSS_DEPARTMENT_PREFIX}{pair}"))
+}
+
+/// 1 件の部をまたぐ委譲について、人がもう答えているか（決定的。文字列の前方一致だけで決める）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossAuthorization {
+    /// 通してよい（`once` / `standing` の決定、または `standing_rules` の規則がある）。
+    Allowed,
+    /// まだ聞いていない（秘書の認可待ち）。
+    Pending,
+    /// 人が認めなかった（`denied`）。
+    Denied,
+}
+
+/// 認可の照合（純粋関数）。`rules` は委譲元宛て + 全員向け、`approvals` は委譲元のノード宛ての全件。
+pub fn cross_authorization(
+    key: &str,
+    task_id: TaskId,
+    approvals: &[Approval],
+    rules: &[StandingRule],
+) -> CrossAuthorization {
+    // 「今後ずっと」は案件・タスクに依らず効く（SPEC §3.6）。
+    if rules.iter().any(|r| r.rule.starts_with(key)) {
+        return CrossAuthorization::Allowed;
+    }
+    // 同じタスクの、同じ鍵の決定のうち最も新しいもの（人が答え直せるので後勝ち）。
+    let decided = approvals
+        .iter()
+        .filter(|a| a.task_id == Some(task_id) && a.question.starts_with(key))
+        .filter_map(|a| a.decision.map(|d| (a.decided_at, a.created_at, d)))
+        .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
+        .map(|(_, _, d)| d);
+    match decided {
+        Some(Decision::Once) | Some(Decision::Standing) => CrossAuthorization::Allowed,
+        Some(Decision::Denied) => CrossAuthorization::Denied,
+        None => CrossAuthorization::Pending,
+    }
+}
+
+/// 委譲の提案を「そのまま子にしてよいもの」と「秘書の認可待ち」「人が認めなかったもの」に分ける。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DelegationSplit {
+    /// 子を作ってよい提案（同じ部宛て、または認可済みの部またぎ）。
+    pub allowed: Vec<DelegateTask>,
+    /// 秘書に聞く部またぎ（子は作らない）。
+    pub pending: Vec<CrossDepartment>,
+    /// 人が認めなかった部またぎ（子は作らないが、もう聞かない）。
+    pub denied: Vec<CrossDepartment>,
+}
+
+/// SPEC §3.1 / ADR-0033 D4・D5: 委譲の提案を認可の状態で振り分ける（Phase 27 の監査 H-1 / H-2 対応）。
+///
+/// - **バッチは分ける**: 同じ部宛ての提案はその場で子にし、部またぎの提案だけを質問にする
+///   （Phase 24 は 1 件でも部またぎがあると全件を止めていた）。
+/// - 委譲元に担当が無い / 担当が秘書（部に属さない）なら、この規則は効かない（誰にでも振れる）。
+/// - 提案に `assignee` が無い、または組織に無い id なら、この規則は効かない（従来の委譲のまま）。
+///
+/// 読むのは `org_nodes` / `approvals` / `standing_rules` だけで、LLM は呼ばない（DESIGN 原則 1）。
+pub fn split_delegation(
+    store: &dyn TaskStore,
+    org: &[OrgNode],
+    parent: &Task,
+    proposals: &[DelegateTask],
+) -> Result<DelegationSplit, OpsError> {
+    let mut split = DelegationSplit::default();
+    let (Some(from), Some(from_dept)) = (
+        parent.assignee.as_deref(),
+        parent
+            .assignee
+            .as_deref()
+            .and_then(|from| department_of(org, from)),
+    ) else {
+        split.allowed = proposals.to_vec();
+        return Ok(split);
+    };
+    // 「全員向け + この委譲元向け」の規則と、この委譲元が聞いた認可の全件（決定を含む）。
+    let rules = store.standing_rule_list(Some(from))?;
+    let approvals = store.approval_list(None, None, Some(from))?;
+    for proposal in proposals {
+        let crossing = match proposal.assignee.as_deref() {
+            Some(to) => match department_of(org, to) {
+                Some(to_dept) if to_dept != from_dept => CrossDepartment {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    title: proposal.title.clone(),
+                },
+                _ => {
+                    split.allowed.push(proposal.clone());
+                    continue;
+                }
+            },
+            None => {
+                split.allowed.push(proposal.clone());
+                continue;
+            }
+        };
+        match cross_authorization(&crossing.key(), parent.id, &approvals, &rules) {
+            CrossAuthorization::Allowed => split.allowed.push(proposal.clone()),
+            CrossAuthorization::Pending => {
+                if !split.pending.contains(&crossing) {
+                    split.pending.push(crossing);
+                }
+            }
+            CrossAuthorization::Denied => {
+                if !split.denied.contains(&crossing) {
+                    split.denied.push(crossing);
+                }
+            }
+        }
+    }
+    Ok(split)
 }
 
 #[cfg(test)]
@@ -396,9 +548,23 @@ mod tests {
         assert_eq!(store.message_list("secretary", None, 20).expect("list").len(), 3);
     }
 
+    fn proposal(assignee: Option<&str>, title: &str) -> DelegateTask {
+        DelegateTask {
+            title: title.into(),
+            objective: "o".into(),
+            acceptance: vec![Criterion { text: "c".into(), check: Check::Human }],
+            role: None,
+            genre: None,
+            depends_on: vec![],
+            tier: None,
+            assignee: assignee.map(str::to_string),
+        }
+    }
+
     /// ADR-0033 D4 / SPEC §3.1: 部をまたぐ委譲は秘書に聞く。同じ部の中なら聞かない。
+    /// Phase 27（監査 H-1 / H-2）: **バッチは分ける**（同じ部宛ての提案はその場で子にする）。
     #[test]
-    fn a_delegation_to_another_department_becomes_a_question() {
+    fn a_delegation_to_another_department_becomes_a_question_and_the_batch_is_split() {
         let store = SqliteStore::open_in_memory().expect("open");
         seed_org(&store);
         let org = store.org_list().expect("org");
@@ -407,31 +573,206 @@ mod tests {
             .expect("start")
             .task;
 
-        let proposal = |assignee: Option<&str>| DelegateTask {
-            title: "t".into(),
-            objective: "o".into(),
-            acceptance: vec![Criterion { text: "c".into(), check: Check::Human }],
-            role: None,
-            genre: None,
-            depends_on: vec![],
-            tier: None,
-            assignee: assignee.map(str::to_string),
-        };
-
         // 同じ部（研究部）の課へ: 聞かない。
-        assert_eq!(cross_department_question(&org, &parent, &[proposal(Some("research-data"))]), None);
+        let split = split_delegation(&store, &org, &parent, &[proposal(Some("research-data"), "整理")])
+            .expect("split");
+        assert_eq!(split.allowed.len(), 1);
+        assert!(split.pending.is_empty() && split.denied.is_empty());
         // 担当なしの提案: 従来どおり（聞かない）。
-        assert_eq!(cross_department_question(&org, &parent, &[proposal(None)]), None);
-        // 別の部（コーディング部）の課へ: 聞く。
-        let q = cross_department_question(&org, &parent, &[proposal(Some("coding-poc"))]).expect("question");
-        assert!(q.contains("research-survey さん"), "{q}");
-        assert!(q.contains("coding-poc さん"), "{q}");
-        assert!(q.contains("認めるか"), "{q}");
+        let split = split_delegation(&store, &org, &parent, &[proposal(None, "t")]).expect("split");
+        assert_eq!(split.allowed.len(), 1);
+        assert!(split.pending.is_empty());
+
+        // 部またぎと同じ部宛てが混ざったバッチ: 同じ部宛てだけ子になり、部またぎは認可待ちになる。
+        let split = split_delegation(
+            &store,
+            &org,
+            &parent,
+            &[proposal(Some("research-data"), "整理"), proposal(Some("coding-poc"), "PoC を書く")],
+        )
+        .expect("split");
+        assert_eq!(split.allowed.len(), 1, "同じ部宛ては止めない: {split:?}");
+        assert_eq!(split.allowed[0].assignee.as_deref(), Some("research-data"));
+        assert_eq!(split.pending.len(), 1);
+        assert_eq!(
+            split.pending[0],
+            CrossDepartment {
+                from: "research-survey".into(),
+                to: "coding-poc".into(),
+                title: "PoC を書く".into()
+            }
+        );
+        assert_eq!(split.pending[0].key(), "cross-department: research-survey -> coding-poc");
+        assert_eq!(
+            split.pending[0].question(),
+            "cross-department: research-survey -> coding-poc: PoC を書く"
+        );
+        assert_eq!(
+            cross_department_key(&split.pending[0].question()).as_deref(),
+            Some(split.pending[0].key().as_str())
+        );
+        assert_eq!(cross_department_key("どのクラスタを使いますか"), None);
+
         // 委譲元が秘書（部に属さない）なら誰にでも振れる。
         parent.assignee = Some("secretary".into());
-        assert_eq!(cross_department_question(&org, &parent, &[proposal(Some("coding-poc"))]), None);
+        let split = split_delegation(&store, &org, &parent, &[proposal(Some("coding-poc"), "t")]).expect("split");
+        assert_eq!(split.allowed.len(), 1);
         // 担当を持たないタスクも従来どおり。
         parent.assignee = None;
-        assert_eq!(cross_department_question(&org, &parent, &[proposal(Some("coding-poc"))]), None);
+        let split = split_delegation(&store, &org, &parent, &[proposal(Some("coding-poc"), "t")]).expect("split");
+        assert_eq!(split.allowed.len(), 1);
+    }
+
+    /// Phase 27（監査 H-1）: 人が答えたら次の run で同じ委譲が通る。`once` はそのタスクだけ、
+    /// `standing` は以後ずっと、`denied` は通さない。照合は鍵の前方一致で決定的。
+    #[test]
+    fn once_standing_and_denied_decide_whether_the_next_run_may_delegate_across_departments() {
+        use task_core::approval::{Approval, ApprovalId, ApprovalStore, Decision, StandingRule, StandingRuleId};
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        seed_org(&store);
+        let org = store.org_list().expect("org");
+        let (roles, genres) = specs();
+        let parent = start(&store, "research-survey", None, "調べて", &roles, &genres, now())
+            .expect("start")
+            .task;
+        let proposals = [proposal(Some("coding-poc"), "PoC を書く")];
+        let crossing = CrossDepartment {
+            from: "research-survey".into(),
+            to: "coding-poc".into(),
+            title: "PoC を書く".into(),
+        };
+
+        // まだ聞いていない: 認可待ち。
+        assert_eq!(
+            split_delegation(&store, &org, &parent, &proposals).expect("split").pending,
+            vec![crossing.clone()]
+        );
+
+        // `once`: 同じタスクの次の run では通る。
+        let approval = Approval {
+            id: ApprovalId::new(),
+            project_id: None,
+            node_id: "research-survey".into(),
+            task_id: Some(parent.id),
+            question: crossing.question(),
+            decision: None,
+            answer: None,
+            created_at: now(),
+            decided_at: None,
+        };
+        store.approval_append(&approval).expect("append");
+        store
+            .approval_decide(approval.id, Decision::Once, Some("認める".into()), now())
+            .expect("decide");
+        let split = split_delegation(&store, &org, &parent, &proposals).expect("split");
+        assert_eq!(split.allowed.len(), 1, "once: 子を作る");
+        assert!(split.pending.is_empty());
+
+        // 別のタスクの同じ委譲は、`once` では通らない（今回だけ）。
+        let other = start(&store, "research-survey", None, "別の件", &roles, &genres, now())
+            .expect("start")
+            .task;
+        assert_eq!(
+            split_delegation(&store, &org, &other, &proposals).expect("split").pending,
+            vec![crossing.clone()]
+        );
+
+        // `standing`: 鍵をそのまま規則にすると、以後どのタスクでも通る。
+        store
+            .standing_rule_append(&StandingRule {
+                id: StandingRuleId::new(),
+                node_id: Some("research-survey".into()),
+                rule: crossing.key(),
+                created_at: now(),
+            })
+            .expect("rule");
+        let split = split_delegation(&store, &org, &other, &proposals).expect("split");
+        assert_eq!(split.allowed.len(), 1, "standing: 以後ずっと通る");
+
+        // `denied`: 子を作らず、もう聞かない（`answers[]` の「認めない」がワーカーに見える）。
+        let store = SqliteStore::open_in_memory().expect("open");
+        seed_org(&store);
+        let parent = start(&store, "research-survey", None, "調べて", &roles, &genres, now())
+            .expect("start")
+            .task;
+        let approval = Approval {
+            id: ApprovalId::new(),
+            project_id: None,
+            node_id: "research-survey".into(),
+            task_id: Some(parent.id),
+            question: crossing.question(),
+            decision: None,
+            answer: None,
+            created_at: now(),
+            decided_at: None,
+        };
+        store.approval_append(&approval).expect("append");
+        store
+            .approval_decide(approval.id, Decision::Denied, Some("認めない".into()), now())
+            .expect("decide");
+        let split = split_delegation(&store, &org, &parent, &proposals).expect("split");
+        assert!(split.allowed.is_empty() && split.pending.is_empty());
+        assert_eq!(split.denied, vec![crossing]);
+    }
+
+    /// 監査 M-3: 同じノード・同じ案件の対話は直列化する（2 通目は 1 通目が終わるまで `ready` にならない）。
+    #[test]
+    fn a_second_message_waits_for_the_first_reply() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        seed_org(&store);
+        let (roles, genres) = specs();
+        let project = Project {
+            id: ProjectId::new(),
+            title: "Pluvio".into(),
+            request: "r".into(),
+            status: ProjectStatus::Proposed,
+            secretary_summary: None,
+            created_at: now(),
+            updated_at: now(),
+        };
+        store.project_create(&project).expect("project");
+
+        let first = start(&store, "secretary", Some(project.id), "1 通目", &roles, &genres, now())
+            .expect("start")
+            .task;
+        let second = start(&store, "secretary", Some(project.id), "2 通目", &roles, &genres, now())
+            .expect("start")
+            .task;
+        assert_eq!(second.depends_on, vec![first.id]);
+        let ready: Vec<TaskId> = store.ready_tasks(10).expect("ready").iter().map(|t| t.id).collect();
+        assert_eq!(ready, vec![first.id], "2 通目はまだ run できない");
+
+        // 別のノード宛て・別の案件（案件なし）は別の列（待たない）。
+        let other_node = start(&store, "research-survey", Some(project.id), "別の人へ", &roles, &genres, now())
+            .expect("start")
+            .task;
+        assert!(other_node.depends_on.is_empty());
+        let no_project = start(&store, "secretary", None, "雑談", &roles, &genres, now())
+            .expect("start")
+            .task;
+        assert!(no_project.depends_on.is_empty());
+
+        // 1 通目が終われば 2 通目が run できる。
+        store
+            .acquire_lease(first.id, "run-1", std::time::Duration::from_secs(60))
+            .expect("lease");
+        store.apply_transition(first.id, Trigger::WorkerDone, None).expect("done");
+        store.apply_transition(first.id, Trigger::ReviewPass, None).expect("pass");
+        let ready: Vec<TaskId> = store.ready_tasks(10).expect("ready").iter().map(|t| t.id).collect();
+        assert!(ready.contains(&second.id), "1 通目が done なら 2 通目が ready: {ready:?}");
+    }
+
+    /// R4（migration 0007）: 1 往復の両方の行に、それを起こした対話用タスクの id が入る。
+    #[test]
+    fn both_sides_of_one_exchange_carry_the_conversation_task_id() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        seed_org(&store);
+        let (roles, genres) = specs();
+        let started = start(&store, "secretary", None, "状況を教えて", &roles, &genres, now()).expect("start");
+        assert_eq!(started.message.task_id, Some(started.task.id));
+        record_reply(&store, &started.task, "run-1", "順調です", now()).expect("record");
+        let thread = store.message_list("secretary", None, 20).expect("list");
+        assert!(thread.iter().all(|m| m.task_id == Some(started.task.id)), "{thread:?}");
     }
 }

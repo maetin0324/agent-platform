@@ -684,6 +684,8 @@ pub struct ProjectTaskView {
     pub depends_on: Vec<TaskId>,
     pub assignee: Option<String>,
     pub milestone_id: Option<MilestoneId>,
+    /// 対話用タスク（人への返事のための run）か。GUI は仕事の木から隠せる（GUI-R3）。
+    pub conversation: bool,
 }
 
 /// `POST /projects/{id}/milestones` の要求本文。`seq` はストアが採番する。

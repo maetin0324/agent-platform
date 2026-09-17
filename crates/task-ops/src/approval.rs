@@ -78,13 +78,16 @@ pub fn decide(
     };
 
     let standing_rule = if decision == Decision::Standing {
+        // Phase 27（監査 H-1）: 部をまたぐ委譲の質問だけは、答えの文ではなく**質問の鍵**を規則にする
+        // （`delegate` の照合が前方一致でできるように）。それ以外の質問は従来どおり答えの文。
+        let rule = crate::conversation::cross_department_key(&decided.question).unwrap_or_else(|| answer.clone());
         let rule = StandingRule {
             id: StandingRuleId::new(),
             node_id: match scope {
                 Scope::Node => Some(decided.node_id.clone()),
                 Scope::All => None,
             },
-            rule: answer,
+            rule,
             created_at: now,
         };
         store.standing_rule_append(&rule)?;

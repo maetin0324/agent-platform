@@ -169,9 +169,13 @@ pub trait ApprovalStore: Send + Sync {
     fn approval_append(&self, approval: &Approval) -> Result<(), StoreError>;
     fn approval_get(&self, id: ApprovalId) -> Result<Option<Approval>, StoreError>;
     /// 古い順（`created_at` 昇順、同値は `id` 昇順。答える順に並ぶキューとして扱う）。
+    ///
+    /// `pending`: `Some(true)` = 未決定だけ（`decision IS NULL`）、`Some(false)` = **決定済みだけ**
+    /// （`decision IS NOT NULL`。人が決めたものの履歴）、`None` = 絞り込み無し。
+    /// GUI からの依頼 R5（Phase 27）で三値にした（以前は `bool` で、`false` が「絞り込み無し」だった）。
     fn approval_list(
         &self,
-        pending_only: bool,
+        pending: Option<bool>,
         project_id: Option<ProjectId>,
         node_id: Option<&str>,
     ) -> Result<Vec<Approval>, StoreError>;
@@ -301,14 +305,17 @@ impl ApprovalStore for SqliteStore {
 
     fn approval_list(
         &self,
-        pending_only: bool,
+        pending: Option<bool>,
         project_id: Option<ProjectId>,
         node_id: Option<&str>,
     ) -> Result<Vec<Approval>, StoreError> {
         let mut where_sql = String::from(" WHERE 1 = 1");
         let mut args: Vec<SqlValue> = Vec::new();
-        if pending_only {
-            where_sql.push_str(" AND decision IS NULL");
+        match pending {
+            Some(true) => where_sql.push_str(" AND decision IS NULL"),
+            // R5: 「未決定ではない」= 人が決めたものだけ（以前は絞り込み無しになっていた）。
+            Some(false) => where_sql.push_str(" AND decision IS NOT NULL"),
+            None => {}
         }
         if let Some(project_id) = project_id {
             where_sql.push_str(" AND project_id = ?");
@@ -469,20 +476,27 @@ mod tests {
         store.approval_append(&b).expect("append");
         store.approval_append(&c).expect("append");
 
-        let all = store.approval_list(false, None, None).expect("list");
+        let all = store.approval_list(None, None, None).expect("list");
         assert_eq!(all.iter().map(|x| x.id).collect::<Vec<_>>(), vec![a.id, b.id, c.id], "oldest first");
 
-        let by_project = store.approval_list(false, Some(project), None).expect("list");
+        let by_project = store.approval_list(None, Some(project), None).expect("list");
         assert_eq!(by_project.len(), 2);
-        let by_node = store.approval_list(false, None, Some("secretary")).expect("list");
+        let by_node = store.approval_list(None, None, Some("secretary")).expect("list");
         assert_eq!(by_node.iter().map(|x| x.id).collect::<Vec<_>>(), vec![c.id]);
 
         store
             .approval_decide(a.id, Decision::Once, Some("pegasus".into()), now)
             .expect("decide")
             .expect("some");
-        let pending = store.approval_list(true, None, None).expect("list");
+        let pending = store.approval_list(Some(true), None, None).expect("list");
         assert_eq!(pending.iter().map(|x| x.id).collect::<Vec<_>>(), vec![b.id, c.id]);
+        // R5（Phase 27）: `Some(false)` は**決定済みだけ**（以前は絞り込み無しと同じだった）。
+        let decided = store.approval_list(Some(false), None, None).expect("list");
+        assert_eq!(decided.iter().map(|x| x.id).collect::<Vec<_>>(), vec![a.id]);
+        assert!(decided.iter().all(|x| x.decision.is_some()));
+        // 絞り込みは他の条件と AND で効く。
+        assert!(store.approval_list(Some(false), None, Some("secretary")).expect("list").is_empty());
+        assert_eq!(store.approval_list(None, None, None).expect("list").len(), 3);
     }
 
     #[test]

@@ -252,12 +252,19 @@ struct RunEntry {
 }
 
 
-/// ADR-0033 D4（Phase 24）: この run の途中で「部をまたぐ委譲」を止めたときに `StoreSink` が残した質問。
-fn cross_department_question_of(events: &[(u64, Event)], run_id: &str) -> Option<String> {
-    events.iter().rev().find_map(|(_, e)| match e {
-        Event::QuestionRaised { run_id: r, text } if r == run_id => Some(text.clone()),
-        _ => None,
-    })
+/// ADR-0033 D4（Phase 24 / Phase 27）: この run の途中で「部をまたぐ委譲」を止めたときに `StoreSink` が
+/// 残した質問（1 件の部またぎにつき 1 件。同じ文面は 1 回だけ）。
+fn cross_department_questions_of(events: &[(u64, Event)], run_id: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, e) in events {
+        if let Event::QuestionRaised { run_id: r, text } = e
+            && r == run_id
+            && !out.contains(text)
+        {
+            out.push(text.clone());
+        }
+    }
+    out
 }
 
 /// ADR-0016 M5: 子待ちの親について覚えておくもの。
@@ -365,23 +372,39 @@ impl StoreSink {
         if !ours {
             return Err("task is no longer running under this run".to_string());
         }
-        // ADR-0033 D4 / SPEC §3.1: 部をまたぐ連携は秘書が認める。別の部の課を `assignee` にした提案が
-        // あれば、**子を作らずに**質問を残し、run の終わりに `Question` 終端へ回す（Phase 26 が
-        // `approvals` に繋ぐ）。判定は組織図だけを見る決定的なもので、LLM は使わない。
+        // ADR-0033 D4 / D5 / SPEC §3.1: 部をまたぐ連携は秘書が認める。別の部の課を `assignee` にした提案は
+        // **子を作らずに**質問（`approvals` の 1 行になる固定の形）を残し、run の終わりに `Question` 終端へ
+        // 回す。既に人が答えていれば（`once` / `standing`）その場で通す。判定は組織図と `approvals` /
+        // `standing_rules` の前方一致だけを見る決定的なもので、LLM は使わない（DESIGN 原則 1）。
+        // Phase 27（監査 H-2）: **バッチは分ける** — 同じ部宛ての提案はその場で子にする。
         let org = self.store.org_list().map_err(|e| format!("store: {e}"))?;
-        if let Some(question) = task_ops::conversation::cross_department_question(&org, &parent, tasks) {
+        let split = task_ops::conversation::split_delegation(self.store.as_ref(), &org, &parent, tasks)
+            .map_err(|e| format!("authorization: {e}"))?;
+        for denied in &split.denied {
+            self.note(format!("delegate denied: {} は人が認めなかった（子は作っていない）", denied.key()));
+        }
+        for pending in &split.pending {
             self.store
                 .append_event(
                     self.task_id,
                     &Event::QuestionRaised {
                         run_id: self.run_id.clone(),
-                        text: question,
+                        text: pending.question(),
                     },
                 )
                 .map_err(|e| format!("store: {e}"))?;
-            self.note("delegate deferred: 部をまたぐ委譲は秘書の認可が要る（子は作っていない）".to_string());
+        }
+        if !split.pending.is_empty() {
+            self.note(format!(
+                "delegate deferred: {} 件は秘書の認可待ち（部をまたぐ委譲。子は作っていない）: {}",
+                split.pending.len(),
+                split.pending.iter().map(|c| c.key()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if split.allowed.is_empty() {
             return Ok(());
         }
+        let tasks: &[DelegateTask] = &split.allowed;
         let already = self.delegated_this_run.load(std::sync::atomic::Ordering::SeqCst);
         let outcome = plan_delegation(
             self.store.as_ref(),
@@ -408,7 +431,13 @@ impl StoreSink {
         self.delegated_this_run
             .fetch_add(n, std::sync::atomic::Ordering::SeqCst);
         let listed: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-        self.note(format!("delegated {n} child task(s): {}", listed.join(", ")));
+        // Phase 27（監査 H-2）: 「N 件は作った、M 件は秘書の認可待ち」がワーカーの目にも入るようにする。
+        let pending = if split.pending.is_empty() {
+            String::new()
+        } else {
+            format!("（{} 件は秘書の認可待ち）", split.pending.len())
+        };
+        self.note(format!("delegated {n} child task(s){pending}: {}", listed.join(", ")));
         tracing::info!(task_id = %self.task_id, run_id = %self.run_id, children = n, "delegated child tasks inserted");
         Ok(())
     }
@@ -1146,7 +1175,7 @@ impl Dispatcher {
         self.absorb_memory(&task);
         // ADR-0033 D4 / SPEC §3.1: 部をまたぐ委譲を試みた run は、子を作らずに秘書へ聞く終わり方にする
         // （`StoreSink::delegate_impl` が `QuestionRaised` を残している）。
-        let cross_department = cross_department_question_of(&self.store.events_for(task_id)?, &run_id);
+        let cross_department = cross_department_questions_of(&self.store.events_for(task_id)?, &run_id);
         let (mut trigger, mut outcome_str, usage, provider_outcome) = match result {
             Ok(RunOutcome {
                 terminal: Terminal::Done { summary, usage, evidence },
@@ -1205,12 +1234,23 @@ impl Dispatcher {
             },
         };
         // ADR-0033 D4: 部をまたぐ委譲の質問は、run の自己申告の終わり方より優先する（子は作られていない）。
-        if let Some(question) = &cross_department
-            && !matches!(trigger, Trigger::WorkerQuestion)
-        {
-            trigger = Trigger::WorkerQuestion;
-            outcome_str = format!("question: {question}");
-            subject = ReviewSubject::default();
+        // Phase 27: 人に見せる質問は 1 件の部またぎにつき 1 つ（`approvals` の行の単位）。
+        let mut questions: Vec<String> = Vec::new();
+        if matches!(trigger, Trigger::WorkerQuestion) {
+            questions.push(
+                outcome_str
+                    .strip_prefix("question: ")
+                    .unwrap_or(outcome_str.as_str())
+                    .to_string(),
+            );
+        }
+        if !cross_department.is_empty() {
+            if !matches!(trigger, Trigger::WorkerQuestion) {
+                trigger = Trigger::WorkerQuestion;
+                outcome_str = format!("question: {}", cross_department.join("\n"));
+                subject = ReviewSubject::default();
+            }
+            questions.extend(cross_department.iter().cloned());
         }
         // ADR-0024 D4 / S10: プール経由の run の失敗は、原因がアカウント側（throttled/auth_failed/exhausted）なら
         // アカウントを cooldown にしプロバイダは cooldown にしない。`Spawn` 失敗（起動できない）はアカウントの
@@ -1241,13 +1281,10 @@ impl Dispatcher {
                 }
             }
         }
-        // ADR-0033 D4（Phase 24）: 対話用タスクの run なら、`summary`（質問なら本文、失敗なら理由）を
-        // そのノードの返事として `messages` に残す。対話由来でないタスクでは何もしない。
-        self.record_conversation_reply(&task, &run_id, &outcome_str);
-        // ADR-0033 D5（Phase 26）: `Question` で終わった run（部をまたぐ委譲の質問への置き換えも含む）は
-        // 既存の `answers[]` の経路（`Status::Blocked`）に加えて `approvals` にも 1 件残す。
-        if let Trigger::WorkerQuestion = trigger {
-            let text = outcome_str.strip_prefix("question: ").unwrap_or(outcome_str.as_str());
+        // ADR-0033 D5（Phase 26 / Phase 27）: `Question` で終わった run（部をまたぐ委譲の質問への置き換えも
+        // 含む）は、既存の `answers[]` の経路（`Status::Blocked`）に加えて `approvals` にも 1 件ずつ残す
+        // （部またぎは 1 件の委譲につき 1 行。同じ質問がまだ未決なら増やさない）。
+        for text in &questions {
             if let Err(e) = crate::approvals::record_question_approval(
                 self.store.as_ref(),
                 &task,
@@ -1263,6 +1300,10 @@ impl Dispatcher {
         {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, next = ?outcome.next, attempts = outcome.attempts, outcome = %outcome_str, "worker finished");
+                // ADR-0033 D4（Phase 24 / 監査 M-5）: 対話用タスクの run なら、`summary`（質問なら本文、
+                // 失敗なら理由）をそのノードの返事として `messages` に残す。**「返事できませんでした」は
+                // タスクが `Failed` に落ちたときだけ**（requeue / まだ試行が残る失敗では書かない）。
+                self.record_conversation_reply(&task, &run_id, &outcome_str, outcome.next);
                 // ADR-0034 D2（監査 M-1〜M-3）: `question` は run の終端でそのまま届ける。`done` はレビューを
                 // 通って `Status::Done` になってから（`on_review_finished` 側）作るので、ここでは作らない。
                 if matches!(terminal_report, Some(crate::reports::TerminalReport::Question { .. }))
@@ -1272,6 +1313,7 @@ impl Dispatcher {
                         &task,
                         &run_id,
                         question,
+                        None,
                         OffsetDateTime::now_utc(),
                     )
                 {
@@ -1295,6 +1337,7 @@ impl Dispatcher {
                             &task,
                             &run_id,
                             terminal,
+                            None,
                             OffsetDateTime::now_utc(),
                         )
                     {
@@ -1334,19 +1377,23 @@ impl Dispatcher {
         }
     }
 
-    /// ADR-0033 D4（Phase 24）: 対話用タスクの run の終わりを、そのノードの返事として `messages` に残す。
-    /// `outcome_str` は `done: <summary>` / `question: <text>` / `error(...): <message>` のいずれか。
-    fn record_conversation_reply(&self, task: &Task, run_id: &str, outcome_str: &str) {
+    /// ADR-0033 D4（Phase 24 / 監査 M-5）: 対話用タスクの run の終わりを、そのノードの返事として
+    /// `messages` に残す。`outcome_str` は `done: <summary>` / `question: <text>` /
+    /// `error(...): <message>` のいずれか。`next` は遷移後の状態で、**失敗の返事は `Failed` のときだけ**
+    /// 書く（retryable な途中失敗や requeue では、同じ問いに何度も「返事できませんでした」が並ばない）。
+    fn record_conversation_reply(&self, task: &Task, run_id: &str, outcome_str: &str, next: Status) {
         if !task_core::is_conversation(task) {
             return;
         }
         let text = if let Some(summary) = outcome_str.strip_prefix("done: ") {
             summary.to_string()
         } else if let Some(question) = outcome_str.strip_prefix("question: ") {
-            // Phase 26 が `approvals` に繋ぐまでは、質問も返事としてそのまま見せる。
+            // 質問は人への問いかけそのものなので、返事としてもそのまま見せる（`approvals` にも 1 行入る）。
             question.to_string()
-        } else {
+        } else if next == Status::Failed {
             task_core::failure_reply(outcome_str)
+        } else {
+            return;
         };
         if let Err(e) = task_ops::conversation::record_reply(
             self.store.as_ref(),
@@ -1540,11 +1587,16 @@ impl Dispatcher {
                         summary: review_entry.subject.summary.clone(),
                         evidence: crate::reports::format_evidence(&review_entry.subject.evidence),
                     };
+                    // ADR-0034 D7: ワーカーが結果ファイルで宣言した `report.kind`（無ければ既定の `result`）。
+                    let declared = self
+                        .task_dir(&task)
+                        .and_then(|ws| task_worker::read_result_report_kind(&ws));
                     if let Err(e) = crate::reports::record_run_report(
                         self.store.as_ref(),
                         &task,
                         &run_id,
                         &terminal,
+                        declared.as_deref(),
                         OffsetDateTime::now_utc(),
                     ) {
                         tracing::warn!(%task_id, %run_id, error = %e, "failed to record the report for this run");
@@ -1562,6 +1614,7 @@ impl Dispatcher {
                         &task,
                         &run_id,
                         &terminal,
+                        None,
                         OffsetDateTime::now_utc(),
                     ) {
                         tracing::warn!(%task_id, %run_id, error = %e, "failed to record the report for this run");
@@ -2133,12 +2186,22 @@ impl Dispatcher {
             _ => None,
         };
         let conversation = match assigned {
-            Some(n) => self
-                .store
-                .message_list(&n.id, task.project_id, task_ops::conversation::CONVERSATION_HISTORY)?
-                .iter()
-                .map(|m| ConversationTurn { role: m.role, text: m.text.clone() })
-                .collect(),
+            Some(n) => {
+                let mut turns: Vec<ConversationTurn> = self
+                    .store
+                    .message_list(&n.id, task.project_id, task_ops::conversation::CONVERSATION_HISTORY)?
+                    .iter()
+                    .map(|m| ConversationTurn { role: m.role, text: m.text.clone() })
+                    .collect();
+                // 監査 L-6: 今回の本文（`objective`）と同じ最後の `user` の行は落とす（二重に載せない）。
+                if let Some(last) = turns.last()
+                    && last.role == task_core::MessageRole::User
+                    && last.text == task.objective
+                {
+                    turns.pop();
+                }
+                turns
+            }
             None => Vec::new(),
         };
         // 分解・委譲できる run（`available_genres` を渡す run と同じ条件）にだけ組織図を渡す。
@@ -5620,12 +5683,12 @@ mod tests {
         assert_eq!(node.id, "secretary");
         assert_eq!(node.brief, "secretary の担当");
         assert_eq!(context.memory.clone().expect("memory").notes, "- 2026-09-10: 人は図より表が好き\n");
-        assert_eq!(context.conversation.len(), 1, "run が始まる時点では人の発言だけ");
-        assert_eq!(context.conversation[0].text, "先週の続きを教えて");
+        // 監査 L-6: 今回の本文は `objective` に載るので、直近のやり取りには**入れない**（二重に載せない）。
+        assert!(context.conversation.is_empty(), "{:?}", context.conversation);
         let preamble = task_worker::preamble::render(&context);
         assert!(preamble.contains("## あなた: secretary 課 (secretary)"), "{preamble}");
         assert!(preamble.contains("- 2026-09-10: 人は図より表が好き"), "{preamble}");
-        assert!(preamble.contains("- 人: 先週の続きを教えて"), "{preamble}");
+        assert!(!preamble.contains("## 直近のやり取り"), "{preamble}");
 
         // 3. 結果ファイルの `memory` が追記されている（古い記憶の後ろに）。
         let notes = std::fs::read_to_string(memory_root.join("secretary/notes.md")).unwrap();
@@ -5686,6 +5749,119 @@ mod tests {
         assert!(reply.text.contains("harness died"), "{}", reply.text);
     }
 
+    /// 監査 L-6（Phase 27）: 直近のやり取りには**前回まで**が載り、今回の本文（`objective` と同じ最後の
+    /// `user` の行）は落ちる。
+    #[tokio::test]
+    async fn the_recent_turns_keep_the_past_but_drop_this_very_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        let first = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "先週の続きを教えて",
+            &[],
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        task_ops::conversation::record_reply(
+            store.as_ref(),
+            &first.task,
+            "run-1",
+            "承知しました",
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        let second = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "その後どう",
+            &[],
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let adapter = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
+        let d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        let extras = d.run_extras(&second.task).unwrap();
+        let texts: Vec<&str> = extras.conversation.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["先週の続きを教えて", "承知しました"], "{texts:?}");
+    }
+
+    /// 監査 M-5（Phase 27）: 途中の失敗（retryable でまだ試行が残る）では返事を書かない。
+    /// 失敗して `Failed` に落ちたときだけ「返事できませんでした」を 1 行書く。
+    #[tokio::test]
+    async fn a_retried_conversation_run_answers_only_once() {
+        struct FlakyPersonAdapter {
+            failures_left: AtomicUsize,
+        }
+        #[async_trait]
+        impl WorkerAdapter for FlakyPersonAdapter {
+            fn id(&self) -> &str {
+                "instant"
+            }
+            async fn run(
+                &self,
+                _req: RunRequest,
+                _run_id: &str,
+                _limits: RunLimits,
+                _sink: &dyn EventSink,
+            ) -> Result<RunOutcome, AdapterError> {
+                if self.failures_left.load(Ordering::SeqCst) > 0 {
+                    self.failures_left.fetch_sub(1, Ordering::SeqCst);
+                    return Ok(RunOutcome {
+                        terminal: Terminal::Error { message: "harness hiccup".into(), retryable: true },
+                        exit_code: Some(1),
+                    });
+                }
+                Ok(RunOutcome {
+                    terminal: Terminal::Done { summary: "順調です".into(), evidence: vec![], usage: None },
+                    exit_code: Some(0),
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        let started = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "調子はどう",
+            &[],
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let adapter = Arc::new(FlakyPersonAdapter { failures_left: AtomicUsize::new(1) });
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 60).await;
+
+        assert_eq!(store.get(started.task.id).unwrap().unwrap().status, Status::Done);
+        let thread = store.message_list("secretary", None, 20).unwrap();
+        let replies: Vec<&Message> = thread.iter().filter(|m| m.role == MessageRole::Node).collect();
+        assert_eq!(replies.len(), 1, "返事は 1 行だけ: {replies:?}");
+        assert_eq!(replies[0].text, "順調です");
+        assert!(
+            !thread.iter().any(|m| m.text.starts_with("返事できませんでした")),
+            "途中の失敗は返事にしない: {thread:?}"
+        );
+    }
+
     /// ADR-0033 D4 / SPEC §3.1: 別の部の課へ委譲しようとしたら、子は作られず、親は質問して止まる。
     #[tokio::test]
     async fn a_delegation_across_departments_asks_the_secretary_instead_of_creating_children() {
@@ -5710,10 +5886,126 @@ mod tests {
         assert!(store.children(task.id).unwrap().is_empty(), "子は作られない");
         let after = store.get(task.id).unwrap().unwrap();
         assert_eq!(after.status, Status::Blocked, "秘書の返事待ちで止まる");
+        // Phase 27（監査 H-1）: 質問は `approvals` の行として構造化された固定の形。
         let question = task_ops::derive::latest_question(&store.events_for(task.id).unwrap());
-        assert!(question.contains("部をまたぐ委譲"), "{question}");
-        assert!(question.contains("research-survey 課"), "{question}");
-        assert!(question.contains("coding-poc 課"), "{question}");
+        assert_eq!(question, "cross-department: research-survey -> coding-poc: 任せたい仕事");
+        let pending = store.approval_list(Some(true), None, None).unwrap();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].node_id, "research-survey", "委譲元のノード宛て");
+        assert_eq!(pending[0].task_id, Some(task.id), "親タスク");
+        assert_eq!(pending[0].question, question);
+    }
+
+    /// Phase 27（監査 H-1）: 人が `once` で認めたら、**次の run で同じ委譲が通る**（永久ループしない）。
+    /// `standing` なら以後ずっと、`denied` なら通らない。
+    #[tokio::test]
+    async fn an_authorized_cross_department_delegation_goes_through_on_the_next_run() {
+        for (decision, expect_children) in [
+            (Decision::Once, 1usize),
+            (Decision::Standing, 1),
+            (Decision::Denied, 0),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let workspace_root = dir.path().join("workspaces");
+            std::fs::create_dir_all(&workspace_root).unwrap();
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+            seed_conversation_org(store.as_ref());
+            let task = assigned_task(&workspace_root, "t1", "research-survey");
+            store.create_task(&task, vec![]).unwrap();
+
+            let adapter = Arc::new(PersonAdapter {
+                terminal: Terminal::Done { summary: "delegated".into(), evidence: vec![], usage: None },
+                seen: Arc::new(StdMutex::new(None)),
+                memory: None,
+                proposals: vec![delegate_to("coding-poc")],
+            });
+            let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+            run_until_idle(&mut d, 40).await;
+            let pending = store.approval_list(Some(true), None, None).unwrap();
+            assert_eq!(pending.len(), 1, "1 回目は認可待ち: {pending:?}");
+
+            // 人が答える（既存の `task_ops::approval::decide` = `answers[]` の経路に相乗り）。
+            task_ops::approval::decide(
+                store.as_ref(),
+                pending[0].clone(),
+                decision,
+                "認める".into(),
+                task_ops::approval::Scope::Node,
+                OffsetDateTime::now_utc(),
+            )
+            .unwrap();
+            assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Ready, "答えるとタスクが再開する");
+
+            // 2 回目の run: 同じ提案が上がってくる。
+            run_until_idle(&mut d, 40).await;
+            let children: Vec<Task> = store
+                .children(task.id)
+                .unwrap()
+                .into_iter()
+                .filter(|c| c.kind == TaskKind::Execute)
+                .collect();
+            assert_eq!(children.len(), expect_children, "{decision:?}: {children:?}");
+            if decision == Decision::Standing {
+                let rules = store.standing_rule_list(Some("research-survey")).unwrap();
+                assert_eq!(
+                    rules.iter().map(|r| r.rule.as_str()).collect::<Vec<_>>(),
+                    vec!["cross-department: research-survey -> coding-poc"],
+                    "standing の規則は質問の鍵（答えの文ではない）"
+                );
+            }
+            if decision == Decision::Denied {
+                // もう聞き直さない（同じ質問の未決の行は増えない）。
+                assert!(store.approval_list(Some(true), None, None).unwrap().is_empty());
+            }
+        }
+    }
+
+    /// Phase 27（監査 H-2）: バッチは分ける。同じ部宛ての提案はその場で子になり、部またぎだけが質問になる。
+    #[tokio::test]
+    async fn a_batch_with_one_crossing_still_creates_the_same_department_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        let task = assigned_task(&workspace_root, "t1", "research-survey");
+        store.create_task(&task, vec![]).unwrap();
+
+        let adapter = Arc::new(PersonAdapter {
+            terminal: Terminal::Done { summary: "delegated".into(), evidence: vec![], usage: None },
+            seen: Arc::new(StdMutex::new(None)),
+            memory: None,
+            proposals: vec![delegate_to("research-data"), delegate_to("coding-poc")],
+        });
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 40).await;
+
+        let children: Vec<Task> = store
+            .children(task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.kind == TaskKind::Execute)
+            .collect();
+        assert_eq!(children.len(), 1, "同じ部宛ては止めない: {children:?}");
+        assert_eq!(children[0].assignee.as_deref(), Some("research-data"));
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Blocked, "部またぎは聞いて止まる");
+        let pending = store.approval_list(Some(true), None, None).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].question, "cross-department: research-survey -> coding-poc: 任せたい仕事");
+        // ワーカーには「N 件は作った、M 件は秘書の認可待ち」が見える（`progress` として残る）。
+        let notes: Vec<String> = store
+            .events_for(task.id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkerProgress { msg, .. } => Some(msg),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notes.iter().any(|m| m.contains("delegated 1 child task(s)（1 件は秘書の認可待ち）")),
+            "{notes:?}"
+        );
     }
 
     /// 同じ部の中の委譲は、これまでどおり子タスクになる（規則が効きすぎないこと）。担当も子に残る。
@@ -5767,7 +6059,7 @@ mod tests {
         run_until_idle(&mut d, 40).await;
 
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Blocked, "既存の質問の終端はそのまま");
-        let pending = store.approval_list(true, None, None).unwrap();
+        let pending = store.approval_list(Some(true), None, None).unwrap();
         assert_eq!(pending.len(), 1, "{pending:?}");
         assert_eq!(pending[0].node_id, "research-survey");
         assert_eq!(pending[0].task_id, Some(task.id));
@@ -5790,7 +6082,7 @@ mod tests {
         let mut d = dispatcher(store.clone(), adapter, 1);
         run_until_idle(&mut d, 40).await;
 
-        let pending = store.approval_list(true, None, None).unwrap();
+        let pending = store.approval_list(Some(true), None, None).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].node_id, "secretary");
     }
