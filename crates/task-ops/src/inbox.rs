@@ -817,6 +817,7 @@ mod tests {
             awaiting_human: vec![],
             awaiting_children: vec![],
             unroutable: vec![stuck.id],
+            reports: None,
             clusters: vec![],
             providers: vec![],
             accounts_root: None,
@@ -1027,6 +1028,7 @@ mod tests {
             awaiting_human: vec![],
             awaiting_children: vec![],
             unroutable: vec![],
+            reports: None,
             clusters: vec![crate::daemon::ClusterLive {
                 id: "pegasus".into(),
                 host: "pegasus".into(),

@@ -663,6 +663,7 @@ mod tests {
             org_include: None,
             org: vec![],
             delegation: Default::default(),
+            reports: Default::default(),
             accounts: None,
             secrets: None,
             source_path: None,

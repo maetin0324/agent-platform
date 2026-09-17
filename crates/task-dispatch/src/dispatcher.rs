@@ -606,6 +606,12 @@ impl Dispatcher {
         &self.config
     }
 
+    /// ADR-0033 D3: tick ループ（taskd）が報告の圧縮のためにストアを読む。ディスパッチャ自身の
+    /// 判断には使わない（ここから LLM を呼ぶこともない）。
+    pub fn store(&self) -> Arc<dyn TaskStore> {
+        Arc::clone(&self.store)
+    }
+
     /// テスト用: 壁時計の Unix 秒を差し替える（ADR-0024 D3 のスコア計算・cooldown の期限に使う）。
     pub fn set_now_unix_fn(&mut self, f: Arc<dyn Fn() -> i64 + Send + Sync>) {
         self.now_unix_fn = f;
@@ -788,8 +794,32 @@ impl Dispatcher {
         }
         self.store.append_event(
             task_id,
-            &Event::ClusterUnavailable { cluster: spec.id.clone(), host: spec.host.clone(), reason },
+            &Event::ClusterUnavailable {
+                cluster: spec.id.clone(),
+                host: spec.host.clone(),
+                reason: reason.clone(),
+            },
         )?;
+        // ADR-0033 D3: クラスタが落ちたことは `infra` 相当のノードの悪い知らせとして人まで上げる
+        // （案件に紐づかない）。同じホストの障害を毎 tick 繰り返さないよう、cooldown の間は 1 件だけにする。
+        let now = OffsetDateTime::now_utc();
+        let cooldown_secs = i64::try_from(self.config.cluster_cooldown.as_secs()).unwrap_or(i64::MAX);
+        match crate::reports::cluster_report_recently_recorded(self.store.as_ref(), &spec.host, now, cooldown_secs) {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Err(e) = crate::reports::record_cluster_unavailable_report(
+                    self.store.as_ref(),
+                    &spec.id,
+                    &spec.host,
+                    &reason,
+                    Some(task_id),
+                    now,
+                ) {
+                    tracing::warn!(cluster = %spec.id, error = %e, "failed to record the cluster report");
+                }
+            }
+            Err(e) => tracing::warn!(cluster = %spec.id, error = %e, "failed to read the recent cluster reports"),
+        }
         Ok(())
     }
 
@@ -931,6 +961,7 @@ impl Dispatcher {
             awaiting_human,
             awaiting_children,
             unroutable,
+            reports: None,
             providers,
             clusters,
             accounts_root,
@@ -1063,6 +1094,8 @@ impl Dispatcher {
         let mut subject = ReviewSubject::default();
         // ADR-0013 D9: 供給側失敗なら種別（ProviderThrottled.reason）を、result を消費する前に取っておく。
         let failure_reason = result.as_ref().err().and_then(provider_failure_reason);
+        // ADR-0033 D3（Phase 25）: 報告の材料（`done` / `error` / `question` の中身）も、result を消費する前に取る。
+        let terminal_report = crate::reports::terminal_report(&result);
         let (trigger, outcome_str, usage, provider_outcome) = match result {
             Ok(RunOutcome {
                 terminal: Terminal::Done { summary, usage, evidence },
@@ -1155,6 +1188,18 @@ impl Dispatcher {
         {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, next = ?outcome.next, attempts = outcome.attempts, outcome = %outcome_str, "worker finished");
+                // ADR-0033 D3: 担当ノード（`assignee`）がいれば、この run の報告を 1 件作る（決定的。LLM は呼ばない）。
+                if let Some(terminal) = terminal_report.as_ref()
+                    && let Err(e) = crate::reports::record_run_report(
+                        self.store.as_ref(),
+                        &task,
+                        &run_id,
+                        terminal,
+                        OffsetDateTime::now_utc(),
+                    )
+                {
+                    tracing::warn!(%task_id, %run_id, error = %e, "failed to record the report for this run");
+                }
                 if outcome.next == Status::Reviewing && !self.spawn_review(task_id, run_id, &subject)? {
                     // Reviewer run の枠が無い: 次 tick の recover_reviews で再試行する。
                     self.pending_subjects.insert(task_id, subject);

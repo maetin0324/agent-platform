@@ -3336,3 +3336,86 @@ Phase 23（コミット `e09951d`）の監査で見つかった 4 件の逸脱�
 846 から、D-1〜D-4 のテスト 5 件を追加して +5 = 851）。`cargo clippy --workspace --all-targets -- -D warnings`
 **exit 0**。テスト以外に `unwrap()` / `expect()` は無い（触った 6 ファイルすべて `#[cfg(test)]` より前を
 機械的に確認）。ディスパッチャ・ストアに LLM 呼び出しは追加していない。
+
+---
+
+## Phase 25 — 報告の生成と圧縮（ADR-0033 D3。2026-09-17）
+
+SPEC §2.4「悪い知らせが目立つ形で届く」/ §3.5「上に行くほどレビューが入り圧縮される。通知は数時間単位」を、
+既存の `tasks` / run の上に載せた。**生成は決定的（LLM なし）、圧縮だけが LLM（別 run）**。
+細部の判断は `docs/adr/0034-report-generation-and-compaction.md`（D1〜D6）。**migration は足していない**（0006 の表を使う）。
+
+### 受け入れ条件ごとの証拠
+
+1. **モデルと store**（`task-core/src/report.rs`。新モジュール。`store.rs` への追加は
+   `TaskStore: … + ReportStore` の supertrait 1 行と `lock` / 時刻関数の `pub(crate)` 化だけ）
+   - `Report { id, project_id?, node_id, task_id?, kind, level, headline, body, sources[], read_at?, created_at }`、
+     `ReportKind { Progress, Result, BadNews, Proposal, Question }`、`ReportFilter`、`ReportsLive`。
+   - `report_append` / `report_append_all` / `report_get` / `report_list` / `report_mark_read` /
+     `report_unreviewed_children` / `report_unread_counts`。
+   - `cargo test -p task-core` → **98 passed / 0 failed**（うち報告は 13 件。追記の往復、案件なし（空文字列）の往復、
+     project / node / level / unread / limit の絞り込みと新しい順、既読の冪等、`sources` 済みの除外）。
+2. **生成は決定的**（`task-dispatch/src/reports.rs`。`dispatcher.rs` への追加は 3 か所・計 30 行）
+   - `on_worker_finished` の既存の `Event` 追記の隣で `record_run_report`。`done` → `result`（`summary` が見出し、
+     `evidence` と成果物が本文）、`error` → `bad_news`（`<タスク名> が失敗: <message の先頭 80 字>`、本文に理由と
+     `retryable`）、`question` → `question`。`assignee` が無ければ作らない。供給側失敗（アダプタの `Err`）は作らない。
+   - `mark_cluster_unavailable`（`Event::ClusterUnavailable`）→ `infra`（無ければ秘書）の `bad_news`、`project_id` は
+     「案件なし」。同じホストは cooldown の間 1 件だけ。
+   - `cargo test -p task-dispatch` → **105 passed / 0 failed**（うち報告 7 件）。
+3. **圧縮は LLM（別 run）**（`taskd/src/reports.rs` + `tick_loop` の 15 行）
+   - 親ノード × 案件ごとに `report_unreviewed_children` を見て、**4 件以上**または**最古が 2 時間**で
+     `role = "report-compressor"` の `execute` タスクを 1 件作る（`objective` に子の報告を全部並べる）。
+     開いているまとめがある間は作らない。**チャネルには送らない（B1）**。
+   - その run の `done` → 親の報告（`kind = result`、`sources` = 子の id、`level` = 親の深さ）。子は次回の対象から外れる。
+   - 閾値は `[reports] compress_after = 4` / `compress_after_secs = 7200`（`config/taskd.example.toml` に追記）。
+   - `cargo test -p taskd` → **130 passed / 0 failed**（うち圧縮 4 件: 4 件で起きる・3 件では起きない・2 時間で起きる・
+     案件ごとに 1 件ずつ・`objective` に全部入る・まとめ後に子が外れる）。
+4. **悪い知らせは圧縮を待たない** — 生成時に各祖先へ複製する。各コピーの `sources` は 1 段下の報告
+   （ADR-0034 D4）。`result` / `question` は複製しない。秘書のコピーだけが未読として残り、圧縮の対象にもならない
+   （`task-core` と `task-dispatch` の両方でテスト）。
+5. **通知の判定** — `DaemonSnapshot.reports = {unread_secretary, unread_bad_news, last_notified_at?, notify_now}`。
+   `notify_now` は「`bad_news` の未読があれば即 true」「無ければ未読があり前回の通知から 2 時間」。
+   3 パターン（2 時間未満で未読 → false、2 時間以上 → true、`bad_news` → 即 true）をテスト。
+6. **API**（`task-api/src/reports.rs`。新モジュール。`handlers.rs` への追加はルート 1 行と `GET /daemon` の 3 行）
+   - `GET /reports?project=&node=&level=&unread=&limit=`、`GET /reports/{id}`（`sources_expanded`）、
+     `POST /reports/read`（管理系）、`POST /reports/notified`（管理系）。
+   - `docs/api/v1/api-v1.schema.json` を `UPDATE_SCHEMA=1` で再生成（+256 行）。`docs/gui/api.md` に §3.50〜3.53 と
+     `report_not_found` の行を追加（`sync-gui-docs.sh` は実行していない。U25-1）。
+   - `cargo test -p task-api` → **171 passed / 0 failed**（うち報告 4 件: 一覧の絞り込みと並び、`sources` の展開、
+     404、管理系の 401（`token_file` 未設定でも）、`GET /daemon` の通知判定）。
+7. **共通条件** — `cargo test --workspace`: **872 passed**、`grep -c "^test result: FAILED"` = **0**
+   （Phase 23 の 846 から +26）。`cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。
+   テスト以外に `unwrap()` / `expect()` は無い（新規 4 ファイルは `#[cfg(test)]` より前に 1 件も無いことを確認）。
+   ディスパッチャ・ストアに LLM 呼び出しは無い（圧縮は「タスクを 1 件作る」だけで、run は通常の dispatch が起こす）。
+
+### 判断したこと（ADR-0034 に書いた細部）
+
+- **`reports.project_id` は `NOT NULL`** だった（指示は「NULL 可のはず」）。migration を足さない方針なので、
+  「案件なし」は**空文字列**で書き、読むときに `None` に戻す（D1）。次に `reports` を触る migration で NULL 可に直せる。
+- **まとめの run の目印は `role = "report-compressor"`**。新しい `TaskKind` もプロトコルも足さない（D3）。
+  `sources` は「まとめタスクの `created_at` 以前のレビュー待ち」で取り直す（objective に載せた集合と一致する）。
+- **まとめタスクの受け入れ条件は空**（条件ゼロのレビューは全 pass = `done`）。報告は run の終端で既に作られている（D3）。
+- **`last_notified_at` は API プロセスのメモリ**。列が無く migration を足さないため。結果として
+  `DaemonSnapshot.reports` は**API が応答を組むときに埋める唯一のフィールド**になった（D6）。
+- **供給側失敗（アダプタの `Err`）は報告にしない**（D2）。requeue と cooldown の話で、同じ試行で何度も起きるため。
+
+### 未解決事項
+
+- U25-1: `scripts/sync-gui-docs.sh --check` は実行していない（指示による）。`gui/docs/taskd-api-v1.md` に
+  §3.50〜3.53 が無い。G13 の担当が同期する。
+- U25-2: まとめの run のプロンプトは `objective` の文字列だけ（アダプタのプロンプト組み立てには触っていない。
+  Phase 24 が `preamble.rs` に寄せているため）。ノードの `brief` は `objective` の先頭に入れてある。
+- U25-3: `level` は報告を作った時点のノードの深さを**写し**として持つ。組織を編集して深さが変わっても
+  過去の報告は動かない（観測値としてはこれでよいが、GUI が「今の木」と突き合わせると食い違う）。
+- U25-4: 報告の削除・古いものの掃除は無い。案件が長く続くと `reports` は増え続ける。
+- U25-5: `bad_news` の複製は `created_at` を 1 秒ずつずらして順序を作っている（同時刻だと一覧の並びが不定になるため）。
+  秘書のコピーの時刻は「起きた時刻 + 段数」秒になる。
+
+### 提案
+
+- P-72: `Progress` / `Proposal` の報告を誰が作るかが未定（今回は作らない）。`Proposal` は「この framing で論文が
+  書けそう」を人が拾いやすくするためのもので、まとめの run に「提案なら kind を proposal にせよ」と言わせるのが
+  自然だが、それは**生成を LLM に委ねる**ことになる。決定的にやるなら「まとめの `summary` の 1 行目が
+  `提案:` で始まれば `proposal`」のような規約が要る。人間の判断を仰ぎたい。
+- P-73: 報告の既読は `POST /reports/read` だけで、GUI が一覧を開いただけでは既読にならない。
+  「流し見」（SPEC §3.5）の体験としては、画面に出た時点で既読にするのが近いかもしれない（G13 で決める）。

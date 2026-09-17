@@ -76,6 +76,9 @@ pub(crate) struct Inner {
     pub(crate) stream_polls: AtomicU64,
     pub(crate) replay_running: AtomicBool,
     pub(crate) stats: Mutex<StatsState>,
+    /// ADR-0033 D3: GUI が最後に通知した時刻（`POST /reports/notified`）。DB には列が無いので
+    /// API プロセスのメモリに持つ観測値（再起動で消える）。
+    pub(crate) last_notified_at: Mutex<Option<time::OffsetDateTime>>,
 }
 
 impl ApiState {
@@ -115,6 +118,7 @@ impl ApiState {
             stream_polls: AtomicU64::new(0),
             replay_running: AtomicBool::new(false),
             stats: Mutex::new(StatsState::default()),
+            last_notified_at: Mutex::new(None),
         };
         Ok(Self {
             inner: Arc::new(inner),

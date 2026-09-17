@@ -24,7 +24,10 @@ async fn daemon_view_is_null_until_a_snapshot_is_sent() {
     let snapshot = snapshot(7);
     env.daemon_tx.send(Some(snapshot.clone())).expect("send snapshot");
     let after = send(&app, get("/api/v1/daemon")).await.json();
-    assert_eq!(after["snapshot"], serde_json::to_value(&snapshot).expect("json"));
+    // ADR-0033 D3（Phase 25）: `reports` だけは API が応答を組むときに埋める（未読が無ければ通知もしない）。
+    let mut expected = serde_json::to_value(&snapshot).expect("json");
+    expected["reports"] = serde_json::json!({"unread_secretary": 0, "unread_bad_news": 0, "notify_now": false});
+    assert_eq!(after["snapshot"], expected);
     assert_eq!(after["snapshot"]["cooldowns"][0]["reason"], "throttled");
     assert_eq!(after["snapshot"]["in_flight"][0]["kind"], "worker");
 }

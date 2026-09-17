@@ -297,6 +297,7 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
         awaiting_human: vec![],
         awaiting_children: vec![],
         unroutable: vec![],
+        reports: None,
         accounts_root: None,
         max_runs_per_account: None,
         accounts_roots: std::collections::HashMap::new(),

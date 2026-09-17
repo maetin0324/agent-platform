@@ -1,0 +1,447 @@
+//! 報告の生成（ADR-0033 D3。Phase 25）。
+//!
+//! run が終端（`done` / `error` / `question`）に達するたび、担当ノード（`task.assignee`）の報告を **1 件**
+//! 作る。**LLM は呼ばない**（DESIGN 原則 1）: 文面は結果ファイルの `summary` / `evidence` と、その run が
+//! 出した成果物の一覧から決定的に組む（文面の組み立て自体は `task_core::report` の純粋関数）。
+//!
+//! - `assignee` が無いタスクでは何も作らない（従来どおりのタスクは報告の対象外）。
+//! - `Error` は `bad_news` で、生成と同時に各祖先へ複製する（圧縮を待たない。SPEC §2.4）。
+//! - まとめの run（`role = COMPACTION_ROLE`）の `done` は、親ノードの報告になり `sources` に子の報告が入る。
+//! - 途中経過（`progress`）は作らない（通知は数時間単位なので run の途中は要らない）。
+
+use task_core::report::{self, Report};
+use task_core::{Event, StoreError, Task, TaskId, TaskStore};
+use task_worker::{AdapterError, RunOutcome, Terminal};
+use time::OffsetDateTime;
+
+/// run の終端のうち、報告に必要な部分だけを取り出したもの。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TerminalReport {
+    Done { summary: String, evidence: Vec<String> },
+    Error { message: String, retryable: bool },
+    Question { text: String },
+}
+
+/// アダプタの結果から報告の材料を取り出す（供給側の失敗 = `Err` は報告にしない。
+/// requeue / cooldown の話であって、人に上げる「悪い知らせ」ではないため）。
+pub(crate) fn terminal_report(result: &Result<RunOutcome, AdapterError>) -> Option<TerminalReport> {
+    match result {
+        Ok(RunOutcome {
+            terminal: Terminal::Done { summary, evidence, .. },
+            ..
+        }) => Some(TerminalReport::Done {
+            summary: summary.clone(),
+            evidence: evidence
+                .iter()
+                .map(|e| {
+                    let mut line = format!("条件 {}", e.criterion);
+                    if let Some(cmd) = &e.command {
+                        line.push_str(&format!(": {cmd}"));
+                    }
+                    if let Some(exit) = e.exit {
+                        line.push_str(&format!(" → exit {exit}"));
+                    }
+                    line
+                })
+                .collect(),
+        }),
+        Ok(RunOutcome {
+            terminal: Terminal::Error { message, retryable },
+            ..
+        }) => Some(TerminalReport::Error {
+            message: message.clone(),
+            retryable: *retryable,
+        }),
+        Ok(RunOutcome {
+            terminal: Terminal::Question { text },
+            ..
+        }) => Some(TerminalReport::Question { text: text.clone() }),
+        Err(_) => None,
+    }
+}
+
+/// その run が出した成果物の一覧（`ArtifactProduced` イベントから。決定的）。
+fn artifacts_of_run(store: &dyn TaskStore, task_id: TaskId, run_id: &str) -> Result<Vec<String>, StoreError> {
+    let mut out = Vec::new();
+    for (_, event) in store.events_for(task_id)? {
+        if let Event::ArtifactProduced { run_id: rid, artifact } = event
+            && rid == run_id
+        {
+            out.push(format!("{} ({})", artifact.name, artifact.path));
+        }
+    }
+    Ok(out)
+}
+
+/// 終端に達した run から、担当ノードの報告を作って追記する（`assignee` が無ければ何もしない）。
+/// 追記は `reports` 表への INSERT だけで、タスクの状態遷移とは別（ADR-0033 D3）。
+pub(crate) fn record_run_report(
+    store: &dyn TaskStore,
+    task: &Task,
+    run_id: &str,
+    terminal: &TerminalReport,
+    now: OffsetDateTime,
+) -> Result<Option<Report>, StoreError> {
+    let Some(assignee) = task.assignee.as_deref() else {
+        return Ok(None);
+    };
+    let org = store.org_list()?;
+    let level = report::level_of(&org, assignee);
+    let report = match terminal {
+        TerminalReport::Done { summary, evidence } => {
+            let artifacts = artifacts_of_run(store, task.id, run_id)?;
+            // まとめの run なら、objective に載せた子の報告（= このタスクを作った時点で
+            // レビュー待ちだったもの）を `sources` にする。1 件も無ければ報告を作らない。
+            let sources = if task.role.as_deref() == Some(report::COMPACTION_ROLE) {
+                let ids: Vec<_> = store
+                    .report_unreviewed_children(assignee)?
+                    .into_iter()
+                    .filter(|r| r.created_at <= task.created_at)
+                    .map(|r| r.id)
+                    .collect();
+                if ids.is_empty() {
+                    return Ok(None);
+                }
+                ids
+            } else {
+                Vec::new()
+            };
+            report::report_for_done(
+                assignee,
+                level,
+                task.project_id,
+                task.id,
+                &task.title,
+                summary,
+                &evidence.clone(),
+                &artifacts,
+                sources,
+                now,
+            )
+        }
+        TerminalReport::Error { message, retryable } => report::report_for_error(
+            assignee,
+            level,
+            task.project_id,
+            task.id,
+            &task.title,
+            message,
+            *retryable,
+            now,
+        ),
+        TerminalReport::Question { text } => {
+            report::report_for_question(assignee, level, task.project_id, task.id, &task.title, text, now)
+        }
+    };
+    append_with_escalation(store, &org, report).map(Some)
+}
+
+/// 報告を追記する。`bad_news` なら同じ内容を秘書まで複製する（SPEC §2.4「目立つ形で届く」）。
+fn append_with_escalation(
+    store: &dyn TaskStore,
+    org: &[task_core::OrgNode],
+    report: Report,
+) -> Result<Report, StoreError> {
+    let mut batch = vec![report.clone()];
+    if report.kind == report::ReportKind::BadNews {
+        batch.extend(report::bad_news_chain(&report, org, report.created_at));
+    }
+    store.report_append_all(&batch)?;
+    Ok(report)
+}
+
+/// ADR-0033 D3: クラスタに接続できないこと（`Event::ClusterUnavailable`）を `infra` 相当のノードの
+/// `bad_news` として 1 件記録する。案件に紐づかないので `project_id` は「案件なし」。
+pub(crate) fn record_cluster_unavailable_report(
+    store: &dyn TaskStore,
+    cluster: &str,
+    host: &str,
+    reason: &str,
+    task_id: Option<TaskId>,
+    now: OffsetDateTime,
+) -> Result<Option<Report>, StoreError> {
+    let org = store.org_list()?;
+    let Some(node) = report::infra_node(&org) else {
+        // 組織がまだ無い（種を蒔いていない）DB では報告を作らない。
+        return Ok(None);
+    };
+    let node_id = node.id.clone();
+    let level = report::level_of(&org, &node_id);
+    let report = report::report_for_cluster_unavailable(&node_id, level, cluster, host, reason, task_id, now);
+    append_with_escalation(store, &org, report).map(Some)
+}
+
+/// 同じクラスタの障害を毎 tick 報告しないための間引き（直近 `within_secs` 以内に同じ見出しの
+/// 未読の報告があれば作らない）。決定的な判定。
+pub(crate) fn cluster_report_recently_recorded(
+    store: &dyn TaskStore,
+    host: &str,
+    now: OffsetDateTime,
+    within_secs: i64,
+) -> Result<bool, StoreError> {
+    let headline = report::truncate_chars(&format!("{host} に接続できない"), report::HEADLINE_MAX_CHARS);
+    let recent = store.report_list(&task_core::ReportFilter {
+        level: Some(0),
+        limit: 50,
+        ..Default::default()
+    })?;
+    Ok(recent
+        .iter()
+        .any(|r| r.headline == headline && (now - r.created_at).whole_seconds() < within_secs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use task_core::org::{OrgKind, OrgNode};
+    use task_core::{Budget, ProjectId, SqliteStore, Status, TaskKind, Tier, WorkerHint, WorkspaceSpec};
+    use task_worker::Evidence;
+
+    fn org_node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
+        let now = OffsetDateTime::now_utc();
+        OrgNode {
+            id: id.into(),
+            parent_id: parent.map(str::to_string),
+            name: id.into(),
+            kind,
+            genre: None,
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn store_with_org() -> Arc<dyn TaskStore> {
+        let store = SqliteStore::open_in_memory().expect("open");
+        for n in [
+            org_node("secretary", None, OrgKind::Secretary),
+            org_node("coding", Some("secretary"), OrgKind::Department),
+            org_node("coding-poc", Some("coding"), OrgKind::Section),
+            org_node("infra", Some("secretary"), OrgKind::Department),
+        ] {
+            store.org_upsert(&n).expect("seed");
+        }
+        Arc::new(store)
+    }
+
+    fn task(assignee: Option<&str>, project: Option<ProjectId>) -> Task {
+        let now = OffsetDateTime::now_utc();
+        Task {
+            id: TaskId::new(),
+            parent_id: None,
+            kind: TaskKind::Execute,
+            title: "PoC を書く".into(),
+            objective: "o".into(),
+            acceptance: vec![],
+            inputs: vec![],
+            depends_on: vec![],
+            status: Status::Running,
+            priority: 0,
+            worker_hint: WorkerHint {
+                tier: Tier::Cheap,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local { path: ".".into() },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
+            attempts: 0,
+            lease: None,
+            created_at: now,
+            updated_at: now,
+            role: None,
+            genre: None,
+            aggregate: false,
+            project_id: project,
+            milestone_id: None,
+            assignee: assignee.map(str::to_string),
+        }
+    }
+
+    fn done(summary: &str) -> Result<RunOutcome, AdapterError> {
+        Ok(RunOutcome {
+            terminal: Terminal::Done {
+                summary: summary.into(),
+                evidence: vec![Evidence {
+                    criterion: 0,
+                    command: Some("cargo test".into()),
+                    exit: Some(0),
+                    stdout_tail: None,
+                }],
+                usage: None,
+            },
+            exit_code: Some(0),
+        })
+    }
+
+    #[test]
+    fn a_done_run_becomes_one_result_report_for_the_assignee() {
+        let store = store_with_org();
+        let project = ProjectId::new();
+        let task = task(Some("coding-poc"), Some(project));
+        store.insert(&task).expect("insert");
+        let terminal = terminal_report(&done("ベンチが 1.8 倍速くなった")).expect("terminal");
+        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+            .expect("record")
+            .expect("some");
+        assert_eq!(report.kind, report::ReportKind::Result);
+        assert_eq!(report.node_id, "coding-poc");
+        assert_eq!(report.level, 2);
+        assert_eq!(report.project_id, Some(project));
+        assert_eq!(report.headline, "ベンチが 1.8 倍速くなった");
+        assert!(report.body.contains("cargo test"), "{}", report.body);
+        // 良い知らせは複製されない（圧縮を待つ）。
+        let all = store.report_list(&task_core::ReportFilter::default()).expect("list");
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn a_task_without_an_assignee_produces_no_report() {
+        let store = store_with_org();
+        let task = task(None, Some(ProjectId::new()));
+        store.insert(&task).expect("insert");
+        let terminal = terminal_report(&done("できました")).expect("terminal");
+        let made = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+            .expect("record");
+        assert!(made.is_none());
+        assert!(store.report_list(&task_core::ReportFilter::default()).expect("list").is_empty());
+    }
+
+    #[test]
+    fn an_error_run_becomes_bad_news_that_reaches_the_secretary() {
+        let store = store_with_org();
+        let task = task(Some("coding-poc"), Some(ProjectId::new()));
+        store.insert(&task).expect("insert");
+        let result: Result<RunOutcome, AdapterError> = Ok(RunOutcome {
+            terminal: Terminal::Error {
+                message: "ビルドが壊れている".into(),
+                retryable: true,
+            },
+            exit_code: Some(1),
+        });
+        let terminal = terminal_report(&result).expect("terminal");
+        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+            .expect("record")
+            .expect("some");
+        assert_eq!(report.kind, report::ReportKind::BadNews);
+        assert_eq!(report.headline, "PoC を書く が失敗: ビルドが壊れている");
+        assert!(report.body.contains("retryable: true"), "{}", report.body);
+        let at_secretary = store
+            .report_list(&task_core::ReportFilter {
+                level: Some(0),
+                ..Default::default()
+            })
+            .expect("list");
+        assert_eq!(at_secretary.len(), 1, "秘書まで複製される");
+        assert_eq!(at_secretary[0].headline, report.headline);
+        assert_eq!(store.report_list(&task_core::ReportFilter::default()).expect("list").len(), 3);
+    }
+
+    #[test]
+    fn a_question_run_becomes_a_question_report() {
+        let store = store_with_org();
+        let task = task(Some("coding-poc"), Some(ProjectId::new()));
+        store.insert(&task).expect("insert");
+        let result: Result<RunOutcome, AdapterError> = Ok(RunOutcome {
+            terminal: Terminal::Question {
+                text: "どのクラスタを使いますか".into(),
+            },
+            exit_code: Some(0),
+        });
+        let terminal = terminal_report(&result).expect("terminal");
+        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+            .expect("record")
+            .expect("some");
+        assert_eq!(report.kind, report::ReportKind::Question);
+        assert_eq!(report.headline, "どのクラスタを使いますか");
+        // 質問は複製しない（悪い知らせではない）。
+        assert_eq!(store.report_list(&task_core::ReportFilter::default()).expect("list").len(), 1);
+    }
+
+    #[test]
+    fn a_provider_failure_is_not_a_report() {
+        let err: Result<RunOutcome, AdapterError> = Err(AdapterError::Throttled {
+            retry_after: std::time::Duration::from_secs(60),
+        });
+        assert_eq!(terminal_report(&err), None);
+    }
+
+    #[test]
+    fn a_cluster_that_cannot_be_reached_is_bad_news_for_infra() {
+        let store = store_with_org();
+        let now = OffsetDateTime::now_utc();
+        let report = record_cluster_unavailable_report(store.as_ref(), "pegasus", "pegasus.ccs", "no master", None, now)
+            .expect("record")
+            .expect("some");
+        assert_eq!(report.node_id, "infra");
+        assert_eq!(report.kind, report::ReportKind::BadNews);
+        assert_eq!(report.project_id, None, "案件なし");
+        assert_eq!(report.headline, "pegasus.ccs に接続できない");
+        // infra → 秘書まで上がる。
+        let at_secretary = store
+            .report_list(&task_core::ReportFilter {
+                level: Some(0),
+                ..Default::default()
+            })
+            .expect("list");
+        assert_eq!(at_secretary.len(), 1);
+        // 同じホストの障害は間引かれる。
+        assert!(cluster_report_recently_recorded(store.as_ref(), "pegasus.ccs", now, 3600).expect("check"));
+        assert!(!cluster_report_recently_recorded(store.as_ref(), "sirius", now, 3600).expect("check"));
+    }
+
+    #[test]
+    fn a_compaction_run_becomes_the_parents_report_with_the_children_as_sources() {
+        let store = store_with_org();
+        let project = ProjectId::new();
+        let now = OffsetDateTime::now_utc();
+        // 子の報告 4 件（まとめのタスクより前に作られたもの）。
+        let children: Vec<task_core::Report> = (0..4)
+            .map(|n| task_core::Report {
+                id: task_core::ReportId::new(),
+                project_id: Some(project),
+                node_id: "coding-poc".into(),
+                task_id: None,
+                kind: report::ReportKind::Result,
+                level: 2,
+                headline: format!("結果 {n}"),
+                body: "本文".into(),
+                sources: Vec::new(),
+                read_at: None,
+                created_at: now - time::Duration::minutes(10),
+            })
+            .collect();
+        store.report_append_all(&children).expect("append");
+
+        let mut compaction = task(Some("coding"), Some(project));
+        compaction.role = Some(report::COMPACTION_ROLE.into());
+        compaction.title = "報告のまとめ: coding".into();
+        store.insert(&compaction).expect("insert");
+
+        let terminal = terminal_report(&done("PoC は 1.8 倍速く、論文の framing は X で書けそう")).expect("terminal");
+        let summary = record_run_report(store.as_ref(), &compaction, "run-1", &terminal, now)
+            .expect("record")
+            .expect("some");
+        assert_eq!(summary.node_id, "coding");
+        assert_eq!(summary.level, 1);
+        assert_eq!(summary.kind, report::ReportKind::Result);
+        let mut got = summary.sources.clone();
+        let mut want: Vec<_> = children.iter().map(|c| c.id).collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "子の報告が sources に入る");
+        // 子は次回の対象から外れ、まとめは 1 段上（秘書）の対象になる。
+        assert!(store.report_unreviewed_children("coding").expect("pending").is_empty());
+        let up = store.report_unreviewed_children("secretary").expect("pending");
+        assert_eq!(up.iter().map(|r| r.id).collect::<Vec<_>>(), vec![summary.id]);
+
+        // まとめる対象が 1 件も無ければ報告を作らない（やり直しで二重に作らないため）。
+        let again = record_run_report(store.as_ref(), &compaction, "run-2", &terminal, now).expect("record");
+        assert!(again.is_none());
+    }
+
+}

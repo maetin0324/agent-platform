@@ -28,6 +28,11 @@ pub struct DaemonSnapshot {
     pub awaiting_children: Vec<TaskId>,
     /// 設定に合うプロバイダが無い ready タスク（この tick の判定）。
     pub unroutable: Vec<TaskId>,
+    /// ADR-0033 D3（Phase 25）: 秘書レベルの未読の報告と通知の判定。**API が応答を組むときに埋める**
+    /// 唯一のフィールド（`last_notified_at` は `POST /reports/notified` が進める API プロセスの観測値で、
+    /// ディスパッチャは知らない）。ディスパッチャが送るスナップショットでは常に `None`。
+    #[serde(default)]
+    pub reports: Option<task_core::ReportsLive>,
     pub providers: Vec<ProviderLive>,
     /// ADR-0018: `[[clusters]]` の稼働状況（`id` 昇順）。第 2 段階で追加したので、古いスナップショットには無い。
     #[serde(default)]

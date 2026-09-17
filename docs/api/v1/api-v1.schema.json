@@ -1632,6 +1632,18 @@
           },
           "type": "array"
         },
+        "reports": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportsLive"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ADR-0033 D3（Phase 25）: 秘書レベルの未読の報告と通知の判定。**API が応答を組むときに埋める**\n唯一のフィールド（`last_notified_at` は `POST /reports/notified` が進める API プロセスの観測値で、\nディスパッチャは知らない）。ディスパッチャが送るスナップショットでは常に `None`。"
+        },
         "started_at": {
           "type": "string"
         },
@@ -3816,6 +3828,229 @@
       ],
       "type": "object"
     },
+    "Report": {
+      "description": "1 件の報告。",
+      "properties": {
+        "body": {
+          "default": "",
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "headline": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/ReportId"
+        },
+        "kind": {
+          "$ref": "#/$defs/ReportKind"
+        },
+        "level": {
+          "description": "組織の木の深さ（秘書 = 0）。GUI は `level = 0` を「人が見る報告」として扱う。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node_id": {
+          "description": "報告した組織のノード（`org_nodes.id`）。",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "案件。`None` は「案件なし」（クラスタの障害など、案件に紐づかない悪い知らせ）。\n`reports.project_id` は NOT NULL なので、DB には空文字列として書く（migration は足さない。ADR-0034）。"
+        },
+        "read_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sources": {
+          "default": [],
+          "description": "元になった報告の id（まとめなら子の報告、悪い知らせの複製なら 1 段下の報告）。",
+          "items": {
+            "$ref": "#/$defs/ReportId"
+          },
+          "type": "array"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "元になったタスク（まとめの報告では、そのまとめの run のタスク）。"
+        }
+      },
+      "required": [
+        "id",
+        "node_id",
+        "kind",
+        "level",
+        "headline",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "ReportDetail": {
+      "description": "`GET /reports/{id}` の応答（`sources` の中身も展開して返す）。",
+      "properties": {
+        "report": {
+          "$ref": "#/$defs/Report"
+        },
+        "sources_expanded": {
+          "description": "`report.sources` の順に引いた元の報告（見つからなかったものは飛ばす）。",
+          "items": {
+            "$ref": "#/$defs/Report"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "report",
+        "sources_expanded"
+      ],
+      "type": "object"
+    },
+    "ReportId": {
+      "description": "報告の一意識別子（ULID）。",
+      "type": "string"
+    },
+    "ReportKind": {
+      "description": "報告の種類（ADR-0033 D3）。",
+      "oneOf": [
+        {
+          "const": "progress",
+          "description": "途中経過。Phase 25 では作らない（run 単位の終端だけを上げる。通知は数時間単位なので run の途中は要らない）。",
+          "type": "string"
+        },
+        {
+          "const": "result",
+          "description": "結果（run の `done`、および親のまとめ）。",
+          "type": "string"
+        },
+        {
+          "const": "bad_news",
+          "description": "悪い知らせ（SPEC §2.4）。圧縮を待たず祖先へ複製される。",
+          "type": "string"
+        },
+        {
+          "const": "proposal",
+          "description": "提案（「この framing で論文が書けそう」）。Phase 25 では生成しない（まとめの本文に入る）。",
+          "type": "string"
+        },
+        {
+          "const": "question",
+          "description": "人への質問（run の `question`）。",
+          "type": "string"
+        }
+      ]
+    },
+    "ReportList": {
+      "description": "`GET /reports` の応答。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/Report"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "ReportsLive": {
+      "description": "未読の件数（`DaemonSnapshot.reports` と GUI の通知判定に使う観測値。ADR-0033 D3）。",
+      "properties": {
+        "last_notified_at": {
+          "description": "前回 GUI が通知した時刻（RFC 3339）。`POST /reports/notified` が進める。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notify_now": {
+          "description": "「前回の通知から 2 時間以上経ち未読がある」か「`bad_news` の未読がある」。",
+          "type": "boolean"
+        },
+        "unread_bad_news": {
+          "description": "そのうち `bad_news` の件数（0 でなければ即通知）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unread_secretary": {
+          "description": "秘書レベル（`level = 0`）の未読の件数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "unread_secretary",
+        "unread_bad_news",
+        "notify_now"
+      ],
+      "type": "object"
+    },
+    "ReportsNotifiedResult": {
+      "description": "`POST /reports/notified` の応答。",
+      "properties": {
+        "last_notified_at": {
+          "description": "進めた後の通知時刻（RFC 3339）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "last_notified_at"
+      ],
+      "type": "object"
+    },
+    "ReportsReadBody": {
+      "additionalProperties": false,
+      "description": "`POST /reports/read` の本文。",
+      "properties": {
+        "ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "type": "object"
+    },
+    "ReportsReadResult": {
+      "description": "`POST /reports/read` の応答。",
+      "properties": {
+        "updated": {
+          "description": "未読から既読に変わった件数。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "updated"
+      ],
+      "type": "object"
+    },
     "ReviewNote": {
       "description": "`prior_review_from_events` の要素。`task_worker::PriorReview` と同じ形（フィールド名も同じ）。",
       "properties": {
@@ -5064,6 +5299,22 @@
     "replay_report": {
       "$ref": "#/$defs/ReplayReport"
     },
+    "report_detail": {
+      "$ref": "#/$defs/ReportDetail"
+    },
+    "report_list": {
+      "$ref": "#/$defs/ReportList",
+      "description": "Phase 25（ADR-0033 D3）: 報告（生成は決定的、圧縮は別 run）。"
+    },
+    "reports_notified": {
+      "$ref": "#/$defs/ReportsNotifiedResult"
+    },
+    "reports_read": {
+      "$ref": "#/$defs/ReportsReadBody"
+    },
+    "reports_read_result": {
+      "$ref": "#/$defs/ReportsReadResult"
+    },
     "run_list": {
       "$ref": "#/$defs/RunList"
     },
@@ -5143,6 +5394,11 @@
     "project_detail",
     "milestone_create",
     "milestone_patch",
+    "report_list",
+    "report_detail",
+    "reports_read",
+    "reports_read_result",
+    "reports_notified",
     "daemon",
     "config",
     "stream_hello",

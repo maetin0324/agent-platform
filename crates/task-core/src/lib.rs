@@ -6,6 +6,7 @@ pub mod delegate;
 pub mod model;
 pub mod org;
 pub mod plan;
+pub mod report;
 pub mod store;
 pub mod transition;
 
@@ -20,6 +21,9 @@ pub use model::{
 pub use org::{
     Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
     assignee_defaults, valid_org_id, validate_upsert,
+};
+pub use report::{
+    COMPACTION_ROLE, Report, ReportFilter, ReportId, ReportKind, ReportStore, ReportsLive,
 };
 pub use plan::{MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput};
 pub use store::{

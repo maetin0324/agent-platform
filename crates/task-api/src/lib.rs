@@ -24,6 +24,7 @@ mod handlers;
 mod middleware;
 mod problem;
 mod query;
+mod reports;
 pub mod schema;
 pub mod secrets;
 mod sse;
@@ -36,6 +37,7 @@ pub use admin::{
     CheckError, ClusterAdminError, ClusterConnectCodeOutcome, ClusterConnectStartOutcome, ProviderCheckOutcome,
     ProviderCheckResult,
 };
+pub use reports::{ReportDetail, ReportList, ReportsNotifiedResult, ReportsReadBody, ReportsReadResult};
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};
 pub use stats::classify_outcome;
