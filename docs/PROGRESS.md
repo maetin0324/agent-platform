@@ -3368,8 +3368,10 @@ SPEC §2.4「悪い知らせが目立つ形で届く」/ §3.5「上に行くほ
      開いているまとめがある間は作らない。**チャネルには送らない（B1）**。
    - その run の `done` → 親の報告（`kind = result`、`sources` = 子の id、`level` = 親の深さ）。子は次回の対象から外れる。
    - 閾値は `[reports] compress_after = 4` / `compress_after_secs = 7200`（`config/taskd.example.toml` に追記）。
-   - `cargo test -p taskd` → **130 passed / 0 failed**（うち圧縮 4 件: 4 件で起きる・3 件では起きない・2 時間で起きる・
-     案件ごとに 1 件ずつ・`objective` に全部入る・まとめ後に子が外れる）。
+   - `cargo test -p taskd` → 監査（2026-09-17）で**未検証の数字だった「130 passed」を実測値に訂正**: 実測は
+     **89 passed / 0 failed**（うち圧縮 4 件: 4 件で起きる・3 件では起きない・2 時間で起きる・
+     案件ごとに 1 件ずつ・`objective` に全部入る・まとめ後に子が外れる）。「130 passed」は`-p task-api`の
+     実測値を誤って転記したものだった（`grep -B2 "130 passed" <(cargo test --workspace 2>&1)` で確認）。
 4. **悪い知らせは圧縮を待たない** — 生成時に各祖先へ複製する。各コピーの `sources` は 1 段下の報告
    （ADR-0034 D4）。`result` / `question` は複製しない。秘書のコピーだけが未読として残り、圧縮の対象にもならない
    （`task-core` と `task-dispatch` の両方でテスト）。
@@ -3402,7 +3404,8 @@ SPEC §2.4「悪い知らせが目立つ形で届く」/ §3.5「上に行くほ
 ### 未解決事項
 
 - U25-1: `scripts/sync-gui-docs.sh --check` は実行していない（指示による）。`gui/docs/taskd-api-v1.md` に
-  §3.50〜3.53 が無い。G13 の担当が同期する。
+  §3.50〜3.53 が無い。G13 の担当が同期する。→ **解消済み**（コミット `8868ec2`「gui: regenerate types and the
+  API mirror after merging phases 23-25 and G13a」で GUI 側の型と API ミラーが再生成された）。
 - U25-2: まとめの run のプロンプトは `objective` の文字列だけ（アダプタのプロンプト組み立てには触っていない。
   Phase 24 が `preamble.rs` に寄せているため）。ノードの `brief` は `objective` の先頭に入れてある。
 - U25-3: `level` は報告を作った時点のノードの深さを**写し**として持つ。組織を編集して深さが変わっても
@@ -3419,3 +3422,54 @@ SPEC §2.4「悪い知らせが目立つ形で届く」/ §3.5「上に行くほ
   `提案:` で始まれば `proposal`」のような規約が要る。人間の判断を仰ぎたい。
 - P-73: 報告の既読は `POST /reports/read` だけで、GUI が一覧を開いただけでは既読にならない。
   「流し見」（SPEC §3.5）の体験としては、画面に出た時点で既読にするのが近いかもしれない（G13 で決める）。
+
+### 監査で直したもの（2026-09-17。ADR-0034 D2/D3a/D7 を参照）
+
+Phase 25 の監査で見つかった逸脱を修正した。設計判断は決定済みのものを実装しただけで、新しい ADR 番号は
+起こしていない（既存の ADR-0034 に節を足した）。
+
+- **H-1（まとめの `sources` が案件をまたぐ）**: `record_run_report`（`task-dispatch/src/reports.rs`）の
+  `sources` 計算に `r.project_id == task.project_id` を追加。テスト
+  `a_compaction_runs_sources_do_not_cross_projects`（`task-dispatch`）で、案件 A と B のまとめ run が
+  並行しても互いの子報告が混ざらないことを確認。
+- **H-2（まとめ run が失敗し続けると無限にタスクが作られる）**: `taskd/src/reports.rs` に
+  `has_recently_failed_compaction_task` を追加し、`schedule_report_compaction` が「直近
+  `compress_after_secs` 以内に `Failed`/`Cancelled` になった同じノード・同じ案件のまとめタスク」があれば
+  次のまとめを作らないようにした（ADR-0034 D3a）。テスト
+  `a_recently_failed_compaction_task_backs_off_until_compress_after_secs_passes`（`taskd`）。
+- **M-1〜M-3（報告を作る条件を run の終端からタスクの終端状態へ）**: `dispatcher.rs` の
+  `on_worker_finished` / `on_review_finished` を変更（ADR-0034 D2 を書き換え）:
+  - `result` は `on_review_finished` で `outcome.next == Status::Done` になったときだけ作る
+    (`entry.subject` の `summary`/`evidence` から)。レビューで差し戻された 1 回目は報告にしない。
+  - `bad_news` は `outcome.next == Status::Failed` になったときだけ、原因を問わず作る
+    （ワーカー自身の `error`、供給側失敗の requeue 上限到達、レビュー不合格のどれでも）。
+  - `question` は従来どおり run の終端で即時。
+  - 新テスト（`task-dispatch`）: `a_review_retry_that_eventually_passes_produces_exactly_one_done_report`
+    （差し戻し→再実行→done で report は 1 件）、`requeue_limit_reached_produces_one_bad_news_report`
+    （requeue 上限で failed → bad_news 1 件）、
+    `three_retryable_worker_errors_in_a_row_produce_no_bad_news_report`（途中の retryable な失敗では
+    bad_news 0 件）。
+- **M-5（未知の assignee が秘書の報告に化ける）**: `record_run_report` の先頭で `assignee` が組織に
+  存在するか確認し、無ければ `warn!` して報告を作らない（`level_of` が未知ノードで 0 を返すため）。
+  テスト `an_unknown_assignee_produces_no_report_instead_of_becoming_the_secretarys`（`task-dispatch`）。
+- **L-1（`cluster_report_recently_recorded` のコメントと実装のずれ）**: `report_list` のフィルタに
+  `unread_only: true` を追加（docstring どおりに直した）。
+- **L-2（まとめの指示文から「悪い知らせ」の項を外す）**: `task_core::report::compaction_objective` の
+  まとめ方の指示から「悪い知らせ」を削除し、「悪い知らせは既に個別に届いているのでまとめない」と明記。
+- **L-4（まとめタスクの作成を `task_ops` の作成経路に通す）**: 今回は対応していない。
+  `taskd/src/reports.rs::compaction_task` は今のまま直接 `Task` を組み立てている。`role =
+  "report-compressor"` は `[[roles]]` に登録する運用が前提になっておらず、`task_ops::create_task_with_roles`
+  相当の経路（ADR-0033 D2 の assignee 解決順）に寄せるには、`[[roles]]` 未登録でも落ちないことの確認を
+  含めた設計判断が要る。次に触る担当への申し送りとする。
+- **ADR-0034 の更新**: D2 を「タスクの終端状態に合わせる」規則へ書き換え、D3 に「まとめの run はレビューでは
+  なく要約（差し戻しの経路は無い）」を明記、D3a（新設）に H-2 のバックオフを記録、D6 に「`last_notified_at`
+  は複数の GUI クライアントで共有される」「`POST /reports/notified` は管理系トークン必須」を追記、
+  D7（新設）に P-72 の決定（`report.kind` はワーカーが結果ファイルで宣言し、taskd は固定表で写すだけ。
+  実装は Phase 24 のマージ後）を記録。
+
+証拠: `cargo test -p task-dispatch` → **112 passed / 0 failed**（監査前 109 + 新規 3）。
+`cargo test -p taskd` → **89 passed / 0 failed**（H-2 のテスト 1 件を含む。監査前の実測と同数だったのは
+偶然ではなく、監査前の PROGRESS.md の「130 passed」自体が誤記だったため）。
+`cargo test -p task-core` → **100 passed / 0 failed**。`cargo test --workspace` の
+`grep -c "^test result: FAILED"` は **0**。`cargo clippy --workspace --all-targets -- -D warnings`
+は **exit 0**。

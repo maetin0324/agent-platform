@@ -1,4 +1,4 @@
-//! 報告の圧縮（ADR-0033 D3。Phase 25）。
+//! 報告の圧縮（ADR-0033 D3。Phase 25。監査による修正は ADR-0034 D2/D7）。
 //!
 //! 親ノードにたまった子の報告を、**レビュー用の run 1 回**で 1 件にまとめる。判断（何件たまったか、
 //! 最古が何時間経ったか）は決定的で、まとめる中身だけが LLM の仕事（`Check::Reviewer` と同じ「別 run」の形）。
@@ -7,6 +7,10 @@
 //! 「`reports` を読む」「まとめのタスクを `tasks` に 1 件作る」だけで、LLM もワーカーも起動しない。
 //! 起こした run が `done` になると、ディスパッチャ（`task-dispatch` の `reports` モジュール）が
 //! その `summary` を親ノードの報告にし、`sources` に子の報告を入れる。
+//!
+//! 監査 H-2: 同じノード・同じ案件のまとめタスクが直近失敗していれば、`compress_after_secs` が
+//! 経つまで次のまとめを作らない(バックオフ)。子の報告は `sources` に入るまで「レビュー待ち」のままなので、
+//! まとめが失敗し続けても tick ごとに新しいタスクが積み上がることはない。
 
 use std::path::Path;
 
@@ -102,6 +106,31 @@ fn has_open_compaction_task(
     }))
 }
 
+/// 監査 H-2: 同じノード・同じ案件のまとめタスクが直近 `within_secs` 以内に `Failed` / `Cancelled` で
+/// 終わっていれば、次のまとめを作らない(バックオフ)。まとめの run が失敗し続けても、子の報告がたまる
+/// たびに無限にタスクが作られるのを防ぐ。
+fn has_recently_failed_compaction_task(
+    store: &dyn TaskStore,
+    node_id: &str,
+    project_id: Option<ProjectId>,
+    now: OffsetDateTime,
+    within_secs: u64,
+) -> Result<bool, StoreError> {
+    let filter = ListFilter {
+        statuses: vec![Status::Failed, Status::Cancelled],
+        project_id,
+        ..ListFilter::default()
+    };
+    let page = store.list_page(&filter, ListOrder::UpdatedDesc, None, OPEN_TASK_SCAN)?;
+    let within = i64::try_from(within_secs).unwrap_or(i64::MAX);
+    Ok(page.items.iter().any(|t| {
+        t.role.as_deref() == Some(report::COMPACTION_ROLE)
+            && t.assignee.as_deref() == Some(node_id)
+            && t.project_id == project_id
+            && (now - t.updated_at).whole_seconds() < within
+    }))
+}
+
 /// まとめの run のタスク（`kind = execute`、担当は親ノード）。
 /// 受け入れ条件は置かない: 出力は「1 件の報告」そのもので、決定的に確かめられるものが無いため
 /// （レビューは条件ゼロで全 pass = `done`。報告自体は run の終端の時点で作られる）。
@@ -165,6 +194,11 @@ pub fn schedule_report_compaction(
                 continue;
             }
             if has_open_compaction_task(store, &node.id, project_id)? {
+                continue;
+            }
+            // 監査 H-2: 直近で失敗したまとめタスクがあれば、`compress_after_secs` 経つまでバックオフする。
+            if has_recently_failed_compaction_task(store, &node.id, project_id, now, config.compress_after_secs)? {
+                tracing::debug!(node = %node.id, ?project_id, "reports: backing off after a recently failed compaction run");
                 continue;
             }
             let task = compaction_task(node, project_id, &items, workspace_root, now);
@@ -288,6 +322,49 @@ mod tests {
         );
         let created = schedule_report_compaction(&store, &cfg, &root, now + time::Duration::hours(2)).expect("schedule");
         assert_eq!(created.len(), 1, "2 時間経過で起きる");
+    }
+
+    /// 監査 H-2: まとめ run が失敗し続けても、`compress_after_secs` が経つまでは次のまとめを作らない。
+    #[test]
+    fn a_recently_failed_compaction_task_backs_off_until_compress_after_secs_passes() {
+        let store = store_with_org();
+        let now = OffsetDateTime::now_utc();
+        let project = ProjectId::new();
+        let cfg = ReportsConfig::default();
+        let root = std::path::PathBuf::from("/tmp/taskd-test");
+
+        for n in 0..4 {
+            store.report_append(&child_report(Some(project), now, n)).expect("append");
+        }
+
+        // 同じノード・同じ案件の、直近失敗したまとめタスク。
+        let node = OrgNode {
+            id: "coding".into(),
+            parent_id: Some("secretary".into()),
+            name: "coding".into(),
+            kind: OrgKind::Department,
+            genre: None,
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut failed = compaction_task(&node, Some(project), &[], &root, now - time::Duration::minutes(10));
+        failed.status = Status::Failed;
+        failed.updated_at = now - time::Duration::minutes(10);
+        store.insert(&failed).expect("insert");
+
+        assert!(
+            schedule_report_compaction(&store, &cfg, &root, now)
+                .expect("schedule")
+                .is_empty(),
+            "失敗直後はバックオフされ、次のまとめを作らない"
+        );
+
+        // `compress_after_secs` が経てば作られる。
+        let later = now + time::Duration::seconds(cfg.compress_after_secs as i64) + time::Duration::minutes(11);
+        let created = schedule_report_compaction(&store, &cfg, &root, later).expect("schedule");
+        assert_eq!(created.len(), 1, "バックオフ期間を過ぎればまた作られる");
     }
 
     #[test]

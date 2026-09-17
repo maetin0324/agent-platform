@@ -1,17 +1,24 @@
-//! 報告の生成（ADR-0033 D3。Phase 25）。
+//! 報告の生成（ADR-0033 D3。Phase 25。監査による修正は ADR-0034 D2/D7）。
 //!
-//! run が終端（`done` / `error` / `question`）に達するたび、担当ノード（`task.assignee`）の報告を **1 件**
-//! 作る。**LLM は呼ばない**（DESIGN 原則 1）: 文面は結果ファイルの `summary` / `evidence` と、その run が
-//! 出した成果物の一覧から決定的に組む（文面の組み立て自体は `task_core::report` の純粋関数）。
+//! 報告は「run の終端」ではなく「**タスクの終端状態**」に合わせて 1 件作る。**LLM は呼ばない**
+//! （DESIGN 原則 1）: 文面は結果ファイルの `summary` / `evidence` と、その run が出した成果物の一覧から
+//! 決定的に組む（文面の組み立て自体は `task_core::report` の純粋関数）。
 //!
-//! - `assignee` が無いタスクでは何も作らない（従来どおりのタスクは報告の対象外）。
-//! - `Error` は `bad_news` で、生成と同時に各祖先へ複製する（圧縮を待たない。SPEC §2.4）。
+//! - `assignee` が無いタスクでは何も作らない（従来どおりのタスクは報告の対象外）。`assignee` があっても
+//!   組織に存在しないノードなら、報告は作らず `warn!` する（監査 M-5。level 0 の秘書の報告に化けるのを防ぐ）。
+//! - `result`（`kind = result`）は、レビューを通って `Status::Done` になったときに作る。ワーカーの
+//!   「できました」がレビューで差し戻された場合は作らない（DESIGN 原則 4）。
+//! - `bad_news` は、`Status::Failed` になったときに原因を問わず 1 件作る（ワーカーの `error`、供給側失敗の
+//!   requeue 上限到達、レビュー不合格のどれでも）。生成と同時に各祖先へ複製する（圧縮を待たない。SPEC §2.4）。
+//!   `retryable` でまだ `ready` に戻るだけの途中の失敗は作らない。
+//! - `question` は run の終端（人の返事を待つ状態は即知らせる）。
 //! - まとめの run（`role = COMPACTION_ROLE`）の `done` は、親ノードの報告になり `sources` に子の報告が入る。
+//!   `sources` は同じ案件の子報告に限る（監査 H-1。案件をまたいで混ざらない）。
 //! - 途中経過（`progress`）は作らない（通知は数時間単位なので run の途中は要らない）。
 
 use task_core::report::{self, Report};
 use task_core::{Event, StoreError, Task, TaskId, TaskStore};
-use task_worker::{AdapterError, RunOutcome, Terminal};
+use task_worker::{AdapterError, Evidence, RunOutcome, Terminal};
 use time::OffsetDateTime;
 
 /// run の終端のうち、報告に必要な部分だけを取り出したもの。
@@ -22,8 +29,25 @@ pub(crate) enum TerminalReport {
     Question { text: String },
 }
 
-/// アダプタの結果から報告の材料を取り出す（供給側の失敗 = `Err` は報告にしない。
-/// requeue / cooldown の話であって、人に上げる「悪い知らせ」ではないため）。
+/// `evidence` を報告の本文用に整形する（ワーカー run の直接の `Done` からでも、レビュー後の `entry.subject` からでも使う）。
+pub(crate) fn format_evidence(evidence: &[Evidence]) -> Vec<String> {
+    evidence
+        .iter()
+        .map(|e| {
+            let mut line = format!("条件 {}", e.criterion);
+            if let Some(cmd) = &e.command {
+                line.push_str(&format!(": {cmd}"));
+            }
+            if let Some(exit) = e.exit {
+                line.push_str(&format!(" → exit {exit}"));
+            }
+            line
+        })
+        .collect()
+}
+
+/// アダプタの結果から報告の材料を取り出す。`Err`（供給側の失敗）は `None`
+/// （呼び出し側が `outcome.next == Status::Failed` のときだけ別途 bad_news を組む。ADR-0034 D2）。
 pub(crate) fn terminal_report(result: &Result<RunOutcome, AdapterError>) -> Option<TerminalReport> {
     match result {
         Ok(RunOutcome {
@@ -31,19 +55,7 @@ pub(crate) fn terminal_report(result: &Result<RunOutcome, AdapterError>) -> Opti
             ..
         }) => Some(TerminalReport::Done {
             summary: summary.clone(),
-            evidence: evidence
-                .iter()
-                .map(|e| {
-                    let mut line = format!("条件 {}", e.criterion);
-                    if let Some(cmd) = &e.command {
-                        line.push_str(&format!(": {cmd}"));
-                    }
-                    if let Some(exit) = e.exit {
-                        line.push_str(&format!(" → exit {exit}"));
-                    }
-                    line
-                })
-                .collect(),
+            evidence: format_evidence(evidence),
         }),
         Ok(RunOutcome {
             terminal: Terminal::Error { message, retryable },
@@ -86,17 +98,23 @@ pub(crate) fn record_run_report(
         return Ok(None);
     };
     let org = store.org_list()?;
+    if !org.iter().any(|n| n.id == assignee) {
+        // 監査 M-5: 未知の assignee は `level_of` が 0 を返すので「秘書の報告」に化ける。作らず警告する。
+        tracing::warn!(task_id = %task.id, assignee, "reports: assignee is not a known org node; skipping report");
+        return Ok(None);
+    }
     let level = report::level_of(&org, assignee);
     let report = match terminal {
         TerminalReport::Done { summary, evidence } => {
             let artifacts = artifacts_of_run(store, task.id, run_id)?;
             // まとめの run なら、objective に載せた子の報告（= このタスクを作った時点で
             // レビュー待ちだったもの）を `sources` にする。1 件も無ければ報告を作らない。
+            // 監査 H-1: 案件をまたいで混ざらないよう、まとめタスク自身の案件と同じ子報告に限る。
             let sources = if task.role.as_deref() == Some(report::COMPACTION_ROLE) {
                 let ids: Vec<_> = store
                     .report_unreviewed_children(assignee)?
                     .into_iter()
-                    .filter(|r| r.created_at <= task.created_at)
+                    .filter(|r| r.created_at <= task.created_at && r.project_id == task.project_id)
                     .map(|r| r.id)
                     .collect();
                 if ids.is_empty() {
@@ -180,8 +198,10 @@ pub(crate) fn cluster_report_recently_recorded(
     within_secs: i64,
 ) -> Result<bool, StoreError> {
     let headline = report::truncate_chars(&format!("{host} に接続できない"), report::HEADLINE_MAX_CHARS);
+    // 監査 L-1: docstring どおり「未読」だけを見る（既読の古い障害報告に引きずられない）。
     let recent = store.report_list(&task_core::ReportFilter {
         level: Some(0),
+        unread_only: true,
         limit: 50,
         ..Default::default()
     })?;
@@ -303,6 +323,19 @@ mod tests {
     fn a_task_without_an_assignee_produces_no_report() {
         let store = store_with_org();
         let task = task(None, Some(ProjectId::new()));
+        store.insert(&task).expect("insert");
+        let terminal = terminal_report(&done("できました")).expect("terminal");
+        let made = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
+            .expect("record");
+        assert!(made.is_none());
+        assert!(store.report_list(&task_core::ReportFilter::default()).expect("list").is_empty());
+    }
+
+    #[test]
+    fn an_unknown_assignee_produces_no_report_instead_of_becoming_the_secretarys() {
+        // 監査 M-5: `level_of` は未知ノードで 0 を返すので、チェック無しだと「秘書の報告」に化ける。
+        let store = store_with_org();
+        let task = task(Some("no-such-node"), Some(ProjectId::new()));
         store.insert(&task).expect("insert");
         let terminal = terminal_report(&done("できました")).expect("terminal");
         let made = record_run_report(store.as_ref(), &task, "run-1", &terminal, OffsetDateTime::now_utc())
@@ -442,6 +475,62 @@ mod tests {
         // まとめる対象が 1 件も無ければ報告を作らない（やり直しで二重に作らないため）。
         let again = record_run_report(store.as_ref(), &compaction, "run-2", &terminal, now).expect("record");
         assert!(again.is_none());
+    }
+
+    #[test]
+    fn a_compaction_runs_sources_do_not_cross_projects() {
+        // 監査 H-1: 案件 A と B のまとめ run が並行しても、A のまとめの sources に B の子報告が混ざらない。
+        let store = store_with_org();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        let now = OffsetDateTime::now_utc();
+        let child_a = task_core::Report {
+            id: task_core::ReportId::new(),
+            project_id: Some(project_a),
+            node_id: "coding-poc".into(),
+            task_id: None,
+            kind: report::ReportKind::Result,
+            level: 2,
+            headline: "A の結果".into(),
+            body: "本文 A".into(),
+            sources: Vec::new(),
+            read_at: None,
+            created_at: now - time::Duration::minutes(10),
+        };
+        let child_b = task_core::Report {
+            id: task_core::ReportId::new(),
+            project_id: Some(project_b),
+            node_id: "coding-poc".into(),
+            task_id: None,
+            kind: report::ReportKind::Result,
+            level: 2,
+            headline: "B の結果".into(),
+            body: "本文 B".into(),
+            sources: Vec::new(),
+            read_at: None,
+            created_at: now - time::Duration::minutes(10),
+        };
+        store.report_append_all(&[child_a.clone(), child_b.clone()]).expect("append");
+
+        let mut compaction_a = task(Some("coding"), Some(project_a));
+        compaction_a.role = Some(report::COMPACTION_ROLE.into());
+        store.insert(&compaction_a).expect("insert");
+        let mut compaction_b = task(Some("coding"), Some(project_b));
+        compaction_b.role = Some(report::COMPACTION_ROLE.into());
+        store.insert(&compaction_b).expect("insert");
+
+        let terminal = terminal_report(&done("A の案件のまとめ")).expect("terminal");
+        let summary_a = record_run_report(store.as_ref(), &compaction_a, "run-a", &terminal, now)
+            .expect("record")
+            .expect("some");
+        assert_eq!(summary_a.sources, vec![child_a.id], "A のまとめには A の子だけが入る");
+
+        // B は A のまとめが done になった後でも、自分の子だけをまとめて done にできる。
+        let terminal_b = terminal_report(&done("B の案件のまとめ")).expect("terminal");
+        let summary_b = record_run_report(store.as_ref(), &compaction_b, "run-b", &terminal_b, now)
+            .expect("record")
+            .expect("some");
+        assert_eq!(summary_b.sources, vec![child_b.id], "B のまとめには B の子だけが入る");
     }
 
 }

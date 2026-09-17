@@ -1094,8 +1094,12 @@ impl Dispatcher {
         let mut subject = ReviewSubject::default();
         // ADR-0013 D9: 供給側失敗なら種別（ProviderThrottled.reason）を、result を消費する前に取っておく。
         let failure_reason = result.as_ref().err().and_then(provider_failure_reason);
-        // ADR-0033 D3（Phase 25）: 報告の材料（`done` / `error` / `question` の中身）も、result を消費する前に取る。
+        // ADR-0033 D3 / ADR-0034 D2（監査 M-1〜M-3）: 報告の材料も、result を消費する前に取る。
+        // `terminal_report` は `Ok(RunOutcome)` の内容（question / worker 自身が返した error）。
+        // `adapter_error_text` は `Err(AdapterError)`（アダプタ／供給側の失敗）の表示文字列。
+        // どちらも「報告するかどうか」は後で `outcome.next` を見て決める（run の終端ではなくタスクの終端状態）。
         let terminal_report = crate::reports::terminal_report(&result);
+        let adapter_error_text = result.as_ref().err().map(|e| e.to_string());
         let (trigger, outcome_str, usage, provider_outcome) = match result {
             Ok(RunOutcome {
                 terminal: Terminal::Done { summary, usage, evidence },
@@ -1188,17 +1192,43 @@ impl Dispatcher {
         {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, next = ?outcome.next, attempts = outcome.attempts, outcome = %outcome_str, "worker finished");
-                // ADR-0033 D3: 担当ノード（`assignee`）がいれば、この run の報告を 1 件作る（決定的。LLM は呼ばない）。
-                if let Some(terminal) = terminal_report.as_ref()
+                // ADR-0034 D2（監査 M-1〜M-3）: `question` は run の終端でそのまま届ける。`done` はレビューを
+                // 通って `Status::Done` になってから（`on_review_finished` 側）作るので、ここでは作らない。
+                if matches!(terminal_report, Some(crate::reports::TerminalReport::Question { .. }))
+                    && let Some(question) = terminal_report.as_ref()
                     && let Err(e) = crate::reports::record_run_report(
                         self.store.as_ref(),
                         &task,
                         &run_id,
-                        terminal,
+                        question,
                         OffsetDateTime::now_utc(),
                     )
                 {
                     tracing::warn!(%task_id, %run_id, error = %e, "failed to record the report for this run");
+                }
+                // `bad_news` は `Status::Failed` に遷移したときだけ、原因を問わず作る（ワーカー自身の `error`、
+                // 供給側失敗が requeue 上限に達した場合のどちらも含む。監査 M-1）。
+                if outcome.next == Status::Failed {
+                    let bad_news = match &terminal_report {
+                        Some(t @ crate::reports::TerminalReport::Error { .. }) => Some(t.clone()),
+                        _ => adapter_error_text
+                            .as_ref()
+                            .map(|message| crate::reports::TerminalReport::Error {
+                                message: message.clone(),
+                                retryable: true,
+                            }),
+                    };
+                    if let Some(terminal) = bad_news.as_ref()
+                        && let Err(e) = crate::reports::record_run_report(
+                            self.store.as_ref(),
+                            &task,
+                            &run_id,
+                            terminal,
+                            OffsetDateTime::now_utc(),
+                        )
+                    {
+                        tracing::warn!(%task_id, %run_id, error = %e, "failed to record the report for this run");
+                    }
                 }
                 if outcome.next == Status::Reviewing && !self.spawn_review(task_id, run_id, &subject)? {
                     // Reviewer run の枠が無い: 次 tick の recover_reviews で再試行する。
@@ -1299,6 +1329,19 @@ impl Dispatcher {
             outcome.verdicts.sort_by_key(|v| v.criterion_idx);
         }
         let all_pass = outcome.all_pass();
+        // ADR-0034 D2（監査 M-1〜M-3）: レビュー不合格の理由（この run が `Status::Failed` に直結した場合の
+        // bad_news の材料。`Status::Ready` に戻るだけの途中の失敗では使わない）。
+        let review_fail_message = if all_pass {
+            None
+        } else {
+            let reasons: Vec<String> = outcome
+                .verdicts
+                .iter()
+                .filter(|v| !v.pass)
+                .map(|v| v.reason.clone())
+                .collect();
+            Some(reasons.join("; "))
+        };
         let mut events: Vec<Event> = reviewer_finished
             .into_iter()
             .chain(outcome.verdicts.iter().map(|v| Event::ReviewVerdict {
@@ -1371,6 +1414,42 @@ impl Dispatcher {
         match result {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, all_pass, next = ?outcome.next, attempts = outcome.attempts, "review finished");
+                // ADR-0034 D2（監査 M-1〜M-3）: `result` はレビューを通って `Status::Done` になったときだけ作る
+                // (ワーカーの「できました」がここで差し戻された分は報告にしない。DESIGN 原則 4)。
+                if outcome.next == Status::Done
+                    && let Some(review_entry) = entry.as_ref()
+                {
+                    let terminal = crate::reports::TerminalReport::Done {
+                        summary: review_entry.subject.summary.clone(),
+                        evidence: crate::reports::format_evidence(&review_entry.subject.evidence),
+                    };
+                    if let Err(e) = crate::reports::record_run_report(
+                        self.store.as_ref(),
+                        &task,
+                        &run_id,
+                        &terminal,
+                        OffsetDateTime::now_utc(),
+                    ) {
+                        tracing::warn!(%task_id, %run_id, error = %e, "failed to record the report for this run");
+                    }
+                } else if outcome.next == Status::Failed
+                    && let Some(message) = review_fail_message.as_ref()
+                {
+                    // レビュー不合格が retry を使い切って `Status::Failed` になった場合の bad_news（原因を問わない。監査 M-1）。
+                    let terminal = crate::reports::TerminalReport::Error {
+                        message: message.clone(),
+                        retryable: false,
+                    };
+                    if let Err(e) = crate::reports::record_run_report(
+                        self.store.as_ref(),
+                        &task,
+                        &run_id,
+                        &terminal,
+                        OffsetDateTime::now_utc(),
+                    ) {
+                        tracing::warn!(%task_id, %run_id, error = %e, "failed to record the report for this run");
+                    }
+                }
             }
             Err(StoreError::InvalidTransition(e)) => {
                 tracing::warn!(%task_id, error = %e, "review result could not be applied");
@@ -3611,6 +3690,152 @@ mod tests {
         let report = run_until_idle(&mut d, 200).await;
         assert!(report.idle);
         assert_eq!(transition_reasons(&store, task0.id), vec!["dispatch", "worker_error"]);
+    }
+
+    /// 監査 M-1〜M-3（ADR-0034 D2）: 報告はタスクの終端状態に合わせて作るテスト向けの、最小の組織（秘書 → coding → coding-poc）。
+    fn seed_org_for_reports(store: &Arc<dyn TaskStore>) {
+        let now = OffsetDateTime::now_utc();
+        for (id, parent, kind) in [
+            ("secretary", None, OrgKind::Secretary),
+            ("coding", Some("secretary"), OrgKind::Department),
+            ("coding-poc", Some("coding"), OrgKind::Section),
+        ] {
+            store
+                .org_upsert(&OrgNode {
+                    id: id.into(),
+                    parent_id: parent.map(str::to_string),
+                    name: id.into(),
+                    kind,
+                    genre: None,
+                    brief: String::new(),
+                    position: 0,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+    }
+
+    /// 2 回目以降の run で `ready` ファイルを作るアダプタ(レビューが 1 回差し戻されてから通る状況を作る)。
+    struct AttemptGatedAdapter {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for AttemptGatedAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+            sink.progress("working");
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n >= 1 {
+                std::fs::write(req.workspace.join("ready"), "1").unwrap();
+            }
+            Ok(RunOutcome {
+                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// 監査 M-1/M-2: 1 回目の「できました」がレビューで差し戻され、2 回目で通っても、`result` 報告は 1 件だけ。
+    #[tokio::test]
+    async fn a_review_retry_that_eventually_passes_produces_exactly_one_done_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_org_for_reports(&store);
+        let mut task = new_task(dir.path(), Check::Command { cmd: "test -f ready".into(), expect_exit: 0 }, 1);
+        task.assignee = Some("coding-poc".into());
+        task.project_id = Some(ProjectId::new());
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(AttemptGatedAdapter { calls: AtomicUsize::new(0) });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let report = run_until_idle(&mut d, 300).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!(t.status, Status::Done);
+        assert_eq!(t.attempts, 1, "1 回目のレビュー差し戻しで attempts を消費し、2 回目で done になる");
+        let reports = store.report_list(&ReportFilter::default()).unwrap();
+        let done_reports: Vec<_> = reports.iter().filter(|r| r.kind == ReportKind::Result).collect();
+        assert_eq!(done_reports.len(), 1, "差し戻された 1 回目は報告にせず、done の報告は 1 件だけ: {reports:?}");
+    }
+
+    /// 監査 M-1: 供給側失敗が requeue の上限に達して通常の失敗（`Status::Failed`）になったら、bad_news を 1 件作る。
+    #[tokio::test]
+    async fn requeue_limit_reached_produces_one_bad_news_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_org_for_reports(&store);
+        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        task.assignee = Some("coding-poc".into());
+        task.project_id = Some(ProjectId::new());
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(AlwaysThrottledAdapter { calls: AtomicUsize::new(0), review_only: false });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.max_requeues = 1;
+        let report = run_until_idle(&mut d, 500).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!(t.status, Status::Failed);
+        let reports = store.report_list(&ReportFilter::default()).unwrap();
+        let bad_news_at_source: Vec<_> = reports
+            .iter()
+            .filter(|r| r.kind == ReportKind::BadNews && r.node_id == "coding-poc")
+            .collect();
+        assert_eq!(bad_news_at_source.len(), 1, "requeue 上限で failed になったら bad_news は 1 件だけ: {reports:?}");
+    }
+
+    /// worker が返す `retryable: true` の `error` を毎回返すアダプタ(供給側失敗ではなく、ワーカー自身の申告)。
+    struct RetryableErrorAdapter;
+
+    #[async_trait]
+    impl WorkerAdapter for RetryableErrorAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(&self, _req: RunRequest, _run_id: &str, _limits: RunLimits, sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+            sink.progress("working");
+            Ok(RunOutcome {
+                terminal: Terminal::Error { message: "flaky".into(), retryable: true },
+                exit_code: Some(1),
+            })
+        }
+    }
+
+    /// 監査 M-1: `max_retries` に余裕があるうちの retryable な失敗は `Status::Ready` に戻るだけで、
+    /// bad_news をリトライのたびに作らない(以前は `WorkerError` のたびに bad_news が飛んでいた)。
+    #[tokio::test]
+    async fn three_retryable_worker_errors_in_a_row_produce_no_bad_news_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_org_for_reports(&store);
+        // max_retries は大きめに取り、3 回失敗するまでの間は確実に `ready` に戻るだけにする。
+        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 50);
+        task.assignee = Some("coding-poc".into());
+        task.project_id = Some(ProjectId::new());
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(RetryableErrorAdapter);
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        // 少なくとも 3 回、retryable な失敗を経験するまで tick する(タイミングにより 3 を超えても構わない。
+        // ここで確かめたいのは「failed になる前に bad_news が作られないこと」)。
+        for _ in 0..200 {
+            d.tick().unwrap();
+            let t = store.get(task.id).unwrap().unwrap();
+            if t.attempts >= 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let t = store.get(task.id).unwrap().unwrap();
+        assert!(t.attempts >= 3, "少なくとも 3 回は retryable な失敗を経たはず: attempts={}", t.attempts);
+        assert_ne!(t.status, Status::Failed, "max_retries=50 なのでまだ failed にならない");
+        let reports = store.report_list(&ReportFilter::default()).unwrap();
+        assert_eq!(
+            reports.iter().filter(|r| r.kind == ReportKind::BadNews).count(),
+            0,
+            "途中の retryable な失敗では bad_news を作らない: {reports:?}"
+        );
     }
 
     /// ADR-0011（P-38）: Reviewer run の供給側失敗による延期も max_requeues までで、超えたら Reviewer 条件を fail にして判定する。
