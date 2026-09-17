@@ -95,6 +95,22 @@ const GLOSSARY: { term: string; text: string }[] = [
     term: "接続方式（auth）",
     text: "クラスタ（[[clusters]]）ごとに設定する、接続の張り方。manual（既定）は taskd が自分では接続を張らず、人が手元で scripts/cluster-login.sh を実行する。publickey は鍵だけで入れるクラスタで、クラスタ画面の「接続」ボタンを押すだけで taskd が張る（ディスパッチャが自動でも試みる）。totp は publickey の後に検証コード（2 要素認証）が要るクラスタで、「接続」→ 表示されたプロンプトを見て検証コードを入力 →「送信」。コードはその場で ssh に渡すだけで taskd には保存されず、ログにも画面にも残らない。",
   },
+  {
+    term: "組織",
+    text: "SPEC §3.2「組織（一つ、役割の木）」。秘書を根に部・課へと分かれる、たった一つの役割の木。各ノードは「人」で、長期記憶を持ち複数の案件の仕事を並列に抱える（記憶の注入は G13b）。/org の組織の木から役職を足す・分ける・消すことができる。",
+  },
+  {
+    term: "案件",
+    text: "SPEC §3.3「案件は組織の上から入り、分解されて下へ流れる」。曖昧な依頼文（request）を投げると、秘書が理解確認・方針・最初の途中目標を返し（G13b）、アジャイルに途中目標ごとの達成を判定しながら進む。",
+  },
+  {
+    term: "途中目標（milestone）",
+    text: "SPEC §7「途中目標は予め大まかに決めておいて、適宜再設計する」。案件の中の通し番号（seq）付きの区切りで、proposed → approved → in_progress → reached（または redesigned）と進む。達成ごとに人が Go を出すか再設計するかを判定する。",
+  },
+  {
+    term: "仕事の木（DAG）",
+    text: "SPEC §3.3「これをパッと見れば、おかしな方針を立てていないかが分かる」。案件に属するタスク（tasks WHERE project_id = ?）を、既存の parent_id（親子）／depends_on（依存）の辺でそのまま描いたもの。/graph の DAG と同じ描画部品を使うが、ノードをクリックすると /tasks/:id へ移る点が違う。",
+  },
 ];
 
 const TOC = [
@@ -107,6 +123,42 @@ const TOC = [
 ] satisfies { id: string; heading: string; icon: IconName }[];
 
 const SCREENS: { href: string | null; icon: IconName; title: string; text: string }[] = [
+  {
+    href: "/org/secretary",
+    icon: "message",
+    title: "秘書",
+    text: "SPEC §4「秘書との対話 — 案件を投げる、状況を聞く、方針を変える」。対話（messages）は taskd 側 Phase 24 待ちのため、今はプレースホルダ。",
+  },
+  {
+    href: "/org",
+    icon: "users",
+    title: "組織",
+    text: "SPEC §4「組織の木 — 誰が何を抱えているか」。秘書を根にした部・課の木を見る画面。ノードを選ぶと brief・分野・抱えているタスクが出る。役職の追加・変更・削除もここで行う（管理系 API のトークンが要る）。「話す」は Phase G13b。",
+  },
+  {
+    href: "/projects",
+    icon: "folder",
+    title: "案件",
+    text: "SPEC §4「仕事の木（DAG） — 案件ごとの分解と進み具合」。案件の一覧・作成と、個々の案件の途中目標・仕事の木（DAG）を見る画面。",
+  },
+  {
+    href: "/reports",
+    icon: "send",
+    title: "報告",
+    text: "SPEC §4「報告の流れ — 各所から上がってくる報告を高速で流し見する」。報告（reports）の生成・圧縮は taskd 側 Phase 25 待ちのため、今はプレースホルダ。",
+  },
+  {
+    href: "/approvals",
+    icon: "shield",
+    title: "認可",
+    text: "SPEC §4「認可の要求 — 聞かれたことに『今回だけ／今後ずっと』で答える」。認可（approvals）は taskd 側 Phase 26 待ちのため、今はプレースホルダ。",
+  },
+  {
+    href: "/artifacts",
+    icon: "file",
+    title: "成果物",
+    text: "SPEC §4「成果物 — 調査文書・リンク集はここで読む」。今はプレースホルダ（個々のタスクの成果物は従来どおり /tasks/:id で見られる）。",
+  },
   {
     href: "/",
     icon: "inbox",

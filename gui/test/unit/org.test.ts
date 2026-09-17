@@ -1,0 +1,242 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { loadOrg } from "~/routes/org";
+import { TaskdClient } from "~/taskd/client.server";
+import {
+  buildOrgCreateInput,
+  buildOrgPatchInput,
+  createOrgNode,
+  deleteOrgNode,
+  patchOrgNode,
+} from "~/taskd/org-admin.server";
+import type { OrgList, OrgNode, ProjectDetail, ProjectList } from "~/taskd/types";
+import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+
+let mock: MockTaskd;
+let client: TaskdClient;
+
+beforeEach(async () => {
+  mock = await startMockTaskd();
+  client = new TaskdClient({ baseUrl: mock.baseUrl });
+});
+
+afterEach(async () => {
+  await mock.close();
+});
+
+const orgNode = (id: string, over: Partial<OrgNode> = {}): OrgNode => ({
+  id,
+  parent_id: null,
+  name: id,
+  kind: "section",
+  position: 0,
+  created_at: "2026-09-17T00:00:00Z",
+  updated_at: "2026-09-17T00:00:00Z",
+  ...over,
+});
+
+describe("buildOrgCreateInput", () => {
+  it("reads id/name/kind/parent_id/genre/brief/position from a FormData", () => {
+    const form = new FormData();
+    form.set("id", "coding-poc");
+    form.set("name", "PoC・R&D 課");
+    form.set("kind", "section");
+    form.set("parent_id", "coding");
+    form.set("genre", "coding");
+    form.set("brief", "小さく試す");
+    form.set("position", "4");
+    expect(buildOrgCreateInput(form)).toEqual({
+      id: "coding-poc",
+      name: "PoC・R&D 課",
+      kind: "section",
+      parent_id: "coding",
+      genre: "coding",
+      brief: "小さく試す",
+      position: 4,
+    });
+  });
+
+  it("omits optional fields when blank, defaults kind to section", () => {
+    const form = new FormData();
+    form.set("id", "x");
+    form.set("name", "X");
+    expect(buildOrgCreateInput(form)).toEqual({ id: "x", name: "X", kind: "section" });
+  });
+});
+
+describe("buildOrgPatchInput", () => {
+  it("genre: 空の選択肢を選ぶと明示的に null（分野なし）を送る", () => {
+    const form = new FormData();
+    form.set("name", "N");
+    form.set("kind", "section");
+    form.set("parent_id", "coding");
+    form.set("genre", "");
+    form.set("brief", "");
+    const body = buildOrgPatchInput(form);
+    expect(body.genre).toBeNull();
+  });
+
+  it("genre: 値を選べばその値を送る", () => {
+    const form = new FormData();
+    form.set("name", "N");
+    form.set("kind", "section");
+    form.set("parent_id", "coding");
+    form.set("genre", "research");
+    form.set("brief", "");
+    expect(buildOrgPatchInput(form).genre).toBe("research");
+  });
+
+  it("parent_id: 空の選択肢を選ぶと明示的に null（根にする）を送る", () => {
+    const form = new FormData();
+    form.set("name", "N");
+    form.set("kind", "secretary");
+    form.set("parent_id", "");
+    form.set("brief", "");
+    expect(buildOrgPatchInput(form).parent_id).toBeNull();
+  });
+});
+
+describe("loadOrg", () => {
+  it("GET /org と、各案件の GET /projects/{id} の tasks から抱えている仕事を数える", async () => {
+    const org: OrgList = {
+      items: [
+        orgNode("secretary", { kind: "secretary" }),
+        orgNode("coding", { kind: "department", parent_id: "secretary" }),
+        orgNode("coding-poc", { parent_id: "coding", genre: "coding" }),
+      ],
+    };
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, org));
+    mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, { genres: [{ id: "coding" }] }));
+    mock.on("GET", "/api/v1/projects", (_req, res) =>
+      sendJson(res, 200, {
+        items: [{ id: "p1", title: "Pluvio", request: "…", status: "active", created_at: "…", updated_at: "…" }],
+      } satisfies ProjectList),
+    );
+    mock.on("GET", "/api/v1/projects/p1", (_req, res) =>
+      sendJson(res, 200, {
+        project: { id: "p1", title: "Pluvio", request: "…", status: "active", created_at: "…", updated_at: "…" },
+        milestones: [],
+        tasks: [
+          {
+            id: "t1",
+            title: "PoC",
+            status: "running",
+            parent_id: null,
+            depends_on: [],
+            assignee: "coding-poc",
+            milestone_id: null,
+          },
+          {
+            id: "t2",
+            title: "検証",
+            status: "done",
+            parent_id: null,
+            depends_on: [],
+            assignee: "coding-poc",
+            milestone_id: null,
+          },
+        ],
+      } satisfies ProjectDetail),
+    );
+
+    const result = await loadOrg(client, new Request("http://gui.invalid/org"));
+
+    expect(result.org).toEqual(org);
+    expect(result.genres).toEqual(["coding"]);
+    expect(result.workload["coding-poc"]).toEqual({ open: 1, total: 2 });
+    expect(result.assignedTasks).toHaveLength(2);
+    expect(result.assignedTasks[0]).toMatchObject({ project_id: "p1", project_title: "Pluvio" });
+  });
+
+  it("GET /config が失敗しても組織は返す（genres は空になる）", async () => {
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/config", (_req, res) =>
+      sendProblem(res, { status: 500, code: "internal", detail: "boom" }),
+    );
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+
+    const result = await loadOrg(client, new Request("http://gui.invalid/org"));
+    expect(result.genres).toEqual([]);
+    expect(result.workload).toEqual({});
+  });
+});
+
+describe("createOrgNode / patchOrgNode / deleteOrgNode (ADR-0033 D1, docs/taskd-api-v1.md §3.43〜3.45)", () => {
+  it("POST /org — success", async () => {
+    const node = orgNode("coding-poc", { parent_id: "coding" });
+    mock.on("POST", "/api/v1/org", (_req, res) => sendJson(res, 201, node));
+    const result = await createOrgNode(client, { id: "coding-poc", name: "coding-poc", kind: "section" });
+    expect(result).toEqual({ ok: true, op: "create", id: "coding-poc", node });
+  });
+
+  it("POST /org — 409 org_node_exists は文言をそのまま返す", async () => {
+    mock.on("POST", "/api/v1/org", (_req, res) =>
+      sendProblem(res, { status: 409, code: "org_node_exists", detail: "coding-poc already exists" }),
+    );
+    const result = await createOrgNode(client, { id: "coding-poc", name: "x", kind: "section" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.status).toBe(409);
+      expect(result.error.code).toBe("org_node_exists");
+      expect(result.error.detail).toBe("coding-poc already exists");
+    }
+  });
+
+  it("POST /org — 401 unauthorized（token_file 未設定でも管理系は拒否される）", async () => {
+    mock.on("POST", "/api/v1/org", (_req, res) =>
+      sendProblem(res, { status: 401, code: "unauthorized", detail: "token required" }),
+    );
+    const result = await createOrgNode(client, { id: "x", name: "x", kind: "section" });
+    expect(result).toEqual({
+      ok: false,
+      op: "create",
+      id: "x",
+      error: expect.objectContaining({ status: 401, code: "unauthorized" }) as unknown,
+    });
+  });
+
+  it("PATCH /org/{id} — success", async () => {
+    const node = orgNode("coding-poc", { brief: "更新後" });
+    mock.on("PATCH", "/api/v1/org/coding-poc", (_req, res) => sendJson(res, 200, node));
+    const result = await patchOrgNode(client, "coding-poc", { brief: "更新後" });
+    expect(result).toEqual({ ok: true, op: "patch", id: "coding-poc", node });
+  });
+
+  it("PATCH /org/{id} — 404 org_node_not_found", async () => {
+    mock.on("PATCH", "/api/v1/org/missing", (_req, res) =>
+      sendProblem(res, { status: 404, code: "org_node_not_found", detail: "no such node" }),
+    );
+    const result = await patchOrgNode(client, "missing", {});
+    expect(result.ok).toBe(false);
+  });
+
+  it("DELETE /org/{id} — success (taskd sends 204 with an empty body, not 200 {})", async () => {
+    // `crates/task-api/src/handlers.rs::delete_org_node` は `StatusCode::NO_CONTENT.into_response()`
+    // （本文なし）を返す。`res.json()` はそれを空文字列として解析に失敗するので、
+    // `TaskdClient.delete` は 204 を特別扱いする必要がある（`~/taskd/client.server.ts`）。
+    mock.on("DELETE", "/api/v1/org/coding-poc", (_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const result = await deleteOrgNode(client, "coding-poc");
+    expect(result).toEqual({ ok: true, op: "delete", id: "coding-poc" });
+  });
+
+  it("DELETE /org/{id} — 409 org_node_in_use（仕事を抱えている・子ノードがある）の文言をそのまま返す", async () => {
+    mock.on("DELETE", "/api/v1/org/coding", (_req, res) =>
+      sendProblem(res, { status: 409, code: "org_node_in_use", detail: "coding has 2 open task(s)" }),
+    );
+    const result = await deleteOrgNode(client, "coding");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("org_node_in_use");
+      expect(result.error.detail).toBe("coding has 2 open task(s)");
+      expect(result.error.status).toBe(409);
+    }
+  });
+
+  it("組織の編集は成功しても POST /reload を呼ばない（DB が正。ADR-0033 D1）", async () => {
+    mock.on("POST", "/api/v1/org", (_req, res) => sendJson(res, 201, orgNode("x")));
+    await createOrgNode(client, { id: "x", name: "x", kind: "section" });
+    expect(mock.requests.some((r) => r.url === "/api/v1/reload")).toBe(false);
+  });
+});

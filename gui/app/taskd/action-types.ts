@@ -6,6 +6,9 @@ import type {
   Action,
   ClusterConnectResult,
   ClusterConnectStart,
+  Milestone,
+  OrgNode,
+  Project,
   ProviderCheckResponse,
   ProviderConfigView1,
   ReloadResult,
@@ -114,6 +117,27 @@ export type ClusterConnectOutcome =
       id: string;
       error: ActionError;
     };
+
+/**
+ * 組織の木の編集（ADR-0033 D1、docs/taskd-api-v1.md §3.43〜3.45。**管理系**、`token_file` 未設定でも 401）:
+ * `POST/PATCH/DELETE /org...` の結果。taskd のエラーは例外にせず `{ok:false, error}` にする
+ * （409 `org_node_exists` / `org_node_in_use`、422 `validation`、401 `unauthorized` を含む）。
+ * 組織は設定ではなく DB が正（ADR-0033 D1）なので、プロバイダ・秘密とは違い `POST /reload` は呼ばない。
+ */
+export type OrgOpOutcome =
+  | { ok: true; op: "create" | "patch"; id: string; node: OrgNode }
+  | { ok: true; op: "delete"; id: string }
+  | { ok: false; op: "create" | "patch" | "delete"; id: string; error: ActionError };
+
+/**
+ * 案件・途中目標の状態変更（ADR-0033 D2、docs/taskd-api-v1.md §3.46〜3.49）: `PATCH /projects/{id}` /
+ * `POST /projects/{id}/milestones` / `PATCH /milestones/{id}` の結果。読み取り・案件操作は通常の要求
+ * （管理系ではない。3.42〜3.49 の前書き）。taskd のエラーは例外にせず `{ok:false, error}` にする。
+ */
+export type ProjectOpOutcome =
+  | { ok: true; op: "project_status"; project: Project }
+  | { ok: true; op: "milestone_create" | "milestone_status"; milestone: Milestone }
+  | { ok: false; op: "project_status" | "milestone_create" | "milestone_status"; error: ActionError };
 
 export type AccountOpOutcome =
   | { ok: true; op: "create"; id: string; adapter: AccountAdapter; account: AccountView }

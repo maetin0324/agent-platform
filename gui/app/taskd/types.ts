@@ -158,6 +158,14 @@ export type Check =
  */
 export type TaskKind = "plan" | "execute" | "review" | "approval";
 /**
+ * 途中目標の一意識別子（ULID）。
+ */
+export type MilestoneId = string;
+/**
+ * 案件の一意識別子（ULID）。`TaskId` と同じ形。
+ */
+export type ProjectId = string;
+/**
  * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
  * taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
  */
@@ -205,6 +213,10 @@ export type AttentionItem =
       type: "cluster_unavailable";
     };
 /**
+ * 途中目標の状態（ADR-0033 D2。SPEC §7 のアジャイル: 達成ごとに人が判定し、Go か再設計）。
+ */
+export type MilestoneStatus = "proposed" | "approved" | "in_progress" | "reached" | "redesigned";
+/**
  * 受け入れ条件 1 件の指定。現在の `taskctl add` の `--accept`/`--check-cmd`/
  * `--check-artifact`/`--check-reviewer` に対応する。API の `POST /tasks` の `acceptance[]` でもある（`docs/gui/api.md` §3.4）。
  */
@@ -226,6 +238,14 @@ export type CriterionSpec =
       text: string;
       type: "reviewer";
     };
+/**
+ * 組織のノードの種類（ADR-0033 D1）。`secretary` は根で 1 つだけ。
+ */
+export type OrgKind = "secretary" | "department" | "section";
+/**
+ * 案件の状態（ADR-0033 D2）。
+ */
+export type ProjectStatus = ("active" | "paused" | "done") | "proposed";
 
 /**
  * スキーマ生成のルート。
@@ -249,9 +269,18 @@ export interface ApiV1Schema {
   graph: Graph;
   health: Health;
   inbox: Inbox;
+  milestone_create: MilestoneCreateBody;
+  milestone_patch: MilestonePatchBody;
   new_plan: NewPlanSpec;
   new_task: NewTaskSpec;
+  org_create: OrgCreateBody;
+  org_list: OrgList;
+  org_patch: OrgPatchBody;
   problem: Problem;
+  project_create: ProjectCreateBody;
+  project_detail: ProjectDetail;
+  project_list: ProjectList;
+  project_patch: ProjectPatchBody;
   provider_check: ProviderCheckResponse;
   provider_config: ProviderConfigView1;
   providers: Providers;
@@ -953,6 +982,11 @@ export interface Task {
    * ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。
    */
   aggregate?: boolean;
+  /**
+   * ADR-0033 D2: 割り当てられた組織のノード（`org_nodes.id`）。あれば `worker_hint` の解決で
+   * 役割・分野より先に見る。無ければ従来どおり（互換）。
+   */
+  assignee?: string | null;
   attempts: number;
   budget: Budget;
   created_at: string;
@@ -966,9 +1000,17 @@ export interface Task {
   inputs: ArtifactRef[];
   kind: TaskKind;
   lease?: Lease | null;
+  /**
+   * ADR-0033 D2: このタスクが属する途中目標（`project_id` の案件のもの）。
+   */
+  milestone_id?: MilestoneId | null;
   objective: string;
   parent_id?: TaskId | null;
   priority: number;
+  /**
+   * ADR-0033 D2: このタスクが属する案件。導入前のタスク・案件に属さないタスクには無い。
+   */
+  project_id?: ProjectId | null;
   /**
    * ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。
    * 導入前のタスクには無いので任意。
@@ -1223,6 +1265,23 @@ export interface AnswerNote {
   question: string;
 }
 /**
+ * `POST /projects/{id}/milestones` の要求本文。`seq` はストアが採番する。
+ */
+export interface MilestoneCreateBody {
+  description?: string | null;
+  /**
+   * 省略時は `proposed`（秘書が提案し、人が承認する。SPEC §7）。
+   */
+  status?: MilestoneStatus | null;
+  title: string;
+}
+/**
+ * `PATCH /milestones/{id}` の要求本文。
+ */
+export interface MilestonePatchBody {
+  status: MilestoneStatus;
+}
+/**
  * `taskctl plan` から組み立てる新規 Plan タスクの指定。API の `POST /plans` の本文でもある（`docs/gui/api.md` §3.14）。
  */
 export interface NewPlanSpec {
@@ -1255,6 +1314,11 @@ export interface NewTaskSpec {
    */
   aggregate?: boolean;
   /**
+   * ADR-0033 D2: 割り当てる組織のノード（`org_nodes.id`）。既定の解決で役割・分野より先に見る。
+   * 存在しないノードはエラー。
+   */
+  assignee?: string | null;
+  /**
    * ADR-0018: 指定すると `WorkspaceSpec::Remote{cluster, path}` になり、コマンドはそのクラスタで実行される。
    * `workspace` がクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。
    */
@@ -1279,9 +1343,17 @@ export interface NewTaskSpec {
    * 省略時は役割の既定 → 600。
    */
   max_wall_secs?: number | null;
+  /**
+   * ADR-0033 D2: このタスクが属する途中目標。`project_id` と同じ案件のものであること。
+   */
+  milestone_id?: MilestoneId | null;
   objective: string;
   parent?: TaskId | null;
   priority?: number;
+  /**
+   * ADR-0033 D2: このタスクが属する案件。存在しない案件はエラー。
+   */
+  project_id?: ProjectId | null;
   /**
    * ADR-0016 D1: 役割名（自由記述）。`[[roles]]` にあれば省略値の既定と run 時の指示文が効く。
    */
@@ -1292,6 +1364,65 @@ export interface NewTaskSpec {
   tier?: Tier | null;
   title: string;
   workspace?: string | null;
+}
+/**
+ * `POST /org` の要求本文（管理系）。
+ */
+export interface OrgCreateBody {
+  brief?: string | null;
+  genre?: string | null;
+  id: string;
+  kind: OrgKind;
+  name: string;
+  parent_id?: string | null;
+  position?: number | null;
+}
+/**
+ * Phase 23（ADR-0033 D1）: 組織（一つ、役割の木）。
+ */
+export interface OrgList {
+  items: OrgNode[];
+}
+/**
+ * 組織の 1 ノード（＝ SPEC §3.2 の「人」）。
+ */
+export interface OrgNode {
+  /**
+   * 担当の一言（プロンプトに前置きされる）。
+   */
+  brief?: string;
+  created_at: string;
+  /**
+   * ADR-0027/0028 の `[[genres]] id`。その「人」が仕事に使うハーネスの束。部は持たなくてよい。
+   */
+  genre?: string | null;
+  /**
+   * 英小文字ケバブの id（`secretary` / `coding-frontend` 等）。設定の種とも API とも同じ文字列。
+   */
+  id: string;
+  kind: OrgKind;
+  name: string;
+  /**
+   * 親ノードの id。`secretary`（根）だけが `None`。
+   */
+  parent_id?: string | null;
+  /**
+   * 同じ親の中での並び順（GUI の組織図の表示順）。
+   */
+  position?: number;
+  updated_at: string;
+}
+/**
+ * `PATCH /org/{id}` の要求本文（管理系）。書いた項目だけを変える。
+ * `genre` は `null` を書けば「分野なし」にできる（書かなければ今の値のまま）。
+ */
+export interface OrgPatchBody {
+  brief?: string | null;
+  genre?: string | null;
+  kind?: OrgKind | null;
+  name?: string | null;
+  parent_id?: string | null;
+  position?: number | null;
 }
 /**
  * RFC 9457 の problem details（`application/problem+json`）。`extra` は `code` ごとの付加フィールド。
@@ -1310,6 +1441,79 @@ export interface Problem {
    */
   type: string;
   [k: string]: unknown;
+}
+/**
+ * `POST /projects` の要求本文。作られた案件は `status = "proposed"`（秘書の返事待ち）。
+ */
+export interface ProjectCreateBody {
+  request: string;
+  title: string;
+}
+/**
+ * `GET /projects/{id}` の応答。案件 + 途中目標 + その案件のタスクの要約（GUI の「仕事の木」用）。
+ */
+export interface ProjectDetail {
+  milestones: Milestone[];
+  project: Project;
+  /**
+   * 仕事の木を描くのに必要な最小限だけ（詳細は `GET /tasks/{id}`）。
+   */
+  tasks: ProjectTaskView[];
+}
+/**
+ * 途中目標（ADR-0033 D2）。`seq` は案件の中での通し番号（1 始まり。ストアが採番する）。
+ */
+export interface Milestone {
+  created_at: string;
+  description?: string;
+  id: MilestoneId;
+  project_id: ProjectId;
+  seq: number;
+  status: MilestoneStatus;
+  title: string;
+  updated_at: string;
+}
+/**
+ * 案件（SPEC §3.3）。仕事の木は `tasks WHERE project_id = ?`。
+ */
+export interface Project {
+  created_at: string;
+  id: ProjectId;
+  /**
+   * 人が投げた依頼文そのまま。
+   */
+  request: string;
+  /**
+   * 秘書の理解確認・方針（Phase 24 で秘書が書く）。
+   */
+  secretary_summary?: string | null;
+  status: ProjectStatus;
+  title: string;
+  updated_at: string;
+}
+/**
+ * 仕事の木の 1 ノード（ADR-0033 D2: DAG は既存の `parent_id` / `depends_on` がそのまま）。
+ */
+export interface ProjectTaskView {
+  assignee?: string | null;
+  depends_on: TaskId[];
+  id: TaskId;
+  milestone_id?: MilestoneId | null;
+  parent_id?: TaskId | null;
+  status: Status;
+  title: string;
+}
+/**
+ * Phase 23（ADR-0033 D2）: 案件と途中目標。
+ */
+export interface ProjectList {
+  items: Project[];
+}
+/**
+ * `PATCH /projects/{id}` の要求本文。
+ */
+export interface ProjectPatchBody {
+  status: ProjectStatus;
 }
 /**
  * `POST /api/v1/providers/{id}/check` の応答（ADR-0017 D2）。

@@ -18,6 +18,9 @@
 | G8 | プロバイダの登録と Claude アカウント（プール・ログイン・残量）の画面 | **DONE** | 2026-09-16 |
 | G9 | codex アカウント（アダプタ選択・デバイス認証）と run の account 列 | **DONE** | 2026-09-17 |
 | G10 | 分野（genre）と能力レジストリの表示（taskd Phase 16〜18 / ADR-0027・0028） | **DONE** | 2026-09-17 |
+| G11 | API キー（秘密）の管理画面（taskd Phase 20 / ADR-0030） | **DONE** | 2026-09-17 |
+| G12 | クラスタへの接続を GUI から張る（taskd Phase 22 / ADR-0032） | **DONE** | 2026-09-17 |
+| G13a | 組織の木と案件（仕事の木）。SPEC §4 の 6 画面のうち 2 つ（taskd Phase 23 / ADR-0033 D1・D2） | **DONE** | 2026-09-17 |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
@@ -1133,3 +1136,137 @@ taskd 側の Phase 22（ADR-0032: クラスタへの接続を GUI から張る�
 - G12-U2: コードは平文 HTTP を通る（LAN 前提。ADR-0032 D6 の注意書きを画面に出しているだけ）。
 - G12-U3: DOM を描画する unit テストが無い件（G10-U1）は未解決のまま。今回は判定を純粋関数に切り出して
   回避したが、描画そのものの回帰は目視に頼っている。
+
+## Phase G13a — 組織の木と案件（2026-09-17）
+
+taskd 側の Phase 23（ADR-0033 D1/D2: `org_nodes` / `projects` / `milestones`）への追従。SPEC §4 の 6 画面
+（秘書との対話／組織の木／仕事の木（DAG）／報告の流れ／認可の要求／成果物）のうち、今の API で作れる
+「組織の木」と「案件（仕事の木を含む）」の 2 つを実装（ADR-0033 D8）。残り 4 つはナビにプレースホルダを置いた
+（G13b で taskd 側の対話・報告・認可 API ができてから）。
+
+### 成果物
+
+- `pnpm gen:types` 再生成（`OrgNode` / `OrgList` / `OrgCreateBody` / `OrgPatchBody` / `Project` / `ProjectList` /
+  `ProjectDetail` / `ProjectTaskView` / `ProjectCreateBody` / `ProjectPatchBody` / `Milestone` /
+  `MilestoneCreateBody` / `MilestonePatchBody` / `Task.assignee` / `.project_id` / `.milestone_id`）。2 回実行して同一。
+- **ナビの組み替え**（`app/root.tsx`）: 先頭の「業務」区画に SPEC §4 の順で「秘書」（`/org/secretary`、プレースホルダ）
+  「組織」（`/org`）「案件」（`/projects`）「報告」（`/reports`、プレースホルダ）「認可」（`/approvals`、プレースホルダ）
+  「成果物」（`/artifacts`、プレースホルダ）を並べ、既存の受信箱・一覧・DAG・新規タスク・新規 Plan・デーモン・
+  プロバイダ・アカウント・クラスタを 1 つの「裏方」区画にまとめて末尾に下げた（ADR-0033 D8「人が見る単位は
+  案件と組織になり、タスクは裏方に下がる」）。プレースホルダは共通コンポーネント `app/components/Placeholder.tsx`
+  （「G13b で作ります」＋ SPEC の該当節の一文だけ）。
+- **`/org`**（`app/routes/org.tsx`）: `GET /org` は position 順の平らな配列なので、`app/lib/org-tree.ts` の
+  `buildOrgTree`（純粋関数）で `parent_id` から木に組む（根の判定は `kind === "secretary"` または
+  `parent_id` 無し。存在しない `parent_id` を指す孤児は根の下に出す）。秘書を根に縦の組織図として描画
+  （ネストした `<ul>`、部→課はインデントと左罫線）。各ノードに `kind`・`genre` バッジと「抱えている仕事の数」
+  （後述）を出す。ノードを選ぶ（`?selected=<id>` の query）と右に詳細（brief・分野・抱えているタスク一覧・
+  無効化した「話す（G13b）」ボタン）。編集は `app/taskd/org-admin.server.ts`（`POST/PATCH/DELETE /org...`。
+  すべて管理系、`token_file` 未設定でも 401）: 追加（id/name/kind/parent_id/genre/brief/position）、
+  変更、削除（確認付き。409 `org_node_in_use` の文面をそのまま出す）。`genre` は `GET /config` の
+  `genres[]` があれば選択式、無ければ自由入力（`/tasks/new` と同じ落とし方）。組織は DB が正
+  （ADR-0033 D1）なので、プロバイダ・秘密の管理と違い **`POST /reload` は呼ばない**。
+  - **「抱えている仕事の数」の求め方（taskd への依頼あり。後述）**: `GET /tasks` の応答（`TaskSummary`）に
+    `assignee` が載っていない（`Task`/`ProjectTaskView` にはあるが一覧の要約型には無い）ため、`GET /projects`
+    の全案件について `GET /projects/{id}` を束ねて取り、その `tasks[].assignee`（`ProjectTaskView`）を
+    `app/lib/org-tree.ts` の `countWorkload` で集計している。**案件に属さない（`project_id` が無い）タスクの
+    割り当ては数えられない**（未解決事項参照）。
+- **`/projects`**（`app/routes/projects.tsx`）: 一覧は `GET /projects` に加え、「途中目標の数」を出すため
+  各案件の `GET /projects/{id}` を束ねて `milestones.length` を添える（API 応答をそのまま数えるだけで、
+  GUI 側の新しい判断はしていない）。新しい案件フォーム（title + request、`placeholder` に SPEC §6 の
+  例文「Pluvio を基盤に用いた新たな研究テーマの模索、検証」）→ `POST /projects` → 成功したら詳細へ redirect。
+- **`/projects/:id`**（`app/routes/projects.$id.tsx`）: `request` 全文、`secretary_summary`（あれば）、案件の
+  `status` 変更（select + submit）、途中目標の一覧（`seq` 順、`status` バッジ、Go/再設計の状態変更フォーム）、
+  途中目標を足すフォーム。**仕事の木**: `GET /projects/{id}` の `tasks`（`ProjectTaskView[]`）を
+  `app/lib/work-tree.ts::projectTasksToGraph` で `/graph`（`app/routes/graph.tsx`）と同じ `Graph` 型に写し、
+  同じ `layoutGraph`（`app/lib/graph-layout.ts`）で描く。新しい部品 `app/components/WorkTree.tsx` は `/graph`
+  と違い **ノードをクリックすると `/tasks/:id` へ移る**（`onNodeClick` を足しただけで、レイアウト・色分けは
+  `/graph` と共有）。各ノードには `assignee` の**組織ノードの名前**（`GET /org` と突き合わせ）を
+  `layoutGraph` の `role`（ラベル 2 行目）に流用して出す。
+- `app/components/Flash.tsx` に `OrgActionFlash` / `ProjectActionFlash`（`ProviderActionFlash` 等と同じ形。
+  組織は reload が無い分クラスタの `ClusterConnectOutcome` に近い）。
+- `help.tsx`: 用語集に「組織」「案件」「途中目標（milestone）」「仕事の木（DAG）」を SPEC の言葉で追加、
+  「画面ごとの説明」に秘書・組織・案件・報告・認可・成果物の 6 行を SPEC §4 の順で追加。
+- testid: `org-tree` / `org-node`（`data-org-id`）/ `org-node-detail` / `org-add-form` / `org-add-submit` /
+  `org-edit-form` / `org-edit-submit` / `org-delete` / `project-row`（`data-project-id`）/ `project-status` /
+  `project-milestone-count` / `project-new-form` / `project-title` / `project-request` / `project-new-submit` /
+  `project-status-form` / `project-status-submit` / `project-request-text` / `project-secretary-summary` /
+  `milestones-section` / `milestone-row`（`data-milestone-id`）/ `milestone-status` / `milestone-status-submit` /
+  `milestone-new-form` / `milestone-new-submit` / `work-tree`（`work-tree-placeholder` はマウント前）。
+
+### 実装中に見つけて直したもの（`app/taskd/client.server.ts`）
+
+**`DELETE /org/{id}` の実機確認で、削除が成功しても例外になっていた。** `crates/task-api/src/handlers.rs::delete_org_node`
+（Phase 23）は `StatusCode::NO_CONTENT`（204、本文なし）を返すが、他の管理系の `DELETE`（`/providers/{id}` 等）は
+200 で `{}` を返す。`TaskdClient.delete()` は常に `res.json()` を呼んでいたため、204 の空本文の解析に失敗し、
+`TaskdError`/`TaskdUnavailable` ではない素の `SyntaxError` として `deleteOrgNode` の外へ漏れていた
+（`toActionError` は未知の例外を re-throw するので、action が 500 になる）。**taskd は §3.45 の文書どおりに
+動いている**（GUI 側の共有クライアントが 204 を想定していなかっただけ）ので、`taskd-requests.md` には書かず
+`TaskdClient.delete()` 側で 204 を素通しするよう直した（`res.status === 204` なら `{}` を返す）。
+`test/unit/client.test.ts` に空本文の 204 で例外にならないことの回帰テストを追加、`test/unit/org.test.ts` の
+delete 系テストも `res.writeHead(204); res.end();`（本文なし）で実機に合わせた。
+
+### 受け入れ条件と証拠
+
+- `pnpm gen:types` を 2 回実行して差分ゼロ（`git diff --exit-code app/taskd/types.ts` 相当を目視確認）。
+- `pnpm lint`（biome、134 files）/ `pnpm typecheck` / `pnpm build` すべて exit 0。
+- `pnpm test` **281 passed**（30 ファイル）。新規: `test/unit/org-tree.test.ts`（`buildOrgTree` の根・孤児・
+  並び順、`countWorkload`/`flattenProjectTasks`）、`test/unit/work-tree.test.ts`（`projectTasksToGraph` の
+  parent_id/depends_on の写し方、assignee → 組織名の解決）、`test/unit/org.test.ts`（`loadOrg` が `GET /org` +
+  各案件の `tasks` から木と件数を組む、`buildOrgCreateInput`/`buildOrgPatchInput`、`createOrgNode`/
+  `patchOrgNode`/`deleteOrgNode` の成功・409 `org_node_exists`・409 `org_node_in_use`・401・204 no-body）、
+  `test/unit/projects.test.ts`（`loadProjects` の途中目標件数の束ね、1 件の詳細取得失敗時のフォールバック、
+  `createProject` の成功・422）、`test/unit/projects.detail.test.ts`（`loadProjectDetail`、`patchProjectStatus`、
+  `createMilestone`、`patchMilestoneStatus` の成功・404・400）。
+- **実機での見た目の確認**（使い捨ての taskd。運用中の 7710/7700 には触れていない）: `scripts/taskd.sh build`
+  でビルドし、`config/org.example.toml` を `org_include` に、`taskd.toml` に `[[genres]] coding` /
+  `[[genres]] literature`（`config.rs` のテストと同じ内容）を足した使い捨て taskd を 127.0.0.1:17910 に、
+  GUI を 127.0.0.1:17900 に起動。`POST /projects` で「Pluvio の新テーマ」案件、`POST /projects/{id}/milestones`
+  で途中目標を 1 件、`POST /tasks` で assignee・project_id・milestone_id・parent・depends_on 付きのタスクを
+  4 件作った（親子 1 組、depends_on 2 本、assignee は `research-survey` / `coding-poc` / `infra` の 3 者、
+  1 件は未承認の draft のまま）。Playwright で確認したこと:
+  - `/org`: 秘書を根に部→課の縦の組織図、`coding-poc` を選ぶと brief・分野・「抱えている仕事（未終了）0 /
+    担当した仕事（累計）1」・`done` の「PoC検証」タスク・無効化した「話す（G13b）」ボタンが出る。`infra`
+    部門（課を持たず直接 assignee にした）が「1」（draft の未終了タスク）を正しく数えている。
+  - `/projects`: 一覧に「Pluvio の新テーマ」（proposed・途中目標 1）、新規案件フォームの placeholder に SPEC
+    §6 の例文。
+  - `/projects/:id`: 依頼全文、途中目標（#1、approved バッジ）、**仕事の木**が親子（点線の枠でグルーピング）
+    ＋ depends_on の辺（2 本）を正しく描き、各ノードに `[関連研究調査課]` `[PoC・R&D 課]` `[インフラ部]` の
+    組織名が出て、status の色（done=緑、draft=中立）も `/graph` と同じ配色で出る。ノード「PoC検証」を
+    クリックすると `/tasks/<id>` に実際に遷移した。
+  - **401**（`[api] token_file` 未設定）: `/org` の追加・削除は `unauthorized` + ADR-GUI-0012 D1 の案内文。
+  - **409 `org_node_in_use`**: `[api] token_file` ありの構成に張り替え、子を持つ「コーディング部」の削除を
+    試みると `org node coding is still in use: 3 child node(s) still report to it` がそのまま出た。
+  - light / dark 両方で確認。確認後は taskd・GUI とも停止し、使い捨てディレクトリは削除済み。
+- e2e（Playwright の `pnpm e2e` 一式）は運用中の taskd / GUI（7700/7710）と衝突するため今回は実行していない
+  （上記の実機確認は別ポート・別ディレクトリの使い捨て taskd で行った）。
+
+### taskd への依頼（`docs/taskd-requests.md` に追記）
+
+- **R3（`docs/taskd-requests.md` の「未対応」。BLOCKED ではない。組織の木の「抱えている仕事」用）**: `GET /tasks` の `TaskSummary` に `assignee` /
+  `project_id` / `milestone_id` が無い（`Task` と `ProjectTaskView` にはある）。今回は `GET /projects` の
+  全件を `GET /projects/{id}` で束ねて代替した（案件に属さない `assignee` 付きタスクは数えられない）。
+  `TaskSummary` に `assignee` を足す、または `GET /tasks?assignee=` を足すと、案件をまたいだ正確な
+  「抱えている仕事」の集計が 1 回の要求でできる。
+
+### 未解決事項
+
+- G13a-U1: 「抱えている仕事の数」は `project_id` の無いタスクの `assignee` を数えられない（上記のとおり
+  `GET /projects/{id}` の束ねで代替しているため）。taskd に `TaskSummary.assignee` が足されたら、そちらを
+  1 回の `GET /tasks` 呼び出しに寄せる。
+- G13a-U2: `/projects` の一覧は案件数ぶん `GET /projects/{id}` を呼ぶ（途中目標の件数を出すため。N+1）。
+  一人で使う前提で案件数は少ない想定だが、案件が増えたら `ProjectList` 自体に `milestone_count` を足す方が
+  素直（taskd 側の設計判断なので提案に留める）。
+- G13a-U3: 秘書・報告・認可・成果物はプレースホルダのまま（G13b、taskd 側 Phase 24〜26 待ち）。
+- G13a-U4: e2e 未実行（上記の理由）。DOM を描画する unit テストが無い件（G10-U1）も未解決で、`/org` の木の
+  描画・`/projects/:id` の仕事の木の描画は目視と Playwright のスクリーンショットでのみ確認している。
+- G13a-U5: 組織の編集フォーム（`buildOrgPatchInput`）は `name`/`brief` を空にして保存すると「変更なし」
+  ではなく空文字を送る（`providers-admin.server.ts` の `model` と同じ扱いに揃えた設計判断。ADR は起こしていない）。
+
+### 提案（`docs/gui/api.md` への変更提案。採否は人間）
+
+- G13a-P1: 3.42〜3.49 に「`GET /tasks` の `TaskSummary` には `assignee`/`project_id`/`milestone_id` が無い」旨と、
+  GUI 側は `GET /projects/{id}` を束ねて代替していることを明記すると、次に触る人が同じ勘違い（`GET /tasks`
+  に `assignee` フィルタがあるはずと読んでしまう）をしなくて済む。
+- G13a-P2: §3.45 の「204」は他の管理系 DELETE（3.24〜3.28 の provider 等は 200 `{}`）と揃っていない。
+  意図的なら「本文なし」と明記し、GUI 側の `TaskdClient` 実装者への注意書きを添えるとよい（今回
+  `res.json()` が空文字列で例外になる実装バグを実機で見つけて直した）。

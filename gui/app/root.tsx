@@ -190,26 +190,32 @@ export default function App({ loaderData }: Route.ComponentProps) {
 
 type NavItem = { href: string; label: string; icon: IconName; badge?: "approvals" };
 
-/** ナビゲーションのグループ（docs/adr/0011 D3）。リンク先・文言は従来と同じ。 */
+/**
+ * ナビゲーションのグループ（docs/adr/0011 D3、Phase G13a で SPEC §4 の順に組み替え。ADR-0033 D8）。
+ * 先頭は SPEC §4 の 6 画面の順（秘書・組織・案件・報告・認可・成果物）。秘書・報告・認可・成果物は
+ * G13b までプレースホルダ（`~/components/Placeholder.tsx`）。既存のタスク・プロバイダ・アカウント・
+ * クラスタの画面は「裏方」区画にまとめて下げる（人が見る単位は案件と組織になり、タスクは裏方に下がる）。
+ */
 const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
-    label: "作業",
+    label: "業務",
+    items: [
+      { href: "/org/secretary", label: "秘書", icon: "message" },
+      { href: "/org", label: "組織", icon: "users" },
+      { href: "/projects", label: "案件", icon: "folder" },
+      { href: "/reports", label: "報告", icon: "send" },
+      { href: "/approvals", label: "認可", icon: "shield" },
+      { href: "/artifacts", label: "成果物", icon: "file" },
+    ],
+  },
+  {
+    label: "裏方",
     items: [
       { href: "/", label: "受信箱", icon: "inbox", badge: "approvals" },
       { href: "/tasks", label: "一覧", icon: "list" },
       { href: "/graph", label: "DAG", icon: "network" },
-    ],
-  },
-  {
-    label: "作成",
-    items: [
       { href: "/tasks/new", label: "新規タスク", icon: "plus" },
       { href: "/plans/new", label: "新規 Plan", icon: "sparkles" },
-    ],
-  },
-  {
-    label: "運用",
-    items: [
       { href: "/daemon", label: "デーモン", icon: "activity" },
       { href: "/providers", label: "プロバイダ", icon: "cpu" },
       { href: "/accounts", label: "アカウント", icon: "users" },
@@ -222,6 +228,8 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
 function isActive(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";
   if (href === "/tasks") return pathname === "/tasks" || (pathname.startsWith("/tasks/") && pathname !== "/tasks/new");
+  // `/org/secretary` は別のナビ項目（秘書）なので、「組織」は `/org` そのものだけを active にする。
+  if (href === "/org") return pathname === "/org";
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
