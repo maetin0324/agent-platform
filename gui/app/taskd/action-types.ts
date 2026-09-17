@@ -6,6 +6,7 @@ import type {
   Action,
   ClusterConnectResult,
   ClusterConnectStart,
+  MessageAccepted,
   Milestone,
   OrgNode,
   Project,
@@ -138,6 +139,17 @@ export type ProjectOpOutcome =
   | { ok: true; op: "project_status"; project: Project }
   | { ok: true; op: "milestone_create" | "milestone_status"; milestone: Milestone }
   | { ok: false; op: "project_status" | "milestone_create" | "milestone_status"; error: ActionError };
+
+/**
+ * 対話（ADR-0033 D4、docs/taskd-api-v1.md §3.55。`POST /org/{id}/messages` は**管理系**）:
+ * 話しかけた結果（202 `{message_id, task_id}` をそのまま載せる）と、「新しい案件として」送ったときの
+ * `POST /projects`（201）の結果。返事は同期では返らないので、画面は `message_id` を手がかりに
+ * `GET /org/{id}/messages` を引き直して待つ（`~/lib/conversation.ts` の `replyArrived`）。
+ */
+export type ConversationOpOutcome =
+  | { ok: true; op: "send"; accepted: MessageAccepted }
+  | { ok: true; op: "new_project"; project: Project }
+  | { ok: false; op: "send" | "new_project"; error: ActionError };
 
 export type AccountOpOutcome =
   | { ok: true; op: "create"; id: string; adapter: AccountAdapter; account: AccountView }

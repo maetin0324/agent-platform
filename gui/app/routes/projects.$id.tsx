@@ -1,9 +1,9 @@
 import { useMemo } from "react";
-import { data, isRouteErrorResponse, useFetcher } from "react-router";
+import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import { ProjectActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
-import { Button } from "~/components/ui/button";
+import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { inputClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
@@ -289,7 +289,35 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         {tasks.length === 0 ? (
           <EmptyState icon="gitBranch" title="この案件のタスクはまだありません" />
         ) : (
-          <WorkTree graph={graph} />
+          <>
+            <WorkTree graph={graph} />
+            {/* SPEC §3.4「おかしなことをしていたら、誰に言うかを決めてその担当に直接言う」。
+                木のノード（タスク）の担当へ、この案件を選んだ状態で話しかける導線（Phase G13b-2）。 */}
+            <ul className="space-y-1" data-testid="work-tree-assignees">
+              {tasks
+                .filter((t) => t.assignee)
+                .map((t) => (
+                  <li key={t.id} className="flex flex-wrap items-center gap-2 text-sm">
+                    <Badge tone="neutral">{t.status}</Badge>
+                    <Link to={`/tasks/${t.id}`} className="underline underline-offset-2">
+                      {t.title}
+                    </Link>
+                    <span className="text-xs text-fg-subtle">
+                      担当: {orgById.get(t.assignee ?? "")?.name ?? t.assignee}
+                    </span>
+                    <Link
+                      to={`/org/${encodeURIComponent(t.assignee ?? "")}?project=${encodeURIComponent(project.id)}`}
+                      data-testid="work-tree-talk"
+                      data-assignee={t.assignee}
+                      className={buttonClass({ variant: "ghost", size: "xs" })}
+                    >
+                      <Icon name="message" />
+                      担当に話す
+                    </Link>
+                  </li>
+                ))}
+            </ul>
+          </>
         )}
       </section>
     </div>

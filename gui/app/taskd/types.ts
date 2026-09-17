@@ -154,6 +154,10 @@ export type Check =
       type: "human";
     };
 /**
+ * 対話の 1 行の識別子（ULID）。
+ */
+export type MessageId = string;
+/**
  * DESIGN §4.1 の `TaskKind`。
  */
 export type TaskKind = "plan" | "execute" | "review" | "approval";
@@ -212,6 +216,10 @@ export type AttentionItem =
       tasks: number;
       type: "cluster_unavailable";
     };
+/**
+ * 誰が言ったか（ADR-0033 D4）。`user` = 人、`node` = 組織のノード（その run の返事）。
+ */
+export type MessageRole = "user" | "node";
 /**
  * 途中目標の状態（ADR-0033 D2。SPEC §7 のアジャイル: 達成ごとに人が判定し、Go か再設計）。
  */
@@ -277,6 +285,9 @@ export interface ApiV1Schema {
   graph: Graph;
   health: Health;
   inbox: Inbox;
+  message_accepted: MessageAccepted;
+  message_list: MessageList;
+  message_post: MessagePostBody;
   milestone_create: MilestoneCreateBody;
   milestone_patch: MilestonePatchBody;
   new_plan: NewPlanSpec;
@@ -1029,6 +1040,12 @@ export interface Task {
   assignee?: string | null;
   attempts: number;
   budget: Budget;
+  /**
+   * ADR-0033 D4（Phase 24）: 対話由来のタスクなら、きっかけになった人の発言（`messages.id`）。
+   * run が終わると、その結果が `assignee` のノードの返事として `messages` に入る。
+   * **DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。
+   */
+  conversation?: MessageId | null;
   created_at: string;
   depends_on: TaskId[];
   /**
@@ -1303,6 +1320,59 @@ export interface QuestionItem {
 export interface AnswerNote {
   answer: string;
   question: string;
+}
+/**
+ * `POST /org/{id}/messages` の応答（202）。返事は待たずに、GUI が `GET /org/{id}/messages` で拾う。
+ */
+export interface MessageAccepted {
+  /**
+   * 入った `role = "user"` の行の id。
+   */
+  message_id: string;
+  /**
+   * タスクの一意識別子（ULID）。DESIGN §4.1。
+   */
+  task_id: string;
+}
+/**
+ * `GET /org/{id}/messages` の応答（古い順）。
+ */
+export interface MessageList {
+  items: Message[];
+}
+/**
+ * 対話の 1 行（`messages` テーブル。ADR-0033 D4）。
+ */
+export interface Message {
+  created_at: string;
+  id: MessageId;
+  /**
+   * 話し相手（`org_nodes.id`）。
+   */
+  node_id: string;
+  /**
+   * 案件（案件に紐づかない雑談なら `None`）。
+   */
+  project_id?: ProjectId | null;
+  role: MessageRole;
+  /**
+   * `role = node` のとき、その返事を作った run（`Event::WorkerStarted.run_id`）。
+   */
+  run_id?: string | null;
+  text: string;
+}
+/**
+ * Phase 24（ADR-0033 D4）: 対話（`POST /org/{id}/messages` と `GET /org/{id}/messages`）。
+ */
+export interface MessagePostBody {
+  /**
+   * この案件についての話なら案件の id（省略すると案件に紐づかない雑談になる）。
+   */
+  project_id?: ProjectId | null;
+  /**
+   * 本文（空白だけは 422）。
+   */
+  text: string;
 }
 /**
  * `POST /projects/{id}/milestones` の要求本文。`seq` はストアが採番する。

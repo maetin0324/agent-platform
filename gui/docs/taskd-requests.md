@@ -31,6 +31,26 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
   1 回の `GET /tasks?assignee=<id>` （またはフィルタ無しで一覧を取って `assignee` で数える）で組織の木の全ノードの
   ワークロードが求まるようになる。
 
+### R4（2026-09-17、Phase G13b-2）: `Message` に `task_id` が無く、対話用タスクが仕事の木に混ざる
+
+- **エンドポイント**: `GET /org/{id}/messages`（`MessageList.items[]` = `Message`）と `GET /projects/{id}`（`tasks[]` = `ProjectTaskView`）。
+- **期待（SPEC §3.4「相手は人」、§3.3「仕事の木をパッと見れば、おかしな方針を立てていないかが分かる」）**:
+  (a) 返事（`role = "node"`）から、それを作った run の**裏方のタスク**（`/tasks/:id`）へ行けること。
+  (b) 案件の仕事の木は「案件が分解された仕事」だけで、人との対話そのものは混ざらないこと。
+- **実際**:
+  (a) `Message` は `{id, node_id, project_id?, role, text, run_id?, created_at}` で、**`task_id` が無い**。`POST /org/{id}/messages` の 202 は
+      `{message_id, task_id}` を返すので、**自分がその画面で送った直後の返事にだけ**タスクを結びつけられる（`app/components/Conversation.tsx`）。
+      画面を開き直した後の過去の返事は `run_id` しか分からず、`run_id` からタスクを引く API は無い（`GET /tasks/{id}/runs` はタスク id が要る）。
+  (b) 対話用タスク（`title = "対話: …"`、`assignee` = 相手のノード、`project_id` = 選んだ案件）は `ProjectTaskView` にも `TaskSummary` にも
+      そのまま出る（taskd 側 Phase 24 の未解決事項 U24-4）。実機で確認: 秘書に案件を投げると、その案件の「仕事の木」に
+      `対話: Pluvio を基盤に用いた…[秘書]` のノードが 1 件出る。
+- **できないこと**: (a) 過去の返事から裏方の run へ行く導線を、仕様どおりの値だけでは作れない。(b) 仕事の木から対話用タスクを
+  除くことが、**仕様に書かれた値**ではできない（`title` の `"対話: "` 前置きに依存するのは「文書に無い挙動に頼る」ことになるのでやらない）。
+- **依頼**: (a) `Message` に `task_id: Option<TaskId>`（`run_id` と同じ規則。追加のみ）を足してほしい。
+  (b) `ProjectTaskView`（と `TaskSummary`）に「対話由来かどうか」が分かる値（例: `conversation: Option<MessageId>` をそのまま出す、
+  または `GET /projects/{id}` / `GET /tasks` に `?exclude=conversation` のような絞り込み）を足してほしい。
+  どちらも足されるまでは、GUI は (a) 送った直後の返事にだけリンクを出し、(b) 対話用タスクも仕事の木に描いたままにする。
+
 ## 対応済み
 
 ### R2 — 対応済み（2026-09-16、taskd 側で追加）

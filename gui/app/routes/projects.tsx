@@ -164,9 +164,16 @@ export default function ProjectsPage({ loaderData, actionData }: Route.Component
           <CardHeader
             icon="plus"
             title="案件を投げる"
-            description="SPEC §2.3 のとおり、曖昧なままでかまいません。秘書が理解確認・方針・最初の途中目標を返します（G13b）。"
+            description="SPEC §2.3 のとおり、曖昧なままでかまいません。作るとすぐ秘書が理解の確認・大まかな方針・最初の途中目標を返します（SPEC §7）。"
           />
           <CardBody>
+            <p className={`${hintClass} mb-3`} data-testid="project-new-secretary-hint">
+              <Link to="/org/secretary" className="underline underline-offset-2">
+                秘書に話しかけても同じです
+              </Link>
+              （SPEC §4「秘書との対話 — 案件を投げる、状況を聞く、方針を変える」）。そちらは本文だけ書けば、先頭 40
+              字が案件名になります。
+            </p>
             <ErrorFlash error={error} />
             <Form method="post" data-testid="project-new-form" className="space-y-4">
               <div>
