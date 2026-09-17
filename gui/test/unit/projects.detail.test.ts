@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadProjectDetail } from "~/routes/projects.$id";
 import { TaskdClient } from "~/taskd/client.server";
 import { createMilestone, patchMilestoneStatus, patchProjectStatus } from "~/taskd/projects-admin.server";
-import type { Milestone, OrgList, Project, ProjectDetail } from "~/taskd/types";
+import type { Milestone, OrgList, Project, ProjectDetail, Report, ReportList } from "~/taskd/types";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
@@ -86,6 +86,47 @@ describe("loadProjectDetail", () => {
 
     expect(result.detail).toEqual(detail);
     expect(result.org).toEqual({ items: [] });
+  });
+
+  it("GET /reports?project=<id> を呼び、この案件のすべての段の報告を返す（level を付けない。SPEC §4「報告の流れ」タブ）", async () => {
+    const detail: ProjectDetail = { project: project(), milestones: [], tasks: [] };
+    const reportsResponse: ReportList = {
+      items: [
+        {
+          id: "r1",
+          kind: "proposal",
+          level: 1,
+          node_id: "research-survey",
+          headline: "この framing で論文が書けそう",
+          created_at: "…",
+        } satisfies Report,
+      ],
+    };
+    mock.on("GET", "/api/v1/projects/p1", (_req, res) => sendJson(res, 200, detail));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/reports", (_req, res) => sendJson(res, 200, reportsResponse));
+
+    const result = await loadProjectDetail(client, "p1", new Request("http://gui.invalid/projects/p1"));
+
+    expect(result.reports).toEqual(reportsResponse);
+    expect(typeof result.fetchedAt).toBe("string");
+    const req = mock.requests.find((r) => r.url.startsWith("/api/v1/reports"));
+    const url = new URL(req?.url ?? "", "http://mock-taskd.invalid");
+    expect(url.searchParams.get("project")).toBe("p1");
+    expect(url.searchParams.has("level")).toBe(false);
+    expect(url.searchParams.has("unread")).toBe(false);
+  });
+
+  it("GET /reports が失敗しても案件の詳細は返す（報告は空扱い）", async () => {
+    const detail: ProjectDetail = { project: project(), milestones: [], tasks: [] };
+    mock.on("GET", "/api/v1/projects/p1", (_req, res) => sendJson(res, 200, detail));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/reports", (_req, res) =>
+      sendProblem(res, { status: 500, code: "internal", detail: "boom" }),
+    );
+
+    const result = await loadProjectDetail(client, "p1", new Request("http://gui.invalid/projects/p1"));
+    expect(result.reports).toEqual({ items: [] });
   });
 
   it("404 project_not_found は例外として投げる（loader が Response に変換する）", async () => {

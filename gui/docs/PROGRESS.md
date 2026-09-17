@@ -1270,3 +1270,131 @@ delete 系テストも `res.writeHead(204); res.end();`（本文なし）で実�
 - G13a-P2: §3.45 の「204」は他の管理系 DELETE（3.24〜3.28 の provider 等は 200 `{}`）と揃っていない。
   意図的なら「本文なし」と明記し、GUI 側の `TaskdClient` 実装者への注意書きを添えるとよい（今回
   `res.json()` が空文字列で例外になる実装バグを実機で見つけて直した）。
+
+## Phase G13b-1 — 報告の流れ（2026-09-17）
+
+taskd 側の Phase 25（ADR-0033 D3、ADR-0034: 報告の生成・圧縮）への追従。SPEC §4 の 6 画面のうち
+「報告の流れ」を実装し、プレースホルダを置き換えた（ADR-0033 D8）。GUI 側の新しい設計判断は無し
+（taskd 側 ADR をそのまま実装。§3.50〜3.53 の契約に従うだけ）。
+
+### 成果物
+
+- `pnpm gen:types` は再生成済みの `app/taskd/types.ts`（`Report` / `ReportDetail` / `ReportList` /
+  `ReportKind` / `ReportsReadBody` / `ReportsReadResult` / `ReportsNotifiedResult` / `DaemonSnapshot.reports` /
+  `ReportsLive`）をそのまま使用。2 回実行して差分ゼロを確認。
+- `app/lib/reports.ts`（新規、純粋関数。DOM を描画する unit テストが無い件（G10-U1）を踏まえ、判断・計算は
+  すべてここに集約）: `buildReportsQuery`（`GET /reports` のクエリを組む。**`kind` は taskd の API に無いので
+  含めない** — §3.50 は `project`/`node`/`level`/`unread`/`limit` しか受け付けず「知らないクエリキーは 400」。
+  既定は `level=0&unread=true`）、`filterReportsByKind`（kind の絞り込みは画面側だけで行う）、
+  `reportProjectName` / `reportNodeName`（`GET /projects` / `GET /org` からの名前解決。`project_id` が無ければ
+  「案件なし」。ADR-0034 D1）、`relativeTimeLabel`（既存の `formatDuration(secondsBetween(...))` の流用）、
+  `reportsBadgeTone`（bad_news があれば `danger`）、`notificationMessage` / `reportsNotificationKey` /
+  `shouldFireNotification`（ADR-0034 D6 の `notify_now` は taskd が決める。**bad_news の未読がある間
+  `notify_now` は常に true**なので、GUI 側だけで「未読件数の組が変わらない限り再度は鳴らさない」重複排除を
+  足した。判断が必要だった点、後述）。
+- `app/taskd/reports-admin.server.ts`（新規）: `markReportsRead` / `markReportsNotified`
+  （`POST /reports/read` / `POST /reports/notified`。管理系、`org-admin.server.ts` と同じ作り）。
+- `app/components/ReportsList.tsx`（新規）: 報告 1 件の行（`ReportRow`。kind バッジ・headline・案件名・
+  担当ノード名・相対時刻・未読ドット）を `/reports` と `/projects/:id` の「報告」タブで共有する部品。
+  クリックで展開すると `GET /reports/{id}`（`app/routes/reports.$id.tsx`。resource route、コンポーネント無し）
+  を呼んで `body` と `sources_expanded` を出し、`sources_expanded` の各報告も同じ `ReportRow` で再帰的に
+  展開できる（「圧縮の元を見に行ける」）。展開した行の中に「既読にする」（1 件、`POST /reports/read`）。
+- `app/routes/reports.tsx`（プレースホルダを置き換え）: 既定は秘書レベル（`level=0`）の未読を新しい順に
+  1 件 1 行で（`GET /reports` 自体が新しい順）。絞り込み（filter: 未読だけ/全部、level: 秘書/部/課/すべて、
+  project）は `<Form method="get">` で taskd に転送、kind は画面側のチェックボックスで絞る（`useSearchParams`
+  から読み、taskd へは送らない）。「表示中の未読をすべて既読にする」ボタン（現在のフィルタ後の一覧の未読 id
+  をまとめて `POST /reports/read`）。
+- `app/routes/reports.$id.tsx`（新規、resource route）: `GET /reports/{id}` の中継のみ。
+- `app/routes.ts`: `reports/:id` を追加。
+- `app/routes/projects.$id.tsx`: 「報告」タブを追加（`GET /reports?project=<id>`。**`level` を付けない
+  ＝全レベル**。この案件のすべての段の報告を、同じ `ReportsList` で出す）。
+- `app/root.tsx`: root loader で `GET /daemon` を呼び `DaemonSnapshot.reports`（`ReportsLive`）を
+  `reportsLive` として loaderData に足す（taskd に届かない・エラーなら badge を出さないだけにする）。
+  ナビの「報告」に未読数バッジ（`reportsBadgeTone` で bad_news があれば赤、無ければ中立。0 件は出さない）。
+  「報告」の隣に「通知を有効にする」ボタン（`Notification.requestPermission()` を呼ぶだけ。taskd には
+  問い合わせない）。`app/components/NotificationsWatcher.tsx`（新規、root に 1 回だけマウント）が
+  `reportsLive` を見て `shouldFireNotification` が true を返したらブラウザ通知を 1 回出し、続けて
+  `POST /reports/notified`（`/reports` route の action に `intent=reports_notified` で `fetcher.submit`）を呼ぶ。
+- `app/taskd/action-types.ts` に `ReportOpOutcome`、`app/components/Flash.tsx` に `ReportActionFlash`。
+- `help.tsx`: 「報告」画面の説明を実装内容に更新、用語集に「報告」「悪い知らせ」「圧縮」を SPEC の言葉で追加。
+- testid: `reports-section` / `report-row`（`data-report-id` / `data-report-kind`）/ `report-headline` /
+  `report-body` / `report-sources` / `report-mark-read` / `reports-filter-level` / `reports-unread-badge` /
+  `notifications-enable`。
+
+### 実装中に実機で見つけて直したもの
+
+**`ReportRow` の個別「既読にする」が 401 のとき、何も表示されずに黙って失敗していた。** 実機（token_file
+未設定の使い捨て taskd）で「既読にする」を押しても見た目が変わらず、原因を追うと `readFetcher.data` の
+`ok: false` を握りつぶしていた（`isRead` の判定にしか使っていなかった）。`ReportsList.tsx` に
+`{readFetcher.data && !readFetcher.data.ok && <ErrorFlash error={readFetcher.data.error} />}` を足し、
+行の中に 401 の文言（ADR-GUI-0012 D1 の案内込み）が出るようにした。他の管理系操作（`OrgActionFlash` 等）は
+ページ全体の `fetcher.data` を見るので同じ穴は無いが、行ごとに `useFetcher` を持つ `ReportRow` だけこの形に
+なっていた。回帰テストは追加していない（DOM を描画する unit テストが無いため。G10-U1。実機で確認済み）。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint`（biome、140 files）/ `pnpm typecheck` / `pnpm build` すべて exit 0。`pnpm test`
+  **316 passed**（31 ファイル）。新規 `test/unit/reports.test.ts`（33 件）: `buildReportsQuery`
+  （既定 `level=0&unread=true`、`filter=all` で unread を送らない、`level=` で level を送らない、`kind` を
+  絶対に送らない）、`filterReportsByKind`、`reportProjectName`/`reportNodeName`、`relativeTimeLabel`、
+  `reportsBadgeTone`、`notificationMessage`/`reportsNotificationKey`、`shouldFireNotification`（許可・
+  `notify_now`・重複排除の場合分け）、`loadReports`（クエリの組み立てと `GET /projects`/`GET /org` 失敗時の
+  フォールバック）、`loadReportDetail`、`markReportsRead`/`markReportsNotified`（成功・401・404
+  `report_not_found`）。`test/unit/projects.detail.test.ts` に 2 件追加（`GET /reports?project=<id>` を
+  `level` 無しで呼ぶこと、失敗時のフォールバック）。
+- `pnpm gen:types` を 2 回実行して差分ゼロ（`app/taskd/types.ts` は既に Phase 25 分を含んでいた）。
+- **実機での見た目の確認**（使い捨ての taskd。運用中の 7710/7700 には触っていない）: `scripts/taskd.sh build`
+  で taskd をビルドし、`config/org.example.toml` を種にした組織と `[[genres]] coding`/`literature`、
+  `[adapters.fake]` を TITLE の内容で分岐する fake-worker（`FAIL` → `error`、`ASK` → `question`、それ以外 →
+  `done`）に差し替えた使い捨て taskd を 127.0.0.1:17950 に、GUI を 127.0.0.1:17940 に起動した。
+  `POST /projects` で「Pluvio の新テーマ」案件、`assignee`/`project_id` 付きのタスクを 3 件（`coding-poc` の
+  PoC 検証→`done`、`research-survey` の関連研究調査→`question`、`project_id` 無しで `infra` のノード監視→
+  `error(retryable=false)`）作って承認し、Phase 25 の生成経路（`task-dispatch::record_run_report`）で
+  `result`/`question`/`bad_news` の 3 種の報告を実際に作らせた（`reports` テーブルへの直接 INSERT はしていない）。
+  Playwright で確認したこと（light/dark 両方）:
+  - `/reports` 既定表示: 秘書レベルの未読が新しい順、`bad_news` は赤バッジ・目立つ見た目、`案件なし`
+    （project_id 無しの bad_news）が正しく出る、担当ノード名（秘書 = bad_news は各祖先へ複製されるため）。
+  - 行を展開: `body`（理由・retryable）と「既読にする」、`sources_expanded`（圧縮元 = infra レベルの
+    元の bad_news）が入れ子で表示され、さらに展開できる。
+  - level フィルタを「すべて」にすると、`結果`（中立）・`質問`（注意色）が課のレベルのまま見える
+    （4 件溜まる／2 時間経つまで秘書へ圧縮されないのは ADR-0034 D3 の設計どおり）。
+  - `/projects/:id` の「報告」タブ: 案件に紐づく全レベルの報告（20 件）が同じ行部品で出る。
+  - ナビの「報告」バッジ: 未読数が赤（bad_news 有り）で表示され、既読にすると件数が実際に減る
+    （`10` → `9`。SSE の再検証で自動的に更新された）。
+  - **401**（`[api] token_file` 未設定）: 個別の「既読にする」で 401 の文言が出る（上記のバグ修正の確認）。
+  - **管理系トークンを設定**した構成に張り替え、「既読にする」が成功して一覧から消え、バッジも減ることを確認。
+  - **通知**: `context.grantPermissions(["notifications"])` と `window.Notification` を差し替えたスタブで
+    確認（実ブラウザの通知許可 UI は自動テストできないため）。root を開いた時点で `notify_now: true` を検知し、
+    `new Notification("taskd: 報告", { body: "悪い知らせ 9 件 / 未読の報告 9 件" })`
+    （`unread_bad_news > 0` を先頭に出す仕様どおり）が 1 回だけ呼ばれ、続けて `POST /reports/notified`
+    （`/reports.data`、React Router の single-fetch 経由）が呼ばれることを確認した。
+  - 「通知を有効にする」ボタン: クリックで `Notification.requestPermission()` が呼ばれることを確認。
+  - 確認後は taskd・GUI とも停止し、使い捨てディレクトリ（scratchpad）は削除済み。
+- e2e（Playwright の `pnpm e2e` 一式）は運用中の taskd / GUI（7700/7710）と衝突するため今回は実行していない
+  （上記の実機確認は別ポート・別ディレクトリの使い捨て taskd で行った）。
+
+### 未解決事項
+
+- G13b1-U1: `shouldFireNotification` の重複排除（未読件数の組が変わらない限り再通知しない）は taskd 側の
+  ADR-0034 には明記されていない GUI 側だけの判断（「判断が必要だった点」）。bad_news の未読がある間
+  `notify_now` は常に true という仕様（ADR-0034 D6）のままだと、SSE の daemon イベントのたびに通知APIを
+  呼び続けることになりかねないため、今回は「未読件数が変わらない限り鳴らさない」を GUI 側に追加した。
+  taskd 側で `notify_now` の意味を変える（例: 一度 `notified` を呼んだら bad_news でも一定時間は false にする）
+  なら、この GUI 側の重複排除は不要になる。ADR は起こしていない（GUI 単体の実装詳細と判断したため）。
+- G13b1-U2: kind の絞り込みは taskd の `GET /reports` に無いため画面側だけで行う。案件・レベルの絞り込みと
+  違い、ページング（`limit`）を跨いだ絞り込みにはならない（1 ページの中でだけ絞る）。件数が多い運用では
+  taskd 側に `kind` フィルタを足す方が素直（`docs/gui/api.md` への提案は下記）。
+- G13b1-U3: DOM を描画する unit テストが無い件（G10-U1）は未解決のまま。`ReportsList`/`ReportRow`/
+  `NotificationsWatcher` の描画・展開・通知の配線は実機の Playwright スクリーンショットとスタブ検証でのみ
+  確認している。
+- G13b1-U4: e2e 未実行（上記の理由）。
+- G13b1-U5: 秘書・認可・成果物はプレースホルダのまま（taskd 側 Phase 24・26 待ち）。
+
+### 提案（`docs/gui/api.md` への変更提案。採否は人間）
+
+- G13b1-P1: `GET /reports` に `kind` フィルタを足すと、GUI 側の画面内絞り込み（1 ページ限定）をやめて
+  taskd に転送できる。
+- G13b1-P2: ADR-0034 D6 の `notify_now`（bad_news の未読がある間は常に true）は、GUI が「同じ状態のまま
+  何度も通知しない」重複排除を自前で持つ前提になっている。§3.53 に「GUI 側で最後に通知した未読件数の組を
+  覚えておき、変化があったときだけ通知を出すことを想定している」と明記すると、次に触る人がこの前提を
+  再発見しなくて済む。
