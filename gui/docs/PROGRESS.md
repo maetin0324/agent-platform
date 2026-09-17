@@ -1518,3 +1518,133 @@ taskd 側 Phase 24（ADR-0033 D4/D6: `messages`、`POST/GET /org/{id}/messages`�
 - G13b-2-P2: §3.46（`POST /projects`）の応答に、秘書の最初の対話の `message_id` / `task_id` を含める
   （または 3.54 の `Message` に `task_id` を足す）と、案件を作った直後の「考え中」も
   同じ基準（自分の発言の id）で終われる。今は「一覧の最後が node」で代用している。
+
+## Phase G13c — 成果物（2026-09-17）
+
+SPEC §4 の 6 画面のうち「成果物」を実装し、プレースホルダを置き換えた（ADR-0033 D8）。GUI 側の新しい
+taskd 依存は無し（既存の `GET /projects`・`GET /projects/{id}`・`GET /tasks/{id}`・`GET /tasks/{id}/artifacts`・
+`GET /org` を組み合わせるだけ。taskd 側は触っていない）。
+
+### 成果物
+
+- `app/lib/artifacts.ts`（新規、純粋関数。DOM を描画する unit テストが無い件 G10-U1 を踏まえ、判断・計算を
+  ここに集約）: `workspacePlace`（`Task.workspace` の `Local{path}` / `Remote{cluster, path}` を「置き場所」の
+  表示に変える。Local は taskd が絶対化した `workspace_dir`（無ければ生の `path`）をそのまま出し
+  `vscode://file/<path>` リンクを添える。Remote はコードが実際にあるのはクラスタ側なので `task.workspace.path`
+  を使い（`workspace_dir` は手元の写しでしかない。docs/gui/api.md §3.5）、`cluster:path` の形でリンクは付けない）、
+  `isSourcesArtifact` / `parseSourcesJson`（`sources.json` を名前で判定し、`[{url, title, engine?, cited}]`
+  （docs/adr/0031-web-research-evidence-gate.md）をリンク集に変換。形が違えば `null` で通常の JSON 表示に
+  フォールバック）、`resolveAssigneeName`（`~/lib/work-tree.ts` と同じ規則）、`buildProjectArtifactRows`
+  （タスクごとに束ねた成果物 `TaskArtifactBundle` を新しい順（`ts` 降順）に平らにする）、`artifactRelativeTime`。
+- `app/components/ArtifactsList.tsx`（新規）: 成果物 1 件の行（`ArtifactRow`）を `/artifacts` と
+  `/projects/:id` の「成果物」節で共有する部品（`~/components/ReportsList.tsx` と同じ作り。G13b-1 の依頼
+  どおり）。本体は「開く」を押したときだけ `/files/tasks/:id/artifacts/:idx` を fetch し taskd が返した実際の
+  `Content-Type` でビューアを選ぶ（`~/routes/tasks.$id.tsx::ArtifactRow` / `~/lib/artifact-view.ts` の
+  `pickViewer`/`isJson`/`artifactStatusMessage` をそのまま流用。既存の `MarkdownViewer`/`CodeViewer`/
+  `ImageViewer`/`Sha256Badge` も流用）。`sources.json` はリンク集（url・title、`cited` は「引用」バッジ、
+  クリックで新規タブに開く）、その他の JSON は `CodeViewer` で整形表示。各行に置き場所（`workspacePlace` の
+  結果。ローカルは vscode リンク付き、リモートはコピー用のモノスペース表示のみ）と担当ノード名・タスク
+  へのリンク・作られた時刻（相対表示）を出す。
+- `app/routes/artifacts.tsx`（プレースホルダを置き換え）: 案件を選ぶ（`GET /projects`。`<Form method="get">` +
+  `project` の select + 送信ボタン、`/reports` の絞り込みフォームと同じ作り）→ 選んだ案件のタスク
+  （`GET /projects/{id}` の `tasks`。仕事の木と同じ集合、ADR-0033 D2）の成果物を横断して一覧する。
+  1 タスクごとに `GET /tasks/{id}/artifacts`（成果物本体）と `GET /tasks/{id}`（`workspace_dir` /
+  `task.workspace` を「置き場所」に使う）を束ねる（N+1。G13a と同じ判断: 一人で使う前提で案件のタスク数は
+  少ない）。案件が見つからない（404 `project_not_found`）場合は例外にせず「案件が見つかりません」を表示。
+  taskd への問い合わせを行う私的ヘルパー（`loadTaskArtifactBundles`）はモジュール外に切り出していない
+  （下記「実装中に見つけたもの」参照）。担当ノード名は `GET /org` から解決する（taskd 側に判断値を作らせない）。
+- `app/routes/projects.$id.tsx`: 「成果物」節を追加（`loadProjectDetail` が同じ形の私的ヘルパーで
+  `detail.tasks` ぶんの成果物を束ね、`buildProjectArtifactRows` で組んだ `artifactRows` を loader データに
+  足す。画面側は `~/routes/artifacts.tsx` と同じ `ArtifactsList` で出す。G13b-1 の「報告」タブと同じ作り）。
+- `help.tsx`: 「成果物」の用語集項目と画面ごとの説明を、プレースホルダの文言から実装内容（横断一覧・
+  Markdown 描画・sources.json のリンク集・置き場所の表示）に更新。SPEC §2.2・§3.7 の言葉を引用。
+- testid: `artifacts-section`（`/artifacts` 全体、`/projects/:id` の成果物節）/ `artifacts-project-select` /
+  `artifact-row`（`data-artifact-name`, `data-task-id`）/ `artifact-view` / `artifact-links` /
+  `artifact-workspace`（`data-task-id`）。ほか `artifact-toggle` / `artifact-download` / `artifact-forbidden` /
+  `artifact-missing` は `~/routes/tasks.$id.tsx::ArtifactRow` と同じ命名を踏襲。
+
+### 実装中に見つけたもの（判断が必要だった点）
+
+**`.server.ts` への切り出しは React Router のクライアントバンドル除去の対象外になる。** 当初、
+`/artifacts` と `/projects/:id` で taskd への問い合わせ（`GET /tasks/{id}` + `GET /tasks/{id}/artifacts` を
+束ねる部分）を共有するため `app/taskd/artifacts.server.ts` を新設し、両ルートの `loadArtifacts` /
+`loadProjectDetail`（loader 本体ではなく、テスト用に公開している集約関数）からそれを import する形にしたところ、
+`pnpm build` が「Server-only module referenced by client」で失敗した。React Router の dot-server プラグインは
+`loader`/`action`/`middleware`/`headers` からの参照だけを自動で取り除く（docs/DESIGN.md には明記が無い実装上の
+制約）ため、それ以外の**公開エクスポート**（テスト用に `export` している `loadArtifacts` / `loadProjectDetail`
+自体）が `.server.ts` を値として import すると、クライアントバンドルにサーバ専用コードが混ざりうると判定されて
+ビルドが止まる。既存の `loadProjectDetail` 等が問題なく動いていたのは、`TaskdClient` を**型としてだけ**受け取り
+（`client: TaskdClient` は引数の型注釈で、`getTaskdClient()` のような値は呼ばない）、`.server.ts` への値の依存が
+無かったため。今回は `app/taskd/artifacts.server.ts` を削除し、集約ロジック（`loadTaskArtifactBundles`）を
+各ルートファイルに私的関数として複製した（`~/lib/artifacts.ts` の純粋関数だけを共有する）。ADR は起こしていない
+（GUI 単体のビルド上の制約であり、taskd との契約やユーザに見える挙動には関わらないため）。次に GET の集約を
+複数ルートで共有したくなったら、`loader` の中だけで呼ぶか、`~/lib/*`（型のみで `.server.ts` に依存しない
+純粋モジュール）に置くとよい。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint`（biome、145 files）/ `pnpm typecheck`（`react-router typegen && tsc -b`）/ `pnpm build` すべて
+  exit 0。`pnpm test` **335 passed**（33 ファイル。G13b-1 までの 316 + 新規 19: `test/unit/artifacts.test.ts`
+  17 件 — `workspacePlace`（local/remote/フォールバック）、`isSourcesArtifact`、`parseSourcesJson`（正常系・
+  不正 JSON・非配列・欠損フィールド）、`resolveAssigneeName`、`buildProjectArtifactRows`（新しい順への整列、
+  bundle 無しタスクの除外）、`artifactRelativeTime` / `test/unit/artifacts.route.test.ts` 4 件 —
+  `loadArtifacts`（project 未指定、案件を選んだときの束ね、404 `project_not_found` の非例外化、1 タスクの
+  取得失敗が他のタスクの行に影響しないこと）/ `test/unit/projects.detail.test.ts` に 1 件追加
+  （`loadProjectDetail` が `artifactRows` を組むこと）。
+- `pnpm gen:types` を 2 回実行し、`git status --porcelain app/taskd/types.ts` が両方とも空（差分ゼロ。
+  taskd 側のスキーマは変えていないので当然だが、手順どおり確認した）。
+- **実機での見た目の確認**（使い捨ての taskd。運用中の 7710/7700 には触れていない）: `scripts/taskd.sh build`
+  で taskd をビルドし、`config/org.example.toml` を `org_include` に、`taskd.toml` に `[[genres]] secretary` /
+  `coding` / `literature` を足した使い捨て taskd を `TASKD_API_LISTEN=127.0.0.1:17970` で起動、GUI を
+  `TASKD_API_URL=http://127.0.0.1:17970 TASKD_GUI_BIND=127.0.0.1:17971 pnpm dev` で起動した。TITLE 分岐の
+  fake ワーカー（`*survey*` → `report.md`/`sources.json`/`research.json` を明示的な `{"type":"artifact",...}`
+  で申告、`*PoC*` → `main.rs`）に差し替え、`POST /projects` で「Pluvio の新テーマ」案件、
+  `assignee`/`project_id`/`genre` 付きのタスクを 2 件（`research-survey` の survey → `done`（human 承認 1 件
+  込み）、`coding-poc` の PoC 実装（`workspace = "lab/pluvio-poc"` を明示） → `done`）作って完了させた
+  （`reports` テーブルへの直接 INSERT はしていない。Phase 25 の生成経路で実際に報告も作られた）。
+  Playwright（`chromium.launch()` を直接使うスクリプト。`pnpm e2e` 一式は運用中の taskd/GUI と衝突するため
+  今回は使っていない）で light/dark 両方のスクリーンショットを確認:
+  - `/artifacts?project=<id>`: 案件選択の select に「Pluvio の新テーマ」、成果物 4 件が新しい順
+    （`main.rs` → `research.json` → `sources.json` → `report.md`）で並ぶ。`report.md` を開くと Markdown が
+    その場で描画（見出し・番号付きリストが効いている）。`sources.json` を開くとリンク集（3 件の url・title、
+    引用ありの 2 件に「引用」バッジ、クリックで新規タブ）。`research.json` は `CodeViewer` で整形表示。
+    `main.rs` は `code` kind のバッジと `CodeViewer`。各行に置き場所（`/tmp/…/workspaces/lab/pluvio-poc` /
+    `/tmp/…/workspaces/01M2R987QZRA73QEN2GSTTQX7Q`。青いモノスペースのリンクで `vscode://file/…`）と
+    担当ノード名（`（PoC・R&D 課）` / `（関連研究調査課）`）・`done` バッジ・相対時刻が出る。
+  - `/projects/<id>`: 「成果物」節に同じ 4 件が「報告」節の下に出る（依頼・途中目標・仕事の木・報告・成果物の
+    順。G13b-1 の並びを踏襲）。
+  - light / dark とも配色・コントラストに問題なし（`CodeViewer`/`MarkdownViewer`/バッジとも既存のトークンを
+    そのまま使っているので新規の配色調整は不要だった）。
+  - 確認後は taskd・GUI とも停止し、使い捨てディレクトリ（`/tmp/taskd-gui-run-rmaeda/g13c-verify`）と
+    スクリーンショット・一時スクリプトは削除済み。運用中の `127.0.0.1:7710` / `127.0.0.1:7700` は確認前後で
+    `curl` の 200 / 302 を確認し、無傷であることを確かめた。
+- e2e（Playwright の `pnpm e2e` 一式）は運用中の taskd / GUI（7700/7710）と衝突するため今回は実行していない
+  （上記の実機確認は別ポート・別ディレクトリの使い捨て taskd + 直接 `chromium.launch()` するスクリプトで
+  行った）。
+
+### 未解決事項
+
+- G13c-U1: DOM を描画する unit テストが無い件（G10-U1）は未解決のまま。`ArtifactsList`/`ArtifactRow` の
+  描画・展開・sources.json のリンク集化・workspace の表示は実機の Playwright スクリーンショットでのみ
+  確認している（純粋関数側は unit テスト済み）。
+- G13c-U2: `/artifacts` は 1 タスクごとに `GET /tasks/{id}` と `GET /tasks/{id}/artifacts` の 2 回、案件の
+  タスク数ぶん呼ぶ（2N+1）。G13a の「抱えている仕事の数」と同じ N+1 の判断だが、こちらは 2 倍。一人で使う
+  前提でタスク数は少ない想定だが、増えたら taskd 側に「案件の成果物一覧」を直接返すエンドポイントを足す方が
+  素直（下記「提案」）。
+- G13c-U3: `sources.json` の判定は**ファイル名の完全一致**（`name === "sources.json"`）で行っている。
+  taskd 側にファイル種別を表す専用のフィールドは無い（`ArtifactRef.kind` は自由記述の文字列で、
+  `web-research` ハーネスは `"json"` を入れている。他の JSON 成果物と区別できない）ため、名前判定にした。
+  同名で別内容のファイルを作るハーネスが増えたら壊れる（現状は `local_deep_research` だけが `sources.json`
+  を作る。ADR-0031）。
+- G13c-U4: e2e 未実行（上記の理由）。
+- G13c-U5: 秘書・認可はまだプレースホルダのまま（taskd 側 Phase 24・26 待ち）。SPEC §4 の 6 画面のうち
+  「成果物」「報告」「組織」「案件」の 4 つが実装済み。
+
+### 提案（`docs/gui/api.md` への変更提案。採否は人間）
+
+- G13c-P1: `GET /projects/{id}` の `tasks`（`ProjectTaskView`）に成果物の有無・件数（または `ArtifactView[]`
+  そのもの）を足せれば、`/artifacts` の N+1（2N+1）を 1 回の呼び出しに減らせる。件数が多い運用で効いてくる
+  （G13a-P2 の「`ProjectList` に `milestone_count` を」と同じ種類の提案）。
+- G13c-P2: `ArtifactRef` に「リンク集」「整形表示」等の表示ヒントを持たせる（例: `kind` の語彙を広げて
+  `"links"` を足す）と、GUI 側でファイル名の完全一致に頼らずに `sources.json` 相当を判定できる
+  （G13c-U3 の代替案）。優先度は低い（現状 1 ハーネスだけの話のため）。

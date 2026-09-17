@@ -85,7 +85,7 @@ const GLOSSARY: { term: string; text: string }[] = [
   { term: "Approval", text: "人間の承認を待つための子タスク（kind=approval）。承認／却下で親の判定が決まる。" },
   {
     term: "成果物",
-    text: "ワーカーが taskd に明示的に登録したファイル（ディスクを自動スキャンして拾うことはしない）。",
+    text: "ワーカーが taskd に明示的に登録したファイル（ディスクを自動スキャンして拾うことはしない）。SPEC §2.2「調査の案件を投げる — 終わったとき、GUI から調査結果の文書と見るべき関連研究へのリンクがまとまって読める」。/artifacts で案件を横断して一覧でき、Markdown（report.md 等）はその場で描画、sources.json はリンク集（url・title・引用の有無）として、その他の JSON は整形表示する。コードの置き場所（タスクの workspace）は SPEC §3.7「コードは ~/workspace/… のリポジトリ」どおり、リンクではなくコピー用のパス表示（ローカルなら vscode で開くリンクも添える）。",
   },
   {
     term: "分野（genre）",
@@ -181,7 +181,7 @@ const SCREENS: { href: string | null; icon: IconName; title: string; text: strin
     href: "/artifacts",
     icon: "file",
     title: "成果物",
-    text: "SPEC §4「成果物 — 調査文書・リンク集はここで読む」。今はプレースホルダ（個々のタスクの成果物は従来どおり /tasks/:id で見られる）。",
+    text: "SPEC §4「成果物 — 調査文書・リンク集はここで読む。コードは置き場所へのリンク」。案件を選ぶと、その案件のタスクの成果物を横断して一覧できる。Markdown はその場で描画、sources.json はリンク集、その他の JSON は整形表示。各行にタスクの置き場所（workspace）も出る。個々のタスクの成果物は従来どおり /tasks/:id でも見られる。案件詳細（/projects/:id）にも同じ一覧が「成果物」節として出る。",
   },
   {
     href: "/",
