@@ -35,13 +35,16 @@ pub struct ViewContext {
     pub clusters: std::collections::HashMap<String, ClusterViewInfo>,
 }
 
-/// ADR-0019 D2: `TaskDetail.worktree` を組み立てるのに要るクラスタの設定。
+/// ADR-0019 D2 / ADR-0032 D1: `TaskDetail.worktree` を組み立てる（`sync` / `worktree_root`）のと、クラスタの
+/// 認証方式（`auth`）を運ぶのに要るクラスタの設定。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ClusterViewInfo {
     /// `"worktree"` のときだけ `TaskDetail.worktree` が出る（`"rsync"` / `"none"` では `null`）。
     pub sync: String,
     /// worktree を置く親ディレクトリ。`None` なら `<project>/.taskd-worktrees`。
     pub worktree_root: Option<PathBuf>,
+    /// ADR-0032 D1: `"manual"` / `"publickey"` / `"totp"`（既定 `"manual"`）。
+    pub auth: String,
 }
 
 /// worktree のブランチ名の接頭辞（ADR-0019 D2）。`task_worker::WorktreeSettings::default().branch_prefix` と同じ値。
@@ -1260,10 +1263,12 @@ mod tests {
         let mut ctx = view_ctx();
         ctx.clusters.insert(
             "pegasus".to_string(),
-            ClusterViewInfo { sync: "worktree".to_string(), worktree_root: None },
+            ClusterViewInfo { sync: "worktree".to_string(), worktree_root: None, ..Default::default() },
         );
-        ctx.clusters
-            .insert("sirius".to_string(), ClusterViewInfo { sync: "rsync".to_string(), worktree_root: None });
+        ctx.clusters.insert(
+            "sirius".to_string(),
+            ClusterViewInfo { sync: "rsync".to_string(), worktree_root: None, ..Default::default() },
+        );
 
         let detail = task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         let wt = detail.worktree.expect("worktree cluster");
@@ -1277,7 +1282,11 @@ mod tests {
         // worktree_root を設定したらそちらが親になる。
         ctx.clusters.insert(
             "pegasus".to_string(),
-            ClusterViewInfo { sync: "worktree".to_string(), worktree_root: Some(PathBuf::from("/work/NBB/x/wt")) },
+            ClusterViewInfo {
+                sync: "worktree".to_string(),
+                worktree_root: Some(PathBuf::from("/work/NBB/x/wt")),
+                ..Default::default()
+            },
         );
         let detail = task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         assert_eq!(detail.worktree.expect("worktree").dir, format!("/work/NBB/x/wt/{}", on_worktree.id));

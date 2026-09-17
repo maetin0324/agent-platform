@@ -4,6 +4,8 @@ import type {
   AccountLoginStart,
   AccountView,
   Action,
+  ClusterConnectResult,
+  ClusterConnectStart,
   ProviderCheckResponse,
   ProviderConfigView1,
   ReloadResult,
@@ -94,6 +96,24 @@ export interface SecretActionResult {
   op: SecretOpOutcome;
   reload?: ReloadOutcome;
 }
+
+/**
+ * クラスタへの接続の中継（ADR-0032 D5/D6、docs/taskd-api-v1.md §3.39〜3.41）:
+ * `POST /clusters/{id}/connect` / `POST /clusters/{id}/connect/code` / `DELETE /clusters/{id}/connect` の結果。
+ * taskd のエラーは例外にせず `{ok:false, error}` にする（401 `unauthorized` を含む）。**`POST /reload` は呼ばない**
+ * （接続を張っても `taskd.toml` の設定は変わらないので不要。プロバイダ・秘密の管理とはここが違う。ADR-0032）。
+ * コード自体（`code` フォーム値）はここにも `fetcher.data` にも載せない（結果の可否と `detail` だけ。ADR-0032 D6）。
+ */
+export type ClusterConnectOutcome =
+  | { ok: true; op: "connect_start"; id: string; start: ClusterConnectStart }
+  | { ok: true; op: "connect_code"; id: string; result: ClusterConnectResult }
+  | { ok: true; op: "connect_cancel"; id: string }
+  | {
+      ok: false;
+      op: "connect_start" | "connect_code" | "connect_cancel";
+      id: string;
+      error: ActionError;
+    };
 
 export type AccountOpOutcome =
   | { ok: true; op: "create"; id: string; adapter: AccountAdapter; account: AccountView }

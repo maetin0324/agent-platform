@@ -1,19 +1,31 @@
-import { isRouteErrorResponse } from "react-router";
+import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher } from "react-router";
+import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { hintClass, inputClass, labelClass } from "~/components/ui/form";
+import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
+import type { ClusterConnectOutcome } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
+import {
+  cancelClusterConnect,
+  readClusterConnectCode,
+  readClusterId,
+  startClusterConnect,
+  submitClusterConnectCode,
+} from "~/taskd/clusters-admin.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import type { Clusters, ClusterView } from "~/taskd/types";
 import type { Route } from "./+types/clusters";
 
 /**
- * `/clusters`（クラスタ画面、docs/DESIGN.md §10 Phase G7）の loader が返すデータ。
- * `Clusters.items[]`（`ClusterView`）をそのまま表にする。cooldown の残り秒数などは
+ * `/clusters`（クラスタ画面、docs/DESIGN.md §10 Phase G7、接続は ADR-0032 / Phase 22）の loader が返すデータ。
+ * `Clusters.items[]`（`ClusterView`）をそのまま表にする。cooldown の残り秒数、`auth`、`connect_pending` は
  * taskd がすでに計算済みなので、GUI 側で再計算しない。
  */
 export interface ClustersData {
@@ -26,8 +38,7 @@ export async function loadClusters(client: TaskdClient, request: Request): Promi
   return { clusters };
 }
 
-// 409 / 422 の action 後も再検証する（docs/adr/0005 D2）。/clusters に action は無いが、
-// 他ルートと同じ規約に揃える（providers.tsx と同じ）。
+// 409 / 422 の action 後も再検証する（docs/adr/0005 D2）。接続の action（ADR-0032）も同じ規約に揃える。
 export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ClustersData> {
@@ -42,8 +53,38 @@ export function meta(_: Route.MetaArgs) {
   return [{ title: "クラスタ - taskd-gui" }];
 }
 
+/**
+ * クラスタへの接続の中継（ADR-0032 D5/D6）。`clusters-admin.server.ts` に判断ロジックは無く、
+ * フォームの `intent` を対応する呼び出しに写すだけ。**`POST /reload` は呼ばない**（接続を張っても
+ * `taskd.toml` の設定は変わらないので不要。プロバイダ・秘密の管理とはここが違う）。
+ */
+export async function action({ request }: Route.ActionArgs) {
+  const form = await request.formData();
+  const intent = form.get("intent");
+  const client = getTaskdClient();
+  const id = readClusterId(form);
+
+  let outcome: ClusterConnectOutcome;
+  switch (intent) {
+    case "cluster_connect":
+      outcome = await startClusterConnect(client, id, request.signal);
+      break;
+    case "cluster_connect_code":
+      outcome = await submitClusterConnectCode(client, id, readClusterConnectCode(form), request.signal);
+      break;
+    case "cluster_connect_cancel":
+      outcome = await cancelClusterConnect(client, id, request.signal);
+      break;
+    default:
+      throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
+  }
+  return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
+}
+
 export default function ClustersPage({ loaderData }: Route.ComponentProps) {
   const { clusters } = loaderData;
+  const fetcher = useFetcher<ClusterConnectOutcome>();
+  const submitting = fetcher.state !== "idle";
 
   return (
     <div className="space-y-8">
@@ -69,7 +110,7 @@ export default function ClustersPage({ loaderData }: Route.ComponentProps) {
         ) : (
           <div className="grid gap-4 xl:grid-cols-2">
             {clusters.items.map((item) => (
-              <ClusterCard key={item.id} item={item} />
+              <ClusterCard key={item.id} item={item} fetcher={fetcher} submitting={submitting} />
             ))}
           </div>
         )}
@@ -78,9 +119,70 @@ export default function ClustersPage({ loaderData }: Route.ComponentProps) {
   );
 }
 
-function ClusterCard({ item }: { item: ClusterView }) {
+/** `ClusterView.auth` を 3 通りに正規化する（未設定・未知の値は `"manual"`。既定と同じ、ADR-0032 D1）。 */
+export type ClusterAuthKind = "manual" | "publickey" | "totp";
+
+export function clusterAuthKind(auth: string | null | undefined): ClusterAuthKind {
+  return auth === "publickey" || auth === "totp" ? auth : "manual";
+}
+
+/**
+ * 接続パネルのどの部分を出すかを決める（ADR-0032 D6）。**描画から切り離して単体テストできるようにしてある**:
+ * 一度「進行中だと入力欄に戻れなくなる」不具合を実機で出したため（`gui/test/unit/clusters.test.ts`）。
+ */
+export function clusterConnectPanelState(input: {
+  connected: boolean | null | undefined;
+  auth: ClusterAuthKind;
+  connectPending: boolean;
+  needsCode: boolean;
+  hasCodeResult: boolean;
+}): { showCodeForm: boolean; showPendingElsewhere: boolean; showConnectButton: boolean } {
+  const notConnected = input.connected !== true;
+  // このタブで「検証コードが要る」接続をちょうど開始し、まだコードの送信結果が付いていないときだけ
+  // プロンプト・入力欄を出す。コード送信が済んだら閉じ、もう一度「接続」からやり直す（D4 手順 5）。
+  const showCodeForm = input.auth === "totp" && notConnected && input.needsCode && !input.hasCodeResult;
+  // `connect_pending` は taskd 側のセッションの有無（このタブに限らない）。このタブで開始したのでなければ
+  // プロンプト文字列を持てない（D5: プロンプトは `POST` の応答にしか載らない）ので、通知だけ出す。
+  const showPendingElsewhere = input.connectPending && !showCodeForm && notConnected;
+  // **進行中でも接続ボタンは出す**。taskd は `connect` を受けると古いセッションを畳んでから張り直すので、
+  // 押し直せば入力欄に戻れる（`/accounts` のログインと同じ扱い）。ここを `!showPendingElsewhere` にすると、
+  // 画面を開き直しただけで「進行中」から抜け出せなくなる。
+  const showConnectButton = notConnected && input.auth !== "manual" && !showCodeForm;
+  return { showCodeForm, showPendingElsewhere, showConnectButton };
+}
+
+function ClusterCard({
+  item,
+  fetcher,
+  submitting,
+}: {
+  item: ClusterView;
+  fetcher: FetcherWithComponents<ClusterConnectOutcome>;
+  submitting: boolean;
+}) {
   const tone: Tone = item.connected === true ? "success" : item.connected === false ? "danger" : "neutral";
   const connectedLabel = item.connected === true ? "connected" : item.connected === false ? "disconnected" : "-";
+  const auth = clusterAuthKind(item.auth);
+  const pendingElsewhereCandidate = item.connect_pending === true;
+
+  const actionData = fetcher.data;
+  const own = actionData && actionData.id === item.id ? actionData : undefined;
+  const startResult = own?.ok && own.op === "connect_start" ? own.start : undefined;
+  const startError = own && !own.ok && own.op === "connect_start" ? own.error : undefined;
+  const codeResult = own?.ok && own.op === "connect_code" ? own.result : undefined;
+  const codeError = own && !own.ok && own.op === "connect_code" ? own.error : undefined;
+  const cancelError = own && !own.ok && own.op === "connect_cancel" ? own.error : undefined;
+
+  // このタブで「検証コードが要る」接続をちょうど開始し、まだコードの送信結果が付いていない状態のときだけ
+  // プロンプト・入力欄を出す。コード送信が失敗しても taskd 側でセッションは終わる（ADR-0032 D4 手順 5）ので、
+  // `codeResult` が付いたらこのパネルは閉じ、もう一度「接続」を押すところからやり直す。
+  const { showCodeForm, showPendingElsewhere, showConnectButton } = clusterConnectPanelState({
+    connected: item.connected,
+    auth,
+    connectPending: pendingElsewhereCandidate,
+    needsCode: startResult?.kind === "needs_code",
+    hasCodeResult: Boolean(codeResult),
+  });
 
   return (
     <Card data-testid="cluster-row" data-cluster-id={item.id} className="hover:shadow-md">
@@ -98,9 +200,14 @@ function ClusterCard({ item }: { item: ClusterView }) {
           </span>
         }
         actions={
-          <Badge tone={tone} dot pulse={item.connected === true} data-testid="cluster-connected">
-            {connectedLabel}
-          </Badge>
+          <>
+            <Badge tone="neutral" data-testid="cluster-auth">
+              {auth}
+            </Badge>
+            <Badge tone={tone} dot pulse={item.connected === true} data-testid="cluster-connected">
+              {connectedLabel}
+            </Badge>
+          </>
         }
       />
       <CardBody className="space-y-4">
@@ -124,13 +231,124 @@ function ClusterCard({ item }: { item: ClusterView }) {
           </DataItem>
         </dl>
 
-        {item.connected === false && (
+        {item.connected === false && auth === "manual" && (
           <Alert tone="danger" title="未接続です" data-testid="cluster-login-hint">
             <p>手元で次のコマンドを実行してください（2 要素認証を通して多重接続を張ります）。</p>
             <pre className="mt-2 overflow-x-auto rounded-lg border border-danger-border bg-surface px-3 py-2 font-mono text-xs text-fg">
               scripts/cluster-login.sh {item.host}
             </pre>
           </Alert>
+        )}
+
+        {startError && <ErrorFlash error={startError} />}
+        {cancelError && <ErrorFlash error={cancelError} />}
+        {codeResult && (
+          <Alert
+            tone={codeResult.ok ? "success" : "danger"}
+            title={codeResult.ok ? "接続しました" : "接続に失敗しました"}
+          >
+            {codeResult.detail && <p>{codeResult.detail}</p>}
+          </Alert>
+        )}
+        {startResult?.kind === "connected" && (
+          <Alert tone="success" title="接続しました">
+            <p>画面はまもなく最新の状態に更新されます。</p>
+          </Alert>
+        )}
+
+        {item.connected === true ? (
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="cluster_connect_cancel" />
+            <input type="hidden" name="id" value={item.id} />
+            <Button type="submit" variant="danger" size="sm" disabled={submitting} data-testid="cluster-disconnect">
+              <Icon name="xCircle" />
+              切断
+            </Button>
+          </fetcher.Form>
+        ) : (
+          auth !== "manual" && (
+            <div className="space-y-3 rounded-lg border border-primary-border bg-primary-soft/40 p-3">
+              {showPendingElsewhere && (
+                <Alert tone="warning" title="接続処理が進行中です" data-testid="cluster-connect-pending">
+                  <p>
+                    別の操作（別のタブ、または画面を開き直す前の操作）でこのクラスタへの接続が進行中です。
+                    検証コードの入力欄はこの画面には出せないので、
+                    <strong>もう一度「接続し直す」を押すと</strong>やり直せます。取り消しても構いません。
+                  </p>
+                </Alert>
+              )}
+
+              {showConnectButton && (
+                <fetcher.Form method="post">
+                  <input type="hidden" name="intent" value="cluster_connect" />
+                  <input type="hidden" name="id" value={item.id} />
+                  <Button type="submit" variant="primary" size="sm" disabled={submitting} data-testid="cluster-connect">
+                    <Icon name="link" />
+                    {showPendingElsewhere ? "接続し直す" : "接続"}
+                  </Button>
+                </fetcher.Form>
+              )}
+
+              {showCodeForm && (
+                <>
+                  <Alert tone="warning" title="セキュリティ上の注意">
+                    検証コードは平文 HTTP を通ります（GUI は LAN で平文。ADR-0024 D7 / ADR-0030 D4 と同じ注意）。
+                    信頼できるネットワークでだけ使ってください。
+                  </Alert>
+                  <p className="text-sm text-fg-muted" data-testid="cluster-connect-prompt">
+                    {startResult?.prompt}
+                  </p>
+                  {codeError && <ErrorFlash error={codeError} />}
+                  <fetcher.Form method="post" className="flex flex-wrap items-end gap-3">
+                    <input type="hidden" name="intent" value="cluster_connect_code" />
+                    <input type="hidden" name="id" value={item.id} />
+                    <div>
+                      <label htmlFor={`cluster-connect-code-${item.id}`} className={labelClass}>
+                        検証コード
+                      </label>
+                      <input
+                        id={`cluster-connect-code-${item.id}`}
+                        name="code"
+                        type="password"
+                        autoComplete="off"
+                        inputMode="numeric"
+                        className={`${inputClass} mt-1.5`}
+                        data-testid="cluster-connect-code"
+                      />
+                      <p className={hintClass}>コードはログにも応答にも残りません。</p>
+                    </div>
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                      disabled={submitting}
+                      data-testid="cluster-connect-submit"
+                    >
+                      <Icon name="check" />
+                      送信
+                    </Button>
+                  </fetcher.Form>
+                </>
+              )}
+
+              {(showCodeForm || showPendingElsewhere) && (
+                <fetcher.Form method="post">
+                  <input type="hidden" name="intent" value="cluster_connect_cancel" />
+                  <input type="hidden" name="id" value={item.id} />
+                  <Button
+                    type="submit"
+                    variant="ghost"
+                    size="sm"
+                    disabled={submitting}
+                    data-testid="cluster-connect-cancel"
+                  >
+                    <Icon name="x" />
+                    取り消し
+                  </Button>
+                </fetcher.Form>
+              )}
+            </div>
+          )
         )}
       </CardBody>
     </Card>

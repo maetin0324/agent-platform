@@ -55,6 +55,24 @@ pub enum AdminRequest {
         id: String,
         reply: oneshot::Sender<Result<(), AccountAdminError>>,
     },
+    /// ADR-0032 D5: `POST /clusters/{id}/connect`。コード無しで張れれば `kind = "connected"`、TOTP 等の
+    /// プロンプトが要れば `kind = "needs_code"`。
+    ClusterConnectStart {
+        id: String,
+        reply: oneshot::Sender<Result<ClusterConnectStartOutcome, ClusterAdminError>>,
+    },
+    /// ADR-0032 D5: `POST /clusters/{id}/connect/code`。コードはこの要求の中だけを通り、ログにも応答にも
+    /// 残らない（ハンドラ側の規律。ここでは受け渡すだけ）。
+    ClusterConnectCode {
+        id: String,
+        code: String,
+        reply: oneshot::Sender<Result<ClusterConnectCodeOutcome, ClusterAdminError>>,
+    },
+    /// ADR-0032 D5: `DELETE /clusters/{id}/connect`。進行中の接続セッションを取り消す、または張った接続を切る。
+    ClusterConnectCancel {
+        id: String,
+        reply: oneshot::Sender<Result<(), ClusterAdminError>>,
+    },
 }
 
 /// ADR-0024 D6: `POST /accounts/{id}/check` の結果。
@@ -117,6 +135,40 @@ pub enum ProviderCheckResult {
     AuthFailed,
     Throttled,
     SpawnFailed,
+}
+
+/// ADR-0032 D5: `POST /clusters/{id}/connect` の結果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClusterConnectStartOutcome {
+    /// `"connected"` | `"needs_code"`。
+    pub kind: String,
+    /// `kind = "needs_code"` のときだけ。ssh が出したプロンプト文字列（ログには出さない）。
+    pub prompt: Option<String>,
+    /// `kind = "needs_code"` のときだけ（Unix 秒）。
+    pub expires_at_unix: Option<i64>,
+}
+
+/// ADR-0032 D5: `POST /clusters/{id}/connect/code` の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterConnectCodeOutcome {
+    pub ok: bool,
+    /// コード・URL は含まない。
+    pub detail: Option<String>,
+}
+
+/// ADR-0032 D5: クラスタ接続の管理系が完了できなかった理由（ハンドラがこれを HTTP へ写す）。
+#[derive(Debug, Clone)]
+pub enum ClusterAdminError {
+    /// 指定した id が `[[clusters]]` に無い。
+    NotFound,
+    /// `auth = "manual"` のクラスタに `connect` した（人の操作で接続する運用のまま）。
+    NotSupported,
+    /// 進行中のセッションが無いのに `connect/code` を呼んだ。
+    NotStarted,
+    /// コードが空・制御文字を含む（ssh には渡していない）。
+    InvalidCode,
+    /// 接続そのものの失敗（ssh の失敗、タイムアウト等）。
+    Failed(String),
 }
 
 /// `check` が完了できなかった理由（taskd 側の都合。ハンドラがこれを HTTP へ写す）。

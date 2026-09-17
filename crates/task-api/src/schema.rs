@@ -15,9 +15,9 @@ use task_ops::view::{TaskDetail, TaskList};
 
 use crate::types::{
     AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView, AnswerBody, ArtifactList,
-    CancelBody, Clusters, ConfigView, DaemonView, DecisionBody, EventsPage, Health, Problem, ProviderCheckResponse,
-    ProviderConfigView, Providers, ReloadResult, RunList, SecretList, SecretPutResult, StreamHeartbeat, StreamHello,
-    StreamReset,
+    CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters, ConfigView, DaemonView, DecisionBody,
+    EventsPage, Health, Problem, ProviderCheckResponse, ProviderConfigView, Providers, ReloadResult, RunList,
+    SecretList, SecretPutResult, StreamHeartbeat, StreamHello, StreamReset,
 };
 
 /// コミット済みのスキーマ（`GET /schema` の本体）。
@@ -49,6 +49,9 @@ pub struct ApiV1Schema {
     pub reload: ReloadResult,
     pub provider_check: ProviderCheckResponse,
     pub clusters: Clusters,
+    /// ADR-0032 D5: `POST /clusters/{id}/connect` と `POST /clusters/{id}/connect/code` の応答。
+    pub cluster_connect_start: ClusterConnectStart,
+    pub cluster_connect_result: ClusterConnectResult,
     /// Phase 20（ADR-0030）: GUI から預かる秘密（API キー等）。`GET /secrets` と `PUT /secrets/{id}` の応答。
     pub secrets: SecretList,
     pub secret_put: SecretPutResult,

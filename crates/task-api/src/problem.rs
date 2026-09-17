@@ -188,6 +188,49 @@ impl ApiProblem {
         Self::new(StatusCode::NOT_FOUND, "secret_not_found", format!("secret not found: {id}"))
     }
 
+    /// ADR-0032 D5: 指定した cluster id が `[[clusters]]` に無い。
+    pub(crate) fn cluster_not_found(id: &str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "cluster_not_found", format!("cluster not found: {id}"))
+    }
+
+    /// ADR-0032 D5: `auth = "manual"` のクラスタに `connect` した（人の操作で接続する運用のまま）。
+    pub(crate) fn cluster_connect_not_supported() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "cluster_connect_not_supported",
+            "this cluster's auth is \"manual\"; connect it with scripts/cluster-login.sh instead",
+        )
+    }
+
+    /// ADR-0032 D5: 進行中のセッションが無いのに `connect/code` を呼んだ。
+    pub(crate) fn cluster_connect_not_started() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "cluster_connect_not_started",
+            "no cluster connect session is in progress for this cluster",
+        )
+    }
+
+    /// ADR-0032 D5: `POST /clusters/{id}/connect/code` の本文が JSON として読めない（構文誤り・型違い・
+    /// 未知フィールド）。**serde のエラー文は返さない**（`secret_body_invalid` と同じ理由）。
+    pub(crate) fn cluster_connect_body_invalid() -> Self {
+        Self::bad_request("invalid JSON body: expected an object with a string `code`")
+    }
+
+    /// ADR-0032 D4/D5: コードが空・空白だけ・制御文字を含む（ssh には渡していない）。
+    pub(crate) fn cluster_connect_code_invalid() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation",
+            "code must not be blank or contain control characters",
+        )
+    }
+
+    /// ADR-0032 D5: 接続そのものの失敗（ssh の失敗、タイムアウト等）。
+    pub(crate) fn cluster_connect_failed(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, "cluster_connect_failed", detail)
+    }
+
     /// この Problem の HTTP ステータス（`put_secret` が解析エラーだけを差し替えるために見る）。
     pub(crate) fn status(&self) -> StatusCode {
         self.status

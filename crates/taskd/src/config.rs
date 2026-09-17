@@ -285,6 +285,11 @@ pub struct ClusterConfig {
     /// `worktree`（ADR-0019 D4 の既定の選択。git 管理下のプロジェクト）、`rsync`（設定の既定）、`none`（共有ファイルシステム）。
     #[serde(default = "default_cluster_sync")]
     pub sync: String,
+    /// ADR-0032 D1: 接続の認証方式。`"manual"`（既定。taskd は接続を張らない。ADR-0018 D2 のまま）/
+    /// `"publickey"`（鍵だけで入れる。ディスパッチャが自動で接続を試みる。ADR-0032 D3）/
+    /// `"totp"`（publickey の後に検証コードが要る。GUI から中継する。ADR-0032 D4）。
+    #[serde(default = "default_cluster_auth")]
+    pub auth: String,
     /// push（手元 → クラスタ）で手元に無いファイルを消すか。既定 false（既存プロジェクトを壊さない）。
     #[serde(default)]
     pub delete_on_push: bool,
@@ -316,6 +321,9 @@ fn default_cluster_concurrency() -> usize {
 }
 fn default_cluster_sync() -> String {
     "rsync".to_string()
+}
+fn default_cluster_auth() -> String {
+    "manual".to_string()
 }
 fn default_worktree_base() -> String {
     "HEAD".to_string()
@@ -965,6 +973,13 @@ impl Config {
                     c.id, c.sync
                 )));
             }
+            // ADR-0032 D1: 認証方式は 3 つだけ。既定は "manual"（taskd は接続を張らない）。
+            if !matches!(c.auth.as_str(), "manual" | "publickey" | "totp") {
+                return Err(ConfigError::Invalid(format!(
+                    "[[clusters]] {}: auth must be \"manual\", \"publickey\" or \"totp\" (got {:?})",
+                    c.id, c.auth
+                )));
+            }
             // ADR-0019 D2: 自動削除は実装しない（実行結果を消してしまわないため）。
             if c.remove_worktree_when != "never" {
                 return Err(ConfigError::Invalid(format!(
@@ -1230,6 +1245,7 @@ impl Config {
                         setup: c.setup.clone(),
                         env,
                         rsync_excludes: c.rsync_excludes.clone(),
+                        auth: c.auth.clone(),
                         worktree: task_worker::WorktreeSettings {
                             root: c.worktree_root.clone(),
                             base: c.worktree_base.clone(),
@@ -1249,7 +1265,11 @@ impl Config {
             .map(|c| {
                 (
                     c.id.clone(),
-                    task_ops::view::ClusterViewInfo { sync: c.sync.clone(), worktree_root: c.worktree_root.clone() },
+                    task_ops::view::ClusterViewInfo {
+                        sync: c.sync.clone(),
+                        worktree_root: c.worktree_root.clone(),
+                        auth: c.auth.clone(),
+                    },
                 )
             })
             .collect()
@@ -1319,6 +1339,10 @@ adapter = "fake"
         cfg.validate().unwrap();
         let specs = cfg.cluster_specs();
         assert_eq!(specs["pegasus"].sync, task_worker::SyncMode::Worktree);
+        // ADR-0032 D1: pegasus/sirius は 2 要素認証（totp）、fern03 は鍵だけで入れる（publickey）の例。
+        assert_eq!(specs["pegasus"].auth, "totp");
+        assert_eq!(specs["sirius"].auth, "totp");
+        assert_eq!(specs["fern03"].auth, "publickey");
 
         let cfg: Config = toml::from_str(
             r#"[[providers]]
@@ -1372,6 +1396,43 @@ host = "h"
         let cfg: Config = toml::from_str(&base(r#"remove_worktree_when = "done""#)).unwrap();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("remove_worktree_when"), "{err}");
+    }
+
+    /// ADR-0032 D1: `auth` の既定は `"manual"`（省略した既存設定の挙動は変わらない）。3 値だけ許し、
+    /// `ClusterSpec` と `ClusterViewInfo` の両方に写る。それ以外は設定エラー。
+    #[test]
+    fn cluster_auth_defaults_to_manual_and_only_three_values_are_accepted() {
+        let base = |extra: &str| {
+            format!(
+                r#"[[providers]]
+id = "x"
+adapter = "fake"
+[[clusters]]
+id = "c"
+host = "h"
+{extra}
+"#
+            )
+        };
+        // 既定: auth を書かなければ "manual"。既存設定の挙動が変わらない。
+        let cfg: Config = toml::from_str(&base("")).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.clusters[0].auth, "manual");
+        assert_eq!(cfg.cluster_specs()["c"].auth, "manual");
+        assert_eq!(cfg.cluster_view_infos()["c"].auth, "manual");
+
+        for auth in ["manual", "publickey", "totp"] {
+            let cfg: Config = toml::from_str(&base(&format!(r#"auth = "{auth}""#))).unwrap();
+            cfg.validate().unwrap();
+            assert_eq!(cfg.clusters[0].auth, auth);
+            assert_eq!(cfg.cluster_specs()["c"].auth, auth);
+            assert_eq!(cfg.cluster_view_infos()["c"].auth, auth);
+        }
+
+        let cfg: Config = toml::from_str(&base(r#"auth = "password""#)).unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("auth must be"), "{err}");
+        assert!(err.contains("password"), "{err}");
     }
 
     #[test]

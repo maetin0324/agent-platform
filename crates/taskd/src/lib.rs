@@ -2,6 +2,7 @@
 //! 判断ロジックは `task-dispatch` にあり、ここはループと配線だけ。
 
 mod accounts_admin;
+mod cluster_admin;
 pub mod config;
 
 use std::collections::{BTreeMap, HashMap};
@@ -366,7 +367,7 @@ fn hostname() -> String {
 
 /// 設定から `Dispatcher` を組み立てる。`[accounts]`/`[secrets]` があればディレクトリを 0700 で作る
 /// （ADR-0024 D1、ADR-0030 D1）。
-pub fn build_dispatcher(config: &Config) -> Result<Dispatcher, DaemonError> {
+pub fn build_dispatcher(config: &Config, masters: ClusterMasters) -> Result<Dispatcher, DaemonError> {
     config.ensure_accounts_dir()?;
     config.ensure_secrets_dir()?;
     let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&config.db)?);
@@ -374,15 +375,75 @@ pub fn build_dispatcher(config: &Config) -> Result<Dispatcher, DaemonError> {
         config.provider_specs(),
         std::time::Duration::from_secs(config.error_cooldown_secs),
     );
-    Ok(Dispatcher::new(
+    let mut dispatcher = Dispatcher::new(
         store,
         Box::new(policy),
         effective_models(config),
         build_adapters(config),
         config.account_pool_providers(),
         config.dispatch_config(),
-    ))
+    );
+    dispatcher.set_cluster_connector(cluster_connector(masters));
+    Ok(dispatcher)
 }
+
+/// ADR-0032 D2: taskd が張った ssh master を保持する場所。`ClusterMaster` を落とすと接続も切れるので、
+/// **接続を生かしておきたい間はここに置く**（`DELETE /clusters/{id}/connect` はここから取り除く）。
+/// 人が `cluster-login.sh` で張った master はこのマップに載らない（taskd の持ち物ではないため）。
+pub type ClusterMasters = Arc<std::sync::Mutex<HashMap<String, task_worker::cluster_login::ClusterMaster>>>;
+
+/// ADR-0032 D3: `auth = "publickey"` のクラスタを、ディスパッチの直前に 1 回だけ自分で張る。
+///
+/// **時間の設計**: これはディスパッチループの中から同期で呼ばれる（`control_master_alive_blocking` と
+/// 同じ立場）。`-O check` は 1 秒で返るが接続はもっとかかるので、長く待つと tick 全体が止まる。
+/// そこで **`AUTO_CONNECT_TIMEOUT` を短く（8 秒）**切る。鍵だけの接続は実測で 1 秒未満なので
+/// （ADR-0032 §1 の fern03）、これで足りる。間に合わなければその tick は cooldown に落ち、
+/// 次の機会に再試行される（人を待たせるより tick を止めない方を優先する）。
+fn cluster_connector(masters: ClusterMasters) -> task_dispatch::dispatcher::ClusterConnector {
+    /// 自動接続に使う上限。ディスパッチループを止めないために短くしてある（上の説明）。
+    const AUTO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+    Arc::new(move |cluster_id: &str, host: &str| {
+        let host = host.to_string();
+        let cluster_id = cluster_id.to_string();
+        // ディスパッチループは同期なので、非同期の `start_connect` を専用ランタイムで回す。
+        // `Handle::current().block_on` は同じランタイムのワーカースレッドを塞いでパニックしうるため使わない。
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("could not build a runtime for the cluster connect: {e}"))?;
+        let outcome = runtime.block_on(task_worker::cluster_login::start_connect(
+            &["ssh".to_string()],
+            &host,
+            false, // publickey のみ。人の入力は要らない（要るクラスタはここに来ない）
+            AUTO_CONNECT_TIMEOUT,
+            AUTO_CONNECT_TIMEOUT,
+        ));
+        match outcome {
+            Ok(task_worker::cluster_login::ClusterConnectStart::Connected(master)) => {
+                // `master` を落とすと接続も切れるので、生かしておく場所へ移す（`None` は人が張った master）。
+                if let Some(master) = master {
+                    match masters.lock() {
+                        Ok(mut held) => {
+                            held.insert(cluster_id.clone(), master);
+                        }
+                        // 保持できないなら接続を維持できない。master はここで drop されて切れる。
+                        Err(_) => return Err("the cluster master registry is poisoned".to_string()),
+                    }
+                }
+                tracing::info!(cluster = %cluster_id, host = %host, "cluster: auto-connected (publickey)");
+                Ok(())
+            }
+            // `interactive = false` では起こらないが、型のうえではありうる。
+            Ok(task_worker::cluster_login::ClusterConnectStart::NeedsCode { session, .. }) => {
+                runtime.block_on(session.cancel());
+                Err("the host asked for a verification code; set auth = \"totp\" for this cluster".to_string())
+            }
+            Err(e) => Err(format!("{e}")),
+        }
+    })
+}
+
 
 /// ADR-0013 / `docs/gui/api.md` §3.21: `GET /api/v1/config` に出す設定の要約。env は**キー名だけ**、トークンとその場所は出さない。
 pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
@@ -429,6 +490,8 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                 ClusterConfigView {
                     id: c.id.clone(),
                     host: c.host.clone(),
+                    // ADR-0032 D1: 接続の張り方（`manual` / `publickey` / `totp`）。GUI が出し分けに使う。
+                    auth: c.auth.clone(),
                     concurrency: c.concurrency,
                     sync: c.sync.clone(),
                     delete_on_push: c.delete_on_push,
@@ -571,7 +634,8 @@ async fn start_api(
 /// デーモン本体。`[api]` があれば同じランタイムで HTTP API も動かし、tick ループの終了時に止める。
 pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> {
     warn_if_db_on_network_filesystem(&config.db);
-    let mut dispatcher = build_dispatcher(&config)?;
+    let cluster_masters: ClusterMasters = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let mut dispatcher = build_dispatcher(&config, Arc::clone(&cluster_masters))?;
     let (api, admin_rx) = match config.api.listen {
         Some(listen) => {
             let (api, admin_rx) = start_api(&config, listen, &mut dispatcher).await?;
@@ -579,7 +643,7 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
         }
         None => (None, None),
     };
-    let result = tick_loop(&mut dispatcher, &config, opts, admin_rx).await;
+    let result = tick_loop(&mut dispatcher, &config, opts, admin_rx, cluster_masters).await;
     if let Some(api) = api {
         api.stop().await;
     }
@@ -593,6 +657,8 @@ async fn tick_loop(
     config: &Config,
     opts: RunOptions,
     mut admin_rx: Option<tokio::sync::mpsc::Receiver<task_api::AdminRequest>>,
+    // ADR-0032 D2: taskd が張った ssh master の置き場所。ここが持っている間だけ接続が生きる。
+    cluster_masters: ClusterMasters,
 ) -> Result<Exit, DaemonError> {
     // ADR-0022 D2: `check` は spawn した先で終わるので、結果をここへ戻してスナップショットに載せる。
     let (check_tx, mut check_rx) = tokio::sync::mpsc::channel::<(String, ProviderCheckView)>(16);
@@ -601,6 +667,9 @@ async fn tick_loop(
     let login_sessions = accounts_admin::new_sessions();
     // ADR-0025 D5: codex のログイン中継（別の流儀なので別のマップ）。
     let codex_login_sessions = accounts_admin::new_codex_sessions();
+    // ADR-0032 D4: クラスタ接続の中継（進行中のセッションと、taskd が保持している ssh master）。
+    let (cluster_tx, mut cluster_rx) = tokio::sync::mpsc::channel::<cluster_admin::ClusterConnectPending>(16);
+    let cluster_sessions: cluster_admin::ClusterConnectSessions = Default::default();
     let tick = config.tick();
     let mut ticks: u64 = 0;
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
@@ -622,6 +691,12 @@ async fn tick_loop(
         }
         for (id, _ok) in accounts_admin::poll_codex_logins(&codex_login_sessions).await {
             dispatcher.set_account_login_pending(task_core::AccountAdapter::Codex, &id, false);
+        }
+        // ADR-0032 D4 / B1: 放置されたクラスタ接続のセッションも同じ規約で畳む（チャネルを使わない）。
+        for id in
+            cluster_admin::expire_stale_cluster_sessions(&cluster_sessions, cluster_admin::SESSION_EXPIRY).await
+        {
+            dispatcher.set_cluster_connect_pending(&id, false);
         }
         let tick_started = std::time::Instant::now();
         let report: TickReport = dispatcher.tick()?;
@@ -671,7 +746,7 @@ async fn tick_loop(
                 // ADR-0017 M2: 処理後は select に戻らず即座にループの先頭（次の `dispatcher.tick()`）へ進む
                 // ので、reload の効果は「次の tick から」になる。`tick_ms` の残りを待たない。
                 if let Some(req) = req {
-                    handle_admin_request(dispatcher, config, req, check_tx.clone(), login_sessions.clone(), codex_login_sessions.clone(), account_tx.clone()).await;
+                    handle_admin_request(dispatcher, config, req, check_tx.clone(), login_sessions.clone(), codex_login_sessions.clone(), account_tx.clone(), cluster_sessions.clone(), Arc::clone(&cluster_masters), cluster_tx.clone()).await;
                 }
             }
             // ADR-0022 D2: 終わった `check` の結果を受け取り、次の tick のスナップショットに載せる。
@@ -692,6 +767,10 @@ async fn tick_loop(
                     }
                 }
             }
+            // ADR-0032 D5: クラスタ接続の進行状況を `ClusterLive.connect_pending` に反映する。
+            Some(cluster_admin::ClusterConnectPending { id, pending }) = cluster_rx.recv() => {
+                dispatcher.set_cluster_connect_pending(&id, pending);
+            }
         }
     }
 }
@@ -707,6 +786,9 @@ async fn handle_admin_request(
     login_sessions: accounts_admin::LoginSessions,
     codex_login_sessions: accounts_admin::CodexLoginSessions,
     account_tx: tokio::sync::mpsc::Sender<accounts_admin::AccountAdminEvent>,
+    cluster_sessions: cluster_admin::ClusterConnectSessions,
+    cluster_masters: ClusterMasters,
+    cluster_tx: tokio::sync::mpsc::Sender<cluster_admin::ClusterConnectPending>,
 ) {
     match req {
         task_api::AdminRequest::Reload { reply } => {
@@ -745,6 +827,24 @@ async fn handle_admin_request(
         }
         task_api::AdminRequest::AccountLoginCancel { adapter, id, reply } => {
             accounts_admin::spawn_login_cancel(login_sessions, codex_login_sessions, adapter, id, account_tx, reply);
+        }
+        // ADR-0032 D5: クラスタ接続の中継。どれも `tokio::spawn` するので tick を止めない。
+        task_api::AdminRequest::ClusterConnectStart { id, reply } => {
+            cluster_admin::spawn_connect_start(config, cluster_sessions, cluster_masters, id, cluster_tx, reply);
+        }
+        task_api::AdminRequest::ClusterConnectCode { id, code, reply } => {
+            cluster_admin::spawn_connect_code(
+                config,
+                cluster_sessions,
+                cluster_masters,
+                id,
+                code,
+                cluster_tx,
+                reply,
+            );
+        }
+        task_api::AdminRequest::ClusterConnectCancel { id, reply } => {
+            cluster_admin::spawn_connect_cancel(config, cluster_sessions, cluster_masters, id, cluster_tx, reply);
         }
         // S2+S8: cheap な fs 操作（ディレクトリの rename）だけなので spawn せず、ここで直接（同期的に）行う。
         // ディスパッチャの権威ある `account_in_use` を使うため `&mut Dispatcher` が要る。
@@ -1381,7 +1481,7 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
         };
         write_config(2);
         let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
-        let mut dispatcher = build_dispatcher(&config).unwrap_or_else(|e| panic!("{e}"));
+        let mut dispatcher = build_dispatcher(&config, Default::default()).unwrap_or_else(|e| panic!("{e}"));
 
         // [accounts] が変わっていなければ通る。
         assert!(reload_providers(&mut dispatcher, &config).is_ok());

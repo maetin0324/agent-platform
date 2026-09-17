@@ -91,6 +91,10 @@ const GLOSSARY: { term: string; text: string }[] = [
     term: "分野（genre）",
     text: "タスクが属する専門領域（例: コーディング、関連研究調査）。設定の [[genres]] にある id で、どのハーネス・役割の集団に作業を投げるかの入口になる（実際にどのアダプタで動くかは、その分野の既定役割などが持つ）。委譲できる親タスクには使える分野と役割の一覧が渡され、子タスクを別の分野に委譲できる。分野は「できること」（capabilities）と「渡すもの／返るもの」（input_artifacts / output_artifacts）も広告でき、Plannerや委譲する親タスクはどこに作業を送るか選ぶときにその一覧を見る。",
   },
+  {
+    term: "接続方式（auth）",
+    text: "クラスタ（[[clusters]]）ごとに設定する、接続の張り方。manual（既定）は taskd が自分では接続を張らず、人が手元で scripts/cluster-login.sh を実行する。publickey は鍵だけで入れるクラスタで、クラスタ画面の「接続」ボタンを押すだけで taskd が張る（ディスパッチャが自動でも試みる）。totp は publickey の後に検証コード（2 要素認証）が要るクラスタで、「接続」→ 表示されたプロンプトを見て検証コードを入力 →「送信」。コードはその場で ssh に渡すだけで taskd には保存されず、ログにも画面にも残らない。",
+  },
 ];
 
 const TOC = [
@@ -143,7 +147,7 @@ const SCREENS: { href: string | null; icon: IconName; title: string; text: strin
     href: "/clusters",
     icon: "server",
     title: "クラスタ",
-    text: "リモートで実行するタスクが使う `[[clusters]]` の接続状況（connected・cooldown）を見る画面。受信箱の「クラスタに接続できません」から開くことが多い。",
+    text: "リモートで実行するタスクが使う `[[clusters]]` の接続状況（connected・cooldown・auth）を見る画面。受信箱の「クラスタに接続できません」から開くことが多い。接続方式（auth）が manual 以外なら、この画面から接続もできる（管理系 API のトークンが要る）: publickey は「接続」ボタンだけ、totp は「接続」→ プロンプト表示 → 検証コード入力 → 「送信」（コードはログにも応答にも残らない）。manual は従来どおり手元で scripts/cluster-login.sh を実行する。",
   },
   {
     href: "/daemon",

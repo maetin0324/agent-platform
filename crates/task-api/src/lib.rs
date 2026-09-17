@@ -33,17 +33,18 @@ pub mod types;
 
 pub use admin::{
     AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome, AdminRequest,
-    CheckError, ProviderCheckOutcome, ProviderCheckResult,
+    CheckError, ClusterAdminError, ClusterConnectCodeOutcome, ClusterConnectStartOutcome, ProviderCheckOutcome,
+    ProviderCheckResult,
 };
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};
 pub use stats::classify_outcome;
 pub use types::{
-    AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterView, Clusters,
-    ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, GenreConfigView, Health, Problem,
-    ProviderConfigView, ProviderStats, ProviderView, Providers, ReviewerConfigView, RoleConfigView, RunList,
-    SecretList, SecretPutBody, SecretPutResult, SecretUse, SecretView, StreamHeartbeat, StreamHello, StreamReset,
-    ValidationError,
+    AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterConnectCodeBody,
+    ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters, ConfigView, DaemonView, DailyUsage, DbInfo,
+    DecisionBody, EventsPage, GenreConfigView, Health, Problem, ProviderConfigView, ProviderStats, ProviderView,
+    Providers, ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody, SecretPutResult, SecretUse,
+    SecretView, StreamHeartbeat, StreamHello, StreamReset, ValidationError,
 };
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。

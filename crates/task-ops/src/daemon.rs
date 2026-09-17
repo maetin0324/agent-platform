@@ -176,4 +176,15 @@ pub struct ClusterLive {
     pub connected: bool,
     /// 多重接続が無くて cooldown 中なら、その終わり（RFC 3339）。
     pub cooldown_until: Option<String>,
+    /// ADR-0032 D1: `"manual"` / `"publickey"` / `"totp"`。古いスナップショットには無いので既定は `"manual"`
+    /// （`taskd::config::ClusterConfig.auth` と同じ既定）。
+    #[serde(default = "default_cluster_live_auth")]
+    pub auth: String,
+    /// ADR-0032 D4: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中か。古いスナップショットには無いので既定は `false`。
+    #[serde(default)]
+    pub connect_pending: bool,
+}
+
+fn default_cluster_live_auth() -> String {
+    "manual".to_string()
 }

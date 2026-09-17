@@ -745,7 +745,7 @@ sleep 30
             book.save().unwrap();
         }
         let config = config_for_dispatcher(tmp.path(), acct.clone());
-        let mut dispatcher = crate::build_dispatcher(&config).unwrap();
+        let mut dispatcher = crate::build_dispatcher(&config, Default::default()).unwrap();
         let sessions = new_sessions();
         let codex_sessions = new_codex_sessions();
         // 進行中のログインがあれば、削除で止められる。
@@ -790,7 +790,7 @@ sleep 30
         let acct = tmp.path().join("claude-accounts");
         std::fs::create_dir_all(&acct).unwrap();
         let config = config_for_dispatcher(tmp.path(), acct);
-        let mut dispatcher = crate::build_dispatcher(&config).unwrap();
+        let mut dispatcher = crate::build_dispatcher(&config, Default::default()).unwrap();
         let sessions = new_sessions();
         let codex_sessions = new_codex_sessions();
         let result = remove_account(&config, &mut dispatcher, &sessions, &codex_sessions, AccountAdapter::ClaudeCode, "missing").await;
@@ -807,7 +807,7 @@ sleep 30
         let mut config = config_with_codex_accounts(codex_dir.clone(), "codex".into());
         config.db = tmp.path().join("taskd.db");
         config.workspace_root = tmp.path().join("ws");
-        let mut dispatcher = crate::build_dispatcher(&config).unwrap();
+        let mut dispatcher = crate::build_dispatcher(&config, Default::default()).unwrap();
         let sessions = new_sessions();
         let codex_sessions = new_codex_sessions();
         let result = remove_account(&config, &mut dispatcher, &sessions, &codex_sessions, AccountAdapter::Codex, "a").await;

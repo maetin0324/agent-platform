@@ -239,6 +239,8 @@ export interface ApiV1Schema {
   answer: AnswerBody;
   artifact_list: ArtifactList;
   cancel: CancelBody;
+  cluster_connect_result: ClusterConnectResult;
+  cluster_connect_start: ClusterConnectStart;
   clusters: Clusters;
   config: ConfigView;
   daemon: DaemonView;
@@ -469,6 +471,31 @@ export interface CancelBody {
   expected_status?: Status | null;
 }
 /**
+ * `POST /clusters/{id}/connect/code` の応答。コード・URL は含まない。
+ */
+export interface ClusterConnectResult {
+  detail?: string | null;
+  ok: boolean;
+}
+/**
+ * ADR-0032 D5: `POST /clusters/{id}/connect` と `POST /clusters/{id}/connect/code` の応答。
+ */
+export interface ClusterConnectStart {
+  /**
+   * `kind = "needs_code"` のときだけ（RFC 3339）。
+   */
+  expires_at?: string | null;
+  /**
+   * `"connected"` | `"needs_code"`。
+   */
+  kind: string;
+  /**
+   * `kind = "needs_code"` のときだけ。ssh が出したプロンプト文字列（ユーザ名・ホスト名を含みうるので
+   * ログには出さない。`GET /clusters` にも出さない。応答にだけ載る）。
+   */
+  prompt?: string | null;
+}
+/**
  * `GET /clusters`（ADR-0018 受け入れ条件8）。
  */
 export interface Clusters {
@@ -478,7 +505,15 @@ export interface Clusters {
  * 設定（`[[clusters]]`）とスナップショット（`ClusterLive`）を結合したもの。`env` の値は出さない。
  */
 export interface ClusterView {
+  /**
+   * ADR-0032 D1: `"manual"` | `"publickey"` | `"totp"`（設定の `[[clusters]].auth` から）。
+   */
+  auth?: string;
   concurrency: number;
+  /**
+   * ADR-0032 D5: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中か。スナップショットが無ければ `false`。
+   */
+  connect_pending?: boolean;
   /**
    * この tick で `ssh -O check` が成功したか。スナップショットが無ければ `null`。
    */
@@ -562,6 +597,10 @@ export interface ApiConfigView {
  * `[[clusters]]` 1 行の要約（ADR-0018 D7: `env` の値は出さない）。
  */
 export interface ClusterConfigView {
+  /**
+   * ADR-0032 D1: `"manual"` | `"publickey"` | `"totp"`。
+   */
+  auth?: string;
   concurrency: number;
   delete_on_push: boolean;
   /**
@@ -799,7 +838,16 @@ export interface RateWindow {
  * クラスタ（`[[clusters]]` の行）の稼働状況（ADR-0018 D2 / D5）。`env` の値・`setup` の中身は含めない。
  */
 export interface ClusterLive {
+  /**
+   * ADR-0032 D1: `"manual"` / `"publickey"` / `"totp"`。古いスナップショットには無いので既定は `"manual"`
+   * （`taskd::config::ClusterConfig.auth` と同じ既定）。
+   */
+  auth?: string;
   concurrency: number;
+  /**
+   * ADR-0032 D4: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中か。古いスナップショットには無いので既定は `false`。
+   */
+  connect_pending?: boolean;
   /**
    * この tick で `ssh -O check` が成功した（人が張った多重接続がある）。
    */

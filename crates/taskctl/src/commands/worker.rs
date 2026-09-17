@@ -673,6 +673,7 @@ mod tests {
             host: host.into(),
             concurrency: 1,
             sync: "rsync".into(),
+            auth: "manual".into(),
             delete_on_push: false,
             setup: vec![],
             env: std::collections::HashMap::new(),

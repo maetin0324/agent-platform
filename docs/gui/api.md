@@ -123,7 +123,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（31）
+## 2. エンドポイント一覧（39）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -163,6 +163,9 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 34 | GET | `/secrets` | GUI から預かる秘密（API キー等）の一覧。値は含まない（ADR-0030、Phase 20。**管理系**） | `SecretList` | taskd（ファイル読み取りのみ） |
 | 35 | PUT | `/secrets/{id}` | 秘密の作成／置き換え（0600）（**管理系**） | 200 `SecretPutResult` | taskd（ファイル書き込みのみ） |
 | 36 | DELETE | `/secrets/{id}` | 秘密の削除（**管理系**） | 200 `{}` | taskd（ファイル削除のみ） |
+| 37 | POST | `/clusters/{id}/connect` | 接続を開始する（コード不要で張れれば即完了。ADR-0032、Phase 22。**管理系**） | 200 `ClusterConnectStart` | taskd（`ssh -M -N` の起動・借用） |
+| 38 | POST | `/clusters/{id}/connect/code` | 進行中の接続に検証コード（TOTP 等）を渡す（**管理系**） | 200 `ClusterConnectResult` | taskd（`SSH_ASKPASS` 経由の中継） |
+| 39 | DELETE | `/clusters/{id}/connect` | 進行中の接続を取り消す、または張った接続を切る（**管理系**） | 200 `{}` | taskd（子プロセスの終了） |
 
 ---
 
@@ -437,13 +440,19 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 
 ### 3.23 `GET /clusters` → 200 `Clusters`（ADR-0018、Phase 12）
 
-`items[]` は `[[clusters]]` の順。定義（`id` / `host` / `concurrency` / `sync` / `delete_on_push` / `has_setup` = `setup` の有無 / `env_keys` = **キー名だけ** / `rsync_excludes`）は設定から、
-`in_use`（そのクラスタで走っている run + 判定の数）/ `connected`（この tick の `ssh -O check` の結果 = 人が張った多重接続があるか）/ `cooldown_until` / `cooldown_remaining_secs` は
-スナップショットから（無ければ `null`）。`env` の値と `setup` の中身は出さない（ADR-0018 D7）。
+`items[]` は `[[clusters]]` の順。定義（`id` / `host` / `concurrency` / `sync` / `delete_on_push` / `has_setup` = `setup` の有無 / `env_keys` = **キー名だけ** / `rsync_excludes` / `auth`）は設定から、
+`in_use`（そのクラスタで走っている run + 判定の数）/ `connected`（この tick の `ssh -O check` の結果 = 多重接続があるか）/ `cooldown_until` / `cooldown_remaining_secs` / `connect_pending` は
+スナップショットから（無ければ `null` / `false`）。`env` の値と `setup` の中身は出さない（ADR-0018 D7）。
 
+- `auth`: `"manual"`（既定）/ `"publickey"` / `"totp"`（ADR-0032 D1）。GUI はこれで「クラスタ」画面の案内を出し分ける
+  （3.39〜3.41、§10）。
+- `connect_pending`: GUI 発の接続（`POST /clusters/{id}/connect`）が taskd 側で進行中か（ADR-0032 D5）。
+  **プロンプト文字列はここには出さない**（`POST /clusters/{id}/connect` の応答にだけ載る。ADR-0024/0025 の
+  「URL とコードは action の戻り値にだけ置く」と同じ規律）。
 - ディスパッチャは 1 tick に 1 回、設定の全クラスタに `ssh -o BatchMode=yes -O check <host>` を実行する（unix ソケットを見るだけ。ネットワークにも認証にも触れない）。
-  接続が戻れば cooldown はその tick で解ける。
-- GUI は `connected == false` のクラスタに「`scripts/cluster-login.sh <host>` でログインし直してください」と出す。受信箱の `attention[].cluster_unavailable`（§5.1 (d)）と対。
+  接続が戻れば cooldown はその tick で解ける。`auth = "publickey"` のクラスタは、未接続を見つけると cooldown にする前に
+  1 回だけ自動で接続を試みる（ADR-0032 D3）。
+- GUI は `connected == false` のクラスタに、`auth` に応じた案内を出す（3.39〜3.41）。受信箱の `attention[].cluster_unavailable`（§5.1 (d)）と対。
 
 ### 3.24〜3.28 プロバイダ管理（ADR-0017、Phase 11。**すべて管理系: `token_file` 未設定でも 401**）
 
@@ -665,6 +674,52 @@ atomic（一時ファイル→rename）に書く。空文字・空白だけの�
 
 **ログ・応答のどこにも値は出ない**（`who = "admin"`, `op = "secret_put" | "secret_delete"`, `secret_id` だけ記録
 する。ADR-0024 D5 と同じ規律）。
+
+### 3.39〜3.41 クラスタへの接続を GUI から張る（ADR-0032、Phase 22。**すべて管理系: `token_file` 未設定でも 401**）
+
+設計は ADR-0032。ADR-0018 D2/D7 の「taskd から対話的な認証は絶対に行わない・接続を張るのは人力」を、
+`[[clusters]].auth` で opt-in する形に上書きする（既定 `"manual"` は従来どおり taskd が接続を張らない）。
+実際の ssh の起動・`SSH_ASKPASS` を使った検証コードの中継は taskd 側（`AdminRequest::ClusterConnect*`）が行い、
+task-api 自身は ssh を起動しない（DESIGN §5.10 の境界）。未知の `id`（`[[clusters]]` に無い）はどの操作も
+404 `cluster_not_found`。
+
+#### 3.39 `POST /clusters/{id}/connect` → 200 `ClusterConnectStart`
+
+```json
+{"kind": "connected", "prompt": null, "expires_at": null}
+```
+```json
+{"kind": "needs_code", "prompt": "(rmaeda@130.158.241.2) Verification code: ", "expires_at": "2026-09-17T01:35:00Z"}
+```
+
+- `kind = "connected"`: コード不要で張れた（`auth = "publickey"` で鍵だけの接続が通った、または既に
+  多重接続があった。ADR-0032 D2: 既にあれば新しく張らずに成功を返す）。
+- `kind = "needs_code"`: ssh がプロンプトを出した（`auth = "totp"`）。`prompt` は ssh が実際に出した文字列を
+  そのまま返す（ユーザ名・ホスト名を含みうる）。人はこれを見て検証コードを入力し、3.40 に渡す。
+  `expires_at`（既定 300 秒後）を過ぎたセッションは taskd が自動で片付ける。
+- `auth = "manual"` のクラスタへの `connect` は 409 `cluster_connect_not_supported`
+  （人が `scripts/cluster-login.sh` で張る運用のまま。ADR-0032 D7）。
+- 接続そのものの失敗（ssh の失敗、タイムアウト）は 502 `cluster_connect_failed`（`detail` に一行の手がかり）。
+- **プロンプト文字列はログに出さない**（ユーザ名・ホスト名が入るため。ADR-0032 D4）。`GET /clusters` にも出さない
+  （3.23）。
+
+#### 3.40 `POST /clusters/{id}/connect/code` → 200 `ClusterConnectResult`
+
+要求本文 `{"code": "123456"}`。`{"ok": true, "detail": null}`。
+
+- コードは `trim` して空、または制御文字を含めば ssh に渡さず 422 `validation`（`claude_account.rs::submit_code`
+  と同じ注入防止。長さや文字種は制限しない）。この場合 `admin_tx` には何も送らない。
+- 進行中のセッションが無ければ 409 `cluster_connect_not_started`。
+- **コードが間違っていた（ssh が接続できなかった）場合は 422 ではなく 200 `{"ok": false, "detail": "…"}`**。
+  422 は「taskd がコードを ssh に渡すことすら拒んだ」ときだけで、ssh の認証結果は `ok` で伝える
+  （ADR-0032 D5。GUI は `ok: false` を握りつぶさずに画面へ出す）。`detail` に**コードは含まれない**。
+- **コードは受け取ってもログにも応答にも出さない**（`who = "admin"`, `op = "cluster_connect_code"`, `cluster`
+  だけ記録する。ADR-0032 D4）。
+
+#### 3.41 `DELETE /clusters/{id}/connect` → 200 `{}`
+
+進行中の接続セッションを取り消す（ssh の子プロセスをプロセスグループごと落とす）、または既に張った接続を切る
+（`ssh -O exit <host>` を `BatchMode=yes` で呼ぶ）。無ければ何もしない。
 
 ---
 
@@ -918,7 +973,9 @@ pub struct ProviderLive { pub id: String, pub adapter: String, pub tiers: Vec<Ti
     pub env_keys: Vec<String> /* ADR-0017 */, pub in_use: u32, pub last_check: Option<ProviderCheckView> /* ADR-0022 */,
     #[serde(default)] pub account_pool: bool /* Phase 13 */ }
 /// Phase 12（ADR-0018）: `[[clusters]]` の稼働状況（`id` 昇順）。`connected` はこの tick の `ssh -O check` の結果。
-pub struct ClusterLive { pub id: String, pub host: String, pub concurrency: usize, pub in_use: u32, pub connected: bool, pub cooldown_until: Option<String> }
+/// ADR-0032 D1/D5: `auth`（既定 `"manual"`）と `connect_pending`（既定 `false`）を追加（古いスナップショットとの互換用）。
+pub struct ClusterLive { pub id: String, pub host: String, pub concurrency: usize, pub in_use: u32, pub connected: bool, pub cooldown_until: Option<String>,
+    #[serde(default = "default_manual")] pub auth: String, #[serde(default)] pub connect_pending: bool }
 /// Phase 13（ADR-0024）: プールの 1 アカウントの稼働状況（`AccountView` から `dir`/`logged_in`/`stats` を除いたもの。Unix 秒のまま）。
 /// Phase 14（ADR-0025）: `adapter` を追加（既定 `"claude-code"`。古いスナップショットとの互換用）。
 pub struct AccountLive { #[serde(default = "default_claude_code")] pub adapter: String, pub id: String, pub logged_in: bool, pub in_use: u32, pub usage: Option<AccountUsageLive>, pub score: Option<f64>,
@@ -955,9 +1012,18 @@ pub struct DailyUsage { pub day: String /* YYYY-MM-DD */, pub runs: u64, pub inp
 pub struct DaemonView { pub now: String, pub snapshot: Option<DaemonSnapshot> }
 // Phase 12（ADR-0018）
 pub struct Clusters { pub items: Vec<ClusterView> }
+// ADR-0032 D1/D5: `auth`（設定。既定 `"manual"`）と `connect_pending`（スナップショット。既定 `false`）を追加。
 pub struct ClusterView { pub id: String, pub host: String, pub concurrency: usize, pub sync: String /* "rsync" | "none" */, pub delete_on_push: bool,
     pub has_setup: bool, pub env_keys: Vec<String>, pub rsync_excludes: Vec<String>,
-    pub in_use: Option<u32>, pub connected: Option<bool>, pub cooldown_until: Option<String>, pub cooldown_remaining_secs: Option<u64> }
+    pub in_use: Option<u32>, pub connected: Option<bool>, pub cooldown_until: Option<String>, pub cooldown_remaining_secs: Option<u64>,
+    #[serde(default = "default_manual")] pub auth: String, #[serde(default)] pub connect_pending: bool }
+// ADR-0032 D5: `POST /clusters/{id}/connect` / `POST /clusters/{id}/connect/code` / `DELETE /clusters/{id}/connect`（Phase 22）。
+pub struct ClusterConnectStart { pub kind: String /* "connected" | "needs_code" */,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub prompt: Option<String> /* needs_code のときだけ */,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub expires_at: Option<String> /* needs_code のときだけ */ }
+#[serde(deny_unknown_fields)]
+pub struct ClusterConnectCodeBody { pub code: String }
+pub struct ClusterConnectResult { pub ok: bool, #[serde(default, skip_serializing_if = "Option::is_none")] pub detail: Option<String> }
 pub struct ConfigView { pub config_path: String, pub db: String, pub workspace_root: String, pub tick_ms: u64, pub max_concurrency: usize,
     pub lease_grace_secs: u64, pub idle_timeout_secs: u64, pub kill_grace_secs: u64, pub review_timeout_secs: u64, pub error_cooldown_secs: u64,
     pub retry_backoff_base_secs: u64, pub retry_backoff_max_secs: u64, pub max_requeues: u32, pub plan_auto_accept: bool,
@@ -1006,7 +1072,10 @@ pub struct AccountLoginCodeBody { pub code: String }
 pub struct AccountLoginResult { pub result: String /* "ok" | "failed" */, pub detail: Option<String> }
 // DaemonSnapshot に `#[serde(default)] pub accounts: Vec<AccountLive>` を追加（AccountView から dir / logged_in / stats を除いた観測値）。
 // DaemonSnapshot に `#[serde(default)] pub accounts_roots: HashMap<String, String>` を Phase 14 で追加（アダプタ -> 絶対パス）。
-pub struct ClusterConfigView { pub id: String, pub host: String, pub concurrency: usize, pub sync: String, pub delete_on_push: bool, pub has_setup: bool, pub env_keys: Vec<String>, pub rsync_excludes: Vec<String> }
+// ADR-0032 D1: `auth`（既定 `"manual"`、`[[clusters]].auth` から。taskd が `GET /config` の `ConfigView` を
+// 組み立てるときに `auth: c.auth.clone()` を渡す）を追加。
+pub struct ClusterConfigView { pub id: String, pub host: String, pub concurrency: usize, pub sync: String, pub delete_on_push: bool, pub has_setup: bool, pub env_keys: Vec<String>, pub rsync_excludes: Vec<String>,
+    #[serde(default = "default_manual")] pub auth: String }
 pub struct ApiConfigView { pub bind: String, pub auth_required: bool, pub allowed_hosts: Vec<String> }
 pub struct StreamHello { pub cursor: u64, pub now: String, pub daemon: Option<DaemonSnapshot> }
 pub struct StreamHeartbeat { pub now: String }
@@ -1036,6 +1105,7 @@ pub struct ApiV1Schema {
     pub account_list: AccountList, pub account: AccountView, pub account_check: AccountCheckResponse,
     pub account_login_start: AccountLoginStart, pub account_login_result: AccountLoginResult, /* Phase 13 */
     pub secrets: SecretList, pub secret_put: SecretPutResult, /* Phase 20 */
+    pub cluster_connect_start: ClusterConnectStart, pub cluster_connect_result: ClusterConnectResult, /* Phase 22, ADR-0032 */
 }
 ```
 

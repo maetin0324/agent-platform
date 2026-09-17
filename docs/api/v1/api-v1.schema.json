@@ -986,6 +986,11 @@
     "ClusterConfigView": {
       "description": "`[[clusters]]` 1 行の要約（ADR-0018 D7: `env` の値は出さない）。",
       "properties": {
+        "auth": {
+          "default": "manual",
+          "description": "ADR-0032 D1: `\"manual\"` | `\"publickey\"` | `\"totp\"`。",
+          "type": "string"
+        },
         "concurrency": {
           "format": "uint",
           "minimum": 0,
@@ -1035,13 +1040,68 @@
       ],
       "type": "object"
     },
+    "ClusterConnectResult": {
+      "description": "`POST /clusters/{id}/connect/code` の応答。コード・URL は含まない。",
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "type": "object"
+    },
+    "ClusterConnectStart": {
+      "description": "`POST /clusters/{id}/connect` の応答。`kind = \"connected\"` はコード不要で張れた場合。",
+      "properties": {
+        "expires_at": {
+          "description": "`kind = \"needs_code\"` のときだけ（RFC 3339）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`\"connected\"` | `\"needs_code\"`。",
+          "type": "string"
+        },
+        "prompt": {
+          "description": "`kind = \"needs_code\"` のときだけ。ssh が出したプロンプト文字列（ユーザ名・ホスト名を含みうるので\nログには出さない。`GET /clusters` にも出さない。応答にだけ載る）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
     "ClusterLive": {
       "description": "クラスタ（`[[clusters]]` の行）の稼働状況（ADR-0018 D2 / D5）。`env` の値・`setup` の中身は含めない。",
       "properties": {
+        "auth": {
+          "default": "manual",
+          "description": "ADR-0032 D1: `\"manual\"` / `\"publickey\"` / `\"totp\"`。古いスナップショットには無いので既定は `\"manual\"`\n（`taskd::config::ClusterConfig.auth` と同じ既定）。",
+          "type": "string"
+        },
         "concurrency": {
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "connect_pending": {
+          "default": false,
+          "description": "ADR-0032 D4: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中か。古いスナップショットには無いので既定は `false`。",
+          "type": "boolean"
         },
         "connected": {
           "description": "この tick で `ssh -O check` が成功した（人が張った多重接続がある）。",
@@ -1080,10 +1140,20 @@
     "ClusterView": {
       "description": "設定（`[[clusters]]`）とスナップショット（`ClusterLive`）を結合したもの。`env` の値は出さない。",
       "properties": {
+        "auth": {
+          "default": "manual",
+          "description": "ADR-0032 D1: `\"manual\"` | `\"publickey\"` | `\"totp\"`（設定の `[[clusters]].auth` から）。",
+          "type": "string"
+        },
         "concurrency": {
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "connect_pending": {
+          "default": false,
+          "description": "ADR-0032 D5: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中か。スナップショットが無ければ `false`。",
+          "type": "boolean"
         },
         "connected": {
           "description": "この tick で `ssh -O check` が成功したか。スナップショットが無ければ `null`。",
@@ -4378,6 +4448,13 @@
     "cancel": {
       "$ref": "#/$defs/CancelBody"
     },
+    "cluster_connect_result": {
+      "$ref": "#/$defs/ClusterConnectResult"
+    },
+    "cluster_connect_start": {
+      "$ref": "#/$defs/ClusterConnectStart",
+      "description": "ADR-0032 D5: `POST /clusters/{id}/connect` と `POST /clusters/{id}/connect/code` の応答。"
+    },
     "clusters": {
       "$ref": "#/$defs/Clusters"
     },
@@ -4488,6 +4565,8 @@
     "reload",
     "provider_check",
     "clusters",
+    "cluster_connect_start",
+    "cluster_connect_result",
     "secrets",
     "secret_put",
     "account_list",

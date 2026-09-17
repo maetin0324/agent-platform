@@ -1,9 +1,14 @@
-# クラスタでコマンドを実行する設定の例（ADR-0018、Phase 12）。相対パスはこのファイルのあるディレクトリ基準。
+# クラスタでコマンドを実行する設定の例（ADR-0018、Phase 12。認証方式は ADR-0032）。
+# 相対パスはこのファイルのあるディレクトリ基準。
 #
 # 前提:
 #   - ワーカー（claude-code / codex）は **このホストで動く**。クラスタで実行するのは「コマンド」だけ。
-#   - クラスタへの ssh は**人が張る**（2 要素認証）。taskd は ControlMaster の多重接続を借りるだけで、
-#     対話的な認証は行わない。張り方: scripts/cluster-login.sh pegasus
+#   - クラスタへの ssh は多重接続（ControlMaster）を借りて行う。張り方は `[[clusters]].auth` で決める
+#     （ADR-0032 D1）:
+#       manual    … 既定。人が `scripts/cluster-login.sh <host>` か GUI の「接続」で先に張る（ADR-0018 D2 のまま）。
+#       publickey … 鍵だけで入れるホスト。taskd（ディスパッチャ）が自分で接続を張ってよい（ADR-0032 D3）。
+#       totp      … publickey の後に検証コード（TOTP 等）が要る。GUI の「接続」ボタンから中継する（ADR-0032 D4）。
+#     いずれも ssh のオプションはいじらない（`~/.ssh/config` が正。ADR-0018 D7）。
 #   - ~/.ssh/config に ControlMaster の設定が要る（config/ssh-config.example）。
 #
 # タスクの作り方:
@@ -51,6 +56,9 @@ host = "pegasus"                  # ~/.ssh/config の Host 名
 concurrency = 2                   # このクラスタで同時に走らせる run の上限
 sync = "worktree"                 # git 管理下なら worktree（ADR-0019）。管理外なら "rsync"、共有 FS なら "none"
 delete_on_push = false            # 既定 false。既存プロジェクトのファイルを消さない
+# ADR-0032 §1 実機確認: pegasus は既存の ControlMaster が生きていて未確認だが、人間の申告どおり sirius と
+# 同じ扱い（publickey の後に keyboard-interactive = TOTP が来る）にする。
+auth = "totp"                     # GUI の「接続」→ 検証コードの入力で張る（ADR-0032 D4）
 # worktree_root = "/work/NBB/rmaeda/.taskd-worktrees"  # 既定は <project>/.taskd-worktrees
 # worktree_base = "HEAD"          # 切り出す元。"origin/main" なども指定できる
 # worktree_paths = ["src", "Cargo.toml", "lib/pluvio/src"]
@@ -67,3 +75,24 @@ host = "sirius"
 concurrency = 2
 sync = "worktree"
 delete_on_push = false
+# ADR-0032 §1 実機確認（`ssh -v -o BatchMode=yes sirius`）: `Authenticated using "publickey" with partial
+# success` の後に `keyboard-interactive`（TOTP）が要求される。2 段構えなので "totp"。
+auth = "totp"
+
+[[clusters]]
+id = "fern03"
+host = "fern03"
+concurrency = 1
+sync = "rsync"                    # クラスタでないノードでの実験用。git 管理外の作業ディレクトリを想定
+delete_on_push = false
+# ADR-0032 §1 実機確認（`ssh -v -o BatchMode=yes fern03`）: `Authenticated to fern03.omni.hpcc.jp ... using
+# "publickey"` の 1 段で完了。TOTP は無い。2 要素認証が要らないので taskd（ディスパッチャ）が自分で
+# 接続を張ってよい（ADR-0032 D3）。GUI の「接続」ボタンを押すだけで（コード入力なしに）張れる。
+auth = "publickey"
+
+# 2 要素認証が要らない・または人手で張り続ける運用のクラスタは、`auth` を書かなければ既定の "manual" になる
+# （taskd は接続を張らない。ADR-0018 D2 のまま。人が `scripts/cluster-login.sh <host>` か GUI の従来案内で張る）。
+# [[clusters]]
+# id = "legacy"
+# host = "legacy"
+# auth = "manual"                 # 明示してもよいが、省略しても同じ既定になる

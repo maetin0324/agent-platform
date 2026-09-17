@@ -171,6 +171,7 @@ pub fn config_view() -> ConfigView {
             has_setup: true,
             env_keys: vec!["OMP_NUM_THREADS".into()],
             rsync_excludes: vec![".git/".into()],
+            auth: "manual".into(),
         }],
         roles: vec![RoleConfigView {
             id: "lead".into(),
@@ -304,6 +305,8 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
             in_use: 1,
             connected: false,
             cooldown_until: Some("2099-01-01T00:00:00Z".into()),
+            auth: "manual".into(),
+            connect_pending: false,
         }],
         providers: vec![
             ProviderLive {

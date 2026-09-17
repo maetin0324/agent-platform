@@ -1031,6 +1031,8 @@ mod tests {
                 in_use: 0,
                 connected: false,
                 cooldown_until: None,
+                auth: "manual".into(),
+                connect_pending: false,
             }],
             providers: vec![],
             accounts_root: None,
@@ -1051,6 +1053,8 @@ mod tests {
                 in_use: 0,
                 connected: true,
                 cooldown_until: None,
+                auth: "manual".into(),
+                connect_pending: false,
             }],
             ..disconnected_snapshot
         };

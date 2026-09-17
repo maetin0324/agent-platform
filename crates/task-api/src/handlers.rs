@@ -20,8 +20,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::admin::{
-    AccountAdminError, AdminRequest, ProviderCreateBody, ProviderPatchBody, read_provider_file, valid_adapter,
-    valid_provider_id, write_provider_file,
+    AccountAdminError, AdminRequest, ClusterAdminError, ProviderCreateBody, ProviderPatchBody, read_provider_file,
+    valid_adapter, valid_provider_id, write_provider_file,
 };
 use crate::files::{self, FileRequest, FileTarget, RunFile};
 use crate::middleware::require_admin;
@@ -31,9 +31,10 @@ use crate::schema::API_V1_SCHEMA_JSON;
 use crate::state::ApiState;
 use crate::types::{
     AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult, AccountLoginStart,
-    AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody, ClusterView, Clusters, DaemonView, DbInfo,
-    DecisionBody, EventsPage, Health, ProviderCheckResponse, ProviderConfigView, ProviderView, Providers,
-    ReloadResult, RunList, SecretList, SecretPutBody, SecretPutResult, SecretView, ValidationError,
+    AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody, ClusterConnectCodeBody, ClusterConnectResult,
+    ClusterConnectStart, ClusterView, Clusters, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
+    ProviderCheckResponse, ProviderConfigView, ProviderView, Providers, ReloadResult, RunList, SecretList,
+    SecretPutBody, SecretPutResult, SecretView, ValidationError,
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
@@ -92,6 +93,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/accounts/{id}/login", post(start_account_login).delete(cancel_account_login))
         .route("/api/v1/accounts/{id}/login/code", post(submit_account_login_code))
         .route("/api/v1/clusters", get(clusters))
+        .route("/api/v1/clusters/{id}/connect", post(start_cluster_connect).delete(cancel_cluster_connect))
+        .route("/api/v1/clusters/{id}/connect/code", post(submit_cluster_connect_code))
         .route("/api/v1/secrets", get(secrets_list))
         .route("/api/v1/secrets/{id}", put(put_secret).delete(delete_secret))
         .route("/api/v1/daemon", get(daemon))
@@ -1384,10 +1387,153 @@ async fn clusters(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
                 connected: live.map(|live| live.connected),
                 cooldown_until,
                 cooldown_remaining_secs,
+                auth: cluster.auth.clone(),
+                connect_pending: live.map(|live| live.connect_pending).unwrap_or(false),
             }
         })
         .collect();
     Ok(json_response(StatusCode::OK, &Clusters { items }))
+}
+
+// ---- ADR-0032 D5: クラスタへの接続を GUI から張る（すべて管理系: `token_file` 未設定でも 401） ----
+
+/// 指定した id が `[[clusters]]` にあるか（無ければ 404。admin_tx へ渡す前にここで弾く）。
+fn require_known_cluster(state: &ApiState, id: &str) -> Result<(), ApiProblem> {
+    if state.inner.config_view.clusters.iter().any(|c| c.id == id) {
+        Ok(())
+    } else {
+        Err(ApiProblem::cluster_not_found(id))
+    }
+}
+
+fn cluster_admin_error(id: &str, err: ClusterAdminError) -> ApiProblem {
+    match err {
+        ClusterAdminError::NotFound => ApiProblem::cluster_not_found(id),
+        ClusterAdminError::NotSupported => ApiProblem::cluster_connect_not_supported(),
+        ClusterAdminError::NotStarted => ApiProblem::cluster_connect_not_started(),
+        ClusterAdminError::InvalidCode => ApiProblem::cluster_connect_code_invalid(),
+        ClusterAdminError::Failed(detail) => ApiProblem::cluster_connect_failed(detail),
+    }
+}
+
+/// `POST /clusters/{id}/connect`（ADR-0032 D5）: taskd 側で ssh の子プロセスを張る／借りる。
+/// プロンプト文字列はログには出さない（ユーザ名・ホスト名が入るため）。
+async fn start_cluster_connect(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    require_known_cluster(&state, &id)?;
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx
+        .send(AdminRequest::ClusterConnectStart { id: id.clone(), reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the cluster connect request")),
+        Err(_) => return Err(ApiProblem::internal("cluster connect timed out")),
+    };
+    match outcome {
+        Ok(started) => {
+            // D4/D5: プロンプト文字列はログに出さない（ユーザ名・ホスト名が入るため）。
+            tracing::info!(who = "admin", op = "cluster_connect", cluster = %id, "admin: cluster connect started");
+            Ok(json_response(
+                StatusCode::OK,
+                &ClusterConnectStart {
+                    kind: started.kind,
+                    prompt: started.prompt,
+                    expires_at: started.expires_at_unix.map(crate::accounts::rfc3339_unix),
+                },
+            ))
+        }
+        Err(e) => Err(cluster_admin_error(&id, e)),
+    }
+}
+
+/// `POST /clusters/{id}/connect/code`（ADR-0032 D4/D5）: コードは受け取ってもログにも応答にも出さない。
+async fn submit_cluster_connect_code(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    require_known_cluster(&state, &id)?;
+    // 監査指摘 D-6 と同じ規律: 型違いで serde のエラー文が値を反射しないよう、専用のメッセージに差し替える。
+    let ClusterConnectCodeBody { code } = read_json(body, false)
+        .await
+        .map_err(|e| if e.status() == StatusCode::BAD_REQUEST { ApiProblem::cluster_connect_body_invalid() } else { e })?;
+    let trimmed = code.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
+        return Err(ApiProblem::cluster_connect_code_invalid());
+    }
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx
+        .send(AdminRequest::ClusterConnectCode { id: id.clone(), code, reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the cluster connect code request")),
+        Err(_) => return Err(ApiProblem::internal("cluster connect code timed out")),
+    };
+    match outcome {
+        Ok(result) => {
+            tracing::info!(who = "admin", op = "cluster_connect_code", cluster = %id, ok = result.ok, "admin: cluster connect code submitted");
+            Ok(json_response(StatusCode::OK, &ClusterConnectResult { ok: result.ok, detail: result.detail }))
+        }
+        Err(e) => Err(cluster_admin_error(&id, e)),
+    }
+}
+
+/// `DELETE /clusters/{id}/connect`（ADR-0032 D5）: 進行中の接続を取り消す、または張った接続を切る。
+async fn cancel_cluster_connect(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    require_known_cluster(&state, &id)?;
+    let Some(admin_tx) = state.inner.admin_tx.clone() else {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if admin_tx
+        .send(AdminRequest::ClusterConnectCancel { id: id.clone(), reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
+        Ok(Ok(Ok(()))) => {
+            tracing::info!(who = "admin", op = "cluster_disconnect", cluster = %id, "admin: cluster connect cancelled");
+            Ok(json_response(StatusCode::OK, &serde_json::json!({})))
+        }
+        Ok(Ok(Err(e))) => Err(cluster_admin_error(&id, e)),
+        Ok(Err(_)) => Err(ApiProblem::internal("taskd dropped the cluster disconnect request")),
+        Err(_) => Err(ApiProblem::internal("cluster disconnect timed out")),
+    }
 }
 
 // ---- 秘密（API キー等）の管理（ADR-0030、Phase 20。すべて管理系: `token_file` 未設定でも 401） ----

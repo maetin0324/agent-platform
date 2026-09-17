@@ -3058,3 +3058,108 @@ D-3（`ensure_secrets_dir` の create → chmod の間の一瞬と、既にあ�
   ADR-0012 D1 の推奨から実際の仕組みに格上げしたため）。
 - P-68: 「ハーネスが証拠の量を決定的に判定する」を `web-research` 固有ではなく**分野共通の考え方**として DESIGN に書く
   （`related-research` の PaperQA2 にも同じ問題がある。引用 0 件の回答が `done` になりうる）。
+
+---
+
+## Phase 22 — クラスタへの接続を GUI から張る（ADR-0032。2026-09-17）
+
+人間の依頼「pegasus や sirius のクラスタ画面で、接続ボタンを押して TOTP を GUI から送信したら接続されるように
+してください。また fern03 などクラスタでないノードで実験する事もありますが、fern03 等は二要素認証が要らないので
+クラスタの config で良い感じに設定できるようにしてください」。
+
+**ADR-0018 の明示的な non-goal を上書きする**変更（D2「taskd から対話的な認証は絶対に行わない」、
+§3「採らない: taskd が ssh 接続を張る／2 要素認証を自動化する試み」）。黙って変えず、ADR-0018 の冒頭に
+改訂注記を入れ、**何を上書きし何を維持するか**（`-O check` での判定・cooldown・**OTP を保存しない**原則）を書いた。
+
+### 実装前に実機で確かめた事実
+
+- **認証の段数がホストで違う**（`ssh -v -o BatchMode=yes`）:
+  - `sirius`: `publickey` → `Authenticated using "publickey" with **partial success**` → `keyboard-interactive`。
+  - `fern03`: `Authenticated ... using "publickey"` の 1 段で完了。**TOTP は無い**。
+  - `pegasus`: 既存の ControlMaster（Qwen トンネル）が生きていて観測できず。人間の申告どおり sirius と同じ扱い。
+- **`SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force` で pty 無しに中継できる**。ssh はプロンプトを askpass の
+  **argv[1]** で渡し、**標準出力**を答えとして読む。非 0 終了は「キャンセル」。実測したプロンプトは
+  `(rmaeda@130.158.241.2) Verification code: `（末尾に改行なし）。
+  → 既存のログイン中継（`claude_account.rs`）のような改行なしプロンプトの生バイト読みも pty も**不要**だった。
+- **`~/.ssh/config` は全 Host が `ControlPersist 10`（10 秒）**。`-f` を付けずに master プロセスを保持すれば
+  `ControlPersist` に関係なく接続が生きることを fern03 で確認（`-O check` → `Master running`、別プロセスからの
+  `ssh -o BatchMode=yes fern03 -- hostname` が成功）。
+- **FIFO で秘密をディスクに落とさず受け渡せる**。偽 ssh を使った配管の実験で、プロンプトが出て行き、コードが戻り、
+  FIFO は `prw-------` のままサイズ 0（中身はカーネルのパイプバッファ）。
+
+### 成果物
+
+- `[[clusters]].auth`（`"manual"` / `"publickey"` / `"totp"`。**既定は `"manual"`** なので既存設定の挙動は不変）。
+- `crates/task-worker/src/cluster_login.rs`（新規）— `start_connect` / `ClusterConnectSession::submit_code` /
+  `cancel` / `disconnect` / `ClusterMaster`。`ssh -M -N`（**`-f` 無し**）の子を保持し、TOTP は askpass + FIFO で中継。
+  コードは `Debug`・ログ・エラー文字列のどこにも出ない。
+- `crates/taskd/src/cluster_admin.rs`（新規）— セッションのマップ（id ごとに高々 1 つ）と 3 つの spawn 関数。
+  `tick_loop` が毎 tick 期限切れ（300 秒）を掃除する。**`accounts_admin` の B1 規約**（掃除の関数はチャネルに
+  送らず id を返し、呼び出し側が Dispatcher に反映する）に従う。
+- `ClusterMasters`（`crates/taskd/src/lib.rs`）— taskd が張った master の登録簿。**ここが持っている間だけ接続が
+  生きる**（`ClusterMaster` を落とすとプロセスグループごと SIGKILL されるため）。`DELETE .../connect` で取り除く。
+- ディスパッチャの自動接続（ADR-0032 D3）— `ClusterConnector` フック。`auth = "publickey"` かつ未接続のときだけ
+  cooldown の前に 1 回試み、失敗したら `reason` を `"auto-connect failed: …"` にして従来どおり cooldown。
+- 管理 API 3 本（`POST /clusters/{id}/connect`、`POST .../connect/code`、`DELETE .../connect`）。
+  すべて `token_file` 未設定でも 401。`GET /clusters` は読み取り専用のまま `auth` と `connect_pending` を足した。
+  **プロンプト文字列は `GET /clusters` には出さない**（`POST` の応答にだけ）。
+- GUI（Phase G12。`gui/docs/PROGRESS.md` に別記）。
+
+### 受け入れ条件と証拠
+
+1. **`auth` の 3 値と既定** — `cargo test -p taskd` / `-p task-dispatch`。
+   `cluster_auth_defaults_to_manual_and_only_three_values_are_accepted` ほか。`auth` を書かない既存設定のテストが
+   そのまま通る（既定 `"manual"`）。
+2. **管理 API の骨格** — `cargo test -p task-api --test cluster_connect_admin` **17 passed**
+   （トークンあり・`token_file` 未設定の両構成で 401、未知 id は 404、409/409/422/502 の写像、
+   空・空白・制御文字のコードが 422 で `admin_tx` に届かない、型違いの本文で値が反射しない、
+   `GET /clusters` に `prompt` が出ない）。
+3. **偽 ssh での一連の流れ** — `cargo test -p task-worker cluster_login` **10 passed**
+   （`Connected(None)` / 遅れて成功 / タイムアウトで子が残らない / プロンプトがそのまま返る / コード送信で成功 /
+   空・制御文字は ssh に渡らない / `cancel` で子と一時ディレクトリが消える / `-O exit`）。
+   taskd 側の受け手は `cargo test -p taskd cluster_admin` **5 passed**。
+4. **自動接続** — `publickey_cluster_auto_connects_and_dispatch_continues_on_success` /
+   `publickey_cluster_auto_connect_failure_gets_a_distinguishable_reason`（cooldown 中に 2 回呼ばれないことも）/
+   `manual_and_totp_clusters_are_not_auto_connected_even_with_a_hook`。
+5. **GUI** — G12 を見よ。
+6. **実機** — **半分だけ充足**:
+   - `auth = "publickey"`（fern03、本番 taskd）: **接続できた**。`POST /clusters/fern03/connect` が **0.22 秒**で
+     `{"kind":"connected"}`。飾りでないことを 3 通りで確認 — `ssh -O check fern03` → `Master running (pid=809664)`、
+     `ssh -o BatchMode=yes fern03 -- uptime` → `up 32 days`（本当に fern03 で実行されている）、
+     `GET /clusters` → `connected: true`。
+   - `auth = "totp"`（sirius、本番 taskd）: **プロンプトの往復までは確認済み**。
+     `POST /clusters/sirius/connect` が 0.56 秒で
+     `{"kind":"needs_code","prompt":"(rmaeda@130.158.241.2) Verification code: ","expires_at":"…"}` を返し、
+     `connect_pending` も立った（その後 `DELETE` で取り消し、宙ぶらりんの ssh が残らないことも確認）。
+     **実際の検証コードで接続が成立するところは未確認**（コードは人間しか出せない。U22-1）。
+7. **共通条件** — `cargo test --workspace` **814 passed / FAILED 行 0**、
+   `cargo clippy --workspace --all-targets -- -D warnings` exit 0、`scripts/sync-gui-docs.sh --check` up to date。
+
+### 結合時に直したもの（並行実装の突き合わせ）
+
+3 つの作業単位（ssh の子プロセス制御 / 設定とディスパッチャ / API）を並行で進め、結合はこちらで行った。
+
+- **`ClusterMaster` の置き場所**: 当初の配線は master を関数内で捨てていた。`Drop` がプロセスグループを
+  SIGKILL するので、**それでは接続が即座に切れる**。`ClusterMasters` 登録簿を用意して移す形に直した。
+- **自動接続のタイムアウトを 8 秒に**: フックはディスパッチループから同期で呼ばれる（`-O check` と同じ立場）ので、
+  長く待つと tick 全体が止まる。鍵だけの接続は実測 1 秒未満（fern03）なので 8 秒で足り、間に合わなければ
+  その tick は cooldown に落として次の機会に回す。理由をコードのコメントに残した。
+- **`mkfifo` と `O_NONBLOCK`**: 実装側が「`Cargo.toml` を触れない」制約から `mkfifo(1)` をプロセス起動で呼び、
+  `O_NONBLOCK` を `0o4000` とハードコードしていた。`nix` は既に直接依存だったので `fs` feature を足して
+  `nix::unistd::mkfifo` と `OFlag::O_NONBLOCK` に置き換えた（テスト 10 件は通ったまま）。
+- **ドキュメントと実装の食い違い**: `docs/gui/api.md` §3.40 に「コードが拒否されたら 422」とあったが、実装は
+  200 `{ok: false, detail}` を返す。ADR-0032 D5 の意図（422 は「taskd が ssh に渡すことすら拒んだ」ときだけ、
+  ssh の認証結果は `ok` で伝える）からしてドキュメントの方が誤りなので、そちらを直した。
+
+### 未解決事項
+
+- **U22-1**: 実機の TOTP で接続が成立するところが未確認（受け入れ条件 6 の後半）。人間がコードを入れるまで保留。
+- U22-2: 自動接続はディスパッチループを最大 8 秒止める。今のところ実測 1 秒未満なので問題になっていないが、
+  遅いホストを `auth = "publickey"` にすると tick が詰まる。詰まるようなら非同期化（フックを spawn して
+  次の tick で結果を見る）を検討する。
+- U22-3: `scripts/cluster-login.sh` は残してある（GUI や taskd が使えないときの逃げ道。ADR-0032 D7）。
+
+### 提案
+
+- P-69: DESIGN §5.9 補足 2（クラスタ）に `auth` の 3 種と「taskd が接続を張る場合がある」ことを足す
+  （ADR-0018 D2 の「人待ち」だけを書いている現状と実装がずれるため）。

@@ -80,7 +80,16 @@ pub struct ClusterSpec {
     pub rsync_excludes: Vec<String>,
     /// ADR-0019 D1: `sync = "worktree"` のときの設定。
     pub worktree: task_worker::WorktreeSettings,
+    /// ADR-0032 D1: `"manual"`（既定） / `"publickey"` / `"totp"`。`"publickey"` のときだけディスパッチャが
+    /// 自動で接続を試みる（D3）。
+    pub auth: String,
 }
+
+/// ADR-0032 D3: `auth = "publickey"` のクラスタに未接続なら、cooldown にする前にディスパッチャが 1 回だけ
+/// 接続を試みるためのフック。引数は `(cluster_id, host)`。同期でブロックしてよい（`control_master_alive_blocking`
+/// と同じ扱い）。本番では taskd が `task_worker::cluster_login::start_connect` 相当の実装を挿す。テストでは
+/// 偽物を挿す。未設定（`None`）なら自動接続はせず、従来どおり cooldown に落ちる。
+pub type ClusterConnector = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
 impl ClusterSpec {
     /// このタスクの写し（ローカル）とリモートのパスから、ワーカー用の設定を作る。
@@ -509,6 +518,12 @@ pub struct Dispatcher {
     /// ADR-0024 D5/D7 / ADR-0025 D5: taskd（GUI の管理 API）が進行中のログイン中継を持っているアカウント
     /// （キーは `"<adapter>:<id>"`。同じ id でもアダプタが違えば別のログインとして扱う）。
     login_pending_accounts: std::collections::HashSet<String>,
+    /// ADR-0032 D3: `auth = "publickey"` のクラスタに自動で接続を張るフック。`None` なら自動接続しない
+    /// （taskd 側が `set_cluster_connector` で挿す。未設定＝従来どおりの挙動）。
+    cluster_connector: Option<ClusterConnector>,
+    /// ADR-0032 D4/D5: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中のクラスタ id
+    /// （taskd が `set_cluster_connect_pending` で反映する。D3 の自動接続とは別物）。
+    connect_pending_clusters: std::collections::HashSet<String>,
     /// 壁時計の Unix 秒（テストで差し替えられるようにした関数。既定は実時刻）。
     now_unix_fn: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -566,7 +581,24 @@ impl Dispatcher {
             account_books,
             accounts_scan_cache: HashMap::new(),
             login_pending_accounts: std::collections::HashSet::new(),
+            cluster_connector: None,
+            connect_pending_clusters: std::collections::HashSet::new(),
             now_unix_fn: Arc::new(real_now_unix),
+        }
+    }
+
+    /// ADR-0032 D3: `auth = "publickey"` のクラスタへの自動接続を有効にする（taskd 側が本番の実装を挿す）。
+    /// 呼ばなければ従来どおり自動接続しない。
+    pub fn set_cluster_connector(&mut self, connector: ClusterConnector) {
+        self.cluster_connector = Some(connector);
+    }
+
+    /// ADR-0032 D4/D5: GUI 発の接続が進行中かを記録する（taskd の管理 API が呼ぶ。呼び出しは taskd 側の配線）。
+    pub fn set_cluster_connect_pending(&mut self, id: &str, pending: bool) {
+        if pending {
+            self.connect_pending_clusters.insert(id.to_string());
+        } else {
+            self.connect_pending_clusters.remove(id);
         }
     }
 
@@ -735,27 +767,41 @@ impl Dispatcher {
         Ok(report)
     }
 
-    /// ADR-0018 D2: 多重接続が無いクラスタを cooldown にし、理由をタスクのイベントに残す（人にログインを促すため）。
-    fn mark_cluster_unavailable(&mut self, task_id: TaskId, spec: &ClusterSpec) -> Result<(), DispatchError> {
+    /// ADR-0018 D2 / ADR-0032 D3: 多重接続が無い（または自動接続を試みて失敗した）クラスタを cooldown にし、
+    /// 理由をタスクのイベントに残す（人にログインを促すため）。`reason` は呼び出し側が組み立てる
+    /// （自動接続を試みて失敗した場合は `"auto-connect failed: ..."` を含め、従来の「接続が無い」だけの文言と区別する）。
+    fn mark_cluster_unavailable(
+        &mut self,
+        task_id: TaskId,
+        spec: &ClusterSpec,
+        reason: String,
+    ) -> Result<(), DispatchError> {
         let first = self
             .cluster_cooldown
             .insert(spec.id.clone(), Instant::now() + self.config.cluster_cooldown)
             .is_none();
         if first {
             tracing::warn!(
-                cluster = %spec.id, host = %spec.host,
+                cluster = %spec.id, host = %spec.host, %reason,
                 "no ssh ControlMaster connection; run `scripts/cluster-login.sh {}` to log in again", spec.host
             );
         }
         self.store.append_event(
             task_id,
-            &Event::ClusterUnavailable {
-                cluster: spec.id.clone(),
-                host: spec.host.clone(),
-                reason: format!("no ssh ControlMaster connection to {} (host {})", spec.id, spec.host),
-            },
+            &Event::ClusterUnavailable { cluster: spec.id.clone(), host: spec.host.clone(), reason },
         )?;
         Ok(())
+    }
+
+    /// ADR-0032 D3: `auth = "publickey"` のクラスタに接続フックが刺さっていれば 1 回だけ接続を試みる。
+    /// フックが無い、または `auth` が `"publickey"` でなければ `None`（＝試みなかった。呼び出し側は従来どおり
+    /// cooldown に落とす）。試みた場合は結果（`Ok(())` = 成功、`Err(detail)` = 失敗の理由）を返す。
+    fn try_auto_connect_cluster(&self, spec: &ClusterSpec) -> Option<Result<(), String>> {
+        if spec.auth != "publickey" {
+            return None;
+        }
+        let connector = self.cluster_connector.as_ref()?;
+        Some(connector(&spec.id, &spec.host))
     }
 
     /// ADR-0018 D2: 設定の全クラスタについて、多重接続の有無を 1 tick に 1 回調べる（`ssh -O check` は unix ソケットを
@@ -867,6 +913,8 @@ impl Dispatcher {
                     .get(&spec.id)
                     .filter(|until| **until > now_instant)
                     .map(|until| rfc3339(now + until.saturating_duration_since(now_instant))),
+                auth: spec.auth.clone(),
+                connect_pending: self.connect_pending_clusters.contains(&spec.id),
             })
             .collect();
         clusters.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1667,9 +1715,33 @@ impl Dispatcher {
                 let alive = self.cluster_connected.get(&spec.id).copied().unwrap_or(false);
                 if !alive {
                     let spec = spec.clone();
-                    self.mark_cluster_unavailable(task.id, &spec)?;
-                    self.cluster_waiting.insert(task.id);
-                    continue;
+                    // ADR-0032 D3: `auth = "publickey"` かつ接続フックがあれば、cooldown にする前に
+                    // 1 回だけ接続を試みる（cooldown 中はここに来ないので、tick ごとに ssh は湧かない。
+                    // 同じ tick の別タスクが同じクラスタを指していても、成功時は `cluster_connected` の
+                    // キャッシュが true になり、失敗時は下で cooldown が立つので、2 本目は走らない）。
+                    match self.try_auto_connect_cluster(&spec) {
+                        Some(Ok(())) => {
+                            self.cluster_connected.insert(spec.id.clone(), true);
+                        }
+                        Some(Err(detail)) => {
+                            self.mark_cluster_unavailable(
+                                task.id,
+                                &spec,
+                                format!("auto-connect failed: {detail}"),
+                            )?;
+                            self.cluster_waiting.insert(task.id);
+                            continue;
+                        }
+                        None => {
+                            self.mark_cluster_unavailable(
+                                task.id,
+                                &spec,
+                                format!("no ssh ControlMaster connection to {} (host {})", spec.id, spec.host),
+                            )?;
+                            self.cluster_waiting.insert(task.id);
+                            continue;
+                        }
+                    }
                 }
             }
             let dir_started = Instant::now();
@@ -3560,6 +3632,7 @@ mod tests {
                 env: vec![],
                 rsync_excludes: vec![],
                 worktree: Default::default(),
+                auth: "manual".into(),
             },
         );
         if !control_master_alive_blocking(&["ssh".to_string()], "taskd-localhost") {
@@ -3616,6 +3689,7 @@ mod tests {
                 env: vec![],
                 rsync_excludes: vec![],
                 worktree: Default::default(),
+                auth: "manual".into(),
             },
         );
         let (tx, rx) = tokio::sync::watch::channel(None);
@@ -3665,6 +3739,191 @@ mod tests {
         );
     }
 
+    fn cluster_spec_with_auth(id: &str, host: &str, auth: &str) -> ClusterSpec {
+        ClusterSpec {
+            id: id.into(),
+            host: host.into(),
+            concurrency: 1,
+            sync: SyncMode::Rsync,
+            delete_on_push: false,
+            setup: vec![],
+            env: vec![],
+            rsync_excludes: vec![],
+            worktree: Default::default(),
+            auth: auth.into(),
+        }
+    }
+
+    /// ADR-0032 D3: `auth = "publickey"` かつ接続フックが刺さっていれば、未接続のクラスタは cooldown にする前に
+    /// 1 回だけ自動接続を試みる。成功したら `cluster_connected` が true になり、そのまま dispatch が続く
+    /// （`ClusterUnavailable` は残らない）。
+    #[tokio::test]
+    async fn publickey_cluster_auto_connects_and_dispatch_continues_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        task.workspace = WorkspaceSpec::Remote { cluster: "auto".into(), path: PathBuf::from("/remote/project") };
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.clusters.insert(
+            "auto".into(),
+            cluster_spec_with_auth("auto", "taskd-no-such-host-for-tests-auto-ok", "publickey"),
+        );
+        let calls: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let calls_for_hook = calls.clone();
+        d.set_cluster_connector(Arc::new(move |id: &str, host: &str| {
+            calls_for_hook.lock().unwrap().push((id.to_string(), host.to_string()));
+            Ok(())
+        }));
+
+        let report = d.tick().unwrap();
+        assert_eq!(report.dispatched, 1, "{report:?}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("auto".to_string(), "taskd-no-such-host-for-tests-auto-ok".to_string())]
+        );
+        assert_eq!(d.cluster_connected.get("auto"), Some(&true));
+        assert!(!d.cluster_cooldown.contains_key("auto"), "success does not cool the cluster down");
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            !events.iter().any(|(_, e)| matches!(e, Event::ClusterUnavailable { .. })),
+            "no ClusterUnavailable when the auto-connect succeeded: {events:?}"
+        );
+    }
+
+    /// ADR-0032 D3: 自動接続が失敗したら、従来どおり cooldown + `Event::ClusterUnavailable` に落ちるが、
+    /// `reason` は「自動接続を試みて失敗した」と分かる文字列になる（人が受信箱で区別できるように）。
+    /// 接続の試行はクラスタごとに 1 回だけ（cooldown 中の 2 tick 目では呼ばれない）。
+    #[tokio::test]
+    async fn publickey_cluster_auto_connect_failure_gets_a_distinguishable_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        task.workspace = WorkspaceSpec::Remote { cluster: "auto".into(), path: PathBuf::from("/remote/project") };
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.clusters.insert(
+            "auto".into(),
+            cluster_spec_with_auth("auto", "taskd-no-such-host-for-tests-auto-fail", "publickey"),
+        );
+        let call_count = Arc::new(StdMutex::new(0u32));
+        let call_count_for_hook = call_count.clone();
+        d.set_cluster_connector(Arc::new(move |_id: &str, _host: &str| {
+            *call_count_for_hook.lock().unwrap() += 1;
+            Err("permission denied (publickey)".to_string())
+        }));
+
+        let report = d.tick().unwrap();
+        assert_eq!(report.dispatched, 0, "{report:?}");
+        assert_eq!(*call_count.lock().unwrap(), 1);
+        let events = store.events_for(task.id).unwrap();
+        let reason = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::ClusterUnavailable { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .expect("ClusterUnavailable event");
+        assert!(reason.contains("auto-connect failed"), "{reason}");
+        assert!(reason.contains("permission denied (publickey)"), "{reason}");
+
+        // 2 tick 目: cooldown 中なので自動接続は再試行しない（tick ごとに ssh が湧かない）。
+        d.tick().unwrap();
+        assert_eq!(*call_count.lock().unwrap(), 1, "cooldown 中は 1 回だけ");
+    }
+
+    /// ADR-0032 D3: `auth = "manual"` / `"totp"` は自動接続の対象外。接続フックが刺さっていても呼ばれず、
+    /// `reason` は従来どおりの文言のまま（自動接続を試みたとは分からない）。
+    #[tokio::test]
+    async fn manual_and_totp_clusters_are_not_auto_connected_even_with_a_hook() {
+        for auth in ["manual", "totp"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+            let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+            task.workspace = WorkspaceSpec::Remote { cluster: "auto".into(), path: PathBuf::from("/remote/project") };
+            store.insert(&task).unwrap();
+            let adapter = Arc::new(InstantAdapter {
+                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                delay: Duration::ZERO,
+            });
+            let mut d = dispatcher(store.clone(), adapter, 1);
+            d.config.clusters.insert(
+                "auto".into(),
+                cluster_spec_with_auth("auto", "taskd-no-such-host-for-tests-not-auto", auth),
+            );
+            let call_count = Arc::new(StdMutex::new(0u32));
+            let call_count_for_hook = call_count.clone();
+            d.set_cluster_connector(Arc::new(move |_id: &str, _host: &str| {
+                *call_count_for_hook.lock().unwrap() += 1;
+                Ok(())
+            }));
+
+            let report = d.tick().unwrap();
+            assert_eq!(report.dispatched, 0, "{auth}: {report:?}");
+            assert_eq!(*call_count.lock().unwrap(), 0, "{auth}: hook must not run for auth={auth:?}");
+            let events = store.events_for(task.id).unwrap();
+            let reason = events
+                .iter()
+                .find_map(|(_, e)| match e {
+                    Event::ClusterUnavailable { reason, .. } => Some(reason.clone()),
+                    _ => None,
+                })
+                .expect("ClusterUnavailable event");
+            assert!(!reason.contains("auto-connect"), "{auth}: {reason}");
+        }
+    }
+
+    /// ADR-0032 D1/D4: `ClusterSpec.auth` がスナップショットの `ClusterLive.auth` に写り、
+    /// `set_cluster_connect_pending` が `ClusterLive.connect_pending` を立てる/降ろす。
+    #[tokio::test]
+    async fn cluster_live_carries_auth_and_connect_pending() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.clusters.insert(
+            "fern03".into(),
+            cluster_spec_with_auth("fern03", "taskd-no-such-host-for-tests-live", "publickey"),
+        );
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        d.set_snapshot_publisher(SnapshotPublisher {
+            tx,
+            instance_id: "inst-1".into(),
+            hostname: "host-1".into(),
+            started_at: "2026-09-17T00:00:00Z".into(),
+            tick_ms: 50,
+            providers: vec![],
+            provider_checks: Default::default(),
+        });
+
+        d.tick().unwrap();
+        let snap = rx.borrow().clone().expect("snapshot published");
+        let live = snap.clusters.iter().find(|c| c.id == "fern03").expect("fern03 in snapshot");
+        assert_eq!((live.auth.as_str(), live.connect_pending), ("publickey", false));
+
+        d.set_cluster_connect_pending("fern03", true);
+        d.tick().unwrap();
+        let snap = rx.borrow().clone().expect("snapshot published");
+        let live = snap.clusters.iter().find(|c| c.id == "fern03").expect("fern03 in snapshot");
+        assert!(live.connect_pending, "connect_pending set");
+
+        d.set_cluster_connect_pending("fern03", false);
+        d.tick().unwrap();
+        let snap = rx.borrow().clone().expect("snapshot published");
+        let live = snap.clusters.iter().find(|c| c.id == "fern03").expect("fern03 in snapshot");
+        assert!(!live.connect_pending, "connect_pending cleared");
+    }
+
     /// ADR-0018 実装メモ M1: 接続が戻っていれば、その tick で cooldown が解ける。`taskd-localhost` への多重接続が無い環境では skip。
     #[tokio::test]
     async fn cluster_cooldown_is_cleared_once_the_control_master_is_back() {
@@ -3690,6 +3949,7 @@ mod tests {
                 env: vec![],
                 rsync_excludes: vec![],
                 worktree: Default::default(),
+                auth: "manual".into(),
             },
         );
         d.cluster_cooldown.insert("local".into(), Instant::now() + Duration::from_secs(3600));

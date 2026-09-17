@@ -294,6 +294,13 @@ pub struct ClusterConfigView {
     /// `env` のキー名だけ（昇順）。
     pub env_keys: Vec<String>,
     pub rsync_excludes: Vec<String>,
+    /// ADR-0032 D1: `"manual"` | `"publickey"` | `"totp"`。
+    #[serde(default = "default_cluster_auth")]
+    pub auth: String,
+}
+
+fn default_cluster_auth() -> String {
+    "manual".to_string()
 }
 
 /// `GET /clusters`（ADR-0018 受け入れ条件8）。
@@ -325,6 +332,12 @@ pub struct ClusterView {
     pub cooldown_until: Option<String>,
     /// `cooldown_until − now`（秒）。過ぎていれば両方 `null`。
     pub cooldown_remaining_secs: Option<u64>,
+    /// ADR-0032 D1: `"manual"` | `"publickey"` | `"totp"`（設定の `[[clusters]].auth` から）。
+    #[serde(default = "default_cluster_auth")]
+    pub auth: String,
+    /// ADR-0032 D5: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中か。スナップショットが無ければ `false`。
+    #[serde(default)]
+    pub connect_pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -542,4 +555,35 @@ pub struct SecretPutResult {
     pub id: String,
     pub updated_at: String,
     pub fingerprint: String,
+}
+
+// ---- ADR-0032 D5: クラスタへの接続を GUI から張る ----
+
+/// `POST /clusters/{id}/connect` の応答。`kind = "connected"` はコード不要で張れた場合。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterConnectStart {
+    /// `"connected"` | `"needs_code"`。
+    pub kind: String,
+    /// `kind = "needs_code"` のときだけ。ssh が出したプロンプト文字列（ユーザ名・ホスト名を含みうるので
+    /// ログには出さない。`GET /clusters` にも出さない。応答にだけ載る）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// `kind = "needs_code"` のときだけ（RFC 3339）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// `POST /clusters/{id}/connect/code` の要求本文。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterConnectCodeBody {
+    pub code: String,
+}
+
+/// `POST /clusters/{id}/connect/code` の応答。コード・URL は含まない。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterConnectResult {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }

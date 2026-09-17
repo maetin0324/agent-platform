@@ -1082,3 +1082,54 @@ GUI 側の新しい設計判断は無し（ADR-0030 D4 をそのまま実装）�
 
 - G11-U1: e2e は運用中の taskd / GUI（7700 / 7710）と衝突するため未実行。確認は unit テストと使い捨て環境でのスクリーンショットで行った。
 - G11-U2: 鍵の値は平文 HTTP を通る（LAN 前提。ADR-0030 D4 の注意書きを画面に出しているだけ）。
+
+## Phase G12 — DONE（2026-09-17）
+
+taskd 側の Phase 22（ADR-0032: クラスタへの接続を GUI から張る）への追従。GUI 側の新しい設計判断は無し
+（ADR-0032 D6 をそのまま実装）。
+
+### 成果物
+
+- `pnpm gen:types` 再生成（`ClusterConnectStart` / `ClusterConnectResult`、`ClusterView.auth` /
+  `.connect_pending`、`ClusterConfigView.auth`、`ClusterLive.auth` / `.connect_pending`）。2 回実行して同一。
+- `app/taskd/clusters-admin.server.ts`（新規）: `startClusterConnect` / `submitClusterConnectCode` /
+  `cancelClusterConnect`。**`POST /reload` は呼ばない**（設定が変わらないため。プロバイダ・秘密とはここが違う）。
+- `app/routes/clusters.tsx`: action を新設（`cluster_connect` / `cluster_connect_code` / `cluster_connect_cancel`）。
+  `auth` で 3 通りに出し分ける:
+  - `manual`: 従来の `scripts/cluster-login.sh` の案内のまま。
+  - `publickey`: 「接続」ボタンだけ。
+  - `totp`: 「接続」→ taskd が返したプロンプト文字列 → コード入力欄（`type="password"` / `autocomplete="off"` /
+    `inputmode="numeric"`）→「送信」。取り消しも置く。
+  - `connected` のときは「切断」。平文 HTTP の注意書きを出す。**コードは `fetcher.data` にも画面にも残さない**。
+- `app/routes/help.tsx`: 用語集と「クラスタ」画面の説明に接続方式（`auth` の 3 種）を追記。
+- testid: `cluster-auth` / `cluster-connect` / `cluster-connect-prompt` / `cluster-connect-code` /
+  `cluster-connect-submit` / `cluster-connect-cancel` / `cluster-disconnect` / `cluster-connect-pending`。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint`（biome、116 files）/ `pnpm typecheck` / `pnpm build` exit 0、`pnpm test` **235 passed**（25 ファイル）。
+  `test/unit/clusters.test.ts` は 24 件（接続 3 本の素通しと 401/404/409/422/502、`ok: false` を握りつぶさない、
+  **`reload` を呼ばない**こと、loader の `auth` / `connect_pending`、下記の回帰 6 件）。
+- 使い捨ての taskd（17710）と dev サーバ（17700）＋偽 ssh で、light / dark のスクリーンショットを取り
+  `auth` 3 種の見た目を目視確認。**運用中の 7710 / 7700 には触っていない**。確認後に片付け済み。
+- e2e は運用中のサービスと衝突するため未実行。
+
+### 実機で見つかった不具合と、その回帰テスト
+
+**「接続処理が進行中です」から抜け出せなくなる**（人間が実機で発見。「GUI で入力するフォームがありません」）。
+
+- 症状: `connect_pending === true` のとき、コード入力欄も接続ボタンも出ず、取り消すことしかできない。
+- 原因: `showConnectButton` の条件に `!showPendingElsewhere` が入っていた。プロンプト文字列は
+  `POST` の応答にしか載らない（ADR-0032 D5）ので、**画面を開き直しただけでこの状態になる**。
+- **`/accounts` のログインで同じ問題を一度直してある**（`70434cf`「ログインをやり直す」）のに、
+  クラスタ側で再発させた。同じ扱いに揃え、進行中でも接続ボタンを出してラベルを「接続し直す」にした
+  （taskd は `connect` を受けると古いセッションを畳んでから張り直すので、押し直せば入力欄に戻れる）。
+- 再発防止: このリポジトリには DOM を描画する unit テストが無い（G10-U1）ため、判定を純粋関数
+  `clusterConnectPanelState` に**切り出して**テストできるようにし、6 件の回帰テストを足した。
+
+### 未解決事項
+
+- G12-U1: e2e 未実行（上記）。
+- G12-U2: コードは平文 HTTP を通る（LAN 前提。ADR-0032 D6 の注意書きを画面に出しているだけ）。
+- G12-U3: DOM を描画する unit テストが無い件（G10-U1）は未解決のまま。今回は判定を純粋関数に切り出して
+  回避したが、描画そのものの回帰は目視に頼っている。
