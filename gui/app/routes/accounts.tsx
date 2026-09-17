@@ -4,7 +4,7 @@ import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { hintClass, inputClass, labelClass } from "~/components/ui/form";
+import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import { TONE_SOLID_BG, type Tone } from "~/components/ui/tone";
@@ -15,12 +15,13 @@ import {
   checkAccount,
   createAccount,
   deleteAccount,
+  readAccountAdapter,
   readAccountId,
   readLoginCode,
   startAccountLogin,
   submitAccountLoginCode,
 } from "~/taskd/accounts-admin.server";
-import type { AccountOpOutcome } from "~/taskd/action-types";
+import type { AccountAdapter, AccountOpOutcome } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import type { AccountList, AccountView } from "~/taskd/types";
@@ -63,25 +64,26 @@ export async function action({ request }: Route.ActionArgs) {
   const intent = form.get("intent");
   const client = getTaskdClient();
   const id = readAccountId(form);
+  const adapter = readAccountAdapter(form);
   let outcome: AccountOpOutcome;
   switch (intent) {
     case "create":
-      outcome = await createAccount(client, id, request.signal);
+      outcome = await createAccount(client, id, adapter, request.signal);
       break;
     case "delete":
-      outcome = await deleteAccount(client, id, request.signal);
+      outcome = await deleteAccount(client, id, adapter, request.signal);
       break;
     case "check":
-      outcome = await checkAccount(client, id, request.signal);
+      outcome = await checkAccount(client, id, adapter, request.signal);
       break;
     case "login_start":
-      outcome = await startAccountLogin(client, id, request.signal);
+      outcome = await startAccountLogin(client, id, adapter, request.signal);
       break;
     case "login_code":
-      outcome = await submitAccountLoginCode(client, id, readLoginCode(form), request.signal);
+      outcome = await submitAccountLoginCode(client, id, adapter, readLoginCode(form), request.signal);
       break;
     case "login_cancel":
-      outcome = await cancelAccountLogin(client, id, request.signal);
+      outcome = await cancelAccountLogin(client, id, adapter, request.signal);
       break;
     default:
       throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
@@ -110,6 +112,25 @@ function usageTone(utilization: number): Tone {
   return "primary";
 }
 
+const ADAPTER_TONE: Record<AccountAdapter, Tone> = { "claude-code": "info", codex: "teal" };
+
+/**
+ * `roots`（ADR-0025 D6）から、根ディレクトリが設定されているアダプタだけを `claude-code` → `codex` の順で返す。
+ * `roots` が無い（古い taskd）場合は `root`（claude-code の別名）だけにフォールバックする。
+ */
+function configuredAdapters(accounts: AccountList): { adapter: AccountAdapter; root: string }[] {
+  const claudeRoot = accounts.roots?.["claude-code"] ?? accounts.root ?? null;
+  const codexRoot = accounts.roots?.codex ?? null;
+  const result: { adapter: AccountAdapter; root: string }[] = [];
+  if (claudeRoot) result.push({ adapter: "claude-code", root: claudeRoot });
+  if (codexRoot) result.push({ adapter: "codex", root: codexRoot });
+  return result;
+}
+
+function accountAdapter(item: AccountView): AccountAdapter {
+  return item.adapter === "codex" ? "codex" : "claude-code";
+}
+
 export default function AccountsPage({ loaderData }: Route.ComponentProps) {
   const { accounts, fetchedAt } = loaderData;
   // taskd の SSE（daemon tick）による自動再検証のたびに `<Form>` の actionData は消える（React Router の仕様、
@@ -128,75 +149,106 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="account_pool = true のプロバイダが使う Claude アカウントのプール。ログイン・残量の確認・削除をここで行います。"
+        description="account_pool = true のプロバイダが使う claude-code / codex アカウントのプール。ログイン・残量の確認・削除をここで行います。"
       />
 
       <AccountActionFlash outcome={fetcher.data} />
 
-      {accounts.root == null ? (
-        <EmptyState icon="users" title="[accounts] が設定されていません">
-          taskd.toml に <Mono>[accounts]</Mono> セクションを足すとプールが使えます。例:
-          <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2 p-3 text-left text-xs">
-            {'[accounts]\nclaude_dir = "claude-accounts"'}
-          </pre>
-        </EmptyState>
-      ) : (
-        <>
-          <section aria-labelledby="accounts-heading" className="space-y-4">
-            <SectionTitle icon="users" id="accounts-heading" count={accounts.items.length}>
-              プール（{accounts.root}）
-            </SectionTitle>
+      {(() => {
+        const configured = configuredAdapters(accounts);
+        if (configured.length === 0) {
+          return (
+            <EmptyState icon="users" title="[accounts] が設定されていません">
+              taskd.toml に <Mono>[accounts]</Mono> セクションを足すとプールが使えます（<Mono>claude_dir</Mono>・
+              <Mono>codex_dir</Mono> のどちらか、または両方）。例:
+              <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2 p-3 text-left text-xs">
+                {'[accounts]\nclaude_dir = "claude-accounts"\ncodex_dir = "codex-accounts"'}
+              </pre>
+            </EmptyState>
+          );
+        }
+        return (
+          <>
             <DataItem label="max_runs_per_account">
               <span data-testid="accounts-max-runs">{accounts.max_runs_per_account}</span>
             </DataItem>
 
-            {accounts.items.length === 0 ? (
-              <EmptyState icon="users" title="アカウントがありません" />
-            ) : (
-              <div className="grid gap-4 xl:grid-cols-2">
-                {accounts.items.map((item) => (
-                  <AccountCard
-                    key={item.id}
-                    item={item}
-                    maxRuns={accounts.max_runs_per_account}
-                    fetchedAt={fetchedAt}
-                    fetcher={fetcher}
-                    submitting={submitting}
-                  />
-                ))}
-              </div>
-            )}
-          </section>
+            {configured.map(({ adapter, root }) => {
+              const items = accounts.items.filter((item) => accountAdapter(item) === adapter);
+              return (
+                <section key={adapter} aria-labelledby={`accounts-heading-${adapter}`} className="space-y-4">
+                  <SectionTitle icon="users" id={`accounts-heading-${adapter}`} count={items.length}>
+                    <Badge tone={ADAPTER_TONE[adapter]}>{adapter}</Badge> プール（{root}）
+                  </SectionTitle>
 
-          <section aria-labelledby="account-add-heading" className="space-y-4">
-            <SectionTitle icon="plus" id="account-add-heading">
-              アカウントを追加
-            </SectionTitle>
-            <Card>
-              <CardHeader
-                icon="plus"
-                title="新規アカウント"
-                description="claude_dir 配下に <id>/ を 0700 で作ります。"
-              />
-              <CardBody>
-                <fetcher.Form method="post" data-testid="account-add-form" className="flex flex-wrap items-end gap-3">
-                  <input type="hidden" name="intent" value="create" />
-                  <div>
-                    <label htmlFor="account-add-id" className={labelClass}>
-                      id
-                    </label>
-                    <input id="account-add-id" name="id" type="text" required className={`${inputClass} mt-1.5`} />
-                  </div>
-                  <Button type="submit" variant="primary" disabled={submitting} data-testid="account-add-submit">
-                    <Icon name="plus" />
-                    追加
-                  </Button>
-                </fetcher.Form>
-              </CardBody>
-            </Card>
-          </section>
-        </>
-      )}
+                  {items.length === 0 ? (
+                    <EmptyState icon="users" title="アカウントがありません" />
+                  ) : (
+                    <div className="grid gap-4 xl:grid-cols-2">
+                      {items.map((item) => (
+                        <AccountCard
+                          key={`${adapter}-${item.id}`}
+                          item={item}
+                          maxRuns={accounts.max_runs_per_account}
+                          fetchedAt={fetchedAt}
+                          fetcher={fetcher}
+                          submitting={submitting}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              );
+            })}
+
+            <section aria-labelledby="account-add-heading" className="space-y-4">
+              <SectionTitle icon="plus" id="account-add-heading">
+                アカウントを追加
+              </SectionTitle>
+              <Card>
+                <CardHeader
+                  icon="plus"
+                  title="新規アカウント"
+                  description="選んだアダプタの根ディレクトリ配下に <id>/ を 0700 で作ります。"
+                />
+                <CardBody>
+                  <fetcher.Form method="post" data-testid="account-add-form" className="flex flex-wrap items-end gap-3">
+                    <input type="hidden" name="intent" value="create" />
+                    <div>
+                      <label htmlFor="account-add-id" className={labelClass}>
+                        id
+                      </label>
+                      <input id="account-add-id" name="id" type="text" required className={`${inputClass} mt-1.5`} />
+                    </div>
+                    <div>
+                      <label htmlFor="account-add-adapter" className={labelClass}>
+                        adapter
+                      </label>
+                      <select
+                        id="account-add-adapter"
+                        name="adapter"
+                        data-testid="account-add-adapter"
+                        defaultValue={configured[0].adapter}
+                        className={`${selectClass} mt-1.5`}
+                      >
+                        {configured.map(({ adapter }) => (
+                          <option key={adapter} value={adapter}>
+                            {adapter}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <Button type="submit" variant="primary" disabled={submitting} data-testid="account-add-submit">
+                      <Icon name="plus" />
+                      追加
+                    </Button>
+                  </fetcher.Form>
+                </CardBody>
+              </Card>
+            </section>
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -214,29 +266,57 @@ function AccountCard({
   fetcher: FetcherWithComponents<AccountOpOutcome>;
   submitting: boolean;
 }) {
+  const adapter = accountAdapter(item);
   const actionData = fetcher.data;
   const loginStart =
-    actionData && actionData.ok && actionData.op === "login_start" && actionData.id === item.id
+    actionData?.ok && actionData.op === "login_start" && actionData.id === item.id && actionData.adapter === adapter
       ? actionData
       : undefined;
   const loginCodeError =
-    actionData && !actionData.ok && actionData.id === item.id && actionData.op === "login_code"
+    actionData &&
+    !actionData.ok &&
+    actionData.id === item.id &&
+    actionData.adapter === adapter &&
+    actionData.op === "login_code"
       ? actionData.error
       : undefined;
-  const showLoginPanel = !!loginStart || item.login_pending;
+  // ログインが終わった（`logged_in`）ら閉じる。`loginStart` は次に何か送信するまで fetcher.data に残り続ける
+  // ため（`useFetcher` は SSE の再検証では消えない、上のコメント参照）、これが無いと codex（コード入力が無く
+  // 完了を待つだけ）のパネルが完了後も表示され続けてしまう。
+  const showLoginPanel = (!!loginStart || item.login_pending) && !item.logged_in;
+  // codex には `paste_code` は無い（ADR-0025 D5）ので、fetcher にまだ何も無い（画面を開き直した）場合は
+  // アダプタから決め打ちできる。これはアダプタ→流儀の固定対応であって、スコア等の再計算ではない。
+  const kind =
+    loginStart?.login.kind === "device_code"
+      ? "device_code"
+      : loginStart
+        ? "paste_code"
+        : adapter === "codex"
+          ? "device_code"
+          : "paste_code";
   const tone: Tone = item.cooldown ? "warning" : item.logged_in ? "success" : "neutral";
 
   return (
-    <Card data-testid="account-card" data-account-id={item.id} className="hover:shadow-md">
+    <Card
+      data-testid="account-card"
+      data-account-id={item.id}
+      data-account-adapter={adapter}
+      className="hover:shadow-md"
+    >
       <CardHeader
         icon="user"
         tone={tone}
         title={<Mono className="text-sm font-semibold text-fg">{item.id}</Mono>}
         description={item.dir}
         actions={
-          <Badge tone={item.logged_in ? "success" : "warning"} dot data-testid="account-logged-in">
-            {item.logged_in ? "ログイン済み" : "未ログイン"}
-          </Badge>
+          <>
+            <Badge tone={ADAPTER_TONE[adapter]} data-testid="account-adapter">
+              {adapter}
+            </Badge>
+            <Badge tone={item.logged_in ? "success" : "warning"} dot data-testid="account-logged-in">
+              {item.logged_in ? "ログイン済み" : "未ログイン"}
+            </Badge>
+          </>
         }
       />
       <CardBody className="space-y-4">
@@ -321,6 +401,7 @@ function AccountCard({
           <fetcher.Form method="post">
             <input type="hidden" name="intent" value="check" />
             <input type="hidden" name="id" value={item.id} />
+            <input type="hidden" name="adapter" value={adapter} />
             <Button type="submit" variant="secondary" size="sm" disabled={submitting} data-testid="account-check">
               <Icon name="activity" />
               確認
@@ -331,6 +412,7 @@ function AccountCard({
             <fetcher.Form method="post">
               <input type="hidden" name="intent" value="login_start" />
               <input type="hidden" name="id" value={item.id} />
+              <input type="hidden" name="adapter" value={adapter} />
               <Button type="submit" variant="soft" size="sm" disabled={submitting} data-testid="account-login-start">
                 <Icon name="link" />
                 ログイン
@@ -346,9 +428,10 @@ function AccountCard({
             <fetcher.Form method="post" className="mt-3 rounded-lg border border-danger-border bg-danger-soft/40 p-3">
               <input type="hidden" name="intent" value="delete" />
               <input type="hidden" name="id" value={item.id} />
+              <input type="hidden" name="adapter" value={adapter} />
               <p className="mb-2 text-sm text-fg-muted">
-                本当に <span className="font-mono">{item.id}</span> を削除しますか？（認証ファイルは消さず
-                claude_dir/.removed/ に移します）
+                本当に <span className="font-mono">{item.id}</span>（{adapter}）を削除しますか？（認証ファイルは消さず
+                根ディレクトリの .removed/ に移します）
               </p>
               <Button type="submit" variant="danger" size="sm" disabled={submitting} data-testid="account-delete">
                 <Icon name="xCircle" />
@@ -361,59 +444,106 @@ function AccountCard({
         {showLoginPanel && (
           <div className="space-y-3 rounded-lg border border-primary-border bg-primary-soft/40 p-3">
             <Alert tone="warning" title="セキュリティ上の注意">
-              認可コードは平文 HTTP を通ります（ADR-0024 D7）。信頼できるネットワークでだけ使ってください。
+              認可コード・URL は平文 HTTP を通ります（ADR-0024 D7）。信頼できるネットワークでだけ使ってください。
             </Alert>
-            {loginStart ? (
-              <p>
-                このリンクをブラウザで開いて認可し、表示されたコードを下に入力してください:{" "}
-                <a
-                  href={loginStart.login.url}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  data-testid="account-login-url"
-                  className="break-all underline underline-offset-2"
-                >
-                  {loginStart.login.url}
-                </a>
-              </p>
+            <p className="hidden" data-testid="account-login-kind">
+              {kind}
+            </p>
+            {kind === "device_code" ? (
+              <>
+                {loginStart ? (
+                  <p>
+                    このリンクを<strong>別のデバイス</strong>のブラウザで開き、下のコードをその画面で入力してください
+                    （このコードはここには貼り戻しません）:{" "}
+                    <a
+                      href={loginStart.login.url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      data-testid="account-login-url"
+                      className="break-all underline underline-offset-2"
+                    >
+                      {loginStart.login.url}
+                    </a>
+                  </p>
+                ) : (
+                  <p className="text-sm text-fg-muted">
+                    ログイン処理が進行中です。URL
+                    はこの画面を離れると再表示できません。もう一度「ログイン」を押すとやり直せます。
+                  </p>
+                )}
+                {loginStart?.login.user_code && (
+                  <div>
+                    <p className={labelClass}>コード（別のデバイスで入力してください）</p>
+                    <p
+                      data-testid="account-login-user-code"
+                      className="mt-1.5 select-all rounded-lg bg-surface-2 px-4 py-3 text-center font-mono text-2xl font-semibold tracking-widest text-fg"
+                    >
+                      {loginStart.login.user_code}
+                    </p>
+                  </div>
+                )}
+                <p className="text-sm text-fg-muted">
+                  入力が終わると taskd が自動的に検知し、この画面も自動で更新されます（最大 15
+                  分待ちます）。ここにコードを貼り付ける必要はありません。
+                </p>
+              </>
             ) : (
-              <p className="text-sm text-fg-muted">
-                ログイン処理が進行中です。URL
-                はこの画面を離れると再表示できません。もう一度「ログイン」を押すとやり直せます。
-              </p>
+              <>
+                {loginStart ? (
+                  <p>
+                    このリンクをブラウザで開いて認可し、表示されたコードを下に入力してください:{" "}
+                    <a
+                      href={loginStart.login.url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      data-testid="account-login-url"
+                      className="break-all underline underline-offset-2"
+                    >
+                      {loginStart.login.url}
+                    </a>
+                  </p>
+                ) : (
+                  <p className="text-sm text-fg-muted">
+                    ログイン処理が進行中です。URL
+                    はこの画面を離れると再表示できません。もう一度「ログイン」を押すとやり直せます。
+                  </p>
+                )}
+                {loginCodeError && <ErrorFlash error={loginCodeError} />}
+                <fetcher.Form method="post" className="flex flex-wrap items-end gap-3">
+                  <input type="hidden" name="intent" value="login_code" />
+                  <input type="hidden" name="id" value={item.id} />
+                  <input type="hidden" name="adapter" value={adapter} />
+                  <div>
+                    <label htmlFor={`login-code-${item.id}`} className={labelClass}>
+                      認可コード
+                    </label>
+                    <input
+                      id={`login-code-${item.id}`}
+                      name="code"
+                      type="text"
+                      autoComplete="off"
+                      className={`${inputClass} mt-1.5`}
+                      data-testid="account-login-code"
+                    />
+                    <p className={hintClass}>コードはログにも応答にも残りません。</p>
+                  </div>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    size="sm"
+                    disabled={submitting}
+                    data-testid="account-login-submit"
+                  >
+                    <Icon name="check" />
+                    送信
+                  </Button>
+                </fetcher.Form>
+              </>
             )}
-            {loginCodeError && <ErrorFlash error={loginCodeError} />}
-            <fetcher.Form method="post" className="flex flex-wrap items-end gap-3">
-              <input type="hidden" name="intent" value="login_code" />
-              <input type="hidden" name="id" value={item.id} />
-              <div>
-                <label htmlFor={`login-code-${item.id}`} className={labelClass}>
-                  認可コード
-                </label>
-                <input
-                  id={`login-code-${item.id}`}
-                  name="code"
-                  type="text"
-                  autoComplete="off"
-                  className={`${inputClass} mt-1.5`}
-                  data-testid="account-login-code"
-                />
-                <p className={hintClass}>コードはログにも応答にも残りません。</p>
-              </div>
-              <Button
-                type="submit"
-                variant="primary"
-                size="sm"
-                disabled={submitting}
-                data-testid="account-login-submit"
-              >
-                <Icon name="check" />
-                送信
-              </Button>
-            </fetcher.Form>
             <fetcher.Form method="post">
               <input type="hidden" name="intent" value="login_cancel" />
               <input type="hidden" name="id" value={item.id} />
+              <input type="hidden" name="adapter" value={adapter} />
               <Button type="submit" variant="ghost" size="sm" disabled={submitting} data-testid="account-login-cancel">
                 <Icon name="x" />
                 中止

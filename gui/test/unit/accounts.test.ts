@@ -18,10 +18,12 @@ afterEach(async () => {
 
 const accountsView: AccountList = {
   root: "/home/u/taskd/claude-accounts",
+  roots: { "claude-code": "/home/u/taskd/claude-accounts", codex: "/home/u/taskd/codex-accounts" },
   max_runs_per_account: 2,
   items: [
     {
       id: "a",
+      adapter: "claude-code",
       dir: "/home/u/taskd/claude-accounts/a",
       logged_in: true,
       in_use: 1,
@@ -38,6 +40,20 @@ const accountsView: AccountList = {
       last_check: { at: "2026-09-16T00:00:00Z", result: "ok", detail: "ok" },
       login_pending: false,
       stats: { runs: 12, done: 10, error: 1, input_tokens: 1234, output_tokens: 567 },
+    },
+    {
+      id: "c",
+      adapter: "codex",
+      dir: "/home/u/taskd/codex-accounts/c",
+      logged_in: false,
+      in_use: 0,
+      usage: null,
+      score: null,
+      excluded_reason: "not_logged_in",
+      cooldown: null,
+      last_check: null,
+      login_pending: false,
+      stats: { runs: 0, done: 0, error: 0, input_tokens: 0, output_tokens: 0 },
     },
   ],
 };

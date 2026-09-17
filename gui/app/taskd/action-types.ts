@@ -69,19 +69,27 @@ export interface ProviderActionResult {
 }
 
 /**
- * アカウントのプール管理（ADR-GUI-0012 D3）: `/accounts...` の結果。taskd のエラーは例外にせず
- * `{ok:false, error}` にする（401 `unauthorized` を含む）。
+ * アカウントのアダプタ（ADR-0025 D1）。`(adapter, id)` でアカウントを識別する。GUI から見た「使えるアダプタ」の
+ * 全体はこの 2 つ（taskd 側の `AccountAdapter`）。
+ */
+export type AccountAdapter = "claude-code" | "codex";
+
+/**
+ * アカウントのプール管理（ADR-GUI-0012 D3、ADR-0025 D5/D6）: `/accounts...` の結果。taskd のエラーは例外にせず
+ * `{ok:false, error}` にする（401 `unauthorized` を含む）。`adapter` は呼び出しに使ったアダプタ（`?adapter=`）で、
+ * `AccountCard` が自分宛ての結果かどうかを id と一緒に判定するのに使う。
  */
 export type AccountOpOutcome =
-  | { ok: true; op: "create"; id: string; account: AccountView }
-  | { ok: true; op: "delete"; id: string }
-  | { ok: true; op: "check"; id: string; result: AccountCheckResponse }
-  | { ok: true; op: "login_start"; id: string; login: AccountLoginStart }
-  | { ok: true; op: "login_code"; id: string; result: AccountLoginResult }
-  | { ok: true; op: "login_cancel"; id: string }
+  | { ok: true; op: "create"; id: string; adapter: AccountAdapter; account: AccountView }
+  | { ok: true; op: "delete"; id: string; adapter: AccountAdapter }
+  | { ok: true; op: "check"; id: string; adapter: AccountAdapter; result: AccountCheckResponse }
+  | { ok: true; op: "login_start"; id: string; adapter: AccountAdapter; login: AccountLoginStart }
+  | { ok: true; op: "login_code"; id: string; adapter: AccountAdapter; result: AccountLoginResult }
+  | { ok: true; op: "login_cancel"; id: string; adapter: AccountAdapter }
   | {
       ok: false;
       op: "create" | "delete" | "check" | "login_start" | "login_code" | "login_cancel";
       id: string;
+      adapter: AccountAdapter;
       error: ActionError;
     };

@@ -1,7 +1,7 @@
-# fixture accounts（gui/docs/adr/0012-provider-and-account-management.md D4、e2e/g8.spec.ts）:
-# 管理系 API（トークン必須）+ providers_include（プロバイダの追加/編集/削除）+ [accounts]（Claude アカウントのプール）。
-# 通常タスク用のワーカーは fake（adapters.fake）のままでよい。claude-code は e2e が GUI から作る
-# account_pool プロバイダ用にスタブの `claude` を指す。
+# fixture accounts（gui/docs/adr/0012-provider-and-account-management.md D4、e2e/g8.spec.ts・g9.spec.ts）:
+# 管理系 API（トークン必須）+ providers_include（プロバイダの追加/編集/削除）+ [accounts]（claude-code / codex 両方の
+# アカウントのプール、ADR-0025）。通常タスク用のワーカーは fake（adapters.fake）のままでよい。claude-code / codex は
+# e2e が GUI から作る account_pool プロバイダ用にそれぞれスタブの `claude` / `codex` を指す。
 # 相対パスは設定ファイルのあるディレクトリ（.run/accounts/）基準。@RUN_DIR@ / @API_LISTEN@ は taskd.sh が置換する。
 db = "taskd.sqlite3"
 workspace_root = "workspaces"
@@ -29,12 +29,16 @@ listen = "@API_LISTEN@"
 
 [accounts]
 claude_dir = "claude-accounts"
+codex_dir = "codex-accounts"
 
 [adapters.fake]
 command = ["sh", "@RUN_DIR@/fake-worker.sh"]
 
 [adapters.claude_code]
 command = "@RUN_DIR@/claude-stub.sh"
+
+[adapters.codex]
+command = "@RUN_DIR@/codex-stub.sh"
 
 [[providers]]
 id = "fake-local"

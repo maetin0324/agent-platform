@@ -337,6 +337,7 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
                       <th className={thClass}>role</th>
                       <th className={thClass}>adapter</th>
                       <th className={thClass}>provider</th>
+                      <th className={thClass}>account</th>
                       <th className={thClass}>model</th>
                       <th className={thClass}>started_at</th>
                       <th className={thClass}>finished_at</th>
@@ -358,6 +359,10 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
                         </td>
                         <td className={tdClass}>{run.adapter}</td>
                         <td className={tdClass}>{run.provider ?? "-"}</td>
+                        {/* プールの run だけ、どのアカウントで動いたかが入る（ADR-0024 D4 / ADR-0025） */}
+                        <td className={cn(tdClass, "whitespace-nowrap")} data-testid="run-account">
+                          {run.account ?? "-"}
+                        </td>
                         <td className={tdClass}>{run.model}</td>
                         <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}>{run.started_at}</td>
                         <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}>

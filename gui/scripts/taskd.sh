@@ -326,9 +326,10 @@ fixture_delegation() {
   echo "  lead: $tl (done; delegated 2 children, aggregate run wrote summary.md)"
 }
 
-# accounts（gui/docs/adr/0012-provider-and-account-management.md D4、e2e/g8.spec.ts）: 管理系 API（token_file 必須）+
-# providers_include（プロバイダの追加/編集/削除）+ [accounts]（Claude アカウントのプール、claude はスタブ）。
-# DB は空のまま起動する（e2e が GUI からプロバイダ・アカウントを作る）。
+# accounts（gui/docs/adr/0012-provider-and-account-management.md D4、e2e/g8.spec.ts・g9.spec.ts）: 管理系 API
+# （token_file 必須）+ providers_include（プロバイダの追加/編集/削除）+ [accounts]（claude-code / codex 両方の
+# アカウントのプール、ADR-0025。claude / codex はどちらもスタブ）。DB は空のまま起動する（e2e が GUI から
+# プロバイダ・アカウントを作る）。
 fixture_accounts() {
   local name="accounts" dir; dir="$(run_dir "$name")"
   [ -x "$TASKD_BIN" ] && [ -x "$TASKCTL_BIN" ] || die "binaries not found; run 'scripts/taskd.sh build' first"
@@ -339,13 +340,16 @@ fixture_accounts() {
   chmod +x "$dir/fake-worker.sh"
   cp "$ROOT/test/taskd/fixtures/claude-stub.sh" "$dir/claude-stub.sh"
   chmod +x "$dir/claude-stub.sh"
+  cp "$ROOT/test/taskd/fixtures/codex-stub.sh" "$dir/codex-stub.sh"
+  chmod +x "$dir/codex-stub.sh"
   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/api.token"
   chmod 600 "$dir/api.token"
   sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$ROOT/test/taskd/accounts.toml.tmpl" > "$dir/taskd.toml"
 
-  echo "fixture 'accounts' prepared at $dir (empty DB; providers.d/ and claude-accounts/ are created on demand)"
+  echo "fixture 'accounts' prepared at $dir (empty DB; providers.d/, claude-accounts/ and codex-accounts/ are created on demand)"
   echo "  token file: $dir/api.token (pass it to the GUI as TASKD_API_TOKEN_FILE)"
   echo "  claude stub: $dir/claude-stub.sh (auth login + -p rate_limit_event/result)"
+  echo "  codex stub: $dir/codex-stub.sh (login --device-auth + exec --json token_count/turn.completed)"
 }
 
 [ $# -ge 1 ] || usage

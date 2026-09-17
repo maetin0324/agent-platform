@@ -16,6 +16,7 @@
 | G6 | 使い方ページ | **DONE** | 2026-09-16 |
 | G7 | クラスタと委譲の表示 | **DONE** | 2026-09-16 |
 | G8 | プロバイダの登録と Claude アカウント（プール・ログイン・残量）の画面 | **DONE** | 2026-09-16 |
+| G9 | codex アカウント（アダプタ選択・デバイス認証）と run の account 列 | **DONE** | 2026-09-17 |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
@@ -970,3 +971,35 @@ G6-P1（アカウント管理画面）は taskd 側 ADR-0022 D1 で「作らな�
 ### 未解決事項
 
 - G8-U1: 実アカウントでのログインは人が行う（認可はアカウントの持ち主の操作が要る）。
+
+## Phase G9 — DONE（2026-09-17）
+
+人間の依頼「codex のアカウント追加方法も実装して下さい」（taskd 側 ADR-0025 / Phase 14）。
+
+### 成果物
+
+- `pnpm gen:types` 再生成（`adapter` / `roots` / `kind` / `user_code` / `RunSummary.account`）。
+- `/accounts`: アダプタ（claude-code / codex）ごとに節を分け、それぞれの根ディレクトリを表示。追加フォームにアダプタ選択（設定済みのアダプタだけ）。
+  各操作は `adapter` を送る。ログインは `kind` で分岐し、`device_code` では **URL と大きな等幅の `user_code` を出し、コード入力欄は出さない**
+  （人は開いたページでコードを入力する。完了すると画面が自分で「ログイン済み」に変わる）。`login_code_not_supported`（409）の案内も追加。
+- `/providers`: `account_pool` の説明を claude-code / codex 両対応に。`/help`: `codex_dir` とデバイス認証の説明を追加。
+- タスク詳細の run 一覧に `account` 列（`data-testid="run-account"`）。プールでない run は `-`。
+- fixture: `accounts` に `codex_dir` と `test/taskd/fixtures/codex-stub.sh`（`login --device-auth` と `exec --json` の両方を模す）。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint` exit 0（113 files）/ `pnpm typecheck` exit 0 / `pnpm test` **192 passed**（24 ファイル）/ `pnpm build` exit 0 / `pnpm gen:types` 安定。
+- `e2e/g8.spec.ts`（claude-code）と `e2e/g9.spec.ts`（codex）を 7800/7810 で実行し **2 passed**:
+  アダプタ codex でアカウント追加 → カードに codex と未ログイン → ログインで `device_code` と `ABCD-EFGHI`（入力欄は無い）→
+  スタブの完了で自動的に「ログイン済み」→ 確認で 30% / 12% のバー → 削除。
+- `/accounts` のライト / ダークのスクリーンショットを目視確認（claude-code と codex のカード、デバイス認証の表示）。
+
+### 実装で決めた細部
+
+- 画面を再読み込みするとログイン開始の応答（`kind`）が失われるため、`login_pending` の表示ではアカウントの `adapter` から流儀を決める
+  （ADR-0025 D5 の表のとおり codex = device_code、claude-code = paste_code の固定対応）。
+- `device_code` は完了を知らせる操作がこちらに無いので、`logged_in` になったらログインの表示を閉じる。
+
+### 未解決事項
+
+- G9-U1: 実際の codex アカウントでのログインは人が行う（未実施）。

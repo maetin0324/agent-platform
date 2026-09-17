@@ -201,8 +201,8 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
                 <div className="col-span-2 sm:col-span-3">
                   <label htmlFor="add-account-pool" className={chipLabelClass}>
                     <input id="add-account-pool" name="account_pool" type="checkbox" className={checkboxClass} />
-                    account_pool（claude-code のときだけ意味があります。[accounts]
-                    のプールから残量でアカウントを選びます）
+                    account_pool（adapter が claude-code か codex のときだけ意味があります。[accounts]
+                    のそのアダプタのプールから残量でアカウントを選びます）
                   </label>
                 </div>
                 <div className="col-span-2 sm:col-span-3">
@@ -407,7 +407,8 @@ function ProviderCard({
                       defaultChecked={item.account_pool}
                       className={checkboxClass}
                     />
-                    account_pool（claude-code のときだけ意味があります）
+                    account_pool（adapter が claude-code か codex
+                    のときだけ意味があります。そのアダプタのプールから選びます）
                   </label>
                 </div>
                 <div className="col-span-2 sm:col-span-3">

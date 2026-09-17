@@ -72,7 +72,7 @@ const GLOSSARY: { term: string; text: string }[] = [
   },
   {
     term: "account_pool",
-    text: "claude-code のプロバイダが、単一の env ではなく [accounts] のアカウントのプールから残量で選んで実行する設定。",
+    text: "claude-code か codex のプロバイダが、単一の env ではなく [accounts]（claude_dir / codex_dir）のそのアダプタのアカウントのプールから残量で選んで実行する設定。",
   },
   {
     term: "Plan",
@@ -129,7 +129,7 @@ const SCREENS: { href: string | null; icon: IconName; title: string; text: strin
     href: "/accounts",
     icon: "users",
     title: "アカウント",
-    text: "account_pool = true のプロバイダが使う Claude アカウントのプール（ログイン状態・5 時間枠/週次枠の使用率・score）を見る画面。追加・ログイン・残量確認・削除もここで行う（管理系 API のトークンが要る）。",
+    text: "account_pool = true のプロバイダが使う claude-code（[accounts] claude_dir）/ codex（[accounts] codex_dir）のアカウントのプール（ログイン状態・5 時間枠/週次枠の使用率・score）を見る画面。追加・ログイン・残量確認・削除もここで行う（管理系 API のトークンが要る）。ログインの流儀はアダプタで違う: claude-code は URL を開いて表示されたコードをこの画面に貼り戻す。codex は `codex login --device-auth` を中継し、URL と一回限りのコード（user_code）を表示するだけで、コードはこの画面には貼り戻さない（別のデバイスでその URL を開いて入力する）。ログインが終わるとこの画面が自動で更新される。",
   },
   {
     href: "/clusters",

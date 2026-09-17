@@ -270,6 +270,10 @@ export interface ApiV1Schema {
  * 1 アカウント（`GET /accounts` の要素、`POST /accounts` の応答）。
  */
 export interface AccountView {
+  /**
+   * ADR-0025 D1: `"claude-code"` | `"codex"`。
+   */
+  adapter?: string;
   cooldown?: AccountCooldownView | null;
   /**
    * アカウントディレクトリの絶対パス（ログイン手順に要る。秘密の中身は含まない）。
@@ -286,7 +290,8 @@ export interface AccountView {
   in_use: number;
   last_check?: ProviderCheckView | null;
   /**
-   * `.credentials.json` の有無（中身は読まない）。
+   * ログイン済みを示すファイル（claude-code は `.credentials.json`、codex は `auth.json`）の有無
+   * （中身は読まない）。
    */
   logged_in: boolean;
   /**
@@ -365,14 +370,21 @@ export interface AccountCheckResponse {
  */
 export interface AccountList {
   /**
-   * `id` 昇順。
+   * `adapter` → `id` の順。
    */
   items: AccountView[];
   max_runs_per_account: number;
   /**
-   * `[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `null`。
+   * `[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `null`。ADR-0025 D6: `roots["claude-code"]`
+   * の別名として残す（後方互換）。
    */
   root?: string | null;
+  /**
+   * ADR-0025 D6: `"claude-code"` / `"codex"` → 設定されていればその絶対パス、無ければ `null`。
+   */
+  roots?: {
+    [k: string]: string | null;
+  };
 }
 /**
  * `POST /accounts/{id}/login/code` の応答。
@@ -385,14 +397,23 @@ export interface AccountLoginResult {
   result: string;
 }
 /**
- * `POST /accounts/{id}/login` の応答（ADR-0024 D7）。
+ * `POST /accounts/{id}/login` の応答（ADR-0024 D7、ADR-0025 D5）。
  */
 export interface AccountLoginStart {
   /**
-   * 10 分後（RFC 3339）。
+   * claude-code は 10 分後、codex は 15 分後（RFC 3339）。
    */
   expires_at: string;
+  /**
+   * `"paste_code"`（claude-code: URL を開いて認可し、表示されたコードを `login/code` に貼る）|
+   * `"device_code"`（codex: URL を開いて `user_code` を入力する。GUI には貼り戻さない）。
+   */
+  kind?: string;
   url: string;
+  /**
+   * codex のみ。`login/code` には使わない（GUI が画面に出すだけ）。ログには出さない。
+   */
+  user_code?: string | null;
 }
 /**
  * `POST /tasks/{id}/answer` の本文。
@@ -625,13 +646,21 @@ export interface DaemonView {
 }
 export interface DaemonSnapshot {
   /**
-   * ADR-0024: プールのアカウント（`id` 昇順）。`[accounts]` が無ければ空。
+   * ADR-0024/0025: プールのアカウント（`adapter` → `id` の順、id 昇順）。`[accounts]` が無ければ空。
    */
   accounts?: AccountLive[];
   /**
    * ADR-0024 D1/D5: `[accounts] claude_dir` の絶対パス（`[accounts]` が無ければ `None`）。
+   * ADR-0025 D6: claude-code の根の別名として残す（`accounts_roots["claude-code"]` と同じ値）。
    */
   accounts_root?: string | null;
+  /**
+   * ADR-0025 D1/D6: アダプタごとの根ディレクトリ（`"claude-code"` / `"codex"` → 絶対パス。設定されていない
+   * アダプタはキーごと無い）。古いスナップショットには無いので既定は空。
+   */
+  accounts_roots?: {
+    [k: string]: string;
+  };
   /**
    * ADR-0023 D3: 委譲した子が終わるのを待っている親（`reviewing` のまま。id 昇順）。
    * 「自分の判定待ち」と区別するための観測値。古いスナップショットには無いので既定は空。
@@ -668,9 +697,13 @@ export interface DaemonSnapshot {
   unroutable: TaskId[];
 }
 /**
- * ADR-0024: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。
+ * ADR-0024/0025: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。
  */
 export interface AccountLive {
+  /**
+   * ADR-0025 D1: `"claude-code"` | `"codex"`。古いスナップショットには無いので既定は `"claude-code"`。
+   */
+  adapter?: string;
   cooldown?: AccountCooldownLive | null;
   /**
    * `"not_logged_in" | "at_capacity" | "cooldown" | "five_hour_exhausted" | "seven_day_exhausted" | "rejected"`。
@@ -683,7 +716,7 @@ export interface AccountLive {
   in_use: number;
   last_check?: ProviderCheckView | null;
   /**
-   * `.credentials.json` の有無。
+   * ログイン済みを示すファイル（claude-code は `.credentials.json`、codex は `auth.json`）の有無。
    */
   logged_in: boolean;
   /**
@@ -992,6 +1025,10 @@ export interface EvidenceView {
   stdout_tail?: string | null;
 }
 export interface RunSummary {
+  /**
+   * プールのアカウント（ADR-0024 D4 / ADR-0025）。`WorkerStarted.account` がある run だけ。
+   */
+  account?: string | null;
   adapter: string;
   artifacts: number;
   /**

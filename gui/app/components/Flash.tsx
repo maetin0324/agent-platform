@@ -65,6 +65,12 @@ export function ErrorFlash({ error }: { error: ActionError | undefined | null })
           <code>[api] token_file</code> と同じ内容にして GUI を再起動してください。
         </p>
       )}
+      {error.code === "login_code_not_supported" && (
+        <p data-testid="flash-login-code-not-supported">
+          このアカウントは codex（デバイス認証）のため、コードをここに貼り付けることはできません（ADR-0025
+          D5）。ログイン開始時に表示された URL を別のデバイスで開き、その画面でコードを入力してください。
+        </p>
+      )}
       {error.messages.length > 1 && (
         <ul className="list-disc space-y-0.5 pl-5">
           {error.messages.map((m) => (
