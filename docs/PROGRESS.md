@@ -4000,3 +4000,26 @@ task-worker` で再生成し、`docs/protocol/worker-protocol.md` も対応す�
   秘書が認める」に合わせて `Department` を分けたい場面が出るかもしれない（部の対話と課の対話で指示文を
   変えたいケースが出たら）。今は「秘書とそれ以外」で十分という判断（実機の事故はどちらも「返事の代わりに
   仕事をした」なので）。
+
+### 実機（本番 taskd、本物の Claude）— SPEC §6 の一本目、秘書の最初の返事（2026-09-17 19:20）
+
+Phase 28 を配備した本番 taskd（`schema_version 7`、組織 10 ノード）で `POST /projects`
+（title「Pluvio を基盤に用いた新たな研究テーマの模索、検証」、`request` に Pluvio の一行説明を含む）→
+案件 `01M2RCYVZH6RGX8RX0JP572BAT`、対話タスク `01M2RCYVZH6J9Y5H74D0PPA4YK`（`assignee = secretary`、`conversation = true`）が
+**約 40 秒で `done`**、`GET /org/secretary/messages?project=` に `role = node` の返事が 1 件。返事は SPEC §7 の形そのもの:
+
+> (a) 理解確認: … オープンエンドな探索案件と理解しました。
+> (b) 方針: ①research-survey 課で隣接領域の動向を調査し候補 3〜5 個 → ②有望な 1〜2 個を coding-poc で小さく検証、の 2 段階。
+> (c) 最初の途中目標案: research-survey 課に「隣接領域の研究動向調査＋テーマ候補リストアップ（3〜5 件、新規性・実現可能性・Pluvio との接続点）」。
+> (d) 判断を仰ぎたいこと: 1. 直近 2 回、research-survey 委譲が Web 検索基盤障害で失敗している。再委譲前に疎通確認を挟むべきか。
+> 2. 探索範囲の希望（学会・方向性）。 3. coding-poc で使う Pluvio のリポジトリの場所。
+
+**記憶が案件をまたいで効いている**: (d)-1 は前の案件（`01M2RBJBPQS3ZKG04YHGD9D5WS`、Phase 28 の前に動かしたもの）で起きた失敗を
+`memory/secretary/notes.md` から読んだもの。U28-1（実機）は**解消**。
+
+Phase 28 の前の一本目（同じ依頼、`01M2RBJBPQS3ZKG04YHGD9D5WS`）で分かったこと:
+- 秘書は返事の代わりに**仕事を始めた**（research-survey へ 2 回委譲、失敗すると自分で候補 6 件のレポートを書いた）。1 回目の run は
+  `error_max_turns`、子の失敗で対話タスクが `blocked`。→ Phase 28 で対話 run から委譲と `Question` を外した。
+- research-survey（`web-research` = LDR）の失敗は Tavily ではなく **LDR の LLM 先（pegasus 経由の Qwen、`127.0.0.1:18000`）が
+  落ちている**ため（`TASKD_RESULT {"summary": "Error: Connection error."…}`）。pegasus は TOTP が要るので夜には張り直せない。
+  証拠ゲート（ADR-0031）が「0 件なのに done」を止めた。**朝、pegasus に接続すれば research-survey は動く**。
