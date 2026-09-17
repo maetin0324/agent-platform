@@ -75,6 +75,10 @@ const GLOSSARY: { term: string; text: string }[] = [
     text: "claude-code か codex のプロバイダが、単一の env ではなく [accounts]（claude_dir / codex_dir）のそのアダプタのアカウントのプールから残量で選んで実行する設定。",
   },
   {
+    term: "API キー",
+    text: "検索エンジン等（例: web-research 分野が使う Tavily・Exa の検索 API キー）をワーカーの環境変数に流し込むために taskd が預かる秘密。[secrets] dir 配下に 1 秘密 1 ファイル（0600）で保存され、値は保存後 GUI にも API 応答にも二度と表示されない。/accounts の「API キー」節から追加・更新・削除でき、保存・削除のたびに reload が走って設定（env_from_secrets）に反映される。",
+  },
+  {
     term: "Plan",
     text: "複数の子タスクをまとめる親タスク（kind=plan）。子タスクは draft で作られ、人間が受け入れて進める。",
   },
@@ -133,7 +137,7 @@ const SCREENS: { href: string | null; icon: IconName; title: string; text: strin
     href: "/accounts",
     icon: "users",
     title: "アカウント",
-    text: "account_pool = true のプロバイダが使う claude-code（[accounts] claude_dir）/ codex（[accounts] codex_dir）のアカウントのプール（ログイン状態・5 時間枠/週次枠の使用率・score）を見る画面。追加・ログイン・残量確認・削除もここで行う（管理系 API のトークンが要る）。ログインの流儀はアダプタで違う: claude-code は URL を開いて表示されたコードをこの画面に貼り戻す。codex は `codex login --device-auth` を中継し、URL と一回限りのコード（user_code）を表示するだけで、コードはこの画面には貼り戻さない（別のデバイスでその URL を開いて入力する）。ログインが終わるとこの画面が自動で更新される。",
+    text: "account_pool = true のプロバイダが使う claude-code（[accounts] claude_dir）/ codex（[accounts] codex_dir）のアカウントのプール（ログイン状態・5 時間枠/週次枠の使用率・score）を見る画面。追加・ログイン・残量確認・削除もここで行う（管理系 API のトークンが要る）。ログインの流儀はアダプタで違う: claude-code は URL を開いて表示されたコードをこの画面に貼り戻す。codex は `codex login --device-auth` を中継し、URL と一回限りのコード（user_code）を表示するだけで、コードはこの画面には貼り戻さない（別のデバイスでその URL を開いて入力する）。ログインが終わるとこの画面が自動で更新される。下部の「API キー」節では、検索 API キー等の秘密（[secrets] dir）の追加・更新・削除ができる（管理系 API のトークンが要る。値は保存後二度と表示されない）。",
   },
   {
     href: "/clusters",

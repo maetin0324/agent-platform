@@ -174,6 +174,37 @@ impl ApiProblem {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_provider", detail)
     }
 
+    /// ADR-0030 D1: `[secrets]` が設定されていない。
+    pub(crate) fn secrets_unavailable() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "secrets_unavailable",
+            "the [secrets] section is not configured in taskd.toml",
+        )
+    }
+
+    /// ADR-0030 D3: 指定した secret id が `[secrets] dir` に無い（または id の形が不正）。
+    pub(crate) fn secret_not_found(id: &str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "secret_not_found", format!("secret not found: {id}"))
+    }
+
+    /// この Problem の HTTP ステータス（`put_secret` が解析エラーだけを差し替えるために見る）。
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// ADR-0030 D3: `PUT /secrets/{id}` の本文が JSON として読めない（構文誤り・型違い・未知フィールド）。
+    /// **serde のエラー文は返さない**。型違いのときに値のリテラルが応答へ反射するのを防ぐため
+    /// （値はログにも応答にも出さない、の徹底。監査指摘 D-6）。
+    pub(crate) fn secret_body_invalid() -> Self {
+        Self::bad_request("invalid JSON body: expected an object with a string `value`")
+    }
+
+    /// ADR-0030 D3: `PUT /secrets/{id}` の値が空白だけ。
+    pub(crate) fn secret_value_invalid() -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "validation", "value must not be empty or whitespace-only")
+    }
+
     pub(crate) fn method_not_allowed() -> Self {
         Self::new(
             StatusCode::METHOD_NOT_ALLOWED,

@@ -307,3 +307,58 @@ async fn create_and_patch_reject_settings_in_the_body() {
     let written = std::fs::read_to_string(dir.join("paperqa-qwen.toml")).unwrap();
     assert!(written.contains("settings = \"/settings/qwen-local\""), "{written}");
 }
+
+/// ADR-0030 D2: `env_from_secrets`（環境変数名 → `[secrets]` の秘密 id）も `command`/`args`/`settings` と
+/// 同じく管理 API からは書けない。`POST`/`PATCH` の本文にあれば拒否し、人が直接書いた値は PATCH の往復でも残る。
+#[tokio::test]
+async fn create_and_patch_reject_env_from_secrets_in_the_body() {
+    let (env, _providers_tmp, dir) = env_with_providers_dir();
+    let app = env.router();
+    let auth = auth();
+
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/providers",
+            &json!({"id": "ldr-tavily", "adapter": "local-deep-research", "env_from_secrets": {"LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY": "tavily"}}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 422, "invalid_provider");
+    assert!(!dir.join("ldr-tavily.toml").exists(), "create must not write a file when rejected");
+
+    // 既存の行に対する PATCH も同様に拒否し、ファイルは変わらない。人が直接編集した env_from_secrets は残る。
+    std::fs::write(
+        dir.join("ldr-tavily.toml"),
+        "id = \"ldr-tavily\"\nadapter = \"local-deep-research\"\n[env_from_secrets]\nLDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = \"tavily\"\n",
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(dir.join("ldr-tavily.toml")).unwrap();
+    let resp = send(
+        &app,
+        patch_json_with(
+            "/api/v1/providers/ldr-tavily",
+            &json!({"env_from_secrets": {"LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY": "other"}}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 422, "invalid_provider");
+    let after = std::fs::read_to_string(dir.join("ldr-tavily.toml")).unwrap();
+    assert_eq!(before, after, "a rejected PATCH must not touch the file");
+
+    // env_from_secrets を持たない PATCH は通り、既存の値（人が書いた分）はファイル上に残る。
+    let resp = send(
+        &app,
+        patch_json_with(
+            "/api/v1/providers/ldr-tavily",
+            &json!({"concurrency": 2}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let written = std::fs::read_to_string(dir.join("ldr-tavily.toml")).unwrap();
+    assert!(written.contains("LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = \"tavily\""), "{written}");
+}

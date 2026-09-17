@@ -63,6 +63,10 @@ pub(crate) struct Inner {
     pub(crate) admin_tx: Option<tokio::sync::mpsc::Sender<crate::admin::AdminRequest>>,
     pub(crate) accounts_roots: HashMap<AccountAdapter, std::path::PathBuf>,
     pub(crate) max_runs_per_account: usize,
+    /// ADR-0030 D1: `[secrets] dir`。`None` なら管理系は 409 `secrets_unavailable`。
+    pub(crate) secrets_dir: Option<std::path::PathBuf>,
+    /// ADR-0030 D3: 秘密 id → `used_by`（taskd が設定から渡す）。
+    pub(crate) secret_usage: HashMap<String, Vec<crate::types::SecretUse>>,
     pub(crate) account_stats: Mutex<crate::stats::AccountStatsState>,
     pub(crate) instance_id: String,
     pub(crate) started_at: String,
@@ -100,6 +104,8 @@ impl ApiState {
             admin_tx: settings.admin_tx,
             accounts_roots: settings.accounts_roots,
             max_runs_per_account: settings.max_runs_per_account,
+            secrets_dir: settings.secrets_dir,
+            secret_usage: settings.secret_usage,
             account_stats: Mutex::new(crate::stats::AccountStatsState::default()),
             instance_id: settings.instance_id,
             started_at: settings.started_at,

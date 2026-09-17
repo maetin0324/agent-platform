@@ -1,6 +1,12 @@
 import { Link } from "react-router";
 import { Alert } from "~/components/ui/misc";
-import type { AccountOpOutcome, ActionError, ProviderActionResult, TransitionOutcome } from "~/taskd/action-types";
+import type {
+  AccountOpOutcome,
+  ActionError,
+  ProviderActionResult,
+  SecretActionResult,
+  TransitionOutcome,
+} from "~/taskd/action-types";
 
 /**
  * action の結果表示（docs/DESIGN.md §6.3 の 2「`TransitionResult` を flash に載せる」、docs/adr/0005 D2）。
@@ -163,6 +169,38 @@ export function AccountActionFlash({ outcome }: { outcome: AccountOpOutcome | un
         )}
       </p>
     </Alert>
+  );
+}
+
+const SECRET_OP_LABEL: Record<string, string> = { put: "保存", delete: "削除" };
+
+/**
+ * `/accounts` の API キー節の action の結果（ADR-0030 D4）。値は載せない。続けて呼んだ `POST /reload` の結果も出す
+ * （`ProviderActionFlash` と同じ作り）。
+ */
+export function SecretActionFlash({ result }: { result: SecretActionResult | undefined | null }) {
+  if (!result) return null;
+  const { op, reload } = result;
+  if (!op.ok) return <ErrorFlash error={op.error} />;
+  return (
+    <div className="my-2 space-y-2" data-testid="secret-action-flash">
+      <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success">
+        <p data-testid="flash-secret-op">
+          {SECRET_OP_LABEL[op.op] ?? op.op}: <span className="font-mono">{op.id}</span>
+        </p>
+      </Alert>
+      {reload &&
+        (reload.ok ? (
+          <Alert data-testid="flash-reload" data-flash-kind="ok" tone="success">
+            reload: 反映しました（次の tick から）。
+          </Alert>
+        ) : (
+          <Alert data-testid="flash-reload" data-flash-kind="error" tone="danger">
+            {op.op === "put" ? "値は保存されましたが" : "削除はできましたが"}
+            、反映（reload）に失敗しました: {reload.error.detail}
+          </Alert>
+        ))}
+    </div>
   );
 }
 

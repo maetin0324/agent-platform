@@ -30,7 +30,7 @@ pub use codex::{CodexAdapter, CodexConfig};
 pub use codex_account::{CodexLoginSession, check_account_codex, start_login_codex};
 pub use delegate_file::{DELEGATE_FILE, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
-pub use local_deep_research::{LdrAdapter, LdrConfig, LdrMode};
+pub use local_deep_research::{EvidenceThresholds, LdrAdapter, LdrConfig, LdrMode};
 pub use paperqa::{PaperQaAdapter, PaperQaConfig};
 pub use protocol::{
     Answer, ChildSummary, Evidence, GenreContext, GenreRoleContext, PROTOCOL_VERSION, PriorReview, ProviderFailure,

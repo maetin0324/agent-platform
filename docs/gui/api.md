@@ -43,6 +43,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 - `providers_include = "providers.d/*.toml"`（トップレベル、`[[providers]]` と併用可。ADR-0017 M1）を設定すると、
   §3.24〜3.28 のプロバイダ管理エンドポイントが `providers.d/<id>.toml`（1 アカウント 1 ファイル、ファイル名昇順で
   `[[providers]]` の後ろに連結）を読み書きできるようになる。未設定なら 5 本とも 409。
+- `[secrets] dir = "secrets"`（ADR-0030 D1。GUI から API キー等を預かる置き場所）を設定すると、§3.36〜3.38 の
+  秘密管理エンドポイントが `dir` 配下に 1 秘密 1 ファイル（0600）で読み書きできるようになる。未設定なら 3 本とも
+  409 `secrets_unavailable`。値を環境変数として run に流し込む `env_from_secrets` は `[adapters.<種別>]` と
+  `[[providers]]` の行の両方に書ける（§3.36 参照）。
 
 ### 1.2 プロトコルと共通規約
 
@@ -156,6 +160,9 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 31 | POST | `/reload` | 設定と `providers.d/` を読み直し、稼働中のプロバイダ選定・アダプタを差し替える（**管理系**） | 200 `ReloadResult` | taskd（`Dispatcher` の差し替え） |
 | 32 | GET | `/tasks/{id}/runs/{run_id}/request` | `runs/<run_id>/request.json`（ワーカーに渡した `RunRequest`。ADR-0023 D2） | `application/json` | ファイル |
 | 33 | GET | `/tasks/{id}/runs/{run_id}/prompt` | `runs/<run_id>/prompt.txt`（claude-code / codex に実際に渡した文面。ADR-0023 M1） | `text/plain` | ファイル |
+| 34 | GET | `/secrets` | GUI から預かる秘密（API キー等）の一覧。値は含まない（ADR-0030、Phase 20。**管理系**） | `SecretList` | taskd（ファイル読み取りのみ） |
+| 35 | PUT | `/secrets/{id}` | 秘密の作成／置き換え（0600）（**管理系**） | 200 `SecretPutResult` | taskd（ファイル書き込みのみ） |
+| 36 | DELETE | `/secrets/{id}` | 秘密の削除（**管理系**） | 200 `{}` | taskd（ファイル削除のみ） |
 
 ---
 
@@ -609,6 +616,56 @@ reload を待たない）。
 しプロバイダは cooldown にしない。**Spawn 失敗（起動できない）はアカウントの責任ではないので、通常どおり
 プロバイダを cooldown にする**（ADR-0024 D4、S10）。
 
+### 3.36〜3.38 秘密（API キー等）の管理（ADR-0030、Phase 20。**すべて管理系: `token_file` 未設定でも 401**）
+
+設計は ADR-0030。ADR-0017 の「API キーを GUI から入力して保存しない」を上書きする（人間の依頼）。秘密は taskd が
+`[secrets] dir` の下にファイルで持つ（1 秘密 = 1 ファイル、ファイル名 = id、中身 = 値 1 行・0600）。**値を返す
+API は無い**（作成・削除だけ）。`[secrets]` が未設定なら 3 本とも 409 `secrets_unavailable`。`id` の規則はプロバイダ
+と同じ（1〜64 文字の ASCII 英数字・`-`・`_`。`PUT`/`DELETE` の id はパスにあるので、無効な形は
+`PATCH`/`DELETE /providers/{id}` と同じ規約で 404 `secret_not_found` にする）。
+
+**使い方（`env_from_secrets`）**: `[adapters.<種別>]` と `[[providers]]` の行の両方に、環境変数名 → 秘密 id の
+対応 `env_from_secrets = { LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily" }` を書ける。値は `build_adapters`
+（アダプタを組み立てるとき）に読むので、鍵を入れ替えたら `POST /reload` が要る（GUI は保存後に自動で呼ぶ）。
+優先順は taskd の環境 < `[adapters.*].env` < `[adapters.*].env_from_secrets` < 行の `env` < 行の
+`env_from_secrets`。**秘密が見つからないのは設定エラーにしない**（`warn!` を出してその環境変数を渡さず、その層
+は下の層の値に道を譲る。run はワーカー自身のエラー（鍵が無い）で失敗する）。`[[providers]].env` に平文で書く
+従来の方法も残る（既存設定を壊さない）。
+
+#### 3.36 `GET /secrets` → 200 `SecretList`
+
+```json
+{"dir": "/home/u/taskd/secrets",
+ "items": [
+   {"id": "tavily", "updated_at": "2026-09-17T01:00:00Z", "fingerprint": "a1b2c3d4",
+    "used_by": [
+      {"scope": "adapter", "name": "local-deep-research", "env": "LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY"},
+      {"scope": "provider", "name": "ldr-tavily", "env": "LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY"}
+    ]}]}
+```
+
+**値は返さない**。`fingerprint` は値の sha256 の先頭 8 桁（16 進。人が「入れ替えた鍵が届いているか」を確かめる
+ためで、値そのものは復元できない）。`updated_at` はファイルの mtime。`used_by` は**稼働中の設定から導く**
+（`GET /secrets` の呼び出しのたびに `[adapters.*].env_from_secrets` と `[[providers]].env_from_secrets` を
+走査する。GUI は再計算しない）。**設定が参照している id は、まだ鍵を入れていなくても `items[]` に載る**
+（`updated_at` と `fingerprint` が `null`。GUI が「鍵を入れる場所」を一覧に出せるようにするため）。したがって
+`items[]` = ファイルとして存在する秘密 ∪ どこかの `env_from_secrets` が指している id。ファイルがある id を
+先に id 昇順、続けて未設定の id を id 昇順で並べる。
+
+#### 3.37 `PUT /secrets/{id}` → 200 `SecretPutResult`
+
+要求本文 `{"value": "tvly-abc123..."}`。作成／置き換え（既にあれば上書き）、ファイルを 0600 で
+atomic（一時ファイル→rename）に書く。空文字・空白だけの値は 422 `validation`。応答は
+`{"id", "updated_at", "fingerprint"}`（**値は含まない**）。無効な id（パス区切りを含む等）は 404
+`secret_not_found`（`PATCH`/`DELETE /providers/{id}` と同じ規約。本文を見る前に判定する）。
+
+#### 3.38 `DELETE /secrets/{id}` → 200 `{}`
+
+ファイルを削除する。無ければ 404 `secret_not_found`。
+
+**ログ・応答のどこにも値は出ない**（`who = "admin"`, `op = "secret_put" | "secret_delete"`, `secret_id` だけ記録
+する。ADR-0024 D5 と同じ規律）。
+
 ---
 
 ## 4. SSE `GET /stream`
@@ -725,6 +782,7 @@ data: {"reason":"cursor_too_old","cursor":20000}
 | `task-ops`（Phase 9b で追加） | `TaskRef`, `TaskSummary`, `TaskList`, `TaskDetail`, `Timers`, `CriterionView`, `VerdictView`, `RunSummary`, `RunFiles`, `RunOutcomeKind`, `ApprovalLink`, `ApprovalDecisionView`, `Action`, `Inbox`, `InboxCounts`, `ApprovalItem`, `EvidenceView`, `QuestionItem`, `DraftGroup`, `AttentionItem`, `Graph`, `GraphNode`, `GraphEdge`, `DelegatedView`（Phase 10）, `TransitionResult.cascaded`, `DaemonSnapshot`, `InFlight`, `InFlightKind`, `CooldownView`, `ProviderLive`, `AccountLive`（Phase 13、`adapter: String` を Phase 14 で追加）, `AccountUsageLive`, `AccountCooldownLive`（Phase 13） | ビュー型。全て `JsonSchema`。`DaemonSnapshot` は task-dispatch が作り task-api が読むので、両者が依存する task-ops に置く（ADR-0013 D3/D4 の依存方向を満たす）。`CooldownView` は `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直した写し |
 | `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `RoleConfigView`（Phase 10）, `GenreConfigView`（Phase 16）, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema` | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
 | `task-api`（Phase 13、ADR-0024） | `AccountList`, `AccountView`, `AccountUsageView`, `RateWindowView`, `AccountCooldownView`, `AccountStats`, `AccountCreateBody`, `AccountCheckResponse`, `AccountLoginStart`, `AccountLoginCodeBody`, `AccountLoginResult` | `GET/POST /accounts`・`DELETE /accounts/{id}`・`POST /accounts/{id}/check`・`POST`/`DELETE /accounts/{id}/login`・`POST /accounts/{id}/login/code` の要求・応答。Phase 14（ADR-0025）で `AccountList.roots: HashMap<String, Option<String>>`、`AccountView.adapter: String`、`AccountCreateBody.adapter: String`（既定 `"claude-code"`）、`AccountLoginStart.kind: String`（`"paste_code"` \| `"device_code"`）と `user_code: Option<String>` を追加（すべて既存フィールドはそのまま。追加のみ） |
+| `task-api`（Phase 20、ADR-0030） | `SecretList`, `SecretView`, `SecretUse`, `SecretPutBody`, `SecretPutResult` | `GET/PUT/DELETE /secrets...` の要求・応答（値は一切含まない）。`used_by: Vec<SecretUse>` は稼働中の設定（`[adapters.*].env_from_secrets` と `[[providers]].env_from_secrets`）から taskd が導く |
 
 ### 6.2 Rust 表記（serde の属性はコメントで示す。`JsonSchema` は全て derive）
 
@@ -954,6 +1012,18 @@ pub struct StreamHello { pub cursor: u64, pub now: String, pub daemon: Option<Da
 pub struct StreamHeartbeat { pub now: String }
 pub struct StreamReset { pub reason: String /* "cursor_too_old" | "cursor_ahead" */, pub cursor: u64 }
 
+// ---- Phase 20（ADR-0030）: GUI から預かる秘密（API キー等）。値を返すフィールドは無い ----
+pub struct SecretList { pub dir: Option<String>, pub items: Vec<SecretView> /* id 昇順 */ }
+pub struct SecretView { pub id: String, pub updated_at: Option<String>, pub fingerprint: Option<String> /* sha256 先頭 8 桁 */, pub used_by: Vec<SecretUse> }
+pub struct SecretUse { pub scope: String /* "adapter" | "provider" */, pub name: String, pub env: String }
+#[serde(deny_unknown_fields)]
+pub struct SecretPutBody { pub value: String /* 空白だけは 422 */ }
+pub struct SecretPutResult { pub id: String, pub updated_at: String, pub fingerprint: String }
+// `[adapters.<種別>]` と `[[providers]]` の行に `#[serde(default)] pub env_from_secrets: HashMap<String, String>`
+// を追加（環境変数名 -> 秘密 id）。`GET /config` のビュー型（`ProviderConfigView` 等）には出さない
+// （id への参照であっても、それが「その環境変数が秘密に紐づいている」という設定上の事実を漏らすだけで
+// 値は漏れないが、今回は追加しない実装判断。知りたければ `GET /secrets` の `used_by` を見る）。
+
 /// スキーマ生成のルート（`task_worker::ProtocolSchema` と同じ流儀。1 フィールド = 1 公開型）。
 pub struct ApiV1Schema {
     pub health: Health, pub problem: Problem, pub inbox: Inbox, pub task_list: TaskList, pub task: Task, pub task_detail: TaskDetail,
@@ -965,6 +1035,7 @@ pub struct ApiV1Schema {
     pub provider_config: ProviderConfigView, pub reload: ReloadResult, pub provider_check: ProviderCheckResponse /* Phase 11 */,
     pub account_list: AccountList, pub account: AccountView, pub account_check: AccountCheckResponse,
     pub account_login_start: AccountLoginStart, pub account_login_result: AccountLoginResult, /* Phase 13 */
+    pub secrets: SecretList, pub secret_put: SecretPutResult, /* Phase 20 */
 }
 ```
 

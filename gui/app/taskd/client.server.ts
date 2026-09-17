@@ -144,6 +144,20 @@ export class TaskdClient {
     return (await res.json()) as T;
   }
 
+  async put<T>(path: string, body: unknown = {}, options: RequestOptions = {}): Promise<T> {
+    const res = await this.#send(
+      this.url(path, options.query),
+      {
+        method: "PUT",
+        headers: this.#headers({ Accept: "application/json", "Content-Type": "application/json" }),
+        body: JSON.stringify(body ?? {}),
+        signal: options.signal,
+      },
+      this.#timeoutMs,
+    );
+    return (await res.json()) as T;
+  }
+
   async delete<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const res = await this.#send(
       this.url(path, options.query),

@@ -493,3 +493,53 @@ pub struct AccountLoginResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
+
+// ---- Phase 20（ADR-0030）: GUI から預かる秘密（API キー等） ----
+
+/// `GET /secrets`。`[secrets]` が未設定なら 409 `secrets_unavailable`（`dir: None` の応答は返さない）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SecretList {
+    /// `[secrets] dir` の絶対パス。
+    pub dir: Option<String>,
+    /// ファイルがある id を id 昇順、続けて未設定（`env_from_secrets` が参照しているだけ）の id を id 昇順。
+    pub items: Vec<SecretView>,
+}
+
+/// 1 秘密（値は決して含まない）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SecretView {
+    pub id: String,
+    /// ファイルの mtime（RFC 3339）。**まだ値が入っていない**（設定が参照しているだけ）なら `null`。
+    pub updated_at: Option<String>,
+    /// 値の sha256 の先頭 8 桁（値そのものは復元できない）。値が無ければ `null`。
+    pub fingerprint: Option<String>,
+    /// 設定（`env_from_secrets`）から導いた、この秘密を使っている場所。
+    pub used_by: Vec<SecretUse>,
+}
+
+/// `SecretView.used_by` の 1 要素。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SecretUse {
+    /// `"adapter" | "provider"`。
+    pub scope: String,
+    /// `scope = "adapter"` ならアダプタ種別（`"claude-code"` 等）、`"provider"` ならプロバイダ id。
+    pub name: String,
+    /// 流し込む環境変数名。
+    pub env: String,
+}
+
+/// `PUT /secrets/{id}` の要求本文。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SecretPutBody {
+    /// 空白だけは 422。
+    pub value: String,
+}
+
+/// `PUT /secrets/{id}` の応答。値は含まない。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SecretPutResult {
+    pub id: String,
+    pub updated_at: String,
+    pub fingerprint: String,
+}

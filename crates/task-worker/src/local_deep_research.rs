@@ -61,6 +61,50 @@ impl LdrMode {
     }
 }
 
+/// `[adapters.local_deep_research.evidence]`（ADR-0031 D2）: 決定的な証拠ゲートの閾値。ハーネス
+/// （このアダプタ）が `TASKD_RESULT` の `counts` を見て機械的に判定する（LLM に判断させない）。
+/// `0` を書けばその項目は見ない。全部 0 なら従来どおり（ゲート無し）の挙動になる（受け入れ条件 3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceThresholds {
+    /// 検索が返した件数の合計の下限（`counts.search_results`。ランナーは重複排除前の出典件数を使う）。
+    #[serde(default = "default_min_search_results")]
+    pub min_search_results: u32,
+    /// 実際に証拠として集まった出典（URL で重複排除後）の数の下限（`counts.sources`）。
+    #[serde(default = "default_min_sources")]
+    pub min_sources: u32,
+    /// 報告が `[n]` で引用した出典の数の下限（`counts.sources_cited`）。
+    #[serde(default = "default_min_cited")]
+    pub min_cited: u32,
+    /// 出典の異なるドメイン数の下限（`counts.unique_domains`）。
+    #[serde(default = "default_min_domains")]
+    pub min_domains: u32,
+}
+
+impl Default for EvidenceThresholds {
+    fn default() -> Self {
+        Self {
+            min_search_results: default_min_search_results(),
+            min_sources: default_min_sources(),
+            min_cited: default_min_cited(),
+            min_domains: default_min_domains(),
+        }
+    }
+}
+
+fn default_min_search_results() -> u32 {
+    5
+}
+fn default_min_sources() -> u32 {
+    3
+}
+fn default_min_cited() -> u32 {
+    2
+}
+fn default_min_domains() -> u32 {
+    2
+}
+
 /// `[adapters.local_deep_research]`（taskd.toml, ADR-0029 D1）。`[[providers]] adapter =
 /// "local-deep-research"` の行ごとに `model`（= `settings` の `llm.model` を上書き）と `env` を上書きできる
 /// （`paperqa`/`acp` と同じ作り）。行の `settings` の上書きは無い（`ProviderConfig.settings` は `paperqa` 専用
@@ -81,6 +125,8 @@ pub struct LdrConfig {
     pub model: Option<String>,
     /// 追加の環境変数。
     pub env: Vec<(String, String)>,
+    /// ADR-0031 D2: 決定的な証拠ゲートの閾値。
+    pub evidence: EvidenceThresholds,
 }
 
 impl Default for LdrConfig {
@@ -93,6 +139,7 @@ impl Default for LdrConfig {
             settings: Vec::new(),
             model: None,
             env: Vec::new(),
+            evidence: EvidenceThresholds::default(),
         }
     }
 }
@@ -135,26 +182,19 @@ impl WorkerAdapter for LdrAdapter {
     }
 }
 
-/// タスクの目的から LDR に渡す問いを組み立てる（`paperqa::build_question` と同じ考え方: LDR はワーカー
-/// プロトコルを話さない調査エンジンなので、結果ファイルの書式やコマンド再実行の話をしても意味が無く、
-/// 素の目的 + 役割の指示文 + 人間の回答履歴だけを使う）。
+/// LDR に渡す**問い**を組み立てる。
+///
+/// 実機で分かったこと（2026-09-17）: ここにタスクのタイトルの見出し（`# ...`）や役割の指示文まで入れると、
+/// 検索エンジンがその文字列ごと検索して**何も返さない**（同じ問いを素で投げれば出典が取れる）。
+/// LDR は受け取った問いをそのまま検索にも使うので、**素の目的だけ**を渡す。
+/// 人間の回答履歴は短い補足として後ろに付ける（検索語としての邪魔が少ない）。
+/// 役割の指示文とタイトルは `runs/<run_id>/request.json` に残るので記録は失われない。
 pub fn build_query(task: &Task, context: &RunContext) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("# {}\n\n", task.title));
-    if let Some(role) = &context.role {
-        out.push_str(&format!("## Role: {}\n", role.id));
-        if !role.instructions.is_empty() {
-            out.push_str(&role.instructions);
-            out.push('\n');
-        }
-        out.push('\n');
-    }
-    out.push_str(&task.objective);
-    out.push('\n');
+    let mut out = task.objective.trim().to_string();
     if !context.answers.is_empty() {
-        out.push_str("\n## Answers from a human to earlier questions\n");
+        out.push_str("\n\n補足（人間の回答）:");
         for Answer { question, answer } in &context.answers {
-            out.push_str(&format!("- Q: {question}\n  A: {answer}\n"));
+            out.push_str(&format!("\n- {question} → {answer}"));
         }
     }
     out
@@ -371,27 +411,88 @@ async fn run_ldr(
         let value = task_result.unwrap_or(serde_json::Value::Null);
         let raw_summary = value.get("summary").and_then(|v| v.as_str()).unwrap_or_default();
         let summary = single_line_summary(raw_summary, SUMMARY_MAX_CHARS);
-        match crate::artifact::resolve(&req.workspace, "report.md", "artifacts/report.md", Some("markdown")) {
-            Ok(artifact) => sink.artifact(&artifact),
-            Err(e) => warn!("run {run_id}: could not register artifacts/report.md: {e}"),
-        }
-        let result_file = serde_json::json!({ "summary": summary, "evidence": [] });
-        match serde_json::to_string_pretty(&result_file) {
-            Ok(text) => {
-                if let Err(e) = tokio::fs::write(artifacts_dir.join("result.json"), format!("{text}\n")).await {
-                    warn!("run {run_id}: could not write artifacts/result.json: {e}");
-                }
+
+        // ADR-0031 D1: `report.md` に加えて、ランナーが機械的に作った証拠の記録
+        // （`sources.json` / `research.json`）も成果物として申告する。ゲート（下）に落ちても
+        // **消さずに残す**（D2: 人が読めるように）ので、この申告はゲートの判定より前に行う。
+        for (name, rel_path, kind) in [
+            ("report.md", "artifacts/report.md", "markdown"),
+            ("sources.json", "artifacts/sources.json", "json"),
+            ("research.json", "artifacts/research.json", "json"),
+        ] {
+            match crate::artifact::resolve(&req.workspace, name, rel_path, Some(kind)) {
+                Ok(artifact) => sink.artifact(&artifact),
+                Err(e) => warn!("run {run_id}: could not register {rel_path}: {e}"),
             }
-            Err(e) => warn!("run {run_id}: could not serialize artifacts/result.json: {e}"),
         }
-        (
-            Terminal::Done {
-                summary,
-                evidence: Vec::new(),
-                usage: None,
-            },
-            None,
-        )
+
+        // ADR-0031 D2: 決定的な証拠ゲート。`TASKD_RESULT` の `counts` を見る（古いランナー/スタブで
+        // 無ければ全 0 扱い＝閾値を全部 0 にしないと落ちる）。LLM には判断させない。
+        let counts = value.get("counts");
+        let count_of = |key: &str| -> u32 {
+            counts.and_then(|c| c.get(key)).and_then(serde_json::Value::as_u64).unwrap_or(0) as u32
+        };
+        let search_results = count_of("search_results");
+        let sources = count_of("sources");
+        let sources_cited = count_of("sources_cited");
+        let unique_domains = count_of("unique_domains");
+        let ev = &config.evidence;
+
+        // どれか 1 つでも閾値が立っているか（全部 0 なら ADR-0031 D2 どおりゲートを見ない）。
+        let gate_enabled =
+            ev.min_search_results > 0 || ev.min_sources > 0 || ev.min_cited > 0 || ev.min_domains > 0;
+        let gate_message = if gate_enabled && search_results == 0 {
+            // 検索経路そのものの問題（鍵切れ・CAPTCHA・ネットワーク遮断）を、調べた結果情報が無かった
+            // ケースと区別できるように、別メッセージにする（ADR-0031 D2）。`min_search_results = 0` に
+            // していてもこの区別は要る（他の項目で落ちるので、運用者が原因を知りたいのは同じ）。
+            Some(
+                "web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)"
+                    .to_string(),
+            )
+        } else {
+            let mut problems = Vec::new();
+            if ev.min_search_results > 0 && search_results < ev.min_search_results {
+                problems.push(format!("search_results={search_results} (min {})", ev.min_search_results));
+            }
+            if ev.min_sources > 0 && sources < ev.min_sources {
+                problems.push(format!("sources={sources} (min {})", ev.min_sources));
+            }
+            if ev.min_cited > 0 && sources_cited < ev.min_cited {
+                problems.push(format!("cited={sources_cited} (min {})", ev.min_cited));
+            }
+            if ev.min_domains > 0 && unique_domains < ev.min_domains {
+                problems.push(format!("domains={unique_domains} (min {})", ev.min_domains));
+            }
+            if problems.is_empty() {
+                None
+            } else {
+                Some(format!("insufficient web evidence: {}", problems.join(", ")))
+            }
+        };
+
+        if let Some(message) = gate_message {
+            // ADR-0031 D2: retryable な `Terminal::Error`。供給側の失敗（`AdapterError`）にはしない
+            // （プロバイダを cooldown にする話ではない）ので `provider_failure` は `None` のまま。
+            (Terminal::Error { message, retryable: true }, None)
+        } else {
+            let result_file = serde_json::json!({ "summary": summary, "evidence": [] });
+            match serde_json::to_string_pretty(&result_file) {
+                Ok(text) => {
+                    if let Err(e) = tokio::fs::write(artifacts_dir.join("result.json"), format!("{text}\n")).await {
+                        warn!("run {run_id}: could not write artifacts/result.json: {e}");
+                    }
+                }
+                Err(e) => warn!("run {run_id}: could not serialize artifacts/result.json: {e}"),
+            }
+            (
+                Terminal::Done {
+                    summary,
+                    evidence: Vec::new(),
+                    usage: None,
+                },
+                None,
+            )
+        }
     };
 
     write_result_json(&run_dir, &terminal, provider_failure).await?;
@@ -477,23 +578,43 @@ mod tests {
         }
     }
 
-    /// スタブは argv[2]（`ldr_input.json` のパス）に成功時の `report.md` を書き、progress と
-    /// TASKD_RESULT を出す（実際のランナーの動きを最小限まねる）。
-    fn success_script() -> &'static str {
-        r#"input="$2"
+    /// counts が満たす閾値（既定: min_search_results=5, min_sources=3, min_cited=2, min_domains=2。ADR-0031 D2）。
+    const PASSING_COUNTS: &str =
+        r#"{"queries": 1, "search_results": 5, "sources": 3, "sources_cited": 2, "unique_domains": 3}"#;
+
+    /// スタブは argv[2]（`ldr_input.json` のパス）に成功時の `report.md`/`sources.json`/`research.json` を
+    /// 書き、progress と `TASKD_RESULT`（`counts` 込み）を出す（実際のランナーの動きを最小限まねる。ADR-0031 D1）。
+    /// `counts_json` が `None` なら `TASKD_RESULT` に `counts` を含めない（古いランナー/スタブの再現）。
+    fn script_with_counts(counts_json: Option<&str>) -> String {
+        let counts = counts_json.unwrap_or(r#"{"queries": 0, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}"#);
+        let result_line = match counts_json {
+            Some(counts) => format!(r#"TASKD_RESULT {{"summary": "found X and Y with sources", "sources": 3, "counts": {counts}}}"#),
+            None => r#"TASKD_RESULT {"summary": "found X and Y with sources", "sources": 3}"#.to_string(),
+        };
+        format!(
+            r#"input="$2"
 report_path=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['report_path'])" "$input")
+artifacts_dir=$(dirname "$report_path")
 echo 'progress: searching the web...'
 echo 'progress: reading 3 pages...'
-mkdir -p "$(dirname "$report_path")"
+mkdir -p "$artifacts_dir"
 printf '# Report\n\nfound X and Y with sources\n' > "$report_path"
-echo 'TASKD_RESULT {"summary": "found X and Y with sources", "sources": 2}'
+printf '[{{"url": "https://a.example.com/1", "title": "A", "engine": "tavily", "cited": true}}, {{"url": "https://b.example.com/2", "title": "B", "engine": null, "cited": true}}, {{"url": "https://c.example.org/3", "title": "C", "engine": null, "cited": false}}]' > "$artifacts_dir/sources.json"
+printf '{{"queries": [{{"query": "q1", "engine": null, "result_count": null}}], "iterations": 1, "counts": {counts}}}' > "$artifacts_dir/research.json"
+echo '{result_line}'
 "#
+        )
+    }
+
+    /// counts が既定の閾値を満たすスタブ（happy path 用）。
+    fn success_script() -> String {
+        script_with_counts(Some(PASSING_COUNTS))
     }
 
     #[tokio::test]
     async fn happy_path_progress_report_and_result_files() {
         let dir = tempfile::tempdir().unwrap();
-        let config = stub_ldr(dir.path(), success_script());
+        let config = stub_ldr(dir.path(), &success_script());
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -511,12 +632,28 @@ echo 'TASKD_RESULT {"summary": "found X and Y with sources", "sources": 2}'
         assert!(progress.iter().any(|m| m.contains("reading 3 pages")));
         assert!(*sink.heartbeat_count.lock().unwrap() >= 3);
 
+        // ADR-0031 受け入れ条件 1: report.md / sources.json / research.json の 3 つが成果物として申告される。
         let artifacts = sink.artifacts.lock().unwrap();
-        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
-        assert_eq!(artifacts[0].name, "report.md");
-        assert_eq!(artifacts[0].path, "artifacts/report.md");
-        assert!(!artifacts[0].sha256.is_empty());
+        assert_eq!(artifacts.len(), 3, "{artifacts:?}");
+        let names: Vec<&str> = artifacts.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"report.md"), "{names:?}");
+        assert!(names.contains(&"sources.json"), "{names:?}");
+        assert!(names.contains(&"research.json"), "{names:?}");
+        for a in artifacts.iter() {
+            assert!(!a.sha256.is_empty(), "{a:?}");
+        }
+        let sources_artifact = artifacts.iter().find(|a| a.name == "sources.json").unwrap();
+        assert_eq!(sources_artifact.path, "artifacts/sources.json");
+        let research_artifact = artifacts.iter().find(|a| a.name == "research.json").unwrap();
+        assert_eq!(research_artifact.path, "artifacts/research.json");
         drop(artifacts);
+
+        let sources_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap()).unwrap();
+        assert_eq!(sources_json.as_array().unwrap().len(), 3);
+        let research_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap()).unwrap();
+        assert_eq!(research_json["counts"]["sources"], 3);
 
         let report_md = std::fs::read_to_string(dir.path().join("artifacts/report.md")).unwrap();
         assert!(report_md.contains("found X and Y with sources"));
@@ -640,6 +777,31 @@ while true; do sleep 0.1; done
         serde_json::from_str(&text).unwrap()
     }
 
+    /// 実機の回帰（2026-09-17）: 検索に渡す問いにタイトルの見出しや役割の指示文を入れると、検索が
+    /// 何も返さなくなる。素の目的だけを渡す（人間の回答があれば短い補足として足す）。
+    #[test]
+    fn build_query_sends_only_the_objective_not_the_title_or_role_instructions() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.title = "gate pass check".into();
+        task.objective = "What is Kubernetes and what problem does it solve?".into();
+        let mut context = RunContext {
+            role: Some(crate::protocol::RoleContext {
+                id: "web-scout".into(),
+                instructions: "あなたは Web 調査担当。出典 URL を付ける。".into(),
+            }),
+            ..Default::default()
+        };
+        let query = build_query(&task, &context);
+        assert_eq!(query, "What is Kubernetes and what problem does it solve?");
+        assert!(!query.contains("gate pass check"), "{query}");
+        assert!(!query.contains("Web 調査担当"), "{query}");
+
+        context.answers = vec![Answer { question: "対象は?".into(), answer: "v1.31".into() }];
+        let with_answers = build_query(&task, &context);
+        assert!(with_answers.starts_with("What is Kubernetes"), "{with_answers}");
+        assert!(with_answers.contains("対象は? → v1.31"), "{with_answers}");
+    }
+
     /// 入力 JSON の組み立てを argv 経由で確認する: `query`/`mode`/`settings`（`model` が `llm.model` を
     /// 上書き）/`iterations`/`questions_per_iteration`/`report_path`（ADR-0029 D1）。
     #[tokio::test]
@@ -660,6 +822,9 @@ while true; do sleep 0.1; done
             ("search.tool".to_string(), "searxng".to_string()),
         ];
         config.model = Some("qwen3.8-27b".to_string());
+        // このテストは入力 JSON の組み立てを見るだけで、証拠ゲート（ADR-0031 D2）とは無関係なので無効にする
+        // （スタブの TASKD_RESULT に counts が無い）。
+        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -717,6 +882,9 @@ while true; do sleep 0.1; done
             ),
         );
         config.env.push(("OPENAI_BASE_URL".to_string(), "http://old:1".to_string()));
+        // このテストは環境変数の上書きを見るだけで、証拠ゲート（ADR-0031 D2）とは無関係なので無効にする
+        // （スタブの TASKD_RESULT に counts が無い）。
+        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
         let base = LdrAdapter::new(config);
         let with_env = base
             .with_env(&[("OPENAI_BASE_URL".to_string(), "http://new:2".to_string())])
@@ -852,5 +1020,303 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
                 "plain",
             ])
         );
+    }
+
+    // --- ADR-0031 D2: 決定的な証拠ゲート ---
+
+    /// 検索が 1 件も返らなかった（`search_results == 0`）ときは別メッセージになり、`report.md` /
+    /// `sources.json` / `research.json` は消さずに残る（ADR-0031 D2 / 受け入れ条件 2）。
+        /// ADR-0031 D2 の監査指摘（D-5）: `min_search_results = 0` にしていても、検索が 0 件なら
+    /// 「検索経路の問題かもしれない」側のメッセージを出す（他の項目でゲートに落ちる場合でも、
+    /// 運用者が知りたい原因は同じ）。閾値が全部 0 のときだけゲート自体を見ない。
+    #[tokio::test]
+    async fn gate_zero_search_results_keeps_the_distinct_message_even_when_that_threshold_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = r#"{"queries": 1, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}"#;
+        let mut config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 3, min_cited: 2, min_domains: 2 };
+        let adapter = LdrAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-gate-0sr", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Error { retryable, message } => {
+                assert!(retryable);
+                assert!(message.contains("web search returned nothing"), "{message}");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+#[tokio::test]
+    async fn gate_zero_search_results_uses_the_distinct_message_and_keeps_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = r#"{"queries": 0, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}"#;
+        let config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        let adapter = LdrAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-gate-1", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Error { retryable, message } => {
+                assert!(retryable);
+                assert!(message.contains("web search returned nothing"), "{message}");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+        assert!(dir.path().join("artifacts/report.md").exists());
+        assert!(dir.path().join("artifacts/sources.json").exists());
+        assert!(dir.path().join("artifacts/research.json").exists());
+        assert!(!dir.path().join("artifacts/result.json").exists());
+        let artifacts = sink.artifacts.lock().unwrap();
+        assert_eq!(artifacts.len(), 3, "{artifacts:?}");
+    }
+
+    /// 出典が閾値未満（他は満たす）→ 実数と閾値入りのメッセージで retryable。`report.md` は残る。
+    #[tokio::test]
+    async fn gate_sources_below_minimum_is_retryable_with_actual_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = r#"{"queries": 1, "search_results": 5, "sources": 1, "sources_cited": 2, "unique_domains": 2}"#;
+        let config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        let adapter = LdrAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-gate-2", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Error { retryable, message } => {
+                assert!(retryable);
+                assert!(message.starts_with("insufficient web evidence:"), "{message}");
+                assert!(message.contains("sources=1 (min 3)"), "{message}");
+                assert!(!message.contains("cited="), "{message}");
+                assert!(!message.contains("domains="), "{message}");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+        assert!(dir.path().join("artifacts/report.md").exists());
+        assert!(!dir.path().join("artifacts/result.json").exists());
+    }
+
+    /// 引用数が閾値未満（他は満たす）→ 実数と閾値入りのメッセージで retryable。
+    #[tokio::test]
+    async fn gate_cited_below_minimum_is_retryable_with_actual_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = r#"{"queries": 1, "search_results": 5, "sources": 3, "sources_cited": 1, "unique_domains": 2}"#;
+        let config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        let adapter = LdrAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-gate-3", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Error { retryable, message } => {
+                assert!(retryable);
+                assert!(message.contains("cited=1 (min 2)"), "{message}");
+                assert!(!message.contains("sources="), "{message}");
+                assert!(!message.contains("domains="), "{message}");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+        assert!(dir.path().join("artifacts/report.md").exists());
+    }
+
+    /// 出典が同一ドメインのみ（他は満たす）→ 実数と閾値入りのメッセージで retryable。
+    #[tokio::test]
+    async fn gate_single_domain_is_retryable_with_actual_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = r#"{"queries": 1, "search_results": 5, "sources": 3, "sources_cited": 2, "unique_domains": 1}"#;
+        let config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        let adapter = LdrAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-gate-4", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Error { retryable, message } => {
+                assert!(retryable);
+                assert!(message.contains("domains=1 (min 2)"), "{message}");
+                assert!(!message.contains("sources="), "{message}");
+                assert!(!message.contains("cited="), "{message}");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+        assert!(dir.path().join("artifacts/report.md").exists());
+    }
+
+    /// 閾値を全部 0 にすると、`counts` が全 0 でも従来どおり `done`（受け入れ条件 3）。
+    #[tokio::test]
+    async fn gate_all_zero_thresholds_still_done_even_with_empty_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = r#"{"queries": 0, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}"#;
+        let mut config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
+        let adapter = LdrAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-gate-5", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        assert!(dir.path().join("artifacts/result.json").exists());
+    }
+
+    /// `TASKD_RESULT` に `counts` が無い（古いランナー/スタブ）場合は全 0 扱いになるので、既定の閾値
+    /// （全部 0 より大きい）では落ちる。
+    #[tokio::test]
+    async fn gate_missing_counts_is_treated_as_all_zero_and_fails_with_default_thresholds() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_ldr(dir.path(), &script_with_counts(None));
+        let adapter = LdrAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-gate-6", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Error { retryable, message } => {
+                assert!(retryable);
+                assert!(message.contains("web search returned nothing"), "{message}");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    /// `counts` が無くても、閾値を全部 0 にすれば `done`（"全部 0 でないと落ちる" の裏取り）。
+    #[tokio::test]
+    async fn gate_missing_counts_is_done_when_all_thresholds_are_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_ldr(dir.path(), &script_with_counts(None));
+        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
+        let adapter = LdrAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-gate-7", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+    }
+
+    /// ランナーの `build_evidence_manifest`（URL での重複排除、`[n]` からの `cited` 判定、ドメイン数、
+    /// 実機（LDR 1.10.7）の形の回帰: `questions` が空でも `findings[].question` から問いを拾い、
+    /// 出典のエンジン名は `source` から取る（ADR-0031 D1 の記録が 0 件のままにならないように）。
+    #[test]
+    fn runner_manifest_uses_findings_questions_and_source_engine() {
+        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+            eprintln!("skipping: python3 not available");
+            return;
+        };
+        if !python.status.success() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+result = {
+    "summary": "A [1] and B [2].",
+    "questions": {},
+    "findings": [
+        {"question": "what is k8s?"},
+        {"question": "what is etcd?"},
+        {"question": "what is k8s?"},
+    ],
+    "sources": [
+        {"link": "https://en.wikipedia.org/wiki/Kubernetes", "title": "K8s", "source": "wikipedia"},
+        {"link": "https://example.org/etcd", "title": "etcd", "source": "wikipedia"},
+    ],
+}
+sources, research = mod.build_evidence_manifest(result)
+print(json.dumps({
+    "queries": [q["query"] for q in research["queries"]],
+    "counts": research["counts"],
+    "engines": [s.get("engine") for s in sources],
+}))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(value["queries"], serde_json::json!(["what is k8s?", "what is etcd?"]));
+        assert_eq!(value["counts"]["queries"], serde_json::json!(2));
+        assert_eq!(value["counts"]["unique_domains"], serde_json::json!(2));
+        assert_eq!(value["engines"], serde_json::json!(["wikipedia", "wikipedia"]));
+    }
+
+    /// `questions` が dict/list どちらでも扱えること）を python3 で直接確認する（ADR-0031 D1）。
+    #[test]
+    fn runner_build_evidence_manifest_dedupes_cites_and_flattens_questions() {
+        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+            eprintln!("skipping: python3 not available");
+            return;
+        };
+        if !python.status.success() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r#"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+result = {
+    "summary": "A is confirmed [1]. C is also seen [3].",
+    "sources": [
+        {"link": "https://a.example.com/x", "title": "A"},
+        {"link": "https://b.example.org/y", "title": "B", "engine": "tavily"},
+        {"link": "https://a.example.com/x", "title": "A dup"},
+    ],
+    "questions": {"1": ["q-second"], "0": ["q-first", "q-first-2"]},
+    "iterations": 2,
+}
+sources_list, research = mod.build_evidence_manifest(result)
+
+result_list_questions = dict(result)
+result_list_questions["questions"] = [["qa"], "qb"]
+_, research_list = mod.build_evidence_manifest(result_list_questions)
+
+print(json.dumps({
+    "sources_list": sources_list,
+    "research": research,
+    "queries_from_list_questions": [q["query"] for q in research_list["queries"]],
+}))
+"#;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let values: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+
+        // 重複排除: 2 件（a.example.com/x は 2 回出るが 1 件に）。`[1]` と `[3]` は両方 a.example.com/x を指す
+        // ので cited=true、`b.example.org/y` は引用されていないので cited=false。
+        assert_eq!(
+            values["sources_list"],
+            serde_json::json!([
+                {"url": "https://a.example.com/x", "title": "A", "engine": null, "cited": true},
+                {"url": "https://b.example.org/y", "title": "B", "engine": "tavily", "cited": false},
+            ])
+        );
+        assert_eq!(values["research"]["iterations"], 2);
+        assert_eq!(values["research"]["counts"]["search_results"], 3);
+        assert_eq!(values["research"]["counts"]["sources"], 2);
+        assert_eq!(values["research"]["counts"]["sources_cited"], 1);
+        assert_eq!(values["research"]["counts"]["unique_domains"], 2);
+        // `questions` が dict のときは反復順（キーの数値昇順）で並ぶ。
+        assert_eq!(
+            values["research"]["queries"],
+            serde_json::json!([
+                {"query": "q-first", "engine": null, "result_count": null},
+                {"query": "q-first-2", "engine": null, "result_count": null},
+                {"query": "q-second", "engine": null, "result_count": null},
+            ])
+        );
+        // `questions` が list（要素がリストまたは文字列）のときも同じように平らにする。
+        assert_eq!(values["queries_from_list_questions"], serde_json::json!(["qa", "qb"]));
     }
 }

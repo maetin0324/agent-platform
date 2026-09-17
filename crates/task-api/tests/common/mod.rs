@@ -45,6 +45,10 @@ pub struct EnvOptions {
     /// ADR-0025 D1: `[accounts] codex_dir`。`None` なら codex のプールは無し。
     pub codex_accounts_root: Option<PathBuf>,
     pub max_runs_per_account: usize,
+    /// ADR-0030 D1: `[secrets] dir`。`None` なら秘密の管理系は 409 `secrets_unavailable`。
+    pub secrets_dir: Option<PathBuf>,
+    /// ADR-0030 D3: 秘密 id → `used_by`（`GET /secrets` の `used_by`）。
+    pub secret_usage: std::collections::HashMap<String, Vec<task_api::SecretUse>>,
 }
 
 pub struct TestEnv {
@@ -221,6 +225,8 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
             roots
         },
         max_runs_per_account: options.max_runs_per_account,
+        secrets_dir: options.secrets_dir,
+        secret_usage: options.secret_usage,
     }
 }
 
@@ -371,6 +377,21 @@ pub fn post_json_with(path: &str, body: &Value, headers: &[(&str, &str)]) -> Req
 
 pub fn patch_json_with(path: &str, body: &Value, headers: &[(&str, &str)]) -> Request<Body> {
     let mut request = Request::patch(path)
+        .header("host", HOST)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    for (name, value) in headers {
+        request.headers_mut().insert(
+            axum::http::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+            axum::http::HeaderValue::from_str(value).expect("header value"),
+        );
+    }
+    request
+}
+
+pub fn put_json_with(path: &str, body: &Value, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut request = Request::put(path)
         .header("host", HOST)
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))

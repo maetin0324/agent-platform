@@ -8,6 +8,7 @@ import type {
   ProviderConfigView1,
   ReloadResult,
   ReplayReport,
+  SecretPutResult,
   TransitionResult,
 } from "./types";
 
@@ -79,6 +80,21 @@ export type AccountAdapter = "claude-code" | "codex";
  * `{ok:false, error}` にする（401 `unauthorized` を含む）。`adapter` は呼び出しに使ったアダプタ（`?adapter=`）で、
  * `AccountCard` が自分宛ての結果かどうかを id と一緒に判定するのに使う。
  */
+/**
+ * API キー（秘密）の管理（ADR-0030 D3/D4）: `PUT/DELETE /secrets/{id}` の結果。値は一切載せない
+ * （taskd の応答自体に値が無い。ADR-0030 D3）。
+ */
+export type SecretOpOutcome =
+  | { ok: true; op: "put"; id: string; secret: SecretPutResult }
+  | { ok: true; op: "delete"; id: string }
+  | { ok: false; op: "put" | "delete"; id: string; error: ActionError };
+
+/** `/accounts` の API キー節の action が返すデータ。`reload` は 2xx のときだけ入る（ADR-0030 D4）。 */
+export interface SecretActionResult {
+  op: SecretOpOutcome;
+  reload?: ReloadOutcome;
+}
+
 export type AccountOpOutcome =
   | { ok: true; op: "create"; id: string; adapter: AccountAdapter; account: AccountView }
   | { ok: true; op: "delete"; id: string; adapter: AccountAdapter }

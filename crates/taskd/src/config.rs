@@ -85,9 +85,20 @@ pub struct Config {
     /// ADR-0024 D1: Claude アカウントのプール。無ければ `account_pool = true` のプロバイダは設定エラー。
     #[serde(default)]
     pub accounts: Option<AccountsConfig>,
+    /// ADR-0030 D1: GUI から預かる API キー等の置き場所。無ければこの機能は無効（管理 API は 409）。
+    #[serde(default)]
+    pub secrets: Option<SecretsConfig>,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+}
+
+/// `[secrets]`（ADR-0030 D1）: 1 秘密 = 1 ファイル（ファイル名 = id、中身 = 値 1 行）。`dir` を 0700 で作る。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretsConfig {
+    /// 相対なら設定ファイル基準。`Config::load` が絶対化する。
+    pub dir: PathBuf,
 }
 
 /// `[accounts]`（ADR-0024 D1、ADR-0025 D1）: `claude_dir` / `codex_dir` の下の 1 ディレクトリが 1 アカウント。
@@ -381,6 +392,9 @@ pub struct FakeConfig {
     /// 追加の環境変数。
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。`env` より優先。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
 }
 
 /// `claude-code` アダプタの設定（ADR-0006 D6）。
@@ -402,6 +416,9 @@ pub struct ClaudeCodeAdapterConfig {
     /// 追加の環境変数（例: `CLAUDE_CONFIG_DIR`）。
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。`env` より優先。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
 }
 
 impl Default for ClaudeCodeAdapterConfig {
@@ -412,6 +429,7 @@ impl Default for ClaudeCodeAdapterConfig {
             permission_mode: default_permission_mode(),
             model: None,
             env: HashMap::new(),
+            env_from_secrets: HashMap::new(),
         }
     }
 }
@@ -439,6 +457,9 @@ pub struct CodexAdapterConfig {
     /// 追加の環境変数。
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。`env` より優先。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
 }
 
 impl Default for CodexAdapterConfig {
@@ -448,6 +469,7 @@ impl Default for CodexAdapterConfig {
             extra_args: Vec::new(),
             model: None,
             env: HashMap::new(),
+            env_from_secrets: HashMap::new(),
         }
     }
 }
@@ -473,6 +495,9 @@ pub struct AcpAdapterConfig {
     /// 追加の環境変数（共通分。行の `env` を重ねる。同名キーは行が優先）。
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。`env` より優先。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
     /// `session/request_permission` への即答。`"allow"`（既定）| `"deny"`。
     #[serde(default = "default_acp_permission")]
     pub permission: task_worker::AcpPermission,
@@ -491,6 +516,7 @@ impl Default for AcpAdapterConfig {
             command: default_acp_command(),
             args: default_acp_args(),
             env: HashMap::new(),
+            env_from_secrets: HashMap::new(),
             permission: default_acp_permission(),
             model_option_id: default_acp_model_option_id(),
             startup_timeout_secs: default_acp_startup_timeout_secs(),
@@ -544,6 +570,9 @@ pub struct PaperQaAdapterConfig {
     /// 追加の環境変数（例: `OPENAI_API_KEY` / `OPENAI_BASE_URL`。LiteLLM 経由の OpenAI 互換エンドポイント向け）。
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。`env` より優先。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
 }
 
 impl Default for PaperQaAdapterConfig {
@@ -556,6 +585,7 @@ impl Default for PaperQaAdapterConfig {
             index_name: None,
             extra_args: Vec::new(),
             env: HashMap::new(),
+            env_from_secrets: HashMap::new(),
         }
     }
 }
@@ -591,6 +621,14 @@ pub struct LdrAdapterConfig {
     /// LiteLLM/OpenAI 互換エンドポイントの鍵など、プロセス環境変数として渡すもの）。
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id（例: `LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily"`）。
+    /// `env` より優先。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
+    /// `[adapters.local_deep_research.evidence]`（ADR-0031 D2）: 決定的な証拠ゲートの閾値。
+    /// 意味は `task_worker::EvidenceThresholds` と同じ。
+    #[serde(default)]
+    pub evidence: task_worker::EvidenceThresholds,
 }
 
 impl Default for LdrAdapterConfig {
@@ -602,6 +640,8 @@ impl Default for LdrAdapterConfig {
             questions_per_iteration: None,
             settings: HashMap::new(),
             env: HashMap::new(),
+            env_from_secrets: HashMap::new(),
+            evidence: task_worker::EvidenceThresholds::default(),
         }
     }
 }
@@ -626,6 +666,10 @@ pub struct ProviderConfig {
     /// （例: `CLAUDE_CONFIG_DIR`、`CODEX_HOME`。ADR-0012 D1）。
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。この行の `env` より優先（優先順は
+    /// taskd の環境 < `[adapters.*].env` < `[adapters.*].env_from_secrets` < 行の `env` < 行の `env_from_secrets`）。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
     /// ADR-0024 D2: `true` なら `[accounts]` のプールから残量に基づいてアカウントを選ぶ。`adapter = "claude-code"`
     /// かつ `[accounts]` があるときだけ有効（既定 `false`）。
     #[serde(default)]
@@ -753,6 +797,12 @@ impl Config {
             {
                 accounts.codex_dir = Some(base.join(dir));
             }
+        }
+        // ADR-0030 D1: `[secrets] dir` も他のパス設定と同じく設定ファイルのディレクトリ基準で絶対化する。
+        if let Some(secrets) = &mut cfg.secrets
+            && secrets.dir.is_relative()
+        {
+            secrets.dir = base.join(&secrets.dir);
         }
         // ADR-0027 D3: `[adapters.paperqa]` のパス設定は、他のパス設定と同じく設定ファイルのディレクトリ基準で
         // 絶対化する。`settings` は `pqa -s` に渡す文字列（拡張子無し）だが、パスの形をしているので同様に扱う。
@@ -1089,6 +1139,27 @@ impl Config {
                     source,
                 })?;
             }
+        }
+        Ok(())
+    }
+
+    /// ADR-0030 D1: `[secrets] dir` を 0700 で作る（無ければ）。`[secrets]` が無ければ何もしない。
+    pub fn ensure_secrets_dir(&self) -> Result<(), ConfigError> {
+        let Some(secrets) = &self.secrets else {
+            return Ok(());
+        };
+        if secrets.dir.exists() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&secrets.dir).map_err(|source| ConfigError::Read { path: secrets.dir.clone(), source })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(&secrets.dir, perms).map_err(|source| ConfigError::Read {
+                path: secrets.dir.clone(),
+                source,
+            })?;
         }
         Ok(())
     }
@@ -1441,12 +1512,44 @@ host = "h"
         assert!(cfg.adapters.local_deep_research.questions_per_iteration.is_none());
         assert!(cfg.adapters.local_deep_research.settings.is_empty());
         assert!(cfg.adapters.local_deep_research.env.is_empty());
+        // ADR-0031 D2: 既定の閾値。
+        assert_eq!(cfg.adapters.local_deep_research.evidence.min_search_results, 5);
+        assert_eq!(cfg.adapters.local_deep_research.evidence.min_sources, 3);
+        assert_eq!(cfg.adapters.local_deep_research.evidence.min_cited, 2);
+        assert_eq!(cfg.adapters.local_deep_research.evidence.min_domains, 2);
     }
 
     #[test]
     fn rejects_unknown_fields_in_local_deep_research_adapter_config() {
         let text =
             "[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\n\n[adapters.local_deep_research]\nbogus = 1\n";
+        assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    /// ADR-0031 D2: `[adapters.local_deep_research.evidence]` を読める。`0` を書けばその項目は無効になる
+    /// （下の値のとおり読めることだけをここでは確認する。ゲートの判定自体は `task_worker::local_deep_research`
+    /// 側のテスト）。未知のキーは拒否する。
+    #[test]
+    fn reads_local_deep_research_evidence_thresholds() {
+        let text = "[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\n\n\
+             [adapters.local_deep_research.evidence]\n\
+             min_search_results = 10\n\
+             min_sources = 4\n\
+             min_cited = 1\n\
+             min_domains = 0\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.validate().is_ok());
+        let ev = cfg.adapters.local_deep_research.evidence;
+        assert_eq!(ev.min_search_results, 10);
+        assert_eq!(ev.min_sources, 4);
+        assert_eq!(ev.min_cited, 1);
+        assert_eq!(ev.min_domains, 0);
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_local_deep_research_evidence_table() {
+        let text = "[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\n\n\
+             [adapters.local_deep_research.evidence]\nbogus = 1\n";
         assert!(toml::from_str::<Config>(text).is_err());
     }
 
@@ -1609,12 +1712,22 @@ host = "h"
         );
         let ldr_provider = cfg.providers.iter().find(|p| p.adapter == "local-deep-research").expect("ldr provider");
         assert_eq!(ldr_provider.model, "qwen3.8-27b");
+        // ADR-0031 D2: 既定の証拠ゲート閾値を明示している。
+        assert_eq!(cfg.adapters.local_deep_research.evidence.min_search_results, 5);
+        assert_eq!(cfg.adapters.local_deep_research.evidence.min_sources, 3);
+        assert_eq!(cfg.adapters.local_deep_research.evidence.min_cited, 2);
+        assert_eq!(cfg.adapters.local_deep_research.evidence.min_domains, 2);
         let genre = cfg.genres.iter().find(|g| g.id == "web-research").expect("web-research genre");
         assert_eq!(genre.default_role.as_deref(), Some("web-scout"));
         assert_eq!(genre.roles, vec!["web-scout".to_string()]);
         assert_eq!(genre.output_artifacts, vec!["report.md".to_string()]);
         let role = cfg.roles.iter().find(|r| r.id == "web-scout").expect("web-scout role");
         assert_eq!(role.adapter.as_deref(), Some("local-deep-research"));
+        // ADR-0030 D1: `[secrets] dir` が読め、設定ファイル基準で絶対化される。鍵の値そのものはファイルに無い。
+        let secrets = cfg.secrets.as_ref().expect("[secrets]");
+        assert!(secrets.dir.is_absolute());
+        assert_eq!(secrets.dir.file_name().and_then(|n| n.to_str()), Some("secrets"));
+        assert!(!std::fs::read_to_string(path).unwrap().contains("tvly-"), "example config must not contain a real key");
     }
 
     /// ADR-0010 D6/D9: バックオフと `[reviewer]` の既定値・指定値が DispatchConfig に写る。
@@ -2156,6 +2269,97 @@ roles = ["lead"]
         // [accounts] 無しは no-op。
         let no_accounts: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert!(no_accounts.ensure_accounts_dir().is_ok());
+    }
+
+    // ---- ADR-0030: [secrets] / env_from_secrets ----
+
+    /// `[secrets] dir` を読み、相対パスを設定ファイル基準で絶対化する。
+    #[test]
+    fn secrets_dir_is_parsed_and_resolved_relative_to_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "[secrets]\ndir = \"secrets\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let secrets = cfg.secrets.as_ref().unwrap();
+        assert!(secrets.dir.is_absolute());
+        assert_eq!(secrets.dir, dir.path().canonicalize().unwrap().join("secrets"));
+
+        // 節を書かなければ `None`。
+        let no_secrets: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(no_secrets.secrets.is_none());
+        // 未知キーは拒否。
+        assert!(toml::from_str::<Config>("[secrets]\nbogus = 1\n").is_err());
+    }
+
+    /// `ensure_secrets_dir` は `[secrets] dir` を 0700 で作る（無ければ）。`[secrets]` が無ければ何もしない。
+    #[test]
+    fn ensure_secrets_dir_creates_the_directory_with_0700() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "[secrets]\ndir = \"secrets\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let secrets_dir = cfg.secrets.as_ref().unwrap().dir.clone();
+        assert!(!secrets_dir.exists());
+        cfg.ensure_secrets_dir().unwrap();
+        assert!(secrets_dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&secrets_dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+        }
+        // 既にあれば触らない。
+        cfg.ensure_secrets_dir().unwrap();
+
+        // [secrets] 無しは no-op。
+        let no_secrets: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(no_secrets.ensure_secrets_dir().is_ok());
+    }
+
+    /// `env_from_secrets` は `[adapters.*]` と行の両方で読める（未知キーは拒否）。
+    #[test]
+    fn env_from_secrets_is_parsed_on_adapters_and_providers() {
+        let text = r#"[adapters.local_deep_research]
+env_from_secrets = { LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily", LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
+
+[[providers]]
+id = "ldr"
+adapter = "local-deep-research"
+env_from_secrets = { LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily-row" }
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(
+            cfg.adapters.local_deep_research.env_from_secrets.get("LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY").map(String::as_str),
+            Some("tavily")
+        );
+        assert_eq!(
+            cfg.providers[0].env_from_secrets.get("LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY").map(String::as_str),
+            Some("tavily-row")
+        );
+
+        for (section, extra) in [
+            ("claude_code", ""),
+            ("codex", ""),
+            ("fake", ""),
+            ("acp", ""),
+            ("paperqa", ""),
+        ] {
+            let _ = extra;
+            let text = format!(
+                "[adapters.{section}]\nenv_from_secrets = {{ FOO = \"bar\" }}\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n"
+            );
+            let cfg: Config = toml::from_str(&text).unwrap_or_else(|e| panic!("{section}: {e}"));
+            let _ = cfg;
+        }
     }
 
     /// 例の設定ファイルにコメントアウトされた `[accounts]` / `account_pool` の節も構文として妥当なことを確認する

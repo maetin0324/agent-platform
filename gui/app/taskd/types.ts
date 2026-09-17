@@ -256,6 +256,8 @@ export interface ApiV1Schema {
   reload: ReloadResult;
   replay_report: ReplayReport;
   run_list: RunList;
+  secret_put: SecretPutResult;
+  secrets: SecretList;
   stream_daemon: DaemonSnapshot;
   stream_event: EventRow;
   stream_heartbeat: StreamHeartbeat;
@@ -1396,6 +1398,62 @@ export interface ReplayMismatch {
  */
 export interface RunList {
   runs: RunSummary[];
+}
+/**
+ * `PUT /secrets/{id}` の応答。値は含まない。
+ */
+export interface SecretPutResult {
+  fingerprint: string;
+  id: string;
+  updated_at: string;
+}
+/**
+ * Phase 20（ADR-0030）: GUI から預かる秘密（API キー等）。`GET /secrets` と `PUT /secrets/{id}` の応答。
+ */
+export interface SecretList {
+  /**
+   * `[secrets] dir` の絶対パス。
+   */
+  dir?: string | null;
+  /**
+   * ファイルがある id を id 昇順、続けて未設定（`env_from_secrets` が参照しているだけ）の id を id 昇順。
+   */
+  items: SecretView[];
+}
+/**
+ * 1 秘密（値は決して含まない）。
+ */
+export interface SecretView {
+  /**
+   * 値の sha256 の先頭 8 桁（値そのものは復元できない）。値が無ければ `null`。
+   */
+  fingerprint?: string | null;
+  id: string;
+  /**
+   * ファイルの mtime（RFC 3339）。**まだ値が入っていない**（設定が参照しているだけ）なら `null`。
+   */
+  updated_at?: string | null;
+  /**
+   * 設定（`env_from_secrets`）から導いた、この秘密を使っている場所。
+   */
+  used_by: SecretUse[];
+}
+/**
+ * `SecretView.used_by` の 1 要素。
+ */
+export interface SecretUse {
+  /**
+   * 流し込む環境変数名。
+   */
+  env: string;
+  /**
+   * `scope = "adapter"` ならアダプタ種別（`"claude-code"` 等）、`"provider"` ならプロバイダ id。
+   */
+  name: string;
+  /**
+   * `"adapter" | "provider"`。
+   */
+  scope: string;
 }
 /**
  * SSE `event: heartbeat`。

@@ -1,5 +1,5 @@
 import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher } from "react-router";
-import { AccountActionFlash, ErrorFlash } from "~/components/Flash";
+import { AccountActionFlash, ErrorFlash, SecretActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -21,10 +21,11 @@ import {
   startAccountLogin,
   submitAccountLoginCode,
 } from "~/taskd/accounts-admin.server";
-import type { AccountAdapter, AccountOpOutcome } from "~/taskd/action-types";
+import type { AccountAdapter, AccountOpOutcome, ActionError, SecretActionResult } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import type { AccountList, AccountView } from "~/taskd/types";
+import { isTaskdUnavailable, TaskdError, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
+import { deleteSecret, putSecret, readSecretId, readSecretValue } from "~/taskd/secrets-admin.server";
+import type { AccountList, AccountView, SecretList, SecretView } from "~/taskd/types";
 import type { Route } from "./+types/accounts";
 
 /**
@@ -35,12 +36,46 @@ import type { Route } from "./+types/accounts";
  */
 export interface AccountsData {
   accounts: AccountList;
+  /** `GET /secrets`（ADR-0030 D3〜D4）。管理系のため 401 になりうる: その場合は `secretsError` に入れ、
+   * 画面全体は壊さず「API キー」節だけにトークン案内を出す（`GET /accounts` 自体は管理系ではない）。 */
+  secrets: SecretList | null;
+  secretsError: ActionError | null;
   fetchedAt: string;
+}
+
+/**
+ * `TaskdError` / `TaskdUnavailable`（`GET /secrets` の 401 等）を `ActionError` にする。`actions.server.ts` の
+ * `toActionError` と同じ変換だが、`loadAccounts` はテストから loader を介さず直接呼ばれるため、サーバ専用
+ * モジュールを `loader`/`action` 以外の export から参照できない制約（React Router の dot-server 除去）を避けて
+ * ここに複製する（`GET /secrets` が返すのは 401/409/503 のみで `errors[]` を持たないので fields/messages は空でよい）。
+ */
+function secretsListError(e: unknown): ActionError {
+  if (isTaskdUnavailable(e)) {
+    return {
+      status: 503,
+      code: "unavailable",
+      detail: `taskd に接続できません（${e.baseUrl}）`,
+      conflict: false,
+      fields: {},
+      messages: [],
+    };
+  }
+  if (e instanceof TaskdError) {
+    return { status: e.status, code: e.code, detail: e.detail, conflict: e.status === 409, fields: {}, messages: [] };
+  }
+  throw e;
 }
 
 export async function loadAccounts(client: TaskdClient, request: Request): Promise<AccountsData> {
   const accounts = await client.get<AccountList>("/accounts", { signal: request.signal });
-  return { accounts, fetchedAt: new Date().toISOString() };
+  let secrets: SecretList | null = null;
+  let secretsError: ActionError | null = null;
+  try {
+    secrets = await client.get<SecretList>("/secrets", { signal: request.signal });
+  } catch (e) {
+    secretsError = secretsListError(e);
+  }
+  return { accounts, secrets, secretsError, fetchedAt: new Date().toISOString() };
 }
 
 export async function loader({ request }: Route.LoaderArgs): Promise<AccountsData> {
@@ -56,13 +91,24 @@ export function meta(_: Route.MetaArgs) {
 }
 
 /**
- * 追加・削除・確認・ログイン中継（ADR-GUI-0012 D3）。管理系はすべて `accounts-admin.server.ts` に任せ、
- * ここはフォームの `intent` を対応する呼び出しに写すだけ（GUI 側で判断ロジックは持たない）。
+ * 追加・削除・確認・ログイン・API キーの追加/更新/削除の中継（ADR-GUI-0012 D3、ADR-0030 D4）。管理系はすべて
+ * `accounts-admin.server.ts` / `secrets-admin.server.ts` に任せ、ここはフォームの `intent` を対応する呼び出しに
+ * 写すだけ（GUI 側で判断ロジックは持たない）。
  */
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
   const client = getTaskdClient();
+
+  if (intent === "secret_put" || intent === "secret_delete") {
+    const secretId = readSecretId(form);
+    const result =
+      intent === "secret_put"
+        ? await putSecret(client, secretId, readSecretValue(form), request.signal)
+        : await deleteSecret(client, secretId, request.signal);
+    return data(result, { status: result.op.ok ? 200 : result.op.error.status });
+  }
+
   const id = readAccountId(form);
   const adapter = readAccountAdapter(form);
   let outcome: AccountOpOutcome;
@@ -132,12 +178,15 @@ function accountAdapter(item: AccountView): AccountAdapter {
 }
 
 export default function AccountsPage({ loaderData }: Route.ComponentProps) {
-  const { accounts, fetchedAt } = loaderData;
+  const { accounts, secrets, secretsError, fetchedAt } = loaderData;
   // taskd の SSE（daemon tick）による自動再検証のたびに `<Form>` の actionData は消える（React Router の仕様、
   // `app/hooks/useTaskdStream.ts`）。ログイン URL は「もう一度出せない」ものなので特に影響が大きい: 1 つの
   // `useFetcher()` にまとめ、その `fetcher.data` を表示する（fetcher の状態は revalidate() の影響を受けない）。
   const fetcher = useFetcher<AccountOpOutcome>();
   const submitting = fetcher.state !== "idle";
+  // API キー節は別の fetcher にする（アカウントの操作結果と型が違う。ADR-0030 D4）。
+  const secretFetcher = useFetcher<SecretActionResult>();
+  const secretSubmitting = secretFetcher.state !== "idle";
 
   return (
     <div className="space-y-8" data-testid="accounts-page">
@@ -249,6 +298,14 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
           </>
         );
       })()}
+
+      <SecretsSection
+        secrets={secrets}
+        secretsError={secretsError}
+        fetcher={secretFetcher}
+        submitting={secretSubmitting}
+        fetchedAt={fetchedAt}
+      />
     </div>
   );
 }
@@ -595,6 +652,242 @@ function UsageBar({
         resets_at: {window.resets_at}（リセットまで {formatDuration(remaining)}）
       </p>
     </div>
+  );
+}
+
+const USED_BY_SCOPE_LABEL: Record<string, string> = { adapter: "アダプタ", provider: "プロバイダ" };
+
+/**
+ * 「API キー」節（ADR-0030 D4）: `[secrets]` から預かった秘密の一覧・追加・更新・削除。
+ * `GET /secrets` は管理系のため、トークンが無い構成では `secretsError` になる（画面全体は壊さず、この節だけに
+ * 案内を出す。`GET /accounts` 自体は非管理系なのでページ本体は表示できる）。
+ */
+function SecretsSection({
+  secrets,
+  secretsError,
+  fetcher,
+  submitting,
+  fetchedAt,
+}: {
+  secrets: SecretList | null;
+  secretsError: ActionError | null;
+  fetcher: FetcherWithComponents<SecretActionResult>;
+  submitting: boolean;
+  fetchedAt: string;
+}) {
+  return (
+    <section aria-labelledby="secrets-heading" className="space-y-4" data-testid="secrets-section">
+      <SectionTitle icon="lock" id="secrets-heading" count={secrets?.items.length}>
+        API キー
+      </SectionTitle>
+
+      <SecretActionFlash result={fetcher.data} />
+
+      {secretsError ? (
+        <ErrorFlash error={secretsError} />
+      ) : !secrets || secrets.dir == null ? (
+        <EmptyState icon="lock" title="[secrets] が設定されていません">
+          taskd.toml に <Mono>[secrets]</Mono> セクションを足すと、GUI から API キー（Tavily / Exa 等）を預かれます。
+          例:
+          <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2 p-3 text-left text-xs">
+            {'[secrets]\ndir = "secrets"'}
+          </pre>
+        </EmptyState>
+      ) : (
+        <>
+          <Alert tone="warning" title="セキュリティ上の注意">
+            値は taskd を動かしているホストに 0600 のファイルとして保存されます。
+            <strong className="font-semibold">保存すると値は二度と表示されません</strong>
+            （更新・削除だけができます）。値は平文 HTTP を通ります（ADR-0030
+            D4）。信頼できるネットワークでだけ使ってください。
+          </Alert>
+
+          <DataItem label="dir">
+            <Mono>{secrets.dir}</Mono>
+          </DataItem>
+
+          {secrets.items.length === 0 ? (
+            <EmptyState icon="lock" title="API キーがありません" />
+          ) : (
+            <div className="grid gap-4 xl:grid-cols-2">
+              {secrets.items.map((item) => (
+                <SecretCard key={item.id} item={item} fetchedAt={fetchedAt} fetcher={fetcher} submitting={submitting} />
+              ))}
+            </div>
+          )}
+
+          <Card>
+            <CardHeader
+              icon="plus"
+              title="API キーを追加"
+              description="id はアダプタ・プロバイダの env_from_secrets が参照する名前と揃えてください（例: tavily、exa）。"
+            />
+            <CardBody>
+              <fetcher.Form method="post" data-testid="secret-add-form" className="flex flex-wrap items-end gap-3">
+                <input type="hidden" name="intent" value="secret_put" />
+                <div>
+                  <label htmlFor="secret-add-id" className={labelClass}>
+                    id
+                  </label>
+                  <input
+                    id="secret-add-id"
+                    name="id"
+                    type="text"
+                    required
+                    data-testid="secret-add-id"
+                    className={`${inputClass} mt-1.5`}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="secret-add-value" className={labelClass}>
+                    value
+                  </label>
+                  <input
+                    id="secret-add-value"
+                    name="value"
+                    type="password"
+                    autoComplete="off"
+                    required
+                    data-testid="secret-add-value"
+                    className={`${inputClass} mt-1.5`}
+                  />
+                  <p className={hintClass}>保存後は値を再表示できません。</p>
+                </div>
+                <Button type="submit" variant="primary" disabled={submitting} data-testid="secret-add-submit">
+                  <Icon name="plus" />
+                  追加
+                </Button>
+              </fetcher.Form>
+            </CardBody>
+          </Card>
+        </>
+      )}
+    </section>
+  );
+}
+
+function SecretCard({
+  item,
+  fetchedAt,
+  fetcher,
+  submitting,
+}: {
+  item: SecretView;
+  fetchedAt: string;
+  fetcher: FetcherWithComponents<SecretActionResult>;
+  submitting: boolean;
+}) {
+  const isSet = item.updated_at != null;
+  return (
+    <Card data-testid="secret-card" data-secret-id={item.id} className="hover:shadow-md">
+      <CardHeader
+        icon="lock"
+        tone={isSet ? "success" : "warning"}
+        title={<Mono className="text-sm font-semibold text-fg">{item.id}</Mono>}
+        actions={
+          isSet ? (
+            <Badge tone="success" dot>
+              設定済み
+            </Badge>
+          ) : (
+            <Badge tone="warning" dot data-testid="secret-unset">
+              未設定
+            </Badge>
+          )
+        }
+      />
+      <CardBody className="space-y-4">
+        <DataItem label="使われている場所" wide>
+          {item.used_by.length === 0 ? (
+            <span className="text-fg-subtle">-</span>
+          ) : (
+            <ul className="space-y-1" data-testid="secret-used-by">
+              {item.used_by.map((use) => (
+                <li key={`${use.scope}-${use.name}-${use.env}`}>
+                  <Mono>{use.env}</Mono>
+                  <span className="ml-1 text-fg-subtle">
+                    （{USED_BY_SCOPE_LABEL[use.scope] ?? use.scope}: {use.name}）
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </DataItem>
+
+        <DataItem label="更新時刻">
+          <span data-testid="secret-updated-at">
+            {item.updated_at ? (
+              <>
+                {item.updated_at}（{formatDuration(secondsBetween(item.updated_at, fetchedAt))} 前）
+              </>
+            ) : (
+              "未設定（設定はこの秘密を参照していますが、まだ値が入っていません）"
+            )}
+          </span>
+        </DataItem>
+
+        <DataItem label="fingerprint">
+          {item.fingerprint ? (
+            <>
+              <Mono data-testid="secret-fingerprint">{item.fingerprint}</Mono>
+              <span className="ml-1 text-xs text-fg-subtle">（値の sha256 の先頭 8 桁。値そのものではありません）</span>
+            </>
+          ) : (
+            <span className="text-fg-subtle">-</span>
+          )}
+        </DataItem>
+
+        <div className="flex flex-wrap items-end gap-3 border-t border-border pt-3">
+          <fetcher.Form method="post" data-testid="secret-update-form" className="flex flex-wrap items-end gap-2">
+            <input type="hidden" name="intent" value="secret_put" />
+            <input type="hidden" name="id" value={item.id} />
+            <div>
+              <label htmlFor={`secret-update-value-${item.id}`} className={labelClass}>
+                新しい値
+              </label>
+              <input
+                id={`secret-update-value-${item.id}`}
+                name="value"
+                type="password"
+                autoComplete="off"
+                required
+                data-testid="secret-update-value"
+                className={`${inputClass} mt-1.5`}
+              />
+            </div>
+            <Button
+              type="submit"
+              variant="secondary"
+              size="sm"
+              disabled={submitting}
+              data-testid="secret-update-submit"
+            >
+              <Icon name="check" />
+              更新
+            </Button>
+          </fetcher.Form>
+
+          <details className="group">
+            <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-danger-border bg-danger-soft px-3 text-sm text-danger-soft-fg shadow-xs hover:bg-danger hover:text-white">
+              <Icon name="xCircle" className="size-4" />
+              削除
+            </summary>
+            <fetcher.Form method="post" className="mt-3 rounded-lg border border-danger-border bg-danger-soft/40 p-3">
+              <input type="hidden" name="intent" value="secret_delete" />
+              <input type="hidden" name="id" value={item.id} />
+              <p className="mb-2 text-sm text-fg-muted">
+                本当に <span className="font-mono">{item.id}</span> を削除しますか？（env_from_secrets がこの id
+                を参照するプロバイダ・アダプタは、次の run から鍵無しのエラーになります）
+              </p>
+              <Button type="submit" variant="danger" size="sm" disabled={submitting} data-testid="secret-delete">
+                <Icon name="xCircle" />
+                削除する
+              </Button>
+            </fetcher.Form>
+          </details>
+        </div>
+      </CardBody>
+    </Card>
   );
 }
 

@@ -8,7 +8,7 @@ use axum::extract::{FromRequestParts, Path, RawQuery, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ use crate::types::{
     AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult, AccountLoginStart,
     AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody, ClusterView, Clusters, DaemonView, DbInfo,
     DecisionBody, EventsPage, Health, ProviderCheckResponse, ProviderConfigView, ProviderView, Providers,
-    ReloadResult, RunList, ValidationError,
+    ReloadResult, RunList, SecretList, SecretPutBody, SecretPutResult, SecretView, ValidationError,
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
@@ -92,6 +92,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/accounts/{id}/login", post(start_account_login).delete(cancel_account_login))
         .route("/api/v1/accounts/{id}/login/code", post(submit_account_login_code))
         .route("/api/v1/clusters", get(clusters))
+        .route("/api/v1/secrets", get(secrets_list))
+        .route("/api/v1/secrets/{id}", put(put_secret).delete(delete_secret))
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -179,21 +181,27 @@ async fn read_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Re
     serde_json::from_slice(text).map_err(|e| ApiProblem::bad_request(format!("invalid JSON body: {e}")))
 }
 
-/// ADR-0026 D7 / ADR-0027 D3: `command`/`args`/`settings` は `[[providers]]`/`providers.d/*.toml` の行にしか
-/// 書けない。実行するコマンドを HTTP から差し替えられると `[api]` のトークンだけで任意コマンド実行に道が
-/// 開くので、`POST /providers` と `PATCH /providers/{id}` の本文にこのいずれかのキーがあれば、値の型や
-/// 中身を見る前に拒否する。
+/// ADR-0026 D7 / ADR-0027 D3 / ADR-0030 D2: `command`/`args`/`settings`/`env_from_secrets` は
+/// `[[providers]]`/`providers.d/*.toml` の行にしか書けない。`command`/`args` を HTTP から差し替えられると
+/// `[api]` のトークンだけで任意コマンド実行に道が開くので、`POST /providers` と `PATCH /providers/{id}` の
+/// 本文にこのいずれかのキーがあれば、値の型や中身を見る前に拒否する（`env_from_secrets` は実行コマンドの
+/// 差し替えではないが、`ProviderConfigFile` の素通り用フィールドと同じ扱いにして往復で失われないようにする）。
 fn reject_provider_command_and_args(map: &serde_json::Map<String, serde_json::Value>) -> Result<(), ApiProblem> {
-    if map.contains_key("command") || map.contains_key("args") || map.contains_key("settings") {
+    if map.contains_key("command")
+        || map.contains_key("args")
+        || map.contains_key("settings")
+        || map.contains_key("env_from_secrets")
+    {
         return Err(ApiProblem::invalid_provider(
-            "command, args, and settings cannot be set through the admin API; edit providers.d/<id>.toml by hand (ADR-0026 D7, ADR-0027 D3)",
+            "command, args, settings, and env_from_secrets cannot be set through the admin API; edit providers.d/<id>.toml by hand (ADR-0026 D7, ADR-0027 D3, ADR-0030 D2)",
         ));
     }
     Ok(())
 }
 
-/// `read_json` と同じだが、先に §ADR-0026 D7 / ADR-0027 D3 の `command`/`args`/`settings` 拒否を通す
-/// （`ProviderCreateBody`/`ProviderPatchBody` はこのキーを知らないので、素の `read_json` では黙って無視されてしまう）。
+/// `read_json` と同じだが、先に §ADR-0026 D7 / ADR-0027 D3 / ADR-0030 D2 の
+/// `command`/`args`/`settings`/`env_from_secrets` 拒否を通す（`ProviderCreateBody`/`ProviderPatchBody` は
+/// このキーを知らないので、素の `read_json` では黙って無視されてしまう）。
 async fn read_provider_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Result<T, ApiProblem> {
     let bytes = read_body(body).await?;
     let text: &[u8] = if empty_is_object && bytes.iter().all(u8::is_ascii_whitespace) {
@@ -1382,6 +1390,102 @@ async fn clusters(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
     Ok(json_response(StatusCode::OK, &Clusters { items }))
 }
 
+// ---- 秘密（API キー等）の管理（ADR-0030、Phase 20。すべて管理系: `token_file` 未設定でも 401） ----
+
+async fn secrets_list(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let Some(dir) = state.inner.secrets_dir.clone() else {
+        return Err(ApiProblem::secrets_unavailable());
+    };
+    let metas = crate::secrets::list_secret_files(&dir).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    let mut items: Vec<SecretView> = metas
+        .into_iter()
+        .map(|m| SecretView {
+            used_by: state.inner.secret_usage.get(&m.id).cloned().unwrap_or_default(),
+            id: m.id,
+            updated_at: Some(m.updated_at),
+            fingerprint: Some(m.fingerprint),
+        })
+        .collect();
+    // 設定（`env_from_secrets`）が参照しているのに、まだ値が入っていない id も「未設定」として並べる。
+    // これが無いと、GUI は「鍵を入れるべき場所」を出せない（ADR-0030 D3 の `used_by` の意図）。
+    let present: std::collections::HashSet<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    let mut missing: Vec<SecretView> = state
+        .inner
+        .secret_usage
+        .iter()
+        .filter(|(id, _)| !present.contains(id.as_str()))
+        .map(|(id, used_by)| SecretView {
+            id: id.clone(),
+            updated_at: None,
+            fingerprint: None,
+            used_by: used_by.clone(),
+        })
+        .collect();
+    missing.sort_by(|a, b| a.id.cmp(&b.id));
+    items.extend(missing);
+    Ok(json_response(StatusCode::OK, &SecretList { dir: Some(dir.display().to_string()), items }))
+}
+
+/// `id` はファイル名に使う（`secret_file_path`）。パストラバーサル防止のため、無効な形は
+/// `PATCH`/`DELETE /providers/{id}` と同じく 404 `secret_not_found` にする（本文を見る前に判定する）。
+async fn put_secret(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let Some(dir) = state.inner.secrets_dir.clone() else {
+        return Err(ApiProblem::secrets_unavailable());
+    };
+    if !crate::secrets::valid_secret_id(&id) {
+        return Err(ApiProblem::secret_not_found(&id));
+    }
+    // ADR-0030 D3 の規律「値はログにも応答にも出さない」を、解析エラーの経路でも守る。`read_json` の
+    // 400 は serde_json のエラー文をそのまま返すので、型違い（`{"value": 12345678}` 等）だと値の
+    // リテラルが応答に反射する。ここだけは本文を見ないメッセージに差し替える（監査指摘 D-6）。
+    let put: SecretPutBody = read_json(body, false)
+        .await
+        .map_err(|e| if e.status() == StatusCode::BAD_REQUEST { ApiProblem::secret_body_invalid() } else { e })?;
+    if put.value.trim().is_empty() {
+        return Err(ApiProblem::secret_value_invalid());
+    }
+    crate::secrets::write_secret_file(&dir, &id, &put.value).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    // ADR-0030 D3: 応答の fingerprint は、以後の `GET /secrets` と一致するよう読み取り側と同じ
+    // trim（末尾改行を落とす）を経た値から計算する。
+    let fingerprint = crate::secrets::fingerprint(crate::secrets::trim_secret_value(&put.value));
+    let updated_at = now_rfc3339();
+    tracing::info!(who = "admin", op = "secret_put", secret_id = %id, "admin: secret stored");
+    Ok(json_response(StatusCode::OK, &SecretPutResult { id, updated_at, fingerprint }))
+}
+
+async fn delete_secret(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let Some(dir) = state.inner.secrets_dir.clone() else {
+        return Err(ApiProblem::secrets_unavailable());
+    };
+    if !crate::secrets::valid_secret_id(&id) {
+        return Err(ApiProblem::secret_not_found(&id));
+    }
+    let path = crate::secrets::secret_file_path(&dir, &id);
+    if !path.exists() {
+        return Err(ApiProblem::secret_not_found(&id));
+    }
+    std::fs::remove_file(&path).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    tracing::info!(who = "admin", op = "secret_delete", secret_id = %id, "admin: secret deleted");
+    Ok(json_response(StatusCode::OK, &serde_json::json!({})))
+}
+
 // ---- 24. GET /daemon, 25. GET /config, 26. GET /schema ----
 
 async fn daemon(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
@@ -1478,6 +1582,8 @@ mod tests {
             admin_tx: None,
             accounts_roots: std::collections::HashMap::new(),
             max_runs_per_account: 0,
+            secrets_dir: None,
+            secret_usage: std::collections::HashMap::new(),
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))

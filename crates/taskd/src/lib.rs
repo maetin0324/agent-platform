@@ -58,9 +58,59 @@ pub enum Exit {
 }
 
 /// `[adapters.<種別>].env` にプロバイダの `env` を重ねる（同名キーはプロバイダが優先。順序は決定的）。
+/// ADR-0030 以降、本体（`build_adapters`）は `merged_env_with_secrets` を使う。これはテストが期待値を
+/// 組み立てるのに使う（`env_from_secrets` が空なら `merged_env_with_secrets` と同じ結果になる）。
+#[cfg(test)]
 fn merged_env(base: &HashMap<String, String>, provider: &HashMap<String, String>) -> Vec<(String, String)> {
     let mut merged: BTreeMap<String, String> = base.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     merged.extend(provider.iter().map(|(k, v)| (k.clone(), v.clone())));
+    merged.into_iter().collect()
+}
+
+/// ADR-0030 D1: `[secrets] dir` の下の `<id>` ファイルを読み、末尾の改行を落とした値を返す。無い・読めない
+/// ときは設定エラーにせず `warn!` を出して `None`（値はログに出さない。id だけ記録する。ADR-0024 D5 と同じ規律）。
+fn resolve_secret(secrets_dir: Option<&Path>, id: &str) -> Option<String> {
+    let dir = secrets_dir?;
+    let path = dir.join(id);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text.trim_end_matches(['\n', '\r']).to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(secret_id = %id, "secret not found; omitting env var (ADR-0030 D2)");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(secret_id = %id, error = %e, "cannot read secret; omitting env var (ADR-0030 D2)");
+            None
+        }
+    }
+}
+
+/// `mapping`（環境変数名 → 秘密 id）のキーを決定的な順で解決し、見つかったものだけ `merged` に上書きする
+/// （見つからなければそのキーには**触れない**。下の層の値が残る。ADR-0030 D2）。
+fn apply_env_from_secrets(merged: &mut BTreeMap<String, String>, mapping: &HashMap<String, String>, secrets_dir: Option<&Path>) {
+    let mut env_keys: Vec<&String> = mapping.keys().collect();
+    env_keys.sort();
+    for env_key in env_keys {
+        let secret_id = &mapping[env_key];
+        if let Some(value) = resolve_secret(secrets_dir, secret_id) {
+            merged.insert(env_key.clone(), value);
+        }
+    }
+}
+
+/// ADR-0030 D2: 優先順は taskd の環境（プロセス継承。ここでは扱わない）< `[adapters.*].env` <
+/// `[adapters.*].env_from_secrets` < 行の `env` < 行の `env_from_secrets`。
+fn merged_env_with_secrets(
+    base_env: &HashMap<String, String>,
+    base_env_from_secrets: &HashMap<String, String>,
+    row_env: &HashMap<String, String>,
+    row_env_from_secrets: &HashMap<String, String>,
+    secrets_dir: Option<&Path>,
+) -> Vec<(String, String)> {
+    let mut merged: BTreeMap<String, String> = base_env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    apply_env_from_secrets(&mut merged, base_env_from_secrets, secrets_dir);
+    merged.extend(row_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    apply_env_from_secrets(&mut merged, row_env_from_secrets, secrets_dir);
     merged.into_iter().collect()
 }
 
@@ -76,6 +126,7 @@ fn effective_model(provider_model: &str, adapter_model: &Option<String>) -> Opti
 /// ADR-0012 D1: `[[providers]]` の各行（= 1 アカウント）ごとにアダプタのインスタンスを作る。`[adapters.<種別>]` を基本設定とし、
 /// プロバイダの `env` と `model` を重ねる。キーはプロバイダ ID。
 pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdapter>> {
+    let secrets_dir = config.secrets.as_ref().map(|s| s.dir.as_path());
     let mut adapters: HashMap<ProviderId, Arc<dyn WorkerAdapter>> = HashMap::new();
     for p in &config.providers {
         let adapter: Arc<dyn WorkerAdapter> = match p.adapter.as_str() {
@@ -86,7 +137,7 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     extra_args: base.extra_args.clone(),
                     permission_mode: base.permission_mode.clone(),
                     model: effective_model(&p.model, &base.model),
-                    env: merged_env(&base.env, &p.env),
+                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
                 }))
             }
             CodexAdapter::ID => {
@@ -95,7 +146,7 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     command: base.command.clone(),
                     extra_args: base.extra_args.clone(),
                     model: effective_model(&p.model, &base.model),
-                    env: merged_env(&base.env, &p.env),
+                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
                 }))
             }
             AcpAdapter::ID => {
@@ -105,7 +156,7 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     // ため）。`Config::validate` が acp 以外の行での指定を拒否している。
                     command: p.command.clone().unwrap_or_else(|| base.command.clone()),
                     args: p.args.clone().unwrap_or_else(|| base.args.clone()),
-                    env: merged_env(&base.env, &p.env),
+                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
                     permission: base.permission,
                     // ADR-0026 D3: `[adapters.acp]` にモデルの既定値は無い（CLI の `--model` フラグではなく
                     // `session/set_config_option` で渡すので、行の `model` が空ならモデル指定なしになるだけ）。
@@ -126,7 +177,7 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     // ADR-0027 D3: `model`（行の値。空なら None）は PaperQA の設定ファイルより優先して `--llm` に渡す。
                     // `[adapters.paperqa]` にモデルの既定値は無い（acp と同じ理由: 行＝アカウント/エンドポイントごと）。
                     model: effective_model(&p.model, &None),
-                    env: merged_env(&base.env, &p.env),
+                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
                     extra_args: base.extra_args.clone(),
                 }))
             }
@@ -144,19 +195,72 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     questions_per_iteration: base.questions_per_iteration,
                     settings,
                     model: effective_model(&p.model, &None),
-                    env: merged_env(&base.env, &p.env),
+                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
+                    // ADR-0031 D2: 証拠ゲートの閾値は行ごとの上書きが無い（他の LDR 設定と同じ扱い）。
+                    evidence: base.evidence,
                 }))
             }
             // `Config::validate` が fake / claude-code / codex / acp / paperqa / local-deep-research 以外を拒否している。
             _ => {
                 let mut fake = FakeAdapter::new(config.adapters.fake.command.clone());
-                fake.set_env(merged_env(&config.adapters.fake.env, &p.env));
+                fake.set_env(merged_env_with_secrets(
+                    &config.adapters.fake.env,
+                    &config.adapters.fake.env_from_secrets,
+                    &p.env,
+                    &p.env_from_secrets,
+                    secrets_dir,
+                ));
                 Arc::new(fake)
             }
         };
         adapters.insert(p.id.clone(), adapter);
     }
     adapters
+}
+
+/// ADR-0030 D3: `GET /secrets` の `used_by` を設定から導く（秘密 id → それを使っている adapter/provider の
+/// env_from_secrets の一覧）。設定順・キー順で決定的に並べる。
+pub fn secret_usage(config: &Config) -> HashMap<String, Vec<task_api::types::SecretUse>> {
+    fn push(
+        map: &mut HashMap<String, Vec<task_api::types::SecretUse>>,
+        secret_id: &str,
+        scope: &str,
+        name: &str,
+        env: &str,
+    ) {
+        map.entry(secret_id.to_string()).or_default().push(task_api::types::SecretUse {
+            scope: scope.to_string(),
+            name: name.to_string(),
+            env: env.to_string(),
+        });
+    }
+
+    let mut map: HashMap<String, Vec<task_api::types::SecretUse>> = HashMap::new();
+    let adapters: [(&str, &HashMap<String, String>); 6] = [
+        (ClaudeCodeAdapter::ID, &config.adapters.claude_code.env_from_secrets),
+        (CodexAdapter::ID, &config.adapters.codex.env_from_secrets),
+        (FakeAdapter::ID, &config.adapters.fake.env_from_secrets),
+        (AcpAdapter::ID, &config.adapters.acp.env_from_secrets),
+        (PaperQaAdapter::ID, &config.adapters.paperqa.env_from_secrets),
+        (LdrAdapter::ID, &config.adapters.local_deep_research.env_from_secrets),
+    ];
+    for (name, from_secrets) in adapters {
+        let mut env_keys: Vec<&String> = from_secrets.keys().collect();
+        env_keys.sort();
+        for env_key in env_keys {
+            push(&mut map, &from_secrets[env_key], "adapter", name, env_key);
+        }
+    }
+    let mut providers: Vec<&config::ProviderConfig> = config.providers.iter().collect();
+    providers.sort_by(|a, b| a.id.cmp(&b.id));
+    for p in providers {
+        let mut env_keys: Vec<&String> = p.env_from_secrets.keys().collect();
+        env_keys.sort();
+        for env_key in env_keys {
+            push(&mut map, &p.env_from_secrets[env_key], "provider", &p.id, env_key);
+        }
+    }
+    map
 }
 
 /// `WorkerStarted.model` に記録する、プロバイダごとの実効モデル名（ADR-0012 D1）。
@@ -260,9 +364,11 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// 設定から `Dispatcher` を組み立てる。`[accounts]` があればディレクトリを 0700 で作る（ADR-0024 D1）。
+/// 設定から `Dispatcher` を組み立てる。`[accounts]`/`[secrets]` があればディレクトリを 0700 で作る
+/// （ADR-0024 D1、ADR-0030 D1）。
 pub fn build_dispatcher(config: &Config) -> Result<Dispatcher, DaemonError> {
     config.ensure_accounts_dir()?;
+    config.ensure_secrets_dir()?;
     let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&config.db)?);
     let policy = StaticPolicy::new(
         config.provider_specs(),
@@ -400,6 +506,8 @@ pub fn api_settings(
         admin_tx,
         accounts_roots: config.accounts.as_ref().map(|a| a.roots()).unwrap_or_default(),
         max_runs_per_account: config.accounts.as_ref().map(|a| a.max_runs_per_account).unwrap_or(0),
+        secrets_dir: config.secrets.as_ref().map(|s| s.dir.clone()),
+        secret_usage: secret_usage(config),
     }
 }
 
@@ -1115,6 +1223,141 @@ tiers = ["standard"]
         );
         assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Detailed);
         assert_eq!(cfg.adapters.local_deep_research.iterations, Some(3));
+    }
+
+    // ---- ADR-0030 D2: `env_from_secrets` の優先順と欠落時の扱い ----
+
+    /// 優先順は `[adapters.*].env` < `[adapters.*].env_from_secrets` < 行の `env` < 行の `env_from_secrets`
+    /// （taskd 自身の環境はプロセス継承なのでここでは扱わない）。秘密が見つからない層はそのキーに触れず、
+    /// 下の層の値が残る。
+    #[test]
+    fn merged_env_with_secrets_follows_the_precedence_order_and_falls_back_when_a_secret_is_missing() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let secrets_dir = dir.path().join("secrets");
+        std::fs::create_dir_all(&secrets_dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
+        std::fs::write(secrets_dir.join("id-base"), "base-secret\n").unwrap_or_else(|e| panic!("write: {e}"));
+        std::fs::write(secrets_dir.join("id-row"), "row-secret").unwrap_or_else(|e| panic!("write: {e}"));
+        // `id-row-missing` はわざと作らない（欠落を再現する）。
+
+        let base_env = HashMap::from([("K".to_string(), "base-env".to_string()), ("ONLY_BASE".to_string(), "b".to_string())]);
+        let base_secrets = HashMap::from([("K".to_string(), "id-base".to_string())]);
+        let row_env = HashMap::from([("K".to_string(), "row-env".to_string())]);
+        let row_secrets = HashMap::from([("K".to_string(), "id-row".to_string())]);
+
+        // 全層が揃っていれば行の env_from_secrets が勝つ。
+        let merged = merged_env_with_secrets(&base_env, &base_secrets, &row_env, &row_secrets, Some(&secrets_dir));
+        let map: HashMap<String, String> = merged.into_iter().collect();
+        assert_eq!(map.get("K"), Some(&"row-secret".to_string()));
+        assert_eq!(map.get("ONLY_BASE"), Some(&"b".to_string()));
+
+        // 行の env_from_secrets の秘密が無ければ、そのキーには触れず 1 段下（行の env）が残る。
+        let row_secrets_missing = HashMap::from([("K".to_string(), "id-row-missing".to_string())]);
+        let merged =
+            merged_env_with_secrets(&base_env, &base_secrets, &row_env, &row_secrets_missing, Some(&secrets_dir));
+        let map: HashMap<String, String> = merged.into_iter().collect();
+        assert_eq!(map.get("K"), Some(&"row-env".to_string()));
+
+        // 行の env も無ければ、その下（`[adapters.*].env_from_secrets`）が残る。
+        let empty: HashMap<String, String> = HashMap::new();
+        let merged = merged_env_with_secrets(&base_env, &base_secrets, &empty, &row_secrets_missing, Some(&secrets_dir));
+        let map: HashMap<String, String> = merged.into_iter().collect();
+        assert_eq!(map.get("K"), Some(&"base-secret".to_string()));
+
+        // `[secrets]` 自体が未設定（`secrets_dir: None`）なら env_from_secrets は何も足さない（設定エラーにしない）。
+        let merged = merged_env_with_secrets(&base_env, &base_secrets, &row_env, &row_secrets, None);
+        let map: HashMap<String, String> = merged.into_iter().collect();
+        assert_eq!(map.get("K"), Some(&"row-env".to_string()), "missing [secrets] falls back to the env layer, not an error");
+
+        // 末尾の改行は読み取り時に落ちる。
+        let base_secrets_only = HashMap::from([("K".to_string(), "id-base".to_string())]);
+        let merged = merged_env_with_secrets(&empty, &base_secrets_only, &empty, &empty, Some(&secrets_dir));
+        let map: HashMap<String, String> = merged.into_iter().collect();
+        assert_eq!(map.get("K"), Some(&"base-secret".to_string()));
+    }
+
+    /// `build_adapters` は秘密が無くても設定エラーにせず、そのプロバイダのアダプタを組み立てる（run 自体は
+    /// ワーカーの認証エラーで失敗する。ADR-0030 D2）。
+    #[test]
+    fn build_adapters_does_not_fail_when_a_referenced_secret_is_missing() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let secrets_dir = dir.path().join("secrets");
+        std::fs::create_dir_all(&secrets_dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
+        // `tavily` の秘密ファイルは書かない。
+
+        let text = format!(
+            r#"[secrets]
+dir = {secrets_dir:?}
+
+[adapters.local_deep_research]
+env_from_secrets = {{ LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily" }}
+
+[[providers]]
+id = "ldr"
+adapter = "local-deep-research"
+"#
+        );
+        let cfg: Config = toml::from_str(&text).unwrap_or_else(|e| panic!("{e}"));
+        cfg.validate().unwrap_or_else(|e| panic!("{e}"));
+        let adapters = build_adapters(&cfg);
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters["ldr"].id(), "local-deep-research");
+    }
+
+    /// `Config::load` は `[secrets] dir` を相対パスのまま toml から読むので、絶対化した設定を経由するには
+    /// `Config::load` を使う（`toml::from_str` だけのテストでは相対のまま）。
+    #[test]
+    fn secret_usage_maps_adapter_and_provider_env_from_secrets_to_secret_ids() {
+        let text = r#"[secrets]
+dir = "secrets"
+
+[adapters.local_deep_research]
+env_from_secrets = { LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily", LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
+
+[[providers]]
+id = "ldr-tavily"
+adapter = "local-deep-research"
+env_from_secrets = { LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily" }
+
+[[providers]]
+id = "ldr-exa"
+adapter = "local-deep-research"
+env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
+"#;
+        let cfg: Config = toml::from_str(text).unwrap_or_else(|e| panic!("{e}"));
+        cfg.validate().unwrap_or_else(|e| panic!("{e}"));
+        let usage = secret_usage(&cfg);
+        assert_eq!(usage.len(), 2);
+        let tavily = usage.get("tavily").expect("tavily uses");
+        assert_eq!(tavily.len(), 2);
+        assert!(tavily.iter().any(|u| u.scope == "adapter" && u.name == "local-deep-research" && u.env == "LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY"));
+        assert!(tavily.iter().any(|u| u.scope == "provider" && u.name == "ldr-tavily" && u.env == "LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY"));
+        let exa = usage.get("exa").expect("exa uses");
+        assert_eq!(exa.len(), 2);
+        assert!(exa.iter().any(|u| u.scope == "adapter" && u.name == "local-deep-research"));
+        assert!(exa.iter().any(|u| u.scope == "provider" && u.name == "ldr-exa"));
+
+        // 未参照の id は現れない。
+        assert!(!usage.contains_key("unused"));
+
+        // `env_from_secrets` を書かない設定は空のまま。
+        let plain: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap_or_else(|e| panic!("{e}"));
+        assert!(secret_usage(&plain).is_empty());
+    }
+
+    /// `api_settings` は `[secrets] dir` と `secret_usage` を `ApiSettings` に写す。
+    #[test]
+    fn api_settings_carries_secrets_dir_and_usage() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "[secrets]\ndir = \"secrets\"\n\n[adapters.local_deep_research]\nenv_from_secrets = { TAVILY = \"tavily\" }\n\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let cfg = Config::load(&path).unwrap_or_else(|e| panic!("{e}"));
+        let settings = api_settings(&cfg, "127.0.0.1:7710".parse().unwrap_or_else(|e| panic!("{e}")), None, "i".into(), "t".into(), None);
+        assert_eq!(settings.secrets_dir, cfg.secrets.as_ref().map(|s| s.dir.clone()));
+        assert!(settings.secret_usage.contains_key("tavily"));
     }
 
     /// S7: `[accounts]` は reload の対象外。`claude_dir` / `max_runs_per_account` / `check_model` のどれかが

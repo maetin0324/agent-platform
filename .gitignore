@@ -3,3 +3,12 @@
 *.sqlite3
 *.sqlite3-journal
 examples/*/target/
+
+# Python のバイトコード（`local_deep_research_run.py` を直接動かすと出る。Phase 19 で誤って追跡した）
+__pycache__/
+*.pyc
+
+# ADR-0030 の秘密の置き場所（`[secrets] dir`）。相対指定なら設定ファイル基準なので `config/secrets/` に
+# なりうる。CLAUDE.md の `git add -A` と組み合わさると API キーが平文でコミットされるため必ず無視する。
+secrets/
+config/secrets/

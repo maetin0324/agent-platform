@@ -2852,3 +2852,163 @@ B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_po
 ### 提案
 
 - P-66: DESIGN §5.4 のアダプタ表に `local-deep-research` を足す（`paperqa` と同じく「ワーカープロトコルを話さない実行器はアダプタが結果ファイルを書く」型）。
+
+---
+
+## Phase 20 — API キーを GUI から預かる（`[secrets]` / `env_from_secrets`。ADR-0030。2026-09-17）
+
+人間の依頼「検索エンジンとして Tavily や Exa の API Key を用意してくるので、その間に **API Key を GUI から渡せるように**しておいてください。
+アカウントのカテゴリで大丈夫かと思います」。ADR-0017 の「API キーを GUI から入力して保存しない」を人間の指示で上書きする（ADR-0030 §1）。
+
+### 実装前に実機で確かめた事実
+
+- Local Deep Research の設定は `LDR_` + 設定キーを大文字化した環境変数で上書きできる（`env_settings.py` の
+  `self.env_var = "LDR_" + key.upper().replace(".", "_")`）。つまり Tavily = `LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY`、
+  Exa = `LDR_SEARCH_ENGINE_WEB_EXA_API_KEY`。**「秘密を環境変数として run に渡す」形にすれば LDR 以外にも同じ仕組みが使える**。
+
+### 成果物
+
+- taskd 側: `[secrets] dir`（相対なら設定ファイル基準。0700 で作る）と `env_from_secrets`（`[adapters.<種別>]` と `[[providers]]` の行の両方）。
+  値は `build_adapters` で読むので、鍵を入れ替えたら `POST /reload` が要る。優先順は
+  taskd の環境 < `[adapters.*].env` < `[adapters.*].env_from_secrets` < 行の `env` < 行の `env_from_secrets`。
+  **秘密が見つからないのは設定エラーにしない**（warn を出してその環境変数を渡さず、下の層に道を譲る）。
+- API 3 本（`crates/task-api/src/secrets.rs`）: `GET /secrets` / `PUT /secrets/{id}` / `DELETE /secrets/{id}`。
+  **すべて管理系**（`token_file` 未設定でも 401。ADR-0017 M3）、`[secrets]` 未設定なら 409 `secrets_unavailable`、
+  無効な id は本文を見る前に 404 `secret_not_found`。**値を返す API は無い**。`fingerprint` = 値の sha256 の先頭 8 桁。
+- `used_by` は**稼働中の設定から導く**（`env_from_secrets` の走査）。**設定が参照している id は、まだ鍵を入れていなくても
+  `items[]` に `updated_at: null` / `fingerprint: null` で載る**（GUI が「鍵を入れる場所」を一覧に出せるように）。
+  この挙動に合わせて `docs/gui/api.md` §3.36 を書き直し、`scripts/sync-gui-docs.sh` で GUI 側の写しに反映した。
+- GUI 側: `/accounts` に「API キー」節（一覧カード・設定済み/未設定バッジ・使われている場所・更新時刻・fingerprint、
+  追加/更新フォーム（`type="password"`、保存後は二度と表示されない旨の注意）、確認付き削除、平文 HTTP の注意 Alert、
+  `[secrets]` 未設定時の EmptyState）。保存・削除の後に `POST /reload` を続けて呼ぶ（ADR-GUI-0012 D2 と同じ作り）。
+
+### 受け入れ条件と証拠
+
+1. **API の骨格** — `cargo test -p task-api --test secrets_admin` **11 passed / 0 failed**
+   （3 本ともトークン無しで 401、`[secrets]` 未設定で 409、`PUT` が 0600 のファイルを作り一時ファイルを残さない、
+   置き換え、空/空白は 422、パストラバーサル id は 404 で隣のファイルを動かさない、`DELETE` の 2 回目は 404、
+   `GET` の `used_by` と未設定エントリ、値が応答に出ない、`token_file` 未設定の構成でも 3 本とも 401、
+   型違いの本文でも値が解析エラーに反射しない）。
+2. **`env_from_secrets` の解釈と優先順** — `cargo test -p taskd secret` **7 passed**
+   （`secrets_dir_is_parsed_and_resolved_relative_to_the_config_file` / `ensure_secrets_dir_creates_the_directory_with_0700` /
+   `env_from_secrets_is_parsed_on_adapters_and_providers` / `merged_env_with_secrets_follows_the_precedence_order_and_falls_back_when_a_secret_is_missing` /
+   `build_adapters_does_not_fail_when_a_referenced_secret_is_missing` / `secret_usage_maps_adapter_and_provider_env_from_secrets_to_secret_ids` /
+   `api_settings_carries_secrets_dir_and_usage`）。
+   プロバイダ管理 API の本文からは `env_from_secrets` を受け付けない（`create_and_patch_reject_env_from_secrets_in_the_body`）。
+3. **値が漏れない** — `secret_values_never_appear_in_config_or_secrets_responses`（`GET /secrets` と `GET /config` の応答全体に
+   PUT した値が現れない）。ログは `who="admin"` / `op` / `secret_id` だけ。
+4. **GUI** — `pnpm test` **213 passed**（新規 `gui/test/unit/secrets-admin.test.ts`: put→reload の両方成功 / put 失敗時は reload を呼ばない /
+   422・404・409・401 の伝播 / reload 失敗の個別報告 / delete→reload / 未設定エントリの passthrough）。
+   使い捨ての taskd（`[secrets] dir` + `[adapters.fake] env_from_secrets`）に対して Playwright で light/dark のスクリーンショットを取り、
+   画面から追加（flash「保存: newkey」＋「reload: 反映しました」）→ カード出現 → 削除 → カード消滅までを実地確認した。
+5. **実機（鍵を入れた web-research）** — **保留**。人間が Tavily / Exa の鍵を用意する予定。鍵が届いたら
+   GUI から入れ、`search.tool` を切り替えて ADR-0031 受け入れ条件 4 と同時に確認する。
+6. **共通条件** — `cargo test --workspace` **777 passed / 0 failed**、
+   `cargo clippy --workspace --all-targets -- -D warnings` exit 0、
+   GUI は `pnpm lint`（115 files, no fixes）/ `pnpm typecheck` / `pnpm build` すべて exit 0、
+   `scripts/sync-gui-docs.sh --check` up to date。
+
+### 未解決事項
+
+- U20-1: 鍵は平文 HTTP を通る（GUI は LAN で平文）。ADR-0024 D7 と同じ注意で、画面に警告を出すだけにしている。
+- U20-2: `taskctl` からの秘密の登録は未実装（ADR-0030 §3 で「採らない」とした。必要になったら足す）。
+
+## Phase 21 — 調査の証拠ゲートと検索の記録（ADR-0031。2026-09-17）
+
+人間が受けたレビューの最重要指摘「**それ以上に重要なのが「0 件なのに done」を直すこと**」に対応する（Phase 19 の U19-2）。
+「検索できなかった」と「調べた結果その情報が無かった」は別物で、**この区別を LLM に委ねない**（ADR-0031 §1）。
+
+### 成果物
+
+- ランナー（`local_deep_research_run.py`）が LDR の戻り値から**機械的に**証拠の記録を作る（LLM に書かせない）:
+  - `artifacts/sources.json` — `[{url, title, engine?, cited}]`（URL で重複排除。`cited` は要約中の `[n]` 参照から決める）
+  - `artifacts/research.json` — `{queries: [{query, engine?, result_count}], iterations, counts: {queries, search_results, sources, sources_cited, unique_domains}}`
+  - `counts` は `TASKD_RESULT` にも入れてアダプタに渡す。
+- アダプタの決定的ゲート `[adapters.local_deep_research.evidence]`（`min_search_results=5` / `min_sources=3` / `min_cited=2` / `min_domains=2`。
+  `0` を書けばその項目を見ない）。満たさなければ `Terminal::Error { retryable: true }`（**`AdapterError` にはしない** — 供給側の失敗ではないので
+  プロバイダを cooldown にしない）。**`report.md` / `sources.json` / `research.json` は消さずに残し、3 つとも成果物として申告する**。
+  `search_results == 0` のときだけメッセージを分ける（鍵切れ・CAPTCHA・ネットワーク遮断を運用者が区別できるように）。
+- `config/taskd.web-research.example.toml` に検索経路の方針（ADR-0031 D4: Tavily 既定 → Exa 意味検索 → 専門検索、
+  **SearXNG は一般 Web 検索の主経路にしない**）と、受け入れの二段構え（D3: ゲート＋`--check-reviewer`。
+  `--check-artifact report.md` だけにしない）を書いた。
+
+### 受け入れ条件と証拠
+
+1. **3 つの記録が書かれ申告される** — `happy_path_progress_report_and_result_files`（申告名 `report.md` / `sources.json` / `research.json`、
+   `path` が `artifacts/` 配下、`sources.json` が 3 件、`research.json.counts.sources == 3`）。
+2. **閾値割れは `Error{retryable:true}` で実数と閾値が入る** — `gate_sources_below_minimum_…` / `gate_cited_below_minimum_…` /
+   `gate_single_domain_is_retryable_with_actual_numbers` / `gate_zero_search_results_uses_the_distinct_message_and_keeps_artifacts`
+   （0 件のときだけ別メッセージ。成果物は残る）/ `gate_missing_counts_is_treated_as_all_zero_and_fails_with_default_thresholds`。
+3. **閾値を全部 0 にすると従来どおり `done`** — `gate_all_zero_thresholds_still_done_even_with_empty_counts` /
+   `gate_missing_counts_is_done_when_all_thresholds_are_zero`。
+4. **実機 — 「落ちる側」だけ確認済み。「通る側」は未達（U21-2）**。
+   - 落ちる側（確認済み）: `wikipedia` を使った `web-research` タスク（`ws-gate5` / `ws-gate6`）がデーモン経由で
+     `{"type":"error","message":"web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)","retryable":true}`
+     になり、`counts: {"queries": 1, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}` が
+     `research.json` に残った。**Phase 19 の `done` と同じ入力で、今回は `done` にならない**（これが直したかったこと）。
+   - 通る側（**未達**）: ADR-0031 §4-4 は「鍵が届くまでは `wikipedia` でゲートに落ちる / 通る**両方**を確認する」と書いているが、
+     下の切り分けのとおり Wikipedia が時間帯によって 0 件しか返さないため、実機で「通る」側を作れていない。
+     つまり**ゲートが正当な `done` を塞いでいないこと（偽陽性が無いこと）の実機裏取りが無い**。
+     スタブでの `happy_path_progress_report_and_result_files`（3 成果物・`counts.sources == 3` で `done`）が代替。
+     鍵（Tavily / Exa）が届いた時点で Phase 20 受け入れ条件 5 と同時に埋める。
+5. **共通条件** — `cargo test -p task-worker local_deep_research` **23 passed**（Phase 19 の 12 件 → 23 件）、
+   `cargo test --workspace` **777 passed / 0 failed**、`cargo clippy --workspace --all-targets -- -D warnings` exit 0。
+
+### 実装中に直したもの（実機で判明）
+
+- **検索クエリに余計なものが入っていた**: `build_query` がタスクのタイトル（`# <title>` の見出し）と役割の指示文を問いに混ぜており、
+  そのせいで Wikipedia が 0 件を返していた。**目的（`objective`）だけを送る**ようにした（人間の回答があれば短い補足として足す）。
+  回帰テスト `build_query_sends_only_the_objective_not_the_title_or_role_instructions`。
+- **`research.json` の件数が常に 0 だった**: LDR の戻り値の `questions` が空のことがあり、実際の問いは `findings[].question` に入る。
+  エンジン名も `sources[]` の辞書の `source` キーにある。両方から作るようにした
+  （`runner_manifest_uses_findings_questions_and_source_engine` / `runner_build_evidence_manifest_dedupes_cites_and_flattens_questions`）。
+
+### 検索が 0 件になる原因の切り分け（記録）
+
+`local-deep-research` が taskd 経由だと 0 件、手元で直接動かすと出典付きの要約を返す、という食い違いを次の順で切り分けた。
+
+1. taskd 経由（`ws-gate5` / `ws-gate6`）→ `search_results: 0`。
+2. 同じランナー・同じ `ldr_input.json` を**新しいディレクトリ**で直接実行 → 出典付きの要約が出た（成功）。
+3. 同じものを**タスクの作業ディレクトリ（cwd）**で実行 → また 0 件。
+4. 3 と**同時刻に**、新しいディレクトリでもう一度実行（対照実験） → **こちらも 0 件**（`counts.queries: 1, search_results: 0`）。
+
+**結論: cwd は関係ない。Wikipedia（LDR 経由）が時間帯によって 0 件を返す。** 2 が成功したのは時間帯の差。
+これは U19-1（このホストに実用的な一般 Web 検索が無い）そのもので、**まさにゲートが捕まえるべき事象**だった。
+鍵付き API（Tavily / Exa）に切り替えるまで、`web-research` の実機確認は不安定なままになる。
+
+### コミット前の監査で直したもの（別文脈の auditor による指摘）
+
+監査は `cargo test --workspace` / clippy（`--all-targets`、キャッシュ破棄後）/ GUI 一式 / `sync-gui-docs --check` を
+自前で再実行し、PROGRESS に書いた数字がすべて再現することを確認したうえで次を指摘した。**設計原則への抵触は無し**。
+
+| # | 指摘 | 対応 |
+|---|---|---|
+| D-1（中） | `[secrets] dir = "secrets"` は設定ファイル基準なので実体は `config/secrets/`。`.gitignore` に無く、CLAUDE.md の `git add -A` と組み合わさると **API キーが平文でコミットされる** | `.gitignore` に `secrets/` と `config/secrets/` を追加（`git check-ignore -v config/secrets/tavily` で確認） |
+| D-2（低〜中） | `PUT` 経由でディレクトリが作られると 0755 になる（`create_dir_all` にモード指定が無い） | `create_secrets_dir` を追加し `DirBuilder::mode(0o700)` で作る |
+| D-4（低） | `GET /secrets` がシンボリックリンクを追い、リンク先の mtime / fingerprint を出しうる | `symlink_metadata` で実ファイルだけを採る |
+| D-5（低） | `min_search_results = 0` にすると「検索が 0 件」専用のメッセージが出なくなる（ADR-0031 D2 の狙いが消える） | 閾値がどれか 1 つでも立っていれば `search_results == 0` を専用メッセージにする。回帰テスト `gate_zero_search_results_keeps_the_distinct_message_even_when_that_threshold_is_zero` |
+| D-6（低） | 型違いの本文（`{"value": 12345678}`）だと serde のエラー文に**値のリテラルが反射する** | `PUT /secrets/{id}` の解析エラーだけ本文を見ないメッセージに差し替え（`secret_body_invalid`）。テスト `put_does_not_reflect_the_value_in_a_parse_error` |
+| D-8 / D-9（低） | `SecretView` の doc コメント・生成スキーマが「id 昇順」のまま／`docs/gui/api.md` §6.2 の Rust 表記が `String`（実装は `Option<String>`） | 両方修正し `UPDATE_SCHEMA=1` でスキーマ再生成、`sync-gui-docs.sh` で写しも更新 |
+| D-10（情報） | 引数 5 個の `merged_env_with_secrets` に不要な `#[allow(clippy::too_many_arguments)]` | 削除 |
+| テスト規律 | `all_three_endpoints_require_a_token_even_on_loopback` が `token: Some(...)` の構成しか見ておらず、**`token_file` 未設定の側を検証していなかった**（名前が実際より強い主張） | `token: None` の構成での 401 を別テストとして追加（`accounts_admin.rs` と同じ形） |
+| 証拠の忠実性 | PROGRESS の実機ログ引用が ADR の日本語文面からの引き写しで、**コードが実際に出す英文と違っていた** | 実際の文言（`web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)`）に修正 |
+| D-7（中） | ADR-0031 受け入れ条件 4 の「ゲートを通る側」の実機確認が無いのに、本文に埋もれていた | 受け入れ条件 4 を「未達」と明記し、U21-2 として未解決事項に立てた |
+
+D-3（`ensure_secrets_dir` の create → chmod の間の一瞬と、既にあるディレクトリの権限を直さない点）は
+`ensure_accounts_dir` と同じ作りなので、既存の慣習に合わせて今回は変えていない。
+
+### 未解決事項
+
+- U19-2 は**解消**（0 件でも `done` になる経路をゲートで塞いだ）。U19-1 は残る（鍵待ち）。
+- **U21-2（受け入れ条件 4 の未達）**: ゲートの「通る側」を実機で確認できていない（上記）。鍵が届くまで Phase 21 は
+  「条件付き完了」として扱う。
+- U21-1: LDR の LangGraph エージェントによる query routing（レビューの提案）は入れていない。
+  Tavily / Exa を実際に回して測ってから、必要なら別 ADR で検討する（ADR-0031 §3）。
+- U21-3: browser / data-analysis / presentation の各分野は引き続き未実装（U19-3）。
+
+### 提案
+
+- P-67: DESIGN §5 の設定の節に `[secrets]` / `env_from_secrets` を足す（「秘密は設定ファイルに平文で書かない」を
+  ADR-0012 D1 の推奨から実際の仕組みに格上げしたため）。
+- P-68: 「ハーネスが証拠の量を決定的に判定する」を `web-research` 固有ではなく**分野共通の考え方**として DESIGN に書く
+  （`related-research` の PaperQA2 にも同じ問題がある。引用 0 件の回答が `done` になりうる）。

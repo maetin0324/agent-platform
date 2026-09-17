@@ -25,6 +25,7 @@ mod middleware;
 mod problem;
 mod query;
 pub mod schema;
+pub mod secrets;
 mod sse;
 mod state;
 mod stats;
@@ -41,7 +42,8 @@ pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterView, Clusters,
     ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, GenreConfigView, Health, Problem,
     ProviderConfigView, ProviderStats, ProviderView, Providers, ReviewerConfigView, RoleConfigView, RunList,
-    StreamHeartbeat, StreamHello, StreamReset, ValidationError,
+    SecretList, SecretPutBody, SecretPutResult, SecretUse, SecretView, StreamHeartbeat, StreamHello, StreamReset,
+    ValidationError,
 };
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
@@ -97,6 +99,11 @@ pub struct ApiSettings {
     pub accounts_roots: HashMap<AccountAdapter, PathBuf>,
     /// ADR-0024 D1: `[accounts] max_runs_per_account`。
     pub max_runs_per_account: usize,
+    /// ADR-0030 D1: `[secrets] dir` の絶対パス。`None` なら秘密の管理系は 409 `secrets_unavailable`。
+    pub secrets_dir: Option<PathBuf>,
+    /// ADR-0030 D3: 秘密 id → それを使っている adapter/provider の `env_from_secrets`（`GET /secrets` の
+    /// `used_by`）。taskd が設定から導いて渡す（task-api は再計算しない）。
+    pub secret_usage: HashMap<String, Vec<types::SecretUse>>,
 }
 
 impl std::fmt::Debug for ApiSettings {
@@ -118,6 +125,8 @@ impl std::fmt::Debug for ApiSettings {
             .field("admin_tx", &self.admin_tx.as_ref().map(|_| "<sender>"))
             .field("accounts_roots", &self.accounts_roots)
             .field("max_runs_per_account", &self.max_runs_per_account)
+            .field("secrets_dir", &self.secrets_dir)
+            .field("secret_usage", &self.secret_usage.keys().collect::<Vec<_>>())
             .finish()
     }
 }

@@ -144,6 +144,11 @@ pub struct ProviderConfigFile {
     pub model: String,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。**管理 API はこのフィールドを読み書きしない**
+    /// （`command`/`args`/`settings` と同じ理由・同じ扱い: `create`/`patch` の本文に来たら 422 で拒否する。
+    /// 素通り用フィールドで、人が直接編集した `providers.d/<id>.toml` の値を PATCH の往復で消さない）。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
     /// ADR-0024 D2: `[accounts]` のプールから選ぶ（`adapter = "claude-code"` かつ `[accounts]` があるときだけ有効）。
     #[serde(default)]
     pub account_pool: bool,
@@ -213,6 +218,9 @@ impl ProviderCreateBody {
             concurrency: self.concurrency.unwrap_or_else(default_concurrency),
             model: self.model.unwrap_or_default(),
             env: self.env,
+            // ADR-0030 D2: 管理 API は env_from_secrets を書かない（`create` された行は必ず空。人が後から
+            // ファイルへ足す）。
+            env_from_secrets: HashMap::new(),
             account_pool: self.account_pool,
             // ADR-0026 D7 / ADR-0027 D3: 管理 API は command/args/settings を書かない（`create` された行は
             // 必ず `None`。人が後からファイルへ足す）。
@@ -359,6 +367,7 @@ mod tests {
             concurrency: 2,
             model: "m1".into(),
             env: HashMap::from([("K".to_string(), "v".to_string())]),
+            env_from_secrets: HashMap::new(),
             account_pool: false,
             command: None,
             args: None,
@@ -389,6 +398,7 @@ mod tests {
             concurrency: 3,
             model: "".into(),
             env: HashMap::from([("CLAUDE_CONFIG_DIR".to_string(), "/x".to_string())]),
+            env_from_secrets: HashMap::from([("K".to_string(), "secret-id".to_string())]),
             account_pool: true,
             command: None,
             args: None,
@@ -399,11 +409,13 @@ mod tests {
         assert_eq!(read.id, "acct-b");
         assert_eq!(read.concurrency, 3);
         assert_eq!(read.env.get("CLAUDE_CONFIG_DIR"), Some(&"/x".to_string()));
+        assert_eq!(read.env_from_secrets.get("K"), Some(&"secret-id".to_string()));
         assert!(read.account_pool);
     }
 
-    /// ADR-0026 D7: `command`/`args` は API から書かないが、人が `providers.d/<id>.toml` に手で足した値は
-    /// `PATCH`（`read_provider_file` → `apply` → `write_provider_file`）を経ても消えない（素通り）。
+    /// ADR-0026 D7 / ADR-0030 D2: `command`/`args`/`env_from_secrets` は API から書かないが、人が
+    /// `providers.d/<id>.toml` に手で足した値は `PATCH`（`read_provider_file` → `apply` →
+    /// `write_provider_file`）を経ても消えない（素通り）。
     #[test]
     fn patch_round_trip_preserves_hand_edited_command_and_args() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
@@ -414,6 +426,7 @@ mod tests {
             concurrency: 1,
             model: "qwen-local/qwen3.8-27b".into(),
             env: HashMap::new(),
+            env_from_secrets: HashMap::from([("SOME_KEY".to_string(), "some-secret".to_string())]),
             account_pool: false,
             command: Some("opencode".into()),
             args: Some(vec!["acp".into()]),
@@ -425,6 +438,7 @@ mod tests {
         let current = read_provider_file(&path).unwrap_or_else(|e| panic!("read: {e}"));
         assert_eq!(current.command.as_deref(), Some("opencode"));
         assert_eq!(current.args.as_deref(), Some(&["acp".to_string()][..]));
+        assert_eq!(current.env_from_secrets.get("SOME_KEY"), Some(&"some-secret".to_string()));
 
         let patch = ProviderPatchBody { concurrency: Some(2), ..Default::default() };
         let updated = patch.apply(current);
@@ -434,5 +448,10 @@ mod tests {
         assert_eq!(after.concurrency, 2);
         assert_eq!(after.command.as_deref(), Some("opencode"), "PATCH must not drop hand-edited command");
         assert_eq!(after.args.as_deref(), Some(&["acp".to_string()][..]), "PATCH must not drop hand-edited args");
+        assert_eq!(
+            after.env_from_secrets.get("SOME_KEY"),
+            Some(&"some-secret".to_string()),
+            "PATCH must not drop hand-edited env_from_secrets"
+        );
     }
 }

@@ -3502,6 +3502,106 @@
       ],
       "type": "object"
     },
+    "SecretList": {
+      "description": "`GET /secrets`。`[secrets]` が未設定なら 409 `secrets_unavailable`（`dir: None` の応答は返さない）。",
+      "properties": {
+        "dir": {
+          "description": "`[secrets] dir` の絶対パス。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "items": {
+          "description": "ファイルがある id を id 昇順、続けて未設定（`env_from_secrets` が参照しているだけ）の id を id 昇順。",
+          "items": {
+            "$ref": "#/$defs/SecretView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "SecretPutResult": {
+      "description": "`PUT /secrets/{id}` の応答。値は含まない。",
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "updated_at",
+        "fingerprint"
+      ],
+      "type": "object"
+    },
+    "SecretUse": {
+      "description": "`SecretView.used_by` の 1 要素。",
+      "properties": {
+        "env": {
+          "description": "流し込む環境変数名。",
+          "type": "string"
+        },
+        "name": {
+          "description": "`scope = \"adapter\"` ならアダプタ種別（`\"claude-code\"` 等）、`\"provider\"` ならプロバイダ id。",
+          "type": "string"
+        },
+        "scope": {
+          "description": "`\"adapter\" | \"provider\"`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "env"
+      ],
+      "type": "object"
+    },
+    "SecretView": {
+      "description": "1 秘密（値は決して含まない）。",
+      "properties": {
+        "fingerprint": {
+          "description": "値の sha256 の先頭 8 桁（値そのものは復元できない）。値が無ければ `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "description": "ファイルの mtime（RFC 3339）。**まだ値が入っていない**（設定が参照しているだけ）なら `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "used_by": {
+          "description": "設定（`env_from_secrets`）から導いた、この秘密を使っている場所。",
+          "items": {
+            "$ref": "#/$defs/SecretUse"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "used_by"
+      ],
+      "type": "object"
+    },
     "Status": {
       "description": "ADR-0002 D1 の状態集合。終端は `done | failed | cancelled`。",
       "enum": [
@@ -4330,6 +4430,13 @@
     "run_list": {
       "$ref": "#/$defs/RunList"
     },
+    "secret_put": {
+      "$ref": "#/$defs/SecretPutResult"
+    },
+    "secrets": {
+      "$ref": "#/$defs/SecretList",
+      "description": "Phase 20（ADR-0030）: GUI から預かる秘密（API キー等）。`GET /secrets` と `PUT /secrets/{id}` の応答。"
+    },
     "stream_daemon": {
       "$ref": "#/$defs/DaemonSnapshot"
     },
@@ -4381,6 +4488,8 @@
     "reload",
     "provider_check",
     "clusters",
+    "secrets",
+    "secret_put",
     "account_list",
     "account",
     "account_check",

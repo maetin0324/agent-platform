@@ -89,14 +89,15 @@ fn check_request(state: &ApiState, req: &Request) -> Result<(), ApiProblem> {
         check_bearer(req.headers(), expected)?;
     }
 
-    // ADR-0017 で PATCH/DELETE（プロバイダ管理）が加わるまでは変更系 = POST だけだった。`Origin` の拒否は
-    // 本文の有無に関わらず全ての変更系メソッドに掛ける（監査で発見: PATCH/DELETE が POST 専用のこのチェックを素通りしていた）。
-    let is_mutating = matches!(*req.method(), Method::POST | Method::PATCH | Method::DELETE);
+    // ADR-0017 で PATCH/DELETE（プロバイダ管理）が加わるまでは変更系 = POST だけだった。ADR-0030 で
+    // `PUT /secrets/{id}` が加わり PUT も同じ扱いにする。`Origin` の拒否は本文の有無に関わらず全ての変更系
+    // メソッドに掛ける（監査で発見: PATCH/DELETE が POST 専用のこのチェックを素通りしていた）。
+    let is_mutating = matches!(*req.method(), Method::POST | Method::PUT | Method::PATCH | Method::DELETE);
     if is_mutating && req.headers().contains_key(header::ORIGIN) {
         return Err(ApiProblem::origin_forbidden());
     }
-    // Content-Type / 本文サイズは本文を伴うメソッド（POST・PATCH）だけ検査する（DELETE は本文を取らない）。
-    if matches!(*req.method(), Method::POST | Method::PATCH) {
+    // Content-Type / 本文サイズは本文を伴うメソッド（POST・PUT・PATCH）だけ検査する（DELETE は本文を取らない）。
+    if matches!(*req.method(), Method::POST | Method::PUT | Method::PATCH) {
         if !is_json_content_type(req.headers()) {
             return Err(ApiProblem::unsupported_media_type());
         }

@@ -1037,3 +1037,48 @@ taskd 側の Phase 16〜18（ADR-0027 の分野、ADR-0028 の能力レジスト
 ### 未解決事項
 
 - G10-U1: このリポジトリには DOM を描画する unit テストが無いため、「空の項目を出さない」ことはコードの条件分岐と目視でのみ確認している。
+
+## Phase G11 — DONE（2026-09-17）
+
+taskd 側の Phase 20（ADR-0030: API キーを GUI から預かる）への追従。置き場所は「アカウント」画面の一区画という人間の指定に従う。
+GUI 側の新しい設計判断は無し（ADR-0030 D4 をそのまま実装）。
+
+### 成果物
+
+- `pnpm gen:types` 再生成（`SecretList` / `SecretView` / `SecretUse` / `SecretPutResult`）。2 回実行して同一。
+- `app/taskd/client.server.ts` に `put<T>()`（既存の `post` / `patch` と同じ形）。
+- `app/taskd/secrets-admin.server.ts`（新規）: `listSecrets` / `putSecret` / `deleteSecret`（put・delete は成功後に続けて
+  `POST /reload` を呼ぶ。ADR-GUI-0012 D2 と同じ作り）/ `readSecretId` / `readSecretValue`。
+- `app/taskd/action-types.ts` に `SecretOpOutcome` / `SecretActionResult`、`components/Flash.tsx` に `SecretActionFlash`
+  （**値は一切表示しない**）。
+- `/accounts` に「API キー」節: 一覧カード（設定済み / 未設定バッジ、使われている場所（env とアダプタ / プロバイダ名）、
+  更新時刻の相対表示、fingerprint）、追加・更新フォーム（`type="password"`、`autocomplete="off"`、保存後は二度と表示されない旨）、
+  確認付き削除、平文 HTTP の注意 Alert、`[secrets]` 未設定時の EmptyState。
+  `GET /secrets` は管理系で 401 / 409 になりうるので loader 内で try/catch し、`secretsError` として**この節の中だけ**に出す
+  （ページ全体は壊さない）。
+- `/help`: 用語集に「API キー」、「アカウント」画面の説明に API キー節への言及。
+- testid: `secrets-section` / `secret-card`（`data-secret-id`）/ `secret-used-by` / `secret-updated-at` / `secret-fingerprint` /
+  `secret-unset` / `secret-add-form` / `secret-add-id` / `secret-add-value` / `secret-add-submit` / `secret-update-form` /
+  `secret-update-value` / `secret-update-submit` / `secret-delete`。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint`（biome、115 files、no fixes）/ `pnpm typecheck` / `pnpm build` exit 0、`pnpm test` **213 passed**（25 ファイル）。
+  新規 `test/unit/secrets-admin.test.ts`: put→reload の両方成功 / put 失敗時は reload を呼ばない / 422・404・409・401 の伝播 /
+  reload 失敗の個別報告 / delete→reload / 未設定エントリの passthrough。
+- 実機: 使い捨ての taskd（`[api] token_file` + `[secrets] dir` + `[adapters.fake] env_from_secrets`）を 127.0.0.1:7810 に立て、
+  GUI dev を 7800 で起動して Playwright で light / dark のスクリーンショットを取得・目視確認。
+  画面から追加（flash「保存: newkey」＋「reload: 反映しました」）→ カード出現 → 確認付き削除 → カード消滅までを実地確認した。
+  確認後に使い捨ての taskd / dev サーバは停止し、作業ディレクトリは削除済み。
+- `docs/taskd-api-v1.md` は `scripts/sync-gui-docs.sh` で同期済み（§3.36〜3.38。未設定 id も `items[]` に載る旨に修正済み）。
+
+### 実装中に直したもの
+
+- React Router のビルド制約で `loader` / `action` 以外の export から `.server` モジュールを参照すると client バンドルが壊れる。
+  `loadAccounts` では `secrets-admin.server.ts` を使わず `client.get` の直呼び + `~/taskd/errors`（非 `.server`）だけを使う形に変更した
+  （`putSecret` / `deleteSecret` / `readSecretId` / `readSecretValue` は `action` の中でだけ使う）。
+
+### 未解決事項
+
+- G11-U1: e2e は運用中の taskd / GUI（7700 / 7710）と衝突するため未実行。確認は unit テストと使い捨て環境でのスクリーンショットで行った。
+- G11-U2: 鍵の値は平文 HTTP を通る（LAN 前提。ADR-0030 D4 の注意書きを画面に出しているだけ）。
