@@ -408,14 +408,16 @@ function AccountCard({
             </Button>
           </fetcher.Form>
 
-          {!showLoginPanel && (
+          {/* 進行中でも、この画面に出せる URL / コードが無い（開き直した等）ならやり直せるようにする。
+              コードは taskd も保存しないので、失ったら開始し直すしかない（前のコードは無効になる）。 */}
+          {(!showLoginPanel || !loginStart) && (
             <fetcher.Form method="post">
               <input type="hidden" name="intent" value="login_start" />
               <input type="hidden" name="id" value={item.id} />
               <input type="hidden" name="adapter" value={adapter} />
               <Button type="submit" variant="soft" size="sm" disabled={submitting} data-testid="account-login-start">
                 <Icon name="link" />
-                ログイン
+                {showLoginPanel ? "ログインをやり直す" : "ログイン"}
               </Button>
             </fetcher.Form>
           )}
