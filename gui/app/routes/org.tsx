@@ -15,6 +15,7 @@ import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { standingRuleTargetName } from "~/lib/approvals";
 import { buildOrgTree, countWorkload, flattenProjectTasks, type OrgTreeNode, type Workload } from "~/lib/org-tree";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
@@ -30,7 +31,17 @@ import {
   deleteOrgNode,
   patchOrgNode,
 } from "~/taskd/org-admin.server";
-import type { ConfigView, OrgKind, OrgList, OrgNode, ProjectDetail, ProjectList, ProjectTaskView } from "~/taskd/types";
+import type {
+  ConfigView,
+  OrgKind,
+  OrgList,
+  OrgNode,
+  ProjectDetail,
+  ProjectList,
+  ProjectTaskView,
+  StandingRule,
+  StandingRuleList,
+} from "~/taskd/types";
 import type { Route } from "./+types/org";
 
 /**
@@ -45,13 +56,21 @@ export interface OrgData {
   genres: string[];
   workload: Record<string, Workload>;
   assignedTasks: (ProjectTaskView & { project_id: string; project_title: string })[];
+  /** 選ばれたノード宛ての永続の認可（全員向け + そのノード向け。ADR-0033 D5、§3.58）。未選択なら空。 */
+  standingRules: StandingRule[];
 }
 
 export async function loadOrg(client: TaskdClient, request: Request): Promise<OrgData> {
-  const [org, config, projects] = await Promise.all([
+  const selected = new URL(request.url).searchParams.get("selected");
+  const [org, config, projects, standingRules] = await Promise.all([
     client.get<OrgList>("/org", { signal: request.signal }),
     client.get<ConfigView>("/config", { signal: request.signal }).catch(() => null),
     client.get<ProjectList>("/projects", { signal: request.signal }),
+    selected
+      ? client
+          .get<StandingRuleList>("/standing-rules", { query: { node: selected }, signal: request.signal })
+          .catch(() => ({ items: [] }) as StandingRuleList)
+      : Promise.resolve({ items: [] } as StandingRuleList),
   ]);
   const withTasks = await Promise.all(
     projects.items.map(async (project) => {
@@ -67,7 +86,13 @@ export async function loadOrg(client: TaskdClient, request: Request): Promise<Or
   );
   const assignedTasks = flattenProjectTasks(withTasks);
   const workload = Object.fromEntries(countWorkload(assignedTasks));
-  return { org, genres: (config?.genres ?? []).map((g) => g.id), workload, assignedTasks };
+  return {
+    org,
+    genres: (config?.genres ?? []).map((g) => g.id),
+    workload,
+    assignedTasks,
+    standingRules: standingRules.items,
+  };
 }
 
 export const shouldRevalidate = revalidateAfterActionErrors;
@@ -111,7 +136,7 @@ export async function action({ request }: Route.ActionArgs) {
 const ORG_KINDS: OrgKind[] = ["secretary", "department", "section"];
 
 export default function OrgPage({ loaderData }: Route.ComponentProps) {
-  const { org, genres, workload, assignedTasks } = loaderData;
+  const { org, genres, workload, assignedTasks, standingRules } = loaderData;
   const [searchParams] = useSearchParams();
   const selectedId = searchParams.get("selected");
   const { roots } = useMemo(() => buildOrgTree(org.items), [org.items]);
@@ -169,6 +194,7 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
                 genres={genres}
                 workload={workload[selected.id]}
                 tasks={nodeTasks}
+                standingRules={standingRules}
                 fetcher={fetcher}
                 submitting={submitting}
               />
@@ -355,6 +381,7 @@ function OrgNodeDetail({
   genres,
   workload,
   tasks,
+  standingRules,
   fetcher,
   submitting,
 }: {
@@ -363,6 +390,7 @@ function OrgNodeDetail({
   genres: string[];
   workload: Workload | undefined;
   tasks: (ProjectTaskView & { project_id: string; project_title: string })[];
+  standingRules: StandingRule[];
   fetcher: FetcherWithComponents<OrgOpOutcome>;
   submitting: boolean;
 }) {
@@ -421,6 +449,35 @@ function OrgNodeDetail({
               ))}
             </ul>
           )}
+        </div>
+
+        <div>
+          <p className={labelClass}>この人への永続の認可</p>
+          {/* SPEC §3.6「永続の認可は文字で記録してエージェントに注入する」。ADR-0033 D5、docs/taskd-api-v1.md
+              §3.58「node を書けば全員向け + そのノード向け」。追加・削除は `/approvals` から行う。 */}
+          {standingRules.length === 0 ? (
+            <p className={cn(hintClass, "mt-1")}>今のところありません。</p>
+          ) : (
+            <ul className="mt-1.5 space-y-1" data-testid="org-node-standing-rules">
+              {standingRules.map((r) => (
+                <li
+                  key={r.id}
+                  data-testid="org-node-standing-rule"
+                  data-rule-id={r.id}
+                  className="flex items-start gap-2 text-sm"
+                >
+                  <Badge tone={r.node_id ? "neutral" : "teal"}>{standingRuleTargetName(r, org)}</Badge>
+                  <span className="min-w-0 flex-1">{r.rule}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <Link
+            to="/approvals"
+            className="mt-1.5 inline-block text-xs text-fg-subtle underline underline-offset-2 hover:text-fg"
+          >
+            追加・削除は「認可」から
+          </Link>
         </div>
 
         <details className="group">

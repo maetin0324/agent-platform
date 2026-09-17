@@ -1648,3 +1648,120 @@ taskd 依存は無し（既存の `GET /projects`・`GET /projects/{id}`・`GET 
 - G13c-P2: `ArtifactRef` に「リンク集」「整形表示」等の表示ヒントを持たせる（例: `kind` の語彙を広げて
   `"links"` を足す）と、GUI 側でファイル名の完全一致に頼らずに `sources.json` 相当を判定できる
   （G13c-U3 の代替案）。優先度は低い（現状 1 ハーネスだけの話のため）。
+## Phase G13d — 認可（2026-09-17）
+
+taskd 側 Phase 26（ADR-0033 D5: `approvals` / `standing_rules`、`GET/POST /approvals...`、`GET/POST/DELETE /standing-rules...`、
+`DaemonSnapshot.approvals_pending`）に追従し、G13a のプレースホルダ（`/approvals`）を実物に置き換えた。
+SPEC §3.6「少しでも聞くべきだとエージェントが判断したら、あなたに指示を仰ぐ。あなたはそれに対して『今回だけ』か
+『同じようなことは今後ずっと』のどちらかの認可を出す。永続の認可は文字で記録してエージェントに注入する」と、
+§4 の 5「認可の要求 — 聞かれたことに『今回だけ／今後ずっと』で答える。永続の認可の一覧と編集」を実装した。
+main（`70986b5`、phase 26）に `git merge --ff-only` してから着手。
+
+### 成果物
+
+- **`app/lib/approvals.ts`（新規、純粋関数）**: `splitApprovals`（未決の要求と決めたものの履歴を `Approval.decision`
+  の有無で分ける。**実機で `GET /approvals?pending=false` が絞り込まないことを確認したため、`pending` クエリには
+  頼らずフィルタ無しの 1 回の取得を `decision` で分ける**。下記「判断したこと」参照）、`approvalProjectName` /
+  `approvalNodeName`（`~/lib/reports.ts` と同じ作り。案件名・ノード名を `GET /projects` / `GET /org` から解決する）、
+  `standingRuleTargetName`（`node_id` が無ければ「全員」）、`approvalsPendingCount`（`DaemonSnapshot.approvals_pending`
+  の既定 0 込みの読み取り）。
+- **`app/taskd/approvals-admin.server.ts`（新規、中継）**: `buildApprovalDecideInput` / `decideApproval`
+  （`POST /approvals/{id}/decide`。**管理系**）、`buildStandingRuleCreateInput` / `createStandingRule`
+  （`POST /standing-rules`。**管理系**）、`deleteStandingRule`（`DELETE /standing-rules/{id}`。**管理系**、204 本文無し）。
+  `org-admin.server.ts` と同じ作り: taskd のエラーはそのまま `{ok:false, error}` にする。
+- **`app/taskd/action-types.ts`**: `ApprovalOpOutcome` / `StandingRuleOpOutcome` を追加。
+- **`app/components/Flash.tsx`**: `ApprovalActionFlash`（`standing` で答えたときは永続の認可への追加も知らせる）、
+  `StandingRuleActionFlash` を追加。
+- **`app/routes/approvals.tsx`（プレースホルダを置き換え）**: 上に**認可待ち**（`ApprovalRow`。質問を `MarkdownViewer`
+  で描き、`answer` の欄 + 3 つのボタン「今回だけ」「今後ずっと」「認めない」+ `scope`（このノードだけ／全員）の
+  `<select>`。1 つの `fetcher.Form`（`useFetcher({key: "approval-<id>"})`）に 3 つの `name="decision" value="once|standing|denied"`
+  submit ボタンを持たせ、`answer` の欄を共有した）、下に**決めたもの**の履歴（同じ `ApprovalRow`。`decision` があれば
+  フォームの代わりに決定・答えを表示）。さらに下に**永続の認可**の一覧（`StandingRuleRow`。`org.tsx` の `org-delete` と
+  同じ `<details>` の確認付き削除）と追加フォーム（`node_id` の `<select>`（空 = 全員）+ `rule` のテキストエリア）。
+  ノードへのリンク（`裏方のタスク` → `/tasks/{task_id}`）、相対時刻（`~/lib/reports.ts` の `relativeTimeLabel` を再利用）。
+- **`app/root.tsx`**: `DaemonSnapshot.approvals_pending` を loader で読み（`approvalsPendingCount`）、ナビの「認可」に
+  バッジ（`badge: "org_approvals"`、`data-testid="approvals-pending-badge"`）を追加。既存の受信箱バッジ
+  （`badge: "approvals"`、`counts.approvals`）とは別の値・別の testid にした（意味が違う: 受信箱は task の承認待ち、
+  こちらは組織のノードからの認可の要求）。
+- **`app/routes/org.tsx`**: `loadOrg` が `?selected=<node>` のときだけ `GET /standing-rules?node=<node>` を呼び
+  （未選択なら呼ばない）、ノード詳細（`OrgNodeDetail`）に「この人への永続の認可」を読み取り専用で表示
+  （`standingRuleTargetName` で全員／このノードのバッジを出し、追加・削除は `/approvals` へのリンクに誘導）。
+- **`help.tsx`**: 画面の説明「認可」を実物の説明に差し替え、用語集に「認可」「今回だけ／今後ずっと」「永続の認可」を
+  SPEC の言葉で追加。
+- testid: `approvals-section` / `approval-row`（`data-approval-id`）/ `approval-question` / `approval-answer` /
+  `approval-once` / `approval-standing` / `approval-denied` / `approval-scope` / `approval-task-link` /
+  `standing-rules-section` / `standing-rule-row`（`data-rule-id`）/ `standing-rule-add-form` /
+  `standing-rule-add-submit` / `standing-rule-delete` / `approvals-pending-badge`。
+  `org.tsx` 側にも `org-node-standing-rules` / `org-node-standing-rule`（`data-rule-id`）を追加。
+
+### 判断したこと（ADR は起こしていない。GUI の中の話。実機で見つかった taskd の挙動への対応）
+
+- **`GET /approvals?pending=false` に頼らず、フィルタ無しで 1 回取得して `decision` の有無で分けた**（`docs/taskd-requests.md`
+  R5）。実機（使い捨ての taskd、`config/org.example.toml` + 偽アダプタ）で確認したところ、`pending=true` は仕様どおり
+  未決定だけに絞れるが、`pending=false` は決定済みかどうかに関わらず全件を返した。`GET /approvals?pending=true` と
+  `?pending=false` を素直に 2 回呼ぶ設計（当初案）だと、決めたものの履歴に未決の要求まで混ざって二重表示になる。
+  `Approval.decision` は応答に必ず含まれるドキュメント化されたフィールドで、その有無で分けることは
+  `filterReportsByKind`（`~/lib/reports.ts`）と同種の「GUI 側でのフィルタ」であって新しい判断値を作ることには
+  当たらないと判断し、`splitApprovals` として実装した。`docs/taskd-requests.md` に taskd 側の直し方も添えて記録し、
+  直り次第 2 回呼びに戻せるようにしてある。
+- **答えるボタンは 1 つの `<form>` に 3 つの `name="decision"` submit ボタン**にした（`app/routes/tasks.$id.tsx` の
+  approve/reject は操作ごとに別々の `<Form>` + 別々の `note` 欄を持つが、今回は要求された testid が `approval-answer`
+  1 つだけなので、`answer` の欄を共有する 1 つのフォームにした。HTML の標準的な「複数 submit ボタン」パターン）。
+- **`scope` は常に送る**（`decision = "standing"` のときだけ意味を持つ。§3.57）。「今回だけ／認めない」を押しても
+  `scope` は無視されるだけで害が無いので、UI 側で表示を出し分ける複雑さを避けた。
+- **組織の木のノード詳細では読み取り専用**にし、追加・削除は `/approvals` に誘導した（同じ CRUD を 2 箇所に置くと
+  どちらが正か紛らわしくなるため。SPEC は「表示」としか言っていない）。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint`（biome、148 files）exit 0 / `pnpm typecheck` exit 0 / `pnpm test` **369 passed**（33 ファイル。
+  G13b-2 の 302 から +67。新規 `test/unit/approvals.test.ts` 32 件 + `test/unit/org.test.ts` に標準の認可の
+  loader テスト 3 件を追加）/ `pnpm build` exit 0。`pnpm gen:types` を 2 回実行して同一、かつコミット済みの
+  `app/taskd/types.ts` と同一（Phase 26 取り込み後に生成済みで差分ゼロ）。
+- 新規テストの内訳: `approvalProjectName`/`approvalNodeName`/`standingRuleTargetName`、`approvalsPendingCount`
+  （daemon 無し・snapshot 無し・古いスナップショット・値ありの 4 パターン）、`splitApprovals`、`loadApprovals`
+  （`GET /approvals` を 1 回だけ呼ぶこと・`GET /org`/`GET /projects` が落ちても返すこと・401 をそのまま投げること）、
+  `buildApprovalDecideInput`、`decideApproval`（once/standing/denied・404・401・422）、`buildStandingRuleCreateInput`、
+  `createStandingRule`/`deleteStandingRule`（成功・422・401・404・204 本文無し）。`org.test.ts`
+  には `?selected=` の有無で `GET /standing-rules` を呼ぶかどうか、`node=` が付くこと、失敗しても組織は返すことを追加。
+- **実機での見た目と動作の確認**（使い捨ての taskd を 127.0.0.1:17930、GUI を 127.0.0.1:17901 に立てた。
+  **運用中の 7710 / 7700 には触れていない。確認後、taskd・GUI とも停止し使い捨てディレクトリは削除済み**）。
+  構成: `config/org.example.toml` を `org_include`、全役割を偽アダプタ `fake`（`question` を毎回返すだけの
+  `sh` スクリプト。LLM は呼ばない）に当て、`[api] token_file` あり。`POST /org/secretary/messages` と
+  `POST /org/coding-poc/messages` で質問に終わる run を起こし `approvals` を作った。Playwright（light / dark、
+  Chromium）で確認したこと:
+  - `/approvals`: 認可待ちに質問（`approval-question`、Markdown 描画）・宛先ノード・案件（「案件なし」）・
+    裏方のタスクへのリンク・相対時刻が並んだ。ナビの「認可」バッジ（`approvals-pending-badge`）が件数と一致した
+    （4 件のときバッジも `4`）。
+  - `answer` に文言を入れ、`scope` を「全員」にして「今後ずっと」を押すと、その行が認可待ちから消え、
+    「決めたもの」に決定（今後ずっと）と答えが表示され、**「永続の認可」に新しい行（対象: 全員、規則文どおり）が
+    現れた**（受け入れ条件のゴール）。`scope` を「このノードだけ」にすると対象がそのノード名になることも確認した。
+  - 「認めない」で答えると、決めたものの履歴に「決定: 認めない」「答え: （そのまま）」が出た（taskd 側が
+    `"認めない: <answer>"` に整形して再開する、§3.57 の仕様どおり）。
+  - 永続の認可の「削除」は `<details>` の確認（「本当に削除しますか？」）を経て `DELETE` した。追加フォームから
+    `node_id` を選ぶ／空にする（全員）を試し、どちらも一覧に反映された。
+  - 組織の木（`/org?selected=coding-poc`）のノード詳細に「この人への永続の認可」が、そのノード宛て・全員宛て
+    両方を含めて表示された。
+  - light / dark 両方でスクリーンショットを取得。コンソールエラー・CSP 違反は 0 件。
+  - 検証中に taskd の `pending=false` フィルタの不具合を発見した（上記「判断したこと」「未解決事項」参照）。
+    また、この偽ワーカーは毎回 `question` で終わる設定にしたため、1 件答えるとタスクが再度実行されてほぼ同じ
+    質問がすぐに新しい `approvals` として現れる（実機の仕様どおりの挙動で、GUI のバグではない）。
+- e2e（`pnpm e2e`）は運用中の taskd / GUI（7700/7710）と衝突するため今回も実行していない（上記は別ポートの
+  使い捨て環境で行った。G13b-2 までと同じ扱い）。
+
+### 未解決事項
+
+- G13d-U1: **`GET /approvals?pending=false` が絞り込まない**（`docs/taskd-requests.md` R5）。GUI 側は
+  `decision` の有無で分けて回避済みだが、taskd 側が直ればクエリでの絞り込みに戻せる。
+  現状の実装のままでも実害は無い（`Approval.decision` は仕様どおりのフィールド）。
+  現状データ量が少ない前提（`GET /approvals` 全件取得）なので、件数が増えたときはページング等の検討が要る
+  （taskd 側に `?limit=`/`?before=` 等が無い。今回は範囲外）。
+- G13d-U2: DOM を描画する unit テストが無い（G10-U1 と同じ）。3 つのボタンの出し分け・`<details>` の開閉・
+  Markdown 描画は純粋関数のテストと Playwright の目視でのみ確認している。
+- G13d-U3: `/artifacts`（G13c）は別の担当が並行して作業中のため触っていない。
+
+### 提案（`docs/taskd-api-v1.md` への変更提案。採否は人間）
+
+- G13d-P1: `docs/taskd-requests.md` R5 のとおり、`GET /approvals?pending=false` を
+  `decision IS NOT NULL` で絞り込むよう直してほしい。直り次第 GUI 側は 2 回呼び（`pending=true` / `pending=false`）に
+  戻し、`GET /approvals` 全件取得をやめられる。

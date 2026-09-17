@@ -8,7 +8,7 @@ import {
   deleteOrgNode,
   patchOrgNode,
 } from "~/taskd/org-admin.server";
-import type { OrgList, OrgNode, ProjectDetail, ProjectList } from "~/taskd/types";
+import type { OrgList, OrgNode, ProjectDetail, ProjectList, StandingRuleList } from "~/taskd/types";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
@@ -157,6 +157,46 @@ describe("loadOrg", () => {
     const result = await loadOrg(client, new Request("http://gui.invalid/org"));
     expect(result.genres).toEqual([]);
     expect(result.workload).toEqual({});
+  });
+
+  it("?selected= が無ければ GET /standing-rules を呼ばない（standingRules は空）", async () => {
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, { genres: [] }));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+
+    const result = await loadOrg(client, new Request("http://gui.invalid/org"));
+    expect(result.standingRules).toEqual([]);
+    expect(mock.requests.some((r) => r.url.startsWith("/api/v1/standing-rules"))).toBe(false);
+  });
+
+  it("?selected=<node> があれば GET /standing-rules?node=<node> を呼ぶ（ADR-0033 D5、§3.58）", async () => {
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, { genres: [] }));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/standing-rules", (_req, res) =>
+      sendJson(res, 200, {
+        items: [{ id: "s1", node_id: "coding-poc", rule: "毎回聞かずに進めてよい", created_at: "…" }],
+      } satisfies StandingRuleList),
+    );
+
+    const result = await loadOrg(client, new Request("http://gui.invalid/org?selected=coding-poc"));
+    expect(result.standingRules).toEqual([
+      { id: "s1", node_id: "coding-poc", rule: "毎回聞かずに進めてよい", created_at: "…" },
+    ]);
+    const req = mock.requests.find((r) => r.url.startsWith("/api/v1/standing-rules"));
+    expect(req?.url).toContain("node=coding-poc");
+  });
+
+  it("GET /standing-rules が失敗しても組織は返す（standingRules は空になる）", async () => {
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, { genres: [] }));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/standing-rules", (_req, res) =>
+      sendProblem(res, { status: 500, code: "internal", detail: "boom" }),
+    );
+
+    const result = await loadOrg(client, new Request("http://gui.invalid/org?selected=coding-poc"));
+    expect(result.standingRules).toEqual([]);
   });
 });
 
