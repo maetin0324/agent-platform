@@ -2659,3 +2659,21 @@ B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_po
 - U14-1: codex のログイン完了は毎 tick のポーリングで検知する（ADR-0025 は「終了を待つ」とだけ書いている。実装は非ブロッキング。挙動は同じ）。
 - U14-2: 実アカウントでの codex の run（上記 6 の未確認部分）。
 - U13-1（継続）: Reviewer run の起動失敗はプールでもアカウント側の cooldown になりうる。
+
+## Phase 14 の不具合修正（人からの報告。2026-09-17）
+
+**報告**: 「codex ログインの際に GUI 側でデバイス ID が表示されません」→ 続報「`command-line` の文字列がデバイスコードとして表示されています」。
+
+- **原因**: `codex login --device-auth` の出力から一回限りのコードを取り出す処理が、「英数字 - 英数字（各 3〜8 文字）」の**最初の一致**を拾っていた。
+  codex は起動時に `OpenAI's command-line coding agent` というバナーを出すため、本物のコードより先に **`command-line`** が一致していた
+  （スタブはコードを文中に出していたので、e2e でもすり抜けた）。
+- **修正**: 実機の形に合わせ、**行全体がコードである行**だけを見る（大文字か数字の塊を `-` でつないだもの。各塊 3〜8 文字）。
+  実機の形は `ABCD-1EFGH`（`crates/task-worker/src/codex_account.rs` の `extract_device_code` / `is_device_code`）。
+  回帰テスト 2 件（実機の出力そのままの文面、`command-line` / `one-time` / パスを拒否）と、e2e のスタブを実機と同じ形
+  （バナー + URL の行 + コードは単独行）に直した。
+- **もう 1 つの不具合（同じ報告の調査中に判明）**: ログインが進行中の間は GUI の「ログイン」ボタンが消えるため、
+  画面を開き直してコードを失うとやり直せなかった。表示できるコードが無いときは「ログインをやり直す」を出すようにした。
+- **証拠**: `cargo test --workspace` **638 passed / 0 failed**、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、
+  GUI は `pnpm typecheck` / `pnpm test`（192 passed）/ `pnpm build` 通過。実機: 運用中の taskd を入れ替えて
+  `POST /accounts/<id>/login?adapter=codex` が `AAAA-9AAAA` 形のコードを返し、GUI の画面にも大きな等幅で表示されることを
+  ブラウザで確認（`account-login-user-code`）。

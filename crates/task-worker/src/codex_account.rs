@@ -370,27 +370,25 @@ fn extract_device_url(bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// エスケープを除いた出力から、`ABCD-EFGHI` の形（英数字-英数字、両側とも 3〜8 文字）の一回限りのコードを探す。
+/// エスケープを除いた出力から、一回限りのコード（実測の形: `ABCD-1EFGH`）を探す。
+///
+/// **行全体がコードである行**だけを見る。codex は起動時に `OpenAI's command-line coding agent` という
+/// バナーを出すので、文中の「英数字-英数字」（`command-line`）を拾ってしまう（実機で発覚）。
+/// 本物のコードは大文字と数字だけで、単独の行に出る。
 fn extract_device_code(bytes: &[u8]) -> Option<String> {
     let stripped = strip_escape_codes(bytes);
-    for token in stripped.split(|c: char| c.is_whitespace()) {
-        let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
-        let Some((a, b)) = trimmed.split_once('-') else {
-            continue;
-        };
-        if a.is_empty()
-            || b.is_empty()
-            || b.contains('-')
-            || !a.chars().all(|c| c.is_ascii_alphanumeric())
-            || !b.chars().all(|c| c.is_ascii_alphanumeric())
-            || !(3..=8).contains(&a.len())
-            || !(3..=8).contains(&b.len())
-        {
-            continue;
-        }
-        return Some(format!("{a}-{b}"));
+    stripped.lines().map(str::trim).find(|line| is_device_code(line)).map(str::to_string)
+}
+
+/// `ABCD-1EFGH` の形（大文字か数字の塊を `-` でつないだもの。各塊 3〜8 文字、塊は 2〜3 個）。
+fn is_device_code(line: &str) -> bool {
+    let parts: Vec<&str> = line.split('-').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return false;
     }
-    None
+    parts.iter().all(|part| {
+        (3..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    })
 }
 
 #[cfg(test)]
@@ -624,6 +622,35 @@ sleep 30
     fn extract_device_code_ignores_the_url_and_finds_the_code() {
         let text = b"Visit https://auth.openai.com/codex/device and enter\nABCD-EFGHI\n";
         assert_eq!(extract_device_code(text).as_deref(), Some("ABCD-EFGHI"));
+    }
+
+    /// 実機（codex-cli 0.154.0）の出力そのまま。バナーの `command-line` を拾ってはいけない（人からの報告で発覚）。
+    #[test]
+    fn extract_device_code_skips_the_banner_and_takes_the_standalone_code_line() {
+        let text = concat!(
+            "\n  Welcome to Codex [v0.154.0]\n",
+            "  OpenAI's command-line coding agent\n\n",
+            "Follow these steps to sign in with ChatGPT using device code authorization:\n\n",
+            "1. Open this link in your browser and sign in to your account\n",
+            "   https://auth.openai.com/codex/device\n\n",
+            "2. Enter this one-time code (expires in 15 minutes)\n",
+            "   QWER-1TYUI\n\n",
+            "Continue only if you started this login in Codex.\n",
+        )
+        .as_bytes();
+        assert_eq!(extract_device_code(text).as_deref(), Some("QWER-1TYUI"));
+    }
+
+    /// 文中の小文字の「英数字-英数字」（`command-line` / `one-time` / パス）は候補にしない。
+    #[test]
+    fn extract_device_code_ignores_hyphenated_words_in_prose() {
+        for text in [
+            &b"OpenAI's command-line coding agent\n"[..],
+            &b"2. Enter this one-time code (expires in 15 minutes)\n"[..],
+            &b"codex_home: /tmp/claude-1001/-home-rmaeda/workspace-agent\n"[..],
+        ] {
+            assert_eq!(extract_device_code(text), None, "should not match: {}", String::from_utf8_lossy(text));
+        }
     }
 
     #[test]

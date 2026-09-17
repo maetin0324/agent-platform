@@ -106,8 +106,13 @@ impl Env {
             r#"#!/bin/sh
 set -u
 if [ "${1:-}" = "login" ] && [ "${2:-}" = "--device-auth" ]; then
-  printf 'Open this URL: https://auth.openai.com/codex/device\n'
-  printf 'Then enter code: ABCD-EFGHI\n'
+  # 実機（codex-cli 0.154.0）と同じ形: バナー（`command-line` を含む）、URL の行、コードは単独の行。
+  printf '\n  Welcome to Codex [v0.154.0]\n'
+  printf "  OpenAI's command-line coding agent\n\n"
+  printf '1. Open this link in your browser and sign in to your account\n'
+  printf '   https://auth.openai.com/codex/device\n\n'
+  printf '2. Enter this one-time code (expires in 15 minutes)\n'
+  printf '   ABCD-EFGHI\n\n'
   sleep 0.2
   printf '%s' '{}' > "$CODEX_HOME/auth.json"
   exit 0
