@@ -105,6 +105,7 @@ model = "fake"
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         };
         self.store.insert(&task).unwrap();
@@ -296,7 +297,8 @@ echo '{"type":"done","summary":"attempt '"$N"'","evidence":[{"criterion":0,"comm
     assert!(run0.contains(r#""prior_review":[]"#));
     assert!(run1.contains(r#""prior_review":[{"criterion":0,"pass":false"#), "{run1}");
     assert!(run1.contains(r#""attempts":1"#));
-    assert!(run1.starts_with(r#"{"type":"run","protocol":2"#));
+    // ADR-0027 D1: protocol は 3（context.available_genres / task.genre / delegate の genre を追加）。
+    assert!(run1.starts_with(r#"{"type":"run","protocol":3"#));
     env.replay_is_consistent();
 }
 
@@ -328,6 +330,7 @@ fn expired_lease_is_reclaimed_and_task_completes() {
         created_at: now,
         updated_at: now,
         role: None,
+        genre: None,
         aggregate: false,
     };
     env.store.insert(&task).unwrap();

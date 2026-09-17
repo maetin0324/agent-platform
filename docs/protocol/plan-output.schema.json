@@ -103,6 +103,13 @@
           },
           "type": "array"
         },
+        "genre": {
+          "description": "ADR-0028 D3: 子の分野名（任意）。明示 > `role` の分野（`roles` に含む分野がちょうど 1 つのとき）>\n親の分野の順で解決する（ADR-0027 D1 の委譲と同じ規則）。`genre` を指定して知らない分野、または\n`role` と両方指定してその役割がその分野の `roles` に無ければ、Plan run は失敗する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/NewTaskKind",
           "default": "execute"

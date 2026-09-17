@@ -284,7 +284,9 @@ fn taskctl_plan_generates_children_that_complete_after_human_approval() {
     assert_eq!(by_title("C").depends_on, vec![by_title("A").id]);
     assert_eq!(by_title("D").depends_on, vec![by_title("B").id, by_title("C").id]);
     assert_eq!(by_title("C").worker_hint.tier, Tier::Cheap);
-    assert_eq!(by_title("A").worker_hint.tier, Tier::Standard);
+    // ADR-0028 D3: `tier` を指定していない子は、役割・分野の既定も無ければ親（Plan）の tier を継ぐ
+    // （委譲と同じ規則。以前は独立した既定 `Standard` だった）。
+    assert_eq!(by_title("A").worker_hint.tier, Tier::Frontier);
     let ls = env.taskctl(&["ls", "--status", "draft"]);
     assert_eq!(ls.lines().count(), 4, "{ls}");
     let tree = env.taskctl(&["ls", "--tree"]);

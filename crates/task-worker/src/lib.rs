@@ -10,6 +10,7 @@ pub mod codex;
 pub mod codex_account;
 pub mod delegate_file;
 pub mod fake;
+pub mod paperqa;
 pub mod protocol;
 pub mod provider;
 pub mod subprocess;
@@ -28,9 +29,10 @@ pub use codex::{CodexAdapter, CodexConfig};
 pub use codex_account::{CodexLoginSession, check_account_codex, start_login_codex};
 pub use delegate_file::{DELEGATE_FILE, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
+pub use paperqa::{PaperQaAdapter, PaperQaConfig};
 pub use protocol::{
-    Answer, ChildSummary, Evidence, PROTOCOL_VERSION, PriorReview, ProviderFailure, ReviewOutput, ReviewRequest,
-    ReviewVerdictOut, RoleContext, RunContext, RunRequest, WorkerMessage,
+    Answer, ChildSummary, Evidence, GenreContext, GenreRoleContext, PROTOCOL_VERSION, PriorReview, ProviderFailure,
+    ReviewOutput, ReviewRequest, ReviewVerdictOut, RoleContext, RunContext, RunRequest, WorkerMessage,
 };
 pub use provider::classify_provider_failure;
 pub use subprocess::{SubprocessSpec, run_subprocess};

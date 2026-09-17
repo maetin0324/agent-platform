@@ -27,10 +27,11 @@ const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_events_global_id.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_tasks_list_columns.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_tasks_objective_column.sql");
+const MIGRATION_0005: &str = include_str!("../migrations/0005_tasks_genre_column.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -95,6 +96,8 @@ pub struct ListFilter {
     pub statuses: Vec<Status>,
     /// 空なら kind で絞らない。
     pub kinds: Vec<TaskKind>,
+    /// ADR-0027 D1: 空なら genre で絞らない。完全一致（`kinds` と同じ形）。
+    pub genres: Vec<String>,
     pub parent_id: Option<TaskId>,
     /// true なら `parent_id IS NULL` のタスクのみ（`parent_id` フィルタとは独立に AND で効く）。
     pub root_only: bool,
@@ -209,6 +212,13 @@ fn filter_predicate(filter: &ListFilter) -> (String, Vec<SqlValue>) {
         clauses.push(format!("kind IN ({placeholders})"));
         for k in &filter.kinds {
             params.push(SqlValue::Text(kind_str(*k).to_string()));
+        }
+    }
+    if !filter.genres.is_empty() {
+        let placeholders = vec!["?"; filter.genres.len()].join(", ");
+        clauses.push(format!("genre IN ({placeholders})"));
+        for g in &filter.genres {
+            params.push(SqlValue::Text(g.clone()));
         }
     }
     if filter.root_only {
@@ -514,6 +524,7 @@ impl SqliteStore {
             2 => Ok(MIGRATION_0002),
             3 => Ok(MIGRATION_0003),
             4 => Ok(MIGRATION_0004),
+            5 => Ok(MIGRATION_0005),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -578,8 +589,8 @@ impl SqliteStore {
         };
         conn.execute(
             "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
-             lease_worker_run_id, lease_expires_at, json, title, updated_at, objective) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             lease_worker_run_id, lease_expires_at, json, title, updated_at, objective, genre) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 task.id.to_string(),
                 status_str(task.status),
@@ -592,8 +603,9 @@ impl SqliteStore {
                 json,
                 task.title,
                 updated_at,
-                // objective は作成後に変わらないので、列を書くのは挿入時だけ（ADR-0014 D2）。
+                // objective / genre は作成後に変わらないので、列を書くのは挿入時だけ（ADR-0014 D2, ADR-0027 D1）。
                 task.objective,
+                task.genre,
             ],
         )?;
         Ok(())
@@ -1361,6 +1373,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         }
     }
@@ -2282,6 +2295,67 @@ mod tests {
         assert_eq!(applied_before, applied_after, "second open must not re-apply migrations");
     }
 
+    /// ADR-0027 D1: 版数 4 の DB（`genre` 列が無い）を `open` すると版数 5 に上がり、
+    /// 既存行は `genre` 列が `NULL`（= `Task::genre == None`）のまま読める。0003/0004 の
+    /// マイグレーションテストと同じ形（生の SQL で旧スキーマを作ってから `open` する）。
+    #[test]
+    fn open_migrates_schema_4_db_and_old_rows_read_back_with_genre_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema4.sqlite3");
+        let task = sample_task(Status::Draft);
+        assert!(task.genre.is_none());
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            conn.execute_batch(MIGRATION_0002).unwrap();
+            conn.execute_batch(MIGRATION_0003).unwrap();
+            conn.execute_batch(MIGRATION_0004).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
+                 INSERT INTO schema_migrations (version, applied_at) VALUES \
+                 (1, '2020-01-01T00:00:00Z'), (2, '2020-01-01T00:00:00Z'), \
+                 (3, '2020-01-01T00:00:00Z'), (4, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+            // 版数 4 の列（genre はまだ無い）で直接挿入する。
+            let json = serde_json::to_string(&task).unwrap();
+            let created_at = format_rfc3339(task.created_at).unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
+                 lease_worker_run_id, lease_expires_at, json, title, updated_at, objective) \
+                 VALUES (?1,?2,?3,?4,?5,?6,NULL,NULL,?7,?8,?9,?10)",
+                params![
+                    task.id.to_string(),
+                    status_str(task.status),
+                    kind_str(task.kind),
+                    task.parent_id.map(|p| p.to_string()),
+                    task.priority,
+                    created_at,
+                    json,
+                    task.title,
+                    created_at,
+                    task.objective,
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+
+        let got = store.get(task.id).unwrap().expect("task still readable after migration");
+        assert_eq!(got.genre, None);
+        assert_eq!(got.objective, task.objective);
+
+        let genre_col: Option<String> = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row("SELECT genre FROM tasks WHERE id = ?1", params![task.id.to_string()], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(genre_col, None, "migration must not invent a genre for pre-existing rows");
+    }
+
     /// ADR-0013 D5: `schema_migrations` の最大版数がこのバイナリの `SCHEMA_VERSION` より大きい DB は
     /// `StoreError::SchemaTooNew` で開けない。
     #[test]
@@ -2507,6 +2581,34 @@ mod tests {
         assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), vec![by_objective.id]);
         let f = ListFilter { text_contains: Some("BILLING".to_string()), ..Default::default() };
         assert_eq!(store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap().total, 1);
+    }
+
+    /// ADR-0027 D1: `genre` は `kind` と同じ形（完全一致、複数は OR）で絞り込める。
+    #[test]
+    fn list_page_filters_by_genre() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut coding = task_with("write code", Status::Ready, TaskKind::Execute, 0, None);
+        coding.genre = Some("coding".to_string());
+        store.insert(&coding).unwrap();
+        let mut literature = task_with("survey papers", Status::Ready, TaskKind::Execute, 0, None);
+        literature.genre = Some("literature".to_string());
+        store.insert(&literature).unwrap();
+        let no_genre = task_with("no genre", Status::Ready, TaskKind::Execute, 0, None);
+        store.insert(&no_genre).unwrap();
+
+        let f = ListFilter { genres: vec!["coding".to_string()], ..Default::default() };
+        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), vec![coding.id]);
+        assert_eq!(page.total, 1);
+
+        let f = ListFilter {
+            genres: vec!["coding".to_string(), "literature".to_string()],
+            ..Default::default()
+        };
+        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
+        assert_eq!(ids, [coding.id, literature.id].into_iter().collect());
+        assert_eq!(page.total, 2);
     }
 
     /// ADR-0013 D10: 3 つの並び順。`updated_at` は遷移後に変わるので `UpdatedDesc` の順序も変わる。

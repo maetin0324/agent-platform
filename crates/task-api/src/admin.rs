@@ -156,6 +156,10 @@ pub struct ProviderConfigFile {
     /// 上と同じ（引数）。
     #[serde(default)]
     pub args: Option<Vec<String>>,
+    /// ADR-0027 D3: `adapter = "paperqa"` のときだけ意味を持つ、PaperQA 設定ファイルの上書き。
+    /// **管理 API はこのフィールドを読み書きしない**（`command`/`args` と同じ理由・同じ扱い）。
+    #[serde(default)]
+    pub settings: Option<String>,
 }
 
 impl ProviderConfigFile {
@@ -210,10 +214,11 @@ impl ProviderCreateBody {
             model: self.model.unwrap_or_default(),
             env: self.env,
             account_pool: self.account_pool,
-            // ADR-0026 D7: 管理 API は command/args を書かない（`create` された行は必ず `None`。人が後から
-            // ファイルへ足す）。
+            // ADR-0026 D7 / ADR-0027 D3: 管理 API は command/args/settings を書かない（`create` された行は
+            // 必ず `None`。人が後からファイルへ足す）。
             command: None,
             args: None,
+            settings: None,
         }
     }
 }
@@ -256,7 +261,7 @@ impl ProviderPatchBody {
     }
 }
 
-pub const KNOWN_ADAPTERS: [&str; 4] = ["fake", "claude-code", "codex", "acp"];
+pub const KNOWN_ADAPTERS: [&str; 5] = ["fake", "claude-code", "codex", "acp", "paperqa"];
 
 /// ファイル名に安全に使える id か（`providers.d/<id>.toml` のパストラバーサル防止）。
 pub fn valid_provider_id(id: &str) -> bool {
@@ -357,6 +362,7 @@ mod tests {
             account_pool: false,
             command: None,
             args: None,
+            settings: None,
         };
         let patch = ProviderPatchBody {
             concurrency: Some(5),
@@ -386,6 +392,7 @@ mod tests {
             account_pool: true,
             command: None,
             args: None,
+            settings: None,
         };
         write_provider_file(dir.path(), &file).unwrap_or_else(|e| panic!("write: {e}"));
         let read = read_provider_file(&provider_file_path(dir.path(), "acct-b")).unwrap_or_else(|e| panic!("read: {e}"));
@@ -410,6 +417,7 @@ mod tests {
             account_pool: false,
             command: Some("opencode".into()),
             args: Some(vec!["acp".into()]),
+            settings: None,
         };
         write_provider_file(dir.path(), &file).unwrap_or_else(|e| panic!("write: {e}"));
 

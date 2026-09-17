@@ -1,0 +1,62 @@
+{
+  "llm": "openai/qwen3.8-27b",
+  "llm_config": {
+    "model_list": [
+      {
+        "model_name": "openai/qwen3.8-27b",
+        "litellm_params": {
+          "model": "openai/qwen3.8-27b",
+          "api_base": "http://127.0.0.1:18000/v1",
+          "api_key": "unused",
+          "timeout": 900,
+          "num_retries": 1
+        }
+      }
+    ]
+  },
+  "summary_llm": "openai/qwen3.8-27b",
+  "summary_llm_config": {
+    "model_list": [
+      {
+        "model_name": "openai/qwen3.8-27b",
+        "litellm_params": {
+          "model": "openai/qwen3.8-27b",
+          "api_base": "http://127.0.0.1:18000/v1",
+          "api_key": "unused",
+          "timeout": 900,
+          "num_retries": 1
+        }
+      }
+    ]
+  },
+  "embedding": "sparse",
+  "temperature": 0.0,
+  "answer": {
+    "evidence_k": 6,
+    "answer_max_sources": 5,
+    "max_concurrent_requests": 2
+  },
+  "parsing": {
+    "use_doc_details": false
+  },
+  "agent": {
+    "agent_llm": "openai/qwen3.8-27b",
+    "agent_llm_config": {
+      "model_list": [
+        {
+          "model_name": "openai/qwen3.8-27b",
+          "litellm_params": {
+            "model": "openai/qwen3.8-27b",
+            "api_base": "http://127.0.0.1:18000/v1",
+            "api_key": "unused",
+            "timeout": 900,
+            "num_retries": 1
+          }
+        }
+      ]
+    },
+    "agent_type": "fake",
+    "search_count": 6,
+    "timeout": 3000
+  }
+}

@@ -179,20 +179,21 @@ async fn read_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Re
     serde_json::from_slice(text).map_err(|e| ApiProblem::bad_request(format!("invalid JSON body: {e}")))
 }
 
-/// ADR-0026 D7: `command`/`args` は `[[providers]]`/`providers.d/*.toml` の行にしか書けない。実行するコマンドを
-/// HTTP から差し替えられると `[api]` のトークンだけで任意コマンド実行に道が開くので、`POST /providers` と
-/// `PATCH /providers/{id}` の本文にこのどちらかのキーがあれば、値の型や中身を見る前に拒否する。
+/// ADR-0026 D7 / ADR-0027 D3: `command`/`args`/`settings` は `[[providers]]`/`providers.d/*.toml` の行にしか
+/// 書けない。実行するコマンドを HTTP から差し替えられると `[api]` のトークンだけで任意コマンド実行に道が
+/// 開くので、`POST /providers` と `PATCH /providers/{id}` の本文にこのいずれかのキーがあれば、値の型や
+/// 中身を見る前に拒否する。
 fn reject_provider_command_and_args(map: &serde_json::Map<String, serde_json::Value>) -> Result<(), ApiProblem> {
-    if map.contains_key("command") || map.contains_key("args") {
+    if map.contains_key("command") || map.contains_key("args") || map.contains_key("settings") {
         return Err(ApiProblem::invalid_provider(
-            "command and args cannot be set through the admin API; edit providers.d/<id>.toml by hand (ADR-0026 D7)",
+            "command, args, and settings cannot be set through the admin API; edit providers.d/<id>.toml by hand (ADR-0026 D7, ADR-0027 D3)",
         ));
     }
     Ok(())
 }
 
-/// `read_json` と同じだが、先に §ADR-0026 D7 の `command`/`args` 拒否を通す（`ProviderCreateBody`/
-/// `ProviderPatchBody` はこのキーを知らないので、素の `read_json` では黙って無視されてしまう）。
+/// `read_json` と同じだが、先に §ADR-0026 D7 / ADR-0027 D3 の `command`/`args`/`settings` 拒否を通す
+/// （`ProviderCreateBody`/`ProviderPatchBody` はこのキーを知らないので、素の `read_json` では黙って無視されてしまう）。
 async fn read_provider_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Result<T, ApiProblem> {
     let bytes = read_body(body).await?;
     let text: &[u8] = if empty_is_object && bytes.iter().all(u8::is_ascii_whitespace) {
@@ -288,7 +289,7 @@ async fn inbox(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRes
 async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     let query = QueryParams::parse(
         raw.as_deref(),
-        &["status", "kind", "parent", "root_only", "q", "order", "limit", "cursor"],
+        &["status", "kind", "genre", "parent", "root_only", "q", "order", "limit", "cursor"],
     )?;
     let mut filter = ListFilter::default();
     for status in query.list("status") {
@@ -296,6 +297,10 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
     }
     for kind in query.list("kind") {
         filter.kinds.push(parse_snake::<TaskKind>("kind", kind)?);
+    }
+    // ADR-0027 D1: `genre` は自由記述なので `kind` と違って列挙型の検証はしない（完全一致だけ）。
+    for genre in query.list("genre") {
+        filter.genres.push(genre.to_string());
     }
     filter.parent_id = query.task_id("parent")?;
     filter.root_only = query.bool("root_only")?.unwrap_or(false);
@@ -343,11 +348,15 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
 async fn create_task(State(state): State<ApiState>, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
     no_query(&raw)?;
     let spec: NewTaskSpec = read_json(body, false).await?;
-    // ADR-0016 M3: 省略された tier / adapter / 予算は `[[roles]]` の既定 → 全体の既定で埋める。
+    // ADR-0016 M3 / ADR-0027 D1: 省略された tier / adapter / 予算は `[[roles]]` の既定 → `[[genres]]` の
+    // `default_role` の既定 → 全体の既定で埋める。API は常に完全な設定を持つので、`genres` が設定されて
+    // いれば知らない `genre` / `genre` と `role` の不整合は常に検証する（taskctl の「`--config` 無し」の
+    // 緩さはここには無い）。
     let roles = state.inner.roles.clone();
+    let genres = state.inner.genres.clone();
     let task = state
         .blocking(move |store| {
-            task_ops::add::create_task_with_roles(store, spec, &roles, OffsetDateTime::now_utc())
+            task_ops::add::create_task_with_roles(store, spec, &roles, &genres, OffsetDateTime::now_utc())
                 .map_err(|e| ops_problem(store, e, None))
         })
         .await?;
@@ -825,7 +834,9 @@ async fn create_provider(State(state): State<ApiState>, headers: HeaderMap, RawQ
         ));
     }
     if !valid_adapter(&create.adapter) {
-        return Err(ApiProblem::bad_request("adapter must be one of fake, claude-code, codex, acp"));
+        return Err(ApiProblem::bad_request(
+            "adapter must be one of fake, claude-code, codex, acp, paperqa",
+        ));
     }
     if create.concurrency.is_some_and(|c| c == 0) {
         return Err(ApiProblem::bad_request("concurrency must be >= 1"));
@@ -1450,6 +1461,7 @@ mod tests {
                 providers: vec![],
                 clusters: vec![],
                 roles: vec![],
+                genres: vec![],
                 delegation: task_core::DelegationLimits::default(),
                 api: ApiConfigView {
                     bind: "127.0.0.1:7710".into(),
@@ -1458,6 +1470,7 @@ mod tests {
                 },
             },
             roles: vec![],
+            genres: vec![],
             taskd_version: "test".into(),
             instance_id: "01J00000000000000000000000".into(),
             started_at: "2026-09-14T00:00:00Z".into(),

@@ -570,6 +570,13 @@
           },
           "type": "array"
         },
+        "genre": {
+          "description": "ADR-0027 D1: 分野名（自由記述。`[[genres]] id` と一致すれば既定の役割・プロンプトの説明が効く）。\n状態機械は見ない。導入前のタスクには無いので任意。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "$ref": "#/$defs/TaskId"
         },

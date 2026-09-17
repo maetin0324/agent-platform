@@ -218,6 +218,9 @@ pub struct ConfigView {
     /// ADR-0016 D1: `[[roles]]` の要約（指示文の本文は出さない）。
     #[serde(default)]
     pub roles: Vec<RoleConfigView>,
+    /// ADR-0027 D1: `[[genres]]` の要約。
+    #[serde(default)]
+    pub genres: Vec<GenreConfigView>,
     /// ADR-0016 D2: `[delegation]` の上限。
     #[serde(default)]
     pub delegation: task_core::DelegationLimits,
@@ -234,6 +237,25 @@ pub struct RoleConfigView {
     pub max_wall_secs: Option<u64>,
     /// 指示文が 1 文字以上あるか（中身は出さない）。
     pub has_instructions: bool,
+}
+
+/// `[[genres]]` 1 行の要約（ADR-0027 D1, ADR-0028 D1）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GenreConfigView {
+    pub id: String,
+    pub description: String,
+    /// ADR-0028 D1: この分野で「できること」の自由記述。空なら省略される。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// ADR-0028 D1: この分野に渡すもの（目安）。空なら省略される。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_artifacts: Vec<String>,
+    /// ADR-0028 D1: この分野から返るもの（目安）。空なら省略される。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_artifacts: Vec<String>,
+    pub default_role: Option<String>,
+    /// この分野に属する役割 id の一覧。
+    pub roles: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

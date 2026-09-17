@@ -3,7 +3,7 @@
 //! （`validate_each`）にある。I/O は `TaskStore` の読み取りだけ。LLM 呼び出し・挿入は無い
 //! （挿入は `TaskStore::delegate_children` が行う）。
 
-use task_core::{DelegateDep, DelegateTask, DelegationLimits, RoleSpec, Status, Task, TaskId, TaskStore};
+use task_core::{DelegateDep, DelegateTask, DelegationLimits, GenreSpec, RoleSpec, Status, Task, TaskId, TaskStore};
 use time::OffsetDateTime;
 
 use crate::OpsError;
@@ -101,13 +101,17 @@ pub fn ancestors(store: &dyn TaskStore, task: &Task) -> Result<Vec<TaskId>, OpsE
     Ok(out)
 }
 
-/// ADR-0016 D2 / M6 / M7: 実行中の委譲の検証。`already_delegated_this_run` は同じ run で既に受け入れた件数。
+/// ADR-0016 D2 / M6 / M7, ADR-0027 D1: 実行中の委譲の検証。`already_delegated_this_run` は同じ run で
+/// 既に受け入れた件数。`genres` は `genre`（分野）の解決・検証に使う（未知の `genre`、`role` と組み合わせた
+/// ときの不整合は `task_core::validate_each` が拒否する）。
+#[allow(clippy::too_many_arguments)]
 pub fn plan_delegation(
     store: &dyn TaskStore,
     parent: &Task,
     proposals: &[DelegateTask],
     already_delegated_this_run: usize,
     roles: &[RoleSpec],
+    genres: &[GenreSpec],
     limits: &DelegationLimits,
     now: OffsetDateTime,
 ) -> Result<DelegationOutcome, OpsError> {
@@ -145,7 +149,7 @@ pub fn plan_delegation(
     }
 
     // 2. ストアを見ない検証。
-    let each = task_core::validate_each(proposals);
+    let each = task_core::validate_each(proposals, genres);
 
     // 3. ID 依存の検証（ストアを見る）。
     let ancestor_ids = ancestors(store, parent)?;
@@ -216,7 +220,7 @@ pub fn plan_delegation(
     }
 
     // 5. 組み立て。
-    let accepted = task_core::materialize_delegated(parent, proposals, &accepted_indices, roles, now);
+    let accepted = task_core::materialize_delegated(parent, proposals, &accepted_indices, roles, genres, now);
 
     Ok(DelegationOutcome { accepted, rejected })
 }
@@ -245,6 +249,7 @@ mod tests {
                 },
             }],
             role: None,
+            genre: None,
             depends_on: deps,
             tier: None,
         }
@@ -278,6 +283,7 @@ mod tests {
             created_at: t,
             updated_at: t,
             role: None,
+            genre: None,
             aggregate: false,
         }
     }
@@ -305,12 +311,53 @@ mod tests {
         let b = dt("b", vec![DelegateDep::Index(0)]);
         let proposals = vec![a, b];
 
-        let out = plan_delegation(&store, &parent, &proposals, 0, &roles, &DelegationLimits::default(), now())
+        let out = plan_delegation(&store, &parent, &proposals, 0, &roles, &[], &DelegationLimits::default(), now())
             .expect("plan_delegation");
         assert_eq!(out.accepted.len(), 2);
         assert!(out.rejected.is_empty());
         assert_eq!(out.accepted[0].worker_hint.tier, Tier::Cheap);
         assert_eq!(out.accepted[1].depends_on, vec![out.accepted[0].id]);
+    }
+
+    /// ADR-0027 D1: `plan_delegation` は分野を解決し（役割の分野が一意なら継ぐ）、`genre` を指定した
+    /// タスクの `role` がその分野に無ければ拒否する。unrelated_genre はここまでの検証を通っても
+    /// role/genre の不整合で落ちる。
+    #[test]
+    fn plan_delegation_resolves_genre_and_rejects_role_genre_mismatch() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut parent = make_task(None, Status::Running);
+        parent.genre = Some("coding".into());
+        insert(&store, &parent);
+
+        let genres = vec![task_core::GenreSpec {
+            id: "literature".into(),
+            description: "survey".into(),
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-scout".into(), "literature-reader".into()],
+            ..task_core::GenreSpec::default()
+        }];
+
+        // 1. role だけ指定: 分野が一意に決まるので "literature" を継ぐ。
+        let mut by_role = dt("by-role", vec![]);
+        by_role.role = Some("literature-scout".into());
+        // 2. genre と role が矛盾: 拒否される。
+        let mut mismatched = dt("mismatched", vec![]);
+        mismatched.genre = Some("literature".into());
+        mismatched.role = Some("implementer".into());
+        // 3. 何も指定しない: 親の分野 "coding" を継ぐ。
+        let inherits = dt("inherits", vec![]);
+
+        let proposals = vec![by_role, mismatched, inherits];
+        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &genres, &DelegationLimits::default(), now())
+            .expect("plan_delegation");
+        assert_eq!(out.accepted.len(), 2);
+        assert_eq!(out.accepted[0].title, "by-role");
+        assert_eq!(out.accepted[0].genre.as_deref(), Some("literature"));
+        assert_eq!(out.accepted[1].title, "inherits");
+        assert_eq!(out.accepted[1].genre.as_deref(), Some("coding"));
+        assert_eq!(out.rejected.len(), 1);
+        assert!(out.rejected[0].contains("mismatched"), "{}", out.rejected[0]);
+        assert!(out.rejected[0].contains("is not one of genre"), "{}", out.rejected[0]);
     }
 
     #[test]
@@ -324,7 +371,7 @@ mod tests {
             ..DelegationLimits::default()
         };
         let proposals = vec![dt("a", vec![]), dt("b", vec![])];
-        let out = plan_delegation(&store, &parent, &proposals, 1, &[], &limits, now()).expect("plan_delegation");
+        let out = plan_delegation(&store, &parent, &proposals, 1, &[], &[], &limits, now()).expect("plan_delegation");
         assert_eq!(out.accepted.len(), 1);
         assert_eq!(out.rejected.len(), 1);
         assert!(out.rejected[0].contains("per-run delegation limit"), "{}", out.rejected[0]);
@@ -345,7 +392,7 @@ mod tests {
             ..DelegationLimits::default()
         };
         let proposals = vec![dt("a", vec![]), dt("b", vec![])];
-        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &limits, now()).expect("plan_delegation");
+        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &[], &limits, now()).expect("plan_delegation");
         assert!(out.accepted.is_empty());
         assert_eq!(out.rejected.len(), 2);
         assert!(out.rejected[0].contains("tree depth would become 4"), "{}", out.rejected[0]);
@@ -410,7 +457,7 @@ mod tests {
             ..DelegationLimits::default()
         };
         let proposals = vec![dt("a", vec![])];
-        let out = plan_delegation(&store, &child, &proposals, 0, &[], &limits, now()).expect("plan_delegation");
+        let out = plan_delegation(&store, &child, &proposals, 0, &[], &[], &limits, now()).expect("plan_delegation");
         assert!(out.accepted.is_empty());
         assert_eq!(out.rejected.len(), 1);
         assert!(out.rejected[0].contains("tree already has 2 worker runs"), "{}", out.rejected[0]);
@@ -431,7 +478,7 @@ mod tests {
             dt("missing-ref", vec![DelegateDep::Id(missing_id.to_string())]),
             dt("ok", vec![]),
         ];
-        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &DelegationLimits::default(), now())
+        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &[], &DelegationLimits::default(), now())
             .expect("plan_delegation");
         assert_eq!(out.accepted.len(), 1);
         assert_eq!(out.accepted[0].title, "ok");
@@ -450,7 +497,7 @@ mod tests {
         insert(&store, &failed_dep);
 
         let proposals = vec![dt("a", vec![DelegateDep::Id(failed_dep.id.to_string())])];
-        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &DelegationLimits::default(), now())
+        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &[], &DelegationLimits::default(), now())
             .expect("plan_delegation");
         assert!(out.accepted.is_empty());
         assert_eq!(out.rejected.len(), 1);

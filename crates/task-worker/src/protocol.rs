@@ -6,11 +6,12 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{ArtifactRef, DelegateTask, Status, Task, TaskId, Usage};
+use task_core::{ArtifactRef, DelegateTask, GenreSpec, Status, Task, TaskId, Usage};
 
 /// `run.protocol`。v2（ADR-0016 M9）: `delegate` メッセージ、`context.role`、`context.children`、`task.role` / `task.aggregate` を追加。
-/// 全て追加のみで v1 のワーカーはそのまま動く。
-pub const PROTOCOL_VERSION: u32 = 2;
+/// v3（ADR-0027 D1）: `context.available_genres`、`task.genre`、`delegate` の `tasks[].genre` を追加。
+/// 全て追加のみで v1/v2 のワーカーはそのまま動く。
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// 直前のレビュー結果（`context.prior_review[]`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -46,6 +47,48 @@ pub struct RoleContext {
     /// 設定に指示文が無ければ空。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
+}
+
+/// `context.available_genres[].roles[]`（ADR-0027 D1）: 分野に属する役割の id。指示文までは渡さない
+/// （長くなりすぎるため。プロンプトに前置きされる指示文は `context.role` 側の役目）ので `description` は
+/// 今のところ常に省略だが、将来役割に説明文を持たせたときのために型としては残す。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GenreRoleContext {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// `context.available_genres[]`（ADR-0027 D1）: 委譲できる run に渡す、使える分野と役割の一覧。
+/// 「タスクの分野」ではなく「この run が子に割り当てられる分野の選択肢」を表す。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GenreContext {
+    pub id: String,
+    pub description: String,
+    /// ADR-0028 D1/D2: この分野で「できること」の自由記述。空なら省略される。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// ADR-0028 D1/D2: この分野に渡すもの（目安、自由記述）。空なら省略される。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_artifacts: Vec<String>,
+    /// ADR-0028 D1/D2: この分野から返るもの（目安、自由記述）。空なら省略される。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<GenreRoleContext>,
+}
+
+impl From<&GenreSpec> for GenreContext {
+    fn from(g: &GenreSpec) -> Self {
+        Self {
+            id: g.id.clone(),
+            description: g.description.clone(),
+            capabilities: g.capabilities.clone(),
+            input_artifacts: g.input_artifacts.clone(),
+            output_artifacts: g.output_artifacts.clone(),
+            roles: g.roles.iter().map(|id| GenreRoleContext { id: id.clone(), description: None }).collect(),
+        }
+    }
 }
 
 /// `context.children[]`（ADR-0016 D3 / M4）: 集約 run に渡す、委譲した子の要約。
@@ -84,6 +127,10 @@ pub struct RunContext {
     /// 集約 run（`aggregate = true` の親の、子が全て終端になった後の run）でのみ非空（ADR-0016 D3）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChildSummary>,
+    /// ADR-0027 D1: 委譲できる run（`build_execute_prompt` を使う run）にだけ、設定済みの分野と
+    /// その役割の一覧を渡す。委譲できない run（`Plan`/`Review`）や `[[genres]]` が空の設定では空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_genres: Vec<GenreContext>,
 }
 
 /// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは
@@ -242,13 +289,16 @@ pub(crate) mod tests {
     /// ADR-0016 D2: `delegate` は非終端で、`tasks` は `DelegateTask`。`depends_on` は整数と ID 文字列を混ぜられる。
     #[test]
     fn delegate_message_parses_and_is_not_terminal() {
-        let line = r#"{"type":"delegate","tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"role":"implementer"},
+        let line = r#"{"type":"delegate","tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"role":"implementer","genre":"coding"},
             {"title":"b","objective":"o","acceptance":[{"text":"c","check":{"type":"command","cmd":"true","expect_exit":0}}],"depends_on":[0]}]}"#;
         let m: WorkerMessage = serde_json::from_str(line).unwrap();
         assert!(!m.is_terminal());
         let WorkerMessage::Delegate { tasks } = m else { panic!("expected delegate") };
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].role.as_deref(), Some("implementer"));
+        // ADR-0027 D1: `genre` は任意。
+        assert_eq!(tasks[0].genre.as_deref(), Some("coding"));
+        assert_eq!(tasks[1].genre, None);
         assert_eq!(tasks[1].depends_on, vec![task_core::DelegateDep::Index(0)]);
     }
 
@@ -262,10 +312,51 @@ pub(crate) mod tests {
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["type"], "run");
-        assert_eq!(v["protocol"], 2);
+        assert_eq!(v["protocol"], 3);
         assert_eq!(v["task"]["kind"], "execute");
         let back: RunRequest = serde_json::from_value(v).unwrap();
         assert_eq!(back, req);
+    }
+
+    /// ADR-0027 D1: `available_genres` は空なら省略され、非空なら分野と役割の一覧が乗る。
+    #[test]
+    fn available_genres_round_trips_and_is_omitted_when_empty() {
+        let empty = RunContext::default();
+        let v = serde_json::to_value(&empty).unwrap();
+        assert!(v.get("available_genres").is_none());
+
+        let genres = [task_core::GenreSpec {
+            id: "literature".into(),
+            description: "related work survey".into(),
+            capabilities: vec!["academic literature search".into(), "citation graph traversal".into()],
+            input_artifacts: vec!["question".into(), "pdf".into()],
+            output_artifacts: vec!["answer.md".into(), "citations.json".into()],
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-scout".into(), "literature-reader".into()],
+        }];
+        let context = RunContext {
+            available_genres: genres.iter().map(GenreContext::from).collect(),
+            ..RunContext::default()
+        };
+        let v = serde_json::to_value(&context).unwrap();
+        assert_eq!(v["available_genres"][0]["id"], "literature");
+        assert_eq!(v["available_genres"][0]["roles"][1]["id"], "literature-reader");
+        assert_eq!(v["available_genres"][0]["capabilities"][1], "citation graph traversal");
+        assert_eq!(v["available_genres"][0]["input_artifacts"], serde_json::json!(["question", "pdf"]));
+        assert_eq!(v["available_genres"][0]["output_artifacts"], serde_json::json!(["answer.md", "citations.json"]));
+        let back: RunContext = serde_json::from_value(v).unwrap();
+        assert_eq!(back, context);
+
+        // 空なら 3 フィールドとも省略される（既存設定との互換）。
+        let bare_genre = task_core::GenreSpec {
+            id: "coding".into(),
+            description: "write and fix code".into(),
+            ..task_core::GenreSpec::default()
+        };
+        let bare_json = serde_json::to_value(GenreContext::from(&bare_genre)).unwrap();
+        assert!(bare_json.get("capabilities").is_none());
+        assert!(bare_json.get("input_artifacts").is_none());
+        assert!(bare_json.get("output_artifacts").is_none());
     }
 
     /// ADR-0003 D6: 生成スキーマとコミット済みファイルの一致。`UPDATE_SCHEMA=1` で再生成する。
@@ -303,6 +394,7 @@ pub(crate) mod tests {
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         }
     }

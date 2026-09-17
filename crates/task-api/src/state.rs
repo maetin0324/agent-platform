@@ -56,6 +56,8 @@ pub(crate) struct Inner {
     pub(crate) config_view: ConfigView,
     /// ADR-0016 M3: `POST /tasks` の省略値を埋める `[[roles]]`。
     pub(crate) roles: Vec<task_core::RoleSpec>,
+    /// ADR-0027 D1: `POST /tasks` の `genre` の検証・既定解決に使う `[[genres]]`。
+    pub(crate) genres: Vec<task_core::GenreSpec>,
     pub(crate) taskd_version: String,
     pub(crate) providers_dir: Option<std::path::PathBuf>,
     pub(crate) admin_tx: Option<tokio::sync::mpsc::Sender<crate::admin::AdminRequest>>,
@@ -92,6 +94,7 @@ impl ApiState {
             view: settings.view,
             config_view: settings.config_view,
             roles: settings.roles,
+            genres: settings.genres,
             taskd_version: settings.taskd_version,
             providers_dir: settings.providers_dir,
             admin_tx: settings.admin_tx,

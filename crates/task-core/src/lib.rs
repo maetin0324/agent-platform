@@ -13,8 +13,8 @@ pub use delegate::{
     DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, materialize_delegated, validate_each,
 };
 pub use model::{
-    ArtifactRef, Budget, Check, Criterion, Event, Lease, RoleSpec, RunRole, Status, Task, TaskId, TaskKind,
-    Tier, Usage, WorkerHint, WorkspaceSpec,
+    ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, Lease, RoleSpec, RunRole, Status, Task, TaskId,
+    TaskKind, Tier, Usage, WorkerHint, WorkspaceSpec,
 };
 pub use plan::{MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput};
 pub use store::{

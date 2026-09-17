@@ -39,9 +39,9 @@ pub use state::{ApiState, StreamTuning};
 pub use stats::classify_outcome;
 pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterView, Clusters,
-    ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, Health, Problem, ProviderConfigView,
-    ProviderStats, ProviderView, Providers, ReviewerConfigView, RoleConfigView, RunList, StreamHeartbeat, StreamHello,
-    StreamReset, ValidationError,
+    ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, GenreConfigView, Health, Problem,
+    ProviderConfigView, ProviderStats, ProviderView, Providers, ReviewerConfigView, RoleConfigView, RunList,
+    StreamHeartbeat, StreamHello, StreamReset, ValidationError,
 };
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
@@ -78,6 +78,9 @@ pub struct ApiSettings {
     pub config_view: ConfigView,
     /// ADR-0016 D1 / M3: `[[roles]]`。`POST /tasks` で省略された `tier` / `adapter` / 予算の既定に使う。
     pub roles: Vec<task_core::RoleSpec>,
+    /// ADR-0027 D1: `[[genres]]`。`POST /tasks` の `genre` の検証と役割の既定の解決に使う。API は常に
+    /// 完全な設定を持つので、ここが空でなければ知らない `genre` / `genre` と `role` の不整合は常に 422。
+    pub genres: Vec<task_core::GenreSpec>,
     pub taskd_version: String,
     /// ディスパッチャのスナップショットと同じ値。
     pub instance_id: String,
@@ -107,6 +110,7 @@ impl std::fmt::Debug for ApiSettings {
             .field("view", &self.view)
             .field("config_view", &self.config_view)
             .field("roles", &self.roles)
+            .field("genres", &self.genres)
             .field("taskd_version", &self.taskd_version)
             .field("instance_id", &self.instance_id)
             .field("started_at", &self.started_at)

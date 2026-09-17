@@ -78,6 +78,8 @@ pub struct TaskSummary {
     pub pending_children: u32,
     /// ADR-0016 D1 の `Task.role`（GUI-R2: 一覧の各行に役割のラベルを出すため。`TaskDetail.role` と同じ値）。
     pub role: Option<String>,
+    /// ADR-0027 D1 の `Task.genre`（`role` と同じ理由で一覧に出す。`TaskDetail.genre` と同じ値）。
+    pub genre: Option<String>,
     /// 今この状態で許される操作（ADR-0015 D4）。
     pub actions: Vec<Action>,
 }
@@ -101,6 +103,8 @@ pub struct TaskDetail {
     pub cluster: Option<String>,
     /// ADR-0016 D1: `Task.role`（GUI の表示用に最上位にも出す）。
     pub role: Option<String>,
+    /// ADR-0027 D1: `Task.genre`（`role` と同じ理由で最上位にも出す）。
+    pub genre: Option<String>,
     /// ADR-0016 D2: 各 run が `delegate` で作った子（`Event::Delegated` の順）。
     pub delegated: Vec<DelegatedView>,
     pub timers: Timers,
@@ -359,6 +363,7 @@ pub(crate) fn build_task_summary(
         children,
         pending_children,
         role: task.role.clone(),
+        genre: task.genre.clone(),
         actions: actions(task),
     }
 }
@@ -675,12 +680,14 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
         })
         .collect();
     let role = task.role.clone();
+    let genre = task.genre.clone();
 
     Ok(TaskDetail {
         task,
         workspace_dir,
         cluster,
         role,
+        genre,
         delegated,
         timers: timers_view,
         criteria,
@@ -776,6 +783,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         }
     }
@@ -1300,6 +1308,31 @@ mod tests {
         assert_eq!(role_of(plain.id), None);
     }
 
+    /// ADR-0027 D1: `Task.genre` は `role` と同じ理由で一覧の各項目に出る。
+    #[test]
+    fn task_list_items_carry_the_genre() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut with_genre = sample_task(TaskKind::Execute, Status::Ready);
+        with_genre.genre = Some("coding".to_string());
+        store.insert(&with_genre).expect("insert");
+        let plain = sample_task(TaskKind::Execute, Status::Ready);
+        store.insert(&plain).expect("insert");
+
+        let list = task_list(
+            &store,
+            &ListFilter::default(),
+            ListOrder::CreatedDesc,
+            None,
+            100,
+            &view_ctx(),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("task_list");
+        let genre_of = |id| list.items.iter().find(|t| t.id == id).expect("in list").genre.clone();
+        assert_eq!(genre_of(with_genre.id).as_deref(), Some("coding"));
+        assert_eq!(genre_of(plain.id), None);
+    }
+
     /// ADR-0016 D1/D2: `role` はトップレベルにも出て、`delegated` は `Event::Delegated` から組み立てる。
     #[test]
     fn task_detail_reports_role_and_delegated_children() {
@@ -1330,6 +1363,19 @@ mod tests {
         assert_eq!(detail.delegated[0].run_id, "run-1");
         assert_eq!(detail.delegated[0].tasks.len(), 1, "missing child id is dropped");
         assert_eq!(detail.delegated[0].tasks[0].id, child.id);
+    }
+
+    /// ADR-0027 D1: `genre` も `role` と同じく最上位に出る。
+    #[test]
+    fn task_detail_reports_genre() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut task = sample_task(TaskKind::Execute, Status::Running);
+        task.genre = Some("literature".to_string());
+        store.insert(&task).expect("insert");
+
+        let ctx = view_ctx();
+        let detail = task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        assert_eq!(detail.genre.as_deref(), Some("literature"));
     }
 
     #[test]

@@ -55,6 +55,7 @@ fn sample_task(i: usize) -> Task {
         created_at: now,
         updated_at: now,
         role: None,
+        genre: None,
         aggregate: false,
     }
 }

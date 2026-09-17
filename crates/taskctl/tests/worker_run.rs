@@ -36,6 +36,7 @@ fn sample_task(status: Status, workspace: WorkspaceSpec) -> Task {
         created_at: now,
         updated_at: now,
         role: None,
+        genre: None,
         aggregate: false,
     }
 }

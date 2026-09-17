@@ -12,8 +12,8 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use futures_util::StreamExt;
 use serde_json::Value;
 use task_api::{
-    AdminRequest, ApiConfigView, ApiSettings, ApiState, ClusterConfigView, ConfigView, ProviderConfigView,
-    ReviewerConfigView, RoleConfigView,
+    AdminRequest, ApiConfigView, ApiSettings, ApiState, ClusterConfigView, ConfigView, GenreConfigView,
+    ProviderConfigView, ReviewerConfigView, RoleConfigView,
 };
 use task_core::{
     Budget, Check, Criterion, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
@@ -34,6 +34,8 @@ pub struct EnvOptions {
     pub allowed_hosts: Vec<String>,
     /// ADR-0016 D1: `POST /tasks` の省略値を埋める `[[roles]]`。
     pub roles: Vec<task_core::RoleSpec>,
+    /// ADR-0027 D1: `POST /tasks` の `genre` の検証・既定解決に使う `[[genres]]`。
+    pub genres: Vec<task_core::GenreSpec>,
     /// ADR-0017 M1: `providers.d/` の書き込み先。`None` なら管理系の作成/変更/削除は使えない。
     pub providers_dir: Option<PathBuf>,
     /// ADR-0017 M2: `reload`/`check` を受け取るチャネルの送信側。`None` ならどちらも使えない。
@@ -174,6 +176,15 @@ pub fn config_view() -> ConfigView {
             max_wall_secs: None,
             has_instructions: true,
         }],
+        genres: vec![GenreConfigView {
+            id: "coding".into(),
+            description: "write and fix code".into(),
+            capabilities: vec![],
+            input_artifacts: vec![],
+            output_artifacts: vec![],
+            default_role: Some("lead".into()),
+            roles: vec!["lead".into()],
+        }],
         delegation: task_core::DelegationLimits::default(),
         api: ApiConfigView {
             bind: HOST.into(),
@@ -193,6 +204,7 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         view: view_context(workspace_root),
         config_view: config_view(),
         roles: options.roles,
+        genres: options.genres,
         taskd_version: "0.9.0-test".into(),
         instance_id: "01J9ZX5T3K8Q7W6V5R4P3N2M1H".into(),
         started_at: "2026-09-14T00:00:00Z".into(),
@@ -246,6 +258,7 @@ pub fn new_task(kind: TaskKind, status: Status) -> Task {
         created_at: now,
         updated_at: now,
         role: None,
+        genre: None,
         aggregate: false,
     }
 }

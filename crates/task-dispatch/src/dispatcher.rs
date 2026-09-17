@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use task_core::plan::{PlanLimits, PlanOutput, materialize};
 use task_core::{
-    AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, OnChildFailure, RateLimitObservation,
-    RoleSpec, RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
+    AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec, OnChildFailure,
+    RateLimitObservation, RoleSpec, RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger,
+    WorkspaceSpec,
 };
 use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
@@ -31,9 +32,9 @@ use task_ops::derive::{
     prior_review_from_events, retry_backoff,
 };
 use task_worker::{
-    AdapterError, Answer, ChildSummary, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, RoleContext,
-    RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal, WorkerMessage,
-    Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
+    AdapterError, Answer, ChildSummary, EventSink, GenreContext, LocalWorkspace, PROTOCOL_VERSION, PriorReview,
+    RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal,
+    WorkerMessage, Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
 };
 use task_ops::daemon::{
     AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot, InFlight,
@@ -183,6 +184,9 @@ pub struct DispatchConfig {
     pub max_requeues: u32,
     /// ADR-0016 D1: `[[roles]]`。run 開始時に `RunContext.role`（指示文）を載せ、委譲された子の既定に使う。
     pub roles: Vec<RoleSpec>,
+    /// ADR-0027 D1: `[[genres]]`。委譲の分野解決（`default_role` の既定の穴埋め）と、委譲できる run に渡す
+    /// `RunContext.available_genres` に使う。
+    pub genres: Vec<GenreSpec>,
     /// ADR-0016 D2: 委譲の上限（1 run の件数・木の深さ・木の run 数）。
     pub delegation: DelegationLimits,
     /// ADR-0024: `[accounts]` が設定されていればプール選択を有効にする。
@@ -241,11 +245,13 @@ struct AwaitingChildren {
     plan: Option<PlanOutput>,
 }
 
-/// run 開始時に決める、ワーカーに渡す追加の文脈（ADR-0016 D1 / D3）。
+/// run 開始時に決める、ワーカーに渡す追加の文脈（ADR-0016 D1 / D3, ADR-0027 D1）。
 #[derive(Default)]
 struct RunExtras {
     role: Option<RoleContext>,
     children: Vec<ChildSummary>,
+    /// ADR-0027 D1: 委譲できる run（`build_execute_prompt` を使う run）にだけ非空。
+    available_genres: Vec<GenreContext>,
 }
 
 struct ReviewEntry {
@@ -295,6 +301,8 @@ struct StoreSink {
     last_renew: std::sync::Mutex<Instant>,
     /// ADR-0016 D2: 委譲の検証に使う `[[roles]]` と上限、この run で既に受け入れた件数。
     roles: Vec<RoleSpec>,
+    /// ADR-0027 D1: 委譲の分野解決・検証に使う `[[genres]]`。
+    genres: Vec<GenreSpec>,
     delegation: DelegationLimits,
     delegated_this_run: std::sync::atomic::AtomicUsize,
     /// ADR-0024 D4 / ADR-0025 D1: このアカウント（プールを使わなければ `None`）と、そのアダプタの観測値を記録する帳簿
@@ -333,6 +341,7 @@ impl StoreSink {
             tasks,
             already,
             &self.roles,
+            &self.genres,
             &self.delegation,
             OffsetDateTime::now_utc(),
         )
@@ -1243,7 +1252,7 @@ impl Dispatcher {
         // ADR-0007 D3/D4: Plan が全 pass なら子タスクの挿入と ReviewPass を同一トランザクションで行う。
         let result = match (all_pass, task.kind, outcome.plan) {
             (true, TaskKind::Plan, Some(plan)) => {
-                let children = materialize(&task, &plan, OffsetDateTime::now_utc());
+                let children = materialize(&task, &plan, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
                 let n = children.len();
                 let r = self
                     .store
@@ -1454,7 +1463,7 @@ impl Dispatcher {
             }
             let result = match (task.kind, waiting.plan) {
                 (TaskKind::Plan, Some(plan)) => {
-                    let children = materialize(&task, &plan, OffsetDateTime::now_utc());
+                    let children = materialize(&task, &plan, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
                     self.store
                         .complete_plan(task_id, Vec::new(), children, self.config.plan_auto_accept)
                 }
@@ -1756,7 +1765,8 @@ impl Dispatcher {
         Ok(dispatched)
     }
 
-    /// ADR-0016 D1 / D3: run 開始時にワーカーへ渡す役割の指示文と、集約 run なら子の要約。
+    /// ADR-0016 D1 / D3, ADR-0027 D1: run 開始時にワーカーへ渡す役割の指示文、委譲できる run なら使える
+    /// 分野の一覧、集約 run なら子の要約。
     fn run_extras(&self, task: &Task) -> Result<RunExtras, DispatchError> {
         let role = task.role.as_deref().map(|id| RoleContext {
             id: id.to_string(),
@@ -1764,6 +1774,14 @@ impl Dispatcher {
                 .and_then(|r| r.instructions.clone())
                 .unwrap_or_default(),
         });
+        // ADR-0027 D1 / ADR-0028 D3: 委譲の指示文を出す run（Execute/Approval）と、子の分野を選べる
+        // Plan run（`build_plan_prompt` も同じ節を出す）にだけ使える分野の一覧を渡す
+        // （プロンプト側の条件と同じ。`claude_code::build_prompt` 参照）。
+        let available_genres = if matches!(task.kind, TaskKind::Execute | TaskKind::Approval | TaskKind::Plan) {
+            self.config.genres.iter().map(GenreContext::from).collect()
+        } else {
+            Vec::new()
+        };
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
         let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
@@ -1798,7 +1816,7 @@ impl Dispatcher {
         } else {
             Vec::new()
         };
-        Ok(RunExtras { role, children })
+        Ok(RunExtras { role, children, available_genres })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1822,6 +1840,7 @@ impl Dispatcher {
             every: self.config.lease_grace / 2,
         };
         let roles = self.config.roles.clone();
+        let genres = self.config.genres.clone();
         let delegation = self.config.delegation;
         let account_book = account_adapter.and_then(|a| self.account_book(a));
         tokio::spawn(async move {
@@ -1836,6 +1855,7 @@ impl Dispatcher {
                 remote,
                 extras,
                 roles,
+                genres,
                 delegation,
                 account,
                 account_book,
@@ -1902,6 +1922,7 @@ impl Dispatcher {
             Some(PlanCheck {
                 depth: self.plan_depth(&task)?,
                 limits: PlanLimits::default(),
+                genres: self.config.genres.clone(),
             })
         } else {
             None
@@ -2038,6 +2059,7 @@ impl Dispatcher {
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         };
         // ADR-0010 D2: 挿入・Created・ApprovalRequested を 1 トランザクションで。
@@ -2323,6 +2345,7 @@ async fn run_worker(
     remote: Option<SshSettings>,
     extras: RunExtras,
     roles: Vec<RoleSpec>,
+    genres: Vec<GenreSpec>,
     delegation: DelegationLimits,
     account: Option<String>,
     account_book: Option<Arc<StdMutex<AccountBook>>>,
@@ -2371,6 +2394,7 @@ async fn run_worker(
             review: None,
             role: extras.role,
             children: extras.children,
+            available_genres: extras.available_genres,
         },
     };
     let sink = StoreSink {
@@ -2381,6 +2405,7 @@ async fn run_worker(
         renew_every: lease.every,
         last_renew: std::sync::Mutex::new(Instant::now()),
         roles,
+        genres,
         delegation,
         delegated_this_run: std::sync::atomic::AtomicUsize::new(0),
         account,
@@ -2568,6 +2593,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         }
     }
@@ -2606,6 +2632,7 @@ mod tests {
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
                 roles: Vec::new(),
+                genres: Vec::new(),
                 delegation: DelegationLimits::default(),
                 accounts: None,
             },
@@ -3846,6 +3873,7 @@ mod tests {
             objective: format!("do {title}"),
             acceptance: vec![Criterion { text: "c".into(), check: Check::Command { cmd: "true".into(), expect_exit: 0 } }],
             role: Some("implementer".into()),
+            genre: None,
             depends_on: deps,
             tier: None,
         }
@@ -3949,6 +3977,122 @@ mod tests {
         assert_eq!(adapter.aggregate_children.load(Ordering::SeqCst), 2, "aggregate run saw both children");
         // 集約 run のレビューには暗黙の summary.md 条件（idx = acceptance.len()）が入る。
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { criterion_idx: 1, pass: true, reason, .. } if reason.contains("summary.md"))), "{events:?}");
+    }
+
+    /// ADR-0027 D1 / 受け入れ 3: 委譲できる run（lead, genre=coding）のプロンプト文脈に設定済みの
+    /// 全分野（`available_genres`）が渡り、`DelegateTask.genre` で子を別分野（literature）に委譲できる。
+    struct GenreDelegatingAdapter {
+        proposal: DelegateTask,
+        seen_available_genres: std::sync::Mutex<Option<Vec<task_worker::GenreContext>>>,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for GenreDelegatingAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            let done = |summary: &str| {
+                Ok(RunOutcome {
+                    terminal: Terminal::Done { summary: summary.into(), evidence: vec![], usage: None },
+                    exit_code: Some(0),
+                })
+            };
+            if req.task.role.as_deref() == Some("literature-reader") {
+                return done("child");
+            }
+            *self.seen_available_genres.lock().unwrap() = Some(req.context.available_genres.clone());
+            sink.delegate(std::slice::from_ref(&self.proposal));
+            done("delegated")
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_can_select_a_different_genre_and_available_genres_reach_the_prompt_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        parent.role = Some("lead".into());
+        parent.genre = Some("coding".into());
+        store.insert(&parent).unwrap();
+
+        let mut child_proposal = proposal("investigate prior art", vec![]);
+        child_proposal.role = Some("literature-reader".into());
+        child_proposal.genre = Some("literature".into());
+        let adapter = Arc::new(GenreDelegatingAdapter {
+            proposal: child_proposal,
+            seen_available_genres: std::sync::Mutex::new(None),
+        });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 4);
+        d.config.roles = vec![
+            RoleSpec { id: "lead".into(), ..RoleSpec::default() },
+            RoleSpec { id: "literature-reader".into(), ..RoleSpec::default() },
+        ];
+        d.config.genres = vec![
+            task_core::GenreSpec {
+                id: "coding".into(),
+                description: "write and fix code".into(),
+                default_role: Some("lead".into()),
+                roles: vec!["lead".into()],
+                ..task_core::GenreSpec::default()
+            },
+            task_core::GenreSpec {
+                id: "literature".into(),
+                description: "related work survey".into(),
+                default_role: Some("literature-reader".into()),
+                roles: vec!["literature-reader".into()],
+                ..task_core::GenreSpec::default()
+            },
+        ];
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+
+        let p = store.get(parent.id).unwrap().unwrap();
+        assert_eq!(p.status, Status::Done, "{:?}", store.events_for(parent.id).unwrap());
+        let children = store.children(parent.id).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].role.as_deref(), Some("literature-reader"));
+        assert_eq!(children[0].genre.as_deref(), Some("literature"), "explicit genre wins");
+
+        let available = adapter.seen_available_genres.lock().unwrap().clone().expect("available_genres seen");
+        let ids: Vec<&str> = available.iter().map(|g| g.id.as_str()).collect();
+        assert!(ids.contains(&"coding"), "{ids:?}");
+        assert!(ids.contains(&"literature"), "{ids:?}");
+    }
+
+    /// ADR-0028 D3: `run_extras` は Plan run にも `available_genres` を渡す（今までは Execute/Approval だけ）。
+    /// これで `build_plan_prompt` にも「使える専門家」節が出る（`claude_code` 側のテストで確認済み）。
+    #[test]
+    fn run_extras_fills_available_genres_for_plan_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let plan = plan_task(dir.path(), 0);
+        store.insert(&plan).unwrap();
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(FileAdapter {
+            plan_json: VALID_PLAN.into(),
+            review_json: r#"{"verdicts":[]}"#.into(),
+            delay: Duration::from_millis(0),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.genres = vec![task_core::GenreSpec {
+            id: "coding".into(),
+            description: "write and fix code".into(),
+            ..task_core::GenreSpec::default()
+        }];
+        let extras = d.run_extras(&plan).unwrap();
+        let ids: Vec<&str> = extras.available_genres.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, vec!["coding"]);
+
+        // 分野が無い設定では空のまま。
+        d.config.genres = Vec::new();
+        let extras = d.run_extras(&plan).unwrap();
+        assert!(extras.available_genres.is_empty());
     }
 
     /// 受け入れ 3: `aggregate = false` の親は子が終わるまで reviewing のまま、終わったら run を増やさず done。
@@ -4214,6 +4358,7 @@ mod tests {
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues,
                 roles: Vec::new(),
+                genres: Vec::new(),
                 delegation: DelegationLimits::default(),
                 accounts: Some(AccountsRuntimeConfig {
                     roots: HashMap::from([(AccountAdapter::ClaudeCode, accounts_root)]),

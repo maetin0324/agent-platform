@@ -76,6 +76,9 @@ pub struct Config {
     /// ADR-0016 D1: 役割ごとの既定と指示文。タスクの値 > 役割の既定 > 全体の既定。
     #[serde(default)]
     pub roles: Vec<RoleConfig>,
+    /// ADR-0027 D1: 分野ごとの説明と既定の役割。タスクの値 > 役割の既定 > 分野の既定（`default_role` の役割）> 親の値。
+    #[serde(default)]
+    pub genres: Vec<GenreConfig>,
     /// ADR-0016 D2: 実行中の委譲の上限。
     #[serde(default)]
     pub delegation: DelegationConfig,
@@ -184,6 +187,33 @@ pub struct RoleConfig {
     /// ワーカーのプロンプトに前置きする指示文（何を任され、何を任せてよいか）。`GET /config` には**出さない**。
     #[serde(default)]
     pub instructions: Option<String>,
+}
+
+/// `[[genres]]`（ADR-0027 D1）: 分野の説明・既定の役割・分野に属する役割の一覧。分野そのものにはアダプタを
+/// 持たせない（D2: `default_role` が指す役割が持つ）。`id` は重複させない。`default_role` と `roles` の各要素は
+/// `[[roles]]` に存在すること、`default_role`（あれば）は `roles` に含まれることを `Config::validate` が確認する。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenreConfig {
+    /// タスクの `genre` が指す名前（例 `"coding"` / `"literature"`）。
+    pub id: String,
+    /// プロンプトに入れる分野の説明（ADR-0027 D1）。
+    pub description: String,
+    /// ADR-0028 D1: この分野で「できること」の自由記述（固定 enum にしない）。省略時は空。
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// ADR-0028 D1: この分野に投げるときに用意すべきものの目安（自由記述。taskd は中身を検査しない）。
+    #[serde(default)]
+    pub input_artifacts: Vec<String>,
+    /// ADR-0028 D1: この分野から戻ってくるものの目安（自由記述）。
+    #[serde(default)]
+    pub output_artifacts: Vec<String>,
+    /// タスクに `role` が無いときに、この分野の既定として使う役割 id。`roles` に含まれること。
+    #[serde(default)]
+    pub default_role: Option<String>,
+    /// この分野に属する役割 id の一覧。`genre` と `role` を両方指定したタスクは、`role` がここに無ければ設定エラー。
+    #[serde(default)]
+    pub roles: Vec<String>,
 }
 
 /// `[delegation]`（ADR-0016 D2 / M6）: 実行中の委譲の上限。既定は `task_core::DelegationLimits::default()` と同じ。
@@ -336,6 +366,8 @@ pub struct AdaptersConfig {
     pub codex: CodexAdapterConfig,
     #[serde(default)]
     pub acp: AcpAdapterConfig,
+    #[serde(default)]
+    pub paperqa: PaperQaAdapterConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -480,6 +512,56 @@ fn default_acp_startup_timeout_secs() -> u64 {
     300
 }
 
+/// `paperqa` アダプタの設定（ADR-0027 D3）。フィールドの意味は `task_worker::PaperQaConfig`
+/// （`crates/task-worker/src/paperqa.rs`）と同じ。`[[providers]] adapter = "paperqa"` の行ごとの
+/// 上書きは `model`/`env` だけ（`ProviderConfig` の既存フィールドを再利用。ADR-0026 D2 と同じ作り）。
+/// `settings`/`paper_directory`/`index_directory` は行では上書きしない
+/// （調査タスクごとの `[[genres]]`/`[[roles]]` で使い分ける前提。必要になれば別 ADR で足す）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaperQaAdapterConfig {
+    /// 起動するコマンド名／パス。既定 `"pqa"`。
+    #[serde(default = "default_paperqa_command")]
+    pub command: String,
+    /// `-s <name>`（拡張子は付けない。実機の仕様。ADR-0027 D3）。
+    #[serde(default)]
+    pub settings: Option<String>,
+    /// `--agent.index.paper_directory`。相対パスは設定ファイルのディレクトリ基準で絶対化する。
+    #[serde(default)]
+    pub paper_directory: Option<PathBuf>,
+    /// `--agent.index.index_directory` の親ディレクトリ（タスクごとのサブディレクトリはアダプタが足す）。
+    /// 相対パスは設定ファイルのディレクトリ基準で絶対化する。
+    #[serde(default)]
+    pub index_directory: Option<PathBuf>,
+    /// `--agent.index.name`。未指定ならタスク ID を使う。
+    #[serde(default)]
+    pub index_name: Option<String>,
+    /// 末尾に追加する引数（`ask` の前に挿入する）。
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// 追加の環境変数（例: `OPENAI_API_KEY` / `OPENAI_BASE_URL`。LiteLLM 経由の OpenAI 互換エンドポイント向け）。
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+impl Default for PaperQaAdapterConfig {
+    fn default() -> Self {
+        Self {
+            command: default_paperqa_command(),
+            settings: None,
+            paper_directory: None,
+            index_directory: None,
+            index_name: None,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+        }
+    }
+}
+
+fn default_paperqa_command() -> String {
+    "pqa".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
@@ -507,6 +589,11 @@ pub struct ProviderConfig {
     /// ADR-0026 D2: 上と同じ（引数）。省略時は `[adapters.acp].args`。
     #[serde(default)]
     pub args: Option<Vec<String>>,
+    /// ADR-0027 D3: `adapter = "paperqa"` のときだけ意味を持つ、この行の PaperQA 設定ファイルの上書き
+    /// （`-s <name>`、拡張子は付けない。省略時は `[adapters.paperqa].settings`）。他のアダプタで指定すると
+    /// `Config::validate` が設定エラーにする。相対パスは設定ファイルのディレクトリ基準で絶対化する。
+    #[serde(default)]
+    pub settings: Option<String>,
 }
 
 fn default_db() -> PathBuf {
@@ -619,6 +706,31 @@ impl Config {
                 accounts.codex_dir = Some(base.join(dir));
             }
         }
+        // ADR-0027 D3: `[adapters.paperqa]` のパス設定は、他のパス設定と同じく設定ファイルのディレクトリ基準で
+        // 絶対化する。`settings` は `pqa -s` に渡す文字列（拡張子無し）だが、パスの形をしているので同様に扱う。
+        if let Some(dir) = &cfg.adapters.paperqa.paper_directory
+            && dir.is_relative()
+        {
+            cfg.adapters.paperqa.paper_directory = Some(base.join(dir));
+        }
+        if let Some(dir) = &cfg.adapters.paperqa.index_directory
+            && dir.is_relative()
+        {
+            cfg.adapters.paperqa.index_directory = Some(base.join(dir));
+        }
+        if let Some(settings) = &cfg.adapters.paperqa.settings
+            && Path::new(settings).is_relative()
+        {
+            cfg.adapters.paperqa.settings = Some(base.join(settings).to_string_lossy().into_owned());
+        }
+        // ADR-0027 D3: 行ごとの `settings` の上書きも同じ基準で絶対化する。
+        for p in &mut cfg.providers {
+            if let Some(settings) = &p.settings
+                && Path::new(settings).is_relative()
+            {
+                p.settings = Some(base.join(settings).to_string_lossy().into_owned());
+            }
+        }
         cfg.validate()?;
         // API を有効にするなら、トークンが読めることを起動時に確かめる（exit 2）。
         if cfg.api.listen.is_some() {
@@ -647,9 +759,10 @@ impl Config {
                 && p.adapter != task_worker::ClaudeCodeAdapter::ID
                 && p.adapter != task_worker::CodexAdapter::ID
                 && p.adapter != task_worker::AcpAdapter::ID
+                && p.adapter != task_worker::PaperQaAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex, acp only)",
+                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex, acp, paperqa only)",
                     p.id, p.adapter
                 )));
             }
@@ -661,6 +774,13 @@ impl Config {
             if p.adapter != task_worker::AcpAdapter::ID && (p.command.is_some() || p.args.is_some()) {
                 return Err(ConfigError::Invalid(format!(
                     "provider {}: command/args are only allowed when adapter = \"acp\" (ADR-0026 D2)",
+                    p.id
+                )));
+            }
+            // ADR-0027 D3: `settings` は `adapter = "paperqa"` の行だけで意味を持つ（acp の `command`/`args` と同じ考え方）。
+            if p.adapter != task_worker::PaperQaAdapter::ID && p.settings.is_some() {
+                return Err(ConfigError::Invalid(format!(
+                    "provider {}: settings is only allowed when adapter = \"paperqa\" (ADR-0027 D3)",
                     p.id
                 )));
             }
@@ -774,9 +894,10 @@ impl Config {
                 && adapter != task_worker::ClaudeCodeAdapter::ID
                 && adapter != task_worker::CodexAdapter::ID
                 && adapter != task_worker::AcpAdapter::ID
+                && adapter != task_worker::PaperQaAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "[[roles]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp only)",
+                    "[[roles]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp, paperqa only)",
                     r.id
                 )));
             }
@@ -785,6 +906,39 @@ impl Config {
             }
             if r.max_wall_secs == Some(0) {
                 return Err(ConfigError::Invalid(format!("[[roles]] {}: max_wall_secs must be >= 1", r.id)));
+            }
+        }
+        // ADR-0027 D1: 分野の id は重複させない。`default_role` と `roles` の各要素は `[[roles]]` に存在すること、
+        // `default_role`（あれば）は `roles` に含まれること。
+        let mut genre_ids = std::collections::HashSet::new();
+        for g in &self.genres {
+            if g.id.trim().is_empty() {
+                return Err(ConfigError::Invalid("[[genres]] id must not be empty".to_string()));
+            }
+            if !genre_ids.insert(&g.id) {
+                return Err(ConfigError::Invalid(format!("duplicate genre id: {}", g.id)));
+            }
+            for role_id in &g.roles {
+                if !role_ids.contains(role_id) {
+                    return Err(ConfigError::Invalid(format!(
+                        "[[genres]] {}: role {role_id:?} in roles is not defined in [[roles]]",
+                        g.id
+                    )));
+                }
+            }
+            if let Some(default_role) = &g.default_role {
+                if !role_ids.contains(default_role) {
+                    return Err(ConfigError::Invalid(format!(
+                        "[[genres]] {}: default_role {default_role:?} is not defined in [[roles]]",
+                        g.id
+                    )));
+                }
+                if !g.roles.iter().any(|r| r == default_role) {
+                    return Err(ConfigError::Invalid(format!(
+                        "[[genres]] {}: default_role {default_role:?} must be included in roles",
+                        g.id
+                    )));
+                }
             }
         }
         // ADR-0016 D2 / M6: 0 の上限は「委譲を止める」ではなく設定ミス（拒否理由が毎回出るだけ）なので拒否する。
@@ -845,6 +999,7 @@ impl Config {
             // ADR-0018 D2: 多重接続が無いクラスタは、プロバイダの cooldown と同じ長さだけ外す。
             cluster_cooldown: Duration::from_secs(self.error_cooldown_secs),
             roles: self.role_specs(),
+            genres: self.genre_specs(),
             delegation: self.delegation_limits(),
             accounts: self.accounts.as_ref().map(|a| AccountsRuntimeConfig {
                 roots: a.roots(),
@@ -899,6 +1054,22 @@ impl Config {
                 max_turns: r.max_turns,
                 max_wall_secs: r.max_wall_secs,
                 instructions: r.instructions.clone(),
+            })
+            .collect()
+    }
+
+    /// ADR-0027 D1: `[[genres]]` を task-core の型に写す（設定の順）。
+    pub fn genre_specs(&self) -> Vec<task_core::GenreSpec> {
+        self.genres
+            .iter()
+            .map(|g| task_core::GenreSpec {
+                id: g.id.clone(),
+                description: g.description.clone(),
+                capabilities: g.capabilities.clone(),
+                input_artifacts: g.input_artifacts.clone(),
+                output_artifacts: g.output_artifacts.clone(),
+                default_role: g.default_role.clone(),
+                roles: g.roles.clone(),
             })
             .collect()
     }
@@ -1188,6 +1359,117 @@ host = "h"
         assert_eq!(cfg.providers[0].env.get("OPENCODE_DISABLE_PROJECT_CONFIG").map(String::as_str), Some("1"));
     }
 
+    /// ADR-0027 D3: `[adapters.paperqa]` の既定値（`pqa` を素の状態で使う）。
+    #[test]
+    fn accepts_paperqa_adapter_with_default_config() {
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n").unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.adapters.paperqa.command, "pqa");
+        assert!(cfg.adapters.paperqa.settings.is_none());
+        assert!(cfg.adapters.paperqa.paper_directory.is_none());
+        assert!(cfg.adapters.paperqa.index_directory.is_none());
+        assert!(cfg.adapters.paperqa.index_name.is_none());
+        assert!(cfg.adapters.paperqa.extra_args.is_empty());
+        assert!(cfg.adapters.paperqa.env.is_empty());
+        assert!(cfg.providers[0].settings.is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_paperqa_adapter_config() {
+        let text = "[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n\n[adapters.paperqa]\nbogus = 1\n";
+        assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    /// ADR-0027 D3: `settings` は `adapter = "paperqa"` の行だけで意味を持つ。行ごとに上書きできる
+    /// （`acp` の `command`/`args` と同じ作り）。
+    #[test]
+    fn settings_is_only_allowed_on_paperqa_providers_and_overrides_per_row() {
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\nsettings = \"whatever\"\n").unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("settings is only allowed when adapter"), "{err}");
+
+        let cfg: Config = toml::from_str(
+            "[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\nsettings = \"/settings/other\"\n",
+        )
+        .unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.providers[0].settings.as_deref(), Some("/settings/other"));
+    }
+
+    /// ADR-0027 D3: `[adapters.paperqa]` の `paper_directory`/`index_directory`/`settings`（共通・行の上書き
+    /// どちらも）は他のパス設定と同じく設定ファイルのディレクトリ基準で絶対化する。
+    #[test]
+    fn paperqa_paths_are_resolved_relative_to_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &path,
+            "[adapters.paperqa]\n\
+             paper_directory = \"papers\"\n\
+             index_directory = \"index\"\n\
+             settings = \"settings/qwen-local\"\n\
+             \n\
+             [[providers]]\n\
+             id = \"pqa\"\n\
+             adapter = \"paperqa\"\n\
+             settings = \"settings/other\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        assert_eq!(cfg.adapters.paperqa.paper_directory, Some(base.join("papers")));
+        assert_eq!(cfg.adapters.paperqa.index_directory, Some(base.join("index")));
+        assert_eq!(
+            cfg.adapters.paperqa.settings.as_deref(),
+            Some(base.join("settings/qwen-local").to_string_lossy().into_owned().as_str())
+        );
+        assert_eq!(
+            cfg.providers[0].settings.as_deref(),
+            Some(base.join("settings/other").to_string_lossy().into_owned().as_str())
+        );
+    }
+
+    /// ADR-0027 D3: 分野・調査ハーネスを両方載せた例の設定ファイルが読め、検証を通る。
+    #[test]
+    fn loads_research_example_config() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/taskd.research.example.toml"
+        ));
+        let cfg = Config::load(path).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.adapters.paperqa.command, "/home/u/taskd/paperqa/.venv/bin/pqa");
+        // `.json` を付けずに渡す（実機の仕様）。
+        assert_eq!(cfg.adapters.paperqa.settings.as_deref(), Some("/home/u/taskd/paperqa/settings/qwen-local"));
+        assert_eq!(
+            cfg.adapters.paperqa.paper_directory.as_deref(),
+            Some(Path::new("/home/u/taskd/paperqa/papers"))
+        );
+        assert_eq!(cfg.adapters.paperqa.env.get("OPENAI_BASE_URL").map(String::as_str), Some("http://127.0.0.1:18000/v1"));
+        let paperqa_provider = cfg.providers.iter().find(|p| p.adapter == "paperqa").expect("paperqa provider");
+        assert_eq!(paperqa_provider.model, "openai/qwen3.8-27b");
+        let genre_ids: Vec<&str> = cfg.genres.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(genre_ids, vec!["coding", "literature"]);
+        let literature = cfg.genres.iter().find(|g| g.id == "literature").expect("literature genre");
+        assert_eq!(literature.default_role.as_deref(), Some("literature-reader"));
+        assert_eq!(
+            literature.roles,
+            vec!["literature-scout".to_string(), "literature-reader".to_string(), "novelty-skeptic".to_string()]
+        );
+        // ADR-0028 D1: 能力・入出力の目安も読める。
+        assert_eq!(
+            literature.capabilities,
+            vec!["学術文献の検索".to_string(), "引用グラフの探索".to_string(), "PDF 全文からの根拠抽出".to_string()]
+        );
+        assert_eq!(literature.input_artifacts, vec!["question".to_string(), "pdf".to_string(), "bibliography".to_string()]);
+        assert_eq!(literature.output_artifacts, vec!["answer.md".to_string(), "citations.json".to_string()]);
+        let coding = cfg.genres.iter().find(|g| g.id == "coding").expect("coding genre");
+        assert!(!coding.capabilities.is_empty());
+        assert!(!coding.input_artifacts.is_empty());
+        assert!(!coding.output_artifacts.is_empty());
+    }
+
     /// ADR-0010 D6/D9: バックオフと `[reviewer]` の既定値・指定値が DispatchConfig に写る。
     #[test]
     fn backoff_and_reviewer_settings_map_to_dispatch_config() {
@@ -1396,7 +1678,7 @@ max_tree_depth = 2
         let cfg: Config = toml::from_str(&bogus).unwrap();
         assert_eq!(
             cfg.validate().unwrap_err().to_string(),
-            "invalid config: [[roles]] lead: adapter \"bogus\" is not available in this build (fake, claude-code, codex, acp only)"
+            "invalid config: [[roles]] lead: adapter \"bogus\" is not available in this build (fake, claude-code, codex, acp, paperqa only)"
         );
 
         let empty = format!("[[roles]]\nid = \"  \"\n{providers}");
@@ -1416,6 +1698,110 @@ max_tree_depth = 2
             let err = cfg.validate().unwrap_err().to_string();
             assert_eq!(err, format!("invalid config: [delegation] {key} must be >= 1"));
         }
+    }
+
+    /// ADR-0027 D1: `[[genres]]` を読み、task-core の `GenreSpec` に写す。`[[genres]]` を書かない設定は
+    /// 今までどおり動く（分野は任意）。
+    #[test]
+    fn genres_are_parsed_and_mapped() {
+        let providers = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
+        let cfg: Config = toml::from_str(providers).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.genres.is_empty());
+        assert!(cfg.genre_specs().is_empty());
+
+        let text = format!(
+            r#"[[roles]]
+id = "lead"
+
+[[roles]]
+id = "implementer"
+
+[[genres]]
+id = "coding"
+description = "write and fix code"
+default_role = "implementer"
+roles = ["lead", "implementer"]
+
+[[genres]]
+id = "related-research"
+description = "先行研究の確認・新規性の検討"
+capabilities = ["学術文献の検索", "引用グラフの探索", "PDF 全文からの根拠抽出"]
+input_artifacts = ["question", "pdf", "bibliography"]
+output_artifacts = ["answer.md", "citations.json"]
+default_role = "lead"
+roles = ["lead"]
+
+{providers}"#
+        );
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert!(cfg.validate().is_ok());
+        let specs = cfg.genre_specs();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].id, "coding");
+        assert_eq!(specs[0].description, "write and fix code");
+        assert_eq!(specs[0].default_role.as_deref(), Some("implementer"));
+        assert_eq!(specs[0].roles, vec!["lead".to_string(), "implementer".to_string()]);
+        // ADR-0028 D1: 3 フィールドを書かなければ空（既存設定との互換）。
+        assert!(specs[0].capabilities.is_empty());
+        assert!(specs[0].input_artifacts.is_empty());
+        assert!(specs[0].output_artifacts.is_empty());
+        // ADR-0028 D1: 書けば `GenreSpec` に写る。
+        assert_eq!(
+            specs[1].capabilities,
+            vec!["学術文献の検索".to_string(), "引用グラフの探索".to_string(), "PDF 全文からの根拠抽出".to_string()]
+        );
+        assert_eq!(specs[1].input_artifacts, vec!["question".to_string(), "pdf".to_string(), "bibliography".to_string()]);
+        assert_eq!(specs[1].output_artifacts, vec!["answer.md".to_string(), "citations.json".to_string()]);
+        let d = cfg.dispatch_config();
+        assert_eq!(d.genres, specs);
+
+        assert!(toml::from_str::<Config>("[[genres]]\nid = \"a\"\ndescription = \"d\"\nbogus = 1\n").is_err());
+    }
+
+    /// ADR-0027 D1: 分野 id の重複、知らない役割を指す `roles`/`default_role`、`roles` に無い
+    /// `default_role` は設定エラー。
+    #[test]
+    fn rejects_duplicate_genre_ids_and_genres_referencing_unknown_or_mismatched_roles() {
+        let providers = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
+        let roles = "[[roles]]\nid = \"lead\"\n\n[[roles]]\nid = \"implementer\"\n";
+
+        let dup = format!(
+            "{roles}[[genres]]\nid = \"coding\"\ndescription = \"d\"\n[[genres]]\nid = \"coding\"\ndescription = \"d\"\n{providers}"
+        );
+        let cfg: Config = toml::from_str(&dup).unwrap();
+        assert_eq!(cfg.validate().unwrap_err().to_string(), "invalid config: duplicate genre id: coding");
+
+        let empty_id = format!("[[genres]]\nid = \"  \"\ndescription = \"d\"\n{providers}");
+        let cfg: Config = toml::from_str(&empty_id).unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("id must not be empty"));
+
+        let unknown_role_in_roles = format!(
+            "{roles}[[genres]]\nid = \"coding\"\ndescription = \"d\"\nroles = [\"lead\", \"nobody\"]\n{providers}"
+        );
+        let cfg: Config = toml::from_str(&unknown_role_in_roles).unwrap();
+        assert_eq!(
+            cfg.validate().unwrap_err().to_string(),
+            "invalid config: [[genres]] coding: role \"nobody\" in roles is not defined in [[roles]]"
+        );
+
+        let unknown_default_role = format!(
+            "{roles}[[genres]]\nid = \"coding\"\ndescription = \"d\"\nroles = [\"lead\"]\ndefault_role = \"nobody\"\n{providers}"
+        );
+        let cfg: Config = toml::from_str(&unknown_default_role).unwrap();
+        assert_eq!(
+            cfg.validate().unwrap_err().to_string(),
+            "invalid config: [[genres]] coding: default_role \"nobody\" is not defined in [[roles]]"
+        );
+
+        let default_role_not_in_roles = format!(
+            "{roles}[[genres]]\nid = \"coding\"\ndescription = \"d\"\nroles = [\"lead\"]\ndefault_role = \"implementer\"\n{providers}"
+        );
+        let cfg: Config = toml::from_str(&default_role_not_in_roles).unwrap();
+        assert_eq!(
+            cfg.validate().unwrap_err().to_string(),
+            "invalid config: [[genres]] coding: default_role \"implementer\" must be included in roles"
+        );
     }
 
     #[test]

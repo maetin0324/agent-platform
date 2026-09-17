@@ -1,0 +1,114 @@
+# 分野（ADR-0027）を使った、関連研究調査（PaperQA2）とコーディングを両方載せる設定例。相対パスはこの
+# ファイルのあるディレクトリ基準。コピーして書き換えて使うこと（`taskctl ... --config <このファイルのコピー>`）。
+#
+# 前提:
+#   - `uv` の隔離環境などに paper-qa（`pqa` CLI）を入れておく（例 `~/taskd/paperqa/.venv/bin/pqa`）。
+#   - PaperQA の設定ファイル（下の `settings` が指す `.json`、ここでは
+#     config/paperqa.qwen-local.example.json をコピーして書き換えたもの）に **必ず**:
+#       - `agent.agent_type = "fake"`（既定の ToolSelector はこの版の組み合わせで落ちる。ADR-0027 の実機確認）
+#       - `embedding = "sparse"`（鍵無しの埋め込み。Semantic Scholar は鍵無しだと 429 なので使わない）
+#       - `llm_config` / `summary_llm_config` / `agent.agent_llm_config` の `timeout` を伸ばす（既定 60 秒だと
+#         ローカル Qwen のような遅い LLM で 1 要約が 180 秒かかって落ちる。ここでは 900 秒にしてある）
+#     を設定しておくこと。
+#   - `settings` にはファイルパスから **`.json` を付けずに** 渡す（`pqa` 自身が拡張子を足す実機の仕様）。
+#   - 論文（`paper_directory`）は読み取りだけ。索引（`index_directory`）はタスクごとにサブディレクトリを
+#     taskd 側が作る（同時実行で索引を壊さないため）。
+
+db = "../taskd-research-demo.sqlite3"
+workspace_root = "../workspaces"
+tick_ms = 2000
+max_concurrency = 2
+lease_grace_secs = 60
+idle_timeout_secs = 300
+kill_grace_secs = 10
+review_timeout_secs = 600
+error_cooldown_secs = 300
+
+[plan]
+auto_accept = false
+
+# `[adapters.paperqa]` は共通設定（ADR-0027 D3）。`settings`/`env`/`model` は `[[providers]] adapter =
+# "paperqa"` の行ごとに上書きできる（`acp`/`command`/`args` と同じ作り。ADR-0026 D2）。
+[adapters.paperqa]
+command = "/home/u/taskd/paperqa/.venv/bin/pqa"
+# `.json` を付けない（実機の仕様）。config/paperqa.qwen-local.example.json をコピーして書き換えたものを指す。
+settings = "/home/u/taskd/paperqa/settings/qwen-local"
+paper_directory = "/home/u/taskd/paperqa/papers"
+index_directory = "/home/u/taskd/paperqa/index"
+# LiteLLM 経由で OpenAI 互換の口（ローカル Qwen へのトンネル等）に向ける。`api_key` は使われないダミーでよい。
+env = { OPENAI_API_KEY = "unused", OPENAI_BASE_URL = "http://127.0.0.1:18000/v1" }
+
+[[providers]]
+id = "paperqa-qwen"
+adapter = "paperqa"
+tiers = ["standard"]
+concurrency = 1
+# 空でなければ `--llm` に渡す（PaperQA の設定ファイルの llm より優先。ADR-0027 D3）。空なら設定ファイルの値のまま。
+model = "openai/qwen3.8-27b"
+
+[[providers]]
+id = "local-fake"
+adapter = "fake"
+tiers = ["standard", "cheap"]
+concurrency = 2
+
+# コーディング分野の役割（ADR-0016）。
+[[roles]]
+id = "lead"
+tier = "standard"
+max_turns = 20
+instructions = "あなたはリード。作業を分割し、コーディングと調査それぞれに合う分野・役割へ delegate する。"
+
+[[roles]]
+id = "implementer"
+tier = "cheap"
+instructions = "あなたは実装担当。受け取った範囲だけを実装し、終わったら summary を書く。"
+
+# 関連研究調査の役割（ADR-0027）。役割名は自由記述で、下の [[genres]] の roles に含めれば分野に属する。
+[[roles]]
+id = "literature-scout"
+adapter = "paperqa"
+tier = "cheap"
+instructions = "広く候補論文を探し、見落としが無いか洗い出す（深読みはしない）。"
+
+[[roles]]
+id = "literature-reader"
+adapter = "paperqa"
+tier = "standard"
+instructions = "候補論文を読み込み、引用付きで要点と新規性への影響をまとめる。"
+
+[[roles]]
+id = "novelty-skeptic"
+adapter = "paperqa"
+tier = "standard"
+instructions = "「本当に新規か」を疑う側に立ち、近い先行研究が無いか反証を試みる。"
+
+# 分野（ADR-0027 D1）。タスクの `genre` がここの `id` を指すと、role が省略されたときの既定として
+# `default_role` の役割（tier / adapter / 予算）が使われる（タスクの値 > 役割の既定 > 分野の既定 > 親の値）。
+# 分野そのものにはアダプタを持たせない（D2: `default_role` の役割が持つ。同じ分野でも役割ごとに違う
+# ハーネス・モデルを使い分けられる）。`capabilities` / `input_artifacts` / `output_artifacts`
+# （ADR-0028 D1）は 3 つとも任意の自由記述で、taskd は中身を検査しない。Planner とワーカーに
+# 「その分野は何ができるか」「何を渡せば何が返るか」を機械可読な形で伝えるためのラベル。
+[[genres]]
+id = "coding"
+description = "コードを書く・直す・テストする"
+capabilities = ["ソースコードの読み書き", "テストの実行", "パッチの作成"]
+input_artifacts = ["issue description", "repository"]
+output_artifacts = ["diff", "test results"]
+default_role = "implementer"
+roles = ["lead", "implementer"]
+
+[[genres]]
+id = "literature"
+description = "関連研究の調査・先行研究の確認・新規性の検討（PaperQA2）"
+capabilities = ["学術文献の検索", "引用グラフの探索", "PDF 全文からの根拠抽出"]
+input_artifacts = ["question", "pdf", "bibliography"]
+output_artifacts = ["answer.md", "citations.json"]
+default_role = "literature-reader"
+roles = ["literature-scout", "literature-reader", "novelty-skeptic"]
+
+[delegation]
+max_delegate_per_run = 8
+max_tree_depth = 5
+max_tree_runs = 100
+on_child_failure = "retry_then_ask"

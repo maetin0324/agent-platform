@@ -354,6 +354,7 @@ async fn execute(
             review: None,
             role: None,
             children: Vec::new(),
+            available_genres: Vec::new(),
         },
     };
 
@@ -440,6 +441,7 @@ async fn execute_on_cluster(
             review: None,
             role: None,
             children: Vec::new(),
+            available_genres: Vec::new(),
         },
     };
 
@@ -657,6 +659,7 @@ mod tests {
             providers_dir: None,
             clusters,
             roles: vec![],
+            genres: vec![],
             delegation: Default::default(),
             accounts: None,
             source_path: None,
@@ -701,6 +704,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         }
     }
@@ -792,6 +796,7 @@ mod tests {
             account_pool: true,
             command: None,
             args: None,
+            settings: None,
         }];
         config.accounts = Some(taskd::config::AccountsConfig {
             claude_dir: Some(accounts_dir.to_path_buf()),
@@ -826,6 +831,7 @@ mod tests {
             account_pool: false,
             command: None,
             args: None,
+            settings: None,
         }];
         assert_eq!(resolve_account(&config, "opencode-qwen", "acp", &args_fixture(None)).unwrap(), None);
         let err = resolve_account(&config, "opencode-qwen", "acp", &args_fixture(Some("a"))).unwrap_err();
@@ -847,6 +853,7 @@ mod tests {
             account_pool: false,
             command: None,
             args: None,
+            settings: None,
         }];
         let adapters = taskd::build_adapters(&config);
         let adapter = adapters.get("opencode-qwen").expect("acp provider has an adapter instance");
@@ -866,6 +873,7 @@ mod tests {
             account_pool: true,
             command: None,
             args: None,
+            settings: None,
         }];
         let err = resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap_err();
         assert!(err.to_string().contains("[accounts] is not configured"), "{err}");
@@ -938,6 +946,7 @@ mod tests {
             account_pool: true,
             command: None,
             args: None,
+            settings: None,
         }];
         config.accounts = Some(taskd::config::AccountsConfig {
             claude_dir: None,

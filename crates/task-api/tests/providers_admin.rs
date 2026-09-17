@@ -252,3 +252,58 @@ async fn create_and_patch_reject_command_and_args_in_the_body() {
     assert!(written.contains("command = \"opencode\""), "{written}");
     assert!(written.contains("args = [\"acp\"]"), "{written}");
 }
+
+/// ADR-0027 D3: `settings`（`adapter = "paperqa"` の行の PaperQA 設定ファイルの上書き）も `command`/`args` と
+/// 同じく管理 API からは書けない。`POST`/`PATCH` の本文にあれば拒否し、人が直接書いた値は PATCH の往復でも残る。
+#[tokio::test]
+async fn create_and_patch_reject_settings_in_the_body() {
+    let (env, _providers_tmp, dir) = env_with_providers_dir();
+    let app = env.router();
+    let auth = auth();
+
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/providers",
+            &json!({"id": "paperqa-qwen", "adapter": "paperqa", "settings": "/settings/qwen-local"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 422, "invalid_provider");
+    assert!(!dir.join("paperqa-qwen.toml").exists(), "create must not write a file when rejected");
+
+    // 既存の行に対する PATCH も同様に拒否し、ファイルは変わらない。人が直接編集した settings は残る。
+    std::fs::write(
+        dir.join("paperqa-qwen.toml"),
+        "id = \"paperqa-qwen\"\nadapter = \"paperqa\"\nsettings = \"/settings/qwen-local\"\n",
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(dir.join("paperqa-qwen.toml")).unwrap();
+    let resp = send(
+        &app,
+        patch_json_with(
+            "/api/v1/providers/paperqa-qwen",
+            &json!({"settings": "/settings/other"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 422, "invalid_provider");
+    let after = std::fs::read_to_string(dir.join("paperqa-qwen.toml")).unwrap();
+    assert_eq!(before, after, "a rejected PATCH must not touch the file");
+
+    // settings を持たない PATCH は通り、既存の値（人が書いた分）はファイル上に残る。
+    let resp = send(
+        &app,
+        patch_json_with(
+            "/api/v1/providers/paperqa-qwen",
+            &json!({"concurrency": 2}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let written = std::fs::read_to_string(dir.join("paperqa-qwen.toml")).unwrap();
+    assert!(written.contains("settings = \"/settings/qwen-local\""), "{written}");
+}

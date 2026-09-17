@@ -165,6 +165,10 @@ pub struct Task {
     /// 導入前のタスクには無いので任意。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// ADR-0027 D1: 分野名（自由記述。`[[genres]] id` と一致すれば既定の役割・プロンプトの説明が効く）。
+    /// 状態機械は見ない。導入前のタスクには無いので任意。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genre: Option<String>,
     /// ADR-0016 D3: true なら、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を作らせる。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub aggregate: bool,
@@ -192,6 +196,49 @@ impl RoleSpec {
     /// `roles` から `id` の行を探す。
     pub fn find<'a>(roles: &'a [RoleSpec], id: &str) -> Option<&'a RoleSpec> {
         roles.iter().find(|r| r.id == id)
+    }
+}
+
+/// ADR-0027 D1: `[[genres]]` の 1 行。分野の説明・既定の役割・分野に属する役割の一覧。
+/// 分野そのものにはアダプタを持たせない（D2: `default_role` が指す役割が持つ）。
+/// 純粋なデータ。taskd の設定から写し、task-ops（作成時の既定・検証）とディスパッチャ（run 時のプロンプト）が使う。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GenreSpec {
+    pub id: String,
+    pub description: String,
+    /// ADR-0028 D1: この分野で「できること」の自由記述の一覧（固定 enum にしない）。空なら出力にも出さない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// ADR-0028 D1: この分野に投げるときに用意すべきものの目安（自由記述。taskd は中身を検査しない）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_artifacts: Vec<String>,
+    /// ADR-0028 D1: この分野から戻ってくるものの目安（自由記述）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_artifacts: Vec<String>,
+    /// タスクに `role` が無いときに、この分野の既定として使う役割 id（`roles` に含まれること。設定検証で確認する）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_role: Option<String>,
+    /// この分野に属する役割 id の一覧。`genre` と `role` を両方指定したタスクは、`role` がここに無ければ設定エラー。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+}
+
+impl GenreSpec {
+    /// `genres` から `id` の行を探す。
+    pub fn find<'a>(genres: &'a [GenreSpec], id: &str) -> Option<&'a GenreSpec> {
+        genres.iter().find(|g| g.id == id)
+    }
+
+    /// `role_id` を `roles` に含む分野がちょうど 1 つだけあれば、その id を返す（ADR-0027 D1: 委譲で
+    /// 分野を省略したときに役割から分野を推定するため）。0 件・2 件以上は `None`（一意に決まらない）。
+    pub fn unique_for_role(genres: &[GenreSpec], role_id: &str) -> Option<String> {
+        let mut matching = genres.iter().filter(|g| g.roles.iter().any(|r| r == role_id));
+        let first = matching.next()?;
+        if matching.next().is_some() {
+            None
+        } else {
+            Some(first.id.clone())
+        }
     }
 }
 

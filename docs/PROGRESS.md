@@ -1,6 +1,6 @@
 # PROGRESS — taskd
 
-現在地: **Phase 0〜15 完了**（Phase 13 = Claude アカウントのプールと残量に基づく負荷分散、GUI からの登録・ログイン。ADR-0024）（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
+現在地: **Phase 0〜18 完了**（Phase 13 = Claude アカウントのプールと残量に基づく負荷分散、GUI からの登録・ログイン。ADR-0024）（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
 人間の判断 H1〜H9 を反映済み）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により G フェーズとして進める（前提: Node 24 LTS / pnpm 11）。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
@@ -23,6 +23,9 @@
 | 13 | Claude アカウントのプール（`CLAUDE_SECURESTORAGE_CONFIG_DIR`）・残量に基づく負荷分散・GUI からのプロバイダ登録とログイン（ADR-0024） | 完了（実機で確認済み。下記 Phase 13 の追記） | 2026-09-16 |
 | 14 | codex アカウントもプールに入れる（`CODEX_HOME`・デバイス認証・`token_count` の残量。ADR-0025） | 完了（実機はログイン前まで確認） | 2026-09-17 |
 | 15 | 汎用 ACP ワーカーアダプタ（最初の実装は opencode。OpenAI 互換 LLM をワーカーに使う。ADR-0026） | 完了（実機で 1 周確認） | 2026-09-17 |
+| 16 | タスクの分野（genre）でハーネスを切り替える（ADR-0027 D1/D2） | 完了 | 2026-09-17 |
+| 17 | 関連研究調査のハーネス（PaperQA2。`paperqa` アダプタ。ADR-0027 D3/D4） | 完了（実機で 1 周確認） | 2026-09-17 |
+| 18 | 分野を能力レジストリにする（capabilities・入出力・Planner の分野選択。ADR-0028） | 完了 | 2026-09-17 |
 
 ---
 
@@ -2735,3 +2738,63 @@ B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_po
 - P-63: `docs/DESIGN.md` §5.4 のアダプタ表に `acp`（汎用 ACP。最初の実装は opencode。ACP は運搬・観測・生存管理だけで、終端は結果ファイル規約）を足す。
   併せて `[[providers]].command` / `args` と `[adapters.acp]` を §5.4 の設定の説明に入れる。`openai-compat` の行は「最小ループを自前で育てるより
   ACP エージェントに任せる」と注記して残す。
+
+## Phase 16〜18 — 分野（genre）と調査ハーネス（ADR-0027 / ADR-0028。2026-09-17）
+
+人間の依頼「調査やその他のタスク毎にジャンルを分けて、それぞれのタスク分野に特化したハーネスを使い作業ワーカーが作業できるようにしたい」
+（分野は新しい概念として足す / 調査の LLM はローカル Qwen 優先 / 文献は鍵無しで始める、はいずれも人間の選択）。
+続けて「manifest 化を先に終わらせてください」で Phase 18。
+
+### 実装前に実機で確かめた事実
+
+- `paper-qa` 2026.8.12（`~/taskd/paperqa/.venv`）。CLI は `pqa {ask,search,index,view,save}`。`-s <名前>` は `.json` を自分で足す。
+- **既定の `agent_type = "ToolSelector"` はこの版の組み合わせで落ちる**（`'LiteLLMModel' object has no attribute 'get_router'`）。`"fake"`（検索 → 証拠収集 → 回答の固定手順）を使う。
+- LiteLLM の既定タイムアウト 60 秒では足りない（ローカル Qwen で 1 回の要約に 180 秒）。`embedding = "sparse"` なら鍵が要らない。
+- 実機の出力は rich 整形で、`[04:38:30] Answer:` のように**時刻が前置**され、色コードと折り返しの左詰めが入る。
+
+### 成果物
+
+- **分野（Phase 16）**: `[[genres]] {id, description, default_role, roles}`、タスクの `genre` 列（migration 0005、スキーマ版 5）、
+  決まり方「タスク > 役割 > 分野の既定役割 > 親」、`RunContext.available_genres` と委譲プロンプトの「使える専門家」節、`DelegateTask.genre`、
+  API（`POST /tasks` の 422、`GET /tasks?genre=`、`GET /config` の `genres[]`）、GUI（作成フォームの選択・一覧の絞り込みと列・詳細表示）、`taskctl add --genre`。
+- **調査ハーネス（Phase 17）**: `paperqa` アダプタ。PaperQA2 はワーカープロトコルを話さないので、**アダプタが `artifacts/answer.md` と
+  `artifacts/result.json` を書き、成果物として申告する**。`[adapters.paperqa]`（command / settings / paper_directory / index_directory / env）と
+  `[[providers]] adapter = "paperqa"`（`settings` / `env` / `model` は行ごとに上書き可）。索引はタスクごとに分ける。委譲はしない。
+- **能力レジストリ（Phase 18）**: `[[genres]]` に `capabilities` / `input_artifacts` / `output_artifacts`。委譲できる run と **Plan run** の
+  プロンプトに ADR-0028 D2 の形で出す。`PlanOutput.tasks[]` に `genre` / `role` を足し、Planner が分野を選べるようにした。
+
+### 受け入れ条件と証拠
+
+1. **分野の検証と解決** — taskd の config テスト（重複・未知の役割・`default_role` の不整合）、`task-core` の解決順テスト、
+   `taskctl add --genre` のテスト: ok。実機でも `--genre literature` だけ指定したタスクが `adapter: paperqa` / `tier: cheap` に解決された。
+2. **委譲と Plan への提示** — `delegate_can_select_a_different_genre_and_available_genres_reach_the_prompt_context`、
+   `run_extras_fills_available_genres_for_plan_runs`、プロンプトの形のテスト: ok。
+3. **migration** — `open_migrates_schema_4_db_and_old_rows_read_back_with_genre_none`: ok。
+4. **`paperqa` アダプタ** — `acp` と同じ作りのオフラインテスト 12 件（進捗・回答抽出・成果物申告・非 0 終了・空出力・タイムアウトでのプロセスグループ停止・
+   引数の組み立て・`--llm` の有無・env の上書き・認証失敗の分類）: ok。
+5. **実機（本物の pqa + トンネル越しの Qwen3.8-27B、使い捨ての taskd）** — `--genre literature` のタスクが
+   **デーモン経由で `done`**。`artifacts/answer.md`（23 行、引用付きの回答のみ）が作られ、成果物として登録され、
+   受け入れ条件 `artifact_exists answer.md` を taskd が判定して通過。
+6. **共通条件** — `cargo test --workspace` **720 passed / 0 failed**、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、
+   `scripts/sync-gui-docs.sh --check` up to date。GUI は別記（Phase G10）。
+
+### 実装中に直したもの（実機で判明）
+
+- **回答の取り出し**: 実機の出力は時刻・色コード・折り返しの左詰めが入るため、最初の実装は `answer.md` に索引作成のログまで書いていた。
+  色コードを落とし、`[HH:MM:SS]` の前置きを外し、`Answer:` の行から本文だけを取り、共通の左詰めを外すようにした（回帰テスト付き）。
+- **成果物の申告**: アダプタが書いた `answer.md` を `sink.artifact` で申告していなかったので、run の成果物一覧が 0 件だった。申告するようにした。
+- （私の操作ミス 1 件: `--check-artifact` は `artifacts/` からの名前を取るので `answer.md` と書く。`artifacts/answer.md` と書くと二重になって落ちる。）
+
+### 未解決事項
+
+- U16-1: Plan の子の `tier` の既定が「親を継ぐ」に変わった（ADR-0028 D3 の挙動変更。委譲と規則をそろえたため）。
+- U17-1: PaperQA2 の `ToolSelector` は使えない（上記）。`fake` で運用する。
+- U17-2: 索引作成は毎回ローカル Qwen で要約するため、文献が増えると時間がかかる（3 本で 2〜5 分）。索引の再利用は `index_name` を固定すれば効くが、
+  タスクごとに分ける現在の実装では効かない。文献が増えたら共有索引に切り替えるか、索引作成だけ別タスクにする。
+- U17-3: Web 調査（Local Deep Research）、browser、data-analysis、presentation の各分野は未実装（人間の調査での優先度順）。
+
+### 提案
+
+- P-63: DESIGN §5.4 のアダプタ表に `acp`（Phase 15）を足す。
+- P-64: DESIGN §4 のタスクに `genre` を足し、§5.4 に「分野 → 役割 → アダプタ」の解決順を書く。
+- P-65: DESIGN §5.4 のアダプタ表に `paperqa` を足す（ワーカープロトコルを話さない実行器は、アダプタが結果ファイルを書く旨も）。

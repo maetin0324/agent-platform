@@ -101,6 +101,7 @@ pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime
         created_at: now,
         updated_at: now,
         role: None,
+        genre: None,
         aggregate: false,
     };
 

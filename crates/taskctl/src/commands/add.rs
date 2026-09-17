@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, ValueEnum};
-use task_core::{RoleSpec, TaskId, TaskKind, TaskStore, Tier};
+use task_core::{GenreSpec, RoleSpec, TaskId, TaskKind, TaskStore, Tier};
 use task_ops::add::{CriterionSpec, NewTaskSpec, create_task_with_roles};
 use time::OffsetDateTime;
 
@@ -72,6 +72,12 @@ pub struct AddArgs {
     /// 埋め、run 時に指示文が前置きされる。`--config` が無いときは名前だけ保存する。
     #[arg(long)]
     pub role: Option<String>,
+
+    /// ADR-0027 D1: 分野名（自由記述）。`--config` があれば `[[genres]]` の既定（`default_role` の役割の
+    /// tier / adapter / 予算）を埋め、知らない分野や `--role` との不整合（`role` がその分野の `roles` に
+    /// 無い）は起動時にエラーにする。`--config` が無いときは名前だけ保存する（検証しない）。
+    #[arg(long)]
+    pub genre: Option<String>,
 
     /// ADR-0016 D3: 委譲した子が全て終端になった後に集約 run を 1 回行い、`artifacts/summary.md` を書かせる。
     #[arg(long, default_value_t = false)]
@@ -155,13 +161,18 @@ fn build_criteria(args: &mut AddArgs) -> Vec<CriterionSpec> {
     acceptance
 }
 
-/// `--config` があれば `[[roles]]` を読む。無ければ空（役割名だけ保存する。`--role` があれば警告）。
-fn load_roles(config: Option<&PathBuf>, role: Option<&str>) -> Result<Vec<RoleSpec>, CliError> {
+/// `--config` があれば `[[roles]]` と `[[genres]]` を読む。無ければ両方とも空（役割名／分野名だけ保存する。
+/// `--role`/`--genre` が指定されているのに `--config` が無ければ警告する）。
+fn load_roles_and_genres(
+    config: Option<&PathBuf>,
+    role: Option<&str>,
+    genre: Option<&str>,
+) -> Result<(Vec<RoleSpec>, Vec<GenreSpec>), CliError> {
     match config {
         Some(path) => {
             let config = taskd::Config::load(path)
                 .map_err(|e| CliError::msg(format!("failed to load config {}: {e}", path.display())))?;
-            Ok(config.role_specs())
+            Ok((config.role_specs(), config.genre_specs()))
         }
         None => {
             if role.is_some() {
@@ -169,14 +180,20 @@ fn load_roles(config: Option<&PathBuf>, role: Option<&str>) -> Result<Vec<RoleSp
                     "warning: --role given without --config; role defaults and instructions are not applied at creation"
                 );
             }
-            Ok(Vec::new())
+            if genre.is_some() {
+                eprintln!(
+                    "warning: --genre given without --config; genre defaults and validation are not applied at creation"
+                );
+            }
+            Ok((Vec::new(), Vec::new()))
         }
     }
 }
 
 pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliError> {
     let acceptance = build_criteria(&mut args);
-    let roles = load_roles(args.config.as_ref(), args.role.as_deref())?;
+    let (roles, genres) =
+        load_roles_and_genres(args.config.as_ref(), args.role.as_deref(), args.genre.as_deref())?;
 
     let parent = match &args.parent {
         Some(s) => Some(parse_task_id(s)?),
@@ -202,13 +219,14 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         max_wall_secs: args.max_wall_secs,
         max_retries: args.max_retries,
         role: args.role,
+        genre: args.genre,
         aggregate: args.aggregate,
         workspace: args.workspace,
         cluster: args.cluster,
         adapter: None,
     };
 
-    let task = create_task_with_roles(store, spec, &roles, OffsetDateTime::now_utc())?;
+    let task = create_task_with_roles(store, spec, &roles, &genres, OffsetDateTime::now_utc())?;
 
     outln!("{}", task.id);
     Ok(ExitCode::SUCCESS)
@@ -236,6 +254,7 @@ mod tests {
             max_wall_secs: Some(600),
             max_retries: 2,
             role: None,
+            genre: None,
             aggregate: false,
             config: None,
             workspace: Some(PathBuf::from("/tmp/workspace")),
@@ -383,6 +402,104 @@ adapter = "fake"
         assert_eq!(task.worker_hint.tier, Tier::Standard);
         assert_eq!((task.budget.max_turns, task.budget.max_wall_secs), (10, 600));
         assert!(task.aggregate);
+    }
+
+    /// ADR-0027 D1: `--genre` + `--config` で、その分野の `default_role` の役割の既定（tier / 予算）が
+    /// role 未指定の子に効く。
+    #[test]
+    fn run_with_genre_and_config_applies_genre_default_role_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &config_path,
+            r#"[[roles]]
+id = "literature-reader"
+tier = "standard"
+max_turns = 5
+max_wall_secs = 1200
+
+[[genres]]
+id = "literature"
+description = "related work survey"
+default_role = "literature-reader"
+roles = ["literature-reader"]
+
+[[providers]]
+id = "fake-local"
+adapter = "fake"
+"#,
+        )
+        .expect("write config");
+
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut args = base_args();
+        args.genre = Some("literature".to_string());
+        args.config = Some(config_path);
+        args.tier = None;
+        args.max_turns = None;
+        args.max_wall_secs = None;
+
+        run(&store, args).expect("run add");
+
+        let tasks = store.list(None).expect("list tasks");
+        let task = &tasks[0];
+        assert_eq!(task.role, None, "genre alone must not set role");
+        assert_eq!(task.genre.as_deref(), Some("literature"));
+        assert_eq!(task.worker_hint.tier, Tier::Standard);
+        assert_eq!((task.budget.max_turns, task.budget.max_wall_secs), (5, 1200));
+    }
+
+    /// `--config` 無しの `--genre` は分野名だけを保存する（検証しない。警告は stderr）。
+    #[test]
+    fn run_with_genre_but_no_config_stores_the_name_only() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut args = base_args();
+        args.genre = Some("literature".to_string());
+
+        run(&store, args).expect("run add");
+
+        let tasks = store.list(None).expect("list tasks");
+        let task = &tasks[0];
+        assert_eq!(task.genre.as_deref(), Some("literature"));
+    }
+
+    /// ADR-0027 D1: `--config` があるとき、知らない `--genre` や `--genre` + `--role` の不整合はエラー（何も挿入しない）。
+    #[test]
+    fn run_with_unknown_genre_or_role_genre_mismatch_errors_when_config_given() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("taskd.toml");
+        std::fs::write(
+            &config_path,
+            r#"[[roles]]
+id = "implementer"
+
+[[genres]]
+id = "coding"
+description = "d"
+roles = ["implementer"]
+
+[[providers]]
+id = "fake-local"
+adapter = "fake"
+"#,
+        )
+        .expect("write config");
+
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut args = base_args();
+        args.genre = Some("literature".to_string());
+        args.config = Some(config_path.clone());
+        let result = run(&store, args);
+        assert!(matches!(result, Err(CliError::Message(_))));
+        assert!(store.list(None).expect("list tasks").is_empty());
+
+        let mut args = base_args();
+        args.genre = Some("coding".to_string());
+        args.role = Some("literature-scout".to_string());
+        args.config = Some(config_path);
+        let result = run(&store, args);
+        assert!(matches!(result, Err(CliError::Message(_))));
+        assert!(store.list(None).expect("list tasks").is_empty());
     }
 
     /// 読めない `--config` はエラー（何も挿入しない）。

@@ -85,10 +85,18 @@ impl From<StatusArg> for Status {
 
 fn print_task_line(task: &Task, indent: usize) {
     let prefix = "  ".repeat(indent);
-    outln!(
-        "{prefix}{} {:?} {:?} {}",
-        task.id, task.status, task.kind, task.title
-    );
+    let mut line = format!("{prefix}{} {:?} {:?} {}", task.id, task.status, task.kind, task.title);
+    // ADR-0016 D1 / ADR-0027 D1: role/genre がある行にだけ `[role=.. genre=..]` を付ける（無い方が普通の taskctl の使い方なので、
+    // 常に `(none)` を書いて行を汚さない）。
+    match (&task.role, &task.genre) {
+        (None, None) => {}
+        (role, genre) => {
+            let role = role.as_deref().unwrap_or("-");
+            let genre = genre.as_deref().unwrap_or("-");
+            line.push_str(&format!(" [role={role} genre={genre}]"));
+        }
+    }
+    outln!("{line}");
 }
 
 fn print_tree(tasks: &[Task]) {
@@ -157,6 +165,8 @@ pub fn run_show(store: &dyn TaskStore, args: ShowArgs) -> Result<ExitCode, CliEr
     outln!("title: {}", task.title);
     outln!("objective: {}", task.objective);
     outln!("priority: {}", task.priority);
+    outln!("role: {}", task.role.as_deref().unwrap_or("(none)"));
+    outln!("genre: {}", task.genre.as_deref().unwrap_or("(none)"));
     outln!("attempts: {}", task.attempts);
     outln!("budget: {:?}", task.budget);
     outln!("lease: {:?}", task.lease);
@@ -299,6 +309,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         }
     }

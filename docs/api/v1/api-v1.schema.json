@@ -1212,6 +1212,14 @@
           "minimum": 0,
           "type": "integer"
         },
+        "genres": {
+          "default": [],
+          "description": "ADR-0027 D1: `[[genres]]` の要約。",
+          "items": {
+            "$ref": "#/$defs/GenreConfigView"
+          },
+          "type": "array"
+        },
         "idle_timeout_secs": {
           "format": "uint64",
           "minimum": 0,
@@ -2232,6 +2240,57 @@
       ],
       "type": "object"
     },
+    "GenreConfigView": {
+      "description": "`[[genres]]` 1 行の要約（ADR-0027 D1, ADR-0028 D1）。",
+      "properties": {
+        "capabilities": {
+          "description": "ADR-0028 D1: この分野で「できること」の自由記述。空なら省略される。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "default_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "input_artifacts": {
+          "description": "ADR-0028 D1: この分野に渡すもの（目安）。空なら省略される。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "output_artifacts": {
+          "description": "ADR-0028 D1: この分野から返るもの（目安）。空なら省略される。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "roles": {
+          "description": "この分野に属する役割 id の一覧。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "roles"
+      ],
+      "type": "object"
+    },
     "Graph": {
       "properties": {
         "edges": {
@@ -2571,6 +2630,14 @@
             "$ref": "#/$defs/TaskId"
           },
           "type": "array"
+        },
+        "genre": {
+          "default": null,
+          "description": "ADR-0027 D1: 分野名（自由記述）。省略時は `role` の分野（`[[genres]] roles` に含む分野がちょうど\n1 つのとき）を継ぐ。`genres` が設定されていれば、知らない `genre` や `role` とその分野の不整合は\nエラー（`genres` が空の設定では検証しない。分野は任意）。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "kind": {
           "$ref": "#/$defs/TaskKind",
@@ -3540,6 +3607,13 @@
           },
           "type": "array"
         },
+        "genre": {
+          "description": "ADR-0027 D1: 分野名（自由記述。`[[genres]] id` と一致すれば既定の役割・プロンプトの説明が効く）。\n状態機械は見ない。導入前のタスクには無いので任意。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "$ref": "#/$defs/TaskId"
         },
@@ -3679,6 +3753,13 @@
             "$ref": "#/$defs/TaskRef"
           },
           "type": "array"
+        },
+        "genre": {
+          "description": "ADR-0027 D1: `Task.genre`（`role` と同じ理由で最上位にも出す）。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "latest_question": {
           "type": [
@@ -3872,6 +3953,13 @@
             "$ref": "#/$defs/TaskId"
           },
           "type": "array"
+        },
+        "genre": {
+          "description": "ADR-0027 D1 の `Task.genre`（`role` と同じ理由で一覧に出す。`TaskDetail.genre` と同じ値）。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "id": {
           "$ref": "#/$defs/TaskId"

@@ -82,6 +82,7 @@ fn sigterm_kills_the_worker_process_and_exits_130() {
         created_at: now,
         updated_at: now,
         role: None,
+        genre: None,
         aggregate: false,
     };
     store.create_task(&task, vec![]).unwrap();

@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    Budget, Check, Criterion, RoleSpec, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
+    Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
     WorkspaceSpec,
 };
 use time::OffsetDateTime;
@@ -98,6 +98,11 @@ pub struct NewTaskSpec {
     /// ADR-0016 D1: 役割名（自由記述）。`[[roles]]` にあれば省略値の既定と run 時の指示文が効く。
     #[serde(default)]
     pub role: Option<String>,
+    /// ADR-0027 D1: 分野名（自由記述）。省略時は `role` の分野（`[[genres]] roles` に含む分野がちょうど
+    /// 1 つのとき）を継ぐ。`genres` が設定されていれば、知らない `genre` や `role` とその分野の不整合は
+    /// エラー（`genres` が空の設定では検証しない。分野は任意）。
+    #[serde(default)]
+    pub genre: Option<String>,
     /// ADR-0016 D3: 委譲した子が全て終端になった後に集約 run を 1 回行う。
     #[serde(default)]
     pub aggregate: bool,
@@ -156,20 +161,47 @@ fn validate_depends_on(store: &dyn TaskStore, depends_on: &[TaskId]) -> Result<(
     Ok(())
 }
 
-/// `spec` から `Task` を組み立て、`store.create_task` で原子的に挿入する（役割の既定は無し = 全体の既定だけ）。
+/// `spec` から `Task` を組み立て、`store.create_task` で原子的に挿入する（役割・分野の既定は無し = 全体の既定だけ）。
 pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime) -> Result<Task, OpsError> {
-    create_task_with_roles(store, spec, &[], now)
+    create_task_with_roles(store, spec, &[], &[], now)
 }
 
-/// ADR-0016 D1 / M3: `spec` の省略値を `roles`（`[[roles]]`）の既定 → 全体の既定の順で埋めてから挿入する。
-/// `spec.role` が `roles` に無くてもエラーにしない（役割名は自由記述。既定と指示文が無いだけ）。
+/// ADR-0016 D1 / M3, ADR-0027 D1: `spec` の省略値を `roles`（`[[roles]]`）の既定 → `genres`（`[[genres]]`）の
+/// `default_role` の既定 → 全体の既定の順で埋めてから挿入する。`spec.role` が `roles` に無くてもエラーに
+/// しない（役割名は自由記述。既定と指示文が無いだけ）。`genres` が空でなければ、知らない `genre` や
+/// `genre` + `role` の不整合（`role` がその分野の `roles` に無い）はエラーにする（`genres` が空の設定
+/// では検証しない。taskctl の `--config` 無しはこちらに当たる）。
 pub fn create_task_with_roles(
     store: &dyn TaskStore,
     spec: NewTaskSpec,
     roles: &[RoleSpec],
+    genres: &[GenreSpec],
     now: OffsetDateTime,
 ) -> Result<Task, OpsError> {
     let role = spec.role.as_deref().and_then(|r| RoleSpec::find(roles, r));
+    if !genres.is_empty()
+        && let Some(g) = &spec.genre
+    {
+        let Some(genre_spec) = GenreSpec::find(genres, g) else {
+            return Err(OpsError::Validation(format!("unknown genre: {g:?}")));
+        };
+        if let Some(r) = &spec.role
+            && !genre_spec.roles.iter().any(|x| x == r)
+        {
+            return Err(OpsError::Validation(format!(
+                "role {r:?} is not one of genre {g:?}'s roles"
+            )));
+        }
+    }
+    let genre_id = spec
+        .genre
+        .clone()
+        .or_else(|| spec.role.as_deref().and_then(|r| GenreSpec::unique_for_role(genres, r)));
+    let genre_role = genre_id
+        .as_deref()
+        .and_then(|g| GenreSpec::find(genres, g))
+        .and_then(|g| g.default_role.as_deref())
+        .and_then(|r| RoleSpec::find(roles, r));
     let status = if spec.kind == TaskKind::Approval {
         Status::Ready
     } else {
@@ -205,14 +237,17 @@ pub fn create_task_with_roles(
         },
     };
 
+    // ADR-0027 D1: tier / adapter / budget = タスクの値 > 役割の既定 > 分野の既定（`default_role` の役割）> 全体の既定。
     let budget = Budget {
         max_turns: spec
             .max_turns
             .or(role.and_then(|r| r.max_turns))
+            .or(genre_role.and_then(|r| r.max_turns))
             .unwrap_or(DEFAULT_MAX_TURNS),
         max_wall_secs: spec
             .max_wall_secs
             .or(role.and_then(|r| r.max_wall_secs))
+            .or(genre_role.and_then(|r| r.max_wall_secs))
             .unwrap_or(DEFAULT_MAX_WALL_SECS),
         max_retries: spec.max_retries,
     };
@@ -229,8 +264,15 @@ pub fn create_task_with_roles(
         status,
         priority: spec.priority,
         worker_hint: WorkerHint {
-            tier: spec.tier.or(role.and_then(|r| r.tier)).unwrap_or(DEFAULT_TIER),
-            adapter: spec.adapter.or_else(|| role.and_then(|r| r.adapter.clone())),
+            tier: spec
+                .tier
+                .or(role.and_then(|r| r.tier))
+                .or(genre_role.and_then(|r| r.tier))
+                .unwrap_or(DEFAULT_TIER),
+            adapter: spec
+                .adapter
+                .or_else(|| role.and_then(|r| r.adapter.clone()))
+                .or_else(|| genre_role.and_then(|r| r.adapter.clone())),
         },
         workspace,
         budget,
@@ -239,6 +281,7 @@ pub fn create_task_with_roles(
         created_at: now,
         updated_at: now,
         role: spec.role,
+        genre: genre_id,
         aggregate: spec.aggregate,
     };
 
@@ -267,6 +310,7 @@ mod tests {
             max_wall_secs: None,
             max_retries: 2,
             role: None,
+            genre: None,
             aggregate: false,
             workspace: Some(PathBuf::from("/tmp/workspace")),
             cluster: None,
@@ -330,7 +374,7 @@ mod tests {
         spec.role = Some("lead".to_string());
         spec.aggregate = true;
         spec.max_turns = Some(7);
-        let task = create_task_with_roles(&store, spec, &roles, now()).expect("create");
+        let task = create_task_with_roles(&store, spec, &roles, &[], now()).expect("create");
         assert_eq!(task.role.as_deref(), Some("lead"));
         assert!(task.aggregate);
         assert_eq!(task.worker_hint.tier, Tier::Frontier, "role default");
@@ -343,7 +387,7 @@ mod tests {
 
         let mut spec = base_spec();
         spec.role = Some("nobody".to_string());
-        let task = create_task_with_roles(&store, spec, &roles, now()).expect("unknown role is allowed");
+        let task = create_task_with_roles(&store, spec, &roles, &[], now()).expect("unknown role is allowed");
         assert_eq!(task.role.as_deref(), Some("nobody"));
         assert_eq!(task.worker_hint.tier, Tier::Standard);
         assert_eq!(task.budget.max_turns, 10);
@@ -359,6 +403,84 @@ mod tests {
         assert_eq!(spec.max_turns, Some(3));
         assert_eq!(spec.max_wall_secs, None);
         assert!(spec.role.is_none());
+    }
+
+    fn genre(id: &str, default_role: Option<&str>, roles: &[&str]) -> GenreSpec {
+        GenreSpec {
+            id: id.into(),
+            description: format!("{id} description"),
+            default_role: default_role.map(str::to_string),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+            ..GenreSpec::default()
+        }
+    }
+
+    /// ADR-0027 D1: タスクの値 > 役割の既定 > 分野の既定（`default_role` の役割）> 全体の既定。
+    /// 役割が無くても分野だけで既定が効く（「genre だけ」のケース）。
+    #[test]
+    fn create_task_with_roles_applies_genre_default_role_when_task_has_no_role() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let roles = vec![RoleSpec {
+            id: "literature-reader".to_string(),
+            tier: Some(Tier::Standard),
+            adapter: Some("acp".to_string()),
+            max_turns: Some(5),
+            max_wall_secs: Some(1200),
+            instructions: None,
+        }];
+        let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
+        let mut spec = base_spec();
+        spec.genre = Some("literature".to_string());
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
+        assert_eq!(task.role, None, "genre alone must not set the task's role");
+        assert_eq!(task.genre.as_deref(), Some("literature"));
+        assert_eq!(task.worker_hint.tier, Tier::Standard);
+        assert_eq!(task.worker_hint.adapter.as_deref(), Some("acp"));
+        assert_eq!(task.budget.max_turns, 5);
+        assert_eq!(task.budget.max_wall_secs, 1200);
+    }
+
+    /// ADR-0027 D1: `genre` 未指定で `role` がちょうど 1 つの分野に属するなら、その分野を継ぐ。
+    #[test]
+    fn create_task_with_roles_infers_genre_from_a_role_that_belongs_to_exactly_one_genre() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let roles = vec![RoleSpec {
+            id: "literature-scout".to_string(),
+            ..RoleSpec::default()
+        }];
+        let genres = vec![genre("literature", Some("literature-reader"), &["literature-scout"])];
+        let mut spec = base_spec();
+        spec.role = Some("literature-scout".to_string());
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
+        assert_eq!(task.genre.as_deref(), Some("literature"));
+    }
+
+    /// ADR-0027 D1: `genres` が設定されているとき、知らない `genre` はエラー、`genre` + `role` の
+    /// 不整合（`role` がその分野の `roles` に無い）もエラー（何も挿入しない）。`genres` が空の設定
+    /// （`--config` 無しの `taskctl add`）では検証しない。
+    #[test]
+    fn create_task_with_roles_rejects_unknown_genre_and_role_genre_mismatch_only_when_genres_configured() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let genres = vec![genre("coding", Some("implementer"), &["lead", "implementer"])];
+
+        let mut spec = base_spec();
+        spec.genre = Some("literature".to_string());
+        let err = create_task_with_roles(&store, spec, &[], &genres, now()).unwrap_err();
+        assert!(matches!(err, OpsError::Validation(_)), "{err:?}");
+        assert!(store.list(None).expect("list").is_empty());
+
+        let mut spec = base_spec();
+        spec.genre = Some("coding".to_string());
+        spec.role = Some("literature-scout".to_string());
+        let err = create_task_with_roles(&store, spec, &[], &genres, now()).unwrap_err();
+        assert!(matches!(err, OpsError::Validation(_)), "{err:?}");
+        assert!(store.list(None).expect("list").is_empty());
+
+        // `genres` が空: 分野を使わない設定では検証しない（自由記述のまま保存する）。
+        let mut spec = base_spec();
+        spec.genre = Some("literature".to_string());
+        let task = create_task_with_roles(&store, spec, &[], &[], now()).expect("no genres configured");
+        assert_eq!(task.genre.as_deref(), Some("literature"));
     }
 
     #[test]

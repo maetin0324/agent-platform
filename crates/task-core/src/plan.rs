@@ -8,7 +8,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::model::{Criterion, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
+use crate::delegate::resolve_child_defaults;
+use crate::model::{Budget, Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
 
 /// DESIGN §5.6「分解の深さは上限 3」。`plan_depth`（その Plan 自身を含む祖先 Plan の数）が
 /// これに達している Plan は、`kind = plan` の子を作れない。
@@ -43,6 +44,11 @@ pub struct NewTask {
     /// ADR-0016 D1 / M10: 子の役割名（任意）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// ADR-0028 D3: 子の分野名（任意）。明示 > `role` の分野（`roles` に含む分野がちょうど 1 つのとき）>
+    /// 親の分野の順で解決する（ADR-0027 D1 の委譲と同じ規則）。`genre` を指定して知らない分野、または
+    /// `role` と両方指定してその役割がその分野の `roles` に無ければ、Plan run は失敗する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genre: Option<String>,
 }
 
 /// DESIGN §5.6 の `PlanOutput{ tasks: Vec<NewTask> }`。
@@ -91,21 +97,30 @@ pub enum PlanError {
     Cycle { index: usize },
     #[error("tasks[{index}] is kind=plan but the plan depth would become {depth} (max {max})")]
     DepthExceeded { index: usize, depth: u32, max: u32 },
+    /// ADR-0028 D3: 知らない `genre`。
+    #[error("tasks[{index}].genre {genre:?} is not a known genre")]
+    UnknownGenre { index: usize, genre: String },
+    /// ADR-0028 D3: `genre` と `role` を両方指定したが、`role` がその分野の `roles` に含まれない。
+    #[error("tasks[{index}].role {role:?} is not one of genre {genre:?}'s roles")]
+    RoleNotInGenre { index: usize, role: String, genre: String },
 }
 
 /// `PlanOutput` をデシリアライズして検証する。`plan_depth` はその Plan 自身を含む祖先 Plan の数。
+/// `genres` は ADR-0028 D3 の `genre`/`role` の整合検証に使う（`[[genres]]` が空の設定では、`genre` を
+/// 指定した子は全て `UnknownGenre` になる）。
 pub fn parse_and_validate(
     json: &str,
     plan_depth: u32,
     limits: &PlanLimits,
+    genres: &[GenreSpec],
 ) -> Result<PlanOutput, String> {
     let plan: PlanOutput = serde_json::from_str(json).map_err(|e| format!("invalid plan.json: {e}"))?;
-    validate(&plan, plan_depth, limits).map_err(|e| e.to_string())?;
+    validate(&plan, plan_depth, limits, genres).map_err(|e| e.to_string())?;
     Ok(plan)
 }
 
-/// 決定的な検証（ADR-0007 D2）。
-pub fn validate(plan: &PlanOutput, plan_depth: u32, limits: &PlanLimits) -> Result<(), PlanError> {
+/// 決定的な検証（ADR-0007 D2, ADR-0028 D3）。
+pub fn validate(plan: &PlanOutput, plan_depth: u32, limits: &PlanLimits, genres: &[GenreSpec]) -> Result<(), PlanError> {
     let len = plan.tasks.len();
     if len < limits.min_tasks || len > limits.max_tasks {
         return Err(PlanError::TaskCount {
@@ -115,6 +130,20 @@ pub fn validate(plan: &PlanOutput, plan_depth: u32, limits: &PlanLimits) -> Resu
         });
     }
     for (index, t) in plan.tasks.iter().enumerate() {
+        if let Some(genre) = &t.genre {
+            let Some(spec) = GenreSpec::find(genres, genre) else {
+                return Err(PlanError::UnknownGenre { index, genre: genre.clone() });
+            };
+            if let Some(role) = &t.role
+                && !spec.roles.iter().any(|r| r == role)
+            {
+                return Err(PlanError::RoleNotInGenre {
+                    index,
+                    role: role.clone(),
+                    genre: genre.clone(),
+                });
+            }
+        }
         if t.title.trim().is_empty() {
             return Err(PlanError::EmptyField { index, field: "title" });
         }
@@ -194,43 +223,61 @@ fn detect_cycle(plan: &PlanOutput) -> Result<(), PlanError> {
     Ok(())
 }
 
-/// 検証済みの `PlanOutput` から子タスクを組み立てる（ADR-0007 D2）。`validate` を通した plan だけを渡すこと。
-pub fn materialize(parent: &Task, plan: &PlanOutput, now: OffsetDateTime) -> Vec<Task> {
+/// 検証済みの `PlanOutput` から子タスクを組み立てる（ADR-0007 D2, ADR-0028 D3）。`validate` を通した
+/// plan だけを渡すこと（`genre`/`role` の不整合は既に無いという前提で、ここではエラーを返さない）。
+/// `tier` / `adapter` / `budget` と分野は、委譲（`materialize_delegated`）と同じ決め方
+/// （タスクの値 > 役割の既定 > 分野の既定 > 親の値。分野は 明示 > role の分野 > 親の分野）を使う。
+pub fn materialize(
+    parent: &Task,
+    plan: &PlanOutput,
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+    now: OffsetDateTime,
+) -> Vec<Task> {
     let ids: Vec<TaskId> = plan.tasks.iter().map(|_| TaskId::new()).collect();
     let index_to_id: HashMap<usize, TaskId> = ids.iter().copied().enumerate().collect();
     plan.tasks
         .iter()
         .enumerate()
-        .map(|(i, t)| Task {
-            id: ids[i],
-            parent_id: Some(parent.id),
-            kind: match t.kind {
-                NewTaskKind::Execute => TaskKind::Execute,
-                NewTaskKind::Plan => TaskKind::Plan,
-            },
-            title: t.title.clone(),
-            objective: t.objective.clone(),
-            acceptance: t.acceptance.clone(),
-            inputs: vec![],
-            depends_on: t
-                .depends_on
-                .iter()
-                .filter_map(|d| index_to_id.get(d).copied())
-                .collect(),
-            status: Status::Draft,
-            priority: parent.priority,
-            worker_hint: WorkerHint {
-                tier: t.tier.unwrap_or(Tier::Standard),
-                adapter: parent.worker_hint.adapter.clone(),
-            },
-            workspace: parent.workspace.clone(),
-            budget: parent.budget,
-            attempts: 0,
-            lease: None,
-            created_at: now,
-            updated_at: now,
-            role: t.role.clone(),
-            aggregate: false,
+        .map(|(i, t)| {
+            let defaults =
+                resolve_child_defaults(parent, t.genre.as_deref(), t.role.as_deref(), t.tier, roles, genres);
+            Task {
+                id: ids[i],
+                parent_id: Some(parent.id),
+                kind: match t.kind {
+                    NewTaskKind::Execute => TaskKind::Execute,
+                    NewTaskKind::Plan => TaskKind::Plan,
+                },
+                title: t.title.clone(),
+                objective: t.objective.clone(),
+                acceptance: t.acceptance.clone(),
+                inputs: vec![],
+                depends_on: t
+                    .depends_on
+                    .iter()
+                    .filter_map(|d| index_to_id.get(d).copied())
+                    .collect(),
+                status: Status::Draft,
+                priority: parent.priority,
+                worker_hint: WorkerHint {
+                    tier: defaults.tier,
+                    adapter: defaults.adapter,
+                },
+                workspace: parent.workspace.clone(),
+                budget: Budget {
+                    max_turns: defaults.max_turns,
+                    max_wall_secs: defaults.max_wall_secs,
+                    max_retries: parent.budget.max_retries,
+                },
+                attempts: 0,
+                lease: None,
+                created_at: now,
+                updated_at: now,
+                role: t.role.clone(),
+                genre: defaults.genre,
+                aggregate: false,
+            }
         })
         .collect()
 }
@@ -244,7 +291,7 @@ pub fn schema_value() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Budget, Check, WorkspaceSpec};
+    use crate::model::{Check, WorkspaceSpec};
     use std::path::PathBuf;
 
     fn new_task(title: &str, deps: Vec<usize>) -> NewTask {
@@ -262,6 +309,17 @@ mod tests {
             kind: NewTaskKind::Execute,
             tier: None,
             role: None,
+            genre: None,
+        }
+    }
+
+    fn genre(id: &str, default_role: Option<&str>, roles: &[&str]) -> GenreSpec {
+        GenreSpec {
+            id: id.into(),
+            description: format!("{id} description"),
+            default_role: default_role.map(str::to_string),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+            ..GenreSpec::default()
         }
     }
 
@@ -295,6 +353,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         }
     }
@@ -304,9 +363,9 @@ mod tests {
         let plan = PlanOutput {
             tasks: vec![new_task("a", vec![]), new_task("b", vec![0]), new_task("c", vec![0, 1])],
         };
-        validate(&plan, 1, &PlanLimits::default()).unwrap();
+        validate(&plan, 1, &PlanLimits::default(), &[]).unwrap();
         let p = parent();
-        let children = materialize(&p, &plan, OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], OffsetDateTime::now_utc());
         assert_eq!(children.len(), 3);
         for c in &children {
             assert_eq!(c.parent_id, Some(p.id));
@@ -315,7 +374,9 @@ mod tests {
             assert_eq!(c.workspace, p.workspace);
             assert_eq!(c.budget, p.budget);
             assert_eq!(c.worker_hint.adapter.as_deref(), Some("fake"));
-            assert_eq!(c.worker_hint.tier, Tier::Standard);
+            // ADR-0028 D3: tier に既定が無ければ（役割・分野・タスクいずれも無指定）親の tier を継ぐ
+            // （委譲と同じ規則。以前は独立した既定 `Standard` だった）。
+            assert_eq!(c.worker_hint.tier, Tier::Frontier);
             assert_eq!(c.kind, TaskKind::Execute);
         }
         assert_eq!(children[1].depends_on, vec![children[0].id]);
@@ -332,7 +393,7 @@ mod tests {
             tasks: vec![new_task("a", vec![])],
         };
         assert!(matches!(
-            validate(&one, 1, &limits),
+            validate(&one, 1, &limits, &[]),
             Err(PlanError::TaskCount { actual: 1, min: 2, max: 3 })
         ));
         let mut empty_title = PlanOutput {
@@ -340,14 +401,14 @@ mod tests {
         };
         empty_title.tasks[1].title = "  ".into();
         assert!(matches!(
-            validate(&empty_title, 1, &limits),
+            validate(&empty_title, 1, &limits, &[]),
             Err(PlanError::EmptyField { index: 1, field: "title" })
         ));
         let mut no_acc = PlanOutput {
             tasks: vec![new_task("a", vec![]), new_task("b", vec![])],
         };
         no_acc.tasks[0].acceptance.clear();
-        assert!(matches!(validate(&no_acc, 1, &limits), Err(PlanError::NoAcceptance { index: 0 })));
+        assert!(matches!(validate(&no_acc, 1, &limits, &[]), Err(PlanError::NoAcceptance { index: 0 })));
     }
 
     #[test]
@@ -355,7 +416,7 @@ mod tests {
         let oor = PlanOutput {
             tasks: vec![new_task("a", vec![7])],
         };
-        let err = validate(&oor, 1, &PlanLimits::default()).unwrap_err();
+        let err = validate(&oor, 1, &PlanLimits::default(), &[]).unwrap_err();
         assert!(matches!(err, PlanError::DependencyOutOfRange { index: 0, target: 7, .. }));
         assert!(err.to_string().contains("out of range"));
 
@@ -363,7 +424,7 @@ mod tests {
             tasks: vec![new_task("a", vec![0])],
         };
         assert!(matches!(
-            validate(&self_dep, 1, &PlanLimits::default()),
+            validate(&self_dep, 1, &PlanLimits::default(), &[]),
             Err(PlanError::SelfDependency { index: 0 })
         ));
 
@@ -371,7 +432,7 @@ mod tests {
             tasks: vec![new_task("a", vec![2]), new_task("b", vec![0]), new_task("c", vec![1])],
         };
         assert!(matches!(
-            validate(&cycle, 1, &PlanLimits::default()),
+            validate(&cycle, 1, &PlanLimits::default(), &[]),
             Err(PlanError::Cycle { .. })
         ));
 
@@ -383,7 +444,7 @@ mod tests {
                 new_task("d", vec![1, 2]),
             ],
         };
-        validate(&diamond, 1, &PlanLimits::default()).unwrap();
+        validate(&diamond, 1, &PlanLimits::default(), &[]).unwrap();
     }
 
     #[test]
@@ -392,27 +453,137 @@ mod tests {
             tasks: vec![new_task("sub", vec![])],
         };
         nested.tasks[0].kind = NewTaskKind::Plan;
-        validate(&nested, 1, &PlanLimits::default()).unwrap();
-        validate(&nested, 2, &PlanLimits::default()).unwrap();
+        validate(&nested, 1, &PlanLimits::default(), &[]).unwrap();
+        validate(&nested, 2, &PlanLimits::default(), &[]).unwrap();
         assert!(matches!(
-            validate(&nested, 3, &PlanLimits::default()),
+            validate(&nested, 3, &PlanLimits::default(), &[]),
             Err(PlanError::DepthExceeded { index: 0, depth: 4, max: 3 })
         ));
         let p = parent();
-        let children = materialize(&p, &nested, OffsetDateTime::now_utc());
+        let children = materialize(&p, &nested, &[], &[], OffsetDateTime::now_utc());
         assert_eq!(children[0].kind, TaskKind::Plan);
     }
 
     #[test]
     fn parse_rejects_unknown_fields_and_reports_serde_errors() {
         let ok = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"reviewer"}}]}]}"#;
-        let plan = parse_and_validate(ok, 1, &PlanLimits::default()).unwrap();
+        let plan = parse_and_validate(ok, 1, &PlanLimits::default(), &[]).unwrap();
         assert_eq!(plan.tasks[0].acceptance[0].check, Check::Reviewer);
         assert_eq!(plan.tasks[0].kind, NewTaskKind::Execute);
         let unknown = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"bogus":1}]}"#;
-        let err = parse_and_validate(unknown, 1, &PlanLimits::default()).unwrap_err();
+        let err = parse_and_validate(unknown, 1, &PlanLimits::default(), &[]).unwrap_err();
         assert!(err.contains("bogus"), "{err}");
-        assert!(parse_and_validate("not json", 1, &PlanLimits::default()).is_err());
+        assert!(parse_and_validate("not json", 1, &PlanLimits::default(), &[]).is_err());
+    }
+
+    /// ADR-0028 D3: 子の分野は 明示 > `role` の分野（一意なら） > 親の分野の順で決まる（委譲と同じ規則）。
+    #[test]
+    fn materialize_resolves_genre_by_precedence() {
+        let mut p = parent();
+        p.genre = Some("coding".into());
+        let genres = vec![
+            genre("coding", Some("implementer"), &["lead", "implementer"]),
+            genre("literature", Some("literature-reader"), &["literature-scout", "literature-reader"]),
+        ];
+
+        // 1. 明示した genre が最優先（`materialize` は検証済みの plan だけを渡す前提で、ここでは
+        // role/genre の整合そのものは見ない）。
+        let mut explicit = new_task("explicit", vec![]);
+        explicit.role = Some("implementer".into());
+        explicit.genre = Some("literature".into());
+        let plan = PlanOutput { tasks: vec![explicit] };
+        let children = materialize(&p, &plan, &[], &genres, OffsetDateTime::now_utc());
+        assert_eq!(children[0].genre.as_deref(), Some("literature"));
+
+        // 2. genre 未指定・role が一意に決まる分野に属する。
+        let mut by_role = new_task("by-role", vec![]);
+        by_role.role = Some("literature-scout".into());
+        let plan = PlanOutput { tasks: vec![by_role] };
+        let children = materialize(&p, &plan, &[], &genres, OffsetDateTime::now_utc());
+        assert_eq!(children[0].genre.as_deref(), Some("literature"));
+
+        // 3. genre も role も無ければ親の分野を継ぐ。
+        let plan = PlanOutput { tasks: vec![new_task("neither", vec![])] };
+        let children = materialize(&p, &plan, &[], &genres, OffsetDateTime::now_utc());
+        assert_eq!(children[0].genre.as_deref(), Some("coding"));
+    }
+
+    /// ADR-0028 D3: `tier` / `adapter` / `budget` は タスクの値 > 役割の既定 > 分野の既定
+    /// （`default_role` の役割）> 親の値、の順（委譲と同じ規則）。
+    #[test]
+    fn materialize_applies_role_and_genre_defaults_like_delegation() {
+        let p = parent(); // tier = Frontier, adapter = Some("fake")
+        let roles = vec![RoleSpec {
+            id: "implementer".into(),
+            tier: None,
+            adapter: Some("codex".into()),
+            max_turns: None,
+            max_wall_secs: None,
+            instructions: None,
+        }];
+        let genres = vec![genre("coding", Some("lead"), &["lead", "implementer"])];
+        let genre_default_role = vec![RoleSpec {
+            id: "lead".into(),
+            tier: Some(Tier::Cheap),
+            adapter: None,
+            max_turns: Some(20),
+            max_wall_secs: None,
+            instructions: None,
+        }];
+        let mut all_roles = roles;
+        all_roles.extend(genre_default_role);
+        let mut t = new_task("impl", vec![]);
+        t.role = Some("implementer".into());
+        t.genre = Some("coding".into());
+        let plan = PlanOutput { tasks: vec![t] };
+        let children = materialize(&p, &plan, &all_roles, &genres, OffsetDateTime::now_utc());
+        // adapter: role(implementer) の既定が優先。
+        assert_eq!(children[0].worker_hint.adapter.as_deref(), Some("codex"));
+        // tier: role に既定が無いので分野の既定役割（lead）から。
+        assert_eq!(children[0].worker_hint.tier, Tier::Cheap);
+        assert_eq!(children[0].budget.max_turns, 20);
+        assert_eq!(children[0].budget.max_retries, p.budget.max_retries);
+    }
+
+    /// ADR-0028 D3: 知らない `genre`、または `genre` + `role` の不整合は Plan の失敗になる。
+    #[test]
+    fn validate_rejects_unknown_genre_and_role_not_in_genre() {
+        let genres = vec![genre("coding", Some("implementer"), &["lead", "implementer"])];
+
+        let mut unknown = new_task("a", vec![]);
+        unknown.genre = Some("literature".into());
+        let plan = PlanOutput { tasks: vec![unknown] };
+        assert_eq!(
+            validate(&plan, 1, &PlanLimits::default(), &genres),
+            Err(PlanError::UnknownGenre { index: 0, genre: "literature".into() })
+        );
+
+        let mut mismatched = new_task("b", vec![]);
+        mismatched.genre = Some("coding".into());
+        mismatched.role = Some("literature-scout".into());
+        let plan = PlanOutput { tasks: vec![mismatched] };
+        assert_eq!(
+            validate(&plan, 1, &PlanLimits::default(), &genres),
+            Err(PlanError::RoleNotInGenre {
+                index: 0,
+                role: "literature-scout".into(),
+                genre: "coding".into(),
+            })
+        );
+
+        // 分野を使わない設定（`genres` が空）でも `genre` を指定すれば同じくエラー。
+        let mut no_config = new_task("c", vec![]);
+        no_config.genre = Some("coding".into());
+        let plan = PlanOutput { tasks: vec![no_config] };
+        assert_eq!(
+            validate(&plan, 1, &PlanLimits::default(), &[]),
+            Err(PlanError::UnknownGenre { index: 0, genre: "coding".into() })
+        );
+
+        // parse_and_validate 経由でも同じ（Plan run の暗黙条件から見えるエラー文言）。
+        let json = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"genre":"literature"}]}"#;
+        let err = parse_and_validate(json, 1, &PlanLimits::default(), &genres).unwrap_err();
+        assert!(err.contains("literature"), "{err}");
     }
 
     /// ADR-0007 D2 / ADR-0003 D6: 生成スキーマとコミット済みファイルの一致。`UPDATE_SCHEMA=1` で再生成。

@@ -225,6 +225,13 @@
           },
           "type": "array"
         },
+        "genre": {
+          "description": "ADR-0027 D1: 分野名（任意）。未指定なら `role` の分野（一意なら）→ 親の分野の順で継ぐ。\n`role` と両方指定したときは `role` がその分野の `roles` に含まれること（含まれなければ設定エラー）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "objective": {
           "type": "string"
         },
@@ -287,6 +294,67 @@
       },
       "required": [
         "criterion"
+      ],
+      "type": "object"
+    },
+    "GenreContext": {
+      "description": "`context.available_genres[]`（ADR-0027 D1）: 委譲できる run に渡す、使える分野と役割の一覧。\n「タスクの分野」ではなく「この run が子に割り当てられる分野の選択肢」を表す。",
+      "properties": {
+        "capabilities": {
+          "description": "ADR-0028 D1/D2: この分野で「できること」の自由記述。空なら省略される。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "input_artifacts": {
+          "description": "ADR-0028 D1/D2: この分野に渡すもの（目安、自由記述）。空なら省略される。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "output_artifacts": {
+          "description": "ADR-0028 D1/D2: この分野から返るもの（目安、自由記述）。空なら省略される。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/GenreRoleContext"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "description"
+      ],
+      "type": "object"
+    },
+    "GenreRoleContext": {
+      "description": "`context.available_genres[].roles[]`（ADR-0027 D1）: 分野に属する役割の id。指示文までは渡さない\n（長くなりすぎるため。プロンプトに前置きされる指示文は `context.role` 側の役目）ので `description` は\n今のところ常に省略だが、将来役割に説明文を持たせたときのために型としては残す。",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
       ],
       "type": "object"
     },
@@ -469,6 +537,13 @@
           },
           "type": "array"
         },
+        "available_genres": {
+          "description": "ADR-0027 D1: 委譲できる run（`build_execute_prompt` を使う run）にだけ、設定済みの分野と\nその役割の一覧を渡す。委譲できない run（`Plan`/`Review`）や `[[genres]]` が空の設定では空。",
+          "items": {
+            "$ref": "#/$defs/GenreContext"
+          },
+          "type": "array"
+        },
         "children": {
           "description": "集約 run（`aggregate = true` の親の、子が全て終端になった後の run）でのみ非空（ADR-0016 D3）。",
           "items": {
@@ -560,6 +635,13 @@
             "$ref": "#/$defs/TaskId"
           },
           "type": "array"
+        },
+        "genre": {
+          "description": "ADR-0027 D1: 分野名（自由記述。`[[genres]] id` と一致すれば既定の役割・プロンプトの説明が効く）。\n状態機械は見ない。導入前のタスクには無いので任意。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "id": {
           "$ref": "#/$defs/TaskId"

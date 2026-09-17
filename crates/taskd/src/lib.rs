@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use task_api::types::{ApiConfigView, ClusterConfigView, ConfigView, ProviderConfigView, ReviewerConfigView, RoleConfigView};
+use task_api::types::{
+    ApiConfigView, ClusterConfigView, ConfigView, GenreConfigView, ProviderConfigView, ReviewerConfigView,
+    RoleConfigView,
+};
 use task_api::{ApiError, ApiSettings, ApiState};
 use task_core::{SqliteStore, StoreError, StoreOptions, TaskStore};
 use task_ops::view::ViewContext;
@@ -19,8 +22,8 @@ use task_ops::daemon::{ProviderCheckView, ProviderLive};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use task_worker::{
-    AcpAdapter, AcpConfig, ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, WorkerAdapter,
-    Workspace,
+    AcpAdapter, AcpConfig, ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, PaperQaAdapter,
+    PaperQaConfig, WorkerAdapter, Workspace,
 };
 
 pub use config::{Config, ConfigError};
@@ -111,7 +114,23 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     startup_timeout: Duration::from_secs(base.startup_timeout_secs),
                 }))
             }
-            // `Config::validate` が fake / claude-code / codex / acp 以外を拒否している。
+            PaperQaAdapter::ID => {
+                let base = &config.adapters.paperqa;
+                Arc::new(PaperQaAdapter::new(PaperQaConfig {
+                    command: base.command.clone(),
+                    // ADR-0027 D3: 行ごとに設定ファイルを上書きできる（`command`/`args` と同じ作り）。
+                    settings: p.settings.clone().or_else(|| base.settings.clone()),
+                    paper_directory: base.paper_directory.clone(),
+                    index_directory: base.index_directory.clone(),
+                    index_name: base.index_name.clone(),
+                    // ADR-0027 D3: `model`（行の値。空なら None）は PaperQA の設定ファイルより優先して `--llm` に渡す。
+                    // `[adapters.paperqa]` にモデルの既定値は無い（acp と同じ理由: 行＝アカウント/エンドポイントごと）。
+                    model: effective_model(&p.model, &None),
+                    env: merged_env(&base.env, &p.env),
+                    extra_args: base.extra_args.clone(),
+                }))
+            }
+            // `Config::validate` が fake / claude-code / codex / acp / paperqa 以外を拒否している。
             _ => {
                 let mut fake = FakeAdapter::new(config.adapters.fake.command.clone());
                 fake.set_env(merged_env(&config.adapters.fake.env, &p.env));
@@ -132,7 +151,8 @@ pub fn effective_models(config: &Config) -> HashMap<ProviderId, String> {
             let adapter_model = match p.adapter.as_str() {
                 ClaudeCodeAdapter::ID => config.adapters.claude_code.model.clone(),
                 CodexAdapter::ID => config.adapters.codex.model.clone(),
-                // ADR-0026 D3: acp には `[adapters.acp].model` が無い。行の `model` が空なら `None` になる。
+                // ADR-0026 D3 / ADR-0027 D3: acp / paperqa には `[adapters.<種別>].model` が無い。
+                // 行の `model` が空なら `None` になる。
                 _ => None,
             };
             (p.id.clone(), effective_model(&p.model, &adapter_model).unwrap_or_default())
@@ -308,6 +328,20 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                 has_instructions: r.instructions.as_ref().is_some_and(|s| !s.is_empty()),
             })
             .collect(),
+        // ADR-0027 D1 / ADR-0028 D1: `[[genres]]` の要約（`role` と同じく設定順のまま）。
+        genres: config
+            .genres
+            .iter()
+            .map(|g| GenreConfigView {
+                id: g.id.clone(),
+                description: g.description.clone(),
+                capabilities: g.capabilities.clone(),
+                input_artifacts: g.input_artifacts.clone(),
+                output_artifacts: g.output_artifacts.clone(),
+                default_role: g.default_role.clone(),
+                roles: g.roles.clone(),
+            })
+            .collect(),
         delegation: config.delegation_limits(),
         api: ApiConfigView {
             bind: listen.to_string(),
@@ -341,6 +375,7 @@ pub fn api_settings(
         },
         config_view: config_view(config, listen),
         roles: config.role_specs(),
+        genres: config.genre_specs(),
         taskd_version: env!("CARGO_PKG_VERSION").to_string(),
         instance_id,
         started_at,
@@ -693,6 +728,7 @@ async fn check_provider(
         created_at: now,
         updated_at: now,
         role: None,
+        genre: None,
         aggregate: false,
     };
     let prepared = task_worker::LocalWorkspace::new(dir.clone())
@@ -711,6 +747,7 @@ async fn check_provider(
             review: None,
             role: None,
             children: vec![],
+            available_genres: vec![],
         },
     };
     let limits = task_worker::RunLimits {
@@ -828,6 +865,77 @@ model = "fake"
         }
     }
 
+    /// ADR-0027 D1 / ADR-0028 D1: `[[genres]]` は `config_view` の `genres[]` に設定順のまま写る。
+    /// `capabilities` / `input_artifacts` / `output_artifacts` を書かない分野は空のまま（既存設定との互換）。
+    #[test]
+    fn config_view_exposes_genres() {
+        let text = r#"
+[[roles]]
+id = "lead"
+
+[[roles]]
+id = "implementer"
+
+[[genres]]
+id = "coding"
+description = "write and fix code"
+default_role = "implementer"
+roles = ["lead", "implementer"]
+
+[[providers]]
+id = "local-fake"
+adapter = "fake"
+model = "fake"
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        cfg.validate().unwrap();
+        let view = config_view(&cfg, "127.0.0.1:7710".parse().unwrap());
+        assert_eq!(
+            view.genres,
+            vec![GenreConfigView {
+                id: "coding".into(),
+                description: "write and fix code".into(),
+                capabilities: vec![],
+                input_artifacts: vec![],
+                output_artifacts: vec![],
+                default_role: Some("implementer".into()),
+                roles: vec!["lead".into(), "implementer".into()],
+            }]
+        );
+    }
+
+    /// ADR-0028 D1: `capabilities` / `input_artifacts` / `output_artifacts` を書けば `GET /config` の
+    /// `genres[]` にそのまま出る。
+    #[test]
+    fn config_view_exposes_genre_capabilities_and_artifacts() {
+        let text = r#"
+[[roles]]
+id = "literature-reader"
+
+[[genres]]
+id = "literature"
+description = "related work survey"
+capabilities = ["academic literature search", "citation graph traversal"]
+input_artifacts = ["question", "pdf"]
+output_artifacts = ["answer.md", "citations.json"]
+default_role = "literature-reader"
+roles = ["literature-reader"]
+
+[[providers]]
+id = "local-fake"
+adapter = "fake"
+model = "fake"
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        cfg.validate().unwrap();
+        let view = config_view(&cfg, "127.0.0.1:7710".parse().unwrap());
+        assert_eq!(view.genres[0].capabilities, vec!["academic literature search".to_string(), "citation graph traversal".to_string()]);
+        assert_eq!(view.genres[0].input_artifacts, vec!["question".to_string(), "pdf".to_string()]);
+        assert_eq!(view.genres[0].output_artifacts, vec!["answer.md".to_string(), "citations.json".to_string()]);
+        let json = serde_json::to_value(&view.genres[0]).unwrap();
+        assert_eq!(json["capabilities"][0], "academic literature search");
+    }
+
     /// ADR-0026 D2/D3: `acp` プロバイダの行は `[adapters.acp]` の env に重ね、`command`/`args` は行の値が
     /// 優先し、`model` は行の値がそのまま（`[adapters.acp]` にモデルの既定値は無い）。
     #[test]
@@ -879,6 +987,59 @@ args = ["acp"]
         // 行の command/args が [adapters.acp] の既定（opencode/["acp"]）を上書きする。
         assert_eq!(cfg.providers[1].command.as_deref(), Some("goose"));
         assert_eq!(cfg.providers[1].args.as_deref(), Some(&["acp".to_string()][..]));
+    }
+
+    /// ADR-0027 D3: `paperqa` プロバイダの行は `[adapters.paperqa]` の env に重ね、`settings` は行の値が
+    /// あればそちらを使い、`model` は行の値がそのまま（`[adapters.paperqa]` にモデルの既定値は無い）。
+    #[test]
+    fn build_adapters_wires_a_paperqa_provider_with_merged_env_and_row_overrides() {
+        let text = r#"
+[adapters.paperqa]
+command = "/opt/paperqa/.venv/bin/pqa"
+settings = "/opt/paperqa/settings/base"
+paper_directory = "/opt/paperqa/papers"
+index_directory = "/opt/paperqa/index"
+env = { SHARED = "base", OPENAI_BASE_URL = "http://old:1/v1" }
+
+[[providers]]
+id = "paperqa-qwen"
+adapter = "paperqa"
+tiers = ["standard"]
+model = "openai/qwen3.8-27b"
+settings = "/opt/paperqa/settings/qwen-local"
+env = { OPENAI_BASE_URL = "http://127.0.0.1:18000/v1" }
+
+[[providers]]
+id = "paperqa-default"
+adapter = "paperqa"
+tiers = ["standard"]
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        cfg.validate().unwrap();
+        let adapters = build_adapters(&cfg);
+        assert_eq!(adapters.len(), 2);
+        assert_eq!(adapters["paperqa-qwen"].id(), "paperqa");
+        assert_eq!(adapters["paperqa-default"].id(), "paperqa");
+
+        let models = effective_models(&cfg);
+        assert_eq!(models["paperqa-qwen"], "openai/qwen3.8-27b");
+        // 行に model が無ければ空文字（`[adapters.paperqa]` にモデルの既定値が無いため、他のアダプタのような
+        // フォールバックは起きない。ADR-0026 D3 と同じ理由）。
+        assert_eq!(models["paperqa-default"], "");
+
+        let merged = merged_env(&cfg.adapters.paperqa.env, &cfg.providers[0].env);
+        assert_eq!(
+            merged,
+            vec![
+                ("OPENAI_BASE_URL".to_string(), "http://127.0.0.1:18000/v1".to_string()),
+                ("SHARED".to_string(), "base".to_string()),
+            ]
+        );
+
+        // 行の settings が [adapters.paperqa] の既定を上書きする。上書きしない行は共通設定のまま。
+        assert_eq!(cfg.providers[0].settings.as_deref(), Some("/opt/paperqa/settings/qwen-local"));
+        assert!(cfg.providers[1].settings.is_none());
+        assert_eq!(cfg.adapters.paperqa.settings.as_deref(), Some("/opt/paperqa/settings/base"));
     }
 
     /// S7: `[accounts]` は reload の対象外。`claude_dir` / `max_runs_per_account` / `check_model` のどれかが

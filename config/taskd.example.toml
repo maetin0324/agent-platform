@@ -38,6 +38,44 @@ auto_accept = false
 # tier = "standard"
 # max_turns = 20
 # instructions = "あなたは実装担当。受け取った範囲だけを実装し、終わったら summary を書く。"
+#
+# 調査分野の役割の例（ADR-0027）。役割名は自由記述で、下の [[genres]] roles に含めれば分野に属する。
+# [[roles]]
+# id = "literature-scout"
+# tier = "cheap"
+# instructions = "あなたは調査担当。広く候補論文を探し、見落としが無いか洗い出す（深読みはしない）。"
+#
+# [[roles]]
+# id = "literature-reader"
+# tier = "standard"
+# instructions = "あなたは精読担当。候補論文を読み込み、引用付きで要点と新規性への影響をまとめる。"
+
+# 分野（ADR-0027 D1）。タスクの `genre` がここの `id` を指すと、role が省略されたときの既定として
+# `default_role` の役割（tier / adapter / 予算）が使われ（タスクの値 > 役割の既定 > 分野の既定 > 親の値）、
+# 委譲できる run（lead など）のプロンプトに「使える専門家」として一覧が渡る。分野そのものにはアダプタを持たせない
+# （D2: `default_role` の役割が持つ。同じ分野でも役割ごとに違うハーネス・モデルを使い分けられる）。
+# `default_role` と `roles` の各要素は上の [[roles]] に存在すること、`default_role`（あれば）は `roles` に
+# 含まれることを起動時に検証する（`taskctl add --genre <id> --config <このファイル>` / API の `POST /tasks` の
+# `"genre"` で指定する）。
+# `capabilities` / `input_artifacts` / `output_artifacts`（ADR-0028 D1）は 3 つとも任意の自由記述。
+# taskd は中身を検査しない（Planner・委譲できる run のプロンプトに「できること」「渡すもの→返るもの」として出るだけ）。
+# [[genres]]
+# id = "coding"
+# description = "コードを書く・直す・テストする"
+# capabilities = ["ソースコードの読み書き", "テストの実行", "パッチの作成"]
+# input_artifacts = ["issue description", "repository"]
+# output_artifacts = ["diff", "test results"]
+# default_role = "implementer"
+# roles = ["lead", "implementer"]
+#
+# [[genres]]
+# id = "literature"
+# description = "関連研究の調査・先行研究の確認・新規性の検討"
+# capabilities = ["学術文献の検索", "引用グラフの探索", "PDF 全文からの根拠抽出"]
+# input_artifacts = ["question", "pdf", "bibliography"]
+# output_artifacts = ["answer.md", "citations.json"]
+# default_role = "literature-reader"
+# roles = ["literature-scout", "literature-reader"]
 
 # 実行中の委譲の上限（ADR-0016 D2 / M6）。既定は下の値。超える提案は拒否され、理由が WorkerProgress に残る（run は失敗しない）。
 [delegation]

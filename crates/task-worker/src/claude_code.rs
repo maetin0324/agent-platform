@@ -101,8 +101,9 @@ pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
     }
 }
 
-/// 冒頭の共通部分（タイトル・run_id/attempt・役割・目的）。`context.role` があれば `## Objective` の前に
-/// `## Role: <id>` と指示文（無ければ id だけ）を出す（ADR-0016 D1 / M3）。
+/// 冒頭の共通部分（タイトル・run_id/attempt・役割・分野・目的）。`context.role` があれば `## Objective` の前に
+/// `## Role: <id>` と指示文（無ければ id だけ）を出す（ADR-0016 D1 / M3）。`task.genre` があり、その分野が
+/// `context.available_genres` に載っていれば、続けて `## Genre: <id>` と説明を出す（ADR-0027 D1）。
 fn prompt_header(task: &Task, context: &RunContext, run_id: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Task: {}\n\n", task.title));
@@ -119,7 +120,71 @@ fn prompt_header(task: &Task, context: &RunContext, run_id: &str) -> String {
         }
         out.push('\n');
     }
+    if let Some(genre_id) = &task.genre
+        && let Some(genre) = context.available_genres.iter().find(|g| &g.id == genre_id)
+    {
+        out.push_str(&format!("## Genre: {}\n{}\n\n", genre.id, genre.description));
+    }
     out.push_str(&format!("## Objective\n{}\n\n", task.objective));
+    out
+}
+
+/// `context.available_genres` の一覧を「使える専門家」の箇条書きに描く（ADR-0027 D1, ADR-0028 D2）。
+/// `できること` / `渡すもの…返るもの` の行は、それぞれの一覧が空なら出さない（ADR-0028 D1: 3 フィールドとも任意）。
+/// 見出しと、末尾の使い方の説明（委譲 or plan.json）は呼び出し側が足す。
+fn genre_list_lines(context: &RunContext) -> String {
+    let mut out = String::new();
+    for g in &context.available_genres {
+        out.push_str(&format!("- {}: {}\n", g.id, g.description));
+        if !g.capabilities.is_empty() {
+            out.push_str(&format!("  できること: {}\n", g.capabilities.join(" / ")));
+        }
+        if !g.input_artifacts.is_empty() || !g.output_artifacts.is_empty() {
+            out.push_str(&format!(
+                "  渡すもの: {} → 返るもの: {}\n",
+                g.input_artifacts.join(", "),
+                g.output_artifacts.join(", ")
+            ));
+        }
+        let roles = if g.roles.is_empty() {
+            "-".to_string()
+        } else {
+            g.roles.iter().map(|r| r.id.as_str()).collect::<Vec<_>>().join(", ")
+        };
+        out.push_str(&format!("  役割: {roles}\n"));
+    }
+    out
+}
+
+/// `context.available_genres` があれば「使える専門家」節を足す（ADR-0027 D1, ADR-0028 D2）。委譲できる run
+/// （`build_execute_prompt`）にだけ、この run が子に割り当てられる分野の能力・入出力・役割の選択肢を伝える。
+fn available_genres_section(context: &RunContext) -> String {
+    let mut out = String::new();
+    if context.available_genres.is_empty() {
+        return out;
+    }
+    out.push_str("## 使える専門家 (available genres and roles you can delegate to)\n");
+    out.push_str(&genre_list_lines(context));
+    out.push_str(
+        "\nIf part of this work belongs to a different genre, delegate it with `role` set to one \
+         of that genre's roles and `genre` set to its id in `artifacts/delegate.json`.\n\n",
+    );
+    out
+}
+
+/// Plan run 用の「使える専門家」節（ADR-0028 D3）。子タスクの `genre` / `role` を `artifacts/plan.json` で
+/// 選べることを伝える点だけが `available_genres_section` と異なる（委譲ではなく分解なので）。
+fn available_genres_section_for_plan(context: &RunContext) -> String {
+    let mut out = String::new();
+    if context.available_genres.is_empty() {
+        return out;
+    }
+    out.push_str("## 使える専門家 (available genres and roles you can assign child tasks to)\n");
+    out.push_str(&genre_list_lines(context));
+    out.push_str(
+        "\nIf a child task belongs to a different genre than this one, set its `genre` (and, one of \
+         that genre's roles, its `role`) in `artifacts/plan.json`.\n\n",
+    );
     out
 }
 
@@ -199,13 +264,14 @@ fn result_json_instructions() -> &'static str {
      chat message directly.\n"
 }
 
-/// 実行中の委譲の方法（ADR-0016 D2 / M8）。
+/// 実行中の委譲の方法（ADR-0016 D2 / M8, ADR-0027 D1）。
 fn delegation_instructions() -> &'static str {
     "If you want to delegate part of this work to another agent, write `artifacts/delegate.json` \
      (create the `artifacts/` directory if it does not exist yet) as a single JSON object of the form \
      `{\"tasks\":[{\"title\":\"...\",\"objective\":\"...\",\"acceptance\":[{\"text\":\"...\",\
      \"check\":{\"type\":\"command\",\"cmd\":\"...\",\"expect_exit\":0}}],\"role\":\"<optional>\",\
-     \"depends_on\":[<index into this array, or an existing task id>]}]}`. `check` may also be \
+     \"genre\":\"<optional>\",\"depends_on\":[<index into this array, or an existing task id>]}]}`. \
+     `check` may also be \
      `{\"type\":\"artifact_exists\",\"name\":\"...\"}`, `{\"type\":\"reviewer\"}`, or `{\"type\":\"human\"}`. \
      taskd will validate this after this run ends and insert whatever proposals pass validation as child \
      tasks (how many are accepted per run is limited by configuration; any rejected proposal has its \
@@ -235,6 +301,7 @@ fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> Stri
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
     out.push_str(&children_section(context));
+    out.push_str(&available_genres_section(context));
     out.push_str("## Instructions\n");
     out.push_str("Work in the current directory (it is a dedicated workspace for this task). ");
     out.push_str(delegation_instructions());
@@ -283,6 +350,7 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String 
     out.push_str("\n```\n\n");
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
+    out.push_str(&available_genres_section_for_plan(context));
     out.push_str(result_json_instructions());
     out
 }
@@ -714,7 +782,7 @@ mod tests {
     use task_core::{ArtifactRef, DelegateTask, RateLimitObservation};
 
     use super::*;
-    use crate::protocol::{PROTOCOL_VERSION, RunContext};
+    use crate::protocol::{GenreContext, PROTOCOL_VERSION, RunContext};
 
     #[derive(Default)]
     struct RecordingSink {
@@ -1211,6 +1279,137 @@ echo '{"type":"result","subtype":"success","is_error":false}'
 
         let no_role_prompt = build_prompt(&task, &RunContext::default(), "run-role-2");
         assert!(!no_role_prompt.contains("## Role"));
+    }
+
+    /// ADR-0027 D1: `task.genre` があり、その分野が `context.available_genres` に載っていれば
+    /// `## Genre: <id>` と説明がプロンプトに入る。載っていなければ（委譲できない run など）出ない。
+    #[test]
+    fn build_prompt_includes_genre_header_only_when_the_genre_is_in_available_genres() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.genre = Some("literature".into());
+        let genre_spec = task_core::GenreSpec {
+            id: "literature".into(),
+            description: "related work survey and novelty checks".into(),
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-reader".into()],
+            ..task_core::GenreSpec::default()
+        };
+        let context = RunContext {
+            available_genres: vec![GenreContext::from(&genre_spec)],
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-genre-1");
+        assert!(prompt.contains("## Genre: literature"));
+        assert!(prompt.contains("related work survey and novelty checks"));
+
+        // available_genres が task.genre を含まない（あるいは空）なら Genre 見出しは出ない。
+        let empty_prompt = build_prompt(&task, &RunContext::default(), "run-genre-2");
+        assert!(!empty_prompt.contains("## Genre"));
+    }
+
+    /// ADR-0027 D1: `context.available_genres` が非空なら「使える専門家」節が Execute プロンプトに入り、
+    /// 空なら入らない。
+    #[test]
+    fn build_prompt_includes_available_genres_section_only_when_present() {
+        let task = crate::protocol::tests::sample_task();
+        let genre_spec = task_core::GenreSpec {
+            id: "literature".into(),
+            description: "related work survey".into(),
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-scout".into(), "literature-reader".into()],
+            ..task_core::GenreSpec::default()
+        };
+        let context = RunContext {
+            available_genres: vec![GenreContext::from(&genre_spec)],
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-avail-1");
+        assert!(prompt.contains("使える専門家"));
+        assert!(prompt.contains("literature-scout"));
+        assert!(prompt.contains("literature-reader"));
+
+        let no_genres_prompt = build_prompt(&task, &RunContext::default(), "run-avail-2");
+        assert!(!no_genres_prompt.contains("使える専門家"));
+    }
+
+    /// ADR-0028 D2: `capabilities` / `input_artifacts` / `output_artifacts` があれば「できること」と
+    /// 「渡すもの…返るもの」の行が、ADR に書かれた通りの形で出る。
+    #[test]
+    fn available_genres_section_renders_the_adr_0028_d2_shape() {
+        let task = crate::protocol::tests::sample_task();
+        let genre_spec = task_core::GenreSpec {
+            id: "related-research".into(),
+            description: "先行研究の確認・新規性の検討".into(),
+            capabilities: vec![
+                "学術文献の検索".into(),
+                "引用グラフの探索".into(),
+                "PDF 全文からの根拠抽出".into(),
+            ],
+            input_artifacts: vec!["question".into(), "pdf".into(), "bibliography".into()],
+            output_artifacts: vec!["answer.md".into(), "citations.json".into()],
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-scout".into(), "literature-reader".into(), "novelty-skeptic".into()],
+        };
+        let context = RunContext {
+            available_genres: vec![GenreContext::from(&genre_spec)],
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-avail-shape");
+        assert!(
+            prompt.contains(
+                "- related-research: 先行研究の確認・新規性の検討\n\
+                 \u{20}\u{20}できること: 学術文献の検索 / 引用グラフの探索 / PDF 全文からの根拠抽出\n\
+                 \u{20}\u{20}渡すもの: question, pdf, bibliography → 返るもの: answer.md, citations.json\n\
+                 \u{20}\u{20}役割: literature-scout, literature-reader, novelty-skeptic\n"
+            ),
+            "{prompt}"
+        );
+    }
+
+    /// ADR-0028 D1: `capabilities` / `input_artifacts` / `output_artifacts` が空なら、それぞれの行を
+    /// 出さない（既存設定との互換）。
+    #[test]
+    fn available_genres_section_omits_lines_whose_list_is_empty() {
+        let task = crate::protocol::tests::sample_task();
+        let genre_spec = task_core::GenreSpec {
+            id: "coding".into(),
+            description: "write and fix code".into(),
+            roles: vec!["implementer".into()],
+            ..task_core::GenreSpec::default()
+        };
+        let context = RunContext {
+            available_genres: vec![GenreContext::from(&genre_spec)],
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-avail-omit");
+        assert!(!prompt.contains("できること"));
+        assert!(!prompt.contains("渡すもの"));
+        assert!(prompt.contains("- coding: write and fix code\n  役割: implementer\n"));
+    }
+
+    /// ADR-0028 D3: Plan run のプロンプトにも「使える専門家」節が入る（今までは Execute/Approval だけ）。
+    #[test]
+    fn build_plan_prompt_includes_available_genres_section_when_present() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.kind = task_core::TaskKind::Plan;
+        let genre_spec = task_core::GenreSpec {
+            id: "literature".into(),
+            description: "related work survey".into(),
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-reader".into()],
+            ..task_core::GenreSpec::default()
+        };
+        let context = RunContext {
+            available_genres: vec![GenreContext::from(&genre_spec)],
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-plan-avail-1");
+        assert!(prompt.contains("使える専門家"));
+        assert!(prompt.contains("literature-reader"));
+        assert!(prompt.contains("artifacts/plan.json"));
+
+        let no_genres_prompt = build_prompt(&task, &RunContext::default(), "run-plan-avail-2");
+        assert!(!no_genres_prompt.contains("使える専門家"));
     }
 
     /// ADR-0016 D3 / M4: `context.children` が非空なら集約 run の節が入り、成果物のまとめ方の指示が付く。

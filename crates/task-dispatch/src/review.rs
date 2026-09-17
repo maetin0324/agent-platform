@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use task_core::plan::{PlanLimits, PlanOutput, parse_and_validate};
-use task_core::{ArtifactRef, Check, Status, Task, TaskId, TaskKind, Tier, Usage, WorkerHint};
+use task_core::{ArtifactRef, Check, GenreSpec, Status, Task, TaskId, TaskKind, Tier, Usage, WorkerHint};
 use task_worker::artifact::sha256_file;
 
 use crate::policy::ProviderOutcome;
@@ -50,12 +50,14 @@ pub struct ReviewerRun {
     pub hint: WorkerHint,
 }
 
-/// `Plan` kind の検証パラメータ（ADR-0007 D2/D4）。
-#[derive(Debug, Clone, Copy)]
+/// `Plan` kind の検証パラメータ（ADR-0007 D2/D4, ADR-0028 D3）。
+#[derive(Debug, Clone)]
 pub struct PlanCheck {
     /// その Plan 自身を含む祖先 Plan の数。
     pub depth: u32,
     pub limits: PlanLimits,
+    /// ADR-0028 D3: `PlanOutput.tasks[].genre` / `role` の整合検証に使う（`[[genres]]`）。
+    pub genres: Vec<GenreSpec>,
 }
 
 /// `Reviewer` run が供給側の失敗で判定できなかったこと（ADR-0010 D5, P-29）。
@@ -225,8 +227,8 @@ pub async fn review_task(
 
     // ADR-0007 D4: Plan kind は暗黙の条件「artifacts/plan.json が PlanOutput として妥当」を追加する。
     let mut plan_output = None;
-    if let Some(check) = plan {
-        let (pass, reason, parsed) = check_plan_file(workspace_dir, &check);
+    if let Some(check) = &plan {
+        let (pass, reason, parsed) = check_plan_file(workspace_dir, check);
         plan_output = parsed;
         verdicts.push(Verdict {
             criterion_idx: task.acceptance.len(),
@@ -311,7 +313,7 @@ fn check_plan_file(workspace_dir: &Path, check: &PlanCheck) -> (bool, String, Op
         Ok(t) => t,
         Err(e) => return (false, format!("{PLAN_FILE} not found or unreadable: {e}"), None),
     };
-    match parse_and_validate(&text, check.depth, &check.limits) {
+    match parse_and_validate(&text, check.depth, &check.limits, &check.genres) {
         Ok(plan) => {
             let n = plan.tasks.len();
             (true, format!("{PLAN_FILE} is a valid PlanOutput with {n} tasks"), Some(plan))
@@ -345,6 +347,7 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHin
         created_at: now,
         updated_at: now,
         role: None,
+        genre: None,
         aggregate: false,
     }
 }
@@ -401,6 +404,8 @@ async fn run_reviewer_inner(
             }),
             role: None,
             children: Vec::new(),
+            // ADR-0027 D1: Reviewer run は委譲しない（M8 相当）。
+            available_genres: Vec::new(),
         },
     };
     let tag = format!("reviewer({})", run.run_id);
@@ -507,6 +512,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             role: None,
+            genre: None,
             aggregate: false,
         }
     }
@@ -801,10 +807,10 @@ mod tests {
         let ws = LocalWorkspace::new(dir.path());
         let mut task = task_with(vec![], dir.path());
         task.kind = TaskKind::Plan;
-        let check = PlanCheck { depth: 1, limits: PlanLimits::default() };
+        let check = PlanCheck { depth: 1, limits: PlanLimits::default(), genres: vec![] };
 
         // ファイル無し。
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;
         assert_eq!(out.verdicts.len(), 1);
         assert_eq!(out.verdicts[0].criterion_idx, 0);
         assert!(!out.verdicts[0].pass);
@@ -818,7 +824,7 @@ mod tests {
             r#"{"tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"command","cmd":"true","expect_exit":0}}],"depends_on":[5]}]}"#,
         )
         .unwrap();
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;
         assert!(!out.verdicts[0].pass);
         assert!(out.verdicts[0].reason.contains("out of range"), "{}", out.verdicts[0].reason);
 
@@ -829,7 +835,7 @@ mod tests {
         )
         .unwrap();
         task.acceptance.push(Criterion { text: "c".into(), check: Check::Command { cmd: "true".into(), expect_exit: 0 } });
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;
         assert_eq!(out.verdicts.iter().map(|v| (v.criterion_idx, v.pass)).collect::<Vec<_>>(), vec![(0, true), (1, true)]);
         assert!(out.verdicts[1].reason.contains("2 tasks"));
         assert_eq!(out.plan.unwrap().tasks.len(), 2);
