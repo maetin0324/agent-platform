@@ -101,9 +101,10 @@ pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
     }
 }
 
-/// 冒頭の共通部分（タイトル・run_id/attempt・役割・分野・目的）。`context.role` があれば `## Objective` の前に
-/// `## Role: <id>` と指示文（無ければ id だけ）を出す（ADR-0016 D1 / M3）。`task.genre` があり、その分野が
-/// `context.available_genres` に載っていれば、続けて `## Genre: <id>` と説明を出す（ADR-0027 D1）。
+/// 冒頭の共通部分（タイトル・run_id/attempt・前置き・分野・目的）。前置き（役職と brief・永続の認可・記憶・
+/// 直近のやり取り・役割の指示文）は `crate::preamble::render` が組む（ADR-0016 D1 / M3, ADR-0033 D4 / D6）。
+/// `task.genre` があり、その分野が `context.available_genres` に載っていれば、続けて `## Genre: <id>` と
+/// 説明を出す（ADR-0027 D1）。
 fn prompt_header(task: &Task, context: &RunContext, run_id: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Task: {}\n\n", task.title));
@@ -112,14 +113,9 @@ fn prompt_header(task: &Task, context: &RunContext, run_id: &str) -> String {
         task.attempts + 1,
         task.budget.max_retries + 1
     ));
-    if let Some(role) = &context.role {
-        out.push_str(&format!("## Role: {}\n", role.id));
-        if !role.instructions.is_empty() {
-            out.push_str(&role.instructions);
-            out.push('\n');
-        }
-        out.push('\n');
-    }
+    // ADR-0033 D4 / D6（Phase 24）: 役職と brief → 永続の認可 → 記憶 → 直近のやり取り → 役割の指示文。
+    // 前置きは `crate::preamble` が 1 か所で組む（`RunContext` が空なら 1 バイトも増えない）。
+    out.push_str(&crate::preamble::render(context));
     if let Some(genre_id) = &task.genre
         && let Some(genre) = context.available_genres.iter().find(|g| &g.id == genre_id)
     {
@@ -188,6 +184,33 @@ fn available_genres_section_for_plan(context: &RunContext) -> String {
     out
 }
 
+
+/// ADR-0033 D4（Phase 24）: 組織図（id / name / brief / genre）。分解・委譲できる run にだけ渡り、
+/// 「どの課に何を振るか」を `assignee` で決めさせる。空なら何も出さない（Phase 23 までと同じ出力）。
+fn organization_section(context: &RunContext) -> String {
+    let mut out = String::new();
+    if context.organization.is_empty() {
+        return out;
+    }
+    out.push_str("## 組織図 (who you can assign work to)\n");
+    for n in &context.organization {
+        let kind = match n.kind {
+            task_core::OrgKind::Secretary => "秘書",
+            task_core::OrgKind::Department => "部",
+            task_core::OrgKind::Section => "課",
+        };
+        let parent = n.parent_id.as_deref().unwrap_or("-");
+        let genre = n.genre.as_deref().unwrap_or("-");
+        out.push_str(&format!("- {} [{kind}] {} (親: {parent}, 分野: {genre})", n.id, n.name));
+        if !n.brief.is_empty() {
+            out.push_str(&format!(" — {}", n.brief));
+        }
+        out.push('\n');
+    }
+    out.push('\n');
+    out
+}
+
 /// `context.children` があれば「集約 run」節を足す（ADR-0016 D3 / M4）。
 fn children_section(context: &RunContext) -> String {
     let mut out = String::new();
@@ -220,6 +243,31 @@ fn children_section(context: &RunContext) -> String {
          The reviewer will check that `artifacts/summary.md` exists.\n\n",
     );
     out
+}
+
+
+/// ADR-0033 D4（Phase 24）: 「どの課に何を振るか」を `assignee` で指定させる指示（Plan run 用）。
+/// 組織図を渡していない run（Phase 23 までの構成）では何も出さない。
+fn assignee_instructions_for_plan(context: &RunContext) -> String {
+    if context.organization.is_empty() {
+        return String::new();
+    }
+    "上の組織図を見て、**子タスクごとに `assignee` を必ず書け**（その仕事を任せる課の id）。\n\
+     `role` は必要なときだけ書けばよい（書かなければその課の分野の既定の役割で走る）。\n\
+     `role` を書いた場合は、そちらの tier / アダプタ / 予算が使われ、`assignee` は「誰の仕事か」だけを表す。\n\n"
+        .to_string()
+}
+
+/// 同じことを委譲（`artifacts/delegate.json`）側にも書く（ADR-0033 D4）。
+/// 部をまたぐ委譲は秘書の認可が要るので、それも伝える（SPEC §3.1）。
+fn assignee_instructions_for_delegation(context: &RunContext) -> String {
+    if context.organization.is_empty() {
+        return String::new();
+    }
+    "委譲する子には、上の組織図を見て `assignee`（任せる課の id）を書け。`role` は必要なときだけでよい。\n\
+     自分と**別の部**の課へ委譲したいときは、子は作られず、代わりに秘書への質問になる（部をまたぐ連携は \
+     秘書が認める）。\n\n"
+        .to_string()
 }
 
 /// `context.prior_review` があれば「前回の判定」として列挙する（ADR-0006 D2）。
@@ -270,7 +318,8 @@ fn delegation_instructions() -> &'static str {
      (create the `artifacts/` directory if it does not exist yet) as a single JSON object of the form \
      `{\"tasks\":[{\"title\":\"...\",\"objective\":\"...\",\"acceptance\":[{\"text\":\"...\",\
      \"check\":{\"type\":\"command\",\"cmd\":\"...\",\"expect_exit\":0}}],\"role\":\"<optional>\",\
-     \"genre\":\"<optional>\",\"depends_on\":[<index into this array, or an existing task id>]}]}`. \
+     \"genre\":\"<optional>\",\"assignee\":\"<optional org node id>\",\
+     \"depends_on\":[<index into this array, or an existing task id>]}]}`. \
      `check` may also be \
      `{\"type\":\"artifact_exists\",\"name\":\"...\"}`, `{\"type\":\"reviewer\"}`, or `{\"type\":\"human\"}`. \
      taskd will validate this after this run ends and insert whatever proposals pass validation as child \
@@ -301,7 +350,9 @@ fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> Stri
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
     out.push_str(&children_section(context));
+    out.push_str(&organization_section(context));
     out.push_str(&available_genres_section(context));
+    out.push_str(&assignee_instructions_for_delegation(context));
     out.push_str("## Instructions\n");
     out.push_str("Work in the current directory (it is a dedicated workspace for this task). ");
     out.push_str(delegation_instructions());
@@ -330,6 +381,7 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String 
          \"acceptance\":[{{\"text\":\"...\",\"check\":{{\"type\":\"command\",\"cmd\":\"...\",\
          \"expect_exit\":0}}}}],\"depends_on\":[<index into this same tasks array>],\
          \"kind\":\"execute\"|\"plan\" (omit for \"execute\"),\
+         \"assignee\":\"<org node id>\" (optional), \
          \"tier\":\"frontier\"|\"standard\"|\"cheap\" (optional)}}]}}\n\
          ```\n\
          `check` may also be `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, \
@@ -350,6 +402,8 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String 
     out.push_str("\n```\n\n");
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
+    out.push_str(&organization_section(context));
+    out.push_str(&assignee_instructions_for_plan(context));
     out.push_str(&available_genres_section_for_plan(context));
     out.push_str(result_json_instructions());
     out
@@ -1260,6 +1314,83 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         }
         let prompt = build_prompt(&crate::protocol::tests::sample_task(), &RunContext::default(), "r");
         assert!(prompt.contains("plain strings are not accepted"));
+    }
+
+    /// ADR-0033 D4 / D6（Phase 24）: 前置き（役職と brief・記憶・直近のやり取り）がプロンプトに入り、
+    /// 並びは `## Task` の直後・`## Objective` の前。`RunContext` が Phase 23 までの中身なら出力は変わらない。
+    #[test]
+    fn build_prompt_puts_the_person_preamble_between_the_run_line_and_the_objective() {
+        let task = crate::protocol::tests::sample_task();
+        let bare = build_prompt(&task, &RunContext::default(), "run-p0");
+
+        let context = RunContext {
+            node: Some(crate::protocol::NodeContext {
+                id: "research-survey".into(),
+                name: "関連研究調査課".into(),
+                brief: "関連研究を洗う。".into(),
+            }),
+            memory: Some(crate::protocol::MemoryContext {
+                notes: "- 2026-09-10: pegasus は pjsub".into(),
+                project: String::new(),
+            }),
+            conversation: vec![crate::protocol::ConversationTurn {
+                role: task_core::MessageRole::User,
+                text: "先週の続き".into(),
+            }],
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-p1");
+        let at = |n: &str| prompt.find(n).unwrap_or_else(|| panic!("missing {n:?} in\n{prompt}"));
+        assert!(at("(run run-p1") < at("## あなた: 関連研究調査課 (research-survey)"));
+        assert!(at("## あなた:") < at("## 覚えていること"));
+        assert!(at("## 覚えていること") < at("## 直近のやり取り"));
+        assert!(at("## 直近のやり取り") < at("## Objective"));
+        assert!(prompt.contains("memory.notes"), "記憶の書き方の指示が付く");
+
+        // Phase 23 までの `RunContext` では 1 バイトも変わらない。
+        assert!(!bare.contains("## あなた"));
+        assert!(!bare.contains("覚えておくこと"));
+        assert_eq!(bare, build_prompt(&task, &RunContext::default(), "run-p0"));
+    }
+
+    /// ADR-0033 D4（Phase 24）: 組織図を渡した run には `## 組織図` と `assignee` の指示が入る。
+    /// 渡していない run（Phase 23 までの構成）では出ない。
+    #[test]
+    fn build_prompt_includes_the_org_chart_and_the_assignee_instruction_only_when_present() {
+        let mut task = crate::protocol::tests::sample_task();
+        let org = vec![
+            crate::protocol::OrgNodeContext {
+                id: "research".into(),
+                name: "研究部".into(),
+                kind: task_core::OrgKind::Department,
+                parent_id: Some("secretary".into()),
+                brief: "課に振り分ける".into(),
+                genre: None,
+            },
+            crate::protocol::OrgNodeContext {
+                id: "research-survey".into(),
+                name: "関連研究調査課".into(),
+                kind: task_core::OrgKind::Section,
+                parent_id: Some("research".into()),
+                brief: "関連研究を洗う".into(),
+                genre: Some("literature".into()),
+            },
+        ];
+        let context = RunContext { organization: org, ..RunContext::default() };
+
+        let execute = build_prompt(&task, &context, "run-o1");
+        assert!(execute.contains("## 組織図 (who you can assign work to)"));
+        assert!(execute.contains("- research-survey [課] 関連研究調査課 (親: research, 分野: literature) — 関連研究を洗う"));
+        assert!(execute.contains("別の部"), "部をまたぐ委譲の注意が入る: {execute}");
+        assert!(execute.contains("\"assignee\":\"<optional org node id>\""));
+
+        task.kind = task_core::TaskKind::Plan;
+        let plan = build_prompt(&task, &context, "run-o2");
+        assert!(plan.contains("## 組織図"));
+        assert!(plan.contains("子タスクごとに `assignee` を必ず書け"));
+        assert!(plan.contains("`role` は必要なときだけ"));
+
+        assert!(!build_prompt(&task, &RunContext::default(), "run-o3").contains("組織図"));
     }
 
     /// ADR-0016 D1 / M3: `context.role` があれば `## Role: <id>` と指示文がプロンプトに入る。無ければ入らない。

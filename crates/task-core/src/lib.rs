@@ -3,6 +3,7 @@
 
 pub mod accounts;
 pub mod delegate;
+pub mod message;
 pub mod model;
 pub mod org;
 pub mod plan;
@@ -14,13 +15,17 @@ pub use accounts::{AccountAdapter, RateLimitObservation, RateWindow};
 pub use delegate::{
     DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, materialize_delegated, validate_each,
 };
+pub use message::{
+    CONVERSATION_GENRE, Message, MessageId, MessageRole, conversation_origin, conversation_title, failure_reply,
+    is_conversation,
+};
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, Lease, RoleSpec, RunRole, Status, Task, TaskId,
     TaskKind, Tier, Usage, WorkerHint, WorkspaceSpec,
 };
 pub use org::{
     Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
-    assignee_defaults, valid_org_id, validate_upsert,
+    assignee_defaults, department_of, valid_org_id, validate_upsert,
 };
 pub use report::{
     COMPACTION_ROLE, Report, ReportFilter, ReportId, ReportKind, ReportStore, ReportsLive,

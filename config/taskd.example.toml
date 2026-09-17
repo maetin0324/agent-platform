@@ -17,6 +17,14 @@ max_requeues = 5                   # ADR-0011: 同じ試行での連続 requeue�
 # 書かなければ種を蒔かない（組織を使わない従来どおりの運用）。例は `config/org.example.toml`。
 # org_include = "org.toml"
 
+# 組織のノードごとの長期記憶（ADR-0033 D6、SPEC §3.2「各ノードは長期記憶を持つ」「記憶は案件をまたぐ」）。
+# `<dir>/<node_id>/notes.md`（案件をまたぐ記憶）と `<dir>/<node_id>/projects/<project_id>.md`（案件の引き出し）。
+# run の前にそれぞれ 8,000 字まで前置きし、run の後に `artifacts/result.json` の `memory` を
+# `- <日付>: <一行>` の形で追記する。相対パスはこのファイル基準。書かなければ記憶を読まないし書かない。
+# ディレクトリは 0700 で作る（人の好みや相談の中身が入るため）。
+[memory]
+dir = "../memory"
+
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]
 # adapter = "claude-code"
@@ -44,6 +52,16 @@ auto_accept = false
 # max_turns = 20
 # instructions = "あなたは実装担当。受け取った範囲だけを実装し、終わったら summary を書く。"
 #
+# 対話用の役割（ADR-0033 D4）。組織のノードに話しかけたときの run はこの役割で走る（そのノードが自分の
+# 分野を持っていれば、そちらの `default_role` が使われる）。秘書の返事の作法をここに書く。
+[[roles]]
+id = "secretary"
+tier = "standard"
+adapter = "claude-code"
+instructions = """あなたは人の秘書。案件を受け取り、組織に流し、報告を集めて人に渡す。部をまたぐ連携はあなたが認める。
+案件の依頼を受けたら、返事に (a) 案件の理解の確認 (b) 大まかな方針 (c) 最初の途中目標の提案 を必ず含め、
+分からないことは質問する。長々と書かず、人が数十秒で読める分量にする。"""
+
 # 調査分野の役割の例（ADR-0027）。役割名は自由記述で、下の [[genres]] roles に含めれば分野に属する。
 # [[roles]]
 # id = "literature-scout"
@@ -64,6 +82,19 @@ auto_accept = false
 # `"genre"` で指定する）。
 # `capabilities` / `input_artifacts` / `output_artifacts`（ADR-0028 D1）は 3 つとも任意の自由記述。
 # taskd は中身を検査しない（Planner・委譲できる run のプロンプトに「できること」「渡すもの→返るもの」として出るだけ）。
+#
+# 対話用の分野（ADR-0033 D4）。`POST /api/v1/org/{id}/messages` で話しかけたときの run に使う。
+# 分野を持たない組織のノード（部・論文執筆課・データ整理課・インフラ部など）は、この分野で対話 run をする
+# （決定的なフォールバック）。id は `secretary` 固定。
+[[genres]]
+id = "secretary"
+description = "人と話し、案件を理解し、組織に流す"
+capabilities = ["案件の理解の確認", "大まかな方針の提案", "途中目標の提案と再設計", "組織への割り当て"]
+input_artifacts = ["人の依頼文", "下から上がった報告"]
+output_artifacts = ["返事（result.json の summary）", "plan.json"]
+default_role = "secretary"
+roles = ["secretary"]
+
 # [[genres]]
 # id = "coding"
 # description = "コードを書く・直す・テストする"

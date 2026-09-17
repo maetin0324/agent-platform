@@ -8,8 +8,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::delegate::resolve_child_defaults;
+use crate::delegate::{ChildSpec, resolve_child_defaults};
 use crate::model::{Budget, Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
+use crate::org::OrgNode;
 
 /// DESIGN §5.6「分解の深さは上限 3」。`plan_depth`（その Plan 自身を含む祖先 Plan の数）が
 /// これに達している Plan は、`kind = plan` の子を作れない。
@@ -49,6 +50,11 @@ pub struct NewTask {
     /// `role` と両方指定してその役割がその分野の `roles` に無ければ、Plan run は失敗する。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genre: Option<String>,
+    /// ADR-0033 D4（Phase 24）: 子を割り当てる組織のノード（`org_nodes.id`。SPEC §3.3「案件は組織の上から
+    /// 入り、分解されて下へ流れる」）。プランナーは普段これだけを書けばよく、`role` は必要なときだけ書く。
+    /// `role` を書いたときは tier / adapter / 予算はその役割が勝ち、`assignee` は「誰の仕事か」だけを表す。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 /// DESIGN §5.6 の `PlanOutput{ tasks: Vec<NewTask> }`。
@@ -230,6 +236,7 @@ fn detect_cycle(plan: &PlanOutput) -> Result<(), PlanError> {
 pub fn materialize(
     parent: &Task,
     plan: &PlanOutput,
+    org: &[OrgNode],
     roles: &[RoleSpec],
     genres: &[GenreSpec],
     now: OffsetDateTime,
@@ -240,8 +247,18 @@ pub fn materialize(
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let defaults =
-                resolve_child_defaults(parent, t.genre.as_deref(), t.role.as_deref(), t.tier, roles, genres);
+            let defaults = resolve_child_defaults(
+                parent,
+                ChildSpec {
+                    genre: t.genre.as_deref(),
+                    role: t.role.as_deref(),
+                    tier: t.tier,
+                    assignee: t.assignee.as_deref(),
+                },
+                org,
+                roles,
+                genres,
+            );
             Task {
                 id: ids[i],
                 parent_id: Some(parent.id),
@@ -281,7 +298,8 @@ pub fn materialize(
                 // 同じ案件・途中目標に属する（担当は Phase 24 で計画が指定するまで空）。
                 project_id: parent.project_id,
                 milestone_id: parent.milestone_id,
-                assignee: None,
+                assignee: defaults.assignee,
+                conversation: None,
             }
         })
         .collect()
@@ -315,6 +333,7 @@ mod tests {
             tier: None,
             role: None,
             genre: None,
+            assignee: None,
         }
     }
 
@@ -363,6 +382,7 @@ mod tests {
             project_id: None,
             milestone_id: None,
             assignee: None,
+            conversation: None,
         }
     }
 
@@ -373,7 +393,7 @@ mod tests {
         };
         validate(&plan, 1, &PlanLimits::default(), &[]).unwrap();
         let p = parent();
-        let children = materialize(&p, &plan, &[], &[], OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], &[], OffsetDateTime::now_utc());
         assert_eq!(children.len(), 3);
         for c in &children {
             assert_eq!(c.parent_id, Some(p.id));
@@ -468,7 +488,7 @@ mod tests {
             Err(PlanError::DepthExceeded { index: 0, depth: 4, max: 3 })
         ));
         let p = parent();
-        let children = materialize(&p, &nested, &[], &[], OffsetDateTime::now_utc());
+        let children = materialize(&p, &nested, &[], &[], &[], OffsetDateTime::now_utc());
         assert_eq!(children[0].kind, TaskKind::Plan);
     }
 
@@ -500,19 +520,19 @@ mod tests {
         explicit.role = Some("implementer".into());
         explicit.genre = Some("literature".into());
         let plan = PlanOutput { tasks: vec![explicit] };
-        let children = materialize(&p, &plan, &[], &genres, OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], &genres, OffsetDateTime::now_utc());
         assert_eq!(children[0].genre.as_deref(), Some("literature"));
 
         // 2. genre 未指定・role が一意に決まる分野に属する。
         let mut by_role = new_task("by-role", vec![]);
         by_role.role = Some("literature-scout".into());
         let plan = PlanOutput { tasks: vec![by_role] };
-        let children = materialize(&p, &plan, &[], &genres, OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], &genres, OffsetDateTime::now_utc());
         assert_eq!(children[0].genre.as_deref(), Some("literature"));
 
         // 3. genre も role も無ければ親の分野を継ぐ。
         let plan = PlanOutput { tasks: vec![new_task("neither", vec![])] };
-        let children = materialize(&p, &plan, &[], &genres, OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], &genres, OffsetDateTime::now_utc());
         assert_eq!(children[0].genre.as_deref(), Some("coding"));
     }
 
@@ -544,13 +564,73 @@ mod tests {
         t.role = Some("implementer".into());
         t.genre = Some("coding".into());
         let plan = PlanOutput { tasks: vec![t] };
-        let children = materialize(&p, &plan, &all_roles, &genres, OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &all_roles, &genres, OffsetDateTime::now_utc());
         // adapter: role(implementer) の既定が優先。
         assert_eq!(children[0].worker_hint.adapter.as_deref(), Some("codex"));
         // tier: role に既定が無いので分野の既定役割（lead）から。
         assert_eq!(children[0].worker_hint.tier, Tier::Cheap);
         assert_eq!(children[0].budget.max_turns, 20);
         assert_eq!(children[0].budget.max_retries, p.budget.max_retries);
+    }
+
+    /// ADR-0033 D4（Phase 24）: 計画の `assignee` は子タスクに残り、`role` が無いときだけ
+    /// そのノードの分野が既定（tier / adapter / 予算）の解決に効く。
+    #[test]
+    fn materialize_carries_the_assignee_and_uses_its_genre_only_without_a_role() {
+        use crate::org::{OrgKind, OrgNode};
+        let now = OffsetDateTime::now_utc();
+        let node = |id: &str, genre_id: Option<&str>| OrgNode {
+            id: id.into(),
+            parent_id: Some("research".into()),
+            name: id.into(),
+            kind: OrgKind::Section,
+            genre: genre_id.map(str::to_string),
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let org = vec![node("research-survey", Some("literature")), node("research-writing", None)];
+        let roles = vec![
+            RoleSpec {
+                id: "literature-reader".into(),
+                tier: Some(Tier::Cheap),
+                adapter: Some("paperqa".into()),
+                max_turns: Some(5),
+                ..RoleSpec::default()
+            },
+            RoleSpec {
+                id: "writer".into(),
+                tier: Some(Tier::Frontier),
+                adapter: Some("claude-code".into()),
+                ..RoleSpec::default()
+            },
+        ];
+        let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
+        let p = parent();
+
+        let mut only_assignee = new_task("調べる", vec![]);
+        only_assignee.assignee = Some("research-survey".into());
+        let mut with_role = new_task("書く", vec![]);
+        with_role.assignee = Some("research-writing".into());
+        with_role.role = Some("writer".into());
+        let mut unknown = new_task("誰？", vec![]);
+        unknown.assignee = Some("nobody".into());
+        let plan = PlanOutput { tasks: vec![only_assignee, with_role, unknown] };
+        let children = materialize(&p, &plan, &org, &roles, &genres, now);
+
+        assert_eq!(children[0].assignee.as_deref(), Some("research-survey"));
+        assert_eq!(children[0].genre.as_deref(), Some("literature"));
+        assert_eq!(children[0].worker_hint.adapter.as_deref(), Some("paperqa"));
+        assert_eq!(children[0].budget.max_turns, 5);
+
+        assert_eq!(children[1].assignee.as_deref(), Some("research-writing"));
+        assert_eq!(children[1].worker_hint.adapter.as_deref(), Some("claude-code"));
+        assert_eq!(children[1].worker_hint.tier, Tier::Frontier);
+
+        // 組織に無い id は担当にしない（既定も変えない）。
+        assert_eq!(children[2].assignee, None);
+        assert_eq!(children[2].genre, p.genre);
     }
 
     /// ADR-0028 D3: 知らない `genre`、または `genre` + `role` の不整合は Plan の失敗になる。

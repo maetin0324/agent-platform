@@ -8,6 +8,10 @@
 - **v2（ADR-0016 M9, Phase 10）**: `run.protocol` を `2` に上げた。追加は `delegate` メッセージ（§4.x）、
   `context.role` / `context.children`（§3.1）、`task.role` / `task.aggregate`。全て**追加のみ**で、`protocol`
   フィールドの値は検査していないため v1 のワーカー（この節を実装しないもの）はそのまま動く
+- **v3（ADR-0027 D1, Phase 16）**: `context.available_genres`、`task.genre`、`delegate` の `tasks[].genre`
+- **v4（ADR-0033 D4/D6, Phase 24）**: `context.node` / `context.memory` / `context.conversation` /
+  `context.standing_rules` / `context.organization`（§3.1）、`delegate` の `tasks[].assignee`、
+  結果ファイルの `memory`（§9）。全て**追加のみ**で、v1〜v3 のワーカーはそのまま動く
 
 ## 1. 概要
 
@@ -58,7 +62,7 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `protocol` | integer | ✓ | `1`（v1）または `2`（v2, ADR-0016 M9）。ワーカーはこの値を検査する必要はない |
+| `protocol` | integer | ✓ | `1`〜`4`（現在は `4`。v2 = ADR-0016 M9、v3 = ADR-0027 D1、v4 = ADR-0033 D4/D6）。ワーカーはこの値を検査する必要はない |
 | `task` | object | ✓ | `Task`（id, kind, title, objective, acceptance[], inputs[], depends_on[], status, priority, worker_hint, workspace, budget, attempts, `role`, `aggregate`, …）。`task.role`（`Option<string>`）はタスクの役割名、`task.aggregate`（`bool`。既定 false）は集約 run の親かどうか（ADR-0016 D1/D3） |
 | `workspace` | string | ✓ | 絶対パス。ワーカーの cwd。`artifact.path` の基準 |
 | `context.prior_review` | array | ✓（空可） | 直前のレビュー結果。`{criterion: usize, pass: bool, reason: string}` |
@@ -66,6 +70,11 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 | `context.answers` | array | –（省略可、空なら省略） | `taskctl answer` で記録された `question` → 人間の回答の履歴（時系列、`{question: string, answer: string}`）。ADR-0010 D3, P-10。前方互換のため未知のワーカーは無視してよい |
 | `context.role` | object | –（省略可。v2, ADR-0016 D1/M3） | タスクに役割があるときだけ `Some`。`{id: string, instructions: string}`（`instructions` は `[[roles]]` に指示文が無ければ空文字列）。`claude-code`/`codex` はプロンプトの前置きにする（`## Role: <id>`） |
 | `context.children` | array | –（省略可。空なら省略。v2, ADR-0016 D3/M4） | 集約 run（`task.aggregate == true` の親の、子が全て終端になった後の run）でのみ非空。`ChildSummary`: `{id, title, role?, status, outcome?, artifacts: ArtifactRef[], workspace?}` |
+| `context.node` | object | –（省略可。v4, ADR-0033 D4） | `task.assignee` の組織ノード（担当が決まっている run だけ）。`{id, name, brief?}`。プロンプトの一番前に「あなたは誰で、何の担当か」として置かれる |
+| `context.memory` | object | –（省略可。v4, ADR-0033 D6） | `[memory]` を設定し、担当が決まっている run だけ。`{notes?: string, project?: string}`（`<memory_dir>/<node_id>/notes.md` と `projects/<project_id>.md` の中身。それぞれ 8,000 字で切る） |
+| `context.conversation` | array | –（省略可。空なら省略。v4, ADR-0033 D4） | その案件でのこのノードと人の**直近のやり取り**（既定 20 件、古い順）。`{role: "user"|"node", text: string}` |
+| `context.standing_rules` | array | –（省略可。空なら省略。v4, ADR-0033 D5） | 「今後ずっと」の認可。**Phase 26 が埋める。今は常に空** |
+| `context.organization` | array | –（省略可。空なら省略。v4, ADR-0033 D4） | 分解・委譲できる run（`context.available_genres` を渡す run と同じ条件）に渡す組織図。`{id, name, kind, parent_id?, brief?, genre?}`。「どの課に何を振るか」を `assignee` で決めさせる |
 
 `context.answers` は、このタスクの `Event::Answered` を時系列に並べたもの（`question` は直前の
 `WorkerFinished.outcome` の `"question: "` 接頭辞から取ったもの、無ければ空文字列）。`claude-code`/`codex`
@@ -75,6 +84,12 @@ Review プロンプトには含めない）。JSON Lines プロトコルを直�
 
 `context.role` / `context.children` も同様に、JSON Lines を直接話すワーカーは自由に解釈してよい
 （taskd 側は解釈を強制しない）。`claude-code`/`codex` の反映のしかたは §9 M8 を参照。
+
+**v4 の前置き（ADR-0033 D4/D6, Phase 24）**: `context.node` / `context.standing_rules` / `context.memory` /
+`context.conversation` / `context.role` は、CLI エージェント系アダプタでは `task_worker::preamble::render` が
+**この順**で 1 か所に組む（役職と brief → 永続の認可 → 記憶 → 直近のやり取り → 役割の指示文 → 記憶の書き方）。
+これらが全て空なら、前置きは Phase 23 までの出力と 1 バイトも変わらない。`local-deep-research` だけは
+役割の指示文を載せない（ADR-0029 / Phase 19: 検索エンジンに渡す問いを役割の文面で濁さないため）。
 
 ## 4. ワーカー → taskd
 
@@ -425,6 +440,20 @@ taskd はこれを直接パースできない。そこでこれらのアダプ�
 {"question": "..."}
 ```
 
+**`memory`（v4, ADR-0033 D6, Phase 24）**: 結果ファイルに `memory` があれば、taskd はその中身を担当ノードの
+長期記憶に**日付付きの箇条書きで追記する**（`- 2026-09-17: …` の 1 項目 1 行）。
+
+```json
+{"summary": "...", "evidence": [], "memory": {"notes": ["pegasus は pjsub で投げる"], "project": ["Pluvio は非同期ランタイム基盤"]}}
+```
+
+- `notes[]` は `<memory_dir>/<node_id>/notes.md`（**案件をまたぐ**記憶: クラスタの使い方、人の好み、直近の相談）、
+  `project[]` は `<memory_dir>/<node_id>/projects/<project_id>.md`（この案件だけの事）。
+- `memory` が無い・空・形が違う・そもそも `[memory]` を設定していない・タスクに `assignee` が無いときは
+  **何もしない**（run は失敗させない）。案件に属さない run の `project[]` は行き先が無いので捨てる。
+- 追記は決定的なファイル操作だけで、何を覚えるかを決めるのはワーカー（**LLM に書かせるのはここだけ**）。
+  プロンプトの前置きの末尾にその指示が入る。
+
 判定順序（ADR-0006 D4）: stream-json の最後の `{"type":"result",...}` が `is_error:true` か
 `subtype != "success"` なら、結果ファイルの内容によらず `error{retryable:true}` とする（自己申告の
 `done` は信用しない）。`success` の場合のみ結果ファイルを読み、無い／不正なら `error{retryable:true}`。
@@ -443,7 +472,9 @@ Phase 7（ADR-0010 D3）で実装した。`claude-code`/`codex` のプロンプ�
 
 **`artifacts/delegate.json`（ADR-0016 M8, v2）**: `claude-code`/`codex` は §4.6 の `delegate` メッセージの
 プロトコルを話さないので、代わりに作業ディレクトリ直下 `artifacts/delegate.json` を使う。形式は
-`{"tasks":[…]}`（`tasks` は §4.6 の `DelegateTask` と同じ形）。run 開始時（`artifacts/result.json` を消す
+`{"tasks":[…]}`（`tasks` は §4.6 の `DelegateTask` と同じ形。v4 から `tasks[].assignee`（組織ノードの id）を
+書ける。`role` を書かなければそのノードの分野から tier / アダプタ / 予算が決まる。**自分と別の部の課へ
+委譲しようとした提案は子を作らず、親の run が秘書への `question` で終わる**。SPEC §3.1 / ADR-0033 D4）。run 開始時（`artifacts/result.json` を消す
 のと同じタイミング）に前回の run が残したファイルを消し、run の終わり（終端を決めた直後、`result.json` を
 書く前）に存在すれば読んで、§4.6 と同じ検証・挿入の経路に渡す。ファイルが無ければ何もしない。JSON として
 読めない場合は run を失敗させず、`WorkerProgress{msg:"delegate.json ignored: <error>"}` を残して無視する。
