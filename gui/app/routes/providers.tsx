@@ -99,7 +99,7 @@ const TIER_OPTIONS: Tier[] = ["frontier", "standard", "cheap"];
 // ADR-0026 D7: "acp"（opencode 等の ACP エージェント経由の OpenAI 互換 LLM）を追加。
 // ADR-0027 D3: "paperqa"（関連研究調査、PaperQA2）を追加。
 // `command`/`args` はこのフォームには無い（管理 API から設定できない。providers.d/<id>.toml を人が直接編集する）。
-export const ADAPTER_OPTIONS = ["fake", "claude-code", "codex", "acp", "paperqa"] as const;
+export const ADAPTER_OPTIONS = ["fake", "claude-code", "codex", "acp", "paperqa", "local-deep-research"] as const;
 
 export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
   const { providers, fetchedAt } = loaderData;

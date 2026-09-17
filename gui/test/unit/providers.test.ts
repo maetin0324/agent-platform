@@ -65,7 +65,7 @@ const providersView: Providers = {
 
 describe("ADAPTER_OPTIONS", () => {
   it("includes acp (ADR-0026) and paperqa (ADR-0027) alongside the existing adapters", () => {
-    expect(ADAPTER_OPTIONS).toEqual(["fake", "claude-code", "codex", "acp", "paperqa"]);
+    expect(ADAPTER_OPTIONS).toEqual(["fake", "claude-code", "codex", "acp", "paperqa", "local-deep-research"]);
   });
 });
 
