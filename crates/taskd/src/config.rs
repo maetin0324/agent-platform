@@ -1706,9 +1706,16 @@ host = "h"
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.adapters.local_deep_research.command, "/home/u/taskd/ldr/.venv/bin/python");
         assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Quick);
+        // ADR-0031 D4: 既定は Tavily（鍵は `env_from_secrets` で渡す）。
         assert_eq!(
             cfg.adapters.local_deep_research.settings.get("search.tool").map(String::as_str),
-            Some("wikipedia")
+            Some("tavily")
+        );
+        // 実機の罠（PROGRESS の Phase 21「真因: DNS」）: これが無いと、このホストの DNS では
+        // LDR の DNS ピン留めが 5 秒で fail-closed し、どのエンジンでも「0 件」になる。
+        assert_eq!(
+            cfg.adapters.local_deep_research.env.get("RES_OPTIONS").map(String::as_str),
+            Some("single-request")
         );
         let ldr_provider = cfg.providers.iter().find(|p| p.adapter == "local-deep-research").expect("ldr provider");
         assert_eq!(ldr_provider.model, "qwen3.8-27b");
