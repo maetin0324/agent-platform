@@ -73,10 +73,10 @@ pub struct WorkerRunArgs {
     #[arg(long)]
     pub cluster: Option<String>,
 
-    /// ADR-0024 D2: `account_pool = true` のプロバイダで使うアカウント id（`[accounts] claude_dir` の下の
-    /// ディレクトリ）。省略時は `<claude_dir>/.taskd-usage.json`（永続化された観測値。taskd が更新するのと
-    /// 同じファイル）を読むだけで選ぶ（in_use は分からないので 0 として扱う）。`account_pool` でないプロバイダに
-    /// 指定するとエラー。
+    /// ADR-0024 D2 / ADR-0025 D2: `account_pool = true` のプロバイダで使うアカウント id（プロバイダの
+    /// `adapter` に応じて `[accounts] claude_dir`/`codex_dir` の下のディレクトリ）。省略時は
+    /// `<root>/.taskd-usage.json`（永続化された観測値。taskd が更新するのと同じファイル）を読むだけで選ぶ
+    /// （in_use は分からないので 0 として扱う）。`account_pool` でないプロバイダに指定するとエラー。
     #[arg(long)]
     pub account: Option<String>,
 }
@@ -159,10 +159,16 @@ struct Selected {
     account: Option<String>,
 }
 
-/// ADR-0024 D2: `account_pool = true` のプロバイダのアカウントを決める。`--account` があればそれ、無ければ
-/// `<claude_dir>/.taskd-usage.json`（永続化された観測値）を読み取り専用で見て選ぶ（`in_use` は 0 扱い）。
-/// `account_pool` でないプロバイダに `--account` を渡したらエラー。
-fn resolve_account(config: &Config, provider_id: &str, args: &WorkerRunArgs) -> Result<Option<String>, CliError> {
+/// ADR-0024 D2 / ADR-0025 D2: `account_pool = true` のプロバイダのアカウントを決める。`--account` があれば
+/// それ、無ければ `<root>/.taskd-usage.json`（永続化された観測値）を読み取り専用で見て選ぶ（`in_use` は 0
+/// 扱い）。`account_pool` でないプロバイダに `--account` を渡したらエラー。アダプタ（claude-code/codex）は
+/// プロバイダの `adapter` から決まる。
+fn resolve_account(
+    config: &Config,
+    provider_id: &str,
+    adapter_kind: &str,
+    args: &WorkerRunArgs,
+) -> Result<Option<String>, CliError> {
     let is_pool = config.providers.iter().any(|p| p.id == provider_id && p.account_pool);
     if !is_pool {
         if args.account.is_some() {
@@ -170,21 +176,29 @@ fn resolve_account(config: &Config, provider_id: &str, args: &WorkerRunArgs) -> 
         }
         return Ok(None);
     }
+    let account_adapter = task_core::AccountAdapter::parse(adapter_kind).ok_or_else(|| {
+        CliError::msg(format!("provider {provider_id} has account_pool = true but adapter {adapter_kind:?} is not a pool adapter"))
+    })?;
     let accounts = config
         .accounts
         .as_ref()
         .ok_or_else(|| CliError::msg(format!("provider {provider_id} has account_pool = true but [accounts] is not configured")))?;
+    let root = accounts.root_for(account_adapter).ok_or_else(|| {
+        CliError::msg(format!(
+            "provider {provider_id} has account_pool = true but [accounts] has no root configured for adapter {adapter_kind}"
+        ))
+    })?;
     if let Some(id) = &args.account {
         if !task_dispatch::valid_account_id(id) {
             return Err(CliError::msg(format!("invalid --account id: {id}")));
         }
-        if !accounts.claude_dir.join(id).is_dir() {
-            return Err(CliError::msg(format!("account not found: {id} (looked in {})", accounts.claude_dir.display())));
+        if !root.join(id).is_dir() {
+            return Err(CliError::msg(format!("account not found: {id} (looked in {})", root.display())));
         }
         return Ok(Some(id.clone()));
     }
-    let dirs = task_dispatch::scan_accounts(&accounts.claude_dir);
-    let book = task_dispatch::AccountBook::load(&accounts.claude_dir.join(".taskd-usage.json"));
+    let dirs = task_dispatch::scan_accounts(root, account_adapter);
+    let book = task_dispatch::AccountBook::load(&root.join(".taskd-usage.json"));
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let candidates: Vec<task_dispatch::AccountCandidate<'_>> = dirs
         .iter()
@@ -209,24 +223,31 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
     let events = store.events_for(task_id)?;
 
     let (provider_id, adapter_kind) = select_provider(&config, &task, &args)?;
-    let account = resolve_account(&config, &provider_id, &args)?;
+    let account = resolve_account(&config, &provider_id, &adapter_kind, &args)?;
 
     let adapters = taskd::build_adapters(&config);
     let base_adapter = adapters
         .get(&provider_id)
         .ok_or_else(|| CliError::msg(format!("provider {provider_id} has no adapter instance")))?;
-    // ADR-0024 D2: アカウントが決まっていれば、taskd の dispatch と同じように env の末尾に重ねる。
+    // ADR-0024 D2 / ADR-0025 D2: アカウントが決まっていれば、taskd の dispatch と同じように env の末尾に重ねる。
     let effective_adapter: std::sync::Arc<dyn WorkerAdapter> = match &account {
         Some(account_id) => {
             // B3: `resolve_account` は `account_pool` のプロバイダでしか `Some` を返さない（そのときは
-            // `[accounts]` が要る、と検証済み）はずだが、`.expect()` は使わず、万一の不整合はエラーとして返す。
+            // `[accounts]` に対応する根ディレクトリが要る、と検証済み）はずだが、`.expect()` は使わず、
+            // 万一の不整合はエラーとして返す。
+            let account_adapter = task_core::AccountAdapter::parse(&adapter_kind).ok_or_else(|| {
+                CliError::msg(format!("provider {provider_id} resolved an account but adapter {adapter_kind:?} is not a pool adapter"))
+            })?;
             let accounts = config
                 .accounts
                 .as_ref()
                 .ok_or_else(|| CliError::msg(format!("provider {provider_id} resolved an account but [accounts] is not configured")))?;
-            let dir = accounts.claude_dir.join(account_id);
+            let root = accounts.root_for(account_adapter).ok_or_else(|| {
+                CliError::msg(format!("provider {provider_id} resolved an account but [accounts] has no root for adapter {adapter_kind}"))
+            })?;
+            let dir = root.join(account_id);
             base_adapter
-                .with_env(&[("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(), dir.display().to_string())])
+                .with_env(&[(account_adapter.env_var().to_string(), dir.display().to_string())])
                 .ok_or_else(|| CliError::msg(format!("adapter for provider {provider_id} does not support account pools")))?
         }
         None => base_adapter.clone(),
@@ -771,7 +792,8 @@ mod tests {
             account_pool: true,
         }];
         config.accounts = Some(taskd::config::AccountsConfig {
-            claude_dir: accounts_dir.to_path_buf(),
+            claude_dir: Some(accounts_dir.to_path_buf()),
+            codex_dir: None,
             max_runs_per_account,
             check_model: "haiku".into(),
         });
@@ -781,8 +803,8 @@ mod tests {
     #[test]
     fn resolve_account_non_pool_provider_ignores_missing_account_and_rejects_explicit_one() {
         let config = cluster_config(vec![]);
-        assert_eq!(resolve_account(&config, "p1", &args_fixture(None)).unwrap(), None);
-        let err = resolve_account(&config, "p1", &args_fixture(Some("a"))).unwrap_err();
+        assert_eq!(resolve_account(&config, "p1", "claude-code", &args_fixture(None)).unwrap(), None);
+        let err = resolve_account(&config, "p1", "claude-code", &args_fixture(Some("a"))).unwrap_err();
         assert!(err.to_string().contains("does not have account_pool"), "{err}");
     }
 
@@ -798,7 +820,7 @@ mod tests {
             env: Default::default(),
             account_pool: true,
         }];
-        let err = resolve_account(&config, "pool", &args_fixture(None)).unwrap_err();
+        let err = resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap_err();
         assert!(err.to_string().contains("[accounts] is not configured"), "{err}");
     }
 
@@ -808,12 +830,12 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("b")).unwrap();
         let config = pool_provider_config(tmp.path(), 2);
 
-        assert_eq!(resolve_account(&config, "pool", &args_fixture(Some("b"))).unwrap(), Some("b".into()));
+        assert_eq!(resolve_account(&config, "pool", "claude-code", &args_fixture(Some("b"))).unwrap(), Some("b".into()));
 
-        let err = resolve_account(&config, "pool", &args_fixture(Some("missing"))).unwrap_err();
+        let err = resolve_account(&config, "pool", "claude-code", &args_fixture(Some("missing"))).unwrap_err();
         assert!(err.to_string().contains("account not found"), "{err}");
 
-        let err = resolve_account(&config, "pool", &args_fixture(Some("../x"))).unwrap_err();
+        let err = resolve_account(&config, "pool", "claude-code", &args_fixture(Some("../x"))).unwrap_err();
         assert!(err.to_string().contains("invalid --account id"), "{err}");
     }
 
@@ -838,7 +860,7 @@ mod tests {
         book.save().unwrap();
 
         let config = pool_provider_config(tmp.path(), 2);
-        assert_eq!(resolve_account(&config, "pool", &args_fixture(None)).unwrap(), Some("b".into()));
+        assert_eq!(resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap(), Some("b".into()));
     }
 
     #[test]
@@ -847,7 +869,38 @@ mod tests {
         // ディレクトリはあるがログインしていない（.credentials.json が無い）ので選べない。
         std::fs::create_dir_all(tmp.path().join("a")).unwrap();
         let config = pool_provider_config(tmp.path(), 2);
-        let err = resolve_account(&config, "pool", &args_fixture(None)).unwrap_err();
+        let err = resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap_err();
         assert!(err.to_string().contains("no eligible account"), "{err}");
+    }
+
+    /// ADR-0025 D2: codex の `account_pool` プロバイダは `[accounts] codex_dir` の下から選び、`auth.json` を
+    /// ログイン済みの目印にする（claude-code の `.credentials.json` とは別物）。
+    #[test]
+    fn resolve_account_codex_pool_provider_uses_codex_dir_and_auth_json_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("c")).unwrap();
+        std::fs::write(tmp.path().join("c").join("auth.json"), "{}").unwrap();
+        let mut config = cluster_config(vec![]);
+        config.providers = vec![taskd::config::ProviderConfig {
+            id: "pool".into(),
+            adapter: "codex".into(),
+            tiers: vec![task_core::Tier::Standard],
+            concurrency: 1,
+            model: String::new(),
+            env: Default::default(),
+            account_pool: true,
+        }];
+        config.accounts = Some(taskd::config::AccountsConfig {
+            claude_dir: None,
+            codex_dir: Some(tmp.path().to_path_buf()),
+            max_runs_per_account: 2,
+            check_model: "haiku".into(),
+        });
+
+        assert_eq!(resolve_account(&config, "pool", "codex", &args_fixture(Some("c"))).unwrap(), Some("c".into()));
+        assert_eq!(resolve_account(&config, "pool", "codex", &args_fixture(None)).unwrap(), Some("c".into()));
+
+        let err = resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap_err();
+        assert!(err.to_string().contains("not a pool adapter") || err.to_string().contains("no root configured"), "{err}");
     }
 }

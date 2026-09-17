@@ -70,7 +70,7 @@
       "description": "`GET /accounts`。",
       "properties": {
         "items": {
-          "description": "`id` 昇順。",
+          "description": "`adapter` → `id` の順。",
           "items": {
             "$ref": "#/$defs/AccountView"
           },
@@ -82,11 +82,22 @@
           "type": "integer"
         },
         "root": {
-          "description": "`[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `null`。",
+          "description": "`[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `null`。ADR-0025 D6: `roots[\"claude-code\"]`\nの別名として残す（後方互換）。",
           "type": [
             "string",
             "null"
           ]
+        },
+        "roots": {
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default": {},
+          "description": "ADR-0025 D6: `\"claude-code\"` / `\"codex\"` → 設定されていればその絶対パス、無ければ `null`。",
+          "type": "object"
         }
       },
       "required": [
@@ -96,8 +107,13 @@
       "type": "object"
     },
     "AccountLive": {
-      "description": "ADR-0024: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。",
+      "description": "ADR-0024/0025: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。",
       "properties": {
+        "adapter": {
+          "default": "claude-code",
+          "description": "ADR-0025 D1: `\"claude-code\"` | `\"codex\"`。古いスナップショットには無いので既定は `\"claude-code\"`。",
+          "type": "string"
+        },
         "cooldown": {
           "anyOf": [
             {
@@ -135,7 +151,7 @@
           ]
         },
         "logged_in": {
-          "description": "`.credentials.json` の有無。",
+          "description": "ログイン済みを示すファイル（claude-code は `.credentials.json`、codex は `auth.json`）の有無。",
           "type": "boolean"
         },
         "login_pending": {
@@ -189,14 +205,26 @@
       "type": "object"
     },
     "AccountLoginStart": {
-      "description": "`POST /accounts/{id}/login` の応答（ADR-0024 D7）。",
+      "description": "`POST /accounts/{id}/login` の応答（ADR-0024 D7、ADR-0025 D5）。",
       "properties": {
         "expires_at": {
-          "description": "10 分後（RFC 3339）。",
+          "description": "claude-code は 10 分後、codex は 15 分後（RFC 3339）。",
+          "type": "string"
+        },
+        "kind": {
+          "default": "paste_code",
+          "description": "`\"paste_code\"`（claude-code: URL を開いて認可し、表示されたコードを `login/code` に貼る）|\n`\"device_code\"`（codex: URL を開いて `user_code` を入力する。GUI には貼り戻さない）。",
           "type": "string"
         },
         "url": {
           "type": "string"
+        },
+        "user_code": {
+          "description": "codex のみ。`login/code` には使わない（GUI が画面に出すだけ）。ログには出さない。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -333,6 +361,11 @@
     "AccountView": {
       "description": "1 アカウント（`GET /accounts` の要素、`POST /accounts` の応答）。",
       "properties": {
+        "adapter": {
+          "default": "claude-code",
+          "description": "ADR-0025 D1: `\"claude-code\"` | `\"codex\"`。",
+          "type": "string"
+        },
         "cooldown": {
           "anyOf": [
             {
@@ -374,7 +407,7 @@
           ]
         },
         "logged_in": {
-          "description": "`.credentials.json` の有無（中身は読まない）。",
+          "description": "ログイン済みを示すファイル（claude-code は `.credentials.json`、codex は `auth.json`）の有無\n（中身は読まない）。",
           "type": "boolean"
         },
         "login_pending": {
@@ -1433,7 +1466,7 @@
       "properties": {
         "accounts": {
           "default": [],
-          "description": "ADR-0024: プールのアカウント（`id` 昇順）。`[accounts]` が無ければ空。",
+          "description": "ADR-0024/0025: プールのアカウント（`adapter` → `id` の順、id 昇順）。`[accounts]` が無ければ空。",
           "items": {
             "$ref": "#/$defs/AccountLive"
           },
@@ -1441,11 +1474,19 @@
         },
         "accounts_root": {
           "default": null,
-          "description": "ADR-0024 D1/D5: `[accounts] claude_dir` の絶対パス（`[accounts]` が無ければ `None`）。",
+          "description": "ADR-0024 D1/D5: `[accounts] claude_dir` の絶対パス（`[accounts]` が無ければ `None`）。\nADR-0025 D6: claude-code の根の別名として残す（`accounts_roots[\"claude-code\"]` と同じ値）。",
           "type": [
             "string",
             "null"
           ]
+        },
+        "accounts_roots": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "ADR-0025 D1/D6: アダプタごとの根ディレクトリ（`\"claude-code\"` / `\"codex\"` → 絶対パス。設定されていない\nアダプタはキーごと無い）。古いスナップショットには無いので既定は空。",
+          "type": "object"
         },
         "awaiting_children": {
           "default": [],
@@ -3288,6 +3329,13 @@
     },
     "RunSummary": {
       "properties": {
+        "account": {
+          "description": "プールのアカウント（ADR-0024 D4 / ADR-0025）。`WorkerStarted.account` がある run だけ。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "adapter": {
           "type": "string"
         },

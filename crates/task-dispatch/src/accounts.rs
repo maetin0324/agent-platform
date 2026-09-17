@@ -1,4 +1,4 @@
-//! Claude アカウントプールの純粋ロジック（ADR-0024 D1, D3, D4）。
+//! アカウントプールの純粋ロジック（ADR-0024 D1, D3, D4。ADR-0025 でアダプタの次元を追加）。
 //!
 //! ここは決定的なコードだけで構成する。LLM は呼ばない（DESIGN 原則 1）。`dispatcher.rs` への統合は別ステップで行う。
 
@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use task_core::{RateLimitObservation, RateWindow};
+use task_core::{AccountAdapter, RateLimitObservation, RateWindow};
 
 /// `^[A-Za-z0-9_-]{1,64}$`（先頭 `.` は文字集合に含まれないため自動的に拒否される。ADR-0024 D1）。
 pub fn valid_account_id(id: &str) -> bool {
@@ -23,12 +23,14 @@ pub struct AccountDir {
 }
 
 /// `root` の下の、有効な id を持つサブディレクトリを id 昇順で返す。`.` で始まる名前・ファイル・無効な id は飛ばす。
-/// `root` が存在しなければ空を返す。`.credentials.json` の中身は読まない（存在だけを見る）。
-pub fn scan_accounts(root: &Path) -> Vec<AccountDir> {
+/// `root` が存在しなければ空を返す。ログイン済みの判定に使うファイル（`adapter.credentials_marker()`）の中身は
+/// 読まない（存在だけを見る。ADR-0025 D1: claude-code は `.credentials.json`、codex は `auth.json`）。
+pub fn scan_accounts(root: &Path, adapter: AccountAdapter) -> Vec<AccountDir> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(root) else {
         return out;
     };
+    let marker = adapter.credentials_marker();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -40,7 +42,7 @@ pub fn scan_accounts(root: &Path) -> Vec<AccountDir> {
         if !valid_account_id(&name) {
             continue;
         }
-        let logged_in = path.join(".credentials.json").exists();
+        let logged_in = path.join(marker).exists();
         out.push(AccountDir { id: name, dir: path, logged_in });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -419,7 +421,7 @@ mod tests {
         fs::create_dir(root.join("bad name")).expect("mkdir"); // invalid id: skipped
         fs::write(root.join("not-a-dir"), "file").expect("write"); // file: skipped
 
-        let found = scan_accounts(root);
+        let found = scan_accounts(root, AccountAdapter::ClaudeCode);
         assert_eq!(
             found,
             vec![
@@ -433,7 +435,27 @@ mod tests {
     fn scan_accounts_missing_root_is_empty() {
         let tmp = tempfile::tempdir().expect("tmp");
         let missing = tmp.path().join("does-not-exist");
-        assert_eq!(scan_accounts(&missing), Vec::new());
+        assert_eq!(scan_accounts(&missing, AccountAdapter::ClaudeCode), Vec::new());
+    }
+
+    /// ADR-0025 D1: codex は `auth.json` の有無でログイン済みを判定する（claude-code は `.credentials.json`）。
+    #[test]
+    fn scan_accounts_uses_the_adapter_specific_credentials_marker() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir(root.join("a")).expect("mkdir");
+        fs::write(root.join("a").join("auth.json"), "{}").expect("write");
+        fs::write(root.join("a").join(".credentials.json"), "{}").expect("write");
+        fs::create_dir(root.join("b")).expect("mkdir");
+        fs::write(root.join("b").join(".credentials.json"), "{}").expect("write");
+
+        let codex = scan_accounts(root, AccountAdapter::Codex);
+        assert!(codex.iter().find(|d| d.id == "a").expect("a").logged_in);
+        assert!(!codex.iter().find(|d| d.id == "b").expect("b").logged_in);
+
+        let claude = scan_accounts(root, AccountAdapter::ClaudeCode);
+        assert!(claude.iter().find(|d| d.id == "a").expect("a").logged_in);
+        assert!(claude.iter().find(|d| d.id == "b").expect("b").logged_in);
     }
 
     // ---- AccountBook: save/load, corruption, newest-wins, cooldown max ----

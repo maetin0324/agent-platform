@@ -155,14 +155,22 @@ fn format_day(day: Date) -> String {
     format!("{:04}-{:02}-{:02}", day.year(), u8::from(day.month()), day.day())
 }
 
-/// ADR-0024: `WorkerStarted.account` と対応する `WorkerFinished` から集計する（`docs/gui/api.md` §3.29 の `stats`）。
-/// `StatsState` とは別のカーソルを持つ（アカウント別の集計は `GET /accounts` からしか使わないため）。
+/// ADR-0024/0025: `WorkerStarted.account` と対応する `WorkerFinished` から集計する（`docs/gui/api.md` §3.29 の
+/// `stats`）。`StatsState` とは別のカーソルを持つ（アカウント別の集計は `GET /accounts` からしか使わないため）。
+/// キーは `"<adapter>:<account id>"`（同じ id でもアダプタが違えば別のアカウントとして集計する。ADR-0025 D1）。
 #[derive(Debug, Default)]
 pub(crate) struct AccountStatsState {
     cursor: u64,
-    /// `WorkerStarted` 済みで `WorkerFinished` がまだの run → account（プールを使わない run は登録しない）。
+    /// `WorkerStarted` 済みで `WorkerFinished` がまだの run → `"<adapter>:<account id>"`（プールを使わない run
+    /// は登録しない）。
     open_runs: HashMap<String, String>,
     accounts: HashMap<String, AccountTotals>,
+}
+
+/// `AccountStatsState` の内部キー（`WorkerStarted.adapter` は `"claude-code"`/`"codex"`/`"fake"` 等の
+/// ワーカーアダプタ識別子で、プールのアカウントを持つ run では `AccountAdapter::as_str()` と同じ値になる）。
+fn account_key(adapter: &str, account: &str) -> String {
+    format!("{adapter}:{account}")
 }
 
 #[derive(Debug, Default, Clone)]
@@ -194,15 +202,16 @@ impl AccountStatsState {
         }
         self.cursor = row.id;
         match &row.event {
-            Event::WorkerStarted { run_id, account: Some(account), .. } => {
-                self.accounts.entry(account.clone()).or_default().runs += 1;
-                self.open_runs.insert(run_id.clone(), account.clone());
+            Event::WorkerStarted { run_id, adapter, account: Some(account), .. } => {
+                let key = account_key(adapter, account);
+                self.accounts.entry(key.clone()).or_default().runs += 1;
+                self.open_runs.insert(run_id.clone(), key);
             }
             Event::WorkerFinished { run_id, outcome, usage, .. } => {
-                let Some(account) = self.open_runs.remove(run_id) else {
+                let Some(key) = self.open_runs.remove(run_id) else {
                     return;
                 };
-                let totals = self.accounts.entry(account).or_default();
+                let totals = self.accounts.entry(key).or_default();
                 // S5: §5.8 のプロバイダ集計と同じ規則。`error` は `RunOutcomeKind::Error` だけを数える
                 // （question/requeue/lease_expired はエラーではない）。
                 match classify_outcome(outcome) {
@@ -219,8 +228,8 @@ impl AccountStatsState {
         }
     }
 
-    pub(crate) fn view(&self, account: &str) -> crate::types::AccountStats {
-        let Some(totals) = self.accounts.get(account) else {
+    pub(crate) fn view(&self, adapter: &str, account: &str) -> crate::types::AccountStats {
+        let Some(totals) = self.accounts.get(&account_key(adapter, account)) else {
             return crate::types::AccountStats::default();
         };
         crate::types::AccountStats {
@@ -362,9 +371,11 @@ mod tests {
         stats.apply(&row(5, "2026-09-14T00:04:00Z", started_with_account("r3", Some("other"), None)));
         stats.apply(&row(6, "2026-09-14T00:05:00Z", finished("r3", "done: ok", None)));
 
-        let b = stats.view("b");
+        let b = stats.view("claude-code", "b");
         assert_eq!((b.runs, b.done, b.error, b.input_tokens, b.output_tokens), (2, 1, 1, 10, 5));
-        assert_eq!(stats.view("a"), crate::types::AccountStats::default());
+        assert_eq!(stats.view("claude-code", "a"), crate::types::AccountStats::default());
+        // 違うアダプタの同じ id は別のアカウントとして扱う（ADR-0025 D1）。
+        assert_eq!(stats.view("codex", "b"), crate::types::AccountStats::default());
     }
 
     /// S5: `error` は `RunOutcomeKind::Error` だけを数える。`question`/`requeue`/`lease_expired` はエラーではない
@@ -381,7 +392,7 @@ mod tests {
         stats.apply(&row(7, "2026-09-14T00:06:00Z", started_with_account("r4", Some("pool"), Some("b"))));
         stats.apply(&row(8, "2026-09-14T00:07:00Z", finished("r4", "error(retryable=true): boom", None)));
 
-        let b = stats.view("b");
+        let b = stats.view("claude-code", "b");
         assert_eq!((b.runs, b.done, b.error), (4, 0, 1));
     }
 }

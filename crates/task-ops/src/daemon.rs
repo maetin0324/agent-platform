@@ -33,21 +33,29 @@ pub struct DaemonSnapshot {
     #[serde(default)]
     pub clusters: Vec<ClusterLive>,
     /// ADR-0024 D1/D5: `[accounts] claude_dir` の絶対パス（`[accounts]` が無ければ `None`）。
+    /// ADR-0025 D6: claude-code の根の別名として残す（`accounts_roots["claude-code"]` と同じ値）。
     #[serde(default)]
     pub accounts_root: Option<String>,
     /// ADR-0024 D1: `[accounts] max_runs_per_account`（`[accounts]` が無ければ `None`）。
     #[serde(default)]
     pub max_runs_per_account: Option<usize>,
-    /// ADR-0024: プールのアカウント（`id` 昇順）。`[accounts]` が無ければ空。
+    /// ADR-0025 D1/D6: アダプタごとの根ディレクトリ（`"claude-code"` / `"codex"` → 絶対パス。設定されていない
+    /// アダプタはキーごと無い）。古いスナップショットには無いので既定は空。
+    #[serde(default)]
+    pub accounts_roots: std::collections::HashMap<String, String>,
+    /// ADR-0024/0025: プールのアカウント（`adapter` → `id` の順、id 昇順）。`[accounts]` が無ければ空。
     #[serde(default)]
     pub accounts: Vec<AccountLive>,
 }
 
-/// ADR-0024: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。
+/// ADR-0024/0025: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AccountLive {
+    /// ADR-0025 D1: `"claude-code"` | `"codex"`。古いスナップショットには無いので既定は `"claude-code"`。
+    #[serde(default = "default_account_adapter")]
+    pub adapter: String,
     pub id: String,
-    /// `.credentials.json` の有無。
+    /// ログイン済みを示すファイル（claude-code は `.credentials.json`、codex は `auth.json`）の有無。
     pub logged_in: bool,
     /// 実行中の run（ワーカー run + このアカウントを使う Reviewer run）の数。
     pub in_use: u32,
@@ -80,6 +88,10 @@ pub struct AccountUsageLive {
     pub observed_at: i64,
     /// `"run" | "check"`。
     pub source: String,
+}
+
+fn default_account_adapter() -> String {
+    "claude-code".to_string()
 }
 
 /// アカウントの cooldown（Unix 秒）。

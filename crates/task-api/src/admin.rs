@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::Tier;
+use task_core::{AccountAdapter, Tier};
 use tokio::sync::oneshot;
 
 use crate::types::ProviderConfigView;
@@ -22,30 +22,36 @@ pub enum AdminRequest {
         provider_id: String,
         reply: oneshot::Sender<Result<ProviderCheckOutcome, CheckError>>,
     },
-    /// ADR-0024 D6: プールのアカウントを 1 つ確認する（`[accounts].check_model` を使う）。
+    /// ADR-0024 D6 / ADR-0025 D4: プールのアカウントを 1 つ確認する（claude-code は `[accounts].check_model`
+    /// を使う。codex はモデルを指定しない）。
     AccountCheck {
+        adapter: AccountAdapter,
         id: String,
         reply: oneshot::Sender<Result<AccountCheckOutcome, AccountAdminError>>,
     },
-    /// ADR-0024 D7: `claude auth login` を開始し、認可 URL を返す。
+    /// ADR-0024 D7 / ADR-0025 D5: ログインを開始する（claude-code は `claude auth login`、codex は
+    /// `codex login --device-auth`）。
     AccountLoginStart {
+        adapter: AccountAdapter,
         id: String,
         reply: oneshot::Sender<Result<AccountLoginStartOutcome, AccountAdminError>>,
     },
-    /// ADR-0024 D7: 認可コードを渡して待つ。
+    /// ADR-0024 D7: 認可コードを渡して待つ（claude-code のみ。codex は 409 `login_code_not_supported`）。
     AccountLoginCode {
         id: String,
         code: String,
         reply: oneshot::Sender<Result<AccountLoginCodeOutcome, AccountAdminError>>,
     },
-    /// ADR-0024 D7: 進行中のログインを止める（無ければ何もしない）。
+    /// ADR-0024 D7 / ADR-0025 D5: 進行中のログインを止める（無ければ何もしない）。
     AccountLoginCancel {
+        adapter: AccountAdapter,
         id: String,
         reply: oneshot::Sender<Result<(), AccountAdminError>>,
     },
     /// S2+S8: `DELETE /accounts/{id}`。taskd 側（ディスパッチャの権威ある `account_in_use`）で行う
     /// （task-api のスナップショット由来の `in_use` はレースしうるため。ADR-0024 D5 の実装をここへ寄せる）。
     AccountRemove {
+        adapter: AccountAdapter,
         id: String,
         reply: oneshot::Sender<Result<(), AccountAdminError>>,
     },
@@ -60,12 +66,14 @@ pub struct AccountCheckOutcome {
     pub observation: Option<task_core::RateLimitObservation>,
 }
 
-/// ADR-0024 D7: `POST /accounts/{id}/login` の結果。
+/// ADR-0024 D7 / ADR-0025 D5: `POST /accounts/{id}/login` の結果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountLoginStartOutcome {
     pub url: String,
-    /// Unix 秒（10 分後）。
+    /// Unix 秒（claude-code は 10 分後、codex は 15 分後）。
     pub expires_at_unix: i64,
+    /// codex の一回限りのコード（claude-code は `None`。ログには出さない）。
+    pub user_code: Option<String>,
 }
 
 /// ADR-0024 D7: `POST /accounts/{id}/login/code` の結果。
@@ -89,6 +97,8 @@ pub enum AccountAdminError {
     LoginFailed(String),
     /// S2+S8: `DELETE /accounts/{id}` で `account_in_use > 0`（ディスパッチャの権威ある値）。
     InUse,
+    /// ADR-0025 D5: codex は `login/code` を使わない（device フローで完結する）。
+    LoginCodeNotSupported,
 }
 
 /// `check` が終わったときの結果（ADR-0022 M1 で `detail` を追加）。

@@ -160,6 +160,15 @@ impl ApiProblem {
         Self::new(StatusCode::BAD_GATEWAY, "login_failed", detail)
     }
 
+    /// ADR-0025 D5: codex は `login/code` を使わない（device フローで完結する）。
+    pub(crate) fn login_code_not_supported() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "login_code_not_supported",
+            "this adapter's login does not use a code submission step",
+        )
+    }
+
     /// ADR-0024 D5: `account_pool = true` だが `adapter != "claude-code"`（API 側で判定できる範囲）。
     pub(crate) fn invalid_provider(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_provider", detail)

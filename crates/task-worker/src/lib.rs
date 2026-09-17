@@ -6,6 +6,7 @@ pub mod artifact;
 pub mod claude_account;
 pub mod claude_code;
 pub mod codex;
+pub mod codex_account;
 pub mod delegate_file;
 pub mod fake;
 pub mod protocol;
@@ -22,6 +23,7 @@ pub use claude_account::{
 };
 pub use claude_code::{ClaudeCodeAdapter, ClaudeCodeConfig};
 pub use codex::{CodexAdapter, CodexConfig};
+pub use codex_account::{CodexLoginSession, check_account_codex, start_login_codex};
 pub use delegate_file::{DELEGATE_FILE, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
 pub use protocol::{

@@ -326,7 +326,7 @@ pub fn api_settings(
         started_at,
         providers_dir: config.providers_dir.clone(),
         admin_tx,
-        accounts_root: config.accounts.as_ref().map(|a| a.claude_dir.clone()),
+        accounts_roots: config.accounts.as_ref().map(|a| a.roots()).unwrap_or_default(),
         max_runs_per_account: config.accounts.as_ref().map(|a| a.max_runs_per_account).unwrap_or(0),
     }
 }
@@ -419,6 +419,8 @@ async fn tick_loop(
     // ADR-0024 D5〜D7: アカウントの確認・ログイン中継も同様に、spawn した先の結果をここへ戻す。
     let (account_tx, mut account_rx) = tokio::sync::mpsc::channel::<accounts_admin::AccountAdminEvent>(16);
     let login_sessions = accounts_admin::new_sessions();
+    // ADR-0025 D5: codex のログイン中継（別の流儀なので別のマップ）。
+    let codex_login_sessions = accounts_admin::new_codex_sessions();
     let tick = config.tick();
     let mut ticks: u64 = 0;
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
@@ -431,7 +433,15 @@ async fn tick_loop(
         // `expire_stale_logins` はチャネルを使わない（このループ自身が drain するチャネルへ `await` で
         // 送るとデッドロックしうるため）。打ち切った id は戻り値で受け取り、ここで直接反映する。
         for id in accounts_admin::expire_stale_logins(&login_sessions, accounts_admin::LOGIN_EXPIRY).await {
-            dispatcher.set_account_login_pending(&id, false);
+            dispatcher.set_account_login_pending(task_core::AccountAdapter::ClaudeCode, &id, false);
+        }
+        // ADR-0025 D5: codex も同様に 15 分で打ち切り、完了したものはポーリングで検知する（どちらもチャネルを
+        // 使わない。B1 と同じ理由）。
+        for id in accounts_admin::expire_stale_codex_logins(&codex_login_sessions, accounts_admin::LOGIN_EXPIRY_CODEX).await {
+            dispatcher.set_account_login_pending(task_core::AccountAdapter::Codex, &id, false);
+        }
+        for (id, _ok) in accounts_admin::poll_codex_logins(&codex_login_sessions).await {
+            dispatcher.set_account_login_pending(task_core::AccountAdapter::Codex, &id, false);
         }
         let tick_started = std::time::Instant::now();
         let report: TickReport = dispatcher.tick()?;
@@ -481,7 +491,7 @@ async fn tick_loop(
                 // ADR-0017 M2: 処理後は select に戻らず即座にループの先頭（次の `dispatcher.tick()`）へ進む
                 // ので、reload の効果は「次の tick から」になる。`tick_ms` の残りを待たない。
                 if let Some(req) = req {
-                    handle_admin_request(dispatcher, config, req, check_tx.clone(), login_sessions.clone(), account_tx.clone()).await;
+                    handle_admin_request(dispatcher, config, req, check_tx.clone(), login_sessions.clone(), codex_login_sessions.clone(), account_tx.clone()).await;
                 }
             }
             // ADR-0022 D2: 終わった `check` の結果を受け取り、次の tick のスナップショットに載せる。
@@ -489,15 +499,16 @@ async fn tick_loop(
                 tracing::info!(who = "admin", provider_id = %provider_id, result = %check.result, "provider check recorded");
                 dispatcher.set_provider_check(&provider_id, check);
             }
-            // ADR-0024 D4〜D7: アカウントの確認・ログイン中継の結果を `AccountBook` / `login_pending` に反映する。
+            // ADR-0024 D4〜D7 / ADR-0025 D4/D5: アカウントの確認・ログイン中継の結果を `AccountBook` /
+            // `login_pending` に反映する。
             Some(event) = account_rx.recv() => {
                 match event {
-                    accounts_admin::AccountAdminEvent::Checked { id, result, detail, observation } => {
-                        tracing::info!(who = "admin", op = "account_check", account_id = %id, result = %result, "account check recorded");
-                        dispatcher.record_account_check(&id, &result, detail, observation);
+                    accounts_admin::AccountAdminEvent::Checked { adapter, id, result, detail, observation } => {
+                        tracing::info!(who = "admin", op = "account_check", account_id = %id, %adapter, result = %result, "account check recorded");
+                        dispatcher.record_account_check(adapter, &id, &result, detail, observation);
                     }
-                    accounts_admin::AccountAdminEvent::LoginPending { id, pending } => {
-                        dispatcher.set_account_login_pending(&id, pending);
+                    accounts_admin::AccountAdminEvent::LoginPending { adapter, id, pending } => {
+                        dispatcher.set_account_login_pending(adapter, &id, pending);
                     }
                 }
             }
@@ -507,12 +518,14 @@ async fn tick_loop(
 
 /// ADR-0017 M2: API から委譲された `reload`/`check` を処理する。`reload` はその場で（`Dispatcher` を直接
 /// 差し替えるだけの軽い処理）、`check` は最大 30 秒かかりうるので tick をブロックしないよう `tokio::spawn` する。
+#[allow(clippy::too_many_arguments)]
 async fn handle_admin_request(
     dispatcher: &mut Dispatcher,
     config: &Config,
     req: task_api::AdminRequest,
     check_tx: tokio::sync::mpsc::Sender<(String, ProviderCheckView)>,
     login_sessions: accounts_admin::LoginSessions,
+    codex_login_sessions: accounts_admin::CodexLoginSessions,
     account_tx: tokio::sync::mpsc::Sender<accounts_admin::AccountAdminEvent>,
 ) {
     match req {
@@ -541,26 +554,26 @@ async fn handle_admin_request(
                 let _ = reply.send(outcome);
             });
         }
-        task_api::AdminRequest::AccountCheck { id, reply } => {
-            accounts_admin::spawn_check(config, id, account_tx, reply);
+        task_api::AdminRequest::AccountCheck { adapter, id, reply } => {
+            accounts_admin::spawn_check(config, adapter, id, account_tx, reply);
         }
-        task_api::AdminRequest::AccountLoginStart { id, reply } => {
-            accounts_admin::spawn_login_start(config, login_sessions, id, account_tx, reply);
+        task_api::AdminRequest::AccountLoginStart { adapter, id, reply } => {
+            accounts_admin::spawn_login_start(config, login_sessions, codex_login_sessions, adapter, id, account_tx, reply);
         }
         task_api::AdminRequest::AccountLoginCode { id, code, reply } => {
             accounts_admin::spawn_login_code(login_sessions, id, code, account_tx, reply);
         }
-        task_api::AdminRequest::AccountLoginCancel { id, reply } => {
-            accounts_admin::spawn_login_cancel(login_sessions, id, account_tx, reply);
+        task_api::AdminRequest::AccountLoginCancel { adapter, id, reply } => {
+            accounts_admin::spawn_login_cancel(login_sessions, codex_login_sessions, adapter, id, account_tx, reply);
         }
         // S2+S8: cheap な fs 操作（ディレクトリの rename）だけなので spawn せず、ここで直接（同期的に）行う。
         // ディスパッチャの権威ある `account_in_use` を使うため `&mut Dispatcher` が要る。
-        task_api::AdminRequest::AccountRemove { id, reply } => {
-            let result = accounts_admin::remove_account(config, dispatcher, &login_sessions, &id).await;
+        task_api::AdminRequest::AccountRemove { adapter, id, reply } => {
+            let result = accounts_admin::remove_account(config, dispatcher, &login_sessions, &codex_login_sessions, adapter, &id).await;
             if result.is_ok() {
-                tracing::info!(who = "admin", op = "account_remove", account_id = %id, "admin: account removed");
+                tracing::info!(who = "admin", op = "account_remove", account_id = %id, %adapter, "admin: account removed");
             } else {
-                tracing::warn!(who = "admin", op = "account_remove", account_id = %id, ?result, "account remove rejected");
+                tracing::warn!(who = "admin", op = "account_remove", account_id = %id, %adapter, ?result, "account remove rejected");
             }
             let _ = reply.send(result);
         }
@@ -603,7 +616,10 @@ fn accounts_section_changed(old: &Option<config::AccountsConfig>, new: &Option<c
     match (old, new) {
         (None, None) => false,
         (Some(o), Some(n)) => {
-            o.claude_dir != n.claude_dir || o.max_runs_per_account != n.max_runs_per_account || o.check_model != n.check_model
+            o.claude_dir != n.claude_dir
+                || o.codex_dir != n.codex_dir
+                || o.max_runs_per_account != n.max_runs_per_account
+                || o.check_model != n.check_model
         }
         _ => true,
     }

@@ -1,11 +1,12 @@
 //! `ApiState`: ハンドラが共有するもの一式（API 専用のストア接続、設定の写し、デーモンの `watch`、SSE と replay の状態、
 //! プロバイダ集計）。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use task_core::{SqliteStore, StoreOptions};
+use task_core::{AccountAdapter, SqliteStore, StoreOptions};
 use task_ops::daemon::DaemonSnapshot;
 use task_ops::view::ViewContext;
 use tokio::sync::watch;
@@ -58,7 +59,7 @@ pub(crate) struct Inner {
     pub(crate) taskd_version: String,
     pub(crate) providers_dir: Option<std::path::PathBuf>,
     pub(crate) admin_tx: Option<tokio::sync::mpsc::Sender<crate::admin::AdminRequest>>,
-    pub(crate) accounts_root: Option<std::path::PathBuf>,
+    pub(crate) accounts_roots: HashMap<AccountAdapter, std::path::PathBuf>,
     pub(crate) max_runs_per_account: usize,
     pub(crate) account_stats: Mutex<crate::stats::AccountStatsState>,
     pub(crate) instance_id: String,
@@ -94,7 +95,7 @@ impl ApiState {
             taskd_version: settings.taskd_version,
             providers_dir: settings.providers_dir,
             admin_tx: settings.admin_tx,
-            accounts_root: settings.accounts_root,
+            accounts_roots: settings.accounts_roots,
             max_runs_per_account: settings.max_runs_per_account,
             account_stats: Mutex::new(crate::stats::AccountStatsState::default()),
             instance_id: settings.instance_id,

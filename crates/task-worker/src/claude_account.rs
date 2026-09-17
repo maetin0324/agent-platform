@@ -22,7 +22,7 @@ use crate::subprocess::{LineOutcome, MAX_LINE_BYTES, read_line_limited, send_sig
 
 /// N5: ログイン中継の読み取りタスク（stdout/stderr の `pump_reader`）の join を待つ上限。子プロセスは
 /// 既に `wait()` 済みなのでパイプはすぐ閉じるはずだが、何かで詰まっても中継全体を止めないための保険。
-const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `check_account` / `AccountLoginResult` の結果種別（ADR-0024 D5/D6。serde は `snake_case`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -227,7 +227,7 @@ fn classify(last_result: Option<&ResultMeta>, stderr_tail: &str) -> (AccountChec
 }
 
 /// 人が読むための一行の手がかり（1 行・200 文字まで）。改行・連続空白は 1 個の空白にたたむ。
-fn truncate_detail(text: &str) -> String {
+pub(crate) fn truncate_detail(text: &str) -> String {
     let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() <= 200 {
         return one_line;
@@ -291,7 +291,7 @@ impl std::fmt::Debug for LoginSession {
 
 /// パイプが詰まらないよう、読めたバイトをそのまま共有バッファへ足し続ける（行区切りに依存しない。
 /// `Paste code here if prompted > ` のように改行の無いプロンプトを認識する必要があるため）。
-async fn pump_reader<R>(mut reader: R, buf: Arc<Mutex<Vec<u8>>>)
+pub(crate) async fn pump_reader<R>(mut reader: R, buf: Arc<Mutex<Vec<u8>>>)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -308,7 +308,7 @@ where
 
 /// N5: `handle` の完了を `timeout` まで待ち、それを超えたら中断する（タスク自体は abort する。呼び出し側の
 /// 処理は続ける）。
-async fn join_with_timeout(handle: JoinHandle<()>, timeout: Duration) {
+pub(crate) async fn join_with_timeout(handle: JoinHandle<()>, timeout: Duration) {
     let abort_handle = handle.abort_handle();
     if tokio::time::timeout(timeout, handle).await.is_err() {
         abort_handle.abort();
@@ -481,7 +481,7 @@ fn redact_urls(text: &str) -> String {
 }
 
 /// OSC 8 のハイパーリンクや CSI のエスケープシーケンスを取り除く（ADR-0024 D7）。
-fn strip_escape_codes(bytes: &[u8]) -> String {
+pub(crate) fn strip_escape_codes(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();

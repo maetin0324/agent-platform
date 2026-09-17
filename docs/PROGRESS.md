@@ -1,6 +1,6 @@
 # PROGRESS — taskd
 
-現在地: **Phase 0〜13 完了**（Phase 13 = Claude アカウントのプールと残量に基づく負荷分散、GUI からの登録・ログイン。ADR-0024）（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
+現在地: **Phase 0〜14 完了**（Phase 13 = Claude アカウントのプールと残量に基づく負荷分散、GUI からの登録・ログイン。ADR-0024）（Phase 9 = GUI のための基盤と HTTP API 層、ADR-0013。追補で GUI 設計からの提案 P-G14〜P-G16 を ADR-0014 として実装。Phase 10 = 役割と委譲、ADR-0016。Phase 11 = GUI からのアカウント管理、ADR-0017。Phase 12 = クラスタでのコマンド実行、ADR-0018）。Web GUI の設計は `docs/gui/`（Fable 作成、
 人間の判断 H1〜H9 を反映済み）で、GUI 本体は別リポジトリ `taskd-gui` で `run-gphases.sh` により G フェーズとして進める（前提: Node 24 LTS / pnpm 11）。Phase 4/6 の実機ドッグフードの扱いも締めた（本ファイル「Phase 4/6 受け入れの締め」）。
 提案 P-1〜P-37 の採否は ADR-0009、Phase 7 は ADR-0010、requeue 上限は ADR-0011。P-40 / P-41 は人間の許可を得て DESIGN.md に
 反映済み（Phase 8 の節も DESIGN §6 に追加）。DESIGN.md への反映待ちの提案は無い（P-12 は P-41 で反映、P-39 は後回し）。
@@ -20,7 +20,8 @@
 | 10 | 役割と委譲（組織的な木構造。ADR-0016） | 完了 | 2026-09-15 |
 | 11 | GUI からのアカウント管理（ADR-0017） | 完了 | 2026-09-15 |
 | 12 | クラスタでのコマンド実行（ssh + ControlMaster。ADR-0018） | 完了 | 2026-09-15 |
-| 13 | Claude アカウントのプール（`CLAUDE_SECURESTORAGE_CONFIG_DIR`）・残量に基づく負荷分散・GUI からのプロバイダ登録とログイン（ADR-0024） | 完了（実アカウントでの `rate_limit_event` 記録は人のログイン待ち） | 2026-09-16 |
+| 13 | Claude アカウントのプール（`CLAUDE_SECURESTORAGE_CONFIG_DIR`）・残量に基づく負荷分散・GUI からのプロバイダ登録とログイン（ADR-0024） | 完了（実機で確認済み。下記 Phase 13 の追記） | 2026-09-16 |
+| 14 | codex アカウントもプールに入れる（`CODEX_HOME`・デバイス認証・`token_count` の残量。ADR-0025） | 完了（実機はログイン前まで確認） | 2026-09-17 |
 
 ---
 
@@ -2608,3 +2609,53 @@ B3（テスト外の `expect`）、S1〜S10（`[accounts]` 無しで `account_po
 
 - P-62: DESIGN.md §6 の非目標「残量推定に基づく複数アカウントの自動切替」を「推定はしない。Claude Code が stream-json で出す実測値（`rate_limit_event`）による選択は ADR-0024 で行う」に改め、
   §5.4 / §5.5 にアカウントのプール（`[accounts]`、`account_pool`、`with_env`）を、§6 に Phase 13 の節を足す。CLAUDE.md の「予算管理の実装（別プロジェクト）」も「課金額の予算管理」と明確化する。
+
+## Phase 13 の実機確認（2026-09-17 追記）
+
+人が GUI の「アカウント」画面から実アカウント 2 つ（`claude_max_lab` / `claude_max_personal`）をログインし、「確認」を押した後に、
+小さな実タスク（`artifacts/ok.txt` を作るだけ）を 1 件流した。
+
+- 選択: `WorkerStarted` は `provider: claude-pool`, **`account: claude_max_lab`**。確認時点の観測値は lab が 5 時間枠 0.0 / 週次 0.31（スコア 1.0）、
+  personal が 0.53 / 0.29（スコア 0.47）で、**スコアの高い lab が選ばれた**（ADR-0024 D3 のとおり）。
+- 観測: run の後、lab の観測値の `source` が `check` → `run` に変わり（`observed_at` も更新）、アカウント別の集計が `runs: 1`・`tokens: 6/390` になった。
+- これで Phase 13 の受け入れ条件 7（実機）を満たす。`~/taskd/claude-accounts/.taskd-usage.json` に保存され、再起動しても残る。
+
+## Phase 14 — codex アカウントもプールに入れる（ADR-0025。2026-09-17）
+
+人間の依頼「codex のアカウント追加方法も実装して下さい」。Phase 13 の仕組みを codex に広げた。
+
+### 事実の確認（実装前、codex-cli 0.154.0）
+
+- `codex login` はローカル 1455 番へのコールバック（別 PC のブラウザからは完了できない）。`codex login --device-auth` は
+  `https://auth.openai.com/codex/device` と一回限りのコード（15 分）を表示し、**標準入力を使わず**完了を待つ → GUI にはこちらを使う。
+- 残量は `codex exec --json` の `token_count` の `rate_limits`（`primary` / `secondary` の `used_percent` と `window_minutes`）。
+- 未ログインで `codex exec` すると `401 Unauthorized: Missing bearer or basic authentication` を 10 回ほど再試行する（約 40 秒）→ 401 を見たら即断する。
+
+### 成果物
+
+- `[accounts] codex_dir`（claude と別の根。アカウントは `(adapter, id)` で識別）。`account_pool` は codex でも有効（env は `CODEX_HOME`）。
+- codex アダプタ: `with_env`、`token_count` → `RateLimitObservation`（`window_minutes <= 1440` を 5 時間枠の位置、それ超を週次枠の位置に割り当て）。
+- `check`（401 を見たら即 `auth_failed`。約 8 秒）、`login`（デバイス認証。`kind: "device_code"` と `user_code`、完了は毎 tick のポーリングで検知）。
+- API: `AccountView.adapter`、`AccountList.roots`、`POST /accounts` の `adapter`、各操作の `?adapter=`、`AccountLoginStart.kind` / `user_code`、
+  `login/code?adapter=codex` は 409 `login_code_not_supported`（すべて追加のみ。`root` は claude-code の別名として残す）。
+- `RunSummary.account` を追加（run 一覧にどのアカウントで動いたかを出す。GUI のタスク詳細に `account` 列）。
+
+### 受け入れ条件と証拠
+
+1. **残量の多い codex アカウントが選ばれ `CODEX_HOME` が一致** — e2e `codex_account_pool_scenarios`（スタブの codex）: ok。
+2. **`token_count` の `rate_limits` が観測値になる（枠の割り当ては `window_minutes`）** — `task-core::accounts::tests::codex_token_count_*`（7 件）と上記 e2e: ok。
+3. **`login` が `device_code` と `user_code` を返し、完了で `logged_in`、`login/code` は 409** — e2e と `taskd::accounts_admin` の codex テスト: ok。
+4. **GUI** — GUI 側 PROGRESS「Phase G9」。
+5. **共通条件** — `cargo test --workspace` **636 passed / 0 failed**、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、`scripts/sync-gui-docs.sh --check` up to date。
+6. **実機（本物の codex 0.154.0、別ポートの使い捨て taskd で確認。運用中の taskd には触れていない）** —
+   `POST /accounts {"id":"probe","adapter":"codex"}` → 201（0700）、`POST …/login?adapter=codex` → `kind: "device_code"` と本物の
+   `https://auth.openai.com/codex/device` と `user_code`、`POST …/login/code?adapter=codex` → 409 `login_code_not_supported`、
+   `DELETE …/login` → 200、`POST …/check?adapter=codex` → **`auth_failed` を 8 秒で**（401 を見て再試行を待たずに打ち切る）、
+   taskd のログに URL と `user_code` は 0 件、`DELETE /accounts/probe?adapter=codex` → 200。
+   **未確認**: 実際に codex にログインした状態での run と振り分け（人がログインした後に確認する）。
+
+### 未解決事項
+
+- U14-1: codex のログイン完了は毎 tick のポーリングで検知する（ADR-0025 は「終了を待つ」とだけ書いている。実装は非ブロッキング。挙動は同じ）。
+- U14-2: 実アカウントでの codex の run（上記 6 の未確認部分）。
+- U13-1（継続）: Reviewer run の起動失敗はプールでもアカウント側の cooldown になりうる。

@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use common::*;
 use serde_json::json;
-use task_api::{AccountAdminError, AdminRequest};
-use task_core::{Event, Status, TaskKind};
+use task_api::{AccountAdminError, AccountLoginStartOutcome, AdminRequest};
+use task_core::{AccountAdapter, Event, Status, TaskKind};
 use task_ops::daemon::{AccountCooldownLive, AccountLive, AccountUsageLive};
 use tokio::sync::mpsc;
 
@@ -42,7 +42,7 @@ fn spawn_account_remove_double(root: std::path::PathBuf, in_use: Arc<StdMutex<Ha
     let (tx, mut rx) = mpsc::channel::<AdminRequest>(8);
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
-            if let AdminRequest::AccountRemove { id, reply } = req {
+            if let AdminRequest::AccountRemove { id, reply, .. } = req {
                 let result: Result<(), AccountAdminError> = (|| {
                     let dir = root.join(&id);
                     if !dir.is_dir() {
@@ -265,6 +265,7 @@ async fn list_accounts_merges_filesystem_snapshot_and_stats() {
     snap.accounts_root = Some(root.display().to_string());
     snap.max_runs_per_account = Some(2);
     snap.accounts = vec![AccountLive {
+        adapter: "claude-code".into(),
         id: "b".into(),
         logged_in: true,
         in_use: 1,
@@ -454,4 +455,216 @@ async fn provider_admin_account_pool_requires_the_accounts_section() {
     )
     .await;
     assert_problem(&resp, 422, "invalid_provider");
+}
+
+// ---- ADR-0025: codex accounts in the pool (the adapter dimension) ----
+
+/// `POST /accounts {"adapter":"codex"}` creates the account under `codex_dir`, not `claude_dir`, and
+/// `GET /accounts` lists both adapters (`adapter` → `id` order) with the `roots` map (ADR-0025 D6).
+#[tokio::test]
+async fn create_account_with_codex_adapter_uses_the_codex_root_and_list_shows_both_adapters() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let claude_root = tmp.path().join("claude-accounts");
+    let codex_root = tmp.path().join("codex-accounts");
+    std::fs::create_dir_all(&claude_root).unwrap();
+    std::fs::create_dir_all(&codex_root).unwrap();
+    let env = TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        accounts_root: Some(claude_root.clone()),
+        codex_accounts_root: Some(codex_root.clone()),
+        max_runs_per_account: 2,
+        ..Default::default()
+    });
+    let app = env.router();
+    let auth = auth();
+
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/accounts",
+            &json!({"id": "codex-a", "adapter": "codex"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_eq!(resp.status, 201, "{}", resp.text());
+    let v = resp.json();
+    assert_eq!(v["adapter"], json!("codex"));
+    assert!(codex_root.join("codex-a").is_dir());
+    assert!(!claude_root.join("codex-a").exists());
+
+    // Also create a claude-code account (default adapter) to check the merged listing.
+    let resp = send(
+        &app,
+        post_json_with("/api/v1/accounts", &json!({"id": "claude-a"}), &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(resp.status, 201, "{}", resp.text());
+    assert_eq!(resp.json()["adapter"], json!("claude-code"));
+
+    let resp = send(&app, get_with("/api/v1/accounts", &[("authorization", &auth)])).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let v = resp.json();
+    assert_eq!(v["root"], json!(claude_root.display().to_string()));
+    assert_eq!(v["roots"]["claude-code"], json!(claude_root.display().to_string()));
+    assert_eq!(v["roots"]["codex"], json!(codex_root.display().to_string()));
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{items:?}");
+    // adapter -> id order (ADR-0025 D6): claude-code before codex.
+    assert_eq!(items[0]["adapter"], json!("claude-code"));
+    assert_eq!(items[0]["id"], json!("claude-a"));
+    assert_eq!(items[1]["adapter"], json!("codex"));
+    assert_eq!(items[1]["id"], json!("codex-a"));
+}
+
+/// `POST /accounts {"adapter":"codex"}` when `[accounts] codex_dir` is not configured is 409
+/// `accounts_unavailable` (even though `claude_dir` is configured).
+#[tokio::test]
+async fn create_account_with_codex_adapter_without_codex_dir_is_unavailable() {
+    let (env, _tmp, _root) = env_with_accounts_root();
+    let app = env.router();
+    let auth = auth();
+
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/accounts",
+            &json!({"id": "a", "adapter": "codex"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 409, "accounts_unavailable");
+}
+
+/// `?adapter=codex` on the management endpoints is forwarded to taskd via `AdminRequest` (ADR-0025 D6).
+/// The double below records which adapter each request carried.
+#[tokio::test]
+async fn management_endpoints_forward_the_adapter_query_parameter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let codex_root = tmp.path().join("codex-accounts");
+    std::fs::create_dir_all(codex_root.join("a")).unwrap();
+    let seen_adapters: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+    let (admin_tx, mut admin_rx) = mpsc::channel::<AdminRequest>(8);
+    let seen = seen_adapters.clone();
+    tokio::spawn(async move {
+        while let Some(req) = admin_rx.recv().await {
+            match req {
+                AdminRequest::AccountCheck { adapter, reply, .. } => {
+                    seen.lock().unwrap().push(adapter.to_string());
+                    let _ = reply.send(Err(AccountAdminError::NotFound));
+                }
+                AdminRequest::AccountLoginStart { adapter, reply, .. } => {
+                    seen.lock().unwrap().push(adapter.to_string());
+                    let _ = reply.send(Ok(AccountLoginStartOutcome {
+                        url: "https://auth.openai.com/codex/device".into(),
+                        expires_at_unix: 2_000_000_000,
+                        user_code: Some("ABCD-EFGHI".into()),
+                    }));
+                }
+                AdminRequest::AccountLoginCancel { adapter, reply, .. } => {
+                    seen.lock().unwrap().push(adapter.to_string());
+                    let _ = reply.send(Ok(()));
+                }
+                AdminRequest::AccountRemove { adapter, reply, .. } => {
+                    seen.lock().unwrap().push(adapter.to_string());
+                    let _ = reply.send(Err(AccountAdminError::NotFound));
+                }
+                _ => {}
+            }
+        }
+    });
+    let env = TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        codex_accounts_root: Some(codex_root),
+        max_runs_per_account: 2,
+        admin_tx: Some(admin_tx),
+        ..Default::default()
+    });
+    let app = env.router();
+    let auth = auth();
+
+    let resp = send(
+        &app,
+        post_json_with("/api/v1/accounts/a/check?adapter=codex", &json!({}), &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(resp.status, 404, "{}", resp.text());
+
+    let resp = send(
+        &app,
+        post_json_with("/api/v1/accounts/a/login?adapter=codex", &json!({}), &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let v = resp.json();
+    assert_eq!(v["kind"], json!("device_code"));
+    assert_eq!(v["user_code"], json!("ABCD-EFGHI"));
+    assert_eq!(v["url"], json!("https://auth.openai.com/codex/device"));
+
+    let resp = send(&app, delete_with("/api/v1/accounts/a/login?adapter=codex", &[("authorization", &auth)])).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+
+    let resp = send(&app, delete_with("/api/v1/accounts/a?adapter=codex", &[("authorization", &auth)])).await;
+    assert_eq!(resp.status, 404, "{}", resp.text());
+
+    let seen = seen_adapters.lock().unwrap().clone();
+    assert_eq!(seen, vec!["codex", "codex", "codex", "codex"]);
+}
+
+/// ADR-0025 D5: `POST /accounts/{id}/login/code?adapter=codex` is 409 `login_code_not_supported` (codex
+/// completes the device flow without a code submission step; no `AdminRequest` is even sent).
+#[tokio::test]
+async fn login_code_is_not_supported_for_codex() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let codex_root = tmp.path().join("codex-accounts");
+    std::fs::create_dir_all(&codex_root).unwrap();
+    let (admin_tx, mut admin_rx) = mpsc::channel::<AdminRequest>(4);
+    tokio::spawn(async move {
+        if admin_rx.recv().await.is_some() {
+            panic!("login/code for codex must not reach the admin channel");
+        }
+    });
+    let env = TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        codex_accounts_root: Some(codex_root),
+        max_runs_per_account: 2,
+        admin_tx: Some(admin_tx),
+        ..Default::default()
+    });
+    let app = env.router();
+    let auth = auth();
+
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/accounts/a/login/code?adapter=codex",
+            &json!({"code": "x"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_problem(&resp, 409, "login_code_not_supported");
+}
+
+/// An unknown `?adapter=` value is 400 `bad_request`.
+#[tokio::test]
+async fn unknown_adapter_query_value_is_bad_request() {
+    let (env, _tmp, _root) = env_with_accounts_root();
+    let app = env.router();
+    let auth = auth();
+
+    let resp = send(
+        &app,
+        post_json_with("/api/v1/accounts/a/check?adapter=bogus", &json!({}), &[("authorization", &auth)]),
+    )
+    .await;
+    assert_problem(&resp, 400, "bad_request");
+}
+
+/// Sanity check that `AccountAdapter::parse`/`as_str` round-trip the query/serde vocabulary used above.
+#[test]
+fn account_adapter_vocabulary_matches_the_api() {
+    assert_eq!(AccountAdapter::parse("codex"), Some(AccountAdapter::Codex));
+    assert_eq!(AccountAdapter::ClaudeCode.as_str(), "claude-code");
 }

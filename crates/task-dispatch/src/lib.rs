@@ -13,6 +13,7 @@ pub use accounts::{
     MIN_WEEK_FRACTION, ObservationSource, SEVEN_DAY_SECS, cooldown_for_failure, evaluate, scan_accounts,
     select_account, valid_account_id,
 };
+pub use task_core::AccountAdapter;
 pub use dispatcher::{
     AccountsRuntimeConfig, ClusterSpec, DispatchConfig, DispatchError, Dispatcher, SnapshotPublisher, TickReport,
 };

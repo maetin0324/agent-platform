@@ -816,6 +816,7 @@ mod tests {
             clusters: vec![],
             providers: vec![],
             accounts_root: None,
+            accounts_roots: std::collections::HashMap::new(),
             max_runs_per_account: None,
             accounts: vec![],
         };
@@ -1032,6 +1033,7 @@ mod tests {
             }],
             providers: vec![],
             accounts_root: None,
+            accounts_roots: std::collections::HashMap::new(),
             max_runs_per_account: None,
             accounts: vec![],
         };

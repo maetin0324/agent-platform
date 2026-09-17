@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use task_core::plan::{PlanLimits, PlanOutput, materialize};
 use task_core::{
-    ArtifactRef, Check, DelegateTask, DelegationLimits, Event, OnChildFailure, RateLimitObservation, RoleSpec,
-    RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
+    AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, OnChildFailure, RateLimitObservation,
+    RoleSpec, RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
 };
 use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
@@ -133,16 +133,22 @@ fn to_answers(notes: Vec<AnswerNote>) -> Vec<Answer> {
         .collect()
 }
 
-/// ADR-0024: `[accounts]` があるときのプール実行時設定（`taskd::config::AccountsConfig` の写し）。
+/// ADR-0024/0025: `[accounts]` があるときのプール実行時設定（`taskd::config::AccountsConfig` の写し）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountsRuntimeConfig {
-    /// `[accounts] claude_dir` の絶対パス。`<root>/<id>/` が 1 アカウント。
-    pub root: PathBuf,
+    /// ADR-0025 D1: アダプタごとの根ディレクトリ。`<root>/<id>/` が 1 アカウント。どちらか一方だけでもよい。
+    pub roots: HashMap<AccountAdapter, PathBuf>,
     pub max_runs_per_account: usize,
-    /// D6 の確認に使うモデル（taskd 側が使う。ディスパッチャ自身は確認を行わない）。
+    /// D6 の確認に使うモデル（taskd 側が使う。ディスパッチャ自身は確認を行わない。claude-code のみ）。
     pub check_model: String,
     /// 供給側失敗でアカウントを cooldown にするときのフォールバック秒数（= `error_cooldown_secs`）。
     pub fallback_cooldown_secs: u64,
+}
+
+impl AccountsRuntimeConfig {
+    pub fn root_for(&self, adapter: AccountAdapter) -> Option<&PathBuf> {
+        self.roots.get(&adapter)
+    }
 }
 
 /// ディスパッチャの設定（`taskd.toml` から組み立てる。ADR-0005 D7）。
@@ -225,6 +231,8 @@ struct RunEntry {
     cluster: Option<String>,
     /// ADR-0024 D2/D3: プールから選んだアカウント（プールを使わないプロバイダなら `None`）。
     account: Option<String>,
+    /// ADR-0025 D1: `account` が属するアダプタ（`account` が `None` なら `None`）。
+    account_adapter: Option<AccountAdapter>,
 }
 
 /// ADR-0016 M5: 子待ちの親について覚えておくもの。
@@ -255,6 +263,8 @@ struct ReviewEntry {
     since: OffsetDateTime,
     /// ADR-0024 D2/D3: プールから選んだアカウント（プールを使わない、または Reviewer run 自体を起動しない場合は `None`）。
     account: Option<String>,
+    /// ADR-0025 D1: `account` が属するアダプタ（`account` が `None` なら `None`）。
+    account_adapter: Option<AccountAdapter>,
 }
 
 /// デーモン状態をメモリから公開するための送り口（ADR-0013 D4）。taskd が `[api]` 有効時に `set_snapshot_publisher` で渡す。
@@ -287,9 +297,10 @@ struct StoreSink {
     roles: Vec<RoleSpec>,
     delegation: DelegationLimits,
     delegated_this_run: std::sync::atomic::AtomicUsize,
-    /// ADR-0024 D4: このアカウント（プールを使わなければ `None`）と、観測値を記録する帳簿。
+    /// ADR-0024 D4 / ADR-0025 D1: このアカウント（プールを使わなければ `None`）と、そのアダプタの観測値を記録する帳簿
+    /// （呼び出し側があらかじめアダプタで解決して渡す）。
     account: Option<String>,
-    account_book: Arc<StdMutex<AccountBook>>,
+    account_book: Option<Arc<StdMutex<AccountBook>>>,
 }
 
 impl StoreSink {
@@ -395,7 +406,8 @@ impl EventSink for StoreSink {
     /// `account` が `None` なので no-op。
     fn rate_limit(&self, obs: RateLimitObservation) {
         let Some(account) = &self.account else { return };
-        let Ok(mut book) = self.account_book.lock() else { return };
+        let Some(book) = &self.account_book else { return };
+        let Ok(mut book) = book.lock() else { return };
         book.record_observation(account, obs, ObservationSource::Run);
         if let Err(e) = book.save() {
             tracing::warn!(task_id = %self.task_id, %account, error = %e, "failed to save account book after rate_limit observation");
@@ -411,9 +423,10 @@ struct ReviewerSink {
     task_id: TaskId,
     subject_run_id: String,
     review_run_id: String,
-    /// ADR-0024 D4: Reviewer run もプールのアカウントで走ることがあるので、同じ帳簿に観測値を記録する。
+    /// ADR-0024 D4: Reviewer run もプールのアカウントで走ることがあるので、同じ帳簿に観測値を記録する
+    /// （呼び出し側があらかじめアダプタで解決して渡す。ADR-0025 D1）。
     account: Option<String>,
-    account_book: Arc<StdMutex<AccountBook>>,
+    account_book: Option<Arc<StdMutex<AccountBook>>>,
 }
 
 impl EventSink for ReviewerSink {
@@ -433,7 +446,8 @@ impl EventSink for ReviewerSink {
 
     fn rate_limit(&self, obs: RateLimitObservation) {
         let Some(account) = &self.account else { return };
-        let Ok(mut book) = self.account_book.lock() else { return };
+        let Some(book) = &self.account_book else { return };
+        let Ok(mut book) = book.lock() else { return };
         book.record_observation(account, obs, ObservationSource::Run);
         if let Err(e) = book.save() {
             tracing::warn!(task_id = %self.task_id, %account, error = %e, "failed to save account book after reviewer rate_limit observation");
@@ -477,12 +491,14 @@ pub struct Dispatcher {
     publisher: Option<SnapshotPublisher>,
     /// ADR-0024 D2: `account_pool = true` のプロバイダ id。`reload_providers` で差し替える。
     account_pool_providers: std::collections::HashSet<ProviderId>,
-    /// ADR-0024 D4: アカウントの観測値・cooldown・確認の帳簿。実行中の run のシンクとも共有する。reload では差し替えない
-    /// （設定ファイルの再読込では消えない観測値）。
-    account_book: Arc<StdMutex<AccountBook>>,
-    /// ADR-0024 D1: 選択のたびにディレクトリを読み直さないよう、tick につき高々 1 回だけスキャンする。
-    accounts_scan_cache: Option<Vec<AccountDir>>,
-    /// ADR-0024 D5/D7: taskd（GUI の管理 API）が進行中のログイン中継を持っているアカウント id。
+    /// ADR-0024 D4 / ADR-0025 D1: アダプタごとのアカウントの観測値・cooldown・確認の帳簿（設定された根ディレクトリの
+    /// アダプタだけキーを持つ）。実行中の run のシンクとも共有する。reload では差し替えない（設定ファイルの
+    /// 再読込では消えない観測値）。
+    account_books: HashMap<AccountAdapter, Arc<StdMutex<AccountBook>>>,
+    /// ADR-0024 D1: 選択のたびにディレクトリを読み直さないよう、tick につき高々 1 回だけスキャンする（アダプタごと）。
+    accounts_scan_cache: HashMap<AccountAdapter, Vec<AccountDir>>,
+    /// ADR-0024 D5/D7 / ADR-0025 D5: taskd（GUI の管理 API）が進行中のログイン中継を持っているアカウント
+    /// （キーは `"<adapter>:<id>"`。同じ id でもアダプタが違えば別のログインとして扱う）。
     login_pending_accounts: std::collections::HashSet<String>,
     /// 壁時計の Unix 秒（テストで差し替えられるようにした関数。既定は実時刻）。
     now_unix_fn: Arc<dyn Fn() -> i64 + Send + Sync>,
@@ -504,10 +520,17 @@ impl Dispatcher {
         config: DispatchConfig,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        // ADR-0024 D4: `<claude_dir>/.taskd-usage.json` から観測値・cooldown を読む（無ければ空から始める）。
-        let account_book = match &config.accounts {
-            Some(accounts) => AccountBook::load(&accounts.root.join(".taskd-usage.json")),
-            None => AccountBook::new_in_memory(),
+        // ADR-0024 D4 / ADR-0025 D1: `<root>/.taskd-usage.json` から観測値・cooldown を読む（無ければ空から始める）。
+        // アダプタごとに別の根ディレクトリ・別の帳簿（アカウントの記録はそのアダプタの中で閉じる）。
+        let account_books: HashMap<AccountAdapter, Arc<StdMutex<AccountBook>>> = match &config.accounts {
+            Some(accounts) => accounts
+                .roots
+                .iter()
+                .map(|(adapter, root)| {
+                    (*adapter, Arc::new(StdMutex::new(AccountBook::load(&root.join(".taskd-usage.json")))))
+                })
+                .collect(),
+            None => HashMap::new(),
         };
         Self {
             store,
@@ -531,8 +554,8 @@ impl Dispatcher {
             ticks: 0,
             publisher: None,
             account_pool_providers,
-            account_book: Arc::new(StdMutex::new(account_book)),
-            accounts_scan_cache: None,
+            account_books,
+            accounts_scan_cache: HashMap::new(),
             login_pending_accounts: std::collections::HashSet::new(),
             now_unix_fn: Arc::new(real_now_unix),
         }
@@ -568,48 +591,65 @@ impl Dispatcher {
         self.account_pool_providers = account_pool_providers;
     }
 
-    // ---- ADR-0024: taskd（GUI の管理 API）が使うアカウント操作 ----
+    // ---- ADR-0024/0025: taskd（GUI の管理 API）が使うアカウント操作 ----
 
-    /// そのアカウントで走っている run（ワーカー run + Reviewer run）の数。
-    pub fn account_in_use(&self, id: &str) -> usize {
-        self.running.values().filter(|e| e.account.as_deref() == Some(id)).count()
-            + self.reviewing.values().filter(|e| e.account.as_deref() == Some(id)).count()
+    /// そのアダプタ・アカウントで走っている run（ワーカー run + Reviewer run）の数。
+    pub fn account_in_use(&self, adapter: AccountAdapter, id: &str) -> usize {
+        let matches = |a: &Option<AccountAdapter>, acct: &Option<String>| {
+            *a == Some(adapter) && acct.as_deref() == Some(id)
+        };
+        self.running.values().filter(|e| matches(&e.account_adapter, &e.account)).count()
+            + self.reviewing.values().filter(|e| matches(&e.account_adapter, &e.account)).count()
+    }
+
+    /// ADR-0025 D1: `login_pending_accounts` のキー（同じ id でもアダプタが違えば別のログインとして扱う）。
+    fn login_pending_key(adapter: AccountAdapter, id: &str) -> String {
+        format!("{adapter}:{id}")
     }
 
     /// D7: 進行中のログイン中継の有無を記録する（taskd の `HashMap<String, LoginSession>` と対）。
-    pub fn set_account_login_pending(&mut self, id: &str, pending: bool) {
+    pub fn set_account_login_pending(&mut self, adapter: AccountAdapter, id: &str, pending: bool) {
+        let key = Self::login_pending_key(adapter, id);
         if pending {
-            self.login_pending_accounts.insert(id.to_string());
+            self.login_pending_accounts.insert(key);
         } else {
-            self.login_pending_accounts.remove(id);
+            self.login_pending_accounts.remove(&key);
         }
+    }
+
+    /// このアダプタの帳簿（設定されていなければ `None`）。
+    fn account_book(&self, adapter: AccountAdapter) -> Option<Arc<StdMutex<AccountBook>>> {
+        self.account_books.get(&adapter).cloned()
     }
 
     /// D6: 手動確認の結果を `AccountBook` に記録して保存する（`source = "check"`）。
     pub fn record_account_check(
         &mut self,
+        adapter: AccountAdapter,
         id: &str,
         result: &str,
         detail: Option<String>,
         observation: Option<RateLimitObservation>,
     ) {
         let now = (self.now_unix_fn)();
-        let Ok(mut book) = self.account_book.lock() else { return };
+        let Some(book) = self.account_book(adapter) else { return };
+        let Ok(mut book) = book.lock() else { return };
         if let Some(obs) = observation {
             book.record_observation(id, obs, ObservationSource::Check);
         }
         book.record_check(id, AccountCheckRecord { at: now, result: result.to_string(), detail });
         if let Err(e) = book.save() {
-            tracing::warn!(account_id = %id, error = %e, "failed to save account book after check");
+            tracing::warn!(account_id = %id, %adapter, error = %e, "failed to save account book after check");
         }
     }
 
     /// D5 `DELETE /accounts/{id}`: 帳簿からもこのアカウントの記録を消す（ディレクトリの移動は taskd/task-api が行う）。
-    pub fn remove_account_book_entry(&mut self, id: &str) {
-        let Ok(mut book) = self.account_book.lock() else { return };
+    pub fn remove_account_book_entry(&mut self, adapter: AccountAdapter, id: &str) {
+        let Some(book) = self.account_book(adapter) else { return };
+        let Ok(mut book) = book.lock() else { return };
         book.remove(id);
         if let Err(e) = book.save() {
-            tracing::warn!(account_id = %id, error = %e, "failed to save account book after removal");
+            tracing::warn!(account_id = %id, %adapter, error = %e, "failed to save account book after removal");
         }
     }
 
@@ -635,11 +675,12 @@ impl Dispatcher {
     pub fn tick(&mut self) -> Result<TickReport, DispatchError> {
         self.ticks += 1;
         // ADR-0024 D1: 選択のたびに読み直さないよう、スキャンは tick ごとに高々 1 回（このキャッシュを毎 tick 捨てる）。
-        self.accounts_scan_cache = None;
-        if self.config.accounts.is_some()
-            && let Ok(mut book) = self.account_book.lock()
-        {
-            book.clear_expired((self.now_unix_fn)());
+        self.accounts_scan_cache.clear();
+        let now = (self.now_unix_fn)();
+        for book in self.account_books.values() {
+            if let Ok(mut book) = book.lock() {
+                book.clear_expired(now);
+            }
         }
         let mut report = TickReport::default();
         // ADR-0015 D2: 遅い tick の内訳を出せるよう、段階ごとに所要時間を測る。
@@ -743,7 +784,7 @@ impl Dispatcher {
             return;
         }
         // `&mut self` が要る（アカウントのスキャンキャッシュを埋める）ので、`self.publisher` を借りる前に計算する。
-        let (accounts_root, max_runs_per_account, accounts) = self.accounts_snapshot();
+        let (accounts_root, accounts_roots, max_runs_per_account, accounts) = self.accounts_snapshot();
         let Some(publisher) = &self.publisher else {
             return;
         };
@@ -837,28 +878,36 @@ impl Dispatcher {
             clusters,
             accounts_root,
             max_runs_per_account,
+            accounts_roots,
             accounts,
         };
         // 受け手（API）がいなければ送信は失敗するが、デーモンの動作には関係ない。
         let _ = publisher.tx.send(Some(snapshot));
     }
 
-    /// ADR-0024 D5: スナップショットに載せる `accounts_root` / `max_runs_per_account` / `accounts[]`（id 昇順）。
+    /// ADR-0024 D5 / ADR-0025 D6: スナップショットに載せる `accounts_root`（claude-code の別名）/ `accounts_roots`
+    /// （アダプタ → 根ディレクトリ）/ `max_runs_per_account` / `accounts[]`（`adapter` → `id` の順）。
     /// `[accounts]` が無ければ全て空。
-    fn accounts_snapshot(&mut self) -> (Option<String>, Option<usize>, Vec<AccountLive>) {
+    #[allow(clippy::type_complexity)]
+    fn accounts_snapshot(&mut self) -> (Option<String>, HashMap<String, String>, Option<usize>, Vec<AccountLive>) {
         let Some(cfg) = self.config.accounts.clone() else {
-            return (None, None, Vec::new());
+            return (None, HashMap::new(), None, Vec::new());
         };
         let now = (self.now_unix_fn)();
-        if self.accounts_scan_cache.is_none() {
-            self.accounts_scan_cache = Some(scan_accounts(&cfg.root));
-        }
-        let dirs = self.accounts_scan_cache.clone().unwrap_or_default();
-        let book = self.account_book.lock().unwrap_or_else(|e| e.into_inner());
-        let items = dirs
-            .iter()
-            .map(|d| {
-                let in_use = self.account_in_use(&d.id);
+        let mut items = Vec::new();
+        let mut roots = HashMap::new();
+        for adapter in AccountAdapter::ALL {
+            let Some(root) = cfg.root_for(adapter) else { continue };
+            roots.insert(adapter.as_str().to_string(), root.display().to_string());
+            let dirs = self
+                .accounts_scan_cache
+                .entry(adapter)
+                .or_insert_with(|| scan_accounts(root, adapter))
+                .clone();
+            let Some(book) = self.account_book(adapter) else { continue };
+            let book = book.lock().unwrap_or_else(|e| e.into_inner());
+            for d in &dirs {
+                let in_use = self.account_in_use(adapter, &d.id);
                 let state = book.state(&d.id);
                 let eval = evaluate(
                     &AccountCandidate { id: &d.id, logged_in: d.logged_in, in_use },
@@ -866,7 +915,8 @@ impl Dispatcher {
                     cfg.max_runs_per_account,
                     now,
                 );
-                AccountLive {
+                items.push(AccountLive {
+                    adapter: adapter.as_str().to_string(),
                     id: d.id.clone(),
                     logged_in: d.logged_in,
                     in_use: in_use as u32,
@@ -892,11 +942,12 @@ impl Dispatcher {
                         result: c.result.clone(),
                         detail: c.detail.clone(),
                     }),
-                    login_pending: self.login_pending_accounts.contains(&d.id),
-                }
-            })
-            .collect();
-        (Some(cfg.root.display().to_string()), Some(cfg.max_runs_per_account), items)
+                    login_pending: self.login_pending_accounts.contains(&Self::login_pending_key(adapter, &d.id)),
+                });
+            }
+        }
+        let accounts_root = roots.get(AccountAdapter::ClaudeCode.as_str()).cloned();
+        (accounts_root, roots, Some(cfg.max_runs_per_account), items)
     }
 
     fn drain_completions(&mut self) -> Result<(usize, usize), DispatchError> {
@@ -935,7 +986,11 @@ impl Dispatcher {
     ) -> Result<(), DispatchError> {
         // ADR-0024 D2/D4: プールで選んだアカウント（無ければ `None`）。失敗の cooldown をプロバイダかアカウントか
         // どちらに向けるかを後で決める。
-        let account = self.running.remove(&task_id).and_then(|e| e.account);
+        let (account, account_adapter) = self
+            .running
+            .remove(&task_id)
+            .map(|e| (e.account, e.account_adapter))
+            .unwrap_or((None, None));
         let Some(task) = self.store.get(task_id)? else {
             tracing::warn!(%task_id, %run_id, "worker finished for unknown task");
             return Ok(());
@@ -1023,9 +1078,11 @@ impl Dispatcher {
         };
         let mut events = vec![finished];
         if let Some(reason) = failure_reason {
-            match &account {
+            match (&account, account_adapter) {
                 // ADR-0024 D4: アカウントの cooldown として記録する（`ProviderThrottled` イベントは出さない）。
-                Some(acct) if reason != "spawn" => self.record_account_failure(acct, reason, &provider_outcome),
+                (Some(acct), Some(adapter)) if reason != "spawn" => {
+                    self.record_account_failure(adapter, acct, reason, &provider_outcome)
+                }
                 // ADR-0013 D9 / S10: プールを使わない、または Spawn 失敗（アカウント非依存）はプロバイダの
                 // cooldown として、遷移と同じトランザクションで記録する。
                 _ => {
@@ -1081,13 +1138,16 @@ impl Dispatcher {
         let mut throttled_events = Vec::new();
         if let Some(pf) = outcome.provider_failure.take() {
             let review_account = entry.as_ref().and_then(|e| e.account.clone());
+            let review_account_adapter = entry.as_ref().and_then(|e| e.account_adapter);
             if let Some(provider) = entry.as_ref().and_then(|e| e.provider.clone()) {
                 // ADR-0024 D4: プール経由の Reviewer run の失敗もプロバイダを cooldown にせず、アカウントに向ける。
                 let policy_outcome = if review_account.is_some() { ProviderOutcome::Ok } else { pf.outcome.clone() };
                 self.policy.report(provider.clone(), &policy_outcome);
-                match &review_account {
-                    Some(acct) => self.record_account_failure(acct, cooldown_reason_name(&pf.outcome), &pf.outcome),
-                    None => {
+                match (&review_account, review_account_adapter) {
+                    (Some(acct), Some(adapter)) => {
+                        self.record_account_failure(adapter, acct, cooldown_reason_name(&pf.outcome), &pf.outcome)
+                    }
+                    _ => {
                         if let Some(ev) = self.provider_throttled_event(&provider, &pf.outcome, cooldown_reason_name(&pf.outcome)) {
                             throttled_events.push(ev);
                         }
@@ -1609,7 +1669,8 @@ impl Dispatcher {
                 continue;
             };
             log_slow_step("task_dir", dir_started);
-            let Some((adapter_id, provider_id, account)) = self.select_provider(&task.worker_hint, now, task.id, &mut full)
+            let Some((adapter_id, provider_id, selected_account)) =
+                self.select_provider(&task.worker_hint, now, task.id, &mut full)
             else {
                 continue;
             };
@@ -1617,10 +1678,11 @@ impl Dispatcher {
                 tracing::warn!(task_id = %task.id, provider = %provider_id, adapter = %adapter_id, "no adapter instance for provider");
                 continue;
             };
-            // ADR-0024 D2: プールで選んだアカウントの env を重ねる。`with_env` が `None` を返すのはアダプタの実装漏れ
-            // （設定検証で account_pool は claude-code 限定にしているため通常は起きない）なので、このタスクは今回見送る。
-            let adapter = match &account {
-                Some(account_id) => match self.adapter_for_account(&base_adapter, account_id) {
+            // ADR-0024 D2 / ADR-0025 D2: プールで選んだアカウントの env を重ねる。`with_env` が `None` を返すのは
+            // アダプタの実装漏れ（設定検証で account_pool は claude-code/codex 限定にしているため通常は起きない）
+            // なので、このタスクは今回見送る。
+            let adapter = match &selected_account {
+                Some((account_adapter, account_id)) => match self.adapter_for_account(&base_adapter, *account_adapter, account_id) {
                     Some(a) => a,
                     None => {
                         tracing::warn!(task_id = %task.id, provider = %provider_id, account_id, "adapter does not support account pools (with_env returned None); skipping this tick");
@@ -1629,6 +1691,8 @@ impl Dispatcher {
                 },
                 None => base_adapter,
             };
+            let account = selected_account.as_ref().map(|(_, id)| id.clone());
+            let account_adapter = selected_account.as_ref().map(|(a, _)| *a);
 
             let run_id = ulid::Ulid::new().to_string();
             let wall = Duration::from_secs(task.budget.max_wall_secs);
@@ -1668,6 +1732,7 @@ impl Dispatcher {
                 run_id.clone(),
                 provider_id.clone(),
                 account.clone(),
+                account_adapter,
                 adapter,
                 dir,
                 limits,
@@ -1683,6 +1748,7 @@ impl Dispatcher {
                     since: OffsetDateTime::now_utc(),
                     cluster: cluster.map(|(spec, _)| spec.id),
                     account,
+                    account_adapter,
                 },
             );
             dispatched += 1;
@@ -1742,6 +1808,7 @@ impl Dispatcher {
         run_id: String,
         provider: ProviderId,
         account: Option<String>,
+        account_adapter: Option<AccountAdapter>,
         adapter: Arc<dyn WorkerAdapter>,
         dir: PathBuf,
         limits: RunLimits,
@@ -1756,7 +1823,7 @@ impl Dispatcher {
         };
         let roles = self.config.roles.clone();
         let delegation = self.config.delegation;
-        let account_book = self.account_book.clone();
+        let account_book = account_adapter.and_then(|a| self.account_book(a));
         tokio::spawn(async move {
             let result = run_worker(
                 store,
@@ -1824,7 +1891,9 @@ impl Dispatcher {
         };
         let provider = reviewer.as_ref().map(|(p, _, _)| p.clone());
         // ADR-0024 D2: `account_pool` で選んだアカウント（プールを使わない、または Reviewer run を起動しない場合は `None`）。
-        let account = reviewer.as_ref().and_then(|(_, a, _)| a.clone());
+        let selected_account = reviewer.as_ref().and_then(|(_, a, _)| a.clone());
+        let account = selected_account.as_ref().map(|(_, id)| id.clone());
+        let account_adapter = selected_account.as_ref().map(|(a, _)| *a);
         // ADR-0014 D1: (provider, Reviewer run の id, adapter) — WorkerStarted の記録と in_flight に使う。
         let review_run = reviewer.as_ref().map(|(p, _, r)| (p.clone(), r.run_id.clone(), r.adapter.id().to_string()));
         let reviewer_run = reviewer.map(|(_, _, r)| r);
@@ -1898,6 +1967,7 @@ impl Dispatcher {
                 since: OffsetDateTime::now_utc(),
                 cluster: cluster_id,
                 account,
+                account_adapter,
             },
         );
         Ok(true)
@@ -1978,14 +2048,19 @@ impl Dispatcher {
 
     /// `Reviewer` run のアダプタ／プロバイダを選ぶ（ADR-0007 D5 1.）。並列度の枠は実行中 run と共有する。
     /// ADR-0024 D2: 選んだプロバイダが `account_pool` ならアカウントも選ぶ（戻り値の第 2 要素）。
-    fn pick_reviewer(&mut self, task: &Task, subject_run_id: &str) -> Option<(ProviderId, Option<String>, ReviewerRun)> {
+    #[allow(clippy::type_complexity)]
+    fn pick_reviewer(
+        &mut self,
+        task: &Task,
+        subject_run_id: &str,
+    ) -> Option<(ProviderId, Option<(AccountAdapter, String)>, ReviewerRun)> {
         if self.workers_in_flight() >= self.config.max_concurrency {
             return None;
         }
         // ADR-0012 D2: ワーカー run と同じ手順（上限のプロバイダを飛ばして次へ、候補なしは warn）で選ぶ。
         let hint = self.config.reviewer_hint.clone();
         let mut full = std::collections::HashSet::new();
-        let (adapter_id, provider_id, account) = self.select_provider(&hint, Instant::now(), task.id, &mut full)?;
+        let (adapter_id, provider_id, selected_account) = self.select_provider(&hint, Instant::now(), task.id, &mut full)?;
         let base_adapter = match self.adapters.get(&provider_id) {
             Some(a) => a.clone(),
             None => {
@@ -1993,8 +2068,8 @@ impl Dispatcher {
                 return None;
             }
         };
-        let adapter = match &account {
-            Some(account_id) => match self.adapter_for_account(&base_adapter, account_id) {
+        let adapter = match &selected_account {
+            Some((account_adapter, account_id)) => match self.adapter_for_account(&base_adapter, *account_adapter, account_id) {
                 Some(a) => a,
                 None => {
                     tracing::warn!(task_id = %task.id, provider = %provider_id, account_id, "adapter does not support account pools for reviewer run; deferring");
@@ -2003,6 +2078,8 @@ impl Dispatcher {
             },
             None => base_adapter,
         };
+        let account = selected_account.as_ref().map(|(_, id)| id.clone());
+        let account_adapter = selected_account.as_ref().map(|(a, _)| *a);
         let review_run_id = ulid::Ulid::new().to_string();
         let sink = ReviewerSink {
             store: self.store.clone(),
@@ -2010,12 +2087,12 @@ impl Dispatcher {
             subject_run_id: subject_run_id.to_string(),
             review_run_id: review_run_id.clone(),
             account: account.clone(),
-            account_book: self.account_book.clone(),
+            account_book: account_adapter.and_then(|a| self.account_book(a)),
         };
         tracing::info!(task_id = %task.id, %review_run_id, adapter = %adapter_id, provider = %provider_id, account = account.as_deref(), "starting reviewer run");
         Some((
             provider_id,
-            account,
+            selected_account,
             ReviewerRun {
                 adapter,
                 run_id: review_run_id,
@@ -2062,13 +2139,14 @@ impl Dispatcher {
     /// ADR-0024 D2: 選んだプロバイダが `account_pool = true` なら、続けて D3 でアカウントを選ぶ。選べるアカウントが
     /// 無ければそのプロバイダを満杯として扱い（除外集合に入れて）次の候補へ進む。戻り値の第 3 要素が選んだアカウント
     /// （プールを使わないプロバイダなら `None`）。
+    #[allow(clippy::type_complexity)]
     fn select_provider(
         &mut self,
         hint: &task_core::WorkerHint,
         now: Instant,
         task_id: TaskId,
         full: &mut std::collections::HashSet<ProviderId>,
-    ) -> Option<(AdapterId, ProviderId, Option<String>)> {
+    ) -> Option<(AdapterId, ProviderId, Option<(AccountAdapter, String)>)> {
         // 外部の ProviderPolicy が除外集合を無視しても止まるよう、試行回数に上限を置く。
         for _ in 0..64 {
             match self.policy.select(hint, now, full) {
@@ -2080,10 +2158,17 @@ impl Dispatcher {
                         continue;
                     }
                     if self.account_pool_providers.contains(&provider) {
-                        match self.pick_account() {
+                        // ADR-0025 D1: プールのアダプタは、そのプロバイダ自身のワーカーアダプタと同じ
+                        // （`account_pool = true` は claude-code/codex 限定。設定検証済み）。
+                        let Some(account_adapter) = AccountAdapter::parse(&adapter) else {
+                            tracing::warn!(%task_id, %provider, %adapter, "account_pool provider has an adapter that is not a pool adapter; treating as full");
+                            full.insert(provider);
+                            continue;
+                        };
+                        match self.pick_account(account_adapter) {
                             Some(account_id) => {
                                 self.warned_unroutable.remove(&task_id);
-                                return Some((adapter, provider, Some(account_id)));
+                                return Some((adapter, provider, Some((account_adapter, account_id))));
                             }
                             None => {
                                 tracing::debug!(%task_id, %provider, "no eligible account in the pool; trying the next provider");
@@ -2112,26 +2197,26 @@ impl Dispatcher {
         None
     }
 
-    /// ADR-0024 D3: `[accounts]` のプールから 1 アカウントを選ぶ（残量に基づく決定的な選択）。`[accounts]` が無い、
-    /// または選べるアカウントが無ければ `None`。ディレクトリのスキャンは tick につき高々 1 回。
-    fn pick_account(&mut self) -> Option<String> {
+    /// ADR-0024 D3 / ADR-0025 D2: `[accounts]` の指定アダプタのプールから 1 アカウントを選ぶ（残量に基づく決定的な
+    /// 選択）。そのアダプタの根ディレクトリが無い、または選べるアカウントが無ければ `None`。
+    /// ディレクトリのスキャンは tick につき高々 1 回（アダプタごと）。
+    fn pick_account(&mut self, adapter: AccountAdapter) -> Option<String> {
         let cfg = self.config.accounts.clone()?;
-        if self.accounts_scan_cache.is_none() {
-            self.accounts_scan_cache = Some(scan_accounts(&cfg.root));
-        }
-        let dirs = self.accounts_scan_cache.clone().unwrap_or_default();
+        let root = cfg.root_for(adapter)?;
+        let dirs = self.accounts_scan_cache.entry(adapter).or_insert_with(|| scan_accounts(root, adapter)).clone();
         let now = (self.now_unix_fn)();
-        let book = self.account_book.lock().unwrap_or_else(|e| e.into_inner());
+        let book = self.account_book(adapter)?;
+        let book = book.lock().unwrap_or_else(|e| e.into_inner());
         let candidates: Vec<AccountCandidate<'_>> = dirs
             .iter()
-            .map(|d| AccountCandidate { id: d.id.as_str(), logged_in: d.logged_in, in_use: self.account_in_use(&d.id) })
+            .map(|d| AccountCandidate { id: d.id.as_str(), logged_in: d.logged_in, in_use: self.account_in_use(adapter, &d.id) })
             .collect();
         select_account(&candidates, &book, cfg.max_runs_per_account, now)
     }
 
     /// ADR-0024 D4: プール run の供給側失敗をアカウントの cooldown として記録する（プロバイダは cooldown にしない）。
     /// `reason` は `provider_failure_reason` と同じ語彙（`throttled` / `auth_failed` / `exhausted` / `spawn`）。
-    fn record_account_failure(&self, account_id: &str, reason: &str, outcome: &ProviderOutcome) {
+    fn record_account_failure(&self, adapter: AccountAdapter, account_id: &str, reason: &str, outcome: &ProviderOutcome) {
         let Some(cfg) = &self.config.accounts else { return };
         let now = (self.now_unix_fn)();
         let fallback_secs = match outcome {
@@ -2139,23 +2224,31 @@ impl Dispatcher {
             _ => cfg.fallback_cooldown_secs,
         };
         let cooldown_reason = account_cooldown_reason_from_failure(reason);
-        let Ok(mut book) = self.account_book.lock() else { return };
+        let Some(book) = self.account_book(adapter) else { return };
+        let Ok(mut book) = book.lock() else { return };
         let cooldown = {
             let state = book.state(account_id);
             cooldown_for_failure(state, cooldown_reason, now, fallback_secs)
         };
         book.set_cooldown(account_id, cooldown, now);
         if let Err(e) = book.save() {
-            tracing::warn!(%account_id, error = %e, "failed to save account book after cooldown");
+            tracing::warn!(%account_id, %adapter, error = %e, "failed to save account book after cooldown");
         }
     }
 
-    /// ADR-0024 D2: プールから選んだアカウントの `CLAUDE_SECURESTORAGE_CONFIG_DIR` を環境の末尾に重ねたアダプタを
-    /// 返す。`with_env` が `None`（アダプタがこの経路を実装していない）なら `None`（呼び出し側は満杯として扱う）。
-    fn adapter_for_account(&self, base: &Arc<dyn WorkerAdapter>, account_id: &str) -> Option<Arc<dyn WorkerAdapter>> {
+    /// ADR-0024 D2 / ADR-0025 D2: プールから選んだアカウントの環境変数（claude-code は
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR`、codex は `CODEX_HOME`）を末尾に重ねたアダプタを返す。`with_env` が
+    /// `None`（アダプタがこの経路を実装していない）なら `None`（呼び出し側は満杯として扱う）。
+    fn adapter_for_account(
+        &self,
+        base: &Arc<dyn WorkerAdapter>,
+        account_adapter: AccountAdapter,
+        account_id: &str,
+    ) -> Option<Arc<dyn WorkerAdapter>> {
         let cfg = self.config.accounts.as_ref()?;
-        let dir = cfg.root.join(account_id);
-        base.with_env(&[("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(), dir.display().to_string())])
+        let root = cfg.root_for(account_adapter)?;
+        let dir = root.join(account_id);
+        base.with_env(&[(account_adapter.env_var().to_string(), dir.display().to_string())])
     }
 
     /// ADR-0005 D3: `Local{path}` がそのタスクの作業ディレクトリ。相対なら `workspace_root` 基準。
@@ -2232,7 +2325,7 @@ async fn run_worker(
     roles: Vec<RoleSpec>,
     delegation: DelegationLimits,
     account: Option<String>,
-    account_book: Arc<StdMutex<AccountBook>>,
+    account_book: Option<Arc<StdMutex<AccountBook>>>,
 ) -> Result<RunOutcome, AdapterError> {
     // リース取得後の状態（running, lease あり）をワーカーに渡す。
     let mut task = store
@@ -4123,7 +4216,7 @@ mod tests {
                 roles: Vec::new(),
                 delegation: DelegationLimits::default(),
                 accounts: Some(AccountsRuntimeConfig {
-                    root: accounts_root,
+                    roots: HashMap::from([(AccountAdapter::ClaudeCode, accounts_root)]),
                     max_runs_per_account,
                     check_model: "haiku".into(),
                     fallback_cooldown_secs: 300,

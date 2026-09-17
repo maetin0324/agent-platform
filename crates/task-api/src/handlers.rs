@@ -41,8 +41,22 @@ type ApiResult = Result<Response, ApiProblem>;
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const TITLE_QUERY_MAX_CHARS: usize = 200;
-/// ADR-0024 D2: `account_pool = true` を受け付けるアダプタ（`crate::admin::KNOWN_ADAPTERS` の一員）。
-const CLAUDE_CODE_ADAPTER: &str = "claude-code";
+
+/// ADR-0024 D2 / ADR-0025 D1: `account_pool = true` は claude-code/codex だけ、かつ `[accounts]` にそのアダプタの
+/// 根ディレクトリが設定済みのときだけ有効。
+fn check_account_pool_adapter(state: &ApiState, adapter: &str) -> Result<(), ApiProblem> {
+    let Some(account_adapter) = task_core::AccountAdapter::parse(adapter) else {
+        return Err(ApiProblem::invalid_provider(
+            "account_pool = true requires adapter = \"claude-code\" or \"codex\"",
+        ));
+    };
+    if !state.inner.accounts_roots.contains_key(&account_adapter) {
+        return Err(ApiProblem::invalid_provider(format!(
+            "account_pool = true requires the [accounts] section to configure a root for adapter {adapter:?}"
+        )));
+    }
+    Ok(())
+}
 
 pub(crate) fn router(state: ApiState) -> Router {
     Router::new()
@@ -789,12 +803,10 @@ async fn create_provider(State(state): State<ApiState>, headers: HeaderMap, RawQ
     if create.concurrency.is_some_and(|c| c == 0) {
         return Err(ApiProblem::bad_request("concurrency must be >= 1"));
     }
-    // ADR-0024 D2 / S1: `account_pool = true` は claude-code だけ、かつ `[accounts]` が設定済みのときだけ有効。
-    if create.account_pool && create.adapter != CLAUDE_CODE_ADAPTER {
-        return Err(ApiProblem::invalid_provider("account_pool = true requires adapter = \"claude-code\""));
-    }
-    if create.account_pool && state.inner.accounts_root.is_none() {
-        return Err(ApiProblem::invalid_provider("account_pool = true requires the [accounts] section to be configured"));
+    // ADR-0024 D2 / ADR-0025 D1 / S1: `account_pool = true` は claude-code/codex だけ、かつ `[accounts]` に
+    // そのアダプタの根ディレクトリが設定済みのときだけ有効。
+    if create.account_pool {
+        check_account_pool_adapter(&state, &create.adapter)?;
     }
     let path = crate::admin::provider_file_path(&dir, &create.id);
     if path.exists() {
@@ -837,12 +849,9 @@ async fn patch_provider(
     }
     let current = read_provider_file(&path).map_err(|e| ApiProblem::internal(e.to_string()))?;
     let updated = patch.apply(current);
-    // ADR-0024 D2 / S1: patch 後の組み合わせも検証する（`id`/`adapter` は patch で変わらない）。
-    if updated.account_pool && updated.adapter != CLAUDE_CODE_ADAPTER {
-        return Err(ApiProblem::invalid_provider("account_pool = true requires adapter = \"claude-code\""));
-    }
-    if updated.account_pool && state.inner.accounts_root.is_none() {
-        return Err(ApiProblem::invalid_provider("account_pool = true requires the [accounts] section to be configured"));
+    // ADR-0024 D2 / ADR-0025 D1 / S1: patch 後の組み合わせも検証する（`id`/`adapter` は patch で変わらない）。
+    if updated.account_pool {
+        check_account_pool_adapter(&state, &updated.adapter)?;
     }
     write_provider_file(&dir, &updated).map_err(|e| ApiProblem::internal(e.to_string()))?;
     tracing::info!(who = "admin", op = "provider_patch", provider_id = %id, "admin: provider patched");
@@ -942,32 +951,39 @@ async fn check_provider(
     }
 }
 
-// ---- Phase 13（ADR-0024）: Claude アカウントのプール ----
+// ---- Phase 13/14（ADR-0024, ADR-0025）: アカウントのプール（claude-code / codex） ----
 
 /// D3.29 `GET /accounts`: フィルタシステムのスキャン（`logged_in`・`dir`）+ スナップショットの観測値 + 集計を merge する。
-/// 読み取りなので認証は不要（管理系は 3.30 以降）。
+/// 読み取りなので認証は不要（管理系は 3.30 以降）。両方のアダプタを `adapter` → `id` の順で返す（ADR-0025 D6）。
 async fn accounts(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
-    let Some(root) = state.inner.accounts_root.clone() else {
-        return Ok(json_response(StatusCode::OK, &AccountList { root: None, max_runs_per_account: 0, items: Vec::new() }));
-    };
+    if state.inner.accounts_roots.is_empty() {
+        return Ok(json_response(
+            StatusCode::OK,
+            &AccountList { root: None, roots: std::collections::HashMap::new(), max_runs_per_account: 0, items: Vec::new() },
+        ));
+    }
     let snapshot = state.snapshot();
-    let dirs = crate::accounts::scan_accounts(&root);
-    let ids: Vec<String> = dirs.iter().map(|d| d.id.clone()).collect();
-    let inner = Arc::clone(&state.inner);
-    let stats = state
-        .blocking(move |store| {
-            let mut guard = inner.account_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.catch_up(store).map_err(store_problem)?;
-            Ok(ids.iter().map(|id| guard.view(id)).collect::<Vec<_>>())
-        })
-        .await?;
-    let items = dirs
-        .iter()
-        .zip(stats)
-        .map(|(d, stats)| {
-            let live = snapshot.as_ref().and_then(|s| s.accounts.iter().find(|a| a.id == d.id));
-            AccountView {
+    let mut items = Vec::new();
+    for adapter in task_core::AccountAdapter::ALL {
+        let Some(root) = state.inner.accounts_roots.get(&adapter) else { continue };
+        let dirs = crate::accounts::scan_accounts(root, adapter);
+        let ids: Vec<String> = dirs.iter().map(|d| d.id.clone()).collect();
+        let inner = Arc::clone(&state.inner);
+        let adapter_str = adapter.as_str().to_string();
+        let stats = state
+            .blocking(move |store| {
+                let mut guard = inner.account_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.catch_up(store).map_err(store_problem)?;
+                Ok(ids.iter().map(|id| guard.view(&adapter_str, id)).collect::<Vec<_>>())
+            })
+            .await?;
+        for (d, stats) in dirs.iter().zip(stats) {
+            let live = snapshot
+                .as_ref()
+                .and_then(|s| s.accounts.iter().find(|a| a.adapter == adapter.as_str() && a.id == d.id));
+            items.push(AccountView {
+                adapter: adapter.as_str().to_string(),
                 id: d.id.clone(),
                 dir: d.dir.display().to_string(),
                 logged_in: d.logged_in,
@@ -979,13 +995,18 @@ async fn accounts(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
                 last_check: live.and_then(|l| l.last_check.clone()),
                 login_pending: live.map(|l| l.login_pending).unwrap_or(false),
                 stats,
-            }
-        })
+            });
+        }
+    }
+    let roots: std::collections::HashMap<String, Option<String>> = task_core::AccountAdapter::ALL
+        .into_iter()
+        .map(|a| (a.as_str().to_string(), state.inner.accounts_roots.get(&a).map(|p| p.display().to_string())))
         .collect();
     Ok(json_response(
         StatusCode::OK,
         &AccountList {
-            root: Some(root.display().to_string()),
+            root: roots.get(task_core::AccountAdapter::ClaudeCode.as_str()).cloned().flatten(),
+            roots,
             max_runs_per_account: state.inner.max_runs_per_account,
             items,
         },
@@ -993,17 +1014,21 @@ async fn accounts(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
 }
 
 /// 3.30 `POST /accounts`: ディレクトリを 0700 で作る。task-api 自身は `Dispatcher`/`AccountBook` に触れない
-/// （次の選択のタイミングで taskd がディレクトリを見つける。ADR-0024 D1）。
+/// （次の選択のタイミングで taskd がディレクトリを見つける。ADR-0024 D1）。`adapter`（既定 `claude-code`）が
+/// 指す根ディレクトリが設定されていなければ 409（ADR-0025 D6）。
 async fn create_account(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
-    let Some(root) = state.inner.accounts_root.clone() else {
-        return Err(ApiProblem::accounts_unavailable());
-    };
     let create: AccountCreateBody = read_json(body, false).await?;
     if !crate::accounts::valid_account_id(&create.id) {
         return Err(ApiProblem::bad_request("id must be 1-64 ASCII alphanumeric/-/_ characters"));
     }
+    let Some(account_adapter) = task_core::AccountAdapter::parse(&create.adapter) else {
+        return Err(ApiProblem::bad_request("adapter must be claude-code or codex"));
+    };
+    let Some(root) = state.inner.accounts_roots.get(&account_adapter).cloned() else {
+        return Err(ApiProblem::accounts_unavailable());
+    };
     let dir = root.join(&create.id);
     // N7: `exists()` してから作る（TOCTOU）のではなく、`DirBuilder::create` の `AlreadyExists` を使って
     // 作成そのものを排他にする。親（`root`）は先に `create_dir_all` で用意する（無ければ）。
@@ -1019,8 +1044,9 @@ async fn create_account(State(state): State<ApiState>, headers: HeaderMap, RawQu
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(ApiProblem::account_exists(&create.id)),
         Err(e) => return Err(ApiProblem::internal(e.to_string())),
     }
-    tracing::info!(who = "admin", op = "account_create", account_id = %create.id, "admin: account created");
+    tracing::info!(who = "admin", op = "account_create", account_id = %create.id, adapter = %account_adapter, "admin: account created");
     let view = AccountView {
+        adapter: account_adapter.as_str().to_string(),
         id: create.id.clone(),
         dir: dir.display().to_string(),
         logged_in: false,
@@ -1040,19 +1066,19 @@ async fn create_account(State(state): State<ApiState>, headers: HeaderMap, RawQu
     Ok(response)
 }
 
-/// 3.31 `DELETE /accounts/{id}`: taskd 側へ委譲する（S2+S8）。`<claude_dir>/.removed/<id>-<unix秒>/` へ移す
+/// 3.31 `DELETE /accounts/{id}`: taskd 側へ委譲する（S2+S8）。`<root>/.removed/<id>-<unix秒>/` へ移す
 /// （認証ファイルは消さない）。task-api 自身はファイルを動かさない: スナップショットの `in_use` はポーリング
 /// 間隔だけ古くなりうる（レース）ので、`account_in_use`（running/reviewing を直接見る、ディスパッチャの
-/// 権威ある値）を持つ taskd 側でチェックしてから移動する。
+/// 権威ある値）を持つ taskd 側でチェックしてから移動する。`?adapter=`（省略時 claude-code。ADR-0025 D6）。
 async fn delete_account(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Params(id): Params<String>,
     RawQuery(raw): RawQuery,
 ) -> ApiResult {
-    no_query(&raw)?;
+    let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
-    if state.inner.accounts_root.is_none() {
+    if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
     }
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
@@ -1060,7 +1086,7 @@ async fn delete_account(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::AccountRemove { id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::AccountRemove { adapter, id: id.clone(), reply: reply_tx })
         .await
         .is_err()
     {
@@ -1068,7 +1094,7 @@ async fn delete_account(
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
-            tracing::info!(who = "admin", op = "account_delete", account_id = %id, "admin: account removed");
+            tracing::info!(who = "admin", op = "account_delete", account_id = %id, %adapter, "admin: account removed");
             Ok(json_response(StatusCode::OK, &serde_json::json!({})))
         }
         Ok(Ok(Err(e))) => Err(account_admin_error(&id, e)),
@@ -1086,19 +1112,21 @@ fn account_admin_error(id: &str, err: AccountAdminError) -> ApiProblem {
         AccountAdminError::LoginNotStarted => ApiProblem::login_not_started(),
         AccountAdminError::LoginFailed(message) => ApiProblem::login_failed(message),
         AccountAdminError::InUse => ApiProblem::account_in_use(id),
+        AccountAdminError::LoginCodeNotSupported => ApiProblem::login_code_not_supported(),
     }
 }
 
-/// 3.32 `POST /accounts/{id}/check`（ADR-0024 D6）: taskd 側で実行する（task-api はプロセスを起動しない）。
+/// 3.32 `POST /accounts/{id}/check`（ADR-0024 D6, ADR-0025 D4）: taskd 側で実行する（task-api はプロセスを
+/// 起動しない）。`?adapter=`（省略時 claude-code）。
 async fn check_account(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Params(id): Params<String>,
     RawQuery(raw): RawQuery,
 ) -> ApiResult {
-    no_query(&raw)?;
+    let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
-    if state.inner.accounts_root.is_none() {
+    if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
     }
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
@@ -1106,7 +1134,7 @@ async fn check_account(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::AccountCheck { id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::AccountCheck { adapter, id: id.clone(), reply: reply_tx })
         .await
         .is_err()
     {
@@ -1119,7 +1147,7 @@ async fn check_account(
     };
     match outcome {
         Ok(outcome) => {
-            tracing::info!(who = "admin", op = "account_check", account_id = %id, result = ?outcome.result, "admin: account checked");
+            tracing::info!(who = "admin", op = "account_check", account_id = %id, %adapter, result = ?outcome.result, "admin: account checked");
             Ok(json_response(
                 StatusCode::OK,
                 &AccountCheckResponse {
@@ -1137,16 +1165,17 @@ async fn check_account(
     }
 }
 
-/// 3.33 `POST /accounts/{id}/login`（ADR-0024 D7）: `claude auth login` を開始し、認可 URL を返す。
+/// 3.33 `POST /accounts/{id}/login`（ADR-0024 D7, ADR-0025 D5）: ログインを開始する（claude-code は
+/// `claude auth login`、codex は `codex login --device-auth`）。`?adapter=`（省略時 claude-code）。
 async fn start_account_login(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Params(id): Params<String>,
     RawQuery(raw): RawQuery,
 ) -> ApiResult {
-    no_query(&raw)?;
+    let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
-    if state.inner.accounts_root.is_none() {
+    if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
     }
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
@@ -1154,7 +1183,7 @@ async fn start_account_login(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::AccountLoginStart { id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::AccountLoginStart { adapter, id: id.clone(), reply: reply_tx })
         .await
         .is_err()
     {
@@ -1168,11 +1197,17 @@ async fn start_account_login(
     match outcome {
         Ok(started) => {
             // D5: URL・認可コードはログに出さない。
-            tracing::info!(who = "admin", op = "account_login_start", account_id = %id, "admin: account login started");
+            tracing::info!(who = "admin", op = "account_login_start", account_id = %id, %adapter, "admin: account login started");
+            let kind = match adapter {
+                task_core::AccountAdapter::ClaudeCode => "paste_code",
+                task_core::AccountAdapter::Codex => "device_code",
+            };
             Ok(json_response(
                 StatusCode::OK,
                 &AccountLoginStart {
+                    kind: kind.to_string(),
                     url: started.url,
+                    user_code: started.user_code,
                     expires_at: crate::accounts::rfc3339_unix(started.expires_at_unix),
                 },
             ))
@@ -1182,6 +1217,7 @@ async fn start_account_login(
 }
 
 /// 3.34 `POST /accounts/{id}/login/code`（ADR-0024 D7）: コードは受け取ってもログにも応答にも出さない。
+/// claude-code のみ（ADR-0025 D5）。`?adapter=codex` は 409 `login_code_not_supported`。
 async fn submit_account_login_code(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -1189,10 +1225,13 @@ async fn submit_account_login_code(
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> ApiResult {
-    no_query(&raw)?;
+    let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
-    if state.inner.accounts_root.is_none() {
+    if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
+    }
+    if adapter != task_core::AccountAdapter::ClaudeCode {
+        return Err(ApiProblem::login_code_not_supported());
     }
     let AccountLoginCodeBody { code } = read_json(body, false).await?;
     if code.trim().is_empty() {
@@ -1232,16 +1271,17 @@ async fn submit_account_login_code(
     }
 }
 
-/// 3.35 `DELETE /accounts/{id}/login`: 進行中のログインを止める（無ければ何もしない）。
+/// 3.35 `DELETE /accounts/{id}/login`: 進行中のログインを止める（無ければ何もしない）。`?adapter=`（省略時
+/// claude-code。ADR-0025 D5）。
 async fn cancel_account_login(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Params(id): Params<String>,
     RawQuery(raw): RawQuery,
 ) -> ApiResult {
-    no_query(&raw)?;
+    let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
-    if state.inner.accounts_root.is_none() {
+    if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
     }
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
@@ -1249,7 +1289,7 @@ async fn cancel_account_login(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::AccountLoginCancel { id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::AccountLoginCancel { adapter, id: id.clone(), reply: reply_tx })
         .await
         .is_err()
     {
@@ -1257,7 +1297,7 @@ async fn cancel_account_login(
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
-            tracing::info!(who = "admin", op = "account_login_cancel", account_id = %id, "admin: account login cancelled");
+            tracing::info!(who = "admin", op = "account_login_cancel", account_id = %id, %adapter, "admin: account login cancelled");
             Ok(json_response(StatusCode::OK, &serde_json::json!({})))
         }
         Ok(Ok(Err(e))) => Err(account_admin_error(&id, e)),
@@ -1396,7 +1436,7 @@ mod tests {
             started_at: "2026-09-14T00:00:00Z".into(),
             providers_dir: None,
             admin_tx: None,
-            accounts_root: None,
+            accounts_roots: std::collections::HashMap::new(),
             max_runs_per_account: 0,
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);

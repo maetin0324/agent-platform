@@ -6,11 +6,13 @@
 //! - DB は API 専用の `SqliteStore` 接続を 1 つ持ち、呼び出しは `spawn_blocking` で行う（ADR-0013 D3）。
 //! - デーモンの状態は `tokio::sync::watch` の `DaemonSnapshot` から読む（ADR-0013 D4）。
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use task_core::AccountAdapter;
 use task_ops::daemon::DaemonSnapshot;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
@@ -86,9 +88,10 @@ pub struct ApiSettings {
     pub providers_dir: Option<PathBuf>,
     /// ADR-0017 M2: `reload` / `check` を taskd（ワーカー起動ができる側）へ委譲するチャネル。`None` なら両方使えない。
     pub admin_tx: Option<mpsc::Sender<AdminRequest>>,
-    /// ADR-0024 D1: `[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `None`
-    /// （そのときは `GET /accounts` が `{root: null, items: []}`、管理系は 409 `accounts_unavailable`）。
-    pub accounts_root: Option<PathBuf>,
+    /// ADR-0024 D1 / ADR-0025 D1/D6: アダプタごとの `[accounts]` の根ディレクトリの絶対パス（設定されている
+    /// アダプタだけキーを持つ）。`[accounts]` が無ければ空（そのときは `GET /accounts` が
+    /// `{root: null, roots: {}, items: []}`、管理系は 409 `accounts_unavailable`）。
+    pub accounts_roots: HashMap<AccountAdapter, PathBuf>,
     /// ADR-0024 D1: `[accounts] max_runs_per_account`。
     pub max_runs_per_account: usize,
 }
@@ -109,7 +112,7 @@ impl std::fmt::Debug for ApiSettings {
             .field("started_at", &self.started_at)
             .field("providers_dir", &self.providers_dir)
             .field("admin_tx", &self.admin_tx.as_ref().map(|_| "<sender>"))
-            .field("accounts_root", &self.accounts_root)
+            .field("accounts_roots", &self.accounts_roots)
             .field("max_runs_per_account", &self.max_runs_per_account)
             .finish()
     }

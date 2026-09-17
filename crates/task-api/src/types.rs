@@ -341,20 +341,28 @@ pub struct StreamReset {
 /// `GET /accounts`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AccountList {
-    /// `[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `null`。
+    /// `[accounts] claude_dir` の絶対パス。`[accounts]` が無ければ `null`。ADR-0025 D6: `roots["claude-code"]`
+    /// の別名として残す（後方互換）。
     pub root: Option<String>,
+    /// ADR-0025 D6: `"claude-code"` / `"codex"` → 設定されていればその絶対パス、無ければ `null`。
+    #[serde(default)]
+    pub roots: std::collections::HashMap<String, Option<String>>,
     pub max_runs_per_account: usize,
-    /// `id` 昇順。
+    /// `adapter` → `id` の順。
     pub items: Vec<AccountView>,
 }
 
 /// 1 アカウント（`GET /accounts` の要素、`POST /accounts` の応答）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AccountView {
+    /// ADR-0025 D1: `"claude-code"` | `"codex"`。
+    #[serde(default = "default_account_adapter")]
+    pub adapter: String,
     pub id: String,
     /// アカウントディレクトリの絶対パス（ログイン手順に要る。秘密の中身は含まない）。
     pub dir: String,
-    /// `.credentials.json` の有無（中身は読まない）。
+    /// ログイン済みを示すファイル（claude-code は `.credentials.json`、codex は `auth.json`）の有無
+    /// （中身は読まない）。
     pub logged_in: bool,
     /// 実行中の run の数。最初の tick 前は `0`。
     pub in_use: u32,
@@ -404,11 +412,18 @@ pub struct AccountStats {
     pub output_tokens: u64,
 }
 
+fn default_account_adapter() -> String {
+    "claude-code".to_string()
+}
+
 /// `POST /accounts` の要求本文。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AccountCreateBody {
     pub id: String,
+    /// ADR-0025 D6: `"claude-code"`（既定）| `"codex"`。
+    #[serde(default = "default_account_adapter")]
+    pub adapter: String,
 }
 
 /// `POST /accounts/{id}/check` の応答（ADR-0024 D6）。
@@ -422,12 +437,23 @@ pub struct AccountCheckResponse {
     pub usage: Option<AccountUsageView>,
 }
 
-/// `POST /accounts/{id}/login` の応答（ADR-0024 D7）。
+/// `POST /accounts/{id}/login` の応答（ADR-0024 D7、ADR-0025 D5）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AccountLoginStart {
+    /// `"paste_code"`（claude-code: URL を開いて認可し、表示されたコードを `login/code` に貼る）|
+    /// `"device_code"`（codex: URL を開いて `user_code` を入力する。GUI には貼り戻さない）。
+    #[serde(default = "default_login_kind")]
+    pub kind: String,
     pub url: String,
-    /// 10 分後（RFC 3339）。
+    /// codex のみ。`login/code` には使わない（GUI が画面に出すだけ）。ログには出さない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
+    /// claude-code は 10 分後、codex は 15 分後（RFC 3339）。
     pub expires_at: String,
+}
+
+fn default_login_kind() -> String {
+    "paste_code".to_string()
 }
 
 /// `POST /accounts/{id}/login/code` の要求本文。

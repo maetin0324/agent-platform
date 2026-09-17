@@ -8,7 +8,7 @@ pub mod plan;
 pub mod store;
 pub mod transition;
 
-pub use accounts::{RateLimitObservation, RateWindow};
+pub use accounts::{AccountAdapter, RateLimitObservation, RateWindow};
 pub use delegate::{
     DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, materialize_delegated, validate_each,
 };

@@ -176,6 +176,9 @@ pub struct RunSummary {
     pub adapter: String,
     pub model: String,
     pub provider: Option<String>,
+    /// プールのアカウント（ADR-0024 D4 / ADR-0025）。`WorkerStarted.account` がある run だけ。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub outcome: Option<RunOutcomeKind>,
@@ -389,6 +392,7 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                 adapter,
                 model,
                 provider,
+                account,
                 role,
                 ..
             } => {
@@ -401,6 +405,7 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                     adapter: adapter.clone(),
                     model: model.clone(),
                     provider: provider.clone(),
+                    account: account.clone(),
                     started_at: row.ts.clone(),
                     finished_at: None,
                     outcome: None,
@@ -791,6 +796,37 @@ mod tests {
             path: format!("artifacts/{name}"),
             sha256: "abc".to_string(),
             kind: "doc".to_string(),
+        }
+    }
+
+    /// プールの run（ADR-0024 D4）: `WorkerStarted.account` が要約に出る。
+    #[test]
+    fn runs_expose_the_pool_account_of_the_run() {
+        let tid = TaskId::new();
+        let pooled = vec![row(0, "t0", tid, started_with_account("r1", Some("claude-pool"), Some("acct-a")))];
+        let summaries = runs(&pooled);
+        assert_eq!(summaries[0].account.as_deref(), Some("acct-a"));
+        assert_eq!(summaries[0].provider.as_deref(), Some("claude-pool"));
+
+        // プールでない run は None のまま（既存の形）。
+        let plain = vec![row(0, "t0", tid, started("r2", Some("claude-a")))];
+        assert!(runs(&plain)[0].account.is_none());
+    }
+
+    fn started_with_account(run_id: &str, provider: Option<&str>, account: Option<&str>) -> Event {
+        let Event::WorkerStarted { run_id, adapter, model, provider, role, task_role, .. } =
+            started(run_id, provider)
+        else {
+            unreachable!("started builds a WorkerStarted")
+        };
+        Event::WorkerStarted {
+            run_id,
+            adapter,
+            model,
+            provider,
+            account: account.map(str::to_string),
+            role,
+            task_role,
         }
     }
 

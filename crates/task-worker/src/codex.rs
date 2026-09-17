@@ -8,11 +8,12 @@
 //! `subprocess.rs` の低レベル部分を再利用する。
 
 use std::process::Stdio;
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use task_core::Usage;
+use task_core::{RateLimitObservation, Usage};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::warn;
@@ -79,6 +80,22 @@ impl WorkerAdapter for CodexAdapter {
     ) -> Result<RunOutcome, AdapterError> {
         run_codex(&self.config, &req, run_id, &limits, sink).await
     }
+
+    /// ADR-0025 D2: `extra`（`CODEX_HOME` を含む）を `config.env` の末尾に足した複製を返す
+    /// （`claude_code::ClaudeCodeAdapter::with_env` と同じ規則: 同名キーは後勝ち）。
+    fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut config = self.config.clone();
+        config.env.extend(extra.iter().cloned());
+        Some(Arc::new(CodexAdapter::new(config)))
+    }
+}
+
+/// 壁時計の Unix 秒（ADR-0025 D3: 観測時刻は taskd の壁時計。`codex_account` からも使う）。
+pub(crate) fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// `artifacts/result.json`（`claude_code::ResultFile` と同じ規約。ADR-0006 D3, ADR-0008 D3）。
@@ -310,6 +327,11 @@ fn handle_line(
     let Some(ty) = value.get("type").and_then(|t| t.as_str()) else {
         return;
     };
+    if ty == "token_count"
+        && let Some(obs) = RateLimitObservation::from_codex_token_count(&value, now_unix_secs())
+    {
+        sink.rate_limit(obs);
+    }
     if ty.starts_with("item.") {
         sink.progress(&truncate(line, 500));
         return;
@@ -411,6 +433,7 @@ mod tests {
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
         delegated: Mutex<Vec<Vec<DelegateTask>>>,
+        rate_limits: Mutex<Vec<task_core::RateLimitObservation>>,
     }
 
     impl EventSink for RecordingSink {
@@ -420,6 +443,9 @@ mod tests {
         fn artifact(&self, _artifact: &ArtifactRef) {}
         fn delegate(&self, tasks: &[DelegateTask]) {
             self.delegated.lock().unwrap_or_else(|e| e.into_inner()).push(tasks.to_vec());
+        }
+        fn rate_limit(&self, obs: task_core::RateLimitObservation) {
+            self.rate_limits.lock().unwrap_or_else(|e| e.into_inner()).push(obs);
         }
     }
 
@@ -830,5 +856,62 @@ echo '{"type":"turn.completed"}'
         let delegated = sink.delegated.lock().unwrap();
         assert_eq!(delegated.len(), 1);
         assert_eq!(delegated[0].len(), 2);
+    }
+
+    /// ADR-0025 D3: `token_count` の `rate_limits` を解析すると `sink.rate_limit` に観測値が渡る。
+    #[tokio::test]
+    async fn token_count_event_line_is_forwarded_to_the_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"mkdir -p artifacts
+echo '{"type":"token_count","rate_limits":{"primary":{"used_percent":14.0,"window_minutes":300,"resets_in_seconds":3600},"secondary":{"used_percent":24.0,"window_minutes":10080,"resets_in_seconds":432000}}}'
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+echo '{"type":"turn.completed"}'
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-rate-1", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let observed = sink.rate_limits.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        let obs = &observed[0];
+        assert_eq!(obs.five_hour.map(|w| w.utilization), Some(0.14));
+        assert_eq!(obs.seven_day.map(|w| w.utilization), Some(0.24));
+    }
+
+    /// ADR-0025 D2: `with_env` の追加分（`CODEX_HOME`）は既存の同名キーより後に環境を組み立てるので勝つ。
+    #[tokio::test]
+    async fn with_env_overrides_a_same_name_key_already_in_config_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("env-seen.txt");
+        let mut config = CodexConfig {
+            command: {
+                let path = dir.path().join("codex_stub.sh");
+                crate::test_support::write_executable(
+                    &path,
+                    &format!(
+                        "#!/bin/sh\nmkdir -p artifacts\nprintf '%s' \"$CODEX_HOME\" > {out}\nprintf '%s' '{{\"summary\":\"ok\",\"evidence\":[]}}' > artifacts/result.json\necho '{{\"type\":\"turn.completed\"}}'\n",
+                        out = out_file.display()
+                    ),
+                );
+                path.to_string_lossy().into_owned()
+            },
+            ..CodexConfig::default()
+        };
+        config.env.push(("CODEX_HOME".to_string(), "old-account-dir".to_string()));
+        let base = CodexAdapter::new(config);
+        let with_env = base
+            .with_env(&[("CODEX_HOME".to_string(), "new-account-dir".to_string())])
+            .expect("codex supports with_env");
+
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = with_env.run(req, "run-env-1", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let seen = std::fs::read_to_string(&out_file).unwrap();
+        assert_eq!(seen, "new-account-dir");
     }
 }

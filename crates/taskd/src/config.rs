@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-use task_core::{DelegationLimits, RoleSpec, Tier, WorkerHint};
+use task_core::{AccountAdapter, DelegationLimits, RoleSpec, Tier, WorkerHint};
 use task_dispatch::{AccountsRuntimeConfig, ClusterSpec, DispatchConfig, ProviderSpec};
 
 #[derive(Debug, thiserror::Error)]
@@ -87,18 +87,44 @@ pub struct Config {
     pub source_path: Option<PathBuf>,
 }
 
-/// `[accounts]`（ADR-0024 D1）: `claude_dir` の下の 1 ディレクトリが 1 アカウント。
+/// `[accounts]`（ADR-0024 D1、ADR-0025 D1）: `claude_dir` / `codex_dir` の下の 1 ディレクトリが 1 アカウント。
+/// どちらか一方だけでもよい（少なくとも一方は必要。`validate` でチェックする）。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountsConfig {
-    /// 相対なら設定ファイル基準。`Config::load` が絶対化する。
-    pub claude_dir: PathBuf,
+    /// 相対なら設定ファイル基準。`Config::load` が絶対化する。`<claude_dir>/<id>/` = `CLAUDE_SECURESTORAGE_CONFIG_DIR`。
+    #[serde(default)]
+    pub claude_dir: Option<PathBuf>,
+    /// ADR-0025 D1: 相対なら設定ファイル基準。`<codex_dir>/<id>/` = `CODEX_HOME`。
+    #[serde(default)]
+    pub codex_dir: Option<PathBuf>,
     /// 1 アカウントで同時に走らせる run の上限。
     #[serde(default = "default_max_runs_per_account")]
     pub max_runs_per_account: usize,
-    /// D6 の確認に使うモデル（枠はアカウント単位なので最も安いモデルでよい）。
+    /// D6 の確認に使うモデル（枠はアカウント単位なので最も安いモデルでよい。claude-code の確認にだけ使う）。
     #[serde(default = "default_check_model")]
     pub check_model: String,
+}
+
+impl AccountsConfig {
+    /// アダプタ → 根ディレクトリ（設定されているものだけ）。
+    pub fn roots(&self) -> HashMap<AccountAdapter, PathBuf> {
+        let mut roots = HashMap::new();
+        if let Some(dir) = &self.claude_dir {
+            roots.insert(AccountAdapter::ClaudeCode, dir.clone());
+        }
+        if let Some(dir) = &self.codex_dir {
+            roots.insert(AccountAdapter::Codex, dir.clone());
+        }
+        roots
+    }
+
+    pub fn root_for(&self, adapter: AccountAdapter) -> Option<&PathBuf> {
+        match adapter {
+            AccountAdapter::ClaudeCode => self.claude_dir.as_ref(),
+            AccountAdapter::Codex => self.codex_dir.as_ref(),
+        }
+    }
 }
 
 fn default_max_runs_per_account() -> usize {
@@ -514,10 +540,17 @@ impl Config {
             cfg.providers.extend(load_provider_files(&dir)?);
             cfg.providers_dir = Some(dir);
         }
-        if let Some(accounts) = &mut cfg.accounts
-            && accounts.claude_dir.is_relative()
-        {
-            accounts.claude_dir = base.join(&accounts.claude_dir);
+        if let Some(accounts) = &mut cfg.accounts {
+            if let Some(dir) = &accounts.claude_dir
+                && dir.is_relative()
+            {
+                accounts.claude_dir = Some(base.join(dir));
+            }
+            if let Some(dir) = &accounts.codex_dir
+                && dir.is_relative()
+            {
+                accounts.codex_dir = Some(base.join(dir));
+            }
         }
         cfg.validate()?;
         // API を有効にするなら、トークンが読めることを起動時に確かめる（exit 2）。
@@ -555,21 +588,43 @@ impl Config {
             if p.concurrency == 0 {
                 return Err(ConfigError::Invalid(format!("provider {}: concurrency must be >= 1", p.id)));
             }
-            // ADR-0024 D2: `account_pool = true` は claude-code だけ、かつ `[accounts]` が設定されている必要がある。
+            // ADR-0024 D2 / ADR-0025 D1: `account_pool = true` は claude-code か codex だけ、かつ `[accounts]` に
+            // そのアダプタの根ディレクトリが設定されている必要がある。
             if p.account_pool {
-                if p.adapter != task_worker::ClaudeCodeAdapter::ID {
+                let Some(account_adapter) = AccountAdapter::parse(&p.adapter) else {
                     return Err(ConfigError::Invalid(format!(
-                        "provider {}: account_pool = true requires adapter = \"claude-code\"",
+                        "provider {}: account_pool = true requires adapter = \"claude-code\" or \"codex\"",
                         p.id
                     )));
-                }
-                if self.accounts.is_none() {
-                    return Err(ConfigError::Invalid(format!(
-                        "provider {}: account_pool = true requires an [accounts] section",
-                        p.id
-                    )));
+                };
+                match &self.accounts {
+                    Some(accounts) if accounts.root_for(account_adapter).is_some() => {}
+                    Some(_) => {
+                        return Err(ConfigError::Invalid(format!(
+                            "provider {}: account_pool = true requires [accounts] {} to be set",
+                            p.id,
+                            match account_adapter {
+                                AccountAdapter::ClaudeCode => "claude_dir",
+                                AccountAdapter::Codex => "codex_dir",
+                            }
+                        )));
+                    }
+                    None => {
+                        return Err(ConfigError::Invalid(format!(
+                            "provider {}: account_pool = true requires an [accounts] section",
+                            p.id
+                        )));
+                    }
                 }
             }
+        }
+        if let Some(accounts) = &self.accounts
+            && accounts.claude_dir.is_none()
+            && accounts.codex_dir.is_none()
+        {
+            return Err(ConfigError::Invalid(
+                "[accounts] requires at least one of claude_dir / codex_dir".into(),
+            ));
         }
         if let Some(accounts) = &self.accounts
             && accounts.max_runs_per_account == 0
@@ -715,7 +770,7 @@ impl Config {
             roles: self.role_specs(),
             delegation: self.delegation_limits(),
             accounts: self.accounts.as_ref().map(|a| AccountsRuntimeConfig {
-                root: a.claude_dir.clone(),
+                roots: a.roots(),
                 max_runs_per_account: a.max_runs_per_account,
                 check_model: a.check_model.clone(),
                 fallback_cooldown_secs: self.error_cooldown_secs,
@@ -723,7 +778,7 @@ impl Config {
         }
     }
 
-    /// ADR-0024 D1: `[accounts] claude_dir` の下の `account_pool = true` のプロバイダ id（重複なし）。
+    /// ADR-0024 D1 / ADR-0025 D1: `[accounts]` の下の `account_pool = true` のプロバイダ id（重複なし）。
     pub fn account_pool_providers(&self) -> std::collections::HashSet<String> {
         self.providers
             .iter()
@@ -732,26 +787,26 @@ impl Config {
             .collect()
     }
 
-    /// ADR-0024 D1: `[accounts] claude_dir` を 0700 で作る（無ければ）。`[accounts]` が無ければ何もしない。
+    /// ADR-0024 D1 / ADR-0025 D1: `[accounts]` の設定された根ディレクトリ（claude_dir・codex_dir）をそれぞれ
+    /// 0700 で作る（無ければ）。`[accounts]` が無ければ何もしない。
     pub fn ensure_accounts_dir(&self) -> Result<(), ConfigError> {
         let Some(accounts) = &self.accounts else {
             return Ok(());
         };
-        if accounts.claude_dir.exists() {
-            return Ok(());
-        }
-        std::fs::create_dir_all(&accounts.claude_dir).map_err(|source| ConfigError::Read {
-            path: accounts.claude_dir.clone(),
-            source,
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(&accounts.claude_dir, perms).map_err(|source| ConfigError::Read {
-                path: accounts.claude_dir.clone(),
-                source,
-            })?;
+        for dir in accounts.roots().values() {
+            if dir.exists() {
+                continue;
+            }
+            std::fs::create_dir_all(dir).map_err(|source| ConfigError::Read { path: dir.clone(), source })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o700);
+                std::fs::set_permissions(dir, perms).map_err(|source| ConfigError::Read {
+                    path: dir.clone(),
+                    source,
+                })?;
+            }
         }
         Ok(())
     }
@@ -1298,9 +1353,9 @@ max_tree_depth = 2
         assert_eq!(cfg.providers.len(), 1);
     }
 
-    // ---- ADR-0024: [accounts] / account_pool ----
+    // ---- ADR-0024/0025: [accounts] / account_pool ----
 
-    /// `account_pool = true` は `adapter = "claude-code"` かつ `[accounts]` を要求する（ADR-0024 D2）。
+    /// `account_pool = true` は `adapter = "claude-code"` かつ `[accounts] claude_dir` を要求する（ADR-0024 D2）。
     #[test]
     fn account_pool_requires_claude_code_adapter_and_accounts_section() {
         // account_pool のプロバイダはあるが [accounts] が無い。
@@ -1311,7 +1366,7 @@ max_tree_depth = 2
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("[accounts]"), "{err}");
 
-        // [accounts] はあるが adapter が claude-code でない。
+        // [accounts] はあるが adapter が claude-code/codex でない。
         let cfg: Config = toml::from_str(
             "[accounts]\nclaude_dir = \"acct\"\n[[providers]]\nid = \"pool\"\nadapter = \"fake\"\naccount_pool = true\n",
         )
@@ -1328,32 +1383,56 @@ max_tree_depth = 2
         assert_eq!(cfg.account_pool_providers(), ["pool".to_string()].into());
     }
 
-    /// `[accounts]` の既定値と、相対 `claude_dir` の解決（設定ファイル基準）。
+    /// ADR-0025 D1: `account_pool = true` の codex プロバイダは `[accounts] codex_dir` を要求する
+    /// （`claude_dir` だけでは足りない）。
     #[test]
-    fn accounts_section_defaults_and_relative_claude_dir_is_resolved() {
+    fn account_pool_for_codex_requires_codex_dir_specifically() {
+        let cfg: Config = toml::from_str(
+            "[accounts]\nclaude_dir = \"acct\"\n[[providers]]\nid = \"pool\"\nadapter = \"codex\"\naccount_pool = true\n",
+        )
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("codex_dir"), "{err}");
+
+        let cfg: Config = toml::from_str(
+            "[accounts]\ncodex_dir = \"acct\"\n[[providers]]\nid = \"pool\"\nadapter = \"codex\"\naccount_pool = true\n",
+        )
+        .unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.account_pool_providers(), ["pool".to_string()].into());
+    }
+
+    /// `[accounts]` の既定値と、相対 `claude_dir`/`codex_dir` の解決（設定ファイル基準）。
+    #[test]
+    fn accounts_section_defaults_and_relative_dirs_are_resolved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("taskd.toml");
         std::fs::write(
             &path,
-            "[accounts]\nclaude_dir = \"claude-accounts\"\n[[providers]]\nid = \"pool\"\nadapter = \"claude-code\"\naccount_pool = true\n",
+            "[accounts]\nclaude_dir = \"claude-accounts\"\ncodex_dir = \"codex-accounts\"\n[[providers]]\nid = \"pool\"\nadapter = \"claude-code\"\naccount_pool = true\n",
         )
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         let accounts = cfg.accounts.as_ref().unwrap();
-        assert!(accounts.claude_dir.is_absolute());
-        assert_eq!(accounts.claude_dir, dir.path().canonicalize().unwrap().join("claude-accounts"));
+        let claude_dir = accounts.claude_dir.clone().expect("claude_dir");
+        let codex_dir = accounts.codex_dir.clone().expect("codex_dir");
+        assert!(claude_dir.is_absolute());
+        assert_eq!(claude_dir, dir.path().canonicalize().unwrap().join("claude-accounts"));
+        assert!(codex_dir.is_absolute());
+        assert_eq!(codex_dir, dir.path().canonicalize().unwrap().join("codex-accounts"));
         assert_eq!(accounts.max_runs_per_account, 2);
         assert_eq!(accounts.check_model, "haiku");
 
         let d = cfg.dispatch_config();
         let runtime = d.accounts.expect("dispatch_config carries [accounts]");
-        assert_eq!(runtime.root, accounts.claude_dir);
+        assert_eq!(runtime.root_for(AccountAdapter::ClaudeCode), Some(&claude_dir));
+        assert_eq!(runtime.root_for(AccountAdapter::Codex), Some(&codex_dir));
         assert_eq!(runtime.max_runs_per_account, 2);
         assert_eq!(runtime.check_model, "haiku");
         assert_eq!(runtime.fallback_cooldown_secs, cfg.error_cooldown_secs);
     }
 
-    /// `max_runs_per_account = 0` は設定エラー。未知キーも拒否。
+    /// `max_runs_per_account = 0` は設定エラー。未知キーも拒否。どちらの根ディレクトリも無ければ設定エラー。
     #[test]
     fn accounts_section_rejects_zero_max_runs_and_unknown_keys() {
         let cfg: Config = toml::from_str(
@@ -1364,29 +1443,39 @@ max_tree_depth = 2
         assert!(err.contains("max_runs_per_account"), "{err}");
 
         assert!(toml::from_str::<Config>("[accounts]\nbogus = 1\n").is_err());
-        assert!(toml::from_str::<Config>("[accounts]\n").is_err()); // claude_dir is required
+
+        // Neither claude_dir nor codex_dir: deserializes fine (both optional) but validate() rejects it.
+        let cfg: Config = toml::from_str("[accounts]\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("claude_dir") && err.contains("codex_dir"), "{err}");
     }
 
-    /// `ensure_accounts_dir` は `[accounts] claude_dir` を 0700 で作る（無ければ）。`[accounts]` が無ければ何もしない。
+    /// `ensure_accounts_dir` は設定された根ディレクトリ（claude_dir・codex_dir それぞれ）を 0700 で作る
+    /// （無ければ）。`[accounts]` が無ければ何もしない。
     #[test]
-    fn ensure_accounts_dir_creates_the_directory_with_0700() {
+    fn ensure_accounts_dir_creates_the_directories_with_0700() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("taskd.toml");
         std::fs::write(
             &path,
-            "[accounts]\nclaude_dir = \"claude-accounts\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+            "[accounts]\nclaude_dir = \"claude-accounts\"\ncodex_dir = \"codex-accounts\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
         )
         .unwrap();
         let cfg = Config::load(&path).unwrap();
-        let claude_dir = cfg.accounts.as_ref().unwrap().claude_dir.clone();
+        let claude_dir = cfg.accounts.as_ref().unwrap().claude_dir.clone().unwrap();
+        let codex_dir = cfg.accounts.as_ref().unwrap().codex_dir.clone().unwrap();
         assert!(!claude_dir.exists());
+        assert!(!codex_dir.exists());
         cfg.ensure_accounts_dir().unwrap();
         assert!(claude_dir.is_dir());
+        assert!(codex_dir.is_dir());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&claude_dir).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o700);
+            for d in [&claude_dir, &codex_dir] {
+                let mode = std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o700);
+            }
         }
         // 既にあれば触らない（既存の中身・権限を壊さない）。
         cfg.ensure_accounts_dir().unwrap();

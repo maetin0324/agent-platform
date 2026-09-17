@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use serde::de::DeserializeOwned;
-use task_core::{Event, TaskId};
+use task_core::{AccountAdapter, Event, TaskId};
 
 use crate::problem::ApiProblem;
 
@@ -87,6 +87,15 @@ impl QueryParams {
             None => Ok(default),
             Some(0) => Err(ApiProblem::bad_request(format!("query parameter `{key}` must be at least 1"))),
             Some(n) => Ok(usize::try_from(n).unwrap_or(usize::MAX).min(max)),
+        }
+    }
+
+    /// ADR-0025 D6: `?adapter=` クエリ（省略時 `claude-code`）。`"claude-code"` / `"codex"` 以外は 400。
+    pub(crate) fn account_adapter(&self) -> Result<AccountAdapter, ApiProblem> {
+        match self.single("adapter")? {
+            None => Ok(AccountAdapter::ClaudeCode),
+            Some(s) => AccountAdapter::parse(s)
+                .ok_or_else(|| ApiProblem::bad_request(format!("unknown adapter `{s}` (must be claude-code or codex)"))),
         }
     }
 

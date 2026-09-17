@@ -1,11 +1,12 @@
-//! Claude アカウントのプールの管理系エンドポイント（ADR-0024）。
+//! アカウントのプールの管理系エンドポイント（ADR-0024, ADR-0025）。
 //!
-//! task-api は task-dispatch に依存しないので（循環依存になる）、ディレクトリのスキャン（存在と
-//! `.credentials.json` の有無の判定だけ。中身は読まない）はここに独自に持つ。ロジックは
-//! `task_dispatch::accounts::{valid_account_id, scan_accounts}` と同じ規則（ADR-0024 D1）。
+//! task-api は task-dispatch に依存しないので（循環依存になる）、ディレクトリのスキャン（存在とログイン済みの
+//! 判定だけ。中身は読まない）はここに独自に持つ。ロジックは `task_dispatch::accounts::{valid_account_id,
+//! scan_accounts}` と同じ規則（ADR-0024 D1、ADR-0025 D1）。
 
 use std::path::{Path, PathBuf};
 
+use task_core::AccountAdapter;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -25,12 +26,14 @@ pub struct AccountDirEntry {
 }
 
 /// `root` の下の、有効な id を持つサブディレクトリを id 昇順で返す。`.` で始まる名前（`.removed/` 等）・
-/// ファイル・無効な id は飛ばす。`root` が存在しなければ空。
-pub fn scan_accounts(root: &Path) -> Vec<AccountDirEntry> {
+/// ファイル・無効な id は飛ばす。`root` が存在しなければ空。ログイン済みの判定は `adapter.credentials_marker()`
+/// の有無（ADR-0025 D1: claude-code は `.credentials.json`、codex は `auth.json`）。
+pub fn scan_accounts(root: &Path, adapter: AccountAdapter) -> Vec<AccountDirEntry> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(root) else {
         return out;
     };
+    let marker = adapter.credentials_marker();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -42,7 +45,7 @@ pub fn scan_accounts(root: &Path) -> Vec<AccountDirEntry> {
         if !valid_account_id(&name) {
             continue;
         }
-        let logged_in = path.join(".credentials.json").exists();
+        let logged_in = path.join(marker).exists();
         out.push(AccountDirEntry { id: name, dir: path, logged_in });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -116,7 +119,7 @@ mod tests {
         std::fs::create_dir(root.join(".removed")).unwrap_or_else(|e| panic!("mkdir: {e}"));
         std::fs::write(root.join("not-a-dir"), "x").unwrap_or_else(|e| panic!("write: {e}"));
 
-        let found = scan_accounts(root);
+        let found = scan_accounts(root, AccountAdapter::ClaudeCode);
         assert_eq!(
             found,
             vec![
@@ -129,6 +132,6 @@ mod tests {
     #[test]
     fn scan_accounts_missing_root_is_empty() {
         let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tmp: {e}"));
-        assert_eq!(scan_accounts(&tmp.path().join("nope")), Vec::new());
+        assert_eq!(scan_accounts(&tmp.path().join("nope"), AccountAdapter::ClaudeCode), Vec::new());
     }
 }

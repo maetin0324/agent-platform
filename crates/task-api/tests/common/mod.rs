@@ -38,8 +38,10 @@ pub struct EnvOptions {
     pub providers_dir: Option<PathBuf>,
     /// ADR-0017 M2: `reload`/`check` を受け取るチャネルの送信側。`None` ならどちらも使えない。
     pub admin_tx: Option<mpsc::Sender<AdminRequest>>,
-    /// ADR-0024 D1: `[accounts] claude_dir`。`None` なら `[accounts]` 無しの構成。
+    /// ADR-0024 D1: `[accounts] claude_dir`。`None` なら claude-code のプールは無し。
     pub accounts_root: Option<PathBuf>,
+    /// ADR-0025 D1: `[accounts] codex_dir`。`None` なら codex のプールは無し。
+    pub codex_accounts_root: Option<PathBuf>,
     pub max_runs_per_account: usize,
 }
 
@@ -196,7 +198,16 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         started_at: "2026-09-14T00:00:00Z".into(),
         providers_dir: options.providers_dir,
         admin_tx: options.admin_tx,
-        accounts_root: options.accounts_root,
+        accounts_roots: {
+            let mut roots = std::collections::HashMap::new();
+            if let Some(dir) = options.accounts_root {
+                roots.insert(task_core::AccountAdapter::ClaudeCode, dir);
+            }
+            if let Some(dir) = options.codex_accounts_root {
+                roots.insert(task_core::AccountAdapter::Codex, dir);
+            }
+            roots
+        },
         max_runs_per_account: options.max_runs_per_account,
     }
 }
@@ -265,6 +276,7 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
         unroutable: vec![],
         accounts_root: None,
         max_runs_per_account: None,
+        accounts_roots: std::collections::HashMap::new(),
         accounts: vec![],
         clusters: vec![ClusterLive {
             id: "pegasus".into(),
