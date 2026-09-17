@@ -7,6 +7,7 @@
 //! ワーカープロトコルの型（`task_worker::{PriorReview, Answer}`）への写像は呼び出し側で行う。
 
 pub mod add;
+pub mod approval;
 pub mod conversation;
 pub mod daemon;
 pub mod delegate;

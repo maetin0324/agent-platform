@@ -13,13 +13,34 @@ export type ProviderCheckResult = "ok" | "auth_failed" | "throttled" | "spawn_fa
  */
 export type Status = "draft" | "ready" | "running" | "blocked" | "reviewing" | "done" | "failed" | "cancelled";
 /**
- * DESIGN §5.4 の `WorkerHint`。
+ * 人の決定（SPEC §3.6）。
  */
-export type Tier = "frontier" | "standard" | "cheap";
+export type Decision = "once" | "standing" | "denied";
+/**
+ * 認可 1 件の識別子（ULID）。
+ */
+export type ApprovalId = string;
+/**
+ * 案件の一意識別子（ULID）。`TaskId` と同じ形。
+ */
+export type ProjectId = string;
 /**
  * タスクの一意識別子（ULID）。DESIGN §4.1。
  */
 export type TaskId = string;
+/**
+ * 永続の規則の識別子（ULID）。
+ */
+export type StandingRuleId = string;
+export type Action = "approve" | "reject" | "answer" | "cancel";
+/**
+ * DESIGN §4.1 の `TaskKind`。
+ */
+export type TaskKind = "plan" | "execute" | "review" | "approval";
+/**
+ * DESIGN §5.4 の `WorkerHint`。
+ */
+export type Tier = "frontier" | "standard" | "cheap";
 export type InFlightKind = "worker" | "reviewer";
 /**
  * DESIGN §4.3 の `Event`（追記専用）。ADR-0002 D2: `Transitioned` は遷移の
@@ -158,17 +179,9 @@ export type Check =
  */
 export type MessageId = string;
 /**
- * DESIGN §4.1 の `TaskKind`。
- */
-export type TaskKind = "plan" | "execute" | "review" | "approval";
-/**
  * 途中目標の一意識別子（ULID）。
  */
 export type MilestoneId = string;
-/**
- * 案件の一意識別子（ULID）。`TaskId` と同じ形。
- */
-export type ProjectId = string;
 /**
  * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
  * taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
@@ -187,7 +200,6 @@ export type WorkspaceSpec =
  * run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。
  */
 export type RunRole = "worker" | "reviewer";
-export type Action = "approve" | "reject" | "answer" | "cancel";
 export type RunOutcomeKind = "done" | "question" | "error" | "requeue" | "lease_expired";
 export type AttentionItem =
   | {
@@ -273,6 +285,9 @@ export interface ApiV1Schema {
   account_login_result: AccountLoginResult;
   account_login_start: AccountLoginStart;
   answer: AnswerBody;
+  approval_decide: ApprovalDecideBody;
+  approval_decide_result: ApprovalDecideResult;
+  approval_list: ApprovalList;
   artifact_list: ArtifactList;
   cancel: CancelBody;
   cluster_connect_result: ClusterConnectResult;
@@ -313,6 +328,8 @@ export interface ApiV1Schema {
   run_list: RunList;
   secret_put: SecretPutResult;
   secrets: SecretList;
+  standing_rule_create: StandingRuleCreateBody;
+  standing_rule_list: StandingRuleList;
   stream_daemon: DaemonSnapshot;
   stream_event: EventRow;
   stream_heartbeat: StreamHeartbeat;
@@ -478,6 +495,96 @@ export interface AccountLoginStart {
 export interface AnswerBody {
   answer: string;
   expected_status?: Status | null;
+}
+/**
+ * `POST /approvals/{id}/decide` の要求本文。
+ */
+export interface ApprovalDecideBody {
+  answer: string;
+  decision: Decision;
+  /**
+   * `decision = "standing"` のときだけ意味を持つ。`"node"`（既定）| `"all"`。
+   */
+  scope?: string | null;
+}
+/**
+ * `POST /approvals/{id}/decide` の応答。`transition`（`task_ops::gate::TransitionResult`）は
+ * `Deserialize` を持たないので、この型も応答専用（`Serialize` だけ）にする。
+ */
+export interface ApprovalDecideResult {
+  approval: Approval;
+  /**
+   * `decision = "standing"` のときだけ `Some`。
+   */
+  standing_rule?: StandingRule | null;
+  /**
+   * 元の質問にタスクが紐づいていたときだけ `Some`（既存の「質問に答える」経路の結果）。
+   */
+  transition?: TransitionResult | null;
+}
+/**
+ * 1 件の認可の要求（`approvals` テーブル。ADR-0033 D5）。
+ */
+export interface Approval {
+  answer?: string | null;
+  created_at: string;
+  decided_at?: string | null;
+  decision?: Decision | null;
+  id: ApprovalId;
+  /**
+   * 聞いてきた組織のノード（`task.assignee`、無ければ秘書）。
+   */
+  node_id: string;
+  /**
+   * 案件（案件に紐づかない質問なら `None`）。
+   */
+  project_id?: ProjectId | null;
+  question: string;
+  /**
+   * きっかけになったタスク（無いことは今回は無いが、`approval_decide` の後も残す前提で任意にしてある）。
+   */
+  task_id?: TaskId | null;
+}
+/**
+ * 永続の認可 1 行（`standing_rules` テーブル。ADR-0033 D5）。
+ */
+export interface StandingRule {
+  created_at: string;
+  id: StandingRuleId;
+  /**
+   * `None` = 全員（どのノードの run にも注入される）。
+   */
+  node_id?: string | null;
+  rule: string;
+}
+/**
+ * 状態変更の結果（承認・却下・回答・取り消し共通）。
+ */
+export interface TransitionResult {
+  /**
+   * この遷移の伝播で `cancelled` になった、対象タスク以外のタスク（`docs/gui/api.md` §5.7）。
+   */
+  cascaded?: TaskRef[];
+  from: Status;
+  id: TaskId;
+  reason: string;
+  to: Status;
+}
+export interface TaskRef {
+  /**
+   * 今この状態で許される操作（ADR-0015 D4。GUI は §5.4 の規則を再実装しない）。
+   */
+  actions: Action[];
+  id: TaskId;
+  kind: TaskKind;
+  status: Status;
+  title: string;
+}
+/**
+ * Phase 26（ADR-0033 D5）: 認可（`GET /approvals` と `POST /approvals/{id}/decide`）。
+ */
+export interface ApprovalList {
+  items: Approval[];
 }
 /**
  * `GET /tasks/{id}/artifacts`。
@@ -783,6 +890,11 @@ export interface DaemonSnapshot {
   accounts_roots?: {
     [k: string]: string;
   };
+  /**
+   * ADR-0033 D5（Phase 26）: 未決定の認可（`approvals.decision IS NULL`）の件数。`reports` と同じ理由で
+   * **API が応答を組むときに埋める**（ディスパッチャが送るスナップショットでは常に 0）。
+   */
+  approvals_pending?: number;
   /**
    * ADR-0023 D3: 委譲した子が終わるのを待っている親（`reviewing` のまま。id 昇順）。
    * 「自分の判定待ち」と区別するための観測値。古いスナップショットには無いので既定は空。
@@ -1186,16 +1298,6 @@ export interface ApprovalItem {
   parent?: TaskRef | null;
   previous_decisions: ApprovalDecisionView[];
   requested_at: string;
-}
-export interface TaskRef {
-  /**
-   * 今この状態で許される操作（ADR-0015 D4。GUI は §5.4 の規則を再実装しない）。
-   */
-  actions: Action[];
-  id: TaskId;
-  kind: TaskKind;
-  status: Status;
-  title: string;
 }
 /**
  * `task_worker::Evidence` と同じ形。
@@ -1890,6 +1992,22 @@ export interface SecretUse {
   scope: string;
 }
 /**
+ * `POST /standing-rules` の要求本文。
+ */
+export interface StandingRuleCreateBody {
+  /**
+   * 省略すると全員向け（`node_id = NULL`）。
+   */
+  node_id?: string | null;
+  rule: string;
+}
+/**
+ * Phase 26（ADR-0033 D5）: 永続の認可（`GET /standing-rules` と `POST /standing-rules`）。
+ */
+export interface StandingRuleList {
+  items: StandingRule[];
+}
+/**
  * SSE `event: heartbeat`。
  */
 export interface StreamHeartbeat {
@@ -2031,17 +2149,4 @@ export interface TaskList {
   items: TaskSummary[];
   next_cursor?: string | null;
   total: number;
-}
-/**
- * 状態変更の結果（承認・却下・回答・取り消し共通）。
- */
-export interface TransitionResult {
-  /**
-   * この遷移の伝播で `cancelled` になった、対象タスク以外のタスク（`docs/gui/api.md` §5.7）。
-   */
-  cascaded?: TaskRef[];
-  from: Status;
-  id: TaskId;
-  reason: string;
-  to: Status;
 }

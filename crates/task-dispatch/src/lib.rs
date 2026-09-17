@@ -3,6 +3,8 @@
 //! **LLM 呼び出しはここに書かない。**
 
 pub mod accounts;
+/// ADR-0033 D5（Phase 26）: `Question` 終端から `approvals` に 1 件作る。
+pub(crate) mod approvals;
 pub mod dispatcher;
 pub mod policy;
 /// ADR-0033 D3（Phase 25）: run の終端から決定的に作る報告。

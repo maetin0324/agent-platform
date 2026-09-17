@@ -33,6 +33,10 @@ pub struct DaemonSnapshot {
     /// ディスパッチャは知らない）。ディスパッチャが送るスナップショットでは常に `None`。
     #[serde(default)]
     pub reports: Option<task_core::ReportsLive>,
+    /// ADR-0033 D5（Phase 26）: 未決定の認可（`approvals.decision IS NULL`）の件数。`reports` と同じ理由で
+    /// **API が応答を組むときに埋める**（ディスパッチャが送るスナップショットでは常に 0）。
+    #[serde(default)]
+    pub approvals_pending: u32,
     pub providers: Vec<ProviderLive>,
     /// ADR-0018: `[[clusters]]` の稼働状況（`id` 昇順）。第 2 段階で追加したので、古いスナップショットには無い。
     #[serde(default)]

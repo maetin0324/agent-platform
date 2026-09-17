@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, watch};
 
 mod accounts;
 mod admin;
+mod approvals;
 pub mod conversation;
 mod files;
 mod handlers;
@@ -33,6 +34,9 @@ mod state;
 mod stats;
 pub mod types;
 
+pub use approvals::{
+    ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody, StandingRuleList,
+};
 pub use conversation::{MessageAccepted, MessageList, MessagePostBody};
 pub use admin::{
     AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome, AdminRequest,

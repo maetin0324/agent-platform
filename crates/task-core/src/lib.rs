@@ -2,6 +2,7 @@
 //! DESIGN.md §4-§5.1 のスコープ。LLM呼び出し・サブプロセス起動は行わない（ADR-0001 D2）。
 
 pub mod accounts;
+pub mod approval;
 pub mod delegate;
 pub mod message;
 pub mod model;
@@ -12,6 +13,7 @@ pub mod store;
 pub mod transition;
 
 pub use accounts::{AccountAdapter, RateLimitObservation, RateWindow};
+pub use approval::{Approval, ApprovalId, ApprovalStore, Decision, StandingRule, StandingRuleId};
 pub use delegate::{
     DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, materialize_delegated, validate_each,
 };
