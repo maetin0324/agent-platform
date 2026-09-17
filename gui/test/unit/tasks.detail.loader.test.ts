@@ -85,7 +85,19 @@ describe("loadTaskDetail", () => {
 
     const result = await loadTaskDetail(client, "T1", new Request("http://gui.invalid/tasks/T1"));
 
-    expect(result).toEqual({ detail: taskDetail, events: eventsPage, artifacts: artifactList });
+    // 案件・担当・途中目標（監査 M2）。この fixture のタスクは案件にも担当にも属さないので全部 null。
+    expect(result).toEqual({
+      detail: taskDetail,
+      events: eventsPage,
+      artifacts: artifactList,
+      place: {
+        projectId: null,
+        projectTitle: null,
+        milestoneTitle: null,
+        assigneeId: null,
+        assigneeName: null,
+      },
+    });
     expect(mock.requests.some((r) => r.method === "GET" && r.url === "/api/v1/tasks/T1")).toBe(true);
     expect(mock.requests.some((r) => r.method === "GET" && r.url.startsWith("/api/v1/tasks/T1/events"))).toBe(true);
     expect(mock.requests.some((r) => r.method === "GET" && r.url === "/api/v1/tasks/T1/artifacts")).toBe(true);

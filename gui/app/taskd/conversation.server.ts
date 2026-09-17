@@ -3,7 +3,7 @@ import type { ConversationOpOutcome } from "./action-types";
 import { toActionError } from "./actions.server";
 import type { TaskdClient } from "./client.server";
 import { formString } from "./forms";
-import type { MessageAccepted, MessageList, MessagePostBody, OrgList, Project, ProjectList } from "./types";
+import type { Inbox, MessageAccepted, MessageList, MessagePostBody, OrgList, Project, ProjectList } from "./types";
 
 /**
  * 秘書・各ノードとの対話（`/org/:id`、`/org/secretary`。SPEC §3.1・§3.4・§4 の 1 と 2、ADR-0033 D4、
@@ -30,13 +30,16 @@ export async function loadConversation(
   // （そのまま送ると taskd が 404 `project_not_found` を返す。ULID でない文字列だから）。
   const raw = new URL(request.url).searchParams.get("project");
   const projectId = raw !== null && raw.length > 0 ? raw : null;
-  const [org, projects, messages] = await Promise.all([
+  const [org, projects, messages, inbox] = await Promise.all([
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
     client.get<ProjectList>("/projects", { signal: request.signal }),
     client.get<MessageList>(`/org/${encodeURIComponent(nodeId)}/messages`, {
       query: { project: projectId, limit: CONVERSATION_MESSAGE_LIMIT },
       signal: request.signal,
     }),
+    // 「考え中」の間に返事が作れない状態（経路なし等）になっていないかを見るため（監査 M1）。
+    // 落ちても対話は出す（`GET /org` と同じ扱い）。
+    client.get<Inbox>("/inbox", { signal: request.signal }).catch(() => null),
   ]);
   return {
     nodeId,
@@ -44,6 +47,7 @@ export async function loadConversation(
     projects: projects.items,
     projectId,
     messages: messages.items,
+    attention: inbox?.attention ?? [],
   };
 }
 

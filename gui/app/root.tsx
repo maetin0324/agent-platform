@@ -242,7 +242,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "裏方",
     items: [
-      { href: "/", label: "受信箱", icon: "inbox", badge: "approvals" },
+      { href: "/inbox", label: "受信箱", icon: "inbox", badge: "approvals" },
       { href: "/tasks", label: "一覧", icon: "list" },
       { href: "/graph", label: "DAG", icon: "network" },
       { href: "/tasks/new", label: "新規タスク", icon: "plus" },
@@ -258,6 +258,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
 
 function isActive(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";
+  if (href === "/inbox") return pathname === "/inbox";
   if (href === "/tasks") return pathname === "/tasks" || (pathname.startsWith("/tasks/") && pathname !== "/tasks/new");
   // `/org/secretary` は別のナビ項目（秘書）なので、「組織」は `/org` そのものだけを active にする。
   if (href === "/org") return pathname === "/org";
@@ -358,7 +359,6 @@ function Sidebar({
                           </span>
                         )}
                       </a>
-                      {item.badge === "reports" && <NotificationsEnableButton />}
                     </li>
                   );
                 })}
@@ -385,31 +385,6 @@ function Sidebar({
         </div>
       </div>
     </aside>
-  );
-}
-
-/**
- * 「通知を有効にする」（SPEC §3.5、ADR-0034 D6）。ブラウザの Notification の許可をここで求める
- * （許可が無ければ `NotificationsWatcher` は何もしない）。`taskd` には問い合わせない、純粋にブラウザ API だけの操作。
- */
-function NotificationsEnableButton() {
-  const handleClick = () => {
-    if (typeof Notification === "undefined") return;
-    if (Notification.permission === "default") {
-      void Notification.requestPermission();
-    }
-  };
-  return (
-    <button
-      type="button"
-      onClick={handleClick}
-      data-testid="notifications-enable"
-      className="ml-2 flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-fg-subtle transition-colors hover:bg-surface-2 hover:text-fg"
-      title="ブラウザ通知を有効にします（悪い知らせは即座に、それ以外は数時間単位）"
-    >
-      <Icon name="alert" className="size-3.5" />
-      通知を有効にする
-    </button>
   );
 }
 
@@ -537,7 +512,7 @@ function ErrorPanel({ title, children }: { title: string; children: React.ReactN
       <div className="mt-2 text-sm text-fg-muted">{children}</div>
       <a href="/" className={buttonClass({ variant: "secondary", className: "mt-6" })}>
         <Icon name="arrowLeft" />
-        受信箱へ戻る
+        秘書へ戻る
       </a>
     </div>
   );

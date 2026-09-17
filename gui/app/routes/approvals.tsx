@@ -8,7 +8,15 @@ import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { hintClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
-import { approvalNodeName, approvalProjectName, standingRuleTargetName } from "~/lib/approvals";
+import {
+  type ApprovalGroup,
+  approvalGroupNodeNames,
+  approvalNodeName,
+  approvalProjectName,
+  groupApprovals,
+  standingRuleTargetName,
+} from "~/lib/approvals";
+import { decisionLabel } from "~/lib/labels";
 import { relativeTimeLabel } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
@@ -102,9 +110,24 @@ export async function action({ request }: Route.ActionArgs) {
 
   switch (intent) {
     case "approval_decide": {
-      const id = formString(form, "id") ?? "";
-      const outcome = await decideApproval(client, id, buildApprovalDecideInput(form), request.signal);
-      return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
+      // 同じ文面の未決の要求は 1 枚にまとまっている（監査 8）ので、`id` が複数来ることがある。
+      // 受信箱の「この Plan の子を全部受け入れ」と同じく順に送る（原子性は無い）。最初の失敗を返す。
+      const ids = form
+        .getAll("id")
+        .map(String)
+        .filter((id) => id.length > 0);
+      const input = buildApprovalDecideInput(form);
+      let last: ApprovalOpOutcome | null = null;
+      for (const id of ids) {
+        const outcome = await decideApproval(client, id, input, request.signal);
+        if (!outcome.ok) return data(outcome, { status: outcome.error.status });
+        last = outcome;
+      }
+      if (last === null) {
+        const outcome = await decideApproval(client, "", input, request.signal);
+        return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
+      }
+      return data(last, { status: 200 });
     }
     case "standing_rule_create": {
       const outcome = await createStandingRule(client, buildStandingRuleCreateInput(form), request.signal);
@@ -135,7 +158,7 @@ export default function ApprovalsPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="SPEC §3.6「少しでも聞くべきだとエージェントが判断したら、あなたに指示を仰ぐ。あなたはそれに対して「今回だけ」か「同じようなことは今後ずっと」のどちらかの認可を出す。永続の認可は文字で記録してエージェントに注入する」。"
+        description="担当が「少しでも聞くべきだ」と判断したことがここに並びます。「今回だけ」か「今後ずっと」で答えてください。今後ずっとの答えは規則文として記録され、以後その担当に前置きされます。"
       />
 
       <section aria-labelledby="approvals-heading" data-testid="approvals-section" className="space-y-6">
@@ -146,9 +169,15 @@ export default function ApprovalsPage({ loaderData }: Route.ComponentProps) {
           {pending.length === 0 ? (
             <EmptyState icon="checkCircle" title="未決の要求はありません" />
           ) : (
-            <ul className="space-y-3">
-              {pending.map((a) => (
-                <ApprovalRow key={a.id} approval={a} org={org} projects={projects} fetchedAt={fetchedAt} />
+            <ul className="space-y-2">
+              {groupApprovals(pending).map((group) => (
+                <PendingApprovalCard
+                  key={group.head.id}
+                  group={group}
+                  org={org}
+                  projects={projects}
+                  fetchedAt={fetchedAt}
+                />
               ))}
             </ul>
           )}
@@ -161,9 +190,9 @@ export default function ApprovalsPage({ loaderData }: Route.ComponentProps) {
           {decided.length === 0 ? (
             <EmptyState icon="clock" title="まだ決めたものはありません" />
           ) : (
-            <ul className="space-y-3">
+            <ul className="space-y-2">
               {decided.map((a) => (
-                <ApprovalRow key={a.id} approval={a} org={org} projects={projects} fetchedAt={fetchedAt} />
+                <DecidedApprovalRow key={a.id} approval={a} org={org} projects={projects} fetchedAt={fetchedAt} />
               ))}
             </ul>
           )}
@@ -188,14 +217,14 @@ export default function ApprovalsPage({ loaderData }: Route.ComponentProps) {
           <CardHeader
             icon="plus"
             title="永続の認可を追加"
-            description="質問を経ずに直接、規則文を足します。node_id を空にすると全員向けになります。"
+            description="聞かれるのを待たずに、規則文を直接足します。「誰に」を（全員）にすると組織のみんなに効きます。"
           />
           <CardBody>
             <addFetcher.Form method="post" data-testid="standing-rule-add-form" className="space-y-3">
               <input type="hidden" name="intent" value="standing_rule_create" />
               <div>
                 <label htmlFor="standing-rule-add-node" className={labelClass}>
-                  node_id
+                  誰に
                 </label>
                 <select
                   id="standing-rule-add-node"
@@ -203,7 +232,7 @@ export default function ApprovalsPage({ loaderData }: Route.ComponentProps) {
                   defaultValue=""
                   className={cn(selectClass, "mt-1.5 w-full max-w-xs")}
                 >
-                  <option value="">(全員)</option>
+                  <option value="">（全員）</option>
                   {org.map((n) => (
                     <option key={n.id} value={n.id}>
                       {n.name}
@@ -213,7 +242,7 @@ export default function ApprovalsPage({ loaderData }: Route.ComponentProps) {
               </div>
               <div>
                 <label htmlFor="standing-rule-add-rule" className={labelClass}>
-                  rule
+                  規則文
                 </label>
                 <textarea
                   id="standing-rule-add-rule"
@@ -221,7 +250,7 @@ export default function ApprovalsPage({ loaderData }: Route.ComponentProps) {
                   rows={2}
                   className={cn(textareaClass, "mt-1.5 w-full")}
                 />
-                <p className={hintClass}>そのまま担当のプロンプトに前置きされます。</p>
+                <p className={hintClass}>そのまま担当に前置きされます。</p>
               </div>
               <Button
                 type="submit"
@@ -242,9 +271,138 @@ export default function ApprovalsPage({ loaderData }: Route.ComponentProps) {
   );
 }
 
-const DECISION_LABEL: Record<string, string> = { once: "今回だけ", standing: "今後ずっと", denied: "認めない" };
+/**
+ * 未決の要求 1 枚（監査 8）。同じ文面の要求はここにまとまって「N 件」と出て、答えは全部にまとめて送る。
+ * 高さを詰めるため、案内文は畳んで（`<details>`）必要なときだけ開く。
+ */
+function PendingApprovalCard({
+  group,
+  org,
+  projects,
+  fetchedAt,
+}: {
+  group: ApprovalGroup;
+  org: OrgNode[];
+  projects: Project[];
+  fetchedAt: string;
+}) {
+  const { head, approvals } = group;
+  const fetcher = useFetcher<ApprovalOpOutcome>({ key: `approval-${head.id}` });
+  const submitting = fetcher.state !== "idle";
+  const nodeNames = approvalGroupNodeNames(group, org);
 
-function ApprovalRow({
+  return (
+    <li
+      data-testid="approval-row"
+      data-approval-id={head.id}
+      data-approval-count={approvals.length}
+      className="rounded-xl border border-border bg-surface px-3 py-2.5 shadow-xs"
+    >
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
+        <span className="font-medium text-fg">{nodeNames.join("・")}</span>
+        <span>{approvalProjectName(head, projects)}</span>
+        {approvals.length > 1 && (
+          <Badge tone="warning" data-testid="approval-count">
+            {approvals.length} 件
+          </Badge>
+        )}
+        <span className="ml-auto flex items-center gap-3">
+          {head.task_id && (
+            <Link
+              to={`/tasks/${head.task_id}`}
+              className="underline underline-offset-2"
+              data-testid="approval-task-link"
+            >
+              裏方のタスク
+            </Link>
+          )}
+          <span>{relativeTimeLabel(head.created_at, fetchedAt)}</span>
+        </span>
+      </div>
+
+      <div data-testid="approval-question" className="mt-1.5 text-sm">
+        <MarkdownViewer content={head.question} />
+      </div>
+
+      <fetcher.Form method="post" className="mt-2 space-y-2">
+        <input type="hidden" name="intent" value="approval_decide" />
+        {approvals.map((a) => (
+          <input key={a.id} type="hidden" name="id" value={a.id} />
+        ))}
+        <textarea
+          id={`approval-answer-${head.id}`}
+          name="answer"
+          aria-label="答え"
+          placeholder="答え（「今後ずっと」のときは規則文として書く）"
+          data-testid="approval-answer"
+          rows={2}
+          className={cn(textareaClass, "w-full")}
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="submit"
+            name="decision"
+            value="once"
+            variant="secondary"
+            size="sm"
+            disabled={submitting}
+            data-testid="approval-once"
+          >
+            今回だけ
+          </Button>
+          <Button
+            type="submit"
+            name="decision"
+            value="standing"
+            variant="primary"
+            size="sm"
+            disabled={submitting}
+            data-testid="approval-standing"
+          >
+            今後ずっと
+          </Button>
+          <Button
+            type="submit"
+            name="decision"
+            value="denied"
+            variant="danger"
+            size="sm"
+            disabled={submitting}
+            data-testid="approval-denied"
+          >
+            認めない
+          </Button>
+          <label htmlFor={`approval-scope-${head.id}`} className="ml-auto flex items-center gap-1.5 text-xs">
+            <span className="text-fg-subtle">「今後ずっと」の範囲</span>
+            <select
+              id={`approval-scope-${head.id}`}
+              name="scope"
+              data-testid="approval-scope"
+              defaultValue="node"
+              className={cn(selectClass, "h-8 w-36 text-xs")}
+            >
+              <option value="node">この担当だけ</option>
+              <option value="all">全員</option>
+            </select>
+          </label>
+        </div>
+        <details>
+          <summary className={cn(hintClass, "cursor-pointer list-none underline underline-offset-2")}>
+            「今後ずっと」の書き方
+          </summary>
+          <p className={hintClass}>
+            規則文として書いてください（例:
+            クラスタへの実験投入は毎回聞かずに進めてよい）。そのまま担当に前置きされます。
+          </p>
+        </details>
+      </fetcher.Form>
+      <ApprovalActionFlash outcome={fetcher.data} />
+    </li>
+  );
+}
+
+/** 決めたものの履歴 1 行（高さを詰めた読み取り専用の行）。 */
+function DecidedApprovalRow({
   approval,
   org,
   projects,
@@ -255,22 +413,17 @@ function ApprovalRow({
   projects: Project[];
   fetchedAt: string;
 }) {
-  const fetcher = useFetcher<ApprovalOpOutcome>({ key: `approval-${approval.id}` });
-  const submitting = fetcher.state !== "idle";
-  const isPending = approval.decision == null;
-
   return (
     <li
       data-testid="approval-row"
       data-approval-id={approval.id}
-      className="rounded-xl border border-border bg-surface p-4 shadow-xs"
+      className="rounded-xl border border-border bg-surface px-3 py-2.5 shadow-xs"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-fg-subtle">
-        <span className="flex items-center gap-2">
-          <Badge tone="neutral">{approvalNodeName(approval, org)}</Badge>
-          <span>{approvalProjectName(approval, projects)}</span>
-        </span>
-        <span className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
+        <span className="font-medium text-fg">{approvalNodeName(approval, org)}</span>
+        <span>{approvalProjectName(approval, projects)}</span>
+        {approval.decision && <Badge tone="neutral">{decisionLabel(approval.decision)}</Badge>}
+        <span className="ml-auto flex items-center gap-3">
           {approval.task_id && (
             <Link
               to={`/tasks/${approval.task_id}`}
@@ -283,94 +436,14 @@ function ApprovalRow({
           <span>{relativeTimeLabel(approval.created_at, fetchedAt)}</span>
         </span>
       </div>
-
-      <div data-testid="approval-question" className="mt-2">
+      <div data-testid="approval-question" className="mt-1.5 text-sm">
         <MarkdownViewer content={approval.question} />
       </div>
-
-      {isPending ? (
-        <fetcher.Form method="post" className="mt-3 space-y-2">
-          <input type="hidden" name="intent" value="approval_decide" />
-          <input type="hidden" name="id" value={approval.id} />
-          <div>
-            <label htmlFor={`approval-answer-${approval.id}`} className={labelClass}>
-              answer
-            </label>
-            <textarea
-              id={`approval-answer-${approval.id}`}
-              name="answer"
-              data-testid="approval-answer"
-              rows={2}
-              className={cn(textareaClass, "mt-1.5 w-full")}
-            />
-            <p className={hintClass}>
-              「今後ずっと」の答えは<strong className="font-semibold text-fg">規則文として</strong>
-              書いてください（例: クラスタへの実験投入は毎回聞かずに進めてよい）。
-              そのまま担当のプロンプトに前置きされます。
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <label htmlFor={`approval-scope-${approval.id}`} className={cn(labelClass, "shrink-0")}>
-              scope（今後ずっとのとき）
-            </label>
-            <select
-              id={`approval-scope-${approval.id}`}
-              name="scope"
-              data-testid="approval-scope"
-              defaultValue="node"
-              className={cn(selectClass, "w-40")}
-            >
-              <option value="node">このノードだけ</option>
-              <option value="all">全員</option>
-            </select>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="submit"
-              name="decision"
-              value="once"
-              variant="secondary"
-              size="sm"
-              disabled={submitting}
-              data-testid="approval-once"
-            >
-              今回だけ
-            </Button>
-            <Button
-              type="submit"
-              name="decision"
-              value="standing"
-              variant="primary"
-              size="sm"
-              disabled={submitting}
-              data-testid="approval-standing"
-            >
-              今後ずっと
-            </Button>
-            <Button
-              type="submit"
-              name="decision"
-              value="denied"
-              variant="danger"
-              size="sm"
-              disabled={submitting}
-              data-testid="approval-denied"
-            >
-              認めない
-            </Button>
-          </div>
-        </fetcher.Form>
-      ) : (
-        <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-          <DataItem label="決定">
-            {approval.decision ? (DECISION_LABEL[approval.decision] ?? approval.decision) : "-"}
-          </DataItem>
-          <DataItem label="答え" wide>
-            {approval.answer || "-"}
-          </DataItem>
-        </dl>
-      )}
-      <ApprovalActionFlash outcome={fetcher.data} />
+      <dl className="mt-1.5 grid grid-cols-1 gap-y-1 text-sm">
+        <DataItem label="答え" wide>
+          {approval.answer || "-"}
+        </DataItem>
+      </dl>
     </li>
   );
 }

@@ -1,4 +1,4 @@
-import { data, Form, isRouteErrorResponse, Link, redirect, useNavigation } from "react-router";
+import { data, isRouteErrorResponse, Link, redirect, useFetcher } from "react-router";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
@@ -18,6 +18,7 @@ import {
 import { Icon } from "~/components/ui/Icon";
 import { EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
+import { projectStatusLabel } from "~/lib/labels";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
 import type { CreateFailure } from "~/taskd/action-types";
@@ -89,11 +90,14 @@ const PROJECT_STATUS_TONE: Record<ProjectStatus, Tone> = {
   done: "success",
 };
 
-export default function ProjectsPage({ loaderData, actionData }: Route.ComponentProps) {
+export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
   const { rows } = loaderData;
-  const navigation = useNavigation();
-  const submitting = navigation.state !== "idle";
-  const error = actionData && !actionData.ok ? actionData.error : undefined;
+  // 失敗（422 等）が SSE の再検証で消えないよう fetcher に載せる（Phase G13f-1、監査 H1）。
+  // 成功したら action が `redirect` を返し、fetcher でもそのまま詳細へ移る。
+  const fetcher = useFetcher<CreateFailure>();
+  const submitting = fetcher.state !== "idle";
+  const result = fetcher.data;
+  const error = result && !result.ok ? result.error : undefined;
 
   return (
     <div className="space-y-8">
@@ -105,7 +109,7 @@ export default function ProjectsPage({ loaderData, actionData }: Route.Component
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="SPEC §3.3「案件と、仕事の木（DAG）」。案件は組織の上から入り、分解されて下へ流れます。"
+        description="案件は秘書が受け取り、組織の上から下へ分解されて流れます。一覧から案件を開くと、途中目標と仕事の木が見られます。"
       />
 
       <section aria-labelledby="projects-heading" data-testid="projects-section" className="space-y-4">
@@ -121,9 +125,9 @@ export default function ProjectsPage({ loaderData, actionData }: Route.Component
             <table className={tableClass}>
               <thead className={theadClass}>
                 <tr>
-                  <th className={thClass}>title</th>
-                  <th className={thClass}>status</th>
-                  <th className={thClass}>作成日</th>
+                  <th className={thClass}>題名</th>
+                  <th className={thClass}>状態</th>
+                  <th className={thClass}>投げた日</th>
                   <th className={thClass}>途中目標</th>
                 </tr>
               </thead>
@@ -137,7 +141,7 @@ export default function ProjectsPage({ loaderData, actionData }: Route.Component
                     </td>
                     <td className={tdClass}>
                       <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status">
-                        {project.status}
+                        {projectStatusLabel(project.status)}
                       </Badge>
                     </td>
                     <td className={tdClass}>
@@ -164,21 +168,20 @@ export default function ProjectsPage({ loaderData, actionData }: Route.Component
           <CardHeader
             icon="plus"
             title="案件を投げる"
-            description="SPEC §2.3 のとおり、曖昧なままでかまいません。作るとすぐ秘書が理解の確認・大まかな方針・最初の途中目標を返します（SPEC §7）。"
+            description="曖昧なままでかまいません。投げるとすぐ秘書が、理解の確認・大まかな方針・最初の途中目標を返します。"
           />
           <CardBody>
             <p className={`${hintClass} mb-3`} data-testid="project-new-secretary-hint">
               <Link to="/org/secretary" className="underline underline-offset-2">
                 秘書に話しかけても同じです
               </Link>
-              （SPEC §4「秘書との対話 — 案件を投げる、状況を聞く、方針を変える」）。そちらは本文だけ書けば、先頭 40
-              字が案件名になります。
+              。そちらは本文だけ書けば、先頭 40 字が題名になります。
             </p>
             <ErrorFlash error={error} />
-            <Form method="post" data-testid="project-new-form" className="space-y-4">
+            <fetcher.Form method="post" data-testid="project-new-form" className="space-y-4">
               <div>
                 <label htmlFor="project-title" className={labelClass}>
-                  title
+                  題名
                 </label>
                 <input
                   id="project-title"
@@ -192,7 +195,7 @@ export default function ProjectsPage({ loaderData, actionData }: Route.Component
               </div>
               <div>
                 <label htmlFor="project-request" className={labelClass}>
-                  request
+                  依頼
                 </label>
                 <textarea
                   id="project-request"
@@ -203,7 +206,8 @@ export default function ProjectsPage({ loaderData, actionData }: Route.Component
                   className={`${textareaClass} mt-1.5 w-full`}
                 />
                 <p className={hintClass}>
-                  SPEC §2.3「関連研究調査 → 実装の計画立案 → … のような種々の仕事に分解され、実行される」。
+                  投げた依頼はこのまま担当に渡ります（関連研究調査 → 計画 → 実験 …
+                  のように、必要な仕事へ分解されて進みます）。
                 </p>
                 <FieldErrors error={error} field="request" />
               </div>
@@ -211,7 +215,7 @@ export default function ProjectsPage({ loaderData, actionData }: Route.Component
                 <Icon name="send" />
                 投げる
               </Button>
-            </Form>
+            </fetcher.Form>
           </CardBody>
         </Card>
       </section>

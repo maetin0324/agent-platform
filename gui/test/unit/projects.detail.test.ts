@@ -232,7 +232,7 @@ describe("loadProjectDetail", () => {
       assigneeName: "関連研究調査課",
       workspace: {
         text: "/home/user/workspace/lab/pluvio-survey",
-        vscodeHref: "vscode://file//home/user/workspace/lab/pluvio-survey",
+        vscodeHref: "vscode://file/home/user/workspace/lab/pluvio-survey",
       },
     });
     expect(result.artifactRows[0].artifact).toEqual(artifacts.items[0]);

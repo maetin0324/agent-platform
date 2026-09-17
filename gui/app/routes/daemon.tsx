@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { data, Form, isRouteErrorResponse, Link, useNavigation } from "react-router";
+import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
@@ -10,6 +10,7 @@ import { Alert, DataItem, DataList, EmptyState, Mono, PageHeader, SectionTitle, 
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { TaskdBanner } from "~/root";
+import type { ReplayOutcome } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { runReplay } from "~/taskd/route-actions.server";
@@ -61,11 +62,13 @@ export async function action({ request }: Route.ActionArgs) {
   return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
 }
 
-export default function DaemonPage({ loaderData, actionData }: Route.ComponentProps) {
+export default function DaemonPage({ loaderData }: Route.ComponentProps) {
   const { daemon, config } = loaderData;
   const { snapshot } = daemon;
-  const navigation = useNavigation();
-  const submitting = navigation.state !== "idle";
+  // replay の結果が SSE の再検証で消えないよう fetcher に載せる（監査 H1）。
+  const fetcher = useFetcher<ReplayOutcome>();
+  const submitting = fetcher.state !== "idle";
+  const replay = fetcher.data;
 
   return (
     <div className="space-y-8">
@@ -346,23 +349,20 @@ export default function DaemonPage({ loaderData, actionData }: Route.ComponentPr
             <p className="text-sm text-fg-muted">
               全タスクをイベントから再構築して `tasks` との差分を検査します（DB は変更しません）。
             </p>
-            <Form method="post">
+            <fetcher.Form method="post">
               <input type="hidden" name="intent" value="replay" />
               <Button type="submit" variant="primary" disabled={submitting} data-testid="replay-button">
                 <Icon name="rotate" />
                 replay
               </Button>
-            </Form>
-            {actionData &&
-              (actionData.ok ? (
-                <Alert
-                  tone={actionData.report.mismatches.length > 0 ? "warning" : "success"}
-                  data-testid="replay-result"
-                >
-                  {actionData.report.mismatches.length} mismatches across {actionData.report.tasks} tasks
-                  {actionData.report.mismatches.length > 0 && (
+            </fetcher.Form>
+            {replay &&
+              (replay.ok ? (
+                <Alert tone={replay.report.mismatches.length > 0 ? "warning" : "success"} data-testid="replay-result">
+                  {replay.report.mismatches.length} mismatches across {replay.report.tasks} tasks
+                  {replay.report.mismatches.length > 0 && (
                     <ul className="mt-2 space-y-1">
-                      {actionData.report.mismatches.map((mismatch) => (
+                      {replay.report.mismatches.map((mismatch) => (
                         <li
                           key={`${mismatch.task_id}-${mismatch.field}`}
                           data-testid="replay-mismatch"
@@ -375,7 +375,7 @@ export default function DaemonPage({ loaderData, actionData }: Route.ComponentPr
                   )}
                 </Alert>
               ) : (
-                <ErrorFlash error={actionData.error} />
+                <ErrorFlash error={replay.error} />
               ))}
           </CardBody>
         </Card>

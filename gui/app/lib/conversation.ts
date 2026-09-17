@@ -1,4 +1,4 @@
-import type { Message, OrgNode, Project } from "~/taskd/types";
+import type { AttentionItem, Message, OrgNode, Project } from "~/taskd/types";
 
 /**
  * 秘書・各ノードとの対話（SPEC §3.4「組織の木を見て誰に言うかを決め、その担当に直接言う」、
@@ -30,6 +30,60 @@ export interface ConversationData {
   projectId: string | null;
   /** そのノード・その案件のやり取り（古い順） */
   messages: Message[];
+  /**
+   * `GET /inbox` の `attention`（Phase G13f-1、監査 M1）。返事を待っている間に「経路なし」等が出たら
+   * 待つのをやめて知らせるために読む。taskd に届かないときは空（画面は従来どおり待つだけになる）。
+   */
+  attention: AttentionItem[];
+}
+
+/** 返事が作れない状態（`attention` の 1 件を、この画面の言葉に写したもの）。 */
+export interface ConversationTrouble {
+  taskId: string;
+  reason: string;
+}
+
+/** やり取りに出ている裏方のタスク（対話用タスク）の id を集める（`user` の行にも同じ id が入る）。 */
+export function conversationTaskIds(messages: readonly Message[]): Set<string> {
+  const ids = new Set<string>();
+  for (const m of messages) {
+    if (m.task_id) ids.add(m.task_id);
+  }
+  return ids;
+}
+
+/**
+ * この対話の裏方のタスクが `attention` に出ていたら、その理由を返す（出ていなければ `null`）。
+ * 理由の文言は taskd の値をそのまま写す（GUI 側で新しい判断はしない。`app/routes/inbox.tsx` の
+ * `attentionText` と同じ材料を、対話の画面の言葉で言い直しているだけ）。
+ */
+export function conversationTrouble(
+  attention: readonly AttentionItem[],
+  taskIds: Iterable<string | null | undefined>,
+): ConversationTrouble | null {
+  const ids = new Set<string>();
+  for (const id of taskIds) {
+    if (id) ids.add(id);
+  }
+  if (ids.size === 0) return null;
+  for (const item of attention) {
+    if (item.type === "cluster_unavailable" || !ids.has(item.task.id)) continue;
+    switch (item.type) {
+      case "unroutable":
+        return {
+          taskId: item.task.id,
+          reason: `この担当に回せるプロバイダがありません（tier=${item.hint.tier}${item.hint.adapter ? `, adapter=${item.hint.adapter}` : ""}）`,
+        };
+      case "failed":
+        return { taskId: item.task.id, reason: `裏方の run が失敗しました: ${item.reason}` };
+      case "requeue_limit_near":
+        return {
+          taskId: item.task.id,
+          reason: `やり直しが上限に近づいています（${item.count}/${item.max}）`,
+        };
+    }
+  }
+  return null;
 }
 
 /**

@@ -10,17 +10,114 @@ import type { Graph, GraphNode, Status } from "~/taskd/types";
  * 色・枠の意味づけは taskd の `Status` / `TaskKind` をそのまま使い、GUI 側で新しい分類は作らない。
  */
 
-const NODE_WIDTH = 180;
-const NODE_HEIGHT = 44;
 const GROUP_PADDING = 28;
 const GROUP_LABEL_HEIGHT = 24;
 
-/** ノードのラベル: 1 行目がタイトル、2 行目に役割と状態の補足（ADR-0023 D3）。 */
-function nodeLabel(node: GraphNode, awaitingChildren: boolean): string {
+/**
+ * ノードの寸法（Phase G13f-1、監査 H4）。固定の 180×44 では日本語のタイトル + `[担当]` がはみ出していたので、
+ * 中身に合わせて幅と高さを決める（測定は文字数からの近似。DOM に触らず純粋関数のままにするため）。
+ * タイトルは最大 2 行で、収まらなければ末尾を `…` にする。
+ */
+const FONT_SIZE = 12;
+const LINE_HEIGHT = 16;
+const NODE_PADDING_X = 10;
+const NODE_PADDING_Y = 8;
+const NODE_MIN_WIDTH = 180;
+const NODE_MAX_WIDTH = 320;
+const NODE_MIN_HEIGHT = 44;
+const MAX_TITLE_LINES = 2;
+
+/** 全角（CJK・全角記号・かな）は 1em、それ以外は約 0.56em として文字列の幅（em）を見積もる。 */
+export function textWidthEm(text: string): number {
+  let em = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    em += isWideChar(code) ? 1 : 0.56;
+  }
+  return em;
+}
+
+function isWideChar(code: number): boolean {
+  return (
+    (code >= 0x1100 && code <= 0x115f) || // ハングル字母
+    (code >= 0x2e80 && code <= 0x303e) || // CJK 部首・記号
+    (code >= 0x3041 && code <= 0x33ff) || // かな・互換
+    (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x4e00 && code <= 0x9fff) || // CJK 統合漢字
+    (code >= 0xa000 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) || // 全角英数・記号
+    (code >= 0xffe0 && code <= 0xffe6)
+  );
+}
+
+/**
+ * 1 行あたり `maxEm` に収まるよう、最大 `maxLines` 行に折り返す。入り切らなければ最後の行の末尾を `…` にする
+ * （単語境界は見ない。日本語のタイトルが主で、境界で切ると却って幅が余るため）。
+ */
+export function wrapLabelLines(text: string, maxEm: number, maxLines = MAX_TITLE_LINES): string[] {
+  const chars = Array.from(text);
+  const lines: string[] = [];
+  let current = "";
+  let currentEm = 0;
+  for (const ch of chars) {
+    const em = textWidthEm(ch);
+    if (currentEm + em > maxEm && current.length > 0) {
+      lines.push(current);
+      current = "";
+      currentEm = 0;
+      if (lines.length === maxLines) break;
+    }
+    current += ch;
+    currentEm += em;
+  }
+  if (lines.length < maxLines && current.length > 0) lines.push(current);
+  if (lines.length === 0) return [text];
+  // 収まらなかったぶんがあれば、最後の行の末尾を `…` にする。
+  const shown = lines.join("");
+  if (shown.length < text.length) {
+    const last = Array.from(lines[lines.length - 1]);
+    while (last.length > 0 && textWidthEm(`${last.join("")}…`) > maxEm) last.pop();
+    lines[lines.length - 1] = `${last.join("")}…`;
+  }
+  return lines;
+}
+
+/** ノード 1 つぶんのラベルと寸法（`layoutGraph` が dagre と React Flow の両方にこの値を渡す）。 */
+export interface NodeBox {
+  label: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * ノードのラベルと寸法: 1〜2 行目がタイトル、その下に担当と状態の補足（ADR-0023 D3。
+ * 担当は `[名前]`）。中身の幅から `NODE_MIN_WIDTH`〜`NODE_MAX_WIDTH` の範囲で幅を決め、
+ * 行数から高さを決める。
+ */
+export function nodeBox(node: GraphNode, awaitingChildren: boolean): NodeBox {
   const marks: string[] = [];
   if (node.role) marks.push(`[${node.role}]`);
   if (awaitingChildren) marks.push("部下待ち");
-  return marks.length > 0 ? `${node.title}\n${marks.join(" ")}` : node.title;
+  const marksText = marks.join(" ");
+
+  const titleEm = textWidthEm(node.title);
+  const marksEm = marksText.length > 0 ? textWidthEm(marksText) : 0;
+  // タイトルは 2 行に割れる前提で必要な幅を見積もり、補足の行はできるだけ 1 行に収める。
+  const wantedEm = Math.max(titleEm / MAX_TITLE_LINES, marksEm);
+  const width = clamp(Math.ceil(wantedEm * FONT_SIZE) + NODE_PADDING_X * 2, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
+  const contentEm = (width - NODE_PADDING_X * 2) / FONT_SIZE;
+
+  const titleLines = wrapLabelLines(node.title, contentEm);
+  const lines = marksText.length > 0 ? [...titleLines, marksText] : titleLines;
+  const height = Math.max(NODE_MIN_HEIGHT, lines.length * LINE_HEIGHT + NODE_PADDING_Y * 2);
+  return { label: lines.join("\n"), width, height };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 // status ごとの帯・枠の色は app.css のトークン（docs/adr/0011 D4）に揃える。CSS 変数文字列をそのまま
@@ -52,11 +149,17 @@ export function layoutGraph(graph: Graph, marks: LayoutMarks = {}): LayoutResult
   const awaitingChildren = new Set(marks.awaitingChildren ?? []);
   const byId = new Map<string, GraphNode>(graph.nodes.map((n) => [n.id, n]));
 
+  // ノードごとの寸法を先に決める（中身に合わせる。監査 H4）。dagre にも React Flow にも同じ値を渡す。
+  const boxes = new Map<string, NodeBox>(
+    graph.nodes.map((node) => [node.id, nodeBox(node, awaitingChildren.has(node.id))]),
+  );
+
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: "LR", nodesep: 32, ranksep: 64 });
   g.setDefaultEdgeLabel(() => ({}));
   for (const node of graph.nodes) {
-    g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
+    const box = boxes.get(node.id);
+    if (box) g.setNode(node.id, { width: box.width, height: box.height });
   }
   for (const edge of graph.edges) {
     if (byId.has(edge.from) && byId.has(edge.to)) g.setEdge(edge.from, edge.to);
@@ -67,7 +170,9 @@ export function layoutGraph(graph: Graph, marks: LayoutMarks = {}): LayoutResult
   const rects = new Map<string, { x: number; y: number; w: number; h: number }>();
   for (const node of graph.nodes) {
     const pos = g.node(node.id);
-    rects.set(node.id, { x: pos.x - NODE_WIDTH / 2, y: pos.y - NODE_HEIGHT / 2, w: NODE_WIDTH, h: NODE_HEIGHT });
+    const box = boxes.get(node.id);
+    if (!pos || !box) continue;
+    rects.set(node.id, { x: pos.x - box.width / 2, y: pos.y - box.height / 2, w: box.width, h: box.height });
   }
 
   // parent_id ごとに子のバウンディングボックスから group を合成する（子の親自身が nodes に含まれるとは限らない）。
@@ -113,7 +218,8 @@ export function layoutGraph(graph: Graph, marks: LayoutMarks = {}): LayoutResult
 
   for (const node of graph.nodes) {
     const rect = rects.get(node.id);
-    if (!rect) continue;
+    const box = boxes.get(node.id);
+    if (!rect || !box) continue;
     const groupRect = node.parent_id ? groupRects.get(node.parent_id) : undefined;
     const position = groupRect ? { x: rect.x - groupRect.x, y: rect.y - groupRect.y } : { x: rect.x, y: rect.y };
     nodes.push({
@@ -121,14 +227,15 @@ export function layoutGraph(graph: Graph, marks: LayoutMarks = {}): LayoutResult
       position,
       parentId: groupRect ? `group-${node.parent_id}` : undefined,
       extent: groupRect ? "parent" : undefined,
-      // 役割はテキストのラベルとして 2 行目に出す（色分けはしない。docs/DESIGN.md §10 Phase G7、taskd-requests R2）。
-      // 「部下待ち」は taskd のスナップショットの値をそのまま出す（ADR-0023 D3。GUI 側で判定しない）。
-      data: { label: nodeLabel(node, awaitingChildren.has(node.id)) },
+      // 役割（案件の仕事の木では担当の名前）はテキストのラベルとして最終行に出す（色分けはしない。
+      // docs/DESIGN.md §10 Phase G7、taskd-requests R2）。「部下待ち」は taskd のスナップショットの値を
+      // そのまま出す（ADR-0023 D3。GUI 側で判定しない）。
+      data: { label: box.label },
       // 角丸・細い枠・左に status 色の帯（モダンな見た目）。kind=plan は枠を太くする意味づけを維持する
       // （docs/adr/0011 D4。色は STATUS_COLOR 経由で app.css のトークンに揃える）。
       style: {
-        width: NODE_WIDTH,
-        height: NODE_HEIGHT,
+        width: box.width,
+        height: box.height,
         background: STATUS_COLOR[node.status].background,
         border:
           node.kind === "plan"
@@ -137,8 +244,10 @@ export function layoutGraph(graph: Graph, marks: LayoutMarks = {}): LayoutResult
         borderLeft: `4px solid ${STATUS_COLOR[node.status].accent}`,
         borderRadius: 10,
         boxShadow: "0 1px 2px hsl(var(--shadow-color) / 0.08)",
-        fontSize: 12,
-        padding: "4px 8px",
+        fontSize: FONT_SIZE,
+        lineHeight: `${LINE_HEIGHT}px`,
+        padding: `${NODE_PADDING_Y}px ${NODE_PADDING_X}px`,
+        boxSizing: "border-box",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",

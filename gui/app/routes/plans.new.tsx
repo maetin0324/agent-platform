@@ -1,4 +1,4 @@
-import { data, Form, redirect, useNavigation } from "react-router";
+import { data, redirect, useFetcher } from "react-router";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -89,11 +89,12 @@ export async function action({ request }: Route.ActionArgs) {
   return data({ ok: false, error: outcome.error } satisfies CreateFailure, { status: outcome.error.status });
 }
 
-export default function NewPlanPage({ loaderData, actionData }: Route.ComponentProps) {
+export default function NewPlanPage({ loaderData }: Route.ComponentProps) {
   const config = loaderData;
-  const navigation = useNavigation();
-  const submitting = navigation.state !== "idle";
-  const error = actionData && !actionData.ok ? actionData.error : null;
+  // 失敗が SSE の再検証で消えないよう fetcher に載せる（監査 H1）。成功は action の redirect で移る。
+  const fetcher = useFetcher<CreateFailure>();
+  const submitting = fetcher.state !== "idle";
+  const error = fetcher.data && !fetcher.data.ok ? fetcher.data.error : null;
 
   return (
     <div className="space-y-6">
@@ -111,7 +112,7 @@ export default function NewPlanPage({ loaderData, actionData }: Route.ComponentP
 
       <ErrorFlash error={error} />
 
-      <Form method="post" data-testid="new-plan-form" className="space-y-6">
+      <fetcher.Form method="post" data-testid="new-plan-form" className="space-y-6">
         <Card>
           <CardHeader icon="file" title="基本" description="Plan の目的と作業ディレクトリ" />
           <CardBody className="space-y-4">
@@ -206,7 +207,7 @@ export default function NewPlanPage({ loaderData, actionData }: Route.ComponentP
             作成
           </Button>
         </div>
-      </Form>
+      </fetcher.Form>
     </div>
   );
 }
