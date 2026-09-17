@@ -595,6 +595,7 @@ pub fn api_settings(
         max_runs_per_account: config.accounts.as_ref().map(|a| a.max_runs_per_account).unwrap_or(0),
         secrets_dir: config.secrets.as_ref().map(|s| s.dir.clone()),
         secret_usage: secret_usage(config),
+        memory_dir: config.memory.as_ref().map(|m| m.dir.clone()),
     }
 }
 

@@ -62,6 +62,9 @@ pub struct QuestionItem {
     pub asked_at: Option<String>,
     pub run_id: Option<String>,
     pub previous: Vec<AnswerNote>,
+    /// GUI 監査対応 Phase 29: 対応する未決の `approvals` の id（`POST /approvals/{id}/decide` へ
+    /// GUI が直接リンクできるように）。無ければ `null`（`approvals` の行がまだ無い、または既に決定済み）。
+    pub approval_id: Option<task_core::approval::ApprovalId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -209,6 +212,13 @@ fn build_approvals(
 
 /// `status == Blocked` のタスク。
 fn build_questions(store: &dyn TaskStore, all_tasks: &[Task]) -> Result<Vec<QuestionItem>, OpsError> {
+    // GUI 監査対応 Phase 29: 未決の approvals を task_id で引けるように 1 回だけ読む。
+    let pending_approval_by_task: HashMap<TaskId, task_core::approval::ApprovalId> = store
+        .approval_list(Some(true), None, None)?
+        .into_iter()
+        .filter_map(|a| a.task_id.map(|task_id| (task_id, a.id)))
+        .collect();
+
     let mut items = Vec::new();
     for t in all_tasks.iter().filter(|t| t.status == Status::Blocked) {
         let rows = store.event_rows_for(t.id, None, view::ALL_EVENTS)?;
@@ -243,6 +253,7 @@ fn build_questions(store: &dyn TaskStore, all_tasks: &[Task]) -> Result<Vec<Ques
             asked_at,
             run_id,
             previous,
+            approval_id: pending_approval_by_task.get(&t.id).copied(),
         });
     }
     items.sort_by(|a, b| a.asked_at.cmp(&b.asked_at));
@@ -710,6 +721,52 @@ mod tests {
         assert_eq!(q.run_id.as_deref(), Some("run-7"));
         assert!(q.asked_at.is_some());
         assert_eq!(result.counts.questions, 1);
+        assert_eq!(q.approval_id, None, "approvals の行がまだ無ければ null");
+    }
+
+    /// GUI 監査対応 Phase 29: 質問に対応する未決の `approvals` の id が付き、GUI が認可画面へ
+    /// 直接リンクできる。決定済みの approval は付かない（`pending = true` でしか引かないため）。
+    #[test]
+    fn inbox_questions_carry_the_id_of_their_pending_approval() {
+        use task_core::approval::{Approval, ApprovalId, ApprovalStore};
+
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let with_pending = sample_task(TaskKind::Execute, Status::Blocked);
+        store.insert(&with_pending).expect("insert");
+        let pending = Approval {
+            id: ApprovalId::new(),
+            project_id: None,
+            node_id: "secretary".into(),
+            task_id: Some(with_pending.id),
+            question: "どのクラスタを使いますか".into(),
+            decision: None,
+            answer: None,
+            created_at: OffsetDateTime::now_utc(),
+            decided_at: None,
+        };
+        store.approval_append(&pending).expect("append");
+
+        // すでに決定済みの approval を持つ別のタスク（新しい質問はまだ来ていない想定）には付かない。
+        let with_decided_only = sample_task(TaskKind::Execute, Status::Blocked);
+        store.insert(&with_decided_only).expect("insert");
+        let decided = Approval {
+            id: ApprovalId::new(),
+            project_id: None,
+            node_id: "secretary".into(),
+            task_id: Some(with_decided_only.id),
+            question: "別の質問".into(),
+            decision: Some(task_core::approval::Decision::Once),
+            answer: Some("x".into()),
+            created_at: OffsetDateTime::now_utc(),
+            decided_at: Some(OffsetDateTime::now_utc()),
+        };
+        store.approval_append(&decided).expect("append");
+
+        let ctx = view_ctx();
+        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let find = |id: TaskId| result.questions.iter().find(|q| q.task.id == id).expect("question");
+        assert_eq!(find(with_pending.id).approval_id, Some(pending.id));
+        assert_eq!(find(with_decided_only.id).approval_id, None);
     }
 
     #[test]

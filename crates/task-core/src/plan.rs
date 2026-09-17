@@ -411,6 +411,26 @@ mod tests {
         assert_eq!(children[2].depends_on, vec![children[0].id, children[1].id]);
     }
 
+    /// ADR-0033 D2（監査 D-3。GUI 監査対応 Phase 29 で確認）: 分解した子は親の `project_id` /
+    /// `milestone_id` を必ず継ぐ（案件の仕事の木から子が消えないように）。偽プランナーの出力からでも同じ。
+    #[test]
+    fn materialize_carries_the_parents_project_and_milestone_id() {
+        let mut p = parent();
+        p.project_id = Some(crate::org::ProjectId::new());
+        p.milestone_id = Some(crate::org::MilestoneId::new());
+        let plan = PlanOutput { tasks: vec![new_task("a", vec![]), new_task("b", vec![])] };
+        let children = materialize(&p, &plan, &[], &[], &[], OffsetDateTime::now_utc());
+        for c in &children {
+            assert_eq!(c.project_id, p.project_id, "child must stay in the parent's project");
+            assert_eq!(c.milestone_id, p.milestone_id);
+        }
+
+        // 案件が無い Plan（従来どおり）では子にも付かない。
+        let none = parent();
+        let children = materialize(&none, &plan, &[], &[], &[], OffsetDateTime::now_utc());
+        assert!(children.iter().all(|c| c.project_id.is_none() && c.milestone_id.is_none()));
+    }
+
     #[test]
     fn rejects_count_empty_fields_and_missing_acceptance() {
         let limits = PlanLimits {

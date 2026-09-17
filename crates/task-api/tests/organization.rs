@@ -461,9 +461,17 @@ async fn project_detail_returns_the_milestones_and_the_work_tree() {
     assert_eq!(child_view["depends_on"], json!([parent["id"]]));
     assert_eq!(child_view["status"], "draft");
     assert!(child_view.get("assignee").is_some_and(|v| v.is_null()), "{child_view}");
+    // GUI 監査 H4（Phase 29）: 人が見る本体の仕事には `support` が付かない。
+    assert!(child_view.get("support").is_some_and(|v| v.is_null()), "{child_view}");
     let parent_view = tasks.iter().find(|t| t["id"] == parent["id"]).expect("parent in the tree");
     assert_eq!(parent_view["assignee"], "research-survey");
     assert_eq!(parent_view["milestone_id"], Value::String(milestone_id));
+    // 秘書への対話用タスクは `support = "conversation"`。
+    let conversation_view = tasks
+        .iter()
+        .find(|t| t["title"].as_str().is_some_and(|t| t.starts_with("対話: ")))
+        .expect("conversation task in the tree");
+    assert_eq!(conversation_view["support"], "conversation");
 }
 
 /// 知らない `assignee` / 無い案件を付けた `POST /tasks` は 422（作られない）。

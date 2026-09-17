@@ -15,6 +15,8 @@ use task_ops::view::{TaskDetail, TaskList};
 
 use crate::approvals::{ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody, StandingRuleList};
 use crate::conversation::{MessageAccepted, MessageList, MessagePostBody};
+use crate::memory::MemoryView;
+use crate::project_plan::{ProjectPlanAccepted, ProjectPlanBody};
 use crate::types::{
     AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView, AnswerBody, ArtifactList,
     CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters, ConfigView, DaemonView, DecisionBody,
@@ -75,6 +77,11 @@ pub struct ApiV1Schema {
     pub project_detail: ProjectDetail,
     pub milestone_create: MilestoneCreateBody,
     pub milestone_patch: MilestonePatchBody,
+    /// GUI 監査対応 Phase 29（ADR-0033 D4 追記）: 分解を起こす（`POST /projects/{id}/plan`）。
+    pub project_plan: ProjectPlanBody,
+    pub project_plan_accepted: ProjectPlanAccepted,
+    /// GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。
+    pub memory: MemoryView,
     /// Phase 25（ADR-0033 D3）: 報告（生成は決定的、圧縮は別 run）。
     pub report_list: crate::reports::ReportList,
     pub report_detail: crate::reports::ReportDetail,

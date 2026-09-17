@@ -255,6 +255,15 @@ impl ApiProblem {
         Self::new(StatusCode::NOT_FOUND, "milestone_not_found", format!("milestone not found: {id}"))
     }
 
+    /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory]` が設定されていない。
+    pub(crate) fn memory_unavailable() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "memory_unavailable",
+            "the [memory] section is not configured in taskd.toml",
+        )
+    }
+
     /// この Problem の HTTP ステータス（`put_secret` が解析エラーだけを差し替えるために見る）。
     pub(crate) fn status(&self) -> StatusCode {
         self.status

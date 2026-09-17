@@ -284,6 +284,28 @@ async fn denied_prefixes_the_answer_so_the_worker_can_tell() {
     assert_eq!(answered.as_deref(), Some("認めない: 予算超過"));
 }
 
+/// GUI 監査 H2（Phase 29）: `POST /tasks/{id}/answer` で答えたときも、そのタスクの未決の approvals が
+/// `once` + 同じ答えで決定済みになる（`GET /approvals?pending=true` からその行が消える）。
+#[tokio::test]
+async fn answering_a_task_directly_also_settles_its_pending_approval() {
+    let env = env_with_token();
+    let app = env.router();
+    seed_org(&env);
+    let (task, approval) = blocked_task_with_approval(&env, "coding-poc", None);
+
+    let resp = send(&app, p(&format!("/api/v1/tasks/{}/answer", task.id), &json!({"answer": "pegasus"}))).await;
+    assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
+    assert_eq!(env.status_of(task.id), Status::Ready);
+
+    let decided = env.store.approval_get(approval.id).expect("get").expect("some");
+    assert_eq!(decided.decision, Some(task_core::approval::Decision::Once));
+    assert_eq!(decided.answer.as_deref(), Some("pegasus"));
+
+    let resp = send(&app, g("/api/v1/approvals?pending=true")).await;
+    let items = resp.json()["items"].as_array().cloned().expect("items");
+    assert!(items.is_empty(), "{items:?}");
+}
+
 #[tokio::test]
 async fn deciding_an_unknown_approval_is_404_and_a_blank_answer_is_422() {
     let env = env_with_token();

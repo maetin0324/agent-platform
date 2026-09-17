@@ -67,6 +67,8 @@ pub(crate) struct Inner {
     pub(crate) secrets_dir: Option<std::path::PathBuf>,
     /// ADR-0030 D3: 秘密 id → `used_by`（taskd が設定から渡す）。
     pub(crate) secret_usage: HashMap<String, Vec<crate::types::SecretUse>>,
+    /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory] dir`。`None` なら `GET /org/{id}/memory` は 409。
+    pub(crate) memory_dir: Option<std::path::PathBuf>,
     pub(crate) account_stats: Mutex<crate::stats::AccountStatsState>,
     pub(crate) instance_id: String,
     pub(crate) started_at: String,
@@ -109,6 +111,7 @@ impl ApiState {
             max_runs_per_account: settings.max_runs_per_account,
             secrets_dir: settings.secrets_dir,
             secret_usage: settings.secret_usage,
+            memory_dir: settings.memory_dir,
             account_stats: Mutex::new(crate::stats::AccountStatsState::default()),
             instance_id: settings.instance_id,
             started_at: settings.started_at,

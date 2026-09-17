@@ -5,7 +5,9 @@
 //! 状態変更は `TaskStore::apply_transition` だけで行う。`expected` が `Some` で現在の `status` と
 //! 違えば、遷移を試みずに `OpsError::Conflict` を返す。
 
+use task_core::approval::Decision;
 use task_core::{Event, Status, TaskId, TaskKind, TaskStore, Trigger};
+use time::OffsetDateTime;
 
 use crate::derive::latest_question;
 use crate::error::OpsError;
@@ -170,9 +172,13 @@ pub fn answer(
     let outcome = store.apply_transition(
         id,
         Trigger::Answer,
-        Some(Event::Answered { question, answer }),
+        Some(Event::Answered { question, answer: answer.clone() }),
     )?;
     let cascaded = collect_cascaded(store, id, since_id)?;
+    // GUI 監査 H2: `POST /tasks/{id}/answer` で答えたときも、そのタスクの未決の `approvals` を
+    // `once` + 同じ答えで決定済みにする（決定的。無ければ何もしない）。`POST /approvals/{id}/decide`
+    // は既にこの経路（`gate::answer`）に相乗りしているので、これで両方向が揃う（`task_ops::approval`）。
+    settle_pending_approvals(store, id, &answer)?;
     Ok(TransitionResult {
         id,
         from,
@@ -180,6 +186,18 @@ pub fn answer(
         reason: outcome.reason.to_string(),
         cascaded,
     })
+}
+
+/// `task_id` に紐づく未決の `approvals` を、渡された `answer` で `once` に決定する。
+/// `task_ops::approval::decide` は呼ばない（そちらは決定のたびに `gate::answer` を呼び直すため、
+/// ここから呼ぶと循環する。ストアへの書き込みだけをここで完結させる）。
+fn settle_pending_approvals(store: &dyn TaskStore, task_id: TaskId, answer: &str) -> Result<(), OpsError> {
+    let now = OffsetDateTime::now_utc();
+    let pending = store.approval_list(Some(true), None, None)?;
+    for approval in pending.into_iter().filter(|a| a.task_id == Some(task_id)) {
+        store.approval_decide(approval.id, Decision::Once, Some(answer.to_string()), now)?;
+    }
+    Ok(())
 }
 
 /// 非終端（`draft/ready/running/blocked/reviewing`）のタスクだけを `Trigger::Cancel` で
@@ -391,6 +409,62 @@ mod tests {
 
         let fetched = store.get(task.id).expect("get").expect("some");
         assert_eq!(fetched.status, Status::Ready);
+    }
+
+    /// GUI 監査 H2（Phase 29）: `answer` は、そのタスクの未決の `approvals` を `once` + 同じ答えで
+    /// 決定済みにする（`GET /approvals?pending=true` からそのタスクの行が消える）。
+    /// 他のタスクの未決の approvals は触らない。approvals が無ければ何もしない（エラーにならない）。
+    #[test]
+    fn answer_settles_the_tasks_pending_approvals_as_once_with_the_same_answer() {
+        use task_core::approval::{Approval, ApprovalId, ApprovalStore};
+
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let task = sample_task(TaskKind::Execute, Status::Blocked);
+        store.insert(&task).expect("insert");
+        let other = sample_task(TaskKind::Execute, Status::Blocked);
+        store.insert(&other).expect("insert other");
+
+        let now = OffsetDateTime::now_utc();
+        let mine = Approval {
+            id: ApprovalId::new(),
+            project_id: None,
+            node_id: "secretary".into(),
+            task_id: Some(task.id),
+            question: "どのクラスタを使いますか".into(),
+            decision: None,
+            answer: None,
+            created_at: now,
+            decided_at: None,
+        };
+        let unrelated = Approval {
+            id: ApprovalId::new(),
+            project_id: None,
+            node_id: "secretary".into(),
+            task_id: Some(other.id),
+            question: "別の質問".into(),
+            decision: None,
+            answer: None,
+            created_at: now,
+            decided_at: None,
+        };
+        store.approval_append(&mine).expect("append mine");
+        store.approval_append(&unrelated).expect("append unrelated");
+
+        answer(&store, task.id, "pegasus".to_string(), None).expect("answer");
+
+        let decided = store.approval_get(mine.id).expect("get").expect("some");
+        assert_eq!(decided.decision, Some(Decision::Once));
+        assert_eq!(decided.answer.as_deref(), Some("pegasus"));
+        assert!(decided.decided_at.is_some());
+
+        // 他のタスクの approval は手つかず。
+        let untouched = store.approval_get(unrelated.id).expect("get").expect("some");
+        assert!(untouched.is_pending());
+
+        // approvals が無いタスクへの answer はエラーにならない。
+        let plain = sample_task(TaskKind::Execute, Status::Blocked);
+        store.insert(&plain).expect("insert plain");
+        assert!(answer(&store, plain.id, "x".to_string(), None).is_ok());
     }
 
     /// ADR-0010 D3（P-10）: `answer` は `Event::Answered{question, answer}` を

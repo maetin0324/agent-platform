@@ -87,6 +87,9 @@ pub struct TaskSummary {
     pub assignee: Option<String>,
     /// 対話用タスク（人への返事のための run）か（GUI-R3: 仕事の木や一覧から隠せるように）。
     pub conversation: bool,
+    /// GUI 監査 H4（Phase 29）: 裏方タスクの印（`"conversation"` | `"compaction"` | `"approval"` |
+    /// `"review"` | `null`）。`task_core::support_kind` の決定的な判定。GUI はこれで仕事の木から裏方を外せる。
+    pub support: Option<String>,
     /// 今この状態で許される操作（ADR-0015 D4）。
     pub actions: Vec<Action>,
 }
@@ -373,6 +376,7 @@ pub(crate) fn build_task_summary(
         genre: task.genre.clone(),
         assignee: task.assignee.clone(),
         conversation: task_core::is_conversation(task),
+        support: task_core::support_kind(task).map(str::to_string),
         actions: actions(task),
     }
 }
@@ -1325,6 +1329,38 @@ mod tests {
         let role_of = |id| list.items.iter().find(|t| t.id == id).expect("in list").role.clone();
         assert_eq!(role_of(lead.id).as_deref(), Some("lead"));
         assert_eq!(role_of(plain.id), None);
+    }
+
+    /// GUI 監査 H4（Phase 29）: 一覧の各項目に裏方の印が出る（決定的な優先順。対話が最優先）。
+    #[test]
+    fn task_list_items_carry_the_support_kind() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut plain = sample_task(TaskKind::Execute, Status::Ready);
+        plain.role = None;
+        store.insert(&plain).expect("insert plain");
+        let mut compaction = sample_task(TaskKind::Execute, Status::Ready);
+        compaction.role = Some(task_core::COMPACTION_ROLE.to_string());
+        store.insert(&compaction).expect("insert compaction");
+        let approval = sample_task(TaskKind::Approval, Status::Ready);
+        store.insert(&approval).expect("insert approval");
+        let review = sample_task(TaskKind::Review, Status::Reviewing);
+        store.insert(&review).expect("insert review");
+
+        let list = task_list(
+            &store,
+            &ListFilter::default(),
+            ListOrder::CreatedDesc,
+            None,
+            100,
+            &view_ctx(),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("task_list");
+        let support_of = |id| list.items.iter().find(|t| t.id == id).expect("in list").support.clone();
+        assert_eq!(support_of(plain.id), None);
+        assert_eq!(support_of(compaction.id).as_deref(), Some("compaction"));
+        assert_eq!(support_of(approval.id).as_deref(), Some("approval"));
+        assert_eq!(support_of(review.id).as_deref(), Some("review"));
     }
 
     /// ADR-0027 D1: `Task.genre` は `role` と同じ理由で一覧の各項目に出る。
