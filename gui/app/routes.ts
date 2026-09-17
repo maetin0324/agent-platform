@@ -12,6 +12,8 @@ export default [
   route("projects", "routes/projects.tsx"),
   route("projects/:id", "routes/projects.$id.tsx"),
   route("reports", "routes/reports.tsx"),
+  // resource route（コンポーネント無し）。`/reports` の行の展開・`sources_expanded` の追い掛けに使う
+  route("reports/:id", "routes/reports.$id.tsx"),
   route("approvals", "routes/approvals.tsx"),
   route("artifacts", "routes/artifacts.tsx"),
   route("tasks", "routes/tasks.tsx"),

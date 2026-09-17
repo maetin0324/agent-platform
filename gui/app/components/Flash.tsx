@@ -6,6 +6,7 @@ import type {
   OrgOpOutcome,
   ProjectOpOutcome,
   ProviderActionResult,
+  ReportOpOutcome,
   SecretActionResult,
   TransitionOutcome,
 } from "~/taskd/action-types";
@@ -237,6 +238,28 @@ export function ProjectActionFlash({ outcome }: { outcome: ProjectOpOutcome | un
   return (
     <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
       <p data-testid="flash-project-op">{PROJECT_OP_LABEL[outcome.op] ?? outcome.op}</p>
+    </Alert>
+  );
+}
+
+const REPORT_OP_LABEL: Record<string, string> = {
+  reports_read: "既読にしました",
+  reports_notified: "通知を記録しました",
+};
+
+/**
+ * 「報告」画面の action の結果（ADR-0033 D3）。`reports_notified` は画面が出ていなくても
+ * `NotificationsWatcher` が呼ぶので、そちらでは表示しない（ここは `/reports` の `fetcher.data` 用）。
+ */
+export function ReportActionFlash({ outcome }: { outcome: ReportOpOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  return (
+    <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+      <p data-testid="flash-report-op">
+        {REPORT_OP_LABEL[outcome.op] ?? outcome.op}
+        {outcome.op === "reports_read" && <>（{outcome.result.updated} 件）</>}
+      </p>
     </Alert>
   );
 }

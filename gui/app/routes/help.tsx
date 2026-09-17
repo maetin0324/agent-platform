@@ -111,6 +111,18 @@ const GLOSSARY: { term: string; text: string }[] = [
     term: "仕事の木（DAG）",
     text: "SPEC §3.3「これをパッと見れば、おかしな方針を立てていないかが分かる」。案件に属するタスク（tasks WHERE project_id = ?）を、既存の parent_id（親子）／depends_on（依存）の辺でそのまま描いたもの。/graph の DAG と同じ描画部品を使うが、ノードをクリックすると /tasks/:id へ移る点が違う。",
   },
+  {
+    term: "報告",
+    text: "SPEC §3.5「上に行くほど多くのレビューが入り、圧縮される。だから上で見る報告はパッと見の判断が楽」。良い報告の例（あなたの言葉）: 「ここまで作業が進み、この程度の結果が確認できました。またこの結果から、このような framing で論文執筆が可能だと思われます」。kind は progress／result／bad_news／proposal／question。生成は決定的（LLM は呼ばない）、圧縮だけ別 run（レビュアー役）が行う。",
+  },
+  {
+    term: "悪い知らせ",
+    text: "SPEC §2.4「ここの脆弱性がヤバい」「このノードが落ちた・壊れた」のような報告。kind=bad_news。良い知らせと同じ経路で、目立つ形（赤いバッジ）で届く。圧縮を待たず各段を素通りして秘書まで即座に上がる。",
+  },
+  {
+    term: "圧縮",
+    text: "SPEC §3.5「通知は数分単位ではなく、数時間単位」。親ノードは子から上がった報告が溜まると（既定 4 件、または最古が 2 時間経過）レビュー用の run を 1 回起こし、子の報告を 1 件にまとめて自分の報告にする（sources に元の id が残る）。秘書まで上がった報告（level=0）が人の見る報告。",
+  },
 ];
 
 const TOC = [
@@ -145,7 +157,7 @@ const SCREENS: { href: string | null; icon: IconName; title: string; text: strin
     href: "/reports",
     icon: "send",
     title: "報告",
-    text: "SPEC §4「報告の流れ — 各所から上がってくる報告を高速で流し見する」。報告（reports）の生成・圧縮は taskd 側 Phase 25 待ちのため、今はプレースホルダ。",
+    text: "SPEC §4「報告の流れ — 各所から上がってくる報告を高速で流し見する。良い知らせも悪い知らせも」。既定は秘書レベル（level=0）の未読を新しい順に 1 件 1 行で。クリックで展開すると本文と、圧縮の元になった下の段の報告（sources_expanded）を辿れる。既読は 1 件ずつ／一括で。案件詳細（/projects/:id）にも、その案件の全レベルの報告が「報告」タブとして出る。",
   },
   {
     href: "/approvals",

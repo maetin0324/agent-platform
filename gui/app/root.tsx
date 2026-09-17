@@ -12,10 +12,12 @@ import {
   useRouteLoaderData,
 } from "react-router";
 import { authCheck, sessionContext } from "~/auth.server";
+import { NotificationsWatcher } from "~/components/NotificationsWatcher";
 import { Badge } from "~/components/ui/badge";
 import { buttonClass } from "~/components/ui/button";
 import { Icon, type IconName } from "~/components/ui/Icon";
 import { Alert } from "~/components/ui/misc";
+import { reportsBadgeTone } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { version as guiVersion } from "../package.json";
@@ -27,7 +29,7 @@ import { useNonce } from "~/nonce";
 import { getTaskdClient } from "~/taskd/client.server";
 import { TaskdError, type TaskdRouteErrorData } from "~/taskd/errors";
 import { loadHealth } from "~/taskd/health.server";
-import type { InboxCounts } from "~/taskd/types";
+import type { DaemonView, InboxCounts, ReportsLive } from "~/taskd/types";
 
 // 全ルートに効くサーバ middleware（docs/DESIGN.md §8.2）。順序: Host 検査 → 認証（docs/adr/0008 D1）→ CSRF 検査（変更系のみ）→ nonce とヘッダ。
 export const middleware: Route.MiddlewareFunction[] = [hostCheck, authCheck, csrfCheck, securityHeaders];
@@ -45,6 +47,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       unavailable: false,
       problem: null,
       counts: null,
+      reportsLive: null,
       session,
       // 接続先も出さない（hydration payload にも載せない）
       gui: { version: guiVersion, taskdApiUrl: "" },
@@ -55,6 +58,10 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   // `/`（inbox ルート）が別途 `GET /inbox` を全項目のために呼ぶので、ここでは counts だけを使う。
   // taskd に届かない・エラーのときは badge を出さないだけにする（health のバナーが既に状況を伝える）。
   let counts: InboxCounts | null = null;
+  // 「報告」ナビのバッジと、ブラウザ通知の判定（ADR-0033 D3、ADR-0034 D6）。`DaemonSnapshot.reports` は
+  // API が応答を組むときに埋める唯一のフィールドなので、SSE の `daemon` イベントで root が再検証されるたびに
+  // ここで拾い直す（`useTaskdStream` が `task.event`/`daemon`/`reset` のいずれでも root を revalidate する）。
+  let reportsLive: ReportsLive | null = null;
   if (!state.unavailable && state.health) {
     try {
       counts = (await client.get<{ counts: InboxCounts }>("/inbox", { signal: request.signal })).counts;
@@ -64,9 +71,16 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       // 401 だけはバナーで知らせる（他は子ルートの ErrorBoundary が個別に出す）。
       if (e instanceof TaskdError && e.status === 401) state.problem = `${e.status} ${e.code}`;
     }
+    try {
+      const daemon = await client.get<DaemonView>("/daemon", { signal: request.signal });
+      reportsLive = daemon.snapshot?.reports ?? null;
+    } catch {
+      // バッジと通知が出ないだけにする（他の画面のバナー・ErrorBoundary が状況を伝える）。
+      reportsLive = null;
+    }
   }
   // トークンは含めない。baseUrl は接続先の表示用（loopback が既定）。
-  return { ...state, counts, session, gui: { version: guiVersion, taskdApiUrl: client.baseUrl } };
+  return { ...state, counts, reportsLive, session, gui: { version: guiVersion, taskdApiUrl: client.baseUrl } };
 }
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -92,7 +106,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 const RECHECK_MS = 5_000;
 
 export default function App({ loaderData }: Route.ComponentProps) {
-  const { health, unavailable, problem, counts, gui, session } = loaderData;
+  const { health, unavailable, problem, counts, reportsLive, gui, session } = loaderData;
   const revalidator = useRevalidator();
   const disconnected = unavailable || health === null;
   const showBanner = disconnected || problem !== null;
@@ -120,8 +134,10 @@ export default function App({ loaderData }: Route.ComponentProps) {
 
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[16rem_1fr]">
+      <NotificationsWatcher reportsLive={reportsLive} />
       <Sidebar
         approvals={counts?.approvals ?? 0}
+        reportsLive={reportsLive}
         connected={!disconnected && problem === null}
         taskdVersion={health?.taskd_version ?? null}
         logoutEnabled={session.enabled}
@@ -188,7 +204,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
   );
 }
 
-type NavItem = { href: string; label: string; icon: IconName; badge?: "approvals" };
+type NavItem = { href: string; label: string; icon: IconName; badge?: "approvals" | "reports" };
 
 /**
  * ナビゲーションのグループ（docs/adr/0011 D3、Phase G13a で SPEC §4 の順に組み替え。ADR-0033 D8）。
@@ -203,7 +219,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { href: "/org/secretary", label: "秘書", icon: "message" },
       { href: "/org", label: "組織", icon: "users" },
       { href: "/projects", label: "案件", icon: "folder" },
-      { href: "/reports", label: "報告", icon: "send" },
+      { href: "/reports", label: "報告", icon: "send", badge: "reports" },
       { href: "/approvals", label: "認可", icon: "shield" },
       { href: "/artifacts", label: "成果物", icon: "file" },
     ],
@@ -235,11 +251,13 @@ function isActive(pathname: string, href: string): boolean {
 
 function Sidebar({
   approvals,
+  reportsLive,
   connected,
   taskdVersion,
   logoutEnabled,
 }: {
   approvals: number;
+  reportsLive: ReportsLive | null;
   connected: boolean;
   taskdVersion: string | null;
   logoutEnabled: boolean;
@@ -269,6 +287,7 @@ function Sidebar({
               <ul className="contents lg:flex lg:flex-col lg:gap-0.5">
                 {group.items.map((item) => {
                   const active = isActive(pathname, item.href);
+                  const unreadSecretary = reportsLive?.unread_secretary ?? 0;
                   return (
                     <li key={item.href} className="shrink-0">
                       <a
@@ -300,7 +319,21 @@ function Sidebar({
                             {approvals}
                           </span>
                         )}
+                        {item.badge === "reports" && unreadSecretary > 0 && (
+                          <span
+                            data-testid="reports-unread-badge"
+                            className={cn(
+                              "ml-auto min-w-5 rounded-full px-1.5 py-0.5 text-center text-[0.7rem] leading-none font-bold tabular-nums shadow-sm",
+                              reportsBadgeTone(reportsLive) === "danger"
+                                ? "bg-danger text-white dark:text-bg"
+                                : "bg-surface-2 text-fg-muted",
+                            )}
+                          >
+                            {unreadSecretary}
+                          </span>
+                        )}
                       </a>
+                      {item.badge === "reports" && <NotificationsEnableButton />}
                     </li>
                   );
                 })}
@@ -327,6 +360,31 @@ function Sidebar({
         </div>
       </div>
     </aside>
+  );
+}
+
+/**
+ * 「通知を有効にする」（SPEC §3.5、ADR-0034 D6）。ブラウザの Notification の許可をここで求める
+ * （許可が無ければ `NotificationsWatcher` は何もしない）。`taskd` には問い合わせない、純粋にブラウザ API だけの操作。
+ */
+function NotificationsEnableButton() {
+  const handleClick = () => {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission === "default") {
+      void Notification.requestPermission();
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      data-testid="notifications-enable"
+      className="ml-2 flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-fg-subtle transition-colors hover:bg-surface-2 hover:text-fg"
+      title="ブラウザ通知を有効にします（悪い知らせは即座に、それ以外は数時間単位）"
+    >
+      <Icon name="alert" className="size-3.5" />
+      通知を有効にする
+    </button>
   );
 }
 

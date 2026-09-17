@@ -13,6 +13,8 @@ import type {
   ProviderConfigView1,
   ReloadResult,
   ReplayReport,
+  ReportsNotifiedResult,
+  ReportsReadResult,
   SecretPutResult,
   TransitionResult,
 } from "./types";
@@ -138,6 +140,17 @@ export type ProjectOpOutcome =
   | { ok: true; op: "project_status"; project: Project }
   | { ok: true; op: "milestone_create" | "milestone_status"; milestone: Milestone }
   | { ok: false; op: "project_status" | "milestone_create" | "milestone_status"; error: ActionError };
+
+/**
+ * 「報告」画面（`/reports`）の既読・通知（ADR-0033 D3、docs/taskd-api-v1.md §3.52〜3.53。**管理系**）:
+ * `POST /reports/read` / `POST /reports/notified` の結果。taskd のエラーは例外にせず `{ok:false, error}` にする
+ * （401 `unauthorized` を含む）。`reports_notified` は `NotificationsWatcher`（`app/components`）が
+ * ブラウザ通知を出した直後にも呼ぶ（画面を開いていなくてもよい resource 呼び出し）。
+ */
+export type ReportOpOutcome =
+  | { ok: true; op: "reports_read"; ids: string[]; result: ReportsReadResult }
+  | { ok: true; op: "reports_notified"; result: ReportsNotifiedResult }
+  | { ok: false; op: "reports_read" | "reports_notified"; error: ActionError };
 
 export type AccountOpOutcome =
   | { ok: true; op: "create"; id: string; adapter: AccountAdapter; account: AccountView }

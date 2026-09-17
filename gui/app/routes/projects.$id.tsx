@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { data, isRouteErrorResponse, useFetcher } from "react-router";
 import { ProjectActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { ReportsList } from "~/components/ReportsList";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -18,28 +19,37 @@ import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { formString } from "~/taskd/forms";
 import { createMilestone, patchMilestoneStatus, patchProjectStatus } from "~/taskd/projects-admin.server";
-import type { MilestoneStatus, OrgList, ProjectDetail, ProjectStatus } from "~/taskd/types";
+import type { MilestoneStatus, OrgList, ProjectDetail, ProjectStatus, ReportList } from "~/taskd/types";
 import type { Route } from "./+types/projects.$id";
 
 /**
- * `/projects/:id`（案件の詳細・途中目標・仕事の木、SPEC §3.3、ADR-0033 D2、docs/gui/api.md §3.47〜3.49）。
+ * `/projects/:id`（案件の詳細・途中目標・仕事の木・報告、SPEC §3.3・§3.5、ADR-0033 D2/D3、
+ * docs/gui/api.md §3.47〜3.51）。
  * 「仕事の木」は `GET /projects/{id}` の `tasks`（`ProjectTaskView`、`parent_id` / `depends_on` は既存の DAG
  * と同じ辺の作り方）を `/graph` と同じ `layoutGraph`（`~/components/WorkTree.tsx`）で描く。
  * 各ノードには `assignee` の組織ノードの名前を出す（`GET /org` と突き合わせる。組織のノード名を出すだけで、
  * taskd 側の判断値は増やさない）。
+ * 「報告」タブは `GET /reports?project=<id>`（**全レベル**。`level` を付けない。`/reports` の既定は秘書
+ * レベルの未読だけだが、案件詳細ではこの案件のすべての段の報告を見せる。G13b-1 の依頼どおり）を
+ * `/reports` と同じ `ReportsList` で出す。
  */
 
 export interface ProjectDetailData {
   detail: ProjectDetail;
   org: OrgList;
+  reports: ReportList;
+  fetchedAt: string;
 }
 
 export async function loadProjectDetail(client: TaskdClient, id: string, request: Request): Promise<ProjectDetailData> {
-  const [detail, org] = await Promise.all([
+  const [detail, org, reports] = await Promise.all([
     client.get<ProjectDetail>(`/projects/${encodeURIComponent(id)}`, { signal: request.signal }),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
+    client
+      .get<ReportList>("/reports", { query: { project: id }, signal: request.signal })
+      .catch(() => ({ items: [] }) as ReportList),
   ]);
-  return { detail, org };
+  return { detail, org, reports, fetchedAt: new Date().toISOString() };
 }
 
 export const shouldRevalidate = revalidateAfterActionErrors;
@@ -107,7 +117,7 @@ const MILESTONE_STATUS_TONE: Record<MilestoneStatus, Tone> = {
 };
 
 export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) {
-  const { detail, org } = loaderData;
+  const { detail, org, reports, fetchedAt } = loaderData;
   const { project, milestones, tasks } = detail;
   const fetcher = useFetcher<ProjectOpOutcome>();
   const submitting = fetcher.state !== "idle";
@@ -290,6 +300,22 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           <EmptyState icon="gitBranch" title="この案件のタスクはまだありません" />
         ) : (
           <WorkTree graph={graph} />
+        )}
+      </section>
+
+      <section aria-labelledby="project-reports-heading" className="space-y-4">
+        <SectionTitle icon="send" id="project-reports-heading" count={reports.items.length}>
+          報告
+        </SectionTitle>
+        <p className="text-xs text-fg-subtle">
+          SPEC §4「報告の流れ — 各所から上がってくる報告を高速で流し見する」。この案件のすべての段の報告（
+          <HelpLink anchor="glossary" label="報告" />
+          ）。全体の未読・秘書レベルは <code>/reports</code> で見られます。
+        </p>
+        {reports.items.length === 0 ? (
+          <EmptyState icon="send" title="この案件の報告はまだありません" />
+        ) : (
+          <ReportsList items={reports.items} projects={[project]} org={org.items} fetchedAt={fetchedAt} />
         )}
       </section>
     </div>
