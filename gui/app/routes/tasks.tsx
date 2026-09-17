@@ -2,7 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState } from "react";
 import { Form, Link, useFetcher, useSearchParams } from "react-router";
 import { HelpLink } from "~/components/HelpLink";
-import { KindBadge, RoleLabel, StatusBadge, statusTone } from "~/components/ui/badge";
+import { GenreLabel, KindBadge, RoleLabel, StatusBadge, statusTone } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { checkboxClass, chipLabelClass, inputClass, labelClass, selectClass, theadClass } from "~/components/ui/form";
@@ -13,7 +13,7 @@ import { cn } from "~/lib/utils";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { taskdErrorResponse } from "~/taskd/errors";
-import type { Status, TaskList, TaskSummary } from "~/taskd/types";
+import type { ConfigView, Status, TaskList, TaskSummary } from "~/taskd/types";
 import type { Route } from "./+types/tasks";
 
 /**
@@ -43,6 +43,7 @@ export async function loadTasks(client: TaskdClient, request: Request): Promise<
     query: {
       status: params.getAll("status"),
       kind: params.getAll("kind"),
+      genre: params.getAll("genre"),
       parent: params.get("parent") ?? undefined,
       root_only: params.get("root_only") ?? undefined,
       q: params.get("q") ?? undefined,
@@ -54,9 +55,27 @@ export async function loadTasks(client: TaskdClient, request: Request): Promise<
   });
 }
 
-export async function loader({ request }: Route.LoaderArgs): Promise<TaskList> {
+export interface TasksData {
+  tasks: TaskList;
+  /** `GET /config` の `genres[]`（ADR-0027 D1）を絞り込みの選択肢に使う。 */
+  config: ConfigView;
+}
+
+/**
+ * `/tasks` の loader 本体。`GET /tasks` と `GET /config` を並列に呼ぶ（`config` は分野の絞り込み UI 用。
+ * `tasks.new.tsx` の `loadNewTask` と同じ形）。
+ */
+export async function loadTasksPage(client: TaskdClient, request: Request): Promise<TasksData> {
+  const [tasks, config] = await Promise.all([
+    loadTasks(client, request),
+    client.get<ConfigView>("/config", { signal: request.signal }),
+  ]);
+  return { tasks, config };
+}
+
+export async function loader({ request }: Route.LoaderArgs): Promise<TasksData> {
   try {
-    return await loadTasks(getTaskdClient(), request);
+    return await loadTasksPage(getTaskdClient(), request);
   } catch (e) {
     throw taskdErrorResponse(e);
   }
@@ -67,7 +86,8 @@ export function meta(_: Route.MetaArgs) {
 }
 
 export default function TasksPage({ loaderData }: Route.ComponentProps) {
-  const taskList = loaderData;
+  const { tasks: taskList, config } = loaderData;
+  const genres = config.genres ?? [];
   const [searchParams] = useSearchParams();
   const fetcher = useFetcher<TaskList>();
 
@@ -118,6 +138,7 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
   });
 
   const selectedStatuses = new Set(searchParams.getAll("status"));
+  const selectedGenres = new Set(searchParams.getAll("genre"));
 
   return (
     <div className="space-y-6">
@@ -181,6 +202,41 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                 ))}
               </div>
             </fieldset>
+            <fieldset data-testid="genre-filter">
+              <legend className={labelClass}>genre</legend>
+              {genres.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {genres.map((g) => (
+                    <label
+                      key={g.id}
+                      className={chipLabelClass}
+                      title={
+                        g.capabilities && g.capabilities.length > 0
+                          ? `${g.description}\nできること: ${g.capabilities.join(" / ")}`
+                          : g.description
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        name="genre"
+                        value={g.id}
+                        defaultChecked={selectedGenres.has(g.id)}
+                        className={checkboxClass}
+                      />
+                      {g.id}
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <input
+                  type="text"
+                  name="genre"
+                  data-testid="genre-filter-input"
+                  defaultValue={searchParams.get("genre") ?? ""}
+                  className={cn(inputClass, "mt-2 w-56")}
+                />
+              )}
+            </fieldset>
             <div className="flex flex-wrap items-end gap-3">
               <label className="flex items-center gap-2 text-sm text-fg-muted">
                 q:
@@ -228,6 +284,7 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
           <span className="w-28 shrink-0">状態</span>
           <span className="w-20 shrink-0">種別</span>
           <span className="w-24 shrink-0">役割</span>
+          <span className="w-24 shrink-0">分野</span>
           <span className="w-10 shrink-0 text-right">優先度</span>
           <span className="w-32 shrink-0">更新日時</span>
         </div>
@@ -274,6 +331,10 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                     {/* 役割（ADR-0016 D1、taskd-requests R2）。色分けはせずテキストのラベルだけ。役割なしは空欄。 */}
                     <span className="w-24 shrink-0 truncate" data-testid="task-role" title={item.role ?? ""}>
                       {item.role ? <RoleLabel role={item.role} /> : ""}
+                    </span>
+                    {/* 分野（ADR-0027 D1）。role と同じ理由で色分けはせずテキストのラベルだけ。分野なしは空欄。 */}
+                    <span className="w-24 shrink-0 truncate" data-testid="task-genre" title={item.genre ?? ""}>
+                      {item.genre ? <GenreLabel genre={item.genre} /> : ""}
                     </span>
                     <span className="w-10 shrink-0 text-right tabular-nums text-fg-muted">{item.priority}</span>
                     <span className="w-32 shrink-0 truncate text-xs text-fg-subtle" title={item.updated_at}>

@@ -172,6 +172,28 @@ describe("buildNewTaskSpec", () => {
     expect(spec.role).toBeUndefined();
   });
 
+  it("genre: sets spec.genre when filled, any free-text id is accepted (taskd validates, ADR-0027 D1)", () => {
+    const spec = buildNewTaskSpec(
+      form([
+        ["title", "t"],
+        ["objective", "o"],
+        ["genre", "literature"],
+      ]),
+    );
+    expect(spec.genre).toBe("literature");
+  });
+
+  it("genre: omits spec.genre when the field is empty", () => {
+    const spec = buildNewTaskSpec(
+      form([
+        ["title", "t"],
+        ["objective", "o"],
+        ["genre", ""],
+      ]),
+    );
+    expect(spec.genre).toBeUndefined();
+  });
+
   it("aggregate: sets spec.aggregate = true when the checkbox is present", () => {
     const spec = buildNewTaskSpec(
       form([
@@ -245,5 +267,80 @@ describe("createTask / loadNewTask", () => {
     const tasksReq = mock.requests.find((r) => r.url.startsWith("/api/v1/tasks"));
     expect(tasksReq?.url).toContain("limit=500");
     expect(tasksReq?.url).toContain("order=created_desc");
+  });
+
+  it("loadNewTask passes GET /config's genres[] through unmodified (ADR-0027 D1)", async () => {
+    const list: TaskList = { items: [], next_cursor: null, counts_by_status: {} } as unknown as TaskList;
+    const configWithGenres: ConfigView = {
+      ...config,
+      genres: [
+        {
+          id: "coding",
+          description: "コードを書く・直す・テストする",
+          capabilities: ["実装", "テスト", "リファクタリング"],
+          input_artifacts: ["spec.md"],
+          output_artifacts: ["diff.patch", "test-report.md"],
+          default_role: "implementer",
+          roles: ["lead", "implementer"],
+        },
+        {
+          id: "literature",
+          description: "関連研究の調査",
+          default_role: "literature-reader",
+          roles: ["literature-scout", "literature-reader"],
+        },
+      ],
+    };
+    mock.on("GET", "/api/v1/tasks", (_req, res) => sendJson(res, 200, list));
+    mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, configWithGenres));
+    const data = await loadNewTask(client, new Request("http://gui.invalid/tasks/new"));
+    expect(data.config.genres).toEqual(configWithGenres.genres);
+  });
+
+  it("422 unknown genre surfaces taskd's wording verbatim (no `field`, ADR-0027 D1)", async () => {
+    const message = 'unknown genre: "no-such-genre"';
+    mock.on("POST", "/api/v1/tasks", (_req, res) =>
+      sendProblem(res, {
+        status: 422,
+        code: "validation",
+        detail: message,
+        extra: { errors: [{ field: null, message }] },
+      }),
+    );
+    const result = await createTask(client, {
+      title: "t",
+      objective: "o",
+      acceptance: [{ type: "human", text: "x" }],
+      genre: "no-such-genre",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.status).toBe(422);
+    expect(result.error.detail).toBe(message);
+    expect(result.error.messages).toContain(message);
+    expect(result.error.fields.genre).toBeUndefined();
+  });
+
+  it("422 role not in genre's roles surfaces taskd's wording verbatim (ADR-0027 D1)", async () => {
+    const message = 'role "novelty-skeptic" is not one of genre "coding"\'s roles';
+    mock.on("POST", "/api/v1/tasks", (_req, res) =>
+      sendProblem(res, {
+        status: 422,
+        code: "validation",
+        detail: message,
+        extra: { errors: [{ field: null, message }] },
+      }),
+    );
+    const result = await createTask(client, {
+      title: "t",
+      objective: "o",
+      acceptance: [{ type: "human", text: "x" }],
+      genre: "coding",
+      role: "novelty-skeptic",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toBe(message);
+    expect(result.error.messages).toContain(message);
   });
 });

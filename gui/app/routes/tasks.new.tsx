@@ -170,6 +170,9 @@ export function buildNewTaskSpec(form: FormData): NewTaskSpec {
   const role = formString(form, "role");
   if (role) spec.role = role;
 
+  const genre = formString(form, "genre");
+  if (genre) spec.genre = genre;
+
   if (form.get("aggregate") != null) spec.aggregate = true;
 
   const parent = formString(form, "parent");
@@ -217,6 +220,15 @@ export default function NewTaskPage({ loaderData, actionData }: Route.ComponentP
 
   const nextRowId = useRef(1);
   const [rows, setRows] = useState<CriterionRow[]>(() => [{ id: 0, type: "human", value: "" }]);
+
+  // 分野（genre、ADR-0027 D1）を選ぶと、その分野の description と所属する role を表示する
+  // （role 欄そのものは自由記述のまま。taskd 側が検証する。ADR-0005 D5）。
+  const genres = config.genres ?? [];
+  const [selectedGenreId, setSelectedGenreId] = useState("");
+  const selectedGenre = genres.find((g) => g.id === selectedGenreId);
+  const capabilities = selectedGenre?.capabilities ?? [];
+  const inputArtifacts = selectedGenre?.input_artifacts ?? [];
+  const outputArtifacts = selectedGenre?.output_artifacts ?? [];
 
   function addRow() {
     const id = nextRowId.current;
@@ -377,6 +389,60 @@ export default function NewTaskPage({ loaderData, actionData }: Route.ComponentP
                     <option key={r.id} value={r.id} />
                   ))}
                 </datalist>
+              </div>
+              <div className="col-span-2">
+                <label htmlFor="genre" className={labelClass}>
+                  genre
+                </label>
+                {genres.length > 0 ? (
+                  <select
+                    id="genre"
+                    name="genre"
+                    data-testid="genre-select"
+                    defaultValue=""
+                    onChange={(e) => setSelectedGenreId(e.target.value)}
+                    className={cn(selectClass, "mt-1.5 w-full")}
+                  >
+                    <option value="">(なし)</option>
+                    {genres.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {g.id}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    id="genre"
+                    name="genre"
+                    type="text"
+                    data-testid="genre-input"
+                    className={cn(inputClass, "mt-1.5 w-full")}
+                  />
+                )}
+                <div className={cn(hintClass, "mt-1 space-y-1")} data-testid="genre-hint">
+                  {selectedGenre ? (
+                    <>
+                      <p>{`${selectedGenre.description}（roles: ${selectedGenre.roles.join(", ") || "-"}）`}</p>
+                      {capabilities.length > 0 && (
+                        <p data-testid="genre-capabilities">できること: {capabilities.join(" / ")}</p>
+                      )}
+                      {(inputArtifacts.length > 0 || outputArtifacts.length > 0) && (
+                        <p className="flex flex-wrap items-center gap-x-1">
+                          {inputArtifacts.length > 0 && (
+                            <span data-testid="genre-input-artifacts">渡すもの: {inputArtifacts.join(", ")}</span>
+                          )}
+                          {inputArtifacts.length > 0 && outputArtifacts.length > 0 && <span aria-hidden="true">→</span>}
+                          {outputArtifacts.length > 0 && (
+                            <span data-testid="genre-output-artifacts">返るもの: {outputArtifacts.join(", ")}</span>
+                          )}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p>分野ごとのハーネス・役割の入口（ADR-0027 D1）。role はこの一覧に関わらず自由記述で送れます。</p>
+                  )}
+                </div>
+                <FieldErrors error={error} field="genre" />
               </div>
               <div className="col-span-2 sm:col-span-4">
                 <label htmlFor="aggregate" className={chipLabelClass}>

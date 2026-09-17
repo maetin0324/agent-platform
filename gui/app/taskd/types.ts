@@ -529,6 +529,10 @@ export interface ConfigView {
   db: string;
   delegation?: DelegationLimits;
   error_cooldown_secs: number;
+  /**
+   * ADR-0027 D1: `[[genres]]` の要約。
+   */
+  genres?: GenreConfigView[];
   idle_timeout_secs: number;
   kill_grace_secs: number;
   lease_grace_secs: number;
@@ -597,6 +601,30 @@ export interface DelegationLimits {
    * ADR-0021 D4: 委譲した子が失敗したときの親の扱い。
    */
   on_child_failure: "retry_then_ask" | "ignore";
+}
+/**
+ * `[[genres]]` 1 行の要約（ADR-0027 D1, ADR-0028 D1）。
+ */
+export interface GenreConfigView {
+  /**
+   * ADR-0028 D1: この分野で「できること」の自由記述。空なら省略される。
+   */
+  capabilities?: string[];
+  default_role?: string | null;
+  description: string;
+  id: string;
+  /**
+   * ADR-0028 D1: この分野に渡すもの（目安）。空なら省略される。
+   */
+  input_artifacts?: string[];
+  /**
+   * ADR-0028 D1: この分野から返るもの（目安）。空なら省略される。
+   */
+  output_artifacts?: string[];
+  /**
+   * この分野に属する役割 id の一覧。
+   */
+  roles: string[];
 }
 export interface ProviderConfigView {
   /**
@@ -879,6 +907,11 @@ export interface Task {
   budget: Budget;
   created_at: string;
   depends_on: TaskId[];
+  /**
+   * ADR-0027 D1: 分野名（自由記述。`[[genres]] id` と一致すれば既定の役割・プロンプトの説明が効く）。
+   * 状態機械は見ない。導入前のタスクには無いので任意。
+   */
+  genre?: string | null;
   id: TaskId;
   inputs: ArtifactRef[];
   kind: TaskKind;
@@ -1105,6 +1138,10 @@ export interface TaskSummary {
   children: number;
   created_at: string;
   depends_on: TaskId[];
+  /**
+   * ADR-0027 D1 の `Task.genre`（`role` と同じ理由で一覧に出す。`TaskDetail.genre` と同じ値）。
+   */
+  genre?: string | null;
   id: TaskId;
   kind: TaskKind;
   lease_expires_at?: string | null;
@@ -1173,6 +1210,12 @@ export interface NewTaskSpec {
    */
   cluster?: string | null;
   depends_on?: TaskId[];
+  /**
+   * ADR-0027 D1: 分野名（自由記述）。省略時は `role` の分野（`[[genres]] roles` に含む分野がちょうど
+   * 1 つのとき）を継ぐ。`genres` が設定されていれば、知らない `genre` や `role` とその分野の不整合は
+   * エラー（`genres` が空の設定では検証しない。分野は任意）。
+   */
+  genre?: string | null;
   /**
    * DESIGN §4.1 の `TaskKind`。
    */
@@ -1403,6 +1446,10 @@ export interface TaskDetail {
   delegated: DelegatedView[];
   dependencies: TaskRef[];
   dependents: TaskRef[];
+  /**
+   * ADR-0027 D1: `Task.genre`（`role` と同じ理由で最上位にも出す）。
+   */
+  genre?: string | null;
   latest_question?: string | null;
   prior_review: ReviewNote[];
   /**

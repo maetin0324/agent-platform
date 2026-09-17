@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadTasks } from "~/routes/tasks";
+import { loadTasks, loadTasksPage } from "~/routes/tasks";
 import { TaskdClient } from "~/taskd/client.server";
 import { TaskdUnavailable } from "~/taskd/errors";
-import type { TaskList } from "~/taskd/types";
+import type { ConfigView, TaskList } from "~/taskd/types";
 import { type MockTaskd, sendJson, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
@@ -69,6 +69,17 @@ describe("loadTasks", () => {
     );
   });
 
+  it("forwards genre (multi, ADR-0027 D1) alongside status/kind", async () => {
+    mock.on("GET", "/api/v1/tasks", (_req, res) => {
+      sendJson(res, 200, sampleTaskList);
+    });
+
+    await loadTasks(client, createRequest("http://gui.invalid/tasks?genre=coding&genre=literature"));
+
+    const req = mock.requests.at(-1);
+    expect(req?.url).toBe("/api/v1/tasks?genre=coding&genre=literature");
+  });
+
   it("forwards kind (multi) and parent/root_only when present", async () => {
     mock.on("GET", "/api/v1/tasks", (_req, res) => {
       sendJson(res, 200, sampleTaskList);
@@ -120,5 +131,58 @@ describe("loadTasks", () => {
     }
 
     expect(error).toBeInstanceOf(TaskdUnavailable);
+  });
+});
+
+describe("loadTasksPage", () => {
+  const config = {
+    config_path: "/tmp/taskd.toml",
+    db: "/tmp/taskd.sqlite3",
+    workspace_root: "/tmp/ws",
+    tick_ms: 200,
+    max_concurrency: 2,
+    lease_grace_secs: 30,
+    idle_timeout_secs: 60,
+    kill_grace_secs: 5,
+    review_timeout_secs: 60,
+    error_cooldown_secs: 0,
+    retry_backoff_base_secs: 0,
+    retry_backoff_max_secs: 0,
+    max_requeues: 3,
+    plan_auto_accept: false,
+    reviewer: { adapter: "fake", tier: "cheap" },
+    providers: [],
+    api: { bind: "127.0.0.1:7710", auth_required: false, allowed_hosts: [] },
+    genres: [
+      {
+        id: "coding",
+        description: "コードを書く",
+        capabilities: ["実装", "テスト"],
+        input_artifacts: ["spec.md"],
+        output_artifacts: ["diff.patch"],
+        default_role: "implementer",
+        roles: ["lead", "implementer"],
+      },
+    ],
+  } as unknown as ConfigView;
+
+  it("calls GET /tasks and GET /config in parallel and returns {tasks, config} unmodified", async () => {
+    mock.on("GET", "/api/v1/tasks", (_req, res) => sendJson(res, 200, sampleTaskList));
+    mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, config));
+
+    const result = await loadTasksPage(client, createRequest("http://gui.invalid/tasks"));
+
+    expect(result).toEqual({ tasks: sampleTaskList, config });
+    expect(mock.requests.some((r) => r.method === "GET" && r.url === "/api/v1/config")).toBe(true);
+  });
+
+  it("falls back to an empty genres[] when taskd has no [[genres]] configured", async () => {
+    const { genres: _genres, ...configWithoutGenres } = config;
+    mock.on("GET", "/api/v1/tasks", (_req, res) => sendJson(res, 200, sampleTaskList));
+    mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, configWithoutGenres));
+
+    const result = await loadTasksPage(client, createRequest("http://gui.invalid/tasks"));
+
+    expect(result.config.genres).toBeUndefined();
   });
 });

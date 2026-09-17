@@ -6,7 +6,7 @@ import { HelpLink } from "~/components/HelpLink";
 import { ImageViewer } from "~/components/ImageViewer";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Sha256Badge } from "~/components/Sha256Badge";
-import { Badge, KindBadge, RoleLabel, StatusBadge } from "~/components/ui/badge";
+import { Badge, GenreLabel, KindBadge, RoleLabel, StatusBadge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import {
@@ -137,6 +137,8 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
                 <StatusBadge status={task.status} data-testid="task-status" />
                 <KindBadge kind={task.kind} data-testid="task-kind" />
                 <RoleLabel role={detail.role ?? "-"} data-testid="task-role" />
+                {/* 分野（ADR-0027 D1）。role と同じ理由で色分けはせずテキストのラベルだけ。分野なしは "-"。 */}
+                <GenreLabel genre={detail.genre ?? "-"} data-testid="task-genre" />
               </div>
               <h1 id="header-heading" className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span data-testid="task-id" className="font-mono text-xs text-fg-subtle">

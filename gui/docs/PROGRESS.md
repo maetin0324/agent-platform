@@ -17,6 +17,7 @@
 | G7 | クラスタと委譲の表示 | **DONE** | 2026-09-16 |
 | G8 | プロバイダの登録と Claude アカウント（プール・ログイン・残量）の画面 | **DONE** | 2026-09-16 |
 | G9 | codex アカウント（アダプタ選択・デバイス認証）と run の account 列 | **DONE** | 2026-09-17 |
+| G10 | 分野（genre）と能力レジストリの表示（taskd Phase 16〜18 / ADR-0027・0028） | **DONE** | 2026-09-17 |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
@@ -1010,3 +1011,29 @@ G6-P1（アカウント管理画面）は taskd 側 ADR-0022 D1 で「作らな�
 - `docs/taskd-api-v1.md` は `scripts/sync-gui-docs.sh` で同期済み（§3.24 / §3.25 の adapter 一覧と 422 の条件）。
 - 証拠: `pnpm lint` / `pnpm typecheck` / `pnpm build` exit 0、`pnpm test` **193 passed**、`pnpm gen:types` 差分ゼロ（スキーマ変更なし）。
   e2e は運用中の taskd / GUI（7700 / 7710）と衝突するため今回は実行していない（GUI の変更は選択肢 1 つの追加のみ）。
+
+## Phase G10 — DONE（2026-09-17）
+
+taskd 側の Phase 16〜18（ADR-0027 の分野、ADR-0028 の能力レジストリ）への追従。GUI 側の新しい設計判断は無し（表示と中継だけ）。
+
+### 成果物
+
+- `pnpm gen:types` 再生成（`Task.genre` / `TaskSummary.genre` / `NewTaskSpec.genre` / `ConfigView.genres` /
+  `GenreConfigView{capabilities, input_artifacts, output_artifacts}`）。
+- `/tasks/new`: 分野の選択（`GET /config` の `genres` から。未設定の taskd では自由入力に落とす）。選ぶと説明・所属する役割に加えて、
+  **できること / 渡すもの → 返るもの**（manifest）を出す（`genre-hint` の中に `genre-capabilities` / `genre-input-artifacts` / `genre-output-artifacts`。空の項目は出さない）。
+  役割の入力は自由記述のまま（検証は taskd 側。ADR-0005 D5）。taskd の 422（未知の分野・分野に属さない役割）はそのまま表示する。
+- `/tasks`: 分野の絞り込み（チップ。説明と capabilities を `title` に出す）と一覧の「分野」列（`GenreLabel`。役割と同じ中立な見た目）。
+- `/tasks/:id`: ヘッダに分野のラベル。
+- `/providers`: adapter の選択肢に `paperqa` を追加（`acp` は G9 で追加済み）。
+- `/help`: 分野の説明（ハーネスへの入口であること、manifest を Planner と委譲する親が見ること）。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint` / `pnpm typecheck` / `pnpm build` exit 0、`pnpm test` **201 passed**（24 ファイル）、`pnpm gen:types` は 2 回実行して同一。
+- スクリーンショット: `/tasks/new` で分野を選んだ状態（manifest の 3 行が出る）をライト / ダークで目視確認。分野が未設定の taskd での自由入力への落とし方も確認。
+- e2e は運用中の taskd / GUI（7700 / 7710）と衝突するため未実行（変更は表示と中継のみ）。
+
+### 未解決事項
+
+- G10-U1: このリポジトリには DOM を描画する unit テストが無いため、「空の項目を出さない」ことはコードの条件分岐と目視でのみ確認している。

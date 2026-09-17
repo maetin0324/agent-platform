@@ -89,3 +89,21 @@ export function RoleLabel({ role, className, ...props }: HTMLAttributes<HTMLSpan
     </span>
   );
 }
+
+/**
+ * 分野（genre、ADR-0027 D1）。role と同じ理由（DESIGN §10 Phase G7）で色分けはせず、
+ * 中立な枠付きラベルにする（RoleLabel と同じ見た目。役割と並べたときに区別できるよう角を丸くする）。
+ */
+export function GenreLabel({ genre, className, ...props }: HTMLAttributes<HTMLSpanElement> & { genre: string }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border border-dashed border-border-strong px-1.5 py-0.5 text-[0.7rem] font-medium text-fg-muted",
+        className,
+      )}
+      {...props}
+    >
+      {genre}
+    </span>
+  );
+}
