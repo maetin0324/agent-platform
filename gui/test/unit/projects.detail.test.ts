@@ -61,6 +61,7 @@ describe("loadProjectDetail", () => {
           depends_on: [],
           assignee: "research-survey",
           milestone_id: "m1",
+          conversation: false,
         },
       ],
     };
@@ -150,6 +151,7 @@ describe("loadProjectDetail", () => {
           parent_id: null,
           depends_on: [],
           assignee: "research-survey",
+          conversation: false,
         },
       ],
     };

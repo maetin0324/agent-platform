@@ -180,6 +180,10 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
   const submitting = fetcher.state !== "idle";
 
   const orgById = useMemo(() => new Map(org.items.map((n) => [n.id, n])), [org.items]);
+  // 対話用タスク（`conversation`）は仕事の木から完全に外す（GUI-R3、Phase 27。SPEC「タスクは裏方」/
+  // ADR-0033 D8）。`projectTasksToGraph` は内部でも同じ絞り込みをするが、件数表示・「担当に話す」一覧
+  // （下の `work-tree-assignees`）も同じ判断に揃えるため、ここでも 1 度だけ絞る。
+  const workTasks = useMemo(() => tasks.filter((t) => !t.conversation), [tasks]);
   const graph = useMemo(() => projectTasksToGraph(tasks, orgById), [tasks, orgById]);
 
   return (
@@ -346,14 +350,14 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
       </section>
 
       <section aria-labelledby="work-tree-heading" className="space-y-4">
-        <SectionTitle icon="gitBranch" id="work-tree-heading" count={tasks.length}>
+        <SectionTitle icon="gitBranch" id="work-tree-heading" count={workTasks.length}>
           仕事の木
         </SectionTitle>
         <p className="text-xs text-fg-subtle">
           SPEC §3.3「これをパッと見れば、おかしな方針を立てていないかが分かる」。ノードをクリックするとタスク詳細（
-          <code>/tasks/:id</code>）へ移ります。
+          <code>/tasks/:id</code>）へ移ります。対話用タスク（人への返事のための run）は裏方なので出ません。
         </p>
-        {tasks.length === 0 ? (
+        {workTasks.length === 0 ? (
           <EmptyState icon="gitBranch" title="この案件のタスクはまだありません" />
         ) : (
           <>
@@ -361,7 +365,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
             {/* SPEC §3.4「おかしなことをしていたら、誰に言うかを決めてその担当に直接言う」。
                 木のノード（タスク）の担当へ、この案件を選んだ状態で話しかける導線（Phase G13b-2）。 */}
             <ul className="space-y-1" data-testid="work-tree-assignees">
-              {tasks
+              {workTasks
                 .filter((t) => t.assignee)
                 .map((t) => (
                   <li key={t.id} className="flex flex-wrap items-center gap-2 text-sm">

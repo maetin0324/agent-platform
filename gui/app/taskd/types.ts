@@ -1384,9 +1384,17 @@ export interface TaskSummary {
    */
   actions: Action[];
   adapter?: string | null;
+  /**
+   * ADR-0033 D2 の `Task.assignee`（組織のノード id。GUI-R3: 一覧に「誰の仕事か」を出すため）。
+   */
+  assignee?: string | null;
   attempts: number;
   backoff_until?: string | null;
   children: number;
+  /**
+   * 対話用タスク（人への返事のための run）か（GUI-R3: 仕事の木や一覧から隠せるように）。
+   */
+  conversation: boolean;
   created_at: string;
   depends_on: TaskId[];
   /**
@@ -1461,6 +1469,11 @@ export interface Message {
    * `role = node` のとき、その返事を作った run（`Event::WorkerStarted.run_id`）。
    */
   run_id?: string | null;
+  /**
+   * この 1 往復を起こした対話用タスク（GUI からの依頼 R4 / Phase 24 の P-74。migration 0007）。
+   * `role = user` の行にも `role = node` の行にも**同じ id** が入る。導入前の行は `None`。
+   */
+  task_id?: TaskId | null;
   text: string;
 }
 /**
@@ -1708,6 +1721,10 @@ export interface Project {
  */
 export interface ProjectTaskView {
   assignee?: string | null;
+  /**
+   * 対話用タスク（人への返事のための run）か。GUI は仕事の木から隠せる（GUI-R3）。
+   */
+  conversation: boolean;
   depends_on: TaskId[];
   id: TaskId;
   milestone_id?: MilestoneId | null;
@@ -1885,8 +1902,8 @@ export interface Report {
    */
   node_id: string;
   /**
-   * 案件。`None` は「案件なし」（クラスタの障害など、案件に紐づかない悪い知らせ）。
-   * `reports.project_id` は NOT NULL なので、DB には空文字列として書く（migration は足さない。ADR-0034）。
+   * 案件。`None` は「案件なし」（クラスタの障害など、案件に紐づかない悪い知らせ）。DB でも NULL
+   * （migration 0007 で NOT NULL を外した。ADR-0034 D1 の「将来」の項）。
    */
   project_id?: ProjectId | null;
   read_at?: string | null;

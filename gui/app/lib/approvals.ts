@@ -6,20 +6,6 @@ import type { Approval, DaemonView, OrgNode, Project, StandingRule } from "~/tas
  * 純粋関数としてテストする。DOM を描画する unit テストはこのリポジトリに無い。G10-U1）。
  */
 
-/**
- * 未決の要求（上）と決めたものの履歴（下）に分ける（`Approval.decision` が無い = 未決。§3.56「decision は
- * once/standing/denied（未決定は無い）」）。**`GET /approvals?pending=false` には頼らない**:
- * 実機で `pending=false` がフィルタせず全件を返す（`pending=true` は正しく未決だけに絞れる）ことを確認したため、
- * `GET /approvals`（フィルタ無し）を 1 回だけ呼び、ここで `decision` の有無だけを見て分ける
- * （`decision` は応答のドキュメント化されたフィールドなので、taskd に無い判断を GUI に足すことにはならない。
- * `docs/taskd-requests.md` R5 に記録済み）。
- */
-export function splitApprovals(items: Approval[]): { pending: Approval[]; decided: Approval[] } {
-  const pending = items.filter((a) => a.decision == null);
-  const decided = items.filter((a) => a.decision != null);
-  return { pending, decided };
-}
-
 /** 案件名の解決（`~/lib/reports.ts` の `reportProjectName` と同じ作り）。`project_id` が無ければ「案件なし」。 */
 export function approvalProjectName(approval: Pick<Approval, "project_id">, projects: Project[]): string {
   if (!approval.project_id) return "案件なし";

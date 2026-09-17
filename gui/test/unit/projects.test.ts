@@ -142,4 +142,17 @@ describe("createProject (POST /projects, docs/taskd-api-v1.md §3.46)", () => {
       expect(result.error.fields.title).toEqual(["title must not be blank"]);
     }
   });
+
+  it("401 unauthorized（Phase 27 M-4 で管理系になった。org-admin と同じ code=unauthorized で、案内文は Flash.tsx 共通）", async () => {
+    mock.on("POST", "/api/v1/projects", (_req, res) =>
+      sendProblem(res, { status: 401, code: "unauthorized", detail: "token required" }),
+    );
+
+    const result = await createProject(client, { title: "p1", request: "…" });
+
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({ status: 401, code: "unauthorized" }) as unknown,
+    });
+  });
 });

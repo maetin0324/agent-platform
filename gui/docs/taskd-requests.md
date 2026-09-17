@@ -4,7 +4,27 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
 
 ## 未対応
 
-### R3（2026-09-17、Phase G13a）: `TaskSummary` に `assignee` / `project_id` / `milestone_id` が無い
+（現在は無し。R3〜R5 は taskd 側 Phase 27 で解決済み。下の「対応済み」参照。）
+
+## 対応済み
+
+### R3 — 対応済み（2026-09-17、taskd 側 Phase 27 / GUI-R3）
+
+- `TaskSummary` に `assignee: Option<String>` と `conversation: bool`、`ProjectTaskView` に
+  `conversation: bool` を足した（`project_id` / `milestone_id` は `TaskSummary` には足していない。依頼の
+  主目的だった「抱えている仕事の数」の集計には `assignee` だけで足りるため）。
+- GUI 側（Phase G13e）: `/org` の「抱えている仕事の数」を、`GET /projects/{id}` を案件数ぶん束ねる N+1 の
+  代替から、**1 回の `GET /tasks?limit=500`** の `TaskSummary.assignee` を数える形に直した
+  （`app/lib/org-tree.ts::countWorkload` / `tasksByAssignee`、`app/routes/org.tsx::loadOrg`）。
+  `TaskSummary` に `project_id` が無いため、組織ノード詳細の「抱えているタスク」一覧から案件名の列は
+  落とした（N+1 をやめた代わりのトレードオフ）。
+- `conversation: true` のタスク（対話用。人への返事のための run）は、仕事の木（`/projects/:id`、
+  `app/lib/work-tree.ts::projectTasksToGraph`）と組織の「抱えている仕事」から**完全に除外**、`/tasks`
+  一覧では既定で隠し「対話用も表示」のトグル（`show_conversation=1`）で出せるようにした
+  （`app/routes/tasks.tsx`）。
+- 以下は原文（記録のため残す）。
+
+### R3（原文、2026-09-17、Phase G13a）: `TaskSummary` に `assignee` / `project_id` / `milestone_id` が無い
 
 - **エンドポイント**: `GET /tasks`（`TaskList.items[]` = `TaskSummary`）。
 - **期待（ADR-0033 D1「組織の木」、SPEC §3.2「誰が何を抱えているか」）**: 組織の木の各ノードに「抱えている仕事の数」を出すには、
@@ -31,7 +51,20 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
   1 回の `GET /tasks?assignee=<id>` （またはフィルタ無しで一覧を取って `assignee` で数える）で組織の木の全ノードの
   ワークロードが求まるようになる。
 
-### R4（2026-09-17、Phase G13b-2）: `Message` に `task_id` が無く、対話用タスクが仕事の木に混ざる
+### R4 — 対応済み（2026-09-17、taskd 側 Phase 27 / GUI-R4）
+
+- (a) `Message` に `task_id: Option<TaskId>` を足した（migration 0007。`role = user` の行にも
+  `role = node` の行にも同じ id が入る）。GUI 側（Phase G13e）: `app/components/Conversation.tsx` が
+  `Waiting`/`replyLink` の「送った直後の発言だけ」ヒューリスティックをやめ、`Message.task_id` を直接
+  リンク先にした。画面を開き直した後の**過去の返事**からも `/tasks/:id`（裏方の run）へ行けるようになった。
+- (b) `TaskSummary.conversation: bool` / `ProjectTaskView.conversation: bool` を足した（`title` の
+  前置きに頼らない、仕様に書かれた値）。GUI 側（Phase G13e）: `app/lib/work-tree.ts::projectTasksToGraph`
+  が `conversation: true` のタスクを仕事の木から完全に除外、`app/routes/projects.$id.tsx` の
+  「担当に話す」一覧・件数表示も同じ絞り込みに揃えた。`/tasks` 一覧は既定で隠し、トグルで表示できる
+  （R3 の対応済みメモも参照）。
+- 以下は原文（記録のため残す）。
+
+### R4（原文、2026-09-17、Phase G13b-2）: `Message` に `task_id` が無く、対話用タスクが仕事の木に混ざる
 
 - **エンドポイント**: `GET /org/{id}/messages`（`MessageList.items[]` = `Message`）と `GET /projects/{id}`（`tasks[]` = `ProjectTaskView`）。
 - **期待（SPEC §3.4「相手は人」、§3.3「仕事の木をパッと見れば、おかしな方針を立てていないかが分かる」）**:
@@ -51,7 +84,17 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
   または `GET /projects/{id}` / `GET /tasks` に `?exclude=conversation` のような絞り込み）を足してほしい。
   どちらも足されるまでは、GUI は (a) 送った直後の返事にだけリンクを出し、(b) 対話用タスクも仕事の木に描いたままにする。
 
-### R5（2026-09-17、Phase G13d）: `GET /approvals?pending=false` が絞り込まない
+### R5 — 対応済み（2026-09-17、taskd 側 Phase 27）
+
+- `GET /approvals?pending=false` が「決定済みだけ」（`decision IS NOT NULL`）に絞り込まれるよう直った
+  （`ApprovalStore::approval_list` の第 1 引数が `bool` から `Option<bool>` に変わり、`None` = 全件 /
+  `Some(true)` = 未決定だけ / `Some(false)` = 決定済みだけ）。
+- GUI 側（Phase G13e）: `app/routes/approvals.tsx::loadApprovals` を `pending=true` / `pending=false` の
+  **2 回呼び**に戻し、`app/lib/approvals.ts` の `splitApprovals`（G13d の回避策）は削除した
+  （クエリの絞り込みを taskd に任せる、本来の設計に戻せた）。
+- 以下は原文（記録のため残す）。
+
+### R5（原文、2026-09-17、Phase G13d）: `GET /approvals?pending=false` が絞り込まない
 
 - **エンドポイント**: `GET /approvals?pending=`（§3.56）。
 - **期待（`docs/taskd-api-v1.md` §3.56「`pending=true` で未決定だけ」）**: `pending=false` は「決定済みだけ」（`decision IS NOT NULL`）に
@@ -70,8 +113,6 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
   「ドキュメント化されたフィールド値で GUI 側が分ける」パターンと同じ）。**新しい判断値は作っていない**。
 - **依頼**: `pending=false` が `decision IS NOT NULL` で絞り込まれるように直してほしい（`pending=true` の実装を参考に）。
   直ったら GUI 側は `pending=true` / `pending=false` の 2 回呼びに戻せる（クエリの絞り込みを taskd に任せる方が本来の設計）。
-
-## 対応済み
 
 ### R2 — 対応済み（2026-09-16、taskd 側で追加）
 

@@ -8,7 +8,7 @@ import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { hintClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
-import { approvalNodeName, approvalProjectName, splitApprovals, standingRuleTargetName } from "~/lib/approvals";
+import { approvalNodeName, approvalProjectName, standingRuleTargetName } from "~/lib/approvals";
 import { relativeTimeLabel } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
@@ -42,8 +42,11 @@ import type { Route } from "./+types/approvals";
  * 上に**未決の要求**、下に**決めたもの**の履歴、さらに下に**永続の認可の一覧と編集**
  * （`GET/POST/DELETE /standing-rules`）。案件名・ノード名は `GET /projects` / `GET /org` から解決する
  * （taskd 側に判断値を作らせない。`~/lib/approvals.ts`）。
- * **`GET /approvals` はフィルタ無しで 1 回だけ呼び、`decision` の有無で分ける**（`~/lib/approvals.ts` の
- * `splitApprovals` のコメント参照。実機で `pending=false` が全件を返すことを確認したため。`docs/taskd-requests.md` R5）。
+ * **`GET /approvals?pending=true` / `?pending=false` の 2 回呼び**（Phase 27 で taskd 側が
+ * `pending=false` を「決定済みだけ」に絞り込むよう直した。`docs/taskd-requests.md` R5 解決済み）。
+ * G13d では実機で `pending=false` が絞り込まないことを確認し、フィルタ無しの 1 回取得 + GUI 側
+ * `splitApprovals`（`Approval.decision` の有無で分ける）で回避していたが、taskd 側の絞り込みに戻した
+ * （クエリの絞り込みを taskd に任せる方が本来の設計。`splitApprovals` は不要になったので削除した）。
  */
 
 export interface ApprovalsData {
@@ -56,16 +59,16 @@ export interface ApprovalsData {
 }
 
 export async function loadApprovals(client: TaskdClient, request: Request): Promise<ApprovalsData> {
-  const [approvals, org, projects, standingRules] = await Promise.all([
-    client.get<ApprovalList>("/approvals", { signal: request.signal }),
+  const [pendingList, decidedList, org, projects, standingRules] = await Promise.all([
+    client.get<ApprovalList>("/approvals", { query: { pending: true }, signal: request.signal }),
+    client.get<ApprovalList>("/approvals", { query: { pending: false }, signal: request.signal }),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
     client.get<ProjectList>("/projects", { signal: request.signal }).catch(() => ({ items: [] }) as ProjectList),
     client.get<StandingRuleList>("/standing-rules", { signal: request.signal }),
   ]);
-  const { pending, decided } = splitApprovals(approvals.items);
   return {
-    pending,
-    decided,
+    pending: pendingList.items,
+    decided: decidedList.items,
     org: org.items,
     projects: projects.items,
     standingRules: standingRules.items,

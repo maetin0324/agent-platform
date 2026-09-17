@@ -1,11 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  approvalNodeName,
-  approvalProjectName,
-  approvalsPendingCount,
-  splitApprovals,
-  standingRuleTargetName,
-} from "~/lib/approvals";
+import { approvalNodeName, approvalProjectName, approvalsPendingCount, standingRuleTargetName } from "~/lib/approvals";
 import { loadApprovals } from "~/routes/approvals";
 import {
   buildApprovalDecideInput,
@@ -126,26 +120,19 @@ describe("approvalsPendingCount (DaemonSnapshot.approvals_pending, docs/taskd-ap
   });
 });
 
-describe("splitApprovals (~/lib/approvals.ts. decision の有無で分ける)", () => {
-  it("decision が無ければ pending、あれば decided", () => {
-    const a1 = approval("a1");
-    const a2 = approval("a2", { decision: "once", answer: "cluster-a" });
-    const a3 = approval("a3", { decision: "standing", answer: "毎回聞かずに進めてよい" });
-    expect(splitApprovals([a1, a2, a3])).toEqual({ pending: [a1], decided: [a2, a3] });
-  });
-
-  it("空配列", () => {
-    expect(splitApprovals([])).toEqual({ pending: [], decided: [] });
-  });
-});
-
-describe("loadApprovals (docs/taskd-api-v1.md §3.56。pending と決定済みを分ける)", () => {
-  it("GET /approvals をフィルタ無しで 1 回だけ呼び、decision の有無で pending / decided に分ける", async () => {
-    // 実機で確認した taskd の挙動（`pending=false` が絞り込まない）に合わせ、GUI 側はフィルタ無しで 1 回だけ呼ぶ
-    // （docs/taskd-requests.md R5）。
+describe("loadApprovals (docs/taskd-api-v1.md §3.56。pending=true / pending=false の 2 回呼び)", () => {
+  it("GET /approvals?pending=true と ?pending=false を 1 回ずつ呼ぶ（Phase 27。taskd-requests.md R5 解決済み）", async () => {
+    // Phase 27 で taskd 側が pending=false を「決定済みだけ」に絞り込むよう直したため、GUI 側の
+    // splitApprovals（decision の有無でフィルタ無し 1 回取得を分ける、G13d の回避策）は不要になった。
     const a1 = approval("a1");
     const a2 = approval("a2", { decision: "once", answer: "cluster-a", decided_at: "2026-09-17T01:00:00Z" });
-    mock.on("GET", "/api/v1/approvals", (_req, res) => sendJson(res, 200, { items: [a1, a2] } satisfies ApprovalList));
+    mock.on("GET", "/api/v1/approvals", (req, res) => {
+      const url = new URL(req.url ?? "", "http://mock-taskd.invalid");
+      const pending = url.searchParams.get("pending");
+      if (pending === "true") return sendJson(res, 200, { items: [a1] } satisfies ApprovalList);
+      if (pending === "false") return sendJson(res, 200, { items: [a2] } satisfies ApprovalList);
+      return sendJson(res, 200, { items: [a1, a2] } satisfies ApprovalList);
+    });
     mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
     mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
     mock.on("GET", "/api/v1/standing-rules", (_req, res) =>
@@ -158,8 +145,10 @@ describe("loadApprovals (docs/taskd-api-v1.md §3.56。pending と決定済み�
     expect(result.decided).toEqual([a2]);
     expect(result.standingRules).toEqual([standingRule("s1")]);
     const approvalRequests = mock.requests.filter((r) => r.url.startsWith("/api/v1/approvals"));
-    expect(approvalRequests).toHaveLength(1);
-    expect(approvalRequests[0].url).toBe("/api/v1/approvals");
+    expect(approvalRequests).toHaveLength(2);
+    expect(approvalRequests.map((r) => r.url).sort()).toEqual(
+      ["/api/v1/approvals?pending=false", "/api/v1/approvals?pending=true"].sort(),
+    );
   });
 
   it("GET /org・GET /projects が落ちても認可の一覧は返す（名前解決にしか使わないため）", async () => {

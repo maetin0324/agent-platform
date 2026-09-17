@@ -29,12 +29,10 @@ import type { ConversationOpOutcome } from "~/taskd/action-types";
  * `role = "node"` の行が入ったら止める（`~/lib/conversation.ts` の `replyArrived`）。
  */
 
-/** 送信の直後だけ覚えておくもの（「考え中」の終了条件と、返事から run の裏方へのリンクに使う）。 */
+/** 送信の直後だけ覚えておくもの（「考え中」の終了条件に使う）。 */
 interface Waiting {
   /** 202 の `message_id`（案件を作った直後など、分からないときは null） */
   messageId: string | null;
-  /** 202 の `task_id`（返事を作る run が動くタスク。裏方） */
-  taskId: string | null;
   since: number;
 }
 
@@ -47,8 +45,6 @@ export function Conversation({ data }: { data: ConversationData }) {
 
   const [waiting, setWaiting] = useState<Waiting | null>(null);
   const [timedOut, setTimedOut] = useState(false);
-  /** 直近に自分が送った発言と、その返事を作るタスク（返事に run_id が付いたらここへリンクする）。 */
-  const [replyLink, setReplyLink] = useState<{ afterMessageId: string | null; taskId: string } | null>(null);
 
   // 案件を作った直後（action の redirect `?waiting=1`）は、秘書の最初の返事を待つ（SPEC §7）。
   const waitParam = searchParams.get("waiting") === "1";
@@ -58,7 +54,7 @@ export function Conversation({ data }: { data: ConversationData }) {
     if (!waitParam || handledWaitKey.current === waitKey) return;
     handledWaitKey.current = waitKey;
     setTimedOut(false);
-    setWaiting({ messageId: null, taskId: null, since: Date.now() });
+    setWaiting({ messageId: null, since: Date.now() });
   }, [waitParam, waitKey]);
 
   // 送信（202）が返ったら「考え中」に入る。
@@ -69,12 +65,7 @@ export function Conversation({ data }: { data: ConversationData }) {
     if (handledAccepted.current === outcome.accepted.message_id) return;
     handledAccepted.current = outcome.accepted.message_id;
     setTimedOut(false);
-    setWaiting({
-      messageId: outcome.accepted.message_id,
-      taskId: outcome.accepted.task_id,
-      since: Date.now(),
-    });
-    setReplyLink({ afterMessageId: outcome.accepted.message_id, taskId: outcome.accepted.task_id });
+    setWaiting({ messageId: outcome.accepted.message_id, since: Date.now() });
   }, [fetcher.data]);
 
   // 返事が入ったら止める（ポーリングの終了条件）。
@@ -99,7 +90,6 @@ export function Conversation({ data }: { data: ConversationData }) {
   const error = fetcher.data && !fetcher.data.ok ? fetcher.data.error : undefined;
   const submitting = fetcher.state !== "idle";
   const project = projects.find((p) => p.id === projectId) ?? null;
-  const linkedIndex = replyLink ? messages.findIndex((m) => m.id === replyLink.afterMessageId) : -1;
   // 送信のたびに入力欄と「新しい案件として」を初期状態へ戻す（案件を切り替えたときも）。
   const formKey = `${projectId ?? "none"}:${handledAccepted.current ?? ""}`;
 
@@ -190,7 +180,7 @@ export function Conversation({ data }: { data: ConversationData }) {
                 </EmptyState>
               ) : (
                 <ul className="space-y-3">
-                  {messages.map((m, i) => (
+                  {messages.map((m) => (
                     <li
                       key={m.id}
                       data-testid="conversation-message"
@@ -212,10 +202,13 @@ export function Conversation({ data }: { data: ConversationData }) {
                         )}
                         <p className="mt-1 flex items-center gap-2 text-[0.7rem] text-fg-subtle">
                           <span>{m.created_at}</span>
+                          {/* `Message.task_id`（GUI からの依頼 R4、Phase 27 で追加。migration 0007）で、
+                              画面を開き直した後の過去の返事からも裏方の run（対話用タスク）へたどれる。
+                              `role = user` の行にも同じ id が入るが、リンクは意味のある返事の行にだけ出す。 */}
                           {m.run_id &&
-                            (replyLink && linkedIndex >= 0 && i > linkedIndex ? (
+                            (m.task_id ? (
                               <Link
-                                to={`/tasks/${replyLink.taskId}`}
+                                to={`/tasks/${m.task_id}`}
                                 data-testid="conversation-run-link"
                                 className="underline underline-offset-2"
                               >

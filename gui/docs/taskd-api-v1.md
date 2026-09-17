@@ -1,6 +1,12 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-17 Phase 27（Phase 24/25 の監査対応、GUI-R3/R4、ADR-0034 D7）— `TaskSummary.assignee` /
+  `TaskSummary.conversation`、`ProjectTaskView.conversation`、`Message.task_id` を追加（追加のみ。v1 のまま）。
+  **`POST /projects` を管理系に変更**（`token_file` 未設定でも 401。破壊的変更はここだけ）。
+  `POST/PATCH /org` の `genre` は `[[genres]]` にあるものだけ（無い id は 422）。
+  `GET /approvals?pending=false` が「決定済みだけ」に絞り込むようになった（R5。以前は全件）。
+  DB のスキーマ版数は 7（migration 0007: `messages.task_id` の追加と `reports.project_id` の NULL 可）
 - 改訂: 2026-09-17 Phase 18（ADR-0028 D1/D4、分野を能力レジストリに）— `GET /config` の
   `genres[].{capabilities, input_artifacts, output_artifacts}` を追加（3 つとも任意、空なら省略。追加のみ。v1 のまま）
 - 改訂: 2026-09-17 Phase 16（ADR-0027 D1、分野）— `POST /tasks` の `genre`、`TaskSummary.genre` / `TaskDetail.genre`、
@@ -176,7 +182,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 42 | PATCH | `/org/{id}` | 役職を変える・付け替える（**管理系**） | 200 `OrgNode` | store `org_upsert` |
 | 43 | DELETE | `/org/{id}` | 役職を消す。仕事を抱えていたら 409（**管理系**） | 204 | store `org_delete` |
 | 44 | GET | `/projects` | 案件の一覧（新しい順。ADR-0033 D2） | `ProjectList` | store `project_list` |
-| 45 | POST | `/projects` | 案件を投げる（`status = proposed`） | 201 `Project`（`Location`） | store `project_create` |
+| 45 | POST | `/projects` | 案件を投げる（`status = proposed`。直後に秘書の run が起きるので**管理系**。Phase 27） | 201 `Project`（`Location`） | store `project_create` |
 | 46 | GET | `/projects/{id}` | 案件 + 途中目標 + 仕事の木 | `ProjectDetail` | store（`project_id` で絞った `tasks`） |
 | 47 | PATCH | `/projects/{id}` | 案件の状態を変える | 200 `Project` | store `project_set_status` |
 | 48 | POST | `/projects/{id}/milestones` | 途中目標を足す（`seq` はストアが採番） | 201 `Milestone`（`Location`） | store `milestone_create` |
@@ -193,12 +199,15 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 ### 3.1 `GET /health` → 200 `Health`
 
 ```json
-{"api_version":"1","schema_version":4,"taskd_version":"0.9.0","instance_id":"01J…",
+{"api_version":"1","schema_version":7,"taskd_version":"0.9.0","instance_id":"01J…",
  "started_at":"…","now":"…","db":{"journal_mode":"wal","busy_timeout_ms":5000}}
 ```
 
 - `api_version` は `"1"` 固定。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
-- `schema_version` は `schema_migrations` の最大版数（= `task_core::SCHEMA_VERSION`。現在 4: 0001 init / 0002 events id / 0003 tasks の title・updated_at 列 / 0004 tasks の objective 列（ADR-0014 D2））。
+- `schema_version` は `schema_migrations` の最大版数（= `task_core::SCHEMA_VERSION`。現在 **7**:
+  0001 init / 0002 events id / 0003 tasks の title・updated_at 列 / 0004 tasks の objective 列（ADR-0014 D2）/
+  0005 tasks の genre 列（ADR-0027）/ 0006 組織・案件・報告・対話・認可の表と tasks の project_id・
+  milestone_id・assignee 列（ADR-0033）/ 0007 messages の task_id 列と reports.project_id の NULL 可（Phase 27））。
 - `journal_mode` は `PRAGMA journal_mode` の実測値（`"wal"` でなければ設定不備。GUI は警告を出す）。
 - 無認証（1.3）。DB のパスは出さない（`GET /config` に出す）。
 
@@ -226,6 +235,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 - `items[].children` / `pending_children` は `parent_id` で集計（`pending` = 非終端）。`backoff_until` は §5.3。
 - `items[].role` は `Task.role`（ADR-0016 D1）。一覧の行に役割のラベルを出すための値で、`TaskDetail.role` と同じ（GUI-R2。役割なしは `null`）。
 - `items[].genre` は `Task.genre`（ADR-0027 D1）。`role` と同じ理由で一覧の行に出す値で、`TaskDetail.genre` と同じ（分野なしは `null`）。
+- `items[].assignee` は `Task.assignee`（組織のノード id。ADR-0033 D2。担当なしは `null`）、
+  `items[].conversation` は**対話用タスクか**（`true` なら人への返事のための run。§3.54〜3.55）。
+  どちらも GUI-R3（Phase 27）で足した。仕事の木やタスク一覧から対話用タスクを隠すのに使う
+  （API 側の絞り込みは足していない。GUI がこの真偽値で弾く）。
 - `counts_by_status` は**フィルタに関係なく** DB 全体の status 別件数（`count_by_status()` の `Vec<(Status, u64)>` をオブジェクトに。0 件の status は現れない）。タイトルバーの件数表示用。
 - 空のときは `{"items":[],"next_cursor":null,"total":0,"counts_by_status":{…}}`。
 
@@ -750,8 +763,10 @@ task-api 自身は ssh を起動しない（DESIGN §5.10 の境界）。未知�
 
 SPEC §3.2〜§3.3 の「組織（一つ、役割の木）」と「案件・仕事の木」を第一級のエンティティにしたもの。
 既存の `tasks` は実行基盤として残り、案件の仕事の木は `tasks WHERE project_id = ?`（DAG は従来どおり
-`parent_id` / `depends_on`）。**組織の編集（3.43〜3.45）だけが管理系**（`token_file` 未設定でも 401）で、
-読み取りと案件・途中目標の操作は通常の要求（トークンを設定した taskd では、他の全要求と同じくトークンが要る）。
+`parent_id` / `depends_on`）。**組織の編集（3.43〜3.45）と案件の作成（3.46 の `POST`）が管理系**
+（`token_file` 未設定でも 401。案件を作ると秘書の run が起きるので、`POST /org/{id}/messages` と同じ規律。
+Phase 27 の監査 M-4）。読み取りと途中目標の操作は通常の要求（トークンを設定した taskd では、他の全要求と
+同じくトークンが要る）。
 
 #### 3.42 `GET /org` → 200 `OrgList`
 
@@ -765,6 +780,8 @@ SPEC §3.2〜§3.3 の「組織（一つ、役割の木）」と「案件・仕�
 - 並びは `position` 昇順、同値なら `id` 昇順。**木は GUI が `parent_id` で組む**（API は入れ子にしない）。
 - `kind` は `secretary`（根。1 つだけ）/ `department`（部）/ `section`（課）。
 - `genre` は `[[genres]] id`（無ければ項目ごと出ない）。その「人」が仕事に使うハーネスの束（ADR-0027/0028）。
+  書き込み（3.43 / 3.44）では**設定の `[[genres]]` にある id だけ**を受ける（無い id は 422 `validation`。
+  分野を 1 つも設定していない taskd では検証しない。Phase 27 の監査 L-1）。
 - 初期の形は `org_include` が指すファイル（`config/org.example.toml`）から、**DB の `org_nodes` が空のときだけ**
   蒔かれる。以後は DB が正で、設定を書き換えても反映されない（ADR-0033 D1）。
 
@@ -781,6 +798,7 @@ SPEC §3.2〜§3.3 の「組織（一つ、役割の木）」と「案件・仕�
 #### 3.44 `PATCH /org/{id}` → 200 `OrgNode`（**管理系**）
 
 `{"name":…, "kind":…, "parent_id":…, "genre":…, "brief":…, "position":…}` のうち**書いた項目だけ**を変える。
+`genre` は設定の `[[genres]]` にある id だけ（無い id は 422 `validation`）。
 `"genre": null` と書けば分野を外せる（書かなければ今の値のまま）。無い id は 404 `org_node_not_found`。
 検証は 3.43 と同じ（付け替えで木が壊れるなら 422）。
 
@@ -791,7 +809,7 @@ SPEC §3.2〜§3.3 の「組織（一つ、役割の木）」と「案件・仕�
 - 子ノードが残っていても 409 `org_node_in_use`（木を宙ぶらりんにしない）。
 - 無い id は 404 `org_node_not_found`。
 
-#### 3.46 `GET /projects` → 200 `ProjectList` / `POST /projects` → 201 `Project`
+#### 3.46 `GET /projects` → 200 `ProjectList` / `POST /projects` → 201 `Project`（**`POST` は管理系**）
 
 要求本文 `{"title":"Pluvio の新テーマ","request":"Pluvio を基盤に用いた新たな研究テーマの模索、検証"}`。
 作られた案件は必ず `status = "proposed"`（秘書が理解確認・方針・最初の途中目標を返すまで人の返事待ち。
@@ -805,11 +823,13 @@ SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validat
  "milestones":[{"id":"01J…","project_id":"01J…","seq":1,"title":"関連研究を棚卸し","description":"",
                 "status":"proposed","created_at":"…","updated_at":"…"}],
  "tasks":[{"id":"01J…","title":"調べる","status":"ready","parent_id":null,"depends_on":[],
-           "assignee":"research-survey","milestone_id":"01J…"}]}
+           "assignee":"research-survey","milestone_id":"01J…","conversation":false}]}
 ```
 
 `tasks` は**仕事の木を描くのに必要な分だけ**（詳細は `GET /tasks/{id}`）。`project_id` が一致するタスクだけが
 入り、他の案件・案件に属さないタスクは出ない。ULID でない id・無い案件は 404 `project_not_found`。
+`conversation` が `true` の行は**対話用タスク**（人への返事のための run。3.54 参照）なので、仕事の木からは
+隠してよい（GUI-R3。Phase 27）。
 
 #### 3.48 `PATCH /projects/{id}` → 200 `Project`
 
@@ -882,10 +902,13 @@ run を 1 回起こすための**対話用タスク**（`kind = "execute"`、受
 
 ```json
 {"items":[{"id":"01J…","node_id":"secretary","project_id":"01J…","role":"user",
-           "text":"この案件をお願いします","created_at":"…"},
+           "text":"この案件をお願いします","task_id":"01J…","created_at":"…"},
           {"id":"01J…","node_id":"secretary","project_id":"01J…","role":"node",
-           "text":"理解の確認です。…","run_id":"01J…","created_at":"…"}]}
+           "text":"理解の確認です。…","run_id":"01J…","task_id":"01J…","created_at":"…"}]}
 ```
+
+- `task_id` は**その 1 往復を起こした対話用タスク**（`role = "user"` の行にも `role = "node"` の行にも
+  同じ id。GUI-R4 / migration 0007。Phase 27 より前に入った行には無い）。
 
 - 並びは**古い順**（`created_at` 昇順、同値は `id` 昇順）。`limit`（既定 50、上限 500）を超えるときは
   **新しい方**を残す（直近のやり取りを読むため）。
@@ -908,10 +931,16 @@ run を 1 回起こすための**対話用タスク**（`kind = "execute"`、受
   （`max_turns = 6` / `max_wall_secs = 300` / `max_retries = 1`）で、役割の既定より優先する。
 - run のプロンプトには、ノードの `brief`・そのノードの長期記憶（ADR-0033 D6）・**この案件のこのノードとの
   直近のやり取り（既定 20 件）**が前置きされる。
-- run が `error` に終わったときの返事は `"返事できませんでした: <理由>"`。`question` は本文をそのまま返事にする
-  ことに加え、**`approvals` に 1 件を作る**（Phase 26、§3.6）。
-- **秘書の最初の返事**: `POST /projects`（3.46）で案件を作ると、その直後に秘書ノードへ `request` を本文と
-  した対話が 1 回自動で起きる（SPEC §7）。秘書がいない構成（組織を種蒔きしていない）では何も起きない。
+- run が `error` に終わったときの返事は `"返事できませんでした: <理由>"`。これを書くのは**タスクが `failed` に
+  落ちたときだけ**で、途中のやり直し（retryable / requeue）では書かない（1 通の問いに返事は 1 行。Phase 27 の
+  監査 M-5）。`question` は本文をそのまま返事にすることに加え、**`approvals` に 1 件を作る**（Phase 26、§3.6）。
+- **同じノード・同じ案件の対話は直列**（監査 M-3）: 未終了の対話タスクがあれば、新しい対話タスクの
+  `depends_on` にそれが入る。つまり 2 通続けて送ると、2 通目は 1 通目の返事が終わるまで `ready` にならない
+  （GUI は `GET /tasks/{id}` の `depends_on` で待ち行列を見せられる）。
+- 対話用タスクは**報告を作らない**（返事は `messages` で読むもので、報告の流れには出ない。監査 M-6）。
+- **秘書の最初の返事**: `POST /projects`（3.46。こちらも管理系）で案件を作ると、その直後に秘書ノードへ
+  `request` を本文とした対話が 1 回自動で起きる（SPEC §7）。秘書がいない構成（組織を種蒔きしていない）では
+  何も起きない。
 
 ### 3.56〜3.60 認可（ADR-0033 D5、Phase 26）
 
@@ -926,9 +955,19 @@ SPEC §3.6「少しでも聞くべきだとエージェントが判断したら�
 
 #### 3.56 `GET /approvals?pending=&project=&node=` → 200 `ApprovalList`
 
-- 古い順（`created_at` 昇順、同値は id 昇順。答える順に並ぶキュー）。`pending=true` で未決定だけ。
+- 古い順（`created_at` 昇順、同値は id 昇順。答える順に並ぶキュー）。`pending` は**三値**:
+  `pending=true` で未決定だけ（`decision` 無し）、`pending=false` で**決定済みだけ**（`decision` あり。
+  「決めたものの履歴」）、省略すると全件（GUI からの依頼 R5。Phase 27 で `false` が絞り込むようになった）。
+  `project` / `node` と AND で効く。
 - `Approval`: `{id, project_id?, node_id, task_id?, question, decision?, answer?, created_at, decided_at?}`。
   `decision` は `once` / `standing` / `denied`（未決定は無い）。
+- **部をまたぐ委譲の認可**（SPEC §3.1 / Phase 27）は `question` が
+  **`"cross-department: <委譲元> -> <委譲先>: <理由>"`** の固定の形で来る（`node_id` = 委譲元、
+  `task_id` = 委譲しようとした親タスク）。`once` ならそのタスクの次の run で委譲が通り、`standing` なら
+  以後ずっと通る（このとき `standing_rules.rule` には答えの文ではなく
+  **`"cross-department: <委譲元> -> <委譲先>"`** が入る）。`denied` なら子は作られず、ワーカーには
+  `answers[]` の「認めない: …」が見える。GUI は接頭辞 `cross-department: ` で「連携の認可」として
+  見せ分けられる。
 
 #### 3.57 `POST /approvals/{id}/decide` → 200 `ApprovalDecideResult`（**管理系**）
 
@@ -1108,7 +1147,9 @@ pub struct TaskSummary {
     pub depends_on: Vec<TaskId>, pub created_at: String, pub updated_at: String,
     pub lease_expires_at: Option<String>, pub backoff_until: Option<String>,
     pub children: u32, pub pending_children: u32, pub role: Option<String> /* GUI-R2 */,
-    pub genre: Option<String> /* Phase 16, ADR-0027 D1 */, pub actions: Vec<Action>,
+    pub genre: Option<String> /* Phase 16, ADR-0027 D1 */,
+    pub assignee: Option<String> /* Phase 27, GUI-R3 */, pub conversation: bool /* Phase 27, GUI-R3 */,
+    pub actions: Vec<Action>,
 }
 pub struct TaskList { pub items: Vec<TaskSummary>, pub next_cursor: Option<String>, pub total: u64, pub counts_by_status: BTreeMap<Status, u64> }
 

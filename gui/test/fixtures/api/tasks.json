@@ -18,7 +18,8 @@
             "backoff_until": null,
             "children": 0,
             "pending_children": 0,
-            "actions": []
+            "actions": [],
+            "conversation": false
         },
         {
             "id": "01M2KQJJ1481PW7X258P06V7YN",
@@ -40,7 +41,8 @@
             "backoff_until": null,
             "children": 0,
             "pending_children": 0,
-            "actions": []
+            "actions": [],
+            "conversation": false
         },
         {
             "id": "01M2KQJJ1MKDY29E7MMW0CMHPD",
@@ -62,7 +64,8 @@
             "backoff_until": null,
             "children": 0,
             "pending_children": 0,
-            "actions": []
+            "actions": [],
+            "conversation": false
         },
         {
             "id": "01M2KQJJ24F1WYT0Z600TV0RRE",
@@ -84,7 +87,8 @@
             "pending_children": 1,
             "actions": [
                 "cancel"
-            ]
+            ],
+            "conversation": false
         },
         {
             "id": "01M2KQJJ2Q4PNPSDCCCXYN76ZJ",
@@ -107,7 +111,8 @@
             "actions": [
                 "answer",
                 "cancel"
-            ]
+            ],
+            "conversation": false
         },
         {
             "id": "01M2KQJJ38YF9N8E5FPZK6NJPC",
@@ -127,7 +132,8 @@
             "backoff_until": null,
             "children": 2,
             "pending_children": 2,
-            "actions": []
+            "actions": [],
+            "conversation": false
         },
         {
             "id": "01M2KQJJ3PA1ZPGQGVVP5R601D",
@@ -147,7 +153,8 @@
             "backoff_until": null,
             "children": 0,
             "pending_children": 0,
-            "actions": []
+            "actions": [],
+            "conversation": false
         },
         {
             "id": "01M2KQJJ47KF77XYXDXN5AFM24",
@@ -167,14 +174,15 @@
             "backoff_until": null,
             "children": 0,
             "pending_children": 0,
-            "actions": []
+            "actions": [],
+            "conversation": false
         },
         {
             "id": "01M2KQJJBBG83DWH7Y8AWNMK0K",
             "parent_id": "01M2KQJJ24F1WYT0Z600TV0RRE",
             "kind": "approval",
             "status": "ready",
-            "title": "Approval needed: Human-B \u2014 criterion 0 (attempt 1)",
+            "title": "Approval needed: Human-B — criterion 0 (attempt 1)",
             "priority": 0,
             "tier": "standard",
             "adapter": null,
@@ -191,7 +199,8 @@
                 "approve",
                 "reject",
                 "cancel"
-            ]
+            ],
+            "conversation": false
         },
         {
             "id": "01M2KQJJR61JTS592RTPMWW1QP",
@@ -216,7 +225,8 @@
             "actions": [
                 "approve",
                 "cancel"
-            ]
+            ],
+            "conversation": false
         },
         {
             "id": "01M2KQJJR6T5XY4RD5BHWBGVBQ",
@@ -239,7 +249,8 @@
             "actions": [
                 "approve",
                 "cancel"
-            ]
+            ],
+            "conversation": false
         }
     ],
     "next_cursor": null,

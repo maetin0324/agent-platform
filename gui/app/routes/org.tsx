@@ -16,7 +16,7 @@ import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/
 import { Icon } from "~/components/ui/Icon";
 import { DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import { standingRuleTargetName } from "~/lib/approvals";
-import { buildOrgTree, countWorkload, flattenProjectTasks, type OrgTreeNode, type Workload } from "~/lib/org-tree";
+import { buildOrgTree, countWorkload, type OrgTreeNode, tasksByAssignee, type Workload } from "~/lib/org-tree";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { TaskdBanner } from "~/root";
@@ -36,61 +36,50 @@ import type {
   OrgKind,
   OrgList,
   OrgNode,
-  ProjectDetail,
-  ProjectList,
-  ProjectTaskView,
   StandingRule,
   StandingRuleList,
+  TaskList,
+  TaskSummary,
 } from "~/taskd/types";
 import type { Route } from "./+types/org";
 
 /**
  * `/org`（組織の木、SPEC §3.2、ADR-0033 D1、docs/gui/api.md §3.42〜3.45）。
  * `GET /org` は木にしない（API は position 順の平らな配列）ので、`parent_id` から GUI 側で組む
- * （`~/lib/org-tree.ts`）。「抱えている仕事の数」は `GET /tasks?assignee=` が無いため
- * （taskd-requests.md に依頼を記録）、各案件の仕事の木（`ProjectTaskView.assignee`）を束ねて数える。
+ * （`~/lib/org-tree.ts`）。「抱えている仕事の数」は `GET /tasks`（`TaskSummary.assignee`、Phase 27 で追加。
+ * taskd-requests.md R3 が解決済み）を 1 回呼んで数える（`app/routes/tasks.new.tsx` と同じ `limit=500` の
+ * 「全件を 1 回で」パターン）。対話用タスク（`TaskSummary.conversation`）は数えない（GUI-R3）。
+ * G13a では `assignee` が `TaskSummary` に無かったため `GET /projects/{id}` を案件数ぶん束ねる N+1 で
+ * 代替していたが、その代替はやめた。
  */
 
 export interface OrgData {
   org: OrgList;
   genres: string[];
   workload: Record<string, Workload>;
-  assignedTasks: (ProjectTaskView & { project_id: string; project_title: string })[];
+  tasksByAssignee: Record<string, TaskSummary[]>;
   /** 選ばれたノード宛ての永続の認可（全員向け + そのノード向け。ADR-0033 D5、§3.58）。未選択なら空。 */
   standingRules: StandingRule[];
 }
 
 export async function loadOrg(client: TaskdClient, request: Request): Promise<OrgData> {
   const selected = new URL(request.url).searchParams.get("selected");
-  const [org, config, projects, standingRules] = await Promise.all([
+  const [org, config, tasks, standingRules] = await Promise.all([
     client.get<OrgList>("/org", { signal: request.signal }),
     client.get<ConfigView>("/config", { signal: request.signal }).catch(() => null),
-    client.get<ProjectList>("/projects", { signal: request.signal }),
+    client.get<TaskList>("/tasks", { query: { limit: 500, order: "created_desc" }, signal: request.signal }),
     selected
       ? client
           .get<StandingRuleList>("/standing-rules", { query: { node: selected }, signal: request.signal })
           .catch(() => ({ items: [] }) as StandingRuleList)
       : Promise.resolve({ items: [] } as StandingRuleList),
   ]);
-  const withTasks = await Promise.all(
-    projects.items.map(async (project) => {
-      try {
-        const detail = await client.get<ProjectDetail>(`/projects/${encodeURIComponent(project.id)}`, {
-          signal: request.signal,
-        });
-        return { project, tasks: detail.tasks };
-      } catch {
-        return { project, tasks: [] as ProjectTaskView[] };
-      }
-    }),
-  );
-  const assignedTasks = flattenProjectTasks(withTasks);
-  const workload = Object.fromEntries(countWorkload(assignedTasks));
+  const workload = Object.fromEntries(countWorkload(tasks.items));
   return {
     org,
     genres: (config?.genres ?? []).map((g) => g.id),
     workload,
-    assignedTasks,
+    tasksByAssignee: Object.fromEntries(tasksByAssignee(tasks.items)),
     standingRules: standingRules.items,
   };
 }
@@ -136,7 +125,7 @@ export async function action({ request }: Route.ActionArgs) {
 const ORG_KINDS: OrgKind[] = ["secretary", "department", "section"];
 
 export default function OrgPage({ loaderData }: Route.ComponentProps) {
-  const { org, genres, workload, assignedTasks, standingRules } = loaderData;
+  const { org, genres, workload, tasksByAssignee: workByAssignee, standingRules } = loaderData;
   const [searchParams] = useSearchParams();
   const selectedId = searchParams.get("selected");
   const { roots } = useMemo(() => buildOrgTree(org.items), [org.items]);
@@ -144,7 +133,7 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
   const fetcher = useFetcher<OrgOpOutcome>();
   const submitting = fetcher.state !== "idle";
 
-  const nodeTasks = selected ? assignedTasks.filter((t) => t.assignee === selected.id) : [];
+  const nodeTasks = selected ? (workByAssignee[selected.id] ?? []) : [];
 
   return (
     <div className="space-y-8">
@@ -389,7 +378,7 @@ function OrgNodeDetail({
   org: OrgNode[];
   genres: string[];
   workload: Workload | undefined;
-  tasks: (ProjectTaskView & { project_id: string; project_title: string })[];
+  tasks: TaskSummary[];
   standingRules: StandingRule[];
   fetcher: FetcherWithComponents<OrgOpOutcome>;
   submitting: boolean;
@@ -434,6 +423,8 @@ function OrgNodeDetail({
 
         <div>
           <p className={labelClass}>抱えているタスク</p>
+          {/* 対話用タスク（`conversation`）は含まない（GUI-R3、Phase 27。SPEC「タスクは裏方」）。
+              `TaskSummary` には `project_id` が無いため、案件名は添えられない（taskd-requests.md R3）。 */}
           {tasks.length === 0 ? (
             <p className={cn(hintClass, "mt-1")}>今のところありません。</p>
           ) : (
@@ -444,7 +435,6 @@ function OrgNodeDetail({
                   <Link to={`/tasks/${t.id}`} className="min-w-0 flex-1 truncate underline underline-offset-2">
                     {t.title}
                   </Link>
-                  <span className="shrink-0 text-xs text-fg-subtle">{t.project_title}</span>
                 </li>
               ))}
             </ul>

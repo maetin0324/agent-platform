@@ -1,4 +1,4 @@
-import type { OrgNode, Project, ProjectTaskView, Status } from "~/taskd/types";
+import type { OrgNode, Status, TaskSummary } from "~/taskd/types";
 
 /**
  * 組織の木（SPEC §3.2、ADR-0033 D1）を `parent_id` から組む純粋関数。API（`GET /org`）は木にしない
@@ -64,19 +64,6 @@ export function buildOrgTree(items: OrgNode[]): OrgTreeResult {
   return { roots, orphanIds };
 }
 
-/** `GET /projects/{id}` の `tasks`（`ProjectTaskView`）1 件に、由来の案件情報を足したもの（組織画面の内訳表示用）。 */
-export interface AssignedTaskView extends ProjectTaskView {
-  project_id: string;
-  project_title: string;
-}
-
-/** 複数案件の `tasks` を、案件の情報を添えて 1 つの配列にする（組織の木の「抱えている仕事」用）。 */
-export function flattenProjectTasks(projects: { project: Project; tasks: ProjectTaskView[] }[]): AssignedTaskView[] {
-  return projects.flatMap((p) =>
-    p.tasks.map((t) => ({ ...t, project_id: p.project.id, project_title: p.project.title })),
-  );
-}
-
 const OPEN_STATUSES = new Set<Status>(["draft", "ready", "running", "blocked", "reviewing"]);
 
 export interface Workload {
@@ -86,15 +73,39 @@ export interface Workload {
   total: number;
 }
 
-/** 割り当て（`assignee`）ごとのタスク件数を数える。`assignee` が無いタスクは数えない。 */
-export function countWorkload(tasks: AssignedTaskView[]): Map<string, Workload> {
+/**
+ * 割り当て（`assignee`）ごとのタスク件数を数える。`assignee` が無いタスクと、対話用タスク（`conversation`）は
+ * 数えない（対話は裏方の run で、SPEC の「タスクは裏方」＝人が見る「抱えている仕事」には入らない。
+ * ADR-0033 D8、GUI-R3 Phase 27）。
+ *
+ * `GET /tasks` の `TaskSummary.assignee`（Phase 27 で追加）を直接数える。G13a では `assignee` が
+ * `TaskSummary` に無かったため `GET /projects/{id}` を案件数ぶん束ねて代替していたが、
+ * その N+1 呼び出しはやめた（taskd-requests.md R3 が解決済み）。
+ */
+export function countWorkload(tasks: TaskSummary[]): Map<string, Workload> {
   const counts = new Map<string, Workload>();
   for (const t of tasks) {
-    if (!t.assignee) continue;
+    if (!t.assignee || t.conversation) continue;
     const cur = counts.get(t.assignee) ?? { open: 0, total: 0 };
     cur.total += 1;
     if (OPEN_STATUSES.has(t.status)) cur.open += 1;
     counts.set(t.assignee, cur);
   }
   return counts;
+}
+
+/**
+ * 組織の木のノード詳細に出す「抱えているタスク」一覧用に、`assignee` ごとにグループ化する
+ * （対話用タスクは除く。理由は `countWorkload` と同じ）。`TaskSummary` には `project_id` が無いため、
+ * 案件名は添えられない（G13a の代替実装にあった `project_title` は、N+1 をやめた代わりに落とした）。
+ */
+export function tasksByAssignee(tasks: TaskSummary[]): Map<string, TaskSummary[]> {
+  const byAssignee = new Map<string, TaskSummary[]>();
+  for (const t of tasks) {
+    if (!t.assignee || t.conversation) continue;
+    const list = byAssignee.get(t.assignee) ?? [];
+    list.push(t);
+    byAssignee.set(t.assignee, list);
+  }
+  return byAssignee;
 }

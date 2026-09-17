@@ -101,6 +101,7 @@
                     "backoff_until": null,
                     "children": 0,
                     "pending_children": 0,
+                    "conversation": false,
                     "actions": [
                         "approve",
                         "cancel"
@@ -124,6 +125,7 @@
                     "backoff_until": null,
                     "children": 0,
                     "pending_children": 0,
+                    "conversation": false,
                     "actions": [
                         "approve",
                         "cancel"

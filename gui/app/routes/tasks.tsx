@@ -94,6 +94,13 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
   const [items, setItems] = useState<TaskSummary[]>(taskList.items);
   const [nextCursor, setNextCursor] = useState<string | null>(taskList.next_cursor ?? null);
 
+  // 対話用タスク（`TaskSummary.conversation`）は既定で隠す（SPEC「タスクは裏方」/ ADR-0033 D8、GUI-R3 Phase 27）。
+  // `show_conversation=1` はここだけの表示切り替えで、`GET /tasks` には送らない（taskd に絞り込みは無い。
+  // `loadTasks` が転送するクエリの一覧に含めていないので、taskd 側には届かない）。ページングは
+  // 対話用を含めた元の `items` に対して行い、表示だけをこの真偽値でフィルタする。
+  const showConversation = searchParams.get("show_conversation") === "1";
+  const visibleItems = showConversation ? items : items.filter((item) => !item.conversation);
+
   // フィルタ・並び順が変わって loader が新しい初期ページを返したら、蓄積分をリセットする。
   // `taskList` は SSE（`useTaskdStream`、root で 1 本）による再検証のたびに新しい参照になるが、
   // 中身（1 ページ目の id 列と next_cursor）が同じなら「さらに読む」で蓄積した分を消してはいけない
@@ -131,7 +138,7 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
-    count: items.length,
+    count: visibleItems.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT_PX,
     overscan: 10,
@@ -268,6 +275,19 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                   ))}
                 </select>
               </label>
+              {/* 対話用タスク（人への返事のための run）は既定で隠す（GUI-R3、Phase 27。SPEC「タスクは裏方」）。
+                  taskd には絞り込みが無いので、表示だけを GUI 側でこの真偽値（`TaskSummary.conversation`）で切り替える。 */}
+              <label className={chipLabelClass}>
+                <input
+                  type="checkbox"
+                  name="show_conversation"
+                  value="1"
+                  data-testid="tasks-show-conversation"
+                  defaultChecked={showConversation}
+                  className={checkboxClass}
+                />
+                対話用も表示
+              </label>
               <Button type="submit" variant="primary" size="sm">
                 <Icon name="filter" />
                 絞り込み
@@ -294,16 +314,18 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
           className="overflow-auto"
           style={{ height: SCROLL_HEIGHT_PX }}
         >
-          {items.length === 0 ? (
+          {visibleItems.length === 0 ? (
             <div className="flex h-full items-center justify-center p-6">
               <EmptyState icon="list" title="タスクが見つかりません">
-                条件を変えて絞り込んでください。
+                {items.length > 0 && !showConversation
+                  ? "対話用タスクしかありません。上の「対話用も表示」を付けてください。"
+                  : "条件を変えて絞り込んでください。"}
               </EmptyState>
             </div>
           ) : (
             <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
               {virtualizer.getVirtualItems().map((virtualRow) => {
-                const item = items[virtualRow.index];
+                const item = visibleItems[virtualRow.index];
                 if (!item) return null;
                 return (
                   <div
