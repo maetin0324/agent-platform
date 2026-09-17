@@ -115,6 +115,7 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/projects/{id}/milestones", post(create_milestone))
         .route("/api/v1/milestones/{id}", patch(patch_milestone))
         .merge(crate::reports::routes())
+        .merge(crate::approvals::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -1976,10 +1977,12 @@ async fn daemon(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
     ))
 }
 
-/// ADR-0033 D3: ディスパッチャのスナップショットに、秘書レベルの未読の報告と通知の判定を載せる。
+/// ADR-0033 D3 / D5: ディスパッチャのスナップショットに、秘書レベルの未読の報告・通知の判定・未決定の
+/// 認可の件数を載せる。
 fn daemon_snapshot_with_reports(state: &ApiState) -> Option<task_ops::daemon::DaemonSnapshot> {
     let mut snapshot = state.snapshot()?;
     snapshot.reports = crate::reports::reports_live(&state.inner.store, crate::reports::last_notified_at(state));
+    snapshot.approvals_pending = crate::approvals::approvals_pending(&state.inner.store);
     Some(snapshot)
 }
 

@@ -517,6 +517,134 @@
       ],
       "type": "object"
     },
+    "Approval": {
+      "description": "1 件の認可の要求（`approvals` テーブル。ADR-0033 D5）。",
+      "properties": {
+        "answer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "decided_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Decision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/ApprovalId"
+        },
+        "node_id": {
+          "description": "聞いてきた組織のノード（`task.assignee`、無ければ秘書）。",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "案件（案件に紐づかない質問なら `None`）。"
+        },
+        "question": {
+          "type": "string"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "きっかけになったタスク（無いことは今回は無いが、`approval_decide` の後も残す前提で任意にしてある）。"
+        }
+      },
+      "required": [
+        "id",
+        "node_id",
+        "question",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "ApprovalDecideBody": {
+      "additionalProperties": false,
+      "description": "`POST /approvals/{id}/decide` の要求本文。",
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/Decision"
+        },
+        "scope": {
+          "default": null,
+          "description": "`decision = \"standing\"` のときだけ意味を持つ。`\"node\"`（既定）| `\"all\"`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "decision",
+        "answer"
+      ],
+      "type": "object"
+    },
+    "ApprovalDecideResult": {
+      "description": "`POST /approvals/{id}/decide` の応答。`transition`（`task_ops::gate::TransitionResult`）は\n`Deserialize` を持たないので、この型も応答専用（`Serialize` だけ）にする。",
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/Approval"
+        },
+        "standing_rule": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StandingRule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`decision = \"standing\"` のときだけ `Some`。"
+        },
+        "transition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TransitionResult"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "元の質問にタスクが紐づいていたときだけ `Some`（既存の「質問に答える」経路の結果）。"
+        }
+      },
+      "required": [
+        "approval"
+      ],
+      "type": "object"
+    },
     "ApprovalDecisionView": {
       "properties": {
         "approved": {
@@ -541,6 +669,10 @@
         "ts"
       ],
       "type": "object"
+    },
+    "ApprovalId": {
+      "description": "認可 1 件の識別子（ULID）。",
+      "type": "string"
     },
     "ApprovalItem": {
       "properties": {
@@ -659,6 +791,21 @@
       },
       "required": [
         "approval"
+      ],
+      "type": "object"
+    },
+    "ApprovalList": {
+      "description": "`GET /approvals` の応答。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/Approval"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
       ],
       "type": "object"
     },
@@ -1566,6 +1713,13 @@
           "description": "ADR-0025 D1/D6: アダプタごとの根ディレクトリ（`\"claude-code\"` / `\"codex\"` → 絶対パス。設定されていない\nアダプタはキーごと無い）。古いスナップショットには無いので既定は空。",
           "type": "object"
         },
+        "approvals_pending": {
+          "default": 0,
+          "description": "ADR-0033 D5（Phase 26）: 未決定の認可（`approvals.decision IS NULL`）の件数。`reports` と同じ理由で\n**API が応答を組むときに埋める**（ディスパッチャが送るスナップショットでは常に 0）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "awaiting_children": {
           "default": [],
           "description": "ADR-0023 D3: 委譲した子が終わるのを待っている親（`reviewing` のまま。id 昇順）。\n「自分の判定待ち」と区別するための観測値。古いスナップショットには無いので既定は空。",
@@ -1752,6 +1906,26 @@
         "busy_timeout_ms"
       ],
       "type": "object"
+    },
+    "Decision": {
+      "description": "人の決定（SPEC §3.6）。",
+      "oneOf": [
+        {
+          "const": "once",
+          "description": "今回だけ。",
+          "type": "string"
+        },
+        {
+          "const": "standing",
+          "description": "同じようなことは今後ずっと（`standing_rules` に 1 行増える）。",
+          "type": "string"
+        },
+        {
+          "const": "denied",
+          "description": "認めない。",
+          "type": "string"
+        }
+      ]
     },
     "DecisionBody": {
       "additionalProperties": false,
@@ -4527,6 +4701,73 @@
       ],
       "type": "object"
     },
+    "StandingRule": {
+      "description": "永続の認可 1 行（`standing_rules` テーブル。ADR-0033 D5）。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/StandingRuleId"
+        },
+        "node_id": {
+          "description": "`None` = 全員（どのノードの run にも注入される）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "rule",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "StandingRuleCreateBody": {
+      "additionalProperties": false,
+      "description": "`POST /standing-rules` の要求本文。",
+      "properties": {
+        "node_id": {
+          "default": null,
+          "description": "省略すると全員向け（`node_id = NULL`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule"
+      ],
+      "type": "object"
+    },
+    "StandingRuleId": {
+      "description": "永続の規則の識別子（ULID）。",
+      "type": "string"
+    },
+    "StandingRuleList": {
+      "description": "`GET /standing-rules` の応答。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/StandingRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
     "Status": {
       "description": "ADR-0002 D1 の状態集合。終端は `done | failed | cancelled`。",
       "enum": [
@@ -5337,6 +5578,16 @@
     "answer": {
       "$ref": "#/$defs/AnswerBody"
     },
+    "approval_decide": {
+      "$ref": "#/$defs/ApprovalDecideBody"
+    },
+    "approval_decide_result": {
+      "$ref": "#/$defs/ApprovalDecideResult"
+    },
+    "approval_list": {
+      "$ref": "#/$defs/ApprovalList",
+      "description": "Phase 26（ADR-0033 D5）: 認可（`GET /approvals` と `POST /approvals/{id}/decide`）。"
+    },
     "artifact_list": {
       "$ref": "#/$defs/ArtifactList"
     },
@@ -5464,6 +5715,13 @@
       "$ref": "#/$defs/SecretList",
       "description": "Phase 20（ADR-0030）: GUI から預かる秘密（API キー等）。`GET /secrets` と `PUT /secrets/{id}` の応答。"
     },
+    "standing_rule_create": {
+      "$ref": "#/$defs/StandingRuleCreateBody"
+    },
+    "standing_rule_list": {
+      "$ref": "#/$defs/StandingRuleList",
+      "description": "Phase 26（ADR-0033 D5）: 永続の認可（`GET /standing-rules` と `POST /standing-rules`）。"
+    },
     "stream_daemon": {
       "$ref": "#/$defs/DaemonSnapshot"
     },
@@ -5541,6 +5799,11 @@
     "message_post",
     "message_accepted",
     "message_list",
+    "approval_list",
+    "approval_decide",
+    "approval_decide_result",
+    "standing_rule_list",
+    "standing_rule_create",
     "daemon",
     "config",
     "stream_hello",

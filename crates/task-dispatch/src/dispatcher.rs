@@ -279,6 +279,8 @@ struct RunExtras {
     memory: Option<MemoryContext>,
     /// ADR-0033 D4: 担当のノードとのこの案件での直近のやり取り（古い順）。
     conversation: Vec<ConversationTurn>,
+    /// ADR-0033 D5（Phase 26）: 担当宛て + 全員向けの永続の認可（`standing_rules`。無ければ空）。
+    standing_rules: Vec<String>,
     /// ADR-0033 D4: 分解・委譲できる run に渡す組織図。
     organization: Vec<OrgNodeContext>,
 }
@@ -999,6 +1001,8 @@ impl Dispatcher {
             awaiting_children,
             unroutable,
             reports: None,
+            // ADR-0033 D5（Phase 26）: 未読の件数は API が応答を組むときに埋める（`reports` と同じ理由）。
+            approvals_pending: 0,
             providers,
             clusters,
             accounts_root,
@@ -1236,6 +1240,19 @@ impl Dispatcher {
         // ADR-0033 D4（Phase 24）: 対話用タスクの run なら、`summary`（質問なら本文、失敗なら理由）を
         // そのノードの返事として `messages` に残す。対話由来でないタスクでは何もしない。
         self.record_conversation_reply(&task, &run_id, &outcome_str);
+        // ADR-0033 D5（Phase 26）: `Question` で終わった run（部をまたぐ委譲の質問への置き換えも含む）は
+        // 既存の `answers[]` の経路（`Status::Blocked`）に加えて `approvals` にも 1 件残す。
+        if let Trigger::WorkerQuestion = trigger {
+            let text = outcome_str.strip_prefix("question: ").unwrap_or(outcome_str.as_str());
+            if let Err(e) = crate::approvals::record_question_approval(
+                self.store.as_ref(),
+                &task,
+                text,
+                OffsetDateTime::now_utc(),
+            ) {
+                tracing::warn!(%task_id, %run_id, error = %e, "failed to record the approval for this question");
+            }
+        }
         match self
             .store
             .apply_transition_with_events(task_id, trigger, events)
@@ -2017,6 +2034,18 @@ impl Dispatcher {
             name: n.name.clone(),
             brief: n.brief.clone(),
         });
+        // ADR-0033 D5（Phase 26）: 担当がいる run にだけ、その担当宛て + 全員向けの永続の認可を注入する
+        // （担当がいない run に、たまたま同じ id を持つ他ノード宛ての規則を混ぜないため。memory/conversation
+        // と同じ条件）。
+        let standing_rules = match assigned {
+            Some(n) => self
+                .store
+                .standing_rule_list(Some(&n.id))?
+                .into_iter()
+                .map(|r| r.rule)
+                .collect(),
+            None => Vec::new(),
+        };
         let memory = match (&self.config.memory_dir, assigned) {
             (Some(dir), Some(n)) => Some(MemoryDir::new(dir).load(
                 &n.id,
@@ -2080,6 +2109,7 @@ impl Dispatcher {
             node,
             memory,
             conversation,
+            standing_rules,
             organization,
         })
     }
@@ -2668,8 +2698,8 @@ async fn run_worker(
             node: extras.node,
             memory: extras.memory,
             conversation: extras.conversation,
-            // ADR-0033 D5: 永続の認可は Phase 26 が埋める（今は常に空）。
-            standing_rules: Vec::new(),
+            // ADR-0033 D5（Phase 26）: 担当宛て + 全員向けの永続の認可。
+            standing_rules: extras.standing_rules,
             organization: extras.organization,
         },
     };
@@ -5492,5 +5522,115 @@ mod tests {
         assert_eq!(children.len(), 1, "同じ部の中なら子ができる");
         assert_eq!(children[0].assignee.as_deref(), Some("research-data"));
         assert_eq!(children[0].title, "任せたい仕事");
+    }
+
+    /// ADR-0033 D5（Phase 26）: `Question` で終わった run は既存の `Blocked` / `answers[]` に加えて、
+    /// `approvals` にも担当ノード宛ての 1 件を残す。
+    #[tokio::test]
+    async fn a_question_from_an_assigned_run_creates_a_pending_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let task = assigned_task(&workspace_root, "t3", "research-survey");
+        store.create_task(&task, vec![]).unwrap();
+
+        let adapter = Arc::new(person_adapter(Terminal::Question { text: "どのクラスタを使いますか".into() }));
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 40).await;
+
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Blocked, "既存の質問の終端はそのまま");
+        let pending = store.approval_list(true, None, None).unwrap();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].node_id, "research-survey");
+        assert_eq!(pending[0].task_id, Some(task.id));
+        assert_eq!(pending[0].question, "どのクラスタを使いますか");
+        assert!(pending[0].is_pending());
+    }
+
+    /// 担当のいないタスクの質問は秘書へ回る（フォールバック。ADR-0033 D5）。
+    #[tokio::test]
+    async fn a_question_without_an_assignee_goes_to_the_secretary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        let q = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        store.insert(&q).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Question { text: "続けますか".into() },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        run_until_idle(&mut d, 40).await;
+
+        let pending = store.approval_list(true, None, None).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].node_id, "secretary");
+    }
+
+    /// ADR-0033 D5（Phase 26）: 全員向け + そのノード向けの永続の認可が run の前置きに載る。
+    #[tokio::test]
+    async fn standing_rules_for_everyone_and_the_assignee_reach_the_preamble() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let now = OffsetDateTime::now_utc();
+        store
+            .standing_rule_append(&StandingRule {
+                id: StandingRuleId::new(),
+                node_id: None,
+                rule: "深夜は連絡しない".into(),
+                created_at: now - time::Duration::minutes(2),
+            })
+            .unwrap();
+        store
+            .standing_rule_append(&StandingRule {
+                id: StandingRuleId::new(),
+                node_id: Some("secretary".into()),
+                rule: "pegasus のジョブは 1 ノードで始めてよい".into(),
+                created_at: now - time::Duration::minutes(1),
+            })
+            .unwrap();
+        // 他ノード宛ての規則は混ざらない。
+        store
+            .standing_rule_append(&StandingRule {
+                id: StandingRuleId::new(),
+                node_id: Some("coding-poc".into()),
+                rule: "coding-poc だけの規則".into(),
+                created_at: now,
+            })
+            .unwrap();
+
+        task_ops::conversation::start(store.as_ref(), "secretary", None, "やあ", &[], &[], now).unwrap();
+
+        let seen = Arc::new(StdMutex::new(None));
+        let adapter = Arc::new(PersonAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            seen: seen.clone(),
+            memory: None,
+            proposals: Vec::new(),
+        });
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
+        run_until_idle(&mut d, 40).await;
+
+        let context = seen.lock().unwrap().clone().expect("the run happened");
+        assert_eq!(
+            context.standing_rules,
+            vec![
+                "深夜は連絡しない".to_string(),
+                "pegasus のジョブは 1 ノードで始めてよい".to_string(),
+            ],
+            "全員向け + secretary 向けだけ（他ノード宛ては混ざらない）"
+        );
+        let preamble = task_worker::preamble::render(&context);
+        assert!(preamble.contains("永続の認可"), "{preamble}");
+        assert!(preamble.contains("深夜は連絡しない"), "{preamble}");
+        assert!(preamble.contains("pegasus のジョブは 1 ノードで始めてよい"), "{preamble}");
+        assert!(!preamble.contains("coding-poc だけの規則"), "{preamble}");
     }
 }

@@ -323,7 +323,9 @@ fn parse_status(s: &str) -> Result<Status, StoreError> {
 /// ADR-0033 D3: 報告（`reports`）の読み書きは `crate::report::ReportStore` にあり、`TaskStore` はそれを
 /// supertrait として要求する（ディスパッチャの `Arc<dyn TaskStore>` から報告を追記できるようにするため。
 /// 実装は `report.rs` にあり、この表の SQL はここには無い）。
-pub trait TaskStore: Send + Sync + crate::report::ReportStore {
+/// ADR-0033 D5（Phase 26）: 認可（`approvals` / `standing_rules`）も同じ形で `crate::approval::ApprovalStore`
+/// にある。
+pub trait TaskStore: Send + Sync + crate::report::ReportStore + crate::approval::ApprovalStore {
     fn insert(&self, task: &Task) -> Result<(), StoreError>;
     fn get(&self, id: TaskId) -> Result<Option<Task>, StoreError>;
     fn list(&self, filter: Option<Status>) -> Result<Vec<Task>, StoreError>;

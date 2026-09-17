@@ -13,6 +13,7 @@ use task_ops::plan::NewPlanSpec;
 use task_ops::replay::ReplayReport;
 use task_ops::view::{TaskDetail, TaskList};
 
+use crate::approvals::{ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody, StandingRuleList};
 use crate::conversation::{MessageAccepted, MessageList, MessagePostBody};
 use crate::types::{
     AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView, AnswerBody, ArtifactList,
@@ -84,6 +85,13 @@ pub struct ApiV1Schema {
     pub message_post: MessagePostBody,
     pub message_accepted: MessageAccepted,
     pub message_list: MessageList,
+    /// Phase 26（ADR-0033 D5）: 認可（`GET /approvals` と `POST /approvals/{id}/decide`）。
+    pub approval_list: ApprovalList,
+    pub approval_decide: ApprovalDecideBody,
+    pub approval_decide_result: ApprovalDecideResult,
+    /// Phase 26（ADR-0033 D5）: 永続の認可（`GET /standing-rules` と `POST /standing-rules`）。
+    pub standing_rule_list: StandingRuleList,
+    pub standing_rule_create: StandingRuleCreateBody,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

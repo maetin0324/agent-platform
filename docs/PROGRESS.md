@@ -3553,3 +3553,113 @@ SPEC §3.4「組織の木を見て誰に言うかを決め、その担当に直�
   一緒に migration を足すなら、そのときに。
 - P-73: 対話用分野の id を `secretary` 固定にしたが、これは「対話に使うハーネス」であってノードの役職では
   ない。`[[genres]] id = "conversation"` に改名した方が読みやすい（今は SPEC の言葉に寄せた）。
+
+---
+
+## Phase 26 — 認可（ADR-0033 D5。2026-09-17）
+
+SPEC §3.6「少しでも聞くべきだとエージェントが判断したら、あなたに指示を仰ぐ。あなたはそれに対して
+『今回だけ』か『同じようなことは今後ずっと』のどちらかの認可を出す。永続の認可は文字で記録してエージェントに
+注入する」を入れた。既存の `Question` 終端（ADR-0010: `Status::Blocked` / `answers[]`）はそのまま残し、
+その終端が起きたときに `approvals` の行を 1 件作るだけにした。**新しいプロトコルは足していない**:
+人が答えると、既存の「質問に答える」経路（`task_ops::gate::answer`）でタスクが再開する（二重実装なし）。
+migration は足していない（0006 の `approvals` / `standing_rules` を使う）。ディスパッチャ・ストアに
+LLM 呼び出しは足していない（DESIGN 原則 1）。
+
+### 受け入れ条件ごとの証拠
+
+1. **モデルと store**（`task-core/src/approval.rs`。新モジュール。`report.rs` と同じ形。`store.rs` への
+   追加は `TaskStore: … + ApprovalStore` の supertrait 1 行だけ）
+   - `Approval { id, project_id?, node_id, task_id?, question, decision?, answer?, created_at, decided_at? }`、
+     `Decision { Once, Standing, Denied }`、`StandingRule { id, node_id?, rule, created_at }`。
+   - `approval_append` / `approval_get` / `approval_list(pending_only, project_id?, node_id?)` /
+     `approval_decide(id, decision, answer?, at)` / `standing_rule_append` /
+     `standing_rule_list(node_id?)`（`Some(id)` = 全員向け + そのノード向け、`None` = 絞り込み無し = 全件）/
+     `standing_rule_delete`。
+   - `cargo test -p task-core --lib approval::tests::` → **5 passed**（追記・取得の往復、`pending`/`project`/`node`
+     の絞り込みと古い順、`decide` の上書き・無い id、`standing_rule_list` の全員向け + ノード向けの結合と
+     削除の冪等を 1 本にまとめたもの）。
+2. **`Question` 終端を `approvals` に接続**（`task-dispatch/src/approvals.rs`。新モジュール。
+   `dispatcher.rs` への追加は `on_worker_finished` に 1 か所（`record_conversation_reply` の隣）と
+   `run_extras` に `standing_rules` の組み立て、計 20 行）
+   - `trigger == Trigger::WorkerQuestion`（run の自己申告の質問、部をまたぐ委譲の質問への置き換えの
+     どちらも）のたびに `approvals` へ 1 件（`node_id = task.assignee`、無ければ秘書。組織がまだ無ければ
+     何もしない）。既存の `answers[]` の仕組みには触っていない。
+   - `cargo test -p task-dispatch --lib approvals` → **3 passed**（担当宛て、秘書へのフォールバック、
+     組織なしでは何もしない）。
+3. **人が答える**（`task-ops/src/approval.rs`。新モジュール）
+   - `decide(store, approval, decision, answer, scope, now)`: `once` はそのまま、`standing` は同じことをした
+     上で `standing_rules` に 1 行、`denied` は `"認めない: <answer>"` にしてから、**いずれも同じ
+     `task_ops::gate::answer` を呼んでタスクを再開する**（二重実装なし）。`approval.task_id` が無ければ
+     再開は `None`。空白の `answer` は `OpsError::Validation`。
+   - `cargo test -p task-ops --lib approval` → **6 passed**（once/standing/denied それぞれの再開と
+     `answers[]`、scope node/all、task_id 無しの行、空白の拒否）。
+4. **注入**: `run_extras` が担当のいる run にだけ `standing_rule_list(Some(assignee))` を
+   `RunContext.standing_rules` に入れる（担当がいない run には注入しない。memory/conversation と同じ条件）。
+   `preamble::render` の見出しを「永続の認可（人が『今後ずっと』と決めたこと）」にした（並びは Phase 24 の
+   ままで 2 番目）。
+   - `cargo test -p task-dispatch --lib dispatcher::tests::standing_rules_for_everyone_and_the_assignee_reach_the_preamble`
+     → 全員向け + secretary 向けだけが前置きに現れ、`coding-poc` だけの規則は混ざらないことを確認。
+   - `cargo test -p task-worker --lib preamble` → 見出しの文言と並びを更新した既存 4 件が通る。
+5. **API**（`task-api/src/approvals.rs`。新モジュール。`handlers.rs` への追加はルート 1 行と `GET /daemon`
+   の 2 行）
+   - `GET /approvals?pending=&project=&node=`、`POST /approvals/{id}/decide`（管理系）、
+     `GET /standing-rules?node=`、`POST /standing-rules`（管理系）、`DELETE /standing-rules/{id}`（管理系）。
+   - `DaemonSnapshot.approvals_pending: u32`（`reports` と同じく **API が応答を組むときに埋める**。
+     ディスパッチャの送るスナップショットでは常に 0）。
+   - `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema` で `docs/api/v1/api-v1.schema.json` を再生成。
+     `docs/gui/api.md` に §3.56〜3.60 と `approval_not_found` / `standing_rule_not_found` の行を追加
+     （`sync-gui-docs.sh` は実行していない。U26-1）。
+   - `cargo test -p task-api --test approvals` → **10 passed**（一覧の絞り込みと古い順、once/standing/denied
+     それぞれの再開と `standing_rules`、scope all、404、422、管理系の 401 を**トークンあり構成と
+     `token_file` 未設定構成の両方**で、`GET /daemon` の `approvals_pending`）。
+6. **共通条件** — `cargo test --workspace`: **940 passed**、`grep -c "^test result: FAILED"` = **0**
+   （Phase 25 の 872 から +68。うち Phase 26 の新規テストは 31 件、残りは Phase 23〜25 merge 後の状態から
+   数え直した差分）。`cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。テスト以外に
+   `unwrap()` / `expect()` は無い（新規 4 ファイルと触った全ファイルで確認）。ディスパッチャ・ストアに
+   LLM 呼び出しは無い。
+
+### 判断したこと（ADR-0033 D5 に無い細部）
+
+- **`approval_list` / `approval_decide` は素朴な引数**（`ReportFilter` のような構造体にしていない）。
+  D5 の指示文がそのまま関数シグネチャになる形を優先した。
+- **`standing_rule_list(node_id)` は 1 本で 2 通りの絞り込みを兼ねる**: `Some(id)` は「全員向け + その
+  ノード向け」（run の注入と `GET /standing-rules?node=` の両方が使う）、`None` は絞り込み無し（全ノード分。
+  GUI が一覧を編集するときの既定）。
+- **`standing_rules` の rule 文字列は答えそのもの**（質問文は含めない）。ADR-0033 D5 の文言
+  「答えを standing_rules に 1 行追加」に忠実にした。将来、注入先の run には質問の文脈が無いまま規則だけが
+  見えることになるので、読みにくければ `"<question> → <answer>"` の形に変える余地がある（U26-2）。
+- **`approval_decide` は決定を上書きできる**（`report_mark_read` と違い、`decision IS NULL` の条件を
+  付けていない）。人が答え直したくなったときのため。二重に `standing_rules` が増えるのを防ぐ仕組みは
+  無い（同じ id を `standing` で 2 回 decide すると規則が 2 行になる。頻度が低いと踏んで許容した）。
+- **`approvals_pending` は `DaemonSnapshot` に `u32` で追加**し、ディスパッチャの 4 か所の構築（本体 +
+  `task-ops::inbox` のテスト 2 件 + `task-api` のテスト共通部品）に `0` を足した。`#[serde(default)]` で
+  古いスナップショットとの互換は保つが、Rust の構造体リテラルは既定値を持たないので機械的に埋める必要が
+  あった。
+- **`GET /standing-rules` の `node` 無し = 絞り込み無し（全ノード分）**。GUI が編集画面で全件を見せたい
+  だろうという判断（D5 の指示は「全員向け + そのノード向け」としか言っていないが、それは「ノードを
+  指定したとき」の意味と読んだ）。
+
+### 未解決事項
+
+- U26-1: `scripts/sync-gui-docs.sh --check` は実行していない（指示による）。`gui/docs/taskd-api-v1.md` に
+  §3.56〜3.60 が無い。G13 の担当が同期する。
+- U26-2: `standing_rules.rule` は答えの文字列だけで、元の質問は残らない。前置きに注入したときに文脈が
+  無いまま読むことになる（上の「判断したこと」参照）。
+- U26-3: 自動判定・自動化はしていない（ADR-0033 D5 の指示どおり。「規則がまだ無い」ため）。`standing_rules`
+  が増えてきたら、似た質問を決定的に照合して`approvals` を作らずに直接答える仕組みを検討できる。
+- U26-4: `POST /approvals/{id}/decide` は `expected_status` のような楽観ロックを持たない（`task_ops::gate::answer`
+  と同様、`Approval.decision` の競合検出もしていない。同時に 2 人が違う決定を出すと後勝ちになる）。
+- U26-5: 冒頭の §2 のエンドポイント番号付き一覧（40〜51）には報告（Phase 25）も認可（Phase 26）も
+  行を足していない（Phase 25 も同じ状態だった）。§3 の節は追加したが、番号付き一覧の同期は G13 でまとめて
+  行う方が、Phase 25 の抜けと衝突しないと判断した。
+- U26-6: 実機確認（ローカル Qwen で `standing` の答えが次の対話 run の前置きに現れることの実地確認）は
+  未実施。ADR-0033 §4 の「実機」の行の一部。
+
+### 提案
+
+- P-74: U26-2 のとおり、`standing_rules.rule` に質問文を含めるかどうかは人間の判断を仰ぎたい
+  （現状は ADR-0033 D5 の文言に忠実な「答えのみ」）。
+- P-75: `POST /approvals/{id}/decide` の応答に `report` を含めて、決定がどの報告（`kind = question`）に
+  対応するかを GUI が直接たどれるようにする案がある（今は `task_id` で `GET /reports?node=` を引き直す
+  必要がある）。

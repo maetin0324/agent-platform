@@ -98,6 +98,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `not_found` | 404 | 未定義のパス |
 | `org_node_not_found` / `project_not_found` / `milestone_not_found` | 404 | 組織のノード / 案件 / 途中目標が無い（ADR-0033、§3.42〜3.49。ULID でない案件・途中目標の id もここ） |
 | `report_not_found` | 404 | 報告が無い（ADR-0033 D3、§3.50〜3.53。ULID でない id もここ） |
+| `approval_not_found` / `standing_rule_not_found` | 404 | 認可 / 永続の認可が無い（ADR-0033 D5、§3.56〜3.60。ULID でない id もここ） |
 | `method_not_allowed` | 405 | |
 | `conflict` | 409 | `expected_status` 不一致。`expected`, `actual` |
 | `invalid_transition` | 409 | 状態機械または task-ops の写像が拒否。`task_status`, `kind`, `trigger`（`InvalidTransition{status, kind, trigger}` の写し。`trigger` は `Trigger::name()`） |
@@ -911,6 +912,57 @@ run を 1 回起こすための**対話用タスク**（`kind = "execute"`、受
   ことに加え、**`approvals` に 1 件を作る**（Phase 26、§3.6）。
 - **秘書の最初の返事**: `POST /projects`（3.46）で案件を作ると、その直後に秘書ノードへ `request` を本文と
   した対話が 1 回自動で起きる（SPEC §7）。秘書がいない構成（組織を種蒔きしていない）では何も起きない。
+
+### 3.56〜3.60 認可（ADR-0033 D5、Phase 26）
+
+SPEC §3.6「少しでも聞くべきだとエージェントが判断したら、あなたに指示を仰ぐ。あなたはそれに対して
+『今回だけ』か『同じようなことは今後ずっと』のどちらかの認可を出す。永続の認可は文字で記録してエージェントに
+注入する」。既存の `Question` 終端（`Status::Blocked` / `answers[]`。ADR-0010）に接続する: run が質問で終わると
+`approvals` に 1 件できる（宛先は `task.assignee`、無ければ秘書）。**新しいプロトコルは足していない**:
+人が答えると、既存の「質問に答える」経路（`POST /tasks/{id}/answer` と同じ `answers[]`）でタスクが再開する。
+
+- **読み取り（3.56 / 3.58）は通常の認証**、**決める・作る・消す（3.57 / 3.59 / 3.60）は管理系**
+  （`token_file` 未設定でも 401）。
+
+#### 3.56 `GET /approvals?pending=&project=&node=` → 200 `ApprovalList`
+
+- 古い順（`created_at` 昇順、同値は id 昇順。答える順に並ぶキュー）。`pending=true` で未決定だけ。
+- `Approval`: `{id, project_id?, node_id, task_id?, question, decision?, answer?, created_at, decided_at?}`。
+  `decision` は `once` / `standing` / `denied`（未決定は無い）。
+
+#### 3.57 `POST /approvals/{id}/decide` → 200 `ApprovalDecideResult`（**管理系**）
+
+要求本文 `{"decision":"once"|"standing"|"denied","answer":"…","scope":"node"|"all"}`（`scope` は省略可、既定
+`node`。`standing` のときだけ意味を持つ）。
+
+- `once` → 既存の「質問に答える」経路（`answers[]`）でそのタスクを再開する。
+- `standing` → 同じことをして、さらに `standing_rules` に 1 行追加する（`scope = "node"` ならそのノード宛て、
+  `"all"` なら全員）。
+- `denied` → 答えを `"認めない: <answer>"` にして再開する（ワーカーが自分で判断できるように）。
+- 応答は `{approval, standing_rule?, transition?}`。`standing_rule` は `decision = "standing"` のときだけ、
+  `transition`（`TransitionResult`。3.12 `POST /tasks/{id}/answer` と同じ形）は `approval.task_id` があるときだけ載る。
+- `answer` が空白だけは 422 `validation`。無い id・ULID でない id は 404 `approval_not_found`。
+  `scope` が `"node"`/`"all"` 以外は 400。
+
+#### 3.58 `GET /standing-rules?node=` → 200 `StandingRuleList`
+
+- `node` を書けば**全員向け（`node_id = null`）+ そのノード向け**、書かなければ**絞り込み無し（全ノード分。
+  GUI の一覧・編集用）**。古い順。
+- `StandingRule`: `{id, node_id?, rule, created_at}`。`node_id` が無いものは全員向け。
+
+#### 3.59 `POST /standing-rules` → 201 `StandingRule`（**管理系**）
+
+要求本文 `{"node_id":"coding-poc","rule":"…"}`（`node_id` は省略すると全員向け）。GUI から直接、質問を経ずに
+永続の認可を足すためのもの。`rule` が空白だけは 422 `validation`。
+
+#### 3.60 `DELETE /standing-rules/{id}` → 204（**管理系**）
+
+無い id・ULID でない id は 404 `standing_rule_not_found`。
+
+#### `GET /daemon` への追加（3.20）
+
+`DaemonSnapshot.approvals_pending`（`u32`。古いスナップショットには無いので既定は 0）: 未決定の認可の件数。
+`reports` と同じ理由で**API が応答を組むときに埋める**（ディスパッチャの送るスナップショットでは常に 0）。
 
 ---
 

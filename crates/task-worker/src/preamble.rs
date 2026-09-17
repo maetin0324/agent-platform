@@ -1,11 +1,12 @@
-//! プロンプトの前置きを 1 か所で組む（ADR-0033 D4 / D6、Phase 24）。
+//! プロンプトの前置きを 1 か所で組む（ADR-0033 D4 / D6 / D5、Phase 24 / 26）。
 //!
 //! 「人」らしさは**注入される記憶と brief** で作る（ADR-0033 D6）。ハーネスのプロセスは相変わらず
 //! ステートレスで、状態はファイルと DB にある（DESIGN 原則 2）。ここは純粋関数だけで、I/O も LLM も無い。
 //!
 //! 並び（ADR-0033 D4 / Phase 24 の指示）:
 //! 1. 役職と brief（`context.node`）
-//! 2. 永続の認可（`context.standing_rules`。**Phase 26 が埋める。今は常に空**）
+//! 2. 永続の認可（`context.standing_rules`。SPEC §3.6「永続の認可は文字で記録してエージェントに注入する」。
+//!    Phase 26 が埋める: 担当宛て + 全員向け）
 //! 3. 記憶（`context.memory`）
 //! 4. 直近のやり取り（`context.conversation`）
 //! 5. 役割の指示文（`context.role`。ADR-0016 D1 からある既存の節）
@@ -47,7 +48,7 @@ fn person_sections(context: &RunContext) -> String {
         out.push('\n');
     }
     if !context.standing_rules.is_empty() {
-        out.push_str("## 常に守ること (standing approvals from the human)\n");
+        out.push_str("## 永続の認可（人が『今後ずっと』と決めたこと）\n");
         for rule in &context.standing_rules {
             out.push_str(&format!("- {rule}\n"));
         }
@@ -149,8 +150,8 @@ mod tests {
     fn the_sections_come_in_the_order_the_adr_asks_for() {
         let out = render(&full_context());
         let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
-        assert!(at("## あなた: 関連研究調査課 (research-survey)") < at("## 常に守ること"));
-        assert!(at("## 常に守ること") < at("## 覚えていること"));
+        assert!(at("## あなた: 関連研究調査課 (research-survey)") < at("## 永続の認可"));
+        assert!(at("## 永続の認可") < at("## 覚えていること"));
         assert!(at("## 覚えていること") < at("## 直近のやり取り"));
         assert!(at("## 直近のやり取り") < at("## Role: literature-reader"));
         assert!(at("## Role: literature-reader") < at("## 覚えておくこと"));
