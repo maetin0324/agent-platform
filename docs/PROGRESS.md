@@ -4146,3 +4146,19 @@ GUI の監査（SPEC §4 との突き合わせ、実機操作あり）で「案�
 - P-82: U29-4 のとおり、`POST /projects/{id}/plan` の多重起動を防ぐなら、対話の直列化
   （`task_ops::conversation::open_conversation_tasks`）と同じ形（同じ案件・同じ秘書の開いている plan タスクを
   `depends_on` に入れる）が流用できる。頻度を見てから ADR にする。
+
+### 実機（本番 taskd、本物の Claude）— SPEC §6 の 2 段目、秘書による分解（2026-09-17 23:45 UTC）
+
+Phase 29 を配備し、案件 `01M2RCYVZH6RGX8RX0JP572BAT` に途中目標「隣接領域の動向調査とテーマ候補 3〜5 件」を作って `approved` にし、
+秘書の 3 つの質問への答えを `note` に添えて `POST /projects/{id}/plan` → plan タスク `01M2RW2WGCQHXMYH0N9N7DFCP0` が
+**約 1 分で `done`**。秘書が作った仕事の木（すべて `draft`。本番は `[plan] auto_accept = false` なので人の Go 待ち）:
+
+| 担当 | 仕事 | 依存 |
+|---|---|---|
+| research-survey（関連研究調査課） | 隣接領域の動向調査とテーマ候補 3〜5 件の抽出 | なし |
+| secretary（秘書） | 検証テーマの選定と実行承認 | 調査 |
+| coding-poc（PoC・R&D 課） | 選定テーマの小さな PoC 検証 | 選定 |
+
+秘書が `assignee` で課を振り分け（ADR-0033 D4）、途中目標の中身どおり「調査 → 選定（人の承認）→ PoC」の順に依存を付けた。
+**SPEC §2.3「分解され、実行される」の「分解」が、GUI と同じ API 経路で本物の LLM により通った**（実行は人が `draft` を受け入れてから）。
+朝にやること: pegasus に接続（TOTP）して LDR の LLM 先を復活させ、`draft` を受け入れると research-survey が動く。
