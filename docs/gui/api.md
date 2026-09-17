@@ -182,7 +182,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 42 | PATCH | `/org/{id}` | 役職を変える・付け替える（**管理系**） | 200 `OrgNode` | store `org_upsert` |
 | 43 | DELETE | `/org/{id}` | 役職を消す。仕事を抱えていたら 409（**管理系**） | 204 | store `org_delete` |
 | 44 | GET | `/projects` | 案件の一覧（新しい順。ADR-0033 D2） | `ProjectList` | store `project_list` |
-| 45 | POST | `/projects` | 案件を投げる（`status = proposed`） | 201 `Project`（`Location`） | store `project_create` |
+| 45 | POST | `/projects` | 案件を投げる（`status = proposed`。直後に秘書の run が起きるので**管理系**。Phase 27） | 201 `Project`（`Location`） | store `project_create` |
 | 46 | GET | `/projects/{id}` | 案件 + 途中目標 + 仕事の木 | `ProjectDetail` | store（`project_id` で絞った `tasks`） |
 | 47 | PATCH | `/projects/{id}` | 案件の状態を変える | 200 `Project` | store `project_set_status` |
 | 48 | POST | `/projects/{id}/milestones` | 途中目標を足す（`seq` はストアが採番） | 201 `Milestone`（`Location`） | store `milestone_create` |
