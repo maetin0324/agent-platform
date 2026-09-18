@@ -5,6 +5,8 @@ import { formString } from "./forms";
 import type {
   Milestone,
   MilestoneCreateBody,
+  MilestoneDecideBody,
+  MilestoneDecided,
   MilestonePatchBody,
   MilestoneStatus,
   Project,
@@ -101,6 +103,33 @@ export async function patchMilestoneStatus(
     return { ok: true, op: "milestone_status", milestone };
   } catch (e) {
     return { ok: false, op: "milestone_status", error: toActionError(e) };
+  }
+}
+
+/**
+ * `POST /milestones/{id}/decide`（**管理系**、202 `MilestoneDecided`。ADR-0038 D2、
+ * docs/taskd-api-v1.md §3.63、Phase 41 / G13j）。人の 3 つの答え（`ok`/`discuss`/`ng`）をそのまま送るだけ
+ * （GUI 側では自由記述の必須チェックを画面の入力の時点で行うが、ここでは検証しない。空でも taskd に送って
+ * taskd の 422 文言をそのまま出す。SPEC の「秘書は達成と言えるかを提案するにとどまる」の裏付けとして、
+ * 3 値を GUI が解釈することもしない）。
+ */
+export async function decideMilestone(
+  client: TaskdClient,
+  milestoneId: string,
+  form: FormData,
+  signal?: AbortSignal,
+): Promise<ProjectOpOutcome> {
+  try {
+    const decision = (formString(form, "decision") ?? "ok") as MilestoneDecideBody["decision"];
+    const body: MilestoneDecideBody = { decision };
+    const note = formString(form, "note");
+    if (note) body.note = note;
+    const decided = await client.post<MilestoneDecided>(`/milestones/${encodeURIComponent(milestoneId)}/decide`, body, {
+      signal,
+    });
+    return { ok: true, op: "milestone_decide", decided };
+  } catch (e) {
+    return { ok: false, op: "milestone_decide", error: toActionError(e) };
   }
 }
 

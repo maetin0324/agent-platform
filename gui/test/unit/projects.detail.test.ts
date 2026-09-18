@@ -3,6 +3,7 @@ import { loadProjectDetail } from "~/routes/projects.$id";
 import { TaskdClient } from "~/taskd/client.server";
 import {
   createMilestone,
+  decideMilestone,
   patchMilestoneStatus,
   patchProjectStatus,
   startProjectPlan,
@@ -10,6 +11,8 @@ import {
 import type {
   ArtifactList,
   Milestone,
+  MilestoneDecided,
+  MilestoneView,
   OrgList,
   Project,
   ProjectDetail,
@@ -90,6 +93,38 @@ describe("loadProjectDetail", () => {
 
     expect(result.detail).toEqual(detail);
     expect(result.org).toEqual(org);
+  });
+
+  it("ADR-0038（Phase 41 / G13j）: milestones[] の review / proposal をそのまま通す", async () => {
+    const milestone: MilestoneView = {
+      id: "m1",
+      project_id: "p1",
+      seq: 1,
+      title: "隣接領域の動向調査",
+      description: "",
+      status: "in_progress",
+      created_at: "…",
+      updated_at: "…",
+      review: { message_id: "msg1", text: "候補を 3 本に絞りました。次は…", at: "2026-09-18T00:00:00Z" },
+      proposal: {
+        id: "m2",
+        project_id: "p1",
+        seq: 2,
+        title: "候補の比較実験",
+        description: "3 本を比較する",
+        status: "proposed",
+        created_at: "…",
+        updated_at: "…",
+      },
+    };
+    const detail: ProjectDetail = { project: project(), milestones: [milestone], tasks: [] };
+    mock.on("GET", "/api/v1/projects/p1", (_req, res) => sendJson(res, 200, detail));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+
+    const result = await loadProjectDetail(client, "p1", new Request("http://gui.invalid/projects/p1"));
+
+    expect(result.detail.milestones[0].review).toEqual(milestone.review);
+    expect(result.detail.milestones[0].proposal).toEqual(milestone.proposal);
   });
 
   it("GET /org が失敗しても案件の詳細は返す（組織は空扱い）", async () => {
@@ -385,5 +420,121 @@ describe("startProjectPlan (POST /projects/{id}/plan)", () => {
     );
     const result = await startProjectPlan(client, "p1", new FormData());
     expect(result).toMatchObject({ ok: false, op: "project_plan", error: { status: 401, code: "unauthorized" } });
+  });
+});
+
+/**
+ * 途中目標の判定（`POST /milestones/{id}/decide`。**管理系**、202。ADR-0038 D2、docs/taskd-api-v1.md §3.63、
+ * Phase 41 / G13j）。GUI 側は 3 値を解釈しない: フォームの `decision`/`note` をそのまま送るだけ。
+ */
+describe("decideMilestone (POST /milestones/{id}/decide)", () => {
+  const decided = (over: Partial<MilestoneDecided> = {}): MilestoneDecided => ({
+    decision: "ok",
+    milestone: {
+      id: "m1",
+      project_id: "p1",
+      seq: 1,
+      title: "隣接領域の動向調査",
+      description: "",
+      status: "reached",
+      created_at: "…",
+      updated_at: "…",
+    },
+    ...over,
+  });
+
+  it("ok: note 無しでも送れる（decision だけの本文）", async () => {
+    mock.on("POST", "/api/v1/milestones/m1/decide", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ decision: "ok" });
+      sendJson(res, 202, decided({ next_milestone: { ...decided().milestone, id: "m2", status: "approved" } }));
+    });
+
+    const form = new FormData();
+    form.set("decision", "ok");
+    const result = await decideMilestone(client, "m1", form);
+
+    expect(result.ok).toBe(true);
+    if (result.ok && result.op === "milestone_decide") {
+      expect(result.decided.decision).toBe("ok");
+      expect(result.decided.next_milestone?.id).toBe("m2");
+    } else {
+      throw new Error(`unexpected result: ${JSON.stringify(result)}`);
+    }
+  });
+
+  it("discuss: decision と note を送る", async () => {
+    mock.on("POST", "/api/v1/milestones/m1/decide", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ decision: "discuss", note: "候補をもう 1 本足してほしい" });
+      sendJson(res, 202, decided({ decision: "discuss", message_id: "msg2", conversation_task_id: "t9" }));
+    });
+
+    const form = new FormData();
+    form.set("decision", "discuss");
+    form.set("note", "候補をもう 1 本足してほしい");
+    const result = await decideMilestone(client, "m1", form);
+
+    expect(result).toMatchObject({
+      ok: true,
+      op: "milestone_decide",
+      decided: { decision: "discuss", message_id: "msg2", conversation_task_id: "t9" },
+    });
+  });
+
+  it("ng: decision と note（理由）を送る", async () => {
+    mock.on("POST", "/api/v1/milestones/m1/decide", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ decision: "ng", note: "この切り方は広すぎる" });
+      sendJson(res, 202, decided({ decision: "ng", message_id: "msg3" }));
+    });
+
+    const form = new FormData();
+    form.set("decision", "ng");
+    form.set("note", "この切り方は広すぎる");
+    const result = await decideMilestone(client, "m1", form);
+
+    expect(result).toMatchObject({ ok: true, op: "milestone_decide", decided: { decision: "ng" } });
+  });
+
+  it("422 validation（discuss で note が空）をそのまま ActionError にする", async () => {
+    mock.on("POST", "/api/v1/milestones/m1/decide", (_req, res) =>
+      sendProblem(res, { status: 422, code: "validation", detail: "note is required for discuss" }),
+    );
+    const form = new FormData();
+    form.set("decision", "discuss");
+    const result = await decideMilestone(client, "m1", form);
+    expect(result).toMatchObject({ ok: false, op: "milestone_decide", error: { status: 422, code: "validation" } });
+  });
+
+  it("401 unauthorized（管理系）をそのまま返す", async () => {
+    mock.on("POST", "/api/v1/milestones/m1/decide", (_req, res) =>
+      sendProblem(res, { status: 401, code: "unauthorized", detail: "token required" }),
+    );
+    const result = await decideMilestone(client, "m1", new FormData());
+    expect(result).toMatchObject({ ok: false, op: "milestone_decide", error: { status: 401, code: "unauthorized" } });
+  });
+
+  it("404 milestone_not_found をそのまま返す", async () => {
+    mock.on("POST", "/api/v1/milestones/missing/decide", (_req, res) =>
+      sendProblem(res, { status: 404, code: "milestone_not_found", detail: "no such milestone" }),
+    );
+    const result = await decideMilestone(client, "missing", new FormData());
+    expect(result).toMatchObject({
+      ok: false,
+      op: "milestone_decide",
+      error: { status: 404, code: "milestone_not_found" },
+    });
+  });
+
+  it("409 milestone_reached（既に達成済み）をそのまま返す", async () => {
+    mock.on("POST", "/api/v1/milestones/m1/decide", (_req, res) =>
+      sendProblem(res, { status: 409, code: "milestone_reached", detail: "already reached" }),
+    );
+    const form = new FormData();
+    form.set("decision", "ok");
+    const result = await decideMilestone(client, "m1", form);
+    expect(result).toMatchObject({
+      ok: false,
+      op: "milestone_decide",
+      error: { status: 409, code: "milestone_reached" },
+    });
   });
 });

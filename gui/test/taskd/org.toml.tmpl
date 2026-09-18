@@ -89,3 +89,12 @@ id = "literature"
 description = "関連研究の調査・先行研究の確認・新規性の検討"
 default_role = "literature-reader"
 roles = ["literature-scout", "literature-reader"]
+
+# taskd 側（08267d9「研究文献調査課 / Web 調査課」の分割、Phase G13j で発覚）: `config/org.example.toml`
+# の `research-web` が使う分野。実際の LDR ハーネスは持ち込まず、fixture では役割を借りるだけ（この課へ
+# タスクを流す e2e は今のところ無いので、設定検証を通すためだけの最小定義）。
+[[genres]]
+id = "web-research"
+description = "論文化されていない実装・製品・仕様を一般 Web 検索で調べる"
+default_role = "literature-reader"
+roles = ["literature-reader"]

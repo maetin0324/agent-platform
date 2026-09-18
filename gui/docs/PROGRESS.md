@@ -2309,3 +2309,126 @@ GUI dev サーバを 127.0.0.1:18097（`TASKD_API_URL=http://127.0.0.1:18098`）
 
 - G13i-P1: 解消（Phase 40 追従、上記参照）。`GET /notify` の `recent[]` に `project_id` が増えたことで、
   `milestone_ready` も対象の案件へリンクできるようになった。
+
+## Phase G13j — 途中目標のレビューカード（2026-09-18）
+
+taskd 側 Phase 41（ADR-0038: 途中目標の判定を「結果の報告 → 次の提案 → ok / 議論 / ng」の対話にする）
+への追従。案件画面の途中目標カードに、秘書のレビューの返事・次の提案・3 ボタン（ok / 議論 / ng）＋
+自由記述欄を追加した。
+
+### 実装したこと
+
+- `pnpm gen:types`（2 回、差分ゼロ）: `MilestoneView`（`Milestone` を平らにした上に `review?` /
+  `proposal?`）、`MilestoneReviewView`、`MilestoneDecideBody`、`MilestoneDecided` を追加。
+  `ProjectDetail.milestones` の型が `Milestone[]` → `MilestoneView[]` に変わった。
+  `bash scripts/sync-gui-docs.sh`（`docs/taskd-api-v1.md` §3.47・3.63 を反映）。
+- `app/lib/milestone-review.ts`（新規、純粋関数）: `milestoneWorkTasks` / `milestoneIsStalled`
+  （taskd 側 `crates/taskd/src/milestone_review.rs::ready_milestones` と同じ条件 — 裏方を除くその
+  途中目標のタスクに ready/running/reviewing/blocked が 0 件・done が 1 件以上 — を GUI 側でも判定し、
+  「秘書が結果をまとめています…」の表示に使う）、`milestoneDecisionNoteRequired` /
+  `milestoneDecisionValid`（`discuss`/`ng` は自由記述必須）。
+- `app/taskd/projects-admin.server.ts`: `decideMilestone`（`POST /milestones/{id}/decide`。フォームの
+  `decision`/`note` をそのまま送るだけ。GUI は 3 値を解釈しない）。
+- `app/taskd/action-types.ts`: `ProjectOpOutcome` に `milestone_decide`（`decided: MilestoneDecided`）を追加。
+- `app/components/Flash.tsx`: `ProjectActionFlash` に `milestone_decide` の分岐（`ok`/`discuss`/`ng` ごとの
+  文言、`ok` で `plan_task_id` があれば裏方のタスクへのリンク）。
+- `app/routes/projects.$id.tsx`:
+  - 途中目標カードに `MilestoneReviewPanel`（新規のローカルコンポーネント）を追加。`m.status` が
+    `reached`/`redesigned` ならバッジのみ（`review` が残っていてもパネルは出さない。判定済みのものに
+    誤って ok/議論/ng を押させないため）。それ以外で `m.review` があればパネル（秘書のまとめを
+    `MarkdownViewer` で描画、`m.proposal` があれば次の途中目標の題名・説明、note 欄、3 ボタン）。
+    `review` が無くまだ `milestoneIsStalled(tasks, m.id)` なら「秘書が結果をまとめています…」。
+  - `MilestoneReviewPanel` は途中目標ごとに専用の `useFetcher`（`WorkTreeTaskRow` と同じ考え方）を持ち、
+    `discuss`/`ng` を押す前に `milestoneDecisionValid` で note を確認（空なら送らず `aria-invalid` で
+    赤くし、送信を止める。JS 無効時は taskd 側の 422 がそのまま出る）。`discuss` が通ったら
+    `useNavigate` で `/org/secretary?project=<id>&waiting=1` へ遷移し、既存の「考え中」（`~/lib/conversation.ts`
+    の `replyArrived`）にそのまま乗る。
+  - 既存の直接状態変更（`milestone_status` の select + submit）は `<details>`（`状態を直接変える（裏方）`）に
+    畳んだ（消していない。誤って押さないように）。
+- `app/routes/help.tsx`: 「途中目標（milestone）」の説明に ok / 議論 / ng の判定と、直接変更が裏方に
+  畳んであることを追記。
+- testid: `milestone-review` / `milestone-review-text` / `milestone-proposal` / `milestone-decide-note` /
+  `milestone-decide-ok` / `milestone-decide-discuss` / `milestone-decide-ng`（依頼どおり）。加えて
+  `milestone-review-pending`（止まっているが返事がまだ）と `milestone-status-details`（畳んだ既存フォーム）。
+
+### 見つけて直したこと（taskd 側の変更に GUI 側の fixture が追従していなかった）
+
+- `gui/test/taskd/org.toml.tmpl`: taskd 側コミット `08267d9`（研究部を PaperQA2 / LDR で分割、
+  `config/org.example.toml` に `research-web`（`genre = "web-research"`）を追加）に、GUI 側の e2e 用
+  `[[genres]]` が追従しておらず、`scripts/taskd.sh fixture org && scripts/taskd.sh start org` が
+  `invalid config: [[org]] research-web: genre "web-research" is not defined in [[genres]]` で起動不能
+  になっていた（本 Phase の実機確認で発覚。`e2e/g13.spec.ts` もこの fixture を使うため、taskd 側の
+  マージ以降は同じ理由で壊れていたはず）。`[[genres]] id = "web-research"`（`literature-reader` を
+  借りるだけの最小定義。この課へタスクを流す e2e は今のところ無い）を足して解消。GUI 側の
+  ファイル（`gui/**`）で直せる範囲だったため、本 Phase のコミットに含めた。
+
+### 実機での見た目・実際の確認
+
+使い捨ての taskd（`scripts/taskd.sh fixture org` を隔離した `TASKD_RUN_ROOT`・`TASKD_API_LISTEN
+127.0.0.1:18931` で用意し、コピーされた `fake-worker.sh` にだけ「途中目標のレビュー対話
+（タイトルに『途中目標』を含む）」の分岐を追加して `milestone_proposal`（結果ファイル
+`artifacts/result.json`）を宣言するようにした。共有される `test/taskd/fixtures/org-worker.sh` 本体は
+変更していない）を、GUI dev サーバ（`127.0.0.1:18901`、`TASKD_API_URL=http://127.0.0.1:18931`）と
+組み合わせて確認した。**運用中の 7710 / 7700 には触っていない**（前後で
+`curl 127.0.0.1:7710/api/v1/health` / `curl 127.0.0.1:7700/` の生存を確認済み）。
+
+1. `POST /projects` → `POST /projects/{id}/milestones`（`status=in_progress`）→
+   `POST /tasks`（`project_id`/`milestone_id`/`assignee=research-survey`）→ `approve` の順で作り、
+   taskd 自身の tick（`tick_ms=200`）に「done → `ready_milestones` → レビュー対話を起こす →
+   dispatch → done（`milestone_proposal` 付き）」を実行させた（**messages と milestones は SQL では
+   なく、taskd の本来の決定的なロジックを実機で走らせて作った**。依頼文の「API / SQL で仕込む」の
+   うち、より実機に近い経路を選んだ）。`GET /projects/{id}` で `milestones[0].review` と `.proposal`
+   が実際に付くことを確認。
+2. Playwright（Chromium）で `/projects/<id>` を light/dark で撮影（`docs/PROGRESS.md` に添付できないため
+   本文に記載): 秘書のまとめ（Markdown 描画）・次の途中目標の提案・note 欄・ok/議論/ng の 3 ボタンが
+   意図どおりの見た目で表示され、崩れは無かった。
+3. `ng` を空の note で押す → 送信されず、note 欄が赤く（`aria-invalid=true`）なることを確認（クライアント
+   側の抑止が効いている）。
+4. `ok` を押す → `flash-milestone-decide`「達成にして、次の途中目標を承認し、分解を秘書に頼みました
+   （裏方のタスク）」が出て、対象の途中目標のバッジが「達成」に、次の途中目標が「進行中」になり、
+   仕事の木に分解された 3 件の draft タスクが増えることを確認（`plan_task_id` へのリンクも機能）。
+   **ここで `reached` になった途中目標に `review` が残ったままレビューパネルとボタンが出続けるバグを
+   発見**（`m.review` の有無だけで出し分けていたため）。`m.status` が `reached`/`redesigned` なら
+   パネルを出さないよう修正し、再度スクリーンショットで確認済み（バッジのみになった）。
+5. 別の途中目標（`ok` の分解 run 自身が「裏方の done 1 件・active 0 件」に見えて、taskd がもう一度
+   レビュー対話を起こした—plan タスクの子が全員 `draft` のまま Go 待ちのときに taskd 自身がその途中目標を
+   「止まっている」と判定する、という taskd 側の挙動。GUI のバグではないので直していない）に対して
+   `discuss` を note 付きで押す → `/org/secretary?project=<id>&waiting=1` へ遷移し、その対話に
+   「途中目標『…』の判定について相談です。もう少し候補を増やしてほしい」が `role=user` で入り、
+   秘書の返事（fixture の応答）が続くことを確認（既存の「考え中」の仕組みにそのまま乗った）。
+6. 確認後、使い捨ての taskd・GUI dev サーバは停止し、`.run`（gitignore 対象のシンボリックリンク）と
+   一時データ（`/tmp` 配下）は削除済み。verify 用の一時スクリプト（`.g13j-verify*.mjs`）もリポジトリに
+   残していない。
+
+### 受け入れ条件ごとの証拠
+
+- `pnpm lint`（biome、166 files）exit 0。
+- `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0。
+- `pnpm test` **498 passed**（42 ファイル。G13i の 482 から `test/unit/milestone-review.test.ts` 8 件 +
+  `test/unit/projects.detail.test.ts` に 8 件を追加）:
+  - `milestone-review.test.ts`: `milestoneIsStalled`（done とその他の状態の組み合わせ、裏方を除く、
+    他の途中目標のタスクを数えない）6 件、`milestoneDecisionNoteRequired`/`milestoneDecisionValid`
+    （ok は任意、discuss/ng は空・空白だけで無効）2 件
+  - `projects.detail.test.ts`: `loadProjectDetail` が `milestones[].review`/`.proposal` をそのまま通す
+    1 件、`decideMilestone` の `ok`/`discuss`/`ng` の本文 3 件、422（discuss で note 空）/401/404/409
+    （`milestone_reached`）の伝播 4 件（計 8 件）
+- `pnpm build` exit 0。
+- `pnpm gen:types` を 2 回実行して差分ゼロ。`bash scripts/sync-gui-docs.sh --check` up to date。
+- 実機での見た目・実際の確認は上記のとおり（light/dark、ok/discuss/ng 3 種、note 必須の抑止、
+  `reached` になったカードがボタンを失うことを含む）。
+
+### 未解決事項
+
+- G13j-U1: e2e（`pnpm e2e`）は運用中の taskd / GUI（7700/7710）と衝突するため未実行（既存フェーズと
+  同じ扱い）。確認は unit テストと使い捨て環境での Playwright 操作・スクリーンショットで行った。
+- G13j-U2: taskd 側の挙動として、`ok` で分解した直後の plan タスク（子が全員 draft）自身が
+  「done 1 件・active 0 件」に見え、その途中目標のレビュー対話がもう一度起きることを実機で確認した
+  （上記 5）。GUI 側はこの状態も正しくカードに出せている（`review`/`proposal` が更新されればそのまま
+  表示する）ので直していないが、taskd 側で「意図した動作か」を確認した方がよいかもしれない
+  （taskd 側のバックログとして記録するだけに留める。GUI からは判断しない）。
+- G13j-U3: DOM を描画する unit テスト（G10-U1 / G13i-U3 と同じ制約）は今回も無い。`MilestoneReviewPanel`
+  の描画・分岐は実機の Playwright でのみ確認している。
+
+### 提案（`docs/gui/api.md` への変更提案。採否は人間）
+
+なし。

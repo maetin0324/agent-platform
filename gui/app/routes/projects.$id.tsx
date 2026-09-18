@@ -1,8 +1,9 @@
-import { useEffect, useMemo } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher, useNavigate } from "react-router";
 import { ArtifactsList } from "~/components/ArtifactsList";
 import { ErrorFlash, ProjectActionFlash, RetryFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { ReportsList } from "~/components/ReportsList";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
@@ -19,6 +20,7 @@ import {
   workspacePlace,
 } from "~/lib/artifacts";
 import { milestoneStatusLabel, projectStatusLabel, taskStatusLabel } from "~/lib/labels";
+import { milestoneDecisionValid, milestoneIsStalled } from "~/lib/milestone-review";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
 import { TaskdBanner } from "~/root";
@@ -28,13 +30,16 @@ import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { formString } from "~/taskd/forms";
 import {
   createMilestone,
+  decideMilestone,
   patchMilestoneStatus,
   patchProjectStatus,
   startProjectPlan,
 } from "~/taskd/projects-admin.server";
 import type {
   ArtifactList,
+  MilestoneDecideBody,
   MilestoneStatus,
+  MilestoneView,
   OrgList,
   ProjectDetail,
   ProjectStatus,
@@ -159,6 +164,9 @@ export async function action({ request, params }: Route.ActionArgs) {
         request.signal,
       );
       break;
+    case "milestone_decide":
+      outcome = await decideMilestone(client, formString(form, "milestone_id") ?? "", form, request.signal);
+      break;
     default:
       throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
   }
@@ -280,7 +288,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
               .map((m) => (
                 <li key={m.id} data-testid="milestone-row" data-milestone-id={m.id}>
                   <Card>
-                    <CardBody className="space-y-2">
+                    <CardBody className="space-y-3">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono text-xs text-fg-subtle">#{m.seq}</span>
                         <span className="font-medium">{m.title}</span>
@@ -289,32 +297,52 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                         </Badge>
                       </div>
                       {m.description && <p className="text-sm text-fg-muted">{m.description}</p>}
-                      <fetcher.Form method="post" className="flex flex-wrap items-end gap-2">
-                        <input type="hidden" name="intent" value="milestone_status" />
-                        <input type="hidden" name="milestone_id" value={m.id} />
-                        <select
-                          name="status"
-                          defaultValue={m.status}
-                          aria-label={`途中目標 ${m.title} の状態`}
-                          className={`${selectClass} h-8 text-xs`}
-                        >
-                          {MILESTONE_STATUSES.map((s) => (
-                            <option key={s} value={s}>
-                              {milestoneStatusLabel(s)}
-                            </option>
-                          ))}
-                        </select>
-                        <Button
-                          type="submit"
-                          variant="ghost"
-                          size="xs"
-                          disabled={submitting}
-                          data-testid="milestone-status-submit"
-                        >
-                          <Icon name="check" />
-                          Go / 再設計
-                        </Button>
-                      </fetcher.Form>
+
+                      {/* ADR-0038 D3（Phase 41 / G13j）: 秘書のレビューの返事が付いたら、まとめ・提案・
+                          ok / 議論 / ng のカードを出す。`reached` / `redesigned` は判定済みなので
+                          バッジだけ（`review` が付いたままでもボタンは出さない。誤って ok/議論/ng を
+                          もう一度押せてしまわないように）。 */}
+                      {m.status === "reached" || m.status === "redesigned" ? null : m.review ? (
+                        <MilestoneReviewPanel milestone={m} projectId={project.id} />
+                      ) : (
+                        milestoneIsStalled(tasks, m.id) && (
+                          <Alert tone="info" data-testid="milestone-review-pending">
+                            秘書が結果をまとめています…
+                          </Alert>
+                        )
+                      )}
+
+                      {/* 既存の直接変更は裏方の詳細に畳む（誤って押さないように。SPEC §7 のアジャイル判定は
+                          本来「ok / 議論 / ng」の対話で行う。ADR-0038 D3 の依頼）。 */}
+                      <details className="text-xs text-fg-subtle" data-testid="milestone-status-details">
+                        <summary className="cursor-pointer select-none">状態を直接変える（裏方）</summary>
+                        <fetcher.Form method="post" className="mt-2 flex flex-wrap items-end gap-2">
+                          <input type="hidden" name="intent" value="milestone_status" />
+                          <input type="hidden" name="milestone_id" value={m.id} />
+                          <select
+                            name="status"
+                            defaultValue={m.status}
+                            aria-label={`途中目標 ${m.title} の状態`}
+                            className={`${selectClass} h-8 text-xs`}
+                          >
+                            {MILESTONE_STATUSES.map((s) => (
+                              <option key={s} value={s}>
+                                {milestoneStatusLabel(s)}
+                              </option>
+                            ))}
+                          </select>
+                          <Button
+                            type="submit"
+                            variant="ghost"
+                            size="xs"
+                            disabled={submitting}
+                            data-testid="milestone-status-submit"
+                          >
+                            <Icon name="check" />
+                            Go / 再設計
+                          </Button>
+                        </fetcher.Form>
+                      </details>
                     </CardBody>
                   </Card>
                 </li>
@@ -489,6 +517,125 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           <ArtifactsList rows={artifactRows} fetchedAt={fetchedAt} />
         )}
       </section>
+    </div>
+  );
+}
+
+/**
+ * 途中目標のレビューカード（ADR-0038 D3、Phase 41 / G13j）。秘書のまとめ（Markdown）と提案された次の
+ * 途中目標を出し、「ok」「議論」「ng」の 3 ボタン＋自由記述欄を持つ。この画面全体の `fetcher`
+ * （project 単位の intent）とは別に、途中目標ごとの専用 `fetcher`（`WorkTreeTaskRow` と同じ考え方）を持つ。
+ * `discuss` が通ったら秘書の対話画面（`/org/secretary?project=<id>`）へ遷移して返事を待つ
+ * （`~/lib/conversation.ts` の「考え中」の仕組みにそのまま乗る。`waiting=1` は新しい案件を作った直後と同じ扱い）。
+ */
+function MilestoneReviewPanel({ milestone, projectId }: { milestone: MilestoneView; projectId: string }) {
+  const fetcher = useFetcher<ProjectOpOutcome>({ key: `milestone-decide-${milestone.id}` });
+  const busy = fetcher.state !== "idle";
+  const [note, setNote] = useState("");
+  const [invalid, setInvalid] = useState(false);
+  const navigate = useNavigate();
+  const review = milestone.review;
+
+  useEffect(() => {
+    if (fetcher.data?.ok && fetcher.data.op === "milestone_decide" && fetcher.data.decided.decision === "discuss") {
+      navigate(`/org/secretary?project=${encodeURIComponent(projectId)}&waiting=1`);
+    }
+  }, [fetcher.data, navigate, projectId]);
+
+  if (!review) return null;
+
+  function handleSubmit(e: FormEvent<HTMLFormElement>) {
+    const submitter = (e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    const decision = (submitter?.value ?? "ok") as MilestoneDecideBody["decision"];
+    if (!milestoneDecisionValid(decision, note)) {
+      e.preventDefault();
+      setInvalid(true);
+      return;
+    }
+    setInvalid(false);
+  }
+
+  return (
+    <div className="space-y-3" data-testid="milestone-review">
+      <Alert tone="info" title="秘書のまとめ">
+        <div data-testid="milestone-review-text">
+          <MarkdownViewer content={review.text} />
+        </div>
+      </Alert>
+      {milestone.proposal && (
+        <div className="rounded-lg border border-border bg-surface-2/50 p-3 text-sm" data-testid="milestone-proposal">
+          <p className="font-medium">次の途中目標の提案: {milestone.proposal.title}</p>
+          {milestone.proposal.description && (
+            <p className="mt-1 whitespace-pre-wrap text-fg-muted">{milestone.proposal.description}</p>
+          )}
+        </div>
+      )}
+      <fetcher.Form method="post" onSubmit={handleSubmit} className="space-y-2">
+        <input type="hidden" name="intent" value="milestone_decide" />
+        <input type="hidden" name="milestone_id" value={milestone.id} />
+        <div>
+          <label htmlFor={`milestone-decide-note-${milestone.id}`} className={labelClass}>
+            一言（議論・ng は必須）
+          </label>
+          <textarea
+            id={`milestone-decide-note-${milestone.id}`}
+            name="note"
+            rows={2}
+            value={note}
+            onChange={(e) => {
+              setNote(e.target.value);
+              if (invalid) setInvalid(false);
+            }}
+            aria-invalid={invalid ? true : undefined}
+            data-testid="milestone-decide-note"
+            className={`${textareaClass} mt-1.5 w-full`}
+          />
+          {invalid && (
+            <p role="alert" className="mt-1 text-xs text-danger" data-testid="milestone-decide-note-required">
+              議論・ng には一言が要ります。
+            </p>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="submit"
+            name="decision"
+            value="ok"
+            variant="success"
+            size="sm"
+            disabled={busy}
+            data-testid="milestone-decide-ok"
+          >
+            <Icon name="check" />
+            ok
+          </Button>
+          <Button
+            type="submit"
+            name="decision"
+            value="discuss"
+            variant="secondary"
+            size="sm"
+            disabled={busy}
+            data-testid="milestone-decide-discuss"
+          >
+            <Icon name="message" />
+            議論
+          </Button>
+          <Button
+            type="submit"
+            name="decision"
+            value="ng"
+            variant="danger"
+            size="sm"
+            disabled={busy}
+            data-testid="milestone-decide-ng"
+          >
+            <Icon name="x" />
+            ng
+          </Button>
+        </div>
+      </fetcher.Form>
+      <ProjectActionFlash outcome={fetcher.data} />
     </div>
   );
 }

@@ -273,14 +273,47 @@ const PROJECT_OP_LABEL: Record<string, string> = {
   project_plan: "分解を秘書に頼みました",
 };
 
+/** 途中目標の判定（`ok`/`discuss`/`ng`）ごとの文言（ADR-0038 D2/D3、Phase 41 / G13j）。 */
+const MILESTONE_DECIDE_LABEL: Record<string, string> = {
+  ok: "達成にして、次の途中目標を承認し、分解を秘書に頼みました",
+  discuss: "議論を秘書に伝えました。秘書の対話画面で返事を待ってください",
+  ng: "達成にせず、再設計を秘書に頼みました",
+};
+
 /**
  * 「案件」画面の action の結果（ADR-0033 D2）。案件・途中目標の操作は管理系ではない（3.42〜3.49 の前書き）。
  * 「この方針で進める」（`project_plan`、§3.61）は 202 なので、待たずに「頼みました」と出し、
  * その裏方のタスクへのリンクを添える（仕事の木は SSE の再検証で増えていく）。
+ * 途中目標の判定（`milestone_decide`、§3.63）も同じく 202 で、`decided.decision` ごとの文言と、
+ * `ok` で分解が起きたときは `plan_task_id` へのリンクを出す（`discuss` は呼び出し側が秘書の対話画面へ
+ * 遷移するので、ここは遷移するまでの一瞬だけ見える）。
  */
 export function ProjectActionFlash({ outcome }: { outcome: ProjectOpOutcome | undefined | null }) {
   if (!outcome) return null;
   if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  if (outcome.op === "milestone_decide") {
+    const { decided } = outcome;
+    return (
+      <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+        <p data-testid="flash-milestone-decide">
+          {MILESTONE_DECIDE_LABEL[decided.decision] ?? decided.decision}
+          {decided.plan_task_id && (
+            <>
+              （
+              <Link
+                to={`/tasks/${decided.plan_task_id}`}
+                data-testid="flash-milestone-plan-task"
+                className="underline underline-offset-2"
+              >
+                裏方のタスク
+              </Link>
+              ）
+            </>
+          )}
+        </p>
+      </Alert>
+    );
+  }
   return (
     <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
       <p data-testid="flash-project-op">

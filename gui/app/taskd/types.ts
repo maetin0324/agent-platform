@@ -315,6 +315,8 @@ export interface ApiV1Schema {
   message_list: MessageList;
   message_post: MessagePostBody;
   milestone_create: MilestoneCreateBody;
+  milestone_decide: MilestoneDecideBody;
+  milestone_decided: MilestoneDecided;
   milestone_patch: MilestonePatchBody;
   new_plan: NewPlanSpec;
   new_task: NewTaskSpec;
@@ -1550,6 +1552,72 @@ export interface MilestoneCreateBody {
   title: string;
 }
 /**
+ * Phase 41（ADR-0038 D2）: 途中目標の判定（`POST /milestones/{id}/decide`）。
+ */
+export interface MilestoneDecideBody {
+  /**
+   * `"ok"` / `"discuss"` / `"ng"`。
+   */
+  decision: "ok" | "discuss" | "ng";
+  /**
+   * 人の自由記述。`discuss` / `ng` では**必須**（空なら 422）。`ok` では任意で、計画の `note` と
+   * 秘書への `messages` に渡る。
+   */
+  note?: string | null;
+}
+/**
+ * `POST /milestones/{id}/decide` の応答（202）。
+ */
+export interface MilestoneDecided {
+  /**
+   * その返事のために起きた対話用タスク。
+   */
+  conversation_task_id?: TaskId | null;
+  /**
+   * 適用した答え。
+   */
+  decision: "ok" | "discuss" | "ng";
+  /**
+   * `discuss` / `ng` で秘書に送った `role = "user"` の行。
+   */
+  message_id?: string | null;
+  milestone: Milestone;
+  /**
+   * `ok` で承認して分解を始めた次の途中目標、`ng` で `redesigned` にした提案（無ければ省略）。
+   */
+  next_milestone?: Milestone1 | null;
+  /**
+   * `ok` で起きた分解（計画 run）のタスク。
+   */
+  plan_task_id?: TaskId | null;
+}
+/**
+ * 判定した途中目標（更新後）。
+ */
+export interface Milestone {
+  created_at: string;
+  description?: string;
+  id: MilestoneId;
+  project_id: ProjectId;
+  seq: number;
+  status: MilestoneStatus;
+  title: string;
+  updated_at: string;
+}
+/**
+ * 途中目標（ADR-0033 D2）。`seq` は案件の中での通し番号（1 始まり。ストアが採番する）。
+ */
+export interface Milestone1 {
+  created_at: string;
+  description?: string;
+  id: MilestoneId;
+  project_id: ProjectId;
+  seq: number;
+  status: MilestoneStatus;
+  title: string;
+  updated_at: string;
+}
+/**
  * `PATCH /milestones/{id}` の要求本文。
  */
 export interface MilestonePatchBody {
@@ -1788,7 +1856,11 @@ export interface ProjectCreateBody {
  * `GET /projects/{id}` の応答。案件 + 途中目標 + その案件のタスクの要約（GUI の「仕事の木」用）。
  */
 export interface ProjectDetail {
-  milestones: Milestone[];
+  /**
+   * ADR-0038 D1 / D4（Phase 41）: 途中目標そのもの（`Milestone` の各フィールドはそのまま）に、
+   * 秘書のレビューの返事と提案された次の途中目標を添えたもの。
+   */
+  milestones: MilestoneView[];
   project: Project;
   /**
    * 仕事の木を描くのに必要な最小限だけ（詳細は `GET /tasks/{id}`）。
@@ -1796,17 +1868,41 @@ export interface ProjectDetail {
   tasks: ProjectTaskView[];
 }
 /**
- * 途中目標（ADR-0033 D2）。`seq` は案件の中での通し番号（1 始まり。ストアが採番する）。
+ * 途中目標 1 件のビュー（ADR-0038 D1 / D4。Phase 41）。`Milestone` のフィールドは**平らに**出るので、
+ * 既存の GUI（`id` / `title` / `status` …）はそのまま読める。
  */
-export interface Milestone {
+export interface MilestoneView {
   created_at: string;
   description?: string;
   id: MilestoneId;
   project_id: ProjectId;
+  /**
+   * その返事が提案した次の途中目標（`proposed` の最新。無ければ省略）。
+   */
+  proposal?: Milestone1 | null;
+  /**
+   * 秘書のレビューの返事（まだ無ければ省略。run 中は `tasks[]` の
+   * `support = "milestone_review"` が動いている）。
+   */
+  review?: MilestoneReviewView | null;
   seq: number;
   status: MilestoneStatus;
   title: string;
   updated_at: string;
+}
+/**
+ * 秘書のレビューの返事（`messages` の 1 行。ADR-0038 D1）。
+ */
+export interface MilestoneReviewView {
+  /**
+   * RFC 3339。
+   */
+  at: string;
+  message_id: string;
+  /**
+   * 返事の本文（Markdown。GUI がカードに出す）。
+   */
+  text: string;
 }
 /**
  * 案件（SPEC §3.3）。仕事の木は `tasks WHERE project_id = ?`。
