@@ -5050,3 +5050,20 @@ OK, keys: ['query', 'research_id', 'summary', 'findings', 'iterations', 'questio
 - P-92: `input_artifacts` 側の `名前: 説明` は解釈だけ実装して、プロンプトでは従来どおり文字列をそのまま
   出している（「渡すもの」は名前が固定ではないため）。GUI で入出力を並べて見せるときに、説明を分けて
   表示するかは GUI 側の判断に委ねた。
+
+### 実機（本番 taskd）— SPEC §6 の 2 段目が初めてレビューを通った（2026-09-18 07:05 UTC）
+
+Phase 30〜38 を配備した本番で、案件 `01M2RCYVZH6RGX8RX0JP572BAT` を分解し直し（`POST /projects/{id}/plan`、計画は Phase 38 の
+成果物規約で `answer.md` / `papers.json` / `report.md` を基準に使った）、2 つの調査に Go を出した結果、**両方とも `done`**（レビュアー PASS）:
+
+| 担当 | ハーネス | 結果 |
+|---|---|---|
+| 研究文献調査課 `01M2SMJ3QRN14KWX9MQ9R3M31V` | PaperQA2（LLM 検索語 → arXiv/OpenAlex → 案件 corpus → pqa） | `answer.md` に候補テーマ **5 件**（混雑感知 I/O タスクスケジューリング付き ad-hoc FS ランタイム／RDMA-first・DPU オフロード ad-hoc オブジェクト FS／非同期イベント駆動 OpenMP・user-level I/O ランタイム／GPU 向け多層非同期バーストバッファ型オフロード／GPUDirect・DPU-GPU 直結 ad-hoc FS I/O）、各々に新規性・実現可能性・Pluvio との接続点、引用は Zhu2025 / Elshazly2021 / Maurya2024 / Maurya2025 / Pereira2023（`cited=5`、出典 30 件すべて学術） |
+| Web 調査課 `01M2SMJ3QRYPWCM8S57MRZ7RB3` | LDR（quick × 3、Tavily） | `report.md` の一次情報: ADMIRE の deliverable PDF、KIT 出版物、Springer 論文、ADA-FS 公式、SC'25 論文（ACM DL）、arXiv、DDS の VLDB 論文、GitHub（MLP-Offload 等）。`counts: search_results 18 / sources 18 / cited 18 / domains 13`。レビュアーは NVIDIA フォーラムを「査読論文ではない」と断って傍証に限定した点も評価 |
+
+ここに至るまでの実機の失敗と対応（すべて今日）: 対話がハーネスで走った（Phase 30）→ 失敗をやり直す手段が無い（31）→
+LDR の report.md が 3 重（32）→ 担当が自分の仕事を知らない（33）→ 一般 Web 検索で関連研究を調べていた（34、人間の決定で課を分割）→
+兄弟が成果物を上書き（35）→ 決定的な検索語がゴミ（36）→ LDR detailed の設定漏れ（37）→ 計画がハーネスの成果物名を知らない（38）。
+**証拠ゲートとレビュアーは一度も誤って通しておらず、毎回の不合格が次の修正を指した。**
+
+残り: 統合・選定（秘書、人の承認）→ PoC（PoC・R&D 課）は `draft` で人の Go 待ち。
