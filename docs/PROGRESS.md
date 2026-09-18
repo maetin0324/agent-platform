@@ -5328,3 +5328,39 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
   別名の主成果物（例: `survey.md`）が出てきたら、分野の manifest（`[[genres]]`）から名前を引く形に
   広げるとよい（今は決め打ちで、無ければ抜粋が空になるだけ）。
 
+## Phase 42 — 計画タスクは途中目標の仕事に数えない（実機から。2026-09-18）
+
+- 完了日: 2026-09-18
+- 実機で起きたこと: 途中目標に `ok` を押す → 計画 run（`kind = plan`）が `done` になり、子は全部
+  `draft` → 「動いているものが無く done が 1 件以上」が成立して、分解した直後にその途中目標の
+  レビュー対話がもう一度起きてしまった（計画タスク自身を途中目標の「仕事」に数えていたため）。
+- 変更:
+  - `crates/task-core/src/report.rs`: `support_kind` が `kind == TaskKind::Plan` に `Some("plan")`
+    を返すようにした（優先順は 途中目標レビュー > 対話 > **計画** > 圧縮 > 承認 > 合成レビュー）。
+  - `crates/taskd/src/milestone_review.rs`: `ready_milestones` はもともと
+    `support_kind(t).is_none()` で裏方を除いていたので、上の変更だけで計画 run は自然に
+    その集合から外れる（コードの条件式は変更なし。ドキュメントコメントのみ更新）。
+    さらに「分解直後（done が 0）はレビューしない」も既存の `done.is_empty() { continue; }` で
+    自動的に満たされることを確認した（追加の分岐は不要だった）。
+  - `crates/taskd/src/notify.rs`: `scan_milestone_ready` は `crate::milestone_review::ready_milestones`
+    をそのまま使っているので、コード変更なしで同じ修正が効く（確認のみ）。
+  - `docs/adr/0038-milestone-review-dialogue.md` D1 に一行追記。
+- 追加したテスト:
+  - `task-core`: `support_kind` が `TaskKind::Plan` に `"plan"` を返すこと（既存の優先順テストに追記）。
+  - `taskd`（`milestone_review.rs` 2 件）: 分解直後（計画 done + 子 draft のみ）で `ready_milestones`
+    が空を返すこと／子が 1 件 `done` になり他が動いていなければ 1 件返り、`done` の件数に計画 run が
+    含まれないこと。
+- 実行したコマンドと結果:
+  - `cargo test --workspace`: exit 0。`grep -c "^test result: FAILED"` = 0、`test result: ok` の
+    ブロックが 56、合計 1120 件 passed（新規追加分を含む）。
+  - `cargo clippy --workspace --all-targets -- -D warnings`: exit 0、警告なし。
+- 未解決事項:
+  - GUI 側は `gui/` を触っていない。`gui/app/lib/work-tree.ts` の `isSupportTask` は
+    `task.support !== null` を見るだけで、`TaskSummary.support` / `ProjectTaskView.support` の型は
+    `string | null`（特定の文字列のユニオン型ではない）なので、taskd が `support = "plan"` を返す
+    ようになった時点で GUI 側は**コード変更なしに**計画タスクを裏方として扱う（仕事の木からも
+    `milestoneWorkTasks` / `milestoneIsStalled` の判定からも自動的に外れる）。念のため実機で
+    GUI から見た仕事の木に計画タスクが出ないことを確認してほしい。
+  - 実機確認（分解直後にレビューが再発しないこと）はこの作業単位では未実施
+    （認証や配備済み taskd が必要な確認のため）。
+
