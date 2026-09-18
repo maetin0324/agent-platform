@@ -75,7 +75,9 @@ export function workspacePlace(workspace: WorkspaceSpec, workspaceDir: string | 
     return { text: `${workspace.cluster}:${workspace.path}`, vscodeHref: null };
   }
   const text = workspaceDir ?? workspace.path;
-  return { text, vscodeHref: `vscode://file/${text}` };
+  // `vscode://file/<絶対パス>`。パスが `/` 始まりなら二重スラッシュ（`vscode://file//tmp/...`）になるので
+  // 先頭の `/` を落としてから繋ぐ（監査 9）。相対パスはそのまま（VS Code 側が解釈する）。
+  return { text, vscodeHref: `vscode://file/${text.replace(/^\/+/, "")}` };
 }
 
 /** `sources.json`（ADR-0031「見るべき関連研究へのリンク」）は、名前で判定する（Content-Type は他の JSON と同じ `application/json`）。 */

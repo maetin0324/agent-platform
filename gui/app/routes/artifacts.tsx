@@ -126,20 +126,16 @@ export default function ArtifactsPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="SPEC §4「成果物 — 調査文書・リンク集はここで読む。コードは置き場所へのリンク」。"
+        description="調査文書・リンク集はここで読みます。コードは置き場所（普段のパス）へのリンクで示します。"
       />
 
       <Card>
-        <CardHeader
-          icon="folder"
-          title="案件を選ぶ"
-          description="この案件のタスクの成果物を横断して一覧します（SPEC §2.2）。"
-        />
+        <CardHeader icon="folder" title="案件を選ぶ" description="選んだ案件の成果物を、担当をまたいで一覧します。" />
         <CardBody>
           <Form method="get" className="flex flex-wrap items-end gap-3">
             <div>
               <label htmlFor="artifacts-project-select" className={labelClass}>
-                project
+                案件
               </label>
               <select
                 id="artifacts-project-select"
@@ -166,8 +162,7 @@ export default function ArtifactsPage({ loaderData }: Route.ComponentProps) {
 
       {!selectedProjectId ? (
         <EmptyState icon="file" title="案件を選んでください">
-          SPEC §2.2「調査の案件を投げる — 終わったとき、GUI
-          から調査結果の文書と見るべき関連研究へのリンクがまとまって読める」。
+          調査結果の文書と、見るべき関連研究へのリンクがまとまって読めます。
         </EmptyState>
       ) : projectNotFound ? (
         <Alert tone="danger" title="案件が見つかりません">

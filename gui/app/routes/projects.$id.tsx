@@ -7,7 +7,7 @@ import { ReportsList } from "~/components/ReportsList";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { inputClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
+import { hintClass, inputClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
@@ -18,14 +18,20 @@ import {
   type TaskArtifactBundle,
   workspacePlace,
 } from "~/lib/artifacts";
+import { milestoneStatusLabel, projectStatusLabel, taskStatusLabel } from "~/lib/labels";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import { projectTasksToGraph } from "~/lib/work-tree";
+import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
 import { TaskdBanner } from "~/root";
 import type { ProjectOpOutcome } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { formString } from "~/taskd/forms";
-import { createMilestone, patchMilestoneStatus, patchProjectStatus } from "~/taskd/projects-admin.server";
+import {
+  createMilestone,
+  patchMilestoneStatus,
+  patchProjectStatus,
+  startProjectPlan,
+} from "~/taskd/projects-admin.server";
 import type {
   ArtifactList,
   MilestoneStatus,
@@ -141,6 +147,9 @@ export async function action({ request, params }: Route.ActionArgs) {
     case "milestone_create":
       outcome = await createMilestone(client, params.id, form, request.signal);
       break;
+    case "project_plan":
+      outcome = await startProjectPlan(client, params.id, form, request.signal);
+      break;
     case "milestone_status":
       outcome = await patchMilestoneStatus(
         client,
@@ -180,10 +189,10 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
   const submitting = fetcher.state !== "idle";
 
   const orgById = useMemo(() => new Map(org.items.map((n) => [n.id, n])), [org.items]);
-  // 対話用タスク（`conversation`）は仕事の木から完全に外す（GUI-R3、Phase 27。SPEC「タスクは裏方」/
-  // ADR-0033 D8）。`projectTasksToGraph` は内部でも同じ絞り込みをするが、件数表示・「担当に話す」一覧
-  // （下の `work-tree-assignees`）も同じ判断に揃えるため、ここでも 1 度だけ絞る。
-  const workTasks = useMemo(() => tasks.filter((t) => !t.conversation), [tasks]);
+  // 裏方のタスク（`support`: 対話・報告のまとめ・承認待ち・レビュー。Phase 29）は仕事の木から完全に外す
+  // （SPEC「タスクは裏方」/ ADR-0033 D8）。件数表示・「担当に話す」一覧（下の `work-tree-assignees`）も
+  // 同じ判断に揃えるため、ここで 1 度だけ絞る。
+  const workTasks = useMemo(() => visibleWorkTasks(tasks), [tasks]);
   const graph = useMemo(() => projectTasksToGraph(tasks, orgById), [tasks, orgById]);
 
   return (
@@ -196,8 +205,12 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="SPEC §3.3「案件は組織の上から入り、分解されて下へ流れる。分解された仕事の依存関係が仕事の木」。"
-        actions={<Badge tone={PROJECT_STATUS_TONE[project.status]}>{project.status}</Badge>}
+        description="案件は組織の上から入り、分解されて下へ流れます。その依存関係が「仕事の木」です。"
+        actions={
+          <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status">
+            {projectStatusLabel(project.status)}
+          </Badge>
+        }
       />
 
       <ProjectActionFlash outcome={fetcher.data} />
@@ -208,13 +221,13 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         </SectionTitle>
         <Card>
           <CardBody className="space-y-4">
-            <DataItem label="request" wide>
+            <DataItem label="依頼文" wide>
               <p className="whitespace-pre-wrap" data-testid="project-request-text">
                 {project.request}
               </p>
             </DataItem>
             {project.secretary_summary && (
-              <Alert tone="info" title="秘書の理解確認・方針" data-testid="project-secretary-summary">
+              <Alert tone="info" title="秘書の理解の確認・方針" data-testid="project-secretary-summary">
                 <p className="whitespace-pre-wrap">{project.secretary_summary}</p>
               </Alert>
             )}
@@ -222,7 +235,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
               <input type="hidden" name="intent" value="project_status" />
               <div>
                 <label htmlFor="project-status-select" className={labelClass}>
-                  status
+                  案件の状態
                 </label>
                 <select
                   id="project-status-select"
@@ -232,7 +245,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                 >
                   {PROJECT_STATUSES.map((s) => (
                     <option key={s} value={s}>
-                      {s}
+                      {projectStatusLabel(s)}
                     </option>
                   ))}
                 </select>
@@ -271,7 +284,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                         <span className="font-mono text-xs text-fg-subtle">#{m.seq}</span>
                         <span className="font-medium">{m.title}</span>
                         <Badge tone={MILESTONE_STATUS_TONE[m.status]} data-testid="milestone-status">
-                          {m.status}
+                          {milestoneStatusLabel(m.status)}
                         </Badge>
                       </div>
                       {m.description && <p className="text-sm text-fg-muted">{m.description}</p>}
@@ -286,7 +299,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                         >
                           {MILESTONE_STATUSES.map((s) => (
                             <option key={s} value={s}>
-                              {s}
+                              {milestoneStatusLabel(s)}
                             </option>
                           ))}
                         </select>
@@ -312,20 +325,20 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           <CardHeader
             icon="plus"
             title="途中目標を足す"
-            description="SPEC §7「途中目標は予め大まかに決めておいて、適宜再設計する」"
+            description="途中目標は予め大まかに決めておいて、達成のたびに Go を出すか、再設計します。"
           />
           <CardBody>
             <fetcher.Form method="post" data-testid="milestone-new-form" className="space-y-3">
               <input type="hidden" name="intent" value="milestone_create" />
               <div>
                 <label htmlFor="milestone-title" className={labelClass}>
-                  title
+                  題名
                 </label>
                 <input id="milestone-title" name="title" type="text" className={`${inputClass} mt-1.5 w-full`} />
               </div>
               <div>
                 <label htmlFor="milestone-description" className={labelClass}>
-                  description
+                  説明
                 </label>
                 <textarea
                   id="milestone-description"
@@ -349,13 +362,75 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         </Card>
       </section>
 
+      {/* 「この方針で進める」（監査 H3、docs/taskd-api-v1.md §3.61）。押すと秘書に分解の仕事が 1 件立ち、
+          仕事の木が増えていく。案件が「提案中」でも押せる（taskd が「進行中」にする）。 */}
+      <section aria-labelledby="project-plan-heading" className="space-y-4">
+        <SectionTitle icon="sparkles" id="project-plan-heading">
+          この方針で進める
+        </SectionTitle>
+        <Card>
+          <CardHeader
+            icon="sparkles"
+            title="分解を秘書に頼む"
+            description="秘書が、依頼文・途中目標・ここまでのやり取りとあなたの一言をまとめて、仕事に分解します。返事は待ちません（仕事の木が増えていきます）。"
+          />
+          <CardBody>
+            <fetcher.Form method="post" data-testid="project-plan-form" className="space-y-3">
+              <input type="hidden" name="intent" value="project_plan" />
+              <div>
+                <label htmlFor="project-plan-milestone" className={labelClass}>
+                  どの途中目標まで進めるか
+                </label>
+                <select
+                  id="project-plan-milestone"
+                  name="milestone_id"
+                  data-testid="project-plan-milestone"
+                  defaultValue=""
+                  className={`${selectClass} mt-1.5 w-full max-w-md`}
+                >
+                  <option value="">指定しない（今ある途中目標を文脈として渡す）</option>
+                  {milestones
+                    .filter((m) => m.status === "approved" || m.status === "in_progress")
+                    .sort((a, b) => a.seq - b.seq)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        #{m.seq} {m.title}
+                      </option>
+                    ))}
+                </select>
+                <p className={hintClass}>
+                  選べるのは承認済み・進行中の途中目標だけです（提案のままのものは出ません）。
+                </p>
+              </div>
+              <div>
+                <label htmlFor="project-plan-note" className={labelClass}>
+                  ひとこと（任意）
+                </label>
+                <textarea
+                  id="project-plan-note"
+                  name="note"
+                  rows={2}
+                  data-testid="project-plan-note"
+                  placeholder="例: 急がなくてよい。まず関連研究から。"
+                  className={`${textareaClass} mt-1.5 w-full`}
+                />
+              </div>
+              <Button type="submit" variant="primary" size="sm" disabled={submitting} data-testid="project-plan-submit">
+                <Icon name="sparkles" />
+                この方針で進める
+              </Button>
+            </fetcher.Form>
+          </CardBody>
+        </Card>
+      </section>
+
       <section aria-labelledby="work-tree-heading" className="space-y-4">
         <SectionTitle icon="gitBranch" id="work-tree-heading" count={workTasks.length}>
           仕事の木
         </SectionTitle>
         <p className="text-xs text-fg-subtle">
-          SPEC §3.3「これをパッと見れば、おかしな方針を立てていないかが分かる」。ノードをクリックするとタスク詳細（
-          <code>/tasks/:id</code>）へ移ります。対話用タスク（人への返事のための run）は裏方なので出ません。
+          パッと見て、おかしな方針を立てていないかを確かめるための図です。四角を押すと裏方のタスクへ移ります。
+          対話の返事や報告のまとめといった裏方の作業は出しません。
         </p>
         {workTasks.length === 0 ? (
           <EmptyState icon="gitBranch" title="この案件のタスクはまだありません" />
@@ -369,7 +444,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                 .filter((t) => t.assignee)
                 .map((t) => (
                   <li key={t.id} className="flex flex-wrap items-center gap-2 text-sm">
-                    <Badge tone="neutral">{t.status}</Badge>
+                    <Badge tone="neutral">{taskStatusLabel(t.status)}</Badge>
                     <Link to={`/tasks/${t.id}`} className="underline underline-offset-2">
                       {t.title}
                     </Link>
@@ -397,9 +472,11 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           報告
         </SectionTitle>
         <p className="text-xs text-fg-subtle">
-          SPEC §4「報告の流れ — 各所から上がってくる報告を高速で流し見する」。この案件のすべての段の報告（
-          <HelpLink anchor="glossary" label="報告" />
-          ）。全体の未読・秘書レベルは <code>/reports</code> で見られます。
+          この案件について、各段から上がってきた報告です。全体の未読（秘書まで上がったもの）は
+          <Link to="/reports" className="mx-1 underline underline-offset-2">
+            報告
+          </Link>
+          の画面で流し見できます。
         </p>
         {reports.items.length === 0 ? (
           <EmptyState icon="send" title="この案件の報告はまだありません" />
@@ -413,9 +490,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           成果物
         </SectionTitle>
         <p className="text-xs text-fg-subtle">
-          SPEC §2.2「調査結果の文書と見るべき関連研究へのリンクがまとまって読める」／§3.7「コードは
-          <code>~/workspace/…</code>
-          のリポジトリ、文書は GUI で読める形」。この案件のタスクの成果物を横断して見られます。
+          調査結果の文書とリンク集はここで読めます。コードは置き場所（普段のパス）へのリンクで示します。
         </p>
         {artifactRows.length === 0 ? (
           <EmptyState icon="file" title="この案件の成果物はまだありません" />

@@ -6,7 +6,7 @@
 #   scripts/taskd.sh status <name>         起動中か、/health が返るか
 #   scripts/taskd.sh logs <name>           .run/<name>/taskd.log を表示
 #   scripts/taskd.sh taskctl <name> ...    taskctl --db .run/<name>/taskd.sqlite3 ... を実行
-#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（basic / unroutable / auth / clusters / delegation / accounts。multi-account は設定のみで DB は作らない。docs/adr/0007 D1）
+#   scripts/taskd.sh fixture <scenario>    既知の DB を作る（basic / unroutable / auth / clusters / delegation / accounts / org。multi-account と org は設定のみで DB は作らない。docs/adr/0007 D1）
 # 環境変数: TASKD_REPO、TASKD_API_LISTEN（既定 127.0.0.1:7710）、TASKD_RUN_ROOT（.run の実体。既定はローカルディスク、下記）
 set -euo pipefail
 
@@ -134,7 +134,8 @@ cmd_fixture() {
     clusters) fixture_clusters ;;
     delegation) fixture_delegation ;;
     accounts) fixture_accounts ;;
-    *) die "unknown fixture scenario '$scenario' (known: basic, multi-account, unroutable, auth, clusters, delegation, accounts)" ;;
+    org) fixture_org ;;
+    *) die "unknown fixture scenario '$scenario' (known: basic, multi-account, unroutable, auth, clusters, delegation, accounts, org)" ;;
   esac
 }
 
@@ -350,6 +351,35 @@ fixture_accounts() {
   echo "  token file: $dir/api.token (pass it to the GUI as TASKD_API_TOKEN_FILE)"
   echo "  claude stub: $dir/claude-stub.sh (auth login + -p rate_limit_event/result)"
   echo "  codex stub: $dir/codex-stub.sh (login --device-auth + exec --json token_count/turn.completed)"
+}
+
+# org（Phase G13f-1 の e2e、gui/e2e/g13.spec.ts）: 組織（config/org.example.toml）と [[genres]] を持つ taskd を
+# 空の DB で用意するだけ（案件・対話・報告・認可・成果物は e2e が GUI と API から作る）。token_file あり。
+fixture_org() {
+  local name="org" dir; dir="$(run_dir "$name")"
+  [ -x "$TASKD_BIN" ] || die "taskd binary not found ($TASKD_BIN); run 'scripts/taskd.sh build' first"
+  alive "$name" && die "taskd '$name' is running; stop it first (scripts/taskd.sh stop $name)"
+  # トークンは作り直しても**同じ値を保つ**（GUI は起動時に TASKD_API_TOKEN_FILE を読んでメモリに持つので、
+  # e2e の beforeAll で作り直すと値が変わって 401 になる）。
+  local keep_token=""
+  [ -f "$dir/api.token" ] && keep_token="$(cat "$dir/api.token")"
+  rm -rf "$dir"
+  mkdir -p "$dir/workspaces"
+  cp "$ROOT/test/taskd/fixtures/org-worker.sh" "$dir/fake-worker.sh"
+  chmod +x "$dir/fake-worker.sh"
+  cp "$ROOT/test/taskd/fixtures/read-run-request.mjs" "$dir/read-run-request.mjs"
+  [ -f "$TASKD_REPO/config/org.example.toml" ] || die "config/org.example.toml not found in $TASKD_REPO"
+  cp "$TASKD_REPO/config/org.example.toml" "$dir/org.toml"
+  if [ -n "$keep_token" ]; then
+    printf '%s' "$keep_token" > "$dir/api.token"
+  else
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/api.token"
+  fi
+  chmod 600 "$dir/api.token"
+  sed -e "s#@RUN_DIR@#$dir#g" -e "s#@API_LISTEN@#$API_LISTEN#g" "$ROOT/test/taskd/org.toml.tmpl" > "$dir/taskd.toml"
+
+  echo "fixture 'org' prepared at $dir (empty DB; the org tree is seeded from org.toml on the first start)"
+  echo "  token file: $dir/api.token (pass it to the GUI as TASKD_API_TOKEN_FILE)"
 }
 
 [ $# -ge 1 ] || usage

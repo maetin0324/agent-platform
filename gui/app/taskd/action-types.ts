@@ -11,6 +11,7 @@ import type {
   Milestone,
   OrgNode,
   Project,
+  ProjectPlanAccepted,
   ProviderCheckResponse,
   ProviderConfigView1,
   ReloadResult,
@@ -142,7 +143,13 @@ export type OrgOpOutcome =
 export type ProjectOpOutcome =
   | { ok: true; op: "project_status"; project: Project }
   | { ok: true; op: "milestone_create" | "milestone_status"; milestone: Milestone }
-  | { ok: false; op: "project_status" | "milestone_create" | "milestone_status"; error: ActionError };
+  // 「この方針で進める」（`POST /projects/{id}/plan`。**管理系**、202。docs/taskd-api-v1.md §3.61、Phase 29）。
+  | { ok: true; op: "project_plan"; accepted: ProjectPlanAccepted }
+  | {
+      ok: false;
+      op: "project_status" | "milestone_create" | "milestone_status" | "project_plan";
+      error: ActionError;
+    };
 
 /**
  * 「報告」画面（`/reports`）の既読・通知（ADR-0033 D3、docs/taskd-api-v1.md §3.52〜3.53。**管理系**）:

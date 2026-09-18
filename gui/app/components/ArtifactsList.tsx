@@ -4,11 +4,12 @@ import { CodeViewer } from "~/components/CodeViewer";
 import { ImageViewer } from "~/components/ImageViewer";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Sha256Badge } from "~/components/Sha256Badge";
-import { Badge, StatusBadge } from "~/components/ui/badge";
+import { Badge, statusTone } from "~/components/ui/badge";
 import { buttonClass } from "~/components/ui/button";
 import { Icon } from "~/components/ui/Icon";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { artifactRelativeTime, isSourcesArtifact, type ProjectArtifactRow, parseSourcesJson } from "~/lib/artifacts";
+import { taskStatusLabel } from "~/lib/labels";
 
 /**
  * 案件を横断した成果物一覧の部品（SPEC §2.2「調査結果の文書と見るべき関連研究へのリンクがまとまって読める」）。
@@ -81,7 +82,9 @@ function ArtifactRow({ row, fetchedAt }: { row: ProjectArtifactRow; fetchedAt: s
               {taskTitle}
             </Link>
             {assigneeName && <span>（{assigneeName}）</span>}
-            <StatusBadge status={taskStatus} />
+            <Badge tone={statusTone(taskStatus)} dot>
+              {taskStatusLabel(taskStatus)}
+            </Badge>
           </p>
           <p className="text-xs text-fg-subtle" data-testid="artifact-workspace" data-task-id={taskId}>
             置き場所:{" "}

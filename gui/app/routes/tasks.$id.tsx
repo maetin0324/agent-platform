@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Form, isRouteErrorResponse, Link, useNavigation, useSearchParams } from "react-router";
+import { Form, isRouteErrorResponse, Link, useFetcher, useSearchParams } from "react-router";
 import { CodeViewer } from "~/components/CodeViewer";
 import { TransitionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
@@ -23,15 +23,27 @@ import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, DataList, EmptyState, Mono } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
+import { milestoneTitle } from "~/lib/project-index";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { TaskdBanner } from "~/root";
+import type { TransitionOutcome } from "~/taskd/action-types";
 import { transitionData } from "~/taskd/actions.server";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { runTaskAction } from "~/taskd/route-actions.server";
-import type { Action, ArtifactList, ArtifactView, Event, EventsPage, TaskDetail, TaskRef } from "~/taskd/types";
+import type {
+  Action,
+  ArtifactList,
+  ArtifactView,
+  Event,
+  EventsPage,
+  OrgList,
+  ProjectDetail,
+  TaskDetail,
+  TaskRef,
+} from "~/taskd/types";
 import type { Route } from "./+types/tasks.$id";
 
 /**
@@ -71,6 +83,14 @@ export interface TaskDetailData {
   detail: TaskDetail;
   events: EventsPage;
   artifacts: ArtifactList;
+  /** どの案件・どの途中目標・誰の仕事か（監査 M2「裏方から戻れる」）。分からなければ null。 */
+  place: {
+    projectId: string | null;
+    projectTitle: string | null;
+    milestoneTitle: string | null;
+    assigneeId: string | null;
+    assigneeName: string | null;
+  };
 }
 
 /**
@@ -94,7 +114,30 @@ export async function loadTaskDetail(client: TaskdClient, taskId: string, reques
     }),
     client.get<ArtifactList>(`/tasks/${taskId}/artifacts`, { signal: request.signal }),
   ]);
-  return { detail, events, artifacts };
+  // 案件・途中目標・担当の名前（監査 M2）。`Task` に `project_id` / `milestone_id` / `assignee` があるので、
+  // 名前を引くだけ（落ちても詳細は出す）。
+  const assigneeId = detail.task.assignee ?? null;
+  const projectId = detail.task.project_id ?? null;
+  const [project, org] = await Promise.all([
+    projectId
+      ? client
+          .get<ProjectDetail>(`/projects/${encodeURIComponent(projectId)}`, { signal: request.signal })
+          .catch(() => null)
+      : Promise.resolve(null),
+    assigneeId ? client.get<OrgList>("/org", { signal: request.signal }).catch(() => null) : Promise.resolve(null),
+  ]);
+  return {
+    detail,
+    events,
+    artifacts,
+    place: {
+      projectId,
+      projectTitle: project?.project.title ?? null,
+      milestoneTitle: milestoneTitle(project?.milestones ?? [], detail.task.milestone_id),
+      assigneeId,
+      assigneeName: assigneeId ? (org?.items.find((n) => n.id === assigneeId)?.name ?? assigneeId) : null,
+    },
+  };
 }
 
 export function meta(_: Route.MetaArgs) {
@@ -118,13 +161,14 @@ export async function action({ request, params }: Route.ActionArgs) {
   return transitionData(outcome);
 }
 
-export default function TaskDetailPage({ loaderData, actionData }: Route.ComponentProps) {
-  const { detail, events, artifacts } = loaderData;
+export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
+  const { detail, events, artifacts, place } = loaderData;
   const { task } = detail;
   const [searchParams] = useSearchParams();
   const selectedTypes = new Set(searchParams.getAll("types"));
-  const navigation = useNavigation();
-  const submitting = navigation.state !== "idle";
+  // 操作の結果は fetcher に載せる（監査 H1。SSE の再検証で `actionData` が消えるのを避ける）。
+  const fetcher = useFetcher<TransitionOutcome>();
+  const submitting = fetcher.state !== "idle";
 
   return (
     <div className="space-y-8">
@@ -149,6 +193,41 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
               <p className="break-words text-2xl font-bold tracking-tight text-fg" data-testid="task-title">
                 {task.title}
               </p>
+              {/* 裏方から戻れる導線（監査 M2）: 案件・担当・途中目標。 */}
+              <div
+                className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-fg-muted"
+                data-testid="task-place"
+              >
+                {place.projectId && (
+                  <p>
+                    案件:{" "}
+                    <Link
+                      to={`/projects/${place.projectId}`}
+                      data-testid="task-project-link"
+                      className="font-medium text-primary hover:underline"
+                    >
+                      {place.projectTitle ?? place.projectId}
+                    </Link>
+                  </p>
+                )}
+                {place.assigneeId && (
+                  <p>
+                    担当:{" "}
+                    <Link
+                      to={
+                        place.assigneeId === "secretary"
+                          ? "/org/secretary"
+                          : `/org/${encodeURIComponent(place.assigneeId)}`
+                      }
+                      data-testid="task-assignee-link"
+                      className="font-medium text-primary hover:underline"
+                    >
+                      {place.assigneeName ?? place.assigneeId}
+                    </Link>
+                  </p>
+                )}
+                {place.milestoneTitle && <p data-testid="task-milestone">途中目標: {place.milestoneTitle}</p>}
+              </div>
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-fg-muted">
                 {detail.cluster && (
                   <p data-testid="task-cluster">
@@ -617,13 +696,13 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
             }
           />
           <CardBody className="space-y-4">
-            <TransitionFlash outcome={actionData} />
+            <TransitionFlash outcome={fetcher.data} />
             {detail.actions.length === 0 ? (
               <EmptyState icon="ban" title="できる操作はありません。" />
             ) : (
               <div className="flex flex-wrap gap-4">
                 {detail.actions.includes("approve") && (
-                  <Form
+                  <fetcher.Form
                     method="post"
                     className="flex w-full max-w-xs flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
                   >
@@ -646,10 +725,10 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
                       <Icon name="check" />
                       {ACTION_LABELS.approve}
                     </Button>
-                  </Form>
+                  </fetcher.Form>
                 )}
                 {detail.actions.includes("reject") && (
-                  <Form
+                  <fetcher.Form
                     method="post"
                     className="flex w-full max-w-xs flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
                   >
@@ -666,10 +745,10 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
                       <Icon name="x" />
                       {ACTION_LABELS.reject}
                     </Button>
-                  </Form>
+                  </fetcher.Form>
                 )}
                 {detail.actions.includes("answer") && (
-                  <Form
+                  <fetcher.Form
                     method="post"
                     className="flex w-full max-w-sm flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
                   >
@@ -691,10 +770,10 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
                       <Icon name="send" />
                       回答する
                     </Button>
-                  </Form>
+                  </fetcher.Form>
                 )}
                 {detail.actions.includes("cancel") && (
-                  <Form
+                  <fetcher.Form
                     method="post"
                     className="flex w-full max-w-xs flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
                   >
@@ -704,7 +783,7 @@ export default function TaskDetailPage({ loaderData, actionData }: Route.Compone
                       <Icon name="ban" />
                       {ACTION_LABELS.cancel}
                     </Button>
-                  </Form>
+                  </fetcher.Form>
                 )}
               </div>
             )}

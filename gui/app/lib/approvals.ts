@@ -23,6 +23,46 @@ export function standingRuleTargetName(rule: Pick<StandingRule, "node_id">, org:
   return org.find((n) => n.id === rule.node_id)?.name ?? rule.node_id;
 }
 
+/** 同じ文面の未決の要求をまとめた 1 枚（監査 8）。`approvals` は新しい順のまま（元の並びを保つ）。 */
+export interface ApprovalGroup {
+  /** 代表（いちばん新しい 1 件。時刻・案件・担当の表示に使う） */
+  head: Approval;
+  /** この文面で未決の要求すべて（答えるときは全部にまとめて同じ答えを送る） */
+  approvals: Approval[];
+}
+
+/**
+ * 未決の要求を**同じ文面**でまとめる（監査 8「同一文面の未決要求はまとめて 1 枚にし『N 件』と出す」）。
+ * 文面の同一性は前後の空白を落とした完全一致だけで判断する（言い換えの解釈はしない。GUI は判断を作らない）。
+ * 並びは taskd が返した順（新しい順）を保ち、同じ文面の最初の 1 件の位置にまとめる。
+ */
+export function groupApprovals(items: readonly Approval[]): ApprovalGroup[] {
+  const groups: ApprovalGroup[] = [];
+  const byQuestion = new Map<string, ApprovalGroup>();
+  for (const approval of items) {
+    const key = approval.question.trim();
+    const found = byQuestion.get(key);
+    if (found) {
+      found.approvals.push(approval);
+      continue;
+    }
+    const group: ApprovalGroup = { head: approval, approvals: [approval] };
+    byQuestion.set(key, group);
+    groups.push(group);
+  }
+  return groups;
+}
+
+/** まとめた 1 枚に出す担当の名前（重複を除く。順は元のまま）。 */
+export function approvalGroupNodeNames(group: ApprovalGroup, org: OrgNode[]): string[] {
+  const names: string[] = [];
+  for (const a of group.approvals) {
+    const name = approvalNodeName(a, org);
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
 /**
  * ナビの「認可」バッジの件数（`DaemonSnapshot.approvals_pending`。古いスナップショットには無いので既定は 0。
  * §3.20 の追加、`~/lib/reports.ts` の `reportsBadgeTone` と同じ理由で純粋関数にしてある）。

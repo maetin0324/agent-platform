@@ -28,7 +28,7 @@ describe("workspacePlace", () => {
     const workspace: WorkspaceSpec = { kind: "local", path: "rust/brainfuck" };
     expect(workspacePlace(workspace, "/home/user/workspace/rust/brainfuck")).toEqual({
       text: "/home/user/workspace/rust/brainfuck",
-      vscodeHref: "vscode://file//home/user/workspace/rust/brainfuck",
+      vscodeHref: "vscode://file/home/user/workspace/rust/brainfuck",
     });
   });
 

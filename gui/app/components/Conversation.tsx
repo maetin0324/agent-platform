@@ -3,16 +3,17 @@ import { Form, Link, useFetcher, useRevalidator, useSearchParams } from "react-r
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
-import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody } from "~/components/ui/card";
 import { checkboxClass, hintClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
-import { EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { Alert, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import {
   CONVERSATION_POLL_MS,
   CONVERSATION_WAIT_LIMIT_MS,
   type ConversationData,
+  conversationTaskIds,
+  conversationTrouble,
   replyArrived,
   SECRETARY_NODE_ID,
 } from "~/lib/conversation";
@@ -33,11 +34,13 @@ import type { ConversationOpOutcome } from "~/taskd/action-types";
 interface Waiting {
   /** 202 の `message_id`（案件を作った直後など、分からないときは null） */
   messageId: string | null;
+  /** 202 の `task_id`（返事を作る裏方の run。`attention` との突き合わせに使う） */
+  taskId: string | null;
   since: number;
 }
 
 export function Conversation({ data }: { data: ConversationData }) {
-  const { nodeId, node, projects, projectId, messages } = data;
+  const { nodeId, node, projects, projectId, messages, attention } = data;
   const isSecretary = nodeId === SECRETARY_NODE_ID;
   const [searchParams] = useSearchParams();
   const fetcher = useFetcher<ConversationOpOutcome>();
@@ -54,7 +57,7 @@ export function Conversation({ data }: { data: ConversationData }) {
     if (!waitParam || handledWaitKey.current === waitKey) return;
     handledWaitKey.current = waitKey;
     setTimedOut(false);
-    setWaiting({ messageId: null, since: Date.now() });
+    setWaiting({ messageId: null, taskId: null, since: Date.now() });
   }, [waitParam, waitKey]);
 
   // 送信（202）が返ったら「考え中」に入る。
@@ -65,13 +68,22 @@ export function Conversation({ data }: { data: ConversationData }) {
     if (handledAccepted.current === outcome.accepted.message_id) return;
     handledAccepted.current = outcome.accepted.message_id;
     setTimedOut(false);
-    setWaiting({ messageId: outcome.accepted.message_id, since: Date.now() });
+    setWaiting({
+      messageId: outcome.accepted.message_id,
+      taskId: outcome.accepted.task_id ?? null,
+      since: Date.now(),
+    });
   }, [fetcher.data]);
 
-  // 返事が入ったら止める（ポーリングの終了条件）。
+  // 返事を作れない状態（経路なし・run の失敗）が `GET /inbox` の `attention` に出ていたら、待つのをやめる
+  //（監査 M1。理由は taskd の値をそのまま出す。`~/lib/conversation.ts::conversationTrouble`）。
+  const trouble = conversationTrouble(attention, [...conversationTaskIds(messages), waiting?.taskId]);
+
+  // 返事が入ったら止める（ポーリングの終了条件）。返事が作れない状態になったときも止める。
   useEffect(() => {
-    if (waiting && replyArrived(messages, waiting.messageId)) setWaiting(null);
-  }, [messages, waiting]);
+    if (!waiting) return;
+    if (replyArrived(messages, waiting.messageId) || trouble !== null) setWaiting(null);
+  }, [messages, waiting, trouble]);
 
   // 返事が来るまで GET を引き直す。待ちすぎたら諦める（run が落ちて何も入らない場合の保険）。
   useEffect(() => {
@@ -105,13 +117,16 @@ export function Conversation({ data }: { data: ConversationData }) {
         }
         description={
           isSecretary
-            ? "SPEC §3.1「あなたの相手。案件を受け取り、組織に流し、報告を集めてあなたに渡す」。案件を投げる・状況を聞く・方針を変えるのはここから。"
-            : "SPEC §3.4「組織の木を見て誰に言うかを決め、その担当に直接言う。相手は人なので、先週の議論の続きとして話せる」。"
+            ? "あなたの相手。案件を受け取り、組織に流し、報告を集めて渡します。案件を投げる・状況を聞く・方針を変えるのはここから。"
+            : "この担当に直接言えます。相手は覚えているので、先週の議論の続きとして話せます。"
         }
         actions={
           <>
-            {node && <Badge tone="neutral">{node.kind}</Badge>}
-            {node?.genre && <Badge tone="teal">{node.genre}</Badge>}
+            {node?.genre && (
+              <span className="text-xs text-fg-subtle" data-testid="conversation-genre">
+                {node.genre}
+              </span>
+            )}
             <Link to="/org" className="text-sm underline underline-offset-2">
               組織の木へ
             </Link>
@@ -130,7 +145,7 @@ export function Conversation({ data }: { data: ConversationData }) {
             <CardBody className="space-y-3">
               <Form method="get" data-testid="conversation-project-form" className="space-y-2">
                 <label htmlFor="conversation-project" className={labelClass}>
-                  この人と、どの案件の話をするか
+                  どの案件の話をするか
                 </label>
                 <select
                   // 案件が変わっても部品は付け替わらない（同じルート）ので、key で選択の初期値を入れ直す。
@@ -224,20 +239,53 @@ export function Conversation({ data }: { data: ConversationData }) {
                 </ul>
               )}
 
-              {waiting && (
+              {waiting && !trouble && (
                 <p data-testid="conversation-thinking" className="flex items-center gap-2 text-sm text-fg-muted">
                   <Icon name="clock" className="size-4 animate-pulse" />
-                  考え中…（返事は run が終わってから入ります）
+                  考え中…（返事は裏方の作業が終わってから入ります）
                 </p>
               )}
-              {timedOut && (
-                <p data-testid="conversation-timeout" className={hintClass}>
-                  しばらく待ちましたが返事が入りませんでした。裏方の run が落ちているかもしれません（
-                  <Link to="/tasks" className="underline underline-offset-2">
-                    タスク一覧
-                  </Link>
-                  ）。
-                </p>
+              {trouble && (
+                <Alert
+                  tone="danger"
+                  icon="alert"
+                  data-testid="conversation-trouble"
+                  title="返事を作れない状態です"
+                  className="my-0"
+                >
+                  <p>
+                    {trouble.reason}。
+                    <Link to="/providers" className="mx-1 underline underline-offset-2">
+                      プロバイダの設定
+                    </Link>
+                    を確認してください（
+                    <Link to={`/tasks/${trouble.taskId}`} className="underline underline-offset-2">
+                      裏方のタスク
+                    </Link>
+                    ）。
+                  </p>
+                </Alert>
+              )}
+              {timedOut && !trouble && (
+                <Alert
+                  tone="warning"
+                  icon="clock"
+                  data-testid="conversation-timeout"
+                  title="しばらく待ちましたが返事が入りませんでした"
+                  className="my-0"
+                >
+                  <p>
+                    裏方の作業が落ちているかもしれません。
+                    <Link to="/providers" className="mx-1 underline underline-offset-2">
+                      プロバイダの設定
+                    </Link>
+                    と
+                    <Link to="/tasks" className="mx-1 underline underline-offset-2">
+                      裏方のタスク
+                    </Link>
+                    を確認してください。
+                  </p>
+                </Alert>
               )}
             </CardBody>
           </Card>
@@ -280,7 +328,7 @@ export function Conversation({ data }: { data: ConversationData }) {
                   送る
                 </Button>
                 <p className={hintClass}>
-                  送ると 202 で受け取られ、返事は裏方の run が終わってから入ります（数分かかることがあります）。
+                  送ると受け取られ、返事は裏方の作業が終わってから入ります（数分かかることがあります）。
                 </p>
               </fetcher.Form>
             </CardBody>

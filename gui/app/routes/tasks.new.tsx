@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { data, Form, redirect, useNavigation } from "react-router";
+import { data, redirect, useFetcher } from "react-router";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { StatusBadge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -212,11 +212,12 @@ interface CriterionRow {
   value: string;
 }
 
-export default function NewTaskPage({ loaderData, actionData }: Route.ComponentProps) {
+export default function NewTaskPage({ loaderData }: Route.ComponentProps) {
   const { candidates, config } = loaderData;
-  const navigation = useNavigation();
-  const submitting = navigation.state !== "idle";
-  const error = actionData && !actionData.ok ? actionData.error : undefined;
+  // 失敗（422 等）が SSE の再検証で消えないよう fetcher に載せる（監査 H1）。成功は action の redirect で移る。
+  const fetcher = useFetcher<CreateFailure>();
+  const submitting = fetcher.state !== "idle";
+  const error = fetcher.data && !fetcher.data.ok ? fetcher.data.error : undefined;
 
   const nextRowId = useRef(1);
   const [rows, setRows] = useState<CriterionRow[]>(() => [{ id: 0, type: "human", value: "" }]);
@@ -253,7 +254,7 @@ export default function NewTaskPage({ loaderData, actionData }: Route.ComponentP
       />
       <ErrorFlash error={error} />
 
-      <Form method="post" data-testid="new-task-form" className="space-y-6">
+      <fetcher.Form method="post" data-testid="new-task-form" className="space-y-6">
         <Card>
           <CardHeader icon="file" title="基本" description="タスクの名前と目的" />
           <CardBody className="space-y-4">
@@ -555,7 +556,7 @@ export default function NewTaskPage({ loaderData, actionData }: Route.ComponentP
             作成
           </Button>
         </div>
-      </Form>
+      </fetcher.Form>
     </div>
   );
 }

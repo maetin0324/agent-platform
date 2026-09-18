@@ -137,7 +137,7 @@ describe("loadArtifacts", () => {
     expect(row.assigneeName).toBe("関連研究調査課");
     expect(row.workspace).toEqual({
       text: "/home/user/workspace/lab/pluvio-survey",
-      vscodeHref: "vscode://file//home/user/workspace/lab/pluvio-survey",
+      vscodeHref: "vscode://file/home/user/workspace/lab/pluvio-survey",
     });
     expect(row.artifact).toEqual(artifacts.items[0]);
   });

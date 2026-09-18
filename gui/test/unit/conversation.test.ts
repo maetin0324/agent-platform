@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { projectTitleFromText, replyArrived } from "~/lib/conversation";
+import { conversationTaskIds, conversationTrouble, projectTitleFromText, replyArrived } from "~/lib/conversation";
 import { TaskdClient } from "~/taskd/client.server";
 import {
   buildMessagePostBody,
@@ -8,7 +8,16 @@ import {
   sendMessage,
   startProjectFromMessage,
 } from "~/taskd/conversation.server";
-import type { Message, MessageAccepted, MessageList, OrgList, Project, ProjectList } from "~/taskd/types";
+import type {
+  AttentionItem,
+  Inbox,
+  Message,
+  MessageAccepted,
+  MessageList,
+  OrgList,
+  Project,
+  ProjectList,
+} from "~/taskd/types";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 /**
@@ -129,6 +138,8 @@ describe("loadConversation", () => {
     expect(result.projects).toHaveLength(1);
     expect(result.projectId).toBe("01JPROJECT");
     expect(result.messages).toEqual(messages.items);
+    // 返事が作れない状態を知るために `GET /inbox` も読む（監査 M1）。ここでは応答が無いので空。
+    expect(result.attention).toEqual([]);
     const asked = mock.requests.find((r) => r.url.startsWith("/api/v1/org/secretary/messages"));
     expect(asked?.url).toBe("/api/v1/org/secretary/messages?project=01JPROJECT&limit=200");
   });
@@ -314,5 +325,102 @@ describe("runConversationAction（どちらを呼ぶかはフォームの値だ�
     );
     expect(outcome).toEqual({ ok: true, op: "send", accepted });
     expect(mock.requests.map((r) => r.url)).toEqual(["/api/v1/org/secretary/messages"]);
+  });
+});
+
+/**
+ * 「考え中」の間に返事を作れない状態（経路なし・run の失敗）になったら、待つのをやめて理由を出す
+ * （Phase G13f-1、監査 M1）。理由は `GET /inbox` の `attention` の値をそのまま写す。
+ */
+describe("conversationTrouble / conversationTaskIds", () => {
+  const unroutable = (taskId: string): AttentionItem => ({
+    type: "unroutable",
+    at: "2026-09-17T00:00:00Z",
+    hint: { tier: "standard" },
+    task: { id: taskId, kind: "execute", status: "ready", title: "対話: 秘書", actions: ["cancel"] },
+  });
+
+  it("やり取りの行から裏方のタスク id を集める（user の行にも入る）", () => {
+    const ids = conversationTaskIds([
+      message({ id: "m1", task_id: "01JTASK" }),
+      message({ id: "m2", role: "node", task_id: "01JTASK" }),
+      message({ id: "m3" }),
+    ]);
+    expect([...ids]).toEqual(["01JTASK"]);
+  });
+
+  it("その対話のタスクが経路なしなら理由を返す", () => {
+    const trouble = conversationTrouble([unroutable("01JTASK")], ["01JTASK"]);
+    expect(trouble?.taskId).toBe("01JTASK");
+    expect(trouble?.reason).toContain("プロバイダがありません");
+    expect(trouble?.reason).toContain("tier=standard");
+  });
+
+  it("関係ないタスクの attention では止めない", () => {
+    expect(conversationTrouble([unroutable("01JOTHER")], ["01JTASK"])).toBeNull();
+    expect(conversationTrouble([unroutable("01JTASK")], [])).toBeNull();
+    expect(conversationTrouble([], ["01JTASK"])).toBeNull();
+  });
+
+  it("run の失敗は taskd の reason をそのまま出す", () => {
+    const failed: AttentionItem = {
+      type: "failed",
+      at: "2026-09-17T00:00:00Z",
+      reason: "adapter spawn failed",
+      task: { id: "01JTASK", kind: "execute", status: "failed", title: "対話: 秘書", actions: [] },
+    };
+    expect(conversationTrouble([failed], ["01JTASK"])?.reason).toBe("裏方の run が失敗しました: adapter spawn failed");
+  });
+
+  it("クラスタの障害（task を持たない項目）は対話の理由にしない", () => {
+    const cluster: AttentionItem = {
+      type: "cluster_unavailable",
+      at: "2026-09-17T00:00:00Z",
+      cluster: "pegasus",
+      host: "pegasus.example",
+      tasks: 3,
+    };
+    expect(conversationTrouble([cluster], ["01JTASK"])).toBeNull();
+  });
+});
+
+describe("loadConversation と GET /inbox（監査 M1）", () => {
+  it("attention をそのまま載せる", async () => {
+    const inbox = {
+      counts: { approvals: 0, questions: 0, drafts: 0, attention: 1 },
+      approvals: [],
+      questions: [],
+      drafts: [],
+      attention: [
+        {
+          type: "unroutable",
+          at: "2026-09-17T00:00:00Z",
+          hint: { tier: "standard" },
+          task: { id: "01JTASK", kind: "execute", status: "ready", title: "対話: 秘書", actions: [] },
+        },
+      ],
+    } as unknown as Inbox;
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/org/secretary/messages", (_req, res) =>
+      sendJson(res, 200, { items: [] } satisfies MessageList),
+    );
+    mock.on("GET", "/api/v1/inbox", (_req, res) => sendJson(res, 200, inbox));
+
+    const result = await loadConversation(client, "secretary", new Request("http://gui.invalid/org/secretary"));
+    expect(result.attention).toEqual(inbox.attention);
+  });
+
+  it("GET /inbox が落ちても対話は出す（attention が空になるだけ）", async () => {
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/org/secretary/messages", (_req, res) =>
+      sendJson(res, 200, { items: [message()] } satisfies MessageList),
+    );
+    mock.on("GET", "/api/v1/inbox", (_req, res) => sendProblem(res, { status: 500, code: "internal", detail: "boom" }));
+
+    const result = await loadConversation(client, "secretary", new Request("http://gui.invalid/org/secretary"));
+    expect(result.attention).toEqual([]);
+    expect(result.messages).toHaveLength(1);
   });
 });

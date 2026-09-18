@@ -2,18 +2,20 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState } from "react";
 import { Form, Link, useFetcher, useSearchParams } from "react-router";
 import { HelpLink } from "~/components/HelpLink";
-import { GenreLabel, KindBadge, RoleLabel, StatusBadge, statusTone } from "~/components/ui/badge";
+import { KindBadge, RoleLabel, StatusBadge, statusTone } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { checkboxClass, chipLabelClass, inputClass, labelClass, selectClass, theadClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { EmptyState, PageHeader } from "~/components/ui/misc";
 import { TONE_SOFT, TONE_SOLID_BG } from "~/components/ui/tone";
+import { buildTaskPlacements, type TaskPlacement } from "~/lib/project-index";
 import { cn } from "~/lib/utils";
+import { isSupportTask } from "~/lib/work-tree";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { taskdErrorResponse } from "~/taskd/errors";
-import type { ConfigView, Status, TaskList, TaskSummary } from "~/taskd/types";
+import type { ConfigView, OrgList, ProjectDetail, ProjectList, Status, TaskList, TaskSummary } from "~/taskd/types";
 import type { Route } from "./+types/tasks";
 
 /**
@@ -59,18 +61,51 @@ export interface TasksData {
   tasks: TaskList;
   /** `GET /config` の `genres[]`（ADR-0027 D1）を絞り込みの選択肢に使う。 */
   config: ConfigView;
+  /** タスク id → どの案件・どの途中目標か（監査 M2「裏方から戻れる」。`~/lib/project-index.ts`）。 */
+  placements: Record<string, TaskPlacement>;
+  /** 担当 id → 名前（`GET /org`。落ちても一覧は出す）。 */
+  assigneeNames: Record<string, string>;
 }
 
 /**
  * `/tasks` の loader 本体。`GET /tasks` と `GET /config` を並列に呼ぶ（`config` は分野の絞り込み UI 用。
  * `tasks.new.tsx` の `loadNewTask` と同じ形）。
  */
+/**
+ * 裏方のタスクから案件・途中目標へ戻るための索引（監査 M2）。`TaskSummary` に `project_id` が無いので
+ * `GET /projects` + 各案件の `GET /projects/{id}` を束ねる（`app/routes/artifacts.tsx` と同じく、taskd への
+ * 問い合わせは loader に閉じた私的ヘルパーにする。公開関数から `.server.ts` を参照するとクライアント
+ * バンドルからのサーバコード除去に引っかかるため）。**落ちても一覧は出す**（索引が空になるだけ）。
+ * taskd 側に `TaskSummary.project_id` が入ったら、この束ねはやめられる（`docs/taskd-requests.md` R3）。
+ */
+async function loadTaskPlacements(
+  client: TaskdClient,
+  signal: AbortSignal | undefined,
+): Promise<Record<string, TaskPlacement>> {
+  try {
+    const list = await client.get<ProjectList>("/projects", { signal });
+    const details = await Promise.all(
+      list.items.map((p) =>
+        client
+          .get<ProjectDetail>(`/projects/${encodeURIComponent(p.id)}`, { signal })
+          .catch(() => null as ProjectDetail | null),
+      ),
+    );
+    return buildTaskPlacements(details.filter((d): d is ProjectDetail => d !== null));
+  } catch {
+    return {};
+  }
+}
+
 export async function loadTasksPage(client: TaskdClient, request: Request): Promise<TasksData> {
-  const [tasks, config] = await Promise.all([
+  const [tasks, config, placements, org] = await Promise.all([
     loadTasks(client, request),
     client.get<ConfigView>("/config", { signal: request.signal }),
+    loadTaskPlacements(client, request.signal),
+    client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
   ]);
-  return { tasks, config };
+  const assigneeNames = Object.fromEntries(org.items.map((n) => [n.id, n.name]));
+  return { tasks, config, placements, assigneeNames };
 }
 
 export async function loader({ request }: Route.LoaderArgs): Promise<TasksData> {
@@ -86,7 +121,7 @@ export function meta(_: Route.MetaArgs) {
 }
 
 export default function TasksPage({ loaderData }: Route.ComponentProps) {
-  const { tasks: taskList, config } = loaderData;
+  const { tasks: taskList, config, placements, assigneeNames } = loaderData;
   const genres = config.genres ?? [];
   const [searchParams] = useSearchParams();
   const fetcher = useFetcher<TaskList>();
@@ -94,12 +129,12 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
   const [items, setItems] = useState<TaskSummary[]>(taskList.items);
   const [nextCursor, setNextCursor] = useState<string | null>(taskList.next_cursor ?? null);
 
-  // 対話用タスク（`TaskSummary.conversation`）は既定で隠す（SPEC「タスクは裏方」/ ADR-0033 D8、GUI-R3 Phase 27）。
-  // `show_conversation=1` はここだけの表示切り替えで、`GET /tasks` には送らない（taskd に絞り込みは無い。
-  // `loadTasks` が転送するクエリの一覧に含めていないので、taskd 側には届かない）。ページングは
-  // 対話用を含めた元の `items` に対して行い、表示だけをこの真偽値でフィルタする。
-  const showConversation = searchParams.get("show_conversation") === "1";
-  const visibleItems = showConversation ? items : items.filter((item) => !item.conversation);
+  // 裏方のタスク（`TaskSummary.support`: 対話・報告のまとめ・承認待ち・レビュー。Phase 29）は既定で隠す
+  // （SPEC「タスクは裏方」/ ADR-0033 D8）。`show_support=1` はここだけの表示切り替えで、`GET /tasks` には
+  // 送らない（taskd に絞り込みは無い。`loadTasks` が転送するクエリの一覧に含めていないので taskd 側には
+  // 届かない）。ページングは裏方を含めた元の `items` に対して行い、表示だけをこの真偽値でフィルタする。
+  const showSupport = searchParams.get("show_support") === "1";
+  const visibleItems = showSupport ? items : items.filter((item) => !isSupportTask(item));
 
   // フィルタ・並び順が変わって loader が新しい初期ページを返したら、蓄積分をリセットする。
   // `taskList` は SSE（`useTaskdStream`、root で 1 本）による再検証のたびに新しい参照になるが、
@@ -275,18 +310,18 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                   ))}
                 </select>
               </label>
-              {/* 対話用タスク（人への返事のための run）は既定で隠す（GUI-R3、Phase 27。SPEC「タスクは裏方」）。
-                  taskd には絞り込みが無いので、表示だけを GUI 側でこの真偽値（`TaskSummary.conversation`）で切り替える。 */}
+              {/* 裏方のタスク（対話の返事・報告のまとめ・承認待ち・レビュー）は既定で隠す（SPEC「タスクは裏方」）。
+                  taskd には絞り込みが無いので、表示だけを GUI 側で `TaskSummary.support` で切り替える。 */}
               <label className={chipLabelClass}>
                 <input
                   type="checkbox"
-                  name="show_conversation"
+                  name="show_support"
                   value="1"
-                  data-testid="tasks-show-conversation"
-                  defaultChecked={showConversation}
+                  data-testid="tasks-show-support"
+                  defaultChecked={showSupport}
                   className={checkboxClass}
                 />
-                対話用も表示
+                裏方も表示
               </label>
               <Button type="submit" variant="primary" size="sm">
                 <Icon name="filter" />
@@ -299,14 +334,14 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
 
       <Card className="overflow-hidden">
         <div className={cn(theadClass, "flex items-center gap-4 border-b border-border px-4 py-2.5 sm:px-5")}>
-          <span className="w-40 shrink-0">ID</span>
           <span className="min-w-0 flex-1">タイトル</span>
           <span className="w-28 shrink-0">状態</span>
           <span className="w-20 shrink-0">種別</span>
-          <span className="w-24 shrink-0">役割</span>
-          <span className="w-24 shrink-0">分野</span>
-          <span className="w-10 shrink-0 text-right">優先度</span>
-          <span className="w-32 shrink-0">更新日時</span>
+          <span className="w-20 shrink-0">役割</span>
+          <span className="w-32 shrink-0">案件</span>
+          <span className="w-28 shrink-0">担当</span>
+          <span className="w-32 shrink-0">途中目標</span>
+          <span className="w-28 shrink-0">更新日時</span>
         </div>
         <div
           ref={scrollRef}
@@ -317,8 +352,8 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
           {visibleItems.length === 0 ? (
             <div className="flex h-full items-center justify-center p-6">
               <EmptyState icon="list" title="タスクが見つかりません">
-                {items.length > 0 && !showConversation
-                  ? "対話用タスクしかありません。上の「対話用も表示」を付けてください。"
+                {items.length > 0 && !showSupport
+                  ? "裏方のタスクしかありません。上の「裏方も表示」を付けてください。"
                   : "条件を変えて絞り込んでください。"}
               </EmptyState>
             </div>
@@ -335,11 +370,9 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                     className="absolute left-0 top-0 flex w-full items-center gap-4 border-b border-border px-4 text-sm transition-colors hover:bg-surface-2/60 sm:px-5"
                     style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}
                   >
-                    <span className="w-40 shrink-0 truncate font-mono text-xs text-fg-subtle" title={item.id}>
-                      {item.id}
-                    </span>
                     <Link
                       to={`/tasks/${item.id}`}
+                      title={item.id}
                       className="min-w-0 flex-1 truncate font-medium text-fg no-underline hover:text-primary hover:underline"
                     >
                       {item.title}
@@ -351,15 +384,48 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                       <KindBadge kind={item.kind} />
                     </span>
                     {/* 役割（ADR-0016 D1、taskd-requests R2）。色分けはせずテキストのラベルだけ。役割なしは空欄。 */}
-                    <span className="w-24 shrink-0 truncate" data-testid="task-role" title={item.role ?? ""}>
+                    <span className="w-20 shrink-0 truncate" data-testid="task-role" title={item.role ?? ""}>
                       {item.role ? <RoleLabel role={item.role} /> : ""}
                     </span>
-                    {/* 分野（ADR-0027 D1）。role と同じ理由で色分けはせずテキストのラベルだけ。分野なしは空欄。 */}
-                    <span className="w-24 shrink-0 truncate" data-testid="task-genre" title={item.genre ?? ""}>
-                      {item.genre ? <GenreLabel genre={item.genre} /> : ""}
+                    {/* 案件・担当・途中目標（監査 M2「裏方から戻れる」）。分野は詳細（/tasks/:id）で見る。 */}
+                    <span className="w-32 shrink-0 truncate" data-testid="task-project">
+                      {placements[item.id] ? (
+                        <Link
+                          to={`/projects/${placements[item.id].projectId}`}
+                          className="underline underline-offset-2"
+                          title={placements[item.id].projectTitle}
+                        >
+                          {placements[item.id].projectTitle}
+                        </Link>
+                      ) : (
+                        <span className="text-fg-subtle">-</span>
+                      )}
                     </span>
-                    <span className="w-10 shrink-0 text-right tabular-nums text-fg-muted">{item.priority}</span>
-                    <span className="w-32 shrink-0 truncate text-xs text-fg-subtle" title={item.updated_at}>
+                    <span className="w-28 shrink-0 truncate" data-testid="task-assignee">
+                      {item.assignee ? (
+                        <Link
+                          to={
+                            item.assignee === "secretary"
+                              ? "/org/secretary"
+                              : `/org/${encodeURIComponent(item.assignee)}`
+                          }
+                          className="underline underline-offset-2"
+                          title={item.assignee}
+                        >
+                          {assigneeNames[item.assignee] ?? item.assignee}
+                        </Link>
+                      ) : (
+                        <span className="text-fg-subtle">-</span>
+                      )}
+                    </span>
+                    <span
+                      className="w-32 shrink-0 truncate text-xs text-fg-muted"
+                      data-testid="task-milestone"
+                      title={placements[item.id]?.milestoneTitle ?? ""}
+                    >
+                      {placements[item.id]?.milestoneTitle ?? "-"}
+                    </span>
+                    <span className="w-28 shrink-0 truncate text-xs text-fg-subtle" title={item.updated_at}>
                       {item.updated_at}
                     </span>
                   </div>

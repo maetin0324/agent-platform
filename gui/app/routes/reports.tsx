@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { data, Form, isRouteErrorResponse, useFetcher, useSearchParams } from "react-router";
 import { ReportActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { NotificationsEnableButton } from "~/components/NotificationsEnable";
 import { ReportsList } from "~/components/ReportsList";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -132,23 +133,26 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="SPEC §3.5「上に行くほど多くのレビューが入り、圧縮される。だから上で見る報告はパッと見の判断が楽」。良い知らせも悪い知らせも、ここで高速に流し見します。"
+        description="上に行くほどレビューが入り、圧縮されます。良い知らせも悪い知らせも、ここで高速に流し見します。"
       />
+
+      <div className="flex flex-wrap items-center gap-3">
+        <NotificationsEnableButton />
+        <span className="text-xs text-fg-subtle">
+          悪い知らせは即座に、それ以外は数時間ごとにブラウザの通知でお知らせします。
+        </span>
+      </div>
 
       <ReportActionFlash outcome={readFetcher.data} />
 
       <Card>
-        <CardHeader
-          icon="filter"
-          title="絞り込み"
-          description="taskd に転送するのは unread・level・project。kind は画面側で絞ります。"
-        />
+        <CardHeader icon="filter" title="絞り込み" />
         <CardBody>
           <Form method="get" className="space-y-4" data-testid="reports-filter-form">
             <div className="flex flex-wrap items-end gap-4">
               <div>
                 <label htmlFor="reports-filter-select" className={labelClass}>
-                  filter
+                  未読
                 </label>
                 <select
                   id="reports-filter-select"
@@ -162,7 +166,7 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
               </div>
               <div>
                 <label htmlFor="reports-filter-level" className={labelClass}>
-                  level
+                  どの段まで
                 </label>
                 <select
                   id="reports-filter-level"
@@ -180,7 +184,7 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
               </div>
               <div>
                 <label htmlFor="reports-filter-project" className={labelClass}>
-                  project
+                  案件
                 </label>
                 <select
                   id="reports-filter-project"
@@ -202,7 +206,7 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
               </Button>
             </div>
             <fieldset>
-              <legend className={labelClass}>kind（画面側で絞り込み。taskd には送りません）</legend>
+              <legend className={labelClass}>知らせの種類</legend>
               <div className="mt-2 flex flex-wrap gap-2">
                 {KIND_OPTIONS.map((opt) => (
                   <label key={opt.value} className={chipLabelClass}>
@@ -240,7 +244,7 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
         </div>
         {visible.length === 0 ? (
           <EmptyState icon="send" title="報告がありません">
-            SPEC §2.4「良い知らせと同じ経路で、目立つ形で届く」。絞り込みを変えると出てくるかもしれません。
+            絞り込みを変えると出てくるかもしれません。
           </EmptyState>
         ) : (
           <ReportsList items={visible} projects={projects} org={org} fetchedAt={fetchedAt} />

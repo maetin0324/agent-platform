@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { projectTasksToGraph } from "~/lib/work-tree";
+import { isSupportTask, projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
 import type { OrgNode, ProjectTaskView } from "~/taskd/types";
 
 /**
@@ -87,5 +87,35 @@ describe("projectTasksToGraph", () => {
     expect(graph.nodes.map((n) => n.id)).toEqual(["work"]);
     expect(graph.nodes[0].parent_id).toBe("chat");
     expect(graph.edges).toEqual([{ from: "chat", kind: "depends_on", to: "work" }]);
+  });
+});
+
+/**
+ * 裏方のタスク（Phase 29 の `support`: `"conversation"` | `"compaction"` | `"approval"` | `"review"`）は
+ * 仕事の木にも件数にも出さない（監査 H4 / 裏方の印）。GUI 側で `role` や `title` から推測しない。
+ */
+describe("isSupportTask / visibleWorkTasks", () => {
+  it("support が付いていれば裏方（対話・まとめ・承認待ち・レビュー）", () => {
+    expect(isSupportTask({ support: "compaction", conversation: false })).toBe(true);
+    expect(isSupportTask({ support: "approval", conversation: false })).toBe(true);
+    expect(isSupportTask({ support: "review", conversation: false })).toBe(true);
+    expect(isSupportTask({ support: "conversation", conversation: true })).toBe(true);
+    expect(isSupportTask({ support: null, conversation: false })).toBe(false);
+  });
+
+  it("support が無い古い応答でも conversation だけは見る（保険）", () => {
+    expect(isSupportTask({ conversation: true } as never)).toBe(true);
+    expect(isSupportTask({ conversation: false } as never)).toBe(false);
+  });
+
+  it("裏方は木からも一覧からも外れる", () => {
+    const tasks = [
+      task("w1", { title: "調べる" }),
+      task("chat", { conversation: true, support: "conversation" }),
+      task("c1", { title: "報告のまとめ: 研究部", support: "compaction" }),
+      task("a1", { title: "Approval needed: …", support: "approval" }),
+    ];
+    expect(visibleWorkTasks(tasks).map((t) => t.id)).toEqual(["w1"]);
+    expect(projectTasksToGraph(tasks, new Map()).nodes.map((n) => n.id)).toEqual(["w1"]);
   });
 });

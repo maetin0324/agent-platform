@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layoutGraph } from "~/lib/graph-layout";
+import { layoutGraph, nodeBox, textWidthEm, wrapLabelLines } from "~/lib/graph-layout";
 import type { Graph, GraphNode } from "~/taskd/types";
 
 /**
@@ -97,5 +97,70 @@ describe("layoutGraph", () => {
     };
     const result = layoutGraph(graph);
     expect(result.edges.map((e) => e.id)).toEqual(["01A-01B"]);
+  });
+});
+
+/**
+ * ノードの寸法（Phase G13f-1、監査 H4）。固定の 180×44 では日本語のタイトル + `[担当]` がはみ出していた。
+ * 幅と高さを中身から決め、タイトルは最大 2 行・入り切らなければ `…` にする。
+ */
+describe("nodeBox（中身に合わせた寸法）", () => {
+  it("短い英字のタイトルは最小の大きさのまま", () => {
+    const box = nodeBox(node("01A", { title: "Small" }), false);
+    expect(box).toEqual({ label: "Small", width: 180, height: 44 });
+  });
+
+  it("日本語のタイトル + 担当は 3 行になり、どの行も幅に収まる（はみ出さない）", () => {
+    const box = nodeBox(
+      node("01B", { title: "Pluvio の非同期ランタイムに関する関連研究の調査", role: "関連研究調査課" }),
+      false,
+    );
+    expect(box.width).toBeGreaterThanOrEqual(180);
+    expect(box.width).toBeLessThanOrEqual(320);
+    const contentEm = (box.width - 20) / 12;
+    for (const line of box.label.split("\n")) expect(textWidthEm(line)).toBeLessThanOrEqual(contentEm);
+    // タイトル 2 行 + 担当 1 行
+    expect(box.label.split("\n")).toHaveLength(3);
+    expect(box.label.split("\n")[2]).toBe("[関連研究調査課]");
+    expect(box.height).toBeGreaterThan(44);
+  });
+
+  it("2 行に入り切らないタイトルは末尾を … にする（はみ出させない）", () => {
+    const title = "あ".repeat(200);
+    const box = nodeBox(node("01C", { title }), false);
+    const lines = box.label.split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[1].endsWith("…")).toBe(true);
+    const contentEm = (box.width - 20) / 12;
+    for (const line of lines) expect(textWidthEm(line)).toBeLessThanOrEqual(contentEm);
+  });
+
+  it("`layoutGraph` はノードごとの寸法をそのまま style に載せる", () => {
+    const graph: Graph = {
+      nodes: [
+        node("01A", { title: "Small" }),
+        node("01B", {
+          title: "Pluvio を基盤に用いた新たな研究テーマの模索と、その検証のための実験計画の立案",
+        }),
+      ],
+      edges: [],
+    };
+    const result = layoutGraph(graph);
+    const a = result.nodes.find((n) => n.id === "01A");
+    const b = result.nodes.find((n) => n.id === "01B");
+    expect(a?.style?.width).toBe(180);
+    expect(Number(b?.style?.width)).toBeGreaterThan(180);
+  });
+});
+
+describe("wrapLabelLines", () => {
+  it("全角は 1em、半角は 0.56em として折り返す", () => {
+    expect(textWidthEm("あい")).toBeCloseTo(2);
+    expect(textWidthEm("ab")).toBeCloseTo(1.12);
+    expect(wrapLabelLines("あいうえおかきくけこ", 5)).toEqual(["あいうえお", "かきくけこ"]);
+  });
+
+  it("行数に収まるならそのまま返す", () => {
+    expect(wrapLabelLines("short", 10)).toEqual(["short"]);
   });
 });

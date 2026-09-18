@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { useFetcher } from "react-router";
+import { Link, useFetcher } from "react-router";
 import { ErrorFlash } from "~/components/Flash";
+import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Icon } from "~/components/ui/Icon";
@@ -52,6 +53,45 @@ export function ReportsList({ items, projects, org, fetchedAt }: ReportsListProp
   );
 }
 
+/** 報告 1 件から辿れる先（監査 6）: 案件・担当・裏方のタスク・その案件の成果物。 */
+function ReportLinks({ report, projects }: { report: Report; projects: Project[] }) {
+  const projectId = report.project_id ?? null;
+  return (
+    <p className="flex flex-wrap items-center gap-3 text-xs" data-testid="report-links">
+      {projectId && (
+        <Link to={`/projects/${projectId}`} data-testid="report-project-link" className="underline underline-offset-2">
+          案件へ（{reportProjectName(report, projects)}）
+        </Link>
+      )}
+      <Link
+        to={
+          report.node_id === "secretary"
+            ? `/org/secretary${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`
+            : `/org/${encodeURIComponent(report.node_id)}${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`
+        }
+        data-testid="report-talk-link"
+        className="underline underline-offset-2"
+      >
+        担当に話す
+      </Link>
+      {report.task_id && (
+        <Link to={`/tasks/${report.task_id}`} data-testid="report-task-link" className="underline underline-offset-2">
+          裏方のタスク
+        </Link>
+      )}
+      {projectId && (
+        <Link
+          to={`/artifacts?project=${encodeURIComponent(projectId)}`}
+          data-testid="report-artifacts-link"
+          className="underline underline-offset-2"
+        >
+          その案件の成果物
+        </Link>
+      )}
+    </p>
+  );
+}
+
 function ReportRow({
   report,
   depth,
@@ -93,7 +133,11 @@ function ReportRow({
       data-testid="report-row"
       data-report-id={report.id}
       data-report-kind={report.kind}
-      className={cn(depth > 0 && "ml-3 border-l border-border pl-3")}
+      className={cn(
+        depth > 0 && "ml-3 border-l border-border pl-3",
+        // 悪い知らせは行そのものを目立たせる（SPEC §2.4「良い知らせと同じ経路で、目立つ形で届く」。監査 6）。
+        report.kind === "bad_news" && "rounded-lg border border-danger-border bg-danger-soft/70",
+      )}
     >
       <button
         type="button"
@@ -124,9 +168,11 @@ function ReportRow({
             <p className="text-xs text-fg-subtle">読み込み中…</p>
           ) : detail ? (
             <>
-              <p data-testid="report-body" className="whitespace-pre-wrap text-sm text-fg">
-                {detail.report.body || "（本文なし）"}
-              </p>
+              {/* 本文は Markdown で描く（対話・認可と同じ。監査 6）。 */}
+              <div data-testid="report-body" className="text-sm text-fg">
+                {detail.report.body ? <MarkdownViewer content={detail.report.body} /> : <p>（本文なし）</p>}
+              </div>
+              <ReportLinks report={detail.report} projects={projects} />
               <Button
                 variant="secondary"
                 size="xs"

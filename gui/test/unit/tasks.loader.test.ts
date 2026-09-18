@@ -173,7 +173,8 @@ describe("loadTasksPage", () => {
 
     const result = await loadTasksPage(client, createRequest("http://gui.invalid/tasks"));
 
-    expect(result).toEqual({ tasks: sampleTaskList, config });
+    // 案件・担当の索引（監査 M2）は `GET /projects` / `GET /org` が無いここでは空になるだけ（画面は出る）。
+    expect(result).toEqual({ tasks: sampleTaskList, config, placements: {}, assigneeNames: {} });
     expect(mock.requests.some((r) => r.method === "GET" && r.url === "/api/v1/config")).toBe(true);
   });
 

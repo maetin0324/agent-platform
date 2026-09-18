@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { approvalNodeName, approvalProjectName, approvalsPendingCount, standingRuleTargetName } from "~/lib/approvals";
+import {
+  approvalGroupNodeNames,
+  approvalNodeName,
+  approvalProjectName,
+  approvalsPendingCount,
+  groupApprovals,
+  standingRuleTargetName,
+} from "~/lib/approvals";
 import { loadApprovals } from "~/routes/approvals";
 import {
   buildApprovalDecideInput,
@@ -336,5 +343,36 @@ describe("createStandingRule / deleteStandingRule (docs/taskd-api-v1.md §3.59�
       expect(outcome.error.status).toBe(404);
       expect(outcome.error.code).toBe("standing_rule_not_found");
     }
+  });
+});
+
+/**
+ * 同じ文面の未決の要求は 1 枚にまとめる（Phase G13f-1、監査 8）。文面の同一性は前後の空白を落とした
+ * 完全一致だけ（言い換えの解釈はしない）。並びは taskd が返した順（新しい順）を保つ。
+ */
+describe("groupApprovals", () => {
+  it("同じ文面をまとめ、最初の 1 件を代表にする", () => {
+    const groups = groupApprovals([
+      approval("a1"),
+      approval("a2", { node_id: "research-survey" }),
+      approval("a3", { question: "別の質問" }),
+      approval("a4", { question: "  which cluster should I use for the benchmark?  " }),
+    ]);
+    expect(groups.map((g) => g.head.id)).toEqual(["a1", "a3"]);
+    expect(groups[0].approvals.map((a) => a.id)).toEqual(["a1", "a2", "a4"]);
+    expect(groups[1].approvals.map((a) => a.id)).toEqual(["a3"]);
+  });
+
+  it("空なら空", () => {
+    expect(groupApprovals([])).toEqual([]);
+  });
+
+  it("まとめた 1 枚に出す担当の名前は重複を除く", () => {
+    const org = [
+      orgNode("coding-poc", { name: "PoC・R&D 課" }),
+      orgNode("research-survey", { name: "関連研究調査課" }),
+    ];
+    const groups = groupApprovals([approval("a1"), approval("a2", { node_id: "research-survey" }), approval("a3")]);
+    expect(approvalGroupNodeNames(groups[0], org)).toEqual(["PoC・R&D 課", "関連研究調査課"]);
   });
 });

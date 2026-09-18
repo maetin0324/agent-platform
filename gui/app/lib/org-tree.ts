@@ -1,3 +1,4 @@
+import { isSupportTask } from "~/lib/work-tree";
 import type { OrgNode, Status, TaskSummary } from "~/taskd/types";
 
 /**
@@ -74,9 +75,9 @@ export interface Workload {
 }
 
 /**
- * 割り当て（`assignee`）ごとのタスク件数を数える。`assignee` が無いタスクと、対話用タスク（`conversation`）は
- * 数えない（対話は裏方の run で、SPEC の「タスクは裏方」＝人が見る「抱えている仕事」には入らない。
- * ADR-0033 D8、GUI-R3 Phase 27）。
+ * 割り当て（`assignee`）ごとのタスク件数を数える。`assignee` が無いタスクと、**裏方のタスク**
+ * （`support`: 対話・報告のまとめ・承認待ち・レビュー。Phase 29）は数えない（SPEC の「タスクは裏方」＝
+ * 人が見る「抱えている仕事」には入らない。ADR-0033 D8）。
  *
  * `GET /tasks` の `TaskSummary.assignee`（Phase 27 で追加）を直接数える。G13a では `assignee` が
  * `TaskSummary` に無かったため `GET /projects/{id}` を案件数ぶん束ねて代替していたが、
@@ -85,7 +86,7 @@ export interface Workload {
 export function countWorkload(tasks: TaskSummary[]): Map<string, Workload> {
   const counts = new Map<string, Workload>();
   for (const t of tasks) {
-    if (!t.assignee || t.conversation) continue;
+    if (!t.assignee || isSupportTask(t)) continue;
     const cur = counts.get(t.assignee) ?? { open: 0, total: 0 };
     cur.total += 1;
     if (OPEN_STATUSES.has(t.status)) cur.open += 1;
@@ -95,14 +96,14 @@ export function countWorkload(tasks: TaskSummary[]): Map<string, Workload> {
 }
 
 /**
- * 組織の木のノード詳細に出す「抱えているタスク」一覧用に、`assignee` ごとにグループ化する
- * （対話用タスクは除く。理由は `countWorkload` と同じ）。`TaskSummary` には `project_id` が無いため、
+ * 組織の木の担当詳細に出す「抱えている仕事」一覧用に、`assignee` ごとにグループ化する
+ * （裏方のタスクは除く。理由は `countWorkload` と同じ）。`TaskSummary` には `project_id` が無いため、
  * 案件名は添えられない（G13a の代替実装にあった `project_title` は、N+1 をやめた代わりに落とした）。
  */
 export function tasksByAssignee(tasks: TaskSummary[]): Map<string, TaskSummary[]> {
   const byAssignee = new Map<string, TaskSummary[]>();
   for (const t of tasks) {
-    if (!t.assignee || t.conversation) continue;
+    if (!t.assignee || isSupportTask(t)) continue;
     const list = byAssignee.get(t.assignee) ?? [];
     list.push(t);
     byAssignee.set(t.assignee, list);
