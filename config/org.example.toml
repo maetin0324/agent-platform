@@ -69,11 +69,23 @@ brief = "調査・実験・執筆の案件を受け持ち、課に振り分け�
 
 [[org]]
 id = "research-survey"
-name = "関連研究調査課"
-kind = "section"
 parent_id = "research"
+kind = "section"
+name = "研究文献調査課"
+# 人間の決定（2026-09-18）: 学術検索は PaperQA2（literature）、一般 Web は LDR（web-research）に分ける。
+# 一般 Web 検索で関連研究を調べさせたら、レビュアーが「出典が Medium / Qiita / note のブログ」と不合格にしたため。
+brief = "学術論文を探して読み、引用付きで動向と候補テーマをまとめる（PaperQA2 + arXiv / OpenAlex）"
 genre = "literature"
-brief = "関連研究を洗い、先行研究との差分を言語化する。"
+position = 10
+
+[[org]]
+id = "research-web"
+parent_id = "research"
+kind = "section"
+name = "Web 調査課"
+brief = "論文化されていない GitHub 上の実装・製品・仕様・技術報告を一般 Web 検索で調べる（Local Deep Research + Tavily）"
+genre = "web-research"
+position = 15
 
 [[org]]
 id = "research-writing"
