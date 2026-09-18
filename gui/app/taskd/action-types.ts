@@ -9,6 +9,7 @@ import type {
   ClusterConnectStart,
   MessageAccepted,
   Milestone,
+  NotifyTestResult,
   OrgNode,
   Project,
   ProjectPlanAccepted,
@@ -171,6 +172,16 @@ export type ReportOpOutcome =
   | { ok: true; op: "reports_read"; ids: string[]; result: ReportsReadResult }
   | { ok: true; op: "reports_notified"; result: ReportsNotifiedResult }
   | { ok: false; op: "reports_read" | "reports_notified"; error: ActionError };
+
+/**
+ * Discord へのテスト送信（ADR-0037 D4、docs/taskd-api-v1.md §3.65。**管理系**、`token_file` 未設定でも 401）:
+ * `POST /notify/test` の結果。taskd のエラーは例外にせず `{ok:false, error}` にする（401 `unauthorized` /
+ * 409 `notify_unavailable`＝秘密が未登録を含む）。`ok: true` でも `result.ok` が `false`（送り先が 404 を
+ * 返した等）はありうるので、画面はどちらの `ok` も見て表示を分ける。
+ */
+export type NotifyTestOutcome =
+  | { ok: true; op: "notify_test"; result: NotifyTestResult }
+  | { ok: false; op: "notify_test"; error: ActionError };
 
 /**
  * 対話（ADR-0033 D4、docs/taskd-api-v1.md §3.55。`POST /org/{id}/messages` は**管理系**）:

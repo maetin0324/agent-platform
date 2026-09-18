@@ -263,6 +263,12 @@ export type CriterionSpec =
       type: "reviewer";
     };
 /**
+ * 知らせる理由（ADR-0037 D1 の 5 種）。**どれも「人の判断が要る」ときだけ**。
+ * `result` / `progress` は入れない（SPEC §3.5 の数時間単位の流れは GUI の報告の仕事）。
+ */
+export type NotificationKind =
+  "milestone_ready" | "approval_pending" | "question_blocked" | "bad_news" | "secretary_reply";
+/**
  * 組織のノードの種類（ADR-0033 D1）。`secretary` は根で 1 つだけ。
  */
 export type OrgKind = "secretary" | "department" | "section";
@@ -312,6 +318,8 @@ export interface ApiV1Schema {
   milestone_patch: MilestonePatchBody;
   new_plan: NewPlanSpec;
   new_task: NewTaskSpec;
+  notify: NotifyView;
+  notify_test: NotifyTestResult;
   org_create: OrgCreateBody;
   org_list: OrgList;
   org_patch: OrgPatchBody;
@@ -1630,6 +1638,62 @@ export interface NewTaskSpec {
   tier?: Tier | null;
   title: string;
   workspace?: string | null;
+}
+/**
+ * Phase 39（ADR-0037 D4）: 通知（Discord）。`GET /notify` と `POST /notify/test` の応答。
+ */
+export interface NotifyView {
+  /**
+   * webhook の秘密が登録されていて、送れる状態か。
+   */
+  configured: boolean;
+  /**
+   * 登録済みのときだけ。値の sha256 の先頭 8 桁（値は復元できない）。
+   */
+  fingerprint?: string | null;
+  /**
+   * `[notify] gui_base_url`（文面のリンクの根）。
+   */
+  gui_base_url?: string | null;
+  /**
+   * 直近の送信（新しい順、最大 10 件）。
+   */
+  recent: NotifyRecent[];
+  /**
+   * `[notify] discord_webhook_secret`（GUI は「この id で API キー画面に登録して」と案内する）。
+   */
+  secret_id: string;
+}
+/**
+ * `GET /notify` の `recent[]` の 1 件（ADR-0037 D4）。
+ */
+export interface NotifyRecent {
+  attempts: number;
+  created_at: string;
+  /**
+   * 失敗の理由（URL・ホスト名は含まない）。
+   */
+  error?: string | null;
+  /**
+   * 重複排除の鍵（途中目標 id / 認可 id / タスク id / 報告 id / 案件 id）。
+   */
+  key: string;
+  kind: NotificationKind;
+  /**
+   * `null` = まだ決着していない、`true` = 送れた、`false` = 諦めた。
+   */
+  ok?: boolean | null;
+  sent_at?: string | null;
+}
+/**
+ * `POST /notify/test` の応答。
+ */
+export interface NotifyTestResult {
+  /**
+   * 人が読む一行（失敗の種別だけ。URL・ホスト名は含まない）。
+   */
+  detail?: string | null;
+  ok: boolean;
 }
 /**
  * `POST /org` の要求本文（管理系）。

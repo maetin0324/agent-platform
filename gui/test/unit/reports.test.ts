@@ -13,8 +13,19 @@ import {
 import { loadReports } from "~/routes/reports";
 import { loadReportDetail } from "~/routes/reports.$id";
 import { TaskdClient } from "~/taskd/client.server";
+import { sendNotifyTest } from "~/taskd/notify-admin.server";
 import { markReportsNotified, markReportsRead } from "~/taskd/reports-admin.server";
-import type { OrgList, OrgNode, Project, ProjectList, Report, ReportDetail, ReportList } from "~/taskd/types";
+import type {
+  NotifyRecent,
+  NotifyView,
+  OrgList,
+  OrgNode,
+  Project,
+  ProjectList,
+  Report,
+  ReportDetail,
+  ReportList,
+} from "~/taskd/types";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
@@ -245,6 +256,118 @@ describe("loadReports (app/routes/reports.tsx)", () => {
     expect(result.reports.items).toHaveLength(1);
     expect(result.projects).toEqual([]);
     expect(result.org).toEqual([]);
+  });
+});
+
+const notifyRecent = (over: Partial<NotifyRecent> = {}): NotifyRecent => ({
+  kind: "bad_news",
+  key: "r1",
+  created_at: "2026-09-18T00:00:00Z",
+  attempts: 1,
+  ok: true,
+  ...over,
+});
+
+const notifyView = (over: Partial<NotifyView> = {}): NotifyView => ({
+  configured: true,
+  secret_id: "discord-webhook",
+  fingerprint: "3f9a1c02",
+  recent: [notifyRecent()],
+  ...over,
+});
+
+describe("loadReports — GET /notify (ADR-0037 D4, docs/gui/api.md §3.64)", () => {
+  it("GET /notify を束ねて ReportsData.notify に入れる", async () => {
+    mock.on("GET", "/api/v1/reports", (_req, res) => sendJson(res, 200, { items: [] } satisfies ReportList));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/notify", (_req, res) => sendJson(res, 200, notifyView()));
+
+    const result = await loadReports(client, new Request("http://gui.invalid/reports"));
+    expect(result.notify).toEqual(notifyView());
+    expect(result.notifyError).toBeNull();
+  });
+
+  it("未設定のときは configured: false・fingerprint 無しをそのまま渡す", async () => {
+    mock.on("GET", "/api/v1/reports", (_req, res) => sendJson(res, 200, { items: [] } satisfies ReportList));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/notify", (_req, res) =>
+      sendJson(res, 200, {
+        configured: false,
+        secret_id: "discord-webhook",
+        recent: [notifyRecent({ ok: false, error: "discord webhook is not configured" })],
+      } satisfies NotifyView),
+    );
+
+    const result = await loadReports(client, new Request("http://gui.invalid/reports"));
+    expect(result.notify?.configured).toBe(false);
+    expect(result.notify?.fingerprint).toBeUndefined();
+    expect(result.notify?.recent[0]?.error).toBe("discord webhook is not configured");
+  });
+
+  it("GET /notify が失敗しても報告は返す（notify は null、notifyError に理由が入る）", async () => {
+    mock.on("GET", "/api/v1/reports", (_req, res) =>
+      sendJson(res, 200, { items: [report("r1")] } satisfies ReportList),
+    );
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/notify", (_req, res) =>
+      sendProblem(res, { status: 401, code: "unauthorized", detail: "token required" }),
+    );
+
+    const result = await loadReports(client, new Request("http://gui.invalid/reports"));
+    expect(result.reports.items).toHaveLength(1);
+    expect(result.notify).toBeNull();
+    expect(result.notifyError?.status).toBe(401);
+    expect(result.notifyError?.code).toBe("unauthorized");
+  });
+});
+
+describe("sendNotifyTest (ADR-0037 D4, docs/gui/api.md §3.65. 管理系)", () => {
+  it("POST /notify/test — success（result.ok: true）", async () => {
+    mock.on("POST", "/api/v1/notify/test", (_req, res) =>
+      sendJson(res, 200, { ok: true, detail: "the test message was delivered" }),
+    );
+    const result = await sendNotifyTest(client);
+    expect(result).toEqual({
+      ok: true,
+      op: "notify_test",
+      result: { ok: true, detail: "the test message was delivered" },
+    });
+  });
+
+  it("POST /notify/test — success だが送れなかった（result.ok: false）", async () => {
+    mock.on("POST", "/api/v1/notify/test", (_req, res) => sendJson(res, 200, { ok: false, detail: "http status 404" }));
+    const result = await sendNotifyTest(client);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.result).toEqual({ ok: false, detail: "http status 404" });
+  });
+
+  it("POST /notify/test — 401 unauthorized（管理系。token_file 未設定でも拒否される）", async () => {
+    mock.on("POST", "/api/v1/notify/test", (_req, res) =>
+      sendProblem(res, { status: 401, code: "unauthorized", detail: "token required" }),
+    );
+    const result = await sendNotifyTest(client);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.op).toBe("notify_test");
+      expect(result.error.status).toBe(401);
+      expect(result.error.code).toBe("unauthorized");
+    }
+  });
+
+  it("POST /notify/test — 409 notify_unavailable（秘密が未登録）", async () => {
+    mock.on("POST", "/api/v1/notify/test", (_req, res) =>
+      sendProblem(res, { status: 409, code: "notify_unavailable", detail: "discord-webhook" }),
+    );
+    const result = await sendNotifyTest(client);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.status).toBe(409);
+      expect(result.error.code).toBe("notify_unavailable");
+      expect(result.error.conflict).toBe(true);
+    }
   });
 });
 
