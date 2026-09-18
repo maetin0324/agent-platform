@@ -570,13 +570,27 @@ task-api 自身はワーカーを起動しない**（DESIGN §5.10 の境界。A
 
 #### 3.28 `POST /reload` → 200 `ReloadResult`（`{"reloaded": true}`）
 
-`taskd.toml` と `providers_include` の指すディレクトリを読み直し、`StaticPolicy`・アダプタ一式・`GET /providers`/
-`GET /config` に出る一覧を差し替える。**cooldown はメモリ上（`StaticPolicy` の内部状態）なので reload で消える**
-（ADR-0017 D1）。設定の検証に失敗したら 400 を返し、稼働中の状態には触れない（古い設定のまま動き続ける）。
-実行中の run はそれぞれ差し替え前のアダプタの参照を既に掴んでいるので、reload の影響を受けない。
-**`[accounts]` は reload の対象外**（ADR-0024。S7）: `claude_dir` / `max_runs_per_account` / `check_model` の
-どれかが読み直した設定で変わっていれば、この reload 自体を 400 で拒否する（`detail` に再起動が必要な旨を書く。
-`[accounts]` 以外の変更は反映されない）。プロバイダの `[[providers]]` / `providers.d/` だけの変更は従来どおり通る。
+`taskd.toml` と `providers_include` の指すディレクトリを読み直す。設定の検証に失敗したら 400 を返し、
+稼働中の状態には触れない（古い設定のまま動き続ける）。実行中の run はそれぞれ差し替え前のアダプタ・役割・
+分野の写しを既に掴んでいるので、reload の影響を受けない。**反映は次に起動する run / 次 tick から**。
+
+反映されるもの（Phase 44、実機 2026-09-18 の前は役割・分野・委譲設定・`[reports]`/`[notify]`/`[conversation]`
+が対象外で、`max_turns` を変えても委譲された子が古い値のまま動いていた）:
+
+| 設定 | 反映先 | いつから効くか |
+| --- | --- | --- |
+| `[[providers]]` / `providers.d/` | `StaticPolicy`・アダプタ一式・`GET /providers`/`GET /config` の一覧 | 次 tick の dispatch から |
+| `[[roles]]` / `[[genres]]` / `[delegation]` | `Dispatcher` の役割・分野・委譲設定（`RunContext`、委譲される子の budget） | 次に起動する run から（実行中の run は古い写しのまま） |
+| `[reports]` | 報告の圧縮の閾値 | 次 tick から |
+| `[notify]` | 通知の間隔・webhook の秘密 id・GUI base URL | 次 tick から |
+| `[conversation]` | 対話が常に走る分野 | 次に始まる対話から |
+
+**cooldown はメモリ上（`StaticPolicy` の内部状態）なので reload で消える**（ADR-0017 D1）。
+
+再起動が要るもの（reload では触れない。変更しても黙って古いまま動き続ける）: `db` / `workspace_root` /
+`[api]` / `[[clusters]]`。**`[accounts]` だけは例外的にこの reload 自体を 400 で拒否する**（ADR-0024。S7）:
+`claude_dir` / `max_runs_per_account` / `check_model` のどれかが読み直した設定で変わっていれば、`detail` に
+再起動が必要な旨を書いて拒否する（それ以外のフィールドの変更は反映されない）。
 
 ### 3.29〜3.35 アカウントのプール（claude-code / codex。ADR-0024・ADR-0025、Phase 13/14）
 
