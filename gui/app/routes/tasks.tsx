@@ -124,7 +124,7 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
   const { tasks: taskList, config, placements, assigneeNames } = loaderData;
   const genres = config.genres ?? [];
   const [searchParams] = useSearchParams();
-  const fetcher = useFetcher<TaskList>();
+  const fetcher = useFetcher<TasksData>();
 
   const [items, setItems] = useState<TaskSummary[]>(taskList.items);
   const [nextCursor, setNextCursor] = useState<string | null>(taskList.next_cursor ?? null);
@@ -155,13 +155,17 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
   // 変わることがある。中身が前回追記した分と同じなら追記しない（二重追記防止。firstPageKey と同じ理由）。
   const lastAppliedFetcherKey = useRef<string | null>(null);
   useEffect(() => {
+    // `fetcher.load("/tasks?...")` はこの route の loader を叩くので、`TaskList` ではなく `TasksData`
+    // （`{ tasks, config, placements, assigneeNames }`）が返る（監査 M2 で loader が包んだ。Phase G13g で発覚
+    // した既存バグの修正: 以前は `TaskList` のつもりで `page.items` を直接読んでいて「さらに読む」がクラッシュしていた）。
     const page = fetcher.data;
     if (!page) return;
-    const key = `${page.items.map((item) => item.id).join(",")}|${page.next_cursor ?? ""}`;
+    const nextItems = page.tasks.items;
+    const key = `${nextItems.map((item) => item.id).join(",")}|${page.tasks.next_cursor ?? ""}`;
     if (lastAppliedFetcherKey.current === key) return;
     lastAppliedFetcherKey.current = key;
-    setItems((prev) => [...prev, ...page.items]);
-    setNextCursor(page.next_cursor ?? null);
+    setItems((prev) => [...prev, ...nextItems]);
+    setNextCursor(page.tasks.next_cursor ?? null);
   }, [fetcher.data]);
 
   const handleLoadMore = (): void => {

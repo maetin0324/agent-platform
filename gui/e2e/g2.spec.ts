@@ -8,20 +8,32 @@ import { expect, test } from "./test";
 // Phase G2 の受け入れ条件 1〜8（docs/DESIGN.md §10 Phase G2、docs/adr/0005 D7）。
 // `scripts/taskd.sh fixture basic && scripts/taskd.sh start basic` の実 taskd（fake ワーカー並走）に対して検証する。
 // G1 の e2e が `basic` に sse probe 等を足しているので、beforeAll で作り直す。
+//
+// 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
+// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
 const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_URL = "http://127.0.0.1:7710";
-const GUI_URL = "http://127.0.0.1:7700";
+const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7710";
+const TASKD_API_URL = process.env.TASKD_API_URL ?? `http://${TASKD_API_LISTEN}`;
+const GUI_URL = `http://${process.env.TASKD_GUI_BIND ?? "127.0.0.1:7700"}`;
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
+  return execFileSync(TASKD_SH, args, {
+    cwd: REPO_ROOT,
+    stdio: "pipe",
+    env: { ...process.env, TASKD_API_LISTEN },
+  }).toString();
 }
 
 function taskctl(...args: string[]): string {
-  return execFileSync(TASKD_SH, ["taskctl", "basic", ...args], { cwd: REPO_ROOT, stdio: "pipe" })
+  return execFileSync(TASKD_SH, ["taskctl", "basic", ...args], {
+    cwd: REPO_ROOT,
+    stdio: "pipe",
+    env: { ...process.env, TASKD_API_LISTEN },
+  })
     .toString()
     .trim();
 }
@@ -92,16 +104,22 @@ test.describe("受け入れ条件 1: 受信箱で Approval を note 付きで承
     await expect(watcher.getByTestId("task-status")).toHaveText("reviewing");
 
     const page = await browser.newPage();
-    await page.goto("/");
+    // `/` は秘書へ 302 する最初の画面になった（Phase G13f-1）。受信箱は `/inbox`。
+    await page.goto("/inbox");
     const item = page.getByTestId("approval-item").first();
     await expect(item).toContainText("Approval needed:");
     await item.getByTestId("approval-note").fill("looks good from the GUI");
-    await item.getByTestId("approval-approve").click();
-
-    // flash: ready → done、承認待ちの区画から消える
-    const flash = page.getByTestId("flash").first();
-    await expect(flash).toHaveAttribute("data-flash-kind", "ok");
-    await expect(flash.getByTestId("flash-to")).toHaveText("done");
+    // POST の成否は応答そのもので確認する（`toHaveAttribute`/`toHaveText` で `flash` を待たない）。
+    // root は taskd の SSE（`daemon`。tick_ms=200 で無条件に届く。docs/DESIGN.md §6.3、G1-U1）のたびに
+    // 再検証し、承認直後は `/inbox` の `approvals` からこの項目が消える（G13f-U4 と同じ「決めたものに
+    // 移ると成功表示も一緒に消える」レース）。この環境では 200ms 以内に消えるのが常態で、`flash` の
+    // DOM を安定して観測できない（Phase G13g で判明）。承認の中身は taskd 側の記録（下記）で検証する。
+    const [response] = await Promise.all([
+      // React Router のデータ要求は `/inbox.data` に POST される（`action="/inbox"` の `fetcher.Form`）。
+      page.waitForResponse((res) => res.url().includes("/inbox.data") && res.request().method() === "POST"),
+      item.getByTestId("approval-approve").click(),
+    ]);
+    expect(response.status()).toBe(200);
     await expect(page.getByTestId("approval-item")).toHaveCount(0);
 
     // taskd 側の記録

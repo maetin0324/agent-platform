@@ -10,16 +10,24 @@ import { expect, test } from "./test";
 // `clusters` フィクスチャ（ADR-0010 D1/D2、実際に localhost への ssh 多重接続を使う）と `delegation`
 // フィクスチャ（ADR-0010 D3）に対して検証する。受け入れ条件 7（lint/typecheck/test/build/e2e/gen:types）は
 // このファイルではなく `pnpm` の各コマンドと `docs/PROGRESS.md` の証拠で扱う。
+//
+// 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
+// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
 const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_HOST = "127.0.0.1";
-const TASKD_API_PORT = 7710;
+const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7710";
+const [TASKD_API_HOST, TASKD_API_PORT_STR] = TASKD_API_LISTEN.split(":");
+const TASKD_API_PORT = Number(TASKD_API_PORT_STR);
 const INSTANCE_NAMES = ["dev", "basic", "clusters", "delegation"] as const;
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
+  return execFileSync(TASKD_SH, args, {
+    cwd: REPO_ROOT,
+    stdio: "pipe",
+    env: { ...process.env, TASKD_API_LISTEN },
+  }).toString();
 }
 
 function stopAll(): void {
@@ -100,7 +108,8 @@ test.describe("受け入れ条件 1・2・3・6: /clusters、受信箱の cluste
   });
 
   test("受信箱に cluster_unavailable の項目が出て、押すと /clusters に遷移する", async ({ page }) => {
-    await page.goto("/");
+    // `/` は秘書へ 302 する最初の画面になった（Phase G13f-1）。受信箱は `/inbox`。
+    await page.goto("/inbox");
     const item = page.locator('[data-testid="attention-item"][data-attention-type="cluster_unavailable"]');
     await expect(item).toHaveCount(1);
     await item.getByTestId("attention-cluster-link").click();

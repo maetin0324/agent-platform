@@ -59,13 +59,14 @@ test.describe("受け入れ条件 2: 導線", () => {
   });
 
   test("受信箱が空のとき導線が出て、押すと /help に遷移する（basic には出ない）", async ({ page }) => {
-    await page.goto("/");
+    // `/` は秘書へ 302 する最初の画面になった（Phase G13f-1）。受信箱は `/inbox`。
+    await page.goto("/inbox");
     await expect(page.getByTestId("inbox-empty-help")).toHaveCount(0);
 
     sh("stop", "basic");
     sh("start", "dev");
     try {
-      await page.goto("/");
+      await page.goto("/inbox");
       await expect(page.getByTestId("inbox-empty-help")).toBeVisible();
       await page.getByTestId("inbox-help-onboarding-link").click();
       await expect(page).toHaveURL(/\/help$/);
@@ -79,15 +80,19 @@ test.describe("受け入れ条件 2: 導線", () => {
 test.describe("受け入れ条件 3: /help 内のリンクがすべて 200", () => {
   test("本文内のリンク先が全て 200 を返す", async ({ page }) => {
     await page.goto("/help");
-    const hrefs = await page
-      .locator("a[href]")
-      .evaluateAll((els) =>
-        Array.from(
-          new Set(
-            els.map((el) => el.getAttribute("href") ?? "").filter((href) => href.startsWith("/") && href !== "/help"),
-          ),
+    const hrefs = await page.locator("a[href]").evaluateAll((els) =>
+      Array.from(
+        new Set(
+          els
+            .map((el) => el.getAttribute("href") ?? "")
+            // `/` は秘書（`/org/secretary`）へ 302 する（Phase G13f-1）。秘書は組織に `secretary` という
+            // id のノードがいて初めて 200 になる（`e2e/g0.spec.ts` 参照）。ロゴのリンク（`app/root.tsx`）と
+            // ナビの「秘書」（同じく `/org/secretary`）が指す先で、`basic` フィクスチャには組織が無いので
+            // 対象から外す（Phase G13g）。
+            .filter((href) => href.startsWith("/") && href !== "/help" && href !== "/" && href !== "/org/secretary"),
         ),
-      );
+      ),
+    );
     expect(hrefs.length).toBeGreaterThan(0);
     for (const href of hrefs) {
       const response = await page.request.get(href);

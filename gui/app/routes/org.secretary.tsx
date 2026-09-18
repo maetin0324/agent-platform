@@ -5,19 +5,28 @@ import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
 import { getTaskdClient } from "~/taskd/client.server";
 import { loadConversation, runConversationAction } from "~/taskd/conversation.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
+import { isTaskdUnavailable, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import type { Route } from "./+types/org.secretary";
 
 /**
  * `/org/secretary`（秘書との対話。SPEC §3.1・§4 の 1「案件を投げる、状況を聞く、方針を変える」、
  * ADR-0033 D4）。`/org/:id` と同じ中継・同じ部品で、相手が `secretary` に固定されている点だけが違う
  * （ナビの「秘書」がここを指す。`/org/:id` より静的なルートが優先される）。
+ *
+ * `/` はここへ 302 する最初の画面（`routes/home.tsx`、Phase G13f-1）なので、taskd 停止中も 200 で開く契約
+ * （docs/DESIGN.md §10 Phase G0 受け入れ条件 4）はここが引き継ぐ（Phase G13g）。root が taskd の状態を
+ * 独自に検査してバナーを出す（`app/root.tsx`）ので、ここでは taskd に届かないときだけ捕まえて「対話は
+ * まだ何も無い」状態として描く（他の画面が `TaskdUnavailable` を投げて 5xx にする作法とは分ける。
+ * `routes/inbox.tsx` の `loadInbox` と同じ考え方）。
  */
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ConversationData> {
   try {
     return await loadConversation(getTaskdClient(), SECRETARY_NODE_ID, request);
   } catch (e) {
+    if (isTaskdUnavailable(e)) {
+      return { nodeId: SECRETARY_NODE_ID, node: null, projects: [], projectId: null, messages: [], attention: [] };
+    }
     throw taskdErrorResponse(e);
   }
 }

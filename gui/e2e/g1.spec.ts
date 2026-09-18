@@ -1,24 +1,38 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isSupportTask } from "~/lib/work-tree";
 import type { TaskList } from "~/taskd/types";
 import { expect, test } from "./test";
 
 // Phase G1 の受け入れ条件 2〜5（docs/DESIGN.md §10 Phase G1）。
 // `scripts/taskd.sh fixture basic && scripts/taskd.sh start basic` で作った既知の DB に対して検証する。
 // このファイルは `basic` を起動したまま終える（他の G フェーズの e2e が上書きする）。
+//
+// 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
+// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
 const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_URL = "http://127.0.0.1:7710";
+const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7710";
+const TASKD_API_URL = process.env.TASKD_API_URL ?? `http://${TASKD_API_LISTEN}`;
+const GUI_BIND = process.env.TASKD_GUI_BIND ?? "127.0.0.1:7700";
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
+  return execFileSync(TASKD_SH, args, {
+    cwd: REPO_ROOT,
+    stdio: "pipe",
+    env: { ...process.env, TASKD_API_LISTEN },
+  }).toString();
 }
 
 function taskctl(...args: string[]): string {
-  return execFileSync(TASKD_SH, ["taskctl", "basic", ...args], { cwd: REPO_ROOT, stdio: "pipe" }).toString();
+  return execFileSync(TASKD_SH, ["taskctl", "basic", ...args], {
+    cwd: REPO_ROOT,
+    stdio: "pipe",
+    env: { ...process.env, TASKD_API_LISTEN },
+  }).toString();
 }
 
 async function apiGet<T>(pathAndQuery: string): Promise<T> {
@@ -52,7 +66,8 @@ test.beforeAll(() => {
 
 test.describe("受け入れ条件 2: 受信箱", () => {
   test("承認待ち・質問・draft・注意が fixture のとおり表示される", async ({ page }) => {
-    await page.goto("/");
+    // `/` は秘書（`/org/secretary`）へ 302 する最初の画面になった（Phase G13f-1）。受信箱は `/inbox`。
+    await page.goto("/inbox");
 
     const approvalItems = page.getByTestId("approval-item");
     await expect(approvalItems).toHaveCount(1);
@@ -91,7 +106,10 @@ test.describe("受け入れ条件 3: 一覧", () => {
 
   test("limit=2 で「さらに読む」を最後まで押すと重複なく全件集まる", async ({ page }) => {
     const all = await apiGet<TaskList>("/tasks?limit=500&order=updated_desc");
-    const expectedIds = new Set(all.items.map((i) => i.id));
+    // `/tasks` は裏方のタスク（`TaskSummary.support` が付くもの。承認の子など）を既定で隠す
+    // （ADR-0033 D8、Phase G13f-2「裏方の印」）。`show_support=1` を付けずに開くこの画面と揃える
+    // （Phase G13g で判明。以前はこのフィルタが無かった頃のまま `/tasks?limit=500` の全件と比べていた）。
+    const expectedIds = new Set(all.items.filter((i) => !isSupportTask(i)).map((i) => i.id));
 
     await page.goto("/tasks?limit=2&order=updated_desc");
     const loadMore = page.getByTestId("load-more");
@@ -103,8 +121,11 @@ test.describe("受け入れ条件 3: 一覧", () => {
     }
 
     const rows = page.getByTestId("task-row");
+    // 最後の「さらに読む」のクリック直後は、fetcher の応答が画面に反映されるまで一瞬ラグがあることがある
+    // （Phase G13g で判明。ループの固定 100ms 待ちだけでは足りないことがある）。ここは自動リトライする
+    // `expect` で数が揃うのを待ってから内容を検証する。
+    await expect(rows).toHaveCount(expectedIds.size);
     const count = await rows.count();
-    expect(count).toBe(expectedIds.size);
     const seenIds = new Set<string>();
     for (let i = 0; i < count; i += 1) {
       const id = await rows.nth(i).getAttribute("data-task-id");
@@ -165,7 +186,7 @@ test.describe("受け入れ条件 5: SSE", () => {
         "sh",
         [
           "-c",
-          `curl -N -m 3 http://127.0.0.1:7700/events & PID=$!; sleep 0.3; ${TASKD_SH} taskctl basic add --title "sse curl probe" --objective x --accept y --workspace ws-sse-curl-probe >/dev/null; wait $PID`,
+          `curl -N -m 3 http://${GUI_BIND}/events & PID=$!; sleep 0.3; ${TASKD_SH} taskctl basic add --title "sse curl probe" --objective x --accept y --workspace ws-sse-curl-probe >/dev/null; wait $PID`,
         ],
         { cwd: REPO_ROOT, stdio: "pipe" },
       ).toString();
