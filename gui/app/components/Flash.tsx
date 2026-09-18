@@ -4,6 +4,7 @@ import type {
   AccountOpOutcome,
   ActionError,
   ApprovalOpOutcome,
+  NotifyTestOutcome,
   OrgOpOutcome,
   ProjectOpOutcome,
   ProviderActionResult,
@@ -319,6 +320,31 @@ export function ReportActionFlash({ outcome }: { outcome: ReportOpOutcome | unde
       <p data-testid="flash-report-op">
         {REPORT_OP_LABEL[outcome.op] ?? outcome.op}
         {outcome.op === "reports_read" && <>（{outcome.result.updated} 件）</>}
+      </p>
+    </Alert>
+  );
+}
+
+/**
+ * Discord のテスト送信の結果（ADR-0037 D4、docs/taskd-api-v1.md §3.65）。`outcome.ok` は action（HTTP）が
+ * 成功したかどうかで、成功していても `result.ok` が `false`（送り先が 404 を返した等）はありうる。
+ * `detail` は種別だけの短い文（URL・ホスト名は含まない。taskd 側の規律）。
+ */
+export function NotifyTestFlash({ outcome }: { outcome: NotifyTestOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  const { result } = outcome;
+  return (
+    <Alert
+      role="status"
+      data-testid="flash"
+      data-flash-kind={result.ok ? "ok" : "error"}
+      tone={result.ok ? "success" : "danger"}
+      className="my-2"
+    >
+      <p data-testid="flash-notify-test">
+        {result.ok ? "テスト送信: 届きました" : "テスト送信: 届きませんでした"}
+        {result.detail && <>（{result.detail}）</>}
       </p>
     </Alert>
   );

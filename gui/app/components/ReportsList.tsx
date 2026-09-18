@@ -130,6 +130,7 @@ function ReportRow({
 
   return (
     <li
+      id={`report-${report.id}`}
       data-testid="report-row"
       data-report-id={report.id}
       data-report-kind={report.kind}

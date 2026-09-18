@@ -1,22 +1,33 @@
 import { useMemo } from "react";
-import { data, Form, isRouteErrorResponse, useFetcher, useSearchParams } from "react-router";
-import { ReportActionFlash } from "~/components/Flash";
+import {
+  data,
+  type FetcherWithComponents,
+  Form,
+  isRouteErrorResponse,
+  Link,
+  useFetcher,
+  useSearchParams,
+} from "react-router";
+import { ErrorFlash, NotifyTestFlash, ReportActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { NotificationsEnableButton } from "~/components/NotificationsEnable";
 import { ReportsList } from "~/components/ReportsList";
+import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { checkboxClass, chipLabelClass, labelClass, selectClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
-import { EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { Alert, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { notifyKindLabel, notifyResultLabel, notifyResultTone, notifyTargetHref } from "~/lib/notify";
 import { buildReportsQuery, filterReportsByKind } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
-import type { ReportOpOutcome } from "~/taskd/action-types";
+import type { ActionError, NotifyTestOutcome, ReportOpOutcome } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
+import { isTaskdUnavailable, TaskdError, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
+import { sendNotifyTest } from "~/taskd/notify-admin.server";
 import { markReportsNotified, markReportsRead } from "~/taskd/reports-admin.server";
-import type { OrgList, OrgNode, Project, ProjectList, ReportKind, ReportList } from "~/taskd/types";
+import type { NotifyView, OrgList, OrgNode, Project, ProjectList, ReportKind, ReportList } from "~/taskd/types";
 import type { Route } from "./+types/reports";
 
 /**
@@ -25,13 +36,43 @@ import type { Route } from "./+types/reports";
  * （`GET /reports` 自体が新しい順を返す。docs/gui/api.md §3.50「新しい順（created_at 降順）」）。
  * `kind` の絞り込みは taskd 側 API に無いので GUI 側だけで行う（`~/lib/reports.ts` のコメント参照）。
  * 案件名・担当ノード名は `GET /projects` / `GET /org` から解決する（taskd 側に判断値を作らせない）。
+ *
+ * Discord への通知（ADR-0037、Phase 39、docs/taskd-api-v1.md §3.64〜3.65）の設定・テスト送信・直近の送信も
+ * この画面の「通知」節に足す（ブラウザ通知の節はそのまま）。`GET /notify` は管理系ではないが taskd に届かない
+ * こともあるため、`GET /secrets`（`app/routes/accounts.tsx`）と同じ形で `notifyError` に落として画面全体は
+ * 壊さない。
  */
 
 export interface ReportsData {
   reports: ReportList;
   projects: Project[];
   org: OrgNode[];
+  notify: NotifyView | null;
+  notifyError: ActionError | null;
   fetchedAt: string;
+}
+
+/**
+ * `TaskdError` / `TaskdUnavailable`（`GET /notify` の失敗）を `ActionError` にする。`loadReports` はテストから
+ * loader を介さず直接呼ばれるため、`actions.server.ts` の `toActionError` をそのまま使うと「loader/action 以外の
+ * export から `.server` モジュールを参照できない」制約に触れる（`app/routes/accounts.tsx` の `secretsListError`
+ * と同じ理由・同じ複製）。
+ */
+function notifyViewError(e: unknown): ActionError {
+  if (isTaskdUnavailable(e)) {
+    return {
+      status: 503,
+      code: "unavailable",
+      detail: `taskd に接続できません（${e.baseUrl}）`,
+      conflict: false,
+      fields: {},
+      messages: [],
+    };
+  }
+  if (e instanceof TaskdError) {
+    return { status: e.status, code: e.code, detail: e.detail, conflict: e.status === 409, fields: {}, messages: [] };
+  }
+  throw e;
 }
 
 export async function loadReports(client: TaskdClient, request: Request): Promise<ReportsData> {
@@ -42,7 +83,21 @@ export async function loadReports(client: TaskdClient, request: Request): Promis
     client.get<ProjectList>("/projects", { signal: request.signal }).catch(() => ({ items: [] }) as ProjectList),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
   ]);
-  return { reports, projects: projects.items, org: org.items, fetchedAt: new Date().toISOString() };
+  let notify: NotifyView | null = null;
+  let notifyError: ActionError | null = null;
+  try {
+    notify = await client.get<NotifyView>("/notify", { signal: request.signal });
+  } catch (e) {
+    notifyError = notifyViewError(e);
+  }
+  return {
+    reports,
+    projects: projects.items,
+    org: org.items,
+    notify,
+    notifyError,
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 export const shouldRevalidate = revalidateAfterActionErrors;
@@ -61,14 +116,15 @@ export function meta(_: Route.MetaArgs) {
 
 /**
  * `reports_read`（選択 1 件・一括とも同じ intent。`ids` を複数付けられる）と `reports_notified`
- * （`NotificationsWatcher` がブラウザ通知を出した直後にも呼ぶ）。いずれも管理系（§3.52〜3.53）。
+ * （`NotificationsWatcher` がブラウザ通知を出した直後にも呼ぶ）はいずれも管理系（§3.52〜3.53）。
+ * `notify_test`（ADR-0037 D4、§3.65。**管理系**、`token_file` 未設定でも 401）は Discord へのテスト送信。
  */
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
   const client = getTaskdClient();
 
-  let outcome: ReportOpOutcome;
+  let outcome: ReportOpOutcome | NotifyTestOutcome;
   switch (intent) {
     case "reports_read": {
       const ids = form
@@ -80,6 +136,9 @@ export async function action({ request }: Route.ActionArgs) {
     }
     case "reports_notified":
       outcome = await markReportsNotified(client, request.signal);
+      break;
+    case "notify_test":
+      outcome = await sendNotifyTest(client, request.signal);
       break;
     default:
       throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
@@ -103,7 +162,7 @@ const KIND_OPTIONS: { value: ReportKind; label: string }[] = [
 ];
 
 export default function ReportsPage({ loaderData }: Route.ComponentProps) {
-  const { reports, projects, org, fetchedAt } = loaderData;
+  const { reports, projects, org, notify, notifyError, fetchedAt } = loaderData;
   const [searchParams] = useSearchParams();
   const filter = searchParams.get("filter") === "all" ? "all" : "unread";
   const level = searchParams.has("level") ? searchParams.get("level") : "0";
@@ -113,6 +172,7 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
   const visible = useMemo(() => filterReportsByKind(reports.items, selectedKinds), [reports.items, selectedKinds]);
 
   const readFetcher = useFetcher<ReportOpOutcome>();
+  const notifyTestFetcher = useFetcher<NotifyTestOutcome>();
   const markAllRead = () => {
     const unreadIds = visible.filter((r) => r.read_at == null).map((r) => r.id);
     if (unreadIds.length === 0) return;
@@ -142,6 +202,8 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
           悪い知らせは即座に、それ以外は数時間ごとにブラウザの通知でお知らせします。
         </span>
       </div>
+
+      <DiscordSection notify={notify} notifyError={notifyError} fetcher={notifyTestFetcher} />
 
       <ReportActionFlash outcome={readFetcher.data} />
 
@@ -251,6 +313,103 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * Discord への通知の区画（ADR-0037、Phase 39、docs/taskd-api-v1.md §3.64〜3.65）。ブラウザ通知の節はそのまま
+ * （`NotificationsEnableButton`）で、ここは taskd の tick が決定的に判定・送信する 5 種
+ * （`~/lib/notify.ts` の `NOTIFY_KIND_LABEL`）の設定・テスト送信・直近 10 件を出す。
+ */
+function DiscordSection({
+  notify,
+  notifyError,
+  fetcher,
+}: {
+  notify: NotifyView | null;
+  notifyError: ActionError | null;
+  fetcher: FetcherWithComponents<NotifyTestOutcome>;
+}) {
+  const submitting = fetcher.state !== "idle";
+  return (
+    <section aria-labelledby="discord-heading" className="space-y-3" data-testid="discord-section">
+      <SectionTitle icon="message" id="discord-heading">
+        通知（Discord）
+      </SectionTitle>
+      <p className="text-xs text-fg-subtle">
+        途中目標の仕事が終わった・認可の要求が来た・質問で止まっている・悪い知らせが届いた・秘書から方針の提案が 届いた
+        — この 5 つ、人の判断が要るときだけ Discord にも 1 通届きます。結果が出たことは知らせません
+        （それはこの「報告」の流れで見ます）。
+      </p>
+
+      {notifyError ? (
+        <ErrorFlash error={notifyError} />
+      ) : !notify ? (
+        <EmptyState icon="message" title="通知の設定を取得できませんでした" />
+      ) : (
+        <>
+          <div data-testid="discord-configured" data-configured={notify.configured ? "true" : "false"}>
+            {notify.configured ? (
+              <Alert tone="success" title="設定済み">
+                <p>
+                  fingerprint <Mono>{notify.fingerprint}</Mono>
+                </p>
+                <fetcher.Form method="post" className="mt-2">
+                  <input type="hidden" name="intent" value="notify_test" />
+                  <Button type="submit" variant="secondary" size="sm" disabled={submitting} data-testid="discord-test">
+                    <Icon name="send" />
+                    テスト送信
+                  </Button>
+                </fetcher.Form>
+                <NotifyTestFlash outcome={fetcher.data} />
+              </Alert>
+            ) : (
+              <Alert tone="warning" title="未設定">
+                <p>
+                  Discord への通知は未設定です。
+                  <Link to="/accounts#secrets" className="underline underline-offset-2">
+                    アカウント → API キー
+                  </Link>
+                  に id <Mono>{notify.secret_id}</Mono> で Webhook URL を登録してください（値は二度と表示されません）。
+                </p>
+              </Alert>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <p className="text-xs font-medium text-fg-subtle">直近の送信</p>
+            {notify.recent.length === 0 ? (
+              <p className="text-xs text-fg-subtle">まだありません。</p>
+            ) : (
+              <ul className="space-y-1">
+                {notify.recent.map((r) => {
+                  const href = notifyTargetHref(r);
+                  return (
+                    <li
+                      key={`${r.kind}-${r.key}-${r.created_at}`}
+                      data-testid="discord-recent-row"
+                      data-notification-kind={r.kind}
+                      className="flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-xs"
+                    >
+                      <Badge tone={notifyResultTone(r)}>{notifyKindLabel(r.kind)}</Badge>
+                      {href ? (
+                        <Link to={href} className="underline underline-offset-2">
+                          {r.key}
+                        </Link>
+                      ) : (
+                        <span className="text-fg-subtle">{r.key}</span>
+                      )}
+                      <span className="text-fg-subtle">{r.created_at}</span>
+                      <span>{notifyResultLabel(r)}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 

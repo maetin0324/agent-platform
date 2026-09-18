@@ -676,7 +676,7 @@ function SecretsSection({
   fetchedAt: string;
 }) {
   return (
-    <section aria-labelledby="secrets-heading" className="space-y-4" data-testid="secrets-section">
+    <section id="secrets" aria-labelledby="secrets-heading" className="space-y-4" data-testid="secrets-section">
       <SectionTitle icon="lock" id="secrets-heading" count={secrets?.items.length}>
         API キー
       </SectionTitle>

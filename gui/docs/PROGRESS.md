@@ -2197,3 +2197,108 @@ GUI に無く、人が遠回り（古い draft を取り消して秘書に分解
 ### 提案
 
 なし。
+
+## Phase G13i — Discord 通知の区画（2026-09-18）
+
+taskd 側の Phase 39（ADR-0037: 人の判断が要るときだけ Discord に知らせる）への追従。「報告」画面
+（`/reports`）の通知の節に Discord の区画を足した（ブラウザ通知の節は変更していない）。GUI 側の新しい
+設計判断は 1 点（後述、対象へのリンクが引けない `milestone_ready` の扱い）。
+
+### 成果物
+
+- `pnpm gen:types` 再生成（`NotifyView` / `NotifyRecent` / `NotifyTestResult`）。2 回実行して差分ゼロ。
+- `app/lib/notify.ts`（新規、純粋関数。DOM を描画する unit テストが無い件（G10-U1）を踏まえ、判断・計算は
+  すべてここに集約）: `notifyKindLabel`（5 種を SPEC の言葉で）、`notifyResultLabel`（Phase 39 の判断 2:
+  `error === "discord webhook is not configured"` を専用の文言「未設定のため送っていません」に畳む）、
+  `notifyResultTone`、`notifyTargetHref`（`key` から画面内リンクを組む。後述の判断参照）。
+- `app/taskd/notify-admin.server.ts`（新規）: `sendNotifyTest`（`POST /notify/test`。管理系、
+  `reports-admin.server.ts` と同じ作り。台帳には残らない）。
+- `app/taskd/action-types.ts` に `NotifyTestOutcome`、`app/components/Flash.tsx` に `NotifyTestFlash`
+  （action レベルの失敗は既存の `ErrorFlash`、成功時は `result.ok` を見て届いた／届かなかったを出し分ける）。
+- `app/routes/reports.tsx`: `loadReports` が `GET /notify` も束ねる（`ReportsData.notify` /
+  `.notifyError`）。`GET /secrets`（`app/routes/accounts.tsx`）と同じ理由で、`loadReports` はテストから
+  loader を介さず直接呼ばれるため `actions.server.ts` の `toActionError` を使えず、`notifyViewError` として
+  同じ変換をここに複製した。`action` に `notify_test` intent を追加（`ReportOpOutcome | NotifyTestOutcome`
+  の合併型を返す）。画面には新規の `DiscordSection`（testid `discord-section`）を、既存のブラウザ通知の行の
+  直後に追加: 未設定なら `/accounts#secrets` への導線（id `discord-webhook` を案内）、設定済みなら
+  fingerprint と「テスト送信」ボタン（testid `discord-test`）、直近 10 件（testid `discord-recent-row`、
+  `data-notification-kind`）を種のバッジ・対象へのリンク・時刻・結果で 1 行ずつ出す。
+- `app/components/ReportsList.tsx`: `<li>` に `id={`report-${report.id}`}` を足した（Discord 区画の
+  `bad_news` のリンク先 `/reports#report-{id}` が着地できるように。表示・testid は変更していない）。
+- `app/routes/accounts.tsx`: 「API キー」節の `<section>` に `id="secrets"` を足した（`/accounts#secrets` の
+  錨。既存の `aria-labelledby="secrets-heading"` はそのまま）。
+- `app/routes/help.tsx`: 用語集に「Discord 通知」、「報告」の画面説明に Discord 区画への言及を追記。
+- testid: `discord-section` / `discord-configured`（`data-configured`）/ `discord-test` /
+  `discord-recent-row`（`data-notification-kind`）。
+
+### 判断が必要だった点
+
+**`milestone_ready` の「対象へのリンク」は作れない**: ADR-0037 D1 の `key` は途中目標 id だが、taskd の
+API に途中目標単体を引く経路（`GET /milestones/{id}` 相当）が無く、`Milestone.project_id` を知るには
+「案件を全件 GET → 各案件の詳細を GET → 該当の途中目標を探す」という N+1 の総当たりが要る
+（`/org` の `countWorkload` が仕事の数を数えるのに使っている手と同種だが、直近 10 件の表示のためだけに
+案件を総当たりするのは重いと判断し、やらなかった）。GUI 側では `notifyTargetHref` が `milestone_ready` に
+`null` を返し、キー（id）をリンクにせずただのテキストで出す。**taskd 側への提案**: `NotifyRecent` に
+`milestone_ready` のときだけ `project_id` を足す（他の 4 種は `key` 自体がそのままリンク可能な id なので
+対称性は崩れるが、`milestone_ready` だけ特別扱いする方が N+1 より安い）。ADR は起こしていない
+（GUI 単体の実装詳細と判断した。`docs/gui/api.md` への提案として次節に記録）。
+
+### 実機での見た目・実際の送信の確認
+
+使い捨ての taskd（`target/debug/taskd`、`[secrets] dir = "secrets"` + `[notify] discord_webhook_secret =
+"discord-webhook"` / `interval_secs = 2` / `gui_base_url`、`[api] token_file`）を 127.0.0.1:18098 に、
+GUI dev サーバを 127.0.0.1:18097（`TASKD_API_URL=http://127.0.0.1:18098`）に、偽の Discord webhook
+（Node の `http` サーバ、127.0.0.1:18099、受けた POST 本文をファイルに記録して 204 を返すだけ）に
+それぞれ起動した。**運用中の 7710 / 7700 には触っていない**（前後で `curl 127.0.0.1:7710/api/v1/health` /
+`curl 127.0.0.1:7700/` が生きていることを確認済み）。Playwright（light/dark）で確認したこと:
+
+1. **未設定**（`secrets/discord-webhook` が無い状態）: `GET /notify` は `{"configured":false,...}`。画面は
+   「未設定です。アカウント → API キーに id discord-webhook で Webhook URL を登録してください」を出す
+   （light/dark とも表示崩れなし）。
+2. **設定済み**（`secrets/discord-webhook` に偽 URL `http://127.0.0.1:18099/webhook` を書いた状態。
+   taskd は毎回ファイルを読み直すので再起動不要）: `GET /notify` が `configured:true` と fingerprint を返し、
+   画面は「設定済み（fingerprint 025e5572）」＋「テスト送信」ボタンを出す。
+3. **テスト送信**: 「テスト送信」を押すと `POST /notify/test` → taskd が実際に偽 webhook へ 1 通 POST
+   （`{"content":"taskd のテスト送信です。…","username":"taskd"}`）し、偽サーバのログに記録された
+   （= 本当に届いた）。画面には `flash-notify-test`「テスト送信: 届きました（the test message was
+   delivered）」が出た。台帳（`GET /notify` の `recent`）には残らないことも確認（ADR-0037 D4 どおり）。
+4. **直近の送信**: `notifications` 表に 5 種それぞれ 1 行ずつ（`milestone_ready`/`approval_pending`/
+   `question_blocked` は `ok:true`、`bad_news` は `ok:false, error:"http status 404"`、`secretary_reply`
+   は `ok:false, error:"discord webhook is not configured"`）を仕込んで表示を確認: 5 種とも SPEC の言葉の
+   バッジ、`milestone_ready` 以外はリンク付き（`question_blocked` の行は挿入直後に taskd の tick が
+   `ok:null` → 実際に偽 webhook へ送って `ok:true` に変わり、偽サーバのログにも記録された。表示だけでなく
+   taskd の再送ロジックそのものが生きて動くことも確認できた）、結果の文言（送れた／失敗（理由）／
+   未設定のため送っていません）がそれぞれ正しく出た。
+5. 確認後、使い捨ての taskd・GUI dev サーバ・偽 webhook サーバはすべて停止し、リポジトリに残した一時ファイル
+   （`.g13i-*.mjs`）は削除済み。使い捨てのデータ（`/tmp` 配下）はリポジトリの外。
+
+### 受け入れ条件ごとの証拠
+
+- `pnpm lint`（biome、164 files）exit 0。
+- `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0。
+- `pnpm test` **480 passed**（41 ファイル。G13h の 459 から新規 `test/unit/notify.test.ts`
+  12 件 + `test/unit/reports.test.ts` に 9 件を追加）:
+  - `notify.test.ts`: `notifyKindLabel`（5 種＋未知の kind）、`notifyResultLabel`（送れた／未設定のため
+    送っていません／失敗（理由）／失敗／送信待ち）、`notifyResultTone`、`notifyTargetHref`
+    （4 種はリンク、`milestone_ready` は `null`、key の URI エンコード）
+  - `reports.test.ts`: `loadReports` が `GET /notify` を束ねる（成功・未設定・失敗時のフォールバック）、
+    `sendNotifyTest`（200 `ok:true`/`ok:false`、401 `unauthorized`、409 `notify_unavailable`）
+- `pnpm build` exit 0。
+- `pnpm gen:types` を 2 回実行して差分ゼロ。`scripts/sync-gui-docs.sh --check` up to date
+  （`docs/gui/api.md` §3.64〜3.65 の同期）。
+- 実機での見た目・実際の送信の確認は上記のとおり（light/dark、5 種の表示、テスト送信の実配達、
+  taskd 自身の再送ロジックの動作）。
+
+### 未解決事項
+
+- G13i-U1: e2e（`pnpm e2e`）は運用中の taskd / GUI（7700/7710）と衝突するため未実行。確認は unit テストと
+  使い捨て環境での Playwright スクリーンショット・実配達確認で行った（既存フェーズと同じ扱い）。
+- G13i-U2: `milestone_ready` の対象へのリンクは作っていない（上記「判断が必要だった点」参照）。
+- G13i-U3: DOM を描画する unit テストが無い件（G10-U1）は未解決のまま。`DiscordSection` の描画・状態分岐は
+  実機の Playwright とスタブ検証（unit テストの `notify.test.ts`/`reports.test.ts`）でのみ確認している。
+
+### 提案（`docs/gui/api.md` への変更提案。採否は人間）
+
+- G13i-P1: `GET /notify` の `recent[]` に、`milestone_ready` のときだけでよいので `project_id`
+  （または途中目標を直接引ける `GET /milestones/{id}` 相当）を足すと、GUI が N+1 の総当たりをせずに
+  対象の案件へリンクできる。

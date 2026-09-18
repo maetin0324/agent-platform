@@ -1,6 +1,10 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-18 Phase 38（ADR-0028 追記）— `GET /config` の `genres[].{input_artifacts, output_artifacts}` の
+  各要素は `"名前"` に加えて **`"名前: 説明"`** の形も取る（型は `Vec<String>` のまま。追加のみ、v1 のまま）。
+  **GUI は `:` の前を成果物の名前として扱い、後ろを説明として出すこと**（`ConfigView` / `GenreConfigView` の
+  型は変えていない。値の文字列に説明が付くだけ）。
 - 改訂: 2026-09-18 Phase 31（実機の事故: 失敗した仕事をやり直す手段が無かった）— `POST /tasks/{id}/retry`
   （§3.63）、イベント種別 `retried`、`task_ops::actions` に `Action::Retry` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-17 Phase 27（Phase 24/25 の監査対応、GUI-R3/R4、ADR-0034 D7）— `TaskSummary.assignee` /
@@ -136,7 +140,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（51）
+## 2. エンドポイント一覧（53）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -191,6 +195,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 49 | PATCH | `/milestones/{id}` | 途中目標の状態を変える（SPEC §7 のアジャイル） | 200 `Milestone` | store `milestone_set_status` |
 | 50 | GET | `/org/{id}/messages` | そのノードとのやり取り（古い順。ADR-0033 D4、Phase 24） | `MessageList` | store `message_list` |
 | 51 | POST | `/org/{id}/messages` | そのノードに話しかける（**管理系**） | 202 `MessageAccepted` | `task_ops::conversation::start` |
+| 52 | GET | `/notify` | Discord への通知の設定と直近の送信（ADR-0037、Phase 39。URL は出さない） | `NotifyView` | 設定 + store `notification_recent` |
+| 53 | POST | `/notify/test` | テスト送信を 1 回（**管理系: `token_file` 未設定でも 401**） | 200 `NotifyTestResult` | taskd（`[secrets]` の webhook へ POST） |
 
 ---
 
@@ -290,7 +296,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
   `genre` を省略し `role` が指定されていれば、その役割を含む分野がちょうど 1 つだけあるとき、その分野を継ぐ
   （0 件・2 件以上は継がない）。`GET /config` の `genres[]` が設定にある分野の一覧
   （`{id, description, capabilities?, input_artifacts?, output_artifacts?, default_role, roles}`。
-  `capabilities` / `input_artifacts` / `output_artifacts` は Phase 18（ADR-0028 D1）の任意の自由記述で、空なら省略される）。
+  `capabilities` / `input_artifacts` / `output_artifacts` は Phase 18（ADR-0028 D1）の任意の自由記述で、空なら省略される。
+  Phase 38: `input_artifacts` / `output_artifacts` の要素は `名前` でも `名前: 説明` でもよい（GUI は `:` の前を名前として扱う））。
 - `aggregate`（ADR-0016 D3）: true の親は、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を書く。
   応答の `Task` では **false のとき省略される**（`#[serde(skip_serializing_if)]`。`role` / `genre` も `null` のとき省略）。
 - `acceptance` は**クライアントが並べた順**で保存する（CLI は accept → cmd → artifact → reviewer の固定順で渡す。並びに意味は無い）。
@@ -1098,6 +1105,59 @@ GUI の監査（SPEC §4 との突き合わせ、実機操作あり）で「案�
   受信箱の `failed` 項目、`GET /tasks/{id}` の `failed`/`cancelled` 表示、案件の仕事の木の失敗ノードは、
   みな `actions` にこれが立つのでボタンの表示に迷わない。
 
+### 3.64〜3.65 通知（Discord）（ADR-0037、Phase 39）
+
+「人の判断が要るとき」だけ Discord の webhook に 1 通投げる仕組みの、設定の確認とテスト送信。
+**判定と送信は taskd の tick が決定的に行う**（LLM は関与しない）。API は台帳（`notifications` 表）を
+読むだけで、送信は taskd に委譲する。
+
+知らせるのは 5 種だけ（ADR-0037 D1）: `milestone_ready` / `approval_pending` / `question_blocked` /
+`bad_news` / `secretary_reply`。`result` / `progress` は**知らせない**（SPEC §3.5 の数時間単位の流れは
+GUI の報告の仕事）。同じ `(kind, key)` は 1 回だけ送り、失敗したら次の tick で再送する（最大 3 回）。
+
+webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に id `discord-webhook`（既定。
+`[notify] discord_webhook_secret` で変えられる）で登録する。**URL は応答にもログにも問題詳細にも出ない。**
+
+#### 3.64 `GET /notify` → 200 `NotifyView`（読み取り）
+
+```jsonc
+{
+  "configured": true,                 // その id の秘密が登録されていて、送れる状態か
+  "secret_id": "discord-webhook",     // GUI はこの id で「API キー」画面への導線を出す
+  "fingerprint": "3f9a1c02",          // 値の sha256 の先頭 8 桁（値は復元できない）。未登録なら省略
+  "gui_base_url": "http://192.168.1.103:7700",  // 文面に付けるリンクの根。未設定なら省略
+  "recent": [                          // 直近 10 件（新しい順）
+    {
+      "kind": "milestone_ready",
+      "key": "01J…",                  // 途中目標 id / 認可 id / タスク id / 報告 id / 案件 id
+      "created_at": "2026-09-18T12:00:00Z",
+      "sent_at": "2026-09-18T12:00:01Z",   // まだなら省略
+      "attempts": 1,
+      "ok": true,                      // 省略 = まだ決着していない（次の tick で再送）、false = 諦めた
+      "error": "http status 404"       // 失敗の理由（**URL・ホスト名は入らない**）。無ければ省略
+    }
+  ]
+}
+```
+
+- 通常の認証だけ（`token_file` があればトークン必須）。本文に URL は**絶対に含まれない**。
+- `configured` が false のとき、GUI は「未設定」と出し、`secret_id` を添えて API キー画面へ導く。
+- 送らずに畳んだ行（秘密が無い間に起きた出来事）は `ok: false`、`attempts: 0`、
+  `error: "discord webhook is not configured"` で並ぶ（ADR-0037 D2:「秘密が無い間の出来事は通知しない」）。
+
+#### 3.65 `POST /notify/test` → 200 `NotifyTestResult`（**管理系: `token_file` 未設定でも 401**）
+
+要求本文は無し（`{}` でよい）。定型のテスト文を 1 通だけ送る。台帳（`notifications`）には残さない。
+
+```jsonc
+{ "ok": true, "detail": "the test message was delivered" }
+```
+
+- `ok: false` でも 200（送り先が 404 を返した等）。`detail` は**種別だけ**の短い文で、URL・ホスト名は入らない。
+- 409 `notify_unavailable`: 秘密が登録されていない（`[secrets]` 自体が無い場合も含む）、または taskd に
+  委譲できない構成。`detail` には id（既定 `discord-webhook`）だけを書く。
+- 401 `unauthorized`: トークン無し（`token_file` を設定していない構成でも 401）。
+
 ---
 
 ## 4. SSE `GET /stream`
@@ -1415,6 +1475,8 @@ pub struct RoleConfigView { pub id: String, pub tier: Option<Tier>, pub adapter:
     pub max_wall_secs: Option<u64>, pub has_instructions: bool }
 /// Phase 16（ADR-0027 D1）: `[[genres]]` 1 行。`capabilities` / `input_artifacts` / `output_artifacts` は
 /// Phase 18（ADR-0028 D1）: 3 つとも自由記述の `Vec<String>` で、空なら省略される（`skip_serializing_if`）。
+/// Phase 38（ADR-0028 追記）: `input_artifacts` / `output_artifacts` の要素は `名前: 説明` の形も取る
+/// （型は変えない。GUI は `:` の前を名前として表示・照合に使う）。
 pub struct GenreConfigView { pub id: String, pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub input_artifacts: Vec<String>,
