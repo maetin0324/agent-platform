@@ -28,13 +28,22 @@ pub const COMPACTION_ROLE: &str = "report-compressor";
 
 /// GUI 監査 H4（Phase 29）: 裏方タスクの印。`TaskSummary.support` / `ProjectTaskView.support` に写す。
 /// 判定は決定的で優先順あり: 途中目標レビュー（対話 + `milestone_id`。ADR-0038 D1）> 対話 >
-/// 圧縮（`role == report-compressor`）> 承認（`kind == approval`）> 合成レビュー（`kind == review`）。
-/// どれでもなければ `None`（人が見る「仕事の木」の本体）。
+/// 計画（`kind == plan`。ADR-0038 D1 / Phase 42）> 圧縮（`role == report-compressor`）>
+/// 承認（`kind == approval`）> 合成レビュー（`kind == review`）。どれでもなければ `None`
+/// （人が見る「仕事の木」の本体）。
+///
+/// Phase 42（実機 2026-09-18）: 計画 run（`kind = plan`）は裏方。人が見る仕事の木にも
+/// `ready_milestones`（`crate::report::support_kind` を使う taskd 側）の件数にも入れない。
+/// 入れたままだと、途中目標を分解した直後（計画 run が `done`、子は全部 `draft`）に
+/// 「動いているものが無く done が 1 件以上」が成立し、人がまだ何も判定していないのに
+/// 途中目標のレビューが再び起きてしまう。
 pub fn support_kind(task: &Task) -> Option<&'static str> {
     if is_milestone_review(task) {
         Some("milestone_review")
     } else if is_conversation(task) {
         Some("conversation")
+    } else if task.kind == TaskKind::Plan {
+        Some("plan")
     } else if task.role.as_deref() == Some(COMPACTION_ROLE) {
         Some("compaction")
     } else if task.kind == TaskKind::Approval {
@@ -1036,6 +1045,10 @@ mod tests {
 
         let review = plain_task(TaskKind::Review);
         assert_eq!(support_kind(&review), Some("review"));
+
+        // Phase 42（実機 2026-09-18）: 計画 run は裏方。途中目標の「仕事」に数えない。
+        let plan = plain_task(TaskKind::Plan);
+        assert_eq!(support_kind(&plan), Some("plan"));
 
         // 対話が最優先（他の条件と重なっても対話が勝つ）。
         let mut both = plain_task(TaskKind::Approval);

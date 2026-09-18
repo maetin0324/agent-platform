@@ -9,6 +9,13 @@
 //!    2 回目は起きない。Go を出して done が増えたら再び起きる）。
 //!
 //! LLM も HTTP も無い（DESIGN 原則 1: 判断は決定的、文面を書くのは対話 run の仕事）。
+//!
+//! Phase 42（実機 2026-09-18）: 途中目標に `ok` を押すと計画 run（`kind = plan`）が `done` になり、
+//! 子は全部 `draft` で始まる。計画 run 自身を「仕事」に数えると、分解した直後に
+//! 「動いているものが無く done が 1 件以上」が成立してしまい、人がまだ何も判定していないのに
+//! レビューの対話がもう一度起きた。`support_kind`（`task_core::report`）が `kind = plan` を
+//! `"plan"`（裏方）として返すようにし、`ready_milestones` の `support_kind(t).is_none()` の
+//! 絞り込みから自然に外れるようにした。
 
 use task_core::report::support_kind;
 use task_core::{
@@ -207,5 +214,110 @@ mod tests {
         assert!(!needs_review(&state, Some(at(10))), "同じ done の集合では 2 回目は起きない");
         assert!(needs_review(&state, Some(at(30))), "レビューの後に done が増えたら再び起こす");
         assert!(!needs_review(&state, None), "終わった仕事が無ければ起こさない");
+    }
+
+    // ---- Phase 42（実機 2026-09-18）: 計画タスクは途中目標の「仕事」に数えない ----
+
+    fn task_with(
+        kind: task_core::TaskKind,
+        status: Status,
+        project_id: task_core::ProjectId,
+        milestone_id: task_core::MilestoneId,
+        created_at: OffsetDateTime,
+    ) -> Task {
+        use task_core::{Budget, TaskId, Tier, WorkerHint, WorkspaceSpec};
+        Task {
+            id: TaskId::new(),
+            parent_id: None,
+            kind,
+            title: "仕事".into(),
+            objective: "o".into(),
+            acceptance: vec![],
+            inputs: vec![],
+            depends_on: vec![],
+            status,
+            priority: 1,
+            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
+            workspace: WorkspaceSpec::Local { path: "ws".into() },
+            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            attempts: 0,
+            lease: None,
+            created_at,
+            updated_at: created_at,
+            role: None,
+            genre: None,
+            aggregate: false,
+            project_id: Some(project_id),
+            milestone_id: Some(milestone_id),
+            assignee: None,
+            conversation: None,
+        }
+    }
+
+    fn seed_project_and_milestone(store: &task_core::SqliteStore, title: &str) -> (task_core::Project, Milestone) {
+        use task_core::{Project, ProjectId, ProjectStatus};
+        let now = OffsetDateTime::now_utc();
+        let project = Project {
+            id: ProjectId::new(),
+            title: title.into(),
+            request: "調べて".into(),
+            status: ProjectStatus::Active,
+            secretary_summary: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store.project_create(&project).unwrap_or_else(|e| panic!("project: {e}"));
+        let milestone = store
+            .milestone_create(project.id, "途中目標", "", MilestoneStatus::InProgress)
+            .unwrap_or_else(|e| panic!("milestone: {e}"));
+        (project, milestone)
+    }
+
+    /// Phase 42: 分解直後（計画 run が `done`、子は全部 `draft`）は「動いているものが無く done が
+    /// 1 件以上」に見えてはいけない。計画 run は仕事に数えない。
+    #[test]
+    fn a_milestone_is_not_stalled_right_after_decomposition() {
+        let store = task_core::SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("open: {e}"));
+        let (project, milestone) = seed_project_and_milestone(&store, "分解直後");
+        let now = OffsetDateTime::now_utc();
+        store
+            .insert(&task_with(task_core::TaskKind::Plan, Status::Done, project.id, milestone.id, now))
+            .unwrap_or_else(|e| panic!("insert plan: {e}"));
+        store
+            .insert(&task_with(task_core::TaskKind::Execute, Status::Draft, project.id, milestone.id, now))
+            .unwrap_or_else(|e| panic!("insert child 1: {e}"));
+        store
+            .insert(&task_with(task_core::TaskKind::Execute, Status::Draft, project.id, milestone.id, now))
+            .unwrap_or_else(|e| panic!("insert child 2: {e}"));
+
+        let ready = ready_milestones(&store).unwrap_or_else(|e| panic!("ready: {e}"));
+        assert!(
+            ready.is_empty(),
+            "計画 run が done でも、子が全部 draft なら人の Go 待ちであってレビュー対象ではない"
+        );
+    }
+
+    /// Phase 42: 子が 1 件 `done` になり、他が動いていなければレビュー対象になる
+    /// （計画 run 自身は done の件数に数えない）。
+    #[test]
+    fn a_milestone_is_stalled_once_a_child_is_done_and_nothing_else_is_moving() {
+        let store = task_core::SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("open: {e}"));
+        let (project, milestone) = seed_project_and_milestone(&store, "1 件完了");
+        let now = OffsetDateTime::now_utc();
+        store
+            .insert(&task_with(task_core::TaskKind::Plan, Status::Done, project.id, milestone.id, now))
+            .unwrap_or_else(|e| panic!("insert plan: {e}"));
+        store
+            .insert(&task_with(task_core::TaskKind::Execute, Status::Done, project.id, milestone.id, now))
+            .unwrap_or_else(|e| panic!("insert done child: {e}"));
+        store
+            .insert(&task_with(task_core::TaskKind::Execute, Status::Draft, project.id, milestone.id, now))
+            .unwrap_or_else(|e| panic!("insert waiting child: {e}"));
+
+        let ready = ready_milestones(&store).unwrap_or_else(|e| panic!("ready: {e}"));
+        assert_eq!(ready.len(), 1, "計画 run を除けば done 1 件・待ち 1 件で仕事は止まっている");
+        assert_eq!(ready[0].milestone.id, milestone.id);
+        assert_eq!(ready[0].done, 1, "計画 run は done の件数に数えない");
+        assert_eq!(ready[0].waiting.len(), 1);
     }
 }
