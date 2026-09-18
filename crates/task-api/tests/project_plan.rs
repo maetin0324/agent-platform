@@ -132,9 +132,18 @@ async fn children_materialized_from_the_plan_output_stay_in_the_same_project() {
             role: None,
             genre: None,
             assignee: None,
+            workspace: None,
         }],
     };
-    let children = task_core::plan::materialize(&plan_task, &plan_output, &[], &[], &[], time::OffsetDateTime::now_utc());
+    let children = task_core::plan::materialize(
+        &plan_task,
+        &plan_output,
+        &[],
+        &[],
+        &[],
+        task_core::WorkspaceContext::default(),
+        time::OffsetDateTime::now_utc(),
+    );
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].project_id, plan_task.project_id);
     assert_eq!(children[0].project_id.map(|p| p.to_string()), Some(project_id));

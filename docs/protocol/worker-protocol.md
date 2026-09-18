@@ -39,6 +39,11 @@
   両方が `<workspace>/artifacts/` に書いたため `sources.json` が上書きされ、レビュアーが相手の成果物を
   読んで判定した。`artifact` メッセージの `path` は従来どおり workspace 相対。**追加のみ**なので
   `protocol` は `4` のまま（この欄を読まないワーカーも単独タスクではそのまま動く）
+- **Phase 43（ADR-0039 D2/D3）**: `context.workspace_note`（§3.1）と、`delegate` の `tasks[].workspace` /
+  `plan.json` の `tasks[].workspace`（§4.6 / §10.1）を追加。**案件（`projects`）が作業場所を持てる**ように
+  なり、分解・委譲した子はそれを継ぐ（明示 > 案件 > 親）。実機の事故（2026-09-18）: 空のローカル
+  workspace に置かれた子タスクが、objective の文面からリポジトリの場所を知って自分で `ssh` し、人の
+  リポジトリへ直接書いた。**追加のみ**なので `protocol` は `4` のまま
 
 ## 1. 概要
 
@@ -104,6 +109,7 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 | `context.conversation` | array | –（省略可。空なら省略。v4, ADR-0033 D4） | その案件でのこのノードと人の**直近のやり取り**（既定 20 件、古い順）。`{role: "user"|"node", text: string}` |
 | `context.standing_rules` | array | –（省略可。空なら省略。v4, ADR-0033 D5） | 「今後ずっと」の認可。**Phase 26 が埋める。今は常に空** |
 | `context.organization` | array | –（省略可。空なら省略。v4, ADR-0033 D4） | 分解・委譲できる run（`context.available_genres` を渡す run と同じ条件）に渡す組織図。`{id, name, kind, parent_id?, brief?, genre?}`。「どの課に何を振るか」を `assignee` で決めさせる |
+| `context.workspace_note` | string | –（省略可。Phase 43, ADR-0039 D3） | **案件が作業場所を決めている run** にだけ載る 1 行（そのコードがどこにあるか）。前置きに `## 作業場所` として出て、「編集は手元の作業ディレクトリで、別のホストの作業ツリーへ `ssh` で直接書くな」が続く。作業場所を決めていない案件・案件に属さないタスク・対話 run では省略（プロンプトは Phase 42 までとバイト単位で同じ） |
 | `context.conversation_addressee` | string | –（省略可。Phase 28, ADR-0033 D4 追記） | 対話用タスクの run だけ `"secretary"` / `"other"`。委譲・`Question` は使えない（`delegate` は子を作らず理由を `progress` で返し、`Question` はそのまま `done` の返事になる） |
 | `context.work_genre` | object | –（省略可。Phase 30, ADR-0033 D4 追記） | 対話 run で、担当ノードが自分の仕事の分野（`node.genre`）を持つときだけ。`GenreContext`（`context.available_genres[]` と同じ形）。対話そのものは常にこの分野ではなく対話用分野（`task.genre`）で走る。前置きに「仕事で使う道具」として 1 行渡すためだけの情報 |
 | `context.milestone_review` | object | –（省略可。Phase 41, ADR-0038 D1） | **途中目標レビューの対話 run**（対話の印 + `task.milestone_id`）にだけ。`{milestone: {id, title, description?, status}, tasks: [{title, status, outcome?, artifacts_excerpt?}]}`。`tasks` はその途中目標に属する仕事（裏方は除く。作られた順、最大 20 件）、`outcome` は `context.recent_work[].outcome` と同じ終端の要約、`artifacts_excerpt` は `answer.md` / `report.md` の先頭 4,000 字（決定的に切る）。集めるのはストアとファイルの読み取りだけ（LLM は使わない） |
@@ -252,6 +258,7 @@ JSON Lines プロトコルを直接話す `fake` 等のワーカーは `provider
 | `role` | string | – | 役割名（`[[roles]]` にあれば既定と指示文が効く。無くても自由記述として許される） |
 | `depends_on` | array | –（省略可、空なら省略） | 各要素は整数（同じ `tasks` 配列内のインデックス）か、既存タスクの ID（文字列）。混在可 |
 | `tier` | string | – | `frontier` / `standard` / `cheap`。省略時は役割の既定 → 親の tier |
+| `workspace` | object | –（省略可。Phase 43, ADR-0039 D2） | その子の作業場所。`{"kind":"local","path":"..."}` か `{"kind":"remote","cluster":"<[[clusters]] の id>","path":"<クラスタ側のパス>"}`。**省略時は案件の作業場所 → 親の workspace** を継ぐので、別のリポジトリ・別のクラスタで作業させたいときにだけ書く（`local` の `~` は taskd の `$HOME` で展開される） |
 
 未知フィールドは拒否する（`deny_unknown_fields`。綴り間違いの検出のため。§2 の「未知フィールドは無視する」
 という一般規則とは意図的に逆。`Plan` の `NewTask` と同じ方針）。
@@ -632,6 +639,11 @@ Reviewer（決定的コード。LLM 呼び出しはここには書かない）�
   超えない場合のみ許される
 - 未知フィールドは拒否（`#[serde(deny_unknown_fields)]`。綴り間違いの検出のため。§2 の「未知フィールドは
   無視する」という一般規則とは意図的に逆）
+- `workspace`（任意。Phase 43 / ADR-0039 D2）: その子の作業場所。`{"kind":"local","path":"..."}` か
+  `{"kind":"remote","cluster":"<[[clusters]] の id>","path":"<クラスタ側のパス>"}`。**省略時は案件の
+  作業場所 → 親の workspace** を継ぐので、別のリポジトリ・別のクラスタで作業させたい子にだけ書く
+  （`local` の `~` は taskd の `$HOME` で展開される）。案件が作業場所を持つ計画 run のプロンプトには
+  「## 子タスクの作業場所」節が出る
 
 検証に失敗した場合、`Plan` タスクの `reviewing` は `ReviewFail` になり（`criterion_idx =
 task.acceptance.len()`。`taskctl plan` が作る Plan は `acceptance = []` なので常に `criterion 0`）、

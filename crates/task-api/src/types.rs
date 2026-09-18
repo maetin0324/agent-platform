@@ -664,14 +664,25 @@ pub struct ProjectList {
 pub struct ProjectCreateBody {
     pub title: String,
     pub request: String,
+    /// ADR-0039 D1: この案件の作業場所（任意）。`{"kind":"local","path":"~/workspace/rust/pluvio-poc"}` か
+    /// `{"kind":"remote","cluster":"pegasus","path":"/work/.../benchfs"}`。`~` は taskd の `$HOME` で
+    /// 展開して保存する（`Local` のみ）。知らない `cluster` は 422。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<task_core::WorkspaceSpec>,
 }
 
-/// `PATCH /projects/{id}` の要求本文。
+/// `PATCH /projects/{id}` の要求本文。`status` / `workspace` はどちらも任意（書いたものだけ変える）。
+/// `"workspace": null` を明示すると作業場所を消す（案件を「作業場所なし」に戻す）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectPatchBody {
-    pub status: ProjectStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProjectStatus>,
+    /// ADR-0039 D1: 省略（`None`）なら変えない、`null`（`Some(None)`）なら消す、値なら差し替える。
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<Option<task_core::WorkspaceSpec>>,
 }
+
 
 /// `GET /projects/{id}` の応答。案件 + 途中目標 + その案件のタスクの要約（GUI の「仕事の木」用）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

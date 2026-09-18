@@ -120,6 +120,7 @@ impl Env {
             request: "調べて".into(),
             status,
             secretary_summary: None,
+            workspace: None,
             created_at: at(0),
             updated_at: at(0),
         };

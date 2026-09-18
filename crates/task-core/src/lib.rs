@@ -18,7 +18,8 @@ pub use accounts::{AccountAdapter, RateLimitObservation, RateWindow};
 pub use artifacts::{ARTIFACTS_DIR_NAME, SHARED_ARTIFACTS_PREFIX, artifacts_dir_for, artifacts_rel_for, owns_workspace, rel_from};
 pub use approval::{Approval, ApprovalId, ApprovalStore, Decision, StandingRule, StandingRuleId};
 pub use delegate::{
-    DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, materialize_delegated, validate_each,
+    DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, WorkspaceContext,
+    materialize_delegated, validate_each,
 };
 pub use message::{
     CONVERSATION_GENRE, Message, MessageId, MessageRole, conversation_origin, conversation_title, failure_reply,
@@ -27,6 +28,7 @@ pub use message::{
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, HARNESS_ADAPTERS, Lease, RoleSpec, RunRole, Status,
     Task, TaskId, TaskKind, Tier, Usage, WorkerHint, WorkspaceSpec, artifact_entry_description, artifact_entry_name,
+    expand_home, home_dir,
 };
 pub use notify::{
     DEFAULT_WEBHOOK_SECRET_ID, MAX_NOTIFY_ATTEMPTS, Notification, NotificationId, NotificationKind,

@@ -667,6 +667,7 @@ mod tests {
             request: "r".into(),
             status: task_core::ProjectStatus::Active,
             secretary_summary: None,
+            workspace: None,
             created_at: now_ts,
             updated_at: now_ts,
         };

@@ -21,7 +21,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::message::{Message, MessageId, MessageRole, is_conversation};
-use crate::model::{Event, Status, Task, TaskId, TaskKind};
+use crate::model::{Event, Status, Task, TaskId, TaskKind, WorkspaceSpec};
 use crate::org::{
     Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
 };
@@ -36,10 +36,11 @@ const MIGRATION_0006: &str = include_str!("../migrations/0006_organization.sql")
 const MIGRATION_0007: &str = include_str!("../migrations/0007_messages_task_id_and_reports_project.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_notifications.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_notifications_project_id.sql");
+const MIGRATION_0010: &str = include_str!("../migrations/0010_projects_workspace.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -455,6 +456,8 @@ pub trait TaskStore:
     fn project_list(&self) -> Result<Vec<Project>, StoreError>;
     /// 状態だけを変える（`updated_at` も更新）。無い案件は `Ok(false)`。
     fn project_set_status(&self, id: ProjectId, status: ProjectStatus) -> Result<bool, StoreError>;
+    /// ADR-0039 D1: 作業場所だけを変える（`None` で消す。`updated_at` も更新）。無い案件は `Ok(false)`。
+    fn project_set_workspace(&self, id: ProjectId, workspace: Option<&WorkspaceSpec>) -> Result<bool, StoreError>;
 
     /// 途中目標を作る。`seq` はその案件の最大 + 1 をストアが採番し、確定した行を返す。
     /// 案件が無ければ `StoreError::Invalid`。
@@ -637,6 +640,7 @@ impl SqliteStore {
             7 => Ok(MIGRATION_0007),
             8 => Ok(MIGRATION_0008),
             9 => Ok(MIGRATION_0009),
+            10 => Ok(MIGRATION_0010),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -709,10 +713,23 @@ impl SqliteStore {
         let status_col: String = row.get(3)?;
         let created_at: String = row.get(5)?;
         let updated_at: String = row.get(6)?;
+        // ADR-0039 D1: migration 0010 で足した列。導入前の行と作業場所を決めていない案件は NULL。
+        let workspace_col: Option<String> = row.get(7)?;
         let (Ok(id), Some(status)) = (id.parse::<ProjectId>(), ProjectStatus::parse(&status_col)) else {
             return Ok(Err(StoreError::Invalid(format!(
                 "invalid project row: id={id} status={status_col}"
             ))));
+        };
+        let workspace = match workspace_col.as_deref() {
+            Some(raw) => match serde_json::from_str::<WorkspaceSpec>(raw) {
+                Ok(spec) => Some(spec),
+                Err(e) => {
+                    return Ok(Err(StoreError::Invalid(format!(
+                        "invalid project workspace for {id}: {e}"
+                    ))));
+                }
+            },
+            None => None,
         };
         Ok((|| {
             Ok(Project {
@@ -721,10 +738,21 @@ impl SqliteStore {
                 request: row.get(2)?,
                 status,
                 secretary_summary: row.get(4)?,
+                workspace,
                 created_at: parse_rfc3339(&created_at)?,
                 updated_at: parse_rfc3339(&updated_at)?,
             })
         })())
+    }
+
+    /// ADR-0039 D1: 案件の作業場所を DB の列に入れる形（JSON か NULL）にする。
+    fn project_workspace_column(workspace: Option<&WorkspaceSpec>) -> Result<Option<String>, StoreError> {
+        match workspace {
+            Some(spec) => serde_json::to_string(spec)
+                .map(Some)
+                .map_err(|e| StoreError::Invalid(format!("cannot serialize workspace: {e}"))),
+            None => Ok(None),
+        }
     }
 
     fn milestone_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Milestone, StoreError>> {
@@ -1839,8 +1867,8 @@ impl TaskStore for SqliteStore {
     fn project_create(&self, project: &Project) -> Result<(), StoreError> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO projects (id, title, request, status, secretary_summary, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO projects (id, title, request, status, secretary_summary, created_at, updated_at, workspace) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 project.id.to_string(),
                 project.title,
@@ -1849,6 +1877,7 @@ impl TaskStore for SqliteStore {
                 project.secretary_summary,
                 format_rfc3339(project.created_at)?,
                 format_rfc3339(project.updated_at)?,
+                Self::project_workspace_column(project.workspace.as_ref())?,
             ],
         )?;
         Ok(())
@@ -1858,7 +1887,7 @@ impl TaskStore for SqliteStore {
         let conn = self.lock()?;
         let row = conn
             .query_row(
-                "SELECT id, title, request, status, secretary_summary, created_at, updated_at \
+                "SELECT id, title, request, status, secretary_summary, created_at, updated_at, workspace \
                  FROM projects WHERE id = ?1",
                 params![id.to_string()],
                 Self::project_row,
@@ -1870,7 +1899,7 @@ impl TaskStore for SqliteStore {
     fn project_list(&self) -> Result<Vec<Project>, StoreError> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, title, request, status, secretary_summary, created_at, updated_at \
+            "SELECT id, title, request, status, secretary_summary, created_at, updated_at, workspace \
              FROM projects ORDER BY created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], Self::project_row)?;
@@ -1890,6 +1919,16 @@ impl TaskStore for SqliteStore {
                 format_rfc3339(OffsetDateTime::now_utc())?,
                 id.to_string()
             ],
+        )?;
+        Ok(affected == 1)
+    }
+
+    fn project_set_workspace(&self, id: ProjectId, workspace: Option<&WorkspaceSpec>) -> Result<bool, StoreError> {
+        let column = Self::project_workspace_column(workspace)?;
+        let conn = self.lock()?;
+        let affected = conn.execute(
+            "UPDATE projects SET workspace = ?1, updated_at = ?2 WHERE id = ?3",
+            params![column, format_rfc3339(OffsetDateTime::now_utc())?, id.to_string()],
         )?;
         Ok(affected == 1)
     }
@@ -3636,7 +3675,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 9);
+        assert_eq!(SCHEMA_VERSION, 10);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -3784,6 +3823,7 @@ mod tests {
             request: "Pluvio を基盤に用いた新たな研究テーマの模索、検証".into(),
             status: ProjectStatus::Proposed,
             secretary_summary: None,
+            workspace: None,
             created_at: now,
             updated_at: now,
         }
@@ -3882,6 +3922,91 @@ mod tests {
             .milestone_create(ProjectId::new(), "無い案件", "", MilestoneStatus::Proposed)
             .unwrap_err();
         assert!(matches!(err, StoreError::Invalid(_)), "{err}");
+    }
+
+    /// ADR-0039 D1（migration 0010）: 案件の作業場所が None / Local / Remote で往復し、後から付け外しできる。
+    #[test]
+    fn project_workspace_round_trips_and_can_be_set_and_cleared() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let none = sample_project();
+        store.project_create(&none).unwrap();
+        assert_eq!(store.project_get(none.id).unwrap().and_then(|p| p.workspace), None);
+
+        let local_spec = WorkspaceSpec::Local {
+            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+        };
+        let mut local = sample_project();
+        local.workspace = Some(local_spec.clone());
+        store.project_create(&local).unwrap();
+        assert_eq!(store.project_get(local.id).unwrap().unwrap().workspace, Some(local_spec));
+
+        let remote_spec = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: std::path::PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+        };
+        let mut remote = sample_project();
+        remote.workspace = Some(remote_spec.clone());
+        store.project_create(&remote).unwrap();
+        assert_eq!(store.project_get(remote.id).unwrap().unwrap().workspace, Some(remote_spec.clone()));
+        // 一覧にも載る。
+        let listed = store.project_list().unwrap();
+        assert_eq!(listed.iter().filter(|p| p.workspace.is_some()).count(), 2);
+
+        // 後から付ける / 消す。
+        assert!(store.project_set_workspace(none.id, Some(&remote_spec)).unwrap());
+        assert_eq!(store.project_get(none.id).unwrap().unwrap().workspace, Some(remote_spec));
+        assert!(store.project_set_workspace(none.id, None).unwrap());
+        assert_eq!(store.project_get(none.id).unwrap().unwrap().workspace, None);
+        assert!(!store.project_set_workspace(ProjectId::new(), None).unwrap());
+    }
+
+    /// ADR-0039 D1: 版数 9 の DB に migration 0010 が当たり、既存の案件は `workspace = NULL` のまま読める。
+    #[test]
+    fn migration_0010_adds_the_projects_workspace_column_to_a_schema_9_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema9.sqlite3");
+        let legacy = ProjectId::new();
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in [
+                MIGRATION_0001,
+                MIGRATION_0002,
+                MIGRATION_0003,
+                MIGRATION_0004,
+                MIGRATION_0005,
+                MIGRATION_0006,
+                MIGRATION_0007,
+                MIGRATION_0008,
+                MIGRATION_0009,
+            ] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
+                 INSERT INTO schema_migrations (version, applied_at) VALUES \
+                 (1, '2020-01-01T00:00:00Z'), (2, '2020-01-01T00:00:00Z'), (3, '2020-01-01T00:00:00Z'), \
+                 (4, '2020-01-01T00:00:00Z'), (5, '2020-01-01T00:00:00Z'), (6, '2020-01-01T00:00:00Z'), \
+                 (7, '2020-01-01T00:00:00Z'), (8, '2020-01-01T00:00:00Z'), (9, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO projects (id, title, request, status, created_at, updated_at) \
+                 VALUES (?1, '古い案件', '依頼', 'active', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
+                params![legacy.to_string()],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 10);
+        // 導入前の案件は「作業場所なし」= 従来どおり。
+        assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
+        let spec = WorkspaceSpec::Local {
+            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+        };
+        assert!(store.project_set_workspace(legacy, Some(&spec)).unwrap());
+        assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, Some(spec));
     }
 
     #[test]

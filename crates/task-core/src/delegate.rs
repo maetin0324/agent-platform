@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::model::{Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
+use crate::model::{Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec};
 use crate::org::OrgNode;
 
 /// `delegate.tasks[].depends_on[]` の 1 要素（ADR-0016 M7）: 同じ配列内のインデックス（整数）か、既存タスクの ID（文字列）。
@@ -44,6 +44,10 @@ pub struct DelegateTask {
     /// （タスクの値 > 役割の既定 > 分野の既定 > 親の値。ADR-0016 D1 の優先順に合わせる）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
+    /// ADR-0039 D2: この子の作業場所（任意）。**書かなければ案件の作業場所 → 親の workspace** を継ぐので、
+    /// 別の場所（別のリポジトリ・別のクラスタ）で作業させたいときにだけ書く。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceSpec>,
 }
 
 /// 委譲の上限（ADR-0016 D2。既定 8 / 5 / 100）。
@@ -242,6 +246,28 @@ pub struct ChildSpec<'a> {
     pub assignee: Option<&'a str>,
 }
 
+/// ADR-0039 D2: 子タスク（分解・委譲）の**作業場所**を決めるための文脈。`Default`（案件の作業場所も
+/// `$HOME` も無し）なら Phase 42 までと同じ挙動（子は親の workspace を継ぐ）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkspaceContext<'a> {
+    /// その子が属する案件の作業場所（`projects.workspace`）。決めていない案件では `None`。
+    pub project: Option<&'a WorkspaceSpec>,
+    /// `~` の展開に使う `$HOME`（ADR-0039 D5。`Local` のパスにだけ効く）。
+    pub home: Option<&'a std::path::Path>,
+}
+
+impl WorkspaceContext<'_> {
+    /// 子 1 件の作業場所: **タスクが明示 > 案件の workspace > 親の workspace（従来）**（ADR-0039 D2）。
+    /// 明示・案件のどちらから来た `Local` のパスも `~` を展開する（D5。`Remote` の `~` はクラスタ側の
+    /// home なので触らない）。親から継いだときは（既に展開済みの値なので）そのまま。
+    pub fn child_workspace(&self, parent: &Task, explicit: Option<&WorkspaceSpec>) -> WorkspaceSpec {
+        match explicit.or(self.project) {
+            Some(spec) => spec.with_home_expanded(self.home),
+            None => parent.workspace.clone(),
+        }
+    }
+}
+
 /// `resolve_child_defaults` が決めた、子タスクの分野・担当・tier・アダプタ・budget の既定
 /// （ADR-0016 D1 / ADR-0027 D1 / ADR-0028 D3 / ADR-0033 D4）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,6 +344,8 @@ pub fn resolve_child_defaults(
 /// 配列内インデックスの依存は、相手も `accepted` に入っているときだけ ID に写す（不合格の相手への依存は落とす）。
 /// ID の依存は呼び出し側（task-ops）が検証済みのものだけを残して渡すこと。`tasks[accepted[..]]` は
 /// `validate_each` を通った（= `genre`/`role` の整合が取れた）ものだけを渡すこと。
+/// ADR-0039 D2: `workspace` は子の作業場所の文脈（案件の workspace と `$HOME`）。
+#[allow(clippy::too_many_arguments)]
 pub fn materialize_delegated(
     parent: &Task,
     tasks: &[DelegateTask],
@@ -325,6 +353,7 @@ pub fn materialize_delegated(
     org: &[OrgNode],
     roles: &[RoleSpec],
     genres: &[GenreSpec],
+    workspace: WorkspaceContext<'_>,
     now: OffsetDateTime,
 ) -> Vec<Task> {
     let ids: HashMap<usize, TaskId> = accepted.iter().map(|&i| (i, TaskId::new())).collect();
@@ -370,7 +399,8 @@ pub fn materialize_delegated(
                     tier: defaults.tier,
                     adapter: defaults.adapter,
                 },
-                workspace: parent.workspace.clone(),
+                // ADR-0039 D2: 明示 > 案件の workspace > 親の workspace（従来）。
+                workspace: workspace.child_workspace(parent, t.workspace.as_ref()),
                 budget,
                 attempts: 0,
                 lease: None,
@@ -412,6 +442,7 @@ mod tests {
             depends_on: deps,
             tier: None,
             assignee: None,
+            workspace: None,
         }
     }
 
@@ -556,7 +587,7 @@ mod tests {
         c.tier = Some(Tier::Standard);
         c.role = Some("implementer".into());
         let tasks = vec![a, b, c];
-        let out = materialize_delegated(&p, &tasks, &[0, 1], &[], &roles, &[], OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &tasks, &[0, 1], &[], &roles, &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].parent_id, Some(p.id));
         assert_eq!(out[0].status, Status::Draft);
@@ -574,7 +605,7 @@ mod tests {
         assert_eq!(out[1].worker_hint.tier, Tier::Frontier);
         assert_eq!(out[1].worker_hint.adapter.as_deref(), Some("fake"));
         // タスクの tier は役割の既定より優先。
-        let out = materialize_delegated(&p, &tasks, &[2], &[], &roles, &[], OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &tasks, &[2], &[], &roles, &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(out[0].worker_hint.tier, Tier::Standard);
     }
 
@@ -591,13 +622,13 @@ mod tests {
         let mut explicit = dt("explicit", vec![]);
         explicit.role = Some("implementer".into()); // coding の役割
         explicit.genre = Some("literature".into());
-        let out = materialize_delegated(&p, &[explicit], &[0], &[], &[], &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[explicit], &[0], &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
 
         // 2. genre 未指定・role がちょうど 1 つの分野に属する: その分野を継ぐ。
         let mut by_role = dt("by-role", vec![]);
         by_role.role = Some("literature-scout".into());
-        let out = materialize_delegated(&p, &[by_role], &[0], &[], &[], &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[by_role], &[0], &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
 
         // 3. role が複数の分野に属する（一意に決まらない）: 親の分野を継ぐ。
@@ -607,12 +638,12 @@ mod tests {
         ];
         let mut ambiguous = dt("ambiguous", vec![]);
         ambiguous.role = Some("shared".into());
-        let out = materialize_delegated(&p, &[ambiguous], &[0], &[], &[], &ambiguous_genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[ambiguous], &[0], &[], &[], &ambiguous_genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(out[0].genre.as_deref(), Some("coding"), "falls back to the parent's genre");
 
         // 4. genre も role も無い: 親の分野を継ぐ。
         let none_of_either = dt("neither", vec![]);
-        let out = materialize_delegated(&p, &[none_of_either], &[0], &[], &[], &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[none_of_either], &[0], &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(out[0].genre.as_deref(), Some("coding"));
     }
 
@@ -632,7 +663,7 @@ mod tests {
         let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
         let mut t = dt("investigate", vec![]);
         t.genre = Some("literature".into());
-        let out = materialize_delegated(&p, &[t], &[0], &[], &roles, &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[t], &[0], &[], &roles, &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(out[0].role, None, "genre alone must not set the task's role");
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
         assert_eq!(out[0].worker_hint.tier, Tier::Standard);
@@ -668,7 +699,7 @@ mod tests {
         let mut t = dt("impl", vec![]);
         t.role = Some("implementer".into());
         t.genre = Some("coding".into());
-        let out = materialize_delegated(&p, &[t], &[0], &[], &roles, &genres, OffsetDateTime::now_utc());
+        let out = materialize_delegated(&p, &[t], &[0], &[], &roles, &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         // adapter は role（implementer）の既定が優先（parent の "fake" にも分野の既定にも負けない）。
         assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("codex"));
         // tier は role（implementer）に既定が無いので、分野の既定役割（lead）の tier を借りる
@@ -717,7 +748,7 @@ mod tests {
         // 1. assignee だけ: そのノードの分野 → default_role の既定が効く。
         let mut t = dt("survey", vec![]);
         t.assignee = Some("research-survey".into());
-        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, now);
+        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, WorkspaceContext::default(), now);
         assert_eq!(out[0].assignee.as_deref(), Some("research-survey"));
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
         assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("paperqa"));
@@ -728,7 +759,7 @@ mod tests {
         let mut t = dt("survey", vec![]);
         t.assignee = Some("research-survey".into());
         t.role = Some("writer".into());
-        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, now);
+        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, WorkspaceContext::default(), now);
         assert_eq!(out[0].assignee.as_deref(), Some("research-survey"));
         assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("claude-code"));
         assert_eq!(out[0].worker_hint.tier, Tier::Standard);
@@ -736,12 +767,84 @@ mod tests {
         // 3. 分野を持たないノード・組織に無い id は既定を変えない（知らない id は担当にもしない）。
         let mut t = dt("tidy", vec![]);
         t.assignee = Some("research-data".into());
-        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, now);
+        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, WorkspaceContext::default(), now);
         assert_eq!(out[0].assignee.as_deref(), Some("research-data"));
         assert_eq!(out[0].genre, p.genre);
         let mut t = dt("ghost", vec![]);
         t.assignee = Some("nobody".into());
-        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, now);
+        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, WorkspaceContext::default(), now);
         assert_eq!(out[0].assignee, None);
+    }
+
+    /// ADR-0039 D2: 委譲した子の作業場所も **明示 > 案件 > 親** の 3 段。案件が Remote なら子も Remote。
+    #[test]
+    fn delegated_child_workspace_is_explicit_then_project_then_parent() {
+        let p = parent();
+        let now = OffsetDateTime::now_utc();
+        let project = WorkspaceSpec::Local {
+            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+        };
+        let explicit = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+        };
+
+        // 1. 案件も明示も無い → 親を継ぐ（従来）。
+        let out = materialize_delegated(
+            &p,
+            &[dt("a", vec![])],
+            &[0],
+            &[],
+            &[],
+            &[],
+            WorkspaceContext::default(),
+            now,
+        );
+        assert_eq!(out[0].workspace, p.workspace);
+
+        // 2. 案件の作業場所 > 親。
+        let ws = WorkspaceContext { project: Some(&project), home: None };
+        let out = materialize_delegated(&p, &[dt("a", vec![])], &[0], &[], &[], &[], ws, now);
+        assert_eq!(out[0].workspace, project);
+
+        // 3. 明示 > 案件（別のクラスタで検証させたいとき）。
+        let mut t = dt("b", vec![]);
+        t.workspace = Some(explicit.clone());
+        let out = materialize_delegated(&p, &[t], &[0], &[], &[], &[], ws, now);
+        assert_eq!(out[0].workspace, explicit);
+
+        // 4. 案件が Remote なら子も Remote（ADR-0018 の写し + `.taskd/remote-exec` 経路に乗る）。
+        let ws = WorkspaceContext { project: Some(&explicit), home: None };
+        let out = materialize_delegated(&p, &[dt("c", vec![])], &[0], &[], &[], &[], ws, now);
+        assert_eq!(out[0].workspace, explicit);
+    }
+
+    /// ADR-0039 D5: `~` は `$HOME` で展開する。`Remote` の `~` はクラスタ側の home なので触らない。
+    #[test]
+    fn tilde_is_expanded_for_local_workspaces_only() {
+        let home = PathBuf::from("/home/rmaeda");
+        let local = WorkspaceSpec::Local {
+            path: PathBuf::from("~/workspace/rust/pluvio-poc"),
+        };
+        assert_eq!(
+            local.with_home_expanded(Some(&home)),
+            WorkspaceSpec::Local {
+                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc")
+            }
+        );
+        assert_eq!(local.with_home_expanded(None), local, "$HOME が無ければそのまま");
+        let remote = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("~/workspace/rust/benchfs"),
+        };
+        assert_eq!(remote.with_home_expanded(Some(&home)), remote);
+        let absolute = WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws") };
+        assert_eq!(absolute.with_home_expanded(Some(&home)), absolute);
+        // `~user` は展開しない（その home を知らない）。
+        let other = WorkspaceSpec::Local {
+            path: PathBuf::from("~someone/ws"),
+        };
+        assert_eq!(other.with_home_expanded(Some(&home)), other);
+        assert_eq!(crate::model::expand_home(std::path::Path::new("~"), Some(&home)), home);
     }
 }

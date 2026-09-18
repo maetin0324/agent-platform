@@ -378,6 +378,36 @@ fn delegation_instructions(artifacts: &str) -> String {
     )
 }
 
+/// ADR-0039 D3: 案件が作業場所を決めている run にだけ、委譲の指示に「子は同じ作業場所を継ぐ」を足す。
+/// 決めていない案件では空文字列（Phase 42 までと 1 バイトも変わらない）。
+fn delegate_workspace_instruction(context: &RunContext) -> String {
+    if context.workspace_note.is_none() {
+        return String::new();
+    }
+    "Children you delegate inherit this project's workspace (the location described above), so do not \
+     tell them to `ssh` into another host and edit files there. Only if a child must work somewhere else \
+     (a different repository or cluster), give it a `workspace` of \
+     `{\"kind\":\"local\",\"path\":\"...\"}` or `{\"kind\":\"remote\",\"cluster\":\"...\",\"path\":\"...\"}`.\n"
+        .to_string()
+}
+
+/// ADR-0039 D3: 計画 run（`build_plan_prompt`）用。子タスクが継ぐ作業場所と、`plan.json` の `workspace` の
+/// 使いどころを伝える。案件が作業場所を決めていない run では空文字列（従来どおりの文面）。
+fn workspace_section_for_plan(context: &RunContext) -> String {
+    let Some(note) = &context.workspace_note else {
+        return String::new();
+    };
+    format!(
+        "## 子タスクの作業場所 (the workspace child tasks inherit)\n\
+         {note}\n\
+         コードを扱う仕事はこの場所で行われ、分解した子タスクはこの作業場所をそのまま継ぐ。担当に \
+         `ssh` でリモートの作業ツリーへ直接書かせてはいけない（同期は taskd が行う）。**別の場所**\
+         （別のリポジトリ・別のクラスタ）で作業させたい子にだけ、`workspace` に \
+         `{{\"kind\":\"local\",\"path\":\"...\"}}` か \
+         `{{\"kind\":\"remote\",\"cluster\":\"...\",\"path\":\"...\"}}` を書け。\n\n"
+    )
+}
+
 /// `Execute`（および `Approval`）用プロンプト（ADR-0006 D2。既存のワーカー用プロンプトのまま）。
 fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts: &str) -> String {
     let mut out = prompt_header(task, context, run_id, artifacts);
@@ -405,6 +435,7 @@ fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str, artifac
     out.push_str("## Instructions\n");
     out.push_str("Work in the current directory (it is a dedicated workspace for this task). ");
     out.push_str(&delegation_instructions(artifacts));
+    out.push_str(&delegate_workspace_instruction(context));
     out.push_str("When you are done:\n");
     out.push_str(&result_json_instructions(artifacts));
     out
@@ -454,6 +485,7 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
     out.push_str(&organization_section(context));
     out.push_str(&assignee_instructions_for_plan(context));
     out.push_str(&available_genres_section_for_plan(context, artifacts));
+    out.push_str(&workspace_section_for_plan(context));
     out.push_str(&harness_artifacts_section_for_plan(context));
     out.push_str(&result_json_instructions(artifacts));
     out
@@ -1753,6 +1785,79 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let context = RunContext { available_genres: vec![literature], ..RunContext::default() };
         let execute_prompt = build_prompt(&execute, &context, "run-exec-harness", "artifacts");
         assert!(!execute_prompt.contains("## ハーネスで動く分野の成果物"), "{execute_prompt}");
+    }
+
+    /// Phase 43（ADR-0039 D3）: 案件が作業場所を決めている run では、前置きに「## 作業場所」が出て
+    /// 「`ssh` で直接書くな」が入る。委譲できる run には「子は同じ作業場所を継ぐ」も足す。
+    #[test]
+    fn build_prompt_states_the_project_workspace_when_the_project_has_one() {
+        let task = crate::protocol::tests::sample_task();
+        let context = RunContext {
+            workspace_note: Some(crate::preamble::workspace_note(&task_core::WorkspaceSpec::Remote {
+                cluster: "pegasus".into(),
+                path: std::path::PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            })),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-ws-1", "artifacts");
+        assert!(prompt.contains("## 作業場所 (where this project's code lives)"), "{prompt}");
+        assert!(
+            prompt.contains("この案件のコードはクラスタ pegasus の `/work/NBB/rmaeda/workspace/rust/benchfs` にある。"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("`ssh` で直接書き込んではいけない"), "{prompt}");
+        assert!(prompt.contains("Children you delegate inherit this project's workspace"), "{prompt}");
+
+        // Local の案件では「クラスタ」とは言わない。
+        let local = RunContext {
+            workspace_note: Some(crate::preamble::workspace_note(&task_core::WorkspaceSpec::Local {
+                path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            })),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &local, "run-ws-2", "artifacts");
+        assert!(prompt.contains("この案件のコードは `/home/rmaeda/workspace/rust/pluvio-poc` にある。"), "{prompt}");
+    }
+
+    /// Phase 43（ADR-0039 D3）: 計画 run には「子タスクの作業場所」と `plan.json` の `workspace` の
+    /// 使いどころが出る。作業場所を決めていない案件のプロンプトは Phase 42 までと**バイト単位で同じ**。
+    #[test]
+    fn build_plan_prompt_states_the_workspace_children_inherit_only_when_the_project_has_one() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.kind = task_core::TaskKind::Plan;
+        let bare = build_prompt(&task, &RunContext::default(), "run-ws-3", "artifacts");
+        // 節そのものは出ない（`plan.json` のスキーマには `workspace` の説明が元から載っている）。
+        assert!(!bare.contains("## 子タスクの作業場所"), "{bare}");
+        assert!(!bare.contains("## 作業場所"), "{bare}");
+
+        let context = RunContext {
+            workspace_note: Some(crate::preamble::workspace_note(&task_core::WorkspaceSpec::Local {
+                path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            })),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-ws-3", "artifacts");
+        assert!(prompt.contains("## 子タスクの作業場所 (the workspace child tasks inherit)"), "{prompt}");
+        assert!(prompt.contains("分解した子タスクはこの作業場所をそのまま継ぐ"), "{prompt}");
+        assert!(prompt.contains("`{\"kind\":\"remote\",\"cluster\":\"...\",\"path\":\"...\"}`"), "{prompt}");
+        // 作業場所の 2 節を取り除けば、Phase 42 までのプロンプトとバイト単位で一致する。
+        let preamble = crate::preamble::render(&context, "artifacts");
+        assert!(!preamble.is_empty());
+        let stripped = prompt
+            .replace(&workspace_section_for_plan(&context), "")
+            .replace(&preamble, "");
+        assert_eq!(stripped.len(), bare.len());
+        assert!(stripped == bare, "作業場所の節以外は 1 バイトも変わらない");
+    }
+
+    /// Phase 43: 案件が作業場所を決めていない run（既存のタスク）は、Execute プロンプトも従来どおり。
+    #[test]
+    fn a_project_without_a_workspace_keeps_the_previous_prompt_byte_for_byte() {
+        let task = crate::protocol::tests::sample_task();
+        let before = build_prompt(&task, &RunContext::default(), "run-ws-4", "artifacts");
+        assert!(!before.contains("## 作業場所"), "{before}");
+        assert_eq!(delegate_workspace_instruction(&RunContext::default()), "");
+        assert_eq!(crate::preamble::render(&RunContext::default(), "artifacts"), "");
     }
 
     /// Phase 38（ADR-0028 追記）: レビュアーのプロンプトにも同じ規約が出る（対象タスクの分野が

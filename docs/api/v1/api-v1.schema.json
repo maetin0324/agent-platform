@@ -3897,6 +3897,17 @@
         },
         "updated_at": {
           "type": "string"
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0039 D1: この案件の作業場所（コードのある場所）。`Local` は手元の普段のパス（SPEC §2.1）、\n`Remote` はクラスタ側の作業ディレクトリ（ADR-0018 D1）。決めていない案件は `None`（従来どおり、\n分解した仕事は親の workspace を継ぐ）。"
         }
       },
       "required": [
@@ -3918,6 +3929,17 @@
         },
         "title": {
           "type": "string"
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0039 D1: この案件の作業場所（任意）。`{\"kind\":\"local\",\"path\":\"~/workspace/rust/pluvio-poc\"}` か\n`{\"kind\":\"remote\",\"cluster\":\"pegasus\",\"path\":\"/work/.../benchfs\"}`。`~` は taskd の `$HOME` で\n展開して保存する（`Local` のみ）。知らない `cluster` は 422。"
         }
       },
       "required": [
@@ -3975,15 +3997,30 @@
     },
     "ProjectPatchBody": {
       "additionalProperties": false,
-      "description": "`PATCH /projects/{id}` の要求本文。",
+      "description": "`PATCH /projects/{id}` の要求本文。`status` / `workspace` はどちらも任意（書いたものだけ変える）。\n`\"workspace\": null` を明示すると作業場所を消す（案件を「作業場所なし」に戻す）。",
       "properties": {
         "status": {
-          "$ref": "#/$defs/ProjectStatus"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0039 D1: 省略（`None`）なら変えない、`null`（`Some(None)`）なら消す、値なら差し替える。"
         }
       },
-      "required": [
-        "status"
-      ],
       "type": "object"
     },
     "ProjectPlanAccepted": {

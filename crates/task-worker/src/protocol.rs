@@ -338,6 +338,12 @@ pub struct RunContext {
     /// ファイル名を基準にレビュアーが不合格にした事故から）。決定的（設定を引くだけ）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_genre: Option<GenreContext>,
+    /// Phase 43（ADR-0039 D3）: **案件が作業場所を決めている run** にだけ載る 1 行（そのコードがどこに
+    /// あるか）。ディスパッチャが `projects.workspace` から決定的に組む（`preamble::workspace_note`）。
+    /// 作業場所を決めていない案件・案件に属さないタスクでは `None` で、プロンプトは Phase 42 までと
+    /// バイト単位で同じ。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_note: Option<String>,
 }
 
 /// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは

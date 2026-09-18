@@ -256,6 +256,7 @@ mod tests {
             request: "依頼".into(),
             status: task_core::ProjectStatus::Active,
             secretary_summary: None,
+            workspace: None,
             created_at: now,
             updated_at: now,
         };

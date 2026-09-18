@@ -3,7 +3,9 @@
 //! （`validate_each`）にある。I/O は `TaskStore` の読み取りだけ。LLM 呼び出し・挿入は無い
 //! （挿入は `TaskStore::delegate_children` が行う）。
 
-use task_core::{DelegateDep, DelegateTask, DelegationLimits, GenreSpec, RoleSpec, Status, Task, TaskId, TaskStore};
+use task_core::{
+    DelegateDep, DelegateTask, DelegationLimits, GenreSpec, RoleSpec, Status, Task, TaskId, TaskStore, WorkspaceSpec,
+};
 use time::OffsetDateTime;
 
 use crate::OpsError;
@@ -99,6 +101,15 @@ pub fn ancestors(store: &dyn TaskStore, task: &Task) -> Result<Vec<TaskId>, OpsE
         }
     }
     Ok(out)
+}
+
+/// ADR-0039 D2: そのタスクが属する案件の作業場所（`projects.workspace`）。案件に属さない・案件が
+/// 作業場所を決めていないなら `None`（従来どおり、子は親の workspace を継ぐ）。ストアの読み取りだけ。
+pub fn project_workspace(store: &dyn TaskStore, task: &Task) -> Result<Option<WorkspaceSpec>, OpsError> {
+    let Some(project_id) = task.project_id else {
+        return Ok(None);
+    };
+    Ok(store.project_get(project_id)?.and_then(|p| p.workspace))
 }
 
 /// ADR-0016 D2 / M6 / M7, ADR-0027 D1: 実行中の委譲の検証。`already_delegated_this_run` は同じ run で
@@ -221,7 +232,15 @@ pub fn plan_delegation(
 
     // 5. 組み立て。ADR-0033 D4: `assignee` の解決に組織図が要る（ストアの読み取りだけ。LLM は使わない）。
     let org = store.org_list()?;
-    let accepted = task_core::materialize_delegated(parent, proposals, &accepted_indices, &org, roles, genres, now);
+    // ADR-0039 D2: 子の作業場所は 明示 > 案件の workspace > 親（案件を引くのもストアの読み取りだけ）。
+    let project = project_workspace(store, parent)?;
+    let home = task_core::home_dir();
+    let workspace = task_core::WorkspaceContext {
+        project: project.as_ref(),
+        home: home.as_deref(),
+    };
+    let accepted =
+        task_core::materialize_delegated(parent, proposals, &accepted_indices, &org, roles, genres, workspace, now);
 
     Ok(DelegationOutcome { accepted, rejected })
 }
@@ -254,6 +273,7 @@ mod tests {
             depends_on: deps,
             tier: None,
             assignee: None,
+            workspace: None,
         }
     }
 
@@ -508,6 +528,54 @@ mod tests {
         assert!(out.accepted.is_empty());
         assert_eq!(out.rejected.len(), 1);
         assert!(out.rejected[0].contains("has status Failed and cannot be depended on"), "{}", out.rejected[0]);
+    }
+
+    /// ADR-0039 D2: 委譲した子は **明示 > 案件の workspace > 親** の順で作業場所を決める。
+    /// 案件の作業場所は DB（`projects.workspace`）から引く（ストアの読み取りだけ）。
+    #[test]
+    fn delegated_children_inherit_the_projects_workspace() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let now_ts = now();
+        let project = task_core::Project {
+            id: task_core::ProjectId::new(),
+            title: "Pluvio".into(),
+            request: "PoC".into(),
+            status: task_core::ProjectStatus::Active,
+            secretary_summary: None,
+            workspace: Some(WorkspaceSpec::Remote {
+                cluster: "pegasus".into(),
+                path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            }),
+            created_at: now_ts,
+            updated_at: now_ts,
+        };
+        store.project_create(&project).expect("project");
+
+        let mut parent = make_task(None, Status::Running);
+        parent.project_id = Some(project.id);
+        insert(&store, &parent);
+
+        // 1. 何も書かなければ案件の作業場所（親の `/tmp/ws` ではない）。
+        let out = plan_delegation(&store, &parent, &[dt("a", vec![])], 0, &[], &[], &DelegationLimits::default(), now())
+            .expect("plan_delegation");
+        assert_eq!(out.accepted[0].workspace, project.workspace.clone().expect("some"));
+
+        // 2. 子が明示すれば案件より強い。
+        let mut explicit = dt("b", vec![]);
+        let elsewhere = WorkspaceSpec::Local {
+            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+        };
+        explicit.workspace = Some(elsewhere.clone());
+        let out = plan_delegation(&store, &parent, &[explicit], 0, &[], &[], &DelegationLimits::default(), now())
+            .expect("plan_delegation");
+        assert_eq!(out.accepted[0].workspace, elsewhere);
+
+        // 3. 案件に属さない親では従来どおり親を継ぐ。
+        let orphan = make_task(None, Status::Running);
+        insert(&store, &orphan);
+        let out = plan_delegation(&store, &orphan, &[dt("c", vec![])], 0, &[], &[], &DelegationLimits::default(), now())
+            .expect("plan_delegation");
+        assert_eq!(out.accepted[0].workspace, orphan.workspace);
     }
 
     #[test]
