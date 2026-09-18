@@ -25,6 +25,13 @@
   直近の失敗（`web search returned nothing` ×2, `idle timeout` ×1, レビュー不合格 ×1）を知らずに
   「対象タスク ID / run / エラーメッセージが必要です」と聞き返した事故の再発防止。対話 run にだけ、
   担当の直近の仕事（最大 10 件、更新の新しい順、対話が案件を選んでいればその案件のものを先に）を渡す
+- **Phase 41（ADR-0038 D1）**: `context.milestone_review`（§3.1）と、結果ファイルの `milestone_proposal`（§9）を
+  追加。途中目標の仕事が止まったときの**レビューの対話 run**（秘書の裏方タスク。`support = "milestone_review"`）
+  にだけ、その途中目標とそこまでの仕事の成果（title / status / 終端の要約 / `answer.md`・`report.md` の
+  先頭 4,000 字）が渡り、前置きに「(a) 得られた結果 (b) 達成と言えるか (c) 次の途中目標の提案
+  (d) 判断を仰ぎたい点」を書く指示が足される。次の途中目標は結果ファイルの `milestone_proposal` にも書く
+  （taskd はそこだけを決定的に読み、`status = proposed` の途中目標を 1 件作る）。**追加のみ**なので
+  `protocol` は `4` のまま
 - **Phase 35（ADR-0036 D1/D5）**: `run.artifacts_dir`（§3.1）を追加。**成果物と結果ファイルの置き場は
   `request.artifacts_dir`**。workspace を自分で所有するタスクは従来と同じ `<workspace>/artifacts`、
   **workspace を親から継いだタスク（plan / delegate の子）は `<workspace>/.taskd/artifacts/<task_id>`**。
@@ -99,6 +106,7 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 | `context.organization` | array | –（省略可。空なら省略。v4, ADR-0033 D4） | 分解・委譲できる run（`context.available_genres` を渡す run と同じ条件）に渡す組織図。`{id, name, kind, parent_id?, brief?, genre?}`。「どの課に何を振るか」を `assignee` で決めさせる |
 | `context.conversation_addressee` | string | –（省略可。Phase 28, ADR-0033 D4 追記） | 対話用タスクの run だけ `"secretary"` / `"other"`。委譲・`Question` は使えない（`delegate` は子を作らず理由を `progress` で返し、`Question` はそのまま `done` の返事になる） |
 | `context.work_genre` | object | –（省略可。Phase 30, ADR-0033 D4 追記） | 対話 run で、担当ノードが自分の仕事の分野（`node.genre`）を持つときだけ。`GenreContext`（`context.available_genres[]` と同じ形）。対話そのものは常にこの分野ではなく対話用分野（`task.genre`）で走る。前置きに「仕事で使う道具」として 1 行渡すためだけの情報 |
+| `context.milestone_review` | object | –（省略可。Phase 41, ADR-0038 D1） | **途中目標レビューの対話 run**（対話の印 + `task.milestone_id`）にだけ。`{milestone: {id, title, description?, status}, tasks: [{title, status, outcome?, artifacts_excerpt?}]}`。`tasks` はその途中目標に属する仕事（裏方は除く。作られた順、最大 20 件）、`outcome` は `context.recent_work[].outcome` と同じ終端の要約、`artifacts_excerpt` は `answer.md` / `report.md` の先頭 4,000 字（決定的に切る）。集めるのはストアとファイルの読み取りだけ（LLM は使わない） |
 | `context.recent_work` | array | –（省略可。空なら省略。Phase 33, ADR-0033 D4 追記） | 対話 run にだけ、担当の直近の仕事（最大 10 件、更新の新しい順。案件を選んでいればその案件のものを先に。対話・まとめ・承認・レビューは除く）。`RecentWork`: `{task_id, title, project_title?, status, finished_at?, outcome?, artifacts: string[]}`。`outcome` は終端の要約（`done` なら summary の 1 行目、`failed` なら理由、`blocked` なら質問）で、ストアのタスクとイベントから決定的に組む（LLM は使わない） |
 
 `context.answers` は、このタスクの `Event::Answered` を時系列に並べたもの（`question` は直前の
@@ -118,6 +126,10 @@ Review プロンプトには含めない）。JSON Lines プロトコルを直�
 あなたの直近の仕事（対話 run にだけ） → 直近のやり取り → 役割の指示文 → 記憶の書き方 → 対話専用の指示）。
 `context.conversation_addressee` が `None`（対話でない run）ならこの末尾の節は出ず、`context.work_genre` /
 `context.recent_work` も渡らないので、前置きは Phase 23 までの出力と 1 バイトも変わらない。
+Phase 41（ADR-0038 D1）: `context.milestone_review` があるときだけ、「あなたの直近の仕事」の直後に
+**「途中目標『X』のここまで」**（各仕事の status / 終端の要約 / 成果物の抜粋）が入り、いちばん最後に
+**「途中目標の判定をお願いする返事です」**（(a)〜(d) と `milestone_proposal` の書き方）が足される
+（対話専用の指示は消えない）。
 `local-deep-research` だけは役割の指示文を載せない（ADR-0029 / Phase 19: 検索エンジンに渡す問いを
 役割の文面で濁さないため）。
 
@@ -486,6 +498,18 @@ taskd はこれを直接パースできない。そこでこれらのアダプ�
 - 追記は決定的なファイル操作だけで、何を覚えるかを決めるのはワーカー（**LLM に書かせるのはここだけ**）。
   プロンプトの前置きの末尾にその指示が入る。
 - 検索ハーネス（`local-deep-research`）はこの前置きを出さないので、記憶の追記も起きない（ADR-0033 D6）。
+
+**`milestone_proposal`（Phase 41, ADR-0038 D1）**: 途中目標レビューの対話 run（および `discuss` / `ng` で
+起きた対話 run）が、**次の途中目標**を宣言できる（任意。`report` と同じ宣言的フィールド）。
+
+```json
+{"summary": "...", "evidence": [], "milestone_proposal": {"title": "候補の比較実験", "description": "3 本を同じ条件で比べる"}}
+```
+
+- taskd は `done` のときだけこれを読み、その案件に `status = proposed` の途中目標を 1 件作る（`seq` は末尾）。
+  既にあった `proposed`（判定中の途中目標自身は除く）は `redesigned` にして**差し替える**（`proposed` は常に 1 件）。
+- `title` が空・`milestone_proposal` が無い・形が違う・案件に属さない run では**何もしない**（run は失敗させない）。
+- 達成にするのも、この提案を承認するのも**人**（`POST /milestones/{id}/decide` の `ok`）。taskd は行を作るだけ。
 
 **`report`（v4 で追加、ADR-0034 D7, Phase 27）**: `done` の結果が「提案」なのか「ただの結果」なのかを
 ワーカーが**自分で宣言**できる（任意。書かなければ従来どおり）。

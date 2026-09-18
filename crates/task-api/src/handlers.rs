@@ -36,7 +36,7 @@ use crate::types::{
     AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult, AccountLoginStart,
     AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody, ClusterConnectCodeBody, ClusterConnectResult,
     ClusterConnectStart, ClusterView, Clusters, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
-    MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail,
+    MilestoneCreateBody, MilestonePatchBody, MilestoneReviewView, MilestoneView, OrgCreateBody, OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail,
     ProjectList, ProjectPatchBody, ProjectTaskView, ProviderCheckResponse, ProviderConfigView, ProviderView,
     Providers, ReloadResult, RetryBody, RunList, SecretList, SecretPutBody, SecretPutResult, SecretView,
     ValidationError,
@@ -117,6 +117,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/projects/{id}/milestones", post(create_milestone))
         .route("/api/v1/milestones/{id}", patch(patch_milestone))
         .merge(crate::project_plan::routes())
+        // ADR-0038 D2（Phase 41）: 途中目標の判定（ok / 議論 / ng）。実装は `crate::milestones`。
+        .merge(crate::milestones::routes())
         .merge(crate::memory::routes())
         .merge(crate::reports::routes())
         .merge(crate::approvals::routes())
@@ -281,7 +283,7 @@ pub(crate) fn parse_project_id(raw: &str) -> Result<ProjectId, ApiProblem> {
     raw.parse::<ProjectId>().map_err(|_| ApiProblem::project_not_found(raw))
 }
 
-fn parse_milestone_id(raw: &str) -> Result<MilestoneId, ApiProblem> {
+pub(crate) fn parse_milestone_id(raw: &str) -> Result<MilestoneId, ApiProblem> {
     raw.parse::<MilestoneId>().map_err(|_| ApiProblem::milestone_not_found(raw))
 }
 
@@ -479,7 +481,27 @@ async fn project_detail(
             let Some(project) = store.project_get(project_id).map_err(store_problem)? else {
                 return Err(ApiProblem::project_not_found(&project_id.to_string()));
             };
-            let milestones = store.milestone_list(project_id).map_err(store_problem)?;
+            // ADR-0038 D1 / D4（Phase 41）: 途中目標ごとに、秘書のレビューの返事と、提案された次の
+            // 途中目標を添える（GUI のカードが「結果 → 提案 → ok / 議論 / ng」を出せるように）。
+            let latest_proposal = task_ops::milestone_review::latest_proposal(store, project_id, None)
+                .map_err(|e| ops_problem(store, e, None))?;
+            let mut milestones = Vec::new();
+            for milestone in store.milestone_list(project_id).map_err(store_problem)? {
+                let review = task_ops::milestone_review::review_state(store, project_id, milestone.id)
+                    .map_err(store_problem)?
+                    .reply
+                    .map(|reply| MilestoneReviewView {
+                        message_id: reply.id.to_string(),
+                        text: reply.text,
+                        at: rfc3339(reply.created_at),
+                    });
+                // 提案は「返事が付いた途中目標のカード」にだけ添える（自分自身は除く）。
+                let proposal = match &review {
+                    Some(_) => latest_proposal.clone().filter(|p| p.id != milestone.id),
+                    None => None,
+                };
+                milestones.push(MilestoneView { milestone, review, proposal });
+            }
             // ADR-0033 D2: 案件の仕事の木 = `tasks WHERE project_id = ?`（DAG は `parent_id` / `depends_on`）。
             let filter = ListFilter { project_id: Some(project_id), ..ListFilter::default() };
             let page = store

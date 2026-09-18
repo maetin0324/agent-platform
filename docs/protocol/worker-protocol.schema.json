@@ -438,9 +438,79 @@
       ],
       "type": "string"
     },
+    "MilestoneBrief": {
+      "description": "`context.milestone_review.milestone`（ADR-0038 D1）。",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "`proposed` / `approved` / `in_progress` / `reached` / `redesigned`。",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "status"
+      ],
+      "type": "object"
+    },
     "MilestoneId": {
       "description": "途中目標の一意識別子（ULID）。",
       "type": "string"
+    },
+    "MilestoneReviewContext": {
+      "description": "`context.milestone_review`（ADR-0038 D1。Phase 41）: **途中目標レビューの対話 run** にだけ載る、\nその途中目標と、そこまでの仕事の成果。人に向けて「得られた結果 → 達成の可否 → 次の提案」を書かせるための\n材料で、集めるのは決定的（ストアのタスク・イベントと成果物ファイルを読むだけ。LLM は使わない）。",
+      "properties": {
+        "milestone": {
+          "$ref": "#/$defs/MilestoneBrief"
+        },
+        "tasks": {
+          "description": "その途中目標に属する仕事（裏方は除く。作られた順）。",
+          "items": {
+            "$ref": "#/$defs/MilestoneTaskResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "milestone"
+      ],
+      "type": "object"
+    },
+    "MilestoneTaskResult": {
+      "description": "`context.milestone_review.tasks[]`（ADR-0038 D1）: 1 件の仕事とその終わり方・成果物の抜粋。",
+      "properties": {
+        "artifacts_excerpt": {
+          "description": "主な成果物（`answer.md` / `report.md`）の先頭 4,000 字（決定的に切る）。",
+          "type": "string"
+        },
+        "outcome": {
+          "description": "終端の要約（`recent_work` と同じ組み立て）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "status"
+      ],
+      "type": "object"
     },
     "NodeContext": {
       "description": "`context.node`（ADR-0033 D4 / Phase 24）: この run をしている「人」（組織のノード）。\nプロンプトの一番前に「あなたは誰で、何の担当か」として置かれる。",
@@ -767,6 +837,17 @@
             }
           ],
           "description": "ADR-0033 D6: `[memory]` を設定し、担当が決まっている run にだけ載る長期記憶。"
+        },
+        "milestone_review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneReviewContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Phase 41（ADR-0038 D1）: **途中目標レビューの対話 run** にだけ `Some`。その途中目標と、そこまでの\n仕事の成果（`preamble` が「これまでの結果」の節を出し、ADR D1 の指示文を足す）。"
         },
         "node": {
           "anyOf": [

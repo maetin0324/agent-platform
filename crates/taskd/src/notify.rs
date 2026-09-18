@@ -16,6 +16,11 @@
 //! 429 が 3 件出た一方、Go 待ちの draft がある途中目標では `milestone_ready` が一生鳴らなかった。
 //! これを受けて 3 つを直した: (1) `milestone_ready` は「動いているものが無く、人の手が要る」状態
 //! （ready/running/reviewing/blocked が 0、done が 1 件以上）で鳴る。全終端である必要はない。
+//! Phase 41（ADR-0038 D4）: `milestone_ready` は**秘書のレビューの返事が付いてから**送り、文面に
+//! 「結果 → 次の提案」の要約（返事の先頭 300 字と提案の題名）を載せる（状態だけを知らせても、人は
+//! GUI で成果物を読んで自分で次を考えなければならなかった）。条件の判定そのものは
+//! `crate::milestone_review::ready_milestones` に移した（レビューの run を起こす側と同じ 1 か所）。
+//!
 //! (2) `bad_news`/`approval_pending`/`question_blocked`/`secretary_reply` は taskd の起動時刻より
 //! 後にできたものだけを対象にする（backfill 禁止）。(3) 送信は 1 tick に最大 1 通、`bad_news` は
 //! 束ねる（`select_batch`）、429 は attempts に数えず `Retry-After` の間だけ待つ。
@@ -27,9 +32,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use task_core::message::MessageRole;
 use task_core::notify::{MAX_NOTIFY_ATTEMPTS, NotificationId, NotificationKind};
-use task_core::report::{ReportFilter, ReportKind, support_kind};
+use task_core::report::{ReportFilter, ReportKind};
 use task_core::{
-    ListFilter, ListOrder, MilestoneStatus, Notification, ProjectStatus, Status, StoreError, TaskStore,
+    ListFilter, ListOrder, Notification, ProjectStatus, Status, StoreError, TaskStore,
 };
 use time::OffsetDateTime;
 
@@ -41,6 +46,8 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CONTENT_MAX_CHARS: usize = 1900;
 /// 文面に載せる質問・見出しの字数（ADR-0037 D1「先頭 120 字」）。
 pub const EXCERPT_CHARS: usize = 120;
+/// `milestone_ready` に載せる秘書のまとめの字数（ADR-0038 D4「先頭 300 字」）。
+pub const REVIEW_EXCERPT_CHARS: usize = 300;
 /// 1 tick で見る案件の上限（案件はそう多くない。暴走しないための上限）。
 const PROJECT_SCAN: usize = 200;
 /// 1 案件あたりに見るタスクの上限。
@@ -189,81 +196,47 @@ pub fn scan(
     Ok(out)
 }
 
-/// 途中目標が「動いているものが無く、人の手が要る」状態になった（ADR-0037 D1、実機 2026-09-18）。
+/// 途中目標が「動いているものが無く、人の手が要る」状態になり、**秘書のレビューの返事が付いた**
+/// （ADR-0037 D1 / 実機 2026-09-18、ADR-0038 D4）。
 ///
-/// 条件: 途中目標が `reached` でなく、属する仕事（裏方を除く）が 1 件以上あり、その中に
-/// ready / running / reviewing / blocked が **0 件**、done が **1 件以上**。
-/// （この 2 条件が揃えば、残りは自動的に draft か終端のどちらかしかない。
-/// 「Go 待ちの draft がある」も「すべて終端」もここに含まれる。）
+/// 条件（`crate::milestone_review::ready_milestones`）: 途中目標が `reached` でなく、属する仕事
+/// （裏方を除く）が 1 件以上あり、その中に ready / running / reviewing / blocked が **0 件**、
+/// done が **1 件以上**。そのうえで ADR-0038 D4 により、**秘書のレビューの返事が `messages` に入ってから**
+/// 送る（状態だけの通知では「何が分かったか」も「次に何をするつもりか」も人に届かないため）。
 ///
 /// 重複排除の `key` は `<milestone_id>:<done の件数>`。Go を出して仕事が進み、また止まれば
 /// done の件数が変わるので再び鳴る。
 fn scan_milestone_ready(
     store: &dyn TaskStore,
-    org: &[task_core::OrgNode],
+    _org: &[task_core::OrgNode],
     base_url: Option<&str>,
 ) -> Result<Vec<Candidate>, StoreError> {
     let mut out = Vec::new();
-    let mut projects = store.project_list()?;
-    projects.sort_by_key(|a| a.id);
-    for project in projects.into_iter().take(PROJECT_SCAN) {
-        let filter = ListFilter {
-            project_id: Some(project.id),
-            ..ListFilter::default()
+    for ready in crate::milestone_review::ready_milestones(store)? {
+        let state = task_ops::milestone_review::review_state(store, ready.project.id, ready.milestone.id)?;
+        // ADR-0038 D4: 秘書のまとめが付くまでは鳴らさない（「結果 → 提案」が手元で読めるように）。
+        let Some(reply) = state.reply else {
+            continue;
         };
-        let page = store.list_page(&filter, ListOrder::CreatedDesc, None, TASK_SCAN)?;
-        let mut milestones = store.milestone_list(project.id)?;
-        milestones.sort_by_key(|a| a.id);
-        for milestone in milestones {
-            if milestone.status == MilestoneStatus::Reached {
-                continue;
-            }
-            let mut tasks: Vec<_> = page
-                .items
-                .iter()
-                .filter(|t| t.milestone_id == Some(milestone.id) && support_kind(t).is_none())
-                .collect();
-            if tasks.is_empty() {
-                continue;
-            }
-            tasks.sort_by_key(|t| t.id);
-            let active = tasks
-                .iter()
-                .filter(|t| matches!(t.status, Status::Ready | Status::Running | Status::Reviewing | Status::Blocked))
-                .count();
-            if active > 0 {
-                continue;
-            }
-            let done = tasks.iter().filter(|t| t.status == Status::Done).count();
-            if done == 0 {
-                continue;
-            }
-            let failed = tasks.iter().filter(|t| t.status == Status::Failed).count();
-            let waiting: Vec<_> = tasks.iter().filter(|t| t.status == Status::Draft).collect();
-            let who = if waiting.is_empty() {
-                "なし".to_string()
-            } else {
-                let mut names: Vec<String> = waiting
-                    .iter()
-                    .map(|t| t.assignee.as_deref().map(|id| node_name(org, id)).unwrap_or_else(|| "担当未定".to_string()))
-                    .collect();
-                names.sort();
-                names.dedup();
-                names.join("、")
-            };
-            let body = format!(
-                "途中目標『{}』: done {done} / failed {failed}。Go 待ちの仕事が {} 件（担当: {who}）。達成の判定と次の Go をお願いします。{}",
-                milestone.title,
-                waiting.len(),
-                link(base_url, &format!("/projects/{}", project.id))
-            );
-            out.push(Candidate {
-                kind: NotificationKind::MilestoneReady,
-                key: format!("{}:{done}", milestone.id),
-                body,
-                project_id: Some(project.id),
-            });
-        }
+        let proposal = task_ops::milestone_review::latest_proposal(store, ready.project.id, Some(ready.milestone.id))
+            .ok()
+            .flatten();
+        let next = match &proposal {
+            Some(m) => format!("次の提案: 『{}』。", m.title),
+            None => String::new(),
+        };
+        let body = format!(
+            "途中目標『{}』の仕事が止まりました。秘書のまとめ: {} {next}→ 案件で ok / 議論 / ng を選んでください。{}",
+            ready.milestone.title,
+            excerpt(&reply.text, REVIEW_EXCERPT_CHARS),
+            link(base_url, &format!("/projects/{}", ready.project.id))
+        );
+        out.push(Candidate {
+            kind: NotificationKind::MilestoneReady,
+            key: format!("{}:{}", ready.milestone.id, ready.done),
+            body,
+            project_id: Some(ready.project.id),
+        });
     }
     Ok(out)
 }

@@ -359,6 +359,38 @@ impl MilestoneStatus {
     }
 }
 
+/// 人が途中目標に返す 3 つの答え（ADR-0038 D2。SPEC §7）。**達成にするのは人の `ok` だけ**で、
+/// 自由記述（`note`）は秘書への言葉として渡すだけ（LLM に 3 値を解釈させない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MilestoneDecision {
+    /// 達成。提案された次の途中目標を承認し、その分解を起こす。
+    Ok,
+    /// 議論したい。状態は何も変えず、`note` を秘書への対話として送る。
+    Discuss,
+    /// 達成にしない。この途中目標と提案を `redesigned` にし、再設計を秘書に頼む。
+    Ng,
+}
+
+impl MilestoneDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MilestoneDecision::Ok => "ok",
+            MilestoneDecision::Discuss => "discuss",
+            MilestoneDecision::Ng => "ng",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ok" => Some(MilestoneDecision::Ok),
+            "discuss" => Some(MilestoneDecision::Discuss),
+            "ng" => Some(MilestoneDecision::Ng),
+            _ => None,
+        }
+    }
+}
+
 /// 途中目標（ADR-0033 D2）。`seq` は案件の中での通し番号（1 始まり。ストアが採番する）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Milestone {

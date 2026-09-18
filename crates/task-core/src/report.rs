@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use ulid::Ulid;
 
-use crate::message::is_conversation;
+use crate::message::{is_conversation, is_milestone_review};
 use crate::model::{Task, TaskId, TaskKind};
 use crate::org::{OrgKind, OrgNode, ProjectId};
 use crate::store::{SqliteStore, StoreError, format_rfc3339, parse_rfc3339};
@@ -27,10 +27,13 @@ use crate::store::{SqliteStore, StoreError, format_rfc3339, parse_rfc3339};
 pub const COMPACTION_ROLE: &str = "report-compressor";
 
 /// GUI 監査 H4（Phase 29）: 裏方タスクの印。`TaskSummary.support` / `ProjectTaskView.support` に写す。
-/// 判定は決定的で優先順あり: 対話 > 圧縮（`role == report-compressor`）> 承認（`kind == approval`）>
-/// 合成レビュー（`kind == review`）。どれでもなければ `None`（人が見る「仕事の木」の本体）。
+/// 判定は決定的で優先順あり: 途中目標レビュー（対話 + `milestone_id`。ADR-0038 D1）> 対話 >
+/// 圧縮（`role == report-compressor`）> 承認（`kind == approval`）> 合成レビュー（`kind == review`）。
+/// どれでもなければ `None`（人が見る「仕事の木」の本体）。
 pub fn support_kind(task: &Task) -> Option<&'static str> {
-    if is_conversation(task) {
+    if is_milestone_review(task) {
+        Some("milestone_review")
+    } else if is_conversation(task) {
         Some("conversation")
     } else if task.role.as_deref() == Some(COMPACTION_ROLE) {
         Some("compaction")

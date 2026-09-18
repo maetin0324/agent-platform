@@ -13,6 +13,8 @@
 //! 3. 記憶（`context.memory`）
 //! 4. あなたの直近の仕事（`context.recent_work`。Phase 33: 実機で対話 run の担当が自分の直近の失敗を
 //!    知らずに「対象タスク ID が必要です」と聞き返した事故の再発防止。対話 run にだけ出す）
+//! 5. 途中目標のここまでの結果（`context.milestone_review`。Phase 41 / ADR-0038 D1: 途中目標レビューの
+//!    対話 run にだけ出す。その途中目標と、属する仕事の終わり方・成果物の抜粋。以下は 1 つずつ繰り下がる）
 //! 5. 直近のやり取り（`context.conversation`）
 //! 6. 役割の指示文（`context.role`。ADR-0016 D1 からある既存の節）
 //! 7. 記憶の書き方の指示（記憶が有効な run にだけ）
@@ -27,7 +29,7 @@
 
 use task_core::MessageRole;
 
-use crate::protocol::{ConversationAddressee, RunContext};
+use crate::protocol::{ConversationAddressee, MilestoneReviewContext, RunContext};
 
 /// 前置き（役割の指示文を含む）。`claude-code` / `codex` / `acp` / `paperqa` が使う。
 /// `artifacts` は成果物ディレクトリの workspace 相対表記（`RunRequest::artifacts_rel`。ADR-0036 D3。
@@ -37,6 +39,11 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
     out.push_str(&role_section(context));
     out.push_str(&memory_instructions(context, artifacts));
     out.push_str(&conversation_instructions(context));
+    // Phase 41（ADR-0038 D1）: 途中目標レビューの対話 run には、対話の指示のさらに後ろに
+    // 「結果 → 達成の可否 → 次の提案」の指示を足す（対話の指示は消さない）。
+    if let Some(review) = &context.milestone_review {
+        out.push_str(&milestone_review_instructions(review));
+    }
     out
 }
 
@@ -99,6 +106,7 @@ fn person_sections(context: &RunContext) -> String {
         }
         out.push('\n');
     }
+    out.push_str(&milestone_review_section(context));
     if !context.conversation.is_empty() {
         out.push_str("## 直近のやり取り (this is a continuing conversation)\n");
         for turn in &context.conversation {
@@ -167,6 +175,52 @@ fn conversation_instructions(context: &RunContext) -> String {
         }
         None => String::new(),
     }
+}
+
+/// 節 4.5: 途中目標のここまでの結果（Phase 41 / ADR-0038 D1）。レビューの対話 run にだけ出す。
+/// 中身は決定的に集めたものをそのまま並べるだけ（要約は run の仕事）。
+fn milestone_review_section(context: &RunContext) -> String {
+    let Some(review) = &context.milestone_review else {
+        return String::new();
+    };
+    let mut out = String::new();
+    out.push_str(&format!(
+        "## 途中目標『{}』のここまで ({})\n",
+        review.milestone.title, review.milestone.status
+    ));
+    if !review.milestone.description.is_empty() {
+        out.push_str(&format!("{}\n", one_line(&review.milestone.description)));
+    }
+    for task in &review.tasks {
+        out.push_str(&format!("\n### [{}] {}\n", status_label(task.status), one_line(&task.title)));
+        if let Some(outcome) = &task.outcome {
+            out.push_str(&format!("要約: {}\n", one_line(outcome)));
+        }
+        if !task.artifacts_excerpt.is_empty() {
+            out.push_str("成果物の抜粋:\n");
+            out.push_str(task.artifacts_excerpt.trim_end());
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// 節 7 の追記（Phase 41 / ADR-0038 D1）: 途中目標レビューの対話 run にだけ足す指示。
+/// 「結果 → 達成の可否 → 次の提案 → 判断を仰ぎたい点」を書かせ、次の途中目標は結果ファイルの
+/// `milestone_proposal` にも書かせる（taskd はそこだけを決定的に読む）。
+fn milestone_review_instructions(review: &MilestoneReviewContext) -> String {
+    format!(
+        "## 途中目標の判定をお願いする返事です (milestone review)\n\
+         途中目標『{}』の仕事が止まりました。人に向けて、数十秒で読める分量で次を書いてください: \
+         (a) この途中目標までで**得られた結果**の要約（数字・候補・出典）(b) 達成と言えるか\
+         （言えないなら何が足りないか）(c) **次の途中目標の提案**（1 つ。題名と説明）\
+         (d) 判断を仰ぎたい点。\
+         次の途中目標は結果ファイルの `milestone_proposal` にも \
+         `{{\"milestone_proposal\": {{\"title\": \"…\", \"description\": \"…\"}}}}` の形で書いてください\
+         （人が「ok」を押すと、これが次の途中目標になります）。達成の可否を決めるのは人です。\n\n",
+        review.milestone.title
+    )
 }
 
 /// やり取りの 1 行化（前置きの箇条書きを崩さないため。中身は削らない）。
@@ -391,6 +445,50 @@ mod tests {
         assert!(!render(&without, "artifacts").contains("あなたの直近の仕事"));
         // 対話でない通常 run の前置きは 1 バイトも変わらない（既定値には `recent_work` が無い）。
         assert_eq!(render(&RunContext::default(), "artifacts"), "");
+    }
+
+    /// Phase 41（ADR-0038 D1）: レビューの対話 run にだけ、途中目標とそこまでの成果の節が出て、
+    /// 末尾に「結果 → 達成の可否 → 次の提案」の指示が足される（対話の指示は消えない）。
+    #[test]
+    fn a_milestone_review_shows_the_results_and_asks_for_the_next_proposal() {
+        use crate::protocol::{MilestoneBrief, MilestoneReviewContext, MilestoneTaskResult};
+        let context = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Secretary),
+            milestone_review: Some(MilestoneReviewContext {
+                milestone: MilestoneBrief {
+                    id: "01HM".into(),
+                    title: "隣接領域の動向調査".into(),
+                    description: "近い分野の直近 3 年を洗う".into(),
+                    status: "in_progress".into(),
+                },
+                tasks: vec![MilestoneTaskResult {
+                    title: "web 調査".into(),
+                    status: Status::Done,
+                    outcome: Some("候補を 3 本に絞った".into()),
+                    artifacts_excerpt: "# answer.md\n候補 A / 候補 B / 候補 C".into(),
+                }],
+            }),
+            ..full_context()
+        };
+        let out = render(&context, "artifacts");
+        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
+        // 節は「あなたの直近の仕事」の後、直近のやり取りの前。
+        assert!(at("## 覚えていること") < at("## 途中目標『隣接領域の動向調査』のここまで"), "{out}");
+        assert!(at("## 途中目標『隣接領域の動向調査』のここまで") < at("## 直近のやり取り"), "{out}");
+        assert!(out.contains("(in_progress)"), "{out}");
+        assert!(out.contains("### [done] web 調査"), "{out}");
+        assert!(out.contains("要約: 候補を 3 本に絞った"), "{out}");
+        assert!(out.contains("候補 A / 候補 B / 候補 C"), "{out}");
+        // 指示は対話の指示の後ろ。
+        assert!(at("これは対話です") < at("## 途中目標の判定をお願いする返事です"), "{out}");
+        assert!(out.contains("(c) **次の途中目標の提案**"), "{out}");
+        assert!(out.contains("milestone_proposal"), "{out}");
+
+        // レビューでない run には何も出ない（通常の対話 run の前置きは 1 バイトも変わらない）。
+        let plain = RunContext { milestone_review: None, ..context.clone() };
+        let plain_out = render(&plain, "artifacts");
+        assert!(!plain_out.contains("途中目標の判定をお願いする返事です"), "{plain_out}");
+        assert!(!plain_out.contains("のここまで"), "{plain_out}");
     }
 
     fn task_worker_recent_work_sample(

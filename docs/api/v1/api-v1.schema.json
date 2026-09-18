@@ -3061,6 +3061,106 @@
       ],
       "type": "object"
     },
+    "MilestoneDecideBody": {
+      "additionalProperties": false,
+      "description": "`POST /milestones/{id}/decide` の要求本文（ADR-0038 D2）。",
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/MilestoneDecision",
+          "description": "`\"ok\"` / `\"discuss\"` / `\"ng\"`。"
+        },
+        "note": {
+          "default": null,
+          "description": "人の自由記述。`discuss` / `ng` では**必須**（空なら 422）。`ok` では任意で、計画の `note` と\n秘書への `messages` に渡る。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "decision"
+      ],
+      "type": "object"
+    },
+    "MilestoneDecided": {
+      "description": "`POST /milestones/{id}/decide` の応答（202）。",
+      "properties": {
+        "conversation_task_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "その返事のために起きた対話用タスク。"
+        },
+        "decision": {
+          "$ref": "#/$defs/MilestoneDecision",
+          "description": "適用した答え。"
+        },
+        "message_id": {
+          "description": "`discuss` / `ng` で秘書に送った `role = \"user\"` の行。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "milestone": {
+          "$ref": "#/$defs/Milestone",
+          "description": "判定した途中目標（更新後）。"
+        },
+        "next_milestone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Milestone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`ok` で承認して分解を始めた次の途中目標、`ng` で `redesigned` にした提案（無ければ省略）。"
+        },
+        "plan_task_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`ok` で起きた分解（計画 run）のタスク。"
+        }
+      },
+      "required": [
+        "decision",
+        "milestone"
+      ],
+      "type": "object"
+    },
+    "MilestoneDecision": {
+      "description": "人が途中目標に返す 3 つの答え（ADR-0038 D2。SPEC §7）。**達成にするのは人の `ok` だけ**で、\n自由記述（`note`）は秘書への言葉として渡すだけ（LLM に 3 値を解釈させない）。",
+      "oneOf": [
+        {
+          "const": "ok",
+          "description": "達成。提案された次の途中目標を承認し、その分解を起こす。",
+          "type": "string"
+        },
+        {
+          "const": "discuss",
+          "description": "議論したい。状態は何も変えず、`note` を秘書への対話として送る。",
+          "type": "string"
+        },
+        {
+          "const": "ng",
+          "description": "達成にしない。この途中目標と提案を `redesigned` にし、再設計を秘書に頼む。",
+          "type": "string"
+        }
+      ]
+    },
     "MilestoneId": {
       "description": "途中目標の一意識別子（ULID）。",
       "type": "string"
@@ -3078,6 +3178,28 @@
       ],
       "type": "object"
     },
+    "MilestoneReviewView": {
+      "description": "秘書のレビューの返事（`messages` の 1 行。ADR-0038 D1）。",
+      "properties": {
+        "at": {
+          "description": "RFC 3339。",
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "text": {
+          "description": "返事の本文（Markdown。GUI がカードに出す）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id",
+        "text",
+        "at"
+      ],
+      "type": "object"
+    },
     "MilestoneStatus": {
       "description": "途中目標の状態（ADR-0033 D2。SPEC §7 のアジャイル: 達成ごとに人が判定し、Go か再設計）。",
       "enum": [
@@ -3088,6 +3210,69 @@
         "redesigned"
       ],
       "type": "string"
+    },
+    "MilestoneView": {
+      "description": "途中目標 1 件のビュー（ADR-0038 D1 / D4。Phase 41）。`Milestone` のフィールドは**平らに**出るので、\n既存の GUI（`id` / `title` / `status` …）はそのまま読める。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/MilestoneId"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "proposal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Milestone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "その返事が提案した次の途中目標（`proposed` の最新。無ければ省略）。"
+        },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneReviewView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "秘書のレビューの返事（まだ無ければ省略。run 中は `tasks[]` の\n`support = \"milestone_review\"` が動いている）。"
+        },
+        "seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/MilestoneStatus"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "seq",
+        "title",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
     },
     "NewPlanSpec": {
       "additionalProperties": false,
@@ -3745,8 +3930,9 @@
       "description": "`GET /projects/{id}` の応答。案件 + 途中目標 + その案件のタスクの要約（GUI の「仕事の木」用）。",
       "properties": {
         "milestones": {
+          "description": "ADR-0038 D1 / D4（Phase 41）: 途中目標そのもの（`Milestone` の各フィールドはそのまま）に、\n秘書のレビューの返事と提案された次の途中目標を添えたもの。",
           "items": {
-            "$ref": "#/$defs/Milestone"
+            "$ref": "#/$defs/MilestoneView"
           },
           "type": "array"
         },
@@ -5971,6 +6157,13 @@
     "milestone_create": {
       "$ref": "#/$defs/MilestoneCreateBody"
     },
+    "milestone_decide": {
+      "$ref": "#/$defs/MilestoneDecideBody",
+      "description": "Phase 41（ADR-0038 D2）: 途中目標の判定（`POST /milestones/{id}/decide`）。"
+    },
+    "milestone_decided": {
+      "$ref": "#/$defs/MilestoneDecided"
+    },
     "milestone_patch": {
       "$ref": "#/$defs/MilestonePatchBody"
     },
@@ -6147,6 +6340,8 @@
     "project_detail",
     "milestone_create",
     "milestone_patch",
+    "milestone_decide",
+    "milestone_decided",
     "project_plan",
     "project_plan_accepted",
     "memory",

@@ -18,8 +18,8 @@ use task_core::notify::{MAX_NOTIFY_ATTEMPTS, NotificationKind, NotificationStore
 use task_core::org::{OrgKind, OrgNode};
 use task_core::report::{Report, ReportId, ReportKind, ReportStore};
 use task_core::{
-    Budget, Check, Criterion, MilestoneStatus, Project, ProjectId, ProjectStatus, SqliteStore, Status, Task,
-    TaskId, TaskKind, TaskStore, Tier, Trigger, WorkerHint, WorkspaceSpec,
+    Budget, Check, Criterion, MilestoneId, MilestoneStatus, Project, ProjectId, ProjectStatus, SqliteStore, Status,
+    Task, TaskId, TaskKind, TaskStore, Tier, Trigger, WorkerHint, WorkspaceSpec,
 };
 use taskd::notify::{self, NotifyConfig, SendResult};
 use time::OffsetDateTime;
@@ -85,6 +85,32 @@ impl Env {
                 })
                 .unwrap_or_else(|e| panic!("org: {e}"));
         }
+    }
+
+    /// ADR-0038 D1 / D4（Phase 41）: 秘書のレビューの対話（裏方 `support = "milestone_review"`）と
+    /// その返事を 1 往復ぶん作る。`milestone_ready` はこの返事が付いてから鳴る。
+    fn seed_review_reply(&self, project: ProjectId, milestone_id: MilestoneId, text: &str) -> TaskId {
+        let mut review = task(Status::Done);
+        review.title = "対話: 途中目標のレビュー".into();
+        review.acceptance = vec![];
+        review.project_id = Some(project);
+        review.milestone_id = Some(milestone_id);
+        review.assignee = Some("secretary".into());
+        review.conversation = Some(MessageId::new());
+        self.store.insert(&review).unwrap_or_else(|e| panic!("insert: {e}"));
+        self.store
+            .message_append(&Message {
+                id: MessageId::new(),
+                node_id: "secretary".into(),
+                project_id: Some(project),
+                role: MessageRole::Node,
+                text: text.to_string(),
+                run_id: Some("run-review".into()),
+                task_id: Some(review.id),
+                created_at: at(5),
+            })
+            .unwrap_or_else(|e| panic!("message: {e}"));
+        review.id
     }
 
     fn seed_project(&self, status: ProjectStatus) -> ProjectId {
@@ -180,10 +206,20 @@ fn milestone_ready_fires_when_nothing_is_active_and_something_is_done() {
     // ready が 1 件でも残っていれば鳴らない。
     assert!(env.scanned(NotificationKind::MilestoneReady).is_empty(), "ready が残っている間は鳴らない");
 
-    // ready を片付けると、done 2 + draft 2（Go 待ち）で鳴る。
+    // ready を片付けても、ADR-0038 D4 により**秘書のまとめが付くまでは鳴らない**。
     env.store
         .apply_transition(ready.id, Trigger::Cancel, None)
         .unwrap_or_else(|e| panic!("cancel: {e}"));
+    assert!(
+        env.scanned(NotificationKind::MilestoneReady).is_empty(),
+        "レビューの返事が付くまでは鳴らない（ADR-0038 D4）"
+    );
+
+    // 秘書のレビューの返事と、その返事が提案した次の途中目標。
+    env.seed_review_reply(project, milestone.id, "候補を 3 本に絞りました。次は比較実験を提案します。");
+    env.store
+        .milestone_create(project, "候補の比較実験", "", MilestoneStatus::Proposed)
+        .unwrap_or_else(|e| panic!("milestone: {e}"));
     assert_eq!(env.schedule(NotificationKind::MilestoneReady), 1);
     // 2 回目の tick では増えない（同じ key）。
     assert_eq!(env.schedule(NotificationKind::MilestoneReady), 0);
@@ -195,9 +231,10 @@ fn milestone_ready_fires_when_nothing_is_active_and_something_is_done() {
         .unwrap_or_else(|| panic!("no milestone_ready row"));
     assert_eq!(row.key, format!("{}:2", milestone.id), "key に done の件数(2)");
     assert!(row.body.contains("候補テーマの統合と選定"), "{}", row.body);
-    assert!(row.body.contains("done 2 / failed 0"), "{}", row.body);
-    assert!(row.body.contains("2 件"), "{}", row.body);
-    assert!(row.body.contains("検証課"), "{}", row.body);
+    // ADR-0038 D4: 秘書のまとめの先頭と、次の提案の題名と、3 つの答え。
+    assert!(row.body.contains("候補を 3 本に絞りました"), "{}", row.body);
+    assert!(row.body.contains("次の提案: 『候補の比較実験』"), "{}", row.body);
+    assert!(row.body.contains("ok / 議論 / ng"), "{}", row.body);
     // GUI 依頼 G13i-P1（ADR-0037 D6）: 途中目標の案件が project_id に載る。
     assert_eq!(row.project_id, Some(project), "{row:?}");
 
@@ -217,8 +254,7 @@ fn milestone_ready_fires_when_nothing_is_active_and_something_is_done() {
         .iter()
         .find(|n| n.kind == NotificationKind::MilestoneReady && n.key == format!("{}:3", milestone.id))
         .unwrap_or_else(|| panic!("no re-fired row with done=3"));
-    assert!(refired.body.contains("done 3 / failed 0"), "{}", refired.body);
-    assert!(refired.body.contains("1 件"), "{}", refired.body);
+    assert!(refired.body.contains("候補を 3 本に絞りました"), "{}", refired.body);
 
     // 条件が解消（`reached` にした）ら、もう候補に出てこない。
     env.store
@@ -493,6 +529,8 @@ fn links_are_added_only_when_a_gui_base_url_is_configured() {
     done.project_id = Some(project);
     done.milestone_id = Some(milestone.id);
     env.store.insert(&done).unwrap_or_else(|e| panic!("insert: {e}"));
+    // ADR-0038 D4: 秘書のまとめが付いてから鳴る。
+    env.seed_review_reply(project, milestone.id, "まとめました。");
 
     let without = notify::scan(env.as_store(), env.started_at, None).unwrap_or_else(|e| panic!("scan: {e}"));
     assert!(without.iter().all(|c| !c.body.contains("http")));

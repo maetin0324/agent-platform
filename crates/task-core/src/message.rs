@@ -117,6 +117,19 @@ pub fn is_conversation(task: &Task) -> bool {
     conversation_origin(task).is_some()
 }
 
+/// Phase 41（ADR-0038 D1）: 途中目標レビューの対話タスクか。印は**対話の印 + `milestone_id`** の 2 つだけで、
+/// 新しい列も新しいフィールドも増やさない（人が話しかける対話 `task_ops::conversation::start` は
+/// `milestone_id` を付けないので、この 2 つで決定的に見分けられる）。裏方なので
+/// `crate::support_kind` は `"milestone_review"` を返す。
+pub fn is_milestone_review(task: &Task) -> bool {
+    is_conversation(task) && task.milestone_id.is_some()
+}
+
+/// Phase 41（ADR-0038 D1）: レビュー対象の途中目標（レビューの対話タスクでなければ `None`）。
+pub fn milestone_review_of(task: &Task) -> Option<crate::org::MilestoneId> {
+    if is_milestone_review(task) { task.milestone_id } else { None }
+}
+
 /// run が `Error` に終わったときの返事の文面（ADR-0033 D4 / Phase 24）。
 pub fn failure_reply(reason: &str) -> String {
     format!("返事できませんでした: {reason}")

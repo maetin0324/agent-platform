@@ -27,12 +27,15 @@ Phase 39 を配備して webhook を登録した直後の最初の走査で、**
 
 | 種 | いつ | 文面の骨 |
 |---|---|---|
-| `milestone_ready`（**Phase 40 で改定**） | 途中目標に属する仕事（裏方を除く）のうち **ready / running / reviewing / blocked が 0 件**、**done が 1 件以上**（＝「動いているものが無く、人の手が要る」）。かつ途中目標が `reached` でない。**全部が終端である必要はない** — Go 待ちの `draft` が残っていてもよい（むしろそここそが人の判断が要る瞬間） | 「途中目標『…』: done N / failed M。Go 待ちの仕事が K 件（担当: …）。達成の判定と次の Go をお願いします」＋案件へのリンク |
+| `milestone_ready`（**Phase 40 で改定、Phase 41 で文面と条件を改定**） | 途中目標に属する仕事（裏方を除く）のうち **ready / running / reviewing / blocked が 0 件**、**done が 1 件以上**（＝「動いているものが無く、人の手が要る」）。かつ途中目標が `reached` でない。**全部が終端である必要はない** — Go 待ちの `draft` が残っていてもよい（むしろそここそが人の判断が要る瞬間）。**加えて、秘書のレビューの返事が `messages` に入ってから**送る（ADR-0038 D1 / D4） | 「途中目標『…』の仕事が止まりました。秘書のまとめ: <返事の先頭 300 字>… 次の提案: 『…』。→ 案件で ok / 議論 / ng を選んでください」＋案件へのリンク |
 | `approval_pending` | `approvals` に未決の行が**新しく**できた | 「認可の要求: <担当>『<質問の先頭 120 字>』」＋認可画面へのリンク |
 | `question_blocked` | タスクが `blocked`（人への質問）になった（`approval_pending` と重複するものは 1 回だけ） | 「<担当> が質問で止まっています: …」 |
 | `bad_news` | 秘書レベル（level 0）の `bad_news` 報告が**新しく**できた | 「悪い知らせ: <headline>」 |
 | `secretary_reply` | 案件が `proposed` のまま秘書の最初の返事が付いた（案件の理解確認・方針・最初の途中目標の提案。人の返事待ち） | 「秘書から『<案件>』の方針の提案が届きました。返事をお願いします」 |
 
+- **Phase 41（ADR-0038 D4）**: `milestone_ready` は「状態の通知」から「**結果 → 次の提案**の通知」に変わった。
+  条件の判定そのものは `taskd::milestone_review::ready_milestones`（レビューの run を起こす側と同じ 1 か所）に
+  移し、`notify` はそこに「返事が付いているか」を足すだけにした。
 - **`result` / `progress` は知らせない**（SPEC §3.5 の「数時間単位」は GUI の報告の流れの仕事。Discord は判断待ちだけ）。
 - 重複排除は **`notifications` 表**（migration 0008 / 0009）で: `(kind, key)` を 1 回だけ送る（`key` = milestone id
   ＋done の件数（Phase 40。下記 D5） / approval id / task id / report id / project id）。

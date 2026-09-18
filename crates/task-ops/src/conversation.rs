@@ -59,6 +59,24 @@ pub fn start(
     conversation_genre: &str,
     now: OffsetDateTime,
 ) -> Result<StartedConversation, OpsError> {
+    start_with_milestone(store, node_id, project_id, None, text, roles, genres, conversation_genre, now)
+}
+
+/// Phase 41（ADR-0038 D1）: `start` と同じ対話を、**途中目標に紐づけて**起こす（レビューの対話）。
+/// `milestone_id` が入った対話用タスクは裏方の `support = "milestone_review"`（`task_core::support_kind`）
+/// になり、仕事の木には出ない。人が話しかける経路（`start`）は常に `None` を渡す。
+#[allow(clippy::too_many_arguments)]
+pub fn start_with_milestone(
+    store: &dyn TaskStore,
+    node_id: &str,
+    project_id: Option<ProjectId>,
+    milestone_id: Option<task_core::MilestoneId>,
+    text: &str,
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+    conversation_genre: &str,
+    now: OffsetDateTime,
+) -> Result<StartedConversation, OpsError> {
     if text.trim().is_empty() {
         return Err(OpsError::Validation("text must not be blank".to_string()));
     }
@@ -76,6 +94,7 @@ pub fn start(
 
     let mut task = conversation_task(&node, project_id, text, roles, genres, conversation_genre, now);
     task.depends_on = depends_on;
+    task.milestone_id = milestone_id;
     let message = Message {
         id: MessageId::new(),
         node_id: node.id.clone(),

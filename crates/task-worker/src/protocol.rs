@@ -214,6 +214,41 @@ pub struct RecentWork {
     pub artifacts: Vec<String>,
 }
 
+/// `context.milestone_review`（ADR-0038 D1。Phase 41）: **途中目標レビューの対話 run** にだけ載る、
+/// その途中目標と、そこまでの仕事の成果。人に向けて「得られた結果 → 達成の可否 → 次の提案」を書かせるための
+/// 材料で、集めるのは決定的（ストアのタスク・イベントと成果物ファイルを読むだけ。LLM は使わない）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MilestoneReviewContext {
+    pub milestone: MilestoneBrief,
+    /// その途中目標に属する仕事（裏方は除く。作られた順）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<MilestoneTaskResult>,
+}
+
+/// `context.milestone_review.milestone`（ADR-0038 D1）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MilestoneBrief {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// `proposed` / `approved` / `in_progress` / `reached` / `redesigned`。
+    pub status: String,
+}
+
+/// `context.milestone_review.tasks[]`（ADR-0038 D1）: 1 件の仕事とその終わり方・成果物の抜粋。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MilestoneTaskResult {
+    pub title: String,
+    pub status: Status,
+    /// 終端の要約（`recent_work` と同じ組み立て）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// 主な成果物（`answer.md` / `report.md`）の先頭 4,000 字（決定的に切る）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub artifacts_excerpt: String,
+}
+
 /// `context.organization[]`（ADR-0033 D4 / Phase 24）: 組織図。分解・委譲できる run に渡し、
 /// 「どの課に何を振るか」を `assignee` で指定させる。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -293,6 +328,10 @@ pub struct RunContext {
     /// 通常の run（対話でない）では常に空。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_work: Vec<RecentWork>,
+    /// Phase 41（ADR-0038 D1）: **途中目標レビューの対話 run** にだけ `Some`。その途中目標と、そこまでの
+    /// 仕事の成果（`preamble` が「これまでの結果」の節を出し、ADR D1 の指示文を足す）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone_review: Option<MilestoneReviewContext>,
     /// Phase 38（ADR-0028 追記）: **レビュー run** にだけ、レビュー対象のタスクの分野の manifest を渡す。
     /// ハーネス系の分野（`GenreContext::is_harness`）なら、レビュアーのプロンプトに「成果物の名前は固定で、
     /// `papers.json` は検索コーパスであって答えではない」という規約を出す（実機で、計画が勝手に決めた
