@@ -305,6 +305,9 @@ function ApprovalRow({ item }: { item: ApprovalItem }) {
 function QuestionRow({ item }: { item: QuestionItem }) {
   const fetcher = useFetcher<TransitionOutcome[]>({ key: `inbox-question-${item.task.id}` });
   const submitting = fetcher.state !== "idle";
+  // 監査 H2: 質問への回答は「認可」の画面に一本化する（Phase 29 で `approval_id` が付いた）。
+  // `approval_id` が無い（まだ行が無い／既に決めた）ときだけ、従来どおりここで回答できるようにする。
+  const approvalId = item.approval_id ?? null;
   return (
     <li
       data-testid="question-item"
@@ -318,30 +321,45 @@ function QuestionRow({ item }: { item: QuestionItem }) {
       <p className="mt-1 text-fg" data-testid="question-text">
         {item.question}
       </p>
-      <fetcher.Form method="post" action="/inbox" className="mt-3 flex flex-col gap-2 border-t border-border pt-3">
-        <input type="hidden" name="task_id" value={item.task.id} />
-        <input type="hidden" name="expected_status" value="blocked" />
-        <input type="hidden" name="intent" value="answer" />
-        <textarea
-          name="answer"
-          aria-label="回答"
-          data-testid="question-answer"
-          rows={3}
-          placeholder="回答"
-          className={textareaClass}
-        />
-        <Button
-          type="submit"
-          variant="primary"
-          size="sm"
-          disabled={submitting}
-          data-testid="question-answer-submit"
-          className="w-fit"
-        >
-          <Icon name="send" />
-          回答する
-        </Button>
-      </fetcher.Form>
+      {approvalId !== null ? (
+        <p className="mt-3 border-t border-border pt-3">
+          <Link
+            to={`/approvals#approval-${approvalId}`}
+            data-testid="question-approval-link"
+            className="font-medium underline underline-offset-2"
+          >
+            「認可」の画面で答える
+          </Link>
+          <span className="ml-2 text-fg-subtle">
+            （「今回だけ」か「今後ずっと」で答えます。同じ問いへの答えはそちらに集まります）
+          </span>
+        </p>
+      ) : (
+        <fetcher.Form method="post" action="/inbox" className="mt-3 flex flex-col gap-2 border-t border-border pt-3">
+          <input type="hidden" name="task_id" value={item.task.id} />
+          <input type="hidden" name="expected_status" value="blocked" />
+          <input type="hidden" name="intent" value="answer" />
+          <textarea
+            name="answer"
+            aria-label="回答"
+            data-testid="question-answer"
+            rows={3}
+            placeholder="回答"
+            className={textareaClass}
+          />
+          <Button
+            type="submit"
+            variant="primary"
+            size="sm"
+            disabled={submitting}
+            data-testid="question-answer-submit"
+            className="w-fit"
+          >
+            <Icon name="send" />
+            回答する
+          </Button>
+        </fetcher.Form>
+      )}
       <InboxFlash fetcher={fetcher} />
     </li>
   );

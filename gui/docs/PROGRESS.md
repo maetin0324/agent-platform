@@ -21,6 +21,8 @@
 | G11 | API キー（秘密）の管理画面（taskd Phase 20 / ADR-0030） | **DONE** | 2026-09-17 |
 | G12 | クラスタへの接続を GUI から張る（taskd Phase 22 / ADR-0032） | **DONE** | 2026-09-17 |
 | G13a | 組織の木と案件（仕事の木）。SPEC §4 の 6 画面のうち 2 つ（taskd Phase 23 / ADR-0033 D1・D2） | **DONE** | 2026-09-17 |
+| G13b〜G13e | 秘書との対話・報告・認可・成果物と、taskd Phase 27 への追従 | **DONE** | 2026-09-17 |
+| G13f | GUI 監査の対応（H1〜H4 / M1〜M5 / 言葉 / 裏方の印 / 記憶。taskd Phase 29） | **DONE** | 2026-09-17 |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
@@ -1862,3 +1864,129 @@ taskd 側 Phase 27（ADR-0033/0034 の仕上げ、R3/R4/R5 の解決、`POST /pr
   未確認（fake ワーカーが `question` を返すよう仕込めば再現できるが、今回は他の受け入れ条件を優先した）。
 - G13e-U4: DOM を描画する unit テストは無い（G10-U1/G13d-U2 と同じ）。今回の変更（トグル、リンクの
   出し分け）も純粋関数のテストと Playwright の目視でのみ確認している。
+
+## Phase G13f-1 — GUI 監査の対応（2026-09-17）
+
+SPEC §4 に照らした GUI 監査（実機操作あり）で「6 画面は揃ったが、SPEC の仕事感の芯が出ていない」と
+判定された。その指摘のうち **今の API で直せるもの（G13f-1）** と、**taskd 側 Phase 29 の追加 API に
+依存するもの（G13f-2: H3 / M4 / 裏方の印 / H2）** を、同じ worktree で続けて実装した
+（別 worktree だと `gui/**` の衝突が避けられないため、コーディネータの指示でここに畳んだ）。
+着手時に `git merge --ff-only main`（`4cefc9c`）、G13f-2 の前に `git merge --no-edit main`（`7ee512d` = Phase 29）。
+
+### 指摘ごとの対応（G13f-1）
+
+1. **H1 操作の失敗が 0.3 秒で消える** — 変更系のフォームをすべて **fetcher 方式**に寄せた
+   （`inbox.tsx` / `projects.tsx` / `tasks.$id.tsx` / `tasks.new.tsx` / `plans.new.tsx` / `daemon.tsx`。
+   `/org` `/approvals` `/reports` `/artifacts` は元から fetcher）。原因は `useTaskdStream` が `daemon`
+   イベント（taskd は tick ごとに無条件で流す）で `revalidate()` し、ナビゲーション方式の `actionData` が
+   捨てられること。fetcher の `data` は再検証では消えない。受信箱は**項目ごとに 1 つの fetcher**を持たせ、
+   結果をその行に出す。回帰テスト: `test/unit/action-feedback.test.ts`（変更系フォームを持つ 11 ルートが
+   `actionData` と `<Form method="post">` を使っていないことをソースで確かめる。コメントは除いて見る）と
+   e2e の「操作の失敗は消えない」（422 の表示が 3 秒後も残る）。
+2. **初期画面** — `/` は `routes/home.tsx` が `/org/secretary` へリダイレクト（302）。受信箱は
+   `/inbox`（裏方の区画）に残した。
+3. **仕事の木（H4）** — `app/lib/graph-layout.ts` の固定 180×44 をやめ、`nodeBox` が中身から幅
+   （180〜320px）と高さを決める。タイトルは最大 2 行で、入り切らなければ末尾を `…`（`wrapLabelLines`、
+   全角 1em / 半角 0.56em の近似）。まとめのタスクは G13f-1 では `role = "report-compressor"` で外し、
+   **G13f-2 で `support` に置き換えた**。
+4. **組織の木を「人」に見せる** — 各行は名前を先頭に太く、その下に一言（1 行に省略）、右端に小さく分野の id。
+   英語の `kind` バッジは出さず、部・課の 1 文字だけ添える。左列を 26rem にして名前が省略されないようにした。
+5. **言葉を SPEC に揃える** — `app/lib/labels.ts`（新規）に案件・途中目標・タスクの状態、役職の印、
+   認可の決定の日本語を集め、業務 6 画面のラベル・見出し・状態値を日本語にした（`request`→「依頼」、
+   `title`→「題名」、`node_id`→「誰に」、`rule`→「規則文」、`scope`→「『今後ずっと』の範囲」など）。
+   人の呼び方は**担当**に統一（画面から「ノード」「人」を消した。help の説明文だけ「人（担当）」と一度言い換え）。
+6. **報告（M3）** — 本文を `MarkdownViewer` で描き、展開した中に**案件へ／担当に話す／裏方のタスク／
+   その案件の成果物**へのリンク（`ReportLinks`）。`bad_news` は行そのものを赤系の背景に。絞り込みカードの
+   内情説明（「taskd に転送するのは…」）を消した。
+7. **秘書の画面（M1）** — `loadConversation` が `GET /inbox` も読み、`conversationTrouble`（純粋関数）で
+   その対話の裏方タスクが `attention`（`unroutable` / `failed` / `requeue_limit_near`）に出ていたら
+   「返事を作れない状態です: <理由>」を出して待つのをやめる。10 分の上限に達したときも同じ形で知らせ、
+   プロバイダの設定と裏方のタスクへ誘導する。
+8. **認可（M5）** — `groupApprovals`（純粋関数）で同じ文面の未決要求を 1 枚にまとめ「N 件」を出す。
+   答えは**まとめて全件に送る**（action が `id` を複数受け取り順に決める）。カードの高さを詰め、
+   案内文は `<details>` に畳んだ。
+9. **細かいもの** — help から「G13b」「Phase」の露出を消し、`app/components/Placeholder.tsx` を削除、
+   `projects.$id.tsx` の空括弧（`HelpLink`）を解消、`vscode://file//tmp` の二重スラッシュを直し
+   （`app/lib/artifacts.ts`）、「通知を有効にする」をナビから報告画面の中へ移した
+   （`app/components/NotificationsEnable.tsx`）。
+10. **裏方から戻れる（M2）** — `/tasks` の行に案件（リンク）・担当（リンク）・途中目標、`/tasks/:id` の
+    ヒーローに同じ 3 つを出した。`TaskSummary` に `project_id` が無いので、`/tasks` の loader が
+    `GET /projects` + 各案件の `GET /projects/{id}` を束ねて索引を作る（`app/lib/project-index.ts`。
+    N+1 なので `docs/taskd-requests.md` R6 に「`TaskSummary` に入れば消せる」と記録した）。
+
+### 指摘ごとの対応（G13f-2、taskd 側 Phase 29 に追従）
+
+1. **H3 「この方針で進める」** — `POST /projects/{id}/plan`（§3.61、管理系、202 `{task_id}`）。案件詳細に
+   「分解を秘書に頼む」カード（承認済み・進行中の途中目標から選ぶ or 指定しない、人のひとこと）。押すと
+   「分解を秘書に頼みました（裏方のタスク）。仕事の木がこれから増えていきます」と出し、待たない。
+   案件が「提案中」でも押せる（taskd が「進行中」にする）。
+2. **M4 記憶を見せる** — `GET /org/{id}/memory?project=`（§3.62）。組織の担当詳細に「覚えていること
+   （案件をまたぐ）」と、案件を選べば「この案件の引き出し」を Markdown で表示。編集はせず、
+   `notes_path` / `project_path` を「直すならこのファイル」として出す。409 `memory_unavailable` は
+   「記憶の置き場所が設定されていません」。
+3. **裏方の印** — `TaskSummary.support` / `ProjectTaskView.support` を使う `isSupportTask` に統一し、
+   仕事の木・組織の「抱えている仕事」・`/tasks` の既定表示から `support != null` を外した。
+   `/tasks` のトグルは「裏方も表示」（`show_support=1`、`data-testid="tasks-show-support"`）。
+   `role = "report-compressor"` の判定は消した。
+4. **H2 受信箱の質問 → 認可へ** — `QuestionItem.approval_id` があれば受信箱の回答欄を出さず、
+   `/approvals#approval-<id>` へのリンクにした（回答は認可画面に一本化）。認可のカードは
+   まとめた 2 件目以降にも錨（`id="approval-<id>"`）を置く。
+5. **e2e** — 「この方針で進める」→ 偽プランナー（`test/taskd/fixtures/org-worker.sh` が `kind = plan` で
+   `assignee` 付きの子を 3 件返す）→ 仕事の木に担当付きで増える、を追加した。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint`（biome、160 files）exit 0 / `pnpm typecheck` exit 0 / `pnpm test` **453 passed**（39 ファイル。
+  G13e の 391 から +62。新規 `test/unit/labels.test.ts` / `action-feedback.test.ts` / `home.route.test.ts` /
+  `project-index.test.ts` と、`graph-layout` / `work-tree` / `conversation` / `approvals` / `org` /
+  `projects.detail` への追加）/ `pnpm build` exit 0。
+- `pnpm gen:types` を 2 回実行して同一（`diff` ゼロ）。`bash ../scripts/sync-gui-docs.sh` 実行済み
+  （`gui/docs/taskd-api-v1.md` を Phase 29 に更新）。
+- **e2e**: `gui/e2e/g13.spec.ts` を**別ポート**で実行し **11 passed**。運用中の 7700 / 7710 には触っていない:
+  `TASKD_API_LISTEN=127.0.0.1:17971 scripts/taskd.sh fixture org` →
+  `TASKD_GUI_BIND=127.0.0.1:17905 TASKD_API_URL=http://127.0.0.1:17971 TASKD_API_LISTEN=127.0.0.1:17971
+  TASKD_API_TOKEN_FILE=$(pwd)/.run/org/api.token pnpm exec playwright test e2e/g13.spec.ts`。
+  中身: 秘書に投げる → 返事 → 案件（日本語の言葉・仕事の木・担当への導線）→ この方針で進める（担当付きの
+  子が 3 件）→ 記憶 → 受信箱の質問から認可へ → 組織の木 → 報告 → 認可（同じ文面が「2 件」でまとまり、
+  答えると履歴に移る）→ 成果物 → 失敗が消えない → 裏方から案件・担当へ戻れる。
+  `playwright.config.ts` に「既定の 7700 / 7710 は運用中を掴むので必ず別ポートを環境変数で指定する」注意書きと
+  `TASKD_API_URL` の上書きを入れた。既存の g0〜g9 は触っていない。
+- **見た目の確認**: 使い捨ての taskd（fake アダプタ、`config/org.example.toml`）に対して Playwright で
+  light / dark のスクリーンショット（秘書・組織・案件・報告・認可・成果物・一覧・受信箱）を撮り、
+  SPEC §4 の言葉と突き合わせた。確認できたこと: 仕事の木のノードが日本語のタイトル + `[担当]` で
+  はみ出さない／組織の木が名前・一言・分野の「人」の並びになっている／案件詳細に「この方針で進める」と
+  分解された 3 件が担当付きで出る／報告が Markdown で読め、リンクが出る／認可が 1 枚にまとまる。
+  撮影用の spec は使い捨てで、コミットには含めていない。
+
+### 判断したこと（ADR は起こしていない。GUI の中の話）
+
+- **`/` を秘書へのリダイレクトにした**（`routes/home.tsx`）。受信箱は `/inbox`。**既存の e2e
+  g0 / g1 / g2 / g4 / g6 / g7 は `page.goto("/")` で受信箱を見る**ので、そのままでは失敗する
+  （今回は「既存の g0〜g9 は触らない」指示のため直していない。下の未解決事項）。
+- **`/tasks` の列**: ID と優先度と分野を落とし、案件・担当・途中目標を足した。役割の列は残した
+  （g7 が `task-role` を見るため）。
+- **`/tasks` の索引は N+1** のまま（上記 R6）。件数が増えたら taskd 側の `TaskSummary.project_id` に載せ替える。
+- **認可の決定は「まとめた全件に同じ答えを送る」**。原子性は無い（受信箱の「この Plan の子を全部受け入れ」と
+  同じ扱い）。最初の失敗でそこまでの結果を返す。
+- **記憶は読み取りだけ**（taskd に書き込み API が無い。§3.62）。`notes_path` を出して人がファイルを直す。
+- **仕事の木には秘書の「分解」タスク（`kind = plan`）は出る**（`support` が付かないため）。人が見て意味の
+  ある仕事なのでそのままにした。
+
+### 未解決事項
+
+- G13f-U1: **既存の e2e（g0/g1/g2/g4/g6/g7）が `/` に受信箱を期待している**。`/` を秘書にしたので、
+  それらは `/inbox` を見るよう直す必要がある（今回の指示の範囲外。次のフェーズで直す）。
+- G13f-U2: `TaskSummary` に `project_id` / `milestone_id` が無い（`docs/taskd-requests.md` R6）。
+  `/tasks` の索引は案件数ぶんの `GET /projects/{id}` を束ねている。
+- G13f-U3: DOM を描画する unit テストは無い（G10-U1 と同じ）。今回も純粋関数のテスト + ソースの静的検査
+  （`action-feedback.test.ts`）+ Playwright の目視で確かめている。
+- G13f-U4: 認可を答えた直後、その行が「決めたもの」に移るとカード内の成功表示（fetcher の flash）も
+  一緒に消える（失敗のときはカードが残るので消えない）。履歴に決定と答えが出るので実害は無いと判断した。
+- G13f-U5: `/tasks` の総件数・status 別件数は taskd の値のまま（裏方を除いた表示件数とずれることがある。
+  G13e-U2 の引き継ぎ）。
+
+### 提案（`docs/DESIGN.md` / `docs/taskd-api-v1.md` への変更提案。採否は人間）
+
+- G13f-P1: `TaskSummary` に `project_id` / `milestone_id` を足してほしい（R6）。GUI の N+1 が消える。
+- G13f-P2: `GET /inbox` の `attention` に「その担当・その案件」の手がかり（`assignee`）があると、
+  秘書の画面での「返事を作れない状態」の判定が `messages` の `task_id` 突き合わせ無しで済む。

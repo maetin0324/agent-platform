@@ -7,7 +7,7 @@ import { ReportsList } from "~/components/ReportsList";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { inputClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
+import { hintClass, inputClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
@@ -20,13 +20,18 @@ import {
 } from "~/lib/artifacts";
 import { milestoneStatusLabel, projectStatusLabel, taskStatusLabel } from "~/lib/labels";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import { projectTasksToGraph, supportTaskIds, visibleWorkTasks } from "~/lib/work-tree";
+import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
 import { TaskdBanner } from "~/root";
 import type { ProjectOpOutcome } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { formString } from "~/taskd/forms";
-import { createMilestone, patchMilestoneStatus, patchProjectStatus } from "~/taskd/projects-admin.server";
+import {
+  createMilestone,
+  patchMilestoneStatus,
+  patchProjectStatus,
+  startProjectPlan,
+} from "~/taskd/projects-admin.server";
 import type {
   ArtifactList,
   MilestoneStatus,
@@ -36,7 +41,6 @@ import type {
   ReportList,
   TaskDetail,
   TaskId,
-  TaskList,
 } from "~/taskd/types";
 import type { Route } from "./+types/projects.$id";
 
@@ -60,11 +64,6 @@ export interface ProjectDetailData {
   org: OrgList;
   reports: ReportList;
   artifactRows: ProjectArtifactRow[];
-  /**
-   * 仕事の木に出さない裏方のタスク（まとめの run。`role = "report-compressor"`）の id
-   * （監査 H4。`ProjectTaskView` に `role` が無いので `GET /tasks` の要約から集める）。
-   */
-  supportTaskIds: string[];
   fetchedAt: string;
 }
 
@@ -99,16 +98,12 @@ async function loadTaskArtifactBundles(
 }
 
 export async function loadProjectDetail(client: TaskdClient, id: string, request: Request): Promise<ProjectDetailData> {
-  const [detail, org, reports, tasks] = await Promise.all([
+  const [detail, org, reports] = await Promise.all([
     client.get<ProjectDetail>(`/projects/${encodeURIComponent(id)}`, { signal: request.signal }),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
     client
       .get<ReportList>("/reports", { query: { project: id }, signal: request.signal })
       .catch(() => ({ items: [] }) as ReportList),
-    // まとめの run（`role = report-compressor`）を木から外すため（監査 H4）。落ちても木は出す。
-    client
-      .get<TaskList>("/tasks", { query: { limit: 500, order: "created_desc" }, signal: request.signal })
-      .catch(() => null),
   ]);
   const orgById = new Map(org.items.map((n) => [n.id, n]));
   const bundles = await loadTaskArtifactBundles(
@@ -117,14 +112,7 @@ export async function loadProjectDetail(client: TaskdClient, id: string, request
     request.signal,
   );
   const artifactRows = buildProjectArtifactRows(detail.tasks, bundles, orgById);
-  return {
-    detail,
-    org,
-    reports,
-    artifactRows,
-    supportTaskIds: [...supportTaskIds(tasks?.items ?? [])],
-    fetchedAt: new Date().toISOString(),
-  };
+  return { detail, org, reports, artifactRows, fetchedAt: new Date().toISOString() };
 }
 
 export const shouldRevalidate = revalidateAfterActionErrors;
@@ -159,6 +147,9 @@ export async function action({ request, params }: Route.ActionArgs) {
     case "milestone_create":
       outcome = await createMilestone(client, params.id, form, request.signal);
       break;
+    case "project_plan":
+      outcome = await startProjectPlan(client, params.id, form, request.signal);
+      break;
     case "milestone_status":
       outcome = await patchMilestoneStatus(
         client,
@@ -192,18 +183,17 @@ const MILESTONE_STATUS_TONE: Record<MilestoneStatus, Tone> = {
 };
 
 export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) {
-  const { detail, org, reports, artifactRows, supportTaskIds: supportIds, fetchedAt } = loaderData;
+  const { detail, org, reports, artifactRows, fetchedAt } = loaderData;
   const { project, milestones, tasks } = detail;
   const fetcher = useFetcher<ProjectOpOutcome>();
   const submitting = fetcher.state !== "idle";
 
   const orgById = useMemo(() => new Map(org.items.map((n) => [n.id, n])), [org.items]);
-  // 対話用タスク（`conversation`）とまとめのタスク（`role = report-compressor`）は仕事の木から完全に外す
-  // （GUI-R3 Phase 27 / 監査 H4。SPEC「タスクは裏方」/ ADR-0033 D8）。件数表示・「担当に話す」一覧
-  // （下の `work-tree-assignees`）も同じ判断に揃えるため、ここで 1 度だけ絞る。
-  const hiddenIds = useMemo(() => new Set(supportIds), [supportIds]);
-  const workTasks = useMemo(() => visibleWorkTasks(tasks, hiddenIds), [tasks, hiddenIds]);
-  const graph = useMemo(() => projectTasksToGraph(tasks, orgById, hiddenIds), [tasks, orgById, hiddenIds]);
+  // 裏方のタスク（`support`: 対話・報告のまとめ・承認待ち・レビュー。Phase 29）は仕事の木から完全に外す
+  // （SPEC「タスクは裏方」/ ADR-0033 D8）。件数表示・「担当に話す」一覧（下の `work-tree-assignees`）も
+  // 同じ判断に揃えるため、ここで 1 度だけ絞る。
+  const workTasks = useMemo(() => visibleWorkTasks(tasks), [tasks]);
+  const graph = useMemo(() => projectTasksToGraph(tasks, orgById), [tasks, orgById]);
 
   return (
     <div className="space-y-8">
@@ -366,6 +356,68 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
               >
                 <Icon name="plus" />
                 追加
+              </Button>
+            </fetcher.Form>
+          </CardBody>
+        </Card>
+      </section>
+
+      {/* 「この方針で進める」（監査 H3、docs/taskd-api-v1.md §3.61）。押すと秘書に分解の仕事が 1 件立ち、
+          仕事の木が増えていく。案件が「提案中」でも押せる（taskd が「進行中」にする）。 */}
+      <section aria-labelledby="project-plan-heading" className="space-y-4">
+        <SectionTitle icon="sparkles" id="project-plan-heading">
+          この方針で進める
+        </SectionTitle>
+        <Card>
+          <CardHeader
+            icon="sparkles"
+            title="分解を秘書に頼む"
+            description="秘書が、依頼文・途中目標・ここまでのやり取りとあなたの一言をまとめて、仕事に分解します。返事は待ちません（仕事の木が増えていきます）。"
+          />
+          <CardBody>
+            <fetcher.Form method="post" data-testid="project-plan-form" className="space-y-3">
+              <input type="hidden" name="intent" value="project_plan" />
+              <div>
+                <label htmlFor="project-plan-milestone" className={labelClass}>
+                  どの途中目標まで進めるか
+                </label>
+                <select
+                  id="project-plan-milestone"
+                  name="milestone_id"
+                  data-testid="project-plan-milestone"
+                  defaultValue=""
+                  className={`${selectClass} mt-1.5 w-full max-w-md`}
+                >
+                  <option value="">指定しない（今ある途中目標を文脈として渡す）</option>
+                  {milestones
+                    .filter((m) => m.status === "approved" || m.status === "in_progress")
+                    .sort((a, b) => a.seq - b.seq)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        #{m.seq} {m.title}
+                      </option>
+                    ))}
+                </select>
+                <p className={hintClass}>
+                  選べるのは承認済み・進行中の途中目標だけです（提案のままのものは出ません）。
+                </p>
+              </div>
+              <div>
+                <label htmlFor="project-plan-note" className={labelClass}>
+                  ひとこと（任意）
+                </label>
+                <textarea
+                  id="project-plan-note"
+                  name="note"
+                  rows={2}
+                  data-testid="project-plan-note"
+                  placeholder="例: 急がなくてよい。まず関連研究から。"
+                  className={`${textareaClass} mt-1.5 w-full`}
+                />
+              </div>
+              <Button type="submit" variant="primary" size="sm" disabled={submitting} data-testid="project-plan-submit">
+                <Icon name="sparkles" />
+                この方針で進める
               </Button>
             </fetcher.Form>
           </CardBody>

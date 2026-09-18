@@ -215,6 +215,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 計算規則は §5.1。クエリ無し。`attention.unroutable` はデーモンのスナップショット（3.23）から合成する。スナップショットがまだ無ければ空。
 
+- `questions[].approval_id`（Phase 29。GUI 監査対応）: その質問に対応する**未決の** `approvals` の id
+  （§3.56）。GUI はこれで `POST /approvals/{id}/decide`（3.57）へ直接リンクできる。行がまだ無い、または
+  既に決定済みなら `null`。
+
 ### 3.3 `GET /tasks` → 200 `TaskList`
 
 | クエリ | 型 | 既定 | 意味 |
@@ -239,6 +243,11 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
   `items[].conversation` は**対話用タスクか**（`true` なら人への返事のための run。§3.54〜3.55）。
   どちらも GUI-R3（Phase 27）で足した。仕事の木やタスク一覧から対話用タスクを隠すのに使う
   （API 側の絞り込みは足していない。GUI がこの真偽値で弾く）。
+- `items[].support` は**裏方タスクの印**（Phase 29。GUI 監査 H4）: `"conversation"` | `"compaction"` |
+  `"approval"` | `"review"` | `null`。決定的な優先順（`task_core::support_kind`）で 1 つだけ付く:
+  対話（`conversation.is_some()`）> 圧縮（`role == "report-compressor"`）> 承認（`kind == "approval"`）>
+  合成レビュー（`kind == "review"`）。人が見る本体の仕事（`kind == "execute"` かつどれにも当たらない）は
+  `null`。GUI はこれで仕事の木から裏方を一括で外せる（`conversation` は互換のため残す。同じ判定の下位互換）。
 - `counts_by_status` は**フィルタに関係なく** DB 全体の status 別件数（`count_by_status()` の `Vec<(Status, u64)>` をオブジェクトに。0 件の status は現れない）。タイトルバーの件数表示用。
 - 空のときは `{"items":[],"next_cursor":null,"total":0,"counts_by_status":{…}}`。
 
@@ -391,6 +400,11 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 本文 `AnswerBody{answer: string, expected_status?}`。`answer` が空白のみ → 422 `validation`（`answer must not be blank`。task-api が task-ops を呼ぶ前に検査する。CLI は clap が空文字を通すので挙動は CLI と同じにしない）。
 `task_ops::gate::answer(store, id, answer, expected_status)`: `status != blocked` → 409 `invalid_transition`（`cannot be answered; only blocked tasks accept an answer`）。
 `Trigger::Answer` + `Event::Answered{question, answer}`（`question` は §5.5 の `latest_question`。無ければ空文字列）を同一トランザクション。
+
+- **Phase 29（GUI 監査 H2）**: このタスクの未決の `approvals`（§3.56）があれば、同じ遷移の中で
+  `once` + 同じ `answer` の文言で決定済みにする（`approvals` が無ければ何もしない。決定的）。
+  `POST /approvals/{id}/decide`（3.57）は既にこの経路（`gate::answer`）に相乗りしているので、
+  どちらから答えても `GET /approvals?pending=true` から同じように消える（両方向が揃う）。
 
 ### 3.13 `POST /tasks/{id}/cancel` → 200 `TransitionResult`
 
@@ -823,13 +837,14 @@ SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validat
  "milestones":[{"id":"01J…","project_id":"01J…","seq":1,"title":"関連研究を棚卸し","description":"",
                 "status":"proposed","created_at":"…","updated_at":"…"}],
  "tasks":[{"id":"01J…","title":"調べる","status":"ready","parent_id":null,"depends_on":[],
-           "assignee":"research-survey","milestone_id":"01J…","conversation":false}]}
+           "assignee":"research-survey","milestone_id":"01J…","conversation":false,"support":null}]}
 ```
 
 `tasks` は**仕事の木を描くのに必要な分だけ**（詳細は `GET /tasks/{id}`）。`project_id` が一致するタスクだけが
 入り、他の案件・案件に属さないタスクは出ない。ULID でない id・無い案件は 404 `project_not_found`。
 `conversation` が `true` の行は**対話用タスク**（人への返事のための run。3.54 参照）なので、仕事の木からは
-隠してよい（GUI-R3。Phase 27）。
+隠してよい（GUI-R3。Phase 27）。`support`（Phase 29。§3.3 の `TaskSummary.support` と同じ規則）が
+`null` でない行は裏方（対話・報告のまとめ・承認・合成レビュー）なので、GUI は仕事の木から一括で外せる。
 
 #### 3.48 `PATCH /projects/{id}` → 200 `Project`
 
@@ -1002,6 +1017,51 @@ SPEC §3.6「少しでも聞くべきだとエージェントが判断したら�
 
 `DaemonSnapshot.approvals_pending`（`u32`。古いスナップショットには無いので既定は 0）: 未決定の認可の件数。
 `reports` と同じ理由で**API が応答を組むときに埋める**（ディスパッチャの送るスナップショットでは常に 0）。
+
+### 3.61〜3.62 GUI が SPEC の一本を通すために要る API（GUI 監査対応、Phase 29）
+
+GUI の監査（SPEC §4 との突き合わせ、実機操作あり）で「案件が分解されて組織を流れる、を GUI から起動も
+観察もできない」と判定された。§3.55 の対話 run は返事だけ（Phase 28）なので、人が方針に納得した後、
+分解そのものを起こす入口が無かった。3.61 がその入口。3.62 は SPEC §3.2 の「記憶は案件をまたぐ」を
+人が確認するための読み取り専用の窓口（ADR-0033 D6）。
+
+#### 3.61 `POST /projects/{id}/plan` → 202 `{task_id}`（**管理系**）
+
+要求本文 `{"milestone_id":"01J…","note":"急がなくてよい"}`（両方省略可）。GUI の「この方針で進める」の
+入口（ADR-0033 D4 に「分解は人が `POST /projects/{id}/plan` で起こす」を追記）。
+
+- 案件の `request`、途中目標（**`approved` / `in_progress` のもの**。`milestone_id` を指定すればそれだけを
+  使う）、`note`（人の一言）、そして**この案件の秘書との直近のやり取り**（`messages` 最大 20 件）を
+  1 つの `goal` にまとめ、`kind = "plan"` のタスクを 1 件作る（**新しいタスクの種類は作らない**。
+  `task_ops::add::create_support_task` にそのまま渡すだけ）。`project_id` / `milestone_id`（明示したときだけ）
+  / `assignee = <その案件の秘書>` を持ち、`role` / `genre` は秘書の分野から解決する。受け入れ条件は空で、
+  作った直後から `ready`（人が明示的にこの API を呼んだ時点が承認）。
+- プランナー（この run）の出力（`PlanOutput.tasks[]`）から作られる子は、親（この plan タスク）の
+  `project_id` / `milestone_id` を継ぐ（`task_core::plan::materialize`。Phase 23 の監査 D-3 で確定済み）。
+  `assignee` は組織図と分野の manifest を渡されたプロンプトの中で秘書が振る（ADR-0033 D4）。
+- 案件の `status` が `proposed` なら `active` にする。`milestone_id` を指定していれば、その途中目標を
+  `in_progress` にする（指定しなければ途中目標の状態は変えない。文脈として読むだけ）。
+- 応答は `{"task_id":"01J…"}`（202。run を待たない）。
+- 401（管理系。`token_file` 未設定でも）。無い案件は 404 `project_not_found`。`milestone_id` がその案件の
+  ものでなければ 422 `validation`（`milestone <id> does not belong to project <id>`）。秘書がいない構成
+  （組織を種蒔きしていない）は 422 `validation`（`no secretary is configured`）。
+
+#### 3.62 `GET /org/{id}/memory?project=<id>` → 200 `{notes, project, notes_path, project_path}`（読み取り）
+
+```json
+{"notes":"- 2026-09-17: pegasus は pjsub で投げる\n",
+ "project":"- 2026-09-17: Pluvio は非同期ランタイム基盤らしい\n",
+ "notes_path":"/var/lib/taskd/memory/secretary/notes.md",
+ "project_path":"/var/lib/taskd/memory/secretary/projects/01J….md"}
+```
+
+- `<memory_dir>/<node_id>/notes.md`（案件をまたぐ記憶）と `projects/<project_id>.md`（案件の引き出し）の
+  **全文**（前置き用の 8,000 字カット。ADR-0033 D6 とは別で、上限は切らない）。無ければ空文字列。
+  `project` を書かなければ `project` / `project_path` は `null`。
+- `[memory]`（`taskd.toml`）が設定されていなければ 409 `memory_unavailable`。無いノードは 404
+  `org_node_not_found`。
+- **書き込み API は無い**（記憶は run の後にワーカーが書く。ADR-0033 D6）。人が直したければ
+  `notes_path` / `project_path` のファイルを直接編集する。この応答がパスを返すのはそのため。
 
 ---
 

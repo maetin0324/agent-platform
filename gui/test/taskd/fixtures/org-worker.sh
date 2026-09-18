@@ -10,6 +10,39 @@ eval "$(node "$HERE/read-run-request.mjs" <"$RUN")"
 rm -f "$RUN"
 mkdir -p artifacts
 
+# 分解（`POST /projects/{id}/plan` が作る `kind = "plan"` のタスク）。偽のプランナーとして、担当（`assignee`）
+# 付きの子を 3 件返す（SPEC §3.3「案件は組織の上から入り、分解されて下へ流れる」）。LLM は呼ばない。
+if [ "$KIND" = "plan" ]; then
+  cat > artifacts/plan.json <<'PLAN'
+{
+  "tasks": [
+    {
+      "title": "関連研究を洗い出す",
+      "objective": "Pluvio 周辺と隣接分野の関連研究を洗い、候補テーマを挙げる",
+      "assignee": "research-survey",
+      "acceptance": [{ "text": "候補テーマが 3 つ挙がっている", "check": { "type": "artifact_exists", "name": "report.md" } }]
+    },
+    {
+      "title": "候補テーマの小さな検証を回す",
+      "objective": "選んだ候補テーマについて小さな検証コードを書いて回す",
+      "assignee": "coding-poc",
+      "depends_on": [0],
+      "acceptance": [{ "text": "検証が動いた", "check": { "type": "command", "cmd": "true", "expect_exit": 0 } }]
+    },
+    {
+      "title": "結果をまとめて framing する",
+      "objective": "検証結果を、論文の framing まで含めてまとめる",
+      "assignee": "research-writing",
+      "depends_on": [1],
+      "acceptance": [{ "text": "まとめが書けている", "check": { "type": "artifact_exists", "name": "report.md" } }]
+    }
+  ]
+}
+PLAN
+  echo '{"type":"done","summary":"3 件に分解しました","evidence":[]}'
+  exit 0
+fi
+
 case "$TITLE" in
   対話:*)
     # 対話用タスク（秘書・各担当への話しかけ）。done の summary がそのまま返事になる（ADR-0033 D4）。

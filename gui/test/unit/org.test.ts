@@ -8,7 +8,7 @@ import {
   deleteOrgNode,
   patchOrgNode,
 } from "~/taskd/org-admin.server";
-import type { OrgList, OrgNode, StandingRuleList, TaskList } from "~/taskd/types";
+import type { MemoryView, OrgList, OrgNode, StandingRuleList, TaskList } from "~/taskd/types";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
@@ -238,6 +238,68 @@ describe("loadOrg", () => {
 
     const result = await loadOrg(client, new Request("http://gui.invalid/org?selected=coding-poc"));
     expect(result.standingRules).toEqual([]);
+  });
+});
+
+/**
+ * 記憶（SPEC §3.2「記憶は案件をまたぐ」。ADR-0033 D6、docs/taskd-api-v1.md §3.62、監査 M4）。
+ * 読み取り専用。`[memory]` 未設定は 409 `memory_unavailable` で、その旨だけを画面に出す。
+ */
+describe("loadOrg と記憶（GET /org/{id}/memory）", () => {
+  const baseMocks = () => {
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, { genres: [] }));
+    mock.on("GET", "/api/v1/tasks", (_req, res) => sendJson(res, 200, emptyTaskList));
+    mock.on("GET", "/api/v1/standing-rules", (_req, res) =>
+      sendJson(res, 200, { items: [] } satisfies StandingRuleList),
+    );
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] }));
+  };
+
+  it("担当を選んでいなければ読まない", async () => {
+    baseMocks();
+    const result = await loadOrg(client, new Request("http://gui.invalid/org"));
+    expect(result.memory).toBeNull();
+    expect(result.memoryUnavailable).toBe(false);
+    expect(mock.requests.some((r) => r.url.includes("/memory"))).toBe(false);
+  });
+
+  it("担当を選ぶと GET /org/{id}/memory を読む（案件を選べば ?project= も送る）", async () => {
+    baseMocks();
+    const memory: MemoryView = {
+      notes: "- 2026-09-17: pegasus は pjsub で投げる\n",
+      notes_path: "/var/lib/taskd/memory/coding-poc/notes.md",
+      project: "- 2026-09-17: Pluvio は非同期ランタイム基盤\n",
+      project_path: "/var/lib/taskd/memory/coding-poc/projects/p1.md",
+    };
+    mock.on("GET", "/api/v1/org/coding-poc/memory", (_req, res) => sendJson(res, 200, memory));
+
+    const result = await loadOrg(client, new Request("http://gui.invalid/org?selected=coding-poc&project=p1"));
+    expect(result.memory).toEqual(memory);
+    const asked = mock.requests.find((r) => r.url.includes("/memory"));
+    expect(asked?.url).toBe("/api/v1/org/coding-poc/memory?project=p1");
+  });
+
+  it("409 memory_unavailable は「記憶の置き場所が設定されていない」として扱う（画面は壊さない）", async () => {
+    baseMocks();
+    mock.on("GET", "/api/v1/org/coding-poc/memory", (_req, res) =>
+      sendProblem(res, { status: 409, code: "memory_unavailable", detail: "[memory] is not configured" }),
+    );
+
+    const result = await loadOrg(client, new Request("http://gui.invalid/org?selected=coding-poc"));
+    expect(result.memory).toBeNull();
+    expect(result.memoryUnavailable).toBe(true);
+  });
+
+  it("他の失敗（404 など）は「記憶なし」として黙って畳む（組織は出す）", async () => {
+    baseMocks();
+    mock.on("GET", "/api/v1/org/coding-poc/memory", (_req, res) =>
+      sendProblem(res, { status: 404, code: "org_node_not_found", detail: "no such node" }),
+    );
+
+    const result = await loadOrg(client, new Request("http://gui.invalid/org?selected=coding-poc"));
+    expect(result.memory).toBeNull();
+    expect(result.memoryUnavailable).toBe(false);
   });
 });
 

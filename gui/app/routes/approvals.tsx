@@ -293,6 +293,8 @@ function PendingApprovalCard({
 
   return (
     <li
+      // 受信箱の質問（`approval_id`）からこの行に直接来られるようにする（監査 H2）。
+      id={`approval-${head.id}`}
       data-testid="approval-row"
       data-approval-id={head.id}
       data-approval-count={approvals.length}
@@ -319,6 +321,11 @@ function PendingApprovalCard({
           <span>{relativeTimeLabel(head.created_at, fetchedAt)}</span>
         </span>
       </div>
+
+      {/* まとめた 2 件目以降にも、受信箱からの `#approval-<id>` が届くよう錨を置く（監査 H2）。 */}
+      {approvals.slice(1).map((a) => (
+        <span key={a.id} id={`approval-${a.id}`} aria-hidden="true" />
+      ))}
 
       <div data-testid="approval-question" className="mt-1.5 text-sm">
         <MarkdownViewer content={head.question} />
@@ -415,6 +422,7 @@ function DecidedApprovalRow({
 }) {
   return (
     <li
+      id={`approval-${approval.id}`}
       data-testid="approval-row"
       data-approval-id={approval.id}
       className="rounded-xl border border-border bg-surface px-3 py-2.5 shadow-xs"

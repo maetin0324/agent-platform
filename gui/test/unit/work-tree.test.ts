@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { projectTasksToGraph, supportTaskIds, visibleWorkTasks } from "~/lib/work-tree";
-import type { OrgNode, ProjectTaskView, TaskSummary } from "~/taskd/types";
+import { isSupportTask, projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
+import type { OrgNode, ProjectTaskView } from "~/taskd/types";
 
 /**
  * `projectTasksToGraph`（案件の「仕事の木」を `/graph` と同じ `layoutGraph` に渡せる `Graph` に写す）のテスト。
@@ -91,30 +91,31 @@ describe("projectTasksToGraph", () => {
 });
 
 /**
- * まとめの run（`role = "report-compressor"`。ADR-0033 D3 の報告の圧縮）も裏方なので木に出さない
- * （Phase G13f-1、監査 H4）。`ProjectTaskView` に `role` が無いので `GET /tasks` の要約から id を集める。
+ * 裏方のタスク（Phase 29 の `support`: `"conversation"` | `"compaction"` | `"approval"` | `"review"`）は
+ * 仕事の木にも件数にも出さない（監査 H4 / 裏方の印）。GUI 側で `role` や `title` から推測しない。
  */
-describe("supportTaskIds / visibleWorkTasks", () => {
-  const summary = (id: string, role: string | null): Pick<TaskSummary, "id" | "role"> => ({ id, role });
-
-  it("role が report-compressor のタスクだけを集める", () => {
-    const ids = supportTaskIds([summary("c1", "report-compressor"), summary("w1", "implementer"), summary("w2", null)]);
-    expect([...ids]).toEqual(["c1"]);
+describe("isSupportTask / visibleWorkTasks", () => {
+  it("support が付いていれば裏方（対話・まとめ・承認待ち・レビュー）", () => {
+    expect(isSupportTask({ support: "compaction", conversation: false })).toBe(true);
+    expect(isSupportTask({ support: "approval", conversation: false })).toBe(true);
+    expect(isSupportTask({ support: "review", conversation: false })).toBe(true);
+    expect(isSupportTask({ support: "conversation", conversation: true })).toBe(true);
+    expect(isSupportTask({ support: null, conversation: false })).toBe(false);
   });
 
-  it("対話用とまとめのタスクを両方外す（件数表示・一覧・木で同じ判断を使う）", () => {
+  it("support が無い古い応答でも conversation だけは見る（保険）", () => {
+    expect(isSupportTask({ conversation: true } as never)).toBe(true);
+    expect(isSupportTask({ conversation: false } as never)).toBe(false);
+  });
+
+  it("裏方は木からも一覧からも外れる", () => {
     const tasks = [
       task("w1", { title: "調べる" }),
-      task("chat", { conversation: true }),
-      task("c1", { title: "報告のまとめ: 研究部" }),
+      task("chat", { conversation: true, support: "conversation" }),
+      task("c1", { title: "報告のまとめ: 研究部", support: "compaction" }),
+      task("a1", { title: "Approval needed: …", support: "approval" }),
     ];
-    const hidden = supportTaskIds([summary("c1", "report-compressor")]);
-    expect(visibleWorkTasks(tasks, hidden).map((t) => t.id)).toEqual(["w1"]);
-    expect(projectTasksToGraph(tasks, new Map(), hidden).nodes.map((n) => n.id)).toEqual(["w1"]);
-  });
-
-  it("id の集合を渡さなければ従来どおり（対話用だけを外す）", () => {
-    const tasks = [task("w1"), task("c1", { title: "報告のまとめ: 研究部" })];
-    expect(visibleWorkTasks(tasks).map((t) => t.id)).toEqual(["w1", "c1"]);
+    expect(visibleWorkTasks(tasks).map((t) => t.id)).toEqual(["w1"]);
+    expect(projectTasksToGraph(tasks, new Map()).nodes.map((n) => n.id)).toEqual(["w1"]);
   });
 });

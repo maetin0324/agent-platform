@@ -300,6 +300,7 @@ export interface ApiV1Schema {
   graph: Graph;
   health: Health;
   inbox: Inbox;
+  memory: MemoryView;
   message_accepted: MessageAccepted;
   message_list: MessageList;
   message_post: MessagePostBody;
@@ -315,6 +316,8 @@ export interface ApiV1Schema {
   project_detail: ProjectDetail;
   project_list: ProjectList;
   project_patch: ProjectPatchBody;
+  project_plan: ProjectPlanBody;
+  project_plan_accepted: ProjectPlanAccepted;
   provider_check: ProviderCheckResponse;
   provider_config: ProviderConfigView1;
   providers: Providers;
@@ -1413,11 +1416,21 @@ export interface TaskSummary {
    */
   role?: string | null;
   status: Status;
+  /**
+   * GUI 監査 H4（Phase 29）: 裏方タスクの印（`"conversation"` | `"compaction"` | `"approval"` |
+   * `"review"` | `null`）。`task_core::support_kind` の決定的な判定。GUI はこれで仕事の木から裏方を外せる。
+   */
+  support?: string | null;
   tier: Tier;
   title: string;
   updated_at: string;
 }
 export interface QuestionItem {
+  /**
+   * GUI 監査対応 Phase 29: 対応する未決の `approvals` の id（`POST /approvals/{id}/decide` へ
+   * GUI が直接リンクできるように）。無ければ `null`（`approvals` の行がまだ無い、または既に決定済み）。
+   */
+  approval_id?: ApprovalId | null;
   asked_at?: string | null;
   previous: AnswerNote[];
   question: string;
@@ -1430,6 +1443,28 @@ export interface QuestionItem {
 export interface AnswerNote {
   answer: string;
   question: string;
+}
+/**
+ * GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。
+ */
+export interface MemoryView {
+  /**
+   * `notes.md` の全文（無ければ空文字列）。
+   */
+  notes: string;
+  /**
+   * `notes.md` の絶対パス（人がファイルを直接編集するため）。
+   */
+  notes_path: string;
+  /**
+   * `?project=` を指定したときだけ `Some`（その引き出し `projects/<project_id>.md` の全文、無ければ
+   * 空文字列）。指定しなければ `null`。
+   */
+  project?: string | null;
+  /**
+   * `?project=` を指定したときだけ `Some`。指定しなければ `null`。
+   */
+  project_path?: string | null;
 }
 /**
  * `POST /org/{id}/messages` の応答（202）。返事は待たずに、GUI が `GET /org/{id}/messages` で拾う。
@@ -1730,6 +1765,10 @@ export interface ProjectTaskView {
   milestone_id?: MilestoneId | null;
   parent_id?: TaskId | null;
   status: Status;
+  /**
+   * GUI 監査 H4（Phase 29）: 裏方タスクの印（`TaskSummary.support` と同じ規則）。
+   */
+  support?: string | null;
   title: string;
 }
 /**
@@ -1743,6 +1782,26 @@ export interface ProjectList {
  */
 export interface ProjectPatchBody {
   status: ProjectStatus;
+}
+/**
+ * GUI 監査対応 Phase 29（ADR-0033 D4 追記）: 分解を起こす（`POST /projects/{id}/plan`）。
+ */
+export interface ProjectPlanBody {
+  /**
+   * 分解の対象にする途中目標。省略すると `approved` / `in_progress` のものを文脈として渡すだけで、
+   * 特定の 1 件をこのタスクに紐づけない。
+   */
+  milestone_id?: MilestoneId | null;
+  /**
+   * 人の一言（任意）。
+   */
+  note?: string | null;
+}
+/**
+ * `POST /projects/{id}/plan` の応答（202）。
+ */
+export interface ProjectPlanAccepted {
+  task_id: TaskId;
 }
 /**
  * `POST /api/v1/providers/{id}/check` の応答（ADR-0017 D2）。

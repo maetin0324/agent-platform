@@ -4,7 +4,18 @@ GUI 側で回避せず、taskd の API に足りない・仕様（`docs/taskd-ap
 
 ## 未対応
 
-（現在は無し。R3〜R5 は taskd 側 Phase 27 で解決済み。下の「対応済み」参照。）
+### R6（2026-09-17、Phase G13f）: `TaskSummary` に `project_id` / `milestone_id` が無い（一覧から案件へ戻れない）
+
+- **エンドポイント**: `GET /tasks`（`TaskList.items[]` = `TaskSummary`）。
+- **期待（監査 M2「裏方から戻れる」）**: `/tasks` の各行から「どの案件・どの途中目標の仕事か」を出したい。
+  `Task`（`GET /tasks/{id}`）には `project_id` / `milestone_id` があるが、一覧の要約型には無い。
+- **実際**: `TaskSummary` は `assignee` / `support` までは持つが `project_id` / `milestone_id` は無い
+  （R3 の対応時に「集計には `assignee` だけで足りる」として見送られた）。
+- **GUI 側の今の形（回避ではなく代替）**: `/tasks` の loader が `GET /projects` と各案件の
+  `GET /projects/{id}` を束ねて「タスク id → 案件・途中目標」の索引を作っている
+  （`app/lib/project-index.ts` / `app/routes/tasks.tsx`）。案件が増えると N+1 になる。
+- **直り方**: `TaskSummary` に `project_id` / `milestone_id`（どちらも `Option`）が入れば、この束ねは消せる。
+  急ぎではない（一人で使う前提で案件数は少ない）。
 
 ## 対応済み
 

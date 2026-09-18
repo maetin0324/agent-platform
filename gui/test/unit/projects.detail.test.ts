@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadProjectDetail } from "~/routes/projects.$id";
 import { TaskdClient } from "~/taskd/client.server";
-import { createMilestone, patchMilestoneStatus, patchProjectStatus } from "~/taskd/projects-admin.server";
+import {
+  createMilestone,
+  patchMilestoneStatus,
+  patchProjectStatus,
+  startProjectPlan,
+} from "~/taskd/projects-admin.server";
 import type {
   ArtifactList,
   Milestone,
@@ -329,5 +334,56 @@ describe("patchMilestoneStatus (PATCH /milestones/{id})", () => {
     );
     const result = await patchMilestoneStatus(client, "missing", "reached");
     expect(result.ok).toBe(false);
+  });
+});
+
+/**
+ * 「この方針で進める」（`POST /projects/{id}/plan`。**管理系**、202 `{task_id}`。docs/taskd-api-v1.md §3.61、
+ * 監査 H3）。GUI 側では判断しない: 選んだ途中目標と一言をそのまま送り、202 の `task_id` を画面へ渡すだけ。
+ */
+describe("startProjectPlan (POST /projects/{id}/plan)", () => {
+  it("途中目標も一言も無ければ空の本文を送る（どちらも省略可）", async () => {
+    mock.on("POST", "/api/v1/projects/p1/plan", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({});
+      sendJson(res, 202, { task_id: "01JPLAN" });
+    });
+
+    const result = await startProjectPlan(client, "p1", new FormData());
+    expect(result).toEqual({ ok: true, op: "project_plan", accepted: { task_id: "01JPLAN" } });
+  });
+
+  it("選んだ途中目標と一言を送る（空文字は送らない）", async () => {
+    mock.on("POST", "/api/v1/projects/p1/plan", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ milestone_id: "m1", note: "急がなくてよい" });
+      sendJson(res, 202, { task_id: "01JPLAN" });
+    });
+
+    const form = new FormData();
+    form.set("milestone_id", "m1");
+    form.set("note", "急がなくてよい");
+    const result = await startProjectPlan(client, "p1", form);
+    expect(result.ok).toBe(true);
+  });
+
+  it("422 validation（途中目標が別の案件のもの）は ActionError にして返す", async () => {
+    mock.on("POST", "/api/v1/projects/p1/plan", (_req, res) =>
+      sendProblem(res, {
+        status: 422,
+        code: "validation",
+        detail: "milestone m9 does not belong to project p1",
+      }),
+    );
+    const form = new FormData();
+    form.set("milestone_id", "m9");
+    const result = await startProjectPlan(client, "p1", form);
+    expect(result).toMatchObject({ ok: false, op: "project_plan", error: { status: 422, code: "validation" } });
+  });
+
+  it("401 unauthorized（管理系）もそのまま返す", async () => {
+    mock.on("POST", "/api/v1/projects/p1/plan", (_req, res) =>
+      sendProblem(res, { status: 401, code: "unauthorized", detail: "token required" }),
+    );
+    const result = await startProjectPlan(client, "p1", new FormData());
+    expect(result).toMatchObject({ ok: false, op: "project_plan", error: { status: 401, code: "unauthorized" } });
   });
 });

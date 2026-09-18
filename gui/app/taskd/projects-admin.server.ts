@@ -10,6 +10,8 @@ import type {
   Project,
   ProjectCreateBody,
   ProjectPatchBody,
+  ProjectPlanAccepted,
+  ProjectPlanBody,
   ProjectStatus,
 } from "./types";
 
@@ -99,5 +101,33 @@ export async function patchMilestoneStatus(
     return { ok: true, op: "milestone_status", milestone };
   } catch (e) {
     return { ok: false, op: "milestone_status", error: toActionError(e) };
+  }
+}
+
+/**
+ * `POST /projects/{id}/plan`（**管理系**、202 `{task_id}`。docs/taskd-api-v1.md §3.61、Phase 29）。
+ * 案件の「この方針で進める」。案件の依頼文・途中目標・人の一言・秘書との直近のやり取りを taskd が 1 つの
+ * `goal` にまとめ、秘書に `kind = "plan"` の仕事を 1 件作る（分解の起点）。GUI は待たない（202）ので、
+ * 仕事の木が増えていくのは SSE の再検証で追う。
+ * `milestone_id` / `note` は空なら送らない（taskd 側でどちらも省略可）。
+ */
+export async function startProjectPlan(
+  client: TaskdClient,
+  projectId: string,
+  form: FormData,
+  signal?: AbortSignal,
+): Promise<ProjectOpOutcome> {
+  try {
+    const body: ProjectPlanBody = {};
+    const milestoneId = formString(form, "milestone_id");
+    if (milestoneId) body.milestone_id = milestoneId;
+    const note = formString(form, "note");
+    if (note) body.note = note;
+    const accepted = await client.post<ProjectPlanAccepted>(`/projects/${encodeURIComponent(projectId)}/plan`, body, {
+      signal,
+    });
+    return { ok: true, op: "project_plan", accepted };
+  } catch (e) {
+    return { ok: false, op: "project_plan", error: toActionError(e) };
   }
 }

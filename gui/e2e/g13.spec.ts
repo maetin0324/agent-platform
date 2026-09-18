@@ -150,6 +150,75 @@ test.describe("Phase G13f-1: 秘書 → 案件 → 報告 → 認可 → 成果�
     await expect(assignees).not.toContainText("対話:");
   });
 
+  test("「この方針で進める」を押すと、秘書が担当付きの仕事に分解する（監査 H3）", async ({ page }) => {
+    await page.goto(`/projects/${projectId}`);
+    const before = await page.getByTestId("work-tree-assignees").locator("li").count();
+
+    await page.getByTestId("project-plan-note").fill("急がなくてよい。まず関連研究から。");
+    await page.getByTestId("project-plan-submit").click();
+
+    // 202 なので待たない。「分解を秘書に頼みました」と、その裏方のタスクへのリンクが出る。
+    await expect(page.getByTestId("flash-project-op")).toContainText("分解を秘書に頼みました");
+    await expect(page.getByTestId("flash-project-plan-task")).toBeVisible();
+
+    // 仕事の木は SSE の再検証で増えていく（偽のプランナーが担当付きの子を 3 件返す）。
+    const rows = page.getByTestId("work-tree-assignees").locator("li");
+    await expect(async () => {
+      expect(await rows.count()).toBeGreaterThanOrEqual(before + 3);
+    }).toPass({ timeout: 60_000 });
+    const list = page.getByTestId("work-tree-assignees");
+    await expect(list).toContainText("関連研究を洗い出す");
+    await expect(list).toContainText("担当: 関連研究調査課");
+    await expect(list).toContainText("担当: 論文執筆課");
+    // 承認待ち・レビューのような裏方のタスクは木にも一覧にも出ない（`support`。Phase 29）。
+    await expect(list).not.toContainText("Approval needed");
+    // 案件は「提案中」から「進行中」になる（taskd が変える）。
+    await expect(page.getByTestId("project-status")).toHaveText("進行中");
+  });
+
+  test("担当の記憶（案件をまたぐ / この案件の引き出し）が読める（監査 M4）", async ({ page }) => {
+    await page.goto("/org?selected=secretary");
+    const memory = page.getByTestId("org-node-memory");
+    await expect(memory).toBeVisible();
+    // この fixture は `[memory]` を設定しているので「設定されていません」は出ない。
+    await expect(page.getByTestId("org-node-memory-unavailable")).toHaveCount(0);
+    await expect(memory).toContainText("直すならこのファイル");
+    // 案件を選ぶと「この案件の引き出し」を読む。
+    await memory.getByTestId("org-node-memory-project").selectOption(projectId);
+    await memory.getByRole("button", { name: "表示" }).click();
+    await expect(page).toHaveURL(new RegExp(`project=${projectId}`));
+    await expect(page.getByTestId("org-node-memory")).toContainText("この案件の引き出し");
+  });
+
+  test("受信箱の質問は「認可」の画面へ送る（監査 H2）", async ({ page }) => {
+    // 人に聞いて止まる仕事を 2 件作る（同じ文面の質問になる。次の「認可」のテストでも使う）。
+    await addTask({
+      title: "実験の投入先を聞く",
+      objective: "クラスタへの投入可否を人に聞く",
+      assignee: "coding-poc",
+      projectId,
+      workspace: "ws-ask-1",
+      acceptance: [{ type: "human", text: "人が確認する" }],
+    });
+    await addTask({
+      title: "別の実験の投入先を聞く",
+      objective: "クラスタへの投入可否を人に聞く",
+      assignee: "research-survey",
+      projectId,
+      workspace: "ws-ask-2",
+      acceptance: [{ type: "human", text: "人が確認する" }],
+    });
+
+    await page.goto("/inbox");
+    const question = page.getByTestId("question-item").first();
+    await expect(question).toBeVisible({ timeout: 60_000 });
+    const link = question.getByTestId("question-approval-link");
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute("href", /\/approvals#approval-/);
+    // 受信箱に回答欄は出さない（回答は認可画面に一本化する）。
+    await expect(question.getByTestId("question-answer")).toHaveCount(0);
+  });
+
   test("組織の木は名前を先頭に太く出し、英語のバッジを出さない", async ({ page }) => {
     await page.goto("/org");
     const secretary = page.locator('[data-testid="org-node"][data-org-id="secretary"]');
@@ -186,23 +255,7 @@ test.describe("Phase G13f-1: 秘書 → 案件 → 報告 → 認可 → 成果�
   });
 
   test("認可は同じ文面をまとめて 1 枚にし、答えると履歴に移る", async ({ page }) => {
-    await addTask({
-      title: "実験の投入先を聞く",
-      objective: "クラスタへの投入可否を人に聞く",
-      assignee: "coding-poc",
-      projectId,
-      workspace: "ws-ask-1",
-      acceptance: [{ type: "human", text: "人が確認する" }],
-    });
-    await addTask({
-      title: "別の実験の投入先を聞く",
-      objective: "クラスタへの投入可否を人に聞く",
-      assignee: "research-survey",
-      projectId,
-      workspace: "ws-ask-2",
-      acceptance: [{ type: "human", text: "人が確認する" }],
-    });
-
+    // 質問は前のテスト（監査 H2）で作った 2 件（同じ文面）。
     await page.goto("/approvals");
     const card = page.getByTestId("approval-row").first();
     await expect(card).toBeVisible({ timeout: 60_000 });

@@ -11,6 +11,7 @@ import { EmptyState, PageHeader } from "~/components/ui/misc";
 import { TONE_SOFT, TONE_SOLID_BG } from "~/components/ui/tone";
 import { buildTaskPlacements, type TaskPlacement } from "~/lib/project-index";
 import { cn } from "~/lib/utils";
+import { isSupportTask } from "~/lib/work-tree";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { taskdErrorResponse } from "~/taskd/errors";
@@ -128,12 +129,12 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
   const [items, setItems] = useState<TaskSummary[]>(taskList.items);
   const [nextCursor, setNextCursor] = useState<string | null>(taskList.next_cursor ?? null);
 
-  // 対話用タスク（`TaskSummary.conversation`）は既定で隠す（SPEC「タスクは裏方」/ ADR-0033 D8、GUI-R3 Phase 27）。
-  // `show_conversation=1` はここだけの表示切り替えで、`GET /tasks` には送らない（taskd に絞り込みは無い。
-  // `loadTasks` が転送するクエリの一覧に含めていないので、taskd 側には届かない）。ページングは
-  // 対話用を含めた元の `items` に対して行い、表示だけをこの真偽値でフィルタする。
-  const showConversation = searchParams.get("show_conversation") === "1";
-  const visibleItems = showConversation ? items : items.filter((item) => !item.conversation);
+  // 裏方のタスク（`TaskSummary.support`: 対話・報告のまとめ・承認待ち・レビュー。Phase 29）は既定で隠す
+  // （SPEC「タスクは裏方」/ ADR-0033 D8）。`show_support=1` はここだけの表示切り替えで、`GET /tasks` には
+  // 送らない（taskd に絞り込みは無い。`loadTasks` が転送するクエリの一覧に含めていないので taskd 側には
+  // 届かない）。ページングは裏方を含めた元の `items` に対して行い、表示だけをこの真偽値でフィルタする。
+  const showSupport = searchParams.get("show_support") === "1";
+  const visibleItems = showSupport ? items : items.filter((item) => !isSupportTask(item));
 
   // フィルタ・並び順が変わって loader が新しい初期ページを返したら、蓄積分をリセットする。
   // `taskList` は SSE（`useTaskdStream`、root で 1 本）による再検証のたびに新しい参照になるが、
@@ -309,18 +310,18 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                   ))}
                 </select>
               </label>
-              {/* 対話用タスク（人への返事のための run）は既定で隠す（GUI-R3、Phase 27。SPEC「タスクは裏方」）。
-                  taskd には絞り込みが無いので、表示だけを GUI 側でこの真偽値（`TaskSummary.conversation`）で切り替える。 */}
+              {/* 裏方のタスク（対話の返事・報告のまとめ・承認待ち・レビュー）は既定で隠す（SPEC「タスクは裏方」）。
+                  taskd には絞り込みが無いので、表示だけを GUI 側で `TaskSummary.support` で切り替える。 */}
               <label className={chipLabelClass}>
                 <input
                   type="checkbox"
-                  name="show_conversation"
+                  name="show_support"
                   value="1"
-                  data-testid="tasks-show-conversation"
-                  defaultChecked={showConversation}
+                  data-testid="tasks-show-support"
+                  defaultChecked={showSupport}
                   className={checkboxClass}
                 />
-                対話用も表示
+                裏方も表示
               </label>
               <Button type="submit" variant="primary" size="sm">
                 <Icon name="filter" />
@@ -351,8 +352,8 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
           {visibleItems.length === 0 ? (
             <div className="flex h-full items-center justify-center p-6">
               <EmptyState icon="list" title="タスクが見つかりません">
-                {items.length > 0 && !showConversation
-                  ? "対話用タスクしかありません。上の「対話用も表示」を付けてください。"
+                {items.length > 0 && !showSupport
+                  ? "裏方のタスクしかありません。上の「裏方も表示」を付けてください。"
                   : "条件を変えて絞り込んでください。"}
               </EmptyState>
             </div>
