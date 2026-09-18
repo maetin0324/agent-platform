@@ -4636,15 +4636,17 @@ ad-hoc file system, I/O offload — 直近の研究動向と候補テーマ」�
 
 ### 未解決事項
 
-- **U34-1（重要。別フェーズ向け）: `classify_provider_failure` が rich のトレースバックの行番号を
-  供給側失敗と誤分類する。** 今回の 1 回目の実機 run（pillow が無くて `pqa` が落ちたとき）の出力に
-  `pypdf/_page.py:529 in __getitem__` が含まれ、`529`（HTTP 529 = throttled）と一致してしまい、
-  ただの `ImportError` が `provider throttled (retry after 60s)` になった。`provider.rs` の
-  `contains_code` は `cli.js:4291:17` 形（`:` の後に数字が続く）は弾くが、**`file.py:529 ` のように
-  行番号で終わる形は弾けない**。実害は「attempts を消費しない requeue が `max_requeues`（既定 5）まで
-  続く」こと。修正案: `:` の直前のトークンが拡張子付きのファイル名（`.py` / `.js` / `.rs` …）なら
-  位置情報として無視する。**`provider.rs` は他の分野・アダプタ共通なので、今回は触らずに報告した**
-  （Phase 34 の担当範囲は `paperqa` 系）。
+- **U34-1: 解消（P-87 対応）。** `classify_provider_failure`/`contains_code`（`provider.rs`）を、
+  (1) `:` の手前が拡張子付きのファイルパス（`[\w/.-]+\.\w{1,5}:`、拡張子は汎用でホワイトリスト無し）
+  なら行番号として無視する、(2) 数字が独立トークンでも「ステータスの文脈」（`HTTP`/`status`/`error`
+  の直後、`(529)` の括弧内、`401 Unauthorized` のように直後に大文字始まりの語が続く）が無ければ HTTP
+  ステータスとみなさない、の 2 点で直した。実機の `pypdf/_page.py:529 in __getitem__` を含む
+  トレースバック（`ModuleNotFoundError`/`ImportError`）をそのままテスト入力にし、`None`（供給側失敗
+  ではない）になることを確認。既存の分類テスト（`classifies_exhausted` / `classifies_throttled_...` /
+  `classifies_auth_failed` / `status_codes_inside_positions_or_numbers_do_not_match` 等）は全部通る。
+  証跡: `cargo test -p task-worker provider` で `provider::tests::*` 9 件・関連クラッシュ分類テスト含め
+  13 件 ok（0 failed）。`cargo test --workspace` は `grep -c "^test result: FAILED"` = 0。
+  `cargo clippy --workspace --all-targets -- -D warnings` は exit 0。
 - U34-2: **検索の relevance が雑**。`ad-hoc FS` / `I/O offload` のような短い語では、arXiv が
   「mobile ad hoc networks」、OpenAlex の全文検索が「focal cortical dysplasias（ad hoc Task Force）」
   「GROMACS」を上位に返す。候補 30 件のうち本当に隣接領域なのは 5〜8 件程度だった。ADR-0035 §3 の
@@ -4667,5 +4669,4 @@ ad-hoc file system, I/O offload — 直近の研究動向と候補テーマ」�
 - P-86: P-68（「ハーネスが証拠の量を決定的に判定する」を分野共通の考え方として DESIGN に書く）は
   今回で `literature` にも実装が入ったので、**2 分野で同じ形**（`sources.json` + 閾値 + 0 件専用の
   メッセージ + 成果物を残す）になった。DESIGN に書くときはこの形をそのまま一般規則にできる。
-- P-87: U34-1 の修正（`provider.rs` の行番号の誤分類）を別フェーズで。テストは実機の文字列
-  `/site-packages/pypdf/_page.py:529 in __getitem__` をそのまま使えばよい。
+- P-87: 対応済み。U34-1 参照。

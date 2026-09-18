@@ -15,33 +15,50 @@ const AUTH_FAILED_CODES: &[&str] = &["401"];
 /// どれにも当たらなければ `None`（例: モデル非対応のような taskd 側では対処しようのないエラー。
 /// ADR-0010 D5）。
 ///
-/// HTTP ステータス（`429` 等）は独立したトークンとしてだけ一致させる（前後が英数字・`.`・`:` でない）。
-/// stderr 末尾のスタックトレースに含まれる `cli.js:4291:17` のような位置情報を供給側失敗と誤分類し、
-/// attempts を消費しない requeue を無期限に繰り返すのを防ぐ（Phase 7 監査の指摘）。
+/// HTTP ステータス（`429` 等）は独立したトークンとして、かつ「ステータスの文脈」にあるときだけ一致
+/// させる（前後が英数字・`.`・`:` でない、かつ `HTTP 529` / `status:429` / `Error 529` / `(529)` /
+/// `401 Unauthorized` のようにステータスであることを示す語や記法が前後にある）。stderr 末尾の
+/// スタックトレースに含まれる `cli.js:4291:17` のような位置情報や、Python の rich トレースバックに
+/// 現れる `pypdf/_page.py:529 in __getitem__` のようなファイル名:行番号を供給側失敗と誤分類し、
+/// attempts を消費しない requeue を無期限に繰り返すのを防ぐ（Phase 7 監査の指摘、Phase 34 実機の
+/// U34-1 / P-87）。
 pub fn classify_provider_failure(text: &str) -> Option<ProviderFailure> {
     let lower = text.to_lowercase();
     if EXHAUSTED_PATTERNS.iter().any(|p| lower.contains(p)) {
         return Some(ProviderFailure::Exhausted);
     }
-    if THROTTLED_PATTERNS.iter().any(|p| lower.contains(p)) || THROTTLED_CODES.iter().any(|c| contains_code(&lower, c)) {
+    // コード（`429` 等）の判定は数字そのものは大文字小文字の影響を受けないので、`has_status_context`
+    // の「直後が大文字始まりの語」判定のために元の大文字小文字を保った `text` をそのまま渡す。
+    if THROTTLED_PATTERNS.iter().any(|p| lower.contains(p)) || THROTTLED_CODES.iter().any(|c| contains_code(text, c)) {
         return Some(ProviderFailure::Throttled { retry_after_secs: 60 });
     }
-    if AUTH_FAILED_PATTERNS.iter().any(|p| lower.contains(p)) || AUTH_FAILED_CODES.iter().any(|c| contains_code(&lower, c)) {
+    if AUTH_FAILED_PATTERNS.iter().any(|p| lower.contains(p)) || AUTH_FAILED_CODES.iter().any(|c| contains_code(text, c)) {
         return Some(ProviderFailure::AuthFailed);
     }
     None
 }
 
-/// `code` が独立したトークンとして現れるか。前後が英数字・`.` なら数字列の一部とみなす。`:` は位置情報
-/// （`file.js:429:17` の `:17`、`12:429` の `12:`）を作る場合、つまり `:` の向こう側が数字のときだけ一部とみなす
-/// （`HTTP 529: too many requests` や `status:429` は一致させる）。
+/// `code` が独立したトークンとして、かつステータスの文脈で現れるか。
+///
+/// まず前後が英数字・`.` なら数字列の一部とみなす。`:` は位置情報（`file.js:429:17` の `:17`、
+/// `12:429` の `12:`）を作る場合、つまり `:` の向こう側が数字のときだけ一部とみなす。加えて、`:` の
+/// 手前が拡張子付きのファイル名（`pypdf/_page.py:529` のような `[\w/.-]+\.\w{1,5}:` の形）のときも
+/// 一部とみなす（rich トレースバックの `file.py:529 in __getitem__` を弾く。U34-1 / P-87）。
+///
+/// 独立したトークンだとわかっても、それだけでは供給側の HTTP ステータスとは限らない（単なる版番号や
+/// 行番号のこともある）。そこで前後に「ステータスの文脈」（`HTTP` / `status` / `error` の直後、
+/// `(529)` のような括弧内、`401 Unauthorized` のようにステータス番号の直後に大文字始まりの語が続く）
+/// があるときだけ一致とみなす。
 fn contains_code(text: &str, code: &str) -> bool {
     let is_joined = |c: char| c.is_ascii_alphanumeric() || c == '.';
     text.match_indices(code).any(|(start, _)| {
+        let end = start + code.len();
         let mut before = text[..start].chars().rev();
-        let mut after = text[start + code.len()..].chars();
+        let mut after = text[end..].chars();
         let joined_before = match before.next() {
-            Some(':') => before.next().is_some_and(|c| c.is_ascii_digit()),
+            Some(':') => {
+                before.next().is_some_and(|c| c.is_ascii_digit()) || ends_with_file_path(&text[..start - 1])
+            }
             Some(c) => is_joined(c),
             None => false,
         };
@@ -50,8 +67,51 @@ fn contains_code(text: &str, code: &str) -> bool {
             Some(c) => is_joined(c),
             None => false,
         };
-        !joined_before && !joined_after
+        !joined_before && !joined_after && has_status_context(text, start, end)
     })
+}
+
+/// `prefix`（コロンの手前までの文字列）が、拡張子付きのファイルパス（`pypdf/_page.py` や
+/// `cli.js` のような、末尾が `.` + 1〜5 文字の単語文字になっている非空白トークン）で終わっているか。
+fn ends_with_file_path(prefix: &str) -> bool {
+    let token = prefix
+        .rsplit(|c: char| c.is_whitespace() || c == '(' || c == '"' || c == '\'' || c == ',')
+        .next()
+        .unwrap_or("");
+    match token.rfind('.') {
+        Some(dot_idx) => {
+            let ext = &token[dot_idx + 1..];
+            let base = &token[..dot_idx];
+            !base.is_empty()
+                && !ext.is_empty()
+                && ext.len() <= 5
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && base.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '-' | '.'))
+        }
+        None => false,
+    }
+}
+
+/// `text[start..end]`（数字列そのもの）の前後に、HTTP ステータスであることを示す文脈があるか。
+/// - 直前（空白・`:`・`=` を除いた最後の単語）が `http` / `status` / `error`
+/// - 直前が `(`（丸括弧の中の番号、例: `(529)`）
+/// - 直後が空白を挟んで大文字始まりの単語（例: `401 Unauthorized`、`529 Too Many`）
+fn has_status_context(text: &str, start: usize, end: usize) -> bool {
+    let prefix = text[..start].trim_end_matches([' ', '\t', ':', '=']);
+    if prefix.ends_with('(') {
+        return true;
+    }
+    let last_word: String = prefix
+        .rsplit(|c: char| !c.is_ascii_alphanumeric())
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(last_word.as_str(), "http" | "status" | "error") {
+        return true;
+    }
+    let suffix = text[end..].trim_start_matches([' ', '\t']);
+    let mut chars = suffix.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
 }
 
 #[cfg(test)]
@@ -127,6 +187,52 @@ mod tests {
             "node v14290.1",
             "exit code 14011",
             "request id 4015xyz",
+        ] {
+            assert_eq!(classify_provider_failure(text), None, "{text}");
+        }
+    }
+
+    /// U34-1 / P-87: Python の rich トレースバックの `file.py:529` 形（`:` の後に数字が続かず、行番号
+    /// だけで終わる）を HTTP 529 と誤認しない。実機（Phase 34 通し）の出力そのものを使う。
+    #[test]
+    fn real_traceback_file_line_is_not_a_status_code() {
+        let text = "\
+Traceback (most recent call last):
+  File \"/home/user/.venv/lib/python3.11/site-packages/pqa/main.py\", line 42, in run
+    from PIL import Image
+ModuleNotFoundError: No module named 'PIL'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File \"/home/user/.venv/lib/python3.11/site-packages/pypdf/_page.py\", line 529, in __getitem__
+    ] pypdf/_page.py:529 in __getitem__
+ImportError: cannot import name 'Image' from 'PIL' (unknown location)
+";
+        assert_eq!(classify_provider_failure(text), None, "{text}");
+    }
+
+    /// 決定に挙げた「ステータスの文脈」の形はすべて Throttled/AuthFailed に一致する。
+    #[test]
+    fn status_context_forms_match() {
+        for text in ["HTTP 529 received", "status 529", "529 Too Many Requests", "Error 529", "got (529) back"] {
+            assert_eq!(
+                classify_provider_failure(text),
+                Some(ProviderFailure::Throttled { retry_after_secs: 60 }),
+                "{text}"
+            );
+        }
+    }
+
+    /// 位置情報でも数字が単独で残らない限り誤って一致しない: `[\w/.-]+\.\w{1,5}:\d+` は拡張子を問わず
+    /// 汎用に無視する。
+    #[test]
+    fn generic_file_extensions_before_line_numbers_are_ignored() {
+        for text in [
+            "at foo/bar.rs:529:1",
+            "in module.go:401",
+            "see script.rb:429 for details",
+            "src/main.ts:529: unexpected token",
         ] {
             assert_eq!(classify_provider_failure(text), None, "{text}");
         }
