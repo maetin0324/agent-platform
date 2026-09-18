@@ -98,8 +98,9 @@ impl ReviewOutcome {
 /// `Check::Human` の criterion idx ごとに解決した `(pass, reason)`（ADR-0008 D2）。
 pub type HumanVerdicts = HashMap<usize, (bool, String)>;
 
-pub const PLAN_FILE: &str = "artifacts/plan.json";
-pub const REVIEW_FILE: &str = "artifacts/review.json";
+/// 成果物ディレクトリの中のファイル名（ADR-0036 D2: 置き場はタスクごとの `artifacts_dir`）。
+pub const PLAN_FILE_NAME: &str = "plan.json";
+pub const REVIEW_FILE_NAME: &str = "review.json";
 
 const REASON_TAIL: usize = 1024;
 
@@ -140,22 +141,26 @@ pub struct ReviewExtras {
     /// 解決した `(pass, reason)`（ADR-0008 D2）。呼び出し元は `task.acceptance` の全 `Human` criterion が
     /// 解決済みのときだけ `review_task` を呼ぶ想定（未解決分を待つ間はレビュー全体を延期する）。
     pub human: HumanVerdicts,
-    /// ADR-0016 D3 / M4: 集約 run のレビューなら true。暗黙の条件「`artifacts/summary.md` が存在する」を
+    /// ADR-0016 D3 / M4: 集約 run のレビューなら true。暗黙の条件「`<artifacts_dir>/summary.md` が存在する」を
     /// `criterion_idx = acceptance.len()`（Plan の暗黙条件があればその次）に加える。
     pub aggregate: bool,
 }
 
-pub const SUMMARY_FILE: &str = "artifacts/summary.md";
+pub const SUMMARY_FILE_NAME: &str = "summary.md";
 
 /// `task.acceptance` を順に判定する。`produced` はその run の `ArtifactProduced`（名前の照合に使う）。
+/// `artifacts_dir` はそのタスクの成果物ディレクトリ（ADR-0036 D1。ディスパッチャが決める）。
+/// `plan.json` / `review.json` / `summary.md` と `Check::ArtifactExists` の既定のパスはここを基準にする。
 pub async fn review_task(
     task: &Task,
     workspace: &dyn Workspace,
     workspace_dir: &Path,
+    artifacts_dir: &Path,
     produced: &[ArtifactRef],
     command_timeout: Duration,
     extras: ReviewExtras,
 ) -> ReviewOutcome {
+    let artifacts_rel = task_core::artifacts::rel_from(workspace_dir, artifacts_dir);
     let ReviewExtras {
         subject,
         plan,
@@ -195,7 +200,7 @@ pub async fn review_task(
                     .rev()
                     .find(|a| &a.name == name)
                     .map(|a| a.path.clone())
-                    .unwrap_or_else(|| format!("artifacts/{name}"));
+                    .unwrap_or_else(|| format!("{artifacts_rel}/{name}"));
                 let full = workspace_dir.join(&rel);
                 if full.is_file() {
                     match sha256_file(&full) {
@@ -225,10 +230,10 @@ pub async fn review_task(
         });
     }
 
-    // ADR-0007 D4: Plan kind は暗黙の条件「artifacts/plan.json が PlanOutput として妥当」を追加する。
+    // ADR-0007 D4: Plan kind は暗黙の条件「`<artifacts_dir>/plan.json` が PlanOutput として妥当」を追加する。
     let mut plan_output = None;
     if let Some(check) = &plan {
-        let (pass, reason, parsed) = check_plan_file(workspace_dir, check);
+        let (pass, reason, parsed) = check_plan_file(artifacts_dir, &artifacts_rel, check);
         plan_output = parsed;
         verdicts.push(Verdict {
             criterion_idx: task.acceptance.len(),
@@ -237,17 +242,18 @@ pub async fn review_task(
         });
     }
 
-    // ADR-0016 D3 / M4: 集約 run は artifacts/summary.md を作っていなければならない（暗黙の条件）。
+    // ADR-0016 D3 / M4: 集約 run は `<artifacts_dir>/summary.md` を作っていなければならない（暗黙の条件）。
     if aggregate {
         let idx = task.acceptance.len() + usize::from(plan.is_some());
-        let full = workspace_dir.join(SUMMARY_FILE);
+        let full = artifacts_dir.join(SUMMARY_FILE_NAME);
+        let summary_rel = format!("{artifacts_rel}/{SUMMARY_FILE_NAME}");
         let (pass, reason) = if full.is_file() {
             match sha256_file(&full) {
-                Ok(sha) => (true, format!("path={SUMMARY_FILE} sha256={sha}")),
-                Err(e) => (false, format!("path={SUMMARY_FILE} unreadable: {e}")),
+                Ok(sha) => (true, format!("path={summary_rel} sha256={sha}")),
+                Err(e) => (false, format!("path={summary_rel} unreadable: {e}")),
             }
         } else {
-            (false, format!("aggregate run did not produce {SUMMARY_FILE}"))
+            (false, format!("aggregate run did not produce {summary_rel}"))
         };
         verdicts.push(Verdict {
             criterion_idx: idx,
@@ -281,8 +287,17 @@ pub async fn review_task(
                     })
                     .collect(),
                 Some(run) => {
-                    let (result, record) =
-                        run_reviewer(task, workspace_dir, produced, subject, &reviewer_criteria, run).await;
+                    let (result, record) = run_reviewer(
+                        task,
+                        workspace_dir,
+                        artifacts_dir,
+                        &artifacts_rel,
+                        produced,
+                        subject,
+                        &reviewer_criteria,
+                        run,
+                    )
+                    .await;
                     reviewer_run = Some(record);
                     match result {
                         Ok(v) => v,
@@ -307,18 +322,23 @@ pub async fn review_task(
     }
 }
 
-fn check_plan_file(workspace_dir: &Path, check: &PlanCheck) -> (bool, String, Option<PlanOutput>) {
-    let path = workspace_dir.join(PLAN_FILE);
+fn check_plan_file(
+    artifacts_dir: &Path,
+    artifacts_rel: &str,
+    check: &PlanCheck,
+) -> (bool, String, Option<PlanOutput>) {
+    let path = artifacts_dir.join(PLAN_FILE_NAME);
+    let rel = format!("{artifacts_rel}/{PLAN_FILE_NAME}");
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(e) => return (false, format!("{PLAN_FILE} not found or unreadable: {e}"), None),
+        Err(e) => return (false, format!("{rel} not found or unreadable: {e}"), None),
     };
     match parse_and_validate(&text, check.depth, &check.limits, &check.genres) {
         Ok(plan) => {
             let n = plan.tasks.len();
-            (true, format!("{PLAN_FILE} is a valid PlanOutput with {n} tasks"), Some(plan))
+            (true, format!("{rel} is a valid PlanOutput with {n} tasks"), Some(plan))
         }
-        Err(e) => (false, format!("{PLAN_FILE}: {e}"), None),
+        Err(e) => (false, format!("{rel}: {e}"), None),
     }
 }
 
@@ -358,22 +378,39 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHin
 }
 
 /// Reviewer run を実行し、判定と、その run 自身の結果（`WorkerFinished` 用。ADR-0014 D1）を返す。
+#[allow(clippy::too_many_arguments)]
 async fn run_reviewer(
     task: &Task,
     workspace_dir: &Path,
+    artifacts_dir: &Path,
+    artifacts_rel: &str,
     produced: &[ArtifactRef],
     subject: &ReviewSubject,
     criteria: &[usize],
     run: ReviewerRun,
 ) -> (Result<Vec<Verdict>, ReviewerProviderFailure>, ReviewerRunRecord) {
     let mut record = ReviewerRunRecord { run_id: run.run_id.clone(), outcome: String::new(), usage: None };
-    let result = run_reviewer_inner(task, workspace_dir, produced, subject, criteria, run, &mut record).await;
+    let result = run_reviewer_inner(
+        task,
+        workspace_dir,
+        artifacts_dir,
+        artifacts_rel,
+        produced,
+        subject,
+        criteria,
+        run,
+        &mut record,
+    )
+    .await;
     (result, record)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_reviewer_inner(
     task: &Task,
     workspace_dir: &Path,
+    artifacts_dir: &Path,
+    artifacts_rel: &str,
     produced: &[ArtifactRef],
     subject: &ReviewSubject,
     criteria: &[usize],
@@ -390,7 +427,8 @@ async fn run_reviewer_inner(
             })
             .collect())
     };
-    let review_path = workspace_dir.join(REVIEW_FILE);
+    let review_path = artifacts_dir.join(REVIEW_FILE_NAME);
+    let review_rel = format!("{artifacts_rel}/{REVIEW_FILE_NAME}");
     // 前回のレビュー run の出力を今回の結果と誤読しない（ADR-0007 D1）。
     let _ = std::fs::remove_file(&review_path);
 
@@ -398,6 +436,9 @@ async fn run_reviewer_inner(
         protocol: PROTOCOL_VERSION,
         task: synthetic_review_task(task, &run.run_id, &run.hint),
         workspace: workspace_dir.to_path_buf(),
+        // ADR-0036 D2: レビューは対象タスクの成果物についての判定なので、対象タスクの成果物ディレクトリを使う
+        // （`review.json` もその中に書かせる）。
+        artifacts_dir: artifacts_dir.to_path_buf(),
         context: RunContext {
             prior_review: vec![],
             inputs: produced.to_vec(),
@@ -452,11 +493,11 @@ async fn run_reviewer_inner(
     }
     let text = match std::fs::read_to_string(&review_path) {
         Ok(t) => t,
-        Err(e) => return fail_all(format!("{tag}: {REVIEW_FILE} not found or unreadable: {e}")),
+        Err(e) => return fail_all(format!("{tag}: {review_rel} not found or unreadable: {e}")),
     };
     let output: ReviewOutput = match serde_json::from_str(&text) {
         Ok(o) => o,
-        Err(e) => return fail_all(format!("{tag}: {REVIEW_FILE} is not a valid ReviewOutput: {e}")),
+        Err(e) => return fail_all(format!("{tag}: {review_rel} is not a valid ReviewOutput: {e}")),
     };
     Ok(criteria
         .iter()
@@ -469,7 +510,7 @@ async fn run_reviewer_inner(
             None => Verdict {
                 criterion_idx: idx,
                 pass: false,
-                reason: format!("{tag}: no verdict for criterion {idx} in {REVIEW_FILE}"),
+                reason: format!("{tag}: no verdict for criterion {idx} in {review_rel}"),
             },
         })
         .collect())
@@ -545,7 +586,7 @@ mod tests {
     }
 
     async fn plain_review(task: &Task, ws: &LocalWorkspace, dir: &Path, produced: &[ArtifactRef], t: Duration) -> Vec<Verdict> {
-        review_task(task, ws, dir, produced, t, ReviewExtras::default())
+        review_task(task, ws, dir, &dir.join("artifacts"), produced, t, ReviewExtras::default())
             .await
             .verdicts
     }
@@ -629,6 +670,7 @@ mod tests {
             &task,
             &ws,
             dir.path(),
+            &dir.path().join("artifacts"),
             &[],
             Duration::from_secs(5),
             ReviewExtras { human, ..Default::default() },
@@ -661,7 +703,7 @@ mod tests {
             sink.progress("judging");
             if let Some(json) = &self.review_json {
                 std::fs::create_dir_all(req.workspace.join("artifacts")).unwrap();
-                std::fs::write(req.workspace.join(REVIEW_FILE), json).unwrap();
+                std::fs::write(req.artifacts_dir.join(REVIEW_FILE_NAME), json).unwrap();
             }
             self.seen.lock().unwrap().push(req);
             Ok(RunOutcome {
@@ -730,7 +772,7 @@ mod tests {
             sink: Box::new(RecordingSink::default()),
             hint: reviewer_hint(),
         };
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { reviewer: Some(run), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { reviewer: Some(run), ..Default::default() }).await;
         let pf = out.provider_failure.expect("provider failure");
         assert_eq!(pf.outcome, ProviderOutcome::Throttled { retry_after: Duration::from_secs(3) });
         assert!(pf.message.contains("reviewer(rev-x)"), "{}", pf.message);
@@ -744,7 +786,7 @@ mod tests {
         std::fs::write(dir.path().join("ok.txt"), "x").unwrap();
         // 前回のレビュー結果が残っていても消される。
         std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
-        std::fs::write(dir.path().join(REVIEW_FILE), r#"{"verdicts":[{"criterion":1,"pass":true,"reason":"stale"}]}"#).unwrap();
+        std::fs::write(dir.path().join("artifacts").join(REVIEW_FILE_NAME), r#"{"verdicts":[{"criterion":1,"pass":true,"reason":"stale"}]}"#).unwrap();
         let ws = LocalWorkspace::new(dir.path());
         let task = task_with(
             vec![
@@ -767,7 +809,7 @@ mod tests {
             summary: "did the thing".into(),
             evidence: vec![Evidence { criterion: 0, command: Some("test -f ok.txt".into()), exit: Some(0), stdout_tail: None }],
         };
-        let out = review_task(&task, &ws, dir.path(), &produced, Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter.clone())), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &produced, Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter.clone())), ..Default::default() }).await;
         assert_eq!(out.verdicts.iter().map(|v| (v.criterion_idx, v.pass)).collect::<Vec<_>>(), vec![(0, true), (1, true), (2, false)]);
         assert!(out.verdicts[1].reason.contains("reviewer(rev-1): looks right"), "{}", out.verdicts[1].reason);
         assert!(out.verdicts[2].reason.contains("missing docs"));
@@ -800,7 +842,7 @@ mod tests {
             terminal: Terminal::Done { summary: "s".into(), evidence: vec![], usage: None },
             seen: Mutex::new(vec![]),
         });
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)), ..Default::default() }).await;
         assert!(out.verdicts.iter().all(|v| !v.pass));
         assert!(out.verdicts[0].reason.contains("review.json not found"), "{}", out.verdicts[0].reason);
 
@@ -810,7 +852,7 @@ mod tests {
             terminal: Terminal::Error { message: "boom".into(), retryable: true },
             seen: Mutex::new(vec![]),
         });
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)), ..Default::default() }).await;
         assert!(out.verdicts.iter().all(|v| !v.pass && v.reason.contains("boom")));
 
         // 判定の欠落（criterion 1 が無い）。
@@ -819,12 +861,12 @@ mod tests {
             terminal: Terminal::Done { summary: "s".into(), evidence: vec![], usage: None },
             seen: Mutex::new(vec![]),
         });
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: Some(reviewer_run(adapter)), ..Default::default() }).await;
         assert_eq!(out.verdicts.iter().map(|v| v.pass).collect::<Vec<_>>(), vec![true, false]);
         assert!(out.verdicts[1].reason.contains("no verdict for criterion 1"));
 
         // reviewer run が無い（ディスパッチャが供給できなかった）。
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: None, ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { subject: subject.clone(), plan: None, reviewer: None, ..Default::default() }).await;
         assert!(out.verdicts.iter().all(|v| !v.pass && v.reason.contains("no reviewer run")));
     }
 
@@ -837,7 +879,7 @@ mod tests {
         let check = PlanCheck { depth: 1, limits: PlanLimits::default(), genres: vec![] };
 
         // ファイル無し。
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;
         assert_eq!(out.verdicts.len(), 1);
         assert_eq!(out.verdicts[0].criterion_idx, 0);
         assert!(!out.verdicts[0].pass);
@@ -847,22 +889,22 @@ mod tests {
         // 不正（依存が範囲外）。
         std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
         std::fs::write(
-            dir.path().join(PLAN_FILE),
+            dir.path().join("artifacts").join(PLAN_FILE_NAME),
             r#"{"tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"command","cmd":"true","expect_exit":0}}],"depends_on":[5]}]}"#,
         )
         .unwrap();
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;
         assert!(!out.verdicts[0].pass);
         assert!(out.verdicts[0].reason.contains("out of range"), "{}", out.verdicts[0].reason);
 
         // 妥当。acceptance に Command 条件があれば idx 0、plan は idx 1。
         std::fs::write(
-            dir.path().join(PLAN_FILE),
+            dir.path().join("artifacts").join(PLAN_FILE_NAME),
             r#"{"tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"reviewer"}}]},{"title":"b","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"depends_on":[0]}]}"#,
         )
         .unwrap();
         task.acceptance.push(Criterion { text: "c".into(), check: Check::Command { cmd: "true".into(), expect_exit: 0 } });
-        let out = review_task(&task, &ws, dir.path(), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;
+        let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;
         assert_eq!(out.verdicts.iter().map(|v| (v.criterion_idx, v.pass)).collect::<Vec<_>>(), vec![(0, true), (1, true)]);
         assert!(out.verdicts[1].reason.contains("2 tasks"));
         assert_eq!(out.plan.unwrap().tasks.len(), 2);

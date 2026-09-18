@@ -4670,3 +4670,123 @@ ad-hoc file system, I/O offload — 直近の研究動向と候補テーマ」�
   今回で `literature` にも実装が入ったので、**2 分野で同じ形**（`sources.json` + 閾値 + 0 件専用の
   メッセージ + 成果物を残す）になった。DESIGN に書くときはこの形をそのまま一般規則にできる。
 - P-87: 対応済み。U34-1 参照。
+
+## Phase 35 — 成果物はタスクごと（ADR-0036。2026-09-18）
+
+### 背景（実機の事故。本番、2026-09-18）
+
+秘書の計画 run が作った 2 つの兄弟タスク（研究文献調査課 = PaperQA2、Web 調査課 = LDR）が
+**親（計画タスク）の workspace をそのまま継いだ**（`plan::materialize` / `delegate` は
+`workspace: parent.workspace.clone()`）。両方のアダプタが `<workspace>/artifacts/` に書いたため:
+
+- LDR の `sources.json` が PaperQA2 の `sources.json` を**上書き**した。
+- レビュアーは**相手の課の成果物**を読んで判定した。
+- `artifacts/result.json` も同じパスなので、`max_concurrency` を 3 にした今、兄弟が同時に走ると
+  **結果ファイルそのものが競合**する（これまで表に出なかったのは `max_concurrency = 1` だったから）。
+
+### 決定（ADR-0036）
+
+- **D1**: `RunRequest.artifacts_dir`（絶対パス）を追加し、**ディスパッチャが決める**。
+  所有の判定は純粋関数 `task_core::artifacts::artifacts_dir_for(task, dir)`:
+  ① `parent_id` が無い → 所有（単独タスク。既存の挙動・パス・テストは 1 バイトも変わらない）
+  ② ディレクトリの末尾がそのタスクの id（既定の `workspace_root/<task_id>`、Remote の手元の写し）→ 所有
+  ③ それ以外（親から継いだ path）→ 共有 → `<workspace>/.taskd/artifacts/<task_id>/`
+- **D2**: `result.json` / `delegate.json` / `plan.json` / `review.json` / `summary.md` /
+  `answer.md` / `sources.json` / `candidates.json` / `report.md` / `research.json`、結果ファイルから読む
+  `memory`（ADR-0033 D6）と `report`（ADR-0034 D7）は全て `artifacts_dir` 基準。レビュー run は
+  **対象タスクの `artifacts_dir`** を使う。
+- **D3**: ワーカーへの指示（claude-code / codex / acp のプロンプト）は `artifacts_dir` の workspace 相対表記
+  で書く。単独タスクでは `artifacts` なので文面はバイト単位で同一。
+- **D4**: `ArtifactRef.path` は従来どおり workspace 相対（`.taskd/artifacts/<task_id>/report.md`）。
+  GUI の `GET /tasks/{id}/artifacts/{idx}` はそのまま読める（隠しディレクトリを弾く規則は無い）。
+- **D5**: `PROTOCOL_VERSION` は **4 のまま**（`run` への追加のみ）。
+
+### 変更したファイル
+
+- `crates/task-core/src/artifacts.rs`（**新規**）— `owns_workspace` / `artifacts_dir_for` /
+  `artifacts_rel_for` / `rel_from`（純粋関数のみ。I/O も判断も無い）。単体テスト 4 件。
+- `crates/task-core/src/lib.rs` — `pub mod artifacts` と再公開。
+- `crates/task-worker/src/protocol.rs` — `RunRequest.artifacts_dir` を追加（必須）。
+  `artifacts_rel()` / `artifact_path()` / `artifact_rel_path()` のヘルパ。`PROTOCOL_VERSION` は 4 のまま。
+- `crates/task-worker/src/workspace.rs` — `prepare` はタスクごとの成果物ディレクトリを作り、`collect` は
+  その中を workspace 相対のパスで列挙する。
+- `crates/task-worker/src/claude_code.rs` / `codex.rs` / `acp.rs` — 結果ファイルと `delegate.json` は
+  `req.artifacts_dir`、プロンプトは `req.artifacts_rel()`（`build_prompt` に引数 1 つ追加）。
+  エラー文面（`… without <rel>/result.json` 等）も実際のパスを出す。
+- `crates/task-worker/src/preamble.rs` — 記憶の書き方の指示も `artifacts_dir` の相対パスで書く。
+- `crates/task-worker/src/paperqa.rs` — 成果物パスの解決だけ（`artifacts_dir` と申告する相対パス）。
+  取得（acquire）の段は `&artifacts_dir` を受け取る形のまま（Phase 35 では中身を触っていない）。
+- `crates/task-worker/src/local_deep_research.rs` — 同上（ランナーに渡す `report_path` もここ基準）。
+- `crates/task-worker/src/delegate_file.rs` — `DELEGATE_FILE`（`artifacts/delegate.json`）→
+  `DELEGATE_FILE_NAME`（`delegate.json`）。関数は `artifacts_dir` を受け取る。
+- `crates/task-worker/src/memory.rs` / `result_report.rs` — 結果ファイルを `artifacts_dir` から読む。
+- `crates/task-dispatch/src/review.rs` — `review_task` に `artifacts_dir` を追加。
+  `PLAN_FILE` / `REVIEW_FILE` / `SUMMARY_FILE` → `*_FILE_NAME`（ファイル名）+ 相対表記の組み立て。
+  `Check::ArtifactExists` の既定パスは `<artifacts_rel>/<name>`。レビュー run の `RunRequest` は
+  対象タスクの `artifacts_dir`。
+- `crates/task-dispatch/src/dispatcher.rs` — `artifacts_dir(task, dir)`（`task_core::artifacts` に委譲）、
+  `RunRequest` の組み立て、Plan の `plan.json` の掃除、`absorb_memory` / `report.kind` の読み取り、
+  `spawn_review` へ受け渡し。
+- `crates/taskctl/src/commands/worker.rs` / `crates/taskd/src/lib.rs` — `RunRequest` に `artifacts_dir`。
+- `crates/task-api` — **実装の変更なし**（`resolve_artifact` は記録された workspace 相対パスをそのまま
+  結合して `canonicalize` するので `.taskd/artifacts/<id>/…` も読める）。テストを 1 本追加。
+- `tests/e2e/tests/plan_scenarios.rs` — fake ワーカーが `run.artifacts_dir` を読むようにした
+  （子 C の `reviewer` 条件の `review.json` は子ごとのディレクトリに書く必要がある）。
+- `docs/adr/0036-per-task-artifacts.md`（新規）、`docs/protocol/worker-protocol.md`（§3.1 の表に
+  `artifacts_dir`、冒頭に Phase 35 の節、§9 / §10 の置き場の説明）、
+  `docs/protocol/worker-protocol.schema.json`（`UPDATE_SCHEMA=1` で再生成。5 行追加）、
+  `config/taskd.example.toml`（`[memory]` の説明）、`docs/PROGRESS.md`（本節）。
+- `gui/` は**変更なし**。`gui/test/taskd/fixtures/org-worker.sh` は成果物を `artifact` メッセージで
+  自分で申告し、終端も JSON Lines で返す（結果ファイルを使わない）ので、置き場の変更の影響を受けない。
+
+### 受け入れ条件と証拠
+
+- 単独タスク（親なし）は `<workspace>/artifacts` のまま:
+  `cargo test -p task-dispatch a_standalone_task_keeps_the_plain_artifacts_dir` → ok 1 passed
+  （`.taskd/` が作られないこと、`ArtifactProduced.path == "artifacts/report.md"` を確認）。
+  プロンプトの回帰テスト（`claude_code::tests::build_prompt_*`、`preamble::tests::*`）は文面を変えずに全 pass。
+- 兄弟 2 件が同じ workspace で同時に走っても混ざらない:
+  `cargo test -p task-dispatch siblings_sharing_one_workspace_do_not_mix_their_result_files_or_artifacts`
+  → ok 1 passed（並列度 2 で同じ tick に 2 件 dispatch、各 run が自分の `result.json` を書いて 150 ms 後に
+  読み直し、`.taskd/artifacts/<task_id>/` に分かれていること、共有 `artifacts/` が作られないことを確認）。
+- `ArtifactRef.path` は workspace 相対で GUI の読み取り API が読める:
+  `cargo test -p task-api --test files per_task_artifact_paths_under_dot_taskd_are_served` → ok 1 passed
+  （`GET /tasks/{id}/artifacts/0` が 200 で本文一致、一覧の `exists` / `sha256_matches` が true）。
+- 各アダプタが `artifacts_dir` を使う（各 1 本）:
+  `cargo test -p task-worker a_shared_workspace` →
+  `workspace::tests::a_shared_workspace_gets_a_per_task_artifacts_dir_and_relative_paths`、
+  `claude_code` / `codex` / `acp`（`a_shared_workspace_task_uses_its_own_artifacts_dir`）、
+  `paperqa` / `local_deep_research`（`a_shared_workspace_task_writes_under_its_own_artifacts_dir`）
+  の 6 件 ok。LDR の分は「兄弟の `artifacts/sources.json` を上書きしない」ことも見る（実機の事故そのもの）。
+- 全体: `cargo test --workspace --no-fail-fast` → `grep -c "^test result: FAILED"` = **0**、
+  合計 **1,039 passed**（52 個の test result 行）。
+  `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**、warning / error 0 行。
+- スキーマ: `UPDATE_SCHEMA=1 cargo test -p task-worker` で再生成し、
+  `committed_schema_matches_generated` が pass（差分は `run.artifacts_dir` の 5 行だけ）。
+- テスト以外に `unwrap()` / `expect()` を追加していない（差分の追加行の unwrap は全て `#[cfg(test)]` 内）。
+
+### 未解決事項
+
+- U35-1: **Remote（`WorkspaceSpec::Remote`）は「所有」扱い**にした。手元の写しが
+  `workspace_root/<task_id>` でタスクごとに分かれており、`.taskd/` はクラスタ同期の両方向から除外される
+  （ADR-0018 D1）ので、`.taskd/artifacts/` に置くと**クラスタ側で作られた成果物が写しに降りてこない**。
+  ただし `sync = rsync` / `none` で**同じリモートディレクトリを複数タスクが使う**場合、クラスタ側の
+  `artifacts/` では依然ぶつかる（`sync = worktree` なら worktree がタスクごとなのでぶつからない）。
+  リモート側もタスクごとにするなら、同期の除外規則の見直しが要る（人間の判断待ち）。
+- U35-2: 所有の判定に `parent_id` を使っている。**人が `--workspace` で 2 つの独立したタスク
+  （親子でない）を同じディレクトリに向けた**場合は、従来どおり両方が `artifacts/` を使う（既存の単独
+  タスクの挙動とテストを変えないことを優先した。ADR-0036 D1）。血縁で判定しているのは、実機の事故が
+  「親から継いだ」ことで起きたため。
+- U35-3: `artifacts_dir` を読まない既存のワーカー（`artifacts/` に決め打ちで書くもの）は、**共有
+  workspace のタスクでは結果ファイルを見つけられない**。単独タスクでは従来どおり動く（D5）。
+  本番で使っている claude-code / codex / acp / paperqa / LDR はすべてこの Phase で対応済み。
+  外部の fake ワーカーを書く場合は `run.artifacts_dir` を読むこと（`docs/protocol/worker-protocol.md` §3.1）。
+
+### 提案
+
+- P-88: DESIGN §5.4 / §5.8 に「成果物ディレクトリは `RunRequest.artifacts_dir`（タスクごと。共有
+  workspace では `.taskd/artifacts/<task_id>/`）」を反映する（現状 DESIGN は `artifacts/result.json` を
+  workspace 直下として書いている）。ADR-0036 が根拠。
+- P-89: 子タスクの workspace の与え方そのもの（親と同じディレクトリを共有する設計）を、案件（project）
+  ごとの作業ディレクトリ + タスクごとの成果物ディレクトリという形で整理するか、人間に確認したい。
+  今回の変更は「成果物だけを分ける」最小の対処で、作業ファイル（ソースコード等）の衝突は対象外。

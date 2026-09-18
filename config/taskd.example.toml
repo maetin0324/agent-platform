@@ -21,7 +21,8 @@ max_requeues = 5                   # ADR-0011: 同じ試行での連続 requeue�
 
 # 組織のノードごとの長期記憶（ADR-0033 D6、SPEC §3.2「各ノードは長期記憶を持つ」「記憶は案件をまたぐ」）。
 # `<dir>/<node_id>/notes.md`（案件をまたぐ記憶）と `<dir>/<node_id>/projects/<project_id>.md`（案件の引き出し）。
-# run の前にそれぞれ 8,000 字まで前置きし、run の後に `artifacts/result.json` の `memory` を
+# run の前にそれぞれ 8,000 字まで前置きし、run の後に結果ファイル（`<artifacts_dir>/result.json`。
+# 共有 workspace のタスクでは `.taskd/artifacts/<task_id>/result.json`。ADR-0036）の `memory` を
 # `- <日付>: <一行>` の形で追記する。相対パスはこのファイル基準。書かなければ記憶を読まないし書かない。
 # ディレクトリは 0700 で作る（人の好みや相談の中身が入るため）。
 [memory]

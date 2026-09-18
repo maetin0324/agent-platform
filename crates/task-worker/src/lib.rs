@@ -35,7 +35,7 @@ pub use cluster_login::{
 };
 pub use codex::{CodexAdapter, CodexConfig};
 pub use codex_account::{CodexLoginSession, check_account_codex, start_login_codex};
-pub use delegate_file::{DELEGATE_FILE, clear_delegate_file, forward_delegate_file};
+pub use delegate_file::{DELEGATE_FILE_NAME, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
 pub use local_deep_research::{EvidenceThresholds, LdrAdapter, LdrConfig, LdrMode};
 pub use memory::{MEMORY_MAX_CHARS, MemoryDir, MemoryUpdate, read_result_memory};

@@ -1265,6 +1265,10 @@
     "run": {
       "description": "taskd → ワーカーの `run` メッセージ（1 行）。`{\"type\":\"run\", ...}`。",
       "properties": {
+        "artifacts_dir": {
+          "description": "絶対パス。この run の成果物と結果ファイル（`result.json`）の置き場（ADR-0036 D1）。\nworkspace を自分で所有するタスクは `<workspace>/artifacts`、親から継いだタスク（plan / delegate の子）は\n`<workspace>/.taskd/artifacts/<task_id>`。決めるのはディスパッチャで、アダプタはここに書くだけ。",
+          "type": "string"
+        },
         "context": {
           "$ref": "#/$defs/RunContext"
         },
@@ -1285,6 +1289,7 @@
         "protocol",
         "task",
         "workspace",
+        "artifacts_dir",
         "context"
       ],
       "type": "object"

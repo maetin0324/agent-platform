@@ -343,10 +343,13 @@ async fn execute(
         .map_err(|e| CliError::msg(format!("failed to prepare workspace: {e}")))?;
 
     let run_id = TaskId::new().to_string();
+    // ADR-0036 D1: 成果物ディレクトリはタスクごと（共有 workspace の子は `.taskd/artifacts/<task_id>/`）。
+    let artifacts_dir = task_core::artifacts::artifacts_dir_for(task, &prepared);
     let req = RunRequest {
         protocol: PROTOCOL_VERSION,
         task: task.clone(),
         workspace: prepared.clone(),
+        artifacts_dir,
         context: RunContext {
             prior_review: to_prior_review(prior_review_from_events(events)),
             inputs: task.inputs.clone(),
@@ -433,10 +436,13 @@ async fn execute_on_cluster(
     run_task.objective.push_str(&remote_exec_instructions(&settings));
 
     let run_id = TaskId::new().to_string();
+    // ADR-0036 D1: Remote の写しは `workspace_root/<task_id>` でタスクごとなので `<写し>/artifacts`。
+    let artifacts_dir = task_core::artifacts::artifacts_dir_for(&run_task, &prepared);
     let req = RunRequest {
         protocol: PROTOCOL_VERSION,
         task: run_task,
         workspace: prepared.clone(),
+        artifacts_dir,
         context: RunContext {
             prior_review: to_prior_review(prior_review_from_events(events)),
             inputs: task.inputs.clone(),
