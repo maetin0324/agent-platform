@@ -8,8 +8,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::delegate::{ChildSpec, resolve_child_defaults};
-use crate::model::{Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
+use crate::delegate::{ChildSpec, WorkspaceContext, resolve_child_defaults};
+use crate::model::{
+    Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec,
+};
 use crate::org::OrgNode;
 
 /// DESIGN §5.6「分解の深さは上限 3」。`plan_depth`（その Plan 自身を含む祖先 Plan の数）が
@@ -55,6 +57,10 @@ pub struct NewTask {
     /// `role` を書いたときは tier / adapter / 予算はその役割が勝ち、`assignee` は「誰の仕事か」だけを表す。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
+    /// ADR-0039 D2: この子の作業場所（任意）。**書かなければ案件の作業場所 → 親の workspace** を継ぐので、
+    /// 別の場所（別のリポジトリ・別のクラスタ）で作業させたいときにだけ書く。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceSpec>,
 }
 
 /// DESIGN §5.6 の `PlanOutput{ tasks: Vec<NewTask> }`。
@@ -329,6 +335,7 @@ pub fn materialize(
     org: &[OrgNode],
     roles: &[RoleSpec],
     genres: &[GenreSpec],
+    workspace: WorkspaceContext<'_>,
     now: OffsetDateTime,
 ) -> Vec<Task> {
     let ids: Vec<TaskId> = plan.tasks.iter().map(|_| TaskId::new()).collect();
@@ -371,7 +378,8 @@ pub fn materialize(
                     tier: defaults.tier,
                     adapter: defaults.adapter,
                 },
-                workspace: parent.workspace.clone(),
+                // ADR-0039 D2: 明示 > 案件の workspace > 親の workspace（従来）。
+                workspace: workspace.child_workspace(parent, t.workspace.as_ref()),
                 budget: Budget {
                     max_turns: defaults.max_turns,
                     max_wall_secs: defaults.max_wall_secs,
@@ -424,6 +432,7 @@ mod tests {
             role: None,
             genre: None,
             assignee: None,
+            workspace: None,
         }
     }
 
@@ -483,7 +492,7 @@ mod tests {
         };
         validate(&plan, 1, &PlanLimits::default(), &[]).unwrap();
         let p = parent();
-        let children = materialize(&p, &plan, &[], &[], &[], OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(children.len(), 3);
         for c in &children {
             assert_eq!(c.parent_id, Some(p.id));
@@ -509,7 +518,7 @@ mod tests {
         p.project_id = Some(crate::org::ProjectId::new());
         p.milestone_id = Some(crate::org::MilestoneId::new());
         let plan = PlanOutput { tasks: vec![new_task("a", vec![]), new_task("b", vec![])] };
-        let children = materialize(&p, &plan, &[], &[], &[], OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
         for c in &children {
             assert_eq!(c.project_id, p.project_id, "child must stay in the parent's project");
             assert_eq!(c.milestone_id, p.milestone_id);
@@ -517,7 +526,7 @@ mod tests {
 
         // 案件が無い Plan（従来どおり）では子にも付かない。
         let none = parent();
-        let children = materialize(&none, &plan, &[], &[], &[], OffsetDateTime::now_utc());
+        let children = materialize(&none, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert!(children.iter().all(|c| c.project_id.is_none() && c.milestone_id.is_none()));
     }
 
@@ -598,7 +607,7 @@ mod tests {
             Err(PlanError::DepthExceeded { index: 0, depth: 4, max: 3 })
         ));
         let p = parent();
-        let children = materialize(&p, &nested, &[], &[], &[], OffsetDateTime::now_utc());
+        let children = materialize(&p, &nested, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(children[0].kind, TaskKind::Plan);
     }
 
@@ -630,19 +639,19 @@ mod tests {
         explicit.role = Some("implementer".into());
         explicit.genre = Some("literature".into());
         let plan = PlanOutput { tasks: vec![explicit] };
-        let children = materialize(&p, &plan, &[], &[], &genres, OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(children[0].genre.as_deref(), Some("literature"));
 
         // 2. genre 未指定・role が一意に決まる分野に属する。
         let mut by_role = new_task("by-role", vec![]);
         by_role.role = Some("literature-scout".into());
         let plan = PlanOutput { tasks: vec![by_role] };
-        let children = materialize(&p, &plan, &[], &[], &genres, OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(children[0].genre.as_deref(), Some("literature"));
 
         // 3. genre も role も無ければ親の分野を継ぐ。
         let plan = PlanOutput { tasks: vec![new_task("neither", vec![])] };
-        let children = materialize(&p, &plan, &[], &[], &genres, OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(children[0].genre.as_deref(), Some("coding"));
     }
 
@@ -674,7 +683,7 @@ mod tests {
         t.role = Some("implementer".into());
         t.genre = Some("coding".into());
         let plan = PlanOutput { tasks: vec![t] };
-        let children = materialize(&p, &plan, &[], &all_roles, &genres, OffsetDateTime::now_utc());
+        let children = materialize(&p, &plan, &[], &all_roles, &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
         // adapter: role(implementer) の既定が優先。
         assert_eq!(children[0].worker_hint.adapter.as_deref(), Some("codex"));
         // tier: role に既定が無いので分野の既定役割（lead）から。
@@ -727,7 +736,7 @@ mod tests {
         let mut unknown = new_task("誰？", vec![]);
         unknown.assignee = Some("nobody".into());
         let plan = PlanOutput { tasks: vec![only_assignee, with_role, unknown] };
-        let children = materialize(&p, &plan, &org, &roles, &genres, now);
+        let children = materialize(&p, &plan, &org, &roles, &genres, WorkspaceContext::default(), now);
 
         assert_eq!(children[0].assignee.as_deref(), Some("research-survey"));
         assert_eq!(children[0].genre.as_deref(), Some("literature"));
@@ -900,6 +909,65 @@ mod tests {
         let json = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"genre":"literature"}]}"#;
         let err = parse_and_validate(json, 1, &PlanLimits::default(), &genres).unwrap_err();
         assert!(err.contains("literature"), "{err}");
+    }
+
+    /// ADR-0039 D2: 分解した子の作業場所は **明示 > 案件 > 親** の 3 段で決まる。
+    #[test]
+    fn child_workspace_is_explicit_then_project_then_parent() {
+        let p = parent();
+        let project = WorkspaceSpec::Local {
+            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+        };
+        let explicit = WorkspaceSpec::Local {
+            path: PathBuf::from("/home/rmaeda/workspace/rust/other"),
+        };
+
+        // 案件も明示も無ければ従来どおり親を継ぐ。
+        let plan = PlanOutput { tasks: vec![new_task("a", vec![])] };
+        let children = materialize(&p, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
+        assert_eq!(children[0].workspace, p.workspace);
+
+        // 案件の作業場所は親より強い。
+        let ws = WorkspaceContext { project: Some(&project), home: None };
+        let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
+        assert_eq!(children[0].workspace, project);
+
+        // タスクが明示すれば案件より強い。
+        let mut explicit_task = new_task("b", vec![]);
+        explicit_task.workspace = Some(explicit.clone());
+        let plan = PlanOutput {
+            tasks: vec![new_task("a", vec![]), explicit_task],
+        };
+        let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
+        assert_eq!(children[0].workspace, project);
+        assert_eq!(children[1].workspace, explicit);
+    }
+
+    /// ADR-0039 D2: 案件が Remote なら子も Remote（従来の ADR-0018 経路に乗る）。D5: `~` は展開する。
+    #[test]
+    fn a_remote_project_makes_remote_children_and_tilde_is_expanded() {
+        let p = parent();
+        let remote = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+        };
+        let plan = PlanOutput { tasks: vec![new_task("a", vec![])] };
+        let home = PathBuf::from("/home/rmaeda");
+        let ws = WorkspaceContext { project: Some(&remote), home: Some(&home) };
+        let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
+        assert_eq!(children[0].workspace, remote, "Remote の path はクラスタ側なので触らない");
+
+        let tilde = WorkspaceSpec::Local {
+            path: PathBuf::from("~/workspace/rust/pluvio-poc"),
+        };
+        let ws = WorkspaceContext { project: Some(&tilde), home: Some(&home) };
+        let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
+        assert_eq!(
+            children[0].workspace,
+            WorkspaceSpec::Local {
+                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc")
+            }
+        );
     }
 
     /// ADR-0007 D2 / ADR-0003 D6: 生成スキーマとコミット済みファイルの一致。`UPDATE_SCHEMA=1` で再生成。

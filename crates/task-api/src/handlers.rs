@@ -439,6 +439,11 @@ async fn create_project(
             message: "request must not be blank".into(),
         }]));
     }
+    // ADR-0039 D1 / D5: 作業場所は `[[clusters]]` に無いクラスタを弾き、`Local` の `~` を展開して保存する。
+    let workspace = match create.workspace {
+        Some(spec) => Some(validated_workspace(&state, spec)?),
+        None => None,
+    };
     let roles = state.inner.roles.clone();
     let genres = state.inner.genres.clone();
     let conversation_genre = state.inner.conversation_genre.clone();
@@ -452,6 +457,7 @@ async fn create_project(
                 // ADR-0033 D2: 作った直後は `proposed`（秘書が理解確認と方針を返すまで人の返事待ち）。
                 status: ProjectStatus::Proposed,
                 secretary_summary: None,
+                workspace,
                 created_at: now,
                 updated_at: now,
             };
@@ -537,9 +543,30 @@ async fn patch_project(
     no_query(&raw)?;
     let project_id = parse_project_id(&id)?;
     let patch: ProjectPatchBody = read_json(body, false).await?;
+    if patch.status.is_none() && patch.workspace.is_none() {
+        return Err(ApiProblem::validation(vec![ValidationError {
+            field: None,
+            message: "specify at least one of `status` or `workspace`".into(),
+        }]));
+    }
+    // ADR-0039 D1 / D5: 作業場所を書き換えるなら、先に検証と `~` の展開をする（422 はここで返す）。
+    let workspace = match patch.workspace {
+        Some(Some(spec)) => Some(Some(validated_workspace(&state, spec)?)),
+        Some(None) => Some(None),
+        None => None,
+    };
     let project = state
         .blocking(move |store| {
-            if !store.project_set_status(project_id, patch.status).map_err(store_problem)? {
+            if let Some(status) = patch.status
+                && !store.project_set_status(project_id, status).map_err(store_problem)?
+            {
+                return Err(ApiProblem::project_not_found(&project_id.to_string()));
+            }
+            if let Some(spec) = &workspace
+                && !store
+                    .project_set_workspace(project_id, spec.as_ref())
+                    .map_err(store_problem)?
+            {
                 return Err(ApiProblem::project_not_found(&project_id.to_string()));
             }
             store
@@ -549,6 +576,20 @@ async fn patch_project(
         })
         .await?;
     Ok(json_response(StatusCode::OK, &project))
+}
+
+/// ADR-0039 D1 / D5: 案件の作業場所を受け取るときの検証と正規化（純粋に近い: 設定の一覧と `$HOME` を見るだけ）。
+/// `Remote` の `cluster` は `[[clusters]]` にあること（無ければ 422）、`Local` の `~` は `$HOME` で展開する。
+fn validated_workspace(state: &ApiState, spec: task_core::WorkspaceSpec) -> Result<task_core::WorkspaceSpec, ApiProblem> {
+    if let task_core::WorkspaceSpec::Remote { cluster, .. } = &spec
+        && !state.inner.config_view.clusters.iter().any(|c| &c.id == cluster)
+    {
+        return Err(ApiProblem::validation(vec![ValidationError {
+            field: Some("workspace.cluster".into()),
+            message: format!("cluster {cluster:?} is not configured"),
+        }]));
+    }
+    Ok(spec.with_home_expanded(task_core::home_dir().as_deref()))
 }
 
 async fn create_milestone(

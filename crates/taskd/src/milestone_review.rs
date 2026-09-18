@@ -263,6 +263,7 @@ mod tests {
             request: "調べて".into(),
             status: ProjectStatus::Active,
             secretary_summary: None,
+            workspace: None,
             created_at: now,
             updated_at: now,
         };

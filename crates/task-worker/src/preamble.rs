@@ -36,6 +36,7 @@ use crate::protocol::{ConversationAddressee, MilestoneReviewContext, RunContext}
 /// 単独タスクでは `artifacts` なので出力は Phase 34 までとバイト単位で同じ）。
 pub fn render(context: &RunContext, artifacts: &str) -> String {
     let mut out = person_sections(context);
+    out.push_str(&workspace_section(context));
     out.push_str(&role_section(context));
     out.push_str(&memory_instructions(context, artifacts));
     out.push_str(&conversation_instructions(context));
@@ -119,6 +120,37 @@ fn person_sections(context: &RunContext) -> String {
         out.push('\n');
     }
     out
+}
+
+/// ADR-0039 D3: 案件の作業場所から、前置きに出す 1 行を組む（純粋関数。ディスパッチャがこれを
+/// `RunContext::workspace_note` に入れる）。`Remote` は ADR-0018 D1 の「クラスタ側が正、手元は写し」を書く。
+pub fn workspace_note(spec: &task_core::WorkspaceSpec) -> String {
+    match spec {
+        task_core::WorkspaceSpec::Local { path } => {
+            format!("この案件のコードは `{}` にある。", path.display())
+        }
+        task_core::WorkspaceSpec::Remote { cluster, path } => format!(
+            "この案件のコードはクラスタ {cluster} の `{}` にある。いまのカレントディレクトリはその写しで、\
+             taskd が run の前後で同期する。",
+            path.display()
+        ),
+    }
+}
+
+/// 作業場所の節（ADR-0039 D3）。**案件が作業場所を決めている run にだけ**出す。
+/// 実機の事故（2026-09-18）: 空の workspace に置かれた子タスクが、自分で `ssh` してリモートの
+/// 作業ツリーに直接書いた。SPEC §3.7 追記「手元で編集してリモートで検証」をここで明示する。
+fn workspace_section(context: &RunContext) -> String {
+    let Some(note) = &context.workspace_note else {
+        return String::new();
+    };
+    format!(
+        "## 作業場所 (where this project's code lives)\n\
+         {note}\n\
+         編集はこの run の作業ディレクトリ（カレントディレクトリ）で行うこと。**別のホストの作業ツリーへ \
+         `ssh` で直接書き込んではいけない**（同期は taskd が行う。検証・計測だけをリモートで実行する。\
+         SPEC §3.7「手元で編集してリモートで検証」）。\n\n"
+    )
 }
 
 /// 5. 役割の指示文（ADR-0016 D1 / M3。Phase 23 までと同じ文面）。

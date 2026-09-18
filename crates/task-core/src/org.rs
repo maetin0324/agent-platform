@@ -317,6 +317,11 @@ pub struct Project {
     /// 秘書の理解確認・方針（Phase 24 で秘書が書く）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secretary_summary: Option<String>,
+    /// ADR-0039 D1: この案件の作業場所（コードのある場所）。`Local` は手元の普段のパス（SPEC §2.1）、
+    /// `Remote` はクラスタ側の作業ディレクトリ（ADR-0018 D1）。決めていない案件は `None`（従来どおり、
+    /// 分解した仕事は親の workspace を継ぐ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<crate::model::WorkspaceSpec>,
     #[serde(with = "time::serde::rfc3339")]
     #[schemars(with = "String")]
     pub created_at: OffsetDateTime,

@@ -369,6 +369,93 @@ async fn projects_and_milestones_round_trip_through_the_api() {
     );
 }
 
+/// ADR-0039 D1（Phase 43）: 案件の作業場所を `POST` / `PATCH` で受け、`GET` で返す。
+/// `[[clusters]]` に無いクラスタは 422、`Local` の `~` は taskd の `$HOME` で展開して保存する。
+#[tokio::test]
+async fn a_project_can_carry_the_workspace_where_its_code_lives() {
+    let env = env_with_token();
+    let app = env.router();
+
+    // 1. 作るときに指定できる（`Remote`）。
+    let resp = send(
+        &app,
+        p(
+            "/api/v1/projects",
+            &json!({
+                "title": "Pluvio の PoC",
+                "request": "DPU オフロードの PoC",
+                "workspace": {"kind": "remote", "cluster": "pegasus", "path": "/work/NBB/rmaeda/workspace/rust/benchfs"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 201, "{}", resp.text());
+    let project_id = resp.json()["id"].as_str().expect("id").to_string();
+    assert_eq!(
+        resp.json()["workspace"],
+        json!({"kind": "remote", "cluster": "pegasus", "path": "/work/NBB/rmaeda/workspace/rust/benchfs"})
+    );
+
+    // `GET /projects/{id}` にも出る。
+    let resp = send(&app, g(&format!("/api/v1/projects/{project_id}"))).await;
+    assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
+    assert_eq!(resp.json()["project"]["workspace"]["cluster"], "pegasus");
+
+    // 2. 後から `PATCH` で差し替えられる（`status` は省略できる）。`~` は展開される。
+    let home = std::env::var("HOME").expect("HOME");
+    let resp = send(
+        &app,
+        pa(
+            &format!("/api/v1/projects/{project_id}"),
+            &json!({"workspace": {"kind": "local", "path": "~/workspace/rust/pluvio-poc"}}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
+    assert_eq!(
+        resp.json()["workspace"],
+        json!({"kind": "local", "path": format!("{home}/workspace/rust/pluvio-poc")})
+    );
+
+    // 3. `null` で消せる。作業場所を決めていない案件には `workspace` が出ない。
+    let resp = send(&app, pa(&format!("/api/v1/projects/{project_id}"), &json!({"workspace": null}))).await;
+    assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
+    assert!(resp.json().get("workspace").is_none(), "{}", resp.text());
+
+    // 4. `[[clusters]]` に無いクラスタは 422（POST も PATCH も）。
+    assert_problem(
+        &send(
+            &app,
+            p(
+                "/api/v1/projects",
+                &json!({"title": "t", "request": "r", "workspace": {"kind": "remote", "cluster": "nope", "path": "/x"}}),
+            ),
+        )
+        .await,
+        422,
+        "validation",
+    );
+    assert_problem(
+        &send(
+            &app,
+            pa(
+                &format!("/api/v1/projects/{project_id}"),
+                &json!({"workspace": {"kind": "remote", "cluster": "nope", "path": "/x"}}),
+            ),
+        )
+        .await,
+        422,
+        "validation",
+    );
+
+    // 5. 何も書かない PATCH は 422（これまでは `status` 必須だった）。
+    assert_problem(&send(&app, pa(&format!("/api/v1/projects/{project_id}"), &json!({}))).await, 422, "validation");
+    // 作業場所を書かない案件は従来どおり（`workspace` は出ない）。
+    let resp = send(&app, p("/api/v1/projects", &json!({"title": "t", "request": "r"}))).await;
+    assert_eq!(resp.status.as_u16(), 201, "{}", resp.text());
+    assert!(resp.json().get("workspace").is_none(), "{}", resp.text());
+}
+
 /// `GET /projects/{id}` は案件 + 途中目標 + 仕事の木（その案件のタスクだけ）を返す。
 #[tokio::test]
 async fn project_detail_returns_the_milestones_and_the_work_tree() {

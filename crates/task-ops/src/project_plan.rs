@@ -13,7 +13,7 @@
 
 use task_core::{
     GenreSpec, Message, Milestone, MilestoneId, MilestoneStatus, OrgKind, Project, ProjectStatus, RoleSpec, Task,
-    TaskKind, TaskStore, Tier,
+    TaskKind, TaskStore, Tier, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -74,6 +74,16 @@ pub fn start(
     let history = store.message_list(&secretary.id, Some(project.id), PLAN_HISTORY_LIMIT)?;
     let goal = compose_goal(project, &context, note, &history);
     let title = truncate_title(&goal, TITLE_MAX_CHARS);
+    // ADR-0039 D2 / D5: 案件の作業場所を `NewTaskSpec` の形（`workspace` + `cluster`）に写す。
+    // `Local` の `~` はここで `$HOME` に展開する（DB には展開済みの絶対パスが入っている想定だが、
+    // 直接 DB を書いた案件でも同じ結果になるように、入口でもう一度通す）。
+    let home = task_core::home_dir();
+    let (plan_workspace, plan_cluster) = match project.workspace.as_ref().map(|w| w.with_home_expanded(home.as_deref()))
+    {
+        Some(WorkspaceSpec::Local { path }) => (Some(path), None),
+        Some(WorkspaceSpec::Remote { cluster, path }) => (Some(path), Some(cluster)),
+        None => (None, None),
+    };
 
     let spec = NewTaskSpec {
         title,
@@ -93,8 +103,10 @@ pub fn start(
         project_id: Some(project.id),
         milestone_id: target.as_ref().map(|m| m.id),
         assignee: Some(secretary.id.clone()),
-        workspace: None,
-        cluster: None,
+        // ADR-0039 D2: 案件が作業場所を決めていれば、分解を起こす計画 run 自身もそこで走る
+        // （子はここから継ぐ。決めていなければ従来どおりタスクごとの作業ディレクトリ）。
+        workspace: plan_workspace,
+        cluster: plan_cluster,
         adapter: None,
     };
     let task = add::create_support_task(store, spec, roles, genres, now)?;
@@ -187,6 +199,7 @@ mod tests {
             request: "Pluvio を基盤に用いた新たな研究テーマの模索、検証をしたい".into(),
             status,
             secretary_summary: None,
+            workspace: None,
             created_at: t,
             updated_at: t,
         }
@@ -350,5 +363,41 @@ mod tests {
         let no_secretary = SqliteStore::open_in_memory().expect("open");
         let err = start(&no_secretary, &project, None, None, &[], &[], now()).unwrap_err();
         assert!(err.to_string().contains("no secretary"), "{err}");
+    }
+
+    /// ADR-0039 D2: 分解を起こす計画 run は案件の作業場所で走る（`Local` / `Remote` の両方）。
+    /// 作業場所を決めていない案件では従来どおりタスクごとの相対パス。
+    #[test]
+    fn the_plan_run_uses_the_projects_workspace() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        seed_org(&store);
+
+        let plain = sample_project(ProjectStatus::Active);
+        store.project_create(&plain).expect("create project");
+        let started = start(&store, &plain, None, None, &[], &[], now()).expect("start");
+        assert_eq!(
+            started.task.workspace,
+            WorkspaceSpec::Local {
+                path: std::path::PathBuf::from(started.task.id.to_string())
+            },
+            "作業場所を決めていない案件は従来どおり"
+        );
+
+        let mut local = sample_project(ProjectStatus::Active);
+        local.workspace = Some(WorkspaceSpec::Local {
+            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+        });
+        store.project_create(&local).expect("create project");
+        let started = start(&store, &local, None, None, &[], &[], now()).expect("start");
+        assert_eq!(started.task.workspace, local.workspace.clone().expect("some"));
+
+        let mut remote = sample_project(ProjectStatus::Active);
+        remote.workspace = Some(WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: std::path::PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+        });
+        store.project_create(&remote).expect("create project");
+        let started = start(&store, &remote, None, None, &[], &[], now()).expect("start");
+        assert_eq!(started.task.workspace, remote.workspace.clone().expect("some"));
     }
 }

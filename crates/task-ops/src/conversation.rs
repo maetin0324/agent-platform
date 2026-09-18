@@ -475,6 +475,7 @@ mod tests {
             request: "新テーマの模索".into(),
             status: ProjectStatus::Proposed,
             secretary_summary: None,
+            workspace: None,
             created_at: now(),
             updated_at: now(),
         };
@@ -654,6 +655,7 @@ mod tests {
             depends_on: vec![],
             tier: None,
             assignee: assignee.map(str::to_string),
+            workspace: None,
         }
     }
 
@@ -824,6 +826,7 @@ mod tests {
             request: "r".into(),
             status: ProjectStatus::Proposed,
             secretary_summary: None,
+            workspace: None,
             created_at: now(),
             updated_at: now(),
         };

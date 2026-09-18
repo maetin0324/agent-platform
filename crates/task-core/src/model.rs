@@ -93,6 +93,40 @@ pub enum WorkspaceSpec {
     Remote { cluster: String, path: PathBuf },
 }
 
+impl WorkspaceSpec {
+    /// ADR-0039 D5: `Local` の `~` / `~/…` を `home` で展開した複製。`Remote` の `~` は**クラスタ側の home**
+    /// なので触らない（taskd には展開できない）。`home` が無い、`~` で始まらないときはそのまま。
+    pub fn with_home_expanded(&self, home: Option<&std::path::Path>) -> WorkspaceSpec {
+        match self {
+            WorkspaceSpec::Local { path } => WorkspaceSpec::Local {
+                path: expand_home(path, home),
+            },
+            other => other.clone(),
+        }
+    }
+}
+
+/// ADR-0039 D5: 先頭の `~`（単独か `~/…`）を `home` に置き換える。それ以外は何もしない（純粋関数）。
+/// `~user` のような別ユーザ指定は展開しない（taskd はその home を知らない）。
+pub fn expand_home(path: &std::path::Path, home: Option<&std::path::Path>) -> PathBuf {
+    let Some(home) = home else { return path.to_path_buf() };
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return home.to_path_buf();
+    }
+    match raw.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None => path.to_path_buf(),
+    }
+}
+
+/// ADR-0039 D5: `$HOME`（空文字列は無しとみなす）。`~` の展開の入口（API・分解・委譲）だけが使う。
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
 /// DESIGN §4.1 の `Budget`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Budget {

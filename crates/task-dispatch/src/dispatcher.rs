@@ -373,6 +373,8 @@ struct RunExtras {
     recent_work: Vec<RecentWork>,
     /// Phase 41（ADR-0038 D1）: **途中目標レビューの対話 run** にだけ、その途中目標とそこまでの成果。
     milestone_review: Option<MilestoneReviewContext>,
+    /// Phase 43（ADR-0039 D3）: 案件が作業場所を決めている run にだけ、その場所を説明する 1 行。
+    workspace_note: Option<String>,
 }
 
 struct ReviewEntry {
@@ -1698,7 +1700,22 @@ impl Dispatcher {
             (true, TaskKind::Plan, Some(mut plan)) => {
                 let org = self.store.org_list()?;
                 self.fix_plan_for_harness(&task, &mut plan, &org);
-                let children = materialize(&task, &plan, &org, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
+                // ADR-0039 D2: 子の作業場所は 明示 > 案件 > 親。
+                let project_workspace = task_ops::delegate::project_workspace(self.store.as_ref(), &task).map_err(ops_to_store)?;
+                let home = task_core::home_dir();
+                let workspace = task_core::WorkspaceContext {
+                    project: project_workspace.as_ref(),
+                    home: home.as_deref(),
+                };
+                let children = materialize(
+                    &task,
+                    &plan,
+                    &org,
+                    &self.config.roles,
+                    &self.config.genres,
+                    workspace,
+                    OffsetDateTime::now_utc(),
+                );
                 let n = children.len();
                 let r = self
                     .store
@@ -1959,7 +1976,22 @@ impl Dispatcher {
                 (TaskKind::Plan, Some(mut plan)) => {
                     let org = self.store.org_list()?;
                     self.fix_plan_for_harness(&task, &mut plan, &org);
-                    let children = materialize(&task, &plan, &org, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
+                    // ADR-0039 D2: 子の作業場所は 明示 > 案件 > 親。
+                    let project_workspace = task_ops::delegate::project_workspace(self.store.as_ref(), &task).map_err(ops_to_store)?;
+                    let home = task_core::home_dir();
+                    let workspace = task_core::WorkspaceContext {
+                        project: project_workspace.as_ref(),
+                        home: home.as_deref(),
+                    };
+                    let children = materialize(
+                        &task,
+                        &plan,
+                        &org,
+                        &self.config.roles,
+                        &self.config.genres,
+                        workspace,
+                        OffsetDateTime::now_utc(),
+                    );
                     self.store
                         .complete_plan(task_id, Vec::new(), children, self.config.plan_auto_accept)
                 }
@@ -2408,6 +2440,15 @@ impl Dispatcher {
             Some(milestone_id) => self.milestone_review_of(task.project_id, milestone_id)?,
             None => None,
         };
+        // Phase 43（ADR-0039 D3）: 案件が作業場所を決めていれば、その場所を前置きに出す（決定的:
+        // `projects.workspace` を引いて 1 行にするだけ）。対話 run（秘書との会話・途中目標のレビュー）には
+        // 出さない（会話は編集をしないので、人のリポジトリの中で走らせる理由が無い。ADR-0039 D2）。
+        let workspace_note = match conversation_addressee {
+            Some(_) => None,
+            None => task_ops::delegate::project_workspace(self.store.as_ref(), task).map_err(ops_to_store)?
+                .as_ref()
+                .map(task_worker::preamble::workspace_note),
+        };
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
         let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
@@ -2455,6 +2496,7 @@ impl Dispatcher {
             work_genre,
             recent_work,
             milestone_review,
+            workspace_note,
         })
     }
 
@@ -3205,6 +3247,8 @@ async fn run_worker(
             recent_work: extras.recent_work,
             // Phase 41（ADR-0038 D1）: 途中目標レビューの対話 run だけに入る。
             milestone_review: extras.milestone_review,
+            // Phase 43（ADR-0039 D3）: 案件が作業場所を決めている run だけに入る。
+            workspace_note: extras.workspace_note,
             // Phase 38（ADR-0028 追記）: レビュー run（`review.rs` が組む）だけに入る。
             subject_genre: None,
         },
@@ -5165,6 +5209,7 @@ mod tests {
             depends_on: deps,
             tier: None,
             assignee: None,
+            workspace: None,
         }
     }
 
@@ -5432,6 +5477,7 @@ mod tests {
                 role: None,
                 genre: Some("literature".into()),
                 assignee: None,
+                workspace: None,
             }],
         };
         d.fix_plan_for_harness(&plan_parent, &mut plan, &[]);
@@ -6162,6 +6208,7 @@ mod tests {
             depends_on: vec![],
             tier: None,
             assignee: Some(assignee.to_string()),
+            workspace: None,
         }
     }
 
@@ -6720,6 +6767,61 @@ mod tests {
         assert_eq!(extras.conversation_addressee, None);
     }
 
+    /// Phase 43（ADR-0039 D3）: 案件が作業場所を決めていれば、その run の前置きに出す 1 行が `RunExtras` に
+    /// 入る。決めていない案件・案件に属さないタスク・対話 run には入らない（従来どおりのプロンプト）。
+    #[test]
+    fn run_extras_carry_the_projects_workspace_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let now = OffsetDateTime::now_utc();
+        let mut with_workspace = titled_project("Pluvio の PoC");
+        with_workspace.workspace = Some(WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+        });
+        store.project_create(&with_workspace).unwrap();
+        let plain = titled_project("作業場所なし");
+        store.project_create(&plain).unwrap();
+
+        let adapter = Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
+
+        let mut task = assigned_task(&workspace_root, "poc", "research-survey");
+        task.project_id = Some(with_workspace.id);
+        let extras = d.run_extras(&task).unwrap();
+        assert_eq!(
+            extras.workspace_note.as_deref(),
+            Some(
+                "この案件のコードはクラスタ pegasus の `/work/NBB/rmaeda/workspace/rust/benchfs` にある。\
+                 いまのカレントディレクトリはその写しで、taskd が run の前後で同期する。"
+            )
+        );
+
+        task.project_id = Some(plain.id);
+        assert_eq!(d.run_extras(&task).unwrap().workspace_note, None);
+        task.project_id = None;
+        assert_eq!(d.run_extras(&task).unwrap().workspace_note, None);
+
+        // 対話 run には出さない（会話は編集をしない。ADR-0039 D2）。
+        let conversation = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            Some(with_workspace.id),
+            "状況を教えて",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            now,
+        )
+        .unwrap()
+        .task;
+        assert_eq!(d.run_extras(&conversation).unwrap().workspace_note, None);
+    }
+
     /// Phase 30（ADR-0033 D4 追記）: 対話は**ノードの `genre`（仕事のハーネス）に関係なく**常に対話用分野
     /// （`task.genre`）で走る。実機の事故: 関連研究調査課（`genre = web-research` = LDR）に話しかけたら
     /// 検索ハーネスが会話しようとして証拠ゲートで落ちた。ただし「人」らしさは保つため、対話 run にだけ、
@@ -6939,6 +7041,7 @@ mod tests {
             request: "r".into(),
             status: ProjectStatus::Active,
             secretary_summary: None,
+            workspace: None,
             created_at: now,
             updated_at: now,
         }

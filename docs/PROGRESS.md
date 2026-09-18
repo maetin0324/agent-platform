@@ -5364,3 +5364,86 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
   - 実機確認（分解直後にレビューが再発しないこと）はこの作業単位では未実施
     （認証や配備済み taskd が必要な確認のため）。
 
+
+## Phase 43 — 案件の作業場所を子が継ぐ（ADR-0039。2026-09-18）
+
+- 完了日: 2026-09-18
+- 実機で起きたこと（本番 2026-09-18）: 秘書が委譲した PoC の子タスク 2 件（`coding-poc`、claude-code、
+  `max_turns = 20`）が両方 `error_max_turns`。子は**空のローカル workspace**（計画タスクの workspace を
+  継いだ `workspaces/<plan_task_id>/`）に置かれ、ワーカーは Pluvio のリポジトリが pegasus 上
+  （`/work/NBB/rmaeda/workspace/rust/benchfs/lib/pluvio`）にあることを objective の文面から知って
+  **自分で `ssh pegasus` し**、リモートの作業ツリーに直接 `examples/dpu_offload_poc/` を書いてビルドまで
+  進め、計測の直前でターンが切れた。原因は (1) 計画・委譲の子に作業場所を指定する手段が無い、
+  (2) その結果、ADR-0018 / ADR-0019 の同期機構を迂回して人のリポジトリに直接書いた
+  （SPEC §3.7 追記「手元で編集してリモートで検証」に反する）。
+- 決定: `docs/adr/0039-project-workspace.md`（D1 案件の `workspace`、D2 継承の規則「明示 > 案件 > 親」、
+  D3 プロンプト、D4 秘書が最初に聞く、D5 `~` の展開）。
+- 変更:
+  - `crates/task-core/migrations/0010_projects_workspace.sql`（新規）と `store.rs`: `projects.workspace TEXT`、
+    `SCHEMA_VERSION = 10`、`project_create` / `project_get` / `project_list` の往復、
+    `TaskStore::project_set_workspace`。
+  - `crates/task-core/src/org.rs`: `Project.workspace: Option<WorkspaceSpec>`（無ければ省略）。
+  - `crates/task-core/src/model.rs`: `WorkspaceSpec::with_home_expanded` / `expand_home` / `home_dir`
+    （`Local` の `~` だけを `$HOME` で展開。`Remote` の `~` はクラスタ側なので触らない）。
+  - `crates/task-core/src/{plan,delegate}.rs`: `NewTask.workspace` / `DelegateTask.workspace`（任意）と
+    `WorkspaceContext{project, home}`。`materialize` / `materialize_delegated` が
+    **明示 > 案件 > 親**で子の workspace を決める。
+  - `crates/task-ops/src/delegate.rs`: `project_workspace(store, task)`（案件の作業場所をストアから引く）と、
+    `plan_delegation` がそれを `materialize_delegated` に渡す。
+  - `crates/task-ops/src/project_plan.rs`: 分解を起こす計画 run 自身も案件の作業場所で走る
+    （`Local` は `workspace`、`Remote` は `cluster` + `workspace`）。
+  - `crates/task-dispatch/src/dispatcher.rs`: `materialize` の 2 か所に `WorkspaceContext` を渡し、
+    `RunExtras.workspace_note` → `RunContext.workspace_note` を埋める（対話 run には出さない）。
+  - `crates/task-worker/src/{protocol,preamble,claude_code}.rs`: `RunContext.workspace_note`、
+    前置きの `## 作業場所`（「別のホストの作業ツリーへ `ssh` で直接書くな」）、計画プロンプトの
+    `## 子タスクの作業場所`、委譲の指示の 1 文。**案件が作業場所を持たない run の文面は 1 バイトも変えない**。
+  - `crates/task-api/src/{types,handlers}.rs`: `POST /projects` / `PATCH /projects/{id}` の `workspace`
+    （`PATCH` は `status` も任意になり、`"workspace": null` で消せる。知らない `cluster` は 422、
+    `~` は保存時に展開）。`GET /projects` / `GET /projects/{id}` に出る。
+  - `config/taskd.example.toml`: `[[roles]] secretary` の指示文に「コードを扱う案件なら作業場所を最初に聞く」。
+  - 文書: `docs/adr/0039-project-workspace.md`（新規）、`docs/protocol/worker-protocol.md`
+    （`context.workspace_note` / `delegate.tasks[].workspace` / `plan.json` の `workspace`）、`docs/gui/api.md`
+    （3.46 / 3.47 / 3.48）、再生成したスキーマ 3 本（`UPDATE_SCHEMA=1`）。
+- 追加したテスト（新規 11 件）:
+  - `task-core`: migration 0010（版数 9 の DB に当たり、既存の案件は `NULL`）、`projects.workspace` の
+    往復（None / Local / Remote、後から付け外し）、分解と委譲の継承 3 段（明示 > 案件 > 親）、
+    案件が Remote なら子も Remote、`~` の展開（`Local` のみ）。
+  - `task-ops`: 計画 run が案件の作業場所で走る（Local / Remote / 未設定）、委譲した子が案件の
+    作業場所を継ぎ、明示が勝ち、案件に属さない親では従来どおり親を継ぐ。
+  - `task-dispatch`: `run_extras` の `workspace_note`（案件あり / なし / 案件なしタスク / 対話 run）。
+  - `task-worker`: 前置きとプロンプトに作業場所の節が出ること、`workspace_note` が無ければ
+    プロンプトがバイト単位で従来どおりであること。
+  - `task-api`: `POST` / `PATCH` の `workspace`、`GET` に出ること、`~` の展開、`null` で消せること、
+    知らない `cluster` が 422、空の `PATCH` が 422。
+- 実行したコマンドと結果:
+  - `cargo test --workspace`: exit 0。`grep -c "^test result: FAILED"` = 0、`test result: ok` のブロックが 56、
+    合計 1133 件 passed。
+  - `cargo clippy --workspace --all-targets -- -D warnings`: exit 0、警告なし。
+  - `UPDATE_SCHEMA=1 cargo test -p task-core -p task-worker -p task-api` でスキーマ 3 本を再生成し、
+    再実行して差分ゼロを確認。
+- 未解決事項:
+  - U43-1: **成果物ディレクトリの扱いは ADR-0036 のまま**にした。作業指示の「`workspace_root` 配下で
+    なければ『所有』扱い」を字義どおりにすると、同じ案件の兄弟が人のリポジトリ直下の `artifacts/` を
+    共有して `result.json` を上書きし合う（Phase 35 の本番事故そのもの）ため、ADR-0036 D1 の規則
+    （親から継いだ workspace は「共有」= `.taskd/artifacts/<task_id>/`）をそのまま適用している。
+    人のリポジトリには `.taskd/` しか増えない（ADR-0018 D3 で同期からも除外済み）。この解釈でよいか確認が欲しい。
+  - U43-2: 対話 run（秘書との会話・途中目標レビュー）には案件の作業場所を渡していない（ADR-0039 D2）。
+    会話で「どのパスか」を答えさせたい場合は、案件の作業場所を対話の前置きにも出す拡張が要る。
+  - U43-3: GUI（`gui/`）はこの作業単位の担当外。案件の作成・編集画面に作業場所の入力
+    （`local` / `remote` + `cluster` の選択は `GET /clusters` から）を足す必要がある。
+  - U43-4: 実機確認は未実施。配備後、Pluvio の案件に
+    `{"kind":"remote","cluster":"pegasus","path":"/work/NBB/rmaeda/workspace/rust/benchfs"}` を
+    `PATCH /projects/{id}` で設定し、`POST /projects/{id}/plan` の子が同じ作業場所で走ること
+    （ワーカーが自分で `ssh` しないこと）を確認してほしい。
+  - U43-5: `taskctl add --workspace` は従来どおり（`~` の展開はしない）。入口をそろえるなら
+    `taskctl` 側にも `expand_home` を通すとよい（今回は案件と分解・委譲の経路だけに入れた）。
+
+### 提案
+
+- P-98: 案件の作業場所が `Local` で、そのディレクトリがまだ無い場合、taskd は何もしない（ワーカーが
+  `git init` から始める）。`git clone <url>` まで案件に持たせるかは人の判断が要る（ADR-0039 §3 では
+  「採らない」に倒した）。
+- P-99: 子が `workspace` を明示したときの検証（`cluster` が `[[clusters]]` にあるか）は今は無く、
+  知らないクラスタを書かれると run は `cluster_unavailable` で待たされる。`plan.json` / `delegate.json`
+  の検証（`task_core::plan::validate` / `validate_each`）に「知らない cluster は拒否」を足すとよい
+  （設定を渡す必要があるので、`genres` と同じ形で持ち回ることになる）。
