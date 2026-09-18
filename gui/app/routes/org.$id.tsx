@@ -5,18 +5,23 @@ import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
 import { getTaskdClient } from "~/taskd/client.server";
 import { loadConversation, runConversationAction } from "~/taskd/conversation.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
+import { isTaskdUnavailable, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import type { Route } from "./+types/org.$id";
 
 /**
  * `/org/:id`（組織の木から選んだ「人」との対話。SPEC §3.4、ADR-0033 D4、
- * docs/taskd-api-v1.md §3.54〜3.55）。秘書は `/org/secretary`（同じ部品・同じ中継を使う別ルート）。
+ * docs/taskd-api-v1.md §3.54〜3.55）。秘書は `/org/secretary`（同じ部品・同じ中継を使う別ルート、
+ * Phase G13g で taskd 停止中も 200 にした）。ここも同じ作法にそろえる: taskd に届かないときは
+ * 捕まえて「対話はまだ何も無い」状態として描く（root が独自にバナーを出す）。
  */
 
 export async function loader({ params, request }: Route.LoaderArgs): Promise<ConversationData> {
   try {
     return await loadConversation(getTaskdClient(), params.id, request);
   } catch (e) {
+    if (isTaskdUnavailable(e)) {
+      return { nodeId: params.id, node: null, projects: [], projectId: null, messages: [], attention: [] };
+    }
     throw taskdErrorResponse(e);
   }
 }

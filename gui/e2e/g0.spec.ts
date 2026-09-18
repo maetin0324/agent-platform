@@ -7,13 +7,18 @@ import { expect, test } from "./test";
 
 // Phase G0 作業単位 B（結合テスト）。docs/DESIGN.md §10 Phase G0 の受け入れ条件 4・5 を実 taskd（scripts/taskd.sh start dev）に対して検証する。
 // このテストは taskd を `dev` として起動したまま終える（try/finally で保証する）。
+//
+// 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
+// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
+// `TASKD_API_LISTEN` は `scripts/taskd.sh`（execFileSync が継承する環境変数）がそのまま読む。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
 const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_URL = "http://127.0.0.1:7710";
-const GUI_HOST = "127.0.0.1";
-const GUI_PORT = 7700;
+const TASKD_API_URL = process.env.TASKD_API_URL ?? "http://127.0.0.1:7710";
+const GUI_BIND = process.env.TASKD_GUI_BIND ?? "127.0.0.1:7700";
+const [GUI_HOST, GUI_PORT_STR] = GUI_BIND.split(":");
+const GUI_PORT = Number(GUI_PORT_STR);
 
 async function fetchTaskdHealth(): Promise<Health> {
   const res = await fetch(`${TASKD_API_URL}/api/v1/health`);
@@ -42,14 +47,18 @@ test.beforeAll(() => {
   startDev();
 });
 
-/** `Host` ヘッダを任意の値にして GET する（Node の http.request なら上書きできる）。 */
+/**
+ * `Host` ヘッダを任意の値にして GET する（Node の http.request なら上書きできる）。
+ * Host 検査は root の middleware で全ルート共通なので、`/` である必要は無い。`/` は秘書へ 302 する
+ * ようになった（Phase G13f-1）ため、ここでは 302 を挟まず判定できる `/healthz` を使う（Phase G13g）。
+ */
 function getWithHost(hostHeader: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
         host: GUI_HOST,
         port: GUI_PORT,
-        path: "/",
+        path: "/healthz",
         method: "GET",
         headers: { Host: hostHeader },
       },
@@ -86,19 +95,22 @@ test.describe("Phase G0 受け入れ条件 4（前半）: taskd の状態表示"
 });
 
 test.describe("Phase G0 受け入れ条件 4（後半）: taskd 停止中のバナーと復旧", () => {
-  test("taskd 停止中は 200 でバナー表示、復旧するとリロード無しでバナーが消える", async ({ page }) => {
+  test("taskd 停止中は /org/secretary（`/` の遷移先）が 200 でバナー表示、復旧するとリロード無しでバナーが消える", async ({
+    page,
+  }) => {
     try {
       stopDev();
 
-      const response = await page.goto("/");
+      // `/` は秘書（`/org/secretary`）へ 302 する最初の画面（Phase G13f-1）。停止中も 200 で開く契約
+      // （docs/DESIGN.md §10 Phase G0 受け入れ条件 4）は、いまはこの遷移先が引き継ぐ（Phase G13g）。
+      const response = await page.goto("/org/secretary");
       expect(response?.status()).toBe(200);
 
       const banner = page.getByTestId("taskd-banner");
       await expect(banner).toBeVisible();
       await expect(banner).toContainText("taskd に接続できません");
 
-      // 例外ページ（root の ErrorBoundary）になっていないことを確認する（G1 で `/` は受信箱になり、
-      // 見出しは h1 ではなく h2 になったので本文全体で判定する）
+      // 例外ページ（root の ErrorBoundary）になっていないことを確認する（本文全体で判定する）
       const body = page.locator("body");
       await expect(body).not.toContainText("予期しないエラーが起きました");
 

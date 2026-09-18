@@ -15,20 +15,32 @@ import { expect, test } from "./test";
 // keep-alive で使い回すため、直前の stop で消えたソケットへの再利用が「SocketError: other side
 // closed」を起こすことがある（実測）。`apiGet` は `node:http` を `agent: false` で直接使い、
 // 呼び出しごとに新しいソケットを張ることでこれを避ける（e2e/g0.spec.ts の `getWithHost` と同じ方針）。
+//
+// 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
+// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
 const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_HOST = "127.0.0.1";
-const TASKD_API_PORT = 7710;
+const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7710";
+const [TASKD_API_HOST, TASKD_API_PORT_STR] = TASKD_API_LISTEN.split(":");
+const TASKD_API_PORT = Number(TASKD_API_PORT_STR);
 const INSTANCE_NAMES = ["dev", "basic", "multi-account", "unroutable"] as const;
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
+  return execFileSync(TASKD_SH, args, {
+    cwd: REPO_ROOT,
+    stdio: "pipe",
+    env: { ...process.env, TASKD_API_LISTEN },
+  }).toString();
 }
 
 function taskctl(name: string, ...args: string[]): string {
-  return execFileSync(TASKD_SH, ["taskctl", name, ...args], { cwd: REPO_ROOT, stdio: "pipe" })
+  return execFileSync(TASKD_SH, ["taskctl", name, ...args], {
+    cwd: REPO_ROOT,
+    stdio: "pipe",
+    env: { ...process.env, TASKD_API_LISTEN },
+  })
     .toString()
     .trim();
 }
@@ -199,7 +211,8 @@ test.describe("受け入れ条件 2b: unroutable フィクスチャ", () => {
   });
 
   test("受信箱の注意と /daemon の unroutable に同じ id が出る", async ({ page }) => {
-    await page.goto("/");
+    // `/` は秘書へ 302 する最初の画面になった（Phase G13f-1）。受信箱は `/inbox`。
+    await page.goto("/inbox");
     await expect(page.locator(`[data-testid="attention-item"] a[href="/tasks/${unroutableId}"]`)).toHaveCount(1);
 
     await page.goto("/daemon");

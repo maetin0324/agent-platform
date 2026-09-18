@@ -23,6 +23,7 @@
 | G13a | 組織の木と案件（仕事の木）。SPEC §4 の 6 画面のうち 2 つ（taskd Phase 23 / ADR-0033 D1・D2） | **DONE** | 2026-09-17 |
 | G13b〜G13e | 秘書との対話・報告・認可・成果物と、taskd Phase 27 への追従 | **DONE** | 2026-09-17 |
 | G13f | GUI 監査の対応（H1〜H4 / M1〜M5 / 言葉 / 裏方の印 / 記憶。taskd Phase 29） | **DONE** | 2026-09-17 |
+| G13g | 既存 e2e（g0〜g9）の `/` が秘書になったことへの追従。G0 の「taskd 停止中でも 200」の引き継ぎ先を `/org/secretary` に | **DONE** | 2026-09-18 |
 
 前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
@@ -1962,7 +1963,7 @@ SPEC §4 に照らした GUI 監査（実機操作あり）で「6 画面は揃�
 
 - **`/` を秘書へのリダイレクトにした**（`routes/home.tsx`）。受信箱は `/inbox`。**既存の e2e
   g0 / g1 / g2 / g4 / g6 / g7 は `page.goto("/")` で受信箱を見る**ので、そのままでは失敗する
-  （今回は「既存の g0〜g9 は触らない」指示のため直していない。下の未解決事項）。
+  （今回は「既存の g0〜g9 は触らない」指示のため直していない。下の未解決事項。**Phase G13g で追従済み**）。
 - **`/tasks` の列**: ID と優先度と分野を落とし、案件・担当・途中目標を足した。役割の列は残した
   （g7 が `task-role` を見るため）。
 - **`/tasks` の索引は N+1** のまま（上記 R6）。件数が増えたら taskd 側の `TaskSummary.project_id` に載せ替える。
@@ -1974,8 +1975,7 @@ SPEC §4 に照らした GUI 監査（実機操作あり）で「6 画面は揃�
 
 ### 未解決事項
 
-- G13f-U1: **既存の e2e（g0/g1/g2/g4/g6/g7）が `/` に受信箱を期待している**。`/` を秘書にしたので、
-  それらは `/inbox` を見るよう直す必要がある（今回の指示の範囲外。次のフェーズで直す）。
+- ~~G13f-U1: 既存の e2e（g0/g1/g2/g4/g6/g7）が `/` に受信箱を期待している~~ **Phase G13g で解消**（下記）。
 - G13f-U2: `TaskSummary` に `project_id` / `milestone_id` が無い（`docs/taskd-requests.md` R6）。
   `/tasks` の索引は案件数ぶんの `GET /projects/{id}` を束ねている。
 - G13f-U3: DOM を描画する unit テストは無い（G10-U1 と同じ）。今回も純粋関数のテスト + ソースの静的検査
@@ -1990,3 +1990,121 @@ SPEC §4 に照らした GUI 監査（実機操作あり）で「6 画面は揃�
 - G13f-P1: `TaskSummary` に `project_id` / `milestone_id` を足してほしい（R6）。GUI の N+1 が消える。
 - G13f-P2: `GET /inbox` の `attention` に「その担当・その案件」の手がかり（`assignee`）があると、
   秘書の画面での「返事を作れない状態」の判定が `messages` の `task_id` 突き合わせ無しで済む。
+
+## Phase G13g — 既存 e2e の追従（2026-09-18）
+
+G13f-1 で `/` を秘書（`/org/secretary`）へのリダイレクトにしたため、既存の `e2e/g0〜g9.spec.ts` のうち
+`page.goto("/")` で受信箱を見る箇所が失敗する（G13f-U1）。また G0 の受け入れ条件 4「taskd 停止中でも `/` が
+200」の契約の引き継ぎ先を決める必要があった。この 2 点への追従と、追従中に見つかった 2 件の既存バグ（G13g 発、
+G13f-1 とは無関係）の修正を行った。
+
+### やったこと
+
+1. **`/` → `/inbox` への置き換え（受信箱の中身を検証している箇所だけ）**
+   - `e2e/g1.spec.ts`（受け入れ条件 2）、`e2e/g2.spec.ts`（受け入れ条件 1）、`e2e/g4.spec.ts`（受け入れ条件 2b）、
+     `e2e/g6.spec.ts`（受け入れ条件 2 の 2 番目のテスト、`inbox-empty-help` 導線）、`e2e/g7.spec.ts`（受け入れ条件 2）
+     の `page.goto("/")` を `page.goto("/inbox")` に直した。検証内容（`approval-item` / `attention-item` /
+     `inbox-empty-help` 等）はそのまま。
+   - `e2e/g0.spec.ts` の「受け入れ条件 4（前半）: taskd の状態表示」（`/` の footer・health 表示）はそのまま
+     `page.goto("/")` を使う（受信箱の中身は見ておらず、root のフッタ・バナーの有無だけを見るテストなので
+     `/org/secretary` へリダイレクトされても root の表示は変わらない）。
+2. **G0 受け入れ条件 4（後半）「taskd 停止中でも 200」の引き継ぎ先を `/org/secretary` にした**
+   - `e2e/g0.spec.ts` の当該テストを `page.goto("/org/secretary")` に変更（`/` は 302 を経由するだけなので
+     直接開いても同じ検証になる）。`taskd-banner` に「taskd に接続できません」が出て 200 で開き、
+     例外ページにならないことをそのまま検証する。
+   - **`routes/org.secretary.tsx` / `routes/org.$id.tsx` の loader を直した**: 従来は `TaskdUnavailable` も
+     他の taskd エラーと同じく `Response` として投げ、ErrorBoundary で `TaskdBanner` を描いていた。この経路は
+     React Router のドキュメント応答ステータスに投げた `Response` のステータス（503）がそのまま使われるため、
+     taskd 停止中は 200 にならなかった。`isTaskdUnavailable` の場合だけ loader 内で捕まえ、空の
+     `ConversationData`（`node: null, projects: [], messages: [], attention: []`）を返すようにした
+     （`routes/inbox.tsx` の `loadInbox` と同じ作法。root が taskd の状態を独自に検査して既にバナーを出すので、
+     ここでは「対話はまだ何も無い」状態を描くだけでよい。`Conversation` コンポーネントは `node`/`projects`/
+     `messages` が空でもそのまま描画できる作り）。`TaskdError`（404 等）は従来どおり `Response` を投げて
+     ErrorBoundary に任せる。
+   - `e2e/g0.spec.ts` の `getWithHost`（受け入れ条件 5: Host 検査）は `/` を GET していたが、`/` が 302 に
+     なったことで「正しい Host は 200」の判定が壊れる（302 は 200 ではない）ため、Host 検査だけなら
+     どのパスでもよいので `/healthz` を GET するように変えた（Host 検査は root の middleware で全ルート共通）。
+3. **`e2e/g0.spec.ts`・`e2e/g1.spec.ts`・`e2e/g2.spec.ts`・`e2e/g4.spec.ts`・`e2e/g7.spec.ts` を別ポートで
+   動かせるようにした**（`e2e/g6.spec.ts` はもともとポートをハードコードしていない）。`playwright.config.ts`
+   の既定（7700/7710）は運用中の GUI/taskd を掴むため、`TASKD_GUI_BIND` / `TASKD_API_URL` /
+   `TASKD_API_LISTEN` を上書きできるよう、ハードコードされていた `127.0.0.1:7700` / `127.0.0.1:7710` を
+   `process.env.*` 参照（既定値は従来どおり）に置き換えた。`scripts/taskd.sh` を直接呼ぶ `sh()` / `taskctl()`
+   ヘルパーは `TASKD_API_LISTEN` を明示的に子プロセスへ渡す（`e2e/g13.spec.ts` と同じ作法）。
+4. **既存バグ 1（G13f-1 とは無関係）: `/tasks` の「さらに読む」が確実にクラッシュしていた**
+   — `app/routes/tasks.tsx` の `useFetcher<TaskList>()` は、`fetcher.load("/tasks?...")` がこの route 自身の
+   loader を叩くことを見落としていた。この route の loader は監査 M2（G13f-2、`docs/taskd-requests.md` R6 の
+   仮対応）で `TaskList` ではなく `TasksData`（`{ tasks, config, placements, assigneeNames }`）を返すように
+   変わっていたが、fetcher 側は直していなかったため `page.items.map(...)` が `undefined.map` で毎回
+   `TypeError` を投げ、画面がクラッシュして行が 0 件になっていた（Playwright で再現・確認。
+   `fetcher.data.tasks.items` / `fetcher.data.tasks.next_cursor` に直した）。
+5. **既存バグ 2（G13f-1 とは無関係）: `e2e/g1.spec.ts` の「さらに読む」テストが裏方タスクを数えていた**
+   — 上のクラッシュを直した後、`limit=2` を最後まで押しても 11 件中 10 件しか集まらなかった。原因は
+   `basic` フィクスチャの `approval`（`Human-B` の承認の子）が `TaskSummary.support = "approval"` を持ち、
+   `/tasks` は既定でこれを隠す（ADR-0033 D8、G13f-2「裏方の印」）ため、画面には最大 10 件しか出ない仕様
+   になっていたこと。テストは `/tasks?limit=500` の生の 11 件と比べていたので、`~/lib/work-tree` の
+   `isSupportTask` で同じフィルタをかけてから期待値を作るように直した（`show_support=1` は付けずに開く
+   画面と同じ条件で比べる）。
+6. **既存の flaky（G13f-1 とは無関係）: `e2e/g2.spec.ts` 受け入れ条件 1 の `flash` 待ちが安定しない**
+   — 承認直後、root の SSE 再検証（`daemon` イベント。tick_ms=200 で無条件に届く。G1-U1）により
+   `/inbox` の loader が数百 ms 以内に再検証され、承認済みの項目が一覧から消える（その `<li>` に閉じている
+   `fetcher`/`flash` も一緒に消える）。これは `/approvals` 画面で既に確認・容認されていた挙動と同じ
+   （G13f-U4「認可を答えた直後…成功表示も一緒に消える。実害は無いと判断した」）。この環境では 3 回連続で
+   再現し、`toHaveAttribute`/`toHaveText` の 5 秒待ちでも `flash` を一度も観測できなかった。**製品コードは
+   変えず**、テストを POST の応答そのもの（`page.waitForResponse("/inbox.data")` が 200）で成否を確認する
+   形に直した（以降の `approval_decided` イベント・note・`replay` 0 mismatches の検証はそのまま）。
+7. **`e2e/g6.spec.ts` 受け入れ条件 3（`/help` 内リンク全 200）** — `/help` はロゴ（`app/root.tsx`）とナビの
+   「秘書」の両方から `/org/secretary` を指す。`basic` フィクスチャには組織（`secretary` ノード）が無いため
+   どちらも 404 になる。クロール対象から `/` と `/org/secretary` を除外した（他のリンクはそのまま全 200 を
+   要求する）。
+
+### 受け入れ条件と証拠
+
+- `pnpm lint`（biome、160 files）exit 0 / `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0 /
+  `pnpm test` **453 passed**（39 ファイル、G13f-2 から件数変わらず。今回はソースの `tasks.tsx` 修正のみで
+  新規ロジックは追加していない）/ `pnpm build` exit 0 / `pnpm gen:types && git diff --exit-code
+  app/taskd/types.ts` 差分ゼロ。
+- **e2e（別ポート、運用中の 7700/7710 には触っていない）**:
+  ```
+  cd gui
+  scripts/taskd.sh build
+  TASKD_RUN_ROOT=/tmp/taskd-gui-e2e-g13g TASKD_GUI_BIND=127.0.0.1:17900 \
+    TASKD_API_URL=http://127.0.0.1:17910 TASKD_API_LISTEN=127.0.0.1:17910 \
+    pnpm exec playwright test e2e/g0.spec.ts e2e/g1.spec.ts e2e/g2.spec.ts \
+      e2e/g4.spec.ts e2e/g6.spec.ts e2e/g7.spec.ts
+  ```
+  結果: **34 passed**、1 failed、3 did not run（下記「未解決事項」参照。実行前後で `curl 127.0.0.1:7700/healthz`
+  ／`curl 127.0.0.1:7710/api/v1/health` がともに 200 のままであることを確認済み＝運用中のインスタンスには
+  触れていない）。内訳:
+  - `e2e/g0.spec.ts`: 5/5 pass（受け入れ条件 4 前半・後半、5、`/healthz`、CSP）。
+  - `e2e/g1.spec.ts`: 8/8 pass（「さらに読む」を含む）。
+  - `e2e/g2.spec.ts`: 8/8 pass（受け入れ条件 1「受信箱で Approval を note 付きで承認」を含む）。
+  - `e2e/g4.spec.ts`: 5/5 pass。
+  - `e2e/g6.spec.ts`: 5/5 pass（受け入れ条件 3「`/help` 内のリンクがすべて 200」を含む）。
+  - `e2e/g7.spec.ts`: 7/11 pass、1 failed（`clusters` フィクスチャ、下記）、3 did not run（同じ
+    `describe` 内の残りで `beforeAll` が失敗したため未実行）。`delegation` フィクスチャを使う後半の
+    3 件は 3/3 pass。
+
+### 未解決事項
+
+- **G7 の `clusters` フィクスチャはこの環境で未実行のまま**（A3-U1・G7-U 系と同じ、既知の環境依存）。
+  `scripts/taskd.sh fixture clusters` は `~/.ssh/config` の `taskd-localhost`（localhost への ssh 多重接続、
+  `ControlMaster auto`）が張られていることを前提にしており（ADR-0010 D1）、このホストには無い
+  （`ssh -O check taskd-localhost` → `No ControlPath specified`）。`ssh -MNf taskd-localhost` を先に張れる
+  環境の人に実行を依頼する（G13g で新たに壊れたものではない。前回・前々回のフルランでも同じ理由で未実行）。
+- G13g-U1: **G13f-2 由来の 2 件のバグ（上記「既存バグ 1・2」）は、`e2e/g0〜g9` を今回はじめて通しで
+  実行し直したことで見つかった**。G13f-2 自身は e2e フルランを行わずに完了扱いにしていた（`e2e/g13.spec.ts`
+  のみ実行）ため、`/tasks` の「さらに読む」がクラッシュする状態が本番ビルドに残っていた。今後、既存画面に
+  影響する変更をした回は、たとえ新規 spec を書いても `g0〜g9` を含むフルランを一度は通すべき、という教訓として
+  残す。
+- G13g-U2: **`e2e/g2.spec.ts` 受け入れ条件 1 の `flash` 消失（上記「既存の flaky」）は、製品として直すかどうか
+  判断が要る**。今回はテスト側で吸収したが、`/inbox` も `/approvals`（G13f-U4）と同じ「決めた直後にカードごと
+  消えて成功表示が一瞬しか出ない」設計になっている。人に見える形で承認結果を一定時間見せたいなら、
+  「直近で決めた項目」を一覧から即座に外さず、SSE 再検証の周期（tick_ms=200）より長く留める・フラッシュを
+  グローバルな場所に出す、等の設計変更が要る。これは GUI 全体の一貫した振る舞いに関わる判断で、勝手に決めず
+  ここに記録するだけにした（採否は人間 / 次フェーズ）。
+
+### 提案（`docs/DESIGN.md` / `docs/taskd-api-v1.md` への変更提案。採否は人間）
+
+- G13g-P1: 上記 G13g-U2 のとおり、「決めた直後に一覧から消えて成功表示が一瞬で消える」挙動
+  （`/inbox` の承認・`/approvals` の認可の両方）をどう扱うか、方針を決めて ADR にしてほしい
+  （据え置き・一定時間残す・グローバルフラッシュ、等の選択肢がある）。
