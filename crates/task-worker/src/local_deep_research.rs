@@ -216,7 +216,9 @@ async fn run_ldr(
     let stderr_log_path = run_dir.join("stderr.log");
     let stderr_log_path_for_task = stderr_log_path.clone();
 
-    let artifacts_dir = req.workspace.join("artifacts");
+    // ADR-0036 D1/D2: 成果物の置き場はディスパッチャが決めた `artifacts_dir`（共有 workspace ではタスクごと）。
+    let artifacts_dir = req.artifacts_dir.clone();
+    let artifacts_rel = req.artifacts_rel();
     tokio::fs::create_dir_all(&artifacts_dir).await?;
     let report_path = artifacts_dir.join("report.md");
     // 前回の run（リトライ）の名残を今回の結果と誤読しない（paperqa/claude_code/codex と同じ理由。ADR-0006 D3）。
@@ -418,12 +420,13 @@ async fn run_ldr(
         // ADR-0031 D1: `report.md` に加えて、ランナーが機械的に作った証拠の記録
         // （`sources.json` / `research.json`）も成果物として申告する。ゲート（下）に落ちても
         // **消さずに残す**（D2: 人が読めるように）ので、この申告はゲートの判定より前に行う。
+        // ADR-0036 D4: 申告する `path` は workspace 相対のまま（`artifacts_dir` 基準で組む）。
         for (name, rel_path, kind) in [
-            ("report.md", "artifacts/report.md", "markdown"),
-            ("sources.json", "artifacts/sources.json", "json"),
-            ("research.json", "artifacts/research.json", "json"),
+            ("report.md", format!("{artifacts_rel}/report.md"), "markdown"),
+            ("sources.json", format!("{artifacts_rel}/sources.json"), "json"),
+            ("research.json", format!("{artifacts_rel}/research.json"), "json"),
         ] {
-            match crate::artifact::resolve(&req.workspace, name, rel_path, Some(kind)) {
+            match crate::artifact::resolve(&req.workspace, name, &rel_path, Some(kind)) {
                 Ok(artifact) => sink.artifact(&artifact),
                 Err(e) => warn!("run {run_id}: could not register {rel_path}: {e}"),
             }
@@ -568,6 +571,7 @@ mod tests {
         RunRequest {
             protocol: PROTOCOL_VERSION,
             task: crate::protocol::tests::sample_task(),
+            artifacts_dir: workspace.join("artifacts"),
             workspace,
             context: RunContext::default(),
         }
@@ -675,6 +679,38 @@ echo '{result_line}'
             crate::protocol::WorkerMessage::Done { summary, .. } => assert_eq!(summary, "found X and Y with sources"),
             other => panic!("expected done in runs/<run_id>/result.json, got {other:?}"),
         }
+    }
+
+    /// ADR-0036 D1/D2/D4: 共有 workspace のタスクでは、ランナーに渡す `report_path` も、申告する成果物の
+    /// `path` も、結果ファイルもタスクごとの `.taskd/artifacts/<task_id>/` になる（実機の事故: 兄弟の
+    /// PaperQA2 の `sources.json` を LDR が上書きした）。
+    #[tokio::test]
+    async fn a_shared_workspace_task_writes_under_its_own_artifacts_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_ldr(dir.path(), &success_script());
+        std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+        std::fs::write(dir.path().join("artifacts/sources.json"), "sibling").unwrap();
+        let adapter = LdrAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        let artifacts = sink.artifacts.lock().unwrap();
+        let mut paths: Vec<&str> = artifacts.iter().map(|a| a.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec![
+                ".taskd/artifacts/T1/report.md",
+                ".taskd/artifacts/T1/research.json",
+                ".taskd/artifacts/T1/sources.json",
+            ]
+        );
+        drop(artifacts);
+        assert!(dir.path().join(".taskd/artifacts/T1/result.json").is_file());
+        // 兄弟の `artifacts/sources.json` は触らない（実機の上書き事故の再発防止）。
+        assert_eq!(std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap(), "sibling");
     }
 
     #[tokio::test]

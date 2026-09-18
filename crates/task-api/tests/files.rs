@@ -192,6 +192,29 @@ async fn artifact_paths_escaping_the_workspace_are_forbidden_but_listed() {
     assert_problem(&missing, 404, "task_not_found");
 }
 
+/// ADR-0036 D4: 共有 workspace のタスクの成果物は `.taskd/artifacts/<task_id>/…` という workspace 相対の
+/// パスで記録される。GUI の読み取り API（`GET /tasks/{id}/artifacts/{idx}` と一覧）はそのまま読めること。
+#[tokio::test]
+async fn per_task_artifact_paths_under_dot_taskd_are_served() {
+    let Fixture { env, task, run_id } = fixture();
+    let app = env.router();
+    let rel = format!(".taskd/artifacts/{}/report.md", task.id);
+    write(&env.workspace(&task).join(&rel), b"# report");
+    produced(&env, &task, &run_id, &rel, &sha256(b"# report"));
+
+    let resp = send(&app, get(&format!("/api/v1/tasks/{}/artifacts/0", task.id))).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    assert_eq!(resp.body, b"# report");
+
+    let list = send(&app, get(&format!("/api/v1/tasks/{}/artifacts", task.id))).await;
+    let items = list.json()["items"].as_array().cloned().expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["artifact"]["path"], rel);
+    assert_eq!(items[0]["exists"], true);
+    assert_eq!(items[0]["forbidden"], false);
+    assert_eq!(items[0]["sha256_matches"], true);
+}
+
 #[tokio::test]
 async fn range_and_offset_requests_follow_the_spec() {
     let Fixture { env, task, run_id } = fixture();

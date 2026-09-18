@@ -30,10 +30,12 @@ use task_core::MessageRole;
 use crate::protocol::{ConversationAddressee, RunContext};
 
 /// 前置き（役割の指示文を含む）。`claude-code` / `codex` / `acp` / `paperqa` が使う。
-pub fn render(context: &RunContext) -> String {
+/// `artifacts` は成果物ディレクトリの workspace 相対表記（`RunRequest::artifacts_rel`。ADR-0036 D3。
+/// 単独タスクでは `artifacts` なので出力は Phase 34 までとバイト単位で同じ）。
+pub fn render(context: &RunContext, artifacts: &str) -> String {
     let mut out = person_sections(context);
     out.push_str(&role_section(context));
-    out.push_str(&memory_instructions(context));
+    out.push_str(&memory_instructions(context, artifacts));
     out.push_str(&conversation_instructions(context));
     out
 }
@@ -126,17 +128,18 @@ fn role_section(context: &RunContext) -> String {
 }
 
 /// 6. 記憶の書き方（ADR-0033 D6）。記憶が有効な run（`context.memory` がある）にだけ出す。
-fn memory_instructions(context: &RunContext) -> String {
+fn memory_instructions(context: &RunContext, artifacts: &str) -> String {
     if context.memory.is_none() {
         return String::new();
     }
-    "## 覚えておくこと (how to write to your memory)\n\
-     覚えておくべきこと（クラスタの使い方、人の好み、直近の相談）は `artifacts/result.json` の \
-     `memory.notes` に、この案件だけの事は `memory.project` に、短い箇条書きの文字列の配列で返せ: \
-     `{\"summary\": \"…\", \"evidence\": [], \"memory\": {\"notes\": [\"…\"], \"project\": [\"…\"]}}`。\
-     覚えることが無ければ `memory` は書かなくてよい（空の配列でもよい）。ここに書いたものだけが次の run に \
-     引き継がれる（この会話の他の部分は残らない）。\n\n"
-        .to_string()
+    format!(
+        "## 覚えておくこと (how to write to your memory)\n\
+         覚えておくべきこと（クラスタの使い方、人の好み、直近の相談）は `{artifacts}/result.json` の \
+         `memory.notes` に、この案件だけの事は `memory.project` に、短い箇条書きの文字列の配列で返せ: \
+         `{{\"summary\": \"…\", \"evidence\": [], \"memory\": {{\"notes\": [\"…\"], \"project\": [\"…\"]}}}}`。\
+         覚えることが無ければ `memory` は書かなくてよい（空の配列でもよい）。ここに書いたものだけが次の run に \
+         引き継がれる（この会話の他の部分は残らない）。\n\n"
+    )
 }
 
 /// 節 7: 対話専用の指示（Phase 28 / ADR-0033 D4 追記）。実機で秘書が「返事の代わりに仕事を始めた」
@@ -220,7 +223,7 @@ mod tests {
     /// ADR-0033 D4 / Phase 24: 並びは 役職と brief → 永続の認可 → 記憶 → 直近のやり取り → 役割の指示文。
     #[test]
     fn the_sections_come_in_the_order_the_adr_asks_for() {
-        let out = render(&full_context());
+        let out = render(&full_context(), "artifacts");
         let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
         assert!(at("## あなた: 関連研究調査課 (research-survey)") < at("## 永続の認可"));
         assert!(at("## 永続の認可") < at("## 覚えていること"));
@@ -251,7 +254,7 @@ mod tests {
             }),
             ..full_context()
         };
-        let out = render(&context);
+        let out = render(&context, "artifacts");
         let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
         assert!(at("## あなた: 関連研究調査課 (research-survey)") < at("あなたの仕事で使う道具"));
         assert!(at("あなたの仕事で使う道具") < at("## 永続の認可"));
@@ -262,7 +265,7 @@ mod tests {
 
         // 担当が自分の仕事の分野を持たない（対話用分野のみで走る）ときは何も足さない。
         let without = RunContext { work_genre: None, ..full_context() };
-        let out = render(&without);
+        let out = render(&without, "artifacts");
         assert!(!out.contains("あなたの仕事で使う道具"), "{out}");
 
         // `context.node` が無ければ、`work_genre` があっても出さない（役職の節そのものが無いため）。
@@ -271,13 +274,13 @@ mod tests {
             work_genre: Some(GenreContext { id: "coding".into(), description: "d".into(), ..GenreContext::default() }),
             ..RunContext::default()
         };
-        assert!(!render(&no_node).contains("あなたの仕事で使う道具"));
+        assert!(!render(&no_node, "artifacts").contains("あなたの仕事で使う道具"));
     }
 
     /// 空の `RunContext` では前置きは空文字（Phase 23 までの出力と 1 バイトも変わらない）。
     #[test]
     fn an_empty_context_renders_nothing_at_all() {
-        assert_eq!(render(&RunContext::default()), "");
+        assert_eq!(render(&RunContext::default(), "artifacts"), "");
     }
 
     /// 役割だけがあるときは、Phase 23 の `prompt_header` と同じ `## Role:` 節だけを出す。
@@ -287,12 +290,12 @@ mod tests {
             role: Some(RoleContext { id: "lead".into(), instructions: "You coordinate.".into() }),
             ..RunContext::default()
         };
-        assert_eq!(render(&with_instructions), "## Role: lead\nYou coordinate.\n\n");
+        assert_eq!(render(&with_instructions, "artifacts"), "## Role: lead\nYou coordinate.\n\n");
         let bare = RunContext {
             role: Some(RoleContext { id: "lead".into(), instructions: String::new() }),
             ..RunContext::default()
         };
-        assert_eq!(render(&bare), "## Role: lead\n\n");
+        assert_eq!(render(&bare, "artifacts"), "## Role: lead\n\n");
     }
 
     /// Phase 28（ADR-0033 D4 追記）: 対話 run にだけ、末尾に「返事だけをする」指示が付く。
@@ -300,14 +303,14 @@ mod tests {
     #[test]
     fn conversation_runs_get_a_reply_only_instruction_appended_at_the_end() {
         let ordinary = full_context();
-        let ordinary_out = render(&ordinary);
+        let ordinary_out = render(&ordinary, "artifacts");
         assert!(!ordinary_out.contains("これは対話です"), "{ordinary_out}");
 
         let secretary = RunContext {
             conversation_addressee: Some(ConversationAddressee::Secretary),
             ..ordinary.clone()
         };
-        let out = render(&secretary);
+        let out = render(&secretary, "artifacts");
         assert!(out.starts_with(&ordinary_out), "対話の指示は末尾に足すだけ: {out}");
         assert!(out.contains("この返事では作業を始めないでください"));
         assert!(out.contains("(a) 理解の確認"));
@@ -319,13 +322,13 @@ mod tests {
             conversation_addressee: Some(ConversationAddressee::Other),
             ..RunContext::default()
         };
-        let out = render(&other);
+        let out = render(&other, "artifacts");
         assert!(out.contains("聞かれたことに答え"));
         assert!(!out.contains("(a) 理解の確認"), "{out}");
         assert!(out.contains("自分の直近の仕事とその結果は上に書いてある"), "{out}");
 
         // 対話でない run（既定値の `None`）では何も足さない。
-        assert_eq!(render(&RunContext::default()), "");
+        assert_eq!(render(&RunContext::default(), "artifacts"), "");
     }
 
     /// 記憶が空（ファイルが無い）なら記憶の節は出ないが、書き方の指示は出る（次から覚えられるように）。
@@ -335,11 +338,11 @@ mod tests {
             memory: Some(MemoryContext::default()),
             ..RunContext::default()
         };
-        let out = render(&context);
+        let out = render(&context, "artifacts");
         assert!(!out.contains("## 覚えていること"), "{out}");
         assert!(out.contains("## 覚えておくこと"), "{out}");
         // `[memory]` を設定していない run には何も出ない。
-        assert!(!render(&RunContext::default()).contains("覚えておくこと"));
+        assert!(!render(&RunContext::default(), "artifacts").contains("覚えておくこと"));
     }
 
     /// Phase 33（実機の事故 — 担当が自分の直近の失敗を知らずに聞き返した — の再発防止）:
@@ -365,7 +368,7 @@ mod tests {
             ],
             ..full_context()
         };
-        let out = render(&context);
+        let out = render(&context, "artifacts");
         let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
         assert!(at("## 覚えていること") < at("## あなたの直近の仕事"), "{out}");
         assert!(at("## あなたの直近の仕事") < at("## 直近のやり取り"), "{out}");
@@ -385,9 +388,9 @@ mod tests {
 
         // 空なら節そのものが無い。
         let without = RunContext { recent_work: Vec::new(), ..full_context() };
-        assert!(!render(&without).contains("あなたの直近の仕事"));
+        assert!(!render(&without, "artifacts").contains("あなたの直近の仕事"));
         // 対話でない通常 run の前置きは 1 バイトも変わらない（既定値には `recent_work` が無い）。
-        assert_eq!(render(&RunContext::default()), "");
+        assert_eq!(render(&RunContext::default(), "artifacts"), "");
     }
 
     fn task_worker_recent_work_sample(

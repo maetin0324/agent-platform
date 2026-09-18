@@ -25,6 +25,13 @@
   直近の失敗（`web search returned nothing` ×2, `idle timeout` ×1, レビュー不合格 ×1）を知らずに
   「対象タスク ID / run / エラーメッセージが必要です」と聞き返した事故の再発防止。対話 run にだけ、
   担当の直近の仕事（最大 10 件、更新の新しい順、対話が案件を選んでいればその案件のものを先に）を渡す
+- **Phase 35（ADR-0036 D1/D5）**: `run.artifacts_dir`（§3.1）を追加。**成果物と結果ファイルの置き場は
+  `request.artifacts_dir`**。workspace を自分で所有するタスクは従来と同じ `<workspace>/artifacts`、
+  **workspace を親から継いだタスク（plan / delegate の子）は `<workspace>/.taskd/artifacts/<task_id>`**。
+  実機の事故（2026-09-18）: 計画 run が作った兄弟 2 件（PaperQA2 と LDR）が親の workspace を共有し、
+  両方が `<workspace>/artifacts/` に書いたため `sources.json` が上書きされ、レビュアーが相手の成果物を
+  読んで判定した。`artifact` メッセージの `path` は従来どおり workspace 相対。**追加のみ**なので
+  `protocol` は `4` のまま（この欄を読まないワーカーも単独タスクではそのまま動く）
 
 ## 1. 概要
 
@@ -62,6 +69,7 @@ taskd ◀─stdout── {"type":"progress", ...}\n
  "protocol":2,
  "task":{ "...": "task-core::Task を serde でそのまま直列化したもの（role・aggregate を含む）" },
  "workspace":"/abs/path/to/workspace/<task_id>",
+ "artifacts_dir":"/abs/path/to/workspace/<task_id>/artifacts",
  "context":{
    "prior_review":[{"criterion":0,"pass":false,"reason":"cargo test exit 101: ..."}],
    "inputs":[{"name":"spec.md","path":"inputs/spec.md","sha256":"…","kind":"doc"}],
@@ -78,6 +86,7 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 | `protocol` | integer | ✓ | `1`〜`4`（現在は `4`。v2 = ADR-0016 M9、v3 = ADR-0027 D1、v4 = ADR-0033 D4/D6）。ワーカーはこの値を検査する必要はない |
 | `task` | object | ✓ | `Task`（id, kind, title, objective, acceptance[], inputs[], depends_on[], status, priority, worker_hint, workspace, budget, attempts, `role`, `aggregate`, …）。`task.role`（`Option<string>`）はタスクの役割名、`task.aggregate`（`bool`。既定 false）は集約 run の親かどうか（ADR-0016 D1/D3） |
 | `workspace` | string | ✓ | 絶対パス。ワーカーの cwd。`artifact.path` の基準 |
+| `artifacts_dir` | string | ✓（Phase 35, ADR-0036 D1） | 絶対パス。**この run の成果物と結果ファイル（`result.json` / `delegate.json` / `plan.json` / `review.json` / `summary.md`）の置き場**。workspace を自分で所有するタスクは `<workspace>/artifacts`、**workspace を親から継いだタスク（plan / delegate の子）は `<workspace>/.taskd/artifacts/<task_id>`**。決めるのは taskd（ディスパッチャ）で、ワーカーはここに書く。`artifact` メッセージの `path` は従来どおり **workspace 相対**（`.taskd/artifacts/<task_id>/report.md` の形）|
 | `context.prior_review` | array | ✓（空可） | 直前のレビュー結果。`{criterion: usize, pass: bool, reason: string}` |
 | `context.inputs` | array | ✓（空可） | 依存成果物の `ArtifactRef`。`prepare()` で `workspace/inputs/` に配置済み |
 | `context.answers` | array | –（省略可、空なら省略） | `taskctl answer` で記録された `question` → 人間の回答の履歴（時系列、`{question: string, answer: string}`）。ADR-0010 D3, P-10。前方互換のため未知のワーカーは無視してよい |
@@ -449,7 +458,9 @@ stdout:
 `claude-code`・`codex`（および将来の `dsh`）は本文書 §1〜§8 の JSON Lines プロトコルを**話さない**。
 `claude` CLI は独自の `stream-json` イベント（`system`/`assistant`/`user`/`result`）を吐くだけであり、
 taskd はこれを直接パースできない。そこでこれらのアダプタはプロンプトでワーカー（Claude Code 自身）に
-次を指示し、アダプタが作業ディレクトリの `artifacts/result.json` を読んで本文書の `done`/`question` に
+次を指示し、アダプタが成果物ディレクトリ（`request.artifacts_dir`。以下この節では `artifacts/` と書くが、
+共有 workspace のタスクでは `.taskd/artifacts/<task_id>/`。ADR-0036 D2/D3。プロンプトにはその相対パスが
+そのまま出る）の `result.json` を読んで本文書の `done`/`question` に
 相当する終端を合成する（旧 P-13。ADR-0006 D3 で確定。旧 P-11 の `run_id`/`attempt` はスキーマ変更せず
 プロンプト文面にのみ埋め込む。旧 P-12 の「evidence を任意化」は ADR-0012 D3 で採用し、`command` / `exit` /
 `stdout_tail` を任意にした）:
@@ -567,7 +578,8 @@ JSON Lines のイベント形が `claude-code` と異なる: `claude-code` の `
 §1〜§9 の `run`/`done`/`error`/`question` プロトコル自体は kind によらず同じ（`task.kind` に応じて
 `RunRequest.task`/`context` の内容が変わるだけで、メッセージ形式は変更しない）。ただし `Plan` run と
 `Review` run では、ワーカーは終端メッセージ（あるいは CLI エージェント系アダプタなら §9 の
-`artifacts/result.json`）に加えて、作業ディレクトリ直下に追加のファイルを書く。ディスパッチャ側の
+`artifacts/result.json`）に加えて、成果物ディレクトリ（`request.artifacts_dir`。共有 workspace では
+`.taskd/artifacts/<task_id>/`。ADR-0036 D2）に追加のファイルを書く。ディスパッチャ側の
 Reviewer（決定的コード。LLM 呼び出しはここには書かない）がそれを読んで判定する。
 
 ### 10.1 `Plan` run — `artifacts/plan.json`

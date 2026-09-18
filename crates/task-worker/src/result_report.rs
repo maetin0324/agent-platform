@@ -20,9 +20,9 @@ pub struct ReportDeclaration {
     pub kind: Option<String>,
 }
 
-/// `<workspace>/artifacts/result.json` の `report.kind`。
-pub fn read_result_report_kind(workspace: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(workspace.join("artifacts").join("result.json")).ok()?;
+/// 結果ファイル（`<artifacts_dir>/result.json`。ADR-0036 D2）の `report.kind`。
+pub fn read_result_report_kind(artifacts_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(artifacts_dir.join("result.json")).ok()?;
     report_kind_from_result_json(&text)
 }
 
@@ -60,13 +60,12 @@ mod tests {
     #[test]
     fn a_missing_result_file_is_none() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(read_result_report_kind(dir.path()), None);
-        std::fs::create_dir_all(dir.path().join("artifacts")).expect("mkdir");
-        std::fs::write(
-            dir.path().join("artifacts/result.json"),
-            r#"{"summary":"s","report":{"kind":"proposal"}}"#,
-        )
-        .expect("write");
-        assert_eq!(read_result_report_kind(dir.path()).as_deref(), Some("proposal"));
+        // ADR-0036 D2: 読むのは成果物ディレクトリの `result.json`（共有 workspace では `.taskd/artifacts/<id>/`）。
+        let artifacts = dir.path().join(".taskd/artifacts/01HTASK");
+        assert_eq!(read_result_report_kind(&artifacts), None);
+        std::fs::create_dir_all(&artifacts).expect("mkdir");
+        std::fs::write(artifacts.join("result.json"), r#"{"summary":"s","report":{"kind":"proposal"}}"#)
+            .expect("write");
+        assert_eq!(read_result_report_kind(&artifacts).as_deref(), Some("proposal"));
     }
 }

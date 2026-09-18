@@ -160,46 +160,53 @@ const PLAN_JSON: &str = r#"{"tasks":[
  {"title":"D","objective":"document usage in README","acceptance":[{"text":"report exists","check":{"type":"artifact_exists","name":"D-report.md"}}],"depends_on":[1,2]}
 ]}"#;
 
-/// stdin の `run` 行から `task.kind` と `task.title` を取り、kind ごとに振る舞う fake ワーカー。
-/// `kind = plan` は `$PLAN_FILE`（テストが用意）を `artifacts/plan.json` にコピー、`kind = review` は全条件 pass の
-/// `artifacts/review.json`、それ以外は `<title>.txt` と `artifacts/<title>-report.md` を作る。
+/// stdin の `run` 行から `task.kind` / `task.title` / `artifacts_dir` を取り、kind ごとに振る舞う fake ワーカー。
+/// 成果物は `run.artifacts_dir`（ADR-0036: 共有 workspace の子は `.taskd/artifacts/<task_id>/`）に置く。
+/// `kind = plan` は `$PLAN_FILE`（テストが用意）を `$A/plan.json` にコピー、`kind = review` は全条件 pass の
+/// `$A/review.json`、それ以外は `<title>.txt` と `$A/<title>-report.md` を作る。
 fn worker_script(plan_source: &str, invalid_first: bool) -> String {
     let plan_step = if invalid_first {
         format!(
             r#"N=$(ls plan-run-*.marker 2>/dev/null | wc -l)
     cp "$RUN" "plan-run-$N.marker"
     if [ "$N" -eq 0 ]; then
-      printf '%s' '{{"tasks":[{{"title":"bad","objective":"o","acceptance":[{{"text":"c","check":{{"type":"human"}}}}],"depends_on":[9]}}]}}' > artifacts/plan.json
+      printf '%s' '{{"tasks":[{{"title":"bad","objective":"o","acceptance":[{{"text":"c","check":{{"type":"human"}}}}],"depends_on":[9]}}]}}' > "$A/plan.json"
     else
-      cp "{plan_source}" artifacts/plan.json
+      cp "{plan_source}" "$A/plan.json"
     fi"#
         )
     } else {
-        format!(r#"cp "{plan_source}" artifacts/plan.json"#)
+        format!(r#"cp "{plan_source}" "$A/plan.json""#)
     };
     format!(
         r##"RUN=$(mktemp)
 cat > "$RUN"
 KIND=$(grep -o '"kind":"[a-z]*"' "$RUN" | head -1 | cut -d'"' -f4)
 TITLE=$(grep -o '"title":"[^"]*"' "$RUN" | head -1 | cut -d'"' -f4)
-mkdir -p artifacts
+# ADR-0036: 成果物の置き場は `run.artifacts_dir`（絶対パス）。`artifact` メッセージの `path` は
+# workspace 相対なので、workspace を取り除いた相対形（`$A`）にして両方に使う。
+WS=$(grep -o '"workspace":"[^"]*"' "$RUN" | head -1 | cut -d'"' -f4)
+A=$(grep -o '"artifacts_dir":"[^"]*"' "$RUN" | head -1 | cut -d'"' -f4)
+A=${{A#"$WS"/}}
+: "${{A:=artifacts}}"
+mkdir -p "$A"
 echo "$KIND $TITLE $(date +%s.%N)" >> timeline.log
 case "$KIND" in
   plan)
     {plan_step}
-    echo '{{"type":"artifact","name":"plan.json","path":"artifacts/plan.json"}}'
+    echo '{{"type":"artifact","name":"plan.json","path":"'"$A"'/plan.json"}}'
     echo '{{"type":"done","summary":"planned","evidence":[]}}'
     ;;
   review)
     cp "$RUN" "review-run.json"
-    printf '%s' '{{"verdicts":[{{"criterion":0,"pass":true,"reason":"tests cover the parser"}}]}}' > artifacts/review.json
+    printf '%s' '{{"verdicts":[{{"criterion":0,"pass":true,"reason":"tests cover the parser"}}]}}' > "$A/review.json"
     echo '{{"type":"done","summary":"reviewed","evidence":[]}}'
     ;;
   *)
     sleep 0.2
     touch "$TITLE.txt"
-    echo "# $TITLE" > "artifacts/$TITLE-report.md"
-    echo '{{"type":"artifact","name":"'"$TITLE"'-report.md","path":"artifacts/'"$TITLE"'-report.md"}}'
+    echo "# $TITLE" > "$A/$TITLE-report.md"
+    echo '{{"type":"artifact","name":"'"$TITLE"'-report.md","path":"'"$A"'/'"$TITLE"'-report.md"}}'
     echo '{{"type":"done","summary":"did '"$TITLE"'","evidence":[]}}'
     ;;
 esac
