@@ -182,6 +182,9 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     model: effective_model(&p.model, &None),
                     env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
                     extra_args: base.extra_args.clone(),
+                    // ADR-0035 D1 / D3: 取得と証拠ゲートは行ごとの上書きが無い（他の paperqa 設定と同じ扱い）。
+                    acquire: base.acquire.clone(),
+                    evidence: base.evidence,
                 }))
             }
             LdrAdapter::ID => {
@@ -1066,7 +1069,7 @@ mod tests {
 
     // ---- ADR-0033 D1（Phase 23）: 組織図の種蒔き ----
 
-    /// 空の DB には例の組織図（10 ノード）が入り、2 回目は何もしない（以後は DB が正）。
+    /// 空の DB には例の組織図（11 ノード）が入り、2 回目は何もしない（以後は DB が正）。
     #[test]
     fn seeds_the_org_once_into_an_empty_db_and_never_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1111,6 +1114,15 @@ id = "literature"
 description = "関連研究の調査"
 default_role = "literature-reader"
 roles = ["literature-reader"]
+
+[[roles]]
+id = "web-researcher"
+
+[[genres]]
+id = "web-research"
+description = "一般 Web の調査"
+default_role = "web-researcher"
+roles = ["web-researcher"]
 "#
             ),
         )
@@ -1118,9 +1130,9 @@ roles = ["literature-reader"]
         let config = Config::load(&path).unwrap();
         let store = SqliteStore::open(&config.db).unwrap();
 
-        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 10);
+        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 11);
         let nodes = store.org_list().unwrap();
-        assert_eq!(nodes.len(), 10);
+        assert_eq!(nodes.len(), 11);
         let secretary = nodes.iter().find(|n| n.id == "secretary").unwrap();
         assert_eq!(secretary.kind, task_core::OrgKind::Secretary);
         assert_eq!(secretary.parent_id, None);
@@ -1132,7 +1144,7 @@ roles = ["literature-reader"]
         store.org_upsert(&renamed).unwrap();
         assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 0);
         assert_eq!(store.org_get("secretary").unwrap().unwrap().name, "本人");
-        assert_eq!(store.org_list().unwrap().len(), 10);
+        assert_eq!(store.org_list().unwrap().len(), 11);
     }
 
     /// 監査 D-4: `org_include` の並びに木としての不整合（種類の順序。`Config::load` は循環・順序までは

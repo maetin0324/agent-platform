@@ -86,6 +86,13 @@ id = "literature-reader"
 tier = "standard"
 instructions = "あなたは精読担当。候補論文を読み込み、引用付きで要点と新規性への影響をまとめる。"
 
+# Web 調査（ADR-0029 / ADR-0035 §1）。人間の決定（2026-09-18）で、学術文献（PaperQA2）と一般 Web（LDR）は
+# 別の課に分けた。実際に LDR を使う設定は `config/taskd.web-research.example.toml` にある。
+[[roles]]
+id = "web-researcher"
+tier = "standard"
+instructions = "あなたは Web 調査担当。論文化されていない実装・製品・仕様を一般 Web 検索で調べ、出典付きでまとめる。"
+
 # 分野（ADR-0027 D1）。タスクの `genre` がここの `id` を指すと、role が省略されたときの既定として
 # `default_role` の役割（tier / adapter / 予算）が使われ（タスクの値 > 役割の既定 > 分野の既定 > 親の値）、
 # 委譲できる run（lead など）のプロンプトに「使える専門家」として一覧が渡る。分野そのものにはアダプタを持たせない
@@ -122,12 +129,22 @@ roles = ["lead", "implementer"]
 
 [[genres]]
 id = "literature"
-description = "関連研究の調査・先行研究の確認・新規性の検討"
-capabilities = ["学術文献の検索", "引用グラフの探索", "PDF 全文からの根拠抽出"]
+description = "関連研究の調査・先行研究の確認・新規性の検討（PaperQA2 + arXiv / OpenAlex）"
+capabilities = ["学術文献の検索と取得", "PDF 全文からの根拠抽出", "引用付きの要約"]
 input_artifacts = ["question", "pdf", "bibliography"]
-output_artifacts = ["answer.md", "citations.json"]
+output_artifacts = ["answer.md", "candidates.json", "sources.json"]
 default_role = "literature-reader"
 roles = ["literature-scout", "literature-reader"]
+
+# 一般 Web の調査（`config/org.example.toml` の Web 調査課が使う分野）。論文は上の `literature` に投げる。
+[[genres]]
+id = "web-research"
+description = "論文化されていない GitHub 上の実装・製品・仕様・技術報告の調査（Local Deep Research）"
+capabilities = ["一般 Web 検索", "複数ページの読解", "出典付きの報告"]
+input_artifacts = ["question"]
+output_artifacts = ["report.md", "sources.json", "research.json"]
+default_role = "web-researcher"
+roles = ["web-researcher"]
 
 # 実行中の委譲の上限（ADR-0016 D2 / M6）。既定は下の値。超える提案は拒否され、理由が WorkerProgress に残る（run は失敗しない）。
 [delegation]

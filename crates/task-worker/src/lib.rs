@@ -39,7 +39,7 @@ pub use delegate_file::{DELEGATE_FILE, clear_delegate_file, forward_delegate_fil
 pub use fake::FakeAdapter;
 pub use local_deep_research::{EvidenceThresholds, LdrAdapter, LdrConfig, LdrMode};
 pub use memory::{MEMORY_MAX_CHARS, MemoryDir, MemoryUpdate, read_result_memory};
-pub use paperqa::{PaperQaAdapter, PaperQaConfig};
+pub use paperqa::{AcquireConfig, PaperQaAdapter, PaperQaConfig, PaperQaEvidence};
 pub use protocol::{
     Answer, ChildSummary, ConversationAddressee, ConversationTurn, Evidence, GenreContext, GenreRoleContext,
     MemoryContext, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, ProviderFailure, RecentWork,

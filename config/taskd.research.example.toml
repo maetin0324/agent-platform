@@ -9,10 +9,19 @@
 #       - `embedding = "sparse"`（鍵無しの埋め込み。Semantic Scholar は鍵無しだと 429 なので使わない）
 #       - `llm_config` / `summary_llm_config` / `agent.agent_llm_config` の `timeout` を伸ばす（既定 60 秒だと
 #         ローカル Qwen のような遅い LLM で 1 要約が 180 秒かかって落ちる。ここでは 900 秒にしてある）
+#       - `parsing.multimodal = false`（ADR-0035 の実機確認。既定は PDF の画像を取り出して**既定モデル
+#         `gpt-4o-2024-11-20`** で説明文を作るため、ローカル LLM のエンドポイントでは 404 になり
+#         **PDF の索引作成が丸ごと落ちる**）
 #     を設定しておくこと。
+#   - PDF を索引するには venv に `pillow` も必要（`uv pip install pillow`。pypdf の画像抽出が要求する）。
 #   - `settings` にはファイルパスから **`.json` を付けずに** 渡す（`pqa` 自身が拡張子を足す実機の仕様）。
-#   - 論文（`paper_directory`）は読み取りだけ。索引（`index_directory`）はタスクごとにサブディレクトリを
-#     taskd 側が作る（同時実行で索引を壊さないため）。
+#   - 論文（`paper_directory`）と索引（`index_directory`）の下に、**案件ごと**（タスクの `project_id`、
+#     案件が無ければ `_shared`）のサブディレクトリを taskd 側が作る（ADR-0035 D1 / D2。同じ案件の別タスク・
+#     リトライで corpus と索引を使い回すため）。
+#   - ADR-0035: run は 2 段（取得 → 回答）。1 段目は arXiv / OpenAlex（**鍵なし**）で候補論文を探し、
+#     open access の PDF を案件の corpus に落とす（`[adapters.paperqa.acquire]`）。2 段目が `pqa ask`。
+#     取得と引用の件数は決定的な証拠ゲート（`[adapters.paperqa.evidence]`）が見る。
+#     成果物は `artifacts/answer.md`（末尾に `## 出典`）/ `candidates.json` / `sources.json`。
 
 db = "../taskd-research-demo.sqlite3"
 workspace_root = "../workspaces"
@@ -36,7 +45,34 @@ settings = "/home/u/taskd/paperqa/settings/qwen-local"
 paper_directory = "/home/u/taskd/paperqa/papers"
 index_directory = "/home/u/taskd/paperqa/index"
 # LiteLLM 経由で OpenAI 互換の口（ローカル Qwen へのトンネル等）に向ける。`api_key` は使われないダミーでよい。
-env = { OPENAI_API_KEY = "unused", OPENAI_BASE_URL = "http://127.0.0.1:18000/v1" }
+# `RES_OPTIONS` は、このホストで見つかった glibc の A/AAAA 並行送信の取りこぼし対策（ADR-0031 の実機記録。
+# 取得ランナーの名前解決が 5 秒待たされる症状が出たら効く）。
+env = { OPENAI_API_KEY = "unused", OPENAI_BASE_URL = "http://127.0.0.1:18000/v1", RES_OPTIONS = "single-request" }
+
+# 文献の取得（ADR-0035 D1）。鍵は要らない（arXiv と OpenAlex のどちらも公開 API）。
+[adapters.paperqa.acquire]
+# ランナーを動かす python。省略すると上の `command` と同じディレクトリの `python3`（= venv の中）。
+# 標準ライブラリしか使わないので、LDR 用の venv などを指してもよい。
+# command = "/home/u/taskd/paperqa/.venv/bin/python3"
+# 重複排除（DOI / arXiv id / タイトル）後に残す候補の上限。**0 にすると取得の段そのものを行わない**
+# （手元の corpus だけで答える従来の使い方。このとき下の `evidence` も見ない）。
+max_candidates = 30
+# 1 run で corpus に入れる PDF の上限。**ローカル LLM で索引を作ると 1 本あたり数分かかる**ので、
+# Qwen をトンネル越しに使う構成では 3〜6 本程度から始めるとよい（索引は案件ごとに使い回される）。
+max_pdfs = 12
+# 検索語 1 本・エンジン 1 つあたりの取得件数（arXiv の `max_results` / OpenAlex の `per_page`）。
+per_query = 20
+timeout_secs = 30
+# OpenAlex の polite pool 用の連絡先。鍵ではないが、入れておくと制限が緩い。
+# mailto = "you@example.org"
+
+# 決定的な証拠ゲート（ADR-0035 D3。ADR-0031 D2 の literature 版）。満たさないと `Error{retryable}` になり、
+# 成果物（answer.md / candidates.json / sources.json）は残る。`0` を書けばその項目は見ない。
+# 取得が 0 件のときは「検索経路の問題かもしれない」という別のメッセージになる。
+[adapters.paperqa.evidence]
+min_candidates = 5
+min_pdfs = 3
+min_cited = 2
 
 [[providers]]
 id = "paperqa-qwen"
@@ -98,12 +134,16 @@ output_artifacts = ["diff", "test results"]
 default_role = "implementer"
 roles = ["lead", "implementer"]
 
+# 人間の決定（2026-09-18、ADR-0035 §1）: **学術論文はこの分野（PaperQA2 + arXiv / OpenAlex）**、
+# 論文化されていない GitHub 上の実装や一般 Web は `web-research` 分野（Local Deep Research。
+# `config/taskd.web-research.example.toml`）。一般 Web 検索で関連研究を調べさせたら、レビュアーが
+# 「出典が Medium / Qiita / note のブログ」と不合格にしたため分けた。
 [[genres]]
 id = "literature"
-description = "関連研究の調査・先行研究の確認・新規性の検討（PaperQA2）"
-capabilities = ["学術文献の検索", "引用グラフの探索", "PDF 全文からの根拠抽出"]
+description = "関連研究の調査・先行研究の確認・新規性の検討（PaperQA2 + arXiv / OpenAlex。論文だけを見る）"
+capabilities = ["学術文献の検索と取得（arXiv / OpenAlex）", "PDF 全文からの根拠抽出", "引用付きの要約"]
 input_artifacts = ["question", "pdf", "bibliography"]
-output_artifacts = ["answer.md", "citations.json"]
+output_artifacts = ["answer.md", "candidates.json", "sources.json"]
 default_role = "literature-reader"
 roles = ["literature-scout", "literature-reader", "novelty-skeptic"]
 

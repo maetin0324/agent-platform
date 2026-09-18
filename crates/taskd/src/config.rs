@@ -662,6 +662,14 @@ pub struct PaperQaAdapterConfig {
     /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。`env` より優先。
     #[serde(default)]
     pub env_from_secrets: HashMap<String, String>,
+    /// `[adapters.paperqa.acquire]`（ADR-0035 D1）: 文献の取得（arXiv / OpenAlex、鍵無し）。
+    /// 意味は `task_worker::AcquireConfig` と同じ。`max_candidates = 0` で取得の段を行わない。
+    #[serde(default)]
+    pub acquire: task_worker::AcquireConfig,
+    /// `[adapters.paperqa.evidence]`（ADR-0035 D3）: 決定的な証拠ゲートの閾値。
+    /// 意味は `task_worker::PaperQaEvidence` と同じ。
+    #[serde(default)]
+    pub evidence: task_worker::PaperQaEvidence,
 }
 
 impl Default for PaperQaAdapterConfig {
@@ -675,6 +683,8 @@ impl Default for PaperQaAdapterConfig {
             extra_args: Vec::new(),
             env: HashMap::new(),
             env_from_secrets: HashMap::new(),
+            acquire: task_worker::AcquireConfig::default(),
+            evidence: task_worker::PaperQaEvidence::default(),
         }
     }
 }
@@ -1506,7 +1516,7 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// `config/org.example.toml` が指す分野（`coding` / `literature`）を持つ最小の設定。
+    /// `config/org.example.toml` が指す分野（`coding` / `literature` / `web-research`）を持つ最小の設定。
     const ORG_TEST_GENRES: &str = r#"
 [[providers]]
 id = "x"
@@ -1538,12 +1548,22 @@ id = "literature"
 description = "関連研究の調査"
 default_role = "literature-reader"
 roles = ["literature-reader"]
+
+[[roles]]
+id = "web-researcher"
+
+[[genres]]
+id = "web-research"
+description = "一般 Web の調査"
+default_role = "web-researcher"
+roles = ["web-researcher"]
 "#;
 
     // ---- ADR-0033 D1（Phase 23）: 組織図の種 ----
 
-    /// 例の設定（`config/org.example.toml`）が読め、SPEC §3.2 の 10 ノードになる。
-    /// `genre` は実在する分野 id（`coding` / `literature`）だけを指す。
+    /// 例の設定（`config/org.example.toml`）が読め、SPEC §3.2 の組織図（11 ノード。2026-09-18 に
+    /// 研究部が「研究文献調査課」と「Web 調査課」に分かれて 1 つ増えた）になる。
+    /// `genre` は実在する分野 id（`coding` / `literature` / `web-research`）だけを指す。
     #[test]
     fn loads_the_org_example_and_maps_it_to_org_nodes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1567,13 +1587,14 @@ roles = ["literature-reader"]
                 "coding-poc",
                 "research",
                 "research-survey",
+                "research-web",
                 "research-writing",
                 "research-data",
                 "infra",
             ]
         );
         let nodes = cfg.org_nodes(time::OffsetDateTime::now_utc());
-        assert_eq!(nodes.len(), 10);
+        assert_eq!(nodes.len(), 11);
         // 親が子より先に来る（secretary → 部 → 課）。
         let order: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(order[0], "secretary");
@@ -1585,6 +1606,10 @@ roles = ["literature-reader"]
         assert_eq!(survey.genre.as_deref(), Some("literature"));
         assert_eq!(survey.parent_id.as_deref(), Some("research"));
         assert!(!survey.brief.is_empty());
+        // 人間の決定（2026-09-18、ADR-0035 §1）: 学術文献は PaperQA2（literature）、一般 Web は LDR。
+        let web = nodes.iter().find(|n| n.id == "research-web").unwrap();
+        assert_eq!(web.genre.as_deref(), Some("web-research"));
+        assert_eq!(web.parent_id.as_deref(), Some("research"));
         // 分野を当てていないノードもある（まだその分野が無い）。
         assert_eq!(nodes.iter().find(|n| n.id == "research-writing").unwrap().genre, None);
         assert_eq!(nodes.iter().filter(|n| n.kind == OrgKind::Secretary).count(), 1);
@@ -1664,11 +1689,11 @@ roles = ["literature-reader"]
         assert!(!cfg.dispatch_config().plan_auto_accept);
         cfg.validate().unwrap();
         // 監査 M-1: 役割は tier だけ（`fake` のプロバイダでもそのまま回る）で、分野は
-        // `config/org.example.toml` の課が使う 3 つが揃っている。
+        // `config/org.example.toml` の課が使う 4 つが揃っている（2026-09-18 に `web-research` が増えた）。
         assert!(cfg.roles.iter().all(|r| r.adapter.is_none()), "{:?}", cfg.roles);
         let mut genres: Vec<&str> = cfg.genres.iter().map(|g| g.id.as_str()).collect();
         genres.sort_unstable();
-        assert_eq!(genres, vec!["coding", "literature", "secretary"]);
+        assert_eq!(genres, vec!["coding", "literature", "secretary", "web-research"]);
         // Phase 30: `[conversation]` は例では省略（コメントアウト）してあり、既定の `secretary` が使われる。
         assert_eq!(cfg.conversation_genre_id(), "secretary");
     }
@@ -1945,6 +1970,61 @@ host = "h"
         assert!(cfg.adapters.paperqa.extra_args.is_empty());
         assert!(cfg.adapters.paperqa.env.is_empty());
         assert!(cfg.providers[0].settings.is_none());
+        // ADR-0035 D1 / D3: 取得と証拠ゲートの既定値。
+        assert_eq!(cfg.adapters.paperqa.acquire, task_worker::AcquireConfig::default());
+        assert!(cfg.adapters.paperqa.acquire.command.is_none());
+        assert_eq!(cfg.adapters.paperqa.acquire.max_candidates, 30);
+        assert_eq!(cfg.adapters.paperqa.acquire.max_pdfs, 12);
+        assert_eq!(cfg.adapters.paperqa.acquire.per_query, 20);
+        assert_eq!(cfg.adapters.paperqa.acquire.timeout_secs, 30);
+        assert!(cfg.adapters.paperqa.acquire.mailto.is_none());
+        assert_eq!(
+            cfg.adapters.paperqa.evidence,
+            task_worker::PaperQaEvidence { min_candidates: 5, min_pdfs: 3, min_cited: 2 }
+        );
+    }
+
+    /// ADR-0035 D1 / D3: `[adapters.paperqa.acquire]` と `[adapters.paperqa.evidence]` を読む
+    /// （`0` を書けばその項目を見ない・取得の段を行わない）。
+    #[test]
+    fn reads_paperqa_acquire_and_evidence_tables() {
+        let text = "[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n\n\
+             [adapters.paperqa.acquire]\ncommand = \"/opt/pq/.venv/bin/python3\"\nmax_candidates = 40\n\
+             max_pdfs = 4\nper_query = 10\ntimeout_secs = 60\nmailto = \"who@example.org\"\n\n\
+             [adapters.paperqa.evidence]\nmin_candidates = 0\nmin_pdfs = 1\nmin_cited = 0\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.validate().is_ok());
+        let acquire = &cfg.adapters.paperqa.acquire;
+        assert_eq!(acquire.command.as_deref(), Some("/opt/pq/.venv/bin/python3"));
+        assert_eq!(acquire.max_candidates, 40);
+        assert_eq!(acquire.max_pdfs, 4);
+        assert_eq!(acquire.per_query, 10);
+        assert_eq!(acquire.timeout_secs, 60);
+        assert_eq!(acquire.mailto.as_deref(), Some("who@example.org"));
+        assert_eq!(
+            cfg.adapters.paperqa.evidence,
+            task_worker::PaperQaEvidence { min_candidates: 0, min_pdfs: 1, min_cited: 0 }
+        );
+        // 部分指定でも残りは既定値。
+        let partial: Config = toml::from_str(
+            "[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n\n[adapters.paperqa.acquire]\nmax_pdfs = 2\n",
+        )
+        .unwrap();
+        assert_eq!(partial.adapters.paperqa.acquire.max_pdfs, 2);
+        assert_eq!(partial.adapters.paperqa.acquire.max_candidates, 30);
+        // 綴り間違いは設定エラー（deny_unknown_fields）。
+        assert!(
+            toml::from_str::<Config>(
+                "[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n\n[adapters.paperqa.acquire]\nmax_pdf = 2\n"
+            )
+            .is_err()
+        );
+        assert!(
+            toml::from_str::<Config>(
+                "[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n\n[adapters.paperqa.evidence]\nmin_pdf = 2\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2133,13 +2213,30 @@ host = "h"
             literature.roles,
             vec!["literature-scout".to_string(), "literature-reader".to_string(), "novelty-skeptic".to_string()]
         );
-        // ADR-0028 D1: 能力・入出力の目安も読める。
+        // ADR-0028 D1: 能力・入出力の目安も読める（ADR-0035 で取得の段が入ったので中身が変わった）。
         assert_eq!(
             literature.capabilities,
-            vec!["学術文献の検索".to_string(), "引用グラフの探索".to_string(), "PDF 全文からの根拠抽出".to_string()]
+            vec![
+                "学術文献の検索と取得（arXiv / OpenAlex）".to_string(),
+                "PDF 全文からの根拠抽出".to_string(),
+                "引用付きの要約".to_string()
+            ]
         );
         assert_eq!(literature.input_artifacts, vec!["question".to_string(), "pdf".to_string(), "bibliography".to_string()]);
-        assert_eq!(literature.output_artifacts, vec!["answer.md".to_string(), "citations.json".to_string()]);
+        assert_eq!(
+            literature.output_artifacts,
+            vec!["answer.md".to_string(), "candidates.json".to_string(), "sources.json".to_string()]
+        );
+        // ADR-0035 D1 / D3: 取得と証拠ゲートの例の値。
+        assert_eq!(cfg.adapters.paperqa.acquire.max_candidates, 30);
+        assert_eq!(cfg.adapters.paperqa.acquire.max_pdfs, 12);
+        assert_eq!(cfg.adapters.paperqa.acquire.per_query, 20);
+        assert!(cfg.adapters.paperqa.acquire.command.is_none(), "既定は pqa の隣の python3");
+        assert_eq!(
+            cfg.adapters.paperqa.evidence,
+            task_worker::PaperQaEvidence { min_candidates: 5, min_pdfs: 3, min_cited: 2 }
+        );
+        assert_eq!(cfg.adapters.paperqa.env.get("RES_OPTIONS").map(String::as_str), Some("single-request"));
         let coding = cfg.genres.iter().find(|g| g.id == "coding").expect("coding genre");
         assert!(!coding.capabilities.is_empty());
         assert!(!coding.input_artifacts.is_empty());

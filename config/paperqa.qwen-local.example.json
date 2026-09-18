@@ -37,7 +37,8 @@
     "max_concurrent_requests": 2
   },
   "parsing": {
-    "use_doc_details": false
+    "use_doc_details": false,
+    "multimodal": false
   },
   "agent": {
     "agent_llm": "openai/qwen3.8-27b",

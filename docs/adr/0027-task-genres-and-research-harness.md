@@ -88,6 +88,16 @@ roles = ["literature-scout", "literature-reader", "novelty-skeptic"]
 - **委譲はしない**（`delegate.json` を読まない）。調査の分割は taskd 側（親の run）が行う。
 - 索引: `index_directory` の下に**タスクごと**の索引を作る（同時実行で索引を壊さないため）。`paper_directory` は読み取りだけ。
 
+**Phase 34 追記（ADR-0035。2026-09-18）**: この D3 は 2 点が上書きされた。
+1. run は 2 段になった（取得 → 索引と回答）。`paper_directory` は読み取りだけではなく、取得ランナーが
+   **案件ごとのサブディレクトリ**（`paper_directory/<project_id>/`、案件が無ければ `_shared`）に PDF を書く。
+2. 索引は**タスクごとではなく案件ごと**（`index_directory/<project_id>/`、索引名も `<project_id>`）。
+   corpus が案件ごとになったので、同じ案件の別タスク・リトライで索引を使い回せる（U17-2 の緩和）。
+また、`settings` に**必ず**入れるものが 1 つ増えた: `parsing.multimodal = false`。既定
+（`ON_WITH_ENRICHMENT`）は PDF の画像を取り出して**既定モデル `gpt-4o-2024-11-20`** で説明文を作るため、
+ローカル Qwen のエンドポイントでは 404 になり PDF の索引作成が丸ごと落ちる（ADR-0035 の実機記録）。
+PDF を索引するには venv に `pillow` も必要（pypdf の画像抽出）。
+
 ### D4. 受け入れ条件の判定は今までどおり taskd
 
 調査タスクの受け入れ条件は `Check::Reviewer`（別の LLM run が判定）か `Check::Human` を使う。

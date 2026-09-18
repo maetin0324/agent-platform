@@ -4505,3 +4505,167 @@ brief・記憶・直近のやり取りしか入らず、記憶は LDR の run �
 - P-84: 今回は対話 run にだけ `recent_work` を渡した。将来、集約 run（`context.children`）にも
   「その担当がこれまでに抱えた仕事」を渡したくなったら、`recent_work_of` はそのまま流用できる
   （`assignee` 単位のクエリで、対話かどうかには依存しない実装にしてある）。
+
+## Phase 34 — 研究文献調査は、まず論文を集める（ADR-0035。2026-09-18）
+
+### 背景（実機。人間の決定）
+
+関連研究調査を LDR（一般 Web 検索）でやらせたら、レビュアー（Claude）が「出典 15 件が Medium / Qiita /
+note の非学術ブログ」と**不合格**にした。人間の決定: 課を**研究文献調査課**（`literature` = PaperQA2）と
+**Web 調査課**（`web-research` = LDR。論文化されていない GitHub 上の実装や一般 Web 向け）に分ける。
+ところが `paperqa` アダプタ（ADR-0027 D3）は `paper_directory` の手元の PDF を読んで答えるだけで、
+**論文を探して取ってくる段が無かった**（本番の corpus には Phase 17 の確認で置いたテキスト 3 本だけ）。
+
+### 実装前に実機で確かめた事実（ADR-0035 §1 にも記載）
+
+- `https://export.arxiv.org/api/query?...` → **HTTP 200**。ただし `all:"ad-hoc file system"`（引用符つき）は
+  `totalResults 0`、`all:ad+hoc+file+system`（引用符なし）は 3 件。**引用符で括らない**。
+- `https://api.openalex.org/works?search=...&per_page=3&filter=is_oa:true&mailto=<メール>` → **HTTP 200、鍵不要**。
+  1 件目から `Ad Hoc File Systems for High-Performance Computing (2020)` のような学術論文が返る。
+- PDF は鍵無しで落ちた: arXiv `https://arxiv.org/pdf/1003.3565v1` → 200 / 798,684 B / `application/pdf`、
+  OpenAlex の `best_oa_location.pdf_url`（upcommons.upc.edu）→ 200 / 7,943,385 B。Python の `urllib` でも同じ。
+- `AF_UNSPEC` の名前解決は cold 0.02 秒（ADR-0031 の 5 秒問題は今回は出ず。出たら `RES_OPTIONS=single-request`）。
+- `~/taskd/paperqa/.venv/bin/pqa`（paper-qa 2026.8.12）と `settings/qwen-local.json` は健在、
+  LLM は `http://127.0.0.1:18000/v1` の Qwen3.8-27B（`/v1/models` が 200）。
+
+### 変更したファイル
+
+- `crates/task-worker/src/paperqa_acquire.py`（**新規**。ADR-0035 D1）— 埋め込みの取得ランナー。標準ライブラリだけ。
+  arXiv（Atom）と OpenAlex（JSON）を叩き、DOI / arXiv id（版番号を落とす）/ タイトル正規化で重複排除し、
+  **(検索語, エンジン) の結果をラウンドロビン**（relevance 順の総当たり）で `max_candidates` まで。
+  open access の PDF を `max_pdfs` 本まで**案件ごとの corpus**に落とす（既にあるファイルは再取得しない。
+  先頭が `%PDF` でない応答は捨てる）。`artifacts/candidates.json` / `artifacts/sources.json` を書き、
+  `progress:` と `TASKD_ACQUIRE {"candidates","pdfs","engines"}` を出す。`--fixture <dir>` でテストは
+  **本物の API を叩かない**（HTTP 要求を 1 回も出さない）。
+- `crates/task-worker/src/paperqa.rs` — run を 2 段に（取得 → `pqa ask`）。
+  - `build_search_queries`（Rust、決定的、**LLM 無し**）: 日本語の依頼文から ASCII の名詞句を抜き、
+    語数の多い順・出現順で最大 4 本。1 本も取れなければ `objective` 全文。
+  - corpus と索引を**案件ごと**に（`paper_directory/<project_id>/`、`index_directory/<project_id>/`、
+    索引名も `<project_id>`。案件が無ければ `_shared`）。**ADR-0027 D3 の「索引はタスクごと」からの変更**（U17-2）。
+  - `stream_child`: 2 段で共用する生存監視（壁時計は run 全体で数える。無出力は段ごと）。
+  - `answer_cites`: 答えが引用した出典を決定的に突き合わせる（DOI / arXiv id / corpus のファイル名 /
+    `著者姓+年` / 正規化タイトル。合わなければ false）。結果で `sources.json` を書き直す。
+  - `render_sources_section`: `answer.md` の末尾に `## 出典`（引用されたものを先に、
+    `[n] 著者 (年). タイトル. venue. URL (引用)`）。
+  - `evidence_gate`（ADR-0035 D3）: `min_candidates=5` / `min_pdfs=3` / `min_cited=2`。満たさなければ
+    `Terminal::Error{retryable:true}`、**成果物は残す**（`answer.md` / `candidates.json` / `sources.json` を
+    ゲートより前に申告）。取得 0 件のときだけ別メッセージ。`AdapterError` にはしない。
+  - 取得ランナーが起動できない／落ちても run は止めず `pqa` に進む（判定はゲート）。`max_candidates = 0` なら
+    取得の段もゲートも行わない（従来どおり手元の corpus だけで答える）。
+- `crates/task-worker/src/lib.rs` — `AcquireConfig` / `PaperQaEvidence` を公開。
+- `crates/taskd/src/config.rs` — `[adapters.paperqa.acquire]`（`command` / `max_candidates` / `max_pdfs` /
+  `per_query` / `timeout_secs` / `mailto`）と `[adapters.paperqa.evidence]`（3 つの下限）。
+  加えて `08267d9`（組織図の分割）で壊れていた 3 テストの期待値を直した（`web-research` 分野の追加、11 ノード）。
+- `crates/taskd/src/lib.rs` — `build_adapters` が `acquire` / `evidence` を渡す（行ごとの上書きは無い）。
+  組織図の種蒔きテストを 11 ノードに。
+- `config/taskd.research.example.toml` — 取得とゲートの節、案件ごとの corpus / 索引、`RES_OPTIONS` の注意、
+  `literature` 分野の manifest（出力は `answer.md` / `candidates.json` / `sources.json`）。
+- `config/taskd.example.toml` — `web-research` 分野と `web-researcher` 役割（`config/org.example.toml` の
+  Web 調査課が指す分野。例の設定 2 つを組み合わせてそのまま起動できる状態に戻した）。
+- `config/paperqa.qwen-local.example.json` — `parsing.multimodal = false`（下記の実機の発見）。
+- `docs/adr/0035-literature-acquisition.md`（新規）、`docs/PROGRESS.md`（本節）。
+- `docs/protocol/` は**変更なし**（結果ファイル規約 `artifacts/result.json` は変わっていない。
+  増えたのは `artifacts/candidates.json` / `sources.json` で、これは ADR-0031 の `sources.json` /
+  `research.json` と同じ「アダプタが書く分野固有の成果物」）。
+
+### 実機で判明して直したこと（本番の venv / settings 側）
+
+1. **`pqa` は PDF の索引作成に `pillow` が必要**。無いと `ImportError: pillow is required to do image
+   extraction`（pypdf の画像抽出）で **PDF 1 本ごとに `Error parsing ..., skipping index`** になる。
+   → `uv pip install pillow`（`~/taskd/paperqa/.venv`、pillow 12.3.0）。
+2. **`parsing.multimodal` の既定（`ON_WITH_ENRICHMENT`）が既定モデル `gpt-4o-2024-11-20` を呼ぶ**。
+   ローカル Qwen のエンドポイントには存在しないので `404 ... does not exist` → やはり索引作成が落ちる。
+   → 設定に `"parsing": {"multimodal": false}` を足す（本番の `~/taskd/paperqa/settings/qwen-local.json` と
+   リポジトリの `config/paperqa.qwen-local.example.json` の両方）。**ADR-0027 の「settings に必ず入れるもの」に
+   1 項目増えた**（`agent_type = "fake"` / `embedding = "sparse"` / `timeout` を伸ばす、に続いて 4 つ目）。
+
+### 実行したコマンドと結果
+
+- `cargo test -p task-worker --lib paperqa` **28 passed**（Phase 17〜18 の 12 件 + 新規 16 件）。
+- `cargo test --workspace`: **1023 passed**、`grep -c "^test result: FAILED"` = **0**
+  （Phase 33 の 1001 → 1023。task-worker 16 + taskd 2 + 既存テストの期待値修正分）。
+- `cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。
+- `./scripts/sync-gui-docs.sh --check` → `up to date`。
+- テスト以外に `unwrap()` / `expect()` / `panic!` は無い（`paperqa.rs` の非テスト部 1196 行を `grep` で確認）。
+  ディスパッチャ・ストアには触っていない（LLM 呼び出しも増やしていない。検索語の抽出・重複排除・
+  `cited` の突き合わせ・ゲートはすべて決定的な文字列処理）。
+
+### 実機の通し（使い捨ての DB / 設定。運用中の taskd（7710）と GUI（7700）には触っていない）
+
+`taskctl worker run`（Phase 18 と同じ手順。デーモン・DB の状態は変えない）で、本番と同じ
+`~/taskd/paperqa/.venv/bin/pqa` と `~/taskd/paperqa/settings/qwen-local`（`multimodal = false` を足した後）、
+トンネル越しの Qwen3.8-27B（`http://127.0.0.1:18000/v1`）を使って 1 回通した。
+使い捨ての `taskd.toml` / `taskd.sqlite3` / `papers` / `index` は scratchpad に置いた
+（`[adapters.paperqa.acquire] max_candidates = 30, max_pdfs = 6, mailto = <自分のメール>`、
+`[adapters.paperqa.evidence] 5 / 3 / 2`）。依頼文は
+「Pluvio（ad-hoc FS の I/O サーバ向け非同期ランタイム）の隣接領域: asynchronous I/O runtime,
+ad-hoc file system, I/O offload — 直近の研究動向と候補テーマ」。
+
+- **検索語の抽出（日本語の依頼文から、LLM 無し）**: `asynchronous I/O runtime` / `ad-hoc file system` /
+  `ad-hoc FS` / `I/O offload` の 4 本（ADR-0035 D1 の例のとおり）。
+- **取得**: arXiv と OpenAlex に 8 回（4 語 × 2 エンジン）、各 20 件 → 重複排除して
+  **候補 30 件**（arXiv 13 / OpenAlex 17）、**PDF 6 本**を `papers/_shared/` に取得
+  （`project_id` が無いタスクなので `_shared`）。Wiley の 1 件は `HTTP Error 403` で飛ばし、
+  softxjournal の 1 件は `%PDF` で始まらないので捨てた（どちらも run は止まらない）。
+- **2 回目以降の run**: `already in the corpus: <ファイル名>` で**再取得せず**、`pqa` も
+  `New file to index:` を新しい 3 本だけに出した（索引が案件ごとに使い回されている）。
+- **回答とゲート**: `Paper Count=6 | Relevant Papers=3 | Current Evidence=5` を経て
+  `result: {"type":"done", ...}`（04:47:34 → 04:55:01、約 7.5 分）。
+  申告された成果物は `answer.md` / `candidates.json` / `sources.json` の 3 つ。
+  `cited` は **3 件**（`min_cited = 2` を満たす）で、突き合わせは決定的:
+  答えが `(Pestka2024 pages 2-2)` のように**ファイル名由来の `著者姓+年`** で引くのを拾った。
+- **`answer.md` の出典が学術論文になっている**（人間が LDR で不合格にした「Medium / Qiita / note」が消えた）:
+  ```
+  [1] Constantin Pestka, Marcus Paradies, Matthias Pohl (2024). Asynchronous I/O -- With Great Power
+      Comes Great Responsibility. arXiv. https://arxiv.org/abs/2411.16254v1 (引用)
+  [2] André Brinkmann et al. (2020). Ad Hoc File Systems for High-Performance Computing.
+      Journal of Computer Science and Technology. https://doi.org/10.1007/s11390-020-9801-1 (引用)
+  [3] Yifan Yuan et al. (2020). IOCA: High-Speed I/O-Aware LLC Management for Network-Centric
+      Multi-Tenant Platform. arXiv. https://arxiv.org/abs/2007.04552v2 (引用)
+  ```
+  出典 10 件目まですべて arXiv か DOI 付きの査読誌で、非学術ブログは 1 件も無い。
+  本文は io_uring / SQ-CQ polling / shared-nothing ランタイム構造の比較と、Pluvio 向けの候補テーマ
+  （adaptive API-instance/thread scaling、I/O offload thread design、tasklet partitioning など）まで書けていた。
+- **落ちる側も実機で見た**（同じ設定で `max_pdfs = 3` のとき）:
+  `result: {"type":"error","message":"insufficient literature evidence: cited=1 (min 2)","retryable":true}`。
+  corpus が 3 本で、そのうち関連するのが 1 本だけだったため。**成果物（answer.md / candidates.json /
+  sources.json）は残り、`artifacts/result.json` は書かれない**。ゲートが「引用が足りない答え」を
+  `done` にしないことを実機で確認できた（ADR-0031 D2 と同じ狙い）。
+- 本番の corpus（`~/taskd/paperqa/papers/`、テキスト 3 本）と運用中の DB・ポートは実行前後で不変
+  （`curl /api/v1/health` = 200、`~/taskd/taskd.sqlite3` の mtime は 03:48 のまま）。
+
+### 未解決事項
+
+- **U34-1（重要。別フェーズ向け）: `classify_provider_failure` が rich のトレースバックの行番号を
+  供給側失敗と誤分類する。** 今回の 1 回目の実機 run（pillow が無くて `pqa` が落ちたとき）の出力に
+  `pypdf/_page.py:529 in __getitem__` が含まれ、`529`（HTTP 529 = throttled）と一致してしまい、
+  ただの `ImportError` が `provider throttled (retry after 60s)` になった。`provider.rs` の
+  `contains_code` は `cli.js:4291:17` 形（`:` の後に数字が続く）は弾くが、**`file.py:529 ` のように
+  行番号で終わる形は弾けない**。実害は「attempts を消費しない requeue が `max_requeues`（既定 5）まで
+  続く」こと。修正案: `:` の直前のトークンが拡張子付きのファイル名（`.py` / `.js` / `.rs` …）なら
+  位置情報として無視する。**`provider.rs` は他の分野・アダプタ共通なので、今回は触らずに報告した**
+  （Phase 34 の担当範囲は `paperqa` 系）。
+- U34-2: **検索の relevance が雑**。`ad-hoc FS` / `I/O offload` のような短い語では、arXiv が
+  「mobile ad hoc networks」、OpenAlex の全文検索が「focal cortical dysplasias（ad hoc Task Force）」
+  「GROMACS」を上位に返す。候補 30 件のうち本当に隣接領域なのは 5〜8 件程度だった。ADR-0035 §3 の
+  「LLM に検索語を作らせる」を入れるか、`literature` 分野に**分野フィルタ**（arXiv の `cat:cs.DC`、
+  OpenAlex の `concepts.id` / `primary_topic`）を足すのが次の手。決定的なままやるなら後者。
+- U34-3: PDF 1 本の索引作成にローカル Qwen で 30〜60 秒かかる（6 本で約 5 分）。`max_pdfs` の既定 12 は
+  ローカル LLM だと 1 run あたり 10 分以上になる。例の設定に「Qwen なら 3〜6 本から」と注意書きを入れたが、
+  **索引作成だけを別タスク（別 run）にする**案（U17-2 の続き）は未着手。
+- U34-4: `cited` の突き合わせは `著者姓+年` の形（`(Pestka2024 pages 2-2)`）に強く依存している。
+  `parsing.use_doc_details = true` にして DOI から正式な citation を引くと `(Pestka et al., 2024)` の
+  ような形になり、姓 + 年の両方が本文に現れるので拾えるはずだが、実機では確認していない。
+- U34-5: `answer.md` の `## 出典` は候補 30 件すべてを並べる（引用された 3 件が先頭）。
+  「見るべき関連研究へのリンク」としては有用だが、無関係な候補も載る（U34-2 の裏返し）。
+  上限を付けるか、引用されたものだけにするかは人間の判断待ち。
+
+### 提案
+
+- P-85: DESIGN §5.4 のアダプタ表の `paperqa` に「取得の段（arXiv / OpenAlex）を持つ」ことと、
+  `[adapters.paperqa.acquire]` / `[adapters.paperqa.evidence]` を書く（P-65 の更新）。
+- P-86: P-68（「ハーネスが証拠の量を決定的に判定する」を分野共通の考え方として DESIGN に書く）は
+  今回で `literature` にも実装が入ったので、**2 分野で同じ形**（`sources.json` + 閾値 + 0 件専用の
+  メッセージ + 成果物を残す）になった。DESIGN に書くときはこの形をそのまま一般規則にできる。
+- P-87: U34-1 の修正（`provider.rs` の行番号の誤分類）を別フェーズで。テストは実機の文字列
+  `/site-packages/pypdf/_page.py:529 in __getitem__` をそのまま使えばよい。
