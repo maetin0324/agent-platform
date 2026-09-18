@@ -2223,9 +2223,22 @@ host = "h"
             ]
         );
         assert_eq!(literature.input_artifacts, vec!["question".to_string(), "pdf".to_string(), "bibliography".to_string()]);
+        // Phase 38（ADR-0028 追記）: `名前: 説明` の形で書ける（設定は文字列のまま読み、名前は `:` の前）。
         assert_eq!(
             literature.output_artifacts,
-            vec!["answer.md".to_string(), "candidates.json".to_string(), "sources.json".to_string()]
+            vec![
+                "answer.md: 引用付きの答え（これが答え）".to_string(),
+                "papers.json: 検索した論文の一覧（コーパス。答えではない）".to_string(),
+                "sources.json: 出典と引用の有無".to_string(),
+                "queries.json: 使った検索語".to_string()
+            ]
+        );
+        assert_eq!(
+            cfg.genre_specs()
+                .iter()
+                .find(|g| g.id == "literature")
+                .map(|g| g.output_artifact_names()),
+            Some(vec!["answer.md", "papers.json", "sources.json", "queries.json"])
         );
         // ADR-0035 D1 / D3: 取得と証拠ゲートの例の値。
         assert_eq!(cfg.adapters.paperqa.acquire.max_candidates, 30);
@@ -2276,7 +2289,22 @@ host = "h"
         let genre = cfg.genres.iter().find(|g| g.id == "web-research").expect("web-research genre");
         assert_eq!(genre.default_role.as_deref(), Some("web-scout"));
         assert_eq!(genre.roles, vec!["web-scout".to_string()]);
-        assert_eq!(genre.output_artifacts, vec!["report.md".to_string()]);
+        // Phase 38（ADR-0028 追記）: `名前: 説明` で書ける（名前は `:` の前）。
+        assert_eq!(
+            genre.output_artifacts,
+            vec![
+                "report.md: 出典付きの調査報告（これが答え）".to_string(),
+                "sources.json: 出典と引用の有無".to_string(),
+                "research.json: 検索の記録（クエリと件数）".to_string()
+            ]
+        );
+        assert_eq!(
+            cfg.genre_specs()
+                .iter()
+                .find(|g| g.id == "web-research")
+                .map(|g| g.output_artifact_names()),
+            Some(vec!["report.md", "sources.json", "research.json"])
+        );
         let role = cfg.roles.iter().find(|r| r.id == "web-scout").expect("web-scout role");
         assert_eq!(role.adapter.as_deref(), Some("local-deep-research"));
         // ADR-0030 D1: `[secrets] dir` が読め、設定ファイル基準で絶対化される。鍵の値そのものはファイルに無い。

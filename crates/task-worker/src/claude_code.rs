@@ -187,6 +187,49 @@ fn available_genres_section_for_plan(context: &RunContext, artifacts: &str) -> S
 }
 
 
+/// 1 つの分野の「成果物の名前は固定」の箇条書き（Phase 38。`名前: 説明` の `名前` と `説明` に分けて出す）。
+fn harness_artifact_lines(genre: &crate::protocol::GenreContext) -> String {
+    let mut out = format!(
+        "- {}: この分野の担当は**ハーネス**で動く。成果物は次の名前で固定され、担当が別のファイルを書くことはできない。\n",
+        genre.id
+    );
+    for (name, description) in genre.output_artifacts_named() {
+        match description {
+            Some(d) => out.push_str(&format!("  - `{name}`: {d}\n")),
+            None => out.push_str(&format!("  - `{name}`\n")),
+        }
+    }
+    out
+}
+
+/// Phase 38（ADR-0028 追記。実機のレビュー不合格から）: **Plan run** に、ハーネスで動く分野
+/// （`GenreContext::is_harness`）の成果物の規約を出す。実機で、計画が研究文献調査課（PaperQA2）に
+/// 「候補テーマを `candidates.json` にまとめよ」と書き、`artifact_exists: candidates.json` を条件に付けた。
+/// `candidates.json`（現 `papers.json`）はハーネスが書く検索コーパスの固定名で、担当は計画が決めた名前の
+/// ファイルを書けないため、答えの中身が良かったのにレビュアーが基準どおり不合格にした。
+/// ハーネスでない分野（coding 等）しか無い設定では**何も出さない**（従来の文面と 1 バイトも変わらない）。
+fn harness_artifacts_section_for_plan(context: &RunContext) -> String {
+    let harness: Vec<&crate::protocol::GenreContext> = context
+        .available_genres
+        .iter()
+        .filter(|g| g.is_harness() && !g.output_artifacts.is_empty())
+        .collect();
+    if harness.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## ハーネスで動く分野の成果物（名前は固定）\n");
+    for genre in harness {
+        out.push_str(&harness_artifact_lines(genre));
+    }
+    out.push_str(
+        "受け入れ条件（`artifact_exists`）にはこの名前だけを使うこと。上に無い名前のファイルを要求しても、\n\
+         その担当は書けない（条件は taskd が落とし、警告が残る）。**内容の要求は `objective` に書き、\n\
+         レビュアー条件（`{\"type\":\"reviewer\"}`）で判定させること**（「X を Y に書け」ではなく\n\
+         「答えに X を含めよ」）。\n\n",
+    );
+    out
+}
+
 /// ADR-0033 D4（Phase 24）: 組織図（id / name / brief / genre）。分解・委譲できる run にだけ渡り、
 /// 「どの課に何を振るか」を `assignee` で決めさせる。空なら何も出さない（Phase 23 までと同じ出力）。
 fn organization_section(context: &RunContext) -> String {
@@ -411,7 +454,30 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
     out.push_str(&organization_section(context));
     out.push_str(&assignee_instructions_for_plan(context));
     out.push_str(&available_genres_section_for_plan(context, artifacts));
+    out.push_str(&harness_artifacts_section_for_plan(context));
     out.push_str(&result_json_instructions(artifacts));
+    out
+}
+
+/// Phase 38（ADR-0028 追記）: レビュー対象のタスクがハーネスで動く分野なら、レビュアーにも成果物の規約を
+/// 渡す（`context.subject_genre`。ディスパッチャが決定的に入れる）。ハーネスでない分野・分野が無いタスクの
+/// レビューでは何も出さない（従来の文面と 1 バイトも変わらない）。
+fn harness_artifacts_section_for_review(context: &RunContext) -> String {
+    let Some(genre) = context.subject_genre.as_ref().filter(|g| g.is_harness()) else {
+        return String::new();
+    };
+    let names = genre.output_artifacts_named();
+    let Some(&(answer, _)) = names.first() else {
+        return String::new();
+    };
+    let mut out = String::from("## この担当の成果物（名前は固定。判定はこの前提で行う）\n");
+    out.push_str(&harness_artifact_lines(genre));
+    out.push_str(&format!(
+        "上のどれかに「答え」があり、それ以外は道具の記録である（例: `papers.json` は検索したコーパスで\n\
+         あって答えではない。答えは `{answer}`）。テーマ候補・考察・結論といった**内容は `{answer}` の中で\n\
+         判定せよ**。受け入れ条件が上に無いファイル名を求めていても、その担当にはそれを書く手段が無いので、\n\
+         ファイル名の不一致だけを理由に不合格にはせず、要求された**内容**が `{answer}` にあるかで判定せよ。\n\n"
+    ));
     out
 }
 
@@ -432,6 +498,7 @@ fn build_review_prompt(task: &Task, context: &RunContext, run_id: &str, artifact
         out.push_str(&format!("{}. {}\n", i, c.text));
     }
     out.push('\n');
+    out.push_str(&harness_artifacts_section_for_review(context));
     match &context.review {
         Some(review) => {
             out.push_str(&format!(
@@ -1584,6 +1651,135 @@ echo '{"type":"result","subtype":"success","is_error":false}'
 
         let no_genres_prompt = build_prompt(&task, &RunContext::default(), "run-plan-avail-2", "artifacts");
         assert!(!no_genres_prompt.contains("使える専門家"));
+    }
+
+    /// Phase 38（ADR-0028 追記）テスト用: ハーネス系の `literature`（`default_role` が `paperqa`）と、
+    /// ハーネスでない `coding`（`claude-code`）。`output_artifacts` は `名前: 説明` の形を混ぜる。
+    fn harness_genre_contexts() -> (GenreContext, GenreContext) {
+        let roles = vec![
+            task_core::RoleSpec {
+                id: "literature-reader".into(),
+                adapter: Some("paperqa".into()),
+                ..task_core::RoleSpec::default()
+            },
+            task_core::RoleSpec {
+                id: "implementer".into(),
+                adapter: Some("claude-code".into()),
+                ..task_core::RoleSpec::default()
+            },
+        ];
+        let literature = task_core::GenreSpec {
+            id: "literature".into(),
+            description: "関連研究の調査".into(),
+            output_artifacts: vec![
+                "answer.md: 引用付きの答え".into(),
+                "papers.json: 検索した論文の一覧（コーパス）".into(),
+                "sources.json".into(),
+            ],
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-reader".into()],
+            ..task_core::GenreSpec::default()
+        };
+        let coding = task_core::GenreSpec {
+            id: "coding".into(),
+            description: "コードを書く".into(),
+            output_artifacts: vec!["diff".into()],
+            default_role: Some("implementer".into()),
+            roles: vec!["implementer".into()],
+            ..task_core::GenreSpec::default()
+        };
+        (
+            GenreContext::from_spec(&literature, &roles),
+            GenreContext::from_spec(&coding, &roles),
+        )
+    }
+
+    /// Phase 38（ADR-0028 追記。実機のレビュー不合格から）: Plan run のプロンプトに、ハーネスで動く分野の
+    /// 成果物の規約（固定の名前と `名前: 説明` の説明、`artifact_exists` にはこの名前だけ、内容は
+    /// objective とレビュアー条件で）が出る。ハーネスでない分野は載らない。
+    #[test]
+    fn build_plan_prompt_states_the_artifact_convention_for_harness_genres() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.kind = task_core::TaskKind::Plan;
+        let (literature, coding) = harness_genre_contexts();
+        let context = RunContext {
+            available_genres: vec![literature, coding],
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-plan-harness-1", "artifacts");
+        assert!(
+            prompt.contains(
+                "## ハーネスで動く分野の成果物（名前は固定）\n\
+                 - literature: この分野の担当は**ハーネス**で動く。成果物は次の名前で固定され、担当が別のファイルを書くことはできない。\n\
+                 \u{20}\u{20}- `answer.md`: 引用付きの答え\n\
+                 \u{20}\u{20}- `papers.json`: 検索した論文の一覧（コーパス）\n\
+                 \u{20}\u{20}- `sources.json`\n"
+            ),
+            "{prompt}"
+        );
+        assert!(prompt.contains("受け入れ条件（`artifact_exists`）にはこの名前だけを使うこと。"), "{prompt}");
+        assert!(prompt.contains("レビュアー条件（`{\"type\":\"reviewer\"}`）で判定させること"), "{prompt}");
+        // ハーネスでない分野（coding）は規約の節に出ない（「使える専門家」節には出る）。
+        assert!(!prompt.contains("- coding: この分野の担当は**ハーネス**で動く"), "{prompt}");
+        assert!(prompt.contains("- coding: コードを書く"), "{prompt}");
+    }
+
+    /// Phase 38: ハーネスでない分野しか無い設定（coding だけ、あるいは `harness` が無い旧プロトコルの
+    /// ワーカー）では規約の節は**空**で、Plan / Execute プロンプトは Phase 37 までと 1 バイトも変わらない。
+    #[test]
+    fn the_artifact_convention_is_absent_without_a_harness_genre() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.kind = task_core::TaskKind::Plan;
+        let (literature, coding) = harness_genre_contexts();
+        let coding_only = RunContext {
+            available_genres: vec![coding],
+            ..RunContext::default()
+        };
+        assert_eq!(harness_artifacts_section_for_plan(&coding_only), "");
+        let prompt = build_prompt(&task, &coding_only, "run-plan-harness-2", "artifacts");
+        assert!(!prompt.contains("ハーネス"), "{prompt}");
+
+        // `output_artifacts` を書いていないハーネス系の分野も、出す名前が無いので節は出ない。
+        let bare = RunContext {
+            available_genres: vec![GenreContext { output_artifacts: Vec::new(), ..literature }],
+            ..RunContext::default()
+        };
+        assert_eq!(harness_artifacts_section_for_plan(&bare), "");
+
+        // Execute プロンプト（委譲側）には元から出さない。
+        let mut execute = crate::protocol::tests::sample_task();
+        execute.kind = task_core::TaskKind::Execute;
+        let (literature, _) = harness_genre_contexts();
+        let context = RunContext { available_genres: vec![literature], ..RunContext::default() };
+        let execute_prompt = build_prompt(&execute, &context, "run-exec-harness", "artifacts");
+        assert!(!execute_prompt.contains("## ハーネスで動く分野の成果物"), "{execute_prompt}");
+    }
+
+    /// Phase 38（ADR-0028 追記）: レビュアーのプロンプトにも同じ規約が出る（対象タスクの分野が
+    /// ハーネス系のときだけ）。`papers.json` は答えではなく、内容は `answer.md` で判定させる。
+    #[test]
+    fn build_review_prompt_states_the_artifact_convention_only_for_harness_genres() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.kind = task_core::TaskKind::Review;
+        let (literature, coding) = harness_genre_contexts();
+        let context = RunContext {
+            subject_genre: Some(literature),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-review-harness-1", "artifacts");
+        assert!(prompt.contains("## この担当の成果物（名前は固定。判定はこの前提で行う）"), "{prompt}");
+        assert!(prompt.contains("  - `papers.json`: 検索した論文の一覧（コーパス）\n"), "{prompt}");
+        assert!(
+            prompt.contains("`papers.json` は検索したコーパスで\nあって答えではない。答えは `answer.md`"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("ファイル名の不一致だけを理由に不合格にはせず"), "{prompt}");
+
+        // ハーネスでない分野・分野が渡っていないレビューでは何も出ない。
+        let coding_context = RunContext { subject_genre: Some(coding), ..RunContext::default() };
+        assert_eq!(harness_artifacts_section_for_review(&coding_context), "");
+        let none = build_prompt(&task, &RunContext::default(), "run-review-harness-2", "artifacts");
+        assert!(!none.contains("この担当の成果物"), "{none}");
     }
 
     /// ADR-0016 D3 / M4: `context.children` が非空なら集約 run の節が入り、成果物のまとめ方の指示が付く。

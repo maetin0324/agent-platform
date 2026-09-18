@@ -509,7 +509,7 @@ fn acquire_python(config: &PaperQaConfig) -> String {
     }
 }
 
-/// `artifacts/candidates.json` の 1 件（ADR-0035 D1 手順 4）。ランナー（Python）が書き、
+/// `artifacts/papers.json` の 1 件（ADR-0035 D1 手順 4。Phase 38 で `candidates.json` から改名）。ランナー（Python）が書き、
 /// アダプタが `cited` の突き合わせと `## 出典` の組み立てに読む。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Candidate {
@@ -715,7 +715,7 @@ async fn run_acquire(
         },
         "request": query_request_block(req),
         "paper_directory": paper_directory.to_string_lossy(),
-        "candidates_path": artifacts_dir.join("candidates.json").to_string_lossy(),
+        "papers_path": artifacts_dir.join("papers.json").to_string_lossy(),
         "sources_path": artifacts_dir.join("sources.json").to_string_lossy(),
         "queries_path": artifacts_dir.join("queries.json").to_string_lossy(),
         "openalex_filter": config.acquire.openalex_filter,
@@ -934,7 +934,7 @@ async fn run_paperqa(
     let artifacts_dir = req.artifacts_dir.clone();
     let artifacts_rel = req.artifacts_rel();
     // ADR-0035 D5: `queries.json`（どの検索語で探したか）も前回の残りを消す。
-    for stale in ["result.json", "answer.md", "candidates.json", "sources.json", "queries.json"] {
+    for stale in ["result.json", "answer.md", "papers.json", "sources.json", "queries.json"] {
         let _ = tokio::fs::remove_file(artifacts_dir.join(stale)).await;
     }
 
@@ -1084,7 +1084,7 @@ async fn run_paperqa(
 
         // ADR-0035 D2 / D4: 取得した候補と答えを決定的に突き合わせ、`sources.json` の `cited` を決め、
         // `answer.md` の末尾に `## 出典` を足す。
-        let candidates = read_candidates(&artifacts_dir.join("candidates.json")).await;
+        let candidates = read_candidates(&artifacts_dir.join("papers.json")).await;
         let marked: Vec<(Candidate, bool)> = candidates
             .into_iter()
             .map(|c| {
@@ -1112,7 +1112,7 @@ async fn run_paperqa(
         let mut to_register: Vec<(&str, String, &str)> =
             vec![("answer.md", format!("{artifacts_rel}/answer.md"), "markdown")];
         if acquiring {
-            to_register.push(("candidates.json", format!("{artifacts_rel}/candidates.json"), "json"));
+            to_register.push(("papers.json", format!("{artifacts_rel}/papers.json"), "json"));
             to_register.push(("sources.json", format!("{artifacts_rel}/sources.json"), "json"));
             // ADR-0035 D5: どの検索語で探したか（LLM の出力そのまま、落ちたなら落ちた理由も）。
             to_register.push(("queries.json", format!("{artifacts_rel}/queries.json"), "json"));
@@ -1411,12 +1411,12 @@ mod tests {
        "file": "", "pdf_downloaded": false, "source_engine": "openalex"}
     ]"#;
 
-    /// 取得ランナーのスタブ本体。`candidates.json` / `sources.json`（`cited` は全部 false）を書き、
+    /// 取得ランナーのスタブ本体。`papers.json` / `sources.json`（`cited` は全部 false）を書き、
     /// progress と `TASKD_ACQUIRE` を出す（実物のランナーの動きを最小限まねる）。
     fn acquire_stub_script(candidates: u32, pdfs: u32) -> String {
         format!(
             r#"input="$2"
-cand=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['candidates_path'])" "$input")
+cand=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['papers_path'])" "$input")
 src=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['sources_path'])" "$input")
 qry=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['queries_path'])" "$input")
 papers=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['paper_directory'])" "$input")
@@ -1985,7 +1985,7 @@ while true; do sleep 0.1; done
         // 3. 成果物 4 つの申告（ADR-0035 D5: `queries.json` も）
         let artifacts = sink.artifacts.lock().unwrap();
         let names: Vec<&str> = artifacts.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["answer.md", "candidates.json", "sources.json", "queries.json"], "{names:?}");
+        assert_eq!(names, vec!["answer.md", "papers.json", "sources.json", "queries.json"], "{names:?}");
         drop(artifacts);
 
         // 4. `cited` の突き合わせ（答えが引用した 2 件だけ true）
@@ -2039,7 +2039,7 @@ while true; do sleep 0.1; done
         }
         // 人が読めるように残る。
         assert!(dir.path().join("artifacts/answer.md").is_file());
-        assert!(dir.path().join("artifacts/candidates.json").is_file());
+        assert!(dir.path().join("artifacts/papers.json").is_file());
         assert!(dir.path().join("artifacts/sources.json").is_file());
         // 成果物の申告はゲートより前に行うので、落ちても 4 件（`queries.json` を含む）申告される。
         assert!(dir.path().join("artifacts/queries.json").is_file());
@@ -2106,7 +2106,7 @@ while true; do sleep 0.1; done
         let outcome = adapter.run(req, "run-a5", default_limits(), &sink).await.unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         assert!(!dir.path().join("runs/run-a5/paperqa_acquire.py").exists());
-        assert!(!dir.path().join("artifacts/candidates.json").exists());
+        assert!(!dir.path().join("artifacts/papers.json").exists());
         let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
         assert!(!answer_md.contains("## 出典"), "{answer_md}");
         assert_eq!(sink.artifacts.lock().unwrap().len(), 1, "answer.md だけ");
@@ -2185,7 +2185,7 @@ while true; do sleep 0.1; done
     }
 
     /// ADR-0035 §4.1: 本物の API を叩かずに（`--fixture`）、重複排除・上限・案件ごとの corpus・
-    /// `candidates.json` / `sources.json` の形・`TASKD_ACQUIRE` を確認する。
+    /// `papers.json` / `sources.json` の形・`TASKD_ACQUIRE` を確認する。
     #[test]
     fn runner_acquires_from_fixtures_with_dedup_limits_and_the_project_corpus() {
         if !python3_available() {
@@ -2202,7 +2202,7 @@ while true; do sleep 0.1; done
         let input = serde_json::json!({
             "queries": ["asynchronous I/O runtime", "ad-hoc file system"],
             "paper_directory": corpus.to_string_lossy(),
-            "candidates_path": dir.path().join("artifacts/candidates.json").to_string_lossy(),
+            "papers_path": dir.path().join("artifacts/papers.json").to_string_lossy(),
             "sources_path": dir.path().join("artifacts/sources.json").to_string_lossy(),
             "max_candidates": 3,
             "max_pdfs": 1,
@@ -2233,7 +2233,7 @@ while true; do sleep 0.1; done
         assert_eq!(counts["engines"]["openalex"], 2, "{counts}");
 
         let candidates: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/candidates.json")).unwrap())
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/papers.json")).unwrap())
                 .unwrap();
         assert_eq!(candidates.len(), 3);
         assert_eq!(candidates[0]["title"], "An Asynchronous IO Runtime");
@@ -2294,7 +2294,7 @@ while true; do sleep 0.1; done
         let input = serde_json::json!({
             "queries": ["asynchronous I/O runtime"],
             "paper_directory": corpus.to_string_lossy(),
-            "candidates_path": dir.path().join("artifacts/candidates.json").to_string_lossy(),
+            "papers_path": dir.path().join("artifacts/papers.json").to_string_lossy(),
             "sources_path": dir.path().join("artifacts/sources.json").to_string_lossy(),
             "max_candidates": 30,
             "max_pdfs": 1,
@@ -2445,7 +2445,7 @@ print(json.dumps(out))
         let input = serde_json::json!({
             "queries": ["asynchronous I/O runtime"],
             "paper_directory": corpus.to_string_lossy(),
-            "candidates_path": dir.path().join("artifacts/candidates.json").to_string_lossy(),
+            "papers_path": dir.path().join("artifacts/papers.json").to_string_lossy(),
             "sources_path": dir.path().join("artifacts/sources.json").to_string_lossy(),
             "max_candidates": 30,
             "max_pdfs": 1,
@@ -2666,7 +2666,7 @@ print(json.dumps(out))
             },
             "request": {"title": "学術動向調査", "objective": "Pluvio の隣接領域を調べよ", "context": null},
             "paper_directory": corpus.to_string_lossy(),
-            "candidates_path": dir.join("artifacts/candidates.json").to_string_lossy(),
+            "papers_path": dir.join("artifacts/papers.json").to_string_lossy(),
             "sources_path": dir.join("artifacts/sources.json").to_string_lossy(),
             "queries_path": dir.join("artifacts/queries.json").to_string_lossy(),
             "max_candidates": 30,
@@ -2677,7 +2677,7 @@ print(json.dumps(out))
     }
 
     /// ADR-0035 D5: ランナーは LLM が立てた検索語で検索し、除外語で候補を落とし、
-    /// `queries.json` と `candidates.json`（`query_text` 付き）を書く。**HTTP は出ない**。
+    /// `queries.json` と `papers.json`（`query_text` 付き）を書く。**HTTP は出ない**。
     #[test]
     fn runner_uses_the_search_terms_the_llm_wrote() {
         if !python3_available() {
@@ -2729,7 +2729,7 @@ print(json.dumps(out))
 
         // どの検索語がどの候補を持ってきたか（ADR-0035 D5 手順 4）。
         let candidates: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/candidates.json")).unwrap())
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/papers.json")).unwrap())
                 .unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0]["title"], "Ad Hoc File Systems for HPC Burst Buffers");

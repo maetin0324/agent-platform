@@ -102,6 +102,8 @@ instructions = "あなたは Web 調査担当。論文化されていない実�
 # 含まれることを起動時に検証する（`taskctl add --genre <id> --config <このファイル>` / API の `POST /tasks` の
 # `"genre"` で指定する）。
 # `capabilities` / `input_artifacts` / `output_artifacts`（ADR-0028 D1）は 3 つとも任意の自由記述。
+# 各要素は `名前` でも `名前: 説明` でもよい（Phase 38。`:` の前が名前。計画・レビュアーのプロンプトには
+# 説明も出るが、名前の照合（`artifact_exists`）には `:` の前だけを使う）。
 # taskd は中身を検査しない（Planner・委譲できる run のプロンプトに「できること」「渡すもの→返るもの」として出るだけ）。
 #
 # 対話用の分野（ADR-0033 D4、Phase 30 で解決を変更）。`POST /api/v1/org/{id}/messages` で話しかけたときの
@@ -133,7 +135,7 @@ id = "literature"
 description = "関連研究の調査・先行研究の確認・新規性の検討（PaperQA2 + arXiv / OpenAlex）"
 capabilities = ["学術文献の検索と取得", "PDF 全文からの根拠抽出", "引用付きの要約"]
 input_artifacts = ["question", "pdf", "bibliography"]
-output_artifacts = ["answer.md", "candidates.json", "sources.json"]
+output_artifacts = ["answer.md: 引用付きの答え（これが答え）", "papers.json: 検索した論文の一覧（コーパス。答えではない）", "sources.json: 出典と引用の有無", "queries.json: 使った検索語"]
 default_role = "literature-reader"
 roles = ["literature-scout", "literature-reader"]
 
@@ -143,7 +145,7 @@ id = "web-research"
 description = "論文化されていない GitHub 上の実装・製品・仕様・技術報告の調査（Local Deep Research）"
 capabilities = ["一般 Web 検索", "複数ページの読解", "出典付きの報告"]
 input_artifacts = ["question"]
-output_artifacts = ["report.md", "sources.json", "research.json"]
+output_artifacts = ["report.md: 出典付きの調査報告（これが答え）", "sources.json: 出典と引用の有無", "research.json: 検索の記録（クエリと件数）"]
 default_role = "web-researcher"
 roles = ["web-researcher"]
 

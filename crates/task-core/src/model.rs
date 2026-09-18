@@ -255,6 +255,47 @@ impl GenreSpec {
             Some(first.id.clone())
         }
     }
+
+    /// Phase 38（ADR-0028 追記）: `output_artifacts` の**名前だけ**（`名前: 説明` の `:` の前）。
+    /// 計画の `artifact_exists` の照合に使えるのはこの一覧だけである。
+    pub fn output_artifact_names(&self) -> Vec<&str> {
+        self.output_artifacts.iter().map(|a| artifact_entry_name(a)).collect()
+    }
+
+    /// Phase 38（ADR-0028 追記）: この分野の担当が動く「ハーネス」のアダプタ id
+    /// （`default_role` の役割の `adapter`）。`default_role` が無い・役割が無い・アダプタ指定が無ければ `None`。
+    pub fn harness_adapter<'a>(&self, roles: &'a [RoleSpec]) -> Option<&'a str> {
+        let default_role = self.default_role.as_deref()?;
+        RoleSpec::find(roles, default_role)?.adapter.as_deref()
+    }
+
+    /// Phase 38（ADR-0028 追記）: 「ハーネス系の分野」か（決定的。`default_role` のアダプタが
+    /// `HARNESS_ADAPTERS` のどれか）。ハーネス系の担当は成果物の名前を選べないので、計画は
+    /// `output_artifacts` の名前だけを `artifact_exists` に使える（Phase 38 の実機の不合格から）。
+    pub fn is_harness(&self, roles: &[RoleSpec]) -> bool {
+        self.harness_adapter(roles).is_some_and(|a| HARNESS_ADAPTERS.contains(&a))
+    }
+}
+
+/// Phase 38（ADR-0028 追記）: 成果物の名前を自分で決められない（固定の名前しか書けない）アダプタ。
+/// `paperqa` は `answer.md` / `papers.json` / `sources.json` / `queries.json`、
+/// `local-deep-research` は `report.md` / `sources.json` / `research.json` しか書かない。
+pub const HARNESS_ADAPTERS: [&str; 2] = ["paperqa", "local-deep-research"];
+
+/// Phase 38（ADR-0028 追記）: `input_artifacts` / `output_artifacts` の 1 要素は `名前` か
+/// `名前: 説明`。その**名前**の部分（`:` の前。前後の空白は落とす）。
+pub fn artifact_entry_name(entry: &str) -> &str {
+    match entry.split_once(':') {
+        Some((name, _)) => name.trim(),
+        None => entry.trim(),
+    }
+}
+
+/// Phase 38（ADR-0028 追記）: `名前: 説明` の**説明**の部分（無ければ `None`）。
+pub fn artifact_entry_description(entry: &str) -> Option<&str> {
+    let (_, description) = entry.split_once(':')?;
+    let description = description.trim();
+    if description.is_empty() { None } else { Some(description) }
 }
 
 /// DESIGN §5.3 の `usage`。取れない項目は省略可。
@@ -374,4 +415,76 @@ pub enum Event {
     Retried {
         from: TaskId,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn literature() -> GenreSpec {
+        GenreSpec {
+            id: "literature".into(),
+            description: "related work".into(),
+            output_artifacts: vec![
+                "answer.md: 引用付きの答え".into(),
+                "papers.json: 検索した論文の一覧（コーパス）".into(),
+                "sources.json".into(),
+            ],
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-reader".into()],
+            ..GenreSpec::default()
+        }
+    }
+
+    /// Phase 38（ADR-0028 追記）: `output_artifacts` の 1 要素は `名前` でも `名前: 説明` でもよい。
+    #[test]
+    fn artifact_entries_may_carry_a_description_after_the_colon() {
+        assert_eq!(artifact_entry_name("answer.md"), "answer.md");
+        assert_eq!(artifact_entry_description("answer.md"), None);
+        assert_eq!(artifact_entry_name("papers.json: 検索した論文の一覧"), "papers.json");
+        assert_eq!(
+            artifact_entry_description("papers.json: 検索した論文の一覧"),
+            Some("検索した論文の一覧")
+        );
+        // 説明が空（`名前:` だけ）なら説明なし扱い。前後の空白は落ちる。
+        assert_eq!(artifact_entry_name("  report.md :  "), "report.md");
+        assert_eq!(artifact_entry_description("report.md:   "), None);
+        assert_eq!(
+            literature().output_artifact_names(),
+            vec!["answer.md", "papers.json", "sources.json"]
+        );
+    }
+
+    /// Phase 38（ADR-0028 追記）: 「ハーネス系の分野」は `default_role` の役割のアダプタで決まる（決定的）。
+    #[test]
+    fn a_genre_is_a_harness_genre_when_its_default_role_runs_paperqa_or_ldr() {
+        let paperqa = vec![RoleSpec {
+            id: "literature-reader".into(),
+            adapter: Some("paperqa".into()),
+            ..RoleSpec::default()
+        }];
+        assert_eq!(literature().harness_adapter(&paperqa), Some("paperqa"));
+        assert!(literature().is_harness(&paperqa));
+
+        let ldr = vec![RoleSpec {
+            id: "literature-reader".into(),
+            adapter: Some("local-deep-research".into()),
+            ..RoleSpec::default()
+        }];
+        assert!(literature().is_harness(&ldr));
+
+        // claude-code / codex / acp / アダプタ指定なし / `default_role` なしはハーネス系でない。
+        let coding = vec![RoleSpec {
+            id: "literature-reader".into(),
+            adapter: Some("claude-code".into()),
+            ..RoleSpec::default()
+        }];
+        assert_eq!(literature().harness_adapter(&coding), Some("claude-code"));
+        assert!(!literature().is_harness(&coding));
+        let bare = vec![RoleSpec { id: "literature-reader".into(), ..RoleSpec::default() }];
+        assert_eq!(literature().harness_adapter(&bare), None);
+        assert!(!literature().is_harness(&bare));
+        let no_default = GenreSpec { default_role: None, ..literature() };
+        assert!(!no_default.is_harness(&paperqa));
+    }
 }

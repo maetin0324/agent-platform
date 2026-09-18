@@ -40,7 +40,7 @@ INPUT (all paths absolute):
                  "max_queries": 6},                # absent/enabled=false: no LLM call
    "request": {"title": "...", "objective": "...", "context": "..."},
    "paper_directory": "<papers>/<project_id>",     # the project corpus
-   "candidates_path": "<ws>/artifacts/candidates.json",
+   "papers_path":     "<ws>/artifacts/papers.json",
    "sources_path":    "<ws>/artifacts/sources.json",
    "queries_path":    "<ws>/artifacts/queries.json",
    "arxiv_categories": ["cs.DC", "cs.OS", "cs.PF", "cs.NI"],   # default
@@ -53,7 +53,7 @@ OUTPUT FILES
                     "queries": [{text, engines[], arxiv_categories[]}],
                     "exclude_terms": [...], "raw": "<what the LLM said>",
                     "error": "<why we fell back>"}
-  candidates.json  [{title, authors[], year, venue, doi, arxiv_id, url,
+  papers.json      [{title, authors[], year, venue, doi, arxiv_id, url,
                      pdf_url, file, pdf_downloaded, source_engine,
                      query_text, abstract}]
   sources.json     [{url, title, engine, cited}]  -- same shape as the
@@ -969,7 +969,7 @@ def main():
         print("literature acquisition failed: %s" % exc, file=sys.stderr)
         return 1
 
-    write_json(payload["candidates_path"], candidates)
+    write_json(payload["papers_path"], candidates)
     write_json(payload["sources_path"], sources)
     if payload.get("queries_path"):
         write_json(payload["queries_path"], plan)

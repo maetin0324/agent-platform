@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::delegate::{ChildSpec, resolve_child_defaults};
-use crate::model::{Budget, Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
+use crate::model::{Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint};
 use crate::org::OrgNode;
 
 /// DESIGN §5.6「分解の深さは上限 3」。`plan_depth`（その Plan 自身を含む祖先 Plan の数）が
@@ -227,6 +227,96 @@ fn detect_cycle(plan: &PlanOutput) -> Result<(), PlanError> {
         }
     }
     Ok(())
+}
+
+/// Phase 38（ADR-0028 追記。実機のレビュー不合格から）: **ハーネス系の分野**（`GenreSpec::is_harness`）の
+/// 担当に「自分で決めた名前のファイルを書け」と要求する `artifact_exists` の受け入れ条件を落として、
+/// 代わりに `objective` の末尾に「本当の成果物の名前」を注記する（**壊さず直す**: Plan run は失敗させず、
+/// `Question` にもしない）。分野の決め方は `materialize` と同じ（`resolve_child_defaults`: 明示 > 役割 >
+/// 担当 > 親）で、判定は決定的（LLM は使わない。DESIGN 原則 1）。
+///
+/// 戻り値は起きた修正の説明（呼び出し元が `warn` で残す）。`output_artifacts` が空の分野、ハーネスでない
+/// 分野（coding 等）、名前が一致している条件には触らない。条件が 1 件も残らなくなるときだけ、落とす代わりに
+/// **同じ文のレビュアー条件**にする（受け入れ条件が 0 件のタスクを作らないため。「内容はレビュアーに
+/// 判定させる」という Phase 38 の方針とも一致する）。
+pub fn fix_harness_artifacts(
+    plan: &mut PlanOutput,
+    parent: &Task,
+    org: &[OrgNode],
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (index, t) in plan.tasks.iter_mut().enumerate() {
+        let resolved = resolve_child_defaults(
+            parent,
+            ChildSpec {
+                genre: t.genre.as_deref(),
+                role: t.role.as_deref(),
+                tier: t.tier,
+                assignee: t.assignee.as_deref(),
+            },
+            org,
+            roles,
+            genres,
+        );
+        let Some(spec) = resolved.genre.as_deref().and_then(|g| GenreSpec::find(genres, g)) else {
+            continue;
+        };
+        if !spec.is_harness(roles) {
+            continue;
+        }
+        let allowed = spec.output_artifact_names();
+        let Some(&answer) = allowed.first() else {
+            continue;
+        };
+        let mismatched: Vec<usize> = t
+            .acceptance
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| match &c.check {
+                Check::ArtifactExists { name } if !allowed.contains(&name.trim()) => Some(i),
+                _ => None,
+            })
+            .collect();
+        if mismatched.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = mismatched
+            .iter()
+            .filter_map(|&i| match &t.acceptance[i].check {
+                Check::ArtifactExists { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let list = allowed.join(" / ");
+        // 残るものが無くなるなら、落とす代わりに同じ文をレビュアー条件にする。
+        if mismatched.len() == t.acceptance.len() {
+            for &i in &mismatched {
+                t.acceptance[i].check = Check::Reviewer;
+            }
+        } else {
+            let mut kept = Vec::with_capacity(t.acceptance.len() - mismatched.len());
+            for (i, c) in t.acceptance.iter().enumerate() {
+                if !mismatched.contains(&i) {
+                    kept.push(c.clone());
+                }
+            }
+            t.acceptance = kept;
+        }
+        t.objective = format!(
+            "{}\n（注: この担当の成果物は {list} に固定。要求した内容は {answer} の中で述べる）",
+            t.objective.trim_end()
+        );
+        warnings.push(format!(
+            "plan tasks[{index}] ({}): genre {:?} runs on a harness and can only write {list}; \
+             dropped the artifact_exists criteria for {} and noted the real artifacts in the objective",
+            t.title,
+            spec.id,
+            names.join(", ")
+        ));
+    }
+    warnings
 }
 
 /// 検証済みの `PlanOutput` から子タスクを組み立てる（ADR-0007 D2, ADR-0028 D3）。`validate` を通した
@@ -651,6 +741,124 @@ mod tests {
         // 組織に無い id は担当にしない（既定も変えない）。
         assert_eq!(children[2].assignee, None);
         assert_eq!(children[2].genre, p.genre);
+    }
+
+    /// Phase 38（ADR-0028 追記）テスト用: ハーネス系（`paperqa`）の `literature` と、ハーネスでない
+    /// `coding`、それぞれの担当ノードを持つ組織・役割・分野。
+    fn harness_setup() -> (Vec<crate::org::OrgNode>, Vec<RoleSpec>, Vec<GenreSpec>) {
+        use crate::org::{OrgKind, OrgNode};
+        let now = OffsetDateTime::now_utc();
+        let node = |id: &str, genre_id: &str| OrgNode {
+            id: id.into(),
+            parent_id: Some("research".into()),
+            name: id.into(),
+            kind: OrgKind::Section,
+            genre: Some(genre_id.to_string()),
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let org = vec![node("research-literature", "literature"), node("coding-poc", "coding")];
+        let roles = vec![
+            RoleSpec { id: "literature-reader".into(), adapter: Some("paperqa".into()), ..RoleSpec::default() },
+            RoleSpec { id: "implementer".into(), adapter: Some("claude-code".into()), ..RoleSpec::default() },
+        ];
+        let genres = vec![
+            GenreSpec {
+                output_artifacts: vec![
+                    "answer.md: 引用付きの答え".into(),
+                    "papers.json: 検索した論文の一覧（コーパス）".into(),
+                    "sources.json".into(),
+                ],
+                ..genre("literature", Some("literature-reader"), &["literature-reader"])
+            },
+            GenreSpec {
+                output_artifacts: vec!["diff".into()],
+                ..genre("coding", Some("implementer"), &["implementer"])
+            },
+        ];
+        (org, roles, genres)
+    }
+
+    /// Phase 38（ADR-0028 追記。実機のレビュー不合格から）: ハーネス系の担当に「`candidates.json` に
+    /// まとめよ」と要求した `artifact_exists` は落ち、`objective` に本当の成果物の名前が注記される。
+    /// 一致している条件（`answer.md`）はそのまま残る。
+    #[test]
+    fn fix_harness_artifacts_drops_unknown_artifact_checks_and_notes_the_real_ones() {
+        let (org, roles, genres) = harness_setup();
+        let mut t = new_task("候補テーマの抽出", vec![]);
+        t.assignee = Some("research-literature".into());
+        t.objective = "候補テーマを 3〜5 件、引用付きで candidates.json にまとめよ".into();
+        t.acceptance = vec![
+            Criterion { text: "candidates.json がある".into(), check: Check::ArtifactExists { name: "candidates.json".into() } },
+            Criterion { text: "answer.md がある".into(), check: Check::ArtifactExists { name: "answer.md".into() } },
+        ];
+        let mut plan = PlanOutput { tasks: vec![t] };
+        let warnings = fix_harness_artifacts(&mut plan, &parent(), &org, &roles, &genres);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("candidates.json"), "{}", warnings[0]);
+        assert!(warnings[0].contains("answer.md / papers.json / sources.json"), "{}", warnings[0]);
+        let fixed = &plan.tasks[0];
+        assert_eq!(
+            fixed.acceptance,
+            vec![Criterion { text: "answer.md がある".into(), check: Check::ArtifactExists { name: "answer.md".into() } }],
+            "名前が一致する条件だけが残る"
+        );
+        assert!(
+            fixed.objective.ends_with(
+                "（注: この担当の成果物は answer.md / papers.json / sources.json に固定。要求した内容は answer.md の中で述べる）"
+            ),
+            "{}",
+            fixed.objective
+        );
+        // 直した plan はそのまま検証を通り、子にできる（壊さず直す）。
+        validate(&plan, 1, &PlanLimits::default(), &genres).unwrap();
+    }
+
+    /// Phase 38: 落とすと受け入れ条件が 0 件になるときは、同じ文をレビュアー条件にして残す
+    /// （内容はレビュアーが `answer.md` の中で判定する）。
+    #[test]
+    fn fix_harness_artifacts_keeps_the_criterion_as_a_reviewer_check_when_nothing_else_remains() {
+        let (org, roles, genres) = harness_setup();
+        let mut t = new_task("候補テーマの抽出", vec![]);
+        t.assignee = Some("research-literature".into());
+        t.acceptance = vec![Criterion {
+            text: "候補テーマ 3 件が引用付きで書かれている".into(),
+            check: Check::ArtifactExists { name: "candidates.json".into() },
+        }];
+        let mut plan = PlanOutput { tasks: vec![t] };
+        let warnings = fix_harness_artifacts(&mut plan, &parent(), &org, &roles, &genres);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            plan.tasks[0].acceptance,
+            vec![Criterion { text: "候補テーマ 3 件が引用付きで書かれている".into(), check: Check::Reviewer }]
+        );
+        validate(&plan, 1, &PlanLimits::default(), &genres).unwrap();
+    }
+
+    /// Phase 38: ハーネスでない分野（coding = claude-code）と、名前が一致しているハーネスのタスクには
+    /// 触らない（`objective` も `acceptance` も 1 バイトも変わらない）。
+    #[test]
+    fn fix_harness_artifacts_leaves_other_genres_and_matching_names_alone() {
+        let (org, roles, genres) = harness_setup();
+        let mut coding = new_task("実装", vec![]);
+        coding.assignee = Some("coding-poc".into());
+        coding.acceptance = vec![Criterion {
+            text: "design.md がある".into(),
+            check: Check::ArtifactExists { name: "design.md".into() },
+        }];
+        let mut literature = new_task("調べる", vec![]);
+        literature.assignee = Some("research-literature".into());
+        literature.acceptance = vec![Criterion {
+            text: "answer.md がある".into(),
+            check: Check::ArtifactExists { name: "answer.md".into() },
+        }];
+        let mut plan = PlanOutput { tasks: vec![coding, literature] };
+        let before = plan.clone();
+        let warnings = fix_harness_artifacts(&mut plan, &parent(), &org, &roles, &genres);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(plan, before);
     }
 
     /// ADR-0028 D3: 知らない `genre`、または `genre` + `role` の不整合は Plan の失敗になる。

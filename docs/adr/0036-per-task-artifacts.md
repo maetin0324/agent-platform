@@ -55,7 +55,7 @@ worktree がタスクごとなのでぶつからない。残件として PROGRES
 
 `result.json`（ADR-0006 D3）、`delegate.json`（ADR-0016 M8）、`plan.json`（ADR-0007 D4）、
 `review.json`（ADR-0007 D1）、`summary.md`（ADR-0016 M4）、`answer.md` / `sources.json` /
-`candidates.json` / `report.md` / `research.json`（ADR-0031 / ADR-0035）は、すべて
+`papers.json`（Phase 38 で `candidates.json` から改名）/ `report.md` / `research.json`（ADR-0031 / ADR-0035）は、すべて
 `artifacts_dir` を基準に読み書きする。結果ファイルから読む `memory`（ADR-0033 D6）と
 `report`（ADR-0034 D7）も同じ。
 

@@ -1341,7 +1341,7 @@ id = "literature"
 description = "related work survey"
 capabilities = ["academic literature search", "citation graph traversal"]
 input_artifacts = ["question", "pdf"]
-output_artifacts = ["answer.md", "citations.json"]
+output_artifacts = ["answer.md: 引用付きの答え", "citations.json"]
 default_role = "literature-reader"
 roles = ["literature-reader"]
 
@@ -1355,9 +1355,16 @@ model = "fake"
         let view = config_view(&cfg, "127.0.0.1:7710".parse().unwrap());
         assert_eq!(view.genres[0].capabilities, vec!["academic literature search".to_string(), "citation graph traversal".to_string()]);
         assert_eq!(view.genres[0].input_artifacts, vec!["question".to_string(), "pdf".to_string()]);
-        assert_eq!(view.genres[0].output_artifacts, vec!["answer.md".to_string(), "citations.json".to_string()]);
+        // Phase 38（ADR-0028 追記）: `名前: 説明` を書いても `GenreConfigView` の型は変わらず、値の文字列に
+        // 説明が付くだけ（GUI は `:` の前を名前として扱う。`docs/gui/api.md`）。
+        assert_eq!(
+            view.genres[0].output_artifacts,
+            vec!["answer.md: 引用付きの答え".to_string(), "citations.json".to_string()]
+        );
         let json = serde_json::to_value(&view.genres[0]).unwrap();
         assert_eq!(json["capabilities"][0], "academic literature search");
+        assert_eq!(json["output_artifacts"][0], "answer.md: 引用付きの答え");
+        assert_eq!(json["output_artifacts"][1], "citations.json");
     }
 
     /// ADR-0026 D2/D3: `acp` プロバイダの行は `[adapters.acp]` の env に重ね、`command`/`args` は行の値が
