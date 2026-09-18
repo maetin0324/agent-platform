@@ -45,11 +45,11 @@ export function notifyResultTone(recent: Pick<NotifyRecent, "ok">): Tone {
 
 /**
  * 対象への画面内リンク（`key` = 途中目標 / 認可 / タスク / 報告 / 案件 id、ADR-0037 D1）。
- * `milestone_ready` の `key` は途中目標 id で、taskd の API には途中目標単体を引く経路
- * （`GET /milestones/{id}` 相当）が無く、どの案件の途中目標かを画面側だけでは解決できないため、
- * リンクは作らず `null` を返す（未解決事項として `docs/PROGRESS.md` の提案に書く）。
+ * Phase 40 で `recent[]` に `project_id` が増えた（`milestone_ready` はその途中目標の案件、
+ * `secretary_reply` は案件自身）ため、`milestone_ready` も `project_id` があれば案件へリンクする
+ * （G13i-P1 の解消）。`project_id` が無い（古い記録・他の種）場合はリンクを作らない。
  */
-export function notifyTargetHref(recent: Pick<NotifyRecent, "kind" | "key">): string | null {
+export function notifyTargetHref(recent: Pick<NotifyRecent, "kind" | "key" | "project_id">): string | null {
   switch (recent.kind) {
     case "approval_pending":
       return `/approvals#approval-${encodeURIComponent(recent.key)}`;
@@ -58,9 +58,11 @@ export function notifyTargetHref(recent: Pick<NotifyRecent, "kind" | "key">): st
     case "bad_news":
       return `/reports#report-${encodeURIComponent(recent.key)}`;
     case "secretary_reply":
-      return `/projects/${encodeURIComponent(recent.key)}`;
+      return recent.project_id
+        ? `/projects/${encodeURIComponent(recent.project_id)}`
+        : `/projects/${encodeURIComponent(recent.key)}`;
     case "milestone_ready":
-      return null;
+      return recent.project_id ? `/projects/${encodeURIComponent(recent.project_id)}` : null;
     default:
       return null;
   }
