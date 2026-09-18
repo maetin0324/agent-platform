@@ -28,7 +28,6 @@ use tower::ServiceExt;
 pub const HOST: &str = "127.0.0.1:7710";
 pub const TOKEN: &str = "s3cret-token-value";
 
-#[derive(Default)]
 pub struct EnvOptions {
     pub token: Option<String>,
     pub allowed_hosts: Vec<String>,
@@ -36,6 +35,9 @@ pub struct EnvOptions {
     pub roles: Vec<task_core::RoleSpec>,
     /// ADR-0027 D1: `POST /tasks` の `genre` の検証・既定解決に使う `[[genres]]`。
     pub genres: Vec<task_core::GenreSpec>,
+    /// Phase 30（ADR-0033 D4 追記）: 対話は常にこの分野で走る。既定は `Default` impl で
+    /// `task_core::CONVERSATION_GENRE`。
+    pub conversation_genre: String,
     /// ADR-0017 M1: `providers.d/` の書き込み先。`None` なら管理系の作成/変更/削除は使えない。
     pub providers_dir: Option<PathBuf>,
     /// ADR-0017 M2: `reload`/`check` を受け取るチャネルの送信側。`None` ならどちらも使えない。
@@ -51,6 +53,27 @@ pub struct EnvOptions {
     pub secret_usage: std::collections::HashMap<String, Vec<task_api::SecretUse>>,
     /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory] dir`。`None` なら `GET /org/{id}/memory` は 409。
     pub memory_dir: Option<PathBuf>,
+}
+
+impl Default for EnvOptions {
+    fn default() -> Self {
+        Self {
+            token: None,
+            allowed_hosts: Vec::new(),
+            roles: Vec::new(),
+            genres: Vec::new(),
+            // Phase 30: 既定の対話用分野は他の既定値と同じく `task_core::CONVERSATION_GENRE`。
+            conversation_genre: task_core::CONVERSATION_GENRE.to_string(),
+            providers_dir: None,
+            admin_tx: None,
+            accounts_root: None,
+            codex_accounts_root: None,
+            max_runs_per_account: 0,
+            secrets_dir: None,
+            secret_usage: std::collections::HashMap::new(),
+            memory_dir: None,
+        }
+    }
 }
 
 pub struct TestEnv {
@@ -212,6 +235,7 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         config_view: config_view(),
         roles: options.roles,
         genres: options.genres,
+        conversation_genre: options.conversation_genre,
         taskd_version: "0.9.0-test".into(),
         instance_id: "01J9ZX5T3K8Q7W6V5R4P3N2M1H".into(),
         started_at: "2026-09-14T00:00:00Z".into(),

@@ -58,6 +58,8 @@ pub(crate) struct Inner {
     pub(crate) roles: Vec<task_core::RoleSpec>,
     /// ADR-0027 D1: `POST /tasks` の `genre` の検証・既定解決に使う `[[genres]]`。
     pub(crate) genres: Vec<task_core::GenreSpec>,
+    /// Phase 30（ADR-0033 D4 追記）: 対話は常にこの分野で走る（ノードの `genre` は使わない）。
+    pub(crate) conversation_genre: String,
     pub(crate) taskd_version: String,
     pub(crate) providers_dir: Option<std::path::PathBuf>,
     pub(crate) admin_tx: Option<tokio::sync::mpsc::Sender<crate::admin::AdminRequest>>,
@@ -104,6 +106,7 @@ impl ApiState {
             config_view: settings.config_view,
             roles: settings.roles,
             genres: settings.genres,
+            conversation_genre: settings.conversation_genre,
             taskd_version: settings.taskd_version,
             providers_dir: settings.providers_dir,
             admin_tx: settings.admin_tx,

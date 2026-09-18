@@ -435,6 +435,7 @@ async fn create_project(
     }
     let roles = state.inner.roles.clone();
     let genres = state.inner.genres.clone();
+    let conversation_genre = state.inner.conversation_genre.clone();
     let project = state
         .blocking(move |store| {
             let now = OffsetDateTime::now_utc();
@@ -451,7 +452,7 @@ async fn create_project(
             store.project_create(&project).map_err(store_problem)?;
             // SPEC §7 / ADR-0033 D4: 案件を受けたら、秘書が最初に「理解の確認・大まかな方針・最初の
             // 途中目標の提案」を返す。ここは対話を 1 回起こすだけ（中身はプロンプトの仕事）。
-            crate::conversation::greet_the_secretary(store, &project, &roles, &genres);
+            crate::conversation::greet_the_secretary(store, &project, &roles, &genres, &conversation_genre);
             Ok(project)
         })
         .await?;
@@ -2092,6 +2093,7 @@ mod tests {
             },
             roles: vec![],
             genres: vec![],
+            conversation_genre: task_core::CONVERSATION_GENRE.to_string(),
             taskd_version: "test".into(),
             instance_id: "01J00000000000000000000000".into(),
             started_at: "2026-09-14T00:00:00Z".into(),

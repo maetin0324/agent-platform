@@ -3,8 +3,10 @@
 //! 「人」らしさは**注入される記憶と brief** で作る（ADR-0033 D6）。ハーネスのプロセスは相変わらず
 //! ステートレスで、状態はファイルと DB にある（DESIGN 原則 2）。ここは純粋関数だけで、I/O も LLM も無い。
 //!
-//! 並び（ADR-0033 D4 / Phase 24 の指示）:
-//! 1. 役職と brief（`context.node`）
+//! 並び（ADR-0033 D4 / Phase 24 の指示。Phase 30 で 1 の直後に「仕事で使う道具」を追加）:
+//! 1. 役職と brief（`context.node`）＋ 対話 run で担当が自分の仕事の分野を持つときは「仕事で使う道具」
+//!    （`context.work_genre`。Phase 30: 対話は常に対話用分野で走るが、その人が自分の得意分野を知って
+//!    答えられるように 1 行足す）
 //! 2. 永続の認可（`context.standing_rules`。SPEC §3.6「永続の認可は文字で記録してエージェントに注入する」。
 //!    Phase 26 が埋める: 担当宛て + 全員向け）
 //! 3. 記憶（`context.memory`）
@@ -40,6 +42,15 @@ fn person_sections(context: &RunContext) -> String {
         out.push_str(&format!("## あなた: {} ({})\n", node.name, node.id));
         if !node.brief.is_empty() {
             out.push_str(&node.brief);
+            out.push('\n');
+        }
+        // Phase 30（ADR-0033 D4 追記）: 対話は常に対話用分野で走るが、担当ノード自身の仕事の分野が
+        // あれば「仕事で使う道具」を 1 行足す（その人が自分の得意分野を知って答えられるように）。
+        if let Some(genre) = &context.work_genre {
+            out.push_str(&format!("あなたの仕事で使う道具（分野）: {}", genre.description));
+            if !genre.capabilities.is_empty() {
+                out.push_str(&format!("（できること: {}）", genre.capabilities.join("、")));
+            }
             out.push('\n');
         }
         out.push('\n');
@@ -141,7 +152,7 @@ fn one_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ConversationTurn, MemoryContext, NodeContext, RoleContext};
+    use crate::protocol::{ConversationTurn, GenreContext, MemoryContext, NodeContext, RoleContext};
 
     fn full_context() -> RunContext {
         RunContext {
@@ -185,6 +196,43 @@ mod tests {
         assert!(out.contains("- 人: 先週の続きを お願い"), "{out}");
         assert!(out.contains("- あなた: 承知しました"));
         assert!(out.contains("memory.notes"));
+    }
+
+    /// Phase 30（ADR-0033 D4 追記）: 対話は常に対話用分野で走るが、担当ノード自身の仕事の分野が
+    /// あれば「仕事で使う道具」を役職と brief の直後に 1 行足す（実機の事故の再発防止: 関連研究調査課
+    /// ＝検索ハーネスに話しかけても、検索ハーネスの run にはしない。その人に自分の分野を知らせるだけ）。
+    #[test]
+    fn a_work_genre_is_shown_right_after_the_brief_when_present() {
+        let context = RunContext {
+            work_genre: Some(GenreContext {
+                id: "web-research".into(),
+                description: "web 検索で先行研究を洗う".into(),
+                capabilities: vec!["web 検索".into(), "証拠の収集".into()],
+                ..GenreContext::default()
+            }),
+            ..full_context()
+        };
+        let out = render(&context);
+        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
+        assert!(at("## あなた: 関連研究調査課 (research-survey)") < at("あなたの仕事で使う道具"));
+        assert!(at("あなたの仕事で使う道具") < at("## 永続の認可"));
+        assert!(
+            out.contains("あなたの仕事で使う道具（分野）: web 検索で先行研究を洗う（できること: web 検索、証拠の収集）"),
+            "{out}"
+        );
+
+        // 担当が自分の仕事の分野を持たない（対話用分野のみで走る）ときは何も足さない。
+        let without = RunContext { work_genre: None, ..full_context() };
+        let out = render(&without);
+        assert!(!out.contains("あなたの仕事で使う道具"), "{out}");
+
+        // `context.node` が無ければ、`work_genre` があっても出さない（役職の節そのものが無いため）。
+        let no_node = RunContext {
+            node: None,
+            work_genre: Some(GenreContext { id: "coding".into(), description: "d".into(), ..GenreContext::default() }),
+            ..RunContext::default()
+        };
+        assert!(!render(&no_node).contains("あなたの仕事で使う道具"));
     }
 
     /// 空の `RunContext` では前置きは空文字（Phase 23 までの出力と 1 バイトも変わらない）。

@@ -13,6 +13,8 @@ use task_core::{ArtifactRef, DelegateTask, GenreSpec, Status, Task, TaskId, Usag
 /// v4（ADR-0033 D4/D6）: `context.node` / `context.memory` / `context.conversation` / `context.standing_rules` /
 /// `context.organization`、`delegate` の `tasks[].assignee`、結果ファイルの `memory` を追加。
 /// Phase 28（ADR-0033 D4 追記）: `context.conversation_addressee` を追加（対話 run は返事だけ。委譲不可）。
+/// Phase 30（ADR-0033 D4 追記）: `context.work_genre` を追加（対話は常に対話用分野で走るが、担当ノード
+/// 自身の仕事の分野があれば「仕事で使う道具」として前置きに渡す）。
 /// 全て追加のみで v1〜v3 のワーカーはそのまま動く。
 pub const PROTOCOL_VERSION: u32 = 4;
 
@@ -64,7 +66,7 @@ pub struct GenreRoleContext {
 
 /// `context.available_genres[]`（ADR-0027 D1）: 委譲できる run に渡す、使える分野と役割の一覧。
 /// 「タスクの分野」ではなく「この run が子に割り当てられる分野の選択肢」を表す。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GenreContext {
     pub id: String,
     pub description: String,
@@ -222,6 +224,11 @@ pub struct RunContext {
     /// 返事だけを求める前置き（`preamble::conversation_instructions`）を出すための印。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_addressee: Option<ConversationAddressee>,
+    /// Phase 30（ADR-0033 D4 追記）: 対話 run で、担当のノードが自分の仕事の分野（`node.genre`）を持つ
+    /// ときだけ `Some`。対話そのものは常に対話用分野（`task.genre`）で走るが、その人が自分の得意分野を
+    /// 知って答えられるように、前置きに「仕事で使う道具」として渡す（決定的。`[[genres]]` を引くだけ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_genre: Option<GenreContext>,
 }
 
 /// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは

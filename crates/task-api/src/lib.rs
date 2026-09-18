@@ -96,6 +96,9 @@ pub struct ApiSettings {
     /// ADR-0027 D1: `[[genres]]`。`POST /tasks` の `genre` の検証と役割の既定の解決に使う。API は常に
     /// 完全な設定を持つので、ここが空でなければ知らない `genre` / `genre` と `role` の不整合は常に 422。
     pub genres: Vec<task_core::GenreSpec>,
+    /// Phase 30（ADR-0033 D4 追記）: 対話は常にこの分野で走る（ノードの `genre` は使わない）。
+    /// `[conversation] genre`（既定 `task_core::CONVERSATION_GENRE = "secretary"`）。
+    pub conversation_genre: String,
     pub taskd_version: String,
     /// ディスパッチャのスナップショットと同じ値。
     pub instance_id: String,
@@ -134,6 +137,7 @@ impl std::fmt::Debug for ApiSettings {
             .field("config_view", &self.config_view)
             .field("roles", &self.roles)
             .field("genres", &self.genres)
+            .field("conversation_genre", &self.conversation_genre)
             .field("taskd_version", &self.taskd_version)
             .field("instance_id", &self.instance_id)
             .field("started_at", &self.started_at)

@@ -767,6 +767,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "work_genre": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GenreContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Phase 30（ADR-0033 D4 追記）: 対話 run で、担当のノードが自分の仕事の分野（`node.genre`）を持つ\nときだけ `Some`。対話そのものは常に対話用分野（`task.genre`）で走るが、その人が自分の得意分野を\n知って答えられるように、前置きに「仕事で使う道具」として渡す（決定的。`[[genres]]` を引くだけ）。"
         }
       },
       "required": [

@@ -292,6 +292,11 @@ struct RunExtras {
     organization: Vec<OrgNodeContext>,
     /// ADR-0033 D4（Phase 28）: 対話用タスクの run だけ `Some`（相手が秘書かそれ以外か）。
     conversation_addressee: Option<ConversationAddressee>,
+    /// Phase 30（ADR-0033 D4 追記）: 対話 run で、担当のノードが**自分の仕事の分野**（`node.genre`）を
+    /// 持つときだけ `Some`。対話そのものは常に対話用分野で走る（`task.genre`）が、その人が自分の得意分野を
+    /// 知って答えられるように、前置きに「仕事で使う道具」として渡す（実機の事故の再発防止:
+    /// 検索ハーネスの genre を持つノードに話しかけても、その分野の run にはしない）。
+    work_genre: Option<GenreContext>,
 }
 
 struct ReviewEntry {
@@ -2252,6 +2257,18 @@ impl Dispatcher {
         } else {
             None
         };
+        // Phase 30（ADR-0033 D4 追記）: 対話は常に対話用分野で走る（`task.genre`）。その人が自分の仕事で
+        // 何を使うかを知って答えられるように、対話 run にだけ、担当ノード**自身**の分野
+        // （`node.genre`。対話用分野とは別物）を「仕事で使う道具」として渡す。決定的（`[[genres]]` の
+        // manifest を引くだけ）。
+        let work_genre = if is_conv {
+            assigned
+                .and_then(|n| n.genre.as_deref())
+                .and_then(|id| GenreSpec::find(&self.config.genres, id))
+                .map(GenreContext::from)
+        } else {
+            None
+        };
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
         let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
@@ -2296,6 +2313,7 @@ impl Dispatcher {
             standing_rules,
             organization,
             conversation_addressee,
+            work_genre,
         })
     }
 
@@ -2887,6 +2905,7 @@ async fn run_worker(
             standing_rules: extras.standing_rules,
             organization: extras.organization,
             conversation_addressee: extras.conversation_addressee,
+            work_genre: extras.work_genre,
         },
     };
     let sink = StoreSink {
@@ -5698,6 +5717,7 @@ mod tests {
             "先週の続きを教えて",
             &[],
             &[],
+            task_core::CONVERSATION_GENRE,
             OffsetDateTime::now_utc(),
         )
         .unwrap();
@@ -5749,7 +5769,7 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_conversation_org(store.as_ref());
-        task_ops::conversation::start(store.as_ref(), "secretary", None, "やあ", &[], &[], OffsetDateTime::now_utc())
+        task_ops::conversation::start(store.as_ref(), "secretary", None, "やあ", &[], &[], task_core::CONVERSATION_GENRE, OffsetDateTime::now_utc())
             .unwrap();
 
         let seen = Arc::new(StdMutex::new(None));
@@ -5776,7 +5796,7 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_conversation_org(store.as_ref());
-        task_ops::conversation::start(store.as_ref(), "secretary", None, "調子はどう", &[], &[], OffsetDateTime::now_utc())
+        task_ops::conversation::start(store.as_ref(), "secretary", None, "調子はどう", &[], &[], task_core::CONVERSATION_GENRE, OffsetDateTime::now_utc())
             .unwrap();
 
         let adapter = Arc::new(person_adapter(Terminal::Error {
@@ -5809,6 +5829,7 @@ mod tests {
             "先週の続きを教えて",
             &[],
             &[],
+            task_core::CONVERSATION_GENRE,
             OffsetDateTime::now_utc(),
         )
         .unwrap();
@@ -5827,6 +5848,7 @@ mod tests {
             "その後どう",
             &[],
             &[],
+            task_core::CONVERSATION_GENRE,
             OffsetDateTime::now_utc(),
         )
         .unwrap();
@@ -5887,6 +5909,7 @@ mod tests {
             "調子はどう",
             &[],
             &[],
+            task_core::CONVERSATION_GENRE,
             OffsetDateTime::now_utc(),
         )
         .unwrap();
@@ -6103,6 +6126,7 @@ mod tests {
             "調べて",
             &[],
             &[],
+            task_core::CONVERSATION_GENRE,
             OffsetDateTime::now_utc(),
         )
         .unwrap();
@@ -6151,6 +6175,7 @@ mod tests {
             "この案件をお願いします",
             &[],
             &[],
+            task_core::CONVERSATION_GENRE,
             OffsetDateTime::now_utc(),
         )
         .unwrap();
@@ -6186,7 +6211,7 @@ mod tests {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_conversation_org(store.as_ref());
 
-        let to_secretary = task_ops::conversation::start(store.as_ref(), "secretary", None, "hi", &[], &[], OffsetDateTime::now_utc())
+        let to_secretary = task_ops::conversation::start(store.as_ref(), "secretary", None, "hi", &[], &[], task_core::CONVERSATION_GENRE, OffsetDateTime::now_utc())
             .unwrap()
             .task;
         let to_survey = task_ops::conversation::start(
@@ -6196,6 +6221,7 @@ mod tests {
             "hi",
             &[],
             &[],
+            task_core::CONVERSATION_GENRE,
             OffsetDateTime::now_utc(),
         )
         .unwrap()
@@ -6216,6 +6242,86 @@ mod tests {
         let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
         let extras = d.run_extras(&ordinary).unwrap();
         assert_eq!(extras.conversation_addressee, None);
+    }
+
+    /// Phase 30（ADR-0033 D4 追記）: 対話は**ノードの `genre`（仕事のハーネス）に関係なく**常に対話用分野
+    /// （`task.genre`）で走る。実機の事故: 関連研究調査課（`genre = web-research` = LDR）に話しかけたら
+    /// 検索ハーネスが会話しようとして証拠ゲートで落ちた。ただし「人」らしさは保つため、対話 run にだけ、
+    /// 担当ノードが自分の仕事の分野を持てば `context.work_genre` として前置きに渡す（分野を持たない
+    /// ノードや通常タスクには乗らない）。
+    #[test]
+    fn conversation_runs_get_the_nodes_own_work_genre_when_it_has_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        for n in [
+            org_node_of("secretary", None, OrgKind::Secretary, Some("secretary")),
+            org_node_of("research", Some("secretary"), OrgKind::Department, None),
+            org_node_of("research-survey", Some("research"), OrgKind::Section, Some("literature")),
+            org_node_of("research-data", Some("research"), OrgKind::Section, None),
+        ] {
+            store.org_upsert(&n).unwrap();
+        }
+
+        let to_survey = task_ops::conversation::start(
+            store.as_ref(),
+            "research-survey",
+            None,
+            "なぜ web search に失敗しているのでしょうか？",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
+        let to_data = task_ops::conversation::start(
+            store.as_ref(),
+            "research-data",
+            None,
+            "図表の相談",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
+
+        // 対話そのものは常に対話用分野で走る（ノードの genre = literature ではない。分野の解決は
+        // `task_ops::conversation` 側のテストで見ているのでここでは genre 未指定 = `None` のまま）。
+        assert_eq!(to_survey.genre, None);
+
+        let adapter = Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
+        d.config.genres.push(GenreSpec {
+            id: "literature".into(),
+            description: "関連研究の調査".into(),
+            capabilities: vec!["学術文献の検索".into(), "引用グラフの探索".into()],
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-reader".into()],
+            ..GenreSpec::default()
+        });
+
+        let extras = d.run_extras(&to_survey).unwrap();
+        let work_genre = extras.work_genre.expect("research-survey has its own genre");
+        assert_eq!(work_genre.id, "literature");
+        assert_eq!(work_genre.description, "関連研究の調査");
+        assert_eq!(
+            work_genre.capabilities,
+            vec!["学術文献の検索".to_string(), "引用グラフの探索".to_string()]
+        );
+
+        // 分野を持たないノードには `work_genre` が乗らない。
+        let extras = d.run_extras(&to_data).unwrap();
+        assert!(extras.work_genre.is_none());
+
+        // 通常タスク（対話由来でない）には、担当が genre を持っていても乗らない
+        // （`work_genre` は対話専用。仕事の run は `task.genre` 自体がその分野になる）。
+        let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
+        let extras = d.run_extras(&ordinary).unwrap();
+        assert!(extras.work_genre.is_none());
     }
 
     /// ADR-0033 D5（Phase 26）: `Question` で終わった run は既存の `Blocked` / `answers[]` に加えて、
@@ -6300,7 +6406,7 @@ mod tests {
             })
             .unwrap();
 
-        task_ops::conversation::start(store.as_ref(), "secretary", None, "やあ", &[], &[], now).unwrap();
+        task_ops::conversation::start(store.as_ref(), "secretary", None, "やあ", &[], &[], task_core::CONVERSATION_GENRE, now).unwrap();
 
         let seen = Arc::new(StdMutex::new(None));
         let adapter = Arc::new(PersonAdapter {

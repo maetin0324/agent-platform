@@ -9,10 +9,12 @@
 #   name      人が読む役職名（SPEC §3.2 の言葉）。
 #   kind      secretary（根。1 つだけ）/ department（部）/ section（課）。
 #   parent_id secretary 以外は必須。
-#   genre     その「人」が仕事に使うハーネスの束（`[[genres]] id`）。部は持たなくてよい（課に振る）。
-#             ここに書く id は taskd.toml の `[[genres]]` に存在すること（設定検証で確かめる）。
-#             ADR-0033 D4: 分野を持たないノードに話しかけたときは、秘書と同じ対話用分野
-#             （`[[genres]] id = "secretary"`）で run する。
+#   genre     その「人」が**仕事をするとき**に使うハーネスの束（`[[genres]] id`）。部は持たなくてよい
+#             （課に振る）。ここに書く id は taskd.toml の `[[genres]]` に存在すること（設定検証で確かめる）。
+#             Phase 30（ADR-0033 D4 追記）: **対話にはこの genre を使わない**。ノードに話しかけたときの
+#             run は、genre の有無に関係なく常に対話用分野（`taskd.toml` の `[conversation]`、既定
+#             `[[genres]] id = "secretary"`）で走る（実機の事故: 検索ハーネス genre のノードに話しかけると
+#             検索ハーネスが会話しようとして落ちた）。
 #   brief     担当の一言。run のプロンプトに前置きされる。
 #   position  同じ親の中での並び順（省略したらこのファイルの並び順）。
 
@@ -20,7 +22,8 @@
 id = "secretary"
 name = "秘書"
 kind = "secretary"
-# 対話用の分野（ADR-0033 D4）。分野を持たないノードもこの分野で対話 run をする（決定的なフォールバック）。
+# 秘書自身の仕事の分野（ADR-0027/0028）。対話用分野（`[conversation]`）の既定と同じ id にしてあるが、
+# 別物: 対話は Phase 30 により常に `[conversation]`（既定 `secretary`）で走り、ここの `genre` は使わない。
 genre = "secretary"
 brief = """案件を受け取り、組織に流し、報告を集めて人に渡す。部をまたぐ連携はここが認める。
 案件の依頼を受けたら、返事に (a) 案件の理解の確認 (b) 大まかな方針 (c) 最初の途中目標の提案 を必ず含め、

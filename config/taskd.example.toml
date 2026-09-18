@@ -37,6 +37,14 @@ tier = "standard"
 [plan]
 auto_accept = false
 
+# 対話が常に走る分野（Phase 30、ADR-0033 D4 追記）。`POST /api/v1/org/{id}/messages` で話しかけたときの
+# run は、話しかけたノードの `genre`（仕事のハーネス）に関係なく、常にこの分野の役割・tier・adapter で走る
+# （実機の事故: 検索ハーネス genre のノードに話しかけたら検索ハーネスが会話しようとして落ちた。検索ハーネスや
+# PaperQA は会話ができない）。省略すればこの例と同じ既定（`secretary`）になる。指す id は下の
+# `[[genres]]` に存在すること（無ければ起動時の設定エラー「対話用の分野が無い」）。
+# [conversation]
+# genre = "secretary"
+
 # 役割（ADR-0016 D1）。タスクの `role` がここの `id` を指すと、省略された tier / adapter / 予算がこの既定で埋まり
 # （タスクの値 > 役割の既定 > 全体の既定）、run のプロンプトに `instructions` が `## Role` として前置きされる。
 # 役割名は自由記述なので、ここに無い名前をタスクに付けてもよい（既定も指示文も無いだけ）。
@@ -88,9 +96,11 @@ instructions = "あなたは精読担当。候補論文を読み込み、引用�
 # `capabilities` / `input_artifacts` / `output_artifacts`（ADR-0028 D1）は 3 つとも任意の自由記述。
 # taskd は中身を検査しない（Planner・委譲できる run のプロンプトに「できること」「渡すもの→返るもの」として出るだけ）。
 #
-# 対話用の分野（ADR-0033 D4）。`POST /api/v1/org/{id}/messages` で話しかけたときの run に使う。
-# 分野を持たない組織のノード（部・論文執筆課・データ整理課・インフラ部など）は、この分野で対話 run をする
-# （決定的なフォールバック）。id は `secretary` 固定。
+# 対話用の分野（ADR-0033 D4、Phase 30 で解決を変更）。`POST /api/v1/org/{id}/messages` で話しかけたときの
+# run は、話しかけた**ノードの `genre`（仕事のハーネス）に関係なく、常にこの分野**で走る
+# （下の `[conversation]` が指す。省略時の既定はこの id = `secretary`）。実機の事故: 関連研究調査課
+# （`genre = web-research` = Local Deep Research）に話しかけたら検索ハーネスが会話しようとして
+# 証拠ゲートで落ちた。検索ハーネスや PaperQA は会話ができないため、対話は常にこの分野に固定する。
 [[genres]]
 id = "secretary"
 description = "人と話し、案件を理解し、組織に流す"

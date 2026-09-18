@@ -586,6 +586,7 @@ pub fn api_settings(
         config_view: config_view(config, listen),
         roles: config.role_specs(),
         genres: config.genre_specs(),
+        conversation_genre: config.conversation_genre_id().to_string(),
         taskd_version: env!("CARGO_PKG_VERSION").to_string(),
         instance_id,
         started_at,

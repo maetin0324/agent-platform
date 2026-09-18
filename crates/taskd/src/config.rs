@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-use task_core::{AccountAdapter, DelegationLimits, OrgKind, OrgNode, RoleSpec, Tier, WorkerHint, valid_org_id};
+use task_core::{
+    AccountAdapter, CONVERSATION_GENRE, DelegationLimits, OrgKind, OrgNode, RoleSpec, Tier, WorkerHint, valid_org_id,
+};
 use task_dispatch::{AccountsRuntimeConfig, ClusterSpec, DispatchConfig, ProviderSpec};
 
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +81,13 @@ pub struct Config {
     /// ADR-0027 D1: 分野ごとの説明と既定の役割。タスクの値 > 役割の既定 > 分野の既定（`default_role` の役割）> 親の値。
     #[serde(default)]
     pub genres: Vec<GenreConfig>,
+    /// Phase 30（ADR-0033 D4 追記）: 対話が常に走る分野。実機の事故（関連研究調査課＝検索ハーネスに
+    /// 話しかけたら検索ハーネスが会話しようとして落ちた）を受けて、対話は**ノードの `genre` を使わない**。
+    /// 省略時は `conversation_genre_id()` が `task_core::CONVERSATION_GENRE`（`"secretary"`）を返す
+    /// （このときは `[[genres]]` に無くても検証しない。`[[genres]]` を使わない最小構成のため）。
+    /// **明示したのに `[[genres]]` に無ければ設定エラー**（対話用の分野が無い）。
+    #[serde(default)]
+    pub conversation: Option<ConversationConfig>,
     /// ADR-0033 D1: 組織図の**種**を書いたファイル（`[[org]]` の並び）。相対パスは設定ファイル基準。
     /// 省略したら種を蒔かない。蒔くのは **DB の `org_nodes` が空のときだけ**で、以後は DB が正
     /// （編集は GUI → API → DB。設定は再読込しない。ADR-0024 の accounts と同じ扱い）。
@@ -249,6 +258,22 @@ pub struct GenreConfig {
     /// この分野に属する役割 id の一覧。`genre` と `role` を両方指定したタスクは、`role` がここに無ければ設定エラー。
     #[serde(default)]
     pub roles: Vec<String>,
+}
+
+/// `[conversation]`（Phase 30 / ADR-0033 D4 追記）: 対話が常に走る分野。書けば `[[genres]]` に存在する
+/// こと（`Config::validate` が確認する）。書かなければ既定は `task_core::CONVERSATION_GENRE`
+/// （`Config::conversation_genre_id` が返す）で、`[[genres]]` の中身は検証しない
+/// （`[[genres]]` を使わない最小構成を壊さないため）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationConfig {
+    /// タスクの `genre` が指す名前と同じ形。`[[genres]] id`。
+    #[serde(default = "default_conversation_genre")]
+    pub genre: String,
+}
+
+fn default_conversation_genre() -> String {
+    CONVERSATION_GENRE.to_string()
 }
 
 /// `org_include` の指すファイルの中身（ADR-0033 D1）。`[[org]]` の 1 行 = 組織の 1 ノード。
@@ -1155,6 +1180,19 @@ impl Config {
                 }
             }
         }
+        // Phase 30（ADR-0033 D4 追記）: `[conversation]` を明示したのに、その分野が `[[genres]]` に
+        // 無ければ設定エラー（対話用の分野が無い）。省略時の既定（`CONVERSATION_GENRE`）は、
+        // `[[genres]]` を使わない最小構成を壊さないよう、ここでは検証しない
+        // （`conversation_genre_id()` の呼び出し側が `GenreSpec::find` で見つからなければ既定の
+        // 役割で走るだけで、実害は無い）。
+        if let Some(conversation) = &self.conversation
+            && !genre_ids.contains(&conversation.genre)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "[conversation]: genre {:?} is not defined in [[genres]] (対話用の分野が無い)",
+                conversation.genre
+            )));
+        }
         // ADR-0033 D1: 組織図の種。id は重複させず英小文字ケバブ、`secretary` はちょうど 1 つ、
         // それ以外の親は同じファイル内に居ること、`genre` は `[[genres]]` にあること。
         // 木としての整合（循環・種類の順序）はストアの `org_upsert` が最終的に見る。
@@ -1377,6 +1415,12 @@ impl Config {
                 roles: g.roles.clone(),
             })
             .collect()
+    }
+
+    /// Phase 30（ADR-0033 D4 追記）: 対話が常に走る分野の id。`[conversation] genre`、省略時は
+    /// `task_core::CONVERSATION_GENRE`（`"secretary"`）。
+    pub fn conversation_genre_id(&self) -> &str {
+        self.conversation.as_ref().map(|c| c.genre.as_str()).unwrap_or(CONVERSATION_GENRE)
     }
 
     /// ADR-0016 D2: `[delegation]` を task-core の型に写す。
@@ -1625,6 +1669,8 @@ roles = ["literature-reader"]
         let mut genres: Vec<&str> = cfg.genres.iter().map(|g| g.id.as_str()).collect();
         genres.sort_unstable();
         assert_eq!(genres, vec!["coding", "literature", "secretary"]);
+        // Phase 30: `[conversation]` は例では省略（コメントアウト）してあり、既定の `secretary` が使われる。
+        assert_eq!(cfg.conversation_genre_id(), "secretary");
     }
 
     /// 監査 M-1: 例の設定 2 つ（`taskd.example.toml` + `org.example.toml`）を**組み合わせて**読める。
@@ -2475,6 +2521,50 @@ roles = ["lead"]
             cfg.validate().unwrap_err().to_string(),
             "invalid config: [[genres]] coding: default_role \"implementer\" must be included in roles"
         );
+    }
+
+    /// Phase 30（ADR-0033 D4 追記）: `[conversation] genre` の既定は `task_core::CONVERSATION_GENRE`
+    /// （`"secretary"`）で、`[[genres]]` を書かない最小構成は今までどおり動く。明示したのに
+    /// `[[genres]]` に無ければ「対話用の分野が無い」設定エラー。明示して存在すれば通る。
+    #[test]
+    fn conversation_genre_defaults_to_secretary_and_an_unknown_genre_is_a_config_error() {
+        let providers = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
+
+        // `[conversation]` を書かない: 既定は `secretary`。`[[genres]]` の中身は検証しない
+        // （最小構成 = genres 無しでも壊れない）。
+        let cfg: Config = toml::from_str(providers).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.conversation_genre_id(), task_core::CONVERSATION_GENRE);
+        assert_eq!(cfg.conversation_genre_id(), "secretary");
+
+        // `[conversation]` を書いて `genre` を省略: それでも既定は `secretary`。
+        let text = format!("[conversation]\n{providers}");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.conversation_genre_id(), "secretary");
+        // `secretary` が `[[genres]]` に無いので設定エラー（明示した以上は検証する）。
+        assert_eq!(
+            cfg.validate().unwrap_err().to_string(),
+            "invalid config: [conversation]: genre \"secretary\" is not defined in [[genres]] (対話用の分野が無い)"
+        );
+
+        // 存在しない分野を明示して指す: 設定エラー。
+        let text = format!("[conversation]\ngenre = \"nope\"\n{providers}");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            cfg.validate().unwrap_err().to_string(),
+            "invalid config: [conversation]: genre \"nope\" is not defined in [[genres]] (対話用の分野が無い)"
+        );
+
+        // 存在する分野を明示して指す: 通る。
+        let text = format!(
+            "[conversation]\ngenre = \"secretary\"\n[[genres]]\nid = \"secretary\"\ndescription = \"d\"\n{providers}"
+        );
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.conversation_genre_id(), "secretary");
+
+        // 未知のキーは設定エラー。
+        assert!(toml::from_str::<Config>("[conversation]\nbogus = 1\n").is_err());
     }
 
     #[test]

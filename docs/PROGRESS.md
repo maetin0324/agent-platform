@@ -4162,3 +4162,94 @@ Phase 29 を配備し、案件 `01M2RCYVZH6RGX8RX0JP572BAT` に途中目標「�
 秘書が `assignee` で課を振り分け（ADR-0033 D4）、途中目標の中身どおり「調査 → 選定（人の承認）→ PoC」の順に依存を付けた。
 **SPEC §2.3「分解され、実行される」の「分解」が、GUI と同じ API 経路で本物の LLM により通った**（実行は人が `draft` を受け入れてから）。
 朝にやること: pegasus に接続（TOTP）して LDR の LLM 先を復活させ、`draft` を受け入れると research-survey が動く。
+
+## Phase 30 — 対話は常に対話用ハーネスで（実機の報告から。2026-09-18）
+
+**実機で起きたこと**（人の報告）: 人が組織の木で関連研究調査課（`research-survey`、`genre = web-research` =
+Local Deep Research）を選び「なぜ web search に失敗しているのでしょうか？」と話しかけた。Phase 24 の規則
+「対話用タスクはノードの `genre` のハーネスで run し、`genre` が無いときだけ対話用分野（`secretary`）に
+フォールバック」により、この対話が LDR（検索ハーネス）で走り、検索して 0 件 → 証拠ゲートで `failed`。
+検索ハーネスや PaperQA は会話ができない。ノードの `genre` は「その人が仕事をするときのハーネス」であって
+「その人と話すときのハーネス」ではない。
+
+### やったこと
+
+1. **対話用タスクは、ノードの `genre` に関係なく常に対話用分野で走る**（`crates/task-ops/src/conversation.rs`
+   `conversation_task`）。分野は呼び出し側が渡す `conversation_genre: &str`（`start` の新しい引数）。
+   ノードの `genre` は一切読まない（フォールバックの分岐そのものを削除）。
+2. **対話用分野は設定 `[conversation] genre`**（`crates/taskd/src/config.rs` の `ConversationConfig`）。
+   省略時の既定は `task_core::CONVERSATION_GENRE`（`"secretary"`）。`Config::conversation_genre_id()` が
+   解決した id を返し、`taskd::api_settings` → `task_api::ApiSettings.conversation_genre` →
+   `ApiState`（`Inner.conversation_genre`）→ `task_ops::conversation::start` / `greet_the_secretary` に渡る。
+3. **「人」らしさは保つ**: `task-dispatch` の `run_extras` が、対話 run のときだけ、担当ノード自身の
+   `genre`（対話用分野とは別物）を `RunExtras.work_genre` として解決し（`[[genres]]` の manifest から
+   決定的に。LLM は使わない）、`RunContext.work_genre`（`task-worker/src/protocol.rs`、新規追加フィールド、
+   protocol v4 のまま・追加のみ）に乗せる。`task-worker/src/preamble.rs` が役職と brief の直後に
+   「あなたの仕事で使う道具（分野）: <description>（できること: <capabilities>）」を 1 行足す
+   （対話でない run・work_genre が無い run では 1 バイトも変わらない）。
+4. **`genre` が無いノード**は従来どおり対話用分野になる（今回の変更で「常に」対話用分野になったので、
+   この場合分けは自然に含まれる。個別の分岐コードは無くなった）。
+5. 既に `failed` になっている対話タスクは触っていない（人が話しかけ直す運用のまま）。
+
+### 判断したこと（設定検証の範囲。指示に無い細部）
+
+- **`[conversation] genre` の存在検証は、`[conversation]` を明示したときだけ行う**（省略時の既定
+  `secretary` が `[[genres]]` に無くても `Config::validate` はエラーにしない）。理由: 文字どおり
+  「無ければ常に起動時の設定エラー」にすると、`[[genres]]` を使わない・対話機能を使わない既存の最小構成
+  （`crates/taskd/src/config.rs` のテスト用フィクスチャは 90 件以上あり、`config/taskd.research.example.toml`
+  / `config/taskd.web-research.example.toml` のような org を使わない例も含む）が軒並み設定エラーになり、
+  この Phase の本題（対話の分野解決）と無関係な箇所を大量に壊す。`[conversation]` を明示した構成
+  （＝対話機能を使うと決めた構成）でだけ検証すれば、実機の事故（`secretary` genre が定義済みの
+  `config/taskd.example.toml` + `org.example.toml` の組では最初から問題にならない）を防ぎつつ、
+  無関係な設定は壊さない。人間が別の判断をしたい場合は `docs/taskd/config.rs` の
+  `Config::validate` 内、`// Phase 30（ADR-0033 D4 追記）` のコメント箇所を参照。
+
+### 受け入れ条件ごとの証拠
+
+- `research-survey`（`genre = web-research` 相当。テストでは `literature`）への対話タスクが `secretary`
+  分野の役割・adapter で作られる（LDR ではない）:
+  `cargo test -p task-ops --lib conversation::tests::conversation_always_uses_the_conversation_genre_regardless_of_the_nodes_own_genre`、
+  `cargo test -p task-ops --lib conversation::tests::a_web_research_node_still_talks_through_the_conversation_genre`、
+  `cargo test -p task-api --test conversation talking_to_a_node_returns_202_and_makes_one_ready_conversation_task`
+  （`task.genre == "secretary"` / `worker_hint.adapter == "claude-code"`、`literature`/`paperqa` ではない）。
+- 前置きにそのノードの `brief` と記憶と「仕事で使う道具」が入る:
+  `cargo test -p task-worker --lib preamble::tests::a_work_genre_is_shown_right_after_the_brief_when_present`
+  （役職と brief の直後、永続の認可より前。work_genre が無い/`context.node` が無いときは出ない）、
+  `cargo test -p task-dispatch --lib dispatcher::tests::conversation_runs_get_the_nodes_own_work_genre_when_it_has_one`
+  （`run_extras` が対話 run にだけ・ノードが自分の `genre` を持つときだけ `work_genre` を解決すること）。
+- `[conversation] genre` の既定と、存在しない分野を指したときの設定エラー:
+  `cargo test -p taskd --lib config::tests::conversation_genre_defaults_to_secretary_and_an_unknown_genre_is_a_config_error`
+  （既定 `secretary`、明示して無ければ `"[conversation]: genre \"…\" is not defined in [[genres]] (対話用の分野が無い)"`、
+  明示して存在すれば通る、未知キーは設定エラー）。
+- 秘書への対話は不変（既存テスト）: `cargo test -p task-ops --lib conversation::` **10 passed**、
+  `cargo test -p task-api --test conversation` **7 passed**（`creating_a_project_asks_the_secretary_first` 等、
+  秘書自身は元々 `genre = "secretary"` だったので挙動は変わらない）。
+- **共通条件** — `cargo test --workspace`: **992 passed**、`grep -c "^test result: FAILED"` = **0**
+  （Phase 29 の 988 から +4: task-ops 2 件・task-worker 1 件・task-dispatch 1 件の新規テスト。
+  taskd の `accounts_admin::spawn_check_codex_reports_ok_and_records_observation` が並列実行時に 1 度だけ
+  `FAILED` になったが、単体実行・再実行では毎回 `ok`。既知のタイミング依存で今回の変更とは無関係
+  — config.rs の `[conversation]` 追加や codex 検証コードには触れていない）。
+  `cargo clippy --workspace --all-targets -- -D warnings` **exit 0**（`task_ops::conversation::start` が
+  8 引数になったため `#[allow(clippy::too_many_arguments)]` を追加）。テスト以外に `unwrap()` / `expect()`
+  は無い（触った全ファイルの `#[cfg(test)]` より前を機械的に確認）。ディスパッチャ・ストアに LLM 呼び出しは
+  無い（`work_genre` の解決も `[[genres]]` の manifest を引くだけ）。
+  `UPDATE_SCHEMA=1 cargo test -p task-worker --lib protocol::tests::committed_schema_matches_generated` で
+  `docs/protocol/worker-protocol.schema.json` を再生成（`RunContext.work_genre` を追加）。
+  `docs/gui/api.md` は変更していない（API の形は変わらない。話す先のノードごとの分野が変わるだけ）。
+
+### 未解決事項
+
+- U30-1: `[conversation] genre` を省略し、かつ `[[genres]]` にも `secretary`（既定値）が無い構成では、
+  `Config::validate` は通り、実行時は `GenreSpec::find` が見つからず素の `Tier::Standard` / adapter 無しで
+  対話 run が走る（クラッシュはしないが、意図した役割・adapter が付かない）。実運用では
+  `config/taskd.example.toml` のように `secretary` genre を用意するのが前提。より厳密にしたい場合は
+  「対話機能を使う（org を持つ）構成なら常に検証する」という判断が要る（上の「判断したこと」を参照）。
+- U30-2: `work_genre` を前置きに 1 行足す文面（「あなたの仕事で使う道具（分野）: …（できること: …）」）は
+  実機の Claude / Qwen でまだ確認していない（偽アダプタでの通しのみ）。人がその人の得意分野を実際に
+  読み取れるかは実機確認が要る。
+
+### 提案
+
+- P-83: `RunContext.work_genre` は今回「対話 run だけ」に限定した。将来、通常の実装タスクの前置きにも
+  「この課の得意分野」を出したくなったら（例えば複数の課が同じ役割を共有する構成で）、`is_conv` の条件を
+  外すだけで流用できる（`work_genre` のデータ形は `available_genres[]` と同じ `GenreContext`）。

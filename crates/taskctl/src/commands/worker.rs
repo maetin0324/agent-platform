@@ -666,6 +666,7 @@ mod tests {
             clusters,
             roles: vec![],
             genres: vec![],
+            conversation: None,
             org_include: None,
             org: vec![],
             delegation: Default::default(),

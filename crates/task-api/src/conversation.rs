@@ -64,6 +64,7 @@ pub(crate) async fn post_message(
     let post: MessagePostBody = read_json(body, false).await?;
     let roles = state.inner.roles.clone();
     let genres = state.inner.genres.clone();
+    let conversation_genre = state.inner.conversation_genre.clone();
     let started = state
         .blocking(move |store| {
             // 知らないノードは 404（検証の 422 ではなく、URL が指すものが無い）。
@@ -77,6 +78,7 @@ pub(crate) async fn post_message(
                 &post.text,
                 &roles,
                 &genres,
+                &conversation_genre,
                 OffsetDateTime::now_utc(),
             )
             .map_err(|e| ops_problem(store, e, None))
@@ -132,6 +134,7 @@ pub(crate) fn greet_the_secretary(
     project: &task_core::Project,
     roles: &[task_core::RoleSpec],
     genres: &[task_core::GenreSpec],
+    conversation_genre: &str,
 ) {
     let Some(secretary) = store
         .org_list()
@@ -148,6 +151,7 @@ pub(crate) fn greet_the_secretary(
         &project.request,
         roles,
         genres,
+        conversation_genre,
         OffsetDateTime::now_utc(),
     ) {
         Ok(started) => {
