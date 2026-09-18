@@ -17,6 +17,8 @@ use task_core::{ArtifactRef, DelegateTask, GenreSpec, Status, Task, TaskId, Usag
 /// 自身の仕事の分野があれば「仕事で使う道具」として前置きに渡す）。
 /// Phase 33（ADR-0033 D4 追記）: `context.recent_work` を追加（対話 run にだけ、その担当の直近の仕事を渡す。
 /// 実機で担当が自分の直近の失敗を知らずに聞き返した事故の再発防止）。
+/// Phase 35（ADR-0036 D1/D5）: `run.artifacts_dir` を追加（成果物と結果ファイルの置き場。単独タスクでは
+/// 従来の `<workspace>/artifacts` と同じ値なので、これを読まないワーカーも単独タスクではそのまま動く）。
 /// 全て追加のみで v1〜v3 のワーカーはそのまま動く。
 pub const PROTOCOL_VERSION: u32 = 4;
 
@@ -290,7 +292,29 @@ pub struct RunRequest {
     pub task: Task,
     /// 絶対パス。ワーカーの cwd、`artifact.path` の基準。
     pub workspace: PathBuf,
+    /// 絶対パス。この run の成果物と結果ファイル（`result.json`）の置き場（ADR-0036 D1）。
+    /// workspace を自分で所有するタスクは `<workspace>/artifacts`、親から継いだタスク（plan / delegate の子）は
+    /// `<workspace>/.taskd/artifacts/<task_id>`。決めるのはディスパッチャで、アダプタはここに書くだけ。
+    pub artifacts_dir: PathBuf,
     pub context: RunContext,
+}
+
+impl RunRequest {
+    /// `artifacts_dir` の workspace 相対表記（`artifacts` / `.taskd/artifacts/<task_id>`）。
+    /// プロンプトの文面（ADR-0036 D3）と `ArtifactRef.path`（D4）に使う。
+    pub fn artifacts_rel(&self) -> String {
+        task_core::artifacts::rel_from(&self.workspace, &self.artifacts_dir)
+    }
+
+    /// `artifacts_dir` 配下のファイルの絶対パス。
+    pub fn artifact_path(&self, name: &str) -> PathBuf {
+        self.artifacts_dir.join(name)
+    }
+
+    /// `artifacts_dir` 配下のファイルの workspace 相対パス（`artifacts/result.json` 等）。
+    pub fn artifact_rel_path(&self, name: &str) -> String {
+        format!("{}/{name}", self.artifacts_rel())
+    }
 }
 
 /// `done.evidence[]`。`command` / `exit` / `stdout_tail` は、コマンドを伴わない条件（`ArtifactExists` / `Reviewer` / `Human`）では
@@ -433,6 +457,7 @@ pub(crate) mod tests {
             protocol: PROTOCOL_VERSION,
             task: sample_task(),
             workspace: PathBuf::from("/tmp/ws"),
+            artifacts_dir: PathBuf::from("/tmp/ws/artifacts"),
             context: RunContext::default(),
         };
         let v = serde_json::to_value(&req).unwrap();

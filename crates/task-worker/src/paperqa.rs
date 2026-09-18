@@ -233,12 +233,12 @@ impl WorkerAdapter for PaperQaAdapter {
 /// ワーカープロトコルを話さない調査エンジン
 /// であり、結果ファイルの書式やコマンド再実行の話をしても意味がないため）。`request.json`/`prompt.txt` は
 /// 他のアダプタと同じ共有ヘルパ（`subprocess::write_run_request`/`write_run_prompt`）で残す。
-pub fn build_question(task: &Task, context: &RunContext) -> String {
+pub fn build_question(task: &Task, context: &RunContext, artifacts: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n\n", task.title));
     // ADR-0033 D4 / D6（Phase 24）: 前置き（役職と brief・永続の認可・記憶・直近のやり取り・役割の指示文）は
     // `crate::preamble` が 1 か所で組む。`RunContext` が Phase 23 までの中身なら出力は変わらない。
-    out.push_str(&crate::preamble::render(context));
+    out.push_str(&crate::preamble::render(context, artifacts));
     out.push_str(&task.objective);
     out.push('\n');
     if !context.answers.is_empty() {
@@ -795,12 +795,14 @@ async fn run_paperqa(
     tokio::fs::create_dir_all(&run_dir).await?;
 
     // 前回の run（リトライ）の名残を今回の結果と誤読しない（claude_code/codex と同じ理由。ADR-0006 D3）。
-    let artifacts_dir = req.workspace.join("artifacts");
+    // ADR-0036 D1/D2: 成果物の置き場はディスパッチャが決めた `artifacts_dir`（共有 workspace ではタスクごと）。
+    let artifacts_dir = req.artifacts_dir.clone();
+    let artifacts_rel = req.artifacts_rel();
     for stale in ["result.json", "answer.md", "candidates.json", "sources.json"] {
         let _ = tokio::fs::remove_file(artifacts_dir.join(stale)).await;
     }
 
-    let question = build_question(&req.task, &req.context);
+    let question = build_question(&req.task, &req.context, &artifacts_rel);
     // ADR-0023 D2 / M1: この run で何を渡したかを残す。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &question, run_id).await;
@@ -970,16 +972,18 @@ async fn run_paperqa(
         // 書いたものは taskd にも知らせる（run の成果物一覧と `Check::ArtifactExists` の解決に使われる）。
         // 他のアダプタではワーカー自身が `artifact` メッセージで申告するが、pqa は申告しないのでアダプタが行う。
         // ADR-0035 D3: ゲートに落ちても成果物は残す（人が読めるように）ので、申告はゲートより前に行う。
-        let mut to_register: Vec<(&str, &str, &str)> = vec![("answer.md", "artifacts/answer.md", "markdown")];
+        // ADR-0036 D4: 申告する `path` は workspace 相対のまま（`artifacts_dir` 基準で組む）。
+        let mut to_register: Vec<(&str, String, &str)> =
+            vec![("answer.md", format!("{artifacts_rel}/answer.md"), "markdown")];
         if acquiring {
-            to_register.push(("candidates.json", "artifacts/candidates.json", "json"));
-            to_register.push(("sources.json", "artifacts/sources.json", "json"));
+            to_register.push(("candidates.json", format!("{artifacts_rel}/candidates.json"), "json"));
+            to_register.push(("sources.json", format!("{artifacts_rel}/sources.json"), "json"));
         }
         for (name, rel_path, kind) in to_register {
-            if !req.workspace.join(rel_path).is_file() {
+            if !req.workspace.join(&rel_path).is_file() {
                 continue;
             }
-            match crate::artifact::resolve(&req.workspace, name, rel_path, Some(kind)) {
+            match crate::artifact::resolve(&req.workspace, name, &rel_path, Some(kind)) {
                 Ok(artifact) => sink.artifact(&artifact),
                 Err(e) => warn!("run {run_id}: could not register {rel_path}: {e}"),
             }
@@ -1302,6 +1306,7 @@ reduce server overhead (Roe 2021).";
         RunRequest {
             protocol: PROTOCOL_VERSION,
             task: crate::protocol::tests::sample_task(),
+            artifacts_dir: workspace.join("artifacts"),
             workspace,
             context: RunContext::default(),
         }
@@ -1370,6 +1375,34 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
             }
             other => panic!("expected done in runs/<run_id>/result.json, got {other:?}"),
         }
+    }
+
+    /// ADR-0036 D1/D2/D4: 共有 workspace のタスクは `.taskd/artifacts/<task_id>/` に答えと結果ファイルを
+    /// 置き、申告する `path` は workspace 相対のその形になる（兄弟の `artifacts/` を上書きしない）。
+    #[tokio::test]
+    async fn a_shared_workspace_task_writes_under_its_own_artifacts_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_pqa(
+            dir.path(),
+            r#"cat >/dev/null
+echo 'Answer: no prior work on X [Doe2020].'
+"#,
+        );
+        std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+        std::fs::write(dir.path().join("artifacts/answer.md"), "sibling").unwrap();
+        let adapter = PaperQaAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        let artifacts = sink.artifacts.lock().unwrap();
+        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+        assert_eq!(artifacts[0].path, ".taskd/artifacts/T1/answer.md");
+        drop(artifacts);
+        assert!(dir.path().join(".taskd/artifacts/T1/answer.md").is_file());
+        assert!(dir.path().join(".taskd/artifacts/T1/result.json").is_file());
+        assert_eq!(std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap(), "sibling");
     }
 
     #[tokio::test]
@@ -1489,7 +1522,7 @@ while true; do sleep 0.1; done
                 "--agent.index.name".to_string(),
                 SHARED_PROJECT_KEY.to_string(),
                 "ask".to_string(),
-                build_question(&req.task, &req.context),
+                build_question(&req.task, &req.context, "artifacts"),
             ]
         );
     }

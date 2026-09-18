@@ -142,11 +142,13 @@ async fn run_codex(
     let stderr_log_path_for_task = stderr_log_path.clone();
 
     // 前回の run（リトライ）が残した結果ファイルを、今回の run の結果と誤読しない（ADR-0006 D3 と同じ理由）。
-    let result_path = req.workspace.join("artifacts").join("result.json");
+    // ADR-0036 D1/D2: 置き場はディスパッチャが決めた `artifacts_dir`（共有 workspace ではタスクごと）。
+    let artifacts_rel = req.artifacts_rel();
+    let result_path = req.artifact_path("result.json");
     let _ = tokio::fs::remove_file(&result_path).await;
-    clear_delegate_file(&req.workspace).await;
+    clear_delegate_file(&req.artifacts_dir).await;
 
-    let prompt = build_prompt(&req.task, &req.context, run_id);
+    let prompt = build_prompt(&req.task, &req.context, run_id, &artifacts_rel);
     // ADR-0023 D2 / M1: この run で何を渡したかを残す（`request.json` は構造、`prompt.txt` は実際の文面）。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
@@ -296,10 +298,12 @@ async fn run_codex(
                 pf,
             )
         }
-        (None, Some(TurnSignal::Completed { usage })) => (terminal_from_result(&req.workspace, *usage).await, None),
+        (None, Some(TurnSignal::Completed { usage })) => {
+            (terminal_from_result(&req.artifacts_dir, &artifacts_rel, *usage).await, None)
+        }
     };
 
-    forward_delegate_file(&req.workspace, sink).await;
+    forward_delegate_file(&req.artifacts_dir, sink).await;
 
     write_result_json(&run_dir, &terminal, provider_failure).await?;
 
@@ -383,13 +387,17 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// `turn.completed` と結果ファイルから終端を合成する。呼び出し元は `turn.completed` を一度でも
 /// 観測できた場合にのみこれを呼ぶ（`claude_code::terminal_from_result` と同じ構造。ADR-0008 D3）。
-async fn terminal_from_result(workspace: &std::path::Path, usage: Option<Usage>) -> Terminal {
-    let result_path = workspace.join("artifacts").join("result.json");
+async fn terminal_from_result(
+    artifacts_dir: &std::path::Path,
+    artifacts_rel: &str,
+    usage: Option<Usage>,
+) -> Terminal {
+    let result_path = artifacts_dir.join("result.json");
     let text = match tokio::fs::read_to_string(&result_path).await {
         Ok(t) => t,
         Err(_) => {
             return Terminal::Error {
-                message: "codex exited without artifacts/result.json".to_string(),
+                message: format!("codex exited without {artifacts_rel}/result.json"),
                 retryable: true,
             };
         }
@@ -407,13 +415,13 @@ async fn terminal_from_result(workspace: &std::path::Path, usage: Option<Usage>)
                 }
             } else {
                 Terminal::Error {
-                    message: "artifacts/result.json has neither 'summary' nor 'question'".into(),
+                    message: format!("{artifacts_rel}/result.json has neither 'summary' nor 'question'"),
                     retryable: true,
                 }
             }
         }
         Err(e) => Terminal::Error {
-            message: format!("artifacts/result.json is not valid JSON: {e}"),
+            message: format!("{artifacts_rel}/result.json is not valid JSON: {e}"),
             retryable: true,
         },
     }
@@ -463,6 +471,7 @@ mod tests {
         RunRequest {
             protocol: PROTOCOL_VERSION,
             task: crate::protocol::tests::sample_task(),
+            artifacts_dir: workspace.join("artifacts"),
             workspace,
             context: RunContext::default(),
         }
@@ -594,6 +603,32 @@ exit 9
             .await
             .expect_err("expected a provider failure");
         assert!(matches!(err, AdapterError::Throttled { .. }), "{err:?}");
+    }
+
+    /// ADR-0036 D1/D2: 共有 workspace のタスクは `.taskd/artifacts/<task_id>/result.json` を読む。
+    #[tokio::test]
+    async fn a_shared_workspace_task_uses_its_own_artifacts_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"mkdir -p .taskd/artifacts/T1
+printf '%s' '{"summary":"mine","evidence":[]}' > .taskd/artifacts/T1/result.json
+echo '{"type":"turn.completed"}'
+"#,
+        );
+        std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+        std::fs::write(dir.path().join("artifacts/result.json"), r#"{"summary":"sibling"}"#).unwrap();
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Done { summary, .. } => assert_eq!(summary, "mine"),
+            other => panic!("expected done, got {other:?}"),
+        }
+        let prompt = std::fs::read_to_string(dir.path().join("runs/run-shared/prompt.txt")).unwrap();
+        assert!(prompt.contains(".taskd/artifacts/T1/result.json"), "{prompt}");
     }
 
     #[tokio::test]

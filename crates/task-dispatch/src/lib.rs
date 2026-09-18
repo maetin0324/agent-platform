@@ -23,6 +23,6 @@ pub use dispatcher::{
 };
 pub use policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy, ProviderSpec, StaticPolicy};
 pub use review::{
-    PLAN_FILE, PlanCheck, REVIEW_FILE, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerProviderFailure, ReviewerRun,
+    PLAN_FILE_NAME, PlanCheck, REVIEW_FILE_NAME, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerProviderFailure, ReviewerRun,
     Verdict, needs_reviewer_run, review_task, reviewer_hint,
 };

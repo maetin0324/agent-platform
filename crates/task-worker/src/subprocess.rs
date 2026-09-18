@@ -383,6 +383,7 @@ mod tests {
         RunRequest {
             protocol: PROTOCOL_VERSION,
             task: crate::protocol::tests::sample_task(),
+            artifacts_dir: workspace.join("artifacts"),
             workspace,
             context: RunContext::default(),
         }

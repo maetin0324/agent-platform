@@ -2,7 +2,7 @@
 //!
 //! ACP はここでは「運搬・観測・生存管理」だけを担う（ADR-0026 D1）。エージェントの最終回答は成功判定に
 //! 使わない。終端は `claude-code`/`codex` と同じく `artifacts/result.json`（ADR-0006 D3）から合成し、
-//! `artifacts/delegate.json` も共有ヘルパで転送する。プロンプト組み立ても `claude_code::build_prompt`
+//! 成果物ディレクトリの `delegate.json` も共有ヘルパで転送する。プロンプト組み立ても `claude_code::build_prompt`
 //! をそのまま再利用する（kind 別の文面をアダプタごとに複製しない）。
 //!
 //! # 実装メモ: 公式 SDK ではなく自前の JSON-RPC クライアント
@@ -502,7 +502,7 @@ enum RawOutcome {
 }
 
 /// プロセスを止め（タイムアウトなら `session/cancel` → `kill_grace` 後 SIGKILL、そうでなければ穏やかな
-/// 刈り取り。ADR-0026 D4）、`artifacts/result.json` から終端を合成し、`runs/<run_id>/result.json` に書く
+/// 刈り取り。ADR-0026 D4）、結果ファイル（`<artifacts_dir>/result.json`）から終端を合成し、`runs/<run_id>/result.json` に書く
 /// （ADR-0006 D3, ADR-0010 D10）。
 #[allow(clippy::too_many_arguments)]
 async fn finish_run(
@@ -513,7 +513,9 @@ async fn finish_run(
     stderr_task: tokio::task::JoinHandle<()>,
     mut stdout_file: tokio::fs::File,
     run_dir: &Path,
-    workspace: &Path,
+    // ADR-0036 D1/D2: 成果物と結果ファイルの置き場（`RunRequest.artifacts_dir`）と、その workspace 相対表記。
+    artifacts_dir: &Path,
+    artifacts_rel: &str,
     stderr_log_path: &Path,
     sink: &dyn EventSink,
     outcome: RawOutcome,
@@ -568,10 +570,12 @@ async fn finish_run(
                 pf,
             )
         }
-        RawOutcome::Success { stop_reason } => (terminal_from_result_file(workspace, &stop_reason).await, None),
+        RawOutcome::Success { stop_reason } => {
+            (terminal_from_result_file(artifacts_dir, artifacts_rel, &stop_reason).await, None)
+        }
     };
 
-    forward_delegate_file(workspace, sink).await;
+    forward_delegate_file(artifacts_dir, sink).await;
     write_result_json(run_dir, &terminal, provider_failure).await?;
 
     if let (Terminal::Error { message, .. }, Some(pf)) = (&terminal, provider_failure) {
@@ -584,16 +588,16 @@ async fn finish_run(
     })
 }
 
-/// `artifacts/result.json` から終端を合成する（ADR-0026 D3 手順 7）。ACP 自体には成功/失敗の強い意味論が
-/// 無いので（D1: 運搬・観測・生存管理だけ）、`stopReason` に関わらず常にこのファイルを見る。ファイルが
-/// 無ければ `stopReason` を理由として `Error{retryable:true}` にする。
-async fn terminal_from_result_file(workspace: &Path, stop_reason: &str) -> Terminal {
-    let result_path = workspace.join("artifacts").join("result.json");
+/// 結果ファイル（`<artifacts_dir>/result.json`）から終端を合成する（ADR-0026 D3 手順 7、ADR-0036 D2）。
+/// ACP 自体には成功/失敗の強い意味論が無いので（D1: 運搬・観測・生存管理だけ）、`stopReason` に関わらず
+/// 常にこのファイルを見る。ファイルが無ければ `stopReason` を理由として `Error{retryable:true}` にする。
+async fn terminal_from_result_file(artifacts_dir: &Path, artifacts_rel: &str, stop_reason: &str) -> Terminal {
+    let result_path = artifacts_dir.join("result.json");
     let text = match tokio::fs::read_to_string(&result_path).await {
         Ok(t) => t,
         Err(_) => {
             return Terminal::Error {
-                message: format!("acp agent stopped ({stop_reason}) without artifacts/result.json"),
+                message: format!("acp agent stopped ({stop_reason}) without {artifacts_rel}/result.json"),
                 retryable: true,
             };
         }
@@ -613,13 +617,13 @@ async fn terminal_from_result_file(workspace: &Path, stop_reason: &str) -> Termi
                 }
             } else {
                 Terminal::Error {
-                    message: "artifacts/result.json has neither 'summary' nor 'question'".into(),
+                    message: format!("{artifacts_rel}/result.json has neither 'summary' nor 'question'"),
                     retryable: true,
                 }
             }
         }
         Err(e) => Terminal::Error {
-            message: format!("artifacts/result.json is not valid JSON: {e}"),
+            message: format!("{artifacts_rel}/result.json is not valid JSON: {e}"),
             retryable: true,
         },
     }
@@ -640,11 +644,13 @@ async fn run_acp(
 
     // 前回の run（リトライ）が残した結果ファイルを、今回の run の結果と誤読しないよう先に消す
     // （claude_code / codex と同じ。ADR-0006 D3）。
-    let result_path = req.workspace.join("artifacts").join("result.json");
+    // ADR-0036 D1/D2: 置き場はディスパッチャが決めた `artifacts_dir`（共有 workspace ではタスクごと）。
+    let artifacts_rel = req.artifacts_rel();
+    let result_path = req.artifact_path("result.json");
     let _ = tokio::fs::remove_file(&result_path).await;
-    clear_delegate_file(&req.workspace).await;
+    clear_delegate_file(&req.artifacts_dir).await;
 
-    let prompt = build_prompt(&req.task, &req.context, run_id);
+    let prompt = build_prompt(&req.task, &req.context, run_id, &artifacts_rel);
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
 
@@ -927,7 +933,8 @@ async fn run_acp(
                             stderr_task,
                             stdout_file,
                             &run_dir,
-                            &req.workspace,
+                            &req.artifacts_dir,
+                            &artifacts_rel,
                             &stderr_log_path,
                             sink,
                             RawOutcome::Eof { context: "session/set_config_option" },
@@ -944,7 +951,8 @@ async fn run_acp(
                             stderr_task,
                             stdout_file,
                             &run_dir,
-                            &req.workspace,
+                            &req.artifacts_dir,
+                            &artifacts_rel,
                             &stderr_log_path,
                             sink,
                             RawOutcome::TimedOut(terminal),
@@ -1034,7 +1042,8 @@ async fn run_acp(
         stderr_task,
         stdout_file,
         &run_dir,
-        &req.workspace,
+        &req.artifacts_dir,
+        &artifacts_rel,
         &stderr_log_path,
         sink,
         outcome,
@@ -1092,6 +1101,7 @@ mod tests {
         RunRequest {
             protocol: PROTOCOL_VERSION,
             task: crate::protocol::tests::sample_task(),
+            artifacts_dir: workspace.join("artifacts"),
             workspace,
             context: RunContext::default(),
         }
@@ -1152,6 +1162,36 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
             crate::protocol::WorkerMessage::Done { summary, .. } => assert_eq!(summary, "added usage example"),
             other => panic!("expected done in result.json, got {other:?}"),
         }
+    }
+
+    /// ADR-0036 D1/D2: 共有 workspace のタスクは `.taskd/artifacts/<task_id>/result.json` を読む。
+    #[tokio::test]
+    async fn a_shared_workspace_task_uses_its_own_artifacts_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_acp(
+            dir.path(),
+            &format!(
+                r#"{HANDSHAKE}
+read -r _prompt
+mkdir -p .taskd/artifacts/T1
+printf '%s' '{{"summary":"mine","evidence":[]}}' > .taskd/artifacts/T1/result.json
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
+"#
+            ),
+        );
+        std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+        std::fs::write(dir.path().join("artifacts/result.json"), r#"{"summary":"sibling"}"#).unwrap();
+        let adapter = AcpAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Done { summary, .. } => assert_eq!(summary, "mine"),
+            other => panic!("expected done, got {other:?}"),
+        }
+        let prompt = std::fs::read_to_string(dir.path().join("runs/run-shared/prompt.txt")).unwrap();
+        assert!(prompt.contains(".taskd/artifacts/T1/result.json"), "{prompt}");
     }
 
     #[tokio::test]

@@ -1012,10 +1012,13 @@ async fn check_provider(
         .await
         .map_err(|e| task_api::CheckError::Unavailable(format!("failed to prepare check workspace: {e}")))?;
     let run_id = task_core::TaskId::new().to_string();
+    // ADR-0036 D1: 疎通確認用の単独タスク（親なし）なので従来どおり `<workspace>/artifacts`。
+    let artifacts_dir = task_core::artifacts::artifacts_dir_for(&task, &prepared);
     let req = task_worker::RunRequest {
         protocol: task_worker::PROTOCOL_VERSION,
         task,
         workspace: prepared,
+        artifacts_dir,
         context: task_worker::RunContext {
             prior_review: vec![],
             inputs: vec![],

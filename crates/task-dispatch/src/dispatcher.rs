@@ -15,7 +15,7 @@
 //! **LLM 呼び出しはここに書かない。** 判断は全て設定・状態機械・ストアのクエリで決まる。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -117,7 +117,7 @@ fn rfc3339(t: OffsetDateTime) -> String {
     t.format(&Rfc3339).unwrap_or_default()
 }
 use crate::review::{
-    HumanVerdicts, PLAN_FILE, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, Verdict,
+    HumanVerdicts, PLAN_FILE_NAME, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, Verdict,
     needs_reviewer_run, review_task,
 };
 
@@ -1450,7 +1450,7 @@ impl Dispatcher {
     }
 
 
-    /// ADR-0033 D6（Phase 24）: `artifacts/result.json` の `memory` を担当の記憶に追記する。
+    /// ADR-0033 D6（Phase 24）: 結果ファイル（`<artifacts_dir>/result.json`）の `memory` を担当の記憶に追記する。
     /// `[memory]` を設定していない・担当がいない・`memory` が無いときは何もしない。失敗しても run は壊さない。
     fn absorb_memory(&self, task: &Task) {
         let (Some(dir), Some(node_id)) = (&self.config.memory_dir, task.assignee.as_deref()) else {
@@ -1459,7 +1459,8 @@ impl Dispatcher {
         let Some(workspace) = self.task_dir(task) else {
             return;
         };
-        let Some(update) = task_worker::read_result_memory(&workspace) else {
+        // ADR-0036 D2: 結果ファイルはそのタスクの成果物ディレクトリの中。
+        let Some(update) = task_worker::read_result_memory(&self.artifacts_dir(task, &workspace)) else {
             return;
         };
         let today = OffsetDateTime::now_utc().date().to_string();
@@ -1682,7 +1683,7 @@ impl Dispatcher {
                     // ADR-0034 D7: ワーカーが結果ファイルで宣言した `report.kind`（無ければ既定の `result`）。
                     let declared = self
                         .task_dir(&task)
-                        .and_then(|ws| task_worker::read_result_report_kind(&ws));
+                        .and_then(|ws| task_worker::read_result_report_kind(&self.artifacts_dir(&task, &ws)));
                     if let Err(e) = crate::reports::record_run_report(
                         self.store.as_ref(),
                         &task,
@@ -2579,6 +2580,9 @@ impl Dispatcher {
             )?;
         }
         let timeout = self.config.review_timeout;
+        // ADR-0036 D1/D2: 判定（`plan.json` / `review.json` / `summary.md` / `ArtifactExists` の既定パス）は
+        // 対象タスクの成果物ディレクトリを基準にする。
+        let artifacts_dir = self.artifacts_dir(&task, &dir);
         let entry_subject = subject.clone();
         let entry_run_id = run_id.clone();
         let subject = subject.clone();
@@ -2596,7 +2600,8 @@ impl Dispatcher {
                 human,
                 aggregate,
             };
-            let outcome = review_task(&task, ws.as_ref(), &dir, &produced, timeout, extras).await;
+            let outcome =
+                review_task(&task, ws.as_ref(), &dir, &artifacts_dir, &produced, timeout, extras).await;
             let _ = tx.send(Completion::Review {
                 task_id,
                 run_id,
@@ -2917,6 +2922,12 @@ impl Dispatcher {
         }
     }
 
+    /// ADR-0036 D1: そのタスクの成果物ディレクトリ（`<dir>/artifacts` か `<dir>/.taskd/artifacts/<task_id>`）。
+    /// 判定は `task_core::artifacts`（純粋関数）。アダプタ・レビュー・記憶の読み取りはすべてこれを使う。
+    fn artifacts_dir(&self, task: &Task, workspace_dir: &Path) -> PathBuf {
+        task_core::artifacts::artifacts_dir_for(task, workspace_dir)
+    }
+
     /// ADR-0018: `WorkspaceSpec::Remote` のタスクのクラスタ設定とリモートのパス。ローカルのタスクは `None`。
     fn cluster_of(&self, task: &Task) -> Option<(ClusterSpec, PathBuf)> {
         match &task.workspace {
@@ -3006,9 +3017,12 @@ async fn run_worker(
             .await
             .map_err(|e| AdapterError::Other(format!("workspace prepare: {e}")))?,
     };
+    // ADR-0036 D1: 成果物ディレクトリはタスクごと（共有 workspace では `.taskd/artifacts/<task_id>/`）。
+    // 決めるのはディスパッチャで、アダプタは `req.artifacts_dir` に書くだけ。
+    let artifacts_dir = task_core::artifacts::artifacts_dir_for(&task, &workspace);
     if task.kind == TaskKind::Plan {
         // ADR-0007 D1: 前回の run の plan.json を今回の出力と誤読しない。
-        let _ = tokio::fs::remove_file(workspace.join(PLAN_FILE)).await;
+        let _ = tokio::fs::remove_file(artifacts_dir.join(PLAN_FILE_NAME)).await;
     }
     let events = store
         .events_for(task_id)
@@ -3018,6 +3032,7 @@ async fn run_worker(
         protocol: PROTOCOL_VERSION,
         task: task.clone(),
         workspace,
+        artifacts_dir,
         context: RunContext {
             prior_review,
             inputs: task.inputs.clone(),
@@ -3398,6 +3413,120 @@ mod tests {
         assert_eq!(store.list(Some(Status::Done)).unwrap().len(), 3);
     }
 
+    /// ADR-0036: 自分の `artifacts_dir` に結果ファイルと成果物を書き、少し待ってから読み直して
+    /// 「兄弟に上書きされていない」ことを確かめるアダプタ（実機の事故の再現条件を作る）。
+    struct SiblingAdapter {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for SiblingAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            let id = req.task.id.to_string();
+            std::fs::create_dir_all(&req.artifacts_dir).unwrap();
+            std::fs::write(req.artifacts_dir.join("result.json"), format!(r#"{{"summary":"{id}","evidence":[]}}"#))
+                .unwrap();
+            std::fs::write(req.artifacts_dir.join("report.md"), &id).unwrap();
+            // 兄弟の run と重なる窓。
+            tokio::time::sleep(self.delay).await;
+            let back = std::fs::read_to_string(req.artifacts_dir.join("result.json")).unwrap();
+            assert!(back.contains(&id), "兄弟に上書きされた: {back}");
+            let rel = format!("{}/report.md", req.artifacts_rel());
+            let artifact = task_worker::artifact::resolve(&req.workspace, "report.md", &rel, None).unwrap();
+            sink.artifact(&artifact);
+            Ok(RunOutcome {
+                terminal: Terminal::Done { summary: id, evidence: vec![], usage: None },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// ADR-0036 D1: 単独タスク（親なし）は従来どおり `<workspace>/artifacts`。挙動もパスも変わらない。
+    #[tokio::test]
+    async fn a_standalone_task_keeps_the_plain_artifacts_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::ArtifactExists { name: "report.md".into() }, 0);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(SiblingAdapter { delay: Duration::ZERO });
+        let mut d = dispatcher(store.clone(), adapter, 2);
+        assert!(run_until_idle(&mut d, 200).await.idle);
+
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        assert!(!dir.path().join(".taskd").exists(), "単独タスクは `.taskd/artifacts/` を使わない");
+        let result = std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
+        assert!(result.contains(&task.id.to_string()), "{result}");
+        let produced: Vec<String> = store
+            .events_for(task.id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                Event::ArtifactProduced { artifact, .. } => Some(artifact.path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(produced, vec!["artifacts/report.md".to_string()]);
+    }
+
+    /// 実機の事故（2026-09-18、ADR-0036 §1）: 計画 run が作った兄弟 2 件が親の workspace を共有し、
+    /// 両方が `<workspace>/artifacts/` に書いたので `sources.json` / `result.json` が混ざった。
+    /// 同時に走らせても、結果ファイルと成果物がタスクごとに分かれていること。
+    #[tokio::test]
+    async fn siblings_sharing_one_workspace_do_not_mix_their_result_files_or_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut parent = new_task(dir.path(), Check::Human, 0);
+        parent.kind = TaskKind::Plan;
+        parent.status = Status::Done;
+        store.insert(&parent).unwrap();
+        let children: Vec<Task> = (0..2)
+            .map(|_| {
+                // plan / delegate の子は親の workspace をそのまま継ぐ（`plan::materialize`）。
+                let mut c = new_task(dir.path(), Check::ArtifactExists { name: "report.md".into() }, 0);
+                c.parent_id = Some(parent.id);
+                store.insert(&c).unwrap();
+                c
+            })
+            .collect();
+
+        let adapter = Arc::new(SiblingAdapter { delay: Duration::from_millis(150) });
+        let mut d = dispatcher(store.clone(), adapter, 2);
+        // 2 件が同じ tick で走り出す（並列度 2）。
+        assert_eq!(d.tick().unwrap().dispatched, 2);
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle);
+
+        assert!(!dir.path().join("artifacts").exists(), "共有の `artifacts/` は作られない");
+        for c in &children {
+            let t = store.get(c.id).unwrap().unwrap();
+            assert_eq!(t.status, Status::Done, "{:?}", store.events_for(c.id).unwrap());
+            let own = dir.path().join(".taskd/artifacts").join(c.id.to_string());
+            let result = std::fs::read_to_string(own.join("result.json")).unwrap();
+            assert!(result.contains(&c.id.to_string()), "{result}");
+            assert_eq!(std::fs::read_to_string(own.join("report.md")).unwrap(), c.id.to_string());
+            // 申告された成果物のパスは workspace 相対のタスクごとの形（GUI がそのまま読める）。
+            let produced: Vec<String> = store
+                .events_for(c.id)
+                .unwrap()
+                .into_iter()
+                .filter_map(|(_, e)| match e {
+                    Event::ArtifactProduced { artifact, .. } => Some(artifact.path),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(produced, vec![format!(".taskd/artifacts/{}/report.md", c.id)]);
+        }
+    }
+
     /// `artifacts/plan.json` を書くテスト用アダプタ（Plan kind）、または `artifacts/review.json` を書く（Review kind）。
     struct FileAdapter {
         plan_json: String,
@@ -3417,7 +3546,7 @@ mod tests {
             _limits: RunLimits,
             sink: &dyn EventSink,
         ) -> Result<RunOutcome, AdapterError> {
-            std::fs::create_dir_all(req.workspace.join("artifacts")).unwrap();
+            std::fs::create_dir_all(&req.artifacts_dir).unwrap();
             match req.task.kind {
                 TaskKind::Plan => {
                     // 2 回目以降（prior_review あり）は正しい plan を書き、1 回目は plan_json をそのまま書く。
@@ -3426,11 +3555,11 @@ mod tests {
                     } else {
                         VALID_PLAN.to_string()
                     };
-                    std::fs::write(req.workspace.join("artifacts/plan.json"), text).unwrap();
+                    std::fs::write(req.artifacts_dir.join("plan.json"), text).unwrap();
                 }
                 TaskKind::Review => {
                     assert!(req.context.review.is_some());
-                    std::fs::write(req.workspace.join("artifacts/review.json"), &self.review_json).unwrap();
+                    std::fs::write(req.artifacts_dir.join("review.json"), &self.review_json).unwrap();
                 }
                 _ => {
                     std::fs::write(req.workspace.join("touched"), "1").unwrap();
@@ -3976,9 +4105,9 @@ mod tests {
                 if self.review_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     return Err(AdapterError::Throttled { retry_after: Duration::from_millis(200) });
                 }
-                std::fs::create_dir_all(req.workspace.join("artifacts")).unwrap();
+                std::fs::create_dir_all(&req.artifacts_dir).unwrap();
                 std::fs::write(
-                    req.workspace.join("artifacts/review.json"),
+                    req.artifacts_dir.join("review.json"),
                     r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"fine"}]}"#,
                 )
                 .unwrap();
@@ -4859,8 +4988,8 @@ mod tests {
             if !req.context.children.is_empty() {
                 self.aggregate_children.store(req.context.children.len(), Ordering::SeqCst);
                 if self.write_summary {
-                    std::fs::create_dir_all(req.workspace.join("artifacts")).unwrap();
-                    std::fs::write(req.workspace.join("artifacts/summary.md"), "# summary\n").unwrap();
+                    std::fs::create_dir_all(&req.artifacts_dir).unwrap();
+                    std::fs::write(req.artifacts_dir.join("summary.md"), "# summary\n").unwrap();
                 }
                 return done("aggregated");
             }
@@ -5730,7 +5859,7 @@ mod tests {
         ) -> Result<RunOutcome, AdapterError> {
             *self.seen.lock().unwrap() = Some(req.context.clone());
             if let Some(memory) = self.memory {
-                let artifacts = req.workspace.join("artifacts");
+                let artifacts = req.artifacts_dir.clone();
                 std::fs::create_dir_all(&artifacts).unwrap();
                 std::fs::write(artifacts.join("result.json"), memory).unwrap();
             }
@@ -5878,7 +6007,7 @@ mod tests {
         assert_eq!(context.memory.clone().expect("memory").notes, "- 2026-09-10: 人は図より表が好き\n");
         // 監査 L-6: 今回の本文は `objective` に載るので、直近のやり取りには**入れない**（二重に載せない）。
         assert!(context.conversation.is_empty(), "{:?}", context.conversation);
-        let preamble = task_worker::preamble::render(&context);
+        let preamble = task_worker::preamble::render(&context, "artifacts");
         assert!(preamble.contains("## あなた: secretary 課 (secretary)"), "{preamble}");
         assert!(preamble.contains("- 2026-09-10: 人は図より表が好き"), "{preamble}");
         assert!(!preamble.contains("## 直近のやり取り"), "{preamble}");
@@ -6556,7 +6685,7 @@ mod tests {
             ],
             "全員向け + secretary 向けだけ（他ノード宛ては混ざらない）"
         );
-        let preamble = task_worker::preamble::render(&context);
+        let preamble = task_worker::preamble::render(&context, "artifacts");
         assert!(preamble.contains("永続の認可"), "{preamble}");
         assert!(preamble.contains("深夜は連絡しない"), "{preamble}");
         assert!(preamble.contains("pegasus のジョブは 1 ノードで始めてよい"), "{preamble}");

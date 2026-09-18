@@ -101,10 +101,11 @@ impl MemoryDir {
     }
 }
 
-/// `artifacts/result.json` の `memory` を読む（ADR-0033 D6 の結果ファイル規約の拡張）。
+/// 結果ファイル（`<artifacts_dir>/result.json`）の `memory` を読む（ADR-0033 D6 の結果ファイル規約の拡張。
+/// 置き場は ADR-0036 D2 で `RunRequest.artifacts_dir` になった）。
 /// ファイルが無い・JSON でない・`memory` が無い・形が違うときは `None`（run は失敗させない）。
-pub fn read_result_memory(workspace: &Path) -> Option<MemoryUpdate> {
-    let text = std::fs::read_to_string(workspace.join("artifacts").join("result.json")).ok()?;
+pub fn read_result_memory(artifacts_dir: &Path) -> Option<MemoryUpdate> {
+    let text = std::fs::read_to_string(artifacts_dir.join("result.json")).ok()?;
     memory_from_result_json(&text)
 }
 
@@ -253,30 +254,32 @@ mod tests {
     #[test]
     fn the_result_file_is_read_leniently() {
         let (tmp, _memory) = dir();
-        let ws = tmp.path().join("ws");
-        std::fs::create_dir_all(ws.join("artifacts")).expect("mkdir");
+        // ADR-0036 D2: 読むのは成果物ディレクトリの `result.json`。
+        let artifacts = tmp.path().join("ws").join("artifacts");
+        std::fs::create_dir_all(&artifacts).expect("mkdir");
         // ファイルが無い
         assert_eq!(read_result_memory(&tmp.path().join("nowhere")), None);
         // `memory` が無い
-        std::fs::write(ws.join("artifacts/result.json"), r#"{"summary":"ok","evidence":[]}"#).expect("write");
-        assert_eq!(read_result_memory(&ws), None);
+        std::fs::write(artifacts.join("result.json"), r#"{"summary":"ok","evidence":[]}"#).expect("write");
+        assert_eq!(read_result_memory(&artifacts), None);
         // 形が違う（配列でない）
-        std::fs::write(ws.join("artifacts/result.json"), r#"{"summary":"ok","memory":{"notes":"x"}}"#).expect("write");
-        assert_eq!(read_result_memory(&ws), None);
+        std::fs::write(artifacts.join("result.json"), r#"{"summary":"ok","memory":{"notes":"x"}}"#).expect("write");
+        assert_eq!(read_result_memory(&artifacts), None);
         // 空の配列は「何も無い」
-        std::fs::write(ws.join("artifacts/result.json"), r#"{"summary":"ok","memory":{"notes":[],"project":[]}}"#).expect("write");
-        assert_eq!(read_result_memory(&ws), None);
+        std::fs::write(artifacts.join("result.json"), r#"{"summary":"ok","memory":{"notes":[],"project":[]}}"#)
+            .expect("write");
+        assert_eq!(read_result_memory(&artifacts), None);
         // 正常
         std::fs::write(
-            ws.join("artifacts/result.json"),
+            artifacts.join("result.json"),
             r#"{"summary":"ok","memory":{"notes":["a"],"project":["b","c"]}}"#,
         )
         .expect("write");
-        let update = read_result_memory(&ws).expect("memory");
+        let update = read_result_memory(&artifacts).expect("memory");
         assert_eq!(update.notes, vec!["a".to_string()]);
         assert_eq!(update.project, vec!["b".to_string(), "c".to_string()]);
         // JSON ですらない
-        std::fs::write(ws.join("artifacts/result.json"), "not json").expect("write");
-        assert_eq!(read_result_memory(&ws), None);
+        std::fs::write(artifacts.join("result.json"), "not json").expect("write");
+        assert_eq!(read_result_memory(&artifacts), None);
     }
 }

@@ -38,14 +38,15 @@ pub struct ExecResult {
 /// DESIGN §5.8 の trait。
 #[async_trait]
 pub trait Workspace: Send + Sync {
-    /// 作業ディレクトリと `artifacts/`, `inputs/`, `runs/` を作り、`task.inputs` を `inputs/<name>` に配置する。
+    /// 作業ディレクトリと成果物ディレクトリ（ADR-0036: `artifacts/` または
+    /// `.taskd/artifacts/<task_id>/`）、`inputs/`, `runs/` を作り、`task.inputs` を `inputs/<name>` に配置する。
     /// 既存ファイルは消さない。戻り値は作業ディレクトリの絶対パス。
     async fn prepare(&self, task: &Task) -> Result<PathBuf, WorkspaceError>;
     /// `sh -c <cmd>` を作業ディレクトリで実行する。`timeout` 超過は kill して `timed_out=true`。
     /// stdout/stderr は末尾 4 KiB を返す。
     async fn exec(&self, cmd: &str, timeout: Duration) -> Result<ExecResult, WorkspaceError>;
-    /// `artifacts/` 配下のファイルを再帰的に列挙し、sha256 付きの `ArtifactRef` を返す
-    /// （`path` は作業ディレクトリ相対、`name` はファイル名、`kind` は拡張子）。
+    /// そのタスクの成果物ディレクトリ（ADR-0036）配下のファイルを再帰的に列挙し、sha256 付きの
+    /// `ArtifactRef` を返す（`path` は作業ディレクトリ相対、`name` はファイル名、`kind` は拡張子）。
     async fn collect(&self, task: &Task) -> Result<Vec<ArtifactRef>, WorkspaceError>;
 }
 
@@ -86,7 +87,8 @@ pub(crate) fn tail_utf8_lossy(bytes: &[u8]) -> String {
 impl Workspace for LocalWorkspace {
     async fn prepare(&self, task: &Task) -> Result<PathBuf, WorkspaceError> {
         tokio::fs::create_dir_all(&self.dir).await?;
-        tokio::fs::create_dir_all(self.dir.join("artifacts")).await?;
+        // ADR-0036 D1: 成果物ディレクトリはタスクごと（共有 workspace では `.taskd/artifacts/<task_id>/`）。
+        tokio::fs::create_dir_all(task_core::artifacts::artifacts_dir_for(task, &self.dir)).await?;
         tokio::fs::create_dir_all(self.dir.join("inputs")).await?;
         tokio::fs::create_dir_all(self.dir.join("runs")).await?;
 
@@ -176,8 +178,8 @@ impl Workspace for LocalWorkspace {
         }
     }
 
-    async fn collect(&self, _task: &Task) -> Result<Vec<ArtifactRef>, WorkspaceError> {
-        let artifacts_dir = self.dir.join("artifacts");
+    async fn collect(&self, task: &Task) -> Result<Vec<ArtifactRef>, WorkspaceError> {
+        let artifacts_dir = task_core::artifacts::artifacts_dir_for(task, &self.dir);
         if !artifacts_dir.exists() {
             return Ok(Vec::new());
         }
@@ -407,6 +409,33 @@ mod tests {
         assert_eq!(refs[1].name, "a.json");
         assert_eq!(refs[1].kind, "json");
         assert_eq!(refs[1].sha256, crate::artifact::sha256_file(&dir.path().join("artifacts/sub/a.json")).expect("sha"));
+    }
+
+    /// ADR-0036 D1/D4: 親から workspace を継いだタスクは `.taskd/artifacts/<task_id>/` に置き、
+    /// `collect` はその中のファイルを **workspace 相対**のパスで返す（GUI の読み取り API がそのまま読める形）。
+    #[tokio::test]
+    async fn a_shared_workspace_gets_a_per_task_artifacts_dir_and_relative_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = LocalWorkspace::new(dir.path());
+        let mut child = sample_task();
+        child.parent_id = Some(task_core::TaskId::new());
+        child.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf() };
+
+        ws.prepare(&child).await.expect("prepare");
+        let own = dir.path().join(".taskd").join("artifacts").join(child.id.to_string());
+        assert!(own.is_dir(), "共有 workspace ではタスクごとのディレクトリを作る");
+        assert!(!dir.path().join("artifacts").exists(), "共有の `artifacts/` は作らない");
+
+        std::fs::write(own.join("report.md"), b"# r").expect("write report");
+        // 兄弟が共有 `artifacts/` に置いた同名のファイルは、このタスクの成果物にはならない。
+        std::fs::create_dir_all(dir.path().join("artifacts")).expect("mkdir");
+        std::fs::write(dir.path().join("artifacts/report.md"), b"sibling").expect("write sibling");
+
+        let refs = ws.collect(&child).await.expect("collect");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].path, format!(".taskd/artifacts/{}/report.md", child.id));
+        assert_eq!(refs[0].name, "report.md");
+        assert_eq!(refs[0].kind, "md");
     }
 
     #[tokio::test]

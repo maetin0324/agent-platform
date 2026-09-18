@@ -3,6 +3,7 @@
 
 pub mod accounts;
 pub mod approval;
+pub mod artifacts;
 pub mod delegate;
 pub mod message;
 pub mod model;
@@ -13,6 +14,7 @@ pub mod store;
 pub mod transition;
 
 pub use accounts::{AccountAdapter, RateLimitObservation, RateWindow};
+pub use artifacts::{ARTIFACTS_DIR_NAME, SHARED_ARTIFACTS_PREFIX, artifacts_dir_for, artifacts_rel_for, owns_workspace, rel_from};
 pub use approval::{Approval, ApprovalId, ApprovalStore, Decision, StandingRule, StandingRuleId};
 pub use delegate::{
     DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, materialize_delegated, validate_each,

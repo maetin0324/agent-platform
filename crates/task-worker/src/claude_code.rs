@@ -93,11 +93,13 @@ impl WorkerAdapter for ClaudeCodeAdapter {
 /// タスクからワーカーへのプロンプトを組み立てる（ADR-0006 D2, ADR-0007 D7, 純粋関数）。`run_id` は
 /// スキーマ変更を避けてプロンプト文面にのみ埋め込む（旧 P-11。ADR-0006 D2 参照）。`task.kind` で分岐する
 /// （`Plan` はプランナー用、`Review` はレビュアー用、それ以外は Phase 4 のワーカー用プロンプト。ADR-0007 D7）。
-pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
+/// `artifacts` は成果物ディレクトリの workspace 相対表記（`RunRequest::artifacts_rel`。ADR-0036 D3。
+/// 単独タスクでは `artifacts` なので、文面は Phase 34 までと 1 バイトも変わらない）。
+pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts: &str) -> String {
     match task.kind {
-        TaskKind::Plan => build_plan_prompt(task, context, run_id),
-        TaskKind::Review => build_review_prompt(task, context, run_id),
-        TaskKind::Execute | TaskKind::Approval => build_execute_prompt(task, context, run_id),
+        TaskKind::Plan => build_plan_prompt(task, context, run_id, artifacts),
+        TaskKind::Review => build_review_prompt(task, context, run_id, artifacts),
+        TaskKind::Execute | TaskKind::Approval => build_execute_prompt(task, context, run_id, artifacts),
     }
 }
 
@@ -105,7 +107,7 @@ pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
 /// 直近のやり取り・役割の指示文）は `crate::preamble::render` が組む（ADR-0016 D1 / M3, ADR-0033 D4 / D6）。
 /// `task.genre` があり、その分野が `context.available_genres` に載っていれば、続けて `## Genre: <id>` と
 /// 説明を出す（ADR-0027 D1）。
-fn prompt_header(task: &Task, context: &RunContext, run_id: &str) -> String {
+fn prompt_header(task: &Task, context: &RunContext, run_id: &str, artifacts: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Task: {}\n\n", task.title));
     out.push_str(&format!(
@@ -115,7 +117,7 @@ fn prompt_header(task: &Task, context: &RunContext, run_id: &str) -> String {
     ));
     // ADR-0033 D4 / D6（Phase 24）: 役職と brief → 永続の認可 → 記憶 → 直近のやり取り → 役割の指示文。
     // 前置きは `crate::preamble` が 1 か所で組む（`RunContext` が空なら 1 バイトも増えない）。
-    out.push_str(&crate::preamble::render(context));
+    out.push_str(&crate::preamble::render(context, artifacts));
     if let Some(genre_id) = &task.genre
         && let Some(genre) = context.available_genres.iter().find(|g| &g.id == genre_id)
     {
@@ -154,33 +156,33 @@ fn genre_list_lines(context: &RunContext) -> String {
 
 /// `context.available_genres` があれば「使える専門家」節を足す（ADR-0027 D1, ADR-0028 D2）。委譲できる run
 /// （`build_execute_prompt`）にだけ、この run が子に割り当てられる分野の能力・入出力・役割の選択肢を伝える。
-fn available_genres_section(context: &RunContext) -> String {
+fn available_genres_section(context: &RunContext, artifacts: &str) -> String {
     let mut out = String::new();
     if context.available_genres.is_empty() {
         return out;
     }
     out.push_str("## 使える専門家 (available genres and roles you can delegate to)\n");
     out.push_str(&genre_list_lines(context));
-    out.push_str(
+    out.push_str(&format!(
         "\nIf part of this work belongs to a different genre, delegate it with `role` set to one \
-         of that genre's roles and `genre` set to its id in `artifacts/delegate.json`.\n\n",
-    );
+         of that genre's roles and `genre` set to its id in `{artifacts}/delegate.json`.\n\n"
+    ));
     out
 }
 
 /// Plan run 用の「使える専門家」節（ADR-0028 D3）。子タスクの `genre` / `role` を `artifacts/plan.json` で
 /// 選べることを伝える点だけが `available_genres_section` と異なる（委譲ではなく分解なので）。
-fn available_genres_section_for_plan(context: &RunContext) -> String {
+fn available_genres_section_for_plan(context: &RunContext, artifacts: &str) -> String {
     let mut out = String::new();
     if context.available_genres.is_empty() {
         return out;
     }
     out.push_str("## 使える専門家 (available genres and roles you can assign child tasks to)\n");
     out.push_str(&genre_list_lines(context));
-    out.push_str(
+    out.push_str(&format!(
         "\nIf a child task belongs to a different genre than this one, set its `genre` (and, one of \
-         that genre's roles, its `role`) in `artifacts/plan.json`.\n\n",
-    );
+         that genre's roles, its `role`) in `{artifacts}/plan.json`.\n\n"
+    ));
     out
 }
 
@@ -212,7 +214,7 @@ fn organization_section(context: &RunContext) -> String {
 }
 
 /// `context.children` があれば「集約 run」節を足す（ADR-0016 D3 / M4）。
-fn children_section(context: &RunContext) -> String {
+fn children_section(context: &RunContext, artifacts: &str) -> String {
     let mut out = String::new();
     if context.children.is_empty() {
         return out;
@@ -238,10 +240,10 @@ fn children_section(context: &RunContext) -> String {
             c.title
         ));
     }
-    out.push_str(
-        "\nSummarize the results of the delegated child tasks in `artifacts/summary.md`. \
-         The reviewer will check that `artifacts/summary.md` exists.\n\n",
-    );
+    out.push_str(&format!(
+        "\nSummarize the results of the delegated child tasks in `{artifacts}/summary.md`. \
+         The reviewer will check that `{artifacts}/summary.md` exists.\n\n"
+    ));
     out
 }
 
@@ -298,40 +300,44 @@ fn answers_section(context: &RunContext) -> String {
     out
 }
 
-/// `artifacts/result.json` の書式指示（ADR-0006 D3。全 kind 共通）。
-fn result_json_instructions() -> &'static str {
-    "Always write `artifacts/result.json` (create the `artifacts/` directory if it does not exist \
-     yet) as a single JSON object of the form `{\"summary\": \"<what you did>\", \"evidence\": []}`. \
-     `evidence` may be left empty; if you fill it, each element must be an object of the form \
-     `{\"criterion\": <index>, \"command\": \"<what you ran>\", \"exit\": <code>, \"stdout_tail\": \"...\"}` \
-     (plain strings are not accepted; `command`, `exit` and `stdout_tail` may be omitted for a criterion that \
-     did not involve running a command). \
-     If you cannot proceed and need a decision from a human, instead write \
-     `{\"question\": \"<your question>\"}` to `artifacts/result.json` and stop there. This is a \
-     non-interactive run: you cannot ask a question any other way, and no one will read your final \
-     chat message directly.\n"
+/// 結果ファイル（`<artifacts_dir>/result.json`）の書式指示（ADR-0006 D3。全 kind 共通。ADR-0036 D3）。
+fn result_json_instructions(artifacts: &str) -> String {
+    format!(
+        "Always write `{artifacts}/result.json` (create the `{artifacts}/` directory if it does not exist \
+         yet) as a single JSON object of the form `{{\"summary\": \"<what you did>\", \"evidence\": []}}`. \
+         `evidence` may be left empty; if you fill it, each element must be an object of the form \
+         `{{\"criterion\": <index>, \"command\": \"<what you ran>\", \"exit\": <code>, \"stdout_tail\": \"...\"}}` \
+         (plain strings are not accepted; `command`, `exit` and `stdout_tail` may be omitted for a criterion that \
+         did not involve running a command). \
+         If you cannot proceed and need a decision from a human, instead write \
+         `{{\"question\": \"<your question>\"}}` to `{artifacts}/result.json` and stop there. This is a \
+         non-interactive run: you cannot ask a question any other way, and no one will read your final \
+         chat message directly.\n"
+    )
 }
 
 /// 実行中の委譲の方法（ADR-0016 D2 / M8, ADR-0027 D1）。
-fn delegation_instructions() -> &'static str {
-    "If you want to delegate part of this work to another agent, write `artifacts/delegate.json` \
-     (create the `artifacts/` directory if it does not exist yet) as a single JSON object of the form \
-     `{\"tasks\":[{\"title\":\"...\",\"objective\":\"...\",\"acceptance\":[{\"text\":\"...\",\
-     \"check\":{\"type\":\"command\",\"cmd\":\"...\",\"expect_exit\":0}}],\"role\":\"<optional>\",\
-     \"genre\":\"<optional>\",\"assignee\":\"<optional org node id>\",\
-     \"depends_on\":[<index into this array, or an existing task id>]}]}`. \
-     `check` may also be \
-     `{\"type\":\"artifact_exists\",\"name\":\"...\"}`, `{\"type\":\"reviewer\"}`, or `{\"type\":\"human\"}`. \
-     taskd will validate this after this run ends and insert whatever proposals pass validation as child \
-     tasks (how many are accepted per run is limited by configuration; any rejected proposal has its \
-     reason recorded as an event you cannot see, but a human can). A task cannot list its own parent or \
-     itself in `depends_on`. This task will not be considered done until any children you delegated have \
-     finished.\n"
+fn delegation_instructions(artifacts: &str) -> String {
+    format!(
+        "If you want to delegate part of this work to another agent, write `{artifacts}/delegate.json` \
+         (create the `{artifacts}/` directory if it does not exist yet) as a single JSON object of the form \
+         `{{\"tasks\":[{{\"title\":\"...\",\"objective\":\"...\",\"acceptance\":[{{\"text\":\"...\",\
+         \"check\":{{\"type\":\"command\",\"cmd\":\"...\",\"expect_exit\":0}}}}],\"role\":\"<optional>\",\
+         \"genre\":\"<optional>\",\"assignee\":\"<optional org node id>\",\
+         \"depends_on\":[<index into this array, or an existing task id>]}}]}}`. \
+         `check` may also be \
+         `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, `{{\"type\":\"reviewer\"}}`, or `{{\"type\":\"human\"}}`. \
+         taskd will validate this after this run ends and insert whatever proposals pass validation as child \
+         tasks (how many are accepted per run is limited by configuration; any rejected proposal has its \
+         reason recorded as an event you cannot see, but a human can). A task cannot list its own parent or \
+         itself in `depends_on`. This task will not be considered done until any children you delegated have \
+         finished.\n"
+    )
 }
 
 /// `Execute`（および `Approval`）用プロンプト（ADR-0006 D2。既存のワーカー用プロンプトのまま）。
-fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
-    let mut out = prompt_header(task, context, run_id);
+fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts: &str) -> String {
+    let mut out = prompt_header(task, context, run_id, artifacts);
     out.push_str("## Acceptance criteria\n");
     for (i, c) in task.acceptance.iter().enumerate() {
         let detail = match &c.check {
@@ -340,7 +346,7 @@ fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> Stri
                  requires exit code {expect_exit}; your own claim of success is not trusted)"
             ),
             Check::ArtifactExists { name } => {
-                format!(" (a reviewer will check that the file `artifacts/{name}` exists)")
+                format!(" (a reviewer will check that the file `{artifacts}/{name}` exists)")
             }
             Check::Reviewer | Check::Human => String::new(),
         };
@@ -349,22 +355,22 @@ fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str) -> Stri
     out.push('\n');
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
-    out.push_str(&children_section(context));
+    out.push_str(&children_section(context, artifacts));
     out.push_str(&organization_section(context));
-    out.push_str(&available_genres_section(context));
+    out.push_str(&available_genres_section(context, artifacts));
     out.push_str(&assignee_instructions_for_delegation(context));
     out.push_str("## Instructions\n");
     out.push_str("Work in the current directory (it is a dedicated workspace for this task). ");
-    out.push_str(delegation_instructions());
+    out.push_str(&delegation_instructions(artifacts));
     out.push_str("When you are done:\n");
-    out.push_str(result_json_instructions());
+    out.push_str(&result_json_instructions(artifacts));
     out
 }
 
 /// `Plan` kind 用プロンプト（DESIGN §5.6, ADR-0007 D7）。目標を独立に検証可能な受け入れ条件を持つ
 /// 子タスク群に分解させ、`artifacts/plan.json` に `PlanOutput` を書かせる。
-fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
-    let mut out = prompt_header(task, context, run_id);
+fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts: &str) -> String {
+    let mut out = prompt_header(task, context, run_id, artifacts);
     out.push_str(
         "## Instructions\n\
          Decompose this goal into a set of child tasks, each with an independently verifiable \
@@ -374,7 +380,7 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String 
          clearly requires it.\n\n",
     );
     out.push_str(&format!(
-        "Write your decomposition to `artifacts/plan.json` (create the `artifacts/` directory if it \
+        "Write your decomposition to `{artifacts}/plan.json` (create the `{artifacts}/` directory if it \
          does not exist yet) as a single JSON object of exactly this shape:\n\
          ```json\n\
          {{\"tasks\":[{{\"title\":\"...\",\"objective\":\"...\",\
@@ -397,22 +403,22 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str) -> String 
     ));
     let schema = serde_json::to_string(&task_core::plan::schema_value())
         .unwrap_or_else(|_| "{}".to_string());
-    out.push_str("### Schema for the `artifacts/plan.json` object\n```json\n");
+    out.push_str(&format!("### Schema for the `{artifacts}/plan.json` object\n```json\n"));
     out.push_str(&schema);
     out.push_str("\n```\n\n");
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
     out.push_str(&organization_section(context));
     out.push_str(&assignee_instructions_for_plan(context));
-    out.push_str(&available_genres_section_for_plan(context));
-    out.push_str(result_json_instructions());
+    out.push_str(&available_genres_section_for_plan(context, artifacts));
+    out.push_str(&result_json_instructions(artifacts));
     out
 }
 
 /// `Review` kind 用プロンプト（DESIGN §5.7, ADR-0007 D5/D7）。対象タスクの成果物を読み取り専用で
 /// 検証し `artifacts/review.json` に判定を書かせる。
-fn build_review_prompt(task: &Task, context: &RunContext, run_id: &str) -> String {
-    let mut out = prompt_header(task, context, run_id);
+fn build_review_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts: &str) -> String {
+    let mut out = prompt_header(task, context, run_id, artifacts);
     out.push_str(
         "## Instructions\n\
          You are a reviewer independently verifying another worker's output. You must not modify any \
@@ -462,15 +468,15 @@ fn build_review_prompt(task: &Task, context: &RunContext, run_id: &str) -> Strin
         out.push_str(&format!("- {} at `{}` (sha256={})\n", a.name, a.path, a.sha256));
     }
     out.push('\n');
-    out.push_str(
+    out.push_str(&format!(
         "## Result\n\
-         Write your verdicts to `artifacts/review.json` (create the `artifacts/` directory if it does \
+         Write your verdicts to `{artifacts}/review.json` (create the `{artifacts}/` directory if it does \
          not exist yet) as a single JSON object of exactly this shape: \
-         `{\"verdicts\":[{\"criterion\":<index>,\"pass\":<bool>,\"reason\":\"...\"}]}`. You must write \
+         `{{\"verdicts\":[{{\"criterion\":<index>,\"pass\":<bool>,\"reason\":\"...\"}}]}}`. You must write \
          exactly one verdict for each criterion listed under \"Criteria you must judge in this run\" \
-         above.\n\n",
-    );
-    out.push_str(result_json_instructions());
+         above.\n\n"
+    ));
+    out.push_str(&result_json_instructions(artifacts));
     out
 }
 
@@ -525,11 +531,13 @@ async fn run_claude_code(
 
     // 前回の run（リトライ）が残した結果ファイルを、今回の run の結果と誤読しないよう先に消す
     // （監査で指摘。ADR-0006 D3 は「この run が書いたファイル」を前提にしている）。
-    let result_path = req.workspace.join("artifacts").join("result.json");
+    // ADR-0036 D1/D2: 置き場はディスパッチャが決めた `artifacts_dir`（共有 workspace ではタスクごと）。
+    let artifacts_rel = req.artifacts_rel();
+    let result_path = req.artifact_path("result.json");
     let _ = tokio::fs::remove_file(&result_path).await;
-    clear_delegate_file(&req.workspace).await;
+    clear_delegate_file(&req.artifacts_dir).await;
 
-    let prompt = build_prompt(&req.task, &req.context, run_id);
+    let prompt = build_prompt(&req.task, &req.context, run_id, &artifacts_rel);
     // ADR-0023 D2 / M1: この run で何を渡したかを残す（`request.json` は構造、`prompt.txt` は実際の文面）。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
@@ -673,10 +681,10 @@ async fn run_claude_code(
                 pf,
             )
         }
-        (None, Some(meta)) => terminal_from_result(&req.workspace, meta).await,
+        (None, Some(meta)) => terminal_from_result(&req.artifacts_dir, &artifacts_rel, meta).await,
     };
 
-    forward_delegate_file(&req.workspace, sink).await;
+    forward_delegate_file(&req.artifacts_dir, sink).await;
 
     write_result_json(&run_dir, &terminal, provider_failure).await?;
 
@@ -776,7 +784,8 @@ fn truncate(s: &str, max: usize) -> String {
 /// クラッシュとして扱い、この関数を呼ばずに `Error` にする。ADR-0006 D4）。`is_error`/`subtype != "success"`
 /// のときは `result` のテキスト（無ければ `subtype`）を供給側失敗として分類する。
 async fn terminal_from_result(
-    workspace: &Path,
+    artifacts_dir: &Path,
+    artifacts_rel: &str,
     last_result: &ResultMeta,
 ) -> (Terminal, Option<ProviderFailure>) {
     if last_result.is_error || last_result.subtype != "success" {
@@ -789,13 +798,13 @@ async fn terminal_from_result(
         return (Terminal::Error { message, retryable: true }, pf);
     }
 
-    let result_path = workspace.join("artifacts").join("result.json");
+    let result_path = artifacts_dir.join("result.json");
     let text = match tokio::fs::read_to_string(&result_path).await {
         Ok(t) => t,
         Err(_) => {
             return (
                 Terminal::Error {
-                    message: "claude exited without artifacts/result.json".to_string(),
+                    message: format!("claude exited without {artifacts_rel}/result.json"),
                     retryable: true,
                 },
                 None,
@@ -815,13 +824,13 @@ async fn terminal_from_result(
                 }
             } else {
                 Terminal::Error {
-                    message: "artifacts/result.json has neither 'summary' nor 'question'".into(),
+                    message: format!("{artifacts_rel}/result.json has neither 'summary' nor 'question'"),
                     retryable: true,
                 }
             }
         }
         Err(e) => Terminal::Error {
-            message: format!("artifacts/result.json is not valid JSON: {e}"),
+            message: format!("{artifacts_rel}/result.json is not valid JSON: {e}"),
             retryable: true,
         },
     };
@@ -872,6 +881,7 @@ mod tests {
         RunRequest {
             protocol: PROTOCOL_VERSION,
             task: crate::protocol::tests::sample_task(),
+            artifacts_dir: workspace.join("artifacts"),
             workspace,
             context: RunContext::default(),
         }
@@ -894,7 +904,7 @@ mod tests {
             pass: false,
             reason: "cargo test exit 101".into(),
         });
-        let prompt = build_prompt(&task, &context, "run-xyz");
+        let prompt = build_prompt(&task, &context, "run-xyz", "artifacts");
         assert!(prompt.contains(&task.objective));
         assert!(prompt.contains("cargo test exit 101"));
         assert!(prompt.contains("artifacts/result.json"));
@@ -913,19 +923,19 @@ mod tests {
         });
 
         let execute_task = crate::protocol::tests::sample_task();
-        let execute_prompt = build_prompt(&execute_task, &context, "run-a1");
+        let execute_prompt = build_prompt(&execute_task, &context, "run-a1", "artifacts");
         assert!(execute_prompt.contains("## Answers from a human to your earlier questions"));
         assert!(execute_prompt.contains("- Q: which crate version?"));
         assert!(execute_prompt.contains("A: 1.0"));
 
         let mut plan_task = crate::protocol::tests::sample_task();
         plan_task.kind = task_core::TaskKind::Plan;
-        let plan_prompt = build_prompt(&plan_task, &context, "run-a2");
+        let plan_prompt = build_prompt(&plan_task, &context, "run-a2", "artifacts");
         assert!(plan_prompt.contains("## Answers from a human to your earlier questions"));
         assert!(plan_prompt.contains("- Q: which crate version?"));
 
         // No answers: the section must not appear at all.
-        let no_answers_prompt = build_prompt(&execute_task, &RunContext::default(), "run-a3");
+        let no_answers_prompt = build_prompt(&execute_task, &RunContext::default(), "run-a3", "artifacts");
         assert!(!no_answers_prompt.contains("Answers from a human"));
     }
 
@@ -939,7 +949,7 @@ mod tests {
             pass: false,
             reason: "tasks[2].depends_on[0] = 7 is out of range".into(),
         });
-        let prompt = build_prompt(&task, &context, "run-plan-1");
+        let prompt = build_prompt(&task, &context, "run-plan-1", "artifacts");
         assert!(prompt.contains("artifacts/plan.json"));
         assert!(prompt.contains("\"tasks\""));
         assert!(prompt.contains("depends_on"));
@@ -972,7 +982,7 @@ mod tests {
             }],
             ..RunContext::default()
         };
-        let prompt = build_prompt(&task, &context, "run-review-1");
+        let prompt = build_prompt(&task, &context, "run-review-1", "artifacts");
         assert!(prompt.contains("artifacts/review.json"));
         assert!(prompt.contains("criterion 0"));
         assert!(prompt.contains("added usage example"));
@@ -982,7 +992,7 @@ mod tests {
 
         // context.review = None must not panic and still produces a usable prompt.
         let none_context = RunContext::default();
-        let prompt_none = build_prompt(&task, &none_context, "run-review-2");
+        let prompt_none = build_prompt(&task, &none_context, "run-review-2", "artifacts");
         assert!(prompt_none.contains("no review context"));
         assert!(prompt_none.contains("artifacts/review.json"));
     }
@@ -1023,6 +1033,39 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             crate::protocol::WorkerMessage::Done { summary, .. } => assert_eq!(summary, "added usage example"),
             other => panic!("expected done in result.json, got {other:?}"),
         }
+    }
+
+    /// ADR-0036 D1/D2/D3: 共有 workspace のタスクは `.taskd/artifacts/<task_id>/result.json` を読み書きし、
+    /// プロンプトにもその相対パスが出る。隣（兄弟）が共有 `artifacts/` に置いた結果ファイルは読まない。
+    #[tokio::test]
+    async fn a_shared_workspace_task_uses_its_own_artifacts_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"mkdir -p .taskd/artifacts/T1
+printf '%s' '{"summary":"mine","evidence":[]}' > .taskd/artifacts/T1/result.json
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#,
+        );
+        std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+        std::fs::write(dir.path().join("artifacts/result.json"), r#"{"summary":"sibling"}"#).unwrap();
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
+        match outcome.terminal {
+            Terminal::Done { summary, .. } => assert_eq!(summary, "mine"),
+            other => panic!("expected done, got {other:?}"),
+        }
+        let prompt = std::fs::read_to_string(dir.path().join("runs/run-shared/prompt.txt")).unwrap();
+        assert!(prompt.contains(".taskd/artifacts/T1/result.json"), "{prompt}");
+        assert!(!prompt.contains("`artifacts/result.json`"), "{prompt}");
+        // 兄弟のファイルは消していない（自分のディレクトリだけを掃除する）。
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap(),
+            r#"{"summary":"sibling"}"#
+        );
     }
 
     #[tokio::test]
@@ -1312,7 +1355,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             }
             other => panic!("expected done, got {other:?}"),
         }
-        let prompt = build_prompt(&crate::protocol::tests::sample_task(), &RunContext::default(), "r");
+        let prompt = build_prompt(&crate::protocol::tests::sample_task(), &RunContext::default(), "r", "artifacts");
         assert!(prompt.contains("plain strings are not accepted"));
     }
 
@@ -1321,7 +1364,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
     #[test]
     fn build_prompt_puts_the_person_preamble_between_the_run_line_and_the_objective() {
         let task = crate::protocol::tests::sample_task();
-        let bare = build_prompt(&task, &RunContext::default(), "run-p0");
+        let bare = build_prompt(&task, &RunContext::default(), "run-p0", "artifacts");
 
         let context = RunContext {
             node: Some(crate::protocol::NodeContext {
@@ -1339,7 +1382,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             }],
             ..RunContext::default()
         };
-        let prompt = build_prompt(&task, &context, "run-p1");
+        let prompt = build_prompt(&task, &context, "run-p1", "artifacts");
         let at = |n: &str| prompt.find(n).unwrap_or_else(|| panic!("missing {n:?} in\n{prompt}"));
         assert!(at("(run run-p1") < at("## あなた: 関連研究調査課 (research-survey)"));
         assert!(at("## あなた:") < at("## 覚えていること"));
@@ -1350,7 +1393,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         // Phase 23 までの `RunContext` では 1 バイトも変わらない。
         assert!(!bare.contains("## あなた"));
         assert!(!bare.contains("覚えておくこと"));
-        assert_eq!(bare, build_prompt(&task, &RunContext::default(), "run-p0"));
+        assert_eq!(bare, build_prompt(&task, &RunContext::default(), "run-p0", "artifacts"));
     }
 
     /// ADR-0033 D4（Phase 24）: 組織図を渡した run には `## 組織図` と `assignee` の指示が入る。
@@ -1378,19 +1421,19 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         ];
         let context = RunContext { organization: org, ..RunContext::default() };
 
-        let execute = build_prompt(&task, &context, "run-o1");
+        let execute = build_prompt(&task, &context, "run-o1", "artifacts");
         assert!(execute.contains("## 組織図 (who you can assign work to)"));
         assert!(execute.contains("- research-survey [課] 関連研究調査課 (親: research, 分野: literature) — 関連研究を洗う"));
         assert!(execute.contains("別の部"), "部をまたぐ委譲の注意が入る: {execute}");
         assert!(execute.contains("\"assignee\":\"<optional org node id>\""));
 
         task.kind = task_core::TaskKind::Plan;
-        let plan = build_prompt(&task, &context, "run-o2");
+        let plan = build_prompt(&task, &context, "run-o2", "artifacts");
         assert!(plan.contains("## 組織図"));
         assert!(plan.contains("子タスクごとに `assignee` を必ず書け"));
         assert!(plan.contains("`role` は必要なときだけ"));
 
-        assert!(!build_prompt(&task, &RunContext::default(), "run-o3").contains("組織図"));
+        assert!(!build_prompt(&task, &RunContext::default(), "run-o3", "artifacts").contains("組織図"));
     }
 
     /// ADR-0016 D1 / M3: `context.role` があれば `## Role: <id>` と指示文がプロンプトに入る。無ければ入らない。
@@ -1404,11 +1447,11 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             }),
             ..RunContext::default()
         };
-        let prompt = build_prompt(&task, &context, "run-role-1");
+        let prompt = build_prompt(&task, &context, "run-role-1", "artifacts");
         assert!(prompt.contains("## Role: lead"));
         assert!(prompt.contains("You coordinate the work of others."));
 
-        let no_role_prompt = build_prompt(&task, &RunContext::default(), "run-role-2");
+        let no_role_prompt = build_prompt(&task, &RunContext::default(), "run-role-2", "artifacts");
         assert!(!no_role_prompt.contains("## Role"));
     }
 
@@ -1429,12 +1472,12 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             available_genres: vec![GenreContext::from(&genre_spec)],
             ..RunContext::default()
         };
-        let prompt = build_prompt(&task, &context, "run-genre-1");
+        let prompt = build_prompt(&task, &context, "run-genre-1", "artifacts");
         assert!(prompt.contains("## Genre: literature"));
         assert!(prompt.contains("related work survey and novelty checks"));
 
         // available_genres が task.genre を含まない（あるいは空）なら Genre 見出しは出ない。
-        let empty_prompt = build_prompt(&task, &RunContext::default(), "run-genre-2");
+        let empty_prompt = build_prompt(&task, &RunContext::default(), "run-genre-2", "artifacts");
         assert!(!empty_prompt.contains("## Genre"));
     }
 
@@ -1454,12 +1497,12 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             available_genres: vec![GenreContext::from(&genre_spec)],
             ..RunContext::default()
         };
-        let prompt = build_prompt(&task, &context, "run-avail-1");
+        let prompt = build_prompt(&task, &context, "run-avail-1", "artifacts");
         assert!(prompt.contains("使える専門家"));
         assert!(prompt.contains("literature-scout"));
         assert!(prompt.contains("literature-reader"));
 
-        let no_genres_prompt = build_prompt(&task, &RunContext::default(), "run-avail-2");
+        let no_genres_prompt = build_prompt(&task, &RunContext::default(), "run-avail-2", "artifacts");
         assert!(!no_genres_prompt.contains("使える専門家"));
     }
 
@@ -1485,7 +1528,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             available_genres: vec![GenreContext::from(&genre_spec)],
             ..RunContext::default()
         };
-        let prompt = build_prompt(&task, &context, "run-avail-shape");
+        let prompt = build_prompt(&task, &context, "run-avail-shape", "artifacts");
         assert!(
             prompt.contains(
                 "- related-research: 先行研究の確認・新規性の検討\n\
@@ -1512,7 +1555,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             available_genres: vec![GenreContext::from(&genre_spec)],
             ..RunContext::default()
         };
-        let prompt = build_prompt(&task, &context, "run-avail-omit");
+        let prompt = build_prompt(&task, &context, "run-avail-omit", "artifacts");
         assert!(!prompt.contains("できること"));
         assert!(!prompt.contains("渡すもの"));
         assert!(prompt.contains("- coding: write and fix code\n  役割: implementer\n"));
@@ -1534,12 +1577,12 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             available_genres: vec![GenreContext::from(&genre_spec)],
             ..RunContext::default()
         };
-        let prompt = build_prompt(&task, &context, "run-plan-avail-1");
+        let prompt = build_prompt(&task, &context, "run-plan-avail-1", "artifacts");
         assert!(prompt.contains("使える専門家"));
         assert!(prompt.contains("literature-reader"));
         assert!(prompt.contains("artifacts/plan.json"));
 
-        let no_genres_prompt = build_prompt(&task, &RunContext::default(), "run-plan-avail-2");
+        let no_genres_prompt = build_prompt(&task, &RunContext::default(), "run-plan-avail-2", "artifacts");
         assert!(!no_genres_prompt.contains("使える専門家"));
     }
 
@@ -1560,12 +1603,12 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             }],
             ..RunContext::default()
         };
-        let prompt = build_prompt(&task, &context, "run-agg-1");
+        let prompt = build_prompt(&task, &context, "run-agg-1", "artifacts");
         assert!(prompt.contains("## Delegated child tasks (this is the aggregate run)"));
         assert!(prompt.contains("implement parser"));
         assert!(prompt.contains("artifacts/summary.md"));
 
-        let no_children_prompt = build_prompt(&task, &RunContext::default(), "run-agg-2");
+        let no_children_prompt = build_prompt(&task, &RunContext::default(), "run-agg-2", "artifacts");
         assert!(!no_children_prompt.contains("Delegated child tasks"));
         assert!(!no_children_prompt.contains("artifacts/summary.md"));
     }
