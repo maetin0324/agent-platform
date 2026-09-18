@@ -1,13 +1,16 @@
-//! ADR-0037（Phase 39）: 人の判断が要るときだけ Discord に知らせる。
+//! ADR-0037（Phase 39 / Phase 40）: 人の判断が要るときだけ Discord に知らせる。
 //!
 //! 見るもの:
 //! - 判定 5 種それぞれ「条件成立で 1 件」「2 回目の tick で増えない」「条件が解消したら作らない」。
-//! - 送信は**偽の HTTP サーバ**（`tokio::net::TcpListener` で 1 リクエスト受けて 204 を返す）へ。
+//! - 送信は**偽の HTTP サーバ**（`tokio::net::TcpListener` で 1 リクエスト受けて応答を返す）へ。
 //!   外部ネットワークには出ない（CLAUDE.md の禁止事項）。
 //! - 3 回失敗したら諦める。秘密が無ければ送らない（pending も溜めない）。
 //! - 失敗の文面に URL・ホスト名が出ない。
+//! - Phase 40（実機 2026-09-18）: backfill 禁止、1 tick 最大 1 通、429 は attempts に数えない、
+//!   `bad_news` の束ね、`milestone_ready` の新しい意味。
 
 use std::path::Path;
+use std::time::Duration;
 
 use task_core::approval::{Approval, ApprovalId, ApprovalStore, Decision};
 use task_core::message::{Message, MessageId, MessageRole};
@@ -28,13 +31,16 @@ fn at(secs: i64) -> OffsetDateTime {
 struct Env {
     _dir: tempfile::TempDir,
     store: SqliteStore,
+    /// backfill 禁止の基準（ADR-0037 D5）。既定は `at(0)`: このテストの多くは `at(0)` で出来事を
+    /// 作るので、`created_at >= started_at` が自然に成り立つ。
+    started_at: OffsetDateTime,
 }
 
 impl Env {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let store = SqliteStore::open(&dir.path().join("taskd.db")).unwrap_or_else(|e| panic!("open: {e}"));
-        Self { _dir: dir, store }
+        Self { _dir: dir, store, started_at: at(0) }
     }
 
     fn as_store(&self) -> &dyn TaskStore {
@@ -43,14 +49,15 @@ impl Env {
 
     /// 判定して pending を作り、その種の件数を返す。
     fn schedule(&self, kind: NotificationKind) -> usize {
-        let created = notify::schedule(self.as_store(), &NotifyConfig::default(), OffsetDateTime::now_utc())
-            .unwrap_or_else(|e| panic!("schedule: {e}"));
+        let created =
+            notify::schedule(self.as_store(), &NotifyConfig::default(), self.started_at, OffsetDateTime::now_utc())
+                .unwrap_or_else(|e| panic!("schedule: {e}"));
         created.iter().filter(|n| n.kind == kind).count()
     }
 
     /// 判定だけ（DB には書かない）。
     fn scanned(&self, kind: NotificationKind) -> Vec<String> {
-        notify::scan(self.as_store(), None)
+        notify::scan(self.as_store(), self.started_at, None)
             .unwrap_or_else(|e| panic!("scan: {e}"))
             .into_iter()
             .filter(|c| c.kind == kind)
@@ -127,40 +134,58 @@ fn task(status: Status) -> Task {
 
 // ---- 1. milestone_ready ----
 
+/// ADR-0037 D1（Phase 40 / 実機 2026-09-18）: `milestone_ready` は「動いているものが無く、
+/// 人の手が要る」ときに鳴る。全部が終端である必要はない — Go 待ちの `draft` が残っていてもよい
+/// （むしろそここそが人の判断が要る瞬間）。
 #[test]
-fn milestone_ready_fires_once_when_every_real_task_is_terminal() {
+fn milestone_ready_fires_when_nothing_is_active_and_something_is_done() {
     let env = Env::new();
     env.seed_org();
     let project = env.seed_project(ProjectStatus::Active);
     let milestone = env
         .store
-        .milestone_create(project, "候補テーマの選定", "", MilestoneStatus::InProgress)
+        .milestone_create(project, "候補テーマの統合と選定", "", MilestoneStatus::InProgress)
         .unwrap_or_else(|e| panic!("milestone: {e}"));
 
-    // まだ走っている仕事があるうちは知らせない。
-    let mut running = task(Status::Running);
-    running.project_id = Some(project);
-    running.milestone_id = Some(milestone.id);
-    env.store.insert(&running).unwrap_or_else(|e| panic!("insert: {e}"));
-    let mut done = task(Status::Done);
-    done.project_id = Some(project);
-    done.milestone_id = Some(milestone.id);
-    env.store.insert(&done).unwrap_or_else(|e| panic!("insert: {e}"));
-    assert_eq!(env.schedule(NotificationKind::MilestoneReady), 0);
+    let mut ready = task(Status::Ready);
+    ready.project_id = Some(project);
+    ready.milestone_id = Some(milestone.id);
+    env.store.insert(&ready).unwrap_or_else(|e| panic!("insert: {e}"));
+    let mut done_a = task(Status::Done);
+    done_a.project_id = Some(project);
+    done_a.milestone_id = Some(milestone.id);
+    env.store.insert(&done_a).unwrap_or_else(|e| panic!("insert: {e}"));
+    let mut done_b = task(Status::Done);
+    done_b.project_id = Some(project);
+    done_b.milestone_id = Some(milestone.id);
+    env.store.insert(&done_b).unwrap_or_else(|e| panic!("insert: {e}"));
+    let mut draft_a = task(Status::Draft);
+    draft_a.assignee = Some("poc".into());
+    draft_a.project_id = Some(project);
+    draft_a.milestone_id = Some(milestone.id);
+    env.store.insert(&draft_a).unwrap_or_else(|e| panic!("insert: {e}"));
+    let mut draft_b = task(Status::Draft);
+    draft_b.assignee = Some("poc".into());
+    draft_b.project_id = Some(project);
+    draft_b.milestone_id = Some(milestone.id);
+    env.store.insert(&draft_b).unwrap_or_else(|e| panic!("insert: {e}"));
 
-    // 裏方（レビュー）は数えない: 終端でなくても判定に影響しない。
+    // 裏方（レビュー）は数えない。
     let mut support = task(Status::Running);
     support.kind = TaskKind::Review;
     support.project_id = Some(project);
     support.milestone_id = Some(milestone.id);
     env.store.insert(&support).unwrap_or_else(|e| panic!("insert: {e}"));
 
-    // 残りが終端になったら 1 件。
+    // ready が 1 件でも残っていれば鳴らない。
+    assert!(env.scanned(NotificationKind::MilestoneReady).is_empty(), "ready が残っている間は鳴らない");
+
+    // ready を片付けると、done 2 + draft 2（Go 待ち）で鳴る。
     env.store
-        .apply_transition(running.id, Trigger::Cancel, None)
+        .apply_transition(ready.id, Trigger::Cancel, None)
         .unwrap_or_else(|e| panic!("cancel: {e}"));
     assert_eq!(env.schedule(NotificationKind::MilestoneReady), 1);
-    // 2 回目の tick では増えない。
+    // 2 回目の tick では増えない（同じ key）。
     assert_eq!(env.schedule(NotificationKind::MilestoneReady), 0);
 
     let rows = env.store.notification_recent(10).unwrap_or_else(|e| panic!("recent: {e}"));
@@ -168,15 +193,38 @@ fn milestone_ready_fires_once_when_every_real_task_is_terminal() {
         .iter()
         .find(|n| n.kind == NotificationKind::MilestoneReady)
         .unwrap_or_else(|| panic!("no milestone_ready row"));
-    assert_eq!(row.key, milestone.id.to_string());
-    assert!(row.body.contains("候補テーマの選定"), "{}", row.body);
-    assert!(row.body.contains("done 1 / failed 0"), "{}", row.body);
+    assert_eq!(row.key, format!("{}:2", milestone.id), "key に done の件数(2)");
+    assert!(row.body.contains("候補テーマの統合と選定"), "{}", row.body);
+    assert!(row.body.contains("done 2 / failed 0"), "{}", row.body);
+    assert!(row.body.contains("2 件"), "{}", row.body);
+    assert!(row.body.contains("検証課"), "{}", row.body);
+    // GUI 依頼 G13i-P1（ADR-0037 D6）: 途中目標の案件が project_id に載る。
+    assert_eq!(row.project_id, Some(project), "{row:?}");
+
+    // Go: draft_a を最後まで進めて done にする（draft → ready → running → reviewing → done）。
+    for (task_id, trigger) in [
+        (draft_a.id, Trigger::Accept),
+        (draft_a.id, Trigger::Dispatch),
+        (draft_a.id, Trigger::WorkerDone),
+        (draft_a.id, Trigger::ReviewPass),
+    ] {
+        env.store.apply_transition(task_id, trigger, None).unwrap_or_else(|e| panic!("transition: {e}"));
+    }
+    // done 3 + draft 1（draft_b が残る）で再び鳴る。key は done の件数が変わるので別物。
+    assert_eq!(env.schedule(NotificationKind::MilestoneReady), 1);
+    let rows = env.store.notification_recent(10).unwrap_or_else(|e| panic!("recent: {e}"));
+    let refired = rows
+        .iter()
+        .find(|n| n.kind == NotificationKind::MilestoneReady && n.key == format!("{}:3", milestone.id))
+        .unwrap_or_else(|| panic!("no re-fired row with done=3"));
+    assert!(refired.body.contains("done 3 / failed 0"), "{}", refired.body);
+    assert!(refired.body.contains("1 件"), "{}", refired.body);
 
     // 条件が解消（`reached` にした）ら、もう候補に出てこない。
     env.store
         .milestone_set_status(milestone.id, MilestoneStatus::Reached)
         .unwrap_or_else(|e| panic!("set: {e}"));
-    assert!(env.scanned(NotificationKind::MilestoneReady).is_empty());
+    assert!(env.scanned(NotificationKind::MilestoneReady).is_empty(), "reached なら鳴らない");
 }
 
 #[test]
@@ -330,6 +378,8 @@ fn bad_news_fires_once_for_level_zero_reports_only() {
         .find(|n| n.kind == NotificationKind::BadNews)
         .unwrap_or_else(|| panic!("no bad_news row"));
     assert!(row.body.contains("クラスタに入れません"), "{}", row.body);
+    // GUI 依頼 G13i-P1（ADR-0037 D6）: `bad_news` は project_id を載せない（他は null）。
+    assert_eq!(row.project_id, None);
 }
 
 #[test]
@@ -337,6 +387,44 @@ fn a_store_without_bad_news_produces_nothing() {
     let env = Env::new();
     assert_eq!(env.schedule(NotificationKind::BadNews), 0);
     assert!(env.scanned(NotificationKind::BadNews).is_empty());
+}
+
+// ---- backfill 禁止（ADR-0037 D5。実機 2026-09-18: 今日の履歴 8 件が起動直後に一斉送信された）----
+
+#[test]
+fn events_created_before_taskd_started_are_never_scanned_or_recorded() {
+    let mut env = Env::new();
+    env.started_at = at(100);
+    let before = Report {
+        id: ReportId::new(),
+        project_id: None,
+        node_id: "secretary".into(),
+        task_id: None,
+        kind: ReportKind::BadNews,
+        level: 0,
+        headline: "起動前の悪い知らせ（GUI で既に見た）".into(),
+        body: "b".into(),
+        sources: vec![],
+        read_at: None,
+        created_at: at(50),
+    };
+    env.store.report_append(&before).unwrap_or_else(|e| panic!("report: {e}"));
+
+    // 起動前の出来事は候補にすら出ない（走査対象外。台帳の行も作らない）。
+    assert!(env.scanned(NotificationKind::BadNews).is_empty());
+    assert_eq!(env.schedule(NotificationKind::BadNews), 0);
+    assert!(env.store.notification_recent(10).unwrap_or_default().is_empty(), "行を作らない");
+
+    // 起動後の出来事は普通に対象になる。
+    let after = Report {
+        id: ReportId::new(),
+        created_at: at(150),
+        headline: "起動後の悪い知らせ".into(),
+        ..before
+    };
+    env.store.report_append(&after).unwrap_or_else(|e| panic!("report: {e}"));
+    assert_eq!(env.scanned(NotificationKind::BadNews), vec![after.id.to_string()]);
+    assert_eq!(env.schedule(NotificationKind::BadNews), 1);
 }
 
 // ---- 5. secretary_reply ----
@@ -375,6 +463,14 @@ fn secretary_reply_fires_once_when_a_proposed_project_gets_a_node_message() {
     assert_eq!(env.schedule(NotificationKind::SecretaryReply), 0);
     assert_eq!(env.scanned(NotificationKind::SecretaryReply), vec![project.to_string()]);
 
+    // GUI 依頼 G13i-P1（ADR-0037 D6）: 案件自身が project_id に載る。
+    let rows = env.store.notification_recent(10).unwrap_or_else(|e| panic!("recent: {e}"));
+    let row = rows
+        .iter()
+        .find(|n| n.kind == NotificationKind::SecretaryReply)
+        .unwrap_or_else(|| panic!("no secretary_reply row"));
+    assert_eq!(row.project_id, Some(project), "{row:?}");
+
     // 人が返事をして案件が動き出したら（`proposed` でなくなったら）候補から消える。
     env.store
         .project_set_status(project, ProjectStatus::Active)
@@ -398,10 +494,10 @@ fn links_are_added_only_when_a_gui_base_url_is_configured() {
     done.milestone_id = Some(milestone.id);
     env.store.insert(&done).unwrap_or_else(|e| panic!("insert: {e}"));
 
-    let without = notify::scan(env.as_store(), None).unwrap_or_else(|e| panic!("scan: {e}"));
+    let without = notify::scan(env.as_store(), env.started_at, None).unwrap_or_else(|e| panic!("scan: {e}"));
     assert!(without.iter().all(|c| !c.body.contains("http")));
 
-    let with = notify::scan(env.as_store(), Some("http://192.168.1.103:7700"))
+    let with = notify::scan(env.as_store(), env.started_at, Some("http://192.168.1.103:7700"))
         .unwrap_or_else(|e| panic!("scan: {e}"));
     let body = &with
         .iter()
@@ -416,13 +512,14 @@ fn links_are_added_only_when_a_gui_base_url_is_configured() {
 
 // ---- 送信（偽の HTTP サーバ。外部ネットワークには出ない）----
 
-/// `127.0.0.1:0` で待ち受け、リクエストを `max` 件受けて `status` を返す。返るのは URL と、
+/// `127.0.0.1:0` で待ち受け、リクエストを `max` 件受けて `response` をそのまま返す。返るのは URL と、
 /// 受け取った本文を集めるハンドル。
-async fn fake_webhook(max: usize, status: u16) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+async fn fake_webhook_raw(max: usize, response: &str) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .unwrap_or_else(|e| panic!("bind: {e}"));
     let addr = listener.local_addr().unwrap_or_else(|e| panic!("addr: {e}"));
+    let response = response.to_string();
     let handle = tokio::spawn(async move {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut bodies = Vec::new();
@@ -431,7 +528,6 @@ async fn fake_webhook(max: usize, status: u16) -> (String, tokio::task::JoinHand
             let mut buf = vec![0u8; 8192];
             let n = socket.read(&mut buf).await.unwrap_or(0);
             bodies.push(String::from_utf8_lossy(&buf[..n]).to_string());
-            let response = format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
             let _ = socket.write_all(response.as_bytes()).await;
             let _ = socket.flush().await;
             let _ = socket.shutdown().await;
@@ -441,22 +537,28 @@ async fn fake_webhook(max: usize, status: u16) -> (String, tokio::task::JoinHand
     (format!("http://{addr}/hook"), handle)
 }
 
+/// `max` 件を受けて、毎回 `status` だけの空応答を返す（`connection: close`）。
+async fn fake_webhook(max: usize, status: u16) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    fake_webhook_raw(max, &format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")).await
+}
+
 #[tokio::test]
 async fn a_pending_notification_is_posted_once_and_marked_sent() {
     let env = Env::new();
     let row = env
         .store
-        .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ: テスト", at(0))
+        .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ: テスト", None, at(0))
         .unwrap_or_else(|e| panic!("upsert: {e}"))
         .unwrap_or_else(|| panic!("row"));
     let (url, server) = fake_webhook(1, 204).await;
     let client = notify::client().unwrap_or_else(|| panic!("client"));
 
+    let batch = notify::select_batch(std::slice::from_ref(&row)).unwrap_or_else(|| panic!("no batch"));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<SendResult>(4);
-    notify::spawn_send(client, url, &row, tx);
+    notify::spawn_send(client, url, &batch, tx);
     let result = rx.recv().await.unwrap_or_else(|| panic!("no result"));
-    assert!(result.ok, "{result:?}");
-    assert_eq!(result.id, row.id);
+    assert_eq!(result.outcome, notify::SendOutcome::Sent, "{result:?}");
+    assert_eq!(result.ids, vec![row.id]);
 
     let bodies = server.await.unwrap_or_else(|e| panic!("server: {e}"));
     assert_eq!(bodies.len(), 1);
@@ -478,7 +580,7 @@ async fn a_failing_webhook_is_retried_three_times_and_then_given_up() {
     let env = Env::new();
     let row = env
         .store
-        .notification_upsert_pending(NotificationKind::BadNews, "r1", "b", at(0))
+        .notification_upsert_pending(NotificationKind::BadNews, "r1", "b", None, at(0))
         .unwrap_or_else(|e| panic!("upsert: {e}"))
         .unwrap_or_else(|| panic!("row"));
     // 500 を返す偽サーバ（4 回分受けられるが、諦めるので 3 回しか来ない）。
@@ -488,13 +590,18 @@ async fn a_failing_webhook_is_retried_three_times_and_then_given_up() {
     let mut attempts = 0;
     for tick in 0..5 {
         let pending = env.store.notification_pending().unwrap_or_else(|e| panic!("pending: {e}"));
-        let Some(next) = pending.first().cloned() else { break };
+        if pending.is_empty() {
+            break;
+        }
+        let batch = notify::select_batch(&pending).unwrap_or_else(|| panic!("no batch"));
         attempts += 1;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SendResult>(4);
-        notify::spawn_send(client.clone(), url.clone(), &next, tx);
+        notify::spawn_send(client.clone(), url.clone(), &batch, tx);
         let result = rx.recv().await.unwrap_or_else(|| panic!("no result"));
-        assert!(!result.ok);
-        let error = result.error.clone().unwrap_or_default();
+        let error = match &result.outcome {
+            notify::SendOutcome::Failed(e) => e.clone(),
+            other => panic!("expected Failed, got {other:?}"),
+        };
         assert_eq!(error, "http status 500");
         // 失敗の文面に URL・ホスト名は出ない（ADR-0037 D3）。
         assert!(!error.contains("127.0.0.1"), "{error}");
@@ -525,13 +632,107 @@ async fn an_unreachable_webhook_never_reveals_the_host() {
     let addr = listener.local_addr().unwrap_or_else(|e| panic!("addr: {e}"));
     drop(listener);
     let client = notify::client().unwrap_or_else(|| panic!("client"));
-    let error = notify::post_webhook(&client, &format!("http://{addr}/hook"), "x")
-        .await
-        .err()
-        .unwrap_or_else(|| panic!("expected a failure"));
+    let outcome = notify::post_webhook(&client, &format!("http://{addr}/hook"), "x").await;
+    let error = match outcome {
+        notify::SendOutcome::Failed(e) => e,
+        other => panic!("expected Failed, got {other:?}"),
+    };
     assert!(!error.contains("127.0.0.1"), "{error}");
     assert!(!error.contains(&addr.port().to_string()), "{error}");
     assert!(!error.contains("hook"), "{error}");
+}
+
+// ---- 送信の間隔（ADR-0037 D5。実機 2026-09-18: 8 件一斉送信で 429 が 3 件）----
+
+#[test]
+fn only_one_message_is_sent_per_tick_even_with_several_kinds_pending() {
+    let env = Env::new();
+    env.seed_org();
+    // 種の違う 3 件を pending にする（bad_news は 1 件だけなので束ねの対象にはならない）。
+    for (kind, key) in [
+        (NotificationKind::BadNews, "r1"),
+        (NotificationKind::ApprovalPending, "a1"),
+        (NotificationKind::QuestionBlocked, "t1"),
+    ] {
+        env.store
+            .notification_upsert_pending(kind, key, "b", None, at(0))
+            .unwrap_or_else(|e| panic!("upsert: {e}"));
+    }
+    let pending = env.store.notification_pending().unwrap_or_else(|e| panic!("pending: {e}"));
+    assert_eq!(pending.len(), 3);
+    let batch = notify::select_batch(&pending).unwrap_or_else(|| panic!("no batch"));
+    assert_eq!(batch.ids.len(), 1, "1 tick には 1 通だけ");
+}
+
+#[tokio::test]
+async fn a_rate_limited_response_is_not_counted_as_an_attempt() {
+    let env = Env::new();
+    let row = env
+        .store
+        .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ: b", None, at(0))
+        .unwrap_or_else(|e| panic!("upsert: {e}"))
+        .unwrap_or_else(|| panic!("row"));
+    // Discord 風の 429（`retry-after` ヘッダに秒数）。
+    let (url, server) =
+        fake_webhook_raw(1, "HTTP/1.1 429 X\r\nretry-after: 2\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+    let client = notify::client().unwrap_or_else(|| panic!("client"));
+    let batch = notify::select_batch(std::slice::from_ref(&row)).unwrap_or_else(|| panic!("no batch"));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SendResult>(4);
+    notify::spawn_send(client, url, &batch, tx);
+    let result = rx.recv().await.unwrap_or_else(|| panic!("no result"));
+    match &result.outcome {
+        notify::SendOutcome::RateLimited(wait) => assert_eq!(*wait, Duration::from_secs(2), "{wait:?}"),
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+
+    // 429 は台帳に触れない: attempts は増えず、まだ pending のまま。
+    let pending_before = env.store.notification_pending().unwrap_or_else(|e| panic!("pending: {e}"));
+    notify::record(env.as_store(), &pending_before, &result, at(1)).unwrap_or_else(|e| panic!("record: {e}"));
+    let pending_after = env.store.notification_pending().unwrap_or_else(|e| panic!("pending: {e}"));
+    assert_eq!(pending_after.len(), 1);
+    assert_eq!(pending_after[0].attempts, 0, "429 は attempts に数えない");
+    assert!(pending_after[0].ok.is_none());
+}
+
+// ---- bad_news の束ね（ADR-0037 D5）----
+
+#[tokio::test]
+async fn two_bad_news_are_bundled_into_one_message_and_both_rows_are_marked_ok() {
+    let env = Env::new();
+    let a = env
+        .store
+        .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ: クラスタに入れません", None, at(0))
+        .unwrap_or_else(|e| panic!("upsert: {e}"))
+        .unwrap_or_else(|| panic!("row"));
+    let b = env
+        .store
+        .notification_upsert_pending(NotificationKind::BadNews, "r2", "悪い知らせ: 予算が尽きました", None, at(1))
+        .unwrap_or_else(|e| panic!("upsert: {e}"))
+        .unwrap_or_else(|| panic!("row"));
+    let pending = env.store.notification_pending().unwrap_or_else(|e| panic!("pending: {e}"));
+    let batch = notify::select_batch(&pending).unwrap_or_else(|| panic!("no batch"));
+    assert_eq!(batch.ids.len(), 2, "bad_news 2 件は 1 通に束ねる");
+    assert!(batch.content.contains("2 件"), "{}", batch.content);
+    assert!(batch.content.contains("クラスタに入れません"), "{}", batch.content);
+    assert!(batch.content.contains("予算が尽きました"), "{}", batch.content);
+
+    let (url, server) = fake_webhook(1, 204).await;
+    let client = notify::client().unwrap_or_else(|| panic!("client"));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SendResult>(4);
+    notify::spawn_send(client, url, &batch, tx);
+    let result = rx.recv().await.unwrap_or_else(|| panic!("no result"));
+    assert_eq!(result.outcome, notify::SendOutcome::Sent, "{result:?}");
+    let bodies = server.await.unwrap_or_else(|e| panic!("server: {e}"));
+    assert_eq!(bodies.len(), 1, "1 tick に 1 通だけ POST される");
+
+    notify::record(env.as_store(), &pending, &result, at(2)).unwrap_or_else(|e| panic!("record: {e}"));
+    let recent = env.store.notification_recent(5).unwrap_or_else(|e| panic!("recent: {e}"));
+    let ok_a = recent.iter().find(|n| n.id == a.id).unwrap_or_else(|| panic!("row a"));
+    let ok_b = recent.iter().find(|n| n.id == b.id).unwrap_or_else(|| panic!("row b"));
+    assert_eq!(ok_a.ok, Some(true), "台帳は行ごとに ok");
+    assert_eq!(ok_b.ok, Some(true), "台帳は行ごとに ok");
 }
 
 // ---- 秘密が無い間は送らない（ADR-0037 D2）----

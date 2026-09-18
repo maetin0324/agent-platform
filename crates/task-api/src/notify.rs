@@ -12,6 +12,7 @@ use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use task_core::ProjectId;
 use task_core::notify::{Notification, NotificationKind, NotificationStore};
 
 use crate::admin::{AdminRequest, NotifyAdminError};
@@ -47,6 +48,10 @@ pub struct NotifyRecent {
     pub kind: NotificationKind,
     /// 重複排除の鍵（途中目標 id / 認可 id / タスク id / 報告 id / 案件 id）。
     pub key: String,
+    /// GUI がリンクを作るための案件 id（ADR-0037 D6 / GUI 依頼 G13i-P1）。`milestone_ready` はその
+    /// 途中目標の案件、`secretary_reply` はその案件自身、他の種は `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<String>,
@@ -64,6 +69,7 @@ impl From<Notification> for NotifyRecent {
         Self {
             kind: n.kind,
             key: n.key,
+            project_id: n.project_id,
             created_at: rfc3339(n.created_at),
             sent_at: n.sent_at.map(rfc3339),
             attempts: n.attempts,

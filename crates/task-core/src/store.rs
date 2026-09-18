@@ -35,10 +35,11 @@ const MIGRATION_0005: &str = include_str!("../migrations/0005_tasks_genre_column
 const MIGRATION_0006: &str = include_str!("../migrations/0006_organization.sql");
 const MIGRATION_0007: &str = include_str!("../migrations/0007_messages_task_id_and_reports_project.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_notifications.sql");
+const MIGRATION_0009: &str = include_str!("../migrations/0009_notifications_project_id.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -635,6 +636,7 @@ impl SqliteStore {
             6 => Ok(MIGRATION_0006),
             7 => Ok(MIGRATION_0007),
             8 => Ok(MIGRATION_0008),
+            9 => Ok(MIGRATION_0009),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -3634,26 +3636,50 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 8);
+        assert_eq!(SCHEMA_VERSION, 9);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
-                .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ", now)
+                .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ", None, now)
                 .unwrap()
                 .is_some()
         );
         assert_eq!(store.notification_pending().unwrap().len(), 1);
+
+        // migration 9（ADR-0037 D6 / GUI 依頼 G13i-P1）: `project_id` が新しい DB でも往復する。
+        let project_id = ProjectId::new();
+        let with_project = store
+            .notification_upsert_pending(NotificationKind::MilestoneReady, "m1:2", "b", Some(project_id), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(with_project.project_id, Some(project_id));
+        let recent = store.notification_recent(10).unwrap();
+        let found = recent.iter().find(|n| n.id == with_project.id).unwrap();
+        assert_eq!(found.project_id, Some(project_id));
         drop(store);
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(store.notification_pending().unwrap().len(), 1, "既存の行は残る");
+        assert_eq!(store.notification_pending().unwrap().len(), 2, "既存の行は残る");
+        let found = store
+            .notification_recent(10)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == with_project.id)
+            .unwrap();
+        assert_eq!(found.project_id, Some(project_id), "project_id も再オープン後に残る");
         let applied: i64 = {
             let conn = store.conn.lock().unwrap();
             conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version = 8", [], |r| r.get(0))
                 .unwrap()
         };
         assert_eq!(applied, 1, "migration 8 must be recorded exactly once");
+        let applied_9: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version = 9", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(applied_9, 1, "migration 9 must be recorded exactly once");
     }
 
     #[test]

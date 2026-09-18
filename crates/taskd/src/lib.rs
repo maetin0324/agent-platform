@@ -712,6 +712,10 @@ async fn tick_loop(
     let mut notify_in_flight: HashSet<task_core::NotificationId> = HashSet::new();
     let mut notify_pending: Vec<task_core::Notification> = Vec::new();
     let mut notify_last: Option<std::time::Instant> = None;
+    // ADR-0037 D5（Phase 40 / 実機 2026-09-18）: backfill 禁止の基準になる taskd の起動時刻。
+    let notify_started_at = OffsetDateTime::now_utc();
+    // ADR-0037 D5: 429 が返っている間は次の送信を控える（`Retry-After` 秒）。
+    let mut notify_blocked_until: Option<std::time::Instant> = None;
     let tick = config.tick();
     let mut ticks: u64 = 0;
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
@@ -763,18 +767,25 @@ async fn tick_loop(
         {
             let store = dispatcher.store();
             let now = OffsetDateTime::now_utc();
-            // 1. 前の tick で spawn した送信の結果を書く。
+            // 1. 前の tick で spawn した送信の結果を書く。429 は attempts に数えず、
+            //    `Retry-After` の間だけ次の送信を控える（ADR-0037 D5）。
             while let Ok(result) = notify_rx.try_recv() {
-                notify_in_flight.remove(&result.id);
+                for id in &result.ids {
+                    notify_in_flight.remove(id);
+                }
+                if let notify::SendOutcome::RateLimited(wait) = &result.outcome {
+                    notify_blocked_until = Some(std::time::Instant::now() + *wait);
+                }
                 if let Err(e) = notify::record(store.as_ref(), &notify_pending, &result, now) {
                     tracing::warn!(error = %e, "notify: could not record the send result");
                 }
             }
-            // 2. `interval_secs` ごとに判定し、送れるものを送る。
-            let due = notify_last.map(|t| t.elapsed() >= notify_interval).unwrap_or(true);
+            // 2. `interval_secs` ごとに判定し、1 tick に最大 1 通だけ送る（ADR-0037 D5）。
+            let due = notify_last.map(|t| t.elapsed() >= notify_interval).unwrap_or(true)
+                && notify_blocked_until.map(|t| std::time::Instant::now() >= t).unwrap_or(true);
             if due {
                 notify_last = Some(std::time::Instant::now());
-                match notify::schedule(store.as_ref(), &config.notify, now) {
+                match notify::schedule(store.as_ref(), &config.notify, notify_started_at, now) {
                     Ok(created) if !created.is_empty() => {
                         tracing::info!(count = created.len(), "notify: new notifications");
                     }
@@ -789,11 +800,16 @@ async fn tick_loop(
                         );
                         match (url, notify_client.as_ref()) {
                             (Some(url), Some(client)) => {
-                                for row in &pending {
-                                    if !notify_in_flight.insert(row.id) {
-                                        continue;
+                                let available: Vec<task_core::Notification> = pending
+                                    .iter()
+                                    .filter(|n| !notify_in_flight.contains(&n.id))
+                                    .cloned()
+                                    .collect();
+                                if let Some(batch) = notify::select_batch(&available) {
+                                    for id in &batch.ids {
+                                        notify_in_flight.insert(*id);
                                     }
-                                    notify::spawn_send(client.clone(), url.clone(), row, notify_tx.clone());
+                                    notify::spawn_send(client.clone(), url.clone(), &batch, notify_tx.clone());
                                 }
                             }
                             // ADR-0037 D2: 秘密が無い間は送らず、pending も溜めない。
