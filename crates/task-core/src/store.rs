@@ -122,6 +122,8 @@ pub struct ListFilter {
     /// `title` または `objective` に対する部分一致（SQLite の LIKE なので ASCII の大文字小文字は区別しない。ADR-0014 D2）。
     /// `%` / `_` はリテラルとして扱う。
     pub text_contains: Option<String>,
+    /// ADR-0033 D4（Phase 33）: 担当（`org_nodes.id`）で絞る。完全一致。`None` なら絞らない。
+    pub assignee: Option<String>,
 }
 
 /// `TaskStore::list_page` の並び順（ADR-0013 D10）。
@@ -249,6 +251,10 @@ fn filter_predicate(filter: &ListFilter) -> (String, Vec<SqlValue>) {
     if let Some(project_id) = filter.project_id {
         clauses.push("project_id = ?".to_string());
         params.push(SqlValue::Text(project_id.to_string()));
+    }
+    if let Some(assignee) = &filter.assignee {
+        clauses.push("assignee = ?".to_string());
+        params.push(SqlValue::Text(assignee.clone()));
     }
     if let Some(needle) = &filter.text_contains {
         clauses.push("(title LIKE ? ESCAPE '\\' OR objective LIKE ? ESCAPE '\\')".to_string());

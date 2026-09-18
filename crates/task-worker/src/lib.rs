@@ -42,8 +42,8 @@ pub use memory::{MEMORY_MAX_CHARS, MemoryDir, MemoryUpdate, read_result_memory};
 pub use paperqa::{PaperQaAdapter, PaperQaConfig};
 pub use protocol::{
     Answer, ChildSummary, ConversationAddressee, ConversationTurn, Evidence, GenreContext, GenreRoleContext,
-    MemoryContext, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, ProviderFailure, ReviewOutput,
-    ReviewRequest, ReviewVerdictOut, RoleContext, RunContext, RunRequest, WorkerMessage,
+    MemoryContext, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, ProviderFailure, RecentWork,
+    ReviewOutput, ReviewRequest, ReviewVerdictOut, RoleContext, RunContext, RunRequest, WorkerMessage,
 };
 pub use provider::classify_provider_failure;
 pub use result_report::{ReportDeclaration, read_result_report_kind, report_kind_from_result_json};

@@ -3,18 +3,21 @@
 //! 「人」らしさは**注入される記憶と brief** で作る（ADR-0033 D6）。ハーネスのプロセスは相変わらず
 //! ステートレスで、状態はファイルと DB にある（DESIGN 原則 2）。ここは純粋関数だけで、I/O も LLM も無い。
 //!
-//! 並び（ADR-0033 D4 / Phase 24 の指示。Phase 30 で 1 の直後に「仕事で使う道具」を追加）:
+//! 並び（ADR-0033 D4 / Phase 24 の指示。Phase 30 で 1 の直後に「仕事で使う道具」を追加。
+//! Phase 33 で 3 の直後に「あなたの直近の仕事」を追加）:
 //! 1. 役職と brief（`context.node`）＋ 対話 run で担当が自分の仕事の分野を持つときは「仕事で使う道具」
 //!    （`context.work_genre`。Phase 30: 対話は常に対話用分野で走るが、その人が自分の得意分野を知って
 //!    答えられるように 1 行足す）
 //! 2. 永続の認可（`context.standing_rules`。SPEC §3.6「永続の認可は文字で記録してエージェントに注入する」。
 //!    Phase 26 が埋める: 担当宛て + 全員向け）
 //! 3. 記憶（`context.memory`）
-//! 4. 直近のやり取り（`context.conversation`）
-//! 5. 役割の指示文（`context.role`。ADR-0016 D1 からある既存の節）
-//! 6. 記憶の書き方の指示（記憶が有効な run にだけ）
-//! 7. 対話専用の指示（`context.conversation_addressee`。Phase 28: 対話 run は返事だけをする。
-//!    末尾に足す。ADR-0033 D4 追記）
+//! 4. あなたの直近の仕事（`context.recent_work`。Phase 33: 実機で対話 run の担当が自分の直近の失敗を
+//!    知らずに「対象タスク ID が必要です」と聞き返した事故の再発防止。対話 run にだけ出す）
+//! 5. 直近のやり取り（`context.conversation`）
+//! 6. 役割の指示文（`context.role`。ADR-0016 D1 からある既存の節）
+//! 7. 記憶の書き方の指示（記憶が有効な run にだけ）
+//! 8. 対話専用の指示（`context.conversation_addressee`。Phase 28: 対話 run は返事だけをする。
+//!    末尾に足す。ADR-0033 D4 追記。Phase 33 で「自分の直近の仕事を先に見ること」を一文追加）
 //!
 //! 検索ハーネス（`local-deep-research`）はこの前置きを**一切使わない**（ADR-0029 / ADR-0033 D6:
 //! 検索に渡す問いを濁さないため。Phase 27 の監査 M-2）。
@@ -35,7 +38,7 @@ pub fn render(context: &RunContext) -> String {
     out
 }
 
-/// 1〜4（役職と brief → 永続の認可 → 記憶 → 直近のやり取り）。
+/// 1〜5（役職と brief → 永続の認可 → 記憶 → あなたの直近の仕事 → 直近のやり取り）。
 fn person_sections(context: &RunContext) -> String {
     let mut out = String::new();
     if let Some(node) = &context.node {
@@ -76,6 +79,23 @@ fn person_sections(context: &RunContext) -> String {
             out.push_str(memory.project.trim_end());
             out.push_str("\n\n");
         }
+    }
+    if !context.recent_work.is_empty() {
+        out.push_str("## あなたの直近の仕事\n");
+        for w in &context.recent_work {
+            out.push_str(&format!("- [{}] {}", status_label(w.status), one_line(&w.title)));
+            if let Some(project_title) = &w.project_title {
+                out.push_str(&format!("（案件: {}）", one_line(project_title)));
+            }
+            if let Some(outcome) = &w.outcome {
+                out.push_str(&format!(": {}", one_line(outcome)));
+            }
+            if !w.artifacts.is_empty() {
+                out.push_str(&format!(" 成果物: {}", w.artifacts.join(", ")));
+            }
+            out.push('\n');
+        }
+        out.push('\n');
     }
     if !context.conversation.is_empty() {
         out.push_str("## 直近のやり取り (this is a continuing conversation)\n");
@@ -130,14 +150,16 @@ fn conversation_instructions(context: &RunContext) -> String {
              この返事では作業を始めないでください。委譲・実装・調査は、人が方針と途中目標を承認してから \
              始まります。返事には次を、人が数十秒で読める分量で書いてください: \
              (a) 理解の確認 (b) 方針 (c) 最初の途中目標の提案 (d) 判断を仰ぎたいこと。\
-             ファイルの作成や大きな探索は不要です。\n\n"
+             ファイルの作成や大きな探索は不要です。\
+             自分の直近の仕事とその結果は上に書いてある。人に聞き返す前に、まずそれを見て答えること。\n\n"
                 .to_string()
         }
         Some(ConversationAddressee::Other) => {
             "## これは対話です (this is a conversation, not a work order)\n\
              この返事では作業を始めないでください。委譲・実装・調査は、人が方針と途中目標を承認してから \
              始まります。聞かれたことに答え、必要なら次にやりたいことを書いてください。\
-             ファイルの作成や大きな探索は不要です。\n\n"
+             ファイルの作成や大きな探索は不要です。\
+             自分の直近の仕事とその結果は上に書いてある。人に聞き返す前に、まずそれを見て答えること。\n\n"
                 .to_string()
         }
         None => String::new(),
@@ -149,10 +171,27 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// `context.recent_work[].status` の表示名（`Status` の `snake_case` 表現。`task_core::model::Status` の
+/// `#[serde(rename_all = "snake_case")]` と同じ）。
+fn status_label(status: task_core::Status) -> &'static str {
+    use task_core::Status::*;
+    match status {
+        Draft => "draft",
+        Ready => "ready",
+        Running => "running",
+        Blocked => "blocked",
+        Reviewing => "reviewing",
+        Done => "done",
+        Failed => "failed",
+        Cancelled => "cancelled",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::{ConversationTurn, GenreContext, MemoryContext, NodeContext, RoleContext};
+    use task_core::Status;
 
     fn full_context() -> RunContext {
         RunContext {
@@ -273,6 +312,8 @@ mod tests {
         assert!(out.contains("この返事では作業を始めないでください"));
         assert!(out.contains("(a) 理解の確認"));
         assert!(out.contains("(d) 判断を仰ぎたいこと"));
+        // Phase 33: 人に聞き返す前に、まず「あなたの直近の仕事」を見るよう促す一文。
+        assert!(out.contains("自分の直近の仕事とその結果は上に書いてある"), "{out}");
 
         let other = RunContext {
             conversation_addressee: Some(ConversationAddressee::Other),
@@ -281,6 +322,7 @@ mod tests {
         let out = render(&other);
         assert!(out.contains("聞かれたことに答え"));
         assert!(!out.contains("(a) 理解の確認"), "{out}");
+        assert!(out.contains("自分の直近の仕事とその結果は上に書いてある"), "{out}");
 
         // 対話でない run（既定値の `None`）では何も足さない。
         assert_eq!(render(&RunContext::default()), "");
@@ -298,5 +340,71 @@ mod tests {
         assert!(out.contains("## 覚えておくこと"), "{out}");
         // `[memory]` を設定していない run には何も出ない。
         assert!(!render(&RunContext::default()).contains("覚えておくこと"));
+    }
+
+    /// Phase 33（実機の事故 — 担当が自分の直近の失敗を知らずに聞き返した — の再発防止）:
+    /// `context.recent_work` は記憶の直後、直近のやり取りより前に 1 行ずつ出す。
+    #[test]
+    fn recent_work_is_shown_right_after_memory_and_before_conversation() {
+        let context = RunContext {
+            recent_work: vec![
+                task_worker_recent_work_sample(
+                    Status::Failed,
+                    "web-research タスク A",
+                    Some("Pluvio の関連研究調査"),
+                    Some("web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)"),
+                    &[],
+                ),
+                task_worker_recent_work_sample(
+                    Status::Done,
+                    "先行研究のまとめ",
+                    None,
+                    Some("Pluvio と比較可能な非同期ランタイムを 3 件確認した"),
+                    &["survey.md".into()],
+                ),
+            ],
+            ..full_context()
+        };
+        let out = render(&context);
+        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
+        assert!(at("## 覚えていること") < at("## あなたの直近の仕事"), "{out}");
+        assert!(at("## あなたの直近の仕事") < at("## 直近のやり取り"), "{out}");
+        assert!(
+            out.contains(
+                "- [failed] web-research タスク A（案件: Pluvio の関連研究調査）: web search returned nothing \
+                 (possible search path failure: expired key, CAPTCHA, or network block)"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "- [done] 先行研究のまとめ: Pluvio と比較可能な非同期ランタイムを 3 件確認した 成果物: survey.md"
+            ),
+            "{out}"
+        );
+
+        // 空なら節そのものが無い。
+        let without = RunContext { recent_work: Vec::new(), ..full_context() };
+        assert!(!render(&without).contains("あなたの直近の仕事"));
+        // 対話でない通常 run の前置きは 1 バイトも変わらない（既定値には `recent_work` が無い）。
+        assert_eq!(render(&RunContext::default()), "");
+    }
+
+    fn task_worker_recent_work_sample(
+        status: Status,
+        title: &str,
+        project_title: Option<&str>,
+        outcome: Option<&str>,
+        artifacts: &[String],
+    ) -> crate::protocol::RecentWork {
+        crate::protocol::RecentWork {
+            task_id: task_core::TaskId::new(),
+            title: title.to_string(),
+            project_title: project_title.map(str::to_string),
+            status,
+            finished_at: Some("2026-09-18T00:00:00Z".to_string()),
+            outcome: outcome.map(str::to_string),
+            artifacts: artifacts.to_vec(),
+        }
     }
 }

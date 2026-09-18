@@ -20,10 +20,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use task_core::plan::{PlanLimits, PlanOutput, materialize};
+use task_core::report::{HEADLINE_MAX_CHARS, first_line, truncate_chars};
 use task_core::{
-    AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec, OnChildFailure, OrgKind,
-    RateLimitObservation, RoleSpec, RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger,
-    WorkspaceSpec,
+    AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec, ListFilter, ListOrder,
+    OnChildFailure, OrgKind, ProjectId, RateLimitObservation, RoleSpec, RunRole, Status, StoreError, Task, TaskId,
+    TaskKind, TaskStore, Trigger, WorkspaceSpec, support_kind,
 };
 use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
@@ -34,8 +35,8 @@ use task_ops::derive::{
 use task_worker::{
     AdapterError, Answer, ChildSummary, ConversationAddressee, ConversationTurn, EventSink, GenreContext,
     LocalWorkspace, MemoryContext, MemoryDir, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview,
-    RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode, Terminal,
-    WorkerMessage, Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
+    RecentWork, RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode,
+    Terminal, WorkerMessage, Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
 };
 use task_ops::daemon::{
     AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot, InFlight,
@@ -267,6 +268,66 @@ fn cross_department_questions_of(events: &[(u64, Event)], run_id: &str) -> Vec<S
     out
 }
 
+/// Phase 33: `recent_work_of` が `list_page` から読む候補の上限（裏方タスクを除いた後に
+/// `RECENT_WORK_LIMIT` 件へ絞るための余裕）。
+const RECENT_WORK_SCAN: usize = 100;
+/// Phase 33（ADR-0033 D4 追記）: `context.recent_work` に渡す件数の上限。
+const RECENT_WORK_LIMIT: usize = 10;
+
+/// Phase 33: その run が残した成果物の名前（`ArtifactProduced` から。重複は除く、順は登場順）。
+fn artifact_names_of(events: &[(u64, Event)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, e) in events {
+        if let Event::ArtifactProduced { artifact, .. } = e
+            && !out.contains(&artifact.name)
+        {
+            out.push(artifact.name.clone());
+        }
+    }
+    out
+}
+
+/// Phase 33（ADR-0033 D4 追記）: 終端タスクの短い要約（対話 run が「あなたの直近の仕事」に出す 1 行）。
+/// `done` なら直近の `WorkerFinished` の `summary` の 1 行目、`failed` なら直近のレビュー不合格の理由か
+/// 直近のワーカーのエラー（どちらが後かはイベント順で決まる）、それも無ければ `Failed` への遷移理由、
+/// `blocked` なら直近の質問。Phase 25 の報告の文面の組み立て（`task_core::report`）をそのまま流用する
+/// （`first_line` / `truncate_chars`）。LLM は使わない（DESIGN 原則 1）。
+fn recent_work_outcome(task: &Task, events: &[(u64, Event)]) -> Option<String> {
+    match task.status {
+        Status::Done => events.iter().rev().find_map(|(_, e)| match e {
+            Event::WorkerFinished { outcome, role: None, .. } => {
+                outcome.strip_prefix("done: ").map(|s| truncate_chars(first_line(s), HEADLINE_MAX_CHARS))
+            }
+            _ => None,
+        }),
+        Status::Failed => events
+            .iter()
+            .rev()
+            .find_map(|(_, e)| match e {
+                Event::ReviewVerdict { pass: false, reason, .. } => Some(truncate_chars(reason, HEADLINE_MAX_CHARS)),
+                Event::WorkerFinished { outcome, role: None, .. } => outcome
+                    .strip_prefix("error(retryable=")
+                    .and_then(|rest| rest.split_once("): "))
+                    .map(|(_, message)| truncate_chars(message, HEADLINE_MAX_CHARS)),
+                _ => None,
+            })
+            .or_else(|| {
+                events.iter().rev().find_map(|(_, e)| match e {
+                    Event::Transitioned { to: Status::Failed, reason, .. } => Some(reason.clone()),
+                    _ => None,
+                })
+            }),
+        Status::Blocked => events.iter().rev().find_map(|(_, e)| match e {
+            Event::QuestionRaised { text, .. } => Some(truncate_chars(text, HEADLINE_MAX_CHARS)),
+            Event::WorkerFinished { outcome, role: None, .. } => {
+                outcome.strip_prefix("question: ").map(|s| truncate_chars(s, HEADLINE_MAX_CHARS))
+            }
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 /// ADR-0016 M5: 子待ちの親について覚えておくもの。
 struct AwaitingChildren {
     run_id: String,
@@ -297,6 +358,9 @@ struct RunExtras {
     /// 知って答えられるように、前置きに「仕事で使う道具」として渡す（実機の事故の再発防止:
     /// 検索ハーネスの genre を持つノードに話しかけても、その分野の run にはしない）。
     work_genre: Option<GenreContext>,
+    /// Phase 33（ADR-0033 D4 追記。実機の事故の再発防止）: 対話 run にだけ、担当の直近の仕事
+    /// （最大 10 件、更新の新しい順。案件を選んでいる対話ならその案件のものを先に）。
+    recent_work: Vec<RecentWork>,
 }
 
 struct ReviewEntry {
@@ -2269,6 +2333,16 @@ impl Dispatcher {
         } else {
             None
         };
+        // Phase 33（ADR-0033 D4 追記。実機の事故 — 担当が自分の直近の失敗を知らずに「対象タスク ID が
+        // 必要です」と聞き返した — の再発防止）: 対話 run にだけ、担当の直近の仕事を渡す。
+        let recent_work = if is_conv {
+            match assigned {
+                Some(n) => self.recent_work_of(&n.id, task.project_id)?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
         let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
@@ -2314,7 +2388,61 @@ impl Dispatcher {
             organization,
             conversation_addressee,
             work_genre,
+            recent_work,
         })
+    }
+
+    /// Phase 33（ADR-0033 D4 追記）: `node_id` の直近の仕事（対話・まとめ・承認・レビューは除く）を
+    /// 更新の新しい順に最大 10 件集める。`current_project` があれば、その案件のものを先に、
+    /// 残りは他の案件から（`current_project` の中でも他の案件のものでも、それぞれ更新の新しい順は保つ）。
+    /// ストアの読み取りだけで、LLM は使わない（DESIGN 原則 1）。
+    fn recent_work_of(
+        &self,
+        node_id: &str,
+        current_project: Option<ProjectId>,
+    ) -> Result<Vec<RecentWork>, DispatchError> {
+        let filter = ListFilter {
+            assignee: Some(node_id.to_string()),
+            ..ListFilter::default()
+        };
+        let page = self
+            .store
+            .list_page(&filter, ListOrder::UpdatedDesc, None, RECENT_WORK_SCAN)?;
+        let candidates: Vec<Task> = page.items.into_iter().filter(|t| support_kind(t).is_none()).collect();
+        let (same_project, other_project): (Vec<Task>, Vec<Task>) = if current_project.is_some() {
+            candidates.into_iter().partition(|t| t.project_id == current_project)
+        } else {
+            (Vec::new(), candidates)
+        };
+        let mut project_titles: HashMap<ProjectId, Option<String>> = HashMap::new();
+        let mut out = Vec::with_capacity(RECENT_WORK_LIMIT);
+        for task in same_project.into_iter().chain(other_project).take(RECENT_WORK_LIMIT) {
+            let events = self.store.events_for(task.id)?;
+            let artifacts = artifact_names_of(&events);
+            let outcome = recent_work_outcome(&task, &events);
+            let finished_at = if matches!(task.status, Status::Done | Status::Failed | Status::Blocked) {
+                Some(rfc3339(task.updated_at))
+            } else {
+                None
+            };
+            let project_title = match task.project_id {
+                Some(pid) => project_titles
+                    .entry(pid)
+                    .or_insert_with(|| self.store.project_get(pid).ok().flatten().map(|p| p.title))
+                    .clone(),
+                None => None,
+            };
+            out.push(RecentWork {
+                task_id: task.id,
+                title: task.title.clone(),
+                project_title,
+                status: task.status,
+                finished_at,
+                outcome,
+                artifacts,
+            });
+        }
+        Ok(out)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2906,6 +3034,7 @@ async fn run_worker(
             organization: extras.organization,
             conversation_addressee: extras.conversation_addressee,
             work_genre: extras.work_genre,
+            recent_work: extras.recent_work,
         },
     };
     let sink = StoreSink {
@@ -6432,5 +6561,312 @@ mod tests {
         assert!(preamble.contains("深夜は連絡しない"), "{preamble}");
         assert!(preamble.contains("pegasus のジョブは 1 ノードで始めてよい"), "{preamble}");
         assert!(!preamble.contains("coding-poc だけの規則"), "{preamble}");
+    }
+
+    // ---- Phase 33（ADR-0033 D4 追記。実機の事故の再発防止）: 担当は自分の仕事を知っている ----
+
+    /// `assignee` の仕事を 1 件作る（`kind = execute`、`Check::Human` はダミー。テストが `status` /
+    /// `project_id` / `updated_at` を直接指定できるようにするだけの下請け）。
+    fn work_task(
+        title: &str,
+        status: Status,
+        assignee: &str,
+        project_id: Option<ProjectId>,
+        updated_at: OffsetDateTime,
+    ) -> Task {
+        let dir = std::path::PathBuf::from("/nonexistent");
+        let mut t = new_task(&dir, Check::Human, 0);
+        t.title = title.to_string();
+        t.status = status;
+        t.assignee = Some(assignee.to_string());
+        t.project_id = project_id;
+        t.updated_at = updated_at;
+        t
+    }
+
+    fn titled_project(title: &str) -> Project {
+        let now = OffsetDateTime::now_utc();
+        Project {
+            id: ProjectId::new(),
+            title: title.to_string(),
+            request: "r".into(),
+            status: ProjectStatus::Active,
+            secretary_summary: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Phase 33 受け入れ 1: `run_extras` は対話 run にだけ、担当の直近の仕事を
+    /// 「更新の新しい順・案件優先・裏方（対話・まとめ・承認・レビュー）除外・最大 10 件」で集める。
+    #[test]
+    fn run_extras_recent_work_orders_by_project_then_recency_excludes_support_and_caps_at_ten() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        let base = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+
+        let project_a = titled_project("案件A");
+        store.project_create(&project_a).unwrap();
+        let project_b = titled_project("案件B");
+        store.project_create(&project_b).unwrap();
+
+        // 案件 A の仕事 6 件（t=100..105。新しい順は A5, A4, ..., A0）。
+        let mut a_ids = Vec::new();
+        for i in 0..6i64 {
+            let t = work_task(
+                &format!("A{i}"),
+                Status::Done,
+                "research-survey",
+                Some(project_a.id),
+                base + time::Duration::seconds(100 + i),
+            );
+            store.insert(&t).unwrap();
+            a_ids.push(t.id);
+        }
+        // 案件 B の仕事 6 件（t=200..205）。
+        let mut b_ids = Vec::new();
+        for i in 0..6i64 {
+            let t = work_task(
+                &format!("B{i}"),
+                Status::Done,
+                "research-survey",
+                Some(project_b.id),
+                base + time::Duration::seconds(200 + i),
+            );
+            store.insert(&t).unwrap();
+            b_ids.push(t.id);
+        }
+        // 裏方タスク（承認）は一番新しいが除外される。
+        let mut support = work_task(
+            "approval",
+            Status::Ready,
+            "research-survey",
+            Some(project_a.id),
+            base + time::Duration::seconds(999),
+        );
+        support.kind = TaskKind::Approval;
+        store.insert(&support).unwrap();
+        // まとめ（圧縮）役割も裏方として除外される。
+        let mut compaction = work_task(
+            "compaction",
+            Status::Done,
+            "research-survey",
+            Some(project_a.id),
+            base + time::Duration::seconds(998),
+        );
+        compaction.role = Some(task_core::COMPACTION_ROLE.to_string());
+        store.insert(&compaction).unwrap();
+        // 他の担当の仕事は一番新しいが除外される。
+        let other_assignee =
+            work_task("other", Status::Done, "research-data", None, base + time::Duration::seconds(999));
+        store.insert(&other_assignee).unwrap();
+
+        let adapter: Arc<dyn WorkerAdapter> =
+            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let dir = tempfile::tempdir().unwrap();
+        let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
+
+        // 案件 A を選んでいる対話。
+        let mut conv = work_task(
+            "conversation",
+            Status::Ready,
+            "research-survey",
+            Some(project_a.id),
+            base + time::Duration::seconds(1000),
+        );
+        conv.conversation = Some(task_core::MessageId::new());
+        store.insert(&conv).unwrap();
+
+        let extras = d.run_extras(&conv).unwrap();
+        assert_eq!(extras.recent_work.len(), 10, "capped at 10: {:?}", extras.recent_work);
+        let ids: Vec<TaskId> = extras.recent_work.iter().map(|w| w.task_id).collect();
+        let mut expected_a = a_ids.clone();
+        expected_a.reverse();
+        let mut expected_b_top4 = b_ids.clone();
+        expected_b_top4.reverse();
+        expected_b_top4.truncate(4);
+        let mut expected = expected_a;
+        expected.extend(expected_b_top4);
+        assert_eq!(ids, expected, "案件 A が先、残りは更新の新しい順");
+        assert!(!ids.contains(&support.id), "承認は裏方なので除外");
+        assert!(!ids.contains(&compaction.id), "まとめは裏方なので除外");
+        assert!(!ids.contains(&other_assignee.id), "他の担当の仕事は含めない");
+    }
+
+    /// Phase 33 受け入れ 1: 通常の run（対話でない）では `recent_work` は常に空
+    /// （担当がいても、他に仕事があっても）。
+    #[test]
+    fn run_extras_recent_work_is_empty_for_ordinary_runs() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        let base = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        let done = work_task("done work", Status::Done, "research-survey", None, base);
+        store.insert(&done).unwrap();
+
+        let adapter: Arc<dyn WorkerAdapter> =
+            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let dir = tempfile::tempdir().unwrap();
+        let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
+
+        let ordinary =
+            work_task("ordinary", Status::Ready, "research-survey", None, base + time::Duration::seconds(1));
+        store.insert(&ordinary).unwrap();
+        let extras = d.run_extras(&ordinary).unwrap();
+        assert!(extras.recent_work.is_empty(), "{:?}", extras.recent_work);
+    }
+
+    /// Phase 33 受け入れ 2: `outcome` は Phase 25 の報告の組み立て（`task_core::report`）を流用して
+    /// 決定的に作る — `done` は summary の 1 行目、`failed` は直近のレビュー不合格の理由かワーカーの
+    /// エラー（`web search returned nothing` / `idle timeout` を含む。より後のイベントが勝つ）、
+    /// それも無ければ `Failed` への遷移理由、`blocked` は直近の質問。
+    #[test]
+    fn recent_work_outcome_reuses_the_report_wording_for_done_failed_and_blocked() {
+        let done_events = vec![(
+            0u64,
+            Event::WorkerFinished {
+                run_id: "r1".into(),
+                outcome: "done: Pluvio と比較可能な非同期ランタイムを 3 件確認した\n詳細は成果物を参照".into(),
+                usage: None,
+                role: None,
+            },
+        )];
+        let done_task = Task { status: Status::Done, ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0) };
+        assert_eq!(
+            recent_work_outcome(&done_task, &done_events),
+            Some("Pluvio と比較可能な非同期ランタイムを 3 件確認した".to_string())
+        );
+
+        let idle_timeout_events = vec![(
+            0u64,
+            Event::WorkerFinished {
+                run_id: "r1".into(),
+                outcome: "error(retryable=true): idle timeout".into(),
+                usage: None,
+                role: None,
+            },
+        )];
+        let failed_task =
+            Task { status: Status::Failed, ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0) };
+        assert_eq!(recent_work_outcome(&failed_task, &idle_timeout_events), Some("idle timeout".to_string()));
+
+        let search_nothing_events = vec![(
+            0u64,
+            Event::WorkerFinished {
+                run_id: "r1".into(),
+                outcome: "error(retryable=true): web search returned nothing (possible search path failure: \
+                          expired key, CAPTCHA, or network block)"
+                    .into(),
+                usage: None,
+                role: None,
+            },
+        )];
+        assert_eq!(
+            recent_work_outcome(&failed_task, &search_nothing_events),
+            Some(
+                "web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)"
+                    .to_string()
+            )
+        );
+
+        // レビュー不合格は、その前のワーカーの `done` より優先される（より後のイベントだから）。
+        let review_failed_events = vec![
+            (0u64, Event::WorkerFinished { run_id: "r1".into(), outcome: "done: 一見よさそう".into(), usage: None, role: None }),
+            (
+                1u64,
+                Event::ReviewVerdict {
+                    run_id: "r1".into(),
+                    criterion_idx: 0,
+                    pass: false,
+                    reason: "rejected: evidence missing".into(),
+                },
+            ),
+        ];
+        assert_eq!(
+            recent_work_outcome(&failed_task, &review_failed_events),
+            Some("rejected: evidence missing".to_string())
+        );
+
+        // どちらも無ければ `Failed` への遷移理由にフォールバックする。
+        let fallback_events =
+            vec![(0u64, Event::Transitioned { from: Status::Reviewing, to: Status::Failed, reason: "child_failed".into() })];
+        assert_eq!(recent_work_outcome(&failed_task, &fallback_events), Some("child_failed".to_string()));
+
+        let question_events =
+            vec![(0u64, Event::QuestionRaised { run_id: "r1".into(), text: "どちらの案で進めますか？".into() })];
+        let blocked_task =
+            Task { status: Status::Blocked, ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0) };
+        assert_eq!(
+            recent_work_outcome(&blocked_task, &question_events),
+            Some("どちらの案で進めますか？".to_string())
+        );
+
+        // 進行中のタスクには要約を出さない。
+        let running_task =
+            Task { status: Status::Running, ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0) };
+        assert_eq!(recent_work_outcome(&running_task, &done_events), None);
+    }
+
+    /// Phase 33 受け入れ 3: `recent_work` の各行に案件名・成果物名・終了時刻も乗る。
+    #[test]
+    fn run_extras_recent_work_carries_project_title_and_artifacts() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        let base = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        let project = titled_project("Pluvio の新テーマ");
+        store.project_create(&project).unwrap();
+
+        let done = work_task("先行研究のまとめ", Status::Done, "research-survey", Some(project.id), base);
+        store.insert(&done).unwrap();
+        store
+            .append_event(
+                done.id,
+                &Event::WorkerFinished {
+                    run_id: "r1".into(),
+                    outcome: "done: Pluvio と比較可能な非同期ランタイムを 3 件確認した".into(),
+                    usage: None,
+                    role: None,
+                },
+            )
+            .unwrap();
+        store
+            .append_event(
+                done.id,
+                &Event::ArtifactProduced {
+                    run_id: "r1".into(),
+                    artifact: ArtifactRef {
+                        name: "survey.md".into(),
+                        path: "artifacts/survey.md".into(),
+                        sha256: String::new(),
+                        kind: "text".into(),
+                    },
+                },
+            )
+            .unwrap();
+
+        let adapter: Arc<dyn WorkerAdapter> =
+            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let dir = tempfile::tempdir().unwrap();
+        let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
+
+        let mut conv = work_task(
+            "conversation",
+            Status::Ready,
+            "research-survey",
+            Some(project.id),
+            base + time::Duration::seconds(1),
+        );
+        conv.conversation = Some(task_core::MessageId::new());
+        store.insert(&conv).unwrap();
+
+        let extras = d.run_extras(&conv).unwrap();
+        assert_eq!(extras.recent_work.len(), 1);
+        let w = &extras.recent_work[0];
+        assert_eq!(w.task_id, done.id);
+        assert_eq!(w.title, "先行研究のまとめ");
+        assert_eq!(w.project_title.as_deref(), Some("Pluvio の新テーマ"));
+        assert_eq!(w.status, Status::Done);
+        assert!(w.finished_at.is_some());
+        assert_eq!(w.outcome.as_deref(), Some("Pluvio と比較可能な非同期ランタイムを 3 件確認した"));
+        assert_eq!(w.artifacts, vec!["survey.md".to_string()]);
     }
 }

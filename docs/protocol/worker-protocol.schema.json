@@ -572,6 +572,52 @@
         }
       ]
     },
+    "RecentWork": {
+      "description": "`context.recent_work[]`（ADR-0033 D4 / Phase 33: 実機の事故 — 担当が自分の直近の仕事を知らずに\n「対象タスク ID が必要です」と聞き返した — の再発防止）。対話 run にだけ、その担当の直近の仕事を渡す。\n生成は決定的（ストアのタスクとイベントから組む。LLM は使わない。DESIGN 原則 1）。",
+      "properties": {
+        "artifacts": {
+          "description": "この仕事が残した成果物の名前（パスは含まない）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "description": "終端の要約: `done` なら `summary` の 1 行目、`failed` なら理由、`blocked` なら質問。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "title",
+        "status"
+      ],
+      "type": "object"
+    },
     "ReviewOutput": {
       "description": "`Review` run がワークスペース直下 `artifacts/review.json` に書く出力（ADR-0007 D1/D5）。",
       "properties": {
@@ -736,6 +782,13 @@
         "prior_review": {
           "items": {
             "$ref": "#/$defs/PriorReview"
+          },
+          "type": "array"
+        },
+        "recent_work": {
+          "description": "Phase 33（ADR-0033 D4 追記。実機の事故の再発防止）: 対話 run にだけ、その担当の直近の仕事\n（最大 10 件、更新の新しい順。案件を選んでいる対話ならその案件のものを先に）を渡す。\n通常の run（対話でない）では常に空。",
+          "items": {
+            "$ref": "#/$defs/RecentWork"
           },
           "type": "array"
         },
