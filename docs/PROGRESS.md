@@ -4342,3 +4342,76 @@ Local Deep Research）を選び「なぜ web search に失敗しているので�
 という要望が出れば `depends_on`（今回は同じ）とは別に `Task.retried_from` のような表示専用のリンクを
 GUI 側の表示ロジックに足す提案はあり得るが、taskd の状態機械には触れずに済む GUI 側の話なので今は
 提案しない）。
+
+## Phase 32 — LDR の report.md を成果物の形に（実機のレビュー不合格から。2026-09-18）
+
+**実機で起きたこと**: 関連研究調査課（`local-deep-research` アダプタ、Qwen + Tavily）の run が完走し、
+証拠ゲートも通った（検索 28 件・出典 24・引用 22・11 ドメイン）が、**レビュアー（Claude）が `report.md`
+を不合格にした**: 「1477 行の未加工の調査エージェントのトランスクリプト。本文が Summary / Findings /
+Final synthesis で 3 回以上重複、反復ログ、同じ 2〜3 論文の URL が繰り返される水増しの参考文献」。
+実物 `/home/rmaeda/taskd/workspaces/01M2S4NCCTW61NXCPS56557ZJ6/artifacts/report.md` で確認したところ、
+1 行目が objective 全文（`# ` を素直に足していた）、`## Summary` と `## Findings` の下にほぼ同一の統合
+結果全文が並び、`## Findings` の末尾（`### Final synthesis`）にも 3 回目の同じ全文、出典が同じ URL を
+複数回書く形になっていた。レビュアーの判定は正しい（実装上のバグ）。
+
+### 変更したファイル
+
+- `crates/task-worker/src/local_deep_research_run.py`: `report.md` を書く
+  `write_report_from_result` を全面的に書き直し、決定的（LLM を呼ばない）に次の形へ固定した。
+  - 題名: `body`（`build_report_body` が選んだ統合結果）が `#` 見出しで始まればそれをそのまま使う
+    （別途見出しを足さない）。`query`（アダプタが渡す問い）が既に `#` で始まる場合は従来どおりそちら
+    を優先（既存の `runner_report_does_not_double_the_markdown_heading` の互換）。どちらでもなければ
+    objective（`query`）の先頭 1 文（最初の「。」まで、最大 80 字。全文は使わない）を `# ` にする。
+  - 本文: 新関数 `build_report_body`/`_body_candidates`/`_is_same_body` で `summary` /
+    `formatted_findings` / `findings[].content` を集め、実質同じ本文（先頭 200 字が一致、または
+    片方が他方を含む）は最も長い 1 つにまとめて 1 回だけ書く。`## Summary`/`## Findings` のような
+    区画見出しは付けない。反復ログ（`iterations`/`findings[].question`）はここでは扱わない
+    （`research.json` にある。ADR-0031 D1）。
+  - 出典: 新関数 `render_sources_section` で `## 出典` を 1 つ書く。`sources` の元の順（= LDR の
+    引用番号順）を保ったまま URL で重複排除し、重複行は本文中の `[n]` 参照を書き換えずに
+    `[n] (= [m])` に畳む（安全な書き換えができないため。ADR-0029 D1 追記どおりの安全策）。
+  - 旧 `render_source`/`render_finding` は新実装に置き換えて削除。モジュール docstring に新しい
+    `report.md` の形を追記。
+- `crates/task-worker/src/local_deep_research.rs`: 回帰テストを 2 件追加（テストのみ、実装は
+  上記 `.py` に閉じている）。
+  - `runner_report_deduplicates_the_body_and_sources_like_the_real_incident`: 実物と同じ構造
+    （`summary` == `formatted_findings` == 全文、`findings` にも同じ本文、`sources` に同じ URL が
+    4 回）の偽の戻り値で、本文が 1 回だけ・`## Summary`/`## Findings`/`## Final synthesis` が
+    無い・題名が LDR の `#` 見出し・出典が URL で重複排除され番号対応（`[n] (= [m])`）が保たれる
+    ことを確認。
+  - `runner_report_title_falls_back_to_the_objectives_first_sentence_when_capped`: 統合結果が `#`
+    で始まらないとき、長い objective は先頭 1 文が 80 字上限で切り詰められ全文を含まないこと、
+    短い objective は最初の「。」でちょうど文が終わることを確認。
+- `docs/adr/0029-web-research-harness.md` D1 に「`report.md` の形（Phase 32）」を追記（実機のレビュー
+  不合格の事実と、題名・本文 1 回・出典重複排除の規則）。
+- `docs/PROGRESS.md`（本節）。
+
+### 判断が必要な点（無し）
+
+依頼の「決定（そのまま実装）」節がフィールド単位まで具体的だったため独自判断は無し。ただし出典の
+「番号を振り直し、本文中の `[n]` も同じ対応で書き換える」は行わず、依頼が明示的に許可した安全側の
+代替（「番号は保ったまま重複 URL の行だけを `[n] (= [m])` と畳む」）を常に採用した（本文の `[n]` を
+機械的に書き換えるのは、コードブロック中の `[1]` のような無関係な角括弧を誤って書き換える危険があり、
+「安全にできなければ」の条件を満たすと判断したため）。
+
+### 実行したコマンドと結果
+
+- `cargo test -p task-worker --lib local_deep_research` **25 passed**（新規 2 件を含む。python3 を使う
+  `runner_*` テストは実機に python3 があるため実際に走った＝skip されていない）。
+- `cargo test --workspace`: **1001 passed**、`grep -c "^test result: FAILED"` = **0**（Phase 31 の
+  999 から +2: task-worker の新規回帰テスト 2 件）。
+- `cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。
+- テスト以外に `unwrap()` は追加していない（変更は `local_deep_research_run.py`（Python、対象外）と
+  `local_deep_research.rs` の `#[cfg(test)]` 内の追加テストのみ）。ディスパッチャ・ストアに触れておらず
+  LLM 呼び出しも追加していない（`report.md` の組み立ては文字列の集約・重複排除のみ）。
+
+### 未解決事項
+
+- 実機の `/home/rmaeda/taskd/workspaces/01M2S4NCCTW61NXCPS56557ZJ6/artifacts/report.md` は今回の
+  run が過去に書いたものなので直っていない（run をやり直すか、次にこの run が retry されたときに
+  新しいランナーで書き直される）。次回この genre の run が実行された際に、レビュアーが合格判定を
+  出すかを実機で確認する余地が残っている（本タスクの範囲は決定的なフォーマット修正のみ）。
+
+### 提案
+
+なし。

@@ -30,6 +30,19 @@ expose a per-search-engine result count, so this is used as an acceptable
 proxy for "how many hits did the search path return in total" (documented
 here and in the Phase 21 implementation report per the task instructions).
 
+`report.md` (`write_report_from_result`) is built mechanically too -- no LLM
+involved. A real run (Phase 32) showed LDR can return `summary` and
+`formatted_findings` that are the same synthesis text 2-3 times over (plus an
+inflated, repeated-URL source list); the reviewer correctly rejected that.
+So the body is de-duplicated (`build_report_body`: `summary` /
+`formatted_findings` / `findings[].content` that are substantially the same
+text collapse into the single longest one, written once, with no
+`## Summary`/`## Findings` section headings), the heading comes from LDR's
+own `#`-prefixed synthesis when present (else the first sentence of the
+objective, not the whole objective), and `## 出典` de-duplicates by URL while
+keeping the original citation numbers (`[n] (= [m])` for a repeat) so `[n]`
+references in the body still point at the right line.
+
 Only the standard library and `local_deep_research` are used. The
 `local_deep_research` import happens lazily inside main() so this module can
 be imported on its own (e.g. to unit test `convert_setting_value` or
@@ -268,52 +281,137 @@ def build_evidence_manifest_from_text(text):
     return sources_list, research
 
 
-def render_source(source):
-    if isinstance(source, dict):
-        url = source.get("url") or source.get("link") or ""
-        title = source.get("title") or source.get("name") or url or "source"
-        if url:
-            return f"- [{title}]({url})"
-        return f"- {title}"
-    return f"- {source}"
+def _collapse_whitespace(text):
+    return " ".join(str(text).split())
 
 
-def render_finding(finding):
-    if isinstance(finding, dict):
+def objective_title_sentence(text, max_chars=80):
+    """タスクの objective（`query`）から題名の材料を取る（実機のレビュー不合格の是正:
+    以前は objective 全文を `# ` に足していたため、1477 行の報告の 1 行目が objective 丸ごとに
+    なっていた）。空白をたたんだ上で、最初の「。」までの 1 文（無ければ全体）を、最大
+    `max_chars` 字に切り詰める。
+    """
+    collapsed = _collapse_whitespace(text)
+    period = collapsed.find("。")
+    sentence = collapsed[: period + 1] if period != -1 else collapsed
+    if len(sentence) > max_chars:
+        sentence = sentence[:max_chars]
+    return sentence
+
+
+def _body_candidates(result):
+    """本文になり得る候補（`summary`、`formatted_findings`、`findings[].content`）を、書かれた順に
+    集める。空・非文字列は除く。
+    """
+    candidates = []
+    summary = str(result.get("summary") or "").strip()
+    if summary:
+        candidates.append(summary)
+    formatted_findings = result.get("formatted_findings")
+    if isinstance(formatted_findings, str):
+        formatted_findings = formatted_findings.strip()
+        if formatted_findings:
+            candidates.append(formatted_findings)
+    for finding in result.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
         text = finding.get("finding") or finding.get("content") or finding.get("text")
-        if text:
-            return f"- {text}"
-        return f"- {json.dumps(finding, ensure_ascii=False, default=str)}"
-    return f"- {finding}"
+        if isinstance(text, str):
+            text = text.strip()
+            if text:
+                candidates.append(text)
+    return candidates
+
+
+def _is_same_body(a, b, prefix_chars=200):
+    """2 つの本文候補が「実質同じ」か（先頭 `prefix_chars` 字が一致、または片方が他方を含む）。"""
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    return len(a) >= prefix_chars and len(b) >= prefix_chars and a[:prefix_chars] == b[:prefix_chars]
+
+
+def build_report_body(result):
+    """`report.md` の本文を組み立てる（実機のレビュー不合格の是正。ADR-0029 D1 追記）。
+    `summary` / `formatted_findings` / `findings[].content` のうち実質同じもの
+    （`_is_same_body`）は最も長い 1 つにまとめ、1 回だけ書く。`## Summary` / `## Findings` /
+    `## Final synthesis` のような区画見出しは付けない。反復ログ（`iterations` /
+    `findings[].question` の羅列）はここでは扱わない（`research.json` にある。ADR-0031 D1）。
+    純粋に文字列の集約・重複排除だけで、LLM は呼ばない。
+    """
+    groups = []
+    for candidate in _body_candidates(result):
+        merged = False
+        for i, kept in enumerate(groups):
+            if _is_same_body(candidate, kept):
+                if len(candidate) > len(kept):
+                    groups[i] = candidate
+                merged = True
+                break
+        if not merged:
+            groups.append(candidate)
+    return "\n\n".join(groups)
+
+
+def render_sources_section(sources):
+    """`## 出典` の中身。`sources` の元の順（= LDR の引用番号順）を保ったまま、URL の重複行は
+    `[n] (= [m])` に畳む（本文中の `[n]` 参照を書き換えるのは安全にできないため。ADR-0029 D1 追記）。
+    """
+    lines = []
+    first_index_for_url = {}
+    for i, raw in enumerate(sources, start=1):
+        if isinstance(raw, dict):
+            url = raw.get("link") or raw.get("url") or ""
+            title = raw.get("title") or raw.get("name") or url or "source"
+        else:
+            url = str(raw)
+            title = url
+        if not url:
+            continue
+        if url in first_index_for_url:
+            lines.append(f"[{i}] (= [{first_index_for_url[url]}])")
+        else:
+            first_index_for_url[url] = i
+            lines.append(f"[{i}] {title} — {url}")
+    if not lines:
+        lines.append("(no sources)")
+    return lines
 
 
 def write_report_from_result(report_path, query, result):
-    summary = str(result.get("summary") or "").strip()
-    formatted_findings = result.get("formatted_findings")
-    findings = result.get("findings") or []
-    sources = result.get("sources") or []
+    """`report.md` を書く。題名は次の優先順で決める（実機のレビュー不合格の是正):
+      1. `query`（アダプタが渡す問い）が既に `#` 見出しで始まっていればそれを使う
+         （そのまま `# {query}` にすると見出しが二重になるので、これまでどおり避ける）。
+      2. 本文（`build_report_body`）が `#` 見出しで始まっていればそれを題名として使い、
+         別途見出しは足さない（LDR 自身が付けた題名を優先する）。
+      3. どちらでもなければ、objective（`query`）の先頭 1 文を `# ` にする
+         （以前は objective 全文を見出しにしていたため 1 行目が肥大化していた）。
+    本文は `build_report_body` が返す 1 回分だけ。出典は `render_sources_section` が
+    引用番号を保ったまま URL で重複排除する。
+    """
+    body = build_report_body(result)
+    raw_summary = str(result.get("summary") or "").strip()
+    q = (query or "").strip()
 
-    # 問いはアダプタが作った本文（タスクのタイトルを `# ...` の見出しとして含むことがある）。
-    # そのまま `# {query}` にすると見出しが二重になるので、既に見出しで始まっていればそのまま使う。
-    heading = query.strip() if query.strip().startswith("#") else f"# {query.strip()}"
-    lines = [heading, "", "## Summary", "", summary or "(no summary)", "", "## Findings", ""]
-    if isinstance(formatted_findings, str) and formatted_findings.strip():
-        lines.append(formatted_findings.strip())
-    elif findings:
-        lines.extend(render_finding(f) for f in findings)
+    if q.startswith("#"):
+        heading = q.splitlines()[0].strip()
+        main_section = f"{heading}\n\n{body or '(no summary)'}"
+    elif body.startswith("#"):
+        main_section = body
     else:
-        lines.append("(no findings)")
-    lines.extend(["", "## Sources", ""])
-    if sources:
-        lines.extend(render_source(s) for s in sources)
-    else:
-        lines.append("(no sources)")
+        heading = f"# {objective_title_sentence(q)}"
+        main_section = f"{heading}\n\n{body or '(no summary)'}"
+
+    sources = result.get("sources") or []
+    lines = [main_section, "", "## 出典", ""]
+    lines.extend(render_sources_section(sources))
     lines.append("")
 
     with open(report_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines))
 
-    return summary, len(sources)
+    return raw_summary or body, len(sources)
 
 
 def summarize_report_file(report_path):

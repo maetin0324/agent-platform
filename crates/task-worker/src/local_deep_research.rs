@@ -993,6 +993,153 @@ print(json.dumps(out))
         assert_eq!(values, serde_json::json!(["# Title", "# plain question"]));
     }
 
+    /// Phase 32: 実機で起きたレビュー不合格（`report.md` が summary/formatted_findings/findings の
+    /// 全文を 3 回以上重複させ、出典も同じ URL を 4 回書いていた）の回帰。実物と同じ構造（`summary` ==
+    /// `formatted_findings` == 全文、`findings` にも同じ本文、`sources` に同じ URL が 4 回）の偽の戻り値で:
+    /// 本文が 1 回だけ書かれ、`## Summary`/`## Findings` のような区画見出しが付かず、題名は LDR 自身の
+    /// `#` 見出しを使い、出典は URL で重複排除されつつ元の引用番号（`[n]`）との対応が保たれる。
+    #[test]
+    fn runner_report_deduplicates_the_body_and_sources_like_the_real_incident() {
+        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+            eprintln!("skipping: python3 not available");
+            return;
+        };
+        if !python.status.success() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r###"
+import importlib.util, json, os, sys, tempfile
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+full_body = (
+    "# Pluvioの隣接領域に関する研究動向と研究テーマ候補\n\n"
+    "## 0. 調査の前提と対象\n\n本文の中身はここに詳しく書かれる [1][2]。"
+)
+result = {
+    "summary": full_body,
+    "formatted_findings": full_body,
+    "findings": [
+        {"content": full_body},
+        {"content": full_body},
+    ],
+    "sources": [
+        {"link": "https://a.example.com/paper", "title": "Paper A"},
+        {"link": "https://a.example.com/paper", "title": "Paper A (dup)"},
+        {"link": "https://a.example.com/paper", "title": "Paper A (dup2)"},
+        {"link": "https://a.example.com/paper", "title": "Paper A (dup3)"},
+        {"link": "https://b.example.org/other", "title": "Other B"},
+    ],
+}
+with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "report.md")
+    mod.write_report_from_result(path, "この objective は無視され、LDR 自身の見出しが優先される。", result)
+    with open(path) as f:
+        text = f.read()
+print(json.dumps({
+    "title": text.splitlines()[0],
+    "body_occurrences": text.count("本文の中身はここに詳しく書かれる"),
+    "has_summary_heading": "## Summary" in text,
+    "has_findings_heading": "## Findings" in text,
+    "has_final_synthesis_heading": "## Final synthesis" in text,
+    "sources_section": [line for line in text.splitlines() if line.startswith("[")],
+}))
+"###;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(value["title"], "# Pluvioの隣接領域に関する研究動向と研究テーマ候補");
+        assert_eq!(value["body_occurrences"], serde_json::json!(1));
+        assert_eq!(value["has_summary_heading"], serde_json::json!(false));
+        assert_eq!(value["has_findings_heading"], serde_json::json!(false));
+        assert_eq!(value["has_final_synthesis_heading"], serde_json::json!(false));
+        assert_eq!(
+            value["sources_section"],
+            serde_json::json!([
+                "[1] Paper A — https://a.example.com/paper",
+                "[2] (= [1])",
+                "[3] (= [1])",
+                "[4] (= [1])",
+                "[5] Other B — https://b.example.org/other",
+            ])
+        );
+    }
+
+    /// Phase 32: LDR の統合結果が `#` 見出しで始まらないときは、objective（`query`）の先頭 1 文
+    /// （最初の「。」まで、最大 80 字）を題名にする。objective 全文をそのまま見出しにしない
+    /// （実機の回帰: 1 行目が objective 丸ごとになっていた）。
+    #[test]
+    fn runner_report_title_falls_back_to_the_objectives_first_sentence_when_capped() {
+        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+            eprintln!("skipping: python3 not available");
+            return;
+        };
+        if !python.status.success() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, os, sys, tempfile
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+long_objective = (
+    "Pluvio（ad-hoc FSのI/Oサーバ向け非同期ランタイム、IEEE Cluster 2026 Best Paper Finalist）の"
+    "隣接領域について直近の研究動向をWeb調査し、次の研究テーマ候補を3〜5件まとめる。"
+    "探索範囲は特定の学会・締切に絞らず自由でよいが、Pluvioの非同期I/Oランタイムという資産を活かせる方向を優先すること。"
+)
+short_objective = "Kubernetesの最新動向を調べる。詳細な補足がここに続くがタイトルには含まれない。"
+result = {"summary": "以下にまとめます。中身はここに続く。", "sources": []}
+
+def title_of(objective):
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "report.md")
+        mod.write_report_from_result(path, objective, result)
+        with open(path) as f:
+            return f.read().splitlines()[0]
+
+long_title = title_of(long_objective)
+short_title = title_of(short_objective)
+print(json.dumps({
+    "long_title": long_title,
+    "long_title_len": len(long_title) - 2,
+    "short_title": short_title,
+}))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        // 長い objective: 最初の「。」より前に 80 字上限に達するので、そこで切り詰められる
+        // （objective 全文を見出しにしない。実機の回帰の是正）。
+        let long_title = value["long_title"].as_str().expect("long_title string");
+        assert!(long_title.starts_with("# Pluvio"), "{long_title}");
+        assert!(!long_title.contains("優先すること"), "{long_title} should not include the whole objective");
+        let long_title_len = value["long_title_len"].as_u64().expect("long_title_len");
+        assert!(long_title_len <= 80, "{long_title_len}");
+        // 短い objective: 最初の「。」が 80 字より前にあるので、そこで文が終わる（それ以降の
+        // 補足文は含まない）。
+        assert_eq!(value["short_title"], "# Kubernetesの最新動向を調べる。");
+    }
+
     /// ランナーの `convert_setting_value`（int/float/bool/JSON 配列・オブジェクトへの変換）を、実際に
     /// 埋め込んだスクリプトに対して python3 で直接確認する（`local_deep_research` の import は
     /// `main()` の中だけにあるので、パッケージ未導入でもモジュールとして読み込める。ネットワークには出ない）。

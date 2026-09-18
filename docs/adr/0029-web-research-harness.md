@@ -34,6 +34,15 @@ ADR-0027 で `related-research`（PaperQA2）が入ったが、これは**論文
   - 入力: 第 1 引数に JSON ファイル（`{query, mode, settings, iterations, questions_per_iteration, report_path}`）。
   - 標準出力: 1 行 1 メッセージの進捗（`progress: …`）と、最後に 1 行だけ `TASKD_RESULT {"summary": …, "sources": N}`。
   - `report_path` に本文（Markdown）を書く。失敗時は 0 以外で終了し、理由を標準エラーに出す。
+- **`report.md` の形（Phase 32。実機で完走した web-research の run をレビュアーが不合格にした:
+  「1477 行の未加工トランスクリプト。本文が Summary/Findings/Final synthesis で 3 回以上重複、
+  同じ URL を 4 回書く水増しの参考文献」）。以後は決定的に（LLM を呼ばずに）次の形に固定する:**
+  - 題名は LDR の統合結果（`formatted_findings`/`summary`）が `#` 見出しで始まればそれを使い、
+    始まっていなければ objective の先頭 1 文（最大 80 字。objective 全文は使わない）。
+  - 本文は `summary`/`formatted_findings`/`findings[].content` のうち実質同じもの（先頭 200 字が
+    一致、または片方が他方を含む）を最も長い 1 つにまとめ、1 回だけ書く（区画見出しは付けない）。
+  - `## 出典` は `sources` を引用番号順のまま URL で重複排除し、重複行は `[n] (= [m])` に畳む
+    （本文中の `[n]` 参照を書き換えるのは安全にできないため。番号は保つ）。
 - 設定:
   ```toml
   [adapters.local_deep_research]
