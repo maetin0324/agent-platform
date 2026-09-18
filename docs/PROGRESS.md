@@ -4897,3 +4897,72 @@ information"、証拠ゲートが `cited=0` で落とした）ため、**取得�
 - P-91: 検索語を立てる LLM 呼び出しは「ハーネスの中の 1 回」なので予算（`max_turns`）にも
   usage にも出ない。ローカル LLM では気にならないが、課金される口を使う構成では run の費用に
   含めて数えたい（`Usage` に足すか、ゲートと同じく「ハーネスの取り分」として別枠にするか）。
+
+## Phase 37 — LDR detailed モードの設定（実機の失敗から。2026-09-18）
+
+### 経緯
+
+本番（2026-09-18）で `[adapters.local_deep_research] mode = "detailed"` の run が
+`local_deep_research call failed: Ollama model not configured. Please set llm.model in settings`
+（exit 1）で落ちた。`quick` は同じ `settings`（`llm.provider = openai_endpoint` /
+`llm.openai_endpoint.url` / `llm.model = qwen3.8-27b` / `search.tool = tavily`）で動く。
+
+### 実機で確かめたこと（`~/taskd/ldr/.venv`、LDR 1.10.7）
+
+`inspect.getsource` で読んだ結果、`quick_summary`/`generate_report` は `settings_override` を
+明示の引数として受け取り内部で `create_settings_snapshot(overrides=settings_override, ...)` を
+呼ぶが、**`detailed_research(query, research_id=None, retrievers=None, llms=None, username=None,
+**kwargs)` には `settings`/`settings_override` という引数自体が無い**。ランナーが渡していた
+`settings_override=settings` は `**kwargs` に落ちて誰にも消費されず、`detailed_research` は
+`"settings_snapshot" not in kwargs` のときは引数無しの `create_settings_snapshot()`（= 既定値・
+環境変数のみ）を使ってしまうため、`llm.model` が設定されず Ollama 前提のまま失敗していた。
+
+トンネル越しの Qwen3.8-27B（`127.0.0.1:18000/v1`）と Wikipedia 検索を使い、`detailed_research` を
+直接 1 回呼んで確認した（`iterations=1`, `questions_per_iteration=1`）:
+
+```
+$ ~/taskd/ldr/.venv/bin/python - <<'EOF'
+from local_deep_research.api import detailed_research, create_settings_snapshot
+settings = {"llm.provider": "openai_endpoint",
+            "llm.openai_endpoint.url": "http://127.0.0.1:18000/v1",
+            "llm.openai_endpoint.api_key": "unused", "llm.model": "qwen3.8-27b",
+            "search.tool": "wikipedia"}
+result = detailed_research("What is the capital of France?",
+                            settings_snapshot=create_settings_snapshot(overrides=settings),
+                            iterations=1, questions_per_iteration=1)
+print(list(result.keys()))
+EOF
+OK, keys: ['query', 'research_id', 'summary', 'findings', 'iterations', 'questions', 'formatted_findings', 'sources', 'metadata']
+```
+
+同じ `settings` を旧来どおり `settings_override=settings` として渡すと、上と同じ
+`ValueError("Ollama model not configured. Please set llm.model in settings ...")` になることも
+実機で再現した（回帰確認）。`generate_report` は `settings_override` を明示の引数に持つので同じ
+問題は無い（署名を確認済み。`report` モードは変更していない）。
+
+### 対応
+
+`crates/task-worker/src/local_deep_research_run.py` の `detailed` 分岐だけを、
+`detailed_research(query, settings_snapshot=create_settings_snapshot(overrides=settings), ...)`
+に変更した（`quick`/`report` は変更なし）。`docs/adr/0029-web-research-harness.md` に「2.6 訂正2」
+として上記の事実（署名・正しい呼び方・実機の 1 回分の証拠）を追記した。
+
+### 証拠コマンドと結果
+
+- `cargo test -p task-worker local_deep_research` → **27 passed; 0 failed**（新規テスト
+  `runner_detailed_mode_passes_settings_via_settings_snapshot` を含む。偽の `local_deep_research`
+  パッケージを `sys.modules` に注入してランナーの `main()` を実際に呼び、`detailed` モードで
+  `create_settings_snapshot` に `overrides=settings` が渡り、その戻り値が `detailed_research` に
+  `settings_snapshot` として渡ること／`settings_override` としては渡らないことを確認）。
+- `cargo test --workspace` → `grep -c "^test result: FAILED"` = **0**、合計 **1,046 passed**
+  （0 failed）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**。
+
+### 未解決事項
+
+- U37-1: 実機で `detailed_research` を Wikipedia 検索で 1 回通した際は `sources: 0`（Wikipedia が
+  この問いにヒットしなかっただけで、設定自体は効いていた。エラーが「Ollama model not configured」
+  から検索結果の話に変わったことで設定が通っていることは確認できる）。本番の `tavily` 設定での
+  `detailed` モードのフル実行（成果物の中身の確認）は本タスクの範囲外なので未実施。
+- U37-2: `mode = "report"` は署名上は同じ問題を抱えていないが、実機のフル実行（`generate_report` が
+  実際に `report_path` へ書く内容）はこの対応では確認していない。

@@ -448,7 +448,12 @@ def main():
     report_path = payload["report_path"]
 
     try:
-        from local_deep_research.api import detailed_research, generate_report, quick_summary
+        from local_deep_research.api import (
+            create_settings_snapshot,
+            detailed_research,
+            generate_report,
+            quick_summary,
+        )
     except Exception as exc:  # pragma: no cover - exercised only with the real package installed
         print(f"failed to import local_deep_research: {exc}", file=sys.stderr)
         return 1
@@ -474,8 +479,19 @@ def main():
             summary, _ = write_report_from_result(report_path, query, result)
             sources_list, research = build_evidence_manifest(result)
         elif mode == "detailed":
+            # `detailed_research` has no `settings_override`/`settings` parameter of its
+            # own (unlike `quick_summary`/`generate_report`): it only honours a
+            # `settings_snapshot` kwarg, and otherwise falls back to
+            # `create_settings_snapshot()` with no overrides, silently ignoring any
+            # `settings_override` passed in `**kwargs`. Confirmed against the real
+            # package (ADR-0029): calling with `settings_override=settings` raises
+            # "Ollama model not configured" even when `settings` has `llm.model` set,
+            # while `settings_snapshot=create_settings_snapshot(overrides=settings)`
+            # uses it correctly.
             result = call_with_fallback(
-                detailed_research, {"query": query, "settings_override": settings}, optional_kwargs
+                detailed_research,
+                {"query": query, "settings_snapshot": create_settings_snapshot(overrides=settings)},
+                optional_kwargs,
             )
             if not isinstance(result, dict):
                 print(f"detailed_research returned an unexpected type: {type(result)!r}", file=sys.stderr)
