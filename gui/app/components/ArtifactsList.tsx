@@ -95,6 +95,12 @@ function ArtifactRow({ row, fetchedAt }: { row: ProjectArtifactRow; fetchedAt: s
             ) : (
               <code className="font-mono">{workspace.text}</code>
             )}
+            {/* ADR-0039 D3（Phase G13k）: Remote は編集を手元、検証をリモートで行う。手元の写しの場所も添える。 */}
+            {workspace.localCopyNote && (
+              <span className="ml-1" data-testid="artifact-workspace-local-copy">
+                （{workspace.localCopyNote}）
+              </span>
+            )}
           </p>
           <p className="text-xs tabular-nums text-fg-subtle">{artifactRelativeTime(artifact.ts, fetchedAt)}</p>
         </div>

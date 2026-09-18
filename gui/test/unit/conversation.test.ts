@@ -201,6 +201,49 @@ describe("loadConversation", () => {
       loadConversation(client, "secretary", new Request("http://gui.invalid/org/secretary")),
     ).rejects.toMatchObject({ status: 401 });
   });
+
+  // ADR-0039 D1（Phase G13k）: 「新しい案件として」の作業場所（クラスタ）の選択肢。
+  it("GET /clusters の一覧を通す（落ちても空扱い、対話自体は出す）", async () => {
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/org/secretary/messages", (_req, res) =>
+      sendJson(res, 200, { items: [] } satisfies MessageList),
+    );
+    mock.on("GET", "/api/v1/clusters", (_req, res) =>
+      sendJson(res, 200, {
+        items: [
+          {
+            id: "pegasus",
+            host: "pegasus",
+            concurrency: 1,
+            delete_on_push: false,
+            env_keys: [],
+            has_setup: false,
+            rsync_excludes: [],
+            sync: "rsync",
+          },
+        ],
+      }),
+    );
+
+    const result = await loadConversation(client, "secretary", new Request("http://gui.invalid/org/secretary"));
+    expect(result.clusters).toHaveLength(1);
+    expect(result.clusters[0].id).toBe("pegasus");
+  });
+
+  it("GET /clusters が落ちても対話は出す（クラスタは空扱い）", async () => {
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/org/secretary/messages", (_req, res) =>
+      sendJson(res, 200, { items: [] } satisfies MessageList),
+    );
+    mock.on("GET", "/api/v1/clusters", (_req, res) =>
+      sendProblem(res, { status: 500, code: "internal", detail: "boom" }),
+    );
+
+    const result = await loadConversation(client, "secretary", new Request("http://gui.invalid/org/secretary"));
+    expect(result.clusters).toEqual([]);
+  });
 });
 
 describe("buildMessagePostBody", () => {
@@ -295,6 +338,50 @@ describe("startProjectFromMessage（秘書に話しかけて新しい案件に�
       expect(outcome.error.fields.request).toEqual(["must not be empty"]);
     }
   });
+
+  // ADR-0039 D1（Phase G13k）: 秘書の「新しい案件として」にも作業場所を渡せる。
+  it("workspace を渡すと本文に足す", async () => {
+    mock.on("POST", "/api/v1/projects", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({
+        title: projectTitleFromText("Pluvio の PoC"),
+        request: "Pluvio の PoC",
+        workspace: { kind: "local", path: "~/workspace/rust/pluvio-poc" },
+      });
+      sendJson(res, 201, project());
+    });
+    const outcome = await startProjectFromMessage(client, "Pluvio の PoC", {
+      kind: "local",
+      path: "~/workspace/rust/pluvio-poc",
+    });
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("workspace が null（まだ決めない）なら workspace キーを送らない", async () => {
+    mock.on("POST", "/api/v1/projects", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ title: projectTitleFromText("Pluvio の PoC"), request: "Pluvio の PoC" });
+      sendJson(res, 201, project());
+    });
+    const outcome = await startProjectFromMessage(client, "Pluvio の PoC", null);
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("422 validation（知らない cluster）は errors[].field = 'workspace.cluster' をそのまま返す", async () => {
+    mock.on("POST", "/api/v1/projects", (_req, res) =>
+      sendProblem(res, {
+        status: 422,
+        code: "validation",
+        detail: "unknown cluster: nope",
+        extra: { errors: [{ field: "workspace.cluster", message: "unknown cluster: nope" }] },
+      }),
+    );
+    const outcome = await startProjectFromMessage(client, "Pluvio の PoC", {
+      kind: "remote",
+      cluster: "nope",
+      path: "/x",
+    });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error.fields["workspace.cluster"]).toEqual(["unknown cluster: nope"]);
+  });
 });
 
 describe("runConversationAction（どちらを呼ぶかはフォームの値だけで決まる）", () => {
@@ -310,6 +397,27 @@ describe("runConversationAction（どちらを呼ぶかはフォームの値だ�
     );
     expect(outcome).toEqual({ ok: true, op: "new_project", project: project() });
     expect(mock.requests.map((r) => r.url)).toEqual(["/api/v1/projects"]);
+  });
+
+  it("「新しい案件として」+ 作業場所欄がそのまま POST /projects の workspace になる", async () => {
+    mock.on("POST", "/api/v1/projects", (_req, res, body) => {
+      expect(JSON.parse(body)).toMatchObject({
+        workspace: { kind: "remote", cluster: "pegasus", path: "/work/NBB/rmaeda/workspace/rust/benchfs" },
+      });
+      sendJson(res, 201, project());
+    });
+    const outcome = await runConversationAction(
+      client,
+      "secretary",
+      form([
+        ["text", "Pluvio の新テーマ"],
+        ["new_project", "on"],
+        ["workspace_kind", "remote"],
+        ["workspace_cluster", "pegasus"],
+        ["workspace_path", "/work/NBB/rmaeda/workspace/rust/benchfs"],
+      ]),
+    );
+    expect(outcome).toEqual({ ok: true, op: "new_project", project: project() });
   });
 
   it("付いていなければ POST /org/{id}/messages", async () => {

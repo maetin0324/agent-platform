@@ -278,6 +278,57 @@ describe("loadProjectDetail", () => {
     expect(result.artifactRows[0].artifact).toEqual(artifacts.items[0]);
   });
 
+  // ADR-0039 D1（Phase G13k）: 案件の作業場所は loader を素通りする（GUI 側で新しい判断はしない）。
+  it("project.workspace をそのまま通し、GET /clusters を編集フォームの選択肢として添える", async () => {
+    const detail: ProjectDetail = {
+      project: project({ workspace: { kind: "remote", cluster: "pegasus", path: "/work/NBB/rmaeda/benchfs" } }),
+      milestones: [],
+      tasks: [],
+    };
+    mock.on("GET", "/api/v1/projects/p1", (_req, res) => sendJson(res, 200, detail));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/reports", (_req, res) => sendJson(res, 200, { items: [] } satisfies ReportList));
+    mock.on("GET", "/api/v1/clusters", (_req, res) =>
+      sendJson(res, 200, {
+        items: [
+          {
+            id: "pegasus",
+            host: "pegasus",
+            concurrency: 1,
+            delete_on_push: false,
+            env_keys: [],
+            has_setup: false,
+            rsync_excludes: [],
+            sync: "rsync",
+          },
+        ],
+      }),
+    );
+
+    const result = await loadProjectDetail(client, "p1", new Request("http://gui.invalid/projects/p1"));
+
+    expect(result.detail.project.workspace).toEqual({
+      kind: "remote",
+      cluster: "pegasus",
+      path: "/work/NBB/rmaeda/benchfs",
+    });
+    expect(result.clusters).toHaveLength(1);
+    expect(result.clusters[0].id).toBe("pegasus");
+  });
+
+  it("GET /clusters が落ちても案件の詳細は返す（選択肢は空扱い）", async () => {
+    const detail: ProjectDetail = { project: project(), milestones: [], tasks: [] };
+    mock.on("GET", "/api/v1/projects/p1", (_req, res) => sendJson(res, 200, detail));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/reports", (_req, res) => sendJson(res, 200, { items: [] } satisfies ReportList));
+    mock.on("GET", "/api/v1/clusters", (_req, res) =>
+      sendProblem(res, { status: 500, code: "internal", detail: "boom" }),
+    );
+
+    const result = await loadProjectDetail(client, "p1", new Request("http://gui.invalid/projects/p1"));
+    expect(result.clusters).toEqual([]);
+  });
+
   it("404 project_not_found は例外として投げる（loader が Response に変換する）", async () => {
     mock.on("GET", "/api/v1/projects/missing", (_req, res) =>
       sendProblem(res, { status: 404, code: "project_not_found", detail: "no such project" }),

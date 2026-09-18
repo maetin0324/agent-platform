@@ -8,6 +8,7 @@ import { Card, CardBody } from "~/components/ui/card";
 import { checkboxClass, hintClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { WorkspaceFields } from "~/components/WorkspaceFields";
 import {
   CONVERSATION_POLL_MS,
   CONVERSATION_WAIT_LIMIT_MS,
@@ -40,7 +41,7 @@ interface Waiting {
 }
 
 export function Conversation({ data }: { data: ConversationData }) {
-  const { nodeId, node, projects, projectId, messages, attention } = data;
+  const { nodeId, node, projects, projectId, messages, attention, clusters } = data;
   const isSecretary = nodeId === SECRETARY_NODE_ID;
   const [searchParams] = useSearchParams();
   const fetcher = useFetcher<ConversationOpOutcome>();
@@ -104,6 +105,13 @@ export function Conversation({ data }: { data: ConversationData }) {
   const project = projects.find((p) => p.id === projectId) ?? null;
   // 送信のたびに入力欄と「新しい案件として」を初期状態へ戻す（案件を切り替えたときも）。
   const formKey = `${projectId ?? "none"}:${handledAccepted.current ?? ""}`;
+
+  // 「新しい案件として」の作業場所欄（ADR-0039 D1、Phase G13k）はチェックが付いているときだけ出す。
+  // 案件を切り替えたら（成功時は redirect で `projectId` が変わる）チェックボックスの初期状態に戻す。
+  const [newProjectChecked, setNewProjectChecked] = useState(projectId === null);
+  useEffect(() => {
+    setNewProjectChecked(projectId === null);
+  }, [projectId]);
 
   return (
     <div className="space-y-6" data-testid="conversation" data-node-id={nodeId}>
@@ -311,17 +319,26 @@ export function Conversation({ data }: { data: ConversationData }) {
                   className={cn(textareaClass, "w-full")}
                 />
                 {isSecretary && (
-                  <label className="flex items-center gap-2 text-sm" htmlFor="conversation-new-project">
-                    <input
-                      id="conversation-new-project"
-                      type="checkbox"
-                      name="new_project"
-                      data-testid="conversation-new-project-toggle"
-                      defaultChecked={projectId === null}
-                      className={checkboxClass}
-                    />
-                    新しい案件として投げる（本文の先頭 40 字が案件名になります）
-                  </label>
+                  <>
+                    <label className="flex items-center gap-2 text-sm" htmlFor="conversation-new-project">
+                      <input
+                        id="conversation-new-project"
+                        type="checkbox"
+                        name="new_project"
+                        data-testid="conversation-new-project-toggle"
+                        defaultChecked={projectId === null}
+                        onChange={(e) => setNewProjectChecked(e.target.checked)}
+                        className={checkboxClass}
+                      />
+                      新しい案件として投げる（本文の先頭 40 字が案件名になります）
+                    </label>
+                    {newProjectChecked && (
+                      <div className="rounded-lg border border-border bg-surface-2/50 p-3">
+                        {/* 案件の作業場所（ADR-0039 D1、Phase G13k）。「まだ決めない」でも投げられる。 */}
+                        <WorkspaceFields idPrefix="conversation-workspace" clusters={clusters} error={error} />
+                      </div>
+                    )}
+                  </>
                 )}
                 <Button type="submit" variant="primary" disabled={submitting} data-testid="conversation-send">
                   <Icon name="send" />

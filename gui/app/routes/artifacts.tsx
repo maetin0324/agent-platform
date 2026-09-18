@@ -41,7 +41,7 @@ async function loadTaskArtifactBundles(
       const bundle: TaskArtifactBundle = {
         workspace: detail
           ? workspacePlace(detail.task.workspace, detail.workspace_dir)
-          : { text: "-", vscodeHref: null },
+          : { text: "-", vscodeHref: null, localCopyNote: null },
         artifacts: list.items,
       };
       return [id, bundle] as const;

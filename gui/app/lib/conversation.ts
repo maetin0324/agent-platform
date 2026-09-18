@@ -1,4 +1,4 @@
-import type { AttentionItem, Message, OrgNode, Project } from "~/taskd/types";
+import type { AttentionItem, ClusterView, Message, OrgNode, Project } from "~/taskd/types";
 
 /**
  * 秘書・各ノードとの対話（SPEC §3.4「組織の木を見て誰に言うかを決め、その担当に直接言う」、
@@ -35,6 +35,11 @@ export interface ConversationData {
    * 待つのをやめて知らせるために読む。taskd に届かないときは空（画面は従来どおり待つだけになる）。
    */
   attention: AttentionItem[];
+  /**
+   * `GET /clusters` の選択肢（ADR-0039 D1、Phase G13k）。秘書に「新しい案件として」投げるときの
+   * 作業場所（クラスタ）の選択肢に使う。taskd に届かないときは空。
+   */
+  clusters: ClusterView[];
 }
 
 /** 返事が作れない状態（`attention` の 1 件を、この画面の言葉に写したもの）。 */

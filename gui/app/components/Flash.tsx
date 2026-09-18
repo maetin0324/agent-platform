@@ -268,6 +268,7 @@ export function OrgActionFlash({ outcome }: { outcome: OrgOpOutcome | undefined 
 
 const PROJECT_OP_LABEL: Record<string, string> = {
   project_status: "案件の状態を変更",
+  project_workspace: "作業場所を変更",
   milestone_create: "途中目標を追加",
   milestone_status: "途中目標の状態を変更",
   project_plan: "分解を秘書に頼みました",

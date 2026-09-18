@@ -138,6 +138,7 @@ describe("loadArtifacts", () => {
     expect(row.workspace).toEqual({
       text: "/home/user/workspace/lab/pluvio-survey",
       vscodeHref: "vscode://file/home/user/workspace/lab/pluvio-survey",
+      localCopyNote: null,
     });
     expect(row.artifact).toEqual(artifacts.items[0]);
   });
