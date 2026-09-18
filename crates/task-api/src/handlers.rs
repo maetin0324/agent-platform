@@ -120,6 +120,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::memory::routes())
         .merge(crate::reports::routes())
         .merge(crate::approvals::routes())
+        // ADR-0037 D4（Phase 39）: 通知（Discord）。実装は `crate::notify`。
+        .merge(crate::notify::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -2129,6 +2131,8 @@ mod tests {
             secrets_dir: None,
             secret_usage: std::collections::HashMap::new(),
             memory_dir: None,
+            notify_secret_id: task_core::DEFAULT_WEBHOOK_SECRET_ID.to_string(),
+            notify_gui_base_url: None,
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))

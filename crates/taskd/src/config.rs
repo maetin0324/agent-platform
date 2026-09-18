@@ -102,6 +102,10 @@ pub struct Config {
     /// ADR-0033 D3: 報告の圧縮の閾値（`compress_after` / `compress_after_secs`）。
     #[serde(default)]
     pub reports: crate::reports::ReportsConfig,
+    /// ADR-0037（Phase 39）: 人の判断が要るときだけ Discord に知らせる。秘密（webhook URL）が
+    /// 無ければ判定はするが何も送らない（エラーにしない）。
+    #[serde(default)]
+    pub notify: crate::notify::NotifyConfig,
     /// ADR-0024 D1: Claude アカウントのプール。無ければ `account_pool = true` のプロバイダは設定エラー。
     #[serde(default)]
     pub accounts: Option<AccountsConfig>,
@@ -2897,6 +2901,30 @@ roles = ["lead"]
         // [accounts] 無しは no-op。
         let no_accounts: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert!(no_accounts.ensure_accounts_dir().is_ok());
+    }
+
+    // ---- ADR-0037: [notify] ----
+
+    /// `[notify]` は書かなくてよく（既定値が入る）、書けば 3 つのキーだけを受ける。
+    #[test]
+    fn notify_defaults_are_used_when_the_section_is_absent() {
+        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert_eq!(cfg.notify, crate::notify::NotifyConfig::default());
+        assert_eq!(cfg.notify.discord_webhook_secret, "discord-webhook");
+        assert_eq!(cfg.notify.interval_secs, 30);
+        assert_eq!(cfg.notify.base_url(), None);
+
+        let cfg: Config = toml::from_str(
+            "[notify]\ndiscord_webhook_secret = \"hook\"\ninterval_secs = 60\n\
+             gui_base_url = \"http://192.168.1.103:7700/\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.notify.discord_webhook_secret, "hook");
+        assert_eq!(cfg.notify.interval_secs, 60);
+        assert_eq!(cfg.notify.base_url(), Some("http://192.168.1.103:7700"));
+
+        // 未知キーは拒否。
+        assert!(toml::from_str::<Config>("[notify]\nbogus = 1\n").is_err());
     }
 
     // ---- ADR-0030: [secrets] / env_from_secrets ----

@@ -25,6 +25,7 @@ mod files;
 mod handlers;
 pub mod memory;
 mod middleware;
+pub mod notify;
 mod problem;
 pub mod project_plan;
 mod query;
@@ -44,9 +45,10 @@ pub use memory::MemoryView;
 pub use project_plan::{ProjectPlanAccepted, ProjectPlanBody};
 pub use admin::{
     AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome, AdminRequest,
-    CheckError, ClusterAdminError, ClusterConnectCodeOutcome, ClusterConnectStartOutcome, ProviderCheckOutcome,
-    ProviderCheckResult,
+    CheckError, ClusterAdminError, ClusterConnectCodeOutcome, ClusterConnectStartOutcome, NotifyAdminError,
+    NotifyTestOutcome, ProviderCheckOutcome, ProviderCheckResult,
 };
+pub use notify::{NotifyRecent, NotifyTestResult, NotifyView};
 pub use reports::{ReportDetail, ReportList, ReportsNotifiedResult, ReportsReadBody, ReportsReadResult};
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};
@@ -123,6 +125,11 @@ pub struct ApiSettings {
     /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory] dir` の絶対パス。`None` なら `GET /org/{id}/memory`
     /// は 409 `memory_unavailable`。
     pub memory_dir: Option<PathBuf>,
+    /// ADR-0037 D2（Phase 39）: `[notify] discord_webhook_secret`。この id の秘密が `[secrets] dir` に
+    /// あれば「設定済み」。**値は API では読まない**（指紋だけ出す）。
+    pub notify_secret_id: String,
+    /// ADR-0037 D3: `[notify] gui_base_url`（文面のリンクの根。無ければリンク無し）。
+    pub notify_gui_base_url: Option<String>,
 }
 
 impl std::fmt::Debug for ApiSettings {
@@ -148,6 +155,8 @@ impl std::fmt::Debug for ApiSettings {
             .field("secrets_dir", &self.secrets_dir)
             .field("secret_usage", &self.secret_usage.keys().collect::<Vec<_>>())
             .field("memory_dir", &self.memory_dir)
+            .field("notify_secret_id", &self.notify_secret_id)
+            .field("notify_gui_base_url", &self.notify_gui_base_url)
             .finish()
     }
 }

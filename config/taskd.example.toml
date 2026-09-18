@@ -166,6 +166,17 @@ on_child_failure = "retry_then_ask"
 compress_after = 4          # 子の報告がこの件数たまったら起こす
 compress_after_secs = 7200  # 件数に満たなくても、最古の報告がこの秒数を過ぎたら起こす（2 時間）
 
+# Discord への通知（ADR-0037 / SPEC §3.5 / §3.6）。**人の判断が要るときだけ**知らせる:
+#   milestone_ready（途中目標の仕事が全部終わった）/ approval_pending（未決の認可）/
+#   question_blocked（質問で止まった）/ bad_news（秘書レベルの悪い知らせ）/ secretary_reply（案件の方針の提案）。
+# 判定は決定的（LLM は関与しない）。result / progress は知らせない（それは GUI の報告の流れ）。
+# webhook の URL は**秘密**なので TOML には書かない: GUI の「アカウント → API キー」から
+# `discord-webhook` という id で登録する（= `[secrets] dir` の下の同名ファイル）。登録が無ければ何も送らない。
+[notify]
+discord_webhook_secret = "discord-webhook"        # [secrets] の中の id（既定値。書かなくてよい）
+interval_secs = 30                                # 判定と送信の間隔（秒）
+# gui_base_url = "http://192.168.1.103:7700"      # 文面に付けるリンクの根（省略するとリンク無し）
+
 # HTTP API（ADR-0013、docs/gui/api.md）。listen を書いたときだけ taskd のプロセス内で動く（既定は無効）。taskd-gui はこれを使う。
 # loopback 以外で listen するなら token_file が必須（中身 1 行が Bearer トークン。読めない・空なら起動時に exit 2）。
 # [api]

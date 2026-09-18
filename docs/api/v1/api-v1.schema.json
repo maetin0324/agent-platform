@@ -3302,6 +3302,142 @@
       ],
       "type": "object"
     },
+    "NotificationKind": {
+      "description": "知らせる理由（ADR-0037 D1 の 5 種）。**どれも「人の判断が要る」ときだけ**。\n`result` / `progress` は入れない（SPEC §3.5 の数時間単位の流れは GUI の報告の仕事）。",
+      "oneOf": [
+        {
+          "const": "milestone_ready",
+          "description": "途中目標に属する仕事がすべて終端になった（達成の判定と次の Go を人に求める）。`key` = 途中目標 id。",
+          "type": "string"
+        },
+        {
+          "const": "approval_pending",
+          "description": "未決の認可の要求。`key` = 認可 id。",
+          "type": "string"
+        },
+        {
+          "const": "question_blocked",
+          "description": "タスクが `blocked`（人への質問）。`key` = タスク id。",
+          "type": "string"
+        },
+        {
+          "const": "bad_news",
+          "description": "秘書レベル（level 0）の悪い知らせ。`key` = 報告 id。",
+          "type": "string"
+        },
+        {
+          "const": "secretary_reply",
+          "description": "`proposed` の案件に秘書の返事が付いた（人の返事待ち）。`key` = 案件 id。",
+          "type": "string"
+        }
+      ]
+    },
+    "NotifyRecent": {
+      "description": "`GET /notify` の `recent[]` の 1 件（ADR-0037 D4）。",
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "description": "失敗の理由（URL・ホスト名は含まない）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "重複排除の鍵（途中目標 id / 認可 id / タスク id / 報告 id / 案件 id）。",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/NotificationKind"
+        },
+        "ok": {
+          "description": "`null` = まだ決着していない、`true` = 送れた、`false` = 諦めた。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sent_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "key",
+        "created_at",
+        "attempts"
+      ],
+      "type": "object"
+    },
+    "NotifyTestResult": {
+      "description": "`POST /notify/test` の応答。",
+      "properties": {
+        "detail": {
+          "description": "人が読む一行（失敗の種別だけ。URL・ホスト名は含まない）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "type": "object"
+    },
+    "NotifyView": {
+      "description": "`GET /notify` の応答。**URL は含まない**。",
+      "properties": {
+        "configured": {
+          "description": "webhook の秘密が登録されていて、送れる状態か。",
+          "type": "boolean"
+        },
+        "fingerprint": {
+          "description": "登録済みのときだけ。値の sha256 の先頭 8 桁（値は復元できない）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gui_base_url": {
+          "description": "`[notify] gui_base_url`（文面のリンクの根）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recent": {
+          "description": "直近の送信（新しい順、最大 10 件）。",
+          "items": {
+            "$ref": "#/$defs/NotifyRecent"
+          },
+          "type": "array"
+        },
+        "secret_id": {
+          "description": "`[notify] discord_webhook_secret`（GUI は「この id で API キー画面に登録して」と案内する）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "configured",
+        "secret_id",
+        "recent"
+      ],
+      "type": "object"
+    },
     "OnChildFailure": {
       "description": "ADR-0021: 委譲した子が `failed` になったとき、親をどうするか。",
       "oneOf": [
@@ -5833,6 +5969,13 @@
     "new_task": {
       "$ref": "#/$defs/NewTaskSpec"
     },
+    "notify": {
+      "$ref": "#/$defs/NotifyView",
+      "description": "Phase 39（ADR-0037 D4）: 通知（Discord）。`GET /notify` と `POST /notify/test` の応答。"
+    },
+    "notify_test": {
+      "$ref": "#/$defs/NotifyTestResult"
+    },
     "org_create": {
       "$ref": "#/$defs/OrgCreateBody"
     },
@@ -6009,6 +6152,8 @@
     "approval_decide_result",
     "standing_rule_list",
     "standing_rule_create",
+    "notify",
+    "notify_test",
     "daemon",
     "config",
     "stream_hello",

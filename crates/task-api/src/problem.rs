@@ -264,6 +264,13 @@ impl ApiProblem {
         )
     }
 
+    /// ADR-0037 D4（Phase 39）: Discord の webhook がまだ登録されていない（`[secrets]` 自体が無い、
+    /// `[notify] discord_webhook_secret` の秘密が無い、taskd が管理系を受けていない）。
+    /// **URL も秘密のパスも文面に入れない**。
+    pub(crate) fn notify_unavailable(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "notify_unavailable", detail)
+    }
+
     /// この Problem の HTTP ステータス（`put_secret` が解析エラーだけを差し替えるために見る）。
     pub(crate) fn status(&self) -> StatusCode {
         self.status

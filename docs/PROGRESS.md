@@ -5067,3 +5067,82 @@ LDR の report.md が 3 重（32）→ 担当が自分の仕事を知らない�
 **証拠ゲートとレビュアーは一度も誤って通しておらず、毎回の不合格が次の修正を指した。**
 
 残り: 統合・選定（秘書、人の承認）→ PoC（PoC・R&D 課）は `draft` で人の Go 待ち。
+
+---
+
+## Phase 39 — 人の判断が要るときだけ Discord に知らせる（ADR-0037。2026-09-18）
+
+今日の実機で、2 つの調査が通った後の「統合・選定」が `draft`（人の Go 待ち）で止まった。GUI を開いて
+いなければ人はそれを知らない（ADR-0034 D6 のブラウザ通知は開いているタブにしか届かない）。ADR-0037 の
+D1〜D4 をそのまま実装した: **人の手が要る 5 種だけ**を決定的に判定し、`(kind, key)` を 1 回だけ
+Discord の webhook へ投げる。
+
+### 入れたもの
+
+- **migration 0008 / `SCHEMA_VERSION = 8`**（`crates/task-core/migrations/0008_notifications.sql`）:
+  `notifications(id, kind, key, body, created_at, sent_at, attempts, ok, error)` + `UNIQUE(kind, key)`。
+  重複排除はこの一意制約そのもの（判定は tick ごとに何度走ってもよい）。
+- **`task_core::notify`**（新規）: `Notification` / `NotificationKind`（5 種）/ `NotificationStore`
+  （`notification_upsert_pending` / `notification_mark` / `notification_recent` / `notification_pending`）。
+  `TaskStore` の supertrait（`report.rs` / `approval.rs` と同じ形）。**ここはネットワークに出ない**。
+- **`taskd::notify`**（新規）: 判定（`scan` / `schedule`、決定的・LLM 無し）と送信（`reqwest` + rustls、
+  タイムアウト 10 秒）。`tick_loop` は B1 のとおり **チャネルに送らずその場で store を見る**。POST だけを
+  `tokio::spawn` で行い、結果は `mpsc` で戻して**次の tick の先頭**で `notification_mark` する。
+  - `milestone_ready`: 途中目標に属する仕事（`support_kind` が付く裏方を除く）が 1 件以上あり、すべて終端で、
+    途中目標が `reached` でない。
+  - `approval_pending`: `decision IS NULL` の認可。`question_blocked`: `blocked` のタスク（同じ `task_id` の
+    認可があれば `approval_pending` に任せて 1 回だけ）。`bad_news`: level 0 の `bad_news` 報告。
+    `secretary_reply`: `proposed` の案件に `role = node` の対話行が付いた。
+- **`[notify]`**: `discord_webhook_secret`（既定 `"discord-webhook"`）/ `interval_secs`（既定 30）/
+  `gui_base_url`（任意。文面のリンクの根）。URL は ADR-0030 の `[secrets]` に置き、TOML には書かない。
+  **秘密が無い間は送らず、pending も溜めない**（判定はして `ok = false` で畳む = その間の出来事は
+  後から秘密を登録しても蒸し返さない。ADR-0037 D2）。
+- **API 2 本**: `GET /api/v1/notify`（読み取り。`configured` / `secret_id` / `fingerprint` /
+  `gui_base_url` / `recent[10]`）と `POST /api/v1/notify/test`（**管理系**。200 / 409 `notify_unavailable`）。
+  送信は `AdminRequest::NotifyTest` で taskd に委譲する（task-api は URL を一切知らない）。
+  `docs/api/v1/api-v1.schema.json` を `UPDATE_SCHEMA=1` で再生成、`docs/gui/api.md` に §3.64〜3.65 を追加。
+
+### 秘密の規律（ADR-0037 D3）
+
+`reqwest::Error` の `Display` は URL を含むので**そのまま文字列にしない**（`safe_error` が種別だけに畳む）。
+`notifications.error` にも `GET /notify` にも `POST /notify/test` の `detail` にも、URL・ホスト名は出ない。
+`GET /notify` が出すのは「設定済みか」と `fingerprint`（sha256 の先頭 8 桁）だけ。
+
+### 証拠
+
+- `cargo test --workspace` → `grep -c "^test result: FAILED"` = **0**。`^test result: ok` は 54 行、
+  通ったテストの合計は **1093 件**（Phase 38 から +42）。
+  - `task-core`: `notify::tests::*`（5 件）、`store::tests::migration_0008_adds_the_notifications_table_to_a_schema_7_db`
+  - `taskd`（`tests/notify.rs`、**14 件**）: 判定 5 種それぞれ「条件成立で 1 件 / 2 回目の tick で増えない /
+    条件が解消したら作らない」、裏方を数えない、リンクは `gui_base_url` があるときだけ、
+    偽の HTTP サーバ（`tokio::net::TcpListener`、`127.0.0.1:0`）への送信で 204 → `ok = true`、
+    500 を返し続ける相手には **3 回で諦める**、接続できない相手のエラーにホスト名・ポート・パスが出ない、
+    秘密が無ければ送らず pending を残さない、`send_test` が `[secrets]` の URL へ 1 通だけ投げる
+  - `taskd`: `config::tests::notify_defaults_are_used_when_the_section_is_absent`
+  - `task-api`（`tests/notify.rs`、**10 件**）: 管理系の 401（トークン設定あり / `token_file` 未設定の**両構成**）、
+    409 `notify_unavailable`（秘密なし / `[secrets]` なし / `admin_tx` なし / taskd 側の `Unavailable`）、
+    200（`ok: true` と `ok: false` の両方）、`GET /notify` に **URL もトークン部分も出ない**
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**。
+- テスト以外に `unwrap()` / `expect()` の追加なし（`reqwest::ClientBuilder::build` の失敗は `None` を返して
+  通知だけを止める）。ディスパッチャ・ストアに LLM 呼び出しなし（判定は SQL と純粋関数だけ）。
+- テストは外部ネットワークに出ない（送信の確認はすべて `127.0.0.1` の偽サーバ）。
+
+### 未解決事項
+
+- U39-1: **人間による確認待ち: GUI から webhook を登録してテスト送信**。Discord の実 URL が無いので、
+  本物への到達は確認していない。手順: GUI の「アカウント → API キー」で id `discord-webhook` に
+  Discord の webhook URL を登録 → 「報告」画面の Discord 区画で「テスト送信」→ Discord に 1 通届くこと。
+  その後、本番の案件で `milestone_ready` が届くことを確認する（ADR-0037 受け入れ条件 4）。
+- U39-2: GUI の Discord 区画（ADR-0037 D4 の 3 番目・受け入れ条件 3）はこの Phase では触っていない
+  （担当が別。API は `GET /notify` / `POST /notify/test` で揃っている）。
+- U39-3: `[notify] gui_base_url` は本番の `~/taskd/taskd.toml` に手で足す必要がある（省略するとリンク無しの
+  文面になるだけで、通知自体は届く）。
+
+### 提案
+
+- P-93: 送信の失敗の理由は種別だけ（`"timed out"` / `"could not connect"` / `"http status 404"`）にした。
+  Discord が 404 を返す原因はほぼ「webhook を消した / URL を間違えた」なので、GUI 側で
+  `http status 404` のときだけ「webhook を登録し直してください」と添えるとよい。
+- P-94: `notifications` は増え続ける（1 件 = 1 出来事）。今は掃除していない。行数が気になったら
+  「`ok IS NOT NULL` かつ `created_at` が N 日より古い行を消す」掃除を tick に足す（判定の重複排除は
+  過去の行に依存するので、消した出来事の条件がまだ真なら再送されることに注意）。

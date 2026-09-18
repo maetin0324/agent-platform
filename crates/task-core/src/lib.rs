@@ -7,6 +7,7 @@ pub mod artifacts;
 pub mod delegate;
 pub mod message;
 pub mod model;
+pub mod notify;
 pub mod org;
 pub mod plan;
 pub mod report;
@@ -26,6 +27,10 @@ pub use message::{
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, HARNESS_ADAPTERS, Lease, RoleSpec, RunRole, Status,
     Task, TaskId, TaskKind, Tier, Usage, WorkerHint, WorkspaceSpec, artifact_entry_description, artifact_entry_name,
+};
+pub use notify::{
+    DEFAULT_WEBHOOK_SECRET_ID, MAX_NOTIFY_ATTEMPTS, Notification, NotificationId, NotificationKind,
+    NotificationStore,
 };
 pub use org::{
     Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
