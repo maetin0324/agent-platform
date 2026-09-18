@@ -25,7 +25,15 @@ export async function loader({ request }: Route.LoaderArgs): Promise<Conversatio
     return await loadConversation(getTaskdClient(), SECRETARY_NODE_ID, request);
   } catch (e) {
     if (isTaskdUnavailable(e)) {
-      return { nodeId: SECRETARY_NODE_ID, node: null, projects: [], projectId: null, messages: [], attention: [] };
+      return {
+        nodeId: SECRETARY_NODE_ID,
+        node: null,
+        projects: [],
+        projectId: null,
+        messages: [],
+        attention: [],
+        clusters: [],
+      };
     }
     throw taskdErrorResponse(e);
   }

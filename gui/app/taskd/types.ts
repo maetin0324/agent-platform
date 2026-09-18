@@ -1851,6 +1851,12 @@ export interface Problem {
 export interface ProjectCreateBody {
   request: string;
   title: string;
+  /**
+   * ADR-0039 D1: この案件の作業場所（任意）。`{"kind":"local","path":"~/workspace/rust/pluvio-poc"}` か
+   * `{"kind":"remote","cluster":"pegasus","path":"/work/.../benchfs"}`。`~` は taskd の `$HOME` で
+   * 展開して保存する（`Local` のみ）。知らない `cluster` は 422。
+   */
+  workspace?: WorkspaceSpec | null;
 }
 /**
  * `GET /projects/{id}` の応答。案件 + 途中目標 + その案件のタスクの要約（GUI の「仕事の木」用）。
@@ -1921,6 +1927,12 @@ export interface Project {
   status: ProjectStatus;
   title: string;
   updated_at: string;
+  /**
+   * ADR-0039 D1: この案件の作業場所（コードのある場所）。`Local` は手元の普段のパス（SPEC §2.1）、
+   * `Remote` はクラスタ側の作業ディレクトリ（ADR-0018 D1）。決めていない案件は `None`（従来どおり、
+   * 分解した仕事は親の workspace を継ぐ）。
+   */
+  workspace?: WorkspaceSpec | null;
 }
 /**
  * 仕事の木の 1 ノード（ADR-0033 D2: DAG は既存の `parent_id` / `depends_on` がそのまま）。
@@ -1949,10 +1961,15 @@ export interface ProjectList {
   items: Project[];
 }
 /**
- * `PATCH /projects/{id}` の要求本文。
+ * `PATCH /projects/{id}` の要求本文。`status` / `workspace` はどちらも任意（書いたものだけ変える）。
+ * `"workspace": null` を明示すると作業場所を消す（案件を「作業場所なし」に戻す）。
  */
 export interface ProjectPatchBody {
-  status: ProjectStatus;
+  status?: ProjectStatus | null;
+  /**
+   * ADR-0039 D1: 省略（`None`）なら変えない、`null`（`Some(None)`）なら消す、値なら差し替える。
+   */
+  workspace?: WorkspaceSpec | null;
 }
 /**
  * GUI 監査対応 Phase 29（ADR-0033 D4 追記）: 分解を起こす（`POST /projects/{id}/plan`）。

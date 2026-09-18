@@ -1,9 +1,21 @@
 import { type ConversationData, projectTitleFromText } from "~/lib/conversation";
+import { readWorkspaceFromForm } from "~/lib/workspace-form";
 import type { ConversationOpOutcome } from "./action-types";
 import { toActionError } from "./actions.server";
 import type { TaskdClient } from "./client.server";
 import { formString } from "./forms";
-import type { Inbox, MessageAccepted, MessageList, MessagePostBody, OrgList, Project, ProjectList } from "./types";
+import type {
+  Clusters,
+  Inbox,
+  MessageAccepted,
+  MessageList,
+  MessagePostBody,
+  OrgList,
+  Project,
+  ProjectCreateBody,
+  ProjectList,
+  WorkspaceSpec,
+} from "./types";
 
 /**
  * 秘書・各ノードとの対話（`/org/:id`、`/org/secretary`。SPEC §3.1・§3.4・§4 の 1 と 2、ADR-0033 D4、
@@ -30,7 +42,7 @@ export async function loadConversation(
   // （そのまま送ると taskd が 404 `project_not_found` を返す。ULID でない文字列だから）。
   const raw = new URL(request.url).searchParams.get("project");
   const projectId = raw !== null && raw.length > 0 ? raw : null;
-  const [org, projects, messages, inbox] = await Promise.all([
+  const [org, projects, messages, inbox, clusters] = await Promise.all([
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
     client.get<ProjectList>("/projects", { signal: request.signal }),
     client.get<MessageList>(`/org/${encodeURIComponent(nodeId)}/messages`, {
@@ -40,6 +52,9 @@ export async function loadConversation(
     // 「考え中」の間に返事が作れない状態（経路なし等）になっていないかを見るため（監査 M1）。
     // 落ちても対話は出す（`GET /org` と同じ扱い）。
     client.get<Inbox>("/inbox", { signal: request.signal }).catch(() => null),
+    // 秘書に「新しい案件として」投げるときの作業場所（クラスタ）の選択肢（ADR-0039 D1、Phase G13k）。
+    // `GET /org` と同じく、落ちても対話は出す。
+    client.get<Clusters>("/clusters", { signal: request.signal }).catch(() => ({ items: [] }) as Clusters),
   ]);
   return {
     nodeId,
@@ -48,6 +63,7 @@ export async function loadConversation(
     projectId,
     messages: messages.items,
     attention: inbox?.attention ?? [],
+    clusters: clusters.items,
   };
 }
 
@@ -72,18 +88,19 @@ export async function sendMessage(
  * 秘書に話しかけて**新しい案件**にする（SPEC §4 の 1「案件を投げる」）。`title` は本文の先頭 40 字、
  * `request` は本文そのまま。`POST /projects` の直後に秘書が最初の返事（理解確認・方針・最初の途中目標）を
  * 自分で返す（ADR-0033 D4、SPEC §7）ので、GUI はここで `POST /org/{id}/messages` を続けて呼ばない。
+ * `workspace`（ADR-0039 D1、Phase G13k）は「まだ決めない」（`null`）なら送らない
+ * （docs/taskd-api-v1.md §3.46「省略すれば従来どおり作業場所なし」）。
  */
 export async function startProjectFromMessage(
   client: TaskdClient,
   text: string,
+  workspace?: WorkspaceSpec | null,
   signal?: AbortSignal,
 ): Promise<ConversationOpOutcome> {
   try {
-    const project = await client.post<Project>(
-      "/projects",
-      { title: projectTitleFromText(text), request: text },
-      { signal },
-    );
+    const body: ProjectCreateBody = { title: projectTitleFromText(text), request: text };
+    if (workspace) body.workspace = workspace;
+    const project = await client.post<Project>("/projects", body, { signal });
     return { ok: true, op: "new_project", project };
   } catch (e) {
     return { ok: false, op: "new_project", error: toActionError(e) };
@@ -109,7 +126,7 @@ export async function runConversationAction(
   signal?: AbortSignal,
 ): Promise<ConversationOpOutcome> {
   if (form.get("new_project") === "on") {
-    return await startProjectFromMessage(client, formString(form, "text") ?? "", signal);
+    return await startProjectFromMessage(client, formString(form, "text") ?? "", readWorkspaceFromForm(form), signal);
   }
   return await sendMessage(client, nodeId, buildMessagePostBody(form), signal);
 }

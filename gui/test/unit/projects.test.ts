@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadProjects } from "~/routes/projects";
 import { TaskdClient } from "~/taskd/client.server";
-import { createProject, readProjectCreateInput } from "~/taskd/projects-admin.server";
-import type { Project, ProjectDetail, ProjectList } from "~/taskd/types";
+import { createProject, patchProjectWorkspace, readProjectCreateInput } from "~/taskd/projects-admin.server";
+import type { Clusters, Project, ProjectDetail, ProjectList } from "~/taskd/types";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
@@ -40,6 +40,164 @@ describe("readProjectCreateInput", () => {
 
   it("blank fields stay blank (GUI does not validate; taskd's 422 is what the user sees)", () => {
     expect(readProjectCreateInput(new FormData())).toEqual({ title: "", request: "" });
+  });
+
+  // ADR-0039 D1（Phase G13k）: 作業場所（任意）の 3 通り。
+  it("workspace_kind = undecided（省略を含む）は workspace キー自体を送らない", () => {
+    const form = new FormData();
+    form.set("title", "t");
+    form.set("request", "r");
+    form.set("workspace_kind", "undecided");
+    expect(readProjectCreateInput(form)).toEqual({ title: "t", request: "r" });
+  });
+
+  it("workspace_kind = local は {kind:'local', path} を足す", () => {
+    const form = new FormData();
+    form.set("title", "t");
+    form.set("request", "r");
+    form.set("workspace_kind", "local");
+    form.set("workspace_path", "~/workspace/rust/pluvio-poc");
+    expect(readProjectCreateInput(form)).toEqual({
+      title: "t",
+      request: "r",
+      workspace: { kind: "local", path: "~/workspace/rust/pluvio-poc" },
+    });
+  });
+
+  it("workspace_kind = remote は {kind:'remote', cluster, path} を足す", () => {
+    const form = new FormData();
+    form.set("title", "t");
+    form.set("request", "r");
+    form.set("workspace_kind", "remote");
+    form.set("workspace_cluster", "pegasus");
+    form.set("workspace_path", "/work/NBB/rmaeda/workspace/rust/benchfs");
+    expect(readProjectCreateInput(form)).toEqual({
+      title: "t",
+      request: "r",
+      workspace: { kind: "remote", cluster: "pegasus", path: "/work/NBB/rmaeda/workspace/rust/benchfs" },
+    });
+  });
+});
+
+/** ADR-0039 D1（Phase G13k）: 作成時に送る `workspace` の本文 3 種（3.46 の要求本文どおり）。 */
+describe("createProject の workspace 本文（3 種、docs/taskd-api-v1.md §3.46）", () => {
+  it("undecided: workspace キーを送らない", async () => {
+    mock.on("POST", "/api/v1/projects", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ title: "t", request: "r" });
+      sendJson(res, 201, project("p1"));
+    });
+    const result = await createProject(client, { title: "t", request: "r" });
+    expect(result.ok).toBe(true);
+  });
+
+  it("local: {kind:'local', path} をそのまま送る", async () => {
+    mock.on("POST", "/api/v1/projects", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({
+        title: "t",
+        request: "r",
+        workspace: { kind: "local", path: "~/workspace/rust/pluvio-poc" },
+      });
+      sendJson(res, 201, project("p1", { workspace: { kind: "local", path: "/home/user/workspace/rust/pluvio-poc" } }));
+    });
+    const result = await createProject(client, {
+      title: "t",
+      request: "r",
+      workspace: { kind: "local", path: "~/workspace/rust/pluvio-poc" },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.project.workspace).toEqual({ kind: "local", path: "/home/user/workspace/rust/pluvio-poc" });
+  });
+
+  it("remote: {kind:'remote', cluster, path} をそのまま送る", async () => {
+    mock.on("POST", "/api/v1/projects", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({
+        title: "t",
+        request: "r",
+        workspace: { kind: "remote", cluster: "pegasus", path: "/work/NBB/rmaeda/workspace/rust/benchfs" },
+      });
+      sendJson(
+        res,
+        201,
+        project("p1", {
+          workspace: { kind: "remote", cluster: "pegasus", path: "/work/NBB/rmaeda/workspace/rust/benchfs" },
+        }),
+      );
+    });
+    const result = await createProject(client, {
+      title: "t",
+      request: "r",
+      workspace: { kind: "remote", cluster: "pegasus", path: "/work/NBB/rmaeda/workspace/rust/benchfs" },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("422 validation（知らない cluster）は errors[].field = 'workspace.cluster' をそのまま返す", async () => {
+    mock.on("POST", "/api/v1/projects", (_req, res) =>
+      sendProblem(res, {
+        status: 422,
+        code: "validation",
+        detail: "unknown cluster: nope",
+        extra: { errors: [{ field: "workspace.cluster", message: "unknown cluster: nope" }] },
+      }),
+    );
+    const result = await createProject(client, {
+      title: "t",
+      request: "r",
+      workspace: { kind: "remote", cluster: "nope", path: "/x" },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.fields["workspace.cluster"]).toEqual(["unknown cluster: nope"]);
+  });
+});
+
+describe("patchProjectWorkspace (PATCH /projects/{id}, ADR-0039 D1)", () => {
+  it("local を保存する", async () => {
+    const updated = project("p1", { workspace: { kind: "local", path: "/home/user/workspace/rust/pluvio-poc" } });
+    mock.on("PATCH", "/api/v1/projects/p1", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ workspace: { kind: "local", path: "~/workspace/rust/pluvio-poc" } });
+      sendJson(res, 200, updated);
+    });
+    const result = await patchProjectWorkspace(client, "p1", { kind: "local", path: "~/workspace/rust/pluvio-poc" });
+    expect(result).toEqual({ ok: true, op: "project_workspace", project: updated });
+  });
+
+  it("remote を保存する", async () => {
+    const workspace = { kind: "remote" as const, cluster: "pegasus", path: "/work/NBB/rmaeda/workspace/rust/benchfs" };
+    const updated = project("p1", { workspace });
+    mock.on("PATCH", "/api/v1/projects/p1", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ workspace });
+      sendJson(res, 200, updated);
+    });
+    const result = await patchProjectWorkspace(client, "p1", workspace);
+    expect(result).toEqual({ ok: true, op: "project_workspace", project: updated });
+  });
+
+  it("消去: workspace = null を明示して送る", async () => {
+    const updated = project("p1");
+    mock.on("PATCH", "/api/v1/projects/p1", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ workspace: null });
+      sendJson(res, 200, updated);
+    });
+    const result = await patchProjectWorkspace(client, "p1", null);
+    expect(result).toEqual({ ok: true, op: "project_workspace", project: updated });
+  });
+
+  it("422 validation（知らない cluster）は errors[].field = 'workspace.cluster' をそのまま返す", async () => {
+    mock.on("PATCH", "/api/v1/projects/p1", (_req, res) =>
+      sendProblem(res, {
+        status: 422,
+        code: "validation",
+        detail: "unknown cluster: nope",
+        extra: { errors: [{ field: "workspace.cluster", message: "unknown cluster: nope" }] },
+      }),
+    );
+    const result = await patchProjectWorkspace(client, "p1", { kind: "remote", cluster: "nope", path: "/x" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.op).toBe("project_workspace");
+      expect(result.error.fields["workspace.cluster"]).toEqual(["unknown cluster: nope"]);
+    }
   });
 });
 
@@ -111,6 +269,39 @@ describe("loadProjects", () => {
     mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
     const result = await loadProjects(client, new Request("http://gui.invalid/projects"));
     expect(result.rows).toEqual([]);
+  });
+
+  // ADR-0039 D1（Phase G13k）: 新規フォームの作業場所（クラスタ）の選択肢。
+  it("GET /clusters の一覧を作業場所の選択肢として通す", async () => {
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/clusters", (_req, res) =>
+      sendJson(res, 200, {
+        items: [
+          {
+            id: "pegasus",
+            host: "pegasus",
+            concurrency: 1,
+            delete_on_push: false,
+            env_keys: [],
+            has_setup: false,
+            rsync_excludes: [],
+            sync: "rsync",
+          },
+        ],
+      } satisfies Clusters),
+    );
+    const result = await loadProjects(client, new Request("http://gui.invalid/projects"));
+    expect(result.clusters).toHaveLength(1);
+    expect(result.clusters[0].id).toBe("pegasus");
+  });
+
+  it("GET /clusters が落ちても一覧・作成フォームは出す（空扱い）", async () => {
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/clusters", (_req, res) =>
+      sendProblem(res, { status: 500, code: "internal", detail: "boom" }),
+    );
+    const result = await loadProjects(client, new Request("http://gui.invalid/projects"));
+    expect(result.clusters).toEqual([]);
   });
 });
 

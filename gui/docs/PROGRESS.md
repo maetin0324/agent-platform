@@ -2432,3 +2432,128 @@ taskd 側 Phase 41（ADR-0038: 途中目標の判定を「結果の報告 → �
 ### 提案（`docs/gui/api.md` への変更提案。採否は人間）
 
 なし。
+
+## Phase G13k — 案件の作業場所（2026-09-18）
+
+taskd 側 Phase 43（ADR-0039「案件が作業場所（コードのある場所）を持ち、計画・委譲の子がそれを継ぐ」）
+への追従。本番で子タスクがワーカーに `ssh` させて人のリポジトリへ直接書いた事故（2026-09-18）を
+受けたもので、案件に作業場所（`Local{path}` / `Remote{cluster, path}`）を持たせ、GUI から作成・編集・
+消去できるようにした。
+
+### 実装したこと
+
+- `pnpm gen:types`（2 回、差分ゼロ）: `Project.workspace` / `ProjectCreateBody.workspace` /
+  `ProjectPatchBody.workspace`（`status` も含めどちらも任意に）が増えた。`bash scripts/sync-gui-docs.sh`
+  （`docs/taskd-api-v1.md` §3.46〜3.48 を反映）。
+- `app/lib/workspace-form.ts`（新規、純粋関数）: `WorkspaceKind`（`undecided`/`local`/`remote`）、
+  `workspaceKindOf`、`readWorkspaceFromForm`（`workspace_kind`/`workspace_path`/`workspace_cluster`
+  から `WorkspaceSpec | null` を組む。「まだ決めない」は `null`）、`workspaceSummaryText`（`path` または
+  `cluster:path` の 1 行）。GUI 側では検証しない: 空のパス・知らないクラスタもそのまま taskd に送る。
+- `app/components/WorkspaceFields.tsx`（新規）: 「作業場所」の入力欄一式（手元／クラスタ／まだ決めない
+  の切り替え、`GET /clusters` からのクラスタ選択、パス入力）。`/projects` の新規フォーム、秘書の
+  「新しい案件として」（`Conversation.tsx`）、`/projects/:id` の編集カードが共有する。
+  `allowUndecided`（既定 `true`。編集カードは `false` — 「まだ決めない」への切り替えは無く、消去は
+  別ボタン）。422 の `workspace.cluster` はクラスタ欄の下に `FieldErrors` でそのまま出す。
+- `app/taskd/action-types.ts`: `ProjectOpOutcome` に `project_workspace`（`project: Project` を返す。
+  `project_status` と同じ形）を追加。
+- `app/taskd/projects-admin.server.ts`: `readProjectCreateInput` が `workspace_kind` 等から
+  `workspace` を組んで足す（「まだ決めない」ならキー自体を省略）。`patchProjectWorkspace`（新規、
+  `PATCH /projects/{id}` に `{workspace}` を送るだけ。`null` を明示すれば消去）。
+- `app/components/Flash.tsx`: `PROJECT_OP_LABEL` に `project_workspace: "作業場所を変更"`。
+- `app/routes/projects.tsx`: `loadProjects` が `GET /clusters` も束ねて `clusters` を返す（落ちても
+  一覧・作成フォームは出す）。新規フォームに `WorkspaceFields`（`allowUndecided` 既定のまま）を追加。
+- `app/routes/projects.$id.tsx`: 「作業場所」カード（`依頼` の次、`途中目標` の前）。現在値
+  （`workspaceSummaryText`。未設定なら `Alert tone="warning"`「未設定 — コードを扱う仕事は空の作業
+  ディレクトリで走ります」）、編集フォーム（`WorkspaceFields allowUndecided={false}`、`intent =
+  "project_workspace_save"`）、消去ボタン（別フォーム、`intent = "project_workspace_clear"` で
+  `workspace: null` を送る）。`loadProjectDetail` が `GET /clusters` も束ねる。
+- `app/components/Conversation.tsx`: 秘書の「新しい案件として」チェックが付いているときだけ
+  `WorkspaceFields`（`idPrefix="conversation-workspace"`）を出す（`newProjectChecked` の state。
+  案件を切り替えたら初期状態に戻す）。`app/lib/conversation.ts::ConversationData` /
+  `app/taskd/conversation.server.ts::loadConversation` に `clusters`（`GET /clusters`。落ちても対話は
+  出す）を追加。`startProjectFromMessage` が `workspace` 引数を取り、`runConversationAction` が
+  `readWorkspaceFromForm` の結果を渡す。
+- `app/lib/artifacts.ts::WorkspacePlace` / `workspacePlace`: ADR-0039 D3「編集は手元、検証はリモートで」
+  に合わせ、`localCopyNote`（Remote かつ `workspace_dir` があるときだけ「手元の写し: `<workspace_dir>`」）
+  を足した。`app/components/ArtifactsList.tsx`（`/artifacts` 横断一覧・`/projects/:id` の「成果物」節が
+  共有）の `artifact-workspace` に、その案内文を添える（testid `artifact-workspace-local-copy`）。
+  `app/routes/tasks.$id.tsx` の `task-workspace-note`（Remote のときだけ出る）も、`workspace_dir` が
+  あれば「手元の写し: `<値>`（クラスタ側の元のパスは表示されません）」と具体的な値を出すよう改めた
+  （従来は値の無い一般的な注意文だけだった）。
+- `app/routes/help.tsx`: 用語集に「作業場所」（ADR-0039、3 択・カードでの編集・消去・子タスクへの
+  継承・実機の事故を要約）を追加。「案件」「秘書」の画面ごとの説明にも作業場所への言及を足した。
+- testid: `project-workspace`（案件画面のカードの `section`）、`project-workspace-kind`、
+  `project-workspace-path`、`project-workspace-cluster`、`project-workspace-save`、
+  `project-workspace-clear`（依頼どおりの 6 つ。新規フォーム・秘書の対話フォームでも
+  `project-workspace-kind`/`-path`/`-cluster` を共有）。加えて `project-workspace-unset`（未設定の警告）。
+
+### 実機での見た目の確認
+
+使い捨ての taskd（`TASKD_API_LISTEN=127.0.0.1:18971`。`scripts/taskd.sh build` → 手作りの
+`taskd.toml`（既定テンプレートに `token_file = "api.token"` と `[[clusters]] id = "pegasus", auth =
+"manual"` を足したもの）→ `scripts/taskd.sh start g13k-workspace`）と GUI dev サーバ
+（`TASKD_API_URL=http://127.0.0.1:18971`、`TASKD_GUI_BIND=127.0.0.1:18901`、
+`TASKD_API_TOKEN_FILE=.../api.token`。`pnpm dev`）を組み合わせ、**運用中の 7710 / 7700 には触っていない**
+（前後で `curl 127.0.0.1:7710/api/v1/health` → 200、`curl 127.0.0.1:7700/` → 302、`ps aux` で
+production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/taskd.toml`）が動いたままである
+ことを確認済み）。
+
+1. `POST /projects`（管理系。トークン付き）で案件を作成 → `/projects` の一覧・新規フォームを
+   Playwright（Chromium）で light/dark 撮影: 作業場所欄が「まだ決めない」の既定で表示、崩れなし。
+2. その案件の `/projects/:id` を light/dark で撮影（3 状態）:
+   - **未設定**: 「未設定 — コードを扱う仕事は空の作業ディレクトリで走ります」の警告カードと、
+     既定 `手元` の編集フォームが表示。
+   - `PATCH /projects/{id}` で `{"workspace":{"kind":"local","path":"~/workspace/rust/pluvio-poc"}}`
+     を送った後（taskd が `$HOME` で展開して保存）: 現在値に展開後の絶対パス
+     （`/home/rmaeda/workspace/rust/pluvio-poc`）が出て、編集フォームもその値で初期化されている。
+   - 続けて `{"workspace":{"kind":"remote","cluster":"pegasus","path":"/work/NBB/rmaeda/workspace/rust/benchfs"}}`
+     を送った後: 現在値が `pegasus:/work/NBB/rmaeda/workspace/rust/benchfs`、編集フォームが
+     `クラスタ` / `pegasus` / 該当パスで初期化されている。
+   - 3 状態とも light/dark で表示崩れなし。
+3. `taskctl add --cluster pegasus --workspace /work/NBB/rmaeda/workspace/rust/benchfs` で Remote
+   workspace のタスクを作り、`/tasks/:id` を撮影: 「cluster: pegasus 手元の写し:
+   `/tmp/taskd-gui-run-rmaeda/g13k-workspace/workspaces/<task_id>`（クラスタ側の元のパスは表示されません）」
+   が具体的な値付きで表示されることを確認（ADR-0039 D3）。
+4. 確認後、使い捨ての taskd・GUI dev サーバは停止し、`.run/g13k-workspace`（`/tmp` 配下の実体）は
+   削除済み。verify 用の一時スクリプトもリポジトリに残していない。
+
+### 受け入れ条件ごとの証拠
+
+- `pnpm lint`（biome、169 files）exit 0。
+- `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0。
+- `pnpm test` **530 passed**（43 ファイル。G13j の 498 から +32）:
+  - `test/unit/workspace-form.test.ts`（新規）10 件: `readWorkspaceFromForm`（undecided/local/remote/
+    未検証の空値）5 件、`workspaceKindOf` 2 件、`workspaceSummaryText` 3 件
+  - `test/unit/projects.test.ts` +13: `readProjectCreateInput` の workspace 3 種 3 件、
+    `createProject` の workspace 本文 3 種 + 422（`workspace.cluster`）4 件、`patchProjectWorkspace`
+    の local/remote/消去（`null`）/422 4 件、`loadProjects` の `GET /clusters` 通過・失敗時空扱い 2 件
+  - `test/unit/projects.detail.test.ts` +2: `loadProjectDetail` が `project.workspace` を素通りし
+    `GET /clusters` を選択肢として添える 1 件、`GET /clusters` が落ちても詳細は返す 1 件
+  - `test/unit/conversation.test.ts` +6: `loadConversation` の `GET /clusters` 通過・失敗時空扱い
+    2 件、`startProjectFromMessage` の workspace 付き・`null`・422 3 件、`runConversationAction` で
+    作業場所欄が `POST /projects` の `workspace` になる 1 件
+  - `test/unit/artifacts.test.ts` +1: `workspacePlace` の remote + `workspace_dir` で
+    `localCopyNote` が付く 1 件（既存の local/remote 2 件は `localCopyNote: null` を足して更新）
+- `pnpm build` exit 0。
+- `pnpm gen:types` を 2 回実行して差分ゼロ。`bash scripts/sync-gui-docs.sh --check` up to date。
+- 実機での見た目の確認は上記のとおり（3 状態 × light/dark、Remote タスクの「手元の写し」表示）。
+
+### 未解決事項
+
+- G13k-U1: e2e（`pnpm e2e`）は運用中の taskd / GUI（7700/7710）と衝突するため未実行（既存フェーズと
+  同じ扱い）。確認は unit テストと使い捨て環境での Playwright 撮影で行った。
+- G13k-U2: DOM を描画する unit テスト（G10-U1 以降と同じ制約）は今回も無い。`WorkspaceFields` /
+  「作業場所」カードの分岐は実機の Playwright でのみ確認している。
+- G13k-U3: 秘書の「新しい案件として」に添えた作業場所は、実機で `POST /projects` の本文に載ることを
+  unit テスト（`runConversationAction`）で確認したが、Playwright での実機確認は `/projects` の新規
+  フォームと `/projects/:id` の編集カードだけに絞った（秘書の対話画面はチェックボックスの表示切り替え
+  を含み、対話 run 自体は taskd 側の fixture ワーカーが要るため、G13b-2/G13j までの確認範囲に揃えて
+  今回は省いた）。
+- G13k-U4: `/artifacts`・`/projects/:id` の「成果物」節（`ArtifactsList`）の「手元の写し」表示は
+  unit テスト（`workspacePlace`）でのみ確認し、実機の Playwright 撮影は `/tasks/:id` の表示（同じ
+  `workspace_dir` の値を使う）で代表させた（成果物の実データを使い捨て環境で 1 件登録するコストに対し、
+  表示ロジックは共通の `workspacePlace` に集約されているため）。
+
+### 提案（`docs/gui/api.md` への変更提案。採否は人間）
+
+なし。

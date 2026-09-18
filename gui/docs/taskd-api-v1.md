@@ -842,6 +842,26 @@ Phase 27 の監査 M-4）。読み取りと途中目標の操作は通常の要�
 SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validation`。
 一覧は `created_at` の降順。
 
+**Phase 43（ADR-0039 D1）**: 任意で `workspace`（**案件の作業場所** = コードのある場所）を受ける:
+
+```json
+{"title":"Pluvio の PoC","request":"…",
+ "workspace":{"kind":"local","path":"~/workspace/rust/pluvio-poc"}}
+{"title":"benchfs の検証","request":"…",
+ "workspace":{"kind":"remote","cluster":"pegasus","path":"/work/NBB/rmaeda/workspace/rust/benchfs"}}
+```
+
+- `kind` は `local`（手元の普段のパス。SPEC §2.1）か `remote`（クラスタ側の作業ディレクトリ。ADR-0018 D1。
+  taskd は写しを持ち、`sync` の設定で往復する）。
+- `local` の `~` / `~/…` は taskd の `$HOME` で**展開して保存する**（`GET` は展開後の絶対パスを返す）。
+  `remote` の `path` はクラスタ側なので展開しない。
+- `remote` の `cluster` が `[[clusters]]`（`GET /clusters`）に無ければ 422 `validation`
+  （`errors[].field = "workspace.cluster"`）。
+- 省略すれば従来どおり「作業場所なし」（`Project.workspace` は応答に出ない）。
+- この作業場所は**分解（`POST /projects/{id}/plan`）とその子タスク**が継ぐ（明示 > 案件 > 親。ADR-0039 D2）。
+  コードを扱う案件では、GUI から必ず入れてもらうのがよい（入れないと子タスクは空の作業ディレクトリに置かれ、
+  ワーカーが自分で `ssh` してリポジトリを探しに行く。実機の事故 2026-09-18）。
+
 #### 3.47 `GET /projects/{id}` → 200 `ProjectDetail`
 
 ```json
@@ -854,6 +874,7 @@ SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validat
            "assignee":"research-survey","milestone_id":"01J…","conversation":false,"support":null}]}
 ```
 
+`project` には案件の作業場所（`workspace`。ADR-0039 D1。決めていない案件では出ない）も入る。
 `tasks` は**仕事の木を描くのに必要な分だけ**（詳細は `GET /tasks/{id}`）。`project_id` が一致するタスクだけが
 入り、他の案件・案件に属さないタスクは出ない。ULID でない id・無い案件は 404 `project_not_found`。
 `conversation` が `true` の行は**対話用タスク**（人への返事のための run。3.54 参照）なので、仕事の木からは
@@ -875,6 +896,13 @@ GUI はこの 2 つが揃ったカードに「ok」「議論」「ng」の 3 ボ
 #### 3.48 `PATCH /projects/{id}` → 200 `Project`
 
 `{"status":"proposed"|"active"|"paused"|"done"}`。知らない値は 400 `bad_request`（本文の解析で落ちる）。
+
+**Phase 43（ADR-0039 D1）**: `status` と `workspace` はどちらも任意になった（書いたものだけ変える）。
+
+- `{"workspace":{"kind":"local","path":"~/workspace/rust/pluvio-poc"}}` — 作業場所だけを設定・差し替える
+  （`POST` と同じ検証・`~` の展開・422）。
+- `{"workspace":null}` — 作業場所を消す（「作業場所なし」に戻す）。
+- `{}`（どちらも書かない）は 422 `validation`。
 
 #### 3.49 途中目標: `POST /projects/{id}/milestones` → 201 `Milestone` / `PATCH /milestones/{id}` → 200 `Milestone`
 

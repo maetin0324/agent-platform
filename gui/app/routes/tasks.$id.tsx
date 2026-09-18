@@ -253,7 +253,10 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                       {detail.cluster}
                     </Link>
                     <span className="ml-2 text-xs text-fg-subtle" data-testid="task-workspace-note">
-                      workspace_dir はクラスタ側ではなく手元の写しです（クラスタ側の元のパスは表示されません）。
+                      {/* ADR-0039 D3（Phase G13k）: 編集は手元の作業ディレクトリで、検証はリモートで。 */}
+                      {detail.workspace_dir
+                        ? `手元の写し: ${detail.workspace_dir}（クラスタ側の元のパスは表示されません）`
+                        : "workspace_dir はクラスタ側ではなく手元の写しです（クラスタ側の元のパスは表示されません）。"}
                     </span>
                   </p>
                 )}

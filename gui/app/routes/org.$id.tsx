@@ -20,7 +20,15 @@ export async function loader({ params, request }: Route.LoaderArgs): Promise<Con
     return await loadConversation(getTaskdClient(), params.id, request);
   } catch (e) {
     if (isTaskdUnavailable(e)) {
-      return { nodeId: params.id, node: null, projects: [], projectId: null, messages: [], attention: [] };
+      return {
+        nodeId: params.id,
+        node: null,
+        projects: [],
+        projectId: null,
+        messages: [],
+        attention: [],
+        clusters: [],
+      };
     }
     throw taskdErrorResponse(e);
   }

@@ -153,7 +153,9 @@ export type OrgOpOutcome =
  * （管理系ではない。3.42〜3.49 の前書き）。taskd のエラーは例外にせず `{ok:false, error}` にする。
  */
 export type ProjectOpOutcome =
-  | { ok: true; op: "project_status"; project: Project }
+  // `project_workspace` は作業場所の保存・消去（`PATCH /projects/{id}` の `workspace`。ADR-0039 D1、
+  // Phase G13k）。`status` の変更と同じ `Project` を返す形なのでまとめる。
+  | { ok: true; op: "project_status" | "project_workspace"; project: Project }
   | { ok: true; op: "milestone_create" | "milestone_status"; milestone: Milestone }
   // 「この方針で進める」（`POST /projects/{id}/plan`。**管理系**、202。docs/taskd-api-v1.md §3.61、Phase 29）。
   | { ok: true; op: "project_plan"; accepted: ProjectPlanAccepted }
@@ -162,7 +164,13 @@ export type ProjectOpOutcome =
   | { ok: true; op: "milestone_decide"; decided: MilestoneDecided }
   | {
       ok: false;
-      op: "project_status" | "milestone_create" | "milestone_status" | "project_plan" | "milestone_decide";
+      op:
+        | "project_status"
+        | "project_workspace"
+        | "milestone_create"
+        | "milestone_status"
+        | "project_plan"
+        | "milestone_decide";
       error: ActionError;
     };
 

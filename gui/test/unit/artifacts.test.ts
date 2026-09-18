@@ -29,6 +29,7 @@ describe("workspacePlace", () => {
     expect(workspacePlace(workspace, "/home/user/workspace/rust/brainfuck")).toEqual({
       text: "/home/user/workspace/rust/brainfuck",
       vscodeHref: "vscode://file/home/user/workspace/rust/brainfuck",
+      localCopyNote: null,
     });
   });
 
@@ -37,14 +38,25 @@ describe("workspacePlace", () => {
     expect(workspacePlace(workspace, null)).toEqual({
       text: "rust/brainfuck",
       vscodeHref: "vscode://file/rust/brainfuck",
+      localCopyNote: null,
     });
   });
 
   it("remote: cluster:path で出し、リンクは付けない（クラスタ側のパスであってローカルではない）", () => {
     const workspace: WorkspaceSpec = { kind: "remote", cluster: "cl1", path: "code/proj" };
+    expect(workspacePlace(workspace, null)).toEqual({
+      text: "cl1:code/proj",
+      vscodeHref: null,
+      localCopyNote: null,
+    });
+  });
+
+  it("remote: workspace_dir があれば「手元の写し」の案内文を添える（ADR-0039 D3、実機の事故 2026-09-18）", () => {
+    const workspace: WorkspaceSpec = { kind: "remote", cluster: "cl1", path: "code/proj" };
     expect(workspacePlace(workspace, "/home/user/workspace/T1")).toEqual({
       text: "cl1:code/proj",
       vscodeHref: null,
+      localCopyNote: "手元の写し: /home/user/workspace/T1",
     });
   });
 });
@@ -133,8 +145,8 @@ describe("buildProjectArtifactRows", () => {
   ]);
 
   it("タスクごとに束ねた成果物を、新しい順（ts 降順）に平らにする", () => {
-    const workspace1 = { text: "rust/brainfuck", vscodeHref: "vscode://file/rust/brainfuck" };
-    const workspace2 = { text: "cl1:code/proj", vscodeHref: null };
+    const workspace1 = { text: "rust/brainfuck", vscodeHref: "vscode://file/rust/brainfuck", localCopyNote: null };
+    const workspace2 = { text: "cl1:code/proj", vscodeHref: null, localCopyNote: null };
     const bundles = new Map<string, TaskArtifactBundle>([
       [
         "t1",

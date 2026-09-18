@@ -1,3 +1,4 @@
+import { readWorkspaceFromForm } from "~/lib/workspace-form";
 import type { CreateFailure, ProjectOpOutcome } from "./action-types";
 import { toActionError } from "./actions.server";
 import type { TaskdClient } from "./client.server";
@@ -15,6 +16,7 @@ import type {
   ProjectPlanAccepted,
   ProjectPlanBody,
   ProjectStatus,
+  WorkspaceSpec,
 } from "./types";
 
 /**
@@ -42,12 +44,19 @@ export async function createProject(
   }
 }
 
-/** フォーム（`title` / `request`）から `ProjectCreateBody` を読む。 */
+/**
+ * フォーム（`title` / `request` / `workspace_kind` / `workspace_path` / `workspace_cluster`）から
+ * `ProjectCreateBody` を読む。作業場所が「まだ決めない」（省略を含む）なら `workspace` キー自体を送らない
+ * （docs/taskd-api-v1.md §3.46「省略すれば従来どおり作業場所なし」。ADR-0039 D1、Phase G13k）。
+ */
 export function readProjectCreateInput(form: FormData): ProjectCreateBody {
-  return {
+  const body: ProjectCreateBody = {
     title: formString(form, "title") ?? "",
     request: formString(form, "request") ?? "",
   };
+  const workspace = readWorkspaceFromForm(form);
+  if (workspace) body.workspace = workspace;
+  return body;
 }
 
 /** `PATCH /projects/{id}`（案件の状態変更。ADR-0033 D2 の `proposed`/`active`/`paused`/`done`）。 */
@@ -63,6 +72,25 @@ export async function patchProjectStatus(
     return { ok: true, op: "project_status", project };
   } catch (e) {
     return { ok: false, op: "project_status", error: toActionError(e) };
+  }
+}
+
+/**
+ * `PATCH /projects/{id}`（案件の作業場所だけを変える。ADR-0039 D1、Phase G13k）。`workspace = null` を
+ * 明示すると「作業場所なし」に戻す（消去。docs/taskd-api-v1.md §3.48）。`status` は送らない（変えない）。
+ */
+export async function patchProjectWorkspace(
+  client: TaskdClient,
+  id: string,
+  workspace: WorkspaceSpec | null,
+  signal?: AbortSignal,
+): Promise<ProjectOpOutcome> {
+  try {
+    const body: ProjectPatchBody = { workspace };
+    const project = await client.patch<Project>(`/projects/${encodeURIComponent(id)}`, body, { signal });
+    return { ok: true, op: "project_workspace", project };
+  } catch (e) {
+    return { ok: false, op: "project_workspace", error: toActionError(e) };
   }
 }
 

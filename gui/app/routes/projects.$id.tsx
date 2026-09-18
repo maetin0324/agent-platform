@@ -12,6 +12,7 @@ import { checkboxClass, hintClass, inputClass, labelClass, selectClass, textarea
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
+import { WorkspaceFields } from "~/components/WorkspaceFields";
 import { WorkTree } from "~/components/WorkTree";
 import {
   buildProjectArtifactRows,
@@ -23,6 +24,7 @@ import { milestoneStatusLabel, projectStatusLabel, taskStatusLabel } from "~/lib
 import { milestoneDecisionValid, milestoneIsStalled } from "~/lib/milestone-review";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
+import { readWorkspaceFromForm, workspaceKindOf, workspaceSummaryText } from "~/lib/workspace-form";
 import { TaskdBanner } from "~/root";
 import type { ProjectOpOutcome, RetryOutcome, TransitionOutcome } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
@@ -33,10 +35,13 @@ import {
   decideMilestone,
   patchMilestoneStatus,
   patchProjectStatus,
+  patchProjectWorkspace,
   startProjectPlan,
 } from "~/taskd/projects-admin.server";
 import type {
   ArtifactList,
+  Clusters,
+  ClusterView,
   MilestoneDecideBody,
   MilestoneStatus,
   MilestoneView,
@@ -71,6 +76,8 @@ export interface ProjectDetailData {
   reports: ReportList;
   artifactRows: ProjectArtifactRow[];
   fetchedAt: string;
+  /** 作業場所の編集フォームの選択肢（`GET /clusters`。ADR-0039 D1、Phase G13k）。taskd に届かないときは空。 */
+  clusters: ClusterView[];
 }
 
 /**
@@ -94,7 +101,7 @@ async function loadTaskArtifactBundles(
       const bundle: TaskArtifactBundle = {
         workspace: detail
           ? workspacePlace(detail.task.workspace, detail.workspace_dir)
-          : { text: "-", vscodeHref: null },
+          : { text: "-", vscodeHref: null, localCopyNote: null },
         artifacts: list.items,
       };
       return [id, bundle] as const;
@@ -104,12 +111,14 @@ async function loadTaskArtifactBundles(
 }
 
 export async function loadProjectDetail(client: TaskdClient, id: string, request: Request): Promise<ProjectDetailData> {
-  const [detail, org, reports] = await Promise.all([
+  const [detail, org, reports, clusters] = await Promise.all([
     client.get<ProjectDetail>(`/projects/${encodeURIComponent(id)}`, { signal: request.signal }),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
     client
       .get<ReportList>("/reports", { query: { project: id }, signal: request.signal })
       .catch(() => ({ items: [] }) as ReportList),
+    // 作業場所の編集フォームの選択肢（ADR-0039 D1、Phase G13k）。落ちても案件の詳細自体は出す。
+    client.get<Clusters>("/clusters", { signal: request.signal }).catch(() => ({ items: [] }) as Clusters),
   ]);
   const orgById = new Map(org.items.map((n) => [n.id, n]));
   const bundles = await loadTaskArtifactBundles(
@@ -118,7 +127,7 @@ export async function loadProjectDetail(client: TaskdClient, id: string, request
     request.signal,
   );
   const artifactRows = buildProjectArtifactRows(detail.tasks, bundles, orgById);
-  return { detail, org, reports, artifactRows, fetchedAt: new Date().toISOString() };
+  return { detail, org, reports, artifactRows, fetchedAt: new Date().toISOString(), clusters: clusters.items };
 }
 
 export const shouldRevalidate = revalidateAfterActionErrors;
@@ -167,6 +176,14 @@ export async function action({ request, params }: Route.ActionArgs) {
     case "milestone_decide":
       outcome = await decideMilestone(client, formString(form, "milestone_id") ?? "", form, request.signal);
       break;
+    // 作業場所の保存・消去（ADR-0039 D1、Phase G13k）。保存は選んだ kind（local/remote）をそのまま送り、
+    // 消去は明示的に `workspace: null` を送る（別ボタン。編集フォームで「まだ決めない」は選べない）。
+    case "project_workspace_save":
+      outcome = await patchProjectWorkspace(client, params.id, readWorkspaceFromForm(form), request.signal);
+      break;
+    case "project_workspace_clear":
+      outcome = await patchProjectWorkspace(client, params.id, null, request.signal);
+      break;
     default:
       throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
   }
@@ -192,10 +209,11 @@ const MILESTONE_STATUS_TONE: Record<MilestoneStatus, Tone> = {
 };
 
 export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) {
-  const { detail, org, reports, artifactRows, fetchedAt } = loaderData;
+  const { detail, org, reports, artifactRows, fetchedAt, clusters } = loaderData;
   const { project, milestones, tasks } = detail;
   const fetcher = useFetcher<ProjectOpOutcome>();
   const submitting = fetcher.state !== "idle";
+  const workspaceError = fetcher.data && !fetcher.data.ok ? fetcher.data.error : undefined;
 
   const orgById = useMemo(() => new Map(org.items.map((n) => [n.id, n])), [org.items]);
   // 裏方のタスク（`support`: 対話・報告のまとめ・承認待ち・レビュー。Phase 29）は仕事の木から完全に外す
@@ -268,6 +286,65 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
               >
                 <Icon name="check" />
                 状態を変える
+              </Button>
+            </fetcher.Form>
+          </CardBody>
+        </Card>
+      </section>
+
+      {/* 案件の作業場所（ADR-0039 D1、Phase G13k）。コードを扱う仕事の子タスクが継ぐ場所
+          （明示 > 案件 > 親。ADR-0039 D2）で、未設定だと空の作業ディレクトリで走ってしまう
+          （実機の事故 2026-09-18）。 */}
+      <section aria-labelledby="project-workspace-heading" data-testid="project-workspace" className="space-y-4">
+        <SectionTitle icon="folder" id="project-workspace-heading">
+          作業場所
+        </SectionTitle>
+        <Card>
+          <CardBody className="space-y-4">
+            {project.workspace ? (
+              <DataItem label="現在" wide>
+                <p className="break-all font-mono text-sm">{workspaceSummaryText(project.workspace)}</p>
+              </DataItem>
+            ) : (
+              <Alert tone="warning" data-testid="project-workspace-unset">
+                未設定 — コードを扱う仕事は空の作業ディレクトリで走ります
+              </Alert>
+            )}
+            <fetcher.Form method="post" className="space-y-3" data-testid="project-workspace-form">
+              <input type="hidden" name="intent" value="project_workspace_save" />
+              <WorkspaceFields
+                idPrefix="project-workspace"
+                clusters={clusters}
+                allowUndecided={false}
+                defaultKind={project.workspace ? workspaceKindOf(project.workspace) : "local"}
+                defaultPath={project.workspace?.path ?? ""}
+                defaultCluster={project.workspace?.kind === "remote" ? project.workspace.cluster : undefined}
+                error={workspaceError}
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="submit"
+                  variant="secondary"
+                  size="sm"
+                  disabled={submitting}
+                  data-testid="project-workspace-save"
+                >
+                  <Icon name="check" />
+                  保存
+                </Button>
+              </div>
+            </fetcher.Form>
+            <fetcher.Form method="post">
+              <input type="hidden" name="intent" value="project_workspace_clear" />
+              <Button
+                type="submit"
+                variant="ghost"
+                size="sm"
+                disabled={submitting}
+                data-testid="project-workspace-clear"
+              >
+                <Icon name="x" />
+                消去
               </Button>
             </fetcher.Form>
           </CardBody>

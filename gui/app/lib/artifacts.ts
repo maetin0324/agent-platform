@@ -61,23 +61,33 @@ export interface WorkspacePlace {
   text: string;
   /** ローカルのときだけ（コピー用のパスはリンクにできないが、`vscode://file/<path>` は開ける）。 */
   vscodeHref: string | null;
+  /**
+   * ADR-0039 D3「編集は手元の作業ディレクトリで、検証はリモートで」（Phase G13k）: Remote のときだけ、
+   * 手元の写し（`workspace_dir`）の案内文。`workspace_dir` が無ければ `null`。
+   */
+  localCopyNote: string | null;
 }
 
 /**
  * `Task.workspace`（`WorkspaceSpec::Local{path}` / `Remote{cluster, path}`）を「置き場所」の表示に変える。
  * - Local: `workspace_dir`（taskd が絶対化した値、docs/gui/api.md §3.5）をそのまま出す。無ければ生の `path`。
  * - Remote: コードが実際にあるのはクラスタ側（`task.workspace.path`）。`workspace_dir` は手元の写しでしかない
- *   ので使わない（docs/gui/api.md §3.5「Remote{cluster, path} では手元の写し…クラスタ側のパスは task.workspace.path」）。
- *   ローカルのパスではないのでリンクにはしない。
+ *   ので `text` には使わない（docs/gui/api.md §3.5「Remote{cluster, path} では手元の写し…クラスタ側のパスは
+ *   task.workspace.path」）。ローカルのパスではないのでリンクにはしないが、ADR-0039 D3 どおり「手元の写し」
+ *   として案内文には出す（実機の事故 2026-09-18: ワーカーが `ssh` でリモートの作業ツリーへ直接書いた）。
  */
 export function workspacePlace(workspace: WorkspaceSpec, workspaceDir: string | null | undefined): WorkspacePlace {
   if (workspace.kind === "remote") {
-    return { text: `${workspace.cluster}:${workspace.path}`, vscodeHref: null };
+    return {
+      text: `${workspace.cluster}:${workspace.path}`,
+      vscodeHref: null,
+      localCopyNote: workspaceDir ? `手元の写し: ${workspaceDir}` : null,
+    };
   }
   const text = workspaceDir ?? workspace.path;
   // `vscode://file/<絶対パス>`。パスが `/` 始まりなら二重スラッシュ（`vscode://file//tmp/...`）になるので
   // 先頭の `/` を落としてから繋ぐ（監査 9）。相対パスはそのまま（VS Code 側が解釈する）。
-  return { text, vscodeHref: `vscode://file/${text.replace(/^\/+/, "")}` };
+  return { text, vscodeHref: `vscode://file/${text.replace(/^\/+/, "")}`, localCopyNote: null };
 }
 
 /** `sources.json`（ADR-0031「見るべき関連研究へのリンク」）は、名前で判定する（Content-Type は他の JSON と同じ `application/json`）。 */

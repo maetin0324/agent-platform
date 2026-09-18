@@ -18,6 +18,7 @@ import {
 import { Icon } from "~/components/ui/Icon";
 import { EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
+import { WorkspaceFields } from "~/components/WorkspaceFields";
 import { projectStatusLabel } from "~/lib/labels";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
@@ -25,7 +26,7 @@ import type { CreateFailure } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { createProject, readProjectCreateInput } from "~/taskd/projects-admin.server";
-import type { Project, ProjectDetail, ProjectList, ProjectStatus } from "~/taskd/types";
+import type { Clusters, ClusterView, Project, ProjectDetail, ProjectList, ProjectStatus } from "~/taskd/types";
 import type { Route } from "./+types/projects";
 
 /**
@@ -42,10 +43,17 @@ export interface ProjectRow {
 
 export interface ProjectsData {
   rows: ProjectRow[];
+  /** 作業場所（`GET /clusters`）の選択肢（ADR-0039 D1、Phase G13k）。taskd に届かないときは空。 */
+  clusters: ClusterView[];
 }
 
 export async function loadProjects(client: TaskdClient, request: Request): Promise<ProjectsData> {
-  const list = await client.get<ProjectList>("/projects", { signal: request.signal });
+  const [list, clusters] = await Promise.all([
+    client.get<ProjectList>("/projects", { signal: request.signal }),
+    // 作業場所（クラスタ）の選択肢（ADR-0039 D1、Phase G13k）。`GET /projects/{id}` の N+1 と同じく、
+    // 落ちても一覧・作成フォーム自体は出す（クラスタは「まだ決めない」で作れる）。
+    client.get<Clusters>("/clusters", { signal: request.signal }).catch(() => ({ items: [] }) as Clusters),
+  ]);
   const rows = await Promise.all(
     list.items.map(async (project) => {
       try {
@@ -58,7 +66,7 @@ export async function loadProjects(client: TaskdClient, request: Request): Promi
       }
     }),
   );
-  return { rows };
+  return { rows, clusters: clusters.items };
 }
 
 export const shouldRevalidate = revalidateAfterActionErrors;
@@ -91,7 +99,7 @@ const PROJECT_STATUS_TONE: Record<ProjectStatus, Tone> = {
 };
 
 export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
-  const { rows } = loaderData;
+  const { rows, clusters } = loaderData;
   // 失敗（422 等）が SSE の再検証で消えないよう fetcher に載せる（Phase G13f-1、監査 H1）。
   // 成功したら action が `redirect` を返し、fetcher でもそのまま詳細へ移る。
   const fetcher = useFetcher<CreateFailure>();
@@ -211,6 +219,7 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
                 </p>
                 <FieldErrors error={error} field="request" />
               </div>
+              <WorkspaceFields idPrefix="project-new-workspace" clusters={clusters} error={error} />
               <Button type="submit" variant="primary" disabled={submitting} data-testid="project-new-submit">
                 <Icon name="send" />
                 投げる
