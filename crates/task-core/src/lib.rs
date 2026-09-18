@@ -22,7 +22,7 @@ pub use delegate::{
 };
 pub use message::{
     CONVERSATION_GENRE, Message, MessageId, MessageRole, conversation_origin, conversation_title, failure_reply,
-    is_conversation,
+    is_conversation, is_milestone_review, milestone_review_of,
 };
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, HARNESS_ADAPTERS, Lease, RoleSpec, RunRole, Status,
@@ -33,8 +33,8 @@ pub use notify::{
     NotificationStore,
 };
 pub use org::{
-    Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
-    assignee_defaults, department_of, valid_org_id, validate_upsert,
+    Milestone, MilestoneDecision, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId,
+    ProjectStatus, assignee_defaults, department_of, valid_org_id, validate_upsert,
 };
 pub use report::{
     COMPACTION_ROLE, Report, ReportFilter, ReportId, ReportKind, ReportStore, ReportsLive, support_kind,

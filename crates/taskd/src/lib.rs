@@ -5,6 +5,7 @@ mod accounts_admin;
 mod cluster_admin;
 pub mod config;
 /// ADR-0037（Phase 39）: 人の判断が要るときだけ Discord に知らせる（判定は決定的、送信は spawn）。
+pub mod milestone_review;
 pub mod notify;
 /// ADR-0033 D3（Phase 25）: 報告の圧縮（まとめの run を起こす決定的な判断）。
 pub mod reports;
@@ -760,6 +761,25 @@ async fn tick_loop(
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "reports: could not schedule the compaction runs"),
+            }
+        }
+        // ADR-0038 D1 / B1（Phase 41）: 途中目標の仕事が止まったら、秘書の「途中目標レビュー」の対話を
+        // 1 回だけ起こす（**通知の前に**）。ここも判断は決定的で、ストアを見て対話用タスクを 1 件作るだけ
+        // （LLM もワーカーも起動しない。起動するのは次の tick の dispatch）。
+        {
+            let store = dispatcher.store();
+            match milestone_review::schedule(
+                store.as_ref(),
+                &config.role_specs(),
+                &config.genre_specs(),
+                config.conversation_genre_id(),
+                OffsetDateTime::now_utc(),
+            ) {
+                Ok(started) if !started.is_empty() => {
+                    tracing::info!(count = started.len(), "milestone review: runs scheduled");
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "milestone review: could not evaluate the milestones"),
             }
         }
         // ADR-0037 D1/D3 / B1: 通知。ここもチャネルには送らず、その場で store を見るだけ（LLM もワーカーも

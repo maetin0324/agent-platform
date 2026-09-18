@@ -34,7 +34,8 @@ use task_ops::derive::{
 };
 use task_worker::{
     AdapterError, Answer, ChildSummary, ConversationAddressee, ConversationTurn, EventSink, GenreContext,
-    LocalWorkspace, MemoryContext, MemoryDir, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview,
+    LocalWorkspace, MemoryContext, MemoryDir, MilestoneBrief, MilestoneReviewContext, MilestoneTaskResult,
+    NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview,
     RecentWork, RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode,
     Terminal, WorkerMessage, Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
 };
@@ -274,6 +275,15 @@ const RECENT_WORK_SCAN: usize = 100;
 /// Phase 33（ADR-0033 D4 追記）: `context.recent_work` に渡す件数の上限。
 const RECENT_WORK_LIMIT: usize = 10;
 
+/// Phase 41（ADR-0038 D1）: レビューの前置きに載せる、その途中目標の仕事の件数の上限。
+const MILESTONE_REVIEW_TASK_LIMIT: usize = 20;
+/// Phase 41: 途中目標の仕事を探すときに `list_page` から読む候補の上限。
+const MILESTONE_REVIEW_TASK_SCAN: usize = 500;
+/// Phase 41（ADR-0038 D1）: 1 件の仕事から載せる成果物の抜粋の字数（決定的に切る）。
+const MILESTONE_REVIEW_EXCERPT_CHARS: usize = 4_000;
+/// Phase 41（ADR-0038 D1）: 抜粋する成果物の名前（この順に見る）。
+const MILESTONE_REVIEW_ARTIFACTS: [&str; 2] = ["answer.md", "report.md"];
+
 /// Phase 33: その run が残した成果物の名前（`ArtifactProduced` から。重複は除く、順は登場順）。
 fn artifact_names_of(events: &[(u64, Event)]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -361,6 +371,8 @@ struct RunExtras {
     /// Phase 33（ADR-0033 D4 追記。実機の事故の再発防止）: 対話 run にだけ、担当の直近の仕事
     /// （最大 10 件、更新の新しい順。案件を選んでいる対話ならその案件のものを先に）。
     recent_work: Vec<RecentWork>,
+    /// Phase 41（ADR-0038 D1）: **途中目標レビューの対話 run** にだけ、その途中目標とそこまでの成果。
+    milestone_review: Option<MilestoneReviewContext>,
 }
 
 struct ReviewEntry {
@@ -1393,6 +1405,11 @@ impl Dispatcher {
                 // 失敗なら理由）をそのノードの返事として `messages` に残す。**「返事できませんでした」は
                 // タスクが `Failed` に落ちたときだけ**（requeue / まだ試行が残る失敗では書かない）。
                 self.record_conversation_reply(&task, &run_id, &outcome_str, outcome.next);
+                // ADR-0038 D1（Phase 41）: 対話 run が結果ファイルで宣言した次の途中目標を
+                // `milestones` に入れる（`done` のときだけ。差し替えは決定的）。
+                if outcome_str.starts_with("done: ") {
+                    self.absorb_milestone_proposal(&task);
+                }
                 // ADR-0034 D2（監査 M-1〜M-3）: `question` は run の終端でそのまま届ける。`done` はレビューを
                 // 通って `Status::Done` になってから（`on_review_finished` 側）作るので、ここでは作らない。
                 // Phase 28: 対話 run の `Question` は `Done` 扱い（上の match）なので、ここでは報告しない
@@ -1467,6 +1484,41 @@ impl Dispatcher {
         let project = task.project_id.map(|p| p.to_string());
         if let Err(e) = MemoryDir::new(dir).append(node_id, project.as_deref(), &update, &today) {
             tracing::warn!(task_id = %task.id, error = %e, "failed to append to the node's memory");
+        }
+    }
+
+    /// ADR-0038 D1（Phase 41）: 対話 run の結果ファイル（`<artifacts_dir>/result.json`）の
+    /// `milestone_proposal` から、その案件に `status = proposed` の途中目標を 1 件作る
+    /// （古い提案は `redesigned` に差し替える。判定中の途中目標自身は触らない）。
+    /// 対話でない run・案件に属さない run・宣言が無い run では何もしない。失敗しても run は壊さない。
+    fn absorb_milestone_proposal(&self, task: &Task) {
+        if !task_core::is_conversation(task) {
+            return;
+        }
+        let Some(project_id) = task.project_id else {
+            return;
+        };
+        let Some(workspace) = self.task_dir(task) else {
+            return;
+        };
+        let Some(proposal) = task_worker::read_result_milestone_proposal(&self.artifacts_dir(task, &workspace))
+        else {
+            return;
+        };
+        match task_ops::milestone_review::record_proposal(
+            self.store.as_ref(),
+            project_id,
+            task.milestone_id,
+            &proposal.title,
+            &proposal.description,
+        ) {
+            Ok(Some(milestone)) => tracing::info!(
+                task_id = %task.id,
+                milestone_id = %milestone.id,
+                "the reply proposed the next milestone; recorded as proposed"
+            ),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(task_id = %task.id, error = %e, "failed to record the proposed milestone"),
         }
     }
 
@@ -2350,6 +2402,12 @@ impl Dispatcher {
         } else {
             Vec::new()
         };
+        // Phase 41（ADR-0038 D1）: 途中目標レビューの対話 run にだけ、その途中目標とそこまでの仕事の成果を
+        // 渡す（集めるのは決定的: ストアのタスク・イベントと成果物ファイルを読むだけ）。
+        let milestone_review = match task_core::milestone_review_of(task) {
+            Some(milestone_id) => self.milestone_review_of(task.project_id, milestone_id)?,
+            None => None,
+        };
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
         let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
@@ -2396,7 +2454,79 @@ impl Dispatcher {
             conversation_addressee,
             work_genre,
             recent_work,
+            milestone_review,
         })
+    }
+
+    /// Phase 41（ADR-0038 D1）: レビューの対話 run に渡す「その途中目標のここまで」。
+    /// その途中目標に属する仕事（裏方は除く。作られた順に最大 20 件）の title / status / 終端の要約 /
+    /// 主な成果物（`answer.md` / `report.md` の先頭 4,000 字）を集める。LLM は使わない（DESIGN 原則 1）。
+    fn milestone_review_of(
+        &self,
+        project_id: Option<ProjectId>,
+        milestone_id: task_core::MilestoneId,
+    ) -> Result<Option<MilestoneReviewContext>, DispatchError> {
+        let Some(project_id) = project_id else {
+            return Ok(None);
+        };
+        let Some(milestone) = self
+            .store
+            .milestone_list(project_id)?
+            .into_iter()
+            .find(|m| m.id == milestone_id)
+        else {
+            return Ok(None);
+        };
+        let filter = ListFilter {
+            project_id: Some(project_id),
+            ..ListFilter::default()
+        };
+        let page = self
+            .store
+            .list_page(&filter, ListOrder::CreatedDesc, None, MILESTONE_REVIEW_TASK_SCAN)?;
+        let mut subjects: Vec<Task> = page
+            .items
+            .into_iter()
+            .filter(|t| t.milestone_id == Some(milestone_id) && support_kind(t).is_none())
+            .collect();
+        subjects.sort_by_key(|t| (t.created_at, t.id));
+        let mut tasks = Vec::new();
+        for task in subjects.into_iter().take(MILESTONE_REVIEW_TASK_LIMIT) {
+            let events = self.store.events_for(task.id)?;
+            tasks.push(MilestoneTaskResult {
+                title: task.title.clone(),
+                status: task.status,
+                outcome: recent_work_outcome(&task, &events),
+                artifacts_excerpt: self.milestone_artifacts_excerpt(&task),
+            });
+        }
+        Ok(Some(MilestoneReviewContext {
+            milestone: MilestoneBrief {
+                id: milestone.id.to_string(),
+                title: milestone.title.clone(),
+                description: milestone.description.clone(),
+                status: milestone.status.as_str().to_string(),
+            },
+            tasks,
+        }))
+    }
+
+    /// Phase 41（ADR-0038 D1）: その仕事が残した `answer.md` / `report.md` の先頭 4,000 字
+    /// （両方あれば名前を見出しに付けて繋ぎ、全体を 4,000 字で切る。読めなければ空文字）。
+    fn milestone_artifacts_excerpt(&self, task: &Task) -> String {
+        let Some(workspace) = self.task_dir(task) else {
+            return String::new();
+        };
+        let dir = self.artifacts_dir(task, &workspace);
+        let mut out = String::new();
+        for name in MILESTONE_REVIEW_ARTIFACTS {
+            if let Ok(text) = std::fs::read_to_string(dir.join(name)) {
+                out.push_str(&format!("#### {name}\n"));
+                out.push_str(text.trim_end());
+                out.push('\n');
+            }
+        }
+        truncate_chars(&out, MILESTONE_REVIEW_EXCERPT_CHARS)
     }
 
     /// Phase 38（ADR-0028 追記。実機のレビュー不合格から）: 計画が**ハーネスで動く分野**の担当に
@@ -3073,6 +3203,8 @@ async fn run_worker(
             conversation_addressee: extras.conversation_addressee,
             work_genre: extras.work_genre,
             recent_work: extras.recent_work,
+            // Phase 41（ADR-0038 D1）: 途中目標レビューの対話 run だけに入る。
+            milestone_review: extras.milestone_review,
             // Phase 38（ADR-0028 追記）: レビュー run（`review.rs` が組む）だけに入る。
             subject_genre: None,
         },
@@ -6906,6 +7038,176 @@ mod tests {
         assert!(!ids.contains(&support.id), "承認は裏方なので除外");
         assert!(!ids.contains(&compaction.id), "まとめは裏方なので除外");
         assert!(!ids.contains(&other_assignee.id), "他の担当の仕事は含めない");
+    }
+
+    // ---- Phase 41（ADR-0038 D1）: 途中目標レビューの対話 run ----
+
+    /// 受け入れ 1: レビューの対話 run（対話の印 + `milestone_id`）には、その途中目標と、
+    /// 属する仕事（裏方は除く）の title / status / 終端の要約 / 成果物の抜粋が渡る。
+    #[test]
+    fn run_extras_fills_the_milestone_review_context_with_results_and_artifact_excerpts() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        let base = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        let project = titled_project("Pluvio");
+        store.project_create(&project).unwrap();
+        let milestone = store
+            .milestone_create(project.id, "隣接領域の動向調査", "近い分野を洗う", MilestoneStatus::InProgress)
+            .unwrap();
+
+        // 成果物を持つ done の仕事（`answer.md` を書いてある）。
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("survey");
+        std::fs::create_dir_all(ws.join("artifacts")).unwrap();
+        std::fs::write(ws.join("artifacts/answer.md"), "候補 A / 候補 B / 候補 C\n").unwrap();
+        let mut done = work_task("web 調査", Status::Done, "research-survey", Some(project.id), base);
+        done.workspace = WorkspaceSpec::Local { path: ws.clone() };
+        done.milestone_id = Some(milestone.id);
+        store.insert(&done).unwrap();
+        store
+            .append_event(
+                done.id,
+                &Event::WorkerFinished {
+                    run_id: "r-1".into(),
+                    outcome: "done: 候補を 3 本に絞った".into(),
+                    usage: None,
+                    role: None,
+                },
+            )
+            .unwrap();
+        // Go 待ちの draft も文脈に入る。
+        let mut draft = work_task(
+            "候補の比較",
+            Status::Draft,
+            "research-survey",
+            Some(project.id),
+            base + time::Duration::seconds(10),
+        );
+        draft.milestone_id = Some(milestone.id);
+        store.insert(&draft).unwrap();
+        // 裏方（承認）は入らない。
+        let mut support = work_task(
+            "approval",
+            Status::Done,
+            "research-survey",
+            Some(project.id),
+            base + time::Duration::seconds(20),
+        );
+        support.kind = TaskKind::Approval;
+        support.milestone_id = Some(milestone.id);
+        store.insert(&support).unwrap();
+
+        let adapter: Arc<dyn WorkerAdapter> =
+            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
+
+        let started = task_ops::milestone_review::start_review(
+            store.as_ref(),
+            &project,
+            &milestone,
+            "途中目標『隣接領域の動向調査』の仕事が止まりました。",
+            &[],
+            &d.config.genres.clone(),
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let extras = d.run_extras(&started.task).unwrap();
+        let review = extras.milestone_review.expect("the review context is filled");
+        assert_eq!(review.milestone.title, "隣接領域の動向調査");
+        assert_eq!(review.milestone.status, "in_progress");
+        assert_eq!(review.tasks.len(), 2, "裏方は入らない: {:?}", review.tasks);
+        assert_eq!(review.tasks[0].title, "web 調査");
+        assert_eq!(review.tasks[0].outcome.as_deref(), Some("候補を 3 本に絞った"));
+        assert!(review.tasks[0].artifacts_excerpt.contains("候補 A / 候補 B / 候補 C"), "{:?}", review.tasks[0]);
+        assert!(review.tasks[0].artifacts_excerpt.contains("answer.md"), "{:?}", review.tasks[0]);
+        assert_eq!(review.tasks[1].title, "候補の比較");
+        assert_eq!(review.tasks[1].status, Status::Draft);
+        // 前置きにも出る。
+        let context = RunContext { milestone_review: Some(review), ..RunContext::default() };
+        let preamble = task_worker::preamble::render(&context, "artifacts");
+        assert!(preamble.contains("## 途中目標『隣接領域の動向調査』のここまで"), "{preamble}");
+        assert!(preamble.contains("候補 A / 候補 B / 候補 C"), "{preamble}");
+
+        // 普通の対話 run（`milestone_id` 無し）には何も渡らない。
+        let plain = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            Some(project.id),
+            "やあ",
+            &[],
+            &d.config.genres.clone(),
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        assert!(d.run_extras(&plain.task).unwrap().milestone_review.is_none());
+    }
+
+    /// 受け入れ 1: 対話 run の結果ファイルの `milestone_proposal` から `proposed` の途中目標が 1 件できる
+    /// （無ければ作らない。判定中の途中目標は差し替えの対象にしない）。
+    #[test]
+    fn absorb_milestone_proposal_records_the_next_milestone_from_the_result_file() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+        let project = titled_project("Pluvio");
+        store.project_create(&project).unwrap();
+        let milestone = store
+            .milestone_create(project.id, "隣接領域の動向調査", "", MilestoneStatus::InProgress)
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("review");
+        std::fs::create_dir_all(ws.join("artifacts")).unwrap();
+        let adapter: Arc<dyn WorkerAdapter> =
+            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
+
+        let mut task = work_task("対話", Status::Done, "secretary", Some(project.id), OffsetDateTime::now_utc());
+        task.workspace = WorkspaceSpec::Local { path: ws.clone() };
+        task.milestone_id = Some(milestone.id);
+        task.conversation = Some(task_core::MessageId::new());
+        store.insert(&task).unwrap();
+
+        // 結果ファイルが無ければ何も作らない。
+        d.absorb_milestone_proposal(&task);
+        assert_eq!(store.milestone_list(project.id).unwrap().len(), 1);
+
+        std::fs::write(
+            ws.join("artifacts/result.json"),
+            r#"{"summary":"結果","milestone_proposal":{"title":"候補の絞り込み","description":"3 本に"}}"#,
+        )
+        .unwrap();
+        d.absorb_milestone_proposal(&task);
+        let all = store.milestone_list(project.id).unwrap();
+        assert_eq!(all.len(), 2, "{all:?}");
+        let proposal = all.iter().find(|m| m.title == "候補の絞り込み").expect("the proposal");
+        assert_eq!(proposal.status, MilestoneStatus::Proposed);
+        assert_eq!(proposal.description, "3 本に");
+        // 判定中の途中目標はそのまま。
+        assert_eq!(
+            all.iter().find(|m| m.id == milestone.id).map(|m| m.status),
+            Some(MilestoneStatus::InProgress)
+        );
+
+        // 2 回目の提案は 1 回目を差し替える（`proposed` は常に 1 件）。
+        std::fs::write(
+            ws.join("artifacts/result.json"),
+            r#"{"summary":"結果","milestone_proposal":{"title":"実験計画","description":""}}"#,
+        )
+        .unwrap();
+        d.absorb_milestone_proposal(&task);
+        let all = store.milestone_list(project.id).unwrap();
+        assert_eq!(
+            all.iter().filter(|m| m.status == MilestoneStatus::Proposed).count(),
+            1,
+            "{all:?}"
+        );
+        assert_eq!(
+            all.iter().find(|m| m.id == proposal.id).map(|m| m.status),
+            Some(MilestoneStatus::Redesigned)
+        );
     }
 
     /// Phase 33 受け入れ 1: 通常の run（対話でない）では `recent_work` は常に空

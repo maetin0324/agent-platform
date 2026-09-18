@@ -27,6 +27,7 @@ pub mod memory;
 mod middleware;
 pub mod notify;
 mod problem;
+pub mod milestones;
 pub mod project_plan;
 mod query;
 mod reports;
@@ -42,6 +43,7 @@ pub use approvals::{
 };
 pub use conversation::{MessageAccepted, MessageList, MessagePostBody};
 pub use memory::MemoryView;
+pub use milestones::{MilestoneDecideBody, MilestoneDecided};
 pub use project_plan::{ProjectPlanAccepted, ProjectPlanBody};
 pub use admin::{
     AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome, AdminRequest,

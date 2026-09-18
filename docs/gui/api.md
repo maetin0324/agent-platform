@@ -197,6 +197,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 51 | POST | `/org/{id}/messages` | そのノードに話しかける（**管理系**） | 202 `MessageAccepted` | `task_ops::conversation::start` |
 | 52 | GET | `/notify` | Discord への通知の設定と直近の送信（ADR-0037、Phase 39。URL は出さない） | `NotifyView` | 設定 + store `notification_recent` |
 | 53 | POST | `/notify/test` | テスト送信を 1 回（**管理系: `token_file` 未設定でも 401**） | 200 `NotifyTestResult` | taskd（`[secrets]` の webhook へ POST） |
+| 54 | POST | `/milestones/{id}/decide` | 途中目標の判定（`ok` / `discuss` / `ng`。ADR-0038 D2、Phase 41）（**管理系**） | 202 `MilestoneDecided` | `task_ops::milestone_review::decide` |
 
 ---
 
@@ -846,7 +847,9 @@ SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validat
 ```json
 {"project":{…Project…},
  "milestones":[{"id":"01J…","project_id":"01J…","seq":1,"title":"関連研究を棚卸し","description":"",
-                "status":"proposed","created_at":"…","updated_at":"…"}],
+                "status":"in_progress","created_at":"…","updated_at":"…",
+                "review":{"message_id":"01J…","text":"候補を 3 本に絞りました。次は…","at":"…"},
+                "proposal":{"id":"01J…","seq":2,"title":"候補の比較実験","status":"proposed", …}}],
  "tasks":[{"id":"01J…","title":"調べる","status":"ready","parent_id":null,"depends_on":[],
            "assignee":"research-survey","milestone_id":"01J…","conversation":false,"support":null}]}
 ```
@@ -855,7 +858,19 @@ SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validat
 入り、他の案件・案件に属さないタスクは出ない。ULID でない id・無い案件は 404 `project_not_found`。
 `conversation` が `true` の行は**対話用タスク**（人への返事のための run。3.54 参照）なので、仕事の木からは
 隠してよい（GUI-R3。Phase 27）。`support`（Phase 29。§3.3 の `TaskSummary.support` と同じ規則）が
-`null` でない行は裏方（対話・報告のまとめ・承認・合成レビュー）なので、GUI は仕事の木から一括で外せる。
+`null` でない行は裏方（対話・報告のまとめ・承認・合成レビュー・**途中目標レビュー**）なので、GUI は
+仕事の木から一括で外せる。
+
+**Phase 41（ADR-0038 D1 / D4）**: `milestones[]` の各行は `Milestone` のフィールドが**そのまま平らに**出たうえで、
+2 つが増える（どちらも無ければ省略。既存の読み手はそのまま動く）:
+
+- `review`: その途中目標についての**秘書のレビューの返事**（`{message_id, text, at}`）。途中目標の仕事が
+  止まると taskd が秘書の対話 run（裏方 `support = "milestone_review"`。`tasks[]` にも出る）を 1 回起こし、
+  その返事がここに入る。**まだ無ければ「秘書が結果をまとめています」**（`tasks[]` にその裏方タスクが
+  `ready` / `running` で居る）。
+- `proposal`: その返事が提案した**次の途中目標**（`proposed` の最新。`review` がある行にだけ付く）。
+
+GUI はこの 2 つが揃ったカードに「ok」「議論」「ng」の 3 ボタンと自由記述欄を出す（3.63）。
 
 #### 3.48 `PATCH /projects/{id}` → 200 `Project`
 
@@ -1056,6 +1071,32 @@ GUI の監査（SPEC §4 との突き合わせ、実機操作あり）で「案�
 - 401（管理系。`token_file` 未設定でも）。無い案件は 404 `project_not_found`。`milestone_id` がその案件の
   ものでなければ 422 `validation`（`milestone <id> does not belong to project <id>`）。秘書がいない構成
   （組織を種蒔きしていない）は 422 `validation`（`no secretary is configured`）。
+
+#### 3.63 `POST /milestones/{id}/decide` → 202 `MilestoneDecided`（**管理系**）
+
+要求本文 `{"decision":"ok"|"discuss"|"ng","note":"…"}`。SPEC §7 の「途中目標の達成ごとに人が判定し、
+Go か再設計」を**人の 3 つの答え**にしたもの（ADR-0038 D2）。**達成にするのは人の `ok` だけ**で、
+秘書は「達成と言えるか」を提案するにとどまる（3 値を LLM に解釈させない）。
+
+| `decision` | taskd がすること（決定的） |
+|---|---|
+| `ok` | この途中目標を `reached`。提案された次の途中目標（`proposed` の最新）を `approved` にし、**その途中目標の分解**を 3.61 と同じ経路で起こす（`note` は計画の `note` に渡り、秘書への `messages` にも `role = "user"` で残る）。分解が始まるので、応答時点のその途中目標は `in_progress` |
+| `discuss` | 状態は何も変えない。`note` を秘書への対話として送る（3.55 と同じ経路。案件付き）。秘書の返事に新しい `milestone_proposal` があれば `proposed` の途中目標が差し替わる（古い提案は `redesigned`）。人は納得したら `ok` を押す |
+| `ng` | この途中目標を `redesigned`（達成にしない）。提案された次の途中目標も `redesigned`。理由 +「この途中目標自体の再設計を提案せよ」の定型を秘書への対話として送る |
+
+応答（202。run は待たない）:
+
+```json
+{"decision":"ok","milestone":{…Milestone…},"next_milestone":{…Milestone…},
+ "plan_task_id":"01J…","message_id":null,"conversation_task_id":null}
+```
+
+- `next_milestone` / `plan_task_id` は `ok`（提案があるとき）、`message_id` / `conversation_task_id` は
+  `discuss` / `ng` で入る（無いものは省略）。提案がまだ無い途中目標に `ok` を押すと、達成にするだけで
+  分解は起こさない（`plan_task_id` は `null`）。
+- `note` は `discuss` / `ng` では**必須**（空白だけも 422 `validation`）。`ok` では任意。
+- 401（管理系。`token_file` 未設定でも）。無い途中目標・ULID でない id は 404 `milestone_not_found`。
+  既に `reached` の途中目標は 409 `milestone_reached`。秘書がいない構成は 422 `validation`。
 
 #### 3.62 `GET /org/{id}/memory?project=<id>` → 200 `{notes, project, notes_path, project_path}`（読み取り）
 
@@ -1572,7 +1613,11 @@ pub struct ProjectList { pub items: Vec<Project> /* created_at 降順 */ }
 pub struct ProjectCreateBody { pub title: String, pub request: String }
 #[serde(deny_unknown_fields)]
 pub struct ProjectPatchBody { pub status: ProjectStatus }
-pub struct ProjectDetail { pub project: Project, pub milestones: Vec<Milestone>, pub tasks: Vec<ProjectTaskView> }
+pub struct ProjectDetail { pub project: Project, pub milestones: Vec<MilestoneView>, pub tasks: Vec<ProjectTaskView> }
+pub struct MilestoneView { #[serde(flatten)] pub milestone: Milestone, // Milestone のフィールドは平らに出る
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub review: Option<MilestoneReviewView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub proposal: Option<Milestone> }
+pub struct MilestoneReviewView { pub message_id: String, pub text: String, pub at: String /* RFC 3339 */ }
 pub struct ProjectTaskView { pub id: TaskId, pub title: String, pub status: Status, pub parent_id: Option<TaskId>,
     pub depends_on: Vec<TaskId>, pub assignee: Option<String>, pub milestone_id: Option<MilestoneId> }
 pub struct Milestone { pub id: MilestoneId, pub project_id: ProjectId, pub seq: i64, pub title: String, #[serde(default)] pub description: String,
@@ -1581,6 +1626,13 @@ pub struct Milestone { pub id: MilestoneId, pub project_id: ProjectId, pub seq: 
 pub struct MilestoneCreateBody { pub title: String, #[serde(default)] pub description: Option<String>, #[serde(default)] pub status: Option<MilestoneStatus> }
 #[serde(deny_unknown_fields)]
 pub struct MilestonePatchBody { pub status: MilestoneStatus }
+#[serde(deny_unknown_fields)]
+pub struct MilestoneDecideBody { pub decision: MilestoneDecision /* ok|discuss|ng */, #[serde(default)] pub note: Option<String> }
+pub struct MilestoneDecided { pub decision: MilestoneDecision, pub milestone: Milestone,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub next_milestone: Option<Milestone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub plan_task_id: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub conversation_task_id: Option<TaskId> }
 // `Task` に `#[serde(default, skip_serializing_if = "Option::is_none")]` の
 // `project_id: Option<ProjectId>` / `milestone_id: Option<MilestoneId>` / `assignee: Option<String>` を追加
 // （`NewTaskSpec` にも同名の任意フィールド）。導入前の JSON・DB 行はそのまま読める。

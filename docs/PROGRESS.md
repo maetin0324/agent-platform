@@ -5245,3 +5245,86 @@ GUI には途中目標単体を引く API が無く案件へのリンクを作�
 **`milestone_ready` が 1 件だけ作られ、`ok = true`（08:24:03）で Discord に届いた**（案件 `…572BAT`、途中目標
 「隣接領域の動向調査とテーマ候補 3〜5 件」: done 2、Go 待ち 2（秘書の統合・選定、PoC・R&D 課の PoC 計画））。
 起動前の `bad_news` は台帳に行が増えていない（backfill 禁止が効いている）。**ADR-0037 の受け入れ条件 4 は充足。**
+
+---
+
+## Phase 41 — 途中目標の判定を対話に（ADR-0038。2026-09-18）
+
+Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2、Go 待ち 2。達成の判定と次の Go を
+お願いします」）で、**何が分かったか**も**次に何をするつもりか**も無かった。ADR-0038 のとおり、
+「秘書が結果をまとめて次を提案 → 人が **ok / 議論 / ng** で答える」の対話にした。
+
+### やったこと（ADR-0038 D1〜D4）
+
+- **D1 レビューの対話 run（taskd の tick、決定的）**: `crates/taskd/src/milestone_review.rs` を新設。
+  `ready_milestones`（`milestone_ready` の条件そのもの。`notify` と共用）→ 秘書の対話を 1 件起こす
+  （`task_ops::milestone_review::start_review` → `task_ops::conversation::start_with_milestone`）。
+  印は**対話の印 + `milestone_id`** の 2 つだけで、列もタスクの種類も増やしていない
+  （`task_core::support_kind` が `"milestone_review"` を返す）。同じ done の集合では 1 回だけ
+  （「一番新しいレビューより後に done が増えたか」で決定的に判断）。
+- **前置き（protocol v4 のまま追加のみ）**: `RunContext.milestone_review`
+  （`{milestone: {id,title,description,status}, tasks: [{title,status,outcome,artifacts_excerpt}]}`）を
+  `run_extras` が埋める。成果物の抜粋は `answer.md` / `report.md` の先頭 4,000 字（決定的に切る）。
+  `preamble.rs` は「## 途中目標『X』のここまで」を「あなたの直近の仕事」の直後に出し、対話の指示の
+  さらに後ろに ADR D1 の (a)〜(d) と `milestone_proposal` の書き方を足す。
+- **D1 結果の受け取り**: 結果ファイルの `milestone_proposal`（`task_worker::read_result_milestone_proposal`。
+  `report.kind` と同じ形）から、ディスパッチャが `done` のときだけ `status = proposed` の途中目標を 1 件作る
+  （古い提案は `redesigned` に差し替え。判定中の途中目標は触らない）。
+- **D4 通知**: `milestone_ready` は**秘書の返事が付いてから**送り、文面に返事の先頭 300 字と提案の題名、
+  「ok / 議論 / ng」を入れる。
+- **D2 `POST /milestones/{id}/decide {decision, note?}`（管理系）**: `ok` = `reached` + 提案を `approved` +
+  Phase 29 の計画経路（`note` を渡す。分解が始まるので応答時点は `in_progress`）+ `note` を秘書への
+  `messages` に残す／`discuss` = 何も変えず対話を送る／`ng` = この途中目標と提案を `redesigned` + 理由 +
+  再設計の依頼を対話で送る。`discuss` / `ng` の空 `note` は 422、`reached` 済みは 409、知らない id は 404、
+  401（両構成）。
+- **API の読み取り**: `GET /projects/{id}` の `milestones[]` に `review`（`{message_id, text, at}`）と
+  `proposal`（`proposed` の最新）を追加（`Milestone` のフィールドは `flatten` でそのまま平ら）。
+  `docs/gui/api.md` §3.47 / 新設 §3.63、`docs/protocol/worker-protocol.md`、ADR-0037 D1 の文面を更新。
+
+### 証拠（コマンドと結果）
+
+- `UPDATE_SCHEMA=1 cargo test -p task-api` / `-p task-worker` / `-p task-core` → スキーマ再生成
+  （`docs/api/v1/api-v1.schema.json`、`docs/protocol/worker-protocol.schema.json` を更新）。
+- `cargo test --workspace --no-fail-fast` → **`grep -c "^test result: FAILED"` = 0**、
+  **1118 passed / 0 failed**。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**。
+- 追加したテスト:
+  - `task-core`: `support_kind` の新しい枝は既存テストが通るまま（印の判定は `is_milestone_review`）。
+  - `task-worker`（`result_report.rs` 2 件、`preamble.rs` 1 件）: `milestone_proposal` の読み取り、
+    レビューの節と指示が末尾に足されること（レビューでない run は 1 バイトも変わらない）。
+  - `task-ops`（`milestone_review.rs` 4 件）: 提案の差し替え、空 `note` の 422、D2 の 3 経路、
+    レビュー run が裏方の対話になること。
+  - `task-dispatch`（2 件）: `run_extras` がレビューの文脈（成果物の抜粋つき）を埋めること、
+    結果ファイルからの提案の記録と差し替え。
+  - `taskd`（`tests/milestone_review.rs` 3 件 + `tests/notify.rs` の `milestone_ready` を改定）:
+    レビューが同じ done の集合で 1 回だけ起き、Go の後に再び起きること。動いている仕事がある／
+    done が無い／`reached` では起きないこと。通知が返事の後に出て文面に要約と提案が入ること。
+  - `task-api`（`tests/milestone_decide.rs` 7 件）: `ok` / `discuss` / `ng` の 3 経路、422 / 401（両構成）
+    / 404 / 409、`GET /projects/{id}` の `review` / `proposal`。
+- テスト以外に `unwrap()` / `expect()` の追加なし。ディスパッチャ・ストアに LLM 呼び出しなし
+  （レビューは対話 run、達成を決めるのは人）。
+
+### 未解決事項
+
+- U41-1: **実機（ADR-0038 受け入れ条件 4）は未実施**。いま止まっている途中目標「隣接領域の動向調査」で
+  秘書のまとめが届き、人が `ok` / `議論` を押して次が動くことの確認をお願いしたい
+  （配備 → 次の tick でレビューの対話が 1 件起き、返事が入ってから Discord に届く）。
+- U41-2: GUI の途中目標カード（ADR-0038 D3 / 受け入れ条件 3）はこの作業単位の担当外
+  （`gui/` は触っていない）。API は `GET /projects/{id}` の `review` / `proposal` と
+  `POST /milestones/{id}/decide` で揃っている。
+- U41-3: 提案がまだ無い途中目標に `ok` を押した場合は「達成にするだけで分解は起こさない」
+  （`plan_task_id` は `null`）。ADR-0038 D2 はこの場合を書いていないので、勝手に分解を起こすより
+  安全側に倒した。人が次の途中目標を足してから `POST /projects/{id}/plan` を押せばよい。
+- U41-4: レビューを起こし直す判定は「一番新しいレビューの `created_at` < 終わった仕事の
+  最新 `updated_at`」。done の件数を機械的な鍵として持たせる（タスクの列を増やす）のを避けた結果で、
+  同じ done の集合では 2 回目が起きないことはテストで確認している。
+
+### 提案
+
+- P-96: `discuss` の対話は案件付きの普通の対話なので、秘書の返事が `milestone_proposal` を書けば
+  提案が差し替わる。GUI は「議論」を押したら対話画面（案件を選んだ状態）へ遷移し、
+  新しい提案が付いたらカードを描き直すとよい（ADR-0038 D3 のとおり）。
+- P-97: レビューの前置きに載せる成果物は `answer.md` / `report.md` の 2 つに固定した。分野が増えて
+  別名の主成果物（例: `survey.md`）が出てきたら、分野の manifest（`[[genres]]`）から名前を引く形に
+  広げるとよい（今は決め打ちで、無ければ抜粋が空になるだけ）。
+

@@ -17,6 +17,7 @@ pub mod gate;
 pub mod graph;
 pub mod inbox;
 pub mod memory;
+pub mod milestone_review;
 pub mod plan;
 pub mod project_plan;
 pub mod replay;

@@ -677,9 +677,36 @@ pub struct ProjectPatchBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectDetail {
     pub project: Project,
-    pub milestones: Vec<Milestone>,
+    /// ADR-0038 D1 / D4（Phase 41）: 途中目標そのもの（`Milestone` の各フィールドはそのまま）に、
+    /// 秘書のレビューの返事と提案された次の途中目標を添えたもの。
+    pub milestones: Vec<MilestoneView>,
     /// 仕事の木を描くのに必要な最小限だけ（詳細は `GET /tasks/{id}`）。
     pub tasks: Vec<ProjectTaskView>,
+}
+
+/// 途中目標 1 件のビュー（ADR-0038 D1 / D4。Phase 41）。`Milestone` のフィールドは**平らに**出るので、
+/// 既存の GUI（`id` / `title` / `status` …）はそのまま読める。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MilestoneView {
+    #[serde(flatten)]
+    pub milestone: Milestone,
+    /// 秘書のレビューの返事（まだ無ければ省略。run 中は `tasks[]` の
+    /// `support = "milestone_review"` が動いている）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<MilestoneReviewView>,
+    /// その返事が提案した次の途中目標（`proposed` の最新。無ければ省略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<Milestone>,
+}
+
+/// 秘書のレビューの返事（`messages` の 1 行。ADR-0038 D1）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MilestoneReviewView {
+    pub message_id: String,
+    /// 返事の本文（Markdown。GUI がカードに出す）。
+    pub text: String,
+    /// RFC 3339。
+    pub at: String,
 }
 
 /// 仕事の木の 1 ノード（ADR-0033 D2: DAG は既存の `parent_id` / `depends_on` がそのまま）。

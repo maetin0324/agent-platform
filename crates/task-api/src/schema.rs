@@ -17,6 +17,7 @@ use task_ops::view::{TaskDetail, TaskList};
 use crate::approvals::{ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody, StandingRuleList};
 use crate::conversation::{MessageAccepted, MessageList, MessagePostBody};
 use crate::memory::MemoryView;
+use crate::milestones::{MilestoneDecideBody, MilestoneDecided};
 use crate::project_plan::{ProjectPlanAccepted, ProjectPlanBody};
 use crate::types::{
     AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView, AnswerBody, ArtifactList,
@@ -82,6 +83,9 @@ pub struct ApiV1Schema {
     pub project_detail: ProjectDetail,
     pub milestone_create: MilestoneCreateBody,
     pub milestone_patch: MilestonePatchBody,
+    /// Phase 41（ADR-0038 D2）: 途中目標の判定（`POST /milestones/{id}/decide`）。
+    pub milestone_decide: MilestoneDecideBody,
+    pub milestone_decided: MilestoneDecided,
     /// GUI 監査対応 Phase 29（ADR-0033 D4 追記）: 分解を起こす（`POST /projects/{id}/plan`）。
     pub project_plan: ProjectPlanBody,
     pub project_plan_accepted: ProjectPlanAccepted,
