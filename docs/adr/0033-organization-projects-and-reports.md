@@ -157,6 +157,10 @@ standing_rules(id ULID PK, node_id NULL /* NULL = 全員 */, rule TEXT, created_
   例外は**部をまたぐ委譲の質問**（D4 の最終項）で、`standing` のときは答えの文ではなく**質問の鍵**
   （`"cross-department: <from> -> <to>"`）をそのまま規則にする（委譲の照合が前方一致でできるように。Phase 27）。
 - 自動判定・自動化は**今回はやらない**（規則がまだ無い。溜まってから ADR にする）。
+- Phase 44（実機 2026-09-18）: **ディスパッチャ自身が立てる質問**（`retry_then_ask`。委譲した子が
+  `max_retries` まで失敗して親を `blocked` にするとき）も、ワーカーの `Question` と同じく `approvals` に
+  1 件残す。以前はこの経路が `approvals` に接続されておらず、認可画面に出ず `approval_pending` の Discord
+  通知も飛ばなかった（受信箱にだけ出て気づかれない）。
 
 ### D6. 記憶（ノードごとのファイル）— 案件をまたぐ
 

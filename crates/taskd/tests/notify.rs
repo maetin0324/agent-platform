@@ -373,6 +373,33 @@ fn question_blocked_fires_once_and_defers_to_approval_pending() {
     assert!(!env.scanned(NotificationKind::QuestionBlocked).contains(&blocked.id.to_string()));
 }
 
+/// Phase 44（実機 2026-09-18）: 起動よりずっと前に作られた（旧い）タスクが、起動後になって初めて
+/// `blocked` に落ちた場合。以前は `created_at`（旧い）を見て backfill 禁止に引っかかり、鳴らなかった。
+/// `blocked` になった時刻（`updated_at`。遷移は実時刻を刻む）で判定するのが正しい。
+#[test]
+fn a_task_blocked_after_startup_is_scanned_even_though_it_was_created_long_before() {
+    let mut env = Env::new();
+    env.seed_org();
+    // 起動時刻はタスクの `created_at`（`at(0)`）よりずっと後、しかしこれから起こす遷移よりは前。
+    env.started_at = OffsetDateTime::now_utc().saturating_sub(time::Duration::seconds(60));
+    let mut old = task(Status::Running);
+    old.assignee = Some("poc".into());
+    old.created_at = at(0);
+    old.updated_at = at(0);
+    env.store.insert(&old).unwrap_or_else(|e| panic!("insert: {e}"));
+
+    // まだ `blocked` に落ちていない間は対象外。
+    assert!(env.scanned(NotificationKind::QuestionBlocked).is_empty());
+
+    // 起動後に `blocked` に落ちる（`apply_transition` は `updated_at` に実時刻を刻む）。
+    env.store
+        .apply_transition(old.id, Trigger::WorkerQuestion, None)
+        .unwrap_or_else(|e| panic!("transition: {e}"));
+
+    assert_eq!(env.scanned(NotificationKind::QuestionBlocked), vec![old.id.to_string()]);
+    assert_eq!(env.schedule(NotificationKind::QuestionBlocked), 1);
+}
+
 // ---- 4. bad_news ----
 
 #[test]

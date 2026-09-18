@@ -97,3 +97,12 @@ D1〜D4 の決定は変えていない。実装時に決めた細部:
   フォールバック）。
 - **M5（監査ログ）**: D4 のとおり、管理操作は `tracing::info!(who = "admin", op = ..., provider_id = ...)` で記録し、
   `env` の値や `token_file` の中身は一切ログに出さない。タスクの `Event` 列には混ぜない。
+- **M6（Phase 44、実機 2026-09-18: `reload` は役割・分野・委譲設定も読み直す）**: 実機で `[[roles]] implementer`
+  の `max_turns` を変えて `POST /reload` しても、その後に委譲された子は古い `max_turns` のままだった。原因は
+  `reload_providers`（M2）が `policy`/`adapters`/`models` しか差し替えず、`DispatchConfig` の `roles` / `genres` /
+  `delegation`（`spawn_worker` が `self.config` から都度写す）を差し替えていなかったこと。`Dispatcher::reload_config`
+  を新設し、`taskd::reload_providers` から `[[roles]]` / `[[genres]]` / `[delegation]` を渡すようにした（反映は
+  M2 と同じく「次に起動する run から」）。taskd の tick ループが `Config` から直接読む `[reports]` / `[notify]` /
+  `[conversation]` も同様に古いままだったので、`tick_loop` の `Config` を `&mut` にし、`reload_providers` が
+  その場でこれらのフィールドだけを書き戻すようにした（`[accounts]` / `[[clusters]]` / `[api]` / `db` /
+  `workspace_root` は D1・S7 のとおり再起動が要る。触れない）。

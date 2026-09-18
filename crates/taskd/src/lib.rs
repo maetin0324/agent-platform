@@ -677,7 +677,12 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
         }
         None => (None, None),
     };
-    let result = tick_loop(&mut dispatcher, &config, opts, admin_rx, cluster_masters).await;
+    // Phase 44（実機 2026-09-18）: `POST /reload` が `[[roles]]` / `[[genres]]` / `[delegation]` /
+    // `[reports]` / `[notify]` / `[conversation]` の設定値も読み直せるよう、tick ループにはこの
+    // `Config` を `&mut` で渡す（`[accounts]` / `[[clusters]]` / `[api]` / `db` / `workspace_root` は
+    // 従来どおり再起動が要る。`reload_providers` がそれ以外のフィールドには触れない）。
+    let mut config = config;
+    let result = tick_loop(&mut dispatcher, &mut config, opts, admin_rx, cluster_masters).await;
     if let Some(api) = api {
         api.stop().await;
     }
@@ -688,7 +693,7 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
 /// `POST /api/v1/providers/{id}/check`（ADR-0017 M2）も同じループで受ける。
 async fn tick_loop(
     dispatcher: &mut Dispatcher,
-    config: &Config,
+    config: &mut Config,
     opts: RunOptions,
     mut admin_rx: Option<tokio::sync::mpsc::Receiver<task_api::AdminRequest>>,
     // ADR-0032 D2: taskd が張った ssh master の置き場所。ここが持っている間だけ接続が生きる。
@@ -939,7 +944,7 @@ async fn tick_loop(
 #[allow(clippy::too_many_arguments)]
 async fn handle_admin_request(
     dispatcher: &mut Dispatcher,
-    config: &Config,
+    config: &mut Config,
     req: task_api::AdminRequest,
     check_tx: tokio::sync::mpsc::Sender<(String, ProviderCheckView)>,
     login_sessions: accounts_admin::LoginSessions,
@@ -1047,13 +1052,17 @@ fn notify_test_outcome(
     }
 }
 
-/// `Config::load` を読み直し、稼働中のプロバイダ選定・アダプタ一式・次 tick のスナップショット提供元を差し替える。
-/// 失敗したら稼働中の状態には触れない（古い設定のまま動き続ける）。
+/// `Config::load` を読み直し、稼働中のプロバイダ選定・アダプタ一式・次 tick のスナップショット提供元、
+/// および `[[roles]]` / `[[genres]]` / `[delegation]` / `[reports]` / `[notify]` / `[conversation]` の
+/// 設定値を差し替える（Phase 44、実機 2026-09-18: `[[roles]] implementer` の `max_turns` を変えて
+/// reload しても、以前はプロバイダ・アダプタ・モデルしか差し替えなかったため、委譲された子の budget が
+/// 古い値のままだった）。失敗したら稼働中の状態には触れない（古い設定のまま動き続ける）。
 ///
 /// S7: `[accounts]` は reload の対象外（`Dispatcher::accounts` はプロセス起動時に固定され、`AccountBook` の
 /// 保存先もそこから決まる）。`claude_dir` / `max_runs_per_account` / `check_model` のどれかが変わっていたら、
 /// 反映されない値のまま動き続けるより、エラーにしてタスクを止めずに知らせる（400。再起動が必要と伝える）。
-fn reload_providers(dispatcher: &mut Dispatcher, config: &Config) -> Result<(), String> {
+/// `[[clusters]]` / `[api]` / `db` / `workspace_root` も同様に再起動が要る（reload では触れない。従来どおり）。
+fn reload_providers(dispatcher: &mut Dispatcher, config: &mut Config) -> Result<(), String> {
     let path = config
         .source_path
         .clone()
@@ -1074,6 +1083,17 @@ fn reload_providers(dispatcher: &mut Dispatcher, config: &Config) -> Result<(), 
     let models = effective_models(&new_config);
     dispatcher.reload_providers(Box::new(policy), models, adapters, new_config.account_pool_providers());
     dispatcher.set_snapshot_providers(provider_lives(&new_config));
+    // Phase 44: 役割・分野・委譲設定はディスパッチャ側（次に起動する run から効く）。
+    dispatcher.reload_config(new_config.role_specs(), new_config.genre_specs(), new_config.delegation_limits());
+    // Phase 44: `[reports]` / `[notify]` / `[conversation]` は taskd の tick ループが直接読むので、
+    // ここで `config` 自身を更新する（次 tick から効く）。他のフィールド（`[accounts]` / `[[clusters]]` /
+    // `[api]` / `db` / `workspace_root` 等）には触れない。
+    config.roles = new_config.roles;
+    config.genres = new_config.genres;
+    config.delegation = new_config.delegation;
+    config.reports = new_config.reports;
+    config.notify = new_config.notify;
+    config.conversation = new_config.conversation;
     Ok(())
 }
 
@@ -1826,16 +1846,55 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
             .unwrap_or_else(|e| panic!("{e}"));
         };
         write_config(2);
-        let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
+        let mut config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
         let mut dispatcher = build_dispatcher(&config, Default::default()).unwrap_or_else(|e| panic!("{e}"));
 
         // [accounts] が変わっていなければ通る。
-        assert!(reload_providers(&mut dispatcher, &config).is_ok());
+        assert!(reload_providers(&mut dispatcher, &mut config).is_ok());
 
         // max_runs_per_account を変えると、次の reload はエラーになる。
         write_config(3);
-        let err = reload_providers(&mut dispatcher, &config).unwrap_err();
+        let err = reload_providers(&mut dispatcher, &mut config).unwrap_err();
         assert!(err.contains("[accounts]"), "{err}");
         assert!(err.contains("restart"), "{err}");
+    }
+
+    /// Phase 44（実機 2026-09-18）: `[[roles]]` の `max_turns` を変えて `reload` すると、次に作られる子の
+    /// budget が新しい値になる（`Dispatcher::config().roles` に反映される。委譲の子は `spawn_worker` の
+    /// 時点でこの写しを使う）。`[reports]` / `[notify]` / `[conversation]` も同様に `Config` 自身へ反映する。
+    #[test]
+    fn reload_rereads_roles_genres_delegation_and_reports_notify_conversation() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let config_path = dir.path().join("taskd.toml");
+        let db = dir.path().join("taskd.db");
+        let ws = dir.path().join("ws");
+        let write_config = |max_turns: u32, notify_interval: u64| {
+            std::fs::write(
+                &config_path,
+                format!(
+                    "db = {db:?}\nworkspace_root = {ws:?}\n\
+                     [[providers]]\nid = \"x\"\nadapter = \"fake\"\n\
+                     [[roles]]\nid = \"implementer\"\nmax_turns = {max_turns}\n\
+                     [delegation]\nmax_delegate_per_run = 3\n\
+                     [notify]\ninterval_secs = {notify_interval}\n"
+                ),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        };
+        write_config(20, 30);
+        let mut config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
+        let mut dispatcher = build_dispatcher(&config, Default::default()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(dispatcher.config().roles[0].max_turns, Some(20));
+        assert_eq!(dispatcher.config().delegation.max_delegate_per_run, 3);
+
+        // `[[roles]] implementer` の `max_turns` を 20 → 60、`[delegation]` と `[notify]` も変える。
+        write_config(60, 90);
+        assert!(reload_providers(&mut dispatcher, &mut config).is_ok());
+
+        // ディスパッチャ側（次に作られる子の budget が読む先）。
+        assert_eq!(dispatcher.config().roles[0].max_turns, Some(60));
+        assert_eq!(config.role_specs()[0].max_turns, Some(60));
+        // taskd の tick ループが直接読む `[notify]`。
+        assert_eq!(config.notify.interval_secs, 90);
     }
 }

@@ -273,7 +273,9 @@ fn scan_approval_pending(
 }
 
 /// `blocked`（人への質問）のタスク。同じ `task_id` の認可があるものは `approval_pending` に任せる。
-/// **taskd の起動時刻より後にできたタスクだけ**（backfill 禁止）。
+/// **`blocked` になった時刻（`updated_at`）が taskd の起動時刻より後のものだけ**（backfill 禁止。
+/// Phase 44（実機 2026-09-18）: 以前は `created_at` を見ていたため、起動前からある古いタスクが
+/// 起動後に `blocked` へ落ちても通知されなかった）。
 fn scan_question_blocked(
     store: &dyn TaskStore,
     org: &[task_core::OrgNode],
@@ -290,7 +292,7 @@ fn scan_question_blocked(
         ..ListFilter::default()
     };
     let page = store.list_page(&filter, ListOrder::CreatedDesc, None, TASK_SCAN)?;
-    let mut tasks: Vec<_> = page.items.into_iter().filter(|t| t.created_at >= started_at).collect();
+    let mut tasks: Vec<_> = page.items.into_iter().filter(|t| t.updated_at >= started_at).collect();
     tasks.sort_by_key(|a| a.id);
     let mut out = Vec::new();
     for task in tasks {
