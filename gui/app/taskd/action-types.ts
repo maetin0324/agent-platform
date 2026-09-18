@@ -9,6 +9,7 @@ import type {
   ClusterConnectStart,
   MessageAccepted,
   Milestone,
+  MilestoneDecided,
   NotifyTestResult,
   OrgNode,
   Project,
@@ -156,9 +157,12 @@ export type ProjectOpOutcome =
   | { ok: true; op: "milestone_create" | "milestone_status"; milestone: Milestone }
   // 「この方針で進める」（`POST /projects/{id}/plan`。**管理系**、202。docs/taskd-api-v1.md §3.61、Phase 29）。
   | { ok: true; op: "project_plan"; accepted: ProjectPlanAccepted }
+  // 途中目標の判定（`POST /milestones/{id}/decide`。**管理系**、202。ADR-0038 D2、docs/taskd-api-v1.md §3.63、
+  // Phase 41 / G13j）。`ok` / `discuss` / `ng` のどれでも同じ形（`decided.decision` を見て画面が出し分ける）。
+  | { ok: true; op: "milestone_decide"; decided: MilestoneDecided }
   | {
       ok: false;
-      op: "project_status" | "milestone_create" | "milestone_status" | "project_plan";
+      op: "project_status" | "milestone_create" | "milestone_status" | "project_plan" | "milestone_decide";
       error: ActionError;
     };
 
