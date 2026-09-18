@@ -92,8 +92,16 @@ describe("notifyTargetHref (対象へのリンク)", () => {
     expect(notifyTargetHref({ kind: "secretary_reply", key: "p1" })).toBe("/projects/p1");
   });
 
-  it("milestone_ready はリンクできる画面が無いので null（GET /milestones/{id} が taskd に無いため）", () => {
+  it("milestone_ready は project_id が無ければ null（古い記録・GET /milestones/{id} が taskd に無いため）", () => {
     expect(notifyTargetHref({ kind: "milestone_ready", key: "m1" })).toBeNull();
+  });
+
+  it("milestone_ready は project_id があれば /projects/{project_id} へ（Phase 40 追従、G13i-P1 の解消）", () => {
+    expect(notifyTargetHref({ kind: "milestone_ready", key: "m1", project_id: "p1" })).toBe("/projects/p1");
+  });
+
+  it("secretary_reply は project_id があればそちらを優先する（Phase 40 追従）", () => {
+    expect(notifyTargetHref({ kind: "secretary_reply", key: "p-old", project_id: "p-new" })).toBe("/projects/p-new");
   });
 
   it("key を URI エンコードする", () => {

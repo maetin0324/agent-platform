@@ -1683,6 +1683,11 @@ export interface NotifyRecent {
    * `null` = まだ決着していない、`true` = 送れた、`false` = 諦めた。
    */
   ok?: boolean | null;
+  /**
+   * GUI がリンクを作るための案件 id（ADR-0037 D6 / GUI 依頼 G13i-P1）。`milestone_ready` はその
+   * 途中目標の案件、`secretary_reply` はその案件自身、他の種は `null`。
+   */
+  project_id?: ProjectId | null;
   sent_at?: string | null;
 }
 /**

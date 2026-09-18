@@ -2288,17 +2288,24 @@ GUI dev サーバを 127.0.0.1:18097（`TASKD_API_URL=http://127.0.0.1:18098`）
   （`docs/gui/api.md` §3.64〜3.65 の同期）。
 - 実機での見た目・実際の送信の確認は上記のとおり（light/dark、5 種の表示、テスト送信の実配達、
   taskd 自身の再送ロジックの動作）。
+- Phase 40 追従（2026-09-18）: taskd 側 Phase 40 で `GET /notify` の `recent[]` に `project_id`
+  （省略可。`milestone_ready` はその途中目標の案件、`secretary_reply` は案件自身）が増えたのに追従し、
+  `notifyTargetHref` が `project_id` があれば `milestone_ready` も `/projects/<project_id>` へリンクするように
+  した（`secretary_reply` も `project_id` があればそちらを優先）。`bash ../scripts/sync-gui-docs.sh` と
+  `pnpm gen:types` を各 2 回実行して差分ゼロ（2 回目は無変化）。`test/unit/notify.test.ts` に 2 件追加
+  （`milestone_ready` が `project_id` ありでリンク、`secretary_reply` が `project_id` を優先）。
+  `pnpm lint`/`typecheck`/`test`（482 件 pass）/`build` すべて exit 0。G13i-P1 を解消。
 
 ### 未解決事項
 
 - G13i-U1: e2e（`pnpm e2e`）は運用中の taskd / GUI（7700/7710）と衝突するため未実行。確認は unit テストと
   使い捨て環境での Playwright スクリーンショット・実配達確認で行った（既存フェーズと同じ扱い）。
-- G13i-U2: `milestone_ready` の対象へのリンクは作っていない（上記「判断が必要だった点」参照）。
+- G13i-U2: `milestone_ready` の対象へのリンクは、taskd が `project_id` を返さない古い記録（または
+  Phase 40 以前の taskd）のときは `null` のまま（Phase 40 追従参照）。
 - G13i-U3: DOM を描画する unit テストが無い件（G10-U1）は未解決のまま。`DiscordSection` の描画・状態分岐は
   実機の Playwright とスタブ検証（unit テストの `notify.test.ts`/`reports.test.ts`）でのみ確認している。
 
 ### 提案（`docs/gui/api.md` への変更提案。採否は人間）
 
-- G13i-P1: `GET /notify` の `recent[]` に、`milestone_ready` のときだけでよいので `project_id`
-  （または途中目標を直接引ける `GET /milestones/{id}` 相当）を足すと、GUI が N+1 の総当たりをせずに
-  対象の案件へリンクできる。
+- G13i-P1: 解消（Phase 40 追従、上記参照）。`GET /notify` の `recent[]` に `project_id` が増えたことで、
+  `milestone_ready` も対象の案件へリンクできるようになった。

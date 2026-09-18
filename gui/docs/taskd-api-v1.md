@@ -1105,7 +1105,7 @@ GUI の監査（SPEC §4 との突き合わせ、実機操作あり）で「案�
   受信箱の `failed` 項目、`GET /tasks/{id}` の `failed`/`cancelled` 表示、案件の仕事の木の失敗ノードは、
   みな `actions` にこれが立つのでボタンの表示に迷わない。
 
-### 3.64〜3.65 通知（Discord）（ADR-0037、Phase 39）
+### 3.64〜3.65 通知（Discord）（ADR-0037、Phase 39 / Phase 40）
 
 「人の判断が要るとき」だけ Discord の webhook に 1 通投げる仕組みの、設定の確認とテスト送信。
 **判定と送信は taskd の tick が決定的に行う**（LLM は関与しない）。API は台帳（`notifications` 表）を
@@ -1113,7 +1113,20 @@ GUI の監査（SPEC §4 との突き合わせ、実機操作あり）で「案�
 
 知らせるのは 5 種だけ（ADR-0037 D1）: `milestone_ready` / `approval_pending` / `question_blocked` /
 `bad_news` / `secretary_reply`。`result` / `progress` は**知らせない**（SPEC §3.5 の数時間単位の流れは
-GUI の報告の仕事）。同じ `(kind, key)` は 1 回だけ送り、失敗したら次の tick で再送する（最大 3 回）。
+GUI の報告の仕事）。同じ `(kind, key)` は 1 回だけ送り、失敗したら次の tick で再送する（最大 3 回。
+429 はここに数えない）。
+
+Phase 40（実機 2026-09-18）で変わった点:
+
+- `milestone_ready` は「動いているものが無く、人の手が要る」状態（ready/running/reviewing/blocked が
+  0 件、done が 1 件以上）で鳴る。**全部が終端である必要はない** — Go 待ちの `draft` が残っていてもよい
+  （むしろそここそが人の判断が要る瞬間）。`key` は `<途中目標 id>:<done の件数>` で、Go を出して
+  また止まると done の件数が変わるので再び鳴る。
+- `milestone_ready` / `approval_pending` / `question_blocked` / `bad_news` / `secretary_reply` のうち
+  `milestone_ready` を除く 4 種は、**taskd の起動より前に作られた出来事は対象にしない**
+  （backfill 禁止。GUI で既に見た昨日以前の履歴が起動直後に一斉送信されることはない）。
+- 1 tick（`interval_secs`）に送るのは最大 1 通。`bad_news` が複数 pending なら 1 通に束ねる
+  （台帳の行は個別に決着する）。
 
 webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に id `discord-webhook`（既定。
 `[notify] discord_webhook_secret` で変えられる）で登録する。**URL は応答にもログにも問題詳細にも出ない。**
@@ -1129,7 +1142,10 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
   "recent": [                          // 直近 10 件（新しい順）
     {
       "kind": "milestone_ready",
-      "key": "01J…",                  // 途中目標 id / 認可 id / タスク id / 報告 id / 案件 id
+      "key": "01J…:2",                // 途中目標 id / 認可 id / タスク id / 報告 id / 案件 id
+                                       // （`milestone_ready` は `<途中目標 id>:<done の件数>`。Phase 40）
+      "project_id": "01K…",           // GUI 依頼 G13i-P1（Phase 40）: milestone_ready はその途中目標の
+                                       // 案件、secretary_reply はその案件自身、他の種は省略（null 相当）
       "created_at": "2026-09-18T12:00:00Z",
       "sent_at": "2026-09-18T12:00:01Z",   // まだなら省略
       "attempts": 1,
@@ -1144,6 +1160,8 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
 - `configured` が false のとき、GUI は「未設定」と出し、`secret_id` を添えて API キー画面へ導く。
 - 送らずに畳んだ行（秘密が無い間に起きた出来事）は `ok: false`、`attempts: 0`、
   `error: "discord webhook is not configured"` で並ぶ（ADR-0037 D2:「秘密が無い間の出来事は通知しない」）。
+- `project_id` は GUI がリンクを作るためだけの補助情報で、判定は taskd がその通知を作った時点で
+  分かっている案件 id をそのまま台帳に書いたもの（応答時に途中目標から逆引きしない）。
 
 #### 3.65 `POST /notify/test` → 200 `NotifyTestResult`（**管理系: `token_file` 未設定でも 401**）
 
