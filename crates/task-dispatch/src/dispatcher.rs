@@ -796,6 +796,16 @@ impl Dispatcher {
         self.account_pool_providers = account_pool_providers;
     }
 
+    /// Phase 44（実機 2026-09-18）: `POST /reload` で `[[roles]]` / `[[genres]]` / `[delegation]` も読み直す。
+    /// `reload_providers` とは別トランザクション（呼び出し側が両方呼ぶ）。実行中の run はそれぞれ `spawn_worker`
+    /// 時点でこれらの値の写しを既に掴んでいるので、反映されるのは**次に起動する run から**
+    /// （委譲で作られる子の budget を含む）。
+    pub fn reload_config(&mut self, roles: Vec<RoleSpec>, genres: Vec<GenreSpec>, delegation: DelegationLimits) {
+        self.config.roles = roles;
+        self.config.genres = genres;
+        self.config.delegation = delegation;
+    }
+
     // ---- ADR-0024/0025: taskd（GUI の管理 API）が使うアカウント操作 ----
 
     /// そのアダプタ・アカウントで走っている run（ワーカー run + Reviewer run）の数。
@@ -1908,6 +1918,13 @@ impl Dispatcher {
                  回答するとこのタスクは指示を持って再開します: taskctl answer {} \"…\"",
                 task.budget.max_retries, task.id,
             );
+            // Phase 44（実機 2026-09-18）: この質問はディスパッチャ由来（ワーカーの `Question` ではない）だが、
+            // Phase 26 と同じく `approvals` にも残す。そうしないと認可画面に出ず、`approval_pending` の
+            // Discord 通知も飛ばない（受信箱にだけ出て気づかれない）。
+            if let Err(e) = crate::approvals::record_question_approval(self.store.as_ref(), task, &text, OffsetDateTime::now_utc())
+            {
+                tracing::warn!(task_id = %task.id, %run_id, error = %e, "failed to record the approval for the child-failure question");
+            }
             events.push(Event::QuestionRaised { run_id: run_id.to_string(), text });
         }
         match self.store.apply_transition_with_events(task.id, Trigger::ChildFailed, events) {
@@ -3554,6 +3571,52 @@ mod tests {
                 "verdict:true",
             ]
         );
+    }
+
+    /// Phase 44（実機 2026-09-18）: 委譲した子タスクが失敗し `retry_then_ask`（max_retries 到達）で親が
+    /// `blocked` に落ちる質問は、ワーカーの `Question` ではなくディスパッチャ自身が立てるものだが、
+    /// Phase 26 と同じく `approvals` にも 1 件残る（そうしないと認可画面に出ず、`approval_pending` の
+    /// Discord 通知も飛ばない）。答えれば（`Trigger::Answer`）親は `ready` に戻る。
+    #[tokio::test]
+    async fn a_dispatcher_raised_child_failure_question_also_becomes_an_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_org_for_reports(&store);
+
+        // 子: 委譲され、走って失敗する（max_retries = 0 なので 1 回で failed）。
+        let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        parent.status = Status::Reviewing;
+        parent.assignee = Some("coding-poc".into());
+        store.insert(&parent).unwrap();
+        let mut child = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        child.parent_id = Some(parent.id);
+        store.delegate_children(parent.id, "run-1", vec![child.clone()]).unwrap();
+        store.apply_transition(child.id, Trigger::Dispatch, None).unwrap();
+        store
+            .apply_transition(child.id, Trigger::WorkerError { retryable: false }, None)
+            .unwrap();
+        assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Failed);
+
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let handled = d.escalate_failed_children(&parent, "run-1", &mut Vec::new()).unwrap();
+        assert!(handled);
+        let after = store.get(parent.id).unwrap().unwrap();
+        assert_eq!(after.status, Status::Blocked, "max_retries = 0 なのでやり直せず、人に聞く");
+
+        // ADR-0033 D5（Phase 26）と同じく `approvals` に 1 件残る。
+        let approvals = store.approval_list(Some(true), None, None).unwrap();
+        assert_eq!(approvals.len(), 1, "{approvals:?}");
+        assert_eq!(approvals[0].node_id, "coding-poc");
+        assert_eq!(approvals[0].task_id, Some(parent.id));
+        assert!(approvals[0].question.contains("委譲した子タスクが失敗し"), "{}", approvals[0].question);
+
+        // 答えれば ready に戻る（既存の answers[] の経路。Phase 29 の一本化はここでは検証しない）。
+        store.apply_transition(parent.id, Trigger::Answer, None).unwrap();
+        assert_eq!(store.get(parent.id).unwrap().unwrap().status, Status::Ready);
     }
 
     #[tokio::test]

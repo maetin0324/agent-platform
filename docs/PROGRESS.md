@@ -5447,3 +5447,82 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
   知らないクラスタを書かれると run は `cluster_unavailable` で待たされる。`plan.json` / `delegate.json`
   の検証（`task_core::plan::validate` / `validate_each`）に「知らない cluster は拒否」を足すとよい
   （設定を渡す必要があるので、`genres` と同じ形で持ち回ることになる）。
+
+## Phase 44 — reload は役割も読み直す／ディスパッチャの質問も認可に（実機から。2026-09-18）
+
+- 完了日: 2026-09-18
+- 実機で起きたこと（本番、2026-09-18）:
+  1. `[[roles]] implementer` の `max_turns` を 20 → 60 に変えて `POST /reload` したのに、その後に委譲された
+     子は `max_turns: 20` のままだった。`reload_providers` はプロバイダ・アダプタ・モデルだけを差し替え、
+     役割・分野・委譲設定は起動時のままだった。`docs/gui/api.md` の `POST /reload` の説明も「プロバイダの
+     再読込」としか言っていなかった。
+  2. 委譲した子が `max_retries` まで失敗して親が `retry_then_ask` で `blocked`（「委譲した子タスクが失敗し…
+     どうしますか」）になったが、この質問はディスパッチャが立てるもので、Phase 26 の「ワーカーの
+     `Question` → `approvals`」の経路を通らないため、認可画面に出ず Discord の `approval_pending` も
+     飛ばなかった（受信箱にだけ出る）。
+- 決定（ADR-0017 M6・ADR-0033 D5 に追記。新しい ADR は起こしていない: どちらも既存の決定の実装漏れの
+  修正で、新しい設計判断は無い）:
+  1. `POST /reload` は、プロバイダに加えて役割・分野・委譲設定（`[delegation]`）・`[reports]` /
+     `[notify]` / `[conversation]` の設定値も読み直す。`[accounts]` と `[[clusters]]` / `[api]` / `db` /
+     `workspace_root` は従来どおり再起動が要る（変更されていたら `[accounts]` だけ 400 で拒否する既存規則
+     は維持）。
+  2. ディスパッチャが立てる質問（`retry_then_ask` の子の失敗）も `approvals` に載せる
+     （`node_id = task.assignee`、無ければ秘書）。
+  3. `question_blocked` の通知の backfill 判定を `created_at` から `updated_at`（`blocked` になった時刻）に
+     直す。
+- 変更したファイル:
+  - `crates/task-dispatch/src/dispatcher.rs`: `Dispatcher::reload_config(roles, genres, delegation)` を新設
+    （`self.config` の該当フィールドだけ差し替える。実行中の run は `spawn_worker` 時点の写しのままなので、
+    反映は次に起動する run から）。`escalate_failed_children` の「やり直せない」枝で
+    `crate::approvals::record_question_approval` を呼ぶ（既存の Phase 26 の関数をそのまま再利用）。
+    テスト 2 本追加（`a_dispatcher_raised_child_failure_question_also_becomes_an_approval`。既存のロール系
+    テストは無変更）。
+  - `crates/taskd/src/lib.rs`: `run`/`tick_loop`/`handle_admin_request` の `Config` を `&mut Config` に変更
+    （`[reports]`/`[notify]`/`[conversation]` を tick ループが直接読んでいるため、`reload` で書き戻す先が
+    要る）。`reload_providers` が `dispatcher.reload_config(...)` を呼び、`config.roles` / `genres` /
+    `delegation` / `reports` / `notify` / `conversation` を新しい設定で上書きする（他のフィールドには
+    触れない）。既存テスト `reload_providers_rejects_changes_to_the_accounts_section` を `&mut config` に
+    合わせて更新、新規テスト `reload_rereads_roles_genres_delegation_and_reports_notify_conversation` を
+    追加（`[[roles]] implementer` の `max_turns` を 20 → 60 にして reload し、`dispatcher.config().roles`
+    と `config.notify.interval_secs` の両方が新しい値になることを確認）。
+  - `crates/taskd/src/notify.rs`: `scan_question_blocked` の backfill 判定を `t.created_at >= started_at`
+    から `t.updated_at >= started_at` に変更。
+  - `crates/taskd/tests/notify.rs`: 新規テスト
+    `a_task_blocked_after_startup_is_scanned_even_though_it_was_created_long_before`（起動よりずっと前に
+    作られたタスクが起動後に `blocked` へ落ちた場合、以前は見逃していたのが鳴るようになったことを確認）。
+  - `docs/adr/0017-account-management-from-gui.md`: M6 追記。`docs/adr/0033-organization-projects-and-reports.md`:
+    D5 に 1 段落追記。`docs/gui/api.md`: 3.28 `POST /reload` を「反映されるもの / 再起動が要るもの」の表に
+    書き直した。
+- 実行したコマンドと結果:
+  - `cargo test -p task-dispatch`: exit 0、144 passed。
+  - `cargo test -p taskd`: exit 0、104 + 1（bin_smoke）+ 3（milestone_review）+ 19（notify）passed。
+  - `cargo test --workspace`: exit 0。`grep -c "^test result: FAILED"` = 0、`test result: ok` のブロックが
+    56、合計 1136 件 passed。
+  - `cargo clippy --workspace --all-targets -- -D warnings`: exit 0、警告なし。
+- reload で反映されるもの: `[[providers]]` / `providers.d/`（従来どおり）、`[[roles]]` / `[[genres]]` /
+  `[delegation]`（次に起動する run から）、`[reports]` / `[notify]` / `[conversation]`（次 tick から）。
+- 再起動が要るもの（従来どおり。今回変えていない）: `db` / `workspace_root` / `[api]` / `[[clusters]]` /
+  `[accounts]`（`[accounts]` だけは変更を検出して 400 で拒否する）。
+- 未解決事項:
+  - U44-1: `task-api` の `ApiState`（`GET /config` が返す `config_view.roles`/`.genres`、対話開始が使う
+    `state.inner.roles`/`.genres`/`.conversation_genre`）は起動時に固定したままで、`reload` では更新して
+    いない（今回の作業単位は `crates/task-dispatch` と `crates/taskd` の読む順に限定した。`GET /providers`/
+    `GET /config` の `providers[]` だけは ADR-0017 M4 で既にスナップショット経由の live 反映がある）。
+    `GET /config` に出る `roles[]`/`genres[]` を reload 直後から新しい値にしたい場合、または `[conversation]`
+    の分野変更を対話 API 経由の検証（`greet_the_secretary` 等）に即時反映したい場合は、`task-api` 側にも
+    reload の通知経路（`AdminRequest::Reload` の結果を `ApiState` の可変スロットへ反映する等）を足す必要が
+    ある。実機の事故（`max_turns` が子に効かない）はディスパッチャ側の経路で直っているので、これは別の
+    作業単位として切り出すのがよい。
+  - U44-2: ディスパッチャ由来の質問を `approvals` に載せる先を `escalate_failed_children` の 1 箇所に絞った
+    （実機で確認できたのはこの経路だけ）。他にディスパッチャが `Event::QuestionRaised` を作る箇所
+    （`StoreSink::delegate_impl` の部をまたぐ委譲）は、ワーカーの run 終端の扱い（`cross_department`
+    の合流。既存コード）を通るため既に `approvals` に載っている。今後ディスパッチャ側に新しい `blocked` の
+    経路を足すときは、同じく `record_question_approval` を呼ぶことを忘れないよう、レビューで確認してほしい。
+  - U44-3: 実機確認は未実施。配備後、`[[roles]] implementer` の `max_turns` を変えて `POST /reload` し、
+    直後に委譲された子の `budget.max_turns` が新しい値であることと、`retry_then_ask` で `blocked` になった
+    案件が GUI の認可画面に出て Discord に通知が飛ぶことを確認してほしい。
+
+### 提案
+
+- P-100: U44-1 のとおり、`task-api` 側の `ApiState` にも reload を伝える経路を足し、`GET /config` の
+  `roles[]`/`genres[]` と対話開始の検証を reload 直後から新しい値にする。
