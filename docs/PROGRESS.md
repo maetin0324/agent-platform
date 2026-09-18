@@ -4415,3 +4415,93 @@ Final synthesis で 3 回以上重複、反復ログ、同じ 2〜3 論文の UR
 ### 提案
 
 なし。
+## Phase 33 — 担当は自分の仕事を知っている（実機の報告から。2026-09-18）
+
+### 背景
+
+人が組織の木で関連研究調査課を選び「なぜ web-research に失敗しているのでしょうか？」と話しかけた
+（Phase 30 で対話は Claude で走るようになり、返事は来た）。返事は「原因を特定するには対象タスク ID /
+run / エラーメッセージが必要です。どのタスクがいつ失敗しましたか？」— その担当は自分が直近に 3 回失敗した
+仕事（`web search returned nothing` ×2、`idle timeout` ×1、レビュー不合格 ×1）を知らなかった。前置きには
+brief・記憶・直近のやり取りしか入らず、記憶は LDR の run が書かないので空。SPEC §3.4「組織の木を見て担当に
+直接言う」は、担当が自分の仕事を把握していて初めて意味を持つ。
+
+### 実装したこと
+
+1. **`RunContext.recent_work: Vec<RecentWork>`**（protocol v4 のまま、追加のみ。`crates/task-worker/src/protocol.rs`）:
+   `RecentWork { task_id, title, project_title?, status, finished_at?, outcome?, artifacts }`。
+2. **対話 run のときだけ**（`task.conversation.is_some()`）、`Dispatcher::run_extras` がその担当
+   （`assignee`）の直近の仕事を store から集めて入れる（`crates/task-dispatch/src/dispatcher.rs`
+   `recent_work_of` / `recent_work_outcome` / `artifact_names_of`）: `assignee` が同じで `support` が無い
+   （対話・まとめ・承認・レビューを除く。`task_core::report::support_kind`）タスクを更新の新しい順に
+   最大 10 件。対話が案件を選んでいれば、その案件のものを先に、残りは他の案件から（それぞれの中では
+   更新の新しい順を保つ）。この検索を可能にするため `task_core::ListFilter` に `assignee: Option<String>`
+   を追加した（`crates/task-core/src/store.rs`。`Default` 由来で既存の構築コードは壊れない）。
+   `outcome` はイベントから決定的に組む: `done` は直近の `WorkerFinished` の summary の 1 行目、`failed` は
+   直近のレビュー不合格の理由か直近のワーカーのエラー（どちらが後のイベントかで決まる。無ければ `Failed`
+   への遷移理由にフォールバック）、`blocked` は直近の質問。Phase 25 の報告の文面の組み立て
+   （`task_core::report::first_line` / `truncate_chars` / `HEADLINE_MAX_CHARS`）をそのまま流用した。
+   LLM は呼ばない（DESIGN 原則 1）。
+3. **`preamble::render` の「記憶」の直後**に「あなたの直近の仕事」の節を足した
+   （`crates/task-worker/src/preamble.rs`）: 1 件 1 行
+   `- [status] <title>（案件: <project_title>）: <outcome> 成果物: a, b`（案件名・outcome・成果物は
+   それぞれ無ければ省略）。空なら節を出さない。通常の run（対話でない）の前置きはバイト一致で不変
+   （既存テスト `an_empty_context_renders_nothing_at_all` / `a_role_only_context_renders_exactly_the_old_role_section`
+   が確認）。
+4. 対話専用の指示文（`conversation_instructions`。Phase 28）に一文追加:
+   「自分の直近の仕事とその結果は上に書いてある。人に聞き返す前に、まずそれを見て答えること。」
+   （秘書向け・それ以外向けの両方）。
+
+### 判断が必要な点（無し）
+
+依頼の「決定（そのまま実装）」節がフィールド単位まで具体的だったため、実装上の独自判断は無し。
+2 点だけ、依頼に明記が無かったので以下のように決めた（設計原則から外れない範囲の実装細部）:
+- `recent_work_of` の候補取得に `TaskStore::list_page` + 新しい `ListFilter.assignee` を使った
+  （既存の `assignee` 絞り込みが無かったため）。既存の `ListFilter` は `Default` 実装済みで、
+  全既存呼び出しが `..Default::default()` / `..ListFilter::default()` を使っていることを確認してから
+  追加した（後方互換）。
+- `finished_at` / `outcome` は `status` が `done` / `failed` / `blocked` のときだけ埋める
+  （`draft`/`ready`/`running`/`reviewing`/`cancelled` は `None`。依頼が終端の要約として明示したのは
+  この 3 状態のみのため）。
+
+### 受け入れ条件ごとの証拠
+
+- `run_extras` が対話 run で直近の仕事を新しい順・案件優先・裏方除外・最大 10 件で集める。通常 run では
+  空: `cargo test -p task-dispatch recent_work` **4 passed**
+  （`run_extras_recent_work_orders_by_project_then_recency_excludes_support_and_caps_at_ten`、
+  `run_extras_recent_work_is_empty_for_ordinary_runs`、
+  `run_extras_recent_work_carries_project_title_and_artifacts`、
+  `recent_work_outcome_reuses_the_report_wording_for_done_failed_and_blocked`）。
+- `outcome` の組み立て（done / failed / blocked、`web search returned nothing` / `idle timeout` /
+  レビュー不合格 / `Failed` 遷移理由へのフォールバックを含む）:
+  `recent_work_outcome_reuses_the_report_wording_for_done_failed_and_blocked` に同居（上と同じ実行）。
+- 前置きに節が入る（対話のみ）。通常 run の前置きはバイト一致で不変:
+  `cargo test -p task-worker preamble` **9 passed**
+  （新規 `recent_work_is_shown_right_after_memory_and_before_conversation`、既存の
+  `an_empty_context_renders_nothing_at_all` / `a_role_only_context_renders_exactly_the_old_role_section`
+  がバイト一致を確認）。
+- **共通条件** — `cargo test --workspace`: **1004 passed**、`grep -c "^test result: FAILED"` = **0**
+  （Phase 31 の 999 から +5: task-dispatch 4 件・task-worker 1 件の新規テスト）。
+  `cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。テスト以外に `unwrap()` / `expect()`
+  は無い（触った全ファイルの `#[cfg(test)]` より前を `awk` + `grep` で機械的に確認）。ディスパッチャ・
+  ストアに LLM 呼び出しは無い（`recent_work_of` / `recent_work_outcome` はストアの読み取りとイベントの
+  文字列処理だけ）。
+  `UPDATE_SCHEMA=1 cargo test -p task-worker protocol::tests::committed_schema_matches_generated` で
+  `docs/protocol/worker-protocol.schema.json` を再生成（`RunContext.recent_work` / `RecentWork` を追加）。
+  `docs/protocol/worker-protocol.md` に `context.recent_work`（§3.1 の表と本文）を追記、
+  `docs/adr/0033-organization-projects-and-reports.md` D4 に Phase 33 追記の段落を追加。
+
+### 未解決事項
+
+- U33-1: `context.recent_work` の文面（前置きの 1 行のフォーマット、`work search returned nothing` の
+  ような長いエラー文が `HEADLINE_MAX_CHARS`（120 字）で切られること）を実機の Claude / Qwen でまだ
+  確認していない（偽アダプタでの通しのみ）。担当がこの情報を読んで的確に答えられるかは実機確認が要る。
+- U33-2: `finished_at` は `done`/`failed`/`blocked` のときだけ埋めている。`cancelled` な直近の仕事
+  （人が承認せず打ち切った等）は一覧には出るが `finished_at`/`outcome` が空になる。必要になれば
+  `cancelled` にも「人が打ち切った」という固定文言の `outcome` を足す判断はあり得る。
+
+### 提案
+
+- P-84: 今回は対話 run にだけ `recent_work` を渡した。将来、集約 run（`context.children`）にも
+  「その担当がこれまでに抱えた仕事」を渡したくなったら、`recent_work_of` はそのまま流用できる
+  （`assignee` 単位のクエリで、対話かどうかには依存しない実装にしてある）。

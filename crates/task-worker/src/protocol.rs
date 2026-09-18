@@ -15,6 +15,8 @@ use task_core::{ArtifactRef, DelegateTask, GenreSpec, Status, Task, TaskId, Usag
 /// Phase 28（ADR-0033 D4 追記）: `context.conversation_addressee` を追加（対話 run は返事だけ。委譲不可）。
 /// Phase 30（ADR-0033 D4 追記）: `context.work_genre` を追加（対話は常に対話用分野で走るが、担当ノード
 /// 自身の仕事の分野があれば「仕事で使う道具」として前置きに渡す）。
+/// Phase 33（ADR-0033 D4 追記）: `context.recent_work` を追加（対話 run にだけ、その担当の直近の仕事を渡す。
+/// 実機で担当が自分の直近の失敗を知らずに聞き返した事故の再発防止）。
 /// 全て追加のみで v1〜v3 のワーカーはそのまま動く。
 pub const PROTOCOL_VERSION: u32 = 4;
 
@@ -155,6 +157,26 @@ pub enum ConversationAddressee {
     Other,
 }
 
+/// `context.recent_work[]`（ADR-0033 D4 / Phase 33: 実機の事故 — 担当が自分の直近の仕事を知らずに
+/// 「対象タスク ID が必要です」と聞き返した — の再発防止）。対話 run にだけ、その担当の直近の仕事を渡す。
+/// 生成は決定的（ストアのタスクとイベントから組む。LLM は使わない。DESIGN 原則 1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecentWork {
+    pub task_id: TaskId,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_title: Option<String>,
+    pub status: Status,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    /// 終端の要約: `done` なら `summary` の 1 行目、`failed` なら理由、`blocked` なら質問。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// この仕事が残した成果物の名前（パスは含まない）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
+}
+
 /// `context.organization[]`（ADR-0033 D4 / Phase 24）: 組織図。分解・委譲できる run に渡し、
 /// 「どの課に何を振るか」を `assignee` で指定させる。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -229,6 +251,11 @@ pub struct RunContext {
     /// 知って答えられるように、前置きに「仕事で使う道具」として渡す（決定的。`[[genres]]` を引くだけ）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_genre: Option<GenreContext>,
+    /// Phase 33（ADR-0033 D4 追記。実機の事故の再発防止）: 対話 run にだけ、その担当の直近の仕事
+    /// （最大 10 件、更新の新しい順。案件を選んでいる対話ならその案件のものを先に）を渡す。
+    /// 通常の run（対話でない）では常に空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_work: Vec<RecentWork>,
 }
 
 /// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは

@@ -21,6 +21,10 @@
   失敗した。検索ハーネスや PaperQA は会話できない）。`context.work_genre` は、担当ノードが自分の仕事の
   分野（`node.genre`）を持つときだけ渡り、その人が自分の得意分野を知って答えられるようにする
   （前置きに 1 行）
+- **Phase 33（ADR-0033 D4 追記）**: `context.recent_work`（§3.1）を追加。実機で対話 run の担当が自分の
+  直近の失敗（`web search returned nothing` ×2, `idle timeout` ×1, レビュー不合格 ×1）を知らずに
+  「対象タスク ID / run / エラーメッセージが必要です」と聞き返した事故の再発防止。対話 run にだけ、
+  担当の直近の仕事（最大 10 件、更新の新しい順、対話が案件を選んでいればその案件のものを先に）を渡す
 
 ## 1. 概要
 
@@ -86,6 +90,7 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 | `context.organization` | array | –（省略可。空なら省略。v4, ADR-0033 D4） | 分解・委譲できる run（`context.available_genres` を渡す run と同じ条件）に渡す組織図。`{id, name, kind, parent_id?, brief?, genre?}`。「どの課に何を振るか」を `assignee` で決めさせる |
 | `context.conversation_addressee` | string | –（省略可。Phase 28, ADR-0033 D4 追記） | 対話用タスクの run だけ `"secretary"` / `"other"`。委譲・`Question` は使えない（`delegate` は子を作らず理由を `progress` で返し、`Question` はそのまま `done` の返事になる） |
 | `context.work_genre` | object | –（省略可。Phase 30, ADR-0033 D4 追記） | 対話 run で、担当ノードが自分の仕事の分野（`node.genre`）を持つときだけ。`GenreContext`（`context.available_genres[]` と同じ形）。対話そのものは常にこの分野ではなく対話用分野（`task.genre`）で走る。前置きに「仕事で使う道具」として 1 行渡すためだけの情報 |
+| `context.recent_work` | array | –（省略可。空なら省略。Phase 33, ADR-0033 D4 追記） | 対話 run にだけ、担当の直近の仕事（最大 10 件、更新の新しい順。案件を選んでいればその案件のものを先に。対話・まとめ・承認・レビューは除く）。`RecentWork`: `{task_id, title, project_title?, status, finished_at?, outcome?, artifacts: string[]}`。`outcome` は終端の要約（`done` なら summary の 1 行目、`failed` なら理由、`blocked` なら質問）で、ストアのタスクとイベントから決定的に組む（LLM は使わない） |
 
 `context.answers` は、このタスクの `Event::Answered` を時系列に並べたもの（`question` は直前の
 `WorkerFinished.outcome` の `"question: "` 接頭辞から取ったもの、無ければ空文字列）。`claude-code`/`codex`
@@ -97,13 +102,15 @@ Review プロンプトには含めない）。JSON Lines プロトコルを直�
 （taskd 側は解釈を強制しない）。`claude-code`/`codex` の反映のしかたは §9 M8 を参照。
 
 **v4 の前置き（ADR-0033 D4/D6, Phase 24。Phase 28 で末尾に対話専用の指示を追加。Phase 30 で役職と brief の
-直後に「仕事で使う道具」を追加）**: `context.node` / `context.work_genre` / `context.standing_rules` /
-`context.memory` / `context.conversation` / `context.role` は、CLI エージェント系アダプタでは
-`task_worker::preamble::render` が**この順**で 1 か所に組む（役職と brief → 仕事で使う道具（あれば） →
-永続の認可 → 記憶 → 直近のやり取り → 役割の指示文 → 記憶の書き方 → 対話専用の指示）。
-`context.conversation_addressee` が `None`（対話でない run）ならこの末尾の節は出ず、`context.work_genre` も
-渡らないので、前置きは Phase 23 までの出力と 1 バイトも変わらない。`local-deep-research` だけは役割の
-指示文を載せない（ADR-0029 / Phase 19: 検索エンジンに渡す問いを役割の文面で濁さないため）。
+直後に「仕事で使う道具」を追加。Phase 33 で記憶の直後に「あなたの直近の仕事」を追加）**: `context.node` /
+`context.work_genre` / `context.standing_rules` / `context.memory` / `context.recent_work` /
+`context.conversation` / `context.role` は、CLI エージェント系アダプタでは `task_worker::preamble::render` が
+**この順**で 1 か所に組む（役職と brief → 仕事で使う道具（あれば） → 永続の認可 → 記憶 →
+あなたの直近の仕事（対話 run にだけ） → 直近のやり取り → 役割の指示文 → 記憶の書き方 → 対話専用の指示）。
+`context.conversation_addressee` が `None`（対話でない run）ならこの末尾の節は出ず、`context.work_genre` /
+`context.recent_work` も渡らないので、前置きは Phase 23 までの出力と 1 バイトも変わらない。
+`local-deep-research` だけは役割の指示文を載せない（ADR-0029 / Phase 19: 検索エンジンに渡す問いを
+役割の文面で濁さないため）。
 
 ## 4. ワーカー → taskd
 
