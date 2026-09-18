@@ -4790,3 +4790,110 @@ ad-hoc file system, I/O offload — 直近の研究動向と候補テーマ」�
 - P-89: 子タスクの workspace の与え方そのもの（親と同じディレクトリを共有する設計）を、案件（project）
   ごとの作業ディレクトリ + タスクごとの成果物ディレクトリという形で整理するか、人間に確認したい。
   今回の変更は「成果物だけを分ける」最小の対処で、作業ファイル（ソースコード等）の衝突は対象外。
+
+## Phase 36 — 文献検索の検索語は LLM が立てる（実機の失敗から。2026-09-18）
+
+ADR-0035 D5（新規。§3 の「LLM に検索語を作らせる（採らない）」を撤回）。Phase 34 の決定的な検索語抽出が
+本番で無関係な論文しか連れて来なかった（run `01M2SES1R5XQBP3C3M3986K908`: 候補 30 件のうち隣接領域は
+0〜1 件、PDF 6 本は全部無関係、PaperQA2 は "I cannot answer this question due to insufficient
+information"、証拠ゲートが `cited=0` で落とした）ため、**取得ランナーの最初の段で LLM に検索語を
+立てさせる**ようにした。ゲートは正しかったので触っていない。
+
+### 変更したファイル
+
+- `crates/task-worker/src/paperqa_acquire.py` — 段 0 を追加。`chat/completions` を
+  `OPENAI_BASE_URL` に 1 回叩き（`pqa` は使わない。`chat_template_kwargs.enable_thinking = false`。
+  受け付けない口には 1 回だけ付け直さずに再送）、`{"queries": [{text, engines, arxiv_categories}],
+  "exclude_terms": [...]}` を読む（`<think>` ブロックと ``` の中からも JSON を取り出す）。
+  壊れていれば**アダプタが渡した決定的な検索語に落ちる**（理由を `progress:` と `queries.json` に残す）。
+  arXiv は語を `AND` で綴じて `AND (cat:… OR cat:…)` を付け、0 件なら同じ語を `OR` で 1 回だけ引き直す。
+  OpenAlex は `filter=is_oa:true,primary_topic.field.id:17`。候補はタイトル + 要旨に除外語が
+  あれば決定的に捨てる（要旨は arXiv の `<summary>` / OpenAlex の `abstract_inverted_index` を戻したもの）。
+  候補に `query_text` と `abstract` を足し、`artifacts/queries.json` を書く。
+- `crates/task-worker/src/paperqa.rs` — 取得の段だけ: `AcquireConfig` に `query_llm`（既定 true）/
+  `query_model` / `query_timeout_secs`（既定 300）/ `openalex_filter`、モデルの解決
+  （`query_model` → `[[providers]] model` → settings の `llm`。`openai/` 等の接頭辞を落とす
+  `strip_provider_prefix`）、`OPENAI_BASE_URL` / `OPENAI_API_KEY` の受け渡し、依頼文の受け渡し
+  （`title` / `objective` / `context.memory.project`）、`queries.json` の申告と前回分の削除。
+  成果物パスは Phase 35（ADR-0036）の `artifacts_dir` 基準のまま（merge で両方を残した）。
+- `docs/adr/0035-literature-acquisition.md` — D5 と §5（Phase 36 の受け入れ条件）を追記、
+  §3 の該当行を取り消し線 +「Phase 36 で撤回」に。
+- `config/taskd.research.example.toml` — `[adapters.paperqa.acquire]` に `query_llm = true` /
+  `query_model` / `query_timeout_secs` / `openalex_filter` の説明。
+- `docs/PROGRESS.md`（本節）。
+
+### 受け入れ条件と証拠
+
+- ランナー（ネットワークにも LLM にも出ない。`--fixture` の `llm-1.json` を読む）:
+  `cargo test -p task-worker paperqa` → **ok. 35 passed; 0 failed**。新規は
+  `runner_uses_the_search_terms_the_llm_wrote`（`<think>` と ``` 付きの応答から検索語を読む、
+  2 本目は OpenAlex だけなので arXiv は 1 回だけ、除外語で 2 件落ちる、`queries.json` /
+  `candidates.json` の `query_text` / 逆引き索引から戻した要旨）、
+  `runner_falls_back_to_the_deterministic_terms_when_the_llm_answer_is_broken`（`generated_by =
+  "fallback"`、`error = "no JSON object in the answer"`、progress に落ちた旨）、
+  `runner_query_plan_parsing_is_deterministic`（URL の組み立て・`reasoning` からの取り出し・
+  JSON の切り出し・engines / categories / 除外語の検査・6 本の上限・4 種類の壊れた答え・
+  プロンプトの中身）、`runner_url_building_normalization_and_dedup_are_deterministic`（更新:
+  `all:a AND all:b` と `AND (cat:cs.DC OR cat:cs.OS)`、OpenAlex の `filter`、除外語）。
+- アダプタ: `the_acquire_input_carries_the_query_llm_and_the_request`（settings の
+  `llm = "openai/qwen3.8-27b"` → `model = "qwen3.8-27b"`、`base_url` / `api_key` / `max_queries` /
+  `timeout_secs`、依頼文、`query_llm = false` で段を動かさない）、
+  `the_query_llm_model_falls_back_from_query_model_to_llm_to_the_settings_file`、
+  `strip_provider_prefix_drops_only_a_litellm_style_prefix`。`queries.json` の申告は既存の
+  `acquire_runs_before_pqa_and_the_answer_gets_a_sources_section`（成果物 4 件）と
+  `gate_rejects_short_evidence_but_keeps_the_artifacts`（落ちても 4 件申告・ファイルは残る）で見る。
+- 全体: `cargo test --workspace` → `grep -c "^test result: FAILED"` = **0**、合計 **1,045 passed**
+  （0 failed / 2 ignored）。`cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**。
+  テスト以外に `unwrap()` / `expect()` 無し（`#[cfg(test)]` の外に追加行なし）。
+- 実機（本番と同じ `~/taskd/paperqa` の venv / settings / トンネルの Qwen3.8-27B。DB・設定・
+  corpus・索引は使い捨て。`~/taskd/taskd.sqlite3` と 7710 には触っていない）:
+  `taskctl --db <tmp> worker run --config <tmp>/taskd.toml --task 01M2SG4QYRQRFJJHG1ET6HRPPJ
+  --adapter paperqa`（objective は失敗した本番 run の `request.json` のもの）。
+  - **検索語（LLM が 5 本、`queries.json` の `generated_by = "llm"`、`model = qwen3.8-27b`、4.7 秒）**:
+    `asynchronous I/O runtime storage` (cs.OS, cs.DC) / `ad hoc file system HPC` (cs.DC, cs.OS) /
+    `user-level I/O scheduling` (cs.OS, cs.PF) / `storage I/O offloading kernel` (cs.OS, cs.AR) /
+    `non-blocking file system interface` (cs.OS, cs.DC)。除外語 10 本（`mobile ad hoc network` /
+    `programming language runtime` / `virtual machine` / …）。Phase 34 の `ad-hoc` / `runtime` /
+    `I/O` / `Pluvio` とは別物になった。
+  - **候補 30 件**（除外語で `The KaffeOS Java runtime system` と blockchain の 1 件が落ちた）。
+    自分の目で数えた分類: **隣接領域そのもの 11 件**（Ad Hoc File Systems for HPC / GekkoFS /
+    Expand Ad-Hoc file system / MLP-Offload / DataStates-LLM / ByteFS / DFUSE / RDMA-First Object
+    Storage with SmartNIC Offload / Protected Data Plane OS (MPK) / Cluster I/O with River / Ceph）、
+    **周辺として読める 9 件**（StarPU / Scheduler activations / RAMCloud / ACGraph / Scaling Spark on
+    HPC 等）、**無関係 10 件**（R 言語 / Mesos の公平性 / V2I / 健康食品コンテンツ 等）。
+    Phase 34 の「隣接領域 0〜1 件」からの改善。
+  - **PDF 4 本**（`max_pdfs = 4`）: MLP-Offload / Ad hoc Cloud Computing / Ad Hoc File Systems for
+    HPC / Protected Data Plane OS。**うち 3 本が隣接領域**（Phase 34 は 6 本すべて無関係）。
+  - **`cited = 4`**（ゲートの `min_cited = 2` を通過）、terminal は `done`。`answer.md` は
+    "cannot answer" ではなく、`Brinkmann2020 pages 7-8` / `Maurya2025 pages 2-3` などを引いて
+    候補テーマ 3 件を新規性・実現可能性・Pluvio との接続点付きで書いている。
+  - 1 回目（run `01M2SGKA9H33VWTJ8KD5EE1NY0`）は**取得は成功**（同じ検索語・30 候補・PDF 4 本）
+    だが `pqa` の索引作成中に PaperQA2 側で `TypeError: object of type 'NoneType' has no len()`
+    （`paperqa/docs.py:208`。citation 用の LLM 応答が空）で exit 1 → `Error{retryable}`。
+    2 回目（run `01M2SGVG7BWYP37HQM7WQ9E3QQ`、PDF は corpus から再取得なし）で上の `done` になった。
+    U36-2 参照。
+
+### 未解決事項
+
+- U36-1: **`ad hoc file system HPC` は arXiv では `AND` で 0 件**になり、`OR` の引き直し（カテゴリの
+  縛りは残る）で 20 件返る。この 20 件は当たり外れが大きい（`(R)SE challenges in HPC` など）。
+  `AND` を段階的に緩める（語を後ろから落とす）か、arXiv では `ti:`/`abs:` に絞るかは未検討。
+- U36-2: **PaperQA2 の索引作成がローカル LLM の空応答で落ちる**（`docs.py:208` で `len(None)`）。
+  citation 用のプロンプトに対して Qwen3 が「考える」だけで `content` を空にすると、その 1 本で
+  `pqa` が丸ごと exit 1 になる（PDF 1 本の失敗が run 全体を落とす）。第三者側の問題なので
+  taskd からは直せないが、`settings` に `enable_thinking = false` 相当を渡せるか（LiteLLM の
+  `litellm_params` に `extra_body`）を確認する価値がある。今は retryable な失敗として再試行で抜ける。
+- U36-3: 除外語は**候補の取得時にしか効かない**。既に corpus にある PDF（前の run が入れた無関係な
+  論文）は除外語で消えないので、`answer.md` の `## 出典` には残る（U34-5 と同じ話）。
+- U36-4: 案件の文脈として渡しているのは `context.memory.project` だけ。`RunContext` に**案件の依頼文
+  そのものは無い**（ADR-0033 D4 の `conversation` は対話 run 用で、通常の run では空）。案件の依頼文を
+  文脈として渡すなら、ディスパッチャ側で `RunContext` に足す必要がある（人間の判断待ち）。
+
+### 提案
+
+- P-90: `[adapters.paperqa.acquire]` の `arxiv_categories`（既定 `cs.DC` / `cs.OS` / `cs.PF` /
+  `cs.NI`）も設定で上書きできるようにするか。今は LLM の出力が無いときだけ使う内部の既定値で、
+  計算機科学以外の分野を `literature` で扱うときに効かない（`openalex_filter` だけ設定可能にした）。
+- P-91: 検索語を立てる LLM 呼び出しは「ハーネスの中の 1 回」なので予算（`max_turns`）にも
+  usage にも出ない。ローカル LLM では気にならないが、課金される口を使う構成では run の費用に
+  含めて数えたい（`Usage` に足すか、ゲートと同じく「ハーネスの取り分」として別枠にするか）。
