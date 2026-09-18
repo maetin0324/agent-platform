@@ -1,14 +1,14 @@
-import type { ReactNode } from "react";
-import { data, type FetcherWithComponents, Link, useFetcher } from "react-router";
-import { TransitionFlash } from "~/components/Flash";
+import { type ReactNode, useEffect } from "react";
+import { data, type FetcherWithComponents, Link, useFetcher, useNavigate } from "react-router";
+import { RetryFlash, TransitionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Button } from "~/components/ui/button";
-import { hintClass, textareaClass } from "~/components/ui/form";
+import { checkboxClass, hintClass, textareaClass } from "~/components/ui/form";
 import { Icon, type IconName } from "~/components/ui/Icon";
 import { Alert, EmptyState, PageHeader, SectionTitle, StatCard } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import type { TransitionOutcome } from "~/taskd/action-types";
+import type { RetryOutcome, TransitionOutcome } from "~/taskd/action-types";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { isTaskdUnavailable, taskdErrorResponse } from "~/taskd/errors";
@@ -448,6 +448,16 @@ function DraftGroupRow({ group }: { group: DraftGroup }) {
 function AttentionRow({ item }: { item: Exclude<AttentionItem, { type: "cluster_unavailable" }> }) {
   const fetcher = useFetcher<TransitionOutcome[]>({ key: `inbox-attention-${item.task.id}` });
   const submitting = fetcher.state !== "idle";
+  // Phase 31: 「やり直す」は新しいタスクを作る（`TransitionOutcome[]` とは形が違う）ので別の fetcher にし、
+  // `/tasks/:id` の action（既に retry を扱う）へ直接投げる。成功したら新しいタスクへ遷移する。
+  const retryFetcher = useFetcher<RetryOutcome>({ key: `inbox-retry-${item.task.id}` });
+  const retrying = retryFetcher.state !== "idle";
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (retryFetcher.data?.ok) {
+      navigate(`/tasks/${retryFetcher.data.result.task_id}`);
+    }
+  }, [retryFetcher.data, navigate]);
   return (
     <li
       data-testid="attention-item"
@@ -471,7 +481,32 @@ function AttentionRow({ item }: { item: Exclude<AttentionItem, { type: "cluster_
           </Button>
         </fetcher.Form>
       )}
+      {item.task.actions.includes("retry") && (
+        <retryFetcher.Form
+          method="post"
+          action={`/tasks/${item.task.id}`}
+          className="mt-3 flex flex-col gap-2 border-t border-danger-border/60 pt-3"
+        >
+          <input type="hidden" name="intent" value="retry" />
+          <label className="flex items-center gap-2 text-fg">
+            <input type="checkbox" name="accept" value="true" className={checkboxClass} />
+            受け入れ済み（ready）で始める
+          </label>
+          <Button
+            type="submit"
+            variant="primary"
+            size="sm"
+            disabled={retrying}
+            data-testid="attention-retry"
+            className="w-fit"
+          >
+            <Icon name="rotate" />
+            やり直す
+          </Button>
+        </retryFetcher.Form>
+      )}
       <InboxFlash fetcher={fetcher} />
+      <RetryFlash outcome={retryFetcher.data} />
     </li>
   );
 }

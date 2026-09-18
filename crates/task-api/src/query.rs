@@ -131,7 +131,7 @@ pub(crate) fn parse_snake<T: DeserializeOwned>(what: &str, value: &str) -> Resul
 }
 
 /// `Event` の serde の `type` 名（`types` クエリの語彙）。
-pub(crate) const EVENT_TYPES: [&str; 14] = [
+pub(crate) const EVENT_TYPES: [&str; 15] = [
     "created",
     "transitioned",
     "worker_started",
@@ -146,6 +146,7 @@ pub(crate) const EVENT_TYPES: [&str; 14] = [
     "cluster_unavailable",
     "delegated",
     "question_raised",
+    "retried",
 ];
 
 pub(crate) fn event_type_name(event: &Event) -> &'static str {
@@ -164,6 +165,7 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::ClusterUnavailable { .. } => "cluster_unavailable",
         Event::Delegated { .. } => "delegated",
         Event::QuestionRaised { .. } => "question_raised",
+        Event::Retried { .. } => "retried",
     }
 }
 

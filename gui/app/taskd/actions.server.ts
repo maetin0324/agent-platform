@@ -1,9 +1,18 @@
 import { data } from "react-router";
-import type { ActionError, TransitionOutcome } from "./action-types";
+import type { ActionError, RetryOutcome, TransitionOutcome } from "./action-types";
 import type { TaskdClient } from "./client.server";
 import { isTaskdUnavailable, TaskdError } from "./errors";
 import { formString } from "./forms";
-import type { Action, AnswerBody, CancelBody, DecisionBody, Status, TransitionResult } from "./types";
+import type {
+  Action,
+  AnswerBody,
+  CancelBody,
+  DecisionBody,
+  RetryBody,
+  RetryResult,
+  Status,
+  TransitionResult,
+} from "./types";
 
 /**
  * 状態変更 action の共通処理（docs/DESIGN.md §6.3 の 2、§6.6、docs/adr/0005 D2）。
@@ -16,7 +25,14 @@ import type { Action, AnswerBody, CancelBody, DecisionBody, Status, TransitionRe
 
 export { formString };
 
-export const ACTIONS: readonly Action[] = ["approve", "reject", "answer", "cancel"];
+/**
+ * `applyTransition`（`readTransitionForm` 経由）が扱う `intent`。Phase 31 で `Action` に加わった `retry`
+ * は本文・応答の形が違う別経路（`applyRetry`）なので、ここでは意図して除く（`readIntent` は `retry` を
+ * 400 として拒む。ルート側は `intent === "retry"` を先に見て `runRetryAction` に分ける）。
+ */
+export type GateAction = Exclude<Action, "retry">;
+
+export const ACTIONS: readonly GateAction[] = ["approve", "reject", "answer", "cancel"];
 const STATUSES: readonly Status[] = [
   "draft",
   "ready",
@@ -28,7 +44,7 @@ const STATUSES: readonly Status[] = [
   "cancelled",
 ];
 
-export function isAction(v: unknown): v is Action {
+export function isAction(v: unknown): v is GateAction {
   return typeof v === "string" && (ACTIONS as readonly string[]).includes(v);
 }
 
@@ -36,8 +52,8 @@ export function isStatus(v: unknown): v is Status {
   return typeof v === "string" && (STATUSES as readonly string[]).includes(v);
 }
 
-/** フォームの `intent` を `Action` として読む。無効なら 400 の `Response` を投げる。 */
-export function readIntent(form: FormData): Action {
+/** フォームの `intent` を `GateAction` として読む。無効なら 400 の `Response` を投げる。 */
+export function readIntent(form: FormData): GateAction {
   const intent = form.get("intent");
   if (!isAction(intent)) throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
   return intent;
@@ -93,7 +109,7 @@ export function toActionError(e: unknown): ActionError {
 }
 
 export interface TransitionInput {
-  intent: Action;
+  intent: GateAction;
   expectedStatus?: Status | undefined;
   note?: string | null;
   answer?: string | null;
@@ -139,7 +155,32 @@ export function readTransitionForm(form: FormData): TransitionInput {
   };
 }
 
+/**
+ * `POST /tasks/{id}/retry`（Phase 31。実機の事故、2026-09-18。docs/taskd-api-v1.md §3.63）。
+ * `failed`/`cancelled` のタスクを 1 件、複製してやり直す。`accept` チェックボックス（`"true"`）を付けると
+ * 新しいタスクは `draft` を経ず `ready` で始まる。
+ */
+export async function applyRetry(
+  client: TaskdClient,
+  taskId: string,
+  form: FormData,
+  signal?: AbortSignal,
+): Promise<RetryOutcome> {
+  const body: RetryBody = { accept: form.get("accept") === "true" };
+  try {
+    const result = await client.post<RetryResult>(`/tasks/${encodeURIComponent(taskId)}/retry`, body, { signal });
+    return { ok: true, taskId, result };
+  } catch (e) {
+    return { ok: false, taskId, error: toActionError(e) };
+  }
+}
+
 /** `TransitionOutcome` を action の戻り値にする（失敗時は taskd の status をそのまま応答の status にする）。 */
 export function transitionData(outcome: TransitionOutcome) {
   return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
+}
+
+/** `RetryOutcome`（Phase 31）を action の戻り値にする。成功は 201（taskd と同じ）。 */
+export function retryData(outcome: RetryOutcome) {
+  return data(outcome, { status: outcome.ok ? 201 : outcome.error.status });
 }

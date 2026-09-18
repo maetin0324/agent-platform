@@ -81,6 +81,14 @@ pub struct CancelBody {
     pub expected_status: Option<Status>,
 }
 
+/// `POST /tasks/{id}/retry`（Phase 31）の本文。`accept: true` なら新しいタスクは `draft` を経ず `ready` で始まる。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetryBody {
+    #[serde(default)]
+    pub accept: bool,
+}
+
 /// `GET /tasks/{id}/events`、`GET /events`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EventsPage {

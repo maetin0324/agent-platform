@@ -55,8 +55,8 @@ pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterConnectCodeBody,
     ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters, ConfigView, DaemonView, DailyUsage, DbInfo,
     DecisionBody, EventsPage, GenreConfigView, Health, Problem, ProviderConfigView, ProviderStats, ProviderView,
-    Providers, ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody, SecretPutResult, SecretUse,
-    SecretView, StreamHeartbeat, StreamHello, StreamReset, ValidationError,
+    Providers, RetryBody, ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody, SecretPutResult,
+    SecretUse, SecretView, StreamHeartbeat, StreamHello, StreamReset, ValidationError,
 };
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。

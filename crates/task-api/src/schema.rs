@@ -11,6 +11,7 @@ use task_ops::graph::Graph;
 use task_ops::inbox::Inbox;
 use task_ops::plan::NewPlanSpec;
 use task_ops::replay::ReplayReport;
+use task_ops::retry::RetryResult;
 use task_ops::view::{TaskDetail, TaskList};
 
 use crate::approvals::{ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody, StandingRuleList};
@@ -22,7 +23,8 @@ use crate::types::{
     CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters, ConfigView, DaemonView, DecisionBody,
     EventsPage, Health, MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, Problem,
     ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody, ProviderCheckResponse, ProviderConfigView,
-    Providers, ReloadResult, RunList, SecretList, SecretPutResult, StreamHeartbeat, StreamHello, StreamReset,
+    Providers, ReloadResult, RetryBody, RunList, SecretList, SecretPutResult, StreamHeartbeat, StreamHello,
+    StreamReset,
 };
 
 /// コミット済みのスキーマ（`GET /schema` の本体）。
@@ -47,6 +49,9 @@ pub struct ApiV1Schema {
     pub answer: AnswerBody,
     pub cancel: CancelBody,
     pub transition_result: TransitionResult,
+    /// Phase 31（実機の事故、2026-09-18）: `POST /tasks/{id}/retry` の要求本文と応答。
+    pub retry: RetryBody,
+    pub retry_result: RetryResult,
     pub replay_report: ReplayReport,
     pub providers: Providers,
     /// `POST /api/v1/providers` と `PATCH /api/v1/providers/{id}` の応答（ADR-0017）。

@@ -32,7 +32,7 @@ export type TaskId = string;
  * 永続の規則の識別子（ULID）。
  */
 export type StandingRuleId = string;
-export type Action = "approve" | "reject" | "answer" | "cancel";
+export type Action = ("approve" | "reject" | "answer" | "cancel") | "retry";
 /**
  * DESIGN §4.1 の `TaskKind`。
  */
@@ -154,6 +154,10 @@ export type Event =
       reason?: string | null;
       type: "provider_throttled";
       until: string;
+    }
+  | {
+      from: TaskId;
+      type: "retried";
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -328,6 +332,8 @@ export interface ApiV1Schema {
   reports_notified: ReportsNotifiedResult;
   reports_read: ReportsReadBody;
   reports_read_result: ReportsReadResult;
+  retry: RetryBody;
+  retry_result: RetryResult;
   run_list: RunList;
   secret_put: SecretPutResult;
   secrets: SecretList;
@@ -2004,6 +2010,25 @@ export interface ReportsReadResult {
    * 未読から既読に変わった件数。
    */
   updated: number;
+}
+/**
+ * Phase 31（実機の事故、2026-09-18）: `POST /tasks/{id}/retry` の要求本文と応答。
+ */
+export interface RetryBody {
+  accept?: boolean;
+}
+/**
+ * `POST /tasks/{id}/retry` の応答（201）。
+ */
+export interface RetryResult {
+  /**
+   * `depends_on` を新しいタスクへ張り替えた（元は `original` に依存していた）タスクの id。
+   */
+  rewired?: TaskId[];
+  /**
+   * タスクの一意識別子（ULID）。DESIGN §4.1。
+   */
+  task_id: string;
 }
 /**
  * `GET /tasks/{id}/runs`。

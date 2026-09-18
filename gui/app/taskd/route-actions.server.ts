@@ -1,6 +1,6 @@
 import { data } from "react-router";
-import type { CreateFailure, ReplayOutcome, TransitionOutcome } from "./action-types";
-import { applyTransition, readTransitionForm, toActionError } from "./actions.server";
+import type { CreateFailure, ReplayOutcome, RetryOutcome, TransitionOutcome } from "./action-types";
+import { applyRetry, applyTransition, readTransitionForm, toActionError } from "./actions.server";
 import type { TaskdClient } from "./client.server";
 import type { NewPlanSpec, NewTaskSpec, ReplayReport, Task } from "./types";
 
@@ -23,6 +23,19 @@ export async function runTaskAction(
 ): Promise<TransitionOutcome> {
   const input = readTransitionForm(form);
   return applyTransition(client, taskId, input, signal);
+}
+
+/**
+ * `/tasks/:id` の「やり直す」（Phase 31。`intent` は `TransitionInput`（approve 等）とは別語彙なので、
+ * ルートの `action` はここへの分岐を `intent === "retry"` で先に判定する）。
+ */
+export async function runRetryAction(
+  client: TaskdClient,
+  taskId: string,
+  form: FormData,
+  signal?: AbortSignal,
+): Promise<RetryOutcome> {
+  return applyRetry(client, taskId, form, signal);
 }
 
 /**

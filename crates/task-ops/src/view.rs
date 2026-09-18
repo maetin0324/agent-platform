@@ -252,6 +252,8 @@ pub enum Action {
     Reject,
     Answer,
     Cancel,
+    /// Phase 31（実機の事故、2026-09-18）: `failed`/`cancelled` を複製してやり直す（`POST /tasks/{id}/retry`）。
+    Retry,
 }
 
 pub fn task_ref(task: &Task) -> TaskRef {
@@ -278,6 +280,9 @@ pub fn actions(task: &Task) -> Vec<Action> {
     }
     if !task.status.is_terminal() {
         out.push(Action::Cancel);
+    }
+    if matches!(task.status, Status::Failed | Status::Cancelled) {
+        out.push(Action::Retry);
     }
     out
 }

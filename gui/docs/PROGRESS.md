@@ -2108,3 +2108,92 @@ G13f-1 とは無関係）の修正を行った。
 - G13g-P1: 上記 G13g-U2 のとおり、「決めた直後に一覧から消えて成功表示が一瞬で消える」挙動
   （`/inbox` の承認・`/approvals` の認可の両方）をどう扱うか、方針を決めて ADR にしてほしい
   （据え置き・一定時間残す・グローバルフラッシュ、等の選択肢がある）。
+
+## Phase G13h — やり直すと Go（実機の報告から。2026-09-18）
+
+taskd 側 Phase 31（`docs/PROGRESS.md`）に対応する GUI 側の追従。実機で、失敗したタスクをやり直す手段が
+GUI に無く、人が遠回り（古い draft を取り消して秘書に分解し直させる）をした報告から。
+
+### 実装したこと
+
+- `app/taskd/action-types.ts`: `RetryOutcome`（`{ok:true, taskId /* 元 */, result: RetryResult}` |
+  `{ok:false, taskId, error}`）を追加。
+- `app/taskd/actions.server.ts`: `applyRetry`（`POST /tasks/{id}/retry`。`accept` チェックボックスを
+  `RetryBody.accept` に写す）と `retryData`（201 応答）を追加。`GateAction = Exclude<Action, "retry">` を
+  導入し、`ACTIONS` / `readIntent` / `TransitionInput.intent` をこれに絞った（`Action` に `retry` が
+  加わったことで `applyTransition` の `switch` が非網羅になった `tsc` のエラーを解消。`retry` は
+  `readTransitionForm` を経由しない別経路であることの型上の裏付けにもなる）。
+- `app/taskd/route-actions.server.ts`: `runRetryAction`（`applyRetry` を呼ぶだけ）を追加。
+- `app/routes/tasks.$id.tsx`: `action` が `intent === "retry"` を先に判定して `runRetryAction` に分岐する
+  （`runTaskAction`/`readTransitionForm` は `retry` を未知の intent として 400 で拒み続ける。二重にしない）。
+  画面には `detail.actions.includes("retry")` のとき「やり直す」ボタン（`accept` チェックボックス付き、
+  `data-testid="action-retry"`）を追加。専用の `retryFetcher` を持ち、`fetcher.data.ok` になったら
+  `useNavigate` で新しいタスク（`result.task_id`）へ遷移する。
+- `app/routes/inbox.tsx`: 「注意」区画の `failed` 項目（`AttentionRow`）に同じ「やり直す」を追加
+  （`action={`/tasks/${item.task.id}`}` で `tasks.$id.tsx` の action に直接投げる。受信箱自身の
+  `runInboxAction`（`task_id[]` を直列に処理する既存の一括処理）は `TransitionOutcome[]` 専用で
+  `RetryOutcome` とは形が違うので広げていない）。
+- `app/routes/projects.$id.tsx`: 「仕事の木」の一覧（`work-tree-assignees`）に、`draft` の行へ「Go”
+  （`/tasks/{id}/approve`、`data-testid="work-tree-go"`）、`failed`/`cancelled` の行へ「やり直す」
+  （`data-testid="work-tree-retry"`）を追加。一覧の絞り込みを「`assignee` がある」から「`assignee` がある
+  **または** `draft`/`failed`/`cancelled`」に広げ、担当のいない actionable なタスクも拾えるようにした
+  （`WorkTreeTaskRow` に切り出し、行ごとに `go`/`retry` 用の別 fetcher を持つ）。
+- `app/components/Flash.tsx`: `RetryFlash`（成功時は新タスクへのリンクと `rewired` の一覧、失敗時は
+  既存の `ErrorFlash`）を追加。
+- `docs/taskd-api-v1.md`（`scripts/sync-gui-docs.sh`）と `app/taskd/types.ts`（`pnpm gen:types`）は
+  taskd 側の変更をそのまま反映（`Action` に `"retry"`、`Event` に `retried`、`RetryBody`/`RetryResult`）。
+
+### 判断したこと
+
+- **「失敗ノードのクリック先」は結局 `/tasks/:id`**: 案件の仕事の木（`WorkTree`、React Flow の図）は
+  ノードを押すと `/tasks/:id` へ遷移するだけの図なので、そこに直接ボタンを置くのではなく、遷移先の
+  `/tasks/:id` に「やり直す」を置けば依頼の「失敗ノードのクリック先」は自然に満たされる。図そのものへの
+  ボタン追加はしていない（React Flow のノード内 UI は複雑になるため。判断が必要というほどのことではないが、
+  依頼文の「クリック先」という言い回しをそのまま実装した根拠として記録する）。
+- **「案件画面の draft ノードに Go」は `work-tree-assignees` の行に直接置いた**（`/tasks/:id` への遷移を
+  挟まない）。ここだけは依頼文が「案件画面の…に」と明示していたため。
+
+### 受け入れ条件ごとの証拠
+
+- `pnpm lint`（biome、161 files）exit 0。
+- `pnpm typecheck`（`react-router typegen && tsc -b`）exit 0（`GateAction` の導入で `applyTransition` の
+  `switch` の非網羅エラーを解消したことを含む）。
+- `pnpm test` **459 passed**（40 ファイル。Phase G13g の 453 から `test/unit/tasks.detail.retry.test.ts`
+  の 6 件を追加）:
+  - `runRetryAction が accept:false/true を正しく本文に写し、新タスク id と rewired を返す` の 2 件
+  - `404 task_not_found` `409 invalid_transition`（`cannot be retried`）`401 unauthorized` を
+    `ActionError` として返す（投げない）ことの 3 件
+  - `runTaskAction は retry を未知の intent として拒み続ける`（ルートが分岐しなければ 400 になることの
+    裏付け）の 1 件
+- `pnpm gen:types && git diff --exit-code app/taskd/types.ts` 差分ゼロ（生成物をコミット済み）。
+- `pnpm build` exit 0。
+- **e2e（別ポート、運用中の 7700/7710 には触れていない）**:
+  ```
+  cd gui
+  scripts/taskd.sh build
+  TASKD_RUN_ROOT=<隔離用の一時ディレクトリ> TASKD_API_LISTEN=127.0.0.1:18971 scripts/taskd.sh fixture org
+  TASKD_RUN_ROOT=<同上> TASKD_GUI_BIND=127.0.0.1:18901 TASKD_API_URL=http://127.0.0.1:18971 \
+    TASKD_API_LISTEN=127.0.0.1:18971 \
+    TASKD_API_TOKEN_FILE=<同上>/org/api.token \
+    pnpm exec playwright test e2e/g13.spec.ts
+  ```
+  結果: **12 passed**（既存 11 件 + 新規「失敗 → やり直す → Go → 動く（Phase 31）」）。新規テストは
+  `test/taskd/fixtures/org-worker.sh` に `Fail-G13h` という題名の分岐を追加して実現した:
+  1 回目の run は決定的に非リトライ失敗（`{"type":"error","retryable":false}`）してタスクが `failed` に
+  なり、マーカーファイル（作業ディレクトリ直下）を残す。`POST /tasks/{id}/retry` は `workspace` を
+  そのまま複製する決定（taskd 側 Phase 31）により、やり直した新タスクは**同じ作業ディレクトリ**を使うので、
+  2 回目の run（Go の後）はマーカーを見つけて成功する（`done`）。実行前後で
+  `curl 127.0.0.1:7700/healthz` / `curl 127.0.0.1:7710/api/v1/health` がともに 200 のままであることを
+  確認済み（運用中のインスタンスには触れていない）。
+  `e2e/g0〜g9` のフルランは今回は行っていない（G13g で教訓化した「既存画面に影響する変更をした回は
+  フルランすべき」に当てはまるほどの変更ではない——今回触った 3 画面のうち `tasks.$id.tsx` の
+  既存ボタン（approve/reject/answer/cancel）のマークアップ・ロジックは変更しておらず、`retry` の枝を
+  追加しただけであることをコード上でも確認している）。
+
+### 未解決事項
+
+なし。
+
+### 提案
+
+なし。

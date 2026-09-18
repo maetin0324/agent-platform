@@ -4253,3 +4253,92 @@ Local Deep Research）を選び「なぜ web search に失敗しているので�
 - P-83: `RunContext.work_genre` は今回「対話 run だけ」に限定した。将来、通常の実装タスクの前置きにも
   「この課の得意分野」を出したくなったら（例えば複数の課が同じ役割を共有する構成で）、`is_conv` の条件を
   外すだけで流用できる（`work_genre` のデータ形は `available_genres[]` と同じ `GenreContext`）。
+
+## Phase 31 — 失敗した仕事をやり直す（実機の報告から。2026-09-18）
+
+### 背景
+
+案件の調査タスクが（LLM 先の停止で）`failed` になり、人が「進行不能」と報告した。API にも GUI にも
+失敗したタスクを**やり直す**手段が無く（`POST /tasks/{id}/retry` は 404）、遠回り（古い draft を取り消して
+秘書に分解し直させる）をした。SPEC §7 のアジャイル（途中目標ごとに判定してやり直す）には、失敗した仕事を
+人が一手でやり直せることが要る。
+
+### 実装したこと
+
+1. **`POST /tasks/{id}/retry`**（`crates/task-api/src/handlers.rs` の `retry`）: `failed`/`cancelled` の
+   タスクを**複製して新しいタスクを作る**（`Failed`/`Cancelled` を非終端へ戻す状態機械の遷移は追加していない。
+   DESIGN の状態機械はそのまま）。複製するのは title/objective/acceptance/inputs/worker_hint/budget/role/
+   genre/project_id/milestone_id/assignee/parent_id/workspace。`depends_on` は元と同じ。新タスクは
+   `attempts=0`、既定で `draft`（`accept: true` を本文に付ければ `ready` から始まる）。
+   `Event::Created` + `Event::Retried{from}` を記録する（`crates/task-core/src/model.rs`）。
+   検証と `Task` の組み立ては `crates/task-ops/src/retry.rs::retry_task`、書き込みは
+   `TaskStore::retry_task`（`crates/task-core/src/store.rs`）が単一トランザクションで行う:
+   元のタスクに依存していた**未終端**（draft/ready/blocked。対話タスクは `DependencyFailed` 免除で
+   ここに残ることがある）と、**その依存の失敗で `cancelled` になっていた**（最後の `Transitioned` の
+   `reason` が `dependency_failed`。人が直接 `cancel` したものは対象外）タスクの `depends_on` を新しい id へ
+   張り替える。後者は `cancelled` → `draft` に戻し `Transitioned{reason:"retried"}` を追記する。
+   `failed`/`cancelled` 以外は 409 `invalid_transition`（`trigger: "retry"`）、無いタスクは 404。
+   `token_file` があれば通常どおりトークン必須、無ければ従来どおり（**管理系にはしていない**。
+   `/tasks/{id}/approve` 等と同じ扱い）。
+2. **Go（accept）**: 既存の `POST /tasks/{id}/approve`（`status == draft` → `Trigger::Accept`）がそのまま
+   `accept` に当たるので、新しいエンドポイントは足していない（二重にしない）。`task_ops::actions(task)` に
+   `Action::Retry`（`failed`/`cancelled` のとき）を追加した（`crates/task-ops/src/view.rs`）。
+3. **`docs/gui/api.md`** に §3.63 を追加（要求・応答・張り替えの規則・`actions` への追加を明記）、
+   `types` クエリの語彙に `retried` を追加（14→15 種）、`ApiV1Schema` に `retry`/`retry_result` を追加。
+   `scripts/sync-gui-docs.sh` で `gui/docs/taskd-api-v1.md` に反映、`pnpm gen:types` で
+   `gui/app/taskd/types.ts` を再生成（`Action` に `"retry"`、`Event` に `retried`、`RetryBody`/`RetryResult`
+   を追加）。
+4. **GUI**（`gui/app/routes/inbox.tsx` / `tasks.$id.tsx` / `projects.$id.tsx`）: 受信箱の `failed` 項目
+   （`attention` 区画）、`/tasks/:id`（`failed`/`cancelled` のとき）、案件の仕事の木の一覧（`work-tree-assignees`。
+   失敗ノードのクリック先は結局 `/tasks/:id` なので同じボタンで足りる）に「やり直す」を、案件画面の `draft`
+   ノードに「Go」を、**fetcher 方式**（G13f の規律）で追加した。「やり直す」は `POST /tasks/{id}/retry` の
+   応答（新しい `task_id`）を受けて `useNavigate` で新タスクへ遷移する（`gui/app/components/Flash.tsx` の
+   `RetryFlash`）。詳細は `gui/docs/PROGRESS.md` の Phase G13h を参照。
+
+### 判断が必要な点（無し）
+
+依頼の「決定（そのまま実装）」節がフィールド単位まで具体的だったため、実装上の独自判断は無し。
+`workspace` を文字どおり複製する（新タスクは元タスクと**同じ作業ディレクトリ**を指す）ことだけは
+一見意外に見えるかもしれない（既定のワークスペースパスはタスク id 由来なので、明示的に指定した
+ワークスペースを使うタスクだけがこの「共有」の対象になる）。依頼の列挙どおりに実装した。
+
+### 受け入れ条件ごとの証拠
+
+- taskd の複製・張り替え・拒否・イベント: `cargo test -p task-ops --lib retry::` **5 passed**
+  （`retry_duplicates_fields_and_records_retried_event`、`retry_with_accept_starts_ready`、
+  `retry_rewires_non_terminal_and_cascaded_cancelled_dependents_but_not_manual_cancels`
+  （未終端＝対話タスクの draft と、`dependency_failed` 由来の cancelled の両方を張り替え、手動 cancel は
+  対象外にすることを確認）、`retry_rejects_non_terminal_or_done_tasks_with_409`、
+  `retry_missing_task_is_not_found`）。
+- API 越し（201・複製・張り替え・cascaded/dependency_failed/手動 cancel の書き分け・`accept: true`・
+  非 failed/cancelled 全状態の 409・404）: `cargo test -p task-api --test operations` **15 passed**
+  （新規 `retry_duplicates_a_failed_task_and_rewires_dependents`、
+  `retry_with_accept_starts_ready_and_non_terminal_or_done_is_409`、`operations_on_missing_tasks_are_404`
+  に `retry` を追加）。
+- `accept` の 409（`draft` 以外）: `retry_with_accept_starts_ready_and_non_terminal_or_done_is_409` が
+  draft/ready/running/blocked/reviewing/done の全状態で 409 `invalid_transition`（`cannot be retried`）を
+  確認（`accept` は既存の `POST /approve` が `draft` 以外を 409 にする既存挙動のまま。新しいエンドポイントは
+  足していない）。
+- **共通条件** — `cargo test --workspace`: **999 passed**、`grep -c "^test result: FAILED"` = **0**
+  （Phase 30 の 992 から +7: task-ops 5 件・task-api 2 件の新規テスト）。
+  `cargo clippy --workspace --all-targets -- -D warnings` **exit 0**。テスト以外に `unwrap()` / `expect()`
+  は無い（触った全ファイルの `#[cfg(test)]` より前を機械的に確認）。ディスパッチャ・ストアに LLM 呼び出しは
+  無い（複製は決定的なフィールドコピー、張り替えはイベントの `reason` 文字列を読むだけ）。
+  `UPDATE_SCHEMA=1 cargo test -p task-core --lib store::tests::event_row_schema_matches_committed` /
+  `UPDATE_SCHEMA=1 cargo test -p task-api schema::` で `docs/api/v1/event.schema.json` /
+  `docs/api/v1/api-v1.schema.json` を再生成（`Event::Retried`、`RetryBody`/`RetryResult`、`Action::Retry`
+  を追加）。
+- GUI 側の受け入れ条件と e2e の結果は `gui/docs/PROGRESS.md` の「Phase G13h」に記載（`pnpm lint` /
+  `typecheck` / `test`（459 passed）/ `build` すべて exit 0、`e2e/g13.spec.ts` 12/12 pass、別ポート
+  （18971/18901、`TASKD_RUN_ROOT` で隔離）。運用中の 7700/7710 は実行前後で 200 のまま。
+
+### 未解決事項
+
+なし。
+
+### 提案
+
+なし（今回の依頼の範囲で完結。将来「やり直し」に元のタスクとの関係を仕事の木の図で明示したい、
+という要望が出れば `depends_on`（今回は同じ）とは別に `Task.retried_from` のような表示専用のリンクを
+GUI 側の表示ロジックに足す提案はあり得るが、taskd の状態機械には触れずに済む GUI 側の話なので今は
+提案しない）。

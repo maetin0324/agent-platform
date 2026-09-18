@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Form, isRouteErrorResponse, Link, useFetcher, useSearchParams } from "react-router";
+import { Form, isRouteErrorResponse, Link, useFetcher, useNavigate, useSearchParams } from "react-router";
 import { CodeViewer } from "~/components/CodeViewer";
-import { TransitionFlash } from "~/components/Flash";
+import { RetryFlash, TransitionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { ImageViewer } from "~/components/ImageViewer";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
@@ -27,12 +27,12 @@ import { milestoneTitle } from "~/lib/project-index";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { TaskdBanner } from "~/root";
-import type { TransitionOutcome } from "~/taskd/action-types";
-import { transitionData } from "~/taskd/actions.server";
+import type { RetryOutcome, TransitionOutcome } from "~/taskd/action-types";
+import { retryData, transitionData } from "~/taskd/actions.server";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { runTaskAction } from "~/taskd/route-actions.server";
+import { runRetryAction, runTaskAction } from "~/taskd/route-actions.server";
 import type {
   Action,
   ArtifactList,
@@ -68,6 +68,7 @@ const ACTION_LABELS: Record<Action, string> = {
   reject: "却下",
   answer: "回答",
   cancel: "取り消し",
+  retry: "やり直す",
 };
 
 /** run の outcome → 色（docs/adr/0011 D4 と同じ考え方。文字列は outcome 名をそのまま出す）。 */
@@ -157,6 +158,12 @@ export async function loader({ params, request }: Route.LoaderArgs): Promise<Tas
 
 export async function action({ request, params }: Route.ActionArgs) {
   const form = await request.formData();
+  // Phase 31: `retry` は `approve`/`reject`/`answer`/`cancel`（`TransitionInput`）とは語彙も応答の形も別
+  // （新しいタスクを作る。`RetryOutcome`）なので、共通の `readTransitionForm` に渡す前に分岐する。
+  if (form.get("intent") === "retry") {
+    const outcome = await runRetryAction(getTaskdClient(), params.id, form, request.signal);
+    return retryData(outcome);
+  }
   const outcome = await runTaskAction(getTaskdClient(), params.id, form, request.signal);
   return transitionData(outcome);
 }
@@ -169,6 +176,16 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
   // 操作の結果は fetcher に載せる（監査 H1。SSE の再検証で `actionData` が消えるのを避ける）。
   const fetcher = useFetcher<TransitionOutcome>();
   const submitting = fetcher.state !== "idle";
+  // Phase 31: 「やり直す」は別のタスクを新しく作る（`TransitionOutcome` とは形が違う）ので別の fetcher。
+  // 成功したら新しいタスクへ遷移する（fetcher はナビゲーションを行わないので `useNavigate` で明示的に行う）。
+  const retryFetcher = useFetcher<RetryOutcome>();
+  const retrying = retryFetcher.state !== "idle";
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (retryFetcher.data?.ok) {
+      navigate(`/tasks/${retryFetcher.data.result.task_id}`);
+    }
+  }, [retryFetcher.data, navigate]);
 
   return (
     <div className="space-y-8">
@@ -785,8 +802,25 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                     </Button>
                   </fetcher.Form>
                 )}
+                {detail.actions.includes("retry") && (
+                  <retryFetcher.Form
+                    method="post"
+                    className="flex w-full max-w-xs flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
+                  >
+                    <input type="hidden" name="intent" value="retry" />
+                    <label className="flex items-center gap-2 text-sm text-fg">
+                      <input type="checkbox" name="accept" value="true" className={checkboxClass} />
+                      受け入れ済み（ready）で始める
+                    </label>
+                    <Button type="submit" variant="primary" size="sm" disabled={retrying} data-testid="action-retry">
+                      <Icon name="rotate" />
+                      {ACTION_LABELS.retry}
+                    </Button>
+                  </retryFetcher.Form>
+                )}
               </div>
             )}
+            <RetryFlash outcome={retryFetcher.data} />
           </CardBody>
         </Card>
       </section>

@@ -38,7 +38,8 @@ use crate::types::{
     ClusterConnectStart, ClusterView, Clusters, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
     MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail,
     ProjectList, ProjectPatchBody, ProjectTaskView, ProviderCheckResponse, ProviderConfigView, ProviderView,
-    Providers, ReloadResult, RunList, SecretList, SecretPutBody, SecretPutResult, SecretView, ValidationError,
+    Providers, ReloadResult, RetryBody, RunList, SecretList, SecretPutBody, SecretPutResult, SecretView,
+    ValidationError,
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
@@ -84,6 +85,7 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/tasks/{id}/reject", post(reject))
         .route("/api/v1/tasks/{id}/answer", post(answer))
         .route("/api/v1/tasks/{id}/cancel", post(cancel))
+        .route("/api/v1/tasks/{id}/retry", post(retry))
         .route("/api/v1/plans", post(create_plan))
         .route("/api/v1/replay", post(replay))
         .route("/api/v1/graph", get(graph))
@@ -1071,6 +1073,29 @@ async fn cancel(
         })
         .await?;
     Ok(json_response(StatusCode::OK, &result))
+}
+
+/// Phase 31（実機の事故、2026-09-18）: `failed`/`cancelled` を複製してやり直す。
+async fn retry(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    let id = parse_task_id(&id)?;
+    let RetryBody { accept } = read_json(body, true).await?;
+    let result = state
+        .blocking(move |store| {
+            task_ops::retry::retry_task(store, id, accept, OffsetDateTime::now_utc())
+                .map_err(|e| ops_problem(store, e, Some("retry")))
+        })
+        .await?;
+    let mut response = json_response(StatusCode::CREATED, &result);
+    if let Ok(location) = HeaderValue::from_str(&format!("/api/v1/tasks/{}", result.task_id)) {
+        response.headers_mut().insert(header::LOCATION, location);
+    }
+    Ok(response)
 }
 
 // ---- 17. POST /plans ----

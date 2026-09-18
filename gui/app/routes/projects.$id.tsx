@@ -1,13 +1,13 @@
-import { useMemo } from "react";
-import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
+import { useEffect, useMemo } from "react";
+import { data, isRouteErrorResponse, Link, useFetcher, useNavigate } from "react-router";
 import { ArtifactsList } from "~/components/ArtifactsList";
-import { ProjectActionFlash } from "~/components/Flash";
+import { ErrorFlash, ProjectActionFlash, RetryFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { ReportsList } from "~/components/ReportsList";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { hintClass, inputClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
+import { checkboxClass, hintClass, inputClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
@@ -22,7 +22,7 @@ import { milestoneStatusLabel, projectStatusLabel, taskStatusLabel } from "~/lib
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
 import { TaskdBanner } from "~/root";
-import type { ProjectOpOutcome } from "~/taskd/action-types";
+import type { ProjectOpOutcome, RetryOutcome, TransitionOutcome } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { formString } from "~/taskd/forms";
@@ -38,6 +38,7 @@ import type {
   OrgList,
   ProjectDetail,
   ProjectStatus,
+  ProjectTaskView,
   ReportList,
   TaskDetail,
   TaskId,
@@ -438,29 +439,19 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           <>
             <WorkTree graph={graph} />
             {/* SPEC §3.4「おかしなことをしていたら、誰に言うかを決めてその担当に直接言う」。
-                木のノード（タスク）の担当へ、この案件を選んだ状態で話しかける導線（Phase G13b-2）。 */}
+                木のノード（タスク）の担当へ、この案件を選んだ状態で話しかける導線（Phase G13b-2）。
+                Phase 31: draft には「Go」（accept）、failed/cancelled には「やり直す」（retry）も
+                ここから直接できる（担当がいないタスクも拾えるよう、絞り込みは assignee 限定をやめた）。 */}
             <ul className="space-y-1" data-testid="work-tree-assignees">
               {workTasks
-                .filter((t) => t.assignee)
+                .filter((t) => t.assignee || t.status === "draft" || t.status === "failed" || t.status === "cancelled")
                 .map((t) => (
-                  <li key={t.id} className="flex flex-wrap items-center gap-2 text-sm">
-                    <Badge tone="neutral">{taskStatusLabel(t.status)}</Badge>
-                    <Link to={`/tasks/${t.id}`} className="underline underline-offset-2">
-                      {t.title}
-                    </Link>
-                    <span className="text-xs text-fg-subtle">
-                      担当: {orgById.get(t.assignee ?? "")?.name ?? t.assignee}
-                    </span>
-                    <Link
-                      to={`/org/${encodeURIComponent(t.assignee ?? "")}?project=${encodeURIComponent(project.id)}`}
-                      data-testid="work-tree-talk"
-                      data-assignee={t.assignee}
-                      className={buttonClass({ variant: "ghost", size: "xs" })}
-                    >
-                      <Icon name="message" />
-                      担当に話す
-                    </Link>
-                  </li>
+                  <WorkTreeTaskRow
+                    key={t.id}
+                    task={t}
+                    projectId={project.id}
+                    orgName={orgById.get(t.assignee ?? "")?.name}
+                  />
                 ))}
             </ul>
           </>
@@ -499,6 +490,85 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * 仕事の木の 1 行（Phase 31。実機の事故、2026-09-18）。`draft` には「Go」（`/tasks/:id/approve` の
+ * `Trigger::Accept`）、`failed`/`cancelled` には「やり直す」（`/tasks/:id/retry`）を直接置く。
+ * どちらも `/tasks/:id` の action へ直接 POST する fetcher（この画面の action は project 単位の
+ * intent しか扱わないため）。成功後の遷移は「やり直す」だけ（新しいタスクが増えるので、そちらを見せる）。
+ */
+function WorkTreeTaskRow({
+  task,
+  projectId,
+  orgName,
+}: {
+  task: ProjectTaskView;
+  projectId: string;
+  orgName: string | undefined;
+}) {
+  const goFetcher = useFetcher<TransitionOutcome>({ key: `work-tree-go-${task.id}` });
+  const going = goFetcher.state !== "idle";
+  const retryFetcher = useFetcher<RetryOutcome>({ key: `work-tree-retry-${task.id}` });
+  const retrying = retryFetcher.state !== "idle";
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (retryFetcher.data?.ok) {
+      navigate(`/tasks/${retryFetcher.data.result.task_id}`);
+    }
+  }, [retryFetcher.data, navigate]);
+
+  return (
+    <li
+      className="flex flex-wrap items-center gap-2 text-sm"
+      data-testid="work-tree-task-row"
+      data-task-status={task.status}
+    >
+      <Badge tone="neutral">{taskStatusLabel(task.status)}</Badge>
+      <Link to={`/tasks/${task.id}`} className="underline underline-offset-2">
+        {task.title}
+      </Link>
+      {task.assignee && (
+        <>
+          <span className="text-xs text-fg-subtle">担当: {orgName ?? task.assignee}</span>
+          <Link
+            to={`/org/${encodeURIComponent(task.assignee)}?project=${encodeURIComponent(projectId)}`}
+            data-testid="work-tree-talk"
+            data-assignee={task.assignee}
+            className={buttonClass({ variant: "ghost", size: "xs" })}
+          >
+            <Icon name="message" />
+            担当に話す
+          </Link>
+        </>
+      )}
+      {task.status === "draft" && (
+        <goFetcher.Form method="post" action={`/tasks/${task.id}`}>
+          <input type="hidden" name="intent" value="approve" />
+          <input type="hidden" name="expected_status" value="draft" />
+          <Button type="submit" variant="success" size="xs" disabled={going} data-testid="work-tree-go">
+            <Icon name="check" />
+            Go
+          </Button>
+        </goFetcher.Form>
+      )}
+      {(task.status === "failed" || task.status === "cancelled") && (
+        <retryFetcher.Form method="post" action={`/tasks/${task.id}`} className="flex items-center gap-2">
+          <input type="hidden" name="intent" value="retry" />
+          <label className="flex items-center gap-1 text-xs text-fg-subtle">
+            <input type="checkbox" name="accept" value="true" className={checkboxClass} />
+            ready で始める
+          </label>
+          <Button type="submit" variant="primary" size="xs" disabled={retrying} data-testid="work-tree-retry">
+            <Icon name="rotate" />
+            やり直す
+          </Button>
+        </retryFetcher.Form>
+      )}
+      {goFetcher.data && !goFetcher.data.ok && <ErrorFlash error={goFetcher.data.error} />}
+      <RetryFlash outcome={retryFetcher.data} />
+    </li>
   );
 }
 

@@ -1,6 +1,8 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-18 Phase 31（実機の事故: 失敗した仕事をやり直す手段が無かった）— `POST /tasks/{id}/retry`
+  （§3.63）、イベント種別 `retried`、`task_ops::actions` に `Action::Retry` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-17 Phase 27（Phase 24/25 の監査対応、GUI-R3/R4、ADR-0034 D7）— `TaskSummary.assignee` /
   `TaskSummary.conversation`、`ProjectTaskView.conversation`、`Message.task_id` を追加（追加のみ。v1 のまま）。
   **`POST /projects` を管理系に変更**（`token_file` 未設定でも 401。破壊的変更はここだけ）。
@@ -338,12 +340,14 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `limit` | 500（最大 5000） | |
 | `types` | 全て | `Event` の `type` 名をカンマ区切り（例 `transitioned,worker_finished`）。未知の名前は 400 |
 
-`types` の語彙（`Event` の `type`、14 種）: `created`、`transitioned`、`worker_started`、`worker_progress`、`artifact_produced`、
+`types` の語彙（`Event` の `type`、15 種）: `created`、`transitioned`、`worker_started`、`worker_progress`、`artifact_produced`、
 `worker_finished`、`review_verdict`、`approval_requested`、`approval_decided`、`answered`、`provider_throttled`、
 `cluster_unavailable`（Phase 12。`{cluster, host, reason}`）、
 `delegated`（Phase 10。`{run_id, task_ids}`。状態は変えないので `replay` は無視する）、
 `question_raised`（ADR-0021。`{run_id, text}`。ディスパッチャが人に出した質問。同じトランザクションの
-`transitioned{to: "blocked", reason: "child_failed"}` と対。状態は変えないので `replay` は無視する）。
+`transitioned{to: "blocked", reason: "child_failed"}` と対。状態は変えないので `replay` は無視する）、
+`retried`（Phase 31。`{from}`。`failed`/`cancelled` を複製してやり直した新しいタスクに付く。状態は
+変えないので `replay` は無視する。§3.63）。
 
 - `seq` 昇順。`has_more` が true なら最後の `seq` を `after_seq` に入れて続きを取る。
 - `items[].id` はグローバル id（ADR-0013 D6）。`items[].ts` は `events.ts`。
@@ -1063,6 +1067,37 @@ GUI の監査（SPEC §4 との突き合わせ、実機操作あり）で「案�
 - **書き込み API は無い**（記憶は run の後にワーカーが書く。ADR-0033 D6）。人が直したければ
   `notes_path` / `project_path` のファイルを直接編集する。この応答がパスを返すのはそのため。
 
+### 3.63 `POST /tasks/{id}/retry` → 201 `RetryResult`（Phase 31。実機の事故、2026-09-18）
+
+実機で、案件の調査タスクが（LLM 先の停止で）`failed` になったが、API にも GUI にも「やり直す」手段が
+無く、「古い draft を取り消して秘書に分解し直させる」という遠回りをした。SPEC §7 のアジャイル（途中目標
+ごとに判定してやり直す）には、失敗した仕事を人が一手でやり直せることが要る。
+
+要求本文 `{"accept": false}`（省略可。既定 `false`）。
+
+- `failed` または `cancelled` のタスクを**複製して新しいタスクを作る**（`Failed`/`Cancelled` を非終端に
+  戻す状態機械の遷移は**足していない**。DESIGN の状態機械を壊さないため）。それ以外の状態は 409
+  `invalid_transition`（`trigger: "retry"`）。無いタスクは 404 `task_not_found`。
+- 複製するもの: `title` / `objective` / `acceptance` / `inputs` / `worker_hint` / `budget` / `role` /
+  `genre` / `project_id` / `milestone_id` / `assignee` / `parent_id` / `workspace`。`depends_on` は
+  **元と同じ**。`attempts` は 0 から。新しいタスクは既定で `draft`（人が Go を出す。§3.10 の
+  `POST /tasks/{id}/approve` で `draft → ready`）。`accept: true` を本文に付ければ、作成の時点で
+  `ready` から始まる（別の遷移は経由しない。`task_ops::add::create_support_task` と同じ「その場で
+  `ready` を書く」流儀）。新しいタスクに `Event::Created` + `Event::Retried{from: <元の id>}` を記録する。
+- **元のタスクに依存していた未終端のタスク**（`draft` / `ready` / `blocked`。対話タスクは
+  `DependencyFailed` の対象外なので `draft`/`ready` のまま残っていることがある。P-78）と、**その依存の
+  失敗で `cancelled` になっていたタスク**（最後の `Transitioned` の `reason` が `"dependency_failed"`
+  のもの。人が直接 `cancel` したものは対象外）の `depends_on` を、元の id から新しい id に張り替える。
+  後者は `cancelled` → `draft` に戻し（`Event::Transitioned{from: "cancelled", to: "draft",
+  reason: "retried"}` を記録）、前者は状態を変えずに `depends_on` だけ書き換える。
+- 応答は `201 {"task_id": "01J…", "rewired": ["01J…", …]}`（`Location: /api/v1/tasks/{task_id}`）。
+  `rewired` は張り替えたタスクの id（順不同）。
+- `token_file` があれば通常どおりトークン必須、無ければ他の変更系と同じ（**管理系ではない**。
+  §3.10〜3.13 と同じ扱い）。
+- `task_ops::actions(task)`（§5.4）は `failed` / `cancelled` のタスクに `Action::Retry`（`"retry"`）を足す。
+  受信箱の `failed` 項目、`GET /tasks/{id}` の `failed`/`cancelled` 表示、案件の仕事の木の失敗ノードは、
+  みな `actions` にこれが立つのでボタンの表示に迷わない。
+
 ---
 
 ## 4. SSE `GET /stream`
@@ -1136,7 +1171,7 @@ data: {"reason":"cursor_too_old","cursor":20000}
 
 ### 5.4 可能な操作（`task_ops::actions(task) -> Vec<Action>`）
 
-`approve`: `status == draft` または `kind == approval && status == ready`。`reject`: `kind == approval && status == ready`。`answer`: `status == blocked`。`cancel`: 非終端。
+`approve`: `status == draft` または `kind == approval && status == ready`。`reject`: `kind == approval && status == ready`。`answer`: `status == blocked`。`cancel`: 非終端。`retry`（Phase 31。§3.63）: `status == failed` または `status == cancelled`。
 
 この結果は `TaskDetail.actions` だけでなく、**`TaskRef` と `TaskSummary` にも入る**（ADR-0015 D4）。受信箱・一覧・DAG・依存関係のどこから来た参照でも、GUI は `actions` を見るだけでよく、この規則を再実装しない。
 
@@ -1488,7 +1523,8 @@ pub struct ApiV1Schema {
     pub health: Health, pub problem: Problem, pub inbox: Inbox, pub task_list: TaskList, pub task: Task, pub task_detail: TaskDetail,
     pub events_page: EventsPage, pub run_list: RunList, pub artifact_list: ArtifactList, pub graph: Graph,
     pub new_task: NewTaskSpec, pub new_plan: NewPlanSpec, pub decision: DecisionBody, pub answer: AnswerBody, pub cancel: CancelBody,
-    pub transition_result: TransitionResult, pub replay_report: ReplayReport, pub providers: Providers, pub daemon: DaemonView,
+    pub transition_result: TransitionResult, pub retry: RetryBody, pub retry_result: RetryResult, /* Phase 31 */
+    pub replay_report: ReplayReport, pub providers: Providers, pub daemon: DaemonView,
     pub config: ConfigView, pub stream_hello: StreamHello, pub stream_event: EventRow, pub stream_daemon: DaemonSnapshot,
     pub stream_heartbeat: StreamHeartbeat, pub stream_reset: StreamReset, pub clusters: Clusters /* Phase 12 */,
     pub provider_config: ProviderConfigView, pub reload: ReloadResult, pub provider_check: ProviderCheckResponse /* Phase 11 */,

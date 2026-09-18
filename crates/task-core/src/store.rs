@@ -472,6 +472,15 @@ pub trait TaskStore: Send + Sync + crate::report::ReportStore + crate::approval:
         project_id: Option<ProjectId>,
         limit: usize,
     ) -> Result<Vec<Message>, StoreError>;
+
+    // ---- Phase 31: 失敗した仕事をやり直す（実機の事故、2026-09-18）----
+
+    /// `original` は `failed` または `cancelled` でなければ `StoreError::InvalidTransition`（`trigger = "retry"`）。
+    /// `new_task` を挿入し（`Event::Created` + `Event::Retried{from: original}`)、`original` に依存していた
+    /// 「未終端」または「`dependency_failed` で `cancelled` になった」タスクの `depends_on` を `new_task.id` に
+    /// 張り替える（後者は `draft` に戻し、`Event::Transitioned{from: cancelled, to: draft, reason: "retried"}`
+    /// を追記する）。全体を単一トランザクションで行い、張り替えたタスクの id を返す。
+    fn retry_task(&self, original: TaskId, new_task: &Task) -> Result<Vec<TaskId>, StoreError>;
 }
 
 pub struct SqliteStore {
@@ -1037,6 +1046,51 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// `depends_on` に `dep_id` を含むタスク（状態を問わない）。Phase 31（やり直し）が使う。
+    fn dependents_of_tx(tx: &Connection, dep_id: TaskId) -> Result<Vec<TaskId>, StoreError> {
+        let mut stmt = tx.prepare("SELECT json FROM tasks WHERE json LIKE ?1")?;
+        let rows = stmt.query_map(params![format!("%{dep_id}%")], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let t = Self::row_to_task(row?)?;
+            if t.id != dep_id && t.depends_on.contains(&dep_id) {
+                out.push(t.id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// `task_id` の最後の `Event::Transitioned` の `reason`。無ければ `None`。Phase 31 が「`cancelled` が
+    /// `dependency_failed` 由来か」を見分けるのに使う。
+    fn last_transitioned_reason_tx(tx: &Connection, task_id: TaskId) -> Result<Option<String>, StoreError> {
+        let mut stmt = tx.prepare(
+            "SELECT json FROM events WHERE task_id = ?1 AND json LIKE '%\"type\":\"transitioned\"%' ORDER BY seq DESC LIMIT 1",
+        )?;
+        let json: Option<String> = stmt
+            .query_row(params![task_id.to_string()], |row| row.get(0))
+            .optional()?;
+        let Some(json) = json else {
+            return Ok(None);
+        };
+        let event: Event = serde_json::from_str(&json)?;
+        match event {
+            Event::Transitioned { reason, .. } => Ok(Some(reason)),
+            _ => Ok(None),
+        }
+    }
+
+    /// `task` の `status` / `depends_on`（json 全体）/ `updated_at` を書き戻す（リースは変えない）。
+    /// Phase 31 の張り替えが使う低レベルの書き込み（`transition()` を経由しない）。
+    fn rewrite_task_tx(tx: &Connection, task: &Task) -> Result<(), StoreError> {
+        let json = serde_json::to_string(task)?;
+        let updated_at = format_rfc3339(task.updated_at)?;
+        tx.execute(
+            "UPDATE tasks SET status = ?1, json = ?2, title = ?3, updated_at = ?4 WHERE id = ?5",
+            params![status_str(task.status), json, task.title, updated_at, task.id.to_string()],
+        )?;
+        Ok(())
+    }
+
     fn append_event_tx(conn: &Connection, task_id: TaskId, event: &Event) -> Result<u64, StoreError> {
         let next_seq: i64 = conn.query_row(
             "SELECT COALESCE(MAX(seq), -1) + 1 FROM events WHERE task_id = ?1",
@@ -1398,6 +1452,75 @@ impl TaskStore for SqliteStore {
         )?;
         tx.commit()?;
         Ok(ids)
+    }
+
+    fn retry_task(&self, original: TaskId, new_task: &Task) -> Result<Vec<TaskId>, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(orig) = Self::get_locked(&tx, original)? else {
+            return Err(StoreError::Invalid(format!("task not found: {original}")));
+        };
+        if !matches!(orig.status, Status::Failed | Status::Cancelled) {
+            return Err(StoreError::InvalidTransition(InvalidTransition {
+                status: orig.status,
+                kind: orig.kind,
+                trigger: "retry",
+            }));
+        }
+
+        Self::insert_tx(&tx, new_task)?;
+        Self::append_event_tx(
+            &tx,
+            new_task.id,
+            &Event::Created {
+                task: Box::new(new_task.clone()),
+            },
+        )?;
+        Self::append_event_tx(&tx, new_task.id, &Event::Retried { from: original })?;
+
+        let mut rewired = Vec::new();
+        for dep_id in Self::dependents_of_tx(&tx, original)? {
+            let Some(dep) = Self::get_locked(&tx, dep_id)? else {
+                continue;
+            };
+            let eligible = match dep.status {
+                Status::Draft | Status::Ready | Status::Blocked => true,
+                Status::Cancelled => {
+                    Self::last_transitioned_reason_tx(&tx, dep_id)?.as_deref() == Some(Trigger::DependencyFailed.name())
+                }
+                _ => false,
+            };
+            if !eligible {
+                continue;
+            }
+            let mut updated = dep.clone();
+            updated.depends_on = updated
+                .depends_on
+                .iter()
+                .map(|d| if *d == original { new_task.id } else { *d })
+                .collect();
+            let was_cancelled = updated.status == Status::Cancelled;
+            if was_cancelled {
+                updated.status = Status::Draft;
+            }
+            updated.updated_at = OffsetDateTime::now_utc();
+            Self::rewrite_task_tx(&tx, &updated)?;
+            if was_cancelled {
+                Self::append_event_tx(
+                    &tx,
+                    dep_id,
+                    &Event::Transitioned {
+                        from: Status::Cancelled,
+                        to: Status::Draft,
+                        reason: "retried".to_string(),
+                    },
+                )?;
+            }
+            rewired.push(dep_id);
+        }
+
+        tx.commit()?;
+        Ok(rewired)
     }
 
     fn children(&self, parent_id: TaskId) -> Result<Vec<Task>, StoreError> {

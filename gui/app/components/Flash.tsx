@@ -8,6 +8,7 @@ import type {
   ProjectOpOutcome,
   ProviderActionResult,
   ReportOpOutcome,
+  RetryOutcome,
   SecretActionResult,
   StandingRuleOpOutcome,
   TransitionOutcome,
@@ -39,6 +40,43 @@ export function TransitionFlash({ outcome }: { outcome: TransitionOutcome | unde
             {cascaded.map((ref) => (
               <Link key={ref.id} to={`/tasks/${ref.id}`} data-testid="flash-cascaded-id" className="mr-2 underline">
                 {ref.id}
+              </Link>
+            ))}
+          </p>
+        )}
+      </Alert>
+    );
+  }
+  return <ErrorFlash error={outcome.error} />;
+}
+
+/**
+ * `POST /tasks/{id}/retry`（Phase 31。実機の事故、2026-09-18）の結果。成功したら画面は新しいタスクへ
+ * 遷移する（呼び出し側が `useEffect` + `useNavigate` で行う）ので、ここは遷移するまでの一瞬だけ見える
+ * 「新しいタスクを作りました」の案内とリンク。
+ */
+export function RetryFlash({ outcome }: { outcome: RetryOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (outcome.ok) {
+    return (
+      <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+        <p>
+          やり直す: 新しいタスク{" "}
+          <Link
+            to={`/tasks/${outcome.result.task_id}`}
+            className="underline underline-offset-2"
+            data-testid="flash-retry-task-id"
+          >
+            {outcome.result.task_id}
+          </Link>{" "}
+          を作りました。移動します…
+        </p>
+        {(outcome.result.rewired ?? []).length > 0 && (
+          <p data-testid="flash-retry-rewired">
+            depends_on を張り替えたタスク:{" "}
+            {(outcome.result.rewired ?? []).map((id) => (
+              <Link key={id} to={`/tasks/${id}`} className="mr-2 underline">
+                {id}
               </Link>
             ))}
           </p>

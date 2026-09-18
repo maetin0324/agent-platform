@@ -20,6 +20,7 @@ pub mod memory;
 pub mod plan;
 pub mod project_plan;
 pub mod replay;
+pub mod retry;
 pub mod view;
 
 pub use error::OpsError;

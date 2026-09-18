@@ -499,6 +499,23 @@
             "until"
           ],
           "type": "object"
+        },
+        {
+          "description": "Phase 31（実機の事故、2026-09-18）: `failed`/`cancelled` を複製してやり直したときの新しいタスクに\n記録する。`from` = 元のタスク。状態は変えない（`Created` が初期状態を与える）。",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/TaskId"
+            },
+            "type": {
+              "const": "retried",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from"
+          ],
+          "type": "object"
         }
       ]
     },

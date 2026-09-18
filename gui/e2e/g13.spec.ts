@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { EventsPage } from "~/taskd/types";
 import { expect, test } from "./test";
 
 /**
@@ -307,5 +308,45 @@ test.describe("Phase G13f-1: 秘書 → 案件 → 報告 → 認可 → 成果�
       "href",
       "/org/research-survey",
     );
+  });
+
+  // Phase G13h（ADR-0033 追記、実機の事故 2026-09-18）: 失敗した仕事を人が一手でやり直せる。
+  test("失敗 → やり直す → Go → 動く（Phase 31）", async ({ page }) => {
+    const failedId = await addTask({
+      title: "Fail-G13h",
+      objective: "LLM 先の停止を再現する（1 回目は必ず失敗する fake ワーカー）",
+      assignee: "coding-poc",
+      projectId,
+      workspace: "ws-g13h-retry",
+      acceptance: [{ type: "command", cmd: "true", expect_exit: 0 }],
+    });
+
+    // 失敗: 1 回目の run は `Fail-G13h` タイトルの分岐で決定的に非リトライ失敗する。
+    await page.goto(`/tasks/${failedId}`);
+    await expect(page.getByTestId("task-status")).toHaveText("failed", { timeout: 30_000 });
+
+    // やり直す: accept は付けない（新しいタスクは draft から始まる）。
+    await page.getByTestId("action-retry").click();
+    await page.waitForURL(
+      (url) => /^\/tasks\/[0-9A-HJKMNP-TV-Z]{26}$/.test(url.pathname) && !url.pathname.endsWith(failedId),
+      {
+        timeout: 30_000,
+      },
+    );
+    const retriedId = page.url().split("/").pop() ?? "";
+    expect(retriedId).not.toBe(failedId);
+    await expect(page.getByTestId("task-status")).toHaveText("draft");
+
+    // 新しいタスクは `Event::Retried{from}` を持つ（複製の記録）。
+    const events = await api<EventsPage>("GET", `/tasks/${retriedId}/events`);
+    expect(events.items.some((row) => row.event.type === "retried" && row.event.from === failedId)).toBe(true);
+
+    // Go: draft → ready（既存の `POST /tasks/{id}/approve`）。
+    await page.getByTestId("action-approve").click();
+    await expect(page.getByTestId("task-status")).toHaveText(/ready|running|reviewing|done/, { timeout: 10_000 });
+
+    // 動く: やり直した run はワークスペースを複製した元のタスクと共有するので、
+    // fake ワーカーはマーカーファイルを見て 2 回目は成功する（= 実機で LLM 先が復旧した後の再現）。
+    await expect(page.getByTestId("task-status")).toHaveText("done", { timeout: 30_000 });
   });
 });

@@ -18,6 +18,7 @@ import type {
   ReplayReport,
   ReportsNotifiedResult,
   ReportsReadResult,
+  RetryResult,
   SecretPutResult,
   StandingRule,
   TransitionResult,
@@ -48,6 +49,15 @@ export interface ActionError {
 export type TransitionOutcome =
   | { ok: true; intent: Action; taskId: string; result: TransitionResult }
   | { ok: false; intent: Action; taskId: string; error: ActionError };
+
+/**
+ * 失敗した仕事をやり直す（Phase 31。実機の事故、2026-09-18。`POST /tasks/{id}/retry`、
+ * docs/taskd-api-v1.md §3.63）。`taskId` は**元の**タスク（対象が固定できるように）、
+ * `result.task_id` が**新しく作られた**タスク（成功したら画面はそちらへ遷移する）。
+ */
+export type RetryOutcome =
+  | { ok: true; taskId: string; result: RetryResult }
+  | { ok: false; taskId: string; error: ActionError };
 
 /** 作成（`POST /tasks` / `POST /plans`）の失敗。成功は詳細へ redirect するので data にならない。 */
 export interface CreateFailure {

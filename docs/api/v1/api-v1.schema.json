@@ -447,13 +447,22 @@
       "type": "object"
     },
     "Action": {
-      "enum": [
-        "approve",
-        "reject",
-        "answer",
-        "cancel"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "approve",
+            "reject",
+            "answer",
+            "cancel"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "retry",
+          "description": "Phase 31（実機の事故、2026-09-18）: `failed`/`cancelled` を複製してやり直す（`POST /tasks/{id}/retry`）。",
+          "type": "string"
+        }
+      ]
     },
     "AnswerBody": {
       "additionalProperties": false,
@@ -2406,6 +2415,23 @@
             "type",
             "provider",
             "until"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Phase 31（実機の事故、2026-09-18）: `failed`/`cancelled` を複製してやり直したときの新しいタスクに\n記録する。`from` = 元のタスク。状態は変えない（`Created` が初期状態を与える）。",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/TaskId"
+            },
+            "type": {
+              "const": "retried",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from"
           ],
           "type": "object"
         }
@@ -4448,6 +4474,38 @@
       ],
       "type": "object"
     },
+    "RetryBody": {
+      "additionalProperties": false,
+      "description": "`POST /tasks/{id}/retry`（Phase 31）の本文。`accept: true` なら新しいタスクは `draft` を経ず `ready` で始まる。",
+      "properties": {
+        "accept": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "RetryResult": {
+      "description": "`POST /tasks/{id}/retry` の応答（201）。",
+      "properties": {
+        "rewired": {
+          "default": [],
+          "description": "`depends_on` を新しいタスクへ張り替えた（元は `original` に依存していた）タスクの id。",
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId",
+          "description": "新しく作られたタスク。"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    },
     "ReviewNote": {
       "description": "`prior_review_from_events` の要素。`task_worker::PriorReview` と同じ形（フィールド名も同じ）。",
       "properties": {
@@ -5840,6 +5898,13 @@
     "reports_read_result": {
       "$ref": "#/$defs/ReportsReadResult"
     },
+    "retry": {
+      "$ref": "#/$defs/RetryBody",
+      "description": "Phase 31（実機の事故、2026-09-18）: `POST /tasks/{id}/retry` の要求本文と応答。"
+    },
+    "retry_result": {
+      "$ref": "#/$defs/RetryResult"
+    },
     "run_list": {
       "$ref": "#/$defs/RunList"
     },
@@ -5902,6 +5967,8 @@
     "answer",
     "cancel",
     "transition_result",
+    "retry",
+    "retry_result",
     "replay_report",
     "providers",
     "provider_config",

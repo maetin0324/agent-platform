@@ -369,4 +369,9 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// Phase 31（実機の事故、2026-09-18）: `failed`/`cancelled` を複製してやり直したときの新しいタスクに
+    /// 記録する。`from` = 元のタスク。状態は変えない（`Created` が初期状態を与える）。
+    Retried {
+        from: TaskId,
+    },
 }

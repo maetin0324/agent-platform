@@ -1,7 +1,8 @@
 #!/bin/sh
-# scripts/taskd.sh fixture org 用の fake ワーカー（Phase G13f-1 の e2e、gui/e2e/g13.spec.ts）。
+# scripts/taskd.sh fixture org 用の fake ワーカー（Phase G13f-1 の e2e、gui/e2e/g13.spec.ts。
+# Phase G13h で「失敗したタスクをやり直す」の分岐を追加、gui/e2e/g13.spec.ts）。
 # LLM は呼ばない。stdin の RunRequest を read-run-request.mjs で解析し、task.title で分岐して
-# 「秘書の返事」「成果物つきの調査」「人に聞く（認可の要求）」を決定的に作る。
+# 「秘書の返事」「成果物つきの調査」「人に聞く（認可の要求）」「決定的な失敗」を作る。
 set -u
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 RUN=$(mktemp)
@@ -51,6 +52,19 @@ case "$TITLE" in
   *聞く*)
     # 人に聞く（Question 終端 → /approvals の「認可待ち」に 1 件）。
     echo '{"type":"question","text":"クラスタ pegasus に実験を投入してよいですか？"}'
+    ;;
+  Fail-G13h)
+    # Phase 31（実機の事故、2026-09-18）の e2e 用: LLM 先の停止を模した決定的な非リトライ失敗。
+    # `POST /tasks/{id}/retry` は `workspace` をそのまま複製する（ADR-0033 追記の決定どおり）ので、
+    # やり直した新しいタスクは元のタスクと**同じ作業ディレクトリ**で走る。このマーカーファイルは
+    # そのディレクトリに残るので、1 回目（元のタスク）は失敗し、2 回目（やり直した後）は成功する
+    # ＝「LLM 先が復旧した後にやり直したら動いた」を決定的に再現する。
+    if [ -f .g13h-ran-once ]; then
+      echo '{"type":"done","summary":"やり直したら動きました","evidence":[]}'
+    else
+      touch .g13h-ran-once
+      echo '{"type":"error","message":"deliberate non-retryable failure (Phase 31 e2e)","retryable":false}'
+    fi
     ;;
   *)
     # 普通の仕事: 調査結果の文書とリンク集を成果物として登録し、報告のもとになる done を返す。

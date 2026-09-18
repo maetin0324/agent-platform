@@ -203,9 +203,107 @@ async fn operations_on_missing_tasks_are_404() {
         ("reject", json!({})),
         ("cancel", json!({})),
         ("answer", json!({"answer": "x"})),
+        ("retry", json!({})),
     ] {
         let resp = send(&app, post_json(&format!("/api/v1/tasks/{id}/{op}"), &body)).await;
         assert_problem(&resp, 404, "task_not_found");
+    }
+}
+
+/// Phase 31（実機の事故、2026-09-18）: `POST /tasks/{id}/retry`。
+#[tokio::test]
+async fn retry_duplicates_a_failed_task_and_rewires_dependents() {
+    let env = TestEnv::new();
+    let app = env.router();
+
+    let mut original = new_task(TaskKind::Execute, Status::Failed);
+    original.title = "investigate incident".into();
+    original.objective = "find out why the LLM stopped".into();
+    env.seed(&original);
+
+    // 未終端の後続（対話タスク扱いではないが、テストの都合上そのまま draft/ready/blocked を直接 seed する
+    // ことで、実機の cascade を経ずに「張り替え対象」の状態を再現する。ready にするには依存を空にしないと
+    // `env.seed` は検証を経由しないのでそのまま status を書ける）。
+    let mut draft_dependent = new_task(TaskKind::Execute, Status::Draft);
+    draft_dependent.depends_on = vec![original.id];
+    env.seed(&draft_dependent);
+
+    // `dependency_failed` で cancelled になった後続。
+    let mut cancelled_dependent = new_task(TaskKind::Execute, Status::Cancelled);
+    cancelled_dependent.depends_on = vec![original.id];
+    env.seed_with(
+        &cancelled_dependent,
+        vec![Event::Transitioned {
+            from: Status::Ready,
+            to: Status::Cancelled,
+            reason: "dependency_failed".into(),
+        }],
+    );
+
+    // 人が直接 cancel した後続（対象外）。
+    let mut manually_cancelled = new_task(TaskKind::Execute, Status::Cancelled);
+    manually_cancelled.depends_on = vec![original.id];
+    env.seed_with(
+        &manually_cancelled,
+        vec![Event::Transitioned {
+            from: Status::Ready,
+            to: Status::Cancelled,
+            reason: "cancel".into(),
+        }],
+    );
+
+    let resp = send(&app, post_json(&format!("/api/v1/tasks/{}/retry", original.id), &json!({}))).await;
+    assert_eq!(resp.status, 201, "{}", resp.text());
+    let body = resp.json();
+    let new_id: TaskId = body["task_id"].as_str().expect("task_id").parse().expect("parse");
+    assert_eq!(resp.header("location"), Some(format!("/api/v1/tasks/{new_id}").as_str()));
+    let mut rewired: Vec<String> = body["rewired"].as_array().expect("rewired").iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    rewired.sort();
+    let mut expected = vec![draft_dependent.id.to_string(), cancelled_dependent.id.to_string()];
+    expected.sort();
+    assert_eq!(rewired, expected);
+
+    let new_task_row = env.store.get(new_id).expect("get").expect("some");
+    assert_eq!(new_task_row.status, Status::Draft);
+    assert_eq!(new_task_row.title, original.title);
+    assert_eq!(new_task_row.objective, original.objective);
+    assert_eq!(new_task_row.depends_on, original.depends_on);
+    let events: Vec<Event> = env.store.events_for(new_id).expect("events").into_iter().map(|(_, e)| e).collect();
+    assert!(matches!(&events[0], Event::Created { task } if task.id == new_id));
+    assert!(matches!(&events[1], Event::Retried { from } if *from == original.id));
+
+    let draft_after = env.store.get(draft_dependent.id).expect("get").expect("some");
+    assert_eq!(draft_after.status, Status::Draft);
+    assert_eq!(draft_after.depends_on, vec![new_id]);
+
+    let cancelled_after = env.store.get(cancelled_dependent.id).expect("get").expect("some");
+    assert_eq!(cancelled_after.status, Status::Draft, "dependency_failed 由来の cancelled は draft に戻す");
+    assert_eq!(cancelled_after.depends_on, vec![new_id]);
+
+    let manually_after = env.store.get(manually_cancelled.id).expect("get").expect("some");
+    assert_eq!(manually_after.status, Status::Cancelled, "手動 cancel は対象外");
+    assert_eq!(manually_after.depends_on, vec![original.id]);
+}
+
+#[tokio::test]
+async fn retry_with_accept_starts_ready_and_non_terminal_or_done_is_409() {
+    let env = TestEnv::new();
+    let app = env.router();
+
+    let failed = new_task(TaskKind::Execute, Status::Failed);
+    env.seed(&failed);
+    let resp = send(&app, post_json(&format!("/api/v1/tasks/{}/retry", failed.id), &json!({"accept": true}))).await;
+    assert_eq!(resp.status, 201, "{}", resp.text());
+    let new_id: TaskId = resp.json()["task_id"].as_str().expect("task_id").parse().expect("parse");
+    assert_eq!(env.status_of(new_id), Status::Ready);
+
+    for status in [Status::Draft, Status::Ready, Status::Running, Status::Blocked, Status::Reviewing, Status::Done] {
+        let task = new_task(TaskKind::Execute, status);
+        env.seed(&task);
+        let resp = send(&app, post_json(&format!("/api/v1/tasks/{}/retry", task.id), &json!({}))).await;
+        let problem = assert_problem(&resp, 409, "invalid_transition");
+        assert!(problem["detail"].as_str().expect("detail").contains("cannot be retried"), "{problem}");
+        assert_eq!(env.status_of(task.id), status);
     }
 }
 
