@@ -34,7 +34,8 @@ roles = ["literature-scout", "literature-reader", "novelty-skeptic"]
 ```
 
 - 3 つとも `Vec<String>` の自由記述（固定 enum にしない。人間の提案どおり）。空なら出力にも出さない。
-- `input_artifacts` / `output_artifacts` は**約束ではなく目安**。taskd は中身を検査しない（受け入れ条件の判定は従来どおり `Check`）。
+- `input_artifacts` / `output_artifacts` は**約束ではなく目安**（**Phase 38 追記**: ただし
+  ハーネスで動く分野では約束である。§2.5 D6〜D8）。taskd は中身を検査しない（受け入れ条件の判定は従来どおり `Check`）。
   「この分野に投げるなら何を用意すべきか」「戻ってくるものは何か」を、委譲側と Planner に伝えるためのラベル。
 - ハーネス（アダプタ）は引き続き**役割が持つ**（ADR-0027 D2）。manifest に `harness command` は入れない
   （同じ分野でも役割ごとに実行器を変えられる設計を壊さないため。どのアダプタが使われるかは `GET /config` の
@@ -68,6 +69,69 @@ roles = ["literature-scout", "literature-reader", "novelty-skeptic"]
 
 - `GET /config` の `genres[]` に 3 つのフィールドを足す（`GenreConfigView`）。
 - GUI のタスク作成で分野を選んだとき、`description` に加えて **できること / 渡すもの / 返るもの** を出す（選択の助けになる情報を、GUI 側で再計算せずそのまま表示する）。
+
+## 2.5 Phase 38 追記（成果物の説明、ハーネス系分野の規約）
+
+- 日付: 2026-09-18（人間の決定。**実機のレビュー不合格**から）
+- 関連: ADR-0035 D6（`candidates.json` → `papers.json` の改名）、ADR-0033 D4（計画のプロンプトに manifest と
+  組織図を渡す）、ADR-0027 D3（`paperqa`）、ADR-0029（`local-deep-research`）
+
+### 何が起きたか（本番、2026-09-18）
+
+秘書の計画 run が研究文献調査課（`literature` = PaperQA2 ハーネス）に「候補テーマを 3〜5 件、新規性・
+実現可能性・接続点・引用付きで **`candidates.json` にまとめよ**」という objective と、
+`artifact_exists: candidates.json` の受け入れ条件を付けた。ところが `candidates.json` は**ハーネス
+（取得ランナー）が書く論文の検索コーパス**の固定名で、ワーカー（`pqa`）は計画が指定したファイルを書けない
+（ハーネス run は `answer.md` を返すだけ）。答えの中身は良かったのに、レビュアーは基準どおり不合格にした。
+**計画がハーネスの成果物の名前を知らずに勝手に決めている**のが原因である。
+
+D1 は `input_artifacts` / `output_artifacts` を「約束ではなく目安」と書いた。**ハーネスで動く分野では
+目安ではなく約束である**（担当は名前を選べない）。そこを次の 4 点で埋める。
+
+### D5. `output_artifacts` の 1 要素に説明を書ける（`名前: 説明`）
+
+```toml
+output_artifacts = ["answer.md: 引用付きの答え（これが答え）",
+                    "papers.json: 検索した論文の一覧（コーパス。答えではない）",
+                    "sources.json: 出典と引用の有無"]
+```
+
+- 型は今までどおり `Vec<String>`（`名前` だけの従来の書き方も引き続き有効）。**名前は `:` の前**
+  （`task_core::artifact_entry_name` / `artifact_entry_description`、`GenreSpec::output_artifact_names`）。
+- 計画とレビュアーのプロンプトには名前と説明の両方を出す。`GET /config` の `GenreConfigView` は
+  **型を変えない**（値の文字列に説明が付くだけ。GUI は `:` の前を名前として扱う。`docs/gui/api.md`）。
+
+### D6. 「ハーネス系の分野」は `default_role` のアダプタで決まる（決定的）
+
+- `GenreSpec::is_harness(roles)` = `default_role` の役割の `adapter` が `paperqa` /
+  `local-deep-research`（`task_core::HARNESS_ADAPTERS`）のどれか。LLM には聞かない。
+- `RunContext.available_genres[].harness` にそのアダプタ id を載せる（プロトコルは追加のみ。版は 4 のまま）。
+- ハーネスでない分野（`claude-code` / `codex` / `acp` の coding 等）は**従来どおり自由**
+  （成果物の名前はワーカーが決められる）。この場合プロンプトは Phase 37 までと 1 バイトも変わらない。
+
+### D7. 計画とレビュアーのプロンプトに成果物の規約を出す（manifest から決定的に組む）
+
+- **Plan run**: 「この分野の担当は**ハーネス**で動く。成果物は次の名前で固定され、担当が別のファイルを
+  書くことはできない: `<output_artifacts>`。受け入れ条件（`artifact_exists`）にはこの名前だけを使うこと。
+  **内容の要求は `objective` に書き、レビュアー条件で判定させる**（『X を Y に書け』ではなく
+  『答えに X を含めよ』）」。
+- **Reviewer run**（対象タスクの分野がハーネス系のとき。`RunContext.subject_genre`）: 同じ一覧を出し、
+  「`papers.json` は検索コーパスであって答えではない。答えは `answer.md`。テーマ候補等の内容はそこで
+  判定せよ。ファイル名の不一致だけを理由に不合格にするな」。
+
+### D8. 計画の後の検証（決定的。壊さず直す）
+
+`PlanOutput.tasks[]` の `acceptance` に `artifact_exists` があり、その子の分野（`materialize` と同じ
+「明示 > 役割 > 担当 > 親」で解決）がハーネス系で、名前が `output_artifacts` に無ければ:
+
+1. **その基準を落とす**（`Question` にしない。Plan run も失敗させない）、
+2. `warn` を 1 行出す（`task_core::plan::fix_harness_artifacts` が文面を返し、ディスパッチャが `warn!`）、
+3. `objective` の末尾に「（注: この担当の成果物は `<一覧>` に固定。要求した内容は `<答えの成果物>` の中で
+   述べる）」を足す。
+
+落とすと受け入れ条件が 0 件になる場合だけ、落とす代わりに**同じ文のレビュアー条件**にする
+（条件ゼロのタスクを作らないため。「内容はレビュアーに判定させる」という D7 の方針と一致する）。
+判定はすべて決定的で、LLM は呼ばない（DESIGN 原則 1）。
 
 ## 3. 採らない
 

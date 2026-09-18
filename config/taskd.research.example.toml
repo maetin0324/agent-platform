@@ -21,7 +21,7 @@
 #   - ADR-0035: run は 2 段（取得 → 回答）。1 段目は arXiv / OpenAlex（**鍵なし**）で候補論文を探し、
 #     open access の PDF を案件の corpus に落とす（`[adapters.paperqa.acquire]`）。2 段目が `pqa ask`。
 #     取得と引用の件数は決定的な証拠ゲート（`[adapters.paperqa.evidence]`）が見る。
-#     成果物は `artifacts/answer.md`（末尾に `## 出典`）/ `candidates.json` / `sources.json` /
+#     成果物は `artifacts/answer.md`（末尾に `## 出典`）/ `papers.json` / `sources.json` /
 #     `queries.json`。
 #   - ADR-0035 D5（Phase 36）: その 1 段目の**検索語は LLM が立てる**（`acquire.query_llm`、既定 true）。
 #     PaperQA2 と同じ LLM 先に `chat/completions` を 1 回叩くだけなので、`env` の `OPENAI_BASE_URL` が
@@ -87,7 +87,7 @@ query_timeout_secs = 300
 # openalex_filter = "is_oa:true,primary_topic.field.id:22"
 
 # 決定的な証拠ゲート（ADR-0035 D3。ADR-0031 D2 の literature 版）。満たさないと `Error{retryable}` になり、
-# 成果物（answer.md / candidates.json / sources.json）は残る。`0` を書けばその項目は見ない。
+# 成果物（answer.md / papers.json / sources.json）は残る。`0` を書けばその項目は見ない。
 # 取得が 0 件のときは「検索経路の問題かもしれない」という別のメッセージになる。
 [adapters.paperqa.evidence]
 min_candidates = 5
@@ -143,8 +143,9 @@ instructions = "「本当に新規か」を疑う側に立ち、近い先行研�
 # `default_role` の役割（tier / adapter / 予算）が使われる（タスクの値 > 役割の既定 > 分野の既定 > 親の値）。
 # 分野そのものにはアダプタを持たせない（D2: `default_role` の役割が持つ。同じ分野でも役割ごとに違う
 # ハーネス・モデルを使い分けられる）。`capabilities` / `input_artifacts` / `output_artifacts`
-# （ADR-0028 D1）は 3 つとも任意の自由記述で、taskd は中身を検査しない。Planner とワーカーに
-# 「その分野は何ができるか」「何を渡せば何が返るか」を機械可読な形で伝えるためのラベル。
+# （ADR-0028 D1）は 3 つとも任意の自由記述で、taskd は中身を検査しない。各要素は `名前: 説明` の形も書ける
+# （Phase 38。`:` の前が名前。ハーネスで動く分野では、この名前が計画の `artifact_exists` に使える名前の全て）。
+# Planner とワーカーに「その分野は何ができるか」「何を渡せば何が返るか」を機械可読な形で伝えるためのラベル。
 [[genres]]
 id = "coding"
 description = "コードを書く・直す・テストする"
@@ -163,7 +164,7 @@ id = "literature"
 description = "関連研究の調査・先行研究の確認・新規性の検討（PaperQA2 + arXiv / OpenAlex。論文だけを見る）"
 capabilities = ["学術文献の検索と取得（arXiv / OpenAlex）", "PDF 全文からの根拠抽出", "引用付きの要約"]
 input_artifacts = ["question", "pdf", "bibliography"]
-output_artifacts = ["answer.md", "candidates.json", "sources.json"]
+output_artifacts = ["answer.md: 引用付きの答え（これが答え）", "papers.json: 検索した論文の一覧（コーパス。答えではない）", "sources.json: 出典と引用の有無", "queries.json: 使った検索語"]
 default_role = "literature-reader"
 roles = ["literature-scout", "literature-reader", "novelty-skeptic"]
 

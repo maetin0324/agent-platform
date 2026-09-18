@@ -4966,3 +4966,87 @@ OK, keys: ['query', 'research_id', 'summary', 'findings', 'iterations', 'questio
   `detailed` モードのフル実行（成果物の中身の確認）は本タスクの範囲外なので未実施。
 - U37-2: `mode = "report"` は署名上は同じ問題を抱えていないが、実機のフル実行（`generate_report` が
   実際に `report_path` へ書く内容）はこの対応では確認していない。
+
+## Phase 38 — 計画はハーネスの成果物の名前を使う（実機のレビュー不合格から。2026-09-18）
+
+完了日: 2026-09-18。ADR: `docs/adr/0028-genre-manifest.md` §2.5「Phase 38 追記（成果物の説明、
+ハーネス系分野の規約）」D5〜D8、`docs/adr/0035-literature-acquisition.md` D6（`candidates.json` →
+`papers.json` の改名）。
+
+### 何が起きたか（本番、2026-09-18）
+
+秘書の計画 run が研究文献調査課（`literature` = PaperQA2 ハーネス）に「候補テーマを 3〜5 件、新規性・
+実現可能性・接続点・引用付きで **`candidates.json` にまとめよ**」という objective と、
+`artifact_exists: candidates.json` の受け入れ条件を付けた。`candidates.json` はハーネス（取得ランナー）が
+書く**論文の検索コーパス**の固定名で、ワーカー（`pqa`）は計画が指定したファイルを書けない。答えの中身は
+良かった（Zhu2025 / Maurya2025 / Saeik2021 を引いて候補 3 件）のに、レビュアーは基準どおり不合格にした。
+**計画がハーネスの成果物の名前を知らずに勝手に決めている**のが原因。
+
+### やったこと
+
+1. **`candidates.json` → `papers.json`**（PaperQA2 ハーネスの検索コーパス。「候補」がテーマ候補と紛れるため）。
+   `answer.md` / `papers.json` / `queries.json` / `sources.json`。ランナーの入力 JSON の鍵も
+   `candidates_path` → `papers_path`。設定例・ADR-0035 / ADR-0036・テストを追従。
+   （`min_candidates` / `max_candidates` の設定キーと `TASKD_ACQUIRE` の `candidates` 件数は互換のため据え置き。）
+2. **manifest の `output_artifacts` に説明を書けるようにした**（`"名前: 説明"`。名前だけの従来の形も有効。
+   `task_core::artifact_entry_name` / `artifact_entry_description`、`GenreSpec::output_artifact_names`）。
+   `GET /config` の `GenreConfigView` の**型は変えない**（値の文字列に説明が付くだけ。GUI は `:` の前を
+   名前として扱う。申し送りを `docs/gui/api.md` の改訂履歴・§3.21・型定義に 1 行ずつ追記）。
+3. **「ハーネス系の分野」を決定的に判定**（`GenreSpec::is_harness(roles)` = `default_role` の役割の
+   `adapter` が `paperqa` / `local-deep-research`。`task_core::HARNESS_ADAPTERS`）。
+   `RunContext.available_genres[].harness` を追加（プロトコルは追加のみ。版は 4 のまま）。
+4. **計画のプロンプト**（Plan run）に「## ハーネスで動く分野の成果物（名前は固定）」節を追加。
+   固定の名前と説明を manifest から決定的に組み、「`artifact_exists` にはこの名前だけを使え」「内容の要求は
+   `objective` に書き、レビュアー条件で判定させろ」を明示する。ハーネスでない分野（coding 等）しか無い
+   設定では節が**空**で、プロンプトは Phase 37 までと 1 バイトも変わらない。
+5. **レビュアーのプロンプト**に、対象タスクの分野がハーネス系のときだけ同じ規約を出す
+   （`RunContext.subject_genre`。ディスパッチャが `[[genres]]` / `[[roles]]` から決定的に入れる）。
+   「`papers.json` は検索コーパスであって答えではない。答えは `answer.md`。ファイル名の不一致だけを理由に
+   不合格にするな」。
+6. **計画の後の決定的な検証**（`task_core::plan::fix_harness_artifacts`）。ハーネス系の担当に
+   `output_artifacts` に無い名前の `artifact_exists` を要求していたら、その基準を落として `warn` を出し、
+   `objective` の末尾に「（注: この担当の成果物は `<一覧>` に固定。要求した内容は `<答え>` の中で述べる）」を
+   足す（`Question` にせず、Plan run も失敗させない = 壊さず直す）。落とすと条件が 0 件になる場合だけ、
+   同じ文を**レビュアー条件**に変えて残す。ディスパッチャは `materialize` の直前にこれを呼ぶだけで、
+   LLM は呼ばない（DESIGN 原則 1）。
+
+### 証拠コマンドと結果
+
+- `cargo test --workspace` → exit 0、`grep -c "^test result: FAILED"` = **0**、合計 **1,056 passed**
+  （Phase 37 の 1,046 から +10）。新規テスト:
+  - `task-core`: `model::tests::artifact_entries_may_carry_a_description_after_the_colon` /
+    `model::tests::a_genre_is_a_harness_genre_when_its_default_role_runs_paperqa_or_ldr` /
+    `plan::tests::fix_harness_artifacts_drops_unknown_artifact_checks_and_notes_the_real_ones` /
+    `…_keeps_the_criterion_as_a_reviewer_check_when_nothing_else_remains` /
+    `…_leaves_other_genres_and_matching_names_alone`
+  - `task-worker`: `claude_code::tests::build_plan_prompt_states_the_artifact_convention_for_harness_genres` /
+    `…::the_artifact_convention_is_absent_without_a_harness_genre` /
+    `…::build_review_prompt_states_the_artifact_convention_only_for_harness_genres` /
+    `protocol::tests::harness_and_subject_genre_are_optional_additions`
+  - `task-dispatch`: `dispatcher::tests::harness_genres_are_marked_and_the_plan_is_fixed_before_children_are_created`
+  - 追従: `taskd::config::tests::loads_research_example_config` / `…loads_web_research_example_config`
+    （`名前: 説明` と `papers.json`）、`taskd::tests::config_view_exposes_genre_capabilities_and_artifacts`
+    （`GenreConfigView` は文字列のまま）、`task-worker` の paperqa 系（成果物名 `papers.json`）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**。
+- テスト以外に `unwrap()` / `expect()` の追加なし（`git diff` の追加行を grep して確認。全てテスト内）。
+- ディスパッチャに LLM 呼び出しなし（追加したのは `fix_plan_for_harness` = `task_core` の純粋関数呼び出しと
+  `tracing::warn!` だけ）。
+- `docs/protocol/worker-protocol.schema.json` は `UPDATE_SCHEMA=1` で再生成（`harness` / `subject_genre` の
+  追加分 18 行）。
+
+### 未解決事項
+
+- U38-1: 実機での再現確認（同じ案件で計画を立て直し、`literature` の子が `answer.md` 基準になることと、
+  レビューが通ることの確認）は未実施。次に本番で計画 run を起こしたときに `papers.json` / 注記付きの
+  `objective` / レビュー結果を記録すること。
+- U38-2: 本番の corpus・過去の run に残る `candidates.json` は改名しない（古い成果物はそのまま残る）。
+  本番設定 `~/taskd/taskd.toml` の `[[genres]] literature` の `output_artifacts` は、手で
+  `answer.md: … / papers.json: … / sources.json: … / queries.json: …` に直す必要がある（例の設定は更新済み）。
+- U38-3: 委譲（`delegate.json`）側には同じ検証を入れていない（実機で問題が出たのは計画側だけのため。
+  必要なら `fix_harness_artifacts` と同じ関数を `materialize_delegated` の前に呼べばよい）。
+
+### 提案
+
+- P-92: `input_artifacts` 側の `名前: 説明` は解釈だけ実装して、プロンプトでは従来どおり文字列をそのまま
+  出している（「渡すもの」は名前が固定ではないため）。GUI で入出力を並べて見せるときに、説明を分けて
+  表示するかは GUI 側の判断に委ねた。

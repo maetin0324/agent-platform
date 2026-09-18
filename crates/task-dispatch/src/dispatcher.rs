@@ -1643,8 +1643,9 @@ impl Dispatcher {
         }
         // ADR-0007 D3/D4: Plan が全 pass なら子タスクの挿入と ReviewPass を同一トランザクションで行う。
         let result = match (all_pass, task.kind, outcome.plan) {
-            (true, TaskKind::Plan, Some(plan)) => {
+            (true, TaskKind::Plan, Some(mut plan)) => {
                 let org = self.store.org_list()?;
+                self.fix_plan_for_harness(&task, &mut plan, &org);
                 let children = materialize(&task, &plan, &org, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
                 let n = children.len();
                 let r = self
@@ -1903,9 +1904,10 @@ impl Dispatcher {
                 continue;
             }
             let result = match (task.kind, waiting.plan) {
-                (TaskKind::Plan, Some(plan)) => {
+                (TaskKind::Plan, Some(mut plan)) => {
                     let org = self.store.org_list()?;
-                let children = materialize(&task, &plan, &org, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
+                    self.fix_plan_for_harness(&task, &mut plan, &org);
+                    let children = materialize(&task, &plan, &org, &self.config.roles, &self.config.genres, OffsetDateTime::now_utc());
                     self.store
                         .complete_plan(task_id, Vec::new(), children, self.config.plan_auto_accept)
                 }
@@ -2246,7 +2248,11 @@ impl Dispatcher {
         // ADR-0033 D4 / Phase 28: 対話 run は委譲できないので渡さない（`delegate.json` を書かせない）。
         let is_conv = task_core::is_conversation(task);
         let available_genres = if !is_conv && matches!(task.kind, TaskKind::Execute | TaskKind::Approval | TaskKind::Plan) {
-            self.config.genres.iter().map(GenreContext::from).collect()
+            self.config
+                .genres
+                .iter()
+                .map(|g| GenreContext::from_spec(g, &self.config.roles))
+                .collect()
         } else {
             Vec::new()
         };
@@ -2330,7 +2336,7 @@ impl Dispatcher {
             assigned
                 .and_then(|n| n.genre.as_deref())
                 .and_then(|id| GenreSpec::find(&self.config.genres, id))
-                .map(GenreContext::from)
+                .map(|g| GenreContext::from_spec(g, &self.config.roles))
         } else {
             None
         };
@@ -2391,6 +2397,17 @@ impl Dispatcher {
             work_genre,
             recent_work,
         })
+    }
+
+    /// Phase 38（ADR-0028 追記。実機のレビュー不合格から）: 計画が**ハーネスで動く分野**の担当に
+    /// 「自分で決めた名前のファイルを書け」と要求していたら、その `artifact_exists` の条件を落として
+    /// `objective` に本当の成果物の名前を注記する（`task_core::plan::fix_harness_artifacts`）。
+    /// 壊さず直す（Plan run は失敗させず、`Question` にもしない）。判定は決定的で LLM は呼ばない
+    /// （DESIGN 原則 1）。直した事実は `warn` に残す。
+    fn fix_plan_for_harness(&self, task: &Task, plan: &mut PlanOutput, org: &[task_core::OrgNode]) {
+        for note in task_core::fix_harness_artifacts(plan, task, org, &self.config.roles, &self.config.genres) {
+            tracing::warn!(task_id = %task.id, "{note}");
+        }
     }
 
     /// Phase 33（ADR-0033 D4 追記）: `node_id` の直近の仕事（対話・まとめ・承認・レビューは除く）を
@@ -2761,6 +2778,12 @@ impl Dispatcher {
                 },
                 sink: Box::new(sink),
                 hint: self.config.reviewer_hint.clone(),
+                // Phase 38（ADR-0028 追記）: レビュー対象の分野の manifest（決定的。設定を引くだけ）。
+                subject_genre: task
+                    .genre
+                    .as_deref()
+                    .and_then(|id| GenreSpec::find(&self.config.genres, id))
+                    .map(|g| GenreContext::from_spec(g, &self.config.roles)),
             },
         ))
     }
@@ -3050,6 +3073,8 @@ async fn run_worker(
             conversation_addressee: extras.conversation_addressee,
             work_genre: extras.work_genre,
             recent_work: extras.recent_work,
+            // Phase 38（ADR-0028 追記）: レビュー run（`review.rs` が組む）だけに入る。
+            subject_genre: None,
         },
     };
     let sink = StoreSink {
@@ -5225,6 +5250,67 @@ mod tests {
         d.config.genres = Vec::new();
         let extras = d.run_extras(&plan).unwrap();
         assert!(extras.available_genres.is_empty());
+    }
+
+    /// Phase 38（ADR-0028 追記。実機のレビュー不合格から）: ディスパッチャの配線 2 つ —
+    /// (1) `available_genres[].harness` が `default_role` の役割のアダプタから決定的に埋まる、
+    /// (2) 計画がハーネス系の担当に別名のファイルを要求していたら、子を作る前にその条件を落として
+    ///     `objective` に本当の成果物の名前を注記する（LLM は呼ばない）。
+    #[test]
+    fn harness_genres_are_marked_and_the_plan_is_fixed_before_children_are_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let plan_parent = plan_task(dir.path(), 0);
+        store.insert(&plan_parent).unwrap();
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(FileAdapter {
+            plan_json: VALID_PLAN.into(),
+            review_json: r#"{"verdicts":[]}"#.into(),
+            delay: Duration::from_millis(0),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.roles = vec![task_core::RoleSpec {
+            id: "literature-reader".into(),
+            adapter: Some("paperqa".into()),
+            ..task_core::RoleSpec::default()
+        }];
+        d.config.genres = vec![task_core::GenreSpec {
+            id: "literature".into(),
+            description: "関連研究の調査".into(),
+            output_artifacts: vec!["answer.md: 引用付きの答え".into(), "papers.json".into()],
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-reader".into()],
+            ..task_core::GenreSpec::default()
+        }];
+
+        let extras = d.run_extras(&plan_parent).unwrap();
+        assert_eq!(extras.available_genres[0].harness.as_deref(), Some("paperqa"));
+        assert!(extras.available_genres[0].is_harness());
+
+        let mut plan = task_core::PlanOutput {
+            tasks: vec![task_core::NewTask {
+                title: "候補テーマの抽出".into(),
+                objective: "候補テーマを candidates.json にまとめよ".into(),
+                acceptance: vec![Criterion {
+                    text: "candidates.json に候補テーマがある".into(),
+                    check: Check::ArtifactExists { name: "candidates.json".into() },
+                }],
+                depends_on: vec![],
+                kind: task_core::NewTaskKind::Execute,
+                tier: None,
+                role: None,
+                genre: Some("literature".into()),
+                assignee: None,
+            }],
+        };
+        d.fix_plan_for_harness(&plan_parent, &mut plan, &[]);
+        assert_eq!(plan.tasks[0].acceptance[0].check, Check::Reviewer, "落とすと 0 件になるので内容はレビュアーが見る");
+        assert!(
+            plan.tasks[0].objective.ends_with(
+                "（注: この担当の成果物は answer.md / papers.json に固定。要求した内容は answer.md の中で述べる）"
+            ),
+            "{}",
+            plan.tasks[0].objective
+        );
     }
 
     /// 受け入れ 3: `aggregate = false` の親は子が終わるまで reviewing のまま、終わったら run を増やさず done。

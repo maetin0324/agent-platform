@@ -71,7 +71,7 @@
    OpenAlex は `best_oa_location.pdf_url` → `primary_location.pdf_url` → `open_access.oa_url`）。
    **案件ごとの corpus**: `paper_directory/<project_id>/`（案件が無ければ `paper_directory/_shared/`）。
    **既にあるファイルは再取得しない**。先頭が `%PDF` でない応答は捨てる（HTML のログインページ等）。
-4. `artifacts/candidates.json`（全候補: `title` / `authors` / `year` / `venue` / `doi` / `arxiv_id` /
+4. `artifacts/papers.json`（全候補: `title` / `authors` / `year` / `venue` / `doi` / `arxiv_id` /
    `url` / `pdf_url` / `file` / `pdf_downloaded` / `source_engine`）と
    `artifacts/sources.json`（LDR と同じ形: `url` / `title` / `engine` / `cited`。ランナーの時点では
    `cited` は全て `false`）を書く。
@@ -105,7 +105,7 @@ min_cited = 2        # 答えが引用した出典の数
 - `0` を書けばその項目は見ない（全部 0 ならゲート無し）。
 - 満たさなければ `Terminal::Error { message, retryable: true }`。**`AdapterError` にはしない**
   （プロバイダを cooldown にする話ではない。ADR-0031 D2 と同じ）。
-- **成果物（`answer.md` / `candidates.json` / `sources.json`）は消さずに残す**。
+- **成果物（`answer.md` / `papers.json` / `sources.json`）は消さずに残す**。
 - **取得が 0 件（`candidates == 0`）のときは別メッセージ**:
   `"literature search returned nothing (possible network or API problem)"`。
   「論文が見つからなかった」と「検索経路が壊れている」を運用者が区別できるようにする（ADR-0031 D2 と同じ理由）。
@@ -174,8 +174,8 @@ D1 手順 1 の決定的な抽出は、実依頼「学術動向調査: Pluvio �
    計算機科学以外で使うときは `acquire.openalex_filter` で差し替える。
 4. **除外語で候補を落とす**（決定的）。候補の**タイトル + 要旨**に `exclude_terms` のどれかが
    含まれていれば捨てる。要旨は arXiv の `<summary>`、OpenAlex の `abstract_inverted_index` を
-   組み直したもの（先頭 600 字）で、`candidates.json` にも残す。
-5. **記録**: `candidates.json` の各候補に `query_text`（どの検索語が連れてきたか。エンジンは従来の
+   組み直したもの（先頭 600 字）で、`papers.json` にも残す。
+5. **記録**: `papers.json` の各候補に `query_text`（どの検索語が連れてきたか。エンジンは従来の
    `source_engine`）を足し、`artifacts/queries.json`（LLM の出力そのまま + `generated_by`:
    `"llm"` / `"fallback"` + 落ちた理由）を書いて成果物として申告する。
 
@@ -206,12 +206,12 @@ DESIGN 原則 1（ディスパッチャとストアに LLM を入れない）は
 
 1. 取得ランナーが、**本物の API を叩かずに**（`--fixture <dir>`）検索語ごとの応答を読み、重複排除・
    `max_candidates` / `max_pdfs` の上限・案件ごとの corpus・既存ファイルの再取得なしを満たし、
-   `candidates.json` / `sources.json` を規定の形で書く。
+   `papers.json` / `sources.json` を規定の形で書く。
 2. アダプタが 2 段（取得 → `pqa`）の順で起動し、ゲートの 3 パターン（通る / 落ちる / 取得 0 件の別メッセージ）
    になり、成果物を申告し、`answer.md` の末尾に `## 出典` が付く。
 3. 既存の `paperqa` のテスト（Phase 17〜18）が通る（索引のパスが案件ごとになった分だけ期待値を更新する）。
 4. 実機: 本番と同じ `~/taskd/paperqa` の venv と settings、トンネル越しの Qwen で、Pluvio の隣接領域を
-   問う `literature` のタスクを `taskctl worker run` で 1 回通し、`candidates.json` の件数・PDF 本数・
+   問う `literature` のタスクを `taskctl worker run` で 1 回通し、`papers.json` の件数・PDF 本数・
    `answer.md` の出典が**学術論文**になっていることを `docs/PROGRESS.md` に記録する。
 5. `cargo test --workspace`（FAILED 0）/ `cargo clippy --workspace --all-targets -- -D warnings` exit 0。
 
@@ -219,10 +219,25 @@ DESIGN 原則 1（ディスパッチャとストアに LLM を入れない）は
 
 1. ランナーが、**本物の API も LLM も叩かずに**（`--fixture <dir>` の `llm-1.json`）LLM の検索語 JSON を
    読み、`cat:` と OpenAlex の `filter` を付け、除外語で候補を落とし、`queries.json` /
-   `candidates.json`（`query_text` 付き）を規定の形で書く。壊れた JSON では決定的な抽出に落ちて、
+   `papers.json`（`query_text` 付き）を規定の形で書く。壊れた JSON では決定的な抽出に落ちて、
    その理由を `progress:` と `queries.json` に残す。
 2. アダプタが LLM の段の設定（PaperQA2 と同じ LLM 先・依頼文）を取得ランナーの入力に載せ、
    `queries.json` を成果物として申告する。既存の `paperqa` のテスト（Phase 17〜18、34）が通る。
 3. 実機: 上の失敗した run と同じ `objective` を、本番と同じ venv / settings / トンネルの Qwen で
-   `taskctl worker run` に 1 回通し、`queries.json` の検索語・`candidates.json` のうち隣接領域の件数・
+   `taskctl worker run` に 1 回通し、`queries.json` の検索語・`papers.json` のうち隣接領域の件数・
    PDF 本数・`cited`・`answer.md` が "cannot answer" でないことを `docs/PROGRESS.md` に記録する。
+
+### D6. `candidates.json` → `papers.json`（Phase 38 で改名。ADR-0028 の追記と対）
+
+- 日付: 2026-09-18（人間の決定）
+- 実機で、秘書の計画が研究文献調査課（`literature`）に「候補テーマを 3〜5 件 **`candidates.json` に
+  まとめよ**」という objective と `artifact_exists: candidates.json` を付けた。`candidates.json` は
+  D1 手順 4 の**検索コーパスの固定名**（title/authors/doi/abstract/pdf_downloaded）で、ワーカー（pqa）は
+  計画が指定したファイルを書けない。答えの中身（Zhu2025 / Maurya2025 / Saeik2021 を引いた候補 3 件）は
+  良かったのに、レビュアーは基準どおり「`candidates.json` に候補テーマが無い」と不合格にした。
+- **「候補」という語がテーマ候補と紛れる**ため、この分野の成果物は
+  `answer.md` / `papers.json` / `queries.json` / `sources.json` に改めた（中身の形は変えていない。
+  ランナーの入力 JSON の鍵も `candidates_path` → `papers_path`）。
+- 計画が名前を勝手に決められないようにする側の対策（分野の manifest に成果物の説明を持たせ、計画・
+  レビュアーのプロンプトに「ハーネスで動く分野の成果物の名前は固定」を出し、計画の後に決定的に直す）は
+  **ADR-0028 の「Phase 38 追記」**に書いた。

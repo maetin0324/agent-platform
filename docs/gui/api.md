@@ -1,6 +1,10 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-18 Phase 38（ADR-0028 追記）— `GET /config` の `genres[].{input_artifacts, output_artifacts}` の
+  各要素は `"名前"` に加えて **`"名前: 説明"`** の形も取る（型は `Vec<String>` のまま。追加のみ、v1 のまま）。
+  **GUI は `:` の前を成果物の名前として扱い、後ろを説明として出すこと**（`ConfigView` / `GenreConfigView` の
+  型は変えていない。値の文字列に説明が付くだけ）。
 - 改訂: 2026-09-18 Phase 31（実機の事故: 失敗した仕事をやり直す手段が無かった）— `POST /tasks/{id}/retry`
   （§3.63）、イベント種別 `retried`、`task_ops::actions` に `Action::Retry` を追加（追加のみ。v1 のまま）
 - 改訂: 2026-09-17 Phase 27（Phase 24/25 の監査対応、GUI-R3/R4、ADR-0034 D7）— `TaskSummary.assignee` /
@@ -290,7 +294,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
   `genre` を省略し `role` が指定されていれば、その役割を含む分野がちょうど 1 つだけあるとき、その分野を継ぐ
   （0 件・2 件以上は継がない）。`GET /config` の `genres[]` が設定にある分野の一覧
   （`{id, description, capabilities?, input_artifacts?, output_artifacts?, default_role, roles}`。
-  `capabilities` / `input_artifacts` / `output_artifacts` は Phase 18（ADR-0028 D1）の任意の自由記述で、空なら省略される）。
+  `capabilities` / `input_artifacts` / `output_artifacts` は Phase 18（ADR-0028 D1）の任意の自由記述で、空なら省略される。
+  Phase 38: `input_artifacts` / `output_artifacts` の要素は `名前` でも `名前: 説明` でもよい（GUI は `:` の前を名前として扱う））。
 - `aggregate`（ADR-0016 D3）: true の親は、委譲した子が全て終端になった後に集約 run を 1 回だけ行い `artifacts/summary.md` を書く。
   応答の `Task` では **false のとき省略される**（`#[serde(skip_serializing_if)]`。`role` / `genre` も `null` のとき省略）。
 - `acceptance` は**クライアントが並べた順**で保存する（CLI は accept → cmd → artifact → reviewer の固定順で渡す。並びに意味は無い）。
@@ -1415,6 +1420,8 @@ pub struct RoleConfigView { pub id: String, pub tier: Option<Tier>, pub adapter:
     pub max_wall_secs: Option<u64>, pub has_instructions: bool }
 /// Phase 16（ADR-0027 D1）: `[[genres]]` 1 行。`capabilities` / `input_artifacts` / `output_artifacts` は
 /// Phase 18（ADR-0028 D1）: 3 つとも自由記述の `Vec<String>` で、空なら省略される（`skip_serializing_if`）。
+/// Phase 38（ADR-0028 追記）: `input_artifacts` / `output_artifacts` の要素は `名前: 説明` の形も取る
+/// （型は変えない。GUI は `:` の前を名前として表示・照合に使う）。
 pub struct GenreConfigView { pub id: String, pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub input_artifacts: Vec<String>,

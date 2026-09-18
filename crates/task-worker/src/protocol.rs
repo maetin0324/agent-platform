@@ -19,6 +19,8 @@ use task_core::{ArtifactRef, DelegateTask, GenreSpec, Status, Task, TaskId, Usag
 /// 実機で担当が自分の直近の失敗を知らずに聞き返した事故の再発防止）。
 /// Phase 35（ADR-0036 D1/D5）: `run.artifacts_dir` を追加（成果物と結果ファイルの置き場。単独タスクでは
 /// 従来の `<workspace>/artifacts` と同じ値なので、これを読まないワーカーも単独タスクではそのまま動く）。
+/// Phase 38（ADR-0028 追記）: `context.available_genres[].harness` と `context.subject_genre` を追加
+/// （計画とレビュアーに「ハーネスで動く分野の成果物の名前は固定」を伝えるため）。
 /// 全て追加のみで v1〜v3 のワーカーはそのまま動く。
 pub const PROTOCOL_VERSION: u32 = 4;
 
@@ -85,6 +87,38 @@ pub struct GenreContext {
     pub output_artifacts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<GenreRoleContext>,
+    /// Phase 38（ADR-0028 追記）: この分野の担当が動くハーネスのアダプタ id
+    /// （`default_role` の役割の `adapter`。`GenreSpec::harness_adapter`）。`paperqa` /
+    /// `local-deep-research` のとき、成果物の名前は**固定**で担当は別のファイルを書けない
+    /// （`is_harness`）。決定的に決まる値で、プロンプトに「成果物の規約」を出すかの判断にだけ使う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+}
+
+impl GenreContext {
+    /// 設定（`[[genres]]` と `[[roles]]`）から組む（Phase 38: `harness` を埋めるため役割も要る）。
+    pub fn from_spec(g: &GenreSpec, roles: &[task_core::RoleSpec]) -> Self {
+        Self {
+            harness: g.harness_adapter(roles).map(str::to_string),
+            ..Self::from(g)
+        }
+    }
+
+    /// Phase 38（ADR-0028 追記）: 成果物の名前を担当が選べない分野か（`harness` が
+    /// `task_core::HARNESS_ADAPTERS` のどれか）。
+    pub fn is_harness(&self) -> bool {
+        self.harness
+            .as_deref()
+            .is_some_and(|a| task_core::HARNESS_ADAPTERS.contains(&a))
+    }
+
+    /// Phase 38（ADR-0028 追記）: `output_artifacts` の `(名前, 説明)`（`名前: 説明` 形式の解釈）。
+    pub fn output_artifacts_named(&self) -> Vec<(&str, Option<&str>)> {
+        self.output_artifacts
+            .iter()
+            .map(|a| (task_core::artifact_entry_name(a), task_core::artifact_entry_description(a)))
+            .collect()
+    }
 }
 
 impl From<&GenreSpec> for GenreContext {
@@ -96,6 +130,7 @@ impl From<&GenreSpec> for GenreContext {
             input_artifacts: g.input_artifacts.clone(),
             output_artifacts: g.output_artifacts.clone(),
             roles: g.roles.iter().map(|id| GenreRoleContext { id: id.clone(), description: None }).collect(),
+            harness: None,
         }
     }
 }
@@ -258,6 +293,12 @@ pub struct RunContext {
     /// 通常の run（対話でない）では常に空。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_work: Vec<RecentWork>,
+    /// Phase 38（ADR-0028 追記）: **レビュー run** にだけ、レビュー対象のタスクの分野の manifest を渡す。
+    /// ハーネス系の分野（`GenreContext::is_harness`）なら、レビュアーのプロンプトに「成果物の名前は固定で、
+    /// `papers.json` は検索コーパスであって答えではない」という規約を出す（実機で、計画が勝手に決めた
+    /// ファイル名を基準にレビュアーが不合格にした事故から）。決定的（設定を引くだけ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_genre: Option<GenreContext>,
 }
 
 /// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは
@@ -507,6 +548,45 @@ pub(crate) mod tests {
         assert!(bare_json.get("capabilities").is_none());
         assert!(bare_json.get("input_artifacts").is_none());
         assert!(bare_json.get("output_artifacts").is_none());
+    }
+
+    /// Phase 38（ADR-0028 追記）: `harness`（`default_role` の役割のアダプタ）と `subject_genre` は
+    /// 追加のみのフィールドで、無ければ JSON に出ない（旧ワーカー互換）。`名前: 説明` は名前と説明に分かれる。
+    #[test]
+    fn harness_and_subject_genre_are_optional_additions() {
+        let roles = vec![task_core::RoleSpec {
+            id: "literature-reader".into(),
+            adapter: Some("paperqa".into()),
+            ..task_core::RoleSpec::default()
+        }];
+        let spec = task_core::GenreSpec {
+            id: "literature".into(),
+            description: "related work".into(),
+            output_artifacts: vec!["answer.md: 引用付きの答え".into(), "papers.json".into()],
+            default_role: Some("literature-reader".into()),
+            roles: vec!["literature-reader".into()],
+            ..task_core::GenreSpec::default()
+        };
+        // 役割を渡さずに組むと `harness` は付かない（従来の `From<&GenreSpec>`）。
+        let bare = serde_json::to_value(GenreContext::from(&spec)).unwrap();
+        assert!(bare.get("harness").is_none(), "{bare}");
+
+        let genre = GenreContext::from_spec(&spec, &roles);
+        assert_eq!(genre.harness.as_deref(), Some("paperqa"));
+        assert!(genre.is_harness());
+        assert_eq!(
+            genre.output_artifacts_named(),
+            vec![("answer.md", Some("引用付きの答え")), ("papers.json", None)]
+        );
+
+        let empty = serde_json::to_value(RunContext::default()).unwrap();
+        assert!(empty.get("subject_genre").is_none(), "{empty}");
+        let context = RunContext { subject_genre: Some(genre), ..RunContext::default() };
+        let json = serde_json::to_value(&context).unwrap();
+        assert_eq!(json["subject_genre"]["harness"], "paperqa");
+        assert_eq!(json["subject_genre"]["output_artifacts"][0], "answer.md: 引用付きの答え");
+        let back: RunContext = serde_json::from_value(json).unwrap();
+        assert_eq!(back, context);
     }
 
     /// ADR-0003 D6: 生成スキーマとコミット済みファイルの一致。`UPDATE_SCHEMA=1` で再生成する。

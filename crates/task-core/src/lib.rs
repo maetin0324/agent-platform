@@ -24,8 +24,8 @@ pub use message::{
     is_conversation,
 };
 pub use model::{
-    ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, Lease, RoleSpec, RunRole, Status, Task, TaskId,
-    TaskKind, Tier, Usage, WorkerHint, WorkspaceSpec,
+    ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, HARNESS_ADAPTERS, Lease, RoleSpec, RunRole, Status,
+    Task, TaskId, TaskKind, Tier, Usage, WorkerHint, WorkspaceSpec, artifact_entry_description, artifact_entry_name,
 };
 pub use org::{
     Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
@@ -34,7 +34,9 @@ pub use org::{
 pub use report::{
     COMPACTION_ROLE, Report, ReportFilter, ReportId, ReportKind, ReportStore, ReportsLive, support_kind,
 };
-pub use plan::{MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput};
+pub use plan::{
+    MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput, fix_harness_artifacts,
+};
 pub use store::{
     EventRow, ListFilter, ListOrder, Page, SCHEMA_VERSION, SqliteStore, StoreError, StoreOptions,
     TaskStore, event_row_schema_value,

@@ -48,6 +48,10 @@ pub struct ReviewerRun {
     pub sink: Box<dyn EventSink>,
     /// 合成 `Review` タスクの `worker_hint`（設定 `[reviewer]`。ADR-0010 D9）。
     pub hint: WorkerHint,
+    /// Phase 38（ADR-0028 追記）: レビュー対象のタスクの分野の manifest（ディスパッチャが `[[genres]]` と
+    /// `[[roles]]` から決定的に組む）。ハーネスで動く分野なら、レビュアーのプロンプトに「成果物の名前は
+    /// 固定」の規約が出る（`claude_code::harness_artifacts_section_for_review`）。
+    pub subject_genre: Option<task_worker::GenreContext>,
 }
 
 /// `Plan` kind の検証パラメータ（ADR-0007 D2/D4, ADR-0028 D3）。
@@ -427,6 +431,7 @@ async fn run_reviewer_inner(
             })
             .collect())
     };
+    let subject_genre = run.subject_genre.clone();
     let review_path = artifacts_dir.join(REVIEW_FILE_NAME);
     let review_rel = format!("{artifacts_rel}/{REVIEW_FILE_NAME}");
     // 前回のレビュー run の出力を今回の結果と誤読しない（ADR-0007 D1）。
@@ -452,6 +457,9 @@ async fn run_reviewer_inner(
             children: Vec::new(),
             // ADR-0027 D1: Reviewer run は委譲しない（M8 相当）。
             available_genres: Vec::new(),
+            // Phase 38（ADR-0028 追記）: 対象タスクの分野の manifest だけは渡す（ハーネスで動く分野の
+            // 成果物の名前は固定で、`papers.json` は検索コーパスであって答えではない、を伝えるため）。
+            subject_genre: subject_genre.clone(),
             // ADR-0033 D4 / D6: Reviewer run は「人」ではなく独立した判定なので、役職・記憶・やり取り・
             // 組織図は渡さない（判定は成果物と条件だけで決める）。
             ..RunContext::default()
@@ -733,6 +741,7 @@ mod tests {
             },
             sink: Box::new(RecordingSink::default()),
             hint: reviewer_hint(),
+            subject_genre: None,
         }
     }
 
@@ -771,6 +780,7 @@ mod tests {
             },
             sink: Box::new(RecordingSink::default()),
             hint: reviewer_hint(),
+            subject_genre: None,
         };
         let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { reviewer: Some(run), ..Default::default() }).await;
         let pf = out.provider_failure.expect("provider failure");

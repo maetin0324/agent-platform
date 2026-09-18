@@ -341,6 +341,13 @@
         "description": {
           "type": "string"
         },
+        "harness": {
+          "description": "Phase 38（ADR-0028 追記）: この分野の担当が動くハーネスのアダプタ id\n（`default_role` の役割の `adapter`。`GenreSpec::harness_adapter`）。`paperqa` /\n`local-deep-research` のとき、成果物の名前は**固定**で担当は別のファイルを書けない\n（`is_harness`）。決定的に決まる値で、プロンプトに「成果物の規約」を出すかの判断にだけ使う。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
         },
@@ -820,6 +827,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "subject_genre": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GenreContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Phase 38（ADR-0028 追記）: **レビュー run** にだけ、レビュー対象のタスクの分野の manifest を渡す。\nハーネス系の分野（`GenreContext::is_harness`）なら、レビュアーのプロンプトに「成果物の名前は固定で、\n`papers.json` は検索コーパスであって答えではない」という規約を出す（実機で、計画が勝手に決めた\nファイル名を基準にレビュアーが不合格にした事故から）。決定的（設定を引くだけ）。"
         },
         "work_genre": {
           "anyOf": [

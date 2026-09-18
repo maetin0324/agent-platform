@@ -145,7 +145,7 @@ id = "web-research"
 description = "Web・OSS・製品・仕様・技術報告の調査（論文以外）"
 capabilities = ["Web 検索（SearXNG）", "OSS 実装・製品・仕様の確認", "複数ソースの突き合わせ"]
 input_artifacts = ["question"]
-output_artifacts = ["report.md"]
+output_artifacts = ["report.md: 出典付きの調査報告（これが答え）", "sources.json: 出典と引用の有無", "research.json: 検索の記録（クエリと件数）"]
 default_role = "web-scout"
 roles = ["web-scout"]
 
