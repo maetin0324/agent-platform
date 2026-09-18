@@ -1524,4 +1524,107 @@ print(json.dumps({
         // `questions` が list（要素がリストまたは文字列）のときも同じように平らにする。
         assert_eq!(values["queries_from_list_questions"], serde_json::json!(["qa", "qb"]));
     }
+
+    /// 実機の不具合（本番、2026-09-18）の回帰: `detailed_research` は `settings_override` という
+    /// 引数を持たず（`quick_summary`/`generate_report` と違う）、渡した設定は `**kwargs` に落ちて
+    /// 無視され、`llm.model` が未設定のまま "Ollama model not configured" で落ちていた。実機
+    /// （LDR 1.10.7）で確かめた通り、正しい渡し方は `settings_snapshot=create_settings_snapshot(overrides=settings)`。
+    /// このテストは偽の `local_deep_research` パッケージを `sys.modules` に入れてランナーの `main()` を
+    /// 実際に呼び、`detailed` モードでは `create_settings_snapshot` が `[adapters.local_deep_research].settings`
+    /// を `overrides` として受け取り、その戻り値が `detailed_research` に `settings_snapshot` として渡ること
+    /// （`settings_override` としては渡らないこと）を検証する。ADR-0029 参照。
+    #[test]
+    fn runner_detailed_mode_passes_settings_via_settings_snapshot() {
+        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+            eprintln!("skipping: python3 not available");
+            return;
+        };
+        if !python.status.success() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r#"
+import contextlib, importlib.util, io, json, os, sys, tempfile, types
+
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+calls = {}
+
+def fake_create_settings_snapshot(overrides=None, base_settings=None, **kwargs):
+    calls["create_settings_snapshot_overrides"] = overrides
+    return {"snapshot": True, "from_overrides": overrides}
+
+def fake_detailed_research(query, **kwargs):
+    calls["detailed_research_kwargs"] = kwargs
+    return {"summary": "s", "sources": [], "findings": [], "iterations": 1, "questions": {}}
+
+def fake_quick_summary(*a, **kw):
+    raise AssertionError("quick_summary must not be called for mode=detailed")
+
+def fake_generate_report(*a, **kw):
+    raise AssertionError("generate_report must not be called for mode=detailed")
+
+fake_api = types.ModuleType("local_deep_research.api")
+fake_api.detailed_research = fake_detailed_research
+fake_api.quick_summary = fake_quick_summary
+fake_api.generate_report = fake_generate_report
+fake_api.create_settings_snapshot = fake_create_settings_snapshot
+fake_pkg = types.ModuleType("local_deep_research")
+fake_pkg.api = fake_api
+sys.modules["local_deep_research"] = fake_pkg
+sys.modules["local_deep_research.api"] = fake_api
+
+with tempfile.TemporaryDirectory() as d:
+    report_path = os.path.join(d, "artifacts", "report.md")
+    input_path = os.path.join(d, "input.json")
+    payload = {
+        "query": "what is the capital of France?",
+        "mode": "detailed",
+        "settings": {"llm.provider": "openai_endpoint", "llm.model": "qwen3.8-27b"},
+        "iterations": 1,
+        "questions_per_iteration": 1,
+        "report_path": report_path,
+    }
+    with open(input_path, "w") as f:
+        json.dump(payload, f)
+    sys.argv = ["local_deep_research_run.py", input_path]
+    # `main()` prints its own progress/`TASKD_RESULT` lines to stdout; swallow those so
+    # only the checker's own JSON summary line reaches the Rust test's stdout capture.
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = mod.main()
+
+kwargs = calls.get("detailed_research_kwargs", {})
+print(json.dumps({
+    "rc": rc,
+    "overrides_passed_to_snapshot": calls.get("create_settings_snapshot_overrides"),
+    "has_settings_snapshot_kwarg": "settings_snapshot" in kwargs,
+    "has_settings_override_kwarg": "settings_override" in kwargs,
+    "settings_snapshot_value": kwargs.get("settings_snapshot"),
+}))
+"#;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let values: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(values["rc"], serde_json::json!(0));
+        assert_eq!(
+            values["overrides_passed_to_snapshot"],
+            serde_json::json!({"llm.provider": "openai_endpoint", "llm.model": "qwen3.8-27b"})
+        );
+        assert_eq!(values["has_settings_snapshot_kwarg"], serde_json::json!(true));
+        assert_eq!(values["has_settings_override_kwarg"], serde_json::json!(false));
+        assert_eq!(
+            values["settings_snapshot_value"],
+            serde_json::json!({"snapshot": true, "from_overrides": {"llm.provider": "openai_endpoint", "llm.model": "qwen3.8-27b"}})
+        );
+    }
 }

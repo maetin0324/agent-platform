@@ -114,6 +114,50 @@ DNS の相性。glibc が A と AAAA を 1 つの UDP ソケットで並行送�
 対処はアダプタの `env` に `RES_OPTIONS = "single-request"`（glibc に順次問い合わせをさせる。root 不要）。
 詳細と実測値は `docs/PROGRESS.md` の Phase 21 と ADR-0031 §4-4。
 
+## 2.6 訂正2（本番の不具合から。2026-09-18。実機で確かめた事実）
+
+**`[adapters.local_deep_research] mode = "detailed"` にすると、`quick` と同じ `settings` で常に
+`Ollama model not configured. Please set llm.model in settings` という `ValueError` を出して失敗していた
+（本番、2026-09-18。exit 1）。** 実機（LDR 1.10.7、`~/taskd/ldr/.venv`）で
+`local_deep_research.api.detailed_research`/`quick_summary` の実装を読み、`detailed_research` を直接
+呼んで確かめた:
+
+- `quick_summary(query, research_id=None, retrievers=None, llms=None, username=None, provider=None,
+  api_key=None, temperature=None, max_search_results=None, settings=None, settings_override=None,
+  search_original_query=True, **kwargs)` — `settings_override` を明示の引数として受け取り、内部で
+  `create_settings_snapshot(base_settings=settings, overrides=settings_override, ...)` を呼んで
+  `kwargs["settings_snapshot"]` を作る。`generate_report` も同じ形（`settings`/`settings_override`
+  を明示の引数に持つ）で、この不具合は無い。
+- **`detailed_research(query, research_id=None, retrievers=None, llms=None, username=None,
+  **kwargs)` には `settings_override` はおろか `settings` という引数すら無い。** 渡した
+  `settings_override=...` は素通しの `**kwargs` に落ち、`detailed_research` 自身のコードは
+  `"settings_snapshot" not in kwargs` のときだけ `create_settings_snapshot()`（**引数無し** =
+  overrides 無し）を呼んで既定値・環境変数だけを使う。その後 `_init_search_system(..., **kwargs)`
+  に渡る `settings_override` はどこにも消費されず単に無視される。結果、`llm.model` は既定のまま
+  （Ollama 前提）で、対象の Qwen エンドポイントは設定されず上記のエラーになる。
+- 実機で確かめた正しい呼び方: **`settings_snapshot=create_settings_snapshot(overrides=settings)` を
+  `detailed_research` に渡す**（`settings` は `quick`/`report` と同じ、TOML の文字列値を
+  `convert_setting_value` で変換したただの `dict`）。ローカルの vLLM Qwen（トンネル越し
+  `127.0.0.1:18000/v1`）と Wikipedia 検索で 1 回通した:
+  ```
+  $ ~/taskd/ldr/.venv/bin/python - <<'EOF'
+  from local_deep_research.api import detailed_research, create_settings_snapshot
+  settings = {"llm.provider": "openai_endpoint",
+              "llm.openai_endpoint.url": "http://127.0.0.1:18000/v1",
+              "llm.openai_endpoint.api_key": "unused", "llm.model": "qwen3.8-27b",
+              "search.tool": "wikipedia"}
+  result = detailed_research("What is the capital of France?",
+                              settings_snapshot=create_settings_snapshot(overrides=settings),
+                              iterations=1, questions_per_iteration=1)
+  print(list(result.keys()))
+  EOF
+  OK, keys: ['query', 'research_id', 'summary', 'findings', 'iterations', 'questions', 'formatted_findings', 'sources', 'metadata']
+  ```
+  （同じ `settings` を旧来どおり `settings_override=settings` として渡すと、上と同じ
+  "Ollama model not configured" で `ValueError` になることも実機で再現確認済み。）
+- ランナー（`crates/task-worker/src/local_deep_research_run.py`）の `detailed` 分岐だけをこの呼び方に
+  直した。`quick`/`report` は元のまま（`settings_override` で正しく動く）。
+
 ## 3. 採らない
 
 - `ldr-web`（Flask の画面）や `ldr-mcp`（MCP サーバ）を常駐させて HTTP / MCP で叩く
