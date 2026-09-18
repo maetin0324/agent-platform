@@ -5237,3 +5237,11 @@ GUI には途中目標単体を引く API が無く案件へのリンクを作�
 - P-95: `bad_news` の束ねは「2 件以上なら束ねる」だが、3 種以上のイベントが同時に pending になる
   運用が増えたら、`approval_pending` や `question_blocked` も種ごとに束ねるほうが良いかもしれない
   （今は「他の種は 1 通ずつ、最古から」なので、pending が多いと後続の通知が数 tick 遅れる）。
+
+### 実機（本番）— Discord 通知が届いた（2026-09-18 08:24 UTC。ADR-0037 受け入れ条件 4）
+
+人間が GUI の「API キー」に `discord-webhook` を登録（fingerprint `8672f59b`）→ Phase 39 の taskd を起動した最初の走査で
+`bad_news` 8 件を一斉送信し 5 件が届き 3 件が 429（Phase 40 の契機）→ Phase 40 を配備して再起動した最初の走査で
+**`milestone_ready` が 1 件だけ作られ、`ok = true`（08:24:03）で Discord に届いた**（案件 `…572BAT`、途中目標
+「隣接領域の動向調査とテーマ候補 3〜5 件」: done 2、Go 待ち 2（秘書の統合・選定、PoC・R&D 課の PoC 計画））。
+起動前の `bad_news` は台帳に行が増えていない（backfill 禁止が効いている）。**ADR-0037 の受け入れ条件 4 は充足。**
