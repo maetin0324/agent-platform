@@ -71,6 +71,10 @@ pub(crate) struct Inner {
     pub(crate) secret_usage: HashMap<String, Vec<crate::types::SecretUse>>,
     /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory] dir`。`None` なら `GET /org/{id}/memory` は 409。
     pub(crate) memory_dir: Option<std::path::PathBuf>,
+    /// ADR-0037 D2（Phase 39）: `[notify] discord_webhook_secret`。
+    pub(crate) notify_secret_id: String,
+    /// ADR-0037 D3: `[notify] gui_base_url`。
+    pub(crate) notify_gui_base_url: Option<String>,
     pub(crate) account_stats: Mutex<crate::stats::AccountStatsState>,
     pub(crate) instance_id: String,
     pub(crate) started_at: String,
@@ -115,6 +119,8 @@ impl ApiState {
             secrets_dir: settings.secrets_dir,
             secret_usage: settings.secret_usage,
             memory_dir: settings.memory_dir,
+            notify_secret_id: settings.notify_secret_id,
+            notify_gui_base_url: settings.notify_gui_base_url,
             account_stats: Mutex::new(crate::stats::AccountStatsState::default()),
             instance_id: settings.instance_id,
             started_at: settings.started_at,

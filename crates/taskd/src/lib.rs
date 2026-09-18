@@ -4,10 +4,12 @@
 mod accounts_admin;
 mod cluster_admin;
 pub mod config;
+/// ADR-0037（Phase 39）: 人の判断が要るときだけ Discord に知らせる（判定は決定的、送信は spawn）。
+pub mod notify;
 /// ADR-0033 D3（Phase 25）: 報告の圧縮（まとめの run を起こす決定的な判断）。
 pub mod reports;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -600,6 +602,8 @@ pub fn api_settings(
         secrets_dir: config.secrets.as_ref().map(|s| s.dir.clone()),
         secret_usage: secret_usage(config),
         memory_dir: config.memory.as_ref().map(|m| m.dir.clone()),
+        notify_secret_id: config.notify.discord_webhook_secret.clone(),
+        notify_gui_base_url: config.notify.base_url().map(str::to_string),
     }
 }
 
@@ -699,6 +703,15 @@ async fn tick_loop(
     // ADR-0032 D4: クラスタ接続の中継（進行中のセッションと、taskd が保持している ssh master）。
     let (cluster_tx, mut cluster_rx) = tokio::sync::mpsc::channel::<cluster_admin::ClusterConnectPending>(16);
     let cluster_sessions: cluster_admin::ClusterConnectSessions = Default::default();
+    // ADR-0037 D3 / B1: 通知。判定はこのループの中で同期に、送信は `tokio::spawn` で（tick を止めない）。
+    // 送信の結果は `notify_rx` に戻り、**次の tick の先頭**で `notifications` に書かれる。
+    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<notify::SendResult>(64);
+    let notify_client = notify::client();
+    let notify_secrets_dir = config.secrets.as_ref().map(|s| s.dir.clone());
+    let notify_interval = Duration::from_secs(config.notify.interval_secs);
+    let mut notify_in_flight: HashSet<task_core::NotificationId> = HashSet::new();
+    let mut notify_pending: Vec<task_core::Notification> = Vec::new();
+    let mut notify_last: Option<std::time::Instant> = None;
     let tick = config.tick();
     let mut ticks: u64 = 0;
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
@@ -743,6 +756,69 @@ async fn tick_loop(
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "reports: could not schedule the compaction runs"),
+            }
+        }
+        // ADR-0037 D1/D3 / B1: 通知。ここもチャネルには送らず、その場で store を見るだけ（LLM もワーカーも
+        // 起動しない）。実際の POST だけが `tokio::spawn` の先で走る。
+        {
+            let store = dispatcher.store();
+            let now = OffsetDateTime::now_utc();
+            // 1. 前の tick で spawn した送信の結果を書く。
+            while let Ok(result) = notify_rx.try_recv() {
+                notify_in_flight.remove(&result.id);
+                if let Err(e) = notify::record(store.as_ref(), &notify_pending, &result, now) {
+                    tracing::warn!(error = %e, "notify: could not record the send result");
+                }
+            }
+            // 2. `interval_secs` ごとに判定し、送れるものを送る。
+            let due = notify_last.map(|t| t.elapsed() >= notify_interval).unwrap_or(true);
+            if due {
+                notify_last = Some(std::time::Instant::now());
+                match notify::schedule(store.as_ref(), &config.notify, now) {
+                    Ok(created) if !created.is_empty() => {
+                        tracing::info!(count = created.len(), "notify: new notifications");
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "notify: could not evaluate the conditions"),
+                }
+                match store.notification_pending() {
+                    Ok(pending) => {
+                        let url = notify::webhook_url(
+                            notify_secrets_dir.as_deref(),
+                            &config.notify.discord_webhook_secret,
+                        );
+                        match (url, notify_client.as_ref()) {
+                            (Some(url), Some(client)) => {
+                                for row in &pending {
+                                    if !notify_in_flight.insert(row.id) {
+                                        continue;
+                                    }
+                                    notify::spawn_send(client.clone(), url.clone(), row, notify_tx.clone());
+                                }
+                            }
+                            // ADR-0037 D2: 秘密が無い間は送らず、pending も溜めない。
+                            _ => {
+                                let idle: Vec<_> = pending
+                                    .iter()
+                                    .filter(|n| !notify_in_flight.contains(&n.id))
+                                    .cloned()
+                                    .collect();
+                                match notify::discard_pending(store.as_ref(), &idle, now) {
+                                    Ok(n) if n > 0 => tracing::debug!(
+                                        count = n,
+                                        "notify: no webhook secret; nothing was sent"
+                                    ),
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "notify: could not discard the pending rows")
+                                    }
+                                }
+                            }
+                        }
+                        notify_pending = pending;
+                    }
+                    Err(e) => tracing::warn!(error = %e, "notify: could not read the pending rows"),
+                }
             }
         }
         let tick_started = std::time::Instant::now();
@@ -904,6 +980,34 @@ async fn handle_admin_request(
             }
             let _ = reply.send(result);
         }
+        // ADR-0037 D4: テスト送信。秘密を読むのも POST するのも taskd 側（task-api は URL を知らない）。
+        // `spawn` するので tick は止まらない（B1）。
+        task_api::AdminRequest::NotifyTest { reply } => {
+            let secrets_dir = config.secrets.as_ref().map(|s| s.dir.clone());
+            let secret_id = config.notify.discord_webhook_secret.clone();
+            let client = notify::client();
+            tokio::spawn(async move {
+                let result = notify::send_test(client.as_ref(), secrets_dir.as_deref(), &secret_id).await;
+                let _ = reply.send(notify_test_outcome(result));
+            });
+        }
+    }
+}
+
+/// ADR-0037 D4: `notify::send_test` の結果を API の型へ写す（秘密が無ければ 409 になる `Unavailable`）。
+fn notify_test_outcome(
+    result: notify::TestSend,
+) -> Result<task_api::NotifyTestOutcome, task_api::NotifyAdminError> {
+    match result {
+        notify::TestSend::Sent => Ok(task_api::NotifyTestOutcome {
+            ok: true,
+            detail: Some("the test message was delivered".to_string()),
+        }),
+        notify::TestSend::Failed(detail) => Ok(task_api::NotifyTestOutcome {
+            ok: false,
+            detail: Some(detail),
+        }),
+        notify::TestSend::NotConfigured(detail) => Err(task_api::NotifyAdminError::Unavailable(detail)),
     }
 }
 

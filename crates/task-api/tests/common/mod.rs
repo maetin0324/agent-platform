@@ -53,6 +53,10 @@ pub struct EnvOptions {
     pub secret_usage: std::collections::HashMap<String, Vec<task_api::SecretUse>>,
     /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory] dir`。`None` なら `GET /org/{id}/memory` は 409。
     pub memory_dir: Option<PathBuf>,
+    /// ADR-0037 D2（Phase 39）: `[notify] discord_webhook_secret`。
+    pub notify_secret_id: String,
+    /// ADR-0037 D3: `[notify] gui_base_url`。
+    pub notify_gui_base_url: Option<String>,
 }
 
 impl Default for EnvOptions {
@@ -72,6 +76,8 @@ impl Default for EnvOptions {
             secrets_dir: None,
             secret_usage: std::collections::HashMap::new(),
             memory_dir: None,
+            notify_secret_id: task_core::DEFAULT_WEBHOOK_SECRET_ID.to_string(),
+            notify_gui_base_url: None,
         }
     }
 }
@@ -255,6 +261,8 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         secrets_dir: options.secrets_dir,
         secret_usage: options.secret_usage,
         memory_dir: options.memory_dir,
+        notify_secret_id: options.notify_secret_id,
+        notify_gui_base_url: options.notify_gui_base_url,
     }
 }
 

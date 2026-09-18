@@ -104,6 +104,9 @@ pub struct ApiV1Schema {
     /// Phase 26（ADR-0033 D5）: 永続の認可（`GET /standing-rules` と `POST /standing-rules`）。
     pub standing_rule_list: StandingRuleList,
     pub standing_rule_create: StandingRuleCreateBody,
+    /// Phase 39（ADR-0037 D4）: 通知（Discord）。`GET /notify` と `POST /notify/test` の応答。
+    pub notify: crate::notify::NotifyView,
+    pub notify_test: crate::notify::NotifyTestResult,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

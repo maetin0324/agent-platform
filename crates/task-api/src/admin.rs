@@ -73,6 +73,26 @@ pub enum AdminRequest {
         id: String,
         reply: oneshot::Sender<Result<(), ClusterAdminError>>,
     },
+    /// ADR-0037 D4（Phase 39）: `POST /notify/test`。taskd が `[secrets]` から webhook の URL を読み、
+    /// その場で 1 通送る（HTTP クライアントを持つのは taskd 側だけ）。
+    NotifyTest {
+        reply: oneshot::Sender<Result<NotifyTestOutcome, NotifyAdminError>>,
+    },
+}
+
+/// ADR-0037 D4: `POST /notify/test` の結果。**URL・ホスト名は含まない**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyTestOutcome {
+    pub ok: bool,
+    /// 人が読む一行（失敗の種別だけ）。
+    pub detail: Option<String>,
+}
+
+/// ADR-0037 D4: テスト送信ができない理由（ハンドラが 409 `notify_unavailable` へ写す）。
+#[derive(Debug, Clone)]
+pub enum NotifyAdminError {
+    /// 秘密が無い・HTTP クライアントが無い等。文面に URL は入れない。
+    Unavailable(String),
 }
 
 /// ADR-0024 D6: `POST /accounts/{id}/check` の結果。

@@ -34,10 +34,11 @@ const MIGRATION_0004: &str = include_str!("../migrations/0004_tasks_objective_co
 const MIGRATION_0005: &str = include_str!("../migrations/0005_tasks_genre_column.sql");
 const MIGRATION_0006: &str = include_str!("../migrations/0006_organization.sql");
 const MIGRATION_0007: &str = include_str!("../migrations/0007_messages_task_id_and_reports_project.sql");
+const MIGRATION_0008: &str = include_str!("../migrations/0008_notifications.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -332,7 +333,10 @@ fn parse_status(s: &str) -> Result<Status, StoreError> {
 /// 実装は `report.rs` にあり、この表の SQL はここには無い）。
 /// ADR-0033 D5（Phase 26）: 認可（`approvals` / `standing_rules`）も同じ形で `crate::approval::ApprovalStore`
 /// にある。
-pub trait TaskStore: Send + Sync + crate::report::ReportStore + crate::approval::ApprovalStore {
+/// ADR-0037 D1（Phase 39）: 通知の台帳（`notifications`）も同じ形で `crate::notify::NotificationStore` にある。
+pub trait TaskStore:
+    Send + Sync + crate::report::ReportStore + crate::approval::ApprovalStore + crate::notify::NotificationStore
+{
     fn insert(&self, task: &Task) -> Result<(), StoreError>;
     fn get(&self, id: TaskId) -> Result<Option<Task>, StoreError>;
     fn list(&self, filter: Option<Status>) -> Result<Vec<Task>, StoreError>;
@@ -630,6 +634,7 @@ impl SqliteStore {
             5 => Ok(MIGRATION_0005),
             6 => Ok(MIGRATION_0006),
             7 => Ok(MIGRATION_0007),
+            8 => Ok(MIGRATION_0008),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -3595,6 +3600,60 @@ mod tests {
         };
         store.message_append(&message).unwrap();
         assert_eq!(store.message_list("secretary", None, 10).unwrap()[0].task_id, Some(task_id));
+    }
+
+    /// Phase 39 / migration 0008（ADR-0037）: 版数 7 の DB を開くと版数 8 になり、`notifications` が
+    /// 使えるようになる（既存の行はそのまま）。2 回目に開いても 0008 は再適用されない。
+    #[test]
+    fn migration_0008_adds_the_notifications_table_to_a_schema_7_db() {
+        use crate::notify::{NotificationKind, NotificationStore};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema7.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in [
+                MIGRATION_0001,
+                MIGRATION_0002,
+                MIGRATION_0003,
+                MIGRATION_0004,
+                MIGRATION_0005,
+                MIGRATION_0006,
+                MIGRATION_0007,
+            ] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
+                 INSERT INTO schema_migrations (version, applied_at) VALUES \
+                 (1, '2020-01-01T00:00:00Z'), (2, '2020-01-01T00:00:00Z'), (3, '2020-01-01T00:00:00Z'), \
+                 (4, '2020-01-01T00:00:00Z'), (5, '2020-01-01T00:00:00Z'), (6, '2020-01-01T00:00:00Z'), \
+                 (7, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 8);
+        let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        assert!(
+            store
+                .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ", now)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(store.notification_pending().unwrap().len(), 1);
+        drop(store);
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(store.notification_pending().unwrap().len(), 1, "既存の行は残る");
+        let applied: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version = 8", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(applied, 1, "migration 8 must be recorded exactly once");
     }
 
     #[test]

@@ -677,6 +677,7 @@ mod tests {
             org: vec![],
             delegation: Default::default(),
             reports: Default::default(),
+            notify: Default::default(),
             accounts: None,
             secrets: None,
             memory: None,
