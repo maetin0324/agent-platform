@@ -120,11 +120,82 @@ min_cited = 2        # 答えが引用した出典の数
 読まれていない候補」を見分けられるようにする）。人が「見るべき関連研究へのリンク」をそのまま読める形にする（SPEC §2.2）。
 `## 出典` は取得の段を行った run だけに付く（`max_candidates = 0` の構成では従来どおり答え本文だけ）。
 
+### D5. 検索語は LLM が立てる（Phase 36 で追記。実機の失敗から）
+
+- 日付: 2026-09-18（Phase 34 の実機の run を見た人間の決定）
+- これは §3 の 1 行目「LLM に検索語を作らせる（今回は採らない）」の**撤回**である。
+
+#### 何が起きたか（本番、2026-09-18。run `01M2SES1R5XQBP3C3M3986K908`）
+
+D1 手順 1 の決定的な抽出は、実依頼「学術動向調査: Pluvio 隣接領域の候補テーマ抽出 …」（日本語）から
+`ad-hoc` / `runtime` / `I/O` / `Pluvio` のような**文脈を失った語**を出した。arXiv / OpenAlex はその語に
+忠実に「モバイル ad hoc ネットワーク」「pluvio-thermal な地形学」「Cilk ランタイム」「PyTorch」を返し、
+30 候補のうち隣接領域は 0〜1 件、PDF 6 本はすべて無関係だった。PaperQA2 は正しく
+"I cannot answer this question due to insufficient information" と答え、D3 の証拠ゲートが `cited=0` で
+落とした。**ゲートは正しく働いた。間違っていたのは検索語である。**
+
+原因は 3 つあり、どれも決定的な抽出では直せない。
+
+1. 依頼文の語（`ad-hoc` / `runtime`）は**分野の文脈の中でだけ**意味が決まる。文脈は日本語の側にある。
+2. 固有名詞（`Pluvio`）は学術索引に存在しない。単独で引くと同じ綴りの別分野（降雨計）に当たる。
+3. arXiv の `all:a b c` は API では **`all:a OR all:b OR all:c`** として扱われる（実機で確認。
+   echo された `search_query` がそうなっていた）。語を並べるほど無関係な論文が増えていた。
+
+#### 決定
+
+1. **検索語は LLM が立てる**（取得ランナーの最初の段）。**PaperQA2 と同じ LLM 先**
+   （settings の `llm`。`acquire.query_model` → `[[providers]] model` → settings の `llm` の順に決め、
+   LiteLLM の `provider/` 接頭辞は落とす）に、OpenAI 互換の `chat/completions` を
+   `OPENAI_BASE_URL` へ**直接 1 回**叩く（`pqa` は使わない。別の run も立てない）。
+   入力はタスクの `title` / `objective` と、あればこの案件についての記憶
+   （`context.memory.project`。`RunContext` に案件の依頼文そのものは無いため、案件単位で人が与えた
+   文脈として最も近いものを渡す）。出力は JSON 固定:
+
+   ```json
+   {"queries": [{"text": "ad hoc file system HPC", "engines": ["arxiv", "openalex"],
+                 "arxiv_categories": ["cs.DC", "cs.OS"]}],
+    "exclude_terms": ["mobile ad hoc network", "language runtime"]}
+   ```
+
+   3〜6 本。プロンプトには「英語で書く」「学術検索向けの短い句（3〜6 語）」「固有名詞（`Pluvio` 等）は
+   単独で使わず説明語と組む」「曖昧語（`ad hoc` / `runtime`）には必ず分野語を添える」「検索エンジンが
+   間違って返してくる近い同名語を `exclude_terms` に挙げる」を書く。
+2. **JSON が壊れていたら D1 手順 1 の決定的な抽出に落ちる**（そのことを `progress:` に出し、
+   `artifacts/queries.json` の `error` に理由を残す）。`acquire.query_llm = false`（既定 `true`）で
+   常に決定的な抽出だけを使える。LLM を呼ぶ先が分からない構成（settings も `--llm` も無い）でも
+   落ちる。**判定は相変わらず D3 のゲートが決定的に行う**（LLM に「足りているか」を聞かない）。
+3. **arXiv は語を `AND` で綴じ、`cat:` で分野を絞る**:
+   `all:ad AND all:hoc AND all:file AND all:system AND (cat:cs.DC OR cat:cs.OS)`。
+   カテゴリは LLM が出したもの、無ければ既定 `cs.DC OR cs.OS OR cs.PF OR cs.NI`。
+   `AND` で 0 件だったときだけ、同じ語を `OR` で 1 回だけ引き直す（カテゴリの縛りは残す。
+   実機で長い `AND` は 0 件になりやすい）。機能語（`for` / `the` / `of` …）は `AND` から落とす。
+   **OpenAlex は `filter=is_oa:true,primary_topic.field.id:17`**（open access かつ Computer Science。
+   `GET https://api.openalex.org/fields` で **fields/17 = Computer Science** を実機で確認、2026-09-18）。
+   計算機科学以外で使うときは `acquire.openalex_filter` で差し替える。
+4. **除外語で候補を落とす**（決定的）。候補の**タイトル + 要旨**に `exclude_terms` のどれかが
+   含まれていれば捨てる。要旨は arXiv の `<summary>`、OpenAlex の `abstract_inverted_index` を
+   組み直したもの（先頭 600 字）で、`candidates.json` にも残す。
+5. **記録**: `candidates.json` の各候補に `query_text`（どの検索語が連れてきたか。エンジンは従来の
+   `source_engine`）を足し、`artifacts/queries.json`（LLM の出力そのまま + `generated_by`:
+   `"llm"` / `"fallback"` + 落ちた理由）を書いて成果物として申告する。
+
+#### なぜ「別の run を立てる」案を採らなかったか
+
+§3 が重いと言ったのは「`[[genres]] literature` の run に `queries.json` を書かせる」案で、run が
+2 本になり、ディスパッチャ・予算・ゲートが絡む。ここで足したのは**取得ランナーの中の 1 回の
+`chat/completions`** であり、run は 1 本のまま、失敗しても決定的な抽出に落ちるだけ
+（実機で 5 秒、Qwen3 は `chat_template_kwargs.enable_thinking = false` を付けないと考えるだけで
+`max_tokens` を使い切って `content` が空になる。付けない口には 1 回だけ付け直さずに再送する）。
+DESIGN 原則 1（ディスパッチャとストアに LLM を入れない）は守られている: LLM を呼ぶのは
+ハーネス（アダプタが起動するランナー）だけで、判定は決定的なゲートのままである。
+
 ## 3. 採らない（今回は）
 
-- **LLM に検索語を作らせる**。依頼文が日本語のとき、英語の検索語を LLM に書かせれば質は上がるが、
+- ~~**LLM に検索語を作らせる**。依頼文が日本語のとき、英語の検索語を LLM に書かせれば質は上がるが、
   そのための run を別に立てると重い（`[[genres]] literature` の run のプロンプトで
-  `artifacts/queries.json` を書かせる案）。まず決定的な抽出で回し、実機で足りなければ別 ADR で足す。
+  `artifacts/queries.json` を書かせる案）。まず決定的な抽出で回し、実機で足りなければ別 ADR で足す。~~
+  → **Phase 36 で撤回**（D5）。実機で決定的な抽出が無関係な論文しか連れて来なかったため、
+  取得ランナーの中で LLM が検索語を立てるようにした（別の run は立てない）。
 - Semantic Scholar / Crossref を叩く（ADR-0027 の「鍵無しで始める」を保つ。Semantic Scholar は
   鍵無しだと 429）。arXiv と OpenAlex で足りるかを先に実機で見る。
 - 引用グラフ（OpenAlex の `referenced_works` / `cited_by`）をたどる。まず 1 段の検索だけ。
@@ -143,3 +214,15 @@ min_cited = 2        # 答えが引用した出典の数
    問う `literature` のタスクを `taskctl worker run` で 1 回通し、`candidates.json` の件数・PDF 本数・
    `answer.md` の出典が**学術論文**になっていることを `docs/PROGRESS.md` に記録する。
 5. `cargo test --workspace`（FAILED 0）/ `cargo clippy --workspace --all-targets -- -D warnings` exit 0。
+
+## 5. 受け入れ条件（Phase 36 / D5）
+
+1. ランナーが、**本物の API も LLM も叩かずに**（`--fixture <dir>` の `llm-1.json`）LLM の検索語 JSON を
+   読み、`cat:` と OpenAlex の `filter` を付け、除外語で候補を落とし、`queries.json` /
+   `candidates.json`（`query_text` 付き）を規定の形で書く。壊れた JSON では決定的な抽出に落ちて、
+   その理由を `progress:` と `queries.json` に残す。
+2. アダプタが LLM の段の設定（PaperQA2 と同じ LLM 先・依頼文）を取得ランナーの入力に載せ、
+   `queries.json` を成果物として申告する。既存の `paperqa` のテスト（Phase 17〜18、34）が通る。
+3. 実機: 上の失敗した run と同じ `objective` を、本番と同じ venv / settings / トンネルの Qwen で
+   `taskctl worker run` に 1 回通し、`queries.json` の検索語・`candidates.json` のうち隣接領域の件数・
+   PDF 本数・`cited`・`answer.md` が "cannot answer" でないことを `docs/PROGRESS.md` に記録する。

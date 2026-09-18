@@ -21,7 +21,11 @@
 #   - ADR-0035: run は 2 段（取得 → 回答）。1 段目は arXiv / OpenAlex（**鍵なし**）で候補論文を探し、
 #     open access の PDF を案件の corpus に落とす（`[adapters.paperqa.acquire]`）。2 段目が `pqa ask`。
 #     取得と引用の件数は決定的な証拠ゲート（`[adapters.paperqa.evidence]`）が見る。
-#     成果物は `artifacts/answer.md`（末尾に `## 出典`）/ `candidates.json` / `sources.json`。
+#     成果物は `artifacts/answer.md`（末尾に `## 出典`）/ `candidates.json` / `sources.json` /
+#     `queries.json`。
+#   - ADR-0035 D5（Phase 36）: その 1 段目の**検索語は LLM が立てる**（`acquire.query_llm`、既定 true）。
+#     PaperQA2 と同じ LLM 先に `chat/completions` を 1 回叩くだけなので、`env` の `OPENAI_BASE_URL` が
+#     生きていることが前提。壊れた答えなら決定的な抽出に落ちるので、止まりはしない。
 
 db = "../taskd-research-demo.sqlite3"
 workspace_root = "../workspaces"
@@ -65,6 +69,22 @@ per_query = 20
 timeout_secs = 30
 # OpenAlex の polite pool 用の連絡先。鍵ではないが、入れておくと制限が緩い。
 # mailto = "you@example.org"
+
+# ADR-0035 D5（Phase 36。実機の失敗から）: **検索語は LLM が立てる**。日本語の依頼文から英語の
+# 学術検索語・arXiv のカテゴリ・除外語を 1 回の `chat/completions` で出させる（PaperQA2 と同じ LLM 先。
+# 上の `env` の `OPENAI_BASE_URL` に直接叩く。別の run は立てない）。答えが JSON として使えなければ
+# 決定的な抽出（依頼文の ASCII 名詞句）に落ち、その理由が `artifacts/queries.json` と progress に残る。
+# `false` にすると常に決定的な抽出だけを使う（Phase 34 までの挙動）。
+query_llm = true
+# 検索語を立てるモデル。省略すると `[[providers]] model`（`--llm`）→ 上の `settings` の `llm` の順。
+# LiteLLM の `provider/` 接頭辞は落として渡す（`openai/qwen3.8-27b` → `qwen3.8-27b`）。
+# query_model = "qwen3.8-27b"
+# その 1 回の呼び出しのタイムアウト（秒）。ローカル LLM は遅いので余裕を持たせる。
+query_timeout_secs = 300
+# OpenAlex の `filter=`。省略すると `is_oa:true,primary_topic.field.id:17`
+# （open access かつ Computer Science。fields/17 は実機の `GET https://api.openalex.org/fields` で確認）。
+# 計算機科学以外の分野を調べるときだけ書き換える（例: Engineering は 22）。
+# openalex_filter = "is_oa:true,primary_topic.field.id:22"
 
 # 決定的な証拠ゲート（ADR-0035 D3。ADR-0031 D2 の literature 版）。満たさないと `Error{retryable}` になり、
 # 成果物（answer.md / candidates.json / sources.json）は残る。`0` を書けばその項目は見ない。
