@@ -1,4 +1,4 @@
-//! 通知の台帳（ADR-0037。migration 0008）。「人の判断が要る」出来事を **1 回だけ** 知らせるための、
+//! 通知の台帳（ADR-0037。migration 0008 / 0009）。「人の判断が要る」出来事を **1 回だけ** 知らせるための、
 //! `(kind, key)` の重複排除だけを持つ小さな表。
 //!
 //! ここにあるのは型と SQL だけで、**何を知らせるかの判定は taskd（`taskd::notify`）にあり、
@@ -6,6 +6,11 @@
 //!
 //! `store.rs` は `TaskStore` の supertrait として `NotificationStore` を要求するだけ
 //! （`report.rs` / `approval.rs` と同じ形）。
+//!
+//! `project_id`（migration 0009。ADR-0037 D6 / GUI 依頼 G13i-P1）: GUI が `milestone_ready` /
+//! `secretary_reply` から案件へリンクを張れるように、判定（`taskd::notify::scan`）が候補を作った
+//! 時点で分かっている案件 id をそのまま台帳に書く。応答時に途中目標から逆引きしない
+//! （安い方: 書き込み時に 1 回決めるだけで済む）。
 
 use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
@@ -13,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use ulid::Ulid;
 
+use crate::org::ProjectId;
 use crate::store::{SqliteStore, StoreError, format_rfc3339, parse_rfc3339};
 
 /// 送信を諦めるまでの試行回数（ADR-0037 D1「最大 3 回、以後は諦めて failed を記録」）。
@@ -116,6 +122,10 @@ pub struct Notification {
     /// 送る文面（決定的な定型文）。
     #[serde(default)]
     pub body: String,
+    /// GUI がリンクを作るための案件 id（ADR-0037 D6）。`milestone_ready` はその途中目標の案件、
+    /// `secretary_reply` はその案件自身、他の種は `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
     #[serde(with = "time::serde::rfc3339")]
     #[schemars(with = "String")]
     pub created_at: OffsetDateTime,
@@ -153,6 +163,7 @@ pub trait NotificationStore: Send + Sync {
         kind: NotificationKind,
         key: &str,
         body: &str,
+        project_id: Option<ProjectId>,
         at: OffsetDateTime,
     ) -> Result<Option<Notification>, StoreError>;
 
@@ -180,7 +191,7 @@ pub trait NotificationStore: Send + Sync {
 }
 
 const SELECT_NOTIFICATION: &str =
-    "SELECT id, kind, key, body, created_at, sent_at, attempts, ok, error FROM notifications";
+    "SELECT id, kind, key, body, created_at, sent_at, attempts, ok, error, project_id FROM notifications";
 
 fn row_to_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Notification, StoreError>> {
     let id: String = row.get(0)?;
@@ -192,6 +203,7 @@ fn row_to_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Notif
     let attempts: i64 = row.get(6)?;
     let ok: Option<i64> = row.get(7)?;
     let error: Option<String> = row.get(8)?;
+    let project_id_col: Option<String> = row.get(9)?;
     let Ok(id) = id.parse::<NotificationId>() else {
         return Ok(Err(StoreError::Invalid(format!("invalid notification id: {id}"))));
     };
@@ -200,12 +212,20 @@ fn row_to_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Notif
             "invalid notification kind: {kind_col}"
         ))));
     };
+    let project_id = match project_id_col {
+        Some(raw) => match raw.parse::<ProjectId>() {
+            Ok(id) => Some(id),
+            Err(_) => return Ok(Err(StoreError::Invalid(format!("invalid notification project_id: {raw}")))),
+        },
+        None => None,
+    };
     Ok((|| {
         Ok(Notification {
             id,
             kind,
             key,
             body,
+            project_id,
             created_at: parse_rfc3339(&created_at)?,
             sent_at: match sent_at {
                 Some(raw) => Some(parse_rfc3339(&raw)?),
@@ -224,14 +244,15 @@ impl NotificationStore for SqliteStore {
         kind: NotificationKind,
         key: &str,
         body: &str,
+        project_id: Option<ProjectId>,
         at: OffsetDateTime,
     ) -> Result<Option<Notification>, StoreError> {
         let conn = self.lock()?;
         let id = NotificationId::new();
         let inserted = conn.execute(
-            "INSERT OR IGNORE INTO notifications (id, kind, key, body, created_at, attempts) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-            params![id.to_string(), kind.as_str(), key, body, format_rfc3339(at)?],
+            "INSERT OR IGNORE INTO notifications (id, kind, key, body, created_at, attempts, project_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+            params![id.to_string(), kind.as_str(), key, body, format_rfc3339(at)?, project_id.map(|p| p.to_string())],
         )?;
         if inserted == 0 {
             return Ok(None);
@@ -321,7 +342,7 @@ mod tests {
     fn upsert_is_idempotent_per_kind_and_key() {
         let store = store();
         let first = store
-            .notification_upsert_pending(NotificationKind::BadNews, "k1", "body", at(0))
+            .notification_upsert_pending(NotificationKind::BadNews, "k1", "body", None, at(0))
             .expect("upsert");
         let first = first.expect("a new row");
         assert_eq!(first.kind, NotificationKind::BadNews);
@@ -332,14 +353,14 @@ mod tests {
 
         // 同じ (kind, key) は 2 回目以降は作らない。
         let second = store
-            .notification_upsert_pending(NotificationKind::BadNews, "k1", "body", at(1))
+            .notification_upsert_pending(NotificationKind::BadNews, "k1", "body", None, at(1))
             .expect("upsert");
         assert!(second.is_none());
         assert_eq!(store.notification_pending().expect("pending").len(), 1);
 
         // kind が違えば別物。
         let other = store
-            .notification_upsert_pending(NotificationKind::QuestionBlocked, "k1", "body", at(2))
+            .notification_upsert_pending(NotificationKind::QuestionBlocked, "k1", "body", None, at(2))
             .expect("upsert");
         assert!(other.is_some());
         assert_eq!(store.notification_pending().expect("pending").len(), 2);
@@ -349,7 +370,7 @@ mod tests {
     fn mark_records_success_failure_and_giving_up() {
         let store = store();
         let row = store
-            .notification_upsert_pending(NotificationKind::ApprovalPending, "a1", "b", at(0))
+            .notification_upsert_pending(NotificationKind::ApprovalPending, "a1", "b", None, at(0))
             .expect("upsert")
             .expect("row");
 
@@ -376,7 +397,7 @@ mod tests {
 
         // 成功: sent_at が入り ok = true、error は消える。
         let sent = store
-            .notification_upsert_pending(NotificationKind::MilestoneReady, "m1", "b", at(3))
+            .notification_upsert_pending(NotificationKind::MilestoneReady, "m1", "b", None, at(3))
             .expect("upsert")
             .expect("row");
         assert!(store.notification_mark(sent.id, Some(true), None, at(4)).expect("mark"));
@@ -400,7 +421,7 @@ mod tests {
         let store = store();
         for (i, key) in ["k1", "k2", "k3"].iter().enumerate() {
             store
-                .notification_upsert_pending(NotificationKind::BadNews, key, "b", at(i as i64))
+                .notification_upsert_pending(NotificationKind::BadNews, key, "b", None, at(i as i64))
                 .expect("upsert");
         }
         let recent = store.notification_recent(2).expect("recent");
@@ -416,7 +437,7 @@ mod tests {
     fn exhausted_reports_the_attempt_limit() {
         let store = store();
         let row = store
-            .notification_upsert_pending(NotificationKind::SecretaryReply, "p1", "b", at(0))
+            .notification_upsert_pending(NotificationKind::SecretaryReply, "p1", "b", None, at(0))
             .expect("upsert")
             .expect("row");
         for i in 0..MAX_NOTIFY_ATTEMPTS {

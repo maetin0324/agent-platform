@@ -169,9 +169,16 @@ async fn the_test_endpoint_is_409_without_an_admin_channel() {
 async fn get_notify_shows_the_fingerprint_and_recent_sends_but_never_the_url() {
     let (env, _tmp) = env_with_webhook(true, Some(TOKEN.into()), None);
     let now = OffsetDateTime::now_utc();
+    let project_id = task_core::ProjectId::new();
     let row = env
         .store
-        .notification_upsert_pending(NotificationKind::MilestoneReady, "01ABC", "途中目標『x』の仕事が終わりました", now)
+        .notification_upsert_pending(
+            NotificationKind::MilestoneReady,
+            "01ABC",
+            "途中目標『x』の仕事が終わりました",
+            Some(project_id),
+            now,
+        )
         .expect("upsert")
         .expect("row");
     env.store
@@ -196,12 +203,34 @@ async fn get_notify_shows_the_fingerprint_and_recent_sends_but_never_the_url() {
     assert_eq!(recent[0]["ok"], true);
     assert_eq!(recent[0]["attempts"], 1);
     assert!(recent[0]["sent_at"].is_string());
+    // GUI 依頼 G13i-P1（ADR-0037 D6）: `milestone_ready` は途中目標の案件 id を運ぶ。
+    assert_eq!(recent[0]["project_id"], project_id.to_string());
 
     // 値そのものは絶対に出ない（URL、トークン部分、どちらも）。
     let text = resp.text();
     assert!(!text.contains(WEBHOOK_URL), "{text}");
     assert!(!text.contains("discord.invalid"), "{text}");
     assert!(!text.contains("super-secret-token"), "{text}");
+}
+
+/// GUI 依頼 G13i-P1（ADR-0037 D6）: `project_id` が無い種（`bad_news` など）は応答に `project_id`
+/// を出さない（`null` 相当。GUI はリンクを作らない）。
+#[tokio::test]
+async fn get_notify_omits_project_id_for_kinds_without_a_project() {
+    let (env, _tmp) = env_with_webhook(true, Some(TOKEN.into()), None);
+    let now = OffsetDateTime::now_utc();
+    env.store
+        .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ: テスト", None, now)
+        .expect("upsert");
+    let app = env.router();
+
+    let resp = send(&app, g("/api/v1/notify")).await;
+    assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
+    let body = resp.json();
+    let recent = body["recent"].as_array().expect("recent");
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0]["kind"], "bad_news");
+    assert!(recent[0].get("project_id").is_none() || recent[0]["project_id"].is_null(), "{recent:?}");
 }
 
 #[tokio::test]

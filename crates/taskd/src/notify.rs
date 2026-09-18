@@ -11,6 +11,14 @@
 //!
 //! 秘密（webhook URL）の規律（ADR-0037 D3）: **URL はログにもエラー文にも応答にも出さない**。
 //! `reqwest::Error` の `Display` は URL を含むので、そのまま文字列にしてはいけない（`safe_error` を使う）。
+//!
+//! Phase 40（実機 2026-09-18。ADR-0037 D5）: 最初の走査で `bad_news` の履歴 8 件が同じ秒に一斉送信され
+//! 429 が 3 件出た一方、Go 待ちの draft がある途中目標では `milestone_ready` が一生鳴らなかった。
+//! これを受けて 3 つを直した: (1) `milestone_ready` は「動いているものが無く、人の手が要る」状態
+//! （ready/running/reviewing/blocked が 0、done が 1 件以上）で鳴る。全終端である必要はない。
+//! (2) `bad_news`/`approval_pending`/`question_blocked`/`secretary_reply` は taskd の起動時刻より
+//! 後にできたものだけを対象にする（backfill 禁止）。(3) 送信は 1 tick に最大 1 通、`bad_news` は
+//! 束ねる（`select_batch`）、429 は attempts に数えず `Retry-After` の間だけ待つ。
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -43,6 +51,10 @@ const REPORT_SCAN: usize = 200;
 const MESSAGE_SCAN: usize = 50;
 /// 送信の本文に付ける名前（ADR-0037 D3）。
 const WEBHOOK_USERNAME: &str = "taskd";
+/// `Retry-After` が読めないときに待つ既定の秒数（ADR-0037 D3。実機 2026-09-18: 8 件一斉送信で 429）。
+pub const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
+/// `bad_news` を束ねるときの接頭辞（`scan_bad_news` が単発送信用に付けたものを剥がして束ねる）。
+const BAD_NEWS_PREFIX: &str = "悪い知らせ: ";
 
 /// `[notify]`（ADR-0037 D2 / D3）。秘密の id と間隔とリンクの根だけを持つ。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -93,16 +105,29 @@ pub struct Candidate {
     pub kind: NotificationKind,
     pub key: String,
     pub body: String,
+    /// GUI がリンクを作るための案件 id（ADR-0037 D6 / GUI 依頼 G13i-P1）。`milestone_ready` はその
+    /// 途中目標の案件、`secretary_reply` はその案件自身、他の種は `None`。
+    pub project_id: Option<task_core::ProjectId>,
 }
 
-/// 送信の結果（spawn した先から tick ループへ戻る）。
+/// 送信の結果（spawn した先から tick ループへ戻る）。`ids` は 1 件のことも、
+/// `bad_news` を束ねた複数件のこともある（ADR-0037 D4）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendResult {
-    pub id: NotificationId,
-    /// 送れたか。
-    pub ok: bool,
-    /// 失敗の理由（**URL・ホスト名は含まない**）。
-    pub error: Option<String>,
+    pub ids: Vec<NotificationId>,
+    pub outcome: SendOutcome,
+}
+
+/// 1 回の POST の結末。**429 は失敗ではない**（ADR-0037 D3 / 実機 2026-09-18）: attempts に数えず、
+/// `retry_after` の間だけ次の送信を控える。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// 送れた。
+    Sent,
+    /// Discord の 1 秒あたりの上限に当たった。この時間が経つまで次を送らない。
+    RateLimited(Duration),
+    /// 送れなかった（**URL・ホスト名は含まない**短い理由）。
+    Failed(String),
 }
 
 // ---- 文面の部品（決定的。LLM は呼ばない）----
@@ -144,19 +169,40 @@ fn node_name(org: &[task_core::OrgNode], id: &str) -> String {
 
 /// tick ごとに DB を読み、「人の判断が要る」条件に当たるものを全部返す（重複排除はまだしない）。
 /// 並びは `NotificationKind::ALL` の順、同じ種の中は id の昇順で決定的。
-pub fn scan(store: &dyn TaskStore, base_url: Option<&str>) -> Result<Vec<Candidate>, StoreError> {
+///
+/// `started_at`（ADR-0037 D5 / 実機 2026-09-18）: `milestone_ready` を除く 4 種は
+/// **taskd の起動時刻より後に作られたもの**（`created_at >= started_at`）だけを対象にする
+/// （過去の出来事を一斉送信しない。backfill 禁止）。`milestone_ready` は状態の判定なので
+/// 起動時刻を見ない（起動直後に 1 回評価してよい）。
+pub fn scan(
+    store: &dyn TaskStore,
+    started_at: OffsetDateTime,
+    base_url: Option<&str>,
+) -> Result<Vec<Candidate>, StoreError> {
     let org = store.org_list()?;
     let mut out = Vec::new();
-    out.extend(scan_milestone_ready(store, base_url)?);
-    out.extend(scan_approval_pending(store, &org, base_url)?);
-    out.extend(scan_question_blocked(store, &org, base_url)?);
-    out.extend(scan_bad_news(store, base_url)?);
-    out.extend(scan_secretary_reply(store, &org, base_url)?);
+    out.extend(scan_milestone_ready(store, &org, base_url)?);
+    out.extend(scan_approval_pending(store, &org, started_at, base_url)?);
+    out.extend(scan_question_blocked(store, &org, started_at, base_url)?);
+    out.extend(scan_bad_news(store, started_at, base_url)?);
+    out.extend(scan_secretary_reply(store, &org, started_at, base_url)?);
     Ok(out)
 }
 
-/// 途中目標に属する仕事（裏方を除く）が 1 件以上あり、すべて終端で、途中目標がまだ `reached` でない。
-fn scan_milestone_ready(store: &dyn TaskStore, base_url: Option<&str>) -> Result<Vec<Candidate>, StoreError> {
+/// 途中目標が「動いているものが無く、人の手が要る」状態になった（ADR-0037 D1、実機 2026-09-18）。
+///
+/// 条件: 途中目標が `reached` でなく、属する仕事（裏方を除く）が 1 件以上あり、その中に
+/// ready / running / reviewing / blocked が **0 件**、done が **1 件以上**。
+/// （この 2 条件が揃えば、残りは自動的に draft か終端のどちらかしかない。
+/// 「Go 待ちの draft がある」も「すべて終端」もここに含まれる。）
+///
+/// 重複排除の `key` は `<milestone_id>:<done の件数>`。Go を出して仕事が進み、また止まれば
+/// done の件数が変わるので再び鳴る。
+fn scan_milestone_ready(
+    store: &dyn TaskStore,
+    org: &[task_core::OrgNode],
+    base_url: Option<&str>,
+) -> Result<Vec<Candidate>, StoreError> {
     let mut out = Vec::new();
     let mut projects = store.project_list()?;
     projects.sort_by_key(|a| a.id);
@@ -172,39 +218,69 @@ fn scan_milestone_ready(store: &dyn TaskStore, base_url: Option<&str>) -> Result
             if milestone.status == MilestoneStatus::Reached {
                 continue;
             }
-            let tasks: Vec<_> = page
+            let mut tasks: Vec<_> = page
                 .items
                 .iter()
                 .filter(|t| t.milestone_id == Some(milestone.id) && support_kind(t).is_none())
                 .collect();
-            if tasks.is_empty() || !tasks.iter().all(|t| t.status.is_terminal()) {
+            if tasks.is_empty() {
+                continue;
+            }
+            tasks.sort_by_key(|t| t.id);
+            let active = tasks
+                .iter()
+                .filter(|t| matches!(t.status, Status::Ready | Status::Running | Status::Reviewing | Status::Blocked))
+                .count();
+            if active > 0 {
                 continue;
             }
             let done = tasks.iter().filter(|t| t.status == Status::Done).count();
+            if done == 0 {
+                continue;
+            }
             let failed = tasks.iter().filter(|t| t.status == Status::Failed).count();
+            let waiting: Vec<_> = tasks.iter().filter(|t| t.status == Status::Draft).collect();
+            let who = if waiting.is_empty() {
+                "なし".to_string()
+            } else {
+                let mut names: Vec<String> = waiting
+                    .iter()
+                    .map(|t| t.assignee.as_deref().map(|id| node_name(org, id)).unwrap_or_else(|| "担当未定".to_string()))
+                    .collect();
+                names.sort();
+                names.dedup();
+                names.join("、")
+            };
             let body = format!(
-                "途中目標『{}』の仕事が終わりました（done {done} / failed {failed}）。達成の判定と次の Go をお願いします。{}",
+                "途中目標『{}』: done {done} / failed {failed}。Go 待ちの仕事が {} 件（担当: {who}）。達成の判定と次の Go をお願いします。{}",
                 milestone.title,
+                waiting.len(),
                 link(base_url, &format!("/projects/{}", project.id))
             );
             out.push(Candidate {
                 kind: NotificationKind::MilestoneReady,
-                key: milestone.id.to_string(),
+                key: format!("{}:{done}", milestone.id),
                 body,
+                project_id: Some(project.id),
             });
         }
     }
     Ok(out)
 }
 
-/// 未決の認可（`decision IS NULL`）。
+/// 未決の認可（`decision IS NULL`）。**taskd の起動時刻より後にできたものだけ**（backfill 禁止）。
 fn scan_approval_pending(
     store: &dyn TaskStore,
     org: &[task_core::OrgNode],
+    started_at: OffsetDateTime,
     base_url: Option<&str>,
 ) -> Result<Vec<Candidate>, StoreError> {
     let mut out = Vec::new();
-    let mut pending = store.approval_list(Some(true), None, None)?;
+    let mut pending: Vec<_> = store
+        .approval_list(Some(true), None, None)?
+        .into_iter()
+        .filter(|a| a.created_at >= started_at)
+        .collect();
     pending.sort_by_key(|a| a.id);
     for approval in pending {
         let body = format!(
@@ -217,15 +293,18 @@ fn scan_approval_pending(
             kind: NotificationKind::ApprovalPending,
             key: approval.id.to_string(),
             body,
+            project_id: None,
         });
     }
     Ok(out)
 }
 
 /// `blocked`（人への質問）のタスク。同じ `task_id` の認可があるものは `approval_pending` に任せる。
+/// **taskd の起動時刻より後にできたタスクだけ**（backfill 禁止）。
 fn scan_question_blocked(
     store: &dyn TaskStore,
     org: &[task_core::OrgNode],
+    started_at: OffsetDateTime,
     base_url: Option<&str>,
 ) -> Result<Vec<Candidate>, StoreError> {
     let with_approval: HashSet<String> = store
@@ -238,7 +317,7 @@ fn scan_question_blocked(
         ..ListFilter::default()
     };
     let page = store.list_page(&filter, ListOrder::CreatedDesc, None, TASK_SCAN)?;
-    let mut tasks = page.items;
+    let mut tasks: Vec<_> = page.items.into_iter().filter(|t| t.created_at >= started_at).collect();
     tasks.sort_by_key(|a| a.id);
     let mut out = Vec::new();
     for task in tasks {
@@ -262,13 +341,19 @@ fn scan_question_blocked(
             kind: NotificationKind::QuestionBlocked,
             key: task.id.to_string(),
             body,
+            project_id: None,
         });
     }
     Ok(out)
 }
 
-/// 秘書レベル（level 0）の `bad_news` 報告。
-fn scan_bad_news(store: &dyn TaskStore, base_url: Option<&str>) -> Result<Vec<Candidate>, StoreError> {
+/// 秘書レベル（level 0）の `bad_news` 報告。**taskd の起動時刻より後にできたものだけ**（backfill 禁止。
+/// 実機 2026-09-18: 起動直後に今日の履歴 8 件が一斉送信され、429 で 3 件落ちた）。
+fn scan_bad_news(
+    store: &dyn TaskStore,
+    started_at: OffsetDateTime,
+    base_url: Option<&str>,
+) -> Result<Vec<Candidate>, StoreError> {
     let filter = ReportFilter {
         level: Some(0),
         limit: REPORT_SCAN,
@@ -277,7 +362,7 @@ fn scan_bad_news(store: &dyn TaskStore, base_url: Option<&str>) -> Result<Vec<Ca
     let mut reports: Vec<_> = store
         .report_list(&filter)?
         .into_iter()
-        .filter(|r| r.kind == ReportKind::BadNews)
+        .filter(|r| r.kind == ReportKind::BadNews && r.created_at >= started_at)
         .collect();
     reports.sort_by_key(|a| a.id);
     Ok(reports
@@ -290,14 +375,17 @@ fn scan_bad_news(store: &dyn TaskStore, base_url: Option<&str>) -> Result<Vec<Ca
                 excerpt(&report.headline, EXCERPT_CHARS),
                 link(base_url, "/reports")
             ),
+            project_id: None,
         })
         .collect())
 }
 
 /// `proposed` の案件に、組織のノードの返事（`role = node`）が付いた（人の返事待ち）。
+/// **その返事が taskd の起動時刻より後に作られたときだけ**（backfill 禁止）。
 fn scan_secretary_reply(
     store: &dyn TaskStore,
     org: &[task_core::OrgNode],
+    started_at: OffsetDateTime,
     base_url: Option<&str>,
 ) -> Result<Vec<Candidate>, StoreError> {
     let mut projects: Vec<_> = store
@@ -311,7 +399,7 @@ fn scan_secretary_reply(
         let mut replied = false;
         for node in org {
             let messages = store.message_list(&node.id, Some(project.id), MESSAGE_SCAN)?;
-            if messages.iter().any(|m| m.role == MessageRole::Node) {
+            if messages.iter().any(|m| m.role == MessageRole::Node && m.created_at >= started_at) {
                 replied = true;
                 break;
             }
@@ -327,6 +415,7 @@ fn scan_secretary_reply(
                 excerpt(&project.title, EXCERPT_CHARS),
                 link(base_url, &format!("/projects/{}", project.id))
             ),
+            project_id: Some(project.id),
         });
     }
     Ok(out)
@@ -334,20 +423,53 @@ fn scan_secretary_reply(
 
 /// 判定して、まだ知らせていない `(kind, key)` を pending として登録する。作った行を返す
 /// （**2 回目の tick では何も作らない**: 重複排除は `notifications` の `UNIQUE(kind, key)`）。
+///
+/// `started_at`（ADR-0037 D5）: taskd の起動時刻。backfill 禁止の基準（`scan` を見よ）。
 pub fn schedule(
     store: &dyn TaskStore,
     config: &NotifyConfig,
+    started_at: OffsetDateTime,
     now: OffsetDateTime,
 ) -> Result<Vec<Notification>, StoreError> {
     let mut created = Vec::new();
-    for candidate in scan(store, config.base_url())? {
+    for candidate in scan(store, started_at, config.base_url())? {
         if let Some(row) =
-            store.notification_upsert_pending(candidate.kind, &candidate.key, &candidate.body, now)?
+            store.notification_upsert_pending(
+                candidate.kind,
+                &candidate.key,
+                &candidate.body,
+                candidate.project_id,
+                now,
+            )?
         {
             created.push(row);
         }
     }
     Ok(created)
+}
+
+/// 1 通に束ねた送信の材料。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendBatch {
+    pub ids: Vec<NotificationId>,
+    pub content: String,
+}
+
+/// 1 tick で送る 1 通だけを選ぶ（ADR-0037 D3「1 tick に最大 1 通」/ D4「bad_news は束ねる」）。
+/// `pending` は `notification_pending()`（古い順）。`bad_news` が 2 件以上あれば、それらをまとめて
+/// 1 通にする（他の種が混ざっていても、その tick は bad_news を優先する）。それ以外は最古の 1 件だけ。
+pub fn select_batch(pending: &[Notification]) -> Option<SendBatch> {
+    let bad_news: Vec<&Notification> = pending.iter().filter(|n| n.kind == NotificationKind::BadNews).collect();
+    if bad_news.len() >= 2 {
+        let joined = bad_news
+            .iter()
+            .map(|n| n.body.strip_prefix(BAD_NEWS_PREFIX).unwrap_or(n.body.as_str()))
+            .collect::<Vec<_>>()
+            .join("／");
+        let content = format!("悪い知らせ {} 件: {joined}", bad_news.len());
+        return Some(SendBatch { ids: bad_news.iter().map(|n| n.id).collect(), content });
+    }
+    pending.first().map(|n| SendBatch { ids: vec![n.id], content: n.body.clone() })
 }
 
 // ---- 送信（ADR-0037 D3）----
@@ -376,69 +498,91 @@ fn safe_error(e: &reqwest::Error) -> String {
     }
 }
 
+/// `Retry-After` ヘッダ（秒。小数もある）か、無ければ Discord の JSON 本文の `retry_after`
+/// （秒。ミリ秒ではない）を読む。どちらも無ければ `DEFAULT_RETRY_AFTER_SECS`。
+async fn read_retry_after(response: reqwest::Response) -> Duration {
+    let from_header = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.trim().parse::<f64>().ok());
+    if let Some(secs) = from_header {
+        return Duration::from_secs_f64(secs.max(0.0));
+    }
+    let body = response.text().await.unwrap_or_default();
+    let from_body = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("retry_after").and_then(|r| r.as_f64()));
+    match from_body {
+        Some(secs) => Duration::from_secs_f64(secs.max(0.0)),
+        None => Duration::from_secs(DEFAULT_RETRY_AFTER_SECS),
+    }
+}
+
 /// webhook の URL へ 1 通 POST する。返すのは**種別だけ**の短いエラー（URL・ホスト名は入らない）。
-pub async fn post_webhook(client: &reqwest::Client, url: &str, content: &str) -> Result<(), String> {
+/// 429 は `SendOutcome::RateLimited`（失敗ではない。ADR-0037 D3）。
+pub async fn post_webhook(client: &reqwest::Client, url: &str, content: &str) -> SendOutcome {
     let payload = serde_json::json!({
         "content": clamp_content(content),
         "username": WEBHOOK_USERNAME,
     });
-    let response = client
-        .post(url)
-        .json(&payload)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| safe_error(&e))?;
+    let response = match client.post(url).json(&payload).timeout(REQUEST_TIMEOUT).send().await {
+        Ok(r) => r,
+        Err(e) => return SendOutcome::Failed(safe_error(&e)),
+    };
     let status = response.status();
     if status.is_success() {
-        Ok(())
+        SendOutcome::Sent
+    } else if status.as_u16() == 429 {
+        SendOutcome::RateLimited(read_retry_after(response).await)
     } else {
-        Err(format!("http status {}", status.as_u16()))
+        SendOutcome::Failed(format!("http status {}", status.as_u16()))
     }
 }
 
-/// tick をブロックせずに 1 件送る（B1）。結果は `tx` に流れ、**次の tick** で `notification_mark` される。
+/// tick をブロックせずに 1 通送る（B1。`bad_news` の束ねなら複数 id）。結果は `tx` に流れ、
+/// **次の tick** で `notification_mark` される。
 pub fn spawn_send(
     client: reqwest::Client,
     url: String,
-    notification: &Notification,
+    batch: &SendBatch,
     tx: tokio::sync::mpsc::Sender<SendResult>,
 ) {
-    let id = notification.id;
-    let content = notification.body.clone();
+    let ids = batch.ids.clone();
+    let content = batch.content.clone();
     tokio::spawn(async move {
-        let result = post_webhook(&client, &url, &content).await;
-        let send_result = match result {
-            Ok(()) => SendResult { id, ok: true, error: None },
-            Err(error) => SendResult { id, ok: false, error: Some(error) },
-        };
-        let _ = tx.send(send_result).await;
+        let outcome = post_webhook(&client, &url, &content).await;
+        let _ = tx.send(SendResult { ids, outcome }).await;
     });
 }
 
-/// 送信の結果 1 件を台帳に書く（`tick_loop` が次の tick の先頭で呼ぶ）。
-/// 3 回目の失敗で諦める（`ok = false`）。
+/// 送信の結果を台帳に書く（`tick_loop` が次の tick の先頭で呼ぶ）。3 回目の失敗で諦める（`ok = false`）。
+/// `RateLimited` は台帳に触れない（**attempts に数えない**。次の tick でそのまま再挑戦する）。
 pub fn record(
     store: &dyn TaskStore,
     pending: &[Notification],
     result: &SendResult,
     now: OffsetDateTime,
 ) -> Result<(), StoreError> {
-    if result.ok {
-        store.notification_mark(result.id, Some(true), None, now)?;
-        return Ok(());
-    }
-    // 直前に読んだ pending の `attempts` で「これが最後の試行か」を決める（決定的）。
-    let attempts_before = pending.iter().find(|n| n.id == result.id).map(|n| n.attempts).unwrap_or(0);
-    let give_up = attempts_before + 1 >= MAX_NOTIFY_ATTEMPTS;
-    let error = result.error.as_deref();
-    store.notification_mark(result.id, None, error, now)?;
-    if give_up {
-        let reason = match error {
-            Some(e) => format!("gave up after {MAX_NOTIFY_ATTEMPTS} attempts: {e}"),
-            None => format!("gave up after {MAX_NOTIFY_ATTEMPTS} attempts"),
-        };
-        store.notification_mark(result.id, Some(false), Some(&reason), now)?;
+    match &result.outcome {
+        SendOutcome::Sent => {
+            for id in &result.ids {
+                store.notification_mark(*id, Some(true), None, now)?;
+            }
+        }
+        SendOutcome::RateLimited(_) => {}
+        SendOutcome::Failed(error) => {
+            for id in &result.ids {
+                // 直前に読んだ pending の `attempts` で「これが最後の試行か」を決める（決定的）。
+                let attempts_before = pending.iter().find(|n| n.id == *id).map(|n| n.attempts).unwrap_or(0);
+                let give_up = attempts_before + 1 >= MAX_NOTIFY_ATTEMPTS;
+                store.notification_mark(*id, None, Some(error), now)?;
+                if give_up {
+                    let reason = format!("gave up after {MAX_NOTIFY_ATTEMPTS} attempts: {error}");
+                    store.notification_mark(*id, Some(false), Some(&reason), now)?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -474,8 +618,9 @@ pub async fn send_test(
         ));
     };
     match post_webhook(client, &url, TEST_CONTENT).await {
-        Ok(()) => TestSend::Sent,
-        Err(detail) => TestSend::Failed(detail),
+        SendOutcome::Sent => TestSend::Sent,
+        SendOutcome::RateLimited(_) => TestSend::Failed("rate limited".to_string()),
+        SendOutcome::Failed(detail) => TestSend::Failed(detail),
     }
 }
 

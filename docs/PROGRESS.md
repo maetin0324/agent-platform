@@ -5146,3 +5146,94 @@ Discord の webhook へ投げる。
 - P-94: `notifications` は増え続ける（1 件 = 1 出来事）。今は掃除していない。行数が気になったら
   「`ok IS NOT NULL` かつ `created_at` が N 日より古い行を消す」掃除を tick に足す（判定の重複排除は
   過去の行に依存するので、消した出来事の条件がまだ真なら再送されることに注意）。
+
+---
+
+## Phase 40 — 通知の間隔と「途中目標の仕事が終わった」の意味（実機の初回送信から。2026-09-18）
+
+Phase 39 を配備して webhook を登録した直後の最初の走査で、`bad_news`（今日の失敗の履歴。既に GUI で見て
+対応済み）**8 件が同じ秒に一斉送信され、5 件が届き 3 件が HTTP 429** になった。一方、人が本当に知りたかった
+`milestone_ready`（統合・選定の途中目標が Go 待ちの draft で止まっていること）は**1 件も作られなかった**:
+その途中目標には done の調査 2 件のほかに `draft`（人の Go 待ち）の統合・PoC があり、旧い D1 の
+「属する仕事がすべて終端」が偽になっていたため。ADR-0037 D5/D6 として書き直し、そのとおり実装した。
+
+途中で GUI 側から 1 件の追加依頼（G13i-P1）が来た: `milestone_ready` の `key` は途中目標 id だが、
+GUI には途中目標単体を引く API が無く案件へのリンクを作れない。`notifications.project_id`（migration 0009）
+を足し、判定時に分かっている案件 id をそのまま台帳に書く形で解決した（D6）。
+
+### 入れたもの
+
+- **`milestone_ready` の意味を変えた**（`crates/taskd/src/notify.rs::scan_milestone_ready`）: 途中目標が
+  `reached` でなく、属する仕事（裏方を除く）のうち ready/running/reviewing/blocked が **0 件**、done が
+  **1 件以上**なら鳴る。**全部が終端である必要はない** — 残りが draft（Go 待ち）でも鳴る。重複排除の
+  `key` は `<途中目標 id>:<done の件数>`（Go を出して進み、また止まれば done の件数が変わるので再び鳴る）。
+  文面に「Go 待ちの仕事が K 件（担当: …）」を追加（担当は draft タスクの assignee をノード名に変換、
+  重複排除して連結）。
+- **backfill 禁止**（`scan` / `scan_bad_news` / `scan_approval_pending` / `scan_question_blocked` /
+  `scan_secretary_reply` に `started_at: OffsetDateTime` を追加）: `milestone_ready` を除く 4 種は
+  `created_at >= started_at` の出来事だけを対象にする。`taskd::lib::tick_loop` が起動直後の時刻を
+  1 回だけ記録し（`notify_started_at`）、`schedule` に渡す。
+- **送信の間隔**（`crates/taskd/src/notify.rs`）: `select_batch(pending) -> Option<SendBatch>` が
+  「1 tick に最大 1 通」を決める。`bad_news` が 2 件以上 pending なら 1 通に束ね（`SendBatch::ids` が
+  複数）、それ以外は最古の 1 件。`post_webhook` は 429 を `SendOutcome::RateLimited(Duration)`
+  として区別し（`Retry-After` ヘッダか JSON 本文の `retry_after`、無ければ既定 5 秒）、`record` は
+  `RateLimited` のとき台帳に触れない（attempts を増やさない）。`tick_loop` は 429 を受けたら
+  `notify_blocked_until` を立てて、その時間が経つまで次の due 判定をしない。
+- **`project_id`（GUI 依頼 G13i-P1。ADR-0037 D6）**: migration 0009 で `notifications.project_id TEXT NULL`
+  を追加（`SCHEMA_VERSION` は 8→9）。`taskd::notify::Candidate` に `project_id: Option<ProjectId>` を足し、
+  `scan_milestone_ready`/`scan_secretary_reply` が判定の時点で分かっている案件 id をそのまま持たせる
+  （他の 3 種は `None`）。`task_core::notify::Notification` / `NotificationStore::notification_upsert_pending`
+  も `project_id` を運ぶ。`task_api::notify::NotifyRecent` に `project_id`（省略可）を追加し、
+  `docs/api/v1/api-v1.schema.json` を `UPDATE_SCHEMA=1` で再生成、`docs/gui/api.md` §3.64 を更新。
+
+### 実機の事実（2026-09-18 07:50）
+
+- webhook 登録直後の最初の走査で `bad_news` 8 件が同じ秒に一斉送信され、5 件が届き 3 件が HTTP 429 になった。
+- 同じ走査で、Go 待ちの draft を含む途中目標の `milestone_ready` は 1 件も作られなかった（旧い「全部終端」
+  の定義では、draft が残っている限り一生鳴らない）。
+
+### 証拠
+
+- `cargo test --workspace` → `grep -c "^test result: FAILED"` = **0**。`^test result: ok` は 54 行、
+  通ったテストの合計は **1098 件**（Phase 39 の 1093 件から `taskd::notify` の新規テスト 5 件・
+  `task-api::notify` の新規テスト 1 件・削除 1 件（milestone_ready のテストを 1 本に統合）差し引きで +5）。
+  - `task-core`: `store::tests::migration_0008_adds_the_notifications_table_to_a_schema_7_db`
+    が migration 9（`project_id` 列）も含めて版数 7→9 の往復を確認するように更新（130 件、全体は変わらず）。
+  - `taskd`（`tests/notify.rs`、**18 件**）: `milestone_ready` が「done 2 + draft 2 → 鳴る（key に
+    done=2）／ ready があれば鳴らない／ Go 後に done 3 + draft 1 で再び鳴る（別 key）／ reached なら
+    鳴らない」を 1 本のテストで確認、backfill 禁止（起動前は行を作らない・起動後は作る）、
+    1 tick 1 通（3 件 pending でも batch は 1 件）、429（`retry-after: 2` → `RateLimited(2s)`、
+    `record` しても attempts は 0 のまま pending）、`bad_news` 2 件の束ね（1 通の POST、台帳は
+    2 行とも `ok = true`）、`project_id` が `milestone_ready`/`secretary_reply` に乗り `bad_news` には
+    乗らないことを既存のテストに追記。
+  - `task-api`（`tests/notify.rs`、**11 件**）: 既存の `get_notify_shows_the_fingerprint_...` に
+    `project_id` の往復を追加、新規 `get_notify_omits_project_id_for_kinds_without_a_project`。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**。
+- テスト以外に `unwrap()` / `expect()` の追加なし。
+- テストは外部ネットワークに出ない（429/204/500 の応答もすべて `127.0.0.1` の偽サーバ）。
+
+### 判断が必要な点（報告のみ。実装は完了）
+
+- U40-1: 本来の作業単位のファイル一覧には `crates/taskd/src/lib.rs` は含まれていなかったが、
+  「1 tick に最大 1 通」「429 は attempts に数えない」を実現するには、pending を全件ループして
+  spawn している `tick_loop` の送信ループそのものを変える必要があり、ADR-0037 の通知区画
+  （`// ADR-0037 D1/D3 / B1: 通知。` のコメントブロック、L706〜822 付近）に限定して手を入れた
+  （`notify_started_at` / `notify_blocked_until` の追加、`schedule` 呼び出しへの引数追加、
+  送信ループを `select_batch` 経由に置き換え）。他の関心事には触れていない。並行編集と衝突しないか
+  確認をお願いしたい。
+- U40-2: `crates/task-core/{src/store.rs, src/notify.rs, migrations/0009_*.sql}` /
+  `crates/task-api/{src/notify.rs, tests/notify.rs}` も、コーディネーターからの追加依頼（GUI 依頼
+  G13i-P1）を受けて本 Phase 内で編集した（当初の作業単位のファイル一覧には無かったが、依頼メッセージで
+  明示的に指示されたため）。
+- U40-3: `milestone_ready` の担当表示（「Go 待ちの仕事が K 件（担当: …）」）は draft タスクの
+  `assignee` を組織ノード名に変換して連結する決定的な実装。担当が無い draft は「担当未定」と表示する
+  （実機でこのケースが起きるかは未確認）。
+- U39-1（Phase 39 から持ち越し）: **人間による確認待ち**。Discord の実 URL が無いので実送信は未確認。
+  今回の変更（backfill 禁止・1 tick 1 通・429 の扱い・`milestone_ready` の新しい意味）についても、
+  実機での再確認をお願いしたい。
+
+### 提案
+
+- P-95: `bad_news` の束ねは「2 件以上なら束ねる」だが、3 種以上のイベントが同時に pending になる
+  運用が増えたら、`approval_pending` や `question_blocked` も種ごとに束ねるほうが良いかもしれない
+  （今は「他の種は 1 通ずつ、最古から」なので、pending が多いと後続の通知が数 tick 遅れる）。
