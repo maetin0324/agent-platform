@@ -12,6 +12,7 @@ pub mod codex_account;
 pub mod delegate_file;
 pub mod fake;
 pub mod local_deep_research;
+pub mod local_worktree;
 pub mod memory;
 pub mod paperqa;
 pub mod preamble;
@@ -38,6 +39,10 @@ pub use codex_account::{CodexLoginSession, check_account_codex, start_login_code
 pub use delegate_file::{DELEGATE_FILE_NAME, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
 pub use local_deep_research::{EvidenceThresholds, LdrAdapter, LdrConfig, LdrMode};
+pub use local_worktree::{
+    BaseKind, BaseRef, CleanupOutcome, DEFAULT_BRANCH_PREFIX, LocalWorktree, WORKTREE_DIR_NAME, current_release_sha,
+    is_git_repo, resolve_base, status_is_clean,
+};
 pub use memory::{MEMORY_MAX_CHARS, MemoryDir, MemoryUpdate, read_result_memory};
 pub use paperqa::{AcquireConfig, PaperQaAdapter, PaperQaConfig, PaperQaEvidence};
 pub use protocol::{

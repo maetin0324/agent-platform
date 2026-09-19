@@ -294,7 +294,7 @@ mod tests {
                 tier: Tier::Frontier,
                 adapter: Some("fake".into()),
             },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws") },
+            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws"), mode: None },
             budget: Budget {
                 max_turns: 10,
                 max_wall_secs: 600,
@@ -563,7 +563,7 @@ mod tests {
         // 2. 子が明示すれば案件より強い。
         let mut explicit = dt("b", vec![]);
         let elsewhere = WorkspaceSpec::Local {
-            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
         };
         explicit.workspace = Some(elsewhere.clone());
         let out = plan_delegation(&store, &parent, &[explicit], 0, &[], &[], &DelegationLimits::default(), now())

@@ -6168,3 +6168,145 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
 - `POST /projects` → 201 `01M2WTS3DKNZBSZ2JMVB4CZMBW`「agent-platform の自己改善」、workspace `local: /home/rmaeda/workspace/agent-platform`、
   `status = proposed`。秘書の対話タスクが `ready` になり、返事は GUI の案件画面に届く（人の返事待ち）。
 - 掃除: 9/17 の消えたワークツリーが残していた dev GUI（pid 1464867、127.0.0.1:17901）を停止。
+
+## Phase 49 — ローカルの作業場所もタスクごとに worktree（ADR-0041 D1。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0041 D1）: 案件の作業場所 `local: ~/workspace/agent-platform` を**全タスクが同じ作業ツリーで
+  共有する**のをやめる。並列の実装者が別のブランチを `checkout` して互いの未コミット変更を壊し、人（と人の
+  補助エージェント）の作業も同じチェックアウトで壊れる。ADR-0019 がリモート（`sync = "worktree"`）に対して
+  決めたことを、**ローカルにも同じ形で**持ち込む。
+- 決めたこと（実装の形）:
+  - **`<workspace_root>/<task_id>/tree` が作業ツリー**、その親 `<workspace_root>/<task_id>/` に
+    `runs/` `inputs/` `artifacts/` を置く。作業ツリーの中に `runs/` を作ると `git status --porcelain` が
+    常に汚れ、**終端で worktree を消せなくなる**ため（ADR-0036 の「成果物はタスクごと」はそのまま満たす。
+    親ディレクトリの末尾がタスク id なので `artifacts_dir_for` は「所有」= `<task_dir>/artifacts` を返す）。
+  - そのため `RunRequest` に **`work_dir`**（任意。ワーカーの cwd）を足し、`workspace` は
+    「`runs/` と `artifacts/` の親・`artifact.path` の基準」に役割を寄せた。`work_dir` が無ければ
+    Phase 48 までと同じ（`workspace` が cwd）。`RunRequest::cwd()` / `artifacts_rel()` が 1 か所で吸収する。
+  - `<task_dir>/worktree.json`（目印）を taskd が書く。API・`taskctl` はこの目印だけを見て
+    「run のログと成果物は作業ツリーの外」と判断する（git を起こさない。**worktree を消した後も**
+    `runs/` と `artifacts/` が同じ場所から引ける）。
+- 変更したファイル:
+  - `crates/task-core/src/model.rs`: `WorkspaceMode { Worktree（既定）, Shared }` と
+    `WorkspaceSpec::Local.mode: Option<WorkspaceMode>`（`skip_serializing_if`。省略したものは JSON に出ない
+    = Phase 48 までと 1 バイト同じ）、`WorkspaceSpec::local()` / `local_mode()`。`with_home_expanded` は
+    `mode` を落とさない。単体テスト 1 件。`crates/task-core/src/lib.rs` で再輸出。
+  - `crates/task-worker/src/local_worktree.rs`（新規）: `is_git_repo` / `resolve_base` /
+    `current_release_sha` / `status_is_clean` と `LocalWorktree{repo, task_dir, dir, branch, base}`
+    の `ensure()`（冪等）/ `remove_if_clean() -> CleanupOutcome`。git を起こすだけで判断は無い。
+    `git worktree add` は `workspace_root/.taskd-worktree.lock` の flock で直列化し（同じリポジトリに
+    複数タスクが同時に足す）、直前に `worktree prune`（人が手で消した登録の残骸を掃除）。
+    **base の規則（決定的）**: `main` があればその sha、無ければ `HEAD`。ただし `[selfdeploy] releases_dir`
+    の**親**の `current/manifest.json` の `sha` が読め、それが `main` の子孫なら（`merge-base --is-ancestor`）
+    その sha（本番より古いコードから分岐させない）。単体テスト 9 件。
+  - `crates/task-worker/src/workspace.rs`: `LocalWorkspace::with_work_dir()`。`prepare` は従来どおり
+    `dir` の下に `artifacts/` `inputs/` `runs/` を作り、**`exec`（判定コマンド）だけ worktree で動かす**
+    （ADR-0019 D1 6.）。
+  - `crates/task-worker/src/protocol.rs`: `RunRequest.work_dir` と `cwd()`、`artifacts_rel()` が
+    worktree のときだけ**絶対パス**を返す（成果物は作業ツリーの外にあるので `..` を書かせない。
+    ADR-0003 D5 の「`artifact.path` に `..` を入れない」と衝突させないため）。`ChildSummary.branch`。
+  - `crates/task-worker/src/{claude_code,codex,acp,subprocess,paperqa,local_deep_research}.rs`:
+    cwd を `req.cwd()` に（acp は `session/new` の `cwd` も）。
+  - `crates/task-worker/src/preamble.rs`: `worktree_note()`（「作業ツリー …、ブランチ …、base …（main /
+    current / head）。このブランチにコミットせよ。`main` に直接コミットするな。`git checkout` で
+    ブランチを変えるな。」）。ディスパッチャが ADR-0039 D3 の `workspace_note` の後ろに足す。
+  - `crates/task-worker/src/claude_code.rs`: 集約 run の子の行に `branch=<子のブランチ>`（あるときだけ。
+    無い子の文面は従来どおり）。
+  - `crates/task-ops/src/workspace.rs`（新規）: `local_dir(task, workspace_root)`（目印を見るだけ）、
+    `WorktreeMarker` の read / write。単体テスト 3 件。`task-ops` の `serde_json` を dev から本依存へ。
+  - `crates/task-ops/src/view.rs`: `workspace_dir` は `workspace::local_dir`、`TaskDetail.worktree` は
+    ローカルの worktree でも出る（目印から `{project, dir, branch}`）。
+  - `crates/task-api/src/files.rs`: `canonical_workspace` も `workspace::local_dir`（GUI の run ログ・
+    成果物が worktree のタスクでも引ける）。
+  - `crates/task-dispatch/src/dispatcher.rs`: `DispatchConfig` に `worktree_branch_prefix` /
+    `releases_dir`。`local_worktree_for(task)`（`Local` + `mode = worktree` + git リポジトリのときだけ
+    `Some`）、`task_dir` がその場合 `workspace_root/<task_id>` を返す、`dispatch_ready` が worktree を
+    用意して `local_worktrees` に覚える、`run_worker` が `ensure()` → 目印 → `with_work_dir` →
+    `RunRequest.work_dir`、`run_extras` が前置きの 1 行と子のブランチを載せる、`spawn_review` が判定を
+    worktree で走らせる、`tick` が `cleanup_finished_worktrees()`（終端でクリーンなら
+    `git worktree remove`、汚れていれば残して `WorkerProgress`「未コミットの変更が残っています: <dir>」を
+    1 行。**ブランチは消さない。`git commit` は一度も呼ばない**）。テスト 8 件。
+  - `crates/task-dispatch/src/review.rs`: Reviewer run は `work_dir: None`（判定だけで編集しないので
+    対象タスクのディレクトリで動かす）。
+  - `crates/taskd/src/config.rs`: `[workspace] worktree_branch_prefix`（既定 `taskd/` =
+    ADR-0019 の `WorktreeSettings::branch_prefix` と同じ値。`deny_unknown_fields`、空は設定エラー）と
+    `dispatch_config()` への写し（`releases_dir` は `[selfdeploy]` の既存の値をそのまま読む）。テスト 1 件。
+  - `crates/taskd/src/lib.rs` / `crates/taskctl/src/commands/worker.rs`: `RunRequest.work_dir: None`
+    （疎通確認と手動 run は worktree を切らない）、テストの `Config` に `workspace: Default::default()`。
+  - `config/taskd.example.toml`: `[workspace]` の節（`mode` の意味・base の規則・後片付けをコメントで）。
+  - `docs/gui/api.md`: §3.5 に「ローカルの worktree の `worktree` と `workspace_dir`」、§3.46 に
+    Phase 49 の `mode` の節。`docs/api/v1/api-v1.schema.json` / `event.schema.json` /
+    `docs/protocol/worker-protocol.schema.json` / `plan-output.schema.json` を再生成。
+  - `docs/adr/0040-self-improvement-deploy.md` D5 / `docs/selfdeploy.md` §2・§7: `self/<task-id>` を
+    「taskd が用意した worktree とブランチ（`taskd/<task-id>`）にコミットする（ADR-0041 D1）」に置き換え。
+  - 既存のテスト（ディスパッチャ・e2e）は**弱めていない**。作業場所が git リポジトリでない tempdir なので
+    `is_git_repo` が偽になり、従来どおりの経路を通る（`mode: shared` を足す必要も無かった）。
+- 証拠:
+  - `cargo test --workspace` → exit 0、`grep -c "^test result: FAILED"` = **0**、**1199 passed / 2 ignored**
+    （59 個のテストバイナリ）。今回足したのは task-core 1 / task-ops 3 / task-worker 9 / task-dispatch 8 /
+    task-api 1 / taskd 1 = **23 件**。
+  - `cargo clippy --workspace -- -D warnings` → exit 0（`--all-targets` でも警告ゼロ）。
+  - `UPDATE_SCHEMA=1 cargo test -p task-api --lib` / `-p task-worker --lib` / `-p task-core --lib` →
+    いずれも ok。再生成した 4 つのスキーマの差分は `WorkspaceMode` / `Local.mode` /
+    `RunRequest.work_dir` / `ChildSummary.branch` の**追加のみ**（既存フィールドの意味は変えていない。
+    `PROTOCOL_VERSION` は 4 のまま）。
+  - 受け入れ条件ごと（すべて `cargo test -p task-dispatch --lib` / `-p task-worker --lib` の中）:
+    - `mode` の既定 `worktree` と往復・知らない値の拒否 →
+      `model::tests::the_local_workspace_mode_defaults_to_worktree_and_stays_out_of_the_json_when_omitted`、
+      `task-api` の `a_local_project_workspace_can_choose_the_worktree_mode`（POST / PATCH / GET / 400）。
+    - `<workspace_root>/<task_id>/tree` に worktree・ブランチ `taskd/<task_id>`・base `main`・cwd が
+      worktree・`runs/` が作業ツリーの外 →
+      `a_local_git_workspace_runs_in_a_per_task_worktree_on_its_own_branch`。
+    - base = `current`（`main` の子孫のとき）→ `the_worktree_branches_from_the_current_release_when_it_is_ahead_of_main`
+      と `local_worktree::tests::the_base_is_the_current_release_when_it_is_a_descendant_of_main` /
+      `..._stays_main_when_the_current_release_is_behind` / `..._is_head_when_there_is_no_main`。
+    - やり直しは作り直さない → `local_worktree::tests::a_retry_reuses_the_existing_worktree`、
+      消した後はブランチから作り直す → `a_removed_worktree_is_recreated_on_the_same_branch`。
+    - 終端でクリーンなら消す（ブランチは残す）/ 汚れていれば残して 1 行 →
+      `a_clean_worktree_is_removed_at_the_terminal_state_and_the_branch_stays` /
+      `a_dirty_worktree_is_kept_and_a_progress_line_is_appended`（2 tick 目に重ねて積まないことも確認）。
+    - 前置きの文 → `the_preamble_note_names_the_worktree_the_branch_and_the_base`。
+    - 子は別 worktree・親は子のブランチを見る →
+      `each_delegated_child_gets_its_own_worktree_and_the_parent_sees_the_branches`。
+    - `shared` は従来どおり / git でない path は従来どおり →
+      `shared_mode_keeps_the_repository_itself_as_the_working_directory` /
+      `a_local_path_that_is_not_a_git_repository_is_unchanged`。
+- 未解決:
+  - **P49-1（人がやること）**: 本番の `~/taskd/taskd.toml` の `implementer` の `instructions` には
+    Phase 48 で「タスクごとに `self/<task-id>` ブランチを切れ」と書いてある。これは**人が直す必要がある**
+    （taskd はこのファイルを書かない）。「taskd が用意した worktree とブランチ（`taskd/<task-id>`）に
+    コミットする。自分でブランチを切るな。`git checkout` でブランチを変えるな」に置き換え、`POST /reload`。
+    直さないと、実装者は前置き（作業場所の節）と役割の指示文で**矛盾した指示**を受ける。
+  - P49-2: `local_worktrees` は taskd のプロセス内の記録なので、**再起動をまたぐと後片付けが走らない**
+    （worktree が残る）。残ったものは人が `git -C <repo> worktree remove <dir>` する。
+    起動時に `workspace_root/*/worktree.json` を舐めて終端のタスクの分を片付ける手もあるが、
+    ADR-0041 は「`taskctl workspace prune` は今回作らない」としたので今回は入れていない。
+  - P49-3: `taskctl worker run`（手動 run）は worktree を切らない（`work_dir: None`）。DB のタスクが
+    worktree で動いていても、手で走らせると元のリポジトリで動く。`--workspace` に `tree` を渡せば済むが、
+    `taskctl show` の `worktree.dir` を見て自分で渡す必要がある。
+  - P49-4: `gui/` は別のエージェントが同じ時間に触っているので**触っていない**。
+    `pnpm gen:types` は**実行していない**ので、`gui/app/taskd/types.ts` はまだ `WorkspaceMode` と
+    `Local.mode` を知らない。GUI が案件の作業場所のフォームに `mode` を出すのは G15 以降の仕事。
+    `docs/api/v1/api-v1.schema.json` は再生成済みなので、`pnpm gen:types` を 1 回回せば追いつく。
+  - P49-5: `Dispatcher::task_dir` が `local_worktree_for` を通るので、ローカルのタスクでは
+    `git rev-parse --git-dir`（git でなければここで止まる）、git リポジトリならさらに
+    `rev-parse refs/heads/main` と `merge-base` が毎回走る。tick ごとに数回なので実測では問題ないが、
+    `log_slow_step("task_dir", …)` に出るようなら tick 内のメモ化を入れる（`local_worktree_for` を
+    「ディレクトリだけ」と「base まで」に割るのが素直。ただし commit が 1 つも無いリポジトリで
+    2 つの判定がずれるので、割るときは目印の扱いを揃えること）。
+  - P49-6: `tests/e2e/tests/account_pool_scenarios.rs` の
+    `account_selection_follows_headroom_and_survives_restart_and_throttle_only_cools_the_account` が
+    全体 1 回目で 1 度だけ落ちた（再起動後の `utilization` が `null`。`AccountBook` の書き出しと
+    再起動の競合。Phase 49 の変更とは無関係）。単独実行と 2 回目の全体実行はいずれも ok。
+    既知のちらつきとして記録する。
+- 提案:
+  - P49-7: ADR-0036 の `artifacts_dir_for` は「作業ディレクトリの末尾がタスク id なら所有」という規則で、
+    今回はその規則に**たまたま**乗って `<task_dir>/artifacts` になっている（`tree` は cwd であって
+    `workspace` ではない）。`RunRequest.workspace` / `work_dir` の 2 本立てが入ったので、
+    「成果物の親」を明示的に渡す形（`artifacts_dir` は既に明示なので、`owns_workspace` を消す）に
+    整理できる。次に ADR-0036 まわりを触るときに検討する。
+  - P49-8: ワーカーが `git checkout` で別のブランチに移ることは**指示文でしか止めていない**
+    （ADR-0041 が「禁止事項が指示文だけで強制力が無いのは最大の構造的な穴。この ADR では扱わない」と
+    した点そのもの）。run の終わりに `git -C <dir> rev-parse --abbrev-ref HEAD` を見て、
+    ブランチが変わっていたら `WorkerProgress` で知らせるくらいは安く足せる。

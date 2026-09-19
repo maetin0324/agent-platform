@@ -1318,7 +1318,7 @@ async fn check_provider(
         status: task_core::Status::Ready,
         priority: 0,
         worker_hint: task_core::WorkerHint { tier: task_core::Tier::Standard, adapter: None },
-        workspace: task_core::WorkspaceSpec::Local { path: dir.clone() },
+        workspace: task_core::WorkspaceSpec::Local { path: dir.clone(), mode: None },
         // ADR-0022 M1: 1 ターンではワーカープロトコル（`artifacts/result.json` を書く）を完了できず、
         // 健全なアカウントでも `error_max_turns` になる。人が読む信号にするため少しだけ余裕を持たせる。
         budget: task_core::Budget { max_turns: 3, max_wall_secs: 30, max_retries: 0 },
@@ -1345,6 +1345,8 @@ async fn check_provider(
         protocol: task_worker::PROTOCOL_VERSION,
         task,
         workspace: prepared,
+        // 疎通確認は taskd 自身が作った使い捨てのディレクトリで動かす（worktree は関係しない）。
+        work_dir: None,
         artifacts_dir,
         context: task_worker::RunContext {
             prior_review: vec![],

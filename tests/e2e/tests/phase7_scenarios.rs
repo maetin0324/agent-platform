@@ -254,7 +254,7 @@ fn cancel_is_limited_to_non_terminal_tasks_and_failures_cancel_dependents() {
     let ws_c = env.workspace("ws-c");
     let c = env.add_approved(&["--title", "C", "--check-cmd", "true", "--depends-on", &b_str, "--workspace", &ws_c]);
     let d = env.add(&["--title", "D", "--check-cmd", "true"]);
-    assert_eq!(env.task(d).workspace, WorkspaceSpec::Local { path: PathBuf::from(d.to_string()) });
+    assert_eq!(env.task(d).workspace, WorkspaceSpec::Local { path: PathBuf::from(d.to_string()), mode: None });
 
     env.run_taskd(&config, Duration::from_secs(60));
     assert_eq!(env.task(a).status, Status::Failed);

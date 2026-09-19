@@ -67,9 +67,9 @@ pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime
 
     let id = TaskId::new();
     let workspace = match spec.workspace {
-        Some(path) => WorkspaceSpec::Local { path },
+        Some(path) => WorkspaceSpec::Local { path, mode: None },
         None => WorkspaceSpec::Local {
-            path: PathBuf::from(id.to_string()),
+            path: PathBuf::from(id.to_string()), mode: None,
         },
     };
 
@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(
             task.workspace,
             WorkspaceSpec::Local {
-                path: PathBuf::from(task.id.to_string())
+                path: PathBuf::from(task.id.to_string()), mode: None
             }
         );
     }

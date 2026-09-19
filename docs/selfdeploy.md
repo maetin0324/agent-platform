@@ -58,7 +58,7 @@ taskd 本体に入る。Phase 47 より前のバイナリで作ったリリー�
 
 ```bash
 scripts/selfdeploy/release.sh HEAD          # または ブランチ名 / タグ / sha
-scripts/selfdeploy/release.sh self/01M2XXX  # 自己改善の案件の実装ブランチ（ADR-0040 D5）
+scripts/selfdeploy/release.sh taskd/01M2XXX # 自己改善の案件の実装ブランチ（taskd が切る。ADR-0041 D1）
 ```
 
 - `~/taskd/releases/.build/<sha12>` に **detached worktree** を生やして、そこでだけビルドする。
@@ -251,7 +251,8 @@ taskd の上の「人」（ワーカー）が自己改善の案件でやって�
 - `~/taskd/*.sqlite3` に書き込む（読むのは `sqlite3 "file:…?mode=ro"` と `.backup` だけ）
 - 本番のプロセスに `kill` などのシグナルを送る
 - `127.0.0.1:7710` / `0.0.0.0:7700` に bind する
-- `main` に直接コミットする（実装者はタスクごとに `self/<task-id>` ブランチを切る）
+- `main` に直接コミットする（実装者は **taskd が用意した worktree とブランチ `taskd/<task-id>`** にコミットする。ADR-0041 D1）
+- `git checkout` で作業ツリーのブランチを変える・自分でブランチを切る（作業ツリーは taskd がタスクごとに用意する）
 
 実装者は `gate.json` / `verify.json` を `artifacts/` に写し、報告に「検証済み sha」を書く。
 昇格は人が `status.sh` で `verify.json.ok` を見てから行う。

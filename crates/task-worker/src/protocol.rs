@@ -152,6 +152,10 @@ pub struct ChildSummary {
     /// 子のワークスペース（絶対パス。集約 run が成果物を読むため）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
+    /// ADR-0041 D1: 子が worktree で作業したときのブランチ（`taskd/<child_id>`）。
+    /// 親はこのブランチを merge して子の成果を統合する（統合は LLM の仕事。taskd はコミットしない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// `context.node`（ADR-0033 D4 / Phase 24）: この run をしている「人」（組織のノード）。
@@ -376,8 +380,14 @@ pub struct ReviewOutput {
 pub struct RunRequest {
     pub protocol: u32,
     pub task: Task,
-    /// 絶対パス。ワーカーの cwd、`artifact.path` の基準。
+    /// 絶対パス。`artifact.path` の基準で、`runs/` `inputs/` `artifacts/` の親。
+    /// 既定ではワーカーの cwd でもある（`work_dir` が無いとき）。
     pub workspace: PathBuf,
+    /// ADR-0041 D1: 絶対パス。ワーカーの cwd（ローカルの作業場所が git リポジトリで
+    /// `mode = worktree` のとき、その run 用の worktree `<workspace>/tree`）。
+    /// `None` なら `workspace` がそのまま cwd（Phase 48 までと同じ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<PathBuf>,
     /// 絶対パス。この run の成果物と結果ファイル（`result.json`）の置き場（ADR-0036 D1）。
     /// workspace を自分で所有するタスクは `<workspace>/artifacts`、親から継いだタスク（plan / delegate の子）は
     /// `<workspace>/.taskd/artifacts/<task_id>`。決めるのはディスパッチャで、アダプタはここに書くだけ。
@@ -386,9 +396,21 @@ pub struct RunRequest {
 }
 
 impl RunRequest {
-    /// `artifacts_dir` の workspace 相対表記（`artifacts` / `.taskd/artifacts/<task_id>`）。
-    /// プロンプトの文面（ADR-0036 D3）と `ArtifactRef.path`（D4）に使う。
+    /// ワーカーを動かすディレクトリ（ADR-0041 D1: worktree があればそこ、無ければ `workspace`）。
+    pub fn cwd(&self) -> &std::path::Path {
+        self.work_dir.as_deref().unwrap_or(&self.workspace)
+    }
+
+    /// `artifacts_dir` の**ワーカーから見た**表記。
+    ///
+    /// - 従来（cwd == workspace）: workspace 相対（`artifacts` / `.taskd/artifacts/<task_id>`）。
+    ///   単独タスクのプロンプトは Phase 48 までと 1 バイトも変わらない（ADR-0036 D3）。
+    /// - worktree（cwd != workspace。ADR-0041 D1）: 成果物は作業ツリーの**外**にあるので絶対パス。
+    ///   `..` を書かせない（`artifact.path` の規則 ADR-0003 D5 と衝突させない）。
     pub fn artifacts_rel(&self) -> String {
+        if self.work_dir.is_some() {
+            return self.artifacts_dir.to_string_lossy().into_owned();
+        }
         task_core::artifacts::rel_from(&self.workspace, &self.artifacts_dir)
     }
 
@@ -543,6 +565,7 @@ pub(crate) mod tests {
             protocol: PROTOCOL_VERSION,
             task: sample_task(),
             workspace: PathBuf::from("/tmp/ws"),
+            work_dir: None,
             artifacts_dir: PathBuf::from("/tmp/ws/artifacts"),
             context: RunContext::default(),
         };
@@ -662,7 +685,7 @@ pub(crate) mod tests {
             status: Status::Running,
             priority: 0,
             worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws") },
+            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws"), mode: None },
             budget: Budget { max_turns: 10, max_wall_secs: 60, max_retries: 1 },
             attempts: 0,
             lease: None,

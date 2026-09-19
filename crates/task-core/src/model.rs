@@ -84,22 +84,54 @@ pub struct WorkerHint {
     pub adapter: Option<String>,
 }
 
+/// ADR-0041 D1: ローカルの作業場所の使い方。並列のタスクが同じ作業ツリーで `git checkout` して
+/// 互いの未コミット変更を壊すのを止めるため、既定ではタスクごとに worktree を切る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMode {
+    /// 既定。`path` が git リポジトリなら、タスクごとに `git worktree` を切ってその中で作業する。
+    #[default]
+    Worktree,
+    /// 従来どおり `path` をそのまま作業ディレクトリにする（自分専用の使い捨てリポジトリ向け）。
+    Shared,
+}
+
 /// DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
 /// taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkspaceSpec {
-    Local { path: PathBuf },
+    Local {
+        path: PathBuf,
+        /// ADR-0041 D1: 省略時は `Worktree`。省略したものは JSON にも出さない（Phase 48 までの
+        /// `{"kind":"local","path":"…"}` と 1 バイトも変わらない）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<WorkspaceMode>,
+    },
     Remote { cluster: String, path: PathBuf },
 }
 
 impl WorkspaceSpec {
+    /// ADR-0005 D3 以来の `Local{path}`（`mode` は省略 = 既定の `Worktree`）。
+    pub fn local(path: impl Into<PathBuf>) -> WorkspaceSpec {
+        WorkspaceSpec::Local { path: path.into(), mode: None }
+    }
+
+    /// ADR-0041 D1: ローカルの作業場所の使い方。`Remote` は従来の経路（`Shared` 相当）。
+    pub fn local_mode(&self) -> WorkspaceMode {
+        match self {
+            WorkspaceSpec::Local { mode, .. } => mode.unwrap_or_default(),
+            WorkspaceSpec::Remote { .. } => WorkspaceMode::Shared,
+        }
+    }
+
     /// ADR-0039 D5: `Local` の `~` / `~/…` を `home` で展開した複製。`Remote` の `~` は**クラスタ側の home**
     /// なので触らない（taskd には展開できない）。`home` が無い、`~` で始まらないときはそのまま。
     pub fn with_home_expanded(&self, home: Option<&std::path::Path>) -> WorkspaceSpec {
         match self {
-            WorkspaceSpec::Local { path } => WorkspaceSpec::Local {
+            WorkspaceSpec::Local { path, mode } => WorkspaceSpec::Local {
                 path: expand_home(path, home),
+                mode: *mode,
             },
             other => other.clone(),
         }
@@ -520,5 +552,37 @@ mod tests {
         assert!(!literature().is_harness(&bare));
         let no_default = GenreSpec { default_role: None, ..literature() };
         assert!(!no_default.is_harness(&paperqa));
+    }
+
+    /// ADR-0041 D1: `Local` の `mode` は省略でき（既定 `worktree`）、省略したものは JSON にも出ない。
+    #[test]
+    fn the_local_workspace_mode_defaults_to_worktree_and_stays_out_of_the_json_when_omitted() {
+        let plain: WorkspaceSpec = serde_json::from_str(r#"{"kind":"local","path":"/srv/repo"}"#).expect("parse");
+        assert_eq!(plain, WorkspaceSpec::Local { path: PathBuf::from("/srv/repo"), mode: None });
+        assert_eq!(plain.local_mode(), WorkspaceMode::Worktree, "既定は worktree");
+        // Phase 48 までと 1 バイトも変わらない。
+        assert_eq!(serde_json::to_string(&plain).expect("json"), r#"{"kind":"local","path":"/srv/repo"}"#);
+        assert_eq!(WorkspaceSpec::local("/srv/repo"), plain);
+
+        for (text, mode) in [("shared", WorkspaceMode::Shared), ("worktree", WorkspaceMode::Worktree)] {
+            let spec: WorkspaceSpec =
+                serde_json::from_str(&format!(r#"{{"kind":"local","path":"/srv/repo","mode":"{text}"}}"#))
+                    .expect("parse");
+            assert_eq!(spec.local_mode(), mode);
+            assert!(serde_json::to_string(&spec).expect("json").contains(&format!(r#""mode":"{text}""#)));
+        }
+
+        // 知らない値は受け付けない。`Remote` は従来の経路（`Shared` 相当）。
+        assert!(serde_json::from_str::<WorkspaceSpec>(r#"{"kind":"local","path":"/x","mode":"bogus"}"#).is_err());
+        let remote = WorkspaceSpec::Remote { cluster: "pegasus".into(), path: PathBuf::from("/work/x") };
+        assert_eq!(remote.local_mode(), WorkspaceMode::Shared);
+
+        // `~` の展開で `mode` は落ちない（ADR-0039 D5）。
+        let home = PathBuf::from("/home/u");
+        let tilde = WorkspaceSpec::Local { path: PathBuf::from("~/repo"), mode: Some(WorkspaceMode::Shared) };
+        assert_eq!(
+            tilde.with_home_expanded(Some(&home)),
+            WorkspaceSpec::Local { path: PathBuf::from("/home/u/repo"), mode: Some(WorkspaceMode::Shared) }
+        );
     }
 }

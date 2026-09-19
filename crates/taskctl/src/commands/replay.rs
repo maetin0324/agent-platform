@@ -69,7 +69,7 @@ mod tests {
                 adapter: None,
             },
             workspace: task_core::WorkspaceSpec::Local {
-                path: "/tmp/ws".into(),
+                path: "/tmp/ws".into(), mode: None,
             },
             budget: task_core::Budget {
                 max_turns: 1,

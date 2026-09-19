@@ -126,7 +126,7 @@ fn person_sections(context: &RunContext) -> String {
 /// `RunContext::workspace_note` に入れる）。`Remote` は ADR-0018 D1 の「クラスタ側が正、手元は写し」を書く。
 pub fn workspace_note(spec: &task_core::WorkspaceSpec) -> String {
     match spec {
-        task_core::WorkspaceSpec::Local { path } => {
+        task_core::WorkspaceSpec::Local { path, .. } => {
             format!("この案件のコードは `{}` にある。", path.display())
         }
         task_core::WorkspaceSpec::Remote { cluster, path } => format!(
@@ -135,6 +135,17 @@ pub fn workspace_note(spec: &task_core::WorkspaceSpec) -> String {
             path.display()
         ),
     }
+}
+
+/// ADR-0041 D1: タスクごとの worktree を前置きに書く 1 行（純粋関数。ディスパッチャが
+/// `workspace_note` の後ろに足す）。「このブランチにコミットせよ」までをここに書く。
+pub fn worktree_note(repo: &std::path::Path, dir: &std::path::Path, branch: &str, base_sha12: &str, base_kind: &str) -> String {
+    format!(
+        "作業ツリー `{}`（`{}` の worktree）、ブランチ `{branch}`、base `{base_sha12}`（{base_kind}）。\
+         このブランチにコミットせよ。`main` に直接コミットするな。`git checkout` でブランチを変えるな。",
+        dir.display(),
+        repo.display()
+    )
 }
 
 /// 作業場所の節（ADR-0039 D3）。**案件が作業場所を決めている run にだけ**出す。

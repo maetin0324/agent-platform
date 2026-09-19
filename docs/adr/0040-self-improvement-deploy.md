@@ -120,8 +120,9 @@ DB バックアップ → `start taskd@<new>` → `health` 200 と `schema_versi
 ### D5. taskd 上の「人」に許すこと・許さないこと（自己改善の案件）
 
 - 案件「agent-platform の自己改善」の作業場所は `local: ~/workspace/agent-platform`（ADR-0039）。実装者は
-  **タスクごとにブランチ `self/<task-id>` を切り**、そこにコミットする（`main` には直接コミットしない。作業チェックアウトは
-  本番に影響しないので、ここで壊しても本番は動き続ける）。
+  **taskd が用意した worktree とブランチ（`taskd/<task-id>`）にコミットする**（ADR-0041 D1。自分でブランチを
+  切らない。`main` には直接コミットしない。作業ツリーはタスクごとに分かれていて本番にも人のチェックアウトにも
+  影響しないので、ここで壊しても本番は動き続ける）。
 - 実装者は `scripts/selfdeploy/release.sh <ブランチ>` と `verify.sh <sha12>` を**自分で実行してよい**（本番に触れない）。
   結果の `gate.json` / `verify.json` を成果物（`artifacts/`）に写し、報告に「検証済み sha」を書く。
 - **`promote.sh` / `rollback.sh` / `systemctl` / `~/taskd/taskd.toml` の編集 / `~/taskd/*.sqlite3` への書き込み /

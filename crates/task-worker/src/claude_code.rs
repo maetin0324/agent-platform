@@ -278,8 +278,13 @@ fn children_section(context: &RunContext, artifacts: &str) -> String {
         } else {
             c.artifacts.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(",")
         };
+        // ADR-0041 D1: 子が worktree で作業したときだけブランチを足す（無い子の文面は従来どおり）。
+        let branch = match &c.branch {
+            Some(b) => format!(" branch={b}"),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "- {} [{role}] status={status} outcome={outcome} workspace={workspace} artifacts={artifacts}\n",
+            "- {} [{role}] status={status} outcome={outcome} workspace={workspace}{branch} artifacts={artifacts}\n",
             c.title
         ));
     }
@@ -659,7 +664,7 @@ async fn run_claude_code(
     command.args(&config.extra_args);
     command
         .envs(config.env.iter().cloned())
-        .current_dir(&req.workspace)
+        .current_dir(req.cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -982,6 +987,7 @@ mod tests {
             task: crate::protocol::tests::sample_task(),
             artifacts_dir: workspace.join("artifacts"),
             workspace,
+            work_dir: None,
             context: RunContext::default(),
         }
     }
@@ -1811,7 +1817,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         // Local の案件では「クラスタ」とは言わない。
         let local = RunContext {
             workspace_note: Some(crate::preamble::workspace_note(&task_core::WorkspaceSpec::Local {
-                path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+                path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
             })),
             ..RunContext::default()
         };
@@ -1832,7 +1838,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
 
         let context = RunContext {
             workspace_note: Some(crate::preamble::workspace_note(&task_core::WorkspaceSpec::Local {
-                path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+                path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
             })),
             ..RunContext::default()
         };
@@ -1898,6 +1904,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 title: "implement parser".into(),
                 role: Some("implementer".into()),
                 status: task_core::Status::Done,
+                branch: None,
                 outcome: Some("done".into()),
                 artifacts: vec![],
                 workspace: Some(std::path::PathBuf::from("/tmp/child-ws")),

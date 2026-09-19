@@ -324,9 +324,9 @@ fn build_task(
             cluster,
             path: PathBuf::from(id.to_string()),
         },
-        (None, Some(path)) => WorkspaceSpec::Local { path },
+        (None, Some(path)) => WorkspaceSpec::Local { path, mode: None },
         (None, None) => WorkspaceSpec::Local {
-            path: PathBuf::from(id.to_string()),
+            path: PathBuf::from(id.to_string()), mode: None,
         },
     };
 
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(
             task.workspace,
             WorkspaceSpec::Local {
-                path: PathBuf::from("/tmp/workspace")
+                path: PathBuf::from("/tmp/workspace"), mode: None
             }
         );
 
@@ -872,7 +872,7 @@ mod tests {
         assert_eq!(
             task.workspace,
             WorkspaceSpec::Local {
-                path: PathBuf::from(task.id.to_string())
+                path: PathBuf::from(task.id.to_string()), mode: None
             }
         );
     }

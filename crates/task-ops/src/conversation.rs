@@ -182,7 +182,7 @@ fn conversation_task(
             adapter: role.and_then(|r| r.adapter.clone()),
         },
         workspace: WorkspaceSpec::Local {
-            path: PathBuf::from(id.to_string()),
+            path: PathBuf::from(id.to_string()), mode: None,
         },
         budget: Budget {
             max_turns: CONVERSATION_MAX_TURNS,

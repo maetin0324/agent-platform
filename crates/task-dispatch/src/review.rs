@@ -441,6 +441,9 @@ async fn run_reviewer_inner(
         protocol: PROTOCOL_VERSION,
         task: synthetic_review_task(task, &run.run_id, &run.hint),
         workspace: workspace_dir.to_path_buf(),
+        // ADR-0041 D1: Reviewer run は判定だけで編集しないので、worktree ではなく対象タスクの
+        // ディレクトリ（成果物と `tree/` がある場所）で動かす。
+        work_dir: None,
         // ADR-0036 D2: レビューは対象タスクの成果物についての判定なので、対象タスクの成果物ディレクトリを使う
         // （`review.json` もその中に書かせる）。
         artifacts_dir: artifacts_dir.to_path_buf(),
@@ -557,7 +560,7 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: PathBuf::from(dir),
+                path: PathBuf::from(dir), mode: None,
             },
             budget: Budget {
                 max_turns: 1,

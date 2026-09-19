@@ -340,6 +340,11 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
   `{project, dir, branch}` = 元のリポジトリ / クラスタ上の worktree のパス（既定 `<project>/.taskd-worktrees/<task_id>`、
   `worktree_root` があればその下）/ ブランチ `taskd/<task_id>`。**taskd は commit しない**ので、変更は worktree の作業ツリーに残る。
   GUI はここを「クラスタで結果を見る場所」として出す（`git -C <dir> diff`、`git -C <dir> commit`、`git worktree remove <dir>` は人の操作）。
+- **Phase 49（ADR-0041 D1）**: ローカルの作業場所（`kind = "local"`、`mode = "worktree"` 既定）が git リポジトリの
+  タスクにも `worktree` が出る（`{project, dir, branch}` = 元のリポジトリ / `<workspace_root>/<task_id>/tree` /
+  `taskd/<task_id>`）。このとき `workspace_dir` は `<workspace_root>/<task_id>`（run のログ `runs/` と成果物は
+  作業ツリーの**外**にある）。taskd が用意した目印 `<workspace_dir>/worktree.json` があるタスクだけがこの扱いで、
+  worktree を消した後も `runs/` と `artifacts/` は同じ場所から引ける。
   `sync = "rsync"` / `"none"` のクラスタと Local のタスクでは `null`。
   `taskctl show --json` は `--config <taskd.toml>`（または `TASKD_CONFIG`）を渡したときだけ `worktree` を出せる
   （`[[clusters]]` を知らないと worktree のパスが決まらないため）。
@@ -888,6 +893,25 @@ SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validat
 - この作業場所は**分解（`POST /projects/{id}/plan`）とその子タスク**が継ぐ（明示 > 案件 > 親。ADR-0039 D2）。
   コードを扱う案件では、GUI から必ず入れてもらうのがよい（入れないと子タスクは空の作業ディレクトリに置かれ、
   ワーカーが自分で `ssh` してリポジトリを探しに行く。実機の事故 2026-09-18）。
+
+**Phase 49（ADR-0041 D1）**: `kind = "local"` は任意で `mode` を持てる（`"worktree"` | `"shared"`、**既定
+`"worktree"`**）。知らない値は 400 `bad_request`（本文の解析で落ちる）。`remote` にこのキーは無い。
+
+```json
+{"workspace":{"kind":"local","path":"~/workspace/agent-platform","mode":"worktree"}}
+```
+
+- `"worktree"`（既定）: `path` が git リポジトリなら、taskd は**タスクごとに `git worktree` を切る**。
+  ワーカーのカレントディレクトリは `<workspace_root>/<task_id>/tree`、ブランチは `taskd/<task_id>`
+  （接頭辞は `[workspace] worktree_branch_prefix`）、base は `main`（無ければ `HEAD`。本番の `current`
+  リリースが `main` の子孫ならその sha）。run のログ（`runs/`）と成果物（`artifacts/`）は**作業ツリーの外**の
+  `<workspace_root>/<task_id>/` に置かれ、ファイル系エンドポイント（§3.7〜§3.9）と `workspace_dir` も
+  そちらを指す。taskd は**コミットしない**し、ブランチも消さない。run が終端に達したとき
+  `git status --porcelain` が空なら worktree だけ消す（空でなければ残し、`WorkerProgress`
+  「未コミットの変更が残っています: `<dir>`」を 1 行積む）。
+- `"shared"`: 従来どおり `path` をそのまま作業ディレクトリにする（taskd 専用の使い捨てリポジトリ向け）。
+- `path` が git リポジトリでなければ `"worktree"` でも従来どおり（`"shared"` と同じ）。
+- 省略したものは応答の JSON にも出ない（Phase 48 までと同じ本文）。
 
 #### 3.47 `GET /projects/{id}` → 200 `ProjectDetail`
 

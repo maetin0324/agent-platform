@@ -24,7 +24,7 @@ fn task(dir: &std::path::Path) -> Task {
         status: Status::Ready,
         priority: 0,
         worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-        workspace: WorkspaceSpec::Local { path: dir.to_path_buf() },
+        workspace: WorkspaceSpec::Local { path: dir.to_path_buf(), mode: None },
         budget: Budget { max_turns: 1, max_wall_secs: 120, max_retries: 0 },
         attempts: 0,
         lease: None,

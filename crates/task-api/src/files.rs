@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use task_core::{ArtifactRef, Event, EventRow, Task, WorkspaceSpec};
+use task_core::{ArtifactRef, Event, EventRow, Task};
 use task_ops::inbox::EvidenceView;
 use task_ops::view::RunFiles;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -62,11 +62,9 @@ pub(crate) fn is_ulid_text(value: &str) -> bool {
 
 /// ワークスペースの canonical パス。存在しなければ 404 `file_not_found`。
 /// `Remote` は手元の写し `root/<task_id>`（run のログと成果物はそこにある。ADR-0018 D1）。
+/// ADR-0041 D1: worktree を切った `Local` も `root/<task_id>`（作業ツリーの外に `runs/` と `artifacts/` がある）。
 pub(crate) fn canonical_workspace(task: &Task, root: &Path) -> Result<PathBuf, ApiProblem> {
-    let dir = match &task.workspace {
-        WorkspaceSpec::Local { path } => root.join(path),
-        WorkspaceSpec::Remote { .. } => root.join(task.id.to_string()),
-    };
+    let dir = task_ops::workspace::local_dir(task, root);
     dir.canonicalize()
         .map_err(|_| ApiProblem::file_not_found("workspace directory does not exist"))
 }

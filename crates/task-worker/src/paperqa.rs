@@ -735,7 +735,7 @@ async fn run_acquire(
         .arg(&script_path)
         .arg(&input_path)
         .envs(config.env.iter().cloned())
-        .current_dir(&req.workspace)
+        .current_dir(req.cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1013,7 +1013,7 @@ async fn run_paperqa(
     command.arg("ask").arg(&question);
     command
         .envs(config.env.iter().cloned())
-        .current_dir(&req.workspace)
+        .current_dir(req.cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1448,6 +1448,7 @@ reduce server overhead (Roe 2021).";
             task: crate::protocol::tests::sample_task(),
             artifacts_dir: workspace.join("artifacts"),
             workspace,
+            work_dir: None,
             context: RunContext::default(),
         }
     }

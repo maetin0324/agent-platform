@@ -43,7 +43,7 @@ fn sample_task(i: usize) -> Task {
             adapter: None,
         },
         workspace: WorkspaceSpec::Local {
-            path: format!("ws-{i}").into(),
+            path: format!("ws-{i}").into(), mode: None,
         },
         budget: Budget {
             max_turns: 10,

@@ -263,7 +263,7 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: "/tmp/workspace".into(),
+                path: "/tmp/workspace".into(), mode: None,
             },
             budget: Budget {
                 max_turns: 10,

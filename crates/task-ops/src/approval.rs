@@ -143,7 +143,7 @@ mod tests {
             status: Status::Blocked,
             priority: 0,
             worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: "ws".into() },
+            workspace: WorkspaceSpec::Local { path: "ws".into(), mode: None },
             budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
             attempts: 0,
             lease: None,

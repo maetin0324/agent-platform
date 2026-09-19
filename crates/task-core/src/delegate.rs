@@ -464,7 +464,7 @@ mod tests {
                 adapter: Some("fake".into()),
             },
             workspace: WorkspaceSpec::Local {
-                path: PathBuf::from("/tmp/ws"),
+                path: PathBuf::from("/tmp/ws"), mode: None,
             },
             budget: Budget {
                 max_turns: 10,
@@ -782,7 +782,7 @@ mod tests {
         let p = parent();
         let now = OffsetDateTime::now_utc();
         let project = WorkspaceSpec::Local {
-            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
         };
         let explicit = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
@@ -824,12 +824,12 @@ mod tests {
     fn tilde_is_expanded_for_local_workspaces_only() {
         let home = PathBuf::from("/home/rmaeda");
         let local = WorkspaceSpec::Local {
-            path: PathBuf::from("~/workspace/rust/pluvio-poc"),
+            path: PathBuf::from("~/workspace/rust/pluvio-poc"), mode: None,
         };
         assert_eq!(
             local.with_home_expanded(Some(&home)),
             WorkspaceSpec::Local {
-                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc")
+                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None
             }
         );
         assert_eq!(local.with_home_expanded(None), local, "$HOME が無ければそのまま");
@@ -838,11 +838,11 @@ mod tests {
             path: PathBuf::from("~/workspace/rust/benchfs"),
         };
         assert_eq!(remote.with_home_expanded(Some(&home)), remote);
-        let absolute = WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws") };
+        let absolute = WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws"), mode: None };
         assert_eq!(absolute.with_home_expanded(Some(&home)), absolute);
         // `~user` は展開しない（その home を知らない）。
         let other = WorkspaceSpec::Local {
-            path: PathBuf::from("~someone/ws"),
+            path: PathBuf::from("~someone/ws"), mode: None,
         };
         assert_eq!(other.with_home_expanded(Some(&home)), other);
         assert_eq!(crate::model::expand_home(std::path::Path::new("~"), Some(&home)), home);

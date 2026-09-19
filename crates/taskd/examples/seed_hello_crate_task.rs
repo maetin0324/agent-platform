@@ -75,7 +75,7 @@ fn main() {
             tier: Tier::Standard,
             adapter: Some(cli.adapter.clone()),
         },
-        workspace: WorkspaceSpec::Local { path: cli.workspace },
+        workspace: WorkspaceSpec::Local { path: cli.workspace, mode: None },
         budget: Budget {
             max_turns: 30,
             max_wall_secs: 600,
@@ -94,7 +94,7 @@ fn main() {
         conversation: None,
     };
 
-    let WorkspaceSpec::Local { path: workspace_path } = &task.workspace else {
+    let WorkspaceSpec::Local { path: workspace_path, mode: None } = &task.workspace else {
         unreachable!("this seed always creates a Local workspace")
     };
     let workspace_display = workspace_path.display().to_string();

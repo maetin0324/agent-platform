@@ -101,7 +101,7 @@ echo '{"type":"done","summary":"ok","evidence":[]}'
     let workspace_dir = tmp.path().join("ws");
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused") });
+    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
     store.insert(&task).expect("insert task");
     store
         .append_event(task.id, &Event::Answered { question: "q?".to_string(), answer: "a!".to_string() })
@@ -157,7 +157,7 @@ echo '{"type":"question","text":"which one?"}'
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused") });
+    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
     store.insert(&task).expect("insert task");
 
     let out = run_taskctl(
@@ -193,7 +193,7 @@ fn provider_selects_the_matching_account_env() {
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused") });
+    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
     store.insert(&task).expect("insert task");
 
     let out = run_taskctl(
@@ -245,7 +245,7 @@ fn running_task_requires_explicit_workspace() {
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Running, WorkspaceSpec::Local { path: PathBuf::from("running-task-ws") });
+    let task = sample_task(Status::Running, WorkspaceSpec::Local { path: PathBuf::from("running-task-ws"), mode: None });
     store.insert(&task).expect("insert task");
 
     let without_workspace = run_taskctl(
@@ -284,7 +284,7 @@ fn unknown_provider_id_errors() {
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused") });
+    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
     store.insert(&task).expect("insert task");
 
     let out = run_taskctl(
@@ -322,7 +322,7 @@ echo '{"type":"error","message":"429","retryable":true,"provider_failure":{"kind
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused") });
+    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
     store.insert(&task).expect("insert task");
 
     let out = run_taskctl(

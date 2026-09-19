@@ -205,6 +205,12 @@ pub struct DispatchConfig {
     pub accounts: Option<AccountsRuntimeConfig>,
     /// ADR-0033 D6（Phase 24）: `[memory] dir`（絶対パス）。`None` なら記憶を読まないし書かない。
     pub memory_dir: Option<PathBuf>,
+    /// ADR-0041 D1: ローカルの worktree のブランチ接頭辞（`[workspace] worktree_branch_prefix`、
+    /// 既定 `taskd/`。ADR-0019 のクラスタ側と同じ値）。
+    pub worktree_branch_prefix: String,
+    /// ADR-0041 D1: `[selfdeploy] releases_dir`。その**親**の `current/manifest.json` が読めれば、
+    /// 本番の sha を worktree の base の候補にする。`None` なら base は常に `main`（か `HEAD`）。
+    pub releases_dir: Option<PathBuf>,
 }
 
 /// 1 tick の要約（ログとテスト用）。
@@ -688,6 +694,9 @@ pub struct Dispatcher {
     /// `dispatch_ready` も `recover_reviews` も動かさず、**手元の run とレビューの面倒だけ見続ける**
     /// （完了の記録、リースの更新、`aggregate` / `child_failed` の後処理は通常どおり動く）。
     accepting_new_work: bool,
+    /// ADR-0041 D1: この taskd が用意したローカルの worktree（タスクが終端に達したら後片付けする）。
+    /// 再起動では失われる（残った worktree は人が `git worktree remove` する。PROGRESS の未解決）。
+    local_worktrees: HashMap<TaskId, task_worker::LocalWorktree>,
 }
 
 fn real_now_unix() -> i64 {
@@ -747,6 +756,7 @@ impl Dispatcher {
             connect_pending_clusters: std::collections::HashSet::new(),
             now_unix_fn: Arc::new(real_now_unix),
             accepting_new_work: true,
+            local_worktrees: HashMap::new(),
         }
     }
 
@@ -950,6 +960,8 @@ impl Dispatcher {
         report.reclaimed = self.reclaim_expired_leases()?;
         let reclaim_ms = lap(&mut at);
         self.abort_stale_runs()?;
+        // ADR-0041 D1: 終端に達したタスクの worktree を片付ける（クリーンなら消す。汚れていれば残して 1 行積む）。
+        self.cleanup_finished_worktrees()?;
         let abort_ms = lap(&mut at);
         // ADR-0040 D4: draining のインスタンスは新しい仕事を始めない（拾い上げも dispatch もしない）。
         // 手元の run とレビューの完了・リース更新・後処理は上の `drain_completions` 以下でそのまま動く。
@@ -2287,9 +2299,18 @@ impl Dispatcher {
                 }
             }
             let dir_started = Instant::now();
-            let Some(dir) = self.task_dir(&task) else {
-                tracing::warn!(task_id = %task.id, "cannot resolve the workspace directory; task left ready");
-                continue;
+            // ADR-0041 D1: ローカルの作業場所が git リポジトリで `mode = worktree` なら、この run 専用の
+            // worktree を使う（`dir` はその親 = `runs/` `artifacts/` の置き場）。
+            let worktree = self.local_worktree_for(&task);
+            let dir = match &worktree {
+                Some(wt) => wt.task_dir.clone(),
+                None => match self.task_dir(&task) {
+                    Some(d) => d,
+                    None => {
+                        tracing::warn!(task_id = %task.id, "cannot resolve the workspace directory; task left ready");
+                        continue;
+                    }
+                },
             };
             log_slow_step("task_dir", dir_started);
             let Some((adapter_id, provider_id, selected_account)) =
@@ -2349,7 +2370,11 @@ impl Dispatcher {
             };
             tracing::info!(task_id = %task.id, %run_id, adapter = %adapter_id, provider = %provider_id, account = account.as_deref(), "dispatching");
             let remote = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path, task.id));
-            let extras = self.run_extras(&task)?;
+            let extras = self.run_extras(&task, worktree.as_ref())?;
+            // ADR-0041 D1: 終端で片付けられるよう、この run で使う worktree を覚えておく。
+            if let Some(wt) = &worktree {
+                self.local_worktrees.insert(task.id, wt.clone());
+            }
             let handle = self.spawn_worker(
                 task.id,
                 run_id.clone(),
@@ -2360,6 +2385,7 @@ impl Dispatcher {
                 dir,
                 limits,
                 remote,
+                worktree,
                 extras,
             );
             self.running.insert(
@@ -2381,7 +2407,11 @@ impl Dispatcher {
 
     /// ADR-0016 D1 / D3, ADR-0027 D1: run 開始時にワーカーへ渡す役割の指示文、委譲できる run なら使える
     /// 分野の一覧、集約 run なら子の要約。
-    fn run_extras(&self, task: &Task) -> Result<RunExtras, DispatchError> {
+    fn run_extras(
+        &self,
+        task: &Task,
+        worktree: Option<&task_worker::LocalWorktree>,
+    ) -> Result<RunExtras, DispatchError> {
         let role = task.role.as_deref().map(|id| RoleContext {
             id: id.to_string(),
             instructions: RoleSpec::find(&self.config.roles, id)
@@ -2505,12 +2535,28 @@ impl Dispatcher {
         // Phase 43（ADR-0039 D3）: 案件が作業場所を決めていれば、その場所を前置きに出す（決定的:
         // `projects.workspace` を引いて 1 行にするだけ）。対話 run（秘書との会話・途中目標のレビュー）には
         // 出さない（会話は編集をしないので、人のリポジトリの中で走らせる理由が無い。ADR-0039 D2）。
-        let workspace_note = match conversation_addressee {
+        let mut workspace_note = match conversation_addressee {
             Some(_) => None,
             None => task_ops::delegate::project_workspace(self.store.as_ref(), task).map_err(ops_to_store)?
                 .as_ref()
                 .map(task_worker::preamble::workspace_note),
         };
+        // ADR-0041 D1: worktree を切る run には、作業ツリー・ブランチ・base と「このブランチにコミットせよ」を足す。
+        if conversation_addressee.is_none()
+            && let Some(wt) = worktree
+        {
+            let line = task_worker::preamble::worktree_note(
+                &wt.repo,
+                &wt.dir,
+                &wt.branch,
+                &wt.base.sha12(),
+                wt.base.kind.as_str(),
+            );
+            workspace_note = Some(match workspace_note {
+                Some(note) => format!("{note}\n{line}"),
+                None => line,
+            });
+        }
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
         let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
@@ -2531,6 +2577,9 @@ impl Dispatcher {
                         _ => None,
                     })
                     .collect();
+                // ADR-0041 D1: 子は親の作業場所を継ぐので、子ごとに別の worktree になる。親が成果を
+                // 統合するときは子のブランチを merge する（統合は LLM の仕事）。
+                let child_worktree = self.local_worktree_for(&child);
                 out.push(ChildSummary {
                     id: child.id,
                     title: child.title.clone(),
@@ -2538,7 +2587,11 @@ impl Dispatcher {
                     status: child.status,
                     outcome,
                     artifacts,
-                    workspace: self.task_dir(&child),
+                    workspace: child_worktree
+                        .as_ref()
+                        .map(|wt| wt.task_dir.clone())
+                        .or_else(|| self.task_dir(&child)),
+                    branch: child_worktree.map(|wt| wt.branch),
                 });
             }
             out
@@ -2709,6 +2762,7 @@ impl Dispatcher {
         dir: PathBuf,
         limits: RunLimits,
         remote: Option<SshSettings>,
+        worktree: Option<task_worker::LocalWorktree>,
         extras: RunExtras,
     ) -> JoinHandle<()> {
         let store = self.store.clone();
@@ -2731,6 +2785,7 @@ impl Dispatcher {
                 limits,
                 lease,
                 remote,
+                worktree,
                 extras,
                 roles,
                 genres,
@@ -2839,10 +2894,15 @@ impl Dispatcher {
         let subject = subject.clone();
         let tx = self.tx.clone();
         let remote_review = remote_settings.clone();
+        // ADR-0019 D1 6. / ADR-0041 D1: 判定コマンドは worktree の中で実行する（元のリポジトリでは実行しない）。
+        let review_work_dir = self.local_worktree_for(&task).map(|wt| wt.dir);
         let handle = tokio::spawn(async move {
             let ws: Box<dyn Workspace> = match remote_review {
                 Some(settings) => Box::new(SshWorkspace::new(&dir, settings)),
-                None => Box::new(LocalWorkspace::new(&dir)),
+                None => Box::new(match review_work_dir {
+                    Some(work) if work.is_dir() => LocalWorkspace::new(&dir).with_work_dir(work),
+                    _ => LocalWorkspace::new(&dir),
+                }),
             };
             let extras = ReviewExtras {
                 subject,
@@ -3167,16 +3227,100 @@ impl Dispatcher {
     }
 
     /// ADR-0005 D3: `Local{path}` がそのタスクの作業ディレクトリ。相対なら `workspace_root` 基準。
+    ///
+    /// ADR-0041 D1: ただし worktree を切るタスク（`mode = worktree` かつ `path` が git リポジトリ）では、
+    /// **`runs/` `inputs/` `artifacts/` を置く場所**は `workspace_root/<task_id>` になる
+    /// （作業ツリーそのものは `<そこ>/tree`。`git status --porcelain` を汚さないため外に出す）。
     fn task_dir(&self, task: &Task) -> Option<PathBuf> {
         match &task.workspace {
-            WorkspaceSpec::Local { path } => Some(if path.is_absolute() {
-                path.clone()
-            } else {
-                self.config.workspace_root.join(path)
+            WorkspaceSpec::Local { path, .. } => Some(match self.local_worktree_for(task) {
+                Some(wt) => wt.task_dir,
+                None if path.is_absolute() => path.clone(),
+                None => self.config.workspace_root.join(path),
             }),
             // ADR-0018 D1: クラスタ側が正で、手元は写し（`workspace_root/<task_id>`）。
             WorkspaceSpec::Remote { .. } => Some(self.config.workspace_root.join(task.id.to_string())),
         }
+    }
+
+    /// ADR-0041 D1: そのタスクに用意する（用意した）ローカルの worktree。
+    ///
+    /// `Some` になる条件は 3 つだけで、どれも決定的（LLM は使わない）:
+    /// 作業場所が `Local`、`mode = worktree`（既定）、`path` が git リポジトリ（`git rev-parse --git-dir`）。
+    /// base の決め方は `task_worker::resolve_base`（`main` / 本番の `current` / `HEAD`）。
+    fn local_worktree_for(&self, task: &Task) -> Option<task_worker::LocalWorktree> {
+        let WorkspaceSpec::Local { path, .. } = &task.workspace else {
+            return None;
+        };
+        if task.workspace.local_mode() != task_core::WorkspaceMode::Worktree {
+            return None;
+        }
+        let repo = if path.is_absolute() { path.clone() } else { self.config.workspace_root.join(path) };
+        if !task_worker::is_git_repo(&repo) {
+            return None;
+        }
+        let current = self
+            .config
+            .releases_dir
+            .as_deref()
+            .and_then(task_worker::current_release_sha);
+        let base = task_worker::resolve_base(&repo, current.as_deref())?;
+        let task_dir = self.config.workspace_root.join(task.id.to_string());
+        Some(task_worker::LocalWorktree {
+            dir: task_dir.join(task_worker::WORKTREE_DIR_NAME),
+            task_dir,
+            repo,
+            branch: format!("{}{}", self.config.worktree_branch_prefix, task.id),
+            base,
+        })
+    }
+
+    /// ADR-0041 D1: 終端に達したタスクの worktree を片付ける。`git status --porcelain` が空なら
+    /// `git worktree remove`（**ブランチは残す**。コミットはリポジトリに残る）。空でなければ残して
+    /// `WorkerProgress`「未コミットの変更が残っています: <dir>」を 1 行積む。**taskd はコミットしない**。
+    fn cleanup_finished_worktrees(&mut self) -> Result<(), DispatchError> {
+        let ids: Vec<TaskId> = self.local_worktrees.keys().copied().collect();
+        for id in ids {
+            // まだ走っている／判定中なら触らない（やり直しは同じ worktree を使い回す）。
+            if self.running.contains_key(&id) || self.reviewing.contains_key(&id) {
+                continue;
+            }
+            let terminal = match self.store.get(id)? {
+                Some(t) => t.status.is_terminal(),
+                // タスクごと消えていれば、記録も落とす（worktree は人の手に残す）。
+                None => {
+                    self.local_worktrees.remove(&id);
+                    continue;
+                }
+            };
+            if !terminal {
+                continue;
+            }
+            let Some(worktree) = self.local_worktrees.remove(&id) else {
+                continue;
+            };
+            match worktree.remove_if_clean() {
+                task_worker::CleanupOutcome::Removed => {
+                    tracing::info!(task_id = %id, dir = %worktree.dir.display(), branch = %worktree.branch, "worktree removed (clean); the branch stays");
+                }
+                task_worker::CleanupOutcome::Dirty => {
+                    tracing::warn!(task_id = %id, dir = %worktree.dir.display(), "worktree kept (uncommitted changes)");
+                    let run_id = last_run_id(&self.store.events_for(id)?).unwrap_or_default();
+                    self.store.append_event(
+                        id,
+                        &Event::WorkerProgress {
+                            run_id,
+                            msg: format!("未コミットの変更が残っています: {}", worktree.dir.display()),
+                        },
+                    )?;
+                }
+                task_worker::CleanupOutcome::AlreadyGone => {}
+                task_worker::CleanupOutcome::Unknown => {
+                    tracing::warn!(task_id = %id, dir = %worktree.dir.display(), "could not check or remove the worktree; leaving it for a human");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// ADR-0036 D1: そのタスクの成果物ディレクトリ（`<dir>/artifacts` か `<dir>/.taskd/artifacts/<task_id>`）。
@@ -3242,6 +3386,7 @@ async fn run_worker(
     limits: RunLimits,
     lease: LeaseRenewal,
     remote: Option<SshSettings>,
+    worktree: Option<task_worker::LocalWorktree>,
     extras: RunExtras,
     roles: Vec<RoleSpec>,
     genres: Vec<GenreSpec>,
@@ -3269,11 +3414,39 @@ async fn run_worker(
             task.objective.push_str(&remote_exec_instructions(settings));
             prepared
         }
-        None => LocalWorkspace::new(&dir)
-            .prepare(&task)
-            .await
-            .map_err(|e| AdapterError::Other(format!("workspace prepare: {e}")))?,
+        // ADR-0041 D1: ローカルの作業場所が git リポジトリなら、この run 専用の worktree を用意し、
+        // そこをワーカーのカレントディレクトリにする（`runs/` `inputs/` `artifacts/` は作業ツリーの外の `dir`）。
+        None => {
+            let mut ws = LocalWorkspace::new(&dir);
+            if let Some(wt) = &worktree {
+                wt.ensure()
+                    .await
+                    .map_err(|e| workspace_error_to_adapter(e, "worktree prepare"))?;
+                // 目印（`<task_dir>/worktree.json`）: API・CLI はこれを見て「run のログと成果物は
+                // 作業ツリーの外にある」と判断する（git を起こさない。worktree を消した後も残す）。
+                if let Err(e) = task_ops::workspace::write_marker(
+                    &wt.task_dir,
+                    &task_ops::workspace::WorktreeMarker {
+                        repo: wt.repo.to_string_lossy().into_owned(),
+                        dir: wt.dir.to_string_lossy().into_owned(),
+                        branch: wt.branch.clone(),
+                        base: wt.base.sha.clone(),
+                        base_kind: wt.base.kind.as_str().to_string(),
+                    },
+                ) {
+                    tracing::warn!(task_id = %task_id, error = %e, "could not write the worktree marker");
+                }
+                ws = ws.with_work_dir(&wt.dir);
+            }
+            ws.prepare(&task)
+                .await
+                .map_err(|e| AdapterError::Other(format!("workspace prepare: {e}")))?
+        }
     };
+    // ADR-0041 D1: ワーカーの cwd は worktree（`workspace` は足回りの親のまま）。
+    let work_dir = worktree
+        .as_ref()
+        .map(|wt| wt.dir.canonicalize().unwrap_or_else(|_| wt.dir.clone()));
     // ADR-0036 D1: 成果物ディレクトリはタスクごと（共有 workspace では `.taskd/artifacts/<task_id>/`）。
     // 決めるのはディスパッチャで、アダプタは `req.artifacts_dir` に書くだけ。
     let artifacts_dir = task_core::artifacts::artifacts_dir_for(&task, &workspace);
@@ -3289,6 +3462,7 @@ async fn run_worker(
         protocol: PROTOCOL_VERSION,
         task: task.clone(),
         workspace,
+        work_dir,
         artifacts_dir,
         context: RunContext {
             prior_review,
@@ -3504,7 +3678,7 @@ mod tests {
             status: Status::Ready,
             priority: 0,
             worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: dir.to_path_buf() },
+            workspace: WorkspaceSpec::Local { path: dir.to_path_buf(), mode: None },
             budget: Budget { max_turns: 1, max_wall_secs: 30, max_retries },
             attempts: 0,
             lease: None,
@@ -3558,6 +3732,8 @@ mod tests {
                 delegation: DelegationLimits::default(),
                 accounts: None,
                 memory_dir: None,
+                worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
+                releases_dir: None,
             },
         )
     }
@@ -5603,13 +5779,13 @@ mod tests {
             description: "write and fix code".into(),
             ..task_core::GenreSpec::default()
         }];
-        let extras = d.run_extras(&plan).unwrap();
+        let extras = d.run_extras(&plan, None).unwrap();
         let ids: Vec<&str> = extras.available_genres.iter().map(|g| g.id.as_str()).collect();
         assert_eq!(ids, vec!["coding"]);
 
         // 分野が無い設定では空のまま。
         d.config.genres = Vec::new();
-        let extras = d.run_extras(&plan).unwrap();
+        let extras = d.run_extras(&plan, None).unwrap();
         assert!(extras.available_genres.is_empty());
     }
 
@@ -5643,7 +5819,7 @@ mod tests {
             ..task_core::GenreSpec::default()
         }];
 
-        let extras = d.run_extras(&plan_parent).unwrap();
+        let extras = d.run_extras(&plan_parent, None).unwrap();
         assert_eq!(extras.available_genres[0].harness.as_deref(), Some("paperqa"));
         assert!(extras.available_genres[0].is_harness());
 
@@ -5947,6 +6123,8 @@ mod tests {
                     fallback_cooldown_secs: 300,
                 }),
                 memory_dir: None,
+                worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
+                releases_dir: None,
             },
         )
     }
@@ -6566,7 +6744,7 @@ mod tests {
             usage: None,
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root, None);
-        let extras = d.run_extras(&second.task).unwrap();
+        let extras = d.run_extras(&second.task, None).unwrap();
         let texts: Vec<&str> = extras.conversation.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, vec!["先週の続きを教えて", "承知しました"], "{texts:?}");
     }
@@ -6937,17 +7115,17 @@ mod tests {
         let adapter = Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
 
-        let extras = d.run_extras(&to_secretary).unwrap();
+        let extras = d.run_extras(&to_secretary, None).unwrap();
         assert!(extras.available_genres.is_empty(), "対話 run は委譲できない: {extras:?}");
         assert!(extras.organization.is_empty());
         assert_eq!(extras.conversation_addressee, Some(ConversationAddressee::Secretary));
 
-        let extras = d.run_extras(&to_survey).unwrap();
+        let extras = d.run_extras(&to_survey, None).unwrap();
         assert_eq!(extras.conversation_addressee, Some(ConversationAddressee::Other));
 
         // 通常タスク（対話由来でない）には付かない。
         let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
-        let extras = d.run_extras(&ordinary).unwrap();
+        let extras = d.run_extras(&ordinary, None).unwrap();
         assert_eq!(extras.conversation_addressee, None);
     }
 
@@ -6976,7 +7154,7 @@ mod tests {
 
         let mut task = assigned_task(&workspace_root, "poc", "research-survey");
         task.project_id = Some(with_workspace.id);
-        let extras = d.run_extras(&task).unwrap();
+        let extras = d.run_extras(&task, None).unwrap();
         assert_eq!(
             extras.workspace_note.as_deref(),
             Some(
@@ -6986,9 +7164,9 @@ mod tests {
         );
 
         task.project_id = Some(plain.id);
-        assert_eq!(d.run_extras(&task).unwrap().workspace_note, None);
+        assert_eq!(d.run_extras(&task, None).unwrap().workspace_note, None);
         task.project_id = None;
-        assert_eq!(d.run_extras(&task).unwrap().workspace_note, None);
+        assert_eq!(d.run_extras(&task, None).unwrap().workspace_note, None);
 
         // 対話 run には出さない（会話は編集をしない。ADR-0039 D2）。
         let conversation = task_ops::conversation::start(
@@ -7003,7 +7181,7 @@ mod tests {
         )
         .unwrap()
         .task;
-        assert_eq!(d.run_extras(&conversation).unwrap().workspace_note, None);
+        assert_eq!(d.run_extras(&conversation, None).unwrap().workspace_note, None);
     }
 
     /// Phase 30（ADR-0033 D4 追記）: 対話は**ノードの `genre`（仕事のハーネス）に関係なく**常に対話用分野
@@ -7066,7 +7244,7 @@ mod tests {
             ..GenreSpec::default()
         });
 
-        let extras = d.run_extras(&to_survey).unwrap();
+        let extras = d.run_extras(&to_survey, None).unwrap();
         let work_genre = extras.work_genre.expect("research-survey has its own genre");
         assert_eq!(work_genre.id, "literature");
         assert_eq!(work_genre.description, "関連研究の調査");
@@ -7076,13 +7254,13 @@ mod tests {
         );
 
         // 分野を持たないノードには `work_genre` が乗らない。
-        let extras = d.run_extras(&to_data).unwrap();
+        let extras = d.run_extras(&to_data, None).unwrap();
         assert!(extras.work_genre.is_none());
 
         // 通常タスク（対話由来でない）には、担当が genre を持っていても乗らない
         // （`work_genre` は対話専用。仕事の run は `task.genre` 自体がその分野になる）。
         let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
-        let extras = d.run_extras(&ordinary).unwrap();
+        let extras = d.run_extras(&ordinary, None).unwrap();
         assert!(extras.work_genre.is_none());
     }
 
@@ -7311,7 +7489,7 @@ mod tests {
         conv.conversation = Some(task_core::MessageId::new());
         store.insert(&conv).unwrap();
 
-        let extras = d.run_extras(&conv).unwrap();
+        let extras = d.run_extras(&conv, None).unwrap();
         assert_eq!(extras.recent_work.len(), 10, "capped at 10: {:?}", extras.recent_work);
         let ids: Vec<TaskId> = extras.recent_work.iter().map(|w| w.task_id).collect();
         let mut expected_a = a_ids.clone();
@@ -7348,7 +7526,7 @@ mod tests {
         std::fs::create_dir_all(ws.join("artifacts")).unwrap();
         std::fs::write(ws.join("artifacts/answer.md"), "候補 A / 候補 B / 候補 C\n").unwrap();
         let mut done = work_task("web 調査", Status::Done, "research-survey", Some(project.id), base);
-        done.workspace = WorkspaceSpec::Local { path: ws.clone() };
+        done.workspace = WorkspaceSpec::Local { path: ws.clone(), mode: None };
         done.milestone_id = Some(milestone.id);
         store.insert(&done).unwrap();
         store
@@ -7400,7 +7578,7 @@ mod tests {
         )
         .unwrap();
 
-        let extras = d.run_extras(&started.task).unwrap();
+        let extras = d.run_extras(&started.task, None).unwrap();
         let review = extras.milestone_review.expect("the review context is filled");
         assert_eq!(review.milestone.title, "隣接領域の動向調査");
         assert_eq!(review.milestone.status, "in_progress");
@@ -7429,7 +7607,7 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .unwrap();
-        assert!(d.run_extras(&plain.task).unwrap().milestone_review.is_none());
+        assert!(d.run_extras(&plain.task, None).unwrap().milestone_review.is_none());
     }
 
     /// 受け入れ 1: 対話 run の結果ファイルの `milestone_proposal` から `proposed` の途中目標が 1 件できる
@@ -7452,7 +7630,7 @@ mod tests {
         let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
 
         let mut task = work_task("対話", Status::Done, "secretary", Some(project.id), OffsetDateTime::now_utc());
-        task.workspace = WorkspaceSpec::Local { path: ws.clone() };
+        task.workspace = WorkspaceSpec::Local { path: ws.clone(), mode: None };
         task.milestone_id = Some(milestone.id);
         task.conversation = Some(task_core::MessageId::new());
         store.insert(&task).unwrap();
@@ -7515,7 +7693,7 @@ mod tests {
         let ordinary =
             work_task("ordinary", Status::Ready, "research-survey", None, base + time::Duration::seconds(1));
         store.insert(&ordinary).unwrap();
-        let extras = d.run_extras(&ordinary).unwrap();
+        let extras = d.run_extras(&ordinary, None).unwrap();
         assert!(extras.recent_work.is_empty(), "{:?}", extras.recent_work);
     }
 
@@ -7662,7 +7840,7 @@ mod tests {
         conv.conversation = Some(task_core::MessageId::new());
         store.insert(&conv).unwrap();
 
-        let extras = d.run_extras(&conv).unwrap();
+        let extras = d.run_extras(&conv, None).unwrap();
         assert_eq!(extras.recent_work.len(), 1);
         let w = &extras.recent_work[0];
         assert_eq!(w.task_id, done.id);
@@ -7672,5 +7850,359 @@ mod tests {
         assert!(w.finished_at.is_some());
         assert_eq!(w.outcome.as_deref(), Some("Pluvio と比較可能な非同期ランタイムを 3 件確認した"));
         assert_eq!(w.artifacts, vec!["survey.md".to_string()]);
+    }
+
+    // ---- Phase 49（ADR-0041 D1）: ローカルの作業場所もタスクごとに worktree ----
+
+    /// テスト用の git リポジトリ（`main` に 1 コミット）。返すのは `main` の sha。
+    fn init_test_repo(dir: &std::path::Path) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+        ] {
+            let out = std::process::Command::new("git").arg("-C").arg(dir).args(&args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        std::fs::write(dir.join("README.md"), b"hello\n").unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "first"]] {
+            let out = std::process::Command::new("git").arg("-C").arg(dir).args(&args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        git_out(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// `git -C <dir> <args...>` の stdout（trim 済み）。失敗したら panic。
+    fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// 走った run の cwd / workspace / artifacts_dir を記録し、`files` を cwd に作るアダプタ。
+    struct RecordingAdapter {
+        seen: Arc<StdMutex<Vec<(PathBuf, PathBuf, PathBuf)>>>,
+        files: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkerAdapter for RecordingAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push((req.cwd().to_path_buf(), req.workspace.clone(), req.artifacts_dir.clone()));
+            }
+            for name in &self.files {
+                std::fs::write(req.cwd().join(name), b"x").unwrap();
+            }
+            Ok(RunOutcome {
+                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// `workspace_root` を実体のあるディレクトリにした dispatcher（既定の `/nonexistent` では worktree を作れない）。
+    fn worktree_dispatcher(
+        store: Arc<dyn TaskStore>,
+        adapter: Arc<dyn WorkerAdapter>,
+        workspace_root: &std::path::Path,
+        releases_dir: Option<PathBuf>,
+    ) -> Dispatcher {
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.workspace_root = workspace_root.to_path_buf();
+        d.config.releases_dir = releases_dir;
+        d
+    }
+
+    fn git_task(repo: &std::path::Path, mode: Option<task_core::WorkspaceMode>, check: Check) -> Task {
+        let mut task = new_task(repo, check, 0);
+        task.workspace = WorkspaceSpec::Local { path: repo.to_path_buf(), mode };
+        task
+    }
+
+    /// ADR-0041 D1: ローカルの git リポジトリは、タスクごとの worktree
+    /// （`<workspace_root>/<task_id>/tree`、ブランチ `taskd/<task_id>`、base は `main`）で動く。
+    /// 成果物・`runs/` は作業ツリーの**外**（`<workspace_root>/<task_id>/`）。
+    #[tokio::test]
+    async fn a_local_git_workspace_runs_in_a_per_task_worktree_on_its_own_branch() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let main_sha = init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        // 判定コマンドも worktree の中で走る（ADR-0019 D1 6.）: アダプタが cwd に置いたファイルが見える。
+        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "test -f in-tree".into(), expect_exit: 0 });
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec!["in-tree".into()] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        run_until_idle(&mut d, 60).await;
+
+        let task_dir = root.path().join(task.id.to_string());
+        let tree = task_dir.join("tree");
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        assert!(tree.join(".git").exists(), "worktree at <workspace_root>/<task_id>/tree");
+        assert!(tree.join("README.md").is_file(), "追跡ファイルが checkout されている");
+        // ワーカーの cwd は worktree、`workspace`（= `runs/` の親）と成果物はその外。
+        let runs = seen.lock().unwrap().clone();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].0.canonicalize().unwrap(), tree.canonicalize().unwrap(), "cwd は worktree");
+        assert_eq!(runs[0].1.canonicalize().unwrap(), task_dir.canonicalize().unwrap(), "workspace は worktree の親");
+        assert_eq!(runs[0].2, task_dir.canonicalize().unwrap().join("artifacts"), "成果物は作業ツリーの外");
+        assert!(task_dir.join("artifacts").is_dir());
+        assert!(task_dir.join("runs").is_dir());
+        assert!(!tree.join("runs").exists(), "`runs/` を作業ツリーに作らない（git status を汚さない）");
+        // ブランチは `taskd/<task_id>` で、base は `main`。taskd はコミットしない。
+        let branch = format!("taskd/{}", task.id);
+        assert!(git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]));
+        assert_eq!(git_out(&tree, &["rev-parse", "HEAD"]), main_sha, "base は main");
+        assert_eq!(git_out(&tree, &["rev-parse", "--abbrev-ref", "HEAD"]), branch);
+        // 目印（API / CLI が「run のログは作業ツリーの外」と判断するのに使う）。
+        let marker = task_ops::workspace::read_marker(&task_dir).expect("worktree.json");
+        assert_eq!(marker.branch, branch);
+        assert_eq!(marker.base, main_sha);
+        assert_eq!(marker.base_kind, "main");
+        assert_eq!(task_ops::workspace::local_dir(&store.get(task.id).unwrap().unwrap(), root.path()), task_dir);
+    }
+
+    /// ADR-0041 D1: 前置きに作業ツリー・ブランチ・base と「このブランチにコミットせよ」が出る。
+    #[tokio::test]
+    async fn the_preamble_note_names_the_worktree_the_branch_and_the_base() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let main_sha = init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        store.insert(&task).unwrap();
+        let d = worktree_dispatcher(store.clone(), Arc::new(RecordingAdapter { seen: Arc::new(StdMutex::new(Vec::new())), files: vec![] }), root.path(), None);
+        let worktree = d.local_worktree_for(&task).expect("worktree plan");
+        let extras = d.run_extras(&task, Some(&worktree)).unwrap();
+        let note = extras.workspace_note.expect("workspace_note");
+        assert!(note.contains(&format!("作業ツリー `{}`", root.path().join(task.id.to_string()).join("tree").display())), "{note}");
+        assert!(note.contains(&format!("ブランチ `taskd/{}`", task.id)), "{note}");
+        assert!(note.contains(&format!("base `{}`（main）", &main_sha[..12])), "{note}");
+        assert!(note.contains("このブランチにコミットせよ"), "{note}");
+        assert!(note.contains("`main` に直接コミットするな"), "{note}");
+        assert!(note.contains("`git checkout` でブランチを変えるな"), "{note}");
+    }
+
+    /// ADR-0041 D1: 本番の `current` が `main` の子孫なら、その sha から分岐する（本番より古いコードから始めない）。
+    #[tokio::test]
+    async fn the_worktree_branches_from_the_current_release_when_it_is_ahead_of_main() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        // `main` の先に 1 コミット（= 本番のリリースが main に未反映の状態）。
+        let _ = git_out(repo_dir.path(), &["checkout", "-q", "-b", "released"]);
+        std::fs::write(repo_dir.path().join("shipped.txt"), b"x").unwrap();
+        let _ = git_out(repo_dir.path(), &["add", "-A"]);
+        let _ = git_out(repo_dir.path(), &["commit", "-q", "-m", "shipped"]);
+        let shipped = git_out(repo_dir.path(), &["rev-parse", "HEAD"]);
+        let _ = git_out(repo_dir.path(), &["checkout", "-q", "main"]);
+        // 偽の `current` リリース（`releases_dir` の親にある。ADR-0040 D6）。
+        let home = tempfile::tempdir().unwrap();
+        let releases = home.path().join("releases");
+        std::fs::create_dir_all(&releases).unwrap();
+        let current = home.path().join("current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(
+            current.join("manifest.json"),
+            format!("{{\"sha\":\"{shipped}\",\"sha12\":\"{}\"}}", &shipped[..12]),
+        )
+        .unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen, files: vec![] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), Some(releases));
+        let worktree = d.local_worktree_for(&task).expect("worktree plan");
+        assert_eq!(worktree.base.kind.as_str(), "current");
+        assert_eq!(worktree.base.sha, shipped);
+        run_until_idle(&mut d, 60).await;
+        // クリーンなので worktree は消えているが、ブランチは残り、その先端は `current` の sha。
+        let branch = format!("taskd/{}", task.id);
+        assert_eq!(git_out(repo_dir.path(), &["rev-parse", &branch]), shipped);
+    }
+
+    /// ADR-0041 D1: 終端でクリーンなら worktree を消す（ブランチは残す）。
+    #[tokio::test]
+    async fn a_clean_worktree_is_removed_at_the_terminal_state_and_the_branch_stays() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen, files: vec![] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        run_until_idle(&mut d, 60).await;
+        // 終端に達した次の tick で片付ける。
+        d.tick().unwrap();
+
+        let task_dir = root.path().join(task.id.to_string());
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        assert!(!task_dir.join("tree").exists(), "クリーンな worktree は消える");
+        assert!(task_dir.join("artifacts").is_dir(), "成果物は残る");
+        assert!(
+            git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/taskd/{}", task.id)]),
+            "ブランチは消さない"
+        );
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            !events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.starts_with("未コミット"))),
+            "クリーンなら「未コミットの変更」は出さない"
+        );
+    }
+
+    /// ADR-0041 D1: 未コミットの変更が残っていれば worktree を残し、`WorkerProgress` を 1 行積む。
+    #[tokio::test]
+    async fn a_dirty_worktree_is_kept_and_a_progress_line_is_appended() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "test -f left-behind".into(), expect_exit: 0 });
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen, files: vec!["left-behind".into()] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        run_until_idle(&mut d, 60).await;
+        d.tick().unwrap();
+
+        let tree = root.path().join(task.id.to_string()).join("tree");
+        assert!(tree.join("left-behind").is_file(), "未コミットの変更ごと残す");
+        let events = store.events_for(task.id).unwrap();
+        let progress: Vec<&String> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkerProgress { msg, .. } if msg.starts_with("未コミット") => Some(msg),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(progress.len(), 1, "1 行だけ");
+        assert!(progress[0].contains(&tree.display().to_string()), "{}", progress[0]);
+        // 2 回目の tick で重ねて積まない（記録は片付けたら落とす）。
+        d.tick().unwrap();
+        let again = store
+            .events_for(task.id)
+            .unwrap()
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.starts_with("未コミット")))
+            .count();
+        assert_eq!(again, 1);
+    }
+
+    /// ADR-0041 D1: `mode = "shared"` は従来どおり `path` をそのまま作業ディレクトリにする。
+    #[tokio::test]
+    async fn shared_mode_keeps_the_repository_itself_as_the_working_directory() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(
+            repo_dir.path(),
+            Some(task_core::WorkspaceMode::Shared),
+            Check::Command { cmd: "true".into(), expect_exit: 0 },
+        );
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        assert!(d.local_worktree_for(&task).is_none());
+        run_until_idle(&mut d, 60).await;
+
+        let runs = seen.lock().unwrap().clone();
+        assert_eq!(runs[0].0, repo_dir.path().canonicalize().unwrap(), "cwd はリポジトリそのもの");
+        assert_eq!(runs[0].2, repo_dir.path().canonicalize().unwrap().join("artifacts"));
+        assert!(!root.path().join(task.id.to_string()).exists(), "タスクごとのディレクトリは作らない");
+    }
+
+    /// ADR-0041 D1: git リポジトリでない `path` は `mode` の既定が `worktree` でも従来どおり。
+    #[tokio::test]
+    async fn a_local_path_that_is_not_a_git_repository_is_unchanged() {
+        let plain = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(plain.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        assert!(d.local_worktree_for(&task).is_none());
+        run_until_idle(&mut d, 60).await;
+
+        let runs = seen.lock().unwrap().clone();
+        assert_eq!(runs[0].0, plain.path().canonicalize().unwrap());
+        assert_eq!(runs[0].1, plain.path().canonicalize().unwrap());
+        assert!(!root.path().join(task.id.to_string()).exists());
+    }
+
+    /// ADR-0041 D1: 委譲の子は親の作業場所を継ぐので、**子ごとに別の worktree**になる。
+    /// 親の集約 run には子のブランチ名が渡る（親はそれを merge する）。
+    #[tokio::test]
+    async fn each_delegated_child_gets_its_own_worktree_and_the_parent_sees_the_branches() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut parent = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        parent.aggregate = true;
+        store.insert(&parent).unwrap();
+        let mut children = Vec::new();
+        for title in ["a", "b"] {
+            let mut child = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+            child.parent_id = Some(parent.id);
+            child.title = title.into();
+            child.status = Status::Done;
+            store.insert(&child).unwrap();
+            children.push(child);
+        }
+        store
+            .append_event(
+                parent.id,
+                &Event::Transitioned { from: Status::Running, to: Status::Reviewing, reason: "aggregate".into() },
+            )
+            .unwrap();
+        let d = worktree_dispatcher(store.clone(), Arc::new(RecordingAdapter { seen: Arc::new(StdMutex::new(Vec::new())), files: vec![] }), root.path(), None);
+        let extras = d.run_extras(&parent, None).unwrap();
+        let mut branches: Vec<String> = extras.children.iter().filter_map(|c| c.branch.clone()).collect();
+        branches.sort();
+        let mut expected: Vec<String> = children.iter().map(|c| format!("taskd/{}", c.id)).collect();
+        expected.sort();
+        assert_eq!(branches, expected, "子ごとに別のブランチ");
+        // 子の worktree は互いに別のディレクトリ（親の作業ツリーも共有しない）。
+        let dirs: Vec<PathBuf> = children
+            .iter()
+            .map(|c| d.local_worktree_for(c).expect("child worktree").dir)
+            .collect();
+        assert_ne!(dirs[0], dirs[1]);
+        assert_ne!(dirs[0], d.local_worktree_for(&parent).expect("parent worktree").dir);
+        // 子でも成果物はタスクごとのディレクトリの中（`.taskd/artifacts/<id>` ではない）。
+        assert_eq!(
+            extras.children[0].workspace.as_deref(),
+            Some(root.path().join(children[0].id.to_string()).as_path())
+        );
     }
 }

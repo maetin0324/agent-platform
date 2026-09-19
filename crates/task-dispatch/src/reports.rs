@@ -282,7 +282,7 @@ mod tests {
                 tier: Tier::Cheap,
                 adapter: None,
             },
-            workspace: WorkspaceSpec::Local { path: ".".into() },
+            workspace: WorkspaceSpec::Local { path: ".".into(), mode: None },
             budget: Budget {
                 max_turns: 1,
                 max_wall_secs: 1,

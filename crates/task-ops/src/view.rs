@@ -646,18 +646,13 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
         Some(latest_question_raw)
     };
 
-    let workspace_dir = match &task.workspace {
-        WorkspaceSpec::Local { path } => {
-            let abs = if path.is_relative() {
-                ctx.workspace_root.join(path)
-            } else {
-                path.clone()
-            };
-            Some(abs.to_string_lossy().into_owned())
-        }
-        // ADR-0018 D1: クラスタ側が正で、手元は写し。run のログ（`runs/`）は写しに置かれる。
-        WorkspaceSpec::Remote { .. } => Some(ctx.workspace_root.join(task.id.to_string()).to_string_lossy().into_owned()),
-    };
+    // ADR-0041 D1: worktree を切ったタスクでは、run のログ・成果物は作業ツリーの外
+    // （`<workspace_root>/<task_id>/`）にある。判定は `workspace::local_dir`（目印ファイルを見るだけ）。
+    let workspace_dir = Some(
+        crate::workspace::local_dir(&task, &ctx.workspace_root)
+            .to_string_lossy()
+            .into_owned(),
+    );
     let cluster = match &task.workspace {
         WorkspaceSpec::Local { .. } => None,
         WorkspaceSpec::Remote { cluster, .. } => Some(cluster.clone()),
@@ -676,7 +671,14 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
                     branch: format!("{WORKTREE_BRANCH_PREFIX}{}", task.id),
                 }
             }),
-        WorkspaceSpec::Local { .. } => None,
+        // ADR-0041 D1: ローカルも worktree を切る。目印（`worktree.json`）があればそれを出す。
+        WorkspaceSpec::Local { path, .. } => {
+            crate::workspace::read_marker(&ctx.workspace_root.join(task.id.to_string())).map(|m| WorktreeView {
+                project: if m.repo.is_empty() { path.to_string_lossy().into_owned() } else { m.repo },
+                dir: m.dir,
+                branch: m.branch,
+            })
+        }
     };
 
     let task_actions = actions(&task);
@@ -789,7 +791,7 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: "workspace".into(),
+                path: "workspace".into(), mode: None,
             },
             budget: Budget {
                 max_turns: 10,
