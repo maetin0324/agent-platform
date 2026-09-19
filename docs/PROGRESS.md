@@ -6158,3 +6158,13 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
 - **可用性**: 0.2 秒間隔で API `/health` と GUI `/healthz` を 45.8 秒間・184 サンプル叩き、**非 200 は 0 件**。
   release の値は API で 13.5〜15.2 秒の間、GUI で 15.7〜26.4 秒の間、新旧が交互に返った（`SO_REUSEPORT` の並走窓。設計どおり）。
 - 事後: `GET /releases` = `current 70e3175eeb20 / previous 60aa29440639 / running.role active / instances 1 行（新のみ）`。
+
+### Phase 48 実機: 自己改善案件の登録（2026-09-19 12:38 UTC）
+
+- `~/taskd/taskd.toml` の `implementer` の `instructions` に P48-1 の自己改善ルール（ADR-0040 D5）を追記（既存の
+  「リモートの作業ツリーに直接書かない」は残す。`max_turns 60 / max_wall_secs 3600` は据え置き。バックアップ `taskd.toml.bak-20260919a`）。
+  `POST /reload` → 200 `{"reloaded":true}`（journal: `providers reloaded`）。`GET /config` の roles は旧のまま（U44-1: task-api の
+  スナップショットは reload で更新されない。ディスパッチャ側は Phase 44 で読み直す）。
+- `POST /projects` → 201 `01M2WTS3DKNZBSZ2JMVB4CZMBW`「agent-platform の自己改善」、workspace `local: /home/rmaeda/workspace/agent-platform`、
+  `status = proposed`。秘書の対話タスクが `ready` になり、返事は GUI の案件画面に届く（人の返事待ち）。
+- 掃除: 9/17 の消えたワークツリーが残していた dev GUI（pid 1464867、127.0.0.1:17901）を停止。
