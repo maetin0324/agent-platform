@@ -4,6 +4,8 @@ import type {
   CommentEffect,
   Decision,
   InstanceRole,
+  IntegrationMethod,
+  IntegrationState,
   MilestoneStatus,
   OrgKind,
   ProjectStatus,
@@ -357,4 +359,75 @@ export function taskTabLabel(tab: TaskTab | string): string {
 /** `?tab=` を読む。知らない値・未指定は概要（ADR-0044 D5 の既定）。 */
 export function parseTaskTab(value: string | null | undefined): TaskTab {
   return value && (TASK_TABS as readonly string[]).includes(value) ? (value as TaskTab) : "overview";
+}
+
+/**
+ * 変更の取り込み（ADR-0043 D5、taskd Phase 54 / G18）。`merge` / `pr` / `discard` と
+ * `done` / `open` / `merged` / `closed` / `conflict` / `failed` は taskd の値をそのまま送り返すだけで、
+ * 画面に出す言葉だけをここに集める。知らない値は素のまま出す（taskd が値を増やしても壊れない）。
+ */
+const INTEGRATION_METHOD_LABEL: Record<IntegrationMethod, string> = {
+  merge: "取り込み",
+  pr: "PR",
+  discard: "破棄",
+};
+
+export function integrationMethodLabel(method: IntegrationMethod | string): string {
+  return INTEGRATION_METHOD_LABEL[method as IntegrationMethod] ?? method;
+}
+
+const INTEGRATION_STATE_LABEL: Record<IntegrationState, string> = {
+  done: "取り込み済み",
+  open: "PR 公開中",
+  merged: "merge 済み",
+  closed: "閉じた",
+  conflict: "衝突",
+  failed: "失敗",
+};
+
+export function integrationStateLabel(state: IntegrationState | string): string {
+  return INTEGRATION_STATE_LABEL[state as IntegrationState] ?? state;
+}
+
+/**
+ * 変わったファイルの `status`（`ChangedFile.status`）。`?` は git の管理外（未追跡）。
+ * 文字は taskd が決めたものをそのまま受ける（GUI で再判定しない）。
+ */
+const CHANGED_FILE_STATUS_LABEL: Record<string, string> = {
+  A: "追加",
+  M: "変更",
+  D: "削除",
+  "?": "未追跡",
+  T: "種類が変わった",
+};
+
+export function changedFileStatusLabel(status: string): string {
+  return CHANGED_FILE_STATUS_LABEL[status] ?? status;
+}
+
+/** 「main に取り込む」ボタン（取り込む先は taskd が返した `default_branch`。`main` とは限らない）。 */
+export function integrateMergeLabel(defaultBranch: string): string {
+  return `${defaultBranch} に取り込む`;
+}
+
+export const CREATE_PR_LABEL = "PR を作る";
+export const DISCARD_CHANGES_LABEL = "捨てる（確認）";
+export const DISCARD_CHANGES_CONFIRM_LABEL = "本当に捨てる";
+export const MERGE_PR_LABEL = "Celeris で merge";
+
+/** `ahead === 0 && files.length === 0`（調査などコードを伴わないタスク。ADR-0043 D5）。 */
+export const NO_CHANGES_LABEL = "変更なし";
+
+/** `missing: true`（worktree もブランチも無い）。 */
+export const CHANGES_MISSING_LABEL = "取り込み済み・中止済み（作業ツリーもブランチもありません）";
+
+/** `ChangeDiffView.truncated`（200 KiB で切った）。 */
+export const DIFF_TRUNCATED_LABEL = "途中で切りました（200 KiB）";
+
+/** 「PR を作る」を押せない理由（`origin` が無い・`gh` が使えない）。押せるなら `null`。 */
+export function prUnavailableReason(origin: boolean, gh: boolean): string | null {
+  if (!origin && !gh) return "origin リモートが無く、gh も使えないので PR を作れません";
+  if (!origin) return "origin リモートが無いので PR を作れません";
+  if (!gh) return "gh が使えない（PATH に無い・未認証）ので PR を作れません";
+  return null;
 }

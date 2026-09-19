@@ -124,6 +124,9 @@ pub struct Config {
     /// ADR-0041 D1（Phase 49）: ローカルの作業場所を worktree にするときの設定。
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+    /// ADR-0043 D5（Phase 54）: 変更の取り込みで GitHub を使うときの設定（`gh` の場所と merge の方法）。
+    #[serde(default)]
+    pub github: GithubConfig,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -210,6 +213,39 @@ impl Default for WorkspaceConfig {
 fn default_worktree_branch_prefix() -> String {
     task_worker::DEFAULT_BRANCH_PREFIX.to_string()
 }
+
+/// `[github]`（ADR-0043 D5。Phase 54）: 変更の取り込みを PR でやるときの設定。
+///
+/// - `gh` — CLI の場所（PATH にあれば `"gh"` のまま）。無ければ PR の経路は 409 になる。
+/// - `merge_method` — 「Celeris で merge」が使う方法（`merge` / `squash` / `rebase`）。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GithubConfig {
+    #[serde(default = "default_gh")]
+    pub gh: String,
+    #[serde(default = "default_merge_method")]
+    pub merge_method: String,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            gh: default_gh(),
+            merge_method: default_merge_method(),
+        }
+    }
+}
+
+fn default_gh() -> String {
+    "gh".to_string()
+}
+
+fn default_merge_method() -> String {
+    "merge".to_string()
+}
+
+/// `gh pr merge` に渡してよい方法（それ以外は設定エラー）。
+pub const MERGE_METHODS: [&str; 3] = ["merge", "squash", "rebase"];
 
 /// ADR-0040 D3（Phase 47）: CLI からの上書き。`verify.sh` が本番の設定をそのまま読ませたまま、
 /// DB・待ち受け・作業場所・トークンだけを staging のものに差し替えるために使う。
@@ -1120,6 +1156,16 @@ impl Config {
         }
         if self.tick_ms == 0 {
             return Err(ConfigError::Invalid("tick_ms must be >= 1".into()));
+        }
+        // ADR-0043 D5: `gh pr merge` に渡す方法は 3 つだけ。
+        if !MERGE_METHODS.contains(&self.github.merge_method.as_str()) {
+            return Err(ConfigError::Invalid(format!(
+                "[github] merge_method must be one of {MERGE_METHODS:?} (got {:?})",
+                self.github.merge_method
+            )));
+        }
+        if self.github.gh.trim().is_empty() {
+            return Err(ConfigError::Invalid("[github] gh must not be blank".into()));
         }
         if self.providers.is_empty() {
             return Err(ConfigError::Invalid("at least one [[providers]] entry is required".into()));
@@ -3268,6 +3314,31 @@ roles = ["lead"]
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.selfdeploy.repo, PathBuf::from("/srv/agent-platform"));
+    }
+
+    /// ADR-0043 D5（Phase 54）: `[github]` は書かなくてよく（既定は `gh` / `merge`）、
+    /// 知らない `merge_method` と空の `gh` は設定エラー。
+    #[test]
+    fn github_defaults_to_gh_and_merge_and_rejects_other_merge_methods() {
+        let base = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n".to_string();
+        let cfg: Config = toml::from_str(&base).expect("defaults");
+        assert_eq!(cfg.github.gh, "gh");
+        assert_eq!(cfg.github.merge_method, "merge");
+        assert!(cfg.validate().is_ok());
+
+        let cfg: Config = toml::from_str(&format!("{base}\n[github]\ngh = \"/opt/gh\"\nmerge_method = \"squash\"\n"))
+            .expect("explicit");
+        assert_eq!(cfg.github.gh, "/opt/gh");
+        assert_eq!(cfg.github.merge_method, "squash");
+        assert!(cfg.validate().is_ok());
+
+        let bad: Config = toml::from_str(&format!("{base}\n[github]\nmerge_method = \"rebase-merge\"\n"))
+            .expect("parse");
+        assert!(matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("merge_method")));
+        let blank: Config = toml::from_str(&format!("{base}\n[github]\ngh = \"  \"\n")).expect("parse");
+        assert!(matches!(blank.validate(), Err(ConfigError::Invalid(m)) if m.contains("gh")));
+        // 未知のキーは弾く（他の節と同じ流儀）。
+        assert!(toml::from_str::<Config>(&format!("{base}\n[github]\nbogus = 1\n")).is_err());
     }
 
     /// ADR-0041 D1（Phase 49）/ ADR-0042 D3（Phase 52）: `[workspace] worktree_branch_prefix` は

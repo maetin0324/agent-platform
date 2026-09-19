@@ -1083,6 +1083,96 @@
       },
       "type": "object"
     },
+    "ChangeDiffView": {
+      "description": "`GET /tasks/{id}/changes/{repo}/diff?path=` の応答（ADR-0043 D5。200 KiB で切る）。",
+      "properties": {
+        "diff": {
+          "description": "unified diff（差分が無ければ空文字列）。",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "truncated": {
+          "description": "200 KiB を超えたので途中で切った。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repo",
+        "path",
+        "diff",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "ChangedFile": {
+      "description": "変わったファイル 1 件。",
+      "properties": {
+        "additions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "binary": {
+          "description": "バイナリ（git が行数を出さなかった）。",
+          "type": "boolean"
+        },
+        "deletions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "リポジトリの根からの相対パス。",
+          "type": "string"
+        },
+        "status": {
+          "description": "`A`（追加）/ `M`（変更）/ `D`（削除）/ `?`（git の管理外）/ `T`（種類が変わった）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "additions",
+        "deletions"
+      ],
+      "type": "object"
+    },
+    "ChangesView": {
+      "description": "`GET /tasks/{id}/changes` の応答（ADR-0043 D5。読み取り。トークンは要らない）。\n\ngit のリポジトリだけを並べる（`dir` のリポジトリは対象外）。PR の状態の同期（`gh pr view`）は\n**この API を呼んだときだけ**行う（ADR-0043 D5: 常時同期はしない）。",
+      "properties": {
+        "gh": {
+          "description": "`gh` が PATH にあって認証済みか（GUI が「PR を作る」を出すかどうか）。",
+          "type": "boolean"
+        },
+        "merge_method": {
+          "description": "`[github] merge_method`（「Celeris で merge」が使う方法）。",
+          "type": "string"
+        },
+        "repos": {
+          "description": "git のリポジトリごとの差分（順番はタスクの `repos` の順）。",
+          "items": {
+            "$ref": "#/$defs/RepoChangesView"
+          },
+          "type": "array"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "repos",
+        "gh",
+        "merge_method"
+      ],
+      "type": "object"
+    },
     "Check": {
       "description": "DESIGN §5.3/§5.7 の `Check` 種別。",
       "oneOf": [
@@ -2188,6 +2278,32 @@
       ],
       "type": "object"
     },
+    "DiffStat": {
+      "description": "ファイル数と ± の合計。",
+      "properties": {
+        "additions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deletions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "files",
+        "additions",
+        "deletions"
+      ],
+      "type": "object"
+    },
     "DraftGroup": {
       "properties": {
         "drafts": {
@@ -3059,6 +3175,109 @@
         {
           "const": "verify",
           "description": "`--mode verify`。dispatch も裏方も無し。`daemon_instances` に行を書かない。",
+          "type": "string"
+        }
+      ]
+    },
+    "IntegrateBody": {
+      "additionalProperties": false,
+      "description": "`POST /tasks/{id}/changes/{repo}/integrate` の要求本文（**管理系。人だけ**。ADR-0043 D5）。",
+      "properties": {
+        "confirm": {
+          "description": "`discard` のときだけ必須（取り返しがつかないので確認を取る）。",
+          "type": "boolean"
+        },
+        "method": {
+          "$ref": "#/$defs/IntegrationMethod",
+          "description": "`merge` / `pr` / `discard`。"
+        },
+        "note": {
+          "description": "人のひとこと（記録の `detail` の先頭に入る。PR の本文には入れない）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object"
+    },
+    "IntegrateResult": {
+      "description": "取り込みの結果（`integrate` と `pr/merge` の応答）。",
+      "properties": {
+        "child_task_id": {
+          "description": "衝突したときに作った「衝突の解消」タスク（ADR-0043 D5）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "integration": {
+          "$ref": "#/$defs/TaskIntegration"
+        }
+      },
+      "required": [
+        "integration"
+      ],
+      "type": "object"
+    },
+    "IntegrationId": {
+      "description": "取り込みの記録の一意識別子（ULID）。",
+      "type": "string"
+    },
+    "IntegrationMethod": {
+      "description": "取り込みの方法（ADR-0043 D5）。",
+      "oneOf": [
+        {
+          "const": "merge",
+          "description": "default_branch に rebase して fast-forward（push はしない）。",
+          "type": "string"
+        },
+        {
+          "const": "pr",
+          "description": "`git push -u origin <branch>` → `gh pr create`。",
+          "type": "string"
+        },
+        {
+          "const": "discard",
+          "description": "worktree とブランチを消す（確認付き）。",
+          "type": "string"
+        }
+      ]
+    },
+    "IntegrationState": {
+      "description": "取り込みの行方（ADR-0043 D5）。",
+      "oneOf": [
+        {
+          "const": "done",
+          "description": "`merge` / `discard` が終わった（worktree とブランチは消えている）。",
+          "type": "string"
+        },
+        {
+          "const": "open",
+          "description": "PR が開いている。",
+          "type": "string"
+        },
+        {
+          "const": "merged",
+          "description": "PR が merge された。",
+          "type": "string"
+        },
+        {
+          "const": "closed",
+          "description": "PR が merge されずに閉じた。",
+          "type": "string"
+        },
+        {
+          "const": "conflict",
+          "description": "rebase が衝突した（「衝突の解消」タスクを作った。worktree は残す）。",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "git / gh が失敗した（`detail` に理由）。",
           "type": "string"
         }
       ]
@@ -4311,6 +4530,42 @@
       "description": "案件の一意識別子（ULID）。`TaskId` と同じ形。",
       "type": "string"
     },
+    "ProjectIntegrationItem": {
+      "description": "`ProjectIntegrations.items[]` の 1 件（記録 + 人が読むためのタスクの題名）。",
+      "properties": {
+        "integration": {
+          "$ref": "#/$defs/TaskIntegration"
+        },
+        "task_status": {
+          "$ref": "#/$defs/Status"
+        },
+        "task_title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "integration",
+        "task_title",
+        "task_status"
+      ],
+      "type": "object"
+    },
+    "ProjectIntegrations": {
+      "description": "`GET /projects/{id}/integrations` の応答（案件画面の「PR と取り込み」。ADR-0043 D5）。",
+      "properties": {
+        "items": {
+          "description": "タスク × リポジトリごとに最新の 1 件（新しい順）。",
+          "items": {
+            "$ref": "#/$defs/ProjectIntegrationItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
     "ProjectList": {
       "description": "`GET /projects` の応答（`created_at` の降順）。",
       "properties": {
@@ -5309,6 +5564,82 @@
       "required": [
         "tasks",
         "mismatches"
+      ],
+      "type": "object"
+    },
+    "RepoChangesView": {
+      "description": "`ChangesView.repos[]` の 1 件。",
+      "properties": {
+        "ahead": {
+          "description": "`base..head` のコミットの数（コミットが無ければ 0）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "base": {
+          "description": "分岐した地点の sha。",
+          "type": "string"
+        },
+        "branch": {
+          "description": "タスクのブランチ（`celeris/<task_id>`）。",
+          "type": "string"
+        },
+        "default_branch": {
+          "description": "取り込む先（`project_repos.default_branch`、無ければ検出）。",
+          "type": "string"
+        },
+        "dirty": {
+          "description": "未コミットの変更がある。",
+          "type": "boolean"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/ChangedFile"
+          },
+          "type": "array"
+        },
+        "head": {
+          "description": "いまのブランチの先端の sha。",
+          "type": "string"
+        },
+        "integration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskIntegration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "このリポジトリの最新の取り込みの記録（無ければ `null`）。"
+        },
+        "missing": {
+          "description": "worktree もブランチも無い（取り込み済み・中止済み）。",
+          "type": "boolean"
+        },
+        "origin": {
+          "description": "`origin` リモートがある（PR を作れる前提の 1 つ）。",
+          "type": "boolean"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "stat": {
+          "$ref": "#/$defs/DiffStat"
+        }
+      },
+      "required": [
+        "repo",
+        "branch",
+        "default_branch",
+        "base",
+        "head",
+        "ahead",
+        "files",
+        "stat",
+        "dirty",
+        "missing",
+        "origin"
       ],
       "type": "object"
     },
@@ -6804,6 +7135,80 @@
       "description": "タスクの一意識別子（ULID）。DESIGN §4.1。",
       "type": "string"
     },
+    "TaskIntegration": {
+      "description": "`task_integrations` の 1 行（ADR-0043 D5）。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "detail": {
+          "description": "人に見せる 1 行（409 の理由、衝突したファイル、gh の失敗など）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/IntegrationId"
+        },
+        "merged_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/IntegrationMethod"
+        },
+        "pr_number": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pr_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "タスクの中でのリポジトリの名前（`repos/<name>/`）。API の URL もこれで引く。",
+          "type": "string"
+        },
+        "repo_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`project_repos.id`。Phase 49 の 1 リポジトリのタスク（案件のリポジトリの行を持たない）は `None`。"
+        },
+        "state": {
+          "$ref": "#/$defs/IntegrationState"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "task_id",
+        "repo",
+        "method",
+        "state",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
     "TaskKind": {
       "description": "DESIGN §4.1 の `TaskKind`。",
       "enum": [
@@ -7240,7 +7645,7 @@
           "type": "object"
         },
         {
-          "description": "ADR-0043 D5 / A2（取り込み: merge / PR / discard）。**この Phase では作られない**\n（enum の口だけ用意しておく）。",
+          "description": "ADR-0043 D5 / A2（取り込み: merge / PR / discard）。`task_integrations` の 1 行を\n`action`（方法）と `detail`（`<リポジトリ>: <行方>` + PR の番号と URL + 理由）に写したもの。",
           "properties": {
             "action": {
               "type": "string"
@@ -7674,6 +8079,13 @@
     "cancel": {
       "$ref": "#/$defs/CancelBody"
     },
+    "change_diff": {
+      "$ref": "#/$defs/ChangeDiffView"
+    },
+    "changes": {
+      "$ref": "#/$defs/ChangesView",
+      "description": "Phase 54（ADR-0043 D5）: 変更の取り込み（差分・merge・PR・衝突タスク）。"
+    },
     "cluster_connect_result": {
       "$ref": "#/$defs/ClusterConnectResult"
     },
@@ -7714,6 +8126,12 @@
     },
     "inbox": {
       "$ref": "#/$defs/Inbox"
+    },
+    "integrate": {
+      "$ref": "#/$defs/IntegrateBody"
+    },
+    "integrate_result": {
+      "$ref": "#/$defs/IntegrateResult"
     },
     "memory": {
       "$ref": "#/$defs/MemoryView",
@@ -7773,6 +8191,9 @@
     },
     "project_detail": {
       "$ref": "#/$defs/ProjectDetail"
+    },
+    "project_integrations": {
+      "$ref": "#/$defs/ProjectIntegrations"
     },
     "project_list": {
       "$ref": "#/$defs/ProjectList",
@@ -7986,6 +8407,11 @@
     "comment_result",
     "reopen",
     "timeline",
+    "changes",
+    "change_diff",
+    "integrate",
+    "integrate_result",
+    "project_integrations",
     "daemon",
     "config",
     "stream_hello",

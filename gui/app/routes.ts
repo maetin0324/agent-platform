@@ -27,6 +27,8 @@ export default [
   route("tasks/:id", "routes/tasks.$id.tsx"),
   // タスクの作業ツリー（ADR-0043 D6、Phase 52 / G16）。`runs/:runId` と同じ兄弟のルート
   route("tasks/:id/files", "routes/tasks.$id.files.tsx"),
+  // タスクの変更の取り込み（ADR-0043 D5、Phase 54 / G18）。「変更」タブと同じ部品を出す兄弟のルート
+  route("tasks/:id/changes", "routes/tasks.$id.changes.tsx"),
   route("tasks/:id/runs/:runId", "routes/tasks.$id.runs.$runId.tsx"),
   route("plans/new", "routes/plans.new.tsx"),
   route("daemon", "routes/daemon.tsx"),

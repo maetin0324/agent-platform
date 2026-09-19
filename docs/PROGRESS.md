@@ -6817,6 +6817,311 @@ Phase 52（ADR-0043 A1）と Phase 53（ADR-0044 B1）は同じ `4152b0a` から
   - B1 の `scripts/live-check-phase53.sh` は**マージ後には回していない**（Phase 53 の枝で回した証跡は
     その節にある）。次の実機確認のときに、A1 の複数リポジトリと一緒に 1 周回すこと。
 
+## Phase 54 — ワークスペース A2: 変更の取り込み（差分・merge・PR・衝突タスク）（ADR-0043 D5。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0043 §1 の (3) / §4 A2）: Phase 52（A1）でタスクは `<workspace_root>/<task_id>/repos/<name>/` の
+  worktree で働き、終端でも worktree とブランチが**残る**ようになった。しかし「**終わったタスクの変更を
+  誰がどう取り込むか**」が無く、人は端末で `git log` を叩くしかなかった。A2 は D5 を入れる:
+  差分を見る（`changes` / `diff`）、取り込む（`merge` / `pr` / `discard`）、衝突したら解消タスクを作る、
+  PR の状態を画面を開いたときに同期する、案件画面に PR と取り込みを並べる。
+  D3（コンテナ実行）は A3、D7（リモート (b)）は A4 なので**触っていない**。
+- 決めたこと（ADR に書き足した差は `docs/adr/0043-workspaces.md` の「Phase 54 追記」。ここには理由を書く）:
+  - **migration は 0014、`SCHEMA_VERSION = 14`**。版 13 は ADR-0044 B1（`task_comments` と
+    `tasks.labels_json` / `category`）が同じ時間に別の枝で作っているので、この枝では
+    `MIGRATION_0013_RESERVED`（中身が空のコメント 1 行）として**版数だけ予約**した。
+    合流のときに `include_str!("../migrations/0013_task_comments.sql")` に差し替えるだけでよい
+    （空の版を当てても `schema_migrations` に行が 1 つ増えるだけで、B1 の 0013 は合流後に当たる）。
+  - **`task_integrations` の列は D5 + 3 つ**（P54-1）。`repo_name`（タスクの中でのリポジトリの名前）、
+    `detail`（人に見せる一行）、`updated_at` を足し、**`repo_id` を NULL 可**にした。Phase 49 の
+    1 リポジトリのタスクは `project_repos` の行を持たないが、そのブランチも取り込む必要があるし、
+    API の URL（`/changes/{repo}`）も名前で引くため。引くキーは `(task_id, repo_name)`。
+  - **衝突の解消タスクは `repos` を空にして `workspace = 親の worktree + mode = "shared"`**（P54-2）。
+    課題文が提案していた `worktree_of: <parent_id>` の目印（`RunRequest` / `worktree.json` に新しい欄）は
+    採らなかった。子に `repos` を持たせると**子が自分の worktree（別のブランチ）を切ってしまう**ので、
+    ADR-0041 D1 の逃げ道（`mode = "shared"` は worktree を切らずそのディレクトリで走る）に乗せた方が
+    既存の経路をそのまま使えて、ワーカープロトコルにも目印にも新しい概念が要らない。
+    子の cwd は親の `repos/<name>/`、ブランチは親の `celeris/<parent_id>` のまま。
+  - **API が `git` / `gh` を起こす**（P54-3）。ADR-0013 は「API はワーカーの起動・コマンドの実行をしない」と
+    決めているが、D5 は `changes` も `integrate` も API のエンドポイントとして要求している。
+    妥協点として **`git` と `gh` だけ**を、**全部に待ち時間の上限を付けて**、
+    **人が押したときと画面を開いたときだけ**起こすことにした（`task_ops::changes`。
+    読み取り 30 秒 / 書き込み 300 秒 / `gh pr view` 10 秒 / `gh pr create`・`merge` 120 秒）。
+    ワーカーも LLM も起こさない。ディスパッチャ経由（`AdminRequest`）にしなかったのは、取り込みが
+    tick と無関係な人の同期操作で、応答に結果を返す必要があるから。
+  - **`files` は「base から**いまの作業ツリー**まで」**（P54-4）。コミット済み + 未コミット + 追跡外を
+    1 つの一覧にする（`git diff --numstat <base>` + `--name-status` + `ls-files --others`）。
+    `dirty` と `ahead` が別にあるので情報は失われず、**ワーカーがコミットしなかったタスクでも**人が
+    中身を見られる。worktree が無くブランチだけのときは `base..<branch>`（コミットだけ、`dirty = false`）。
+  - **`base` は `merge-base(default_branch, head)`**。取れなければ目印（`worktree.json`）の `base`、
+    それも無ければ `head`（そのとき `ahead = 0`）。`default_branch` は `project_repos.default_branch` →
+    `origin/HEAD` → `main` → `master` → `"main"` の順（決定的）。
+  - **`merge` は 409 を先に判定してから何もしない**。人のチェックアウトが `default_branch` を出していて
+    `git status --porcelain` が空でなければ、一時 worktree も作らずに 409 `default_branch_busy`
+    「`<default_branch>` が編集中」を返す（**記録も残さない**＝「何も起きていない」）。
+    綺麗なら `merge --ff-only`、別のブランチなら `update-ref refs/heads/<db> <new> <old>`
+    （compare-and-swap。人の作業ツリーには触らない）。
+  - **`git` / `gh` の失敗は 200 + `state = "failed"` + `detail`**。HTTP のエラーにするのは
+    409 `default_branch_busy` / 409 `pr_unavailable` / 422（`discard` の確認漏れ）/ 404 / 401 だけにした。
+    こうすると GUI の契約が「返ってきた記録の `state` と `detail` を出す」の 1 本になる。
+  - **PR の同期は `GET /tasks/{id}/changes` と `GET /projects/{id}/integrations` でだけ**（D5 のとおり）。
+    `gh` が落ちたときは記録を**触らない**（画面を開いただけで `failed` にしない）。案件の一覧は
+    **1 回に 20 件まで**同期する（`MAX_REFRESH_PER_CALL`）。
+  - **`gh auth status` はプロセス内で 60 秒だけ覚える**（D5）。キャッシュはパスごとではなく 1 つ
+    （設定の `[github] gh` は実行中に変わらないため）。テストのために `forget_gh_auth()` を公開した。
+  - **PR の本文は決定的**（LLM を使わない）: 目的 / 受け入れ条件 / 最新の報告の要約（見出し + 本文 12 行）/
+    `Celeris task <id>` と `[notify] gui_base_url` があればそのリンク。報告は `ReportFilter` に
+    `task_id` が無いので、案件（あれば）で 200 件まで引いてから `task_id` で突き合わせる。
+  - **`origin` へ push するのは `pr` のときだけ**（D5。`merge` は push しない）。
+- 変更したファイル（taskd 側）:
+  - `crates/task-core/migrations/0014_task_integrations.sql`（新規）: `task_integrations` + 索引 2 本。
+    D5 の列との差をコメントに書いた。
+  - `crates/task-core/src/integrations.rs`（新規）: `IntegrationId` / `IntegrationMethod`（`merge`/`pr`/`discard`）/
+    `IntegrationState`（`done`/`open`/`merged`/`closed`/`conflict`/`failed`）/ `TaskIntegration`、
+    `TaskIntegration::pr_state`（`gh pr view --json state` の写像）。単体テスト 2 件。
+  - `crates/task-core/src/store.rs`: `SCHEMA_VERSION = 14`、`MIGRATION_0013_RESERVED` と `MIGRATION_0014`、
+    `integration_row` / `integration_put_tx` / `integration_query_tx`、`TaskStore` に `integration_put` /
+    `integration_get` / `integration_list_for_task`（新しい順。**ADR-0044 B1 の timeline はこれを読めばよい**）/
+    `integration_latest(task_id, repo)` / `integration_list_for_project(project_id, limit)`
+    （タスク × リポジトリごとに最新の 1 件）。テスト 1 件。
+  - `crates/task-core/src/lib.rs`: `pub mod integrations` と再輸出。
+  - `crates/task-ops/src/changes.rs`（新規、約 1000 行）: `run`（**待ち時間の上限付きの子プロセス**。
+    パイプは別スレッドで読み切る）/ `git` / `changes` / `file_diff` / `truncate_diff` /
+    `parse_numstat` / `parse_name_status` / `default_branch` / `source_for` /
+    `merge_into_default_branch`（`MergeOutcome::{Merged, Conflict, Busy, Failed}`）/
+    `remove_worktree_and_branch` / `discard` / `has_origin` / `push_branch` / `gh_authenticated`
+    （60 秒の記憶）/ `gh_pr_create` / `gh_pr_view` / `gh_pr_merge` / `parse_pr_url` / `parse_pr_view` /
+    `conflict_child_task`。単体テスト 13 件（tempdir の本物の git リポジトリ）。
+  - `crates/task-ops/src/lib.rs`: `pub mod changes`。
+  - `crates/task-api/src/changes.rs`（新規）: 5 本のハンドラ、`targets_for`（目印 + 案件のリポジトリから
+    git のリポジトリだけを並べる）、`refresh_pr`、`pr_body`（決定的）、`latest_report_for`。単体テスト 2 件。
+  - `crates/task-api/src/types.rs`: **末尾に区切りコメント付きの新しい節**（Phase 52 の節の下。
+    ADR-0044 B1 との衝突を避けるため）: `ChangesView` / `RepoChangesView` / `ChangeDiffView` /
+    `IntegrateBody` / `IntegrateResult` / `ProjectIntegrations` / `ProjectIntegrationItem`。
+  - `crates/task-api/src/tree.rs`: `marker_of` / `marker_repos` を `pub(crate)` にした（`changes.rs` が使う。
+    目印の読み方を 2 か所に書かないため）。**挙動は変えていない**。
+  - `crates/task-api/src/lib.rs`: `pub mod changes`、`GithubSettings`（`gh` / `merge_method`）、
+    `ApiSettings.github`、型の再輸出。
+  - `crates/task-api/src/state.rs` / `handlers.rs` / `schema.rs`: `Inner.github`、ルートの `merge` 1 行、
+    スキーマのルートに 5 型。
+  - `crates/task-api/tests/changes.rs`（新規）: 結合テスト 7 件（**偽の `gh`** とローカルの bare `origin`。
+    外部ネットワークには出ない）。
+  - `crates/taskd/src/config.rs`: `GithubConfig`（`[github] gh` / `merge_method`、`deny_unknown_fields`）、
+    `MERGE_METHODS`、`validate()` の検査、テスト 1 件。
+  - `crates/taskd/src/lib.rs`: `api_settings` が `[github]` を `task_api::GithubSettings` に写す。
+  - `crates/taskctl/src/commands/worker.rs`: テストの `Config` リテラルに `github: Default::default()`。
+  - `config/taskd.example.toml`: `[github]` の節（`gh` が無いときの振る舞いも書いた）。
+  - `docs/gui/api.md`: 冒頭の改訂履歴、§1.5 に `default_branch_busy` / `pr_unavailable`、
+    エンドポイント一覧（62 → **67**）、§3.74〜3.78（取り込みの 5 本）、§6.1 / §6.2 の型。
+    `gui/docs/taskd-api-v1.md` に同期。
+  - `docs/workspace.md`: §6「変更の取り込み」（見る / 取り込む / `[github]`）。
+  - `docs/adr/0043-workspaces.md`: 「Phase 54 追記」（D5 から離れた 4 点）。
+  - `docs/api/v1/api-v1.schema.json` を再生成（`UPDATE_SCHEMA=1`）。`gui/app/taskd/types.ts` を
+    `pnpm gen:types` で再生成（**手では触っていない**）。
+  - **既存のテストは 1 つも弱めていない・消していない**（`assert_eq!(SCHEMA_VERSION, 12)` の 2 か所を
+    14 に直しただけ）。
+- 証拠:
+  - `cargo test --workspace` → exit **0**、`grep -c "^test result: FAILED"` = **0**、
+    **1267 passed / 0 failed / 2 ignored**（61 個のテストバイナリ。Phase 52 の 60 から +1 =
+    `task-api/tests/changes.rs`）。Phase 52 の 1241 から **+26** で、今回足したテスト関数の数と
+    ちょうど一致する: task-core 3（`integrations` 2 + `store` 1）/ task-ops 13（`changes`）/
+    task-api 9（`changes.rs` の単体 2 + 結合 `tests/changes.rs` 7）/ taskd 1（`[github]` の設定）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` → exit **0**（警告ゼロ）。
+  - `UPDATE_SCHEMA=1 cargo test -p task-api --lib` / `-p task-core --lib` / `-p task-worker --lib` →
+    いずれも ok。差分は `ChangesView` 系と `TaskIntegration` 系の**追加のみ**
+    （`PROTOCOL_VERSION` は 4 のまま、API は v1 のまま、`worker-protocol.schema.json` は**変わらない**
+    ＝ ワーカーから取り込みは見えない）。
+  - `bash scripts/sync-gui-docs.sh` → `updated gui/docs/taskd-api-v1.md`。
+  - 受け入れ条件ごと（ADR-0043 §4 A2）:
+    - **`changes`（差分の一覧）** → `task_ops::changes::tests::the_changes_of_a_worktree_cover_commits_working_tree_and_untracked_files`
+      （コミット + 未コミット + 追跡外が 1 つの一覧、`ahead = 1`、`dirty`、`stat`）、
+      `changes_fall_back_to_the_branch_and_then_report_missing`（worktree を消してもブランチから引ける、
+      ブランチも消すと `missing`）、`a_task_without_commits_is_zero_ahead`（`ahead = 0`）、
+      `task-api` の `the_changes_list_every_git_repo_and_serve_one_file_diff`（`dir` のリポジトリは出ない）。
+    - **`diff`（1 ファイル、200 KiB で切る）** → `a_huge_diff_is_truncated_at_200_kib`（文字の境界で切る）と
+      上の 2 件（追跡外のファイルも `--no-index` で出る）。API の 400 / 403 / 404 も同じ結合テスト。
+    - **`merge`（fast-forward / ref のみ / 409）** →
+      `merge_fast_forwards_the_default_branch_when_it_is_checked_out_and_clean`、
+      `merge_updates_the_ref_when_another_branch_is_checked_out`（人の作業ツリーに触らない）、
+      `merge_refuses_while_the_default_branch_is_being_edited`（409、何も動かない）、
+      `task-api` の `merging_fast_forwards_the_default_branch_and_records_the_integration` /
+      `merging_while_the_default_branch_is_being_edited_is_409`（`detail` が「main が編集中」、記録も残らない）。
+    - **衝突 → 子タスク** → `a_conflicting_rebase_is_aborted_and_reports_the_files`（`rebase --abort`、
+      worktree もブランチも残る、人のリポジトリは無傷）と
+      `task-api` の `a_conflicting_merge_records_a_conflict_and_creates_the_child_task`
+      （`state = conflict`、`child_task_id`、子は `parent_id` = 親・`ready`・`workspace` が親の worktree +
+      `mode = shared`・`repos` 空・前置きに衝突ファイル・受け入れ条件が `Check::Command` 3 本）。
+    - **`discard`（確認必須）** → `discard_removes_the_worktree_and_the_branch` と
+      `task-api` の `discarding_needs_confirmation_and_then_removes_the_worktree_and_branch`
+      （確認なしは 422 `validation`、`errors[0].field = "confirm"`）。
+    - **`pr`（push → 作成 → 同期 → Celeris で merge）** →
+      `task-api` の `a_pull_request_is_pushed_created_refreshed_and_merged_with_a_fake_gh`:
+      `origin` が無ければ 409 `pr_unavailable` → ローカルの **bare リポジトリ**を `origin` にして
+      `push` が実際に効いたことを bare 側のブランチで確認 → `gh pr create` の引数
+      （`pr create --base main --head …`）を偽 `gh` の `calls.log` で確認 → `pr_number` / `pr_url` を記録 →
+      画面を開くと `open` のまま → `pr/merge` で `gh pr merge 42 --merge --delete-branch` が呼ばれ、
+      同期で `merged` になり **worktree とローカルのブランチが消える** → 2 回目は 409。
+    - **`gh` の有無と認証の検出** → 同テストの `"gh": true` と `origin: true`、
+      および `origin` が無いときの 409（`gh_authenticated` は 60 秒の記憶。`forget_gh_auth` で捨てられる）。
+    - **`task_integrations`（CRUD と最新）** →
+      `store::tests::integrations_are_recorded_and_the_latest_one_per_task_and_repo_is_listed`。
+    - **案件画面の PR 一覧** → `task-api` の `the_project_page_lists_the_integrations_of_its_tasks`
+      （空でも 200、無い案件は 404、**タスク × リポジトリごとに最新の 1 件**）。
+    - **401 / 404 / 409 / 422** → 上の各テストに埋め込み（読み取りも `token_file` があればトークンが要る
+      ＝ 既存の規律どおり。`integrate` はトークン無しで 401）。
+    - **`[github]` の設定** → `config::tests::github_defaults_to_gh_and_merge_and_rejects_other_merge_methods`
+      （既定 `gh` / `merge`、`squash` は通る、知らない方法と空の `gh` と未知のキーは設定エラー）。
+  - **GUI（G17。詳細は `gui/docs/PROGRESS.md`）**: タスク画面の `/tasks/:id/changes`
+    （`gui/app/components/task-changes.tsx` と**兄弟のルート** `gui/app/routes/tasks.$id.changes.tsx`。
+    Phase 52 の「ファイル」と同じ作り。`tasks.$id.tsx` への変更は導線のリンク 9 行だけで、
+    **タブの殻は作っていない**＝ ADR-0044 B1 のものができたら 1 行で載せ替えられる）:
+    リポジトリごとのカード（`branch → default_branch`、`base` / `head` の 12 桁、`ahead`、`dirty`、
+    `N ファイル +A −B`）、ファイル一覧（状態の印と ± ）、クリックで unified diff（等幅・`+`/`-` を色分け。
+    `<span>` で描く。`dangerouslySetInnerHTML` は使わない）、200 KiB で切った印、
+    「`main` に取り込む」「PR を作る」「捨てる（2 段の確認）」の 3 ボタン（`useFetcher`。
+    **409 の `detail`「main が編集中」は別の `Alert` でそのまま出す**）、PR カード
+    （状態・`#番号` のリンク・「Celeris で merge」・`merge_method`）、衝突のときは解消タスクへのリンク。
+    案件画面に「PR と取り込み」節（`gui/app/components/ProjectIntegrations.tsx`）。
+    `pnpm lint` / `typecheck` / `test` / `build` すべて exit 0、**49 ファイル / 672 テスト**
+    （G16 の 48 / 627 から 1 ファイル・**+45** テスト）。`pnpm gen:types` は冪等
+    （再実行しても `app/taskd/types.ts` の md5 は `d3b066ca…` のまま）。
+    `bash scripts/sync-gui-docs.sh --check` → `up to date`。`gui/package.json` は**変えていない**（新しい依存なし）。
+    `pnpm e2e` は**走らせていない**（実 taskd とブラウザが要り、既定のポート 7700/7710 は本番が使っている）。
+  - **本番には触っていない**（`/home/rmaeda/taskd/`・動いているプロセス・7710/7700・`systemctl` のいずれも）。
+    実機の昇格（`release.sh` / `verify.sh` / `promote.sh`）はこの Phase では**走らせていない**。
+    テストは外部ネットワークに出ていない（`origin` は同じ tempdir の bare リポジトリ、`gh` は tempdir に
+    書いた `/bin/sh` のスクリプト。`[github] gh` でそれを指しているので PATH も汚さない）。
+- 未解決:
+  - P54-1: **`task_integrations` は D5 の列 + 3 つ**（`repo_name` / `detail` / `updated_at`、`repo_id` は NULL 可）。
+    ADR-0043 の「Phase 54 追記」に書いた。ADR 本文は直していない。
+  - P54-2: **衝突の解消タスクは `worktree_of` の目印ではなく `mode = "shared"` で親の worktree に乗る**。
+    副作用として、その子の `workspace.path` は**絶対パス**（`<workspace_root>/<親 id>/repos/<name>`）になる。
+    親の worktree が（人の `merge` / `discard` で）消えた後に子が dispatch されると、cwd が無いまま走る。
+    いまは「子が `done` になってから人が merge を押す」運用なので起きないが、**中止した親の子**が
+    残っている場合はあり得る。A3 かタスク管理（ADR-0044）で「親の worktree が無くなったら子を
+    `blocked` にする」を入れるとよい。
+  - P54-3: **API が `git` / `gh` を起こすのは ADR-0013 からの逸脱**（上の「決めたこと」）。
+    `POST …/integrate` は最悪 300 秒（`rebase`）または 120 秒（`gh`）ブロックする。いまは
+    `spawn_blocking` の中なので API 全体は止まらないが、ブロッキングのスレッドプールを長く占有する。
+    実機で困るようなら 202 + 進行中の記録（`state = "running"`）に変える。
+  - P54-4: **`verify.sh` の検査 5（N-1 互換）は引き続き `live_ok = false`**。スキーマ版数を 12 → 14 に
+    上げたので、版 12 以前のバイナリは版 14 の DB を `SchemaTooNew` で開けない（ADR-0013 D5 の設計どおり）。
+    P52-1 と同じで、この系列のリリースの昇格は**停止 → 起動**になる。
+  - P54-5: **`gh auth status` の記憶はプロセス内 1 つ**で、`gh` のパスごとではない。設定は実行中に
+    変わらないので実害は無いが、テストで偽の `gh` を差し替えるときは `forget_gh_auth()` が要る。
+  - P54-6: **リモートのリポジトリの取り込みは未対応**（P52-3 の続き）。`changes` は目印の `kind = "git"` を
+    見るだけなので、リモート 1 件だけのタスク（従来の rsync 経路）は目印に `repos` が無く、
+    Phase 49 の合成（`name = "tree"`）に落ちる。手元の写しの git を見ることになるので
+    「見る」は動くが、`merge` は手元の写しに対して行われる。A4 で決めること。
+  - P54-7: **ADR-0044 B1（タスク編集・コメント・ボード）を別のエージェントが同じ時間に実装している**。
+    共有したファイル: `crates/task-core/src/store.rs`（`SCHEMA_VERSION` と `migration_sql` の分岐。
+    **`MIGRATION_0013_RESERVED` を B1 の 0013 に差し替えるのが合流の作業**）、
+    `crates/task-api/src/types.rs`（末尾の新しい節）、`crates/task-api/src/handlers.rs`（ルートの `merge` 1 行）、
+    `crates/task-api/src/lib.rs`、`crates/task-api/src/schema.rs`、`crates/task-api/src/state.rs`、
+    `crates/task-api/tests/common/mod.rs`（`EnvOptions.github`）、`docs/gui/api.md`、
+    `docs/api/v1/api-v1.schema.json`、`docs/PROGRESS.md`。GUI 側は
+    `gui/app/routes/tasks.$id.tsx`（導線のリンク 9 行だけ）/ `gui/app/routes/projects.$id.tsx` /
+    `gui/app/routes.ts`（1 行）/ `gui/app/lib/labels.ts`（末尾に追記）/
+    `gui/app/taskd/action-types.ts`（末尾に `IntegrateOutcome`）/ `gui/test/mock-taskd/fixtures.ts`（末尾に追記）/
+    `gui/app/taskd/types.ts`（生成物）/ `gui/docs/PROGRESS.md`。**タブの殻は作っていない**（B1 のもの）。
+- 提案:
+  - U54-1: **`GET /tasks/{id}/changes` は git を 5〜7 回起こす**（リポジトリあたり）。タスク画面を開くたびに
+    走るので、リポジトリが多い案件では体感に出るかもしれない。`base` と `head` が変わっていなければ
+    結果を短時間（数秒）記憶する案がある。まず実測してから。
+  - U54-2: ADR-0043 D5 の「実機: 自己改善案件の 1 タスクのブランチを GUI から PR にし、Celeris の
+    『merge』で GitHub 側が merge される」は**まだやっていない**（`gh` の認証と、本番に載せた後でないと
+    意味が無いため）。次の昇格の後に人と一緒に 1 周回す。
+  - U54-3: 取り込みの記録は**イベント（`events`）に残していない**。ADR-0044 B1 の timeline が
+    `integration_list_for_task` を読めば足りると判断したが、監査の観点では `Event::Integrated` を
+    足す方が一貫する（追記専用の正典に人の操作が残る）。B1 と合流した後に検討する。
+
+---
+
+### マージ（Phase 54）
+
+Phase 54（ADR-0043 A2）は Phase 52（A1）の `0d0a953` から枝分かれしたので、Phase 52 + 53 を合流済みの
+main（`ef639ea`）に `git merge --no-ff` で合わせた。衝突は **12 か所**で、**どれも「両方を残す」で解けた**。
+決めたことは次のとおり。
+
+- **スキーマ**: A2 が置いた `MIGRATION_0013_RESERVED`（中身が空の場所取り）は**捨てた**。migration は
+  12 → `0012_project_repos.sql`（A1）、13 → `0013_task_comments.sql`（B1 の本物）、
+  14 → `0014_task_integrations.sql`（A2）の順で、**`SCHEMA_VERSION = 14`**。A1 の Rust の写し
+  （`backfill_project_repos`）は**版 12 を当てたのと同じトランザクション**のまま。
+  `assert_eq!(SCHEMA_VERSION, …)` は **3 か所**とも 14 にした（衝突した 2 か所と、B1 だけが足していて
+  衝突しなかった 1 か所 = 版 11 → 13 の移行の試験）。
+- **`crates/task-core/src/store.rs`**: `TaskStore` は A2 の `integration_put` / `integration_get` /
+  `integration_list_for_task` / `integration_latest` / `integration_list_for_project` と、
+  B1 の `update_task` / コメント系の**両方**を持つ。`migration_sql` の分岐は 14 まで。
+- **`crates/task-ops/src/lib.rs`**: `pub mod changes`（A2）と `pub mod comment`（B1）の両方。
+- **`crates/task-api/src/schema.rs`**: B1 の 5 型（`task_edit` / `comment` / `timeline` …）と
+  A2 の 5 型（`changes` / `integrate` / `project_integrations` …）を両方ルートに並べた。
+- **タイムラインに「取り込み」を足した**（この合流で足した唯一の機能。A2 の U54-3 と B1 の口の接続）:
+  B1 が空けておいた `TimelineItem::Integration` を、A2 の `TaskStore::integration_list_for_task` から
+  埋める（`crates/task-api/src/timeline.rs` の `integration_item`）。`action` は `merge` / `pr` / `discard`、
+  `detail` は `<リポジトリ>: <行方>` + PR の番号と URL + 記録の `detail`、`at` は**人が押した時刻**
+  （`created_at`。PR の同期で `updated_at` が動いてもタイムラインの中で並びが変わらない）。
+  **`events` には書いていない**（A2 の U54-3 のとおり。追記専用の正典に足すなら別 ADR）。
+  テストは `task-api/tests/task_management.rs::the_timeline_lists_the_integrations_of_this_task`（+1 件）。
+- **`crates/task-api/src/changes.rs` のテスト用 `Task`** に B1 の `labels` / `category` を足した
+  （struct literal の機械的な追随。主張は変えていない）。
+- **GUI**: B1 の stub `app/components/task-changes.tsx` を A2 の本物に差し替え、B1 のタブの殻の
+  **「変更」タブ**に載せた。`tasks.$id.tsx` の loader は **`?tab=changes` のときだけ**
+  `GET /tasks/{id}/changes` を引き（git を数回起こすので。A2 の U54-1）、404 / 403 は
+  `task-changes-unavailable` としてタブの中に出す（ページ全体は落とさない）。
+  **兄弟のルート `/tasks/:id/changes` は残した**（差分の `<Link>`（`?repo=&file=`）と取り込みの
+  `useFetcher` の送り先で、`ErrorBoundary` の経路も持つ。「ファイル」タブと `/tasks/:id/files` と同じ作り）。
+  ヒーローの「変更」ボタンの行き先だけ `/tasks/:id?tab=changes` に変えた。案件画面は A1 の
+  「リポジトリ」節・B1 の `task_create` フォーム・A2 の `ProjectIntegrations` の 3 つを持つ。
+- **GUI のモジュールを 1 つ動かした**（Phase 52 + 53 のマージで `task-files.server.ts` を動かしたのと
+  同じ理由。テスト用に公開している `loadTaskDetail` が `*.server` を runtime で参照すると
+  `pnpm build` がクライアントの束に混ざると言って止まる）:
+  `gui/app/taskd/task-changes.server.ts` → `gui/app/taskd/task-changes.ts`（中身は import 1 行の付け替えだけ。
+  `toActionError` は `~/taskd/errors` から引く）。
+- **GUI の Phase 番号**は A2 も G17 を名乗っていたので、**A2 を G18 に振り直した**
+  （`gui/docs/PROGRESS.md` の註。決めたこと・未解決・提案の番号も `G17-*` → `G18-*`）。
+- **`docs/gui/api.md`**: エンドポイントは **72 本**（67 + A2 の 5）。節番号も A2 が §3.74 を名乗っていたので、
+  **A2 を §3.79〜3.83（68〜72）**に整えた（B1 の §3.74〜3.78 は `task_ops::edit` の doc コメントと
+  §5.4 から参照されているので動かさず、参照が api.md の中だけだった A2 を動かした）。
+  §1.5 の `default_branch_busy` / `pr_unavailable` の参照も §3.81 / §3.82 に直した。§3.78 の
+  「`integration` はこの Phase では作られない」は実際に出るようになったので書き直した。
+  ついでに §3.1 の `schema_version`「現在 **11**」を **14**（0012 / 0013 / 0014 を追記）に直した
+  （A1 / B1 / A2 のどれも直していなかった）。
+- **再生成**: `docs/api/v1/*.schema.json` は `UPDATE_SCHEMA=1`、`gui/app/taskd/types.ts` は
+  `pnpm gen:types`、`gui/docs/taskd-api-v1.md` は `bash scripts/sync-gui-docs.sh` で作り直した
+  （手では触っていない）。
+- **弱めたテストは無い**。両方の主張はそのまま残っている。マージで増えたぶんだけ直した GUI の 2 件は
+  どちらも**強くした**: `tasks.detail.loader.test.ts` は `loadTaskDetail` の戻り値を丸ごと `toEqual` で
+  比べているので期待値に `changes: null` を足し、`task-changes.test.ts` の導線の試験は
+  「兄弟のルートに飛ぶ」から「**タブに載っていて、loader は `?tab=changes` のときだけ引く**」
+  （+ 兄弟のルートは送り先として残る）に書き足した。
+- 設計の矛盾は **1 つも無かった**。A2 の「合流したら `MIGRATION_0013_RESERVED` を B1 の 0013 に
+  差し替えるだけでよい」（P54-7）と、B1 の「timeline は `integration_list_for_task` を読めばよい」
+  （`TimelineItem::Integration` の口）は、どちらも相手を予定どおりに受けられた（ADR-0043 D5 / ADR-0044 D5）。
+
+- 証拠（マージ後の門）:
+  - `cargo test --workspace` → exit **0**、`grep -c "^test result: FAILED"` = **0**、
+    **1304 passed / 0 failed / 2 ignored**（62 個のテストバイナリ）。内訳は マージ（Phase 52 + 53）の
+    1277 + Phase 54 の 26 + 今回足した 1 件（`the_timeline_lists_the_integrations_of_this_task`）。
+  - `cargo clippy --workspace -- -D warnings` → exit **0**（`--all-targets` でも警告ゼロ）。
+  - `UPDATE_SCHEMA=1 cargo test -p task-core -p task-api -p task-worker --lib` → ok
+    （46 / 169 / 247 passed）。再実行しても `docs/api/v1/` と `docs/protocol/` に差分ゼロ。
+    `PROTOCOL_VERSION` は 4、API は v1 のまま、`worker-protocol.schema.json` は**変わっていない**
+    （ワーカーから取り込みは見えない）。
+  - `cd gui && pnpm gen:types` → 再実行しても `app/taskd/types.ts` に差分ゼロ。
+  - `bash scripts/sync-gui-docs.sh` → `up to date`（`--check` も exit 0）。
+  - `cd gui && pnpm lint` / `typecheck` / `test` / `build` → すべて exit 0。
+    **52 ファイル / 726 テスト**（マージ（Phase 52 + 53）の 51/681 と Phase 54 の +1 ファイル・+45 テスト）。
+  - `pnpm e2e` は**走らせていない**（実 taskd とブラウザが要り、既定のポート 7700 / 7710 は本番が使っている）。
+  - **本番には触っていない**（`/home/rmaeda/taskd/`・動いているプロセス・7710/7700・`systemctl`）。
+- 未解決（マージで持ち越し）:
+  - **スキーマ版数は 11 → 14 に 3 つ上がる**ので、`verify.sh` の検査 5（N-1 互換）は `live_ok = false`。
+    このリリースの昇格は停止 → 起動になる（ADR-0040 D3）。P52-1 / P54-4 と同じ。
+  - P54-2（衝突の解消タスクが親の worktree に `mode = "shared"` で乗る）と P54-6（リモートのリポジトリ）は
+    そのまま残る。B1 の `scripts/live-check-phase53.sh` も**マージ後には回していない**。
+    次の実機確認で、A1 の複数リポジトリ・B1 のタスク管理・A2 の取り込みを 1 周で見ること。
+  - U54-3（取り込みを `events` にも残すか）は、タイムラインに出るようになったので**急がない**が、
+    監査の観点では `Event::Integrated` を足す方が一貫する。別 ADR にする。
+
 ---
 
 ## Phase 51 — 検証に煙試験（ADR-0041 D5。2026-09-19）

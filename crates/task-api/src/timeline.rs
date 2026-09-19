@@ -5,13 +5,16 @@
 //! 入ったリリース）。
 //!
 //! 集めるのは決定的（ストアと、`ReleaseSource` が読むリリースのディレクトリだけ）。LLM は関与しない。
-//! ADR-0043 D5 / A2 の「取り込み（merge / PR / discard）」は `TimelineItem::Integration` の口だけ空けてある。
+//! ADR-0043 D5 / A2 の「取り込み（merge / PR / discard）」は `task_integrations` から
+//! `TimelineItem::Integration` として出す（Phase 54 との合流で口がふさがった）。
 
 use std::collections::HashSet;
 
 use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
-use task_core::{ApprovalStore, Event, ReportFilter, ReportStore, SqliteStore, Task, TaskId, TaskStore};
+use task_core::{
+    ApprovalStore, Event, ReportFilter, ReportStore, SqliteStore, Task, TaskId, TaskIntegration, TaskStore,
+};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -88,7 +91,7 @@ pub(crate) fn at_of(item: &TimelineItem) -> &str {
     }
 }
 
-/// ストアから引ける 5 種（イベント・コメント・認可・報告・委譲）。
+/// ストアから引ける 6 種（イベント・コメント・認可・報告・委譲・取り込み）。
 fn store_items(store: &SqliteStore, id: TaskId) -> Result<(Task, Vec<TimelineItem>), ApiProblem> {
     let task = store
         .get(id)
@@ -153,7 +156,36 @@ fn store_items(store: &SqliteStore, id: TaskId) -> Result<(Task, Vec<TimelineIte
         });
     }
 
+    // ADR-0043 D5（Phase 54）: 人が押した取り込み（merge / PR / discard）。`integration_list_for_task` は
+    // 新しい順だが、並べ替えは `sort_items` がやるのでそのまま足す。`at` は**押した時刻**（`created_at`）で、
+    // PR の同期（`updated_at`）ではタイムラインの中を動かさない。
+    for integration in store.integration_list_for_task(id).map_err(store_problem)? {
+        items.push(integration_item(&integration));
+    }
+
     Ok((task, items))
+}
+
+/// 取り込みの記録 1 件を `TimelineItem::Integration` に写す（ADR-0044 D5 が空けておいた口）。
+///
+/// `action` は方法（`merge` / `pr` / `discard`）、`detail` は人が読む 1 行
+/// （`<リポジトリ>: <行方>` + PR の番号と URL + 記録の `detail`）。決定的（LLM も I/O も無い）。
+fn integration_item(integration: &TaskIntegration) -> TimelineItem {
+    let mut parts = vec![format!("{}: {}", integration.repo, integration.state.as_str())];
+    match (integration.pr_number, integration.pr_url.as_deref()) {
+        (Some(number), Some(url)) => parts.push(format!("PR #{number} {url}")),
+        (Some(number), None) => parts.push(format!("PR #{number}")),
+        (None, Some(url)) => parts.push(url.to_string()),
+        (None, None) => {}
+    }
+    if let Some(detail) = &integration.detail {
+        parts.push(detail.clone());
+    }
+    TimelineItem::Integration {
+        at: crate::handlers::rfc3339(integration.created_at),
+        action: integration.method.as_str().to_string(),
+        detail: parts.join(" — "),
+    }
 }
 
 /// ADR-0044 D5: そのタスクのブランチのコミットが入ったリリース。

@@ -9,6 +9,7 @@ import type {
   ClusterConnectStart,
   CommentResult,
   EditResult,
+  IntegrateResult,
   MessageAccepted,
   Milestone,
   MilestoneDecided,
@@ -295,3 +296,16 @@ export type AccountOpOutcome =
       adapter: AccountAdapter;
       error: ActionError;
     };
+
+/**
+ * 変更の取り込み（ADR-0043 D5、taskd Phase 54 / G18。**管理系。人だけ**）:
+ * `POST /tasks/{id}/changes/{repo}/integrate`（`merge` / `pr` / `discard`）と
+ * `POST /tasks/{id}/changes/{repo}/pr/merge` の結果。taskd のエラーは例外にせず `{ok:false, error}` にする
+ * （409 `default_branch_busy`＝「main が編集中」/ 409 `pr_unavailable` / 422 `validation`（`confirm`）/
+ * 401 `unauthorized` を含む）。**衝突と git の失敗は 200** で返るので `ok: true` のままで、
+ * `result.integration.state`（`conflict` / `failed`）と `result.child_task_id`（「衝突の解消: …」タスク）を
+ * 画面が見る（GUI では判定しない）。
+ */
+export type IntegrateOutcome =
+  | { ok: true; op: "integrate" | "pr_merge"; repo: string; result: IntegrateResult }
+  | { ok: false; op: "integrate" | "pr_merge"; repo: string; error: ActionError };

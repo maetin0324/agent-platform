@@ -134,6 +134,8 @@ describe("loadTaskDetail", () => {
       milestones: [],
       // ADR-0043 D6（Phase 52 + 53 のマージ）: 作業ツリーは `?tab=files` のときだけ引く。
       files: null,
+      // マージ（Phase 54）: 「変更」タブを見ていないので引かない（`?tab=changes` のときだけ）。
+      changes: null,
       place: {
         projectId: null,
         projectTitle: null,

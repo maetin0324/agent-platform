@@ -4,6 +4,7 @@ import { ArtifactsList } from "~/components/ArtifactsList";
 import { ErrorFlash, FieldErrors, ProjectActionFlash, RetryFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
+import { ProjectIntegrations } from "~/components/ProjectIntegrations";
 import { ProjectRepos } from "~/components/ProjectRepos";
 import { ReportsList } from "~/components/ReportsList";
 import { Badge } from "~/components/ui/badge";
@@ -69,6 +70,8 @@ import type {
   OrgList,
   OrgNode,
   ProjectDetail,
+  ProjectIntegrationItem,
+  ProjectIntegrations as ProjectIntegrationsView,
   ProjectStatus,
   ProjectTaskView,
   ReportList,
@@ -100,6 +103,11 @@ export interface ProjectDetailData {
   fetchedAt: string;
   /** 作業場所の編集フォームの選択肢（`GET /clusters`。ADR-0039 D1、Phase G13k）。taskd に届かないときは空。 */
   clusters: ClusterView[];
+  /**
+   * 「PR と取り込み」節（`GET /projects/{id}/integrations`。ADR-0043 D5、Phase 54 / G18）。
+   * タスク × リポジトリごとに最新の 1 件を taskd が新しい順で返す。落ちても案件の詳細自体は出す。
+   */
+  integrations: ProjectIntegrationItem[];
 }
 
 /**
@@ -133,7 +141,7 @@ async function loadTaskArtifactBundles(
 }
 
 export async function loadProjectDetail(client: TaskdClient, id: string, request: Request): Promise<ProjectDetailData> {
-  const [detail, org, reports, clusters] = await Promise.all([
+  const [detail, org, reports, clusters, integrations] = await Promise.all([
     client.get<ProjectDetail>(`/projects/${encodeURIComponent(id)}`, { signal: request.signal }),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
     client
@@ -141,6 +149,10 @@ export async function loadProjectDetail(client: TaskdClient, id: string, request
       .catch(() => ({ items: [] }) as ReportList),
     // 作業場所の編集フォームの選択肢（ADR-0039 D1、Phase G13k）。落ちても案件の詳細自体は出す。
     client.get<Clusters>("/clusters", { signal: request.signal }).catch(() => ({ items: [] }) as Clusters),
+    // 取り込みの記録（ADR-0043 D5、Phase 54 / G18）。落ちても案件の詳細自体は出す。
+    client
+      .get<ProjectIntegrationsView>(`/projects/${encodeURIComponent(id)}/integrations`, { signal: request.signal })
+      .catch(() => ({ items: [] }) as ProjectIntegrationsView),
   ]);
   const orgById = new Map(org.items.map((n) => [n.id, n]));
   const bundles = await loadTaskArtifactBundles(
@@ -149,7 +161,15 @@ export async function loadProjectDetail(client: TaskdClient, id: string, request
     request.signal,
   );
   const artifactRows = buildProjectArtifactRows(detail.tasks, bundles, orgById);
-  return { detail, org, reports, artifactRows, fetchedAt: new Date().toISOString(), clusters: clusters.items };
+  return {
+    detail,
+    org,
+    reports,
+    artifactRows,
+    fetchedAt: new Date().toISOString(),
+    clusters: clusters.items,
+    integrations: integrations.items,
+  };
 }
 
 export const shouldRevalidate = revalidateAfterActionErrors;
@@ -252,7 +272,7 @@ const MILESTONE_STATUS_TONE: Record<MilestoneStatus, Tone> = {
 };
 
 export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) {
-  const { detail, org, reports, artifactRows, fetchedAt, clusters } = loaderData;
+  const { detail, org, reports, artifactRows, fetchedAt, clusters, integrations } = loaderData;
   const { project, milestones, tasks } = detail;
   // ADR-0043 D1（Phase 52 / G16）: 並びは taskd が決めたもの（primary が先頭）をそのまま使う。
   const repos = detail.repos ?? [];
@@ -404,6 +424,19 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           リポジトリ
         </SectionTitle>
         <ProjectRepos projectId={project.id} repos={repos} clusters={clusters} />
+      </section>
+
+      {/* PR と取り込み（ADR-0043 D5、Phase 54 / G18）。タスク × リポジトリごとに最新の 1 件を
+          taskd が新しい順で返すので、並べ替えも集計もしない。操作はタスクの「変更」で行う。 */}
+      <section
+        aria-labelledby="project-integrations-heading"
+        data-testid="project-integrations-section"
+        className="space-y-4"
+      >
+        <SectionTitle icon="gitBranch" id="project-integrations-heading" count={integrations.length}>
+          PR と取り込み
+        </SectionTitle>
+        <ProjectIntegrations items={integrations} />
       </section>
 
       <section aria-labelledby="milestones-heading" data-testid="milestones-section" className="space-y-4">

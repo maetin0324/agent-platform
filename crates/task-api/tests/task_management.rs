@@ -482,6 +482,71 @@ async fn the_timeline_merges_events_comments_and_delegations_in_time_order() {
     );
 }
 
+/// ADR-0043 D5（Phase 54）× ADR-0044 D5: 人が押した取り込み（merge / PR / discard）が
+/// `task_integrations` からタイムラインに出る。`at` は押した時刻（`created_at`）なので、
+/// PR の同期（`updated_at`）で並びが動かない。
+#[tokio::test]
+async fn the_timeline_lists_the_integrations_of_this_task() {
+    use task_core::{IntegrationMethod, IntegrationState, TaskIntegration};
+
+    let env = env_with_token();
+    let app = env.router();
+    let task = seeded(&env, Status::Done);
+    let now = time::OffsetDateTime::now_utc();
+
+    // 1 件目: 取り込み（merge）。押した時刻がいちばん古い。
+    let merged = TaskIntegration::new(
+        task.id,
+        None,
+        "api",
+        IntegrationMethod::Merge,
+        IntegrationState::Done,
+        now - time::Duration::seconds(120),
+    );
+    env.store.integration_put(&merged).expect("put merge");
+
+    // 2 件目: PR（後から `gh pr view` で `merged` に同期された = `updated_at` だけ新しい）。
+    let mut pr = TaskIntegration::new(
+        task.id,
+        None,
+        "gui",
+        IntegrationMethod::Pr,
+        IntegrationState::Merged,
+        now - time::Duration::seconds(60),
+    );
+    pr.pr_number = Some(42);
+    pr.pr_url = Some("https://example.invalid/pr/42".into());
+    pr.updated_at = now;
+    env.store.integration_put(&pr).expect("put pr");
+
+    let resp = send(&app, get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin())).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let body = resp.json();
+    let items = body["items"].as_array().cloned().expect("items");
+    let integrations: Vec<&Value> = items.iter().filter(|i| i["kind"] == "integration").collect();
+    assert_eq!(integrations.len(), 2, "{items:?}");
+    // 押した順（`created_at` の昇順）に並ぶ。
+    assert_eq!(integrations[0]["action"], "merge");
+    assert_eq!(integrations[0]["detail"], "api: done");
+    assert_eq!(integrations[1]["action"], "pr");
+    assert_eq!(
+        integrations[1]["detail"],
+        "gui: merged \u{2014} PR #42 https://example.invalid/pr/42"
+    );
+    let pressed_at = (now - time::Duration::seconds(60))
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("rfc3339");
+    assert_eq!(
+        integrations[1]["at"], pressed_at,
+        "`at` は押した時刻（同期した時刻ではない）"
+    );
+    // タイムライン全体は時刻の昇順のまま。
+    let times: Vec<&str> = items.iter().map(|i| i["at"].as_str().unwrap_or_default()).collect();
+    let mut sorted = times.clone();
+    sorted.sort_unstable();
+    assert_eq!(times, sorted, "{times:?}");
+}
+
 /// ADR-0044 D5: `worktree.json` のブランチのコミットが `changes.json` に入っているリリースが
 /// タイムラインに出る。目印が無ければ何も出さない（タイムラインは落ちない）。
 #[tokio::test]

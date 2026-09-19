@@ -132,6 +132,12 @@ pub struct ApiV1Schema {
     pub reopen: ReopenBody,
     /// ADR-0044 D5: `GET /tasks/{id}/timeline`。
     pub timeline: Timeline,
+    /// Phase 54（ADR-0043 D5）: 変更の取り込み（差分・merge・PR・衝突タスク）。
+    pub changes: crate::types::ChangesView,
+    pub change_diff: crate::types::ChangeDiffView,
+    pub integrate: crate::types::IntegrateBody,
+    pub integrate_result: crate::types::IntegrateResult,
+    pub project_integrations: crate::types::ProjectIntegrations,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

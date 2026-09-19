@@ -6,8 +6,8 @@ import { HelpLink } from "~/components/HelpLink";
 import { ImageViewer } from "~/components/ImageViewer";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Sha256Badge } from "~/components/Sha256Badge";
-/* ADR-0043 D5 の差分・PR はこのコンポーネントを差し替えるだけ（A2 が本物を入れる） */
-import TaskChanges from "~/components/task-changes";
+/* ADR-0043 D5 の変更の取り込み（Phase 54 / A2 の本物。ADR-0044 D5 の「変更」タブに載せる） */
+import { TaskChanges } from "~/components/task-changes";
 /* ADR-0043 D6 のファイル閲覧（Phase 52 / A1 の本物。ADR-0044 D5 の「ファイル」タブに載せる） */
 import { TaskFiles } from "~/components/task-files";
 import { Badge, GenreLabel, KindBadge, RoleLabel, StatusBadge } from "~/components/ui/badge";
@@ -63,6 +63,7 @@ import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse, toActionError } from "~/taskd/errors";
 import { runRetryAction, runTaskAction } from "~/taskd/route-actions.server";
+import { loadTaskChanges, readTaskChangesQuery, type TaskChangesData } from "~/taskd/task-changes";
 import { loadTaskFiles, readTaskFilesQuery, type TaskFilesData } from "~/taskd/task-files";
 import { buildTaskEdit, commentOnTask, editTask, reopenTask } from "~/taskd/tasks-admin.server";
 import type {
@@ -155,6 +156,13 @@ export interface TaskDetailData {
    * taskd の文言が入り、タブはその文言だけを出す（ページ全体は落とさない）。
    */
   files: { data: TaskFilesData; error: null } | { data: null; error: ActionError } | null;
+  /**
+   * ADR-0043 D5 + ADR-0044 D5（Phase 53 + 54 のマージ）: 「変更」タブの中身。
+   * **`?tab=changes` のときだけ**引く（`GET /tasks/{id}/changes` はリポジトリごとに git を数回起こすので、
+   * 他のタブを見ているあいだは走らせない。taskd 側の U54-1）。ブランチも作業ツリーも無いタスクや
+   * リポジトリを使わないタスクでは `error` に taskd の文言が入り、タブはその文言だけを出す。
+   */
+  changes: { data: TaskChangesData; error: null } | { data: null; error: ActionError } | null;
   /** どの案件・どの途中目標・誰の仕事か（監査 M2「裏方から戻れる」）。分からなければ null。 */
   place: {
     projectId: string | null;
@@ -213,6 +221,19 @@ export async function loadTaskDetail(client: TaskdClient, taskId: string, reques
       files = { data: null, error: toActionError(e) };
     }
   }
+  // ADR-0043 D5:「変更」タブを見ているときだけ差分を引く（`GET /tasks/{id}/changes` は git を起こす）。
+  // 404 / 403 はタブの中に出す（兄弟のルート `/tasks/:id/changes` はページ自体を落とす）。
+  let changes: TaskDetailData["changes"] = null;
+  if (parseTaskTab(url.searchParams.get("tab")) === "changes") {
+    try {
+      changes = {
+        data: await loadTaskChanges(client, taskId, readTaskChangesQuery(request), request.signal),
+        error: null,
+      };
+    } catch (e) {
+      changes = { data: null, error: toActionError(e) };
+    }
+  }
   return {
     detail,
     events,
@@ -222,6 +243,7 @@ export async function loadTaskDetail(client: TaskdClient, taskId: string, reques
     org: org?.items ?? [],
     milestones: project?.milestones ?? [],
     files,
+    changes,
     place: {
       projectId,
       projectTitle: project?.project.title ?? null,
@@ -275,7 +297,7 @@ export async function action({ request, params }: Route.ActionArgs) {
 }
 
 export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
-  const { detail, events, artifacts, timeline, comments, org, milestones, files, place } = loaderData;
+  const { detail, events, artifacts, timeline, comments, org, milestones, files, changes, place } = loaderData;
   const { task } = detail;
   const [searchParams] = useSearchParams();
   const tab = parseTaskTab(searchParams.get("tab"));
@@ -400,6 +422,17 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                 <Icon name="folder" />
                 ファイル
               </Link>
+              {/* 変更の取り込み（ADR-0043 D5、Phase 54 / G18）。ADR-0044 D5 のタブの殻ができたので
+                  「変更」タブに載せ替えた。兄弟のルート `/tasks/:id/changes` も従来どおり動く
+                  （同じ `~/components/task-changes.tsx` を全画面で出す）。 */}
+              <Link
+                to={`/tasks/${task.id}?tab=changes`}
+                data-testid="task-changes-link"
+                className={buttonClass({ variant: "secondary", size: "sm" })}
+              >
+                <Icon name="gitBranch" />
+                変更
+              </Link>
               <Link
                 to={`/graph?root=${task.id}`}
                 data-testid="task-graph-link"
@@ -437,13 +470,28 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
         <TimelineTab taskId={task.id} detail={detail} timeline={timeline} comments={comments} events={events} />
       )}
 
-      {/* ADR-0043 A1/A2 が入るまでの差し込み口（この 1 行を差し替えるだけで本物になる）。 */}
       {tab === "changes" && (
         <section aria-labelledby="changes-heading" data-testid="changes-section" className="space-y-4">
           <h2 id="changes-heading" className="text-[0.95rem] font-semibold text-fg">
             変更
           </h2>
-          <TaskChanges taskId={task.id} />
+          {/* ADR-0043 D5（Phase 54 / G18）の本物。中身は `~/components/task-changes.tsx`。
+              取り込みの `fetcher` と差分のリンクは兄弟のルート `/tasks/:id/changes` に出る
+              （「ファイル」タブと同じ作り）。 */}
+          {changes?.data ? (
+            <TaskChanges
+              taskId={task.id}
+              changes={changes.data.changes}
+              diff={changes.data.diff}
+              diffError={changes.data.diffError}
+              diffRepo={changes.data.diffRepo}
+              diffPath={changes.data.diffPath}
+            />
+          ) : changes?.error ? (
+            <EmptyState icon="gitBranch" title="取り込める変更がありません" data-testid="task-changes-unavailable">
+              {changes.error.detail}
+            </EmptyState>
+          ) : null}
         </section>
       )}
 
@@ -1639,7 +1687,7 @@ function TimelineBody({ taskId, item }: { taskId: string; item: TimelineItem }) 
           に入りました（コミット {item.commits.length} 件）。
         </p>
       );
-    // ADR-0043 D5 / A2 が入るまでは作られない。来ても画面が壊れないように素のまま出す。
+    // ADR-0043 D5 / A2（取り込み）。`action` は merge / pr / discard、`detail` は 1 行の説明。
     case "integration":
       return (
         <p className="mt-1.5 text-fg-muted">

@@ -133,8 +133,8 @@ pub enum TimelineItem {
         /// そのリリースに入った、このタスクのコミット（完全な sha）。
         commits: Vec<String>,
     },
-    /// ADR-0043 D5 / A2（取り込み: merge / PR / discard）。**この Phase では作られない**
-    /// （enum の口だけ用意しておく）。
+    /// ADR-0043 D5 / A2（取り込み: merge / PR / discard）。`task_integrations` の 1 行を
+    /// `action`（方法）と `detail`（`<リポジトリ>: <行方>` + PR の番号と URL + 理由）に写したもの。
     Integration {
         at: String,
         action: String,
@@ -1072,4 +1072,100 @@ pub struct TreeFileView {
     /// 本文（テキストで 512 KiB 以下のときだけ）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+}
+
+// ============================================================================
+// ADR-0043 D5（Phase 54）: 変更の取り込み（差分・merge・PR・衝突タスク）
+// ここから下が Phase 54 で足した型。上の節（Phase 52）にも既存の型にも触っていない。
+// ============================================================================
+
+/// `GET /tasks/{id}/changes` の応答（ADR-0043 D5。読み取り。トークンは要らない）。
+///
+/// git のリポジトリだけを並べる（`dir` のリポジトリは対象外）。PR の状態の同期（`gh pr view`）は
+/// **この API を呼んだときだけ**行う（ADR-0043 D5: 常時同期はしない）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangesView {
+    pub task_id: String,
+    /// git のリポジトリごとの差分（順番はタスクの `repos` の順）。
+    pub repos: Vec<RepoChangesView>,
+    /// `gh` が PATH にあって認証済みか（GUI が「PR を作る」を出すかどうか）。
+    pub gh: bool,
+    /// `[github] merge_method`（「Celeris で merge」が使う方法）。
+    pub merge_method: String,
+}
+
+/// `ChangesView.repos[]` の 1 件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RepoChangesView {
+    pub repo: String,
+    /// タスクのブランチ（`celeris/<task_id>`）。
+    pub branch: String,
+    /// 取り込む先（`project_repos.default_branch`、無ければ検出）。
+    pub default_branch: String,
+    /// 分岐した地点の sha。
+    pub base: String,
+    /// いまのブランチの先端の sha。
+    pub head: String,
+    /// `base..head` のコミットの数（コミットが無ければ 0）。
+    pub ahead: u64,
+    pub files: Vec<task_ops::changes::ChangedFile>,
+    pub stat: task_ops::changes::DiffStat,
+    /// 未コミットの変更がある。
+    pub dirty: bool,
+    /// worktree もブランチも無い（取り込み済み・中止済み）。
+    pub missing: bool,
+    /// `origin` リモートがある（PR を作れる前提の 1 つ）。
+    pub origin: bool,
+    /// このリポジトリの最新の取り込みの記録（無ければ `null`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<task_core::TaskIntegration>,
+}
+
+/// `GET /tasks/{id}/changes/{repo}/diff?path=` の応答（ADR-0043 D5。200 KiB で切る）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangeDiffView {
+    pub repo: String,
+    pub path: String,
+    /// unified diff（差分が無ければ空文字列）。
+    pub diff: String,
+    /// 200 KiB を超えたので途中で切った。
+    pub truncated: bool,
+}
+
+/// `POST /tasks/{id}/changes/{repo}/integrate` の要求本文（**管理系。人だけ**。ADR-0043 D5）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrateBody {
+    /// `merge` / `pr` / `discard`。
+    pub method: task_core::IntegrationMethod,
+    /// 人のひとこと（記録の `detail` の先頭に入る。PR の本文には入れない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// `discard` のときだけ必須（取り返しがつかないので確認を取る）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
+}
+
+/// 取り込みの結果（`integrate` と `pr/merge` の応答）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrateResult {
+    pub integration: task_core::TaskIntegration,
+    /// 衝突したときに作った「衝突の解消」タスク（ADR-0043 D5）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_task_id: Option<String>,
+}
+
+/// `GET /projects/{id}/integrations` の応答（案件画面の「PR と取り込み」。ADR-0043 D5）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectIntegrations {
+    /// タスク × リポジトリごとに最新の 1 件（新しい順）。
+    pub items: Vec<ProjectIntegrationItem>,
+}
+
+/// `ProjectIntegrations.items[]` の 1 件（記録 + 人が読むためのタスクの題名）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectIntegrationItem {
+    pub integration: task_core::TaskIntegration,
+    pub task_title: String,
+    pub task_status: Status,
 }
