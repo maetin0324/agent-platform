@@ -16,4 +16,5 @@ config/secrets/
 # Claude Code の作業領域（Phase 55 の覚書）。`.claude/settings.local.json`（各人の許可）と、
 # サブエージェントが作る `.claude/worktrees/`（別リポジトリの実体）が入る。CLAUDE.md の
 # `git add -A` がこれらを拾うと、他のエージェントの作業ツリーごとコミットしてしまう。
-.claude/
+.claude/*
+!.claude/agents/
