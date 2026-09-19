@@ -6168,3 +6168,165 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
 - `POST /projects` → 201 `01M2WTS3DKNZBSZ2JMVB4CZMBW`「agent-platform の自己改善」、workspace `local: /home/rmaeda/workspace/agent-platform`、
   `status = proposed`。秘書の対話タスクが `ready` になり、返事は GUI の案件画面に届く（人の返事待ち）。
 - 掃除: 9/17 の消えたワークツリーが残していた dev GUI（pid 1464867、127.0.0.1:17901）を停止。
+
+---
+
+## Phase 50 / G15 — 検証の直列化と件数検査、main への反映、昇格前の差分（ADR-0041 D2–D4。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0041 §1 の 2〜4）: 自己改善ループを回す前に、(2) `verify.sh` の件数検査が**本番の動きで
+  偽陰性になる**のと**同時実行で衝突する**のを直し、(3) 昇格したコードが `main` に戻っていないことを
+  **人に見せ**、(4) 昇格の前に**何が変わるか**と**安全に関わる変更**を見せて、昇格に使うスクリプトを
+  **いま動いている版のもの**にする。D1（Phase 49）と D5（Phase 51）はこの Phase では触っていない。
+- 変更したファイル（`scripts/selfdeploy/`）:
+  - `lib.sh`: **`sd_lock_or_tempfail <fd> <file> <wait> <what>`**（`flock`。取れなければ exit 75
+    = EX_TEMPFAIL「壊れた」ではなく「混んでいる」）、`SD_VERIFY_LOCK_WAIT`（既定 1800）、
+    **`SD_SENSITIVE_PATTERNS` と `sd_is_sensitive`**（ADR-0041 D4 の 12 パターン。**ここが唯一の定義**）、
+    `sd_lines_to_json_array`（パスの数だけ python3 を起こさないため）。
+  - `verify.sh`: **検査 2 の意味を変えた**。`.backup` 直後（マイグレーション前）に `collect_snapshot`
+    （python3 の `sqlite3` で**生の行数**と `tasks (id,status)` のダイジェスト）を取り、
+    マイグレーション後の staging API と比べる。**本番 API は 1 回も叩かない**（`SD_PROD_API` /
+    `SD_API_TOKEN_FILE` の参照がファイルから消えた）。検査 5（N-1）も比べる相手をスナップショットにした。
+    `verify.json.counts` は `{snapshot, staging}`（`prod` / `prod_after` は削除）。
+    API 側の `collect` は**表の全行を数える**ように直した: `reports` は組織のノードごと、`messages` は
+    ノード×（案件なし + 各案件）ごとに数えて足す（1 応答の上限が 500 なので、まとめて数えると
+    黙って切り捨てられる。どれかが 500 に達したら `capped` に入れて検査を落とす）。`approvals` は
+    全件と決定済みの両方。冒頭で `$SD_STAGING/.lock` を `flock`（待ち `SD_VERIFY_LOCK_WAIT`、超えたら
+    exit 75）。staging の作り直しは `.lock` を残す（`rm -rf` すると排他が効かなくなる）。
+  - `release.sh`: `.build/.lock-<sha12>` を `flock -n`（同じ sha の 2 本目は**待たずに** exit 75）、
+    **`changes.json`** を書く（`{base, at, commits(最大 50, 新しい順), files, sensitive}`。
+    `base` はビルド時の `~/taskd/current` の sha12。無ければ `null` で `commits`/`files` は空。
+    base の commit がリポジトリに無いときも空にして続ける）。
+  - `promote.sh`: 成功時に **`<release>/promoted.json`** `{promoted_at, mode, from}` を書く。
+    **git リポジトリには触れない**（最後に「`main` が遅れているなら人が `git merge --ff-only` する」と
+    ログに 1 行出すだけ）。
+  - `status.sh`: `releases[]` に `promoted_at` / `promoted` / `on_main`（`$SD_REPO` に `main` があるときだけ。
+    `timeout 5` 付きの `merge-base --is-ancestor`）/ `changes`（`base` / `stale` / `commit_count` /
+    `file_count` / `sensitive`）。
+- 変更したファイル（Rust）:
+  - `crates/taskd/src/config.rs`: `[selfdeploy] repo`（既定 `~/workspace/agent-platform`。`~` は taskd の
+    `$HOME` で展開、相対は設定ファイル基準）。`on_main` を出すためだけに**読む**。
+  - `crates/taskd/src/releases.rs`: `FsReleases::new(root, repo)`、`scan(root, repo)`。
+    `git_status`（`try_wait` で 5 秒の上限を掛け、超えたら kill して `None`）、`git_has_main`（1 回だけ
+    見切りをつける）、`on_main`（終了コード 0/1 → `true`/`false`、それ以外は `null`）、
+    `read_changes`（`stale` は**いまの** `current` と比べてここで決める）、`promoted.json` → `promoted_at`。
+    `start_promote` は **`<current>/scripts/promote.sh`** を優先し、無ければ昇格先のもの、
+    どちらも無ければ 409。応答に `script_from`。
+  - `crates/task-api/src/types.rs`: `ReleaseItem` に `promoted_at` / `on_main` / `changes`、
+    新しい `ReleaseChanges` / `ReleaseCommit`、`ReleasePromoteAccepted.script_from`。
+    `crates/task-api/src/lib.rs` の再輸出。
+  - `crates/taskd/src/lib.rs`: `FsReleases::new(..., config.selfdeploy.repo.clone())`。
+  - `config/taskd.example.toml`: `[selfdeploy] repo` をコメントで追加。
+- 変更したファイル（GUI / G15）:
+  - `gui/app/lib/releases.ts`: `hasSensitiveChanges` / `sensitiveBadgeText` / `promoteNeedsTypedSha` /
+    `typedShaMatches` / `changesSummaryText` / `staleChangesText` / `commitShort` / `notOnMainText` /
+    `promotedAtText`。**判断は足していない**（`sensitive` が空かどうかを見るだけ。パターンは GUI に写さない）。
+  - `gui/app/lib/labels.ts`: `sensitiveChangesLabel`（「安全に関わる変更 N 件」）/ `staleChangesLabel`。
+  - `gui/app/routes/releases.tsx`: 行を開くとコミット（sha7 + subject）と変更ファイル数、
+    `sensitive` が空でなければ**赤いバッジ**とパス一覧を**最初から開いて**出し、その行の「昇格」は
+    `window.confirm` ではなく **sha12 の入力**（一致するまでボタンは `disabled`）。
+    `current` が `on_main === false` のときだけ「本番は main に未反映: `git merge --ff-only <sha12>`」。
+    `promoted_at` を `dl` に追加。
+  - `gui/app/taskd/types.ts` / `gui/docs/taskd-api-v1.md`: `pnpm gen:types` と `scripts/sync-gui-docs.sh` で再生成。
+  - テスト: `gui/test/mock-taskd/fixtures.ts`（`releaseChanges()`、`releaseItem` に
+    `promoted_at`/`on_main`/`changes`、`defaultReleasePromoteAccepted.script_from`）、
+    `gui/test/unit/releases.test.ts` に 9 件追加。
+- 文書: `docs/selfdeploy.md`（§0 の flock と exit 75、§2 の `changes.json` と `SD_SENSITIVE_PATTERNS`、
+  §3 の検査 2 の新しい意味と「件数一致が落ちたとき」、§4 の `promoted.json`、**§4d「昇格したら `main` に
+  戻す」**、§4c のスクリプトの出どころと sha12 入力、§6 の `status.sh`、§8 の `[selfdeploy] repo`）、
+  `docs/gui/api.md`（冒頭の改訂履歴、§3.66 の 3 フィールド、§3.67 の `script_from` と 409 の条件）。
+- 受け入れ条件ごとの証拠:
+  - 条件: 検査 2 がスナップショット前後の比較になり、本番 API を数えない。
+    実行: `bash scripts/selfdeploy/verify.sh eb98796a8242` — **exit 0**。
+    `check 2 (counts-match): true — snapshot (pre-migration, sqlite3) == staging API (post-migration)`。
+    `verify.json.counts` のキーは `['snapshot','staging']` だけで、
+    tasks 83 / tasks_total 83 / projects 3 / milestones 4 / org 11 / approvals 9 / approvals_decided 9 /
+    reports 79 / messages 18 / tasks_digest `736b1b49777a5b7b` が**両側一致**。
+    `grep -n 'SD_PROD_API\|SD_API_TOKEN_FILE\|PROD_JSON' scripts/selfdeploy/verify.sh` — **当たり 0 件**。
+    `messages` は旧の数え方（案件なしのスレッドだけ）なら 2 だったが、ノード×案件で数えて
+    **表の行数 18 と一致**するようになった（`sqlite3 'SELECT COUNT(*) FROM messages'` = 17 は
+    スナップショット取得前の値で、実機が動いて 18 に増えた後の値で一致している）。
+  - 条件: `flock` で直列化される（同時 2 本目が待つ／exit 75）。
+    実行 (a): `verify.sh` を背後で起こし、すぐもう 1 本を前景で起こした — 1 本目が 13:24:33 に
+    ロックを取り、2 本目は **13:24:40 にロックを取得**（待った）。**どちらも exit 0**
+    （Phase 48 までは 2 本目が「port 7711 is already in use」で exit 1 になっていた）。
+    実行 (b): `flock -x ~/taskd/staging/.lock -c 'sleep 25'` を背後で走らせたまま
+    `SD_VERIFY_LOCK_WAIT=5 verify.sh eb98796a8242` — **exit 75** と
+    `another verify.sh is running and did not finish within 5s`。何も消さずに終わった。
+    実行 (c): `flock -x ~/taskd/releases/.build/.lock-eb98796a8242 -c 'sleep 20'` の最中に
+    `release.sh eb98796a8242` — **exit 75**、`another release.sh of eb98796a8242 is already running;
+    nothing was changed`（待たない）。
+  - 条件: `changes.json` が書かれ、`sensitive` が当たる。
+    実行: `bash scripts/selfdeploy/release.sh HEAD` — **exit 0**、`eb98796a8242` ができ、
+    `changes.json: base=70e3175eeb20 commits=4 files=4 sensitive=3`。
+    中身は `base: "70e3175eeb20"`、コミット 4 件（`eb98796a8242` … `d19d3ff`）、
+    `files` 4 件、`sensitive` 3 件（`deploy/systemd/taskd-gui@.service`、`deploy/systemd/taskd@.service`、
+    `docs/adr/0041-self-improvement-loop-hardening.md` — `deploy/` と `docs/adr/0041-` の前方一致）。
+  - 条件: `promoted.json` / `GET /releases` の `promoted_at` / `on_main` / `changes`。
+    実行: `cargo test -p taskd --lib releases` — **10 passed**（`promoted_json_becomes_promoted_at`、
+    `changes_json_becomes_changes_with_stale_computed_against_current`、`on_main_is_true_false_or_null`
+    は tempdir の中に作った git リポジトリに対して `true` / `false` / `null` の 3 通りを確かめる）。
+    `cargo test -p taskd --test releases_api` — **8 passed**
+    （`get_releases_carries_promoted_at_on_main_and_changes` が HTTP で 3 フィールドを確かめ、
+    `current` を張り替えると `changes.stale` が真になることも見る）。
+    `status.sh` の実機出力: `eb98796a8242 on_main=True promoted_at=None changes={base: 70e3175eeb20,
+    stale: False, commit_count: 4, file_count: 4} sensitive=[3 件]`。
+    **`promote.sh` は実行していない**（昇格は人が押す。ADR-0040 D5）。
+  - 条件: 昇格が `current` のスクリプトを使う。
+    実行: `cargo test -p taskd --lib promotion_runs_the_promote_script_of_the_current_release` と
+    `cargo test -p taskd --test releases_api promoting_prefers_the_promote_script_of_the_current_release` —
+    tempdir に印の違う偽 `promote.sh` を 2 つ置き、(1) どちらにも無ければ 409、(2) 昇格先にだけあれば
+    `script_from = "target"` でそれが走る、(3) `current` にもあれば `script_from = "current"` で
+    **`current` のものだけ**が走る（`promote.log` に `target-script` が出ない）ことを確かめた。
+    401 / 404 / 409×3 / 202 の既存 5 件も、`current` に偽リリースを置いた状態で通っている。
+  - 条件: Rust のゲート。
+    実行: `cargo test --workspace` — **exit 0**、`grep -c "^test result: FAILED"` = **0**、
+    `test result: ok` の `passed` 合計 **1182**（Phase 48 の 1176 + 今回 6:
+    `taskd/src/releases.rs` +4、`taskd/tests/releases_api.rs` +2）。
+    `cargo clippy --workspace -- -D warnings` — **exit 0**、警告なし。
+    `UPDATE_SCHEMA=1 cargo test -p task-api --lib` — exit 0、40 passed。
+    `docs/api/v1/api-v1.schema.json` は **+99 / -2 行**（削除の 2 行は `ReleasePromoteAccepted` の
+    説明文の書き換えと `required` の並び）。
+  - 条件: GUI のゲート（gui/CLAUDE.md）。
+    実行（`gui/`、corepack の pnpm）: `pnpm lint` — **exit 0**（biome、174 ファイル）。
+    `pnpm typecheck` — **exit 0**。`pnpm test` — **exit 0**、**45 ファイル / 567 tests passed**
+    （Phase 48 の 558 + 9）。`pnpm build` — **exit 0**。
+    `pnpm gen:types` を流し直しても `app/taskd/types.ts` の md5 は `0d632377…` のまま（差分ゼロ）。
+    `bash scripts/sync-gui-docs.sh --check` — **exit 0**（`up to date`）。
+  - 条件: スクリプトの構文。
+    実行: `bash -n scripts/selfdeploy/{lib,release,verify,promote,rollback,status,install-units}.sh` —
+    **すべて exit 0**（shellcheck はこのホストに無い）。
+- 安全（この Phase で本番に対してやったこと・やらなかったこと）:
+  - やった: `release.sh HEAD`（`~/taskd/releases/` に書く）、`verify.sh`（`~/taskd/staging/` に書き、
+    本番 DB は `.backup` と `mode=ro` で読むだけ、ポートは 7711 / 7701 / 7712）。
+  - やっていない: `promote.sh` / `rollback.sh` / `systemctl` / 本番プロセスへのシグナル /
+    `~/taskd/taskd.toml` の編集 / `~/taskd/*.sqlite3` への書き込み / 7710・7700 への bind。
+  - 本番は検証の間も `70e3175eeb20` のまま動き続けた（`GET /health` の `release` は変わっていない）。
+- 未解決事項:
+  - U50-1: **`eb98796a8242` は Phase 50 のコードを含まない**（`main` の HEAD をビルドしただけ）。
+    実機で `promoted_at` / `on_main` / `changes` が GUI に出るのは、この Phase を `main` に入れて
+    `release.sh` → `verify.sh` → 人が昇格した後。実機の絵は次の昇格で確かめる。
+  - U50-2: `reports` / `messages` の件数は「組織のノードごとに数えて足す」ので、**ノードを消した後に
+    残っている行**（`node_id` が `org_nodes` に無い行）は数えられない。スナップショット側は生の
+    `COUNT(*)` なので、そうなると検査 2 が落ちる。落ちたときの一行に `orphan reports/messages` の数を
+    出して区別できるようにした（実機はどちらも 0）。API に「全件」の入口ができたら直せる（P50-2）。
+  - U50-3: `pnpm e2e` は今回も流していない（U48-1 と同じ。既定の待ち受けが本番のポート）。
+    「リリース」画面の新しい要素（赤いバッジ、sha12 入力、`on_main` の一行）は DOM のテストが無いので、
+    純粋関数の unit テストとソースの目視までしか確かめていない（G10-U1）。
+  - U50-4: `on_main` は `GET /releases` のたびにリリースの数だけ `git merge-base` を起こす
+    （`main` が引けないリポジトリなら 1 回で諦める）。引き継ぎ中の GUI は 2 秒ごとに読み直すので、
+    リリースが増えると git の起動が効いてくる。いまは 4 件なので測れるほどではない。
+- 提案:
+  - P50-1: **`verify.sh` の検査 2 は「マイグレーションが壊していないこと」しか見ていない**。
+    スキーマが変わる版（`0012_*.sql` 以降）では「移した先の列が正しいか」を見たいので、
+    migration ごとに「前後で不変な式」を宣言できる仕組み（`migrations/0012_*.check.sql` のような）を
+    足すとよい。ADR が要る。
+  - P50-2: `GET /reports` / `GET /org/{id}/messages` に cursor か `total` があれば、件数の数え方が
+    1 回の要求で済む（いまはノード×案件で最大 `org × (projects + 1)` 回）。API の追加なので v1 のまま
+    できる（`Page<T>` と同じ形に寄せる）。
+  - P50-3: `changes.json` は `release.sh` がビルド時に書くので、`base`（そのときの `current`）が
+    その後の昇格で古くなる（`stale`）。GUI は断り書きを出すだけなので、`stale` のリリースに対して
+    「いまの current からの差分」を API が計算し直す手もある（taskd が git を触る範囲が広がるので、
+    今回は採らなかった）。
+  - P50-4: ADR-0041 D1（Phase 49、タスクごとの worktree）と D5（Phase 51、煙試験）はまだ。
+    自己改善ループを実際に回すのはその 2 つが入ってから（ADR-0041 §4 の「実機」）。

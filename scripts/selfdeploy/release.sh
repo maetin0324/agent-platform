@@ -42,6 +42,11 @@ REL="$(sd_release_dir "$SHA12")"
 GATE_TSV="$(mktemp)"
 trap 'rm -f "$GATE_TSV"' EXIT
 
+# ADR-0041 D2: 同じ sha のビルドは 1 本だけ（`.build/<sha12>` のワークツリー作成が競合する。
+# `cargo` の target lock は「待つ」が、`git worktree add` は先に消してから作るので壊れる）。
+# **待たない**（同じ sha を 2 度ビルドしても結果は同じなので、待つ意味が無い）→ exit 75。
+sd_lock_or_tempfail 9 "$SD_BUILD_ROOT/.lock-$SHA12" 0 "release.sh of $SHA12"
+
 CUR="$(sd_current_sha)"
 PREV="$(sd_previous_sha)"
 if [ -d "$REL" ]; then
@@ -174,6 +179,66 @@ GUI_VERSION="$(sd_json_get "$STAGE/gui/package.json" version || true)"
   printf '  "gate_ok": true\n'
   printf '}\n'
 } >"$STAGE/manifest.json"
+
+# ---- changes.json（ADR-0041 D4）-------------------------------------------
+#
+# 「いま動いている版（`current`）からこのリリースへ、何が変わるか」を**ビルド時に**書き留める。
+# 昇格の直前に人が見るもので、GUI は `GET /releases` 越しにこれを読むだけ（判断はしない）。
+# `base` はビルド時の `current` の sha12（無ければ `null` で、`commits` / `files` は空）。
+# `sensitive` は `lib.sh` の `SD_SENSITIVE_PATTERNS` に**前方一致**した `files`（唯一の定義）。
+
+write_changes_json() {
+  local dest="$1"
+  local base_sha12="" base_ref=""
+  local commits_tsv files_txt sens_txt sha subject path
+  base_sha12="$CUR"
+  if [ -n "$base_sha12" ]; then
+    # git に渡すのは完全な sha の方が確実（`current/manifest.json` に入っている）。
+    base_ref="$(sd_json_get "$(sd_release_dir "$base_sha12")/manifest.json" sha 2>/dev/null || true)"
+    [ -n "$base_ref" ] || base_ref="$base_sha12"
+  fi
+
+  commits_tsv="$(mktemp)"
+  files_txt="$(mktemp)"
+  sens_txt="$(mktemp)"
+  printf 'sha:s subject:s\n' >"$commits_tsv"
+
+  if [ -n "$base_ref" ] && git -C "$SD_REPO" rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null; then
+    # 新しい順、最大 50 件（ADR-0041 D4）。subject の中のタブは潰す（TSV なので）。
+    git -C "$SD_REPO" log --format='%H%x09%s' -n 50 "${base_ref}..${SHA_FULL}" 2>/dev/null \
+      | while IFS=$'\t' read -r sha subject; do
+        [ -n "$sha" ] || continue
+        printf '%s\t%s\n' "$sha" "$(printf '%s' "$subject" | tr '\t' ' ')"
+      done >>"$commits_tsv"
+    git -C "$SD_REPO" diff --name-only "${base_ref}" "${SHA_FULL}" 2>/dev/null >"$files_txt" || true
+  elif [ -n "$base_sha12" ]; then
+    sd_log "changes.json: base $base_sha12 is not in $SD_REPO; commits/files will be empty"
+  fi
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if sd_is_sensitive "$path"; then printf '%s\n' "$path"; fi
+  done <"$files_txt" >"$sens_txt"
+
+  {
+    printf '{\n'
+    if [ -n "$base_sha12" ]; then
+      printf '  "base": %s,\n' "$(sd_json_str "$base_sha12")"
+    else
+      printf '  "base": null,\n'
+    fi
+    printf '  "at": %s,\n' "$(sd_json_str "$(sd_ts)")"
+    printf '  "commits": %s,\n' "$(sd_tsv_to_json "$commits_tsv")"
+    printf '  "files": %s,\n' "$(sd_lines_to_json_array "$files_txt")"
+    printf '  "sensitive": %s\n' "$(sd_lines_to_json_array "$sens_txt")"
+    printf '}\n'
+  } >"$dest"
+
+  sd_log "changes.json: base=${base_sha12:-<none>} commits=$(($(wc -l <"$commits_tsv") - 1)) files=$(wc -l <"$files_txt" | tr -d ' ') sensitive=$(wc -l <"$sens_txt" | tr -d ' ')"
+  rm -f "$commits_tsv" "$files_txt" "$sens_txt"
+}
+
+write_changes_json "$STAGE/changes.json"
 
 # ADR-0040 D6（Phase 48）: selfdeploy の道具一式をリリースに同梱する。
 # `POST /releases/{sha12}/promote` は **リリースの中の** `scripts/promote.sh` を起こすので、

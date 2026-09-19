@@ -186,6 +186,25 @@ PY
   esac
 }
 
+# 1 行 1 要素のファイル → JSON の文字列配列（空行は落とす）。1 回の呼び出しで済ませる
+# （`sd_json_str` をパスの数だけ呼ぶと python3 の起動が数百回になる）。
+sd_lines_to_json_array() {
+  local file="$1"
+  [ -s "$file" ] || { printf '[]'; return 0; }
+  case "$SD_JSON_TOOL" in
+    python3)
+      python3 - "$file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+    items = [line for line in fh.read().split("\n") if line.strip()]
+sys.stdout.write(json.dumps(items, ensure_ascii=False))
+PY
+      ;;
+    jq) jq -R -s 'split("\n") | map(select(length > 0))' "$file" ;;
+    *) sd_die "need python3 or jq" ;;
+  esac
+}
+
 # ---- git -------------------------------------------------------------------
 
 sd_sha12() {
@@ -317,4 +336,71 @@ sd_use_pnpm() {
     *) PATH="$SD_PNPM_SHIM_DIR:$PATH"; export PATH ;;
   esac
   command -v pnpm >/dev/null 2>&1 || sd_die "pnpm not found (looked in $SD_PNPM_SHIM_DIR)"
+}
+
+# ---- 直列化（flock。ADR-0041 D2） -----------------------------------------
+
+# `verify.sh` は `$SD_STAGING` とポート 7711 / 7701 / 7712 を固定で使うので、2 本同時に走ると
+# 必ず壊れる（スナップショットを作り直す側が、もう一方の DB を消す）。`release.sh` も同じ sha なら
+# `.build/<sha12>` のワークツリー作成が競合する。どちらも `flock` の**ファイル記述子**で直列化する
+# （プロセスが死ねばカーネルが外すので、残骸のロックファイルは無害）。
+#
+# EX_TEMPFAIL（sysexits.h の 75）= 「いまは無理。あとでもう一度」。呼び出し側（人・ワーカー・CI）が
+# 「壊れた（1）」と「混んでいる（75）」を区別できるようにする。
+SD_EX_TEMPFAIL=75
+
+# `verify.sh` がロックを待つ上限（秒）。既定 1800（ADR-0041 D2）。
+SD_VERIFY_LOCK_WAIT="${SD_VERIFY_LOCK_WAIT:-1800}"
+
+# `sd_lock_or_tempfail <fd> <lockfile> <wait-secs> <what>`
+#   `<wait-secs>` が 0 なら `flock -n`（待たずに諦める）。取れなければ exit 75。
+#   取れたロックは**このシェルが終わるまで**（fd が閉じるまで）持ち続ける。
+sd_lock_or_tempfail() {
+  local fd="$1" file="$2" wait="$3" what="$4"
+  command -v flock >/dev/null 2>&1 \
+    || sd_die "flock not found (util-linux); refusing to run without serialization"
+  mkdir -p "$(dirname "$file")"
+  : >>"$file"
+  eval "exec $fd>>\"\$file\""
+  if [ "$wait" = 0 ]; then
+    if flock -n "$fd"; then return 0; fi
+    sd_log "another $what is already running (lock: $file); nothing was changed"
+    exit "$SD_EX_TEMPFAIL"
+  fi
+  if flock -w "$wait" "$fd"; then return 0; fi
+  sd_log "another $what is running and did not finish within ${wait}s (lock: $file)"
+  sd_log "exit $SD_EX_TEMPFAIL (EX_TEMPFAIL) = busy, not broken; try again later or raise SD_VERIFY_LOCK_WAIT"
+  exit "$SD_EX_TEMPFAIL"
+}
+
+# ---- 安全に関わる変更（ADR-0041 D4） ---------------------------------------
+
+# 昇格の前に人へ**赤く**見せるパスの一覧。**ここが唯一の定義**（`release.sh` が `changes.json` の
+# `sensitive` に書き、`GET /releases` と GUI はその結果を読むだけ。判断を 2 か所に置かない）。
+# リポジトリ相対のパスに対する**前方一致**（ディレクトリは末尾 `/`、ファイルはそのまま）。
+#
+# 選んだ理由: これらを変えたリリースは「昇格の仕組みそのもの」「本番の設定」「エージェントへの
+# 指示文」を変える。壊れると次の昇格で直せるとは限らないので、人が必ず中身を見てから押す。
+SD_SENSITIVE_PATTERNS=(
+  "scripts/selfdeploy/"
+  "deploy/"
+  "crates/taskd/src/instance.rs"
+  "crates/taskd/src/releases.rs"
+  "crates/task-api/src/releases.rs"
+  "crates/task-core/migrations/"
+  "CLAUDE.md"
+  "gui/CLAUDE.md"
+  ".claude/"
+  "config/"
+  "docs/adr/0040-"
+  "docs/adr/0041-"
+)
+
+# `sd_is_sensitive <repo-relative-path>` — 上のどれかに前方一致すれば 0。
+sd_is_sensitive() {
+  local path="$1" pat
+  for pat in "${SD_SENSITIVE_PATTERNS[@]}"; do
+    case "$path" in "$pat"*) return 0 ;; esac
+  done
+  return 1
 }

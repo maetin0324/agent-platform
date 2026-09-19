@@ -14,7 +14,8 @@ case "${1:-}" in
 usage: status.sh
 
   JSON を標準出力に出す。何も変えない。
-    current / previous / releases[] (gate.json と verify.json の要約) / health / gui_health / daemon_instances
+    current / previous / releases[] (gate.json / verify.json / promoted.json / changes.json の要約と
+    on_main) / health / gui_health / daemon_instances
 EOF
     exit 2
     ;;
@@ -50,10 +51,38 @@ export SD_STATUS_DAEMON="$DAEMON_ROWS"
 export SD_STATUS_CURRENT="$(sd_current_sha)"
 export SD_STATUS_PREVIOUS="$(sd_previous_sha)"
 
+# ADR-0041 D3: `main` に反映されているか。作業チェックアウト（`$SD_REPO`）が git リポジトリで
+# `main` を持つときだけ見る。無ければ `on_main` は全部 `null`（`GET /releases` と同じ扱い）。
+# **読むだけ**（`git` は `merge-base --is-ancestor` しか使わない。checkout も fetch もしない）。
+SD_STATUS_GIT_REPO=""
+if git -C "$SD_REPO" rev-parse --verify --quiet main >/dev/null 2>&1; then
+  SD_STATUS_GIT_REPO="$SD_REPO"
+fi
+export SD_STATUS_GIT_REPO
+
 python3 <<'PY'
-import json, os, sys
+import json, os, subprocess, sys
 
 releases_dir = os.environ["SD_RELEASES"]
+git_repo = os.environ.get("SD_STATUS_GIT_REPO") or ""
+
+
+def on_main(sha):
+    """その sha が `main` の祖先か（ADR-0041 D3）。分からなければ None。"""
+    if not git_repo or not sha:
+        return None
+    try:
+        done = subprocess.run(
+            ["git", "-C", git_repo, "merge-base", "--is-ancestor", sha, "main"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if done.returncode == 0:
+        return True
+    if done.returncode == 1:
+        return False
+    return None  # その sha がこのリポジトリに無い等
 current = os.environ.get("SD_STATUS_CURRENT") or None
 previous = os.environ.get("SD_STATUS_PREVIOUS") or None
 
@@ -87,7 +116,21 @@ if os.path.isdir(releases_dir):
         manifest = load(os.path.join(d, "manifest.json")) or {}
         gate = load(os.path.join(d, "gate.json")) or {}
         verify = load(os.path.join(d, "verify.json"))
+        promoted = load(os.path.join(d, "promoted.json"))
+        changes = load(os.path.join(d, "changes.json"))
         items.append({
+            "promoted_at": (promoted or {}).get("promoted_at"),
+            "promoted": promoted,
+            # ADR-0041 D3: 本番に出た版が `main` に戻っているか（null = 分からない）。
+            "on_main": on_main(manifest.get("sha") or name),
+            # ADR-0041 D4: 昇格したら何が変わるか（`release.sh` がビルド時に書いた要約）。
+            "changes": None if changes is None else {
+                "base": changes.get("base"),
+                "stale": changes.get("base") != current,
+                "commit_count": len(changes.get("commits") or []),
+                "file_count": len(changes.get("files") or []),
+                "sensitive": changes.get("sensitive") or [],
+            },
             "sha12": name,
             "ref": manifest.get("ref"),
             "built_at": manifest.get("built_at"),

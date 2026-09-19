@@ -4,15 +4,23 @@
 #   本番 DB の `sqlite3 .backup` スナップショットに対して、新リリースの taskd を **verify モード**で
 #   127.0.0.1:7711 に起こし、
 #     1. 起動と health.schema_version == 新バイナリの SCHEMA_VERSION
-#     2. 本番 API（127.0.0.1:7710、読むだけ）との件数一致（tasks / projects / milestones / org /
-#        approvals(pending=false) / reports / messages）と tasks の {id,status} 集合の一致
+#     2. **件数一致（ADR-0041 D2）**: 同じスナップショットの**マイグレーション前**（`.backup` 直後に
+#        `sqlite3` で数えた生の行数）と**マイグレーション後**（staging API）を比べる。対象は
+#        tasks / projects / milestones / org_nodes / approvals / reports / messages の件数と
+#        tasks の {id,status} のダイジェスト。**本番 API は読まない**（本番は検証の間も動いているので、
+#        本番と比べると当たり前にずれて偽陰性になる。ADR-0041 §1-2）
 #     3. 主要 GET が 200 かつ JSON（inbox / org/<node>/memory / notify / clusters / providers / config）
 #     4. 新リリースの GUI を 127.0.0.1:7701 に起こして主要ページが 200
 #     5. N-1 互換: `current` の旧 taskd を、**新バイナリがマイグレーションした後の**同じスナップショットに
-#        対して 127.0.0.1:7712 に起こし、1〜3 と同じ検査（落ちたら live_ok = false）
+#        対して 127.0.0.1:7712 に起こし、1〜3 と同じ検査（件数はスナップショットと比べる。
+#        落ちたら live_ok = false）
 #   を行い、`~/taskd/releases/<sha12>/verify.json` を書く。`ok` は 1〜4 が全部真のとき。
 #
-# 本番には触れない: DB は `.backup` と `mode=ro` で読むだけ、本番 API は GET だけ、
+#   **直列化（ADR-0041 D2）**: `$SD_STAGING/.lock` を `flock` で取る（待ちの上限
+#   `SD_VERIFY_LOCK_WAIT`、既定 1800 秒）。取れなければ exit 75（EX_TEMPFAIL）。
+#   staging のディレクトリもポート（7711 / 7701 / 7712）も固定なので、2 本同時には走れない。
+#
+# 本番には触れない: DB は `.backup` と `mode=ro` で読むだけ、**本番 API は一切叩かない**、
 # 本番のプロセスには一切シグナルを送らない。127.0.0.1:7710 / 0.0.0.0:7700 には bind しない。
 set -euo pipefail
 
@@ -27,6 +35,14 @@ usage: verify.sh [--dry-run] <sha12>
   --dry-run   何も起こさずに、前提（スナップショットが取れる / ポート 7711・7701・7712 が空いている /
               current の状態）だけ確かめ、実行するはずのコマンドを表示して終わる。
               Phase 47（--mode / --db / --listen …）が本番の `current` に入る前でも使える。
+
+env:
+  SD_VERIFY_LOCK_WAIT  他の verify.sh を待つ上限（秒。既定 1800）。超えたら exit 75
+
+exit:
+  0   verify.json.ok == true
+  1   検査に落ちた / 前提が揃わない
+  75  他の verify.sh が走っていて、待ち時間の上限までに終わらなかった（EX_TEMPFAIL）
 EOF
   exit 2
 }
@@ -86,13 +102,72 @@ sd_cleanup() {
 }
 trap sd_cleanup EXIT INT TERM
 
+# ---- スナップショットを数える python3（ADR-0041 D2 の検査 2 の基準側）-------
+#
+# `.backup` の直後（＝**マイグレーション前**）に、コピーした SQLite を `mode=ro` で開いて生の行数を
+# 数える。出す形は下の `collect`（staging API 側）と**同じキー**で、`tasks_digest` は
+# **同じ式**（`sorted("<id>:<status>")` を "\n" で連ね、sha256 の先頭 16 桁）で計算する。
+# DB の `tasks.status` は API の JSON と同じ snake_case の文字列なので、両側が一致する。
+collect_snapshot() {
+  python3 - "$1" <<'PY'
+import hashlib, json, sqlite3, sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+errors = []
+
+
+def scalar(sql):
+    try:
+        return int(conn.execute(sql).fetchone()[0])
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"{sql}: {exc}")
+        return -1
+
+
+out = {}
+out["tasks"] = scalar("SELECT COUNT(*) FROM tasks")
+out["tasks_total"] = out["tasks"]
+try:
+    pairs = sorted(f"{row[0]}:{row[1]}" for row in conn.execute("SELECT id, status FROM tasks"))
+    out["tasks_digest"] = hashlib.sha256("\n".join(pairs).encode("utf-8")).hexdigest()[:16]
+except Exception as exc:  # noqa: BLE001
+    errors.append(f"tasks_digest: {exc}")
+    out["tasks_digest"] = ""
+out["projects"] = scalar("SELECT COUNT(*) FROM projects")
+out["milestones"] = scalar("SELECT COUNT(*) FROM milestones")
+out["org"] = scalar("SELECT COUNT(*) FROM org_nodes")
+out["approvals"] = scalar("SELECT COUNT(*) FROM approvals")
+out["approvals_decided"] = scalar("SELECT COUNT(*) FROM approvals WHERE decision IS NOT NULL")
+out["reports"] = scalar("SELECT COUNT(*) FROM reports")
+out["messages"] = scalar("SELECT COUNT(*) FROM messages")
+# API 側は「組織のノードごと」に数える（reports / messages には全件を返す入口が無い）。
+# ノードが消えた後に残っている行はそこから漏れるので、数が合わなかったときの説明に使う。
+out["orphan_reports"] = scalar("SELECT COUNT(*) FROM reports WHERE node_id NOT IN (SELECT id FROM org_nodes)")
+out["orphan_messages"] = scalar("SELECT COUNT(*) FROM messages WHERE node_id NOT IN (SELECT id FROM org_nodes)")
+out["schema_version"] = scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+out["errors"] = errors
+conn.close()
+json.dump(out, sys.stdout, ensure_ascii=False)
+PY
+}
+
+# ---- 直列化（ADR-0041 D2）--------------------------------------------------
+#
+# ポートの検査より**先に**ロックを取る。先に検査すると、もう 1 本が走っている間は「ポートが塞がって
+# いる」で exit 1 になってしまい、「混んでいる（75）」と区別できない。ロックは `$SD_STAGING/.lock`
+# （staging を作り直すときもこのファイルだけは消さない。消すと inode が変わって排他が効かなくなる）。
+mkdir -p "$SD_STAGING"
+sd_lock_or_tempfail 9 "$SD_STAGING/.lock" "$SD_VERIFY_LOCK_WAIT" "verify.sh"
+sd_log "staging lock acquired: $SD_STAGING/.lock"
+
 # ---- staging を作り直してスナップショットを取る ----------------------------
 
 sd_require_port_free "$SD_STAGING_API_PORT" "staging taskd"
 sd_require_port_free "$SD_STAGING_GUI_PORT" "staging gui"
 sd_require_port_free "$SD_STAGING_OLD_API_PORT" "staging N-1 taskd"
 
-rm -rf "$SD_STAGING"
+# `.lock` 以外を消す（`rm -rf "$SD_STAGING"` だとロックしている実体ごと消えてしまう）。
+find "$SD_STAGING" -mindepth 1 -maxdepth 1 ! -name '.lock' -exec rm -rf {} +
 mkdir -p "$SD_STAGING/workspaces" "$SD_STAGING/logs"
 SNAP="$SD_STAGING/staging.sqlite3"
 ST_TOKEN="$SD_STAGING/api.token"
@@ -103,6 +178,13 @@ sqlite3 "file:$SD_DB?mode=ro" ".backup '$SNAP'" \
 SNAP_SCHEMA="$(sqlite3 "file:$SNAP?mode=ro" 'SELECT COALESCE(MAX(version), 0) FROM schema_migrations;')"
 SNAP_TASKS="$(sqlite3 "file:$SNAP?mode=ro" 'SELECT COUNT(*) FROM tasks;')"
 sd_log "snapshot ok: schema_version=$SNAP_SCHEMA tasks=$SNAP_TASKS ($(du -h "$SNAP" | cut -f1))"
+
+# **マイグレーションの前に**数える（ADR-0041 D2 の検査 2 の基準）。ここから先はこのファイルを
+# 新バイナリが書き換えるので、ここでしか取れない。
+SNAP_JSON="$SD_STAGING/logs/counts-snapshot.json"
+collect_snapshot "$SNAP" >"$SNAP_JSON" || true
+sd_json_valid "$SNAP_JSON" || sd_die "could not count the snapshot before migration (see $SNAP_JSON)"
+sd_log "snapshot counts: tasks=$(sd_json_get "$SNAP_JSON" tasks) projects=$(sd_json_get "$SNAP_JSON" projects) org=$(sd_json_get "$SNAP_JSON" org) reports=$(sd_json_get "$SNAP_JSON" reports) messages=$(sd_json_get "$SNAP_JSON" messages) digest=$(sd_json_get "$SNAP_JSON" tasks_digest)"
 
 head -c 32 /dev/urandom | base64 | tr -d '\n' >"$ST_TOKEN"
 chmod 600 "$ST_TOKEN"
@@ -128,10 +210,12 @@ if [ "$DRY_RUN" = true ]; then
 --- dry run: 前提 ---
 release           : $REL (schema_version=$NEW_SCHEMA)
 snapshot          : $SNAP (schema_version=$SNAP_SCHEMA, tasks=$SNAP_TASKS)
+snapshot counts   : $SNAP_JSON（マイグレーション前。検査 2 はこれと staging API を比べる）
+staging lock      : $SD_STAGING/.lock（取得済み。待ちの上限 ${SD_VERIFY_LOCK_WAIT}s）
 staging token     : $ST_TOKEN
 ports free        : $SD_STAGING_API_PORT (taskd) / $SD_STAGING_GUI_PORT (gui) / $SD_STAGING_OLD_API_PORT (N-1)
 current           : ${CUR:-<none>}  -> live_ok は $( [ -n "$CUR" ] && echo "N-1 の結果しだい" || echo "false（current が無い）" )
-production API    : $SD_PROD_API (読むだけ。token $SD_API_TOKEN_FILE)
+production API    : 叩かない（ADR-0041 D2。件数は同じスナップショットの前後で比べる）
 
 --- dry run: 実行するはずのコマンド ---
 [1/5] ${NEW_CMD[*]}
@@ -157,7 +241,13 @@ record() { # record <id> <name> <ok:true|false> <detail>
 
 # ---- 件数を集める python3 --------------------------------------------------
 
-# `collect <base-url> <token-file>` → JSON（件数と tasks の {id,status} のダイジェスト）
+# `collect <base-url> <token-file>` → JSON（件数と tasks の {id,status} のダイジェスト）。
+# 出す形は `collect_snapshot`（生の行数）と**同じキー**。API から「表の全行」を数えるために:
+#   - tasks は `next_cursor` で最後まで辿る
+#   - reports / messages は 1 回の応答の上限が 500 なので、**組織のノードごと**（messages は
+#     さらに案件ごと + 案件なし）に分けて数えて足す。どれかが 500 に達したら `capped` に入れて
+#     検査 2 を落とす（黙って少なく数えない）
+#   - approvals は `pending` を書かなければ全件
 collect() {
   python3 - "$1" "$2" <<'PY'
 import hashlib, json, sys, urllib.error, urllib.parse, urllib.request
@@ -213,21 +303,45 @@ org = (safe("/api/v1/org", {"items": []}) or {}).get("items") or []
 out["org"] = len(org)
 out["first_org"] = org[0].get("id") if org else ""
 
+out["approvals"] = len((safe("/api/v1/approvals", {"items": []}) or {}).get("items") or [])
 out["approvals_decided"] = len((safe("/api/v1/approvals?pending=false", {"items": []}) or {}).get("items") or [])
-out["reports"] = len((safe("/api/v1/reports?limit=500", {"items": []}) or {}).get("items") or [])
 
+# 1 応答の上限は 500（`GET /reports` / `GET /org/{id}/messages`）。表の全行を数えるために、
+# 行が必ず持つ `node_id`（と messages は `project_id`）で分けて数える。
+LIMIT = 500
+capped = []
+
+
+def counted(path, what):
+    page = safe(path, {"items": []}) or {}
+    n = len(page.get("items") or [])
+    if n >= LIMIT:
+        capped.append(f"{what} hit the {LIMIT}-row page limit")
+    return n
+
+
+reports = 0
 messages = 0
 for n in org:
-    page = safe(f"/api/v1/org/{urllib.parse.quote(str(n.get('id')), safe='')}/messages?limit=5000", {"items": []}) or {}
-    messages += len(page.get("items") or [])
+    node = urllib.parse.quote(str(n.get("id")), safe="")
+    reports += counted(f"/api/v1/reports?node={node}&limit={LIMIT}", f"reports of {node}")
+    messages += counted(f"/api/v1/org/{node}/messages?limit={LIMIT}", f"messages of {node} (no project)")
+    for p in projects:
+        pid = urllib.parse.quote(str(p.get("id")), safe="")
+        messages += counted(
+            f"/api/v1/org/{node}/messages?project={pid}&limit={LIMIT}",
+            f"messages of {node} in {pid}",
+        )
+out["reports"] = reports
 out["messages"] = messages
+out["capped"] = capped
 
-out["errors"] = errors
+out["errors"] = errors + capped
 json.dump(out, sys.stdout, ensure_ascii=False)
 PY
 }
 
-COUNT_KEYS="tasks tasks_total projects milestones org approvals_decided reports messages tasks_digest"
+COUNT_KEYS="tasks tasks_total projects milestones org approvals approvals_decided reports messages tasks_digest"
 
 # ---- 1. 新リリースを verify モードで起こす ---------------------------------
 
@@ -255,46 +369,46 @@ else
   record 1 start-and-migrate false "no 200 from $NEW_BASE/api/v1/health within 60s; see $NEW_LOG ($(tail -n 3 "$NEW_LOG" | tr '\n' ' '))"
 fi
 
-# ---- 2. 件数一致（本番 API は読むだけ） ------------------------------------
+# ---- 2. 件数一致（同じスナップショットのマイグレーション前後。ADR-0041 D2）--
+
+# 基準は `$SNAP_JSON`（`.backup` 直後、マイグレーション前の生の行数）。比べる相手は
+# staging API（同じファイルを新バイナリがマイグレーションした後）。**本番は出てこない**ので、
+# 本番が動いていてもこの検査は揺れない。
 
 OK2=false
-PROD_JSON="$SD_STAGING/logs/counts-prod.json"
 STG_JSON="$SD_STAGING/logs/counts-staging.json"
-PROD_AFTER_JSON="$SD_STAGING/logs/counts-prod-after.json"
 COUNT_DIFF=""
 if [ "$OK1" = true ]; then
-  collect "$SD_PROD_API" "$SD_API_TOKEN_FILE" >"$PROD_JSON" || true
   collect "$NEW_BASE" "$ST_TOKEN" >"$STG_JSON" || true
-  if sd_json_valid "$PROD_JSON" && sd_json_valid "$STG_JSON"; then
+  if sd_json_valid "$SNAP_JSON" && sd_json_valid "$STG_JSON"; then
     OK2=true
     for key in $COUNT_KEYS; do
-      a="$(sd_json_get "$PROD_JSON" "$key" || echo "?")"
+      a="$(sd_json_get "$SNAP_JSON" "$key" || echo "?")"
       b="$(sd_json_get "$STG_JSON" "$key" || echo "??")"
       if [ "$a" != "$b" ]; then
         OK2=false
-        COUNT_DIFF="$COUNT_DIFF $key(prod=$a staging=$b)"
+        COUNT_DIFF="$COUNT_DIFF $key(snapshot=$a staging=$b)"
       fi
     done
-    perr="$(sd_json_get "$PROD_JSON" errors || echo '[]')"
     serr="$(sd_json_get "$STG_JSON" errors || echo '[]')"
-    if [ "$perr" != "[]" ] || [ "$serr" != "[]" ]; then
+    if [ "$serr" != "[]" ]; then
       OK2=false
-      COUNT_DIFF="$COUNT_DIFF errors(prod=$perr staging=$serr)"
+      COUNT_DIFF="$COUNT_DIFF errors(staging=$serr)"
     fi
-    # 本番は動き続けているので、検査の後にもう一度数えてドリフトが見えるようにする。
-    collect "$SD_PROD_API" "$SD_API_TOKEN_FILE" >"$PROD_AFTER_JSON" || true
     if [ "$OK2" = true ]; then
-      record 2 counts-match true "all of: $COUNT_KEYS"
+      record 2 counts-match true "snapshot (pre-migration, sqlite3) == staging API (post-migration): $COUNT_KEYS"
     else
-      drift=""
-      if sd_json_valid "$PROD_AFTER_JSON" \
-        && [ "$(sd_json_get "$PROD_JSON" tasks_digest || echo x)" != "$(sd_json_get "$PROD_AFTER_JSON" tasks_digest || echo y)" ]; then
-        drift=" (production changed during verify: tasks_digest moved — rerun when it is quiet)"
-      fi
-      record 2 counts-match false "mismatch:$COUNT_DIFF$drift"
+      hint=""
+      orphans="$(sd_json_get "$SNAP_JSON" orphan_reports || echo 0)/$(sd_json_get "$SNAP_JSON" orphan_messages || echo 0)"
+      case "$COUNT_DIFF" in
+        *reports* | *messages*)
+          hint=" (orphan reports/messages whose node_id is no longer in org_nodes: $orphans — the API counts per node, so those rows cannot be reached)"
+          ;;
+      esac
+      record 2 counts-match false "migration changed the data:$COUNT_DIFF$hint"
     fi
   else
-    record 2 counts-match false "could not collect counts (see $PROD_JSON / $STG_JSON)"
+    record 2 counts-match false "could not collect counts (see $SNAP_JSON / $STG_JSON)"
   fi
 else
   record 2 counts-match false "skipped (check 1 failed)"
@@ -397,18 +511,20 @@ else
     collect "$OLD_BASE" "$ST_TOKEN" >"$OLD_COUNTS" || true
     BAD5="$(probe_api "$OLD_BASE" "$ST_TOKEN")"
     DIFF5=""
-    if sd_json_valid "$OLD_COUNTS" && sd_json_valid "$STG_JSON"; then
+    # 比べる相手は**スナップショット**（マイグレーション前の生の行数。ADR-0041 D2）。
+    # 本番 API はここでも読まない。
+    if sd_json_valid "$OLD_COUNTS" && sd_json_valid "$SNAP_JSON"; then
       for key in $COUNT_KEYS; do
-        a="$(sd_json_get "$STG_JSON" "$key" || echo "?")"
+        a="$(sd_json_get "$SNAP_JSON" "$key" || echo "?")"
         b="$(sd_json_get "$OLD_COUNTS" "$key" || echo "??")"
-        [ "$a" = "$b" ] || DIFF5="$DIFF5 $key(new=$a old=$b)"
+        [ "$a" = "$b" ] || DIFF5="$DIFF5 $key(snapshot=$a old=$b)"
       done
     else
       DIFF5=" could-not-collect"
     fi
     if [ "$OLD_SCHEMA" = "$NEW_SCHEMA" ] && [ -z "$BAD5" ] && [ -z "$DIFF5" ]; then
       LIVE_OK=true
-      record 5 n-1-compat true "old taskd ($CUR) reads the migrated snapshot: schema_version=$OLD_SCHEMA, same counts, main GETs 200"
+      record 5 n-1-compat true "old taskd ($CUR) reads the migrated snapshot: schema_version=$OLD_SCHEMA, counts match the pre-migration snapshot, main GETs 200"
     else
       record 5 n-1-compat false "old taskd ($CUR) is not compatible: schema=$OLD_SCHEMA(want $NEW_SCHEMA) gets:$BAD5 counts:$DIFF5"
     fi
@@ -437,9 +553,8 @@ counts_or_null() { if sd_json_valid "$1"; then cat "$1"; else printf 'null'; fi;
   printf '  "staging_dir": %s,\n' "$(sd_json_str "$SD_STAGING")"
   printf '  "checks": %s,\n' "$CHECKS_JSON"
   printf '  "counts": {\n'
-  printf '    "prod": %s,\n' "$(counts_or_null "$PROD_JSON")"
-  printf '    "staging": %s,\n' "$(counts_or_null "$STG_JSON")"
-  printf '    "prod_after": %s\n' "$(counts_or_null "$PROD_AFTER_JSON")"
+  printf '    "snapshot": %s,\n' "$(counts_or_null "$SNAP_JSON")"
+  printf '    "staging": %s\n' "$(counts_or_null "$STG_JSON")"
   printf '  }\n'
   printf '}\n'
 } >"$REL/verify.json"

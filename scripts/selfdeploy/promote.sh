@@ -305,4 +305,24 @@ case "$MODE" in
   stop-start) promote_stop_start ;;
 esac
 
+# ---- promoted.json（ADR-0041 D3）------------------------------------------
+#
+# 「このリリースが、いつ、どの版から、どうやって昇格したか」を**リリースの中に**残す。
+# `GET /releases` の `promoted_at` はこれを読むだけ（Phase 48 の逸脱 2「どこにも書かれていない」の解消）。
+# **git リポジトリには触れない**（人のチェックアウトを機械が fast-forward しない。ADR-0041 D3）。
+# `main` に反映されているかは `GET /releases` の `on_main` が読み取りで見せる。
+{
+  printf '{\n'
+  printf '  "promoted_at": %s,\n' "$(sd_json_str "$(sd_ts)")"
+  printf '  "mode": %s,\n' "$(sd_json_str "$MODE")"
+  if [ -n "$OLD" ]; then
+    printf '  "from": %s\n' "$(sd_json_str "$OLD")"
+  else
+    printf '  "from": null\n'
+  fi
+  printf '}\n'
+} >"$REL/promoted.json"
+sd_log "promoted.json: $REL/promoted.json (mode=$MODE from=${OLD:-<none>})"
+
 sd_log "promoted $SHA12 (mode=$MODE). backup: $BACKUP"
+sd_log "the working checkout was NOT touched. If main is behind this release, a human runs: git -C $SD_REPO merge --ff-only $SHA12"

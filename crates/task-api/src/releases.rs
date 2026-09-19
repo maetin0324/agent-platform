@@ -1,8 +1,10 @@
 //! リリースの一覧と昇格（ADR-0040 D6。Phase 48。`docs/gui/api.md` §3.54/§3.55）。
 //!
-//! - `GET /releases` — 読み取り（トークン不要）。`[selfdeploy] releases_dir` の下を読むだけ。
-//! - `POST /releases/{sha12}/promote` — **管理系**（トークン必須）。リリースに同梱された
-//!   `scripts/promote.sh` を detached で起こして 202 を返す。
+//! - `GET /releases` — 読み取り（トークン不要）。`[selfdeploy] releases_dir` の下と、
+//!   `[selfdeploy] repo`（作業チェックアウト。`on_main` のためだけ）を**読むだけ**。
+//! - `POST /releases/{sha12}/promote` — **管理系**（トークン必須）。`promote.sh` を detached で
+//!   起こして 202 を返す。どちらの `promote.sh` かは ADR-0041 D4（`current` のもの > 昇格先のもの。
+//!   応答の `script_from`）。
 //!
 //! task-api はファイルシステムの規約（`manifest.json` / `gate.json` / `verify.json` / `current` の
 //! symlink）を知らない。読み書きは taskd 側（`taskd::releases`）が `ReleaseSource` として渡す

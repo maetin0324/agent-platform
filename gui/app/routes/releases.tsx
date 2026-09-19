@@ -1,24 +1,32 @@
-import { useEffect } from "react";
+import { useEffect, useId, useState } from "react";
 import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher, useRevalidator } from "react-router";
 import { ReleasePromoteFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { hintClass } from "~/components/ui/form";
+import { hintClass, inputClass, labelClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import { instanceRoleLabel } from "~/lib/labels";
 import {
+  changesSummaryText,
+  commitShort,
   handoffInFlight,
   handoffProgressText,
+  notOnMainText,
   promoteAvailability,
   promoteConfirmText,
+  promotedAtText,
+  promoteNeedsTypedSha,
   releaseGateLabel,
   releasePositionLabel,
   releaseSubtitle,
   releaseVerifyLabel,
   releaseVerifyTone,
+  sensitiveBadgeText,
+  staleChangesText,
+  typedShaMatches,
 } from "~/lib/releases";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
@@ -208,6 +216,16 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
   const submitting = fetcher.state !== "idle";
   const { canPromote, reason } = promoteAvailability(item);
   const position = releasePositionLabel(item);
+  const sensitive = sensitiveBadgeText(item);
+  const notOnMain = notOnMainText(item);
+  const promotedAt = promotedAtText(item);
+  const summary = changesSummaryText(item);
+  const stale = staleChangesText(item);
+  // 安全に関わる変更があるときは sha12 を打たせる（ADR-0041 D4）。打った文字はこの行だけの状態。
+  const needsTyped = promoteNeedsTypedSha(item);
+  const [typed, setTyped] = useState("");
+  const typedOk = typedShaMatches(item, typed);
+  const shaInputId = useId();
 
   return (
     <Card data-testid="release-row" data-release-sha12={item.sha12} className="hover:shadow-md">
@@ -237,6 +255,11 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
             <Badge tone={releaseVerifyTone(item)} dot pulse={item.promoting} data-testid="release-verify">
               {releaseVerifyLabel(item)}
             </Badge>
+            {sensitive && (
+              <Badge tone="danger" dot data-testid="release-sensitive-badge">
+                {sensitive}
+              </Badge>
+            )}
           </>
         }
       />
@@ -260,7 +283,76 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
               {item.verify?.at ?? "-"}
             </span>
           </DataItem>
+          <DataItem label="昇格">
+            <span data-testid="release-promoted-at" className="text-fg-subtle">
+              {promotedAt ?? "まだ"}
+            </span>
+          </DataItem>
         </dl>
+
+        {notOnMain && (
+          <Alert tone="warning" title="main に戻っていません" data-testid="release-not-on-main">
+            <p className="break-all">
+              <Mono className="text-sm">{notOnMain}</Mono>
+            </p>
+            <p className={hintClass}>
+              昇格は本番を動かすだけで、あなたのチェックアウトには触れません（ADR-0041 D3）。 上のコマンドを人が流すと
+              `main` が本番に追いつきます。
+            </p>
+          </Alert>
+        )}
+
+        {item.changes && (
+          <details className="rounded-lg border border-border bg-surface-2/40" data-testid="release-changes">
+            <summary className="cursor-pointer list-none px-3 py-2 text-sm text-fg-muted hover:text-fg">
+              <Icon name="layers" className="mr-1.5 inline size-4" />
+              昇格したら変わるもの
+              <span className="ml-2 text-fg-subtle" data-testid="release-changes-summary">
+                {summary}
+              </span>
+            </summary>
+            <div className="space-y-3 px-3 pb-3">
+              {stale && (
+                <p className={hintClass} data-testid="release-changes-stale">
+                  {stale}
+                </p>
+              )}
+              {item.changes.commits.length > 0 ? (
+                <ul className="space-y-1 text-sm" data-testid="release-commit-list">
+                  {item.changes.commits.map((commit) => (
+                    <li key={commit.sha} data-testid="release-commit" className="flex gap-2">
+                      <Mono className="shrink-0 text-xs text-fg-subtle">{commitShort(commit)}</Mono>
+                      <span className="break-all">{commit.subject}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className={hintClass} data-testid="release-commit-empty">
+                  コミットの一覧がありません（起点が分からないか、差が無いリリースです）。
+                </p>
+              )}
+              <p className={hintClass} data-testid="release-file-count">
+                変更ファイル {item.changes.file_count} 件
+              </p>
+            </div>
+          </details>
+        )}
+
+        {sensitive && item.changes && (
+          <Alert tone="danger" title={sensitive} data-testid="release-sensitive">
+            <p>
+              昇格の仕組み・本番の設定・エージェントへの指示文に当たるファイルが変わっています。
+              中身を読んでから押してください。
+            </p>
+            <ul className="mt-2 space-y-0.5" data-testid="release-sensitive-list">
+              {item.changes.sensitive.map((path) => (
+                <li key={path} data-testid="release-sensitive-path">
+                  <Mono className="text-xs break-all">{path}</Mono>
+                </li>
+              ))}
+            </ul>
+          </Alert>
+        )}
 
         {item.problem && (
           <Alert tone="danger" title="リリースのファイルが読めません" data-testid="release-problem">
@@ -288,13 +380,38 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
               <p className="mb-2 text-sm text-fg-muted" data-testid="release-promote-confirm">
                 {promoteConfirmText(item)}
               </p>
+              {needsTyped && (
+                <div className="mb-2 space-y-1" data-testid="release-promote-typed">
+                  <label className={labelClass} htmlFor={shaInputId}>
+                    続けるには <Mono className="text-sm">{item.sha12}</Mono> を入力してください
+                  </label>
+                  <input
+                    id={shaInputId}
+                    type="text"
+                    className={`${inputClass} font-mono`}
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={typed}
+                    onChange={(e) => setTyped(e.target.value)}
+                    data-testid="release-promote-sha-input"
+                  />
+                  <p className={hintClass}>
+                    安全に関わる変更を含むリリースは、ボタンを押すだけでは昇格できません（ADR-0041 D4）。
+                  </p>
+                </div>
+              )}
               <Button
                 type="submit"
                 variant="primary"
                 size="sm"
-                disabled={submitting}
+                disabled={submitting || (needsTyped && !typedOk)}
                 data-testid="release-promote"
                 onClick={(e) => {
+                  // 安全に関わる変更があるときは、上の sha12 入力がそのまま確認になる（`confirm` は聞かない）。
+                  if (needsTyped) {
+                    if (!typedOk) e.preventDefault();
+                    return;
+                  }
                   // 二重の確認（ADR-0040 D6「確認付き」）。ブラウザ以外（テスト・SSR）では confirm が
                   // 無いので、あるときだけ聞く。
                   if (typeof window !== "undefined" && typeof window.confirm === "function") {
