@@ -6146,3 +6146,15 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
   `GET /releases` の `running.role = active`・`instances` 1 行・`is_current` 真。本番はもう `~/workspace/agent-platform/target` を使っていない。
 - 注意（運用）: `promote.sh` は auto mode の権限分類器に「Production Deploy」として拒否されるため、
   `.claude/settings.local.json` に `Bash(bash …/scripts/selfdeploy/promote.sh:*)` の許可を足した。パイプ等を付けるとルールに当たらない。
+
+### Phase 47/48 実機: 2 回目の昇格はライブ引き継ぎ（2026-09-19 12:36 UTC）
+
+- `release.sh main` → `70e3175eeb20`。`verify.sh` → ok=true、**live_ok=true**（検査 5: 旧 `60aa29440639` がマイグレーション後の
+  スナップショットを読めて件数一致・主要 GET 200）。
+- `promote.sh 70e3175eeb20`（mode=live）: DB バックアップ → `start taskd@70e3175eeb20` → **2 秒**で health が
+  `release=70e3175eeb20 role=active` を 5/5 サンプル → GUI unit 起動 → 11 秒で `/healthz` が新 release 5/5 → 旧 GUI 停止 →
+  `previous -> 60aa29440639`、`current -> 70e3175eeb20`。
+- 旧 taskd の journal: `active -> draining (in_flight 0)` → `api stopped` → `drained; exiting 0`（同じ秒。`Exit::Drained`。unit は再起動されず inactive）。
+- **可用性**: 0.2 秒間隔で API `/health` と GUI `/healthz` を 45.8 秒間・184 サンプル叩き、**非 200 は 0 件**。
+  release の値は API で 13.5〜15.2 秒の間、GUI で 15.7〜26.4 秒の間、新旧が交互に返った（`SO_REUSEPORT` の並走窓。設計どおり）。
+- 事後: `GET /releases` = `current 70e3175eeb20 / previous 60aa29440639 / running.role active / instances 1 行（新のみ）`。
