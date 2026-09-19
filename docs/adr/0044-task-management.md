@@ -65,7 +65,8 @@ task_comments(id TEXT PK, task_id TEXT NOT NULL, author_kind TEXT NOT NULL CHECK
 ### D4. ボードと検索
 
 - `GET /tasks` のフィルタを足す: `label=`、`category=`、`assignee=`、`milestone=`、`tier=`、`priority=`、`q=`（title / objective /
-  コメント本文の全文。SQLite FTS5（rusqlite の bundled にある）。無ければ `LIKE`）。複数指定は AND。`archived`（D6）は既定で隠す。
+  コメント本文の全文。**`LIKE` で引く**（Phase 53 追記: bundled SQLite に FTS5 はあるが `unicode61` は日本語を分かち書きしないので
+  「調査」が 0 件になる。FTS5 は採らない）。複数指定は AND。`archived`（D6）は既定で隠す。
 - GUI「ボード」画面（案件を選ぶ）: 列は **待ち（draft / ready）・進行中（running / reviewing）・止まっている（blocked）・完了（done）・
   失敗（failed）・中止（cancelled）**。カードに題名・担当・tier・優先度・ラベル・種類・途中目標。フィルタ欄（上のクエリ）。
   カード上で優先度・tier・担当をその場で変えられる（`PATCH`）。並べ替えは優先度で（ドラッグで列を跨ぐ状態変更はしない。
@@ -139,3 +140,16 @@ task_comments(id TEXT PK, task_id TEXT NOT NULL, author_kind TEXT NOT NULL CHECK
 - **B3（D7）**: 文書 API と GUI、昇格、逆リンク、既定の文書リポジトリの作成。実機: 調査の `answer.md` を昇格して GUI で読み、
   人が 1 行直してコミットが残る。
 - どの Phase も `cargo test --workspace` / clippy / GUI 一式、PROGRESS の実機の証跡。
+
+## 5. Phase 53 追記（2026-09-19。B1 の実装と監査から）
+
+- D4 の検索は `LIKE`（上記）。
+- **run の止め方を 1 つにする（B2 で実装）**: `cancel` / `Interrupt` / タイムアウトのどれも、**プロセスグループ**に SIGTERM →
+  `kill_grace_secs` → SIGKILL とする。今日までは `cancel` と `Interrupt` が子プロセスだけを SIGKILL し、ハーネスが起こした孫
+  （`cargo test` など）が生き残っていた。D2 の表の「SIGTERM → `kill_grace_secs`」はこの追記で実現する。
+- **変更を伴う API はすべて管理系（bearer）に揃える（B2 で実装）**: `answer` / `cancel` / `retry` / `POST /tasks` / `approve` も
+  `PATCH` / コメント / `reopen` と同じくトークン必須にする。GUI は BFF がトークンを持つので画面は変わらない。人以外（組織の「人」）
+  はそもそも API を叩かない。
+- `PATCH` で `assignee` / `role` を変えたとき tier / adapter / budget を再導出するかは**しない**（人が触った値を壊さない）。人が
+  変えたいなら同じ `PATCH` で明示する。GUI の編集フォームは「担当を変えると役割の既定が変わります」と注記するだけ。
+
