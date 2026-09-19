@@ -10,6 +10,9 @@ export const defaultHealth: Health = {
   instance_id: "01MOCKTASKDINSTANCE00001",
   started_at: "2026-09-15T00:00:00Z",
   now: "2026-09-15T00:00:01Z",
+  release: "dev",
+  mode: "normal",
+  role: "active",
   db: {
     journal_mode: "wal",
     busy_timeout_ms: 5000,

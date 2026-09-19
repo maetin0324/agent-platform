@@ -1283,7 +1283,19 @@ export interface Health {
   api_version: string;
   db: DbInfo;
   instance_id: string;
+  /**
+   * ADR-0040 D3: `normal` または `verify`（`--mode`）。
+   */
+  mode: string;
   now: string;
+  /**
+   * ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `TASKD_RELEASE` / `"dev"`）。
+   */
+  release: string;
+  /**
+   * ADR-0040 D4: `active` / `standby` / `draining` / `verify`。
+   */
+  role: string;
   /**
    * `schema_migrations` の最大版数。
    */
