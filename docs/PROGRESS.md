@@ -6472,3 +6472,19 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
     （ADR-0041 が「禁止事項が指示文だけで強制力が無いのは最大の構造的な穴。この ADR では扱わない」と
     した点そのもの）。run の終わりに `git -C <dir> rev-parse --abbrev-ref HEAD` を見て、
     ブランチが変わっていたら `WorkerProgress` で知らせるくらいは安く足せる。
+
+### Phase 49/50 実機: 3 回目の昇格（ライブ）。unit の PATH と実装者の指示文（2026-09-19 13:38 UTC）
+
+- 移行直後の事故: systemd の user unit の PATH に `~/.local/bin` が無く、claude-code アダプタが `claude` を spawn できず
+  （`failed to spawn worker: No such file or directory`）、自己改善案件の秘書の対話が requeue を繰り返していた。verify は
+  ワーカーを起こさないので拾えない（Phase 51 の煙試験の動機）。対処: `taskd.toml` の `[adapters.claude_code]` / `[adapters.codex]`
+  に絶対パス（`POST /reload` で即時）、unit に `Environment=PATH=%h/.local/bin:%h/.cargo/bin:corepack:…`（`eb98796`。次の昇格から）。
+  秘書の対話は 12:52 に `done`。
+- `release.sh main` → `3af3fe474175`（Phase 49 + 50。`changes.json`: base 70e3175eeb20、commits 8、files 90、**sensitive 12**）。
+  `verify.sh` → ok / live_ok（検査 2 は snapshot 前後比較、flock 取得）。
+- `promote.sh 3af3fe474175`（mode=live）: 2 秒で新が active、GUI は 27 秒で切替、旧 `70e3175eeb20` は `drained; exiting 0`。
+  `promoted.json` 生成。事後の `GET /releases`: current `3af3fe474175` `on_main=true` `promoted_at=13:38:39`、新 unit の PATH に
+  `~/.local/bin` `~/.cargo/bin` corepack が入っていることを `/proc/<pid>/environ` で確認。
+- `taskd.toml` の `implementer` 指示文を「taskd が用意した worktree とブランチ `taskd/<task-id>`」に直して `POST /reload`（P49-1 解消）。
+- 気づき（U50-5）: `changes.stale` は current 自身にも `true` が付く（base ≠ current になるのは当然）。current の行では `stale` を
+  出さないか、計算を「current 以外」に限るべき。GUI で紛らわしいだけで害は無い。
