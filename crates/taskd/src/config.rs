@@ -316,6 +316,19 @@ impl ApiConfig {
     }
 }
 
+/// ADR-0041 D5（Phase 51）: 検証（`--mode verify`）の煙試験が使う組み込みの id。
+/// 役割・分野・プロバイダで同じ名前を使う（`Config::apply_verify_smoke` が足す）。
+pub const SMOKE_ID: &str = "smoke";
+/// 組み込みの分野 `smoke` の説明（ADR-0041 D5）。
+pub const SMOKE_DESCRIPTION: &str = "検証の煙試験";
+/// 煙試験の予算（小さく。偽のアダプタは 1 往復で終わる）。
+pub const SMOKE_MAX_TURNS: u32 = 1;
+/// 同上（壁時計）。
+pub const SMOKE_MAX_WALL_SECS: u64 = 60;
+/// 組み込みの役割 `smoke` の指示文。
+pub const SMOKE_INSTRUCTIONS: &str =
+    "検証（staging）の煙試験。偽のアダプタが 1 往復するだけで、外に出る操作は何もしない。";
+
 /// `[[roles]]`（ADR-0016 D1）: 役割ごとの既定。タスクに書かれた値 > ここの既定 > 全体の既定の順に効く。
 /// `id` は自由記述で、ここに無い役割名をタスクに付けてもよい（既定も指示文も無いだけ）。
 #[derive(Debug, Clone, Deserialize)]
@@ -1454,6 +1467,64 @@ impl Config {
         if let Some(token_file) = &overrides.token_file {
             self.api.token_file = Some(resolve(token_file));
         }
+    }
+
+    /// ADR-0041 D5（Phase 51）: `--mode verify` の煙試験に要るものを**組み込みで**足す。
+    ///
+    /// `Config::load` の後（`apply_overrides` の後）に、**verify モードのときだけ** taskd が呼ぶ。
+    /// 設定ファイルに同じ id があっても**上書きする**（本番の設定に `smoke` という名前の役割や分野が
+    /// あっても、検証の煙試験は必ず偽のアダプタで 1 往復するだけのものになる）。
+    ///
+    /// 足すもの:
+    /// - `[[providers]] id = "smoke" adapter = "fake" tiers = ["standard"]`
+    ///   （本番の設定には `fake` のプロバイダが無いので、これが無いと煙試験を起こせない）
+    /// - `[[roles]] id = "smoke" adapter = "fake" tier = "standard"`（小さい予算）
+    /// - `[[genres]] id = "smoke" description = "検証の煙試験" default_role = "smoke" roles = ["smoke"]`
+    /// - `[adapters.fake].command` を `FakeAdapter::default_command()` に固定し、`[reviewer]` も
+    ///   `fake` / `standard` にする（ADR-0041 §3「煙試験で本物の LLM を呼ばない。`fake` だけ」を、
+    ///   指示文ではなく設定の形で守る）
+    pub fn apply_verify_smoke(&mut self) {
+        use task_worker::FakeAdapter;
+
+        // 偽のアダプタは既定のコマンドに固定する（設定の `[adapters.fake]` に左右されない）。
+        self.adapters.fake.command = FakeAdapter::default_command();
+        // レビューも偽のアダプタだけ（`Check::Reviewer` を持つ煙試験を書いても LLM は呼ばれない）。
+        self.reviewer.adapter = Some(FakeAdapter::ID.to_string());
+        self.reviewer.tier = Tier::Standard;
+
+        self.providers.retain(|p| p.id != SMOKE_ID);
+        self.providers.push(ProviderConfig {
+            id: SMOKE_ID.to_string(),
+            adapter: FakeAdapter::ID.to_string(),
+            tiers: vec![Tier::Standard],
+            concurrency: 1,
+            model: FakeAdapter::ID.to_string(),
+            env: HashMap::new(),
+            env_from_secrets: HashMap::new(),
+            account_pool: false,
+            command: None,
+            args: None,
+            settings: None,
+        });
+        self.roles.retain(|r| r.id != SMOKE_ID);
+        self.roles.push(RoleConfig {
+            id: SMOKE_ID.to_string(),
+            tier: Some(Tier::Standard),
+            adapter: Some(FakeAdapter::ID.to_string()),
+            max_turns: Some(SMOKE_MAX_TURNS),
+            max_wall_secs: Some(SMOKE_MAX_WALL_SECS),
+            instructions: Some(SMOKE_INSTRUCTIONS.to_string()),
+        });
+        self.genres.retain(|g| g.id != SMOKE_ID);
+        self.genres.push(GenreConfig {
+            id: SMOKE_ID.to_string(),
+            description: SMOKE_DESCRIPTION.to_string(),
+            capabilities: vec![],
+            input_artifacts: vec![],
+            output_artifacts: vec![],
+            default_role: Some(SMOKE_ID.to_string()),
+            roles: vec![SMOKE_ID.to_string()],
+        });
     }
 
     pub fn dispatch_config(&self) -> DispatchConfig {

@@ -94,6 +94,14 @@ pub struct ClusterSpec {
 /// 偽物を挿す。未設定（`None`）なら自動接続はせず、従来どおり cooldown に落ちる。
 pub type ClusterConnector = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
+/// ADR-0041 D5: この taskd が**面倒を見てよいタスク**の述語。`None`（既定）は「全部」＝従来どおり。
+///
+/// 検証（`--mode verify`）の taskd は、ここに「`genre = "smoke"` で、かつアダプタが `fake`」を渡す。
+/// dispatch だけでなく、**ストア上の他のタスクの状態を変えうる経路すべて**（期限切れリースの回収、
+/// `reviewing` の拾い上げ）で同じ述語を使う。手元で起こした run の後始末はこの述語に関係なく続ける
+/// （自分が起こしたものは必ず自分が畳む）。
+pub type TaskFilter = Arc<dyn Fn(&Task) -> bool + Send + Sync>;
+
 impl ClusterSpec {
     /// このタスクの写し（ローカル）とリモートのパスから、ワーカー用の設定を作る。
     /// `task_id` は worktree のディレクトリ名とブランチ名に使う（ADR-0019 D2）。
@@ -697,6 +705,8 @@ pub struct Dispatcher {
     /// ADR-0041 D1: この taskd が用意したローカルの worktree（タスクが終端に達したら後片付けする）。
     /// 再起動では失われる（残った worktree は人が `git worktree remove` する。PROGRESS の未解決）。
     local_worktrees: HashMap<TaskId, task_worker::LocalWorktree>,
+    /// ADR-0041 D5: 面倒を見てよいタスクの述語（`None` なら全部）。`--mode verify` の煙試験でだけ使う。
+    eligible: Option<TaskFilter>,
 }
 
 fn real_now_unix() -> i64 {
@@ -757,6 +767,7 @@ impl Dispatcher {
             now_unix_fn: Arc::new(real_now_unix),
             accepting_new_work: true,
             local_worktrees: HashMap::new(),
+            eligible: None,
         }
     }
 
@@ -765,6 +776,17 @@ impl Dispatcher {
     /// かもしれない reviewing の拾い上げ）を止める。**手元の run とレビューはそのまま面倒を見る**。
     pub fn set_accepting_new_work(&mut self, accepting: bool) {
         self.accepting_new_work = accepting;
+    }
+
+    /// ADR-0041 D5: 面倒を見てよいタスクを絞る（`--mode verify` の煙試験）。呼ばなければ従来どおり全部。
+    /// 絞られたタスクは **ready のまま放置**され、リースの回収もレビューの拾い上げも起きない。
+    pub fn set_eligible_tasks(&mut self, eligible: TaskFilter) {
+        self.eligible = Some(eligible);
+    }
+
+    /// そのタスクをこのインスタンスが触ってよいか（述語が無ければ常に真）。
+    fn is_eligible(&self, task: &Task) -> bool {
+        self.eligible.as_ref().is_none_or(|f| f(task))
     }
 
     /// 手元で動いている run とレビューの数（ADR-0040 D4 の drain の判定に使う）。
@@ -2090,6 +2112,10 @@ impl Dispatcher {
         let now = OffsetDateTime::now_utc();
         let mut count = 0;
         for task in self.store.list(Some(Status::Running))? {
+            // ADR-0041 D5: 面倒を見ないタスクのリースは奪わない（verify は本番のコピーの行を書き換えない）。
+            if !self.is_eligible(&task) {
+                continue;
+            }
             let Some(lease) = &task.lease else { continue };
             if lease.expires_at > now {
                 continue;
@@ -2158,6 +2184,10 @@ impl Dispatcher {
             .retain(|id| reviewing_tasks.iter().any(|t| t.id == *id));
         for task in reviewing_tasks {
             if self.reviewing.contains_key(&task.id) || self.awaiting_children.contains_key(&task.id) {
+                continue;
+            }
+            // ADR-0041 D5: 面倒を見ないタスクのレビューは拾わない（verify は他人のタスクを判定しない）。
+            if !self.is_eligible(&task) {
                 continue;
             }
             let events = self.store.events_for(task.id)?;
@@ -2232,6 +2262,10 @@ impl Dispatcher {
                 break;
             }
             if self.running.contains_key(&task.id) {
+                continue;
+            }
+            // ADR-0041 D5: verify モードは `genre = "smoke"` の煙試験だけを起こす（他は ready のまま）。
+            if !self.is_eligible(&task) {
                 continue;
             }
             // ADR-0010 D6（P-3）: ready に入った時刻（DB の updated_at）からのバックオフ。
@@ -3370,9 +3404,11 @@ impl Dispatcher {
         if ready.len() >= window {
             return Ok(false);
         }
-        Ok(ready
-            .iter()
-            .all(|t| self.unroutable.contains(&t.id) || self.cluster_waiting.contains(&t.id)))
+        // ADR-0041 D5: 面倒を見ないタスク（verify の非 `smoke`）は、このインスタンスでは決して進まないので
+        // 待ち対象に数えない。
+        Ok(ready.iter().all(|t| {
+            !self.is_eligible(t) || self.unroutable.contains(&t.id) || self.cluster_waiting.contains(&t.id)
+        }))
     }
 }
 

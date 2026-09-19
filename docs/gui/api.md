@@ -1,6 +1,12 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-19 Phase 51（ADR-0041 D5）— **型は変わらない**。`mode = "verify"` のプロセスに限り、
+  `GET /config` の `roles[]` / `genres[]` / `providers[]` に組み込みの `smoke`（`adapter = "fake"`）が
+  1 つずつ増え、`reviewer` が `{adapter: "fake", tier: "standard"}` になる（`Config::apply_verify_smoke`。
+  設定ファイルに同じ id があっても上書きする）。`mode = "normal"`（本番）の応答は 1 バイトも変わらない。
+  `POST /tasks` はそのプロセスで `{"genre":"smoke","role":"smoke"}` を受け付け、verify の taskd はその
+  タスク**だけ**を dispatch する（§3.1、`docs/selfdeploy.md` の検査 6）
 - 改訂: 2026-09-19 Phase 50（ADR-0041 D3/D4）— `GET /releases` の `items[]` に `promoted_at` / `on_main` /
   `changes`、`POST /releases/{sha12}/promote` の応答に `script_from` を追加（追加のみ。v1 のまま）。
   昇格に使う `promote.sh` は**いま動いている版のもの**に変わった（§3.67）
@@ -234,6 +240,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
   `"active"` / `"standby"` / `"draining"` / `"verify"`。昇格（`promote.sh`）と検証（`verify.sh`）は
   「どの版がどの役割で動いているか」をここだけで判定する。`role` が `standby` / `draining` の間は
   ディスパッチャの状態を要する管理系が 503 `standby`（§1.5）。
+- ADR-0041 D5（Phase 51）: `mode == "verify"` のプロセスは、**`genre = "smoke"` のタスクだけ**を
+  dispatch する（他の ready は動かさない・リースも奪わない・レビューも拾わない・`daemon_instances` にも
+  書かない）。その役割・分野・プロバイダは verify モードが組み込みで足すもので、すべて偽のアダプタ
+  （`adapter = "fake"`）。`GET /config` にだけ姿が出る（§3.21）。本番（`normal`）には何の影響も無い。
 - 無認証（1.3）。DB のパスは出さない（`GET /config` に出す）。
 
 ### 3.2 `GET /inbox` → 200 `Inbox`
@@ -517,7 +527,13 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 `[[genres]]` の順。`[[genres]]` を書かない設定では `[]`）、
 `delegation{max_delegate_per_run, max_tree_depth, max_tree_runs, on_child_failure}`（Phase 10 / ADR-0021。既定 8 / 5 / 100 /
 `"retry_then_ask"`。`on_child_failure` は `"retry_then_ask"` か `"ignore"`）、`api{bind, auth_required, allowed_hosts}`、`config_path`。
-`[[providers]].env` の**値**、`[adapters.*].env` の値、`[[clusters]].env` の値と `setup` の中身、`[[roles]].instructions` の**本文**（有無だけを `has_instructions` で出す）、`token_file` のパスと内容は出さない。`task-api` は `taskd` crate に依存しないので、この型は task-api に置き、taskd が起動時に値を作って `ApiState` に渡す。
+`[[providers]].env` の**値**、`[adapters.*].env` の値、`[[clusters]].env` の値と `setup` の中身、`[[roles]].instructions` の**本文**（有無だけを `has_instructions` で出す）、`token_file` のパスと内容は出さない。
+
+- ADR-0041 D5（Phase 51）: `GET /health` の `mode` が `"verify"` のプロセスでは、`roles[]` / `genres[]` /
+  `providers[]` の末尾に組み込みの **`smoke`**（`adapter = "fake"`、`tier`/`tiers` は `standard`）が 1 つずつ
+  増え、`reviewer` が `{adapter: "fake", tier: "standard"}` になる。設定ファイルに同じ id があっても
+  上書きされる（煙試験が本物の LLM を呼ぶ経路を設定で開けられないようにするため）。**型は変わらない**し、
+  本番（`mode = "normal"`）の応答も変わらない。GUI は本番の API しか見ないので対応は要らない。`task-api` は `taskd` crate に依存しないので、この型は task-api に置き、taskd が起動時に値を作って `ApiState` に渡す。
 
 ### 3.22 `GET /schema` → 200 `application/schema+json`
 

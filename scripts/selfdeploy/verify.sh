@@ -14,7 +14,12 @@
 #     5. N-1 互換: `current` の旧 taskd を、**新バイナリがマイグレーションした後の**同じスナップショットに
 #        対して 127.0.0.1:7712 に起こし、1〜3 と同じ検査（件数はスナップショットと比べる。
 #        落ちたら live_ok = false）
-#   を行い、`~/taskd/releases/<sha12>/verify.json` を書く。`ok` は 1〜4 が全部真のとき。
+#     6. **煙試験（ADR-0041 D5）**: staging に `POST /tasks {genre: "smoke", role: "smoke"}` して承認し、
+#        60 秒以内に `done` になること、`worker_started` / `worker_finished(done…)` の event があること、
+#        （`assignee` を付けられたときは）その run の報告が `GET /reports` に出ることを確かめる。
+#        verify の taskd は `genre = "smoke"` だけを dispatch し、役割・分野・プロバイダはすべて
+#        **偽のアダプタ**の組み込み（LLM は呼ばない）。**検査 5 の後**に行う（検査 2 / 5 の件数を動かさない）
+#   を行い、`~/taskd/releases/<sha12>/verify.json` を書く。`ok` は 1〜4 と 6 が全部真のとき。
 #
 #   **直列化（ADR-0041 D2）**: `$SD_STAGING/.lock` を `flock` で取る（待ちの上限
 #   `SD_VERIFY_LOCK_WAIT`、既定 1800 秒）。取れなければ exit 75（EX_TEMPFAIL）。
@@ -218,11 +223,13 @@ current           : ${CUR:-<none>}  -> live_ok は $( [ -n "$CUR" ] && echo "N-1
 production API    : 叩かない（ADR-0041 D2。件数は同じスナップショットの前後で比べる）
 
 --- dry run: 実行するはずのコマンド ---
-[1/5] ${NEW_CMD[*]}
-[3/5] curl http://127.0.0.1:$SD_STAGING_API_PORT/api/v1/{health,tasks,projects,org,approvals,reports,inbox,notify,clusters,providers,config}
-[4/5] ( cd $REL/gui && ${GUI_ENV[*]} /usr/bin/node server.js )
+[1/6] ${NEW_CMD[*]}
+[3/6] curl http://127.0.0.1:$SD_STAGING_API_PORT/api/v1/{health,tasks,projects,org,approvals,reports,inbox,notify,clusters,providers,config}
+[4/6] ( cd $REL/gui && ${GUI_ENV[*]} /usr/bin/node server.js )
       curl http://127.0.0.1:$SD_STAGING_GUI_PORT/{healthz,,org,projects,projects/<id>,approvals,reports,clusters}
-[5/5] $( [ ${#OLD_CMD[@]} -gt 0 ] && echo "${OLD_CMD[*]}" || echo "（current が無いので N-1 検査は行わない。live_ok=false）" )
+[5/6] $( [ ${#OLD_CMD[@]} -gt 0 ] && echo "${OLD_CMD[*]}" || echo "（current が無いので N-1 検査は行わない。live_ok=false）" )
+[6/6] curl -X POST http://127.0.0.1:$SD_STAGING_API_PORT/api/v1/tasks -d '{"title":"smoke","genre":"smoke","role":"smoke",...}'
+      → approve → GET /tasks/<id> を 60 秒まで待って done → events → reports（ADR-0041 D5）
 
 何も起こさずに終わる（verify.json は書かない）。
 EOF
@@ -233,9 +240,12 @@ fi
 # ---- 検査の記録 ------------------------------------------------------------
 
 CHECKS_TSV="$(mktemp)"
-printf 'id:i name:s ok:b detail:s\n' >"$CHECKS_TSV"
-record() { # record <id> <name> <ok:true|false> <detail>
-  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$(printf '%s' "$4" | tr '\t\n' '  ')" >>"$CHECKS_TSV"
+printf 'id:i name:s ok:b detail:s task_id:s elapsed_s:f\n' >"$CHECKS_TSV"
+# record <id> <name> <ok:true|false> <detail> [task_id] [elapsed_s]
+# `task_id` / `elapsed_s` は検査 6（煙試験。ADR-0041 D5）だけが埋める。他の検査では空 / 0。
+record() {
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$(printf '%s' "$4" | tr '\t\n' '  ')" \
+    "${5:-}" "${6:-0}" >>"$CHECKS_TSV"
   sd_log "check $1 ($2): $3 — $4"
 }
 
@@ -337,6 +347,150 @@ out["messages"] = messages
 out["capped"] = capped
 
 out["errors"] = errors + capped
+json.dump(out, sys.stdout, ensure_ascii=False)
+PY
+}
+
+# ---- 煙試験（ADR-0041 D5 の検査 6）を回す python3 --------------------------
+#
+# `smoke <base-url> <token-file> [assignee]` → JSON `{ok, task_id, elapsed_s, detail, report}`。
+# staging の API だけを叩く（本番には触れない）。中身は
+#   POST /tasks（`genre = "smoke"`、受け入れ条件は `true` が exit 0 = 判定に LLM が要らない）
+#   → POST /tasks/{id}/approve（draft → ready）
+#   → GET /tasks/{id} を 60 秒まで 1 秒ごとに見て `status == "done"` を待つ
+#   → GET /tasks/{id}/events に `worker_started` と `worker_finished`（outcome が `done…`）があるか
+#   → `assignee` を付けられたときは GET /reports?node=<assignee> にそのタスクの報告が出るか
+# の 5 段。`assignee` を付けるのは「終端での報告の生成（ADR-0034）」まで回帰に入れるため
+# （報告は `assignee` のあるタスクにだけ作られる）。付けられなければその段だけ飛ばす。
+smoke() {
+  python3 - "$1" "$2" "${3:-}" <<'PY'
+import json, sys, time, urllib.error, urllib.parse, urllib.request
+
+base = sys.argv[1].rstrip("/")
+token = open(sys.argv[2], encoding="utf-8").read().strip() if sys.argv[2] else ""
+assignee = sys.argv[3] if len(sys.argv) > 3 else ""
+TIMEOUT_S = 60
+
+out = {"ok": False, "task_id": "", "elapsed_s": 0.0, "detail": "", "report": ""}
+
+
+def call(path, body=None):
+    req = urllib.request.Request(base + path, method="POST" if body is not None else "GET")
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    data = None
+    if body is not None:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, data, timeout=30) as resp:  # loopback only
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def fail(detail):
+    out["detail"] = detail
+    json.dump(out, sys.stdout, ensure_ascii=False)
+    sys.exit(0)
+
+
+def problem(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            return f"{exc.code} {exc.read().decode('utf-8', 'replace')[:300]}"
+        except Exception:  # noqa: BLE001
+            return str(exc.code)
+    return str(exc)
+
+
+spec = {
+    "title": "smoke",
+    "objective": "検証（staging）の煙試験。偽のアダプタが 1 往復するだけ（ADR-0041 D5）。",
+    "acceptance": [{"type": "command", "cmd": "true", "expect_exit": 0}],
+    "genre": "smoke",
+    # 組み込みの役割（`adapter = "fake"`）を明示する。`assignee` を付けると、役割を省略した場合は
+    # そのノードの分野の既定の役割（＝本物のアダプタ）が勝ってしまう。
+    "role": "smoke",
+    "max_retries": 0,
+}
+if assignee:
+    spec["assignee"] = assignee
+
+started = time.monotonic()
+try:
+    task = call("/api/v1/tasks", spec)
+except Exception as exc:  # noqa: BLE001
+    if assignee:
+        # `assignee` がこのスナップショットの組織に無いだけかもしれない。付けずにもう一度。
+        spec.pop("assignee")
+        assignee = ""
+        try:
+            task = call("/api/v1/tasks", spec)
+        except Exception as exc2:  # noqa: BLE001
+            fail(f"POST /tasks failed: {problem(exc2)}")
+    else:
+        fail(f"POST /tasks failed: {problem(exc)}")
+
+task_id = task.get("id") or ""
+out["task_id"] = task_id
+if not task_id:
+    fail(f"POST /tasks returned no id: {json.dumps(task, ensure_ascii=False)[:200]}")
+quoted = urllib.parse.quote(str(task_id), safe="")
+
+# draft で作られていれば承認して ready にする（すでに ready なら何もしない）。
+if task.get("status") == "draft":
+    try:
+        call(f"/api/v1/tasks/{quoted}/approve", {})
+    except Exception as exc:  # noqa: BLE001
+        fail(f"POST /tasks/{task_id}/approve failed: {problem(exc)}")
+
+status = task.get("status") or ""
+while time.monotonic() - started < TIMEOUT_S:
+    try:
+        status = (call(f"/api/v1/tasks/{quoted}") or {}).get("task", {}).get("status") or ""
+    except Exception as exc:  # noqa: BLE001
+        fail(f"GET /tasks/{task_id} failed: {problem(exc)}")
+    if status in ("done", "failed", "cancelled"):
+        break
+    time.sleep(1)
+out["elapsed_s"] = round(time.monotonic() - started, 2)
+if status != "done":
+    fail(f"the smoke task is {status!r} after {out['elapsed_s']}s (want 'done')")
+
+try:
+    events = (call(f"/api/v1/tasks/{quoted}/events") or {}).get("items") or []
+except Exception as exc:  # noqa: BLE001
+    fail(f"GET /tasks/{task_id}/events failed: {problem(exc)}")
+kinds = [(e.get("event") or {}).get("type") for e in events]
+if "worker_started" not in kinds:
+    fail(f"no worker_started event (events: {kinds})")
+finished = [
+    (e.get("event") or {}).get("outcome") or ""
+    for e in events
+    if (e.get("event") or {}).get("type") == "worker_finished"
+    and not (e.get("event") or {}).get("role")
+]
+if not finished:
+    fail(f"no worker_finished event (events: {kinds})")
+if not any(o.startswith("done") for o in finished):
+    fail(f"worker_finished outcomes are {finished} (want one starting with 'done')")
+
+# 報告（ADR-0034 の終端での決定的な生成）。`assignee` を付けられたときだけ確かめる。
+if assignee:
+    node = urllib.parse.quote(str(assignee), safe="")
+    try:
+        reports = (call(f"/api/v1/reports?node={node}&limit=500") or {}).get("items") or []
+    except Exception as exc:  # noqa: BLE001
+        fail(f"GET /reports?node={assignee} failed: {problem(exc)}")
+    mine = [r for r in reports if str(r.get("task_id") or "") == str(task_id)]
+    if not mine:
+        fail(f"no report for the smoke task under node {assignee!r} ({len(reports)} reports there)")
+    out["report"] = str(mine[0].get("id") or "")
+
+out["ok"] = True
+out["detail"] = (
+    f"done in {out['elapsed_s']}s (worker_finished {finished[0]!r}"
+    + (f", report {out['report']} for node {assignee}" if assignee else ", no assignee: no report expected")
+    + ")"
+)
 json.dump(out, sys.stdout, ensure_ascii=False)
 PY
 }
@@ -533,10 +687,36 @@ else
   fi
 fi
 
+# ---- 6. 煙試験（ADR-0041 D5）------------------------------------------------
+#
+# **検査 5 の後**に回す。ここで 1 件タスクを足すので、先に回すと検査 2（件数一致）と検査 5（N-1）の
+# 基準がずれてしまう。足したタスクは staging のスナップショットの中だけで、本番には残らない。
+
+OK6=false
+SMOKE_JSON="$SD_STAGING/logs/smoke.json"
+if [ "$OK1" = true ]; then
+  sd_log "smoke: POST $NEW_BASE/api/v1/tasks {genre: smoke, role: smoke} (assignee: ${FIRST_ORG:-<none>})"
+  smoke "$NEW_BASE" "$ST_TOKEN" "$FIRST_ORG" >"$SMOKE_JSON" || true
+  if sd_json_valid "$SMOKE_JSON"; then
+    SMOKE_OK="$(sd_json_get "$SMOKE_JSON" ok || echo false)"
+    SMOKE_TASK="$(sd_json_get "$SMOKE_JSON" task_id || echo "")"
+    SMOKE_ELAPSED="$(sd_json_get "$SMOKE_JSON" elapsed_s || echo 0)"
+    SMOKE_DETAIL="$(sd_json_get "$SMOKE_JSON" detail || echo "")"
+    [ "$SMOKE_OK" = true ] && OK6=true
+    record 6 smoke "$OK6" "$SMOKE_DETAIL" "$SMOKE_TASK" "$SMOKE_ELAPSED"
+  else
+    record 6 smoke false "could not run the smoke task (see $SMOKE_JSON and $NEW_LOG)"
+  fi
+else
+  record 6 smoke false "skipped (check 1 failed)"
+fi
+
 # ---- verify.json ------------------------------------------------------------
 
 OK=false
-if [ "$OK1" = true ] && [ "$OK2" = true ] && [ "$OK3" = true ] && [ "$OK4" = true ]; then OK=true; fi
+if [ "$OK1" = true ] && [ "$OK2" = true ] && [ "$OK3" = true ] && [ "$OK4" = true ] && [ "$OK6" = true ]; then
+  OK=true
+fi
 
 CHECKS_JSON="$(sd_tsv_to_json "$CHECKS_TSV")"
 counts_or_null() { if sd_json_valid "$1"; then cat "$1"; else printf 'null'; fi; }
