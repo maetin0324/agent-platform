@@ -35,7 +35,7 @@ pub(crate) fn routes() -> axum::Router<ApiState> {
 }
 
 /// そのタスクの目印（`worktree.json`）。作業ツリーを持たないタスクは 404。
-fn marker_of(task: &Task, workspace_root: &Path) -> Result<WorktreeMarker, ApiProblem> {
+pub(crate) fn marker_of(task: &Task, workspace_root: &Path) -> Result<WorktreeMarker, ApiProblem> {
     let task_dir = workspace_root.join(task.id.to_string());
     task_ops::workspace::read_marker(&task_dir)
         .filter(|m| !m.repos.is_empty() || !m.dir.is_empty())
@@ -43,7 +43,7 @@ fn marker_of(task: &Task, workspace_root: &Path) -> Result<WorktreeMarker, ApiPr
 }
 
 /// 目印の `repos`（Phase 49 の目印には無いので、そのときは先頭の 1 件を合成する）。
-fn marker_repos(marker: &WorktreeMarker) -> Vec<WorktreeMarkerRepo> {
+pub(crate) fn marker_repos(marker: &WorktreeMarker) -> Vec<WorktreeMarkerRepo> {
     if !marker.repos.is_empty() {
         return marker.repos.clone();
     }

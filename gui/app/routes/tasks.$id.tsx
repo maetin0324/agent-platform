@@ -282,6 +282,15 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                 <Icon name="folder" />
                 ファイル
               </Link>
+              {/* 変更の取り込み（ADR-0043 D5、Phase 54 / G17）。中身は `~/components/task-changes.tsx`。 */}
+              <Link
+                to={`/tasks/${task.id}/changes`}
+                data-testid="task-changes-link"
+                className={buttonClass({ variant: "secondary", size: "sm" })}
+              >
+                <Icon name="gitBranch" />
+                変更
+              </Link>
               <Link
                 to={`/graph?root=${task.id}`}
                 data-testid="task-graph-link"

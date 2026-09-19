@@ -187,3 +187,33 @@ deliverables = "."                     # コード以外の成果物（図・表
   `.config/celeris/workspace.toml`（`mode = container`）を置いて 1 タスクを回し、ホストに何も生えないことを確認。
 - **A4（D7）**: 後続。
 - どの Phase も `cargo test --workspace` / clippy / GUI 一式、PROGRESS の実機の証跡。
+
+## Phase 54 追記（A2 の実装で D5 から離れたところ。2026-09-19）
+
+D5 を実装して分かった 4 つ。**決定そのものは変えていない**（本文は読み替えない）。詳細と証拠は
+`docs/PROGRESS.md` の Phase 54（P54-1〜P54-4）にある。
+
+1. **`task_integrations` の列**（P54-1）: D5 の
+   `(id, task_id, repo_id, method, state, pr_number, pr_url, merged_at, created_at)` に **`repo_name`**
+   （タスクの中でのリポジトリの名前）、**`detail`**（人に見せる一行）、**`updated_at`** を足し、
+   **`repo_id` を NULL 可**にした。Phase 49 の 1 リポジトリのタスクは `project_repos` の行を持たないが、
+   そういうタスクのブランチも取り込む必要があり、API の URL（`/changes/{repo}`）も名前で引くため。
+   migration は **0014**（版 13 は ADR-0044 B1 の `task_comments` が使う）。
+
+2. **衝突の解消タスクの作業場所**（P54-2）: D5 は「worktree はそのまま、同じ担当でタスクを作る」としか
+   書いていない。子に `repos` を持たせると**子が自分の worktree を切ってしまう**（別のブランチになる）ので、
+   子は **`repos` を空にし、`workspace` を親の worktree のパス + `mode = "shared"`**（ADR-0041 D1 の逃げ道）に
+   した。既存のディスパッチャがそのまま「そのディレクトリで走る」ので、ワーカープロトコルにも
+   `worktree.json` にも新しい概念を足さずに済む。子の cwd は親の `repos/<name>/`、ブランチは
+   親の `celeris/<parent_id>` のまま。
+
+3. **API が `git` / `gh` を起こす**（P54-3）: ADR-0013 は「API はワーカーの起動・コマンドの実行をしない」と
+   決めているが、D5 は `GET /tasks/{id}/changes` と `POST …/integrate` を API のエンドポイントとして
+   要求している。そこで **`git` と `gh` だけ**を、待ち時間の上限付きで、**人が押したときと画面を開いたときに**
+   起こすことにした（`task_ops::changes`）。ワーカーも LLM も起こさない。ディスパッチャ経由にしなかったのは、
+   取り込みが tick とは無関係な人の同期操作だからである。
+
+4. **`files` はコミットだけでなく作業ツリーまで**（P54-4）: D5 の `files` / `stat` は、`base` から
+   **いまの作業ツリー**までの差分（コミット済み + 未コミット + 追跡外）にした。`dirty` と `ahead` が別に
+   あるので情報は失われず、「ワーカーがコミットしなかったタスク」でも人が中身を見られる。worktree が
+   無くブランチだけのときは `base..<branch>`（コミットだけ）になる。

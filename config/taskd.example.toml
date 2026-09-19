@@ -52,6 +52,20 @@ dir = "../memory"
 [workspace]
 # worktree_branch_prefix = "celeris/"
 
+# 変更の取り込み（ADR-0043 D5、Phase 54）。タスクが作ったブランチを**人が** GUI から
+# 「main に取り込む」「PR を作る」「捨てる」する（`GET/POST /api/v1/tasks/{id}/changes...`）。
+# 押せるのは人だけで、組織の「人」＝ワーカーからこの経路には届かない（SPEC §3.6）。
+#   gh           — GitHub CLI の場所。PATH にあれば既定の "gh" のままでよい。
+#                  無い・認証されていない（`gh auth status` が失敗する）ときは PR の経路が 409 になり、
+#                  「main に取り込む」（ローカルの rebase + fast-forward）だけが使える。
+#                  結果はプロセス内で 60 秒だけ覚える（画面を開くたびに起こさない）。
+#   merge_method — 「Celeris で merge」が使う方法（`gh pr merge --<method> --delete-branch`）。
+#                  "merge"（既定）/ "squash" / "rebase" のどれか。他を書くと起動時の設定エラー。
+# PR の状態の同期は**画面を開いたときだけ**（`gh pr view`。常時同期はしない。ADR-0043 D5）。
+[github]
+# gh = "gh"
+# merge_method = "merge"
+
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]
 # adapter = "claude-code"

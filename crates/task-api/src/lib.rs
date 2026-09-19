@@ -20,6 +20,8 @@ use tokio::sync::{mpsc, watch};
 mod accounts;
 mod admin;
 mod approvals;
+/// ADR-0043 D5（Phase 54）: 変更の取り込み（差分・merge・PR・衝突タスク）。
+pub mod changes;
 pub mod conversation;
 mod files;
 mod handlers;
@@ -73,6 +75,11 @@ pub use types::{
 };
 // ---- ADR-0043（Phase 52）: 案件のリポジトリとファイル閲覧 ----
 pub use types::{RepoCreateBody, RepoList, RepoPatchBody, TreeEntry, TreeFileView, TreeRepoView, TreeView};
+// ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
+pub use types::{
+    ChangeDiffView, ChangesView, IntegrateBody, IntegrateResult, ProjectIntegrationItem, ProjectIntegrations,
+    RepoChangesView,
+};
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
 pub const API_VERSION: &str = "1";
@@ -155,6 +162,26 @@ pub struct ApiSettings {
     /// ディスパッチャの状態を要する管理 API（`reload` / `check` / クラスタ接続 / アカウントのログイン中継 /
     /// `notify/test`）が 503 `standby` になる。
     pub role: task_core::SharedRole,
+    /// ADR-0043 D5（Phase 54）: `[github]`（`gh` の場所と「Celeris で merge」の方法）。
+    pub github: GithubSettings,
+}
+
+/// ADR-0043 D5（Phase 54）: `[github]` の写し。taskd が設定から渡す（task-api は TOML を読まない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubSettings {
+    /// `gh` CLI の場所（PATH にあれば `"gh"`）。
+    pub gh: String,
+    /// `gh pr merge --<method>`（`merge` / `squash` / `rebase`）。
+    pub merge_method: String,
+}
+
+impl Default for GithubSettings {
+    fn default() -> Self {
+        Self {
+            gh: "gh".to_string(),
+            merge_method: "merge".to_string(),
+        }
+    }
 }
 
 impl std::fmt::Debug for ApiSettings {

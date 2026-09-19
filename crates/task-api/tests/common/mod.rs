@@ -63,6 +63,8 @@ pub struct EnvOptions {
     pub release: String,
     pub mode: task_core::DaemonMode,
     pub role: task_core::SharedRole,
+    /// ADR-0043 D5（Phase 54）: `[github]`（既定は `gh` / `merge`）。
+    pub github: task_api::GithubSettings,
 }
 
 impl Default for EnvOptions {
@@ -88,6 +90,7 @@ impl Default for EnvOptions {
             release: "dev".to_string(),
             mode: task_core::DaemonMode::Normal,
             role: task_core::SharedRole::new(task_core::InstanceRole::Active),
+            github: task_api::GithubSettings::default(),
         }
     }
 }
@@ -277,6 +280,7 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         release: options.release,
         mode: options.mode,
         role: options.role,
+        github: options.github,
     }
 }
 

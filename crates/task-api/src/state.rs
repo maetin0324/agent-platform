@@ -82,6 +82,8 @@ pub(crate) struct Inner {
     pub(crate) release: String,
     pub(crate) mode: task_core::DaemonMode,
     pub(crate) role: task_core::SharedRole,
+    /// ADR-0043 D5（Phase 54）: `[github]`（`gh` の場所と merge の方法）。
+    pub(crate) github: crate::GithubSettings,
     pub(crate) account_stats: Mutex<crate::stats::AccountStatsState>,
     pub(crate) instance_id: String,
     pub(crate) started_at: String,
@@ -132,6 +134,7 @@ impl ApiState {
             release: settings.release,
             mode: settings.mode,
             role: settings.role,
+            github: settings.github,
             account_stats: Mutex::new(crate::stats::AccountStatsState::default()),
             instance_id: settings.instance_id,
             started_at: settings.started_at,

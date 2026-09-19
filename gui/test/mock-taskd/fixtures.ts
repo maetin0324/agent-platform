@@ -1,11 +1,18 @@
 import type {
+  ChangeDiffView,
+  ChangesView,
   Health,
+  IntegrateResult,
+  ProjectIntegrationItem,
+  ProjectIntegrations,
   ProjectRepo,
   ReleaseChanges,
   ReleaseItem,
   ReleasePromoteAccepted,
   Releases,
+  RepoChangesView,
   RepoList,
+  TaskIntegration,
   TreeFileView,
   TreeView,
 } from "~/taskd/types";
@@ -183,3 +190,110 @@ export function treeFileView(overrides: Partial<TreeFileView> = {}): TreeFileVie
     ...overrides,
   };
 }
+
+/**
+ * 変更の取り込み（ADR-0043 D5、taskd Phase 54 / G17）。`GET /tasks/{id}/changes` の 1 リポジトリぶん。
+ * 既定は「2 コミット進んでいて 3 ファイル変わった、きれいな worktree」。テストは `repoChangesView({...})` で上書きする。
+ */
+export function repoChangesView(overrides: Partial<RepoChangesView> = {}): RepoChangesView {
+  return {
+    repo: "benchfs",
+    branch: "celeris/01TASK",
+    default_branch: "main",
+    base: "9602b596826c9f0f3b1c",
+    head: "1f2e3d4c5b6a79887766",
+    ahead: 2,
+    files: [
+      { path: "src/lib.rs", status: "M", additions: 12, deletions: 4 },
+      { path: "src/new.rs", status: "A", additions: 30, deletions: 0 },
+      { path: "docs/old.md", status: "D", additions: 0, deletions: 8 },
+    ],
+    stat: { files: 3, additions: 42, deletions: 12 },
+    dirty: false,
+    missing: false,
+    origin: true,
+    integration: null,
+    ...overrides,
+  };
+}
+
+/** `GET /tasks/{id}/changes` の既定応答（git のリポジトリ 1 つ、`gh` は使える）。 */
+export function changesView(overrides: Partial<ChangesView> = {}): ChangesView {
+  return {
+    task_id: "01TASK",
+    repos: [repoChangesView()],
+    gh: true,
+    merge_method: "merge",
+    ...overrides,
+  };
+}
+
+/** `GET /tasks/{id}/changes/{repo}/diff?path=` の既定応答（1 ファイル、切られていない）。 */
+export function changeDiffView(overrides: Partial<ChangeDiffView> = {}): ChangeDiffView {
+  return {
+    repo: "benchfs",
+    path: "src/lib.rs",
+    diff: [
+      "diff --git a/src/lib.rs b/src/lib.rs",
+      "index 1111111..2222222 100644",
+      "--- a/src/lib.rs",
+      "+++ b/src/lib.rs",
+      "@@ -1,3 +1,3 @@",
+      " fn main() {",
+      "-    old();",
+      "+    new();",
+      " }",
+      "",
+    ].join("\n"),
+    truncated: false,
+    ...overrides,
+  };
+}
+
+/** `task_integrations` の 1 行（既定は merge が通ったあと）。 */
+export function taskIntegration(overrides: Partial<TaskIntegration> = {}): TaskIntegration {
+  return {
+    id: "01MOCKINTEGRATION000000001",
+    task_id: "01TASK",
+    repo_id: "01MOCKREPO0000000000000001",
+    repo: "benchfs",
+    method: "merge",
+    state: "done",
+    pr_number: null,
+    pr_url: null,
+    merged_at: null,
+    detail: null,
+    created_at: "2026-09-19T10:00:00Z",
+    updated_at: "2026-09-19T10:00:01Z",
+    ...overrides,
+  };
+}
+
+/** `POST .../integrate` と `POST .../pr/merge` の既定応答（衝突していないので `child_task_id` は無し）。 */
+export function integrateResult(overrides: Partial<IntegrateResult> = {}): IntegrateResult {
+  return { integration: taskIntegration(), child_task_id: null, ...overrides };
+}
+
+/** `GET /projects/{id}/integrations` の既定応答（新しい順。開いている PR 1 件と取り込み 1 件）。 */
+export const defaultProjectIntegrations: ProjectIntegrations = {
+  items: [
+    {
+      integration: taskIntegration({
+        id: "01MOCKINTEGRATION000000002",
+        task_id: "01TASK2",
+        method: "pr",
+        state: "open",
+        pr_number: 42,
+        pr_url: "https://github.test/example/benchfs/pull/42",
+        updated_at: "2026-09-19T11:00:00Z",
+      }),
+      task_title: "ベンチマークの並列化",
+      task_status: "reviewing",
+    },
+    {
+      integration: taskIntegration(),
+      task_title: "読み取りの高速化",
+      task_status: "done",
+    },
+  ] satisfies ProjectIntegrationItem[],
+};

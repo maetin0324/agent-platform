@@ -2737,3 +2737,153 @@ production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/
   - G16-P2: `GET /tasks/{id}/tree` に「このタスクが `repos` を持たない（コードを伴わない調査）」と
     「作業ツリーがまだ作られていない（`draft` / `ready`）」を区別できる `code` がほしい。いまは
     どちらも 404 `file_not_found` なので、画面の言い方を分けられない。
+
+## Phase G17 — 変更の取り込み（ADR-0043 D5 / taskd Phase 54。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的: taskd Phase 54（ADR-0043 D5）で入った「変更の取り込み」を画面にする。タスクがブランチに作った
+  変更を**人が見てから**、既定のブランチに取り込む（merge）・PR を作る・捨てる（discard）を選べるようにし、
+  その記録（`task_integrations`）をタスクと案件の両方に出す。取り込みは**人だけ**（SPEC §3.6）で、
+  組織の「人」が `main` を動かす経路は作らない。
+  使う API は 5 つ: `GET /tasks/{id}/changes`、`GET /tasks/{id}/changes/{repo}/diff?path=`、
+  `POST /tasks/{id}/changes/{repo}/integrate`（管理系）、`POST /tasks/{id}/changes/{repo}/pr/merge`（管理系）、
+  `GET /projects/{id}/integrations`。
+- 決めたこと:
+  - G17-D1: 画面は**兄弟のルート `/tasks/:id/changes`**（`/tasks/:id/files` と同じ形。G16-D6）。中身は全部
+    `~/components/task-changes.tsx`（自己完結の部品）に入れてあるので、ADR-0044 B1 のタブの殻ができたら
+    そこへ 1 行で載せ替えられる。`/tasks/:id` に足したのは導線のリンク 1 本（「変更」）だけで、
+    タブの殻はこの Phase では作らない（別の担当）。
+  - G17-D2: 読み取り（一覧・差分）は `<Link>`（`?repo=&file=`）で loader を走らせ、取り込みは
+    ルートの `action`（intent は `integrate` / `pr_merge` の 2 つ）に出す `useFetcher`。
+    フォームには `action="/tasks/:id/changes"` を明示して、部品をどこに載せても送り先が変わらないようにする
+    （`/projects/:id` の `TaskRow` が `/tasks/:id` に直接 POST するのと同じ作り）。
+  - G17-D3: 結果は**リポジトリごとの `useFetcher`**（キー `integrate-<taskId>-<repo>`）に載せる。
+    SSE の再検証で消えないため（監査 H1 / Phase G14 / `ProjectRepos.tsx` と同じ）。
+  - G17-D4: **衝突と git の失敗は 200**（`integration.state === "conflict"` / `"failed"`）なので
+    `IntegrateOutcome` は `ok: true` のままにして、部品が `state` で出し分ける。衝突のときは taskd の
+    `detail`（衝突したファイル・作った解消タスクの id）をそのまま出し、`child_task_id` が返っていれば
+    `/tasks/<child_task_id>` へのリンクも出す。GUI では衝突かどうかを判定しない。
+  - G17-D5: 409 `default_branch_busy`（「main が編集中」）は `ErrorFlash` が 409 を一律
+    「状態が変わりました」と読むので、**部品側に専用の Alert をもう 1 枚**出して taskd の文言と
+    次にやること（手元の default_branch を片付ける）を見せる。`Flash.tsx` は触らない。
+  - G17-D6: 「PR を作る」を押せるかどうかは taskd が返す `origin` / `gh` だけで決める（`prUnavailableReason`）。
+    押せないときはボタンを `disabled` にして理由を文で出す。GUI で `gh` を探したりはしない。
+  - G17-D7: `discard` の確認は**画面の中の 2 段階**（「捨てる（確認）」→ 赤い帯の「本当に捨てる」）で、
+    2 段目だけが `confirm: true` を送る。`window.confirm` は使わない（`ProjectRepos` の削除と違い、
+    消えるものの説明（リポジトリ名とブランチ名）を出したいため）。`confirm` を落としたときに
+    422 `validation` になるのは taskd 側の規則で、GUI では検証しない。
+  - G17-D8: 差分は `parseDiff` で 1 行ずつ `meta` / `hunk` / `add` / `del` / `ctx` に分けて `<span>` で描く
+    （`dangerouslySetInnerHTML` は使わない。GUI CLAUDE.md の禁止）。`truncated` のときは
+    「途中で切りました（200 KiB）」を添える。`missing` は「取り込み済み・中止済み（作業ツリーも
+    ブランチもありません）」、`ahead === 0 && files.length === 0` は「変更なし」。
+  - G17-D9: 案件の「PR と取り込み」節は `GET /projects/{id}/integrations` をそのまま並べるだけ
+    （タスク × リポジトリごとに最新の 1 件・新しい順は taskd が決める）。**操作は置かない**
+    （取り込みはタスクの画面で行う）。落ちても案件の詳細自体は出す（`.catch(() => ({items: []}))`。
+    `GET /clusters` と同じ扱い）。
+- 変更したファイル:
+  - `app/lib/task-changes.ts`（新規）— `parseDiff` / `DIFF_LINE_CLASS` / `shortSha` / `statChip` /
+    `fileDeltaChip` / `changedFileStatusTone` / `integrationStateTone` / `taskChangesHref`。
+  - `app/lib/labels.ts` — `integrationMethodLabel` / `integrationStateLabel` / `changedFileStatusLabel` /
+    `integrateMergeLabel` / `prUnavailableReason` と、`CREATE_PR_LABEL` / `DISCARD_CHANGES_LABEL` /
+    `DISCARD_CHANGES_CONFIRM_LABEL` / `MERGE_PR_LABEL` / `NO_CHANGES_LABEL` / `CHANGES_MISSING_LABEL` /
+    `DIFF_TRUNCATED_LABEL`。
+  - `app/taskd/task-changes.server.ts`（新規）— `loadTaskChanges` / `readTaskChangesQuery` /
+    `integrateChange` / `mergePullRequest` / `readIntegrateBody`。
+  - `app/taskd/action-types.ts` — `IntegrateOutcome` を追加。
+  - `app/components/task-changes.tsx`（新規）、`app/components/ProjectIntegrations.tsx`（新規）。
+  - `app/routes/tasks.$id.changes.tsx`（新規、loader + action + meta + ErrorBoundary）、
+    `app/routes.ts`（`tasks/:id/changes`）、`app/routes/tasks.$id.tsx`（「変更」への導線のリンク 1 本）。
+  - `app/routes/projects.$id.tsx` — loader に `GET /projects/{id}/integrations` を足し、「PR と取り込み」節を追加。
+  - `test/mock-taskd/fixtures.ts` — `repoChangesView` / `changesView` / `changeDiffView` /
+    `taskIntegration` / `integrateResult` / `defaultProjectIntegrations`（5 つのエンドポイントぶん）。
+  - `test/unit/task-changes.test.ts`（新規、45 件）。
+  - `app/taskd/types.ts` / `docs/taskd-api-v1.md` — taskd 側が Phase 54 で同期済み（GUI からは触っていない。
+    `pnpm gen:types` を流し直しても変わらない）。
+- 受け入れ条件ごとの証拠:
+  - 条件: `/tasks/:id/changes` でリポジトリごとの変更（ブランチ → 既定のブランチ、base / head の短い sha、
+    進んだコミット数、dirty、stat、ファイル一覧）が読める。
+    実行: `pnpm test`（`test/unit/task-changes.test.ts`）— `loadTaskChanges` が taskd の並びと値を
+    そのまま返すこと（`files` は `src/lib.rs` / `src/new.rs` / `docs/old.md` の順）、ファイルを選ばなければ
+    差分を引かないこと（要求は 1 本だけ）、`missing` / `ahead: 0` もそのまま通すこと。
+    表示の組み立ては `shortSha`（`9602b596826c9f0f3b1c` → `9602b596826c`、空は `-`）と
+    `statChip`（`3 ファイル +42 −12`）、`fileDeltaChip`（`+12 −4` / バイナリは行数を出さない）で検証。
+  - 条件: ファイルを選ぶと unified diff が色つきで出る（`dangerouslySetInnerHTML` を使わない）。
+    実行: 同テスト — `loadTaskChanges` が `GET .../changes/{repo}/diff` を `path=src/lib.rs` で引くこと、
+    `parseDiff` が `["meta","meta","meta","meta","hunk","ctx","del","add","ctx"]` に分けること
+    （`+++` / `---` はファイル名なので meta、`\ No newline…` と `Binary files…` も meta）、
+    末尾の改行で余分な空行を作らないこと。ソースの確認で `app/components/task-changes.tsx` に
+    `dangerouslySetInnerHTML` が無く `parseDiff` を使っていること。`truncated: true` はそのまま通り、
+    文言は `DIFF_TRUNCATED_LABEL`（「途中で切りました（200 KiB）」）。
+  - 条件: `missing` と「変更なし」を人の言葉で出す。
+    実行: 同テスト — `CHANGES_MISSING_LABEL` が「取り込み済み・中止済み（作業ツリーもブランチも
+    ありません）」、`NO_CHANGES_LABEL` が「変更なし」であること、loader が `missing: true` /
+    `ahead: 0, files: []` をそのまま通すこと。
+  - 条件: merge / PR / 捨てる（確認）の 3 つが押せて、結果が画面に残る。
+    実行: 同テスト（`integrateChange`、8 件）— `merge` は本文 `{method:"merge",note:"ok"}` をそのまま送り
+    200 の記録を返すこと、`discard` は `{method:"discard",confirm:true}` を送ること、
+    `readIntegrateBody` が空欄をキーごと送らないこと（`note: ""` は送らない、`confirm` は確認欄が
+    出ているときだけ `true`）。ボタンの文言は `integrateMergeLabel("main") === "main に取り込む"` /
+    `integrateMergeLabel("develop") === "develop に取り込む"`（`default_branch` は taskd が返した値）。
+    ルート側は `case "integrate":` / `case "pr_merge":` の 2 つと `<TaskChanges` の描画をソースで確認。
+  - 条件: 409 `default_branch_busy` の「main が編集中」が画面に残る。
+    実行: 同テスト — `integrateChange` が `{ok:false, error:{status:409, code:"default_branch_busy",
+    detail:"main が編集中"}}` を返すこと（`toActionError` は 409 を一律 `conflict: true` にするので、
+    部品には `data-testid="task-changes-busy"` の専用 Alert を足して文言と次にやることを出す。ソースで確認）。
+  - 条件: PR を作れないとき（`origin` が無い・`gh` が使えない）は理由が出る。
+    実行: 同テスト — `prUnavailableReason(true,true) === null` /
+    `(false,true) === "origin リモートが無いので PR を作れません"` /
+    `(true,false) === "gh が使えない（PATH に無い・未認証）ので PR を作れません"` /
+    `(false,false)` は両方を言う 1 文。409 `pr_unavailable` は taskd の `detail` そのまま。
+  - 条件: 衝突は 200 で「衝突の解消」タスクへ導ける。
+    実行: 同テスト — `state: "conflict"` + `child_task_id: "01CHILD"` が `ok: true` のまま返り、
+    `detail` に解消タスクの id が入っていること。git の失敗（`state: "failed"` + `detail`）も同じく 200。
+  - 条件: 開いている PR を「Celeris で merge」できる。
+    実行: 同テスト（`mergePullRequest`）— **空の JSON 本文 `{}`** を POST し、`state: "merged"` /
+    `pr_number: 42` を返すこと、開いている PR が無ければ 409 `pr_unavailable`（`detail` そのまま）。
+    方法（`merge_method`）は `ChangesView` の値をそのまま画面に出す。
+  - 条件: 差分の 403 / 404 は一覧を出したまま文言を出し、一覧の 404 は画面ごとエラーにする。
+    実行: 同テスト — `GET .../diff` の 403 `path_forbidden` は `changes.repos` を保ったまま
+    `diffError`（status / code / detail そのまま）になること、`GET /tasks/{id}/changes` の 404
+    `file_not_found` は例外になる（＝画面は `ErrorBoundary`）こと。
+  - 条件: 案件に「PR と取り込み」節があり、`GET /projects/{id}/integrations` を新しい順に出す。
+    実行: 同テスト — `loadProjectDetail` が `items` を並べ替えずそのまま返すこと
+    （先頭が PR #42 / `task_title` 「ベンチマークの並列化」）、404 `project_not_found` でも
+    案件の詳細自体は出て節が空になること。ソースの確認で `<ProjectIntegrations items={integrations} />` と
+    「PR と取り込み」の見出しがあること。
+  - 条件: クライアントから taskd を直接呼ばない。
+    実行: 同テスト — `app/components/task-changes.tsx` / `app/components/ProjectIntegrations.tsx` に
+    `fetch(` も `TASKD_API_URL` も無いこと、PR のリンクが `rel="noreferrer noopener"` で開くこと、
+    `app/routes.ts` に `route("tasks/:id/changes", "routes/tasks.$id.changes.tsx")` が登録されていること、
+    `/tasks/:id` に `data-testid="task-changes-link"` の導線があること。
+  - 条件: フェーズのゲート。
+    実行: `pnpm lint` exit 0（biome、191 ファイル）/ `pnpm typecheck` exit 0 /
+    `pnpm test` exit 0（**49 ファイル、672 tests passed**。G16 時点の 48 ファイル / 627 から +1 ファイル・+45）/
+    `pnpm build` exit 0（client / ssr とも）。`pnpm gen:types` を流し直しても `app/taskd/types.ts` は
+    変わらない（md5 `d3b066ca6ff1d1e7e2cfe5023e2c098c` が前後で一致＝差分ゼロ。なお `git diff` は
+    taskd Phase 54 が同期した未コミットの差分を出すので、GUI 側からの変更が無いことは md5 で見る）。
+- 未解決事項:
+  - G17-U1: `pnpm e2e` は未実行（G13k-U1 / G14-U1 / G16-U1 と同じく、既定の 7700 / 7710 が運用中の
+    GUI / taskd を掴むため）。別ポートを与えて人が流すときは、`/tasks/:id/changes`（変更を持つ
+    タスクが要る）と `/projects/:id` の「PR と取り込み」節を見るのがよい。
+  - G17-U2: DOM を描画する unit テストは今回も無い（G10-U1）。差分の色分け・`discard` の 2 段階の確認・
+    「Celeris で merge」が `state === "open"` のときだけ出ること・`disabled` の「PR を作る」は
+    Playwright でのみ確認できる。
+  - G17-U3: `/tasks/:id` のタブの殻は ADR-0044 B1（別の担当）。いまは「変更」のリンクを 1 本足した
+    だけで、タブになったら `~/components/task-changes.tsx` をそのまま載せ替える
+    （ルート `/tasks/:id/changes` は `action` があるので残す）。
+  - G17-U4: PR の状態の同期は「画面を開いたとき」だけ（ADR-0043 D5）。GUI からは何もしていない
+    （`GET /tasks/{id}/changes` が返した `integration` をそのまま出すだけ）ので、
+    開いていない間に GitHub 側で merge / close されても画面はすぐには変わらない。
+  - G17-U5: `updated_at` / `merged_at` は taskd が返した ISO の文字列をそのまま出している
+    （このリポジトリに日時の整形の共通関数が無いため。`/daemon` の `formatDuration` は経過時間用）。
+- 提案（`docs/taskd-api-v1.md` への変更提案。採否は人間）:
+  - G17-P1: 409 `default_branch_busy` に、片付けるべきパス（人のチェックアウトの `local.path`）を
+    載せてほしい。いまは `detail` の「main が編集中」だけなので、リポジトリが複数あるとき
+    どのチェックアウトを片付ければよいかが画面から分からない。
+  - G17-P2: `TaskIntegration` に「このタスクのどの run の結果か」または `note` そのものを別の欄で
+    返してほしい。いまは人のひとことが `detail` の先頭に混ざるので、409 の理由や衝突ファイルの一覧と
+    同じ場所に出てしまう（画面では 1 行として出すしかない）。
+  - G17-P3: `GET /tasks/{id}/changes` で「このタスクは git のリポジトリを持たない（調査などコードを
+    伴わない仕事）」と「作業ツリーがまだ作られていない」を画面で言い分けたい（G16-P2 と同じ理由）。
+    いまは前者を `repos: []`、後者を 404 `file_not_found` として扱っているが、
+    `docs/taskd-api-v1.md` に明記されると GUI の文言を確信を持って書ける。

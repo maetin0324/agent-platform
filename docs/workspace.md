@@ -108,3 +108,56 @@ docs = "docs"
   だけ**である。タスクが自分で検査コマンドを書いていれば、それが勝つ（ADR-0043 D4）。
 - `[run] mode = "container"` と `[container]` は**この Phase では解釈されるだけ**で、実行環境は変わらない
   （ADR-0043 A3 の工事）。
+
+## 6. 変更の取り込み（ADR-0043 D5。Phase 54）
+
+タスクは `<task_dir>/repos/<name>/` の worktree で働き、ブランチ `celeris/<task_id>` に変更を積む。
+終端（`done` / `failed`）になっても worktree もブランチも**消えない**（ADR-0043 D2）。そこから先、
+それを `main` に入れるかどうかを決めるのは**人**である（SPEC §3.6。組織の「人」＝ワーカーには
+この経路が無い）。
+
+### 6.1 見る
+
+- `GET /api/v1/tasks/{id}/changes` — リポジトリごとに `base` / `head` / `ahead`（コミット数）/
+  変わったファイルの一覧（`+` / `-` 付き）/ `dirty`（未コミットの変更があるか）。
+  **コミットが 1 つも無ければ `ahead = 0`**（調査のようにコードを伴わないタスク。GUI は「変更なし」）。
+  `dir` のリポジトリは対象外。
+- `GET /api/v1/tasks/{id}/changes/{repo}/diff?path=…` — 1 ファイルの unified diff（**200 KiB で切る**）。
+- worktree を消した後でもブランチが残っていれば、元のリポジトリから同じものが見える。
+  どちらも無ければ `missing: true`。
+- GUI ではタスク画面の `/tasks/<id>/changes`。
+
+### 6.2 取り込む（`POST /api/v1/tasks/{id}/changes/{repo}/integrate`。人だけ）
+
+| `method` | すること | 後片付け |
+|---|---|---|
+| `merge` | 一時 worktree でブランチを `default_branch` に `rebase` → 成功なら `default_branch` を進める。**push はしない** | worktree を消し、ブランチを `git branch -D` |
+| `pr` | `git push -u origin <branch>` → `gh pr create`（本文は目的・受け入れ条件・最新の報告・Celeris のリンク） | PR が merge されたと分かった時点で消す |
+| `discard` | 何も取り込まずに捨てる（`{"confirm": true}` が要る） | worktree を消し、ブランチを `git branch -D` |
+
+`merge` の細かい規則:
+
+- **人のチェックアウト（`project_repos.location.path`）が `default_branch` を出していて汚れていたら
+  409「`<default_branch>` が編集中」**。何も触らないので、片付けてからもう一度押す。
+- 出していて綺麗なら `git -C <path> merge --ff-only <sha>`（人の作業ツリーもそのまま進む）。
+- 別のブランチを出していれば `git update-ref` でブランチの先だけ動かす（**人の作業ツリーには触らない**）。
+- `rebase` が衝突したら `rebase --abort` して worktree もブランチも残し、**「衝突の解消: <題名>」タスク**を
+  同じ担当で自動的に作る。そのタスクは**親の worktree の上で**（`mode = "shared"`）働き、
+  受け入れ条件は「作業ツリーが clean」「rebase が進行中でない」「`default_branch` が `HEAD` の祖先」。
+  終わったら人がもう一度「取り込む」を押す。
+
+### 6.3 GitHub（`[github]`）
+
+```toml
+[github]
+gh = "gh"              # GitHub CLI の場所。PATH にあれば既定のまま
+merge_method = "merge" # 「Celeris で merge」= `gh pr merge --<method> --delete-branch`
+```
+
+- `gh` が無い・認証されていない（`gh auth status` が失敗する）ときは、PR の経路が 409 になり、
+  ローカルの `merge` と `discard` だけが使える。判定はプロセス内で 60 秒だけ覚える。
+- **PR の状態の同期は画面を開いたときだけ**（`gh pr view`。常時同期はしない）。`merged` を見つけた
+  時点で worktree とローカルのブランチを片付ける。
+- 「Celeris で merge」は `POST /api/v1/tasks/{id}/changes/{repo}/pr/merge`。GitHub 側でも merge される。
+- 案件画面の「PR と取り込み」は `GET /api/v1/projects/{id}/integrations`（タスク × リポジトリごとに
+  最新の 1 件。1 回に同期する PR は 20 件まで）。

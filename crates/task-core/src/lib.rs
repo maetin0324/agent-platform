@@ -7,6 +7,8 @@ pub mod artifacts;
 pub mod delegate;
 /// ADR-0040 D4（Phase 47）: taskd のインスタンスの役割（`daemon_instances`）。
 pub mod instance;
+/// ADR-0043 D5（Phase 54）: 変更の取り込みの記録（`task_integrations`）。
+pub mod integrations;
 pub mod message;
 pub mod model;
 pub mod notify;
@@ -28,6 +30,8 @@ pub use delegate::{
     materialize_delegated, validate_each,
 };
 pub use instance::{DaemonInstance, DaemonMode, InstanceRole, SharedRole};
+// ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
+pub use integrations::{IntegrationId, IntegrationMethod, IntegrationState, TaskIntegration};
 pub use message::{
     CONVERSATION_GENRE, Message, MessageId, MessageRole, conversation_origin, conversation_title, failure_reply,
     is_conversation, is_milestone_review, milestone_review_of,

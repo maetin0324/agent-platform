@@ -690,6 +690,7 @@ mod tests {
             handoff: Default::default(),
             selfdeploy: Default::default(),
             workspace: Default::default(),
+            github: Default::default(),
             source_path: None,
         }
     }

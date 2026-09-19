@@ -38,6 +38,22 @@ export type Action = ("approve" | "reject" | "answer" | "cancel") | "retry";
  */
 export type TaskKind = "plan" | "execute" | "review" | "approval";
 /**
+ * 取り込みの記録の一意識別子（ULID）。
+ */
+export type IntegrationId = string;
+/**
+ * 取り込みの方法（ADR-0043 D5）。
+ */
+export type IntegrationMethod = "merge" | "pr" | "discard";
+/**
+ * リポジトリの一意識別子（ULID）。`TaskId` / `ProjectId` と同じ形。
+ */
+export type RepoId = string;
+/**
+ * 取り込みの行方（ADR-0043 D5）。
+ */
+export type IntegrationState = "done" | "open" | "merged" | "closed" | "conflict" | "failed";
+/**
  * DESIGN §5.4 の `WorkerHint`。
  */
 export type Tier = "frontier" | "standard" | "cheap";
@@ -187,10 +203,6 @@ export type MessageId = string;
  */
 export type MilestoneId = string;
 /**
- * リポジトリの一意識別子（ULID）。`TaskId` / `ProjectId` と同じ形。
- */
-export type RepoId = string;
-/**
  * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
  * taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
  */
@@ -333,6 +345,8 @@ export interface ApiV1Schema {
   approval_list: ApprovalList;
   artifact_list: ArtifactList;
   cancel: CancelBody;
+  change_diff: ChangeDiffView;
+  changes: ChangesView;
   cluster_connect_result: ClusterConnectResult;
   cluster_connect_start: ClusterConnectStart;
   clusters: Clusters;
@@ -343,6 +357,8 @@ export interface ApiV1Schema {
   graph: Graph;
   health: Health;
   inbox: Inbox;
+  integrate: IntegrateBody;
+  integrate_result: IntegrateResult;
   memory: MemoryView;
   message_accepted: MessageAccepted;
   message_list: MessageList;
@@ -361,6 +377,7 @@ export interface ApiV1Schema {
   problem: Problem;
   project_create: ProjectCreateBody;
   project_detail: ProjectDetail;
+  project_integrations: ProjectIntegrations;
   project_list: ProjectList;
   project_patch: ProjectPatchBody;
   project_plan: ProjectPlanBody;
@@ -688,6 +705,136 @@ export interface ArtifactRef {
  */
 export interface CancelBody {
   expected_status?: Status | null;
+}
+/**
+ * `GET /tasks/{id}/changes/{repo}/diff?path=` の応答（ADR-0043 D5。200 KiB で切る）。
+ */
+export interface ChangeDiffView {
+  /**
+   * unified diff（差分が無ければ空文字列）。
+   */
+  diff: string;
+  path: string;
+  repo: string;
+  /**
+   * 200 KiB を超えたので途中で切った。
+   */
+  truncated: boolean;
+}
+/**
+ * Phase 54（ADR-0043 D5）: 変更の取り込み（差分・merge・PR・衝突タスク）。
+ */
+export interface ChangesView {
+  /**
+   * `gh` が PATH にあって認証済みか（GUI が「PR を作る」を出すかどうか）。
+   */
+  gh: boolean;
+  /**
+   * `[github] merge_method`（「Celeris で merge」が使う方法）。
+   */
+  merge_method: string;
+  /**
+   * git のリポジトリごとの差分（順番はタスクの `repos` の順）。
+   */
+  repos: RepoChangesView[];
+  task_id: string;
+}
+/**
+ * `ChangesView.repos[]` の 1 件。
+ */
+export interface RepoChangesView {
+  /**
+   * `base..head` のコミットの数（コミットが無ければ 0）。
+   */
+  ahead: number;
+  /**
+   * 分岐した地点の sha。
+   */
+  base: string;
+  /**
+   * タスクのブランチ（`celeris/<task_id>`）。
+   */
+  branch: string;
+  /**
+   * 取り込む先（`project_repos.default_branch`、無ければ検出）。
+   */
+  default_branch: string;
+  /**
+   * 未コミットの変更がある。
+   */
+  dirty: boolean;
+  files: ChangedFile[];
+  /**
+   * いまのブランチの先端の sha。
+   */
+  head: string;
+  /**
+   * このリポジトリの最新の取り込みの記録（無ければ `null`）。
+   */
+  integration?: TaskIntegration | null;
+  /**
+   * worktree もブランチも無い（取り込み済み・中止済み）。
+   */
+  missing: boolean;
+  /**
+   * `origin` リモートがある（PR を作れる前提の 1 つ）。
+   */
+  origin: boolean;
+  repo: string;
+  stat: DiffStat;
+}
+/**
+ * 変わったファイル 1 件。
+ */
+export interface ChangedFile {
+  additions: number;
+  /**
+   * バイナリ（git が行数を出さなかった）。
+   */
+  binary?: boolean;
+  deletions: number;
+  /**
+   * リポジトリの根からの相対パス。
+   */
+  path: string;
+  /**
+   * `A`（追加）/ `M`（変更）/ `D`（削除）/ `?`（git の管理外）/ `T`（種類が変わった）。
+   */
+  status: string;
+}
+/**
+ * `task_integrations` の 1 行（ADR-0043 D5）。
+ */
+export interface TaskIntegration {
+  created_at: string;
+  /**
+   * 人に見せる 1 行（409 の理由、衝突したファイル、gh の失敗など）。
+   */
+  detail?: string | null;
+  id: IntegrationId;
+  merged_at?: string | null;
+  method: IntegrationMethod;
+  pr_number?: number | null;
+  pr_url?: string | null;
+  /**
+   * タスクの中でのリポジトリの名前（`repos/<name>/`）。API の URL もこれで引く。
+   */
+  repo: string;
+  /**
+   * `project_repos.id`。Phase 49 の 1 リポジトリのタスク（案件のリポジトリの行を持たない）は `None`。
+   */
+  repo_id?: RepoId | null;
+  state: IntegrationState;
+  task_id: TaskId;
+  updated_at: string;
+}
+/**
+ * ファイル数と ± の合計。
+ */
+export interface DiffStat {
+  additions: number;
+  deletions: number;
+  files: number;
 }
 /**
  * `POST /clusters/{id}/connect/code` の応答。コード・URL は含まない。
@@ -1528,6 +1675,33 @@ export interface AnswerNote {
   question: string;
 }
 /**
+ * `POST /tasks/{id}/changes/{repo}/integrate` の要求本文（**管理系。人だけ**。ADR-0043 D5）。
+ */
+export interface IntegrateBody {
+  /**
+   * `discard` のときだけ必須（取り返しがつかないので確認を取る）。
+   */
+  confirm?: boolean;
+  /**
+   * 取り込みの方法（ADR-0043 D5）。
+   */
+  method: "merge" | "pr" | "discard";
+  /**
+   * 人のひとこと（記録の `detail` の先頭に入る。PR の本文には入れない）。
+   */
+  note?: string | null;
+}
+/**
+ * 取り込みの結果（`integrate` と `pr/merge` の応答）。
+ */
+export interface IntegrateResult {
+  /**
+   * 衝突したときに作った「衝突の解消」タスク（ADR-0043 D5）。
+   */
+  child_task_id?: string | null;
+  integration: TaskIntegration;
+}
+/**
  * GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。
  */
 export interface MemoryView {
@@ -2082,6 +2256,23 @@ export interface ProjectTaskView {
    */
   support?: string | null;
   title: string;
+}
+/**
+ * `GET /projects/{id}/integrations` の応答（案件画面の「PR と取り込み」。ADR-0043 D5）。
+ */
+export interface ProjectIntegrations {
+  /**
+   * タスク × リポジトリごとに最新の 1 件（新しい順）。
+   */
+  items: ProjectIntegrationItem[];
+}
+/**
+ * `ProjectIntegrations.items[]` の 1 件（記録 + 人が読むためのタスクの題名）。
+ */
+export interface ProjectIntegrationItem {
+  integration: TaskIntegration;
+  task_status: Status;
+  task_title: string;
 }
 /**
  * Phase 23（ADR-0033 D2）: 案件と途中目標。

@@ -1,6 +1,15 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-19 Phase 54（ADR-0043 A2、変更の取り込み）— **追加のみ。v1 のまま**。タスクが
+  作ったブランチを**人が**見て取り込めるようになった: エンドポイント 63〜67
+  （`GET /tasks/{id}/changes`、`GET /tasks/{id}/changes/{repo}/diff`、
+  `POST /tasks/{id}/changes/{repo}/integrate`、`POST /tasks/{id}/changes/{repo}/pr/merge`、
+  `GET /projects/{id}/integrations`）。取り込みの記録は `task_integrations`（DB のスキーマ版数は **14**。
+  migration 0014。版 13 は ADR-0044 B1 が使う）。エラーコードに `default_branch_busy`（409）と
+  `pr_unavailable`（409）が増えた。**取り込みの変更系は管理系**（`token_file` 未設定でも 401）で、
+  **組織の「人」＝ワーカーからは呼べない**（ワーカープロトコルには出していない）。
+  `taskd.toml` に `[github]`（`gh` / `merge_method`）が増えた
 - 改訂: 2026-09-19 Phase 52（ADR-0043 A1、ワークスペース）— **追加のみ。v1 のまま**。案件が「リポジトリ」を
   複数持てるようになった（`project_repos`）: エンドポイント 57〜60（`GET|POST /projects/{id}/repos`、
   `PATCH|DELETE /repos/{id}`）、`ProjectDetail.repos[]`、`POST /tasks` の `repos`（名前の配列）、
@@ -137,6 +146,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `org_node_in_use` | 409 | 消そうとした組織のノードが未終了のタスクを抱えている、または子を持つ（ADR-0033 D1） |
 | `release_not_found` | 404 | ADR-0040 D6: `POST /releases/{sha12}/promote` の sha12 が `[selfdeploy] releases_dir` に無い（sha12 の形でないときも同じ） |
 | `release_not_promotable` | 409 | ADR-0040 D6: 昇格を受け付けられない（`verify.json` が無い／`ok` でない、既に `current`、既に昇格中、`scripts/promote.sh` が無い、`[selfdeploy]` が無い）。`detail` に理由の一行 |
+| `default_branch_busy` | 409 | ADR-0043 D5（§3.76）: 人のチェックアウトが取り込み先のブランチを出したまま未コミットの変更を持っている。`detail` は `"<default_branch> が編集中"`。**何も触っていない**ので、人が片付けてからもう一度押す |
+| `pr_unavailable` | 409 | ADR-0043 D5（§3.76 / §3.77）: PR の経路が使えない（`origin` リモートが無い、`gh` が PATH に無いか認証されていない、merge しようとした PR が開いていない）。`detail` に理由の一行 |
 | `payload_too_large` | 413 | 本文 > 1 MiB |
 | `unsupported_media_type` | 415 | 変更系で `Content-Type` が JSON でない |
 | `range_not_satisfiable` | 416 | ファイル系の `Range` / `offset` がサイズを超える。`Content-Range: bytes */<size>` |
@@ -162,7 +173,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（62）
+## 2. エンドポイント一覧（67）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -228,6 +239,11 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 60 | DELETE | `/repos/{id}` | リポジトリを消す。未終端のタスクが使っていたら 409（**管理系**） | 204 | store `repo_delete` |
 | 61 | GET | `/tasks/{id}/tree` | タスクの作業ツリーの一覧（ADR-0043 D6） | `TreeView` | `worktree.json` + ファイル |
 | 62 | GET | `/tasks/{id}/tree/file` | そのファイルの本文（テキスト 512 KiB まで） | `TreeFileView` | ファイル |
+| 63 | GET | `/tasks/{id}/changes` | リポジトリごとの差分の要約と取り込みの記録（ADR-0043 D5、Phase 54） | `ChangesView` | `worktree.json` + `git` + store |
+| 64 | GET | `/tasks/{id}/changes/{repo}/diff` | 1 ファイルの unified diff（200 KiB で切る） | `ChangeDiffView` | `git diff` |
+| 65 | POST | `/tasks/{id}/changes/{repo}/integrate` | 取り込む（`merge` / `pr` / `discard`）（**管理系: `token_file` 未設定でも 401**） | 200 `IntegrateResult` | `git` / `gh` + store |
+| 66 | POST | `/tasks/{id}/changes/{repo}/pr/merge` | その PR を Celeris から merge する（**管理系**） | 200 `IntegrateResult` | `gh pr merge` + store |
+| 67 | GET | `/projects/{id}/integrations` | その案件の PR と取り込み（タスク × リポジトリごとに最新の 1 件） | `ProjectIntegrations` | store + `gh pr view` |
 
 ---
 
@@ -1550,6 +1566,114 @@ stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid �
 
 ---
 
+### 3.74〜3.78 変更の取り込み（ADR-0043 D5、Phase 54。**63〜67。変更系は管理系: `token_file` 未設定でも 401**）
+
+タスクは `celeris/<task_id>` ブランチに変更を積む（ADR-0043 D2）。それを**人が**見て、`main` に
+取り込むか、PR にするか、捨てる。**押せるのは人だけ**（SPEC §3.6）。ワーカープロトコル
+（`docs/protocol/worker-protocol.md`）にはこの経路が無いので、組織の「人」が `main` を動かす道は無い。
+
+見る先は §3.72 と同じ目印（`<workspace_root>/<task_id>/worktree.json`）で、`kind = "git"` の
+リポジトリだけが対象（`dir` は出ない）。目印が無いタスクは 404 `file_not_found`。
+
+taskd はここで **`git` と `gh` だけ**を、待ち時間の上限付きで起こす（読み取り 30 秒、書き込み 300 秒、
+`gh pr view` 10 秒、`gh pr create` / `gh pr merge` 120 秒）。LLM もワーカーも起こさない。
+
+#### 3.74 `GET /tasks/{id}/changes` → 200 `ChangesView`
+
+- リポジトリごとに `base`（`merge-base(default_branch, head)`）/ `head` / `ahead`（`base..head` の
+  コミット数）/ `files` / `stat` / `dirty` / `missing` / `origin` / `integration` を返す
+- `files` は **base から「いまの作業ツリー」まで**（コミット済み + 未コミット + 追跡外）。
+  `dirty` は `git status --porcelain` が空でないこと、`ahead` はコミットの数なので、
+  **コミットが 1 つも無いタスクは `ahead = 0`**（GUI は「変更なし」）
+- worktree が消えていてもブランチが残っていれば、元のリポジトリで `base..<branch>` を見る
+  （そのとき `dirty` は常に `false`）。**どちらも無ければ `missing: true`、`ahead: 0`、`files: []`**
+- `default_branch` は `project_repos.default_branch`、無ければ検出（`origin/HEAD` → `main` → `master`）
+- **PR の同期はここでだけ行う**（ADR-0043 D5「常時同期はしない」）。`integration.state` が `open` で
+  `pr_number` があれば `gh pr view <n> --json state,mergedAt,mergeable,reviewDecision,url` を 10 秒で呼び、
+  `OPEN` / `MERGED` / `CLOSED` を `open` / `merged` / `closed` に写す。`merged` になったら**その場で
+  worktree とローカルのブランチを片付ける**。`gh` が失敗したときは記録を**触らない**（`failed` にしない）
+- `gh`（真偽）は `gh auth status` の結果（**プロセス内で 60 秒だけ覚える**）。`merge_method` は `[github] merge_method`
+
+```json
+{
+  "task_id": "01J...",
+  "gh": true,
+  "merge_method": "merge",
+  "repos": [
+    {"repo": "benchfs", "branch": "celeris/01J...", "default_branch": "main",
+     "base": "9602b596826c...", "head": "1f2e3d4c5b6a...", "ahead": 3,
+     "files": [{"path": "src/lib.rs", "status": "M", "additions": 12, "deletions": 3},
+               {"path": "notes.md", "status": "?", "additions": 8, "deletions": 0}],
+     "stat": {"files": 2, "additions": 20, "deletions": 3},
+     "dirty": true, "missing": false, "origin": true,
+     "integration": {"id": "01J...", "task_id": "01J...", "repo": "benchfs", "method": "pr",
+                     "state": "open", "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42",
+                     "created_at": "2026-09-19T10:00:00Z", "updated_at": "2026-09-19T10:00:00Z"}}
+  ]
+}
+```
+
+#### 3.75 `GET /tasks/{id}/changes/{repo}/diff?path=` → 200 `ChangeDiffView`
+
+- `path` は必須（省略は 400 `bad_request`）。`..` と絶対パスは 403 `path_forbidden`
+- そのタスクに無い `repo` は 404 `file_not_found`
+- **200 KiB で切る**（切ったら `truncated: true`）。差分が無ければ `diff` は空文字列
+- 追跡外のファイルは `git diff --no-index -- /dev/null <path>` の出力（「全部追加」の形）
+
+#### 3.76 `POST /tasks/{id}/changes/{repo}/integrate` → 200 `IntegrateResult`（**管理系**）
+
+要求本文 `IntegrateBody`: `{"method": "merge" | "pr" | "discard", "note"?: string, "confirm"?: bool}`。
+
+- **`merge`**: 一時 worktree（`<workspace_root>/.integrate/<ulid>`）でブランチを `default_branch` に
+  `rebase` し、成功したら `default_branch` を進める。`origin` へ push は**しない**
+  - 人のチェックアウトが `default_branch` を出していて `git status --porcelain` が空でなければ
+    **409 `default_branch_busy`**（`detail` は `"<default_branch> が編集中"`）。**記録も残さない**
+  - 出していて綺麗なら `git -C <local.path> merge --ff-only <sha>`（人の作業ツリーも進む）
+  - 別のブランチ（または detached）なら `git -C <local.path> update-ref refs/heads/<default_branch> <new> <old>`
+    （**人の作業ツリーには触らない**）
+  - 成功したら worktree を消してブランチを `git branch -D` し、`state = "done"`（`merged_at` も入る）
+  - `rebase` が衝突したら `rebase --abort` して worktree もブランチも残し、`state = "conflict"` を記録して
+    **「衝突の解消: <題名>」タスクを自動で作る**（応答の `child_task_id`。下の注記）
+- **`pr`**: `origin` リモートが無い、または `gh` が使えない（PATH に無い・認証されていない）ときは
+  **409 `pr_unavailable`**。そうでなければ `git push -u origin <branch>` →
+  `gh pr create --base <default_branch> --head <branch> --title <タスクの題名> --body <生成>` →
+  `state = "open"`（`pr_number` / `pr_url`）。本文は**決定的**（目的 / 受け入れ条件 / 最新の報告の要約 /
+  `Celeris task <id>` と `[notify] gui_base_url` があればそのリンク）。LLM は使わない
+- **`discard`**: `{"confirm": true}` が要る（無ければ 422 `validation`、`errors[0].field = "confirm"`）。
+  worktree を消してブランチを `git branch -D` し、`state = "done"`
+- `git` / `gh` が失敗したときは **200** を返し、記録が `state = "failed"` と `detail`（理由の一行）を持つ
+  （GUI はそれをそのまま出す）。409 になるのは上の 2 つだけ
+- `note` は記録の `detail` の先頭に入る（PR の本文には入れない）
+
+**衝突の解消タスク**（ADR-0043 D5）: 親 = 元のタスク、担当（`assignee` / `role` / `genre` / `tier` / 予算）は
+親と同じ、`status = "ready"`、前置きに衝突したファイルの一覧。受け入れ条件は `Check::Command` 3 本
+（作業ツリーが clean / rebase が進行中でない / `default_branch` が `HEAD` の祖先）。
+**親のブランチの上で**働かせるため、`workspace` は**親の worktree のパス + `mode = "shared"`** で
+`repos` は空（Phase 54 の実装判断。`docs/PROGRESS.md` の P54-2）。終わったら人がもう一度 `merge` を押す。
+
+#### 3.77 `POST /tasks/{id}/changes/{repo}/pr/merge` → 200 `IntegrateResult`（**管理系**）
+
+- 本文は空の JSON（`{}`）でよい
+- そのリポジトリの最新の記録が `method = "pr"` かつ `state = "open"` でなければ **409 `pr_unavailable`**
+- `gh pr merge <n> --<[github] merge_method> --delete-branch` → そのまま `gh pr view` で同期する。
+  `merged` になったら worktree とローカルのブランチを片付ける
+- `gh` が失敗したら 200 で `state = "failed"` と `detail`
+
+#### 3.78 `GET /projects/{id}/integrations` → 200 `ProjectIntegrations`
+
+- その案件のタスクの取り込みを、**タスク × リポジトリごとに最新の 1 件**だけ、新しい順に最大 200 件
+- `state = "open"` のものは `gh pr view` で同期する（**1 回の呼び出しで 20 件まで**）
+- 無い案件は 404 `project_not_found`
+
+```json
+{"items": [{"integration": {"id": "01J...", "task_id": "01J...", "repo": "benchfs", "method": "pr",
+                            "state": "open", "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42",
+                            "created_at": "2026-09-19T10:00:00Z", "updated_at": "2026-09-19T10:05:00Z"},
+            "task_title": "ワークスペース A2", "task_status": "done"}]}
+```
+
+---
+
 ## 4. SSE `GET /stream`
 
 ```
@@ -1665,6 +1789,9 @@ data: {"reason":"cursor_too_old","cursor":20000}
 | `task-core`（Phase 52、ADR-0043 D1/D2） | `ProjectRepo`, `RepoId`, `RepoKind`, `RepoRun`, `RepoSync`, `RepoRef`、`Task.repos: Vec<RepoRef>` | 案件のリポジトリ（`project_repos`）と、タスクが使うリポジトリ。`Task.repos` は空なら省略される（従来の応答と 1 バイトも変わらない） |
 | `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `RoleConfigView`（Phase 10）, `GenreConfigView`（Phase 16）, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema`、`RepoList`, `RepoCreateBody`, `RepoPatchBody`, `TreeView`, `TreeRepoView`, `TreeEntry`, `TreeFileView`（Phase 52、ADR-0043 D1/D6） | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
 | `task-api`（Phase 13、ADR-0024） | `AccountList`, `AccountView`, `AccountUsageView`, `RateWindowView`, `AccountCooldownView`, `AccountStats`, `AccountCreateBody`, `AccountCheckResponse`, `AccountLoginStart`, `AccountLoginCodeBody`, `AccountLoginResult` | `GET/POST /accounts`・`DELETE /accounts/{id}`・`POST /accounts/{id}/check`・`POST`/`DELETE /accounts/{id}/login`・`POST /accounts/{id}/login/code` の要求・応答。Phase 14（ADR-0025）で `AccountList.roots: HashMap<String, Option<String>>`、`AccountView.adapter: String`、`AccountCreateBody.adapter: String`（既定 `"claude-code"`）、`AccountLoginStart.kind: String`（`"paste_code"` \| `"device_code"`）と `user_code: Option<String>` を追加（すべて既存フィールドはそのまま。追加のみ） |
+| `task-core`（Phase 54、ADR-0043 D5） | `TaskIntegration`, `IntegrationId`, `IntegrationMethod`, `IntegrationState` | 変更の取り込みの記録（`task_integrations`。migration 0014、スキーマ版数 14） |
+| `task-ops`（Phase 54、ADR-0043 D5） | `changes::{ChangedFile, DiffStat}` | `git` の出力を写しただけの値（`RepoChangesView` の中に入る） |
+| `task-api`（Phase 54、ADR-0043 D5） | `ChangesView`, `RepoChangesView`, `ChangeDiffView`, `IntegrateBody`, `IntegrateResult`, `ProjectIntegrations`, `ProjectIntegrationItem` | §3.74〜3.78 の要求・応答 |
 | `task-api`（Phase 20、ADR-0030） | `SecretList`, `SecretView`, `SecretUse`, `SecretPutBody`, `SecretPutResult` | `GET/PUT/DELETE /secrets...` の要求・応答（値は一切含まない）。`used_by: Vec<SecretUse>` は稼働中の設定（`[adapters.*].env_from_secrets` と `[[providers]].env_from_secrets`）から taskd が導く |
 
 ### 6.2 Rust 表記（serde の属性はコメントで示す。`JsonSchema` は全て derive）
@@ -1980,6 +2107,37 @@ pub struct TreeEntry { pub name: String, pub path: String, pub kind: String /* d
     #[serde(default, skip_serializing_if = "Option::is_none")] pub size: Option<u64> }
 pub struct TreeFileView { pub repo: String, pub path: String, pub size: u64, pub binary: bool, pub too_large: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub text: Option<String> }
+// ---- Phase 54（ADR-0043 D5）: 変更の取り込み ----
+pub enum IntegrationMethod { Merge, Pr, Discard }        // serde: "merge" | "pr" | "discard"
+pub enum IntegrationState { Done, Open, Merged, Closed, Conflict, Failed }  // serde: snake_case
+pub struct TaskIntegration { pub id: IntegrationId /* ULID */, pub task_id: TaskId,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub repo_id: Option<RepoId>, // 案件のリポジトリの行が無ければ None
+    pub repo: String /* タスクの中での名前。URL もこれ */, pub method: IntegrationMethod, pub state: IntegrationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub pr_number: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub merged_at: Option<String> /* RFC 3339 */,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub detail: Option<String> /* 人に見せる一行 */,
+    pub created_at: String, pub updated_at: String }
+pub struct ChangedFile { pub path: String, pub status: String /* A|M|D|?|T。? は git の管理外 */,
+    pub additions: u64, pub deletions: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub binary: bool }
+pub struct DiffStat { pub files: u64, pub additions: u64, pub deletions: u64 }
+pub struct ChangesView { pub task_id: String, pub repos: Vec<RepoChangesView>,
+    pub gh: bool /* gh が PATH にあって認証済み */, pub merge_method: String /* [github] merge_method */ }
+pub struct RepoChangesView { pub repo: String, pub branch: String, pub default_branch: String,
+    pub base: String, pub head: String, pub ahead: u64, pub files: Vec<ChangedFile>, pub stat: DiffStat,
+    pub dirty: bool, pub missing: bool, pub origin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub integration: Option<TaskIntegration> }
+pub struct ChangeDiffView { pub repo: String, pub path: String, pub diff: String, pub truncated: bool }
+#[serde(deny_unknown_fields)]
+pub struct IntegrateBody { pub method: IntegrationMethod,
+    #[serde(default)] pub note: Option<String>,
+    #[serde(default)] pub confirm: bool /* discard のときだけ必須 */ }
+pub struct IntegrateResult { pub integration: TaskIntegration,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub child_task_id: Option<String> /* 衝突の解消タスク */ }
+pub struct ProjectIntegrations { pub items: Vec<ProjectIntegrationItem> }
+pub struct ProjectIntegrationItem { pub integration: TaskIntegration, pub task_title: String, pub task_status: Status }
+
 pub struct MilestoneView { #[serde(flatten)] pub milestone: Milestone, // Milestone のフィールドは平らに出る
     #[serde(default, skip_serializing_if = "Option::is_none")] pub review: Option<MilestoneReviewView>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub proposal: Option<Milestone> }

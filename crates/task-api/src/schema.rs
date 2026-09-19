@@ -120,6 +120,12 @@ pub struct ApiV1Schema {
     pub repo_patch: crate::types::RepoPatchBody,
     pub tree: crate::types::TreeView,
     pub tree_file: crate::types::TreeFileView,
+    /// Phase 54（ADR-0043 D5）: 変更の取り込み（差分・merge・PR・衝突タスク）。
+    pub changes: crate::types::ChangesView,
+    pub change_diff: crate::types::ChangeDiffView,
+    pub integrate: crate::types::IntegrateBody,
+    pub integrate_result: crate::types::IntegrateResult,
+    pub project_integrations: crate::types::ProjectIntegrations,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

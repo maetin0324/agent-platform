@@ -21,6 +21,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::instance::{DaemonInstance, InstanceRole, SELECT_INSTANCE, row_to_instance};
+use crate::integrations::{IntegrationId, IntegrationMethod, IntegrationState, TaskIntegration};
 use crate::message::{Message, MessageId, MessageRole, is_conversation};
 use crate::model::{Event, Status, Task, TaskId, TaskKind, WorkspaceSpec};
 use crate::org::{
@@ -41,10 +42,16 @@ const MIGRATION_0009: &str = include_str!("../migrations/0009_notifications_proj
 const MIGRATION_0010: &str = include_str!("../migrations/0010_projects_workspace.sql");
 const MIGRATION_0011: &str = include_str!("../migrations/0011_daemon_instances.sql");
 const MIGRATION_0012: &str = include_str!("../migrations/0012_project_repos.sql");
+/// Phase 54（ADR-0043 D5）は migration **0014** を使う。**0013 は ADR-0044 B1**（`task_comments` と
+/// `tasks.labels_json` / `category`）が同じ時間に別の枝で作っているので、この枝では版数だけ予約して
+/// 中身を空にしておく（合流したら `include_str!("../migrations/0013_task_comments.sql")` に差し替える。
+/// 空の版を適用しても `schema_migrations` に行が 1 つ増えるだけで、B1 の 0013 は合流後に当たる）。
+const MIGRATION_0013_RESERVED: &str = "-- reserved for ADR-0044 B1 (task_comments, tasks.labels_json/category)\n";
+const MIGRATION_0014: &str = include_str!("../migrations/0014_task_integrations.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -492,6 +499,24 @@ pub trait TaskStore:
     /// そのリポジトリを参照している未終端のタスク（`DELETE` の 409 の理由に使う）。
     fn repo_active_tasks(&self, id: RepoId) -> Result<Vec<TaskId>, StoreError>;
 
+    // ---- ADR-0043 D5（Phase 54）: 変更の取り込み（`task_integrations`）----
+
+    /// 取り込みの記録を 1 件書く（同じ `id` があれば差し替える。`updated_at` は呼び出し側が入れる）。
+    /// **人（管理系 API）だけが呼ぶ**。組織の「人」がここに届く経路は無い（SPEC §3.6）。
+    fn integration_put(&self, integration: &TaskIntegration) -> Result<(), StoreError>;
+    fn integration_get(&self, id: IntegrationId) -> Result<Option<TaskIntegration>, StoreError>;
+    /// そのタスクの記録（新しい順）。ADR-0044 B1 の timeline はこれを読めばよい。
+    fn integration_list_for_task(&self, task_id: TaskId) -> Result<Vec<TaskIntegration>, StoreError>;
+    /// そのタスクのそのリポジトリの**最新の** 1 件（`GET /tasks/{id}/changes` の `integration`）。
+    fn integration_latest(&self, task_id: TaskId, repo: &str) -> Result<Option<TaskIntegration>, StoreError>;
+    /// 案件のタスクの取り込み（**タスク × リポジトリごとに最新の 1 件**。新しい順、`limit` 件まで）。
+    /// 案件画面の「PR と取り込み」（ADR-0043 D5）。
+    fn integration_list_for_project(
+        &self,
+        project_id: ProjectId,
+        limit: usize,
+    ) -> Result<Vec<TaskIntegration>, StoreError>;
+
     /// 途中目標を作る。`seq` はその案件の最大 + 1 をストアが採番し、確定した行を返す。
     /// 案件が無ければ `StoreError::Invalid`。
     fn milestone_create(
@@ -725,6 +750,8 @@ impl SqliteStore {
             10 => Ok(MIGRATION_0010),
             11 => Ok(MIGRATION_0011),
             12 => Ok(MIGRATION_0012),
+            13 => Ok(MIGRATION_0013_RESERVED),
+            14 => Ok(MIGRATION_0014),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -996,6 +1023,101 @@ impl SqliteStore {
         let mut out = Vec::new();
         for row in rows {
             out.push(Self::parse_id(&row?)?);
+        }
+        Ok(out)
+    }
+
+    // ---- ADR-0043 D5（Phase 54）: 変更の取り込み（`task_integrations`）----
+
+    const INTEGRATION_COLUMNS: &'static str = "id, task_id, repo_id, repo_name, method, state, pr_number, \
+         pr_url, merged_at, detail, created_at, updated_at";
+
+    fn integration_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<TaskIntegration, StoreError>> {
+        let id: String = row.get(0)?;
+        let task_id: String = row.get(1)?;
+        let repo_id: Option<String> = row.get(2)?;
+        let method_col: String = row.get(4)?;
+        let state_col: String = row.get(5)?;
+        let (Ok(id), Ok(task_id), Some(method), Some(state)) = (
+            id.parse::<IntegrationId>(),
+            task_id.parse::<TaskId>(),
+            IntegrationMethod::parse(&method_col),
+            IntegrationState::parse(&state_col),
+        ) else {
+            return Ok(Err(StoreError::Invalid(format!(
+                "invalid task_integrations row: id={id} task_id={task_id} method={method_col} state={state_col}"
+            ))));
+        };
+        let repo_id = match repo_id.as_deref() {
+            None => None,
+            Some(raw) => match raw.parse::<RepoId>() {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    return Ok(Err(StoreError::Invalid(format!(
+                        "invalid task_integrations repo_id for {id}: {raw:?}"
+                    ))));
+                }
+            },
+        };
+        Ok((|| {
+            let merged_at: Option<String> = row.get(8)?;
+            let created_at: String = row.get(10)?;
+            let updated_at: String = row.get(11)?;
+            Ok(TaskIntegration {
+                id,
+                task_id,
+                repo_id,
+                repo: row.get(3)?,
+                method,
+                state,
+                pr_number: row.get(6)?,
+                pr_url: row.get(7)?,
+                merged_at: merged_at.as_deref().map(parse_rfc3339).transpose()?,
+                detail: row.get(9)?,
+                created_at: parse_rfc3339(&created_at)?,
+                updated_at: parse_rfc3339(&updated_at)?,
+            })
+        })())
+    }
+
+    fn integration_put_tx(conn: &Connection, integration: &TaskIntegration) -> Result<(), StoreError> {
+        conn.execute(
+            &format!(
+                "INSERT OR REPLACE INTO task_integrations ({}) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                Self::INTEGRATION_COLUMNS
+            ),
+            params![
+                integration.id.to_string(),
+                integration.task_id.to_string(),
+                integration.repo_id.map(|r| r.to_string()),
+                integration.repo,
+                integration.method.as_str(),
+                integration.state.as_str(),
+                integration.pr_number,
+                integration.pr_url,
+                integration.merged_at.map(format_rfc3339).transpose()?,
+                integration.detail,
+                format_rfc3339(integration.created_at)?,
+                format_rfc3339(integration.updated_at)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn integration_query_tx(
+        conn: &Connection,
+        where_sql: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<TaskIntegration>, StoreError> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM task_integrations WHERE {where_sql} ORDER BY created_at DESC, id DESC",
+            Self::INTEGRATION_COLUMNS
+        ))?;
+        let rows = stmt.query_map(params, Self::integration_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
         }
         Ok(out)
     }
@@ -2436,6 +2558,70 @@ impl TaskStore for SqliteStore {
     fn repo_active_tasks(&self, id: RepoId) -> Result<Vec<TaskId>, StoreError> {
         let conn = self.lock()?;
         Self::repo_active_tasks_tx(&conn, id)
+    }
+
+    // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
+
+    fn integration_put(&self, integration: &TaskIntegration) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        Self::integration_put_tx(&conn, integration)
+    }
+
+    fn integration_get(&self, id: IntegrationId) -> Result<Option<TaskIntegration>, StoreError> {
+        let conn = self.lock()?;
+        Ok(Self::integration_query_tx(&conn, "id = ?1", params![id.to_string()])?
+            .into_iter()
+            .next())
+    }
+
+    fn integration_list_for_task(&self, task_id: TaskId) -> Result<Vec<TaskIntegration>, StoreError> {
+        let conn = self.lock()?;
+        Self::integration_query_tx(&conn, "task_id = ?1", params![task_id.to_string()])
+    }
+
+    fn integration_latest(&self, task_id: TaskId, repo: &str) -> Result<Option<TaskIntegration>, StoreError> {
+        let conn = self.lock()?;
+        Ok(Self::integration_query_tx(
+            &conn,
+            "task_id = ?1 AND repo_name = ?2",
+            params![task_id.to_string(), repo],
+        )?
+        .into_iter()
+        .next())
+    }
+
+    fn integration_list_for_project(
+        &self,
+        project_id: ProjectId,
+        limit: usize,
+    ) -> Result<Vec<TaskIntegration>, StoreError> {
+        let conn = self.lock()?;
+        // タスク × リポジトリごとに最新の 1 件（`created_at` が同じなら `id`〈ULID〉で決める）。
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {cols} FROM task_integrations i \
+             JOIN tasks t ON t.id = i.task_id \
+             WHERE t.project_id = ?1 \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM task_integrations n \
+                 WHERE n.task_id = i.task_id AND n.repo_name = i.repo_name \
+                   AND (n.created_at > i.created_at OR (n.created_at = i.created_at AND n.id > i.id)) \
+               ) \
+             ORDER BY i.created_at DESC, i.id DESC LIMIT ?2",
+            cols = Self::INTEGRATION_COLUMNS
+                .split(", ")
+                .map(|c| format!("i.{c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))?;
+        let rows = stmt.query_map(
+            params![project_id.to_string(), i64::try_from(limit).unwrap_or(i64::MAX)],
+            Self::integration_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
     }
 
     fn milestone_create(
@@ -4292,7 +4478,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 12);
+        assert_eq!(SCHEMA_VERSION, 14);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -4616,7 +4802,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 12);
+        assert_eq!(SCHEMA_VERSION, 14);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -4837,6 +5023,83 @@ mod tests {
         assert!(store.repo_delete(repo.id).unwrap());
         // primary が消えたので案件は「作業場所なし」に戻る。
         assert_eq!(store.project_get(project.id).unwrap().unwrap().workspace, None);
+    }
+
+    /// ADR-0043 D5（Phase 54）: 取り込みの記録を書く → 最新を引く → 案件の一覧は
+    /// 「タスク × リポジトリごとに最新の 1 件」。
+    #[test]
+    fn integrations_are_recorded_and_the_latest_one_per_task_and_repo_is_listed() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let project = sample_project();
+        store.project_create(&project).unwrap();
+        let mut task = sample_task(Status::Done);
+        task.project_id = Some(project.id);
+        store.insert(&task).unwrap();
+        // 案件に属さないタスクの記録は案件の一覧に出ない。
+        let other = sample_task(Status::Done);
+        store.insert(&other).unwrap();
+
+        let t0 = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        let mut first = TaskIntegration::new(
+            task.id,
+            None,
+            "code",
+            IntegrationMethod::Pr,
+            IntegrationState::Open,
+            t0,
+        );
+        first.pr_number = Some(7);
+        first.pr_url = Some("https://example.invalid/pull/7".into());
+        store.integration_put(&first).unwrap();
+        let paper = TaskIntegration::new(
+            task.id,
+            None,
+            "paper",
+            IntegrationMethod::Merge,
+            IntegrationState::Done,
+            t0 + time::Duration::seconds(1),
+        );
+        store.integration_put(&paper).unwrap();
+        let elsewhere = TaskIntegration::new(
+            other.id,
+            None,
+            "code",
+            IntegrationMethod::Discard,
+            IntegrationState::Done,
+            t0 + time::Duration::seconds(2),
+        );
+        store.integration_put(&elsewhere).unwrap();
+
+        assert_eq!(store.integration_get(first.id).unwrap().as_ref(), Some(&first));
+        assert_eq!(store.integration_latest(task.id, "code").unwrap().as_ref(), Some(&first));
+        assert_eq!(store.integration_latest(task.id, "nope").unwrap(), None);
+        // 新しい順（ADR-0044 B1 の timeline はこれを読む）。
+        assert_eq!(
+            store
+                .integration_list_for_task(task.id)
+                .unwrap()
+                .iter()
+                .map(|i| i.repo.as_str())
+                .collect::<Vec<_>>(),
+            vec!["paper", "code"]
+        );
+
+        // 同じタスク・同じリポジトリをもう一度取り込むと、一覧には新しい方だけ出る。
+        let mut second = first.clone();
+        second.id = crate::integrations::IntegrationId::new();
+        second.state = IntegrationState::Merged;
+        second.created_at = t0 + time::Duration::seconds(10);
+        second.updated_at = second.created_at;
+        store.integration_put(&second).unwrap();
+        assert_eq!(store.integration_latest(task.id, "code").unwrap().as_ref(), Some(&second));
+
+        let listed = store.integration_list_for_project(project.id, 100).unwrap();
+        assert_eq!(
+            listed.iter().map(|i| (i.repo.as_str(), i.state)).collect::<Vec<_>>(),
+            vec![("code", IntegrationState::Merged), ("paper", IntegrationState::Done)],
+            "タスク × リポジトリごとに最新の 1 件、新しい順"
+        );
+        assert_eq!(store.integration_list_for_project(project.id, 1).unwrap().len(), 1, "limit が効く");
     }
 
     /// ADR-0043 D1: `PATCH /projects {workspace}`（従来のフォーム）は primary のリポジトリを書き換える。

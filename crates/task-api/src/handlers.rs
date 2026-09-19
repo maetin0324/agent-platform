@@ -119,6 +119,7 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::repos::routes())
         // ADR-0043 D6（Phase 52）: タスクの作業ツリーの閲覧。実装は `crate::tree`。
         .merge(crate::tree::routes())
+        .merge(crate::changes::routes())
         .route("/api/v1/milestones/{id}", patch(patch_milestone))
         .merge(crate::project_plan::routes())
         // ADR-0038 D2（Phase 41）: 途中目標の判定（ok / 議論 / ng）。実装は `crate::milestones`。
@@ -2223,6 +2224,7 @@ mod tests {
             release: "dev".to_string(),
             mode: task_core::DaemonMode::Normal,
             role: task_core::SharedRole::new(task_core::InstanceRole::Active),
+            github: crate::GithubSettings::default(),
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))

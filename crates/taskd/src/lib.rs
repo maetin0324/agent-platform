@@ -636,6 +636,11 @@ pub fn api_settings(
         release,
         mode,
         role,
+        // ADR-0043 D5（Phase 54）: 取り込みで使う `gh` の場所と merge の方法。
+        github: task_api::GithubSettings {
+            gh: config.github.gh.clone(),
+            merge_method: config.github.merge_method.clone(),
+        },
     }
 }
 
