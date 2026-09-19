@@ -53,7 +53,21 @@ pub trait ReleaseSource: Send + Sync + 'static {
     fn list(&self) -> ReleasesFs;
     /// `<releases_dir>/<sha12>/scripts/promote.sh <sha12>` を detached で起こす。
     fn promote(&self, sha12: &str) -> Result<ReleasePromoteAccepted, ReleasePromoteError>;
+
+    /// ADR-0044 D5（Phase 53）: `repo` の `branch` にだけ載っているコミットの sha（新しい順、最大
+    /// `BRANCH_COMMITS_LIMIT` 件）。タスクのブランチ（`celeris/<task_id>` / `taskd/<task_id>`）の
+    /// コミットが、どのリリースの `changes.json` に入ったかを照合するために使う。
+    ///
+    /// **git を起こすのは taskd 側の実装**（task-api はプロセスを起こさない）。git が無い・リポジトリが
+    /// 無い・そのブランチが無い・base が分からないときは空を返す（タイムラインからリリースが消えるだけ）。
+    /// 既定は空（git を起こさない実装・テスト用）。
+    fn branch_commits(&self, _repo: &std::path::Path, _branch: &str, _base: Option<&str>) -> Vec<String> {
+        Vec::new()
+    }
 }
+
+/// ADR-0044 D5: `branch_commits` が返すコミットの上限。
+pub const BRANCH_COMMITS_LIMIT: usize = 500;
 
 /// `GET /releases`。
 pub(crate) async fn list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {

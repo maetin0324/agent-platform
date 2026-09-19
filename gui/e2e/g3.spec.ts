@@ -103,7 +103,8 @@ test.describe("受け入れ条件 3: 成果物ビューア", () => {
       d.dismiss();
     });
 
-    await page.goto(`/tasks/${taskId}`);
+    // ADR-0044 D5（Phase 53）: 成果物は「成果物」タブの中（`?tab=artifacts`）。
+    await page.goto(`/tasks/${taskId}?tab=artifacts`);
     const items = page.getByTestId("artifact-item");
     await expect(items).toHaveCount(3);
 
@@ -154,7 +155,7 @@ test.describe("受け入れ条件 4: 成果物の sha256 不一致", () => {
     try {
       writeFileSync(dataPath, '{"tampered":true}');
 
-      await page.goto(`/tasks/${taskId}`);
+      await page.goto(`/tasks/${taskId}?tab=artifacts`);
       const jsonItem = page.getByTestId("artifact-item").filter({ hasText: "data.json" });
       await expect(jsonItem.getByTestId("sha256-mismatch")).toBeVisible();
     } finally {

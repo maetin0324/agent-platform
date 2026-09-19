@@ -33,7 +33,8 @@ use task_ops::derive::{
     prior_review_from_events, retry_backoff,
 };
 use task_worker::{
-    AdapterError, Answer, ChildSummary, ConversationAddressee, ConversationTurn, EventSink, GenreContext,
+    AdapterError, Answer, ChildSummary, CommentContext, ConversationAddressee, ConversationTurn, EventSink,
+    GenreContext,
     LocalWorkspace, MemoryContext, MemoryDir, MilestoneBrief, MilestoneReviewContext, MilestoneTaskResult,
     NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview,
     RecentWork, RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode,
@@ -389,6 +390,10 @@ struct RunExtras {
     milestone_review: Option<MilestoneReviewContext>,
     /// Phase 43（ADR-0039 D3）: 案件が作業場所を決めている run にだけ、その場所を説明する 1 行。
     workspace_note: Option<String>,
+    /// ADR-0044 D2（Phase 53）: そのタスクのコメント（最新 20 件、古い順）。
+    comments: Vec<CommentContext>,
+    /// ADR-0044 D2: 直前の run を止めた人のコメント（あれば前置きの先頭に「人からの割り込み」として出る）。
+    interrupt: Option<String>,
 }
 
 struct ReviewEntry {
@@ -568,6 +573,30 @@ impl EventSink for StoreSink {
         }
     }
 
+    /// ADR-0044 D2（Phase 53）: ワーカーの `{"type":"comment"}` は `author_kind = node` で残す。
+    /// 人は起こさない（通知は ADR-0037 の 5 種のまま）。状態は変えない。
+    fn comment(&self, body: &str) {
+        let author = self
+            .store
+            .get(self.task_id)
+            .ok()
+            .flatten()
+            .and_then(|t| t.assignee.clone());
+        match task_ops::comment::post_node_comment(
+            self.store.as_ref(),
+            self.task_id,
+            author,
+            Some(self.run_id.clone()),
+            body.to_string(),
+            OffsetDateTime::now_utc(),
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(task_id = %self.task_id, run_id = %self.run_id, error = %e, "failed to record the worker comment")
+            }
+        }
+    }
+
     fn delegate(&self, tasks: &[DelegateTask]) {
         if let Err(reason) = self.delegate_impl(tasks) {
             tracing::warn!(task_id = %self.task_id, run_id = %self.run_id, %reason, "delegate proposal ignored");
@@ -660,6 +689,10 @@ pub struct Dispatcher {
     warned_unroutable: std::collections::HashSet<TaskId>,
     /// この tick で `NoMatchingProvider` だった ready タスク（`is_idle` で待ち対象から外す。ADR-0012 D2）。
     unroutable: std::collections::HashSet<TaskId>,
+    /// ADR-0044 D2（Phase 53）: **この tick で run を打ち切った**タスク。次の tick まで dispatch しない。
+    /// 打ち切りは `handle.abort()`（= 子プロセスへの SIGKILL）で、**孫プロセスは即死しない**ので、
+    /// 同じ tick で同じ worktree に次の run を入れると 2 つの書き手が重なる（Phase 53 の監査で発見）。
+    just_aborted: std::collections::HashSet<TaskId>,
     /// ADR-0018 D2（監査 4-1）: この tick でクラスタの多重接続が無い／cooldown 中のため待っている ready タスク。「人のログイン待ち」で
     /// 経路なし（`unroutable`）とは別物。`is_idle` の待ち対象から外すだけで、スナップショットには出さない（受信箱の (d) が知らせる）。
     cluster_waiting: std::collections::HashSet<TaskId>,
@@ -749,6 +782,7 @@ impl Dispatcher {
             reviewing: HashMap::new(),
             pending_subjects: HashMap::new(),
             warned_unroutable: std::collections::HashSet::new(),
+            just_aborted: std::collections::HashSet::new(),
             unroutable: std::collections::HashSet::new(),
             cluster_waiting: std::collections::HashSet::new(),
             awaiting_human: std::collections::HashSet::new(),
@@ -2154,8 +2188,10 @@ impl Dispatcher {
         Ok(count)
     }
 
-    /// ADR-0002 D9: ストア上で `running` でなくなった（cancel 等）run を強制終了する。
+    /// ADR-0002 D9: ストア上で `running` でなくなった（cancel / ADR-0044 D2 の割り込み等）run を
+    /// 強制終了する。打ち切ったタスクは `just_aborted` に入れ、**この tick では dispatch し直さない**。
     fn abort_stale_runs(&mut self) -> Result<(), DispatchError> {
+        self.just_aborted.clear();
         let ids: Vec<TaskId> = self.running.keys().copied().collect();
         for id in ids {
             let current = self.store.get(id)?;
@@ -2170,6 +2206,7 @@ impl Dispatcher {
             if !still_ours && let Some(entry) = self.running.remove(&id) {
                 tracing::warn!(task_id = %id, run_id = %entry.run_id, "aborting run (task no longer running under this lease)");
                 entry.handle.abort();
+                self.just_aborted.insert(id);
             }
         }
         // レビュー中に cancel されたタスクの判定（Reviewer run を含む）も中断する。
@@ -2270,6 +2307,11 @@ impl Dispatcher {
                 break;
             }
             if self.running.contains_key(&task.id) {
+                continue;
+            }
+            // ADR-0044 D2: この tick で打ち切ったばかりの run と同じ worktree に、すぐ次の run を
+            // 入れない（孫プロセスが片付く猶予を 1 tick 置く）。
+            if self.just_aborted.contains(&task.id) {
                 continue;
             }
             // ADR-0041 D5: verify モードは `genre = "smoke"` の煙試験だけを起こす（他は ready のまま）。
@@ -2647,6 +2689,15 @@ impl Dispatcher {
         } else {
             Vec::new()
         };
+        // ADR-0044 D2（Phase 53）: コメントの糸（最新 20 件、古い順）と、直前の run を止めた人のコメント。
+        // どちらも決定的に引くだけ（LLM は関与しない）。
+        let all_comments = self.store.comments_for(task.id)?;
+        let interrupt = task_ops::comment::interrupting_comment(&events, &all_comments).map(|c| c.body.clone());
+        let comments: Vec<CommentContext> = all_comments
+            .iter()
+            .skip(all_comments.len().saturating_sub(task_core::PREAMBLE_COMMENTS))
+            .map(CommentContext::from)
+            .collect();
         Ok(RunExtras {
             role,
             children,
@@ -2661,6 +2712,8 @@ impl Dispatcher {
             recent_work,
             milestone_review,
             workspace_note,
+            comments,
+            interrupt,
         })
     }
 
@@ -3068,6 +3121,8 @@ impl Dispatcher {
             milestone_id: task.milestone_id,
             assignee: task.assignee.clone(),
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         };
         // ADR-0010 D2: 挿入・Created・ApprovalRequested を 1 トランザクションで。
         self.store.create_task(&approval, vec![Event::ApprovalRequested])?;
@@ -3755,6 +3810,8 @@ async fn run_worker(
         .events_for(task_id)
         .map_err(|e| AdapterError::Other(format!("store: {e}")))?;
     let prior_review = to_prior_review(prior_review_from_events(&events));
+    // ADR-0044 D2: 対話 run（人への返事だけをする run。Phase 28）にはコメントの書き方を出さない。
+    let writes_comments = extras.conversation_addressee.is_none();
     let req = RunRequest {
         protocol: PROTOCOL_VERSION,
         task: task.clone(),
@@ -3782,6 +3839,12 @@ async fn run_worker(
             milestone_review: extras.milestone_review,
             // Phase 43（ADR-0039 D3）: 案件が作業場所を決めている run だけに入る。
             workspace_note: extras.workspace_note,
+            // ADR-0044 D2（Phase 53）: コメントの糸と、直前の run を止めた人のコメント。
+            comments: extras.comments,
+            interrupt: extras.interrupt,
+            // 仕事の run はコメントを書ける。**対話 run は書かせない**（Phase 28 の「返事だけをする」と
+            // ぶつかる）。レビュー run は `review.rs` が `RunContext::default()` を使うので既定の false。
+            comments_enabled: writes_comments,
             // Phase 38（ADR-0028 追記）: レビュー run（`review.rs` が組む）だけに入る。
             subject_genre: None,
         },
@@ -3989,6 +4052,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 
@@ -6137,6 +6202,8 @@ mod tests {
                 genre: Some("literature".into()),
                 assignee: None,
                 workspace: None,
+                category: None,
+                labels: Vec::new(),
             }],
         };
         d.fix_plan_for_harness(&plan_parent, &mut plan, &[]);
@@ -8187,6 +8254,174 @@ mod tests {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    // ---- ADR-0044 D2（Phase 53）: 人のコメントによる割り込み ----
+
+    /// 走り続けて、渡された `RunContext` を記録するアダプタ。`hold` の間は終わらない
+    /// （1 回目の run を「走っている」状態にするため）。2 回目以降はすぐ `done` になる。
+    struct InterruptProbeAdapter {
+        seen: Arc<StdMutex<Vec<task_worker::RunContext>>>,
+        hold: Duration,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for InterruptProbeAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            let first = match self.seen.lock() {
+                Ok(mut seen) => {
+                    seen.push(req.context.clone());
+                    seen.len() == 1
+                }
+                Err(_) => false,
+            };
+            if first {
+                // 1 回目: 人が割り込むまで走り続ける（tick がこの run を abort する）。
+                sink.progress("working");
+                tokio::time::sleep(self.hold).await;
+            }
+            Ok(RunOutcome {
+                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// ADR-0044 D2 / D8: 走っている run に人がコメントすると、
+    /// 1. タスクは `ready` に戻り（attempts 据え置き、`Transitioned{reason:"comment"}`）、
+    /// 2. `WorkerFinished{outcome:"interrupted: comment"}` が残り（失敗ではないので報告は作らない）、
+    /// 3. ディスパッチャが次の tick でその run を止め（cancel と同じ `abort_stale_runs` の経路）、
+    /// 4. **次の run の前置きの先頭**にそのコメントが「人からの割り込み」として載る。
+    #[tokio::test]
+    async fn a_human_comment_interrupts_the_running_run_and_the_next_run_carries_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(dir.path(), Check::Human, 2);
+        task.attempts = 1;
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(InterruptProbeAdapter {
+            seen: seen.clone(),
+            hold: Duration::from_secs(30),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+
+        // 1 tick で dispatch し、run が**実際に走り出す**まで待つ（spawn されただけでは前置きは組まれない）。
+        d.tick().unwrap();
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Running);
+        assert_eq!(d.running.len(), 1, "run が手元で走っている");
+        for _ in 0..50 {
+            if seen.lock().map(|s| !s.is_empty()).unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(seen.lock().unwrap().len(), 1, "1 回目の run が始まっている");
+
+        // 人がコメントする（API と同じ経路）。
+        let result = task_ops::comment::post_human_comment(
+            store.as_ref(),
+            task.id,
+            "方針を変えたい。まず設計を書いて".into(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        assert_eq!(result.effect, task_ops::comment::CommentEffect::Interrupted);
+        let after = store.get(task.id).unwrap().unwrap();
+        assert_eq!(after.status, Status::Ready);
+        assert_eq!(after.attempts, 1, "割り込みは試行を消費しない");
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if outcome == "interrupted: comment"))
+        );
+
+        // 次の tick で走っていた run が止まり、同じ tick で走り直す。
+        d.tick().unwrap();
+        assert!(
+            !d.running.contains_key(&task.id) || store.get(task.id).unwrap().unwrap().status == Status::Running,
+            "古い run は捨てられている"
+        );
+        // 走り直した run の前置きに割り込みが載るまで回す。
+        for _ in 0..40 {
+            if seen.lock().map(|s| s.len() >= 2).unwrap_or(false) {
+                break;
+            }
+            d.tick().unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let contexts = seen.lock().unwrap().clone();
+        assert!(contexts.len() >= 2, "2 回目の run が始まっていない: {}", contexts.len());
+        let second = &contexts[1];
+        assert_eq!(
+            second.interrupt.as_deref(),
+            Some("方針を変えたい。まず設計を書いて"),
+            "次の run に割り込みが渡る"
+        );
+        assert_eq!(second.comments.len(), 1);
+        assert_eq!(second.comments[0].author_kind, task_core::CommentAuthorKind::Human);
+        assert!(second.comments_enabled, "ワーカー run はコメントを書ける");
+        assert!(contexts[0].interrupt.is_none(), "1 回目には割り込みが無い");
+
+        // 前置きの先頭に「人からの割り込み」として出る。
+        let preamble = task_worker::preamble::render(second, "artifacts");
+        assert!(preamble.starts_with("## コメント"), "{preamble}");
+        assert!(preamble.contains("**人からの割り込み**: 方針を変えたい。まず設計を書いて"), "{preamble}");
+        assert!(preamble.contains("短い進捗や判断の記録はコメントに書け"), "{preamble}");
+    }
+
+    /// ADR-0044 D2: ワーカーの `{"type":"comment"}` 行は `author_kind = node` で残り、状態は変えない。
+    #[tokio::test]
+    async fn a_worker_comment_is_recorded_as_a_node_comment_without_touching_the_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        task.assignee = Some("impl".into());
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(CommentingAdapter);
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        run_until_idle(&mut d, 20).await;
+
+        let comments = store.comments_for(task.id).unwrap();
+        assert_eq!(comments.len(), 1, "{comments:?}");
+        assert_eq!(comments[0].author_kind, task_core::CommentAuthorKind::Node);
+        assert_eq!(comments[0].author.as_deref(), Some("impl"));
+        assert_eq!(comments[0].body, "ビルドが通った");
+        assert!(comments[0].run_id.is_some(), "run に紐づく");
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done, "状態は変えない");
+    }
+
+    /// `comment` を 1 行出してから終わるアダプタ。
+    struct CommentingAdapter;
+
+    #[async_trait]
+    impl WorkerAdapter for CommentingAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            _req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            sink.comment("ビルドが通った");
+            Ok(RunOutcome {
+                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                exit_code: Some(0),
+            })
+        }
     }
 
     /// 走った run の cwd / workspace / artifacts_dir を記録し、`files` を cwd に作るアダプタ。

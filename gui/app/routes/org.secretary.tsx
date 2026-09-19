@@ -42,7 +42,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<Conversatio
 export const shouldRevalidate = revalidateAfterActionErrors;
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "秘書 - taskd-gui" }];
+  return [{ title: "秘書 - Celeris" }];
 }
 
 /**

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::comment::{CommentAuthorKind, TaskComment};
 use crate::instance::{DaemonInstance, InstanceRole, SELECT_INSTANCE, row_to_instance};
 use crate::message::{Message, MessageId, MessageRole, is_conversation};
 use crate::model::{Event, Status, Task, TaskId, TaskKind, WorkspaceSpec};
@@ -40,11 +41,15 @@ const MIGRATION_0008: &str = include_str!("../migrations/0008_notifications.sql"
 const MIGRATION_0009: &str = include_str!("../migrations/0009_notifications_project_id.sql");
 const MIGRATION_0010: &str = include_str!("../migrations/0010_projects_workspace.sql");
 const MIGRATION_0011: &str = include_str!("../migrations/0011_daemon_instances.sql");
+/// ADR-0043 D1/D2（Phase 52）: `project_repos` と `tasks.repos_json`。
+/// この版を当てた直後に、同じトランザクションで `backfill_project_repos` が写しを作る。
 const MIGRATION_0012: &str = include_str!("../migrations/0012_project_repos.sql");
+/// ADR-0044 D2/D3（Phase 53）: `task_comments` と `tasks.labels_json` / `tasks.category`。
+const MIGRATION_0013: &str = include_str!("../migrations/0013_task_comments.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -134,6 +139,21 @@ pub struct ListFilter {
     pub text_contains: Option<String>,
     /// ADR-0033 D4（Phase 33）: 担当（`org_nodes.id`）で絞る。完全一致。`None` なら絞らない。
     pub assignee: Option<String>,
+    // ---- ADR-0044 D4（Phase 53）: ボードと検索のフィルタ。ここから ----
+    /// ADR-0044 D4: ラベル。複数指定は **AND**（全部持つタスクだけ）。
+    pub labels: Vec<String>,
+    /// ADR-0044 D4: 種類。複数指定は IN（どれか）。
+    pub categories: Vec<crate::model::TaskCategory>,
+    /// ADR-0044 D4: 途中目標（`milestones.id`）。完全一致。
+    pub milestone_id: Option<MilestoneId>,
+    /// ADR-0044 D4: tier（`worker_hint.tier`）。複数指定は IN。
+    pub tiers: Vec<crate::model::Tier>,
+    /// ADR-0044 D4: 優先度（P0〜P3 を `i32` に写したもの）。複数指定は IN。
+    pub priorities: Vec<i32>,
+    /// ADR-0044 D4: `text_contains` を**コメント本文にも**広げる（`GET /tasks?q=`）。
+    /// `false` なら従来どおり title / objective だけ（`taskctl` の既存の挙動）。
+    pub text_includes_comments: bool,
+    // ---- ADR-0044 D4（Phase 53）: ここまで ----
 }
 
 /// `TaskStore::list_page` の並び順（ADR-0013 D10）。
@@ -266,11 +286,59 @@ fn filter_predicate(filter: &ListFilter) -> (String, Vec<SqlValue>) {
         clauses.push("assignee = ?".to_string());
         params.push(SqlValue::Text(assignee.clone()));
     }
+    // ---- ADR-0044 D4（Phase 53）----
+    if let Some(milestone_id) = filter.milestone_id {
+        clauses.push("milestone_id = ?".to_string());
+        params.push(SqlValue::Text(milestone_id.to_string()));
+    }
+    if !filter.categories.is_empty() {
+        let placeholders = vec!["?"; filter.categories.len()].join(", ");
+        // 導入前の行（`category` が NULL）は `other` として扱う。
+        clauses.push(format!("COALESCE(category, 'other') IN ({placeholders})"));
+        for c in &filter.categories {
+            params.push(SqlValue::Text(c.as_str().to_string()));
+        }
+    }
+    for label in &filter.labels {
+        // AND: 指定したラベルを**全部**持つタスクだけ。`labels_json` は `PATCH` でも書き直す写し。
+        clauses.push(
+            "EXISTS (SELECT 1 FROM json_each(COALESCE(tasks.labels_json, '[]')) WHERE json_each.value = ?)"
+                .to_string(),
+        );
+        params.push(SqlValue::Text(label.clone()));
+    }
+    if !filter.tiers.is_empty() {
+        // tier は `json` の中にしか無い（列を増やさない）。JSON1 の `json_extract` で決定的に引く。
+        let placeholders = vec!["?"; filter.tiers.len()].join(", ");
+        clauses.push(format!("json_extract(json, '$.worker_hint.tier') IN ({placeholders})"));
+        for t in &filter.tiers {
+            params.push(SqlValue::Text(tier_str(*t).to_string()));
+        }
+    }
+    if !filter.priorities.is_empty() {
+        let placeholders = vec!["?"; filter.priorities.len()].join(", ");
+        clauses.push(format!("priority IN ({placeholders})"));
+        for p in &filter.priorities {
+            params.push(SqlValue::Integer(*p as i64));
+        }
+    }
     if let Some(needle) = &filter.text_contains {
-        clauses.push("(title LIKE ? ESCAPE '\\' OR objective LIKE ? ESCAPE '\\')".to_string());
         let pattern = format!("%{}%", escape_like(needle));
-        params.push(SqlValue::Text(pattern.clone()));
-        params.push(SqlValue::Text(pattern));
+        if filter.text_includes_comments {
+            // ADR-0044 D4: `q=` は title / objective / コメント本文の 3 つ（OR）。
+            clauses.push(
+                "(title LIKE ? ESCAPE '\\' OR objective LIKE ? ESCAPE '\\' OR EXISTS \
+                 (SELECT 1 FROM task_comments c WHERE c.task_id = tasks.id AND c.body LIKE ? ESCAPE '\\'))"
+                    .to_string(),
+            );
+            params.push(SqlValue::Text(pattern.clone()));
+            params.push(SqlValue::Text(pattern.clone()));
+            params.push(SqlValue::Text(pattern));
+        } else {
+            clauses.push("(title LIKE ? ESCAPE '\\' OR objective LIKE ? ESCAPE '\\')".to_string());
+            params.push(SqlValue::Text(pattern.clone()));
+            params.push(SqlValue::Text(pattern));
+        }
     }
 
     if clauses.is_empty() {
@@ -529,6 +597,27 @@ pub trait TaskStore:
     /// を追記する）。全体を単一トランザクションで行い、張り替えたタスクの id を返す。
     fn retry_task(&self, original: TaskId, new_task: &Task) -> Result<Vec<TaskId>, StoreError>;
 
+    // ---- ADR-0044 D1/D2（Phase 53）: 人の編集とタスク単位のコメント ----
+
+    /// ADR-0044 D1: 人の編集を書き戻す（`json` と絞り込みの列、`Event::Edited` を単一トランザクションで）。
+    /// **状態機械は通らない**: `status` / `attempts` / `lease` は渡された `task` の値を**使わず**、
+    /// トランザクションの中で読み直した現在の行の値を書く（編集を組み立てている間にディスパッチャが
+    /// リースを取っていても、その run を壊さないため。`acquire_lease` / `release_lease` と同じ規律）。
+    /// 書き込んだ後の `Task`（= 読み直した状態を持つもの）を返す。無いタスクは `StoreError::Invalid`。
+    fn update_task(&self, task: &Task, event: Event) -> Result<Task, StoreError>;
+
+    /// ADR-0044 D2: コメントを 1 件追記する。`transition` が `Some((trigger, extra_events))` なら
+    /// **同じトランザクション**で状態遷移も行い、その結果を返す（人のコメントの割り込みが
+    /// 「コメントは残ったが run は止まらなかった」状態にならないようにするため）。
+    fn comment_add(
+        &self,
+        comment: &TaskComment,
+        transition: Option<(Trigger, Vec<Event>)>,
+    ) -> Result<Option<Outcome>, StoreError>;
+
+    /// ADR-0044 D2: そのタスクのコメントを古い順（`created_at`、同時刻は `id` 昇順）で返す。
+    fn comments_for(&self, task_id: TaskId) -> Result<Vec<TaskComment>, StoreError>;
+
     // ---- ADR-0040 D4（Phase 47）: taskd のインスタンスの役割（`daemon_instances`）----
     //
     // ここにあるのは「行を読み書きする」だけの操作で、役割を決める規則（誰が active になるか、いつ
@@ -602,6 +691,15 @@ fn kind_str(k: TaskKind) -> &'static str {
         TaskKind::Execute => "execute",
         TaskKind::Review => "review",
         TaskKind::Approval => "approval",
+    }
+}
+
+/// ADR-0044 D4: `worker_hint.tier` の JSON 表現（`json_extract` の照合に使う）。
+fn tier_str(t: crate::model::Tier) -> &'static str {
+    match t {
+        crate::model::Tier::Frontier => "frontier",
+        crate::model::Tier::Standard => "standard",
+        crate::model::Tier::Cheap => "cheap",
     }
 }
 
@@ -725,6 +823,7 @@ impl SqliteStore {
             10 => Ok(MIGRATION_0010),
             11 => Ok(MIGRATION_0011),
             12 => Ok(MIGRATION_0012),
+            13 => Ok(MIGRATION_0013),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -1158,8 +1257,8 @@ impl SqliteStore {
         conn.execute(
             "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
              lease_worker_run_id, lease_expires_at, json, title, updated_at, objective, genre, \
-             project_id, milestone_id, assignee, repos_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             project_id, milestone_id, assignee, repos_json, labels_json, category) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 task.id.to_string(),
                 status_str(task.status),
@@ -1180,6 +1279,40 @@ impl SqliteStore {
                 task.milestone_id.map(|m| m.to_string()),
                 task.assignee.clone(),
                 repos_json,
+                // ADR-0044 D3（Phase 53）: ラベルと種類は `PATCH /tasks/{id}` で変わるので、
+                // `update_task_tx` が同じ 2 列を書き直す。
+                serde_json::to_string(&task.labels)?,
+                task.category.as_str(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// ADR-0044 D1（Phase 53）: `PATCH /tasks/{id}` の書き戻し。`json`（正本）と、絞り込みのための
+    /// 写しの列を**全部**書き直す（挿入時にしか書いていなかった `objective` / `genre` / `project_id` /
+    /// `milestone_id` / `assignee` も、編集で変わりうるのでここで揃える）。状態機械は通らない
+    /// （`status` / `attempts` / `lease` は触らない）。
+    fn update_task_tx(tx: &Connection, task: &Task) -> Result<(), StoreError> {
+        let json = serde_json::to_string(task)?;
+        let updated_at = format_rfc3339(task.updated_at)?;
+        tx.execute(
+            "UPDATE tasks SET json = ?1, title = ?2, updated_at = ?3, objective = ?4, genre = ?5, \
+             priority = ?6, parent_id = ?7, project_id = ?8, milestone_id = ?9, assignee = ?10, \
+             labels_json = ?11, category = ?12 WHERE id = ?13",
+            params![
+                json,
+                task.title,
+                updated_at,
+                task.objective,
+                task.genre,
+                task.priority,
+                task.parent_id.map(|p| p.to_string()),
+                task.project_id.map(|p| p.to_string()),
+                task.milestone_id.map(|m| m.to_string()),
+                task.assignee.clone(),
+                serde_json::to_string(&task.labels)?,
+                task.category.as_str(),
+                task.id.to_string(),
             ],
         )?;
         Ok(())
@@ -1415,6 +1548,35 @@ impl SqliteStore {
             params![status_str(task.status), json, task.title, updated_at, task.id.to_string()],
         )?;
         Ok(())
+    }
+
+    /// ADR-0044 D2: `task_comments` の 1 行を `TaskComment` にする。
+    fn comment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<TaskComment, StoreError>> {
+        let id: String = row.get(0)?;
+        let task_id: String = row.get(1)?;
+        let author_kind: String = row.get(2)?;
+        let author: Option<String> = row.get(3)?;
+        let body: String = row.get(4)?;
+        let run_id: Option<String> = row.get(5)?;
+        let created_at: String = row.get(6)?;
+        Ok((|| {
+            let Some(author_kind) = CommentAuthorKind::parse(&author_kind) else {
+                return Err(StoreError::Invalid(format!(
+                    "invalid author_kind in task_comments: {author_kind}"
+                )));
+            };
+            Ok(TaskComment {
+                id: id
+                    .parse()
+                    .map_err(|_| StoreError::Invalid(format!("invalid comment id: {id}")))?,
+                task_id: Self::parse_id(&task_id)?,
+                author_kind,
+                author,
+                body,
+                run_id,
+                created_at: parse_rfc3339(&created_at)?,
+            })
+        })())
     }
 
     fn append_event_tx(conn: &Connection, task_id: TaskId, event: &Event) -> Result<u64, StoreError> {
@@ -2568,6 +2730,88 @@ impl TaskStore for SqliteStore {
 
     // ---- ADR-0040 D4（Phase 47）: `daemon_instances` ----
 
+    // ---- ADR-0044 D1/D2（Phase 53）----
+
+    fn update_task(&self, task: &Task, event: Event) -> Result<Task, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(current) = Self::get_locked(&tx, task.id)? else {
+            return Err(StoreError::Invalid(format!("task not found: {}", task.id)));
+        };
+        // 状態機械が持つ 3 つ（`status` / `attempts` / `lease`）だけは**この tx の中で読んだ行**の値を使う。
+        // 編集を組み立てている間にディスパッチャが `acquire_lease` を通していたら、渡された `task` は
+        // 古い `ready` / `lease: None` を持っている。そのまま書くと `json` と `status` 列が食い違い、
+        // そのタスクは二度と dispatch されず run の結果も捨てられる（Phase 53 の監査で発見）。
+        let merged = Task {
+            status: current.status,
+            attempts: current.attempts,
+            lease: current.lease.clone(),
+            ..task.clone()
+        };
+        Self::update_task_tx(&tx, &merged)?;
+        Self::append_event_tx(&tx, task.id, &event)?;
+        tx.commit()?;
+        Ok(merged)
+    }
+
+    fn comment_add(
+        &self,
+        comment: &TaskComment,
+        transition: Option<(Trigger, Vec<Event>)>,
+    ) -> Result<Option<Outcome>, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT 1 FROM tasks WHERE id = ?1",
+                params![comment.task_id.to_string()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(StoreError::Invalid(format!("task not found: {}", comment.task_id)));
+        }
+        tx.execute(
+            "INSERT INTO task_comments (id, task_id, author_kind, author, body, run_id, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                comment.id.to_string(),
+                comment.task_id.to_string(),
+                comment.author_kind.as_str(),
+                comment.author.clone(),
+                comment.body,
+                comment.run_id.clone(),
+                format_rfc3339(comment.created_at)?,
+            ],
+        )?;
+        let outcome = match transition {
+            Some((trigger, extra_events)) => Some(Self::apply_transition_tx(
+                &tx,
+                comment.task_id,
+                trigger,
+                extra_events,
+            )?),
+            None => None,
+        };
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    fn comments_for(&self, task_id: TaskId) -> Result<Vec<TaskComment>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, task_id, author_kind, author, body, run_id, created_at FROM task_comments \
+             WHERE task_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![task_id.to_string()], Self::comment_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
     fn instance_register(&self, instance: &DaemonInstance) -> Result<(), StoreError> {
         let conn = self.lock()?;
         conn.execute(
@@ -2735,6 +2979,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 
@@ -4292,7 +4538,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 12);
+        assert_eq!(SCHEMA_VERSION, 13);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -4616,7 +4862,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 12);
+        assert_eq!(SCHEMA_VERSION, 13);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -4908,5 +5154,330 @@ mod tests {
         let back: Task = serde_json::from_value(json).unwrap();
         assert_eq!(back.project_id, None);
         assert_eq!(back.assignee, None);
+        // ADR-0044 D3（Phase 53）: 導入前のタスクはラベル無し・種類 other として読める。
+        assert!(back.labels.is_empty());
+        assert_eq!(back.category, crate::model::TaskCategory::Other);
+    }
+
+    // ---- ADR-0044 D2/D3/D4（Phase 53）: コメント・ラベル・種類・ボードのフィルタ ----
+
+    /// migration 0013 が schema 11 の DB に `task_comments` と `tasks.labels_json` / `tasks.category` を足す。
+    /// 既存の行は「ラベル無し・種類 other」になる。
+    #[test]
+    fn migration_0013_adds_task_comments_and_the_label_columns_to_a_schema_11_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.sqlite3");
+        let legacy = sample_task(Status::Ready);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            SqliteStore::configure_pragmas(&conn, &StoreOptions::default()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+            )
+            .unwrap();
+            for version in 1..=11 {
+                SqliteStore::apply_migration_version(&mut conn, version).unwrap();
+            }
+            // 11 版の列だけで 1 行書く（`labels_json` / `category` はまだ無い）。
+            conn.execute(
+                "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, json, title, updated_at, \
+                 objective) VALUES (?1, 'ready', 'execute', NULL, 0, ?2, ?3, ?4, ?2, ?5)",
+                params![
+                    legacy.id.to_string(),
+                    format_rfc3339(legacy.created_at).unwrap(),
+                    serde_json::to_string(&legacy).unwrap(),
+                    legacy.title,
+                    legacy.objective,
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 13);
+        {
+            let conn = store.lock().unwrap();
+            let (labels, category): (String, String) = conn
+                .query_row(
+                    "SELECT labels_json, category FROM tasks WHERE id = ?1",
+                    params![legacy.id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(labels, "[]");
+            assert_eq!(category, "other");
+        }
+        // コメントを 1 件書ける（表がある）。
+        let comment = TaskComment::new(
+            legacy.id,
+            CommentAuthorKind::Human,
+            None,
+            "移行後でも書ける".into(),
+            None,
+            OffsetDateTime::now_utc(),
+        );
+        assert!(store.comment_add(&comment, None).unwrap().is_none());
+        assert_eq!(store.comments_for(legacy.id).unwrap().len(), 1);
+    }
+
+    /// コメントは古い順に読め、遷移と同じトランザクションで書ける（割り込み）。
+    /// 知らないタスクへのコメントは書けない。
+    #[test]
+    fn comments_round_trip_and_can_carry_a_transition_in_one_transaction() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task(Status::Running);
+        store.insert(&task).unwrap();
+
+        let base = OffsetDateTime::now_utc();
+        for (i, body) in ["ひとつめ", "ふたつめ"].iter().enumerate() {
+            let c = TaskComment::new(
+                task.id,
+                CommentAuthorKind::Node,
+                Some("impl".into()),
+                (*body).to_string(),
+                Some(format!("run-{i}")),
+                base + time::Duration::seconds(i as i64),
+            );
+            store.comment_add(&c, None).unwrap();
+        }
+        let comments = store.comments_for(task.id).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].body, "ひとつめ");
+        assert_eq!(comments[1].run_id.as_deref(), Some("run-1"));
+        assert_eq!(comments[0].author.as_deref(), Some("impl"));
+
+        // 割り込み: コメント + `Interrupt` + `WorkerFinished` が 1 トランザクション。
+        let human = TaskComment::new(
+            task.id,
+            CommentAuthorKind::Human,
+            None,
+            "止めて".into(),
+            None,
+            base + time::Duration::seconds(5),
+        );
+        let finished = Event::WorkerFinished {
+            run_id: "run-1".into(),
+            outcome: "interrupted: comment".into(),
+            usage: None,
+            role: None,
+        };
+        let outcome = store
+            .comment_add(&human, Some((Trigger::Interrupt, vec![finished])))
+            .unwrap()
+            .expect("outcome");
+        assert_eq!(outcome.next, Status::Ready);
+        assert_eq!(outcome.reason, "comment");
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Ready);
+        assert_eq!(store.comments_for(task.id).unwrap().len(), 3);
+
+        // 知らないタスクには書けない（表に行が残らない）。
+        let orphan = TaskComment::new(
+            TaskId::new(),
+            CommentAuthorKind::Human,
+            None,
+            "x".into(),
+            None,
+            base,
+        );
+        assert!(matches!(store.comment_add(&orphan, None), Err(StoreError::Invalid(_))));
+    }
+
+    /// ADR-0044 D1: `update_task` は `json` と絞り込みの列を書き直し、`Event::Edited` を積む。
+    /// 状態機械は通らない（`status` は変わらない）。
+    #[test]
+    fn update_task_rewrites_the_denormalized_columns_and_appends_edited() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut task = sample_task(Status::Running);
+        store.insert(&task).unwrap();
+
+        task.title = "新しい題名".into();
+        task.objective = "新しい目的".into();
+        task.priority = 30;
+        task.labels = vec!["infra".into()];
+        task.category = crate::model::TaskCategory::Ops;
+        task.assignee = Some("infra-section".into());
+        store
+            .update_task(
+                &task,
+                Event::Edited {
+                    fields: vec!["title".into(), "labels".into()],
+                    by: "human".into(),
+                },
+            )
+            .unwrap();
+
+        let after = store.get(task.id).unwrap().unwrap();
+        assert_eq!(after.title, "新しい題名");
+        assert_eq!(after.status, Status::Running, "状態機械は通らない");
+        {
+            let conn = store.lock().unwrap();
+            let (title, objective, priority, labels, category, assignee): (
+                String,
+                String,
+                i64,
+                String,
+                String,
+                Option<String>,
+            ) = conn
+                .query_row(
+                    "SELECT title, objective, priority, labels_json, category, assignee FROM tasks WHERE id = ?1",
+                    params![task.id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(title, "新しい題名");
+            assert_eq!(objective, "新しい目的");
+            assert_eq!(priority, 30);
+            assert_eq!(labels, r#"["infra"]"#);
+            assert_eq!(category, "ops");
+            assert_eq!(assignee.as_deref(), Some("infra-section"));
+        }
+        assert!(
+            store
+                .events_for(task.id)
+                .unwrap()
+                .iter()
+                .any(|(_, e)| matches!(e, Event::Edited { by, .. } if by == "human"))
+        );
+
+        // 無いタスクは書けない。
+        let mut ghost = sample_task(Status::Ready);
+        ghost.title = "いない".into();
+        assert!(matches!(
+            store.update_task(&ghost, Event::Edited { fields: vec![], by: "human".into() }),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+
+    /// ADR-0044 D4: label（AND）/ category / milestone / tier / priority / `q`（コメント本文も）で絞れる。
+    #[test]
+    fn list_page_filters_by_label_category_tier_priority_and_comment_text() {
+        let store = SqliteStore::open_in_memory().unwrap();
+
+        let mut infra = task_with("infra work", Status::Ready, TaskKind::Execute, 30, None);
+        infra.labels = vec!["infra".into(), "urgent".into()];
+        infra.category = crate::model::TaskCategory::Ops;
+        infra.worker_hint.tier = crate::model::Tier::Frontier;
+        store.insert(&infra).unwrap();
+
+        let mut docs = task_with("write docs", Status::Ready, TaskKind::Execute, 0, None);
+        docs.labels = vec!["infra".into()];
+        docs.category = crate::model::TaskCategory::Docs;
+        docs.worker_hint.tier = crate::model::Tier::Cheap;
+        store.insert(&docs).unwrap();
+
+        let page = |filter: ListFilter| {
+            store
+                .list_page(&filter, ListOrder::CreatedDesc, None, 50)
+                .unwrap()
+                .items
+                .iter()
+                .map(|t| t.title.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // ラベルは AND。
+        assert_eq!(
+            page(ListFilter { labels: vec!["infra".into()], ..ListFilter::default() }).len(),
+            2
+        );
+        assert_eq!(
+            page(ListFilter {
+                labels: vec!["infra".into(), "urgent".into()],
+                ..ListFilter::default()
+            }),
+            vec!["infra work".to_string()]
+        );
+        // 種類・tier・優先度。
+        assert_eq!(
+            page(ListFilter {
+                categories: vec![crate::model::TaskCategory::Docs],
+                ..ListFilter::default()
+            }),
+            vec!["write docs".to_string()]
+        );
+        assert_eq!(
+            page(ListFilter {
+                tiers: vec![crate::model::Tier::Frontier],
+                ..ListFilter::default()
+            }),
+            vec!["infra work".to_string()]
+        );
+        assert_eq!(
+            page(ListFilter { priorities: vec![30], ..ListFilter::default() }),
+            vec!["infra work".to_string()]
+        );
+        // 複数のフィルタは AND（種類が合わないので 0 件）。
+        assert!(
+            page(ListFilter {
+                labels: vec!["infra".into()],
+                categories: vec![crate::model::TaskCategory::Feature],
+                ..ListFilter::default()
+            })
+            .is_empty()
+        );
+
+        // `q` はコメント本文も見る（`text_includes_comments = true` のときだけ）。
+        let comment = TaskComment::new(
+            docs.id,
+            CommentAuthorKind::Human,
+            None,
+            "ここに zebra と書いてある".into(),
+            None,
+            OffsetDateTime::now_utc(),
+        );
+        store.comment_add(&comment, None).unwrap();
+        assert_eq!(
+            page(ListFilter {
+                text_contains: Some("zebra".into()),
+                text_includes_comments: true,
+                ..ListFilter::default()
+            }),
+            vec!["write docs".to_string()]
+        );
+        assert!(
+            page(ListFilter {
+                text_contains: Some("zebra".into()),
+                ..ListFilter::default()
+            })
+            .is_empty(),
+            "コメントを含めない従来の検索では当たらない"
+        );
+    }
+
+    /// ADR-0044 D4 の検討の記録: rusqlite の bundled には **FTS5 がある**（この検査で実測している）。
+    /// それでも Phase 53 が `LIKE` を選んだのは、FTS5 の既定のトークナイザ（unicode61）が**日本語を
+    /// 語に切らない**ため、「調査」のような部分一致がこの検査のとおり 0 件になるから。
+    /// ADR-0044 D4 は「FTS5。無ければ `LIKE`」と書いているが、日本語の検索としては `LIKE` が正しい。
+    #[test]
+    fn fts5_availability_of_the_bundled_sqlite_is_recorded() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let conn = store.lock().unwrap();
+        let available = conn
+            .execute_batch("CREATE VIRTUAL TABLE temp.fts5_probe USING fts5(body)")
+            .is_ok();
+        assert!(available, "rusqlite の bundled には FTS5 がある（ADR-0044 D4 の前提）");
+        // FTS5 はある。だが `unicode61` は日本語を 1 つの token にしてしまうので、
+        // 「途中の語」では引けない（`LIKE` を選んだ理由）。
+        conn.execute_batch("INSERT INTO temp.fts5_probe(body) VALUES ('関連研究の調査をする')")
+            .unwrap();
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM temp.fts5_probe WHERE temp.fts5_probe MATCH '調査'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(hits, 0, "FTS5 の既定のトークナイザでは日本語の部分一致にならない");
     }
 }

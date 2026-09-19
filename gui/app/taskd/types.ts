@@ -32,11 +32,23 @@ export type TaskId = string;
  * 永続の規則の識別子（ULID）。
  */
 export type StandingRuleId = string;
-export type Action = ("approve" | "reject" | "answer" | "cancel") | "retry";
+export type Action = ("approve" | "reject" | "answer" | "cancel") | "retry" | "edit" | "reopen";
 /**
  * DESIGN §4.1 の `TaskKind`。
  */
 export type TaskKind = "plan" | "execute" | "review" | "approval";
+/**
+ * 誰が書いたか（`task_comments.author_kind` の CHECK と対）。
+ */
+export type CommentAuthorKind = "human" | "node" | "system";
+/**
+ * コメントの一意識別子（ULID）。
+ */
+export type CommentId = string;
+/**
+ * 人のコメントが何を起こしたか（ADR-0044 D2 の表）。
+ */
+export type CommentEffect = "stored" | "interrupted" | "answered" | "terminal";
 /**
  * DESIGN §5.4 の `WorkerHint`。
  */
@@ -158,6 +170,11 @@ export type Event =
   | {
       from: TaskId;
       type: "retried";
+    }
+  | {
+      by: string;
+      fields: string[];
+      type: "edited";
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -218,7 +235,7 @@ export type WorkspaceMode = "worktree" | "shared";
  * run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。
  */
 export type RunRole = "worker" | "reviewer";
-export type RunOutcomeKind = "done" | "question" | "error" | "requeue" | "lease_expired";
+export type RunOutcomeKind = ("done" | "question" | "error" | "requeue" | "lease_expired") | "interrupted";
 export type AttentionItem =
   | {
       at: string;
@@ -277,6 +294,15 @@ export type CriterionSpec =
       type: "reviewer";
     };
 /**
+ * ADR-0044 D3: タスクの種類。既定は `Other`。状態機械は見ない（人とボードのための分類）。
+ */
+export type TaskCategory = "feature" | "bug" | "research" | "ops" | "docs" | "other";
+/**
+ * ADR-0044 D3: `priority` の入力。`"P1"` のようなラベルでも整数でも書ける（API は `priority_label` を
+ * 返すので、GUI はラベルだけを扱えばよい。`i32` は互換のため残す）。
+ */
+export type PriorityInput = ("P0" | "P1" | "P2" | "P3") | number;
+/**
  * 知らせる理由（ADR-0037 D1 の 5 種）。**どれも「人の判断が要る」ときだけ**。
  * `result` / `progress` は入れない（SPEC §3.5 の数時間単位の流れは GUI の報告の仕事）。
  */
@@ -317,6 +343,52 @@ export type ReportId = string;
  * 報告の種類（ADR-0033 D3）。
  */
 export type ReportKind = "progress" | "result" | "bad_news" | "proposal" | "question";
+/**
+ * タイムラインの 1 件（ADR-0044 D5）。`at` は RFC 3339。
+ */
+export type TimelineItem =
+  | {
+      at: string;
+      event: Event;
+      kind: "event";
+      seq: number;
+    }
+  | {
+      at: string;
+      comment: TaskComment;
+      kind: "comment";
+    }
+  | {
+      approval: Approval;
+      at: string;
+      kind: "approval";
+    }
+  | {
+      at: string;
+      kind: "report";
+      report: Report;
+    }
+  | {
+      at: string;
+      kind: "delegation";
+      run_id: string;
+      tasks: TaskRef[];
+    }
+  | {
+      at: string;
+      /**
+       * そのリリースに入った、このタスクのコミット（完全な sha）。
+       */
+      commits: string[];
+      kind: "release";
+      sha12: string;
+    }
+  | {
+      action: string;
+      at: string;
+      detail: string;
+      kind: "integration";
+    };
 
 /**
  * スキーマ生成のルート。
@@ -336,6 +408,9 @@ export interface ApiV1Schema {
   cluster_connect_result: ClusterConnectResult;
   cluster_connect_start: ClusterConnectStart;
   clusters: Clusters;
+  comment: CommentBody;
+  comment_list: CommentList;
+  comment_result: CommentResult;
   config: ConfigView;
   daemon: DaemonView;
   decision: DecisionBody;
@@ -371,6 +446,7 @@ export interface ApiV1Schema {
   release_promote: ReleasePromoteAccepted;
   releases: Releases;
   reload: ReloadResult;
+  reopen: ReopenBody;
   replay_report: ReplayReport;
   repo_create: RepoCreateBody;
   repo_list: RepoList;
@@ -394,7 +470,10 @@ export interface ApiV1Schema {
   stream_reset: StreamReset;
   task: Task;
   task_detail: TaskDetail;
+  task_edit: TaskEdit;
+  task_edit_result: EditResult;
   task_list: TaskList;
+  timeline: Timeline;
   transition_result: TransitionResult;
   tree: TreeView;
   tree_file: TreeFileView;
@@ -768,6 +847,51 @@ export interface ClusterView {
    * `"rsync"` | `"none"`。
    */
   sync: string;
+}
+/**
+ * ADR-0044 D2: コメント（`GET`/`POST /tasks/{id}/comments`）と再開（`POST /tasks/{id}/reopen`）。
+ */
+export interface CommentBody {
+  body: string;
+}
+/**
+ * `GET /tasks/{id}/comments` の応答（古い順）。
+ */
+export interface CommentList {
+  items: TaskComment[];
+}
+/**
+ * `task_comments` の 1 行（ADR-0044 D2）。
+ */
+export interface TaskComment {
+  /**
+   * `author_kind = node` のときの `org_nodes.id`（無ければ `null`）。
+   */
+  author?: string | null;
+  author_kind: CommentAuthorKind;
+  body: string;
+  created_at: string;
+  id: CommentId;
+  /**
+   * ワーカーが書いたコメントの run（人のコメントには無い）。
+   */
+  run_id?: string | null;
+  task_id: TaskId;
+}
+/**
+ * `POST /tasks/{id}/comments` の結果。
+ */
+export interface CommentResult {
+  /**
+   * `Terminal` のとき、`POST /tasks/{id}/reopen` が使えるか（`cancelled` は `false`）。
+   */
+  can_reopen: boolean;
+  comment: TaskComment;
+  effect: CommentEffect;
+  /**
+   * 状態が動いたときだけ（`Interrupted` / `Answered`）。
+   */
+  transition?: TransitionResult | null;
 }
 /**
  * `GET /config`: `taskd.toml` の要約。env の値・トークンは含めない。taskd が起動時に作る。
@@ -1212,6 +1336,10 @@ export interface Task {
   attempts: number;
   budget: Budget;
   /**
+   * ADR-0044 D3: 種類（既定 `other`）。導入前のタスクには無いので既定で埋まる。
+   */
+  category?: "feature" | "bug" | "research" | "ops" | "docs" | "other";
+  /**
    * ADR-0033 D4（Phase 24）: 対話由来のタスクなら、きっかけになった人の発言（`messages.id`）。
    * run が終わると、その結果が `assignee` のノードの返事として `messages` に入る。
    * **DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。
@@ -1227,6 +1355,10 @@ export interface Task {
   id: TaskId;
   inputs: ArtifactRef[];
   kind: TaskKind;
+  /**
+   * ADR-0044 D3: 自由なラベル（小文字・`[a-z0-9-]`・最大 8 個）。導入前のタスクには無いので既定は空。
+   */
+  labels?: string[];
   lease?: Lease | null;
   /**
    * ADR-0033 D2: このタスクが属する途中目標（`project_id` の案件のもの）。
@@ -1476,6 +1608,10 @@ export interface TaskSummary {
   assignee?: string | null;
   attempts: number;
   backoff_until?: string | null;
+  /**
+   * ADR-0044 D3 の `Task.category`。
+   */
+  category: "feature" | "bug" | "research" | "ops" | "docs" | "other";
   children: number;
   /**
    * 対話用タスク（人への返事のための run）か（GUI-R3: 仕事の木や一覧から隠せるように）。
@@ -1489,11 +1625,27 @@ export interface TaskSummary {
   genre?: string | null;
   id: TaskId;
   kind: TaskKind;
+  /**
+   * ADR-0044 D3 の `Task.labels`。
+   */
+  labels: string[];
   lease_expires_at?: string | null;
   max_retries: number;
+  /**
+   * ADR-0033 D2 の `Task.milestone_id`（カードに途中目標を出すため）。
+   */
+  milestone_id?: MilestoneId | null;
   parent_id?: TaskId | null;
   pending_children: number;
   priority: number;
+  /**
+   * ADR-0044 D3: `priority` を P0〜P3 に丸めたもの（`i32` は互換のため残す）。
+   */
+  priority_label: string;
+  /**
+   * ADR-0033 D2 の `Task.project_id`（ボードは案件で絞るので一覧にも出す）。
+   */
+  project_id?: ProjectId | null;
   /**
    * ADR-0016 D1 の `Task.role`（GUI-R2: 一覧の各行に役割のラベルを出すため。`TaskDetail.role` と同じ値）。
    */
@@ -1728,6 +1880,10 @@ export interface NewTaskSpec {
    */
   assignee?: string | null;
   /**
+   * ADR-0044 D3: 種類。省略時は `other`。
+   */
+  category?: TaskCategory | null;
+  /**
    * ADR-0018: 指定すると `WorkspaceSpec::Remote{cluster, path}` になり、コマンドはそのクラスタで実行される。
    * `workspace` がクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。
    */
@@ -1743,6 +1899,10 @@ export interface NewTaskSpec {
    * DESIGN §4.1 の `TaskKind`。
    */
   kind?: "plan" | "execute" | "review" | "approval";
+  /**
+   * ADR-0044 D3: ラベル（小文字 `[a-z0-9-]`、最大 8 個）。省略時は無し。
+   */
+  labels?: string[];
   max_retries?: number;
   /**
    * 省略時は役割の既定 → 10。
@@ -1758,7 +1918,12 @@ export interface NewTaskSpec {
   milestone_id?: MilestoneId | null;
   objective: string;
   parent?: TaskId | null;
-  priority?: number;
+  /**
+   * ADR-0044 D3: `"P1"` のようなラベルでも `20` のような整数でも書ける。**省略時は P2**
+   * （= `task_core::DEFAULT_PRIORITY` = 10）。`taskctl add` は `--priority` の既定 0 を明示して渡すので
+   * 従来どおり。
+   */
+  priority?: PriorityInput | null;
   /**
    * ADR-0033 D2: このタスクが属する案件。存在しない案件はエラー。
    */
@@ -1773,6 +1938,12 @@ export interface NewTaskSpec {
    * ADR-0016 D1: 役割名（自由記述）。`[[roles]]` にあれば省略値の既定と run 時の指示文が効く。
    */
   role?: string | null;
+  /**
+   * ADR-0044 D1: 初期状態。`draft` か `ready` だけ（それ以外は 422）。**省略時は呼び出し側の既定**
+   * （`taskctl add` と委譲・計画の経路は従来どおり `draft`、`POST /tasks` は `ready`。人は Go を出す
+   * 側なので draft を挟まない）。`kind = approval` は従来どおり常に `ready`。
+   */
+  status?: Status | null;
   /**
    * 省略時は役割の既定 → `standard`（ADR-0016 D1 / M3: タスクの値 > 役割の既定 > 全体の既定）。
    */
@@ -2412,6 +2583,12 @@ export interface ReloadResult {
   reloaded: boolean;
 }
 /**
+ * `POST /tasks/{id}/reopen` の本文。
+ */
+export interface ReopenBody {
+  expected_status?: Status | null;
+}
+/**
  * `replay` の結果。
  */
 export interface ReplayReport {
@@ -2735,6 +2912,10 @@ export interface TaskDetail {
   latest_question?: string | null;
   prior_review: ReviewNote[];
   /**
+   * ADR-0044 D3（Phase 53）: `task.priority` を P0〜P3 に丸めたもの（GUI の編集フォーム用）。
+   */
+  priority_label: string;
+  /**
    * ADR-0016 D1: `Task.role`（GUI の表示用に最上位にも出す）。
    */
   role?: string | null;
@@ -2811,6 +2992,74 @@ export interface WorktreeView {
    */
   project: string;
 }
+/**
+ * ADR-0044 D1: `PATCH /tasks/{id}` の本文と応答。
+ */
+export interface TaskEdit {
+  /**
+   * 差し替え（部分更新はしない）。1 件以上。
+   */
+  acceptance?: CriterionSpec[] | null;
+  /**
+   * `worker_hint.adapter`（`null` で外す）。
+   */
+  adapter?: string | null;
+  /**
+   * 組織のノード（`null` で外す）。
+   */
+  assignee?: string | null;
+  category?: TaskCategory | null;
+  /**
+   * 差し替え。存在しない・`failed`/`cancelled`・自分自身はエラー。
+   */
+  depends_on?: TaskId[] | null;
+  /**
+   * 楽観的排他（現在の `status` と違えば 409）。
+   */
+  expected_status?: Status | null;
+  /**
+   * ADR-0044 D3: 差し替え（小文字 `[a-z0-9-]`、最大 8 個）。
+   */
+  labels?: string[] | null;
+  max_retries?: number | null;
+  max_turns?: number | null;
+  max_wall_secs?: number | null;
+  /**
+   * 途中目標（`null` で外す）。そのタスクの案件のものであること。
+   */
+  milestone_id?: MilestoneId | null;
+  objective?: string | null;
+  /**
+   * ADR-0044 D3: `"P1"` でも `20` でもよい。
+   */
+  priority?: PriorityInput | null;
+  /**
+   * ADR-0043 D2（Phase 52 / A1）: このタスクが使う案件のリポジトリを**名前で**差し替える
+   * （`project_repos.name`。空配列で「リポジトリを使わない」）。名前は `POST /tasks` と同じ規則で
+   * **そのタスクの案件の中**から解決する（知らない名前・リモートと他の混在は 422、案件に属さない
+   * タスクで空でない `repos` を書くのも 422）。走っている run には効かず、次の run の worktree から。
+   */
+  repos?: string[] | null;
+  /**
+   * 役割名（`null` で外す）。
+   */
+  role?: string | null;
+  /**
+   * ADR-0033 D2 の最上位「タスク」の tier 指定（`worker_hint.tier`）。
+   */
+  tier?: Tier | null;
+  title?: string | null;
+}
+/**
+ * `PATCH /tasks/{id}` の結果。
+ */
+export interface EditResult {
+  /**
+   * 実際に変えた項目の名前（決定的な並び。何も変わらなければ空）。
+   */
+  fields: string[];
+  task: Task;
+}
 export interface TaskList {
   /**
    * status 名 → 件数（フィルタに関係なく DB 全体。0 件の status は現れない）。
@@ -2821,6 +3070,13 @@ export interface TaskList {
   items: TaskSummary[];
   next_cursor?: string | null;
   total: number;
+}
+/**
+ * ADR-0044 D5: `GET /tasks/{id}/timeline`。
+ */
+export interface Timeline {
+  items: TimelineItem[];
+  task_id: TaskId;
 }
 /**
  * `GET /tasks/{id}/tree` の応答（ADR-0043 D6。読み取り。トークンは要らない）。

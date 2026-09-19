@@ -172,6 +172,8 @@ pub async fn run_subprocess(
                 match serde_json::from_str::<WorkerMessage>(trimmed) {
                     Ok(msg) => match msg {
                         WorkerMessage::Progress { msg } => sink.progress(&msg),
+                        // ADR-0044 D2（Phase 53）: 残る記録。run は止まらない。
+                        WorkerMessage::Comment { body } => sink.comment(&body),
                         WorkerMessage::Delegate { tasks } => sink.delegate(&tasks),
                         WorkerMessage::Artifact { name, path, kind } => {
                             match crate::artifact::resolve(&req.workspace, &name, &path, kind.as_deref()) {
@@ -362,11 +364,16 @@ mod tests {
         progress: Mutex<Vec<String>>,
         artifacts: Mutex<Vec<ArtifactRef>>,
         heartbeat_count: Mutex<u32>,
+        /// ADR-0044 D2（Phase 53）: `{"type":"comment"}` の本文。
+        comments: Mutex<Vec<String>>,
     }
 
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
             self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+        }
+        fn comment(&self, body: &str) {
+            self.comments.lock().unwrap_or_else(|e| e.into_inner()).push(body.to_string());
         }
         fn artifact(&self, artifact: &ArtifactRef) {
             self.artifacts
@@ -480,6 +487,29 @@ mod tests {
             }
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    /// ADR-0044 D2（Phase 53）: `{"type":"comment","body":"…"}` は**非終端**で、シンクの
+    /// `comment` に渡る（`progress` とは別の口）。run はそのまま続いて `done` で終わる。
+    /// `PROTOCOL_VERSION` は上げない（追加のみ。この行を出さないワーカーはそのまま動く）。
+    #[tokio::test]
+    async fn a_comment_line_is_passed_to_the_sink_and_does_not_end_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = sh_spec("cat >/dev/null\necho '{\"type\":\"comment\",\"body\":\"ビルドが通った\"}'\necho '{\"type\":\"progress\",\"msg\":\"next\"}'\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = run_subprocess(&spec, &req, "run-comment", &default_limits(), &sink).await.unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        assert_eq!(
+            sink.comments.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            vec!["ビルドが通った".to_string()]
+        );
+        assert_eq!(
+            sink.progress.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            vec!["next".to_string()],
+            "コメントは progress には入らない"
+        );
+        assert_eq!(PROTOCOL_VERSION, 4, "追加のみなので版数は上げない");
     }
 
     #[tokio::test]

@@ -8,10 +8,12 @@
 
 pub mod add;
 pub mod approval;
+pub mod comment;
 pub mod conversation;
 pub mod daemon;
 pub mod delegate;
 pub mod derive;
+pub mod edit;
 pub mod error;
 pub mod gate;
 pub mod graph;

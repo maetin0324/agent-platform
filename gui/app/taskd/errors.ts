@@ -1,3 +1,5 @@
+import type { ActionError } from "./action-types";
+
 /**
  * TaskdClient のエラー型（docs/DESIGN.md §6.3）。サーバ・クライアント両方から import できる（Node 専用 API を使わない）。
  * - TaskdError: taskd が application/problem+json（docs/taskd-api-v1.md §1.5）で返したエラー
@@ -78,6 +80,47 @@ export function taskdErrorResponse(e: unknown): Response {
   if (e instanceof TaskdError) {
     const data: TaskdRouteErrorData = { kind: "taskd_error", status: e.status, code: e.code, detail: e.detail };
     return new Response(JSON.stringify(data), { status: e.status, headers: { "Content-Type": "application/json" } });
+  }
+  throw e;
+}
+
+/** `TaskdError` / `TaskdUnavailable` を `ActionError` にする。それ以外は re-throw（本当に予期しないエラー）。 */
+export function toActionError(e: unknown): ActionError {
+  if (isTaskdUnavailable(e)) {
+    return {
+      status: 503,
+      code: "unavailable",
+      detail: `taskd に接続できません（${e.baseUrl}）`,
+      conflict: false,
+      fields: {},
+      messages: [],
+    };
+  }
+  if (e instanceof TaskdError) {
+    const fields: Record<string, string[]> = {};
+    const messages: string[] = [];
+    const errors = e.extra.errors;
+    if (Array.isArray(errors)) {
+      for (const item of errors) {
+        if (!item || typeof item !== "object") continue;
+        const message = (item as { message?: unknown }).message;
+        if (typeof message !== "string") continue;
+        messages.push(message);
+        const field = (item as { field?: unknown }).field;
+        if (typeof field === "string" && field) {
+          fields[field] ??= [];
+          fields[field].push(message);
+        }
+      }
+    }
+    return {
+      status: e.status,
+      code: e.code,
+      detail: e.detail,
+      conflict: e.status === 409,
+      fields,
+      messages,
+    };
   }
   throw e;
 }

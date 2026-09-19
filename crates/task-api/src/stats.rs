@@ -52,6 +52,9 @@ pub fn classify_outcome(outcome: &str) -> RunOutcomeKind {
         RunOutcomeKind::Question
     } else if outcome.starts_with("requeue: ") {
         RunOutcomeKind::Requeue
+    } else if outcome.starts_with("interrupted: ") {
+        // ADR-0044 D2/D8（Phase 53）: 人のコメントで止めた run は失敗ではない。
+        RunOutcomeKind::Interrupted
     } else if outcome == "lease_expired" {
         RunOutcomeKind::LeaseExpired
     } else {
@@ -97,6 +100,8 @@ impl StatsState {
                     RunOutcomeKind::Error => totals.error += 1,
                     RunOutcomeKind::Requeue => totals.requeue += 1,
                     RunOutcomeKind::LeaseExpired => totals.lease_expired += 1,
+                    // ADR-0044 D8: 割り込みはどの集計にも数えない（run は起きたが失敗でも成功でもない）。
+                    RunOutcomeKind::Interrupted => {}
                 }
                 let input = usage.and_then(|u| u.input_tokens).unwrap_or(0);
                 let output = usage.and_then(|u| u.output_tokens).unwrap_or(0);
@@ -217,7 +222,10 @@ impl AccountStatsState {
                 match classify_outcome(outcome) {
                     RunOutcomeKind::Done => totals.done += 1,
                     RunOutcomeKind::Error => totals.error += 1,
-                    RunOutcomeKind::Question | RunOutcomeKind::Requeue | RunOutcomeKind::LeaseExpired => {}
+                    RunOutcomeKind::Question
+                    | RunOutcomeKind::Requeue
+                    | RunOutcomeKind::LeaseExpired
+                    | RunOutcomeKind::Interrupted => {}
                 }
                 let input = usage.and_then(|u| u.input_tokens).unwrap_or(0);
                 let output = usage.and_then(|u| u.output_tokens).unwrap_or(0);
@@ -285,6 +293,8 @@ mod tests {
         assert_eq!(classify_outcome("requeue: throttled"), RunOutcomeKind::Requeue);
         assert_eq!(classify_outcome("lease_expired"), RunOutcomeKind::LeaseExpired);
         assert_eq!(classify_outcome("lease_expired: x"), RunOutcomeKind::Error);
+        // ADR-0044 D2/D8（Phase 53）: 人のコメントで止めた run は失敗ではない。
+        assert_eq!(classify_outcome("interrupted: comment"), RunOutcomeKind::Interrupted);
         assert_eq!(classify_outcome("error(retryable=true): boom"), RunOutcomeKind::Error);
     }
 

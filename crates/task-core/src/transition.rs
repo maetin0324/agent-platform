@@ -36,6 +36,13 @@ pub enum Trigger {
     /// 委譲した子が失敗した親（ADR-0021 D1）: やり直せるなら `reviewing → ready`（attempts 消費）、
     /// やり直せないなら `reviewing → blocked`（人間の判断待ち）。**`failed` にはしない**。
     ChildFailed,
+    /// ADR-0044 D2（Phase 53）: 人のコメントによる割り込み。`running`/`reviewing → ready`、
+    /// attempts は据え置き（人が口を出しただけで試行を 1 回使わせない）。`Outcome::reason` は
+    /// **`"comment"`**（`name()` の `"interrupt"` とは別。ADR-0044 D2 の表がそう書いている）。
+    Interrupt,
+    /// ADR-0044 D2（Phase 53）: 終端のタスクの再開（`POST /tasks/{id}/reopen`）。
+    /// `done`/`failed → ready`、attempts は 0 に戻す。`cancelled` は再開しない（worktree が無い）。
+    Reopen,
 }
 
 impl Trigger {
@@ -59,6 +66,17 @@ impl Trigger {
             Trigger::DependencyFailed => "dependency_failed",
             Trigger::Aggregate => "aggregate",
             Trigger::ChildFailed => "child_failed",
+            Trigger::Interrupt => "interrupt",
+            Trigger::Reopen => "reopen",
+        }
+    }
+
+    /// `Outcome::reason`（`Event::Transitioned.reason` に入る文字列）。ふつうは `name()` と同じだが、
+    /// `Interrupt` だけは ADR-0044 D2 の表のとおり `"comment"`（「なぜ ready に戻ったか」を人が読む）。
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Trigger::Interrupt => "comment",
+            other => other.name(),
         }
     }
 }
@@ -165,6 +183,32 @@ pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransiti
                         reason: t.name(),
                     })
                 }
+            } else {
+                Err(invalid(s, t))
+            }
+        }
+
+        // ADR-0044 D2: 人のコメントで走っている run を止める。attempts は据え置き、理由は `comment`。
+        Trigger::Interrupt => {
+            if matches!(s.status, Status::Running | Status::Reviewing) {
+                Ok(Outcome {
+                    next: Status::Ready,
+                    attempts: s.attempts,
+                    reason: t.reason(),
+                })
+            } else {
+                Err(invalid(s, t))
+            }
+        }
+
+        // ADR-0044 D2: 終端のタスクの再開。`done`/`failed` からだけ（`cancelled` は worktree が無い）。
+        Trigger::Reopen => {
+            if matches!(s.status, Status::Done | Status::Failed) {
+                Ok(Outcome {
+                    next: Status::Ready,
+                    attempts: 0,
+                    reason: t.reason(),
+                })
             } else {
                 Err(invalid(s, t))
             }
@@ -363,6 +407,22 @@ mod tests {
                     expect_err()
                 }
             }
+            // ADR-0044 D2: 人のコメントの割り込みは `running`/`reviewing` からだけ。
+            Trigger::Interrupt => {
+                if matches!(status, Status::Running | Status::Reviewing) {
+                    expect_ok(Status::Ready)
+                } else {
+                    expect_err()
+                }
+            }
+            // ADR-0044 D2: 再開は `done`/`failed` からだけ（`cancelled` は不可）。
+            Trigger::Reopen => {
+                if matches!(status, Status::Done | Status::Failed) {
+                    expect_ok(Status::Ready)
+                } else {
+                    expect_err()
+                }
+            }
             Trigger::Accept => {
                 if status == Status::Draft {
                     expect_ok(Status::Ready)
@@ -439,6 +499,9 @@ mod tests {
             Trigger::Requeue,
             Trigger::DependencyFailed,
             Trigger::Aggregate,
+            // ADR-0044 D2（Phase 53）: 割り込みと再開も attempts を絡めない（据え置き / 0 に戻す）。
+            Trigger::Interrupt,
+            Trigger::Reopen,
         ];
 
         let mut count = 0usize;
@@ -469,7 +532,8 @@ mod tests {
                                 outcome.attempts, 0,
                                 "attempts should be unchanged: kind={kind:?} status={status:?} trigger={trigger:?}"
                             );
-                            assert_eq!(outcome.reason, trigger.name());
+                            // ADR-0044 D2: `Interrupt` だけ reason が name と違う（`"comment"`）。
+                            assert_eq!(outcome.reason, trigger.reason());
                         }
                         None => {
                             let err = got.unwrap_err();
@@ -481,8 +545,51 @@ mod tests {
                 }
             }
         }
-        // 4 kinds * 8 statuses * 12 triggers
-        assert_eq!(count, 4 * 8 * 12);
+        // 4 kinds * 8 statuses * 14 triggers（Phase 53 で Interrupt / Reopen を追加）
+        assert_eq!(count, 4 * 8 * 14);
+    }
+
+    /// ADR-0044 D2（Phase 53）: 割り込みは attempts を消費せず理由は `comment`、再開は attempts を 0 に戻す。
+    /// `cancelled` は再開できない（worktree が無い）。
+    #[test]
+    fn interrupt_keeps_attempts_and_reopen_resets_them() {
+        for kind in ALL_KINDS {
+            for status in [Status::Running, Status::Reviewing] {
+                let s = StateView {
+                    kind,
+                    status,
+                    attempts: 2,
+                    max_retries: 2,
+                };
+                let outcome = transition(&s, &Trigger::Interrupt)
+                    .unwrap_or_else(|e| panic!("expected Ok for {kind:?}/{status:?}, got Err({e})"));
+                assert_eq!(outcome.next, Status::Ready);
+                assert_eq!(outcome.attempts, 2, "割り込みは試行を 1 回使わせない");
+                assert_eq!(outcome.reason, "comment");
+            }
+            for status in [Status::Done, Status::Failed] {
+                let s = StateView {
+                    kind,
+                    status,
+                    attempts: 5,
+                    max_retries: 2,
+                };
+                let outcome = transition(&s, &Trigger::Reopen)
+                    .unwrap_or_else(|e| panic!("expected Ok for {kind:?}/{status:?}, got Err({e})"));
+                assert_eq!(outcome.next, Status::Ready);
+                assert_eq!(outcome.attempts, 0, "再開は attempts を 0 に戻す");
+                assert_eq!(outcome.reason, "reopen");
+            }
+            let cancelled = StateView {
+                kind,
+                status: Status::Cancelled,
+                attempts: 0,
+                max_retries: 2,
+            };
+            let err = transition(&cancelled, &Trigger::Reopen).unwrap_err();
+            assert_eq!(err.trigger, "reopen");
+            assert_eq!(err.status, Status::Cancelled);
+        }
     }
 
     /// リトライ判定を含むトリガー (WorkerError{true/false}, LeaseExpired,

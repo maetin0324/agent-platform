@@ -113,6 +113,6 @@ test.describe("Phase G5 受け入れ条件 5: pnpm release の配布物", () => 
     expect(response?.status()).toBe(200);
 
     const footer = page.getByTestId("footer");
-    await expect(footer).toContainText(`taskd-gui ${VERSION}`);
+    await expect(footer).toContainText(`Celeris ${VERSION}`);
   });
 });

@@ -70,6 +70,72 @@ impl ReleaseSource for FsReleases {
     fn promote(&self, sha12: &str) -> Result<ReleasePromoteAccepted, ReleasePromoteError> {
         start_promote(&self.root, sha12)
     }
+
+    /// ADR-0044 D5（Phase 53）: タスクのブランチにだけ載っているコミットの sha。
+    /// `rev-list --max-count=<N> [<base>..]<branch>` を上限つきで走らせるだけ（読むだけ。
+    /// 壊れていても空を返す）。
+    fn branch_commits(&self, repo: &Path, branch: &str, base: Option<&str>) -> Vec<String> {
+        branch_commits(repo, branch, base)
+    }
+}
+
+/// ADR-0044 D5: `branch`（`base` があれば `base..branch`）のコミットの sha を新しい順に返す。
+/// git が無い・リポジトリが無い・ブランチが無い・時間切れなら空。
+fn branch_commits(repo: &Path, branch: &str, base: Option<&str>) -> Vec<String> {
+    // ブランチ名・sha に変な文字が混じっていたら走らせない。
+    let safe = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/_-.".contains(c));
+    if !repo.is_dir() || !safe(branch) {
+        return Vec::new();
+    }
+    let range = match base.filter(|b| safe(b)) {
+        Some(base) => format!("{base}..{branch}"),
+        None => branch.to_string(),
+    };
+    let limit = format!("--max-count={}", task_api::BRANCH_COMMITS_LIMIT);
+    let Some(out) = git_output(repo, &["rev-list", &limit, &range]) else {
+        return Vec::new();
+    };
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// `git_status` と同じ流儀で stdout を取る（失敗・時間切れ・非 0 終了は `None`）。
+fn git_output(repo: &Path, args: &[&str]) -> Option<String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut buf = String::new();
+    use std::io::Read;
+    child.stdout.as_mut()?.read_to_string(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// ディレクトリ名として安全で、`git rev-parse --short=12` が出す形か（パストラバーサル防止）。

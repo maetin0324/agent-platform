@@ -129,7 +129,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<OrgData> {
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "組織 - taskd-gui" }];
+  return [{ title: "組織 - Celeris" }];
 }
 
 /** 追加・編集・削除（すべて管理系。ADR-0033 D1）。GUI 側では判断しない: フォームの `intent` を写すだけ。 */

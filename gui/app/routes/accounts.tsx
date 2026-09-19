@@ -87,7 +87,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<AccountsDat
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "アカウント - taskd-gui" }];
+  return [{ title: "アカウント - Celeris" }];
 }
 
 /**

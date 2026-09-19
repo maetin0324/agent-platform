@@ -1,0 +1,532 @@
+import { data, Form, isRouteErrorResponse, Link, useFetcher, useSearchParams } from "react-router";
+import { ErrorFlash } from "~/components/Flash";
+import { HelpLink } from "~/components/HelpLink";
+import { Badge, StatusBadge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
+import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { checkboxClass, chipLabelClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
+import { Icon } from "~/components/ui/Icon";
+import { EmptyState, PageHeader } from "~/components/ui/misc";
+import {
+  BOARD_COLUMNS,
+  type BoardColumnId,
+  boardFilterIsEmpty,
+  boardFilterToQuery,
+  groupByColumn,
+  PRIORITY_LABELS,
+  parseBoardFilter,
+  summaryPriorityLabel,
+} from "~/lib/board";
+import {
+  boardColumnLabel,
+  priorityFullLabel,
+  TASK_CATEGORIES,
+  TIERS,
+  taskCategoryLabel,
+  tierLabel,
+} from "~/lib/labels";
+import { revalidateAfterActionErrors } from "~/lib/revalidate";
+import { cn } from "~/lib/utils";
+import { isSupportTask } from "~/lib/work-tree";
+import { TaskdBanner } from "~/root";
+import type { TaskEditOutcome } from "~/taskd/action-types";
+import type { TaskdClient } from "~/taskd/client.server";
+import { getTaskdClient } from "~/taskd/client.server";
+import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
+import { formString } from "~/taskd/forms";
+import { buildTaskEdit, editTask } from "~/taskd/tasks-admin.server";
+import type { MilestoneView, OrgList, OrgNode, ProjectDetail, ProjectList, TaskList, TaskSummary } from "~/taskd/types";
+import type { Route } from "./+types/board";
+
+/**
+ * `/board`（ボード、ADR-0044 D4）。案件を選んで、6 列（待ち・進行中・止まっている・完了・失敗・中止）で見る。
+ *
+ * - **URL がそのまま状態**（`project` / `label` / `category` / `assignee` / `milestone` / `tier` / `priority` / `q`）。
+ *   絞り込みは `GET /tasks` にそのまま転送する（GUI 側で絞り直さない）。
+ * - 列の束ね方と並び（優先度の降順 → `created_at` の昇順）は `~/lib/board.ts` の純関数。
+ * - カードの上で優先度・レベル・担当をその場で変えられる（`PATCH /tasks/{id}`。ADR-0044 D1）。
+ * - **ドラッグで列を跨がせない**（状態は状態機械の仕事。ADR-0044 D4 の「採らない」）。
+ */
+
+/** 1 度に読む上限。ボードは列に全部出すのでページングはしない（超えたら画面に断りを出す）。 */
+const BOARD_LIMIT = 500;
+
+export interface BoardData {
+  tasks: TaskList;
+  projects: ProjectList;
+  /** 選んだ案件の途中目標（絞り込みの選択肢とカードの表示）。案件未選択のときは空。 */
+  milestones: MilestoneView[];
+  /** 担当の名前とプルダウンの選択肢（`GET /org`。落ちてもボードは出す）。 */
+  org: OrgNode[];
+}
+
+/**
+ * `/board` の loader 本体。検索パラメータを `BoardFilter` に読み、`GET /tasks` のクエリへ写す
+ * （`app/routes/tasks.tsx` の `loadTasks` と同じ形。`TaskdClient` を引数に取ってテスト可能にする）。
+ */
+export async function loadBoard(client: TaskdClient, request: Request): Promise<BoardData> {
+  const params = new URL(request.url).searchParams;
+  const filter = parseBoardFilter(params);
+  const [tasks, projects, org] = await Promise.all([
+    client.get<TaskList>("/tasks", {
+      query: { ...boardFilterToQuery(filter), limit: BOARD_LIMIT, order: "created_desc" },
+      signal: request.signal,
+    }),
+    client.get<ProjectList>("/projects", { signal: request.signal }).catch(() => ({ items: [] }) as ProjectList),
+    client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
+  ]);
+  // 途中目標は案件を選んだときだけ（絞り込みの選択肢とカードの表示。落ちても空で出す）。
+  const milestones = filter.project
+    ? await client
+        .get<ProjectDetail>(`/projects/${encodeURIComponent(filter.project)}`, { signal: request.signal })
+        .then((d) => d.milestones)
+        .catch(() => [] as MilestoneView[])
+    : [];
+  return { tasks, projects, milestones, org: org.items };
+}
+
+export async function loader({ request }: Route.LoaderArgs): Promise<BoardData> {
+  try {
+    return await loadBoard(getTaskdClient(), request);
+  } catch (e) {
+    throw taskdErrorResponse(e);
+  }
+}
+
+export function meta(_: Route.MetaArgs) {
+  return [{ title: "ボード - Celeris" }];
+}
+
+export const shouldRevalidate = revalidateAfterActionErrors;
+
+/** カードの行内編集（ADR-0044 D1 / D4）。送るのは変えた 1 項目だけ（`TaskEdit` は「省略 = 変えない」）。 */
+export async function action({ request }: Route.ActionArgs) {
+  const form = await request.formData();
+  const taskId = formString(form, "task_id");
+  if (form.get("intent") !== "edit" || !taskId) {
+    throw data({ error: "unknown intent" }, { status: 400 });
+  }
+  const outcome = await editTask(getTaskdClient(), taskId, buildTaskEdit(form), request.signal);
+  return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
+}
+
+export default function BoardPage({ loaderData }: Route.ComponentProps) {
+  const { tasks, projects, milestones, org } = loaderData;
+  const [searchParams] = useSearchParams();
+  const filter = parseBoardFilter(searchParams);
+  // 裏方のタスク（`TaskSummary.support`: 対話・報告のまとめ・承認待ち・レビュー）は既定で隠す
+  // （SPEC「タスクは裏方」/ ADR-0033 D8。`/tasks` と同じ扱い）。判定は taskd の `support` をそのまま使い、
+  // `show_support=1` は表示の切り替えだけ（`GET /tasks` には送らない。taskd に絞り込みが無い）。
+  const showSupport = searchParams.get("show_support") === "1";
+  const visibleItems = showSupport ? tasks.items : tasks.items.filter((t) => !isSupportTask(t));
+  const columns = groupByColumn(visibleItems);
+  const orgNames = Object.fromEntries(org.map((n) => [n.id, n.name]));
+  const milestoneNames = Object.fromEntries(milestones.map((m) => [m.id, `#${m.seq} ${m.title}`]));
+  const truncated = tasks.items.length >= BOARD_LIMIT;
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        icon="layers"
+        title={
+          <>
+            ボード
+            <HelpLink anchor="screens" label="画面ごとの説明" />
+          </>
+        }
+        description="案件のタスクを状態ごとに並べて見ます。カードの上で優先度・レベル・担当をその場で変えられます（状態は状態機械が決めるので、ドラッグでは動かせません）。"
+      />
+
+      <Card>
+        <CardHeader icon="filter" title="絞り込み" description="ここで選んだ条件はそのまま URL になります。" />
+        <CardBody>
+          <Form method="get" className="space-y-4" data-testid="board-filter-form">
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label htmlFor="board-project" className={labelClass}>
+                  案件
+                </label>
+                <select
+                  id="board-project"
+                  name="project"
+                  defaultValue={filter.project ?? ""}
+                  data-testid="board-project"
+                  className={cn(selectClass, "mt-1.5 w-56")}
+                >
+                  <option value="">すべての案件</option>
+                  {projects.items.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="board-assignee" className={labelClass}>
+                  担当
+                </label>
+                <select
+                  id="board-assignee"
+                  name="assignee"
+                  defaultValue={filter.assignee ?? ""}
+                  data-testid="board-assignee"
+                  className={cn(selectClass, "mt-1.5 w-44")}
+                >
+                  <option value="">すべての担当</option>
+                  {org.map((node) => (
+                    <option key={node.id} value={node.id}>
+                      {node.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="board-milestone" className={labelClass}>
+                  途中目標
+                </label>
+                <select
+                  id="board-milestone"
+                  name="milestone"
+                  defaultValue={filter.milestone ?? ""}
+                  data-testid="board-milestone"
+                  className={cn(selectClass, "mt-1.5 w-52")}
+                >
+                  <option value="">すべての途中目標</option>
+                  {milestones
+                    .slice()
+                    .sort((a, b) => a.seq - b.seq)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        #{m.seq} {m.title}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="board-label" className={labelClass}>
+                  ラベル
+                </label>
+                <input
+                  id="board-label"
+                  type="text"
+                  name="label"
+                  defaultValue={filter.labels[0] ?? ""}
+                  placeholder="例: pluvio"
+                  data-testid="board-label"
+                  className={cn(inputClass, "mt-1.5 w-40")}
+                />
+              </div>
+              <div>
+                <label htmlFor="board-q" className={labelClass}>
+                  検索
+                </label>
+                <input
+                  id="board-q"
+                  type="text"
+                  name="q"
+                  maxLength={200}
+                  defaultValue={filter.q ?? ""}
+                  placeholder="題名・目的・コメント"
+                  data-testid="board-q"
+                  className={cn(inputClass, "mt-1.5 w-56")}
+                />
+              </div>
+            </div>
+
+            <fieldset data-testid="board-category-filter">
+              <legend className={labelClass}>種類</legend>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                {TASK_CATEGORIES.map((c) => (
+                  <label key={c} className={chipLabelClass}>
+                    <input
+                      type="checkbox"
+                      name="category"
+                      value={c}
+                      defaultChecked={filter.categories.includes(c)}
+                      className={checkboxClass}
+                    />
+                    {taskCategoryLabel(c)}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset data-testid="board-priority-filter">
+              <legend className={labelClass}>優先度</legend>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                {PRIORITY_LABELS.map((p) => (
+                  <label key={p} className={chipLabelClass}>
+                    <input
+                      type="checkbox"
+                      name="priority"
+                      value={p}
+                      defaultChecked={filter.priorities.includes(p)}
+                      className={checkboxClass}
+                    />
+                    {priorityFullLabel(p)}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset data-testid="board-tier-filter">
+              <legend className={labelClass}>レベル</legend>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                {TIERS.map((t) => (
+                  <label key={t} className={chipLabelClass}>
+                    <input
+                      type="checkbox"
+                      name="tier"
+                      value={t}
+                      defaultChecked={filter.tiers.includes(t)}
+                      className={checkboxClass}
+                    />
+                    {tierLabel(t)}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {/* 裏方のタスク（対話の返事・報告のまとめ・承認待ち・レビュー）は既定で隠す。
+                  taskd には絞り込みが無いので、表示だけを `TaskSummary.support` で切り替える。 */}
+              <label className={chipLabelClass}>
+                <input
+                  type="checkbox"
+                  name="show_support"
+                  value="1"
+                  data-testid="board-show-support"
+                  defaultChecked={showSupport}
+                  className={checkboxClass}
+                />
+                裏方も表示
+              </label>
+              <Button type="submit" variant="primary" size="sm" data-testid="board-filter-submit">
+                <Icon name="filter" />
+                絞り込み
+              </Button>
+              <Link to="/board" className="text-sm text-fg-muted underline underline-offset-2">
+                条件を消す
+              </Link>
+            </div>
+          </Form>
+        </CardBody>
+      </Card>
+
+      {truncated && (
+        <p className="text-xs text-fg-subtle" data-testid="board-truncated">
+          多すぎるので先頭 {BOARD_LIMIT} 件だけ出しています。案件やラベルで絞ってください。
+        </p>
+      )}
+
+      {visibleItems.length === 0 && (
+        <EmptyState icon="layers" title="出せるタスクがありません" data-testid="board-empty">
+          {boardFilterIsEmpty(filter)
+            ? showSupport
+              ? "タスクがまだありません。案件の画面から「タスクを追加」してください。"
+              : "人が見る仕事がありません（裏方のタスクしかない可能性があります）。上の「裏方も表示」を付けてください。"
+            : "条件に合うタスクがありません。条件を変えてください。"}
+        </EmptyState>
+      )}
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3" data-testid="board-columns">
+        {BOARD_COLUMNS.map((column) => (
+          <BoardColumn
+            key={column.id}
+            id={column.id}
+            items={columns[column.id]}
+            orgNames={orgNames}
+            milestoneNames={milestoneNames}
+            org={org}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BoardColumn({
+  id,
+  items,
+  orgNames,
+  milestoneNames,
+  org,
+}: {
+  id: BoardColumnId;
+  items: TaskSummary[];
+  orgNames: Record<string, string>;
+  milestoneNames: Record<string, string>;
+  org: OrgNode[];
+}) {
+  return (
+    <section
+      aria-label={boardColumnLabel(id)}
+      data-testid="board-column"
+      data-column={id}
+      className="rounded-xl border border-border bg-surface-2/40 p-3"
+    >
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-fg">
+        {boardColumnLabel(id)}
+        <span className="rounded-full bg-surface px-2 py-0.5 text-xs font-semibold tabular-nums text-fg-subtle">
+          {items.length}
+        </span>
+      </h2>
+      {items.length === 0 ? (
+        <p className="mt-3 text-xs text-fg-subtle">ありません。</p>
+      ) : (
+        <ul className="mt-3 space-y-2">
+          {items.map((item) => (
+            <BoardCard key={item.id} item={item} orgNames={orgNames} milestoneNames={milestoneNames} org={org} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * カード 1 枚（ADR-0044 D4）。題名・担当・レベル・優先度・ラベル・種類・途中目標を出し、
+ * 優先度・レベル・担当は選んだ瞬間に `PATCH /tasks/{id}` を送る（`useFetcher`。画面遷移はしない）。
+ */
+function BoardCard({
+  item,
+  orgNames,
+  milestoneNames,
+  org,
+}: {
+  item: TaskSummary;
+  orgNames: Record<string, string>;
+  milestoneNames: Record<string, string>;
+  org: OrgNode[];
+}) {
+  const fetcher = useFetcher<TaskEditOutcome>({ key: `board-edit-${item.id}` });
+  const busy = fetcher.state !== "idle";
+  // 終端のタスクは taskd が 409 を返す（ADR-0044 D1）ので、行内編集そのものを出さない。
+  const editable = item.actions.includes("edit");
+  const priority = summaryPriorityLabel(item);
+
+  function submitField(name: string, value: string) {
+    fetcher.submit({ intent: "edit", task_id: item.id, [name]: value }, { method: "post", action: "/board" });
+  }
+
+  return (
+    <li
+      data-testid="board-card"
+      data-task-id={item.id}
+      data-status={item.status}
+      className="rounded-lg border border-border bg-surface p-3 shadow-xs"
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        <StatusBadge status={item.status} />
+        <Badge tone="primary" data-testid="board-card-priority">
+          {priority}
+        </Badge>
+        <Badge tone="neutral" data-testid="board-card-category">
+          {taskCategoryLabel(item.category)}
+        </Badge>
+        <Badge tone="neutral" data-testid="board-card-tier">
+          {item.tier}
+        </Badge>
+      </div>
+      <Link
+        to={`/tasks/${item.id}`}
+        data-testid="board-card-title"
+        className="mt-1.5 block font-medium text-fg no-underline hover:text-primary hover:underline"
+      >
+        {item.title}
+      </Link>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
+        <span data-testid="board-card-assignee">
+          担当: {item.assignee ? (orgNames[item.assignee] ?? item.assignee) : "（なし）"}
+        </span>
+        {item.milestone_id && (
+          <span data-testid="board-card-milestone">
+            途中目標: {milestoneNames[item.milestone_id] ?? item.milestone_id}
+          </span>
+        )}
+      </div>
+      {item.labels.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {item.labels.map((label) => (
+            <Badge key={label} tone="teal" data-testid="board-card-label">
+              {label}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {editable && (
+        <div className="mt-2 flex flex-wrap gap-1.5" data-testid="board-card-edit">
+          <select
+            aria-label={`${item.title} の優先度`}
+            value={priority}
+            disabled={busy}
+            data-testid="board-card-priority-select"
+            onChange={(e) => submitField("priority", e.target.value)}
+            className={cn(selectClass, "h-7 w-24 text-xs")}
+          >
+            {PRIORITY_LABELS.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label={`${item.title} のレベル`}
+            value={item.tier}
+            disabled={busy}
+            data-testid="board-card-tier-select"
+            onChange={(e) => submitField("tier", e.target.value)}
+            className={cn(selectClass, "h-7 w-28 text-xs")}
+          >
+            {TIERS.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label={`${item.title} の担当`}
+            value={item.assignee ?? ""}
+            disabled={busy}
+            data-testid="board-card-assignee-select"
+            onChange={(e) => submitField("assignee", e.target.value)}
+            className={cn(selectClass, "h-7 w-36 text-xs")}
+          >
+            <option value="">（決めない）</option>
+            {org.map((node) => (
+              <option key={node.id} value={node.id}>
+                {node.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {fetcher.data && !fetcher.data.ok && <ErrorFlash error={fetcher.data.error} />}
+    </li>
+  );
+}
+
+export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
+  if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
+    const errorData = error.data as TaskdRouteErrorData;
+    if (errorData.kind === "unavailable") {
+      return (
+        <main className="p-4">
+          <TaskdBanner taskdApiUrl={errorData.baseUrl ?? ""} problem={null} />
+        </main>
+      );
+    }
+    return (
+      <main className="mx-auto max-w-2xl space-y-3 p-6">
+        <h1 className="text-xl font-semibold text-fg">エラー {errorData.status}</h1>
+        <EmptyState icon="alert" title={errorData.detail ?? "読み込めませんでした"} />
+      </main>
+    );
+  }
+  return (
+    <main className="mx-auto max-w-2xl space-y-3 p-6">
+      <h1 className="text-xl font-semibold text-fg">エラー</h1>
+      <EmptyState icon="alert" title="予期しないエラーが起きました。" />
+    </main>
+  );
+}

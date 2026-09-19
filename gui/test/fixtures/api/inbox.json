@@ -105,7 +105,10 @@
                     "actions": [
                         "approve",
                         "cancel"
-                    ]
+                    ],
+                    "labels": [],
+                    "category": "other",
+                    "priority_label": "P3"
                 },
                 {
                     "id": "01M2KQJJR6T5XY4RD5BHWBGVBQ",
@@ -129,7 +132,10 @@
                     "actions": [
                         "approve",
                         "cancel"
-                    ]
+                    ],
+                    "labels": [],
+                    "category": "other",
+                    "priority_label": "P3"
                 }
             ]
         }

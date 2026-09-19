@@ -111,7 +111,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ReportsData
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "報告 - taskd-gui" }];
+  return [{ title: "報告 - Celeris" }];
 }
 
 /**

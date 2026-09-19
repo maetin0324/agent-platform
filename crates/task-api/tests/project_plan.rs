@@ -133,6 +133,8 @@ async fn children_materialized_from_the_plan_output_stay_in_the_same_project() {
             genre: None,
             assignee: None,
             workspace: None,
+            category: None,
+            labels: Vec::new(),
         }],
     };
     let children = task_core::plan::materialize(

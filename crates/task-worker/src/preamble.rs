@@ -4,7 +4,10 @@
 //! ステートレスで、状態はファイルと DB にある（DESIGN 原則 2）。ここは純粋関数だけで、I/O も LLM も無い。
 //!
 //! 並び（ADR-0033 D4 / Phase 24 の指示。Phase 30 で 1 の直後に「仕事で使う道具」を追加。
-//! Phase 33 で 3 の直後に「あなたの直近の仕事」を追加）:
+//! Phase 33 で 3 の直後に「あなたの直近の仕事」を追加。Phase 53 / ADR-0044 D2 で**先頭に**
+//! 「コメント」を追加）:
+//! 0. コメント（`context.comments` / `context.interrupt`。ADR-0044 D2: 人がコメントで run を止めたら、
+//!    次の run の**先頭**に「**人からの割り込み**: …」として出す。続けてコメントの糸を最新 20 件）
 //! 1. 役職と brief（`context.node`）＋ 対話 run で担当が自分の仕事の分野を持つときは「仕事で使う道具」
 //!    （`context.work_genre`。Phase 30: 対話は常に対話用分野で走るが、その人が自分の得意分野を知って
 //!    答えられるように 1 行足す）
@@ -17,7 +20,8 @@
 //!    対話 run にだけ出す。その途中目標と、属する仕事の終わり方・成果物の抜粋。以下は 1 つずつ繰り下がる）
 //! 5. 直近のやり取り（`context.conversation`）
 //! 6. 役割の指示文（`context.role`。ADR-0016 D1 からある既存の節）
-//! 7. 記憶の書き方の指示（記憶が有効な run にだけ）
+//! 7. 記憶の書き方の指示（記憶が有効な run にだけ）と、コメントの書き方
+//!    （`context.comments_enabled` の run にだけ。ADR-0044 D2）
 //! 8. 対話専用の指示（`context.conversation_addressee`。Phase 28: 対話 run は返事だけをする。
 //!    末尾に足す。ADR-0033 D4 追記。Phase 33 で「自分の直近の仕事を先に見ること」を一文追加）
 //!
@@ -35,10 +39,15 @@ use crate::protocol::{ConversationAddressee, MilestoneReviewContext, RunContext}
 /// `artifacts` は成果物ディレクトリの workspace 相対表記（`RunRequest::artifacts_rel`。ADR-0036 D3。
 /// 単独タスクでは `artifacts` なので出力は Phase 34 までとバイト単位で同じ）。
 pub fn render(context: &RunContext, artifacts: &str) -> String {
-    let mut out = person_sections(context);
+    // ADR-0044 D2（Phase 53）: コメントは**前置きの先頭**（人が割り込んだら最初に目に入る）。
+    // コメントが 1 件も無ければ何も出さないので、Phase 52 までの出力とバイト単位で同じ。
+    let mut out = comments_section(context);
+    out.push_str(&person_sections(context));
     out.push_str(&workspace_section(context));
     out.push_str(&role_section(context));
     out.push_str(&memory_instructions(context, artifacts));
+    // ADR-0044 D2（Phase 53）: コメントの書き方（`comments_enabled` の run にだけ）。
+    out.push_str(&comment_instructions(context));
     out.push_str(&conversation_instructions(context));
     // Phase 41（ADR-0038 D1）: 途中目標レビューの対話 run には、対話の指示のさらに後ろに
     // 「結果 → 達成の可否 → 次の提案」の指示を足す（対話の指示は消さない）。
@@ -46,6 +55,51 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
         out.push_str(&milestone_review_instructions(review));
     }
     out
+}
+
+/// ADR-0044 D2（Phase 53）: 「コメント」の節。**前置きの先頭**に出す。
+///
+/// - 人のコメントで直前の run を止めた（`context.interrupt`）ときは、その本文を
+///   「**人からの割り込み**: …」として**いちばん先**に置く（ADR-0044 D2 の表）。
+///   割り込みの後に人がさらに書き足していれば、その**最新の**人のコメントがここに出る
+///   （どちらも人が読ませたい文なので先頭に出してよい、という判断。`interrupting_comment`）。
+/// - 続けてコメントの糸（最新 20 件、古い順）を出す。
+/// - コメントが 1 件も無く割り込みも無ければ、この節ごと出さない（既存の出力を変えない）。
+fn comments_section(context: &RunContext) -> String {
+    if context.interrupt.is_none() && context.comments.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## コメント (comments on this task)\n");
+    if let Some(interrupt) = &context.interrupt {
+        out.push_str(&format!(
+            "**人からの割り込み**: {}\n（この run はこのコメントで止められた。まずこれに応えること）\n",
+            interrupt.trim()
+        ));
+    }
+    for comment in &context.comments {
+        let who = match comment.author_kind {
+            task_core::CommentAuthorKind::Human => "人".to_string(),
+            task_core::CommentAuthorKind::Node => match &comment.author {
+                Some(id) => id.clone(),
+                None => "担当".to_string(),
+            },
+            task_core::CommentAuthorKind::System => "taskd".to_string(),
+        };
+        out.push_str(&format!("- [{}] {}: {}\n", comment.at, who, one_line(&comment.body)));
+    }
+    out.push('\n');
+    out
+}
+
+/// ADR-0044 D2（Phase 53）: ワーカーへの指示（コメントの書き方）。`comments_enabled` の run にだけ出す。
+fn comment_instructions(context: &RunContext) -> String {
+    if !context.comments_enabled {
+        return String::new();
+    }
+    "## コメント (how to leave a note on this task)\n\
+     短い進捗や判断の記録はコメントに書け（`{\"type\":\"comment\",\"body\":\"…\"}` を 1 行出す）。\
+     `progress` と違ってコメントは**残り**、人にも次の run にも見える。長い成果は成果物に書くこと。\n\n"
+        .to_string()
 }
 
 /// 1〜5（役職と brief → 永続の認可 → 記憶 → あなたの直近の仕事 → 直近のやり取り）。
@@ -508,6 +562,53 @@ mod tests {
     #[test]
     fn an_empty_context_renders_nothing_at_all() {
         assert_eq!(render(&RunContext::default(), "artifacts"), "");
+    }
+
+    /// ADR-0044 D2（Phase 53）: コメントの節は**前置きの先頭**。人の割り込みがいちばん先に来て、
+    /// その後にコメントの糸（古い順）が並ぶ。`comments_enabled` の run には書き方の指示も付く。
+    /// コメントが 1 件も無い run の前置きは Phase 52 までと 1 バイトも変わらない。
+    #[test]
+    fn comments_come_first_and_the_interruption_is_the_very_first_line() {
+        let context = RunContext {
+            interrupt: Some("方針を変えたい。まず設計を書いて".into()),
+            comments: vec![
+                crate::protocol::CommentContext {
+                    author_kind: task_core::CommentAuthorKind::Node,
+                    author: Some("impl".into()),
+                    body: "ビルドは通った\n（続き）".into(),
+                    at: "2026-09-19T01:00:00Z".into(),
+                },
+                crate::protocol::CommentContext {
+                    author_kind: task_core::CommentAuthorKind::Human,
+                    author: None,
+                    body: "方針を変えたい。まず設計を書いて".into(),
+                    at: "2026-09-19T02:00:00Z".into(),
+                },
+            ],
+            comments_enabled: true,
+            ..full_context()
+        };
+        let out = render(&context, "artifacts");
+        assert!(out.starts_with("## コメント (comments on this task)\n"), "{out}");
+        let interrupt_at = out.find("**人からの割り込み**").expect("interrupt line");
+        let thread_at = out.find("- [2026-09-19T01:00:00Z] impl:").expect("thread line");
+        assert!(interrupt_at < thread_at, "割り込みが糸より先: {out}");
+        // 複数行の本文は 1 行に畳む（他の節と同じ規則）。
+        assert!(out.contains("- [2026-09-19T01:00:00Z] impl: ビルドは通った （続き）"), "{out}");
+        assert!(out.contains("- [2026-09-19T02:00:00Z] 人: 方針を変えたい。まず設計を書いて"), "{out}");
+        // 役職の節はコメントの後ろ。
+        assert!(out.find("## あなた:").expect("node section") > interrupt_at, "{out}");
+        // 書き方の指示（ADR-0044 D2）。
+        assert!(out.contains("短い進捗や判断の記録はコメントに書け"), "{out}");
+        assert!(out.contains(r#"{"type":"comment","body":"…"}"#), "{out}");
+
+        // コメントが無ければ節ごと出ない（`comments_enabled` だけなら指示だけ）。
+        let quiet = RunContext { comments_enabled: true, ..full_context() };
+        let quiet_out = render(&quiet, "artifacts");
+        assert!(!quiet_out.contains("## コメント (comments on this task)"), "{quiet_out}");
+        assert!(quiet_out.contains("短い進捗や判断の記録はコメントに書け"), "{quiet_out}");
+        let silent = render(&full_context(), "artifacts");
+        assert!(!silent.contains("コメント"), "{silent}");
     }
 
     /// 役割だけがあるときは、Phase 23 の `prompt_header` と同じ `## Role:` 節だけを出す。

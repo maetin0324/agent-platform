@@ -212,7 +212,7 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         acceptance,
         kind: args.kind.into(),
         tier: args.tier.map(Into::into),
-        priority: args.priority,
+        priority: Some(task_ops::add::PriorityInput::Number(args.priority)),
         parent,
         depends_on,
         max_turns: args.max_turns,
@@ -228,6 +228,10 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         workspace: args.workspace,
         cluster: args.cluster,
         adapter: None,
+        // ADR-0044 D1/D3: `taskctl add` は引数を増やさない（ラベル・種類・初期状態は GUI から）。
+        labels: Vec::new(),
+        category: None,
+        status: None,
     };
 
     let task = create_task_with_roles(store, spec, &roles, &genres, OffsetDateTime::now_utc())?;

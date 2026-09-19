@@ -21,7 +21,8 @@ use crate::milestones::{MilestoneDecideBody, MilestoneDecided};
 use crate::project_plan::{ProjectPlanAccepted, ProjectPlanBody};
 use crate::types::{
     AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView, AnswerBody, ArtifactList,
-    CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters, ConfigView, DaemonView, DecisionBody,
+    CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters, CommentBody, CommentList, ConfigView,
+    DaemonView, DecisionBody, ReopenBody, Timeline,
     EventsPage, Health, MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, Problem,
     ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody, ProviderCheckResponse, ProviderConfigView,
     Providers, ReleasePromoteAccepted, Releases, ReloadResult, RetryBody, RunList, SecretList, SecretPutResult,
@@ -120,6 +121,17 @@ pub struct ApiV1Schema {
     pub repo_patch: crate::types::RepoPatchBody,
     pub tree: crate::types::TreeView,
     pub tree_file: crate::types::TreeFileView,
+    // ---- ADR-0044 B1（Phase 53）: 編集・コメント・再開・タイムライン ----
+    /// ADR-0044 D1: `PATCH /tasks/{id}` の本文と応答。
+    pub task_edit: task_ops::edit::TaskEdit,
+    pub task_edit_result: task_ops::edit::EditResult,
+    /// ADR-0044 D2: コメント（`GET`/`POST /tasks/{id}/comments`）と再開（`POST /tasks/{id}/reopen`）。
+    pub comment: CommentBody,
+    pub comment_list: CommentList,
+    pub comment_result: task_ops::comment::CommentResult,
+    pub reopen: ReopenBody,
+    /// ADR-0044 D5: `GET /tasks/{id}/timeline`。
+    pub timeline: Timeline,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

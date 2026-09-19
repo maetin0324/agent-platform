@@ -117,7 +117,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<TasksData> 
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "タスク一覧 - taskd-gui" }];
+  return [{ title: "タスク一覧 - Celeris" }];
 }
 
 export default function TasksPage({ loaderData }: Route.ComponentProps) {

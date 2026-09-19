@@ -7,6 +7,8 @@ import type {
   ApprovalDecideResult,
   ClusterConnectResult,
   ClusterConnectStart,
+  CommentResult,
+  EditResult,
   MessageAccepted,
   Milestone,
   MilestoneDecided,
@@ -25,6 +27,7 @@ import type {
   RetryResult,
   SecretPutResult,
   StandingRule,
+  Task,
   TransitionResult,
 } from "./types";
 
@@ -62,6 +65,33 @@ export type TransitionOutcome =
 export type RetryOutcome =
   | { ok: true; taskId: string; result: RetryResult }
   | { ok: false; taskId: string; error: ActionError };
+
+/**
+ * タスクの編集（ADR-0044 D1、Phase 53。`PATCH /tasks/{id}`。**管理系**）。
+ * `result.fields` は**実際に変わった項目**（何も変わらなければ空）なので、画面はこれをそのまま出す
+ * （GUI 側で差分を計算し直さない）。409（終端のタスク・`expected_status` 不一致）も例外にせず
+ * `{ok:false, error}` にする。
+ */
+export type TaskEditOutcome =
+  | { ok: true; op: "edit"; taskId: string; result: EditResult }
+  | { ok: false; op: "edit"; taskId: string; error: ActionError };
+
+/**
+ * タスクへのコメント（ADR-0044 D2、Phase 53。`POST /tasks/{id}/comments`。**管理系**）。
+ * `result.effect` が「何が起きたか」（`stored` / `interrupted` / `answered` / `terminal`）で、
+ * 状態が動いたときだけ `result.transition` が付く。判断は taskd がした結果なので GUI は writes せず出すだけ。
+ */
+export type TaskCommentOutcome =
+  | { ok: true; op: "comment"; taskId: string; result: CommentResult }
+  | { ok: false; op: "comment"; taskId: string; error: ActionError };
+
+/**
+ * 終端のタスクの再開（ADR-0044 D2、Phase 53。`POST /tasks/{id}/reopen`。**管理系**）。
+ * `done`/`failed` → `ready`。`cancelled` は 409（worktree が無いので「やり直す」= `retry` を使う）。
+ */
+export type TaskReopenOutcome =
+  | { ok: true; op: "reopen"; taskId: string; result: TransitionResult }
+  | { ok: false; op: "reopen"; taskId: string; error: ActionError };
 
 /** 作成（`POST /tasks` / `POST /plans`）の失敗。成功は詳細へ redirect するので data にならない。 */
 export interface CreateFailure {
@@ -169,6 +199,9 @@ export type ProjectOpOutcome =
   // `is_primary: true` で、他の行の付け替えは taskd が行う（GUI は再計算しない）。
   | { ok: true; op: "repo_create" | "repo_patch" | "repo_primary"; repo: ProjectRepo }
   | { ok: true; op: "repo_delete"; repoId: string }
+  // ADR-0044 D1（Phase 53）: 案件・途中目標から人がタスクを足す（`POST /tasks`。**管理系**、201）。
+  // 人が作ったタスクは `ready`（人は Go を出す側なので draft を挟まない）。
+  | { ok: true; op: "task_create"; task: Task }
   | {
       ok: false;
       op:
@@ -181,7 +214,8 @@ export type ProjectOpOutcome =
         | "repo_create"
         | "repo_patch"
         | "repo_primary"
-        | "repo_delete";
+        | "repo_delete"
+        | "task_create";
       error: ActionError;
     };
 

@@ -97,6 +97,10 @@ const task = (id: string, over: Partial<TaskSummary> = {}): TaskSummary => ({
   conversation: false,
   actions: [],
   assignee: null,
+  // ADR-0044 D3（Phase 53）で `TaskSummary` に増えた必須項目。
+  labels: [],
+  category: "other",
+  priority_label: "P3",
   ...over,
 });
 
