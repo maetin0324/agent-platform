@@ -8379,3 +8379,10 @@ main（`ef639ea`）に `git merge --no-ff` で合わせた。衝突は **12 か�
   `POST /projects/{id}/pause` と `POST /tasks/{id}/answer` はトークン無しで 401。`celeris-worker:latest`（2.05 GB）ビルド済み。
 - 教訓（提案 P-55/56-a）: 停止→起動の昇格の前に load を見る（`verify.sh` が終わってから数分空ける／`promote.sh` が
   `loadavg` を出す）。重い I/O の直後に daemon を止めると exit が遅い。
+
+### Phase 57 実機: 7 回目の昇格（ライブ。2026-09-19 23:25 UTC）
+
+- `release.sh main` → `3aa24c8536fc`（B3。migration 無し）。`verify.sh` → 検査 1〜6 すべて true（N-1: 旧 `a96919eebd98` が同じ schema 15 を読む）、
+  `ok=true live_ok=true`。
+- `promote.sh 3aa24c8536fc`（mode=live）: 2 秒で新が active、GUI は 48 秒で切替（load 約 6 の中）、旧は drain して exit 0。
+  `current -> 3aa24c8536fc`、`previous -> a96919eebd98`。これで ADR-0043 A1〜A3 と ADR-0044 B1〜B3 がすべて本番。
