@@ -56,3 +56,30 @@ P-56 で挙げていた代案は「子が 1 件でも failed なら親を `revie
 - 人が見るのは「自動でやり直しても駄目だったもの」だけになる。受信箱の「質問」がその入口。
 - 状態機械にトリガが 1 つ、イベントが 1 つ増える（ADR-0010 / ADR-0016 と同じ流儀）。全網羅テストは 4×8×13 になる。
 - `replay` は `Transitioned{reason: "child_failed"}` をそのまま再現できる（`QuestionRaised` は状態を変えないので無視）。
+
+## Phase 45 追記（2026-09-19、実機）
+
+D3 の「一度扱った失敗は数え直さない」判定は、`Dispatcher::newly_failed_delegated_children`
+（`crates/task-dispatch/src/dispatcher.rs`）で実装されていたが、親の直近の `child_failed` 遷移の位置
+（`handled_at`）と子の `failed` 遷移の位置（`failed_at`）の両方を `TaskStore::events_for` から取っていた。
+この `events_for` が返す `u64` は**タスクごとにローカルな `seq`**（0 始まり）であり、`events` テーブルの
+グローバルな `id`（Phase 9b / ADR-0013 D6 で導入済み）ではない。そのため「親の `seq` ≥ 子の `seq`」を
+グローバルな前後関係の代わりに使っており、**子の方が親よりイベント数が多い**（＝ `seq` が大きい）場合に
+毎回「新規の失敗」と誤判定していた。
+
+症状（本番、2026-09-19、親 `01M2VG4YNG4DD7Z5BYPSB8W8AW`）: 委譲した子が 1 回失敗した後、人間が
+`taskctl answer` で答えて親を `ready` に戻すたびに、親は同じ子の失敗を「新規」として数え直し、
+`blocked` と「委譲した子タスクが失敗し… どうしますか」という質問（`Event::QuestionRaised` と
+`approvals` の新しい行、Phase 44）を繰り返した。20 分で 5 回、同じ質問が出た。
+
+修正: `TaskStore` に `events_for_with_global_ids`（`events.id` 昇順で返す）を追加し、
+`newly_failed_delegated_children` の `handled_at`/`failed_at` の両方をこちらから取るようにした
+（`events_for` はタスクをまたいだ比較に使えないことをドキュメントに明記した）。他に `events_for` の
+戻り値をタスクをまたいで比較している箇所は無かった（`crates/task-dispatch` / `task-ops` / `taskd` /
+`task-api` を監査。詳細は Phase 45 の `docs/PROGRESS.md`）。
+
+回帰テスト: `crates/task-dispatch/src/dispatcher.rs` の
+`child_failure_question_is_not_repeated_when_the_child_has_more_events_than_the_parent`
+（子に親より多くの `WorkerProgress` を積んでから失敗させ、親が 2 回目の run でも `blocked` を
+繰り返さず `done` になること、`QuestionRaised` と `child_failed` 遷移がそれぞれちょうど 1 件であることを
+確認）。旧実装（`events_for_with_global_ids` を `events_for` に戻した状態）では失敗することを確認済み。

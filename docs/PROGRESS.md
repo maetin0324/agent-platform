@@ -5526,3 +5526,83 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
 
 - P-100: U44-1 のとおり、`task-api` 側の `ApiState` にも reload を伝える経路を足し、`GET /config` の
   `roles[]`/`genres[]` と対話開始の検証を reload 直後から新しい値にする。
+
+## Phase 45 — 子の失敗の「扱い済み」判定が per-task seq を比べていた（実機から。2026-09-19）
+
+- 完了日: 2026-09-19
+- 症状（本番、2026-09-19）: 親 `01M2VG4YNG4DD7Z5BYPSB8W8AW` が、委譲した子タスクの失敗について
+  「委譲した子タスクが失敗し、やり直し（max_retries = …）でも解決しませんでした。どうしますか。」という
+  質問（Phase 44 で `approvals` にも載るようになったもの）を、人間が `taskctl answer` で答えて `ready` に
+  戻すたびに何度も繰り返した。20 分で 5 回、同じ子の失敗について質問が出た。
+- 原因: ADR-0021 D3「一度扱った失敗は数え直さない: 子が `failed` になったイベントの**グローバル id** が、
+  親の直近の `Transitioned{reason: "child_failed"}` の id より大きいものだけを数える」を実装した
+  `Dispatcher::newly_failed_delegated_children`（`crates/task-dispatch/src/dispatcher.rs`）が、親・子
+  どちらも `TaskStore::events_for` を使って `handled_at`（親の直近の `child_failed` 遷移の位置）と
+  `failed_at`（子の `failed` 遷移の位置）を取っていた。`events_for` が返す `u64` は
+  `SELECT seq, json FROM events WHERE task_id = ?1` の**タスクごとにローカルな連番**（0 始まり）であり、
+  `events` テーブル全体でグローバルに単調増加する `id`（Phase 9b で導入済み、`SELECT id, json FROM events
+  ... ORDER BY id`）ではない。親の `seq` と子の `seq` を比較しても大小関係に意味は無く、たまたま
+  子の方が親よりイベント数が多い（＝子の `seq` の方が大きい）場合、
+  「子の失敗 `seq` ≤ 親の直近の処理 `seq`」が常に偽になり、**毎回「新規の失敗」と誤判定**していた。
+  実機の子は再委譲や進捗イベントを重ねて親より `seq` が大きくなっていたため、常に該当した。
+- 変更したファイル:
+  - `crates/task-core/src/store.rs`: `TaskStore` トレイトに `events_for_with_global_ids(task_id) ->
+    Result<Vec<(u64, Event)>, StoreError>`（`SELECT id, json FROM events WHERE task_id = ?1 ORDER BY id
+    ASC`）を追加。`SqliteStore` に実装（`TaskStore` の実装はこれ 1 つのみ。他にテストダブル等の実装は無い
+    ことを確認済み）。`events_for` の doc comment に「`seq` はタスクごとのローカルな連番で、他タスクの
+    `seq` とは比較できない」ことを明記し、タスクをまたぐ比較には新しいメソッドを使うよう誘導。
+  - `crates/task-dispatch/src/dispatcher.rs`: `newly_failed_delegated_children` の `handled_at`
+    （親）・`failed_at`（子）の取得を、両方とも `events_for` から `events_for_with_global_ids` に変更。
+    誤解を招いていたコメント（`events_for` の id がグローバルだと書いていた）を Phase 45 の説明に修正。
+    回帰テスト
+    `child_failure_question_is_not_repeated_when_the_child_has_more_events_than_the_parent` を追加
+    （子に親より多い `WorkerProgress` を 200 件積んでから `Trigger::WorkerError` で `failed` にし、
+    `max_retries = 0` の親を 1 回目は `blocked` + `QuestionRaised` にし、`Trigger::Answer` で戻して 2 回目の
+    run では `done` まで進み、`QuestionRaised` と `Transitioned{reason: "child_failed"}` がそれぞれ
+    ちょうど 1 件であることを確認）。`events_for_with_global_ids` を一時的に `events_for` に戻して
+    このテストが `FAILED`（`Blocked` のまま。2 回目の `child_failed` と `QuestionRaised` が記録される）に
+    なることを確認したうえで修正を復元した（コミット前に diff がフィックス分のみであることも確認済み）。
+  - `docs/adr/0021-parent-retries-when-a-delegated-child-fails.md`: 「Phase 45 追記」節を追加。
+- 監査（`events_for` の呼び出し元のうち、複数タスクのイベントの `u64` を比較していないか）:
+  - `crates/task-dispatch/src/dispatcher.rs:1826/1853`（修正対象。旧 `newly_failed_delegated_children`）
+    → 修正済み。
+  - `crates/task-dispatch/src/dispatcher.rs:1278`（`cross_department_questions_of`）、`:1328`
+    （`consecutive_requeues`）、`:1609`（`consecutive_reviewer_requeues`）、`:1818`
+    （`needs_aggregate_run`/`has_aggregate_transition`）、`:2111`（`recover_reviews` の `last_run_id`）、
+    `:2474`（`run_extras` の集約/やり直し判定）、`:2482`（同じブロックの `child_events`。id を捨てて
+    `outcome`/`artifacts` の内容だけ見ており比較しない）、`:2559`（`milestone_review_of` ループ内、1 タスク
+    ずつ）、`:2632`（`recent_work_of` ループ内、1 タスクずつ）、`:2769`/`:2775`（`review_task` 内、対象
+    タスク自身の判定）、`:2870`（`resolve_human_approvals` の `approval_decision_note`、子 1 件の内容だけ）
+    → いずれも単一タスクの events を渡すだけ、または id を破棄して内容（`Event` の中身）だけ見ており、
+    タスクをまたいだ `u64` の大小比較は無い。問題なし。
+  - `crates/task-ops/src/derive.rs`（`consecutive_requeues`/`consecutive_reviewer_requeues`/
+    `last_run_id`/`approval_decision_note`、いずれも `events: &[(u64, Event)]` 1 引数）→ 単一タスクの
+    events しか受け取らない関数で、呼び出し側もそれぞれ 1 タスク分だけを渡している。問題なし。
+  - `crates/task-ops/src/replay.rs:89`（`replay`。全タスクをループして `events_for` を呼ぶが、
+    `diff_task` は id を使わず `Event` の内容を畳み込むだけで、タスク間の比較は無い）→ 問題なし。
+  - `crates/task-ops/src/delegate.rs:65`（`tree_worker_runs`。根とその子孫をまたいで `events_for` を
+    呼ぶが、`WorkerStarted` の**件数**を合計しているだけで、id 同士の比較は無い）→ 問題なし。
+  - `crates/task-ops/src/gate.rs` / `approval.rs` / `add.rs` / `plan.rs` / `retry.rs` の `events_for`
+    呼び出しはすべて `#[cfg(test)]` 内（テストの検証用）。本番コードに `events_for` の呼び出しは無い
+    （`gate.rs` の本番コード `answer()` は `latest_question(&store.events_for(id)?)` を 1 タスク分だけに
+    使っている）。→ 問題なし。
+  - `crates/taskd/src/*.rs`・`crates/task-api/src/*.rs`: `events_for` の直接呼び出しは無し（`derive.rs`
+    の単一タスク用ヘルパー経由のみ）。→ 対象外。
+- 実行したコマンドと結果:
+  - `cargo test -p task-dispatch --lib
+    child_failure_question_is_not_repeated_when_the_child_has_more_events_than_the_parent`: 修正後
+    exit 0、1 passed。旧コード（`events_for_with_global_ids` を `events_for` に戻した状態）では
+    `FAILED`（`left: Blocked, right: Done`、イベント列に `child_failed` 遷移と `QuestionRaised` が
+    2 件ずつ記録されていることを確認）。
+  - `cargo test --workspace`: exit 0。`grep -c "^test result: FAILED"` = 0、`test result: ok` のブロックが
+    56、`passed` の合計 1137 件（Phase 44 の 1136 件 + 今回の回帰テスト 1 件）。
+  - `cargo clippy --workspace -- -D warnings`: exit 0、警告なし。
+- 未解決事項:
+  - U45-1: 実機の親 `01M2VG4YNG4DD7Z5BYPSB8W8AW` 自体が既に `blocked` で人間の回答待ちのままなら、
+    配備後に人間が改めて答えたときに今度こそ `done`（または次段階）まで進むかを実機で確認してほしい
+    （このタスクは taskd/GUI のプロセスに触れない前提で作業したため、実機側の状態は未確認）。
+  - U45-2: `events_for` を使う既存コードが将来また複数タスクの `u64` を比較しないよう、レビューで
+    「`events_for` はタスクをまたいで比較できない」という doc comment（`crates/task-core/src/store.rs`）を
+    見てもらうしかない。型で強制する分離（例えば `Seq(u64)`/`GlobalEventId(u64)` のような newtype 化）は
+    今回のスコープ外（他の呼び出し箇所すべての型変更を伴うため、Phase 45 の「今回の Phase だけをやる」を
+    超える）。今後同種の事故が繰り返すようなら次の Phase で newtype 化を検討する価値がある。

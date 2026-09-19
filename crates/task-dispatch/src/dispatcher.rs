@@ -1822,8 +1822,13 @@ impl Dispatcher {
     /// ADR-0021 D1/D3: 委譲した子（`Event::Delegated`）のうち、**前回この親が子の失敗を扱ってから後に** `failed` に
     /// なったもの。一度扱った失敗は数え直さない（親が別の子に割り当て直して成功したのに、古い失敗で止まらないため）。
     /// 返り値は id 順の `(子, 直近のワーカー run の outcome)`。
+    ///
+    /// Phase 45（実機バグ）: ここは親と子で別々のタスクのイベント id を比較するので、`events_for`（タスクごとの
+    /// ローカルな `seq`）ではなく `events_for_with_global_ids`（`events` テーブルの全タスク共通の `id`）を
+    /// 使わなければならない。`seq` で比較すると、子の方がイベント数が多い（＝ `seq` が大きい）場合に
+    /// 「一度扱った失敗」でも毎回「新規」と判定され、同じ質問が繰り返し出る。
     fn newly_failed_delegated_children(&self, task_id: TaskId) -> Result<Vec<(Task, Option<String>)>, DispatchError> {
-        let events = self.store.events_for(task_id)?;
+        let events = self.store.events_for_with_global_ids(task_id)?;
         // 直近に子の失敗を扱った時点（グローバル id。イベント id は単調増加）。
         let handled_at = events
             .iter()
@@ -1850,7 +1855,7 @@ impl Dispatcher {
             if child.status != Status::Failed {
                 continue;
             }
-            let child_events = self.store.events_for(id)?;
+            let child_events = self.store.events_for_with_global_ids(id)?;
             let failed_at = child_events.iter().rev().find_map(|(eid, e)| match e {
                 Event::Transitioned { to: Status::Failed, .. } => Some(*eid),
                 _ => None,
@@ -3617,6 +3622,82 @@ mod tests {
         // 答えれば ready に戻る（既存の answers[] の経路。Phase 29 の一本化はここでは検証しない）。
         store.apply_transition(parent.id, Trigger::Answer, None).unwrap();
         assert_eq!(store.get(parent.id).unwrap().unwrap().status, Status::Ready);
+    }
+
+    /// Phase 45（実機バグ、2026-09-19）: `newly_failed_delegated_children` が「一度扱った失敗は数え直さない」
+    /// （ADR-0021 D3）を判定するのに `events_for`（タスクごとのローカルな `seq`）で親と子を比較していたため、
+    /// 子の方が親よりイベント数が多い（＝ `seq` が大きい）場合、子の失敗が毎回「新規」と誤判定され、親が
+    /// resume するたびに同じ質問（`QuestionRaised` と `child_failed` への遷移）が繰り返された
+    /// （実機の親 `01M2VG4YNG4DD7Z5BYPSB8W8AW` が 20 分で 5 回同じ質問をした事故）。
+    /// `events_for_with_global_ids`（`events` テーブルのグローバル `id`）で比較すれば、2 回目以降は
+    /// 「既に扱った失敗」と正しく判定され、親はやり直しの review pass だけで `done` になる。
+    #[tokio::test]
+    async fn child_failure_question_is_not_repeated_when_the_child_has_more_events_than_the_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_org_for_reports(&store);
+
+        let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        parent.assignee = Some("coding-poc".into());
+        store.insert(&parent).unwrap();
+
+        let mut child = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        child.parent_id = Some(parent.id);
+        store.delegate_children(parent.id, "run-1", vec![child.clone()]).unwrap();
+        store.apply_transition(child.id, Trigger::Dispatch, None).unwrap();
+        // 子に、親が今後 2 回の run で積む以上のイベントを積んでから失敗させる（実機の形の再現）。
+        // 子の `seq`（タスクごとのローカルな連番）が親のどの `seq` よりも大きくなるようにする。
+        for i in 0..200u32 {
+            store
+                .append_event(child.id, &Event::WorkerProgress { run_id: "child-run".into(), msg: format!("padding {i}") })
+                .unwrap();
+        }
+        store
+            .apply_transition(child.id, Trigger::WorkerError { retryable: false }, None)
+            .unwrap();
+        assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Failed);
+
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+
+        // 1 回目: 親が走って review pass するが、委譲した子が失敗しているので `max_retries = 0` によりやり直せず、
+        // ディスパッチャが質問を立てて blocked になる。
+        let report1 = run_until_idle(&mut d, 200).await;
+        assert!(report1.idle);
+        let after_first = store.get(parent.id).unwrap().unwrap();
+        assert_eq!(after_first.status, Status::Blocked, "max_retries = 0 なのでやり直せず、人に聞く");
+
+        // 人間が答えると ready に戻る。
+        store.apply_transition(parent.id, Trigger::Answer, None).unwrap();
+        assert_eq!(store.get(parent.id).unwrap().unwrap().status, Status::Ready);
+
+        // 2 回目: 親がもう一度走って review pass する。子は同じ失敗のままだが、既に扱った失敗なので
+        // 再度質問を出してはいけない（旧実装のバグ: per-task seq を比較すると、子の方が seq が大きいので
+        // 「新規」と誤判定して blocked を繰り返した）。
+        let report2 = run_until_idle(&mut d, 200).await;
+        assert!(report2.idle);
+        let after_second = store.get(parent.id).unwrap().unwrap();
+        let parent_events = store.events_for(parent.id).unwrap();
+        assert_eq!(
+            after_second.status,
+            Status::Done,
+            "既に扱った子の失敗を数え直してはいけない: {parent_events:?}"
+        );
+
+        let questions = parent_events.iter().filter(|(_, e)| matches!(e, Event::QuestionRaised { .. })).count();
+        assert_eq!(questions, 1, "{parent_events:?}");
+        let child_failed_transitions = parent_events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == Trigger::ChildFailed.name()))
+            .count();
+        assert_eq!(child_failed_transitions, 1, "{parent_events:?}");
+
+        // approvals も 1 件のまま（Phase 44）。
+        let approvals = store.approval_list(Some(true), None, None).unwrap();
+        assert_eq!(approvals.len(), 1, "{approvals:?}");
     }
 
     #[tokio::test]

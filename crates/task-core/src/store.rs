@@ -344,8 +344,17 @@ pub trait TaskStore:
     fn list(&self, filter: Option<Status>) -> Result<Vec<Task>, StoreError>;
     /// イベントを追記し、割り当てられた `seq`（0始まり、task_id 内で単調増加）を返す。
     fn append_event(&self, task_id: TaskId, event: &Event) -> Result<u64, StoreError>;
-    /// `task_id` に紐づく全イベントを `seq` 昇順で返す。
+    /// `task_id` に紐づく全イベントを `seq` 昇順で返す。**`seq` はタスクごとに 0 始まりで単調増加する
+    /// ローカルな連番**であり、別のタスクの `seq` と大小比較することはできない（Phase 45 実機バグ:
+    /// ADR-0021 D3 の「一度扱った失敗は数え直さない」判定で、親の `seq` と子の `seq` を比較していたため、
+    /// 子の失敗が毎回「新規」と判定され、同じ質問が繰り返し出た）。タスクをまたいでイベントの前後関係を
+    /// 比較したい場合は `events_for_with_global_ids` を使うこと。
     fn events_for(&self, task_id: TaskId) -> Result<Vec<(u64, Event)>, StoreError>;
+    /// `task_id` に紐づく全イベントを、`events` テーブルの**グローバルに単調増加する id**（`seq` ではない）
+    /// と一緒に id 昇順で返す（Phase 45）。この id は全タスクを横断して単調増加するため、
+    /// 異なるタスクのイベント同士の前後関係を比較してよい（`events_for` の `seq` はタスクごとにローカルなので
+    /// 比較できない）。
+    fn events_for_with_global_ids(&self, task_id: TaskId) -> Result<Vec<(u64, Event)>, StoreError>;
     /// 排他的にリースを取得する。成功したら true を返し、task の status を Running にし、
     /// lease = Some{worker_run_id, expires_at: now + ttl} をDBに書く。
     /// 既にリースされている／status != Ready の場合は false を返す（エラーではない）。
@@ -1207,6 +1216,23 @@ impl TaskStore for SqliteStore {
             let (seq, json) = row?;
             let event: Event = serde_json::from_str(&json)?;
             events.push((seq as u64, event));
+        }
+        Ok(events)
+    }
+
+    fn events_for_with_global_ids(&self, task_id: TaskId) -> Result<Vec<(u64, Event)>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT id, json FROM events WHERE task_id = ?1 ORDER BY id ASC")?;
+        let rows = stmt.query_map(params![task_id.to_string()], |row| {
+            let id: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            Ok((id, json))
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (id, json) = row?;
+            let event: Event = serde_json::from_str(&json)?;
+            events.push((id as u64, event));
         }
         Ok(events)
     }
