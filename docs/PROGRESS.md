@@ -6620,3 +6620,11 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
 - `taskd.toml` の `implementer` 指示文を「taskd が用意した worktree とブランチ `taskd/<task-id>`」に直して `POST /reload`（P49-1 解消）。
 - 気づき（U50-5）: `changes.stale` は current 自身にも `true` が付く（base ≠ current になるのは当然）。current の行では `stale` を
   出さないか、計算を「current 以外」に限るべき。GUI で紛らわしいだけで害は無い。
+
+### Phase 51 実機: 4 回目の昇格（ライブ）。煙試験入りの検証（2026-09-19 14:02 UTC）
+
+- `release.sh main` → `7d7c38b4e080`（Phase 51）。`verify.sh` → 検査 1〜6 すべて true、`ok=true live_ok=true`。
+  検査 6: 煙試験タスクが 6.23 秒で `done`（`worker_finished 'done: fake'`、報告 `01M2WZK4XCFVS4H1XD6MDA17KZ`）。
+- `promote.sh 7d7c38b4e080`（mode=live）: 2 秒で新が active、GUI 25 秒で切替、旧 `3af3fe474175` は drain して exit 0。
+  `current -> 7d7c38b4e080`、`previous -> 3af3fe474175`。
+- これで ADR-0041 D1〜D5 がすべて本番で動いている。残りは §4 の「実機: 自己改善案件を 1 周回す」（人が GUI で Go を出す）。
