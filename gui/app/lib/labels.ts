@@ -314,6 +314,7 @@ const TIMELINE_KIND_LABEL: Record<string, string> = {
   delegation: "委譲",
   release: "リリース",
   integration: "取り込み",
+  doc: "文書",
 };
 
 export function timelineKindLabel(kind: string): string {
@@ -426,6 +427,51 @@ export const CHANGES_MISSING_LABEL = "取り込み済み・中止済み（作業
 
 /** `ChangeDiffView.truncated`（200 KiB で切った）。 */
 export const DIFF_TRUNCATED_LABEL = "途中で切りました（200 KiB）";
+
+/**
+ * 文書（ADR-0044 D7、taskd Phase 57 / G20。**正本は git**）。ページの中身も履歴も taskd が返すものを
+ * そのまま出し、ここには画面の言葉だけを置く。
+ */
+export const DOCS_TAB_LABEL = "文書";
+export const DOCS_SECTION_DESCRIPTION =
+  "案件の文書です。正本は主なリポジトリの Markdown（git）で、ここでの編集は既定のブランチに直接コミットされます。";
+export const DOCS_INIT_LABEL = "文書を用意する";
+export const DOCS_EDIT_LABEL = "編集";
+export const DOCS_SAVE_LABEL = "保存";
+export const DOCS_CANCEL_LABEL = "やめる";
+export const DOCS_NEW_PAGE_LABEL = "ページを作る";
+export const DOCS_DELETE_LABEL = "削除";
+export const DOCS_DELETE_CONFIRM_LABEL = "本当に削除";
+export const DOCS_RELOAD_LABEL = "再読み込み";
+export const DOCS_SEARCH_LABEL = "本文を検索";
+export const DOCS_HISTORY_LABEL = "履歴";
+export const DOCS_EMPTY_LABEL = "まだページがありません";
+export const DOCS_TRUNCATED_LABEL = "多すぎるので途中まで出しています（500 ページ）";
+export const DOCS_TOO_LARGE_LABEL = "大きすぎるので本文を出していません（512 KiB）";
+export const PROMOTE_TO_DOC_LABEL = "文書に昇格";
+export const PROMOTE_TO_DOC_SUBMIT_LABEL = "昇格する";
+export const PROMOTE_OVERWRITE_LABEL = "既にあるページを上書きする";
+
+/**
+ * 文書の変更が弾かれた理由（taskd の `code`）を人の言葉にする。`detail` は別に出すので、
+ * ここは「次に何をすればよいか」だけ。知らない `code` は `null`（`detail` だけ出す）。
+ */
+export function docsErrorHint(code: string): string | null {
+  switch (code) {
+    case "etag_mismatch":
+      return "読み込んだ後に誰かがこのページを直しました。再読み込みしてから、もう一度編集してください。";
+    case "default_branch_busy":
+      return "既定のブランチが編集中（未コミットの変更がある）です。手元で片付けてから、もう一度保存してください。";
+    case "page_exists":
+      return "その場所には既にページがあります。別の場所にするか、上書きを選んでください。";
+    case "docs_unavailable":
+      return "この案件にはまだ文書の置き場がありません。「文書を用意する」を押すと作れます。";
+    case "path_forbidden":
+      return "文書の根の外は触れません（`..` や絶対パスは使えません）。";
+    default:
+      return null;
+  }
+}
 
 /** 「PR を作る」を押せない理由（`origin` が無い・`gh` が使えない）。押せるなら `null`。 */
 export function prUnavailableReason(origin: boolean, gh: boolean): string | null {

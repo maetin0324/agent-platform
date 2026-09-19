@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
 import { data, Form, isRouteErrorResponse, Link, useFetcher, useNavigate, useSearchParams } from "react-router";
 import { CodeViewer } from "~/components/CodeViewer";
-import { RetryFlash, TaskCommentFlash, TaskEditFlash, TaskReopenFlash, TransitionFlash } from "~/components/Flash";
+import {
+  ErrorFlash,
+  RetryFlash,
+  TaskCommentFlash,
+  TaskEditFlash,
+  TaskReopenFlash,
+  TransitionFlash,
+} from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { ImageViewer } from "~/components/ImageViewer";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
@@ -32,9 +39,14 @@ import { Alert, DataItem, DataList, EmptyState, Mono } from "~/components/ui/mis
 import type { Tone } from "~/components/ui/tone";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { isValidLabel, MAX_LABELS, PRIORITY_LABELS } from "~/lib/board";
+import { defaultPromotePath, docsHref, isMarkdownName } from "~/lib/docs";
 import {
   commentAuthorLabel,
+  docsErrorHint,
   milestoneStatusLabel,
+  PROMOTE_OVERWRITE_LABEL,
+  PROMOTE_TO_DOC_LABEL,
+  PROMOTE_TO_DOC_SUBMIT_LABEL,
   parseTaskTab,
   priorityFullLabel,
   TASK_CATEGORIES,
@@ -52,6 +64,7 @@ import { cn } from "~/lib/utils";
 import { TaskdBanner } from "~/root";
 import type {
   ActionError,
+  DocsOpOutcome,
   RetryOutcome,
   TaskCommentOutcome,
   TaskEditOutcome,
@@ -61,6 +74,7 @@ import type {
 import { retryData, transitionData } from "~/taskd/actions.server";
 import type { TaskdClient } from "~/taskd/client.server";
 import { getTaskdClient } from "~/taskd/client.server";
+import { promoteArtifact, readArtifactPromoteBody } from "~/taskd/docs-admin.server";
 import { type TaskdRouteErrorData, taskdErrorResponse, toActionError } from "~/taskd/errors";
 import { runRetryAction, runTaskAction } from "~/taskd/route-actions.server";
 import { loadTaskChanges, readTaskChangesQuery, type TaskChangesData } from "~/taskd/task-changes";
@@ -135,6 +149,7 @@ const TIMELINE_TONE: Record<string, Tone> = {
   delegation: "primary",
   release: "success",
   integration: "neutral",
+  doc: "teal",
 };
 
 export interface TaskDetailData {
@@ -290,6 +305,11 @@ export async function action({ request, params }: Route.ActionArgs) {
   }
   if (intent === "reopen") {
     const outcome = await reopenTask(client, params.id, form, request.signal);
+    return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
+  }
+  // ADR-0044 D7（Phase 57 / G20）: 成果物を案件の文書に昇格する（**管理系**。宛先は人が決める）。
+  if (intent === "promote") {
+    const outcome = await promoteArtifact(client, params.id, readArtifactPromoteBody(form), request.signal);
     return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
   }
   const outcome = await runTaskAction(client, params.id, form, request.signal);
@@ -534,7 +554,14 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
               ) : (
                 <ul className="space-y-3">
                   {artifacts.items.map((artifact) => (
-                    <ArtifactRow key={artifact.idx} taskId={task.id} artifact={artifact} />
+                    <ArtifactRow
+                      key={artifact.idx}
+                      taskId={task.id}
+                      artifact={artifact}
+                      projectId={task.project_id ?? null}
+                      taskTitle={task.title}
+                      category={task.category ?? null}
+                    />
                   ))}
                 </ul>
               )}
@@ -1606,6 +1633,8 @@ function timelineItemKey(item: TimelineItem): string {
       return `delegation-${item.run_id}`;
     case "release":
       return `release-${item.sha12}`;
+    case "doc":
+      return `doc-${item.path}`;
     default:
       return `${item.kind}-${item.at}-${item.action}`;
   }
@@ -1692,6 +1721,19 @@ function TimelineBody({ taskId, item }: { taskId: string; item: TimelineItem }) 
       return (
         <p className="mt-1.5 text-fg-muted">
           {item.action}: {item.detail}
+        </p>
+      );
+    // ADR-0044 D7（Phase 57 / G20）: 逆リンク。front matter の `tasks:` にこのタスクを持つページ。
+    case "doc":
+      return (
+        <p className="mt-1.5 text-fg-muted" data-testid="timeline-doc">
+          <Link
+            to={docsHref(item.project_id, { path: item.path })}
+            className="font-medium text-primary hover:underline"
+          >
+            {item.title}
+          </Link>{" "}
+          <Mono className="text-xs">{item.path}</Mono>
         </p>
       );
     default:
@@ -1785,12 +1827,28 @@ function TaskRefList({ label, testId, refs }: { label: string; testId: string; r
  * （拡張子からの推測はしない。taskd の値をそのまま使う）。403（`forbidden`）は一覧の `ArtifactView.forbidden`
  * だけで判定し、本体を取りに行かない。
  */
-function ArtifactRow({ taskId, artifact }: { taskId: string; artifact: ArtifactView }) {
+function ArtifactRow({
+  taskId,
+  artifact,
+  projectId,
+  taskTitle,
+  category,
+}: {
+  taskId: string;
+  artifact: ArtifactView;
+  /** ADR-0044 D7: 昇格の宛先は案件の文書なので、案件に属さないタスクでは出さない。 */
+  projectId: string | null;
+  taskTitle: string;
+  category: string | null;
+}) {
   const [open, setOpen] = useState(false);
+  const [promoting, setPromoting] = useState(false);
   const [body, setBody] = useState<{ contentType: string; content?: string } | null>(null);
   const href = `/files/tasks/${taskId}/artifacts/${artifact.idx}`;
   const canOpen = artifact.exists && !artifact.forbidden;
   const statusMessage = artifactStatusMessage(artifact);
+  // ADR-0044 D7: 昇格できるのは Markdown の成果物だけ（判定は名前だけ。中身は taskd が読む）。
+  const canPromote = canOpen && projectId !== null && isMarkdownName(artifact.artifact.name);
 
   useEffect(() => {
     if (!open || body || !canOpen) return;
@@ -1840,9 +1898,30 @@ function ArtifactRow({ taskId, artifact }: { taskId: string; artifact: ArtifactV
             >
               保存
             </a>
+            {canPromote && (
+              <button
+                type="button"
+                onClick={() => setPromoting((v) => !v)}
+                data-testid="artifact-promote"
+                className={buttonClass({ variant: "ghost", size: "xs" })}
+              >
+                <Icon name="book" />
+                {PROMOTE_TO_DOC_LABEL}
+              </button>
+            )}
           </div>
         )}
       </div>
+      {promoting && projectId && (
+        <PromoteToDoc
+          taskId={taskId}
+          projectId={projectId}
+          name={artifact.artifact.name}
+          taskTitle={taskTitle}
+          category={category}
+          onClose={() => setPromoting(false)}
+        />
+      )}
       {statusMessage && (
         <p
           data-testid={artifact.forbidden ? "artifact-forbidden" : "artifact-missing"}
@@ -1868,6 +1947,87 @@ function ArtifactRow({ taskId, artifact }: { taskId: string; artifact: ArtifactV
         </div>
       )}
     </li>
+  );
+}
+
+/**
+ * 成果物を案件の文書に昇格する（ADR-0044 D7、docs/taskd-api-v1.md §3.97。**管理系**。Phase 57 / G20）。
+ * 宛先のパスは人が決める（既定は `docs/<種類>/<題名の slug>.md`）。宛先が既にあれば taskd が
+ * 409 `page_exists` を返すので、そのときだけ「上書きする」を選び直す（GUI では判定しない）。
+ */
+function PromoteToDoc({
+  taskId,
+  projectId,
+  name,
+  taskTitle,
+  category,
+  onClose,
+}: {
+  taskId: string;
+  projectId: string;
+  name: string;
+  taskTitle: string;
+  category: string | null;
+  onClose: () => void;
+}) {
+  const fetcher = useFetcher<DocsOpOutcome>({ key: `promote-${taskId}-${name}` });
+  const submitting = fetcher.state !== "idle";
+  const error = fetcher.data && !fetcher.data.ok ? fetcher.data.error : null;
+  return (
+    <div className="mt-3 rounded-lg border border-border bg-surface-2/50 p-3" data-testid="artifact-promote-form">
+      <fetcher.Form method="post" action={`/tasks/${taskId}`} className="space-y-2">
+        <input type="hidden" name="intent" value="promote" />
+        <input type="hidden" name="name" value={name} />
+        <label className={labelClass} htmlFor={`promote-path-${name}`}>
+          文書の置き場（案件の文書の根からの相対パス。`.md`）
+        </label>
+        <input
+          id={`promote-path-${name}`}
+          name="path"
+          className={inputClass}
+          defaultValue={defaultPromotePath("docs", category, taskTitle, name)}
+          data-testid="artifact-promote-path"
+        />
+        <label className={labelClass} htmlFor={`promote-title-${name}`}>
+          題名（任意。省略すると中身の 1 行目）
+        </label>
+        <input id={`promote-title-${name}`} name="title" className={inputClass} defaultValue={taskTitle} />
+        <label className={chipLabelClass}>
+          <input type="checkbox" name="overwrite" value="1" className={checkboxClass} />
+          {PROMOTE_OVERWRITE_LABEL}
+        </label>
+        <div className="flex items-center gap-2">
+          <button
+            type="submit"
+            disabled={submitting}
+            className={buttonClass({ variant: "primary", size: "xs" })}
+            data-testid="artifact-promote-submit"
+          >
+            {PROMOTE_TO_DOC_SUBMIT_LABEL}
+          </button>
+          <button type="button" onClick={onClose} className={buttonClass({ variant: "ghost", size: "xs" })}>
+            やめる
+          </button>
+        </div>
+      </fetcher.Form>
+      {error && (
+        <div data-testid="artifact-promote-error">
+          <ErrorFlash error={error} />
+          {docsErrorHint(error.code) && <p className="text-xs text-fg-muted">{docsErrorHint(error.code)}</p>}
+        </div>
+      )}
+      {fetcher.data?.ok && fetcher.data.op === "docs_promote" && (
+        <p className="mt-2 text-sm" data-testid="artifact-promote-done">
+          <Link
+            to={docsHref(projectId, { path: fetcher.data.result.path })}
+            className="font-medium text-primary hover:underline"
+          >
+            {fetcher.data.result.path}
+          </Link>{" "}
+          に昇格しました。
+        </p>
+      )}
+    </div>
   );
 }
 

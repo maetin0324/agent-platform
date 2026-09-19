@@ -23,6 +23,8 @@ mod approvals;
 /// ADR-0043 D5（Phase 54）: 変更の取り込み（差分・merge・PR・衝突タスク）。
 pub mod changes;
 pub mod conversation;
+/// ADR-0044 D7（Phase 57）: 案件の文書（git が正本）。ツリー・ページ・編集・昇格。
+pub mod docs;
 mod files;
 mod handlers;
 /// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
@@ -78,6 +80,10 @@ pub use types::{
 };
 // ---- ADR-0043（Phase 52）: 案件のリポジトリとファイル閲覧 ----
 pub use types::{RepoCreateBody, RepoList, RepoPatchBody, TreeEntry, TreeFileView, TreeRepoView, TreeView};
+// ---- ADR-0044 D7（Phase 57）: 文書 ----
+pub use docs::{
+    ArtifactPromoteBody, DocItem, DocPage, DocPagePutBody, DocPageResult, DocsInitResult, DocsTree, MAX_TREE_PAGES,
+};
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use types::{
     ChangeDiffView, ChangesView, IntegrateBody, IntegrateResult, ProjectIntegrationItem, ProjectIntegrations,
@@ -167,6 +173,9 @@ pub struct ApiSettings {
     pub role: task_core::SharedRole,
     /// ADR-0043 D5（Phase 54）: `[github]`（`gh` の場所と「Celeris で merge」の方法）。
     pub github: GithubSettings,
+    /// ADR-0044 D7（Phase 57）: 既定の文書リポジトリを作る場所の根（SPEC §5 の `~/workspace`）。
+    /// taskd が `$HOME` を展開して渡す。`None` なら文書リポジトリを作れない（409 `docs_unavailable`）。
+    pub docs_repo_root: Option<PathBuf>,
 }
 
 /// ADR-0043 D5（Phase 54）: `[github]` の写し。taskd が設定から渡す（task-api は TOML を読まない）。

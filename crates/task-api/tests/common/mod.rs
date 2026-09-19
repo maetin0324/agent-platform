@@ -99,6 +99,8 @@ pub struct TestEnv {
     pub dir: tempfile::TempDir,
     pub db_path: PathBuf,
     pub workspace_root: PathBuf,
+    /// ADR-0044 D7（Phase 57）: 既定の文書リポジトリを作る場所（`~/workspace` の代わり）。
+    pub docs_repo_root: PathBuf,
     /// テストが書き込みに使う別接続（taskctl / ディスパッチャ相当）。
     pub store: SqliteStore,
     pub state: ApiState,
@@ -117,9 +119,12 @@ impl TestEnv {
         std::fs::create_dir_all(&workspace_root).expect("workspace root");
         let store = SqliteStore::open(&db_path).expect("open store");
         let (daemon_tx, daemon_rx) = watch::channel(None);
-        let settings = settings(&db_path, &workspace_root, options);
+        // ADR-0044 D7（Phase 57）: 既定の文書リポジトリも tempdir の中に作る。
+        let docs_repo_root = dir.path().join("workspace");
+        let settings = settings(&db_path, &workspace_root, &docs_repo_root, options);
         let state = ApiState::new(settings, daemon_rx).expect("api state");
         Self {
+            docs_repo_root,
             dir,
             db_path,
             workspace_root,
@@ -243,7 +248,12 @@ pub fn config_view() -> ConfigView {
     }
 }
 
-pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, options: EnvOptions) -> ApiSettings {
+pub fn settings(
+    db_path: &std::path::Path,
+    workspace_root: &std::path::Path,
+    docs_repo_root: &std::path::Path,
+    options: EnvOptions,
+) -> ApiSettings {
     ApiSettings {
         listen: HOST.parse().expect("listen"),
         token: options.token,
@@ -281,6 +291,8 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         mode: options.mode,
         role: options.role,
         github: options.github,
+        // ADR-0044 D7（Phase 57）: テストは **tempdir の中**に文書リポジトリを作る（`$HOME` は触らない）。
+        docs_repo_root: Some(docs_repo_root.to_path_buf()),
     }
 }
 

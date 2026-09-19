@@ -2,6 +2,10 @@ import type {
   ChangeDiffView,
   ChangesView,
   CommentResult,
+  DocPage,
+  DocPageResult,
+  DocsInitResult,
+  DocsTree,
   EditResult,
   Health,
   IntegrateResult,
@@ -471,4 +475,100 @@ export function projectLifecycle(overrides: Partial<ProjectLifecycle> = {}): Pro
 /** `POST /milestones/{id}/{cancel|pause|resume}` の応答（既定は連鎖なし）。 */
 export function milestoneLifecycle(overrides: Partial<MilestoneLifecycle> = {}): MilestoneLifecycle {
   return { milestone: milestone(), cancelled_tasks: [], ...overrides };
+}
+
+// ---------------------------------------------------------------------------
+// 文書（ADR-0044 D7、docs/taskd-api-v1.md §3.92〜3.97。Phase 57 / G20）
+// ---------------------------------------------------------------------------
+
+/** `GET /projects/{id}/docs` の既定応答（2 ページ。1 つはフォルダの中）。 */
+export function docsTree(overrides: Partial<DocsTree> = {}): DocsTree {
+  return {
+    project_id: "01PROJECT",
+    repo: "benchfs",
+    root: "docs",
+    default_branch: "main",
+    truncated: false,
+    items: [
+      {
+        path: "docs/README.md",
+        title: "案件のあらまし",
+        updated_at: "2026-09-19T10:00:00Z",
+        last_commit: {
+          sha: "1111111111111111111111111111111111111111",
+          at: "2026-09-19T10:00:00Z",
+          author: "Celeris (human)",
+          subject: "docs: docs/README.md",
+        },
+      },
+      {
+        path: "docs/research/fs.md",
+        title: "調べたこと",
+        updated_at: "2026-09-19T11:00:00Z",
+        last_commit: {
+          sha: "2222222222222222222222222222222222222222",
+          at: "2026-09-19T11:00:00Z",
+          author: "Celeris (human)",
+          subject: "docs: docs/research/fs.md",
+        },
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/** `GET /projects/{id}/docs/page?path=` の既定応答（front matter 付き）。 */
+export function docPage(overrides: Partial<DocPage> = {}): DocPage {
+  const raw =
+    "---\ntitle: 調べたこと\ntags: [research]\ntasks: [01TASK]\n---\n\n# 調べたこと\n\n本文と [[../README.md]]\n";
+  return {
+    project_id: "01PROJECT",
+    repo: "benchfs",
+    root: "docs",
+    default_branch: "main",
+    path: "docs/research/fs.md",
+    title: "調べたこと",
+    raw,
+    html: "<h1>調べたこと</h1>",
+    tags: ["research"],
+    tasks: ["01TASK"],
+    history: [
+      {
+        sha: "2222222222222222222222222222222222222222",
+        at: "2026-09-19T11:00:00Z",
+        author: "Celeris (human)",
+        subject: "docs: docs/research/fs.md",
+      },
+    ],
+    etag: "3333333333333333333333333333333333333333",
+    too_large: false,
+    ...overrides,
+  };
+}
+
+/** `PUT`/`DELETE /projects/{id}/docs/page` と `POST /tasks/{id}/artifacts/promote` の既定応答。 */
+export function docPageResult(overrides: Partial<DocPageResult> = {}): DocPageResult {
+  return {
+    project_id: "01PROJECT",
+    repo: "benchfs",
+    path: "docs/research/fs.md",
+    etag: "4444444444444444444444444444444444444444",
+    sha: "5555555555555555555555555555555555555555",
+    deleted: false,
+    unchanged: false,
+    ...overrides,
+  };
+}
+
+/** `POST /projects/{id}/docs/init` の既定応答（新しく作った）。 */
+export function docsInitResult(overrides: Partial<DocsInitResult> = {}): DocsInitResult {
+  return {
+    project_id: "01PROJECT",
+    repo: "pluvio-poc",
+    root: "docs",
+    default_branch: "main",
+    created: true,
+    path: "/home/celeris/workspace/pluvio-poc",
+    ...overrides,
+  };
 }

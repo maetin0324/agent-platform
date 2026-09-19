@@ -68,6 +68,7 @@ deliverables = "."                                # コード以外の成果物�
 git のリポジトリでは taskd が用意したブランチにコミットせよ。`main` に直接コミットするな。`git checkout` でブランチを変えるな。
 `benchfs` のこのリポジトリの検査コマンド: `cargo test --workspace` / `cargo clippy --workspace -- -D warnings`
 コード以外の成果物（図・表・原稿）は `/home/rmaeda/.local/celeris/workspaces/01J…/repos/benchfs/`、文書は `…/repos/benchfs/docs` の下に置け。`artifacts/` は run の中間物・ログ・機械向けの `result.json` だけで、人が読む成果物を置く場所ではない。
+文書は `…/repos/benchfs/docs/` に Markdown で書く（題名は 1 行目の `# `。タスクとの紐付けは front matter の `tasks: [<このタスクの id>]`）。既定のブランチに直接コミットせず、上のブランチに置け（人が取り込む）。
 ```
 
 計画 run（`POST /projects/{id}/plan`）にはさらに「この案件のリポジトリ」の一覧が出て、プランナーは
@@ -242,3 +243,63 @@ env = { CARGO_TARGET_DIR = "/w/.cargo-target" }
 
 イメージのビルドが落ちたときも同じ経路（`blocked` + 質問）で、記録は `runs/container-build.log` にある。
 `POST /api/v1/tasks/{id}/answer` で答えると次の run から再開する。
+
+## 8. 文書（ADR-0044 D7。Phase 57）
+
+**案件の文書の正本は git のファイル**である（DB には何も持たない）。置き場は
+
+```
+<primary リポジトリ>/<[outputs] docs（既定 docs）>/**/*.md
+```
+
+で、GUI の案件画面「文書」（`/projects/<id>/docs`）が読み書きする窓口になる。
+
+### 8.1 文書の根の決まり方
+
+1. 案件の **primary リポジトリ**（ADR-0043 D1。`project_repos.is_primary`）が `git` で手元にあれば、
+   その `[outputs] docs`（既定 `docs`）
+2. primary が `dir`、または案件にリポジトリが無ければ、**`~/workspace/<案件 slug>/` に文書リポジトリを作る**
+   （`git init -b main` + `docs/README.md` の最初のコミット）。作ったものは primary の `git` リポジトリとして
+   登録される。slug は案件の題名の ASCII 化（作れなければ案件の id）
+3. 作るのは**人が押したとき**だけ（`POST /api/v1/projects/{id}/docs/init`、ページの保存、成果物の昇格）。
+   読み取り（ツリー・ページ）は何も作らず 409 `docs_unavailable` を返す
+4. primary がリモート（クラスタ）の案件は、この Phase では未対応（409 `docs_unavailable`）
+
+### 8.2 ページの形
+
+```markdown
+---
+title: 調べたこと          # 任意。無ければ 1 行目の `# `
+tags: [research, fs]       # 任意
+tasks: [01J…]              # 任意。**このページがどのタスクの成果か**（逆リンクの元）
+---
+
+# 調べたこと
+
+本文。`celeris:task/01J…` はタスクへのリンク、`[[../README.md]]` は同じ文書の中のリンクになる。
+```
+
+- 描画はサーバ側で決定的に行う（`pulldown-cmark`。表・脚注・打ち消し線あり、**生 HTML は捨てる**）
+- `tasks:` に載せたタスクの「タイムライン」にこのページが出る（`kind = "doc"`。逆リンク）
+
+### 8.3 誰がどこに書くか
+
+| 書く人 | 経路 | コミット先 |
+|---|---|---|
+| 人（GUI の「文書」） | `PUT /api/v1/projects/{id}/docs/page` | **既定のブランチに直接**（一時 worktree でコミットして fast-forward。author は `Celeris (human) <celeris@local>`） |
+| 組織の「人」（ワーカー） | 自分の worktree の `docs/` に書くだけ | `celeris/<task_id>` ブランチ。人が「変更」タブで取り込む（§6） |
+| 昇格 | `POST /api/v1/tasks/{id}/artifacts/promote` | 既定のブランチ（front matter に `tasks: [<タスク id>]` を混ぜる） |
+
+人が既定のブランチを checkout したまま**未コミットの変更を持っている**ときは、取り込み（§6.2）と同じく
+409 `default_branch_busy` で**何も触らない**。手元を片付けてからもう一度押す。
+
+ページの衝突は **`etag`（blob の sha）**で見る。読んだ後に誰かが直していれば 409 `etag_mismatch` になるので、
+再読み込みしてから編集し直す。
+
+### 8.4 前置き
+
+タスクの前置きの「作業場所」には、§3 の例のとおり 1 行入る:
+
+```
+文書は `…/repos/benchfs/docs/` に Markdown で書く（題名は 1 行目の `# `。タスクとの紐付けは front matter の `tasks: [<このタスクの id>]`）。既定のブランチに直接コミットせず、上のブランチに置け（人が取り込む）。
+```

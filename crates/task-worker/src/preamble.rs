@@ -276,6 +276,13 @@ pub fn repos_note(repos: &[RepoNote]) -> String {
         join_repo_path(&first.dir, &first.deliverables),
         join_repo_path(&first.dir, &first.docs)
     ));
+    // ADR-0044 D7（Phase 57）: 文書の書き方（正本は git。人は GUI の「文書」タブで同じファイルを読む）。
+    let docs_dir = join_repo_path(&first.dir, &first.docs);
+    let docs_dir = if docs_dir.ends_with('/') { docs_dir } else { format!("{docs_dir}/") };
+    out.push_str(&format!(
+        "文書は `{docs_dir}` に Markdown で書く（題名は 1 行目の `# `。タスクとの紐付けは front matter の \
+         `tasks: [<このタスクの id>]`）。既定のブランチに直接コミットせず、上のブランチに置け（人が取り込む）。\n"
+    ));
     out
 }
 
@@ -763,6 +770,40 @@ mod tests {
         let plain_out = render(&plain, "artifacts");
         assert!(!plain_out.contains("途中目標の判定をお願いする返事です"), "{plain_out}");
         assert!(!plain_out.contains("のここまで"), "{plain_out}");
+    }
+
+    /// ADR-0044 D7（Phase 57）: 「作業場所」に文書の書き方が 1 行出る（題名は 1 行目、紐付けは
+    /// front matter の `tasks:`、既定のブランチには直接コミットしない）。
+    #[test]
+    fn the_workspace_section_says_how_to_write_documents() {
+        let note = RepoNote {
+            name: "benchfs".into(),
+            dir: "/ws/01J/repos/benchfs".into(),
+            git: true,
+            branch: Some("celeris/01J".into()),
+            base: Some("abc1234".into()),
+            base_kind: Some("main".into()),
+            description: None,
+            check: vec![],
+            docs: "docs".into(),
+            deliverables: ".".into(),
+        };
+        let out = repos_note(std::slice::from_ref(&note));
+        assert!(
+            out.contains("文書は `/ws/01J/repos/benchfs/docs/` に Markdown で書く"),
+            "{out}"
+        );
+        assert!(out.contains("題名は 1 行目の `# `"), "{out}");
+        assert!(out.contains("front matter の `tasks: [<このタスクの id>]`"), "{out}");
+        assert!(out.contains("既定のブランチに直接コミットせず"), "{out}");
+        // `[outputs] docs` を変えるとその場所になる。
+        let moved = RepoNote { docs: "doc/pages".into(), ..note };
+        assert!(
+            repos_note(&[moved]).contains("文書は `/ws/01J/repos/benchfs/doc/pages/` に"),
+            "{out}"
+        );
+        // リポジトリが無いタスクの前置きは 1 バイトも変わらない（空）。
+        assert_eq!(repos_note(&[]), "");
     }
 
     fn task_worker_recent_work_sample(

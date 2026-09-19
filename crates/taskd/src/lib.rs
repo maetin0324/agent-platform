@@ -654,6 +654,9 @@ pub fn api_settings(
             gh: config.github.gh.clone(),
             merge_method: config.github.merge_method.clone(),
         },
+        // ADR-0044 D7（Phase 57）: 案件に git のリポジトリが無いときに文書リポジトリを作る場所
+        // （SPEC §5: 成果物は `~/workspace/` に）。`$HOME` が無ければ作れない（409）。
+        docs_repo_root: task_core::home_dir().map(|home| home.join("workspace")),
     }
 }
 

@@ -31,6 +31,8 @@ import {
   CANCEL_CONFIRM_LABEL,
   CANCEL_LABEL,
   CANCEL_STOP_LABEL,
+  DOCS_SECTION_DESCRIPTION,
+  DOCS_TAB_LABEL,
   MILESTONE_PAUSED_BANNER,
   milestoneCancelConfirmText,
   milestoneStatusLabel,
@@ -806,6 +808,22 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         ) : (
           <ArtifactsList rows={artifactRows} fetchedAt={fetchedAt} />
         )}
+      </section>
+
+      {/* ADR-0044 D7（Phase 57 / G20）: 文書は別のルート（`/projects/:id/docs`）。ここは入口だけ。 */}
+      <section aria-labelledby="project-docs-heading" data-testid="project-docs-section" className="space-y-4">
+        <SectionTitle icon="book" id="project-docs-heading">
+          {DOCS_TAB_LABEL}
+        </SectionTitle>
+        <p className="text-xs text-fg-subtle">{DOCS_SECTION_DESCRIPTION}</p>
+        <Link
+          to={`/projects/${project.id}/docs`}
+          data-testid="project-docs-link"
+          className={buttonClass({ variant: "secondary", size: "sm" })}
+        >
+          <Icon name="book" />
+          {DOCS_TAB_LABEL}を開く
+        </Link>
       </section>
     </div>
   );

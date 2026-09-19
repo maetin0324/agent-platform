@@ -3205,3 +3205,30 @@ production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/
     `scripts/sync-gui-docs.sh` を流し直したので、`app/lib/lifecycle.ts` の 2 つの一覧と 1:1 で一致する。
   - G19-P4: `GET /projects` の `archived` のように、**`GET /projects` にも `status` の絞り込み**が
     欲しい（中止済みだけを隠す、など）。アーカイブしていない中止済みの案件が一覧に残り続けるため。
+
+## Phase G20 — 案件の文書（ADR-0044 D7 / taskd Phase 57。2026-09-19）
+
+> **マージの註**: この枝（taskd Phase 57 / ADR-0044 B3）はコメントの中で自分を「G19」と書いていたが、
+> main の G19 は ADR-0044 D6 の GUI（上の G19）で先に埋まっていたので、**マージのときに G20 に振り直した**。
+> 併せて taskd 側の節番号も §3.84〜3.89 → **§3.92〜3.97**（エンドポイント 81〜86）に振り直してある。
+
+- 完了日: 2026-09-19
+- 目的: taskd Phase 57（ADR-0044 D7）で入った「案件の文書（**正本は git のファイル**）」を画面にする。
+  使う API は 6 つ（`docs/taskd-api-v1.md` §3.92〜3.97、エンドポイント 81〜86。**変更系はすべて管理系**）:
+  `GET /projects/{id}/docs`、`GET|PUT|DELETE /projects/{id}/docs/page`、
+  `POST /projects/{id}/docs/init`、`POST /tasks/{id}/artifacts/promote`。
+- 作ったもの:
+  - `app/routes/projects.$id.docs.tsx`（`/projects/:id/docs`。ツリー・描画・編集とプレビュー・履歴・
+    削除・検索・「文書を用意する」）、`app/routes.ts` に 1 行（`tasks/:id/files` と同じ兄弟のルート）。
+  - `app/lib/docs.ts`（純粋関数。`celeris:task/<id>` と `[[相対パス]]` の開き方）と
+    `test/unit/docs.test.ts`（**17 件**）。
+  - `app/taskd/docs.ts`（読み取りの中継）/ `app/taskd/docs-admin.server.ts`（変更系。§3.94〜3.97）、
+    `app/taskd/action-types.ts` に `DocsOpOutcome`、`app/lib/labels.ts` に文書の言葉と `docsErrorHint`。
+  - `app/routes/tasks.$id.tsx`: 成果物タブの「文書に昇格」（`intent=promote`）と、タイムラインの
+    `kind = "doc"`（逆リンク）の行。
+  - `app/routes/projects.$id.tsx`: **末尾に「文書」節（入口だけ）**。ヘッダ（G19 の中止・一時停止・
+    アーカイブ）は触っていない。
+  - `test/mock-taskd/fixtures.ts` に文書の 4 つ（`docsTree` / `docPage` / `docPageResult` / `docsInitResult`）。
+- 決めたこと・未解決・提案は **taskd 側の `docs/PROGRESS.md` の「Phase 57」**（P57-1〜P57-6、
+  とくに **P57-4「GUI は `html` ではなく `raw` を描く」**＝`dangerouslySetInnerHTML` の禁止を守る）に
+  まとめてある。ここでは重複して書かない。
