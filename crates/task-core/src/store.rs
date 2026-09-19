@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::instance::{DaemonInstance, InstanceRole, SELECT_INSTANCE, row_to_instance};
 use crate::message::{Message, MessageId, MessageRole, is_conversation};
 use crate::model::{Event, Status, Task, TaskId, TaskKind, WorkspaceSpec};
 use crate::org::{
@@ -37,10 +38,11 @@ const MIGRATION_0007: &str = include_str!("../migrations/0007_messages_task_id_a
 const MIGRATION_0008: &str = include_str!("../migrations/0008_notifications.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_notifications_project_id.sql");
 const MIGRATION_0010: &str = include_str!("../migrations/0010_projects_workspace.sql");
+const MIGRATION_0011: &str = include_str!("../migrations/0011_daemon_instances.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -504,6 +506,36 @@ pub trait TaskStore:
     /// 張り替える（後者は `draft` に戻し、`Event::Transitioned{from: cancelled, to: draft, reason: "retried"}`
     /// を追記する）。全体を単一トランザクションで行い、張り替えたタスクの id を返す。
     fn retry_task(&self, original: TaskId, new_task: &Task) -> Result<Vec<TaskId>, StoreError>;
+
+    // ---- ADR-0040 D4（Phase 47）: taskd のインスタンスの役割（`daemon_instances`）----
+    //
+    // ここにあるのは「行を読み書きする」だけの操作で、役割を決める規則（誰が active になるか、いつ
+    // drain するか）は taskd 側（`taskd::instance`）にある。`verify` のインスタンスはこの表に触れない。
+
+    /// 自分の行を作る（既にあれば上書きする＝同じ `instance_id` で起動し直したとき）。
+    /// `handoff_requested_at` / `drained_at` は NULL に戻る。
+    fn instance_register(&self, instance: &DaemonInstance) -> Result<(), StoreError>;
+    /// 自分の行の `heartbeat_at` を更新する。行が無ければ `Ok(false)`（呼び出し側は登録し直す）。
+    fn instance_heartbeat(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError>;
+    /// `instance_id` の行に `handoff_requested_at` を書く（既に入っていれば**上書きしない**。
+    /// 引き継ぎの要求は 1 回だけ）。書いたら `Ok(true)`。
+    fn instance_request_handoff(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError>;
+    /// 役割を変える（`heartbeat_at` も同時に更新する）。行が無ければ `Ok(false)`。
+    fn instance_set_role(&self, instance_id: &str, role: InstanceRole, at: OffsetDateTime)
+    -> Result<bool, StoreError>;
+    /// 手元の run が 0 になったので `drained_at` を書く（役割は `draining` のまま）。行が無ければ `Ok(false)`。
+    fn instance_mark_drained(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError>;
+    /// 全インスタンスを `started_at` 昇順（同時刻は `instance_id` 昇順）で返す。
+    fn instance_list(&self) -> Result<Vec<DaemonInstance>, StoreError>;
+    /// 1 行消す。無い id は `Ok(false)`。
+    fn instance_delete(&self, instance_id: &str) -> Result<bool, StoreError>;
+    /// 終わった・死んだ他のインスタンスの行を消す（`keep` は消さない）。対象は `drained_at` が入っている
+    /// 行と、`heartbeat_at` が `heartbeat_before` より古い行。消した `instance_id` を昇順で返す。
+    fn instance_delete_stale(
+        &self,
+        keep: &str,
+        heartbeat_before: OffsetDateTime,
+    ) -> Result<Vec<String>, StoreError>;
 }
 
 pub struct SqliteStore {
@@ -650,6 +682,7 @@ impl SqliteStore {
             8 => Ok(MIGRATION_0008),
             9 => Ok(MIGRATION_0009),
             10 => Ok(MIGRATION_0010),
+            11 => Ok(MIGRATION_0011),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -2085,6 +2118,117 @@ impl TaskStore for SqliteStore {
         }
         out.reverse();
         Ok(out)
+    }
+
+    // ---- ADR-0040 D4（Phase 47）: `daemon_instances` ----
+
+    fn instance_register(&self, instance: &DaemonInstance) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO daemon_instances \
+             (instance_id, \"release\", pid, role, started_at, heartbeat_at, handoff_requested_at, drained_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                instance.instance_id,
+                instance.release,
+                i64::from(instance.pid),
+                instance.role.as_str(),
+                format_rfc3339(instance.started_at)?,
+                format_rfc3339(instance.heartbeat_at)?,
+                instance.handoff_requested_at.map(format_rfc3339).transpose()?,
+                instance.drained_at.map(format_rfc3339).transpose()?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn instance_heartbeat(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let affected = conn.execute(
+            "UPDATE daemon_instances SET heartbeat_at = ?1 WHERE instance_id = ?2",
+            params![format_rfc3339(at)?, instance_id],
+        )?;
+        Ok(affected == 1)
+    }
+
+    fn instance_request_handoff(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let affected = conn.execute(
+            "UPDATE daemon_instances SET handoff_requested_at = ?1 \
+             WHERE instance_id = ?2 AND handoff_requested_at IS NULL",
+            params![format_rfc3339(at)?, instance_id],
+        )?;
+        Ok(affected == 1)
+    }
+
+    fn instance_set_role(
+        &self,
+        instance_id: &str,
+        role: InstanceRole,
+        at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let affected = conn.execute(
+            "UPDATE daemon_instances SET role = ?1, heartbeat_at = ?2 WHERE instance_id = ?3",
+            params![role.as_str(), format_rfc3339(at)?, instance_id],
+        )?;
+        Ok(affected == 1)
+    }
+
+    fn instance_mark_drained(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let ts = format_rfc3339(at)?;
+        let affected = conn.execute(
+            "UPDATE daemon_instances SET drained_at = ?1, heartbeat_at = ?2 WHERE instance_id = ?3",
+            params![ts.clone(), ts, instance_id],
+        )?;
+        Ok(affected == 1)
+    }
+
+    fn instance_list(&self) -> Result<Vec<DaemonInstance>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt =
+            conn.prepare(&format!("{SELECT_INSTANCE} ORDER BY started_at ASC, instance_id ASC"))?;
+        let rows = stmt.query_map([], row_to_instance)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
+    fn instance_delete(&self, instance_id: &str) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let affected = conn.execute("DELETE FROM daemon_instances WHERE instance_id = ?1", params![instance_id])?;
+        Ok(affected == 1)
+    }
+
+    fn instance_delete_stale(
+        &self,
+        keep: &str,
+        heartbeat_before: OffsetDateTime,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut conn = self.lock()?;
+        let before = format_rfc3339(heartbeat_before)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut removed: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT instance_id FROM daemon_instances \
+                 WHERE instance_id <> ?1 AND (drained_at IS NOT NULL OR heartbeat_at < ?2)",
+            )?;
+            let rows = stmt.query_map(params![keep, before], |row| row.get::<_, String>(0))?;
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row?);
+            }
+            ids
+        };
+        removed.sort();
+        for id in &removed {
+            tx.execute("DELETE FROM daemon_instances WHERE instance_id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 }
 
@@ -3701,7 +3845,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(SCHEMA_VERSION, 11);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -4025,7 +4169,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(SCHEMA_VERSION, 11);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {

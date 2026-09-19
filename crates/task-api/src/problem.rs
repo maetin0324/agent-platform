@@ -126,6 +126,14 @@ impl ApiProblem {
         )
     }
 
+    /// ADR-0040 D4（Phase 47）: いまこのプロセスは `standby`（または `draining`）なので、ディスパッチャの
+    /// 状態を要する管理系は受けられない。窓は 1〜2 tick なので、GUI は `Retry-After` の秒数だけ待って
+    /// もう一度出せばよい（本文の `detail` は `"standby"` ちょうど）。
+    pub(crate) fn standby() -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "standby", "standby")
+            .with_header(header::RETRY_AFTER, HeaderValue::from_static("2"))
+    }
+
     /// ADR-0024 D5: 指定した account id が `[accounts] claude_dir` に無い。
     pub(crate) fn account_not_found(id: &str) -> Self {
         Self::new(StatusCode::NOT_FOUND, "account_not_found", format!("account not found: {id}"))

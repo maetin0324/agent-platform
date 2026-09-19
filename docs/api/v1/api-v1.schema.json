@@ -2669,7 +2669,19 @@
         "instance_id": {
           "type": "string"
         },
+        "mode": {
+          "description": "ADR-0040 D3: `normal` または `verify`（`--mode`）。",
+          "type": "string"
+        },
         "now": {
+          "type": "string"
+        },
+        "release": {
+          "description": "ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `TASKD_RELEASE` / `\"dev\"`）。",
+          "type": "string"
+        },
+        "role": {
+          "description": "ADR-0040 D4: `active` / `standby` / `draining` / `verify`。",
           "type": "string"
         },
         "schema_version": {
@@ -2692,7 +2704,10 @@
         "instance_id",
         "started_at",
         "now",
-        "db"
+        "db",
+        "release",
+        "mode",
+        "role"
       ],
       "type": "object"
     },

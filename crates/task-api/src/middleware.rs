@@ -144,6 +144,17 @@ pub(crate) fn require_admin(state: &ApiState, headers: &HeaderMap) -> Result<(),
     }
 }
 
+/// ADR-0040 D4（Phase 47）: ディスパッチャの状態を要する管理系（`reload` / `check` / クラスタ接続 /
+/// アカウントの確認・削除・ログイン中継 / `notify/test`）は `active` のときだけ受ける。`standby` と
+/// `draining` の間は 503 `standby` に `Retry-After: 2` を付けて返す（読み書きの通常のエンドポイントは
+/// 同じ DB を見ているのでそのまま動く）。
+pub(crate) fn require_active(state: &ApiState) -> Result<(), ApiProblem> {
+    if state.inner.role.accepts_admin() {
+        return Ok(());
+    }
+    Err(ApiProblem::standby())
+}
+
 /// トークンは SHA-256 の値で持ち、比較は長さに依らない定数時間で行う。
 pub(crate) fn token_digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()

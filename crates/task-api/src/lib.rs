@@ -132,6 +132,15 @@ pub struct ApiSettings {
     pub notify_secret_id: String,
     /// ADR-0037 D3: `[notify] gui_base_url`（文面のリンクの根。無ければリンク無し）。
     pub notify_gui_base_url: Option<String>,
+    /// ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `TASKD_RELEASE` / `"dev"`）。
+    /// `GET /health` の `release`。
+    pub release: String,
+    /// ADR-0040 D3: `--mode`（`normal` / `verify`）。`GET /health` の `mode`。
+    pub mode: task_core::DaemonMode,
+    /// ADR-0040 D4: いまの役割。**tick ループだけが書き、API は読むだけ**。`standby` / `draining` の間は
+    /// ディスパッチャの状態を要する管理 API（`reload` / `check` / クラスタ接続 / アカウントのログイン中継 /
+    /// `notify/test`）が 503 `standby` になる。
+    pub role: task_core::SharedRole,
 }
 
 impl std::fmt::Debug for ApiSettings {
@@ -159,6 +168,9 @@ impl std::fmt::Debug for ApiSettings {
             .field("memory_dir", &self.memory_dir)
             .field("notify_secret_id", &self.notify_secret_id)
             .field("notify_gui_base_url", &self.notify_gui_base_url)
+            .field("release", &self.release)
+            .field("mode", &self.mode)
+            .field("role", &self.role.get())
             .finish()
     }
 }

@@ -4,6 +4,8 @@
 mod accounts_admin;
 mod cluster_admin;
 pub mod config;
+/// ADR-0040 D4（Phase 47）: インスタンスの役割（active / standby / draining / verify）とライブ引き継ぎ。
+pub mod instance;
 /// ADR-0037（Phase 39）: 人の判断が要るときだけ Discord に知らせる（判定は決定的、送信は spawn）。
 pub mod milestone_review;
 pub mod notify;
@@ -21,7 +23,7 @@ use task_api::types::{
     RoleConfigView,
 };
 use task_api::{ApiError, ApiSettings, ApiState};
-use task_core::{SqliteStore, StoreError, StoreOptions, TaskStore};
+use task_core::{DaemonMode, InstanceRole, SharedRole, SqliteStore, StoreError, StoreOptions, TaskStore};
 use task_ops::view::ViewContext;
 use task_dispatch::{DispatchError, Dispatcher, ProviderId, SnapshotPublisher, StaticPolicy, TickReport};
 use task_ops::daemon::{ProviderCheckView, ProviderLive};
@@ -32,7 +34,8 @@ use task_worker::{
     LdrConfig, PaperQaAdapter, PaperQaConfig, WorkerAdapter, Workspace,
 };
 
-pub use config::{Config, ConfigError};
+pub use config::{Config, ConfigError, Overrides};
+pub use instance::InstanceIdentity;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -47,12 +50,17 @@ pub enum DaemonError {
 }
 
 /// ループの終了条件。
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     /// idle な tick で exit する（テスト・バッチ用）。
     pub until_idle: bool,
     /// tick 数の上限（0 = 無制限）。
     pub max_ticks: u64,
+    /// ADR-0040 D3（Phase 47）: `--mode`。`verify` は本番のデータのコピーに対する検証専用
+    /// （dispatch しない、ワーカーを起こさない、tick の裏方を動かさない、`daemon_instances` に書かない）。
+    pub mode: DaemonMode,
+    /// ADR-0040 D4: `--release <sha12>`。無ければ環境変数 `TASKD_RELEASE`、それも無ければ `"dev"`。
+    pub release: Option<String>,
 }
 
 /// ループ終了の理由。
@@ -61,6 +69,12 @@ pub enum Exit {
     Idle,
     MaxTicks,
     Signal,
+    /// ADR-0040 D4: 引き継ぎのために `draining` になり、手元の run が 0 になった（または
+    /// `[handoff] drain_timeout_secs` を超えて残りを abort した）。プロセスは exit 0 で終わる
+    /// （systemd の `Restart=on-failure` では再起動されない）。
+    Drained,
+    /// ADR-0040 D4: 同じ `release` の `active` が既に動いていた。何もせず exit 3。
+    DuplicateRelease,
 }
 
 /// `[adapters.<種別>].env` にプロバイダの `env` を重ねる（同名キーはプロバイダが優先。順序は決定的）。
@@ -568,6 +582,8 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
 }
 
 /// `task_api::ApiSettings` を設定から作る。`instance_id` / `started_at` はディスパッチャのスナップショットと同じ値を渡す。
+/// ADR-0040 D3 / D4: `release` / `mode` / `role` は `GET /health` に出て、`role` は standby の 503 にも使う。
+#[allow(clippy::too_many_arguments)]
 pub fn api_settings(
     config: &Config,
     listen: SocketAddr,
@@ -575,6 +591,9 @@ pub fn api_settings(
     instance_id: String,
     started_at: String,
     admin_tx: Option<tokio::sync::mpsc::Sender<task_api::AdminRequest>>,
+    release: String,
+    mode: DaemonMode,
+    role: SharedRole,
 ) -> ApiSettings {
     ApiSettings {
         listen,
@@ -605,6 +624,9 @@ pub fn api_settings(
         memory_dir: config.memory.as_ref().map(|m| m.dir.clone()),
         notify_secret_id: config.notify.discord_webhook_secret.clone(),
         notify_gui_base_url: config.notify.base_url().map(str::to_string),
+        release,
+        mode,
+        role,
     }
 }
 
@@ -626,15 +648,36 @@ impl RunningApi {
     }
 }
 
+/// ADR-0040 D4（Phase 47）: `SO_REUSEPORT` で bind する。新しいリリースの `standby` が、動いている
+/// `active` と**同じポート**に起動と同時に bind できるようにするため（カーネルが新しい接続を振り分ける。
+/// 読み書きは同じ DB なので問題ない）。`SO_REUSEADDR` も立てる（旧 listener の `TIME_WAIT` を跨ぐため）。
+pub fn bind_reuseport(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    // `tokio::net::TcpListener::bind` と同じ待ち行列の深さ。
+    socket.listen(1024)?;
+    tokio::net::TcpListener::from_std(std::net::TcpListener::from(socket))
+}
+
 /// ADR-0013 D3 / D4: ディスパッチャにスナップショットの送り口を付け、API 専用の DB 接続を開いて bind する。
 /// 開けない・bind できないときは起動を失敗させる（黙って API 無しで動かない）。
+/// ADR-0040 D3 / D4: `admin = false`（verify モード）では管理系の委譲チャネルを作らない（tick ループが
+/// 動かないので、送っても誰も受け取れない）。bind は `SO_REUSEPORT` で行う。
 async fn start_api(
     config: &Config,
     listen: SocketAddr,
     dispatcher: &mut Dispatcher,
-) -> Result<(RunningApi, tokio::sync::mpsc::Receiver<task_api::AdminRequest>), DaemonError> {
+    identity: &InstanceIdentity,
+    mode: DaemonMode,
+    role: SharedRole,
+    admin: bool,
+) -> Result<(RunningApi, Option<tokio::sync::mpsc::Receiver<task_api::AdminRequest>>), DaemonError> {
     let token = config.api.read_token()?;
-    let instance_id = ulid::Ulid::new().to_string();
+    let instance_id = identity.instance_id.clone();
     let started_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default();
     let (tx, rx) = tokio::sync::watch::channel(None);
     dispatcher.set_snapshot_publisher(SnapshotPublisher {
@@ -648,14 +691,28 @@ async fn start_api(
     });
     // ADR-0017 M2: `reload`/`check` は API 側では実行できない（task-worker/task-dispatch に依存しない
     // 境界を守るため）。taskd の tick ループへ委譲するチャネルを作り、送信側だけ API に渡す。
-    let (admin_tx, admin_rx) = tokio::sync::mpsc::channel(8);
-    let settings = api_settings(config, listen, token, instance_id, started_at, Some(admin_tx));
+    let (admin_tx, admin_rx) = match admin {
+        true => {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            (Some(tx), Some(rx))
+        }
+        false => (None, None),
+    };
+    let settings = api_settings(
+        config,
+        listen,
+        token,
+        instance_id,
+        started_at,
+        admin_tx,
+        identity.release.clone(),
+        mode,
+        role,
+    );
     let state = tokio::task::spawn_blocking(move || ApiState::new(settings, rx))
         .await
         .map_err(|e| ApiError::Startup(e.to_string()))??;
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .map_err(|source| ApiError::Bind { addr: listen, source })?;
+    let listener = bind_reuseport(listen).map_err(|source| ApiError::Bind { addr: listen, source })?;
     let addr = listener.local_addr().unwrap_or(listen);
     tracing::info!(%addr, auth_required = config.api.token_file.is_some(), "api listening");
     let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -665,26 +722,84 @@ async fn start_api(
     Ok((RunningApi { stop, handle }, admin_rx))
 }
 
+/// ADR-0040 D4（Phase 47）: tick ループが役割のために持つもの。API は `draining` になった tick で
+/// ここから取り出して閉じる（プロセスは動き続け、手元の run の面倒を見る）。
+struct RoleState {
+    role: SharedRole,
+    /// `--mode verify` では `None`（`daemon_instances` に触れない）。
+    supervisor: Option<instance::Supervisor>,
+    api: Option<RunningApi>,
+}
+
 /// デーモン本体。`[api]` があれば同じランタイムで HTTP API も動かし、tick ループの終了時に止める。
+/// ADR-0040 D4: 起動時に `daemon_instances` を見て役割を決める（同じ `release` の `active` がいれば
+/// 何もせず `Exit::DuplicateRelease`＝ exit 3）。
 pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> {
     warn_if_db_on_network_filesystem(&config.db);
+    let identity = InstanceIdentity::new(opts.release.as_deref());
     let cluster_masters: ClusterMasters = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let mut dispatcher = build_dispatcher(&config, Arc::clone(&cluster_masters))?;
+    let verify = opts.mode == DaemonMode::Verify;
+    let role = SharedRole::new(if verify { InstanceRole::Verify } else { InstanceRole::Active });
+    let supervisor = match verify {
+        // ADR-0040 D3: verify は本番の表に触れない（そもそも DB のコピーだが、規約として）。
+        true => {
+            tracing::info!(
+                release = %identity.release, instance_id = %identity.instance_id,
+                "verify mode: migrations and the API only (no dispatch, no workers, no background jobs, \
+                 no Discord, no daemon_instances row; ADR-0040 D3)"
+            );
+            None
+        }
+        false => {
+            let freshness = instance::freshness_window(config.tick(), config.lease_grace_secs);
+            match instance::Supervisor::start(
+                dispatcher.store(),
+                identity.clone(),
+                role.clone(),
+                freshness,
+                config.drain_timeout(),
+                OffsetDateTime::now_utc(),
+            )? {
+                instance::Started::Duplicate { instance_id, pid } => {
+                    tracing::error!(
+                        release = %identity.release, active_instance_id = %instance_id, active_pid = pid,
+                        "another instance of the same release is already active; exiting 3 (ADR-0040 D4)"
+                    );
+                    return Ok(Exit::DuplicateRelease);
+                }
+                instance::Started::Running(supervisor) => Some(supervisor),
+            }
+        }
+    };
+    // ADR-0040 D4: `standby` は dispatch も裏方もしない（`tick` そのものを呼ばない）。`active` に
+    // なったら `set_accepting_new_work(true)` で始める。
+    dispatcher.set_accepting_new_work(role.get() == InstanceRole::Active);
     let (api, admin_rx) = match config.api.listen {
         Some(listen) => {
-            let (api, admin_rx) = start_api(&config, listen, &mut dispatcher).await?;
-            (Some(api), Some(admin_rx))
+            // `standby` も起きてすぐ API を受ける（同じポートに `SO_REUSEPORT` で bind する）。
+            let (api, admin_rx) =
+                start_api(&config, listen, &mut dispatcher, &identity, opts.mode, role.clone(), !verify).await?;
+            (Some(api), admin_rx)
         }
         None => (None, None),
     };
+    let mut roles = RoleState { role, supervisor, api };
     // Phase 44（実機 2026-09-18）: `POST /reload` が `[[roles]]` / `[[genres]]` / `[delegation]` /
     // `[reports]` / `[notify]` / `[conversation]` の設定値も読み直せるよう、tick ループにはこの
     // `Config` を `&mut` で渡す（`[accounts]` / `[[clusters]]` / `[api]` / `db` / `workspace_root` は
     // 従来どおり再起動が要る。`reload_providers` がそれ以外のフィールドには触れない）。
     let mut config = config;
-    let result = tick_loop(&mut dispatcher, &mut config, opts, admin_rx, cluster_masters).await;
-    if let Some(api) = api {
+    let result = tick_loop(&mut dispatcher, &mut config, opts, admin_rx, cluster_masters, &mut roles).await;
+    if let Some(api) = roles.api.take() {
         api.stop().await;
+    }
+    // ADR-0040 D4: 普通に止まったときは自分の行を消す。drain で終わったときは `drained_at` を残したまま
+    // にし、新しい active が掃除する（`status.sh` が引き継ぎの結果を見られるように）。
+    if let Some(supervisor) = &roles.supervisor
+        && !matches!(result, Ok(Exit::Drained))
+    {
+        supervisor.deregister();
     }
     result
 }
@@ -698,6 +813,8 @@ async fn tick_loop(
     mut admin_rx: Option<tokio::sync::mpsc::Receiver<task_api::AdminRequest>>,
     // ADR-0032 D2: taskd が張った ssh master の置き場所。ここが持っている間だけ接続が生きる。
     cluster_masters: ClusterMasters,
+    // ADR-0040 D4: インスタンスの役割（`active` / `standby` / `draining` / `verify`）。
+    roles: &mut RoleState,
 ) -> Result<Exit, DaemonError> {
     // ADR-0022 D2: `check` は spawn した先で終わるので、結果をここへ戻してスナップショットに載せる。
     let (check_tx, mut check_rx) = tokio::sync::mpsc::channel::<(String, ProviderCheckView)>(16);
@@ -724,12 +841,45 @@ async fn tick_loop(
     let mut notify_blocked_until: Option<std::time::Instant> = None;
     let tick = config.tick();
     let mut ticks: u64 = 0;
-    tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, "taskd started");
+    // ADR-0040 D4: 手元の run とレビューの数（drain の判定に使う。最後の tick の値）。
+    let mut in_flight: usize = 0;
+    tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, role = %roles.role.get(), "taskd started");
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
     // ADR-0015 D2: tick の所要時間を測り、遅い tick を警告する（止まっているのがディスパッチャか API かの切り分け用）。
     let slow_tick = std::cmp::max(Duration::from_secs(1), tick * 2);
     loop {
+        // ADR-0040 D4: 役割の判断は毎 tick の**いちばん最初**に行う（`active` が引き継ぎを求められたら
+        // **同じ tick で** listener を閉じ、dispatch と裏方を止めるため）。DB が一時的に読めなくても
+        // デーモンは止めない（次の tick でやり直す）。
+        if let Some(supervisor) = roles.supervisor.as_mut() {
+            match supervisor.step(OffsetDateTime::now_utc(), in_flight) {
+                Ok(instance::Step::Stay) => {}
+                Ok(instance::Step::Promoted) => {
+                    dispatcher.set_accepting_new_work(true);
+                    tracing::info!(ticks, "now active: dispatching and the tick background jobs are on");
+                }
+                Ok(instance::Step::Draining) => {
+                    // 受け付け済みの要求は完了させてから listener を閉じる（graceful shutdown）。
+                    dispatcher.set_accepting_new_work(false);
+                    if let Some(api) = roles.api.take() {
+                        api.stop().await;
+                    }
+                    tracing::info!(ticks, in_flight, "draining: the API listener is closed; supervising the runs in hand");
+                }
+                Ok(instance::Step::Drained) => return Ok(Exit::Drained),
+                Ok(instance::Step::DrainTimedOut) => {
+                    let aborted = dispatcher.abort_all_runs();
+                    tracing::warn!(ticks, aborted, "drain timeout; the remaining runs were aborted");
+                    return Ok(Exit::Drained);
+                }
+                Err(e) => tracing::warn!(error = %e, "could not update the instance role this tick"),
+            }
+        }
+        let role = roles.role.get();
+        // ADR-0040 D3 / D4: tick の裏方（報告の圧縮・途中目標レビュー・通知）を動かすのは `active` だけ。
+        // `standby` はまだ自分の番ではなく、`draining` は手元の run の面倒だけ見る。`verify` は何もしない。
+        if role == InstanceRole::Active {
         // ADR-0024 D7 / B1: 10 分を超えたログイン中継を打ち切る（tick をブロックしない軽い処理）。
         // `expire_stale_logins` はチャネルを使わない（このループ自身が drain するチャネルへ `await` で
         // 送るとデッドロックしうるため）。打ち切った id は戻り値で受け取り、ここで直接反映する。
@@ -862,8 +1012,17 @@ async fn tick_loop(
                 }
             }
         }
+        }
+        // ADR-0040 D3 / D4: `active` と `draining` だけが `Dispatcher::tick` を回す（`draining` は
+        // `set_accepting_new_work(false)` により新しい run を起こさず、手元の run の完了・リース更新・
+        // 後処理だけを行う）。`standby` と `verify` はディスパッチャを一切回さない
+        // （＝ ready なタスクを拾わない、ワーカーを起こさない、リースを奪わない）。
         let tick_started = std::time::Instant::now();
-        let report: TickReport = dispatcher.tick()?;
+        let report: TickReport = match role {
+            InstanceRole::Active | InstanceRole::Draining => dispatcher.tick()?,
+            InstanceRole::Standby | InstanceRole::Verify => TickReport::default(),
+        };
+        in_flight = report.in_flight;
         let tick_elapsed = tick_started.elapsed();
         ticks += 1;
         if tick_elapsed >= slow_tick {
@@ -872,9 +1031,10 @@ async fn tick_loop(
         if report.reclaimed + report.dispatched + report.finished + report.reviewed > 0 {
             tracing::info!(ticks, ?report, "tick");
         } else {
-            tracing::debug!(ticks, ?report, "tick");
+            tracing::debug!(ticks, %role, ?report, "tick");
         }
-        if opts.until_idle && report.idle {
+        // `standby` / `verify` は `report.idle` を計算していないので `until_idle` では止まらない。
+        if opts.until_idle && report.idle && matches!(role, InstanceRole::Active | InstanceRole::Draining) {
             tracing::info!(ticks, "idle; exiting");
             return Ok(Exit::Idle);
         }
@@ -1821,9 +1981,23 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let cfg = Config::load(&path).unwrap_or_else(|e| panic!("{e}"));
-        let settings = api_settings(&cfg, "127.0.0.1:7710".parse().unwrap_or_else(|e| panic!("{e}")), None, "i".into(), "t".into(), None);
+        let settings = api_settings(
+            &cfg,
+            "127.0.0.1:7710".parse().unwrap_or_else(|e| panic!("{e}")),
+            None,
+            "i".into(),
+            "t".into(),
+            None,
+            "sha12sha12ab".into(),
+            DaemonMode::Verify,
+            SharedRole::new(InstanceRole::Standby),
+        );
         assert_eq!(settings.secrets_dir, cfg.secrets.as_ref().map(|s| s.dir.clone()));
         assert!(settings.secret_usage.contains_key("tavily"));
+        // ADR-0040 D3 / D4: `release` / `mode` / `role` はそのまま API へ渡る（`GET /health` に出る）。
+        assert_eq!(settings.release, "sha12sha12ab");
+        assert_eq!(settings.mode, DaemonMode::Verify);
+        assert_eq!(settings.role.get(), InstanceRole::Standby);
     }
 
     /// S7: `[accounts]` は reload の対象外。`claude_dir` / `max_runs_per_account` / `check_model` のどれかが

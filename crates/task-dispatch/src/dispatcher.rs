@@ -684,6 +684,10 @@ pub struct Dispatcher {
     connect_pending_clusters: std::collections::HashSet<String>,
     /// 壁時計の Unix 秒（テストで差し替えられるようにした関数。既定は実時刻）。
     now_unix_fn: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// ADR-0040 D4（Phase 47）: 新しい仕事を始めてよいか。`false`（= draining）のときは
+    /// `dispatch_ready` も `recover_reviews` も動かさず、**手元の run とレビューの面倒だけ見続ける**
+    /// （完了の記録、リースの更新、`aggregate` / `child_failed` の後処理は通常どおり動く）。
+    accepting_new_work: bool,
 }
 
 fn real_now_unix() -> i64 {
@@ -742,7 +746,39 @@ impl Dispatcher {
             cluster_connector: None,
             connect_pending_clusters: std::collections::HashSet::new(),
             now_unix_fn: Arc::new(real_now_unix),
+            accepting_new_work: true,
         }
+    }
+
+    /// ADR-0040 D4（Phase 47）: 新しい仕事を始めるのをやめる／再開する。`false` にすると
+    /// `dispatch_ready`（ready なタスクの起動）と `recover_reviews`（他のインスタンスが抱えている
+    /// かもしれない reviewing の拾い上げ）を止める。**手元の run とレビューはそのまま面倒を見る**。
+    pub fn set_accepting_new_work(&mut self, accepting: bool) {
+        self.accepting_new_work = accepting;
+    }
+
+    /// 手元で動いている run とレビューの数（ADR-0040 D4 の drain の判定に使う）。
+    pub fn in_flight(&self) -> usize {
+        self.running.len() + self.reviewing.len()
+    }
+
+    /// ADR-0040 D4: `[handoff] drain_timeout_secs` を超えたときに、残っている run とレビューを
+    /// 打ち切る。DB の状態は変えない（リースが切れて新しい active が従来の「リース切れ」の経路で拾う）。
+    /// 打ち切った数を返す。
+    pub fn abort_all_runs(&mut self) -> usize {
+        let mut aborted = 0;
+        for (task_id, entry) in self.running.drain() {
+            tracing::warn!(task_id = %task_id, run_id = %entry.run_id, "drain timeout; aborting the run (the lease will expire and the new active will reclaim it)");
+            entry.handle.abort();
+            aborted += 1;
+        }
+        for (task_id, entry) in self.reviewing.drain() {
+            tracing::warn!(task_id = %task_id, "drain timeout; aborting the review");
+            entry.handle.abort();
+            aborted += 1;
+        }
+        self.pending_subjects.clear();
+        aborted
     }
 
     /// ADR-0032 D3: `auth = "publickey"` のクラスタへの自動接続を有効にする（taskd 側が本番の実装を挿す）。
@@ -915,11 +951,15 @@ impl Dispatcher {
         let reclaim_ms = lap(&mut at);
         self.abort_stale_runs()?;
         let abort_ms = lap(&mut at);
-        self.recover_reviews()?;
+        // ADR-0040 D4: draining のインスタンスは新しい仕事を始めない（拾い上げも dispatch もしない）。
+        // 手元の run とレビューの完了・リース更新・後処理は上の `drain_completions` 以下でそのまま動く。
+        if self.accepting_new_work {
+            self.recover_reviews()?;
+        }
         let recover_ms = lap(&mut at);
         self.refresh_cluster_liveness();
         let cluster_ms = lap(&mut at);
-        report.dispatched = self.dispatch_ready()?;
+        report.dispatched = if self.accepting_new_work { self.dispatch_ready()? } else { 0 };
         let dispatch_ms = lap(&mut at);
         report.in_flight = self.running.len() + self.reviewing.len();
         report.idle = self.is_idle()?;

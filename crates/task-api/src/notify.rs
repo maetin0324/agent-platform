@@ -133,6 +133,7 @@ pub(crate) async fn test(
 ) -> ApiResult {
     crate::handlers::no_query(&raw)?;
     require_admin(&state, &headers)?;
+    crate::middleware::require_active(&state)?;
     if webhook_fingerprint(&state).is_none() {
         return Err(ApiProblem::notify_unavailable(format!(
             "no Discord webhook is registered; add it as the secret `{}`",
