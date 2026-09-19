@@ -62,6 +62,9 @@ pub struct PlanCheck {
     pub limits: PlanLimits,
     /// ADR-0028 D3: `PlanOutput.tasks[].genre` / `role` の整合検証に使う（`[[genres]]`）。
     pub genres: Vec<GenreSpec>,
+    /// ADR-0043 D2: その案件のリポジトリの名前（計画の `tasks[].repos` の検証に使う）。
+    /// 案件にリポジトリが無ければ空で、そのとき `repos` を書いた計画は差し戻される。
+    pub repos: Vec<String>,
 }
 
 /// `Reviewer` run が供給側の失敗で判定できなかったこと（ADR-0010 D5, P-29）。
@@ -148,6 +151,10 @@ pub struct ReviewExtras {
     /// ADR-0016 D3 / M4: 集約 run のレビューなら true。暗黙の条件「`<artifacts_dir>/summary.md` が存在する」を
     /// `criterion_idx = acceptance.len()`（Plan の暗黙条件があればその次）に加える。
     pub aggregate: bool,
+    /// ADR-0043 D4: 先頭のリポジトリの `.config/celeris/workspace.toml` の `[commands] check`。
+    /// **タスクの `acceptance` に `Check::Command` が 1 つも無いときだけ**、暗黙の条件として
+    /// `exit 0` を期待して実行する（タスクに明示があればそれが勝つ）。空なら何もしない。
+    pub repo_checks: Vec<String>,
 }
 
 pub const SUMMARY_FILE_NAME: &str = "summary.md";
@@ -171,6 +178,7 @@ pub async fn review_task(
         reviewer,
         human,
         aggregate,
+        repo_checks,
     } = extras;
     let subject = &subject;
     let mut verdicts = Vec::with_capacity(task.acceptance.len() + 1);
@@ -266,6 +274,32 @@ pub async fn review_task(
         });
     }
 
+    // ADR-0043 D4: タスクが自分で検査コマンドを書いていないときだけ、リポジトリの
+    // `[commands] check` を暗黙の条件として足す（タスクの `acceptance` の明示が勝つ）。
+    let task_has_command = task.acceptance.iter().any(|c| matches!(c.check, Check::Command { .. }));
+    if !repo_checks.is_empty() && !task_has_command {
+        let base = task.acceptance.len() + usize::from(plan.is_some()) + usize::from(aggregate);
+        for (n, cmd) in repo_checks.iter().enumerate() {
+            let (pass, reason) = match workspace.exec(cmd, command_timeout).await {
+                Err(e) => (false, format!("exec failed: {e}")),
+                Ok(r) if r.timed_out => (
+                    false,
+                    format!("command timed out after {}s: {cmd}", command_timeout.as_secs()),
+                ),
+                Ok(r) => (
+                    r.exit == Some(0),
+                    format!(
+                        "workspace.toml check: cmd={cmd:?} exit={:?} expected=0 stdout_tail={:?} stderr_tail={:?}",
+                        r.exit,
+                        tail(&r.stdout_tail, REASON_TAIL),
+                        tail(&r.stderr_tail, REASON_TAIL)
+                    ),
+                ),
+            };
+            verdicts.push(Verdict { criterion_idx: base + n, pass, reason });
+        }
+    }
+
     // ADR-0007 D5 2./3.: 決定的条件が全 pass のときだけ LLM レビュー run を起動する。
     let mut provider_failure = None;
     let mut reviewer_run = None;
@@ -337,7 +371,7 @@ fn check_plan_file(
         Ok(t) => t,
         Err(e) => return (false, format!("{rel} not found or unreadable: {e}"), None),
     };
-    match parse_and_validate(&text, check.depth, &check.limits, &check.genres) {
+    match parse_and_validate(&text, check.depth, &check.limits, &check.genres, &check.repos) {
         Ok(plan) => {
             let n = plan.tasks.len();
             (true, format!("{rel} is a valid PlanOutput with {n} tasks"), Some(plan))
@@ -350,6 +384,7 @@ fn check_plan_file(
 pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHint) -> Task {
     let now = time::OffsetDateTime::now_utc();
     Task {
+        repos: Vec::new(),
         id: TaskId::new(),
         parent_id: Some(subject_task.id),
         kind: TaskKind::Review,
@@ -539,6 +574,7 @@ mod tests {
     fn task_with(checks: Vec<Check>, dir: &Path) -> Task {
         let now = time::OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
@@ -889,7 +925,7 @@ mod tests {
         let ws = LocalWorkspace::new(dir.path());
         let mut task = task_with(vec![], dir.path());
         task.kind = TaskKind::Plan;
-        let check = PlanCheck { depth: 1, limits: PlanLimits::default(), genres: vec![] };
+        let check = PlanCheck { depth: 1, limits: PlanLimits::default(), genres: vec![], repos: vec![] };
 
         // ファイル無し。
         let out = review_task(&task, &ws, dir.path(), &dir.path().join("artifacts"), &[], Duration::from_secs(5), ReviewExtras { plan: Some(check.clone()), ..Default::default() }).await;

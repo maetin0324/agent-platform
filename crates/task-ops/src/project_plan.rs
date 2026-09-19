@@ -86,6 +86,8 @@ pub fn start(
     };
 
     let spec = NewTaskSpec {
+        // ADR-0043 D2: 分解を起こす計画 run も案件の primary を継ぐ（`resolve_repos` の既定）。
+        repos: Vec::new(),
         title,
         objective: goal,
         acceptance: Vec::new(),

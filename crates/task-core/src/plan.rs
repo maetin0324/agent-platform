@@ -61,6 +61,11 @@ pub struct NewTask {
     /// 別の場所（別のリポジトリ・別のクラスタ）で作業させたいときにだけ書く。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceSpec>,
+    /// ADR-0043 D2: この子が使う案件のリポジトリを**名前で**指定する（例 `["benchfs", "benchfs-paper"]`）。
+    /// 書かなければ **親 → 案件の primary** を継ぐ。前置きの「この案件のリポジトリ」に出ていない名前を
+    /// 書くと、その計画は差し戻される（`PlanError::UnknownRepo`）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
 }
 
 /// DESIGN §5.6 の `PlanOutput{ tasks: Vec<NewTask> }`。
@@ -115,6 +120,14 @@ pub enum PlanError {
     /// ADR-0028 D3: `genre` と `role` を両方指定したが、`role` がその分野の `roles` に含まれない。
     #[error("tasks[{index}].role {role:?} is not one of genre {genre:?}'s roles")]
     RoleNotInGenre { index: usize, role: String, genre: String },
+    /// ADR-0043 D2: 知らないリポジトリの名前（案件の `project_repos` に無い）。
+    #[error("tasks[{index}].repos[{position}] = {repo:?} is not one of this project's repositories ({known})")]
+    UnknownRepo {
+        index: usize,
+        position: usize,
+        repo: String,
+        known: String,
+    },
 }
 
 /// `PlanOutput` をデシリアライズして検証する。`plan_depth` はその Plan 自身を含む祖先 Plan の数。
@@ -125,14 +138,21 @@ pub fn parse_and_validate(
     plan_depth: u32,
     limits: &PlanLimits,
     genres: &[GenreSpec],
+    repos: &[String],
 ) -> Result<PlanOutput, String> {
     let plan: PlanOutput = serde_json::from_str(json).map_err(|e| format!("invalid plan.json: {e}"))?;
-    validate(&plan, plan_depth, limits, genres).map_err(|e| e.to_string())?;
+    validate(&plan, plan_depth, limits, genres, repos).map_err(|e| e.to_string())?;
     Ok(plan)
 }
 
 /// 決定的な検証（ADR-0007 D2, ADR-0028 D3）。
-pub fn validate(plan: &PlanOutput, plan_depth: u32, limits: &PlanLimits, genres: &[GenreSpec]) -> Result<(), PlanError> {
+pub fn validate(
+    plan: &PlanOutput,
+    plan_depth: u32,
+    limits: &PlanLimits,
+    genres: &[GenreSpec],
+    repos: &[String],
+) -> Result<(), PlanError> {
     let len = plan.tasks.len();
     if len < limits.min_tasks || len > limits.max_tasks {
         return Err(PlanError::TaskCount {
@@ -184,6 +204,18 @@ pub fn validate(plan: &PlanOutput, plan_depth: u32, limits: &PlanLimits, genres:
             }
             if target == index {
                 return Err(PlanError::SelfDependency { index });
+            }
+        }
+        // ADR-0043 D2: 子が選んだリポジトリは、案件に登録されている名前でなければならない
+        // （知らない名前は計画を差し戻す。他の検証の失敗と同じ扱い）。
+        for (position, repo) in t.repos.iter().enumerate() {
+            if !repos.iter().any(|known| known == repo.trim()) {
+                return Err(PlanError::UnknownRepo {
+                    index,
+                    position,
+                    repo: repo.clone(),
+                    known: if repos.is_empty() { "none".to_string() } else { repos.join(", ") },
+                });
             }
         }
         if t.kind == NewTaskKind::Plan && plan_depth + 1 > MAX_PLAN_DEPTH {
@@ -380,6 +412,8 @@ pub fn materialize(
                 },
                 // ADR-0039 D2: 明示 > 案件の workspace > 親の workspace（従来）。
                 workspace: workspace.child_workspace(parent, t.workspace.as_ref()),
+                // ADR-0043 D2: 明示（名前）> 親 > 案件の primary。
+                repos: workspace.child_repos(parent, &t.repos),
                 budget: Budget {
                     max_turns: defaults.max_turns,
                     max_wall_secs: defaults.max_wall_secs,
@@ -417,6 +451,7 @@ mod tests {
 
     fn new_task(title: &str, deps: Vec<usize>) -> NewTask {
         NewTask {
+            repos: Vec::new(),
             title: title.into(),
             objective: format!("do {title}"),
             acceptance: vec![Criterion {
@@ -449,6 +484,7 @@ mod tests {
     fn parent() -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Plan,
@@ -490,7 +526,7 @@ mod tests {
         let plan = PlanOutput {
             tasks: vec![new_task("a", vec![]), new_task("b", vec![0]), new_task("c", vec![0, 1])],
         };
-        validate(&plan, 1, &PlanLimits::default(), &[]).unwrap();
+        validate(&plan, 1, &PlanLimits::default(), &[], &[]).unwrap();
         let p = parent();
         let children = materialize(&p, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
         assert_eq!(children.len(), 3);
@@ -540,7 +576,7 @@ mod tests {
             tasks: vec![new_task("a", vec![])],
         };
         assert!(matches!(
-            validate(&one, 1, &limits, &[]),
+            validate(&one, 1, &limits, &[], &[]),
             Err(PlanError::TaskCount { actual: 1, min: 2, max: 3 })
         ));
         let mut empty_title = PlanOutput {
@@ -548,14 +584,14 @@ mod tests {
         };
         empty_title.tasks[1].title = "  ".into();
         assert!(matches!(
-            validate(&empty_title, 1, &limits, &[]),
+            validate(&empty_title, 1, &limits, &[], &[]),
             Err(PlanError::EmptyField { index: 1, field: "title" })
         ));
         let mut no_acc = PlanOutput {
             tasks: vec![new_task("a", vec![]), new_task("b", vec![])],
         };
         no_acc.tasks[0].acceptance.clear();
-        assert!(matches!(validate(&no_acc, 1, &limits, &[]), Err(PlanError::NoAcceptance { index: 0 })));
+        assert!(matches!(validate(&no_acc, 1, &limits, &[], &[]), Err(PlanError::NoAcceptance { index: 0 })));
     }
 
     #[test]
@@ -563,7 +599,7 @@ mod tests {
         let oor = PlanOutput {
             tasks: vec![new_task("a", vec![7])],
         };
-        let err = validate(&oor, 1, &PlanLimits::default(), &[]).unwrap_err();
+        let err = validate(&oor, 1, &PlanLimits::default(), &[], &[]).unwrap_err();
         assert!(matches!(err, PlanError::DependencyOutOfRange { index: 0, target: 7, .. }));
         assert!(err.to_string().contains("out of range"));
 
@@ -571,7 +607,7 @@ mod tests {
             tasks: vec![new_task("a", vec![0])],
         };
         assert!(matches!(
-            validate(&self_dep, 1, &PlanLimits::default(), &[]),
+            validate(&self_dep, 1, &PlanLimits::default(), &[], &[]),
             Err(PlanError::SelfDependency { index: 0 })
         ));
 
@@ -579,7 +615,7 @@ mod tests {
             tasks: vec![new_task("a", vec![2]), new_task("b", vec![0]), new_task("c", vec![1])],
         };
         assert!(matches!(
-            validate(&cycle, 1, &PlanLimits::default(), &[]),
+            validate(&cycle, 1, &PlanLimits::default(), &[], &[]),
             Err(PlanError::Cycle { .. })
         ));
 
@@ -591,7 +627,7 @@ mod tests {
                 new_task("d", vec![1, 2]),
             ],
         };
-        validate(&diamond, 1, &PlanLimits::default(), &[]).unwrap();
+        validate(&diamond, 1, &PlanLimits::default(), &[], &[]).unwrap();
     }
 
     #[test]
@@ -600,10 +636,10 @@ mod tests {
             tasks: vec![new_task("sub", vec![])],
         };
         nested.tasks[0].kind = NewTaskKind::Plan;
-        validate(&nested, 1, &PlanLimits::default(), &[]).unwrap();
-        validate(&nested, 2, &PlanLimits::default(), &[]).unwrap();
+        validate(&nested, 1, &PlanLimits::default(), &[], &[]).unwrap();
+        validate(&nested, 2, &PlanLimits::default(), &[], &[]).unwrap();
         assert!(matches!(
-            validate(&nested, 3, &PlanLimits::default(), &[]),
+            validate(&nested, 3, &PlanLimits::default(), &[], &[]),
             Err(PlanError::DepthExceeded { index: 0, depth: 4, max: 3 })
         ));
         let p = parent();
@@ -614,13 +650,13 @@ mod tests {
     #[test]
     fn parse_rejects_unknown_fields_and_reports_serde_errors() {
         let ok = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"reviewer"}}]}]}"#;
-        let plan = parse_and_validate(ok, 1, &PlanLimits::default(), &[]).unwrap();
+        let plan = parse_and_validate(ok, 1, &PlanLimits::default(), &[], &[]).unwrap();
         assert_eq!(plan.tasks[0].acceptance[0].check, Check::Reviewer);
         assert_eq!(plan.tasks[0].kind, NewTaskKind::Execute);
         let unknown = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"bogus":1}]}"#;
-        let err = parse_and_validate(unknown, 1, &PlanLimits::default(), &[]).unwrap_err();
+        let err = parse_and_validate(unknown, 1, &PlanLimits::default(), &[], &[]).unwrap_err();
         assert!(err.contains("bogus"), "{err}");
-        assert!(parse_and_validate("not json", 1, &PlanLimits::default(), &[]).is_err());
+        assert!(parse_and_validate("not json", 1, &PlanLimits::default(), &[], &[]).is_err());
     }
 
     /// ADR-0028 D3: 子の分野は 明示 > `role` の分野（一意なら） > 親の分野の順で決まる（委譲と同じ規則）。
@@ -822,7 +858,7 @@ mod tests {
             fixed.objective
         );
         // 直した plan はそのまま検証を通り、子にできる（壊さず直す）。
-        validate(&plan, 1, &PlanLimits::default(), &genres).unwrap();
+        validate(&plan, 1, &PlanLimits::default(), &genres, &[]).unwrap();
     }
 
     /// Phase 38: 落とすと受け入れ条件が 0 件になるときは、同じ文をレビュアー条件にして残す
@@ -843,7 +879,7 @@ mod tests {
             plan.tasks[0].acceptance,
             vec![Criterion { text: "候補テーマ 3 件が引用付きで書かれている".into(), check: Check::Reviewer }]
         );
-        validate(&plan, 1, &PlanLimits::default(), &genres).unwrap();
+        validate(&plan, 1, &PlanLimits::default(), &genres, &[]).unwrap();
     }
 
     /// Phase 38: ハーネスでない分野（coding = claude-code）と、名前が一致しているハーネスのタスクには
@@ -879,7 +915,7 @@ mod tests {
         unknown.genre = Some("literature".into());
         let plan = PlanOutput { tasks: vec![unknown] };
         assert_eq!(
-            validate(&plan, 1, &PlanLimits::default(), &genres),
+            validate(&plan, 1, &PlanLimits::default(), &genres, &[]),
             Err(PlanError::UnknownGenre { index: 0, genre: "literature".into() })
         );
 
@@ -888,7 +924,7 @@ mod tests {
         mismatched.role = Some("literature-scout".into());
         let plan = PlanOutput { tasks: vec![mismatched] };
         assert_eq!(
-            validate(&plan, 1, &PlanLimits::default(), &genres),
+            validate(&plan, 1, &PlanLimits::default(), &genres, &[]),
             Err(PlanError::RoleNotInGenre {
                 index: 0,
                 role: "literature-scout".into(),
@@ -901,13 +937,13 @@ mod tests {
         no_config.genre = Some("coding".into());
         let plan = PlanOutput { tasks: vec![no_config] };
         assert_eq!(
-            validate(&plan, 1, &PlanLimits::default(), &[]),
+            validate(&plan, 1, &PlanLimits::default(), &[], &[]),
             Err(PlanError::UnknownGenre { index: 0, genre: "coding".into() })
         );
 
         // parse_and_validate 経由でも同じ（Plan run の暗黙条件から見えるエラー文言）。
         let json = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"genre":"literature"}]}"#;
-        let err = parse_and_validate(json, 1, &PlanLimits::default(), &genres).unwrap_err();
+        let err = parse_and_validate(json, 1, &PlanLimits::default(), &genres, &[]).unwrap_err();
         assert!(err.contains("literature"), "{err}");
     }
 
@@ -928,7 +964,7 @@ mod tests {
         assert_eq!(children[0].workspace, p.workspace);
 
         // 案件の作業場所は親より強い。
-        let ws = WorkspaceContext { project: Some(&project), home: None };
+        let ws = WorkspaceContext { repos: &[], project: Some(&project), home: None };
         let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
         assert_eq!(children[0].workspace, project);
 
@@ -953,14 +989,14 @@ mod tests {
         };
         let plan = PlanOutput { tasks: vec![new_task("a", vec![])] };
         let home = PathBuf::from("/home/rmaeda");
-        let ws = WorkspaceContext { project: Some(&remote), home: Some(&home) };
+        let ws = WorkspaceContext { repos: &[], project: Some(&remote), home: Some(&home) };
         let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
         assert_eq!(children[0].workspace, remote, "Remote の path はクラスタ側なので触らない");
 
         let tilde = WorkspaceSpec::Local {
             path: PathBuf::from("~/workspace/rust/pluvio-poc"), mode: None,
         };
-        let ws = WorkspaceContext { project: Some(&tilde), home: Some(&home) };
+        let ws = WorkspaceContext { repos: &[], project: Some(&tilde), home: Some(&home) };
         let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
         assert_eq!(
             children[0].workspace,
@@ -968,6 +1004,95 @@ mod tests {
                 path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None
             }
         );
+    }
+
+    fn project_repo(name: &str, primary: bool) -> crate::repos::ProjectRepo {
+        crate::repos::ProjectRepo {
+            id: crate::repos::RepoId::new(),
+            project_id: crate::org::ProjectId::new(),
+            name: name.into(),
+            kind: crate::repos::RepoKind::Git,
+            location: WorkspaceSpec::local(format!("/srv/{name}")),
+            default_branch: None,
+            sync: None,
+            run: crate::repos::RepoRun::Auto,
+            is_primary: primary,
+            created_at: OffsetDateTime::now_utc(),
+        }
+    }
+
+    /// ADR-0043 D2: 計画の `repos` は案件に登録されている名前でなければならない（知らない名前は差し戻し）。
+    #[test]
+    fn a_plan_can_only_name_repositories_the_project_has() {
+        let known = vec!["benchfs".to_string(), "benchfs-paper".to_string()];
+        let mut ok = new_task("a", vec![]);
+        ok.repos = vec!["benchfs".into(), "benchfs-paper".into()];
+        let plan = PlanOutput { tasks: vec![ok] };
+        assert_eq!(validate(&plan, 1, &PlanLimits::default(), &[], &known), Ok(()));
+
+        let mut bad = new_task("b", vec![]);
+        bad.repos = vec!["benchfs".into(), "nope".into()];
+        let plan = PlanOutput { tasks: vec![bad] };
+        assert_eq!(
+            validate(&plan, 1, &PlanLimits::default(), &[], &known),
+            Err(PlanError::UnknownRepo {
+                index: 0,
+                position: 1,
+                repo: "nope".into(),
+                known: "benchfs, benchfs-paper".into(),
+            })
+        );
+
+        // 案件にリポジトリが無ければ `repos` を書いた計画は通らない。
+        let mut any = new_task("c", vec![]);
+        any.repos = vec!["benchfs".into()];
+        let plan = PlanOutput { tasks: vec![any] };
+        assert!(matches!(
+            validate(&plan, 1, &PlanLimits::default(), &[], &[]),
+            Err(PlanError::UnknownRepo { known, .. }) if known == "none"
+        ));
+
+        // `parse_and_validate` 経由でも同じ（Plan run の暗黙条件から見えるエラー文言）。
+        let json = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"repos":["nope"]}]}"#;
+        let err = parse_and_validate(json, 1, &PlanLimits::default(), &[], &known).unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+        // 書かなければ従来どおり通る（既存の計画はそのまま）。
+        let json = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}]}]}"#;
+        assert!(parse_and_validate(json, 1, &PlanLimits::default(), &[], &[]).is_ok());
+    }
+
+    /// ADR-0043 D2: 子のリポジトリは **明示（名前）> 親 > 案件の primary**。
+    #[test]
+    fn child_repos_are_explicit_then_parent_then_the_project_primary() {
+        let repos = vec![project_repo("benchfs", true), project_repo("benchfs-paper", false)];
+        let primary = crate::repos::RepoRef::of(&repos[0]);
+        let paper = crate::repos::RepoRef::of(&repos[1]);
+        let ws = WorkspaceContext { repos: &repos, project: None, home: None };
+
+        // 何も書かず、親も持たなければ案件の primary。
+        let p = parent();
+        assert!(p.repos.is_empty());
+        let plan = PlanOutput { tasks: vec![new_task("a", vec![])] };
+        let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
+        assert_eq!(children[0].repos, vec![primary.clone()]);
+
+        // 親が持っていれば親を継ぐ（primary ではない）。
+        let mut inheriting = parent();
+        inheriting.repos = vec![paper.clone()];
+        let children = materialize(&inheriting, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
+        assert_eq!(children[0].repos, vec![paper.clone()]);
+
+        // 明示が一番強い（複数可。並びはそのまま = `repos[0]` が cwd）。
+        let mut explicit = new_task("b", vec![]);
+        explicit.repos = vec!["benchfs-paper".into(), "benchfs".into()];
+        let plan = PlanOutput { tasks: vec![new_task("a", vec![]), explicit] };
+        let children = materialize(&inheriting, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
+        assert_eq!(children[0].repos, vec![paper.clone()], "書かない子は親を継ぐ");
+        assert_eq!(children[1].repos, vec![paper, primary]);
+
+        // 案件にリポジトリが無ければ空のまま（従来の 1 つの `workspace` だけで動く）。
+        let children = materialize(&p, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
+        assert!(children[0].repos.is_empty());
     }
 
     /// ADR-0007 D2 / ADR-0003 D6: 生成スキーマとコミット済みファイルの一致。`UPDATE_SCHEMA=1` で再生成。

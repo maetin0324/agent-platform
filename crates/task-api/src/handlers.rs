@@ -115,6 +115,10 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/projects", get(project_list).post(create_project))
         .route("/api/v1/projects/{id}", get(project_detail).patch(patch_project))
         .route("/api/v1/projects/{id}/milestones", post(create_milestone))
+        // ADR-0043 D1（Phase 52）: 案件のリポジトリ。実装は `crate::repos`。
+        .merge(crate::repos::routes())
+        // ADR-0043 D6（Phase 52）: タスクの作業ツリーの閲覧。実装は `crate::tree`。
+        .merge(crate::tree::routes())
         .route("/api/v1/milestones/{id}", patch(patch_milestone))
         .merge(crate::project_plan::routes())
         // ADR-0038 D2（Phase 41）: 途中目標の判定（ok / 議論 / ng）。実装は `crate::milestones`。
@@ -530,7 +534,9 @@ async fn project_detail(
                     milestone_id: task.milestone_id,
                 })
                 .collect();
-            Ok(ProjectDetail { project, milestones, tasks })
+            // ADR-0043 D1: この案件のリポジトリ（primary が先頭）。
+            let repos = store.repo_list(project_id).map_err(store_problem)?;
+            Ok(ProjectDetail { project, repos, milestones, tasks })
         })
         .await?;
     Ok(json_response(StatusCode::OK, &detail))
@@ -582,7 +588,7 @@ async fn patch_project(
 
 /// ADR-0039 D1 / D5: 案件の作業場所を受け取るときの検証と正規化（純粋に近い: 設定の一覧と `$HOME` を見るだけ）。
 /// `Remote` の `cluster` は `[[clusters]]` にあること（無ければ 422）、`Local` の `~` は `$HOME` で展開する。
-fn validated_workspace(state: &ApiState, spec: task_core::WorkspaceSpec) -> Result<task_core::WorkspaceSpec, ApiProblem> {
+pub(crate) fn validated_workspace(state: &ApiState, spec: task_core::WorkspaceSpec) -> Result<task_core::WorkspaceSpec, ApiProblem> {
     if let task_core::WorkspaceSpec::Remote { cluster, .. } = &spec
         && !state.inner.config_view.clusters.iter().any(|c| &c.id == cluster)
     {

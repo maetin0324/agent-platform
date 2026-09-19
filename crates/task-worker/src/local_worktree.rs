@@ -22,8 +22,11 @@ use crate::workspace::WorkspaceError;
 /// worktree の親（`<workspace_root>/<task_id>`）の下に切る作業ツリーの名前。
 pub const WORKTREE_DIR_NAME: &str = "tree";
 
-/// ADR-0019 の `[[clusters]] worktree` と同じ既定のブランチ接頭辞。
-pub const DEFAULT_BRANCH_PREFIX: &str = "taskd/";
+/// ローカルの worktree のブランチ接頭辞の既定（ADR-0042 D3 でこの基盤の名前 Celeris に合わせた。
+/// Phase 49 までは ADR-0019 のクラスタ側と同じ `taskd/` だった）。`[workspace] worktree_branch_prefix` で変えられる。
+/// **クラスタ側**（ADR-0019 の `WorktreeSettings::branch_prefix`）は `taskd/` のまま（既存のクラスタに
+/// 残っているブランチの名前を変えないため）。
+pub const DEFAULT_BRANCH_PREFIX: &str = "celeris/";
 
 /// `git worktree add` の直列化に使う錠（`workspace_root` 直下。元のリポジトリには置かない）。
 const LOCK_FILE: &str = ".taskd-worktree.lock";
@@ -143,6 +146,35 @@ impl LocalWorktree {
                     _ => CleanupOutcome::Unknown,
                 }
             }
+        }
+    }
+    /// ADR-0043 D2 の**中止（cancel）**の後片付け: 未コミットの変更があっても worktree を消し、
+    /// **ブランチも消す**（`git branch -D`）。人が「このタスクは中止」と決めたときだけ呼ぶ。
+    /// 終端（`done` / `failed`）では呼ばない（差分を見るために残す）。
+    pub fn remove_with_branch(&self) -> CleanupOutcome {
+        let existed = self.dir.exists();
+        let dir = self.dir.to_string_lossy().into_owned();
+        if existed {
+            // `--force` は未コミットの変更ごと消す（cancel は人の指示）。
+            let removed = git(&self.repo, &["worktree", "remove", "--force", &dir]).is_some_and(|o| o.ok);
+            if !removed {
+                // 登録が壊れている（人が手で消した等）なら prune してからディレクトリを落とす。
+                let _ = git(&self.repo, &["worktree", "prune"]);
+                if self.dir.exists() && std::fs::remove_dir_all(&self.dir).is_err() {
+                    return CleanupOutcome::Unknown;
+                }
+                let _ = git(&self.repo, &["worktree", "prune"]);
+            }
+        }
+        // ブランチは worktree が無くなってからでないと消せない。
+        let had_branch = branch_exists(&self.repo, &self.branch);
+        if had_branch && !git(&self.repo, &["branch", "-D", &self.branch]).is_some_and(|o| o.ok) {
+            return CleanupOutcome::Unknown;
+        }
+        if existed || had_branch {
+            CleanupOutcome::Removed
+        } else {
+            CleanupOutcome::AlreadyGone
         }
     }
 }

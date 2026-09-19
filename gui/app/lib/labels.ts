@@ -1,4 +1,14 @@
-import type { Decision, InstanceRole, MilestoneStatus, OrgKind, ProjectStatus, Status } from "~/taskd/types";
+import type {
+  Decision,
+  InstanceRole,
+  MilestoneStatus,
+  OrgKind,
+  ProjectStatus,
+  RepoKind,
+  RepoRun,
+  RepoSync,
+  Status,
+} from "~/taskd/types";
 
 /**
  * 業務の 6 画面（SPEC §4: 秘書・組織・案件・報告・認可・成果物）で使う日本語の言葉（Phase G13f-1、監査 5）。
@@ -106,4 +116,86 @@ export function staleChangesLabel(base: string | null): string {
   return base
     ? `この差分は ${base} を起点に作られたもので、いまの現行とは違います（もう一度 release.sh を通すと新しくなります）`
     : "この差分は現行が無いときに作られたもので、いまの現行との差ではありません";
+}
+
+/**
+ * 案件のリポジトリ（ADR-0043 D1、docs/taskd-api-v1.md §3.68〜3.71。Phase 52 / G16）。
+ * 値（`git` / `dir` / `auto` / `host` / `container` / `worktree` / `rsync` / `none`）は taskd のものを
+ * そのまま送り返すだけで、画面に出す言葉だけをここに集める。知らない値は素のまま出す
+ * （taskd が値を増やしても壊れない）。
+ */
+const REPO_KIND_LABEL: Record<RepoKind, string> = {
+  git: "git",
+  dir: "ディレクトリ",
+};
+
+export function repoKindLabel(kind: RepoKind | string): string {
+  return REPO_KIND_LABEL[kind as RepoKind] ?? kind;
+}
+
+/** 実行環境（ADR-0043 D1 / D3）。`container` はこの Phase では読むだけ（ADR-0043 A3）。 */
+const REPO_RUN_LABEL: Record<RepoRun, string> = {
+  auto: "自動",
+  host: "ホスト",
+  container: "コンテナ",
+};
+
+export function repoRunLabel(run: RepoRun | string): string {
+  return REPO_RUN_LABEL[run as RepoRun] ?? run;
+}
+
+/** リモートのリポジトリの持ち込み方（ADR-0043 D7。`none` は taskd が 422 にする）。 */
+const REPO_SYNC_LABEL: Record<RepoSync, string> = {
+  worktree: "worktree",
+  rsync: "rsync",
+  none: "同期しない",
+};
+
+export function repoSyncLabel(sync: RepoSync | string): string {
+  return REPO_SYNC_LABEL[sync as RepoSync] ?? sync;
+}
+
+/** 案件の「主なリポジトリ」（`is_primary`）に添える印。`Project.workspace` はこの行の写し。 */
+export const PRIMARY_REPO_MARK = "主";
+
+/** 「主にする」ボタンの文言（1 案件に 1 つ。primary を空にはできない）。 */
+export const SET_PRIMARY_REPO_LABEL = "主にする";
+
+/** リポジトリの `kind` を「自動で決める」（`kind` を送らない）ときの選択肢の文言。 */
+export const REPO_KIND_AUTO_LABEL = "自動（.git があれば git）";
+
+/**
+ * タスクの作業ツリー（ADR-0043 D6、docs/taskd-api-v1.md §3.72）の一覧の種類。
+ * `kind` は taskd が決めた `dir` / `file` / `other` をそのまま受ける（GUI で再判定しない）。
+ */
+const TREE_ENTRY_KIND_LABEL: Record<string, string> = {
+  dir: "ディレクトリ",
+  file: "ファイル",
+  other: "その他",
+};
+
+export function treeEntryKindLabel(kind: string): string {
+  return TREE_ENTRY_KIND_LABEL[kind] ?? kind;
+}
+
+/** バイト数の表示（`size` は taskd が返した値そのまま。1024 進で小数 1 桁まで）。 */
+export function fileSizeLabel(size: number): string {
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let value = size;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 ? String(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+/** テキストとして読めなかったファイル（`binary: true`）。本文は出さず大きさだけ出す（§3.73）。 */
+export function binaryFileLabel(size: number): string {
+  return `バイナリのため表示しません（${fileSizeLabel(size)}）`;
+}
+
+/** 512 KiB を超えたファイル（`too_large: true`）。本文は出さず大きさだけ出す（§3.73）。 */
+export function tooLargeFileLabel(size: number): string {
+  return `512 KiB を超えるため表示しません（${fileSizeLabel(size)}）`;
 }

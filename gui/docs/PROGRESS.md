@@ -2611,3 +2611,129 @@ production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/
 - 提案（`docs/taskd-api-v1.md` への変更提案。採否は人間）:
   - G14-P1: `daemon_instances` の変化を SSE の `daemon` イベントに載せてほしい。載れば
     「リリース」画面の 2 秒ポーリング（この画面だけの特例）を消せる。
+
+## Phase G16 — 案件のリポジトリとタスクの作業ツリー（ADR-0043 D1/D6、Phase 52。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的: taskd Phase 52（ADR-0043 A1）で入った 2 つを画面にする。
+  (1) 案件が**リポジトリを複数持てる**ようになった（`docs/taskd-api-v1.md` §3.68〜3.71、
+  `ProjectDetail.repos[]`、`POST /tasks` の `repos`）。`Project.workspace` は primary の `location` の
+  写しなので、**従来の「作業場所」カードと `/projects` の単一 `workspace` フォームはそのまま動く**。
+  (2) タスクの作業ツリーが GUI から読めるようになった（§3.72〜3.73、読み取り・トークン不要）。
+- 決めたこと:
+  - G16-D1: 「リポジトリ」節は `/projects/:id` の「作業場所」カードの**すぐ下**に置く。作業場所は
+    primary の写しなので、同じものが 2 か所に出る形だが、**どちらも taskd が持つ値そのまま**で
+    GUI 側の再計算はしない（`workspace` を変えれば primary が変わる、は taskd 側の規則）。
+  - G16-D2: `WorkspaceFields` は触らず、兄弟の `RepoFields` を足す（`/projects` の既存の単体テストを
+    壊さないため。ADR-0039 D1 の作業場所フォームは今までどおり）。純粋関数も
+    `~/lib/workspace-form.ts` ではなく兄弟の `~/lib/repo-form.ts` に置く。
+  - G16-D3: `RepoFields` は**入力欄を常に全部描く**（クラスタの選択は `hidden` で隠すだけ）。
+    `/projects` の「追加のリポジトリ」はこの組を繰り返し、`form.getAll()` で列ごとに読むので、
+    行によって欄が欠けると並びがずれるため。パスが空の行は送らない。
+  - G16-D4: `/projects` の作成は **`POST /projects` → 行ごとに `POST /projects/{id}/repos`** の順
+    （`POST /projects` は 1 つの `workspace` しか受けない。§3.46 / §3.69）。案件は作れたが
+    リポジトリで 422 / 409 になったときは、案件へのリンクを添えて taskd の文言を出す
+    （`ProjectCreateFailure.projectId`）。作り直させない。
+  - G16-D5: リポジトリの操作（追加・変更・主にする・削除）の結果は**行ごとの `useFetcher`** に載せる
+    （SSE の再検証で消えないため。監査 H1 / Phase G14 と同じ）。`ProjectOpOutcome` に
+    `repo_create` / `repo_patch` / `repo_primary` / `repo_delete` を足した。
+  - G16-D6: 作業ツリーの画面は**兄弟のルート `/tasks/:id/files`**（`/tasks/:id/runs/:runId` と同じ形）。
+    中身は全部 `~/components/task-files.tsx`（自己完結の部品）に入れてあるので、ADR-0044 B1 の
+    タブの殻ができたらそこへ 1 行で載せ替えられる。`/tasks/:id` に付けたのは導線のリンク 1 本だけ。
+  - G16-D7: 作業ツリーの移動は全部 `<Link>`（`?repo=&path=&file=`）で、そのたびに loader が走る。
+    クライアントから taskd を呼ぶコードは書かない（DESIGN §8.1）。一覧（`GET /tasks/{id}/tree`）が
+    落ちたらページが出せないので例外のまま（`ErrorBoundary`）、選んだファイルの 403 / 404 だけは
+    `fileError` として一覧を出したまま文言を見せる。
+  - G16-D8: `binary` / `too_large` は**本文を出さず大きさだけ**出す（§3.73）。中身の推測はしない。
+- 変更したファイル:
+  - `app/lib/repo-form.ts`（新規）— 置き場所の 2 択（`RepoPlace`）、`repoLocationFrom` /
+    `repoLocationText` / `repoPlaceOf` / `primaryRepo`。
+  - `app/lib/task-files.ts`（新規）— `treeBreadcrumbs` / `parentPath` / `fileBody`（text / binary /
+    too_large）/ `pickTreeFileViewer` / `isJsonPath` / `taskFilesHref`。
+  - `app/lib/labels.ts` — `repoKindLabel` / `repoRunLabel` / `repoSyncLabel` / `PRIMARY_REPO_MARK` /
+    `SET_PRIMARY_REPO_LABEL` / `REPO_KIND_AUTO_LABEL` / `treeEntryKindLabel` / `fileSizeLabel` /
+    `binaryFileLabel` / `tooLargeFileLabel`。
+  - `app/taskd/repos-admin.server.ts`（新規）— `listRepos` / `createRepo` / `patchRepo` /
+    `setPrimaryRepo` / `deleteRepo` と読み手（`readRepoCreateBody` / `readRepoPatchBody` /
+    `readExtraRepoCreateBodies`）。
+  - `app/taskd/task-files.server.ts`（新規）— `loadTaskFiles` / `readTaskFilesQuery`。
+  - `app/taskd/action-types.ts` — `ProjectOpOutcome` に 4 つの repo の op を追加。
+  - `app/components/RepoFields.tsx`（新規）、`app/components/ProjectRepos.tsx`（新規）、
+    `app/components/task-files.tsx`（新規）、`app/components/Flash.tsx`（`PROJECT_OP_LABEL` に 4 語）。
+  - `app/routes/projects.$id.tsx` — 「リポジトリ」節と 4 つの intent。
+  - `app/routes/projects.tsx` — 「追加のリポジトリ」（繰り返し行）と、201 後の `POST .../repos`。
+  - `app/routes/tasks.$id.files.tsx`（新規）、`app/routes.ts`（`tasks/:id/files`）、
+    `app/routes/tasks.$id.tsx`（「ファイル」への導線のリンク 1 本）。
+  - `test/mock-taskd/fixtures.ts` — `projectRepo` / `defaultRepoList` / `treeView` / `treeFileView`。
+  - `test/unit/repos-admin.test.ts`（新規、21 件）、`test/unit/projects.repos.test.ts`（新規、14 件）、
+    `test/unit/task-files.test.ts`（新規、25 件）。
+  - `app/taskd/types.ts` / `docs/taskd-api-v1.md` — taskd 側が Phase 52 で同期済み（`pnpm gen:types` を
+    流し直しても変わらない）。
+- 受け入れ条件ごとの証拠:
+  - 条件: `/projects/:id` に「リポジトリ」節があり、一覧（名前・種類・場所・実行環境・既定のブランチ・
+    主の印）と、追加・変更・主にする・削除ができる。
+    実行: `pnpm test`（`test/unit/projects.repos.test.ts`）— `loadProjectDetail` が
+    `ProjectDetail.repos` を**並べ替えず**そのまま通すこと（primary が先頭なのは taskd が決める）、
+    `repos` が無い応答でも詳細が出ること、行に出す文言（`repoLocationText` が `cluster:path` /
+    パスそのまま、`repoKindLabel` / `repoRunLabel` / `repoSyncLabel` が知らない値を素のまま返す）。
+    ルート側は `case "repo_create":` 〜 `case "repo_delete":` の 4 つと `ProjectRepos` の描画をソースで確認。
+  - 条件: フォームの読み手が `RepoCreateBody` / `RepoPatchBody` を仕様どおりに組む（空欄はキーごと送らない）。
+    実行: `pnpm test`（`test/unit/repos-admin.test.ts`）— パスだけ書いたら `{location}` だけ、
+    `kind = auto` はキーを送らない、`name` / `default_branch` / `run` の空欄もキーを送らない、
+    remote は `{kind:"remote", cluster, path}`、編集は `name` / `location` / `default_branch` を必ず送り
+    `default_branch` の空欄は `null`（消す）を明示、「主にする」は `{is_primary: true}` だけ。
+  - 条件: taskd のエラー文言をそのまま出す（GUI 側で検証しない）。
+    実行: 同テスト — 422 `validation`（`errors[].field = "name"` が `error.fields.name` に入る）、
+    409 `repo_in_use`（`detail` そのまま、`conflict: true`）、404 `repo_not_found`、401 `unauthorized`。
+  - 条件: `/projects` の従来の単一 `workspace` フォームが今までどおり動く。
+    実行: `pnpm test` — 既存の `test/unit/projects.test.ts`（`readProjectCreateInput` の 4 件、
+    `createProject` の workspace 本文 3 種）が無改変で通る。加えて `projects.repos.test.ts` で
+    `WorkspaceFields` / `readProjectCreateInput` / `project-new-form` が残っていることを確認。
+  - 条件: 「追加のリポジトリ」は行ごとに `POST /projects/{id}/repos` される。
+    実行: `pnpm test`（`repos-admin.test.ts` の `readExtraRepoCreateBodies` 3 件）— 行が無ければ空、
+    2 行を列ごとに突き合わせて `RepoCreateBody` を並べる、パスが空の行は送らない。
+    ルート側は `readExtraRepoCreateBodies` / `createRepo` の呼び出しをソースで確認。
+  - 条件: タスクの作業ツリーが読める（リポジトリの選択・パンくず・一覧・ファイルの本文）。
+    実行: `pnpm test`（`test/unit/task-files.test.ts`）— `loadTaskFiles` が taskd の並びと
+    `repos[]` をそのまま返すこと、`repo` / `path` を省いたらクエリに載せないこと（先頭のリポジトリ・
+    根は taskd が決める）、指定したら載せること、ファイルを選ぶと一覧と同じ `repo` で
+    `GET /tasks/{id}/tree/file` を引くこと。`treeBreadcrumbs` / `parentPath` / `taskFilesHref` の
+    組み立ても別に検証。
+  - 条件: `binary` / `too_large` は大きさだけを出す。
+    実行: 同テスト — `fileBody` が `{kind:"binary", text:null, message:"バイナリのため表示しません（2.0 KiB）"}` /
+    `{kind:"too_large", …"512 KiB を超えるため表示しません（1.0 MiB）"}` を返すこと、
+    loader が `binary: true` の応答をそのまま通すこと（`text` は付かない）。
+  - 条件: 403 / 404 は taskd の文言をそのまま出す。
+    実行: 同テスト — `GET /tasks/{id}/tree/file` の 403 `path_forbidden` は**一覧を出したまま**
+    `fileError`（status 403 / code / detail そのまま）になること、
+    `GET /tasks/{id}/tree` の 404 `file_not_found` は例外になる（＝画面は `ErrorBoundary`）こと。
+  - 条件: クライアントから taskd を直接呼ばない。
+    実行: 同テスト — `app/components/task-files.tsx` に `fetch(` も `TASKD_API_URL` も無いこと、
+    `/tasks/:id/files` に `action` が無いこと、`app/routes.ts` に兄弟のルートが登録されていること。
+  - 条件: フェーズのゲート。
+    実行: `pnpm lint` exit 0（biome、185 ファイル）/ `pnpm typecheck` exit 0 /
+    `pnpm test` exit 0（**48 ファイル、627 tests passed**。G14 時点の 558 から +69）/ `pnpm build` exit 0。
+    `pnpm gen:types` を流し直しても `app/taskd/types.ts` は変わらない
+    （md5 `7c6b6b64aedd8340bb1a03b60d72539e` が前後で一致＝差分ゼロ）。
+- 未解決事項:
+  - G16-U1: `pnpm e2e` は未実行（G13k-U1 / G14-U1 と同じく、既定の 7700 / 7710 が運用中の
+    GUI / taskd を掴むため）。別ポートを与えて人が流すときは、`/projects/:id` の「リポジトリ」節と
+    `/tasks/:id/files`（作業ツリーを持つタスクが要る）を見るのがよい。
+  - G16-U2: DOM を描画する unit テストは今回も無い（G10-U1）。行の描画・`hidden` のクラスタ欄・
+    削除の `confirm` は Playwright でのみ確認できる。
+  - G16-U3: `/tasks/:id` のタブの殻は ADR-0044 B1（別の担当）。いまは `/tasks/:id` の見出しに
+    「ファイル」のリンクを 1 本足しただけで、タブになったら `~/components/task-files.tsx` を
+    そのまま載せ替える（ルート `/tasks/:id/files` は残してよい）。
+  - G16-U4: `POST /tasks` の `repos`（タスクがどのリポジトリを使うか）と `Task.repos[]` の表示は
+    この Phase では入れていない（`/tasks/new` は案件を選ばない画面のまま）。作業ツリーの画面は
+    タスクが実際に使っているリポジトリを `GET /tasks/{id}/tree` の `repos[]` から出している。
+  - G16-U5: `sync`（`worktree` / `rsync`）は一覧に出すだけで、フォームからは送っていない
+    （remote のときだけ有効で、`none` は taskd が 422。既定の `worktree` で足りるため）。
+- 提案（`docs/taskd-api-v1.md` への変更提案。採否は人間）:
+  - G16-P1: `POST /projects` の本文に `repos[]`（`RepoCreateBody` の配列）を足してほしい。いまは
+    案件を作ってから 1 行ずつ `POST /projects/{id}/repos` するので、途中で 422 になると
+    「案件はあるがリポジトリは半分」という中途半端な状態が残る（GUI は案件へのリンクを出して
+    続きを案内しているが、原子的に作れる方がよい）。
+  - G16-P2: `GET /tasks/{id}/tree` に「このタスクが `repos` を持たない（コードを伴わない調査）」と
+    「作業ツリーがまだ作られていない（`draft` / `ready`）」を区別できる `code` がほしい。いまは
+    どちらも 404 `file_not_found` なので、画面の言い方を分けられない。

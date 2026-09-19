@@ -1,6 +1,9 @@
 # taskd 設定の例（ADR-0005 D7）。相対パスはこのファイルのあるディレクトリ基準。
 db = "../taskd.sqlite3"            # taskctl --db / TASKD_DB と同じファイルを指すこと
-workspace_root = "../workspaces"   # WorkspaceSpec::Local の相対パスの基準
+# タスクの足回り（worktree・成果物・run のログ）の置き場（ADR-0042 D3）。
+# **書かなければ既定は `~/.local/celeris/workspaces`**（`~` は taskd の `$HOME` で展開する）。
+# 相対パスを書いたときだけ、この設定ファイルのあるディレクトリ基準になる（Phase 51 までの挙動）。
+workspace_root = "../workspaces"   # WorkspaceSpec::Local の相対パスの基準でもある
 tick_ms = 2000
 max_concurrency = 2
 lease_grace_secs = 60              # ADR-0002 D7: リース ttl = max_wall_secs + 猶予
@@ -28,18 +31,26 @@ max_requeues = 5                   # ADR-0011: 同じ試行での連続 requeue�
 [memory]
 dir = "../memory"
 
-# ローカルの作業場所をタスクごとの git worktree にする（ADR-0041 D1、Phase 49）。
-# 案件の `workspace` が `{"kind":"local","path":"…","mode":"worktree"}`（`mode` の既定が `"worktree"`）で
-# `path` が git リポジトリなら、taskd は run ごとに
-#   git -C <path> worktree add -b <worktree_branch_prefix><task_id> <workspace_root>/<task_id>/tree <base>
-# を切り、そこをワーカーのカレントディレクトリにする（`runs/` と `artifacts/` は作業ツリーの外）。
+# タスクごと・リポジトリごとに git worktree を切る（ADR-0041 D1 / ADR-0043 D2、Phase 49 / 52）。
+#
+# 案件は「リポジトリ」を複数持つ（`project_repos`。GUI の案件画面「リポジトリ」で登録する）。
+# タスクが使うリポジトリ（`Task.repos`。明示 > 親 > 案件の primary）は、それぞれ
+#   <workspace_root>/<task_id>/repos/<name>/
+# に置かれる。`kind = "git"` なら
+#   git -C <実体> worktree add -b <worktree_branch_prefix><task_id> <その場所> <base>
+# の worktree、`kind = "dir"` なら実体へのシンボリックリンク（コピーしない）。
+# ワーカーのカレントディレクトリは **`repos[0]`**（`runs/` と `artifacts/` は作業ツリーの外）。
 # base は `main`（無ければ `HEAD`）。本番の `current` リリースの sha が `main` の子孫ならその sha
 # （`[selfdeploy] releases_dir` の親の `current/manifest.json` を読む）。
-# taskd はコミットしないしブランチも消さない。終端で `git status --porcelain` が空なら worktree だけ消す。
-# 案件の `workspace` に `"mode": "shared"` と書けば従来どおり `path` をそのまま作業ディレクトリにする。
-# 接頭辞の既定はクラスタ側（ADR-0019 の `[[clusters]] sync = "worktree"`）と同じ `taskd/`。
+# taskd はコミットしない。**終端（done / failed）では worktree もブランチも消さない**（差分を見るために残す。
+# ADR-0043 D2）。消えるのは**中止**（`POST /tasks/{id}/cancel`）のときだけで、worktree と `git branch -D`。
+# リポジトリの `location` に `"mode": "shared"` と書けば worktree を切らず、実体へのリンクにする。
+# リポジトリの中の設定（`[commands] setup` / `check`、`[outputs]`、`[run] mode`）は
+# `<repo>/.config/celeris/workspace.toml`（ADR-0043 D4。`docs/workspace.md`）。
+# 接頭辞の既定は **`celeris/`**（ADR-0042 D3。Phase 49 は `taskd/` だった。クラスタ側〈ADR-0019 の
+# `[[clusters]] sync = "worktree"`〉は `taskd/` のまま）。
 [workspace]
-# worktree_branch_prefix = "taskd/"
+# worktree_branch_prefix = "celeris/"
 
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]

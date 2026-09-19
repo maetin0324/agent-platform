@@ -187,6 +187,10 @@ export type MessageId = string;
  */
 export type MilestoneId = string;
 /**
+ * リポジトリの一意識別子（ULID）。`TaskId` / `ProjectId` と同じ形。
+ */
+export type RepoId = string;
+/**
  * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
  * taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
  */
@@ -287,9 +291,24 @@ export type OrgKind = "secretary" | "department" | "section";
  */
 export type ProjectStatus = ("active" | "paused" | "done") | "proposed";
 /**
+ * リポジトリの種類（ADR-0043 D1）。`git` はタスクごとに worktree を切る。`dir` は
+ * シンボリックリンクで見せる（コピーしない。大きいデータを想定）。
+ */
+export type RepoKind = "git" | "dir";
+/**
+ * リモートのリポジトリの同期方式（ADR-0043 D1。ADR-0019 の `sync` と同じ語彙）。
+ * 省略（`None`）は既定の `worktree`（ADR-0019 の (a)）。
+ */
+export type RepoSync = "worktree" | "rsync" | "none";
+/**
  * インスタンスの役割（ADR-0040 D4）。`daemon_instances.role` の綴りと 1 対 1。
  */
 export type InstanceRole = "active" | "standby" | "draining" | "verify";
+/**
+ * 実行環境（ADR-0043 D1 / D3）。`auto` は `workspace.toml` の `[run] mode` に従い、無ければ `host`。
+ * **`container` は ADR-0043 A3 の工事**（この Phase では読むだけで、実行には使わない）。
+ */
+export type RepoRun = "auto" | "host" | "container";
 /**
  * 報告の一意識別子（ULID）。
  */
@@ -353,6 +372,9 @@ export interface ApiV1Schema {
   releases: Releases;
   reload: ReloadResult;
   replay_report: ReplayReport;
+  repo_create: RepoCreateBody;
+  repo_list: RepoList;
+  repo_patch: RepoPatchBody;
   report_detail: ReportDetail;
   report_list: ReportList;
   reports_notified: ReportsNotifiedResult;
@@ -374,6 +396,8 @@ export interface ApiV1Schema {
   task_detail: TaskDetail;
   task_list: TaskList;
   transition_result: TransitionResult;
+  tree: TreeView;
+  tree_file: TreeFileView;
 }
 /**
  * 1 アカウント（`GET /accounts` の要素、`POST /accounts` の応答）。
@@ -1216,6 +1240,13 @@ export interface Task {
    */
   project_id?: ProjectId | null;
   /**
+   * ADR-0043 D2: このタスクが使う案件のリポジトリ（`project_repos`）。空なら継承の規則
+   * （明示 > 親 > 案件の primary）で決まった結果が空だった、または案件にリポジトリが無い
+   * （純粋な調査などコードを伴わないタスク）。`repos[0]` がワーカーのカレントディレクトリになる。
+   * 導入前のタスクには無いので既定は空（従来どおり `workspace` 1 つで動く）。
+   */
+  repos?: RepoRef[];
+  /**
    * ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。
    * 導入前のタスクには無いので任意。
    */
@@ -1248,6 +1279,14 @@ export interface Budget {
 export interface Lease {
   expires_at: string;
   worker_run_id: string;
+}
+/**
+ * タスクが使うリポジトリの参照（`tasks.repos_json` の 1 要素。ADR-0043 D2）。
+ * `name` も持つのは、リポジトリの行が消えた後でも前置きと GUI が名前を出せるようにするため。
+ */
+export interface RepoRef {
+  name: string;
+  repo_id: RepoId;
 }
 export interface WorkerHint {
   adapter?: string | null;
@@ -1725,6 +1764,12 @@ export interface NewTaskSpec {
    */
   project_id?: ProjectId | null;
   /**
+   * ADR-0043 D2: このタスクが使う案件のリポジトリを**名前で**指定する（`project_repos.name`）。
+   * 省略すると **親 → 案件の primary** を継ぐ。案件に無い名前は 422、リモートのリポジトリを
+   * 他と混ぜたものも 422（`task_core::resolve_task_repos`）。
+   */
+  repos?: string[];
+  /**
    * ADR-0016 D1: 役割名（自由記述）。`[[roles]]` にあれば省略値の既定と run 時の指示文が効く。
    */
   role?: string | null;
@@ -1897,6 +1942,11 @@ export interface ProjectDetail {
   milestones: MilestoneView[];
   project: Project;
   /**
+   * ADR-0043 D1（Phase 52）: この案件のリポジトリ（primary が先頭）。
+   * `project.workspace` は primary の `location` の写し（GUI の後方互換）。
+   */
+  repos?: ProjectRepo[];
+  /**
    * 仕事の木を描くのに必要な最小限だけ（詳細は `GET /tasks/{id}`）。
    */
   tasks: ProjectTaskView[];
@@ -1961,6 +2011,57 @@ export interface Project {
    * 分解した仕事は親の workspace を継ぐ）。
    */
   workspace?: WorkspaceSpec | null;
+}
+/**
+ * 案件のリポジトリ 1 件（`project_repos` の 1 行。ADR-0043 D1）。
+ */
+export interface ProjectRepo {
+  created_at: string;
+  /**
+   * git のみ。無ければ検出（origin/HEAD → main → master）。
+   */
+  default_branch?: string | null;
+  id: RepoId;
+  /**
+   * 案件の「主なリポジトリ」。1 案件に 1 つ（成果物と文書の既定の置き場。ADR-0044 D7）。
+   */
+  is_primary?: boolean;
+  kind: RepoKind;
+  /**
+   * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
+   * taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
+   */
+  location:
+    | {
+        kind: "local";
+        /**
+         * ADR-0041 D1: 省略時は `Worktree`。省略したものは JSON にも出さない（Phase 48 までの
+         * `{"kind":"local","path":"…"}` と 1 バイトも変わらない）。
+         */
+        mode?: WorkspaceMode | null;
+        path: string;
+      }
+    | {
+        cluster: string;
+        kind: "remote";
+        path: string;
+      };
+  /**
+   * 案件の中で一意の slug（既定はディレクトリ名）。タスクの作業場所では
+   * `<workspace_root>/<task_id>/repos/<name>/` というディレクトリ名になるので、
+   * `valid_repo_name` を通ったものだけを受ける。
+   */
+  name: string;
+  project_id: ProjectId;
+  /**
+   * 実行環境（ADR-0043 D1 / D3）。`auto` は `workspace.toml` の `[run] mode` に従い、無ければ `host`。
+   * **`container` は ADR-0043 A3 の工事**（この Phase では読むだけで、実行には使わない）。
+   */
+  run?: "auto" | "host" | "container";
+  /**
+   * remote のみ。省略は既定の `worktree`（ADR-0019 の (a)）。
+   */
+  sync?: RepoSync | null;
 }
 /**
  * 仕事の木の 1 ノード（ADR-0033 D2: DAG は既存の `parent_id` / `depends_on` がそのまま）。
@@ -2336,6 +2437,80 @@ export interface ReplayMismatch {
   task_id: TaskId;
 }
 /**
+ * `POST /projects/{id}/repos` の要求本文（管理系）。
+ */
+export interface RepoCreateBody {
+  default_branch?: string | null;
+  /**
+   * 案件の「主なリポジトリ」にする。案件の最初の 1 件は自動的に primary。
+   */
+  is_primary?: boolean;
+  /**
+   * 省略すると `location` から決める（`<path>/.git` があれば `git`、無ければ `dir`。
+   * リモートは `git`）。
+   */
+  kind?: RepoKind | null;
+  /**
+   * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
+   * taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
+   */
+  location:
+    | {
+        kind: "local";
+        /**
+         * ADR-0041 D1: 省略時は `Worktree`。省略したものは JSON にも出さない（Phase 48 までの
+         * `{"kind":"local","path":"…"}` と 1 バイトも変わらない）。
+         */
+        mode?: WorkspaceMode | null;
+        path: string;
+      }
+    | {
+        cluster: string;
+        kind: "remote";
+        path: string;
+      };
+  /**
+   * 案件の中で一意の slug。省略すると `location` のディレクトリ名から作る。
+   */
+  name?: string | null;
+  /**
+   * 省略は `auto`（`workspace.toml` に従う。無ければ host）。
+   */
+  run?: RepoRun | null;
+  /**
+   * remote のみ。省略は既定の `worktree`（ADR-0019 の (a)）。
+   */
+  sync?: RepoSync | null;
+}
+/**
+ * Phase 52（ADR-0043 D1 / D6）: 案件のリポジトリと、タスクの作業ツリーの閲覧。
+ */
+export interface RepoList {
+  items: ProjectRepo[];
+}
+/**
+ * `PATCH /repos/{id}` の要求本文（管理系）。書いたものだけ変える。
+ */
+export interface RepoPatchBody {
+  /**
+   * 省略なら変えない、`null` なら消す。
+   */
+  default_branch?: string | null;
+  /**
+   * `true` にするとこの行が案件の primary になる（他は落ちる）。`false` は何もしない
+   * （primary を空にはできない。別の行を primary にする）。
+   */
+  is_primary?: boolean | null;
+  kind?: RepoKind | null;
+  location?: WorkspaceSpec | null;
+  name?: string | null;
+  run?: RepoRun | null;
+  /**
+   * 省略なら変えない、`null` なら消す（＝既定の `worktree`）。
+   */
+  sync?: RepoSync | null;
+}
+/**
  * `GET /reports/{id}` の応答（`sources` の中身も展開して返す）。
  */
 export interface ReportDetail {
@@ -2646,4 +2821,79 @@ export interface TaskList {
   items: TaskSummary[];
   next_cursor?: string | null;
   total: number;
+}
+/**
+ * `GET /tasks/{id}/tree` の応答（ADR-0043 D6。読み取り。トークンは要らない）。
+ */
+export interface TreeView {
+  /**
+   * `path` の直下（ディレクトリが先、あとは名前順）。
+   */
+  entries: TreeEntry[];
+  /**
+   * そのリポジトリの作業ツリーからの相対パス（根は `""`）。
+   */
+  path: string;
+  /**
+   * 見ているリポジトリの名前。
+   */
+  repo: string;
+  /**
+   * このタスクが使っているリポジトリの一覧（GUI のタブ）。
+   */
+  repos: TreeRepoView[];
+}
+/**
+ * `TreeView.entries[]` の 1 件。
+ */
+export interface TreeEntry {
+  /**
+   * `dir` / `file` / `other`（シンボリックリンクは指す先で `dir` / `file`）。
+   */
+  kind: string;
+  name: string;
+  /**
+   * リポジトリの作業ツリーからの相対パス。
+   */
+  path: string;
+  /**
+   * ファイルのときだけ。
+   */
+  size?: number | null;
+}
+/**
+ * `TreeView.repos[]` の 1 件。
+ */
+export interface TreeRepoView {
+  base?: string | null;
+  branch?: string | null;
+  /**
+   * タスクの中での絶対パス。
+   */
+  dir: string;
+  /**
+   * `git`（worktree）か `dir`（シンボリックリンク）。
+   */
+  kind: string;
+  name: string;
+}
+/**
+ * `GET /tasks/{id}/tree/file` の応答（ADR-0043 D6）。
+ */
+export interface TreeFileView {
+  /**
+   * テキストとして読めなかった（NUL を含む・UTF-8 でない）。このときは `text` を返さない。
+   */
+  binary: boolean;
+  path: string;
+  repo: string;
+  size: number;
+  /**
+   * 本文（テキストで 512 KiB 以下のときだけ）。
+   */
+  text?: string | null;
+  /**
+   * 512 KiB を超えたので `text` を返していない。
+   */
+  too_large: boolean;
 }

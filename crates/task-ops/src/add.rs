@@ -125,10 +125,51 @@ pub struct NewTaskSpec {
     /// 省略時は役割の既定 → 指定なし。
     #[serde(default)]
     pub adapter: Option<String>,
+    /// ADR-0043 D2: このタスクが使う案件のリポジトリを**名前で**指定する（`project_repos.name`）。
+    /// 省略すると **親 → 案件の primary** を継ぐ。案件に無い名前は 422、リモートのリポジトリを
+    /// 他と混ぜたものも 422（`task_core::resolve_task_repos`）。
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 fn default_kind() -> TaskKind {
     TaskKind::Execute
+}
+
+/// ADR-0043 D2: `POST /tasks` の `repos`（名前）を解決する。**明示 > 親 > 案件の primary**。
+///
+/// - 案件に属さないタスク（`project_id` が無い）で `repos` を書いたら 422
+/// - 案件に無い名前は 422、リモートのリポジトリを他と混ぜたものも 422
+fn resolve_repos(
+    store: &dyn TaskStore,
+    project_id: Option<ProjectId>,
+    parent: Option<TaskId>,
+    names: &[String],
+) -> Result<Vec<task_core::RepoRef>, OpsError> {
+    let Some(project_id) = project_id else {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(OpsError::Validation(
+            "repos can only be used on a task that belongs to a project".to_string(),
+        ));
+    };
+    let available = store.repo_list(project_id)?;
+    if !names.is_empty() {
+        return task_core::resolve_task_repos(&available, names).map_err(|e| OpsError::Validation(e.to_string()));
+    }
+    // 親から継ぐ（親が持っていなければ案件の primary）。
+    if let Some(parent) = parent
+        && let Some(parent) = store.get(parent)?
+        && !parent.repos.is_empty()
+    {
+        return Ok(parent.repos);
+    }
+    Ok(available
+        .iter()
+        .find(|r| r.is_primary)
+        .map(|r| vec![task_core::RepoRef::of(r)])
+        .unwrap_or_default())
 }
 /// 全体の既定（`taskctl add` と API で共通）。
 pub const DEFAULT_TIER: Tier = Tier::Standard;
@@ -316,6 +357,9 @@ fn build_task(
     }
     validate_depends_on(store, &spec.depends_on)?;
 
+    // ADR-0043 D2: このタスクが使う案件のリポジトリ（明示 > 親 > 案件の primary）。
+    let repos = resolve_repos(store, spec.project_id, spec.parent, &spec.repos)?;
+
     let id = TaskId::new();
     let workspace = match (spec.cluster, spec.workspace) {
         // ADR-0018: クラスタ指定。path はクラスタ側の作業ディレクトリ（絶対パスで指定する）。
@@ -350,6 +394,7 @@ fn build_task(
     };
 
     let task = Task {
+        repos,
         id,
         parent_id: spec.parent,
         kind: spec.kind,
@@ -397,6 +442,7 @@ mod tests {
 
     fn base_spec() -> NewTaskSpec {
         NewTaskSpec {
+            repos: Vec::new(),
             title: "do something".to_string(),
             objective: "make it work".to_string(),
             acceptance: vec![CriterionSpec::Human {

@@ -166,6 +166,7 @@ fn conversation_task(
         .and_then(|r| RoleSpec::find(roles, r));
     let id = TaskId::new();
     Task {
+        repos: Vec::new(),
         id,
         parent_id: None,
         kind: TaskKind::Execute,

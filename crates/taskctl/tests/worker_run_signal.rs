@@ -64,6 +64,7 @@ fn sigterm_kills_the_worker_process_and_exits_130() {
     let store = SqliteStore::open(&db).unwrap();
     let now = OffsetDateTime::now_utc();
     let task = Task {
+        repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
         kind: TaskKind::Execute,

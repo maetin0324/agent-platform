@@ -4,6 +4,7 @@ import { ArtifactsList } from "~/components/ArtifactsList";
 import { ErrorFlash, ProjectActionFlash, RetryFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
+import { ProjectRepos } from "~/components/ProjectRepos";
 import { ReportsList } from "~/components/ReportsList";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
@@ -38,6 +39,14 @@ import {
   patchProjectWorkspace,
   startProjectPlan,
 } from "~/taskd/projects-admin.server";
+import {
+  createRepo,
+  deleteRepo,
+  patchRepo,
+  readRepoCreateBody,
+  readRepoPatchBody,
+  setPrimaryRepo,
+} from "~/taskd/repos-admin.server";
 import type {
   ArtifactList,
   Clusters,
@@ -184,6 +193,20 @@ export async function action({ request, params }: Route.ActionArgs) {
     case "project_workspace_clear":
       outcome = await patchProjectWorkspace(client, params.id, null, request.signal);
       break;
+    // 案件のリポジトリ（ADR-0043 D1、docs/taskd-api-v1.md §3.69〜3.71。Phase 52 / G16）。
+    // どれもフォームの値を対応する要求に写すだけで、GUI 側では検証しない（409 / 422 は taskd の文言）。
+    case "repo_create":
+      outcome = await createRepo(client, params.id, readRepoCreateBody(form), request.signal);
+      break;
+    case "repo_patch":
+      outcome = await patchRepo(client, formString(form, "repo_id") ?? "", readRepoPatchBody(form), request.signal);
+      break;
+    case "repo_primary":
+      outcome = await setPrimaryRepo(client, formString(form, "repo_id") ?? "", request.signal);
+      break;
+    case "repo_delete":
+      outcome = await deleteRepo(client, formString(form, "repo_id") ?? "", request.signal);
+      break;
     default:
       throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
   }
@@ -211,6 +234,8 @@ const MILESTONE_STATUS_TONE: Record<MilestoneStatus, Tone> = {
 export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) {
   const { detail, org, reports, artifactRows, fetchedAt, clusters } = loaderData;
   const { project, milestones, tasks } = detail;
+  // ADR-0043 D1（Phase 52 / G16）: 並びは taskd が決めたもの（primary が先頭）をそのまま使う。
+  const repos = detail.repos ?? [];
   const fetcher = useFetcher<ProjectOpOutcome>();
   const submitting = fetcher.state !== "idle";
   const workspaceError = fetcher.data && !fetcher.data.ok ? fetcher.data.error : undefined;
@@ -349,6 +374,16 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
             </fetcher.Form>
           </CardBody>
         </Card>
+      </section>
+
+      {/* ADR-0043 D1（Phase 52 / G16）: 案件は「リポジトリ」を複数持つ（論文とコード、git ではない
+          データの置き場）。`is_primary` の 1 件が上の「作業場所」と同じものを指す。並び・primary の
+          付け替え・削除できるかどうかは taskd が決めるので、ここは表示と中継だけ。 */}
+      <section aria-labelledby="project-repos-heading" data-testid="project-repos-section" className="space-y-4">
+        <SectionTitle icon="database" id="project-repos-heading" count={repos.length}>
+          リポジトリ
+        </SectionTitle>
+        <ProjectRepos projectId={project.id} repos={repos} clusters={clusters} />
       </section>
 
       <section aria-labelledby="milestones-heading" data-testid="milestones-section" className="space-y-4">

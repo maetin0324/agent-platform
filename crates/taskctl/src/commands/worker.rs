@@ -715,6 +715,7 @@ mod tests {
     fn task_fixture(status: Status, workspace: WorkspaceSpec) -> Task {
         let now = time::OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: task_core::TaskKind::Execute,

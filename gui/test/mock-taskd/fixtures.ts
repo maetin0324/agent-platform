@@ -1,4 +1,14 @@
-import type { Health, ReleaseChanges, ReleaseItem, ReleasePromoteAccepted, Releases } from "~/taskd/types";
+import type {
+  Health,
+  ProjectRepo,
+  ReleaseChanges,
+  ReleaseItem,
+  ReleasePromoteAccepted,
+  Releases,
+  RepoList,
+  TreeFileView,
+  TreeView,
+} from "~/taskd/types";
 
 /**
  * `GET /health` の既定応答（docs/taskd-api-v1.md §3.1）。`Health` 型で宣言することで形を検証する。
@@ -95,3 +105,81 @@ export const defaultReleasePromoteAccepted: ReleasePromoteAccepted = {
   // ADR-0041 D4: 既定は「いま動いている版に同梱の promote.sh で昇格した」。
   script_from: "current",
 };
+
+/**
+ * 案件のリポジトリ 1 件（ADR-0043 D1、docs/taskd-api-v1.md §3.68〜3.71。Phase 52 / G16）。
+ * 既定は手元の git で主なリポジトリ。テストは `projectRepo({...})` で上書きする。
+ */
+export function projectRepo(overrides: Partial<ProjectRepo> = {}): ProjectRepo {
+  return {
+    id: "01MOCKREPO0000000000000001",
+    project_id: "p1",
+    name: "benchfs",
+    kind: "git",
+    location: { kind: "local", path: "/home/mock/workspace/rust/benchfs" },
+    default_branch: "main",
+    run: "auto",
+    is_primary: true,
+    created_at: "2026-09-19T00:00:00Z",
+    ...overrides,
+  };
+}
+
+/** `GET /projects/{id}/repos` の既定応答（primary が先頭、あとは作った順）。 */
+export const defaultRepoList: RepoList = {
+  items: [
+    projectRepo(),
+    projectRepo({
+      id: "01MOCKREPO0000000000000002",
+      name: "benchfs-paper",
+      kind: "dir",
+      location: { kind: "local", path: "/home/mock/workspace/papers/benchfs" },
+      default_branch: null,
+      is_primary: false,
+    }),
+  ],
+};
+
+/**
+ * `GET /tasks/{id}/tree` の既定応答（ADR-0043 D6、§3.72）。リポジトリ 2 つ、根に
+ * ディレクトリ 1 つ + ファイル 2 つ（並びは taskd が決めたもの: ディレクトリが先、あとは名前順）。
+ */
+export function treeView(overrides: Partial<TreeView> = {}): TreeView {
+  return {
+    repo: "benchfs",
+    path: "",
+    repos: [
+      {
+        name: "benchfs",
+        kind: "git",
+        dir: "/home/mock/.local/celeris/workspaces/01TASK/repos/benchfs",
+        branch: "celeris/01TASK",
+        base: "9602b596826c",
+      },
+      {
+        name: "benchfs-paper",
+        kind: "dir",
+        dir: "/home/mock/.local/celeris/workspaces/01TASK/repos/benchfs-paper",
+      },
+    ],
+    entries: [
+      { name: "src", path: "src", kind: "dir" },
+      { name: "Cargo.toml", path: "Cargo.toml", kind: "file", size: 512 },
+      { name: "README.md", path: "README.md", kind: "file", size: 1234 },
+    ],
+    ...overrides,
+  };
+}
+
+/** `GET /tasks/{id}/tree/file` の既定応答（§3.73）。テキストで 512 KiB 以下なので `text` が付く。 */
+export function treeFileView(overrides: Partial<TreeFileView> = {}): TreeFileView {
+  return {
+    repo: "benchfs",
+    path: "README.md",
+    size: 1234,
+    binary: false,
+    too_large: false,
+    text: "# benchfs\n\nワークスペースの読み取り専用の表示。\n",
+    ...overrides,
+  };
+}

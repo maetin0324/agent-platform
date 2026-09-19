@@ -26,6 +26,7 @@ use crate::model::{Event, Status, Task, TaskId, TaskKind, WorkspaceSpec};
 use crate::org::{
     Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
 };
+use crate::repos::{ProjectRepo, RepoError, RepoId, RepoKind, RepoRun, RepoSync};
 use crate::transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
@@ -39,10 +40,11 @@ const MIGRATION_0008: &str = include_str!("../migrations/0008_notifications.sql"
 const MIGRATION_0009: &str = include_str!("../migrations/0009_notifications_project_id.sql");
 const MIGRATION_0010: &str = include_str!("../migrations/0010_projects_workspace.sql");
 const MIGRATION_0011: &str = include_str!("../migrations/0011_daemon_instances.sql");
+const MIGRATION_0012: &str = include_str!("../migrations/0012_project_repos.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -90,6 +92,9 @@ pub enum StoreError {
     /// ADR-0033 D1: 組織の検証に落ちた（API は 422）。
     #[error(transparent)]
     Org(#[from] OrgError),
+    /// ADR-0043 D1（Phase 52）: 案件のリポジトリの検証に落ちた（API は 422）。
+    #[error(transparent)]
+    Repo(#[from] RepoError),
 }
 
 /// `events` テーブルの 1 行（ADR-0013 D6）。`id` はテーブル全体でのグローバル単調増加値。
@@ -470,6 +475,23 @@ pub trait TaskStore:
     /// ADR-0039 D1: 作業場所だけを変える（`None` で消す。`updated_at` も更新）。無い案件は `Ok(false)`。
     fn project_set_workspace(&self, id: ProjectId, workspace: Option<&WorkspaceSpec>) -> Result<bool, StoreError>;
 
+    // ---- ADR-0043 D1（Phase 52）: 案件のリポジトリ（`project_repos`）----
+
+    /// 案件のリポジトリを 1 件作る。`repos::validate_upsert` に落ちれば `StoreError::Repo`（API は 422）。
+    /// `is_primary` を立てた行を作ると、同じ案件の他の行の `is_primary` は落ちる（1 案件に 1 つ）。
+    fn repo_create(&self, repo: &ProjectRepo) -> Result<(), StoreError>;
+    fn repo_get(&self, id: RepoId) -> Result<Option<ProjectRepo>, StoreError>;
+    /// その案件のリポジトリ（primary が先、あとは作った順）。
+    fn repo_list(&self, project_id: ProjectId) -> Result<Vec<ProjectRepo>, StoreError>;
+    /// 既存の 1 件を差し替える（`id` と `project_id` は変えない）。無い id は `Ok(false)`。
+    fn repo_update(&self, repo: &ProjectRepo) -> Result<bool, StoreError>;
+    /// 消す。未終端のタスクが参照していれば `StoreError::InUse`（API は 409）。無い id は `Ok(false)`。
+    fn repo_delete(&self, id: RepoId) -> Result<bool, StoreError>;
+    /// その案件の primary をこの行にする。無い id は `Ok(false)`。
+    fn repo_set_primary(&self, id: RepoId) -> Result<bool, StoreError>;
+    /// そのリポジトリを参照している未終端のタスク（`DELETE` の 409 の理由に使う）。
+    fn repo_active_tasks(&self, id: RepoId) -> Result<Vec<TaskId>, StoreError>;
+
     /// 途中目標を作る。`seq` はその案件の最大 + 1 をストアが採番し、確定した行を返す。
     /// 案件が無ければ `StoreError::Invalid`。
     fn milestone_create(
@@ -540,6 +562,25 @@ pub trait TaskStore:
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
+}
+
+/// ADR-0043 D1: 既存の作業場所を写すとき・API が `kind` を省略したときの `kind` の決め方
+/// （決定的。LLM は使わない）。
+///
+/// - `Local` — `<path>/.git` があれば `git`（ディレクトリでも worktree の gitfile でもよい）、無ければ `dir`
+/// - `Remote` — `git`。クラスタ側のファイルシステムは taskd からは見えないが、ADR-0018 / ADR-0019 の
+///   リモートの作業場所は git リポジトリを前提にした同期をするため。違えば人が `PATCH /repos/{id}` で直す
+pub fn detect_repo_kind(location: &WorkspaceSpec) -> RepoKind {
+    match location {
+        WorkspaceSpec::Local { path, .. } => {
+            if path.join(".git").exists() {
+                RepoKind::Git
+            } else {
+                RepoKind::Dir
+            }
+        }
+        WorkspaceSpec::Remote { .. } => RepoKind::Git,
+    }
 }
 
 fn status_str(s: Status) -> &'static str {
@@ -683,6 +724,7 @@ impl SqliteStore {
             9 => Ok(MIGRATION_0009),
             10 => Ok(MIGRATION_0010),
             11 => Ok(MIGRATION_0011),
+            12 => Ok(MIGRATION_0012),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -691,6 +733,12 @@ impl SqliteStore {
         let sql = Self::migration_sql(version)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(sql)?;
+        // ADR-0043 D1（Phase 52）: 既存の `projects.workspace` を `is_primary = 1` のリポジトリ 1 件に
+        // 写す。id が ULID で、`kind` の判定にファイルシステムを見る必要があるので SQL では書けない
+        // （migration 0012 のコメント参照）。同じトランザクションの中で 1 度だけ走る。
+        if version == 12 {
+            Self::backfill_project_repos(&tx)?;
+        }
         let ts = format_rfc3339(OffsetDateTime::now_utc())?;
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
@@ -755,7 +803,8 @@ impl SqliteStore {
         let status_col: String = row.get(3)?;
         let created_at: String = row.get(5)?;
         let updated_at: String = row.get(6)?;
-        // ADR-0039 D1: migration 0010 で足した列。導入前の行と作業場所を決めていない案件は NULL。
+        // ADR-0039 D1 / ADR-0043 D1: 7 列目は **primary のリポジトリの `location_json`**、無ければ
+        // 従来の `projects.workspace` 列（`COALESCE`。導入前の行と作業場所を決めていない案件は NULL）。
         let workspace_col: Option<String> = row.get(7)?;
         let (Ok(id), Some(status)) = (id.parse::<ProjectId>(), ProjectStatus::parse(&status_col)) else {
             return Ok(Err(StoreError::Invalid(format!(
@@ -795,6 +844,193 @@ impl SqliteStore {
                 .map_err(|e| StoreError::Invalid(format!("cannot serialize workspace: {e}"))),
             None => Ok(None),
         }
+    }
+
+    // ---- ADR-0043 D1（Phase 52）: 案件のリポジトリ（`project_repos`）----
+
+    /// `project_repos` の 1 行。
+    fn repo_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ProjectRepo, StoreError>> {
+        let id: String = row.get(0)?;
+        let project_id: String = row.get(1)?;
+        let kind_col: String = row.get(3)?;
+        let location_col: String = row.get(4)?;
+        let run_col: String = row.get(7)?;
+        let created_at: String = row.get(9)?;
+        let (Ok(id), Ok(project_id), Some(kind), Some(run)) = (
+            id.parse::<RepoId>(),
+            project_id.parse::<ProjectId>(),
+            RepoKind::parse(&kind_col),
+            RepoRun::parse(&run_col),
+        ) else {
+            return Ok(Err(StoreError::Invalid(format!(
+                "invalid project_repos row: id={id} project_id={project_id} kind={kind_col} run={run_col}"
+            ))));
+        };
+        let location = match serde_json::from_str::<WorkspaceSpec>(&location_col) {
+            Ok(spec) => spec,
+            Err(e) => {
+                return Ok(Err(StoreError::Invalid(format!(
+                    "invalid project_repos location for {id}: {e}"
+                ))));
+            }
+        };
+        let sync_col: Option<String> = row.get(6)?;
+        let sync = match sync_col.as_deref() {
+            None => None,
+            Some(raw) => match RepoSync::parse(raw) {
+                Some(v) => Some(v),
+                None => {
+                    return Ok(Err(StoreError::Invalid(format!(
+                        "invalid project_repos sync for {id}: {raw:?}"
+                    ))));
+                }
+            },
+        };
+        Ok((|| {
+            let is_primary: i64 = row.get(8)?;
+            Ok(ProjectRepo {
+                id,
+                project_id,
+                name: row.get(2)?,
+                kind,
+                location,
+                default_branch: row.get(5)?,
+                sync,
+                run,
+                is_primary: is_primary != 0,
+                created_at: parse_rfc3339(&created_at)?,
+            })
+        })())
+    }
+
+    const REPO_COLUMNS: &'static str =
+        "id, project_id, name, kind, location_json, default_branch, sync, run, is_primary, created_at";
+
+    fn repo_list_tx(conn: &Connection, project_id: ProjectId) -> Result<Vec<ProjectRepo>, StoreError> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM project_repos WHERE project_id = ?1 \
+             ORDER BY is_primary DESC, created_at ASC, id ASC",
+            Self::REPO_COLUMNS
+        ))?;
+        let rows = stmt.query_map(params![project_id.to_string()], Self::repo_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
+    fn repo_get_tx(conn: &Connection, id: RepoId) -> Result<Option<ProjectRepo>, StoreError> {
+        conn.query_row(
+            &format!("SELECT {} FROM project_repos WHERE id = ?1", Self::REPO_COLUMNS),
+            params![id.to_string()],
+            Self::repo_row,
+        )
+        .optional()?
+        .transpose()
+    }
+
+    /// 行を 1 件書く（INSERT OR REPLACE）。検証は呼び出し側で済ませておくこと。
+    fn repo_write_tx(conn: &Connection, repo: &ProjectRepo) -> Result<(), StoreError> {
+        let location = serde_json::to_string(&repo.location)
+            .map_err(|e| StoreError::Invalid(format!("cannot serialize repo location: {e}")))?;
+        conn.execute(
+            &format!(
+                "INSERT OR REPLACE INTO project_repos ({}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                Self::REPO_COLUMNS
+            ),
+            params![
+                repo.id.to_string(),
+                repo.project_id.to_string(),
+                repo.name,
+                repo.kind.as_str(),
+                location,
+                repo.default_branch,
+                repo.sync.map(|s| s.as_str()),
+                repo.run.as_str(),
+                i64::from(repo.is_primary),
+                format_rfc3339(repo.created_at)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 1 案件に primary は 1 つ（ADR-0043 D1）。`keep` 以外の `is_primary` を落とす。
+    fn repo_clear_other_primaries_tx(conn: &Connection, project_id: ProjectId, keep: RepoId) -> Result<(), StoreError> {
+        conn.execute(
+            "UPDATE project_repos SET is_primary = 0 WHERE project_id = ?1 AND id <> ?2",
+            params![project_id.to_string(), keep.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// `projects.workspace` 列を primary のリポジトリの写しに保つ（migration 0012 のコメント参照。
+    /// ADR-0043 D1 は「書かない」だが、N-1 互換〈旧バイナリが新スキーマを読む〉のために写しを残す）。
+    fn sync_project_workspace_tx(conn: &Connection, project_id: ProjectId) -> Result<(), StoreError> {
+        let primary: Option<String> = conn
+            .query_row(
+                "SELECT location_json FROM project_repos WHERE project_id = ?1 AND is_primary = 1 \
+                 ORDER BY created_at ASC, id ASC LIMIT 1",
+                params![project_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // primary が消えたら NULL に戻す（案件を「作業場所なし」に戻したとき）。
+        conn.execute(
+            "UPDATE projects SET workspace = ?1 WHERE id = ?2",
+            params![primary, project_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// そのリポジトリを参照している**未終端**のタスク（ADR-0043 D1: `DELETE /repos/{id}` の 409）。
+    /// 索引は migration 0012 で足した `tasks.repos_json`（ULID は一意なので部分一致で足りる）。
+    fn repo_active_tasks_tx(conn: &Connection, id: RepoId) -> Result<Vec<TaskId>, StoreError> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id FROM tasks WHERE {} AND repos_json IS NOT NULL AND repos_json LIKE ?1 \
+             ORDER BY id ASC",
+            Self::NON_TERMINAL_SQL
+        ))?;
+        let pattern = format!("%{id}%");
+        let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(Self::parse_id(&row?)?);
+        }
+        Ok(out)
+    }
+
+    /// migration 0012 の写し（ADR-0043 D1）。`projects.workspace` がある案件ごとに `is_primary = 1` の
+    /// リポジトリを 1 件作る。`kind` は「パスが git なら git、でなければ dir」だが、SQL からは
+    /// ファイルシステムを見られないのでここ（Rust）で決める。
+    fn backfill_project_repos(conn: &Connection) -> Result<(), StoreError> {
+        let mut stmt = conn.prepare("SELECT id, workspace, created_at FROM projects WHERE workspace IS NOT NULL")?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for (project_id, workspace, created_at) in rows {
+            let Ok(project_id) = project_id.parse::<ProjectId>() else {
+                continue;
+            };
+            let Ok(location) = serde_json::from_str::<WorkspaceSpec>(&workspace) else {
+                continue;
+            };
+            let repo = ProjectRepo {
+                id: RepoId::new(),
+                project_id,
+                name: crate::repos::default_repo_name(&location),
+                kind: detect_repo_kind(&location),
+                location,
+                default_branch: None,
+                sync: None,
+                run: RepoRun::Auto,
+                is_primary: true,
+                created_at: parse_rfc3339(&created_at).unwrap_or_else(|_| OffsetDateTime::now_utc()),
+            };
+            Self::repo_write_tx(conn, &repo)?;
+        }
+        Ok(())
     }
 
     fn milestone_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Milestone, StoreError>> {
@@ -913,11 +1149,17 @@ impl SqliteStore {
             ),
             None => (None, None),
         };
+        // ADR-0043 D2: `repos_json` は索引（正は `json` の中の `repos`）。空なら NULL。
+        let repos_json = if task.repos.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&task.repos)?)
+        };
         conn.execute(
             "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
              lease_worker_run_id, lease_expires_at, json, title, updated_at, objective, genre, \
-             project_id, milestone_id, assignee) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             project_id, milestone_id, assignee, repos_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 task.id.to_string(),
                 status_str(task.status),
@@ -937,6 +1179,7 @@ impl SqliteStore {
                 task.project_id.map(|p| p.to_string()),
                 task.milestone_id.map(|m| m.to_string()),
                 task.assignee.clone(),
+                repos_json,
             ],
         )?;
         Ok(())
@@ -1924,8 +2167,9 @@ impl TaskStore for SqliteStore {
     // ---- ADR-0033 D2: 案件と途中目標 ----
 
     fn project_create(&self, project: &Project) -> Result<(), StoreError> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO projects (id, title, request, status, secretary_summary, created_at, updated_at, workspace) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -1939,6 +2183,26 @@ impl TaskStore for SqliteStore {
                 Self::project_workspace_column(project.workspace.as_ref())?,
             ],
         )?;
+        // ADR-0043 D1: 案件の作業場所は `is_primary = 1` のリポジトリ 1 件として持つ
+        // （`Project.workspace` はその写し）。`POST /projects {workspace}`（従来のフォーム）も
+        // これで複数リポジトリの世界に入る。
+        if let Some(location) = &project.workspace {
+            let repo = ProjectRepo {
+                id: RepoId::new(),
+                project_id: project.id,
+                name: crate::repos::default_repo_name(location),
+                kind: detect_repo_kind(location),
+                location: location.clone(),
+                default_branch: None,
+                sync: None,
+                run: RepoRun::Auto,
+                is_primary: true,
+                created_at: project.created_at,
+            };
+            crate::repos::validate_upsert(&[], &repo)?;
+            Self::repo_write_tx(&tx, &repo)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1946,8 +2210,11 @@ impl TaskStore for SqliteStore {
         let conn = self.lock()?;
         let row = conn
             .query_row(
-                "SELECT id, title, request, status, secretary_summary, created_at, updated_at, workspace \
-                 FROM projects WHERE id = ?1",
+                "SELECT p.id, p.title, p.request, p.status, p.secretary_summary, p.created_at, p.updated_at, \
+                 COALESCE((SELECT r.location_json FROM project_repos r \
+                           WHERE r.project_id = p.id AND r.is_primary = 1 \
+                           ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace) \
+                 FROM projects p WHERE p.id = ?1",
                 params![id.to_string()],
                 Self::project_row,
             )
@@ -1958,8 +2225,11 @@ impl TaskStore for SqliteStore {
     fn project_list(&self) -> Result<Vec<Project>, StoreError> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, title, request, status, secretary_summary, created_at, updated_at, workspace \
-             FROM projects ORDER BY created_at DESC, id DESC",
+            "SELECT p.id, p.title, p.request, p.status, p.secretary_summary, p.created_at, p.updated_at, \
+                 COALESCE((SELECT r.location_json FROM project_repos r \
+                           WHERE r.project_id = p.id AND r.is_primary = 1 \
+                           ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace) \
+             FROM projects p ORDER BY p.created_at DESC, p.id DESC",
         )?;
         let rows = stmt.query_map([], Self::project_row)?;
         let mut out = Vec::new();
@@ -1984,12 +2254,188 @@ impl TaskStore for SqliteStore {
 
     fn project_set_workspace(&self, id: ProjectId, workspace: Option<&WorkspaceSpec>) -> Result<bool, StoreError> {
         let column = Self::project_workspace_column(workspace)?;
-        let conn = self.lock()?;
-        let affected = conn.execute(
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let affected = tx.execute(
             "UPDATE projects SET workspace = ?1, updated_at = ?2 WHERE id = ?3",
             params![column, format_rfc3339(OffsetDateTime::now_utc())?, id.to_string()],
         )?;
-        Ok(affected == 1)
+        if affected != 1 {
+            return Ok(false);
+        }
+        // ADR-0043 D1: 従来の `PATCH /projects {workspace}` は **primary のリポジトリ**を書き換える。
+        let existing = Self::repo_list_tx(&tx, id)?;
+        let primary = existing.iter().find(|r| r.is_primary).cloned();
+        match (workspace, primary) {
+            // 差し替え: primary の場所（と kind）だけを直す。名前・run・default_branch は人の設定を残す。
+            (Some(location), Some(mut repo)) => {
+                repo.location = location.clone();
+                repo.kind = detect_repo_kind(location);
+                if repo.kind == RepoKind::Dir {
+                    repo.default_branch = None;
+                }
+                if matches!(location, WorkspaceSpec::Local { .. }) {
+                    repo.sync = None;
+                }
+                let others: Vec<ProjectRepo> = existing.iter().filter(|r| r.id != repo.id).cloned().collect();
+                crate::repos::validate_upsert(&others, &repo)?;
+                Self::repo_write_tx(&tx, &repo)?;
+            }
+            // 新規: primary がまだ無い案件に作業場所を付けた。
+            (Some(location), None) => {
+                let mut name = crate::repos::default_repo_name(location);
+                if existing.iter().any(|r| r.name == name) {
+                    name = format!("{name}-2");
+                }
+                let repo = ProjectRepo {
+                    id: RepoId::new(),
+                    project_id: id,
+                    name,
+                    kind: detect_repo_kind(location),
+                    location: location.clone(),
+                    default_branch: None,
+                    sync: None,
+                    run: RepoRun::Auto,
+                    is_primary: true,
+                    created_at: OffsetDateTime::now_utc(),
+                };
+                crate::repos::validate_upsert(&existing, &repo)?;
+                Self::repo_write_tx(&tx, &repo)?;
+                Self::repo_clear_other_primaries_tx(&tx, id, repo.id)?;
+            }
+            // 消す: `"workspace": null` は「案件を作業場所なしに戻す」なので primary の行を消す。
+            // 未終端のタスクが使っていれば 409（`DELETE /repos/{id}` と同じ規律）。
+            (None, Some(repo)) => {
+                let open = Self::repo_active_tasks_tx(&tx, repo.id)?;
+                if !open.is_empty() {
+                    return Err(StoreError::InUse {
+                        kind: "project repo",
+                        id: repo.id.to_string(),
+                        detail: format!("{} task(s) using it have not finished", open.len()),
+                    });
+                }
+                tx.execute("DELETE FROM project_repos WHERE id = ?1", params![repo.id.to_string()])?;
+            }
+            (None, None) => {}
+        }
+        Self::sync_project_workspace_tx(&tx, id)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    // ---- ADR-0043 D1（Phase 52）: 案件のリポジトリ ----
+
+    fn repo_create(&self, repo: &ProjectRepo) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            params![repo.project_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::Invalid(format!("project not found: {}", repo.project_id)));
+        }
+        let existing = Self::repo_list_tx(&tx, repo.project_id)?;
+        crate::repos::validate_upsert(&existing, repo)?;
+        // 最初の 1 件は自動的に primary（案件に「主なリポジトリ」が無い状態を作らない）。
+        let mut repo = repo.clone();
+        if existing.is_empty() {
+            repo.is_primary = true;
+        }
+        Self::repo_write_tx(&tx, &repo)?;
+        if repo.is_primary {
+            Self::repo_clear_other_primaries_tx(&tx, repo.project_id, repo.id)?;
+        }
+        Self::sync_project_workspace_tx(&tx, repo.project_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn repo_get(&self, id: RepoId) -> Result<Option<ProjectRepo>, StoreError> {
+        let conn = self.lock()?;
+        Self::repo_get_tx(&conn, id)
+    }
+
+    fn repo_list(&self, project_id: ProjectId) -> Result<Vec<ProjectRepo>, StoreError> {
+        let conn = self.lock()?;
+        Self::repo_list_tx(&conn, project_id)
+    }
+
+    fn repo_update(&self, repo: &ProjectRepo) -> Result<bool, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(current) = Self::repo_get_tx(&tx, repo.id)? else {
+            return Ok(false);
+        };
+        // `project_id` と `created_at` は動かさない（付け替えは作り直し）。
+        let repo = ProjectRepo {
+            project_id: current.project_id,
+            created_at: current.created_at,
+            ..repo.clone()
+        };
+        let others: Vec<ProjectRepo> = Self::repo_list_tx(&tx, repo.project_id)?
+            .into_iter()
+            .filter(|r| r.id != repo.id)
+            .collect();
+        crate::repos::validate_upsert(&others, &repo)?;
+        Self::repo_write_tx(&tx, &repo)?;
+        if repo.is_primary {
+            Self::repo_clear_other_primaries_tx(&tx, repo.project_id, repo.id)?;
+        }
+        Self::sync_project_workspace_tx(&tx, repo.project_id)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn repo_delete(&self, id: RepoId) -> Result<bool, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(repo) = Self::repo_get_tx(&tx, id)? else {
+            return Ok(false);
+        };
+        let open = Self::repo_active_tasks_tx(&tx, id)?;
+        if !open.is_empty() {
+            return Err(StoreError::InUse {
+                kind: "project repo",
+                id: id.to_string(),
+                detail: format!("{} task(s) using it have not finished", open.len()),
+            });
+        }
+        tx.execute("DELETE FROM project_repos WHERE id = ?1", params![id.to_string()])?;
+        // primary を消したら、残りのうち一番古いものを primary にする（案件に主なリポジトリを残す）。
+        if repo.is_primary
+            && let Some(next) = Self::repo_list_tx(&tx, repo.project_id)?.first()
+        {
+            tx.execute(
+                "UPDATE project_repos SET is_primary = 1 WHERE id = ?1",
+                params![next.id.to_string()],
+            )?;
+        }
+        Self::sync_project_workspace_tx(&tx, repo.project_id)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn repo_set_primary(&self, id: RepoId) -> Result<bool, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(repo) = Self::repo_get_tx(&tx, id)? else {
+            return Ok(false);
+        };
+        tx.execute(
+            "UPDATE project_repos SET is_primary = 1 WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Self::repo_clear_other_primaries_tx(&tx, repo.project_id, id)?;
+        Self::sync_project_workspace_tx(&tx, repo.project_id)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn repo_active_tasks(&self, id: RepoId) -> Result<Vec<TaskId>, StoreError> {
+        let conn = self.lock()?;
+        Self::repo_active_tasks_tx(&conn, id)
     }
 
     fn milestone_create(
@@ -2244,6 +2690,7 @@ mod tests {
     fn sample_task(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
@@ -3845,7 +4292,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(SCHEMA_VERSION, 12);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -4169,7 +4616,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(SCHEMA_VERSION, 12);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -4177,6 +4624,251 @@ mod tests {
         };
         assert!(store.project_set_workspace(legacy, Some(&spec)).unwrap());
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, Some(spec));
+    }
+
+    /// ADR-0043 D1（Phase 52）: 版数 11 の DB に migration 0012 が当たり、既存の `projects.workspace` が
+    /// `is_primary = 1` のリポジトリ 1 件に写る。`kind` は「パスが git なら git、でなければ dir」で、
+    /// これは Rust の backfill（`backfill_project_repos`）が決める。
+    #[test]
+    fn migration_0012_copies_each_project_workspace_into_a_primary_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("benchfs");
+        std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        let plain_dir = dir.path().join("data set");
+        std::fs::create_dir_all(&plain_dir).unwrap();
+
+        let path = dir.path().join("schema11.sqlite3");
+        let (git_project, plain_project, none_project, remote_project) =
+            (ProjectId::new(), ProjectId::new(), ProjectId::new(), ProjectId::new());
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in [
+                MIGRATION_0001,
+                MIGRATION_0002,
+                MIGRATION_0003,
+                MIGRATION_0004,
+                MIGRATION_0005,
+                MIGRATION_0006,
+                MIGRATION_0007,
+                MIGRATION_0008,
+                MIGRATION_0009,
+                MIGRATION_0010,
+                MIGRATION_0011,
+            ] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
+                 INSERT INTO schema_migrations (version, applied_at) VALUES \
+                 (1, '2020-01-01T00:00:00Z'), (2, '2020-01-01T00:00:00Z'), (3, '2020-01-01T00:00:00Z'), \
+                 (4, '2020-01-01T00:00:00Z'), (5, '2020-01-01T00:00:00Z'), (6, '2020-01-01T00:00:00Z'), \
+                 (7, '2020-01-01T00:00:00Z'), (8, '2020-01-01T00:00:00Z'), (9, '2020-01-01T00:00:00Z'), \
+                 (10, '2020-01-01T00:00:00Z'), (11, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+            let rows: [(ProjectId, Option<String>); 4] = [
+                (
+                    git_project,
+                    Some(format!(r#"{{"kind":"local","path":"{}"}}"#, repo_dir.display())),
+                ),
+                (
+                    plain_project,
+                    Some(format!(r#"{{"kind":"local","path":"{}"}}"#, plain_dir.display())),
+                ),
+                (none_project, None),
+                (
+                    remote_project,
+                    Some(r#"{"kind":"remote","cluster":"pegasus","path":"/work/NBB/x/benchfs"}"#.to_string()),
+                ),
+            ];
+            for (id, workspace) in rows {
+                conn.execute(
+                    "INSERT INTO projects (id, title, request, status, created_at, updated_at, workspace) \
+                     VALUES (?1, '案件', '依頼', 'active', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', ?2)",
+                    params![id.to_string(), workspace],
+                )
+                .unwrap();
+            }
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+
+        // git のリポジトリ（`.git` がある）→ `kind = git`、名前はディレクトリ名、primary。
+        let repos = store.repo_list(git_project).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "benchfs");
+        assert_eq!(repos[0].kind, RepoKind::Git);
+        assert!(repos[0].is_primary);
+        assert_eq!(repos[0].location, WorkspaceSpec::local(repo_dir.clone()));
+        assert_eq!(repos[0].run, RepoRun::Auto);
+
+        // git でないディレクトリ → `kind = dir`。名前は slug（空白は `-`）。
+        let plain = store.repo_list(plain_project).unwrap();
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].kind, RepoKind::Dir);
+        assert_eq!(plain[0].name, "data-set");
+
+        // 作業場所を決めていない案件にはリポジトリを作らない。
+        assert!(store.repo_list(none_project).unwrap().is_empty());
+
+        // リモートは `git`（クラスタ側は見られないので ADR-0018 / 0019 の前提に倒す）。
+        let remote = store.repo_list(remote_project).unwrap();
+        assert_eq!(remote.len(), 1);
+        assert_eq!(remote[0].kind, RepoKind::Git);
+
+        // `Project.workspace` は primary の写し（GUI の後方互換）。
+        assert_eq!(
+            store.project_get(git_project).unwrap().unwrap().workspace,
+            Some(WorkspaceSpec::local(repo_dir))
+        );
+        assert_eq!(store.project_get(none_project).unwrap().unwrap().workspace, None);
+    }
+
+    /// ADR-0043 D1: リポジトリの CRUD と primary の不変条件（1 案件に 1 つ）。
+    #[test]
+    fn project_repos_are_created_updated_and_have_exactly_one_primary() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let project = sample_project();
+        store.project_create(&project).unwrap();
+
+        let code = ProjectRepo {
+            id: RepoId::new(),
+            project_id: project.id,
+            name: "benchfs".into(),
+            kind: RepoKind::Git,
+            location: WorkspaceSpec::local("/srv/benchfs"),
+            default_branch: None,
+            sync: None,
+            run: RepoRun::Auto,
+            is_primary: false,
+            created_at: OffsetDateTime::now_utc(),
+        };
+        store.repo_create(&code).unwrap();
+        // 最初の 1 件は自動的に primary。
+        assert!(store.repo_get(code.id).unwrap().unwrap().is_primary);
+        assert_eq!(
+            store.project_get(project.id).unwrap().unwrap().workspace,
+            Some(WorkspaceSpec::local("/srv/benchfs")),
+            "Project.workspace は primary の写し"
+        );
+
+        let paper = ProjectRepo {
+            id: RepoId::new(),
+            name: "benchfs-paper".into(),
+            location: WorkspaceSpec::local("/srv/benchfs-paper"),
+            ..code.clone()
+        };
+        store.repo_create(&paper).unwrap();
+        let repos = store.repo_list(project.id).unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].name, "benchfs", "primary が先頭");
+        assert!(!repos[1].is_primary);
+
+        // 名前が重複したら 422（`StoreError::Repo`）。
+        let dup = ProjectRepo { id: RepoId::new(), ..paper.clone() };
+        assert!(matches!(store.repo_create(&dup), Err(StoreError::Repo(RepoError::DuplicateName(_)))));
+
+        // primary を移すと写しも移る。
+        assert!(store.repo_set_primary(paper.id).unwrap());
+        assert!(!store.repo_get(code.id).unwrap().unwrap().is_primary);
+        assert_eq!(
+            store.project_get(project.id).unwrap().unwrap().workspace,
+            Some(WorkspaceSpec::local("/srv/benchfs-paper"))
+        );
+
+        // 更新（名前と run）。`project_id` / `created_at` は動かない。
+        let renamed = ProjectRepo {
+            name: "paper".into(),
+            run: RepoRun::Host,
+            project_id: ProjectId::new(),
+            ..store.repo_get(paper.id).unwrap().unwrap()
+        };
+        assert!(store.repo_update(&renamed).unwrap());
+        let back = store.repo_get(paper.id).unwrap().unwrap();
+        assert_eq!(back.name, "paper");
+        assert_eq!(back.run, RepoRun::Host);
+        assert_eq!(back.project_id, project.id, "案件の付け替えはしない");
+
+        // 消すと、残りのうち一番古いものが primary になる。
+        assert!(store.repo_delete(paper.id).unwrap());
+        assert!(store.repo_get(code.id).unwrap().unwrap().is_primary);
+        assert_eq!(
+            store.project_get(project.id).unwrap().unwrap().workspace,
+            Some(WorkspaceSpec::local("/srv/benchfs"))
+        );
+        assert!(!store.repo_delete(paper.id).unwrap(), "無い id は false");
+    }
+
+    /// ADR-0043 D1: 未終端のタスクが参照しているリポジトリは消せない（API は 409）。
+    #[test]
+    fn a_repo_used_by_an_unfinished_task_cannot_be_deleted() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let project = sample_project();
+        store.project_create(&project).unwrap();
+        let repo = ProjectRepo {
+            id: RepoId::new(),
+            project_id: project.id,
+            name: "benchfs".into(),
+            kind: RepoKind::Git,
+            location: WorkspaceSpec::local("/srv/benchfs"),
+            default_branch: None,
+            sync: None,
+            run: RepoRun::Auto,
+            is_primary: true,
+            created_at: OffsetDateTime::now_utc(),
+        };
+        store.repo_create(&repo).unwrap();
+
+        let mut task = sample_task(Status::Ready);
+        task.project_id = Some(project.id);
+        task.repos = vec![crate::repos::RepoRef::of(&repo)];
+        store.insert(&task).unwrap();
+
+        assert_eq!(store.repo_active_tasks(repo.id).unwrap(), vec![task.id]);
+        assert!(matches!(
+            store.repo_delete(repo.id),
+            Err(StoreError::InUse { kind: "project repo", .. })
+        ));
+
+        // 終端になれば消せる。
+        store.apply_transition(task.id, Trigger::Cancel, None).unwrap();
+        assert!(store.repo_active_tasks(repo.id).unwrap().is_empty());
+        assert!(store.repo_delete(repo.id).unwrap());
+        // primary が消えたので案件は「作業場所なし」に戻る。
+        assert_eq!(store.project_get(project.id).unwrap().unwrap().workspace, None);
+    }
+
+    /// ADR-0043 D1: `PATCH /projects {workspace}`（従来のフォーム）は primary のリポジトリを書き換える。
+    #[test]
+    fn setting_the_project_workspace_keeps_the_primary_repo_in_step() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut project = sample_project();
+        project.workspace = None;
+        store.project_create(&project).unwrap();
+        assert!(store.repo_list(project.id).unwrap().is_empty());
+
+        // 作業場所を付けると primary のリポジトリが 1 件できる。
+        let first = WorkspaceSpec::local("/srv/benchfs");
+        assert!(store.project_set_workspace(project.id, Some(&first)).unwrap());
+        let repos = store.repo_list(project.id).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "benchfs");
+        assert!(repos[0].is_primary);
+
+        // 差し替えは場所だけを直す（名前は人の設定を残す）。
+        let moved = WorkspaceSpec::local("/srv/moved");
+        assert!(store.project_set_workspace(project.id, Some(&moved)).unwrap());
+        let repos = store.repo_list(project.id).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "benchfs");
+        assert_eq!(repos[0].location, moved);
+        assert_eq!(store.project_get(project.id).unwrap().unwrap().workspace, Some(moved));
+
+        // `null` は primary を消す（= 案件を「作業場所なし」に戻す）。
+        assert!(store.project_set_workspace(project.id, None).unwrap());
+        assert!(store.repo_list(project.id).unwrap().is_empty());
+        assert_eq!(store.project_get(project.id).unwrap().unwrap().workspace, None);
     }
 
     #[test]

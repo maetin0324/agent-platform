@@ -213,8 +213,8 @@ pub struct DispatchConfig {
     pub accounts: Option<AccountsRuntimeConfig>,
     /// ADR-0033 D6（Phase 24）: `[memory] dir`（絶対パス）。`None` なら記憶を読まないし書かない。
     pub memory_dir: Option<PathBuf>,
-    /// ADR-0041 D1: ローカルの worktree のブランチ接頭辞（`[workspace] worktree_branch_prefix`、
-    /// 既定 `taskd/`。ADR-0019 のクラスタ側と同じ値）。
+    /// ADR-0041 D1 / ADR-0042 D3: ローカルの worktree のブランチ接頭辞
+    /// （`[workspace] worktree_branch_prefix`、既定 `celeris/`）。
     pub worktree_branch_prefix: String,
     /// ADR-0041 D1: `[selfdeploy] releases_dir`。その**親**の `current/manifest.json` が読めれば、
     /// 本番の sha を worktree の base の候補にする。`None` なら base は常に `main`（か `HEAD`）。
@@ -702,9 +702,11 @@ pub struct Dispatcher {
     /// `dispatch_ready` も `recover_reviews` も動かさず、**手元の run とレビューの面倒だけ見続ける**
     /// （完了の記録、リースの更新、`aggregate` / `child_failed` の後処理は通常どおり動く）。
     accepting_new_work: bool,
-    /// ADR-0041 D1: この taskd が用意したローカルの worktree（タスクが終端に達したら後片付けする）。
-    /// 再起動では失われる（残った worktree は人が `git worktree remove` する。PROGRESS の未解決）。
-    local_worktrees: HashMap<TaskId, task_worker::LocalWorktree>,
+    /// ADR-0041 D1 / ADR-0043 D2: この taskd が用意したローカルの作業場所（1 つ以上のリポジトリ）。
+    /// **終端では消さない**（ADR-0043 D2 の改定。差分を見るために残す）。消すのは**中止**（cancel）
+    /// のときだけで、worktree とブランチを消す。再起動では失われる（残った worktree は人が
+    /// `git worktree remove` する。PROGRESS の未解決）。
+    task_workspaces: HashMap<TaskId, task_worker::TaskWorkspaces>,
     /// ADR-0041 D5: 面倒を見てよいタスクの述語（`None` なら全部）。`--mode verify` の煙試験でだけ使う。
     eligible: Option<TaskFilter>,
 }
@@ -766,7 +768,7 @@ impl Dispatcher {
             connect_pending_clusters: std::collections::HashSet::new(),
             now_unix_fn: Arc::new(real_now_unix),
             accepting_new_work: true,
-            local_worktrees: HashMap::new(),
+            task_workspaces: HashMap::new(),
             eligible: None,
         }
     }
@@ -982,8 +984,8 @@ impl Dispatcher {
         report.reclaimed = self.reclaim_expired_leases()?;
         let reclaim_ms = lap(&mut at);
         self.abort_stale_runs()?;
-        // ADR-0041 D1: 終端に達したタスクの worktree を片付ける（クリーンなら消す。汚れていれば残して 1 行積む）。
-        self.cleanup_finished_worktrees()?;
+        // ADR-0043 D2: **中止**されたタスクの worktree とブランチを消す（終端〈done / failed〉では消さない）。
+        self.cleanup_cancelled_worktrees()?;
         let abort_ms = lap(&mut at);
         // ADR-0040 D4: draining のインスタンスは新しい仕事を始めない（拾い上げも dispatch もしない）。
         // 手元の run とレビューの完了・リース更新・後処理は上の `drain_completions` 以下でそのまま動く。
@@ -1786,10 +1788,13 @@ impl Dispatcher {
                 self.fix_plan_for_harness(&task, &mut plan, &org);
                 // ADR-0039 D2: 子の作業場所は 明示 > 案件 > 親。
                 let project_workspace = task_ops::delegate::project_workspace(self.store.as_ref(), &task).map_err(ops_to_store)?;
+                // ADR-0043 D2: 子のリポジトリは 明示（計画の `repos`）> 親 > 案件の primary。
+                let project_repos = task_ops::delegate::project_repos(self.store.as_ref(), &task).map_err(ops_to_store)?;
                 let home = task_core::home_dir();
                 let workspace = task_core::WorkspaceContext {
                     project: project_workspace.as_ref(),
                     home: home.as_deref(),
+                    repos: &project_repos,
                 };
                 let children = materialize(
                     &task,
@@ -2074,10 +2079,13 @@ impl Dispatcher {
                     self.fix_plan_for_harness(&task, &mut plan, &org);
                     // ADR-0039 D2: 子の作業場所は 明示 > 案件 > 親。
                     let project_workspace = task_ops::delegate::project_workspace(self.store.as_ref(), &task).map_err(ops_to_store)?;
+                    // ADR-0043 D2: 子のリポジトリは 明示（計画の `repos`）> 親 > 案件の primary。
+                    let project_repos = task_ops::delegate::project_repos(self.store.as_ref(), &task).map_err(ops_to_store)?;
                     let home = task_core::home_dir();
                     let workspace = task_core::WorkspaceContext {
                         project: project_workspace.as_ref(),
                         home: home.as_deref(),
+                        repos: &project_repos,
                     };
                     let children = materialize(
                         &task,
@@ -2333,11 +2341,11 @@ impl Dispatcher {
                 }
             }
             let dir_started = Instant::now();
-            // ADR-0041 D1: ローカルの作業場所が git リポジトリで `mode = worktree` なら、この run 専用の
-            // worktree を使う（`dir` はその親 = `runs/` `artifacts/` の置き場）。
-            let worktree = self.local_worktree_for(&task);
+            // ADR-0041 D1 / ADR-0043 D2: ローカルの作業場所（1 つ以上のリポジトリ）を用意する
+            // （`dir` はその親 = `runs/` `artifacts/` の置き場）。
+            let worktree = self.task_workspaces_for(&task);
             let dir = match &worktree {
-                Some(wt) => wt.task_dir.clone(),
+                Some(ws) => ws.task_dir.clone(),
                 None => match self.task_dir(&task) {
                     Some(d) => d,
                     None => {
@@ -2405,9 +2413,9 @@ impl Dispatcher {
             tracing::info!(task_id = %task.id, %run_id, adapter = %adapter_id, provider = %provider_id, account = account.as_deref(), "dispatching");
             let remote = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path, task.id));
             let extras = self.run_extras(&task, worktree.as_ref())?;
-            // ADR-0041 D1: 終端で片付けられるよう、この run で使う worktree を覚えておく。
-            if let Some(wt) = &worktree {
-                self.local_worktrees.insert(task.id, wt.clone());
+            // ADR-0043 D2: 中止されたときに片付けられるよう、この run で使う作業場所を覚えておく。
+            if let Some(ws) = &worktree {
+                self.task_workspaces.insert(task.id, ws.clone());
             }
             let handle = self.spawn_worker(
                 task.id,
@@ -2444,7 +2452,7 @@ impl Dispatcher {
     fn run_extras(
         &self,
         task: &Task,
-        worktree: Option<&task_worker::LocalWorktree>,
+        worktree: Option<&task_worker::TaskWorkspaces>,
     ) -> Result<RunExtras, DispatchError> {
         let role = task.role.as_deref().map(|id| RoleContext {
             id: id.to_string(),
@@ -2575,21 +2583,27 @@ impl Dispatcher {
                 .as_ref()
                 .map(task_worker::preamble::workspace_note),
         };
-        // ADR-0041 D1: worktree を切る run には、作業ツリー・ブランチ・base と「このブランチにコミットせよ」を足す。
+        // ADR-0041 D1 / ADR-0043 D2 / D8: 作業ツリーを切る run には、リポジトリ一覧（ブランチ・base）、
+        // 検査コマンド、成果物の置き場を足す。
         if conversation_addressee.is_none()
-            && let Some(wt) = worktree
+            && let Some(ws) = worktree
         {
-            let line = task_worker::preamble::worktree_note(
-                &wt.repo,
-                &wt.dir,
-                &wt.branch,
-                &wt.base.sha12(),
-                wt.base.kind.as_str(),
-            );
+            let line = task_worker::preamble::repos_note(&self.repo_notes(ws));
             workspace_note = Some(match workspace_note {
                 Some(note) => format!("{note}\n{line}"),
                 None => line,
             });
+        }
+        // ADR-0043 D2: 計画 run には**案件のリポジトリの一覧**（名前 / 種類 / 説明）を渡す。
+        // プランナーは子タスクごとに `repos: ["benchfs"]` と名前で指定する。
+        if task.kind == TaskKind::Plan && conversation_addressee.is_none() {
+            let listing = task_worker::preamble::project_repos_note(&self.project_repo_notes(task)?);
+            if !listing.is_empty() {
+                workspace_note = Some(match workspace_note {
+                    Some(note) => format!("{note}\n{listing}"),
+                    None => listing,
+                });
+            }
         }
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
@@ -2613,7 +2627,7 @@ impl Dispatcher {
                     .collect();
                 // ADR-0041 D1: 子は親の作業場所を継ぐので、子ごとに別の worktree になる。親が成果を
                 // 統合するときは子のブランチを merge する（統合は LLM の仕事）。
-                let child_worktree = self.local_worktree_for(&child);
+                let child_worktree = self.task_workspaces_for(&child);
                 out.push(ChildSummary {
                     id: child.id,
                     title: child.title.clone(),
@@ -2623,9 +2637,10 @@ impl Dispatcher {
                     artifacts,
                     workspace: child_worktree
                         .as_ref()
-                        .map(|wt| wt.task_dir.clone())
+                        .map(|ws| ws.task_dir.clone())
                         .or_else(|| self.task_dir(&child)),
-                    branch: child_worktree.map(|wt| wt.branch),
+                    branch: child_worktree
+                        .and_then(|ws| ws.repos.first().and_then(|r| r.branch().map(str::to_string))),
                 });
             }
             out
@@ -2796,7 +2811,7 @@ impl Dispatcher {
         dir: PathBuf,
         limits: RunLimits,
         remote: Option<SshSettings>,
-        worktree: Option<task_worker::LocalWorktree>,
+        worktree: Option<task_worker::TaskWorkspaces>,
         extras: RunExtras,
     ) -> JoinHandle<()> {
         let store = self.store.clone();
@@ -2890,6 +2905,12 @@ impl Dispatcher {
                 depth: self.plan_depth(&task)?,
                 limits: PlanLimits::default(),
                 genres: self.config.genres.clone(),
+                // ADR-0043 D2: 計画が子に書ける `repos` の名前（案件に登録されているものだけ）。
+                repos: task_ops::delegate::project_repos(self.store.as_ref(), &task)
+                    .map_err(ops_to_store)?
+                    .into_iter()
+                    .map(|r| r.name)
+                    .collect(),
             })
         } else {
             None
@@ -2929,7 +2950,9 @@ impl Dispatcher {
         let tx = self.tx.clone();
         let remote_review = remote_settings.clone();
         // ADR-0019 D1 6. / ADR-0041 D1: 判定コマンドは worktree の中で実行する（元のリポジトリでは実行しない）。
-        let review_work_dir = self.local_worktree_for(&task).map(|wt| wt.dir);
+        let review_work_dir = self.work_dir_for(&task);
+        // ADR-0043 D4: リポジトリが宣言した検査コマンド（`workspace.toml` の `[commands] check`）。
+        let repo_checks = self.default_checks(&task);
         let handle = tokio::spawn(async move {
             let ws: Box<dyn Workspace> = match remote_review {
                 Some(settings) => Box::new(SshWorkspace::new(&dir, settings)),
@@ -2944,6 +2967,8 @@ impl Dispatcher {
                 reviewer: reviewer_run,
                 human,
                 aggregate,
+                // ADR-0043 D4: リポジトリの `[commands] check`（タスクに検査コマンドが無いときだけ効く）。
+                repo_checks,
             };
             let outcome =
                 review_task(&task, ws.as_ref(), &dir, &artifacts_dir, &produced, timeout, extras).await;
@@ -3017,6 +3042,7 @@ impl Dispatcher {
     fn create_human_approval_child(&self, task: &Task, idx: usize, title: &str) -> Result<Task, DispatchError> {
         let now = OffsetDateTime::now_utc();
         let approval = Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: Some(task.id),
             kind: TaskKind::Approval,
@@ -3267,8 +3293,8 @@ impl Dispatcher {
     /// （作業ツリーそのものは `<そこ>/tree`。`git status --porcelain` を汚さないため外に出す）。
     fn task_dir(&self, task: &Task) -> Option<PathBuf> {
         match &task.workspace {
-            WorkspaceSpec::Local { path, .. } => Some(match self.local_worktree_for(task) {
-                Some(wt) => wt.task_dir,
+            WorkspaceSpec::Local { path, .. } => Some(match self.task_workspaces_for(task) {
+                Some(ws) => ws.task_dir,
                 None if path.is_absolute() => path.clone(),
                 None => self.config.workspace_root.join(path),
             }),
@@ -3277,12 +3303,74 @@ impl Dispatcher {
         }
     }
 
-    /// ADR-0041 D1: そのタスクに用意する（用意した）ローカルの worktree。
+    /// ADR-0041 D1 / ADR-0043 D2: そのタスクに用意する（用意した）ローカルの作業場所。
     ///
-    /// `Some` になる条件は 3 つだけで、どれも決定的（LLM は使わない）:
-    /// 作業場所が `Local`、`mode = worktree`（既定）、`path` が git リポジトリ（`git rev-parse --git-dir`）。
-    /// base の決め方は `task_worker::resolve_base`（`main` / 本番の `current` / `HEAD`）。
-    fn local_worktree_for(&self, task: &Task) -> Option<task_worker::LocalWorktree> {
+    /// 決め方は決定的（LLM は使わない）:
+    ///
+    /// 1. **タスクがリポジトリを選んでいる**（`task.repos`、ADR-0043 D2）→ `<task_dir>/repos/<name>/` に
+    ///    1 つずつ並べる。`kind = git` で実際に git リポジトリなら worktree、そうでなければ実体への
+    ///    シンボリックリンク（`kind = dir`、`mode = shared`、git でなかった場合）。
+    ///    **リモートのリポジトリを含むタスクは `None`**（従来の ADR-0018 / 0019 の経路に倒す。
+    ///    ローカルと混ぜたタスクは作成時に 422 で弾いてある）。
+    /// 2. **選んでいない**（案件にリポジトリが無い・案件に属さない）→ Phase 49 と同じ 1 つだけの worktree
+    ///    （`<task_dir>/tree`）。条件は 3 つ: `Local`、`mode = worktree`（既定）、`path` が git リポジトリ。
+    ///
+    /// base の決め方は `task_worker::resolve_base`（`main` / 本番の `current` / `HEAD`。ADR-0041 D1）。
+    fn task_workspaces_for(&self, task: &Task) -> Option<task_worker::TaskWorkspaces> {
+        let task_dir = self.config.workspace_root.join(task.id.to_string());
+        if task.repos.is_empty() {
+            let worktree = self.legacy_worktree_for(task, &task_dir)?;
+            let name = task_worker::task_repos::repo_display_name(&worktree.repo);
+            return Some(task_worker::TaskWorkspaces {
+                task_dir,
+                repos: vec![task_worker::TaskRepo::git(name, worktree)],
+            });
+        }
+        let mut repos = Vec::with_capacity(task.repos.len());
+        for reference in &task.repos {
+            let row = match self.store.repo_get(reference.repo_id) {
+                Ok(Some(row)) => row,
+                Ok(None) => {
+                    tracing::warn!(task_id = %task.id, repo = %reference.name, "the project repo is gone; falling back to the plain workspace");
+                    return None;
+                }
+                Err(e) => {
+                    tracing::error!(task_id = %task.id, repo = %reference.name, error = %e, "cannot read the project repo");
+                    return None;
+                }
+            };
+            let task_core::WorkspaceSpec::Local { path, mode } = &row.location else {
+                // ADR-0043 D2 / D7: リモートは従来の経路（手元の写し + rsync）。
+                return None;
+            };
+            let source = if path.is_absolute() { path.clone() } else { self.config.workspace_root.join(path) };
+            let dir = task_dir.join(task_worker::REPOS_DIR_NAME).join(&row.name);
+            let wants_worktree = row.kind == task_core::RepoKind::Git
+                && mode.unwrap_or_default() == task_core::WorkspaceMode::Worktree
+                && task_worker::is_git_repo(&source);
+            let base = if wants_worktree { self.worktree_base(&source) } else { None };
+            match base {
+                Some(base) => repos.push(task_worker::TaskRepo::git(
+                    row.name.clone(),
+                    task_worker::LocalWorktree {
+                        dir,
+                        task_dir: task_dir.clone(),
+                        repo: source,
+                        branch: format!("{}{}", self.config.worktree_branch_prefix, task.id),
+                        base,
+                    },
+                )),
+                None => repos.push(task_worker::TaskRepo::link(row.name.clone(), source, dir)),
+            }
+        }
+        if repos.is_empty() {
+            return None;
+        }
+        Some(task_worker::TaskWorkspaces { task_dir, repos })
+    }
+
+    /// Phase 49（ADR-0041 D1）の 1 リポジトリだけの worktree（`<task_dir>/tree`）。
+    fn legacy_worktree_for(&self, task: &Task, task_dir: &Path) -> Option<task_worker::LocalWorktree> {
         let WorkspaceSpec::Local { path, .. } = &task.workspace else {
             return None;
         };
@@ -3293,65 +3381,171 @@ impl Dispatcher {
         if !task_worker::is_git_repo(&repo) {
             return None;
         }
-        let current = self
-            .config
-            .releases_dir
-            .as_deref()
-            .and_then(task_worker::current_release_sha);
-        let base = task_worker::resolve_base(&repo, current.as_deref())?;
-        let task_dir = self.config.workspace_root.join(task.id.to_string());
+        let base = self.worktree_base(&repo)?;
         Some(task_worker::LocalWorktree {
             dir: task_dir.join(task_worker::WORKTREE_DIR_NAME),
-            task_dir,
+            task_dir: task_dir.to_path_buf(),
             repo,
             branch: format!("{}{}", self.config.worktree_branch_prefix, task.id),
             base,
         })
     }
 
-    /// ADR-0041 D1: 終端に達したタスクの worktree を片付ける。`git status --porcelain` が空なら
-    /// `git worktree remove`（**ブランチは残す**。コミットはリポジトリに残る）。空でなければ残して
-    /// `WorkerProgress`「未コミットの変更が残っています: <dir>」を 1 行積む。**taskd はコミットしない**。
-    fn cleanup_finished_worktrees(&mut self) -> Result<(), DispatchError> {
-        let ids: Vec<TaskId> = self.local_worktrees.keys().copied().collect();
+    /// ADR-0041 D1 の base の規則（`main` / 本番の `current` / `HEAD`）。
+    fn worktree_base(&self, repo: &Path) -> Option<task_worker::BaseRef> {
+        let current = self
+            .config
+            .releases_dir
+            .as_deref()
+            .and_then(task_worker::current_release_sha);
+        task_worker::resolve_base(repo, current.as_deref())
+    }
+
+    /// ADR-0043 D2 / D4 / D8: 前置きの「作業場所」に出すリポジトリ一覧（決定的。`workspace.toml` を
+    /// 読むだけで、判断も LLM も無い）。`description` / `check` / `outputs` は
+    /// `.config/celeris/workspace.toml` に**書いてあることだけ**を使う（ADR-0043 §3）。
+    ///
+    /// 読む場所は、作業ツリーが既にあればそこ、無ければ元のリポジトリ（初回の dispatch では
+    /// worktree をまだ切っていないため）。
+    fn repo_notes(&self, ws: &task_worker::TaskWorkspaces) -> Vec<task_worker::preamble::RepoNote> {
+        ws.repos
+            .iter()
+            .map(|repo| {
+                let from = if repo.dir.is_dir() { &repo.dir } else { &repo.source };
+                let (config, warning) = task_core::workspace_config::load_or_default(from);
+                if let Some(warning) = warning {
+                    tracing::warn!(repo = %repo.name, %warning, "cannot read workspace.toml; using the defaults");
+                }
+                task_worker::preamble::RepoNote {
+                    name: repo.name.clone(),
+                    dir: repo.dir.to_string_lossy().into_owned(),
+                    git: repo.is_git(),
+                    branch: repo.branch().map(str::to_string),
+                    base: repo.worktree.as_ref().map(|w| w.base.sha12()),
+                    base_kind: repo.worktree.as_ref().map(|w| w.base.kind.as_str().to_string()),
+                    description: config.workspace.description.clone(),
+                    check: config.commands.check.clone(),
+                    docs: config.outputs.docs.clone(),
+                    deliverables: config.outputs.deliverables.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// ADR-0043 D2 / D4: 計画 run に渡す「この案件のリポジトリ」（名前 / 種類 / 置き場 / `workspace.toml` の
+    /// `description`）。ストアと `workspace.toml` を読むだけで、判断も LLM も無い。
+    fn project_repo_notes(&self, task: &Task) -> Result<Vec<task_worker::preamble::ProjectRepoNote>, DispatchError> {
+        let repos = task_ops::delegate::project_repos(self.store.as_ref(), task).map_err(ops_to_store)?;
+        Ok(repos
+            .into_iter()
+            .map(|repo| {
+                let (location, local) = match &repo.location {
+                    WorkspaceSpec::Local { path, .. } => (path.display().to_string(), Some(path.clone())),
+                    WorkspaceSpec::Remote { cluster, path } => (format!("{cluster}:{}", path.display()), None),
+                };
+                let description = local
+                    .as_deref()
+                    .and_then(|dir| task_core::workspace_config::load_or_default(dir).0.workspace.description);
+                task_worker::preamble::ProjectRepoNote {
+                    name: repo.name,
+                    kind: repo.kind.as_str().to_string(),
+                    location,
+                    description,
+                    is_primary: repo.is_primary,
+                }
+            })
+            .collect())
+    }
+
+    /// ADR-0043 D4: レビュー担当の `Check::Command` の既定になる検査コマンド
+    /// （タスクに `acceptance` が明示されていればそれが勝つ。決めるのはここではなく `review.rs` の
+    /// 呼び出し側）。**先頭のリポジトリの** `[commands] check` だけを使う。
+    fn default_checks(&self, task: &Task) -> Vec<String> {
+        let Some(ws) = self.task_workspaces_for(task) else {
+            return Vec::new();
+        };
+        let Some(repo) = ws.repos.first() else {
+            return Vec::new();
+        };
+        let from = if repo.dir.is_dir() { &repo.dir } else { &repo.source };
+        task_core::workspace_config::load_or_default(from).0.commands.check
+    }
+
+    /// テスト用: Phase 49 のときの「1 つだけの worktree」の姿（`task_workspaces_for` の先頭）。
+    #[cfg(test)]
+    fn local_worktree_for(&self, task: &Task) -> Option<task_worker::LocalWorktree> {
+        self.task_workspaces_for(task)
+            .and_then(|ws| ws.repos.into_iter().next())
+            .and_then(|r| r.worktree)
+    }
+
+    /// ADR-0043 D2: ワーカーのカレントディレクトリ（先頭のリポジトリ）。レビューの判定コマンドもここで動かす。
+    fn work_dir_for(&self, task: &Task) -> Option<PathBuf> {
+        self.task_workspaces_for(task)
+            .and_then(|ws| ws.cwd().map(Path::to_path_buf))
+    }
+
+    /// ADR-0043 D2（Phase 52。ADR-0041 D1 の後片付けを改める）: worktree は**終端では消さない**
+    /// （`done` で未取り込みのものも `failed` も、差分を見るために残す）。消えるのは**中止**（cancel）
+    /// のときだけで、worktree を消し、ブランチも `git branch -D` する（人の指示）。
+    ///
+    /// `done` / `failed` のときは、未コミットの変更があれば `WorkerProgress` を 1 行積んで記録だけ落とす。
+    /// **taskd はコミットしない**（ADR-0019 D2）。
+    fn cleanup_cancelled_worktrees(&mut self) -> Result<(), DispatchError> {
+        let ids: Vec<TaskId> = self.task_workspaces.keys().copied().collect();
         for id in ids {
             // まだ走っている／判定中なら触らない（やり直しは同じ worktree を使い回す）。
             if self.running.contains_key(&id) || self.reviewing.contains_key(&id) {
                 continue;
             }
-            let terminal = match self.store.get(id)? {
-                Some(t) => t.status.is_terminal(),
+            let status = match self.store.get(id)? {
+                Some(t) => Some(t.status),
                 // タスクごと消えていれば、記録も落とす（worktree は人の手に残す）。
+                None => None,
+            };
+            match status {
                 None => {
-                    self.local_worktrees.remove(&id);
-                    continue;
+                    self.task_workspaces.remove(&id);
                 }
-            };
-            if !terminal {
-                continue;
-            }
-            let Some(worktree) = self.local_worktrees.remove(&id) else {
-                continue;
-            };
-            match worktree.remove_if_clean() {
-                task_worker::CleanupOutcome::Removed => {
-                    tracing::info!(task_id = %id, dir = %worktree.dir.display(), branch = %worktree.branch, "worktree removed (clean); the branch stays");
+                Some(Status::Cancelled) => {
+                    let Some(workspaces) = self.task_workspaces.remove(&id) else {
+                        continue;
+                    };
+                    for (name, outcome) in workspaces.remove_for_cancel() {
+                        match outcome {
+                            task_worker::CleanupOutcome::Removed => {
+                                tracing::info!(task_id = %id, repo = %name, "cancelled: the worktree and its branch are gone");
+                            }
+                            task_worker::CleanupOutcome::AlreadyGone => {}
+                            other => {
+                                tracing::warn!(task_id = %id, repo = %name, outcome = ?other, "cancelled: could not remove the worktree; leaving it for a human");
+                            }
+                        }
+                    }
                 }
-                task_worker::CleanupOutcome::Dirty => {
-                    tracing::warn!(task_id = %id, dir = %worktree.dir.display(), "worktree kept (uncommitted changes)");
-                    let run_id = last_run_id(&self.store.events_for(id)?).unwrap_or_default();
-                    self.store.append_event(
-                        id,
-                        &Event::WorkerProgress {
-                            run_id,
-                            msg: format!("未コミットの変更が残っています: {}", worktree.dir.display()),
-                        },
-                    )?;
+                Some(status) if status.is_terminal() => {
+                    // ADR-0043 D2: 残す。未コミットの変更があることだけ 1 行記録する。
+                    let Some(workspaces) = self.task_workspaces.remove(&id) else {
+                        continue;
+                    };
+                    let dirty: Vec<String> = workspaces
+                        .repos
+                        .iter()
+                        .filter(|r| r.is_git() && task_worker::status_is_clean(&r.dir) == Some(false))
+                        .map(|r| r.dir.to_string_lossy().into_owned())
+                        .collect();
+                    if !dirty.is_empty() {
+                        let run_id = last_run_id(&self.store.events_for(id)?).unwrap_or_default();
+                        self.store.append_event(
+                            id,
+                            &Event::WorkerProgress {
+                                run_id,
+                                msg: format!("未コミットの変更が残っています: {}", dirty.join(", ")),
+                            },
+                        )?;
+                    }
                 }
-                task_worker::CleanupOutcome::AlreadyGone => {}
-                task_worker::CleanupOutcome::Unknown => {
-                    tracing::warn!(task_id = %id, dir = %worktree.dir.display(), "could not check or remove the worktree; leaving it for a human");
-                }
+                Some(_) => {}
             }
         }
         Ok(())
@@ -3412,6 +3606,42 @@ impl Dispatcher {
     }
 }
 
+/// ADR-0043 D3 / D4: `[commands] setup` の 1 コマンドあたりの上限（設定キーにはしない。
+/// `cargo fetch` / `pnpm install` が入る想定で、run の予算とは別に取る）。
+const SETUP_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// ADR-0041 D1 / ADR-0043 D2: `<task_dir>/worktree.json` の中身。先頭の 5 つは Phase 49 からある
+/// 「1 リポジトリのときの姿」で、複数リポジトリのタスクでは `repos[0]`（cwd になるもの）の写しが入る。
+fn worktree_marker(ws: &task_worker::TaskWorkspaces) -> task_ops::workspace::WorktreeMarker {
+    let first = ws.repos.first();
+    task_ops::workspace::WorktreeMarker {
+        repo: first.map(|r| r.source.to_string_lossy().into_owned()).unwrap_or_default(),
+        dir: first.map(|r| r.dir.to_string_lossy().into_owned()).unwrap_or_default(),
+        branch: first.and_then(|r| r.branch()).unwrap_or_default().to_string(),
+        base: first
+            .and_then(|r| r.worktree.as_ref())
+            .map(|w| w.base.sha.clone())
+            .unwrap_or_default(),
+        base_kind: first
+            .and_then(|r| r.worktree.as_ref())
+            .map(|w| w.base.kind.as_str().to_string())
+            .unwrap_or_default(),
+        repos: ws
+            .repos
+            .iter()
+            .map(|r| task_ops::workspace::WorktreeMarkerRepo {
+                name: r.name.clone(),
+                kind: if r.is_git() { "git".into() } else { "dir".into() },
+                source: r.source.to_string_lossy().into_owned(),
+                dir: r.dir.to_string_lossy().into_owned(),
+                branch: r.branch().map(str::to_string),
+                base: r.worktree.as_ref().map(|w| w.base.sha.clone()),
+                base_kind: r.worktree.as_ref().map(|w| w.base.kind.as_str().to_string()),
+            })
+            .collect(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_worker(
     store: Arc<dyn TaskStore>,
@@ -3422,7 +3652,7 @@ async fn run_worker(
     limits: RunLimits,
     lease: LeaseRenewal,
     remote: Option<SshSettings>,
-    worktree: Option<task_worker::LocalWorktree>,
+    worktree: Option<task_worker::TaskWorkspaces>,
     extras: RunExtras,
     roles: Vec<RoleSpec>,
     genres: Vec<GenreSpec>,
@@ -3450,8 +3680,8 @@ async fn run_worker(
             task.objective.push_str(&remote_exec_instructions(settings));
             prepared
         }
-        // ADR-0041 D1: ローカルの作業場所が git リポジトリなら、この run 専用の worktree を用意し、
-        // そこをワーカーのカレントディレクトリにする（`runs/` `inputs/` `artifacts/` は作業ツリーの外の `dir`）。
+        // ADR-0041 D1 / ADR-0043 D2: ローカルの作業場所（1 つ以上のリポジトリ）を用意し、その
+        // 先頭をワーカーのカレントディレクトリにする（`runs/` `inputs/` `artifacts/` は作業ツリーの外の `dir`）。
         None => {
             let mut ws = LocalWorkspace::new(&dir);
             if let Some(wt) = &worktree {
@@ -3460,29 +3690,60 @@ async fn run_worker(
                     .map_err(|e| workspace_error_to_adapter(e, "worktree prepare"))?;
                 // 目印（`<task_dir>/worktree.json`）: API・CLI はこれを見て「run のログと成果物は
                 // 作業ツリーの外にある」と判断する（git を起こさない。worktree を消した後も残す）。
-                if let Err(e) = task_ops::workspace::write_marker(
-                    &wt.task_dir,
-                    &task_ops::workspace::WorktreeMarker {
-                        repo: wt.repo.to_string_lossy().into_owned(),
-                        dir: wt.dir.to_string_lossy().into_owned(),
-                        branch: wt.branch.clone(),
-                        base: wt.base.sha.clone(),
-                        base_kind: wt.base.kind.as_str().to_string(),
-                    },
-                ) {
+                if let Err(e) = task_ops::workspace::write_marker(&wt.task_dir, &worktree_marker(wt)) {
                     tracing::warn!(task_id = %task_id, error = %e, "could not write the worktree marker");
                 }
-                ws = ws.with_work_dir(&wt.dir);
+                if let Some(cwd) = wt.cwd() {
+                    ws = ws.with_work_dir(cwd);
+                }
             }
             ws.prepare(&task)
                 .await
                 .map_err(|e| AdapterError::Other(format!("workspace prepare: {e}")))?
         }
     };
-    // ADR-0041 D1: ワーカーの cwd は worktree（`workspace` は足回りの親のまま）。
+    // ADR-0043 D3 / D4: worktree を作った直後に `[commands] setup` を**一度だけ**ホストで流す
+    // （記録は `runs/setup.log`。そのファイルがあれば済んでいる）。落ちたら run を始めず、
+    // 既存の質問の経路でタスクを `blocked` にして人に聞く。
+    if let Some(wt) = &worktree
+        && remote.is_none()
+        && !wt.task_dir.join(task_worker::task_repos::SETUP_LOG).exists()
+    {
+        match task_worker::run_setup(&wt.repos, &wt.task_dir, SETUP_TIMEOUT).await {
+            Ok(outcome) if outcome.ok => {}
+            Ok(outcome) => {
+                tracing::warn!(task_id = %task_id, failures = ?outcome.failures, "setup failed; asking a human");
+                return Ok(RunOutcome {
+                    terminal: Terminal::Question {
+                        text: format!(
+                            "setup が失敗しました（`.config/celeris/workspace.toml` の `[commands] setup`）: {}。\
+                             記録は `{}` にあります。直し方を教えてください（設定を直す／この手順を飛ばす）。",
+                            outcome.failures.join(" / "),
+                            wt.task_dir.join(task_worker::task_repos::SETUP_LOG).display()
+                        ),
+                    },
+                    exit_code: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "could not run setup");
+                return Ok(RunOutcome {
+                    terminal: Terminal::Question {
+                        text: format!(
+                            "setup が失敗しました（`.config/celeris/workspace.toml` の `[commands] setup` を流せませんでした）: {e}。\
+                             直し方を教えてください（設定を直す／この手順を飛ばす）。"
+                        ),
+                    },
+                    exit_code: None,
+                });
+            }
+        }
+    }
+    // ADR-0041 D1 / ADR-0043 D2: ワーカーの cwd は先頭のリポジトリ（`workspace` は足回りの親のまま）。
     let work_dir = worktree
         .as_ref()
-        .map(|wt| wt.dir.canonicalize().unwrap_or_else(|_| wt.dir.clone()));
+        .and_then(|wt| wt.cwd())
+        .map(|cwd| cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf()));
     // ADR-0036 D1: 成果物ディレクトリはタスクごと（共有 workspace では `.taskd/artifacts/<task_id>/`）。
     // 決めるのはディスパッチャで、アダプタは `req.artifacts_dir` に書くだけ。
     let artifacts_dir = task_core::artifacts::artifacts_dir_for(&task, &workspace);
@@ -3703,6 +3964,7 @@ mod tests {
     fn new_task(dir: &std::path::Path, check: Check, max_retries: u32) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
@@ -5861,6 +6123,7 @@ mod tests {
 
         let mut plan = task_core::PlanOutput {
             tasks: vec![task_core::NewTask {
+                repos: Vec::new(),
                 title: "候補テーマの抽出".into(),
                 objective: "候補テーマを candidates.json にまとめよ".into(),
                 acceptance: vec![Criterion {
@@ -7977,7 +8240,7 @@ mod tests {
     }
 
     /// ADR-0041 D1: ローカルの git リポジトリは、タスクごとの worktree
-    /// （`<workspace_root>/<task_id>/tree`、ブランチ `taskd/<task_id>`、base は `main`）で動く。
+    /// （`<workspace_root>/<task_id>/tree`、ブランチ `celeris/<task_id>`、base は `main`）で動く。
     /// 成果物・`runs/` は作業ツリーの**外**（`<workspace_root>/<task_id>/`）。
     #[tokio::test]
     async fn a_local_git_workspace_runs_in_a_per_task_worktree_on_its_own_branch() {
@@ -8008,7 +8271,7 @@ mod tests {
         assert!(task_dir.join("runs").is_dir());
         assert!(!tree.join("runs").exists(), "`runs/` を作業ツリーに作らない（git status を汚さない）");
         // ブランチは `taskd/<task_id>` で、base は `main`。taskd はコミットしない。
-        let branch = format!("taskd/{}", task.id);
+        let branch = format!("celeris/{}", task.id);
         assert!(git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]));
         assert_eq!(git_out(&tree, &["rev-parse", "HEAD"]), main_sha, "base は main");
         assert_eq!(git_out(&tree, &["rev-parse", "--abbrev-ref", "HEAD"]), branch);
@@ -8030,15 +8293,20 @@ mod tests {
         let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
         store.insert(&task).unwrap();
         let d = worktree_dispatcher(store.clone(), Arc::new(RecordingAdapter { seen: Arc::new(StdMutex::new(Vec::new())), files: vec![] }), root.path(), None);
-        let worktree = d.local_worktree_for(&task).expect("worktree plan");
+        let worktree = d.task_workspaces_for(&task).expect("worktree plan");
         let extras = d.run_extras(&task, Some(&worktree)).unwrap();
         let note = extras.workspace_note.expect("workspace_note");
-        assert!(note.contains(&format!("作業ツリー `{}`", root.path().join(task.id.to_string()).join("tree").display())), "{note}");
-        assert!(note.contains(&format!("ブランチ `taskd/{}`", task.id)), "{note}");
+        let tree = root.path().join(task.id.to_string()).join("tree");
+        assert!(note.contains(&format!("→ `{}`", tree.display())), "{note}");
+        assert!(note.contains(&format!("ブランチ `celeris/{}`", task.id)), "{note}");
         assert!(note.contains(&format!("base `{}`（main）", &main_sha[..12])), "{note}");
-        assert!(note.contains("このブランチにコミットせよ"), "{note}");
+        assert!(note.contains(&format!("カレントディレクトリは `{}`", tree.display())), "{note}");
+        assert!(note.contains("ブランチにコミットせよ"), "{note}");
         assert!(note.contains("`main` に直接コミットするな"), "{note}");
         assert!(note.contains("`git checkout` でブランチを変えるな"), "{note}");
+        // ADR-0043 D8: 成果物と文書の置き場。
+        assert!(note.contains(&format!("は `{}/docs` の下に置け", tree.display())), "{note}");
+        assert!(note.contains("`artifacts/` は run の中間物"), "{note}");
     }
 
     /// ADR-0041 D1: 本番の `current` が `main` の子孫なら、その sha から分岐する（本番より古いコードから始めない）。
@@ -8077,13 +8345,14 @@ mod tests {
         assert_eq!(worktree.base.sha, shipped);
         run_until_idle(&mut d, 60).await;
         // クリーンなので worktree は消えているが、ブランチは残り、その先端は `current` の sha。
-        let branch = format!("taskd/{}", task.id);
+        let branch = format!("celeris/{}", task.id);
         assert_eq!(git_out(repo_dir.path(), &["rev-parse", &branch]), shipped);
     }
 
-    /// ADR-0041 D1: 終端でクリーンなら worktree を消す（ブランチは残す）。
+    /// ADR-0043 D2（ADR-0041 D1 の改定）: **終端では worktree を消さない**（`done` で未取り込みの
+    /// 差分を見るために残す）。ブランチも残る。
     #[tokio::test]
-    async fn a_clean_worktree_is_removed_at_the_terminal_state_and_the_branch_stays() {
+    async fn a_worktree_survives_the_terminal_state_together_with_its_branch() {
         let repo_dir = tempfile::tempdir().unwrap();
         init_test_repo(repo_dir.path());
         let root = tempfile::tempdir().unwrap();
@@ -8094,16 +8363,16 @@ mod tests {
         let adapter = Arc::new(RecordingAdapter { seen, files: vec![] });
         let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
         run_until_idle(&mut d, 60).await;
-        // 終端に達した次の tick で片付ける。
+        // 終端に達した次の tick で「片付け」が回っても消えない。
         d.tick().unwrap();
 
         let task_dir = root.path().join(task.id.to_string());
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
-        assert!(!task_dir.join("tree").exists(), "クリーンな worktree は消える");
+        assert!(task_dir.join("tree").is_dir(), "ADR-0043 D2: 終端では消さない");
         assert!(task_dir.join("artifacts").is_dir(), "成果物は残る");
         assert!(
-            git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/taskd/{}", task.id)]),
-            "ブランチは消さない"
+            git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/celeris/{}", task.id)]),
+            "ブランチも残る"
         );
         let events = store.events_for(task.id).unwrap();
         assert!(
@@ -8112,7 +8381,44 @@ mod tests {
         );
     }
 
-    /// ADR-0041 D1: 未コミットの変更が残っていれば worktree を残し、`WorkerProgress` を 1 行積む。
+    /// ADR-0043 D2: **中止**（cancel）されたタスクの worktree とブランチは消える。
+    #[tokio::test]
+    async fn cancelling_a_task_removes_its_worktree_and_branch() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        store.insert(&task).unwrap();
+        // 質問で止まる run（`blocked`）にして、終端になる前に人が中止できるようにする。
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Question { text: "どちらで進めますか".into() },
+            delay: Duration::ZERO,
+        });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        run_until_idle(&mut d, 60).await;
+        let task_dir = root.path().join(task.id.to_string());
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Blocked);
+        assert!(task_dir.join("tree").is_dir());
+        // 未コミットの変更があっても cancel は消す（人の指示なので）。
+        std::fs::write(task_dir.join("tree/wip.txt"), b"x").unwrap();
+
+        // 人が GUI / CLI から中止する（`task-ops::gate::cancel` と同じ遷移）。
+        store
+            .apply_transition(task.id, task_core::Trigger::Cancel, None)
+            .unwrap();
+        d.tick().unwrap();
+
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Cancelled);
+        assert!(!task_dir.join("tree").exists(), "中止したら worktree は消える");
+        assert!(task_dir.join("artifacts").is_dir(), "run の記録と成果物は残る");
+        assert!(
+            !git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/celeris/{}", task.id)]),
+            "中止したらブランチも消える"
+        );
+    }
+
+    /// ADR-0041 D1 / ADR-0043 D2: 未コミットの変更が残っていれば `WorkerProgress` を 1 行積む（worktree は残す）。
     #[tokio::test]
     async fn a_dirty_worktree_is_kept_and_a_progress_line_is_appended() {
         let repo_dir = tempfile::tempdir().unwrap();
@@ -8148,6 +8454,240 @@ mod tests {
             .filter(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.starts_with("未コミット")))
             .count();
         assert_eq!(again, 1);
+    }
+
+    // ---- ADR-0043 D2 / D4（Phase 52）: 複数のリポジトリ ----
+
+    /// 案件と `project_repos` を仕込み、その案件のタスクを返す。
+    fn project_with_repos(
+        store: &Arc<dyn TaskStore>,
+        repos: &[(&str, &std::path::Path, task_core::RepoKind)],
+    ) -> (task_core::ProjectId, Vec<task_core::ProjectRepo>) {
+        let now = OffsetDateTime::now_utc();
+        let project = task_core::Project {
+            id: task_core::ProjectId::new(),
+            title: "benchfs".into(),
+            request: "測る".into(),
+            status: task_core::ProjectStatus::Active,
+            secretary_summary: None,
+            workspace: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store.project_create(&project).unwrap();
+        let mut out = Vec::new();
+        for (i, (name, path, kind)) in repos.iter().enumerate() {
+            let repo = task_core::ProjectRepo {
+                id: task_core::RepoId::new(),
+                project_id: project.id,
+                name: (*name).to_string(),
+                kind: *kind,
+                location: WorkspaceSpec::local(*path),
+                default_branch: None,
+                sync: None,
+                run: task_core::RepoRun::Auto,
+                is_primary: i == 0,
+                created_at: now,
+            };
+            store.repo_create(&repo).unwrap();
+            out.push(store.repo_get(repo.id).unwrap().unwrap());
+        }
+        (project.id, out)
+    }
+
+    /// ADR-0043 D2: git 2 つ + `dir` 1 つのタスクは、`repos/<name>/` に worktree 2 つと
+    /// シンボリックリンク 1 つを持ち、cwd は**先頭のリポジトリ**になる。前置きには全部が並ぶ。
+    #[tokio::test]
+    async fn a_task_with_several_repos_gets_one_worktree_per_git_repo_and_a_link_for_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        let code = root.path().join("benchfs");
+        let paper = root.path().join("benchfs-paper");
+        init_test_repo(&code);
+        init_test_repo(&paper);
+        let data = root.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("one.csv"), b"1\n").unwrap();
+
+        let ws_root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let (project_id, repos) = project_with_repos(
+            &store,
+            &[
+                ("benchfs", code.as_path(), task_core::RepoKind::Git),
+                ("benchfs-paper", paper.as_path(), task_core::RepoKind::Git),
+                ("data", data.as_path(), task_core::RepoKind::Dir),
+            ],
+        );
+        // 先頭が cwd になる（`repos[0]`）。
+        let mut task = new_task(&code, Check::Command { cmd: "test -f in-tree".into(), expect_exit: 0 }, 0);
+        task.project_id = Some(project_id);
+        task.repos = repos.iter().map(task_core::RepoRef::of).collect();
+        store.insert(&task).unwrap();
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec!["in-tree".into()] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, ws_root.path(), None);
+        // 前置き（`run_extras`）は dispatch の前に組める。
+        let workspaces = d.task_workspaces_for(&task).expect("workspaces");
+        assert_eq!(workspaces.repos.len(), 3);
+        let note = d.run_extras(&task, Some(&workspaces)).unwrap().workspace_note.expect("note");
+        for name in ["benchfs", "benchfs-paper", "data"] {
+            assert!(note.contains(&format!("- `{name}` →")), "{note}");
+        }
+        assert!(note.contains("ディレクトリ。読み書き可。git ではない"), "{note}");
+        assert!(note.contains(&format!("ブランチ `celeris/{}`", task.id)), "{note}");
+
+        run_until_idle(&mut d, 60).await;
+
+        let task_dir = ws_root.path().join(task.id.to_string());
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        // git のリポジトリは worktree。
+        for name in ["benchfs", "benchfs-paper"] {
+            let dir = task_dir.join("repos").join(name);
+            assert!(dir.join(".git").exists(), "{name} は worktree");
+            assert!(dir.join("README.md").is_file());
+        }
+        // `dir` はシンボリックリンク（コピーしない）。
+        let link = task_dir.join("repos").join("data");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(link.join("one.csv").is_file());
+        // cwd は先頭のリポジトリ。`runs/` と `artifacts/` は作業ツリーの外。
+        let (cwd, workspace, artifacts) = seen.lock().unwrap()[0].clone();
+        assert_eq!(cwd, task_dir.join("repos/benchfs").canonicalize().unwrap());
+        assert_eq!(workspace, task_dir.canonicalize().unwrap());
+        assert_eq!(artifacts, task_dir.canonicalize().unwrap().join("artifacts"));
+        assert!(task_dir.join("runs").is_dir());
+        // 判定コマンドも先頭の worktree で走った（`test -f in-tree` が通っている）。
+        assert!(task_dir.join("repos/benchfs/in-tree").is_file());
+
+        // 目印（`worktree.json`）に全部が並ぶ（ファイル閲覧 API がこれを見る）。
+        let marker = task_ops::workspace::read_marker(&task_dir).expect("marker");
+        assert_eq!(marker.repos.len(), 3);
+        assert_eq!(marker.repos[0].name, "benchfs");
+        assert_eq!(marker.repos[0].kind, "git");
+        assert_eq!(marker.repos[2].kind, "dir");
+        assert_eq!(marker.dir, marker.repos[0].dir, "先頭の写しが Phase 49 の目印になる");
+        assert_eq!(
+            task_ops::workspace::local_dir(&store.get(task.id).unwrap().unwrap(), ws_root.path()),
+            task_dir
+        );
+    }
+
+    /// ADR-0043 D3 / D4: `[commands] setup` が落ちたら run を始めず、既存の質問の経路で `blocked` にする。
+    #[tokio::test]
+    async fn a_failing_setup_blocks_the_task_with_a_question_instead_of_starting_the_run() {
+        let root = tempfile::tempdir().unwrap();
+        let code = root.path().join("benchfs");
+        init_test_repo(&code);
+        std::fs::create_dir_all(code.join(".config/celeris")).unwrap();
+        std::fs::write(
+            code.join(".config/celeris/workspace.toml"),
+            b"[commands]\nsetup = [\"exit 3\"]\n",
+        )
+        .unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "setup"]] {
+            let out = std::process::Command::new("git").arg("-C").arg(&code).args(&args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+
+        let ws_root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let (project_id, repos) =
+            project_with_repos(&store, &[("benchfs", code.as_path(), task_core::RepoKind::Git)]);
+        let mut task = new_task(&code, Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        task.project_id = Some(project_id);
+        task.repos = repos.iter().map(task_core::RepoRef::of).collect();
+        store.insert(&task).unwrap();
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, ws_root.path(), None);
+        run_until_idle(&mut d, 60).await;
+
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Blocked);
+        assert!(seen.lock().unwrap().is_empty(), "ワーカーは起こさない");
+        let task_dir = ws_root.path().join(task.id.to_string());
+        let log = std::fs::read_to_string(task_dir.join("runs/setup.log")).expect("setup.log");
+        assert!(log.contains("$ (benchfs) exit 3"), "{log}");
+        let events = store.events_for(task.id).unwrap();
+        let question = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::WorkerFinished { outcome, .. } if outcome.starts_with("question:") => Some(outcome.clone()),
+                _ => None,
+            })
+            .expect("question outcome");
+        assert!(question.contains("setup が失敗しました"), "{question}");
+        assert!(question.contains("workspace.toml"), "{question}");
+    }
+
+    /// ADR-0043 D4: リポジトリの `[commands] check` は、タスクが検査コマンドを書いていないときだけ
+    /// レビューの暗黙の条件になる（書いていればタスクの方が勝つ）。
+    #[tokio::test]
+    async fn the_repository_check_commands_are_the_reviewers_default() {
+        let root = tempfile::tempdir().unwrap();
+        let code = root.path().join("benchfs");
+        init_test_repo(&code);
+        std::fs::create_dir_all(code.join(".config/celeris")).unwrap();
+        std::fs::write(
+            code.join(".config/celeris/workspace.toml"),
+            b"[commands]\ncheck = [\"test -f in-tree\"]\n",
+        )
+        .unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "check"]] {
+            let out = std::process::Command::new("git").arg("-C").arg(&code).args(&args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+
+        let ws_root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let (project_id, repos) =
+            project_with_repos(&store, &[("benchfs", code.as_path(), task_core::RepoKind::Git)]);
+        // 受け入れ条件に `Check::Command` が無い → リポジトリの `check` が暗黙の条件として足される。
+        let mut task = new_task(&code, Check::ArtifactExists { name: "missing.json".into() }, 0);
+        task.project_id = Some(project_id);
+        task.repos = repos.iter().map(task_core::RepoRef::of).collect();
+        store.insert(&task).unwrap();
+        // 自分で検査コマンドを書いたタスクには足さない（明示が勝つ）。
+        let mut explicit = new_task(&code, Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        explicit.project_id = Some(project_id);
+        explicit.repos = task.repos.clone();
+        store.insert(&explicit).unwrap();
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        // ワーカーが cwd に `in-tree` を置くので、リポジトリの `check` は通る。
+        let adapter = Arc::new(RecordingAdapter { seen, files: vec!["in-tree".into()] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, ws_root.path(), None);
+        assert_eq!(d.default_checks(&store.get(task.id).unwrap().unwrap()), vec!["test -f in-tree".to_string()]);
+        run_until_idle(&mut d, 60).await;
+
+        let verdicts = |id: TaskId| -> Vec<(usize, bool, String)> {
+            store
+                .events_for(id)
+                .unwrap()
+                .iter()
+                .filter_map(|(_, e)| match e {
+                    Event::ReviewVerdict { criterion_idx, pass, reason, .. } => {
+                        Some((*criterion_idx, *pass, reason.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        // 条件 0（`artifact_exists`）は落ち、暗黙の条件 1（リポジトリの `check`）は通る。
+        let mine = verdicts(task.id);
+        assert_eq!(mine.len(), 2, "{mine:?}");
+        assert_eq!(mine[0].0, 0);
+        assert!(!mine[0].1, "{mine:?}");
+        assert_eq!(mine[1].0, 1);
+        assert!(mine[1].1, "{mine:?}");
+        assert!(mine[1].2.contains("workspace.toml check"), "{mine:?}");
+
+        // 自分で検査コマンドを書いたタスクには暗黙の条件は足されない。
+        let theirs = verdicts(explicit.id);
+        assert_eq!(theirs.len(), 1, "{theirs:?}");
+        assert!(theirs[0].1, "{theirs:?}");
+        assert_eq!(store.get(explicit.id).unwrap().unwrap().status, Status::Done);
     }
 
     /// ADR-0041 D1: `mode = "shared"` は従来どおり `path` をそのまま作業ディレクトリにする。
@@ -8225,7 +8765,7 @@ mod tests {
         let extras = d.run_extras(&parent, None).unwrap();
         let mut branches: Vec<String> = extras.children.iter().filter_map(|c| c.branch.clone()).collect();
         branches.sort();
-        let mut expected: Vec<String> = children.iter().map(|c| format!("taskd/{}", c.id)).collect();
+        let mut expected: Vec<String> = children.iter().map(|c| format!("celeris/{}", c.id)).collect();
         expected.sort();
         assert_eq!(branches, expected, "子ごとに別のブランチ");
         // 子の worktree は互いに別のディレクトリ（親の作業ツリーも共有しない）。

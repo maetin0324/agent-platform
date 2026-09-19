@@ -1,6 +1,16 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-19 Phase 52（ADR-0043 A1、ワークスペース）— **追加のみ。v1 のまま**。案件が「リポジトリ」を
+  複数持てるようになった（`project_repos`）: エンドポイント 57〜60（`GET|POST /projects/{id}/repos`、
+  `PATCH|DELETE /repos/{id}`）、`ProjectDetail.repos[]`、`POST /tasks` の `repos`（名前の配列）、
+  `Task.repos[]`（`{repo_id, name}`）。タスクの作業ツリーが GUI から読めるようになった:
+  エンドポイント 61〜62（`GET /tasks/{id}/tree`、`GET /tasks/{id}/tree/file`。読み取り。トークン不要）。
+  **`Project.workspace` は primary のリポジトリの `location` の写し**（GUI の後方互換。従来どおり読める）。
+  DB のスキーマ版数は 12（migration 0012: `project_repos` と `tasks.repos_json`）。
+  worktree のブランチ接頭辞の既定が `taskd/` → **`celeris/`**、`workspace_root` の既定が
+  **`~/.local/celeris/workspaces`** に変わった（ADR-0042 D3。どちらも `taskd.toml` で変えられる）。
+  worktree は**終端では消えなくなり**、**中止（`POST /tasks/{id}/cancel`）で worktree とブランチが消える**（ADR-0043 D2）
 - 改訂: 2026-09-19 Phase 51（ADR-0041 D5）— **型は変わらない**。`mode = "verify"` のプロセスに限り、
   `GET /config` の `roles[]` / `genres[]` / `providers[]` に組み込みの `smoke`（`adapter = "fake"`）が
   1 つずつ増え、`reviewer` が `{adapter: "fake", tier: "standard"}` になる（`Config::apply_verify_smoke`。
@@ -152,7 +162,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（56）
+## 2. エンドポイント一覧（62）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -212,6 +222,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 54 | POST | `/milestones/{id}/decide` | 途中目標の判定（`ok` / `discuss` / `ng`。ADR-0038 D2、Phase 41）（**管理系**） | 202 `MilestoneDecided` | `task_ops::milestone_review::decide` |
 | 55 | GET | `/releases` | リリース一覧・検証状態・`current`/`previous`・引き継ぎの進行（ADR-0040 D6、Phase 48） | `Releases` | `[selfdeploy] releases_dir` のファイル + store `instance_list` |
 | 56 | POST | `/releases/{sha12}/promote` | そのリリースへ昇格する（`promote.sh` を起こして 202）（**管理系: `token_file` 未設定でも 401**） | 202 `ReleasePromoteAccepted` | taskd（`<release>/scripts/promote.sh` を detached で起動） |
+| 57 | GET | `/projects/{id}/repos` | その案件のリポジトリ（primary が先頭。ADR-0043 D1、Phase 52） | `RepoList` | store `repo_list` |
+| 58 | POST | `/projects/{id}/repos` | リポジトリを足す（**管理系: `token_file` 未設定でも 401**） | 201 `ProjectRepo` | store `repo_create` |
+| 59 | PATCH | `/repos/{id}` | リポジトリを変える（名前・場所・`run`・primary。**管理系**） | 200 `ProjectRepo` | store `repo_update` |
+| 60 | DELETE | `/repos/{id}` | リポジトリを消す。未終端のタスクが使っていたら 409（**管理系**） | 204 | store `repo_delete` |
+| 61 | GET | `/tasks/{id}/tree` | タスクの作業ツリーの一覧（ADR-0043 D6） | `TreeView` | `worktree.json` + ファイル |
+| 62 | GET | `/tasks/{id}/tree/file` | そのファイルの本文（テキスト 512 KiB まで） | `TreeFileView` | ファイル |
 
 ---
 
@@ -339,6 +355,14 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
   - `genre` が `[[genres]]` に無い（`[[genres]]` が空でない設定に限る）→ `unknown genre: "<genre>"`
   - `genre` と `role` を両方指定し、`role` がその分野の `roles` に無い（`[[genres]]` が空でない設定に限る）→ `role "<role>" is not one of genre "<genre>"'s roles`
 - 検証に失敗したら何も挿入しない。
+- **`repos` は Phase 52 から任意**（ADR-0043 D2）。そのタスクが使う案件のリポジトリを**名前で**並べる
+  （`"repos": ["benchfs", "benchfs-paper"]`。名前は `GET /projects/{id}/repos` の `name`）。
+  省略すると **親のタスクの `repos` → 案件の primary** を継ぐ。`repos[0]` がワーカーの
+  カレントディレクトリになる。422 `validation` になるのは次の 3 つ:
+  - `project_id` を書かずに `repos` を書いた → `repos can only be used on a task that belongs to a project`
+  - その案件に無い名前 → `task repo "<name>" is not one of this project's repositories`
+  - リモートのリポジトリを他と混ぜた → `a task cannot mix a remote repository with other repositories yet (ADR-0043 D2)`
+  応答の `Task.repos[]` は `{"repo_id": "01J…", "name": "benchfs"}` の配列（空なら省略される）。
 
 ### 3.5 `GET /tasks/{id}` → 200 `TaskDetail`
 
@@ -913,6 +937,12 @@ SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validat
   コードを扱う案件では、GUI から必ず入れてもらうのがよい（入れないと子タスクは空の作業ディレクトリに置かれ、
   ワーカーが自分で `ssh` してリポジトリを探しに行く。実機の事故 2026-09-18）。
 
+**Phase 52（ADR-0043 D1）**: 案件は**リポジトリを複数持てる**ようになった（3.68〜3.71）。
+`POST /projects {workspace}` と `PATCH /projects {workspace}` は従来どおり使え、**primary のリポジトリを
+作る／書き換える**（`"workspace": null` は primary を消す。未終端のタスクが使っていれば 409 `repo_in_use`）。
+`Project.workspace` は primary の `location` の写しなので、従来の GUI はそのまま動く。
+`GET /projects/{id}` の応答には `repos[]`（primary が先頭）が増えた。
+
 **Phase 49（ADR-0041 D1）**: `kind = "local"` は任意で `mode` を持てる（`"worktree"` | `"shared"`、**既定
 `"worktree"`**）。知らない値は 400 `bad_request`（本文の解析で落ちる）。`remote` にこのキーは無い。
 
@@ -1431,6 +1461,95 @@ stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid �
 
 ---
 
+### 3.68〜3.71 案件のリポジトリ（ADR-0043 D1、Phase 52。**57〜60。変更系はすべて管理系: `token_file` 未設定でも 401**）
+
+案件は**リポジトリを複数持つ**（論文の `benchfs-paper` とコードの `benchfs`、git ではないデータの置き場）。
+`is_primary` の 1 件が「主なリポジトリ」で、**`Project.workspace` はその `location` の写し**である
+（GUI の後方互換。`PATCH /projects {workspace}` は primary を書き換える）。
+
+#### 3.68 `GET /projects/{id}/repos` → 200 `RepoList`
+
+- 読み取り（トークン不要）。並びは **primary が先頭**、あとは作った順
+- 知らない案件は 404 `project_not_found`
+
+#### 3.69 `POST /projects/{id}/repos` → 201 `ProjectRepo`
+
+```json
+{
+  "name": "benchfs",
+  "kind": "git",
+  "location": {"kind": "local", "path": "~/workspace/rust/benchfs"},
+  "default_branch": "main",
+  "run": "auto",
+  "is_primary": true
+}
+```
+
+- `location` だけが必須。`name` を省略するとパスの末尾から slug を作る（`benchfs`）。
+  `kind` を省略すると `<path>/.git` があれば `git`、無ければ `dir`（リモートは `git`）
+- `location.kind = "local"` の `path` の `~` は taskd の `$HOME` で展開して保存する（ADR-0039 D5）。
+  `remote` の `cluster` が `[[clusters]]` に無ければ 422 `validation`
+- `name` は案件内で一意の slug（`[a-z0-9._-]`、1〜64 文字、先頭が `.` / `-` でないこと）。
+  重複・不正な名前は 422。`<workspace_root>/<task_id>/repos/<name>/` というディレクトリ名になるため
+- **案件の最初の 1 件は自動的に `is_primary = true`** になる（案件に主なリポジトリが無い状態を作らない）。
+  `is_primary: true` を立てると、同じ案件の他の行の `is_primary` は落ちる
+- `sync` は `location.kind = "remote"` のときだけ（`worktree`〈既定〉 / `rsync` / `none`）。
+  **`sync: "none"` は 422**（ADR-0043 D7 のリモート (b) は未実装）
+- `run` は `auto`（既定。`workspace.toml` の `[run] mode` に従う）/ `host` / `container`。
+  **`container` はこの Phase では読むだけで、実行には使われない**（ADR-0043 A3）
+
+#### 3.70 `PATCH /repos/{id}` → 200 `ProjectRepo`
+
+- 書いたものだけ変える（1 つも書かなければ 422）。`default_branch` / `sync` は `null` を明示すると消える
+- `is_primary: true` でこの行が primary になる（`false` は何もしない。primary を空にはできない）
+- `kind` を `dir` にすると `default_branch` は落ちる。`location` を `local` にすると `sync` は落ちる
+- 知らない id は 404 `repo_not_found`
+
+#### 3.71 `DELETE /repos/{id}` → 204
+
+- **未終端（`done` / `failed` / `cancelled` 以外）のタスクがそのリポジトリを使っていたら 409 `repo_in_use`**
+- primary を消したら、残りのうち一番古いものが primary になる
+
+### 3.72〜3.73 タスクの作業ツリーの閲覧（ADR-0043 D6、Phase 52。**読み取り。トークン不要**）
+
+タスクの作業場所は `<workspace_root>/<task_id>/repos/<name>/`（git は worktree、`dir` は実体への
+シンボリックリンク）。`<workspace_root>/<task_id>/worktree.json` がその目印で、この 2 つの
+エンドポイントはそれだけを見る（git は起こさない）。
+
+#### 3.72 `GET /tasks/{id}/tree?repo=&path=` → 200 `TreeView`
+
+- `repo` を省略すると**先頭のリポジトリ**（= ワーカーのカレントディレクトリ）。そのタスクに無い名前は 404
+- `path` はそのリポジトリの作業ツリーからの**相対パス**（省略・空は根）。
+  `..` を含むもの・絶対パスは **403 `path_forbidden`**。解決した実体が作業ツリーの外に出るもの
+  （シンボリックリンクでの脱出）も 403
+- 作業ツリーを持たないタスク（`worktree.json` が無い）は 404 `file_not_found`
+- `entries` はディレクトリが先、あとは名前順（決定的）。`kind` は `dir` / `file` / `other`
+
+```json
+{
+  "repo": "benchfs",
+  "path": "src",
+  "repos": [
+    {"name": "benchfs", "kind": "git", "dir": "/home/u/.local/celeris/workspaces/01J.../repos/benchfs",
+     "branch": "celeris/01J...", "base": "9602b596826c..."},
+    {"name": "data", "kind": "dir", "dir": "/home/u/.local/celeris/workspaces/01J.../repos/data"}
+  ],
+  "entries": [
+    {"name": "bin", "path": "src/bin", "kind": "dir"},
+    {"name": "lib.rs", "path": "src/lib.rs", "kind": "file", "size": 1234}
+  ]
+}
+```
+
+#### 3.73 `GET /tasks/{id}/tree/file?repo=&path=` → 200 `TreeFileView`
+
+- `path` は必須（省略は 400 `bad_request`）。境界の規則は 3.72 と同じ
+- ディレクトリを指したら 403 `path_forbidden`
+- **テキストで 512 KiB 以下のときだけ `text` を返す**。超えたら `too_large: true`（`text` なし）、
+  バイナリ（NUL を含む・UTF-8 でない）は `binary: true`（`text` なし）。どちらも `size` は返す
+
+---
+
 ## 4. SSE `GET /stream`
 
 ```
@@ -1543,7 +1662,8 @@ data: {"reason":"cursor_too_old","cursor":20000}
 | `task-core`（Phase 9a、実装済み。`genres` は Phase 16） | `EventRow { id: u64, task_id: TaskId, seq: u64, ts: String, event: Event }`、`ListFilter { statuses, kinds, genres, parent_id, root_only, text_contains }`、`ListOrder { Dispatch, UpdatedDesc, CreatedDesc }`、`Page<T> { items, next_cursor, total }`、`SCHEMA_VERSION` | `events_since` / `list_page` / `count_by_status` の型。`EventRow` は `docs/api/v1/event.schema.json` のルート |
 | `task-ops`（Phase 9a、実装済み） | `add::{NewTaskSpec, CriterionSpec, create_task}`、`plan::{NewPlanSpec, create_plan}`、`gate::{TransitionResult, approve, reject, answer, cancel}`、`replay::{ReplayReport, ReplayMismatch, replay}`、`derive::{ReviewNote, AnswerNote, …}`、`OpsError` | 9b で `Deserialize` / `Serialize` / `JsonSchema` を付ける（`NewTaskSpec` / `NewPlanSpec` は `deny_unknown_fields` + `#[serde(default)]`、`CriterionSpec` は `tag = "type"`、`ReplayMismatch.field` は `&'static str` のまま文字列に出る） |
 | `task-ops`（Phase 9b で追加） | `TaskRef`, `TaskSummary`, `TaskList`, `TaskDetail`, `Timers`, `CriterionView`, `VerdictView`, `RunSummary`, `RunFiles`, `RunOutcomeKind`, `ApprovalLink`, `ApprovalDecisionView`, `Action`, `Inbox`, `InboxCounts`, `ApprovalItem`, `EvidenceView`, `QuestionItem`, `DraftGroup`, `AttentionItem`, `Graph`, `GraphNode`, `GraphEdge`, `DelegatedView`（Phase 10）, `TransitionResult.cascaded`, `DaemonSnapshot`, `InFlight`, `InFlightKind`, `CooldownView`, `ProviderLive`, `AccountLive`（Phase 13、`adapter: String` を Phase 14 で追加）, `AccountUsageLive`, `AccountCooldownLive`（Phase 13） | ビュー型。全て `JsonSchema`。`DaemonSnapshot` は task-dispatch が作り task-api が読むので、両者が依存する task-ops に置く（ADR-0013 D3/D4 の依存方向を満たす）。`CooldownView` は `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直した写し |
-| `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `RoleConfigView`（Phase 10）, `GenreConfigView`（Phase 16）, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema` | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
+| `task-core`（Phase 52、ADR-0043 D1/D2） | `ProjectRepo`, `RepoId`, `RepoKind`, `RepoRun`, `RepoSync`, `RepoRef`、`Task.repos: Vec<RepoRef>` | 案件のリポジトリ（`project_repos`）と、タスクが使うリポジトリ。`Task.repos` は空なら省略される（従来の応答と 1 バイトも変わらない） |
+| `task-api`（Phase 9b） | `Health`, `DbInfo`, `Problem`, `ValidationError`, `DecisionBody`, `AnswerBody`, `CancelBody`, `EventsPage`, `RunList`, `ArtifactList`, `ArtifactView`, `Providers`, `ProviderView`, `ProviderStats`, `DailyUsage`, `DaemonView`, `ConfigView`, `ReviewerConfigView`, `ProviderConfigView`, `RoleConfigView`（Phase 10）, `GenreConfigView`（Phase 16）, `ApiConfigView`, `StreamHello`, `StreamHeartbeat`, `StreamReset`, `ApiV1Schema`、`RepoList`, `RepoCreateBody`, `RepoPatchBody`, `TreeView`, `TreeRepoView`, `TreeEntry`, `TreeFileView`（Phase 52、ADR-0043 D1/D6） | HTTP の要求・応答の包み。`POST /tasks` / `POST /plans` の本文は task-ops の `NewTaskSpec` / `NewPlanSpec` そのもの |
 | `task-api`（Phase 13、ADR-0024） | `AccountList`, `AccountView`, `AccountUsageView`, `RateWindowView`, `AccountCooldownView`, `AccountStats`, `AccountCreateBody`, `AccountCheckResponse`, `AccountLoginStart`, `AccountLoginCodeBody`, `AccountLoginResult` | `GET/POST /accounts`・`DELETE /accounts/{id}`・`POST /accounts/{id}/check`・`POST`/`DELETE /accounts/{id}/login`・`POST /accounts/{id}/login/code` の要求・応答。Phase 14（ADR-0025）で `AccountList.roots: HashMap<String, Option<String>>`、`AccountView.adapter: String`、`AccountCreateBody.adapter: String`（既定 `"claude-code"`）、`AccountLoginStart.kind: String`（`"paste_code"` \| `"device_code"`）と `user_code: Option<String>` を追加（すべて既存フィールドはそのまま。追加のみ） |
 | `task-api`（Phase 20、ADR-0030） | `SecretList`, `SecretView`, `SecretUse`, `SecretPutBody`, `SecretPutResult` | `GET/PUT/DELETE /secrets...` の要求・応答（値は一切含まない）。`used_by: Vec<SecretUse>` は稼働中の設定（`[adapters.*].env_from_secrets` と `[[providers]].env_from_secrets`）から taskd が導く |
 
@@ -1825,7 +1945,41 @@ pub struct ProjectList { pub items: Vec<Project> /* created_at 降順 */ }
 pub struct ProjectCreateBody { pub title: String, pub request: String }
 #[serde(deny_unknown_fields)]
 pub struct ProjectPatchBody { pub status: ProjectStatus }
-pub struct ProjectDetail { pub project: Project, pub milestones: Vec<MilestoneView>, pub tasks: Vec<ProjectTaskView> }
+pub struct ProjectDetail { pub project: Project,
+    // Phase 52（ADR-0043 D1）: この案件のリポジトリ（primary が先頭）。project.workspace は primary の location の写し。
+    #[serde(default)] pub repos: Vec<ProjectRepo>,
+    pub milestones: Vec<MilestoneView>, pub tasks: Vec<ProjectTaskView> }
+
+// ---- Phase 52（ADR-0043 D1 / D6）: 案件のリポジトリと、タスクの作業ツリーの閲覧 ----
+pub struct ProjectRepo { pub id: RepoId /* ULID */, pub project_id: ProjectId, pub name: String,
+    pub kind: RepoKind /* git|dir */, pub location: WorkspaceSpec /* local{path} | remote{cluster,path} */,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub default_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub sync: Option<RepoSync> /* worktree|rsync|none。remote のみ */,
+    #[serde(default)] pub run: RepoRun /* auto|host|container。既定 auto */,
+    #[serde(default)] pub is_primary: bool, pub created_at: String /* RFC 3339 */ }
+pub struct RepoRef { pub repo_id: RepoId, pub name: String }   // Task.repos[] の 1 件
+pub struct RepoList { pub items: Vec<ProjectRepo> }            // primary が先頭
+#[serde(deny_unknown_fields)]
+pub struct RepoCreateBody { #[serde(default)] pub name: Option<String>, #[serde(default)] pub kind: Option<RepoKind>,
+    pub location: WorkspaceSpec, #[serde(default)] pub default_branch: Option<String>,
+    #[serde(default)] pub sync: Option<RepoSync>, #[serde(default)] pub run: Option<RepoRun>,
+    #[serde(default)] pub is_primary: bool }
+#[serde(deny_unknown_fields)]
+pub struct RepoPatchBody { /* 書いた項目だけ変える */
+    #[serde(default)] pub name: Option<String>, #[serde(default)] pub kind: Option<RepoKind>,
+    #[serde(default)] pub location: Option<WorkspaceSpec>,
+    #[serde(default, deserialize_with = "double_option")] pub default_branch: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")] pub sync: Option<Option<RepoSync>>,
+    #[serde(default)] pub run: Option<RepoRun>, #[serde(default)] pub is_primary: Option<bool> }
+pub struct TreeView { pub repo: String, pub path: String /* 作業ツリー相対。根は "" */,
+    pub repos: Vec<TreeRepoView>, pub entries: Vec<TreeEntry> }
+pub struct TreeRepoView { pub name: String, pub kind: String /* git|dir */, pub dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub base: Option<String> }
+pub struct TreeEntry { pub name: String, pub path: String, pub kind: String /* dir|file|other */,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub size: Option<u64> }
+pub struct TreeFileView { pub repo: String, pub path: String, pub size: u64, pub binary: bool, pub too_large: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub text: Option<String> }
 pub struct MilestoneView { #[serde(flatten)] pub milestone: Milestone, // Milestone のフィールドは平らに出る
     #[serde(default, skip_serializing_if = "Option::is_none")] pub review: Option<MilestoneReviewView>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub proposal: Option<Milestone> }

@@ -1,6 +1,8 @@
+import { useId, useState } from "react";
 import { data, isRouteErrorResponse, Link, redirect, useFetcher } from "react-router";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { RepoFields } from "~/components/RepoFields";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -26,6 +28,7 @@ import type { CreateFailure } from "~/taskd/action-types";
 import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { createProject, readProjectCreateInput } from "~/taskd/projects-admin.server";
+import { createRepo, readExtraRepoCreateBodies } from "~/taskd/repos-admin.server";
 import type { Clusters, ClusterView, Project, ProjectDetail, ProjectList, ProjectStatus } from "~/taskd/types";
 import type { Route } from "./+types/projects";
 
@@ -83,12 +86,35 @@ export function meta(_: Route.MetaArgs) {
   return [{ title: "案件 - taskd-gui" }];
 }
 
-/** `POST /projects`。成功したら詳細へ移る（`/tasks/new` と同じ作り）。 */
+/**
+ * 作成の失敗（`CreateFailure`）に、**案件だけは作れた**ときの id を添えたもの（ADR-0043 D1、Phase G16）。
+ * 「追加のリポジトリ」は案件を作ってから 1 行ずつ `POST /projects/{id}/repos` するので、案件が 201 の
+ * あとにリポジトリで 422 / 409 になることがある。そのときは案件へのリンクを添えて taskd の文言を出す。
+ */
+export interface ProjectCreateFailure extends CreateFailure {
+  projectId?: string;
+}
+
+/**
+ * `POST /projects`。成功したら詳細へ移る（`/tasks/new` と同じ作り）。
+ * 従来の単一の `workspace` フォームはそのまま（`readProjectCreateInput`）。ADR-0043 D1 の
+ * 「追加のリポジトリ」がある場合だけ、201 のあとに `POST /projects/{id}/repos` を行ごとに送る
+ * （`POST /projects` は 1 つの作業場所しか受けないため。docs/taskd-api-v1.md §3.46 / §3.69）。
+ */
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
-  const result = await createProject(getTaskdClient(), readProjectCreateInput(form), request.signal);
-  if (result.ok) return redirect(`/projects/${result.project.id}`);
-  return data(result satisfies CreateFailure, { status: result.error.status });
+  const client = getTaskdClient();
+  const result = await createProject(client, readProjectCreateInput(form), request.signal);
+  if (!result.ok) return data(result satisfies CreateFailure, { status: result.error.status });
+  for (const body of readExtraRepoCreateBodies(form)) {
+    const added = await createRepo(client, result.project.id, body, request.signal);
+    if (!added.ok) {
+      return data({ ok: false, error: added.error, projectId: result.project.id } satisfies ProjectCreateFailure, {
+        status: added.error.status,
+      });
+    }
+  }
+  return redirect(`/projects/${result.project.id}`);
 }
 
 const PROJECT_STATUS_TONE: Record<ProjectStatus, Tone> = {
@@ -102,7 +128,7 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
   const { rows, clusters } = loaderData;
   // 失敗（422 等）が SSE の再検証で消えないよう fetcher に載せる（Phase G13f-1、監査 H1）。
   // 成功したら action が `redirect` を返し、fetcher でもそのまま詳細へ移る。
-  const fetcher = useFetcher<CreateFailure>();
+  const fetcher = useFetcher<ProjectCreateFailure>();
   const submitting = fetcher.state !== "idle";
   const result = fetcher.data;
   const error = result && !result.ok ? result.error : undefined;
@@ -186,6 +212,17 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
               。そちらは本文だけ書けば、先頭 40 字が題名になります。
             </p>
             <ErrorFlash error={error} />
+            {/* 案件は作れたが「追加のリポジトリ」で失敗した場合（ADR-0043 D1、Phase G16）。
+                案件そのものは残っているので、続きは案件の画面でやってもらう。 */}
+            {result?.projectId && (
+              <p className="my-2 text-sm text-fg-muted" data-testid="project-new-partial">
+                案件は作成されました（
+                <Link to={`/projects/${result.projectId}`} className="underline underline-offset-2">
+                  案件を開く
+                </Link>
+                ）。リポジトリの追加は案件の画面で続けてください。
+              </p>
+            )}
             <fetcher.Form method="post" data-testid="project-new-form" className="space-y-4">
               <div>
                 <label htmlFor="project-title" className={labelClass}>
@@ -220,6 +257,7 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
                 <FieldErrors error={error} field="request" />
               </div>
               <WorkspaceFields idPrefix="project-new-workspace" clusters={clusters} error={error} />
+              <ExtraRepoRows clusters={clusters} error={error} />
               <Button type="submit" variant="primary" disabled={submitting} data-testid="project-new-submit">
                 <Icon name="send" />
                 投げる
@@ -228,6 +266,69 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
           </CardBody>
         </Card>
       </section>
+    </div>
+  );
+}
+
+/**
+ * 「追加のリポジトリ」（ADR-0043 D1、docs/taskd-api-v1.md §3.69。Phase G16）。
+ * 上の `WorkspaceFields`（従来どおりの単一の `workspace`）が**主なリポジトリ**になり、ここに足した行は
+ * 案件を作ったあとに 1 行ずつ `POST /projects/{id}/repos` される（読み手は `readExtraRepoCreateBodies`）。
+ * 行を足しただけでパスを書かなかったものは送られない。既定では 1 行も出さない（従来の画面と同じ見た目）。
+ */
+function ExtraRepoRows({
+  clusters,
+  error,
+}: {
+  clusters: readonly ClusterView[];
+  error: CreateFailure["error"] | undefined;
+}) {
+  const baseId = useId();
+  const [rowIds, setRowIds] = useState<number[]>([]);
+  const [nextId, setNextId] = useState(0);
+
+  return (
+    <div className="space-y-3" data-testid="project-new-extra-repos">
+      {rowIds.map((rowId, index) => (
+        <div key={rowId} className="rounded-lg border border-border bg-surface-2/40 p-3" data-testid="extra-repo-row">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className={labelClass}>追加のリポジトリ {index + 1}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              data-testid="extra-repo-remove"
+              onClick={() => setRowIds((ids) => ids.filter((id) => id !== rowId))}
+            >
+              <Icon name="x" />
+              この行を消す
+            </Button>
+          </div>
+          <RepoFields
+            idPrefix={`${baseId}-extra-repo-${rowId}`}
+            namePrefix="extra_repo"
+            clusters={clusters}
+            error={error}
+          />
+        </div>
+      ))}
+      <Button
+        type="button"
+        variant="secondary"
+        size="sm"
+        data-testid="project-new-extra-repo-add"
+        onClick={() => {
+          setRowIds((ids) => [...ids, nextId]);
+          setNextId((n) => n + 1);
+        }}
+      >
+        <Icon name="plus" />
+        追加のリポジトリ
+      </Button>
+      <p className={hintClass}>
+        論文とコードのように、1
+        つの案件で複数のリポジトリを使うときに足してください。上の「作業場所」が主なリポジトリになります。
+      </p>
     </div>
   );
 }

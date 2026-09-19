@@ -87,6 +87,7 @@ model = "fake"
     fn add_ready_task(&self, title: &str, dir: &Path, checks: Vec<Check>, depends_on: Vec<TaskId>, max_retries: u32) -> TaskId {
         let now = OffsetDateTime::now_utc();
         let task = Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
@@ -317,6 +318,7 @@ fn expired_lease_is_reclaimed_and_task_completes() {
     // 前世代の taskd が落ちた状態を再現: running + 期限切れリース。
     let now = OffsetDateTime::now_utc();
     let task = Task {
+        repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
         kind: TaskKind::Execute,

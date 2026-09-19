@@ -218,6 +218,14 @@ pub struct Task {
     pub priority: i32,
     pub worker_hint: WorkerHint,
     pub workspace: WorkspaceSpec,
+    // ---- ADR-0043 D2（Phase 52）: このタスクが使う案件のリポジトリ ----
+    /// ADR-0043 D2: このタスクが使う案件のリポジトリ（`project_repos`）。空なら継承の規則
+    /// （明示 > 親 > 案件の primary）で決まった結果が空だった、または案件にリポジトリが無い
+    /// （純粋な調査などコードを伴わないタスク）。`repos[0]` がワーカーのカレントディレクトリになる。
+    /// 導入前のタスクには無いので既定は空（従来どおり `workspace` 1 つで動く）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<crate::repos::RepoRef>,
+    // ---- ここまで ADR-0043 D2 ----
     pub budget: Budget,
     pub attempts: u32,
     pub lease: Option<Lease>,

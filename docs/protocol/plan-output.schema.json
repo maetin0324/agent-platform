@@ -124,6 +124,13 @@
         "objective": {
           "type": "string"
         },
+        "repos": {
+          "description": "ADR-0043 D2: この子が使う案件のリポジトリを**名前で**指定する（例 `[\"benchfs\", \"benchfs-paper\"]`）。\n書かなければ **親 → 案件の primary** を継ぐ。前置きの「この案件のリポジトリ」に出ていない名前を\n書くと、その計画は差し戻される（`PlanError::UnknownRepo`）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "role": {
           "description": "ADR-0016 D1 / M10: 子の役割名（任意）。",
           "type": [

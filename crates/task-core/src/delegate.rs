@@ -250,10 +250,14 @@ pub struct ChildSpec<'a> {
 /// `$HOME` も無し）なら Phase 42 までと同じ挙動（子は親の workspace を継ぐ）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkspaceContext<'a> {
-    /// その子が属する案件の作業場所（`projects.workspace`）。決めていない案件では `None`。
+    /// その子が属する案件の作業場所（`projects.workspace` = primary のリポジトリの写し）。
+    /// 決めていない案件では `None`。
     pub project: Option<&'a WorkspaceSpec>,
     /// `~` の展開に使う `$HOME`（ADR-0039 D5。`Local` のパスにだけ効く）。
     pub home: Option<&'a std::path::Path>,
+    /// ADR-0043 D1 / D2: その案件のリポジトリ（primary が先頭。`repo_list` の順）。
+    /// 子の `repos` の継承（明示 > 親 > 案件の primary）に使う。
+    pub repos: &'a [crate::repos::ProjectRepo],
 }
 
 impl WorkspaceContext<'_> {
@@ -265,6 +269,29 @@ impl WorkspaceContext<'_> {
             Some(spec) => spec.with_home_expanded(self.home),
             None => parent.workspace.clone(),
         }
+    }
+
+    /// ADR-0043 D2: 子 1 件が使うリポジトリ: **明示（名前）> 親 > 案件の primary**。
+    /// 知らない名前は無視する（検証は `validate`（計画）と API（`POST /tasks`）が先に済ませる）。
+    pub fn child_repos(&self, parent: &Task, explicit: &[String]) -> Vec<crate::repos::RepoRef> {
+        if !explicit.is_empty() {
+            let picked: Vec<crate::repos::RepoRef> = explicit
+                .iter()
+                .filter_map(|name| self.repos.iter().find(|r| r.name == name.trim()))
+                .map(crate::repos::RepoRef::of)
+                .collect();
+            if !picked.is_empty() {
+                return picked;
+            }
+        }
+        if !parent.repos.is_empty() {
+            return parent.repos.clone();
+        }
+        self.repos
+            .iter()
+            .find(|r| r.is_primary)
+            .map(|r| vec![crate::repos::RepoRef::of(r)])
+            .unwrap_or_default()
     }
 }
 
@@ -401,6 +428,8 @@ pub fn materialize_delegated(
                 },
                 // ADR-0039 D2: 明示 > 案件の workspace > 親の workspace（従来）。
                 workspace: workspace.child_workspace(parent, t.workspace.as_ref()),
+                // ADR-0043 D2: 委譲の子は親のリポジトリを継ぐ（親が持たなければ案件の primary）。
+                repos: workspace.child_repos(parent, &[]),
                 budget,
                 attempts: 0,
                 lease: None,
@@ -449,6 +478,7 @@ mod tests {
     fn parent() -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
@@ -803,7 +833,7 @@ mod tests {
         assert_eq!(out[0].workspace, p.workspace);
 
         // 2. 案件の作業場所 > 親。
-        let ws = WorkspaceContext { project: Some(&project), home: None };
+        let ws = WorkspaceContext { repos: &[], project: Some(&project), home: None };
         let out = materialize_delegated(&p, &[dt("a", vec![])], &[0], &[], &[], &[], ws, now);
         assert_eq!(out[0].workspace, project);
 
@@ -814,7 +844,7 @@ mod tests {
         assert_eq!(out[0].workspace, explicit);
 
         // 4. 案件が Remote なら子も Remote（ADR-0018 の写し + `.taskd/remote-exec` 経路に乗る）。
-        let ws = WorkspaceContext { project: Some(&explicit), home: None };
+        let ws = WorkspaceContext { repos: &[], project: Some(&explicit), home: None };
         let out = materialize_delegated(&p, &[dt("c", vec![])], &[0], &[], &[], &[], ws, now);
         assert_eq!(out[0].workspace, explicit);
     }

@@ -14,6 +14,7 @@ import type {
   OrgNode,
   Project,
   ProjectPlanAccepted,
+  ProjectRepo,
   ProviderCheckResponse,
   ProviderConfigView1,
   ReleasePromoteAccepted,
@@ -163,6 +164,11 @@ export type ProjectOpOutcome =
   // 途中目標の判定（`POST /milestones/{id}/decide`。**管理系**、202。ADR-0038 D2、docs/taskd-api-v1.md §3.63、
   // Phase 41 / G13j）。`ok` / `discuss` / `ng` のどれでも同じ形（`decided.decision` を見て画面が出し分ける）。
   | { ok: true; op: "milestone_decide"; decided: MilestoneDecided }
+  // 案件のリポジトリ（ADR-0043 D1、docs/taskd-api-v1.md §3.68〜3.71。Phase 52 / G16）。
+  // 変更系は**管理系**（`token_file` 未設定でも 401）。`repo_primary` は `PATCH /repos/{id}` の
+  // `is_primary: true` で、他の行の付け替えは taskd が行う（GUI は再計算しない）。
+  | { ok: true; op: "repo_create" | "repo_patch" | "repo_primary"; repo: ProjectRepo }
+  | { ok: true; op: "repo_delete"; repoId: string }
   | {
       ok: false;
       op:
@@ -171,7 +177,11 @@ export type ProjectOpOutcome =
         | "milestone_create"
         | "milestone_status"
         | "project_plan"
-        | "milestone_decide";
+        | "milestone_decide"
+        | "repo_create"
+        | "repo_patch"
+        | "repo_primary"
+        | "repo_delete";
       error: ActionError;
     };
 

@@ -148,6 +148,136 @@ pub fn worktree_note(repo: &std::path::Path, dir: &std::path::Path, branch: &str
     )
 }
 
+/// ADR-0043 D2 / D8: 前置きの「作業場所」に出すリポジトリ 1 件（純粋なデータ。ディスパッチャが組む）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoNote {
+    /// 案件の中での名前（`project_repos.name`）。
+    pub name: String,
+    /// タスクの作業場所の中での相対パス（`repos/<name>/`）。
+    pub dir: String,
+    /// git の worktree か（偽なら「ディレクトリ。読み書き可。git ではない」）。
+    pub git: bool,
+    /// worktree のブランチ（git のときだけ）。
+    pub branch: Option<String>,
+    /// base の短縮 sha（git のときだけ）。
+    pub base: Option<String>,
+    /// base をどこから取ったか（`main` / `current` / `head`。git のときだけ）。
+    pub base_kind: Option<String>,
+    /// `workspace.toml` の `[workspace] description`（無ければ出さない）。
+    pub description: Option<String>,
+    /// `workspace.toml` の `[commands] check`（無ければ出さない）。
+    pub check: Vec<String>,
+    /// `workspace.toml` の `[outputs] docs`（既定 `docs`）。
+    pub docs: String,
+    /// `workspace.toml` の `[outputs] deliverables`（既定 `.`）。
+    pub deliverables: String,
+}
+
+/// ADR-0043 D2 / D8: タスクが複数のリポジトリを持つときの「作業場所」の本文（純粋関数）。
+/// ディスパッチャが ADR-0039 D3 の `workspace_note` の代わりにこれを入れる。
+///
+/// 出る順は `repos` の順（先頭がカレントディレクトリ）。`repos` が空なら空文字列。
+pub fn repos_note(repos: &[RepoNote]) -> String {
+    let Some(first) = repos.first() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    out.push_str("この案件のリポジトリのうち、このタスクが使うものは次のとおり:\n");
+    for repo in repos {
+        out.push_str(&format!("- `{}` → `{}`", repo.name, repo.dir));
+        if repo.git {
+            let branch = repo.branch.as_deref().unwrap_or("");
+            let base = repo.base.as_deref().unwrap_or("");
+            let base_kind = repo.base_kind.as_deref().unwrap_or("");
+            out.push_str(&format!("（worktree、ブランチ `{branch}`、base `{base}`（{base_kind}））"));
+        } else {
+            out.push_str("（ディレクトリ。読み書き可。git ではない）");
+        }
+        if let Some(description) = repo.description.as_deref().filter(|d| !d.trim().is_empty()) {
+            out.push_str(&format!(" — {}", description.trim()));
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "カレントディレクトリは `{}`。編集はこの作業場所の中だけで行い、元のリポジトリには直接書くな。\n",
+        first.dir
+    ));
+    if repos.iter().any(|r| r.git) {
+        out.push_str(
+            "git のリポジトリでは taskd が用意したブランチにコミットせよ。`main` に直接コミットするな。\
+             `git checkout` でブランチを変えるな。\n",
+        );
+    }
+    for repo in repos.iter().filter(|r| !r.check.is_empty()) {
+        out.push_str(&format!(
+            "`{}` のこのリポジトリの検査コマンド: {}\n",
+            repo.name,
+            repo.check.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(" / ")
+        ));
+    }
+    // ADR-0043 D8: 成果物は案件のリポジトリの中。`artifacts/` は中間物だけ。
+    out.push_str(&format!(
+        "コード以外の成果物（図・表・原稿）は `{}`、文書は `{}` の下に置け。`artifacts/` は run の中間物・\
+         ログ・機械向けの `result.json` だけで、人が読む成果物を置く場所ではない。\n",
+        join_repo_path(&first.dir, &first.deliverables),
+        join_repo_path(&first.dir, &first.docs)
+    ));
+    out
+}
+
+/// ADR-0043 D2: 計画 run に渡す「この案件のリポジトリ」1 件（純粋なデータ。ディスパッチャが組む）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectRepoNote {
+    pub name: String,
+    /// `git` / `dir`。
+    pub kind: String,
+    /// 置き場（`~/workspace/benchfs` / `pegasus:/work/...`）。
+    pub location: String,
+    /// `workspace.toml` の `[workspace] description`（無ければ出さない）。
+    pub description: Option<String>,
+    /// 案件の主なリポジトリ（成果物と文書の既定の置き場）。
+    pub is_primary: bool,
+}
+
+/// ADR-0043 D2: 計画 run の前置きに出す「この案件のリポジトリ」の一覧（純粋関数）。
+/// 子タスクはこの**名前**を `repos` に書く。空なら空文字列。
+pub fn project_repos_note(repos: &[ProjectRepoNote]) -> String {
+    if repos.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("この案件のリポジトリ:\n");
+    for repo in repos {
+        out.push_str(&format!("- `{}`（{}", repo.name, repo.kind));
+        if repo.is_primary {
+            out.push_str("、主なリポジトリ");
+        }
+        out.push_str(&format!("）: {}", repo.location));
+        if let Some(description) = repo.description.as_deref().filter(|d| !d.trim().is_empty()) {
+            out.push_str(&format!(" — {}", description.trim()));
+        }
+        out.push('\n');
+    }
+    out.push_str(
+        "子タスクが使うリポジトリは `repos` に**この名前で**書く（例 `\"repos\": [\"",
+    );
+    out.push_str(&repos[0].name);
+    out.push_str(
+        "\"]`）。書かなければ主なリポジトリを継ぐ。ここに無い名前を書くと計画は差し戻される。\n",
+    );
+    out
+}
+
+/// `repos/benchfs/` と `docs` → `repos/benchfs/docs`（`.` はリポジトリのルートそのもの）。
+fn join_repo_path(dir: &str, rel: &str) -> String {
+    let base = dir.trim_end_matches('/');
+    let rel = rel.trim().trim_start_matches("./").trim_end_matches('/');
+    if rel.is_empty() || rel == "." {
+        format!("{base}/")
+    } else {
+        format!("{base}/{rel}")
+    }
+}
+
 /// 作業場所の節（ADR-0039 D3）。**案件が作業場所を決めている run にだけ**出す。
 /// 実機の事故（2026-09-18）: 空の workspace に置かれた子タスクが、自分で `ssh` してリモートの
 /// 作業ツリーに直接書いた。SPEC §3.7 追記「手元で編集してリモートで検証」をここで明示する。

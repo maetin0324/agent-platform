@@ -20,6 +20,8 @@ pub mod protocol;
 pub mod provider;
 pub mod result_report;
 pub mod subprocess;
+/// ADR-0043 D2 / D4（Phase 52）: タスクの作業場所を複数のリポジトリで組む（worktree とリンク、`setup`）。
+pub mod task_repos;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ssh;
@@ -57,6 +59,7 @@ pub use result_report::{
     read_result_report_kind, report_kind_from_result_json,
 };
 pub use subprocess::{SubprocessSpec, run_subprocess};
+pub use task_repos::{REPOS_DIR_NAME, SetupOutcome, TaskRepo, TaskWorkspaces, run_setup};
 pub use ssh::{
     SYNC_ALWAYS_EXCLUDED, SshSettings, SshWorkspace, SyncMode, WorktreeSettings, control_master_alive_blocking,
     remote_exec_instructions,

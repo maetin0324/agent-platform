@@ -13,6 +13,7 @@ use time::OffsetDateTime;
 fn task(dir: &std::path::Path) -> Task {
     let now = OffsetDateTime::now_utc();
     Task {
+        repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
         kind: TaskKind::Execute,

@@ -547,6 +547,26 @@
       "description": "案件の一意識別子（ULID）。`TaskId` と同じ形。",
       "type": "string"
     },
+    "RepoId": {
+      "description": "リポジトリの一意識別子（ULID）。`TaskId` / `ProjectId` と同じ形。",
+      "type": "string"
+    },
+    "RepoRef": {
+      "description": "タスクが使うリポジトリの参照（`tasks.repos_json` の 1 要素。ADR-0043 D2）。\n`name` も持つのは、リポジトリの行が消えた後でも前置きと GUI が名前を出せるようにするため。",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "repo_id": {
+          "$ref": "#/$defs/RepoId"
+        }
+      },
+      "required": [
+        "repo_id",
+        "name"
+      ],
+      "type": "object"
+    },
     "RunRole": {
       "description": "run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。",
       "enum": [
@@ -684,6 +704,13 @@
             }
           ],
           "description": "ADR-0033 D2: このタスクが属する案件。導入前のタスク・案件に属さないタスクには無い。"
+        },
+        "repos": {
+          "description": "ADR-0043 D2: このタスクが使う案件のリポジトリ（`project_repos`）。空なら継承の規則\n（明示 > 親 > 案件の primary）で決まった結果が空だった、または案件にリポジトリが無い\n（純粋な調査などコードを伴わないタスク）。`repos[0]` がワーカーのカレントディレクトリになる。\n導入前のタスクには無いので既定は空（従来どおり `workspace` 1 つで動く）。",
+          "items": {
+            "$ref": "#/$defs/RepoRef"
+          },
+          "type": "array"
         },
         "role": {
           "description": "ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。\n導入前のタスクには無いので任意。",

@@ -50,6 +50,15 @@
   このとき `workspace` は**作業ツリーの親**（`runs/` `inputs/` `artifacts/` の置き場）であって cwd ではない
   （作業ツリーの中に `runs/` を作ると `git status --porcelain` が常に汚れ、終端で worktree を消せなくなる）。
   `work_dir` が無ければ従来どおり `workspace` が cwd。**追加のみ**なので `protocol` は `4` のまま
+- **Phase 52（ADR-0043 D2 / D4 / D8）**: `run.task.repos`（`Task` の新しい任意フィールド。
+  `[{"repo_id":"01J…","name":"benchfs"}]`。空なら出ない）と、`plan.json` の `tasks[].repos`
+  （名前の配列。§10.1）を追加。**案件は「リポジトリ」を複数持ち**（`project_repos`）、タスクはその一部を
+  使う（明示 > 親 > 案件の primary）。タスクの作業場所は
+  `<workspace_root>/<task_id>/repos/<name>/`（git は worktree、`dir` は実体へのシンボリックリンク）で、
+  `work_dir` は **`repos[0]`**（`workspace` は従来どおりその親 = `runs/` `inputs/` `artifacts/` の置き場）。
+  `context.workspace_note` の中身が「作業ツリー 1 つ」から**リポジトリの一覧**（名前 / ブランチ / base /
+  `workspace.toml` の `description` と `check`、成果物と文書の置き場）に変わった。
+  ブランチ接頭辞の既定は `taskd/` → **`celeris/`**（ADR-0042 D3）。**追加のみ**なので `protocol` は `4` のまま
 
 ## 1. 概要
 
@@ -653,6 +662,11 @@ Reviewer（決定的コード。LLM 呼び出しはここには書かない）�
   作業場所 → 親の workspace** を継ぐので、別のリポジトリ・別のクラスタで作業させたい子にだけ書く
   （`local` の `~` は taskd の `$HOME` で展開される）。案件が作業場所を持つ計画 run のプロンプトには
   「## 子タスクの作業場所」節が出る
+- `repos`（任意。Phase 52 / ADR-0043 D2）: その子が使う案件のリポジトリを**名前で**並べた配列
+  （`["benchfs", "benchfs-paper"]`）。名前は計画 run の前置きに出る「この案件のリポジトリ」の `name`。
+  **省略時は 親 → 案件の primary** を継ぐ。`repos[0]` がその子のワーカーのカレントディレクトリになる。
+  **前置きに無い名前を書くと計画は差し戻される**（他の検証の失敗と同じ扱い。エラー文言は
+  `tasks[0].repos[1] = "nope" is not one of this project's repositories (benchfs, benchfs-paper)`）
 
 検証に失敗した場合、`Plan` タスクの `reviewing` は `ReviewFail` になり（`criterion_idx =
 task.acceptance.len()`。`taskctl plan` が作る Plan は `acceptance = []` なので常に `criterion 0`）、

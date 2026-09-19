@@ -37,6 +37,8 @@ pub fn retry_task(store: &dyn TaskStore, id: TaskId, accept: bool, now: OffsetDa
     }
 
     let new_task = Task {
+        // ADR-0043 D2: やり直しは元のタスクと同じリポジトリで作業する。
+        repos: original.repos.clone(),
         id: TaskId::new(),
         parent_id: original.parent_id,
         kind: original.kind,
@@ -85,6 +87,7 @@ mod tests {
 
     fn base_spec(title: &str) -> crate::add::NewTaskSpec {
         crate::add::NewTaskSpec {
+            repos: Vec::new(),
             title: title.to_string(),
             objective: "do it".to_string(),
             acceptance: vec![crate::add::CriterionSpec::Human { text: "looks right".to_string() }],
@@ -123,6 +126,7 @@ mod tests {
     fn raw_task(status: Status, depends_on: Vec<TaskId>, conversation: Option<MessageId>) -> Task {
         let t = now();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,

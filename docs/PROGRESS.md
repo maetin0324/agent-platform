@@ -6171,6 +6171,228 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
 
 ---
 
+## Phase 52 — ワークスペース A1: 複数リポジトリ・workspace.toml・ファイル閲覧（ADR-0043。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0043 §1 / §4 A1）: ADR-0039 / 0041 で「案件に作業場所が 1 つ、タスクごとに worktree」までは
+  来たが、(1) 論文（`benchfs-paper`）とコード（`benchfs`）のように **1 案件が複数のリポジトリを跨ぐ**、
+  (2) リポジトリごとに環境（toolchain、テストのコマンド）が違う、(3) GUI から作業ツリーの中が見えない、
+  が残っていた。A1 は D1（`project_repos`）/ D2（タスクの `repos` と複数 worktree、後片付けの改定）/
+  D4（`.config/celeris/workspace.toml`）/ D6（ファイル閲覧 API）/ D8（成果物の置き場）を入れる。
+  D3（コンテナ実行）は A3、D5（取り込み）は A2 なので**触っていない**。
+- 決めたこと（ADR に書き足していない実装判断。ADR 本文との差はここに書く）:
+  - **migration 0012 の写しは Rust でやる**（SQL では書けない）。`project_repos` の `id` は ULID で、
+    `kind` は「パスが git なら git、でなければ dir」＝ファイルシステムを見る必要がある。
+    `SqliteStore::apply_migration_version` が版 12 を当てた**直後に同じトランザクションで**
+    `backfill_project_repos` を呼ぶ（migration は 1 度しか走らないので、印は要らない）。
+    判定は `<path>/.git` の存在（ディレクトリでも worktree の gitfile でもよい。task-core から `git` を
+    起こさないため）。**リモートは `git` に倒す**（クラスタ側は taskd から見えない。ADR-0018 / 0019 の
+    リモートの作業場所は git 前提の同期をする。違えば人が `PATCH /repos/{id}`）。
+  - **`projects.workspace` 列は「書かない」のではなく primary の写しとして書き続ける**（ADR-0043 D1 は
+    「残すが書かない」と書いている）。理由は **N-1 互換**（ADR-0040 D3 の検査 5: 旧バイナリが新スキーマの
+    DB を読む）で、書くのをやめると版 11 のバイナリからは新しい案件の作業場所が消えて見える。
+    読むときは primary の `location_json` が優先（`COALESCE`）。`project_create` / `project_set_workspace` /
+    `repo_*` が `sync_project_workspace_tx` で写しを保つ。
+  - **`PATCH /projects {workspace}` は primary のリポジトリを書き換える**（従来のフォームをそのまま使える）。
+    `"workspace": null` は primary を**消す**ので、未終端のタスクが使っていれば 409 `repo_in_use`。
+  - **後片付けの場所はディスパッチャ**（ADR-0043 D2 は「中止で消す」としか書いていない）。`task-ops` は
+    `git` を起こさないし、API は「ワーカーの起動・コマンドの実行をしない」（ADR-0013）。よって
+    `task_ops::gate::cancel` は変えず、tick の掃除（Phase 49 の `cleanup_finished_worktrees` を
+    **`cleanup_cancelled_worktrees` に改名・改定**）が `Status::Cancelled` の行だけ消す。
+    **`done` / `failed` では消さない**（ADR-0043 D2。差分を見るために残す。未コミットの変更があれば
+    `WorkerProgress` を 1 行積むのは Phase 49 のまま）。
+  - **Phase 49 の 1 リポジトリの経路は残す**（`task.repos` が空なら `<task_dir>/tree`）。案件にリポジトリが
+    無い・案件に属さないタスクはそれで動く。`task_workspaces_for` が両方を `TaskWorkspaces` に畳んで返すので、
+    ディスパッチャの分岐は 1 か所だけ。
+  - **リモートのリポジトリを他と混ぜたタスクは 422**（ADR-0043 D2 の宿題。リモートは ADR-0018 / 0019 の
+    「手元の写し + rsync」をそのまま使うので、この Phase では 1 つだけのときに限る）。
+    リモート 1 つだけのタスクは従来の経路にそのまま乗る（`task_workspaces_for` が `None` を返す）。
+  - **`kind = git` でも worktree にしない場合がある**: 実体が git リポジトリでない、`location` の
+    `mode = "shared"`（ADR-0041 D1 の逃げ道）、commit が 1 つも無い。そのときは実体への
+    シンボリックリンク（`dir` と同じ扱い）。**どのリポジトリも `repos/<name>/` に必ずディレクトリができる**。
+  - **`[commands] check` をレビューの暗黙の条件にするのは、タスクの `acceptance` に `Check::Command` が
+    1 つも無いときだけ**（ADR-0043 D4 の「タスクに `acceptance` が明示されていればそれが勝つ」の解釈。
+    受け入れ条件は必ず 1 件以上あるので、「検査コマンドを自分で書いたか」で切る）。
+    `criterion_idx` は `acceptance.len()`（+ Plan / 集約の暗黙条件の分）から順に振る。
+  - **`setup` は 1 タスクにつき 1 回**。印は `<task_dir>/runs/setup.log` の有無だけ（ADR-0043 D3 の
+    「結果は `runs/setup.log`」をそのまま印に使う）。落ちたら**アダプタを起こさずに**
+    `Terminal::Question` を返す ＝ 既存の質問の経路で `blocked` + `QuestionRaised`。1 コマンドの上限は
+    1800 秒（設定キーにはしない）。
+  - **ブランチ接頭辞の既定 `celeris/` はローカルだけ**（ADR-0042 D3）。クラスタ側（ADR-0019 の
+    `WorktreeSettings::branch_prefix`）は `taskd/` のまま（既存のクラスタに残っているブランチの名前を変えない）。
+  - **`workspace_root` の既定 `~/.local/celeris/workspaces`**（ADR-0042 D3）。`~` を展開してから、
+    それでも相対なら従来どおり設定ファイル基準（`workspace_root = "workspaces"` と書いてある既存の設定は不変）。
+- 変更したファイル:
+  - `crates/task-core/migrations/0012_project_repos.sql`（新規）: `project_repos`（ADR-0043 D1 そのまま）+
+    索引 + `ALTER TABLE tasks ADD COLUMN repos_json TEXT`。写しの方針をコメントに書いた。
+  - `crates/task-core/src/repos.rs`（新規）: `RepoId` / `RepoKind` / `RepoRun` / `RepoSync` / `ProjectRepo` /
+    `RepoRef` / `RepoError`、`valid_repo_name`（`repos/<name>/` になるので境界）、`default_repo_name` /
+    `slugify_repo_name`、`validate_upsert`、`resolve_task_repos`（名前 → `RepoRef`。知らない名前と
+    リモートの混在を弾く）。単体テスト 4 件。
+  - `crates/task-core/src/workspace_config.rs`（新規）: `.config/celeris/workspace.toml` の読み取り
+    （`deny_unknown_fields`、`parse` は純粋関数、`load_or_default` が warn 用の文字列を返す）。
+    `[workspace] name/description` / `[run] mode` / `[container]` / `[commands] setup/check` /
+    `[outputs] docs/deliverables`。単体テスト 4 件。`task-core` に `toml = "0.9"` を足した。
+  - `crates/task-core/src/store.rs`: `SCHEMA_VERSION = 12`、migration 12、`backfill_project_repos`
+    （版 12 の適用と同じトランザクション）、`detect_repo_kind`、`repo_row` / `repo_*_tx` /
+    `sync_project_workspace_tx` / `repo_active_tasks_tx`、`TaskStore` に `repo_create` / `repo_get` /
+    `repo_list` / `repo_update` / `repo_delete` / `repo_set_primary` / `repo_active_tasks`、
+    `project_create` / `project_set_workspace` が primary を作る・直す・消す、`project_get` / `project_list` の
+    SELECT が primary の `location_json` を `COALESCE` で返す、`insert_tx` が `repos_json` を書く、
+    `StoreError::Repo`。テスト 4 件。
+  - `crates/task-core/src/model.rs`: `Task.repos: Vec<RepoRef>`（`workspace` の直後。空なら JSON に出ない）。
+  - `crates/task-core/src/delegate.rs`: `WorkspaceContext.repos` と `child_repos`（明示 > 親 > 案件の primary）。
+    `materialize_delegated` が子に `repos` を載せる。
+  - `crates/task-core/src/plan.rs`: `NewTask.repos: Vec<String>`（名前）、`PlanError::UnknownRepo`、
+    `validate` / `parse_and_validate` に `repos: &[String]`（案件の名前一覧）、`materialize` が
+    `child_repos` を通す。テスト 2 件。
+  - `crates/task-worker/src/task_repos.rs`（新規）: `TaskRepo` / `TaskWorkspaces`（`ensure` / `cwd` /
+    `remove_for_cancel`）、`REPOS_DIR_NAME`、`repo_display_name`、`run_setup` と `SETUP_LOG`。
+    シンボリックリンクは「同じ先なら何もしない / 別の先なら張り替える / 実体があれば触らない」。
+    単体テスト 5 件。
+  - `crates/task-worker/src/local_worktree.rs`: `DEFAULT_BRANCH_PREFIX = "celeris/"`、
+    `remove_with_branch()`（`worktree remove --force` + `branch -D`。中止のときだけ）。
+  - `crates/task-worker/src/preamble.rs`: `RepoNote` / `repos_note`（ADR-0043 D2 / D8 の作業場所の本文）、
+    `ProjectRepoNote` / `project_repos_note`（計画 run に渡す案件のリポジトリ一覧）。
+  - `crates/task-ops/src/workspace.rs`: `WorktreeMarker.repos`（`WorktreeMarkerRepo`）。`local_dir` は
+    目印に `repos` があれば `mode` に関わらず per-task ディレクトリ。テスト 1 件。
+  - `crates/task-ops/src/delegate.rs`: `project_repos(store, task)`。`WorkspaceContext` に渡す。
+  - `crates/task-ops/src/add.rs`: `NewTaskSpec.repos: Vec<String>` と `resolve_repos`
+    （明示 > 親 > 案件の primary。案件に属さないタスクの `repos` は 422）。
+  - `crates/task-ops/src/retry.rs`: やり直しは元のタスクの `repos` を引き継ぐ。
+  - `crates/task-dispatch/src/dispatcher.rs`: `task_workspaces_for`（Phase 49 の `local_worktree_for` を
+    置き換え）、`legacy_worktree_for` / `worktree_base` / `work_dir_for` / `repo_notes` /
+    `project_repo_notes` / `default_checks`、`task_workspaces`（`local_worktrees` の改名）、
+    `cleanup_cancelled_worktrees`、`worktree_marker`、`SETUP_TIMEOUT`、`run_worker` が
+    `ensure` → 目印 → `setup` →（落ちたら `Terminal::Question`）→ cwd = `repos[0]`。
+    `PlanCheck.repos` と `ReviewExtras.repo_checks` を埋める。テスト 3 件。
+  - `crates/task-dispatch/src/review.rs`: `ReviewExtras.repo_checks`（タスクに `Check::Command` が
+    1 つも無いときだけ暗黙の条件として実行）。
+  - `crates/task-api/src/repos.rs`（新規）: `GET|POST /projects/{id}/repos`、`PATCH|DELETE /repos/{id}`。
+  - `crates/task-api/src/tree.rs`（新規）: `GET /tasks/{id}/tree`、`GET /tasks/{id}/tree/file`。
+    境界は `..` / 絶対パス / 根の外に出る解決（シンボリックリンクの脱出）を 403。`dir` のリポジトリは
+    根そのものを `canonicalize` してから比べる。`MAX_TEXT_BYTES = 512 KiB`。単体テスト 2 件。
+  - `crates/task-api/src/types.rs`: **末尾に区切りコメント付きの新しい節**（ADR-0044 B1 との衝突を避けるため）:
+    `RepoList` / `RepoCreateBody` / `RepoPatchBody` / `TreeView` / `TreeRepoView` / `TreeEntry` /
+    `TreeFileView`。`ProjectDetail.repos` も足した。
+  - `crates/task-api/src/handlers.rs` / `lib.rs` / `schema.rs` / `problem.rs`: ルートの `merge`、
+    `ProjectDetail.repos`、スキーマのルートに 5 型、`repo_in_use`（409）と `StoreError::Repo` → 422。
+  - `crates/task-api/tests/repos.rs`（新規）: 結合テスト 8 件。
+  - `crates/taskd/src/config.rs`: `workspace_root` の既定 `~/.local/celeris/workspaces`（`~` を展開）、
+    `worktree_branch_prefix` の既定 `celeris/`。
+  - `config/taskd.example.toml`: `workspace_root` の既定の注記と `[workspace]` の説明を改定。
+  - `.config/celeris/workspace.toml`（新規）: **このリポジトリ自身**の設定（`check` は CLAUDE.md の 2 本、
+    `outputs.docs = "docs"`、`[run] mode = "host"`）。
+  - `docs/workspace.md`（新規）: 書き方と、このリポジトリを例にした説明。
+  - `docs/gui/api.md`: 冒頭の改訂履歴、エンドポイント一覧（56 → 62）、§3.4 の `repos`、§3.47 の注記、
+    §3.68〜3.73（リポジトリとファイル閲覧）、§6.1 / §6.2 の型。`gui/docs/taskd-api-v1.md` に同期。
+  - `docs/protocol/worker-protocol.md`: 冒頭の改訂履歴と §10.1 の `repos`。
+  - `docs/api/v1/api-v1.schema.json` / `event.schema.json` / `docs/protocol/plan-output.schema.json` /
+    `worker-protocol.schema.json` を再生成（`UPDATE_SCHEMA=1`）。`gui/app/taskd/types.ts` を `pnpm gen:types` で再生成。
+  - 既存のテストは**弱めていない**。Phase 49 の 2 件だけ ADR-0043 D2 に合わせて主張を変えた:
+    `a_clean_worktree_is_removed_at_the_terminal_state_and_the_branch_stays` →
+    `a_worktree_survives_the_terminal_state_together_with_its_branch`（終端では消さない）、
+    その対として `cancelling_a_task_removes_its_worktree_and_branch` を足した。
+    ブランチ接頭辞を見るテスト（dispatcher / config）は `taskd/` → `celeris/` に直した。
+- 証拠:
+  - `cargo test --workspace` → exit 0、`grep -c "^test result: FAILED"` = **0**、**1241 passed / 2 ignored**
+    （60 個のテストバイナリ）。Phase 51 の 1207 から **+34**（今回足したテスト関数の数とちょうど一致する:
+    task-core 14〈repos 4 / workspace_config 4 / store 4 / plan 2〉/ task-ops 1 / task-worker 5 /
+    task-dispatch 4 / task-api 10〈tree の単体 2 + 結合 `tests/repos.rs` 8〉）。
+  - `cargo clippy --workspace -- -D warnings` → exit 0（`--all-targets` でも警告ゼロ）。
+  - `UPDATE_SCHEMA=1 cargo test -p task-core --lib` / `-p task-worker --lib` / `-p task-api --lib` →
+    いずれも ok。差分は `Task.repos` / `NewTask.repos` / `ProjectRepo` 系 / `Tree*` の**追加のみ**
+    （`PROTOCOL_VERSION` は 4 のまま、API は v1 のまま）。
+  - `bash scripts/sync-gui-docs.sh` → `updated gui/docs/taskd-api-v1.md`。
+    `cd gui && pnpm gen:types` → `app/taskd/types.ts` に 250 行追加（手では触っていない）。
+  - 受け入れ条件ごと:
+    - **`project_repos` と migration の写し** → `store::tests::migration_0012_copies_each_project_workspace_into_a_primary_repo`
+      （版 11 の DB に 4 案件〈git / git でないディレクトリ / 作業場所なし / remote〉を置いて開き、
+      `kind` と `name` と `is_primary` と `Project.workspace` の写しを確かめる）。
+    - **CRUD と primary の不変条件** → `store::tests::project_repos_are_created_updated_and_have_exactly_one_primary`、
+      `setting_the_project_workspace_keeps_the_primary_repo_in_step`。
+    - **409（参照中の削除）** → `store::tests::a_repo_used_by_an_unfinished_task_cannot_be_deleted` と
+      `task-api` の `a_task_picks_repos_by_name_and_blocks_their_deletion_until_it_finishes`。
+    - **repos API（CRUD / 401 / 404 / 422）** → `task-api/tests/repos.rs` の 4 件
+      （`repos_can_be_created_listed_repointed_and_deleted` / `changing_repos_needs_the_admin_token_but_reading_does_not` /
+      `invalid_repo_input_is_422_and_unknown_ids_are_404` / `mixing_a_remote_repo_with_a_local_one_is_rejected`）。
+    - **タスクの `repos` と継承** → `plan::tests::child_repos_are_explicit_then_parent_then_the_project_primary`、
+      `task-api` の `a_task_picks_repos_by_name_and_blocks_their_deletion_until_it_finishes`（`POST /tasks`）。
+    - **複数 worktree（git 2 + dir 1）と cwd と前置き** →
+      `dispatcher::tests::a_task_with_several_repos_gets_one_worktree_per_git_repo_and_a_link_for_the_rest`
+      （`repos/benchfs` と `repos/benchfs-paper` が worktree、`repos/data` がシンボリックリンク、
+      cwd = 先頭、`runs/` は外、目印に 3 件、前置きに 3 件と「ディレクトリ。読み書き可。git ではない」）と
+      `task_repos::tests::two_git_repos_and_one_directory_become_two_worktrees_and_a_symlink`。
+    - **計画の `repos` の検証** → `plan::tests::a_plan_can_only_name_repositories_the_project_has`。
+    - **後片付けの改定** → `dispatcher::tests::a_worktree_survives_the_terminal_state_together_with_its_branch`
+      （`done` で残る）/ `cancelling_a_task_removes_its_worktree_and_branch`（中止で worktree もブランチも消える）/
+      `task_repos::tests::cancel_removes_every_worktree_its_branch_and_the_symlink`。
+    - **`workspace.toml` の読み取り** → `workspace_config::tests` 4 件（全節・既定・未知キーの拒否・
+      ファイル無し／壊れている）。
+    - **`setup`** → `task_repos::tests::setup_commands_run_in_the_repo_and_are_logged` /
+      `a_failing_setup_reports_the_reason`、`dispatcher::tests::a_failing_setup_blocks_the_task_with_a_question_instead_of_starting_the_run`
+      （`blocked` になり、ワーカーは 0 回起きて、`runs/setup.log` に記録が残り、
+      `WorkerFinished.outcome` が `question: setup が失敗しました …`）。
+    - **`check` の既定** → `dispatcher::tests::the_repository_check_commands_are_the_reviewers_default`
+      （検査コマンドを書いていないタスクには `criterion_idx = acceptance.len()` に暗黙の条件が増え、
+      書いたタスクには増えない）。
+    - **ファイル閲覧 API** → `task-api/tests/repos.rs` の 3 件
+      （`the_tree_lists_every_repo_of_the_task` / `the_tree_file_returns_text_and_only_the_size_for_binaries` /
+      `the_tree_refuses_to_leave_the_working_tree`）と `tree::tests` 2 件。
+    - **`workspace_root` と接頭辞の既定** → `config::tests::workspace_worktree_branch_prefix_defaults_to_celeris_slash_and_reaches_the_dispatcher`
+      と既存の `cfg.workspace_root.is_absolute()` の主張。
+  - **GUI（G16。詳細は `gui/docs/PROGRESS.md`）**: 案件画面の「リポジトリ」（一覧・追加・編集・
+    「主にする」・削除）、案件フォームの「追加のリポジトリ」（従来の単一 `workspace` のフォームは不変）、
+    タスクの作業ツリーの閲覧（`gui/app/components/task-files.tsx` と兄弟のルート `/tasks/:id/files`。
+    `tasks.$id.tsx` への変更は導線のリンク 4 行だけ。ADR-0044 B1 のタブの殻ができたら 1 行で載せ替えられる）。
+    `pnpm lint` / `typecheck` / `test` / `build` すべて exit 0、**48 ファイル / 627 テスト**（G14 の 45 / 558 から
+    3 ファイル・69 テスト増）。`pnpm gen:types` は冪等（再実行しても `app/taskd/types.ts` の md5 が変わらない）。
+    `pnpm e2e` は**走らせていない**（実 taskd とブラウザが要り、既定のポート 7700/7710 は本番が使っている）。
+  - **本番には触っていない**（`/home/rmaeda/taskd/`・動いているプロセス・7710/7700・`systemctl` のいずれも）。
+    実機の昇格（`release.sh` / `verify.sh` / `promote.sh`）はこの Phase では**走らせていない**。
+- 未解決:
+  - P52-1: **`verify.sh` の検査 5（N-1 互換）は `live_ok = false` になる**。スキーマ版数を 11 → 12 に
+    上げたので、版 11 のバイナリは版 12 の DB を `SchemaTooNew` で開けない（ADR-0013 D5 の設計どおり）。
+    ADR-0040 D3 のとおり、このリリースの昇格は**ライブ引き継ぎではなく停止 → 起動**になる。
+    人が昇格するときはそれを承知で押すこと（`verify.json.ok` は 1〜4 と 6 で決まるので昇格自体は通る）。
+  - P52-2: `task_workspaces` はプロセス内の記録なので、**再起動をまたぐと中止の後片付けが走らない**
+    （Phase 49 の P49-2 と同じ制約）。再起動の後に中止されたタスクの worktree は残る。人が
+    `git -C <repo> worktree remove <dir> && git -C <repo> branch -D celeris/<task-id>` する。
+    起動時に `workspace_root/*/worktree.json` を舐める案は ADR-0043 A2（取り込み）で `changes` を
+    出すときに一緒に考えるのがよい。
+  - P52-3: **リモートのリポジトリは複数リポジトリの層に入っていない**。`task.repos` にリモートが 1 件だけの
+    ときは従来の ADR-0018 / 0019 の経路（手元の写し + rsync）にそのまま倒し、`repos/<name>/` は作らない。
+    混在は 422。A2 / A4 で決めること。
+  - P52-4: `repo_notes` / `default_checks` / `project_repo_notes` は dispatch のたびに
+    `workspace.toml` を読む（タスクあたり数ファイル）。tick ごとに数回なので実測では問題ないが、
+    `log_slow_step` に出るようならメモ化する（P49-5 と同じ話）。
+  - P52-5: ADR-0044 B1（タスク編集・コメント・ボード）を**別のエージェントが同じ時間に実装している**。
+    共有したファイルは `crates/task-core/src/model.rs`（`Task.repos` は `workspace` の直後）、
+    `crates/task-api/src/types.rs`（末尾の新しい節）、`crates/task-api/src/handlers.rs`（ルートの `merge` 2 行と
+    `ProjectDetail.repos`）、`crates/task-api/src/schema.rs`、`crates/task-api/src/problem.rs`、
+    `docs/gui/api.md`、`docs/api/v1/api-v1.schema.json`。migration は 0012（あちらは 0013）、
+    `SCHEMA_VERSION` は 12（あちらは 13）なので、**merge のときに版数と `migration_sql` の分岐を直すこと**。
+  - P52-6: `taskctl` には `repos` を渡す口が無い（`taskctl add --repo` を足していない）。CLI から
+    複数リポジトリのタスクを作りたくなったら足す。API（`POST /tasks {repos}`）と GUI では作れる。
+- 提案:
+  - P52-9: GUI から 2 つ（`gui/docs/PROGRESS.md` の G16-P1 / G16-P2。`taskd-requests.md` 行きの
+    「足りない」ではなく改善の提案）:
+    - `POST /projects` が `repos[]` を受ければ、複数リポジトリの案件を**1 回で**作れる。いまは
+      案件を作ってから `POST /projects/{id}/repos` を件数分投げるので、途中で 422 になると
+      「案件はできたがリポジトリは半分」という状態が残る（GUI はその旨と案件へのリンクを出している）。
+    - `GET /tasks/{id}/tree` の 404 `file_not_found` が「リポジトリを使わないタスク（純粋な調査）」と
+      「まだ worktree を作っていない（draft / ready）」の両方に付く。`code` を分ければ GUI が
+      言い分けられる。
+  - P52-7: `[commands] check` をレビューの暗黙の条件にする規則は、リポジトリによっては**重い**
+    （`cargo test --workspace` は 60 秒前後）。`review_timeout_secs`（既定 600）を超えるリポジトリでは
+    `timed_out` で落ちるので、`workspace.toml` 側に `check_timeout_secs` を置けるようにするか、
+    タスクの `acceptance` に書かせる運用にするかを、実機で 1 周回してから決める。
+  - P52-8: ADR-0043 D1 の「`projects.workspace` 列は残すが書かない」は、N-1 互換（ADR-0040 D3 検査 5）と
+    噛み合わない。この Phase では**写しとして書き続ける**ことにしたので、ADR 本文の D1 のその一文を
+    「primary の写しとして書き続ける（読むときは primary が優先）」に直すとよい。
+
+---
+
 ## Phase 51 — 検証に煙試験（ADR-0041 D5。2026-09-19）
 
 - 完了日: 2026-09-19

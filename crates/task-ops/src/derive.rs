@@ -406,6 +406,7 @@ mod tests {
     fn sample_task(title: &str, attempts: u32) -> Task {
         let now = time::OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,
             kind: task_core::TaskKind::Execute,

@@ -30,6 +30,8 @@ mod problem;
 pub mod milestones;
 pub mod project_plan;
 mod query;
+/// ADR-0043 D1（Phase 52）: 案件のリポジトリ（`project_repos`）の CRUD。
+pub mod repos;
 pub mod releases;
 mod reports;
 pub mod schema;
@@ -37,6 +39,8 @@ pub mod secrets;
 mod sse;
 mod state;
 mod stats;
+/// ADR-0043 D6（Phase 52）: タスクの作業ツリーの閲覧（読み取り）。
+pub mod tree;
 pub mod types;
 
 pub use approvals::{
@@ -57,6 +61,7 @@ pub use reports::{ReportDetail, ReportList, ReportsNotifiedResult, ReportsReadBo
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};
 pub use stats::classify_outcome;
+pub use tree::MAX_TEXT_BYTES;
 pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterConnectCodeBody,
     ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters, ConfigView, DaemonView, DailyUsage, DbInfo,
@@ -66,6 +71,8 @@ pub use types::{
     ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody, SecretPutResult, SecretUse, SecretView,
     StreamHeartbeat, StreamHello, StreamReset, ValidationError,
 };
+// ---- ADR-0043（Phase 52）: 案件のリポジトリとファイル閲覧 ----
+pub use types::{RepoCreateBody, RepoList, RepoPatchBody, TreeEntry, TreeFileView, TreeRepoView, TreeView};
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
 pub const API_VERSION: &str = "1";

@@ -138,7 +138,7 @@ fn has_recently_failed_compaction_task(
 /// 解決順（タスクの値 > 役割の既定 > `assignee` 由来 > 分野の既定 > 全体の既定）に任せる。
 /// `role = report-compressor` が `[[roles]]` に無い構成でも落ちない（既定が埋まらないだけ）。
 fn compaction_spec(node: &OrgNode, project_id: Option<ProjectId>, pending: &[Report]) -> NewTaskSpec {
-    NewTaskSpec {
+    NewTaskSpec { repos: Vec::new(),
         title: format!("報告のまとめ: {}", node.name),
         objective: report::compaction_objective(node, pending),
         acceptance: Vec::new(),

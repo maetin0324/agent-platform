@@ -1329,6 +1329,7 @@ async fn check_provider(
     let dir = std::env::temp_dir().join(format!("taskd-provider-check-{}", ulid::Ulid::new()));
     let now = OffsetDateTime::now_utc();
     let task = task_core::Task {
+        repos: Vec::new(),
         id: task_core::TaskId::new(),
         parent_id: None,
         kind: task_core::TaskKind::Execute,

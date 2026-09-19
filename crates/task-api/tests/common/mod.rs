@@ -284,6 +284,7 @@ pub fn new_task(kind: TaskKind, status: Status) -> Task {
     let id = TaskId::new();
     let now = OffsetDateTime::now_utc();
     Task {
+        repos: Vec::new(),
         id,
         parent_id: None,
         kind,

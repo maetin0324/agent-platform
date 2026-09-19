@@ -80,6 +80,7 @@ pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime
     };
 
     let task = Task {
+        repos: Vec::new(),
         id,
         parent_id: None,
         kind: TaskKind::Plan,

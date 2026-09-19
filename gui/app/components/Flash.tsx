@@ -273,6 +273,11 @@ const PROJECT_OP_LABEL: Record<string, string> = {
   milestone_create: "途中目標を追加",
   milestone_status: "途中目標の状態を変更",
   project_plan: "分解を秘書に頼みました",
+  // 案件のリポジトリ（ADR-0043 D1、Phase 52 / G16）。
+  repo_create: "リポジトリを追加",
+  repo_patch: "リポジトリを変更",
+  repo_primary: "主なリポジトリを変更",
+  repo_delete: "リポジトリを削除",
 };
 
 /** 途中目標の判定（`ok`/`discuss`/`ng`）ごとの文言（ADR-0038 D2/D3、Phase 41 / G13j）。 */

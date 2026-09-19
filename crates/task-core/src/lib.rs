@@ -13,8 +13,12 @@ pub mod notify;
 pub mod org;
 pub mod plan;
 pub mod report;
+/// ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ（`project_repos`）とタスクの `repos`。
+pub mod repos;
 pub mod store;
 pub mod transition;
+/// ADR-0043 D4（Phase 52）: リポジトリの中の設定 `.config/celeris/workspace.toml`。
+pub mod workspace_config;
 
 pub use accounts::{AccountAdapter, RateLimitObservation, RateWindow};
 pub use artifacts::{ARTIFACTS_DIR_NAME, SHARED_ARTIFACTS_PREFIX, artifacts_dir_for, artifacts_rel_for, owns_workspace, rel_from};
@@ -32,6 +36,11 @@ pub use model::{
     ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, HARNESS_ADAPTERS, Lease, RoleSpec, RunRole, Status,
     Task, TaskId, TaskKind, Tier, Usage, WorkerHint, WorkspaceMode, WorkspaceSpec, artifact_entry_description, artifact_entry_name,
     expand_home, home_dir,
+};
+// ---- ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ ----
+pub use repos::{
+    ProjectRepo, RepoError, RepoId, RepoKind, RepoRef, RepoRun, RepoSync, default_repo_name, resolve_task_repos,
+    valid_repo_name,
 };
 pub use notify::{
     DEFAULT_WEBHOOK_SECRET_ID, MAX_NOTIFY_ATTEMPTS, Notification, NotificationId, NotificationKind,

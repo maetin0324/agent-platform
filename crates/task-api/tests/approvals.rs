@@ -62,6 +62,7 @@ fn blocked_task_with_approval(env: &TestEnv, node_id: &str, project: Option<Proj
     let now = OffsetDateTime::now_utc();
     let id = TaskId::new();
     let task = Task {
+        repos: Vec::new(),
         id,
         parent_id: None,
         kind: TaskKind::Execute,

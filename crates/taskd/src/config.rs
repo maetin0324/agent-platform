@@ -188,9 +188,10 @@ fn default_selfdeploy_repo() -> PathBuf {
     PathBuf::from("~/workspace/agent-platform")
 }
 
-/// `[workspace]`（ADR-0041 D1）: 案件の作業場所が `kind = local` かつ `mode = "worktree"`（既定）で、
-/// その `path` が git リポジトリのとき、taskd はタスクごとに `git worktree` を切る。そのブランチ名の
-/// 接頭辞はクラスタ側（ADR-0019 の `WorktreeSettings::branch_prefix`）と同じ既定 `taskd/`。
+/// `[workspace]`（ADR-0041 D1 / ADR-0043 D2）: 案件のリポジトリが `kind = local` の git リポジトリで
+/// `mode = "worktree"`（既定）のとき、taskd はタスクごと・リポジトリごとに `git worktree` を切る。
+/// そのブランチ名の接頭辞の既定は **`celeris/`**（ADR-0042 D3。Phase 49 までは `taskd/` だった。
+/// クラスタ側〈ADR-0019 の `WorktreeSettings::branch_prefix`〉は `taskd/` のまま）。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
@@ -907,8 +908,10 @@ pub struct ProviderConfig {
 fn default_db() -> PathBuf {
     PathBuf::from("taskd.sqlite3")
 }
+/// ADR-0042 D3: タスクの足回り（worktree・成果物・run のログ）の既定の置き場。
+/// Phase 51 までは設定ファイル基準の `workspaces` だった。明示してあればそのまま使う。
 fn default_workspace_root() -> PathBuf {
-    PathBuf::from("workspaces")
+    PathBuf::from("~/.local/celeris/workspaces")
 }
 fn default_tick_ms() -> u64 {
     2000
@@ -989,6 +992,10 @@ impl Config {
         if cfg.db.is_relative() {
             cfg.db = base.join(&cfg.db);
         }
+        // ADR-0042 D3: `workspace_root` の既定は `~/.local/celeris/workspaces`。`~` を展開してから、
+        // それでも相対なら他のパス設定と同じく設定ファイルのディレクトリ基準にする
+        // （`$HOME` が無い環境や `workspace_root = "workspaces"` と書いた既存の設定は従来どおり）。
+        cfg.workspace_root = task_core::expand_home(&cfg.workspace_root, task_core::home_dir().as_deref());
         if cfg.workspace_root.is_relative() {
             cfg.workspace_root = base.join(&cfg.workspace_root);
         }
@@ -1557,7 +1564,7 @@ impl Config {
             }),
             // ADR-0033 D6: `[memory]` が無ければ記憶を読まないし書かない。
             memory_dir: self.memory.as_ref().map(|m| m.dir.clone()),
-            // ADR-0041 D1: ローカルの worktree（ADR-0019 のクラスタ側と同じ既定 `taskd/`）。
+            // ADR-0041 D1 / ADR-0042 D3: ローカルの worktree（既定 `celeris/`）。
             worktree_branch_prefix: self.workspace.worktree_branch_prefix.clone(),
             releases_dir: Some(self.selfdeploy.releases_dir.clone()),
         }
@@ -3263,18 +3270,18 @@ roles = ["lead"]
         assert_eq!(cfg.selfdeploy.repo, PathBuf::from("/srv/agent-platform"));
     }
 
-    /// ADR-0041 D1（Phase 49）: `[workspace] worktree_branch_prefix` は既定 `taskd/`（ADR-0019 の
-    /// クラスタ側と同じ値）で、`DispatchConfig` に写る。空文字列は設定エラー。
+    /// ADR-0041 D1（Phase 49）/ ADR-0042 D3（Phase 52）: `[workspace] worktree_branch_prefix` は
+    /// 既定 **`celeris/`** で、`DispatchConfig` に写る。空文字列は設定エラー。
     #[test]
-    fn workspace_worktree_branch_prefix_defaults_to_taskd_slash_and_reaches_the_dispatcher() {
+    fn workspace_worktree_branch_prefix_defaults_to_celeris_slash_and_reaches_the_dispatcher() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("taskd.toml");
-        // 節を書かなくても既定が効く（クラスタ側の `WorktreeSettings::branch_prefix` と同じ）。
+        // 節を書かなくても既定が効く。
         std::fs::write(&path, "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         let cfg = Config::load(&path).unwrap();
-        assert_eq!(cfg.workspace.worktree_branch_prefix, "taskd/");
+        assert_eq!(cfg.workspace.worktree_branch_prefix, "celeris/");
         let dispatch = cfg.dispatch_config();
-        assert_eq!(dispatch.worktree_branch_prefix, "taskd/");
+        assert_eq!(dispatch.worktree_branch_prefix, "celeris/");
         assert_eq!(dispatch.releases_dir.as_deref(), Some(dir.path().join("releases").as_path()));
 
         std::fs::write(

@@ -1,0 +1,19 @@
+# このリポジトリ（agent-platform / Celeris 本体）の作業場所の設定（ADR-0042 D2 / ADR-0043 D4）。
+# 書き方は docs/workspace.md。**書いてあることだけ**が使われる（言語やファイル構成からの推定はしない）。
+
+[workspace]
+name = "agent-platform"
+description = "Celeris（taskd / taskctl / GUI）本体。Rust のワークスペース + gui/ の Remix アプリ"
+
+[run]
+# ホスト実行のまま（コンテナ実行は ADR-0043 A3 の工事。この Phase では読むだけ）。
+mode = "host"
+
+[commands]
+# 実装者とレビュー担当が使う検査コマンド（CLAUDE.md の「各Phase完了時に必ず」と同じ 2 本）。
+# タスクに `acceptance` の検査コマンドが明示されていればそちらが勝つ。
+check = ["cargo test --workspace", "cargo clippy --workspace -- -D warnings"]
+
+[outputs]
+# 文書ページの根。図・表・原稿のような「コード以外の成果物」はリポジトリのルート基準（既定）。
+docs = "docs"

@@ -206,7 +206,7 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         .map(|s| parse_task_id(s))
         .collect::<Result<_, _>>()?;
 
-    let spec = NewTaskSpec {
+    let spec = NewTaskSpec { repos: Vec::new(),
         title: args.title,
         objective: args.objective,
         acceptance,

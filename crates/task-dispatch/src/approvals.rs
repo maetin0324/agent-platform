@@ -80,6 +80,7 @@ mod tests {
     fn task(assignee: Option<&str>, project: Option<ProjectId>) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,

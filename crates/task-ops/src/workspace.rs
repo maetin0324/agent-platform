@@ -30,7 +30,13 @@ pub fn local_dir(task: &Task, workspace_root: &Path) -> PathBuf {
     match &task.workspace {
         WorkspaceSpec::Local { path, .. } => {
             let per_task = workspace_root.join(task.id.to_string());
-            if task.workspace.local_mode() == WorkspaceMode::Worktree && per_task.join(WORKTREE_MARKER).is_file() {
+            if !per_task.join(WORKTREE_MARKER).is_file() {
+                return workspace_root.join(path);
+            }
+            // ADR-0043 D2（Phase 52）: 複数リポジトリのタスクは、リポジトリごとの `mode` に関わらず
+            // 足回りが `<workspace_root>/<task_id>/` にある（目印の `repos` が空でないのが印）。
+            let multi = read_marker(&per_task).is_some_and(|m| !m.repos.is_empty());
+            if multi || task.workspace.local_mode() == WorkspaceMode::Worktree {
                 per_task
             } else {
                 workspace_root.join(path)
@@ -40,19 +46,46 @@ pub fn local_dir(task: &Task, workspace_root: &Path) -> PathBuf {
     }
 }
 
-/// 目印に書く内容（ADR-0041 D1。人が読む・API が読む）。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// 目印に書く内容（ADR-0041 D1 / ADR-0043 D2。人が読む・API が読む）。
+///
+/// 先頭の 5 つは Phase 49 からある「1 リポジトリのときの姿」で、複数リポジトリのタスクでは
+/// **`repos[0]`（カレントディレクトリになるリポジトリ）の写し**が入る（既存の `TaskDetail.worktree` と
+/// GUI がそのまま読める）。`repos` は ADR-0043 D2 で足したリポジトリ全部の一覧。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeMarker {
-    /// 元のリポジトリ（`WorkspaceSpec::Local.path`）。
+    /// 元のリポジトリ（`WorkspaceSpec::Local.path`、または `repos[0]` の実体）。
     pub repo: String,
-    /// 作業ツリー（`<workspace_root>/<task_id>/tree`）。
+    /// 作業ツリー（`<workspace_root>/<task_id>/tree` か `.../repos/<name>`）。
     pub dir: String,
-    /// ブランチ（`<branch_prefix><task_id>`）。
+    /// ブランチ（`<branch_prefix><task_id>`）。git でなければ空。
     pub branch: String,
-    /// 切り出した base の sha（全長）。
+    /// 切り出した base の sha（全長）。git でなければ空。
     pub base: String,
-    /// base をどこから取ったか（`main` / `current` / `head`）。
+    /// base をどこから取ったか（`main` / `current` / `head`）。git でなければ空。
     pub base_kind: String,
+    /// ADR-0043 D2: このタスクが使うリポジトリ全部（順番は cwd が先頭）。
+    /// Phase 49 までの目印には無いので既定は空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<WorktreeMarkerRepo>,
+}
+
+/// 目印の `repos[]` の 1 件（ADR-0043 D2）。ファイル閲覧 API（D6）と GUI がこれを見る。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorktreeMarkerRepo {
+    /// 案件の中での名前（`project_repos.name`）。
+    pub name: String,
+    /// `git`（worktree）か `dir`（シンボリックリンク）。
+    pub kind: String,
+    /// 実体（案件のリポジトリの場所）。
+    pub source: String,
+    /// タスクの中での場所（`<workspace_root>/<task_id>/repos/<name>`）。
+    pub dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_kind: Option<String>,
 }
 
 /// 目印を書く（worktree を用意したディスパッチャが 1 回だけ。上書きしてよい）。
@@ -76,6 +109,7 @@ mod tests {
         use task_core::*;
         let now = time::OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
@@ -120,6 +154,43 @@ mod tests {
         std::fs::create_dir_all(&per_task).expect("mkdir");
         std::fs::write(per_task.join(WORKTREE_MARKER), "{}").expect("write");
         assert_eq!(local_dir(&t, root.path()), per_task);
+    }
+
+    /// ADR-0043 D2: 複数リポジトリのタスクは、`mode = shared` のリポジトリでも足回りが per-task にある
+    /// （目印の `repos` が空でないのが印）。
+    #[test]
+    fn a_multi_repo_marker_wins_over_the_shared_mode() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let t = task("/srv/repo", Some(WorkspaceMode::Shared));
+        let per_task = root.path().join(t.id.to_string());
+        std::fs::create_dir_all(&per_task).expect("mkdir");
+        let marker = WorktreeMarker {
+            repo: "/srv/repo".into(),
+            dir: per_task.join("repos/code").to_string_lossy().into_owned(),
+            branch: "celeris/x".into(),
+            base: "abc".into(),
+            base_kind: "main".into(),
+            repos: vec![WorktreeMarkerRepo {
+                name: "code".into(),
+                kind: "git".into(),
+                source: "/srv/repo".into(),
+                dir: per_task.join("repos/code").to_string_lossy().into_owned(),
+                branch: Some("celeris/x".into()),
+                base: Some("abc".into()),
+                base_kind: Some("main".into()),
+            }],
+        };
+        write_marker(&per_task, &marker).expect("write");
+        assert_eq!(local_dir(&t, root.path()), per_task);
+        // Phase 49 までの目印（`repos` 無し）も読める。
+        let old = read_marker(&per_task).expect("marker");
+        assert_eq!(old.repos.len(), 1);
+        std::fs::write(
+            per_task.join(WORKTREE_MARKER),
+            br#"{"repo":"/srv/repo","dir":"/x/tree","branch":"b","base":"s","base_kind":"main"}"#,
+        )
+        .expect("write");
+        assert_eq!(read_marker(&per_task).expect("marker").repos, Vec::new());
     }
 
     /// `mode = shared` は目印があっても従来どおり（worktree を切らないので目印も付かないが、念のため）。

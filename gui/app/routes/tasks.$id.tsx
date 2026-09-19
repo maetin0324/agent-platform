@@ -270,14 +270,27 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                 )}
               </div>
             </div>
-            <Link
-              to={`/graph?root=${task.id}`}
-              data-testid="task-graph-link"
-              className={buttonClass({ variant: "secondary", size: "sm" })}
-            >
-              <Icon name="gitBranch" />
-              DAG で見る
-            </Link>
+            <div className="flex flex-wrap items-center gap-2">
+              {/* 作業ツリー（ADR-0043 D6、Phase 52 / G16）。中身は `~/components/task-files.tsx` にあり、
+                  いまは兄弟のルート `/tasks/:id/files` に載っている（ADR-0044 B1 のタブの殻ができたら
+                  そこへ移す）。ここはその導線だけ。 */}
+              <Link
+                to={`/tasks/${task.id}/files`}
+                data-testid="task-files-link"
+                className={buttonClass({ variant: "secondary", size: "sm" })}
+              >
+                <Icon name="folder" />
+                ファイル
+              </Link>
+              <Link
+                to={`/graph?root=${task.id}`}
+                data-testid="task-graph-link"
+                className={buttonClass({ variant: "secondary", size: "sm" })}
+              >
+                <Icon name="gitBranch" />
+                DAG で見る
+              </Link>
+            </div>
           </div>
         </div>
       </section>

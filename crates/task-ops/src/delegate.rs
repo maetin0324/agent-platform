@@ -112,6 +112,15 @@ pub fn project_workspace(store: &dyn TaskStore, task: &Task) -> Result<Option<Wo
     Ok(store.project_get(project_id)?.and_then(|p| p.workspace))
 }
 
+/// ADR-0043 D1 / D2: そのタスクが属する案件のリポジトリ（primary が先頭）。案件に属さない・
+/// リポジトリを 1 つも登録していない案件では空。ストアの読み取りだけ。
+pub fn project_repos(store: &dyn TaskStore, task: &Task) -> Result<Vec<task_core::ProjectRepo>, OpsError> {
+    let Some(project_id) = task.project_id else {
+        return Ok(Vec::new());
+    };
+    Ok(store.repo_list(project_id)?)
+}
+
 /// ADR-0016 D2 / M6 / M7, ADR-0027 D1: 実行中の委譲の検証。`already_delegated_this_run` は同じ run で
 /// 既に受け入れた件数。`genres` は `genre`（分野）の解決・検証に使う（未知の `genre`、`role` と組み合わせた
 /// ときの不整合は `task_core::validate_each` が拒否する）。
@@ -234,8 +243,11 @@ pub fn plan_delegation(
     let org = store.org_list()?;
     // ADR-0039 D2: 子の作業場所は 明示 > 案件の workspace > 親（案件を引くのもストアの読み取りだけ）。
     let project = project_workspace(store, parent)?;
+    // ADR-0043 D2: 子のリポジトリは 明示 > 親 > 案件の primary。
+    let project_repos = project_repos(store, parent)?;
     let home = task_core::home_dir();
     let workspace = task_core::WorkspaceContext {
+        repos: &project_repos,
         project: project.as_ref(),
         home: home.as_deref(),
     };
@@ -280,6 +292,7 @@ mod tests {
     fn make_task(parent_id: Option<TaskId>, status: Status) -> Task {
         let t = now();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id,
             kind: TaskKind::Execute,

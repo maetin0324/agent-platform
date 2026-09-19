@@ -132,6 +132,7 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let id = TaskId::new();
         let task = Task {
+            repos: Vec::new(),
             id,
             parent_id: None,
             kind: TaskKind::Execute,

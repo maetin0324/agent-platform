@@ -143,6 +143,7 @@ mod tests {
         use crate::model::{Budget, Status, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec};
         let now = OffsetDateTime::now_utc();
         Task {
+            repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,

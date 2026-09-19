@@ -23,6 +23,8 @@ export default [
   route("tasks", "routes/tasks.tsx"),
   route("tasks/new", "routes/tasks.new.tsx"),
   route("tasks/:id", "routes/tasks.$id.tsx"),
+  // タスクの作業ツリー（ADR-0043 D6、Phase 52 / G16）。`runs/:runId` と同じ兄弟のルート
+  route("tasks/:id/files", "routes/tasks.$id.files.tsx"),
   route("tasks/:id/runs/:runId", "routes/tasks.$id.runs.$runId.tsx"),
   route("plans/new", "routes/plans.new.tsx"),
   route("daemon", "routes/daemon.tsx"),

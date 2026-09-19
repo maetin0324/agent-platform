@@ -694,6 +694,10 @@ pub struct ProjectPatchBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectDetail {
     pub project: Project,
+    /// ADR-0043 D1（Phase 52）: この案件のリポジトリ（primary が先頭）。
+    /// `project.workspace` は primary の `location` の写し（GUI の後方互換）。
+    #[serde(default)]
+    pub repos: Vec<task_core::ProjectRepo>,
     /// ADR-0038 D1 / D4（Phase 41）: 途中目標そのもの（`Milestone` の各フィールドはそのまま）に、
     /// 秘書のレビューの返事と提案された次の途中目標を添えたもの。
     pub milestones: Vec<MilestoneView>,
@@ -876,4 +880,122 @@ pub struct ReleasePromoteAccepted {
     /// スクリプト（既定。新しいコードの昇格スクリプトは、それ自身が昇格された後の次の昇格から使われる）、
     /// `"target"` = 昇格先に同梱のスクリプト（`current` に `scripts/` が無い Phase 48 以前のときだけ）。
     pub script_from: String,
+}
+
+// ============================================================================
+// ADR-0043（Phase 52）: 案件のリポジトリ（D1）とタスクのファイル閲覧（D6）
+// ここから下がこの Phase で足した型。既存の型には触っていない。
+// ============================================================================
+
+/// `GET /projects/{id}/repos` の応答（primary が先頭、あとは作った順）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RepoList {
+    pub items: Vec<task_core::ProjectRepo>,
+}
+
+/// `POST /projects/{id}/repos` の要求本文（管理系）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RepoCreateBody {
+    /// 案件の中で一意の slug。省略すると `location` のディレクトリ名から作る。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 省略すると `location` から決める（`<path>/.git` があれば `git`、無ければ `dir`。
+    /// リモートは `git`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<task_core::RepoKind>,
+    /// `{"kind":"local","path":"~/workspace/benchfs"}` か
+    /// `{"kind":"remote","cluster":"pegasus","path":"/work/.../benchfs"}`。
+    /// `Local` の `~` は taskd の `$HOME` で展開して保存する。知らない `cluster` は 422。
+    pub location: task_core::WorkspaceSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    /// remote のみ。省略は既定の `worktree`（ADR-0019 の (a)）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<task_core::RepoSync>,
+    /// 省略は `auto`（`workspace.toml` に従う。無ければ host）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<task_core::RepoRun>,
+    /// 案件の「主なリポジトリ」にする。案件の最初の 1 件は自動的に primary。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_primary: bool,
+}
+
+/// `PATCH /repos/{id}` の要求本文（管理系）。書いたものだけ変える。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RepoPatchBody {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<task_core::RepoKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<task_core::WorkspaceSpec>,
+    /// 省略なら変えない、`null` なら消す。
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<Option<String>>,
+    /// 省略なら変えない、`null` なら消す（＝既定の `worktree`）。
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub sync: Option<Option<task_core::RepoSync>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<task_core::RepoRun>,
+    /// `true` にするとこの行が案件の primary になる（他は落ちる）。`false` は何もしない
+    /// （primary を空にはできない。別の行を primary にする）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_primary: Option<bool>,
+}
+
+/// `GET /tasks/{id}/tree` の応答（ADR-0043 D6。読み取り。トークンは要らない）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TreeView {
+    /// 見ているリポジトリの名前。
+    pub repo: String,
+    /// そのリポジトリの作業ツリーからの相対パス（根は `""`）。
+    pub path: String,
+    /// このタスクが使っているリポジトリの一覧（GUI のタブ）。
+    pub repos: Vec<TreeRepoView>,
+    /// `path` の直下（ディレクトリが先、あとは名前順）。
+    pub entries: Vec<TreeEntry>,
+}
+
+/// `TreeView.repos[]` の 1 件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TreeRepoView {
+    pub name: String,
+    /// `git`（worktree）か `dir`（シンボリックリンク）。
+    pub kind: String,
+    /// タスクの中での絶対パス。
+    pub dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+/// `TreeView.entries[]` の 1 件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TreeEntry {
+    pub name: String,
+    /// リポジトリの作業ツリーからの相対パス。
+    pub path: String,
+    /// `dir` / `file` / `other`（シンボリックリンクは指す先で `dir` / `file`）。
+    pub kind: String,
+    /// ファイルのときだけ。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// `GET /tasks/{id}/tree/file` の応答（ADR-0043 D6）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TreeFileView {
+    pub repo: String,
+    pub path: String,
+    pub size: u64,
+    /// テキストとして読めなかった（NUL を含む・UTF-8 でない）。このときは `text` を返さない。
+    pub binary: bool,
+    /// 512 KiB を超えたので `text` を返していない。
+    pub too_large: bool,
+    /// 本文（テキストで 512 KiB 以下のときだけ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }

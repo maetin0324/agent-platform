@@ -3538,6 +3538,14 @@
           "default": null,
           "description": "ADR-0033 D2: このタスクが属する案件。存在しない案件はエラー。"
         },
+        "repos": {
+          "default": [],
+          "description": "ADR-0043 D2: このタスクが使う案件のリポジトリを**名前で**指定する（`project_repos.name`）。\n省略すると **親 → 案件の primary** を継ぐ。案件に無い名前は 422、リモートのリポジトリを\n他と混ぜたものも 422（`task_core::resolve_task_repos`）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "role": {
           "default": null,
           "description": "ADR-0016 D1: 役割名（自由記述）。`[[roles]]` にあれば省略値の既定と run 時の指示文が効く。",
@@ -4050,6 +4058,14 @@
         "project": {
           "$ref": "#/$defs/Project"
         },
+        "repos": {
+          "default": [],
+          "description": "ADR-0043 D1（Phase 52）: この案件のリポジトリ（primary が先頭）。\n`project.workspace` は primary の `location` の写し（GUI の後方互換）。",
+          "items": {
+            "$ref": "#/$defs/ProjectRepo"
+          },
+          "type": "array"
+        },
         "tasks": {
           "description": "仕事の木を描くのに必要な最小限だけ（詳細は `GET /tasks/{id}`）。",
           "items": {
@@ -4149,6 +4165,67 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "ProjectRepo": {
+      "description": "案件のリポジトリ 1 件（`project_repos` の 1 行。ADR-0043 D1）。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "default_branch": {
+          "description": "git のみ。無ければ検出（origin/HEAD → main → master）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/RepoId"
+        },
+        "is_primary": {
+          "default": false,
+          "description": "案件の「主なリポジトリ」。1 案件に 1 つ（成果物と文書の既定の置き場。ADR-0044 D7）。",
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/RepoKind"
+        },
+        "location": {
+          "$ref": "#/$defs/WorkspaceSpec",
+          "description": "`{\"kind\":\"local\",\"path\":\"/abs\"}` / `{\"kind\":\"remote\",\"cluster\":\"pegasus\",\"path\":\"/abs\"}`。\n`Local` の `~` は保存する前に展開する（ADR-0039 D5）。"
+        },
+        "name": {
+          "description": "案件の中で一意の slug（既定はディレクトリ名）。タスクの作業場所では\n`<workspace_root>/<task_id>/repos/<name>/` というディレクトリ名になるので、\n`valid_repo_name` を通ったものだけを受ける。",
+          "type": "string"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "run": {
+          "$ref": "#/$defs/RepoRun",
+          "default": "auto"
+        },
+        "sync": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoSync"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "remote のみ。省略は既定の `worktree`（ADR-0019 の (a)）。"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "name",
+        "kind",
+        "location",
+        "created_at"
+      ],
       "type": "object"
     },
     "ProjectStatus": {
@@ -4990,6 +5067,199 @@
         "mismatches"
       ],
       "type": "object"
+    },
+    "RepoCreateBody": {
+      "additionalProperties": false,
+      "description": "`POST /projects/{id}/repos` の要求本文（管理系）。",
+      "properties": {
+        "default_branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_primary": {
+          "description": "案件の「主なリポジトリ」にする。案件の最初の 1 件は自動的に primary。",
+          "type": "boolean"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "省略すると `location` から決める（`<path>/.git` があれば `git`、無ければ `dir`。\nリモートは `git`）。"
+        },
+        "location": {
+          "$ref": "#/$defs/WorkspaceSpec",
+          "description": "`{\"kind\":\"local\",\"path\":\"~/workspace/benchfs\"}` か\n`{\"kind\":\"remote\",\"cluster\":\"pegasus\",\"path\":\"/work/.../benchfs\"}`。\n`Local` の `~` は taskd の `$HOME` で展開して保存する。知らない `cluster` は 422。"
+        },
+        "name": {
+          "description": "案件の中で一意の slug。省略すると `location` のディレクトリ名から作る。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoRun"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "省略は `auto`（`workspace.toml` に従う。無ければ host）。"
+        },
+        "sync": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoSync"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "remote のみ。省略は既定の `worktree`（ADR-0019 の (a)）。"
+        }
+      },
+      "required": [
+        "location"
+      ],
+      "type": "object"
+    },
+    "RepoId": {
+      "description": "リポジトリの一意識別子（ULID）。`TaskId` / `ProjectId` と同じ形。",
+      "type": "string"
+    },
+    "RepoKind": {
+      "description": "リポジトリの種類（ADR-0043 D1）。`git` はタスクごとに worktree を切る。`dir` は\nシンボリックリンクで見せる（コピーしない。大きいデータを想定）。",
+      "enum": [
+        "git",
+        "dir"
+      ],
+      "type": "string"
+    },
+    "RepoList": {
+      "description": "`GET /projects/{id}/repos` の応答（primary が先頭、あとは作った順）。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ProjectRepo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "RepoPatchBody": {
+      "additionalProperties": false,
+      "description": "`PATCH /repos/{id}` の要求本文（管理系）。書いたものだけ変える。",
+      "properties": {
+        "default_branch": {
+          "description": "省略なら変えない、`null` なら消す。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_primary": {
+          "description": "`true` にするとこの行が案件の primary になる（他は落ちる）。`false` は何もしない\n（primary を空にはできない。別の行を primary にする）。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoRun"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sync": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoSync"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "省略なら変えない、`null` なら消す（＝既定の `worktree`）。"
+        }
+      },
+      "type": "object"
+    },
+    "RepoRef": {
+      "description": "タスクが使うリポジトリの参照（`tasks.repos_json` の 1 要素。ADR-0043 D2）。\n`name` も持つのは、リポジトリの行が消えた後でも前置きと GUI が名前を出せるようにするため。",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "repo_id": {
+          "$ref": "#/$defs/RepoId"
+        }
+      },
+      "required": [
+        "repo_id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "RepoRun": {
+      "description": "実行環境（ADR-0043 D1 / D3）。`auto` は `workspace.toml` の `[run] mode` に従い、無ければ `host`。\n**`container` は ADR-0043 A3 の工事**（この Phase では読むだけで、実行には使わない）。",
+      "enum": [
+        "auto",
+        "host",
+        "container"
+      ],
+      "type": "string"
+    },
+    "RepoSync": {
+      "description": "リモートのリポジトリの同期方式（ADR-0043 D1。ADR-0019 の `sync` と同じ語彙）。\n省略（`None`）は既定の `worktree`（ADR-0019 の (a)）。",
+      "enum": [
+        "worktree",
+        "rsync",
+        "none"
+      ],
+      "type": "string"
     },
     "Report": {
       "description": "1 件の報告。",
@@ -5862,6 +6132,13 @@
           ],
           "description": "ADR-0033 D2: このタスクが属する案件。導入前のタスク・案件に属さないタスクには無い。"
         },
+        "repos": {
+          "description": "ADR-0043 D2: このタスクが使う案件のリポジトリ（`project_repos`）。空なら継承の規則\n（明示 > 親 > 案件の primary）で決まった結果が空だった、または案件にリポジトリが無い\n（純粋な調査などコードを伴わないタスク）。`repos[0]` がワーカーのカレントディレクトリになる。\n導入前のタスクには無いので既定は空（従来どおり `workspace` 1 つで動く）。",
+          "items": {
+            "$ref": "#/$defs/RepoRef"
+          },
+          "type": "array"
+        },
         "role": {
           "description": "ADR-0016 D1: 役割名（自由記述。`[[roles]] id` と一致すれば既定と指示文が効く）。状態機械は見ない。\n導入前のタスクには無いので任意。",
           "type": [
@@ -6345,6 +6622,144 @@
       ],
       "type": "object"
     },
+    "TreeEntry": {
+      "description": "`TreeView.entries[]` の 1 件。",
+      "properties": {
+        "kind": {
+          "description": "`dir` / `file` / `other`（シンボリックリンクは指す先で `dir` / `file`）。",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "リポジトリの作業ツリーからの相対パス。",
+          "type": "string"
+        },
+        "size": {
+          "description": "ファイルのときだけ。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "TreeFileView": {
+      "description": "`GET /tasks/{id}/tree/file` の応答（ADR-0043 D6）。",
+      "properties": {
+        "binary": {
+          "description": "テキストとして読めなかった（NUL を含む・UTF-8 でない）。このときは `text` を返さない。",
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "description": "本文（テキストで 512 KiB 以下のときだけ）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "too_large": {
+          "description": "512 KiB を超えたので `text` を返していない。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repo",
+        "path",
+        "size",
+        "binary",
+        "too_large"
+      ],
+      "type": "object"
+    },
+    "TreeRepoView": {
+      "description": "`TreeView.repos[]` の 1 件。",
+      "properties": {
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dir": {
+          "description": "タスクの中での絶対パス。",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`git`（worktree）か `dir`（シンボリックリンク）。",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "dir"
+      ],
+      "type": "object"
+    },
+    "TreeView": {
+      "description": "`GET /tasks/{id}/tree` の応答（ADR-0043 D6。読み取り。トークンは要らない）。",
+      "properties": {
+        "entries": {
+          "description": "`path` の直下（ディレクトリが先、あとは名前順）。",
+          "items": {
+            "$ref": "#/$defs/TreeEntry"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "そのリポジトリの作業ツリーからの相対パス（根は `\"\"`）。",
+          "type": "string"
+        },
+        "repo": {
+          "description": "見ているリポジトリの名前。",
+          "type": "string"
+        },
+        "repos": {
+          "description": "このタスクが使っているリポジトリの一覧（GUI のタブ）。",
+          "items": {
+            "$ref": "#/$defs/TreeRepoView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "repo",
+        "path",
+        "repos",
+        "entries"
+      ],
+      "type": "object"
+    },
     "Usage": {
       "description": "DESIGN §5.3 の `usage`。取れない項目は省略可。",
       "properties": {
@@ -6669,6 +7084,16 @@
     "replay_report": {
       "$ref": "#/$defs/ReplayReport"
     },
+    "repo_create": {
+      "$ref": "#/$defs/RepoCreateBody"
+    },
+    "repo_list": {
+      "$ref": "#/$defs/RepoList",
+      "description": "Phase 52（ADR-0043 D1 / D6）: 案件のリポジトリと、タスクの作業ツリーの閲覧。"
+    },
+    "repo_patch": {
+      "$ref": "#/$defs/RepoPatchBody"
+    },
     "report_detail": {
       "$ref": "#/$defs/ReportDetail"
     },
@@ -6735,6 +7160,12 @@
     },
     "transition_result": {
       "$ref": "#/$defs/TransitionResult"
+    },
+    "tree": {
+      "$ref": "#/$defs/TreeView"
+    },
+    "tree_file": {
+      "$ref": "#/$defs/TreeFileView"
     }
   },
   "required": [
@@ -6802,6 +7233,11 @@
     "notify_test",
     "releases",
     "release_promote",
+    "repo_list",
+    "repo_create",
+    "repo_patch",
+    "tree",
+    "tree_file",
     "daemon",
     "config",
     "stream_hello",

@@ -1796,6 +1796,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "time",
+ "toml",
  "ulid",
 ]
 

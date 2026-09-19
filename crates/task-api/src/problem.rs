@@ -255,6 +255,11 @@ impl ApiProblem {
         Self::new(StatusCode::CONFLICT, "org_node_in_use", detail)
     }
 
+    /// ADR-0043 D1（Phase 52）: 未終端のタスクが参照しているリポジトリは消せない。
+    pub(crate) fn repo_in_use(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "repo_in_use", detail)
+    }
+
     pub(crate) fn project_not_found(id: &str) -> Self {
         Self::new(StatusCode::NOT_FOUND, "project_not_found", format!("project not found: {id}"))
     }
@@ -465,9 +470,10 @@ pub(crate) fn store_problem(err: StoreError) -> ApiProblem {
             .with_extra("kind", t.kind)
             .with_extra("trigger", t.trigger),
         StoreError::Sqlite(e) if is_busy(e) => ApiProblem::db_busy(),
-        // ADR-0033 D1: 使用中は 409、組織の検証違反は 422（`OpsError::Validation` と同じ形）。
+        // ADR-0033 D1 / ADR-0043 D1: 使用中は 409、検証違反は 422（`OpsError::Validation` と同じ形）。
+        StoreError::InUse { kind: "project repo", .. } => ApiProblem::repo_in_use(err.to_string()),
         StoreError::InUse { .. } => ApiProblem::org_node_in_use(err.to_string()),
-        StoreError::Org(_) => ApiProblem::validation(vec![ValidationError {
+        StoreError::Org(_) | StoreError::Repo(_) => ApiProblem::validation(vec![ValidationError {
             field: None,
             message: err.to_string(),
         }]),
