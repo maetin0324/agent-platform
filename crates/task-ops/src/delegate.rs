@@ -552,6 +552,8 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         let now_ts = now();
         let project = task_core::Project {
+            archived_at: None,
+            paused_from: None,
             id: task_core::ProjectId::new(),
             title: "Pluvio".into(),
             request: "PoC".into(),

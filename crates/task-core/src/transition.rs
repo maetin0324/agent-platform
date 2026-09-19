@@ -43,6 +43,12 @@ pub enum Trigger {
     /// ADR-0044 D2（Phase 53）: 終端のタスクの再開（`POST /tasks/{id}/reopen`）。
     /// `done`/`failed → ready`、attempts は 0 に戻す。`cancelled` は再開しない（worktree が無い）。
     Reopen,
+    /// ADR-0044 D6（Phase 55）: 案件の中止による連鎖。遷移は `Cancel` と同じ（非終端 → `cancelled`、
+    /// attempts 据え置き）で、`Event::Transitioned.reason` だけが `"project_cancelled"` になる
+    /// （タイムラインで「自分が止めたのか、案件ごと止まったのか」が読めるように）。
+    ProjectCancelled,
+    /// ADR-0044 D6（Phase 55）: 途中目標の中止による連鎖。理由は `"milestone_cancelled"`。
+    MilestoneCancelled,
 }
 
 impl Trigger {
@@ -68,6 +74,8 @@ impl Trigger {
             Trigger::ChildFailed => "child_failed",
             Trigger::Interrupt => "interrupt",
             Trigger::Reopen => "reopen",
+            Trigger::ProjectCancelled => "project_cancelled",
+            Trigger::MilestoneCancelled => "milestone_cancelled",
         }
     }
 
@@ -127,7 +135,11 @@ fn retry_or_fail(s: &StateView, reason: &'static str) -> Outcome {
 pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransition> {
     match t {
         // ADR-0010 D1（P-4 / P-9）: Cancel と DependencyFailed は非終端状態からのみ cancelled へ。
-        Trigger::Cancel | Trigger::DependencyFailed => {
+        // ADR-0044 D6（Phase 55）: 案件・途中目標の中止による連鎖も同じ遷移（理由だけが違う）。
+        Trigger::Cancel
+        | Trigger::DependencyFailed
+        | Trigger::ProjectCancelled
+        | Trigger::MilestoneCancelled => {
             if s.status.is_terminal() {
                 Err(invalid(s, t))
             } else {

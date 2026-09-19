@@ -112,6 +112,20 @@ describe("loadTasks", () => {
     expect(req?.url).toBe("/api/v1/tasks");
   });
 
+  // ADR-0044 D6（Phase 55 / G19）: アーカイブされた案件のタスクは taskd が既定で隠す。
+  // GUI は `?archived=1` を素通しするだけ（絞り込みを GUI で再実装しない）。
+  it("forwards archived=1 when present (ADR-0044 D6) and omits it otherwise", async () => {
+    mock.on("GET", "/api/v1/tasks", (_req, res) => {
+      sendJson(res, 200, sampleTaskList);
+    });
+
+    await loadTasks(client, createRequest("http://gui.invalid/tasks?archived=1"));
+    expect(mock.requests.at(-1)?.url).toBe("/api/v1/tasks?archived=1");
+
+    await loadTasks(client, createRequest("http://gui.invalid/tasks"));
+    expect(mock.requests.at(-1)?.url).toBe("/api/v1/tasks");
+  });
+
   it("returns the TaskList response from taskd unmodified (no added/removed fields)", async () => {
     mock.on("GET", "/api/v1/tasks", (_req, res) => {
       sendJson(res, 200, sampleTaskList);

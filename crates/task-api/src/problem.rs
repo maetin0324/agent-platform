@@ -458,6 +458,16 @@ pub(crate) fn ops_problem(store: &dyn TaskStore, err: OpsError, trigger: Option<
         OpsError::Conflict { expected, actual } => ApiProblem::new(StatusCode::CONFLICT, "conflict", detail)
             .with_extra("expected", expected)
             .with_extra("actual", actual),
+        // ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
+        OpsError::ProjectNotFound(id) => ApiProblem::project_not_found(&id.to_string()),
+        OpsError::MilestoneNotFound(id) => ApiProblem::milestone_not_found(&id.to_string()),
+        OpsError::InvalidLifecycle { .. } => {
+            let mut problem = ApiProblem::new(StatusCode::CONFLICT, "invalid_transition", detail);
+            if let Some(trigger) = trigger {
+                problem = problem.with_extra("trigger", trigger);
+            }
+            problem
+        }
         OpsError::Store(err) => store_problem(err),
     }
 }

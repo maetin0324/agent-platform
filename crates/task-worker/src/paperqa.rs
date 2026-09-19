@@ -744,7 +744,12 @@ async fn run_acquire(
     command.process_group(0);
 
     let child = match command.spawn() {
-        Ok(child) => child,
+        // ADR-0044 §5 Phase 53 追記（Phase 55）: 取得ランナーも同じ run の一族（`pqa ask` の前に
+        // 順に走るので、表の `run_id` は重ならない）。
+        Ok(child) => {
+            let _process_group = crate::process_group::ProcessGroup::register(run_id, child.id());
+            child
+        }
         Err(e) => {
             // 取得ランナーが起動できないのは設定の誤り（python のパス）だが、ここでは run を止めず
             // 0 件として先に進む（ゲートが「取得が 0 件」として人に返す）。
@@ -1022,6 +1027,8 @@ async fn run_paperqa(
     command.process_group(0);
 
     let child = command.spawn().map_err(AdapterError::Spawn)?;
+    // ADR-0044 §5 Phase 53 追記（Phase 55）: この run のプロセスグループを覚える（`kill_tree` の入口）。
+    let _process_group = crate::process_group::ProcessGroup::register(run_id, child.id());
 
     let streamed = stream_child(
         child,

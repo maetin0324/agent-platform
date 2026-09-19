@@ -24,15 +24,39 @@ import {
 } from "~/lib/artifacts";
 import { PRIORITY_LABELS } from "~/lib/board";
 import {
+  ARCHIVE_CONFIRM_LABEL,
+  ARCHIVE_LABEL,
+  ARCHIVE_ONLY_TERMINAL_HINT,
+  ARCHIVED_BADGE_LABEL,
+  CANCEL_CONFIRM_LABEL,
+  CANCEL_LABEL,
+  CANCEL_STOP_LABEL,
+  MILESTONE_PAUSED_BANNER,
+  milestoneCancelConfirmText,
   milestoneStatusLabel,
+  PAUSE_LABEL,
+  PROJECT_ARCHIVED_BANNER,
+  PROJECT_CANCELLED_BANNER,
+  PROJECT_PAUSED_BANNER,
   priorityFullLabel,
+  projectArchiveConfirmText,
+  projectCancelConfirmText,
   projectStatusLabel,
+  RESUME_LABEL,
   TASK_CATEGORIES,
   TIERS,
   taskCategoryLabel,
   taskStatusLabel,
   tierLabel,
+  UNARCHIVE_LABEL,
 } from "~/lib/labels";
+import {
+  milestoneIsPaused,
+  milestoneLifecycleButtons,
+  projectIsArchived,
+  projectIsPaused,
+  projectLifecycleButtons,
+} from "~/lib/lifecycle";
 import { milestoneDecisionValid, milestoneIsStalled } from "~/lib/milestone-review";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
@@ -43,12 +67,20 @@ import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
 import { formString } from "~/taskd/forms";
 import {
+  archiveProject,
+  cancelMilestone,
+  cancelProject,
   createMilestone,
   decideMilestone,
   patchMilestoneStatus,
   patchProjectStatus,
   patchProjectWorkspace,
+  pauseMilestone,
+  pauseProject,
+  resumeMilestone,
+  resumeProject,
   startProjectPlan,
+  unarchiveProject,
 } from "~/taskd/projects-admin.server";
 import {
   createRepo,
@@ -247,13 +279,41 @@ export async function action({ request, params }: Route.ActionArgs) {
       outcome = created.ok ? { ok: true, op: "task_create", task: created.task } : { ...created, op: "task_create" };
       break;
     }
+    // 中止・一時停止・アーカイブ（ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.91。Phase 55 / G19）。
+    // どれも本文は `{}` で、できるかどうかは taskd が決める（409 `invalid_transition` はそのまま出す）。
+    case "project_cancel":
+      outcome = await cancelProject(client, params.id, request.signal);
+      break;
+    case "project_pause":
+      outcome = await pauseProject(client, params.id, request.signal);
+      break;
+    case "project_resume":
+      outcome = await resumeProject(client, params.id, request.signal);
+      break;
+    case "project_archive":
+      outcome = await archiveProject(client, params.id, request.signal);
+      break;
+    case "project_unarchive":
+      outcome = await unarchiveProject(client, params.id, request.signal);
+      break;
+    case "milestone_cancel":
+      outcome = await cancelMilestone(client, formString(form, "milestone_id") ?? "", request.signal);
+      break;
+    case "milestone_pause":
+      outcome = await pauseMilestone(client, formString(form, "milestone_id") ?? "", request.signal);
+      break;
+    case "milestone_resume":
+      outcome = await resumeMilestone(client, formString(form, "milestone_id") ?? "", request.signal);
+      break;
     default:
       throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
   }
   return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
 }
 
-const PROJECT_STATUSES: ProjectStatus[] = ["proposed", "active", "paused", "done"];
+// 「状態を直接変える」プルダウンの選択肢。`paused` / `cancelled` は専用のボタン（ADR-0044 D6）で
+// 行う（`PATCH` では連鎖も `paused_from` も起きないので、ここには並べない）。
+const PROJECT_STATUSES: ProjectStatus[] = ["proposed", "active", "done"];
 const MILESTONE_STATUSES: MilestoneStatus[] = ["proposed", "approved", "in_progress", "reached", "redesigned"];
 
 const PROJECT_STATUS_TONE: Record<ProjectStatus, Tone> = {
@@ -261,6 +321,7 @@ const PROJECT_STATUS_TONE: Record<ProjectStatus, Tone> = {
   active: "primary",
   paused: "warning",
   done: "success",
+  cancelled: "neutral",
 };
 
 const MILESTONE_STATUS_TONE: Record<MilestoneStatus, Tone> = {
@@ -269,6 +330,8 @@ const MILESTONE_STATUS_TONE: Record<MilestoneStatus, Tone> = {
   in_progress: "warning",
   reached: "success",
   redesigned: "teal",
+  paused: "warning",
+  cancelled: "neutral",
 };
 
 export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) {
@@ -299,11 +362,49 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         }
         description="案件は組織の上から入り、分解されて下へ流れます。その依存関係が「仕事の木」です。"
         actions={
-          <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status">
-            {projectStatusLabel(project.status)}
-          </Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status">
+              {projectStatusLabel(project.status)}
+            </Badge>
+            {/* ADR-0044 D6（Phase 55 / G19）: 一時停止・中止・アーカイブは題名の横でも分かるようにする
+                （状態のバッジと重なるが、アーカイブは `status` に出ないので別に要る）。 */}
+            {projectIsPaused(project) && (
+              <Badge tone="warning" data-testid="project-paused-badge">
+                {PAUSE_LABEL}
+              </Badge>
+            )}
+            {project.status === "cancelled" && (
+              <Badge tone="neutral" data-testid="project-cancelled-badge">
+                {CANCEL_LABEL}
+              </Badge>
+            )}
+            {projectIsArchived(project) && (
+              <Badge tone="neutral" data-testid="project-archived-badge">
+                {ARCHIVED_BADGE_LABEL}
+              </Badge>
+            )}
+          </div>
         }
       />
+
+      <ProjectLifecycleActions project={project} />
+
+      {/* 止まっている案件は、押しても新しい仕事が始まらないことを画面の上で必ず言う（ADR-0044 D6）。 */}
+      {projectIsPaused(project) && (
+        <Alert tone="warning" data-testid="project-paused-banner">
+          {PROJECT_PAUSED_BANNER}
+        </Alert>
+      )}
+      {project.status === "cancelled" && (
+        <Alert tone="warning" data-testid="project-cancelled-banner">
+          {PROJECT_CANCELLED_BANNER}
+        </Alert>
+      )}
+      {projectIsArchived(project) && (
+        <Alert tone="info" data-testid="project-archived-banner">
+          {PROJECT_ARCHIVED_BANNER}
+        </Alert>
+      )}
 
       <ProjectActionFlash outcome={fetcher.data} />
 
@@ -462,6 +563,9 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                         </Badge>
                       </div>
                       {m.description && <p className="text-sm text-fg-muted">{m.description}</p>}
+
+                      {/* ADR-0044 D6（Phase 55 / G19）: 一時停止・再開・中止（確認付き）。 */}
+                      <MilestoneLifecycleActions milestone={m} />
 
                       {/* ADR-0038 D3（Phase 41 / G13j）: 秘書のレビューの返事が付いたら、まとめ・提案・
                           ok / 議論 / ng のカードを出す。`reached` / `redesigned` は判定済みなので
@@ -703,6 +807,193 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           <ArtifactsList rows={artifactRows} fetchedAt={fetchedAt} />
         )}
       </section>
+    </div>
+  );
+}
+
+/**
+ * 案件のヘッダの「一時停止／再開」「中止（確認付き）」「アーカイブ／アーカイブ解除（確認付き）」
+ * （ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.88。Phase 55 / G19）。
+ *
+ * 確認は `~/components/task-changes.tsx` の「捨てる（確認）」と同じ 2 段の fetcher フォーム
+ * （`window.confirm` ではなく画面の中に出す。テストからも押せる）。
+ * **押せるかどうかの最終判断は taskd**（409 `invalid_transition`）。ここは
+ * `~/lib/lifecycle.ts::projectLifecycleButtons` で「その状態で意味のあるボタン」だけを出すだけで、
+ * アーカイブは終端でなくても消さずに `disabled` にして理由を添える（何をすれば押せるかが分かるように）。
+ */
+function ProjectLifecycleActions({ project }: { project: ProjectDetail["project"] }) {
+  const fetcher = useFetcher<ProjectOpOutcome>({ key: `project-lifecycle-${project.id}` });
+  const busy = fetcher.state !== "idle";
+  const [confirming, setConfirming] = useState<"cancel" | "archive" | null>(null);
+  const buttons = projectLifecycleButtons(project);
+
+  return (
+    <div className="space-y-2" data-testid="project-lifecycle">
+      <div className="flex flex-wrap items-center gap-2">
+        {buttons.pause && (
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="project_pause" />
+            <Button type="submit" variant="secondary" size="sm" disabled={busy} data-testid="project-pause">
+              <Icon name="clock" />
+              {PAUSE_LABEL}
+            </Button>
+          </fetcher.Form>
+        )}
+        {buttons.resume && (
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="project_resume" />
+            <Button type="submit" variant="primary" size="sm" disabled={busy} data-testid="project-resume">
+              <Icon name="play" />
+              {RESUME_LABEL}
+            </Button>
+          </fetcher.Form>
+        )}
+        {buttons.cancel && (
+          <Button
+            type="button"
+            variant="danger"
+            size="sm"
+            disabled={busy}
+            onClick={() => setConfirming("cancel")}
+            data-testid="project-cancel"
+          >
+            <Icon name="ban" />
+            {CANCEL_LABEL}
+          </Button>
+        )}
+        {buttons.archive && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={busy || !buttons.archiveEnabled}
+            title={buttons.archiveEnabled ? undefined : ARCHIVE_ONLY_TERMINAL_HINT}
+            onClick={() => setConfirming("archive")}
+            data-testid="project-archive"
+          >
+            <Icon name="folder" />
+            {ARCHIVE_LABEL}
+          </Button>
+        )}
+        {buttons.unarchive && (
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="project_unarchive" />
+            <Button type="submit" variant="secondary" size="sm" disabled={busy} data-testid="project-unarchive">
+              <Icon name="rotate" />
+              {UNARCHIVE_LABEL}
+            </Button>
+          </fetcher.Form>
+        )}
+      </div>
+      {buttons.archive && !buttons.archiveEnabled && (
+        <p className={hintClass} data-testid="project-archive-hint">
+          {ARCHIVE_ONLY_TERMINAL_HINT}
+        </p>
+      )}
+      {confirming === "cancel" && (
+        <Alert tone="danger" data-testid="project-cancel-confirm">
+          <p>{projectCancelConfirmText(project.title)}</p>
+          <fetcher.Form method="post" className="flex flex-wrap items-center gap-2 pt-1">
+            <input type="hidden" name="intent" value="project_cancel" />
+            <Button type="submit" variant="danger" size="sm" disabled={busy} data-testid="project-cancel-submit">
+              <Icon name="ban" />
+              {CANCEL_CONFIRM_LABEL}
+            </Button>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setConfirming(null)}>
+              {CANCEL_STOP_LABEL}
+            </Button>
+          </fetcher.Form>
+        </Alert>
+      )}
+      {confirming === "archive" && (
+        <Alert tone="info" data-testid="project-archive-confirm">
+          <p>{projectArchiveConfirmText(project.title)}</p>
+          <fetcher.Form method="post" className="flex flex-wrap items-center gap-2 pt-1">
+            <input type="hidden" name="intent" value="project_archive" />
+            <Button type="submit" variant="secondary" size="sm" disabled={busy} data-testid="project-archive-submit">
+              <Icon name="folder" />
+              {ARCHIVE_CONFIRM_LABEL}
+            </Button>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setConfirming(null)}>
+              {CANCEL_STOP_LABEL}
+            </Button>
+          </fetcher.Form>
+        </Alert>
+      )}
+      <ProjectActionFlash outcome={fetcher.data} />
+    </div>
+  );
+}
+
+/**
+ * 途中目標のカードの「一時停止／再開」「中止（確認付き）」（ADR-0044 D6、§3.89〜3.91。Phase 55 / G19）。
+ * 案件の状態は変わらない（途中目標だけ）。中止すると、この途中目標に属する非終端タスクが連鎖で中止される。
+ */
+function MilestoneLifecycleActions({ milestone }: { milestone: MilestoneView }) {
+  const fetcher = useFetcher<ProjectOpOutcome>({ key: `milestone-lifecycle-${milestone.id}` });
+  const busy = fetcher.state !== "idle";
+  const [confirming, setConfirming] = useState(false);
+  const buttons = milestoneLifecycleButtons(milestone);
+
+  return (
+    <div className="space-y-2" data-testid="milestone-lifecycle" data-milestone-id={milestone.id}>
+      {milestoneIsPaused(milestone) && (
+        <Alert tone="warning" data-testid="milestone-paused-banner">
+          {MILESTONE_PAUSED_BANNER}
+        </Alert>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {buttons.pause && (
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="milestone_pause" />
+            <input type="hidden" name="milestone_id" value={milestone.id} />
+            <Button type="submit" variant="ghost" size="xs" disabled={busy} data-testid="milestone-pause">
+              <Icon name="clock" />
+              {PAUSE_LABEL}
+            </Button>
+          </fetcher.Form>
+        )}
+        {buttons.resume && (
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="milestone_resume" />
+            <input type="hidden" name="milestone_id" value={milestone.id} />
+            <Button type="submit" variant="soft" size="xs" disabled={busy} data-testid="milestone-resume">
+              <Icon name="play" />
+              {RESUME_LABEL}
+            </Button>
+          </fetcher.Form>
+        )}
+        {buttons.cancel && (
+          <Button
+            type="button"
+            variant="danger"
+            size="xs"
+            disabled={busy}
+            onClick={() => setConfirming(true)}
+            data-testid="milestone-cancel"
+          >
+            <Icon name="ban" />
+            {CANCEL_LABEL}
+          </Button>
+        )}
+      </div>
+      {confirming && (
+        <Alert tone="danger" data-testid="milestone-cancel-confirm">
+          <p>{milestoneCancelConfirmText(milestone.title)}</p>
+          <fetcher.Form method="post" className="flex flex-wrap items-center gap-2 pt-1">
+            <input type="hidden" name="intent" value="milestone_cancel" />
+            <input type="hidden" name="milestone_id" value={milestone.id} />
+            <Button type="submit" variant="danger" size="xs" disabled={busy} data-testid="milestone-cancel-submit">
+              <Icon name="ban" />
+              {CANCEL_CONFIRM_LABEL}
+            </Button>
+            <Button type="button" variant="ghost" size="xs" onClick={() => setConfirming(false)}>
+              {CANCEL_STOP_LABEL}
+            </Button>
+          </fetcher.Form>
+        </Alert>
+      )}
+      <ProjectActionFlash outcome={fetcher.data} />
     </div>
   );
 }

@@ -155,6 +155,15 @@ env = {provider_env}
         format!("listen = \"127.0.0.1:{}\"", self.port)
     }
 
+    /// ADR-0044 §5 Phase 53 追記（Phase 55）: **変更を伴う API はすべて管理系（bearer 必須）**。
+    /// `[api]` に `token_file` を足し、以後の要求に `Authorization: Bearer` を付ける。
+    fn api_listen_with_token(&mut self) -> String {
+        let token = "tok-e2e-phase55";
+        std::fs::write(self.root.join("api.token"), format!("{token}\n")).unwrap();
+        self.token = Some(token.to_string());
+        format!("{}\ntoken_file = \"api.token\"", self.api_listen())
+    }
+
     fn workspace(&self, name: &str) -> String {
         let dir = self.root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
@@ -316,7 +325,7 @@ fn api_is_off_by_default_and_health_reports_versions_when_enabled() {
 /// 受け入れ 5: API からの作成・承認・却下・回答・取消・plan が状態機械を通る。無効な遷移と `expected_status` 不一致は 409。
 #[test]
 fn api_mutations_go_through_the_state_machine() {
-    let env = Env::new();
+    let mut env = Env::new();
     let script = env.write_script(
         r#"input=$(cat)
 case "$input" in
@@ -324,7 +333,9 @@ case "$input" in
   *) echo '{"type":"question","text":"which version should I target?"}' ;;
 esac"#,
     );
-    let config = env.write_config(&script, &env.api_listen(), "");
+    // ADR-0044 Phase 53 追記（Phase 55）: 変更系はトークンが要る。
+    let api = env.api_listen_with_token();
+    let config = env.write_config(&script, &api, "");
     let mut daemon = env.start_taskd(&config);
     env.wait_api(&mut daemon);
     let ws = env.workspace("ws-q");
@@ -651,9 +662,11 @@ fn api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values()
 /// どちらにも `database is locked` が出ず taskd も落ちない（書き込みトランザクションは IMMEDIATE + busy_timeout）。
 #[test]
 fn writes_from_taskctl_and_api_while_taskd_ticks_fast_never_hit_database_is_locked() {
-    let env = Env::new();
+    let mut env = Env::new();
     let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
-    let config = env.write_config(&script, &env.api_listen(), "");
+    // ADR-0044 Phase 53 追記（Phase 55）: `POST /tasks` は管理系になったのでトークンを持たせる。
+    let api = env.api_listen_with_token();
+    let config = env.write_config(&script, &api, "");
     let text = std::fs::read_to_string(&config).unwrap().replace("tick_ms = 50", "tick_ms = 20");
     std::fs::write(&config, text).unwrap();
     let mut daemon = env.start_taskd(&config);

@@ -5,8 +5,12 @@ import type {
   EditResult,
   Health,
   IntegrateResult,
+  Milestone,
+  MilestoneLifecycle,
+  Project,
   ProjectIntegrationItem,
   ProjectIntegrations,
+  ProjectLifecycle,
   ProjectRepo,
   ReleaseChanges,
   ReleaseItem,
@@ -17,6 +21,7 @@ import type {
   Task,
   TaskComment,
   TaskIntegration,
+  TaskRef,
   TaskSummary,
   Timeline,
   TimelineItem,
@@ -412,3 +417,58 @@ export const defaultProjectIntegrations: ProjectIntegrations = {
     },
   ] satisfies ProjectIntegrationItem[],
 };
+
+/**
+ * 中止・一時停止・アーカイブ（ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.91。Phase 55 / G19）。
+ * `ProjectLifecycle` / `MilestoneLifecycle` は `cancel` のときだけ `cancelled_*` に中身が入る。
+ */
+
+/** `GET /projects` / `ProjectLifecycle.project` の 1 件（既定は進行中・アーカイブなし）。 */
+export function project(overrides: Partial<Project> = {}): Project {
+  return {
+    id: "p1",
+    title: "Pluvio の新テーマ",
+    request: "Pluvio を基盤に用いた新たな研究テーマの模索、検証",
+    status: "active",
+    created_at: "2026-09-19T00:00:00Z",
+    updated_at: "2026-09-19T00:00:01Z",
+    ...overrides,
+  };
+}
+
+/** `MilestoneLifecycle.milestone` の 1 件（既定は進行中）。 */
+export function milestone(overrides: Partial<Milestone> = {}): Milestone {
+  return {
+    id: "m1",
+    project_id: "p1",
+    seq: 1,
+    title: "統合・選定",
+    description: "",
+    status: "in_progress",
+    created_at: "2026-09-19T00:00:00Z",
+    updated_at: "2026-09-19T00:00:01Z",
+    ...overrides,
+  };
+}
+
+/** 連鎖で中止されたタスク 1 件（`cancelled_tasks[]` の要素）。 */
+export function taskRef(overrides: Partial<TaskRef> = {}): TaskRef {
+  return {
+    id: "01BOARDTASK00000000000001",
+    title: "関連研究を調べる",
+    kind: "execute",
+    status: "cancelled",
+    actions: [],
+    ...overrides,
+  };
+}
+
+/** `POST /projects/{id}/{cancel|pause|resume|archive|unarchive}` の応答（既定は連鎖なし）。 */
+export function projectLifecycle(overrides: Partial<ProjectLifecycle> = {}): ProjectLifecycle {
+  return { project: project(), cancelled_tasks: [], cancelled_milestones: [], ...overrides };
+}
+
+/** `POST /milestones/{id}/{cancel|pause|resume}` の応答（既定は連鎖なし）。 */
+export function milestoneLifecycle(overrides: Partial<MilestoneLifecycle> = {}): MilestoneLifecycle {
+  return { milestone: milestone(), cancelled_tasks: [], ...overrides };
+}

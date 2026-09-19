@@ -331,6 +331,51 @@ describe("loadProjectDetail", () => {
     expect(result.clusters).toEqual([]);
   });
 
+  /**
+   * 中止・一時停止・アーカイブ（ADR-0044 D6、Phase 55 / G19）。loader は素通りさせるだけ
+   * （`archived_at` / `paused_from` / `paused` / `cancelled` を GUI 側で計算し直さない）。
+   * `GET /projects/{id}`（個別）はアーカイブ済みでもそのまま見えるので、隠す判断もしない。
+   */
+  it("archived_at / paused_from と paused / cancelled の途中目標をそのまま通す", async () => {
+    const detail: ProjectDetail = {
+      project: project({ status: "paused", paused_from: "active", archived_at: "2026-09-19T12:00:00Z" }),
+      milestones: [
+        {
+          id: "m1",
+          project_id: "p1",
+          seq: 1,
+          title: "調査",
+          description: "",
+          status: "paused",
+          paused_from: "in_progress",
+          created_at: "…",
+          updated_at: "…",
+        },
+        {
+          id: "m2",
+          project_id: "p1",
+          seq: 2,
+          title: "統合",
+          description: "",
+          status: "cancelled",
+          created_at: "…",
+          updated_at: "…",
+        },
+      ],
+      tasks: [],
+    };
+    mock.on("GET", "/api/v1/projects/p1", (_req, res) => sendJson(res, 200, detail));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+
+    const result = await loadProjectDetail(client, "p1", new Request("http://gui.invalid/projects/p1"));
+
+    expect(result.detail.project.status).toBe("paused");
+    expect(result.detail.project.paused_from).toBe("active");
+    expect(result.detail.project.archived_at).toBe("2026-09-19T12:00:00Z");
+    expect(result.detail.milestones.map((m) => m.status)).toEqual(["paused", "cancelled"]);
+    expect(result.detail.milestones[0].paused_from).toBe("in_progress");
+  });
+
   it("404 project_not_found は例外として投げる（loader が Response に変換する）", async () => {
     mock.on("GET", "/api/v1/projects/missing", (_req, res) =>
       sendProblem(res, { status: 404, code: "project_not_found", detail: "no such project" }),

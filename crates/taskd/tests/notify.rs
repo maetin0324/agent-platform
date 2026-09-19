@@ -115,6 +115,8 @@ impl Env {
 
     fn seed_project(&self, status: ProjectStatus) -> ProjectId {
         let project = Project {
+            archived_at: None,
+            paused_from: None,
             id: ProjectId::new(),
             title: "Pluvio の検証".into(),
             request: "調べて".into(),

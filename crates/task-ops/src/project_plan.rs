@@ -200,6 +200,8 @@ mod tests {
     fn sample_project(status: ProjectStatus) -> Project {
         let t = now();
         Project {
+            archived_at: None,
+            paused_from: None,
             id: ProjectId::new(),
             title: "Pluvio を基盤に用いた新テーマ".into(),
             request: "Pluvio を基盤に用いた新たな研究テーマの模索、検証をしたい".into(),
@@ -215,6 +217,7 @@ mod tests {
     fn compose_goal_includes_request_milestones_note_and_history() {
         let project = sample_project(ProjectStatus::Proposed);
         let milestone = Milestone {
+            paused_from: None,
             id: MilestoneId::new(),
             project_id: project.id,
             seq: 1,

@@ -9,6 +9,8 @@ use task_core::{RoleSpec, TaskStore, Tier};
 
 fn env_with_lead_role() -> TestEnv {
     TestEnv::with(EnvOptions {
+        // ADR-0044 §5 Phase 53 追記（Phase 55）: `POST /tasks` は管理系（bearer 必須）。
+        token: Some(TOKEN.to_string()),
         roles: vec![
             RoleSpec {
                 id: "lead".into(),
@@ -43,7 +45,7 @@ async fn create_task_with_role_applies_role_defaults() {
         "acceptance": [{"type": "human", "text": "the plan is sound"}],
         "role": "lead",
     });
-    let resp = send(&app, post_json("/api/v1/tasks", &body)).await;
+    let resp = send(&app, post_admin("/api/v1/tasks", &body)).await;
     assert_eq!(resp.status, 201, "{}", resp.text());
     let task = resp.json();
     assert_eq!(task["role"], "lead");
@@ -59,7 +61,7 @@ async fn create_task_with_role_applies_role_defaults() {
     assert_eq!(serde_json::to_value(&stored).expect("json"), task);
 
     // 受け入れ 5: 詳細にも `role` が出る。
-    let resp = send(&app, get(&format!("/api/v1/tasks/{id}"))).await;
+    let resp = send(&app, get_admin(&format!("/api/v1/tasks/{id}"))).await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     assert_eq!(resp.json()["task"]["role"], "lead");
 }
@@ -78,7 +80,7 @@ async fn task_values_win_over_role_defaults_and_aggregate_is_stored() {
         "tier": "standard",
         "aggregate": true,
     });
-    let resp = send(&app, post_json("/api/v1/tasks", &body)).await;
+    let resp = send(&app, post_admin("/api/v1/tasks", &body)).await;
     assert_eq!(resp.status, 201, "{}", resp.text());
     let task = resp.json();
     assert_eq!(task["role"], "implementer");
@@ -100,7 +102,7 @@ async fn unknown_role_is_stored_without_defaults() {
         "acceptance": [{"type": "human", "text": "a summary exists"}],
         "role": "researcher",
     });
-    let resp = send(&app, post_json("/api/v1/tasks", &body)).await;
+    let resp = send(&app, post_admin("/api/v1/tasks", &body)).await;
     assert_eq!(resp.status, 201, "{}", resp.text());
     let task = resp.json();
     assert_eq!(task["role"], "researcher");
@@ -114,7 +116,7 @@ async fn config_shows_roles_without_instruction_text_and_delegation_limits() {
     let env = TestEnv::new();
     let app = env.router();
 
-    let resp = send(&app, get("/api/v1/config")).await;
+    let resp = send(&app, get_admin("/api/v1/config")).await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     let config = resp.json();
     assert_eq!(

@@ -3537,6 +3537,17 @@
         "id": {
           "$ref": "#/$defs/MilestoneId"
         },
+        "paused_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。"
+        },
         "project_id": {
           "$ref": "#/$defs/ProjectId"
         },
@@ -3701,6 +3712,25 @@
       "description": "途中目標の一意識別子（ULID）。",
       "type": "string"
     },
+    "MilestoneLifecycle": {
+      "description": "途中目標の状態を変えたときの結果。",
+      "properties": {
+        "cancelled_tasks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TaskRef"
+          },
+          "type": "array"
+        },
+        "milestone": {
+          "$ref": "#/$defs/Milestone"
+        }
+      },
+      "required": [
+        "milestone"
+      ],
+      "type": "object"
+    },
     "MilestonePatchBody": {
       "additionalProperties": false,
       "description": "`PATCH /milestones/{id}` の要求本文。",
@@ -3738,14 +3768,28 @@
     },
     "MilestoneStatus": {
       "description": "途中目標の状態（ADR-0033 D2。SPEC §7 のアジャイル: 達成ごとに人が判定し、Go か再設計）。",
-      "enum": [
-        "proposed",
-        "approved",
-        "in_progress",
-        "reached",
-        "redesigned"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "proposed",
+            "approved",
+            "in_progress",
+            "reached",
+            "redesigned"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "paused",
+          "description": "ADR-0044 D6: 一時停止。属するタスクは dispatch されない（`ready` のまま）。\n元の状態は `Milestone::paused_from` に持ち、`resume` でそこへ戻る。",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "ADR-0044 D6: 中止。属する非終端タスクは全部 `cancelled` にした後の終端。",
+          "type": "string"
+        }
+      ]
     },
     "MilestoneView": {
       "description": "途中目標 1 件のビュー（ADR-0038 D1 / D4。Phase 41）。`Milestone` のフィールドは**平らに**出るので、\n既存の GUI（`id` / `title` / `status` …）はそのまま読める。",
@@ -3759,6 +3803,17 @@
         },
         "id": {
           "$ref": "#/$defs/MilestoneId"
+        },
+        "paused_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。"
         },
         "project_id": {
           "$ref": "#/$defs/ProjectId"
@@ -4479,11 +4534,29 @@
     "Project": {
       "description": "案件（SPEC §3.3）。仕事の木は `tasks WHERE project_id = ?`。",
       "properties": {
+        "archived_at": {
+          "description": "ADR-0044 D6: アーカイブした時刻。`None` ならアーカイブされていない。一覧は既定でこれが\n`Some` の案件（とそのタスク）を隠す。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "type": "string"
         },
         "id": {
           "$ref": "#/$defs/ProjectId"
+        },
+        "paused_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。"
         },
         "request": {
           "description": "人が投げた依頼文そのまま。",
@@ -4631,6 +4704,34 @@
       ],
       "type": "object"
     },
+    "ProjectLifecycle": {
+      "description": "案件・途中目標の状態を変えたときの結果（API がそのまま返す）。",
+      "properties": {
+        "cancelled_milestones": {
+          "default": [],
+          "description": "この操作の連鎖で `cancelled` になった途中目標の id（`cancel` 以外では空）。",
+          "items": {
+            "$ref": "#/$defs/MilestoneId"
+          },
+          "type": "array"
+        },
+        "cancelled_tasks": {
+          "default": [],
+          "description": "この操作の連鎖で `cancelled` になったタスク（`cancel` 以外では空）。",
+          "items": {
+            "$ref": "#/$defs/TaskRef"
+          },
+          "type": "array"
+        },
+        "project": {
+          "$ref": "#/$defs/Project"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
     "ProjectList": {
       "description": "`GET /projects` の応答（`created_at` の降順）。",
       "properties": {
@@ -4775,12 +4876,11 @@
       "type": "object"
     },
     "ProjectStatus": {
-      "description": "案件の状態（ADR-0033 D2）。",
+      "description": "案件の状態（ADR-0033 D2、ADR-0044 D6）。",
       "oneOf": [
         {
           "enum": [
             "active",
-            "paused",
             "done"
           ],
           "type": "string"
@@ -4788,6 +4888,16 @@
         {
           "const": "proposed",
           "description": "秘書が理解確認と方針を出し、人の返事待ち。",
+          "type": "string"
+        },
+        {
+          "const": "paused",
+          "description": "ADR-0044 D6: 一時停止。属するタスクは dispatch されない（`ready` のまま）。\n元の状態は `Project::paused_from` に持ち、`resume` でそこへ戻る。",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "ADR-0044 D6: 中止。属する非終端タスクは全部 `cancelled` にした後の終端。",
           "type": "string"
         }
       ]
@@ -8222,6 +8332,9 @@
     "milestone_decided": {
       "$ref": "#/$defs/MilestoneDecided"
     },
+    "milestone_lifecycle": {
+      "$ref": "#/$defs/MilestoneLifecycle"
+    },
     "milestone_patch": {
       "$ref": "#/$defs/MilestonePatchBody"
     },
@@ -8259,6 +8372,10 @@
     },
     "project_integrations": {
       "$ref": "#/$defs/ProjectIntegrations"
+    },
+    "project_lifecycle": {
+      "$ref": "#/$defs/ProjectLifecycle",
+      "description": "Phase 55（ADR-0044 D6）: 案件・途中目標の中止・一時停止・アーカイブの応答。"
     },
     "project_list": {
       "$ref": "#/$defs/ProjectList",
@@ -8440,6 +8557,8 @@
     "milestone_patch",
     "milestone_decide",
     "milestone_decided",
+    "project_lifecycle",
+    "milestone_lifecycle",
     "project_plan",
     "project_plan_accepted",
     "memory",

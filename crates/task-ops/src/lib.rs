@@ -20,6 +20,8 @@ pub mod error;
 pub mod gate;
 pub mod graph;
 pub mod inbox;
+/// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
+pub mod lifecycle;
 pub mod memory;
 pub mod milestone_review;
 pub mod plan;
