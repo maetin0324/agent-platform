@@ -215,17 +215,30 @@ promote_stop_start() {
 
   if old_pid="$(find_old_taskd_pid)"; then
     sd_log "old taskd pid=$old_pid (exact match on: taskd --config $SD_CONFIG)"
-    sd_log "SIGTERM $old_pid; waiting up to $((grace + 10))s"
+    # 実機 2026-09-19 22:42: SIGTERM の後、旧 taskd が ext4 のジャーナル待ち（jbd2_log_wait_commit、D 状態）で
+    # 2 分半かかり、20 秒で諦めた promote.sh が「何も変えていない」と言って止まった。しかし SIGTERM は届いていて
+    # API は閉じていたので、本番は新も旧も無い状態で 3 分止まった。SIGTERM を送ったら**戻れない**ので、
+    # 長く待ち（SD_STOP_WAIT、既定 300 秒）、それでも生きていて API だけ閉じているなら警告して先へ進む
+    # （DB は SQLite のロックで守られる。旧は書き終えて flush しているだけ）。
+    stop_wait="${SD_STOP_WAIT:-300}"
+    sd_log "SIGTERM $old_pid; waiting up to ${stop_wait}s (kill_grace_secs=$grace)"
     kill -TERM "$old_pid"
     waited=0
-    while kill -0 "$old_pid" 2>/dev/null && [ "$waited" -lt $((grace + 10)) ]; do
+    while kill -0 "$old_pid" 2>/dev/null && [ "$waited" -lt "$stop_wait" ]; do
       sleep 1
       waited=$((waited + 1))
+      if [ $((waited % 15)) -eq 0 ]; then
+        sd_log "still exiting after ${waited}s: state=$(awk '{print $3}' "/proc/$old_pid/stat" 2>/dev/null || echo '?') wchan=$(cat "/proc/$old_pid/wchan" 2>/dev/null || echo '?')"
+      fi
     done
     if kill -0 "$old_pid" 2>/dev/null; then
-      sd_die "old taskd (pid $old_pid) did not exit within $((grace + 10))s; stopping here (nothing was changed)"
+      if [ "$(sd_http_status "$SD_PROD_API/api/v1/health")" = 200 ]; then
+        sd_die "old taskd (pid $old_pid) is still serving after ${stop_wait}s; refusing to start a second daemon (SIGTERM was sent — watch it and rerun)"
+      fi
+      sd_log "warning: old taskd (pid $old_pid) is still exiting after ${stop_wait}s but its API is closed; continuing (SQLite locking protects the DB)"
+    else
+      sd_log "old taskd exited after ${waited}s"
     fi
-    sd_log "old taskd exited after ${waited}s"
   elif [ -n "$OLD" ] && systemctl --user is-active --quiet "taskd@$OLD"; then
     sd_log "systemctl --user stop taskd@$OLD"
     systemctl --user stop "taskd@$OLD" || sd_die "failed to stop taskd@$OLD"

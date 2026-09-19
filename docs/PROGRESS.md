@@ -8172,3 +8172,20 @@ main（`ef639ea`）に `git merge --no-ff` で合わせた。衝突は **12 か�
 - 気づき: 案件「Pluvio…」のタスク `01M2VTETVXHTZVJQBKYTPHZ784` は 07:12 から `reviewing`（criterion 0 の承認タスク
   `01M2W846395893N2YDRPQQEEYC` が `ready` で受信箱に出ている。人が approve / reject するまで動かない。人は 07:12 の対話で
   「一旦プロジェクト修了」と言っているので、Phase 55 の案件の中止・アーカイブで片付ける想定）。
+
+### Phase 55/56 実機: 6 回目の昇格（停止→起動、schema 14→15。2026-09-19 22:42–22:45 UTC）と promote.sh の穴
+
+- `release.sh main` → `a96919eebd98`（A3 + B2）。`verify.sh` → 1〜4・6 true、5 false（N-1。schema 15）→ ok / live_ok=false。
+  `taskd.toml` に `[containers] runtime = "docker"` を追加（バックアップ `.bak-20260919d`）。
+- **事故**: `promote.sh` は SIGTERM 後 20 秒（`kill_grace_secs + 10`）で諦め「nothing was changed」と出たが、旧 taskd は
+  `SIGTERM; exiting` → `api stopped` → `instance row removed` の後、`jbd2_log_wait_commit`（ext4 のジャーナル待ち。`/home` は
+  loop デバイス、load 約 10: 直前まで `celeris-worker` のイメージビルドと cargo が走っていた）で **D 状態のまま 2 分半**。
+  API は閉じていたので**本番が 22:42:05〜22:44:55 の約 3 分止まった**。旧が exit した直後に `promote.sh` を再実行 →
+  「no running taskd found; starting the new one on a cold DB」→ バックアップ → 起動 → 1 秒で health 200 / schema 15。
+- **直し**: `promote.sh` の停止→起動は SIGTERM 後 `SD_STOP_WAIT`（既定 300 秒）まで待ち、15 秒ごとに `state`/`wchan` を記録。
+  それでも生きていて API が閉じているなら警告して先へ進む（SQLite のロックで DB は守られる）。API がまだ応えるなら止める。
+  SIGTERM を送った後は「何も変えていない」ことはありえないので、その文言は消した。
+- 事後: health `a96919eebd98` active schema 15、`GET /daemon.containers` = `{runtime: docker, probes: [docker ok]}`、
+  `POST /projects/{id}/pause` と `POST /tasks/{id}/answer` はトークン無しで 401。`celeris-worker:latest`（2.05 GB）ビルド済み。
+- 教訓（提案 P-55/56-a）: 停止→起動の昇格の前に load を見る（`verify.sh` が終わってから数分空ける／`promote.sh` が
+  `loadavg` を出す）。重い I/O の直後に daemon を止めると exit が遅い。
