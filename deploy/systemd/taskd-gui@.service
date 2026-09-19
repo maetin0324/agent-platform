@@ -9,6 +9,9 @@ Wants=taskd@%i.service
 [Service]
 Type=simple
 WorkingDirectory=%h/taskd/releases/%i/gui
+# PATH: systemd の user unit は ~/.local/bin（claude, codex）・~/.cargo/bin（cargo）・corepack（pnpm）を知らない。
+# ワーカーとその子（実装者の cargo test など）はこの PATH を継ぐ（2026-09-19 実機: claude の spawn に失敗）。
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/lib/node_modules/corepack/shims:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/node server.js
 Environment=NODE_ENV=production
 Environment=TASKD_GUI_BIND=0.0.0.0:7700

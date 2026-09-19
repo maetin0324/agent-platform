@@ -8,6 +8,9 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/taskd
+# PATH: systemd の user unit は ~/.local/bin（claude, codex）・~/.cargo/bin（cargo）・corepack（pnpm）を知らない。
+# ワーカーとその子（実装者の cargo test など）はこの PATH を継ぐ（2026-09-19 実機: claude の spawn に失敗）。
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/lib/node_modules/corepack/shims:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/taskd/releases/%i/bin/taskd --config %h/taskd/taskd.toml --release %i
 # drain して exit 0 したときは再起動しない（ADR-0040 D4 のライブ引き継ぎ）。落ちたときだけ起こし直す。
 Restart=on-failure
