@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# scripts/selfdeploy/lib.sh — release / verify / promote / rollback / status で共有する道具
+# （ADR-0040 D1/D2）。単体では何もしない。`source` して使う。
+#
+# 触ってよい場所（ADR-0040 D1、安全規則）:
+#   $SD_RELEASES ($TASKD_HOME/releases) / $SD_STAGING ($TASKD_HOME/staging) / $SD_BACKUPS ($TASKD_HOME/backups)
+#   と、昇格のときだけ $SD_CURRENT / $SD_PREVIOUS の symlink。
+# 触ってはいけない場所: $TASKD_HOME/taskd.toml（編集しない）、$TASKD_HOME/taskd.sqlite3（`sqlite3 .backup` と
+#   `mode=ro` で読むだけ）、本番のポート 127.0.0.1:7710 と 0.0.0.0:7700（bind しない）。
+
+# shellcheck shell=bash
+
+# ---- 場所 ------------------------------------------------------------------
+
+TASKD_HOME="${TASKD_HOME:-$HOME/taskd}"
+SD_REPO="${SD_REPO:-$HOME/workspace/agent-platform}"
+
+SD_RELEASES="$TASKD_HOME/releases"
+SD_BUILD_ROOT="$SD_RELEASES/.build"
+SD_CARGO_TARGET="$SD_RELEASES/.cargo-target"
+SD_STAGING="$TASKD_HOME/staging"
+SD_BACKUPS="$TASKD_HOME/backups"
+SD_CURRENT="$TASKD_HOME/current"
+SD_PREVIOUS="$TASKD_HOME/previous"
+SD_CONFIG="$TASKD_HOME/taskd.toml"
+SD_DB="$TASKD_HOME/taskd.sqlite3"
+SD_API_TOKEN_FILE="$TASKD_HOME/api.token"
+
+# 本番のポート。ここに bind してはいけない（読むだけ）。
+SD_PROD_API="http://127.0.0.1:7710"
+SD_PROD_GUI_PORT=7700
+# staging のポート（D3）。
+SD_STAGING_API_PORT=7711
+SD_STAGING_GUI_PORT=7701
+SD_STAGING_OLD_API_PORT=7712
+
+# corepack の pnpm（このホストでは PATH に無い）。
+SD_PNPM_SHIM_DIR="${SD_PNPM_SHIM_DIR:-/usr/lib/node_modules/corepack/shims}"
+
+# ---- ログ ------------------------------------------------------------------
+
+SD_LOG_FILE="${SD_LOG_FILE:-}"
+
+sd_ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+sd_stamp() { date +%Y%m%d-%H%M%S; }
+
+sd_log() {
+  local line
+  line="$(sd_ts) [${SD_PROG:-selfdeploy}] $*"
+  printf '%s\n' "$line" >&2
+  if [ -n "$SD_LOG_FILE" ]; then printf '%s\n' "$line" >>"$SD_LOG_FILE"; fi
+}
+
+sd_die() {
+  sd_log "ERROR: $*"
+  exit 1
+}
+
+# ---- JSON（python3 を優先。無ければ jq） -----------------------------------
+
+if command -v python3 >/dev/null 2>&1; then
+  SD_JSON_TOOL=python3
+elif command -v jq >/dev/null 2>&1; then
+  SD_JSON_TOOL=jq
+else
+  SD_JSON_TOOL=none
+fi
+
+sd_require_json_tool() {
+  [ "$SD_JSON_TOOL" = none ] && sd_die "need python3 or jq for JSON handling"
+  return 0
+}
+
+# 文字列を JSON の文字列リテラルにする（前後の " 込み）。
+sd_json_str() {
+  case "$SD_JSON_TOOL" in
+    python3) python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.argv[1], ensure_ascii=False))' "$1" ;;
+    jq) jq -Rn --arg s "$1" '$s' ;;
+    *) sd_die "need python3 or jq" ;;
+  esac
+}
+
+# ファイルの JSON から dotted path の値を取り出す（`a.b.0.c`）。
+# 見つかれば標準出力に（スカラーは素の値、配列/オブジェクトは JSON）、見つからなければ exit 1。
+sd_json_get() {
+  local file="$1" path="$2"
+  [ -f "$file" ] || return 1
+  case "$SD_JSON_TOOL" in
+    python3)
+      python3 - "$file" "$path" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cur = json.load(fh)
+except Exception:
+    sys.exit(1)
+for part in sys.argv[2].split("."):
+    if part == "":
+        continue
+    if isinstance(cur, list):
+        try:
+            cur = cur[int(part)]
+        except Exception:
+            sys.exit(1)
+    elif isinstance(cur, dict) and part in cur:
+        cur = cur[part]
+    else:
+        sys.exit(1)
+if cur is None:
+    sys.stdout.write("null")
+elif isinstance(cur, bool):
+    sys.stdout.write("true" if cur else "false")
+elif isinstance(cur, (int, float, str)):
+    sys.stdout.write(str(cur))
+else:
+    sys.stdout.write(json.dumps(cur, ensure_ascii=False))
+PY
+      ;;
+    jq)
+      local filter=".$path"
+      [ "$path" = "" ] && filter="."
+      jq -e -r "$filter" "$file" 2>/dev/null
+      ;;
+    *) sd_die "need python3 or jq" ;;
+  esac
+}
+
+# JSON ファイルが妥当かどうか（本文は捨てる）。
+sd_json_valid() {
+  case "$SD_JSON_TOOL" in
+    python3) python3 -c 'import json,sys; json.load(open(sys.argv[1],encoding="utf-8"))' "$1" >/dev/null 2>&1 ;;
+    jq) jq -e . "$1" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# TSV（1 行目が `name:type name:type ...` のヘッダ。type は s/i/f/b）→ JSON の配列。
+sd_tsv_to_json() {
+  local file="$1"
+  case "$SD_JSON_TOOL" in
+    python3)
+      python3 - "$file" <<'PY'
+import json, sys
+rows = []
+with open(sys.argv[1], encoding="utf-8") as fh:
+    lines = fh.read().split("\n")
+spec = [f.split(":") for f in lines[0].split() if f]
+for line in lines[1:]:
+    if not line.strip():
+        continue
+    cells = line.split("\t")
+    row = {}
+    for i, (name, kind) in enumerate(spec):
+        raw = cells[i] if i < len(cells) else ""
+        if kind == "i":
+            row[name] = int(raw or 0)
+        elif kind == "f":
+            row[name] = round(float(raw or 0), 3)
+        elif kind == "b":
+            row[name] = raw == "true"
+        else:
+            row[name] = raw
+    rows.append(row)
+sys.stdout.write(json.dumps(rows, ensure_ascii=False, indent=2))
+PY
+      ;;
+    jq)
+      local hdr spec
+      hdr="$(head -n 1 "$file")"
+      spec="$(printf '%s' "$hdr" | tr ' ' '\n' | jq -Rn '[inputs | select(length>0) | split(":") | {n: .[0], t: .[1]}]')"
+      tail -n +2 "$file" | jq -Rn --argjson spec "$spec" '
+        [ inputs | select(length > 0) | split("\t") as $r
+          | reduce range(0; ($spec | length)) as $i ({};
+              ($spec[$i].n) as $n | ($spec[$i].t) as $t | ($r[$i] // "") as $v
+              | .[$n] = (if $t == "i" then ($v | tonumber | floor)
+                         elif $t == "f" then ($v | tonumber)
+                         elif $t == "b" then ($v == "true")
+                         else $v end)) ]'
+      ;;
+    *) sd_die "need python3 or jq" ;;
+  esac
+}
+
+# ---- git -------------------------------------------------------------------
+
+sd_sha12() {
+  local ref="$1"
+  git -C "$SD_REPO" rev-parse --short=12 "${ref}^{commit}" 2>/dev/null \
+    || sd_die "cannot resolve git ref: $ref (repo $SD_REPO)"
+}
+
+sd_sha_full() {
+  git -C "$SD_REPO" rev-parse "${1}^{commit}" 2>/dev/null || sd_die "cannot resolve git ref: $1"
+}
+
+# ---- HTTP ------------------------------------------------------------------
+
+# `sd_http_get <url> [token-file]` — 本文を標準出力に。HTTP status を返す代わりに、
+# 非 2xx なら exit 1（本文は捨てない）。
+sd_http_get() {
+  local url="$1" token_file="${2:-}" code body tmp
+  tmp="$(mktemp)"
+  if [ -n "$token_file" ] && [ -r "$token_file" ]; then
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' -m 30 -H "Authorization: Bearer $(tr -d '\r\n' <"$token_file")" "$url" || echo 000)"
+  else
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' -m 30 "$url" || echo 000)"
+  fi
+  body="$(cat "$tmp")"
+  rm -f "$tmp"
+  printf '%s' "$body"
+  case "$code" in
+    2*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# `sd_http_status <url> [token-file]` — status コードだけ。
+sd_http_status() {
+  local url="$1" token_file="${2:-}"
+  if [ -n "$token_file" ] && [ -r "$token_file" ]; then
+    curl -sS -o /dev/null -w '%{http_code}' -m 30 -H "Authorization: Bearer $(tr -d '\r\n' <"$token_file")" "$url" 2>/dev/null || echo 000
+  else
+    curl -sS -o /dev/null -w '%{http_code}' -m 30 "$url" 2>/dev/null || echo 000
+  fi
+}
+
+# `sd_http_status_follow <url>` — リダイレクトを追って**最後の**status を返す。GUI の画面用
+# （`/` は `/tasks` などへ 302 する。ADR-0040 D3 の「200」はリダイレクトの先のこと）。
+sd_http_status_follow() {
+  curl -sSL --max-redirs 5 -o /dev/null -w '%{http_code}' -m 30 "$1" 2>/dev/null || echo 000
+}
+
+# `sd_wait_http_200 <url> <timeout-secs> [token-file]`
+sd_wait_http_200() {
+  local url="$1" timeout="$2" token_file="${3:-}" waited=0 code
+  while [ "$waited" -lt "$timeout" ]; do
+    code="$(sd_http_status "$url" "$token_file")"
+    [ "$code" = 200 ] && return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
+# ---- ポート ----------------------------------------------------------------
+
+# 誰かが LISTEN していれば 1（塞がっている）。
+sd_port_free() {
+  local port="$1"
+  if ss -ltn "sport = :$port" 2>/dev/null | tail -n +2 | grep -q .; then
+    return 1
+  fi
+  return 0
+}
+
+sd_require_port_free() {
+  sd_port_free "$1" || sd_die "port $1 is already in use (need it for $2)"
+}
+
+# ---- リリース --------------------------------------------------------------
+
+sd_release_dir() { printf '%s/%s' "$SD_RELEASES" "$1"; }
+
+# `current` / `previous` が指している sha12（無ければ空文字）。
+sd_link_target() {
+  local link="$1" dest
+  [ -L "$link" ] || return 0
+  dest="$(readlink -f "$link" 2>/dev/null)" || return 0
+  [ -n "$dest" ] || return 0
+  basename "$dest"
+}
+
+sd_current_sha() { sd_link_target "$SD_CURRENT"; }
+sd_previous_sha() { sd_link_target "$SD_PREVIOUS"; }
+
+# `sd_set_link <link> <sha12>` — symlink を張り替える（同一 dir 内で mv するので原子的）。
+sd_set_link() {
+  local link="$1" sha="$2" tmp
+  tmp="$link.tmp.$$"
+  ln -sfn "releases/$sha" "$tmp"
+  mv -T "$tmp" "$link"
+}
+
+# `crates/task-core/src/store.rs` から `pub const SCHEMA_VERSION: u32 = N;` を読む。
+sd_schema_version_of_tree() {
+  # `local a="$1" b="$a"` は全部の語を先に展開してから代入するので `$a` はまだ無い（set -u で落ちる）。
+  # 参照する変数は別の `local` に分ける。
+  local tree="$1"
+  local file n
+  file="$tree/crates/task-core/src/store.rs"
+  [ -f "$file" ] || { printf '0'; return 1; }
+  n="$(sed -n 's/^[[:space:]]*pub const SCHEMA_VERSION: u32 = \([0-9][0-9]*\);.*$/\1/p' "$file" | head -n 1)"
+  [ -n "$n" ] || { printf '0'; return 1; }
+  printf '%s' "$n"
+}
+
+# 本番 DB のスキーマ版数（read-only。`schema_migrations` の最大 `version`）。
+sd_db_schema_version() {
+  local db="${1:-$SD_DB}" v
+  v="$(sqlite3 "file:${db}?mode=ro" 'SELECT COALESCE(MAX(version), 0) FROM schema_migrations;' 2>/dev/null)" || return 1
+  printf '%s' "$v"
+}
+
+sd_mkdirs() {
+  mkdir -p "$SD_RELEASES" "$SD_BUILD_ROOT" "$SD_BACKUPS"
+}
+
+# pnpm（corepack の shim）を PATH に入れる。
+sd_use_pnpm() {
+  case ":$PATH:" in
+    *":$SD_PNPM_SHIM_DIR:"*) ;;
+    *) PATH="$SD_PNPM_SHIM_DIR:$PATH"; export PATH ;;
+  esac
+  command -v pnpm >/dev/null 2>&1 || sd_die "pnpm not found (looked in $SD_PNPM_SHIM_DIR)"
+}

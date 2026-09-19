@@ -143,6 +143,8 @@ test.describe("/healthz", () => {
     expect(body.ok).toBe(true);
     expect(body.name).toBe("taskd-gui");
     expect(typeof body.version).toBe("string");
+    // ADR-0040 D4（Phase 46）: 昇格で使う `release`。TASKD_GUI_RELEASE が無ければ "dev"。
+    expect(typeof body.release).toBe("string");
   });
 });
 

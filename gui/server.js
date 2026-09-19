@@ -138,9 +138,11 @@ if (DEVELOPMENT) {
   app.use(await import(BUILD_PATH).then((mod) => mod.app));
 }
 
-const server = app.listen(bind.port, bind.host, () => {
+// ADR-0040 D4: 昇格のライブ引き継ぎのため `reusePort`（Node 24）。新旧の GUI が同じポートに同時に
+// bind でき、カーネルが振り分ける。旧は `/healthz` が新しい release を返したら止める。
+const server = app.listen({ port: bind.port, host: bind.host, reusePort: true }, () => {
   process.stderr.write(
-    `taskd-gui: listening on http://${bind.host}:${bind.port} (taskd API ${taskdApiUrl}, auth ${passwordFile ? "password" : "none (loopback)"}, token ${process.env.TASKD_API_TOKEN_FILE ? "yes" : "no"})\n`,
+    `taskd-gui: listening on http://${bind.host}:${bind.port} (release ${process.env.TASKD_GUI_RELEASE ?? "dev"}, taskd API ${taskdApiUrl}, auth ${passwordFile ? "password" : "none (loopback)"}, token ${process.env.TASKD_API_TOKEN_FILE ? "yes" : "no"})\n`,
   );
 });
 for (const sig of ["SIGINT", "SIGTERM"]) {

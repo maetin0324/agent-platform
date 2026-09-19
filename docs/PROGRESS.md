@@ -5609,3 +5609,207 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
     見てもらうしかない。型で強制する分離（例えば `Seq(u64)`/`GlobalEventId(u64)` のような newtype 化）は
     今回のスコープ外（他の呼び出し箇所すべての型変更を伴うため、Phase 45 の「今回の Phase だけをやる」を
     超える）。今後同種の事故が繰り返すようなら次の Phase で newtype 化を検討する価値がある。
+
+## Phase 46 — 自己改善のデプロイの道具（ADR-0040 D1–D3、systemd。2026-09-19）
+
+- 完了日: 2026-09-19
+- やったこと: ADR-0040 の D1（不変のリリースディレクトリ）・D2（`release` / `verify` / `promote` /
+  `rollback` / `status` の 5 本）・D3（staging での検証）と、D4 のうち **systemd と昇格の手順**、
+  それに GUI の `reusePort` と `/healthz` の `release`。**taskd 本体（Phase 47: `--mode` / `--db` /
+  `--listen` / `--workspace-root` / `--token-file` / `--release`、`daemon_instances`、`SO_REUSEPORT`、
+  standby の 503、drain）はこの Phase では触っていない**（別のエージェントが並行して実装中）。
+  スクリプトはその契約に対して書いてある。
+- 追加したファイル:
+  - `scripts/selfdeploy/lib.sh` — 共有。`TASKD_HOME`（既定 `~/taskd`）と `SD_REPO`（既定
+    `~/workspace/agent-platform`）からパスを組む。JSON は **python3 を優先し、無ければ jq**
+    （`sd_json_get` / `sd_json_str` / `sd_json_valid` / `sd_tsv_to_json` の 4 つとも両方の実装を持つ。
+    このホストには python3 だけがある）。ログ（`sd_log`、`SD_LOG_FILE` があればファイルにも）、
+    `sd_sha12`（`git rev-parse --short=12 <ref>^{commit}`）、HTTP（`sd_http_get` / `sd_http_status` /
+    `sd_wait_http_200`）、ポートの空き（`ss -ltn`）、symlink の張り替え（同一 dir で `mv -T`）、
+    `sd_schema_version_of_tree`（その sha の `crates/task-core/src/store.rs` から
+    `pub const SCHEMA_VERSION: u32 = N;` を `sed` で読む）、`sd_db_schema_version`
+    （`sqlite3 "file:…?mode=ro" "SELECT COALESCE(MAX(version),0) FROM schema_migrations"`）、
+    corepack の pnpm（`/usr/lib/node_modules/corepack/shims`）を PATH に足す `sd_use_pnpm`。
+  - `scripts/selfdeploy/release.sh <git-ref>` — D1/D2。`git worktree add --detach
+    ~/taskd/releases/.build/<sha12>`、`CARGO_TARGET_DIR=~/taskd/releases/.cargo-target`。gate は D2 の順:
+    `cargo test --workspace` → `cargo clippy --workspace -- -D warnings` → `cargo build --release -p taskd
+    -p taskctl` → GUI `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → `pnpm build`。
+    各段の exit code・所要秒・ログ名を `gate.json` に残す。全段 0 のときだけ
+    `~/taskd/releases/<sha12>/{bin,gui,manifest.json,gate.json,gate-logs}` を組み立て（gui は build/ と
+    server.js / package.json / pnpm-lock.yaml / pnpm-workspace.yaml を入れて、そこで
+    `pnpm install --prod --frozen-lockfile`）、ビルド用の worktree を消す。1 段でも非 0 なら
+    **リリースディレクトリを作らず** `.build/<sha12>/gate.json` だけ残す。掃除は `current` / `previous` /
+    いま作った版 / 検証済みの新しい 3 件を残して削除。`current`/`previous` が指す sha の再ビルドは拒否。
+  - `scripts/selfdeploy/verify.sh [--dry-run] <sha12>` — D3 のとおり。`staging/` を作り直し、
+    `sqlite3 "file:~/taskd/taskd.sqlite3?mode=ro" ".backup staging.sqlite3"`、新リリースを
+    `--mode verify --db … --listen 127.0.0.1:7711 --workspace-root … --token-file … --release <sha12>` で
+    起こして health を待ち、検査 1（`health.schema_version` == manifest の `SCHEMA_VERSION`）、
+    2（本番 API `127.0.0.1:7710` を**読むだけ**で `tasks` / `projects` / `milestones` / `org` /
+    `approvals(pending=false)` / `reports` / `messages` の件数と `tasks` の `{id,status}` 集合の sha256 を
+    比べる）、3（`inbox` / `org/<最初のノード>/memory` / `notify` / `clusters` / `providers` / `config` が
+    200 かつ JSON）、4（GUI を `127.0.0.1:7701` に `TASKD_API_URL=http://127.0.0.1:7711`
+    `TASKD_API_TOKEN_FILE=<staging token>` `TASKD_GUI_RELEASE=<sha12>` で起こし、`/healthz` の `release` と
+    `/`,`/org`,`/projects`,`/projects/<最新>`,`/approvals`,`/reports`,`/clusters` が 200）、
+    5（N-1: `~/taskd/current/bin/taskd` を**マイグレーション後の**同じスナップショットに対して
+    `127.0.0.1:7712` で起こし 1〜3 と同じ検査。`current` が無ければ `live_ok=false`）。
+    `trap` で**自分が起こした pid だけ**を SIGTERM → 15 秒待って SIGKILL。結果は `verify.json`
+    （`checks[]` / `ok`（1〜4）/ `live_ok`（5）/ `at` / `counts.{prod,staging,prod_after}`）。
+    本番が動いていて件数がずれたときに判るよう、検査の後にもう一度本番を数えて `prod_after` に入れる。
+  - `scripts/selfdeploy/promote.sh <sha12>` — D4。`verify.json.ok` が真でなければ拒否（`--force` 無し）。
+    `~/taskd/backups/<ts>-pre-<sha12>.sqlite3` に DB をコピー。**ライブ**（`live_ok` かつ動いている
+    taskd の `/health` が `role` を持つ）: `systemctl --user start taskd@<sha12>` →
+    `/health` を**毎秒 5 回ずつ**見て 5 回とも `release == <sha12>` かつ `role == active` になるまで 60 秒
+    （同じポートを `SO_REUSEPORT` で共有するので 1 回では判らない）→ ならなければ新を止めて失敗（旧はそのまま）
+    → `enable` 新 / `disable` 旧 → `start taskd-gui@<sha12>` → `:7700/healthz` の `release` が新になるまで
+    待って `stop taskd-gui@<旧>` → symlink 更新。**停止→起動**（`live_ok` が偽、または `/health` に `role`
+    が無い＝この ADR 以前の版。初回の移行はこれ）: 旧 pid を `/proc/*/cmdline` の**完全一致**
+    （`argv[0]` の basename が `taskd`、`--config ~/taskd/taskd.toml` を持ち、`--mode`/`--db`/`--listen`/
+    `--workspace-root`/`--token-file` を持たない。`grep` も `bash -c` も staging も当たらない）で探して
+    SIGTERM → `kill_grace_secs + 10` 秒待つ → DB バックアップ → unit 起動 → `health` 200 と
+    `schema_version` を 60 秒待つ → 駄目なら新を止め、旧 unit があれば起こし直し、**DB は戻さずに**失敗を
+    報告 → `ss -ltnp` で `:7700` の旧 GUI（`node server.js`）を見つけて SIGTERM →
+    `start taskd-gui@<sha12>` → symlink 更新。全部 `~/taskd/backups/promote-<ts>.log` に残る。
+  - `scripts/selfdeploy/rollback.sh [--restore-db]` — D2。`previous/manifest.json` の `SCHEMA_VERSION` が
+    DB の `schema_version`（`/health`、取れなければ `sqlite3` で `schema_migrations` の最大 `version`）
+    以上なら `promote.sh previous` に `exec`。低ければ拒否し、`--restore-db` のときだけ
+    `backups/` の直近の `*-pre-*.sqlite3`（`*-pre-rollback.sqlite3` は除く）を選び、いまの DB を
+    `<ts>-pre-rollback.sqlite3` に退避してから停止→書き戻し（`-wal`/`-shm` も消す）→`previous` を起動。
+  - `scripts/selfdeploy/status.sh` — 読むだけ。`current`/`previous`、`releases[]`（`gate` の各段の exit と
+    秒数、`verify` の `ok`/`live_ok`/落ちた検査名）、`:7710` の `/health`、`:7700` の `/healthz`、
+    `daemon_instances`（`sqlite3 "file:…?mode=ro" -json`。表が無い Phase 47 前は `null`）、
+    `backups` の新しい 10 件を JSON 1 つで。
+  - `scripts/selfdeploy/install-units.sh` — `deploy/systemd/*.service` を `~/.config/systemd/user/` に入れて
+    `daemon-reload`。**書いただけで実行していない**（人が一度だけ実行する）。
+  - `deploy/systemd/taskd@.service` / `deploy/systemd/taskd-gui@.service` — テンプレート unit。
+    `ExecStart=%h/taskd/releases/%i/bin/taskd --config %h/taskd/taskd.toml --release %i`、GUI は
+    `WorkingDirectory=%h/taskd/releases/%i/gui` + `/usr/bin/node server.js` と本番と同じ環境変数
+    （`TASKD_GUI_BIND=0.0.0.0:7700` / `NODE_ENV=production` / `TASKD_API_URL=http://127.0.0.1:7710` /
+    `TASKD_API_TOKEN_FILE` / `TASKD_GUI_ALLOWED_HOSTS=192.168.1.103,home-dev` /
+    `TASKD_GUI_SESSION_SECRET_FILE` / `TASKD_GUI_PASSWORD_FILE` / `TASKD_GUI_RELEASE=%i`）。
+    `Restart=on-failure` / `RestartSec=2` / `WantedBy=default.target`。`ProtectHome` と `User=` は
+    user unit では `~` のパスを壊すので入れていない。taskd 側は drain が長いので `TimeoutStopSec=3900`。
+  - `docs/selfdeploy.md` — 運用手順（初回の移行 / 通常の昇格 / ロールバック / staging の見方 / 禁止事項）。
+  - `gui/test/unit/server-healthz.test.ts` — `/healthz` の `release` と `reusePort` の回帰テスト。
+- 変更したファイル:
+  - `gui/server.js`: `app.listen(bind.port, bind.host, cb)` → `app.listen({ port, host, reusePort: true }, cb)`
+    （ADR-0040 D4。bind の検証と非 loopback のパスワード必須はそのまま）。起動ログに `release` を足した。
+  - `gui/app/routes/healthz.ts`: `{ok, name, version}` に **`release`**（`TASKD_GUI_RELEASE`、無ければ
+    `"dev"`）を足した。**`server.js` に express の `/healthz` を足すのではなく既存の resource route を
+    伸ばした**: `/healthz` は `docs/DESIGN.md` §6.2 に載っている resource route で、
+    `app/auth.server.ts` の `PUBLIC_PATHS` に入っており既に認証の対象外、Playwright の `webServer.url` と
+    `e2e/g0.spec.ts` が `{ok, name, version}` を見ている。express 側に足すと route を影で覆って
+    `name`/`version` が消え、その契約が壊れる。
+  - `gui/e2e/g0.spec.ts`: `/healthz` の検査に `typeof body.release === "string"` を足した（e2e は未実行）。
+- 実行したコマンドと結果:
+  - `bash -n`: `lib.sh` / `release.sh` / `verify.sh` / `promote.sh` / `rollback.sh` / `status.sh` /
+    `install-units.sh` の 7 本すべて exit 0。
+  - `which shellcheck`: **入っていない**（exit 1）。静的検査は `bash -n` のみ。
+  - `systemd-analyze --user verify deploy/systemd/taskd@.service`: exit 0
+    （`taskd@test_instance.service: Command … is not executable` は `%i` を仮の値に埋めた結果で、
+    テンプレートの検査としては想定どおり）。`deploy/systemd/taskd-gui@.service`: exit 0、出力なし。
+  - GUI（`/usr/lib/node_modules/corepack/shims/pnpm`、`gui/` で）:
+    - `pnpm lint`: exit 0（`biome check .`、170 ファイル、エラーなし。最初 1 件の整形差分が出たので
+      `pnpm format` を掛けた）
+    - `pnpm typecheck`: exit 0（`react-router typegen && tsc -b`）
+    - `pnpm test`: exit 0、**44 ファイル / 534 テスト passed**（Phase 45 時点の 43 / 530 + 今回の 4 本）
+    - `pnpm gen:types` は**実行していない**（指示どおり）
+  - `scripts/selfdeploy/status.sh`: exit 0。リリースが 1 件も無い時点で
+    `{"current": null, "previous": null, "health": {…schema_version 10…}, "gui_health": {"ok": true,…},
+    "daemon_instances": null, "releases": [], "backups": []}` を返した（本番の `/health` を読むだけ）。
+  - `scripts/selfdeploy/release.sh HEAD`（実リポジトリ・実機。`SD_REPO` はこの作業ワークツリー）:
+    **exit 0**。`~/taskd/releases/a6cb1b525032/` ができた。gate は 7 段すべて exit 0:
+    `cargo-test 54.737s` / `cargo-clippy 40.051s` / `cargo-build 18.155s`（`--release -p taskd -p taskctl`）/
+    `pnpm-install 1.229s` / `pnpm-typecheck 1.492s` / `pnpm-test 2.008s` / `pnpm-build 2.621s`。
+    `gate-logs/cargo-test.log`: `test result: ok` のブロックが **56**、合計 **1137 passed**、
+    `test result: FAILED` は 0（Phase 45 と同じ）。`gate-logs/pnpm-test.log`: **44 files / 534 tests passed**。
+    `manifest.json` = `{"sha":"a6cb1b525032c5806bcb44d7a4e2fd6fece77751","sha12":"a6cb1b525032","ref":"HEAD",
+    "built_at":"2026-09-19T03:57:42Z","built_by":"rmaeda@home-dev","profile":"release","schema_version":10,
+    "taskd_version":"0.1.0","gui_version":"0.1.0","gate_ok":true}`。中身は
+    `bin/taskd`（25.4 MB）/ `bin/taskctl`（10.1 MB）/ `gui/{build 2.1M, node_modules 69M(prod), server.js,
+    package.json, pnpm-lock.yaml, pnpm-workspace.yaml}` / `gate.json` / `gate-logs/`。
+    ビルド用 worktree は消えている（`git worktree list` に残っていない）。
+    **注**: この実行は本節（PROGRESS の追記）と、下の B-2 の修正を入れる**前**の木に対して回したもの。
+  - `scripts/selfdeploy/release.sh HEAD`（2 回目。B-2 の修正と本節を入れた後の木 `d2c05cf` に対して）:
+    **exit 0**、`~/taskd/releases/d2c05cff5f6c/`。gate 7 段すべて exit 0（`cargo-test 63.758s` /
+    `cargo-clippy 34.208s` / `cargo-build 18.505s` / `pnpm-install 1.2s` / `pnpm-typecheck 1.728s` /
+    `pnpm-test 2.030s` / `pnpm-build 2.6s` — Rust は **56 ブロック / 1137 passed**、GUI は
+    **44 files / 534 tests passed** で 1 回目と同じ）。`manifest.json` は
+    `{"sha":"d2c05cff5f6c1c451b31d9f9575461731dd763e8","sha12":"d2c05cff5f6c","schema_version":10,…}`。
+    このとき**掃除も動いた**: 1 回目の `a6cb1b525032` は `current` でも `previous` でも検証済みでも
+    ないので `pruning release a6cb1b525032` で消えた（D1 の「`current`/`previous` と検証済みの新しい
+    3 件を残す」どおり）。`~/taskd/releases/.build/` は空、作業ツリーの一覧にも残っていない。
+    **いま `~/taskd/releases/` にあるのは `d2c05cff5f6c` の 1 件だけ**。
+  - `scripts/selfdeploy/verify.sh --dry-run a6cb1b525032`: **exit 0**。
+    `sqlite3 "file:~/taskd/taskd.sqlite3?mode=ro" ".backup …"` が通り（2.4M、`schema_version=10`、
+    `tasks=77`）、7711 / 7701 / 7712 がすべて空き、`current` は無し（→ `live_ok=false`）、
+    実行するはずの 3 本のコマンド（新 taskd / staging GUI / N-1）をそのまま表示した。
+    **本番のプロセスには一切触れていない**。
+  - `verify.sh` の検査 2 の収集部（verify.sh に埋め込んである python3）を切り出して**本番 API に対して
+    読み取りだけで**実行: exit 0、
+    `{"tasks_total":77,"tasks":77,"tasks_digest":"f7ca96c26312b92b","projects":2,"milestones":4,"org":11,
+    "approvals_decided":8,"reports":74,"messages":2,"errors":[]}`。
+    ページング（`limit=500` + `next_cursor`）・案件ごとの `milestones`・ノードごとの `messages`・
+    `Authorization: Bearer` が実データで通ることを確認した。
+  - `verify.sh` の検査 4 と同じことを、staging の taskd ではなく**本番 API を読むだけ**にして試した
+    （リリースの GUI を `127.0.0.1:7701` に `TASKD_GUI_RELEASE=a6cb1b525032` で起こす。本番のポートには
+    bind しない。終わったら自分が起こした pid だけを止めた）:
+    `/healthz` → `{"ok":true,"name":"taskd-gui","version":"0.1.0","release":"a6cb1b525032"}`、
+    `/`・`/org`・`/projects`・`/projects/01M2RCYVZH6RGX8RX0JP572BAT`・`/approvals`・`/reports`・
+    `/clusters`・`/tasks` がすべて **200**（`/` はリダイレクトを追った先）。
+  - `scripts/selfdeploy/status.sh`（リリースが 1 件ある状態）: exit 0。`releases[0]` に `sha12` /
+    `built_at` / `schema_version` / `gate.steps[]`（各段の exit と秒数）/ `verify: null` / `has_bin: true` が
+    出て、本番の `/health`（`schema_version: 10`、`instance_id 01M2VR2M46BKZVCQMP1F69GWMS`）と
+    `:7700` の `/healthz`（`{"ok":true,"name":"taskd-gui","version":"0.1.0"}` — **`release` が無い**。
+    いま動いている GUI は作業チェックアウトから手で起こした Phase 46 以前のもの）も読めた。
+    `daemon_instances` は `null`（Phase 47 の表がまだ無い）。
+- 実機で見つけて直した道具側の不具合（どちらも実行して初めて出た）:
+  - B-1: `lib.sh` の `sd_schema_version_of_tree` が `local tree="$1" file="$tree/…"` と書いてあり、
+    bash は `local` の**全部の語を先に展開してから**代入するので `$tree` がまだ無く、`set -u` で
+    `tree: unbound variable` になって 1 回目の `release.sh` が gate 全段 exit 0 の**後**で落ちた
+    （リリースは作られず `.partial` が残った）。参照する変数を別の `local` に分けて修正。
+    同じ書き方が他に無いことを `grep -n 'local [a-z_]*="\$[0-9]"[^;]*\$[a-z_]' *.sh` で確認した。
+  - B-2: 検査 4 の画面の検査が `curl` のリダイレクトを追っていなかった。GUI の `/` は `/tasks` へ
+    **302** するので（`gui/e2e/g0.spec.ts` の Phase G13g の注にもある）、そのままでは検査 4 が必ず落ちる。
+    `lib.sh` に `sd_http_status_follow`（`curl -sSL --max-redirs 5`）を足し、画面の検査だけそれを使う
+    ようにした。上の実機の確認は修正後のやり方（リダイレクトを追う）で 200 になっている。
+- 実行していないこと（できない理由つき）:
+  - `verify.sh <sha12>`（本番）: **できない**。検査 1 が `taskd --mode verify --db … --listen …` で
+    新リリースを起こすが、`--mode` 以下のフラグは **Phase 47** で taskd 本体に入るもので、いまの
+    バイナリは知らない（引数を渡すと起動に失敗する）。代わりに `--dry-run` で前提（スナップショット・
+    ポート・`current`）を確かめ、検査 2 の収集部と検査 4 の画面の検査を本番 API の**読み取りだけ**で
+    別々に回した（上記）。Phase 47 が入ったら `verify.sh a6cb…` をそのまま 1 回回せる。
+  - `promote.sh` / `rollback.sh` / `install-units.sh` / `systemctl`: **実行していない**。本番の taskd
+    （pid 2697489、`target/debug/taskd`）と GUI（pid 2615036、`0.0.0.0:7700`）には触れていない。
+    初回の移行は人（または認可のある会話のエージェント）が `docs/selfdeploy.md` §1 → §4a の順で行う。
+  - `pnpm e2e`: 実行していない（`e2e/g0.spec.ts` の `/healthz` に `release` の検査を足したが未実行）。
+  - `pnpm gen:types`: 指示どおり実行していない（API の型は今回変えていない）。
+- 未解決事項:
+  - U46-1: **初回の移行がまだ**。`deploy/systemd/*.service` は `ExecStart` に `--release %i` を渡すので、
+    Phase 47 の入ったバイナリでないと `taskd@<sha12>` が起動しない。手順は `docs/selfdeploy.md` §1・§4a。
+    ADR-0040 §4 の「2 回目の昇格がライブになることを確かめる」も Phase 47 の後。
+  - U46-2: 件数一致（検査 2）は本番が動いていると必ずずれる（スナップショットは時刻 T、本番の読みは
+    T+ε）。`verify.json` に `counts.prod` / `counts.staging` / `counts.prod_after` の 3 つを入れて、
+    ずれが「本番が動いたせい」かどうかを人が見分けられるようにしてある。実機で何回か回してみて、
+    許容幅（たとえば `prod` と `prod_after` の間に入っていればよい）にするかどうかを決めたい。
+  - U46-3: `verify.sh` の検査 3 の `org/<ノード>/memory` は staging の `GET /org` の**先頭のノード**を
+    使う（ADR-0040 D3 は `org/secretary/memory` と書いているが、`secretary` が消えたり改名されたりしても
+    落ちないようにした）。実機の組織図では先頭が `secretary` なので同じものを見ている。
+  - U46-4: `shellcheck` がこのホストに無いので、静的検査は `bash -n` だけ。入れられるなら
+    `scripts/selfdeploy/*.sh` に一度かけてほしい（`SC2155` など軽い指摘は残っているはず）。
+- taskd.toml: **Phase 46 で変えるところは無い**（`docs/selfdeploy.md` §8）。`[handoff]` は Phase 47 で
+  taskd 本体に入るときの設定で、それまでは既定値で動く。`promote.sh` が読むのは既存の
+  `kill_grace_secs`（実機は 10）だけ。
+
+### 提案
+
+- P-101: `promote.sh` の「ライブ引き継ぎが 60 秒で完了しなかった」の判定は `/health` の `release` と
+  `role` だけを見ている。Phase 47 で `daemon_instances` ができたら、`sqlite3` で
+  `SELECT role, release FROM daemon_instances` も見て、「新が standby のまま」「旧が draining に
+  ならない」のどちらで詰まったかをログに出せるようにするとよい（`status.sh` は既に読んでいる）。
+- P-102: ADR-0040 D6 の `GET /releases` と GUI の「リリース」画面（G14、Phase 48）を作るとき、
+  `status.sh` が組み立てている JSON をそのまま契約にできる（`releases[]` の形は D6 とほぼ同じ）。
+  API 側は `~/taskd/releases/*/manifest.json` と `verify.json` を読むだけでよい。
+- P-103: `release.sh` の gate はネットワークに出ない前提（`Cargo.lock` / `pnpm-lock.yaml` は固定、
+  pnpm の store は温まっている）だが、`pnpm install --frozen-lockfile` は store に無いものがあれば
+  レジストリに出る。自己改善の案件で依存を足したときにここで初めてネットワークに出るので、
+  `--offline` を付けるかどうかは実機で 1 回踏んでから決めたい。

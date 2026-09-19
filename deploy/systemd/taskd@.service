@@ -1,0 +1,22 @@
+[Unit]
+# taskd（ADR-0040 D4）。`%i` は リリースの sha12。`~/taskd/releases/<sha12>/bin/taskd` から動く。
+# 本番は作業チェックアウト（~/workspace/agent-platform/target）にはもう依存しない（D1）。
+# インストール: scripts/selfdeploy/install-units.sh（~/.config/systemd/user/ に置いて daemon-reload）
+Description=taskd (release %i)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/taskd
+ExecStart=%h/taskd/releases/%i/bin/taskd --config %h/taskd/taskd.toml --release %i
+# drain して exit 0 したときは再起動しない（ADR-0040 D4 のライブ引き継ぎ）。落ちたときだけ起こし直す。
+Restart=on-failure
+RestartSec=2
+# drain は長い（既定 [handoff] drain_timeout_secs = 3600）。stop で待つ時間もそれに合わせる。
+TimeoutStopSec=3900
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=false
+
+[Install]
+WantedBy=default.target
