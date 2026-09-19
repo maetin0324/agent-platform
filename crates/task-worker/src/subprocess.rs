@@ -80,6 +80,7 @@ pub async fn run_subprocess(
     command.process_group(0);
 
     let mut child = command.spawn().map_err(AdapterError::Spawn)?;
+    let _process_group = crate::process_group::ProcessGroup::register(run_id, child.id());
 
     let payload = serde_json::to_string(req)?;
     if let Some(mut stdin) = child.stdin.take() {

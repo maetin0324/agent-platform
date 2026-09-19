@@ -12,6 +12,31 @@ fn valid_task_body() -> serde_json::Value {
     json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}]})
 }
 
+/// ADR-0044 §5 Phase 53 追記（Phase 55）: **変更を伴う API はすべて管理系**なので、
+/// 変更系のガード（Content-Type / 本文サイズ / 未知フィールド）を見るテストはトークン付きの
+/// env を使い、要求に Bearer を付ける。
+fn admin_env() -> TestEnv {
+    TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        ..Default::default()
+    })
+}
+
+fn admin() -> [(&'static str, String); 1] {
+    [("authorization", format!("Bearer {TOKEN}"))]
+}
+
+/// `Request::post(..)` に Host / Content-Type / Bearer を付ける（本文はそのまま）。
+fn admin_post(path: &str, content_type: Option<&str>, body: Body) -> Request<Body> {
+    let mut builder = Request::post(path)
+        .header("host", HOST)
+        .header("authorization", format!("Bearer {TOKEN}"));
+    if let Some(ct) = content_type {
+        builder = builder.header("content-type", ct);
+    }
+    builder.body(body).expect("request")
+}
+
 #[tokio::test]
 async fn bearer_token_is_required_when_configured() {
     let env = TestEnv::with(EnvOptions {
@@ -153,47 +178,45 @@ async fn post_with_origin_is_forbidden_and_changes_nothing() {
 
 #[tokio::test]
 async fn post_requires_json_content_type() {
-    let env = TestEnv::new();
+    let env = admin_env();
     let app = env.router();
 
-    let without = Request::post("/api/v1/tasks")
-        .header("host", HOST)
-        .body(Body::from(valid_task_body().to_string()))
-        .expect("request");
+    let without = admin_post("/api/v1/tasks", None, Body::from(valid_task_body().to_string()));
     assert_problem(&send(&app, without).await, 415, "unsupported_media_type");
 
-    let form = Request::post("/api/v1/tasks")
-        .header("host", HOST)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .body(Body::from("title=t"))
-        .expect("request");
+    let form = admin_post(
+        "/api/v1/tasks",
+        Some("application/x-www-form-urlencoded"),
+        Body::from("title=t"),
+    );
     assert_problem(&send(&app, form).await, 415, "unsupported_media_type");
 
-    let text = Request::post("/api/v1/tasks/01J9ZX5T3K8Q7W6V5R4P3N2M1H/cancel")
-        .header("host", HOST)
-        .header("content-type", "text/plain")
-        .body(Body::empty())
-        .expect("request");
+    let text = admin_post(
+        "/api/v1/tasks/01J9ZX5T3K8Q7W6V5R4P3N2M1H/cancel",
+        Some("text/plain"),
+        Body::empty(),
+    );
     assert_problem(&send(&app, text).await, 415, "unsupported_media_type");
     assert!(env.store.list(None).expect("list").is_empty());
 
-    let with_charset = Request::post("/api/v1/tasks")
-        .header("host", HOST)
-        .header("content-type", "Application/JSON; charset=utf-8")
-        .body(Body::from(valid_task_body().to_string()))
-        .expect("request");
+    let with_charset = admin_post(
+        "/api/v1/tasks",
+        Some("Application/JSON; charset=utf-8"),
+        Body::from(valid_task_body().to_string()),
+    );
     assert_eq!(send(&app, with_charset).await.status, 201);
 }
 
 #[tokio::test]
 async fn bodies_over_one_mebibyte_are_rejected_with_413() {
-    let env = TestEnv::new();
+    let env = admin_env();
     let app = env.router();
     let big = vec![b' '; 1024 * 1024 + 1];
 
     let declared = Request::post("/api/v1/tasks")
         .header("host", HOST)
         .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {TOKEN}"))
         .header("content-length", big.len().to_string())
         .body(Body::from(big.clone()))
         .expect("request");
@@ -201,54 +224,64 @@ async fn bodies_over_one_mebibyte_are_rejected_with_413() {
 
     // Content-Length 無し（chunked 相当）でも読み取り中に打ち切る。
     let chunks: Vec<Result<Bytes, std::io::Error>> = big.chunks(64 * 1024).map(|c| Ok(Bytes::copy_from_slice(c))).collect();
-    let streamed = Request::post("/api/v1/tasks")
-        .header("host", HOST)
-        .header("content-type", "application/json")
-        .body(Body::from_stream(futures_util::stream::iter(chunks)))
-        .expect("request");
+    let streamed = admin_post(
+        "/api/v1/tasks",
+        Some("application/json"),
+        Body::from_stream(futures_util::stream::iter(chunks)),
+    );
     assert_problem(&send(&app, streamed).await, 413, "payload_too_large");
 
     // ちょうど 1 MiB は上限内（本文としては JSON の空白だけなので 400）。
     let exact = vec![b' '; 1024 * 1024];
-    let at_limit = Request::post("/api/v1/tasks")
-        .header("host", HOST)
-        .header("content-type", "application/json")
-        .body(Body::from(exact))
-        .expect("request");
+    let at_limit = admin_post("/api/v1/tasks", Some("application/json"), Body::from(exact));
     assert_problem(&send(&app, at_limit).await, 400, "bad_request");
     assert!(env.store.list(None).expect("list").is_empty());
 }
 
 #[tokio::test]
 async fn malformed_and_unknown_fields_are_bad_requests() {
-    let env = TestEnv::new();
+    let env = admin_env();
     let app = env.router();
+    let admin = admin();
+    let headers: Vec<(&str, &str)> = admin.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
     let mut unknown = valid_task_body();
     unknown["bogus"] = json!(1);
-    assert_problem(&send(&app, post_json("/api/v1/tasks", &unknown)).await, 400, "bad_request");
+    assert_problem(
+        &send(&app, post_json_with("/api/v1/tasks", &unknown, &headers)).await,
+        400,
+        "bad_request",
+    );
 
     let unknown_criterion = json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok", "extra": true}]});
-    assert_problem(&send(&app, post_json("/api/v1/tasks", &unknown_criterion)).await, 400, "bad_request");
+    assert_problem(
+        &send(&app, post_json_with("/api/v1/tasks", &unknown_criterion, &headers)).await,
+        400,
+        "bad_request",
+    );
 
     let wrong_type = json!({"title": "t", "objective": "o", "acceptance": [], "priority": "high"});
-    assert_problem(&send(&app, post_json("/api/v1/tasks", &wrong_type)).await, 400, "bad_request");
+    assert_problem(
+        &send(&app, post_json_with("/api/v1/tasks", &wrong_type, &headers)).await,
+        400,
+        "bad_request",
+    );
 
-    let syntax = Request::post("/api/v1/tasks")
-        .header("host", HOST)
-        .header("content-type", "application/json")
-        .body(Body::from("{\"title\": "))
-        .expect("request");
+    let syntax = admin_post("/api/v1/tasks", Some("application/json"), Body::from("{\"title\": "));
     assert_problem(&send(&app, syntax).await, 400, "bad_request");
 
     let id = task_core::TaskId::new();
-    let approve_unknown = post_json(&format!("/api/v1/tasks/{id}/approve"), &json!({"nope": true}));
+    let approve_unknown = post_json_with(&format!("/api/v1/tasks/{id}/approve"), &json!({"nope": true}), &headers);
     assert_problem(&send(&app, approve_unknown).await, 400, "bad_request");
-    let bad_status = post_json(&format!("/api/v1/tasks/{id}/cancel"), &json!({"expected_status": "sleeping"}));
+    let bad_status = post_json_with(
+        &format!("/api/v1/tasks/{id}/cancel"),
+        &json!({"expected_status": "sleeping"}),
+        &headers,
+    );
     assert_problem(&send(&app, bad_status).await, 400, "bad_request");
-    let plan_unknown = post_json("/api/v1/plans", &json!({"goal": "g", "tier": "cheap", "color": "red"}));
+    let plan_unknown = post_json_with("/api/v1/plans", &json!({"goal": "g", "tier": "cheap", "color": "red"}), &headers);
     assert_problem(&send(&app, plan_unknown).await, 400, "bad_request");
-    let replay_unknown = post_json("/api/v1/replay", &json!({"dry_run": true}));
+    let replay_unknown = post_json_with("/api/v1/replay", &json!({"dry_run": true}), &headers);
     assert_problem(&send(&app, replay_unknown).await, 400, "bad_request");
     assert!(env.store.list(None).expect("list").is_empty());
 }

@@ -2996,3 +2996,212 @@ production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/
     伴わない仕事）」と「作業ツリーがまだ作られていない」を画面で言い分けたい（G16-P2 と同じ理由）。
     いまは前者を `repos: []`、後者を 404 `file_not_found` として扱っているが、
     `docs/taskd-api-v1.md` に明記されると GUI の文言を確信を持って書ける。
+
+## Phase G19 — 中止・一時停止・アーカイブ（ADR-0044 D6 / taskd Phase 55。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的: taskd Phase 55（ADR-0044 D6）で入った「案件・途中目標の中止・一時停止・アーカイブ」を画面にする。
+  タスク 1 件の中止（`POST /tasks/{id}/cancel`）は従来どおりで、ここは**その上の 2 階層**。
+  使う API は 8 つ（すべて**管理系**、本文 `{}`、応答 200）:
+  `POST /projects/{id}/{cancel|pause|resume|archive|unarchive}` → `ProjectLifecycle`、
+  `POST /milestones/{id}/{cancel|pause|resume}` → `MilestoneLifecycle`
+  （`docs/taskd-api-v1.md` §3.84〜3.91、エンドポイント 73〜80）。
+  読み取り側は `GET /projects?archived=` と `GET /tasks?archived=`（既定でアーカイブ済みを隠す）。
+- 決めたこと:
+  - G19-D1: **押せるかどうかの最終判断は taskd**（409 `invalid_transition`）。GUI には
+    `app/lib/lifecycle.ts` という**表示の判定だけ**の純関数を置き、「その状態で意味のないボタンを
+    出さない」ためにだけ使う。押されたら必ず taskd に送り、409 の文言をそのまま出す
+    （状態機械を GUI で作り直さない。CLAUDE.md の「仕様外の挙動に頼らない」）。
+    判定の根拠は §3.84〜3.91 の「いまの状態でできない操作」の 4 行だけ:
+    中止済みの `cancel` / 終端・一時停止中の `pause` / `paused` でないものの `resume` / 非終端の案件の `archive`。
+    したがって案件の終端は `done` / `cancelled`、途中目標の終端は `reached` / `redesigned` / `cancelled`
+    （taskd 側が Phase 55 で `ProjectStatus::is_terminal()` / `MilestoneStatus::is_terminal()` を
+    この 2 つに確定させ、§3.84〜3.91 に明記した。G19-P3 を参照）。
+    **「中止」の出し方は案件と途中目標で違う**: `POST /milestones/{id}/cancel` は**終端の途中目標を
+    409 にする**ので `cancel: !terminal`（達成・再設計・中止済みには出さない）。一方
+    `POST /projects/{id}/cancel` は**完了した案件でも受ける**ので `cancel: status !== "cancelled"`。
+    どちらも taskd の規則をそのまま写しただけで、GUI 側で「完了したものは中止できないはずだ」と
+    決めつけてはいない。
+  - G19-D2: **「アーカイブ」は終端でなくても消さずに `disabled` で出す**（理由を文で添える）。
+    消してしまうと「どうすれば押せるのか」が画面から分からないため（G18-D6 の「PR を作る」と同じ扱い）。
+    `archive` / `unarchive` は taskd 側で冪等なので、二度押しを GUI で止めたりはしない。
+  - G19-D3: 中止とアーカイブの確認は**画面の中の 2 段階**（G18-D7 と同じ。`window.confirm` は使わない）。
+    1 段目のボタンで赤い帯／情報の帯を開き、2 段目のボタンだけが `intent` を POST する。
+    確認の文には対象の題名と「何が消えるか」を書く（中止は作業ツリーとブランチが消えて取り返しがつかない）。
+  - G19-D4: 結果は**対象ごとの `useFetcher`**（`project-lifecycle-<id>` / `milestone-lifecycle-<id>`）に
+    載せる。SSE の再検証で消えないため（監査 H1 / G14 / G18-D3 と同じ）。
+  - G19-D5: 中止の flash には **taskd が返した `cancelled_tasks` / `cancelled_milestones` の長さ**を
+    そのまま件数として出し、止まったタスクへのリンクも並べる（連鎖を GUI で数え直さない）。
+    `cancel` 以外は空配列なので件数は出さない。
+  - G19-D6: 一時停止のバナーは**必ず「新しい仕事は始まりません（走っている仕事は最後まで走ります）」**
+    まで言う。止めたつもりで走り続けている run を事故と誤解しないため（§3.84〜3.91 の `pause` の行）。
+    出す場所は案件詳細（ヘッダの直下）とボード（選んだ案件・途中目標が止まっているとき）。
+  - G19-D7: 案件の「状態を直接変える」プルダウンから **`paused` を外した**（`proposed` / `active` / `done`
+    の 3 つに）。`PATCH /projects/{id}` で `paused` にしても `paused_from` が入らず連鎖も起きないので、
+    一時停止はヘッダのボタン（`POST …/pause`）に一本化する。`cancelled` も同じ理由で並べない。
+    途中目標の「状態を直接変える」（裏方）も同じく `proposed` / `approved` / `in_progress` /
+    `reached` / `redesigned` の 5 つのまま。
+    **追記（taskd P55-7）**: taskd 側も同じ規則を入れ、`PATCH /projects/{id}` と `PATCH /milestones/{id}` は
+    `status` に `paused` / `cancelled` を書くと **422 `validation`**（`errors[0].field = "status"`）で
+    専用のエンドポイントへ案内するようになった（`docs/taskd-api-v1.md` §3.46 / §3.84〜3.91。
+    `PATCH {"status":"paused"}` が 200 だった v1 の挙動の変更）。GUI の選択肢は変えていない
+    （**この判断は GUI だけの取り決めではなく、taskd と同じ規則が 2 か所にある**という位置づけに変わった）。
+    万一 422 が返っても、文言は `ProjectActionFlash` → `ErrorFlash` がそのまま出す（GUI では検証しない）。
+  - G19-D8: 一覧の絞り込み（「アーカイブを表示」）は **`<Form method="get">` で URL の `?archived=1` を
+    付け外しする**（ボードの絞り込みと同じ「URL がそのまま状態」。リンクとして共有できる）。
+    隠す・出すの判断は taskd がするので、GUI は `archived=1` を**付けるかどうか**だけを決め、
+    返ってきた `items` を絞り直さない。既定ではクエリごと送らない。
+  - G19-D9: ボードの「アーカイブされた案件」のバナーは**作らなかった**。`GET /projects`（ボードの
+    案件プルダウンの元）が既定でアーカイブ済みを隠すので、ボードからはそもそも選べない。
+    アーカイブの状態は `/projects`（バッジ）と `/projects/:id`（バッジ + バナー）で見せる。
+- 変更したファイル:
+  - `app/lib/lifecycle.ts`（新規）— `projectLifecycleButtons` / `milestoneLifecycleButtons` /
+    `projectIsTerminal` / `milestoneIsTerminal` / `projectIsArchived` / `projectIsPaused` /
+    `milestoneIsPaused` / `readArchivedParam` / `archivedQuery` と終端の一覧 2 つ。
+  - `app/lib/labels.ts` — `PROJECT_STATUS_LABEL` に `cancelled`、`MILESTONE_STATUS_LABEL` に
+    `paused` / `cancelled`。`PAUSE_LABEL` / `RESUME_LABEL` / `CANCEL_LABEL` / `CANCEL_CONFIRM_LABEL` /
+    `ARCHIVE_LABEL` / `ARCHIVE_CONFIRM_LABEL` / `UNARCHIVE_LABEL` / `CANCEL_STOP_LABEL` /
+    `ARCHIVED_BADGE_LABEL` / `SHOW_ARCHIVED_LABEL` / `ARCHIVE_ONLY_TERMINAL_HINT` /
+    `PROJECT_PAUSED_BANNER` / `MILESTONE_PAUSED_BANNER` / `PROJECT_CANCELLED_BANNER` /
+    `PROJECT_ARCHIVED_BANNER` と `projectCancelConfirmText` / `milestoneCancelConfirmText` /
+    `projectArchiveConfirmText` / `cancelledCountLabel`。
+  - `app/taskd/projects-admin.server.ts` — `cancelProject` / `pauseProject` / `resumeProject` /
+    `archiveProject` / `unarchiveProject` / `cancelMilestone` / `pauseMilestone` / `resumeMilestone`
+    （内部は `projectLifecycle` / `milestoneLifecycle` の 2 つの私的ヘルパー）。
+    冒頭の JSDoc を Phase 55 の認可の変更（`PATCH /projects/{id}` 等も管理系になった）に合わせた。
+  - `app/taskd/action-types.ts` — `ProjectLifecycleOp` / `MilestoneLifecycleOp` と
+    `ProjectOpOutcome` の `{ok:true, op, lifecycle}` の 2 枝、失敗側の `op` の union。
+  - `app/components/Flash.tsx` — `ProjectActionFlash` に 8 つの `op` の文言と、中止のときの
+    件数・止まったタスクへのリンク（`LIFECYCLE_OPS`）。
+  - `app/routes/projects.$id.tsx` — `action` に 8 つの `intent`、`ProjectLifecycleActions` /
+    `MilestoneLifecycleActions`（新規の部品）、ヘッダのバッジ 3 つ（一時停止・中止・アーカイブ済み）、
+    バナー 3 つ、`PROJECT_STATUSES` から `paused` を外し、状態の tone に `cancelled` / `paused` を追加。
+  - `app/routes/projects.tsx` — loader に `?archived=` の読み取り（`ProjectsData.showArchived`）、
+    「アーカイブを表示」の GET フォーム、行のアーカイブ済みバッジ、tone に `cancelled`。
+  - `app/routes/board.tsx` — 選んだ案件・途中目標が止まっているときのバナー 3 つ。
+  - `app/routes/tasks.tsx` — `loadTasks` が `?archived=` を `GET /tasks` に素通しする 1 行。
+  - `test/mock-taskd/fixtures.ts` — `project` / `milestone` / `taskRef` / `projectLifecycle` /
+    `milestoneLifecycle`。
+  - `test/mock-taskd/server.ts` — `serveLifecycle`（8 経路）と `serveProjectList`（`?archived=1`）。
+  - `test/unit/lifecycle.test.ts`（新規、24 件。うち 1 件は taskd 側の `is_terminal()` 確定を受けた追加分）、
+    `test/unit/labels.test.ts`（+4）、
+    `test/unit/projects.test.ts`（+2）、`test/unit/projects.detail.test.ts`（+1）、
+    `test/unit/tasks.loader.test.ts`（+1）。
+  - `app/taskd/types.ts` — `pnpm gen:types` で再生成（`ProjectLifecycle` / `MilestoneLifecycle`、
+    `ProjectStatus` の `cancelled`、`MilestoneStatus` の `paused` / `cancelled`、
+    `Project.{archived_at, paused_from}`、`Milestone.paused_from`）。手では書いていない。
+  - `docs/taskd-api-v1.md` は**触っていない**（`scripts/sync-gui-docs.sh` が `docs/gui/api.md` から
+    写す生成物。ADR-0020 D4）。
+- 受け入れ条件ごとの証拠:
+  - 条件: 案件のヘッダに「一時停止／再開」「中止（確認付き）」「アーカイブ／アーカイブ解除（確認付き）」が
+    状態に応じて出る。終端でない案件はアーカイブできない。
+    実行: `pnpm test`（`test/unit/lifecycle.test.ts`）—
+    `projectLifecycleButtons({status:"active"})` が
+    `{pause:true, resume:false, cancel:true, archive:true, unarchive:false, archiveEnabled:false}`、
+    `"paused"` は `pause:false / resume:true`、`"done"` は `pause:false / archiveEnabled:true`、
+    `"cancelled"` は `cancel:false / archiveEnabled:true`、`archived_at` が入ると
+    `archive:false / unarchive:true`。**`archiveEnabled` が真になるのは `done` と `cancelled` だけ**
+    （5 つの状態を回して `["done","cancelled"]` を確認）。
+  - 条件: 途中目標のカードに「一時停止／再開」「中止（確認付き）」が出る。
+    実行: 同テスト — `milestoneLifecycleButtons({status:"in_progress"})` が
+    `{pause:true, resume:false, cancel:true}`、`"paused"` は `{pause:false, resume:true, cancel:true}`
+    （一時停止中でも中止はできる）、`"cancelled"` と `"reached"` は 3 つとも false。
+    6 つの状態を回して**一時停止できるのも中止できるのも** `["proposed","approved","in_progress"]` だけ
+    （`reached` / `redesigned` / `cancelled` は終端で、taskd が 409 にする）。
+    **案件との違い**: 案件は `done` でも中止できる（上の G19-D1）。
+  - 条件: 8 つの経路に空の本文を送り、応答をそのまま画面に渡す。
+    実行: 同テスト（`serveLifecycle` の偽 taskd）— `cancelProject` が
+    `POST /api/v1/projects/p1/cancel` に **body `"{}"`** を送り、
+    `{ok:true, op:"project_cancel", lifecycle:{project:{status:"cancelled"}, cancelled_tasks:[1 件],
+    cancelled_milestones:["m1"]}}` を返すこと。`pause` は `paused_from:"active"` を、
+    `milestone pause` は `paused_from:"in_progress"` をそのまま通すこと。
+    `archive` → `archived_at:"2026-09-19T12:00:00Z"`、`unarchive` → `archived_at` 無し、
+    **二度押しも 200**（冪等）。id は URL エンコードして送る（`a/b` → `/projects/a%2Fb/cancel`）。
+  - 条件: できない操作（409）・無い id（404）・トークン無し（401）は taskd の文言のまま出る。
+    実行: 同テスト — 非終端の案件の `archive` が
+    `{ok:false, op:"project_archive", error:{status:409, code:"invalid_transition", conflict:true}}`、
+    `pause` の 404 `project_not_found` と 401 `unauthorized`、
+    `resumeMilestone` の 404 `milestone_not_found` と 409 `invalid_transition`。
+    いずれも例外にせず data として返る（401 の案内文は `Flash.tsx` の 1 か所に集約済み）。
+  - 条件: 中止のあと「何件止まったか」が画面に出る。
+    実行: `pnpm test`（`test/unit/labels.test.ts`）—
+    `cancelledCountLabel(3, 1) === "仕事 3 件・途中目標 1 件を中止しました"`、
+    `cancelledCountLabel(0) === "仕事 0 件を中止しました"`。
+    `Flash.tsx` の `ProjectActionFlash` が `lifecycle.cancelled_tasks.length` /
+    `cancelled_milestones.length` をそのまま渡し、止まったタスクを `/tasks/<id>` のリンクで並べること
+    （`data-testid="flash-lifecycle-cancelled"` / `"flash-lifecycle-task"`）をソースで確認。
+  - 条件: 一時停止・中止・アーカイブのバッジが題名の横に出る。
+    実行: ソースの確認 — `app/routes/projects.$id.tsx` の `PageHeader` の `actions` に
+    `project-status` に加えて `project-paused-badge` / `project-cancelled-badge` /
+    `project-archived-badge`。`app/routes/projects.tsx` の一覧の「状態」欄に
+    `project-status` + `project-archived-badge`。文言は
+    `projectStatusLabel("cancelled") === "中止"` / `milestoneStatusLabel("paused") === "一時停止"` /
+    `milestoneStatusLabel("cancelled") === "中止"` / `ARCHIVED_BADGE_LABEL === "アーカイブ済み"`
+    （`test/unit/labels.test.ts`）。
+  - 条件: 一時停止のバナーが案件とボードに出る。
+    実行: `pnpm test`（`test/unit/labels.test.ts`）— `PROJECT_PAUSED_BANNER` が
+    「一時停止中」「新しい仕事は始まりません」「走っている仕事は最後まで走ります」の 3 つを含むこと、
+    `MILESTONE_PAUSED_BANNER` も同じ断りを含むこと。ソースの確認で
+    `projects.$id.tsx` に `project-paused-banner` / `project-cancelled-banner` /
+    `project-archived-banner`、`board.tsx` に `board-project-paused` / `board-project-cancelled` /
+    `board-milestone-paused`（選んだ案件・途中目標を `filter.project` / `filter.milestone` で引いて判定）。
+  - 条件: 一覧に「アーカイブを表示」があり、URL の `?archived=1` で切り替わる。
+    実行: `pnpm test`（`test/unit/projects.test.ts`、2 件）— 既定では
+    `GET /api/v1/projects` に `archived` を**付けない**（`showArchived === false`、
+    アーカイブ済みの `p9` は並ばない）。`?archived=1` のときだけ `archived=1` を付け、
+    偽 taskd（`serveProjectList`）がアーカイブ済みも返すと `["p1","p9"]` が並ぶこと。
+    `readArchivedParam` / `archivedQuery` の対応（`""`→false→クエリ無し、`"1"`→true→`"1"`、
+    `"0"`→false）は `test/unit/lifecycle.test.ts`。
+  - 条件: タスク一覧も `?archived=1` を素通しする。
+    実行: `pnpm test`（`test/unit/tasks.loader.test.ts`）— `?archived=1` のとき
+    `/api/v1/tasks?archived=1`、無いときは `/api/v1/tasks`（クエリを足さない）。
+  - 条件: 新しい項目（`archived_at` / `paused_from` / `paused` / `cancelled`）を loader が素通りさせる。
+    実行: `pnpm test`（`test/unit/projects.detail.test.ts`）— `GET /projects/{id}` が返した
+    `status:"paused"` / `paused_from:"active"` / `archived_at` と、`paused` / `cancelled` の
+    途中目標 2 件がそのまま `loaderData` に載ること（GUI 側で計算し直さない）。
+  - 条件: 変更系はすべて BFF のトークン付きクライアントを通る（Phase 55 で変更系が全部管理系になった）。
+    実行: ソースの監査 — `client.post|patch|put|delete` の呼び出しは `app/taskd/*.server.ts` と
+    `app/taskd/task-changes.ts` の **52 か所すべて**が引数の `TaskdClient` を使い、
+    `action` を持つルート 20 本のうち **18 本が `getTaskdClient()`**（= `TaskdClient.fromEnv()` で
+    `TASKD_API_TOKEN_FILE` を読み `Authorization: Bearer` を付ける 1 つの共有クライアント）。
+    残り 2 本（`routes/login.tsx` / `routes/logout.ts`）は GUI 自身のセッションクッキーだけで
+    taskd を呼ばない。`app/` に残る素の `fetch(` 3 か所（`tasks.$id.runs.$runId.tsx` /
+    `tasks.$id.tsx` / `components/ArtifactsList.tsx`）は**ブラウザから GUI 自身の
+    `/files/...` を GET する**もので、taskd を直接呼んでも変更もしていない。
+  - 条件: フェーズのゲート。
+    実行: `pnpm lint` exit 0（biome、199 ファイル）/ `pnpm typecheck` exit 0 /
+    `pnpm test` exit 0（**53 ファイル、758 tests passed**。この Phase の前は 52 ファイル / 726 なので
+    +1 ファイル・+32）/ `pnpm build` exit 0（client / ssr とも）。
+    `pnpm gen:types` は**2 回流しても差分ゼロ**（1 回目で Phase 55 の型が入り、2 回目は `diff -u` が無出力）。
+    `git diff --exit-code app/taskd/types.ts` は**この Phase の再生成ぶん**を出す（コミット前なので当然）。
+- 未解決事項:
+  - G19-U1: `pnpm e2e` は未実行（G13k-U1 / G14-U1 / G16-U1 / G18-U1 と同じく、既定の 7700 / 7710 が
+    運用中の GUI / taskd を掴むため）。別ポートを与えて人が流すときは、`/projects/:id` の
+    「一時停止 → バナー → 再開」「中止（2 段階）→ 件数の flash」「完了の案件のアーカイブ →
+    `/projects` から消える → 『アーカイブを表示』で戻る」を見るのがよい。
+  - G19-U2: DOM を描画する unit テストは今回も無い（G10-U1 / G18-U2）。確認の 2 段階・
+    `disabled` のアーカイブ・バッジとバナーの出現は Playwright でのみ確認できる。
+    いまは純関数（`app/lib/lifecycle.ts`）と文言（`app/lib/labels.ts`）に分けて、判定の側だけを
+    テストで押さえている。
+  - G19-U3: `paused` の案件・途中目標に属するタスクは taskd が dispatch しないだけで、`ready` のまま
+    ボードの「待ち」に並ぶ。バナーで断ってはいるが、カード 1 枚 1 枚には印が無い
+    （`TaskSummary` に「上が止まっている」を表す項目が無いため。下の G19-P1）。
+  - G19-U4: 一時停止・中止は報告も通知も作らない（ADR-0044 D8）ので、**他の画面から止まったことに
+    気づく手がかりが無い**（受信箱にも `/reports` にも出ない）。案件・ボードを開いたときだけ分かる。
+  - G19-U5: `POST /projects/{id}/cancel` の `cancelled_milestones` は **id の配列**なので、flash では
+    件数しか出していない（題名を出すには案件の詳細を引き直す必要がある）。下の G19-P2。
+- 提案（`docs/taskd-api-v1.md` への変更提案。採否は人間）:
+  - G19-P1: `TaskSummary` に「このタスクは上（案件・途中目標）が止まっているので dispatch されない」を
+    表す真偽値が欲しい（`blocked_by_parent` など）。いまはボードの「待ち」に並ぶカードが、
+    順番待ちなのか上ごと止まっているのかを画面で言い分けられない（判定を GUI でやり直すのは
+    ADR-0033 D8 / CLAUDE.md の禁止に当たる）。
+  - G19-P2: `ProjectLifecycle.cancelled_milestones` を `cancelled_tasks` と同じく
+    `{id, title, seq}` の配列にしてほしい。いまは id だけなので、「何が止まったか」を人の言葉で
+    出すには案件の詳細を引き直すことになる。
+  - G19-P3: （**解決済み**）§3.84〜3.91 に「非終端の途中目標（`proposed`/`approved`/`in_progress`/`paused`）」
+    としか書かれていなかったので、終端を補集合（`reached` / `redesigned` / `cancelled`）で読んでいた。
+    taskd 側が Phase 55 で `MilestoneStatus::is_terminal()` = `reached | redesigned | cancelled` /
+    `ProjectStatus::is_terminal()` = `done | cancelled` と揃え、§3.84〜3.91 に明記して
+    `scripts/sync-gui-docs.sh` を流し直したので、`app/lib/lifecycle.ts` の 2 つの一覧と 1:1 で一致する。
+  - G19-P4: `GET /projects` の `archived` のように、**`GET /projects` にも `status` の絞り込み**が
+    欲しい（中止済みだけを隠す、など）。アーカイブしていない中止済みの案件が一覧に残り続けるため。

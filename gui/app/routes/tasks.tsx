@@ -49,6 +49,9 @@ export async function loadTasks(client: TaskdClient, request: Request): Promise<
       parent: params.get("parent") ?? undefined,
       root_only: params.get("root_only") ?? undefined,
       q: params.get("q") ?? undefined,
+      // ADR-0044 D6（Phase 55 / G19）: アーカイブされた案件のタスクは既定で隠れる。`?archived=1` で見える
+      // （隠す・出すの判断は taskd。GUI 側で絞り直さない）。
+      archived: params.get("archived") ?? undefined,
       order: params.get("order") ?? undefined,
       limit: params.get("limit") ?? undefined,
       cursor: params.get("cursor") ?? undefined,

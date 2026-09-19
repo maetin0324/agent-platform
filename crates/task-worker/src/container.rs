@@ -769,21 +769,62 @@ fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
 /// kill の経路から呼ぶ後始末の口（ADR-0044 B2 のプロセスグループ kill helper からも呼べるようにしておく）。
 ///
 /// `--rm` を付けているので `<runtime> run` のクライアントに SIGTERM が届けばコンテナも止まるが、
-/// クライアントだけを殺した場合に取り残さないよう、**ラベルで**止める道を用意する。
+/// **クライアントの pid への `killpg` はコンテナの中には届かない**（別の PID 名前空間。ADR-0044 P55-4）。
+/// そこで「ラベルで止める」道を 2 段に分けて用意する:
+///
+/// 1. [`ContainerStopper::terminate_blocking`] — 中の PID 1 へ SIGTERM（`<runtime> kill --signal TERM`）。
+///    ホストのプロセスグループへ送る SIGTERM と**同じ瞬間**に送る。片付けの猶予を与えるのが目的。
+/// 2. [`ContainerStopper::stop_blocking`] — `grace` 後の `rm -f`（ホストの SIGKILL と同じ瞬間）。
 pub trait ContainerStopper: Send + Sync {
-    /// `--label celeris.task=<task_id>` の付いたコンテナを止める（同期。呼ぶのは kill の直後）。
+    /// `--label celeris.task=<task_id>` の付いたコンテナの中へ SIGTERM を送る（同期）。
+    fn terminate_blocking(&self);
+    /// `--label celeris.task=<task_id>` の付いたコンテナを消す（同期。`grace` の後に呼ぶ）。
     fn stop_blocking(&self);
 }
 
 impl ContainerStopper for ContainerPlan {
+    fn terminate_blocking(&self) {
+        terminate_by_label(&self.program, &self.task_id);
+    }
+
     fn stop_blocking(&self) {
         stop_by_label(&self.program, &self.task_id);
     }
 }
 
-/// `--label celeris.task=<task_id>` の付いたコンテナを強制的に消す（`ps -aq --filter` → `rm -f`）。
-/// 失敗しても warn するだけ（run の結果には影響させない）。
-pub fn stop_by_label(program: &str, task_id: &str) {
+/// ラベルでコンテナを止めるのに要る最小限（runtime の実行ファイルとタスク id）。
+///
+/// `ContainerPlan` そのものを kill の経路へ持ち回すと、イメージやマウントまで抱えることになる。
+/// ディスパッチャが `RunEntry` に置くのはこれだけでよい（ADR-0044 §5 / ADR-0043 P56-7）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerStop {
+    pub program: String,
+    pub task_id: String,
+}
+
+impl ContainerStop {
+    /// 計画から作る（`program` と `task_id` だけを借りる）。
+    pub fn of(plan: &ContainerPlan) -> Self {
+        Self {
+            program: plan.program.clone(),
+            task_id: plan.task_id.clone(),
+        }
+    }
+}
+
+impl ContainerStopper for ContainerStop {
+    fn terminate_blocking(&self) {
+        terminate_by_label(&self.program, &self.task_id);
+    }
+
+    fn stop_blocking(&self) {
+        stop_by_label(&self.program, &self.task_id);
+    }
+}
+
+/// `--label celeris.task=<task_id>` の付いたコンテナの id（`ps -aq --filter label=…`）。
+/// runtime が起動できない・落ちたなら空（kill の経路では黙って諦める）。
+fn ids_by_label(program: &str, task_id: &str) -> Vec<String> {
     let filter = format!("label={TASK_LABEL}={task_id}");
     let listed = std::process::Command::new(program)
         .args(["ps", "-aq", "--filter", &filter])
@@ -791,14 +832,41 @@ pub fn stop_by_label(program: &str, task_id: &str) {
         .stderr(Stdio::null())
         .output();
     let Ok(listed) = listed else {
-        return;
+        return Vec::new();
     };
-    let ids: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+    String::from_utf8_lossy(&listed.stdout)
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(str::to_string)
-        .collect();
+        .collect()
+}
+
+/// `--label celeris.task=<task_id>` の付いたコンテナの中の PID 1 へ SIGTERM を送る
+/// （`ps -aq --filter` → `kill --signal TERM`）。ホストのプロセスグループへの `killpg` は
+/// 別の PID 名前空間には届かないので、コンテナで走る run にはこちらが要る（ADR-0044 P55-4）。
+/// 失敗しても warn するだけ（run の結果には影響させない）。
+pub fn terminate_by_label(program: &str, task_id: &str) {
+    let ids = ids_by_label(program, task_id);
+    if ids.is_empty() {
+        return;
+    }
+    let mut command = std::process::Command::new(program);
+    command.arg("kill").arg("--signal").arg("TERM").args(&ids);
+    if let Err(e) = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        tracing::warn!(%task_id, error = %e, "could not signal the task container");
+    }
+}
+
+/// `--label celeris.task=<task_id>` の付いたコンテナを強制的に消す（`ps -aq --filter` → `rm -f`）。
+/// 失敗しても warn するだけ（run の結果には影響させない）。
+pub fn stop_by_label(program: &str, task_id: &str) {
+    let ids = ids_by_label(program, task_id);
     if ids.is_empty() {
         return;
     }

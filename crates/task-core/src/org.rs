@@ -274,15 +274,19 @@ pub fn department_of(org: &[OrgNode], id: &str) -> Option<String> {
     None
 }
 
-/// 案件の状態（ADR-0033 D2）。
+/// 案件の状態（ADR-0033 D2、ADR-0044 D6）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectStatus {
     /// 秘書が理解確認と方針を出し、人の返事待ち。
     Proposed,
     Active,
+    /// ADR-0044 D6: 一時停止。属するタスクは dispatch されない（`ready` のまま）。
+    /// 元の状態は `Project::paused_from` に持ち、`resume` でそこへ戻る。
     Paused,
     Done,
+    /// ADR-0044 D6: 中止。属する非終端タスクは全部 `cancelled` にした後の終端。
+    Cancelled,
 }
 
 impl ProjectStatus {
@@ -292,6 +296,7 @@ impl ProjectStatus {
             ProjectStatus::Active => "active",
             ProjectStatus::Paused => "paused",
             ProjectStatus::Done => "done",
+            ProjectStatus::Cancelled => "cancelled",
         }
     }
 
@@ -301,8 +306,14 @@ impl ProjectStatus {
             "active" => Some(ProjectStatus::Active),
             "paused" => Some(ProjectStatus::Paused),
             "done" => Some(ProjectStatus::Done),
+            "cancelled" => Some(ProjectStatus::Cancelled),
             _ => None,
         }
+    }
+
+    /// ADR-0044 D6: 終端（これ以上動かない）。**アーカイブできるのは終端の案件だけ**。
+    pub fn is_terminal(self) -> bool {
+        matches!(self, ProjectStatus::Done | ProjectStatus::Cancelled)
     }
 }
 
@@ -322,6 +333,14 @@ pub struct Project {
     /// 分解した仕事は親の workspace を継ぐ）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<crate::model::WorkspaceSpec>,
+    /// ADR-0044 D6: アーカイブした時刻。`None` ならアーカイブされていない。一覧は既定でこれが
+    /// `Some` の案件（とそのタスク）を隠す。
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[schemars(with = "Option<String>")]
+    pub archived_at: Option<OffsetDateTime>,
+    /// ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_from: Option<ProjectStatus>,
     #[serde(with = "time::serde::rfc3339")]
     #[schemars(with = "String")]
     pub created_at: OffsetDateTime,
@@ -339,6 +358,11 @@ pub enum MilestoneStatus {
     InProgress,
     Reached,
     Redesigned,
+    /// ADR-0044 D6: 一時停止。属するタスクは dispatch されない（`ready` のまま）。
+    /// 元の状態は `Milestone::paused_from` に持ち、`resume` でそこへ戻る。
+    Paused,
+    /// ADR-0044 D6: 中止。属する非終端タスクは全部 `cancelled` にした後の終端。
+    Cancelled,
 }
 
 impl MilestoneStatus {
@@ -349,6 +373,8 @@ impl MilestoneStatus {
             MilestoneStatus::InProgress => "in_progress",
             MilestoneStatus::Reached => "reached",
             MilestoneStatus::Redesigned => "redesigned",
+            MilestoneStatus::Paused => "paused",
+            MilestoneStatus::Cancelled => "cancelled",
         }
     }
 
@@ -359,8 +385,20 @@ impl MilestoneStatus {
             "in_progress" => Some(MilestoneStatus::InProgress),
             "reached" => Some(MilestoneStatus::Reached),
             "redesigned" => Some(MilestoneStatus::Redesigned),
+            "paused" => Some(MilestoneStatus::Paused),
+            "cancelled" => Some(MilestoneStatus::Cancelled),
             _ => None,
         }
+    }
+
+    /// ADR-0044 D6: 終端（これ以上動かない）。**達成（`reached`）・再設計（`redesigned`）・
+    /// 中止（`cancelled`）の 3 つ**。中止の連鎖（案件ごと止めたとき）はこの 3 つを触らず、
+    /// `pause` / `cancel` もこの 3 つには効かない（409）。
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            MilestoneStatus::Reached | MilestoneStatus::Redesigned | MilestoneStatus::Cancelled
+        )
     }
 }
 
@@ -406,6 +444,9 @@ pub struct Milestone {
     #[serde(default)]
     pub description: String,
     pub status: MilestoneStatus,
+    /// ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_from: Option<MilestoneStatus>,
     #[serde(with = "time::serde::rfc3339")]
     #[schemars(with = "String")]
     pub created_at: OffsetDateTime,

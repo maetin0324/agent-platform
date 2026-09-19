@@ -1,6 +1,21 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-19 Phase 55（ADR-0044 B2 = D6、中止・一時停止・アーカイブ / §5 Phase 53 追記）—
+  **追加 + 認可の破壊的変更**。(1) 案件・途中目標を止められるようになった: エンドポイント 73〜80
+  （`POST /projects/{id}/{cancel|pause|resume|archive|unarchive}`、
+  `POST /milestones/{id}/{cancel|pause|resume}`。§3.84〜3.91）、`ProjectStatus` に `cancelled`、
+  `MilestoneStatus` に `paused` / `cancelled`、`Project.{archived_at, paused_from}`、
+  `Milestone.paused_from`、`GET /projects?archived=` と `GET /tasks?archived=`、
+  `Event::Transitioned.reason` に `project_cancelled` / `milestone_cancelled`。
+  DB のスキーマ版数は **15**（migration 0015: `projects.archived_at` / `projects.paused_from` /
+  `milestones.paused_from`）。(2) **変更を伴うエンドポイントを 1 つ残らず管理系に揃えた**
+  （§1.3。`POST /tasks`、`approve` / `reject` / `answer` / `cancel` / `retry`、`POST /plans`、
+  `POST /replay`、`PATCH /projects/{id}`、`POST /projects/{id}/milestones`、`PATCH /milestones/{id}` が
+  トークン必須になった。**v1 の破壊的変更**。GUI は BFF がトークンを持つので画面は変わらない）。
+  (3) 走っている run の**止め方が 1 つになった**: `cancel` / 人のコメントによる割り込み /
+  タイムアウト / リース喪失 / drain のどれも、ワーカーの**プロセスグループ**へ SIGTERM →
+  `kill_grace_secs` → SIGKILL（ハーネスが起こした孫まで消える）
 - 改訂: 2026-09-19 Phase 54（ADR-0043 A2、変更の取り込み）— **追加のみ。v1 のまま**。タスクが
   作ったブランチを**人が**見て取り込めるようになった: エンドポイント 68〜72
   （`GET /tasks/{id}/changes`、`GET /tasks/{id}/changes/{repo}/diff`、
@@ -123,7 +138,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 ### 1.3 認証（Bearer）
 
 - `token_file` が設定されていれば全エンドポイント（`GET /health` を除く）で `Authorization: Bearer <token>` を要求する。無ければ 401 `unauthorized`（`WWW-Authenticate: Bearer realm="taskd"`）。比較は定数時間。
-- `token_file` が無い（= loopback のみ）場合は認証しない。**ただし管理系エンドポイント（`POST/PATCH/DELETE /providers...`、`POST /reload`）は例外**で、`token_file` が無くても常に 401 にする（ADR-0017 D1: loopback でも管理操作にはトークンを要求する）。管理 API を使うには `token_file` の設定が要る。
+- `token_file` が無い（= loopback のみ）場合は認証しない。**ただし管理系エンドポイントは例外**で、`token_file` が無くても常に 401 にする（ADR-0017 D1: loopback でも管理操作にはトークンを要求する）。管理 API を使うには `token_file` の設定が要る。
+- **Phase 55（ADR-0044 §5 Phase 53 追記）から、変更を伴うエンドポイントは 1 つ残らず管理系**（`POST` / `PATCH` / `PUT` / `DELETE` の全部）。読み取り（`GET`）は従来どおりで、`token_file` が無ければ loopback から素通しのまま。
+  - この Phase で管理系に揃えたもの（それまでトークン不要だった）: `POST /tasks`、`POST /tasks/{id}/{approve|reject|answer|cancel|retry}`、`POST /plans`、`POST /replay`、`PATCH /projects/{id}`、`POST /projects/{id}/milestones`、`PATCH /milestones/{id}`。**v1 の破壊的変更**（冒頭の変更点一覧）。
+  - GUI は BFF がトークンを持つ（`TASKD_API_TOKEN_FILE`）ので画面は変わらない。`taskctl` は HTTP API を使わず SQLite を直接開くので影響しない。組織の「人」（ワーカー）はそもそも API を叩かない（SPEC §3.6）。
 - `GET /health` は常に無認証（版とスキーマ版数だけを返す。G0 の疎通確認用）。ただし Host 検査は受ける。
 
 ### 1.4 Host 検査・Origin・CSRF
@@ -189,7 +207,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（72）
+## 2. エンドポイント一覧（80）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -265,6 +283,14 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 70 | POST | `/tasks/{id}/changes/{repo}/integrate` | 取り込む（`merge` / `pr` / `discard`）（**管理系: `token_file` 未設定でも 401**） | 200 `IntegrateResult` | `git` / `gh` + store |
 | 71 | POST | `/tasks/{id}/changes/{repo}/pr/merge` | その PR を Celeris から merge する（**管理系**） | 200 `IntegrateResult` | `gh pr merge` + store |
 | 72 | GET | `/projects/{id}/integrations` | その案件の PR と取り込み（タスク × リポジトリごとに最新の 1 件） | `ProjectIntegrations` | store + `gh pr view` |
+| 73 | POST | `/projects/{id}/cancel` | 案件を中止し、属する非終端タスクと途中目標を連鎖で `cancelled` にする（ADR-0044 D6、Phase 55。**管理系: `token_file` 未設定でも 401**） | 200 `ProjectLifecycle` | `task_ops::lifecycle` |
+| 74 | POST | `/projects/{id}/pause` | 案件を一時停止する（属するタスクは dispatch されない。**管理系**） | 200 `ProjectLifecycle` | `task_ops::lifecycle` |
+| 75 | POST | `/projects/{id}/resume` | 一時停止を解く（`paused_from` へ戻す。**管理系**） | 200 `ProjectLifecycle` | `task_ops::lifecycle` |
+| 76 | POST | `/projects/{id}/archive` | 終端の案件をアーカイブする（一覧から既定で隠れる。**管理系**） | 200 `ProjectLifecycle` | `task_ops::lifecycle` |
+| 77 | POST | `/projects/{id}/unarchive` | アーカイブを解除する（**管理系**） | 200 `ProjectLifecycle` | `task_ops::lifecycle` |
+| 78 | POST | `/milestones/{id}/cancel` | 途中目標を中止し、属する非終端タスクを連鎖で `cancelled` にする（**管理系**） | 200 `MilestoneLifecycle` | `task_ops::lifecycle` |
+| 79 | POST | `/milestones/{id}/pause` | 途中目標を一時停止する（**管理系**） | 200 `MilestoneLifecycle` | `task_ops::lifecycle` |
+| 80 | POST | `/milestones/{id}/resume` | 一時停止を解く（**管理系**） | 200 `MilestoneLifecycle` | `task_ops::lifecycle` |
 
 ---
 
@@ -328,6 +354,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `priority` | `P0`〜`P3` または整数、複数可 | 全て | `Task.priority` の完全一致（ラベルは P0=30 / P1=20 / P2=10 / P3=0 に写す） |
 | `order` | `dispatch` / `updated_desc` / `created_desc` | `updated_desc` | `ListOrder` と同じ: `dispatch` = `priority DESC, created_at ASC, id ASC`（`ready_tasks` と同じ）。`updated_desc` = `updated_at DESC, id DESC`。`created_desc` = `created_at DESC, id DESC` |
 | `limit` | 1..=500 | 100 | |
+| `archived` | bool（`1`/`0`/`true`/`false`） | `false` | `true` なら**アーカイブされた案件のタスクも返す**。既定はそれらを隠す（`ListFilter.hide_archived`。ADR-0044 D6、Phase 55）。案件に属さないタスクは常に見える。`GET /tasks/{id}`（個別）は既定でもそのまま見える |
 | `cursor` | 不透明文字列 | — | 前応答の `next_cursor`（`Page<T>.next_cursor` をそのまま）。解読できない cursor は 400 |
 
 - `TaskStore::list_page(&ListFilter, ListOrder, cursor, limit) -> Page<Task>` をそのまま使い、`Task` を `TaskSummary` に写す（`children` / `pending_children` / `backoff_until` の付加は task-ops）。
@@ -995,6 +1022,13 @@ Phase 27 の監査 M-4）。読み取りと途中目標の操作は通常の要�
 作られた案件は必ず `status = "proposed"`（秘書が理解確認・方針・最初の途中目標を返すまで人の返事待ち。
 SPEC §7 / ADR-0033 D2）。空白だけの `title` / `request` は 422 `validation`。
 一覧は `created_at` の降順。
+
+**Phase 55（ADR-0044 D6）**: `GET /projects` は**アーカイブされた案件を既定で隠す**。`?archived=1`
+（`1`/`0`/`true`/`false`）で全部返す。`GET /projects/{id}`（個別）は既定でもそのまま見える。
+`PATCH /projects/{id}`（3.48）と `POST /projects/{id}/milestones`（3.49）、`PATCH /milestones/{id}`（3.49）は
+Phase 55 から**管理系**（§1.3）。また **`PATCH` では `paused` / `cancelled` を入れられない**
+（422 `validation`、`errors[0].field = "status"`）: `paused_from`（`resume` の戻り先）が空のままになり、
+中止の連鎖も起きないので、§3.84〜3.91 の専用のエンドポイントを使う。
 
 **Phase 43（ADR-0039 D1）**: 任意で `workspace`（**案件の作業場所** = コードのある場所）を受ける:
 
@@ -1870,6 +1904,65 @@ taskd はここで **`git` と `gh` だけ**を、待ち時間の上限付きで
 
 ---
 
+### 3.84〜3.91 中止・一時停止・アーカイブ（ADR-0044 D6、Phase 55。**73〜80。すべて管理系: `token_file` 未設定でも 401**）
+
+タスクの中止は従来どおり `POST /tasks/{id}/cancel`（3.13）。ここはその**上の 2 階層**（途中目標と案件）。
+要求本文は `{}`（空本体も可）。未知のフィールドは 400。どれも応答は 200。
+
+| 操作 | 何が起きる |
+|---|---|
+| `cancel` | 属する**非終端タスクを全部** `cancelled` にする。案件の中止は**非終端の途中目標**（`proposed`/`approved`/`in_progress`/`paused`）も `cancelled` にする。最後に自分が `cancelled`。連鎖は**決定的・同期** |
+| `pause` | 自分が `paused`。元の状態は `paused_from` に残る。**属するタスクは dispatch されない**（`ready` のまま。状態機械は触らない）。走っている run は最後まで走る |
+| `resume` | `paused_from` へ戻す（無ければ案件は `active`、途中目標は `in_progress`）。`paused_from` は消える |
+| `archive` | **終端（`done` / `cancelled`）の案件だけ**。`archived_at` が入り、`GET /projects` と `GET /tasks` から既定で消える |
+| `unarchive` | `archived_at` が消える |
+
+- **中止で止まる run**: タスクが `running` でなくなるので、次の tick でディスパッチャが気付き、
+  ADR-0044 §5 Phase 53 追記の**統一された止め方**（ワーカーの**プロセスグループ**へ SIGTERM →
+  `kill_grace_secs` → SIGKILL）で止める。worktree とブランチはその後の掃除（ADR-0043 D2）が消す。
+- **タスクに残るもの**: `Event::Transitioned{to: "cancelled", reason: "project_cancelled" | "milestone_cancelled"}`
+  （「自分が止められたのか、上ごと止まったのか」がタイムラインで読める）。案件・途中目標そのものには
+  イベント表を作らない（`updated_at` だけが動く）。**通知は作らない**（ADR-0044 D8）。
+- **dispatch の抑止の範囲**: `paused` / `cancelled` / アーカイブ済みの案件と、`paused` / `cancelled` の
+  途中目標に属するタスクは `TaskStore::ready_tasks` から外れる。計画・レビュー・まとめ・報告の圧縮といった
+  **裏方の run も同じ `tasks` の行**なので、この 1 か所で全部止まる。
+  **例外は対話（`Task.conversation`）**: 止まっている案件でも人が秘書と話せるよう、対話タスクだけは起きる。
+- 知らない id（ULID でない形も含む）は 404 `project_not_found` / `milestone_not_found`。
+  いまの状態でできない操作は 409 `invalid_transition`（`trigger` に `project_pause` などが入る）:
+  **終端の** `cancel`、終端・一時停止中の `pause`、`paused` でないものの `resume`、非終端の案件の `archive`。
+  終端は案件が `done` / `cancelled`、**途中目標が `reached` / `redesigned` / `cancelled`**
+  （達成・再設計の記録は止められないし畳めない）。
+  **`archive` / `unarchive` は冪等**（既にその状態なら 200 でそのまま返す。GUI の二度押しを 409 にしない）。
+
+#### 3.84〜3.88 `POST /projects/{id}/{cancel|pause|resume|archive|unarchive}` → 200 `ProjectLifecycle`
+
+```json
+{"project": {"id": "01J...", "title": "Pluvio の新テーマ", "request": "…", "status": "cancelled",
+             "created_at": "…", "updated_at": "…"},
+ "cancelled_tasks": [{"id": "01J...", "title": "調査", "kind": "execute", "status": "cancelled", "actions": []}],
+ "cancelled_milestones": ["01J..."]}
+```
+
+- `cancelled_tasks` / `cancelled_milestones` は **`cancel` のときだけ**中身が入る（他は空配列）。
+- `project.paused_from` は `pause` の後だけ出る（`resume` で消える）。`project.archived_at` は
+  `archive` の後だけ出る。
+
+#### 3.89〜3.91 `POST /milestones/{id}/{cancel|pause|resume}` → 200 `MilestoneLifecycle`
+
+```json
+{"milestone": {"id": "01J...", "project_id": "01J...", "seq": 2, "title": "統合・選定",
+               "description": "", "status": "paused", "paused_from": "in_progress",
+               "created_at": "…", "updated_at": "…"},
+ "cancelled_tasks": []}
+```
+
+- 案件の状態は変えない（途中目標だけ）。`cancelled_tasks` は `cancel` のときだけ。
+- **`PATCH /projects/{id}` / `PATCH /milestones/{id}` からは `paused` / `cancelled` を入れられない**
+  （422。`paused_from` が空になり連鎖も起きないため）。GUI の「状態を直接変える」プルダウンからも
+  この 2 つは外してある。
+
+---
+
 ## 4. SSE `GET /stream`
 
 ```
@@ -2333,8 +2426,15 @@ pub struct OrgPatchBody { /* 書いた項目だけ変える。genre は null で
     #[serde(default)] pub name: Option<String>, #[serde(default)] pub kind: Option<OrgKind>, #[serde(default)] pub parent_id: Option<String>,
     #[serde(default, deserialize_with = "double_option")] pub genre: Option<Option<String>>,
     #[serde(default)] pub brief: Option<String>, #[serde(default)] pub position: Option<i64> }
-pub struct Project { pub id: ProjectId, pub title: String, pub request: String, pub status: ProjectStatus /* proposed|active|paused|done */,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub secretary_summary: Option<String>, pub created_at: String, pub updated_at: String }
+pub struct Project { pub id: ProjectId, pub title: String, pub request: String,
+    // Phase 55（ADR-0044 D6）: `cancelled` を追加。終端は done | cancelled。
+    pub status: ProjectStatus /* proposed|active|paused|done|cancelled */,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub secretary_summary: Option<String>,
+    // Phase 55（ADR-0044 D6）: アーカイブした時刻（RFC 3339）。無ければ項目ごと出ない。
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub archived_at: Option<String>,
+    // Phase 55（ADR-0044 D6）: pause する直前の状態（resume の戻り先）。paused でなければ出ない。
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub paused_from: Option<ProjectStatus>,
+    pub created_at: String, pub updated_at: String }
 pub struct ProjectList { pub items: Vec<Project> /* created_at 降順 */ }
 #[serde(deny_unknown_fields)]
 pub struct ProjectCreateBody { pub title: String, pub request: String }
@@ -2413,7 +2513,16 @@ pub struct MilestoneReviewView { pub message_id: String, pub text: String, pub a
 pub struct ProjectTaskView { pub id: TaskId, pub title: String, pub status: Status, pub parent_id: Option<TaskId>,
     pub depends_on: Vec<TaskId>, pub assignee: Option<String>, pub milestone_id: Option<MilestoneId> }
 pub struct Milestone { pub id: MilestoneId, pub project_id: ProjectId, pub seq: i64, pub title: String, #[serde(default)] pub description: String,
-    pub status: MilestoneStatus /* proposed|approved|in_progress|reached|redesigned */, pub created_at: String, pub updated_at: String }
+    // Phase 55（ADR-0044 D6）: `paused` と `cancelled` を追加。終端は cancelled。
+    pub status: MilestoneStatus /* proposed|approved|in_progress|reached|redesigned|paused|cancelled */,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub paused_from: Option<MilestoneStatus>,
+    pub created_at: String, pub updated_at: String }
+// Phase 55（ADR-0044 D6）: `POST /projects/{id}/{cancel|pause|resume|archive|unarchive}` の応答（§3.84〜3.88）。
+pub struct ProjectLifecycle { pub project: Project,
+    #[serde(default)] pub cancelled_tasks: Vec<TaskRef> /* cancel のときだけ */,
+    #[serde(default)] pub cancelled_milestones: Vec<MilestoneId> /* cancel のときだけ */ }
+// Phase 55（ADR-0044 D6）: `POST /milestones/{id}/{cancel|pause|resume}` の応答（§3.89〜3.91）。
+pub struct MilestoneLifecycle { pub milestone: Milestone, #[serde(default)] pub cancelled_tasks: Vec<TaskRef> }
 #[serde(deny_unknown_fields)]
 pub struct MilestoneCreateBody { pub title: String, #[serde(default)] pub description: Option<String>, #[serde(default)] pub status: Option<MilestoneStatus> }
 #[serde(deny_unknown_fields)]

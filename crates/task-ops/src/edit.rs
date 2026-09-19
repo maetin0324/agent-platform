@@ -689,6 +689,8 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("store");
         let now = OffsetDateTime::now_utc();
         let project = Project {
+            archived_at: None,
+            paused_from: None,
             id: ProjectId::new(),
             title: "benchfs".into(),
             request: "複数リポジトリの案件".into(),

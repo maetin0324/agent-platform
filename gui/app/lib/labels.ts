@@ -29,25 +29,28 @@ import type {
 /** 組織のノードの呼び方（画面に出す唯一の言い方）。 */
 export const ASSIGNEE_WORD = "担当";
 
-/** 案件の状態（ADR-0033 D2）。 */
+/** 案件の状態（ADR-0033 D2、ADR-0044 D6 で `cancelled` が増えた）。 */
 const PROJECT_STATUS_LABEL: Record<ProjectStatus, string> = {
   proposed: "提案中",
   active: "進行中",
   paused: "一時停止",
   done: "完了",
+  cancelled: "中止",
 };
 
 export function projectStatusLabel(status: ProjectStatus | string): string {
   return PROJECT_STATUS_LABEL[status as ProjectStatus] ?? status;
 }
 
-/** 途中目標の状態（SPEC §7 のアジャイル）。 */
+/** 途中目標の状態（SPEC §7 のアジャイル。ADR-0044 D6 で `paused` / `cancelled` が増えた）。 */
 const MILESTONE_STATUS_LABEL: Record<MilestoneStatus, string> = {
   proposed: "提案",
   approved: "承認済み",
   in_progress: "進行中",
   reached: "達成",
   redesigned: "再設計",
+  paused: "一時停止",
+  cancelled: "中止",
 };
 
 export function milestoneStatusLabel(status: MilestoneStatus | string): string {
@@ -430,4 +433,68 @@ export function prUnavailableReason(origin: boolean, gh: boolean): string | null
   if (!origin) return "origin リモートが無いので PR を作れません";
   if (!gh) return "gh が使えない（PATH に無い・未認証）ので PR を作れません";
   return null;
+}
+
+/**
+ * 中止・一時停止・アーカイブ（ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.91。Phase 55 / G19）。
+ * どれも**人が押す操作**なので、英語の操作名（`cancel` / `pause` / `archive`）は画面に出さない。
+ * 「できるかどうか」は `~/lib/lifecycle.ts`（表示の判定だけ）と taskd（409 `invalid_transition`）が決める。
+ */
+export const PAUSE_LABEL = "一時停止";
+export const RESUME_LABEL = "再開";
+export const CANCEL_LABEL = "中止";
+/** 中止は取り返しがつかない（属するタスクの worktree とブランチも消える）ので 2 段にする。 */
+export const CANCEL_CONFIRM_LABEL = "本当に中止する";
+export const ARCHIVE_LABEL = "アーカイブ";
+export const ARCHIVE_CONFIRM_LABEL = "アーカイブする";
+export const UNARCHIVE_LABEL = "アーカイブ解除";
+export const CANCEL_STOP_LABEL = "やめる";
+
+/** 一覧のバッジ（`Project.archived_at` が入っているとき）。 */
+export const ARCHIVED_BADGE_LABEL = "アーカイブ済み";
+
+/** 案件一覧の絞り込み（`GET /projects?archived=1`。既定は隠す）。 */
+export const SHOW_ARCHIVED_LABEL = "アーカイブを表示";
+
+/** 「アーカイブ」を押せない理由（終端＝完了・中止の案件だけアーカイブできる）。 */
+export const ARCHIVE_ONLY_TERMINAL_HINT = "アーカイブできるのは完了・中止の案件だけです";
+
+/** 中止の確認文（案件）。 */
+export function projectCancelConfirmText(title: string): string {
+  return `案件「${title}」を中止します。まだ終わっていない仕事と途中目標はすべて中止され、作業ツリーとブランチも消えます。取り返しがつきません。`;
+}
+
+/** 中止の確認文（途中目標）。 */
+export function milestoneCancelConfirmText(title: string): string {
+  return `途中目標「${title}」を中止します。この途中目標のまだ終わっていない仕事はすべて中止され、作業ツリーとブランチも消えます。取り返しがつきません。`;
+}
+
+/** アーカイブの確認文（アーカイブは冪等なので取り返しはつく。一覧から消えることだけ言う）。 */
+export function projectArchiveConfirmText(title: string): string {
+  return `案件「${title}」をアーカイブします。一覧とタスクの一覧から既定で消えます（「${SHOW_ARCHIVED_LABEL}」で見えます。いつでも解除できます）。`;
+}
+
+/** 一時停止中の案件のバナー（ボード・案件詳細・仕事の木）。 */
+export const PROJECT_PAUSED_BANNER =
+  "この案件は一時停止中です。新しい仕事は始まりません（走っている仕事は最後まで走ります）。";
+
+/** 一時停止中の途中目標のバナー。 */
+export const MILESTONE_PAUSED_BANNER =
+  "この途中目標は一時停止中です。新しい仕事は始まりません（走っている仕事は最後まで走ります）。";
+
+/** 中止済みの案件のバナー。 */
+export const PROJECT_CANCELLED_BANNER = "この案件は中止されています。新しい仕事は始まりません。";
+
+/** アーカイブ済みの案件のバナー。 */
+export const PROJECT_ARCHIVED_BANNER = "この案件はアーカイブされています。一覧とタスクの一覧からは既定で消えています。";
+
+/**
+ * 中止で連鎖して止まったものの件数（`ProjectLifecycle.cancelled_tasks` /
+ * `cancelled_milestones`、`MilestoneLifecycle.cancelled_tasks`）。**数えるのは taskd が返した配列**で、
+ * GUI 側では連鎖を計算し直さない。
+ */
+export function cancelledCountLabel(tasks: number, milestones?: number): string {
+  const parts = [`仕事 ${tasks} 件`];
+  if (milestones !== undefined) parts.push(`途中目標 ${milestones} 件`);
+  return `${parts.join("・")}を中止しました`;
 }

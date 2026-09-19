@@ -316,6 +316,10 @@ struct RunEntry {
     account: Option<String>,
     /// ADR-0025 D1: `account` が属するアダプタ（`account` が `None` なら `None`）。
     account_adapter: Option<AccountAdapter>,
+    /// Phase 55/56 の合流（ADR-0044 P55-4 / ADR-0043 P56-7）: この run をコンテナで走らせているなら、
+    /// ラベルでコンテナを止める口。`killpg` はコンテナの中の PID 名前空間には届かないので、
+    /// `stop_run` がこれを `task_worker::kill_tree_with` に渡す。ホスト実行なら `None`。
+    container: Option<Arc<dyn task_worker::ContainerStopper>>,
 }
 
 
@@ -920,14 +924,23 @@ impl Dispatcher {
     /// 打ち切る。DB の状態は変えない（リースが切れて新しい active が従来の「リース切れ」の経路で拾う）。
     /// 打ち切った数を返す。
     pub fn abort_all_runs(&mut self) -> usize {
+        // ADR-0044 §5 Phase 53 追記（Phase 55）: drain も他の 4 つと同じ止め方
+        // （プロセスグループへ SIGTERM → `kill_grace_secs` → SIGKILL）。
+        let kill_grace = self.config.kill_grace;
         let mut aborted = 0;
         for (task_id, entry) in self.running.drain() {
             tracing::warn!(task_id = %task_id, run_id = %entry.run_id, "drain timeout; aborting the run (the lease will expire and the new active will reclaim it)");
+            // Phase 55/56 の合流: コンテナで走っている run はラベル越しにも止める（P55-4 / P56-7）。
+            task_worker::kill_tree_with(&entry.run_id, kill_grace, entry.container);
             entry.handle.abort();
             aborted += 1;
         }
         for (task_id, entry) in self.reviewing.drain() {
             tracing::warn!(task_id = %task_id, "drain timeout; aborting the review");
+            task_worker::kill_tree(&entry.run_id, kill_grace);
+            if let Some(review_run_id) = &entry.review_run_id {
+                task_worker::kill_tree(review_run_id, kill_grace);
+            }
             entry.handle.abort();
             aborted += 1;
         }
@@ -2265,7 +2278,9 @@ impl Dispatcher {
                 continue;
             }
             if let Some(entry) = self.running.remove(&task.id) {
-                entry.handle.abort();
+                // ADR-0044 Phase 53 追記: リース喪失も同じ止め方（プロセスグループごと。
+                // コンテナで走っていればラベル越しにも同じ 2 段を送る）。
+                self.stop_run(&entry.run_id, entry.handle, entry.container);
             }
             let finished = Event::WorkerFinished {
                 run_id: lease.worker_run_id.clone(),
@@ -2290,6 +2305,36 @@ impl Dispatcher {
         Ok(count)
     }
 
+    /// ADR-0044 §5 Phase 53 追記（Phase 55）: **run の止め方はこれ 1 つ**。
+    ///
+    /// `cancel` / 人のコメントによる割り込み（`Interrupt`）/ 実時間・無入力のタイムアウト /
+    /// リース喪失 / drain タイムアウトのどれも、ここを通って
+    /// **ワーカーのプロセスグループに SIGTERM → `kill_grace_secs` → SIGKILL** を送る
+    /// （`task_worker::kill_tree`）。ハーネスが起こした孫（`cargo test`、`node`、シェル）まで届く。
+    /// タイムアウトだけは `task_worker::subprocess` の中でも同じ手順を踏むが、そちらが先に終わって
+    /// いれば登録が無いので、ここは何もしない（二重には送らない）。
+    ///
+    /// tokio の `JoinHandle::abort()` は**従来どおり即座に**行う（run の記録を止めるための帳簿）。
+    ///
+    /// Phase 55/56 の合流（ADR-0044 P55-4 / ADR-0043 P56-7）: `container` が `Some`（= ADR-0043 D3 で
+    /// コンテナ実行に倒した run）なら、`killpg` と**同じ 2 段**を
+    /// `--label celeris.task=<task_id>` 越しにも送る（`<runtime> kill --signal TERM` → `grace` →
+    /// `<runtime> rm -f`）。`killpg` は `<runtime> run` のクライアントにしか届かず、
+    /// コンテナの中は別の PID 名前空間なので、これが無いと中のハーネスが生き残る。
+    fn stop_run(&self, run_id: &str, handle: JoinHandle<()>, container: Option<Arc<dyn task_worker::ContainerStopper>>) {
+        task_worker::kill_tree_with(run_id, self.config.kill_grace, container);
+        handle.abort();
+    }
+
+    /// レビュー側（判定コマンドの run と Reviewer run）の停止。run は 2 本ありうるので両方に送る。
+    fn stop_review(&self, entry: ReviewEntry) {
+        task_worker::kill_tree(&entry.run_id, self.config.kill_grace);
+        if let Some(review_run_id) = &entry.review_run_id {
+            task_worker::kill_tree(review_run_id, self.config.kill_grace);
+        }
+        entry.handle.abort();
+    }
+
     /// ADR-0002 D9: ストア上で `running` でなくなった（cancel / ADR-0044 D2 の割り込み等）run を
     /// 強制終了する。打ち切ったタスクは `just_aborted` に入れ、**この tick では dispatch し直さない**。
     fn abort_stale_runs(&mut self) -> Result<(), DispatchError> {
@@ -2307,7 +2352,8 @@ impl Dispatcher {
             };
             if !still_ours && let Some(entry) = self.running.remove(&id) {
                 tracing::warn!(task_id = %id, run_id = %entry.run_id, "aborting run (task no longer running under this lease)");
-                entry.handle.abort();
+                // ADR-0044 Phase 53 追記: プロセスグループごと止める（孫まで。コンテナならその中も）。
+                self.stop_run(&entry.run_id, entry.handle, entry.container);
                 self.just_aborted.insert(id);
             }
         }
@@ -2317,7 +2363,7 @@ impl Dispatcher {
             let still_reviewing = matches!(self.store.get(id)?, Some(t) if t.status == Status::Reviewing);
             if !still_reviewing && let Some(entry) = self.reviewing.remove(&id) {
                 tracing::warn!(task_id = %id, "aborting review (task no longer reviewing)");
-                entry.handle.abort();
+                self.stop_review(entry);
                 self.pending_subjects.remove(&id);
             }
         }
@@ -2558,6 +2604,14 @@ impl Dispatcher {
             let remote = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path, task.id));
             // ADR-0043 D3（Phase 56）: ホストか、コンテナか、runtime が無くて `blocked` か。
             let container = self.container_decision(&task, worktree.as_ref(), &adapter_id, remote.is_some());
+            // Phase 55/56 の合流: コンテナで走らせるなら、止めるための口（runtime の実行ファイルと
+            // `--label celeris.task=<task_id>`）を覚えておく（ADR-0044 P55-4 / ADR-0043 P56-7）。
+            let container_stop: Option<Arc<dyn task_worker::ContainerStopper>> = match &container {
+                ContainerDecision::Container(run) => {
+                    Some(Arc::new(task_worker::ContainerStop::of(&run.plan)))
+                }
+                ContainerDecision::Host | ContainerDecision::Unavailable { .. } => None,
+            };
             let extras = self.run_extras(&task, worktree.as_ref())?;
             // ADR-0043 D2: 中止されたときに片付けられるよう、この run で使う作業場所を覚えておく。
             if let Some(ws) = &worktree {
@@ -2587,6 +2641,7 @@ impl Dispatcher {
                     cluster: cluster.map(|(spec, _)| spec.id),
                     account,
                     account_adapter,
+                    container: container_stop,
                 },
             );
             dispatched += 1;
@@ -8031,6 +8086,8 @@ mod tests {
     fn titled_project(title: &str) -> Project {
         let now = OffsetDateTime::now_utc();
         Project {
+            archived_at: None,
+            paused_from: None,
             id: ProjectId::new(),
             title: title.to_string(),
             request: "r".into(),
@@ -8967,6 +9024,8 @@ mod tests {
     ) -> (task_core::ProjectId, Vec<task_core::ProjectRepo>) {
         let now = OffsetDateTime::now_utc();
         let project = task_core::Project {
+            archived_at: None,
+            paused_from: None,
             id: task_core::ProjectId::new(),
             title: "benchfs".into(),
             request: "測る".into(),

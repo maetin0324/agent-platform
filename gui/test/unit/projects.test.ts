@@ -3,7 +3,7 @@ import { loadProjects } from "~/routes/projects";
 import { TaskdClient } from "~/taskd/client.server";
 import { createProject, patchProjectWorkspace, readProjectCreateInput } from "~/taskd/projects-admin.server";
 import type { Clusters, Project, ProjectDetail, ProjectList } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { type MockTaskd, sendJson, sendProblem, serveProjectList, startMockTaskd } from "../mock-taskd/server";
 
 let mock: MockTaskd;
 let client: TaskdClient;
@@ -302,6 +302,46 @@ describe("loadProjects", () => {
     );
     const result = await loadProjects(client, new Request("http://gui.invalid/projects"));
     expect(result.clusters).toEqual([]);
+  });
+
+  /**
+   * アーカイブ（ADR-0044 D6、Phase 55 / G19）。隠す・出すの判断は taskd なので、GUI は
+   * **`?archived=1` を付けるかどうか**だけを決める（既定は付けない = taskd が隠す）。
+   */
+  it("既定では archived を送らない（taskd がアーカイブ済みを隠す）", async () => {
+    serveProjectList(mock, { archived: [project("p9", { archived_at: "2026-09-19T12:00:00Z" })] });
+    mock.on("GET", "/api/v1/projects/p1", (_req, res) =>
+      sendJson(res, 200, { project: project("p1"), milestones: [], tasks: [] } satisfies ProjectDetail),
+    );
+
+    const result = await loadProjects(client, new Request("http://gui.invalid/projects"));
+
+    expect(result.showArchived).toBe(false);
+    expect(result.rows.map((r) => r.project.id)).toEqual(["p1"]);
+    const url = new URL(
+      mock.requests.find((r) => r.url.startsWith("/api/v1/projects?"))?.url ?? "/api/v1/projects",
+      "http://mock-taskd.invalid",
+    );
+    expect(url.searchParams.has("archived")).toBe(false);
+  });
+
+  it("?archived=1 のときだけ GET /projects に archived=1 を付け、アーカイブ済みも並べる", async () => {
+    serveProjectList(mock, { archived: [project("p9", { archived_at: "2026-09-19T12:00:00Z" })] });
+    for (const id of ["p1", "p9"]) {
+      mock.on("GET", `/api/v1/projects/${id}`, (_req, res) =>
+        sendJson(res, 200, { project: project(id), milestones: [], tasks: [] } satisfies ProjectDetail),
+      );
+    }
+
+    const result = await loadProjects(client, new Request("http://gui.invalid/projects?archived=1"));
+
+    expect(result.showArchived).toBe(true);
+    expect(result.rows.map((r) => r.project.id)).toEqual(["p1", "p9"]);
+    const url = new URL(
+      mock.requests.find((r) => r.url.startsWith("/api/v1/projects?"))?.url ?? "",
+      "http://mock-taskd.invalid",
+    );
+    expect(url.searchParams.get("archived")).toBe("1");
   });
 });
 

@@ -53,6 +53,8 @@ impl Env {
 
     fn project(&self) -> Project {
         let project = Project {
+            archived_at: None,
+            paused_from: None,
             id: ProjectId::new(),
             title: "Pluvio の検証".into(),
             request: "調べて".into(),

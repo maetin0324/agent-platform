@@ -782,6 +782,8 @@ mod tests {
 
         let now_ts = OffsetDateTime::now_utc();
         let project = task_core::Project {
+            archived_at: None,
+            paused_from: None,
             id: task_core::ProjectId::new(),
             title: "t".into(),
             request: "r".into(),

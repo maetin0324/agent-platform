@@ -380,6 +380,8 @@ mod tests {
 
         fn seed_project(&self) -> Project {
             let project = Project {
+                archived_at: None,
+                paused_from: None,
                 id: ProjectId::new(),
                 title: "Pluvio".into(),
                 request: "調べて".into(),

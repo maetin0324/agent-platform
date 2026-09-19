@@ -13,9 +13,11 @@ import type {
   MessageAccepted,
   Milestone,
   MilestoneDecided,
+  MilestoneLifecycle,
   NotifyTestResult,
   OrgNode,
   Project,
+  ProjectLifecycle,
   ProjectPlanAccepted,
   ProjectRepo,
   ProviderCheckResponse,
@@ -182,8 +184,9 @@ export type OrgOpOutcome =
 
 /**
  * 案件・途中目標の状態変更（ADR-0033 D2、docs/taskd-api-v1.md §3.46〜3.49）: `PATCH /projects/{id}` /
- * `POST /projects/{id}/milestones` / `PATCH /milestones/{id}` の結果。読み取り・案件操作は通常の要求
- * （管理系ではない。3.42〜3.49 の前書き）。taskd のエラーは例外にせず `{ok:false, error}` にする。
+ * `POST /projects/{id}/milestones` / `PATCH /milestones/{id}` の結果。**Phase 55（ADR-0044 D6）から
+ * この 3 つも管理系**（`token_file` 未設定でも 401。読み取りの `GET /projects` だけが通常の要求）。
+ * taskd のエラーは例外にせず `{ok:false, error}` にする。
  */
 export type ProjectOpOutcome =
   // `project_workspace` は作業場所の保存・消去（`PATCH /projects/{id}` の `workspace`。ADR-0039 D1、
@@ -203,6 +206,11 @@ export type ProjectOpOutcome =
   // ADR-0044 D1（Phase 53）: 案件・途中目標から人がタスクを足す（`POST /tasks`。**管理系**、201）。
   // 人が作ったタスクは `ready`（人は Go を出す側なので draft を挟まない）。
   | { ok: true; op: "task_create"; task: Task }
+  // 中止・一時停止・アーカイブ（ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.91。Phase 55 / G19。
+  // **管理系**、200）。`lifecycle.cancelled_tasks` / `cancelled_milestones` は**`cancel` のときだけ**
+  // 中身が入る（他は空配列）ので、画面はそれをそのまま件数として出す（連鎖を GUI で計算し直さない）。
+  | { ok: true; op: ProjectLifecycleOp; lifecycle: ProjectLifecycle }
+  | { ok: true; op: MilestoneLifecycleOp; lifecycle: MilestoneLifecycle }
   | {
       ok: false;
       op:
@@ -216,9 +224,22 @@ export type ProjectOpOutcome =
         | "repo_patch"
         | "repo_primary"
         | "repo_delete"
-        | "task_create";
+        | "task_create"
+        | ProjectLifecycleOp
+        | MilestoneLifecycleOp;
       error: ActionError;
     };
+
+/** 案件の中止・一時停止・アーカイブ（`POST /projects/{id}/{cancel|pause|resume|archive|unarchive}`）。 */
+export type ProjectLifecycleOp =
+  | "project_cancel"
+  | "project_pause"
+  | "project_resume"
+  | "project_archive"
+  | "project_unarchive";
+
+/** 途中目標の中止・一時停止（`POST /milestones/{id}/{cancel|pause|resume}`）。 */
+export type MilestoneLifecycleOp = "milestone_cancel" | "milestone_pause" | "milestone_resume";
 
 /**
  * 「報告」画面（`/reports`）の既読・通知（ADR-0033 D3、docs/taskd-api-v1.md §3.52〜3.53。**管理系**）:

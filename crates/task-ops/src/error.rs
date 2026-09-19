@@ -3,7 +3,7 @@
 //! `Display` は現在の `taskctl` の各コマンドのエラー文面をそのまま保つ（挙動を変えない）。
 //! `taskctl` 側は `OpsError` を `CliError` に写し、stderr の文面と exit code を変えない。
 
-use task_core::{Status, StoreError, TaskId};
+use task_core::{MilestoneId, ProjectId, Status, StoreError, TaskId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpsError {
@@ -29,6 +29,24 @@ pub enum OpsError {
     /// 呼び出し側が期待した `Status` と現在の `Status` が食い違う（`expected` 引数付き呼び出し）。
     #[error("expected status {expected:?} but task has status {actual:?}")]
     Conflict { expected: Status, actual: Status },
+
+    /// ADR-0044 D6（Phase 55）: その id の案件が無い（API は 404）。
+    #[error("project not found: {0}")]
+    ProjectNotFound(ProjectId),
+
+    /// ADR-0044 D6（Phase 55）: その id の途中目標が無い（API は 404）。
+    #[error("milestone not found: {0}")]
+    MilestoneNotFound(MilestoneId),
+
+    /// ADR-0044 D6（Phase 55）: いまの状態ではその操作ができない（API は 409）。
+    /// `subject` は `project <ULID>` / `milestone <ULID>`、`context` は `status=..`、
+    /// `action` は `cancelled` / `paused` / `resumed` / `archived`。
+    #[error("{subject} ({context}) cannot be {action}")]
+    InvalidLifecycle {
+        subject: String,
+        context: String,
+        action: String,
+    },
 
     #[error(transparent)]
     Store(#[from] StoreError),

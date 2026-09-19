@@ -473,6 +473,8 @@ mod tests {
         seed_org(&store);
         let (roles, genres) = specs();
         let project = Project {
+            archived_at: None,
+            paused_from: None,
             id: ProjectId::new(),
             title: "Pluvio".into(),
             request: "新テーマの模索".into(),
@@ -824,6 +826,8 @@ mod tests {
         seed_org(&store);
         let (roles, genres) = specs();
         let project = Project {
+            archived_at: None,
+            paused_from: None,
             id: ProjectId::new(),
             title: "Pluvio".into(),
             request: "r".into(),
