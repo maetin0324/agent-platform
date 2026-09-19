@@ -1,6 +1,9 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-19 Phase 50（ADR-0041 D3/D4）— `GET /releases` の `items[]` に `promoted_at` / `on_main` /
+  `changes`、`POST /releases/{sha12}/promote` の応答に `script_from` を追加（追加のみ。v1 のまま）。
+  昇格に使う `promote.sh` は**いま動いている版のもの**に変わった（§3.67）
 - 改訂: 2026-09-18 Phase 38（ADR-0028 追記）— `GET /config` の `genres[].{input_artifacts, output_artifacts}` の
   各要素は `"名前"` に加えて **`"名前: 説明"`** の形も取る（型は `Vec<String>` のまま。追加のみ、v1 のまま）。
   **GUI は `:` の前を成果物の名前として扱い、後ろを説明として出すこと**（`ConfigView` / `GenreConfigView` の
@@ -1280,8 +1283,8 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
 
 | | |
 |---|---|
-| 何を読むか | `<releases_dir>/<sha12>/{manifest.json, gate.json, verify.json}`、`promote.lock`、`<releases_dir>` の**親**の `current` / `previous` の symlink、`daemon_instances`（ADR-0040 D4） |
-| 何を書くか | `POST .../promote` のときだけ `<release>/promote.lock` と `<release>/promote.log`。**DB も設定も本番プロセスも触らない** |
+| 何を読むか | `<releases_dir>/<sha12>/{manifest.json, gate.json, verify.json, changes.json, promoted.json}`、`promote.lock`、`<releases_dir>` の**親**の `current` / `previous` の symlink、`daemon_instances`（ADR-0040 D4）、`[selfdeploy] repo` の git（`on_main` のためだけ。ADR-0041 D3） |
+| 何を書くか | `POST .../promote` のときだけ `<release>/promote.lock` と `<release>/promote.log`。**DB も設定も本番プロセスも、`[selfdeploy] repo` の git リポジトリも触らない** |
 | 誰が昇格するか | **人だけ**（ADR-0040 D5）。この API か shell から。taskd の中に自動で呼ぶ経路は無い |
 
 `.build` / `.cargo-target` のような `.` で始まる名前と、組み立て途中の `<sha12>.partial` は一覧に出ない。
@@ -1311,6 +1314,16 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
       "schema_version": 11,
       "gate_ok": true,                // gate.json の ok（cargo test / clippy / build / pnpm … が全部 exit 0）
       "verify": { "ok": true, "live_ok": true, "at": "2026-09-19T08:30:00Z" },  // null = 未検証
+      "promoted_at": null,            // promoted.json（昇格に成功したときだけ）。null = 一度も昇格していない
+      "on_main": false,               // git merge-base --is-ancestor <sha> main。null = 分からない
+      "changes": {                    // changes.json（ADR-0041 D4）。null = Phase 48 以前のリリース
+        "base": "9ca90bd4f1c2",       // ビルド時の current の sha12（null = current が無かった）
+        "stale": false,               // base != いまの current（＝この差分はもう「いま」の話ではない）
+        "commit_count": 3,
+        "file_count": 12,
+        "sensitive": ["scripts/selfdeploy/verify.sh"],   // 安全に関わる変更。空なら普通のリリース
+        "commits": [{ "sha": "…40 桁…", "subject": "phase 50: …" }]   // 新しい順、最大 50 件
+      },
       "is_current": false,
       "is_previous": false,
       "promoting": false,             // promote.lock の pid がまだ生きている
@@ -1327,22 +1340,47 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
 - 引き継ぎの進行は `instances` で見える（旧が `draining`、新が `active`。ADR-0040 D4）。
   昇格の最中は `GET /releases` を数秒ごとに読み直せばよい（SSE には載らない）。
 
+**ADR-0041 D3 / D4（Phase 50）で増えた 3 つ:**
+
+- **`promoted_at`**: `promote.sh` が昇格に成功したときに書く `<release>/promoted.json` の
+  `{promoted_at, mode, from}` の `promoted_at`。まだ昇格していないリリースは `null`。
+- **`on_main`**: その sha が `[selfdeploy] repo`（既定 `~/workspace/agent-platform`。`~` は taskd の
+  `$HOME` で展開）の `main` の**祖先**か。`git -C <repo> merge-base --is-ancestor <sha> main` の
+  終了コードそのままで、`0` → `true`、`1` → `false`、それ以外（リポジトリが無い・`main` が無い・
+  git が無い・時間切れ・その sha を知らない）は **`null`**。**taskd はこのリポジトリを読むだけ**で、
+  checkout も fetch も merge もしない（反映は人がやる。ADR-0041 D3）。
+  GUI は `current` の行が `on_main: false` のときだけ「本番は main に未反映: `git merge --ff-only <sha12>`」と出す。
+- **`changes`**: `release.sh` が**ビルド時に**書いた `<release>/changes.json` の要約。
+  `sensitive` は `scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS`（`scripts/selfdeploy/`、`deploy/`、
+  `crates/taskd/src/instance.rs`、`crates/taskd/src/releases.rs`、`crates/task-api/src/releases.rs`、
+  `crates/task-core/migrations/`、`CLAUDE.md`、`gui/CLAUDE.md`、`.claude/`、`config/`、`docs/adr/0040-`、
+  `docs/adr/0041-`）に**前方一致**したファイル。**判定は `release.sh` の側で済んでいて、API も GUI も
+  その結果を運ぶだけ**（パターンを 2 か所に置かない）。`changes.json` が無いリリース（Phase 48 以前）は `null`。
+
 #### 3.67 `POST /releases/{sha12}/promote` → 202 `ReleasePromoteAccepted`（**管理系: `token_file` 未設定でも 401**）
 
-要求本文は無し（`{}` でよい）。`<releases_dir>/<sha12>/scripts/promote.sh <sha12>` を **detached**
-（`setsid`、stdin は `/dev/null`、stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に
-pid を書いてすぐ返す。**昇格の完了は待たない。**
+要求本文は無し（`{}` でよい）。`promote.sh <sha12>` を **detached**（`setsid`、stdin は `/dev/null`、
+stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid を書いてすぐ返す。
+**昇格の完了は待たない。**
+
+**どちらの `promote.sh` を起こすか**（ADR-0041 D4。Phase 50 で変わった）:
+**いま動いている版**のもの（`<releases_dir>/<current>/scripts/promote.sh`）を使う。昇格は「動いている
+本番を止めて／引き継いで新しい版に替える」作業で、その手順を知っているべきなのはいまの本番だから。
+実装者が `scripts/selfdeploy/` を壊したリリースを作っても、その壊れた昇格スクリプトは走らない
+（新しい昇格スクリプトは、それ自身が一度昇格されてから次の昇格で使われる）。`current` に `scripts/` が
+無い（Phase 48 以前のリリース、または初回）ときだけ昇格先のものを使う。どちらを使ったかは `script_from`。
 
 ```jsonc
 { "sha12": "abcdef123456",
   "log": "/home/…/taskd/releases/abcdef123456/promote.log",   // 中身は API では出さない
-  "started_at": "2026-09-19T10:00:00Z" }
+  "started_at": "2026-09-19T10:00:00Z",
+  "script_from": "current" }   // "current" | "target"
 ```
 
 - 404 `release_not_found`: その sha12 のディレクトリが無い（sha12 の形＝16 進 7〜40 桁でないときも同じ）。
 - 409 `release_not_promotable`: `verify.json` が無い／`ok` でない、既に `current`、既に昇格中
-  （`promote.lock` の pid が生きている）、`scripts/promote.sh` が無い（Phase 48 より前のリリース）、
-  `[selfdeploy]` が無い。`detail` に理由の一行。
+  （`promote.lock` の pid が生きている）、`current` にも昇格先にも `scripts/promote.sh` が無い
+  （どちらも Phase 48 より前のリリース）、`[selfdeploy]` が無い。`detail` に理由の一行。
 - 401 `unauthorized`: トークン無し（`token_file` を設定していない構成でも 401）。
 - **この要求に答えた taskd 自身が、その昇格で `draining` になって最後には終わる**（ADR-0040 D4 の
   ライブ引き継ぎ）。202 を返した後に同じプロセスの API が閉じるのは正常。GUI は `GET /releases` を

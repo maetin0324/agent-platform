@@ -91,3 +91,19 @@ const INSTANCE_ROLE_LABEL: Record<InstanceRole, string> = {
 export function instanceRoleLabel(role: InstanceRole | string): string {
   return INSTANCE_ROLE_LABEL[role as InstanceRole] ?? role;
 }
+
+/**
+ * 昇格の前に見せる差分（ADR-0041 D4。Phase G15）。**どのパスが「安全に関わる」かは
+ * taskd 側（`scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS`）が決める**ので、
+ * ここにあるのは言葉だけ。
+ */
+export function sensitiveChangesLabel(count: number): string {
+  return `安全に関わる変更 ${count} 件`;
+}
+
+/** `changes.base` がいまの `current` と違うときの断り書き。 */
+export function staleChangesLabel(base: string | null): string {
+  return base
+    ? `この差分は ${base} を起点に作られたもので、いまの現行とは違います（もう一度 release.sh を通すと新しくなります）`
+    : "この差分は現行が無いときに作られたもので、いまの現行との差ではありません";
+}

@@ -4650,6 +4650,73 @@
       ],
       "type": "object"
     },
+    "ReleaseChanges": {
+      "description": "`changes.json` の要約（ADR-0041 D4）。`release.sh` が**ビルド時の `current`**（`base`）から\nそのリリースまでの差分を書いたもの。GUI は昇格の前にこれを人へ見せる。",
+      "properties": {
+        "base": {
+          "description": "差分の起点（ビルド時の `current` の sha12）。`current` が無いときに作られたリリースは `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit_count": {
+          "description": "`base..<sha>` のコミット数（`commits` は最大 50 件までなので、こちらも 50 で頭打ち）。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "commits": {
+          "description": "新しい順、最大 50 件。",
+          "items": {
+            "$ref": "#/$defs/ReleaseCommit"
+          },
+          "type": "array"
+        },
+        "file_count": {
+          "description": "変わったファイルの数。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sensitive": {
+          "description": "**安全に関わる変更**（`scripts/selfdeploy/` などのパスに前方一致したもの。\n一覧の定義は `scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS` 1 か所）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "stale": {
+          "description": "`base` がいまの `current` と違う（＝この一覧は「いま昇格したら何が変わるか」ではない）。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stale",
+        "commit_count",
+        "file_count",
+        "sensitive",
+        "commits"
+      ],
+      "type": "object"
+    },
+    "ReleaseCommit": {
+      "description": "`changes.json` の `commits[]` の 1 件。",
+      "properties": {
+        "sha": {
+          "description": "完全な sha（GUI は先頭 7 桁を出す）。",
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "subject"
+      ],
+      "type": "object"
+    },
     "ReleaseItem": {
       "description": "`GET /releases` の `items[]` の 1 件。",
       "properties": {
@@ -4659,6 +4726,17 @@
             "string",
             "null"
           ]
+        },
+        "changes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReleaseChanges"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0041 D4: いま動いている版からこのリリースへ**何が変わるか**（`changes.json`）。\nPhase 48 以前に作られたリリースには無いので `null`。"
         },
         "gate_ok": {
           "description": "`gate.json` の `ok`（`release.sh` の gate が全段 exit 0 だったか）。読めなければ `false`。",
@@ -4670,8 +4748,22 @@
         "is_previous": {
           "type": "boolean"
         },
+        "on_main": {
+          "description": "ADR-0041 D3: この sha が `[selfdeploy] repo` の `main` の**祖先**か\n（`git merge-base --is-ancestor <sha> main`）。`false` なら本番のコードが `main` に\n戻っていない。リポジトリが無い・git が動かない・その sha を知らないときは `null`。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "problem": {
           "description": "`manifest.json` / `gate.json` が読めなかったときの一行（GUI が「壊れている」と出す）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promoted_at": {
+          "description": "ADR-0041 D3: `promoted.json` の `promoted_at`（`promote.sh` が昇格に成功したときだけ書く）。\n一度も昇格していないリリースは `null`。",
           "type": [
             "string",
             "null"
@@ -4723,10 +4815,14 @@
       "type": "object"
     },
     "ReleasePromoteAccepted": {
-      "description": "`POST /releases/{sha12}/promote` → 202 の応答。**昇格そのものはこの API の外**\n（`<releases_dir>/<sha12>/scripts/promote.sh` を detached で起こすだけ）。",
+      "description": "`POST /releases/{sha12}/promote` → 202 の応答。**昇格そのものはこの API の外**\n（`promote.sh` を detached で起こすだけ）。",
       "properties": {
         "log": {
           "description": "`promote.sh` の出力を流し込んでいるファイルの絶対パス（中身は API では出さない）。",
+          "type": "string"
+        },
+        "script_from": {
+          "description": "ADR-0041 D4: どちらの `promote.sh` を起こしたか。`\"current\"` = いま動いている版に同梱の\nスクリプト（既定。新しいコードの昇格スクリプトは、それ自身が昇格された後の次の昇格から使われる）、\n`\"target\"` = 昇格先に同梱のスクリプト（`current` に `scripts/` が無い Phase 48 以前のときだけ）。",
           "type": "string"
         },
         "sha12": {
@@ -4740,7 +4836,8 @@
       "required": [
         "sha12",
         "log",
-        "started_at"
+        "started_at",
+        "script_from"
       ],
       "type": "object"
     },

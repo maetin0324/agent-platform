@@ -160,18 +160,29 @@ fn default_drain_timeout_secs() -> u64 {
 pub struct SelfdeployConfig {
     #[serde(default = "default_releases_dir")]
     pub releases_dir: PathBuf,
+    /// ADR-0041 D3: **作業チェックアウト**の場所（`~/workspace/agent-platform`）。
+    /// `GET /releases` の `on_main`（`git merge-base --is-ancestor <sha> main`）を出すためだけに読む。
+    /// taskd はこのリポジトリを**読むだけ**（checkout も fetch も merge もしない。反映は人がやる）。
+    /// `~` は taskd の `$HOME` で展開する。無くても構わない（その場合 `on_main` は `null`）。
+    #[serde(default = "default_selfdeploy_repo")]
+    pub repo: PathBuf,
 }
 
 impl Default for SelfdeployConfig {
     fn default() -> Self {
         Self {
             releases_dir: default_releases_dir(),
+            repo: default_selfdeploy_repo(),
         }
     }
 }
 
 fn default_releases_dir() -> PathBuf {
     PathBuf::from("releases")
+}
+
+fn default_selfdeploy_repo() -> PathBuf {
+    PathBuf::from("~/workspace/agent-platform")
 }
 
 /// ADR-0040 D3（Phase 47）: CLI からの上書き。`verify.sh` が本番の設定をそのまま読ませたまま、
@@ -990,6 +1001,13 @@ impl Config {
         // ADR-0040 D6: `[selfdeploy] releases_dir` も同じ扱い（既定の `releases` もここで絶対化される）。
         if cfg.selfdeploy.releases_dir.is_relative() {
             cfg.selfdeploy.releases_dir = base.join(&cfg.selfdeploy.releases_dir);
+        }
+        // ADR-0041 D3: `[selfdeploy] repo` は**人のチェックアウト**なので `~` を展開する
+        // （既定の `~/workspace/agent-platform` もここで絶対パスになる）。`$HOME` が無い環境や
+        // 相対で書かれたときは、他のパス設定と同じく設定ファイルのディレクトリ基準。
+        cfg.selfdeploy.repo = task_core::expand_home(&cfg.selfdeploy.repo, task_core::home_dir().as_deref());
+        if cfg.selfdeploy.repo.is_relative() {
+            cfg.selfdeploy.repo = base.join(&cfg.selfdeploy.repo);
         }
         // ADR-0027 D3: `[adapters.paperqa]` のパス設定は、他のパス設定と同じく設定ファイルのディレクトリ基準で
         // 絶対化する。`settings` は `pqa -s` に渡す文字列（拡張子無し）だが、パスの形をしているので同様に扱う。
@@ -3120,6 +3138,23 @@ roles = ["lead"]
 
         // 知らないキーは拒否する（他の節と同じ）。
         assert!(toml::from_str::<Config>("[selfdeploy]\nbogus = 1\n").is_err());
+
+        // ADR-0041 D3: `repo` は既定 `~/workspace/agent-platform` で、`~` は taskd の $HOME で展開する。
+        std::fs::write(&path, "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let cfg = Config::load(&path).unwrap();
+        match task_core::home_dir() {
+            Some(home) => assert_eq!(cfg.selfdeploy.repo, home.join("workspace/agent-platform")),
+            // $HOME が無い環境では展開できないので、設定ファイル基準の相対として残る。
+            None => assert_eq!(cfg.selfdeploy.repo, dir.path().join("~/workspace/agent-platform")),
+        }
+        // 明示した絶対パスはそのまま（存在しなくてよい。`on_main` が `null` になるだけ）。
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[selfdeploy]\nrepo = \"/srv/agent-platform\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.selfdeploy.repo, PathBuf::from("/srv/agent-platform"));
     }
 
     /// `ensure_secrets_dir` は `[secrets] dir` を 0700 で作る（無ければ）。`[secrets]` が無ければ何もしない。

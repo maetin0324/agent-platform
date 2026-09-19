@@ -6,9 +6,12 @@
 //!
 //! 見るもの:
 //! - `GET /releases`: 空のディレクトリでも 200、`built_at` の新しい順、`current` / `previous` の印、
-//!   壊れた JSON は `problem` 付きで出る（落ちない）、`running` と `instances`。
+//!   壊れた JSON は `problem` 付きで出る（落ちない）、`running` と `instances`、
+//!   **`promoted_at` / `on_main` / `changes`**（ADR-0041 D3/D4。`on_main` は tempdir の中に作った
+//!   git リポジトリに対してだけ聞く — 人の本物のチェックアウトには触れない）。
 //! - `POST /releases/{sha12}/promote`: 401（トークン無し）/ 404（知らない sha）/
-//!   409 × 3（未検証・既に current・既に昇格中）/ 202（同梱の `scripts/promote.sh` を起こす）。
+//!   409 × 3（未検証・既に current・既に昇格中）/ 202（`promote.sh` を起こす）と、
+//!   **どちらの `promote.sh` を起こすか**（ADR-0041 D4: `current` のもの > 昇格先のもの。`script_from`）。
 //!
 //! **本番には一切触れない**: `~/taskd/` も systemd も本番プロセスも出てこない。起こすのは tempdir の
 //! 中の偽 `promote.sh`（ログに 1 行書いて眠るだけ）。外部ネットワークにも出ない（loopback だけ）。
@@ -58,6 +61,7 @@ token_file = "api.token"
 
 [selfdeploy]
 releases_dir = "releases"
+repo = "repo"
 
 [[providers]]
 id = "p1"
@@ -68,6 +72,9 @@ adapter = "fake"
 
         let config = Config::load(&config_path).unwrap_or_else(|e| panic!("load: {e}"));
         assert_eq!(config.selfdeploy.releases_dir, releases, "relative releases_dir must be config-dir based");
+        // ADR-0041 D3: `on_main` が見る作業チェックアウトも tempdir の中に閉じる
+        // （**人の本物のリポジトリは触らない**。既定の `~/workspace/agent-platform` を使わせない）。
+        assert_eq!(config.selfdeploy.repo, home.join("repo"), "relative repo must be config-dir based");
         // マイグレーションを流す（`GET /releases` は `daemon_instances` を読む）。
         let _store = SqliteStore::open(&config.db).unwrap_or_else(|e| panic!("open: {e}"));
 
@@ -126,14 +133,42 @@ adapter = "fake"
     }
 
     /// 偽の `scripts/promote.sh`（ログに 1 行書いて眠るだけ。本物の昇格は起きない）。
-    fn fake_promote_script(&self, sha: &str) {
+    /// `marker` で「どちらのリリースのスクリプトが走ったか」を見分ける（ADR-0041 D4）。
+    fn fake_promote_script(&self, sha: &str, marker: &str) {
         let scripts = self.releases.join(sha).join("scripts");
         std::fs::create_dir_all(&scripts).unwrap_or_else(|e| panic!("mkdir: {e}"));
         let script = scripts.join("promote.sh");
-        std::fs::write(&script, "#!/bin/sh\nprintf 'fake promote %s\\n' \"$1\"\nsleep 3\n")
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '{marker} %s\\n' \"$1\"\nsleep 3\n"))
             .unwrap_or_else(|e| panic!("write: {e}"));
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|e| panic!("chmod: {e}"));
+    }
+
+    /// `<home>/repo` に `main` を持つ git リポジトリを作り、(main の sha, main に居ない sha) を返す。
+    /// git が使えない環境では `None`（その検査だけ飛ばす）。
+    fn git_repo(&self) -> Option<(String, String)> {
+        let dir = self.home.join("repo");
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
+        let git = |args: &[&str]| -> Option<String> {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "user.email=t@example.invalid", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        git(&["init", "-q", "-b", "main"])?;
+        git(&["commit", "-q", "--allow-empty", "-m", "on main"])?;
+        let merged = git(&["rev-parse", "HEAD"])?;
+        git(&["checkout", "-q", "-b", "side"])?;
+        git(&["commit", "-q", "--allow-empty", "-m", "not on main"])?;
+        let unmerged = git(&["rev-parse", "HEAD"])?;
+        git(&["checkout", "-q", "main"])?;
+        Some((merged, unmerged))
     }
 
     fn link(&self, name: &str, sha: &str) {
@@ -287,7 +322,7 @@ async fn promoting_is_409_when_unverified_already_current_or_already_promoting()
 
     // (1) verify.json が無い＝未検証。
     api.release("aaaaaaaaaaaa", Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
-    api.fake_promote_script("aaaaaaaaaaaa");
+    api.fake_promote_script("aaaaaaaaaaaa", "fake promote");
     let (status, body) = api.post("/releases/aaaaaaaaaaaa/promote", Some(TOKEN)).await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["code"], "release_not_promotable");
@@ -312,7 +347,7 @@ async fn promoting_is_409_when_unverified_already_current_or_already_promoting()
         Some(r#"{"ok":true}"#),
         Some(r#"{"ok":true,"live_ok":true}"#),
     );
-    api.fake_promote_script("bbbbbbbbbbbb");
+    api.fake_promote_script("bbbbbbbbbbbb", "fake promote");
     std::fs::write(
         api.releases.join("bbbbbbbbbbbb").join("promote.lock"),
         format!("{}\n", std::process::id()),
@@ -336,7 +371,7 @@ async fn promoting_a_verified_release_starts_the_bundled_script_and_returns_202(
         Some(r#"{"ok":true}"#),
         Some(r#"{"ok":true,"live_ok":true,"at":"2026-09-19T02:00:00Z"}"#),
     );
-    api.fake_promote_script("abcdef123456");
+    api.fake_promote_script("abcdef123456", "fake promote");
 
     let (status, body) = api.post("/releases/abcdef123456/promote", Some(TOKEN)).await;
     assert_eq!(status, 202, "{body}");
@@ -346,6 +381,8 @@ async fn promoting_a_verified_release_starts_the_bundled_script_and_returns_202(
         "{body}"
     );
     assert!(body["started_at"].as_str().unwrap_or_default().contains('T'), "{body}");
+    // `current` が無い（初回）ので、昇格先に同梱されたスクリプトを使う（ADR-0041 D4）。
+    assert_eq!(body["script_from"], "target", "{body}");
 
     let log = api.releases.join("abcdef123456").join("promote.log");
     let text = wait_for(&log, "fake promote abcdef123456");
@@ -365,5 +402,114 @@ async fn promoting_a_verified_release_starts_the_bundled_script_and_returns_202(
     let (status, body) = api.post("/releases/abcdef123456/promote", Some(TOKEN)).await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["code"], "release_not_promotable");
+    api.shutdown().await;
+}
+
+/// ADR-0041 D4: `current` が `scripts/promote.sh` を持っていれば**そちら**を起こす
+/// （昇格先に同梱されたスクリプトは使わない）。応答の `script_from` は `"current"`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promoting_prefers_the_promote_script_of_the_current_release() {
+    let api = Api::start().await;
+    api.release(
+        "aaaaaaaaaaaa",
+        Some(r#"{"ref":"main","built_at":"2026-09-18T00:00:00Z","schema_version":11}"#),
+        Some(r#"{"ok":true}"#),
+        Some(r#"{"ok":true,"live_ok":true}"#),
+    );
+    api.release(
+        "bbbbbbbbbbbb",
+        Some(r#"{"ref":"taskd/01M","built_at":"2026-09-19T00:00:00Z","schema_version":11}"#),
+        Some(r#"{"ok":true}"#),
+        Some(r#"{"ok":true,"live_ok":true,"at":"2026-09-19T02:00:00Z"}"#),
+    );
+    // 昇格先のスクリプトは「壊れた新しいコード」のつもり。走ったら分かるように別の印にする。
+    api.fake_promote_script("bbbbbbbbbbbb", "target-script");
+    api.fake_promote_script("aaaaaaaaaaaa", "current-script");
+    api.link("current", "aaaaaaaaaaaa");
+
+    let (status, body) = api.post("/releases/bbbbbbbbbbbb/promote", Some(TOKEN)).await;
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["script_from"], "current", "{body}");
+    // ログは昇格先の `promote.log`（人が見る場所は変わらない）。
+    assert!(
+        body["log"].as_str().unwrap_or_default().ends_with("bbbbbbbbbbbb/promote.log"),
+        "{body}"
+    );
+    let log = api.releases.join("bbbbbbbbbbbb").join("promote.log");
+    let text = wait_for(&log, "current-script bbbbbbbbbbbb");
+    assert!(text.contains("current-script bbbbbbbbbbbb"), "{text:?}");
+    assert!(!text.contains("target-script"), "昇格先のスクリプトは走らない: {text:?}");
+    api.shutdown().await;
+}
+
+/// ADR-0041 D3 / D4: `GET /releases` の `promoted_at` / `on_main` / `changes`。
+/// `changes.json` が無い Phase 48 以前のリリースは `changes: null`（一覧は落ちない）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_releases_carries_promoted_at_on_main_and_changes() {
+    let api = Api::start().await;
+    let Some((merged, unmerged)) = api.git_repo() else {
+        eprintln!("git is not usable here; skipping");
+        api.shutdown().await;
+        return;
+    };
+
+    // 昇格済みで `main` に入っている版（＝いまの current）。
+    let old = api.release(
+        "aaaaaaaaaaaa",
+        Some(&format!(r#"{{"sha":"{merged}","ref":"main","built_at":"2026-09-18T00:00:00Z","schema_version":11}}"#)),
+        Some(r#"{"ok":true}"#),
+        Some(r#"{"ok":true,"live_ok":true,"at":"2026-09-18T01:00:00Z"}"#),
+    );
+    std::fs::write(
+        old.join("promoted.json"),
+        r#"{"promoted_at":"2026-09-18T02:00:00Z","mode":"stop-start","from":null}"#,
+    )
+    .unwrap_or_else(|e| panic!("write: {e}"));
+
+    // まだ昇格していない、`main` に入っていない版（自己改善のブランチ）。
+    let new = api.release(
+        "bbbbbbbbbbbb",
+        Some(&format!(
+            r#"{{"sha":"{unmerged}","ref":"taskd/01M","built_at":"2026-09-19T00:00:00Z","schema_version":11}}"#
+        )),
+        Some(r#"{"ok":true}"#),
+        Some(r#"{"ok":true,"live_ok":true,"at":"2026-09-19T01:00:00Z"}"#),
+    );
+    std::fs::write(
+        new.join("changes.json"),
+        format!(
+            r#"{{"base":"aaaaaaaaaaaa",
+                 "commits":[{{"sha":"{unmerged}","subject":"phase 50: 検証の直列化"}}],
+                 "files":["scripts/selfdeploy/verify.sh","docs/PROGRESS.md"],
+                 "sensitive":["scripts/selfdeploy/verify.sh"]}}"#
+        ),
+    )
+    .unwrap_or_else(|e| panic!("write: {e}"));
+    api.link("current", "aaaaaaaaaaaa");
+
+    let (status, body) = api.get("/releases").await;
+    assert_eq!(status, 200, "{body}");
+    let items = body["items"].as_array().unwrap_or_else(|| panic!("items: {body}"));
+    assert_eq!(items[0]["sha12"], "bbbbbbbbbbbb", "{body}");
+
+    // 新しい方: 未昇格・main に未反映・差分あり（安全に関わる変更 1 件）。
+    assert!(items[0]["promoted_at"].is_null(), "{body}");
+    assert_eq!(items[0]["on_main"], false, "{body}");
+    assert_eq!(items[0]["changes"]["base"], "aaaaaaaaaaaa", "{body}");
+    assert_eq!(items[0]["changes"]["stale"], false, "base == current: {body}");
+    assert_eq!(items[0]["changes"]["commit_count"], 1, "{body}");
+    assert_eq!(items[0]["changes"]["file_count"], 2, "{body}");
+    assert_eq!(items[0]["changes"]["sensitive"][0], "scripts/selfdeploy/verify.sh", "{body}");
+    assert_eq!(items[0]["changes"]["commits"][0]["subject"], "phase 50: 検証の直列化", "{body}");
+
+    // いまの current: 昇格済み・main に反映済み・`changes.json` が無いので null。
+    assert_eq!(items[1]["promoted_at"], "2026-09-18T02:00:00Z", "{body}");
+    assert_eq!(items[1]["on_main"], true, "{body}");
+    assert!(items[1]["changes"].is_null(), "{body}");
+
+    // `current` が動くと `stale` が立つ（差分の起点がもう「いま」ではない）。
+    api.link("current", "bbbbbbbbbbbb");
+    let (_status, body) = api.get("/releases").await;
+    assert_eq!(body["items"][0]["changes"]["stale"], true, "{body}");
     api.shutdown().await;
 }

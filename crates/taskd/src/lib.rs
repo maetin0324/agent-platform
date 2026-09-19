@@ -630,6 +630,8 @@ pub fn api_settings(
         // task-api はファイルの規約を知らないので、読む係をここで渡す。
         releases: Some(Arc::new(crate::releases::FsReleases::new(
             config.selfdeploy.releases_dir.clone(),
+            // ADR-0041 D3: `on_main` を出すためだけに読む作業チェックアウト（書き換えない）。
+            config.selfdeploy.repo.clone(),
         ))),
         release,
         mode,

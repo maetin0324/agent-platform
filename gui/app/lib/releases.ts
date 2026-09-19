@@ -1,6 +1,6 @@
 import type { Tone } from "~/components/ui/tone";
-import { instanceRoleLabel } from "~/lib/labels";
-import type { DaemonInstance, ReleaseItem, ReleaseRunning, Releases } from "~/taskd/types";
+import { instanceRoleLabel, sensitiveChangesLabel, staleChangesLabel } from "~/lib/labels";
+import type { DaemonInstance, ReleaseCommit, ReleaseItem, ReleaseRunning, Releases } from "~/taskd/types";
 
 /**
  * 「リリース」画面（`/releases`、Phase G14。ADR-0040 D6、docs/taskd-api-v1.md §3.66〜3.67）の純粋関数。
@@ -82,6 +82,65 @@ export function promoteConfirmText(item: ReleaseItem): string {
   return `${item.sha12} に昇格します。${how}。よろしいですか？`;
 }
 
+// ---- 昇格の前に何が変わるか（ADR-0041 D4。Phase G15）----------------------
+
+/**
+ * **安全に関わる変更**（`changes.sensitive`）を含むか。
+ *
+ * 判定は taskd の外（`scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS`）で済んでいて、
+ * GUI は**その結果が空かどうかを見るだけ**（パターンを GUI 側に写さない。判断を 2 か所に置かない）。
+ */
+export function hasSensitiveChanges(item: Pick<ReleaseItem, "changes">): boolean {
+  return (item.changes?.sensitive?.length ?? 0) > 0;
+}
+
+/** 赤いバッジの文言（`sensitive` が空なら `null`）。 */
+export function sensitiveBadgeText(item: Pick<ReleaseItem, "changes">): string | null {
+  const n = item.changes?.sensitive?.length ?? 0;
+  return n > 0 ? sensitiveChangesLabel(n) : null;
+}
+
+/**
+ * 「昇格」を押す前に **sha12 を打たせるか**（ADR-0041 D4）。
+ * 安全に関わる変更があるときだけ。無いときは従来どおり `window.confirm` の二重確認。
+ */
+export function promoteNeedsTypedSha(item: ReleaseItem): boolean {
+  return hasSensitiveChanges(item);
+}
+
+/** 打たれた文字列が sha12 と一致するか（前後の空白は落とす。大文字小文字は区別しない）。 */
+export function typedShaMatches(item: Pick<ReleaseItem, "sha12">, typed: string): boolean {
+  return typed.trim().toLowerCase() === item.sha12.toLowerCase();
+}
+
+/** 差分の一行（コミット数・ファイル数。`changes.json` が無ければ `null`）。 */
+export function changesSummaryText(item: Pick<ReleaseItem, "changes">): string | null {
+  const c = item.changes;
+  if (!c) return null;
+  const base = c.base ? `${c.base} から` : "起点なし（current が無いときに作られたリリース）";
+  return `${base} コミット ${c.commit_count} 件 / 変更ファイル ${c.file_count} 件`;
+}
+
+/** `changes.base` がいまの `current` と違う（この差分は「いま昇格したら」の話ではない）。 */
+export function staleChangesText(item: Pick<ReleaseItem, "changes">): string | null {
+  return item.changes?.stale ? staleChangesLabel(item.changes.base ?? null) : null;
+}
+
+/** コミットの短い sha（GUI は先頭 7 桁）。 */
+export function commitShort(commit: Pick<ReleaseCommit, "sha">): string {
+  return commit.sha.slice(0, 7);
+}
+
+/**
+ * 本番のコードが `main` に戻っていないときの一行（ADR-0041 D3）。
+ * **`current` の行にだけ**出す（他のリリースが `main` に居ないのは普通のこと）。
+ * `on_main` が `null`（リポジトリが読めない）なら何も出さない。
+ */
+export function notOnMainText(item: Pick<ReleaseItem, "sha12" | "is_current" | "on_main">): string | null {
+  if (!item.is_current || item.on_main !== false) return null;
+  return `本番は main に未反映: git merge --ff-only ${item.sha12}`;
+}
+
 /** `verify` されていない／`draining` 中のインスタンスを除いた「いま働いているもの」。 */
 export function activeInstances(instances: DaemonInstance[]): DaemonInstance[] {
   return instances.filter((i) => i.role === "active");
@@ -129,4 +188,9 @@ export function releaseSubtitle(item: ReleaseItem): string {
   if (item.ref) parts.push(item.ref);
   if (item.schema_version != null) parts.push(`schema ${item.schema_version}`);
   return parts.join(" · ");
+}
+
+/** 昇格の記録（`promoted.json`）の一行。一度も昇格していなければ `null`。 */
+export function promotedAtText(item: Pick<ReleaseItem, "promoted_at">): string | null {
+  return item.promoted_at ?? null;
 }

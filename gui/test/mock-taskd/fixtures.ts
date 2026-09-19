@@ -1,4 +1,4 @@
-import type { Health, ReleaseItem, ReleasePromoteAccepted, Releases } from "~/taskd/types";
+import type { Health, ReleaseChanges, ReleaseItem, ReleasePromoteAccepted, Releases } from "~/taskd/types";
 
 /**
  * `GET /health` の既定応答（docs/taskd-api-v1.md §3.1）。`Health` 型で宣言することで形を検証する。
@@ -31,9 +31,31 @@ export function releaseItem(overrides: Partial<ReleaseItem> = {}): ReleaseItem {
     schema_version: 11,
     gate_ok: true,
     verify: { ok: true, live_ok: true, at: "2026-09-19T01:00:00Z" },
+    promoted_at: null,
+    on_main: true,
+    changes: null,
     is_current: false,
     is_previous: false,
     promoting: false,
+    ...overrides,
+  };
+}
+
+/**
+ * `ReleaseItem.changes`（ADR-0041 D4、Phase G15）。既定は**安全に関わる変更が無い**差分。
+ * 赤いバッジと sha12 入力を試すテストは `releaseChanges({sensitive: [...]})` で上書きする。
+ */
+export function releaseChanges(overrides: Partial<ReleaseChanges> = {}): ReleaseChanges {
+  return {
+    base: "aaaaaaaaaaaa",
+    stale: false,
+    commit_count: 2,
+    file_count: 3,
+    sensitive: [],
+    commits: [
+      { sha: "1111111111111111111111111111111111111111", subject: "phase 50: 検証の直列化" },
+      { sha: "2222222222222222222222222222222222222222", subject: "adr-0041" },
+    ],
     ...overrides,
   };
 }
@@ -54,8 +76,14 @@ export const defaultReleases: Releases = {
     },
   ],
   items: [
-    releaseItem({ sha12: "bbbbbbbbbbbb", built_at: "2026-09-19T08:00:00Z", verify: null }),
-    releaseItem({ is_current: true }),
+    releaseItem({
+      sha12: "bbbbbbbbbbbb",
+      built_at: "2026-09-19T08:00:00Z",
+      verify: null,
+      on_main: false,
+      changes: releaseChanges(),
+    }),
+    releaseItem({ is_current: true, promoted_at: "2026-09-19T02:00:00Z" }),
   ],
 };
 
@@ -64,4 +92,6 @@ export const defaultReleasePromoteAccepted: ReleasePromoteAccepted = {
   sha12: "bbbbbbbbbbbb",
   log: "/home/mock/taskd/releases/bbbbbbbbbbbb/promote.log",
   started_at: "2026-09-19T10:00:00Z",
+  // ADR-0041 D4: 既定は「いま動いている版に同梱の promote.sh で昇格した」。
+  script_from: "current",
 };

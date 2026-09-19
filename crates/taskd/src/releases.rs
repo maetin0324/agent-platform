@@ -6,9 +6,11 @@
 //! 読むもの（`release.sh` / `verify.sh` / `promote.sh` が書いたもの。`docs/selfdeploy.md`）:
 //!
 //! ```text
-//! <releases_dir>/<sha12>/manifest.json   {sha12, ref, built_at, schema_version, ...}
+//! <releases_dir>/<sha12>/manifest.json   {sha, sha12, ref, built_at, schema_version, ...}
 //! <releases_dir>/<sha12>/gate.json       {ok, failed_step, steps: [...]}
 //! <releases_dir>/<sha12>/verify.json     {ok, live_ok, at, checks: [...]}   ← 無ければ未検証
+//! <releases_dir>/<sha12>/changes.json    {base, commits: [...], files: [...], sensitive: [...]}（ADR-0041 D4）
+//! <releases_dir>/<sha12>/promoted.json   {promoted_at, mode, from}（ADR-0041 D3。昇格に成功したときだけ）
 //! <releases_dir>/<sha12>/scripts/*.sh    release.sh が同梱した selfdeploy 一式
 //! <releases_dir>/<sha12>/promote.lock    昇格中の pid（この模組が書く）
 //! <releases_dir>/<sha12>/promote.log     promote.sh の出力
@@ -18,36 +20,51 @@
 //!
 //! 壊れた JSON・途中で消えたディレクトリでは**落ちない**（その 1 件が `gate_ok = false` と
 //! `problem` を持つだけ）。`.build` / `.cargo-target` のような `.` で始まる名前と `*.partial` は飛ばす。
+//!
+//! ADR-0041 D3 で `[selfdeploy] repo`（人の作業チェックアウト）を**読むだけ**使うようになった:
+//! `git -C <repo> merge-base --is-ancestor <sha> main` で `on_main` を出す。git が無い・遅い・
+//! リポジトリが無い・その sha を知らない、のどれでも `null` を出すだけで、一覧は落とさない
+//! （**taskd がリポジトリを書き換えることは無い**。`main` への反映は人がやる）。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use task_api::types::{ReleaseItem, ReleasePromoteAccepted, ReleaseVerify};
+use task_api::types::{ReleaseChanges, ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseVerify};
 use task_api::{ReleasePromoteError, ReleaseSource, ReleasesFs};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::instance::pid_alive;
 
+/// `git` を待つ上限。一覧の要求の中で走るので、詰まったら諦めて `null` を出す（ADR-0041 D3）。
+const GIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// `<releases_dir>` を読む `ReleaseSource`（taskd が `ApiSettings` に渡す）。
 #[derive(Debug, Clone)]
 pub struct FsReleases {
     root: PathBuf,
+    /// `[selfdeploy] repo`（作業チェックアウト）。`on_main` を出すためだけに読む。
+    repo: PathBuf,
 }
 
 impl FsReleases {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new(root: PathBuf, repo: PathBuf) -> Self {
+        Self { root, repo }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    pub fn repo(&self) -> &Path {
+        &self.repo
+    }
 }
 
 impl ReleaseSource for FsReleases {
     fn list(&self) -> ReleasesFs {
-        scan(&self.root)
+        scan(&self.root, Some(&self.repo))
     }
 
     fn promote(&self, sha12: &str) -> Result<ReleasePromoteAccepted, ReleasePromoteError> {
@@ -68,12 +85,16 @@ fn link_target_name(link: &Path) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// `<releases_dir>` を読んで一覧を作る（純粋。副作用は読み取りだけ）。
-pub fn scan(root: &Path) -> ReleasesFs {
+/// `<releases_dir>` を読んで一覧を作る（副作用は読み取りだけ。`repo` は `on_main` のためだけに使う）。
+pub fn scan(root: &Path, repo: Option<&Path>) -> ReleasesFs {
     // `current` / `previous` は `releases_dir` の**親**にある（`~/taskd/current -> releases/<sha12>`）。
     let home = root.parent();
     let current = home.and_then(|h| link_target_name(&h.join("current")));
     let previous = home.and_then(|h| link_target_name(&h.join("previous")));
+
+    // ADR-0041 D3: `main` が引けるリポジトリのときだけ `on_main` を出す。1 回で見切りをつけて、
+    // リリースごとに `git` を起こす無駄（と、リポジトリが無いときの毎回の失敗）を避ける。
+    let git_repo = repo.filter(|r| git_has_main(r));
 
     let mut items = Vec::new();
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -95,7 +116,13 @@ pub fn scan(root: &Path) -> ReleasesFs {
         if !entry.path().is_dir() {
             continue;
         }
-        items.push(read_release(&entry.path(), &name, current.as_deref(), previous.as_deref()));
+        items.push(read_release(
+            &entry.path(),
+            &name,
+            current.as_deref(),
+            previous.as_deref(),
+            git_repo,
+        ));
     }
     // 新しい順。`built_at` が読めなかったものは最後（同値は sha12 昇順で安定させる）。
     items.sort_by(|a, b| {
@@ -115,10 +142,103 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
-fn read_release(dir: &Path, sha12: &str, current: Option<&str>, previous: Option<&str>) -> ReleaseItem {
+/// `git -C <repo> <args...>` を**上限つき**で走らせる。終了コードを返す（起こせない・時間切れ・
+/// シグナルで死んだ、のどれでも `None`）。`GET /releases` の中で走るので、詰まったら諦める。
+fn git_status(repo: &Path, args: &[&str]) -> Option<i32> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.code(),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// そのディレクトリが git リポジトリで、`main` という commit を持っているか。
+fn git_has_main(repo: &Path) -> bool {
+    repo.is_dir() && git_status(repo, &["rev-parse", "--verify", "--quiet", "main^{commit}"]) == Some(0)
+}
+
+/// ADR-0041 D3: `<sha>` が `main` の祖先か。分からなければ `None`（一覧は落とさない）。
+fn on_main(repo: &Path, sha: &str) -> Option<bool> {
+    match git_status(repo, &["merge-base", "--is-ancestor", sha, "main"]) {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        // 128 = その sha をこのリポジトリが知らない（別のチェックアウトでビルドした等）。
+        _ => None,
+    }
+}
+
+/// ADR-0041 D4: `changes.json` を `ReleaseChanges` に写す。`stale` はここで決める
+/// （`base` が**いまの** `current` と違えば、この一覧は「いま昇格したら何が変わるか」ではない）。
+fn read_changes(dir: &Path, current: Option<&str>) -> Option<ReleaseChanges> {
+    let raw = read_json(&dir.join("changes.json"))?;
+    let base = raw.get("base").and_then(serde_json::Value::as_str).map(str::to_string);
+    let files = raw.get("files").and_then(serde_json::Value::as_array);
+    let sensitive = raw
+        .get("sensitive")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let commits = raw
+        .get("commits")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| {
+                    Some(ReleaseCommit {
+                        sha: c.get("sha")?.as_str()?.to_string(),
+                        subject: c
+                            .get("subject")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(ReleaseChanges {
+        stale: base.as_deref() != current,
+        base,
+        commit_count: commits.len(),
+        file_count: files.map(Vec::len).unwrap_or(0),
+        sensitive,
+        commits,
+    })
+}
+
+fn read_release(
+    dir: &Path,
+    sha12: &str,
+    current: Option<&str>,
+    previous: Option<&str>,
+    repo: Option<&Path>,
+) -> ReleaseItem {
     let manifest = read_json(&dir.join("manifest.json"));
     let gate = read_json(&dir.join("gate.json"));
     let verify = read_json(&dir.join("verify.json"));
+    let promoted = read_json(&dir.join("promoted.json"));
 
     let mut problems: Vec<&str> = Vec::new();
     if manifest.is_none() {
@@ -135,6 +255,9 @@ fn read_release(dir: &Path, sha12: &str, current: Option<&str>, previous: Option
         v.and_then(|v| v.as_str().map(str::to_string))
     };
 
+    // git に渡すのは完全な sha（`manifest.json`）を優先する。読めなければディレクトリ名（sha12）。
+    let full_sha = as_string(field(&manifest, "sha")).unwrap_or_else(|| sha12.to_string());
+
     ReleaseItem {
         sha12: sha12.to_string(),
         r#ref: as_string(field(&manifest, "ref")),
@@ -148,6 +271,9 @@ fn read_release(dir: &Path, sha12: &str, current: Option<&str>, previous: Option
             live_ok: v.get("live_ok").and_then(serde_json::Value::as_bool).unwrap_or(false),
             at: v.get("at").and_then(serde_json::Value::as_str).map(str::to_string),
         }),
+        promoted_at: as_string(field(&promoted, "promoted_at")),
+        on_main: repo.and_then(|r| on_main(r, &full_sha)),
+        changes: read_changes(dir, current),
         is_current: current == Some(sha12),
         is_previous: previous == Some(sha12),
         promoting: promoting_pid(dir).is_some(),
@@ -168,8 +294,9 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// `<releases_dir>/<sha12>/scripts/promote.sh <sha12>` を detached（`setsid`、stdin は `/dev/null`、
-/// stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid を書く。
+/// `promote.sh <sha12>` を detached（`setsid`、stdin は `/dev/null`、stdout/err は
+/// `<release>/promote.log`）で起こし、`promote.lock` に pid を書く。どの `promote.sh` かは
+/// ADR-0041 D4: **`<current>/scripts/promote.sh`**（無ければ昇格先のもの）。
 ///
 /// **この関数を自動で呼ぶ経路は作らない**（ADR-0040 D5: 昇格は人が押す）。呼ぶのは
 /// `POST /releases/{sha12}/promote` だけで、そこは管理系（トークン必須）。
@@ -200,7 +327,8 @@ pub fn start_promote(root: &Path, sha12: &str) -> Result<ReleasePromoteAccepted,
     }
 
     // 2. 既に current か。
-    if root.parent().and_then(|h| link_target_name(&h.join("current"))).as_deref() == Some(sha12) {
+    let current = root.parent().and_then(|h| link_target_name(&h.join("current")));
+    if current.as_deref() == Some(sha12) {
         return Err(ReleasePromoteError::AlreadyCurrent);
     }
 
@@ -209,14 +337,30 @@ pub fn start_promote(root: &Path, sha12: &str) -> Result<ReleasePromoteAccepted,
         return Err(ReleasePromoteError::AlreadyPromoting);
     }
 
-    // 4. リリースに同梱された `scripts/promote.sh`（`release.sh` が入れる。ADR-0040 D6 / Phase 48）。
-    let script = dir.join("scripts").join("promote.sh");
-    if !script.is_file() {
-        return Err(ReleasePromoteError::Unavailable(format!(
-            "{} is missing — this release was built before the selfdeploy scripts were bundled",
-            script.display()
-        )));
-    }
+    // 4. どちらの `promote.sh` で昇格するか（ADR-0041 D4）。
+    //
+    //    **いま動いている版（`current`）のスクリプト**を使う。昇格は「動いている本番を止めて／
+    //    引き継いで新しい版に替える」作業で、その手順を知っているべきなのは**いまの本番**の方だから。
+    //    実装者が `scripts/selfdeploy/` を壊したリリースを作っても、その壊れた昇格スクリプトが
+    //    走ることは無い（新しい昇格スクリプトは、それ自身が一度昇格されてから次の昇格で使われる）。
+    //    `current` に `scripts/` が無い（Phase 48 以前のリリース、または初回）ときだけ、
+    //    昇格先に同梱された方を使う。どちらを使ったかは応答の `script_from` に出す。
+    let target_script = dir.join("scripts").join("promote.sh");
+    let current_script = current
+        .as_deref()
+        .map(|c| root.join(c).join("scripts").join("promote.sh"))
+        .filter(|p| p.is_file());
+    let (script, script_from) = match current_script {
+        Some(script) => (script, "current"),
+        None if target_script.is_file() => (target_script, "target"),
+        None => {
+            return Err(ReleasePromoteError::Unavailable(format!(
+                "{} is missing — this release was built before the selfdeploy scripts were bundled, \
+                 and the current release does not carry them either",
+                target_script.display()
+            )));
+        }
+    };
 
     let log = dir.join("promote.log");
     let lock = dir.join("promote.lock");
@@ -251,6 +395,7 @@ pub fn start_promote(root: &Path, sha12: &str) -> Result<ReleasePromoteAccepted,
         started_at: OffsetDateTime::now_utc()
             .format(&Rfc3339)
             .unwrap_or_else(|_| String::new()),
+        script_from: script_from.to_string(),
     })
 }
 
@@ -269,6 +414,42 @@ mod tests {
         }
     }
 
+    /// 実行ビット付きの偽 `scripts/promote.sh`（1 行書いて眠るだけ。本物の昇格は起きない）。
+    fn fake_script(root: &Path, sha: &str, marker: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let scripts = root.join(sha).join("scripts");
+        std::fs::create_dir_all(&scripts).expect("mkdir");
+        let script = scripts.join("promote.sh");
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '{marker} %s\\n' \"$1\"\nsleep 2\n")).expect("write");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    /// tempdir に `main` を持つ git リポジトリを作り、(main の sha, main に居ない sha) を返す。
+    /// git が無い環境では `None`（テストは飛ばす）。
+    fn git_repo(dir: &Path) -> Option<(String, String)> {
+        let git = |args: &[&str]| -> Option<String> {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.email=t@example.invalid", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        std::fs::create_dir_all(dir).expect("mkdir");
+        git(&["init", "-q", "-b", "main"])?;
+        git(&["commit", "-q", "--allow-empty", "-m", "on main"])?;
+        let on_main_sha = git(&["rev-parse", "HEAD"])?;
+        git(&["checkout", "-q", "-b", "side"])?;
+        git(&["commit", "-q", "--allow-empty", "-m", "not on main"])?;
+        let off_main_sha = git(&["rev-parse", "HEAD"])?;
+        git(&["checkout", "-q", "main"])?;
+        Some((on_main_sha, off_main_sha))
+    }
+
     fn env() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("releases");
@@ -279,13 +460,13 @@ mod tests {
     #[test]
     fn scanning_an_empty_or_missing_directory_yields_nothing_and_does_not_fail() {
         let (dir, root) = env();
-        let scanned = scan(&root);
+        let scanned = scan(&root, None);
         assert!(scanned.items.is_empty());
         assert_eq!(scanned.current, None);
         assert_eq!(scanned.previous, None);
         // ディレクトリごと無いとき（初回）も同じ。
         let missing = dir.path().join("nope");
-        assert!(scan(&missing).items.is_empty());
+        assert!(scan(&missing, None).items.is_empty());
     }
 
     #[test]
@@ -309,7 +490,7 @@ mod tests {
         std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current")).expect("symlink");
         std::os::unix::fs::symlink("releases/bbbbbbbbbbbb", dir.path().join("previous")).expect("symlink");
 
-        let scanned = scan(&root);
+        let scanned = scan(&root, None);
         assert_eq!(scanned.current.as_deref(), Some("aaaaaaaaaaaa"));
         assert_eq!(scanned.previous.as_deref(), Some("bbbbbbbbbbbb"));
         assert_eq!(
@@ -344,7 +525,7 @@ mod tests {
         std::fs::create_dir_all(root.join("eeeeeeeeeeee.partial")).expect("mkdir");
         std::fs::write(root.join("stray.txt"), "x").expect("write");
 
-        let scanned = scan(&root);
+        let scanned = scan(&root, None);
         assert_eq!(scanned.items.len(), 1, "{:?}", scanned.items);
         let item = &scanned.items[0];
         assert_eq!(item.sha12, "cccccccccccc");
@@ -452,7 +633,150 @@ mod tests {
         // 走っている間は 409（二重に起こさない）。
         assert_eq!(start_promote(&root, "abcdef123456"), Err(ReleasePromoteError::AlreadyPromoting));
         // 一覧にも `promoting = true` で出る。
-        let scanned = scan(&root);
+        let scanned = scan(&root, None);
         assert!(scanned.items.iter().any(|i| i.sha12 == "abcdef123456" && i.promoting));
+    }
+
+    /// ADR-0041 D4: 昇格に使うのは **`current` に同梱された** `promote.sh`。
+    /// `current` がそれを持っていないとき（Phase 48 以前・初回）だけ昇格先のものを使う。
+    #[test]
+    fn promotion_runs_the_promote_script_of_the_current_release() {
+        let (dir, root) = env();
+        release(&root, "aaaaaaaaaaaa", Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#), Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#));
+        release(&root, "bbbbbbbbbbbb", Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#), Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#));
+        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current")).expect("symlink");
+
+        // (1) current にも昇格先にも `scripts/` が無い → 409。
+        assert!(matches!(
+            start_promote(&root, "bbbbbbbbbbbb"),
+            Err(ReleasePromoteError::Unavailable(_))
+        ));
+
+        // (2) 昇格先にだけある（current は Phase 48 以前）→ 昇格先のものを使う。
+        fake_script(&root, "bbbbbbbbbbbb", "target-script");
+        let accepted = start_promote(&root, "bbbbbbbbbbbb").expect("202");
+        assert_eq!(accepted.script_from, "target");
+        let log = root.join("bbbbbbbbbbbb").join("promote.log");
+        let mut logged = String::new();
+        for _ in 0..100 {
+            logged = std::fs::read_to_string(&log).unwrap_or_default();
+            if logged.contains("target-script") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(logged.contains("target-script bbbbbbbbbbbb"), "{logged:?}");
+
+        // (3) current も持っている → **current のもの**を使う（実装者が昇格先の promote.sh を
+        //     壊しても、それは走らない）。前の昇格のロックは消してから。
+        std::fs::remove_file(root.join("bbbbbbbbbbbb").join("promote.lock")).expect("rm lock");
+        std::fs::remove_file(&log).expect("rm log");
+        fake_script(&root, "aaaaaaaaaaaa", "current-script");
+        let accepted = start_promote(&root, "bbbbbbbbbbbb").expect("202");
+        assert_eq!(accepted.script_from, "current");
+        // ログは**昇格先**の promote.log（人が見る場所は変わらない）。
+        assert!(accepted.log.ends_with("bbbbbbbbbbbb/promote.log"), "{}", accepted.log);
+        for _ in 0..100 {
+            logged = std::fs::read_to_string(&log).unwrap_or_default();
+            if logged.contains("current-script") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(logged.contains("current-script bbbbbbbbbbbb"), "{logged:?}");
+    }
+
+    /// ADR-0041 D3: `promoted.json` が `promoted_at` になる。無ければ `null`。
+    #[test]
+    fn promoted_json_becomes_promoted_at() {
+        let (_dir, root) = env();
+        release(&root, "aaaaaaaaaaaa", Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
+        std::fs::write(
+            root.join("aaaaaaaaaaaa").join("promoted.json"),
+            r#"{"promoted_at":"2026-09-19T12:31:36Z","mode":"stop-start","from":null}"#,
+        )
+        .expect("write");
+        release(&root, "bbbbbbbbbbbb", Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
+
+        let scanned = scan(&root, None);
+        let by = |sha: &str| scanned.items.iter().find(|i| i.sha12 == sha).expect("item").clone();
+        assert_eq!(by("aaaaaaaaaaaa").promoted_at.as_deref(), Some("2026-09-19T12:31:36Z"));
+        assert_eq!(by("bbbbbbbbbbbb").promoted_at, None, "昇格していないリリースは null");
+        // 壊れた promoted.json でも落ちない。
+        std::fs::write(root.join("bbbbbbbbbbbb").join("promoted.json"), "{ broken").expect("write");
+        assert_eq!(scan(&root, None).items.len(), 2);
+    }
+
+    /// ADR-0041 D4: `changes.json` が `changes` になる。`stale` は**いまの** `current` と比べて決める。
+    /// `changes.json` が無いリリース（Phase 48 以前）は `null`。
+    #[test]
+    fn changes_json_becomes_changes_with_stale_computed_against_current() {
+        let (dir, root) = env();
+        release(&root, "aaaaaaaaaaaa", Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
+        release(&root, "bbbbbbbbbbbb", Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
+        std::fs::write(
+            root.join("bbbbbbbbbbbb").join("changes.json"),
+            r#"{"base":"aaaaaaaaaaaa",
+                "commits":[{"sha":"1111111111111111111111111111111111111111","subject":"phase 50"},
+                           {"sha":"2222222222222222222222222222222222222222","subject":"adr-0041"}],
+                "files":["crates/taskd/src/releases.rs","docs/PROGRESS.md","README.md"],
+                "sensitive":["crates/taskd/src/releases.rs"]}"#,
+        )
+        .expect("write");
+        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current")).expect("symlink");
+
+        let scanned = scan(&root, None);
+        let newest = &scanned.items[0];
+        assert_eq!(newest.sha12, "bbbbbbbbbbbb");
+        let changes = newest.changes.as_ref().expect("changes");
+        assert_eq!(changes.base.as_deref(), Some("aaaaaaaaaaaa"));
+        assert!(!changes.stale, "base == current なら stale ではない");
+        assert_eq!(changes.commit_count, 2);
+        assert_eq!(changes.file_count, 3);
+        assert_eq!(changes.sensitive, ["crates/taskd/src/releases.rs"]);
+        assert_eq!(changes.commits[0].sha, "1111111111111111111111111111111111111111");
+        assert_eq!(changes.commits[0].subject, "phase 50");
+        // `changes.json` が無いリリース（Phase 48 以前）は `null`。
+        assert!(scanned.items[1].changes.is_none());
+
+        // `current` が動いたら stale になる（差分の起点がもう「いま」ではない）。
+        std::fs::remove_file(dir.path().join("current")).expect("rm");
+        std::os::unix::fs::symlink("releases/cccccccccccc", dir.path().join("current")).expect("symlink");
+        let stale = scan(&root, None).items[0].changes.clone().expect("changes");
+        assert!(stale.stale);
+    }
+
+    /// ADR-0041 D3: `on_main` は `git merge-base --is-ancestor <sha> main`。
+    /// リポジトリが無い・その sha を知らないときは `null`（一覧は落ちない）。
+    #[test]
+    fn on_main_is_true_false_or_null() {
+        let (dir, root) = env();
+        let repo = dir.path().join("repo");
+        let Some((merged, unmerged)) = git_repo(&repo) else {
+            eprintln!("git is not usable here; skipping");
+            return;
+        };
+
+        release(&root, "aaaaaaaaaaaa", Some(&format!(r#"{{"sha":"{merged}","built_at":"2026-09-18T00:00:00Z"}}"#)),
+            Some(r#"{"ok":true}"#), None);
+        release(&root, "bbbbbbbbbbbb", Some(&format!(r#"{{"sha":"{unmerged}","built_at":"2026-09-19T00:00:00Z"}}"#)),
+            Some(r#"{"ok":true}"#), None);
+        // このリポジトリが知らない sha（別のチェックアウトでビルドした版）。
+        release(&root, "cccccccccccc", Some(r#"{"sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","built_at":"2026-09-17T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#), None);
+
+        let scanned = scan(&root, Some(&repo));
+        let by = |sha: &str| scanned.items.iter().find(|i| i.sha12 == sha).expect("item").clone();
+        assert_eq!(by("aaaaaaaaaaaa").on_main, Some(true), "main の祖先");
+        assert_eq!(by("bbbbbbbbbbbb").on_main, Some(false), "main に入っていない");
+        assert_eq!(by("cccccccccccc").on_main, None, "このリポジトリが知らない sha");
+
+        // リポジトリが無ければ全部 null（`git` を 1 回試して諦める）。
+        let missing = dir.path().join("no-such-repo");
+        assert!(scan(&root, Some(&missing)).items.iter().all(|i| i.on_main.is_none()));
+        // `repo` を渡さなければそもそも見ない。
+        assert!(scan(&root, None).items.iter().all(|i| i.on_main.is_none()));
     }
 }

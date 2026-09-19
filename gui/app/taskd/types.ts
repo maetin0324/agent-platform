@@ -2110,13 +2110,19 @@ export interface DailyUsage {
 }
 /**
  * `POST /releases/{sha12}/promote` → 202 の応答。**昇格そのものはこの API の外**
- * （`<releases_dir>/<sha12>/scripts/promote.sh` を detached で起こすだけ）。
+ * （`promote.sh` を detached で起こすだけ）。
  */
 export interface ReleasePromoteAccepted {
   /**
    * `promote.sh` の出力を流し込んでいるファイルの絶対パス（中身は API では出さない）。
    */
   log: string;
+  /**
+   * ADR-0041 D4: どちらの `promote.sh` を起こしたか。`"current"` = いま動いている版に同梱の
+   * スクリプト（既定。新しいコードの昇格スクリプトは、それ自身が昇格された後の次の昇格から使われる）、
+   * `"target"` = 昇格先に同梱のスクリプト（`current` に `scripts/` が無い Phase 48 以前のときだけ）。
+   */
+  script_from: string;
   sha12: string;
   /**
    * RFC 3339。
@@ -2170,15 +2176,31 @@ export interface ReleaseItem {
    */
   built_at?: string | null;
   /**
+   * ADR-0041 D4: いま動いている版からこのリリースへ**何が変わるか**（`changes.json`）。
+   * Phase 48 以前に作られたリリースには無いので `null`。
+   */
+  changes?: ReleaseChanges | null;
+  /**
    * `gate.json` の `ok`（`release.sh` の gate が全段 exit 0 だったか）。読めなければ `false`。
    */
   gate_ok: boolean;
   is_current: boolean;
   is_previous: boolean;
   /**
+   * ADR-0041 D3: この sha が `[selfdeploy] repo` の `main` の**祖先**か
+   * （`git merge-base --is-ancestor <sha> main`）。`false` なら本番のコードが `main` に
+   * 戻っていない。リポジトリが無い・git が動かない・その sha を知らないときは `null`。
+   */
+  on_main?: boolean | null;
+  /**
    * `manifest.json` / `gate.json` が読めなかったときの一行（GUI が「壊れている」と出す）。
    */
   problem?: string | null;
+  /**
+   * ADR-0041 D3: `promoted.json` の `promoted_at`（`promote.sh` が昇格に成功したときだけ書く）。
+   * 一度も昇格していないリリースは `null`。
+   */
+  promoted_at?: string | null;
   /**
    * `promote.lock` に書かれた pid がまだ生きている（昇格が走っている最中）。
    */
@@ -2199,6 +2221,47 @@ export interface ReleaseItem {
    * `verify.json`。無ければ `null`（＝未検証。昇格できない）。
    */
   verify?: ReleaseVerify | null;
+}
+/**
+ * `changes.json` の要約（ADR-0041 D4）。`release.sh` が**ビルド時の `current`**（`base`）から
+ * そのリリースまでの差分を書いたもの。GUI は昇格の前にこれを人へ見せる。
+ */
+export interface ReleaseChanges {
+  /**
+   * 差分の起点（ビルド時の `current` の sha12）。`current` が無いときに作られたリリースは `null`。
+   */
+  base?: string | null;
+  /**
+   * `base..<sha>` のコミット数（`commits` は最大 50 件までなので、こちらも 50 で頭打ち）。
+   */
+  commit_count: number;
+  /**
+   * 新しい順、最大 50 件。
+   */
+  commits: ReleaseCommit[];
+  /**
+   * 変わったファイルの数。
+   */
+  file_count: number;
+  /**
+   * **安全に関わる変更**（`scripts/selfdeploy/` などのパスに前方一致したもの。
+   * 一覧の定義は `scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS` 1 か所）。
+   */
+  sensitive: string[];
+  /**
+   * `base` がいまの `current` と違う（＝この一覧は「いま昇格したら何が変わるか」ではない）。
+   */
+  stale: boolean;
+}
+/**
+ * `changes.json` の `commits[]` の 1 件。
+ */
+export interface ReleaseCommit {
+  /**
+   * 完全な sha（GUI は先頭 7 桁を出す）。
+   */
+  sha: string;
+  subject: string;
 }
 /**
  * `verify.json` の要約（ADR-0040 D3）。

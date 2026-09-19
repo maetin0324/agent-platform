@@ -806,6 +806,16 @@ pub struct ReleaseItem {
     pub gate_ok: bool,
     /// `verify.json`。無ければ `null`（＝未検証。昇格できない）。
     pub verify: Option<ReleaseVerify>,
+    /// ADR-0041 D3: `promoted.json` の `promoted_at`（`promote.sh` が昇格に成功したときだけ書く）。
+    /// 一度も昇格していないリリースは `null`。
+    pub promoted_at: Option<String>,
+    /// ADR-0041 D3: この sha が `[selfdeploy] repo` の `main` の**祖先**か
+    /// （`git merge-base --is-ancestor <sha> main`）。`false` なら本番のコードが `main` に
+    /// 戻っていない。リポジトリが無い・git が動かない・その sha を知らないときは `null`。
+    pub on_main: Option<bool>,
+    /// ADR-0041 D4: いま動いている版からこのリリースへ**何が変わるか**（`changes.json`）。
+    /// Phase 48 以前に作られたリリースには無いので `null`。
+    pub changes: Option<ReleaseChanges>,
     pub is_current: bool,
     pub is_previous: bool,
     /// `promote.lock` に書かれた pid がまだ生きている（昇格が走っている最中）。
@@ -826,8 +836,35 @@ pub struct ReleaseVerify {
     pub at: Option<String>,
 }
 
+/// `changes.json` の要約（ADR-0041 D4）。`release.sh` が**ビルド時の `current`**（`base`）から
+/// そのリリースまでの差分を書いたもの。GUI は昇格の前にこれを人へ見せる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseChanges {
+    /// 差分の起点（ビルド時の `current` の sha12）。`current` が無いときに作られたリリースは `null`。
+    pub base: Option<String>,
+    /// `base` がいまの `current` と違う（＝この一覧は「いま昇格したら何が変わるか」ではない）。
+    pub stale: bool,
+    /// `base..<sha>` のコミット数（`commits` は最大 50 件までなので、こちらも 50 で頭打ち）。
+    pub commit_count: usize,
+    /// 変わったファイルの数。
+    pub file_count: usize,
+    /// **安全に関わる変更**（`scripts/selfdeploy/` などのパスに前方一致したもの。
+    /// 一覧の定義は `scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS` 1 か所）。
+    pub sensitive: Vec<String>,
+    /// 新しい順、最大 50 件。
+    pub commits: Vec<ReleaseCommit>,
+}
+
+/// `changes.json` の `commits[]` の 1 件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseCommit {
+    /// 完全な sha（GUI は先頭 7 桁を出す）。
+    pub sha: String,
+    pub subject: String,
+}
+
 /// `POST /releases/{sha12}/promote` → 202 の応答。**昇格そのものはこの API の外**
-/// （`<releases_dir>/<sha12>/scripts/promote.sh` を detached で起こすだけ）。
+/// （`promote.sh` を detached で起こすだけ）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ReleasePromoteAccepted {
     pub sha12: String,
@@ -835,4 +872,8 @@ pub struct ReleasePromoteAccepted {
     pub log: String,
     /// RFC 3339。
     pub started_at: String,
+    /// ADR-0041 D4: どちらの `promote.sh` を起こしたか。`"current"` = いま動いている版に同梱の
+    /// スクリプト（既定。新しいコードの昇格スクリプトは、それ自身が昇格された後の次の昇格から使われる）、
+    /// `"target"` = 昇格先に同梱のスクリプト（`current` に `scripts/` が無い Phase 48 以前のときだけ）。
+    pub script_from: String,
 }

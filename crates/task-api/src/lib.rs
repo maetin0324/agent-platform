@@ -61,7 +61,8 @@ pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterConnectCodeBody,
     ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters, ConfigView, DaemonView, DailyUsage, DbInfo,
     DecisionBody, EventsPage, GenreConfigView, Health, Problem, ProviderConfigView, ProviderStats, ProviderView,
-    Providers, ReleaseItem, ReleasePromoteAccepted, ReleaseRunning, ReleaseVerify, Releases, RetryBody,
+    Providers, ReleaseChanges, ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseRunning, ReleaseVerify,
+    Releases, RetryBody,
     ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody, SecretPutResult, SecretUse, SecretView,
     StreamHeartbeat, StreamHello, StreamReset, ValidationError,
 };

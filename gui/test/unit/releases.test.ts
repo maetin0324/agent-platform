@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { instanceRoleLabel } from "~/lib/labels";
 import {
+  changesSummaryText,
+  commitShort,
   handoffInFlight,
   handoffProgressText,
+  hasSensitiveChanges,
+  notOnMainText,
   promoteAvailability,
   promoteConfirmText,
+  promotedAtText,
+  promoteNeedsTypedSha,
   releaseGateLabel,
   releasePositionLabel,
   releaseSubtitle,
@@ -12,12 +18,15 @@ import {
   releaseVerifyState,
   releaseVerifyTone,
   runningSummary,
+  sensitiveBadgeText,
+  staleChangesText,
+  typedShaMatches,
 } from "~/lib/releases";
 import { loadReleases } from "~/routes/releases";
 import { TaskdClient } from "~/taskd/client.server";
 import { promoteRelease } from "~/taskd/releases-admin.server";
 import type { ReleaseItem, Releases } from "~/taskd/types";
-import { defaultReleasePromoteAccepted, defaultReleases, releaseItem } from "../mock-taskd/fixtures";
+import { defaultReleasePromoteAccepted, defaultReleases, releaseChanges, releaseItem } from "../mock-taskd/fixtures";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 /**
@@ -108,6 +117,78 @@ describe("promoteAvailability（taskd の 409 と同じ理由で先回りして�
   });
 });
 
+describe("昇格の前に何が変わるか（ADR-0041 D4。Phase G15）", () => {
+  it("changes が無いリリース（Phase 48 以前）は差分も安全の印も出ない", () => {
+    const plain = item({ changes: null });
+    expect(changesSummaryText(plain)).toBeNull();
+    expect(hasSensitiveChanges(plain)).toBe(false);
+    expect(sensitiveBadgeText(plain)).toBeNull();
+    expect(promoteNeedsTypedSha(plain)).toBe(false);
+    expect(staleChangesText(plain)).toBeNull();
+  });
+
+  it("差分の一行は 起点 · コミット数 · ファイル数", () => {
+    expect(changesSummaryText(item({ changes: releaseChanges() }))).toBe(
+      "aaaaaaaaaaaa から コミット 2 件 / 変更ファイル 3 件",
+    );
+    expect(changesSummaryText(item({ changes: releaseChanges({ base: null }) }))).toContain("起点なし");
+  });
+
+  it("sensitive が空でなければ赤いバッジの文言が出る（判定は taskd 側の結果を読むだけ）", () => {
+    const safe = item({ changes: releaseChanges() });
+    expect(hasSensitiveChanges(safe)).toBe(false);
+    expect(sensitiveBadgeText(safe)).toBeNull();
+
+    const risky = item({
+      changes: releaseChanges({ sensitive: ["scripts/selfdeploy/verify.sh", "crates/taskd/src/releases.rs"] }),
+    });
+    expect(hasSensitiveChanges(risky)).toBe(true);
+    expect(sensitiveBadgeText(risky)).toBe("安全に関わる変更 2 件");
+  });
+
+  it("安全に関わる変更があるときだけ sha12 の入力を求め、一致するまで押せない", () => {
+    const risky = item({ sha12: "abcdef123456", changes: releaseChanges({ sensitive: ["config/taskd.toml"] }) });
+    expect(promoteNeedsTypedSha(risky)).toBe(true);
+    expect(typedShaMatches(risky, "")).toBe(false);
+    expect(typedShaMatches(risky, "abcdef12345")).toBe(false);
+    expect(typedShaMatches(risky, "abcdef123456")).toBe(true);
+    // 前後の空白は落とし、大文字小文字は区別しない（貼り付けで通る）。
+    expect(typedShaMatches(risky, "  ABCDEF123456 \n")).toBe(true);
+
+    // 安全に関わる変更が無ければ従来どおり（`window.confirm` の二重確認だけ）。
+    expect(promoteNeedsTypedSha(item({ changes: releaseChanges() }))).toBe(false);
+  });
+
+  it("base が今の current と違えば「この差分は古い」と断る", () => {
+    const stale = item({ changes: releaseChanges({ stale: true, base: "999999999999" }) });
+    expect(staleChangesText(stale)).toContain("999999999999");
+    expect(staleChangesText(item({ changes: releaseChanges() }))).toBeNull();
+  });
+
+  it("コミットは先頭 7 桁で出す", () => {
+    expect(commitShort({ sha: "1111111111111111111111111111111111111111" })).toBe("1111111");
+  });
+});
+
+describe("main への反映と昇格の記録（ADR-0041 D3）", () => {
+  it("current が main に入っていなければ ff-only の手順を出す", () => {
+    const behind = item({ sha12: "70e3175eeb20", is_current: true, on_main: false });
+    expect(notOnMainText(behind)).toBe("本番は main に未反映: git merge --ff-only 70e3175eeb20");
+  });
+
+  it("current でない行・main に入っている行・分からない行には出さない", () => {
+    expect(notOnMainText(item({ is_current: false, on_main: false }))).toBeNull();
+    expect(notOnMainText(item({ is_current: true, on_main: true }))).toBeNull();
+    // リポジトリが読めない（null）ときは黙る（「未反映だ」と決めつけない）。
+    expect(notOnMainText(item({ is_current: true, on_main: null }))).toBeNull();
+  });
+
+  it("promoted_at は promoted.json があるときだけ", () => {
+    expect(promotedAtText(item({ promoted_at: "2026-09-19T12:31:36Z" }))).toBe("2026-09-19T12:31:36Z");
+    expect(promotedAtText(item())).toBeNull();
+  });
+});
+
 describe("引き継ぎの進行（ADR-0040 D4）", () => {
   it("active が 1 つだけなら進行中ではない", () => {
     expect(handoffInFlight(releasesView)).toBe(false);
@@ -191,6 +272,8 @@ describe("promoteRelease（POST /releases/{sha12}/promote。管理系）", () =>
     mock.on("POST", "/api/v1/releases/bbbbbbbbbbbb/promote", (_req, res) => sendJson(res, 202, accepted));
     const outcome = await promoteRelease(client, "bbbbbbbbbbbb");
     expect(outcome).toEqual({ ok: true, op: "release_promote", sha12: "bbbbbbbbbbbb", accepted });
+    // ADR-0041 D4: どちらの `promote.sh` が走ったかも落とさずに運ぶ。
+    expect(accepted.script_from).toBe("current");
     const req = mock.requests.find((r) => r.method === "POST" && r.url === "/api/v1/releases/bbbbbbbbbbbb/promote");
     expect(JSON.parse(req?.body ?? "null")).toEqual({});
   });
