@@ -38,6 +38,9 @@ pub struct ClaudeCodeConfig {
     pub model: Option<String>,
     /// 追加の環境変数（例: `CLAUDE_CONFIG_DIR`）。
     pub env: Vec<(String, String)>,
+    /// ADR-0043 D3（Phase 56）: `Some` なら `claude` をコンテナの中で起こす（`container::wrap`）。
+    /// TOML には書かない（ディスパッチャが `with_container` で入れる）。
+    pub container: Option<crate::container::SharedPlan>,
 }
 
 impl Default for ClaudeCodeConfig {
@@ -48,6 +51,7 @@ impl Default for ClaudeCodeConfig {
             permission_mode: "bypassPermissions".to_string(),
             model: None,
             env: Vec::new(),
+            container: None,
         }
     }
 }
@@ -86,6 +90,13 @@ impl WorkerAdapter for ClaudeCodeAdapter {
     fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
         let mut config = self.config.clone();
         config.env.extend(extra.iter().cloned());
+        Some(Arc::new(ClaudeCodeAdapter::new(config)))
+    }
+
+    /// ADR-0043 D3（Phase 56）: コンテナの中で `claude` を起こす複製。
+    fn with_container(&self, plan: crate::container::SharedPlan) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut config = self.config.clone();
+        config.container = Some(plan);
         Some(Arc::new(ClaudeCodeAdapter::new(config)))
     }
 }
@@ -662,9 +673,10 @@ async fn run_claude_code(
         command.arg("--model").arg(model);
     }
     command.args(&config.extra_args);
+    command.envs(config.env.iter().cloned()).current_dir(req.cwd());
+    // ★ ADR-0043 D3 の差し込み点（コンテナ実行）。`None` ならそのまま（ホスト実行は変わらない）。
+    let mut command = crate::container::wrap(command, config.container.as_deref());
     command
-        .envs(config.env.iter().cloned())
-        .current_dir(req.cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

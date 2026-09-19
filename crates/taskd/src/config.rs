@@ -127,6 +127,9 @@ pub struct Config {
     /// ADR-0043 D5（Phase 54）: 変更の取り込みで GitHub を使うときの設定（`gh` の場所と merge の方法）。
     #[serde(default)]
     pub github: GithubConfig,
+    /// ADR-0043 D3（Phase 56）: コンテナ実行（runtime・既定のイメージ・ビルドの置き場）。
+    #[serde(default)]
+    pub containers: ContainersConfig,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -212,6 +215,58 @@ impl Default for WorkspaceConfig {
 
 fn default_worktree_branch_prefix() -> String {
     task_worker::DEFAULT_BRANCH_PREFIX.to_string()
+}
+
+/// `[containers]`（ADR-0043 D3。Phase 56）: リポジトリの `run` が `container` のタスクを
+/// どのコンテナ runtime で、どのイメージで走らせるか。
+///
+/// - `runtime` — `"auto"`（既定。podman を先に試し、駄目なら docker）/ `"podman"` / `"docker"`。
+///   起動時に `<runtime> info` を 1 度だけ起こして能力を確かめ、結果を `GET /daemon` とログに出す。
+///   どれも使えなければ `run = container` のタスクは dispatch されず `blocked` になる。
+/// - `image_default` — `workspace.toml` に `[container] image` も `dockerfile` も無いときのイメージ。
+///   既定は `celeris-worker:latest`（`scripts/containers/build-worker.sh` で作る）。
+/// - `build_dir` — `[container] dockerfile` からビルドしたイメージの作業場所。既定は
+///   `~/.local/celeris/containers`（ADR-0042 D3）。`~` は展開し、相対ならこの設定ファイル基準。
+/// - `build_timeout_secs` — 1 回のビルドの上限（既定 1800）。超えたらタスクを `blocked` にして人に聞く。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContainersConfig {
+    #[serde(default = "default_container_runtime")]
+    pub runtime: String,
+    #[serde(default = "default_container_image")]
+    pub image_default: String,
+    #[serde(default = "default_container_build_dir")]
+    pub build_dir: PathBuf,
+    #[serde(default = "default_container_build_timeout_secs")]
+    pub build_timeout_secs: u64,
+}
+
+impl Default for ContainersConfig {
+    fn default() -> Self {
+        Self {
+            runtime: default_container_runtime(),
+            image_default: default_container_image(),
+            build_dir: default_container_build_dir(),
+            build_timeout_secs: default_container_build_timeout_secs(),
+        }
+    }
+}
+
+fn default_container_runtime() -> String {
+    "auto".to_string()
+}
+
+fn default_container_image() -> String {
+    task_worker::container::DEFAULT_IMAGE.to_string()
+}
+
+/// ADR-0042 D3: `~/.local/celeris/containers`。
+fn default_container_build_dir() -> PathBuf {
+    PathBuf::from("~/.local/celeris/containers")
+}
+
+fn default_container_build_timeout_secs() -> u64 {
+    task_worker::container::DEFAULT_BUILD_TIMEOUT_SECS
 }
 
 /// `[github]`（ADR-0043 D5。Phase 54）: 変更の取り込みを PR でやるときの設定。
@@ -1035,6 +1090,12 @@ impl Config {
         if cfg.workspace_root.is_relative() {
             cfg.workspace_root = base.join(&cfg.workspace_root);
         }
+        // ADR-0043 D3 / ADR-0042 D3: `[containers] build_dir` の既定は `~/.local/celeris/containers`。
+        cfg.containers.build_dir =
+            task_core::expand_home(&cfg.containers.build_dir, task_core::home_dir().as_deref());
+        if cfg.containers.build_dir.is_relative() {
+            cfg.containers.build_dir = base.join(&cfg.containers.build_dir);
+        }
         if let Some(token_file) = &cfg.api.token_file
             && token_file.is_relative()
         {
@@ -1166,6 +1227,19 @@ impl Config {
         }
         if self.github.gh.trim().is_empty() {
             return Err(ConfigError::Invalid("[github] gh must not be blank".into()));
+        }
+        // ADR-0043 D3: runtime は 3 つだけ（綴り間違いで黙ってホスト実行に倒れないように）。
+        if task_worker::RuntimePreference::parse(&self.containers.runtime).is_none() {
+            return Err(ConfigError::Invalid(format!(
+                "[containers] runtime must be one of [\"auto\", \"podman\", \"docker\"] (got {:?})",
+                self.containers.runtime
+            )));
+        }
+        if self.containers.image_default.trim().is_empty() {
+            return Err(ConfigError::Invalid("[containers] image_default must not be blank".into()));
+        }
+        if self.containers.build_timeout_secs == 0 {
+            return Err(ConfigError::Invalid("[containers] build_timeout_secs must be >= 1".into()));
         }
         if self.providers.is_empty() {
             return Err(ConfigError::Invalid("at least one [[providers]] entry is required".into()));
@@ -1613,6 +1687,13 @@ impl Config {
             // ADR-0041 D1 / ADR-0042 D3: ローカルの worktree（既定 `celeris/`）。
             worktree_branch_prefix: self.workspace.worktree_branch_prefix.clone(),
             releases_dir: Some(self.selfdeploy.releases_dir.clone()),
+            // ADR-0043 D3（Phase 56）: コンテナ実行。綴りは `validate()` が通してある。
+            containers: task_dispatch::ContainersRuntimeConfig {
+                preference: task_worker::RuntimePreference::parse(&self.containers.runtime).unwrap_or_default(),
+                image_default: self.containers.image_default.clone(),
+                build_dir: self.containers.build_dir.clone(),
+                build_timeout: Duration::from_secs(self.containers.build_timeout_secs),
+            },
         }
     }
 
@@ -3339,6 +3420,66 @@ roles = ["lead"]
         assert!(matches!(blank.validate(), Err(ConfigError::Invalid(m)) if m.contains("gh")));
         // 未知のキーは弾く（他の節と同じ流儀）。
         assert!(toml::from_str::<Config>(&format!("{base}\n[github]\nbogus = 1\n")).is_err());
+    }
+
+    /// ADR-0043 D3（Phase 56）: `[containers]` の既定（`auto` / `celeris-worker:latest` /
+    /// `~/.local/celeris/containers` / 1800 秒）と `DispatchConfig` への写り、綴り間違いの拒否。
+    #[test]
+    fn containers_defaults_reach_the_dispatcher_and_bad_values_are_rejected() {
+        let base = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n".to_string();
+        let cfg: Config = toml::from_str(&base).expect("defaults");
+        assert_eq!(cfg.containers.runtime, "auto");
+        assert_eq!(cfg.containers.image_default, "celeris-worker:latest");
+        assert_eq!(cfg.containers.build_timeout_secs, 1800);
+        assert!(cfg.validate().is_ok());
+        let dispatch = cfg.dispatch_config();
+        assert_eq!(dispatch.containers.preference, task_worker::RuntimePreference::Auto);
+        assert_eq!(dispatch.containers.image_default, "celeris-worker:latest");
+        assert_eq!(dispatch.containers.build_timeout, Duration::from_secs(1800));
+
+        let cfg: Config = toml::from_str(&format!(
+            "{base}\n[containers]\nruntime = \"podman\"\nimage_default = \"x:1\"\nbuild_timeout_secs = 60\n"
+        ))
+        .expect("explicit");
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.dispatch_config().containers.preference, task_worker::RuntimePreference::Podman);
+        assert_eq!(cfg.dispatch_config().containers.build_timeout, Duration::from_secs(60));
+
+        // 知らない runtime・空のイメージ・0 秒は設定エラー（黙ってホスト実行に倒れない）。
+        let bad: Config = toml::from_str(&format!("{base}\n[containers]\nruntime = \"lxc\"\n")).expect("parse");
+        assert!(matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("runtime")));
+        let bad: Config =
+            toml::from_str(&format!("{base}\n[containers]\nimage_default = \"  \"\n")).expect("parse");
+        assert!(matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("image_default")));
+        let bad: Config =
+            toml::from_str(&format!("{base}\n[containers]\nbuild_timeout_secs = 0\n")).expect("parse");
+        assert!(matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("build_timeout_secs")));
+        // 未知のキーは弾く。
+        assert!(toml::from_str::<Config>(&format!("{base}\n[containers]\nbogus = 1\n")).is_err());
+    }
+
+    /// ADR-0043 D3 / ADR-0042 D3: `[containers] build_dir` の既定は `~/.local/celeris/containers`
+    /// （`~` を展開し、相対なら設定ファイル基準）。
+    #[test]
+    fn containers_build_dir_expands_home_and_resolves_relative_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        std::fs::write(&path, "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.containers.build_dir.is_absolute(), "{:?}", cfg.containers.build_dir);
+        assert!(
+            cfg.containers.build_dir.ends_with(".local/celeris/containers"),
+            "{:?}",
+            cfg.containers.build_dir
+        );
+
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[containers]\nbuild_dir = \"images\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.containers.build_dir, dir.path().canonicalize().unwrap().join("images"));
     }
 
     /// ADR-0041 D1（Phase 49）/ ADR-0042 D3（Phase 52）: `[workspace] worktree_branch_prefix` は

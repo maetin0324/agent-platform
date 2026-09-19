@@ -1,5 +1,7 @@
 //! `fake` アダプタ（ADR-0005 D2）。設定されたコマンドをサブプロセスとして起動する。
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, WorkerAdapter};
@@ -39,6 +41,7 @@ impl FakeAdapter {
                 program,
                 args: command,
                 env: vec![],
+                container: None,
             },
         }
     }
@@ -73,5 +76,12 @@ impl WorkerAdapter for FakeAdapter {
         sink: &dyn EventSink,
     ) -> Result<RunOutcome, AdapterError> {
         run_subprocess(&self.spec, &req, run_id, &limits, sink).await
+    }
+
+    /// ADR-0043 D3（Phase 56）: コンテナの中で起こす複製（差し込み点は `subprocess::run_subprocess`）。
+    fn with_container(&self, plan: crate::container::SharedPlan) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut next = self.clone();
+        next.spec.container = Some(plan);
+        Some(Arc::new(next))
     }
 }

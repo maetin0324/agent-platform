@@ -55,6 +55,35 @@ pub struct DaemonSnapshot {
     /// ADR-0024/0025: プールのアカウント（`adapter` → `id` の順、id 昇順）。`[accounts]` が無ければ空。
     #[serde(default)]
     pub accounts: Vec<AccountLive>,
+    /// ADR-0043 D3（Phase 56）: `[containers]` の設定と、起動時に調べたコンテナ runtime。
+    /// 古いスナップショットには無いので既定は `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containers: Option<ContainersLive>,
+}
+
+/// ADR-0043 D3（Phase 56）: コンテナ実行の設定と起動時の検出（**観測値**。DB には書かない）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ContainersLive {
+    /// `[containers] runtime`（`"auto"` | `"podman"` | `"docker"`）。
+    pub preference: String,
+    /// 実際に使う runtime（`"podman"` | `"docker"`）。どれも使えなければ `None`
+    /// （`run = container` のタスクは dispatch されず `blocked` になる）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// 試した runtime ごとの `<runtime> info` の結果（試した順）。
+    #[serde(default)]
+    pub probes: Vec<ContainerProbeView>,
+    /// `[containers] image_default`（`[container] image` も `dockerfile` も無いときのイメージ）。
+    pub image_default: String,
+    /// `[containers] build_dir`（Dockerfile からビルドしたイメージの作業場所。絶対パス）。
+    pub build_dir: String,
+}
+
+/// `<runtime> info` の結果 1 件（`detail` は成功なら `"ok"`、失敗なら理由の 1 行）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ContainerProbeView {
+    pub runtime: String,
+    pub detail: String,
 }
 
 /// ADR-0024/0025: プールの 1 アカウントの稼働状況（観測値。DB には書かない）。

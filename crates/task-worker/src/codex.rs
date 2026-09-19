@@ -39,6 +39,8 @@ pub struct CodexConfig {
     pub model: Option<String>,
     /// 追加の環境変数。
     pub env: Vec<(String, String)>,
+    /// ADR-0043 D3（Phase 56）: `Some` なら `codex` をコンテナの中で起こす（`container::wrap`）。
+    pub container: Option<crate::container::SharedPlan>,
 }
 
 impl Default for CodexConfig {
@@ -48,6 +50,7 @@ impl Default for CodexConfig {
             extra_args: Vec::new(),
             model: None,
             env: Vec::new(),
+            container: None,
         }
     }
 }
@@ -86,6 +89,13 @@ impl WorkerAdapter for CodexAdapter {
     fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
         let mut config = self.config.clone();
         config.env.extend(extra.iter().cloned());
+        Some(Arc::new(CodexAdapter::new(config)))
+    }
+
+    /// ADR-0043 D3（Phase 56）: コンテナの中で `codex` を起こす複製。
+    fn with_container(&self, plan: crate::container::SharedPlan) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut config = self.config.clone();
+        config.container = Some(plan);
         Some(Arc::new(CodexAdapter::new(config)))
     }
 }
@@ -160,9 +170,10 @@ async fn run_codex(
     }
     command.args(&config.extra_args);
     command.arg(&prompt);
+    command.envs(config.env.iter().cloned()).current_dir(req.cwd());
+    // ★ ADR-0043 D3 の差し込み点（コンテナ実行）。`None` ならそのまま（ホスト実行は変わらない）。
+    let mut command = crate::container::wrap(command, config.container.as_deref());
     command
-        .envs(config.env.iter().cloned())
-        .current_dir(req.cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -856,6 +867,7 @@ echo '{"type":"turn.completed"}'
             extra_args: vec!["--sandbox".into(), "read-only".into()],
             model: Some("gpt-5-codex".into()),
             env: Vec::new(),
+            container: None,
         };
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());

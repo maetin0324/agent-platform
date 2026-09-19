@@ -48,8 +48,8 @@ deliverables = "."                                # コード以外の成果物�
 |---|---|---|---|
 | `[workspace]` | `name` | 無し | 人がリポジトリを案件に登録するときの名前の候補（現状 taskd は読むだけ。GUI が使う） |
 | `[workspace]` | `description` | 無し | **計画 run**（「この案件のリポジトリ」の一覧）と、タスクの前置きの「作業場所」 |
-| `[run]` | `mode` | `"host"` | **この Phase では読むだけ**。コンテナ実行は ADR-0043 A3 |
-| `[container]` | `image` / `dockerfile` / `mounts` / `env` | 無し | 同上（A3） |
+| `[run]` | `mode` | `"host"` | `"container"` ならこのリポジトリを使うタスクの run は**コンテナの中**（§7。Phase 56） |
+| `[container]` | `image` / `dockerfile` / `mounts` / `env` | 無し | `mode = "container"` のときのイメージ・追加マウント・環境変数（§7） |
 | `[commands]` | `setup` | `[]` | worktree を作った直後に**一度だけ**ホストで流す。記録は `<task_dir>/runs/setup.log`。1 つでも落ちたら run を始めず、タスクを `blocked` にして人に聞く |
 | `[commands]` | `check` | `[]` | タスクの前置きに「このリポジトリの検査コマンド」として出す。加えて、**タスクの `acceptance` に検査コマンドが 1 つも無いときだけ**、レビューの暗黙の条件（`exit 0` を期待）になる |
 | `[outputs]` | `docs` | `"docs"` | 前置きの「文書は `<repo>/<docs>` の下に置け」 |
@@ -106,8 +106,8 @@ docs = "docs"
   `POST /tasks/{id}/answer` で答えると次の run から再開する（`setup.log` があるので `setup` は再実行しない）。
 - `check` をレビューの暗黙の条件に足すのは、**タスクの `acceptance` に `Check::Command` が 1 つも無いとき
   だけ**である。タスクが自分で検査コマンドを書いていれば、それが勝つ（ADR-0043 D4）。
-- `[run] mode = "container"` と `[container]` は**この Phase では解釈されるだけ**で、実行環境は変わらない
-  （ADR-0043 A3 の工事）。
+- `[run] mode = "container"` と `[container]` は §7 のとおりに効く（Phase 56）。`mode` を書かなければ
+  従来どおりホストで走る。
 
 ## 6. 変更の取り込み（ADR-0043 D5。Phase 54）
 
@@ -161,3 +161,84 @@ merge_method = "merge" # 「Celeris で merge」= `gh pr merge --<method> --dele
 - 「Celeris で merge」は `POST /api/v1/tasks/{id}/changes/{repo}/pr/merge`。GitHub 側でも merge される。
 - 案件画面の「PR と取り込み」は `GET /api/v1/projects/{id}/integrations`（タスク × リポジトリごとに
   最新の 1 件。1 回に同期する PR は 20 件まで）。
+
+## 7. コンテナ実行（ADR-0043 D3。Phase 56）
+
+リポジトリが `run = container`（案件のリポジトリの設定）か、`run = auto`（既定）で `workspace.toml` に
+`[run] mode = "container"` と書いてあるとき、そのタスクの **ワーカー（ハーネスの CLI そのもの）が
+コンテナの中で起きる**。devcontainer と同じ考え方で、ホストにツールチェーンを生やさずに済ませる。
+
+```toml
+[run]
+mode = "container"
+
+[container]
+image = "ghcr.io/…/rust-dev:1.90"            # か dockerfile = ".config/celeris/Dockerfile"
+mounts = ["/dev/infiniband:/dev/infiniband"] # 追加のマウント（そのまま runtime に渡る）
+env = { CARGO_TARGET_DIR = "/w/.cargo-target" }
+```
+
+### 7.1 いつホストにするか（大事）
+
+**迷ったらホスト**（既定）。コンテナにするのは「ツールチェーンをホストに置きたくない」ときだけである。
+次のものは**ホスト実行**（リポジトリの `run` を `host` に）にすること:
+
+- **ホストのデバイスが要るもの**（benchfs の InfiniBand、GPU、`/dev/fuse`、特権が要る計測）。
+  `[container] mounts` でデバイスを渡すこともできるが、権限と `cgroup` の都合でまず壊れる。
+  デバイスが要るなら最初から `run = host` が正しい。
+- **リモートのクラスタで動かすもの**（ADR-0018 / 0019 の (a)）。リモートのタスクは常にホスト扱い。
+- **`paperqa` / `local-deep-research` のタスク**。この 2 つは**設定に関わらず常にホスト**で走る
+  （道具立てがホストの venv にあり、コンテナに持ち込むと別物になる。ADR-0043 Phase 56 追記）。
+
+### 7.2 何がどう見えるか
+
+タスクごとに `<runtime> run --rm -i --network host …` が 1 つ起きる。中身は決定的:
+
+| 何 | どうする | なぜ |
+|---|---|---|
+| uid | podman: `--userns=keep-id` / docker: `--user <uid>:<gid>` | マウントした worktree にホストと同じ持ち主で書けるように |
+| タスクのディレクトリ | `<workspace_root>/<task_id>` を**同じパス**で読み書き可 | worktree・`artifacts/`・`runs/` が前置きに書いたパスのまま見える |
+| `dir` のリポジトリ | シンボリックリンクの**実体**を同じパスで読み書き可 | リンクはコンテナの中では辿れないため |
+| 認証情報 | `CLAUDE_CONFIG_DIR` / `CLAUDE_SECURESTORAGE_CONFIG_DIR` / `CODEX_HOME` / `OPENCODE_CONFIG` の指す場所を**同じパスで読み取り専用** | アダプタが env に書いた場所だけを、書けない形で渡す（ADR-0024 のアカウントプールが選んだものだけ） |
+| ネットワーク | `--network host` | LLM の API と、手元の Qwen のポート（`bnode150:18000` の中継など）に届く必要がある |
+| cwd | `-w <repos[0] の作業ツリー>` | ホスト実行と同じ場所 |
+| 環境変数 | `HOME=<task_dir>` → アダプタの env → `[container] env`（後勝ち） | ホームは**マウントしない**ので、書ける HOME をタスクのディレクトリに置く |
+| 目印 | `--label celeris.task=<task_id>` | 取り残したコンテナをラベルで消せるように |
+
+**見せないもの**: ホームディレクトリ、`~/taskd`、`~/.local/celeris` の根。必要なものだけを同じパスで渡す。
+
+### 7.3 イメージ
+
+1. `[container] image` — **そのまま使う**（Celeris はビルドもプルもしない。手元に無ければ runtime が引く）。
+2. `[container] dockerfile`（リポジトリ相対。例 `.config/celeris/Dockerfile`）— **Dockerfile の内容と
+   `.config/celeris/` の中身の sha** からタグ `celeris-ws-<sha12>` を作り、`~/.local/celeris/containers/<tag>/`
+   でビルドしてキャッシュする。**同じ内容なら再ビルドしない**（`<runtime> image inspect` で見る）。
+   文脈に送るのは `.config/celeris/` の写しだけで、リポジトリ全体ではない。ビルドは
+   `<runtime> build --network host`（run と同じネットワーク。入れ子のコンテナでは `RUN` が
+   ブリッジを張れないため）。
+   記録は `<task_dir>/runs/container-build.log`。上限は `[containers] build_timeout_secs`（既定 1800 秒）。
+3. どちらも無い — `[containers] image_default`（既定 `celeris-worker:latest`）。中身は
+   `deploy/containers/celeris-worker/Dockerfile`（Debian stable slim + node LTS と claude/codex CLI +
+   rust stable + python3/uv + git・gh・rsync・ssh）。作るのは `scripts/containers/build-worker.sh`
+   （**`cargo test` の一部ではない**。ネットワークに出るので人が 1 度叩く）。
+
+タスクが複数のリポジトリを使い、複数がコンテナを要求したときは、**primary → `repos[0]` の順で最初に
+要求したもの**のイメージ・`mounts`・`env` を使う（環境は混ぜない。ADR-0043 D3）。
+
+### 7.4 `setup` もコンテナの中
+
+`[commands] setup` は worktree を作った直後に一度だけ走るが、**コンテナのタスクではコンテナの中で走る**
+（ADR-0043 D3）。`runs/setup.log` の 1 行目に `# 実行環境: コンテナ <image>（<runtime>）` が出る。
+
+### 7.5 runtime が使えないとき
+
+`[containers] runtime`（既定 `auto` = podman → docker）を taskd が起動時に 1 度だけ `<runtime> info` で
+確かめる。結果は `GET /api/v1/daemon` の `containers` とログに出る。**どれも使えなければ、コンテナが要る
+タスクは run を始めずに `blocked` になり**、人に質問が積まれる:
+
+> コンテナ runtime が使えません（`benchfs` が `run = container` を要求しています）: podman: … / docker: …。
+> `[containers] runtime` の設定か、podman / docker の用意を見てください。
+> ホストで走らせてよければ、そのリポジトリの `run` を `host` にしてください。
+
+イメージのビルドが落ちたときも同じ経路（`blocked` + 質問）で、記録は `runs/container-build.log` にある。
+`POST /api/v1/tasks/{id}/answer` で答えると次の run から再開する。

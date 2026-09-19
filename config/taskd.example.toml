@@ -66,6 +66,34 @@ dir = "../memory"
 # gh = "gh"
 # merge_method = "merge"
 
+# コンテナ実行（ADR-0043 D3、Phase 56）。リポジトリの `run` が `container`（または `auto` で
+# `<repo>/.config/celeris/workspace.toml` の `[run] mode = "container"`）のとき、**ハーネスの CLI そのもの**を
+# コンテナの中で起こす（devcontainer 流）。タスクのディレクトリ（worktree・artifacts・runs）は
+# **同じパス**で読み書きできるようにマウントし、`dir` のリポジトリは実体を同じパスで、ハーネスの
+# 認証情報（`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `OPENCODE_CONFIG` の指す場所）は**読み取り専用**で渡す。
+# ホームや `~/.local/celeris` を丸ごと見せることはしない。
+#   runtime           — "auto"（既定。podman → docker の順に `info` を試す）/ "podman" / "docker"。
+#                       起動時に 1 度だけ調べ、結果は `GET /api/v1/daemon` の `containers` とログに出る。
+#                       **どれも使えなければ `run = container` のタスクは dispatch されず `blocked`** になり、
+#                       「コンテナ runtime が使えません…」という質問が人に積まれる（ホストでよければ
+#                       そのリポジトリの `run` を `host` にする）。
+#   image_default     — `workspace.toml` に `[container] image` も `dockerfile` も無いときのイメージ。
+#                       既定 "celeris-worker:latest"（`scripts/containers/build-worker.sh` で作る。
+#                       中身は `deploy/containers/celeris-worker/Dockerfile`）。
+#   build_dir         — `[container] dockerfile` からビルドしたイメージの作業場所。既定は
+#                       `~/.local/celeris/containers`（ADR-0042 D3）。タグは Dockerfile の内容と
+#                       `.config/celeris/` の中身の sha（`celeris-ws-<sha12>`）なので、同じ内容なら再ビルドしない。
+#                       ビルドは `<runtime> build --network host`（run と同じネットワーク。入れ子の
+#                       コンテナでは `RUN` がブリッジを張れず落ちるため）。
+#   build_timeout_secs— 1 回のビルドの上限（既定 1800）。超えたらタスクを `blocked` にして人に聞く。
+# **`paperqa` / `local-deep-research` のタスクは常にホスト**（道具立てがホストの venv にあるため）。
+# デバイス（InfiniBand など）が要る案件は、そもそもリポジトリの `run` を `host` にすること。
+[containers]
+# runtime = "auto"
+# image_default = "celeris-worker:latest"
+# build_dir = "~/.local/celeris/containers"
+# build_timeout_secs = 1800
+
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]
 # adapter = "claude-code"

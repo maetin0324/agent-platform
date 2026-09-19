@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
@@ -23,6 +24,8 @@ pub struct SubprocessSpec {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// ADR-0043 D3（Phase 56）: `Some` ならこのコマンドをコンテナの中で起こす（`container::wrap`）。
+    pub container: Option<crate::container::SharedPlan>,
 }
 
 /// ADR-0023 D2: ワーカーに渡した指示そのものを `runs/<run_id>/` に残す（後から「何を言われて何をしたか」を追える）。
@@ -65,7 +68,10 @@ pub async fn run_subprocess(
     command
         .args(&spec.args)
         .envs(spec.env.iter().cloned())
-        .current_dir(req.cwd())
+        .current_dir(req.cwd());
+    // ★ ADR-0043 D3 の差し込み点（コンテナ実行）。`None` ならそのまま（ホスト実行は変わらない）。
+    let mut command = crate::container::wrap(command, spec.container.as_deref());
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -220,6 +226,12 @@ pub async fn run_subprocess(
     } else {
         reap_after_terminal(&mut child, limits.kill_grace).await?
     };
+    // ADR-0043 D3: `--rm` と signal の転送でふつうは消えるが、クライアントだけを殺した場合に
+    // 取り残さないようラベルでも消す（ADR-0044 B2 のプロセスグループ kill からも同じ口を呼べる）。
+    if let Some(plan) = &spec.container {
+        let plan = Arc::clone(plan);
+        let _ = tokio::task::spawn_blocking(move || crate::container::ContainerStopper::stop_blocking(&*plan)).await;
+    }
 
     if let Err(e) = stderr_task.await {
         warn!("run {run_id}: stderr capture task failed: {e}");
@@ -410,6 +422,7 @@ mod tests {
             program: "sh".to_string(),
             args: vec!["-c".to_string(), script.to_string()],
             env: vec![],
+            container: None,
         }
     }
 

@@ -130,4 +130,15 @@ pub trait WorkerAdapter: Send + Sync {
     fn with_env(&self, _extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
         None
     }
+
+    /// ADR-0043 D3（Phase 56）: このアダプタが起こすコマンドを**コンテナの中で**走らせる複製を返す。
+    /// 差し込み点は `crate::container::wrap` の 1 関数だけで、アダプタは受け取った計画を
+    /// `Command` を組み立てた直後に渡すだけである（stdio 契約は変わらない）。
+    ///
+    /// 既定は `None` = **この経路を持たないアダプタ**（`paperqa` / `local-deep-research` は道具立てが
+    /// ホストの venv にあるので、そもそも `container::decide` がコンテナを選ばない）。
+    /// `None` が返ったらディスパッチャはホストで走らせる。
+    fn with_container(&self, _plan: crate::container::SharedPlan) -> Option<Arc<dyn WorkerAdapter>> {
+        None
+    }
 }

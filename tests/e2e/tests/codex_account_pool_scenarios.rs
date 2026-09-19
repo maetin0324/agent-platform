@@ -250,6 +250,16 @@ account_pool = true
             self.request("GET", "/health", None, &[]).status == 200
         });
         assert!(ok, "API did not come up\n{}", daemon.log_text());
+        // `GET /accounts` の観測値（`usage` / `score` / `in_use`）は**ディスパッチャのスナップショット**
+        // 由来なので、API が上がっただけでは空になりうる（最初の tick より前は `snapshot: null`）。
+        // 起動にかかる時間は環境で動く（Phase 56 で起動時のコンテナ runtime 検出が入った）ため、
+        // 「最初の tick がスナップショットを出すまで」を待ちに含める。
+        // 認証が要る設定では、この時点でまだトークンを持っていないことがある（そのときは待たない）。
+        let ticked = wait_until(Duration::from_secs(20), || {
+            let resp = self.request("GET", "/daemon", None, &[]);
+            resp.status != 200 || resp.json()["snapshot"].is_object()
+        });
+        assert!(ticked, "the dispatcher never published a snapshot\n{}", daemon.log_text());
     }
 
     fn url(&self, path: &str) -> String {

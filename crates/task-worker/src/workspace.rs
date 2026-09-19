@@ -56,17 +56,26 @@ pub struct LocalWorkspace {
     dir: PathBuf,
     /// ADR-0041 D1: コマンドを実行する場所（worktree）。`None` なら `dir` と同じ（従来どおり）。
     work_dir: Option<PathBuf>,
+    /// ADR-0043 D3（Phase 56）: `Some` なら `exec` をコンテナの中で走らせる（`[commands] setup` が
+    /// 「その実行環境で」走るために要る）。`None` はホスト実行（従来どおり）。
+    container: Option<crate::container::SharedPlan>,
 }
 
 impl LocalWorkspace {
     /// `dir` はそのタスクの作業ディレクトリ（ADR-0005 D3）。
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), work_dir: None }
+        Self { dir: dir.into(), work_dir: None, container: None }
     }
 
     /// ADR-0041 D1: `runs/` `inputs/` `artifacts/` は `dir`、コマンドは `work_dir`（worktree）で動かす。
     pub fn with_work_dir(mut self, work_dir: impl Into<PathBuf>) -> Self {
         self.work_dir = Some(work_dir.into());
+        self
+    }
+
+    /// ADR-0043 D3: `exec` をコンテナの中で走らせる（`setup` 用）。
+    pub fn with_container(mut self, plan: Option<crate::container::SharedPlan>) -> Self {
+        self.container = plan;
         self
     }
 
@@ -130,6 +139,8 @@ impl Workspace for LocalWorkspace {
         command.arg("-c").arg(cmd);
         // ADR-0019 D1 6. / ADR-0041 D1: 判定コマンドは worktree の中で実行する。
         command.current_dir(self.work_dir());
+        // ★ ADR-0043 D3 の差し込み点（コンテナ実行）。`None` ならそのまま（ホスト実行は変わらない）。
+        let mut command = crate::container::wrap(command, self.container.as_deref());
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());

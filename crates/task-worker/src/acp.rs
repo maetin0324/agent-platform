@@ -72,6 +72,8 @@ pub struct AcpConfig {
     pub model_option_id: String,
     /// `initialize` の応答を待つ上限（初回はエージェント側のプロバイダ取得で数分かかりうる。既定 300 秒）。
     pub startup_timeout: Duration,
+    /// ADR-0043 D3（Phase 56）: `Some` なら ACP エージェントをコンテナの中で起こす（`container::wrap`）。
+    pub container: Option<crate::container::SharedPlan>,
 }
 
 impl Default for AcpConfig {
@@ -84,6 +86,7 @@ impl Default for AcpConfig {
             model: None,
             model_option_id: "model".to_string(),
             startup_timeout: Duration::from_secs(300),
+            container: None,
         }
     }
 }
@@ -122,6 +125,13 @@ impl WorkerAdapter for AcpAdapter {
     fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
         let mut config = self.config.clone();
         config.env.extend(extra.iter().cloned());
+        Some(Arc::new(AcpAdapter::new(config)))
+    }
+
+    /// ADR-0043 D3（Phase 56）: コンテナの中で ACP エージェントを起こす複製。
+    fn with_container(&self, plan: crate::container::SharedPlan) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut config = self.config.clone();
+        config.container = Some(plan);
         Some(Arc::new(AcpAdapter::new(config)))
     }
 }
@@ -658,7 +668,10 @@ async fn run_acp(
     command
         .args(&config.args)
         .envs(config.env.iter().cloned())
-        .current_dir(req.cwd())
+        .current_dir(req.cwd());
+    // ★ ADR-0043 D3 の差し込み点（コンテナ実行）。`None` ならそのまま（ホスト実行は変わらない）。
+    let mut command = crate::container::wrap(command, config.container.as_deref());
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -9,6 +9,8 @@ pub mod claude_code;
 pub mod cluster_login;
 pub mod codex;
 pub mod codex_account;
+/// ADR-0043 D3（Phase 56）: ハーネスの CLI をコンテナの中で起こす（runtime 検出・包み方・イメージ）。
+pub mod container;
 pub mod delegate_file;
 pub mod fake;
 pub mod local_deep_research;
@@ -38,6 +40,10 @@ pub use cluster_login::{
 };
 pub use codex::{CodexAdapter, CodexConfig};
 pub use codex_account::{CodexLoginSession, check_account_codex, start_login_codex};
+pub use container::{
+    ContainerChoice, ContainerPlan, ContainerStopper, ImageSource, RepoRunInput, Runtime, RuntimePreference,
+    RuntimeProbe, SharedPlan,
+};
 pub use delegate_file::{DELEGATE_FILE_NAME, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
 pub use local_deep_research::{EvidenceThresholds, LdrAdapter, LdrConfig, LdrMode};
@@ -60,7 +66,7 @@ pub use result_report::{
     read_result_report_kind, report_kind_from_result_json,
 };
 pub use subprocess::{SubprocessSpec, run_subprocess};
-pub use task_repos::{REPOS_DIR_NAME, SetupOutcome, TaskRepo, TaskWorkspaces, run_setup};
+pub use task_repos::{REPOS_DIR_NAME, SetupOutcome, TaskRepo, TaskWorkspaces, run_setup, run_setup_in};
 pub use ssh::{
     SYNC_ALWAYS_EXCLUDED, SshSettings, SshWorkspace, SyncMode, WorktreeSettings, control_master_alive_blocking,
     remote_exec_instructions,

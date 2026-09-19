@@ -160,6 +160,9 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     permission_mode: base.permission_mode.clone(),
                     model: effective_model(&p.model, &base.model),
                     env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
+                    // ADR-0043 D3（Phase 56）: コンテナで走らせるかはタスクごとに決まるので、ここでは常に `None`
+                    // （ディスパッチャが `with_container` で包んだ複製を作る）。
+                    container: None,
                 }))
             }
             CodexAdapter::ID => {
@@ -169,6 +172,9 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     extra_args: base.extra_args.clone(),
                     model: effective_model(&p.model, &base.model),
                     env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
+                    // ADR-0043 D3（Phase 56）: コンテナで走らせるかはタスクごとに決まるので、ここでは常に `None`
+                    // （ディスパッチャが `with_container` で包んだ複製を作る）。
+                    container: None,
                 }))
             }
             AcpAdapter::ID => {
@@ -185,6 +191,9 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     model: effective_model(&p.model, &None),
                     model_option_id: base.model_option_id.clone(),
                     startup_timeout: Duration::from_secs(base.startup_timeout_secs),
+                    // ADR-0043 D3（Phase 56）: コンテナで走らせるかはタスクごとに決まるので、ここでは常に `None`
+                    // （ディスパッチャが `with_container` で包んだ複製を作る）。
+                    container: None,
                 }))
             }
             PaperQaAdapter::ID => {
@@ -410,6 +419,10 @@ pub fn build_dispatcher(config: &Config, masters: ClusterMasters) -> Result<Disp
         config.dispatch_config(),
     );
     dispatcher.set_cluster_connector(cluster_connector(masters));
+    // ADR-0043 D3（Phase 56）: 起動時に 1 度だけコンテナ runtime を調べる（`podman info` → `docker info`）。
+    // 結果はログと `GET /daemon` の `containers` に出る。使えなければ `run = container` のタスクは
+    // dispatch されず `blocked`（「コンテナ runtime が使えません」）になる。
+    dispatcher.detect_container_runtime();
     Ok(dispatcher)
 }
 

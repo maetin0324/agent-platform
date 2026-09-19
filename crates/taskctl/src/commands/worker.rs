@@ -691,6 +691,7 @@ mod tests {
             selfdeploy: Default::default(),
             workspace: Default::default(),
             github: Default::default(),
+            containers: Default::default(),
             source_path: None,
         }
     }

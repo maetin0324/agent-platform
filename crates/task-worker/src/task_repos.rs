@@ -139,21 +139,35 @@ pub struct SetupOutcome {
     pub failures: Vec<String>,
 }
 
-/// リポジトリごとの `[commands] setup` を**ホストで**一度だけ流す（ADR-0043 D3。コンテナ実行は A3）。
-///
-/// - 走らせる場所はそのリポジトリの作業ツリー（`<task_dir>/repos/<name>`）
-/// - 記録は `<task_dir>/runs/setup.log`（追記。このファイルがあるかどうかは呼び出し側が見る）
-/// - 1 つでも落ちたら `ok = false`（呼び出し側は run を始めずタスクを `blocked` にして人に聞く）
-///
-/// `workspace.toml` が読めない・壊れているリポジトリは既定（`setup` 無し）として飛ばす。
+/// リポジトリごとの `[commands] setup` を一度だけ流す（ADR-0043 D3）。ホストで流す従来の入口。
 pub async fn run_setup(
     repos: &[TaskRepo],
     task_dir: &Path,
     timeout: std::time::Duration,
 ) -> Result<SetupOutcome, WorkspaceError> {
+    run_setup_in(repos, task_dir, timeout, None).await
+}
+
+/// リポジトリごとの `[commands] setup` を**そのタスクの実行環境で**一度だけ流す（ADR-0043 D3 / D4）。
+///
+/// - 走らせる場所はそのリポジトリの作業ツリー（`<task_dir>/repos/<name>`）
+/// - `plan` が `Some` なら**コンテナの中**（Phase 56 = A3。`None` ならホスト）
+/// - 記録は `<task_dir>/runs/setup.log`（追記。このファイルがあるかどうかは呼び出し側が見る）
+/// - 1 つでも落ちたら `ok = false`（呼び出し側は run を始めずタスクを `blocked` にして人に聞く）
+///
+/// `workspace.toml` が読めない・壊れているリポジトリは既定（`setup` 無し）として飛ばす。
+pub async fn run_setup_in(
+    repos: &[TaskRepo],
+    task_dir: &Path,
+    timeout: std::time::Duration,
+    plan: Option<&crate::container::SharedPlan>,
+) -> Result<SetupOutcome, WorkspaceError> {
     use std::fmt::Write as _;
 
     let mut log = String::new();
+    if let Some(plan) = plan {
+        let _ = writeln!(log, "# 実行環境: コンテナ {} （{}）", plan.image, plan.runtime.as_str());
+    }
     let mut out = SetupOutcome { ok: true, ran: 0, failures: Vec::new() };
     for repo in repos {
         let (config, warning) = task_core::workspace_config::load_or_default(&repo.dir);
@@ -164,7 +178,9 @@ pub async fn run_setup(
         for cmd in &config.commands.setup {
             out.ran += 1;
             let _ = writeln!(log, "$ ({}) {cmd}", repo.name);
-            let ws = crate::workspace::LocalWorkspace::new(task_dir).with_work_dir(&repo.dir);
+            let ws = crate::workspace::LocalWorkspace::new(task_dir)
+                .with_work_dir(&repo.dir)
+                .with_container(plan.map(std::sync::Arc::clone));
             let result = crate::workspace::Workspace::exec(&ws, cmd, timeout).await?;
             if !result.stdout_tail.is_empty() {
                 let _ = writeln!(log, "{}", result.stdout_tail.trim_end());
@@ -407,6 +423,92 @@ mod tests {
         assert!(outcome.failures[0].contains("exit Some(7)"), "{:?}", outcome.failures);
         let log = std::fs::read_to_string(task_dir.join(SETUP_LOG)).expect("log");
         assert!(log.contains("[stderr] boom"), "{log}");
+    }
+
+    /// ADR-0043 D3（Phase 56）: コンテナのタスクでは `setup` も**コンテナの中で**走る。
+    ///
+    /// 偽の runtime（argv を記録して、`-w` の場所で本体のコマンドをそのまま実行する sh スクリプト）を
+    /// 使う。**ネットワークにも本物の podman / docker にも触らない**。
+    #[tokio::test]
+    async fn setup_runs_inside_the_container_when_the_task_is_containerized() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let code = root.path().join("benchfs");
+        init_repo(&code);
+        std::fs::create_dir_all(code.join(".config/celeris")).expect("mkdir");
+        std::fs::write(
+            code.join(".config/celeris/workspace.toml"),
+            b"[run]\nmode = \"container\"\n\n[commands]\nsetup = [\"pwd > setup-ran.txt\"]\n",
+        )
+        .expect("write");
+        git(&code, &["add", "-A"]);
+        git(&code, &["commit", "-q", "-m", "workspace.toml"]);
+
+        // 偽の runtime: argv を NUL 区切りで記録し、`-w` のディレクトリでイメージ以降を実行する。
+        let argv_log = root.path().join("argv.log");
+        let fake = root.path().join("fake-runtime");
+        crate::test_support::write_executable(
+            &fake,
+            &format!(
+                r#"#!/bin/sh
+for a in "$@"; do printf '%s\0' "$a" >> "{log}"; done
+cwd=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -w) cwd="$2"; shift 2 ;;
+    -v|--env|--label|--user) shift 2 ;;
+    run|--rm|-i|--network|host|--userns=keep-id) shift ;;
+    *) break ;;
+  esac
+done
+shift
+cd "$cwd" || exit 1
+exec "$@"
+"#,
+                log = argv_log.display()
+            ),
+        );
+
+        let task_dir = root.path().join("ws").join("01TASK");
+        let ws = workspaces(&task_dir, &[("benchfs", &code)], &[]);
+        ws.ensure().await.expect("ensure");
+
+        let plan: crate::container::SharedPlan = std::sync::Arc::new(crate::container::ContainerPlan {
+            runtime: crate::container::Runtime::Podman,
+            program: fake.display().to_string(),
+            image: "celeris-worker:latest".to_string(),
+            task_dir: task_dir.clone(),
+            dir_repos: vec![],
+            creds: vec![],
+            extra_mounts: vec![],
+            env: vec![],
+            task_id: "01TASK".to_string(),
+            uid: 1000,
+            gid: 1000,
+        });
+        let outcome = run_setup_in(&ws.repos, &task_dir, std::time::Duration::from_secs(60), Some(&plan))
+            .await
+            .expect("setup");
+        assert_eq!(outcome, SetupOutcome { ok: true, ran: 1, failures: Vec::new() });
+
+        // コマンドは runtime 越しに渡っている（ホストで直接 `sh -c` していない）。
+        let argv = std::fs::read(&argv_log).expect("argv.log");
+        let argv: Vec<String> = String::from_utf8_lossy(&argv)
+            .split('\0')
+            .filter(|a| !a.is_empty())
+            .map(str::to_string)
+            .collect();
+        let line = argv.join(" ");
+        assert!(line.starts_with("run --rm -i --network host --userns=keep-id"), "{line}");
+        assert!(line.contains(&format!("-w {}", task_dir.join("repos/benchfs").display())), "{line}");
+        assert!(line.contains(&format!("-v {0}:{0}", task_dir.display())), "{line}");
+        assert!(line.contains("--label celeris.task=01TASK"), "{line}");
+        assert!(line.contains("celeris-worker:latest sh -c pwd > setup-ran.txt"), "{line}");
+
+        // 中身も本当に走っている（worktree の中に結果が残る）。
+        assert!(task_dir.join("repos/benchfs/setup-ran.txt").is_file());
+        let log = std::fs::read_to_string(task_dir.join(SETUP_LOG)).expect("log");
+        assert!(log.contains("# 実行環境: コンテナ celeris-worker:latest （podman）"), "{log}");
+        assert!(log.contains("=> exit 0"), "{log}");
     }
 
     /// 人が実体のディレクトリを置いていたら、リンクで上書きしない。

@@ -605,6 +605,21 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 - cooldown は `ProviderPolicy::cooldowns(now) -> Vec<Cooldown{provider, until: Instant, reason: CooldownReason}>`（既定実装は空。Phase 9a で `StaticPolicy` が実装済み）で取り、`Instant` を壁時計に直す。`reason` の語彙は `throttled | auth_failed | exhausted`（`Spawn` は `provider_failure_outcome` が `Exhausted` に写すので cooldown の理由としては現れない。`ProviderThrottled.reason` には `spawn` も入りうる）。
 - `last_tick_at` が `now` から `3 × tick_ms` 以上古ければ GUI は「ディスパッチャが遅延」と表示する（API は判定しない）。
 - API に繋がらないこと自体が「taskd 停止」を意味する（GUI 側で表示）。
+- **`containers`**（Phase 56、ADR-0043 D3。古いスナップショットには無いので任意）: コンテナ実行の設定と、
+  **起動時に 1 度だけ**調べた runtime の能力。
+
+```json
+"containers":{"preference":"auto","runtime":"docker","image_default":"celeris-worker:latest",
+  "build_dir":"/home/u/.local/celeris/containers",
+  "probes":[{"runtime":"podman","detail":"newuidmap: write to uid_map failed: Operation not permitted"},
+            {"runtime":"docker","detail":"ok"}]}
+```
+
+  - `preference` は `[containers] runtime`（`"auto"` / `"podman"` / `"docker"`）。`"auto"` は podman を先に試す。
+  - `runtime` は実際に使うもの。**`null` なら `run = container` のタスクは dispatch されず `blocked`** になる
+    （質問「コンテナ runtime が使えません…」）。GUI は設定画面で赤く出す。
+  - `probes[]` は試した順の `<runtime> info` の結果（`detail` は成功なら `"ok"`、失敗なら理由の 1 行）。
+  - これは**観測値**で、DB には書かないし `replay` の対象でもない（再起動すると調べ直す）。
 
 ### 3.21 `GET /config` → 200 `ConfigView`
 

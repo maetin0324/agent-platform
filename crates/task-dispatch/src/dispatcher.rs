@@ -220,6 +220,56 @@ pub struct DispatchConfig {
     /// ADR-0041 D1: `[selfdeploy] releases_dir`。その**親**の `current/manifest.json` が読めれば、
     /// 本番の sha を worktree の base の候補にする。`None` なら base は常に `main`（か `HEAD`）。
     pub releases_dir: Option<PathBuf>,
+    /// ADR-0043 D3（Phase 56）: `[containers]`。コンテナ実行の runtime・既定のイメージ・ビルドの置き場。
+    pub containers: ContainersRuntimeConfig,
+}
+
+/// `[containers]`（ADR-0043 D3 / ADR-0042 D3）。
+#[derive(Debug, Clone)]
+pub struct ContainersRuntimeConfig {
+    /// `runtime = "auto" | "podman" | "docker"`（既定 `auto` = podman を先に試す）。
+    pub preference: task_worker::RuntimePreference,
+    /// `[container] image` も `dockerfile` も無いときのイメージ（既定 `celeris-worker:latest`）。
+    pub image_default: String,
+    /// Dockerfile からビルドしたイメージの作業場所（既定 `~/.local/celeris/containers`）。
+    pub build_dir: PathBuf,
+    /// 1 回のビルドの上限（既定 1800 秒）。
+    pub build_timeout: Duration,
+}
+
+impl Default for ContainersRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            preference: task_worker::RuntimePreference::Auto,
+            image_default: task_worker::container::DEFAULT_IMAGE.to_string(),
+            build_dir: PathBuf::from("."),
+            build_timeout: Duration::from_secs(task_worker::container::DEFAULT_BUILD_TIMEOUT_SECS),
+        }
+    }
+}
+
+/// ADR-0043 D3（Phase 56）: 1 タスク分の実行環境の判断（ディスパッチャが dispatch のときに決める）。
+#[derive(Debug, Clone)]
+pub enum ContainerDecision {
+    /// 従来どおりホストで走らせる。
+    Host,
+    /// コンテナが要るのに runtime が使えない → run を始めず `blocked` にして人に聞く。
+    Unavailable { question: String },
+    /// コンテナで走らせる（イメージの用意は `run_worker` が run の直前にやる）。
+    Container(Box<ContainerRun>),
+}
+
+/// コンテナで走らせるときの一式（ADR-0043 D3）。
+#[derive(Debug, Clone)]
+pub struct ContainerRun {
+    /// コンテナの形。`image` はイメージを決めた後に埋める。
+    pub plan: task_worker::ContainerPlan,
+    pub image: task_worker::ImageSource,
+    pub image_default: String,
+    pub build_root: PathBuf,
+    pub build_timeout: Duration,
+    /// コンテナを要求したリポジトリの名前（人に見せる文面に出す）。
+    pub repo: String,
 }
 
 /// 1 tick の要約（ログとテスト用）。
@@ -723,6 +773,10 @@ pub struct Dispatcher {
     /// ADR-0024 D5/D7 / ADR-0025 D5: taskd（GUI の管理 API）が進行中のログイン中継を持っているアカウント
     /// （キーは `"<adapter>:<id>"`。同じ id でもアダプタが違えば別のログインとして扱う）。
     login_pending_accounts: std::collections::HashSet<String>,
+    /// ADR-0043 D3（Phase 56）: 起動時に調べたコンテナ runtime（観測値）。taskd が
+    /// `detect_container_runtime()` を呼んで埋める。埋まっていなければ「使えない」と同じ扱いで、
+    /// コンテナが要るタスクは `blocked` になる。
+    container_probe: task_worker::RuntimeProbe,
     /// ADR-0032 D3: `auth = "publickey"` のクラスタに自動で接続を張るフック。`None` なら自動接続しない
     /// （taskd 側が `set_cluster_connector` で挿す。未設定＝従来どおりの挙動）。
     cluster_connector: Option<ClusterConnector>,
@@ -798,6 +852,7 @@ impl Dispatcher {
             account_books,
             accounts_scan_cache: HashMap::new(),
             login_pending_accounts: std::collections::HashSet::new(),
+            container_probe: task_worker::RuntimeProbe::default(),
             cluster_connector: None,
             connect_pending_clusters: std::collections::HashSet::new(),
             now_unix_fn: Arc::new(real_now_unix),
@@ -805,6 +860,37 @@ impl Dispatcher {
             task_workspaces: HashMap::new(),
             eligible: None,
         }
+    }
+
+    /// ADR-0043 D3（Phase 56）: 起動時にコンテナ runtime を調べる（`podman info` → `docker info`）。
+    /// 結果はログと `GET /daemon` に出る。**呼ばなければコンテナが要るタスクは `blocked`** になる
+    /// （テストは `set_container_probe` で差し替える。`cargo test` は runtime を起こさない）。
+    pub fn detect_container_runtime(&mut self) {
+        let probe = task_worker::container::detect(self.config.containers.preference, CONTAINER_PROBE_TIMEOUT);
+        match probe.runtime {
+            Some(rt) => tracing::info!(
+                runtime = rt.as_str(),
+                preference = %probe.preference,
+                image_default = %self.config.containers.image_default,
+                "container runtime detected"
+            ),
+            None => tracing::warn!(
+                preference = %probe.preference,
+                detail = %probe.summary(),
+                "no container runtime; tasks that need one will be blocked"
+            ),
+        }
+        self.container_probe = probe;
+    }
+
+    /// 調べた結果を差し替える（taskd の起動経路とテスト用）。
+    pub fn set_container_probe(&mut self, probe: task_worker::RuntimeProbe) {
+        self.container_probe = probe;
+    }
+
+    /// 起動時に調べたコンテナ runtime（スナップショット用）。
+    pub fn container_probe(&self) -> &task_worker::RuntimeProbe {
+        &self.container_probe
     }
 
     /// ADR-0040 D4（Phase 47）: 新しい仕事を始めるのをやめる／再開する。`false` にすると
@@ -1248,6 +1334,22 @@ impl Dispatcher {
             max_runs_per_account,
             accounts_roots,
             accounts,
+            // ADR-0043 D3（Phase 56）: コンテナ実行の設定と起動時の検出。
+            containers: Some(task_ops::daemon::ContainersLive {
+                preference: self.config.containers.preference.as_str().to_string(),
+                runtime: self.container_probe.program().map(str::to_string),
+                probes: self
+                    .container_probe
+                    .tried
+                    .iter()
+                    .map(|(runtime, detail)| task_ops::daemon::ContainerProbeView {
+                        runtime: runtime.clone(),
+                        detail: detail.clone(),
+                    })
+                    .collect(),
+                image_default: self.config.containers.image_default.clone(),
+                build_dir: self.config.containers.build_dir.display().to_string(),
+            }),
         };
         // 受け手（API）がいなければ送信は失敗するが、デーモンの動作には関係ない。
         let _ = publisher.tx.send(Some(snapshot));
@@ -2454,6 +2556,8 @@ impl Dispatcher {
             };
             tracing::info!(task_id = %task.id, %run_id, adapter = %adapter_id, provider = %provider_id, account = account.as_deref(), "dispatching");
             let remote = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path, task.id));
+            // ADR-0043 D3（Phase 56）: ホストか、コンテナか、runtime が無くて `blocked` か。
+            let container = self.container_decision(&task, worktree.as_ref(), &adapter_id, remote.is_some());
             let extras = self.run_extras(&task, worktree.as_ref())?;
             // ADR-0043 D2: 中止されたときに片付けられるよう、この run で使う作業場所を覚えておく。
             if let Some(ws) = &worktree {
@@ -2471,6 +2575,7 @@ impl Dispatcher {
                 remote,
                 worktree,
                 extras,
+                container,
             );
             self.running.insert(
                 task.id,
@@ -2866,6 +2971,7 @@ impl Dispatcher {
         remote: Option<SshSettings>,
         worktree: Option<task_worker::TaskWorkspaces>,
         extras: RunExtras,
+        container: ContainerDecision,
     ) -> JoinHandle<()> {
         let store = self.store.clone();
         let tx = self.tx.clone();
@@ -2894,6 +3000,7 @@ impl Dispatcher {
                 delegation,
                 account,
                 account_book,
+                container,
             )
             .await;
             let _ = tx.send(Completion::Worker {
@@ -3424,6 +3531,89 @@ impl Dispatcher {
         Some(task_worker::TaskWorkspaces { task_dir, repos })
     }
 
+    /// ADR-0043 D3（Phase 56）: **このタスクをコンテナで走らせるか**。ストアと `workspace.toml` を
+    /// 読むだけの決定的な判断で、LLM は使わない（DESIGN 原則 1）。
+    ///
+    /// - リモート（`WorkspaceSpec::Remote`）と作業場所の無いタスクはホスト（ADR-0043 D7 は後続）
+    /// - `paperqa` / `local-deep-research` はホスト（道具立てがホストの venv にある。`container::decide`）
+    /// - 1 つでも `run = container`（か `auto` + `[run] mode = "container"`）なら**コンテナ**
+    /// - runtime が使えなければ `Unavailable`（run を始めず `blocked` にして人に聞く）
+    fn container_decision(
+        &self,
+        task: &Task,
+        worktree: Option<&task_worker::TaskWorkspaces>,
+        adapter_id: &str,
+        remote: bool,
+    ) -> ContainerDecision {
+        let Some(ws) = worktree else {
+            return ContainerDecision::Host;
+        };
+        if remote {
+            return ContainerDecision::Host;
+        }
+        // リポジトリごとの `run` と `is_primary`。Phase 49 の 1 リポジトリのタスクは
+        // `project_repos` の行を持たないので `auto` + primary として扱う。
+        let mut inputs: Vec<task_worker::RepoRunInput> = Vec::with_capacity(ws.repos.len());
+        for repo in &ws.repos {
+            let row = task
+                .repos
+                .iter()
+                .find(|r| r.name == repo.name)
+                .and_then(|r| self.store.repo_get(r.repo_id).ok().flatten());
+            // `workspace.toml` は作業ツリーがあればそこ、無ければ元のリポジトリ（`repo_notes` と同じ規則）。
+            let from = if repo.dir.is_dir() { &repo.dir } else { &repo.source };
+            let (config, warning) = task_core::workspace_config::load_or_default(from);
+            if let Some(warning) = warning {
+                tracing::warn!(repo = %repo.name, %warning, "cannot read workspace.toml; using the defaults");
+            }
+            inputs.push(task_worker::RepoRunInput {
+                name: repo.name.clone(),
+                run: row.as_ref().map(|r| r.run).unwrap_or(task_core::RepoRun::Auto),
+                is_primary: row.as_ref().map(|r| r.is_primary).unwrap_or(true),
+                config,
+                config_dir: from.clone(),
+            });
+        }
+        let Some(choice) = task_worker::container::decide(&inputs, adapter_id) else {
+            return ContainerDecision::Host;
+        };
+        let Some(runtime) = self.container_probe.runtime else {
+            return ContainerDecision::Unavailable {
+                question: task_worker::container::unavailable_question(&self.container_probe, &choice.repo),
+            };
+        };
+        // `dir` のリポジトリ（シンボリックリンク）は**実体**を同じパスでマウントする。
+        let dir_repos: Vec<PathBuf> = ws
+            .repos
+            .iter()
+            .filter(|r| !r.is_git())
+            .map(|r| r.source.clone())
+            .collect();
+        let (uid, gid) = task_worker::container::host_ids();
+        let plan = task_worker::ContainerPlan {
+            runtime,
+            program: runtime.as_str().to_string(),
+            // イメージは `run_worker` が run の直前に決める（ビルドが要ることがある）。
+            image: self.config.containers.image_default.clone(),
+            task_dir: ws.task_dir.clone(),
+            dir_repos,
+            creds: Vec::new(),
+            extra_mounts: choice.mounts.clone(),
+            env: choice.env.clone(),
+            task_id: task.id.to_string(),
+            uid,
+            gid,
+        };
+        ContainerDecision::Container(Box::new(ContainerRun {
+            plan,
+            image: choice.image,
+            image_default: self.config.containers.image_default.clone(),
+            build_root: self.config.containers.build_dir.clone(),
+            build_timeout: self.config.containers.build_timeout,
+            repo: choice.repo,
+        }))
+    }
+
     /// Phase 49（ADR-0041 D1）の 1 リポジトリだけの worktree（`<task_dir>/tree`）。
     fn legacy_worktree_for(&self, task: &Task, task_dir: &Path) -> Option<task_worker::LocalWorktree> {
         let WorkspaceSpec::Local { path, .. } = &task.workspace else {
@@ -3665,6 +3855,9 @@ impl Dispatcher {
 /// `cargo fetch` / `pnpm install` が入る想定で、run の予算とは別に取る）。
 const SETUP_TIMEOUT: Duration = Duration::from_secs(1800);
 
+/// ADR-0043 D3（Phase 56）: 起動時の `<runtime> info` の上限（届かない docker デーモンで固まらない）。
+const CONTAINER_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// ADR-0041 D1 / ADR-0043 D2: `<task_dir>/worktree.json` の中身。先頭の 5 つは Phase 49 からある
 /// 「1 リポジトリのときの姿」で、複数リポジトリのタスクでは `repos[0]`（cwd になるもの）の写しが入る。
 fn worktree_marker(ws: &task_worker::TaskWorkspaces) -> task_ops::workspace::WorktreeMarker {
@@ -3714,6 +3907,7 @@ async fn run_worker(
     delegation: DelegationLimits,
     account: Option<String>,
     account_book: Option<Arc<StdMutex<AccountBook>>>,
+    container: ContainerDecision,
 ) -> Result<RunOutcome, AdapterError> {
     // リース取得後の状態（running, lease あり）をワーカーに渡す。
     let mut task = store
@@ -3757,14 +3951,72 @@ async fn run_worker(
                 .map_err(|e| AdapterError::Other(format!("workspace prepare: {e}")))?
         }
     };
-    // ADR-0043 D3 / D4: worktree を作った直後に `[commands] setup` を**一度だけ**ホストで流す
-    // （記録は `runs/setup.log`。そのファイルがあれば済んでいる）。落ちたら run を始めず、
-    // 既存の質問の経路でタスクを `blocked` にして人に聞く。
+    // ADR-0043 D3（Phase 56）: この run の実行環境。コンテナなら**イメージをここで用意する**
+    // （`[container] image` はそのまま、`dockerfile` は内容の sha のタグでビルドしてキャッシュ）。
+    // runtime が無い・ビルドが落ちたときは run を始めず、`setup` の失敗と同じ経路で人に聞く。
+    let container_plan: Option<task_worker::SharedPlan> = match container {
+        ContainerDecision::Host => None,
+        ContainerDecision::Unavailable { question } => {
+            tracing::warn!(task_id = %task_id, %question, "no container runtime; asking a human");
+            return Ok(RunOutcome {
+                terminal: Terminal::Question { text: question },
+                exit_code: None,
+            });
+        }
+        ContainerDecision::Container(run) => {
+            let mut run = *run;
+            let log_path = dir.join(task_worker::container::BUILD_LOG);
+            let resolved =
+                match task_worker::container::resolve_image(&run.image, &run.image_default, &run.build_root) {
+                    Ok(resolved) => resolved,
+                    Err(e) => {
+                        tracing::warn!(task_id = %task_id, error = %e, "cannot resolve the container image");
+                        return Ok(RunOutcome {
+                            terminal: Terminal::Question {
+                                text: task_worker::container::image_question(&run.repo, &e, &log_path),
+                            },
+                            exit_code: None,
+                        });
+                    }
+                };
+            match resolved {
+                task_worker::container::ResolvedImage::Ready(tag) => run.plan.image = tag,
+                task_worker::container::ResolvedImage::Build(request) => {
+                    let program = run.plan.program.clone();
+                    let exists = move |tag: &str| task_worker::container::image_exists(&program, tag);
+                    if let Err(e) = task_worker::container::ensure_image(
+                        &run.plan.program,
+                        &request,
+                        run.build_timeout,
+                        &log_path,
+                        &exists,
+                    )
+                    .await
+                    {
+                        tracing::warn!(task_id = %task_id, error = %e, "container image build failed");
+                        return Ok(RunOutcome {
+                            terminal: Terminal::Question {
+                                text: task_worker::container::image_question(&run.repo, &e, &log_path),
+                            },
+                            exit_code: None,
+                        });
+                    }
+                    run.plan.image = request.tag;
+                }
+            }
+            tracing::info!(task_id = %task_id, image = %run.plan.image, runtime = run.plan.runtime.as_str(), repo = %run.repo, "running in a container");
+            Some(Arc::new(run.plan))
+        }
+    };
+    // ADR-0043 D3 / D4: worktree を作った直後に `[commands] setup` を**一度だけ**流す
+    // （記録は `runs/setup.log`。そのファイルがあれば済んでいる）。コンテナのタスクは
+    // **コンテナの中で**流す（Phase 56）。落ちたら run を始めず、既存の質問の経路で
+    // タスクを `blocked` にして人に聞く。
     if let Some(wt) = &worktree
         && remote.is_none()
         && !wt.task_dir.join(task_worker::task_repos::SETUP_LOG).exists()
     {
-        match task_worker::run_setup(&wt.repos, &wt.task_dir, SETUP_TIMEOUT).await {
+        match task_worker::run_setup_in(&wt.repos, &wt.task_dir, SETUP_TIMEOUT, container_plan.as_ref()).await {
             Ok(outcome) if outcome.ok => {}
             Ok(outcome) => {
                 tracing::warn!(task_id = %task_id, failures = ?outcome.failures, "setup failed; asking a human");
@@ -3848,6 +4100,19 @@ async fn run_worker(
             // Phase 38（ADR-0028 追記）: レビュー run（`review.rs` が組む）だけに入る。
             subject_genre: None,
         },
+    };
+    // ADR-0043 D3（Phase 56）: コンテナで走らせる run は、ここでアダプタを包んだ複製に差し替える
+    // （差し込み点はアダプタ側の `container::wrap` 1 か所）。この経路を持たないアダプタ
+    // （`with_container` が `None`）はホストのまま走る。
+    let adapter = match &container_plan {
+        Some(plan) => match adapter.with_container(Arc::clone(plan)) {
+            Some(wrapped) => wrapped,
+            None => {
+                tracing::warn!(task_id = %task_id, adapter = %adapter.id(), "adapter does not support containers; running on the host");
+                adapter
+            }
+        },
+        None => adapter,
     };
     let sink = StoreSink {
         store,
@@ -4097,6 +4362,7 @@ mod tests {
                 memory_dir: None,
                 worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
                 releases_dir: None,
+                containers: ContainersRuntimeConfig::default(),
             },
         )
     }
@@ -6491,6 +6757,7 @@ mod tests {
                 memory_dir: None,
                 worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
                 releases_dir: None,
+                containers: ContainersRuntimeConfig::default(),
             },
         )
     }
@@ -8854,6 +9121,99 @@ mod tests {
             .expect("question outcome");
         assert!(question.contains("setup が失敗しました"), "{question}");
         assert!(question.contains("workspace.toml"), "{question}");
+    }
+
+    /// ADR-0043 D3（Phase 56）: `[run] mode = "container"` のリポジトリを使うタスクは、コンテナ
+    /// runtime が使えないと **run を始めず** `blocked` になり、人に質問が積まれる。
+    ///
+    /// runtime の検出には**偽の podman / docker**（`info` が失敗する sh スクリプト）を使う。
+    /// 本物の podman / docker にもネットワークにも触らない。
+    #[tokio::test]
+    async fn a_container_task_is_blocked_with_a_question_when_no_runtime_works() {
+        let root = tempfile::tempdir().unwrap();
+        let code = root.path().join("benchfs");
+        init_test_repo(&code);
+        std::fs::create_dir_all(code.join(".config/celeris")).unwrap();
+        std::fs::write(
+            code.join(".config/celeris/workspace.toml"),
+            b"[run]\nmode = \"container\"\n",
+        )
+        .unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "container"]] {
+            let out = std::process::Command::new("git").arg("-C").arg(&code).args(&args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+
+        // 偽の runtime: `info` が必ず落ちる（podman は rootless、docker はデーモン不在を模す）。
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for (name, message) in [("podman", "newuidmap: Operation not permitted"), ("docker", "Cannot connect to the Docker daemon")] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\necho '{message}' 1>&2\nexit 1\n")).unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+
+        let ws_root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let (project_id, repos) =
+            project_with_repos(&store, &[("benchfs", code.as_path(), task_core::RepoKind::Git)]);
+        let mut task = new_task(&code, Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        task.project_id = Some(project_id);
+        task.repos = repos.iter().map(task_core::RepoRef::of).collect();
+        store.insert(&task).unwrap();
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, ws_root.path(), None);
+        // 実物の検出（`detect_with` + `probe_program`）を偽の実行ファイルに向ける。
+        let probe = task_worker::container::detect_with(task_worker::RuntimePreference::Auto, |rt| {
+            task_worker::container::probe_program(
+                &bin.join(rt.as_str()).display().to_string(),
+                Duration::from_secs(10),
+            )
+        });
+        assert!(!probe.is_available(), "{probe:?}");
+        d.set_container_probe(probe);
+        run_until_idle(&mut d, 60).await;
+
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Blocked);
+        assert!(seen.lock().unwrap().is_empty(), "ワーカーは起こさない");
+        let events = store.events_for(task.id).unwrap();
+        let question = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::WorkerFinished { outcome, .. } if outcome.starts_with("question:") => Some(outcome.clone()),
+                _ => None,
+            })
+            .expect("question outcome");
+        assert!(question.contains("コンテナ runtime が使えません"), "{question}");
+        assert!(question.contains("benchfs"), "{question}");
+        assert!(question.contains("newuidmap"), "{question}");
+        assert!(question.contains("Cannot connect"), "{question}");
+        // `setup` も走らない（実行環境が決まらないので run の手前で止まる）。
+        assert!(!ws_root.path().join(task.id.to_string()).join("runs/setup.log").exists());
+    }
+
+    /// ADR-0043 D3（Phase 56）: `[run] mode` を書いていない（= `host`）リポジトリのタスクは、
+    /// runtime が使えなくても従来どおりホストで走る（コンテナの工事は既存の運用を変えない）。
+    #[tokio::test]
+    async fn a_host_task_still_runs_when_no_container_runtime_is_available() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        // 既定（`RuntimeProbe::default()` = 何も使えない）のまま走らせる。
+        assert!(!d.container_probe().is_available());
+        run_until_idle(&mut d, 60).await;
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(seen.lock().unwrap().len(), 1, "ホストのタスクはそのまま走る");
     }
 
     /// ADR-0043 D4: リポジトリの `[commands] check` は、タスクが検査コマンドを書いていないときだけ

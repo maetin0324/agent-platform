@@ -217,3 +217,57 @@ D5 を実装して分かった 4 つ。**決定そのものは変えていない
    **いまの作業ツリー**までの差分（コミット済み + 未コミット + 追跡外）にした。`dirty` と `ahead` が別に
    あるので情報は失われず、「ワーカーがコミットしなかったタスク」でも人が中身を見られる。worktree が
    無くブランチだけのときは `base..<branch>`（コミットだけ）になる。
+
+## Phase 56 追記（A3 の実装で D3 から離れた／D3 が決めていなかったところ。2026-09-19）
+
+D3 を実装して決めた 8 つ。**決定そのものは変えていない**（本文は読み替えない）。詳細と証拠は
+`docs/PROGRESS.md` の Phase 56（P56-1〜P56-8）にある。
+
+1. **`paperqa` / `local-deep-research` は常にホスト**（P56-1）: D3 は「アダプタごとの変更は無い」と
+   言っているが、この 2 つは道具立てが**ホストの venv**（`uv` が作った `.venv`、`PAPERQA_*` と LDR の
+   設定、埋め込みモデルの置き場）に生えていて、コンテナに入れると別物になる。そこで
+   `container::HOST_ONLY_ADAPTERS` に入れ、`container::decide` が**リポジトリの設定に関わらず**
+   この 2 つのタスクをホストに倒す。研究文献調査課・Web 調査課の運用は 1 バイトも変わらない。
+
+2. **差し込み点は「1 関数」で、呼ぶ場所は 5 つ**（P56-2）: D3 は「差し込み点は 1 か所:
+   `task-worker::subprocess` のコマンド組み立て」と書いているが、`subprocess.rs` を通るのは
+   `fake` だけで、`claude-code` / `codex` / `acp` は自分で `Command` を組む。包む処理は
+   **`container::wrap` の 1 関数**に閉じ（組み立て終えた `Command` を読み直して作り直す）、
+   その 1 行を `subprocess.rs` / `claude_code.rs` / `codex.rs` / `acp.rs` / `workspace.rs`
+   （`setup` と判定コマンド）の**コマンド組み立ての直後**に置いた。`wrap(cmd, None)` は恒等なので、
+   ホスト実行は 1 バイトも変わらない。アダプタへの計画の渡し方は `WorkerAdapter::with_container`
+   （`with_env` と同じ形。既定 `None`）。
+
+3. **`blocked` の作り方は Phase 52 の `setup` 失敗と同じ経路**（P56-3）: D3 は「dispatch せず
+   `blocked`」と書いているが、専用の dispatch 抑止を足すと「なぜ ready のまま動かないのか」が
+   人に見えない。そこで **run を始める前に `Terminal::Question` を返す**（`setup` の失敗とまったく
+   同じ形）。タスクは `blocked` になり、質問が人の受信箱に出る。ワーカーは起こさない。
+   イメージのビルドが落ちたときも同じ（記録は `runs/container-build.log`）。
+
+4. **`HOME` はタスクのディレクトリ**（P56-4）: D3 は環境変数について「アダプタが渡すもの ＋
+   `[container] env`」としか言っていない。ホームは**マウントしない**ので、そのままだとコンテナの中の
+   `HOME` が `/` になり、ツールが書き込みで転ぶ。`--env HOME=<task_dir>` を**いちばん先**に置いた
+   （アダプタの env と `[container] env` で上書きできる）。
+
+5. **認証情報は env から拾う**（P56-5）: D3 は「claude: `CLAUDE_CONFIG_DIR`、codex: `CODEX_HOME`」と
+   アダプタ名で書いているが、アダプタを増やすたびに分岐が増える。実際には**アダプタが env に書いた
+   パスが正**なので、`CLAUDE_CONFIG_DIR` / `CLAUDE_SECURESTORAGE_CONFIG_DIR` / `CODEX_HOME` /
+   `OPENCODE_CONFIG`（ファイルなので親ディレクトリ）を見て、その場所だけを `:ro` で同じパスに渡す。
+   読み書きのマウントの下にあるものは重ねない。
+
+6. **ビルドの文脈は `.config/celeris/` の写しだけ**（P56-6）: D3 は「`~/.local/celeris/containers/` で
+   ビルドしてキャッシュする」としか書いていない。リポジトリ全体を文脈にすると大きな案件で送信だけで
+   分単位かかるので、`<build_dir>/<tag>/context/` に **`.config/celeris/` の中身だけ**を写して
+   `build -f context/<Dockerfile> .` する。タグが `.config/celeris/` の中身の sha を含むのはこのため
+   （文脈が変わればタグも変わる）。
+
+7. **ビルドも `--network host`**（P56-8）: D3 は run のネットワーク（`--network host`）しか決めて
+   いないが、**入れ子のコンテナ（この LXC）では `docker build` の `RUN` がブリッジを張れず**
+   `OCI runtime create failed: recvfrom(PF_NETLINK)` で落ちる。run が `--network host` である以上
+   ビルドを別のネットワークにする理由が無いので、`<runtime> build --network host …` にした。
+
+8. **後片付けはラベル**（P56-7）: `--rm` と signal の転送で普通はコンテナも止まるが、`run` の
+   クライアントだけを殺した場合（ADR-0044 のプロセスグループ kill）に取り残さないよう、
+   `--label celeris.task=<task_id>` を付け、`container::stop_by_label`（`ps -aq --filter label=…` →
+   `rm -f`）を用意した。`run_subprocess` は run の後始末で必ず呼ぶ。`ContainerStopper` trait で
+   公開してあるので、ほかの kill の経路からも同じ口を呼べる。

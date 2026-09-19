@@ -14,7 +14,7 @@ thiserror = "2"
 tracing = "0.1"
 sha2 = "0.10"
 # `fs` は ADR-0032 の TOTP 中継で使う `mkfifo` と `OFlag::O_NONBLOCK` のため。
-nix = { version = "0.30", features = ["signal", "process", "fs"] }
+nix = { version = "0.30", features = ["signal", "process", "fs", "user"] }
 time = { version = "0.3", features = ["serde", "formatting"] }
 
 [dev-dependencies]

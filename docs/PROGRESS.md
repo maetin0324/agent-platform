@@ -7124,6 +7124,245 @@ main（`ef639ea`）に `git merge --no-ff` で合わせた。衝突は **12 か�
 
 ---
 
+## Phase 56 — ワークスペース A3: コンテナ実行（ADR-0043 D3。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0043 §1 の (4) / §4 A3）: Phase 52（A1）で `workspace.toml` の `[run] mode` と `[container]` は
+  **読めるようになったが何も起きなかった**。A3 は D3 を入れる: リポジトリが `run = container`（または
+  `auto` + `[run] mode = "container"`）なら、**そのタスクのワーカー（ハーネスの CLI そのもの）をコンテナの
+  中で起こす**。runtime の検出、イメージの決定（`image` / `dockerfile` のビルドとキャッシュ / 既定の
+  `celeris-worker`）、マウント・uid・ネットワーク・認証情報の規則、`setup` をコンテナで、runtime が
+  使えないときの `blocked`。D5（取り込み）は Phase 54、D7（リモート (b)）は A4 なので**触っていない**。
+- 決めたこと（ADR に書き足した差は `docs/adr/0043-workspaces.md` の「Phase 56 追記」。ここには理由を書く）:
+  - **P56-1 `paperqa` / `local-deep-research` は設定に関わらずホスト**。道具立てがホストの venv
+    （`uv` が作った `.venv`、`PAPERQA_*` と LDR の設定、埋め込みモデルの置き場）に生えていて、
+    コンテナに持ち込むと別物になる。`container::HOST_ONLY_ADAPTERS` で `decide` が弾くので、
+    研究文献調査課・Web 調査課の運用は 1 バイトも変わらない。
+  - **P56-2 包む処理は 1 関数（`container::wrap`）で、呼ぶ場所は 5 つ**。ADR は「差し込み点は 1 か所:
+    `task-worker::subprocess`」と書いているが、`subprocess.rs` を通るのは `fake` だけで、
+    `claude-code` / `codex` / `acp` は自分で `Command` を組んでいる。そこで **組み立て終えた
+    `tokio::process::Command` を読み直して作り直す** `wrap` を 1 つ作り、その 1 行を
+    `subprocess.rs:73` / `claude_code.rs:678` / `codex.rs:175` / `acp.rs:673` / `workspace.rs:143`
+    （`LocalWorkspace::exec` = `setup` と判定コマンド）の**コマンド組み立ての直後**に置いた。
+    `wrap(cmd, None)` は恒等なので**ホスト実行は 1 バイトも変わらない**。計画の渡し方は
+    `WorkerAdapter::with_container`（`with_env` と同じ形。既定 `None`）。
+  - **P56-3 `blocked` は Phase 52 の `setup` 失敗と同じ経路**。ADR は「dispatch せず `blocked`」と
+    書いているが、専用の dispatch 抑止を足すと「なぜ ready のまま動かないのか」が人に見えない。
+    **run を始める前に `Terminal::Question` を返す**（`setup` の失敗とまったく同じ形）ので、
+    タスクは `blocked` になり質問が受信箱に出る。ワーカーは起こさない。イメージのビルドが
+    落ちたときも同じ経路（記録は `runs/container-build.log`）。
+  - **P56-4 `HOME` はタスクのディレクトリ**。ホームは絶対にマウントしないので、そのままだと
+    コンテナの中の `HOME` が `/` になってツールが転ぶ。`--env HOME=<task_dir>` を**いちばん先**に
+    置いた（アダプタの env と `[container] env` で上書きできる）。
+  - **P56-5 認証情報は env から拾う**。ADR はアダプタ名で列挙しているが、実際は**アダプタが env に
+    書いたパスが正**なので、`CLAUDE_CONFIG_DIR` / `CLAUDE_SECURESTORAGE_CONFIG_DIR` / `CODEX_HOME` /
+    `OPENCODE_CONFIG`（ファイルなので親ディレクトリ）を見て、その場所だけを `:ro` で同じパスに渡す。
+    アダプタが増えてもここに 1 行足すだけで済む。読み書きのマウントの下にあるものは重ねない。
+  - **P56-6 ビルドの文脈は `.config/celeris/` の写しだけ**。リポジトリ全体を文脈にすると大きな案件で
+    送信だけで分単位かかる。`<build_dir>/<tag>/context/` に `.config/celeris/` を写して
+    `build -f context/<Dockerfile> .` する。タグが `.config/celeris/` の中身の sha を含むのはこのため。
+  - **P56-7 後片付けはラベル**。`--rm` と signal の転送で普通はコンテナも止まるが、`run` のクライアント
+    だけを殺した場合（ADR-0044 のプロセスグループ kill）に取り残さないよう、
+    `--label celeris.task=<task_id>` を付け、`container::stop_by_label`（`ps -aq --filter label=…` →
+    `rm -f`）を `run_subprocess` の後始末で必ず呼ぶ。`ContainerStopper` trait で公開したので、
+    **ほかの kill の経路（B2 のプロセスグループ kill helper）からも同じ口を呼べる**。
+  - **P56-8 ビルドも `--network host`**（実機で決めた）。D3 は run のネットワークしか決めていないが、
+    **入れ子のコンテナ（この LXC）では `docker build` の `RUN` がブリッジを張れず**
+    `OCI runtime create failed: recvfrom(PF_NETLINK)` で落ちる。run が `--network host` である以上
+    ビルドも同じネットワークで構わないので、`<runtime> build --network host …` にした。
+    これで実機の `dockerfile` の経路が通るようになった（下の実機確認）。
+  - **migration は無し**（設定とファイルだけ。`SCHEMA_VERSION` は据え置き）。
+- 変更したファイル:
+  - `crates/task-worker/src/container.rs`（**新規**、約 1000 行）: `Runtime` / `RuntimePreference` /
+    `RuntimeProbe` / `probe_program`（`<runtime> info`）/ `detect_with`（純粋）/ `detect`、
+    `RepoRunInput` / `wants_container` / `decide` / `ContainerChoice` / `ImageSource`、
+    `ContainerPlan` / `argv`（純粋）/ `wrap`（**差し込み点**）/ `credential_dirs`、
+    `image_tag` / `context_digest` / `resolve_image` / `ResolvedImage` / `BuildRequest` /
+    `image_exists` / `ensure_image`（`exists` を差し替えられる）、`ContainerStopper` / `stop_by_label`、
+    `unavailable_question` / `image_question`、`host_ids`。単体テスト **12 件**。
+  - `crates/task-worker/src/adapter.rs`: `WorkerAdapter::with_container`（既定 `None`）。
+  - `crates/task-worker/src/subprocess.rs`: `SubprocessSpec.container`、差し込み点 1 行、
+    run の後始末で `stop_by_label`。
+  - `crates/task-worker/src/{fake,claude_code,codex,acp}.rs`: 設定に `container`、`with_container`、
+    差し込み点 1 行ずつ。
+  - `crates/task-worker/src/workspace.rs`: `LocalWorkspace.container` と `with_container`、
+    `exec` の差し込み点 1 行（`setup` をコンテナで走らせるため）。
+  - `crates/task-worker/src/task_repos.rs`: `run_setup_in(…, plan)`（`run_setup` はホストの薄い入口の
+    まま）。`setup.log` の 1 行目に実行環境を書く。テスト **1 件**（偽の runtime）。
+  - `crates/task-worker/Cargo.toml`: `nix` に `user` feature（`getuid` / `getgid`）。
+  - `crates/task-dispatch/src/dispatcher.rs`: `ContainersRuntimeConfig`（`DispatchConfig.containers`）、
+    `ContainerDecision` / `ContainerRun`、`Dispatcher.container_probe` と
+    `detect_container_runtime()` / `set_container_probe()` / `container_probe()`、
+    `container_decision()`（決定的。ストアと `workspace.toml` を読むだけ）、dispatch ループで判断して
+    `spawn_worker` → `run_worker` に渡す、`run_worker` でイメージを用意 → `setup` → アダプタを包む、
+    スナップショットに `containers`。テスト **2 件**。
+  - `crates/task-ops/src/daemon.rs`: `DaemonSnapshot.containers`（任意）、`ContainersLive` /
+    `ContainerProbeView`。
+  - `crates/taskd/src/config.rs`: `ContainersConfig`（`[containers] runtime` / `image_default` /
+    `build_dir` / `build_timeout_secs`、`deny_unknown_fields`）、`build_dir` の `~` 展開と相対解決、
+    `validate()` の 3 検査、`dispatch_config()` への写し。テスト **2 件**。
+  - `crates/taskd/src/lib.rs`: アダプタ構築の `container: None`、起動時に
+    `dispatcher.detect_container_runtime()`。
+  - `deploy/containers/celeris-worker/Dockerfile`（**新規**）: Debian stable slim + node LTS と
+    `@anthropic-ai/claude-code` / `@openai/codex` + rustup の stable + python3 / uv +
+    git・gh・rsync・openssh-client・ca-certificates。**非 root ユーザは作らない**（keep-id / `--user`
+    でホストの uid を借りるため）。
+  - `scripts/containers/build-worker.sh`（**新規**、実行可能）: 検出した runtime で
+    `celeris-worker:latest` を作る。`cargo test` の一部ではない。
+  - `config/taskd.example.toml`: `[containers]` の節。
+  - `docs/workspace.md`: §7「コンテナ実行」（いつホストにするか / 何がどう見えるか / イメージ /
+    `setup` / runtime が無いとき）。§2 の表と §5 の注記も更新。
+  - `docs/gui/api.md` §3.20: `DaemonView.snapshot.containers`。`gui/docs/taskd-api-v1.md` に同期。
+  - `docs/adr/0043-workspaces.md`: 「Phase 56 追記」（P56-1〜P56-7）。
+  - `docs/api/v1/api-v1.schema.json` を再生成（`UPDATE_SCHEMA=1`）。`gui/app/taskd/types.ts` を
+    `pnpm gen:types` で再生成（**手では触っていない**）。
+  - `crates/task-api/tests/common/mod.rs` / `crates/task-ops/src/inbox.rs` /
+    `crates/taskctl/src/commands/worker.rs`: 新しいフィールドの既定を足しただけ。
+  - `tests/e2e/tests/{account_pool,codex_account_pool}_scenarios.rs`: `wait_api` に
+    「**最初の tick がスナップショットを出すまで待つ**」を足した（下の「直した潜在バグ」）。
+  - **既存のテストは 1 つも弱めていない・消していない**。
+- 直した潜在バグ（この Phase で露見したもの）:
+  - e2e の `wait_api` は `GET /health` が 200 になった時点で返っていたが、`GET /accounts` の
+    `usage` / `score` / `in_use` は**ディスパッチャのスナップショット**由来で、最初の tick より前は
+    `snapshot: null` なので空になる。つまり `wait_api` の直後に観測値を読む 2 つのテストは
+    **起動にかかる時間しだいで落ちる**競合を元から抱えていた。Phase 56 で起動時の runtime 検出
+    （約 80 ms）が入って位相がずれ、`account_pool_scenarios` と `codex_account_pool_scenarios` の
+    「再起動しても観測値が残る」テストが**必ず**落ちるようになった。`detect_container_runtime()` を
+    外すと直ることを実際に確かめた上で（ビルドし直して再現。binary が古いまま試して一度
+    誤った結論を出しかけた）、**待ちの側**を直した: `/daemon` の `snapshot` が出るまで待つ
+    （認証が要る設定ではトークンをまだ持っていないので待たない）。taskd 側は変えていない。
+- 証拠:
+  - `cargo test --workspace` → exit **0**、`grep -c "^test result: FAILED"` = **0**、
+    **1321 passed / 0 failed / 2 ignored**。**同じ機械で base（`26238ab`）を測ると 1304 passed**
+    なので **+17**（container 12 + task_repos 1 + dispatcher 2 + taskd の設定 2 = 今回足した
+    テスト関数の数とちょうど一致）。
+  - `cargo clippy --workspace -- -D warnings` → exit **0**（警告ゼロ）。
+    `--all-targets` を付けても exit 0。
+  - `UPDATE_SCHEMA=1 cargo test -p task-api committed_schema_matches_generated` → ok。
+    `docs/api/v1/api-v1.schema.json` の差分は **`ContainersLive` / `ContainerProbeView` の追加と
+    `DaemonSnapshot.containers` の 1 行だけ**（+65 行、削除なし）。
+  - `pnpm gen:types` → `gui/app/taskd/types.ts` に `ContainersLive` と `containers?` が増えた（+38 行）。
+    `bash ../scripts/sync-gui-docs.sh` → `updated gui/docs/taskd-api-v1.md`。`pnpm typecheck` → exit **0**。
+  - 受け入れ条件ごと（ADR-0043 §4 A3）:
+    - **`run = container` の判断** → `container::tests::the_decision_follows_the_repos_and_the_workspace_toml`
+      （ホストだけ → `None`、`auto` + `[run] mode` → そのイメージ、明示の `container`、
+      **primary が `repos[0]` の順より先**、`auto` + `mode = host` は要求しない、
+      `paperqa` / `local-deep-research` は常に `None`）と
+      `a_dockerfile_in_the_workspace_toml_is_built`。
+    - **runtime 検出** → `detection_prefers_podman_and_records_why_each_one_failed`（podman → docker の順、
+      落ちた理由が残る、明示した runtime は 1 つだけ試す）と
+      `probing_a_runtime_sees_success_failure_and_absence`（**偽の実行ファイル**で成功 / `info` が失敗 /
+      実行ファイルが無い。PATH は触らないので他のテストと競合しない）。
+    - **包み方（マウント・uid・ネットワーク・認証情報・env・追加マウント）** →
+      `podman_and_docker_differ_only_in_how_they_keep_the_uid`（`--userns=keep-id` と
+      `--user <uid>:<gid>`、`-w`、同じパスのマウント、`--label`、重ねない）、
+      `credentials_from_the_adapter_env_are_mounted_read_only`（4 つの env、`OPENCODE_CONFIG` は親、
+      **ホームと `~/.local/celeris` の根は出てこない**、`HOME=<task_dir>`）、
+      `workspace_toml_env_comes_last_and_extra_mounts_are_passed_through`（後勝ち）、
+      `a_cwd_outside_the_task_directory_is_mounted_too`（`mode = shared`）、
+      `wrap_is_a_no_op_without_a_plan_and_rewrites_the_command_with_one`（**`None` は恒等**）。
+    - **イメージのタグとキャッシュ** → `the_tag_changes_when_the_dockerfile_or_the_context_changes`
+      （同じ内容なら同じタグ、文脈が変われば変わる、`image` / 既定はビルドしない）、
+      `a_cache_hit_skips_the_build`（`image_exists` を差し替え。**存在しない runtime の名前を渡しても
+      落ちない** = 起こしていない証拠）、`a_cache_miss_builds_and_logs`（偽の runtime の argv と
+      `container-build.log`、文脈は `.config/celeris/` の写しだけ）。
+    - **`setup` をコンテナで** → `task_repos::tests::setup_runs_inside_the_container_when_the_task_is_containerized`
+      （偽の runtime が argv を記録して `-w` の場所で本体を実行する。`--label` / 同じパスのマウント /
+      `image sh -c <cmd>` が argv に出て、worktree の中に結果のファイルが残り、
+      `setup.log` に実行環境の行が出る）。
+    - **runtime が無いときの `blocked`** →
+      `dispatcher::tests::a_container_task_is_blocked_with_a_question_when_no_runtime_works`
+      （**偽の podman / docker**〈`info` が失敗する〉で実物の `detect_with` + `probe_program` を回し、
+      タスクは `Blocked`、**ワーカーは 1 回も起きない**、質問に「コンテナ runtime が使えません」と
+      リポジトリ名と両方の理由が入る、`setup.log` も作られない）と
+      `a_host_task_still_runs_when_no_container_runtime_is_available`（**ホストのタスクは従来どおり**
+      `Done` になる = 既存の運用を壊していない）。
+- 実機確認（この LXC。`cargo test` の外。ネットワークは **alpine の pull だけ**）:
+  - **podman 5.4.1 は使えない**: `podman info` が
+    `running /usr/bin/newuidmap …: newuidmap: write to uid_map failed: Operation not permitted` →
+    `Error: cannot set up namespace using "/usr/bin/newuidmap": exit status 1`。
+    この LXC は非特権（`/proc/self/uid_map` = `0 100000 65536`）で subuid の委譲ができないため、
+    **rootless podman はそもそも名前空間を張れない**。`/dev/fuse` も無い。
+  - **docker 28.2.2 は使える**: `docker info` が ok（storage driver `overlay2`、cgroup v2、
+    `rmaeda` は `docker` グループ）。よってこの機械の既定（`runtime = "auto"`）は
+    **podman を試して落ち、docker に倒れる**。`GET /api/v1/daemon` の `containers` に
+    そのまま出た:
+    `{"preference":"auto","runtime":"docker","probes":[{"runtime":"podman","detail":"Error: cannot set up namespace using \"/usr/bin/newuidmap\": exit status 1"},{"runtime":"docker","detail":"ok"}],…}`。
+  - **包み方が実機で通る**（手で 1 回）:
+    `docker run --rm -i --network host --user 1001:1001 -w <d>/repos/x -v <d>:<d> --env HOME=<d> --label celeris.task=TESTTASK alpine:latest sh -c 'id; pwd; echo hi > made.txt'`
+    → `uid=1001 gid=1001`、cwd が同じパス、書いたファイルは**ホスト側で `rmaeda:rmaeda`**。
+  - **`fake` アダプタのタスクをコンテナ経路で 1 本**（`mktemp -d` の別の taskd。
+    db / workspace_root / ポート **7794** すべて別。**本番〈`/home/rmaeda/taskd`、7710 / 7700〉には
+    一切触っていない**）:
+    - 設定は `[containers] runtime = "docker"` / `image_default = "alpine:latest"`、
+      リポジトリの `.config/celeris/workspace.toml` は `[run] mode = "container"` +
+      `[commands] setup = ["echo setup-in-container > setup-here.txt"]`。
+    - ログ: `container runtime detected runtime="docker"` →
+      `running in a container task_id=… image=alpine:latest runtime=docker repo=repo`。
+    - `runs/setup.log`: `# 実行環境: コンテナ alpine:latest （docker）` / `$ (repo) echo …` / `=> exit 0`。
+      **worktree の中に `setup-here.txt` が `rmaeda:rmaeda` で残った**（uid が正しく借りられている）。
+    - `runs/<run_id>/stdout.jsonl` に `{"type":"progress"…}` と `{"type":"done"…}`
+      → **ワーカープロトコルがコンテナの stdio をそのまま通った**（アダプタは無改造）。
+    - `docker ps -a --filter label=celeris.task` が**空**（`--rm` + ラベルでの後片付けが効いている）。
+  - **`--network host` が要る**（P56-8 を決めた実験）: 素の `docker run --rm alpine …` も
+    `docker build`（の `RUN`）も、この LXC では `OCI runtime create failed: recvfrom(PF_NETLINK)` で
+    落ちる（ブリッジの名前空間を張れない）。**`--network host` を付けると両方通る**。
+    包み方は元から `--network host`（D3）なので run は最初から動いていたが、ビルドには
+    付いていなかったので付けた。ついでに `docker run --env X=a --env X=b … 'echo $X'` → **`b`**
+    で「同じキーは後勝ち」（`[container] env` が勝つ）も実機で確かめた。
+  - **Dockerfile のビルドとキャッシュ**（同じ scratch taskd。**失敗の経路と成功の経路の両方**）:
+    - `--network host` を付ける前: `RUN` のある Dockerfile のタスクは `Blocked` になり、質問は
+      「コンテナのイメージを用意できませんでした（`repo`）: イメージ `celeris-ws-8337d41555f2` の
+      ビルドが失敗した（exit Some(1)）: … recvfrom(PF_NETLINK)。記録は
+      `…/runs/container-build.log` にあります。直し方を教えてください（Dockerfile を直す／
+      `[container] image` を指す／`run = host` にする）」だった。**失敗の経路が実機で動く**ことと、
+      同じ内容の Dockerfile なら 2 つのタスクで**タグが一致**することが確認できた。
+    - `--network host` を付けた後: `FROM alpine:latest` + `RUN touch /built-by-celeris && apk --version …`
+      の Dockerfile のタスク → `runs/container-build.log` の 1 行目が
+      `$ docker build --network host -t celeris-ws-80384e52a614 -f Dockerfile .`、
+      `Successfully built` → `=> exit 0`。`docker images` に `celeris-ws-80384e52a614`。
+      `docker run --rm --network host celeris-ws-80384e52a614 sh -c 'ls -l /built-by-celeris; cat /apk-version.txt'`
+      → `RUN` の結果が入っている。
+    - **次のタスクは `container-build.log` を作らなかった**（= `image inspect` が当たって
+      ビルドを起こしていない）。その `runs/setup.log` は
+      `# 実行環境: コンテナ celeris-ws-80384e52a614 （docker）` で、**同じタグのイメージで走った**。
+    - 終わった後も `docker ps -a --filter label=celeris.task` は**空**。
+  - **ホストに何も生えていない**: scratch の taskd は `workspace_root` も `[containers] build_dir` も
+    `mktemp -d` の下に置いたので、`~/.local/celeris/` は**いまも存在しない**
+    （`ls ~/.local/celeris` → `No such file or directory`）。コンテナで動いた `sh` / `apk` は
+    イメージの中にしかなく、ホストに残ったのは**マウントした worktree に書かれた
+    `setup-here.txt`（`rmaeda:rmaeda`）だけ**。`docker images` に増えたのは
+    `alpine:latest`（pull）と試験用の `celeris-ws-…`（後で消した）で、ホストの
+    パッケージやツールチェーンは 1 つも増えていない。
+  - **ADR-0043 §4 A3 の「agent-platform 自身のリポジトリで」は、別の scratch リポジトリで代えた**。
+    `agent-platform` の `.config/celeris/workspace.toml` を `mode = "container"` にすると、
+    **この案件の自己改善タスク全部**（いま動いている B2 のものも含む）がコンテナに入ってしまい、
+    しかも `celeris-worker:latest` がまだ無いので全部落ちる。確かめたい中身
+    （包み方・uid・`setup`・stdio・イメージ・後片付け）は scratch の git リポジトリで同じだけ取れるので、
+    **本番と同じ案件には触らなかった**。`celeris-worker` を作った後に人が 1 タスク流すのが安全。
+  - **`celeris-worker` の本体イメージは作っていない**（node / rust / uv / gh を入れるので 10 分では
+    終わらない見込み。課題の指示どおり飛ばした）。人が使える機械では
+    `bash scripts/containers/build-worker.sh` の 1 本で作れる。**この LXC で `image_default` のまま
+    `mode = "container"` にすると「イメージが無い」で落ちる**ので、使い始める前に 1 回作ること。
+- 未解決 / 次にやること:
+  - **buildx（BuildKit）は入れていない**。`docker build` は「legacy builder は将来消える」と
+    毎回警告する。`--network host` で用は足りているので今回は触っていないが、いずれ
+    `docker buildx build` に移す判断が要る（`podman build` はそのままで良い）。
+  - **`celeris-worker:latest` は誰も作っていない**。`image_default` の既定はこの名前なので、
+    `[container] image` も `dockerfile` も書かずに `mode = "container"` にしたタスクは
+    「イメージが無い」で落ちる。使い始める前に `scripts/containers/build-worker.sh` を 1 回。
+  - **リモート（ADR-0018 / 0019）のタスクは常にホスト**にした（D7 が A4 なので）。
+    クラスタ側でコンテナを使うのは A4 以降の話。
+  - **レビューの `Check::Command` はホストで走る**。`LocalWorkspace::exec` はコンテナに対応したが、
+    レビュー経路（`review.rs`）は計画を渡していない。`[commands] check` をコンテナで走らせたい
+    案件が出たら足す（1 行）。今はタスクの run と `setup` だけがコンテナに入る。
+- 提案（人へ）:
+  - **`[containers] runtime` をこの機械では `"docker"` と明示してよい**。`auto` でも正しく倒れるが、
+    起動のたびに `podman info` が失敗ログを出す（80 ms 程度なので実害は無い）。
+  - **podman を使いたいなら LXC 側で subuid の委譲を許す**（`lxc.idmap` と `/etc/subuid`）。
+    rootless podman の `--userns=keep-id` はホストの uid をそのまま見せられるので、
+    docker の `--user <uid>:<gid>`（デーモンが root）より筋が良い。
+
 ## Phase 51 — 検証に煙試験（ADR-0041 D5。2026-09-19）
 
 - 完了日: 2026-09-19

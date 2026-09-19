@@ -886,6 +886,7 @@ mod tests {
             accounts_roots: std::collections::HashMap::new(),
             max_runs_per_account: None,
             accounts: vec![],
+            containers: None,
         };
         let with_snapshot = inbox(&store, Some(&snapshot), &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
         assert!(
@@ -1107,6 +1108,7 @@ mod tests {
             accounts_roots: std::collections::HashMap::new(),
             max_runs_per_account: None,
             accounts: vec![],
+            containers: None,
         };
         let still_present = inbox(&store, Some(&disconnected_snapshot), &ctx, now, &no_evidence).expect("inbox");
         let (host, _, _) =

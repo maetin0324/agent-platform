@@ -1238,6 +1238,11 @@ export interface DaemonSnapshot {
    * ADR-0018: `[[clusters]]` の稼働状況（`id` 昇順）。第 2 段階で追加したので、古いスナップショットには無い。
    */
   clusters?: ClusterLive[];
+  /**
+   * ADR-0043 D3（Phase 56）: `[containers]` の設定と、起動時に調べたコンテナ runtime。
+   * 古いスナップショットには無いので既定は `None`。
+   */
+  containers?: ContainersLive | null;
   cooldowns: CooldownView[];
   hostname: string;
   in_flight: InFlight[];
@@ -1366,6 +1371,39 @@ export interface ClusterLive {
    * このクラスタで走っている run（ワーカー run + 判定）の数。
    */
   in_use: number;
+}
+/**
+ * ADR-0043 D3（Phase 56）: コンテナ実行の設定と起動時の検出（**観測値**。DB には書かない）。
+ */
+export interface ContainersLive {
+  /**
+   * `[containers] build_dir`（Dockerfile からビルドしたイメージの作業場所。絶対パス）。
+   */
+  build_dir: string;
+  /**
+   * `[containers] image_default`（`[container] image` も `dockerfile` も無いときのイメージ）。
+   */
+  image_default: string;
+  /**
+   * `[containers] runtime`（`"auto"` | `"podman"` | `"docker"`）。
+   */
+  preference: string;
+  /**
+   * 試した runtime ごとの `<runtime> info` の結果（試した順）。
+   */
+  probes?: ContainerProbeView[];
+  /**
+   * 実際に使う runtime（`"podman"` | `"docker"`）。どれも使えなければ `None`
+   * （`run = container` のタスクは dispatch されず `blocked` になる）。
+   */
+  runtime?: string | null;
+}
+/**
+ * `<runtime> info` の結果 1 件（`detail` は成功なら `"ok"`、失敗なら理由の 1 行）。
+ */
+export interface ContainerProbeView {
+  detail: string;
+  runtime: string;
 }
 /**
  * `task_dispatch::policy::Cooldown`（`Instant`）を壁時計に直したもの。
