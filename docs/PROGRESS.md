@@ -5598,9 +5598,12 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
     56、`passed` の合計 1137 件（Phase 44 の 1136 件 + 今回の回帰テスト 1 件）。
   - `cargo clippy --workspace -- -D warnings`: exit 0、警告なし。
 - 未解決事項:
-  - U45-1: 実機の親 `01M2VG4YNG4DD7Z5BYPSB8W8AW` 自体が既に `blocked` で人間の回答待ちのままなら、
-    配備後に人間が改めて答えたときに今度こそ `done`（または次段階）まで進むかを実機で確認してほしい
-    （このタスクは taskd/GUI のプロセスに触れない前提で作業したため、実機側の状態は未確認）。
+  - U45-1（**解消。実機 2026-09-19 02:31–02:34**）: `b4c5a17` の taskd を配備（pid 2697489、02:31:39 起動、
+    binary mtime 02:30、health 200）。残っていた認可 `01M2VPV47HQYYFYQQ0P2E1M461` に人間の既出の判断
+    「候補Bは捨てる。候補Aだけで進める」を 1 回答えた（`POST /approvals/{id}/decide once`、HTTP 200）。
+    親 `01M2VG4YNG4DD7Z5BYPSB8W8AW` は `blocked → ready → running`（02:32:24）→ `reviewing`（02:33:35）
+    → **`done`（02:33:37、`review_pass`）**。`child_failed` 遷移も `question_raised` も新たに起きず、
+    `GET /approvals?pending=true` は 0 件。配備前は同じ回答の後に 5 回連続で `reviewing → blocked (child_failed)` だった。
   - U45-2: `events_for` を使う既存コードが将来また複数タスクの `u64` を比較しないよう、レビューで
     「`events_for` はタスクをまたいで比較できない」という doc comment（`crates/task-core/src/store.rs`）を
     見てもらうしかない。型で強制する分離（例えば `Seq(u64)`/`GlobalEventId(u64)` のような newtype 化）は
