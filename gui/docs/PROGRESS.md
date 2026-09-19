@@ -2737,3 +2737,99 @@ production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/
   - G16-P2: `GET /tasks/{id}/tree` に「このタスクが `repos` を持たない（コードを伴わない調査）」と
     「作業ツリーがまだ作られていない（`draft` / `ready`）」を区別できる `code` がほしい。いまは
     どちらも 404 `file_not_found` なので、画面の言い方を分けられない。
+
+## Phase G17 — タスク管理: タブ・編集・コメント・ボード（ADR-0044 B1。2026-09-19）
+
+> **マージの註**: この枝も自分を「G16」と書いていたが、ADR-0043 A1 の GUI（上の G16）と
+> 番号がぶつかったので、**マージのときに G17 に振り直した**（提案の番号も `G16-P*` → `G17-P*`）。
+> `app/components/task-files.tsx` の stub は A1 の本物に差し替え、この枝の
+> 「ファイル」タブに載せた（下の「マージで変えたところ」）。
+
+- 完了日: 2026-09-19
+- 目的: taskd Phase 53 で入った `PATCH /tasks/{id}` / `GET,POST /tasks/{id}/comments` /
+  `POST /tasks/{id}/reopen` / `GET /tasks/{id}/timeline` と、`GET /tasks` の新しいフィルタ
+  （`docs/taskd-api-v1.md` §3.3・§3.74〜3.78。マージで番号を振り直した）を画面にする。taskd 側の実装と**同じコミット**で入れた
+  （この Phase は taskd Phase 53 と 1 対 1）。G15 は taskd Phase 50 の GUI 追従で、独立した節は作らなかった。
+- 変更したファイル:
+  - `app/routes/tasks.$id.tsx` — **タブ**（概要 / タイムライン / 変更 / ファイル / 成果物。`?tab=` で
+    切り替え、SSR で解決）。概要に**編集フォーム**（題名・目的・tier・優先度 P0〜P3・ラベルのチップ・
+    種類・担当・途中目標・依存）、タイムラインに `GET /tasks/{id}/timeline` の 1 本 + **コメント入力** +
+    終端の**「再開」**。loader が `/timeline` `/comments` `/org` も読む。action は `edit` / `comment` /
+    `reopen` に分岐。
+  - `app/components/task-changes.tsx` / `task-files.tsx`（新規）— **差し替えるだけの stub**。
+    ADR-0043 A1/A2 が本物を入れる（マウント点は 1 行で、直前に印のコメント）。
+    **マージ後**: `task-files.tsx` は A1 の本物（G16）に差し替え済み。`task-changes.tsx` は
+    stub のまま（ADR-0043 A2 が入れる）。
+  - `app/routes/board.tsx`（新規）— `/board?project=…`。ADR-0044 D4 の 6 列、カード（題名・担当・tier・
+    優先度・ラベル・種類・途中目標）、クエリに束縛したフィルタ欄、カード上の優先度 / tier / 担当の
+    その場変更（`useFetcher` → `PATCH`）。既定で裏方（`TaskSummary.support`）を隠す。
+  - `app/lib/board.ts`（新規）— 優先度の写像（`P0↔30 … P3↔0`、`i32 → ラベル`は taskd と同じ丸め）、
+    列分け、`BoardFilter` の解析 / 組み立て、ラベルの形の検査。
+  - `app/taskd/tasks-admin.server.ts`（新規）— `buildTaskEdit` / `editTask` / `commentOnTask` /
+    `reopenTask` / `buildProjectTaskSpec`。
+  - `app/routes/projects.$id.tsx` — **「タスクを追加」**（案件と各途中目標カード）、「ボードで見る」。
+  - `app/routes.ts`（`route("board", …)`）、`app/root.tsx`（ナビに「ボード」、表示名を **Celeris** に）、
+    `app/routes/help.tsx` と 21 ルートの `meta` の `<title>`（`- taskd-gui` → `- Celeris`）。
+    `package.json` の `name`・`healthz` の `name`・`TASKD_GUI_RELEASE`・unit 名は**そのまま**。
+  - `app/lib/labels.ts`（列・種類・優先度・tier・コメントの書き手・`effect` の文面・タイムラインの種別・
+    編集した項目名・タブ名）、`app/components/Flash.tsx`、`app/taskd/action-types.ts`。
+  - `app/taskd/actions.server.ts` — `Action` に `edit` / `reopen` が増えて `applyTransition` の網羅 switch が
+    壊れたので `GateAction` から 2 つを除いた（`tsc` が検出）。
+  - `app/taskd/types.ts` / `docs/taskd-api-v1.md` — `pnpm gen:types` と `scripts/sync-gui-docs.sh` で再生成。
+  - `test/unit/{board,board.loader,tasks.manage.action}.test.ts`（新規）、`test/unit/labels.test.ts` と
+    `test/unit/tasks.detail.loader.test.ts` を拡張（計 **+61 tests**）、
+    `test/mock-taskd/{fixtures,server}.ts` に `serveTaskManagement`（comments / timeline / PATCH / reopen /
+    フィルタ）、`test/fixtures/api/*.json` に増えた必須フィールド。
+- 受け入れ条件ごとの証拠:
+  - 条件: タスク画面が 5 つのタブになり、変更・ファイルは空でよい。
+    実行: `pnpm test`（`tasks.detail.loader.test.ts`）— `?tab=` の解決、各タブの loader が読むもの、
+    stub が「ADR-0043 で入る」を出すこと。
+  - 条件: 編集フォームが `PATCH /tasks/{id}` を呼び、変わった項目が出る。
+    実行: 同（`tasks.manage.action.test.ts`）— `buildTaskEdit` が「省略 = 触らない / 空 = 消す」を
+    作り分けること、成功時に `fields` を、409 / 422 を文面のまま返すこと。
+  - 条件: コメント欄が `POST /tasks/{id}/comments` を呼び、`effect` ごとに出す文面が変わる。
+    実行: 同 — `stored` / `interrupted` / `answered` / `terminal` の 4 通り。
+  - 条件: 終端のタスクに「再開」が出て `POST /tasks/{id}/reopen` を呼ぶ。
+    実行: 同 — `actions` に `reopen` があるときだけ出す（GUI は規則を再実装しない）。
+  - 条件: ボードが 6 列で、フィルタがクエリに束縛され、カード上で優先度 / tier / 担当を変えられる。
+    実行: `pnpm test`（`board.test.ts` / `board.loader.test.ts`）— 8 状態 → 6 列の対応、
+    優先度の写像（境界を含む往復）、フィルタの解析 → `GET /tasks` のクエリ文字列（繰り返しパラメータ込み）。
+  - 条件: フェーズのゲート。
+    実行: `pnpm lint` exit 0（biome、182 ファイル）/ `pnpm typecheck` exit 0 /
+    `pnpm test` exit 0（**48 ファイル、620 tests passed**）/ `pnpm build` exit 0 /
+    `pnpm gen:types` の後も `app/taskd/types.ts` はバイト一致。
+- 未解決事項:
+  - **`pnpm e2e` を回していない**（実 taskd のビルドとポートが要り、taskd Phase 53 の工事と
+    ぶつかるため）。タブ化で `event-item` がタイムラインへ、`artifact-item` が成果物へ移ったので
+    `e2e/g1.spec.ts` / `g3.spec.ts` の `page.goto` に `?tab=timeline` / `?tab=artifacts` を足し、
+    `g5*.spec.ts` のフッタの表示名を Celeris に直した（**未実行**。次に e2e を回すときに確かめる）。
+  - loader が `/timeline` と `/comments` の両方を読む（タイムラインにもコメントは載るので冗長）。
+    コメント数をタブに出すために残した。
+- 提案（`docs/taskd-api-v1.md` への変更提案。採否は人間）:
+  - G17-P1: `GET /tasks/{id}/timeline` に `?kinds=` の絞り込みが欲しい（いまは全部返す）。
+  - G17-P2: ボードは案件ごとに `GET /tasks?project=…&limit=500` を 1 回投げている。列ごとの件数だけ
+    先に欲しくなったら `counts_by_status` をフィルタ後の値でも返してほしい（いまは DB 全体）。
+
+### マージで変えたところ（Phase 52 + 53 = G16 + G17）
+
+- **「ファイル」タブに A1 の本物を載せた**。`app/components/task-files.tsx` は B1 の stub を捨てて
+  A1 の `TaskFiles`（名前付きエクスポート。リポジトリ切り替え・パンくず・一覧・本文）にし、
+  `app/routes/tasks.$id.tsx` の `?tab=files` から呼ぶ。loader は **`?tab=files` のときだけ**
+  `GET /tasks/{id}/tree`（と選んだファイルの本文）を引く（他のタブで毎回叩かないため）。
+  403 / 404 はタブの中に taskd の文言を出すだけで、ページは落とさない。
+- **兄弟のルート `/tasks/:id/files` はそのまま残した**（リダイレクトにはしていない）。同じ部品を
+  全画面で出すページで、`ErrorBoundary` で 403 / 404 を扱う経路をすでに持っており、
+  ブックマークや `docs/` のリンクを壊さないため。ヒーローの「ファイル」ボタンの行き先だけ
+  `/tasks/:id?tab=files` に変えた（タブの中で見えた方が周りの文脈が残る）。
+- **`app/lib/labels.ts`** は両方の節をそのまま並べた（A1: `repoKindLabel` / `treeEntryKindLabel` /
+  `fileSizeLabel` …、B1: `boardColumnLabel` / `taskCategoryLabel` / `taskTabLabel` …）。
+- **`app/routes/projects.$id.tsx`** は A1 の「リポジトリ」節と B1 の「タスクを足す」フォームの両方。
+  `action` の `intent` も `repo_*` と `task_create` の両方を持つ。
+- **サーバ専用モジュールの置き場を 2 つ動かした**（`pnpm build` が通らなかったため。React Router は
+  ルートの `loader` / `action` からしかサーバ用のコードを剥がせず、テストのために公開している
+  `loadTaskDetail` から `*.server` を runtime で参照すると**クライアントの束に混ざる**と言って止まる）:
+  - `app/taskd/task-files.server.ts` → **`app/taskd/task-files.ts`**（中身は無変更。Node 専用の
+    API は使っておらず、注入された `TaskdClient` を呼ぶだけ。`~/lib/task-files.ts` の純粋関数とは別物）。
+  - `toActionError` を `app/taskd/actions.server.ts` → **`app/taskd/errors.ts`** に移し、
+    `actions.server.ts` からは再輸出した（既存の import は 1 つも直していない）。
+- **`app/taskd/types.ts`** は `pnpm gen:types` で作り直した（手では触っていない）。

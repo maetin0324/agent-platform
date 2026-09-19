@@ -38,6 +38,13 @@ fn replay_status_and_attempts(events: &[(u64, Event)]) -> Option<(Status, u32)> 
             }
             Event::Transitioned { to, reason, .. } => {
                 let (_, attempts) = state.unwrap_or((*to, 0));
+                // ADR-0044 D2（Phase 53）: `reopen` は attempts を **0 に戻す**唯一のトリガ
+                // （`Trigger::Reopen`）。ここに書かないと、再開したタスクは毎回
+                // `attempts: replayed=N stored=0` の不一致として報告され続ける。
+                if reason == "reopen" {
+                    state = Some((*to, 0));
+                    continue;
+                }
                 let bump = matches!(reason.as_str(), "worker_error" | "lease_expired" | "review_fail")
                     // ADR-0021 D1: `child_failed` は「やり直し」のときだけ attempts を使う
                     // （人の判断待ち = blocked に落ちるときは据え置き）。
@@ -150,6 +157,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 
@@ -301,5 +310,36 @@ mod tests {
         };
         assert_eq!(replayed(Status::Ready), (Status::Ready, 1), "やり直しは attempts を使う");
         assert_eq!(replayed(Status::Blocked), (Status::Blocked, 0), "人に聞くときは使わない");
+    }
+
+    /// ADR-0044 D2（Phase 53）: `reopen` は attempts を **0 に戻す**唯一のトリガ。
+    /// 畳み込みがこれを知らないと、再開したタスクは毎回 `attempts` の不一致として報告され続ける
+    /// （ADR-0004 D6 の不変条件の検査が狼少年になる。Phase 53 の監査で発見）。
+    #[test]
+    fn replay_follows_reopen_back_to_zero_attempts() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut task = sample_task(Status::Draft);
+        task.budget.max_retries = 0;
+        store
+            .create_task(&task, vec![Event::Created { task: Box::new(task.clone()) }])
+            .expect("create");
+        // draft → ready → running → failed（attempts を 1 使う）。
+        store.apply_transition(task.id, Trigger::Accept, None).expect("accept");
+        store.apply_transition(task.id, Trigger::Dispatch, None).expect("dispatch");
+        store
+            .apply_transition(task.id, Trigger::WorkerError { retryable: false }, None)
+            .expect("worker_error");
+        assert_eq!(store.get(task.id).expect("get").expect("some").attempts, 1);
+
+        // 人が再開する（attempts は 0 に戻る）。
+        crate::comment::reopen(&store, task.id, None).expect("reopen");
+        let stored = store.get(task.id).expect("get").expect("some");
+        assert_eq!((stored.status, stored.attempts), (Status::Ready, 0));
+
+        // `taskctl replay` は不一致を報告しない。
+        let events = store.events_for(task.id).expect("events_for");
+        assert_eq!(replay_status_and_attempts(&events), Some((Status::Ready, 0)));
+        let report = replay(&store).expect("replay");
+        assert_eq!(report.mismatches, Vec::new(), "{report:?}");
     }
 }

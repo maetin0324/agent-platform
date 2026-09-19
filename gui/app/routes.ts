@@ -15,6 +15,8 @@ export default [
   route("org/:id", "routes/org.$id.tsx"),
   route("projects", "routes/projects.tsx"),
   route("projects/:id", "routes/projects.$id.tsx"),
+  // ボード（ADR-0044 D4、Phase 53）。案件を選んで 6 列で見る。絞り込みは URL がそのまま状態
+  route("board", "routes/board.tsx"),
   route("reports", "routes/reports.tsx"),
   // resource route（コンポーネント無し）。`/reports` の行の展開・`sources_expanded` の追い掛けに使う
   route("reports/:id", "routes/reports.$id.tsx"),

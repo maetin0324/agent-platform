@@ -5,7 +5,7 @@ import { Alert, PageHeader } from "~/components/ui/misc";
 import { TaskdBanner } from "~/root";
 import { getTaskdClient } from "~/taskd/client.server";
 import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { loadTaskFiles, readTaskFilesQuery, type TaskFilesData } from "~/taskd/task-files.server";
+import { loadTaskFiles, readTaskFilesQuery, type TaskFilesData } from "~/taskd/task-files";
 import type { Route } from "./+types/tasks.$id.files";
 
 /**

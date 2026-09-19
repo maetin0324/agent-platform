@@ -1,6 +1,18 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-19 Phase 53（ADR-0044 B1、タスク管理）— **追加のみ。v1 のまま**。人がタスクを手で触れる
+  ようになった: エンドポイント 63〜67（`PATCH /tasks/{id}`、`GET|POST /tasks/{id}/comments`、
+  `POST /tasks/{id}/reopen`、`GET /tasks/{id}/timeline`。§3.74〜3.78）、`Task.labels[]` / `Task.category`、
+  `TaskSummary.{labels, category, priority_label, project_id, milestone_id}`、`TaskDetail.priority_label`、
+  `GET /tasks` の絞り込み（`labels` / `categories` / `milestone_id` / `tiers` / `priorities` / `q`）、
+  イベント種別 `edited`、`Action::{Edit, Reopen}`、`RunOutcomeKind::Interrupted`。
+  `POST /tasks` の既定が `ready`（人の経路だけ。`taskctl add` と計画・委譲は従来どおり `draft`）、
+  `priority` の既定が **P2（= 10）**。DB のスキーマ版数は 13（migration 0013: `task_comments` と
+  `tasks.labels_json` / `tasks.category`）
+- **マージ（Phase 52 + 53）**: 両方の節が同じ番号を取っていたので、**ADR-0043 A1 が §3.68〜3.73
+  （エンドポイント 57〜62）、ADR-0044 B1 が §3.74〜3.78（エンドポイント 63〜67）**に整えた。
+  `PATCH /tasks/{id}`（§3.74）は ADR-0043 D2 の **`repos`** も受ける
 - 改訂: 2026-09-19 Phase 52（ADR-0043 A1、ワークスペース）— **追加のみ。v1 のまま**。案件が「リポジトリ」を
   複数持てるようになった（`project_repos`）: エンドポイント 57〜60（`GET|POST /projects/{id}/repos`、
   `PATCH|DELETE /repos/{id}`）、`ProjectDetail.repos[]`、`POST /tasks` の `repos`（名前の配列）、
@@ -162,7 +174,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（62）
+## 2. エンドポイント一覧（67）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -228,6 +240,11 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 60 | DELETE | `/repos/{id}` | リポジトリを消す。未終端のタスクが使っていたら 409（**管理系**） | 204 | store `repo_delete` |
 | 61 | GET | `/tasks/{id}/tree` | タスクの作業ツリーの一覧（ADR-0043 D6） | `TreeView` | `worktree.json` + ファイル |
 | 62 | GET | `/tasks/{id}/tree/file` | そのファイルの本文（テキスト 512 KiB まで） | `TreeFileView` | ファイル |
+| 63 | PATCH | `/tasks/{id}` | タスクを編集する（題名・目的・受け入れ条件・優先度・ラベル・種類・リポジトリ・担当・役割・tier・アダプタ・途中目標・依存・予算。ADR-0044 D1 + ADR-0043 D2、Phase 53）（**管理系**） | 200 `TaskEditResult` | `task_ops::edit::edit_task` |
+| 64 | GET | `/tasks/{id}/comments` | そのタスクのコメント（古い順。ADR-0044 D2） | `CommentList` | store `comments_for` |
+| 65 | POST | `/tasks/{id}/comments` | 人のコメント。状態に応じて**割り込み**・回答・記録になる（**管理系**） | 201 `CommentResult` | `task_ops::comment::post_human_comment` |
+| 66 | POST | `/tasks/{id}/reopen` | 終端のタスクを同じ worktree のまま再開する（`done`/`failed` → `ready`）（**管理系**） | 200 `TransitionResult` | `task_ops::comment::reopen` |
+| 67 | GET | `/tasks/{id}/timeline` | 起きたこと 1 本（イベント・コメント・認可・報告・委譲・リリース。ADR-0044 D5） | `Timeline` | store + `[selfdeploy] releases_dir` |
 
 ---
 
@@ -280,7 +297,13 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `parent` | `TaskId` | — | 直接の子だけ（`ListFilter.parent_id`） |
 | `project` | `ProjectId`（ULID） | — | その案件のタスクだけ（`ListFilter.project_id`。ADR-0033 D2）。ULID でなければ 400 |
 | `root_only` | bool | false | `parent_id IS NULL` のものだけ。`parent` と AND で効く（同時指定は空になるだけで、エラーではない） |
-| `q` | 文字列（最大 200 文字） | — | `title` **または `objective`** の部分一致（`ListFilter.text_contains`。SQLite の LIKE なので **ASCII の大文字小文字は区別しない**。`%` `_` はリテラル。ADR-0014 D2） |
+| `q` | 文字列（最大 200 文字） | — | `title` / `objective` / **コメント本文**の部分一致（`ListFilter.text_contains` + `text_includes_comments`。SQLite の LIKE なので **ASCII の大文字小文字は区別しない**。`%` `_` はリテラル。ADR-0014 D2 / ADR-0044 D4） |
+| `label` | 文字列（小文字 `[a-z0-9-]`）、複数可 | 全て | **AND**（指定したラベルを全部持つタスクだけ）。規則に合わない値は 400（ADR-0044 D4） |
+| `category` | `feature`/`bug`/`research`/`ops`/`docs`/`other`、複数可 | 全て | OR。知らない値は 400（ADR-0044 D3/D4） |
+| `assignee` | 文字列（`org_nodes.id`） | — | 完全一致（`ListFilter.assignee`） |
+| `milestone` | `MilestoneId`（ULID） | — | その途中目標のタスクだけ。ULID でなければ 400 |
+| `tier` | `frontier`/`standard`/`cheap`、複数可 | 全て | `worker_hint.tier`（`json_extract`）。知らない値は 400 |
+| `priority` | `P0`〜`P3` または整数、複数可 | 全て | `Task.priority` の完全一致（ラベルは P0=30 / P1=20 / P2=10 / P3=0 に写す） |
 | `order` | `dispatch` / `updated_desc` / `created_desc` | `updated_desc` | `ListOrder` と同じ: `dispatch` = `priority DESC, created_at ASC, id ASC`（`ready_tasks` と同じ）。`updated_desc` = `updated_at DESC, id DESC`。`created_desc` = `created_at DESC, id DESC` |
 | `limit` | 1..=500 | 100 | |
 | `cursor` | 不透明文字列 | — | 前応答の `next_cursor`（`Page<T>.next_cursor` をそのまま）。解読できない cursor は 400 |
@@ -299,6 +322,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
   対話（`conversation.is_some()`）> 圧縮（`role == "report-compressor"`）> 承認（`kind == "approval"`）>
   合成レビュー（`kind == "review"`）。人が見る本体の仕事（`kind == "execute"` かつどれにも当たらない）は
   `null`。GUI はこれで仕事の木から裏方を一括で外せる（`conversation` は互換のため残す。同じ判定の下位互換）。
+- `items[].labels` / `items[].category` / `items[].priority_label` / `items[].project_id` /
+  `items[].milestone_id` は Phase 53（ADR-0044 D3/D4）で足した。ボードのカードが要るものを一覧に出す。
+  `priority_label` は `priority`（`i32`）を P0〜P3 に丸めた文字列（30 以上 = P0、20..30 = P1、
+  10..20 = P2、10 未満 = P3）。`priority`（`i32`）は互換のため残す。
+- 複数のフィルタを同時に書いたら **AND**（`label` どうしも AND、`category` / `tier` / `priority` /
+  `status` / `kind` / `genre` は同じキーの中では OR）。
 - `counts_by_status` は**フィルタに関係なく** DB 全体の status 別件数（`count_by_status()` の `Vec<(Status, u64)>` をオブジェクトに。0 件の status は現れない）。タイトルバーの件数表示用。
 - 空のときは `{"items":[],"next_cursor":null,"total":0,"counts_by_status":{…}}`。
 
@@ -316,7 +345,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
  "parent":null,"depends_on":["01J…"],
  "max_turns":10,"max_wall_secs":600,"max_retries":2,"workspace":null,
  "role":"lead","genre":null,"aggregate":false,
- "project_id":null,"milestone_id":null,"assignee":null}
+ "project_id":null,"milestone_id":null,"assignee":null,
+ "labels":["infra"],"category":"ops","status":"ready"}
 ```
 
 - `acceptance[]` は `task_ops::add::CriterionSpec`（`Human{text}` / `Command{cmd, expect_exit}` / `ArtifactExists{name}` / `Reviewer{text}`）を `#[serde(tag = "type", rename_all = "snake_case")]` で表したもの。
@@ -345,7 +375,19 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
   応答の `Task` では **false のとき省略される**（`#[serde(skip_serializing_if)]`。`role` / `genre` も `null` のとき省略）。
 - `acceptance` は**クライアントが並べた順**で保存する（CLI は accept → cmd → artifact → reviewer の固定順で渡す。並びに意味は無い）。
   `command` の `text` は `` `<cmd>` exits 0 ``（現状の `CriterionSpec::into_criterion` は `expect_exit` に関わらずこの文。CLI も常に `expect_exit = 0`）、`artifact_exists` の `text` は `artifact <name> exists`。整形は task-ops が行う。
-- 初期 `status`: `kind=approval` なら `ready`、それ以外 `draft`。`Created` イベントと同一トランザクション（`task_ops::add::create_task(store, spec, now) -> Task`）。
+- **`labels` / `category` / `priority` のラベル表記 / `status` は Phase 53 から任意**（ADR-0044 D1/D3）:
+  - `labels`: 小文字の `[a-z0-9-]`、1〜64 文字、最大 8 個（重複は畳む）。違反は 422 `validation`。
+  - `category`: `feature` / `bug` / `research` / `ops` / `docs` / `other`。**既定は `other`**
+    （応答の `Task` では既定のとき省略される）。
+  - `priority`: `"P1"` のようなラベルでも `20` のような整数でも書ける（P0=30 / P1=20 / P2=10 / P3=0）。
+    **省略時は P2（= 10）**。`taskctl add` は `--priority` の既定 0 を明示して渡すので従来どおり。
+  - `status`: `"draft"` か `"ready"` だけ（他は 422）。
+- 初期 `status`（ADR-0044 D1 で変わった）: `kind=approval` なら従来どおり `ready`。それ以外は
+  **`POST /tasks` では `ready`**（人は Go を出す側なので draft を挟まない）。`status: "draft"` を
+  明示したときだけ Go 待ちの `draft` で始まる。`taskctl add`・計画（`POST /plans`）・委譲・分解の
+  子は**従来どおり `draft`**（この規則は API のハンドラが `status` を省略時に `ready` で埋めることで
+  実現していて、`task_ops::add` の既定は変わっていない）。
+  `Created` イベントと同一トランザクション（`task_ops::add::create_task(store, spec, now) -> Task`）。
 - 422 `validation`（`OpsError::Validation` の文言そのまま。`taskctl add` も同じ関数を通る。検査はこの順。ADR-0014 D3 / ADR-0027 D1）:
   - `title` が空白だけ → `title must not be blank`（`field: "title"`）
   - `objective` が空白だけ → `objective must not be blank`（`field: "objective"`）
@@ -1459,8 +1501,6 @@ stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid �
 - `promote.sh` は `verify.json.ok` を自分でも確かめる（`--force` は無い）。この API の 409 はその前段の
   早い拒否で、二重の防壁になっている。
 
----
-
 ### 3.68〜3.71 案件のリポジトリ（ADR-0043 D1、Phase 52。**57〜60。変更系はすべて管理系: `token_file` 未設定でも 401**）
 
 案件は**リポジトリを複数持つ**（論文の `benchfs-paper` とコードの `benchfs`、git ではないデータの置き場）。
@@ -1550,6 +1590,140 @@ stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid �
 
 ---
 
+### 3.74〜3.78 タスク管理: 編集・コメント・再開・タイムライン（ADR-0044 B1、Phase 53）
+
+人がタスクに手を入れるための 5 本。**`PATCH /tasks/{id}` と `POST /tasks/{id}/comments`、
+`POST /tasks/{id}/reopen` は管理系**（`token_file` 未設定でも 401）。読み取り 2 本は通常の認証だけ。
+
+#### 3.74 `PATCH /tasks/{id}` → 200 `{task, fields}`（**管理系**）
+
+要求本文は `task_ops::edit::TaskEdit`。**書いた項目だけ**が変わる。`null` を書ける項目
+（`assignee` / `role` / `adapter` / `milestone_id`）は `null` で消す、省略で据え置き。
+
+```json
+{"title":"…","objective":"…","acceptance":[{"type":"human","text":"…"}],
+ "priority":"P1","labels":["infra"],"category":"ops","repos":["benchfs","benchfs-paper"],
+ "assignee":"infra-section","role":"implementer","tier":"frontier","adapter":null,
+ "milestone_id":"01J…","depends_on":["01J…"],
+ "max_turns":30,"max_wall_secs":1800,"max_retries":2,
+ "expected_status":"ready"}
+```
+
+- 応答の `fields` は**実際に変わった項目の名前**（決まった並び: `title`, `objective`, `acceptance`,
+  `priority`, `labels`, `category`, `repos`, `assignee`, `role`, `tier`, `adapter`, `milestone_id`,
+  `depends_on`, `budget`）。何も変わらなければ空配列で、イベントも積まない。
+- 変わったときは `Event::Edited{fields, by: "human"}` を**同じトランザクション**で積む
+  （`replay` はこのイベントを無視する。状態機械は通らない）。
+- **終端（`done` / `failed` / `cancelled`）は 409 `invalid_transition`**（`task_status` / `kind` 付き）。
+  やり直すなら `POST /tasks/{id}/retry`、同じ worktree で続けるなら `POST /tasks/{id}/reopen`。
+- **`running` / `reviewing` は受け付けるが、走っている run は止めない**（次の run から効く）。
+  止めたければ `POST /tasks/{id}/comments`（D2 の割り込み）か `POST /tasks/{id}/cancel`。
+- `expected_status` が現在と違えば 409 `conflict`（`expected` / `actual` 付き）。
+- 422 `validation`: 1 つも項目を書いていない、空白だけの `title` / `objective`、空の `acceptance`、
+  ラベルの規則違反（`[a-z0-9-]` でない・9 個以上）、知らない `assignee`、案件違い・案件なしの
+  `milestone_id`、存在しない・`failed`/`cancelled` の `depends_on`、自分自身への依存、
+  **依存の循環**（`depends_on would create a cycle: …`。作成時は新しい id が誰の `depends_on` にも
+  入っていないので起きないが、編集では起こせる。循環した 2 件は `ready_tasks` が永久に返さない）、
+  **`genre` の `roles` に無い `role`**（作成時と同じ規則。`genre` はこの API では変えられない）。
+- **`tier` / `adapter` / 予算は再解決しない**。ADR-0033 D2 の解決順（タスク > 役割 > 担当 > 分野）は
+  **作成時に 1 回**効いて `worker_hint` と `budget` に焼き付く。`assignee` や `role` を変えても
+  それらは動かないので、変えたければ同じ本文に `tier` / `adapter` / `max_turns` …も書くこと
+  （GUI の編集フォームは tier を担当の隣に並べている）。
+- **`status` / `attempts` / リースは触らない**。ストアはこの 3 つを、編集を書き戻すトランザクションの
+  中で読み直した値で書く（編集フォームを開いている間にディスパッチャが run を始めていても、
+  その run を壊さない）。応答の `task` はその読み直した状態を持つ。
+- 知らないキーは 400 `bad_request`（`deny_unknown_fields`）。
+- **`repos`（ADR-0043 D2。Phase 52 + 53 のマージで入った）**: この案件のリポジトリを**名前で**差し替える
+  （`project_repos.name`。§3.68）。解決の規則は `POST /tasks` と同じで、**そのタスクの案件の中**から引く
+  （継承〈親 → primary〉は作成時だけの規則なので、`[]` を書けば「リポジトリを使わない」になる）。
+  知らない名前・リモートと他のリポジトリの混在・案件に属さないタスクの空でない `repos` は 422 `validation`。
+  **走っている run には効かない**（次の run の worktree から。`PATCH` は run を止めない）。
+
+#### 3.75 `GET /tasks/{id}/comments` → 200 `CommentList`
+
+`{"items":[{"id":"01J…","task_id":"01J…","author_kind":"human","author":null,
+  "body":"…","run_id":null,"created_at":"2026-09-19T…Z"}]}` — **古い順**（`created_at`、同時刻は `id`）。
+`author_kind` は `human`（人）/ `node`（組織の「人」。`author` にノード id）/ `system`（taskd）。
+知らないタスクは 404 `task_not_found`。
+
+#### 3.76 `POST /tasks/{id}/comments` → 201 `CommentResult`（**管理系**）
+
+本文は `{"body":"…"}`（空白だけは 422、20,000 文字超は 422）。応答:
+
+```json
+{"comment":{…TaskComment…},"effect":"interrupted",
+ "transition":{"id":"…","from":"running","to":"ready","reason":"comment","cascaded":[]},
+ "can_reopen":false}
+```
+
+**人のコメントの効き方（ADR-0044 D2 の表。決定的）**:
+
+| タスクの状態 | `effect` | 何が起きる |
+|---|---|---|
+| `running` / `reviewing` | `interrupted` | 新しいトリガ `Interrupt` で `ready` に戻す（**attempts 据え置き**、`Transitioned{reason:"comment"}`）。`WorkerFinished{outcome:"interrupted: comment"}` を同じトランザクションで積む。走っていた run はディスパッチャが次の tick で止める（`cancel` と同じ `abort_stale_runs` の経路）。**報告（ADR-0034）は作らない**。次の run の前置きの先頭に「**人からの割り込み**: …」として載る |
+| `blocked` | `answered` | `POST /tasks/{id}/answer` と同じ（`Event::Answered`、`Trigger::Answer`、未決の `approvals` も決まる） |
+| `ready` / `draft` | `stored` | 記録するだけ（次の run の前置きの「コメント」節に載る。`draft` は Go 待ちのまま） |
+| `done` / `failed` / `cancelled` | `terminal` | 記録するだけ。`can_reopen` が真なら GUI は「再開」を出せる（`cancelled` は worktree が無いので偽） |
+
+- ワーカーのコメントはこの API では作れない（ワーカー・プロトコルの `{"type":"comment"}` 行が
+  `author_kind = node` で入る。`docs/protocol/worker-protocol.md` §4.7）。ワーカーのコメントは
+  **人を起こさない**（状態も変えない）。対話 run とレビュー run にはコメントを書かせない。
+- ADR-0044 D8: `interrupted` は `bad_news` にも `error_cooldown` にも数えない
+  （`RunOutcomeKind::Interrupted`。§5.2）。
+- `WorkerFinished{outcome:"interrupted: comment"}` は、**いま走っているワーカー run**
+  （= リースの `worker_run_id`）にだけ付く。`reviewing` の割り込みでは付かない（直近のワーカー run は
+  既に `done: …` で終わっており、そこに重ねるとその run の記録を壊すため）。遷移
+  （`Transitioned{reason:"comment"}`）はどちらでも残る。
+- **認証の非対称**: `blocked` のタスクへのコメントは `POST /tasks/{id}/answer` と同じ状態変化を
+  起こすが、こちらは**管理系**（トークン必須）で `answer` は通常の認証だけ。コメントは
+  「走っている run を止める」「終端のタスクに記録を足す」もできるので、`PATCH` / `reopen` と同じ
+  管理系の扱いに揃えた（ADR-0044 D1/D2 がどちらも「管理系」と書いている）。`answer` / `cancel` /
+  `retry` / `POST /tasks` を同じ扱いに揃えるかは別 Phase の判断（`docs/PROGRESS.md` の提案 P-53d）。
+
+#### 3.77 `POST /tasks/{id}/reopen` → 200 `TransitionResult`（**管理系**）
+
+本文は `{"expected_status":"done"}`（任意）。新しいトリガ `Reopen` で **`done` / `failed` → `ready`**、
+**attempts は 0 に戻す**（`reason: "reopen"`）。worktree とブランチはそのままなので、続きから直せる。
+
+- `cancelled` は**再開しない**（worktree もブランチも消してある。ADR-0044 D6）→ 409 `invalid_transition`。
+  やり直すなら `POST /tasks/{id}/retry`（複製）。
+- 非終端も 409 `invalid_transition`。`expected_status` 不一致は 409 `conflict`。
+
+#### 3.78 `GET /tasks/{id}/timeline` → 200 `Timeline`
+
+そのタスクに起きたことを **`at` の昇順で 1 本**にまとめる（同時刻は元の順を保つ安定ソート）。
+
+```json
+{"task_id":"01J…","items":[
+  {"kind":"event","at":"…","seq":0,"event":{…Event…}},
+  {"kind":"comment","at":"…","comment":{…TaskComment…}},
+  {"kind":"approval","at":"…","approval":{…Approval…}},
+  {"kind":"report","at":"…","report":{…Report…}},
+  {"kind":"delegation","at":"…","run_id":"…","tasks":[{…TaskRef…}]},
+  {"kind":"release","at":"…","sha12":"abcdef012345","commits":["…"]}]}
+```
+
+- `event`: `events` の 1 行（遷移・run・質問・回答・**編集**・**割り込み**）。ただし `Delegated` だけは
+  `delegation` に畳む（同じことを 2 回出さない）。
+- `approval`: そのタスクの認可（`at` は決まっていれば `decided_at`、まだなら `created_at`）。
+- `report`: そのタスクが元になった報告（ADR-0034）。
+- `delegation`: `Event::Delegated` の run と、作られた子の `TaskRef`。
+- `release`: **そのタスクのブランチのコミット**（`worktree.json` の `branch` と `base` から
+  `rev-list <base>..<branch>` で引く）が `~/taskd/releases/*/changes.json` の `commits` に含まれる
+  リリース。`worktree.json` が無い・**`base` が空**・git が動かない・`[selfdeploy]` が無いときは
+  **何も出さない**（タイムラインは落ちない）。`base` が無いまま `rev-list <branch>` を引くと
+  `main` の歴史まで「このタスクの変更」として並ぶので、そこは出さない側に倒す。
+- `items[].event` は**新しい方から 2,000 件**まで（それより古いイベントは `GET /tasks/{id}/events`
+  でページングして見る）。クエリパラメータは受け付けない。
+- 並びは `at` を**時刻として**比べる（RFC 3339 の小数秒があるので、文字列比較では順が狂う）。
+- `integration`（ADR-0043 D5 / A2 の取り込み: merge / PR / discard）は**この Phase では作られない**。
+  GUI は知らない `kind` を無視できるようにしておくこと。
+- 知らないタスクは 404 `task_not_found`。
+
+---
+
+---
+
 ## 4. SSE `GET /stream`
 
 ```
@@ -1602,13 +1776,19 @@ data: {"reason":"cursor_too_old","cursor":20000}
 
 ### 5.2 run の要約（`task_ops::runs(events) -> Vec<RunSummary>`）
 
+`RunOutcomeKind` は `done` / `question` / `error` / `requeue` / `lease_expired` に加えて
+**`interrupted`**（ADR-0044 D2: `outcome` が `interrupted: ` で始まる = 人のコメントで止めた run）。
+`interrupted` は失敗ではないので、`bad_news`（ADR-0034）にも `error_cooldown`（§5.8 の `error`）にも
+数えない。
+
 - `WorkerStarted{run_id, adapter, model, provider}` で開始（`started_at` = `ts`）。同じ `run_id` の `WorkerProgress` を `progress` に数え、`ArtifactProduced` を `artifacts` に数え、`ReviewVerdict` を `verdicts` に数える。
 - `WorkerFinished{run_id, outcome, usage}` で終了（`finished_at` = `ts`）。`outcome` の分類（`RunOutcomeKind`）は**接頭辞**で決める（ディスパッチャの文字列と対）:
   - `done: ` → `done`（`outcome_text` = 後ろの summary）
   - `question: ` → `question`
   - `requeue: ` → `requeue`
   - `lease_expired`（完全一致）→ `lease_expired`
-  - それ以外（`error(retryable=…): …`）→ `error`
+  - `interrupted: ` → `interrupted`（ADR-0044 D2。人のコメントで止めた run。失敗ではない）
+- それ以外（`error(retryable=…): …`）→ `error`
 - `WorkerFinished` が無い run は `finished_at = null, outcome = null`（実行中、または回収前）。
 - Reviewer run も `WorkerStarted` / `WorkerFinished`（`role: "reviewer"`）を持つので一覧に現れ、`RunSummary.role` が `reviewer` になる（ADR-0014 D1。`role` の無いイベントは `worker`）。Reviewer run の進捗（`WorkerProgress`）は従来どおり対象 run に `reviewer run <id>: ` 接頭辞で付き、`reviewer run requeued: ` で始まるものは対象 run の `RunSummary.reviewer_deferrals` に数える。Reviewer run の `outcome` もワーカー run と同じ接頭辞の規則。
 
@@ -1621,7 +1801,7 @@ data: {"reason":"cursor_too_old","cursor":20000}
 
 ### 5.4 可能な操作（`task_ops::actions(task) -> Vec<Action>`）
 
-`approve`: `status == draft` または `kind == approval && status == ready`。`reject`: `kind == approval && status == ready`。`answer`: `status == blocked`。`cancel`: 非終端。`retry`（Phase 31。§3.63）: `status == failed` または `status == cancelled`。
+`approve`: `status == draft` または `kind == approval && status == ready`。`reject`: `kind == approval && status == ready`。`answer`: `status == blocked`。`cancel`: 非終端。`retry`（Phase 31。§3.63）: `status == failed` または `status == cancelled`。**`edit`（ADR-0044 D1。§3.74）: 非終端。`reopen`（ADR-0044 D2。§3.77）: `status == done` または `status == failed`**（`cancelled` には付かない）。
 
 この結果は `TaskDetail.actions` だけでなく、**`TaskRef` と `TaskSummary` にも入る**（ADR-0015 D4）。受信箱・一覧・DAG・依存関係のどこから来た参照でも、GUI は `actions` を見るだけでよく、この規則を再実装しない。
 
@@ -1695,7 +1875,11 @@ pub struct TaskSummary {
     pub children: u32, pub pending_children: u32, pub role: Option<String> /* GUI-R2 */,
     pub genre: Option<String> /* Phase 16, ADR-0027 D1 */,
     pub assignee: Option<String> /* Phase 27, GUI-R3 */, pub conversation: bool /* Phase 27, GUI-R3 */,
+    pub support: Option<String> /* Phase 29, GUI 監査 H4 */,
     pub actions: Vec<Action>,
+    // ---- Phase 53（ADR-0044 D3/D4）: ボードのカードが要るもの ----
+    pub labels: Vec<String>, pub category: TaskCategory, pub priority_label: String,
+    pub project_id: Option<ProjectId>, pub milestone_id: Option<MilestoneId>,
 }
 pub struct TaskList { pub items: Vec<TaskSummary>, pub next_cursor: Option<String>, pub total: u64, pub counts_by_status: BTreeMap<Status, u64> }
 
@@ -1703,6 +1887,7 @@ pub struct TaskList { pub items: Vec<TaskSummary>, pub next_cursor: Option<Strin
 pub struct TaskDetail {
     pub task: Task, pub workspace_dir: Option<String>, pub cluster: Option<String> /* Phase 12 */,
     pub role: Option<String> /* Phase 10 */, pub genre: Option<String> /* Phase 16, ADR-0027 D1 */,
+    pub priority_label: String /* Phase 53, ADR-0044 D3: P0〜P3 */,
     pub delegated: Vec<DelegatedView> /* Phase 10 */,
     pub timers: Timers, pub criteria: Vec<CriterionView>,
     pub runs: Vec<RunSummary>, pub prior_review: Vec<ReviewNote>, pub answers: Vec<AnswerNote>,
@@ -1727,13 +1912,66 @@ pub struct RunSummary { pub run_id: String, pub role: RunRole /* worker | review
 pub struct RunFiles { pub stdout: bool, pub stderr: bool, pub result: bool,
     pub request: bool /* ADR-0023 D2 */, pub prompt: bool /* ADR-0023 M1 */ }
 // #[serde(rename_all = "snake_case")]
-pub enum RunOutcomeKind { Done, Question, Error, Requeue, LeaseExpired }
+pub enum RunOutcomeKind { Done, Question, Error, Requeue, LeaseExpired, Interrupted /* Phase 53, ADR-0044 D2 */ }
 pub struct ReviewNote { pub criterion: usize, pub pass: bool, pub reason: String }   // task_ops::derive（実装済み）。task_worker::PriorReview への写像はディスパッチャ側
 pub struct AnswerNote { pub question: String, pub answer: String }                    // task_ops::derive（実装済み）
 pub struct ApprovalLink { pub approval: TaskRef, pub criterion_idx: Option<usize>, pub attempt: Option<u32>, pub decided: Option<ApprovalDecisionView> }
 pub struct ApprovalDecisionView { pub by: String, pub approved: bool, pub note: Option<String>, pub ts: String }
 // #[serde(rename_all = "snake_case")]
-pub enum Action { Approve, Reject, Answer, Cancel }
+pub enum Action { Approve, Reject, Answer, Cancel, Retry /* Phase 31 */,
+                 Edit /* Phase 53, ADR-0044 D1 */, Reopen /* Phase 53, ADR-0044 D2 */ }
+
+// ---- Phase 53（ADR-0044 B1）: 編集・コメント・再開・タイムライン ----
+// #[serde(rename_all = "snake_case")]
+pub enum TaskCategory { Feature, Bug, Research, Ops, Docs, Other }   // 既定 Other（Task の JSON では省略）
+// Task に足した 2 つ（どちらも既定なら JSON に出ない。導入前のタスクもそのまま読める）:
+//   pub labels: Vec<String>,          // 小文字 [a-z0-9-]、1..=64 文字、最大 8 個
+//   pub category: TaskCategory,
+// Event に足した 1 つ（type 名 `edited`。状態は変えない。replay は無視する）:
+//   Edited { fields: Vec<String>, by: String }
+
+// `PATCH /tasks/{id}` の本文（deny_unknown_fields。省略 = 据え置き、Option<Option<T>> は null で消す）
+pub struct TaskEdit {
+    pub title: Option<String>, pub objective: Option<String>, pub acceptance: Option<Vec<CriterionSpec>>,
+    pub priority: Option<PriorityInput> /* "P0".."P3" か i32 */, pub labels: Option<Vec<String>>,
+    pub category: Option<TaskCategory>,
+    pub repos: Option<Vec<String>> /* Phase 52+53 のマージ, ADR-0043 D2: 案件のリポジトリ名 */,
+    pub assignee: Option<Option<String>>, pub role: Option<Option<String>>,
+    pub tier: Option<Tier>, pub adapter: Option<Option<String>>, pub milestone_id: Option<Option<MilestoneId>>,
+    pub depends_on: Option<Vec<TaskId>>,
+    pub max_turns: Option<u32>, pub max_wall_secs: Option<u64>, pub max_retries: Option<u32>,
+    pub expected_status: Option<Status>,
+}
+pub struct EditResult { pub task: Task, pub fields: Vec<String> }
+// #[serde(untagged)]
+pub enum PriorityInput { Label(PriorityLabel), Number(i32) }
+// #[serde(rename_all = "UPPERCASE")]
+pub enum PriorityLabel { P0, P1, P2, P3 }                             // P0=30 / P1=20 / P2=10 / P3=0
+
+pub struct CommentId(pub Ulid);
+// #[serde(rename_all = "snake_case")]
+pub enum CommentAuthorKind { Human, Node, System }
+pub struct TaskComment { pub id: CommentId, pub task_id: TaskId, pub author_kind: CommentAuthorKind,
+    pub author: Option<String>, pub body: String, pub run_id: Option<String>, pub created_at: String /* RFC3339 */ }
+pub struct CommentBody { pub body: String }                            // POST /tasks/{id}/comments の本文
+pub struct CommentList { pub items: Vec<TaskComment> }
+// #[serde(rename_all = "snake_case")]
+pub enum CommentEffect { Stored, Interrupted, Answered, Terminal }
+pub struct CommentResult { pub comment: TaskComment, pub effect: CommentEffect,
+    pub transition: Option<TransitionResult>, pub can_reopen: bool }
+pub struct ReopenBody { pub expected_status: Option<Status> }
+
+pub struct Timeline { pub task_id: TaskId, pub items: Vec<TimelineItem> }
+// #[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TimelineItem {
+    Event { at: String, seq: u64, event: Event },
+    Comment { at: String, comment: TaskComment },
+    Approval { at: String, approval: Approval },
+    Report { at: String, report: Report },
+    Delegation { at: String, run_id: String, tasks: Vec<TaskRef> },
+    Release { at: String, sha12: String, commits: Vec<String> },
+    Integration { at: String, action: String, detail: String },        // ADR-0043 A2。今は作られない
+}
 
 // ---- task-ops: 受信箱 ----
 pub struct Inbox { pub approvals: Vec<ApprovalItem>, pub questions: Vec<QuestionItem>, pub drafts: Vec<DraftGroup>,
@@ -1761,7 +1999,9 @@ pub struct NewTaskSpec {
     #[serde(default)] pub kind: TaskKind /* execute */,
     // Phase 10（ADR-0016 M3）: tier / max_turns / max_wall_secs / adapter は Option になった（省略時は役割の既定 → 全体の既定）
     #[serde(default)] pub tier: Option<Tier> /* 既定 standard */,
-    #[serde(default)] pub priority: i32, #[serde(default)] pub parent: Option<TaskId>, #[serde(default)] pub depends_on: Vec<TaskId>,
+    // Phase 53（ADR-0044 D3）: priority は "P1" でも 20 でもよく、**省略時は P2（= 10）**
+    #[serde(default)] pub priority: Option<PriorityInput>,
+    #[serde(default)] pub parent: Option<TaskId>, #[serde(default)] pub depends_on: Vec<TaskId>,
     #[serde(default)] pub max_turns: Option<u32> /* 既定 10 */, #[serde(default)] pub max_wall_secs: Option<u64> /* 既定 600 */,
     #[serde(default = "2")] pub max_retries: u32,
     #[serde(default)] pub role: Option<String> /* Phase 10 */,
@@ -1769,6 +2009,12 @@ pub struct NewTaskSpec {
     #[serde(default)] pub aggregate: bool /* Phase 10 */,
     #[serde(default)] pub workspace: Option<PathBuf> /* JSON では文字列 */,
     #[serde(default)] pub cluster: Option<String> /* Phase 12 */, #[serde(default)] pub adapter: Option<String>,
+    // Phase 23（ADR-0033 D2）
+    #[serde(default)] pub project_id: Option<ProjectId>, #[serde(default)] pub milestone_id: Option<MilestoneId>,
+    #[serde(default)] pub assignee: Option<String>,
+    // Phase 53（ADR-0044 D1/D3）。`status` は draft か ready だけ（`POST /tasks` は省略時に ready を入れる）
+    #[serde(default)] pub labels: Vec<String>, #[serde(default)] pub category: Option<TaskCategory>,
+    #[serde(default)] pub status: Option<Status>,
 }
 // #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CriterionSpec { Human { text: String }, Command { cmd: String, #[serde(default)] expect_exit: i32 }, ArtifactExists { name: String }, Reviewer { text: String } }

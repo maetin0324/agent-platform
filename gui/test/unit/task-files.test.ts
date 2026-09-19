@@ -4,14 +4,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { binaryFileLabel, fileSizeLabel, tooLargeFileLabel, treeEntryKindLabel } from "~/lib/labels";
 import { fileBody, isJsonPath, parentPath, pickTreeFileViewer, taskFilesHref, treeBreadcrumbs } from "~/lib/task-files";
 import { TaskdClient } from "~/taskd/client.server";
-import { loadTaskFiles, readTaskFilesQuery } from "~/taskd/task-files.server";
+import { loadTaskFiles, readTaskFilesQuery } from "~/taskd/task-files";
 import { treeFileView, treeView } from "../mock-taskd/fixtures";
 import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
 
 /**
  * タスクの作業ツリーの閲覧（ADR-0043 D6、docs/taskd-api-v1.md §3.72〜3.73。Phase 52 / G16）。
  * DOM を描画する unit テストが無い（G10-U1）ので、表示の判断は `~/lib/task-files.ts` の純粋関数、
- * 取得は `~/taskd/task-files.server.ts` の loader で見る。
+ * 取得は `~/taskd/task-files.ts` の loader で見る。
  */
 
 let mock: MockTaskd;

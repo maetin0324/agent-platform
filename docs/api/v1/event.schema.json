@@ -516,6 +516,30 @@
             "from"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0044 D1（Phase 53）: 人がタスクを編集した（`PATCH /tasks/{id}`）。`fields` は変えた項目の名前\n（`title` / `priority` / `labels` …。並びは決定的）、`by` は `\"human\"`。状態は変えない\n（`replay` は無視する）。",
+          "properties": {
+            "by": {
+              "type": "string"
+            },
+            "fields": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "edited",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "fields",
+            "by"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -617,6 +641,10 @@
         "budget": {
           "$ref": "#/$defs/Budget"
         },
+        "category": {
+          "$ref": "#/$defs/TaskCategory",
+          "description": "ADR-0044 D3: 種類（既定 `other`）。導入前のタスクには無いので既定で埋まる。"
+        },
         "conversation": {
           "anyOf": [
             {
@@ -655,6 +683,13 @@
         },
         "kind": {
           "$ref": "#/$defs/TaskKind"
+        },
+        "labels": {
+          "description": "ADR-0044 D3: 自由なラベル（小文字・`[a-z0-9-]`・最大 8 個）。導入前のタスクには無いので既定は空。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "lease": {
           "anyOf": [
@@ -753,6 +788,18 @@
         "updated_at"
       ],
       "type": "object"
+    },
+    "TaskCategory": {
+      "description": "ADR-0044 D3: タスクの種類。既定は `Other`。状態機械は見ない（人とボードのための分類）。",
+      "enum": [
+        "feature",
+        "bug",
+        "research",
+        "ops",
+        "docs",
+        "other"
+      ],
+      "type": "string"
     },
     "TaskId": {
       "description": "タスクの一意識別子（ULID）。DESIGN §4.1。",

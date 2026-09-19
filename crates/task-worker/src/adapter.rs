@@ -92,6 +92,10 @@ pub trait EventSink: Send + Sync {
     /// `delegate` メッセージ（LLM アダプタでは `artifacts/delegate.json`）の提案（ADR-0016 D2）。ディスパッチャが検証して
     /// 子タスクを挿入する。既定は何もしない（`taskctl worker run` など DB を変えない文脈）。
     fn delegate(&self, _tasks: &[task_core::DelegateTask]) {}
+    /// ADR-0044 D2（Phase 53）: `{"type":"comment","body":"…"}`（任意回、非終端）。ディスパッチャは
+    /// `task_comments` に `author_kind = node` で残す。既定は何もしない（`taskctl worker run` など
+    /// DB を変えない文脈）。
+    fn comment(&self, _body: &str) {}
     /// claude-code アダプタが stream-json の `rate_limit_event` を解析するたびに呼ぶ（ADR-0024 D4）。
     /// ディスパッチャはプールのアカウントで走っている run のシンクから、この値を `AccountBook` に記録する。
     /// 既定は何もしない（`fake` アダプタや `taskctl worker run` の観測用途など）。

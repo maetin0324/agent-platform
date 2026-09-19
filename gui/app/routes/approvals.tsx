@@ -95,7 +95,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ApprovalsDa
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "認可 - taskd-gui" }];
+  return [{ title: "認可 - Celeris" }];
 }
 
 /**

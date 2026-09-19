@@ -16,7 +16,7 @@ import type { Route } from "./+types/help";
  * `docs/DESIGN.md` の範囲だけに留める（仕様に無い機能は書かない）。
  */
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "使い方 - taskd-gui" }];
+  return [{ title: "使い方 - Celeris" }];
 }
 
 const STATUS_ROWS: { status: string; meaning: string; canDo: string }[] = [
@@ -270,7 +270,7 @@ export default function HelpPage() {
         as="h1"
         icon="book"
         title="使い方"
-        description="taskd-gui の使い方をひとまとめにしたドキュメントです。"
+        description="Celeris の使い方をひとまとめにしたドキュメントです。"
       />
 
       <nav aria-label="使い方の目次" className="rounded-xl border border-border bg-surface-2/50 p-3">

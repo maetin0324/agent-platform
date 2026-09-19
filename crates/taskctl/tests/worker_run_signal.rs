@@ -89,6 +89,8 @@ fn sigterm_kills_the_worker_process_and_exits_130() {
         milestone_id: None,
         assignee: None,
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     };
     store.create_task(&task, vec![]).unwrap();
     let script = root.join("worker.sh");

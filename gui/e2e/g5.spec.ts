@@ -237,7 +237,7 @@ test.describe("受け入れ条件 1: 非 loopback バインドのパスワード
     const res = await page.goto(`${AUTH_BASE}/`);
     expect(res?.status()).toBe(200);
     await expect(page).toHaveURL(`${AUTH_BASE}/`);
-    await expect(page.locator('[data-testid="footer"]')).toContainText("taskd-gui");
+    await expect(page.locator('[data-testid="footer"]')).toContainText("Celeris");
     await expect(page.locator('[data-testid="logout"]')).toBeVisible();
     const events = await page.request.get(`${AUTH_BASE}/healthz`);
     expect(events.status()).toBe(200);

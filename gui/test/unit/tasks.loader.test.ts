@@ -30,6 +30,10 @@ const sampleTaskList: TaskList = {
       pending_children: 0,
       conversation: false,
       actions: ["cancel"],
+      // ADR-0044 D3（Phase 53）で `TaskSummary` に増えた必須項目。
+      labels: [],
+      category: "other",
+      priority_label: "P3",
     },
   ],
   next_cursor: "opaque-cursor-1",

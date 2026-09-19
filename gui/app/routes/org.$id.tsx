@@ -37,7 +37,7 @@ export async function loader({ params, request }: Route.LoaderArgs): Promise<Con
 export const shouldRevalidate = revalidateAfterActionErrors;
 
 export function meta({ params }: Route.MetaArgs) {
-  return [{ title: `${params.id} と話す - taskd-gui` }];
+  return [{ title: `${params.id} と話す - Celeris` }];
 }
 
 /**

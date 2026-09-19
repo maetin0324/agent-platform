@@ -68,7 +68,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ReleasesDat
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "リリース - taskd-gui" }];
+  return [{ title: "リリース - Celeris" }];
 }
 
 /**

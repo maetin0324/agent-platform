@@ -16,7 +16,7 @@ import type { Route } from "./+types/login";
 /** 非 loopback（またはパスワード明示）のときのログイン画面（docs/DESIGN.md §8.2、docs/adr/0008 D1〜D4）。 */
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "ログイン · taskd-gui" }];
+  return [{ title: "ログイン · Celeris" }];
 }
 
 export async function loader({ request, context }: Route.LoaderArgs) {
@@ -50,10 +50,10 @@ export default function LoginPage({ loaderData, actionData }: Route.ComponentPro
           <span className="grid size-12 place-items-center rounded-2xl bg-linear-to-br from-primary via-primary to-teal text-white shadow-md ring-1 ring-white/20 dark:text-bg">
             <Icon name="zap" className="size-6" strokeWidth={2.2} />
           </span>
-          <p className="text-lg font-bold tracking-tight text-fg">taskd-gui</p>
+          <p className="text-lg font-bold tracking-tight text-fg">Celeris</p>
         </div>
         <div className="rounded-2xl border border-border bg-surface p-6 shadow-md sm:p-8">
-          <h1 className="text-xl font-semibold text-fg">taskd-gui にログイン</h1>
+          <h1 className="text-xl font-semibold text-fg">Celeris にログイン</h1>
           <Form method="post" className="mt-6 flex flex-col gap-4">
             <input type="hidden" name="next" value={next} />
             <div className="flex flex-col gap-1.5">

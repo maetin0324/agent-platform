@@ -111,6 +111,8 @@ pub(crate) async fn list(State(state): State<ApiState>, RawQuery(raw): RawQuery)
         project_id,
         node_id,
         level,
+        // `GET /reports` はタスクでは絞らない（ADR-0044 D5 のタイムラインだけが使う）。
+        task_id: None,
         unread_only,
         limit,
     };

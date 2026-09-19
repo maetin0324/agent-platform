@@ -327,7 +327,12 @@ async fn create_task_returns_201_with_location_and_cli_defaults() {
     let id = task["id"].as_str().expect("id").to_string();
     assert_eq!(resp.header("location"), Some(format!("/api/v1/tasks/{id}").as_str()));
     assert_eq!(task["kind"], "execute");
-    assert_eq!(task["status"], "draft");
+    // ADR-0044 D1（Phase 53）: `POST /tasks` は人の作成なので `ready`（Go を挟まない）。
+    assert_eq!(task["status"], "ready");
+    // ADR-0044 D3: 省略した優先度は P2（= 10）、種類は `other`、ラベルは無し。
+    assert_eq!(task["priority"], 10);
+    assert_eq!(task.get("category"), None, "既定の other は JSON に出さない");
+    assert_eq!(task.get("labels"), None, "空のラベルは JSON に出さない");
     assert_eq!(task["worker_hint"], json!({"tier": "standard", "adapter": null}));
     assert_eq!(task["budget"], json!({"max_turns": 10, "max_wall_secs": 600, "max_retries": 2}));
     assert_eq!(task["workspace"], json!({"kind": "local", "path": id}));
@@ -340,6 +345,15 @@ async fn create_task_returns_201_with_location_and_cli_defaults() {
     let resp = send(&app, post_json("/api/v1/tasks", &approval)).await;
     assert_eq!(resp.status, 201);
     assert_eq!(resp.json()["status"], "ready");
+
+    // ADR-0044 D1: `status: "draft"` を明示したときだけ Go 待ちの draft で始まる。
+    let drafted = json!({"title": "later", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}], "status": "draft"});
+    let resp = send(&app, post_json("/api/v1/tasks", &drafted)).await;
+    assert_eq!(resp.status, 201);
+    assert_eq!(resp.json()["status"], "draft");
+    // `running` のような初期状態は 422。
+    let bogus = json!({"title": "x", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}], "status": "running"});
+    assert_eq!(send(&app, post_json("/api/v1/tasks", &bogus)).await.status, 422);
 }
 
 #[tokio::test]
@@ -425,7 +439,7 @@ async fn replay_reports_zero_mismatches_after_api_operations() {
     .await
     .json();
     let id = created["id"].as_str().expect("id").to_string();
-    assert_eq!(send(&app, post_json(&format!("/api/v1/tasks/{id}/approve"), &json!({}))).await.status, 200);
+    // ADR-0044 D1: `POST /tasks` は `ready` で作るので approve は要らない（cancel だけ通す）。
     assert_eq!(send(&app, post_json(&format!("/api/v1/tasks/{id}/cancel"), &json!({}))).await.status, 200);
     assert_eq!(send(&app, post_json("/api/v1/plans", &json!({"goal": "g"}))).await.status, 201);
 

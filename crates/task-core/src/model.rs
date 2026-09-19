@@ -203,6 +203,106 @@ pub struct ArtifactRef {
     pub kind: String,
 }
 
+/// ADR-0044 D3: タスクの種類。既定は `Other`。状態機械は見ない（人とボードのための分類）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCategory {
+    Feature,
+    Bug,
+    Research,
+    Ops,
+    Docs,
+    #[default]
+    Other,
+}
+
+impl TaskCategory {
+    /// serde の `skip_serializing_if` 用。既定の `other` は JSON に出さないので、導入前のタスクの
+    /// JSON と 1 バイトも変わらない。
+    pub fn is_default(&self) -> bool {
+        *self == TaskCategory::Other
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskCategory::Feature => "feature",
+            TaskCategory::Bug => "bug",
+            TaskCategory::Research => "research",
+            TaskCategory::Ops => "ops",
+            TaskCategory::Docs => "docs",
+            TaskCategory::Other => "other",
+        }
+    }
+
+    /// snake_case の名前から引く（API のクエリと PATCH の検証に使う）。
+    pub fn parse(s: &str) -> Option<TaskCategory> {
+        match s {
+            "feature" => Some(TaskCategory::Feature),
+            "bug" => Some(TaskCategory::Bug),
+            "research" => Some(TaskCategory::Research),
+            "ops" => Some(TaskCategory::Ops),
+            "docs" => Some(TaskCategory::Docs),
+            "other" => Some(TaskCategory::Other),
+            _ => None,
+        }
+    }
+}
+
+/// ADR-0044 D3: 1 タスクに付けられるラベルの上限。
+pub const MAX_LABELS: usize = 8;
+
+/// ADR-0044 D3: ラベルは小文字の `[a-z0-9-]` だけ（空でない、64 文字以内）。純粋関数。
+pub fn is_valid_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.chars().count() <= 64
+        && label.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// ADR-0044 D3: ラベルの一覧を検証する（重複は取り除き、順は保つ）。違反があれば理由を返す。
+pub fn normalize_labels(labels: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::with_capacity(labels.len());
+    for label in labels {
+        if !is_valid_label(label) {
+            return Err(format!(
+                "label {label:?} must match [a-z0-9-] (lowercase, 1..=64 characters)"
+            ));
+        }
+        if !out.iter().any(|l| l == label) {
+            out.push(label.clone());
+        }
+    }
+    if out.len() > MAX_LABELS {
+        return Err(format!("at most {MAX_LABELS} labels are allowed (got {})", out.len()));
+    }
+    Ok(out)
+}
+
+/// ADR-0044 D3: 優先度のラベル（P0〜P3）と `Task.priority`（`i32`。大きいほど先）の対応。
+/// P0 = 30 / P1 = 20 / P2 = 10 / P3 = 0。既定は P2。
+pub const PRIORITY_LABELS: [(&str, i32); 4] = [("P0", 30), ("P1", 20), ("P2", 10), ("P3", 0)];
+
+/// ADR-0044 D3: 既定の優先度（P2 = 10）。
+pub const DEFAULT_PRIORITY: i32 = 10;
+
+/// ADR-0044 D3: `"P1"` のようなラベルを `i32` に写す（大文字小文字は区別しない）。知らない値は `None`。
+pub fn priority_from_label(label: &str) -> Option<i32> {
+    let upper = label.trim().to_ascii_uppercase();
+    PRIORITY_LABELS.iter().find(|(name, _)| *name == upper).map(|(_, v)| *v)
+}
+
+/// ADR-0044 D3: `i32` を P0〜P3 に丸めて返す（30 以上 = P0、20..30 = P1、10..20 = P2、10 未満 = P3）。
+pub fn priority_label(priority: i32) -> &'static str {
+    if priority >= 30 {
+        "P0"
+    } else if priority >= 20 {
+        "P1"
+    } else if priority >= 10 {
+        "P2"
+    } else {
+        "P3"
+    }
+}
+
 /// DESIGN §4.1 の `Task`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Task {
@@ -256,6 +356,14 @@ pub struct Task {
     /// 役割・分野より先に見る。無ければ従来どおり（互換）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
+    // ---- ADR-0044 D3（Phase 53）: ラベルと種類。ここから（ADR-0043 D2 の `repos` はこの外に足す）----
+    /// ADR-0044 D3: 自由なラベル（小文字・`[a-z0-9-]`・最大 8 個）。導入前のタスクには無いので既定は空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// ADR-0044 D3: 種類（既定 `other`）。導入前のタスクには無いので既定で埋まる。
+    #[serde(default, skip_serializing_if = "TaskCategory::is_default")]
+    pub category: TaskCategory,
+    // ---- ADR-0044 D3（Phase 53）: ここまで ----
     /// ADR-0033 D4（Phase 24）: 対話由来のタスクなら、きっかけになった人の発言（`messages.id`）。
     /// run が終わると、その結果が `assignee` のノードの返事として `messages` に入る。
     /// **DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。
@@ -488,6 +596,13 @@ pub enum Event {
     /// 記録する。`from` = 元のタスク。状態は変えない（`Created` が初期状態を与える）。
     Retried {
         from: TaskId,
+    },
+    /// ADR-0044 D1（Phase 53）: 人がタスクを編集した（`PATCH /tasks/{id}`）。`fields` は変えた項目の名前
+    /// （`title` / `priority` / `labels` …。並びは決定的）、`by` は `"human"`。状態は変えない
+    /// （`replay` は無視する）。
+    Edited {
+        fields: Vec<String>,
+        by: String,
     },
 }
 

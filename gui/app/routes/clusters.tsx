@@ -50,7 +50,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ClustersDat
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "クラスタ - taskd-gui" }];
+  return [{ title: "クラスタ - Celeris" }];
 }
 
 /**

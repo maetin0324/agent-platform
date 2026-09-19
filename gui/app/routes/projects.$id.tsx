@@ -1,7 +1,7 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher, useNavigate } from "react-router";
 import { ArtifactsList } from "~/components/ArtifactsList";
-import { ErrorFlash, ProjectActionFlash, RetryFlash } from "~/components/Flash";
+import { ErrorFlash, FieldErrors, ProjectActionFlash, RetryFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { ProjectRepos } from "~/components/ProjectRepos";
@@ -21,7 +21,17 @@ import {
   type TaskArtifactBundle,
   workspacePlace,
 } from "~/lib/artifacts";
-import { milestoneStatusLabel, projectStatusLabel, taskStatusLabel } from "~/lib/labels";
+import { PRIORITY_LABELS } from "~/lib/board";
+import {
+  milestoneStatusLabel,
+  priorityFullLabel,
+  projectStatusLabel,
+  TASK_CATEGORIES,
+  TIERS,
+  taskCategoryLabel,
+  taskStatusLabel,
+  tierLabel,
+} from "~/lib/labels";
 import { milestoneDecisionValid, milestoneIsStalled } from "~/lib/milestone-review";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
@@ -47,6 +57,8 @@ import {
   readRepoPatchBody,
   setPrimaryRepo,
 } from "~/taskd/repos-admin.server";
+import { createTask } from "~/taskd/route-actions.server";
+import { buildProjectTaskSpec } from "~/taskd/tasks-admin.server";
 import type {
   ArtifactList,
   Clusters,
@@ -55,6 +67,7 @@ import type {
   MilestoneStatus,
   MilestoneView,
   OrgList,
+  OrgNode,
   ProjectDetail,
   ProjectStatus,
   ProjectTaskView,
@@ -150,7 +163,7 @@ export async function loader({ params, request }: Route.LoaderArgs): Promise<Pro
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "案件詳細 - taskd-gui" }];
+  return [{ title: "案件詳細 - Celeris" }];
 }
 
 export async function action({ request, params }: Route.ActionArgs) {
@@ -207,6 +220,13 @@ export async function action({ request, params }: Route.ActionArgs) {
     case "repo_delete":
       outcome = await deleteRepo(client, formString(form, "repo_id") ?? "", request.signal);
       break;
+    // ADR-0044 D1（Phase 53）: 案件・途中目標から人がタスクを足す。人が作ったタスクは `ready`
+    // （`POST /tasks` の既定。`status` は送らない）。
+    case "task_create": {
+      const created = await createTask(client, buildProjectTaskSpec(form, params.id), request.signal);
+      outcome = created.ok ? { ok: true, op: "task_create", task: created.task } : { ...created, op: "task_create" };
+      break;
+    }
     default:
       throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
   }
@@ -424,6 +444,14 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                         )
                       )}
 
+                      {/* ADR-0044 D1（Phase 53）: この途中目標に属するタスクを人が直接足せる。 */}
+                      <AddTaskForm
+                        projectId={project.id}
+                        milestoneId={m.id}
+                        org={org.items}
+                        testId={`milestone-add-task-${m.id}`}
+                      />
+
                       {/* 既存の直接変更は裏方の詳細に畳む（誤って押さないように。SPEC §7 のアジャイル判定は
                           本来「ok / 議論 / ng」の対話で行う。ADR-0038 D3 の依頼）。 */}
                       <details className="text-xs text-fg-subtle" data-testid="milestone-status-details">
@@ -569,6 +597,19 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         <SectionTitle icon="gitBranch" id="work-tree-heading" count={workTasks.length}>
           仕事の木
         </SectionTitle>
+        {/* ADR-0044 D1（Phase 53）: 秘書に分解を頼むだけでなく、人が直接タスクを足せる。
+            ボード（`/board?project=…`）でこの案件のタスクを並べて見られる。 */}
+        <div className="flex flex-wrap items-center gap-3">
+          <Link
+            to={`/board?project=${encodeURIComponent(project.id)}`}
+            data-testid="project-board-link"
+            className={buttonClass({ variant: "secondary", size: "sm" })}
+          >
+            <Icon name="layers" />
+            ボードで見る
+          </Link>
+        </div>
+        <AddTaskForm projectId={project.id} org={org.items} testId="project-add-task" />
         <p className="text-xs text-fg-subtle">
           パッと見て、おかしな方針を立てていないかを確かめるための図です。四角を押すと裏方のタスクへ移ります。
           対話の返事や報告のまとめといった裏方の作業は出しません。
@@ -630,6 +671,162 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * 「タスクを追加」（ADR-0044 D1、Phase 53）。案件のヘッダと途中目標のカードの両方から同じ形で開く
+ * （`milestoneId` を渡すとその途中目標に属するタスクになる）。
+ *
+ * **人が作ったタスクは待機中（ready）で始まる**（`POST /tasks` の既定。人は Go を出す側なので
+ * draft を挟まない）。検証は taskd（題名・目的・受け入れ条件が空なら 422）に任せ、その文言をそのまま出す。
+ */
+function AddTaskForm({
+  projectId,
+  milestoneId,
+  org,
+  testId,
+}: {
+  projectId: string;
+  milestoneId?: string;
+  org: OrgNode[];
+  testId: string;
+}) {
+  const fetcher = useFetcher<ProjectOpOutcome>({ key: `task-create-${milestoneId ?? projectId}` });
+  const busy = fetcher.state !== "idle";
+  const error = fetcher.data && !fetcher.data.ok ? fetcher.data.error : undefined;
+
+  return (
+    <details data-testid={testId} className="rounded-lg border border-border bg-surface-2/40 p-3">
+      <summary className="cursor-pointer select-none text-sm font-medium text-fg">タスクを追加</summary>
+      <div className="mt-3 space-y-3">
+        <ProjectActionFlash outcome={fetcher.data} />
+        <fetcher.Form method="post" className="space-y-3" data-testid={`${testId}-form`}>
+          <input type="hidden" name="intent" value="task_create" />
+          {milestoneId && <input type="hidden" name="milestone_id" value={milestoneId} />}
+          <div>
+            <label htmlFor={`${testId}-title`} className={labelClass}>
+              題名
+            </label>
+            <input
+              id={`${testId}-title`}
+              name="title"
+              type="text"
+              data-testid={`${testId}-title`}
+              className={`${inputClass} mt-1.5 w-full`}
+            />
+            <FieldErrors error={error} field="title" />
+          </div>
+          <div>
+            <label htmlFor={`${testId}-objective`} className={labelClass}>
+              目的
+            </label>
+            <textarea
+              id={`${testId}-objective`}
+              name="objective"
+              rows={3}
+              data-testid={`${testId}-objective`}
+              className={`${textareaClass} mt-1.5 w-full`}
+            />
+            <FieldErrors error={error} field="objective" />
+          </div>
+          <div>
+            <label htmlFor={`${testId}-acceptance`} className={labelClass}>
+              終わったと言える条件
+            </label>
+            <input
+              id={`${testId}-acceptance`}
+              name="acceptance"
+              type="text"
+              placeholder="例: 候補が 3 件以上まとまっている"
+              data-testid={`${testId}-acceptance`}
+              className={`${inputClass} mt-1.5 w-full`}
+            />
+            <FieldErrors error={error} field="acceptance" />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <label htmlFor={`${testId}-assignee`} className={labelClass}>
+                担当
+              </label>
+              <select
+                id={`${testId}-assignee`}
+                name="assignee"
+                defaultValue=""
+                data-testid={`${testId}-assignee`}
+                className={`${selectClass} mt-1.5`}
+              >
+                <option value="">（taskd に任せる）</option>
+                {org.map((node) => (
+                  <option key={node.id} value={node.id}>
+                    {node.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor={`${testId}-tier`} className={labelClass}>
+                レベル
+              </label>
+              <select
+                id={`${testId}-tier`}
+                name="tier"
+                defaultValue=""
+                data-testid={`${testId}-tier`}
+                className={`${selectClass} mt-1.5`}
+              >
+                <option value="">（既定）</option>
+                {TIERS.map((t) => (
+                  <option key={t} value={t}>
+                    {tierLabel(t)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor={`${testId}-priority`} className={labelClass}>
+                優先度
+              </label>
+              <select
+                id={`${testId}-priority`}
+                name="priority"
+                defaultValue="P2"
+                data-testid={`${testId}-priority`}
+                className={`${selectClass} mt-1.5`}
+              >
+                {PRIORITY_LABELS.map((p) => (
+                  <option key={p} value={p}>
+                    {priorityFullLabel(p)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor={`${testId}-category`} className={labelClass}>
+                種類
+              </label>
+              <select
+                id={`${testId}-category`}
+                name="category"
+                defaultValue="other"
+                data-testid={`${testId}-category`}
+                className={`${selectClass} mt-1.5`}
+              >
+                {TASK_CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {taskCategoryLabel(c)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <Button type="submit" variant="primary" size="sm" disabled={busy} data-testid={`${testId}-submit`}>
+            <Icon name="plus" />
+            追加（待機中で始まります）
+          </Button>
+        </fetcher.Form>
+      </div>
+    </details>
   );
 }
 

@@ -169,7 +169,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
           data-testid="footer"
         >
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="font-medium text-fg-muted">taskd-gui {gui.version}</span>
+            <span className="font-medium text-fg-muted">Celeris {gui.version}</span>
             {health && (
               <>
                 <span aria-hidden="true">·</span>taskd {health.taskd_version} · api_version {health.api_version} ·
@@ -234,6 +234,8 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { href: "/org/secretary", label: "秘書", icon: "message" },
       { href: "/org", label: "組織", icon: "users" },
       { href: "/projects", label: "案件", icon: "folder" },
+      // ADR-0044 D4（Phase 53）: 案件のタスクを 6 列で見るボード
+      { href: "/board", label: "ボード", icon: "layers" },
       { href: "/reports", label: "報告", icon: "send", badge: "reports" },
       { href: "/approvals", label: "認可", icon: "shield", badge: "org_approvals" },
       { href: "/artifacts", label: "成果物", icon: "file" },
@@ -290,7 +292,7 @@ function Sidebar({
             <span className="grid size-8 place-items-center rounded-lg bg-linear-to-br from-primary via-primary to-teal text-white shadow-md ring-1 ring-white/20 transition-transform group-hover:scale-105 dark:text-bg">
               <Icon name="zap" className="size-4" strokeWidth={2.2} />
             </span>
-            <span className="text-[0.95rem] font-bold tracking-tight text-fg">taskd-gui</span>
+            <span className="text-[0.95rem] font-bold tracking-tight text-fg">Celeris</span>
           </a>
         </div>
 

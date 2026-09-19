@@ -37,6 +37,7 @@ mod reports;
 pub mod schema;
 pub mod secrets;
 mod sse;
+pub mod timeline;
 mod state;
 mod stats;
 /// ADR-0043 D6（Phase 52）: タスクの作業ツリーの閲覧（読み取り）。
@@ -56,7 +57,7 @@ pub use admin::{
     NotifyTestOutcome, ProviderCheckOutcome, ProviderCheckResult,
 };
 pub use notify::{NotifyRecent, NotifyTestResult, NotifyView};
-pub use releases::{ReleasePromoteError, ReleaseSource, ReleasesFs, SharedReleaseSource};
+pub use releases::{BRANCH_COMMITS_LIMIT, ReleasePromoteError, ReleaseSource, ReleasesFs, SharedReleaseSource};
 pub use reports::{ReportDetail, ReportList, ReportsNotifiedResult, ReportsReadBody, ReportsReadResult};
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};

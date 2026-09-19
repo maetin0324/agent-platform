@@ -47,7 +47,7 @@ export async function loadGraph(client: TaskdClient, request: Request): Promise<
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "DAG - taskd-gui" }];
+  return [{ title: "DAG - Celeris" }];
 }
 
 export async function loader({ request }: Route.LoaderArgs): Promise<GraphData> {

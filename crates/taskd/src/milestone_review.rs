@@ -204,6 +204,8 @@ mod tests {
             milestone_id: Some(MilestoneId::new()),
             assignee: Some("secretary".into()),
             conversation: Some(task_core::MessageId::new()),
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 
@@ -253,6 +255,8 @@ mod tests {
             milestone_id: Some(milestone_id),
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 

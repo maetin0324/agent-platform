@@ -3,6 +3,10 @@
 - 状態: Draft（Phase 0 初版、Phase 10 で v2 に拡張）。規範は `docs/DESIGN.md` §5.3 と [ADR-0003](../adr/0003-worker-protocol.md)、
   v2 の追加分は [ADR-0016](../adr/0016-roles-and-delegation.md)（役割と委譲、実装メモ M3/M4/M8/M9）
 - JSON Schema: 正は隣の `worker-protocol.schema.json`（Phase 3 で `task-worker::protocol` の Rust 型から `schemars` で生成。`task-worker` のテスト `committed_schema_matches_generated` が一致を検証し、`UPDATE_SCHEMA=1 cargo test -p task-worker` で再生成する）。本文書 §7 の手書きスキーマは説明用の抜粋
+- **Phase 53（ADR-0044 D2）**: ワーカー → taskd に `comment` メッセージ（§4.7）、`run.context` に
+  `comments` / `interrupt` / `comments_enabled`（§3.1）を追加。**どちらも追加のみ**なので
+  `PROTOCOL_VERSION` は **4 のまま**（この行を出さない・このフィールドを読まないワーカーはそのまま動く。
+  版数を上げるのは「既存の形を変える」ときだけ、という Phase 28 以降の運用に揃える）
 - §9 は Phase 4（ADR-0006）で確定した CLI エージェント系アダプタ（`claude-code` 等）専用の規約。§1〜§8 の
   JSON Lines プロトコルとは別物で、DESIGN §5.4 の表への反映は `docs/PROGRESS.md` の提案 P-24 として持ち越し中
 - **v2（ADR-0016 M9, Phase 10）**: `run.protocol` を `2` に上げた。追加は `delegate` メッセージ（§4.x）、
@@ -63,7 +67,7 @@
 ## 1. 概要
 
 オーケストレータ（taskd）はワーカーを **サブプロセス** として起動し、stdin に `run` を 1 行書いて閉じる。
-ワーカーは stdout に JSON Lines で `progress` / `artifact` を任意回、最後に `done` / `error` / `question` のいずれか 1 つを書いて exit する。
+ワーカーは stdout に JSON Lines で `progress` / `artifact` / `comment` / `delegate` を任意回、最後に `done` / `error` / `question` のいずれか 1 つを書いて exit する。
 全アダプタ（fake / claude-code / codex / dsh / openai-compat）はこの形に正規化する。
 
 ```
@@ -130,6 +134,9 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 | `context.conversation_addressee` | string | –（省略可。Phase 28, ADR-0033 D4 追記） | 対話用タスクの run だけ `"secretary"` / `"other"`。委譲・`Question` は使えない（`delegate` は子を作らず理由を `progress` で返し、`Question` はそのまま `done` の返事になる） |
 | `context.work_genre` | object | –（省略可。Phase 30, ADR-0033 D4 追記） | 対話 run で、担当ノードが自分の仕事の分野（`node.genre`）を持つときだけ。`GenreContext`（`context.available_genres[]` と同じ形）。対話そのものは常にこの分野ではなく対話用分野（`task.genre`）で走る。前置きに「仕事で使う道具」として 1 行渡すためだけの情報 |
 | `context.milestone_review` | object | –（省略可。Phase 41, ADR-0038 D1） | **途中目標レビューの対話 run**（対話の印 + `task.milestone_id`）にだけ。`{milestone: {id, title, description?, status}, tasks: [{title, status, outcome?, artifacts_excerpt?}]}`。`tasks` はその途中目標に属する仕事（裏方は除く。作られた順、最大 20 件）、`outcome` は `context.recent_work[].outcome` と同じ終端の要約、`artifacts_excerpt` は `answer.md` / `report.md` の先頭 4,000 字（決定的に切る）。集めるのはストアとファイルの読み取りだけ（LLM は使わない） |
+| `context.comments` | array | –（省略可。空なら省略。Phase 53, ADR-0044 D2） | そのタスクのコメントの**最新 20 件**（古い順）。`{author_kind: "human"｜"node"｜"system", author?, body, at}`。前置きの**先頭**に「コメント」節として出る |
+| `context.interrupt` | string | –（省略可。Phase 53, ADR-0044 D2） | **直前の run を人のコメントで止めた**とき、そのコメントの本文。前置きのいちばん先に「**人からの割り込み**: …」として出る。割り込みの直後の run にだけ載る（その run が終わったら消える） |
+| `context.comments_enabled` | bool | –（省略可。既定 false。Phase 53, ADR-0044 D2） | この run は `comment` を書ける。true のときだけ前置きに「短い進捗や判断の記録はコメントに書け」が出る。**仕事の run は true、対話 run（Phase 28 の「返事だけをする」run）とレビュー run は false** |
 | `context.recent_work` | array | –（省略可。空なら省略。Phase 33, ADR-0033 D4 追記） | 対話 run にだけ、担当の直近の仕事（最大 10 件、更新の新しい順。案件を選んでいればその案件のものを先に。対話・まとめ・承認・レビューは除く）。`RecentWork`: `{task_id, title, project_title?, status, finished_at?, outcome?, artifacts: string[]}`。`outcome` は終端の要約（`done` なら summary の 1 行目、`failed` なら理由、`blocked` なら質問）で、ストアのタスクとイベントから決定的に組む（LLM は使わない） |
 
 `context.answers` は、このタスクの `Event::Answered` を時系列に並べたもの（`question` は直前の
@@ -153,6 +160,10 @@ Phase 41（ADR-0038 D1）: `context.milestone_review` があるときだけ、�
 **「途中目標『X』のここまで」**（各仕事の status / 終端の要約 / 成果物の抜粋）が入り、いちばん最後に
 **「途中目標の判定をお願いする返事です」**（(a)〜(d) と `milestone_proposal` の書き方）が足される
 （対話専用の指示は消えない）。
+Phase 53（ADR-0044 D2）: `context.comments` か `context.interrupt` があるときだけ、**いちばん先頭**に
+「コメント」節が入る（`interrupt` があればその本文が節の先頭に「**人からの割り込み**: …」として置かれ、
+続けてコメントの糸が古い順に並ぶ）。`context.comments_enabled` が true なら、記憶の書き方の直後に
+「コメントの書き方」が入る。どちらも無い run の前置きは Phase 52 までと 1 バイトも変わらない。
 `local-deep-research` だけは役割の指示文を載せない（ADR-0029 / Phase 19: 検索エンジンに渡す問いを
 役割の文面で濁さないため）。
 
@@ -295,12 +306,41 @@ taskd 側の扱い（ADR-0016 D2, 実装メモ M2/M6/M7）:
   （`task.aggregate == true` なら M4 の集約 run、`false` なら子の成否を問わず `done` になる）。
 - 自分の親（祖先を含む）や自分自身を `depends_on` に指定することはできない。
 
+### 4.7 `comment`（任意回、非終端。Phase 53, ADR-0044 D2）
+
+```json
+{"type":"comment","body":"ベンチは 12% 速くなった。次は書き込み側を見る"}
+```
+
+| フィールド | 型 | 必須 |
+|---|---|---|
+| `body` | string | ✓ |
+
+`progress` と違って**残る**記録。taskd は `task_comments` に `author_kind = "node"`、
+`author = task.assignee`（担当が無ければ `null`）、`run_id` = この run で 1 行足す
+（`GET /tasks/{id}/comments` と `GET /tasks/{id}/timeline`、次の run の前置きに出る）。
+
+- **run は止まらない**（非終端）。状態機械も動かない。
+- **人を起こさない**（通知は ADR-0037 の 5 種のまま）。人が書いたコメントだけが
+  `POST /tasks/{id}/comments` 経由で担当を起こす（`docs/gui/api.md` §3.70 の表）。
+- 空白だけの本文・20,000 文字超は捨てる（警告だけ。run は続く）。
+- 前置きには「短い進捗や判断の記録はコメントに書け」と書いてある（`context.comments_enabled`）。
+  長い成果は成果物（`artifact`）に書くこと。
+- **追加のみ**なので `PROTOCOL_VERSION` は 4 のまま。この行を出さない既存のワーカーは何も変わらない。
+
 ## 5. 終了規則
 
 1. 終端メッセージ（`done` / `error` / `question`）は run につき 1 つ。終端後の行は捨てる。
 2. 終端メッセージ無しで exit した場合、exit code に関わらず `error{retryable:true, message:"worker exited without terminal message (exit=N)"}` と等価に扱う。
 3. exit code は `WorkerFinished{run_id, outcome, usage}` に記録するが、状態遷移には使わない。
-4. taskd 側で run を打ち切った場合（タイムアウト・cancel）は SIGTERM → 猶予（既定 10 s）→ SIGKILL。子プロセスグループごと終了させる。
+4. **アダプタ自身が打ち切る場合**（wall-clock 超過・無出力タイムアウト・プロトコル違反）は
+   SIGTERM → 猶予（`kill_grace_secs`、既定 10 s）→ SIGKILL を**プロセスグループごと**送る。
+   **taskd 側から打ち切る場合**（`cancel`、ADR-0044 D2 の**人のコメントによる割り込み**）は
+   ディスパッチャが run の `JoinHandle` を `abort()` し、tokio の `kill_on_drop` が**子プロセスにだけ
+   SIGKILL** を送る（猶予は無く、孫プロセスは残る。cancel も Phase 3 からこの形。統一は
+   `docs/PROGRESS.md` の提案 P-53a）。割り込みで止めた run は
+   `WorkerFinished{outcome: "interrupted: comment"}` として記録し、**失敗には数えない**
+   （報告も `error_cooldown` も作らない）。worktree はそのまま残すので、次の run が続きから直せる。
 
 ## 6. タイムアウト
 
@@ -309,7 +349,7 @@ taskd 側の扱い（ADR-0016 D2, 実装メモ M2/M6/M7）:
 | wall-clock | `task.budget.max_wall_secs` | タスクごと | `error{retryable:true,"wall clock exceeded"}` |
 | 無出力 | アダプタ設定 `idle_timeout_secs` | 300 | `error{retryable:true,"idle timeout"}` |
 
-`progress` / `artifact` の受信で無出力カウンタをリセットする。
+`progress` / `artifact` / `comment` / `delegate` の受信で無出力カウンタをリセットする（stdout の 1 行ごと）。
 
 ### 6.1 heartbeat（リースの延長。プロトコルのメッセージではない）
 
@@ -432,6 +472,10 @@ taskd 側の扱い（ADR-0016 D2, 実装メモ M2/M6/M7）:
         {
           "type": "object", "required": ["type", "msg"],
           "properties": {"type": {"const": "progress"}, "msg": {"type": "string"}}
+        },
+        {
+          "type": "object", "required": ["type", "body"],
+          "properties": {"type": {"const": "comment"}, "body": {"type": "string"}}
         },
         {
           "type": "object", "required": ["type", "name", "path"],

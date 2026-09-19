@@ -191,7 +191,7 @@ pub fn answer(
 /// `task_id` に紐づく未決の `approvals` を、渡された `answer` で `once` に決定する。
 /// `task_ops::approval::decide` は呼ばない（そちらは決定のたびに `gate::answer` を呼び直すため、
 /// ここから呼ぶと循環する。ストアへの書き込みだけをここで完結させる）。
-fn settle_pending_approvals(store: &dyn TaskStore, task_id: TaskId, answer: &str) -> Result<(), OpsError> {
+pub(crate) fn settle_pending_approvals(store: &dyn TaskStore, task_id: TaskId, answer: &str) -> Result<(), OpsError> {
     let now = OffsetDateTime::now_utc();
     let pending = store.approval_list(Some(true), None, None)?;
     for approval in pending.into_iter().filter(|a| a.task_id == Some(task_id)) {
@@ -282,6 +282,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 

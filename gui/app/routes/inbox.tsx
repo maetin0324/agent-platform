@@ -17,7 +17,7 @@ import type { ApprovalItem, AttentionItem, DraftGroup, Inbox, QuestionItem } fro
 import type { Route } from "./+types/inbox";
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "受信箱 - taskd-gui" }];
+  return [{ title: "受信箱 - Celeris" }];
 }
 
 /**

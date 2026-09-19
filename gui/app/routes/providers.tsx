@@ -64,7 +64,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ProvidersDa
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "プロバイダ - taskd-gui" }];
+  return [{ title: "プロバイダ - Celeris" }];
 }
 
 /**

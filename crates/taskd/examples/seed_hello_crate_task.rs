@@ -93,6 +93,8 @@ fn main() {
         milestone_id: None,
         assignee: None,
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     };
 
     let WorkspaceSpec::Local { path: workspace_path, mode: None } = &task.workspace else {

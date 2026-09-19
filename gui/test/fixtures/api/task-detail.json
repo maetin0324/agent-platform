@@ -54,5 +54,6 @@
         "reject",
         "cancel"
     ],
-    "worker_run_hint": "taskctl worker run --config <taskd.toml> --task 01M2KQJJBBG83DWH7Y8AWNMK0K"
+    "worker_run_hint": "taskctl worker run --config <taskd.toml> --task 01M2KQJJBBG83DWH7Y8AWNMK0K",
+    "priority_label": "P3"
 }

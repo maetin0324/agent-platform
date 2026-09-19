@@ -1,7 +1,7 @@
 import { data } from "react-router";
-import type { ActionError, RetryOutcome, TransitionOutcome } from "./action-types";
+import type { RetryOutcome, TransitionOutcome } from "./action-types";
 import type { TaskdClient } from "./client.server";
-import { isTaskdUnavailable, TaskdError } from "./errors";
+import { toActionError } from "./errors";
 import { formString } from "./forms";
 import type {
   Action,
@@ -29,8 +29,10 @@ export { formString };
  * `applyTransition`（`readTransitionForm` 経由）が扱う `intent`。Phase 31 で `Action` に加わった `retry`
  * は本文・応答の形が違う別経路（`applyRetry`）なので、ここでは意図して除く（`readIntent` は `retry` を
  * 400 として拒む。ルート側は `intent === "retry"` を先に見て `runRetryAction` に分ける）。
+ * Phase 53（ADR-0044 D1/D2）で加わった `edit`（`PATCH /tasks/{id}`）と `reopen`
+ * （`POST /tasks/{id}/reopen`）も同じ理由で除く（`~/taskd/tasks-admin.server.ts` が受け持つ）。
  */
-export type GateAction = Exclude<Action, "retry">;
+export type GateAction = Exclude<Action, "retry" | "edit" | "reopen">;
 
 export const ACTIONS: readonly GateAction[] = ["approve", "reject", "answer", "cancel"];
 const STATUSES: readonly Status[] = [
@@ -67,46 +69,12 @@ export function readExpectedStatus(form: FormData): Status | undefined {
   return v;
 }
 
-/** `TaskdError` / `TaskdUnavailable` を `ActionError` にする。それ以外は re-throw（本当に予期しないエラー）。 */
-export function toActionError(e: unknown): ActionError {
-  if (isTaskdUnavailable(e)) {
-    return {
-      status: 503,
-      code: "unavailable",
-      detail: `taskd に接続できません（${e.baseUrl}）`,
-      conflict: false,
-      fields: {},
-      messages: [],
-    };
-  }
-  if (e instanceof TaskdError) {
-    const fields: Record<string, string[]> = {};
-    const messages: string[] = [];
-    const errors = e.extra.errors;
-    if (Array.isArray(errors)) {
-      for (const item of errors) {
-        if (!item || typeof item !== "object") continue;
-        const message = (item as { message?: unknown }).message;
-        if (typeof message !== "string") continue;
-        messages.push(message);
-        const field = (item as { field?: unknown }).field;
-        if (typeof field === "string" && field) {
-          fields[field] ??= [];
-          fields[field].push(message);
-        }
-      }
-    }
-    return {
-      status: e.status,
-      code: e.code,
-      detail: e.detail,
-      conflict: e.status === 409,
-      fields,
-      messages,
-    };
-  }
-  throw e;
-}
+/**
+ * `TaskdError` / `TaskdUnavailable` → `ActionError`。**実体は `./errors` に移した**
+ * （Phase 52 + 53 のマージ。ルートの `loadX` ヘルパ〈クライアントの束にも入る〉から呼ぶので、
+ * `*.server` の印が付いた場所には置けない）。ここからの再輸出は従来の import を壊さないため。
+ */
+export { toActionError };
 
 export interface TransitionInput {
   intent: GateAction;

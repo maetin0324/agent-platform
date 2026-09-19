@@ -186,6 +186,55 @@
       ],
       "type": "object"
     },
+    "CommentAuthorKind": {
+      "description": "誰が書いたか（`task_comments.author_kind` の CHECK と対）。",
+      "oneOf": [
+        {
+          "const": "human",
+          "description": "人（GUI の `POST /tasks/{id}/comments`）。担当をすぐ起こす（ADR-0044 D2 の表）。",
+          "type": "string"
+        },
+        {
+          "const": "node",
+          "description": "組織の「人」（ワーカーの `{\"type\":\"comment\"}` 行、または秘書・lead が委譲先に書いたもの）。",
+          "type": "string"
+        },
+        {
+          "const": "system",
+          "description": "taskd 自身（決定的な記録）。",
+          "type": "string"
+        }
+      ]
+    },
+    "CommentContext": {
+      "description": "`context.comments[]`（ADR-0044 D2 / Phase 53）: タスクに付いたコメントの 1 件。",
+      "properties": {
+        "at": {
+          "description": "RFC 3339。",
+          "type": "string"
+        },
+        "author": {
+          "description": "`node` のときの組織ノード id。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "author_kind": {
+          "$ref": "#/$defs/CommentAuthorKind",
+          "description": "`human` / `node` / `system`。"
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "author_kind",
+        "body",
+        "at"
+      ],
+      "type": "object"
+    },
     "ConversationAddressee": {
       "description": "`context.conversation_addressee`（ADR-0033 D4 / Phase 28）: この run が対話用タスクなら、相手が\n秘書かそれ以外かを表す。対話でない run では `None`。この値そのものは判断せず、`preamble::render`\nが対話専用の指示文（作業を始めない・委譲不可）を出し分けるためだけに使う純粋なデータ\n（判定はディスパッチャが `task.conversation` と組織図から決定的に行う。DESIGN 原則 1）。",
       "enum": [
@@ -841,6 +890,17 @@
           },
           "type": "array"
         },
+        "comments": {
+          "description": "ADR-0044 D2: そのタスクのコメントの**最新 20 件**（古い順）。空なら省略され、\n「コメント」の節も出ない。",
+          "items": {
+            "$ref": "#/$defs/CommentContext"
+          },
+          "type": "array"
+        },
+        "comments_enabled": {
+          "description": "ADR-0044 D2: この run はコメントを書ける（`{\"type\":\"comment\",\"body\":\"…\"}`）か。\n`true` のときだけ前置きに「短い進捗や判断の記録はコメントに書け」の節を出す。\n**仕事の run はすべて true** なので、Phase 53 以降、普通の run の前置きにはこの節が必ず入る\n（Phase 52 とバイト単位で同じなのは、この 3 つが既定のまま = レビュー run と対話 run だけ）。",
+          "type": "boolean"
+        },
         "conversation": {
           "description": "ADR-0033 D4: 担当のノードとのこの案件での直近のやり取り（古い順）。",
           "items": {
@@ -864,6 +924,13 @@
             "$ref": "#/$defs/ArtifactRef"
           },
           "type": "array"
+        },
+        "interrupt": {
+          "description": "ADR-0044 D2: **直前の run を止めた人のコメント**（次の run の前置きの先頭に\n「人からの割り込み」として載る）。割り込みの直後の run にだけ入る。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "memory": {
           "anyOf": [
@@ -1025,6 +1092,10 @@
         "budget": {
           "$ref": "#/$defs/Budget"
         },
+        "category": {
+          "$ref": "#/$defs/TaskCategory",
+          "description": "ADR-0044 D3: 種類（既定 `other`）。導入前のタスクには無いので既定で埋まる。"
+        },
         "conversation": {
           "anyOf": [
             {
@@ -1063,6 +1134,13 @@
         },
         "kind": {
           "$ref": "#/$defs/TaskKind"
+        },
+        "labels": {
+          "description": "ADR-0044 D3: 自由なラベル（小文字・`[a-z0-9-]`・最大 8 個）。導入前のタスクには無いので既定は空。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "lease": {
           "anyOf": [
@@ -1162,6 +1240,18 @@
       ],
       "type": "object"
     },
+    "TaskCategory": {
+      "description": "ADR-0044 D3: タスクの種類。既定は `Other`。状態機械は見ない（人とボードのための分類）。",
+      "enum": [
+        "feature",
+        "bug",
+        "research",
+        "ops",
+        "docs",
+        "other"
+      ],
+      "type": "string"
+    },
     "TaskId": {
       "description": "タスクの一意識別子（ULID）。DESIGN §4.1。",
       "type": "string"
@@ -1240,6 +1330,23 @@
           "required": [
             "type",
             "msg"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0044 D2（Phase 53）: タスクのコメント（任意回、非終端）。`progress` と違って**残る**\n（`task_comments` に `author_kind = node` で入り、次の run の前置きにも載る）。\n**追加のみ**なので `PROTOCOL_VERSION` は 4 のまま（この行を出さないワーカーはそのまま動く）。",
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "type": {
+              "const": "comment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "body"
           ],
           "type": "object"
         },

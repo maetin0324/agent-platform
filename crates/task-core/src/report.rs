@@ -172,6 +172,9 @@ pub struct ReportFilter {
     pub project_id: Option<ProjectId>,
     pub node_id: Option<String>,
     pub level: Option<u32>,
+    /// ADR-0044 D5（Phase 53）: 元になったタスクで絞る（`reports.task_id` の完全一致）。
+    /// SQL で絞るので、`limit` で新しい方に押し出されて消えることがない。
+    pub task_id: Option<crate::model::TaskId>,
     /// true なら未読（`read_at IS NULL`）だけ。
     pub unread_only: bool,
     pub limit: usize,
@@ -183,6 +186,7 @@ impl Default for ReportFilter {
             project_id: None,
             node_id: None,
             level: None,
+            task_id: None,
             unread_only: false,
             limit: 100,
         }
@@ -674,6 +678,11 @@ impl ReportStore for SqliteStore {
             where_sql.push_str(" AND level = ?");
             args.push(SqlValue::Integer(i64::from(level)));
         }
+        // ADR-0044 D5（Phase 53）: SQL で絞る（Rust 側で `.filter()` すると `LIMIT` で押し出される）。
+        if let Some(task_id) = filter.task_id {
+            where_sql.push_str(" AND task_id = ?");
+            args.push(SqlValue::Text(task_id.to_string()));
+        }
         if filter.unread_only {
             where_sql.push_str(" AND read_at IS NULL");
         }
@@ -1025,6 +1034,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 

@@ -70,7 +70,7 @@ export async function loadRunDetail(
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "run ログ - taskd-gui" }];
+  return [{ title: "run ログ - Celeris" }];
 }
 
 export async function loader({ params, request }: Route.LoaderArgs): Promise<RunDetailData> {

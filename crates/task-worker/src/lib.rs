@@ -48,7 +48,8 @@ pub use local_worktree::{
 pub use memory::{MEMORY_MAX_CHARS, MemoryDir, MemoryUpdate, read_result_memory};
 pub use paperqa::{AcquireConfig, PaperQaAdapter, PaperQaConfig, PaperQaEvidence};
 pub use protocol::{
-    Answer, ChildSummary, ConversationAddressee, ConversationTurn, Evidence, GenreContext, GenreRoleContext,
+    Answer, ChildSummary, CommentContext, ConversationAddressee, ConversationTurn, Evidence, GenreContext,
+    GenreRoleContext,
     MemoryContext, MilestoneBrief, MilestoneReviewContext, MilestoneTaskResult, NodeContext, OrgNodeContext,
     PROTOCOL_VERSION, PriorReview, ProviderFailure, RecentWork, ReviewOutput, ReviewRequest, ReviewVerdictOut,
     RoleContext, RunContext, RunRequest, WorkerMessage,

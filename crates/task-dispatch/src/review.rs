@@ -413,6 +413,8 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHin
         milestone_id: subject_task.milestone_id,
         assignee: subject_task.assignee.clone(),
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     }
 }
 
@@ -614,6 +616,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 

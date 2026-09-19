@@ -10,7 +10,8 @@ use time::OffsetDateTime;
 
 use crate::delegate::{ChildSpec, WorkspaceContext, resolve_child_defaults};
 use crate::model::{
-    Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec,
+    Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskCategory, TaskId, TaskKind, Tier, WorkerHint,
+    WorkspaceSpec,
 };
 use crate::org::OrgNode;
 
@@ -66,6 +67,14 @@ pub struct NewTask {
     /// 書くと、その計画は差し戻される（`PlanError::UnknownRepo`）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
+    /// ADR-0044 D3（Phase 53）: 子の種類（任意。`feature|bug|research|ops|docs|other`）。
+    /// **省略時は `other`**（人が後からボードで直せる）。状態機械は見ない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<TaskCategory>,
+    /// ADR-0044 D3（Phase 53）: 子のラベル（任意。小文字 `[a-z0-9-]`、最大 8 個）。
+    /// 規則に合わないラベルは**落とす**（計画 run を失敗させない。人がボードで直せる）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 /// DESIGN §5.6 の `PlanOutput{ tasks: Vec<NewTask> }`。
@@ -432,6 +441,24 @@ pub fn materialize(
                 milestone_id: parent.milestone_id,
                 assignee: defaults.assignee,
                 conversation: None,
+                // ADR-0044 D3（Phase 53）: planner が決めたラベル・種類（省略時は既定）。
+                // 規則に合わないラベルは黙って落とす（計画 run は失敗させない）。
+                labels: crate::model::normalize_labels(&t.labels).unwrap_or_else(|_| {
+                    // 規則に合わないものを落としてからもう一度正規化する（重複も上限もここで揃う）。
+                    let kept: Vec<String> =
+                        t.labels.iter().filter(|l| crate::model::is_valid_label(l)).cloned().collect();
+                    crate::model::normalize_labels(&kept).unwrap_or_else(|_| {
+                        let mut out: Vec<String> = Vec::new();
+                        for label in kept {
+                            if !out.contains(&label) {
+                                out.push(label);
+                            }
+                        }
+                        out.truncate(crate::model::MAX_LABELS);
+                        out
+                    })
+                }),
+                category: t.category.unwrap_or_default(),
             }
         })
         .collect()
@@ -468,6 +495,8 @@ mod tests {
             genre: None,
             assignee: None,
             workspace: None,
+            category: None,
+            labels: Vec::new(),
         }
     }
 
@@ -518,6 +547,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 
