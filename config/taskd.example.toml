@@ -28,6 +28,19 @@ max_requeues = 5                   # ADR-0011: 同じ試行での連続 requeue�
 [memory]
 dir = "../memory"
 
+# ローカルの作業場所をタスクごとの git worktree にする（ADR-0041 D1、Phase 49）。
+# 案件の `workspace` が `{"kind":"local","path":"…","mode":"worktree"}`（`mode` の既定が `"worktree"`）で
+# `path` が git リポジトリなら、taskd は run ごとに
+#   git -C <path> worktree add -b <worktree_branch_prefix><task_id> <workspace_root>/<task_id>/tree <base>
+# を切り、そこをワーカーのカレントディレクトリにする（`runs/` と `artifacts/` は作業ツリーの外）。
+# base は `main`（無ければ `HEAD`）。本番の `current` リリースの sha が `main` の子孫ならその sha
+# （`[selfdeploy] releases_dir` の親の `current/manifest.json` を読む）。
+# taskd はコミットしないしブランチも消さない。終端で `git status --porcelain` が空なら worktree だけ消す。
+# 案件の `workspace` に `"mode": "shared"` と書けば従来どおり `path` をそのまま作業ディレクトリにする。
+# 接頭辞の既定はクラスタ側（ADR-0019 の `[[clusters]] sync = "worktree"`）と同じ `taskd/`。
+[workspace]
+# worktree_branch_prefix = "taskd/"
+
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]
 # adapter = "claude-code"

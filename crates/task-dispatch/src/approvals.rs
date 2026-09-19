@@ -91,7 +91,7 @@ mod tests {
             status: Status::Running,
             priority: 0,
             worker_hint: WorkerHint { tier: Tier::Cheap, adapter: None },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from(".") },
+            workspace: WorkspaceSpec::Local { path: PathBuf::from("."), mode: None },
             budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
             attempts: 0,
             lease: None,

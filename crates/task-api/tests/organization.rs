@@ -456,6 +456,62 @@ async fn a_project_can_carry_the_workspace_where_its_code_lives() {
     assert!(resp.json().get("workspace").is_none(), "{}", resp.text());
 }
 
+/// ADR-0041 D1（Phase 49）: `kind = local` の作業場所は `mode`（`"worktree"` 既定 / `"shared"`）を持てる。
+/// 省略したら応答にも出ない（Phase 48 までと 1 バイトも変わらない）。
+#[tokio::test]
+async fn a_local_project_workspace_can_choose_the_worktree_mode() {
+    let env = env_with_token();
+    let app = env.router();
+
+    // 1. 省略すると保存も応答も従来どおり（既定は `worktree`）。
+    let resp = send(
+        &app,
+        p(
+            "/api/v1/projects",
+            &json!({"title": "t", "request": "r", "workspace": {"kind": "local", "path": "/srv/repo"}}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 201, "{}", resp.text());
+    let project_id = resp.json()["id"].as_str().expect("id").to_string();
+    assert_eq!(resp.json()["workspace"], json!({"kind": "local", "path": "/srv/repo"}));
+
+    // 2. `mode` を書けばそのまま往復する。
+    let resp = send(
+        &app,
+        pa(
+            &format!("/api/v1/projects/{project_id}"),
+            &json!({"workspace": {"kind": "local", "path": "/srv/repo", "mode": "shared"}}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
+    assert_eq!(resp.json()["workspace"], json!({"kind": "local", "path": "/srv/repo", "mode": "shared"}));
+    let resp = send(&app, g(&format!("/api/v1/projects/{project_id}"))).await;
+    assert_eq!(resp.json()["project"]["workspace"]["mode"], "shared");
+
+    let resp = send(
+        &app,
+        pa(
+            &format!("/api/v1/projects/{project_id}"),
+            &json!({"workspace": {"kind": "local", "path": "/srv/repo", "mode": "worktree"}}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.json()["workspace"]["mode"], "worktree", "{}", resp.text());
+
+    // 3. 知らない `mode` は受け付けない。
+    let resp = send(
+        &app,
+        p(
+            "/api/v1/projects",
+            &json!({"title": "t", "request": "r", "workspace": {"kind": "local", "path": "/srv/repo", "mode": "bogus"}}),
+        ),
+    )
+    .await;
+    assert!(resp.status.is_client_error(), "{} {}", resp.status, resp.text());
+}
+
 /// `GET /projects/{id}` は案件 + 途中目標 + 仕事の木（その案件のタスクだけ）を返す。
 #[tokio::test]
 async fn project_detail_returns_the_milestones_and_the_work_tree() {

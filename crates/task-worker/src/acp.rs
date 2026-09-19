@@ -658,7 +658,7 @@ async fn run_acp(
     command
         .args(&config.args)
         .envs(config.env.iter().cloned())
-        .current_dir(&req.workspace)
+        .current_dir(req.cwd())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -788,7 +788,7 @@ async fn run_acp(
 
     // --- Phase A 続き: session/new（ADR-0026 D3 手順 3） ---
     let new_session_params = serde_json::json!({
-        "cwd": req.workspace.to_string_lossy(),
+        "cwd": req.cwd().to_string_lossy(),
         "mcpServers": [],
     });
     if write_line(&mut stdin, &jsonrpc_request(2, "session/new", new_session_params)).await.is_err() {
@@ -1103,6 +1103,7 @@ mod tests {
             task: crate::protocol::tests::sample_task(),
             artifacts_dir: workspace.join("artifacts"),
             workspace,
+            work_dir: None,
             context: RunContext::default(),
         }
     }

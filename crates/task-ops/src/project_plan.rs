@@ -80,7 +80,7 @@ pub fn start(
     let home = task_core::home_dir();
     let (plan_workspace, plan_cluster) = match project.workspace.as_ref().map(|w| w.with_home_expanded(home.as_deref()))
     {
-        Some(WorkspaceSpec::Local { path }) => (Some(path), None),
+        Some(WorkspaceSpec::Local { path, .. }) => (Some(path), None),
         Some(WorkspaceSpec::Remote { cluster, path }) => (Some(path), Some(cluster)),
         None => (None, None),
     };
@@ -378,14 +378,14 @@ mod tests {
         assert_eq!(
             started.task.workspace,
             WorkspaceSpec::Local {
-                path: std::path::PathBuf::from(started.task.id.to_string())
+                path: std::path::PathBuf::from(started.task.id.to_string()), mode: None
             },
             "作業場所を決めていない案件は従来どおり"
         );
 
         let mut local = sample_project(ProjectStatus::Active);
         local.workspace = Some(WorkspaceSpec::Local {
-            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
         });
         store.project_create(&local).expect("create project");
         let started = start(&store, &local, None, None, &[], &[], now()).expect("start");

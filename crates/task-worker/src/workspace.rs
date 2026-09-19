@@ -54,16 +54,29 @@ pub trait Workspace: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct LocalWorkspace {
     dir: PathBuf,
+    /// ADR-0041 D1: コマンドを実行する場所（worktree）。`None` なら `dir` と同じ（従来どおり）。
+    work_dir: Option<PathBuf>,
 }
 
 impl LocalWorkspace {
     /// `dir` はそのタスクの作業ディレクトリ（ADR-0005 D3）。
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self { dir: dir.into(), work_dir: None }
+    }
+
+    /// ADR-0041 D1: `runs/` `inputs/` `artifacts/` は `dir`、コマンドは `work_dir`（worktree）で動かす。
+    pub fn with_work_dir(mut self, work_dir: impl Into<PathBuf>) -> Self {
+        self.work_dir = Some(work_dir.into());
+        self
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// 実際にコマンドを動かす場所（worktree があればそこ）。
+    pub fn work_dir(&self) -> &Path {
+        self.work_dir.as_deref().unwrap_or(&self.dir)
     }
 }
 
@@ -115,7 +128,8 @@ impl Workspace for LocalWorkspace {
 
         let mut command = tokio::process::Command::new("sh");
         command.arg("-c").arg(cmd);
-        command.current_dir(&self.dir);
+        // ADR-0019 D1 6. / ADR-0041 D1: 判定コマンドは worktree の中で実行する。
+        command.current_dir(self.work_dir());
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -267,7 +281,7 @@ mod tests {
             status: Status::Running,
             priority: 0,
             worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws") },
+            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws"), mode: None },
             budget: Budget { max_turns: 10, max_wall_secs: 60, max_retries: 1 },
             attempts: 0,
             lease: None,
@@ -295,7 +309,7 @@ mod tests {
 
         let ws = LocalWorkspace::new(dir.path());
         let mut task = sample_task();
-        task.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf() };
+        task.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf(), mode: None };
         task.inputs = vec![task_core::ArtifactRef {
             name: "data.txt".into(),
             path: abs_input_path.to_string_lossy().into_owned(),
@@ -326,7 +340,7 @@ mod tests {
 
         let ws = LocalWorkspace::new(dir.path());
         let mut task = sample_task();
-        task.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf() };
+        task.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf(), mode: None };
         task.inputs = vec![task_core::ArtifactRef {
             name: "run.sh".into(),
             path: "scripts/run.sh".into(),
@@ -342,7 +356,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let ws = LocalWorkspace::new(dir.path());
         let mut task = sample_task();
-        task.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf() };
+        task.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf(), mode: None };
         task.inputs = vec![task_core::ArtifactRef {
             name: "missing.txt".into(),
             path: "does/not/exist.txt".into(),
@@ -419,7 +433,7 @@ mod tests {
         let ws = LocalWorkspace::new(dir.path());
         let mut child = sample_task();
         child.parent_id = Some(task_core::TaskId::new());
-        child.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf() };
+        child.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf(), mode: None };
 
         ws.prepare(&child).await.expect("prepare");
         let own = dir.path().join(".taskd").join("artifacts").join(child.id.to_string());

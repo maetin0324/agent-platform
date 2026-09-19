@@ -44,6 +44,12 @@
   なり、分解・委譲した子はそれを継ぐ（明示 > 案件 > 親）。実機の事故（2026-09-18）: 空のローカル
   workspace に置かれた子タスクが、objective の文面からリポジトリの場所を知って自分で `ssh` し、人の
   リポジトリへ直接書いた。**追加のみ**なので `protocol` は `4` のまま
+- **Phase 49（ADR-0041 D1）**: `run.work_dir`（§3.1）と `context.children[].branch`（§3.1）を追加。
+  ローカルの作業場所が git リポジトリで案件の `workspace.mode` が `"worktree"`（既定）なら、taskd は
+  **タスクごとに `git worktree` を切り**、`work_dir` にその作業ツリー（`<workspace>/tree`）を渡す。
+  このとき `workspace` は**作業ツリーの親**（`runs/` `inputs/` `artifacts/` の置き場）であって cwd ではない
+  （作業ツリーの中に `runs/` を作ると `git status --porcelain` が常に汚れ、終端で worktree を消せなくなる）。
+  `work_dir` が無ければ従来どおり `workspace` が cwd。**追加のみ**なので `protocol` は `4` のまま
 
 ## 1. 概要
 
@@ -81,6 +87,7 @@ taskd ◀─stdout── {"type":"progress", ...}\n
  "protocol":2,
  "task":{ "...": "task-core::Task を serde でそのまま直列化したもの（role・aggregate を含む）" },
  "workspace":"/abs/path/to/workspace/<task_id>",
+ "work_dir":"/abs/path/to/workspace/<task_id>/tree",
  "artifacts_dir":"/abs/path/to/workspace/<task_id>/artifacts",
  "context":{
    "prior_review":[{"criterion":0,"pass":false,"reason":"cargo test exit 101: ..."}],
@@ -89,7 +96,7 @@ taskd ◀─stdout── {"type":"progress", ...}\n
    "role":{"id":"lead","instructions":"You coordinate the work of others."},
    "children":[{"id":"01J9…","title":"implement parser","role":"implementer","status":"done",
                 "outcome":"done","artifacts":[{"name":"parser.rs","path":"artifacts/parser.rs","sha256":"…","kind":"rs"}],
-                "workspace":"/abs/path/to/workspace/<child_task_id>"}]
+                "workspace":"/abs/path/to/workspace/<child_task_id>","branch":"taskd/<child_task_id>"}]
  }}
 ```
 
@@ -97,13 +104,14 @@ taskd ◀─stdout── {"type":"progress", ...}\n
 |---|---|---|---|
 | `protocol` | integer | ✓ | `1`〜`4`（現在は `4`。v2 = ADR-0016 M9、v3 = ADR-0027 D1、v4 = ADR-0033 D4/D6）。ワーカーはこの値を検査する必要はない |
 | `task` | object | ✓ | `Task`（id, kind, title, objective, acceptance[], inputs[], depends_on[], status, priority, worker_hint, workspace, budget, attempts, `role`, `aggregate`, …）。`task.role`（`Option<string>`）はタスクの役割名、`task.aggregate`（`bool`。既定 false）は集約 run の親かどうか（ADR-0016 D1/D3） |
-| `workspace` | string | ✓ | 絶対パス。ワーカーの cwd。`artifact.path` の基準 |
+| `workspace` | string | ✓ | 絶対パス。`artifact.path` の基準で、`runs/` `inputs/` `artifacts/` の親。`work_dir` が無ければワーカーの cwd でもある |
+| `work_dir` | string | –（省略可。Phase 49, ADR-0041 D1） | 絶対パス。ワーカーの cwd。タスクごとの `git worktree`（`<workspace>/tree`。ブランチ `taskd/<task_id>`）を切った run にだけ載る。このとき成果物は作業ツリーの**外**にあるので、前置きの成果物のパスは絶対パスになる |
 | `artifacts_dir` | string | ✓（Phase 35, ADR-0036 D1） | 絶対パス。**この run の成果物と結果ファイル（`result.json` / `delegate.json` / `plan.json` / `review.json` / `summary.md`）の置き場**。workspace を自分で所有するタスクは `<workspace>/artifacts`、**workspace を親から継いだタスク（plan / delegate の子）は `<workspace>/.taskd/artifacts/<task_id>`**。決めるのは taskd（ディスパッチャ）で、ワーカーはここに書く。`artifact` メッセージの `path` は従来どおり **workspace 相対**（`.taskd/artifacts/<task_id>/report.md` の形）|
 | `context.prior_review` | array | ✓（空可） | 直前のレビュー結果。`{criterion: usize, pass: bool, reason: string}` |
 | `context.inputs` | array | ✓（空可） | 依存成果物の `ArtifactRef`。`prepare()` で `workspace/inputs/` に配置済み |
 | `context.answers` | array | –（省略可、空なら省略） | `taskctl answer` で記録された `question` → 人間の回答の履歴（時系列、`{question: string, answer: string}`）。ADR-0010 D3, P-10。前方互換のため未知のワーカーは無視してよい |
 | `context.role` | object | –（省略可。v2, ADR-0016 D1/M3） | タスクに役割があるときだけ `Some`。`{id: string, instructions: string}`（`instructions` は `[[roles]]` に指示文が無ければ空文字列）。`claude-code`/`codex` はプロンプトの前置きにする（`## Role: <id>`） |
-| `context.children` | array | –（省略可。空なら省略。v2, ADR-0016 D3/M4） | 集約 run（`task.aggregate == true` の親の、子が全て終端になった後の run）でのみ非空。`ChildSummary`: `{id, title, role?, status, outcome?, artifacts: ArtifactRef[], workspace?}` |
+| `context.children` | array | –（省略可。空なら省略。v2, ADR-0016 D3/M4） | 集約 run（`task.aggregate == true` の親の、子が全て終端になった後の run）でのみ非空。`ChildSummary`: `{id, title, role?, status, outcome?, artifacts: ArtifactRef[], workspace?, branch?}`。`branch` はその子が worktree で作業したときのブランチ（`taskd/<child_id>`。Phase 49, ADR-0041 D1）で、親はこれを merge して子の成果を統合する |
 | `context.node` | object | –（省略可。v4, ADR-0033 D4） | `task.assignee` の組織ノード（担当が決まっている run だけ）。`{id, name, brief?}`。プロンプトの一番前に「あなたは誰で、何の担当か」として置かれる |
 | `context.memory` | object | –（省略可。v4, ADR-0033 D6） | `[memory]` を設定し、担当が決まっている run だけ。`{notes?: string, project?: string}`（`<memory_dir>/<node_id>/notes.md` と `projects/<project_id>.md` の中身。それぞれ 8,000 字で切る） |
 | `context.conversation` | array | –（省略可。空なら省略。v4, ADR-0033 D4） | その案件でのこのノードと人の**直近のやり取り**（既定 20 件、古い順）。`{role: "user"|"node", text: string}` |
@@ -375,7 +383,8 @@ taskd 側の扱い（ADR-0016 D2, 実装メモ M2/M6/M7）:
         "status": {"type": "string"},
         "outcome": {"type": "string"},
         "artifacts": {"type": "array", "items": {"$ref": "#/$defs/ArtifactRef"}},
-        "workspace": {"type": "string"}
+        "workspace": {"type": "string"},
+        "branch": {"type": "string"}
       }
     },
     "DelegateTask": {

@@ -193,6 +193,11 @@ export type MilestoneId = string;
 export type WorkspaceSpec =
   | {
       kind: "local";
+      /**
+       * ADR-0041 D1: 省略時は `Worktree`。省略したものは JSON にも出さない（Phase 48 までの
+       * `{"kind":"local","path":"…"}` と 1 バイトも変わらない）。
+       */
+      mode?: WorkspaceMode | null;
       path: string;
     }
   | {
@@ -200,6 +205,11 @@ export type WorkspaceSpec =
       kind: "remote";
       path: string;
     };
+/**
+ * ADR-0041 D1: ローカルの作業場所の使い方。並列のタスクが同じ作業ツリーで `git checkout` して
+ * 互いの未コミット変更を壊すのを止めるため、既定ではタスクごとに worktree を切る。
+ */
+export type WorkspaceMode = "worktree" | "shared";
 /**
  * run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。
  */

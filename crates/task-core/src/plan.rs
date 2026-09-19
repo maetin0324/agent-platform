@@ -464,7 +464,7 @@ mod tests {
                 adapter: Some("fake".into()),
             },
             workspace: WorkspaceSpec::Local {
-                path: PathBuf::from("/tmp/ws"),
+                path: PathBuf::from("/tmp/ws"), mode: None,
             },
             budget: Budget {
                 max_turns: 30,
@@ -916,10 +916,10 @@ mod tests {
     fn child_workspace_is_explicit_then_project_then_parent() {
         let p = parent();
         let project = WorkspaceSpec::Local {
-            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
         };
         let explicit = WorkspaceSpec::Local {
-            path: PathBuf::from("/home/rmaeda/workspace/rust/other"),
+            path: PathBuf::from("/home/rmaeda/workspace/rust/other"), mode: None,
         };
 
         // 案件も明示も無ければ従来どおり親を継ぐ。
@@ -958,14 +958,14 @@ mod tests {
         assert_eq!(children[0].workspace, remote, "Remote の path はクラスタ側なので触らない");
 
         let tilde = WorkspaceSpec::Local {
-            path: PathBuf::from("~/workspace/rust/pluvio-poc"),
+            path: PathBuf::from("~/workspace/rust/pluvio-poc"), mode: None,
         };
         let ws = WorkspaceContext { project: Some(&tilde), home: Some(&home) };
         let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
         assert_eq!(
             children[0].workspace,
             WorkspaceSpec::Local {
-                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc")
+                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None
             }
         );
     }

@@ -30,7 +30,7 @@ pub use message::{
 };
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, HARNESS_ADAPTERS, Lease, RoleSpec, RunRole, Status,
-    Task, TaskId, TaskKind, Tier, Usage, WorkerHint, WorkspaceSpec, artifact_entry_description, artifact_entry_name,
+    Task, TaskId, TaskKind, Tier, Usage, WorkerHint, WorkspaceMode, WorkspaceSpec, artifact_entry_description, artifact_entry_name,
     expand_home, home_dir,
 };
 pub use notify::{

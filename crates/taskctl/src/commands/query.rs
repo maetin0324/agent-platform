@@ -297,7 +297,7 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: "/tmp".into(),
+                path: "/tmp".into(), mode: None,
             },
             budget: Budget {
                 max_turns: 10,

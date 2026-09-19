@@ -102,7 +102,7 @@ adapter = "fake"
             status: Status::Ready,
             priority: 0,
             worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: ws },
+            workspace: WorkspaceSpec::Local { path: ws, mode: None },
             budget: Budget { max_turns: 4, max_wall_secs: 60, max_retries: 0 },
             attempts: 0,
             lease: None,

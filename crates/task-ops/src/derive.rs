@@ -417,7 +417,7 @@ mod tests {
             status: task_core::Status::Running,
             priority: 0,
             worker_hint: task_core::WorkerHint { tier: task_core::Tier::Standard, adapter: None },
-            workspace: task_core::WorkspaceSpec::Local { path: "/tmp".into() },
+            workspace: task_core::WorkspaceSpec::Local { path: "/tmp".into(), mode: None },
             budget: task_core::Budget { max_turns: 1, max_wall_secs: 1, max_retries: 1 },
             attempts,
             lease: None,

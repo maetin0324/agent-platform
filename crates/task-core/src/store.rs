@@ -2270,7 +2270,7 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: "/tmp/workspace".into(),
+                path: "/tmp/workspace".into(), mode: None,
             },
             budget: Budget {
                 max_turns: 10,
@@ -4103,7 +4103,7 @@ mod tests {
         assert_eq!(store.project_get(none.id).unwrap().and_then(|p| p.workspace), None);
 
         let local_spec = WorkspaceSpec::Local {
-            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
         };
         let mut local = sample_project();
         local.workspace = Some(local_spec.clone());
@@ -4173,7 +4173,7 @@ mod tests {
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
-            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
         };
         assert!(store.project_set_workspace(legacy, Some(&spec)).unwrap());
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, Some(spec));

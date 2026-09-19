@@ -6413,6 +6413,21 @@
       ],
       "type": "object"
     },
+    "WorkspaceMode": {
+      "description": "ADR-0041 D1: ローカルの作業場所の使い方。並列のタスクが同じ作業ツリーで `git checkout` して\n互いの未コミット変更を壊すのを止めるため、既定ではタスクごとに worktree を切る。",
+      "oneOf": [
+        {
+          "const": "worktree",
+          "description": "既定。`path` が git リポジトリなら、タスクごとに `git worktree` を切ってその中で作業する。",
+          "type": "string"
+        },
+        {
+          "const": "shared",
+          "description": "従来どおり `path` をそのまま作業ディレクトリにする（自分専用の使い捨てリポジトリ向け）。",
+          "type": "string"
+        }
+      ]
+    },
     "WorkspaceSpec": {
       "description": "DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。\ntaskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。",
       "oneOf": [
@@ -6421,6 +6436,17 @@
             "kind": {
               "const": "local",
               "type": "string"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0041 D1: 省略時は `Worktree`。省略したものは JSON にも出さない（Phase 48 までの\n`{\"kind\":\"local\",\"path\":\"…\"}` と 1 バイトも変わらない）。"
             },
             "path": {
               "type": "string"

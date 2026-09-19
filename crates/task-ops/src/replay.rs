@@ -131,7 +131,7 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: PathBuf::from("/tmp/ws"),
+                path: PathBuf::from("/tmp/ws"), mode: None,
             },
             budget: Budget {
                 max_turns: 10,

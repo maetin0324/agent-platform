@@ -65,7 +65,7 @@ pub async fn run_subprocess(
     command
         .args(&spec.args)
         .envs(spec.env.iter().cloned())
-        .current_dir(&req.workspace)
+        .current_dir(req.cwd())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -385,6 +385,7 @@ mod tests {
             task: crate::protocol::tests::sample_task(),
             artifacts_dir: workspace.join("artifacts"),
             workspace,
+            work_dir: None,
             context: RunContext::default(),
         }
     }

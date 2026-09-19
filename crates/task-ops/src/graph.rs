@@ -191,7 +191,7 @@ mod tests {
                 tier: Tier::Standard,
                 adapter: None,
             },
-            workspace: WorkspaceSpec::Local { path: "workspace".into() },
+            workspace: WorkspaceSpec::Local { path: "workspace".into(), mode: None },
             budget: Budget {
                 max_turns: 10,
                 max_wall_secs: 600,

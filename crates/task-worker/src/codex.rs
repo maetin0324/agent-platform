@@ -162,7 +162,7 @@ async fn run_codex(
     command.arg(&prompt);
     command
         .envs(config.env.iter().cloned())
-        .current_dir(&req.workspace)
+        .current_dir(req.cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -473,6 +473,7 @@ mod tests {
             task: crate::protocol::tests::sample_task(),
             artifacts_dir: workspace.join("artifacts"),
             workspace,
+            work_dir: None,
             context: RunContext::default(),
         }
     }

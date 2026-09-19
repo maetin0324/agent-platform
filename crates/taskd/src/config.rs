@@ -121,6 +121,9 @@ pub struct Config {
     /// ADR-0040 D6（Phase 48）: リリースの置き場所（`GET /releases` と昇格が読む）。
     #[serde(default)]
     pub selfdeploy: SelfdeployConfig,
+    /// ADR-0041 D1（Phase 49）: ローカルの作業場所を worktree にするときの設定。
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -183,6 +186,28 @@ fn default_releases_dir() -> PathBuf {
 
 fn default_selfdeploy_repo() -> PathBuf {
     PathBuf::from("~/workspace/agent-platform")
+}
+
+/// `[workspace]`（ADR-0041 D1）: 案件の作業場所が `kind = local` かつ `mode = "worktree"`（既定）で、
+/// その `path` が git リポジトリのとき、taskd はタスクごとに `git worktree` を切る。そのブランチ名の
+/// 接頭辞はクラスタ側（ADR-0019 の `WorktreeSettings::branch_prefix`）と同じ既定 `taskd/`。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceConfig {
+    #[serde(default = "default_worktree_branch_prefix")]
+    pub worktree_branch_prefix: String,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            worktree_branch_prefix: default_worktree_branch_prefix(),
+        }
+    }
+}
+
+fn default_worktree_branch_prefix() -> String {
+    task_worker::DEFAULT_BRANCH_PREFIX.to_string()
 }
 
 /// ADR-0040 D3（Phase 47）: CLI からの上書き。`verify.sh` が本番の設定をそのまま読ませたまま、
@@ -1218,6 +1243,13 @@ impl Config {
                 return Err(ConfigError::Invalid(format!("[[clusters]] {}: concurrency must be >= 1", c.id)));
             }
         }
+        // ADR-0041 D1: ローカルの worktree のブランチ名は `<接頭辞><task_id>`。接頭辞が空だと
+        // タスク id そのものがブランチ名になり、人のブランチと見分けが付かない。
+        if self.workspace.worktree_branch_prefix.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "[workspace] worktree_branch_prefix must not be empty".to_string(),
+            ));
+        }
         // ADR-0016 D1: 役割の id は重複させない。adapter は providers と同じ判定。上限は 1 以上。
         let mut role_ids = std::collections::HashSet::new();
         for r in &self.roles {
@@ -1454,6 +1486,9 @@ impl Config {
             }),
             // ADR-0033 D6: `[memory]` が無ければ記憶を読まないし書かない。
             memory_dir: self.memory.as_ref().map(|m| m.dir.clone()),
+            // ADR-0041 D1: ローカルの worktree（ADR-0019 のクラスタ側と同じ既定 `taskd/`）。
+            worktree_branch_prefix: self.workspace.worktree_branch_prefix.clone(),
+            releases_dir: Some(self.selfdeploy.releases_dir.clone()),
         }
     }
 
@@ -3155,6 +3190,38 @@ roles = ["lead"]
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.selfdeploy.repo, PathBuf::from("/srv/agent-platform"));
+    }
+
+    /// ADR-0041 D1（Phase 49）: `[workspace] worktree_branch_prefix` は既定 `taskd/`（ADR-0019 の
+    /// クラスタ側と同じ値）で、`DispatchConfig` に写る。空文字列は設定エラー。
+    #[test]
+    fn workspace_worktree_branch_prefix_defaults_to_taskd_slash_and_reaches_the_dispatcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        // 節を書かなくても既定が効く（クラスタ側の `WorktreeSettings::branch_prefix` と同じ）。
+        std::fs::write(&path, "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.workspace.worktree_branch_prefix, "taskd/");
+        let dispatch = cfg.dispatch_config();
+        assert_eq!(dispatch.worktree_branch_prefix, "taskd/");
+        assert_eq!(dispatch.releases_dir.as_deref(), Some(dir.path().join("releases").as_path()));
+
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[workspace]\nworktree_branch_prefix = \"bot/\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        assert_eq!(Config::load(&path).unwrap().workspace.worktree_branch_prefix, "bot/");
+
+        // 空は拒否する（ブランチ名がタスク id そのものになってしまう）。
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[workspace]\nworktree_branch_prefix = \"\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_err());
+        // 知らないキーは拒否する（他の節と同じ）。
+        assert!(toml::from_str::<Config>("[workspace]\nbogus = 1\n").is_err());
     }
 
     /// `ensure_secrets_dir` は `[secrets] dir` を 0700 で作る（無ければ）。`[secrets]` が無ければ何もしない。

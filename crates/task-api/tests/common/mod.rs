@@ -302,7 +302,7 @@ pub fn new_task(kind: TaskKind, status: Status) -> Task {
             adapter: None,
         },
         workspace: WorkspaceSpec::Local {
-            path: PathBuf::from(id.to_string()),
+            path: PathBuf::from(id.to_string()), mode: None,
         },
         budget: Budget {
             max_turns: 10,

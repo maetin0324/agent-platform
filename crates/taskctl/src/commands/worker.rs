@@ -285,8 +285,8 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
     let workspace_dir = match &args.workspace {
         Some(dir) => dir.clone(),
         None => match &task.workspace {
-            WorkspaceSpec::Local { path } if path.is_relative() => config.workspace_root.join(path),
-            WorkspaceSpec::Local { path } => path.clone(),
+            WorkspaceSpec::Local { path, .. } if path.is_relative() => config.workspace_root.join(path),
+            WorkspaceSpec::Local { path, .. } => path.clone(),
             WorkspaceSpec::Remote { .. } => {
                 return Err(CliError::msg("task workspace is remote; pass --workspace to run it locally"));
             }
@@ -349,6 +349,9 @@ async fn execute(
         protocol: PROTOCOL_VERSION,
         task: task.clone(),
         workspace: prepared.clone(),
+        // `taskctl worker run` は人が指定した（か DB の）ディレクトリでそのまま動かす（ADR-0041 D1 の worktree は
+        // ディスパッチャが用意するもので、手動 run では切らない）。
+        work_dir: None,
         artifacts_dir,
         context: RunContext {
             prior_review: to_prior_review(prior_review_from_events(events)),
@@ -442,6 +445,9 @@ async fn execute_on_cluster(
         protocol: PROTOCOL_VERSION,
         task: run_task,
         workspace: prepared.clone(),
+        // `taskctl worker run` は人が指定した（か DB の）ディレクトリでそのまま動かす（ADR-0041 D1 の worktree は
+        // ディスパッチャが用意するもので、手動 run では切らない）。
+        work_dir: None,
         artifacts_dir,
         context: RunContext {
             prior_review: to_prior_review(prior_review_from_events(events)),
@@ -683,6 +689,7 @@ mod tests {
             memory: None,
             handoff: Default::default(),
             selfdeploy: Default::default(),
+            workspace: Default::default(),
             source_path: None,
         }
     }
@@ -738,7 +745,7 @@ mod tests {
     #[test]
     fn resolve_cluster_target_errors_when_cluster_missing() {
         let config = cluster_config(vec![]);
-        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into() });
+        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into(), mode: None });
         let err = resolve_cluster_target(&config, &task, "local", None).unwrap_err();
         assert!(err.to_string().contains("cluster not found in config: local"), "{err}");
     }
@@ -746,7 +753,7 @@ mod tests {
     #[test]
     fn resolve_cluster_target_requires_workspace_arg_for_local_task() {
         let config = cluster_config(vec![cluster("local", "h")]);
-        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into() });
+        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into(), mode: None });
         let err = resolve_cluster_target(&config, &task, "local", None).unwrap_err();
         assert!(err.to_string().contains("has a local workspace"), "{err}");
     }
@@ -768,7 +775,7 @@ mod tests {
     #[test]
     fn resolve_cluster_target_workspace_arg_overrides_task_path() {
         let config = cluster_config(vec![cluster("local", "h")]);
-        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into() });
+        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into(), mode: None });
         let target = resolve_cluster_target(&config, &task, "local", Some(Path::new("/remote/other"))).unwrap();
         assert_eq!(target.remote_path, PathBuf::from("/remote/other"));
         assert!(target.warning.is_none());
@@ -790,7 +797,7 @@ mod tests {
     fn resolve_cluster_target_rejects_running_or_reviewing_task_even_with_workspace_arg() {
         let config = cluster_config(vec![cluster("local", "h")]);
         for status in [Status::Running, Status::Reviewing] {
-            let task = task_fixture(status, WorkspaceSpec::Local { path: "/tmp/x".into() });
+            let task = task_fixture(status, WorkspaceSpec::Local { path: "/tmp/x".into(), mode: None });
             let err = resolve_cluster_target(&config, &task, "local", Some(Path::new("/remote/x"))).unwrap_err();
             assert!(err.to_string().contains("stop taskd or wait"), "{err}");
         }
