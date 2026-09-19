@@ -2611,3 +2611,68 @@ production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/
 - 提案（`docs/taskd-api-v1.md` への変更提案。採否は人間）:
   - G14-P1: `daemon_instances` の変化を SSE の `daemon` イベントに載せてほしい。載れば
     「リリース」画面の 2 秒ポーリング（この画面だけの特例）を消せる。
+
+## Phase G16 — タスク管理: タブ・編集・コメント・ボード（ADR-0044 B1。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的: taskd Phase 53 で入った `PATCH /tasks/{id}` / `GET,POST /tasks/{id}/comments` /
+  `POST /tasks/{id}/reopen` / `GET /tasks/{id}/timeline` と、`GET /tasks` の新しいフィルタ
+  （`docs/taskd-api-v1.md` §3.3・§3.68〜3.72）を画面にする。taskd 側の実装と**同じコミット**で入れた
+  （この Phase は taskd Phase 53 と 1 対 1）。G15 は taskd Phase 50 の GUI 追従で、独立した節は作らなかった。
+- 変更したファイル:
+  - `app/routes/tasks.$id.tsx` — **タブ**（概要 / タイムライン / 変更 / ファイル / 成果物。`?tab=` で
+    切り替え、SSR で解決）。概要に**編集フォーム**（題名・目的・tier・優先度 P0〜P3・ラベルのチップ・
+    種類・担当・途中目標・依存）、タイムラインに `GET /tasks/{id}/timeline` の 1 本 + **コメント入力** +
+    終端の**「再開」**。loader が `/timeline` `/comments` `/org` も読む。action は `edit` / `comment` /
+    `reopen` に分岐。
+  - `app/components/task-changes.tsx` / `task-files.tsx`（新規）— **差し替えるだけの stub**。
+    ADR-0043 A1/A2 が本物を入れる（マウント点は 1 行で、直前に印のコメント）。
+  - `app/routes/board.tsx`（新規）— `/board?project=…`。ADR-0044 D4 の 6 列、カード（題名・担当・tier・
+    優先度・ラベル・種類・途中目標）、クエリに束縛したフィルタ欄、カード上の優先度 / tier / 担当の
+    その場変更（`useFetcher` → `PATCH`）。既定で裏方（`TaskSummary.support`）を隠す。
+  - `app/lib/board.ts`（新規）— 優先度の写像（`P0↔30 … P3↔0`、`i32 → ラベル`は taskd と同じ丸め）、
+    列分け、`BoardFilter` の解析 / 組み立て、ラベルの形の検査。
+  - `app/taskd/tasks-admin.server.ts`（新規）— `buildTaskEdit` / `editTask` / `commentOnTask` /
+    `reopenTask` / `buildProjectTaskSpec`。
+  - `app/routes/projects.$id.tsx` — **「タスクを追加」**（案件と各途中目標カード）、「ボードで見る」。
+  - `app/routes.ts`（`route("board", …)`）、`app/root.tsx`（ナビに「ボード」、表示名を **Celeris** に）、
+    `app/routes/help.tsx` と 21 ルートの `meta` の `<title>`（`- taskd-gui` → `- Celeris`）。
+    `package.json` の `name`・`healthz` の `name`・`TASKD_GUI_RELEASE`・unit 名は**そのまま**。
+  - `app/lib/labels.ts`（列・種類・優先度・tier・コメントの書き手・`effect` の文面・タイムラインの種別・
+    編集した項目名・タブ名）、`app/components/Flash.tsx`、`app/taskd/action-types.ts`。
+  - `app/taskd/actions.server.ts` — `Action` に `edit` / `reopen` が増えて `applyTransition` の網羅 switch が
+    壊れたので `GateAction` から 2 つを除いた（`tsc` が検出）。
+  - `app/taskd/types.ts` / `docs/taskd-api-v1.md` — `pnpm gen:types` と `scripts/sync-gui-docs.sh` で再生成。
+  - `test/unit/{board,board.loader,tasks.manage.action}.test.ts`（新規）、`test/unit/labels.test.ts` と
+    `test/unit/tasks.detail.loader.test.ts` を拡張（計 **+61 tests**）、
+    `test/mock-taskd/{fixtures,server}.ts` に `serveTaskManagement`（comments / timeline / PATCH / reopen /
+    フィルタ）、`test/fixtures/api/*.json` に増えた必須フィールド。
+- 受け入れ条件ごとの証拠:
+  - 条件: タスク画面が 5 つのタブになり、変更・ファイルは空でよい。
+    実行: `pnpm test`（`tasks.detail.loader.test.ts`）— `?tab=` の解決、各タブの loader が読むもの、
+    stub が「ADR-0043 で入る」を出すこと。
+  - 条件: 編集フォームが `PATCH /tasks/{id}` を呼び、変わった項目が出る。
+    実行: 同（`tasks.manage.action.test.ts`）— `buildTaskEdit` が「省略 = 触らない / 空 = 消す」を
+    作り分けること、成功時に `fields` を、409 / 422 を文面のまま返すこと。
+  - 条件: コメント欄が `POST /tasks/{id}/comments` を呼び、`effect` ごとに出す文面が変わる。
+    実行: 同 — `stored` / `interrupted` / `answered` / `terminal` の 4 通り。
+  - 条件: 終端のタスクに「再開」が出て `POST /tasks/{id}/reopen` を呼ぶ。
+    実行: 同 — `actions` に `reopen` があるときだけ出す（GUI は規則を再実装しない）。
+  - 条件: ボードが 6 列で、フィルタがクエリに束縛され、カード上で優先度 / tier / 担当を変えられる。
+    実行: `pnpm test`（`board.test.ts` / `board.loader.test.ts`）— 8 状態 → 6 列の対応、
+    優先度の写像（境界を含む往復）、フィルタの解析 → `GET /tasks` のクエリ文字列（繰り返しパラメータ込み）。
+  - 条件: フェーズのゲート。
+    実行: `pnpm lint` exit 0（biome、182 ファイル）/ `pnpm typecheck` exit 0 /
+    `pnpm test` exit 0（**48 ファイル、620 tests passed**）/ `pnpm build` exit 0 /
+    `pnpm gen:types` の後も `app/taskd/types.ts` はバイト一致。
+- 未解決事項:
+  - **`pnpm e2e` を回していない**（実 taskd のビルドとポートが要り、taskd Phase 53 の工事と
+    ぶつかるため）。タブ化で `event-item` がタイムラインへ、`artifact-item` が成果物へ移ったので
+    `e2e/g1.spec.ts` / `g3.spec.ts` の `page.goto` に `?tab=timeline` / `?tab=artifacts` を足し、
+    `g5*.spec.ts` のフッタの表示名を Celeris に直した（**未実行**。次に e2e を回すときに確かめる）。
+  - loader が `/timeline` と `/comments` の両方を読む（タイムラインにもコメントは載るので冗長）。
+    コメント数をタブに出すために残した。
+- 提案（`docs/taskd-api-v1.md` への変更提案。採否は人間）:
+  - G16-P1: `GET /tasks/{id}/timeline` に `?kinds=` の絞り込みが欲しい（いまは全部返す）。
+  - G16-P2: ボードは案件ごとに `GET /tasks?project=…&limit=500` を 1 回投げている。列ごとの件数だけ
+    先に欲しくなったら `counts_by_status` をフィルタ後の値でも返してほしい（いまは DB 全体）。

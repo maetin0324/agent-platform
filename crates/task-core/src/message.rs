@@ -167,6 +167,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 

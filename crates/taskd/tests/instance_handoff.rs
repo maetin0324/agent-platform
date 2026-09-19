@@ -135,6 +135,8 @@ drain_timeout_secs = 60
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         };
         let store = self.store();
         store.insert(&task).unwrap_or_else(|e| panic!("insert: {e}"));

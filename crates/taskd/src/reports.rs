@@ -144,7 +144,7 @@ fn compaction_spec(node: &OrgNode, project_id: Option<ProjectId>, pending: &[Rep
         acceptance: Vec::new(),
         kind: TaskKind::Execute,
         tier: None,
-        priority: 0,
+        priority: Some(task_ops::add::PriorityInput::Number(0)),
         parent: None,
         depends_on: Vec::new(),
         max_turns: Some(COMPACTION_BUDGET.max_turns),
@@ -160,6 +160,10 @@ fn compaction_spec(node: &OrgNode, project_id: Option<ProjectId>, pending: &[Rep
         workspace: None,
         cluster: None,
         adapter: None,
+        // ADR-0044 D3: 裏方（報告のまとめ）にラベル・種類は付けない。
+        labels: Vec::new(),
+        category: None,
+        status: None,
     }
 }
 

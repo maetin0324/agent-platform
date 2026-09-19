@@ -154,6 +154,8 @@ test.describe("受け入れ条件 4: 詳細", () => {
     await expect(page.getByTestId("run-row")).toHaveCount(1);
     expect(detail.runs.length).toBe(1);
 
+    // ADR-0044 D5（Phase 53）: 生のイベントは「タイムライン」タブの中（`?tab=timeline`）。
+    await page.goto(`/tasks/${humanId}?tab=timeline`);
     const timelineTypes = await page
       .getByTestId("event-item")
       .evaluateAll((els) => els.map((el) => el.getAttribute("data-event-type")));

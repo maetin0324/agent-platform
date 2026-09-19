@@ -415,6 +415,8 @@ pub fn materialize_delegated(
                 milestone_id: parent.milestone_id,
                 assignee: defaults.assignee,
                 conversation: None,
+                labels: Vec::new(),
+                category: Default::default(),
             }
         })
         .collect()
@@ -482,6 +484,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 

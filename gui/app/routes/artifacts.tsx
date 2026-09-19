@@ -110,7 +110,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ArtifactsDa
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "成果物 - taskd-gui" }];
+  return [{ title: "成果物 - Celeris" }];
 }
 
 export default function ArtifactsPage({ loaderData }: Route.ComponentProps) {

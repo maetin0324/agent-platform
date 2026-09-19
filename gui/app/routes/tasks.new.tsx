@@ -78,7 +78,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<NewTaskData
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "タスク作成 - taskd-gui" }];
+  return [{ title: "タスク作成 - Celeris" }];
 }
 
 /** `form` の文字列値（無ければ `undefined`）。空文字は `""` のまま返す（title/objective 用）。 */

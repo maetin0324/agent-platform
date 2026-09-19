@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 import { Alert } from "~/components/ui/misc";
+import { commentEffectMessage, taskFieldLabel } from "~/lib/labels";
 import type {
   AccountOpOutcome,
   ActionError,
@@ -13,6 +14,9 @@ import type {
   RetryOutcome,
   SecretActionResult,
   StandingRuleOpOutcome,
+  TaskCommentOutcome,
+  TaskEditOutcome,
+  TaskReopenOutcome,
   TransitionOutcome,
 } from "~/taskd/action-types";
 
@@ -87,6 +91,90 @@ export function RetryFlash({ outcome }: { outcome: RetryOutcome | undefined | nu
     );
   }
   return <ErrorFlash error={outcome.error} />;
+}
+
+/**
+ * タスクの編集の結果（ADR-0044 D1、Phase 53）。**taskd が返した `fields`（実際に変わった項目）**を
+ * そのまま出す。`running` / `reviewing` のタスクは走っている run を止めないので、その旨を添える
+ * （止めたいときはコメント（D2）か取り消し）。
+ */
+export function TaskEditFlash({
+  outcome,
+  runningNote = false,
+}: {
+  outcome: TaskEditOutcome | undefined | null;
+  runningNote?: boolean;
+}) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  const { fields } = outcome.result;
+  if (fields.length === 0) {
+    return (
+      <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="info" className="my-2">
+        <p data-testid="flash-task-edit">変わった項目はありません。</p>
+      </Alert>
+    );
+  }
+  return (
+    <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+      <p data-testid="flash-task-edit">変えました: {fields.map(taskFieldLabel).join("・")}</p>
+      {runningNote && (
+        <p data-testid="flash-task-edit-running">
+          いま走っている run は止めていません（この変更は次の run から効きます）。すぐ止めたいときは
+          タイムラインにコメントしてください。
+        </p>
+      )}
+    </Alert>
+  );
+}
+
+/**
+ * タスクへのコメントの結果（ADR-0044 D2、Phase 53）。**何が起きたか**（`effect`）を必ず言う:
+ * 走っていた run を止めたのか、質問への回答になったのか、記録しただけなのか。
+ * 状態が動いたときは `transition` の from → to も添える。
+ */
+export function TaskCommentFlash({ outcome }: { outcome: TaskCommentOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  const { effect, transition, can_reopen } = outcome.result;
+  return (
+    <Alert
+      role="status"
+      data-testid="flash"
+      data-flash-kind="ok"
+      data-flash-effect={effect}
+      tone={effect === "interrupted" ? "warning" : "success"}
+      className="my-2"
+    >
+      <p data-testid="flash-comment-effect">{commentEffectMessage(effect)}</p>
+      {transition && (
+        <p data-testid="flash-comment-transition">
+          <span data-testid="flash-from">{transition.from}</span> → <span data-testid="flash-to">{transition.to}</span>
+          （reason: {transition.reason}）
+        </p>
+      )}
+      {effect === "terminal" && !can_reopen && (
+        <p data-testid="flash-comment-no-reopen">
+          中止したタスクは再開できません（worktree を消してあります）。「やり直す」で複製してください。
+        </p>
+      )}
+    </Alert>
+  );
+}
+
+/** 終端のタスクの再開の結果（ADR-0044 D2、Phase 53）。 */
+export function TaskReopenFlash({ outcome }: { outcome: TaskReopenOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  const { result } = outcome;
+  return (
+    <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+      <p data-testid="flash-task-reopen">
+        再開しました: <span data-testid="flash-from">{result.from}</span> →{" "}
+        <span data-testid="flash-to">{result.to}</span>（reason: {result.reason}）
+      </p>
+    </Alert>
+  );
 }
 
 export function ErrorFlash({ error }: { error: ActionError | undefined | null }) {
@@ -273,6 +361,8 @@ const PROJECT_OP_LABEL: Record<string, string> = {
   milestone_create: "途中目標を追加",
   milestone_status: "途中目標の状態を変更",
   project_plan: "分解を秘書に頼みました",
+  // ADR-0044 D1（Phase 53）: 人が作ったタスクは `ready` で始まる（Go を挟まない）。
+  task_create: "タスクを追加しました（待機中で始まります）",
 };
 
 /** 途中目標の判定（`ok`/`discuss`/`ng`）ごとの文言（ADR-0038 D2/D3、Phase 41 / G13j）。 */
@@ -320,6 +410,19 @@ export function ProjectActionFlash({ outcome }: { outcome: ProjectOpOutcome | un
     <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
       <p data-testid="flash-project-op">
         {PROJECT_OP_LABEL[outcome.op] ?? outcome.op}
+        {outcome.op === "task_create" && (
+          <>
+            （
+            <Link
+              to={`/tasks/${outcome.task.id}`}
+              data-testid="flash-task-create-link"
+              className="underline underline-offset-2"
+            >
+              {outcome.task.title}
+            </Link>
+            ）
+          </>
+        )}
         {outcome.op === "project_plan" && (
           <>
             （

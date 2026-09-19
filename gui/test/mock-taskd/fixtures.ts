@@ -1,4 +1,17 @@
-import type { Health, ReleaseChanges, ReleaseItem, ReleasePromoteAccepted, Releases } from "~/taskd/types";
+import type {
+  CommentResult,
+  EditResult,
+  Health,
+  ReleaseChanges,
+  ReleaseItem,
+  ReleasePromoteAccepted,
+  Releases,
+  Task,
+  TaskComment,
+  TaskSummary,
+  Timeline,
+  TimelineItem,
+} from "~/taskd/types";
 
 /**
  * `GET /health` の既定応答（docs/taskd-api-v1.md §3.1）。`Health` 型で宣言することで形を検証する。
@@ -86,6 +99,114 @@ export const defaultReleases: Releases = {
     releaseItem({ is_current: true, promoted_at: "2026-09-19T02:00:00Z" }),
   ],
 };
+
+/**
+ * ADR-0044（Phase 53）のタスク管理の fixture。ボード・タイムライン・コメント・編集で使う。
+ * どれも taskd が返す形（`app/taskd/types.ts`）で宣言してあるので、型が変わればここで気づく。
+ */
+
+/** ボードのカード 1 枚（`GET /tasks` の 1 行）。 */
+export function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
+  return {
+    id: "01BOARDTASK00000000000001",
+    parent_id: null,
+    kind: "execute",
+    status: "ready",
+    title: "関連研究を調べる",
+    priority: 10,
+    priority_label: "P2",
+    tier: "standard",
+    adapter: null,
+    attempts: 0,
+    max_retries: 2,
+    depends_on: [],
+    created_at: "2026-09-19T00:00:00Z",
+    updated_at: "2026-09-19T00:00:01Z",
+    lease_expires_at: null,
+    backoff_until: null,
+    children: 0,
+    pending_children: 0,
+    conversation: false,
+    actions: ["cancel", "edit"],
+    labels: [],
+    category: "other",
+    ...overrides,
+  };
+}
+
+/** `PATCH /tasks/{id}` が写す先の `Task`（ADR-0044 D1）。 */
+export function task(overrides: Partial<Task> = {}): Task {
+  return {
+    id: "01BOARDTASK00000000000001",
+    kind: "execute",
+    status: "ready",
+    title: "関連研究を調べる",
+    objective: "3 本読む",
+    priority: 10,
+    attempts: 0,
+    created_at: "2026-09-19T00:00:00Z",
+    updated_at: "2026-09-19T00:00:02Z",
+    acceptance: [],
+    depends_on: [],
+    inputs: [],
+    worker_hint: { tier: "standard" },
+    budget: { max_retries: 2, max_turns: 10, max_wall_secs: 600 },
+    workspace: { kind: "local", path: "." },
+    labels: [],
+    category: "other",
+    ...overrides,
+  };
+}
+
+/** `PATCH /tasks/{id}` の既定応答（`fields` は**実際に変わった項目**）。 */
+export function editResult(fields: string[] = ["priority"], overrides: Partial<Task> = {}): EditResult {
+  return { task: task(overrides), fields };
+}
+
+/** `task_comments` の 1 行（ADR-0044 D2）。 */
+export function taskComment(overrides: Partial<TaskComment> = {}): TaskComment {
+  return {
+    id: "01COMMENT0000000000000001",
+    task_id: "01BOARDTASK00000000000001",
+    author_kind: "human",
+    body: "先に関連研究を 3 本だけ読んでください",
+    created_at: "2026-09-19T00:01:00Z",
+    ...overrides,
+  };
+}
+
+/**
+ * `POST /tasks/{id}/comments` の応答。`effect` ごとに `transition` / `can_reopen` の付き方が変わる
+ * （ADR-0044 D2 の表）。
+ */
+export function commentResult(overrides: Partial<CommentResult> = {}): CommentResult {
+  return { comment: taskComment(), effect: "stored", can_reopen: false, ...overrides };
+}
+
+/** `GET /tasks/{id}/timeline` の既定応答（ADR-0044 D5。時刻の昇順）。 */
+export function timeline(items: TimelineItem[] = [], taskId = "01BOARDTASK00000000000001"): Timeline {
+  return {
+    task_id: taskId,
+    items:
+      items.length > 0
+        ? items
+        : [
+            {
+              kind: "event",
+              at: "2026-09-19T00:00:00Z",
+              seq: 0,
+              event: { type: "transitioned", from: "draft", to: "ready", reason: "accepted" },
+            },
+            { kind: "comment", at: "2026-09-19T00:01:00Z", comment: taskComment() },
+            {
+              kind: "release",
+              at: "2026-09-19T00:02:00Z",
+              sha12: "aaaaaaaaaaaa",
+              commits: ["1111111111111111111111111111111111111111"],
+            },
+          ],
+  };
+}
 
 /** `POST /releases/{sha12}/promote` の既定応答（202）。 */
 export const defaultReleasePromoteAccepted: ReleasePromoteAccepted = {

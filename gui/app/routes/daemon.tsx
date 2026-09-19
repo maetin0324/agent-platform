@@ -49,7 +49,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<DaemonData>
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "デーモン - taskd-gui" }];
+  return [{ title: "デーモン - Celeris" }];
 }
 
 export async function action({ request }: Route.ActionArgs) {

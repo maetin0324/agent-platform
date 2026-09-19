@@ -201,6 +201,8 @@ fn conversation_task(
         assignee: Some(node.id.clone()),
         // 対話由来の印（`tasks` の列は増やさない。`task_core::message` 参照）。呼び出し側が入れる。
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     }
 }
 

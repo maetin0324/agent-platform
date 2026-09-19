@@ -70,6 +70,80 @@ pub struct DecisionBody {
     pub expected_status: Option<Status>,
 }
 
+// ========== ADR-0044 D2/D5（Phase 53）: コメント・再開・タイムライン。ここから ==========
+// このブロックは ADR-0044 B1 が足した型だけを持つ（ADR-0043 A1 の型は別のブロックに足す）。
+
+/// `POST /tasks/{id}/comments` の本文（人のコメント。ADR-0044 D2）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CommentBody {
+    pub body: String,
+}
+
+/// `GET /tasks/{id}/comments` の応答（古い順）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CommentList {
+    pub items: Vec<task_core::TaskComment>,
+}
+
+/// `POST /tasks/{id}/reopen` の本文。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReopenBody {
+    #[serde(default)]
+    pub expected_status: Option<Status>,
+}
+
+/// `GET /tasks/{id}/timeline` の応答（ADR-0044 D5）。**時刻の昇順で 1 本**。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct Timeline {
+    pub task_id: TaskId,
+    pub items: Vec<TimelineItem>,
+}
+
+/// タイムラインの 1 件（ADR-0044 D5）。`at` は RFC 3339。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TimelineItem {
+    /// 状態遷移・run・質問・回答・編集・割り込み（`events` の 1 行）。
+    Event {
+        at: String,
+        seq: u64,
+        event: task_core::Event,
+    },
+    /// コメント（人・組織の「人」・taskd）。
+    Comment { at: String, comment: task_core::TaskComment },
+    /// 認可（ADR-0033 D5）。`decided_at` があれば決まった時刻、無ければ聞いた時刻。
+    Approval {
+        at: String,
+        approval: task_core::Approval,
+    },
+    /// 報告（ADR-0034）。
+    Report { at: String, report: task_core::Report },
+    /// 委譲（`Event::Delegated`。作られた子のタスク）。
+    Delegation {
+        at: String,
+        run_id: String,
+        tasks: Vec<task_ops::view::TaskRef>,
+    },
+    /// リリース（ADR-0044 D5）: このタスクのブランチのコミットが入ったリリース。
+    Release {
+        at: String,
+        sha12: String,
+        /// そのリリースに入った、このタスクのコミット（完全な sha）。
+        commits: Vec<String>,
+    },
+    /// ADR-0043 D5 / A2（取り込み: merge / PR / discard）。**この Phase では作られない**
+    /// （enum の口だけ用意しておく）。
+    Integration {
+        at: String,
+        action: String,
+        detail: String,
+    },
+}
+
+// ========== ADR-0044 D2/D5（Phase 53）: ここまで ==========
+
 /// `POST /tasks/{id}/answer` の本文。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

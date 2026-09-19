@@ -107,6 +107,8 @@ pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime
         milestone_id: None,
         assignee: None,
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     };
 
     store.create_task(&task, vec![])?;

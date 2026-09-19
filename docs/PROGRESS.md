@@ -6171,6 +6171,355 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
 
 ---
 
+## Phase 53 — タスク管理 B1: 編集・コメントで割り込み・ボード・タイムライン（ADR-0044。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0044 §1）: タスクは状態機械・親子・依存・認可・質問・報告を持っていたが、**人が手で触る道具**が
+  無かった（編集できない、タスク単位の会話が無い、ラベルも検索もボードも無い）。ADR-0044 の受け入れ条件
+  **B1（D1 / D2 / D3 / D4 / D5）**を入れる。B2（D6: 中止・一時停止・アーカイブ）と B3（D7: 文書）は
+  この Phase では触っていない。
+- **同時並行の工事**: ADR-0043 A1（案件の複数リポジトリ）を別の枝が進めている。migration の番号は
+  **A1 = 0012、この Phase = 0013**（`SCHEMA_VERSION = 13`）と決めて分けた。マージの注意は末尾の
+  「ADR-0043 A1 とのマージ」に書いた。
+
+### 決めたこと（ADR-0044 の実装判断。ADR 本文は書き足していない）
+
+- **`Trigger::Interrupt` の `reason` は `"comment"`**（`name()` は `"interrupt"`）。ADR-0044 D2 の表が
+  「理由 `comment`」と書いているので、`Outcome::reason` と `InvalidTransition::trigger` を分けた
+  （`Trigger::reason()` を足し、`name()` と違う値を返すのは今のところ `Interrupt` だけ）。
+- **割り込みで止めた run を実際に殺すのは既存の `abort_stale_runs`**（cancel と同じ経路）。task-ops は
+  状態とコメントを 1 トランザクションで書くだけで、次の tick でディスパッチャが
+  「ストア上で running でなくなった run」として `handle.abort()` する（`kill_on_drop` でプロセス
+  グループごと片付く）。**割り込み専用の殺し方は作っていない**（ADR-0044 D2 の「SIGTERM → `kill_grace_secs`」は
+  cancel の経路そのもの）。
+- **「割り込みが次の run に載る」規則**（`task_ops::comment::interrupting_comment`。純粋関数）:
+  最後の `Transitioned{reason:"comment", to:ready}` を探し、**それより後に「割り込み以外の run の終わり」
+  （`WorkerFinished` で `outcome` が `interrupted: ` で始まらないもの）が無ければ**、最後の人のコメントを
+  返す。`Transitioned{to:running}`（dispatch）や `WorkerStarted` は消化とみなさない — その run こそが
+  前置きを受け取る run だから。最初は「最後の遷移が `comment` なら」で書いたが、dispatch の遷移が
+  後から積まれるので載らなかった（実機で分かった）。
+- **`q=` は FTS5 ではなく `LIKE`**（ADR-0044 D4 からの**明示的な逸脱**）。rusqlite の bundled には
+  FTS5 が**ある**（`store.rs` の `fts5_availability_of_the_bundled_sqlite_is_recorded` が実測している）が、
+  既定のトークナイザ `unicode61` は**日本語を語に切らない**ので「調査」のような部分一致が 0 件になる
+  （同じテストがそれも確かめている）。この基盤の title / objective / コメントはほぼ日本語なので、
+  `LIKE '%…%'`（`title` OR `objective` OR `EXISTS (task_comments.body)`）の方が正しい。ADR の
+  「FTS5。無ければ `LIKE`」は日本語を想定していなかったと読んだ。
+- **`POST /tasks` の既定を `ready` にしたのは API のハンドラだけ**。`task_ops::add::build_task` の既定は
+  従来どおり `draft` で、`NewTaskSpec.status`（`draft` か `ready` のみ）が書かれていればそれが勝つ。
+  こうすると `taskctl add`・`POST /plans`・計画の分解・委譲の子は**1 バイトも変わらない**（ADR-0044 D1 の
+  「人が作ったタスクは ready」は人の経路だけの話）。
+- **`Task.priority` の既定を P2（= 10）に変えた**（ADR-0044 D3）。`taskctl add` は `--priority` の既定 0 を
+  明示して渡すので従来どおり 0。`POST /tasks` で省略したときだけ 10 になる。
+- **`RunOutcomeKind::Interrupted` を足した**（ADR-0044 D8）。`interrupted: comment` は `error` に落とさない
+  ので、報告（`bad_news`）にも `error_cooldown` にも `GET /providers` の `error` にも数えない。
+  実装上は、割り込んだ run の結果はリースが合わないので `on_worker_finished` の入口で捨てられ、
+  プロバイダの cooldown 判定まで届かない（`abort` が先に効けばそもそも届かない）。
+- **ワーカーの `comment` 行で `PROTOCOL_VERSION` は上げない**（4 のまま）。Phase 28 / 30 / 33 / 35 / 38 /
+  43 / 49 と同じ運用（追加のみなら上げない）。`WorkerMessage` は未知の `type` を拒否するが、それは
+  「古い taskd が新しいワーカーの行を見る」方向で、今回は逆（新しい taskd が古いワーカーを見る）なので
+  互換は壊れない。`docs/protocol/worker-protocol.md` の冒頭にその理由を書いた。
+- **やり直し（`POST /tasks/{id}/retry`）は元のラベル・種類を引き継ぐ**（人が付けた分類なので複製にも残す。
+  `crates/task-ops/src/retry.rs`）。`attempts` / `conversation` は従来どおりリセットする。
+- **対話 run にはコメントを書かせない**（`comments_enabled = false`）。Phase 28 の「返事だけをする」と
+  ぶつかるため。レビュー run も `RunContext::default()` なので false。
+- **`repos`（ADR-0043 D2）は入れていない**。`TaskEdit` に「A1 がここに 1 行足す」という TODO コメントだけ
+  置いた（`crates/task-ops/src/edit.rs`）。
+
+### 変更したファイル（taskd 側）
+
+- **migration**: `crates/task-core/migrations/0013_task_comments.sql`（`task_comments` 表 + 索引、
+  `tasks.labels_json` / `tasks.category` と既存行の埋め戻し、`idx_tasks_category`）。
+  `crates/task-core/migrations/0012_project_repos.sql` は **ADR-0043 A1 の場所取り**（SQL を 1 文も
+  含まないファイル。マージで A1 側を採る）。
+- `crates/task-core/src/model.rs`: `TaskCategory`、`MAX_LABELS` / `is_valid_label` / `normalize_labels`、
+  `PRIORITY_LABELS` / `DEFAULT_PRIORITY` / `priority_from_label` / `priority_label`、
+  **`Task.labels` / `Task.category`**（`assignee` の直後の区切りコメント付きブロック。A1 の `repos` は
+  その外に足す）、`Event::Edited{fields, by}`。
+- `crates/task-core/src/comment.rs`（新）: `CommentId` / `CommentAuthorKind` / `TaskComment` /
+  `MAX_COMMENT_CHARS` / `PREAMBLE_COMMENTS`。
+- `crates/task-core/src/transition.rs`: `Trigger::Interrupt`（`running|reviewing → ready`、attempts 据え置き、
+  reason `comment`）と `Trigger::Reopen`（`done|failed → ready`、attempts 0）、`Trigger::reason()`。
+  **網羅テストを 12 トリガ → 14 トリガに拡張**（`4 × 8 × 14`）。
+- `crates/task-core/src/store.rs`: `SCHEMA_VERSION = 13`、`ListFilter` に `labels` / `categories` /
+  `milestone_id` / `tiers` / `priorities` / `text_includes_comments`、`filter_predicate` の追加述語
+  （ラベルは `json_each(labels_json)` の AND、tier は `json_extract(json,'$.worker_hint.tier')`、
+  `q` は `EXISTS (task_comments)` を OR に足す）、`insert_tx` が新しい 2 列を書く、
+  **`update_task_tx`**（編集の書き戻し。絞り込みの列を全部書き直す）、
+  `TaskStore::{update_task, comment_add, comments_for}`。
+- `crates/task-core/src/plan.rs`: `NewTask.category` / `NewTask.labels`（ADR-0044 D3。規則に合わない
+  ラベルは**落とす**。計画 run は失敗させない）と `materialize` の写し。
+- `crates/task-ops/src/comment.rs`（新）: **人のコメントの効き方の表**（`post_human_comment`）、
+  `post_node_comment`、`list_comments`、`reopen`、`interrupting_comment`、`INTERRUPTED_OUTCOME`。
+- `crates/task-ops/src/edit.rs`（新）: `TaskEdit` / `EditResult` / `edit_task`（終端は 409、
+  `running`/`reviewing` は受け付けて次の run から効く、変わった項目だけ `fields` に積む）。
+- `crates/task-ops/src/add.rs`: `NewTaskSpec` に `labels` / `category` / `status`、`priority` を
+  `Option<PriorityInput>`（`"P1"` でも `20` でも書ける）に。
+- `crates/task-ops/src/view.rs`: `TaskSummary` に `labels` / `category` / `priority_label` /
+  `project_id` / `milestone_id`、`TaskDetail` に `priority_label`、`Action::{Edit, Reopen}`、
+  `RunOutcomeKind::Interrupted`。
+- `crates/task-worker/src/protocol.rs`: `WorkerMessage::Comment{body}`、`RunContext` に
+  `comments` / `interrupt` / `comments_enabled`、`CommentContext`。
+- `crates/task-worker/src/adapter.rs` / `subprocess.rs`: `EventSink::comment`（既定 no-op）と
+  `{"type":"comment"}` の写し。
+- `crates/task-worker/src/preamble.rs`: **前置きの先頭**に「コメント」節（割り込みが 1 行目、
+  続けてコメントの糸）と、`comments_enabled` の run にだけ出る「コメントの書き方」。
+  コメントが 1 件も無い run の前置きは Phase 52 までと**バイト単位で同じ**。
+- `crates/task-dispatch/src/dispatcher.rs`: `RunExtras` に `comments` / `interrupt`（決定的に引くだけ）、
+  `StoreSink::comment`（`author_kind = node`、`author = task.assignee`、`run_id` 付き）。
+- `crates/task-api/`: `types.rs` に区切り付きブロック（`CommentBody` / `CommentList` / `ReopenBody` /
+  `Timeline` / `TimelineItem`）、`timeline.rs`（新）、`handlers.rs` に
+  `PATCH /tasks/{id}` / `GET,POST /tasks/{id}/comments` / `POST /tasks/{id}/reopen` と
+  `GET /tasks` の新しいフィルタ、`POST /tasks` の `status` 既定 `ready`、`releases.rs` に
+  `ReleaseSource::branch_commits`（既定は空）、`schema.rs` に 6 型、`query.rs` に `edited`、
+  `stats.rs` に `interrupted`。
+- `crates/taskd/src/releases.rs`: `branch_commits` の実装（`rev-list --max-count=500 <base>..<branch>` を
+  上限 5 秒で。git を起こすのは taskd 側だけ）。
+- `scripts/live-check-phase53.sh`（新）: 実機確認（下記）。
+- 文書: `docs/gui/api.md`（一覧 56 → **61**、§3.3 のフィルタ表、§3.4 の既定、**§3.68〜3.72**、
+  §5.2 / §5.4、§6.2 の型）、`gui/docs/taskd-api-v1.md`（`scripts/sync-gui-docs.sh`）、
+  `docs/protocol/worker-protocol.md`（冒頭の履歴、§1、§3.1 の表と前置きの順、**§4.7 `comment`**、
+  §5 の終了規則、§6、§7 の手書きスキーマ）、`docs/protocol/worker-protocol.schema.json`、
+  `docs/protocol/plan-output.schema.json`、`docs/api/v1/api-v1.schema.json`、
+  `docs/api/v1/event.schema.json`（いずれも `UPDATE_SCHEMA=1` で再生成）。
+  `config/taskd.example.toml` は**変更なし**（B1 は設定キーを増やさない）。
+
+### 証拠（taskd 側）
+
+- `cargo test --workspace` → exit 0、`grep -c "^test result: FAILED"` = **0**、**1242 passed / 2 ignored**
+  （Phase 51 の 1207 から +35）。足したのは:
+  - task-core: 遷移の `interrupt_keeps_attempts_and_reopen_resets_them`、`comment.rs` の 2 件、
+    store の `migration_0013_…` / `comments_round_trip_…` / `update_task_rewrites_…` /
+    `list_page_filters_by_label_category_tier_priority_and_comment_text` /
+    `fts5_availability_of_the_bundled_sqlite_is_recorded`
+  - task-ops: `comment::tests`（効き方の表・reopen・ワーカーのコメント・割り込みの寿命）4 件、
+    `edit::tests` 4 件
+  - task-worker: `subprocess::a_comment_line_is_passed_to_the_sink_and_does_not_end_the_run`、
+    `preamble::comments_come_first_and_the_interruption_is_the_very_first_line`
+  - task-dispatch: `a_human_comment_interrupts_the_running_run_and_the_next_run_carries_it`、
+    `a_worker_comment_is_recorded_as_a_node_comment_without_touching_the_state`
+  - task-api: `tests/task_management.rs` 8 件（PATCH の成功・検証・409、コメントの効き方の表と
+    検証・認証、`reopen`、フィルタ、タイムラインの併合と時刻順、タイムラインのリリース）と
+    `timeline` の並びのテスト 2 件（安定ソート / 小数秒）
+  - 監査への対応で足したもの: `replay_follows_reopen_back_to_zero_attempts`、
+    `an_edit_never_overwrites_the_status_attempts_or_lease`、`depends_on_cannot_create_a_cycle`、
+    `a_role_outside_the_tasks_genre_is_rejected`、
+    `a_requeue_or_a_lease_expiry_does_not_consume_the_interruption`、
+    `fractional_seconds_do_not_reverse_the_order`
+- `cargo clippy --workspace --all-targets -- -D warnings` → exit 0（警告ゼロ）。
+- 既存テストで**意図して直したもの**（ADR-0044 D1 で挙動が変わったところ）:
+  `crates/task-api/tests/operations.rs`（`POST /tasks` は `ready`、`status: "draft"` の明示、
+  `status: "running"` は 422）、`crates/task-api/tests/organization.rs`、
+  `tests/e2e/tests/api_scenarios.rs`（approve を挟まない・`draft` を明示）、
+  `crates/task-ops/src/view.rs` の `task_detail_terminal_task_has_no_worker_run_hint`
+  （`done` には `reopen` が付く）。
+
+### 実機（ADR-0044 §4 B1「走っている run に人がコメントし、run が止まって次の run の前置きにコメントが載る」）
+
+`bash scripts/live-check-phase53.sh` → **exit 0**。本番（`~/taskd/`、7710/7700、systemd）には触れていない
+（DB も設定も `mktemp -d` の下、API は **127.0.0.1:7719**、ワーカーは `fake`＝LLM を呼ばない）。
+
+```
+== start taskd on 127.0.0.1:7719 (本番ではない) ==
+{"api_version":"1","schema_version":13,…,"mode":"normal","role":"active"}
+== 1. 人がタスクを作る（ADR-0044 D1: status は ready）==
+{"id":"01M2X8MC0TAB7K08G64BTZCGN2",…,"status":"ready","priority":20,…}
+== 3. 人がコメントする（ADR-0044 D2: running → 割り込み）==
+{"comment":{…,"author_kind":"human","body":"方針を変えたい。まず設計を書いて",…},
+ "effect":"interrupted",
+ "transition":{"from":"running","to":"ready","reason":"comment","cascaded":[]},"can_reopen":false}
+== 4. 走っていた run が止まり、次の run の前置きに割り込みが載る ==
+interrupt: 方針を変えたい。まず設計を書いて
+comments: [{"author_kind": "human", "body": "方針を変えたい。まず設計を書いて", "at": "…"}]
+comments_enabled: True
+== 5. イベントとコメントとタイムライン ==
+('created','') ('transitioned','dispatch') ('worker_started','') ('worker_progress','')
+('transitioned','comment') ('worker_finished','interrupted: comment')
+('transitioned','dispatch') ('worker_started','') ('worker_progress','')
+('transitioned','worker_done') ('worker_finished','done: fake done')
+('transitioned','review_pass') ('review_verdict',…)
+  コメント 2 件: human（人の割り込み）と node（2 回目の run が書いた `{"type":"comment"}`、run_id 付き）
+  timeline kinds: event×4, comment, event×5, comment, event×4（`at` の昇順）
+== 6. 終端での 409、再開（reopen）、編集（PATCH）==
+終端: done
+PATCH on done -> 409 ({"code":"invalid_transition",…"task 01M2X8… (status=Done) cannot be edited…"})
+done -> ready reopen
+['title', 'priority', 'labels']
+== 7. フィルタ ==
+total: 1 P0                      # ?label=live-check&label=urgent&category=ops&priority=P0
+q(コメント本文) total: 1          # ?q=割り込みを読んだ（ワーカーが書いたコメントに当たる）
+OK: Phase 53 の実機確認（fake アダプタ、127.0.0.1:7719、本番には触れていない）
+```
+
+### GUI（`gui/`。ADR-0044 D1/D2/D4/D5 の画面）
+
+- **タスク画面のタブ**（`gui/app/routes/tasks.$id.tsx`）: **概要 / タイムライン / 変更 / ファイル / 成果物**
+  （`?tab=` で切り替え。リンクできる）。
+  - 概要: 従来の中身 + **編集フォーム**（題名・目的・tier のプルダウン・優先度 P0〜P3・ラベルのチップ・
+    種類・担当（`GET /org` のノード）・途中目標・依存）→ `PATCH /tasks/{id}`。変わった項目
+    （応答の `fields`）を flash に出す。
+  - タイムライン: `GET /tasks/{id}/timeline` を 1 本で描き、**下にコメント入力**、終端のタスクには
+    **「再開」**。`effect` に応じて「走っていた run を止めて ready に戻しました」等を出し分ける。
+    従来の生のイベント一覧（`types` の絞り込み付き）は `<details data-testid="raw-events">` として
+    この下に残した（既存の e2e が見ているため）。
+  - 変更 / ファイル: **差し替えるだけの stub**（`gui/app/components/task-changes.tsx` /
+    `task-files.tsx`。マウント点は 1 行で、直前に「A1 が本物を入れる」印のコメント）。
+- **ボード**（`gui/app/routes/board.tsx`、`/board?project=…`）: ADR-0044 D4 の 6 列
+  （待ち / 進行中 / 止まっている / 完了 / 失敗 / 中止）。カードに題名・担当・tier・優先度・ラベル・種類・
+  途中目標。フィルタ欄はクエリパラメータに束縛（URL が状態）。カード上で優先度・tier・担当を
+  `useFetcher` → `PATCH` で変えられる。列の中は優先度降順 → 作成の古い順。ナビに「ボード」。
+- **「タスクを追加」**: 案件画面と各途中目標カード（`project_id` / `milestone_id` を埋めて `POST /tasks`）。
+- **表示名を Celeris に**（`root.tsx` の見出しとフッタ、`help.tsx`、21 のルートの `meta` の `<title>`）。
+  `package.json` の `name`・`healthz` の `name`・`TASKD_GUI_RELEASE`・unit 名は**そのまま**。
+- 純粋関数は `gui/app/lib/board.ts`（優先度の写像・列分け・フィルタの解析と組み立て）、
+  表示文字列は `gui/app/lib/labels.ts`。API 呼び出しは `gui/app/taskd/tasks-admin.server.ts`。
+
+**証拠（`gui/` で実行）**:
+
+| コマンド | exit | 要点 |
+|---|---|---|
+| `pnpm lint` | 0 | `Checked 182 files … No fixes applied.` |
+| `pnpm typecheck` | 0 | 出力なし（`react-router typegen && tsc -b`） |
+| `pnpm test` | 0 | **Test Files 48 passed (48) / Tests 620 passed (620)**（Phase 52 から +61） |
+| `pnpm build` | 0 | client `✓ built in 777ms` / ssr も成功 |
+| `pnpm gen:types` | 0 | 生成し直しても `app/taskd/types.ts` は**バイト一致**（`diff` が 0） |
+
+`pnpm e2e` は回していない（実 taskd のビルドとポートが要り、この Phase の他の工事とぶつかるため）。
+タブ化で `event-item` がタイムラインへ、`artifact-item` が成果物へ移ったので、`gui/e2e/g1.spec.ts` /
+`g3.spec.ts` の `page.goto` に `?tab=timeline` / `?tab=artifacts` を足し、`g5*.spec.ts` のフッタの
+表示名を Celeris に直した（**未実行**。次に e2e を回す Phase で確かめること）。
+
+`gui/docs/PROGRESS.md` にも **`## Phase G16`** の節を足した（GUI 側の受け入れ条件と証跡）。
+
+GUI 側の判断（ADR には書いていない）:
+- ボードは既定で**裏方タスクを隠す**（`TaskSummary.support` を見るだけ。「裏方も表示」で出る）。
+  `/tasks` と同じ流儀で、API には送らない表示だけの絞り込み。
+- ラベルの検査は**入力の補助だけ**（`[a-z0-9-]` でない値と 9 個目を止める）。正は taskd で、
+  422 の文面はそのまま出す（`gui/CLAUDE.md`「taskd API の仕様外の挙動に頼らない」）。
+- `labels` / `depends_on` は空の hidden input を必ず 1 つ出し、「空にする」と「触らない」を区別する。
+- `Action` に `edit` / `reopen` が増えたことで `applyTransition` の網羅 switch が壊れたので、
+  `gui/app/taskd/actions.server.ts` の `GateAction` から 2 つを除いた（`tsc` が検出した）。
+
+
+### 監査（実装者とは別の文脈で Rust 側を読ませた。ADR-0044 B1 と ADR-0002/0021/0033/0034/0041 に対して）
+
+18 件の指摘のうち **13 件を直し**、2 件は文書で明示、3 件は提案に回した。直したもの:
+
+- **blocker: `reopen` が `taskctl replay` を永久に壊す**（`crates/task-ops/src/replay.rs`）。
+  `replay_status_and_attempts` は `attempts` を**増やす**理由しか知らず、`reopen`（0 に戻す唯一の
+  トリガ）を知らなかった。再開したタスクは以後ずっと `attempts: replayed=N stored=0` の不一致として
+  報告され、ADR-0004 D6 の不変条件の検査が狼少年になる。→ `reason == "reopen"` で 0 に畳む。
+  テスト `replay_follows_reopen_back_to_zero_attempts`（失敗 → 再開 → `replay` の不一致ゼロ）。
+- **blocker: 編集がトランザクションの外で read-modify-write していた**（`store.rs` の `update_task`）。
+  `update_task_tx` は `json` 全体（`status` / `attempts` / `lease` を含む）を、**tx が開く前に読んだ**
+  `Task` から書き直す一方で `status` 列とリース列は書かない。編集フォームを開いている間に
+  ディスパッチャが `acquire_lease` を通すと、`json` は `ready`/`lease:null`、`status` 列は `running` に
+  なって**食い違い**、そのタスクは二度と dispatch されず（`ready_tasks` は列を見る）、走っている run の
+  結果も捨てられ（`on_worker_finished` は json を見る）、リース回収も効かない — **誰にも見えずに死ぬ**。
+  → `update_task` が tx の中で行を読み直し、`status` / `attempts` / `lease` は**読み直した値**で書く
+  （`acquire_lease` / `release_lease` と同じ規律）。書いた結果の `Task` を返す。
+  テスト `an_edit_never_overwrites_the_status_attempts_or_lease`。
+- **`reviewing` の割り込みが 1 つ前の run の記録を壊していた**。`last_run_id` は最後のワーカー run を
+  返すが、`reviewing` のタスクではその run は既に `done: …` で終わっている。そこに
+  `WorkerFinished{interrupted}` を重ねると `GET /tasks/{id}/runs` でその run が `interrupted` になり、
+  `usage`（トークン数）が消える。→ **リースの `worker_run_id`** にだけ付ける（`reviewing` は
+  リースが無いので何も足さない。遷移は残る）。
+- **requeue / lease_expired が割り込みを食べていた**。「割り込み以外の `WorkerFinished`」を消化と
+  みなしていたので、割り込みの次の run がレート制限で requeue（ADR-0010 P-21: モデルは前置きを
+  見ていない）されただけで、B1 の受け入れ文「次の run の前置きの先頭に載る」が消えた。
+  → `requeue: ` と `lease_expired` を除外（`consumes_interrupt`）。テストあり。
+- **`blocked` へのコメントが 2 トランザクションだった**。`comment_add` の後に `gate::answer` を呼ぶので、
+  間に状態が動くと「コメントだけ残って回答が消える」。→ `Event::Answered` を組んで
+  `comment_add(.., Some((Trigger::Answer, ..)))` の 1 トランザクションにし、認可の後始末だけ後から。
+- **`PATCH depends_on` で依存の循環が作れた**（作成時は新しい id なので構造上作れない）。循環した 2 件は
+  `ready_tasks` が永久に返さず、エラーも通知も出ない。→ 到達可能性の探索で拒否。テストあり。
+- **`PATCH role` が `genre` と食い違う組み合わせを書けた**（作成時は 422）。→ 同じ検証を入れた
+  （`edit_task` に `genres` を渡す）。`tier` / 予算の**再解決はしない**ことを §3.68 に明示した。
+- **タイムラインが報告を取りこぼしていた**。`report_list` の `LIMIT 1000` は SQL 側、`task_id` の
+  絞り込みは Rust 側だったので、案件に属さないタスクでは DB 全体の新しい 1000 件に押し出されて
+  自分の報告が消えた。→ `ReportFilter.task_id` を足して SQL で絞る。
+- **`worktree.json` の `base` が空のとき、ブランチの歴史すべてを「このタスクの変更」にしていた**
+  （`rev-list <branch>` は `main` の分も返す）。→ `base` が無ければ何も出さない。
+- **タイムラインが無制限だった**（`event_rows_for(.., usize::MAX)`）。→ 新しい方から 2,000 件。
+  併せて `release_items` に既に読んだ `Task` を渡し、1 回分の `store.get` を減らした。
+- **`at` を文字列で比べていた**。`created_at` には小数秒が付くので `…00.5Z` が `…00Z` より前に来る。
+  → `OffsetDateTime` で比べる（解析できないものは最古扱い）。テストあり。
+- **計画の出力のラベルの取りこぼしで重複が残った**（正常系は畳むのに、規則違反を落とす経路は畳まない）。
+- **`CommentContext.at` が書式化に失敗すると空文字**になり得た → `to_string()` に倒す。
+- **`retry` が元のラベル・種類を捨てていた**（機械的な追加のときに `Vec::new()` を入れてしまった）。
+  `conversation.rs` の struct-update でも同じ取りこぼしがあり、どちらも直した。
+
+文書だけ直したもの:
+
+- **割り込みの止め方**は ADR-0044 D2 の「SIGTERM → `kill_grace_secs`」に**なっていない**。実体は
+  `cancel` と同じ `JoinHandle::abort()` → tokio の `kill_on_drop`（= **子プロセスにだけ SIGKILL**、
+  猶予なし、孫は残る）。`crates/task-ops/src/comment.rs` の頭・`docs/protocol/worker-protocol.md` §5・
+  本節の記述をすべて実際に合わせた（提案 P-53a）。併せて、**打ち切った tick では同じタスクを
+  dispatch し直さない**ようにした（`Dispatcher::just_aborted`。同じ worktree に 2 つの書き手を
+  入れないため）。
+- **前置きは Phase 52 とバイト単位で同じではない**。`comments_enabled` が仕事の run すべてで真なので、
+  「コメントの書き方」の節が必ず入る（意図どおり。`protocol.rs` の説明が間違っていた）。
+  バイト単位で同じなのはレビュー run と対話 run だけ。
+
+提案に回したもの: P-53a（止め方の統一）、P-53d（`answer` / `cancel` / `retry` / `POST /tasks` の
+認証を `PATCH` / コメント / `reopen` と揃えるか）、割り込み後に人が書き足したコメントの扱い
+（いまは最新の人のコメントを「割り込み」として先頭に出す。`preamble.rs` に明記）。
+
+### ADR-0043 A1 とのマージ（この枝を統合する人への申し送り）
+
+同じファイルを両方の枝が触っている。衝突するのは次の 5 か所で、**どれも「両方を残す」で解ける**:
+
+1. `crates/task-core/migrations/0012_project_repos.sql` — **A1 側を採る**（この枝のものは空の場所取り）。
+   `SCHEMA_VERSION` はこの枝の **13** のままでよい（A1 が 12、この枝が 13）。
+2. `crates/task-core/src/model.rs` の `Task` — この枝は `assignee` の直後に区切りコメント付きで
+   `labels` / `category` を足した。A1 の `repos` はそのブロックの**外**に足す。
+   **`Task` の struct literal 47 か所**（テスト・fixture を含む）にも同じ行が入っているので、
+   A1 の `repos` を足す機械的な置換とぶつかる。どちらも「行を足すだけ」なので両方残す。
+3. `crates/task-core/src/store.rs` — `ListFilter` / `filter_predicate` / `insert_tx` /
+   `TaskStore` のメソッド一覧。この枝の追加は `// ---- ADR-0044 … ----` で囲ってある。
+4. `crates/task-dispatch/src/dispatcher.rs` — `RunExtras` の末尾 2 フィールドと `StoreSink::comment`。
+5. `crates/task-api/src/types.rs` / `handlers.rs`（ルータ）/ `schema.rs` — この枝の追加は
+   `// ========== ADR-0044 … ==========` で囲ってある。ルータは `/tasks/{id}` に `.patch(patch_task)` を
+   足しているので、A1 が同じ行を触るなら両方を合成する。
+
+統合後は `UPDATE_SCHEMA=1 cargo test -p task-core -p task-api -p task-worker` でスキーマを
+再生成し直し、`gui/` 側で `pnpm gen:types` と `bash scripts/sync-gui-docs.sh` を回すこと。
+
+### 未解決
+
+- **ADR-0044 D2 の「SIGTERM → `kill_grace_secs`」**は cancel と同じ経路（`handle.abort()` →
+  `kill_on_drop`）に相乗りしている。`kill_on_drop` は**子プロセスにだけ SIGKILL**（猶予なし、孫は
+  残る）なので、ADR の文面どおりではない。**cancel も Phase 3 から同じ**なので Phase 53 では
+  仕組みは変えず、文書を実際に合わせ、「打ち切った tick では同じタスクを dispatch し直さない」
+  （`just_aborted`）だけ足した。統一は提案 P-53a。
+- タイムラインの **`release`** は `worktree.json` の `base..branch` を `git rev-list` で引く。
+  本番では `[selfdeploy]` が設定されている taskd でしか出ない（設定が無ければ何も出さない）。
+  実機では確認していない（この Phase の実機は `[selfdeploy]` 無しの一時 taskd）。
+- ADR-0044 **B2（D6: 中止・一時停止・アーカイブ）と B3（D7: 文書）**は未着手。
+
+### 提案
+
+- **P-53a**: 走っている run の止め方を 1 か所に集める（`cancel` / `Interrupt` / タイムアウトで
+  「SIGTERM → `kill_grace_secs` → SIGKILL」を必ず通す）。いまは `abort_stale_runs` の
+  `handle.abort()` → `kill_on_drop`（SIGKILL）なので、ワーカーが後始末（一時ファイル・子プロセス）を
+  する隙が無い。ADR-0044 D2 の文面に合わせるなら、ディスパッチャが run のハンドルと一緒に
+  「プロセスグループ id」を持ち、abort の前に `SIGTERM` を送るのが素直。
+- **P-53b**: `docs/gui/api.md` の「§5.4 可能な操作」に `edit` / `reopen` を足したが、`Action` は
+  **GUI がボタンを出すかどうか**にしか使われていない。`comment` はどの状態でも出せるので `Action` には
+  足していない。この非対称は GUI 側の判断に委ねた（ADR には書いていない）。
+- **P-53c**: ADR-0044 D4 の「FTS5」は日本語では使えない（上の「決めたこと」参照）。ADR を直すなら
+  「全文検索は `LIKE`。将来 `fts5` + `icu` か `trigram` トークナイザを使うときは別 ADR」にしたい。
+- **P-53d**: 変更系の認証が揃っていない。`PATCH /tasks/{id}` / コメント / `reopen` は**管理系**
+  （トークン必須）にしたが、同じことをする `POST /tasks/{id}/answer`・`cancel`・`retry`・`POST /tasks`
+  は通常の認証だけ（ADR-0044 D1 は `POST /tasks` を「管理系」と書いているのに、Phase 23 からそうなって
+  いない）。`blocked` のタスクにコメントすると `answer` と**同じ状態変化**が起きるのに、片方だけ
+  トークンが要る。どちらかに揃えるべき（揃えると GUI の既存の操作にトークンが要るようになるので、
+  人の判断が要る）。
+- **P-53e**: `PATCH` で `assignee` / `role` を変えても `tier` / `adapter` / 予算は**再解決しない**
+  （ADR-0033 D2 の解決順は作成時に 1 回だけ効く）。GUI の編集フォームは担当と tier を並べて出すので、
+  人は「担当を変えたら既定も付いてくる」と思うかもしれない。再解決するなら「人が明示した値は守る」
+  規則（この PATCH で書いた項目か、過去に書いた項目か）を決める必要があり、`Task` に「どの項目を
+  人が明示したか」を持たせることになる。別 ADR にしたい。
+
 ## Phase 51 — 検証に煙試験（ADR-0041 D5。2026-09-19）
 
 - 完了日: 2026-09-19

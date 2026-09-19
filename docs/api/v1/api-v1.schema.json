@@ -461,6 +461,16 @@
           "const": "retry",
           "description": "Phase 31（実機の事故、2026-09-18）: `failed`/`cancelled` を複製してやり直す（`POST /tasks/{id}/retry`）。",
           "type": "string"
+        },
+        {
+          "const": "edit",
+          "description": "ADR-0044 D1（Phase 53）: 人が編集できる（`PATCH /tasks/{id}`。終端でないタスクだけ）。",
+          "type": "string"
+        },
+        {
+          "const": "reopen",
+          "description": "ADR-0044 D2（Phase 53）: 終端のタスクを同じ worktree のまま再開する（`POST /tasks/{id}/reopen`。\n`done` / `failed` だけ。`cancelled` は worktree を消してあるので `Retry` を使う）。",
+          "type": "string"
         }
       ]
     },
@@ -1402,6 +1412,115 @@
       ],
       "type": "object"
     },
+    "CommentAuthorKind": {
+      "description": "誰が書いたか（`task_comments.author_kind` の CHECK と対）。",
+      "oneOf": [
+        {
+          "const": "human",
+          "description": "人（GUI の `POST /tasks/{id}/comments`）。担当をすぐ起こす（ADR-0044 D2 の表）。",
+          "type": "string"
+        },
+        {
+          "const": "node",
+          "description": "組織の「人」（ワーカーの `{\"type\":\"comment\"}` 行、または秘書・lead が委譲先に書いたもの）。",
+          "type": "string"
+        },
+        {
+          "const": "system",
+          "description": "taskd 自身（決定的な記録）。",
+          "type": "string"
+        }
+      ]
+    },
+    "CommentBody": {
+      "additionalProperties": false,
+      "description": "`POST /tasks/{id}/comments` の本文（人のコメント。ADR-0044 D2）。",
+      "properties": {
+        "body": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "type": "object"
+    },
+    "CommentEffect": {
+      "description": "人のコメントが何を起こしたか（ADR-0044 D2 の表）。",
+      "oneOf": [
+        {
+          "const": "stored",
+          "description": "記録しただけ（`ready` / `draft`）。",
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "description": "走っていた run を止めて `ready` に戻した（`running` / `reviewing`）。",
+          "type": "string"
+        },
+        {
+          "const": "answered",
+          "description": "質問への回答として渡した（`blocked`）。",
+          "type": "string"
+        },
+        {
+          "const": "terminal",
+          "description": "終端なので記録しただけ。GUI は「再開」を出せる（`done` / `failed`。`cancelled` は再開できない）。",
+          "type": "string"
+        }
+      ]
+    },
+    "CommentId": {
+      "description": "コメントの一意識別子（ULID）。",
+      "type": "string"
+    },
+    "CommentList": {
+      "description": "`GET /tasks/{id}/comments` の応答（古い順）。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/TaskComment"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "CommentResult": {
+      "description": "`POST /tasks/{id}/comments` の結果。",
+      "properties": {
+        "can_reopen": {
+          "description": "`Terminal` のとき、`POST /tasks/{id}/reopen` が使えるか（`cancelled` は `false`）。",
+          "type": "boolean"
+        },
+        "comment": {
+          "$ref": "#/$defs/TaskComment"
+        },
+        "effect": {
+          "$ref": "#/$defs/CommentEffect"
+        },
+        "transition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TransitionResult"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "状態が動いたときだけ（`Interrupted` / `Answered`）。"
+        }
+      },
+      "required": [
+        "comment",
+        "effect",
+        "can_reopen"
+      ],
+      "type": "object"
+    },
     "ConfigView": {
       "description": "`GET /config`: `taskd.toml` の要約。env の値・トークンは含めない。taskd が起動時に作る。",
       "properties": {
@@ -2099,6 +2218,26 @@
       ],
       "type": "object"
     },
+    "EditResult": {
+      "description": "`PATCH /tasks/{id}` の結果。",
+      "properties": {
+        "fields": {
+          "description": "実際に変えた項目の名前（決定的な並び。何も変わらなければ空）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "task": {
+          "$ref": "#/$defs/Task"
+        }
+      },
+      "required": [
+        "task",
+        "fields"
+      ],
+      "type": "object"
+    },
     "Event": {
       "description": "DESIGN §4.3 の `Event`（追記専用）。ADR-0002 D2: `Transitioned` は遷移の\n*結果* を記録するものであり、`transition()` の入力（`Trigger`）とは別物。\n`JsonSchema` は ADR-0013 D8: `docs/api/v1/event.schema.json`（`EventRow` 経由）の契約に使う。",
       "oneOf": [
@@ -2481,6 +2620,30 @@
           "required": [
             "type",
             "from"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0044 D1（Phase 53）: 人がタスクを編集した（`PATCH /tasks/{id}`）。`fields` は変えた項目の名前\n（`title` / `priority` / `labels` …。並びは決定的）、`by` は `\"human\"`。状態は変えない\n（`replay` は無視する）。",
+          "properties": {
+            "by": {
+              "type": "string"
+            },
+            "fields": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "edited",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "fields",
+            "by"
           ],
           "type": "object"
         }
@@ -3442,6 +3605,18 @@
             "null"
           ]
         },
+        "category": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskCategory"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ADR-0044 D3: 種類。省略時は `other`。"
+        },
         "cluster": {
           "default": null,
           "description": "ADR-0018: 指定すると `WorkspaceSpec::Remote{cluster, path}` になり、コマンドはそのクラスタで実行される。\n`workspace` がクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。",
@@ -3468,6 +3643,14 @@
         "kind": {
           "$ref": "#/$defs/TaskKind",
           "default": "execute"
+        },
+        "labels": {
+          "default": [],
+          "description": "ADR-0044 D3: ラベル（小文字 `[a-z0-9-]`、最大 8 個）。省略時は無し。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "max_retries": {
           "default": 2,
@@ -3522,9 +3705,16 @@
           "default": null
         },
         "priority": {
-          "default": 0,
-          "format": "int32",
-          "type": "integer"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PriorityInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ADR-0044 D3: `\"P1\"` のようなラベルでも `20` のような整数でも書ける。**省略時は P2**\n（= `task_core::DEFAULT_PRIORITY` = 10）。`taskctl add` は `--priority` の既定 0 を明示して渡すので\n従来どおり。"
         },
         "project_id": {
           "anyOf": [
@@ -3545,6 +3735,18 @@
             "string",
             "null"
           ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Status"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ADR-0044 D1: 初期状態。`draft` か `ready` だけ（それ以外は 422）。**省略時は呼び出し側の既定**\n（`taskctl add` と委譲・計画の経路は従来どおり `draft`、`POST /tasks` は `ready`。人は Go を出す\n側なので draft を挟まない）。`kind = approval` は従来どおり常に `ready`。"
         },
         "tier": {
           "anyOf": [
@@ -3919,6 +4121,30 @@
         }
       },
       "type": "object"
+    },
+    "PriorityInput": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PriorityLabel",
+          "description": "`\"P0\"` 〜 `\"P3\"`。"
+        },
+        {
+          "description": "生の `i32`（大きいほど先。従来どおり）。",
+          "format": "int32",
+          "type": "integer"
+        }
+      ],
+      "description": "ADR-0044 D3: `priority` の入力。`\"P1\"` のようなラベルでも整数でも書ける（API は `priority_label` を\n返すので、GUI はラベルだけを扱えばよい。`i32` は互換のため残す）。"
+    },
+    "PriorityLabel": {
+      "description": "ADR-0044 D3 の優先度のラベル。P0 = 30 / P1 = 20 / P2 = 10 / P3 = 0（`task_core::PRIORITY_LABELS`）。",
+      "enum": [
+        "P0",
+        "P1",
+        "P2",
+        "P3"
+      ],
+      "type": "string"
     },
     "Problem": {
       "additionalProperties": true,
@@ -4943,6 +5169,24 @@
       ],
       "type": "object"
     },
+    "ReopenBody": {
+      "additionalProperties": false,
+      "description": "`POST /tasks/{id}/reopen` の本文。",
+      "properties": {
+        "expected_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Status"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "type": "object"
+    },
     "ReplayMismatch": {
       "description": "`replay` が検出した 1 件の食い違い。",
       "properties": {
@@ -5379,14 +5623,23 @@
       "type": "object"
     },
     "RunOutcomeKind": {
-      "enum": [
-        "done",
-        "question",
-        "error",
-        "requeue",
-        "lease_expired"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "done",
+            "question",
+            "error",
+            "requeue",
+            "lease_expired"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "description": "ADR-0044 D2/D8（Phase 53）: 人のコメントで止めた run（`interrupted: comment`）。\n**失敗ではない**ので `bad_news` にも `error_cooldown` にも数えない。",
+          "type": "string"
+        }
+      ]
     },
     "RunRole": {
       "description": "run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。",
@@ -5774,6 +6027,10 @@
         "budget": {
           "$ref": "#/$defs/Budget"
         },
+        "category": {
+          "$ref": "#/$defs/TaskCategory",
+          "description": "ADR-0044 D3: 種類（既定 `other`）。導入前のタスクには無いので既定で埋まる。"
+        },
         "conversation": {
           "anyOf": [
             {
@@ -5812,6 +6069,13 @@
         },
         "kind": {
           "$ref": "#/$defs/TaskKind"
+        },
+        "labels": {
+          "description": "ADR-0044 D3: 自由なラベル（小文字・`[a-z0-9-]`・最大 8 個）。導入前のタスクには無いので既定は空。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "lease": {
           "anyOf": [
@@ -5904,6 +6168,60 @@
       ],
       "type": "object"
     },
+    "TaskCategory": {
+      "description": "ADR-0044 D3: タスクの種類。既定は `Other`。状態機械は見ない（人とボードのための分類）。",
+      "enum": [
+        "feature",
+        "bug",
+        "research",
+        "ops",
+        "docs",
+        "other"
+      ],
+      "type": "string"
+    },
+    "TaskComment": {
+      "description": "`task_comments` の 1 行（ADR-0044 D2）。",
+      "properties": {
+        "author": {
+          "description": "`author_kind = node` のときの `org_nodes.id`（無ければ `null`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "author_kind": {
+          "$ref": "#/$defs/CommentAuthorKind"
+        },
+        "body": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/CommentId"
+        },
+        "run_id": {
+          "description": "ワーカーが書いたコメントの run（人のコメントには無い）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "id",
+        "task_id",
+        "author_kind",
+        "body",
+        "created_at"
+      ],
+      "type": "object"
+    },
     "TaskDetail": {
       "description": "`taskctl show --json` と `GET /api/v1/tasks/{id}` の本体。",
       "properties": {
@@ -5982,6 +6300,10 @@
           },
           "type": "array"
         },
+        "priority_label": {
+          "description": "ADR-0044 D3（Phase 53）: `task.priority` を P0〜P3 に丸めたもの（GUI の編集フォーム用）。",
+          "type": "string"
+        },
         "role": {
           "description": "ADR-0016 D1: `Task.role`（GUI の表示用に最上位にも出す）。",
           "type": [
@@ -6028,6 +6350,7 @@
       },
       "required": [
         "task",
+        "priority_label",
         "delegated",
         "timers",
         "criteria",
@@ -6040,6 +6363,154 @@
         "children",
         "actions"
       ],
+      "type": "object"
+    },
+    "TaskEdit": {
+      "additionalProperties": false,
+      "description": "`PATCH /tasks/{id}` の本文（ADR-0044 D1）。**書いた項目だけ**が変わる。\n`Option<Option<T>>` の項目は「省略 = 変えない / `null` = 消す / 値 = その値にする」。\n\nTODO(ADR-0043 D2 / A1): `repos`（案件の複数リポジトリからこのタスクが使うものを選ぶ）は\nADR-0043 A1 の枝が `Task.repos` と一緒に足す。ここに `repos: Option<Vec<String>>` を 1 行足し、\n`apply` で `task.repos` に写し、`fields` に `\"repos\"` を積めばよい。",
+      "properties": {
+        "acceptance": {
+          "description": "差し替え（部分更新はしない）。1 件以上。",
+          "items": {
+            "$ref": "#/$defs/CriterionSpec"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "adapter": {
+          "description": "`worker_hint.adapter`（`null` で外す）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "assignee": {
+          "description": "組織のノード（`null` で外す）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "category": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskCategory"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "depends_on": {
+          "description": "差し替え。存在しない・`failed`/`cancelled`・自分自身はエラー。",
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "expected_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Status"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "楽観的排他（現在の `status` と違えば 409）。"
+        },
+        "labels": {
+          "description": "ADR-0044 D3: 差し替え（小文字 `[a-z0-9-]`、最大 8 個）。",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "max_retries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_turns": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_wall_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "milestone_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "途中目標（`null` で外す）。そのタスクの案件のものであること。"
+        },
+        "objective": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PriorityInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0044 D3: `\"P1\"` でも `20` でもよい。"
+        },
+        "role": {
+          "description": "役割名（`null` で外す）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D2 の最上位「タスク」の tier 指定（`worker_hint.tier`）。"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "TaskId": {
@@ -6156,6 +6627,10 @@
             "null"
           ]
         },
+        "category": {
+          "$ref": "#/$defs/TaskCategory",
+          "description": "ADR-0044 D3 の `Task.category`。"
+        },
         "children": {
           "format": "uint32",
           "minimum": 0,
@@ -6187,6 +6662,13 @@
         "kind": {
           "$ref": "#/$defs/TaskKind"
         },
+        "labels": {
+          "description": "ADR-0044 D3 の `Task.labels`。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "lease_expires_at": {
           "type": [
             "string",
@@ -6197,6 +6679,17 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "milestone_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D2 の `Task.milestone_id`（カードに途中目標を出すため）。"
         },
         "parent_id": {
           "anyOf": [
@@ -6216,6 +6709,21 @@
         "priority": {
           "format": "int32",
           "type": "integer"
+        },
+        "priority_label": {
+          "description": "ADR-0044 D3: `priority` を P0〜P3 に丸めたもの（`i32` は互換のため残す）。",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0033 D2 の `Task.project_id`（ボードは案件で絞るので一覧にも出す）。"
         },
         "role": {
           "description": "ADR-0016 D1 の `Task.role`（GUI-R2: 一覧の各行に役割のラベルを出すため。`TaskDetail.role` と同じ値）。",
@@ -6259,7 +6767,10 @@
         "children",
         "pending_children",
         "conversation",
-        "actions"
+        "actions",
+        "labels",
+        "category",
+        "priority_label"
       ],
       "type": "object"
     },
@@ -6271,6 +6782,202 @@
         "cheap"
       ],
       "type": "string"
+    },
+    "Timeline": {
+      "description": "`GET /tasks/{id}/timeline` の応答（ADR-0044 D5）。**時刻の昇順で 1 本**。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/TimelineItem"
+          },
+          "type": "array"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "items"
+      ],
+      "type": "object"
+    },
+    "TimelineItem": {
+      "description": "タイムラインの 1 件（ADR-0044 D5）。`at` は RFC 3339。",
+      "oneOf": [
+        {
+          "description": "状態遷移・run・質問・回答・編集・割り込み（`events` の 1 行）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "event": {
+              "$ref": "#/$defs/Event"
+            },
+            "kind": {
+              "const": "event",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "seq",
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "コメント（人・組織の「人」・taskd）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "comment": {
+              "$ref": "#/$defs/TaskComment"
+            },
+            "kind": {
+              "const": "comment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "comment"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "認可（ADR-0033 D5）。`decided_at` があれば決まった時刻、無ければ聞いた時刻。",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "at": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "approval",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "approval"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "報告（ADR-0034）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "report",
+              "type": "string"
+            },
+            "report": {
+              "$ref": "#/$defs/Report"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "report"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "委譲（`Event::Delegated`。作られた子のタスク）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "delegation",
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "tasks": {
+              "items": {
+                "$ref": "#/$defs/TaskRef"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "run_id",
+            "tasks"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "リリース（ADR-0044 D5）: このタスクのブランチのコミットが入ったリリース。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "commits": {
+              "description": "そのリリースに入った、このタスクのコミット（完全な sha）。",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "release",
+              "type": "string"
+            },
+            "sha12": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "sha12",
+            "commits"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0043 D5 / A2（取り込み: merge / PR / discard）。**この Phase では作られない**\n（enum の口だけ用意しておく）。",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "at": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "integration",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "action",
+            "detail"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "Timers": {
       "properties": {
@@ -6552,6 +7259,16 @@
     "clusters": {
       "$ref": "#/$defs/Clusters"
     },
+    "comment": {
+      "$ref": "#/$defs/CommentBody",
+      "description": "ADR-0044 D2: コメント（`GET`/`POST /tasks/{id}/comments`）と再開（`POST /tasks/{id}/reopen`）。"
+    },
+    "comment_list": {
+      "$ref": "#/$defs/CommentList"
+    },
+    "comment_result": {
+      "$ref": "#/$defs/CommentResult"
+    },
     "config": {
       "$ref": "#/$defs/ConfigView"
     },
@@ -6666,6 +7383,9 @@
     "reload": {
       "$ref": "#/$defs/ReloadResult"
     },
+    "reopen": {
+      "$ref": "#/$defs/ReopenBody"
+    },
     "replay_report": {
       "$ref": "#/$defs/ReplayReport"
     },
@@ -6730,8 +7450,19 @@
     "task_detail": {
       "$ref": "#/$defs/TaskDetail"
     },
+    "task_edit": {
+      "$ref": "#/$defs/TaskEdit",
+      "description": "ADR-0044 D1: `PATCH /tasks/{id}` の本文と応答。"
+    },
+    "task_edit_result": {
+      "$ref": "#/$defs/EditResult"
+    },
     "task_list": {
       "$ref": "#/$defs/TaskList"
+    },
+    "timeline": {
+      "$ref": "#/$defs/Timeline",
+      "description": "ADR-0044 D5: `GET /tasks/{id}/timeline`。"
     },
     "transition_result": {
       "$ref": "#/$defs/TransitionResult"
@@ -6802,6 +7533,13 @@
     "notify_test",
     "releases",
     "release_promote",
+    "task_edit",
+    "task_edit_result",
+    "comment",
+    "comment_list",
+    "comment_result",
+    "reopen",
+    "timeline",
     "daemon",
     "config",
     "stream_hello",

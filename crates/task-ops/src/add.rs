@@ -46,7 +46,7 @@ pub enum CriterionSpec {
 }
 
 impl CriterionSpec {
-    fn into_criterion(self) -> Criterion {
+    pub(crate) fn into_criterion(self) -> Criterion {
         match self {
             CriterionSpec::Human { text } => Criterion {
                 text,
@@ -81,8 +81,11 @@ pub struct NewTaskSpec {
     /// 省略時は役割の既定 → `standard`（ADR-0016 D1 / M3: タスクの値 > 役割の既定 > 全体の既定）。
     #[serde(default)]
     pub tier: Option<Tier>,
+    /// ADR-0044 D3: `"P1"` のようなラベルでも `20` のような整数でも書ける。**省略時は P2**
+    /// （= `task_core::DEFAULT_PRIORITY` = 10）。`taskctl add` は `--priority` の既定 0 を明示して渡すので
+    /// 従来どおり。
     #[serde(default)]
-    pub priority: i32,
+    pub priority: Option<PriorityInput>,
     #[serde(default)]
     pub parent: Option<TaskId>,
     #[serde(default)]
@@ -125,6 +128,53 @@ pub struct NewTaskSpec {
     /// 省略時は役割の既定 → 指定なし。
     #[serde(default)]
     pub adapter: Option<String>,
+    // ---- ADR-0044 D1/D3（Phase 53）: 人が作るタスク。ここから ----
+    /// ADR-0044 D3: ラベル（小文字 `[a-z0-9-]`、最大 8 個）。省略時は無し。
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// ADR-0044 D3: 種類。省略時は `other`。
+    #[serde(default)]
+    pub category: Option<task_core::TaskCategory>,
+    /// ADR-0044 D1: 初期状態。`draft` か `ready` だけ（それ以外は 422）。**省略時は呼び出し側の既定**
+    /// （`taskctl add` と委譲・計画の経路は従来どおり `draft`、`POST /tasks` は `ready`。人は Go を出す
+    /// 側なので draft を挟まない）。`kind = approval` は従来どおり常に `ready`。
+    #[serde(default)]
+    pub status: Option<Status>,
+    // ---- ADR-0044 D1/D3（Phase 53）: ここまで ----
+}
+
+/// ADR-0044 D3: `priority` の入力。`"P1"` のようなラベルでも整数でも書ける（API は `priority_label` を
+/// 返すので、GUI はラベルだけを扱えばよい。`i32` は互換のため残す）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PriorityInput {
+    /// `"P0"` 〜 `"P3"`。
+    Label(PriorityLabel),
+    /// 生の `i32`（大きいほど先。従来どおり）。
+    Number(i32),
+}
+
+/// ADR-0044 D3 の優先度のラベル。P0 = 30 / P1 = 20 / P2 = 10 / P3 = 0（`task_core::PRIORITY_LABELS`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum PriorityLabel {
+    P0,
+    P1,
+    P2,
+    P3,
+}
+
+impl PriorityInput {
+    /// `Task.priority`（`i32`）に写す。
+    pub fn to_i32(self) -> i32 {
+        match self {
+            PriorityInput::Number(n) => n,
+            PriorityInput::Label(PriorityLabel::P0) => 30,
+            PriorityInput::Label(PriorityLabel::P1) => 20,
+            PriorityInput::Label(PriorityLabel::P2) => 10,
+            PriorityInput::Label(PriorityLabel::P3) => 0,
+        }
+    }
 }
 
 fn default_kind() -> TaskKind {
@@ -291,11 +341,30 @@ fn build_task(
         .and_then(|g| GenreSpec::find(genres, g))
         .and_then(|g| g.default_role.as_deref())
         .and_then(|r| RoleSpec::find(roles, r));
+    // ADR-0044 D1（Phase 53）: `kind = approval` は従来どおり常に `ready`。それ以外は `spec.status`
+    // （`draft` か `ready` だけ）が勝ち、省略時は従来どおり `draft`（`POST /tasks` のハンドラが
+    // 省略時に `ready` を入れる。人は Go を出す側なので draft を挟まない）。
     let status = if spec.kind == TaskKind::Approval {
         Status::Ready
     } else {
-        Status::Draft
+        match spec.status {
+            None => Status::Draft,
+            Some(s @ (Status::Draft | Status::Ready)) => s,
+            Some(other) => {
+                return Err(OpsError::Validation(format!(
+                    "status must be \"draft\" or \"ready\" when creating a task (got {other:?})"
+                )));
+            }
+        }
     };
+    // ADR-0044 D3（Phase 53）: ラベルの検証（小文字 `[a-z0-9-]`、最大 8 個、重複は畳む）。
+    let labels = task_core::normalize_labels(&spec.labels).map_err(OpsError::Validation)?;
+    let category = spec.category.unwrap_or_default();
+    // ADR-0044 D3: 省略時は P2（`taskctl add` は `--priority` の既定 0 を明示して渡す）。
+    let priority = spec
+        .priority
+        .map(PriorityInput::to_i32)
+        .unwrap_or(task_core::DEFAULT_PRIORITY);
 
     // ADR-0014 D3（P-G16）: 空白だけの title / objective と、存在しない親を拒否する（taskctl add も同じ関数を通る）。
     if spec.title.trim().is_empty() {
@@ -359,7 +428,7 @@ fn build_task(
         inputs: vec![],
         depends_on: spec.depends_on,
         status,
-        priority: spec.priority,
+        priority,
         worker_hint: WorkerHint {
             tier: spec
                 .tier
@@ -386,6 +455,8 @@ fn build_task(
         milestone_id: spec.milestone_id,
         assignee: spec.assignee,
         conversation: None,
+        labels,
+        category,
     };
     Ok(task)
 }
@@ -404,7 +475,7 @@ mod tests {
             }],
             kind: TaskKind::Execute,
             tier: None,
-            priority: 0,
+            priority: Some(PriorityInput::Number(0)),
             parent: None,
             depends_on: vec![],
             max_turns: None,
@@ -419,6 +490,9 @@ mod tests {
             workspace: Some(PathBuf::from("/tmp/workspace")),
             cluster: None,
             adapter: None,
+            labels: Vec::new(),
+            category: None,
+            status: None,
         }
     }
 

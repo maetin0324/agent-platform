@@ -86,6 +86,8 @@ fn blocked_task_with_approval(env: &TestEnv, node_id: &str, project: Option<Proj
         milestone_id: None,
         assignee: Some(node_id.to_string()),
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     };
     env.store.create_task(&task, vec![]).expect("create task");
     let approval = Approval {

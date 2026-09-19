@@ -29,8 +29,10 @@ export { formString };
  * `applyTransition`（`readTransitionForm` 経由）が扱う `intent`。Phase 31 で `Action` に加わった `retry`
  * は本文・応答の形が違う別経路（`applyRetry`）なので、ここでは意図して除く（`readIntent` は `retry` を
  * 400 として拒む。ルート側は `intent === "retry"` を先に見て `runRetryAction` に分ける）。
+ * Phase 53（ADR-0044 D1/D2）で加わった `edit`（`PATCH /tasks/{id}`）と `reopen`
+ * （`POST /tasks/{id}/reopen`）も同じ理由で除く（`~/taskd/tasks-admin.server.ts` が受け持つ）。
  */
-export type GateAction = Exclude<Action, "retry">;
+export type GateAction = Exclude<Action, "retry" | "edit" | "reopen">;
 
 export const ACTIONS: readonly GateAction[] = ["approve", "reject", "answer", "cancel"];
 const STATUSES: readonly Status[] = [

@@ -4,6 +4,8 @@
 pub mod accounts;
 pub mod approval;
 pub mod artifacts;
+/// ADR-0044 D2（Phase 53）: タスク単位のコメント。
+pub mod comment;
 pub mod delegate;
 /// ADR-0040 D4（Phase 47）: taskd のインスタンスの役割（`daemon_instances`）。
 pub mod instance;
@@ -23,15 +25,19 @@ pub use delegate::{
     DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, WorkspaceContext,
     materialize_delegated, validate_each,
 };
+pub use comment::{
+    CommentAuthorKind, CommentId, MAX_COMMENT_CHARS, PREAMBLE_COMMENTS, TaskComment,
+};
 pub use instance::{DaemonInstance, DaemonMode, InstanceRole, SharedRole};
 pub use message::{
     CONVERSATION_GENRE, Message, MessageId, MessageRole, conversation_origin, conversation_title, failure_reply,
     is_conversation, is_milestone_review, milestone_review_of,
 };
 pub use model::{
-    ArtifactRef, Budget, Check, Criterion, Event, GenreSpec, HARNESS_ADAPTERS, Lease, RoleSpec, RunRole, Status,
-    Task, TaskId, TaskKind, Tier, Usage, WorkerHint, WorkspaceMode, WorkspaceSpec, artifact_entry_description, artifact_entry_name,
-    expand_home, home_dir,
+    ArtifactRef, Budget, Check, Criterion, DEFAULT_PRIORITY, Event, GenreSpec, HARNESS_ADAPTERS, Lease, MAX_LABELS,
+    PRIORITY_LABELS, RoleSpec, RunRole, Status, Task, TaskCategory, TaskId, TaskKind, Tier, Usage, WorkerHint,
+    WorkspaceMode, WorkspaceSpec, artifact_entry_description, artifact_entry_name, expand_home, home_dir,
+    is_valid_label, normalize_labels, priority_from_label, priority_label,
 };
 pub use notify::{
     DEFAULT_WEBHOOK_SECRET_ID, MAX_NOTIFY_ATTEMPTS, Notification, NotificationId, NotificationKind,

@@ -61,6 +61,9 @@ pub fn retry_task(store: &dyn TaskStore, id: TaskId, accept: bool, now: OffsetDa
         milestone_id: original.milestone_id,
         assignee: original.assignee.clone(),
         conversation: None,
+        // ADR-0044 D3（Phase 53）: やり直したタスクは元のラベル・種類を引き継ぐ（人が付けた分類なので）。
+        labels: original.labels.clone(),
+        category: original.category,
     };
     let new_id = new_task.id;
     let rewired = store.retry_task(id, &new_task)?;
@@ -90,7 +93,7 @@ mod tests {
             acceptance: vec![crate::add::CriterionSpec::Human { text: "looks right".to_string() }],
             kind: TaskKind::Execute,
             tier: None,
-            priority: 0,
+            priority: Some(crate::add::PriorityInput::Number(0)),
             parent: None,
             depends_on: vec![],
             max_turns: None,
@@ -105,11 +108,20 @@ mod tests {
             workspace: None,
             cluster: None,
             adapter: None,
+            labels: Vec::new(),
+            category: None,
+            status: None,
         }
     }
 
     fn make_failed(store: &SqliteStore, title: &str) -> Task {
-        let task = crate::add::create_task(store, base_spec(title), now()).expect("create");
+        // ADR-0044 D3: ラベル・種類を付けてから失敗させる（やり直しが引き継ぐことを確かめるため）。
+        let spec = crate::add::NewTaskSpec {
+            labels: vec!["infra".into()],
+            category: Some(task_core::TaskCategory::Bug),
+            ..base_spec(title)
+        };
+        let task = crate::add::create_task(store, spec, now()).expect("create");
         store.apply_transition(task.id, Trigger::Accept, None).expect("accept");
         store.apply_transition(task.id, Trigger::Dispatch, None).expect("dispatch");
         let outcome = store
@@ -155,6 +167,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 
@@ -183,6 +197,9 @@ mod tests {
         assert_eq!(new_task.workspace, original.workspace);
         assert_eq!(new_task.depends_on, original.depends_on);
         assert_eq!(new_task.conversation, None);
+        // ADR-0044 D3（Phase 53）: 人が付けた分類（ラベル・種類）は引き継ぐ。
+        assert_eq!(new_task.labels, original.labels);
+        assert_eq!(new_task.category, original.category);
 
         let events: Vec<Event> = store.events_for(new_task.id).expect("events").into_iter().map(|(_, e)| e).collect();
         assert!(matches!(&events[0], Event::Created { task } if task.id == new_task.id));

@@ -329,10 +329,17 @@ esac"#,
     env.wait_api(&mut daemon);
     let ws = env.workspace("ws-q");
 
-    // 作成（taskctl add 相当）。
+    // 作成。ADR-0044 D1（Phase 53）: **人が作ったタスクは `ready`**（Go を挟まない）。
+    // `status: "draft"` を明示したときだけ従来どおり draft で止まる。
+    let drafted = env.post(
+        "/tasks",
+        json!({"title": "draft on purpose", "objective": "api", "acceptance": [{"type": "human", "text": "t"}], "status": "draft"}),
+    );
+    assert_eq!(drafted.status, 201, "{}", drafted.body);
+    assert_eq!(drafted.json()["status"], "draft");
     let created = env.post(
         "/tasks",
-        json!({"title": "ask me", "objective": "api", "acceptance": [{"type": "command", "cmd": "true"}], "workspace": ws}),
+        json!({"title": "ask me", "objective": "api", "acceptance": [{"type": "command", "cmd": "true"}], "workspace": ws, "status": "draft"}),
     );
     assert_eq!(created.status, 201, "{}", created.body);
     let task = created.json();
@@ -349,9 +356,24 @@ esac"#,
         .post("/tasks", json!({"title": "x", "objective": "y", "acceptance": human, "parent": TaskId::new().to_string()}))
         .assert_problem(422, "validation");
     assert_eq!(v["errors"][0]["field"], "parent", "{v}");
-    // ADR-0014 D2（P-G15）: q は objective も対象（最初のタスクは title "ask me"、objective "api"）。
+    // ADR-0014 D2（P-G15）: q は objective も対象（objective "api" を持つのは上で作った 2 件）。
     let found = env.get("/tasks?q=api").json();
-    assert_eq!((found["total"].as_u64(), found["items"][0]["id"].as_str()), (Some(1), Some(id.to_string().as_str())), "{found}");
+    assert_eq!(found["total"].as_u64(), Some(2), "{found}");
+    // ADR-0044 D4（Phase 53）: ラベル・種類・優先度で絞れる（AND）。
+    let labelled = env.post(
+        "/tasks",
+        json!({"title": "board card", "objective": "board", "acceptance": [{"type": "human", "text": "t"}],
+               "labels": ["infra", "urgent"], "category": "ops", "priority": "P0"}),
+    );
+    assert_eq!(labelled.status, 201, "{}", labelled.body);
+    let labelled = labelled.json();
+    assert_eq!(labelled["status"], "ready", "人が作ったタスクは ready");
+    assert_eq!(labelled["priority"], 30);
+    assert_eq!(labelled["category"], "ops");
+    let by_label = env.get("/tasks?label=infra&label=urgent&category=ops&priority=P0").json();
+    assert_eq!(by_label["total"].as_u64(), Some(1), "{by_label}");
+    assert_eq!(by_label["items"][0]["priority_label"], "P0", "{by_label}");
+    assert_eq!(env.get("/tasks?label=infra&label=nope").json()["total"].as_u64(), Some(0));
     env.post("/tasks", json!({"title": "x", "objective": "y", "acceptance": [{"type": "human", "text": "t"}], "bogus": 1}))
         .assert_problem(400, "bad_request");
 
@@ -401,8 +423,8 @@ esac"#,
     let r = env.post(&format!("/tasks/{b}/reject"), json!({"note": "no"}));
     assert_eq!((r.status, r.json()["to"].clone()), (200, json!("failed")), "{}", r.body);
 
-    // cancel は非終端だけ。
-    let draft = id_of(&env.post("/tasks", json!({"title": "c", "objective": "o", "acceptance": [{"type": "human", "text": "t"}]})).json());
+    // cancel は非終端だけ（`status: "draft"` を明示して draft のまま止めておく。ADR-0044 D1）。
+    let draft = id_of(&env.post("/tasks", json!({"title": "c", "objective": "o", "acceptance": [{"type": "human", "text": "t"}], "status": "draft"})).json());
     let r = env.post(&format!("/tasks/{draft}/cancel"), json!({"expected_status": "draft"}));
     assert_eq!((r.status, r.json()["to"].clone()), (200, json!("cancelled")), "{}", r.body);
     assert!(r.json()["cascaded"].is_array(), "{}", r.body);
@@ -649,10 +671,10 @@ fn writes_from_taskctl_and_api_while_taskd_ticks_fast_never_hit_database_is_lock
                 json!({"title": format!("api {i}"), "objective": "o", "acceptance": [{"type": "command", "cmd": "true"}], "workspace": ws}),
             );
             assert_eq!(r.status, 201, "{}", r.body);
-            let id = id_of(&r.json());
-            let r = env.post(&format!("/tasks/{id}/approve"), json!({}));
-            assert_eq!(r.status, 200, "{}", r.body);
-            ids.push(id);
+            // ADR-0044 D1（Phase 53）: `POST /tasks` は `ready` で作るので approve は要らない。
+            let created = r.json();
+            assert_eq!(created["status"], "ready", "{created}");
+            ids.push(id_of(&created));
         }
         assert!(daemon.child.try_wait().unwrap().is_none(), "taskd exited at iteration {i}\n{}", daemon.log_text());
     }

@@ -1355,6 +1355,8 @@ async fn check_provider(
         milestone_id: None,
         assignee: None,
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     };
     let prepared = task_worker::LocalWorkspace::new(dir.clone())
         .prepare(&task)

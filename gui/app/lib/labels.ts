@@ -1,4 +1,16 @@
-import type { Decision, InstanceRole, MilestoneStatus, OrgKind, ProjectStatus, Status } from "~/taskd/types";
+import type { BoardColumnId } from "~/lib/board";
+import type {
+  CommentAuthorKind,
+  CommentEffect,
+  Decision,
+  InstanceRole,
+  MilestoneStatus,
+  OrgKind,
+  ProjectStatus,
+  Status,
+  TaskCategory,
+  Tier,
+} from "~/taskd/types";
 
 /**
  * 業務の 6 画面（SPEC §4: 秘書・組織・案件・報告・認可・成果物）で使う日本語の言葉（Phase G13f-1、監査 5）。
@@ -106,4 +118,158 @@ export function staleChangesLabel(base: string | null): string {
   return base
     ? `この差分は ${base} を起点に作られたもので、いまの現行とは違います（もう一度 release.sh を通すと新しくなります）`
     : "この差分は現行が無いときに作られたもので、いまの現行との差ではありません";
+}
+
+/**
+ * ADR-0044（Phase 53）のタスク管理で足した言葉。ボードの列・種類・優先度・コメント・タイムラインは
+ * 人が読むところなので、英語の値（`feature` / `interrupted` / `delegation` …）をそのまま出さない。
+ */
+
+/** ボードの列（ADR-0044 D4）。列の並び・状態の束ね方は `~/lib/board.ts` が持つ。 */
+const BOARD_COLUMN_LABEL: Record<BoardColumnId, string> = {
+  waiting: "待ち",
+  in_progress: "進行中",
+  blocked: "止まっている",
+  done: "完了",
+  failed: "失敗",
+  cancelled: "中止",
+};
+
+export function boardColumnLabel(column: BoardColumnId | string): string {
+  return BOARD_COLUMN_LABEL[column as BoardColumnId] ?? column;
+}
+
+/** タスクの種類（ADR-0044 D3）。既定は `other`。 */
+const TASK_CATEGORY_LABEL: Record<TaskCategory, string> = {
+  feature: "機能",
+  bug: "不具合",
+  research: "調査",
+  ops: "運用",
+  docs: "文書",
+  other: "その他",
+};
+
+export const TASK_CATEGORIES: readonly TaskCategory[] = ["feature", "bug", "research", "ops", "docs", "other"];
+
+export function taskCategoryLabel(category: TaskCategory | string): string {
+  return TASK_CATEGORY_LABEL[category as TaskCategory] ?? category;
+}
+
+/**
+ * 優先度（ADR-0044 D3）。P0 が最優先。記号だけでは分からないので短い言葉を添える
+ * （画面には `P1（高い）` のように出す）。
+ */
+const PRIORITY_LABEL_TEXT: Record<string, string> = {
+  P0: "今すぐ",
+  P1: "高い",
+  P2: "ふつう",
+  P3: "低い",
+};
+
+export function priorityText(label: string): string {
+  return PRIORITY_LABEL_TEXT[label] ?? label;
+}
+
+/** `P1（高い）` の形。プルダウンの選択肢とカードのバッジで使う。 */
+export function priorityFullLabel(label: string): string {
+  const text = PRIORITY_LABEL_TEXT[label];
+  return text ? `${label}（${text}）` : label;
+}
+
+/** 担当エージェントのレベル（ADR-0033 D2 の tier。ADR-0044 D1 でタスクから指定できるようになった）。 */
+const TIER_LABEL: Record<Tier, string> = {
+  frontier: "最上位（frontier）",
+  standard: "標準（standard）",
+  cheap: "軽い（cheap）",
+};
+
+export const TIERS: readonly Tier[] = ["frontier", "standard", "cheap"];
+
+export function tierLabel(tier: Tier | string): string {
+  return TIER_LABEL[tier as Tier] ?? tier;
+}
+
+/** コメントを誰が書いたか（ADR-0044 D2）。 */
+const COMMENT_AUTHOR_LABEL: Record<CommentAuthorKind, string> = {
+  human: "あなた",
+  node: ASSIGNEE_WORD,
+  system: "taskd",
+};
+
+export function commentAuthorLabel(kind: CommentAuthorKind | string): string {
+  return COMMENT_AUTHOR_LABEL[kind as CommentAuthorKind] ?? kind;
+}
+
+/**
+ * 人のコメントが何を起こしたか（ADR-0044 D2 の表）。コメントを送った直後に、
+ * 「記録しただけ」なのか「走っていた run を止めた」のかを必ず言う。
+ */
+const COMMENT_EFFECT_MESSAGE: Record<CommentEffect, string> = {
+  stored: "コメントを記録しました。次の run の前置きに載ります。",
+  interrupted: "走っていた run を止めて ready に戻しました。次の run はこのコメントから始まります。",
+  answered: "質問への回答として渡しました。",
+  terminal: "終わったタスクなので、コメントを記録しただけです。",
+};
+
+export function commentEffectMessage(effect: CommentEffect | string): string {
+  return COMMENT_EFFECT_MESSAGE[effect as CommentEffect] ?? String(effect);
+}
+
+/** タイムラインの 1 件の種類（ADR-0044 D5）。 */
+const TIMELINE_KIND_LABEL: Record<string, string> = {
+  event: "できごと",
+  comment: "コメント",
+  approval: "認可",
+  report: "報告",
+  delegation: "委譲",
+  release: "リリース",
+  integration: "取り込み",
+};
+
+export function timelineKindLabel(kind: string): string {
+  return TIMELINE_KIND_LABEL[kind] ?? kind;
+}
+
+/** 編集で実際に変わった項目（`EditResult.fields`）を日本語にする（ADR-0044 D1）。 */
+const TASK_FIELD_LABEL: Record<string, string> = {
+  title: "題名",
+  objective: "目的",
+  acceptance: "受け入れ条件",
+  priority: "優先度",
+  labels: "ラベル",
+  category: "種類",
+  assignee: ASSIGNEE_WORD,
+  role: "役割",
+  tier: "レベル",
+  adapter: "アダプタ",
+  milestone_id: "途中目標",
+  depends_on: "依存",
+  max_turns: "max_turns",
+  max_wall_secs: "max_wall_secs",
+  max_retries: "max_retries",
+};
+
+export function taskFieldLabel(field: string): string {
+  return TASK_FIELD_LABEL[field] ?? field;
+}
+
+/** タスク画面のタブ（ADR-0044 D5）。URL の `?tab=` の値 → 見出し。 */
+export const TASK_TABS = ["overview", "timeline", "changes", "files", "artifacts"] as const;
+export type TaskTab = (typeof TASK_TABS)[number];
+
+const TASK_TAB_LABEL: Record<TaskTab, string> = {
+  overview: "概要",
+  timeline: "タイムライン",
+  changes: "変更",
+  files: "ファイル",
+  artifacts: "成果物",
+};
+
+export function taskTabLabel(tab: TaskTab | string): string {
+  return TASK_TAB_LABEL[tab as TaskTab] ?? tab;
+}
+
+/** `?tab=` を読む。知らない値・未指定は概要（ADR-0044 D5 の既定）。 */
+export function parseTaskTab(value: string | null | undefined): TaskTab {
+  return value && (TASK_TABS as readonly string[]).includes(value) ? (value as TaskTab) : "overview";
 }

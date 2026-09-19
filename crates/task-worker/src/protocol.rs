@@ -348,6 +348,50 @@ pub struct RunContext {
     /// バイト単位で同じ。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_note: Option<String>,
+    // ---- ADR-0044 D2（Phase 53）: タスク単位のコメント。ここから ----
+    /// ADR-0044 D2: そのタスクのコメントの**最新 20 件**（古い順）。空なら省略され、
+    /// 「コメント」の節も出ない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<CommentContext>,
+    /// ADR-0044 D2: **直前の run を止めた人のコメント**（次の run の前置きの先頭に
+    /// 「人からの割り込み」として載る）。割り込みの直後の run にだけ入る。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt: Option<String>,
+    /// ADR-0044 D2: この run はコメントを書ける（`{"type":"comment","body":"…"}`）か。
+    /// `true` のときだけ前置きに「短い進捗や判断の記録はコメントに書け」の節を出す。
+    /// **仕事の run はすべて true** なので、Phase 53 以降、普通の run の前置きにはこの節が必ず入る
+    /// （Phase 52 とバイト単位で同じなのは、この 3 つが既定のまま = レビュー run と対話 run だけ）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub comments_enabled: bool,
+    // ---- ADR-0044 D2（Phase 53）: ここまで ----
+}
+
+/// `context.comments[]`（ADR-0044 D2 / Phase 53）: タスクに付いたコメントの 1 件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommentContext {
+    /// `human` / `node` / `system`。
+    pub author_kind: task_core::CommentAuthorKind,
+    /// `node` のときの組織ノード id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    pub body: String,
+    /// RFC 3339。
+    pub at: String,
+}
+
+impl From<&task_core::TaskComment> for CommentContext {
+    fn from(c: &task_core::TaskComment) -> Self {
+        Self {
+            author_kind: c.author_kind,
+            author: c.author.clone(),
+            body: c.body.clone(),
+            at: c
+                .created_at
+                .format(&time::format_description::well_known::Rfc3339)
+                // 書式化はまず失敗しないが、失敗しても空文字（`- [] 人: …`）にはしない。
+                .unwrap_or_else(|_| c.created_at.to_string()),
+        }
+    }
 }
 
 /// `error.provider_failure`（任意）: 供給側の失敗の種別（ADR-0010 D5, P-21）。付いていればディスパッチャは
@@ -444,6 +488,12 @@ pub struct Evidence {
 pub enum WorkerMessage {
     Progress {
         msg: String,
+    },
+    /// ADR-0044 D2（Phase 53）: タスクのコメント（任意回、非終端）。`progress` と違って**残る**
+    /// （`task_comments` に `author_kind = node` で入り、次の run の前置きにも載る）。
+    /// **追加のみ**なので `PROTOCOL_VERSION` は 4 のまま（この行を出さないワーカーはそのまま動く）。
+    Comment {
+        body: String,
     },
     /// ADR-0016 D2: 実行中の委譲の提案（任意回、非終端）。taskd は検証を通ったものだけ子タスクとして挿入し、
     /// 拒否した提案は理由を `WorkerProgress` に残す。run は失敗しない。
@@ -698,6 +748,8 @@ pub(crate) mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 }

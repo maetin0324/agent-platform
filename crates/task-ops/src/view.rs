@@ -92,6 +92,18 @@ pub struct TaskSummary {
     pub support: Option<String>,
     /// 今この状態で許される操作（ADR-0015 D4）。
     pub actions: Vec<Action>,
+    // ---- ADR-0044 D3/D4（Phase 53）: ボードのカードが要るもの。ここから ----
+    /// ADR-0044 D3 の `Task.labels`。
+    pub labels: Vec<String>,
+    /// ADR-0044 D3 の `Task.category`。
+    pub category: task_core::TaskCategory,
+    /// ADR-0044 D3: `priority` を P0〜P3 に丸めたもの（`i32` は互換のため残す）。
+    pub priority_label: String,
+    /// ADR-0033 D2 の `Task.project_id`（ボードは案件で絞るので一覧にも出す）。
+    pub project_id: Option<task_core::ProjectId>,
+    /// ADR-0033 D2 の `Task.milestone_id`（カードに途中目標を出すため）。
+    pub milestone_id: Option<task_core::MilestoneId>,
+    // ---- ADR-0044 D3/D4（Phase 53）: ここまで ----
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -115,6 +127,8 @@ pub struct TaskDetail {
     pub role: Option<String>,
     /// ADR-0027 D1: `Task.genre`（`role` と同じ理由で最上位にも出す）。
     pub genre: Option<String>,
+    /// ADR-0044 D3（Phase 53）: `task.priority` を P0〜P3 に丸めたもの（GUI の編集フォーム用）。
+    pub priority_label: String,
     /// ADR-0016 D2: 各 run が `delegate` で作った子（`Event::Delegated` の順）。
     pub delegated: Vec<DelegatedView>,
     pub timers: Timers,
@@ -227,6 +241,9 @@ pub enum RunOutcomeKind {
     Error,
     Requeue,
     LeaseExpired,
+    /// ADR-0044 D2/D8（Phase 53）: 人のコメントで止めた run（`interrupted: comment`）。
+    /// **失敗ではない**ので `bad_news` にも `error_cooldown` にも数えない。
+    Interrupted,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -254,6 +271,11 @@ pub enum Action {
     Cancel,
     /// Phase 31（実機の事故、2026-09-18）: `failed`/`cancelled` を複製してやり直す（`POST /tasks/{id}/retry`）。
     Retry,
+    /// ADR-0044 D1（Phase 53）: 人が編集できる（`PATCH /tasks/{id}`。終端でないタスクだけ）。
+    Edit,
+    /// ADR-0044 D2（Phase 53）: 終端のタスクを同じ worktree のまま再開する（`POST /tasks/{id}/reopen`。
+    /// `done` / `failed` だけ。`cancelled` は worktree を消してあるので `Retry` を使う）。
+    Reopen,
 }
 
 pub fn task_ref(task: &Task) -> TaskRef {
@@ -283,6 +305,13 @@ pub fn actions(task: &Task) -> Vec<Action> {
     }
     if matches!(task.status, Status::Failed | Status::Cancelled) {
         out.push(Action::Retry);
+    }
+    // ADR-0044 D1/D2（Phase 53）: 編集は終端でないタスク、再開は `done`/`failed` だけ。
+    if !task.status.is_terminal() {
+        out.push(Action::Edit);
+    }
+    if matches!(task.status, Status::Done | Status::Failed) {
+        out.push(Action::Reopen);
     }
     out
 }
@@ -383,6 +412,11 @@ pub(crate) fn build_task_summary(
         conversation: task_core::is_conversation(task),
         support: task_core::support_kind(task).map(str::to_string),
         actions: actions(task),
+        labels: task.labels.clone(),
+        category: task.category,
+        priority_label: task_core::priority_label(task.priority).to_string(),
+        project_id: task.project_id,
+        milestone_id: task.milestone_id,
     }
 }
 
@@ -396,6 +430,9 @@ fn classify_outcome(outcome: &str) -> (RunOutcomeKind, Option<String>) {
         (RunOutcomeKind::Question, Some(text.to_string()))
     } else if let Some(text) = outcome.strip_prefix("requeue: ") {
         (RunOutcomeKind::Requeue, Some(text.to_string()))
+    } else if let Some(text) = outcome.strip_prefix("interrupted: ") {
+        // ADR-0044 D2/D8: 人のコメントによる割り込み（失敗ではない）。
+        (RunOutcomeKind::Interrupted, Some(text.to_string()))
     } else if outcome == "lease_expired" {
         (RunOutcomeKind::LeaseExpired, None)
     } else {
@@ -701,9 +738,11 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
         .collect();
     let role = task.role.clone();
     let genre = task.genre.clone();
+    let priority_label = task_core::priority_label(task.priority).to_string();
 
     Ok(TaskDetail {
         task,
+        priority_label,
         workspace_dir,
         cluster,
         role,
@@ -809,6 +848,8 @@ mod tests {
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 
@@ -1504,7 +1545,8 @@ mod tests {
         let ctx = view_ctx();
         let detail = task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
         assert!(detail.worker_run_hint.is_none());
-        assert!(detail.actions.is_empty());
+        // ADR-0044 D2（Phase 53）: `done` は編集できないが「再開」はできる。
+        assert_eq!(detail.actions, vec![Action::Reopen]);
     }
 
     #[test]

@@ -36,6 +36,7 @@ use crate::types::{
     AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult, AccountLoginStart,
     AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody, ClusterConnectCodeBody, ClusterConnectResult,
     ClusterConnectStart, ClusterView, Clusters, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
+    CommentBody, CommentList, ReopenBody,
     MilestoneCreateBody, MilestonePatchBody, MilestoneReviewView, MilestoneView, OrgCreateBody, OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail,
     ProjectList, ProjectPatchBody, ProjectTaskView, ProviderCheckResponse, ProviderConfigView, ProviderView,
     Providers, ReloadResult, RetryBody, RunList, SecretList, SecretPutBody, SecretPutResult, SecretView,
@@ -71,7 +72,10 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/inbox", get(inbox))
         .route("/api/v1/tasks", get(list_tasks).post(create_task))
-        .route("/api/v1/tasks/{id}", get(task_detail))
+        .route("/api/v1/tasks/{id}", get(task_detail).patch(patch_task))
+        // ADR-0044 D2（Phase 53）: タスク単位のコメントと再開。
+        .route("/api/v1/tasks/{id}/comments", get(list_comments).post(create_comment))
+        .route("/api/v1/tasks/{id}/reopen", post(reopen))
         .route("/api/v1/tasks/{id}/events", get(task_events))
         .route("/api/v1/tasks/{id}/runs", get(task_runs))
         .route("/api/v1/tasks/{id}/runs/{run_id}/request", get(run_request))
@@ -126,6 +130,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::notify::routes())
         // ADR-0040 D6（Phase 48）: リリースの一覧と昇格。実装は `crate::releases`。
         .merge(crate::releases::routes())
+        // ADR-0044 D5（Phase 53）: タスクのタイムライン。実装は `crate::timeline`。
+        .merge(crate::timeline::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -730,7 +736,11 @@ async fn inbox(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRes
 async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     let query = QueryParams::parse(
         raw.as_deref(),
-        &["status", "kind", "genre", "parent", "project", "root_only", "q", "order", "limit", "cursor"],
+        &[
+            "status", "kind", "genre", "parent", "project", "root_only", "q", "order", "limit", "cursor",
+            // ADR-0044 D4（Phase 53）: ボードと検索のフィルタ。複数指定は AND。
+            "label", "category", "assignee", "milestone", "tier", "priority",
+        ],
     )?;
     let mut filter = ListFilter::default();
     for status in query.list("status") {
@@ -751,12 +761,50 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
         })?);
     }
     filter.root_only = query.bool("root_only")?.unwrap_or(false);
+    // ---- ADR-0044 D4（Phase 53）----
+    for label in query.list("label") {
+        if !task_core::is_valid_label(label) {
+            return Err(ApiProblem::bad_request(format!(
+                "query parameter `label` must match [a-z0-9-] (got {label:?})"
+            )));
+        }
+        filter.labels.push(label.to_string());
+    }
+    for category in query.list("category") {
+        let Some(parsed) = task_core::TaskCategory::parse(category) else {
+            return Err(ApiProblem::bad_request(format!("unknown category `{category}`")));
+        };
+        filter.categories.push(parsed);
+    }
+    if let Some(assignee) = query.single("assignee")?.filter(|a| !a.is_empty()) {
+        filter.assignee = Some(assignee.to_string());
+    }
+    if let Some(raw) = query.single("milestone")? {
+        filter.milestone_id = Some(raw.parse::<MilestoneId>().map_err(|_| {
+            ApiProblem::bad_request("query parameter `milestone` must be a ULID")
+        })?);
+    }
+    for tier in query.list("tier") {
+        filter.tiers.push(parse_snake::<task_core::Tier>("tier", tier)?);
+    }
+    for priority in query.list("priority") {
+        // `P0`〜`P3` でも生の整数でも受ける（`priority_label` と対）。
+        let value = match task_core::priority_from_label(priority) {
+            Some(v) => v,
+            None => priority
+                .parse::<i32>()
+                .map_err(|_| ApiProblem::bad_request(format!("unknown priority `{priority}`")))?,
+        };
+        filter.priorities.push(value);
+    }
     if let Some(text) = query.single("q")? {
         if text.chars().count() > TITLE_QUERY_MAX_CHARS {
             return Err(ApiProblem::bad_request("query parameter `q` must be at most 200 characters"));
         }
         if !text.is_empty() {
             filter.text_contains = Some(text.to_string());
+            // ADR-0044 D4: `GET /tasks?q=` は title / objective に加えて**コメント本文**も見る。
+            filter.text_includes_comments = true;
         }
     }
     let order = match query.single("order")? {
@@ -794,7 +842,13 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
 
 async fn create_task(State(state): State<ApiState>, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
     no_query(&raw)?;
-    let spec: NewTaskSpec = read_json(body, false).await?;
+    let mut spec: NewTaskSpec = read_json(body, false).await?;
+    // ADR-0044 D1（Phase 53）: **人が作ったタスクは `ready`**（人は Go を出す側なので draft を挟まない）。
+    // `draft` にしたければ `status: "draft"` を明示する。計画・委譲で作られる子（`draft` → Go）の経路は
+    // ここを通らないので変わらない。
+    if spec.status.is_none() {
+        spec.status = Some(task_core::Status::Ready);
+    }
     // ADR-0016 M3 / ADR-0027 D1: 省略された tier / adapter / 予算は `[[roles]]` の既定 → `[[genres]]` の
     // `default_role` の既定 → 全体の既定で埋める。API は常に完全な設定を持つので、`genres` が設定されて
     // いれば知らない `genre` / `genre` と `role` の不整合は常に検証する（taskctl の「`--config` 無し」の
@@ -1168,6 +1222,90 @@ async fn retry(
         response.headers_mut().insert(header::LOCATION, location);
     }
     Ok(response)
+}
+
+// ---- ADR-0044 D1/D2（Phase 53）: 編集・コメント・再開 ----
+
+/// `PATCH /tasks/{id}`（**管理系**。ADR-0044 D1）。書いた項目だけを変える。終端のタスクは 409。
+/// `running` / `reviewing` は受け付けるが**次の run から効く**（走っている run は止めない）。
+async fn patch_task(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let id = parse_task_id(&id)?;
+    let edit: task_ops::edit::TaskEdit = read_json(body, true).await?;
+    if edit.is_empty() {
+        return Err(ApiProblem::validation(vec![ValidationError {
+            field: None,
+            message: "at least one field must be given".to_string(),
+        }]));
+    }
+    let genres = state.inner.genres.clone();
+    let result = state
+        .blocking(move |store| {
+            task_ops::edit::edit_task(store, id, edit, &genres, OffsetDateTime::now_utc())
+                .map_err(|e| ops_problem(store, e, Some("edit")))
+        })
+        .await?;
+    Ok(json_response(StatusCode::OK, &result))
+}
+
+/// `GET /tasks/{id}/comments`（読み取り。古い順）。
+async fn list_comments(State(state): State<ApiState>, Params(id): Params<String>, RawQuery(raw): RawQuery) -> ApiResult {
+    no_query(&raw)?;
+    let id = parse_task_id(&id)?;
+    let items = state
+        .blocking(move |store| task_ops::comment::list_comments(store, id).map_err(|e| ops_problem(store, e, None)))
+        .await?;
+    Ok(json_response(StatusCode::OK, &CommentList { items }))
+}
+
+/// `POST /tasks/{id}/comments`（**管理系**。ADR-0044 D2）。人のコメントは状態に応じて
+/// 割り込み（`running`/`reviewing`）・回答（`blocked`）・記録（その他）になる。
+async fn create_comment(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let id = parse_task_id(&id)?;
+    let CommentBody { body } = read_json(body, false).await?;
+    let result = state
+        .blocking(move |store| {
+            task_ops::comment::post_human_comment(store, id, body, OffsetDateTime::now_utc())
+                .map_err(|e| ops_problem(store, e, Some("comment")))
+        })
+        .await?;
+    Ok(json_response(StatusCode::CREATED, &result))
+}
+
+/// `POST /tasks/{id}/reopen`（**管理系**。ADR-0044 D2）。`done` / `failed` を `ready` に戻す
+/// （attempts は 0）。`cancelled` は worktree を消してあるので 409（`retry` を使う）。
+async fn reopen(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let id = parse_task_id(&id)?;
+    let ReopenBody { expected_status } = read_json(body, true).await?;
+    let result = state
+        .blocking(move |store| {
+            task_ops::comment::reopen(store, id, expected_status).map_err(|e| ops_problem(store, e, Some("reopen")))
+        })
+        .await?;
+    Ok(json_response(StatusCode::OK, &result))
 }
 
 // ---- 17. POST /plans ----

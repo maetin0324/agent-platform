@@ -156,6 +156,8 @@ mod tests {
             milestone_id: None,
             assignee: Some(node_id.to_string()),
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         };
         store.create_task(&task, vec![]).expect("create");
         let approval = Approval {

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Problem } from "~/taskd/types";
-import { defaultHealth } from "./fixtures";
+import type { CommentResult, EditResult, Problem, TaskComment, TaskList, TaskSummary, Timeline } from "~/taskd/types";
+import { commentResult, defaultHealth, editResult, taskComment, taskSummary, timeline } from "./fixtures";
 
 /**
  * プロセス内の偽 taskd（docs/adr/0002 D8）。実 taskd を起動せず、Vitest から `TaskdClient` /
@@ -96,6 +96,49 @@ export function sendSseHello(res: ServerResponse, data: unknown): void {
     "content-type": "text/event-stream",
   });
   res.write(`event: hello\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+/**
+ * ADR-0044（Phase 53）のタスク管理の経路をまとめて登録する:
+ * `GET /tasks`（新しいフィルタつき）・`GET/POST /tasks/{id}/comments`・`GET /tasks/{id}/timeline`・
+ * `PATCH /tasks/{id}`・`POST /tasks/{id}/reopen`。
+ *
+ * **絞り込みは taskd の仕事**なので、ここでは「受け取ったクエリをそのまま `mock.requests` に残す」だけで
+ * 実際のフィルタはしない（GUI 側がクエリをどう組み立てたかを検証するのが目的）。
+ */
+export interface TaskManagementOptions {
+  taskId?: string;
+  items?: TaskSummary[];
+  timeline?: Timeline;
+  comments?: TaskComment[];
+  /** `POST /tasks/{id}/comments` の応答（ADR-0044 D2 の `effect` を差し替えるため）。 */
+  comment?: CommentResult;
+  /** `PATCH /tasks/{id}` の応答。 */
+  edit?: EditResult;
+}
+
+export function serveTaskManagement(mock: MockTaskd, options: TaskManagementOptions = {}): void {
+  const id = options.taskId ?? "01BOARDTASK00000000000001";
+  const items = options.items ?? [taskSummary()];
+  mock.on("GET", "/api/v1/tasks", (_req, res) => {
+    const list: TaskList = { items, total: items.length, counts_by_status: {}, next_cursor: null };
+    sendJson(res, 200, list);
+  });
+  mock.on("GET", `/api/v1/tasks/${id}/timeline`, (_req, res) => {
+    sendJson(res, 200, options.timeline ?? timeline([], id));
+  });
+  mock.on("GET", `/api/v1/tasks/${id}/comments`, (_req, res) => {
+    sendJson(res, 200, { items: options.comments ?? [taskComment({ task_id: id })] });
+  });
+  mock.on("POST", `/api/v1/tasks/${id}/comments`, (_req, res) => {
+    sendJson(res, 201, options.comment ?? commentResult());
+  });
+  mock.on("PATCH", `/api/v1/tasks/${id}`, (_req, res) => {
+    sendJson(res, 200, options.edit ?? editResult());
+  });
+  mock.on("POST", `/api/v1/tasks/${id}/reopen`, (_req, res) => {
+    sendJson(res, 200, { id, from: "failed", to: "ready", reason: "reopened" });
+  });
 }
 
 function collectBody(req: IncomingMessage): Promise<string> {

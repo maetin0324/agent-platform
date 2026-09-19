@@ -111,6 +111,8 @@ model = "fake"
             milestone_id: None,
             assignee: None,
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         };
         self.store.insert(&task).unwrap();
         self.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();
@@ -341,6 +343,8 @@ fn expired_lease_is_reclaimed_and_task_completes() {
         milestone_id: None,
         assignee: None,
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     };
     env.store.insert(&task).unwrap();
     env.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();

@@ -78,7 +78,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ConfigView>
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "Plan 作成 - taskd-gui" }];
+  return [{ title: "Plan 作成 - Celeris" }];
 }
 
 export async function action({ request }: Route.ActionArgs) {

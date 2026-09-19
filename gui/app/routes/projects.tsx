@@ -80,7 +80,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ProjectsDat
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "案件 - taskd-gui" }];
+  return [{ title: "案件 - Celeris" }];
 }
 
 /** `POST /projects`。成功したら詳細へ移る（`/tasks/new` と同じ作り）。 */

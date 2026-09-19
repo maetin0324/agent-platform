@@ -61,6 +61,8 @@ fn sample_task(i: usize) -> Task {
         milestone_id: None,
         assignee: None,
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     }
 }
 

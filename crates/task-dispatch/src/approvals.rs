@@ -104,6 +104,8 @@ mod tests {
             milestone_id: None,
             assignee: assignee.map(str::to_string),
             conversation: None,
+            labels: Vec::new(),
+            category: Default::default(),
         }
     }
 

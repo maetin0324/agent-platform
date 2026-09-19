@@ -42,6 +42,8 @@ fn sample_task(status: Status, workspace: WorkspaceSpec) -> Task {
         milestone_id: None,
         assignee: None,
         conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
     }
 }
 

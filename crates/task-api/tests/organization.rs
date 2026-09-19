@@ -602,7 +602,8 @@ async fn project_detail_returns_the_milestones_and_the_work_tree() {
     let child_view = tasks.iter().find(|t| t["id"] == child["id"]).expect("child in the tree");
     assert_eq!(child_view["parent_id"], parent["id"]);
     assert_eq!(child_view["depends_on"], json!([parent["id"]]));
-    assert_eq!(child_view["status"], "draft");
+    // ADR-0044 D1（Phase 53）: `POST /tasks` で人が作ったタスクは `ready`。
+    assert_eq!(child_view["status"], "ready");
     assert!(child_view.get("assignee").is_some_and(|v| v.is_null()), "{child_view}");
     // GUI 監査 H4（Phase 29）: 人が見る本体の仕事には `support` が付かない。
     assert!(child_view.get("support").is_some_and(|v| v.is_null()), "{child_view}");

@@ -45,6 +45,8 @@ const taskDetail = (over: Partial<TaskDetail> = {}): TaskDetail => ({
     workspace: { kind: "local", path: "lab/pluvio-survey" },
     assignee: "research-survey",
   },
+  // ADR-0044 D3（Phase 53）で `TaskDetail` に増えた必須項目。
+  priority_label: "P3",
   workspace_dir: "/home/user/workspace/lab/pluvio-survey",
   timers: { now: "…", consecutive_requeues: 0, consecutive_reviewer_requeues: 0, max_requeues: 3 },
   criteria: [],

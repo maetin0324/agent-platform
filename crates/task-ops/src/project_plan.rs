@@ -91,7 +91,7 @@ pub fn start(
         acceptance: Vec::new(),
         kind: TaskKind::Plan,
         tier: Some(PLAN_TIER),
-        priority: 0,
+        priority: Some(add::PriorityInput::Number(0)),
         parent: None,
         depends_on: Vec::new(),
         max_turns: Some(PLAN_MAX_TURNS),
@@ -108,6 +108,10 @@ pub fn start(
         workspace: plan_workspace,
         cluster: plan_cluster,
         adapter: None,
+        // ADR-0044 D3: 裏方の計画タスクにラベル・種類は付けない（`create_support_task` が `ready` にする）。
+        labels: Vec::new(),
+        category: None,
+        status: None,
     };
     let task = add::create_support_task(store, spec, roles, genres, now)?;
 
