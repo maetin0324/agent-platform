@@ -1,6 +1,6 @@
 import { Link } from "react-router";
 import { Alert } from "~/components/ui/misc";
-import { commentEffectMessage, taskFieldLabel } from "~/lib/labels";
+import { cancelledCountLabel, commentEffectMessage, taskFieldLabel } from "~/lib/labels";
 import type {
   AccountOpOutcome,
   ActionError,
@@ -368,7 +368,28 @@ const PROJECT_OP_LABEL: Record<string, string> = {
   repo_delete: "リポジトリを削除",
   // ADR-0044 D1（Phase 53）: 人が作ったタスクは `ready` で始まる（Go を挟まない）。
   task_create: "タスクを追加しました（待機中で始まります）",
+  // ADR-0044 D6（Phase 55 / G19）: 中止・一時停止・アーカイブ。
+  project_cancel: "案件を中止しました",
+  project_pause: "案件を一時停止しました",
+  project_resume: "案件を再開しました",
+  project_archive: "案件をアーカイブしました",
+  project_unarchive: "アーカイブを解除しました",
+  milestone_cancel: "途中目標を中止しました",
+  milestone_pause: "途中目標を一時停止しました",
+  milestone_resume: "途中目標を再開しました",
 };
+
+/** 中止・一時停止・アーカイブの `op`（`lifecycle` を持つ結果かどうかの判定に使う）。 */
+const LIFECYCLE_OPS: readonly string[] = [
+  "project_cancel",
+  "project_pause",
+  "project_resume",
+  "project_archive",
+  "project_unarchive",
+  "milestone_cancel",
+  "milestone_pause",
+  "milestone_resume",
+];
 
 /** 途中目標の判定（`ok`/`discuss`/`ng`）ごとの文言（ADR-0038 D2/D3、Phase 41 / G13j）。 */
 const MILESTONE_DECIDE_LABEL: Record<string, string> = {
@@ -408,6 +429,42 @@ export function ProjectActionFlash({ outcome }: { outcome: ProjectOpOutcome | un
             </>
           )}
         </p>
+      </Alert>
+    );
+  }
+  // 中止・一時停止・アーカイブ（ADR-0044 D6、Phase 55 / G19）。中止のときだけ、**taskd が返した**
+  // `cancelled_tasks` / `cancelled_milestones` の件数を添える（連鎖は GUI で数え直さない）。
+  if (LIFECYCLE_OPS.includes(outcome.op) && "lifecycle" in outcome) {
+    const { lifecycle } = outcome;
+    const cancelledTasks = lifecycle.cancelled_tasks ?? [];
+    const cancelledMilestones = "cancelled_milestones" in lifecycle ? (lifecycle.cancelled_milestones ?? []) : null;
+    const cancelling = outcome.op === "project_cancel" || outcome.op === "milestone_cancel";
+    return (
+      <Alert
+        role="status"
+        data-testid="flash"
+        data-flash-kind="ok"
+        data-flash-op={outcome.op}
+        tone={cancelling ? "warning" : "success"}
+        className="my-2"
+      >
+        <p data-testid="flash-project-op">{PROJECT_OP_LABEL[outcome.op] ?? outcome.op}</p>
+        {cancelling && (
+          <p data-testid="flash-lifecycle-cancelled">
+            {cancelledCountLabel(cancelledTasks.length, cancelledMilestones?.length)}
+          </p>
+        )}
+        {cancelling && cancelledTasks.length > 0 && (
+          <ul className="list-disc space-y-0.5 pl-5">
+            {cancelledTasks.map((ref) => (
+              <li key={ref.id}>
+                <Link to={`/tasks/${ref.id}`} data-testid="flash-lifecycle-task" className="underline">
+                  {ref.title}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
       </Alert>
     );
   }

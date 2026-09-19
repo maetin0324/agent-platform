@@ -1,14 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
+  ARCHIVE_LABEL,
+  ARCHIVE_ONLY_TERMINAL_HINT,
+  ARCHIVED_BADGE_LABEL,
   boardColumnLabel,
+  CANCEL_CONFIRM_LABEL,
+  CANCEL_LABEL,
+  cancelledCountLabel,
   commentAuthorLabel,
   commentEffectMessage,
   decisionLabel,
+  MILESTONE_PAUSED_BANNER,
+  milestoneCancelConfirmText,
   milestoneStatusLabel,
   orgKindMark,
+  PAUSE_LABEL,
+  PROJECT_PAUSED_BANNER,
   parseTaskTab,
   priorityFullLabel,
+  projectArchiveConfirmText,
+  projectCancelConfirmText,
   projectStatusLabel,
+  RESUME_LABEL,
+  SHOW_ARCHIVED_LABEL,
   TASK_TABS,
   taskCategoryLabel,
   taskFieldLabel,
@@ -16,6 +30,7 @@ import {
   taskTabLabel,
   tierLabel,
   timelineKindLabel,
+  UNARCHIVE_LABEL,
 } from "~/lib/labels";
 
 /**
@@ -28,6 +43,8 @@ describe("labels", () => {
     expect(projectStatusLabel("active")).toBe("進行中");
     expect(projectStatusLabel("paused")).toBe("一時停止");
     expect(projectStatusLabel("done")).toBe("完了");
+    // ADR-0044 D6（Phase 55 / G19）。
+    expect(projectStatusLabel("cancelled")).toBe("中止");
     expect(projectStatusLabel("unknown")).toBe("unknown");
   });
 
@@ -37,6 +54,10 @@ describe("labels", () => {
     expect(milestoneStatusLabel("in_progress")).toBe("進行中");
     expect(milestoneStatusLabel("reached")).toBe("達成");
     expect(milestoneStatusLabel("redesigned")).toBe("再設計");
+    // ADR-0044 D6（Phase 55 / G19）。
+    expect(milestoneStatusLabel("paused")).toBe("一時停止");
+    expect(milestoneStatusLabel("cancelled")).toBe("中止");
+    expect(milestoneStatusLabel("unknown")).toBe("unknown");
   });
 
   it("タスクの状態", () => {
@@ -127,5 +148,37 @@ describe("タスク管理の言葉（ADR-0044）", () => {
     expect(parseTaskTab("")).toBe("overview");
     expect(parseTaskTab("timeline")).toBe("timeline");
     expect(parseTaskTab("nope")).toBe("overview");
+  });
+
+  /** 中止・一時停止・アーカイブ（ADR-0044 D6、Phase 55 / G19）。英語の操作名は画面に出さない。 */
+  it("中止・一時停止・アーカイブのボタンの文言", () => {
+    expect(PAUSE_LABEL).toBe("一時停止");
+    expect(RESUME_LABEL).toBe("再開");
+    expect(CANCEL_LABEL).toBe("中止");
+    expect(CANCEL_CONFIRM_LABEL).toBe("本当に中止する");
+    expect(ARCHIVE_LABEL).toBe("アーカイブ");
+    expect(UNARCHIVE_LABEL).toBe("アーカイブ解除");
+    expect(ARCHIVED_BADGE_LABEL).toBe("アーカイブ済み");
+    expect(SHOW_ARCHIVED_LABEL).toBe("アーカイブを表示");
+    expect(ARCHIVE_ONLY_TERMINAL_HINT).toContain("完了・中止");
+  });
+
+  it("一時停止のバナーは「新しい仕事は始まらない／走っている仕事は最後まで走る」を必ず言う", () => {
+    expect(PROJECT_PAUSED_BANNER).toContain("一時停止中");
+    expect(PROJECT_PAUSED_BANNER).toContain("新しい仕事は始まりません");
+    expect(PROJECT_PAUSED_BANNER).toContain("走っている仕事は最後まで走ります");
+    expect(MILESTONE_PAUSED_BANNER).toContain("新しい仕事は始まりません");
+  });
+
+  it("確認文には対象の題名と、何が起きるかを書く", () => {
+    expect(projectCancelConfirmText("Pluvio")).toContain("Pluvio");
+    expect(projectCancelConfirmText("Pluvio")).toContain("取り返しがつきません");
+    expect(milestoneCancelConfirmText("統合・選定")).toContain("統合・選定");
+    expect(projectArchiveConfirmText("Pluvio")).toContain("アーカイブを表示");
+  });
+
+  it("連鎖で中止された件数（taskd が返した配列の長さをそのまま出す）", () => {
+    expect(cancelledCountLabel(3, 1)).toBe("仕事 3 件・途中目標 1 件を中止しました");
+    expect(cancelledCountLabel(0)).toBe("仕事 0 件を中止しました");
   });
 });

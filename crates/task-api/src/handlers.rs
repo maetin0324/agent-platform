@@ -128,6 +128,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::project_plan::routes())
         // ADR-0038 D2（Phase 41）: 途中目標の判定（ok / 議論 / ng）。実装は `crate::milestones`。
         .merge(crate::milestones::routes())
+        // ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。実装は `crate::lifecycle`。
+        .merge(crate::lifecycle::routes())
         .merge(crate::memory::routes())
         .merge(crate::reports::routes())
         .merge(crate::approvals::routes())
@@ -421,10 +423,20 @@ async fn delete_org_node(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// `GET /projects`。ADR-0044 D6（Phase 55）: **アーカイブされた案件は既定で隠す**
+/// （`?archived=1` で全部、`?archived=0` は既定と同じ）。
 async fn project_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
-    no_query(&raw)?;
+    let query = QueryParams::parse(raw.as_deref(), &["archived"])?;
+    let show_archived = query.bool("archived")?.unwrap_or(false);
     let items = state
-        .blocking(|store| store.project_list().map_err(store_problem))
+        .blocking(move |store| {
+            let all = store.project_list().map_err(store_problem)?;
+            Ok(if show_archived {
+                all
+            } else {
+                all.into_iter().filter(|p| p.archived_at.is_none()).collect()
+            })
+        })
         .await?;
     Ok(json_response(StatusCode::OK, &ProjectList { items }))
 }
@@ -464,6 +476,8 @@ async fn create_project(
         .blocking(move |store| {
             let now = OffsetDateTime::now_utc();
             let project = Project {
+                archived_at: None,
+                paused_from: None,
                 id: ProjectId::new(),
                 title: create.title,
                 request: create.request,
@@ -552,16 +566,31 @@ async fn project_detail(
 async fn patch_project(
     State(state): State<ApiState>,
     Params(id): Params<String>,
+    headers: HeaderMap,
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let project_id = parse_project_id(&id)?;
     let patch: ProjectPatchBody = read_json(body, false).await?;
     if patch.status.is_none() && patch.workspace.is_none() {
         return Err(ApiProblem::validation(vec![ValidationError {
             field: None,
             message: "specify at least one of `status` or `workspace`".into(),
+        }]));
+    }
+    // ADR-0044 D6（Phase 55）: `paused` / `cancelled` は**専用のエンドポイント**でしか入れない。
+    // `PATCH` で入れると `paused_from`（`resume` の戻り先）が空のままになり、中止の連鎖
+    //（属するタスクと途中目標を `cancelled` にする）も起きないので、状態だけが食い違う。
+    if let Some(status @ (ProjectStatus::Paused | ProjectStatus::Cancelled)) = patch.status {
+        return Err(ApiProblem::validation(vec![ValidationError {
+            field: Some("status".into()),
+            message: format!(
+                "use POST /projects/{{id}}/{} instead of PATCH to set {:?} (it also records paused_from and cascades)",
+                if status == ProjectStatus::Paused { "pause" } else { "cancel" },
+                status.as_str()
+            ),
         }]));
     }
     // ADR-0039 D1 / D5: 作業場所を書き換えるなら、先に検証と `~` の展開をする（422 はここで返す）。
@@ -610,10 +639,12 @@ pub(crate) fn validated_workspace(state: &ApiState, spec: task_core::WorkspaceSp
 async fn create_milestone(
     State(state): State<ApiState>,
     Params(id): Params<String>,
+    headers: HeaderMap,
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let project_id = parse_project_id(&id)?;
     let create: MilestoneCreateBody = read_json(body, false).await?;
     if create.title.trim().is_empty() {
@@ -647,12 +678,25 @@ async fn create_milestone(
 async fn patch_milestone(
     State(state): State<ApiState>,
     Params(id): Params<String>,
+    headers: HeaderMap,
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let milestone_id = parse_milestone_id(&id)?;
     let patch: MilestonePatchBody = read_json(body, false).await?;
+    // ADR-0044 D6（Phase 55）: 案件と同じ理由で、`paused` / `cancelled` は `PATCH` では入れない。
+    if matches!(patch.status, MilestoneStatus::Paused | MilestoneStatus::Cancelled) {
+        return Err(ApiProblem::validation(vec![ValidationError {
+            field: Some("status".into()),
+            message: format!(
+                "use POST /milestones/{{id}}/{} instead of PATCH to set {:?} (it also records paused_from and cascades)",
+                if patch.status == MilestoneStatus::Paused { "pause" } else { "cancel" },
+                patch.status.as_str()
+            ),
+        }]));
+    }
     let milestone = state
         .blocking(move |store| {
             if !store.milestone_set_status(milestone_id, patch.status).map_err(store_problem)? {
@@ -747,6 +791,8 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
             "status", "kind", "genre", "parent", "project", "root_only", "q", "order", "limit", "cursor",
             // ADR-0044 D4（Phase 53）: ボードと検索のフィルタ。複数指定は AND。
             "label", "category", "assignee", "milestone", "tier", "priority",
+            // ADR-0044 D6（Phase 55）: アーカイブされた案件のタスクは既定で隠す。
+            "archived",
         ],
     )?;
     let mut filter = ListFilter::default();
@@ -768,6 +814,8 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
         })?);
     }
     filter.root_only = query.bool("root_only")?.unwrap_or(false);
+    // ADR-0044 D6（Phase 55）: `?archived=1` を付けたときだけアーカイブされた案件のタスクも返す。
+    filter.hide_archived = !query.bool("archived")?.unwrap_or(false);
     // ---- ADR-0044 D4（Phase 53）----
     for label in query.list("label") {
         if !task_core::is_valid_label(label) {
@@ -847,8 +895,14 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
 
 // ---- 4. POST /tasks ----
 
-async fn create_task(State(state): State<ApiState>, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
+async fn create_task(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let mut spec: NewTaskSpec = read_json(body, false).await?;
     // ADR-0044 D1（Phase 53）: **人が作ったタスクは `ready`**（人は Go を出す側なので draft を挟まない）。
     // `draft` にしたければ `status: "draft"` を明示する。計画・委譲で作られる子（`draft` → Go）の経路は
@@ -1133,14 +1187,20 @@ async fn artifact_body(
 }
 
 // ---- 13〜16. POST /tasks/{id}/{approve|reject|answer|cancel} ----
+//
+// ADR-0044 §5 Phase 53 追記（Phase 55）: **変更を伴う API はすべて管理系**（`token_file` 未設定でも 401）。
+// この節の 4 つと `retry` / `POST /tasks` / `POST /plans` / `POST /replay`、案件・途中目標の変更系が
+// この Phase で `require_admin` に揃った。認可は本文の検証より**先**（トークン無しの壊れた本文は 401）。
 
 async fn approve(
     State(state): State<ApiState>,
     Params(id): Params<String>,
+    headers: HeaderMap,
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
     let DecisionBody { note, expected_status } = read_json(body, true).await?;
     let result = state
@@ -1154,10 +1214,12 @@ async fn approve(
 async fn reject(
     State(state): State<ApiState>,
     Params(id): Params<String>,
+    headers: HeaderMap,
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
     let DecisionBody { note, expected_status } = read_json(body, true).await?;
     let result = state
@@ -1171,10 +1233,12 @@ async fn reject(
 async fn answer(
     State(state): State<ApiState>,
     Params(id): Params<String>,
+    headers: HeaderMap,
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
     let AnswerBody { answer, expected_status } = read_json(body, false).await?;
     if answer.trim().is_empty() {
@@ -1194,10 +1258,12 @@ async fn answer(
 async fn cancel(
     State(state): State<ApiState>,
     Params(id): Params<String>,
+    headers: HeaderMap,
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
     let CancelBody { expected_status } = read_json(body, true).await?;
     let result = state
@@ -1212,10 +1278,12 @@ async fn cancel(
 async fn retry(
     State(state): State<ApiState>,
     Params(id): Params<String>,
+    headers: HeaderMap,
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
     let RetryBody { accept } = read_json(body, true).await?;
     let result = state
@@ -1317,8 +1385,14 @@ async fn reopen(
 
 // ---- 17. POST /plans ----
 
-async fn create_plan(State(state): State<ApiState>, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
+async fn create_plan(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let spec: NewPlanSpec = read_json(body, false).await?;
     let task = state
         .blocking(move |store| {
@@ -1335,8 +1409,14 @@ async fn create_plan(State(state): State<ApiState>, RawQuery(raw): RawQuery, bod
 #[serde(deny_unknown_fields)]
 struct ReplayBody {}
 
-async fn replay(State(state): State<ApiState>, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
+async fn replay(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
     no_query(&raw)?;
+    require_admin(&state, &headers)?;
     let ReplayBody {} = read_json(body, true).await?;
     let guard = state.try_begin_replay().ok_or_else(ApiProblem::replay_in_progress)?;
     let report = state
@@ -2302,7 +2382,9 @@ mod tests {
     fn state(dir: &std::path::Path) -> ApiState {
         let settings = ApiSettings {
             listen: "127.0.0.1:7710".parse().unwrap_or_else(|e| panic!("{e}")),
-            token: None,
+            // ADR-0044 §5 Phase 53 追記（Phase 55）: `POST /replay` は管理系になったので、
+            // この単体テストのルータにもトークンを持たせる（下の要求は Bearer を付ける）。
+            token: Some(REPLAY_TEST_TOKEN.to_string()),
             allowed_hosts: vec![],
             db_path: dir.join("taskd.db"),
             busy_timeout: Duration::from_millis(5000),
@@ -2368,12 +2450,30 @@ mod tests {
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))
     }
 
+    /// この単体テストだけで使う管理系トークン。
+    const REPLAY_TEST_TOKEN: &str = "replay-test-token";
+
     fn replay_request() -> Request<Body> {
         Request::post("/api/v1/replay")
             .header("host", "127.0.0.1:7710")
             .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {REPLAY_TEST_TOKEN}"))
             .body(Body::from("{}"))
             .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// ADR-0044 §5 Phase 53 追記（Phase 55）: トークンが無ければ 401。
+    #[tokio::test]
+    async fn replay_without_a_token_is_unauthorized() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let app = router(state(dir.path()));
+        let request = Request::post("/api/v1/replay")
+            .header("host", "127.0.0.1:7710")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let resp = app.oneshot(request).await.unwrap_or_else(|e| match e {});
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

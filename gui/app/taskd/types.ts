@@ -282,7 +282,8 @@ export type MessageRole = "user" | "node";
 /**
  * 途中目標の状態（ADR-0033 D2。SPEC §7 のアジャイル: 達成ごとに人が判定し、Go か再設計）。
  */
-export type MilestoneStatus = "proposed" | "approved" | "in_progress" | "reached" | "redesigned";
+export type MilestoneStatus =
+  ("proposed" | "approved" | "in_progress" | "reached" | "redesigned") | "paused" | "cancelled";
 /**
  * 受け入れ条件 1 件の指定。現在の `taskctl add` の `--accept`/`--check-cmd`/
  * `--check-artifact`/`--check-reviewer` に対応する。API の `POST /tasks` の `acceptance[]` でもある（`docs/gui/api.md` §3.4）。
@@ -325,9 +326,9 @@ export type NotificationKind =
  */
 export type OrgKind = "secretary" | "department" | "section";
 /**
- * 案件の状態（ADR-0033 D2）。
+ * 案件の状態（ADR-0033 D2、ADR-0044 D6）。
  */
-export type ProjectStatus = ("active" | "paused" | "done") | "proposed";
+export type ProjectStatus = ("active" | "done") | "proposed" | "paused" | "cancelled";
 /**
  * リポジトリの種類（ADR-0043 D1）。`git` はタスクごとに worktree を切る。`dir` は
  * シンボリックリンクで見せる（コピーしない。大きいデータを想定）。
@@ -441,6 +442,7 @@ export interface ApiV1Schema {
   milestone_create: MilestoneCreateBody;
   milestone_decide: MilestoneDecideBody;
   milestone_decided: MilestoneDecided;
+  milestone_lifecycle: MilestoneLifecycle;
   milestone_patch: MilestonePatchBody;
   new_plan: NewPlanSpec;
   new_task: NewTaskSpec;
@@ -453,6 +455,7 @@ export interface ApiV1Schema {
   project_create: ProjectCreateBody;
   project_detail: ProjectDetail;
   project_integrations: ProjectIntegrations;
+  project_lifecycle: ProjectLifecycle;
   project_list: ProjectList;
   project_patch: ProjectPatchBody;
   project_plan: ProjectPlanBody;
@@ -1991,6 +1994,10 @@ export interface Milestone {
   created_at: string;
   description?: string;
   id: MilestoneId;
+  /**
+   * ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。
+   */
+  paused_from?: MilestoneStatus | null;
   project_id: ProjectId;
   seq: number;
   status: MilestoneStatus;
@@ -2004,11 +2011,22 @@ export interface Milestone1 {
   created_at: string;
   description?: string;
   id: MilestoneId;
+  /**
+   * ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。
+   */
+  paused_from?: MilestoneStatus | null;
   project_id: ProjectId;
   seq: number;
   status: MilestoneStatus;
   title: string;
   updated_at: string;
+}
+/**
+ * 途中目標の状態を変えたときの結果。
+ */
+export interface MilestoneLifecycle {
+  cancelled_tasks?: TaskRef[];
+  milestone: Milestone1;
 }
 /**
  * `PATCH /milestones/{id}` の要求本文。
@@ -2304,6 +2322,10 @@ export interface MilestoneView {
   created_at: string;
   description?: string;
   id: MilestoneId;
+  /**
+   * ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。
+   */
+  paused_from?: MilestoneStatus | null;
   project_id: ProjectId;
   /**
    * その返事が提案した次の途中目標（`proposed` の最新。無ければ省略）。
@@ -2337,8 +2359,17 @@ export interface MilestoneReviewView {
  * 案件（SPEC §3.3）。仕事の木は `tasks WHERE project_id = ?`。
  */
 export interface Project {
+  /**
+   * ADR-0044 D6: アーカイブした時刻。`None` ならアーカイブされていない。一覧は既定でこれが
+   * `Some` の案件（とそのタスク）を隠す。
+   */
+  archived_at?: string | null;
   created_at: string;
   id: ProjectId;
+  /**
+   * ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。
+   */
+  paused_from?: ProjectStatus | null;
   /**
    * 人が投げた依頼文そのまま。
    */
@@ -2444,6 +2475,20 @@ export interface ProjectIntegrationItem {
   integration: TaskIntegration;
   task_status: Status;
   task_title: string;
+}
+/**
+ * Phase 55（ADR-0044 D6）: 案件・途中目標の中止・一時停止・アーカイブの応答。
+ */
+export interface ProjectLifecycle {
+  /**
+   * この操作の連鎖で `cancelled` になった途中目標の id（`cancel` 以外では空）。
+   */
+  cancelled_milestones?: MilestoneId[];
+  /**
+   * この操作の連鎖で `cancelled` になったタスク（`cancel` 以外では空）。
+   */
+  cancelled_tasks?: TaskRef[];
+  project: Project;
 }
 /**
  * Phase 23（ADR-0033 D2）: 案件と途中目標。

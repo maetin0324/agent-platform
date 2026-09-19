@@ -6,7 +6,7 @@ import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { checkboxClass, chipLabelClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
-import { EmptyState, PageHeader } from "~/components/ui/misc";
+import { Alert, EmptyState, PageHeader } from "~/components/ui/misc";
 import {
   BOARD_COLUMNS,
   type BoardColumnId,
@@ -19,12 +19,16 @@ import {
 } from "~/lib/board";
 import {
   boardColumnLabel,
+  MILESTONE_PAUSED_BANNER,
+  PROJECT_CANCELLED_BANNER,
+  PROJECT_PAUSED_BANNER,
   priorityFullLabel,
   TASK_CATEGORIES,
   TIERS,
   taskCategoryLabel,
   tierLabel,
 } from "~/lib/labels";
+import { milestoneIsPaused, projectIsPaused } from "~/lib/lifecycle";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { isSupportTask } from "~/lib/work-tree";
@@ -123,6 +127,10 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
   const orgNames = Object.fromEntries(org.map((n) => [n.id, n.name]));
   const milestoneNames = Object.fromEntries(milestones.map((m) => [m.id, `#${m.seq} ${m.title}`]));
   const truncated = tasks.items.length >= BOARD_LIMIT;
+  // ADR-0044 D6（Phase 55 / G19）: 止まっている案件・途中目標を選んでいるときは、
+  // 「新しい仕事は始まらない」ことをボードの上で言う（状態は taskd が返したものをそのまま読む）。
+  const selectedProject = filter.project ? projects.items.find((p) => p.id === filter.project) : undefined;
+  const selectedMilestone = filter.milestone ? milestones.find((m) => m.id === filter.milestone) : undefined;
 
   return (
     <div className="space-y-6">
@@ -136,6 +144,24 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
         }
         description="案件のタスクを状態ごとに並べて見ます。カードの上で優先度・レベル・担当をその場で変えられます（状態は状態機械が決めるので、ドラッグでは動かせません）。"
       />
+
+      {/* 一時停止・中止・アーカイブ（ADR-0044 D6、Phase 55 / G19）。選んだ案件・途中目標が止まっていたら、
+          カードが並んでいても新しい仕事は始まらないので必ず断る。 */}
+      {selectedProject && projectIsPaused(selectedProject) && (
+        <Alert tone="warning" data-testid="board-project-paused">
+          {PROJECT_PAUSED_BANNER}
+        </Alert>
+      )}
+      {selectedProject?.status === "cancelled" && (
+        <Alert tone="warning" data-testid="board-project-cancelled">
+          {PROJECT_CANCELLED_BANNER}
+        </Alert>
+      )}
+      {selectedMilestone && milestoneIsPaused(selectedMilestone) && (
+        <Alert tone="warning" data-testid="board-milestone-paused">
+          {MILESTONE_PAUSED_BANNER}
+        </Alert>
+      )}
 
       <Card>
         <CardHeader icon="filter" title="絞り込み" description="ここで選んだ条件はそのまま URL になります。" />

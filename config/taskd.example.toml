@@ -8,7 +8,9 @@ tick_ms = 2000
 max_concurrency = 2
 lease_grace_secs = 60              # ADR-0002 D7: リース ttl = max_wall_secs + 猶予
 idle_timeout_secs = 300            # ADR-0003 D4: 無出力タイムアウト
-kill_grace_secs = 10               # ADR-0003 D4: SIGTERM 後 SIGKILL までの猶予
+kill_grace_secs = 10               # ADR-0003 D4 / ADR-0044 Phase 53 追記: run を止めるときに
+                                   # ワーカーの**プロセスグループ**へ SIGTERM を送ってから SIGKILL までの猶予
+                                   # （cancel・人のコメントによる割り込み・タイムアウト・リース喪失・drain 共通）
 review_timeout_secs = 600          # Command チェック 1 件あたりの上限
 error_cooldown_secs = 300          # AuthFailed / Exhausted / 起動失敗時のプロバイダ除外時間
 retry_backoff_base_secs = 10       # ADR-0010 D6: リトライ前の待ち min(base·2^(attempts-1), max)。0 で無効

@@ -25,6 +25,8 @@ pub mod changes;
 pub mod conversation;
 mod files;
 mod handlers;
+/// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
+pub mod lifecycle;
 pub mod memory;
 mod middleware;
 pub mod notify;

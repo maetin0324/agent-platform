@@ -255,6 +255,8 @@ mod tests {
     fn seed_project(store: &SqliteStore) -> ProjectId {
         let now = OffsetDateTime::now_utc();
         let project = task_core::Project {
+            archived_at: None,
+            paused_from: None,
             id: ProjectId::new(),
             title: "案件".into(),
             request: "依頼".into(),

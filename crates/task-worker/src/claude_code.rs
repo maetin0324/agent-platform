@@ -88,6 +88,7 @@ impl WorkerAdapter for ClaudeCodeAdapter {
         config.env.extend(extra.iter().cloned());
         Some(Arc::new(ClaudeCodeAdapter::new(config)))
     }
+
 }
 
 /// タスクからワーカーへのプロンプトを組み立てる（ADR-0006 D2, ADR-0007 D7, 純粋関数）。`run_id` は
@@ -673,6 +674,8 @@ async fn run_claude_code(
     command.process_group(0);
 
     let mut child = command.spawn().map_err(AdapterError::Spawn)?;
+    // ADR-0044 §5 Phase 53 追記（Phase 55）: この run のプロセスグループを覚える（`kill_tree` の入口）。
+    let _process_group = crate::process_group::ProcessGroup::register(run_id, child.id());
 
     let stdout = child
         .stdout

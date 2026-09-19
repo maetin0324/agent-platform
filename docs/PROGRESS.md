@@ -7596,3 +7596,250 @@ main（`ef639ea`）に `git merge --no-ff` で合わせた。衝突は **12 か�
 - 気づき: 案件「Pluvio…」のタスク `01M2VTETVXHTZVJQBKYTPHZ784` は 07:12 から `reviewing`（criterion 0 の承認タスク
   `01M2W846395893N2YDRPQQEEYC` が `ready` で受信箱に出ている。人が approve / reject するまで動かない。人は 07:12 の対話で
   「一旦プロジェクト修了」と言っているので、Phase 55 の案件の中止・アーカイブで片付ける想定）。
+
+---
+
+## Phase 55 — タスク管理 B2: 中止・一時停止・アーカイブ、run の止め方の統一、変更系 API の認可（ADR-0044 D6 / Phase 53 追記。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0044 §4 B2 と §5 の「B2 で実装」の 2 項目）:
+  1. **案件・途中目標を止められるようにする**（D6）。Phase 54 までは「タスク 1 件の cancel」しか無く、
+     終わった案件・やめた案件を畳む手段が無かった（Phase 52–54 実機の最後の気づき: 人が「一旦プロジェクト
+     終了」と言った案件のタスクが `reviewing` のまま残っていた）。案件・途中目標の
+     cancel / pause / resume / archive / unarchive と、タスクへの決定的な連鎖を入れる。
+  2. **run の止め方を 1 つにする**（§5）。`cancel` と人のコメントによる割り込みは tokio の
+     `JoinHandle::abort()` だけで、`kill_on_drop` が**直接の子**を SIGKILL するにとどまり、
+     ハーネスが起こした**孫**（`cargo test`、`node`、シェル）が worktree を掴んだまま生き残っていた。
+  3. **変更を伴う API をすべて管理系（bearer 必須）に揃える**（§5）。`PATCH /tasks` / コメント / `reopen`
+     だけがトークン必須で、`POST /tasks` や `cancel` / `answer` / `approve` は素通しという不揃いだった。
+  D7（文書）は B3 なので**触っていない**。ADR-0043 D3（コンテナ）は A3 の担当で、`subprocess.rs` には
+  1 行しか足していない（下の「A3 との合流」）。
+- 決めたこと（ADR に書き足した差は `docs/adr/0044-task-management.md` の「6. Phase 55 追記」。ここには理由を書く）:
+  - **migration は `0015_lifecycle.sql`、`SCHEMA_VERSION = 15`**。列は 3 つだけ
+    （`projects.archived_at` / `projects.paused_from` / `milestones.paused_from`）。`status` は
+    `projects` にも `milestones` にも CHECK 制約が無いので、`cancelled` / `paused` の値を足すのに
+    列の作り直しは要らない（知らない値は `ProjectStatus::parse` / `MilestoneStatus::parse` が弾く）。
+  - **`paused_from` は案件と途中目標の両方**。D6 は案件についてだけ書いていたが、`resume` の戻り先が
+    要るのは途中目標も同じ。`pause` と `resume` は状態と `paused_from` を **1 回の UPDATE** で書く
+    （`project_set_lifecycle` / `milestone_set_lifecycle`。読んでから書く間に割り込まれないように）。
+  - **案件の中止は非終端の途中目標も `cancelled` にする**。D6 の文が「途中目標は `cancelled`、案件は
+    `cancelled`」としか書いておらず波及の有無が読めなかったので、`proposed` / `approved` /
+    `in_progress` / `paused` を畳み、`reached` / `redesigned`（達成・再設計の記録）は残すと決めた。
+    同じ理由で **`MilestoneStatus::is_terminal()` は `reached` / `redesigned` / `cancelled` の 3 つ**にし、
+    `POST /milestones/{id}/{cancel|pause}` もこの 3 つには 409 を返す（GUI のボタンの出し分けと
+    1 対 1 に対応させるため。`gui/app/lib/lifecycle.ts`）。
+  - **連鎖の理由は新しいトリガ 2 つ**（`Trigger::ProjectCancelled` / `MilestoneCancelled`）。遷移そのものは
+    `Cancel` と同じ 1 本の match 腕（非終端 → `cancelled`、attempts 据え置き）で、
+    `Event::Transitioned.reason` だけが `project_cancelled` / `milestone_cancelled` になる。
+    タイムラインで「自分が止められたのか、上ごと止まったのか」が読める。
+    **案件・途中目標そのものにはイベント表を作らなかった**（ADR-0044 D8 は「タイムラインに残るだけ」。
+    案件のタイムラインは既存の `messages` と報告で足りる。動くのは `updated_at` だけ）。
+  - **dispatch の抑止は `TaskStore::ready_tasks` の 1 か所**（P55-1）。案件の計画 run・途中目標の
+    レビュー対話・報告の圧縮といった裏方も**同じ `tasks` の行**なので、ここだけで全部止まる。
+    スケジュール側（`taskd::milestone_review::schedule`、`taskd::reports`）は**止めていない**:
+    行は作られるが `ready` のまま動かないので、`resume` したときに素直に動き出す。
+    **例外は対話（`task_core::is_conversation`）**: 止まっている案件でも人が秘書と「なぜ止めたか」を
+    話せる必要があるため。`paused` / `cancelled` / アーカイブ済みのどれも同じ扱いで抑止する。
+  - **`archive` / `unarchive` は冪等**（既にその状態なら 200 でそのまま返す）。GUI の二度押しを 409 に
+    しない。409 になるのは**非終端の案件の `archive`** だけ。
+  - **`PATCH` からは `paused` / `cancelled` を入れられない**（422 `validation`。P55-7）。
+    `PATCH /projects/{id} {status}` は従来どおりの素の setter だが、この 2 つだけを通すと
+    `paused_from`（`resume` の戻り先）が空のまま `paused` になり、`cancelled` にしても連鎖が起きず
+    タスクが走り続ける。専用のエンドポイントへ誘導する 422 を返す。GUI 側も独立に同じ結論に達し、
+    「状態を直接変える」プルダウンからこの 2 つを外している（G19-D7）。
+  - **`ListFilter.hide_archived` は既定 `false`**（＝隠さない）。`GET /tasks` だけが明示的に `true` を
+    立てる（`?archived=1` で `false`）。こうするとディスパッチャ・報告・途中目標のレビューなど
+    **既存の呼び出し側の挙動が 1 つも変わらない**（`ListFilter::default()` が `false` のまま）。
+    アーカイブ済み案件のタスクの dispatch 抑止は `ready_tasks` 側で別に見ている。
+  - **run の止め方**（P55-2）: `task-worker` に `process_group` モジュールを足した。全アダプタは既に
+    `Command::process_group(0)` を付けていた（＝子は自分を長とする新しいプロセスグループの長）ので、
+    足りなかったのは「その pid を run_id で引ける表」と「そこへ signal を送る 1 つの入口」だけ。
+    spawn 直後の **1 行**（`ProcessGroup::register(run_id, child.id())`。RAII で run が終われば消える）と、
+    `kill_tree(run_id, grace)`（`killpg(SIGTERM)` → 別スレッドで `grace` 待ち → `killpg(SIGKILL)`）。
+    ディスパッチャの 4 経路（`abort_stale_runs` の run とレビュー、`reclaim_expired_leases`、
+    `abort_all_runs` = drain）がここを通り、タイムアウトは従来どおり `subprocess::kill_now` が
+    同じ手順を踏む（登録は先に消えているので二重には送らない）。
+    **`JoinHandle::abort()` は従来どおり即座に行う**（run の記録を止めるための帳簿）。そのため直接の子は
+    `kill_on_drop` で即 SIGKILL されるが、**孫はグループ宛の SIGTERM を受けて片付けの猶予を持つ**
+    ＝ ADR-0044 D2 の表が本当に求めていたところ。`grace` 後の SIGKILL は tokio ではなく
+    `std::thread` で待つ（`Dispatcher::tick()` は同期の関数で、ランタイムの有無に依らせたくないため）。
+  - **認可は本文の検証より先**（P55-3）: `require_admin` を `read_json` の前に置いたので、トークン無しで
+    壊れた本文を送ると **400 ではなく 401** になる。既存のガードのテスト 3 件
+    （Content-Type / 本文サイズ / 未知フィールド）はトークン付きの env に移した
+    （**テストを弱めてはいない**。401 は別の新しいテストが見る）。
+  - **§5 が数えていなかった 3 つも揃えた**: `reject` / `POST /replay` / 案件・途中目標の変更系
+    （`PATCH /projects/{id}`、`POST /projects/{id}/milestones`、`PATCH /milestones/{id}`）。
+    「変更を伴う API はすべて」の規則に含まれるため。**`taskctl` は HTTP API を使わず SQLite を直接
+    開く**ので影響しない（`crates/taskctl/src/` に API クライアントは無い。`--token-file` も要らない）。
+- 変更したファイル（taskd 側）:
+  - `crates/task-core/migrations/0015_lifecycle.sql`（新規）: 3 列 + 索引 2 本。
+  - `crates/task-core/src/org.rs`: `ProjectStatus::Cancelled` / `is_terminal()`、
+    `MilestoneStatus::{Paused, Cancelled}` / `is_terminal()`、`Project.{archived_at, paused_from}`、
+    `Milestone.paused_from`。
+  - `crates/task-core/src/store.rs`: `SCHEMA_VERSION = 15` と `MIGRATION_0015`、`project_row` /
+    `milestone_row` の新しい列、`project_create` の INSERT、`TaskStore` に `project_set_lifecycle` /
+    `project_set_archived_at` / **`milestone_get`**（今まで id 1 つで引けなかった）/
+    `milestone_set_lifecycle`、`ListFilter.hide_archived` と述語、`ready_tasks` の
+    `halted_projects_locked` / `halted_milestones_locked`（対話は例外）。テスト 1 件。
+  - `crates/task-core/src/transition.rs`: `Trigger::{ProjectCancelled, MilestoneCancelled}`。
+  - `crates/task-worker/src/process_group.rs`（新規）: `ProcessGroup::register`（RAII）/ `pgid_of` /
+    `signal_group` / `kill_tree`。単体テスト 4 件（実プロセスで孫まで消えるものを含む）。
+  - `crates/task-worker/src/{subprocess,claude_code,codex,acp,local_deep_research,paperqa}.rs`:
+    spawn 直後に登録の 1 行（`subprocess.rs` は**ちょうど 1 行**。下の「A3 との合流」）。
+  - `crates/task-api/src/handlers.rs`: `PATCH /projects/{id}` / `PATCH /milestones/{id}` は
+    `paused` / `cancelled` を 422 で断る（P55-7）。
+  - `crates/task-ops/src/lifecycle.rs`（新規）: `cancel_project` / `pause_project` / `resume_project` /
+    `archive_project` / `unarchive_project` / `cancel_milestone` / `pause_milestone` /
+    `resume_milestone`、`ProjectLifecycle` / `MilestoneLifecycle`。テスト 9 件。
+  - `crates/task-ops/src/error.rs`: `OpsError::{ProjectNotFound, MilestoneNotFound, InvalidLifecycle}`。
+  - `crates/task-api/src/lifecycle.rs`（新規）: 8 つのルートと 2 つの共通ハンドラ（どれも `require_admin`）。
+  - `crates/task-api/src/handlers.rs`: 上記の `merge`、`project_list` の `?archived=`、
+    `list_tasks` の `?archived=`、**11 のハンドラに `require_admin`**。
+  - `crates/task-api/src/problem.rs`: 新しい `OpsError` → 404 / 409 の写像。
+  - `crates/task-api/src/schema.rs`: `ProjectLifecycle` / `MilestoneLifecycle` をスキーマに載せた。
+  - `crates/task-dispatch/src/dispatcher.rs`: `stop_run` / `stop_review`（**run を止める唯一の入口**）と
+    4 経路の差し替え。
+  - `crates/task-dispatch/tests/unified_kill.rs`（新規）: 4 経路 × 孫の生死。
+  - `crates/task-api/tests/lifecycle.rs`（新規、7 件）、`crates/task-api/tests/operations.rs`（+2 件の 401）、
+    `crates/task-api/tests/{auth_and_guards,genres,roles}.rs` と `tests/common/mod.rs`（`admin_env` /
+    `get_admin` / `post_admin` / `patch_admin` を足し、変更系を呼ぶテストをトークン付きに移した）。
+  - `tests/e2e/tests/api_scenarios.rs`: `api_listen_with_token()` を足し、`POST /tasks` を使う 2 本に
+    `token_file` を持たせた。
+  - `docs/gui/api.md`（§1.3 / §2 の一覧を 72 → 80 / §3.3 と §3.46 の `archived` / §3.84〜3.91 / §6.2 の型 /
+    冒頭の改訂履歴）、`gui/docs/taskd-api-v1.md`（`scripts/sync-gui-docs.sh` で同期）、
+    `docs/api/v1/api-v1.schema.json`（`UPDATE_SCHEMA=1` で再生成）、`config/taskd.example.toml`
+    （`kill_grace_secs` の注記）。
+  - **既存のテストは 1 つも弱めていない・消していない**（`assert_eq!(SCHEMA_VERSION, 14)` の 3 か所を
+    15 に直し、変更系を呼ぶテストをトークン付きの env に移しただけ）。
+- 証拠:
+  - `cargo test --workspace` → exit **0**、`grep -c "^test result: FAILED"` = **0**、
+    **1332 passed / 0 failed / 3 ignored**（57 個のテストバイナリ + 7 個の doc-test。Phase 54 から
+    テストバイナリが 2 つ増えた: `task-api/tests/lifecycle.rs`、`task-dispatch/tests/unified_kill.rs`）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` → exit **0**（警告ゼロ）。
+  - `UPDATE_SCHEMA=1 cargo test -p task-api schema::` → ok。差分は `ProjectLifecycle` /
+    `MilestoneLifecycle` / `Project.{archived_at, paused_from}` / `Milestone.paused_from` /
+    `ProjectStatus::cancelled` / `MilestoneStatus::{paused, cancelled}` の**追加のみ**
+    （`worker-protocol.schema.json` は**変わらない** ＝ ワーカーからは何も見えない）。
+  - `bash scripts/sync-gui-docs.sh` → `updated gui/docs/taskd-api-v1.md`。
+  - 受け入れ条件ごと（ADR-0044 §4 B2 と §5）:
+    - **案件・途中目標の cancel / pause / resume / archive と連鎖** →
+      `task_ops::lifecycle::tests::cancelling_a_project_cancels_its_open_tasks_and_milestones_and_keeps_terminal_ones`
+      （`running` と `ready` が `cancelled`、`done` はそのまま、他の案件のタスクは無傷、`reached` の
+      途中目標は残る）、`the_cascade_reason_says_which_level_cancelled_the_task`
+      （`reason` が `project_cancelled` / `milestone_cancelled`）、
+      `pause_remembers_the_previous_status_and_resume_restores_it`（`paused_from` の往復、二重の
+      pause と `paused` でない resume が 409）、`milestone_pause_and_resume_round_trip`、
+      `only_a_terminal_project_can_be_archived_and_archived_tasks_are_hidden_by_default`、
+      `unknown_ids_are_not_found`。API 側は `task-api/tests/lifecycle.rs` の 6 件
+      （`cancelling_a_project_cascades_to_its_tasks_and_milestones`、
+      `cancelling_a_milestone_only_touches_its_own_tasks`、
+      `pausing_a_project_stops_dispatch_and_resume_restores_the_previous_status`、
+      `pausing_a_milestone_stops_only_its_own_tasks`、
+      `archive_requires_a_terminal_project_and_hides_it_and_its_tasks_by_default`、
+      `unknown_and_malformed_ids_are_404`）。
+    - **paused の dispatch 抑止と resume での復帰** →
+      `task_ops::lifecycle::tests::a_paused_project_stops_dispatch_and_resume_brings_it_back`
+      （`ready_tasks` から消え、**タスクの状態は `ready` のまま**＝ 状態機械は触らない。`resume` で戻る）と
+      `a_paused_milestone_stops_dispatch_of_its_tasks_only`（同じ案件の他のタスクは残る）。
+      API からも `pausing_a_project_stops_dispatch_and_resume_restores_the_previous_status` で確認。
+    - **アーカイブの既定の隠蔽** → `archive_requires_a_terminal_project_and_hides_it_and_its_tasks_by_default`:
+      動いている案件の `archive` は 409 → 中止してから `archive` → `GET /projects` から消え
+      `?archived=1` で見える → `GET /tasks` からも消え `?archived=1` で見える →
+      **`GET /tasks/{id}`（個別）は 200 のまま** → `unarchive` で戻る（二度押しても 200）。
+    - **cancel での worktree・ブランチ削除** → **Phase 52 の実装のまま**（`Dispatcher::cleanup_cancelled_worktrees`
+      が `Status::Cancelled` のタスクの `remove_for_cancel()` を呼ぶ）。連鎖で `cancelled` になったタスクも
+      同じ掃除に乗る（連鎖は状態を `cancelled` にするだけで、掃除の経路は 1 本）。この Phase では触っていない。
+    - **run の止め方の統一** → `task-dispatch/tests/unified_kill.rs` の 4 件。fake ワーカーが
+      `sleep 300 &` で**孫**を起こして pid をファイルに書き、`cancel` / `Interrupt` / 実時間タイムアウト /
+      drain のそれぞれで**孫が消える**ことを（上限付きの待ちで）見る。Phase 54 までの `abort()` だけの
+      実装ではこの 4 件のうち `cancel` / `Interrupt` / drain が落ちる。
+      単体は `task_worker::process_group::tests::kill_tree_terminates_the_whole_group_including_grandchildren`。
+      **回帰の実証**: `Dispatcher::stop_run` の `task_worker::kill_tree(...)` の 1 行を一時的に外して
+      `cancel_kills_the_worker_process_group_including_grandchildren` を走らせると **FAILED**
+      （`the grandchild ... survived Cancel (process group was not signalled)`、10.25 秒）。
+      1 行を戻すと 4 件とも ok（1.08 秒）。テストが本当にこの Phase の修正を見ていることの証拠。
+    - **`PATCH` からは `paused` / `cancelled` を入れられない** →
+      `task-api/tests/lifecycle.rs::patch_cannot_set_paused_or_cancelled_on_a_project_or_a_milestone`
+      （案件・途中目標 × `paused` / `cancelled` の 4 通りが 422 `validation`、
+      `errors[0].field = "status"`、状態は変わらない。`active` / `in_progress` は従来どおり 200）。
+    - **変更系の認可** → `task-api/tests/operations.rs` の
+      `every_mutating_endpoint_requires_a_bearer_token`（`POST /tasks` / `approve` / `reject` / `answer` /
+      `cancel` / `retry` / `POST /plans` / `POST /replay` の 8 つが**トークン無しで 401**、しかも
+      **何も起きていない**（状態も件数も変わらない）、トークンを付けると 401 でなくなる）と
+      `project_and_milestone_mutations_require_a_bearer_token`（案件・途中目標の 11 経路）。
+      `task-api` の単体 `handlers::tests::replay_without_a_token_is_unauthorized`。
+      既存の `auth_and_guards.rs` の 415 / 413 / 400 はトークン付きの env で従来どおり通る。
+  - **GUI（G19。詳細は `gui/docs/PROGRESS.md` の `## Phase G19`）**: 案件画面のヘッダに
+    「一時停止／再開」「中止（2 段の確認）」「アーカイブ（2 段の確認）／アーカイブ解除」、
+    paused / cancelled / archived のバッジと 4 種のバナー、案件一覧の「アーカイブを表示」（`?archived=1`）、
+    途中目標カードの「一時停止／再開」「中止（確認）」、ボードの一時停止・中止バナー、
+    `GET /tasks?archived=` の中継。押せるかどうかの最終判断は taskd（409 をそのまま出す）で、
+    `gui/app/lib/lifecycle.ts` は**表示の判定だけ**の純関数（G19-D1）。
+    `pnpm lint` / `typecheck` / `test` / `build` すべて exit **0**、**53 ファイル / 758 テスト**
+    （G18 の 52 / 726 から 1 ファイル・**+32** テスト。うち 1 件は taskd 側の「途中目標の終端は
+    `reached` / `redesigned` / `cancelled`」の確定に合わせて後から足した
+    `milestoneLifecycleButtons` の中止ボタンの判定）。`pnpm gen:types` は冪等（2 回目の出力が 1 回目と
+    完全一致）。`app/taskd/types.ts` は再生成だけで**手では触っていない**。
+    `pnpm e2e` は**走らせていない**（実 taskd とブラウザが要り、既定の 7700/7710 は本番が使っている。
+    G19-U1）。
+    **GUI 側の監査で分かったこと**: 変更系の呼び出し 52 か所は全て `TaskdClient`（`TASKD_API_TOKEN_FILE`
+    からトークンを読む）を引数に取る 16 のモジュールの中にあり、`action` を持つ 20 のルートのうち 18 が
+    `getTaskdClient()` を使う（残る 2 つは `login` / `logout` で taskd を呼ばない）。
+    `app/` の生の `fetch(` 3 か所は**ブラウザから GUI 自身の `/files/...` への GET** で taskd ではない。
+    ＝ **この Phase の「変更系はすべて管理系」に GUI 側の直しは要らなかった**。
+  - **本番には触っていない**（`/home/rmaeda/taskd/`・動いているプロセス・7710/7700・`systemctl` の
+    いずれも）。実機の昇格はこの Phase では走らせていない。テストは外部ネットワークに出ていない
+    （`sh` と `sleep` と tempdir の SQLite だけ）。
+- **A3（ADR-0043 D3 コンテナ）との合流のための覚書**:
+  - `crates/task-worker/src/subprocess.rs` への変更は **1 行だけ**（`command.spawn()` の直後の
+    `let _process_group = crate::process_group::ProcessGroup::register(run_id, child.id());`）。
+    コマンドの組み立ての API（`SubprocessSpec` / `run_subprocess` のシグネチャ）は**変えていない**。
+  - `crates/taskd/src/config.rs` は**触っていない**（`[containers]` と衝突しない）。
+  - `crates/task-worker/src/task_repos.rs` も**触っていない**。
+  - `claude_code.rs` / `codex.rs` / `acp.rs` / `local_deep_research.rs` / `paperqa.rs` にも同じ 1 行
+    （+ コメント 1 行）を足した。A3 がコマンドを `runtime run --rm -i …` で包んでも、
+    **包んだコマンドの pid がそのままプロセスグループの長になる**ので `kill_tree` はそのまま効く
+    （コンテナの中の孫までは届かないので、A3 は `--init` か `runtime kill` を足すとよい。下の P55-4）。
+- 未解決:
+  - P55-1: **dispatch の抑止は `ready_tasks` の 1 か所**で、**スケジュール側は止めていない**。
+    止まっている案件でも途中目標のレビュー対話・報告の圧縮の**行は作られる**（`ready` のまま動かない）。
+    長く止めると `ready` の裏方タスクが溜まる。溜まりが実機で気になるなら、
+    `taskd::milestone_review::schedule` と `taskd::reports` に案件の状態の門を足す。
+  - P55-2: **`kill_tree` の `grace` 後の SIGKILL は pid の再利用に対して無防備**。`killpg` は
+    「その pgid のグループ長」にしか届かず、Linux の pid は上限まで順に配られるので既定 10 秒の間に
+    一周することはまず無いが、厳密には残る。`pidfd` を使えば消せる。
+  - P55-3: **`JoinHandle::abort()` を即座に行うので、直接の子は `kill_on_drop` の SIGKILL で死ぬ**。
+    孫は SIGTERM → `grace` → SIGKILL の正しい扱いを受けるが、ハーネス自身に後片付けの猶予は無い。
+    猶予を与えるなら `abort()` を `grace` 後にずらす必要があり、そうすると打ち切った run が
+    イベントを書き足してしまう（いまは `abort()` がそれを止めている）。実機で困るまではこのまま。
+  - P55-4: **コンテナ実行（A3）と `kill_tree` の関係**。`podman run` / `docker run` の pid を
+    killpg しても**コンテナの中のプロセスには届かない**（別の PID 名前空間）。A3 が入ったら
+    `--init` を付ける（PID 1 が SIGTERM を子に流す）か、`kill_tree` のあとに
+    `runtime kill --signal TERM <name>` を足す必要がある。A3 の Phase で確認すること。
+  - P55-5: **`taskctl` は HTTP API を使わないので認可の統一の外側**。`--db` で SQLite を直接開けば
+    誰でも変更できる（ファイルの権限が唯一の門）。SPEC §3.6 の「押せるのは人だけ」は
+    「API 経由では人だけ」であって「DB に触れるのは人だけ」ではない。従来どおりの前提だが、
+    認可を揃えた今は書き残しておく。
+  - P55-7: **`PATCH` の `paused` / `cancelled` を 422 にしたのは v1 の挙動の変更**（追加ではない）。
+    いままで `PATCH /projects/{id} {"status":"paused"}` は 200 で通っていた（`ProjectStatus::Paused` は
+    Phase 55 より前から列挙型にあった）。GUI 以外の利用者（`curl` の手作業）がこれに依存していたら
+    422 になる。`docs/gui/api.md` §3.46 と §3.84〜3.91 に書いた。
+  - P55-6: **Phase 52–54 実機の気づき**（案件「Pluvio…」のタスク `01M2VTETVXHTZVJQBKYTPHZ784` が
+    `reviewing` のまま）は、この Phase の `POST /projects/{id}/cancel` で畳める。
+    **実機ではまだ実行していない**（本番に触らない方針。人が GUI から押すか、次の昇格の後に行う）。
+- 提案:
+  - ADR-0044 D6 に「案件の中止は非終端の途中目標も `cancelled` にする」「`archive` / `unarchive` は冪等」
+    「dispatch の抑止から対話は除く」を本文として書き足すとよい（いまは「6. Phase 55 追記」にある）。
+  - ADR-0044 §5 の「変更を伴う API はすべて管理系」は `reject` / `replay` / 案件・途中目標の変更系を
+    数えていなかった。本文の列挙を実装に合わせるとよい。
+  - ADR-0002 / 0021 の状態機械の表に `ProjectCancelled` / `MilestoneCancelled` の行を足すとよい
+    （遷移は `Cancel` と同じで理由だけが違う、と 1 行）。
+  - **GUI から上がった 2 件（`gui/docs/PROGRESS.md` の G19-P1 / G19-P2）**。どちらも D6 の外なので
+    Phase 55 では入れていない:
+    - **`TaskSummary` に「上が止まっているので dispatch されない」印**（`api.md` §3.3 の追加。
+      `halted` などの真偽値を `ready_tasks` と同じ述語で計算して返す）。いまはボードの 待ち 列に
+      止まっている仕事が普通に並び、バナーだけが手がかり。GUI 側で案件・途中目標の状態から
+      derive すると taskd の判断を作り直すことになるので、**taskd が返すべき値**。
+    - **`ProjectLifecycle.cancelled_milestones` を `{id, title}` にする**。いまは id の配列なので、
+      中止の flash は途中目標について件数しか出せない（タスクは `cancelled_tasks` に題名と id があるので
+      リンクを出せている）。

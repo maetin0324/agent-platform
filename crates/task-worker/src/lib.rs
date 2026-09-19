@@ -16,6 +16,8 @@ pub mod local_worktree;
 pub mod memory;
 pub mod paperqa;
 pub mod preamble;
+/// ADR-0044 §5 Phase 53 追記（Phase 55）: run の止め方を 1 つにする（プロセスグループごと止める）。
+pub mod process_group;
 pub mod protocol;
 pub mod provider;
 pub mod result_report;
@@ -54,6 +56,7 @@ pub use protocol::{
     PROTOCOL_VERSION, PriorReview, ProviderFailure, RecentWork, ReviewOutput, ReviewRequest, ReviewVerdictOut,
     RoleContext, RunContext, RunRequest, WorkerMessage,
 };
+pub use process_group::{ProcessGroup, kill_tree};
 pub use provider::classify_provider_failure;
 pub use result_report::{
     MilestoneProposal, ReportDeclaration, milestone_proposal_from_result_json, read_result_milestone_proposal,

@@ -87,6 +87,9 @@ pub struct ApiV1Schema {
     /// Phase 41（ADR-0038 D2）: 途中目標の判定（`POST /milestones/{id}/decide`）。
     pub milestone_decide: MilestoneDecideBody,
     pub milestone_decided: MilestoneDecided,
+    /// Phase 55（ADR-0044 D6）: 案件・途中目標の中止・一時停止・アーカイブの応答。
+    pub project_lifecycle: task_ops::lifecycle::ProjectLifecycle,
+    pub milestone_lifecycle: task_ops::lifecycle::MilestoneLifecycle,
     /// GUI 監査対応 Phase 29（ADR-0033 D4 追記）: 分解を起こす（`POST /projects/{id}/plan`）。
     pub project_plan: ProjectPlanBody,
     pub project_plan_accepted: ProjectPlanAccepted,

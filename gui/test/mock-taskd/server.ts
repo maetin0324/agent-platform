@@ -1,7 +1,31 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { CommentResult, EditResult, Problem, TaskComment, TaskList, TaskSummary, Timeline } from "~/taskd/types";
-import { commentResult, defaultHealth, editResult, taskComment, taskSummary, timeline } from "./fixtures";
+import type {
+  CommentResult,
+  EditResult,
+  MilestoneLifecycle,
+  Problem,
+  Project,
+  ProjectLifecycle,
+  ProjectList,
+  TaskComment,
+  TaskList,
+  TaskSummary,
+  Timeline,
+} from "~/taskd/types";
+import {
+  commentResult,
+  defaultHealth,
+  editResult,
+  milestone,
+  milestoneLifecycle,
+  project,
+  projectLifecycle,
+  taskComment,
+  taskRef,
+  taskSummary,
+  timeline,
+} from "./fixtures";
 
 /**
  * プロセス内の偽 taskd（docs/adr/0002 D8）。実 taskd を起動せず、Vitest から `TaskdClient` /
@@ -138,6 +162,76 @@ export function serveTaskManagement(mock: MockTaskd, options: TaskManagementOpti
   });
   mock.on("POST", `/api/v1/tasks/${id}/reopen`, (_req, res) => {
     sendJson(res, 200, { id, from: "failed", to: "ready", reason: "reopened" });
+  });
+}
+
+/**
+ * 中止・一時停止・アーカイブ（ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.91。Phase 55 / G19）の 8 経路を
+ * まとめて登録する。**どれも 200**（`archive` / `unarchive` は冪等なので二度押しでも 200）。
+ *
+ * 状態遷移は taskd の仕事なので、ここでは**操作ごとに決め打ちの応答**を返すだけ
+ * （`cancel` だけ `cancelled_*` に中身を入れる）。GUI がどの経路にどの本文を送ったかは
+ * `mock.requests` で検証する。個別の応答を差し替えたいときは `projects` / `milestones` に渡す。
+ */
+export interface LifecycleOptions {
+  projectId?: string;
+  milestoneId?: string;
+  /** 操作名 → `ProjectLifecycle`。省略した操作は既定（`fixtures.ts` の `projectLifecycle`）。 */
+  projects?: Partial<Record<"cancel" | "pause" | "resume" | "archive" | "unarchive", ProjectLifecycle>>;
+  /** 操作名 → `MilestoneLifecycle`。 */
+  milestones?: Partial<Record<"cancel" | "pause" | "resume", MilestoneLifecycle>>;
+}
+
+export function serveLifecycle(mock: MockTaskd, options: LifecycleOptions = {}): void {
+  const projectId = options.projectId ?? "p1";
+  const milestoneId = options.milestoneId ?? "m1";
+  const projectDefaults: Record<string, ProjectLifecycle> = {
+    cancel: projectLifecycle({
+      project: project({ status: "cancelled" }),
+      cancelled_tasks: [taskRef()],
+      cancelled_milestones: [milestoneId],
+    }),
+    pause: projectLifecycle({ project: project({ status: "paused", paused_from: "active" }) }),
+    resume: projectLifecycle({ project: project({ status: "active" }) }),
+    archive: projectLifecycle({ project: project({ status: "done", archived_at: "2026-09-19T12:00:00Z" }) }),
+    unarchive: projectLifecycle({ project: project({ status: "done" }) }),
+  };
+  const milestoneDefaults: Record<string, MilestoneLifecycle> = {
+    cancel: milestoneLifecycle({ milestone: milestone({ status: "cancelled" }), cancelled_tasks: [taskRef()] }),
+    pause: milestoneLifecycle({ milestone: milestone({ status: "paused", paused_from: "in_progress" }) }),
+    resume: milestoneLifecycle({ milestone: milestone({ status: "in_progress" }) }),
+  };
+  for (const op of ["cancel", "pause", "resume", "archive", "unarchive"] as const) {
+    mock.on("POST", `/api/v1/projects/${projectId}/${op}`, (_req, res) => {
+      sendJson(res, 200, options.projects?.[op] ?? projectDefaults[op]);
+    });
+  }
+  for (const op of ["cancel", "pause", "resume"] as const) {
+    mock.on("POST", `/api/v1/milestones/${milestoneId}/${op}`, (_req, res) => {
+      sendJson(res, 200, options.milestones?.[op] ?? milestoneDefaults[op]);
+    });
+  }
+}
+
+/**
+ * `GET /projects` の `?archived=1`（ADR-0044 D6）。**隠す・出すは taskd の仕事**なので、
+ * ここでは「クエリに `archived=1` が付いていたらアーカイブ済みも返す」という最小限の振る舞いだけ真似て、
+ * GUI がクエリを付けたかどうかを `mock.requests` で検証できるようにする。
+ */
+export interface ProjectListOptions {
+  /** アーカイブされていない案件（既定でも返る）。 */
+  items?: Project[];
+  /** アーカイブ済みの案件（`?archived=1` のときだけ返る）。 */
+  archived?: Project[];
+}
+
+export function serveProjectList(mock: MockTaskd, options: ProjectListOptions = {}): void {
+  const items = options.items ?? [project()];
+  const archived = options.archived ?? [];
+  mock.on("GET", "/api/v1/projects", (req, res) => {
+    const url = new URL(req.url ?? "/", "http://mock-taskd.invalid");
+    const showArchived = ["1", "true"].includes(url.searchParams.get("archived") ?? "");
+    sendJson(res, 200, { items: showArchived ? [...items, ...archived] : items } satisfies ProjectList);
   });
 }
 

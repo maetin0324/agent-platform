@@ -420,6 +420,33 @@ pub fn get_with(path: &str, headers: &[(&str, &str)]) -> Request<Body> {
     request
 }
 
+/// ADR-0044 §5 Phase 53 追記（Phase 55）: **変更を伴う API はすべて管理系（bearer 必須）**。
+/// 変更系を呼ぶテストはこの env（`token_file` 相当あり）を使い、要求に `admin_headers()` を付ける。
+/// `token` を設定すると読み取りにも bearer が要る（api.md §1.3）ので、`get_admin` / `post_admin` を使う。
+pub fn admin_env() -> TestEnv {
+    TestEnv::with(EnvOptions {
+        token: Some(TOKEN.to_string()),
+        ..EnvOptions::default()
+    })
+}
+
+/// `admin_env()` に対する `Authorization: Bearer`。
+pub fn admin_headers() -> [(&'static str, &'static str); 1] {
+    [("authorization", "Bearer s3cret-token-value")]
+}
+
+pub fn get_admin(path: &str) -> Request<Body> {
+    get_with(path, &admin_headers())
+}
+
+pub fn post_admin(path: &str, body: &Value) -> Request<Body> {
+    post_json_with(path, body, &admin_headers())
+}
+
+pub fn patch_admin(path: &str, body: &Value) -> Request<Body> {
+    patch_json_with(path, body, &admin_headers())
+}
+
 pub fn post_json(path: &str, body: &Value) -> Request<Body> {
     Request::post(path)
         .header("host", HOST)

@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { data, isRouteErrorResponse, Link, redirect, useFetcher } from "react-router";
+import { data, Form, isRouteErrorResponse, Link, redirect, useFetcher } from "react-router";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { RepoFields } from "~/components/RepoFields";
@@ -7,6 +7,8 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import {
+  checkboxClass,
+  chipLabelClass,
   hintClass,
   inputClass,
   labelClass,
@@ -21,7 +23,8 @@ import { Icon } from "~/components/ui/Icon";
 import { EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
 import { WorkspaceFields } from "~/components/WorkspaceFields";
-import { projectStatusLabel } from "~/lib/labels";
+import { ARCHIVED_BADGE_LABEL, projectStatusLabel, SHOW_ARCHIVED_LABEL } from "~/lib/labels";
+import { archivedQuery, projectIsArchived, readArchivedParam } from "~/lib/lifecycle";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { TaskdBanner } from "~/root";
 import type { CreateFailure } from "~/taskd/action-types";
@@ -48,11 +51,19 @@ export interface ProjectsData {
   rows: ProjectRow[];
   /** 作業場所（`GET /clusters`）の選択肢（ADR-0039 D1、Phase G13k）。taskd に届かないときは空。 */
   clusters: ClusterView[];
+  /**
+   * アーカイブされた案件も出しているか（`?archived=1`。ADR-0044 D6、Phase 55 / G19）。
+   * URL がそのまま状態なので、チェックの初期値はここから取る（リンクとして共有できる）。
+   */
+  showArchived: boolean;
 }
 
 export async function loadProjects(client: TaskdClient, request: Request): Promise<ProjectsData> {
+  // ADR-0044 D6: `GET /projects` はアーカイブされた案件を**既定で隠す**。見たいときだけ `archived=1` を送る
+  // （隠す・出すの判断は taskd。GUI 側で `archived_at` を見て絞り直さない）。
+  const showArchived = readArchivedParam(new URL(request.url).searchParams);
   const [list, clusters] = await Promise.all([
-    client.get<ProjectList>("/projects", { signal: request.signal }),
+    client.get<ProjectList>("/projects", { query: { archived: archivedQuery(showArchived) }, signal: request.signal }),
     // 作業場所（クラスタ）の選択肢（ADR-0039 D1、Phase G13k）。`GET /projects/{id}` の N+1 と同じく、
     // 落ちても一覧・作成フォーム自体は出す（クラスタは「まだ決めない」で作れる）。
     client.get<Clusters>("/clusters", { signal: request.signal }).catch(() => ({ items: [] }) as Clusters),
@@ -69,7 +80,7 @@ export async function loadProjects(client: TaskdClient, request: Request): Promi
       }
     }),
   );
-  return { rows, clusters: clusters.items };
+  return { rows, clusters: clusters.items, showArchived };
 }
 
 export const shouldRevalidate = revalidateAfterActionErrors;
@@ -122,10 +133,11 @@ const PROJECT_STATUS_TONE: Record<ProjectStatus, Tone> = {
   active: "primary",
   paused: "warning",
   done: "success",
+  cancelled: "neutral",
 };
 
 export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
-  const { rows, clusters } = loaderData;
+  const { rows, clusters, showArchived } = loaderData;
   // 失敗（422 等）が SSE の再検証で消えないよう fetcher に載せる（Phase G13f-1、監査 H1）。
   // 成功したら action が `redirect` を返し、fetcher でもそのまま詳細へ移る。
   const fetcher = useFetcher<ProjectCreateFailure>();
@@ -150,6 +162,25 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
         <SectionTitle icon="folder" id="projects-heading" count={rows.length}>
           案件一覧
         </SectionTitle>
+        {/* アーカイブの表示（ADR-0044 D6、Phase 55 / G19）。URL がそのまま状態になるよう GET のフォームで
+            `archived=1` を付け外しする（リンクとして共有できる）。絞り込み自体は taskd が行う。 */}
+        <Form method="get" className="flex flex-wrap items-center gap-2" data-testid="projects-archived-form">
+          <label className={chipLabelClass}>
+            <input
+              type="checkbox"
+              name="archived"
+              value="1"
+              defaultChecked={showArchived}
+              data-testid="projects-show-archived"
+              className={checkboxClass}
+            />
+            {SHOW_ARCHIVED_LABEL}
+          </label>
+          <Button type="submit" variant="secondary" size="sm" data-testid="projects-archived-submit">
+            <Icon name="filter" />
+            絞り込み
+          </Button>
+        </Form>
         {rows.length === 0 ? (
           <EmptyState icon="folder" title="案件がありません">
             下のフォームから最初の案件を投げてください。
@@ -174,9 +205,17 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
                       </Link>
                     </td>
                     <td className={tdClass}>
-                      <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status">
-                        {projectStatusLabel(project.status)}
-                      </Badge>
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status">
+                          {projectStatusLabel(project.status)}
+                        </Badge>
+                        {/* アーカイブは `status` に出ないので別のバッジ（ADR-0044 D6）。 */}
+                        {projectIsArchived(project) && (
+                          <Badge tone="neutral" data-testid="project-archived-badge">
+                            {ARCHIVED_BADGE_LABEL}
+                          </Badge>
+                        )}
+                      </span>
                     </td>
                     <td className={tdClass}>
                       <span className="text-fg-subtle">{project.created_at}</span>

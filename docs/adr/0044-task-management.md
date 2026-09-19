@@ -153,3 +153,47 @@ task_comments(id TEXT PK, task_id TEXT NOT NULL, author_kind TEXT NOT NULL CHECK
 - `PATCH` で `assignee` / `role` を変えたとき tier / adapter / budget を再導出するかは**しない**（人が触った値を壊さない）。人が
   変えたいなら同じ `PATCH` で明示する。GUI の編集フォームは「担当を変えると役割の既定が変わります」と注記するだけ。
 
+
+## 6. Phase 55 追記（2026-09-19。B2 = D6 と §5 の 2 項目の実装から）
+
+D6 と §5 はそのまま実装した。以下は**決めきれていなかったところを決めた**記録（逸脱ではなく細目）。
+
+- **`ProjectStatus` / `MilestoneStatus` の終端**: 案件は `done` / `cancelled`、途中目標は `cancelled`。
+  `MilestoneStatus` に `paused` と `cancelled` を足した（`ProjectStatus` には `paused` が既にあったので
+  `cancelled` だけ）。`paused_from` は `projects` と `milestones` の両方に列で持つ（D6 は案件についてだけ
+  書いていたが、途中目標も同じ理由で要る）。migration `0015_lifecycle.sql`、`SCHEMA_VERSION = 15`。
+- **案件の中止は非終端の途中目標も `cancelled` にする**（D6 は「途中目標は `cancelled`、案件は `cancelled`」と
+  書いていて、案件の中止が途中目標に波及するかが読めなかった）。`reached` / `redesigned` は達成・再設計の
+  記録なので触らない。同じ理由で **`MilestoneStatus::is_terminal()` は `reached` / `redesigned` /
+  `cancelled` の 3 つ**とし、`POST /milestones/{id}/{cancel|pause}` もこの 3 つには効かない（409）。
+  GUI のボタンの出し分け（`gui/app/lib/lifecycle.ts`）はこの規則と 1 対 1 に対応する。
+- **連鎖の理由**: 状態機械に `Trigger::ProjectCancelled` / `MilestoneCancelled` を足した。遷移は `Cancel` と
+  同じ（非終端 → `cancelled`、attempts 据え置き）で、`Event::Transitioned.reason` だけが
+  `project_cancelled` / `milestone_cancelled` になる。タイムラインで「自分が止められたのか、上ごと
+  止まったのか」が読める。**案件・途中目標そのものにはイベント表を作らない**（D8 の「タイムラインに残る
+  だけ」に対して、案件のタイムラインは既存の `messages` と報告で足りる。動くのは `updated_at` だけ）。
+- **dispatch の抑止は `TaskStore::ready_tasks` の 1 か所**。計画・レビュー・まとめ・報告の圧縮といった
+  裏方の run も同じ `tasks` の行なので、ここだけで全部止まる（`milestone_review::schedule` や
+  報告の圧縮の**スケジュール側は止めない**。行は作られるが `ready` のまま動かない）。
+  **例外は対話（`task_core::is_conversation`）**: 止まっている案件でも人が秘書と「なぜ止めたか」を
+  話せる必要があるので、対話タスクだけは起こす。アーカイブ済み・`cancelled` の案件も同じ扱いで抑止する。
+- **`PATCH` からは `paused` / `cancelled` を入れられない**（422）。`PATCH /projects/{id} {status}` /
+  `PATCH /milestones/{id} {status}` は従来どおりの素の setter だが、この 2 つだけは `paused_from` が
+  空のままになり中止の連鎖も起きないので、専用のエンドポイントに誘導する。GUI の「状態を直接変える」
+  プルダウンからも外した（`gui/app/routes/projects.$id.tsx`）。
+- **`archive` / `unarchive` は冪等**（既にその状態なら 200 でそのまま返す）。GUI の二度押しを 409 に
+  しないため。非終端の案件の `archive` だけが 409。
+- **run の止め方の統一の実装**（§5 の 1 つ目）: `task-worker` に `process_group` モジュールを足した。
+  全アダプタは既に `Command::process_group(0)` で子を新しいプロセスグループの長にしていたので、
+  spawn 直後に「`run_id` → その pid」を 1 つの表に登録し、`kill_tree(run_id, grace)` が
+  `killpg(SIGTERM)` → `grace` → `killpg(SIGKILL)` を送る。ディスパッチャの `cancel` / `Interrupt` /
+  リース喪失 / drain の 4 経路と、`subprocess` の中のタイムアウトがこれを通る。
+  **tokio の `JoinHandle::abort()` は従来どおり即座に行う**（run の記録を止めるための帳簿）。
+  そのため直接の子は `kill_on_drop` で即 SIGKILL されるが、**ハーネスが起こした孫はグループ宛の
+  SIGTERM を受けて片付けの猶予を持つ**（D2 の表が求めていたのはここ）。
+- **認可を揃えた範囲**（§5 の 2 つ目）: `POST /tasks` / `approve` / `reject` / `answer` / `cancel` /
+  `retry` / `POST /plans` / `POST /replay` / `PATCH /projects/{id}` / `POST /projects/{id}/milestones` /
+  `PATCH /milestones/{id}` を管理系にした（`reject` と `replay` と案件・途中目標の 3 つは §5 が数えて
+  いなかったが、「変更を伴う API はすべて」の規則に含まれる）。読み取りは従来どおり。
+  **認可は本文の検証より先**（トークン無しの不正な本文は 400 ではなく 401）。
+  `taskctl` は HTTP API を使わず SQLite を直接開くので影響しない。

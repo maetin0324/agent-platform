@@ -49,10 +49,12 @@ const MIGRATION_0012: &str = include_str!("../migrations/0012_project_repos.sql"
 const MIGRATION_0013: &str = include_str!("../migrations/0013_task_comments.sql");
 /// ADR-0043 D5（Phase 54）: `task_integrations`（取り込みの記録）。
 const MIGRATION_0014: &str = include_str!("../migrations/0014_task_integrations.sql");
+/// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ（`archived_at` / `paused_from`）。
+const MIGRATION_0015: &str = include_str!("../migrations/0015_lifecycle.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -157,6 +159,10 @@ pub struct ListFilter {
     /// `false` なら従来どおり title / objective だけ（`taskctl` の既存の挙動）。
     pub text_includes_comments: bool,
     // ---- ADR-0044 D4（Phase 53）: ここまで ----
+    /// ADR-0044 D6（Phase 55）: **アーカイブされた案件のタスクを隠す**（`GET /tasks` の既定。
+    /// `?archived=1` で `false`）。既定は `false`（＝隠さない）なので、ディスパッチャ・報告・
+    /// 途中目標のレビューなど既存の呼び出し側の挙動は変わらない。
+    pub hide_archived: bool,
 }
 
 /// `TaskStore::list_page` の並び順（ADR-0013 D10）。
@@ -324,6 +330,13 @@ fn filter_predicate(filter: &ListFilter) -> (String, Vec<SqlValue>) {
         for p in &filter.priorities {
             params.push(SqlValue::Integer(*p as i64));
         }
+    }
+    // ADR-0044 D6（Phase 55）: アーカイブされた案件のタスクを隠す（案件に属さないタスクは常に見える）。
+    if filter.hide_archived {
+        clauses.push(
+            "NOT EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.archived_at IS NOT NULL)"
+                .to_string(),
+        );
     }
     if let Some(needle) = &filter.text_contains {
         let pattern = format!("%{}%", escape_like(needle));
@@ -545,6 +558,16 @@ pub trait TaskStore:
     fn project_set_status(&self, id: ProjectId, status: ProjectStatus) -> Result<bool, StoreError>;
     /// ADR-0039 D1: 作業場所だけを変える（`None` で消す。`updated_at` も更新）。無い案件は `Ok(false)`。
     fn project_set_workspace(&self, id: ProjectId, workspace: Option<&WorkspaceSpec>) -> Result<bool, StoreError>;
+    /// ADR-0044 D6（Phase 55）: 状態と `paused_from` を**同時に**書く（`pause` / `resume` / `cancel`）。
+    /// `paused_from` は `Some(None)` で消し、`None` なら触らない。無い案件は `Ok(false)`。
+    fn project_set_lifecycle(
+        &self,
+        id: ProjectId,
+        status: ProjectStatus,
+        paused_from: Option<Option<ProjectStatus>>,
+    ) -> Result<bool, StoreError>;
+    /// ADR-0044 D6（Phase 55）: アーカイブの時刻を書く（`None` で解除）。無い案件は `Ok(false)`。
+    fn project_set_archived_at(&self, id: ProjectId, at: Option<OffsetDateTime>) -> Result<bool, StoreError>;
 
     // ---- ADR-0043 D1（Phase 52）: 案件のリポジトリ（`project_repos`）----
 
@@ -592,8 +615,18 @@ pub trait TaskStore:
     ) -> Result<Milestone, StoreError>;
     /// その案件の途中目標を `seq` 昇順で返す。
     fn milestone_list(&self, project_id: ProjectId) -> Result<Vec<Milestone>, StoreError>;
+    /// ADR-0044 D6（Phase 55）: 途中目標を id 1 つで引く（案件を知らなくてよい）。
+    fn milestone_get(&self, id: MilestoneId) -> Result<Option<Milestone>, StoreError>;
     /// 状態だけを変える。無い途中目標は `Ok(false)`。
     fn milestone_set_status(&self, id: MilestoneId, status: MilestoneStatus) -> Result<bool, StoreError>;
+    /// ADR-0044 D6（Phase 55）: 状態と `paused_from` を**同時に**書く（`pause` / `resume` / `cancel`）。
+    /// `paused_from` は `Some(None)` で消し、`None` なら触らない。無い途中目標は `Ok(false)`。
+    fn milestone_set_lifecycle(
+        &self,
+        id: MilestoneId,
+        status: MilestoneStatus,
+        paused_from: Option<Option<MilestoneStatus>>,
+    ) -> Result<bool, StoreError>;
 
     // ---- ADR-0033 D4: 対話（`messages`）----
 
@@ -846,6 +879,7 @@ impl SqliteStore {
             12 => Ok(MIGRATION_0012),
             13 => Ok(MIGRATION_0013),
             14 => Ok(MIGRATION_0014),
+            15 => Ok(MIGRATION_0015),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -927,10 +961,24 @@ impl SqliteStore {
         // ADR-0039 D1 / ADR-0043 D1: 7 列目は **primary のリポジトリの `location_json`**、無ければ
         // 従来の `projects.workspace` 列（`COALESCE`。導入前の行と作業場所を決めていない案件は NULL）。
         let workspace_col: Option<String> = row.get(7)?;
+        // ADR-0044 D6（Phase 55）: 8 列目 `archived_at`、9 列目 `paused_from`。
+        let archived_at_col: Option<String> = row.get(8)?;
+        let paused_from_col: Option<String> = row.get(9)?;
         let (Ok(id), Some(status)) = (id.parse::<ProjectId>(), ProjectStatus::parse(&status_col)) else {
             return Ok(Err(StoreError::Invalid(format!(
                 "invalid project row: id={id} status={status_col}"
             ))));
+        };
+        let paused_from = match paused_from_col.as_deref() {
+            Some(raw) => match ProjectStatus::parse(raw) {
+                Some(parsed) => Some(parsed),
+                None => {
+                    return Ok(Err(StoreError::Invalid(format!(
+                        "invalid project paused_from for {id}: {raw}"
+                    ))));
+                }
+            },
+            None => None,
         };
         let workspace = match workspace_col.as_deref() {
             Some(raw) => match serde_json::from_str::<WorkspaceSpec>(raw) {
@@ -951,6 +999,11 @@ impl SqliteStore {
                 status,
                 secretary_summary: row.get(4)?,
                 workspace,
+                archived_at: match archived_at_col.as_deref() {
+                    Some(raw) => Some(parse_rfc3339(raw)?),
+                    None => None,
+                },
+                paused_from,
                 created_at: parse_rfc3339(&created_at)?,
                 updated_at: parse_rfc3339(&updated_at)?,
             })
@@ -1249,12 +1302,39 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// ADR-0044 D6（Phase 55）: いま dispatch を止めている案件の id（`paused` / `cancelled` /
+    /// アーカイブ済み）。`ready_tasks` が 1 tick に 1 回だけ引く。
+    fn halted_projects_locked(conn: &Connection) -> Result<std::collections::HashSet<String>, StoreError> {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM projects WHERE status IN ('paused', 'cancelled') OR archived_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = std::collections::HashSet::new();
+        for row in rows {
+            out.insert(row?);
+        }
+        Ok(out)
+    }
+
+    /// ADR-0044 D6（Phase 55）: いま dispatch を止めている途中目標の id（`paused` / `cancelled`）。
+    fn halted_milestones_locked(conn: &Connection) -> Result<std::collections::HashSet<String>, StoreError> {
+        let mut stmt = conn.prepare("SELECT id FROM milestones WHERE status IN ('paused', 'cancelled')")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = std::collections::HashSet::new();
+        for row in rows {
+            out.insert(row?);
+        }
+        Ok(out)
+    }
+
     fn milestone_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Milestone, StoreError>> {
         let id: String = row.get(0)?;
         let project_id: String = row.get(1)?;
         let status_col: String = row.get(5)?;
         let created_at: String = row.get(6)?;
         let updated_at: String = row.get(7)?;
+        // ADR-0044 D6（Phase 55）: 8 列目 `paused_from`。
+        let paused_from_col: Option<String> = row.get(8)?;
         let (Ok(id), Ok(project_id), Some(status)) = (
             id.parse::<MilestoneId>(),
             project_id.parse::<ProjectId>(),
@@ -1264,6 +1344,17 @@ impl SqliteStore {
                 "invalid milestone row: id={id} project_id={project_id} status={status_col}"
             ))));
         };
+        let paused_from = match paused_from_col.as_deref() {
+            Some(raw) => match MilestoneStatus::parse(raw) {
+                Some(parsed) => Some(parsed),
+                None => {
+                    return Ok(Err(StoreError::Invalid(format!(
+                        "invalid milestone paused_from for {id}: {raw}"
+                    ))));
+                }
+            },
+            None => None,
+        };
         Ok((|| {
             Ok(Milestone {
                 id,
@@ -1272,6 +1363,7 @@ impl SqliteStore {
                 title: row.get(3)?,
                 description: row.get(4)?,
                 status,
+                paused_from,
                 created_at: parse_rfc3339(&created_at)?,
                 updated_at: parse_rfc3339(&updated_at)?,
             })
@@ -1923,6 +2015,14 @@ impl TaskStore for SqliteStore {
     fn ready_tasks(&self, limit: usize) -> Result<Vec<Task>, StoreError> {
         let conn = self.lock()?;
 
+        // ADR-0044 D6（Phase 55）: **一時停止・中止・アーカイブされた案件／途中目標のタスクは
+        // dispatch しない**（`ready` のまま。状態機械は触らない）。案件の支援 run（計画・レビュー・
+        // まとめ・報告の圧縮）も同じ `tasks` の行なので、この 1 か所で全部が止まる。
+        // **対話（`is_conversation`）だけは例外**: 人が「なぜ止めたのか」を秘書と話せなくなるため、
+        // 止まっている案件でも対話は起こす（判断は下の Rust 側。`Task` を読まないと見分けられない）。
+        let halted_projects = Self::halted_projects_locked(&conn)?;
+        let halted_milestones = Self::halted_milestones_locked(&conn)?;
+
         // ADR-0010 D2（P-36）: dispatch されない Approval は取得件数を占有しないよう SQL 段階で除外する。
         let mut stmt = conn.prepare(
             "SELECT json FROM tasks WHERE status = ?1 AND kind != ?2 ORDER BY priority DESC, created_at ASC",
@@ -1935,6 +2035,17 @@ impl TaskStore for SqliteStore {
         let mut result = Vec::new();
         for row in rows {
             let task = Self::row_to_task(row?)?;
+
+            // ADR-0044 D6（Phase 55）: 止まっている案件・途中目標のタスクは見送る（対話は除く）。
+            if !is_conversation(&task) {
+                let halted = task.project_id.is_some_and(|p| halted_projects.contains(&p.to_string()))
+                    || task
+                        .milestone_id
+                        .is_some_and(|m| halted_milestones.contains(&m.to_string()));
+                if halted {
+                    continue;
+                }
+            }
 
             // P-78（ADR-0033 D4 / Phase 28）: 対話タスクの `depends_on` は返事を送った順に返すための
             // 直列化だけが目的で、前の対話タスクの成否には意味が無い。前の対話タスクが終端に達していれば
@@ -2449,8 +2560,9 @@ impl TaskStore for SqliteStore {
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT INTO projects (id, title, request, status, secretary_summary, created_at, updated_at, workspace) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO projects (id, title, request, status, secretary_summary, created_at, updated_at, workspace, \
+             archived_at, paused_from) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 project.id.to_string(),
                 project.title,
@@ -2460,6 +2572,8 @@ impl TaskStore for SqliteStore {
                 format_rfc3339(project.created_at)?,
                 format_rfc3339(project.updated_at)?,
                 Self::project_workspace_column(project.workspace.as_ref())?,
+                project.archived_at.map(format_rfc3339).transpose()?,
+                project.paused_from.map(|s| s.as_str()),
             ],
         )?;
         // ADR-0043 D1: 案件の作業場所は `is_primary = 1` のリポジトリ 1 件として持つ
@@ -2492,7 +2606,8 @@ impl TaskStore for SqliteStore {
                 "SELECT p.id, p.title, p.request, p.status, p.secretary_summary, p.created_at, p.updated_at, \
                  COALESCE((SELECT r.location_json FROM project_repos r \
                            WHERE r.project_id = p.id AND r.is_primary = 1 \
-                           ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace) \
+                           ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace), \
+                 p.archived_at, p.paused_from \
                  FROM projects p WHERE p.id = ?1",
                 params![id.to_string()],
                 Self::project_row,
@@ -2507,7 +2622,8 @@ impl TaskStore for SqliteStore {
             "SELECT p.id, p.title, p.request, p.status, p.secretary_summary, p.created_at, p.updated_at, \
                  COALESCE((SELECT r.location_json FROM project_repos r \
                            WHERE r.project_id = p.id AND r.is_primary = 1 \
-                           ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace) \
+                           ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace), \
+                 p.archived_at, p.paused_from \
              FROM projects p ORDER BY p.created_at DESC, p.id DESC",
         )?;
         let rows = stmt.query_map([], Self::project_row)?;
@@ -2524,6 +2640,42 @@ impl TaskStore for SqliteStore {
             "UPDATE projects SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![
                 status.as_str(),
+                format_rfc3339(OffsetDateTime::now_utc())?,
+                id.to_string()
+            ],
+        )?;
+        Ok(affected == 1)
+    }
+
+    /// ADR-0044 D6（Phase 55）: `pause` / `resume` / `cancel` は状態と `paused_from` を 1 回の UPDATE で書く
+    /// （`resume` が「戻り先」を読んだ後に別の書き込みが割り込まないように）。
+    fn project_set_lifecycle(
+        &self,
+        id: ProjectId,
+        status: ProjectStatus,
+        paused_from: Option<Option<ProjectStatus>>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let now = format_rfc3339(OffsetDateTime::now_utc())?;
+        let affected = match paused_from {
+            Some(from) => conn.execute(
+                "UPDATE projects SET status = ?1, paused_from = ?2, updated_at = ?3 WHERE id = ?4",
+                params![status.as_str(), from.map(|s| s.as_str()), now, id.to_string()],
+            )?,
+            None => conn.execute(
+                "UPDATE projects SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![status.as_str(), now, id.to_string()],
+            )?,
+        };
+        Ok(affected == 1)
+    }
+
+    fn project_set_archived_at(&self, id: ProjectId, at: Option<OffsetDateTime>) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let affected = conn.execute(
+            "UPDATE projects SET archived_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                at.map(format_rfc3339).transpose()?,
                 format_rfc3339(OffsetDateTime::now_utc())?,
                 id.to_string()
             ],
@@ -2811,6 +2963,7 @@ impl TaskStore for SqliteStore {
             title: title.to_string(),
             description: description.to_string(),
             status,
+            paused_from: None,
             created_at: now,
             updated_at: now,
         };
@@ -2835,7 +2988,7 @@ impl TaskStore for SqliteStore {
     fn milestone_list(&self, project_id: ProjectId) -> Result<Vec<Milestone>, StoreError> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, seq, title, description, status, created_at, updated_at \
+            "SELECT id, project_id, seq, title, description, status, created_at, updated_at, paused_from \
              FROM milestones WHERE project_id = ?1 ORDER BY seq ASC",
         )?;
         let rows = stmt.query_map(params![project_id.to_string()], Self::milestone_row)?;
@@ -2844,6 +2997,19 @@ impl TaskStore for SqliteStore {
             out.push(row??);
         }
         Ok(out)
+    }
+
+    fn milestone_get(&self, id: MilestoneId) -> Result<Option<Milestone>, StoreError> {
+        let conn = self.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT id, project_id, seq, title, description, status, created_at, updated_at, paused_from \
+                 FROM milestones WHERE id = ?1",
+                params![id.to_string()],
+                Self::milestone_row,
+            )
+            .optional()?;
+        row.transpose()
     }
 
     fn milestone_set_status(&self, id: MilestoneId, status: MilestoneStatus) -> Result<bool, StoreError> {
@@ -2856,6 +3022,28 @@ impl TaskStore for SqliteStore {
                 id.to_string()
             ],
         )?;
+        Ok(affected == 1)
+    }
+
+    /// ADR-0044 D6（Phase 55）: 状態と `paused_from` を 1 回の UPDATE で書く（`project_set_lifecycle` と同じ）。
+    fn milestone_set_lifecycle(
+        &self,
+        id: MilestoneId,
+        status: MilestoneStatus,
+        paused_from: Option<Option<MilestoneStatus>>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let now = format_rfc3339(OffsetDateTime::now_utc())?;
+        let affected = match paused_from {
+            Some(from) => conn.execute(
+                "UPDATE milestones SET status = ?1, paused_from = ?2, updated_at = ?3 WHERE id = ?4",
+                params![status.as_str(), from.map(|s| s.as_str()), now, id.to_string()],
+            )?,
+            None => conn.execute(
+                "UPDATE milestones SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![status.as_str(), now, id.to_string()],
+            )?,
+        };
         Ok(affected == 1)
     }
 
@@ -4719,7 +4907,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 14);
+        assert_eq!(SCHEMA_VERSION, 15);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -4862,6 +5050,8 @@ mod tests {
     fn sample_project() -> Project {
         let now = OffsetDateTime::now_utc();
         Project {
+            archived_at: None,
+            paused_from: None,
             id: ProjectId::new(),
             title: "Pluvio の新テーマ".into(),
             request: "Pluvio を基盤に用いた新たな研究テーマの模索、検証".into(),
@@ -5043,7 +5233,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 14);
+        assert_eq!(SCHEMA_VERSION, 15);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -5417,6 +5607,71 @@ mod tests {
         assert_eq!(back.category, crate::model::TaskCategory::Other);
     }
 
+    // ---- ADR-0044 D6（Phase 55）: 中止・一時停止・アーカイブ ----
+
+    /// migration 0015 が schema 14 の DB に `projects.archived_at` / `projects.paused_from` /
+    /// `milestones.paused_from` を足す。既存の行はどれも NULL（＝止まっていない・アーカイブされていない）。
+    #[test]
+    fn migration_0015_adds_the_lifecycle_columns_to_a_schema_14_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.sqlite3");
+        let project_id = ProjectId::new();
+        let milestone_id = MilestoneId::new();
+        let now = format_rfc3339(OffsetDateTime::now_utc()).unwrap();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            SqliteStore::configure_pragmas(&conn, &StoreOptions::default()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+            )
+            .unwrap();
+            for version in 1..=14 {
+                SqliteStore::apply_migration_version(&mut conn, version).unwrap();
+            }
+            // 14 版の列だけで案件と途中目標を 1 件ずつ書く（`archived_at` / `paused_from` はまだ無い）。
+            conn.execute(
+                "INSERT INTO projects (id, title, request, status, created_at, updated_at) \
+                 VALUES (?1, '昔の案件', 'やって', 'active', ?2, ?2)",
+                params![project_id.to_string(), now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO milestones (id, project_id, seq, title, description, status, created_at, updated_at) \
+                 VALUES (?1, ?2, 1, '昔の途中目標', '', 'in_progress', ?3, ?3)",
+                params![milestone_id.to_string(), project_id.to_string(), now],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 15);
+
+        let project = store.project_get(project_id).unwrap().expect("project");
+        assert_eq!(project.status, ProjectStatus::Active);
+        assert_eq!(project.archived_at, None);
+        assert_eq!(project.paused_from, None);
+        let milestone = store.milestone_get(milestone_id).unwrap().expect("milestone");
+        assert_eq!(milestone.status, MilestoneStatus::InProgress);
+        assert_eq!(milestone.paused_from, None);
+
+        // 新しい値も往復する。
+        store
+            .project_set_lifecycle(project_id, ProjectStatus::Paused, Some(Some(ProjectStatus::Active)))
+            .unwrap();
+        store.project_set_archived_at(project_id, None).unwrap();
+        let project = store.project_get(project_id).unwrap().expect("project");
+        assert_eq!(project.status, ProjectStatus::Paused);
+        assert_eq!(project.paused_from, Some(ProjectStatus::Active));
+
+        store
+            .milestone_set_lifecycle(milestone_id, MilestoneStatus::Cancelled, Some(None))
+            .unwrap();
+        let milestone = store.milestone_get(milestone_id).unwrap().expect("milestone");
+        assert_eq!(milestone.status, MilestoneStatus::Cancelled);
+        assert_eq!(milestone.paused_from, None);
+    }
+
     // ---- ADR-0044 D2/D3/D4（Phase 53）: コメント・ラベル・種類・ボードのフィルタ ----
 
     /// migration 0013 が schema 11 の DB に `task_comments` と `tasks.labels_json` / `tasks.category` を足す。
@@ -5453,7 +5708,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 14);
+        assert_eq!(SCHEMA_VERSION, 15);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn
