@@ -51,7 +51,7 @@ RUN set -eux; \
 # Rust stable（rustup。`cargo` はホストと同じ版を使えるよう toolchain ごと入れる）
 RUN set -eux; \
     curl -fsSL https://sh.rustup.rs -o /tmp/rustup.sh; \
-    sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain stable --component clippy rustfmt; \
+    sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain stable --component clippy --component rustfmt; \
     rm /tmp/rustup.sh; \
     chmod -R a+rwX "$CARGO_HOME" "$RUSTUP_HOME"
 

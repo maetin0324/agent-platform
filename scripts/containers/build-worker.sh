@@ -31,7 +31,9 @@ echo "runtime: $runtime"
 echo "context: $context"
 echo "tag:     $tag"
 
-"$runtime" build -t "$tag" -f "$context/Dockerfile" "$context"
+# この LXC では素の build の RUN がネットワークに出られない（PF_NETLINK が塞がれる）。ADR-0043 Phase 56 追記 P56-8 と同じく host で。
+network="${CELERIS_BUILD_NETWORK:-host}"
+"$runtime" build --network "$network" -t "$tag" -f "$context/Dockerfile" "$context"
 
 echo
 echo "できました:"
