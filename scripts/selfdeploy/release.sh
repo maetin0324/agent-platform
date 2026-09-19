@@ -175,6 +175,19 @@ GUI_VERSION="$(sd_json_get "$STAGE/gui/package.json" version || true)"
   printf '}\n'
 } >"$STAGE/manifest.json"
 
+# ADR-0040 D6（Phase 48）: selfdeploy の道具一式をリリースに同梱する。
+# `POST /releases/{sha12}/promote` は **リリースの中の** `scripts/promote.sh` を起こすので、
+# 作業チェックアウトが無くても（別のブランチにいても）昇格できる。実行ビットは `cp -p` で保つ。
+# `lib.sh` は `dirname "${BASH_SOURCE[0]}"` から自分の隣を読むだけなので、ここから source しても動く
+# （場所は全部 `TASKD_HOME` 基準。`SD_REPO` を使うのは `release.sh` の git 操作だけ）。
+mkdir -p "$STAGE/scripts"
+for sh in "$BUILD"/scripts/selfdeploy/*.sh; do
+  [ -f "$sh" ] || continue
+  cp -p "$sh" "$STAGE/scripts/$(basename "$sh")"
+done
+[ -x "$STAGE/scripts/promote.sh" ] || sd_die "bundled scripts/promote.sh is missing or not executable"
+[ -f "$STAGE/scripts/lib.sh" ] || sd_die "bundled scripts/lib.sh is missing"
+
 write_gate_json "$STAGE/gate.json"
 # gate のログも残す（失敗の再現に要る）。
 mkdir -p "$STAGE/gate-logs"

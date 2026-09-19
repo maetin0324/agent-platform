@@ -158,3 +158,34 @@ DB バックアップ → `start taskd@<new>` → `health` 200 と `schema_versi
 この会話のエージェント）が `promote.sh` で行い、以後の昇格がライブになることを 2 回目の昇格で確かめる。
 
 **Phase 48 / G14（後続）**: D6 の API と GUI、案件「agent-platform の自己改善」の登録と `implementer` の指示文（D5）。
+
+## Phase 48 追記（2026-09-19。D6 からの逸脱だけ）
+
+実装で D6 の契約から変えたところ。設計（誰が昇格を決めるか、何に触れないか）は変えていない。
+
+1. **`GET /releases` の応答に `running` と `instances` を足した**。D6 は `{current, previous, items}` だけだが、
+   GUI「リリース」画面は「いま動いているのはどれか」「引き継ぎがどこまで進んだか」を出す必要がある
+   （D6 自身が G14 の要件に「引き継ぎの進行（`daemon_instances`）」と書いている）。`running` は
+   `GET /health` の `release` / `mode` / `role` と同じ値、`instances` は `daemon_instances` の行そのまま。
+   別エンドポイント（`GET /instances`。PROGRESS の P47-1）にはせず、1 回の読み直しで画面が作れる形にした。
+2. **`items[]` の `promoted_at` を出さない**。どのリリースがいつ昇格したかは `~/taskd/releases/<sha12>/` の
+   どのファイルにも書かれていない（`promote.sh` は `~/taskd/backups/promote-<ts>.log` にしか残さない）。
+   読むだけで作れないので落とした。代わりに **`is_current` / `is_previous`**（symlink から）と
+   **`promoting`**（`promote.lock` の pid が生きているか）を出す。
+3. **`items[]` に `problem`（文字列、省略可）を足した**。`manifest.json` / `gate.json` が壊れていても
+   一覧全体を落とさないため（そのリリースは `gate_ok = false` と `problem` を持つ）。
+4. **`[selfdeploy] releases_dir` を設定に足した**（既定 `releases`、設定ファイルのディレクトリ基準）。
+   D6 は「`~/taskd/releases/*/manifest.json` 等を読むだけ」としか書いておらず、パスの出どころが無かった。
+   `current` / `previous` の symlink は `releases_dir` の**親**にある（`sd_set_link` がそう張るため）。
+   本番の `~/taskd/taskd.toml` は書き換え不要（既定でそのまま当たる）。
+5. **`release.sh` が `scripts/selfdeploy/*.sh` をリリースに同梱する**（`<release>/scripts/`）。
+   `POST /releases/{sha12}/promote` が起こすのは**リリースの中の** `promote.sh` で、作業チェックアウトが
+   別のブランチにいても・無くても昇格できる。`lib.sh` は `dirname "${BASH_SOURCE[0]}"` で自分の隣を読み、
+   場所は全部 `TASKD_HOME` 基準なので、そのまま動く（`SD_REPO` を要るのは `release.sh` だけ）。
+   Phase 48 より前に作られたリリースには `scripts/` が無いので、その昇格は 409 になる（shell から行う）。
+6. **`GET /releases` は task-api → taskd をチャネルではなくトレイト（`task_api::ReleaseSource`）で越える**。
+   `reload` / `check` / `notify/test` は `AdminRequest` の非同期チャネルだが、こちらは同期のファイル読み取りで、
+   `standby` でも答えられる（ディスパッチャの状態を要しない）ため 503 にしたくない。実体
+   （`taskd::releases::FsReleases`）は taskd 側にあり、task-api はファイルの規約を知らないまま。
+7. **`POST /releases/{sha12}/promote` に `require_active` を付けない**。昇格を始めるのに
+   ディスパッチャは要らない（外部プロセスを起こすだけ）。むしろ `standby` からも押せる方がよい。

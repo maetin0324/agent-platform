@@ -2557,3 +2557,57 @@ production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/
 ### 提案（`docs/gui/api.md` への変更提案。採否は人間）
 
 なし。
+
+## Phase G14 — 「リリース」画面（ADR-0040 D6。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的: taskd Phase 48 で入った `GET /releases` / `POST /releases/{sha12}/promote`
+  （`docs/taskd-api-v1.md` §3.66〜3.67）を画面にする。**昇格は人が押す**（ADR-0040 D5）。
+  taskd 側の実装と同じコミットで入れた（この Phase は taskd Phase 48 と 1 対 1）。
+- 変更したファイル:
+  - `app/routes/releases.tsx`（新規）— `loadReleases`（`GET /releases` をそのまま返す。並び・
+    `is_current` / `promoting` は taskd が計算済みなので再計算しない）、`action`（`release_promote` のみ）、
+    画面、`ErrorBoundary`（`clusters.tsx` と同形）。
+  - `app/lib/releases.ts`（新規）— 表示の判断を集めた純粋関数（DOM の unit テストが無い制約 G10-U1）。
+  - `app/lib/labels.ts` — `instanceRoleLabel`（`active` / `standby` / `draining` / `verify` の日本語）。
+  - `app/taskd/releases-admin.server.ts`（新規）、`app/taskd/action-types.ts`（`ReleasePromoteOutcome`）、
+    `app/components/Flash.tsx`（`ReleasePromoteFlash`）。
+  - `app/routes.ts`（`route("releases", ...)`）、`app/root.tsx`（裏方の最後に「リリース」）、
+    `app/routes/help.tsx`（`SCREENS` に「リリース」）。
+  - `app/taskd/types.ts` / `docs/taskd-api-v1.md` — `pnpm gen:types` と `scripts/sync-gui-docs.sh` で再生成
+    （taskd Phase 47 の持ち越し U47-3 をここで解消。`Health` の `release`/`mode`/`role` もこれで入った）。
+  - `test/unit/releases.test.ts`（新規）、`test/mock-taskd/fixtures.ts`（`releaseItem` / `defaultReleases` /
+    `defaultReleasePromoteAccepted`）、`test/unit/action-feedback.test.ts` に `releases.tsx` を追加。
+- 受け入れ条件ごとの証拠:
+  - 条件: 一覧・検証状態・`current` が出て、検証済みで current でないものにだけ「昇格」が出る。
+    実行: `pnpm test`（`test/unit/releases.test.ts`）— `releaseVerifyState` の 4 通り
+    （未検証 / 検証済み（ライブ引き継ぎ）/ 検証済み（停止 → 起動）/ 検証に落ちました）と
+    `promoteAvailability` の 5 通り（押せる / current / 昇格中 / 未検証・検証落ち / ファイルが読めない）。
+  - 条件: 「昇格」は確認付きで、BFF の action が `POST /releases/{sha12}/promote` を呼ぶ。
+    実行: 同テストの `promoteRelease` 4 件 — 202 のとき要求本文が `{}` で `/api/v1/releases/<sha>/promote`
+    に飛ぶこと、404 / 409 / 401 が `{ok:false, error}` になること。画面側は `<details>` で一段隠したうえ、
+    ボタンの `onClick` で `window.confirm`（`promoteConfirmText` は `live_ok` で文言が変わる）。
+  - 条件: 202 / 409 の結果が SSE の再検証で消えない。
+    実行: `pnpm test`（`test/unit/action-feedback.test.ts`）— `releases.tsx` に `actionData` と
+    `<Form method="post">` が無い（行ごとの `useFetcher({key: "release-<sha12>"})` を使っている）。
+  - 条件: 昇格中は `GET /releases` を 2 秒ごとに読み直し、`instances` で進行を出す。
+    実行: 同テストの `handoffInFlight` / `handoffProgressText` — `draining` が居る / `active` が 2 つ /
+    どれかが `promoting` のいずれかで真になり、文言に旧の「引き継ぎ中」と新の「稼働中」が出る。
+    ポーリングは `HANDOFF_POLL_MS = 2000` で `revalidator.state === "idle"` のときだけ発火する
+    （`root.tsx` の再接続ポーリングと同じ作り）。
+  - 条件: フェーズのゲート。
+    実行: `pnpm lint` exit 0（biome、174 ファイル）/ `pnpm typecheck` exit 0 /
+    `pnpm test` exit 0（**45 ファイル、558 tests passed**）/ `pnpm build` exit 0。
+    `pnpm gen:types` を流し直しても `app/taskd/types.ts` は変わらない（md5 一致＝差分ゼロ）。
+- 未解決事項:
+  - G14-U1: `pnpm e2e` は未実行（既定の 7700 / 7710 が運用中の GUI / taskd を掴むため。G13k-U1 と同じ）。
+    別ポート（`TASKD_API_LISTEN=127.0.0.1:7713` / `TASKD_GUI_BIND=127.0.0.1:7703`）を与えて人が流すときに、
+    `/releases` が 200 であることと `/help` のリンクを足すのがよい。
+  - G14-U2: `promote.log` は API から読めない（taskd 側の意図。ADR-0040 D6）。画面にもログは出さず、
+    進行は `instances` だけで見せている。
+  - G14-U3: 「昇格」を押したあとの数秒、taskd が旧から新へ切り替わる窓では管理系 API が
+    503 `standby` を返しうる（ADR-0040 D4）。`/releases` は読み取りなので影響を受けないが、
+    他の画面（`/providers` の reload など）はその間だけ 503 になる。今回は特別扱いしていない。
+- 提案（`docs/taskd-api-v1.md` への変更提案。採否は人間）:
+  - G14-P1: `daemon_instances` の変化を SSE の `daemon` イベントに載せてほしい。載れば
+    「リリース」画面の 2 秒ポーリング（この画面だけの特例）を消せる。

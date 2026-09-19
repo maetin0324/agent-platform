@@ -19,6 +19,9 @@ release.sh <ref>  →  verify.sh <sha12>  →  promote.sh <sha12>        （戻�
   current -> releases/<sha12>     いま動いている版
   previous -> releases/<sha12>    直前の版（rollback 先）
   releases/<sha12>/     bin/{taskd,taskctl}  gui/  manifest.json  gate.json  verify.json
+                        scripts/          selfdeploy 一式の写し（ADR-0040 D6。昇格に作業チェックアウトが要らない）
+                        promote.log       この API 経由の昇格の出力（§4c）
+                        promote.lock      昇格中の pid
   releases/.build/      release.sh が生やす detached worktree（成功したら消える）
   releases/.cargo-target/  CARGO_TARGET_DIR（リリース間で共有。ビルドを速くするだけ）
   staging/              verify.sh の作業場所（毎回作り直す）
@@ -65,7 +68,12 @@ scripts/selfdeploy/release.sh self/01M2XXX  # 自己改善の案件の実装ブ�
   → GUI `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → `pnpm build`
 - 成功したら `~/taskd/releases/<sha12>/` に `bin/`（taskd, taskctl）、`gui/`（build/ server.js package.json
   pnpm-lock.yaml pnpm-workspace.yaml と `pnpm install --prod` の node_modules）、`manifest.json`、`gate.json`、
-  `gate-logs/` を置き、ビルド用の worktree を消す。
+  `gate-logs/`、`scripts/` を置き、ビルド用の worktree を消す。
+- `scripts/` は **その sha の `scripts/selfdeploy/*.sh` をそのまま写したもの**（実行ビットごと。ADR-0040 D6、
+  Phase 48）。`POST /releases/{sha12}/promote` はこの `<release>/scripts/promote.sh` を起こすので、
+  **作業チェックアウトが別のブランチにいても、無くても昇格できる**。`lib.sh` は
+  `dirname "${BASH_SOURCE[0]}"` で自分の隣を読むだけで、場所はすべて `TASKD_HOME` 基準なので
+  リリースの中から source しても動く（`SD_REPO` を要るのは `release.sh` の worktree 操作だけ）。
 - 失敗したら**リリースディレクトリは作らず**、`~/taskd/releases/.build/<sha12>/gate.json` と
   `.gate-<step>.log` を残す（次に同じ sha で `release.sh` を回すと消える）。
 - 掃除: `current` / `previous` / いま作った版 / 検証済み（`verify.json.ok`）の新しい 3 件だけを残す。
@@ -175,6 +183,32 @@ scripts/selfdeploy/promote.sh <sha12>
 `daemon_instances` で見える。API が一瞬 `503 {"detail":"standby"}` を返す管理系（`reload` / `check` /
 クラスタ接続 / アカウントのログイン / `notify/test`）があるが、窓は 1〜2 tick。
 
+### 4c. GUI から昇格する（Phase 48 / G14。ADR-0040 D6）
+
+GUI「リリース」画面（`/releases`）の「昇格」ボタンは `POST /releases/{sha12}/promote`（管理系）を叩き、
+taskd が **`~/taskd/releases/<sha12>/scripts/promote.sh <sha12>`** を detached（`setsid`、stdin は
+`/dev/null`、stdout/err は `<release>/promote.log`）で起こす。やることは shell から `promote.sh` を
+叩くのと**同じ**で、押すのは人（ADR-0040 D5。taskd の中に自動で呼ぶ経路は無い）。
+
+```bash
+# shell からと同じことを API で
+curl -sS -X POST -H "Authorization: Bearer $(cat ~/taskd/api.token)" \
+     http://127.0.0.1:7710/api/v1/releases/<sha12>/promote
+# → 202 {"sha12":"…","log":"~/taskd/releases/<sha12>/promote.log","started_at":"…"}
+```
+
+- 断られるとき（409 `release_not_promotable`）: `verify.json` が無い／`ok` でない、既に `current`、
+  既に昇格中（`promote.lock` の pid が生きている）、`scripts/promote.sh` が無い（Phase 48 より前の
+  リリース — その場合は shell から `scripts/selfdeploy/promote.sh` を使う）。
+- ログは `<release>/promote.log`（**API では中身を出さない**）と、`promote.sh` 自身が書く
+  `~/taskd/backups/promote-<ts>.log`。進行は `GET /releases` の `instances`（旧 `draining` / 新 `active`）
+  と `status.sh` で見る。
+- **202 を返した taskd 自身がその昇格で `draining` になって終わる**（ライブ引き継ぎ）。API が一瞬
+  切り替わるのは正常（新旧が `SO_REUSEPORT` で同じポートを共有する）。
+
+`~/taskd/taskd.toml` に足す設定は無い（`[selfdeploy] releases_dir` の既定が `releases` なので、
+`~/taskd/releases` をそのまま見る）。
+
 ## 5. 戻す（`rollback.sh`。人だけ）
 
 ```bash
@@ -210,7 +244,8 @@ taskd の上の「人」（ワーカー）が自己改善の案件でやって�
 
 やってはいけないこと:
 
-- `promote.sh` / `rollback.sh` / `install-units.sh` を実行する
+- `promote.sh` / `rollback.sh` / `install-units.sh` を実行する（リリースの中の `<release>/scripts/*.sh` も同じ）
+- `POST /releases/{sha12}/promote` を叩く（GUI の「昇格」ボタンと同じもの。押すのは人だけ）
 - `systemctl` を叩く（本番の unit を start / stop / restart / enable / disable する）
 - `~/taskd/taskd.toml` を編集する
 - `~/taskd/*.sqlite3` に書き込む（読むのは `sqlite3 "file:…?mode=ro"` と `.backup` だけ）
@@ -223,7 +258,9 @@ taskd の上の「人」（ワーカー）が自己改善の案件でやって�
 
 ## 8. taskd.toml について
 
-**Phase 46 で `~/taskd/taskd.toml` に変えるところは無い。** `[handoff]`（`drain_timeout_secs` など）は
+**Phase 46 / Phase 48 とも `~/taskd/taskd.toml` に変えるところは無い。** Phase 48 で入った
+`[selfdeploy] releases_dir` は既定が `releases`（設定ファイルのディレクトリ基準）なので、書かなければ
+`~/taskd/releases` を見る。別の場所に置きたいときだけ書く。 `[handoff]`（`drain_timeout_secs` など）は
 Phase 47 で taskd 本体に入るときに足す設定で、それまでは既定値（`drain_timeout_secs = 3600`）で動く。
 `promote.sh` が読むのは既存の `kill_grace_secs` だけ（無ければ 10 秒）。
 `verify.sh` は `taskd.toml` を**そのまま**新リリースに読ませる（本番の設定が新しいバイナリで通るかを

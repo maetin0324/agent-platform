@@ -30,6 +30,7 @@ mod problem;
 pub mod milestones;
 pub mod project_plan;
 mod query;
+pub mod releases;
 mod reports;
 pub mod schema;
 pub mod secrets;
@@ -51,6 +52,7 @@ pub use admin::{
     NotifyTestOutcome, ProviderCheckOutcome, ProviderCheckResult,
 };
 pub use notify::{NotifyRecent, NotifyTestResult, NotifyView};
+pub use releases::{ReleasePromoteError, ReleaseSource, ReleasesFs, SharedReleaseSource};
 pub use reports::{ReportDetail, ReportList, ReportsNotifiedResult, ReportsReadBody, ReportsReadResult};
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};
@@ -59,8 +61,9 @@ pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterConnectCodeBody,
     ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters, ConfigView, DaemonView, DailyUsage, DbInfo,
     DecisionBody, EventsPage, GenreConfigView, Health, Problem, ProviderConfigView, ProviderStats, ProviderView,
-    Providers, RetryBody, ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody, SecretPutResult,
-    SecretUse, SecretView, StreamHeartbeat, StreamHello, StreamReset, ValidationError,
+    Providers, ReleaseItem, ReleasePromoteAccepted, ReleaseRunning, ReleaseVerify, Releases, RetryBody,
+    ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody, SecretPutResult, SecretUse, SecretView,
+    StreamHeartbeat, StreamHello, StreamReset, ValidationError,
 };
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
@@ -132,6 +135,9 @@ pub struct ApiSettings {
     pub notify_secret_id: String,
     /// ADR-0037 D3: `[notify] gui_base_url`（文面のリンクの根。無ければリンク無し）。
     pub notify_gui_base_url: Option<String>,
+    /// ADR-0040 D6（Phase 48）: `[selfdeploy] releases_dir` を読む係（taskd が渡す。task-api は
+    /// リリースのファイル規約を知らない）。`None` なら `GET /releases` は空、昇格は 409。
+    pub releases: Option<SharedReleaseSource>,
     /// ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `TASKD_RELEASE` / `"dev"`）。
     /// `GET /health` の `release`。
     pub release: String,
@@ -168,6 +174,7 @@ impl std::fmt::Debug for ApiSettings {
             .field("memory_dir", &self.memory_dir)
             .field("notify_secret_id", &self.notify_secret_id)
             .field("notify_gui_base_url", &self.notify_gui_base_url)
+            .field("releases", &self.releases.as_ref().map(|_| "<source>"))
             .field("release", &self.release)
             .field("mode", &self.mode)
             .field("role", &self.role.get())

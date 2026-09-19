@@ -188,6 +188,16 @@ interval_secs = 30                                # 判定と送信の間隔（�
 # [handoff]
 # drain_timeout_secs = 3600          # 既定 3600（1 時間）
 
+# 自己改善のデプロイ（ADR-0040 D6、Phase 48。docs/selfdeploy.md）。
+# `scripts/selfdeploy/release.sh` が作るリリースの置き場所。`GET /releases` はここの
+# `manifest.json` / `gate.json` / `verify.json` を読むだけ、`POST /releases/{sha12}/promote`（管理系）は
+# `<releases_dir>/<sha12>/scripts/promote.sh` を detached で起こす（**昇格は人が押す**。ADR-0040 D5）。
+# `current` / `previous` の symlink は `releases_dir` の**親**（本番では ~/taskd/current）にある。
+# 相対パスは設定ファイルのディレクトリ基準。既定が "releases" なので、~/taskd/taskd.toml なら
+# 何も書かなくても ~/taskd/releases を見る。
+# [selfdeploy]
+# releases_dir = "releases"          # 既定 "releases"
+
 # HTTP API（ADR-0013、docs/gui/api.md）。listen を書いたときだけ taskd のプロセス内で動く（既定は無効）。taskd-gui はこれを使う。
 # loopback 以外で listen するなら token_file が必須（中身 1 行が Bearer トークン。読めない・空なら起動時に exit 2）。
 # [api]

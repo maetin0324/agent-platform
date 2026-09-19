@@ -57,6 +57,8 @@ pub struct EnvOptions {
     pub notify_secret_id: String,
     /// ADR-0037 D3: `[notify] gui_base_url`。
     pub notify_gui_base_url: Option<String>,
+    /// ADR-0040 D6（Phase 48）: `GET /releases` / `POST /releases/{sha12}/promote` が読む係。
+    pub releases: Option<task_api::SharedReleaseSource>,
     /// ADR-0040 D4（Phase 47）: `GET /health` の `release` / `mode` と、管理系の 503 に使う役割。
     pub release: String,
     pub mode: task_core::DaemonMode,
@@ -82,6 +84,7 @@ impl Default for EnvOptions {
             memory_dir: None,
             notify_secret_id: task_core::DEFAULT_WEBHOOK_SECRET_ID.to_string(),
             notify_gui_base_url: None,
+            releases: None,
             release: "dev".to_string(),
             mode: task_core::DaemonMode::Normal,
             role: task_core::SharedRole::new(task_core::InstanceRole::Active),
@@ -270,6 +273,7 @@ pub fn settings(db_path: &std::path::Path, workspace_root: &std::path::Path, opt
         memory_dir: options.memory_dir,
         notify_secret_id: options.notify_secret_id,
         notify_gui_base_url: options.notify_gui_base_url,
+        releases: options.releases,
         release: options.release,
         mode: options.mode,
         role: options.role,

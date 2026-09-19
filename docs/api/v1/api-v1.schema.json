@@ -1696,6 +1696,55 @@
       ],
       "type": "object"
     },
+    "DaemonInstance": {
+      "description": "`daemon_instances` の 1 行。",
+      "properties": {
+        "drained_at": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handoff_requested_at": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "heartbeat_at": {
+          "type": "string"
+        },
+        "instance_id": {
+          "type": "string"
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "release": {
+          "description": "`--release <sha12>` / `TASKD_RELEASE` / `\"dev\"`。",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/InstanceRole"
+        },
+        "started_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "instance_id",
+        "release",
+        "pid",
+        "role",
+        "started_at",
+        "heartbeat_at"
+      ],
+      "type": "object"
+    },
     "DaemonSnapshot": {
       "properties": {
         "accounts": {
@@ -2825,6 +2874,31 @@
         "by_status"
       ],
       "type": "object"
+    },
+    "InstanceRole": {
+      "description": "インスタンスの役割（ADR-0040 D4）。`daemon_instances.role` の綴りと 1 対 1。",
+      "oneOf": [
+        {
+          "const": "active",
+          "description": "dispatch する。tick の裏方（通知・報告・途中目標レビュー・クラスタ・アカウント）を動かす。常に 1 つだけ。",
+          "type": "string"
+        },
+        {
+          "const": "standby",
+          "description": "API は受けるが dispatch も裏方もしない。ディスパッチャの状態を要する管理 API は 503。",
+          "type": "string"
+        },
+        {
+          "const": "draining",
+          "description": "listener を閉じ、手元の run とレビューだけ面倒を見る。0 になったら exit 0。",
+          "type": "string"
+        },
+        {
+          "const": "verify",
+          "description": "`--mode verify`。dispatch も裏方も無し。`daemon_instances` に行を書かない。",
+          "type": "string"
+        }
+      ]
     },
     "Lease": {
       "description": "DESIGN §4.1 の `Lease`。ADR-0002 D7: `expires_at` は\n`budget.max_wall_secs + 猶予` から `acquire_lease` 呼び出し側が計算する。",
@@ -4576,6 +4650,190 @@
       ],
       "type": "object"
     },
+    "ReleaseItem": {
+      "description": "`GET /releases` の `items[]` の 1 件。",
+      "properties": {
+        "built_at": {
+          "description": "`manifest.json` の `built_at`（RFC 3339）。読めなければ `null`（並びは最後）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gate_ok": {
+          "description": "`gate.json` の `ok`（`release.sh` の gate が全段 exit 0 だったか）。読めなければ `false`。",
+          "type": "boolean"
+        },
+        "is_current": {
+          "type": "boolean"
+        },
+        "is_previous": {
+          "type": "boolean"
+        },
+        "problem": {
+          "description": "`manifest.json` / `gate.json` が読めなかったときの一行（GUI が「壊れている」と出す）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promoting": {
+          "description": "`promote.lock` に書かれた pid がまだ生きている（昇格が走っている最中）。",
+          "type": "boolean"
+        },
+        "ref": {
+          "description": "`manifest.json` の `ref`（`release.sh` に渡した git ref）。読めなければ `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "description": "`manifest.json` の `schema_version`。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sha12": {
+          "description": "ディレクトリ名（`git rev-parse --short=12`）。",
+          "type": "string"
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReleaseVerify"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`verify.json`。無ければ `null`（＝未検証。昇格できない）。"
+        }
+      },
+      "required": [
+        "sha12",
+        "gate_ok",
+        "is_current",
+        "is_previous",
+        "promoting"
+      ],
+      "type": "object"
+    },
+    "ReleasePromoteAccepted": {
+      "description": "`POST /releases/{sha12}/promote` → 202 の応答。**昇格そのものはこの API の外**\n（`<releases_dir>/<sha12>/scripts/promote.sh` を detached で起こすだけ）。",
+      "properties": {
+        "log": {
+          "description": "`promote.sh` の出力を流し込んでいるファイルの絶対パス（中身は API では出さない）。",
+          "type": "string"
+        },
+        "sha12": {
+          "type": "string"
+        },
+        "started_at": {
+          "description": "RFC 3339。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha12",
+        "log",
+        "started_at"
+      ],
+      "type": "object"
+    },
+    "ReleaseRunning": {
+      "description": "`GET /releases` の `running`。",
+      "properties": {
+        "instance_id": {
+          "type": "string"
+        },
+        "release": {
+          "description": "`--release <sha12>` / `TASKD_RELEASE` / `\"dev\"`。",
+          "type": "string"
+        },
+        "role": {
+          "description": "`active` / `standby` / `draining` / `verify`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "release",
+        "role",
+        "instance_id"
+      ],
+      "type": "object"
+    },
+    "ReleaseVerify": {
+      "description": "`verify.json` の要約（ADR-0040 D3）。",
+      "properties": {
+        "at": {
+          "description": "RFC 3339。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "live_ok": {
+          "description": "N-1 互換（旧バイナリが新スキーマを読める）。偽なら昇格は停止 → 起動になる。",
+          "type": "boolean"
+        },
+        "ok": {
+          "description": "検査 1〜4 が全部真。`promote.sh` はこれが真でなければ拒否する。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "live_ok"
+      ],
+      "type": "object"
+    },
+    "Releases": {
+      "description": "`GET /releases` の応答（読み取り。トークンは要らない）。\n\n中身は `[selfdeploy] releases_dir` の下の `manifest.json` / `gate.json` / `verify.json` と\n`current` / `previous` の symlink、`daemon_instances` の行を**読むだけ**で作る。",
+      "properties": {
+        "current": {
+          "description": "`<releases_dir>/../current` が指す sha12（無ければ `null`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instances": {
+          "description": "ADR-0040 D4 の `daemon_instances`（引き継ぎの進行が見える）。`started_at` 昇順。",
+          "items": {
+            "$ref": "#/$defs/DaemonInstance"
+          },
+          "type": "array"
+        },
+        "items": {
+          "description": "リリース一覧。`built_at` の新しい順。",
+          "items": {
+            "$ref": "#/$defs/ReleaseItem"
+          },
+          "type": "array"
+        },
+        "previous": {
+          "description": "`<releases_dir>/../previous` が指す sha12（無ければ `null`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "running": {
+          "$ref": "#/$defs/ReleaseRunning",
+          "description": "いまこの要求に答えているプロセス自身（`GET /health` の `release` / `role` と同じ値）。"
+        }
+      },
+      "required": [
+        "running",
+        "instances",
+        "items"
+      ],
+      "type": "object"
+    },
     "ReloadResult": {
       "description": "`POST /api/v1/reload` の応答（ADR-0017 D1）。",
       "properties": {
@@ -6275,6 +6533,13 @@
     "providers": {
       "$ref": "#/$defs/Providers"
     },
+    "release_promote": {
+      "$ref": "#/$defs/ReleasePromoteAccepted"
+    },
+    "releases": {
+      "$ref": "#/$defs/Releases",
+      "description": "Phase 48（ADR-0040 D6）: リリース。`GET /releases` と `POST /releases/{sha12}/promote` の応答。"
+    },
     "reload": {
       "$ref": "#/$defs/ReloadResult"
     },
@@ -6412,6 +6677,8 @@
     "standing_rule_create",
     "notify",
     "notify_test",
+    "releases",
+    "release_promote",
     "daemon",
     "config",
     "stream_hello",

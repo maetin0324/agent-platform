@@ -116,6 +116,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `invalid_transition` | 409 | 状態機械または task-ops の写像が拒否。`task_status`, `kind`, `trigger`（`InvalidTransition{status, kind, trigger}` の写し。`trigger` は `Trigger::name()`） |
 | `org_node_exists` | 409 | `POST /org` の `id` が既にある（更新は `PATCH /org/{id}`） |
 | `org_node_in_use` | 409 | 消そうとした組織のノードが未終了のタスクを抱えている、または子を持つ（ADR-0033 D1） |
+| `release_not_found` | 404 | ADR-0040 D6: `POST /releases/{sha12}/promote` の sha12 が `[selfdeploy] releases_dir` に無い（sha12 の形でないときも同じ） |
+| `release_not_promotable` | 409 | ADR-0040 D6: 昇格を受け付けられない（`verify.json` が無い／`ok` でない、既に `current`、既に昇格中、`scripts/promote.sh` が無い、`[selfdeploy]` が無い）。`detail` に理由の一行 |
 | `payload_too_large` | 413 | 本文 > 1 MiB |
 | `unsupported_media_type` | 415 | 変更系で `Content-Type` が JSON でない |
 | `range_not_satisfiable` | 416 | ファイル系の `Range` / `offset` がサイズを超える。`Content-Range: bytes */<size>` |
@@ -141,7 +143,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（53）
+## 2. エンドポイント一覧（56）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -199,6 +201,8 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 52 | GET | `/notify` | Discord への通知の設定と直近の送信（ADR-0037、Phase 39。URL は出さない） | `NotifyView` | 設定 + store `notification_recent` |
 | 53 | POST | `/notify/test` | テスト送信を 1 回（**管理系: `token_file` 未設定でも 401**） | 200 `NotifyTestResult` | taskd（`[secrets]` の webhook へ POST） |
 | 54 | POST | `/milestones/{id}/decide` | 途中目標の判定（`ok` / `discuss` / `ng`。ADR-0038 D2、Phase 41）（**管理系**） | 202 `MilestoneDecided` | `task_ops::milestone_review::decide` |
+| 55 | GET | `/releases` | リリース一覧・検証状態・`current`/`previous`・引き継ぎの進行（ADR-0040 D6、Phase 48） | `Releases` | `[selfdeploy] releases_dir` のファイル + store `instance_list` |
+| 56 | POST | `/releases/{sha12}/promote` | そのリリースへ昇格する（`promote.sh` を起こして 202）（**管理系: `token_file` 未設定でも 401**） | 202 `ReleasePromoteAccepted` | taskd（`<release>/scripts/promote.sh` を detached で起動） |
 
 ---
 
@@ -1267,6 +1271,85 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
 - 409 `notify_unavailable`: 秘密が登録されていない（`[secrets]` 自体が無い場合も含む）、または taskd に
   委譲できない構成。`detail` には id（既定 `discord-webhook`）だけを書く。
 - 401 `unauthorized`: トークン無し（`token_file` を設定していない構成でも 401）。
+
+### 3.66〜3.67 リリース（自己改善のデプロイ）（ADR-0040 D6、Phase 48）
+
+`scripts/selfdeploy/release.sh` が作った**不変のリリース**（`~/taskd/releases/<sha12>/`）を一覧し、
+検証済みのものへ**人が**昇格する。設計は `docs/adr/0040-self-improvement-deploy.md`、運用は
+`docs/selfdeploy.md`。読む先は `[selfdeploy] releases_dir`（既定 `releases`。設定ファイルのディレクトリ基準）。
+
+| | |
+|---|---|
+| 何を読むか | `<releases_dir>/<sha12>/{manifest.json, gate.json, verify.json}`、`promote.lock`、`<releases_dir>` の**親**の `current` / `previous` の symlink、`daemon_instances`（ADR-0040 D4） |
+| 何を書くか | `POST .../promote` のときだけ `<release>/promote.lock` と `<release>/promote.log`。**DB も設定も本番プロセスも触らない** |
+| 誰が昇格するか | **人だけ**（ADR-0040 D5）。この API か shell から。taskd の中に自動で呼ぶ経路は無い |
+
+`.build` / `.cargo-target` のような `.` で始まる名前と、組み立て途中の `<sha12>.partial` は一覧に出ない。
+`manifest.json` / `gate.json` が壊れていても一覧は落ちず、その 1 件が `gate_ok: false` と `problem` を持つ。
+
+#### 3.66 `GET /releases` → 200 `Releases`（読み取り。**管理系ではない**）
+
+```jsonc
+{
+  "current": "9ca90bd4f1c2",          // <releases_dir>/../current が指す sha12。無ければ null
+  "previous": "448ae0c33b19",         // 同 previous。rollback 先
+  "running": {                        // いまこの要求に答えているプロセス自身（GET /health と同じ値）
+    "release": "9ca90bd4f1c2",        // --release / TASKD_RELEASE / "dev"
+    "role": "active",                 // active | standby | draining | verify
+    "instance_id": "01K…"
+  },
+  "instances": [                      // daemon_instances（ADR-0040 D4）。started_at 昇順
+    { "instance_id": "01K…", "release": "9ca90bd4f1c2", "pid": 1234, "role": "draining",
+      "started_at": "2026-09-19T09:00:00Z", "heartbeat_at": "2026-09-19T10:00:00Z",
+      "handoff_requested_at": "2026-09-19T09:59:00Z", "drained_at": null }
+  ],
+  "items": [                          // built_at の新しい順（読めなかったものは最後）
+    {
+      "sha12": "abcdef123456",
+      "ref": "self/01M2…",            // release.sh に渡した ref。読めなければ null
+      "built_at": "2026-09-19T08:00:00Z",
+      "schema_version": 11,
+      "gate_ok": true,                // gate.json の ok（cargo test / clippy / build / pnpm … が全部 exit 0）
+      "verify": { "ok": true, "live_ok": true, "at": "2026-09-19T08:30:00Z" },  // null = 未検証
+      "is_current": false,
+      "is_previous": false,
+      "promoting": false,             // promote.lock の pid がまだ生きている
+      "problem": null                 // manifest/gate が読めなかったときだけ一行（普段は省略）
+    }
+  ]
+}
+```
+
+- 通常の認証だけ（`token_file` があればトークン必須。`GET /notify` と同じ扱い）。
+- `[selfdeploy]` が無い構成、`releases_dir` がまだ無い（初回）ときも **200**（`items: []`）。
+- GUI は `verify` で状態を出し分ける: `null` =「未検証」、`ok && live_ok` =「検証済み（ライブ引き継ぎ）」、
+  `ok && !live_ok` =「検証済み（停止 → 起動）」、`!ok` =「検証に落ちた」。
+- 引き継ぎの進行は `instances` で見える（旧が `draining`、新が `active`。ADR-0040 D4）。
+  昇格の最中は `GET /releases` を数秒ごとに読み直せばよい（SSE には載らない）。
+
+#### 3.67 `POST /releases/{sha12}/promote` → 202 `ReleasePromoteAccepted`（**管理系: `token_file` 未設定でも 401**）
+
+要求本文は無し（`{}` でよい）。`<releases_dir>/<sha12>/scripts/promote.sh <sha12>` を **detached**
+（`setsid`、stdin は `/dev/null`、stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に
+pid を書いてすぐ返す。**昇格の完了は待たない。**
+
+```jsonc
+{ "sha12": "abcdef123456",
+  "log": "/home/…/taskd/releases/abcdef123456/promote.log",   // 中身は API では出さない
+  "started_at": "2026-09-19T10:00:00Z" }
+```
+
+- 404 `release_not_found`: その sha12 のディレクトリが無い（sha12 の形＝16 進 7〜40 桁でないときも同じ）。
+- 409 `release_not_promotable`: `verify.json` が無い／`ok` でない、既に `current`、既に昇格中
+  （`promote.lock` の pid が生きている）、`scripts/promote.sh` が無い（Phase 48 より前のリリース）、
+  `[selfdeploy]` が無い。`detail` に理由の一行。
+- 401 `unauthorized`: トークン無し（`token_file` を設定していない構成でも 401）。
+- **この要求に答えた taskd 自身が、その昇格で `draining` になって最後には終わる**（ADR-0040 D4 の
+  ライブ引き継ぎ）。202 を返した後に同じプロセスの API が閉じるのは正常。GUI は `GET /releases` を
+  読み直して `running.release` が新しい sha12 になるのを待つ（同じポートを新旧が `SO_REUSEPORT` で
+  共有するので接続は切れない）。
+- `promote.sh` は `verify.json.ok` を自分でも確かめる（`--force` は無い）。この API の 409 はその前段の
+  早い拒否で、二重の防壁になっている。
 
 ---
 

@@ -13,6 +13,11 @@
 # ---- 場所 ------------------------------------------------------------------
 
 TASKD_HOME="${TASKD_HOME:-$HOME/taskd}"
+# `SD_REPO` を要るのは `release.sh`（git worktree を生やす）だけ。`verify.sh` / `promote.sh` /
+# `rollback.sh` / `status.sh` は `TASKD_HOME` の下だけを見るので、作業チェックアウトが無くても動く。
+# ADR-0040 D6（Phase 48）: `release.sh` がこの一式を `<release>/scripts/` に写すので、
+# `promote.sh` はリリースの中から（`POST /releases/{sha12}/promote` 経由で）起きることがある。
+# そのときも `lib.sh` は `dirname "${BASH_SOURCE[0]}"` で自分の隣を読むだけなので、場所に依らない。
 SD_REPO="${SD_REPO:-$HOME/workspace/agent-platform}"
 
 SD_RELEASES="$TASKD_HOME/releases"

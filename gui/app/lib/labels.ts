@@ -1,4 +1,4 @@
-import type { Decision, MilestoneStatus, OrgKind, ProjectStatus, Status } from "~/taskd/types";
+import type { Decision, InstanceRole, MilestoneStatus, OrgKind, ProjectStatus, Status } from "~/taskd/types";
 
 /**
  * 業務の 6 画面（SPEC §4: 秘書・組織・案件・報告・認可・成果物）で使う日本語の言葉（Phase G13f-1、監査 5）。
@@ -75,4 +75,19 @@ const DECISION_LABEL: Record<Decision, string> = {
 
 export function decisionLabel(decision: Decision | string): string {
   return DECISION_LABEL[decision as Decision] ?? decision;
+}
+
+/**
+ * taskd のインスタンスの役割（ADR-0040 D4）。「リリース」画面（`/releases`、Phase G14）は裏方だが、
+ * 引き継ぎの進行は人が読むところなので日本語にする（`active` / `standby` / … のままは出さない）。
+ */
+const INSTANCE_ROLE_LABEL: Record<InstanceRole, string> = {
+  active: "稼働中",
+  standby: "待機（切り替え中）",
+  draining: "引き継ぎ中（残りの仕事を完了待ち）",
+  verify: "検証",
+};
+
+export function instanceRoleLabel(role: InstanceRole | string): string {
+  return INSTANCE_ROLE_LABEL[role as InstanceRole] ?? role;
 }

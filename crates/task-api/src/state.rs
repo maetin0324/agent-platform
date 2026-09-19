@@ -75,6 +75,9 @@ pub(crate) struct Inner {
     pub(crate) notify_secret_id: String,
     /// ADR-0037 D3: `[notify] gui_base_url`。
     pub(crate) notify_gui_base_url: Option<String>,
+    /// ADR-0040 D6（Phase 48）: `[selfdeploy] releases_dir` を読む係（taskd が渡す）。`None` なら
+    /// `GET /releases` は空、`POST /releases/{sha12}/promote` は 409。
+    pub(crate) releases: Option<crate::releases::SharedReleaseSource>,
     /// ADR-0040 D4（Phase 47）: `GET /health` の `release` / `mode` と、管理 API の 503 に使う役割。
     pub(crate) release: String,
     pub(crate) mode: task_core::DaemonMode,
@@ -125,6 +128,7 @@ impl ApiState {
             memory_dir: settings.memory_dir,
             notify_secret_id: settings.notify_secret_id,
             notify_gui_base_url: settings.notify_gui_base_url,
+            releases: settings.releases,
             release: settings.release,
             mode: settings.mode,
             role: settings.role,

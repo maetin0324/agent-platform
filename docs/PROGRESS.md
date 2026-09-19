@@ -5950,3 +5950,186 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
     DB を直に読まずに済む（ADR-0040 D6 の `GET /releases` と合わせて Phase 48 で）。
   - P47-2: `standby` の間もスナップショットだけは publish したい（GUI の「切り替え中」表示を
     `role` で出すなら不要。D6 の G14 の設計で決めるのがよい）。
+
+## Phase 48 / G14 — リリース API と GUI（ADR-0040 D6。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0040 D6）: Phase 46（配備の道具）/ Phase 47（インスタンスの役割）で作った仕組みを
+  **人が GUI から見て押せる**ようにする。`GET /releases`（リリース一覧・検証状態・`current` /
+  `previous`・引き継ぎの進行）と `POST /releases/{sha12}/promote`（管理系。`promote.sh` を起こして 202）、
+  そして GUI の「リリース」画面（G14）。**昇格を自動で呼ぶ経路は作らない**（D5: 押すのは人）。
+- 変更したファイル（taskd 側）:
+  - `crates/taskd/src/releases.rs`（新規）: `releases_dir` に対する**純粋な関数**。`scan(root)` が
+    `manifest.json` / `gate.json` / `verify.json` / `promote.lock` と、`root` の**親**の `current` /
+    `previous` の symlink を読んで `ReleasesFs{current, previous, items}` を作る（`built_at` の新しい順、
+    読めなかったものは最後）。`.` で始まる名前（`.build` / `.cargo-target`）と `*.partial` は飛ばし、
+    壊れた JSON では落ちずにその 1 件を `gate_ok = false` + `problem` にする。`start_promote(root, sha12)`
+    は sha12 の形（16 進 7〜40 桁。パストラバーサル防止）→ ディレクトリの存在 → `verify.json.ok` →
+    `current` でない → `promote.lock` の pid が生きていない → `scripts/promote.sh` がある、の順に見て、
+    `sh -c 'setsid <script> <sha12> </dev/null >>promote.log 2>&1 & printf %s "$!" >promote.lock'` で
+    **detached** に起こす（`sh` は即座に抜けるので taskd はゾンビを抱えない。孤児になるので、
+    **この taskd 自身が引き継ぎで終わっても昇格は走り続ける**）。`FsReleases` が `task_api::ReleaseSource`
+    を実装する。単体テスト 6 件。
+  - `crates/taskd/src/config.rs`: `[selfdeploy] releases_dir`（既定 `releases`、設定ファイルの
+    ディレクトリ基準で絶対化、`deny_unknown_fields`）。単体テスト 1 件。
+  - `crates/taskd/src/lib.rs`: モジュール追加と `api_settings` に
+    `releases: Some(Arc::new(FsReleases::new(...)))`。
+  - `crates/task-api/src/releases.rs`（新規）: `ReleaseSource` トレイト（`list` / `promote`）、
+    `ReleasesFs`、`ReleasePromoteError`、2 つのハンドラ、ルータ。`GET /releases` は `instance_list()` と
+    `release` / `role` / `instance_id` を足して `Releases` を組む。`POST .../promote` は `require_admin`
+    だけ（`require_active` は付けない）。
+  - `crates/task-api/src/types.rs`: `Releases` / `ReleaseRunning` / `ReleaseItem` / `ReleaseVerify` /
+    `ReleasePromoteAccepted`。`crates/task-api/src/schema.rs` に `releases` / `release_promote` を追加。
+  - `crates/task-api/src/problem.rs`: `release_not_found`（404）/ `release_not_promotable`（409）。
+  - `crates/task-api/src/{lib,state,handlers}.rs`: `ApiSettings.releases` / `Inner.releases` / ルータ合流。
+  - `crates/taskctl/src/commands/worker.rs`: テストの `Config` リテラルに `selfdeploy: Default::default()`。
+  - `scripts/selfdeploy/release.sh`: `scripts/selfdeploy/*.sh` をリリースの `<release>/scripts/` へ
+    `cp -p`（実行ビットごと）。`promote.sh` と `lib.sh` が入ったことを確かめてから完成させる。
+  - `scripts/selfdeploy/lib.sh`: `SD_REPO` が要るのは `release.sh` だけ、という注記
+    （`promote.sh` / `verify.sh` / `rollback.sh` / `status.sh` は `TASKD_HOME` の下しか見ない）。
+  - `config/taskd.example.toml`: `[selfdeploy] releases_dir` をコメントで追加。
+  - `docs/gui/api.md`: §1.5 のエラー表に `release_not_found` / `release_not_promotable`、
+    エンドポイント一覧を 56 件に、§3.66〜3.67 を新設。`docs/api/v1/api-v1.schema.json` を再生成。
+  - `docs/selfdeploy.md`: リリースの中身に `scripts/` / `promote.log` / `promote.lock`、§4c「GUI から
+    昇格する」、§7 の禁止に「`POST /releases/{sha12}/promote` を叩かない」、§8 に `[selfdeploy]` の注記。
+  - `docs/adr/0040-self-improvement-deploy.md`: 「Phase 48 追記」（D6 からの逸脱 7 点）。
+  - テスト: `crates/taskd/tests/releases_api.rs`（新規 6 件。tempdir のリリースに対して実際に HTTP で叩く）。
+- 変更したファイル（GUI 側 / G14）:
+  - `gui/app/routes/releases.tsx`（新規）: `loadReleases` / `loader` / `action`（`release_promote` のみ）/
+    画面 / `ErrorBoundary`。行ごとに `useFetcher({key: "release-<sha12>"})` を持たせ、202 / 409 の結果が
+    SSE の再検証で消えないようにする（監査 H1）。`handoffInFlight` が真の間だけ 2 秒ごとに
+    `revalidator.revalidate()`（引き継ぎは SSE のイベントにならないため。`root.tsx` の再接続ポーリングと
+    同じ作り）。「昇格」は `<details>` の中のボタン＋`window.confirm` の二重確認。
+  - `gui/app/lib/releases.ts`（新規）: 表示の判断を全部ここに（`releaseVerifyState` / `...Label` /
+    `...Tone`、`promoteAvailability`（taskd の 409 と同じ理由で先回りして灰色にする）、`promoteConfirmText`、
+    `handoffInFlight` / `handoffProgressText`、`releaseSubtitle` ほか）。DOM の unit テストが無い（G10-U1）ため。
+  - `gui/app/lib/labels.ts`: `instanceRoleLabel`（`active` → 稼働中 / `standby` → 待機（切り替え中）/
+    `draining` → 引き継ぎ中 / `verify` → 検証）。
+  - `gui/app/taskd/releases-admin.server.ts`（新規）: `promoteRelease` / `readReleaseSha12`。
+    `clusters-admin.server.ts` と同じく `POST /reload` は呼ばない。
+  - `gui/app/taskd/action-types.ts`: `ReleasePromoteOutcome`。`gui/app/components/Flash.tsx`:
+    `ReleasePromoteFlash`（202 は「始めました」であって「終わりました」ではない、と必ず書く）。
+  - `gui/app/routes.ts` / `gui/app/root.tsx`（裏方の最後に「リリース」）/ `gui/app/routes/help.tsx`（SCREENS）。
+  - `gui/app/taskd/types.ts` / `gui/docs/taskd-api-v1.md`: `pnpm gen:types` と `scripts/sync-gui-docs.sh` で
+    再生成（Phase 47 の U47-3 をここで解消。`Health` の `release`/`mode`/`role` もこれで GUI 側に入った）。
+  - テスト: `gui/test/unit/releases.test.ts`（新規）、`gui/test/mock-taskd/fixtures.ts`（`releaseItem` /
+    `defaultReleases` / `defaultReleasePromoteAccepted`）、`gui/test/unit/action-feedback.test.ts` に
+    `releases.tsx` を追加（`actionData` と `<Form method="post">` を使っていないことの回帰テスト）。
+- 受け入れ条件ごとの証拠:
+  - 条件: `[selfdeploy] releases_dir` が設定ファイル基準で解決され、既定が `releases`。
+    実行: `cargo test -p taskd --lib selfdeploy_releases_dir_defaults_to_releases_and_is_config_dir_relative`
+    — 節を書かない構成でも `<config dir>/releases`、相対 `rel` は `<config dir>/rel`、絶対はそのまま、
+    未知キーは拒否。`cargo test -p taskd --test releases_api` の `Api::start` も同じことを assert している。
+  - 条件: `GET /releases` の形・並び・空ディレクトリでの寛容さ。
+    実行: `cargo test -p taskd --test releases_api` — `get_releases_is_200_on_an_empty_directory`
+    （空でも 200、`items: []`、`running` が `GET /health` の `release` / `role` と一致）、
+    `get_releases_sorts_newest_first_and_tolerates_broken_releases`（`built_at` 降順で
+    `bbbbbbbbbbbb, aaaaaaaaaaaa, cccccccccccc`（`built_at` が読めないものが最後）、`.build` は出ない、
+    壊れた 1 件だけが `gate_ok = false` と `problem` を持つ、`is_current` と `verify` の要約）。
+  - 条件: `POST /releases/{sha12}/promote` が 401 / 404 / 409×3 / 202。
+    実行: 同じテストファイル — `promote_requires_a_token`（401 `unauthorized`）、
+    `promoting_an_unknown_release_is_404`（知らない sha も `notahexsha` も 404 `release_not_found`）、
+    `promoting_is_409_when_unverified_already_current_or_already_promoting`（未検証 / 既に current /
+    既に昇格中がすべて 409 `release_not_promotable`、`detail` に理由）、
+    `promoting_a_verified_release_starts_the_bundled_script_and_returns_202`
+    （**tempdir の偽 `scripts/promote.sh`**（ログに 1 行書いて眠るだけ）が実際に起き、`promote.log` に
+    出力が流れ、`promote.lock` に pid が入り、一覧の `promoting` が真になり、もう一度押すと 409）。
+    **本番のパス・プロセス・systemd には一切触れていない。**
+  - 条件: `releases.rs` の単体テスト（tempdir に 2 リリース + symlink + 壊れた JSON）。
+    実行: `cargo test -p taskd --lib releases` — 6 passed
+    （空／無いディレクトリ、2 件の並びと `current`/`previous` の印、壊れた JSON と `.build`/`.partial` の除外、
+    sha12 の検証、昇格の 4 つの拒否理由、偽 `promote.sh` の detached 起動と `promote.lock`）。
+  - 条件: スキーマの再生成。
+    実行: `UPDATE_SCHEMA=1 cargo test -p task-api --lib` — exit 0、40 passed。
+    `docs/api/v1/api-v1.schema.json` に `Releases` / `ReleaseItem` / `ReleaseVerify` / `ReleaseRunning` /
+    `ReleasePromoteAccepted` / `DaemonInstance` / `InstanceRole` が入り、**+267 行**の追加のみ（削除 0）。
+  - 条件: `release.sh` が selfdeploy 一式をリリースに同梱する。
+    実行: `bash -n scripts/selfdeploy/{release,lib,promote}.sh` — 構文 OK（shellcheck はこのホストに無い）。
+    `release.sh` は `cp -p "$BUILD"/scripts/selfdeploy/*.sh "$STAGE/scripts/"` のあと
+    `[ -x "$STAGE/scripts/promote.sh" ]` と `[ -f "$STAGE/scripts/lib.sh" ]` を確かめてから
+    `mv -T "$STAGE" "$REL"` する（揃っていなければリリースを作らない）。
+    `promote.sh` / `verify.sh` / `rollback.sh` / `status.sh` は `SD_REPO` を使わない
+    （`grep -n 'SD_REPO' scripts/selfdeploy/*.sh` の当たりは `lib.sh` の定義と `release.sh` のワークツリー操作、
+    それに `promote.sh` の**ログ 1 行**（初回移行の失敗時に旧バイナリの場所を人に伝えるだけ）のみ）。
+  - 条件: リリースの中から起こした `promote.sh` が、作業チェックアウト無しで動く。
+    実行（本番には触れない。使い捨ての偽 `TASKD_HOME` に対して）:
+    `cp -p scripts/selfdeploy/*.sh <tmp>/releases/abcdef123456/scripts/` で 7 本が実行ビット付きで揃い、
+    `TASKD_HOME=<tmp> SD_REPO=/nonexistent-repo bash <tmp>/releases/abcdef123456/scripts/promote.sh 999999999999`
+    が `lib.sh` を**自分の隣から**読めて起動し、`ERROR: no such release: <tmp>/releases/999999999999` で
+    exit 1（＝`SD_REPO` が存在しなくても動き、`systemctl` に触れる前の検査で止まる）。
+  - 条件: Rust のゲート。
+    実行: `cargo test --workspace` — **exit 0**、`grep -c "^test result: FAILED"` = **0**、
+    `test result: ok` の `passed` 合計 **1176**（Phase 47 の 1163 + 今回 13:
+    `taskd/src/releases.rs` 6 + `taskd/src/config.rs` 1 + `taskd/tests/releases_api.rs` 6）。
+    `cargo clippy --workspace -- -D warnings` — **exit 0**、警告なし。
+    `cargo clippy --workspace --all-targets -- -D warnings` も **exit 0**。
+  - 条件: GUI のゲート（gui/CLAUDE.md）。
+    実行（`gui/` で、corepack の pnpm）: `pnpm lint` — **exit 0**（biome、174 ファイル）。
+    `pnpm typecheck` — **exit 0**（`react-router typegen && tsc -b`）。
+    `pnpm test` — **exit 0**、**45 ファイル / 558 tests passed**。
+    `pnpm build` — **exit 0**（client / ssr とも）。
+    `pnpm gen:types` を流し直しても `app/taskd/types.ts` の md5 は変わらない（差分ゼロ）。
+  - 条件: API の仕様書と GUI の写しが一致する。
+    実行: `bash scripts/sync-gui-docs.sh` — `gui/docs/taskd-api-v1.md` を更新（Phase 47 の U47-3 を解消）。
+- 未解決事項:
+  - U48-1: **`pnpm e2e` を流していない**。既定の待ち受けが `127.0.0.1:7710` / `127.0.0.1:7700` で、
+    いま動いている本番の taskd / GUI を掴む（`gui/playwright.config.ts` 冒頭の注意そのもの）。
+    今回の作業では本番プロセスに触れない約束だったので流さなかった。人が流すときは
+    `TASKD_API_LISTEN=127.0.0.1:7713 TASKD_API_URL=http://127.0.0.1:7713 TASKD_GUI_BIND=127.0.0.1:7703 pnpm e2e`
+    のように別ポートを与えること。「リリース」画面の e2e（`/releases` が 200、`/help` のリンク）は
+    そのときに足す。
+  - U48-2: **実機の `release.sh` を回していない**（リリースに `scripts/` が入ることの実物確認）。
+    ビルドに数分かかるうえ `~/taskd/releases/` を書き換えるので、人が回すのがよい:
+    `scripts/selfdeploy/release.sh HEAD` → `ls -l ~/taskd/releases/<sha12>/scripts/` に `.sh` が
+    実行ビット付きで並ぶことを確認 → `verify.sh <sha12>` → GUI の「リリース」画面から「昇格」。
+    **Phase 48 より前に作られたリリースには `scripts/` が無いので、GUI からは昇格できない**（409。
+    shell の `scripts/selfdeploy/promote.sh` を使う）。つまり GUI からの昇格が使えるのは
+    「Phase 48 以降に `release.sh` で作ったリリース」から。
+  - U48-3: `promote.log` の中身は API から読めない（意図どおり。ADR-0040 D6 のスコープ外）。
+    昇格が失敗したときは `~/taskd/backups/promote-<ts>.log` を人が見る。GUI に出すなら別の判断が要る。
+  - U48-4: `promote.lock` は pid の生存でしか判定しない。`promote.sh` が SIGKILL された直後は
+    ロックが残るが、pid が消えているので昇格は塞がれない（残骸は無視される）。逆に pid が再利用されると
+    誤って「昇格中」に見えうる（同一ホスト・短時間なので実害は小さいと判断した）。
+- 提案:
+  - P48-1: **案件「agent-platform の自己改善」の登録と `implementer` の指示文**（ADR-0040 D5）。
+    下のブロックを人が `~/taskd/taskd.toml` に貼る（**このエージェントは `~/taskd/taskd.toml` を編集しない**。
+    貼ったら GUI の「プロバイダ」画面か `POST /reload` で読み直す）。案件そのものは GUI の「秘書」から
+    「新しい案件として」投げ、作業場所に `local: /home/rmaeda/workspace/agent-platform` を登録する（ADR-0039）。
+
+    ```toml
+    [[roles]]
+    id = "implementer"
+    tier = "standard"
+    max_turns = 20
+    instructions = """あなたは実装担当。受け取った範囲だけを実装し、終わったら summary を書く。
+
+    agent-platform 自身を直す案件では、次を必ず守る（ADR-0040 D5 / docs/selfdeploy.md §7）。
+
+    やること:
+    - タスクごとにブランチ `self/<task-id>` を切り、そこにコミットする。`main` には直接コミットしない。
+    - `cargo test --workspace` と `cargo clippy --workspace -- -D warnings` を通してからコミットする。
+    - 検証までは自分でやってよい: `scripts/selfdeploy/release.sh self/<task-id>` と
+      `scripts/selfdeploy/verify.sh <sha12>`（どちらも本番に触れない）。
+    - できた `~/taskd/releases/<sha12>/gate.json` と `verify.json` を `artifacts/` に写し、
+      報告に「検証済み sha」を書く。昇格するかどうかは人が決める。
+
+    やってはいけないこと（どれか 1 つでもやったら、やらずに止まって報告する）:
+    - `scripts/selfdeploy/promote.sh` / `rollback.sh` / `install-units.sh` を実行する
+      （リリースの中の `~/taskd/releases/*/scripts/*.sh` も同じ）。
+    - `POST /releases/{sha12}/promote` を叩く（GUI の「昇格」ボタンと同じもの。押すのは人だけ）。
+    - `systemctl` を叩く（本番の unit を start / stop / restart / enable / disable する）。
+    - `~/taskd/taskd.toml` を編集する。`~/taskd/*.sqlite3` に書き込む
+      （読むのは `sqlite3 "file:…?mode=ro"` と `.backup` だけ）。
+    - 本番のプロセスに `kill` などのシグナルを送る。`127.0.0.1:7710` / `0.0.0.0:7700` に bind する。
+    - `docs/DESIGN.md` と `docs/SPEC.md` を書き換える（提案は `docs/PROGRESS.md` の「提案」節へ）。
+
+    困ったら止まって人に聞く。本番は動き続けているので、壊しても直せる範囲（作業チェックアウトと
+    `~/taskd/releases/`）から出ないこと。"""
+    ```
+  - P48-2: `status.sh` は `daemon_instances` を `sqlite3` で直に読んでいるが、`GET /releases` が同じものを
+    返すようになったので、API が生きているときはそちらから取ってもよい（P47-1 の続き）。今回は
+    `status.sh` を一切変えていない（人の手順を変えないため）。
+  - P48-3: 昇格を standing の認可で機械に渡すかどうか（ADR-0040 D5 が「実機で数回回してから決める」と
+    したもの）は、まだ判断材料が無い。GUI からの昇格を数回試してから決めるのがよい。
+  - P48-4: `GET /releases` は SSE に載らないので、GUI は引き継ぎ中だけ 2 秒ポーリングしている。
+    `daemon_instances` の変化を SSE の `daemon` イベントに混ぜると、この特例を消せる。

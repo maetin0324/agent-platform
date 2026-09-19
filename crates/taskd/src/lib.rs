@@ -9,6 +9,8 @@ pub mod instance;
 /// ADR-0037（Phase 39）: 人の判断が要るときだけ Discord に知らせる（判定は決定的、送信は spawn）。
 pub mod milestone_review;
 pub mod notify;
+/// ADR-0040 D6（Phase 48）: `[selfdeploy] releases_dir` を読む／`promote.sh` を起こす。
+pub mod releases;
 /// ADR-0033 D3（Phase 25）: 報告の圧縮（まとめの run を起こす決定的な判断）。
 pub mod reports;
 
@@ -624,6 +626,11 @@ pub fn api_settings(
         memory_dir: config.memory.as_ref().map(|m| m.dir.clone()),
         notify_secret_id: config.notify.discord_webhook_secret.clone(),
         notify_gui_base_url: config.notify.base_url().map(str::to_string),
+        // ADR-0040 D6（Phase 48）: `GET /releases` / `POST /releases/{sha12}/promote` が読む先。
+        // task-api はファイルの規約を知らないので、読む係をここで渡す。
+        releases: Some(Arc::new(crate::releases::FsReleases::new(
+            config.selfdeploy.releases_dir.clone(),
+        ))),
         release,
         mode,
         role,

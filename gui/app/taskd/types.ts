@@ -277,6 +277,10 @@ export type OrgKind = "secretary" | "department" | "section";
  */
 export type ProjectStatus = ("active" | "paused" | "done") | "proposed";
 /**
+ * インスタンスの役割（ADR-0040 D4）。`daemon_instances.role` の綴りと 1 対 1。
+ */
+export type InstanceRole = "active" | "standby" | "draining" | "verify";
+/**
  * 報告の一意識別子（ULID）。
  */
 export type ReportId = string;
@@ -335,6 +339,8 @@ export interface ApiV1Schema {
   provider_check: ProviderCheckResponse;
   provider_config: ProviderConfigView1;
   providers: Providers;
+  release_promote: ReleasePromoteAccepted;
+  releases: Releases;
   reload: ReloadResult;
   replay_report: ReplayReport;
   report_detail: ReportDetail;
@@ -2101,6 +2107,129 @@ export interface DailyUsage {
    * その日に終わった run の数。
    */
   runs: number;
+}
+/**
+ * `POST /releases/{sha12}/promote` → 202 の応答。**昇格そのものはこの API の外**
+ * （`<releases_dir>/<sha12>/scripts/promote.sh` を detached で起こすだけ）。
+ */
+export interface ReleasePromoteAccepted {
+  /**
+   * `promote.sh` の出力を流し込んでいるファイルの絶対パス（中身は API では出さない）。
+   */
+  log: string;
+  sha12: string;
+  /**
+   * RFC 3339。
+   */
+  started_at: string;
+}
+/**
+ * Phase 48（ADR-0040 D6）: リリース。`GET /releases` と `POST /releases/{sha12}/promote` の応答。
+ */
+export interface Releases {
+  /**
+   * `<releases_dir>/../current` が指す sha12（無ければ `null`）。
+   */
+  current?: string | null;
+  /**
+   * ADR-0040 D4 の `daemon_instances`（引き継ぎの進行が見える）。`started_at` 昇順。
+   */
+  instances: DaemonInstance[];
+  /**
+   * リリース一覧。`built_at` の新しい順。
+   */
+  items: ReleaseItem[];
+  /**
+   * `<releases_dir>/../previous` が指す sha12（無ければ `null`）。
+   */
+  previous?: string | null;
+  running: ReleaseRunning;
+}
+/**
+ * `daemon_instances` の 1 行。
+ */
+export interface DaemonInstance {
+  drained_at?: string | null;
+  handoff_requested_at?: string | null;
+  heartbeat_at: string;
+  instance_id: string;
+  pid: number;
+  /**
+   * `--release <sha12>` / `TASKD_RELEASE` / `"dev"`。
+   */
+  release: string;
+  role: InstanceRole;
+  started_at: string;
+}
+/**
+ * `GET /releases` の `items[]` の 1 件。
+ */
+export interface ReleaseItem {
+  /**
+   * `manifest.json` の `built_at`（RFC 3339）。読めなければ `null`（並びは最後）。
+   */
+  built_at?: string | null;
+  /**
+   * `gate.json` の `ok`（`release.sh` の gate が全段 exit 0 だったか）。読めなければ `false`。
+   */
+  gate_ok: boolean;
+  is_current: boolean;
+  is_previous: boolean;
+  /**
+   * `manifest.json` / `gate.json` が読めなかったときの一行（GUI が「壊れている」と出す）。
+   */
+  problem?: string | null;
+  /**
+   * `promote.lock` に書かれた pid がまだ生きている（昇格が走っている最中）。
+   */
+  promoting: boolean;
+  /**
+   * `manifest.json` の `ref`（`release.sh` に渡した git ref）。読めなければ `null`。
+   */
+  ref?: string | null;
+  /**
+   * `manifest.json` の `schema_version`。
+   */
+  schema_version?: number | null;
+  /**
+   * ディレクトリ名（`git rev-parse --short=12`）。
+   */
+  sha12: string;
+  /**
+   * `verify.json`。無ければ `null`（＝未検証。昇格できない）。
+   */
+  verify?: ReleaseVerify | null;
+}
+/**
+ * `verify.json` の要約（ADR-0040 D3）。
+ */
+export interface ReleaseVerify {
+  /**
+   * RFC 3339。
+   */
+  at?: string | null;
+  /**
+   * N-1 互換（旧バイナリが新スキーマを読める）。偽なら昇格は停止 → 起動になる。
+   */
+  live_ok: boolean;
+  /**
+   * 検査 1〜4 が全部真。`promote.sh` はこれが真でなければ拒否する。
+   */
+  ok: boolean;
+}
+/**
+ * いまこの要求に答えているプロセス自身（`GET /health` の `release` / `role` と同じ値）。
+ */
+export interface ReleaseRunning {
+  instance_id: string;
+  /**
+   * `--release <sha12>` / `TASKD_RELEASE` / `"dev"`。
+   */
+  release: string;
+  /**
+   * `active` / `standby` / `draining` / `verify`。
+   */
+  role: string;
 }
 /**
  * `POST /api/v1/reload` の応答（ADR-0017 D1）。

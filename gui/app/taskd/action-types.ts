@@ -16,6 +16,7 @@ import type {
   ProjectPlanAccepted,
   ProviderCheckResponse,
   ProviderConfigView1,
+  ReleasePromoteAccepted,
   ReloadResult,
   ReplayReport,
   ReportsNotifiedResult,
@@ -224,6 +225,17 @@ export type StandingRuleOpOutcome =
   | { ok: true; op: "create"; id: string; rule: StandingRule }
   | { ok: true; op: "delete"; id: string }
   | { ok: false; op: "create" | "delete"; id: string; error: ActionError };
+
+/**
+ * リリースの昇格（ADR-0040 D6、docs/taskd-api-v1.md §3.67。**管理系**、`token_file` 未設定でも 401）:
+ * `POST /releases/{sha12}/promote` の結果。taskd のエラーは例外にせず `{ok:false, error}` にする
+ * （404 `release_not_found` / 409 `release_not_promotable`＝未検証・既に current・既に昇格中 /
+ * 401 `unauthorized` を含む）。202 は「`promote.sh` を起こした」だけで、**昇格の完了ではない**
+ * （進行は `GET /releases` の `instances` を読み直して見る）。
+ */
+export type ReleasePromoteOutcome =
+  | { ok: true; op: "release_promote"; sha12: string; accepted: ReleasePromoteAccepted }
+  | { ok: false; op: "release_promote"; sha12: string; error: ActionError };
 
 export type AccountOpOutcome =
   | { ok: true; op: "create"; id: string; adapter: AccountAdapter; account: AccountView }

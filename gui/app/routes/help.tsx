@@ -250,6 +250,12 @@ const SCREENS: { href: string | null; icon: IconName; title: string; text: strin
     text: "リモートで実行するタスクが使う `[[clusters]]` の接続状況（connected・cooldown・auth）を見る画面。受信箱の「クラスタに接続できません」から開くことが多い。接続方式（auth）が manual 以外なら、この画面から接続もできる（管理系 API のトークンが要る）: publickey は「接続」ボタンだけ、totp は「接続」→ プロンプト表示 → 検証コード入力 → 「送信」（コードはログにも応答にも残らない）。manual は従来どおり手元で scripts/cluster-login.sh を実行する。",
   },
   {
+    href: "/releases",
+    icon: "layers",
+    title: "リリース",
+    text: "agent-platform 自身の新しい版（リリース）を一覧し、検証済みのものへ昇格する画面（ADR-0040）。リリースは scripts/selfdeploy/release.sh が作り（cargo test / clippy / build と GUI の typecheck / test / build が全部通ったときだけ）、verify.sh が本番 DB のコピーで検証する。この画面に出るのはその結果で、「検証済み（ライブ引き継ぎ）」なら動いている仕事を止めずに切り替わり、「検証済み（停止 → 起動）」なら数十秒 API と画面が止まる。「昇格」は確認のうえ人が押す（管理系 API のトークンが要る）。切り替えの最中は上の「切り替えの進行」で旧が引き継ぎ中・新が稼働中になるのを見られる（2 秒ごとに自動更新）。",
+  },
+  {
     href: "/daemon",
     icon: "activity",
     title: "デーモン",

@@ -29,6 +29,8 @@ export default [
   route("providers", "routes/providers.tsx"),
   route("accounts", "routes/accounts.tsx"),
   route("clusters", "routes/clusters.tsx"),
+  // リリース（自己改善のデプロイ。Phase G14、ADR-0040 D6）
+  route("releases", "routes/releases.tsx"),
   route("graph", "routes/graph.tsx"),
   route("help", "routes/help.tsx"),
   route("events", "routes/events.ts"),

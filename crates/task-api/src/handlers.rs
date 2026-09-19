@@ -124,6 +124,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::approvals::routes())
         // ADR-0037 D4（Phase 39）: 通知（Discord）。実装は `crate::notify`。
         .merge(crate::notify::routes())
+        // ADR-0040 D6（Phase 48）: リリースの一覧と昇格。実装は `crate::releases`。
+        .merge(crate::releases::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -2211,6 +2213,7 @@ mod tests {
             memory_dir: None,
             notify_secret_id: task_core::DEFAULT_WEBHOOK_SECRET_ID.to_string(),
             notify_gui_base_url: None,
+            releases: None,
             release: "dev".to_string(),
             mode: task_core::DaemonMode::Normal,
             role: task_core::SharedRole::new(task_core::InstanceRole::Active),

@@ -682,6 +682,7 @@ mod tests {
             secrets: None,
             memory: None,
             handoff: Default::default(),
+            selfdeploy: Default::default(),
             source_path: None,
         }
     }

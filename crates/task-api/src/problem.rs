@@ -279,6 +279,16 @@ impl ApiProblem {
         Self::new(StatusCode::CONFLICT, "notify_unavailable", detail)
     }
 
+    /// ADR-0040 D6（Phase 48）: `POST /releases/{sha12}/promote` の sha12 が `releases_dir` に無い。
+    pub(crate) fn release_not_found(sha12: &str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "release_not_found", format!("release not found: {sha12}"))
+    }
+
+    /// ADR-0040 D6: 昇格を受け付けられない（未検証 / 既に current / 既に昇格中 / `[selfdeploy]` が無い）。
+    pub(crate) fn release_not_promotable(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "release_not_promotable", detail)
+    }
+
     /// この Problem の HTTP ステータス（`put_secret` が解析エラーだけを差し替えるために見る）。
     pub(crate) fn status(&self) -> StatusCode {
         self.status

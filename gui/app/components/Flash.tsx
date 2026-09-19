@@ -8,6 +8,7 @@ import type {
   OrgOpOutcome,
   ProjectOpOutcome,
   ProviderActionResult,
+  ReleasePromoteOutcome,
   ReportOpOutcome,
   RetryOutcome,
   SecretActionResult,
@@ -379,6 +380,31 @@ export function NotifyTestFlash({ outcome }: { outcome: NotifyTestOutcome | unde
       <p data-testid="flash-notify-test">
         {result.ok ? "テスト送信: 届きました" : "テスト送信: 届きませんでした"}
         {result.detail && <>（{result.detail}）</>}
+      </p>
+    </Alert>
+  );
+}
+
+/**
+ * 「リリース」画面（`/releases`、Phase G14。ADR-0040 D6）の昇格の結果。202 は
+ * 「`promote.sh` を起こした」だけで、**切り替えが終わったわけではない**ことを必ず書く
+ * （旧 taskd はこのあと `draining` になって手元の run を見終わってから終わる。ADR-0040 D4）。
+ */
+export function ReleasePromoteFlash({ outcome }: { outcome: ReleasePromoteOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  return (
+    <Alert
+      role="status"
+      data-testid="flash"
+      data-flash-kind="ok"
+      tone="success"
+      title="昇格を始めました"
+      className="my-2"
+    >
+      <p data-testid="flash-release-promote">
+        {outcome.sha12} への切り替えを始めました。完了は下の「切り替えの進行」で確認してください （この画面は 2
+        秒ごとに自動で読み直します）。
       </p>
     </Alert>
   );

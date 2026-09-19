@@ -26,6 +26,9 @@ const ROUTES_WITH_WRITE_FORMS = [
   "plans.new.tsx",
   "daemon.tsx",
   "artifacts.tsx",
+  // Phase G14（ADR-0040 D6）: 昇格の 202 / 409 は行に残り続ける必要がある（引き継ぎ中は
+  // 2 秒ごとに再検証するので、`actionData` だとその都度消えてしまう）。
+  "releases.tsx",
 ];
 
 /** コメント（`//` と `/* *​/`）は落としてから見る（説明文で `actionData` に触れてよいように）。 */

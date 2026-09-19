@@ -24,8 +24,8 @@ use crate::types::{
     CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters, ConfigView, DaemonView, DecisionBody,
     EventsPage, Health, MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, Problem,
     ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody, ProviderCheckResponse, ProviderConfigView,
-    Providers, ReloadResult, RetryBody, RunList, SecretList, SecretPutResult, StreamHeartbeat, StreamHello,
-    StreamReset,
+    Providers, ReleasePromoteAccepted, Releases, ReloadResult, RetryBody, RunList, SecretList, SecretPutResult,
+    StreamHeartbeat, StreamHello, StreamReset,
 };
 
 /// コミット済みのスキーマ（`GET /schema` の本体）。
@@ -111,6 +111,9 @@ pub struct ApiV1Schema {
     /// Phase 39（ADR-0037 D4）: 通知（Discord）。`GET /notify` と `POST /notify/test` の応答。
     pub notify: crate::notify::NotifyView,
     pub notify_test: crate::notify::NotifyTestResult,
+    /// Phase 48（ADR-0040 D6）: リリース。`GET /releases` と `POST /releases/{sha12}/promote` の応答。
+    pub releases: Releases,
+    pub release_promote: ReleasePromoteAccepted,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

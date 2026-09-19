@@ -118,6 +118,9 @@ pub struct Config {
     /// ADR-0040 D4（Phase 47）: ライブ引き継ぎ（`draining` の待ち時間）。
     #[serde(default)]
     pub handoff: HandoffConfig,
+    /// ADR-0040 D6（Phase 48）: リリースの置き場所（`GET /releases` と昇格が読む）。
+    #[serde(default)]
+    pub selfdeploy: SelfdeployConfig,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -143,6 +146,32 @@ impl Default for HandoffConfig {
 
 fn default_drain_timeout_secs() -> u64 {
     3600
+}
+
+/// `[selfdeploy]`（ADR-0040 D6）: `release.sh` が作るリリースの置き場所。`GET /releases` はここの
+/// `manifest.json` / `gate.json` / `verify.json` を読むだけで、`POST /releases/{sha12}/promote` は
+/// `<releases_dir>/<sha12>/scripts/promote.sh` を起こす。`current` / `previous` の symlink は
+/// **`releases_dir` の親**（本番では `~/taskd/current`）にある。
+///
+/// 相対パスは設定ファイルのディレクトリ基準（他のパス設定と同じ）。既定は `releases` なので、
+/// 本番の `~/taskd/taskd.toml` には何も書かなくても `~/taskd/releases` を見る。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfdeployConfig {
+    #[serde(default = "default_releases_dir")]
+    pub releases_dir: PathBuf,
+}
+
+impl Default for SelfdeployConfig {
+    fn default() -> Self {
+        Self {
+            releases_dir: default_releases_dir(),
+        }
+    }
+}
+
+fn default_releases_dir() -> PathBuf {
+    PathBuf::from("releases")
 }
 
 /// ADR-0040 D3（Phase 47）: CLI からの上書き。`verify.sh` が本番の設定をそのまま読ませたまま、
@@ -957,6 +986,10 @@ impl Config {
             && memory.dir.is_relative()
         {
             memory.dir = base.join(&memory.dir);
+        }
+        // ADR-0040 D6: `[selfdeploy] releases_dir` も同じ扱い（既定の `releases` もここで絶対化される）。
+        if cfg.selfdeploy.releases_dir.is_relative() {
+            cfg.selfdeploy.releases_dir = base.join(&cfg.selfdeploy.releases_dir);
         }
         // ADR-0027 D3: `[adapters.paperqa]` のパス設定は、他のパス設定と同じく設定ファイルのディレクトリ基準で
         // 絶対化する。`settings` は `pqa -s` に渡す文字列（拡張子無し）だが、パスの形をしているので同様に扱う。
@@ -3054,6 +3087,39 @@ roles = ["lead"]
         assert!(without.ensure_memory_dir().is_ok());
         // 知らないキーは拒否する（他の節と同じ）。
         assert!(toml::from_str::<Config>("[memory]\ndir = \"m\"\nbogus = 1\n").is_err());
+    }
+
+    /// ADR-0040 D6（Phase 48）: `[selfdeploy] releases_dir` は既定 `releases` で、他のパス設定と同じく
+    /// 設定ファイルのディレクトリ基準で絶対化される（節を書かなくても既定が効く）。
+    #[test]
+    fn selfdeploy_releases_dir_defaults_to_releases_and_is_config_dir_relative() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("taskd.toml");
+        // 節を書かない構成でも既定の `releases` が効く。
+        std::fs::write(&path, "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.selfdeploy.releases_dir, dir.path().join("releases"));
+
+        // 明示した相対パスも設定ファイル基準。
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[selfdeploy]\nreleases_dir = \"rel\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.selfdeploy.releases_dir, dir.path().join("rel"));
+
+        // 絶対パスはそのまま。
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[selfdeploy]\nreleases_dir = \"/srv/releases\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.selfdeploy.releases_dir, PathBuf::from("/srv/releases"));
+
+        // 知らないキーは拒否する（他の節と同じ）。
+        assert!(toml::from_str::<Config>("[selfdeploy]\nbogus = 1\n").is_err());
     }
 
     /// `ensure_secrets_dir` は `[secrets] dir` を 0700 で作る（無ければ）。`[secrets]` が無ければ何もしない。

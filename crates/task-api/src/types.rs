@@ -760,3 +760,79 @@ pub struct MilestoneCreateBody {
 pub struct MilestonePatchBody {
     pub status: MilestoneStatus,
 }
+
+// ---- ADR-0040 D6（Phase 48）: リリース（自己改善のデプロイ）----
+
+/// `GET /releases` の応答（読み取り。トークンは要らない）。
+///
+/// 中身は `[selfdeploy] releases_dir` の下の `manifest.json` / `gate.json` / `verify.json` と
+/// `current` / `previous` の symlink、`daemon_instances` の行を**読むだけ**で作る。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Releases {
+    /// `<releases_dir>/../current` が指す sha12（無ければ `null`）。
+    pub current: Option<String>,
+    /// `<releases_dir>/../previous` が指す sha12（無ければ `null`）。
+    pub previous: Option<String>,
+    /// いまこの要求に答えているプロセス自身（`GET /health` の `release` / `role` と同じ値）。
+    pub running: ReleaseRunning,
+    /// ADR-0040 D4 の `daemon_instances`（引き継ぎの進行が見える）。`started_at` 昇順。
+    pub instances: Vec<task_core::DaemonInstance>,
+    /// リリース一覧。`built_at` の新しい順。
+    pub items: Vec<ReleaseItem>,
+}
+
+/// `GET /releases` の `running`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseRunning {
+    /// `--release <sha12>` / `TASKD_RELEASE` / `"dev"`。
+    pub release: String,
+    /// `active` / `standby` / `draining` / `verify`。
+    pub role: String,
+    pub instance_id: String,
+}
+
+/// `GET /releases` の `items[]` の 1 件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseItem {
+    /// ディレクトリ名（`git rev-parse --short=12`）。
+    pub sha12: String,
+    /// `manifest.json` の `ref`（`release.sh` に渡した git ref）。読めなければ `null`。
+    pub r#ref: Option<String>,
+    /// `manifest.json` の `built_at`（RFC 3339）。読めなければ `null`（並びは最後）。
+    pub built_at: Option<String>,
+    /// `manifest.json` の `schema_version`。
+    pub schema_version: Option<u32>,
+    /// `gate.json` の `ok`（`release.sh` の gate が全段 exit 0 だったか）。読めなければ `false`。
+    pub gate_ok: bool,
+    /// `verify.json`。無ければ `null`（＝未検証。昇格できない）。
+    pub verify: Option<ReleaseVerify>,
+    pub is_current: bool,
+    pub is_previous: bool,
+    /// `promote.lock` に書かれた pid がまだ生きている（昇格が走っている最中）。
+    pub promoting: bool,
+    /// `manifest.json` / `gate.json` が読めなかったときの一行（GUI が「壊れている」と出す）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+/// `verify.json` の要約（ADR-0040 D3）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseVerify {
+    /// 検査 1〜4 が全部真。`promote.sh` はこれが真でなければ拒否する。
+    pub ok: bool,
+    /// N-1 互換（旧バイナリが新スキーマを読める）。偽なら昇格は停止 → 起動になる。
+    pub live_ok: bool,
+    /// RFC 3339。
+    pub at: Option<String>,
+}
+
+/// `POST /releases/{sha12}/promote` → 202 の応答。**昇格そのものはこの API の外**
+/// （`<releases_dir>/<sha12>/scripts/promote.sh` を detached で起こすだけ）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleasePromoteAccepted {
+    pub sha12: String,
+    /// `promote.sh` の出力を流し込んでいるファイルの絶対パス（中身は API では出さない）。
+    pub log: String,
+    /// RFC 3339。
+    pub started_at: String,
+}

@@ -251,6 +251,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { href: "/providers", label: "プロバイダ", icon: "cpu" },
       { href: "/accounts", label: "アカウント", icon: "users" },
       { href: "/clusters", label: "クラスタ", icon: "server" },
+      { href: "/releases", label: "リリース", icon: "layers" },
     ],
   },
   { label: "ヘルプ", items: [{ href: "/help", label: "使い方", icon: "book" }] },
