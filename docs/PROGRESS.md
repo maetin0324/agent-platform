@@ -7581,3 +7581,18 @@ main（`ef639ea`）に `git merge --no-ff` で合わせた。衝突は **12 か�
 - `promote.sh 7d7c38b4e080`（mode=live）: 2 秒で新が active、GUI 25 秒で切替、旧 `3af3fe474175` は drain して exit 0。
   `current -> 7d7c38b4e080`、`previous -> 3af3fe474175`。
 - これで ADR-0041 D1〜D5 がすべて本番で動いている。残りは §4 の「実機: 自己改善案件を 1 周回す」（人が GUI で Go を出す）。
+
+### Phase 52–54 実機: 5 回目の昇格（停止→起動、schema 11→14。2026-09-19 20:41 UTC）
+
+- `release.sh main` → `26238ab2b052`（A1 + B1 + A2。`changes.json`: base 7d7c38b4e080、commits 9、files 175、sensitive 6）。
+  `verify.sh` → 検査 1〜4・6 が true（煙試験 5.02 秒）、**検査 5（N-1）は false**: 旧 `7d7c38b4e080`（schema 11）は 14 の DB を
+  `SchemaTooNew` で開けない（設計どおり）→ `ok=true live_ok=false`。
+- `promote.sh 26238ab2b052`（mode=stop-start）: 旧 pid 3293617 を SIGTERM → 7 秒で終了 → DB バックアップ
+  `backups/20260919-204107-pre-26238ab2b052.sqlite3` → `taskd@26238ab2b052` 起動 → 3 秒で health 200 / schema 14 → GUI 切替 →
+  `current -> 26238ab2b052`、`previous -> 7d7c38b4e080`。停止していた間に走っていた run は無し（`reviewing` 1 件は人の認可待ちで
+  プロセス無し）。
+- 事後: `GET /projects/{id}/repos` の backfill が両案件に primary 1 件（`benchfs` remote git、`agent-platform` local git）。
+  `GET /tasks?q=` が通る。GUI `/healthz` release 一致。
+- 気づき: 案件「Pluvio…」のタスク `01M2VTETVXHTZVJQBKYTPHZ784` は 07:12 から `reviewing`（criterion 0 の承認タスク
+  `01M2W846395893N2YDRPQQEEYC` が `ready` で受信箱に出ている。人が approve / reject するまで動かない。人は 07:12 の対話で
+  「一旦プロジェクト修了」と言っているので、Phase 55 の案件の中止・アーカイブで片付ける想定）。
