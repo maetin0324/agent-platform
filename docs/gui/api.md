@@ -122,6 +122,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `validation` | 422 | task-ops の検証失敗。`errors: [{field?, message}]`。`message` は `taskctl` と同じ文言（§5.6）。`field` は task-api が文言から推定できるときだけ（`acceptance` / `depends_on` / `goal`） |
 | `too_many_streams` | 503 | SSE 接続数が 16 を超えた。`Retry-After: 5` |
 | `db_busy` | 503 | `SQLITE_BUSY`（busy_timeout 超過）。`Retry-After: 1` |
+| `standby` | 503 | ADR-0040 D4: いまこのプロセスは `standby`（または `draining`）なので、ディスパッチャの状態を要する管理系（`POST /reload`、`POST /providers/{id}/check`、クラスタ接続、アカウントの確認・削除・ログイン中継、`POST /notify/test`）を受けられない。`detail` は `"standby"`、`Retry-After: 2`。窓は 1〜2 tick（昇格の引き継ぎ中）なので、GUI はその間だけ「切り替え中」を出して再送すればよい。読み書きの通常のエンドポイントはそのまま動く |
 | `internal` | 500 | その他（`detail` にエラー文。スタックやパスは出さない） |
 
 `task_ops::OpsError` からの写像（Phase 9a の型）:
@@ -208,16 +209,24 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 ### 3.1 `GET /health` → 200 `Health`
 
 ```json
-{"api_version":"1","schema_version":7,"taskd_version":"0.9.0","instance_id":"01J…",
- "started_at":"…","now":"…","db":{"journal_mode":"wal","busy_timeout_ms":5000}}
+{"api_version":"1","schema_version":11,"taskd_version":"0.9.0","instance_id":"01J…",
+ "started_at":"…","now":"…","db":{"journal_mode":"wal","busy_timeout_ms":5000},
+ "release":"a1b2c3d4e5f6","mode":"normal","role":"active"}
 ```
 
 - `api_version` は `"1"` 固定。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
-- `schema_version` は `schema_migrations` の最大版数（= `task_core::SCHEMA_VERSION`。現在 **7**:
+- `schema_version` は `schema_migrations` の最大版数（= `task_core::SCHEMA_VERSION`。現在 **11**:
   0001 init / 0002 events id / 0003 tasks の title・updated_at 列 / 0004 tasks の objective 列（ADR-0014 D2）/
   0005 tasks の genre 列（ADR-0027）/ 0006 組織・案件・報告・対話・認可の表と tasks の project_id・
-  milestone_id・assignee 列（ADR-0033）/ 0007 messages の task_id 列と reports.project_id の NULL 可（Phase 27））。
+  milestone_id・assignee 列（ADR-0033）/ 0007 messages の task_id 列と reports.project_id の NULL 可（Phase 27）/
+  0008 notifications（ADR-0037）/ 0009 notifications の project_id 列 / 0010 projects の workspace 列（ADR-0039）/
+  0011 daemon_instances（ADR-0040 D4））。
 - `journal_mode` は `PRAGMA journal_mode` の実測値（`"wal"` でなければ設定不備。GUI は警告を出す）。
+- ADR-0040 D3 / D4（Phase 47）: `release` はこのプロセスのリリース（`--release <sha12>` / 環境変数
+  `TASKD_RELEASE` / 既定 `"dev"`）、`mode` は `"normal"` か `"verify"`（`--mode`）、`role` は
+  `"active"` / `"standby"` / `"draining"` / `"verify"`。昇格（`promote.sh`）と検証（`verify.sh`）は
+  「どの版がどの役割で動いているか」をここだけで判定する。`role` が `standby` / `draining` の間は
+  ディスパッチャの状態を要する管理系が 503 `standby`（§1.5）。
 - 無認証（1.3）。DB のパスは出さない（`GET /config` に出す）。
 
 ### 3.2 `GET /inbox` → 200 `Inbox`

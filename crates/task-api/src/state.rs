@@ -75,6 +75,10 @@ pub(crate) struct Inner {
     pub(crate) notify_secret_id: String,
     /// ADR-0037 D3: `[notify] gui_base_url`。
     pub(crate) notify_gui_base_url: Option<String>,
+    /// ADR-0040 D4（Phase 47）: `GET /health` の `release` / `mode` と、管理 API の 503 に使う役割。
+    pub(crate) release: String,
+    pub(crate) mode: task_core::DaemonMode,
+    pub(crate) role: task_core::SharedRole,
     pub(crate) account_stats: Mutex<crate::stats::AccountStatsState>,
     pub(crate) instance_id: String,
     pub(crate) started_at: String,
@@ -121,6 +125,9 @@ impl ApiState {
             memory_dir: settings.memory_dir,
             notify_secret_id: settings.notify_secret_id,
             notify_gui_base_url: settings.notify_gui_base_url,
+            release: settings.release,
+            mode: settings.mode,
+            role: settings.role,
             account_stats: Mutex::new(crate::stats::AccountStatsState::default()),
             instance_id: settings.instance_id,
             started_at: settings.started_at,

@@ -5609,3 +5609,140 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
     見てもらうしかない。型で強制する分離（例えば `Seq(u64)`/`GlobalEventId(u64)` のような newtype 化）は
     今回のスコープ外（他の呼び出し箇所すべての型変更を伴うため、Phase 45 の「今回の Phase だけをやる」を
     超える）。今後同種の事故が繰り返すようなら次の Phase で newtype 化を検討する価値がある。
+
+## Phase 47 — taskd のインスタンス役割とライブ引き継ぎ（ADR-0040 D4。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0040 §4 の Phase 47）: 昇格（新しいリリースへの切り替え）を**動いている仕事を殺さずに**
+  行えるようにする。taskd に「インスタンスの役割」（`active` / `standby` / `draining` / `verify`）を
+  持たせ、新旧が同じ DB・同じポートに並んだ状態から引き継ぐ。配備の道具（`scripts/selfdeploy/*`、
+  systemd の unit、GUI の `reusePort`）は Phase 46 で、API/GUI の「リリース」画面は Phase 48 / G14。
+- 変更したファイル:
+  - `crates/task-core/migrations/0011_daemon_instances.sql`（新規）: ADR-0040 D4 の表そのまま
+    （`instance_id` PK / `"release"` / `pid` / `role` CHECK(4 綴り) / `started_at` / `heartbeat_at` /
+    `handoff_requested_at` / `drained_at`）。`release` は SQLite の予約語なので常に引用する。
+    `(role, heartbeat_at)` に索引。
+  - `crates/task-core/src/store.rs`: `SCHEMA_VERSION` を 10 → **11**。`TaskStore` に
+    `instance_register` / `instance_heartbeat` / `instance_request_handoff`（既に入っていれば上書き
+    しない）/ `instance_set_role`（heartbeat も同時更新）/ `instance_mark_drained` / `instance_list`
+    （`started_at` 昇順、同値は `instance_id` 昇順）/ `instance_delete` / `instance_delete_stale`
+    （`keep` 以外で `drained_at` が付いた行と heartbeat が古い行を 1 トランザクションで消し、消した id を
+    昇順で返す）を追加し、`SqliteStore` に実装。
+  - `crates/task-core/src/instance.rs`（新規）: `InstanceRole`（4 綴り、`daemon_instances.role` と 1 対 1）、
+    `DaemonMode`（`normal` / `verify`）、`DaemonInstance`（行）、`SharedRole`（`Arc<AtomicU8>`。tick ループ
+    だけが書き、API は読むだけ）、行 → 型の変換。`is_fresh(now, freshness)` は `now - heartbeat_at <
+    freshness`（未来の heartbeat も「新しい」）。単体テスト 8 件（綴りの往復、共有の役割、行の往復、
+    再登録で `handoff_requested_at`/`drained_at` が消えること、`delete_stale` の対象、CHECK 制約）。
+  - `crates/taskd/src/instance.rs`（新規）: 役割の規則そのもの。`InstanceIdentity{instance_id(ULID),
+    release, pid}`、`resolve_release`（`--release` > 環境変数 `TASKD_RELEASE` > `"dev"`）、
+    `freshness_window(tick, lease_grace) = 3 × tick + lease_grace`、**純粋関数** `decide_startup`
+    （同じ `release` の生きた `active` → `DuplicateRelease`、違う `release` → `Standby`、居なければ
+    `Active`）と `decide_tick`（`active` は `handoff_requested_at` を見たら `Drain`、`standby` は
+    生きた他の `active` が居なくなったら `Promote`）、`Supervisor`（行の登録・heartbeat・役割の書き換え・
+    古い行の掃除・drain の判定を 1 メソッド `step(now, in_flight)` に閉じる）。単体テスト 9 件。
+  - `crates/taskd/src/lib.rs`: `RunOptions` に `mode` / `release`、`Exit` に `Drained` /
+    `DuplicateRelease` を追加。`run` は起動時に `Supervisor::start`（verify モードでは作らない）。
+    `tick_loop` は毎 tick の**いちばん最初**に `supervisor.step` を呼び、`Draining` になったその tick で
+    listener を閉じて `set_accepting_new_work(false)`、`Drained` / `DrainTimedOut` で `Exit::Drained`。
+    裏方（報告の圧縮・途中目標レビュー・通知・アカウント/クラスタのセッション期限）は `active` のときだけ
+    動かし、`Dispatcher::tick` を回すのは `active` と `draining` だけ（`standby` と `verify` は
+    ディスパッチャに一切触らない）。`bind_reuseport`（socket2 で `SO_REUSEPORT` + `SO_REUSEADDR`）を追加し、
+    API はこれで bind する。`api_settings` に `release` / `mode` / `role` を追加。
+  - `crates/taskd/src/config.rs`: `[handoff] drain_timeout_secs`（既定 3600）と `Config::drain_timeout()`。
+    `Overrides{db, listen, workspace_root, token_file}` と `Config::apply_overrides`（相対パスは
+    `Config::load` と同じく**設定ファイルのディレクトリ基準**）。
+  - `crates/taskd/src/main.rs`: `--mode <normal|verify>` / `--db` / `--listen` / `--workspace-root` /
+    `--token-file` / `--release <sha12>`。`Exit::DuplicateRelease` は **exit 3**（`SchemaTooNew` の
+    exit 2 はそのまま）。
+  - `crates/task-dispatch/src/dispatcher.rs`: `set_accepting_new_work(bool)`（`false` で `dispatch_ready`
+    と `recover_reviews` を止める。**手元の run とレビューの完了・リース更新・`aggregate`/`child_failed`
+    の後処理は動いたまま**）、`in_flight()`、`abort_all_runs()`（drain timeout 用。DB は変えない＝
+    リースが切れて新 active が従来の経路で拾う）。
+  - `crates/task-api/`: `ApiSettings`/`ApiState` に `release` / `mode` / `role`。`GET /health` に
+    `release` / `mode` / `role`（`crates/task-api/src/types.rs` の `Health`）。`ApiProblem::standby()`
+    （503 `standby`、`detail` は `"standby"`、`Retry-After: 2`）と `middleware::require_active`。
+    ディスパッチャの状態を要する管理系 — `POST /reload`、`POST /providers/{id}/check`、
+    クラスタ接続（start / code / cancel）、アカウントのログイン中継（start / code / cancel）、
+    アカウントの確認・削除、`POST /notify/test` — に適用。
+  - `docs/api/v1/api-v1.schema.json`: `UPDATE_SCHEMA=1 cargo test -p task-api` で再生成（`health` に
+    `release`/`mode`/`role` が 3 つ増え、`required` にも入った。差分はこの 16 行だけ）。
+  - `docs/gui/api.md`: §1.5 のエラー表に `standby`（503）を追加、§3.1 `GET /health` の例と説明を更新
+    （`release`/`mode`/`role` と `schema_version` の現在値 11・0008〜0011 の説明）。
+  - `config/taskd.example.toml`: `[handoff] drain_timeout_secs = 3600` をコメントで追加。
+  - テスト: `crates/taskd/tests/instance_handoff.rs`（新規 6 件）、`crates/task-api/tests/standby.rs`
+    （新規 3 件）、`crates/task-api/tests/common/mod.rs`（`EnvOptions` に `release`/`mode`/`role`）。
+- 受け入れ条件ごとの証拠（ADR-0040 §4 Phase 47）:
+  - (a) 新が standby → 旧が draining → 新が active:
+    `cargo test -p taskd --test instance_handoff a_newer_release_takes_over_while_the_old_one_finishes_its_run`
+    — 1 つの SQLite に `taskd::run` を 2 つ（release = `old` / `new`）同じプロセス内で起こし、
+    `daemon_instances` の役割が `old: active → draining`、`new: standby → active` と動くことを実際に確認。
+  - (b) draining の run は旧が完了させ、新は二重 dispatch しない: 同じテストで、旧の `WorkerStarted`
+    （role=None）はそのタスクにちょうど 1 件、`WorkerFinished` も 1 件でその `run_id` が旧の取ったリースの
+    `worker_run_id` と一致し、最終状態は `done`。旧は `Exit::Drained`（exit 0）、新は `Exit::Idle`。
+  - (c) verify は dispatch せず `daemon_instances` に触れない:
+    `verify_mode_never_dispatches_and_never_touches_daemon_instances` — `--mode verify` 相当で 5 tick
+    回しても ready のタスクは `ready` のまま、`WorkerStarted` 0 件、`instance_list()` は空、
+    `schema_version` は `SCHEMA_VERSION`（= マイグレーションはコピーに適用される）。
+  - (d) 同版の二重起動は exit 3: `starting_the_same_release_twice_exits_three`（実バイナリ
+    `CARGO_BIN_EXE_taskd` を `--release sha12sha12ab` で起こし、終了コード 3・行が増えないことを確認）。
+    判断関数の単体テストは `taskd::instance::tests::the_same_release_running_as_active_is_a_duplicate`。
+  - (e) heartbeat が止まれば standby が active に: `a_stale_heartbeat_promotes_the_standby`
+    （heartbeat を打たない `active` の行を手で置き、`standby` で上がったインスタンスが
+    `3 × tick + lease_grace` 後に `active` になり、死んだ行が消えることを確認）。
+  - (f) standby の 503: `cargo test -p task-api --test standby` — `POST /reload` が 503 / `code=standby` /
+    `detail="standby"` / `Retry-After: 2` で、その間ディスパッチャへは要求を送らない。`active` に戻すと
+    同じ要求が tick ループまで届いて 200。`draining` でも同じ 7 エンドポイントが 503、`GET /tasks` と
+    `GET /health` は 200。
+  - (g) `SO_REUSEPORT`: `two_listeners_bind_the_same_port_with_so_reuseport`（同じアドレスに
+    `taskd::bind_reuseport` が 2 回成功し、素の `TcpListener::bind` は失敗する）。
+  - (h) health の `release`/`mode`/`role`: `health_carries_the_release_the_mode_and_the_role`
+    （4 つの役割すべてが `role` に出ることも確認）。
+- 実行したコマンドと結果:
+  - `cargo test --workspace`: **exit 0**。`grep -c "^test result: FAILED"` = **0**、`test result: ok` の
+    `passed` 合計 **1163**（Phase 45 の 1137 + 今回 26: `task-core/src/instance.rs` 7 +
+    `taskd/src/instance.rs` 10 + `taskd/tests/instance_handoff.rs` 6 +
+    `task-api/tests/standby.rs` 3）。
+  - `cargo clippy --workspace -- -D warnings`: **exit 0**、警告なし。
+    `cargo clippy --workspace --all-targets -- -D warnings` も exit 0。
+  - `UPDATE_SCHEMA=1 cargo test -p task-api --lib`: exit 0、40 passed（`docs/api/v1/api-v1.schema.json`
+    を再生成。差分は `health` の 3 フィールドのみ）。
+- ADR-0040 からの逸脱（実装で変えたところ）:
+  - **D4「同じ `release` の `active` がいたら exit 3」に pid の生存確認を足した**。heartbeat が新しくても
+    その pid のプロセスが `/proc` に無ければ「二重起動ではない」と判断する（`taskd::instance::pid_alive`。
+    判定できない環境では生きている扱い＝保守的側）。理由: 本番も e2e も `kill -9` → 起こし直しで復旧する
+    ので、heartbeat だけで見ると死んだ直後の**同じ版**を `3 × tick + lease_grace`（本番で 66 秒）の間
+    起こせなくなる。実際 `tests/e2e/tests/account_pool_scenarios.rs` の再起動シナリオがこれで落ちた。
+  - **`Exit::DuplicateRelease` を足した**（ADR は `Exit::Drained` しか触れていない）。`run` が exit 3 を
+    呼び出し側に伝える手段が要るため。`main.rs` がこれを `ExitCode::from(3)` に写す。
+  - **standby の 503 を、ADR が挙げた 5 つに加えてアカウントの確認（`POST /accounts/{id}/check`）と
+    削除（`DELETE /accounts/{id}`）にも広げた**。どちらも `AdminRequest` 経由でディスパッチャの
+    権威ある状態（`account_in_use`）とワーカー起動を要するので、standby が受けても意味が無い。
+  - **`draining` は `recover_reviews`（他のインスタンスが抱えているかもしれない `reviewing` の拾い上げ）も
+    止める**。ADR は「dispatch と裏方を止める」としか書いていないが、拾い上げを続けると新 active の
+    レビューを横取りしうる。手元のレビューは `drain_completions` から直接起こされるのでそのまま続く。
+  - **`standby` は `Dispatcher::tick` 自体を呼ばない**。ADR は「dispatch しない」だが、`tick` の中には
+    `reclaim_expired_leases`（他インスタンスのリース回収）や `recover_reviews` も含まれるため、
+    役割が決まるまで DB の状態に一切触らせない方が安全。結果として `standby` の `GET /daemon` は
+    1〜2 tick の間スナップショット無し（ADR「GUI はその間だけ切り替え中」の窓と同じ）。
+  - **CLI の相対パスは設定ファイルのディレクトリ基準**（カレントディレクトリ基準ではない）。`Config::load`
+    と同じ解決をするため。`verify.sh` は絶対パスで渡すので実害は無い。
+- 未解決事項:
+  - U47-1: **レビューには リースが無い**。`draining` 側が抱えている `reviewing` のタスクは、新 active の
+    `recover_reviews` から見ると「誰も見ていない reviewing」に見えるため、引き継ぎの最中に**同じレビューが
+    二重に走りうる**（run は ADR-0040 D4 のとおりリースで守られており二重にならない）。二重に走っても
+    後から来た方の `apply_transition` が `InvalidTransition` になって捨てられるので状態は壊れないが、
+    `Check::Command` が副作用を持つ場合は 2 回実行される。直すならレビューにもリース相当の印が要る
+    （`reviewing` の run_id を `tasks` に持たせる等）。今回のスコープ外。
+  - U47-2: `max_concurrency` は各インスタンスの手元の数で数えるので、引き継ぎ中は合計が一時的に超えうる
+    （上限は旧の残り run 数。ADR-0040 D4 が「採らない」とした DB で合計を数える案のまま）。
+  - U47-3: `scripts/sync-gui-docs.sh` は**まだ流していない**（`docs/gui/api.md` を §1.5 と §3.1 で
+    変更したので `gui/docs/taskd-api-v1.md` とずれている）。Phase 46 / G14 を担当する側が `gui/` を
+    触るときに `scripts/sync-gui-docs.sh` と `pnpm gen:types`（`Health` に 3 フィールド増えた）を
+    一緒に流すこと。この Phase では `gui/` に触らない取り決めだったため保留した。
+  - U47-4: 実機での引き継ぎ（`promote.sh` による本番の昇格）は Phase 46 の受け入れ条件。この Phase は
+    本番プロセスに触れていない（`~/taskd/` も未変更）。
+- 提案:
+  - P47-1: `GET /daemon` か新しい `GET /instances` に `daemon_instances` の中身を出すと、`status.sh` が
+    DB を直に読まずに済む（ADR-0040 D6 の `GET /releases` と合わせて Phase 48 で）。
+  - P47-2: `standby` の間もスナップショットだけは publish したい（GUI の「切り替え中」表示を
+    `role` で出すなら不要。D6 の G14 の設計で決めるのがよい）。

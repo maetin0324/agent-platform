@@ -180,6 +180,14 @@ discord_webhook_secret = "discord-webhook"        # [secrets] の中の id（既
 interval_secs = 30                                # 判定と送信の間隔（秒）
 # gui_base_url = "http://192.168.1.103:7700"      # 文面に付けるリンクの根（省略するとリンク無し）
 
+# 昇格のライブ引き継ぎ（ADR-0040 D4、Phase 47）。新しいリリースを同じ DB・同じポート（`SO_REUSEPORT`）に
+# 起こすと、新しい方が `standby` になって古い方に引き継ぎを求め、古い方は `draining` になって
+# **手元の run を最後まで面倒を見てから** exit 0 する（新しい仕事は新しい方が取る）。
+# `drain_timeout_secs` はその待ち時間の上限。超えたら残りの run を abort し（リースが切れて新しい
+# active が従来どおり拾う）、exit 0 する。同じ `release` を二重に起こすと何もせず exit 3。
+# [handoff]
+# drain_timeout_secs = 3600          # 既定 3600（1 時間）
+
 # HTTP API（ADR-0013、docs/gui/api.md）。listen を書いたときだけ taskd のプロセス内で動く（既定は無効）。taskd-gui はこれを使う。
 # loopback 以外で listen するなら token_file が必須（中身 1 行が Bearer トークン。読めない・空なら起動時に exit 2）。
 # [api]

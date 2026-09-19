@@ -5,6 +5,8 @@ pub mod accounts;
 pub mod approval;
 pub mod artifacts;
 pub mod delegate;
+/// ADR-0040 D4（Phase 47）: taskd のインスタンスの役割（`daemon_instances`）。
+pub mod instance;
 pub mod message;
 pub mod model;
 pub mod notify;
@@ -21,6 +23,7 @@ pub use delegate::{
     DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, WorkspaceContext,
     materialize_delegated, validate_each,
 };
+pub use instance::{DaemonInstance, DaemonMode, InstanceRole, SharedRole};
 pub use message::{
     CONVERSATION_GENRE, Message, MessageId, MessageRole, conversation_origin, conversation_title, failure_reply,
     is_conversation, is_milestone_review, milestone_review_of,

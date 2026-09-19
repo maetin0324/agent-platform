@@ -21,6 +21,12 @@ pub struct Health {
     pub started_at: String,
     pub now: String,
     pub db: DbInfo,
+    /// ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `TASKD_RELEASE` / `"dev"`）。
+    pub release: String,
+    /// ADR-0040 D3: `normal` または `verify`（`--mode`）。
+    pub mode: String,
+    /// ADR-0040 D4: `active` / `standby` / `draining` / `verify`。
+    pub role: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

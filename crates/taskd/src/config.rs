@@ -115,9 +115,44 @@ pub struct Config {
     /// ADR-0033 D6: 組織のノードごとの長期記憶の置き場所。無ければ記憶を読まないし書かない。
     #[serde(default)]
     pub memory: Option<MemoryConfig>,
+    /// ADR-0040 D4（Phase 47）: ライブ引き継ぎ（`draining` の待ち時間）。
+    #[serde(default)]
+    pub handoff: HandoffConfig,
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+}
+
+/// `[handoff]`（ADR-0040 D4）: 昇格のライブ引き継ぎ。`active` が `draining` になったあと、手元の run が
+/// 終わるのをここまで待つ。超えたら残りを abort し（リースが切れて新しい active が従来の「リース切れ」の
+/// 経路で拾う）、exit 0 する。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffConfig {
+    #[serde(default = "default_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
+}
+
+impl Default for HandoffConfig {
+    fn default() -> Self {
+        Self {
+            drain_timeout_secs: default_drain_timeout_secs(),
+        }
+    }
+}
+
+fn default_drain_timeout_secs() -> u64 {
+    3600
+}
+
+/// ADR-0040 D3（Phase 47）: CLI からの上書き。`verify.sh` が本番の設定をそのまま読ませたまま、
+/// DB・待ち受け・作業場所・トークンだけを staging のものに差し替えるために使う。
+#[derive(Debug, Clone, Default)]
+pub struct Overrides {
+    pub db: Option<PathBuf>,
+    pub listen: Option<std::net::SocketAddr>,
+    pub workspace_root: Option<PathBuf>,
+    pub token_file: Option<PathBuf>,
 }
 
 /// `[memory]`（ADR-0033 D6）: 組織のノードごとの長期記憶。`<dir>/<node_id>/notes.md` と
@@ -1302,6 +1337,40 @@ impl Config {
 
     pub fn tick(&self) -> Duration {
         Duration::from_millis(self.tick_ms)
+    }
+
+    /// ADR-0040 D4: `[handoff] drain_timeout_secs`。
+    pub fn drain_timeout(&self) -> Duration {
+        Duration::from_secs(self.handoff.drain_timeout_secs)
+    }
+
+    /// ADR-0040 D3: CLI の上書きを設定に重ねる（`Config::load` の**後に**呼ぶ）。相対パスは
+    /// `Config::load` と同じく**設定ファイルのディレクトリ基準**で絶対化する（設定に書いた場合と
+    /// CLI で渡した場合で同じ場所を指すようにするため）。設定をファイルから読んでいないときは
+    /// カレントディレクトリ基準になる。
+    pub fn apply_overrides(&mut self, overrides: &Overrides) {
+        let base = self
+            .source_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let resolve = |p: &PathBuf| -> PathBuf {
+            if p.is_relative() { base.join(p) } else { p.clone() }
+        };
+        if let Some(db) = &overrides.db {
+            self.db = resolve(db);
+        }
+        if let Some(listen) = overrides.listen {
+            self.api.listen = Some(listen);
+        }
+        if let Some(root) = &overrides.workspace_root {
+            self.workspace_root = resolve(root);
+        }
+        if let Some(token_file) = &overrides.token_file {
+            self.api.token_file = Some(resolve(token_file));
+        }
     }
 
     pub fn dispatch_config(&self) -> DispatchConfig {

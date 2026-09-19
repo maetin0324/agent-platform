@@ -27,7 +27,7 @@ use crate::admin::{
     valid_adapter, valid_provider_id, write_provider_file,
 };
 use crate::files::{self, FileRequest, FileTarget, RunFile};
-use crate::middleware::require_admin;
+use crate::middleware::{require_active, require_admin};
 use crate::problem::{ApiProblem, ops_problem, store_problem};
 use crate::query::{QueryParams, event_type_name, parse_snake, parse_task_id};
 use crate::schema::API_V1_SCHEMA_JSON;
@@ -681,6 +681,11 @@ async fn health(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
                 journal_mode: inner.journal_mode.clone(),
                 busy_timeout_ms: inner.busy_timeout_ms,
             },
+            // ADR-0040 D3 / D4: 検証（`verify.sh`）と昇格（`promote.sh`）が「どの版がどの役割で動いて
+            // いるか」をここだけで判定できるようにする。
+            release: inner.release.clone(),
+            mode: inner.mode.as_str().to_string(),
+            role: inner.role.get().as_str().to_string(),
         },
     ))
 }
@@ -1387,6 +1392,7 @@ async fn delete_provider(
 async fn reload(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
         return Err(ApiProblem::providers_admin_unavailable());
     };
@@ -1413,6 +1419,7 @@ async fn check_provider(
 ) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
         return Err(ApiProblem::providers_admin_unavailable());
     };
@@ -1579,6 +1586,7 @@ async fn delete_account(
 ) -> ApiResult {
     let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
     }
@@ -1627,6 +1635,7 @@ async fn check_account(
 ) -> ApiResult {
     let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
     }
@@ -1676,6 +1685,7 @@ async fn start_account_login(
 ) -> ApiResult {
     let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
     }
@@ -1728,6 +1738,7 @@ async fn submit_account_login_code(
 ) -> ApiResult {
     let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
     }
@@ -1782,6 +1793,7 @@ async fn cancel_account_login(
 ) -> ApiResult {
     let adapter = QueryParams::parse(raw.as_deref(), &["adapter"])?.account_adapter()?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     if state.inner.accounts_roots.is_empty() {
         return Err(ApiProblem::accounts_unavailable());
     }
@@ -1878,6 +1890,7 @@ async fn start_cluster_connect(
 ) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     require_known_cluster(&state, &id)?;
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
         return Err(ApiProblem::internal("taskd is not accepting admin requests"));
@@ -1922,6 +1935,7 @@ async fn submit_cluster_connect_code(
 ) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     require_known_cluster(&state, &id)?;
     // 監査指摘 D-6 と同じ規律: 型違いで serde のエラー文が値を反射しないよう、専用のメッセージに差し替える。
     let ClusterConnectCodeBody { code } = read_json(body, false)
@@ -1965,6 +1979,7 @@ async fn cancel_cluster_connect(
 ) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
+    require_active(&state)?;
     require_known_cluster(&state, &id)?;
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
         return Err(ApiProblem::internal("taskd is not accepting admin requests"));
@@ -2196,6 +2211,9 @@ mod tests {
             memory_dir: None,
             notify_secret_id: task_core::DEFAULT_WEBHOOK_SECRET_ID.to_string(),
             notify_gui_base_url: None,
+            release: "dev".to_string(),
+            mode: task_core::DaemonMode::Normal,
+            role: task_core::SharedRole::new(task_core::InstanceRole::Active),
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))

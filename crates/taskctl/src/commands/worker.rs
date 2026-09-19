@@ -681,6 +681,7 @@ mod tests {
             accounts: None,
             secrets: None,
             memory: None,
+            handoff: Default::default(),
             source_path: None,
         }
     }
