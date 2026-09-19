@@ -1,6 +1,14 @@
 # taskd HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。taskd 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-19 Phase 57（ADR-0044 B3、文書）— **追加のみ。v1 のまま。DB は変わらない**（正本は
+  git のファイル）。案件の文書が GUI から読み書きできるようになった: エンドポイント 73〜78
+  （`GET /projects/{id}/docs`、`GET|PUT|DELETE /projects/{id}/docs/page`、
+  `POST /projects/{id}/docs/init`、`POST /tasks/{id}/artifacts/promote`。§3.84〜3.89）。
+  `GET /tasks/{id}/timeline` に `kind = "doc"`（逆リンク）が増えた。エラーコードに
+  `docs_unavailable`（409）・`etag_mismatch`（409）・`page_exists`（409）・`page_not_found`（404）が増えた。
+  **変更系は管理系**（`token_file` 未設定でも 401）で、**組織の「人」は呼べない**
+  （ワーカーは自分の worktree のブランチに文書を書き、人が取り込む）
 - 改訂: 2026-09-19 Phase 54（ADR-0043 A2、変更の取り込み）— **追加のみ。v1 のまま**。タスクが
   作ったブランチを**人が**見て取り込めるようになった: エンドポイント 68〜72
   （`GET /tasks/{id}/changes`、`GET /tasks/{id}/changes/{repo}/diff`、
@@ -164,6 +172,10 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `release_not_promotable` | 409 | ADR-0040 D6: 昇格を受け付けられない（`verify.json` が無い／`ok` でない、既に `current`、既に昇格中、`scripts/promote.sh` が無い、`[selfdeploy]` が無い）。`detail` に理由の一行 |
 | `default_branch_busy` | 409 | ADR-0043 D5（§3.81）: 人のチェックアウトが取り込み先のブランチを出したまま未コミットの変更を持っている。`detail` は `"<default_branch> が編集中"`。**何も触っていない**ので、人が片付けてからもう一度押す |
 | `pr_unavailable` | 409 | ADR-0043 D5（§3.81 / §3.82）: PR の経路が使えない（`origin` リモートが無い、`gh` が PATH に無いか認証されていない、merge しようとした PR が開いていない）。`detail` に理由の一行 |
+| `docs_unavailable` | 409 | ADR-0044 D7（§3.84〜3.89）: 案件の文書の根が使えない（まだ無い＝`POST /projects/{id}/docs/init` で用意する、primary がリモート、`$HOME` が無い、`git` が動かない、置き場が空でない）。`detail` に理由の一行 |
+| `etag_mismatch` | 409 | ADR-0044 D7（§3.87 / §3.88）: 読んでから誰かがそのページを直した（ページがあるのに `etag` を付けなかったときも同じ）。拡張フィールド `etag` にいまの値。再読み込みしてから直す |
+| `page_exists` | 409 | ADR-0044 D7（§3.89）: 昇格の宛先にもうページがある。`overwrite: true` なら上書きできる |
+| `page_not_found` | 404 | ADR-0044 D7（§3.85 / §3.88）: そのパスのページが default_branch に無い |
 | `payload_too_large` | 413 | 本文 > 1 MiB |
 | `unsupported_media_type` | 415 | 変更系で `Content-Type` が JSON でない |
 | `range_not_satisfiable` | 416 | ファイル系の `Range` / `offset` がサイズを超える。`Content-Range: bytes */<size>` |
@@ -189,7 +201,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（72）
+## 2. エンドポイント一覧（78）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -265,6 +277,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 70 | POST | `/tasks/{id}/changes/{repo}/integrate` | 取り込む（`merge` / `pr` / `discard`）（**管理系: `token_file` 未設定でも 401**） | 200 `IntegrateResult` | `git` / `gh` + store |
 | 71 | POST | `/tasks/{id}/changes/{repo}/pr/merge` | その PR を Celeris から merge する（**管理系**） | 200 `IntegrateResult` | `gh pr merge` + store |
 | 72 | GET | `/projects/{id}/integrations` | その案件の PR と取り込み（タスク × リポジトリごとに最新の 1 件） | `ProjectIntegrations` | store + `gh pr view` |
+| 73 | GET | `/projects/{id}/docs` | 案件の文書のツリー（`?q=` は `git grep -il`。ADR-0044 D7、Phase 57） | `DocsTree` | `git ls-tree` / `git log` |
+| 74 | GET | `/projects/{id}/docs/page` | ページ 1 枚（raw / html / front matter / 履歴 / etag） | `DocPage` | `git show` / `git log` |
+| 75 | POST | `/projects/{id}/docs/init` | 文書リポジトリを用意する（無い案件だけ。**管理系**） | 200 `DocsInitResult` | `git init` + store |
+| 76 | PUT | `/projects/{id}/docs/page` | ページを既定のブランチに直接コミットする（**管理系**） | 200 `DocPageResult` | 一時 worktree + `git commit` |
+| 77 | DELETE | `/projects/{id}/docs/page` | ページを消す（**管理系**） | 200 `DocPageResult` | 一時 worktree + `git commit` |
+| 78 | POST | `/tasks/{id}/artifacts/promote` | 成果物をページに昇格する（**管理系**） | 200 `DocPageResult` | 成果物 + 一時 worktree |
 
 ---
 
@@ -1758,6 +1776,11 @@ stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid �
   出る（Phase 54 との合流で有効になった）。`action` は `merge` / `pr` / `discard`、`detail` は
   `<リポジトリ>: <行方>` + PR の番号と URL + 理由の一行。`at` は**人が押した時刻**（記録の `created_at`。
   PR の同期では動かない）。GUI は知らない `kind` を無視できるようにしておくこと。
+- `doc`（ADR-0044 D7、Phase 57 の逆リンク）は **front matter の `tasks:` にこのタスクを持つページ**
+  （`{"kind":"doc","at":"…","project_id":"01J…","path":"docs/research/fs.md","title":"調べたこと"}`）。
+  案件の文書の根を `git grep -l "<タスク id>"` で絞ってから front matter を確かめるので、本文に id が
+  出ただけのページは載らない。`at` はそのページの**最後のコミットの時刻**（読めなければ空）。
+  文書の根が無い案件・git が動かないときは**何も出さない**（タイムラインは落ちない）。
 - 知らないタスクは 404 `task_not_found`。
 
 ---
@@ -1867,6 +1890,101 @@ taskd はここで **`git` と `gh` だけ**を、待ち時間の上限付きで
                             "created_at": "2026-09-19T10:00:00Z", "updated_at": "2026-09-19T10:05:00Z"},
             "task_title": "ワークスペース A2", "task_status": "done"}]}
 ```
+
+---
+
+### 3.84〜3.89 文書（ADR-0044 D7、Phase 57。**73〜78。変更系は管理系: `token_file` 未設定でも 401**）
+
+**正本は git のファイル**（DB には何も持たない）。案件の文書の根は
+
+1. その案件の **primary リポジトリ**（`project_repos.is_primary`。ADR-0043 D1）が `kind = "git"` で
+   **手元（`location.kind = "local"`）**にあれば、その `.config/celeris/workspace.toml` の
+   `[outputs] docs`（既定 `docs`）
+2. primary が `dir`、または案件にリポジトリが無ければ **`POST /projects/{id}/docs/init`（§3.86）で
+   `~/workspace/<案件 slug>/` に作る**（`git init -b main` + `docs/README.md` の最初のコミット）。
+   作ったら primary の `git` リポジトリとして登録する
+
+見えるのは **`<docs>/**/*.md` の default_branch の中身**（人の作業ツリーの未コミットの変更は出ない）。
+`path` は**リポジトリ相対**（`docs/research/xxx.md`）で、文書の根で始まっていなければ根の下だと解釈する
+（`?path=research/xxx.md` も同じページ）。`..`・絶対パスは **403 `path_forbidden`**、`.md` で終わらない
+パスは **422 `validation`**。文書の根がまだ無い案件の**読み取り**は **409 `docs_unavailable`**
+（読み取りは何も作らない。作るのは管理系の §3.86 / §3.87 / §3.89 だけ）。
+
+taskd はここで **`git` だけ**を、待ち時間の上限付きで起こす（読み取り 30 秒、書き込み 300 秒。§3.79 と同じ
+枠組み）。LLM もワーカーも起こさない。人の編集は**一時 worktree でコミットして default_branch を
+fast-forward** する（ADR-0043 D5 の `merge` と同じやり方）。author / committer は
+`Celeris (human) <celeris@local>`。
+
+組織の「人」（ワーカー）にはこの経路を**出していない**。ワーカーは自分の worktree のブランチに
+`docs/` を書き、人が「変更」タブ（§3.81）で取り込む。
+
+#### 3.84 `GET /projects/{id}/docs` → 200 `DocsTree`
+
+- `root`（文書の根）・`repo`（リポジトリの名前）・`default_branch` と、ページの一覧（パスの昇順、最大 500。
+  超えたら `truncated: true`）
+- 1 件ごとに `path` / `title`（front matter の `title` → 1 行目の `# ` → ファイル名）/ `updated_at` /
+  `last_commit`（`sha` / `at` / `author` / `subject`）
+- `?q=` があれば **`git grep -i -l -F`**（大文字小文字を区別しない固定文字列。正規表現ではない）で絞る
+- 無い案件は 404 `project_not_found`、文書の根が無ければ 409 `docs_unavailable`
+
+```json
+{"project_id": "01J...", "repo": "benchfs", "root": "docs", "default_branch": "main", "truncated": false,
+ "items": [{"path": "docs/research/fs.md", "title": "調べたこと", "updated_at": "2026-09-19T11:00:00Z",
+            "last_commit": {"sha": "…", "at": "2026-09-19T11:00:00Z", "author": "Celeris (human)",
+                            "subject": "docs: docs/research/fs.md"}}]}
+```
+
+#### 3.85 `GET /projects/{id}/docs/page?path=` → 200 `DocPage`
+
+- `raw`（front matter を含む Markdown のもと）、`html`（**サーバで描画**。`pulldown-cmark`、表・脚注・
+  打ち消し線あり、**生 HTML は捨てる**）、`title` / `tags[]` / `tasks[]`（front matter）、
+  `history`（直近 20 件、新しい順）、`etag`（**blob の sha**）
+- 本文中の `celeris:task/<ULID>` は `/tasks/<ULID>` に、`[[相対パス.md]]` は文書タブへのリンクに開く
+  （根の外に出るものはリンクにしない）
+- 512 KiB を超えるページは `too_large: true` で `raw` / `html` が空
+- 無いページは 404 `page_not_found`
+
+#### 3.86 `POST /projects/{id}/docs/init` → 200 `DocsInitResult`（**管理系**）
+
+- 本文は空の JSON（`{}`）でよい
+- 文書の根が既にあれば**何もせず** `created: false`（その根を返す）
+- 無ければ `~/workspace/<案件 slug>/` に作る（slug は案件の題名の ASCII 化。作れなければ案件の id）。
+  既に同じ名前の git リポジトリがあればそれを使い、**中身は触らない**
+- `$HOME` が分からない・`git` が動かない・置き場が空でないときは 409 `docs_unavailable`
+
+#### 3.87 `PUT /projects/{id}/docs/page` → 200 `DocPageResult`（**管理系**）
+
+```json
+{"path": "docs/research/fs.md", "body": "# 調べたこと\n…", "etag": "<blob sha>", "message": "docs: 直した"}
+```
+
+- `etag` は **§3.85 が返した値**。ページが既にあるのに `etag` が無い / 違えば **409 `etag_mismatch`**
+  （`etag` 拡張フィールドにいまの値が載る）。新しいページは `etag` を付けない
+- `message` の既定は `docs: <path>`
+- **人のチェックアウトが default_branch を出していて未コミットの変更があれば 409 `default_branch_busy`**
+  （ADR-0043 D5 と同じ規則。何も触らない）
+- 中身が同じなら新しいコミットを作らず `unchanged: true` を返す
+- 文書の根が無い案件では**その場で作る**（§3.86 と同じ）
+
+#### 3.88 `DELETE /projects/{id}/docs/page?path=&etag=` → 200 `DocPageResult`（**管理系**）
+
+- `etag` の規則は §3.87 と同じ（無い / 違えば 409 `etag_mismatch`）。消えたページは 404 `page_not_found`
+- 応答は `deleted: true`、`etag: null`
+
+#### 3.89 `POST /tasks/{id}/artifacts/promote` → 200 `DocPageResult`（**管理系**）
+
+```json
+{"name": "answer.md", "path": "docs/research/fs.md", "title": "調べたこと", "overwrite": false}
+```
+
+- `name` はそのタスクの成果物（`ArtifactProduced` の `name`。同じ名前が複数あれば**いちばん新しいもの**）。
+  無ければ 404 `artifact_not_found`、UTF-8 で読めなければ 422 `validation`
+- 中身の先頭に front matter を**混ぜて**コミットする（`title` と `tasks: [<タスク id>]`。既にある
+  front matter の `tags` は残し、同じタスクは 2 回足さない）
+- 宛先が既にあれば **409 `page_exists`**（`overwrite: true` なら上書き）
+- 案件に属さないタスクは 409 `docs_unavailable`、知らないタスクは 404 `task_not_found`
+- コミットの規則（一時 worktree・fast-forward・`default_branch_busy`）は §3.87 と同じ
+- 昇格したページはそのタスクの `GET /tasks/{id}/timeline` に `kind = "doc"` として出る（逆リンク）
 
 ---
 

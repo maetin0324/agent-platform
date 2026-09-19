@@ -15,6 +15,8 @@ export default [
   route("org/:id", "routes/org.$id.tsx"),
   route("projects", "routes/projects.tsx"),
   route("projects/:id", "routes/projects.$id.tsx"),
+  // 案件の文書（ADR-0044 D7、Phase 57 / G19）。`tasks/:id/files` と同じ兄弟のルート
+  route("projects/:id/docs", "routes/projects.$id.docs.tsx"),
   // ボード（ADR-0044 D4、Phase 53）。案件を選んで 6 列で見る。絞り込みは URL がそのまま状態
   route("board", "routes/board.tsx"),
   route("reports", "routes/reports.tsx"),

@@ -138,6 +138,13 @@ pub struct ApiV1Schema {
     pub integrate: crate::types::IntegrateBody,
     pub integrate_result: crate::types::IntegrateResult,
     pub project_integrations: crate::types::ProjectIntegrations,
+    /// Phase 57（ADR-0044 D7）: 文書（git が正本）。ツリー・ページ・編集・用意・昇格。
+    pub docs_tree: crate::docs::DocsTree,
+    pub doc_page: crate::docs::DocPage,
+    pub doc_page_put: crate::docs::DocPagePutBody,
+    pub doc_page_result: crate::docs::DocPageResult,
+    pub docs_init: crate::docs::DocsInitResult,
+    pub artifact_promote: crate::docs::ArtifactPromoteBody,
     pub daemon: DaemonView,
     pub config: ConfigView,
     pub stream_hello: StreamHello,

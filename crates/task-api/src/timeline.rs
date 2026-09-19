@@ -44,6 +44,7 @@ pub(crate) async fn timeline(
     let id = parse_task_id(&id)?;
     let ctx = state.inner.view.clone();
     let releases = state.inner.releases.clone();
+    let docs_repo_root = state.inner.docs_repo_root.clone();
     let view = state
         .blocking(move |store| {
             let (task, mut items) = store_items(store, id)?;
@@ -51,6 +52,9 @@ pub(crate) async fn timeline(
             if let Some(source) = releases {
                 items.extend(release_items(&task, &ctx.workspace_root, source.as_ref()));
             }
+            // ADR-0044 D7（Phase 57）: 逆リンク（front matter の `tasks:` にこのタスクを持つページ）。
+            // 文書の根が無い案件・読めないリポジトリでは何も足さない。
+            items.extend(doc_items(store, &task, docs_repo_root.as_deref()));
             sort_items(&mut items);
             Ok(Timeline { task_id: id, items })
         })
@@ -87,6 +91,7 @@ pub(crate) fn at_of(item: &TimelineItem) -> &str {
         | TimelineItem::Report { at, .. }
         | TimelineItem::Delegation { at, .. }
         | TimelineItem::Release { at, .. }
+        | TimelineItem::Doc { at, .. }
         | TimelineItem::Integration { at, .. } => at,
     }
 }
@@ -186,6 +191,19 @@ fn integration_item(integration: &TaskIntegration) -> TimelineItem {
         action: integration.method.as_str().to_string(),
         detail: parts.join(" — "),
     }
+}
+
+/// ADR-0044 D7（Phase 57）: そのタスクを front matter の `tasks:` に持つ文書のページ（逆リンク）。
+fn doc_items(store: &SqliteStore, task: &Task, docs_repo_root: Option<&std::path::Path>) -> Vec<TimelineItem> {
+    crate::docs::backlinks(store, task, docs_repo_root)
+        .into_iter()
+        .map(|(at, path, title, project_id)| TimelineItem::Doc {
+            at,
+            project_id,
+            path,
+            title,
+        })
+        .collect()
 }
 
 /// ADR-0044 D5: そのタスクのブランチのコミットが入ったリリース。

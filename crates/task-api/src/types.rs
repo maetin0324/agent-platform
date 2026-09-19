@@ -140,6 +140,15 @@ pub enum TimelineItem {
         action: String,
         detail: String,
     },
+    /// ADR-0044 D7（Phase 57）: 逆リンク。front matter の `tasks:` にこのタスクを持つ文書のページ。
+    /// `at` はそのページの最後のコミットの時刻（読めなければ空）。
+    Doc {
+        at: String,
+        project_id: task_core::ProjectId,
+        /// 案件のリポジトリからの相対パス（`docs/research/xxx.md`）。
+        path: String,
+        title: String,
+    },
 }
 
 // ========== ADR-0044 D2/D5（Phase 53）: ここまで ==========

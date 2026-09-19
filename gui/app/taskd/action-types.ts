@@ -8,6 +8,8 @@ import type {
   ClusterConnectResult,
   ClusterConnectStart,
   CommentResult,
+  DocPageResult,
+  DocsInitResult,
   EditResult,
   IntegrateResult,
   MessageAccepted,
@@ -309,3 +311,20 @@ export type AccountOpOutcome =
 export type IntegrateOutcome =
   | { ok: true; op: "integrate" | "pr_merge"; repo: string; result: IntegrateResult }
   | { ok: false; op: "integrate" | "pr_merge"; repo: string; error: ActionError };
+
+/**
+ * 文書（ADR-0044 D7、taskd Phase 57 / G19。**管理系。正本は git**）:
+ * `POST /projects/{id}/docs/init`、`PUT`/`DELETE /projects/{id}/docs/page`、
+ * `POST /tasks/{id}/artifacts/promote` の結果。taskd のエラーは例外にせず `{ok:false, error}` にする
+ * （409 `etag_mismatch`＝「読んでから誰かが直した」/ 409 `default_branch_busy`＝「main が編集中」/
+ * 409 `page_exists` / 409 `docs_unavailable` / 403 `path_forbidden` / 422 `validation` /
+ * 401 `unauthorized` を含む）。衝突の判定は taskd 側にあるので GUI では作り直さない。
+ */
+export type DocsOpOutcome =
+  | { ok: true; op: "docs_init"; result: DocsInitResult }
+  | { ok: true; op: "docs_put" | "docs_delete" | "docs_promote"; result: DocPageResult }
+  | {
+      ok: false;
+      op: "docs_init" | "docs_put" | "docs_delete" | "docs_promote";
+      error: ActionError;
+    };

@@ -153,3 +153,36 @@ task_comments(id TEXT PK, task_id TEXT NOT NULL, author_kind TEXT NOT NULL CHECK
 - `PATCH` で `assignee` / `role` を変えたとき tier / adapter / budget を再導出するかは**しない**（人が触った値を壊さない）。人が
   変えたいなら同じ `PATCH` で明示する。GUI の編集フォームは「担当を変えると役割の既定が変わります」と注記するだけ。
 
+## 6. Phase 57 追記（2026-09-19。B3 の実装で D7 から離れた／D7 が決めていなかったところ）
+
+D7 を実装して決めた 6 つ。**決定そのものは変えていない**（本文は読み替えない）。詳細と証拠は
+`docs/PROGRESS.md` の Phase 57（P57-1〜P57-6）にある。
+
+1. **文書リポジトリを作るのは人が押したときだけ**（P57-1）: D7 は「primary が `dir` か無い案件は Celeris が
+   作る」としか書いておらず、いつ作るかを決めていない。読み取り（ツリー・ページ）はトークンが要らないので、
+   そこで `git init` と `project_repos` への登録をすると**無認証の GET が案件を書き換える**。そこで
+   **`POST /projects/{id}/docs/init`（管理系）**を足し、ページの保存（`PUT`）と昇格からも同じ経路で作る。
+   読み取りは何も作らず 409 `docs_unavailable`（GUI は「文書を用意する」ボタンを出す）。
+
+2. **パスはリポジトリ相対で、根を省いても届く**（P57-2）: D7 は `path` の基準を決めていない。昇格の例
+   （`docs/research/xxx.md`）に合わせて**リポジトリ相対**にし、文書の根で始まっていなければ根の下だと
+   解釈する（`?path=research/xxx.md` も同じページ）。`..`・絶対パスは 403、`.md` 以外は 422。
+
+3. **リモートの primary は未対応**（P57-3）: `location.kind = "remote"` のリポジトリは taskd からファイルが
+   見えない（ADR-0018 / 0019 の同期の先にある）。この Phase では 409 `docs_unavailable` にし、
+   `~/workspace/` に別のリポジトリを勝手に作ることはしない。
+
+4. **GUI は `html` ではなく `raw` を描く**（P57-4）: D7 は「描画はサーバ側で決定的に」と決めており、API は
+   そのとおり `html` を返す（生 HTML は捨ててある）。ただし GUI 側の規律（`gui/CLAUDE.md` の禁止事項）に
+   `dangerouslySetInnerHTML` があるので、画面は `react-markdown` で `raw` を描く。`celeris:task/<id>` と
+   `[[相対パス]]` の開き方は `gui/app/lib/docs.ts` の純粋関数に置いて単体テストで押さえた。`html` は
+   契約として残る（GUI 以外の読み手のため）。
+
+5. **既定の文書リポジトリの置き場は設定で渡す**（P57-5）: `~/workspace` は taskd が `$HOME` から組んで
+   `ApiSettings.docs_repo_root` で API に渡す（`None` なら 409）。テストが人の `$HOME` を触らずに
+   tempdir で回せるようにするため（環境変数の書き換えはしない）。
+
+6. **front matter は最小の自前パーサ**（P57-6）: `serde_yaml` は入れず、`title` / `tags` / `tasks` の
+   3 つだけを読む（`[a, b]` と `- a` の両方。閉じていない `---` は front matter として扱わない）。
+   Markdown の描画は `pulldown-cmark`（`default-features = false`、`html` のみ）を足した。
+

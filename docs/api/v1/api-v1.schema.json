@@ -843,6 +843,38 @@
       ],
       "type": "object"
     },
+    "ArtifactPromoteBody": {
+      "additionalProperties": false,
+      "description": "`POST /tasks/{id}/artifacts/promote` の本文。",
+      "properties": {
+        "name": {
+          "description": "成果物の名前（`ArtifactRef.name`）。",
+          "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "description": "宛先が既にあっても上書きする。",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "宛先（リポジトリ相対。`docs/research/xxx.md`）。",
+          "type": "string"
+        },
+        "title": {
+          "default": null,
+          "description": "front matter の `title`（省略時は成果物の中身から）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "type": "object"
+    },
     "ArtifactRef": {
       "description": "DESIGN §4.4 の `ArtifactRef`。実体は `workspace/<task_id>/artifacts/` 配下。",
       "properties": {
@@ -2366,6 +2398,293 @@
         "files",
         "additions",
         "deletions"
+      ],
+      "type": "object"
+    },
+    "DocCommit": {
+      "description": "コミット 1 件（ツリーの「最終コミット」とページの履歴）。",
+      "properties": {
+        "at": {
+          "description": "RFC 3339（`%aI`）。",
+          "type": "string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "sha": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "at",
+        "author",
+        "subject"
+      ],
+      "type": "object"
+    },
+    "DocItem": {
+      "description": "ツリーの 1 件（`GET /projects/{id}/docs`）。",
+      "properties": {
+        "last_commit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DocCommit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "description": "リポジトリ相対のパス（`docs/research/xxx.md`）。",
+          "type": "string"
+        },
+        "title": {
+          "description": "front matter の `title` → 1 行目の `# ` → ファイル名。",
+          "type": "string"
+        },
+        "updated_at": {
+          "description": "最後にこのページを触ったコミットの時刻（RFC 3339）。履歴が読めなければ `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "title"
+      ],
+      "type": "object"
+    },
+    "DocPage": {
+      "description": "`GET /projects/{id}/docs/page`。",
+      "properties": {
+        "default_branch": {
+          "type": "string"
+        },
+        "etag": {
+          "description": "いまの blob sha。`PUT` / `DELETE` にそのまま渡す。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "history": {
+          "description": "直近 20 件（新しい順）。",
+          "items": {
+            "$ref": "#/$defs/DocCommit"
+          },
+          "type": "array"
+        },
+        "html": {
+          "description": "サーバで描画した HTML（生 HTML は捨ててある）。",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "raw": {
+          "description": "Markdown のもと（front matter を含む）。`too_large` なら空。",
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tasks": {
+          "description": "front matter の `tasks`（逆リンク）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        },
+        "too_large": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project_id",
+        "repo",
+        "root",
+        "default_branch",
+        "path",
+        "title",
+        "raw",
+        "html",
+        "history",
+        "too_large"
+      ],
+      "type": "object"
+    },
+    "DocPagePutBody": {
+      "additionalProperties": false,
+      "description": "`PUT /projects/{id}/docs/page` の本文。",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "etag": {
+          "default": null,
+          "description": "既にあるページを直すときは必須（無ければ 409 `etag_mismatch`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "default": null,
+          "description": "コミットメッセージ（既定 `docs: <path>`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "body"
+      ],
+      "type": "object"
+    },
+    "DocPageResult": {
+      "description": "`PUT` / `DELETE` / 昇格の応答。",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "etag": {
+          "description": "書いた後の blob sha（削除なら `null`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "sha": {
+          "description": "default_branch の新しい先端。",
+          "type": "string"
+        },
+        "unchanged": {
+          "description": "中身が同じだったので新しいコミットは作らなかった。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project_id",
+        "repo",
+        "path",
+        "sha",
+        "deleted",
+        "unchanged"
+      ],
+      "type": "object"
+    },
+    "DocsInitResult": {
+      "description": "`POST /projects/{id}/docs/init` の応答。",
+      "properties": {
+        "created": {
+          "description": "この呼び出しで新しく作った（既にあったなら `false`）。",
+          "type": "boolean"
+        },
+        "default_branch": {
+          "type": "string"
+        },
+        "path": {
+          "description": "作った（または見つけた）リポジトリの場所。",
+          "type": "string"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "repo",
+        "root",
+        "default_branch",
+        "created",
+        "path"
+      ],
+      "type": "object"
+    },
+    "DocsTree": {
+      "description": "`GET /projects/{id}/docs`。",
+      "properties": {
+        "default_branch": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DocItem"
+          },
+          "type": "array"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "q": {
+          "description": "`?q=` で絞ったならその文字列。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "文書の根になっているリポジトリの名前（`project_repos.name`）。",
+          "type": "string"
+        },
+        "root": {
+          "description": "リポジトリの中での文書の根（`[outputs].docs`。既定 `docs`）。",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "[`MAX_TREE_PAGES`] で切った。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project_id",
+        "repo",
+        "root",
+        "default_branch",
+        "items",
+        "truncated"
       ],
       "type": "object"
     },
@@ -7733,6 +8052,36 @@
             "detail"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0044 D7（Phase 57）: 逆リンク。front matter の `tasks:` にこのタスクを持つ文書のページ。\n`at` はそのページの最後のコミットの時刻（読めなければ空）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "doc",
+              "type": "string"
+            },
+            "path": {
+              "description": "案件のリポジトリからの相対パス（`docs/research/xxx.md`）。",
+              "type": "string"
+            },
+            "project_id": {
+              "$ref": "#/$defs/ProjectId"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "project_id",
+            "path",
+            "title"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -8141,6 +8490,9 @@
     "artifact_list": {
       "$ref": "#/$defs/ArtifactList"
     },
+    "artifact_promote": {
+      "$ref": "#/$defs/ArtifactPromoteBody"
+    },
     "cancel": {
       "$ref": "#/$defs/CancelBody"
     },
@@ -8179,6 +8531,22 @@
     },
     "decision": {
       "$ref": "#/$defs/DecisionBody"
+    },
+    "doc_page": {
+      "$ref": "#/$defs/DocPage"
+    },
+    "doc_page_put": {
+      "$ref": "#/$defs/DocPagePutBody"
+    },
+    "doc_page_result": {
+      "$ref": "#/$defs/DocPageResult"
+    },
+    "docs_init": {
+      "$ref": "#/$defs/DocsInitResult"
+    },
+    "docs_tree": {
+      "$ref": "#/$defs/DocsTree",
+      "description": "Phase 57（ADR-0044 D7）: 文書（git が正本）。ツリー・ページ・編集・用意・昇格。"
     },
     "events_page": {
       "$ref": "#/$defs/EventsPage"
@@ -8477,6 +8845,12 @@
     "integrate",
     "integrate_result",
     "project_integrations",
+    "docs_tree",
+    "doc_page",
+    "doc_page_put",
+    "doc_page_result",
+    "docs_init",
+    "artifact_promote",
     "daemon",
     "config",
     "stream_hello",

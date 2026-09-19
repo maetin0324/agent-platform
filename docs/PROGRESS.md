@@ -7363,6 +7363,140 @@ main（`ef639ea`）に `git merge --no-ff` で合わせた。衝突は **12 か�
     rootless podman の `--userns=keep-id` はホストの uid をそのまま見せられるので、
     docker の `--user <uid>:<gid>`（デーモンが root）より筋が良い。
 
+## Phase 57 — タスク管理 B3: 文書（git が正本。ADR-0044 D7。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0044 §1 / §4 B3）: 成果としての文書が `answer.md` のような成果物ファイルに散っていて、
+  人が「読む・直す・タスクと紐付ける」道具が無かった。D7 を入れる: **正本は git のファイル**
+  （案件の primary リポジトリの `[outputs] docs`）とし、ツリー・ページ・編集・履歴・検索の API、
+  成果物の昇格、タスクへの逆リンク、既定の文書リポジトリの作成、GUI の「文書」画面。
+  DB は増やしていない（`SCHEMA_VERSION` は 14 のまま。**migration 無し**）。
+- 決めたこと（ADR に書き足した差は `docs/adr/0044-task-management.md` の「Phase 57 追記」。ここには理由を書く）:
+  - **P57-1 文書リポジトリを作るのは人が押したときだけ**。D7 は「primary が `dir` か無い案件は Celeris が
+    `~/workspace/<slug>/` に作る」としか書いておらず、いつ作るかを決めていない。読み取り
+    （`GET /projects/{id}/docs`）はトークンが要らないので、そこで `git init` と `project_repos` への
+    登録をすると**無認証の GET が案件を書き換える**（ADR-0044 §5「変更を伴う API はすべて管理系」に反する）。
+    そこで **`POST /projects/{id}/docs/init`（管理系）**を足し、`PUT` と昇格からも同じ関数で作る。
+    読み取りは何も作らず 409 `docs_unavailable` を返し、GUI が「文書を用意する」ボタンを出す。
+  - **P57-2 パスはリポジトリ相対で、根を省いても届く**。D7 は `path` の基準を決めていない。昇格の例
+    （`docs/research/xxx.md`）に合わせて**リポジトリ相対**にし、文書の根で始まっていなければ根の下だと
+    解釈する（`?path=research/xxx.md` も同じページ）。境界は `task_ops::docs::page_path` の 1 か所で、
+    `..`・絶対パス・Windows prefix は 403、`.md` で終わらないものは 422。
+  - **P57-3 リモートの primary は未対応**。`location.kind = "remote"` のリポジトリのファイルは taskd から
+    見えない（ADR-0018 / 0019 の同期の先にある）。409 `docs_unavailable` にして、`~/workspace/` に
+    別のリポジトリを勝手に作ることはしない（人が primary を決め直す方が正しい）。
+  - **P57-4 GUI は `html` ではなく `raw` を描く**。D7 の「描画はサーバ側で決定的に」は API 側で守っている
+    （`pulldown-cmark`、生 HTML を捨てる、`celeris:task/<id>` と `[[…]]` をリンクに開く）が、
+    GUI には `dangerouslySetInnerHTML` の禁止（`gui/CLAUDE.md`）があるので、画面は `react-markdown` で
+    `raw` を描く。リンクの開き方は `gui/app/lib/docs.ts` の純粋関数に置いて単体テストで押さえた。
+    `html` は契約として残す（GUI 以外の読み手のため）。**どちらの経路でも生 HTML は実行されない**。
+  - **P57-5 既定の文書リポジトリの置き場は設定で渡す**。`~/workspace` は taskd が `$HOME` から組んで
+    `ApiSettings.docs_repo_root` で API に渡す（`None` なら 409）。テストが人の `$HOME` を触らずに
+    tempdir で回せるようにするため（Rust 2024 では `std::env::set_var` が unsafe で、並行するテストにも
+    影響する）。
+  - **P57-6 front matter は最小の自前パーサ**。`serde_yaml` は入れず、`title` / `tags` / `tasks` の 3 つ
+    だけを読む（`[a, b]` と `- a` の両方。閉じていない `---` は front matter にしない）。新しい依存は
+    `pulldown-cmark 0.13`（`default-features = false`、`html` のみ）の 1 つだけ。
+- 変更したファイル:
+  - `crates/task-ops/src/docs.rs`（**新規**、約 900 行）: `page_path` / `normalize_root` /
+    `resolve_relative` / `slugify` / `project_slug`（境界と名前。純粋）、`front_matter` / `title_of` /
+    `merge_front_matter`（最小の YAML もどき。純粋）、`render`（`pulldown-cmark`。生 HTML を捨て、
+    `celeris:task/<id>` → `/tasks/<id>`、`[[相対パス]]` → 文書タブのリンク。純粋）、
+    `list` / `grep` / `last_commits` / `history` / `read_page` / `blob_sha`（**default_branch の中身だけ**を
+    `git ls-tree` / `git grep -I -i -l -F` / `git log` / `git show` / `git rev-parse` で読む）、
+    `commit_page`（etag 照合 → `default_branch_busy` → 一時 worktree → `Celeris (human)` でコミット →
+    fast-forward か `update-ref`）、`init_docs_repo` / `docs_repo_dir`。単体テスト **10 件**。
+  - `crates/task-api/src/docs.rs`（**新規**、約 700 行）: 6 エンドポイントと応答の型
+    （`DocsTree` / `DocItem` / `DocPage` / `DocPagePutBody` / `DocPageResult` / `DocsInitResult` /
+    `ArtifactPromoteBody`）、`docs_target`（文書の根の決定。primary → `[outputs] docs` → 作る）、
+    `create_docs_repo`（`git init` + `repo_create` + `repo_set_primary`）、`write_page`（`WriteOutcome` →
+    HTTP。409 の 2 種と 404）、`artifact_text`（成果物を名前で引いて読む）、`backlinks`（逆リンク）。
+  - `crates/task-api/src/handlers.rs`: `crate::docs::routes()` を 1 行 merge。テスト用 `ApiSettings` に
+    `docs_repo_root`。
+  - `crates/task-api/src/lib.rs`: `pub mod docs` と `pub use`、`ApiSettings.docs_repo_root`。
+  - `crates/task-api/src/state.rs`: `Inner.docs_repo_root`。
+  - `crates/task-api/src/types.rs`: `TimelineItem::Doc { at, project_id, path, title }`（逆リンク）。
+  - `crates/task-api/src/timeline.rs`: `doc_items`（`crate::docs::backlinks` を呼ぶだけ）と `at_of` の 1 行。
+  - `crates/task-api/src/schema.rs`: 文書の 6 型を `ApiV1Schema` に。
+  - `crates/task-worker/src/preamble.rs`: `repos_note` に**文書の書き方の 1 行**（題名は 1 行目、
+    紐付けは front matter の `tasks:`、既定のブランチに直接コミットしない）。テスト **1 件**。
+  - `crates/taskd/src/lib.rs`: `docs_repo_root: task_core::home_dir().map(|h| h.join("workspace"))`。
+  - `crates/task-ops/Cargo.toml`: `pulldown-cmark 0.13`（`default-features = false`, `features = ["html"]`）。
+  - `crates/task-api/tests/docs.rs`（**新規**）: 結合テスト **9 件**（文書の根の決まり方 3 / ツリーと
+    `q=` とページの描画と逆リンク 1 / `PUT`・`DELETE`・境界 1 / `default_branch_busy` 1 / 昇格 1 /
+    案件に属さないタスク 1 / 無い案件 1）。git リポジトリは全部 tempdir、ネットワークには出ない。
+  - `crates/task-api/tests/common/mod.rs` / `crates/task-api/tests/stream.rs`: `docs_repo_root`
+    （tempdir の中）を足しただけ。
+  - GUI: `gui/app/routes/projects.$id.docs.tsx`（**新規**。ツリー・描画・編集とプレビュー・履歴・
+    削除・検索・「文書を用意する」）、`gui/app/lib/docs.ts`（**新規**。純粋関数）、
+    `gui/app/taskd/docs.ts` / `docs-admin.server.ts`（**新規**）、`gui/app/routes.ts`（1 行）、
+    `gui/app/taskd/action-types.ts`（`DocsOpOutcome`）、`gui/app/lib/labels.ts`（文書の言葉と
+    `docsErrorHint`、タイムラインの `doc`）、`gui/app/routes/tasks.$id.tsx`（成果物タブの
+    「文書に昇格」＋`intent=promote`、タイムラインの `doc` の行）、
+    `gui/app/routes/projects.$id.tsx`（**末尾に「文書」節を足しただけ**。ヘッダは触っていない）、
+    `gui/test/mock-taskd/fixtures.ts`（文書の 4 つ）、`gui/test/unit/docs.test.ts`（**新規**。17 件）。
+  - `docs/gui/api.md`: §3.84〜3.89（エンドポイント 73〜78）、§2 の一覧（72 → **78**）、
+    §3.78 に `kind = "doc"`、エラー表に `docs_unavailable` / `etag_mismatch` / `page_exists` /
+    `page_not_found`、冒頭の改訂。`gui/docs/taskd-api-v1.md` に `scripts/sync-gui-docs.sh` で同期。
+  - `docs/workspace.md`: §8「文書」（根の決まり方・ページの形・誰がどこに書くか・前置き）と §3 の例。
+  - `docs/adr/0044-task-management.md`: 「Phase 57 追記」（P57-1〜P57-6）。
+  - `docs/api/v1/api-v1.schema.json` を再生成（`UPDATE_SCHEMA=1`）、`gui/app/taskd/types.ts` を
+    `pnpm gen:types` で再生成（**手では触っていない**）。
+  - **既存のテストは 1 つも弱めていない・消していない**。
+- 証拠（このワークツリー `worktree-agent-ad847564a1f74a910` で実行）:
+  - `cargo test --workspace` → **exit 0**、`grep -c "^test result: FAILED"` = **0**、
+    `test result:` の行 63 本、**passed 合計 1342 / failed 0 / ignored 2**。
+    うち新規は `task_ops::docs`（単体 10）、`task-api` の `tests/docs.rs`（結合 9）、
+    `task_worker::preamble`（前置きの文書の行 1）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**（警告 0）。
+  - `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema` → 2 passed。
+    `docs/api/v1/api-v1.schema.json` は **+374 行**（文書の 6 型）。もう一度流しても差分は増えない。
+  - `pnpm gen:types` → `gui/app/taskd/types.ts` が **+177 行**。**2 回目は差分ゼロ**
+    （生成物を退避して再生成し `diff -q` が無言）。手では触っていない。
+  - `bash scripts/sync-gui-docs.sh` → 更新、続けて `--check` が **up to date**。
+  - GUI（`/usr/lib/node_modules/corepack/shims/pnpm`）: `pnpm lint` → **No fixes applied**（exit 0）、
+    `pnpm typecheck` → **exit 0**、`pnpm test` → **53 ファイル / 743 件 passed**
+    （うち `test/unit/docs.test.ts` が **17 件**）、`pnpm build` → **built**（サーバ 844.79 kB）。
+- 実機の証跡（できたところ／できなかったところ）:
+  - **HTTP の実機確認はこの環境からはできなかった**。scratch の taskd（`127.0.0.1:7791`、`token_file` あり、
+    DB も `workspace_root` も scratchpad の下。**本番の `~/taskd/` も 7710 / 7700 も触っていない**）は
+    起動して `ss -ltnp` に `LISTEN 127.0.0.1:7791 users:(("taskd",pid=…))` と出たが、
+    **エージェントのシェルからの `curl` が接続拒否（exit 7）**になる（サンドボックスが loopback の
+    送信を塞いでいる）。確認後に `kill -TERM` で止め、ポートが空いたことも確かめた。
+  - 代わりに **`tests/docs.rs` が同じ経路を本物の `axum` ルータと本物の git リポジトリ（tempdir）で通している**:
+    文書の根の決定（`[outputs] docs` / 既定 / 無い案件は作って primary に登録）、ツリーと `git grep`、
+    ページの描画（front matter・`celeris:task/` と `[[…]]` のリンク・`<script>` が消える・履歴）、
+    `PUT`（作成・更新・409 `etag_mismatch` 2 種・409 `default_branch_busy`・403・422）、`DELETE`、
+    昇格（404 / 409 `page_exists` / `overwrite` / front matter の混ぜ方）、逆リンク、401。
+    **人のチェックアウトが `main` を出していれば作業ツリーも早送りされる**ことまで確かめている
+    （`repo.join("docs/a.md").is_file()`）。
+  - **人にお願いしたい実機（ADR-0044 §4 B3 の「調査の `answer.md` を昇格して GUI で読み、人が 1 行直す」）**:
+    1. `cd gui && pnpm dev`（`TASKD_API_URL` と `TASKD_API_TOKEN_FILE` は本番の taskd に向ける）
+    2. 調査の終わった案件を開き、末尾の「文書」→「文書を用意する」（リポジトリがある案件なら不要）
+    3. そのタスクの「成果物」タブで `answer.md` の「文書に昇格」→ 宛先を確かめて「昇格する」
+    4. 出てきたリンクでページを開き、「編集」で 1 行足して「保存」
+    5. `git -C <primary リポジトリ> log --oneline -3 -- <docs>/` に
+       `docs: <path>`（author `Celeris (human)`）が 2 本積まれていること、
+       タスクの「タイムライン」に **文書** の行（逆リンク）が出ていることを見る
+- 未解決 / 次にやること:
+  - **リモート（クラスタ）の primary を持つ案件の文書**（P57-3）。`~/workspace` に別のリポジトリを作るのが
+    正しいのか、同期の先を読むのかは人の判断が要る。いまは 409 `docs_unavailable`。
+  - **ツリーは 500 ページで切る**。題名を出すためにページ 1 枚ごとに `git show` を起こしているため
+    （`git grep` で 1 行目だけ拾う手もあるが front matter があるので素直ではない）。
+    超えた場合は `truncated: true` を返し、GUI が「途中まで」と出す。
+  - **`q=` は `git grep -F`（固定文字列）**。正規表現も日本語の分かち書きもしない（ADR-0044 D4 が
+    FTS5 を採らなかったのと同じ理由で、素直に部分一致にした）。
+  - **GUI の e2e（Playwright）は触っていない**。`pnpm e2e` は実 taskd を起こすので、この環境では
+    `curl` と同じ理由で動かない。文書の画面は `test/unit/docs.test.ts`（純粋関数 + mock-taskd）止まり。
+- 提案（人へ）:
+  - **`docs/` を持たない案件でも「文書」を先に押して構わない**。`POST /projects/{id}/docs/init` が
+    `~/workspace/<案件 slug>/` に git リポジトリを作って **primary に据える**ので、以後その案件の
+    タスクはそのリポジトリを継ぐ（ADR-0043 D2 の「明示 > 親 > 案件の primary」）。コードのある案件では
+    先に本物のリポジトリを登録してから文書を使うこと。
+  - **ワーカーが書いた文書は「変更」タブから取り込む**。前置きに 1 行足したので、実装者・調査担当は
+    `docs/` に Markdown を置くようになるが、既定のブランチには入らない（人が merge するまで
+    「文書」タブには出ない）。これは D7 の設計どおり。
+
 ## Phase 51 — 検証に煙試験（ADR-0041 D5。2026-09-19）
 
 - 完了日: 2026-09-19

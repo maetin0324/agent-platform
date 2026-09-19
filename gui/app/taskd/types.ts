@@ -400,6 +400,16 @@ export type TimelineItem =
       at: string;
       detail: string;
       kind: "integration";
+    }
+  | {
+      at: string;
+      kind: "doc";
+      /**
+       * 案件のリポジトリからの相対パス（`docs/research/xxx.md`）。
+       */
+      path: string;
+      project_id: ProjectId;
+      title: string;
     };
 
 /**
@@ -416,6 +426,7 @@ export interface ApiV1Schema {
   approval_decide_result: ApprovalDecideResult;
   approval_list: ApprovalList;
   artifact_list: ArtifactList;
+  artifact_promote: ArtifactPromoteBody;
   cancel: CancelBody;
   change_diff: ChangeDiffView;
   changes: ChangesView;
@@ -428,6 +439,11 @@ export interface ApiV1Schema {
   config: ConfigView;
   daemon: DaemonView;
   decision: DecisionBody;
+  doc_page: DocPage;
+  doc_page_put: DocPagePutBody;
+  doc_page_result: DocPageResult;
+  docs_init: DocsInitResult;
+  docs_tree: DocsTree;
   events_page: EventsPage;
   graph: Graph;
   health: Health;
@@ -778,6 +794,27 @@ export interface ArtifactRef {
   name: string;
   path: string;
   sha256: string;
+}
+/**
+ * `POST /tasks/{id}/artifacts/promote` の本文。
+ */
+export interface ArtifactPromoteBody {
+  /**
+   * 成果物の名前（`ArtifactRef.name`）。
+   */
+  name: string;
+  /**
+   * 宛先が既にあっても上書きする。
+   */
+  overwrite?: boolean;
+  /**
+   * 宛先（リポジトリ相対。`docs/research/xxx.md`）。
+   */
+  path: string;
+  /**
+   * front matter の `title`（省略時は成果物の中身から）。
+   */
+  title?: string | null;
 }
 /**
  * `POST /tasks/{id}/cancel` の本文。
@@ -1483,6 +1520,146 @@ export interface ReportsLive {
 export interface DecisionBody {
   expected_status?: Status | null;
   note?: string | null;
+}
+/**
+ * `GET /projects/{id}/docs/page`。
+ */
+export interface DocPage {
+  default_branch: string;
+  /**
+   * いまの blob sha。`PUT` / `DELETE` にそのまま渡す。
+   */
+  etag?: string | null;
+  /**
+   * 直近 20 件（新しい順）。
+   */
+  history: DocCommit[];
+  /**
+   * サーバで描画した HTML（生 HTML は捨ててある）。
+   */
+  html: string;
+  path: string;
+  project_id: ProjectId;
+  /**
+   * Markdown のもと（front matter を含む）。`too_large` なら空。
+   */
+  raw: string;
+  repo: string;
+  root: string;
+  tags?: string[];
+  /**
+   * front matter の `tasks`（逆リンク）。
+   */
+  tasks?: string[];
+  title: string;
+  too_large: boolean;
+}
+/**
+ * コミット 1 件（ツリーの「最終コミット」とページの履歴）。
+ */
+export interface DocCommit {
+  /**
+   * RFC 3339（`%aI`）。
+   */
+  at: string;
+  author: string;
+  sha: string;
+  subject: string;
+}
+/**
+ * `PUT /projects/{id}/docs/page` の本文。
+ */
+export interface DocPagePutBody {
+  body: string;
+  /**
+   * 既にあるページを直すときは必須（無ければ 409 `etag_mismatch`）。
+   */
+  etag?: string | null;
+  /**
+   * コミットメッセージ（既定 `docs: <path>`）。
+   */
+  message?: string | null;
+  path: string;
+}
+/**
+ * `PUT` / `DELETE` / 昇格の応答。
+ */
+export interface DocPageResult {
+  deleted: boolean;
+  /**
+   * 書いた後の blob sha（削除なら `null`）。
+   */
+  etag?: string | null;
+  path: string;
+  project_id: ProjectId;
+  repo: string;
+  /**
+   * default_branch の新しい先端。
+   */
+  sha: string;
+  /**
+   * 中身が同じだったので新しいコミットは作らなかった。
+   */
+  unchanged: boolean;
+}
+/**
+ * `POST /projects/{id}/docs/init` の応答。
+ */
+export interface DocsInitResult {
+  /**
+   * この呼び出しで新しく作った（既にあったなら `false`）。
+   */
+  created: boolean;
+  default_branch: string;
+  /**
+   * 作った（または見つけた）リポジトリの場所。
+   */
+  path: string;
+  project_id: ProjectId;
+  repo: string;
+  root: string;
+}
+/**
+ * Phase 57（ADR-0044 D7）: 文書（git が正本）。ツリー・ページ・編集・用意・昇格。
+ */
+export interface DocsTree {
+  default_branch: string;
+  items: DocItem[];
+  project_id: ProjectId;
+  /**
+   * `?q=` で絞ったならその文字列。
+   */
+  q?: string | null;
+  /**
+   * 文書の根になっているリポジトリの名前（`project_repos.name`）。
+   */
+  repo: string;
+  /**
+   * リポジトリの中での文書の根（`[outputs].docs`。既定 `docs`）。
+   */
+  root: string;
+  /**
+   * [`MAX_TREE_PAGES`] で切った。
+   */
+  truncated: boolean;
+}
+/**
+ * ツリーの 1 件（`GET /projects/{id}/docs`）。
+ */
+export interface DocItem {
+  last_commit?: DocCommit | null;
+  /**
+   * リポジトリ相対のパス（`docs/research/xxx.md`）。
+   */
+  path: string;
+  /**
+   * front matter の `title` → 1 行目の `# ` → ファイル名。
+   */
+  title: string;
+  /**
+   * 最後にこのページを触ったコミットの時刻（RFC 3339）。履歴が読めなければ `null`。
+   */
+  updated_at?: string | null;
 }
 /**
  * `GET /tasks/{id}/events`、`GET /events`。
