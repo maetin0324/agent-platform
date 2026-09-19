@@ -744,19 +744,29 @@ struct RoleState {
 /// ADR-0040 D4: 起動時に `daemon_instances` を見て役割を決める（同じ `release` の `active` がいれば
 /// 何もせず `Exit::DuplicateRelease`＝ exit 3）。
 pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> {
+    // Phase 44（実機 2026-09-18）: `POST /reload` が `[[roles]]` / `[[genres]]` / `[delegation]` /
+    // `[reports]` / `[notify]` / `[conversation]` の設定値も読み直せるよう、tick ループにはこの
+    // `Config` を `&mut` で渡す（`[accounts]` / `[[clusters]]` / `[api]` / `db` / `workspace_root` は
+    // 従来どおり再起動が要る。`reload_providers` がそれ以外のフィールドには触れない）。
+    let mut config = config;
+    let verify = opts.mode == DaemonMode::Verify;
+    // ADR-0041 D5（Phase 51）: verify の taskd は `genre = "smoke"` を 1 件だけ流せる。その役割・分野・
+    // プロバイダ（すべて偽のアダプタ）は**組み込みで**足す（設定ファイルに同じ id があっても上書きする）。
+    if verify {
+        config.apply_verify_smoke();
+    }
     warn_if_db_on_network_filesystem(&config.db);
     let identity = InstanceIdentity::new(opts.release.as_deref());
     let cluster_masters: ClusterMasters = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let mut dispatcher = build_dispatcher(&config, Arc::clone(&cluster_masters))?;
-    let verify = opts.mode == DaemonMode::Verify;
     let role = SharedRole::new(if verify { InstanceRole::Verify } else { InstanceRole::Active });
     let supervisor = match verify {
         // ADR-0040 D3: verify は本番の表に触れない（そもそも DB のコピーだが、規約として）。
         true => {
             tracing::info!(
-                release = %identity.release, instance_id = %identity.instance_id,
-                "verify mode: migrations and the API only (no dispatch, no workers, no background jobs, \
-                 no Discord, no daemon_instances row; ADR-0040 D3)"
+                release = %identity.release, instance_id = %identity.instance_id, smoke = config::SMOKE_ID,
+                "verify mode: migrations, the API and the `smoke` genre only (no other dispatch, no background \
+                 jobs, no Discord, no daemon_instances row; ADR-0040 D3 / ADR-0041 D5)"
             );
             None
         }
@@ -783,7 +793,16 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
     };
     // ADR-0040 D4: `standby` は dispatch も裏方もしない（`tick` そのものを呼ばない）。`active` に
     // なったら `set_accepting_new_work(true)` で始める。
-    dispatcher.set_accepting_new_work(role.get() == InstanceRole::Active);
+    dispatcher.set_accepting_new_work(verify || role.get() == InstanceRole::Active);
+    // ADR-0041 D5: verify が面倒を見てよいのは「組み込みの分野 `smoke` で、アダプタが `fake`」のタスクだけ。
+    // アダプタまで見るのは、本物の LLM を呼ぶ経路を**設定ではなく構造で**閉じるため（ADR-0041 §3）。
+    // それ以外は ready のまま置かれ、リースの回収もレビューの拾い上げも起きない。
+    if verify {
+        dispatcher.set_eligible_tasks(Arc::new(|task: &task_core::Task| {
+            task.genre.as_deref() == Some(config::SMOKE_ID)
+                && task.worker_hint.adapter.as_deref() == Some(FakeAdapter::ID)
+        }));
+    }
     let (api, admin_rx) = match config.api.listen {
         Some(listen) => {
             // `standby` も起きてすぐ API を受ける（同じポートに `SO_REUSEPORT` で bind する）。
@@ -794,11 +813,6 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
         None => (None, None),
     };
     let mut roles = RoleState { role, supervisor, api };
-    // Phase 44（実機 2026-09-18）: `POST /reload` が `[[roles]]` / `[[genres]]` / `[delegation]` /
-    // `[reports]` / `[notify]` / `[conversation]` の設定値も読み直せるよう、tick ループにはこの
-    // `Config` を `&mut` で渡す（`[accounts]` / `[[clusters]]` / `[api]` / `db` / `workspace_root` は
-    // 従来どおり再起動が要る。`reload_providers` がそれ以外のフィールドには触れない）。
-    let mut config = config;
     let result = tick_loop(&mut dispatcher, &mut config, opts, admin_rx, cluster_masters, &mut roles).await;
     if let Some(api) = roles.api.take() {
         api.stop().await;
@@ -1022,14 +1036,17 @@ async fn tick_loop(
             }
         }
         }
-        // ADR-0040 D3 / D4: `active` と `draining` だけが `Dispatcher::tick` を回す（`draining` は
+        // ADR-0040 D3 / D4: `active` と `draining` が `Dispatcher::tick` を回す（`draining` は
         // `set_accepting_new_work(false)` により新しい run を起こさず、手元の run の完了・リース更新・
-        // 後処理だけを行う）。`standby` と `verify` はディスパッチャを一切回さない
-        // （＝ ready なタスクを拾わない、ワーカーを起こさない、リースを奪わない）。
+        // 後処理だけを行う）。`standby` はディスパッチャを一切回さない（＝ ready なタスクを拾わない、
+        // ワーカーを起こさない、リースを奪わない）。ADR-0041 D5: `verify` は回すが、面倒を見るのは
+        // `genre = "smoke"` かつアダプタが `fake` のタスクだけ（`set_eligible_tasks`）。
         let tick_started = std::time::Instant::now();
         let report: TickReport = match role {
-            InstanceRole::Active | InstanceRole::Draining => dispatcher.tick()?,
-            InstanceRole::Standby | InstanceRole::Verify => TickReport::default(),
+            // ADR-0041 D5: `verify` も tick を回すが、`set_eligible_tasks` で `smoke` の煙試験だけに
+            // 絞られている（他の ready なタスクは拾わない・リースも奪わない・レビューもしない）。
+            InstanceRole::Active | InstanceRole::Draining | InstanceRole::Verify => dispatcher.tick()?,
+            InstanceRole::Standby => TickReport::default(),
         };
         in_flight = report.in_flight;
         let tick_elapsed = tick_started.elapsed();
@@ -1042,8 +1059,11 @@ async fn tick_loop(
         } else {
             tracing::debug!(ticks, %role, ?report, "tick");
         }
-        // `standby` / `verify` は `report.idle` を計算していないので `until_idle` では止まらない。
-        if opts.until_idle && report.idle && matches!(role, InstanceRole::Active | InstanceRole::Draining) {
+        // `standby` は `report.idle` を計算していないので `until_idle` では止まらない。
+        if opts.until_idle
+            && report.idle
+            && matches!(role, InstanceRole::Active | InstanceRole::Draining | InstanceRole::Verify)
+        {
             tracing::info!(ticks, "idle; exiting");
             return Ok(Exit::Idle);
         }

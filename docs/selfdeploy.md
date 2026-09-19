@@ -160,9 +160,57 @@ SD_VERIFY_LOCK_WAIT=60 scripts/selfdeploy/verify.sh <sha12>   # 他の検証を 
       `/`, `/org`, `/projects`, `/projects/<最新>`, `/approvals`, `/reports`, `/clusters` が 200
    5. **N-1 互換**: `~/taskd/current/bin/taskd`（旧）を、**新バイナリがマイグレーションした後の**同じ
       スナップショットに対して `:7712` で起こし、1〜3 と同じ検査（件数は**スナップショット**と比べる。
-      ここでも本番 API は読まない）。落ちたら `live_ok = false`（`current` が無い初回も `live_ok = false`）
-4. `~/taskd/releases/<sha12>/verify.json` を書く。`ok` は **1〜4 が全部真**のとき。`live_ok` は 5。
+      ここでも本番 API は読まない）。落ちたら `live_ok = false`（`current` が無い初回も `live_ok = false`）。
+      **煙試験（6）はここではやらない**（旧バイナリは `smoke` を知らない）
+   6. **煙試験（ADR-0041 D5）**: staging に 1 件だけタスクを流し、**dispatch → ワーカー起動 →
+      結果の取り込み → レビュー → 終端 → 報告の生成**までを通す。詳しくは下の節
+4. `~/taskd/releases/<sha12>/verify.json` を書く。`ok` は **1〜4 と 6 が全部真**のとき。`live_ok` は 5。
 5. 起こしたプロセスは `trap` で必ず止める（自分が起こした pid だけ）。
+
+### 検査 6: 煙試験（ADR-0041 D5）
+
+検査 1〜5 は「起動する・データが残っている・画面が出る」しか見ない。アダプタ・前置き・委譲・レビューの
+回帰は素通りして本番に届いていた。検査 6 はそこを塞ぐ。
+
+**verify モードの taskd は `genre = "smoke"` のタスクだけを dispatch する**（それ以外の ready は
+従来どおり 1 件も動かさない。リースも奪わない、レビューも拾わない、`daemon_instances` にも書かない）。
+`smoke` の**役割・分野・プロバイダは verify モードが組み込みで足す**（`Config::apply_verify_smoke`）:
+
+| | 中身 |
+|---|---|
+| `[[providers]] id = "smoke"` | `adapter = "fake"`、`tiers = ["standard"]`、`concurrency = 1` |
+| `[[roles]] id = "smoke"` | `adapter = "fake"`、`tier = "standard"`、`max_turns = 1`、`max_wall_secs = 60` |
+| `[[genres]] id = "smoke"` | `description = "検証の煙試験"`、`default_role = "smoke"`、`roles = ["smoke"]` |
+| `[adapters.fake].command` | `FakeAdapter::default_command()` に固定 |
+| `[reviewer]` | `adapter = "fake"` / `tier = "standard"` |
+
+設定ファイル（`~/taskd/taskd.toml`）に同じ id があっても**上書きする**。本番の設定に何を書いても、
+煙試験が本物の LLM を呼ぶ経路は無い（ADR-0041 §3「煙試験で本物の LLM を呼ばない。`fake` だけ」）。
+これらが出るのは verify モードの `GET /config` だけで、本番の設定ファイルは 1 バイトも変わらない。
+
+`verify.sh` がすること（**検査 5 の後**。ここで 1 件足すので、先に回すと検査 2 / 5 の件数がずれる）:
+
+1. `POST /tasks`（staging のトークン）
+   `{"title":"smoke","genre":"smoke","role":"smoke","acceptance":[{"type":"command","cmd":"true","expect_exit":0}],"assignee":"<最初の組織ノード>"}`
+   — 受け入れ条件がコマンドなのでレビューにも LLM が要らない。`assignee` を付けるのは
+   **報告の生成（ADR-0034）まで**回帰に入れるため（報告は `assignee` のあるタスクにだけ作られる）。
+   そのノードがスナップショットに無ければ `assignee` 無しでもう一度作り、報告の段だけ飛ばす
+2. `POST /tasks/{id}/approve`（draft → ready）
+3. `GET /tasks/{id}` を 1 秒ごとに見て、**60 秒以内**に `status == "done"`
+4. `GET /tasks/{id}/events` に `worker_started` と、`outcome` が `done…` の `worker_finished` がある
+5. `GET /reports?node=<assignee>` にそのタスク（`task_id`）の報告が出る
+
+結果は `verify.json.checks` の `id = 6` に `{ok, task_id, elapsed_s, detail}` として載り、
+`verify.json.ok` の条件に入る。生の JSON は `~/taskd/staging/logs/smoke.json`。
+
+落ちたときの見方:
+
+- `the smoke task is 'ready' after 60.0s` — dispatch されていない。`logs/taskd-new.log` に
+  `no provider in the config matches this worker_hint` が出ていないか（`smoke` の組み込みが
+  入っていない＝そのリリースが Phase 51 より前）
+- `the smoke task is 'failed' after …` — ワーカーかレビューが落ちた。`GET /tasks/{id}` の
+  `runs` と `~/taskd/staging/workspaces/<task_id>/runs/` を見る
+- `no report for the smoke task under node …` — 終端での報告の生成（ADR-0034）が壊れている
 
 ### 件数一致が落ちたとき
 
@@ -186,12 +234,13 @@ SD_VERIFY_LOCK_WAIT=60 scripts/selfdeploy/verify.sh <sha12>   # 他の検証を 
   .lock                  直列化の flock（作り直しでも消さない。ADR-0041 D2）
   staging.sqlite3        本番 DB のコピー（新バイナリがマイグレーション済み）
   api.token              staging だけのトークン（毎回作り直す）
-  workspaces/            verify モードの作業場所（何も動かないので空のまま）
+  workspaces/            verify モードの作業場所（煙試験の 1 件だけがここに出る。ADR-0041 D5）
   logs/taskd-new.log     新リリースの taskd の出力 ← 起動に失敗したらまずここ
   logs/taskd-old.log     N-1（旧バイナリ）の出力 ← `SchemaTooNew` はここに出る
   logs/gui.log           staging GUI の出力
   logs/counts-*.json     件数の生データ（snapshot = マイグレーション前 / staging / n1）
   logs/health-*.json     health の生データ
+  logs/smoke.json        煙試験の生データ（`{ok, task_id, elapsed_s, detail, report}`。ADR-0041 D5）
 ```
 
 `verify.sh` は次に走ったときに `staging/` を**丸ごと作り直す**。残したいログは先にコピーすること。

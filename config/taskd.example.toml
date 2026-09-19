@@ -226,6 +226,14 @@ interval_secs = 30                                # 判定と送信の間隔（�
 # allowed_hosts = ["taskd.lab.example"]   # Host 許可リストへの追加（localhost / 127.0.0.1 / [::1] は常に許可）
 
 # fake アダプタ: サブプロセスとして起動するコマンド。省略時は progress + done を返す sh スクリプト。
+#
+# ADR-0041 D5（Phase 51）: `taskd --mode verify`（`scripts/selfdeploy/verify.sh` の検証段）は、この設定を
+# そのまま読んだうえで**組み込みで** `smoke` の役割・分野・プロバイダ（すべて `adapter = "fake"`）を足し、
+# `[adapters.fake].command` を既定に、`[reviewer]` を `fake` / `standard` に固定する。verify の taskd は
+# `genre = "smoke"` のタスク**だけ**を dispatch するので、本番のデータのコピーに対して煙試験を 1 件流しても
+# 他のタスクは 1 つも動かない。**この設定ファイルに `smoke` という id の役割・分野・プロバイダを書いても
+# verify では上書きされる**（煙試験で本物の LLM を呼ぶ経路を作らせないため）。通常運転（`--mode normal`）は
+# 何も足さない。詳しくは docs/selfdeploy.md の「検査 6: 煙試験」。
 [adapters.fake]
 # command = ["sh", "-c", "cat >/dev/null; echo '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'"]
 

@@ -238,6 +238,29 @@ sd_http_get() {
   esac
 }
 
+# `sd_http_post <url> <token-file> <json-body>` — 本文を標準出力に。非 2xx なら exit 1
+# （本文は捨てない。`problem+json` の説明をそのまま呼び出し側のログに出せる）。
+# 本番には使わない（`verify.sh` の staging だけ。lib.sh の先頭の安全規則）。
+sd_http_post() {
+  local url="$1" token_file="${2:-}" body="${3:-}" code out tmp
+  tmp="$(mktemp)"
+  if [ -n "$token_file" ] && [ -r "$token_file" ]; then
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' -m 30 -X POST \
+      -H "Authorization: Bearer $(tr -d '\r\n' <"$token_file")" \
+      -H 'Content-Type: application/json' --data-binary "$body" "$url" || echo 000)"
+  else
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' -m 30 -X POST \
+      -H 'Content-Type: application/json' --data-binary "$body" "$url" || echo 000)"
+  fi
+  out="$(cat "$tmp")"
+  rm -f "$tmp"
+  printf '%s' "$out"
+  case "$code" in
+    2*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # `sd_http_status <url> [token-file]` — status コードだけ。
 sd_http_status() {
   local url="$1" token_file="${2:-}"

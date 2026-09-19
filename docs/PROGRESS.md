@@ -6171,6 +6171,138 @@ Phase 40 で人に届いた `milestone_ready` は**状態の通知**（「done 2
 
 ---
 
+## Phase 51 — 検証に煙試験（ADR-0041 D5。2026-09-19）
+
+- 完了日: 2026-09-19
+- 目的（ADR-0041 §1 の 5）: verify モードは**ワーカーを一切動かさない**ので、アダプタ・前置き・委譲・
+  レビュー・報告の回帰が検証を素通りして本番に届いていた。verify を拡張して、**偽のアダプタだけ**で
+  1 件流す煙試験を検査に足す（新しいモードは作らない）。D1（Phase 49）と D2–D4（Phase 50）は触っていない。
+- 決めたこと（ADR-0041 D5 の実装判断。ADR には書き足していない）:
+  - 組み込みは**役割・分野だけでなくプロバイダも**足す。本番の `~/taskd/taskd.toml` には
+    `adapter = "fake"` のプロバイダが 1 行も無いので、役割に `adapter = "fake"` と書いても
+    `StaticPolicy` が行き先を見つけられない（煙試験が永遠に `ready` のまま）。
+  - 述語は「`genre = "smoke"`」だけでなく「**かつアダプタが `fake`**」。ADR 本文より**狭い**。
+    本物の LLM を呼ぶ経路を指示文や設定ではなく**構造で**閉じるため（ADR-0041 §3「煙試験で本物の
+    LLM を呼ばない。`fake` だけ」）。組み込みの分野 `smoke` の `default_role` が `adapter = "fake"` を
+    入れるので、`POST /tasks {genre: "smoke", role: "smoke"}` は必ずこの述語を通る。
+  - 同じ理由で verify モードでは `[adapters.fake].command` を `FakeAdapter::default_command()` に、
+    `[reviewer]` を `{adapter: "fake", tier: "standard"}` に固定する（`Check::Reviewer` を持つ煙試験を
+    書いても LLM は呼ばれない）。
+  - 述語は dispatch だけでなく、**ストア上の他のタスクの状態を変えうる経路すべて**に効かせる:
+    `dispatch_ready` / `reclaim_expired_leases` / `recover_reviews` / `is_idle`。verify が tick を
+    回すようになったので、これを入れないと本番スナップショットの `running` のリースが（本番の daemon が
+    更新しないコピーなので数十秒で切れる）回収されて `tasks` の `{id,status}` が変わり、**検査 2 の
+    件数一致が落ちる**。
+  - **ADR-0041 D5-2（報告の生成）の確認**: ADR-0034 の「終端での決定的な報告の生成」は
+    `Dispatcher::drain_completions` → `reports::record_run_report` の中にあり、**tick の裏方
+    （報告の圧縮・途中目標レビュー・通知）とは別の経路**。裏方は従来どおり `role == Active` でしか
+    動かないが、報告の生成は run の完了処理の一部なので verify でもそのまま動く。LLM も呼ばない
+    （文面は結果ファイルと成果物の一覧から決定的に組む）。よって**例外規定は要らなかった**。
+    ただし報告は `assignee` のあるタスクにだけ作られるので、`verify.sh` の検査 6 は
+    `assignee = <最初の組織ノード>` を付けて POST する（付けられなければその段だけ飛ばす）。
+- 変更したファイル:
+  - `crates/task-dispatch/src/dispatcher.rs` / `lib.rs`: **`pub type TaskFilter = Arc<dyn Fn(&Task) ->
+    bool + Send + Sync>`** と `Dispatcher::set_eligible_tasks` / `is_eligible`（既定 `None` = 全部
+    ＝従来どおり）。`dispatch_ready` / `reclaim_expired_leases` / `recover_reviews` が最初に
+    `is_eligible` を見て飛ばし、`is_idle` は「面倒を見ないタスク」を待ち対象に数えない。
+  - `crates/taskd/src/config.rs`: `SMOKE_ID` / `SMOKE_DESCRIPTION` / `SMOKE_MAX_TURNS`(1) /
+    `SMOKE_MAX_WALL_SECS`(60) / `SMOKE_INSTRUCTIONS` と **`Config::apply_verify_smoke()`**
+    （`[[providers]] smoke` / `[[roles]] smoke` / `[[genres]] smoke` を `retain` してから `push` =
+    **設定ファイルの同名 id を上書き**、`[adapters.fake].command` と `[reviewer]` の固定）。
+  - `crates/taskd/src/lib.rs`: `run()` は verify のとき最初に `config.apply_verify_smoke()`
+    （`Config` を先頭で `mut` にし、後ろにあった `let mut config = config;` を消した）。
+    `set_accepting_new_work(verify || active)`、verify なら `set_eligible_tasks`（genre == `smoke`
+    かつ adapter == `fake`）。tick の `match role` に `InstanceRole::Verify` を足して
+    `dispatcher.tick()` を回す（裏方の `if role == InstanceRole::Active` は**そのまま**なので、
+    通知・報告の圧縮・途中目標レビュー・クラスタ・アカウントは従来どおり動かない）。`--until-idle` は
+    verify でも効くようになった。`daemon_instances` の扱いは無変更（verify は `Supervisor` を作らない）。
+  - `scripts/selfdeploy/lib.sh`: **`sd_http_post <url> <token-file> <json>`**（staging 専用。
+    非 2xx は exit 1、本文は捨てない）。
+  - `scripts/selfdeploy/verify.sh`: **検査 6 `smoke`**。`record` の TSV に `task_id:s elapsed_s:f` の
+    2 列を足し（他の検査は空 / 0）、python3 の `smoke <base> <token> [assignee]` が
+    `POST /tasks` → `POST /tasks/{id}/approve` → `GET /tasks/{id}` を 1 秒ごとに**60 秒まで**待って
+    `done` → `GET /tasks/{id}/events` に `worker_started` と `outcome` が `done…` の `worker_finished`
+    → `GET /reports?node=<assignee>` にそのタスクの報告、を確かめて
+    `{ok, task_id, elapsed_s, detail, report}` を返す。結果は `verify.json.checks[id=6]` と
+    `$SD_STAGING/logs/smoke.json`。**`verify.json.ok` は 1〜4 と 6**（5 = N-1 は従来どおり `live_ok`）。
+    検査 6 は**検査 5 の後**に回す（先に回すとタスクが 1 件増えて検査 2 / 5 の件数一致が落ちる）。
+  - `crates/taskd/tests/instance_handoff.rs`: `Env::with_body`（プロバイダを 1 つも書かない設定を
+    作れるように `with_extra` を分割）と `Env::smoke_task` / `ready_task_with`。
+  - `config/taskd.example.toml`: `[adapters.fake]` の上に verify モードの組み込みの説明。
+  - `docs/selfdeploy.md`: §3 の検査一覧に 6 を足し、「### 検査 6: 煙試験（ADR-0041 D5）」の節
+    （組み込みの表・5 段の手順・落ちたときの見方）、staging の見方に `logs/smoke.json`。
+  - `docs/gui/api.md`: 冒頭の改訂履歴、§3.1（`mode = verify` は `smoke` だけを dispatch する）、
+    §3.21（verify の `GET /config` にだけ `smoke` が増える。**型は変わらない**。本番の応答は不変）。
+    スキーマの再生成は**不要**（型も列も増えていない）。
+- 証拠:
+  - `cargo test --workspace` → exit 0、`grep -c "^test result: FAILED"` = **0**、**1207 passed / 2 ignored**
+    （Phase 49 の 1199 から +8。今回足したのは taskd の統合テスト 2 件
+    〈`the_builtin_smoke_role_and_genre_override_a_config_entry_of_the_same_id` /
+    `normal_mode_does_not_inject_the_smoke_builtins`〉と、Phase 50 で入った他の変更分）。
+  - `cargo clippy --workspace -- -D warnings` → exit 0（`--all-targets` でも警告ゼロ）。
+  - `bash -n scripts/selfdeploy/verify.sh` / `lib.sh` → exit 0（このホストに shellcheck は無い）。
+  - 受け入れ条件ごと（`cargo test -p taskd --test instance_handoff` → 8 passed）:
+    - (a) verify モードで `smoke` が dispatch され `done` まで行く / (b) 同時に置いた非 `smoke` の
+      ready は最後まで `ready`・ワーカーも 0 回 / (c) それでも `daemon_instances` は空 →
+      `verify_mode_never_dispatches_and_never_touches_daemon_instances`（Phase 47 のテストを**拡張**。
+      元の主張〈ready に触れない・ワーカーを起こさない・行を書かない・マイグレーションは通る〉は
+      すべて残っている）。
+    - (d) 設定ファイルの `smoke`（`adapter = "claude-code"` / `tier = "frontier"` / 別の説明）を
+      組み込みが上書きする → `the_builtin_smoke_role_and_genre_override_a_config_entry_of_the_same_id`
+      （役割・分野・プロバイダとも 1 つだけになり、`adapter = "fake"` / `tier = standard` /
+      `description = "検証の煙試験"`。`[reviewer]` も `fake` / `standard`）。
+    - (e) 通常運転は組み込まない → `normal_mode_does_not_inject_the_smoke_builtins`
+      （`fake` のプロバイダが 1 つも無い設定で、normal では `smoke` のタスクが `ready` のまま・
+      ワーカー 0 回、同じ DB を verify で起こすと `done` になる）。
+  - **実機（本番のスナップショットに対して。2026-09-19 13:55Z）**:
+    - `SD_REPO=<この worktree> scripts/selfdeploy/release.sh HEAD` → exit 0、
+      `releases/2596a2ec466e`（`schema_version=11`）。`gate.json.ok = true`（cargo-test 62.2s /
+      cargo-clippy 42.0s / cargo-build 18.5s / pnpm-install 1.2s / typecheck 1.5s / test 2.1s /
+      build 2.7s、すべて exit 0）。`changes.json`: `base=3af3fe474175` commits=1 files=11
+      **sensitive=3**（`scripts/selfdeploy/lib.sh` / `verify.sh` / `config/taskd.example.toml`）。
+    - `scripts/selfdeploy/verify.sh 2596a2ec466e` → **exit 0**、`verify.json.ok = true` /
+      `live_ok = true`。**全体 12.9 秒**（`real 0m12.907s`）。
+    - 検査ごと: 1 start-and-migrate ok（`mode=verify release=2596a2ec466e schema_version=11`）/
+      2 counts-match ok（スナップショット 83 tasks・digest `736b1b49777a5b7b` と一致）/ 3 main-gets ok /
+      4 gui ok / 5 n-1-compat ok（旧 `3af3fe474175`）/ **6 smoke ok**。
+    - **検査 6**: `task_id = 01M2WZ75MS7KE7AK269YRV9ZG7`、**`elapsed_s = 6.52`**
+      （`POST /tasks` から `status == done` まで。本番の `tick_ms` で 3〜4 tick）。
+      `worker_finished` の `outcome = "done: fake"`、報告 `01M2WZ7BHNAPGF7CGC7C1Y61G5`（node `secretary`）が
+      `GET /reports?node=secretary` に出た。生データは `~/taskd/staging/logs/smoke.json`。
+    - **他のタスクを 1 件も動かしていないことの確認**: 検証が終わった後の
+      `staging.sqlite3` は `tasks` が **84**（= 83 + 煙試験の 1 件）で、煙試験の行を除いた
+      `{id,status}` の digest は `736b1b49777a5b7b` = **マイグレーション前のスナップショットと同一**。
+      `~/taskd/staging/workspaces/` にあるディレクトリも煙試験の 1 つだけ。
+    - **昇格はしていない**（`promote.sh` は実行していない。本番のプロセス・DB・設定には触っていない。
+      本番 DB は `sqlite3 .backup` と `mode=ro` でしか読んでいない）。
+    - この節は release / verify を回した後に書いたので、実機で回した commit は**この commit の
+      amend 前**（`2596a2ec466e2fb9c5c483781a1a829863b0cb21`）。後から足したのは `docs/PROGRESS.md` の
+      この節だけで、コード・スクリプト・他の文書は 1 バイトも変えていない。
+- 未解決:
+  - P51-1: 検査 6 の煙試験は **`assignee` に「スナップショットの最初の組織ノード」**（実機では
+    `secretary`）を使う。そのノードに報告が 1 件増える（staging のコピーの中だけ。本番には残らない）。
+    組織が空の DB では `assignee` を付けずに作り直し、報告の段だけ飛ばす（検査 6 自体は通る）。
+  - P51-2: 煙試験は **`fake` アダプタが 1 往復するだけ**なので、claude-code / codex / acp / paperqa /
+    local-deep-research の回帰は**拾えない**（それらは本物の認証とネットワークが要るので、検証の
+    スナップショット段では動かせない。ADR-0041 §3）。拾えるのは dispatch → ワーカーの起動と
+    プロトコルの往復 → 結果の取り込み → レビュー（コマンド判定）→ 終端 → 報告の生成、までの配線。
+  - P51-3: verify の taskd が `Dispatcher::tick` を回すようになったので、**述語が漏れた経路は
+    本番のコピーを書き換えうる**。今回は `dispatch_ready` / `reclaim_expired_leases` /
+    `recover_reviews` / `is_idle` の 4 か所に入れた（`settle_awaiting_children` / `abort_stale_runs` /
+    `cleanup_finished_worktrees` はメモリ上の自分の run だけを見るので不要）。**ディスパッチャに
+    「ストアの他のタスクを触る新しい段」を足すときは、ここに `is_eligible` を入れること**。
+    検査 2（件数一致）が事実上のガードになっている（実機の digest 一致がその証拠）。
+- 提案:
+  - P51-4: 煙試験のタスクは `staging.sqlite3` に残る（次の `verify.sh` が staging を作り直すので
+    消えるが、その間は `GET /tasks` に出る）。`verify.json` に `task_id` を出しているので追えるが、
+    検査 6 の最後に `POST /tasks/{id}/cancel` … は状態が変わるだけで消えはしない。気になるなら
+    煙試験だけ別の DB コピーに対して回す手もある（その場合マイグレーション後の DB を使えなくなる）。
+  - P51-5: 検査 6 の 60 秒は `tick_ms` に対して十分だが、本番の `tick_ms` を大きくすると足りなくなる。
+    `GET /config` の `tick_ms` を読んで `max(60, 20 * tick_ms/1000)` にすると設定に追従できる。
+  - P51-6: ADR-0041 §4 の「実機（Phase 49–51 の後）」— 自己改善案件の最初のタスクが worktree で動き、
+    `release.sh`/`verify.sh` を自分で通し、GUI の「リリース」画面に差分と `on_main` が出て、人が昇格する
+    — は**まだ**。Phase 49–51 が揃ったので、次はこれを人と一緒に 1 周回す。
+
 ## Phase 50 / G15 — 検証の直列化と件数検査、main への反映、昇格前の差分（ADR-0041 D2–D4。2026-09-19）
 
 - 完了日: 2026-09-19
