@@ -186,9 +186,18 @@ pub fn scan(
     started_at: OffsetDateTime,
     base_url: Option<&str>,
 ) -> Result<Vec<Candidate>, StoreError> {
+    scan_at(store, started_at, base_url, OffsetDateTime::now_utc())
+}
+
+fn scan_at(
+    store: &dyn TaskStore,
+    started_at: OffsetDateTime,
+    base_url: Option<&str>,
+    now: OffsetDateTime,
+) -> Result<Vec<Candidate>, StoreError> {
     let org = store.org_list()?;
     let mut out = Vec::new();
-    out.extend(scan_milestone_ready(store, &org, base_url)?);
+    out.extend(scan_milestone_ready(store, &org, base_url, now)?);
     out.extend(scan_approval_pending(store, &org, started_at, base_url)?);
     out.extend(scan_question_blocked(store, &org, started_at, base_url)?);
     out.extend(scan_bad_news(store, started_at, base_url)?);
@@ -211,6 +220,7 @@ fn scan_milestone_ready(
     store: &dyn TaskStore,
     _org: &[task_core::OrgNode],
     base_url: Option<&str>,
+    now: OffsetDateTime,
 ) -> Result<Vec<Candidate>, StoreError> {
     let mut out = Vec::new();
     for ready in crate::milestone_review::ready_milestones(store)? {
@@ -223,7 +233,7 @@ fn scan_milestone_ready(
         if reply.is_none()
             && ready
                 .last_done_at
-                .is_some_and(|at| OffsetDateTime::now_utc() - at < time::Duration::minutes(5))
+                .is_some_and(|at| now - at < time::Duration::minutes(5))
         {
             continue;
         }
@@ -509,7 +519,7 @@ pub fn schedule(
 ) -> Result<Vec<Notification>, StoreError> {
     let mut created = Vec::new();
     let since = store.notification_scan_at()?.unwrap_or(started_at);
-    for candidate in scan(store, since, config.base_url())? {
+    for candidate in scan_at(store, since, config.base_url(), now)? {
         if let Some(row) = store.notification_upsert_pending(
             candidate.kind,
             &candidate.key,

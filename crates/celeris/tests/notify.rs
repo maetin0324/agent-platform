@@ -1293,7 +1293,7 @@ fn milestone_without_cos_reply_eventually_notifies_the_handoff() {
     let mut done = task(Status::Done);
     done.project_id = Some(project);
     done.milestone_id = Some(milestone.id);
-    done.updated_at = OffsetDateTime::now_utc() - time::Duration::minutes(6);
+    done.updated_at = env.started_at - time::Duration::minutes(6);
     env.store.insert(&done).unwrap();
     assert_eq!(env.schedule(NotificationKind::MilestoneReady), 1);
     assert_eq!(env.schedule(NotificationKind::MilestoneReady), 0);
