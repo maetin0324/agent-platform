@@ -9417,3 +9417,17 @@ git -C ~/knowledge log --oneline -5   # confidence: high の create/update が
   ヒント文）。`retire` のときは取り込み先（`target`）の編集フィールドを触っても意味が無い
   （accept は常に候補の `target` を使う）ので、次の GUI Phase で `retire`/`merge` のときは
   そのフィールドを読み取り専用にする等の UX 改善ができる。
+
+### Phase 62 実機: 10 回目の昇格（停止→起動、schema 17→18。2026-09-20 11:44 UTC）と、煙試験が止めた不具合
+
+- 最初のリリース `1fecd07881cf` は **`verify.sh` の検査 6（煙試験）で落ちた**（`ok=false`。昇格していない）: 煙試験のタスクが
+  `blocked`「担当が見つからない: harness smoke」。前回の昇格で本番の組織が profile を持ったため、Phase 59 の matching が verify 専用の
+  組み込みハーネス `smoke` まで組織に流し、どのノードの `allowed` にも無い（のが正しい）ので unroutable になった。Phase 59 のテストは
+  空の組織でしか smoke を見ていなかった。**煙試験（ADR-0041 D5）が本番に届く前に止めた最初の実例**。
+- 直し（`6ea2dcb`）: 組み込みの裏方ハーネス（conversation / plan / reviewer / smoke / knowledge）は matching の対象外
+  （`task_ops::matching::decide`）。回帰テスト `builtin_support_harnesses_are_never_routed_through_the_org`。根の除外のテストは例を
+  組み込みでない harness に書き換えた。ゲート: `cargo test --workspace --no-fail-fast` exit 0 / FAILED 0 / passed 1497、clippy exit 0。
+- `release.sh main` → `6ea2dcb1b052`。`verify.sh` → 1〜4 true、5 false（schema 18）、**6 true（5.03 秒）** → ok。load が 1 を切るのを待ってから
+  `promote.sh 6ea2dcb1b052`（stop-start）: 旧 2 秒で終了 → バックアップ → 新 1 秒で health 200 / schema 18 → GUI 切替。API の停止は約 3 秒。
+- 事後: health `6ea2dcb1b052` active schema 18、`GET /console` 200、`GET /knowledge/inbox` 200、`knowledge_runs` 0 行
+  （`[knowledge.langmem] enabled` は既定の false。LangMem の実機確認はこの後）。
