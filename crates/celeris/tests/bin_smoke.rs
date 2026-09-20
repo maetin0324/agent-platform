@@ -5,7 +5,10 @@ use std::process::Command;
 
 #[test]
 fn help_exits_zero_and_missing_config_exits_two() {
-    let out = Command::new(env!("CARGO_BIN_EXE_celeris")).arg("--help").output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_celeris"))
+        .arg("--help")
+        .output()
+        .unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("--until-idle"));
 

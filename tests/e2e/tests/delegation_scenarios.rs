@@ -23,12 +23,20 @@ fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
     let path = debug_dir.join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
@@ -76,7 +84,13 @@ impl Env {
         let root = tmp.path().canonicalize().unwrap();
         let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
-        Self { _tmp: tmp, root, db, store, port: free_port() }
+        Self {
+            _tmp: tmp,
+            root,
+            db,
+            store,
+            port: free_port(),
+        }
     }
 
     fn write_script(&self, body: &str) -> PathBuf {
@@ -143,9 +157,18 @@ model = "fake"
     }
 
     fn celerisctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("celerisctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
+        let out = Command::new(bin("celerisctl"))
+            .arg("--db")
+            .arg(&self.db)
+            .args(args)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "celerisctl {args:?} failed: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         stdout
     }
 
@@ -163,7 +186,16 @@ model = "fake"
 
     fn get(&self, path: &str) -> (u16, Value) {
         let out = Command::new("curl")
-            .args(["-s", "-S", "-o", "-", "-w", "\n%{http_code}", "--max-time", "10"])
+            .args([
+                "-s",
+                "-S",
+                "-o",
+                "-",
+                "-w",
+                "\n%{http_code}",
+                "--max-time",
+                "10",
+            ])
             .arg(format!("http://127.0.0.1:{}/api/v1{path}", self.port))
             .output()
             .unwrap();
@@ -179,14 +211,21 @@ model = "fake"
     }
 
     fn events(&self, id: TaskId) -> Vec<Event> {
-        self.store.events_for(id).unwrap().into_iter().map(|(_, e)| e).collect()
+        self.store
+            .events_for(id)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect()
     }
 
     fn transitions(&self, id: TaskId) -> Vec<String> {
         self.events(id)
             .into_iter()
             .filter_map(|e| match e {
-                Event::Transitioned { from, to, reason } => Some(format!("{from:?}->{to:?}:{reason}")),
+                Event::Transitioned { from, to, reason } => {
+                    Some(format!("{from:?}->{to:?}:{reason}"))
+                }
                 _ => None,
             })
             .collect()
@@ -259,8 +298,14 @@ rm -f "$RUN"
 }
 
 fn wait_done(env: &Env, daemon: &Proc, id: TaskId) {
-    let ok = wait_until(Duration::from_secs(60), || env.task(id).status.is_terminal());
-    assert!(ok, "task {id} did not reach a terminal state\n{}", daemon.log_text());
+    let ok = wait_until(Duration::from_secs(60), || {
+        env.task(id).status.is_terminal()
+    });
+    assert!(
+        ok,
+        "task {id} did not reach a terminal state\n{}",
+        daemon.log_text()
+    );
 }
 
 /// 受け入れ 1・2・3（aggregate = true）・5・6。
@@ -299,7 +344,10 @@ fn lead_delegates_children_waits_for_them_and_aggregates_once() {
     assert_eq!(lead.worker_hint.tier, Tier::Frontier, "role default");
     assert_eq!(lead.budget.max_turns, 40, "role default");
     assert_eq!(lead.budget.max_wall_secs, 600, "global default");
-    assert_eq!(env.celerisctl(&["approve", &id.to_string()]).trim(), "Ready");
+    assert_eq!(
+        env.celerisctl(&["approve", &id.to_string()]).trim(),
+        "Ready"
+    );
 
     let daemon = env.start_celeris(&config);
     wait_done(&env, &daemon, id);
@@ -331,11 +379,38 @@ fn lead_delegates_children_waits_for_them_and_aggregates_once() {
         .collect();
     assert_eq!(delegated, vec![vec![children[0].id, children[1].id]]);
     let progress = env.progress(id);
-    assert!(progress.iter().any(|m| m == &format!("instructions: {LEAD_INSTRUCTIONS}")), "{progress:?}");
-    assert!(progress.iter().any(|m| m.starts_with("delegate rejected: tasks[2]") && m.contains("title must not be empty")), "{progress:?}");
-    assert!(progress.iter().any(|m| m.starts_with("delegate rejected: tasks[3]") && m.contains("delegating task itself")), "{progress:?}");
-    assert!(progress.iter().any(|m| m.starts_with("waiting for 2 delegated child task(s)")), "{progress:?}");
-    assert!(progress.iter().any(|m| m == "aggregate run sees 2 children"), "{progress:?}");
+    assert!(
+        progress
+            .iter()
+            .any(|m| m == &format!("instructions: {LEAD_INSTRUCTIONS}")),
+        "{progress:?}"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|m| m.starts_with("delegate rejected: tasks[2]")
+                && m.contains("title must not be empty")),
+        "{progress:?}"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|m| m.starts_with("delegate rejected: tasks[3]")
+                && m.contains("delegating task itself")),
+        "{progress:?}"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|m| m.starts_with("waiting for 2 delegated child task(s)")),
+        "{progress:?}"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|m| m == "aggregate run sees 2 children"),
+        "{progress:?}"
+    );
 
     // 3. 親は子待ちの間 reviewing のまま → 集約遷移 → 集約 run → done。run は 2 回、役割が WorkerStarted に残る。
     assert_eq!(
@@ -353,11 +428,18 @@ fn lead_delegates_children_waits_for_them_and_aggregates_once() {
     let task_roles: Vec<Option<String>> = events
         .iter()
         .filter_map(|e| match e {
-            Event::WorkerStarted { role: None, task_role, .. } => Some(task_role.clone()),
+            Event::WorkerStarted {
+                role: None,
+                task_role,
+                ..
+            } => Some(task_role.clone()),
             _ => None,
         })
         .collect();
-    assert_eq!(task_roles, vec![Some("lead".to_string()), Some("lead".to_string())]);
+    assert_eq!(
+        task_roles,
+        vec![Some("lead".to_string()), Some("lead".to_string())]
+    );
     assert!(
         events.iter().any(|e| matches!(e, Event::ReviewVerdict { criterion_idx: 1, pass: true, reason, .. } if reason.contains("summary.md"))),
         "{events:?}"
@@ -365,11 +447,19 @@ fn lead_delegates_children_waits_for_them_and_aggregates_once() {
     assert!(dir.join("artifacts/summary.md").is_file());
 
     // 5. celerisctl show --json と GET /tasks/{id} の role / delegated。
-    let shown: Value = serde_json::from_str(env.celerisctl(&["show", "--json", &id.to_string()]).trim()).unwrap();
+    let shown: Value =
+        serde_json::from_str(env.celerisctl(&["show", "--json", &id.to_string()]).trim()).unwrap();
     assert_eq!(shown["role"], "lead", "{shown}");
     assert_eq!(shown["task"]["aggregate"], true);
-    assert_eq!(shown["delegated"].as_array().map(Vec::len), Some(1), "{shown}");
-    assert_eq!(shown["delegated"][0]["tasks"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        shown["delegated"].as_array().map(Vec::len),
+        Some(1),
+        "{shown}"
+    );
+    assert_eq!(
+        shown["delegated"][0]["tasks"].as_array().map(Vec::len),
+        Some(2)
+    );
     assert_eq!(shown["delegated"][0]["tasks"][0]["title"], "impl-a");
     let (status, detail) = env.get(&format!("/tasks/{id}"));
     assert_eq!(status, 200, "{detail}\n{}", daemon.log_text());
@@ -380,7 +470,10 @@ fn lead_delegates_children_waits_for_them_and_aggregates_once() {
     assert_eq!(status, 200);
     assert_eq!(cfg["roles"][0]["id"], "lead", "{cfg}");
     assert!(cfg.to_string().contains("has_instructions"), "{cfg}");
-    assert!(!cfg.to_string().contains(LEAD_INSTRUCTIONS), "instructions body must not leak: {cfg}");
+    assert!(
+        !cfg.to_string().contains(LEAD_INSTRUCTIONS),
+        "instructions body must not leak: {cfg}"
+    );
     drop(daemon);
 
     // 6. replay 差分ゼロ（Delegated と aggregate は状態・attempts を変えない）。
@@ -421,9 +514,14 @@ fn non_aggregate_lead_completes_after_children_without_another_run() {
     // 親の run と判定が終わっても、子が終わるまで reviewing のまま。
     let saw_waiting = wait_until(Duration::from_secs(30), || {
         let parent = env.task(id);
-        parent.status == Status::Reviewing && env.children_of(id).iter().any(|c| !c.status.is_terminal())
+        parent.status == Status::Reviewing
+            && env.children_of(id).iter().any(|c| !c.status.is_terminal())
     });
-    assert!(saw_waiting, "parent should wait in reviewing while children run\n{}", daemon.log_text());
+    assert!(
+        saw_waiting,
+        "parent should wait in reviewing while children run\n{}",
+        daemon.log_text()
+    );
     wait_done(&env, &daemon, id);
     drop(daemon);
 
@@ -438,7 +536,10 @@ fn non_aggregate_lead_completes_after_children_without_another_run() {
         ]
     );
     assert_eq!(
-        env.events(id).iter().filter(|e| matches!(e, Event::WorkerStarted { role: None, .. })).count(),
+        env.events(id)
+            .iter()
+            .filter(|e| matches!(e, Event::WorkerStarted { role: None, .. }))
+            .count(),
         1,
         "no aggregate run without --aggregate"
     );
@@ -511,12 +612,22 @@ fn a_failed_child_makes_the_parent_retry_instead_of_inheriting_the_failure() {
 
     let id: TaskId = env
         .celerisctl(&[
-            "add", "--config", config.to_str().unwrap(), "--role", "lead", "--aggregate",
-            "--max-retries", "1",
-            "--title", "lead with a failing child",
-            "--objective", "delegate two units; one of them fails",
-            "--check-cmd", "true",
-            "--workspace", dir.to_str().unwrap(),
+            "add",
+            "--config",
+            config.to_str().unwrap(),
+            "--role",
+            "lead",
+            "--aggregate",
+            "--max-retries",
+            "1",
+            "--title",
+            "lead with a failing child",
+            "--objective",
+            "delegate two units; one of them fails",
+            "--check-cmd",
+            "true",
+            "--workspace",
+            dir.to_str().unwrap(),
         ])
         .trim()
         .parse()
@@ -539,14 +650,28 @@ fn a_failed_child_makes_the_parent_retry_instead_of_inheriting_the_failure() {
 
     // reviewing → ready(child_failed) → もう一度 run → 代わりの子 → 集約 run → done。
     let transitions = env.transitions(id);
-    assert!(transitions.contains(&"Reviewing->Ready:child_failed".to_string()), "{transitions:?}");
-    assert!(!transitions.iter().any(|t| t.ends_with("->Failed:child_failed")), "{transitions:?}");
-    assert_eq!(transitions.last().map(String::as_str), Some("Reviewing->Done:review_pass"), "{transitions:?}");
+    assert!(
+        transitions.contains(&"Reviewing->Ready:child_failed".to_string()),
+        "{transitions:?}"
+    );
+    assert!(
+        !transitions
+            .iter()
+            .any(|t| t.ends_with("->Failed:child_failed")),
+        "{transitions:?}"
+    );
+    assert_eq!(
+        transitions.last().map(String::as_str),
+        Some("Reviewing->Done:review_pass"),
+        "{transitions:?}"
+    );
 
     // やり直しの run は子の結果を見ている（fake が failed を見つけて代わりを委譲した）。
     let progress = env.progress(id);
     assert!(
-        progress.iter().any(|m| m.starts_with("a delegated child failed; delegating a replacement")),
+        progress
+            .iter()
+            .any(|m| m.starts_with("a delegated child failed; delegating a replacement")),
         "{progress:?}"
     );
     assert!(
@@ -563,7 +688,10 @@ fn a_failed_child_makes_the_parent_retry_instead_of_inheriting_the_failure() {
         .collect();
     assert_eq!(failed, vec!["impl-broken"], "{children:?}");
     assert_eq!(children.len(), 3, "{children:?}");
-    assert!(dir.join("artifacts/summary.md").is_file(), "集約 run まで進む");
+    assert!(
+        dir.join("artifacts/summary.md").is_file(),
+        "集約 run まで進む"
+    );
     env.replay_is_consistent();
 }
 
@@ -579,12 +707,22 @@ fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
 
     let id: TaskId = env
         .celerisctl(&[
-            "add", "--config", config.to_str().unwrap(), "--role", "lead", "--aggregate",
-            "--max-retries", "0",
-            "--title", "lead that cannot retry",
-            "--objective", "delegate two units; one of them fails",
-            "--check-cmd", "true",
-            "--workspace", dir.to_str().unwrap(),
+            "add",
+            "--config",
+            config.to_str().unwrap(),
+            "--role",
+            "lead",
+            "--aggregate",
+            "--max-retries",
+            "0",
+            "--title",
+            "lead that cannot retry",
+            "--objective",
+            "delegate two units; one of them fails",
+            "--check-cmd",
+            "true",
+            "--workspace",
+            dir.to_str().unwrap(),
         ])
         .trim()
         .parse()
@@ -592,13 +730,21 @@ fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
     env.celerisctl(&["approve", &id.to_string()]);
 
     let daemon = env.start_celeris(&config);
-    let blocked = wait_until(Duration::from_secs(60), || env.task(id).status == Status::Blocked);
+    let blocked = wait_until(Duration::from_secs(60), || {
+        env.task(id).status == Status::Blocked
+    });
     assert!(blocked, "親は人の判断待ちになる\n{}", daemon.log_text());
 
     let parent = env.task(id);
-    assert_eq!(parent.attempts, 0, "人の回答を待つ間は attempts を増やさない");
+    assert_eq!(
+        parent.attempts, 0,
+        "人の回答を待つ間は attempts を増やさない"
+    );
     let transitions = env.transitions(id);
-    assert!(transitions.contains(&"Reviewing->Blocked:child_failed".to_string()), "{transitions:?}");
+    assert!(
+        transitions.contains(&"Reviewing->Blocked:child_failed".to_string()),
+        "{transitions:?}"
+    );
 
     // 質問が残り、受信箱と詳細に出る。
     let question = env.events(id).into_iter().find_map(|e| match e {
@@ -607,7 +753,10 @@ fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
     });
     let question = question.expect("QuestionRaised");
     assert!(question.contains("impl-broken"), "{question}");
-    assert!(question.contains(&format!("celerisctl answer {id}")), "{question}");
+    assert!(
+        question.contains(&format!("celerisctl answer {id}")),
+        "{question}"
+    );
 
     let (status, inbox) = env.get("/inbox");
     assert_eq!(status, 200);
@@ -616,17 +765,31 @@ fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
         .iter()
         .find(|q| q["task"]["id"] == id.to_string())
         .unwrap_or_else(|| panic!("parent should be in the inbox questions: {inbox}"));
-    assert!(item["question"].as_str().unwrap_or_default().contains("impl-broken"), "{item}");
+    assert!(
+        item["question"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("impl-broken"),
+        "{item}"
+    );
     assert!(item["asked_at"].is_string(), "{item}");
 
     // 人が答えると再開し、代わりの子を立てて完了する（失敗のまま終わらない）。
-    env.celerisctl(&["answer", &id.to_string(), "impl-broken は別の分け方でやり直して"]);
+    env.celerisctl(&[
+        "answer",
+        &id.to_string(),
+        "impl-broken は別の分け方でやり直して",
+    ]);
     wait_done(&env, &daemon, id);
     drop(daemon);
 
     let parent = env.task(id);
     assert_eq!(parent.status, Status::Done, "回答の後は進める");
-    assert!(env.children_of(id).iter().any(|c| c.title == "impl-fixed"), "{:?}", env.children_of(id));
+    assert!(
+        env.children_of(id).iter().any(|c| c.title == "impl-fixed"),
+        "{:?}",
+        env.children_of(id)
+    );
     env.replay_is_consistent();
 }
 
@@ -666,11 +829,20 @@ rm -f "$RUN"
 
     let id: TaskId = env
         .celerisctl(&[
-            "add", "--config", config.to_str().unwrap(), "--role", "lead", "--aggregate",
-            "--title", "lead that ignores child failures",
-            "--objective", "delegate one unit that fails",
-            "--check-cmd", "true",
-            "--workspace", dir.to_str().unwrap(),
+            "add",
+            "--config",
+            config.to_str().unwrap(),
+            "--role",
+            "lead",
+            "--aggregate",
+            "--title",
+            "lead that ignores child failures",
+            "--objective",
+            "delegate one unit that fails",
+            "--check-cmd",
+            "true",
+            "--workspace",
+            dir.to_str().unwrap(),
         ])
         .trim()
         .parse()
@@ -685,7 +857,15 @@ rm -f "$RUN"
     assert_eq!(parent.status, Status::Done);
     assert_eq!(parent.attempts, 0);
     let transitions = env.transitions(id);
-    assert!(!transitions.iter().any(|t| t.contains("child_failed")), "{transitions:?}");
-    assert!(env.children_of(id).iter().any(|c| c.status == Status::Failed), "子は失敗したまま");
+    assert!(
+        !transitions.iter().any(|t| t.contains("child_failed")),
+        "{transitions:?}"
+    );
+    assert!(
+        env.children_of(id)
+            .iter()
+            .any(|c| c.status == Status::Failed),
+        "子は失敗したまま"
+    );
     env.replay_is_consistent();
 }

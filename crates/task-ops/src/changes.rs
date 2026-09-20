@@ -71,7 +71,9 @@ impl CmdOutput {
 /// 起動して、`timeout` を過ぎたら殺す。パイプは別スレッドで読み切る（詰まらせない）。
 /// 起動そのものに失敗したら `None`（`git` / `gh` が無い）。
 fn run(mut cmd: Command, timeout: Duration) -> Option<CmdOutput> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().ok()?;
     let out_pipe = child.stdout.take();
     let err_pipe = child.stderr.take();
@@ -130,7 +132,12 @@ pub fn git(dir: &Path, args: &[&str], timeout: Duration) -> Option<CmdOutput> {
 
 /// 任意の子プロセスを 1 つ起こす（上限つき）。`git` が無い環境での `grep` の代わりなど、
 /// **`git` 以外の決定的な道具**を呼ぶときだけ使う（ADR-0047 D3 の全文検索のフォールバック）。
-pub fn run_with_timeout(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Option<CmdOutput> {
+pub fn run_with_timeout(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Option<CmdOutput> {
     let mut cmd = Command::new(program);
     cmd.current_dir(dir).args(args);
     run(cmd, timeout)
@@ -154,7 +161,9 @@ fn git_line(dir: &Path, args: &[&str]) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// 変わったファイル 1 件。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct ChangedFile {
     /// リポジトリの根からの相対パス。
     pub path: String,
@@ -168,7 +177,17 @@ pub struct ChangedFile {
 }
 
 /// ファイル数と ± の合計。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 pub struct DiffStat {
     pub files: u64,
     pub additions: u64,
@@ -176,7 +195,9 @@ pub struct DiffStat {
 }
 
 /// リポジトリ 1 つ分の「このタスクが変えたもの」（ADR-0043 D5）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct RepoChanges {
     /// 分岐した地点の sha（`merge-base(default_branch, head)`。取れなければ目印の base）。
     pub base: String,
@@ -211,7 +232,17 @@ pub fn source_for(repo: &Path, worktree: Option<&Path>, branch: &str) -> Changes
     {
         return ChangesSource::Worktree(dir.to_path_buf());
     }
-    if !branch.is_empty() && git_ok(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
+    if !branch.is_empty()
+        && git_ok(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+    {
         return ChangesSource::Branch {
             repo: repo.to_path_buf(),
             branch: branch.to_string(),
@@ -226,14 +257,29 @@ pub fn default_branch(repo: &Path, configured: Option<&str>) -> String {
     if let Some(name) = configured.map(str::trim).filter(|n| !n.is_empty()) {
         return name.to_string();
     }
-    if let Some(head) = git_line(repo, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
-        && let Some(name) = head.strip_prefix("origin/")
+    if let Some(head) = git_line(
+        repo,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    ) && let Some(name) = head.strip_prefix("origin/")
         && !name.is_empty()
     {
         return name.to_string();
     }
     for name in ["main", "master"] {
-        if git_ok(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")]) {
+        if git_ok(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{name}"),
+            ],
+        ) {
             return name.to_string();
         }
     }
@@ -311,7 +357,15 @@ fn base_of(dir: &Path, default_branch: &str, head: &str, fallback: Option<&str>)
         return sha;
     }
     if let Some(fallback) = fallback.map(str::trim).filter(|b| !b.is_empty())
-        && let Some(sha) = git_line(dir, &["rev-parse", "--verify", "--quiet", &format!("{fallback}^{{commit}}")])
+        && let Some(sha) = git_line(
+            dir,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{fallback}^{{commit}}"),
+            ],
+        )
     {
         return sha;
     }
@@ -404,7 +458,12 @@ pub fn parse_name_status(text: &str) -> Vec<(String, String)> {
 /// git の管理外のファイル（`.gitignore` は尊重する）。人が見たいのは「このタスクが置いたもの」なので
 /// 追加行だけ数える（大きすぎる・バイナリは 0）。
 fn untracked_files(dir: &Path) -> Vec<ChangedFile> {
-    let Some(out) = git(dir, &["ls-files", "--others", "--exclude-standard"], GIT_TIMEOUT).filter(|o| o.ok) else {
+    let Some(out) = git(
+        dir,
+        &["ls-files", "--others", "--exclude-standard"],
+        GIT_TIMEOUT,
+    )
+    .filter(|o| o.ok) else {
         return Vec::new();
     };
     out.stdout
@@ -439,7 +498,11 @@ fn count_added_lines(path: &Path) -> (u64, bool) {
     }
     let lines = bytes.iter().filter(|b| **b == b'\n').count() as u64;
     // 末尾に改行が無いファイルの最後の行も 1 行と数える。
-    let lines = if bytes.is_empty() || bytes.ends_with(b"\n") { lines } else { lines + 1 };
+    let lines = if bytes.is_empty() || bytes.ends_with(b"\n") {
+        lines
+    } else {
+        lines + 1
+    };
     (lines, false)
 }
 
@@ -466,7 +529,10 @@ pub fn file_diff(
         ChangesSource::Missing => return None,
         ChangesSource::Worktree(dir) => {
             let head = git_line(dir, &["rev-parse", "HEAD"]).unwrap_or_default();
-            (dir.clone(), base_of(dir, default_branch, &head, fallback_base))
+            (
+                dir.clone(),
+                base_of(dir, default_branch, &head, fallback_base),
+            )
         }
         ChangesSource::Branch { repo, branch } => {
             let reference = format!("refs/heads/{branch}");
@@ -475,7 +541,11 @@ pub fn file_diff(
             (repo.clone(), format!("{base}..{reference}"))
         }
     };
-    let out = git(&dir, &["diff", "--no-renames", &rev, "--", path], GIT_TIMEOUT)?;
+    let out = git(
+        &dir,
+        &["diff", "--no-renames", &rev, "--", path],
+        GIT_TIMEOUT,
+    )?;
     let mut text = if out.ok { out.stdout } else { String::new() };
     // 追跡外のファイル（`git diff` には出ない）は `--no-index` で「空 → いまの中身」を出す。
     if text.trim().is_empty()
@@ -552,7 +622,12 @@ pub fn is_dirty(dir: &Path) -> Option<bool> {
 /// - 出していて綺麗なら `git -C <repo> merge --ff-only <sha>`（作業ツリーもそのまま進む）
 /// - 別のブランチを出していれば `git -C <repo> update-ref`（作業ツリーには触らない）
 /// - rebase が衝突したら `rebase --abort` して `Conflict`（worktree もブランチも残す）
-pub fn merge_into_default_branch(repo: &Path, branch: &str, default_branch: &str, temp_dir: &Path) -> MergeOutcome {
+pub fn merge_into_default_branch(
+    repo: &Path,
+    branch: &str,
+    default_branch: &str,
+    temp_dir: &Path,
+) -> MergeOutcome {
     let branch_ref = format!("refs/heads/{branch}");
     if !git_ok(repo, &["rev-parse", "--verify", "--quiet", &branch_ref]) {
         return MergeOutcome::Failed {
@@ -560,7 +635,8 @@ pub fn merge_into_default_branch(repo: &Path, branch: &str, default_branch: &str
         };
     }
     let default_ref = format!("refs/heads/{default_branch}");
-    let Some(default_sha) = git_line(repo, &["rev-parse", "--verify", "--quiet", &default_ref]) else {
+    let Some(default_sha) = git_line(repo, &["rev-parse", "--verify", "--quiet", &default_ref])
+    else {
         return MergeOutcome::Failed {
             detail: format!("既定のブランチ {default_branch} がありません"),
         };
@@ -601,7 +677,11 @@ pub fn merge_into_default_branch(repo: &Path, branch: &str, default_branch: &str
     }
 
     let outcome = rebase_and_advance(repo, temp_dir, default_branch, &default_sha, checked_out);
-    let _ = git(repo, &["worktree", "remove", "--force", &temp], GIT_WRITE_TIMEOUT);
+    let _ = git(
+        repo,
+        &["worktree", "remove", "--force", &temp],
+        GIT_WRITE_TIMEOUT,
+    );
     let _ = git(repo, &["worktree", "prune"], GIT_TIMEOUT);
     if temp_dir.exists() {
         let _ = std::fs::remove_dir_all(temp_dir);
@@ -620,19 +700,24 @@ fn rebase_and_advance(
     match rebase {
         Some(o) if o.ok => {}
         Some(o) => {
-            let files = git(temp_dir, &["diff", "--name-only", "--diff-filter=U"], GIT_TIMEOUT)
-                .filter(|o| o.ok)
-                .map(|o| {
-                    o.stdout
-                        .lines()
-                        .map(str::trim)
-                        .filter(|l| !l.is_empty())
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let files = git(
+                temp_dir,
+                &["diff", "--name-only", "--diff-filter=U"],
+                GIT_TIMEOUT,
+            )
+            .filter(|o| o.ok)
+            .map(|o| {
+                o.stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
             let _ = git(temp_dir, &["rebase", "--abort"], GIT_WRITE_TIMEOUT);
-            if files.is_empty() && !o.stdout.contains("CONFLICT") && !o.stderr.contains("CONFLICT") {
+            if files.is_empty() && !o.stdout.contains("CONFLICT") && !o.stderr.contains("CONFLICT")
+            {
                 return MergeOutcome::Failed {
                     detail: format!("rebase に失敗しました: {}", o.why()),
                 };
@@ -688,12 +773,21 @@ fn rebase_and_advance(
 
 /// worktree を消してブランチも消す（ADR-0043 D5 の `merge` 成功後と `discard`）。
 /// 人が手で消していても落ちない（`prune` してから `branch -D`）。
-pub fn remove_worktree_and_branch(repo: &Path, worktree: Option<&Path>, branch: &str) -> Result<(), String> {
+pub fn remove_worktree_and_branch(
+    repo: &Path,
+    worktree: Option<&Path>,
+    branch: &str,
+) -> Result<(), String> {
     if let Some(dir) = worktree
         && dir.exists()
     {
         let path = dir.to_string_lossy().into_owned();
-        let removed = git(repo, &["worktree", "remove", "--force", &path], GIT_WRITE_TIMEOUT).is_some_and(|o| o.ok);
+        let removed = git(
+            repo,
+            &["worktree", "remove", "--force", &path],
+            GIT_WRITE_TIMEOUT,
+        )
+        .is_some_and(|o| o.ok);
         if !removed {
             let _ = git(repo, &["worktree", "prune"], GIT_TIMEOUT);
             if dir.exists() && std::fs::remove_dir_all(dir).is_err() {
@@ -867,8 +961,8 @@ pub fn gh_pr_view(gh_path: &str, repo: &Path, number: i64) -> Result<PrView, Str
 
 /// `gh pr view --json …` の JSON を読む（知らないキーは無視する）。
 pub fn parse_pr_view(text: &str) -> Result<PrView, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(text.trim()).map_err(|e| format!("gh pr view の JSON を読めませんでした: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(text.trim())
+        .map_err(|e| format!("gh pr view の JSON を読めませんでした: {e}"))?;
     let string = |key: &str| {
         value
             .get(key)
@@ -935,7 +1029,11 @@ pub fn conflict_child_task(
     let files = if conflicts.is_empty() {
         "（一覧が取れませんでした。作業ツリーの状態を見てください）".to_string()
     } else {
-        conflicts.iter().map(|f| format!("- `{f}`")).collect::<Vec<_>>().join("\n")
+        conflicts
+            .iter()
+            .map(|f| format!("- `{f}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     let objective = format!(
         "リポジトリ `{repo}` のブランチを `{default_branch}` に rebase しようとしたところ衝突しました。\n\
@@ -1002,7 +1100,8 @@ mod tests {
     use super::*;
 
     fn git_must(dir: &Path, args: &[&str]) {
-        let out = git(dir, args, GIT_TIMEOUT).unwrap_or_else(|| panic!("git {args:?} did not start"));
+        let out =
+            git(dir, args, GIT_TIMEOUT).unwrap_or_else(|| panic!("git {args:?} did not start"));
         assert!(out.ok, "git {args:?}: {}", out.stderr);
     }
 
@@ -1044,23 +1143,64 @@ mod tests {
         assert_eq!(c.ahead, 1, "コミットは 1 つ");
         assert!(c.dirty, "未コミットの変更がある");
         let paths: Vec<&str> = c.files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, vec!["README.md", "new.txt", "src.txt"], "{:?}", c.files);
-        let src = c.files.iter().find(|f| f.path == "src.txt").unwrap_or_else(|| panic!("src"));
-        assert_eq!((src.status.as_str(), src.additions, src.deletions), ("A", 3, 0));
-        let untracked = c.files.iter().find(|f| f.path == "new.txt").unwrap_or_else(|| panic!("new"));
+        assert_eq!(
+            paths,
+            vec!["README.md", "new.txt", "src.txt"],
+            "{:?}",
+            c.files
+        );
+        let src = c
+            .files
+            .iter()
+            .find(|f| f.path == "src.txt")
+            .unwrap_or_else(|| panic!("src"));
+        assert_eq!(
+            (src.status.as_str(), src.additions, src.deletions),
+            ("A", 3, 0)
+        );
+        let untracked = c
+            .files
+            .iter()
+            .find(|f| f.path == "new.txt")
+            .unwrap_or_else(|| panic!("new"));
         assert_eq!((untracked.status.as_str(), untracked.additions), ("?", 2));
-        assert_eq!(c.stat, DiffStat { files: 3, additions: 6, deletions: 0 });
+        assert_eq!(
+            c.stat,
+            DiffStat {
+                files: 3,
+                additions: 6,
+                deletions: 0
+            }
+        );
         assert_eq!(c.base.len(), 40, "base は完全な sha");
 
         // 1 ファイルの diff。
-        let diff = file_diff(&repo, Some(&tree), "celeris/01TASK", "main", None, "src.txt")
-            .unwrap_or_else(|| panic!("diff"));
+        let diff = file_diff(
+            &repo,
+            Some(&tree),
+            "celeris/01TASK",
+            "main",
+            None,
+            "src.txt",
+        )
+        .unwrap_or_else(|| panic!("diff"));
         assert!(diff.diff.contains("+a"), "{}", diff.diff);
         assert!(!diff.truncated);
         // 追跡外のファイルも `--no-index` で出る。
-        let untracked_diff = file_diff(&repo, Some(&tree), "celeris/01TASK", "main", None, "new.txt")
-            .unwrap_or_else(|| panic!("diff"));
-        assert!(untracked_diff.diff.contains("+x"), "{}", untracked_diff.diff);
+        let untracked_diff = file_diff(
+            &repo,
+            Some(&tree),
+            "celeris/01TASK",
+            "main",
+            None,
+            "new.txt",
+        )
+        .unwrap_or_else(|| panic!("diff"));
+        assert!(
+            untracked_diff.diff.contains("+x"),
+            "{}",
+            untracked_diff.diff
+        );
     }
 
     /// worktree を消してもブランチが残っていれば、元のリポジトリから差分が引ける。無ければ `missing`。
@@ -1084,15 +1224,38 @@ mod tests {
         assert_eq!(c.files.len(), 1);
         assert_eq!(c.files[0].path, "src.txt");
         assert!(
-            file_diff(&repo, Some(&tree), "celeris/01TASK", "main", None, "src.txt")
-                .is_some_and(|d| d.diff.contains("+a"))
+            file_diff(
+                &repo,
+                Some(&tree),
+                "celeris/01TASK",
+                "main",
+                None,
+                "src.txt"
+            )
+            .is_some_and(|d| d.diff.contains("+a"))
         );
 
         git_must(&repo, &["branch", "-D", "celeris/01TASK"]);
         let gone = changes(&repo, Some(&tree), "celeris/01TASK", "main", None);
-        assert_eq!(gone, RepoChanges { missing: true, ..Default::default() });
+        assert_eq!(
+            gone,
+            RepoChanges {
+                missing: true,
+                ..Default::default()
+            }
+        );
         assert_eq!(gone.ahead, 0);
-        assert!(file_diff(&repo, Some(&tree), "celeris/01TASK", "main", None, "src.txt").is_none());
+        assert!(
+            file_diff(
+                &repo,
+                Some(&tree),
+                "celeris/01TASK",
+                "main",
+                None,
+                "src.txt"
+            )
+            .is_none()
+        );
     }
 
     /// コミットが 1 つも無いタスク（調査など）は `ahead = 0` で、ファイルも出ない。
@@ -1130,7 +1293,10 @@ mod tests {
     fn numstat_and_name_status_are_parsed() {
         assert_eq!(
             parse_numstat("3\t1\tsrc/a.rs\n-\t-\tlogo.png\nbroken\n"),
-            vec![("src/a.rs".to_string(), 3, 1, false), ("logo.png".to_string(), 0, 0, true)]
+            vec![
+                ("src/a.rs".to_string(), 3, 1, false),
+                ("logo.png".to_string(), 0, 0, true)
+            ]
         );
         assert_eq!(
             parse_name_status("M\tsrc/a.rs\nA\tnew.rs\nD\told.rs\n\n"),
@@ -1146,15 +1312,23 @@ mod tests {
     fn the_pr_url_and_view_json_are_parsed() {
         assert_eq!(
             parse_pr_url("https://github.com/o/r/pull/12\n"),
-            Some(PrRef { number: 12, url: "https://github.com/o/r/pull/12".into() })
+            Some(PrRef {
+                number: 12,
+                url: "https://github.com/o/r/pull/12".into()
+            })
         );
         assert_eq!(
             parse_pr_url("Creating pull request...\nhttps://github.com/o/r/pull/7."),
-            Some(PrRef { number: 7, url: "https://github.com/o/r/pull/7".into() })
+            Some(PrRef {
+                number: 7,
+                url: "https://github.com/o/r/pull/7".into()
+            })
         );
         assert_eq!(parse_pr_url("no url here"), None);
-        let view = parse_pr_view(r#"{"state":"MERGED","mergedAt":"2026-09-19T00:00:00Z","url":"u","mergeable":null}"#)
-            .unwrap_or_else(|e| panic!("{e}"));
+        let view = parse_pr_view(
+            r#"{"state":"MERGED","mergedAt":"2026-09-19T00:00:00Z","url":"u","mergeable":null}"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(view.state, "MERGED");
         assert_eq!(view.merged_at.as_deref(), Some("2026-09-19T00:00:00Z"));
         assert_eq!(view.mergeable, None);
@@ -1173,23 +1347,50 @@ mod tests {
         git_must(&tree, &["add", "-A"]);
         git_must(&tree, &["commit", "-q", "-m", "add src"]);
 
-        let outcome = merge_into_default_branch(&repo, "celeris/01TASK", "main", &root.path().join("tmp/one"));
+        let outcome = merge_into_default_branch(
+            &repo,
+            "celeris/01TASK",
+            "main",
+            &root.path().join("tmp/one"),
+        );
         let sha = match outcome {
-            MergeOutcome::Merged { sha, fast_forwarded } => {
+            MergeOutcome::Merged {
+                sha,
+                fast_forwarded,
+            } => {
                 assert!(fast_forwarded, "作業ツリーごと早送りする");
                 sha
             }
             other => panic!("{other:?}"),
         };
-        assert_eq!(git_line(&repo, &["rev-parse", "refs/heads/main"]).as_deref(), Some(sha.as_str()));
-        assert!(repo.join("src.txt").is_file(), "人の作業ツリーにも反映される");
-        assert!(!root.path().join("tmp/one").exists(), "一時 worktree は片付ける");
+        assert_eq!(
+            git_line(&repo, &["rev-parse", "refs/heads/main"]).as_deref(),
+            Some(sha.as_str())
+        );
+        assert!(
+            repo.join("src.txt").is_file(),
+            "人の作業ツリーにも反映される"
+        );
+        assert!(
+            !root.path().join("tmp/one").exists(),
+            "一時 worktree は片付ける"
+        );
 
-        remove_worktree_and_branch(&repo, Some(&tree), "celeris/01TASK").unwrap_or_else(|e| panic!("{e}"));
+        remove_worktree_and_branch(&repo, Some(&tree), "celeris/01TASK")
+            .unwrap_or_else(|e| panic!("{e}"));
         assert!(!tree.exists());
-        assert!(!git_ok(&repo, &["rev-parse", "--verify", "--quiet", "refs/heads/celeris/01TASK"]));
+        assert!(!git_ok(
+            &repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/celeris/01TASK"
+            ]
+        ));
         // 2 回目も落ちない。
-        remove_worktree_and_branch(&repo, Some(&tree), "celeris/01TASK").unwrap_or_else(|e| panic!("{e}"));
+        remove_worktree_and_branch(&repo, Some(&tree), "celeris/01TASK")
+            .unwrap_or_else(|e| panic!("{e}"));
     }
 
     /// 人が別のブランチを出していれば ref だけ動かす（作業ツリーには触らない）。
@@ -1208,16 +1409,31 @@ mod tests {
         std::fs::write(repo.join("scratch.txt"), b"mine\n").unwrap_or_else(|e| panic!("{e}"));
 
         let before = git_line(&repo, &["rev-parse", "refs/heads/main"]).unwrap_or_default();
-        let outcome = merge_into_default_branch(&repo, "celeris/01TASK", "main", &root.path().join("tmp/two"));
+        let outcome = merge_into_default_branch(
+            &repo,
+            "celeris/01TASK",
+            "main",
+            &root.path().join("tmp/two"),
+        );
         match outcome {
-            MergeOutcome::Merged { sha, fast_forwarded } => {
+            MergeOutcome::Merged {
+                sha,
+                fast_forwarded,
+            } => {
                 assert!(!fast_forwarded, "ref だけ動かす");
                 assert_ne!(sha, before);
-                assert_eq!(git_line(&repo, &["rev-parse", "refs/heads/main"]).as_deref(), Some(sha.as_str()));
+                assert_eq!(
+                    git_line(&repo, &["rev-parse", "refs/heads/main"]).as_deref(),
+                    Some(sha.as_str())
+                );
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(current_branch(&repo).as_deref(), Some("wip"), "人のチェックアウトは動かさない");
+        assert_eq!(
+            current_branch(&repo).as_deref(),
+            Some("wip"),
+            "人のチェックアウトは動かさない"
+        );
         assert!(!repo.join("src.txt").exists(), "人の作業ツリーには触らない");
         assert!(repo.join("scratch.txt").is_file());
     }
@@ -1233,14 +1449,23 @@ mod tests {
         std::fs::write(tree.join("src.txt"), b"a\n").unwrap_or_else(|e| panic!("{e}"));
         git_must(&tree, &["add", "-A"]);
         git_must(&tree, &["commit", "-q", "-m", "add src"]);
-        std::fs::write(repo.join("README.md"), b"human is editing\n").unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(repo.join("README.md"), b"human is editing\n")
+            .unwrap_or_else(|e| panic!("{e}"));
 
         let before = git_line(&repo, &["rev-parse", "refs/heads/main"]).unwrap_or_default();
-        match merge_into_default_branch(&repo, "celeris/01TASK", "main", &root.path().join("tmp/three")) {
+        match merge_into_default_branch(
+            &repo,
+            "celeris/01TASK",
+            "main",
+            &root.path().join("tmp/three"),
+        ) {
             MergeOutcome::Busy { detail } => assert_eq!(detail, "main が編集中"),
             other => panic!("{other:?}"),
         }
-        assert_eq!(git_line(&repo, &["rev-parse", "refs/heads/main"]).as_deref(), Some(before.as_str()));
+        assert_eq!(
+            git_line(&repo, &["rev-parse", "refs/heads/main"]).as_deref(),
+            Some(before.as_str())
+        );
         assert!(tree.join("src.txt").is_file(), "worktree は残る");
     }
 
@@ -1260,13 +1485,29 @@ mod tests {
         git_must(&repo, &["add", "-A"]);
         git_must(&repo, &["commit", "-q", "-m", "human"]);
 
-        match merge_into_default_branch(&repo, "celeris/01TASK", "main", &root.path().join("tmp/four")) {
+        match merge_into_default_branch(
+            &repo,
+            "celeris/01TASK",
+            "main",
+            &root.path().join("tmp/four"),
+        ) {
             MergeOutcome::Conflict { files } => assert_eq!(files, vec!["README.md".to_string()]),
             other => panic!("{other:?}"),
         }
         assert!(tree.join("README.md").is_file(), "worktree はそのまま");
-        assert!(git_ok(&repo, &["rev-parse", "--verify", "--quiet", "refs/heads/celeris/01TASK"]));
-        assert!(!root.path().join("tmp/four").exists(), "一時 worktree は片付ける");
+        assert!(git_ok(
+            &repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/celeris/01TASK"
+            ]
+        ));
+        assert!(
+            !root.path().join("tmp/four").exists(),
+            "一時 worktree は片付ける"
+        );
         assert_eq!(
             std::fs::read_to_string(repo.join("README.md")).unwrap_or_default(),
             "human side\n",
@@ -1286,7 +1527,15 @@ mod tests {
 
         discard(&repo, Some(&tree), "celeris/01TASK").unwrap_or_else(|e| panic!("{e}"));
         assert!(!tree.exists());
-        assert!(!git_ok(&repo, &["rev-parse", "--verify", "--quiet", "refs/heads/celeris/01TASK"]));
+        assert!(!git_ok(
+            &repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/celeris/01TASK"
+            ]
+        ));
         assert!(repo.join("README.md").is_file(), "元のリポジトリは無事");
     }
 

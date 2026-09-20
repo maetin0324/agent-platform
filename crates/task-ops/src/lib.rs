@@ -28,6 +28,8 @@ pub mod inbox;
 pub mod knowledge;
 /// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
 pub mod lifecycle;
+/// ADR-0046 D5（Phase 59）: 担当の決定的な選び方（capability matching）。
+pub mod matching;
 pub mod memory;
 pub mod milestone_review;
 pub mod plan;

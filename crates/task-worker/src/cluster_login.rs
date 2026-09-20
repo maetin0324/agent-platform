@@ -33,7 +33,9 @@ pub struct ClusterMaster {
 
 impl std::fmt::Debug for ClusterMaster {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClusterMaster").field("pid", &self.child.id()).finish()
+        f.debug_struct("ClusterMaster")
+            .field("pid", &self.child.id())
+            .finish()
     }
 }
 
@@ -49,7 +51,10 @@ pub enum ClusterConnectStart {
     /// コード無しで接続できた。人が張った master を見つけた場合は `None`。
     Connected(Option<ClusterMaster>),
     /// ssh がプロンプトを出した。`prompt` をそのまま GUI に見せる。
-    NeedsCode { prompt: String, session: ClusterConnectSession },
+    NeedsCode {
+        prompt: String,
+        session: ClusterConnectSession,
+    },
 }
 
 /// 進行中の TOTP 接続セッション（ADR-0032 D4）。一時ディレクトリ・FIFO・askpass の子プロセスを保持する。
@@ -161,7 +166,11 @@ impl ClusterConnectSession {
     }
 
     fn stderr_detail(&self) -> String {
-        let buf = self.stderr_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let buf = self
+            .stderr_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         truncate_detail(&String::from_utf8_lossy(&buf))
     }
 }
@@ -183,7 +192,10 @@ impl std::fmt::Display for ClusterConnectError {
             Self::Spawn(detail) => write!(f, "could not start ssh: {detail}"),
             Self::Timeout => write!(f, "timed out waiting for ssh"),
             Self::Failed(detail) => write!(f, "ssh did not connect: {detail}"),
-            Self::InvalidCode => write!(f, "the verification code was empty or contained control characters"),
+            Self::InvalidCode => write!(
+                f,
+                "the verification code was empty or contained control characters"
+            ),
         }
     }
 }
@@ -216,8 +228,9 @@ pub async fn start_connect(
 
 /// 接続を切る。`ssh -O exit <host>` を `BatchMode=yes` で呼ぶ（ADR-0032 D5: `DELETE /clusters/{id}/connect`）。
 pub async fn disconnect(ssh_command: &[String], host: &str) -> Result<(), ClusterConnectError> {
-    let (program, rest) =
-        ssh_command.split_first().ok_or_else(|| ClusterConnectError::Spawn("empty ssh_command".to_string()))?;
+    let (program, rest) = ssh_command
+        .split_first()
+        .ok_or_else(|| ClusterConnectError::Spawn("empty ssh_command".to_string()))?;
     let mut args: Vec<String> = rest.to_vec();
     args.push("-o".into());
     args.push("BatchMode=yes".into());
@@ -235,7 +248,9 @@ pub async fn disconnect(ssh_command: &[String], host: &str) -> Result<(), Cluste
     if output.status.success() {
         Ok(())
     } else {
-        Err(ClusterConnectError::Failed(truncate_detail(&String::from_utf8_lossy(&output.stderr))))
+        Err(ClusterConnectError::Failed(truncate_detail(
+            &String::from_utf8_lossy(&output.stderr),
+        )))
     }
 }
 
@@ -245,8 +260,9 @@ async fn start_publickey(
     host: &str,
     connect_timeout: Duration,
 ) -> Result<ClusterConnectStart, ClusterConnectError> {
-    let (program, rest) =
-        ssh_command.split_first().ok_or_else(|| ClusterConnectError::Spawn("empty ssh_command".to_string()))?;
+    let (program, rest) = ssh_command
+        .split_first()
+        .ok_or_else(|| ClusterConnectError::Spawn("empty ssh_command".to_string()))?;
     let mut args: Vec<String> = rest.to_vec();
     args.push("-o".into());
     args.push("BatchMode=yes".into());
@@ -278,7 +294,8 @@ async fn start_totp(
     host: &str,
     prompt_timeout: Duration,
 ) -> Result<ClusterConnectStart, ClusterConnectError> {
-    let dir = make_secure_tempdir().map_err(|e| ClusterConnectError::Spawn(format!("tempdir: {e}")))?;
+    let dir =
+        make_secure_tempdir().map_err(|e| ClusterConnectError::Spawn(format!("tempdir: {e}")))?;
     let prompt_fifo = dir.join("prompt");
     let code_fifo = dir.join("code");
     if let Err(e) = make_fifo(&prompt_fifo).and_then(|()| make_fifo(&code_fifo)) {
@@ -306,11 +323,20 @@ async fn start_totp(
     args.push(host.to_string());
     // BatchMode=yes は付けない（付けると askpass が呼ばれない。ADR-0032 §1「実機で確かめた事実」）。
     let envs = vec![
-        ("SSH_ASKPASS".to_string(), askpass.to_string_lossy().into_owned()),
+        (
+            "SSH_ASKPASS".to_string(),
+            askpass.to_string_lossy().into_owned(),
+        ),
         ("SSH_ASKPASS_REQUIRE".to_string(), "force".to_string()),
         ("DISPLAY".to_string(), String::new()),
-        ("CELERIS_PROMPT_FIFO".to_string(), prompt_fifo.to_string_lossy().into_owned()),
-        ("CELERIS_CODE_FIFO".to_string(), code_fifo.to_string_lossy().into_owned()),
+        (
+            "CELERIS_PROMPT_FIFO".to_string(),
+            prompt_fifo.to_string_lossy().into_owned(),
+        ),
+        (
+            "CELERIS_CODE_FIFO".to_string(),
+            code_fifo.to_string_lossy().into_owned(),
+        ),
     ];
 
     let (child, stderr_buf, err_task) = match spawn_master(program, &args, &envs) {
@@ -338,7 +364,9 @@ async fn start_totp(
     // なりうる（`ssh` が二度と askpass を呼ばない場合。実際にテストで確認した）ので採らない。
     let deadline = Instant::now() + prompt_timeout;
     let read_prompt_path = prompt_fifo;
-    let read_result = tokio::task::spawn_blocking(move || read_prompt_blocking(&read_prompt_path, deadline)).await;
+    let read_result =
+        tokio::task::spawn_blocking(move || read_prompt_blocking(&read_prompt_path, deadline))
+            .await;
 
     match read_result {
         Ok(Ok(Some(prompt))) => Ok(ClusterConnectStart::NeedsCode { prompt, session }),
@@ -370,7 +398,11 @@ async fn start_totp(
 type MasterSpawn = (Child, Arc<Mutex<Vec<u8>>>, JoinHandle<()>);
 
 /// `ssh -M -N` を起動し、stderr を非同期に汲み出す（`stdout` は使わないので捨てる）。
-fn spawn_master(program: &str, args: &[String], envs: &[(String, String)]) -> Result<MasterSpawn, ClusterConnectError> {
+fn spawn_master(
+    program: &str,
+    args: &[String],
+    envs: &[(String, String)],
+) -> Result<MasterSpawn, ClusterConnectError> {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -381,7 +413,9 @@ fn spawn_master(program: &str, args: &[String], envs: &[(String, String)]) -> Re
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command.spawn().map_err(|e| ClusterConnectError::Spawn(e.to_string()))?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| ClusterConnectError::Spawn(e.to_string()))?;
     let stderr = child.stderr.take();
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let task_buf = buf.clone();
@@ -395,7 +429,11 @@ fn spawn_master(program: &str, args: &[String], envs: &[(String, String)]) -> Re
 
 /// 失敗として終える: プロセスグループを落とし、stderr の読み取りタスクを（上限付きで）待ってから
 /// 人が読める一行の手がかりにする（ADR-0032 D4: コードは含めない。ssh の stderr にはそもそも入らない）。
-async fn finish_stderr(child: &mut Child, stderr_buf: Arc<Mutex<Vec<u8>>>, err_task: JoinHandle<()>) -> String {
+async fn finish_stderr(
+    child: &mut Child,
+    stderr_buf: Arc<Mutex<Vec<u8>>>,
+    err_task: JoinHandle<()>,
+) -> String {
     send_signal_to_group(child, Signal::SIGKILL);
     let _ = child.wait().await;
     join_with_timeout(err_task, READER_JOIN_TIMEOUT).await;
@@ -454,20 +492,28 @@ async fn poll_until_connected_or_timeout(
 async fn check_master(ssh_command: &[String], host: &str) -> bool {
     let ssh_command = ssh_command.to_vec();
     let host = host.to_string();
-    tokio::task::spawn_blocking(move || control_master_alive_blocking(&ssh_command, &host)).await.unwrap_or(false)
+    tokio::task::spawn_blocking(move || control_master_alive_blocking(&ssh_command, &host))
+        .await
+        .unwrap_or(false)
 }
 
 /// 0700 の一時ディレクトリを作る（ADR-0032 D4）。
 fn make_secure_tempdir() -> std::io::Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("celeris-cluster-connect-{}", task_core::TaskId::new()));
+    let dir = std::env::temp_dir().join(format!(
+        "celeris-cluster-connect-{}",
+        task_core::TaskId::new()
+    ));
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     Ok(dir)
 }
 
 /// FIFO を作る。`mkfifo(3)` のモードは umask に削られるので、作った後に `chmod 0600` で確定させる。
 fn make_fifo(path: &Path) -> Result<(), ClusterConnectError> {
-    nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR)
-        .map_err(|e| ClusterConnectError::Spawn(format!("mkfifo {}: {e}", path.display())))?;
+    nix::unistd::mkfifo(
+        path,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .map_err(|e| ClusterConnectError::Spawn(format!("mkfifo {}: {e}", path.display())))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| ClusterConnectError::Spawn(format!("chmod {}: {e}", path.display())))
 }
@@ -475,8 +521,10 @@ fn make_fifo(path: &Path) -> Result<(), ClusterConnectError> {
 /// askpass スクリプト（ADR-0032 §1「実機で確かめた事実」で検証済みの中身と等価）。
 fn write_askpass_script(dir: &Path) -> Result<PathBuf, ClusterConnectError> {
     let path = dir.join("askpass.sh");
-    let script = "#!/bin/sh\nprintf '%s' \"$1\" > \"$CELERIS_PROMPT_FIFO\"\ncat \"$CELERIS_CODE_FIFO\"\n";
-    std::fs::write(&path, script).map_err(|e| ClusterConnectError::Spawn(format!("askpass script: {e}")))?;
+    let script =
+        "#!/bin/sh\nprintf '%s' \"$1\" > \"$CELERIS_PROMPT_FIFO\"\ncat \"$CELERIS_CODE_FIFO\"\n";
+    std::fs::write(&path, script)
+        .map_err(|e| ClusterConnectError::Spawn(format!("askpass script: {e}")))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| ClusterConnectError::Spawn(format!("askpass permissions: {e}")))?;
     Ok(path)
@@ -494,7 +542,11 @@ fn write_askpass_script(dir: &Path) -> Result<PathBuf, ClusterConnectError> {
 /// （ADR-0032 §1）なので、最初に読めたところで確定する。
 fn read_prompt_blocking(path: &Path, deadline: Instant) -> std::io::Result<Option<String>> {
     use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new().read(true).write(true).custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits()).open(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+        .open(path)?;
     let mut chunk = [0u8; 4096];
     loop {
         match file.read(&mut chunk) {
@@ -562,7 +614,10 @@ mod tests {
     /// `-O check` に一致するかどうかだけを見る（ADR-0018 の判定＝`control_master_alive_blocking` の
     /// 引数と同じなので、テストの偽 ssh もその形に合わせる）。
     fn always_ok_script() -> String {
-        format!("#!/bin/sh\n{}if [ \"$is_check\" = 1 ]; then exit 0; fi\nexit 1\n", preamble())
+        format!(
+            "#!/bin/sh\n{}if [ \"$is_check\" = 1 ]; then exit 0; fi\nexit 1\n",
+            preamble()
+        )
     }
 
     /// `-M -N` で master を張り続け（ブロックし続け）、`-O check` は常に失敗する偽 ssh。
@@ -621,10 +676,18 @@ mod tests {
     async fn connected_without_spawning_when_master_already_alive() {
         let dir = tempfile::tempdir().unwrap();
         let ssh = fake_ssh(dir.path(), "ssh", &always_ok_script());
-        let result =
-            start_connect(&ssh, "cluster-host", false, Duration::from_millis(200), Duration::from_secs(2)).await;
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            false,
+            Duration::from_millis(200),
+            Duration::from_secs(2),
+        )
+        .await;
         match result {
-            Ok(ClusterConnectStart::Connected(master)) => assert!(master.is_none(), "master を借りるだけ"),
+            Ok(ClusterConnectStart::Connected(master)) => {
+                assert!(master.is_none(), "master を借りるだけ")
+            }
             other => panic!("expected Connected(None), got {other:?}"),
         }
     }
@@ -635,9 +698,19 @@ mod tests {
     async fn publickey_connects_after_a_delay() {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let ssh = fake_ssh(dir.path(), "ssh", &delayed_success_script(state.path(), 300));
-        let result =
-            start_connect(&ssh, "cluster-host", false, Duration::from_millis(200), Duration::from_secs(5)).await;
+        let ssh = fake_ssh(
+            dir.path(),
+            "ssh",
+            &delayed_success_script(state.path(), 300),
+        );
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            false,
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+        )
+        .await;
         match result {
             Ok(ClusterConnectStart::Connected(Some(master))) => {
                 let pid = master.child.id();
@@ -657,15 +730,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let ssh = fake_ssh(dir.path(), "ssh", &never_authenticates_script(state.path()));
-        let result =
-            start_connect(&ssh, "cluster-host", false, Duration::from_millis(300), Duration::from_secs(5)).await;
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            false,
+            Duration::from_millis(300),
+            Duration::from_secs(5),
+        )
+        .await;
         match result {
             Err(ClusterConnectError::Failed(_)) => {}
             other => panic!("expected Failed, got {other:?}"),
         }
         let pid_file = state.path().join("pid");
         assert!(pid_file.is_file(), "master は一度は起動した");
-        let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         wait_until_process_gone(pid).await;
     }
 
@@ -676,11 +759,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let prompt = "(rmaeda@130.158.241.2) Verification code: ";
-        let ssh = fake_ssh(dir.path(), "ssh", &askpass_script(state.path(), prompt, "123456"));
-        let result =
-            start_connect(&ssh, "cluster-host", true, Duration::from_secs(5), Duration::from_secs(5)).await.unwrap();
+        let ssh = fake_ssh(
+            dir.path(),
+            "ssh",
+            &askpass_script(state.path(), prompt, "123456"),
+        );
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            true,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         match result {
-            ClusterConnectStart::NeedsCode { prompt: got, session } => {
+            ClusterConnectStart::NeedsCode {
+                prompt: got,
+                session,
+            } => {
                 assert_eq!(got, prompt);
                 session.cancel().await;
             }
@@ -722,15 +819,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let prompt = "(rmaeda@130.158.241.2) Verification code: ";
-        let ssh = fake_ssh(dir.path(), "ssh", &daemonizing_askpass_script(state.path(), prompt, "123456"));
-        let result =
-            start_connect(&ssh, "cluster-host", true, Duration::from_secs(5), Duration::from_secs(5)).await.unwrap();
+        let ssh = fake_ssh(
+            dir.path(),
+            "ssh",
+            &daemonizing_askpass_script(state.path(), prompt, "123456"),
+        );
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            true,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         let ClusterConnectStart::NeedsCode { session, .. } = result else {
             panic!("expected NeedsCode");
         };
         match session.submit_code("123456", Duration::from_secs(5)).await {
             // 保持する子は無い（ssh が切り離した）が、**接続は成功している**。
-            Ok(master) => assert!(master.is_none(), "the child exited, so there is nothing to hold"),
+            Ok(master) => assert!(
+                master.is_none(),
+                "the child exited, so there is nothing to hold"
+            ),
             Err(e) => panic!("expected success even though the child exited, got {e:?}"),
         }
     }
@@ -741,13 +852,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let prompt = "(rmaeda@130.158.241.2) Verification code: ";
-        let ssh = fake_ssh(dir.path(), "ssh", &daemonizing_askpass_script(state.path(), prompt, "123456"));
-        let result =
-            start_connect(&ssh, "cluster-host", true, Duration::from_secs(5), Duration::from_secs(5)).await.unwrap();
+        let ssh = fake_ssh(
+            dir.path(),
+            "ssh",
+            &daemonizing_askpass_script(state.path(), prompt, "123456"),
+        );
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            true,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         let ClusterConnectStart::NeedsCode { session, .. } = result else {
             panic!("expected NeedsCode");
         };
-        assert!(session.submit_code("000000", Duration::from_secs(2)).await.is_err());
+        assert!(
+            session
+                .submit_code("000000", Duration::from_secs(2))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -755,9 +882,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let prompt = "(rmaeda@130.158.241.2) Verification code: ";
-        let ssh = fake_ssh(dir.path(), "ssh", &askpass_script(state.path(), prompt, "123456"));
-        let result =
-            start_connect(&ssh, "cluster-host", true, Duration::from_secs(5), Duration::from_secs(5)).await.unwrap();
+        let ssh = fake_ssh(
+            dir.path(),
+            "ssh",
+            &askpass_script(state.path(), prompt, "123456"),
+        );
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            true,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         let ClusterConnectStart::NeedsCode { session, .. } = result else {
             panic!("expected NeedsCode");
         };
@@ -777,15 +915,28 @@ mod tests {
         let prompt = "(rmaeda@130.158.241.2) Verification code: ";
 
         for bad in ["", "12\n34"] {
-            let ssh = fake_ssh(dir.path(), "ssh", &askpass_script(state.path(), prompt, "123456"));
-            let result = start_connect(&ssh, "cluster-host", true, Duration::from_secs(5), Duration::from_secs(5))
-                .await
-                .unwrap();
+            let ssh = fake_ssh(
+                dir.path(),
+                "ssh",
+                &askpass_script(state.path(), prompt, "123456"),
+            );
+            let result = start_connect(
+                &ssh,
+                "cluster-host",
+                true,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
             let ClusterConnectStart::NeedsCode { session, .. } = result else {
                 panic!("expected NeedsCode");
             };
             let outcome = session.submit_code(bad, Duration::from_secs(1)).await;
-            assert!(matches!(outcome, Err(ClusterConnectError::InvalidCode)), "{outcome:?}");
+            assert!(
+                matches!(outcome, Err(ClusterConnectError::InvalidCode)),
+                "{outcome:?}"
+            );
         }
         // 何もコードが渡っていないので、askpass のスクリプトは一度も `authed` を書いていない。
         assert!(!state.path().join("authed").exists(), "ssh に何も渡らない");
@@ -798,9 +949,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let prompt = "(rmaeda@130.158.241.2) Verification code: ";
-        let ssh = fake_ssh(dir.path(), "ssh", &askpass_script(state.path(), prompt, "123456"));
-        let result =
-            start_connect(&ssh, "cluster-host", true, Duration::from_secs(5), Duration::from_secs(5)).await.unwrap();
+        let ssh = fake_ssh(
+            dir.path(),
+            "ssh",
+            &askpass_script(state.path(), prompt, "123456"),
+        );
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            true,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         let ClusterConnectStart::NeedsCode { session, .. } = result else {
             panic!("expected NeedsCode");
         };
@@ -821,12 +983,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let ssh = fake_ssh(dir.path(), "ssh", &never_authenticates_script(state.path()));
-        let result =
-            start_connect(&ssh, "cluster-host", true, Duration::from_millis(300), Duration::from_secs(5)).await;
-        assert!(matches!(result, Err(ClusterConnectError::Timeout)), "{result:?}");
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            true,
+            Duration::from_millis(300),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ClusterConnectError::Timeout)),
+            "{result:?}"
+        );
         let pid_file = state.path().join("pid");
         assert!(pid_file.is_file(), "master は一度は起動した");
-        let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         wait_until_process_gone(pid).await;
     }
 
@@ -835,8 +1010,17 @@ mod tests {
     #[tokio::test]
     async fn disconnect_runs_o_exit_batch_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let ssh = fake_ssh(dir.path(), "ssh", &format!("#!/bin/sh\n{}if [ \"$is_exit\" = 1 ]; then exit 0; fi\nexit 1\n", preamble()));
-        disconnect(&ssh, "cluster-host").await.expect("disconnect ok");
+        let ssh = fake_ssh(
+            dir.path(),
+            "ssh",
+            &format!(
+                "#!/bin/sh\n{}if [ \"$is_exit\" = 1 ]; then exit 0; fi\nexit 1\n",
+                preamble()
+            ),
+        );
+        disconnect(&ssh, "cluster-host")
+            .await
+            .expect("disconnect ok");
     }
 
     #[tokio::test]
@@ -847,9 +1031,13 @@ mod tests {
             "ssh",
             "#!/bin/sh\necho 'no such control socket' >&2\nexit 1\n",
         );
-        let err = disconnect(&ssh, "cluster-host").await.expect_err("disconnect fails");
+        let err = disconnect(&ssh, "cluster-host")
+            .await
+            .expect_err("disconnect fails");
         match err {
-            ClusterConnectError::Failed(detail) => assert!(detail.contains("control socket"), "{detail}"),
+            ClusterConnectError::Failed(detail) => {
+                assert!(detail.contains("control socket"), "{detail}")
+            }
             other => panic!("expected Failed, got {other:?}"),
         }
     }

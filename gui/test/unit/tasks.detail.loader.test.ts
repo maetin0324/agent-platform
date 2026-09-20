@@ -132,6 +132,10 @@ describe("loadTaskDetail", () => {
       comments,
       org: [],
       milestones: [],
+      // ADR-0046 D3（Phase 59）: `GET /config` を登録していないので落ちて `[]`（自由記述の欄になる）。
+      genres: [],
+      // ADR-0046 D5（Phase 59）: `assigned` イベントが無いので null。
+      assignedEvent: null,
       // ADR-0043 D6（Phase 52 + 53 のマージ）: 作業ツリーは `?tab=files` のときだけ引く。
       files: null,
       // マージ（Phase 54）: 「変更」タブを見ていないので引かない（`?tab=changes` のときだけ）。
@@ -152,6 +156,47 @@ describe("loadTaskDetail", () => {
     }
     // 「ファイル」タブを見ていないので `GET /tasks/{id}/tree` は叩かない。
     expect(mock.requests.some((r) => r.url.startsWith("/api/v1/tasks/T1/tree"))).toBe(false);
+  });
+
+  /**
+   * ADR-0046 D3 / D5（Phase 59 / G21）: `GET /config` の `genres` がハーネスの選択肢になり、
+   * `assigned` イベントが「なぜこの担当か」の `assignedEvent` になる（直近の 1 件）。
+   */
+  it("genres は GET /config の genres[].id、assignedEvent は最新の assigned イベント", async () => {
+    serveTask();
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] }));
+    mock.on("GET", "/api/v1/config", (_req, res) =>
+      sendJson(res, 200, { genres: [{ id: "coding" }, { id: "literature" }] }),
+    );
+    mock.on("GET", "/api/v1/tasks/T1/events", (_req, res) =>
+      sendJson(res, 200, {
+        has_more: false,
+        items: [
+          {
+            id: 1,
+            seq: 0,
+            task_id: "T1",
+            ts: "2026-09-15T00:00:00Z",
+            event: { type: "created", task: taskDetail.task },
+          },
+          {
+            id: 2,
+            seq: 1,
+            task_id: "T1",
+            ts: "2026-09-15T00:00:01Z",
+            event: { type: "assigned", node: "engineering", score: 2, reason: "harness coding / skill の重なり 2 件" },
+          },
+        ],
+      } satisfies EventsPage),
+    );
+
+    const result = await loadTaskDetail(client, "T1", new Request("http://gui.invalid/tasks/T1"));
+    expect(result.genres).toEqual(["coding", "literature"]);
+    expect(result.assignedEvent).toEqual({
+      node: "engineering",
+      score: 2,
+      reason: "harness coding / skill の重なり 2 件",
+    });
   });
 
   /**

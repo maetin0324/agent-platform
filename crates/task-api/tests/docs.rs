@@ -16,19 +16,33 @@ use std::path::{Path, PathBuf};
 use task_core::{ArtifactRef, Event, Status, Task, TaskKind, TaskStore};
 
 fn g(path: &str) -> axum::http::Request<axum::body::Body> {
-    get_with(path, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    get_with(
+        path,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn p(path: &str, body: &Value) -> axum::http::Request<axum::body::Body> {
-    post_json_with(path, body, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    post_json_with(
+        path,
+        body,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn pu(path: &str, body: &Value) -> axum::http::Request<axum::body::Body> {
-    put_json_with(path, body, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    put_json_with(
+        path,
+        body,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn d(path: &str) -> axum::http::Request<axum::body::Body> {
-    delete_with(path, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    delete_with(
+        path,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn env() -> TestEnv {
@@ -45,11 +59,22 @@ fn git(dir: &Path, args: &[&str]) {
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 async fn make_project(app: &axum::Router, title: &str) -> String {
-    let resp = send(app, p("/api/v1/projects", &json!({"title": title, "request": "書く"}))).await;
+    let resp = send(
+        app,
+        p(
+            "/api/v1/projects",
+            &json!({"title": title, "request": "書く"}),
+        ),
+    )
+    .await;
     assert_eq!(resp.status.as_u16(), 201, "{}", resp.text());
     resp.json()["id"].as_str().expect("id").to_string()
 }
@@ -74,7 +99,12 @@ fn seed_repo(dir: &Path, docs: &str, workspace_toml: Option<&str>) {
 }
 
 /// 案件 + primary の git リポジトリ。
-async fn project_with_repo(app: &axum::Router, dir: &Path, docs: &str, toml: Option<&str>) -> (String, PathBuf) {
+async fn project_with_repo(
+    app: &axum::Router,
+    dir: &Path,
+    docs: &str,
+    toml: Option<&str>,
+) -> (String, PathBuf) {
     let project = make_project(app, "Pluvio PoC").await;
     let repo = dir.join("primary");
     seed_repo(&repo, docs, toml);
@@ -113,7 +143,12 @@ async fn the_docs_root_comes_from_the_primary_repository() {
     assert_eq!(body["items"][0]["path"], "docs/README.md");
     assert_eq!(body["items"][0]["title"], "案件");
     assert_eq!(body["items"][0]["last_commit"]["subject"], "first");
-    assert!(body["items"][0]["updated_at"].as_str().is_some_and(|t| t.contains('T')), "{body}");
+    assert!(
+        body["items"][0]["updated_at"]
+            .as_str()
+            .is_some_and(|t| t.contains('T')),
+        "{body}"
+    );
 
     // `[outputs] docs` を書けばそこが根（ADR-0043 D4）。
     let other = tempfile::tempdir().expect("tempdir");
@@ -124,7 +159,9 @@ async fn the_docs_root_comes_from_the_primary_repository() {
         Some("[outputs]\ndocs = \"handbook\"\n"),
     )
     .await;
-    let tree = send(&app, g(&format!("/api/v1/projects/{moved}/docs"))).await.json();
+    let tree = send(&app, g(&format!("/api/v1/projects/{moved}/docs")))
+        .await
+        .json();
     assert_eq!(tree["root"], "handbook");
     assert_eq!(tree["items"][0]["path"], "handbook/README.md", "{tree}");
 }
@@ -142,16 +179,27 @@ async fn a_project_without_a_repository_gets_a_documents_repository_on_init() {
         409,
         "docs_unavailable",
     );
-    assert!(!env.docs_repo_root.join("pluvio-poc").exists(), "読み取りでは作らない");
+    assert!(
+        !env.docs_repo_root.join("pluvio-poc").exists(),
+        "読み取りでは作らない"
+    );
 
     // 管理系。トークンが無ければ 401。
     assert_problem(
-        &send(&app, post_json(&format!("/api/v1/projects/{project}/docs/init"), &json!({}))).await,
+        &send(
+            &app,
+            post_json(&format!("/api/v1/projects/{project}/docs/init"), &json!({})),
+        )
+        .await,
         401,
         "unauthorized",
     );
 
-    let init = send(&app, p(&format!("/api/v1/projects/{project}/docs/init"), &json!({}))).await;
+    let init = send(
+        &app,
+        p(&format!("/api/v1/projects/{project}/docs/init"), &json!({})),
+    )
+    .await;
     assert_eq!(init.status.as_u16(), 200, "{}", init.text());
     let body = init.json();
     assert_eq!(body["created"], true);
@@ -164,21 +212,35 @@ async fn a_project_without_a_repository_gets_a_documents_repository_on_init() {
     assert!(path.join("docs/README.md").is_file(), "最初のページがある");
 
     // primary として登録されている（`Project.workspace` の写しも動く）。
-    let repos = send(&app, g(&format!("/api/v1/projects/{project}/repos"))).await.json();
+    let repos = send(&app, g(&format!("/api/v1/projects/{project}/repos")))
+        .await
+        .json();
     assert_eq!(repos["items"].as_array().expect("items").len(), 1);
     assert_eq!(repos["items"][0]["is_primary"], true);
     assert_eq!(repos["items"][0]["kind"], "git");
     assert_eq!(repos["items"][0]["default_branch"], "main");
 
     // ツリーが読める。2 回目の init は作り直さない。
-    let tree = send(&app, g(&format!("/api/v1/projects/{project}/docs"))).await.json();
+    let tree = send(&app, g(&format!("/api/v1/projects/{project}/docs")))
+        .await
+        .json();
     assert_eq!(tree["items"][0]["path"], "docs/README.md", "{tree}");
-    let again = send(&app, p(&format!("/api/v1/projects/{project}/docs/init"), &json!({}))).await.json();
+    let again = send(
+        &app,
+        p(&format!("/api/v1/projects/{project}/docs/init"), &json!({})),
+    )
+    .await
+    .json();
     assert_eq!(again["created"], false);
 
     // 題名が ASCII にならない案件は案件 id を使う。
     let jp = make_project(&app, "調査").await;
-    let init = send(&app, p(&format!("/api/v1/projects/{jp}/docs/init"), &json!({}))).await.json();
+    let init = send(
+        &app,
+        p(&format!("/api/v1/projects/{jp}/docs/init"), &json!({})),
+    )
+    .await
+    .json();
     assert_eq!(init["repo"], jp.to_lowercase(), "{init}");
 }
 
@@ -201,10 +263,17 @@ async fn a_dir_primary_is_replaced_by_a_documents_repository() {
     .await;
     assert_eq!(created.json()["kind"], "dir");
 
-    let init = send(&app, p(&format!("/api/v1/projects/{project}/docs/init"), &json!({}))).await.json();
+    let init = send(
+        &app,
+        p(&format!("/api/v1/projects/{project}/docs/init"), &json!({})),
+    )
+    .await
+    .json();
     assert_eq!(init["created"], true);
     assert_eq!(init["repo"], "data-project");
-    let repos = send(&app, g(&format!("/api/v1/projects/{project}/repos"))).await.json();
+    let repos = send(&app, g(&format!("/api/v1/projects/{project}/repos")))
+        .await
+        .json();
     let items = repos["items"].as_array().expect("items");
     assert_eq!(items.len(), 2);
     let primary: Vec<&str> = items
@@ -212,7 +281,11 @@ async fn a_dir_primary_is_replaced_by_a_documents_repository() {
         .filter(|r| r["is_primary"] == true)
         .map(|r| r["name"].as_str().unwrap_or_default())
         .collect();
-    assert_eq!(primary, vec!["data-project"], "primary は文書リポジトリに移る");
+    assert_eq!(
+        primary,
+        vec!["data-project"],
+        "primary は文書リポジトリに移る"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +320,9 @@ async fn pages_are_searched_rendered_and_linked() {
     assert_eq!(put.status.as_u16(), 200, "{}", put.text());
 
     // ツリー（2 枚）と `q=`（1 枚）。
-    let tree = send(&app, g(&format!("/api/v1/projects/{project}/docs"))).await.json();
+    let tree = send(&app, g(&format!("/api/v1/projects/{project}/docs")))
+        .await
+        .json();
     let paths: Vec<&str> = tree["items"]
         .as_array()
         .expect("items")
@@ -255,18 +330,36 @@ async fn pages_are_searched_rendered_and_linked() {
         .map(|i| i["path"].as_str().unwrap_or_default())
         .collect();
     assert_eq!(paths, vec!["docs/README.md", "docs/research/fs.md"]);
-    assert_eq!(tree["items"][1]["title"], "調べたこと", "front matter の title が勝つ");
-    let found = send(&app, g(&format!("/api/v1/projects/{project}/docs?q=%E8%AA%BF%E3%81%B9"))).await.json();
+    assert_eq!(
+        tree["items"][1]["title"], "調べたこと",
+        "front matter の title が勝つ"
+    );
+    let found = send(
+        &app,
+        g(&format!(
+            "/api/v1/projects/{project}/docs?q=%E8%AA%BF%E3%81%B9"
+        )),
+    )
+    .await
+    .json();
     assert_eq!(found["q"], "調べ");
-    assert_eq!(found["items"].as_array().expect("items").len(), 1, "{found}");
+    assert_eq!(
+        found["items"].as_array().expect("items").len(),
+        1,
+        "{found}"
+    );
     assert_eq!(found["items"][0]["path"], "docs/research/fs.md");
-    let none = send(&app, g(&format!("/api/v1/projects/{project}/docs?q=zzz"))).await.json();
+    let none = send(&app, g(&format!("/api/v1/projects/{project}/docs?q=zzz")))
+        .await
+        .json();
     assert!(none["items"].as_array().expect("items").is_empty());
 
     // ページ。
     let page = send(
         &app,
-        g(&format!("/api/v1/projects/{project}/docs/page?path=docs/research/fs.md")),
+        g(&format!(
+            "/api/v1/projects/{project}/docs/page?path=docs/research/fs.md"
+        )),
     )
     .await;
     assert_eq!(page.status.as_u16(), 200, "{}", page.text());
@@ -275,10 +368,16 @@ async fn pages_are_searched_rendered_and_linked() {
     assert_eq!(page["tags"][0], "research");
     assert_eq!(page["tasks"][0], task.id.to_string());
     assert_eq!(page["root"], "docs");
-    assert!(page["etag"].as_str().is_some_and(|e| e.len() >= 40), "{page}");
+    assert!(
+        page["etag"].as_str().is_some_and(|e| e.len() >= 40),
+        "{page}"
+    );
     let html = page["html"].as_str().expect("html");
     assert!(!html.contains("<script"), "生 HTML は捨てる: {html}");
-    assert!(html.contains(&format!("href=\"/tasks/{}\"", task.id)), "{html}");
+    assert!(
+        html.contains(&format!("href=\"/tasks/{}\"", task.id)),
+        "{html}"
+    );
     assert!(
         html.contains(&format!("/projects/{project}/docs?path=docs/README.md")),
         "[[…]] がリンクになる: {html}"
@@ -290,7 +389,9 @@ async fn pages_are_searched_rendered_and_linked() {
     assert_eq!(page["too_large"], false);
 
     // 逆リンク: タイムラインにこのページが出る（front matter の `tasks:` に載っているから）。
-    let timeline = send(&app, g(&format!("/api/v1/tasks/{}/timeline", task.id))).await.json();
+    let timeline = send(&app, g(&format!("/api/v1/tasks/{}/timeline", task.id)))
+        .await
+        .json();
     let docs: Vec<&Value> = timeline["items"]
         .as_array()
         .expect("items")
@@ -304,7 +405,13 @@ async fn pages_are_searched_rendered_and_linked() {
 
     // 無いページは 404。
     assert_problem(
-        &send(&app, g(&format!("/api/v1/projects/{project}/docs/page?path=docs/none.md"))).await,
+        &send(
+            &app,
+            g(&format!(
+                "/api/v1/projects/{project}/docs/page?path=docs/none.md"
+            )),
+        )
+        .await,
         404,
         "page_not_found",
     );
@@ -325,12 +432,20 @@ async fn editing_a_page_commits_on_the_default_branch_and_checks_the_etag() {
 
     // 読み取りはトークン無しでよいが、書き込みは管理系。
     assert_problem(
-        &send(&app, put_json_with(&page, &json!({"path": "docs/a.md", "body": "# A\n"}), &[])).await,
+        &send(
+            &app,
+            put_json_with(&page, &json!({"path": "docs/a.md", "body": "# A\n"}), &[]),
+        )
+        .await,
         401,
         "unauthorized",
     );
 
-    let created = send(&app, pu(&page, &json!({"path": "docs/a.md", "body": "# A\n"}))).await;
+    let created = send(
+        &app,
+        pu(&page, &json!({"path": "docs/a.md", "body": "# A\n"})),
+    )
+    .await;
     assert_eq!(created.status.as_u16(), 200, "{}", created.text());
     let created = created.json();
     assert_eq!(created["path"], "docs/a.md");
@@ -341,14 +456,21 @@ async fn editing_a_page_commits_on_the_default_branch_and_checks_the_etag() {
     assert!(repo.join("docs/a.md").is_file(), "作業ツリーが早送りされる");
 
     // 既にあるのに etag を付けなければ 409。
-    let missing = send(&app, pu(&page, &json!({"path": "docs/a.md", "body": "# B\n"}))).await;
+    let missing = send(
+        &app,
+        pu(&page, &json!({"path": "docs/a.md", "body": "# B\n"})),
+    )
+    .await;
     let problem = assert_problem(&missing, 409, "etag_mismatch");
     assert_eq!(problem["etag"], etag, "いまの etag を返す");
     // 違う etag も 409。
     assert_problem(
         &send(
             &app,
-            pu(&page, &json!({"path": "docs/a.md", "body": "# B\n", "etag": "0".repeat(40)})),
+            pu(
+                &page,
+                &json!({"path": "docs/a.md", "body": "# B\n", "etag": "0".repeat(40)}),
+            ),
         )
         .await,
         409,
@@ -367,7 +489,9 @@ async fn editing_a_page_commits_on_the_default_branch_and_checks_the_etag() {
     .json();
     let next = updated["etag"].as_str().expect("etag").to_string();
     assert_ne!(next, etag);
-    let read = send(&app, g(&format!("{page}?path=docs/a.md"))).await.json();
+    let read = send(&app, g(&format!("{page}?path=docs/a.md")))
+        .await
+        .json();
     assert_eq!(read["raw"], "# B\n");
     assert_eq!(read["history"][0]["subject"], "docs: 直した");
     assert_eq!(read["history"].as_array().expect("history").len(), 2);
@@ -378,7 +502,11 @@ async fn editing_a_page_commits_on_the_default_branch_and_checks_the_etag() {
 
     // 境界: `..` は 403、`.md` 以外は 422、空は 400。
     assert_problem(
-        &send(&app, pu(&page, &json!({"path": "../escape.md", "body": "x"}))).await,
+        &send(
+            &app,
+            pu(&page, &json!({"path": "../escape.md", "body": "x"})),
+        )
+        .await,
         403,
         "path_forbidden",
     );
@@ -387,10 +515,18 @@ async fn editing_a_page_commits_on_the_default_branch_and_checks_the_etag() {
         422,
         "validation",
     );
-    assert_problem(&send(&app, pu(&page, &json!({"path": "", "body": "x"}))).await, 400, "bad_request");
+    assert_problem(
+        &send(&app, pu(&page, &json!({"path": "", "body": "x"}))).await,
+        400,
+        "bad_request",
+    );
 
     // 消す（etag 必須）。
-    assert_problem(&send(&app, d(&format!("{page}?path=docs/a.md"))).await, 409, "etag_mismatch");
+    assert_problem(
+        &send(&app, d(&format!("{page}?path=docs/a.md"))).await,
+        409,
+        "etag_mismatch",
+    );
     let deleted = send(&app, d(&format!("{page}?path=docs/a.md&etag={next}"))).await;
     assert_eq!(deleted.status.as_u16(), 200, "{}", deleted.text());
     assert_eq!(deleted.json()["deleted"], true);
@@ -421,7 +557,12 @@ async fn editing_while_the_default_branch_is_dirty_is_409() {
     )
     .await;
     let problem = assert_problem(&resp, 409, "default_branch_busy");
-    assert!(problem["detail"].as_str().is_some_and(|d| d.contains("main")), "{problem}");
+    assert!(
+        problem["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("main")),
+        "{problem}"
+    );
     assert!(!repo.join("docs/a.md").exists(), "何も触らない");
 }
 
@@ -460,25 +601,47 @@ async fn an_artifact_can_be_promoted_to_a_page() {
     let mut task = new_task(TaskKind::Execute, Status::Done);
     task.project_id = Some(project_id);
     env.seed(&task);
-    produced(&env, &task, "answer.md", "# 調査の答え\n\n本文\n".as_bytes());
+    produced(
+        &env,
+        &task,
+        "answer.md",
+        "# 調査の答え\n\n本文\n".as_bytes(),
+    );
     let promote = format!("/api/v1/tasks/{}/artifacts/promote", task.id);
 
     // 管理系。
     assert_problem(
-        &send(&app, post_json(&promote, &json!({"name": "answer.md", "path": "docs/research/x.md"}))).await,
+        &send(
+            &app,
+            post_json(
+                &promote,
+                &json!({"name": "answer.md", "path": "docs/research/x.md"}),
+            ),
+        )
+        .await,
         401,
         "unauthorized",
     );
     // 知らない成果物は 404。
     assert_problem(
-        &send(&app, p(&promote, &json!({"name": "nope.md", "path": "docs/research/x.md"}))).await,
+        &send(
+            &app,
+            p(
+                &promote,
+                &json!({"name": "nope.md", "path": "docs/research/x.md"}),
+            ),
+        )
+        .await,
         404,
         "artifact_not_found",
     );
 
     let resp = send(
         &app,
-        p(&promote, &json!({"name": "answer.md", "path": "docs/research/x.md"})),
+        p(
+            &promote,
+            &json!({"name": "answer.md", "path": "docs/research/x.md"}),
+        ),
     )
     .await;
     assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
@@ -486,21 +649,36 @@ async fn an_artifact_can_be_promoted_to_a_page() {
 
     let page = send(
         &app,
-        g(&format!("/api/v1/projects/{project}/docs/page?path=docs/research/x.md")),
+        g(&format!(
+            "/api/v1/projects/{project}/docs/page?path=docs/research/x.md"
+        )),
     )
     .await
     .json();
-    assert_eq!(page["title"], "調査の答え", "front matter の title は中身から");
+    assert_eq!(
+        page["title"], "調査の答え",
+        "front matter の title は中身から"
+    );
     assert_eq!(page["tasks"][0], task.id.to_string());
     let raw = page["raw"].as_str().expect("raw");
     assert!(raw.starts_with("---\ntitle: 調査の答え\n"), "{raw}");
     assert!(raw.contains(&format!("tasks: [{}]", task.id)), "{raw}");
     assert!(raw.ends_with("# 調査の答え\n\n本文\n"), "{raw}");
-    assert!(repo.join("docs/research/x.md").is_file(), "人の作業ツリーにも出る");
+    assert!(
+        repo.join("docs/research/x.md").is_file(),
+        "人の作業ツリーにも出る"
+    );
 
     // 同じ宛先は 409。`overwrite: true` なら上書きできる。
     assert_problem(
-        &send(&app, p(&promote, &json!({"name": "answer.md", "path": "docs/research/x.md"}))).await,
+        &send(
+            &app,
+            p(
+                &promote,
+                &json!({"name": "answer.md", "path": "docs/research/x.md"}),
+            ),
+        )
+        .await,
         409,
         "page_exists",
     );
@@ -516,16 +694,24 @@ async fn an_artifact_can_be_promoted_to_a_page() {
     assert_eq!(again.status.as_u16(), 200, "{}", again.text());
     let page = send(
         &app,
-        g(&format!("/api/v1/projects/{project}/docs/page?path=docs/research/x.md")),
+        g(&format!(
+            "/api/v1/projects/{project}/docs/page?path=docs/research/x.md"
+        )),
     )
     .await
     .json();
     assert_eq!(page["title"], "決定版");
-    assert_eq!(page["tasks"].as_array().expect("tasks").len(), 1, "同じタスクは 1 回だけ");
+    assert_eq!(
+        page["tasks"].as_array().expect("tasks").len(),
+        1,
+        "同じタスクは 1 回だけ"
+    );
     assert_eq!(page["history"].as_array().expect("history").len(), 2);
 
     // 逆リンク（front matter の `tasks:`）。
-    let timeline = send(&app, g(&format!("/api/v1/tasks/{}/timeline", task.id))).await.json();
+    let timeline = send(&app, g(&format!("/api/v1/tasks/{}/timeline", task.id)))
+        .await
+        .json();
     let docs: Vec<&Value> = timeline["items"]
         .as_array()
         .expect("items")
@@ -537,12 +723,23 @@ async fn an_artifact_can_be_promoted_to_a_page() {
 
     // 宛先の境界は `PUT` と同じ。
     assert_problem(
-        &send(&app, p(&promote, &json!({"name": "answer.md", "path": "../x.md"}))).await,
+        &send(
+            &app,
+            p(&promote, &json!({"name": "answer.md", "path": "../x.md"})),
+        )
+        .await,
         403,
         "path_forbidden",
     );
     assert_problem(
-        &send(&app, p(&promote, &json!({"name": "answer.md", "path": "docs/x.txt"}))).await,
+        &send(
+            &app,
+            p(
+                &promote,
+                &json!({"name": "answer.md", "path": "docs/x.txt"}),
+            ),
+        )
+        .await,
         422,
         "validation",
     );
@@ -572,7 +769,10 @@ async fn promoting_needs_a_project() {
         &send(
             &app,
             p(
-                &format!("/api/v1/tasks/{}/artifacts/promote", task_core::TaskId::new()),
+                &format!(
+                    "/api/v1/tasks/{}/artifacts/promote",
+                    task_core::TaskId::new()
+                ),
                 &json!({"name": "answer.md", "path": "docs/x.md"}),
             ),
         )
@@ -588,9 +788,17 @@ async fn an_unknown_project_is_404() {
     let env = env();
     let app = env.router();
     let id = task_core::ProjectId::new();
-    assert_problem(&send(&app, g(&format!("/api/v1/projects/{id}/docs"))).await, 404, "project_not_found");
     assert_problem(
-        &send(&app, p(&format!("/api/v1/projects/{id}/docs/init"), &json!({}))).await,
+        &send(&app, g(&format!("/api/v1/projects/{id}/docs"))).await,
+        404,
+        "project_not_found",
+    );
+    assert_problem(
+        &send(
+            &app,
+            p(&format!("/api/v1/projects/{id}/docs/init"), &json!({})),
+        )
+        .await,
         404,
         "project_not_found",
     );

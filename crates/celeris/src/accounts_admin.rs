@@ -14,11 +14,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use task_api::{AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome};
+use task_api::{
+    AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome,
+};
 use task_core::{AccountAdapter, RateLimitObservation};
 use task_worker::{
-    AccountCheckResult, CodexLoginSession, LoginOutcome, LoginSession, check_account, check_account_codex,
-    start_login, start_login_codex,
+    AccountCheckResult, CodexLoginSession, LoginOutcome, LoginSession, check_account,
+    check_account_codex, start_login, start_login_codex,
 };
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -61,7 +63,11 @@ pub enum AccountAdminEvent {
         observation: Option<RateLimitObservation>,
     },
     /// D7: 進行中のログインの有無（開始・コード送信・打ち切りのたびに送る）。
-    LoginPending { adapter: AccountAdapter, id: String, pending: bool },
+    LoginPending {
+        adapter: AccountAdapter,
+        id: String,
+        pending: bool,
+    },
 }
 
 /// 10 分を超えたログイン中継を打ち切り、打ち切ったアカウント id を返す（`tick_loop` が毎 tick 呼ぶ。claude-code）。
@@ -90,7 +96,10 @@ pub async fn expire_stale_logins(sessions: &LoginSessions, expiry: Duration) -> 
 }
 
 /// ADR-0025 D5 / B1 と同じ理由: codex の進行中のログインを 15 分で打ち切る（`tick_loop` が毎 tick 呼ぶ）。
-pub async fn expire_stale_codex_logins(sessions: &CodexLoginSessions, expiry: Duration) -> Vec<String> {
+pub async fn expire_stale_codex_logins(
+    sessions: &CodexLoginSessions,
+    expiry: Duration,
+) -> Vec<String> {
     let mut guard = sessions.lock().await;
     let expired: Vec<String> = guard
         .iter()
@@ -115,7 +124,9 @@ pub async fn poll_codex_logins(sessions: &CodexLoginSessions) -> Vec<(String, bo
     let mut finished = Vec::new();
     let ids: Vec<String> = guard.keys().cloned().collect();
     for id in ids {
-        let Some(session) = guard.get_mut(&id) else { continue };
+        let Some(session) = guard.get_mut(&id) else {
+            continue;
+        };
         if let Some(result) = session.try_finished() {
             guard.remove(&id);
             let ok = result.result == LoginOutcome::Ok;
@@ -129,7 +140,11 @@ pub async fn poll_codex_logins(sessions: &CodexLoginSessions) -> Vec<(String, bo
 /// `[adapters.claude_code].command` と、そのアダプタの env（**プロバイダの env ではない**。ADR-0024 D6/D7）。
 fn claude_command_and_env(config: &Config) -> (String, Vec<(String, String)>) {
     let base = &config.adapters.claude_code;
-    let mut env: Vec<(String, String)> = base.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut env: Vec<(String, String)> = base
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     env.sort();
     (base.command.clone(), env)
 }
@@ -137,23 +152,32 @@ fn claude_command_and_env(config: &Config) -> (String, Vec<(String, String)>) {
 /// `[adapters.codex].command` と、そのアダプタの env（ADR-0025 D4/D5）。
 fn codex_command_and_env(config: &Config) -> (String, Vec<(String, String)>) {
     let base = &config.adapters.codex;
-    let mut env: Vec<(String, String)> = base.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut env: Vec<(String, String)> = base
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     env.sort();
     (base.command.clone(), env)
 }
 
 /// アカウントディレクトリを解決する。`id` が無効、`[accounts]` にそのアダプタの根が無い、ディレクトリが
 /// 無ければエラー（ADR-0025 D1）。
-fn account_dir(config: &Config, adapter: AccountAdapter, id: &str) -> Result<PathBuf, AccountAdminError> {
-    let accounts = config
-        .accounts
-        .as_ref()
-        .ok_or_else(|| AccountAdminError::Unavailable("the [accounts] section is not configured".to_string()))?;
+fn account_dir(
+    config: &Config,
+    adapter: AccountAdapter,
+    id: &str,
+) -> Result<PathBuf, AccountAdminError> {
+    let accounts = config.accounts.as_ref().ok_or_else(|| {
+        AccountAdminError::Unavailable("the [accounts] section is not configured".to_string())
+    })?;
     if !task_dispatch::valid_account_id(id) {
         return Err(AccountAdminError::NotFound);
     }
     let root = accounts.root_for(adapter).ok_or_else(|| {
-        AccountAdminError::Unavailable(format!("the [accounts] section has no root configured for adapter {adapter}"))
+        AccountAdminError::Unavailable(format!(
+            "the [accounts] section has no root configured for adapter {adapter}"
+        ))
     })?;
     let dir = root.join(id);
     if !dir.is_dir() {
@@ -192,13 +216,12 @@ pub async fn remove_account(
     }
     dispatcher.set_account_login_pending(adapter, id, false);
     // `account_dir` は `[accounts]` とそのアダプタの根の存在を既に確かめている。
-    let accounts = config
-        .accounts
-        .as_ref()
-        .ok_or_else(|| AccountAdminError::Unavailable("the [accounts] section is not configured".to_string()))?;
-    let root = accounts
-        .root_for(adapter)
-        .ok_or_else(|| AccountAdminError::Unavailable(format!("no root configured for adapter {adapter}")))?;
+    let accounts = config.accounts.as_ref().ok_or_else(|| {
+        AccountAdminError::Unavailable("the [accounts] section is not configured".to_string())
+    })?;
+    let root = accounts.root_for(adapter).ok_or_else(|| {
+        AccountAdminError::Unavailable(format!("no root configured for adapter {adapter}"))
+    })?;
     let removed_dir = root.join(".removed");
     // 移した先にも認証ファイルが残るので、アカウントのディレクトリと同じく本人だけが読める権限にする。
     {
@@ -206,11 +229,16 @@ pub async fn remove_account(
         match std::fs::DirBuilder::new().mode(0o700).create(&removed_dir) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(AccountAdminError::Unavailable(format!("failed to create .removed dir: {e}"))),
+            Err(e) => {
+                return Err(AccountAdminError::Unavailable(format!(
+                    "failed to create .removed dir: {e}"
+                )));
+            }
         }
     }
     let dest = removed_dir.join(format!("{id}-{}", unix_now()));
-    std::fs::rename(&dir, &dest).map_err(|e| AccountAdminError::Unavailable(format!("failed to move account dir: {e}")))?;
+    std::fs::rename(&dir, &dest)
+        .map_err(|e| AccountAdminError::Unavailable(format!("failed to move account dir: {e}")))?;
     dispatcher.remove_account_book_entry(adapter, id);
     Ok(())
 }
@@ -233,18 +261,40 @@ pub fn spawn_check(
     };
     match adapter {
         AccountAdapter::ClaudeCode => {
-            let check_model = config.accounts.as_ref().map(|a| a.check_model.clone()).unwrap_or_default();
+            let check_model = config
+                .accounts
+                .as_ref()
+                .map(|a| a.check_model.clone())
+                .unwrap_or_default();
             let (command, env) = claude_command_and_env(config);
             tokio::spawn(async move {
                 let check = check_account(&command, &dir, &check_model, CHECK_TIMEOUT, &env).await;
-                finish_check(adapter, id, check.result, check.detail, check.observation, events, reply).await;
+                finish_check(
+                    adapter,
+                    id,
+                    check.result,
+                    check.detail,
+                    check.observation,
+                    events,
+                    reply,
+                )
+                .await;
             });
         }
         AccountAdapter::Codex => {
             let (command, env) = codex_command_and_env(config);
             tokio::spawn(async move {
                 let check = check_account_codex(&command, &dir, CHECK_TIMEOUT, &env).await;
-                finish_check(adapter, id, check.result, check.detail, check.observation, events, reply).await;
+                finish_check(
+                    adapter,
+                    id,
+                    check.result,
+                    check.detail,
+                    check.observation,
+                    events,
+                    reply,
+                )
+                .await;
             });
         }
     }
@@ -260,9 +310,19 @@ async fn finish_check(
     reply: oneshot::Sender<Result<AccountCheckOutcome, AccountAdminError>>,
 ) {
     let result_name = account_check_result_name(&result).to_string();
-    let outcome = AccountCheckOutcome { result: map_check_result(result), detail: detail.clone(), observation: observation.clone() };
+    let outcome = AccountCheckOutcome {
+        result: map_check_result(result),
+        detail: detail.clone(),
+        observation: observation.clone(),
+    };
     let _ = events
-        .send(AccountAdminEvent::Checked { adapter, id, result: result_name, detail, observation })
+        .send(AccountAdminEvent::Checked {
+            adapter,
+            id,
+            result: result_name,
+            detail,
+            observation,
+        })
         .await;
     let _ = reply.send(Ok(outcome));
 }
@@ -307,15 +367,29 @@ pub fn spawn_login_start(
                         let expires_at_unix = unix_now() + LOGIN_EXPIRY.as_secs() as i64;
                         sessions.lock().await.insert(id.clone(), session);
                         let _ = events
-                            .send(AccountAdminEvent::LoginPending { adapter, id: id.clone(), pending: true })
+                            .send(AccountAdminEvent::LoginPending {
+                                adapter,
+                                id: id.clone(),
+                                pending: true,
+                            })
                             .await;
-                        let _ = reply.send(Ok(AccountLoginStartOutcome { url, expires_at_unix, user_code: None }));
+                        let _ = reply.send(Ok(AccountLoginStartOutcome {
+                            url,
+                            expires_at_unix,
+                            user_code: None,
+                        }));
                     }
                     Err(e) => {
                         // B2: 古いセッションを止めた後に新しい start_login 自体が失敗したら、login_pending を false に
                         // 戻す（そのままだと `sessions` には無いのに GUI には「進行中」が残り続ける）。
                         if had_old {
-                            let _ = events.send(AccountAdminEvent::LoginPending { adapter, id: id.clone(), pending: false }).await;
+                            let _ = events
+                                .send(AccountAdminEvent::LoginPending {
+                                    adapter,
+                                    id: id.clone(),
+                                    pending: false,
+                                })
+                                .await;
                         }
                         // D5: URL・認可コードは失敗時もログには出さない（アカウント id と操作名だけ）。
                         let _ = reply.send(Err(AccountAdminError::LoginFailed(e.to_string())));
@@ -343,13 +417,27 @@ pub fn spawn_login_start(
                         let expires_at_unix = unix_now() + LOGIN_EXPIRY_CODEX.as_secs() as i64;
                         codex_sessions.lock().await.insert(id.clone(), session);
                         let _ = events
-                            .send(AccountAdminEvent::LoginPending { adapter, id: id.clone(), pending: true })
+                            .send(AccountAdminEvent::LoginPending {
+                                adapter,
+                                id: id.clone(),
+                                pending: true,
+                            })
                             .await;
-                        let _ = reply.send(Ok(AccountLoginStartOutcome { url, expires_at_unix, user_code: Some(user_code) }));
+                        let _ = reply.send(Ok(AccountLoginStartOutcome {
+                            url,
+                            expires_at_unix,
+                            user_code: Some(user_code),
+                        }));
                     }
                     Err(e) => {
                         if had_old {
-                            let _ = events.send(AccountAdminEvent::LoginPending { adapter, id: id.clone(), pending: false }).await;
+                            let _ = events
+                                .send(AccountAdminEvent::LoginPending {
+                                    adapter,
+                                    id: id.clone(),
+                                    pending: false,
+                                })
+                                .await;
                         }
                         let _ = reply.send(Err(AccountAdminError::LoginFailed(e.to_string())));
                     }
@@ -376,7 +464,11 @@ pub fn spawn_login_code(
         };
         let result = session.submit_code(&code, LOGIN_CODE_WAIT).await;
         let _ = events
-            .send(AccountAdminEvent::LoginPending { adapter: AccountAdapter::ClaudeCode, id, pending: false })
+            .send(AccountAdminEvent::LoginPending {
+                adapter: AccountAdapter::ClaudeCode,
+                id,
+                pending: false,
+            })
             .await;
         let _ = reply.send(Ok(AccountLoginCodeOutcome {
             ok: result.result == LoginOutcome::Ok,
@@ -406,7 +498,13 @@ pub fn spawn_login_cancel(
             }),
         };
         if cancelled {
-            let _ = events.send(AccountAdminEvent::LoginPending { adapter, id, pending: false }).await;
+            let _ = events
+                .send(AccountAdminEvent::LoginPending {
+                    adapter,
+                    id,
+                    pending: false,
+                })
+                .await;
         }
         let _ = reply.send(Ok(()));
     });
@@ -479,12 +577,23 @@ mod tests {
         let config = config_with_accounts(acct, command);
         let (tx, mut rx) = mpsc::channel(4);
         let (reply_tx, reply_rx) = oneshot::channel();
-        spawn_check(&config, AccountAdapter::ClaudeCode, "a".to_string(), tx, reply_tx);
+        spawn_check(
+            &config,
+            AccountAdapter::ClaudeCode,
+            "a".to_string(),
+            tx,
+            reply_tx,
+        );
         let outcome = reply_rx.await.unwrap().unwrap();
         assert_eq!(outcome.result, task_api::ProviderCheckResult::Ok);
         let event = rx.recv().await.unwrap();
         match event {
-            AccountAdminEvent::Checked { adapter, id, result, .. } => {
+            AccountAdminEvent::Checked {
+                adapter,
+                id,
+                result,
+                ..
+            } => {
                 assert_eq!(adapter, AccountAdapter::ClaudeCode);
                 assert_eq!(id, "a");
                 assert_eq!(result, "ok");
@@ -501,8 +610,17 @@ mod tests {
         let config = config_with_accounts(acct, "claude".into());
         let (tx, _rx) = mpsc::channel(4);
         let (reply_tx, reply_rx) = oneshot::channel();
-        spawn_check(&config, AccountAdapter::ClaudeCode, "missing".to_string(), tx, reply_tx);
-        assert!(matches!(reply_rx.await.unwrap(), Err(AccountAdminError::NotFound)));
+        spawn_check(
+            &config,
+            AccountAdapter::ClaudeCode,
+            "missing".to_string(),
+            tx,
+            reply_tx,
+        );
+        assert!(matches!(
+            reply_rx.await.unwrap(),
+            Err(AccountAdminError::NotFound)
+        ));
     }
 
     /// ADR-0025 D4: codex の確認は `[accounts].check_model` を使わず、`check_account_codex` に委譲する。
@@ -515,12 +633,23 @@ mod tests {
         let config = config_with_codex_accounts(acct, command);
         let (tx, mut rx) = mpsc::channel(4);
         let (reply_tx, reply_rx) = oneshot::channel();
-        spawn_check(&config, AccountAdapter::Codex, "a".to_string(), tx, reply_tx);
+        spawn_check(
+            &config,
+            AccountAdapter::Codex,
+            "a".to_string(),
+            tx,
+            reply_tx,
+        );
         let outcome = reply_rx.await.unwrap().unwrap();
         assert_eq!(outcome.result, task_api::ProviderCheckResult::Ok);
         let event = rx.recv().await.unwrap();
         match event {
-            AccountAdminEvent::Checked { adapter, id, result, .. } => {
+            AccountAdminEvent::Checked {
+                adapter,
+                id,
+                result,
+                ..
+            } => {
                 assert_eq!(adapter, AccountAdapter::Codex);
                 assert_eq!(id, "a");
                 assert_eq!(result, "ok");
@@ -542,7 +671,13 @@ mod tests {
         let config = config_with_codex_accounts(acct, command);
         let (tx, _rx) = mpsc::channel(4);
         let (reply_tx, reply_rx) = oneshot::channel();
-        spawn_check(&config, AccountAdapter::Codex, "a".to_string(), tx, reply_tx);
+        spawn_check(
+            &config,
+            AccountAdapter::Codex,
+            "a".to_string(),
+            tx,
+            reply_tx,
+        );
         let outcome = reply_rx.await.unwrap().unwrap();
         assert_eq!(outcome.result, task_api::ProviderCheckResult::AuthFailed);
     }
@@ -582,25 +717,53 @@ exit 1
         let started = reply_rx.await.unwrap().unwrap();
         assert_eq!(started.url, "https://claude.com/cai/oauth/authorize?x=1");
         assert_eq!(started.user_code, None);
-        assert!(matches!(rx.recv().await, Some(AccountAdminEvent::LoginPending { pending: true, .. })));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AccountAdminEvent::LoginPending { pending: true, .. })
+        ));
         assert!(sessions.lock().await.contains_key("a"));
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        spawn_login_code(sessions.clone(), "a".to_string(), "good-code".to_string(), tx.clone(), reply_tx);
+        spawn_login_code(
+            sessions.clone(),
+            "a".to_string(),
+            "good-code".to_string(),
+            tx.clone(),
+            reply_tx,
+        );
         let result = reply_rx.await.unwrap().unwrap();
         assert!(result.ok);
-        assert!(matches!(rx.recv().await, Some(AccountAdminEvent::LoginPending { pending: false, .. })));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AccountAdminEvent::LoginPending { pending: false, .. })
+        ));
         assert!(acct.join("a").join(".credentials.json").is_file());
         assert!(!sessions.lock().await.contains_key("a"));
 
         // 進行中でないときの login/code は LoginNotStarted。
         let (reply_tx, reply_rx) = oneshot::channel();
-        spawn_login_code(sessions.clone(), "a".to_string(), "x".to_string(), tx.clone(), reply_tx);
-        assert!(matches!(reply_rx.await.unwrap(), Err(AccountAdminError::LoginNotStarted)));
+        spawn_login_code(
+            sessions.clone(),
+            "a".to_string(),
+            "x".to_string(),
+            tx.clone(),
+            reply_tx,
+        );
+        assert!(matches!(
+            reply_rx.await.unwrap(),
+            Err(AccountAdminError::LoginNotStarted)
+        ));
 
         // cancel は進行中でなくても成功する（no-op）。
         let (reply_tx, reply_rx) = oneshot::channel();
-        spawn_login_cancel(sessions.clone(), codex_sessions.clone(), AccountAdapter::ClaudeCode, "a".to_string(), tx, reply_tx);
+        spawn_login_cancel(
+            sessions.clone(),
+            codex_sessions.clone(),
+            AccountAdapter::ClaudeCode,
+            "a".to_string(),
+            tx,
+            reply_tx,
+        );
         assert!(reply_rx.await.unwrap().is_ok());
     }
 
@@ -639,7 +802,14 @@ exit 0
         let started = reply_rx.await.unwrap().unwrap();
         assert_eq!(started.url, "https://auth.openai.com/codex/device");
         assert_eq!(started.user_code.as_deref(), Some("ABCD-EFGHI"));
-        assert!(matches!(rx.recv().await, Some(AccountAdminEvent::LoginPending { adapter: AccountAdapter::Codex, pending: true, .. })));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AccountAdminEvent::LoginPending {
+                adapter: AccountAdapter::Codex,
+                pending: true,
+                ..
+            })
+        ));
         assert!(codex_sessions.lock().await.contains_key("a"));
 
         for _ in 0..100 {
@@ -674,9 +844,20 @@ sleep 30
         let (tx, mut rx) = mpsc::channel(8);
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        spawn_login_start(&config, sessions, codex_sessions.clone(), AccountAdapter::Codex, "a".to_string(), tx, reply_tx);
+        spawn_login_start(
+            &config,
+            sessions,
+            codex_sessions.clone(),
+            AccountAdapter::Codex,
+            "a".to_string(),
+            tx,
+            reply_tx,
+        );
         reply_rx.await.unwrap().unwrap();
-        assert!(matches!(rx.recv().await, Some(AccountAdminEvent::LoginPending { pending: true, .. })));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AccountAdminEvent::LoginPending { pending: true, .. })
+        ));
         assert!(codex_sessions.lock().await.contains_key("a"));
 
         let expired = expire_stale_codex_logins(&codex_sessions, Duration::from_secs(600)).await;
@@ -706,9 +887,20 @@ sleep 30
         let (tx, mut rx) = mpsc::channel(8);
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        spawn_login_start(&config, sessions.clone(), codex_sessions, AccountAdapter::ClaudeCode, "a".to_string(), tx, reply_tx);
+        spawn_login_start(
+            &config,
+            sessions.clone(),
+            codex_sessions,
+            AccountAdapter::ClaudeCode,
+            "a".to_string(),
+            tx,
+            reply_tx,
+        );
         reply_rx.await.unwrap().unwrap();
-        assert!(matches!(rx.recv().await, Some(AccountAdminEvent::LoginPending { pending: true, .. })));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AccountAdminEvent::LoginPending { pending: true, .. })
+        ));
         assert!(sessions.lock().await.contains_key("a"));
 
         // 期限内なら何も打ち切らない。
@@ -741,7 +933,14 @@ sleep 30
         // 既存の観測値がある帳簿を用意しておき、削除後に消えることを確かめる。
         {
             let mut book = task_dispatch::AccountBook::load(&acct.join(".celeris-usage.json"));
-            book.record_check("a", task_dispatch::AccountCheckRecord { at: 1, result: "ok".into(), detail: None });
+            book.record_check(
+                "a",
+                task_dispatch::AccountCheckRecord {
+                    at: 1,
+                    result: "ok".into(),
+                    detail: None,
+                },
+            );
             book.save().unwrap();
         }
         let config = config_for_dispatcher(tmp.path(), acct.clone());
@@ -768,20 +967,43 @@ sleep 30
             reply_tx,
         );
         reply_rx.await.unwrap().unwrap();
-        assert!(matches!(rx.recv().await, Some(AccountAdminEvent::LoginPending { pending: true, .. })));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AccountAdminEvent::LoginPending { pending: true, .. })
+        ));
 
-        let result = remove_account(&config, &mut dispatcher, &sessions, &codex_sessions, AccountAdapter::ClaudeCode, "a").await;
+        let result = remove_account(
+            &config,
+            &mut dispatcher,
+            &sessions,
+            &codex_sessions,
+            AccountAdapter::ClaudeCode,
+            "a",
+        )
+        .await;
         assert!(result.is_ok(), "{result:?}");
         assert!(!acct.join("a").exists());
         assert!(!sessions.lock().await.contains_key("a"));
         let removed: Vec<_> = std::fs::read_dir(acct.join(".removed")).unwrap().collect();
         assert_eq!(removed.len(), 1);
         let moved = removed.into_iter().next().unwrap().unwrap().path();
-        assert!(moved.file_name().unwrap().to_string_lossy().starts_with("a-"));
-        assert!(moved.join(".credentials.json").is_file(), "credentials are not deleted, just moved");
+        assert!(
+            moved
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("a-")
+        );
+        assert!(
+            moved.join(".credentials.json").is_file(),
+            "credentials are not deleted, just moved"
+        );
 
         let reloaded = task_dispatch::AccountBook::load(&acct.join(".celeris-usage.json"));
-        assert!(reloaded.state("a").is_none(), "account book entry should be cleared");
+        assert!(
+            reloaded.state("a").is_none(),
+            "account book entry should be cleared"
+        );
     }
 
     #[tokio::test]
@@ -793,7 +1015,15 @@ sleep 30
         let mut dispatcher = crate::build_dispatcher(&config, Default::default()).unwrap();
         let sessions = new_sessions();
         let codex_sessions = new_codex_sessions();
-        let result = remove_account(&config, &mut dispatcher, &sessions, &codex_sessions, AccountAdapter::ClaudeCode, "missing").await;
+        let result = remove_account(
+            &config,
+            &mut dispatcher,
+            &sessions,
+            &codex_sessions,
+            AccountAdapter::ClaudeCode,
+            "missing",
+        )
+        .await;
         assert!(matches!(result, Err(AccountAdminError::NotFound)));
     }
 
@@ -810,10 +1040,20 @@ sleep 30
         let mut dispatcher = crate::build_dispatcher(&config, Default::default()).unwrap();
         let sessions = new_sessions();
         let codex_sessions = new_codex_sessions();
-        let result = remove_account(&config, &mut dispatcher, &sessions, &codex_sessions, AccountAdapter::Codex, "a").await;
+        let result = remove_account(
+            &config,
+            &mut dispatcher,
+            &sessions,
+            &codex_sessions,
+            AccountAdapter::Codex,
+            "a",
+        )
+        .await;
         assert!(result.is_ok(), "{result:?}");
         assert!(!codex_dir.join("a").exists());
-        let removed: Vec<_> = std::fs::read_dir(codex_dir.join(".removed")).unwrap().collect();
+        let removed: Vec<_> = std::fs::read_dir(codex_dir.join(".removed"))
+            .unwrap()
+            .collect();
         assert_eq!(removed.len(), 1);
     }
 }

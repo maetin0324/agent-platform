@@ -12,8 +12,8 @@
 //! I/O はストアの読み書きだけで、LLM は呼ばない（DESIGN 原則 1）。
 
 use task_core::{
-    GenreSpec, Message, Milestone, MilestoneId, MilestoneStatus, OrgKind, Project, ProjectStatus, RoleSpec, Task,
-    TaskKind, TaskStore, Tier, WorkspaceSpec,
+    GenreSpec, Message, Milestone, MilestoneId, MilestoneStatus, OrgKind, Project, ProjectStatus,
+    RoleSpec, Task, TaskKind, TaskStore, Tier, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -50,15 +50,30 @@ pub fn start(
     genres: &[GenreSpec],
     now: OffsetDateTime,
 ) -> Result<StartedPlan, OpsError> {
-    let Some(secretary) = store.org_list()?.into_iter().find(|n| n.kind == OrgKind::Secretary) else {
-        return Err(OpsError::Validation("no secretary is configured".to_string()));
+    let Some(secretary) = store
+        .org_list()?
+        .into_iter()
+        .find(|n| n.kind == OrgKind::Secretary)
+    else {
+        return Err(OpsError::Validation(
+            "no secretary is configured".to_string(),
+        ));
     };
 
     let milestones = store.milestone_list(project.id)?;
     let target: Option<Milestone> = match milestone_id {
-        Some(id) => Some(milestones.iter().find(|m| m.id == id).cloned().ok_or_else(|| {
-            OpsError::Validation(format!("milestone {id} does not belong to project {}", project.id))
-        })?),
+        Some(id) => Some(
+            milestones
+                .iter()
+                .find(|m| m.id == id)
+                .cloned()
+                .ok_or_else(|| {
+                    OpsError::Validation(format!(
+                        "milestone {id} does not belong to project {}",
+                        project.id
+                    ))
+                })?,
+        ),
         None => None,
     };
     // SPEC §7 のアジャイル: 途中目標を明示しなければ、`approved` / `in_progress` のものを文脈として渡す
@@ -67,7 +82,12 @@ pub fn start(
         Some(m) => vec![m.clone()],
         None => milestones
             .into_iter()
-            .filter(|m| matches!(m.status, MilestoneStatus::Approved | MilestoneStatus::InProgress))
+            .filter(|m| {
+                matches!(
+                    m.status,
+                    MilestoneStatus::Approved | MilestoneStatus::InProgress
+                )
+            })
             .collect(),
     };
 
@@ -78,7 +98,10 @@ pub fn start(
     // `Local` の `~` はここで `$HOME` に展開する（DB には展開済みの絶対パスが入っている想定だが、
     // 直接 DB を書いた案件でも同じ結果になるように、入口でもう一度通す）。
     let home = task_core::home_dir();
-    let (plan_workspace, plan_cluster) = match project.workspace.as_ref().map(|w| w.with_home_expanded(home.as_deref()))
+    let (plan_workspace, plan_cluster) = match project
+        .workspace
+        .as_ref()
+        .map(|w| w.with_home_expanded(home.as_deref()))
     {
         Some(WorkspaceSpec::Local { path, .. }) => (Some(path), None),
         Some(WorkspaceSpec::Remote { cluster, path }) => (Some(path), Some(cluster)),
@@ -113,6 +136,10 @@ pub fn start(
         // ADR-0044 D3: 裏方の計画タスクにラベル・種類は付けない（`create_support_task` が `ready` にする）。
         labels: Vec::new(),
         category: None,
+        // ADR-0046 D2 / D4（Phase 59）: 計画 run 自身に能力タグは要らない。進め方は子ごとに
+        // 計画が決める（`NewTask.mode`）ので、ここは既定のまま。
+        skills: Vec::new(),
+        mode: None,
         status: None,
     };
     let task = add::create_support_task(store, spec, roles, genres, now)?;
@@ -139,9 +166,18 @@ fn truncate_title(goal: &str, max_chars: usize) -> String {
 
 /// 決定的な組み立て（LLM は呼ばない）。案件の `request`、途中目標、人の一言、秘書との直近のやり取りを
 /// 1 つの文字列にまとめる。プランナー（秘書の計画の run）へそのまま `objective` として渡される。
-pub fn compose_goal(project: &Project, milestones: &[Milestone], note: Option<&str>, history: &[Message]) -> String {
+pub fn compose_goal(
+    project: &Project,
+    milestones: &[Milestone],
+    note: Option<&str>,
+    history: &[Message],
+) -> String {
     let mut out = String::new();
-    out.push_str(&format!("案件: {}\n\n依頼:\n{}\n", project.title, project.request.trim()));
+    out.push_str(&format!(
+        "案件: {}\n\n依頼:\n{}\n",
+        project.title,
+        project.request.trim()
+    ));
 
     if !milestones.is_empty() {
         out.push_str("\n途中目標:\n");
@@ -150,7 +186,11 @@ pub fn compose_goal(project: &Project, milestones: &[Milestone], note: Option<&s
             if description.is_empty() {
                 out.push_str(&format!("- [{}] {}\n", m.status.as_str(), m.title));
             } else {
-                out.push_str(&format!("- [{}] {}: {description}\n", m.status.as_str(), m.title));
+                out.push_str(&format!(
+                    "- [{}] {}: {description}\n",
+                    m.status.as_str(),
+                    m.title
+                ));
             }
         }
     }
@@ -181,6 +221,7 @@ mod tests {
     fn node(id: &str, parent: Option<&str>, kind: OrgKind, genre: Option<&str>) -> OrgNode {
         let t = now();
         OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: id.into(),
@@ -194,7 +235,14 @@ mod tests {
     }
 
     fn seed_org(store: &SqliteStore) {
-        store.org_upsert(&node("secretary", None, OrgKind::Secretary, Some("secretary"))).expect("secretary");
+        store
+            .org_upsert(&node(
+                "secretary",
+                None,
+                OrgKind::Secretary,
+                Some("secretary"),
+            ))
+            .expect("secretary");
     }
 
     fn sample_project(status: ProjectStatus) -> Project {
@@ -249,7 +297,12 @@ mod tests {
                 created_at: now(),
             },
         ];
-        let goal = compose_goal(&project, std::slice::from_ref(&milestone), Some("急がなくてよい"), &history);
+        let goal = compose_goal(
+            &project,
+            std::slice::from_ref(&milestone),
+            Some("急がなくてよい"),
+            &history,
+        );
         assert!(goal.contains(&project.request));
         assert!(goal.contains("[approved] 隣接領域の調査: 候補 3〜5 件"));
         assert!(goal.contains("急がなくてよい"));
@@ -270,9 +323,14 @@ mod tests {
         let project = sample_project(ProjectStatus::Proposed);
         store.project_create(&project).expect("create project");
 
-        let started = start(&store, &project, None, Some("よろしく"), &[], &[], now()).expect("start");
+        let started =
+            start(&store, &project, None, Some("よろしく"), &[], &[], now()).expect("start");
         assert_eq!(started.task.kind, TaskKind::Plan);
-        assert_eq!(started.task.status, task_core::Status::Ready, "その場で走らせる");
+        assert_eq!(
+            started.task.status,
+            task_core::Status::Ready,
+            "その場で走らせる"
+        );
         assert_eq!(started.task.project_id, Some(project.id));
         assert_eq!(started.task.milestone_id, None);
         assert_eq!(started.task.assignee.as_deref(), Some("secretary"));
@@ -281,7 +339,11 @@ mod tests {
         assert!(started.task.acceptance.is_empty());
 
         let updated = store.project_get(project.id).expect("get").expect("some");
-        assert_eq!(updated.status, ProjectStatus::Active, "proposed から active になる");
+        assert_eq!(
+            updated.status,
+            ProjectStatus::Active,
+            "proposed から active になる"
+        );
     }
 
     #[test]
@@ -291,10 +353,16 @@ mod tests {
         let project = sample_project(ProjectStatus::Active);
         store.project_create(&project).expect("create project");
         let milestone = store
-            .milestone_create(project.id, "隣接領域の調査", "候補 3〜5 件", MilestoneStatus::Approved)
+            .milestone_create(
+                project.id,
+                "隣接領域の調査",
+                "候補 3〜5 件",
+                MilestoneStatus::Approved,
+            )
             .expect("create milestone");
 
-        let started = start(&store, &project, Some(milestone.id), None, &[], &[], now()).expect("start");
+        let started =
+            start(&store, &project, Some(milestone.id), None, &[], &[], now()).expect("start");
         assert_eq!(started.task.milestone_id, Some(milestone.id));
         assert!(started.task.objective.contains("隣接領域の調査"));
 
@@ -308,24 +376,41 @@ mod tests {
         seed_org(&store);
         let project = sample_project(ProjectStatus::Active);
         store.project_create(&project).expect("create project");
-        store.milestone_create(project.id, "提案中", "", MilestoneStatus::Proposed).expect("create");
-        let approved = store.milestone_create(project.id, "承認済み", "", MilestoneStatus::Approved).expect("create");
-        let reached = store.milestone_create(project.id, "達成済み", "", MilestoneStatus::Reached).expect("create");
+        store
+            .milestone_create(project.id, "提案中", "", MilestoneStatus::Proposed)
+            .expect("create");
+        let approved = store
+            .milestone_create(project.id, "承認済み", "", MilestoneStatus::Approved)
+            .expect("create");
+        let reached = store
+            .milestone_create(project.id, "達成済み", "", MilestoneStatus::Reached)
+            .expect("create");
 
         let started = start(&store, &project, None, None, &[], &[], now()).expect("start");
         assert!(started.task.objective.contains("承認済み"));
         assert!(!started.task.objective.contains("提案中"));
         assert!(!started.task.objective.contains("達成済み"));
-        assert_eq!(started.task.milestone_id, None, "明示しなければタスク自体には特定の途中目標を付けない");
+        assert_eq!(
+            started.task.milestone_id, None,
+            "明示しなければタスク自体には特定の途中目標を付けない"
+        );
 
         // 明示していないので、途中目標の状態は変わらない。
         let milestones = store.milestone_list(project.id).expect("list");
         assert_eq!(
-            milestones.iter().find(|m| m.id == approved.id).expect("approved").status,
+            milestones
+                .iter()
+                .find(|m| m.id == approved.id)
+                .expect("approved")
+                .status,
             MilestoneStatus::Approved
         );
         assert_eq!(
-            milestones.iter().find(|m| m.id == reached.id).expect("reached").status,
+            milestones
+                .iter()
+                .find(|m| m.id == reached.id)
+                .expect("reached")
+                .status,
             MilestoneStatus::Reached
         );
     }
@@ -351,7 +436,11 @@ mod tests {
                 .expect("append");
         }
         let started = start(&store, &project, None, None, &[], &[], now()).expect("start");
-        assert!(!started.task.objective.contains("message 4"), "{}", started.task.objective);
+        assert!(
+            !started.task.objective.contains("message 4"),
+            "{}",
+            started.task.objective
+        );
         assert!(started.task.objective.contains("message 5"));
         assert!(started.task.objective.contains("message 24"));
     }
@@ -364,10 +453,24 @@ mod tests {
         store.project_create(&project).expect("create project");
         let other = sample_project(ProjectStatus::Active);
         store.project_create(&other).expect("create project");
-        let foreign_milestone = store.milestone_create(other.id, "別案件", "", MilestoneStatus::Approved).expect("create");
+        let foreign_milestone = store
+            .milestone_create(other.id, "別案件", "", MilestoneStatus::Approved)
+            .expect("create");
 
-        let err = start(&store, &project, Some(foreign_milestone.id), None, &[], &[], now()).unwrap_err();
-        assert!(err.to_string().contains("does not belong to project"), "{err}");
+        let err = start(
+            &store,
+            &project,
+            Some(foreign_milestone.id),
+            None,
+            &[],
+            &[],
+            now(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("does not belong to project"),
+            "{err}"
+        );
 
         let no_secretary = SqliteStore::open_in_memory().expect("open");
         let err = start(&no_secretary, &project, None, None, &[], &[], now()).unwrap_err();
@@ -387,18 +490,23 @@ mod tests {
         assert_eq!(
             started.task.workspace,
             WorkspaceSpec::Local {
-                path: std::path::PathBuf::from(started.task.id.to_string()), mode: None
+                path: std::path::PathBuf::from(started.task.id.to_string()),
+                mode: None
             },
             "作業場所を決めていない案件は従来どおり"
         );
 
         let mut local = sample_project(ProjectStatus::Active);
         local.workspace = Some(WorkspaceSpec::Local {
-            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
+            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            mode: None,
         });
         store.project_create(&local).expect("create project");
         let started = start(&store, &local, None, None, &[], &[], now()).expect("start");
-        assert_eq!(started.task.workspace, local.workspace.clone().expect("some"));
+        assert_eq!(
+            started.task.workspace,
+            local.workspace.clone().expect("some")
+        );
 
         let mut remote = sample_project(ProjectStatus::Active);
         remote.workspace = Some(WorkspaceSpec::Remote {
@@ -407,6 +515,9 @@ mod tests {
         });
         store.project_create(&remote).expect("create project");
         let started = start(&store, &remote, None, None, &[], &[], now()).expect("start");
-        assert_eq!(started.task.workspace, remote.workspace.clone().expect("some"));
+        assert_eq!(
+            started.task.workspace,
+            remote.workspace.clone().expect("some")
+        );
     }
 }

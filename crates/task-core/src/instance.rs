@@ -163,7 +163,9 @@ impl DaemonInstance {
 pub(crate) const SELECT_INSTANCE: &str = "SELECT instance_id, \"release\", pid, role, started_at, heartbeat_at, \
      handoff_requested_at, drained_at FROM daemon_instances";
 
-pub(crate) fn row_to_instance(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<DaemonInstance, StoreError>> {
+pub(crate) fn row_to_instance(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<DaemonInstance, StoreError>> {
     let instance_id: String = row.get(0)?;
     let release: String = row.get(1)?;
     let pid: i64 = row.get(2)?;
@@ -185,7 +187,10 @@ pub(crate) fn row_to_instance(row: &rusqlite::Row<'_>) -> rusqlite::Result<Resul
             role,
             started_at: parse_rfc3339(&started_at)?,
             heartbeat_at: parse_rfc3339(&heartbeat_at)?,
-            handoff_requested_at: handoff_requested_at.as_deref().map(parse_rfc3339).transpose()?,
+            handoff_requested_at: handoff_requested_at
+                .as_deref()
+                .map(parse_rfc3339)
+                .transpose()?,
             drained_at: drained_at.as_deref().map(parse_rfc3339).transpose()?,
         })
     })())
@@ -251,7 +256,9 @@ mod store_tests {
         let store = SqliteStore::open_in_memory().expect("open");
         assert!(store.instance_list().expect("list").is_empty());
 
-        store.instance_register(&row("old", "aaaaaaaaaaaa", InstanceRole::Active, 0)).expect("register");
+        store
+            .instance_register(&row("old", "aaaaaaaaaaaa", InstanceRole::Active, 0))
+            .expect("register");
         let listed = store.instance_list().expect("list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].release, "aaaaaaaaaaaa");
@@ -260,20 +267,45 @@ mod store_tests {
         assert_eq!(listed[0].handoff_requested_at, None);
 
         assert!(store.instance_heartbeat("old", at(5)).expect("heartbeat"));
-        assert!(!store.instance_heartbeat("nobody", at(5)).expect("heartbeat"));
+        assert!(
+            !store
+                .instance_heartbeat("nobody", at(5))
+                .expect("heartbeat")
+        );
         assert_eq!(store.instance_list().expect("list")[0].heartbeat_at, at(5));
 
         // 引き継ぎの要求は 1 回だけ（2 回目は上書きしない）。
-        assert!(store.instance_request_handoff("old", at(6)).expect("handoff"));
-        assert!(!store.instance_request_handoff("old", at(9)).expect("handoff"));
-        assert_eq!(store.instance_list().expect("list")[0].handoff_requested_at, Some(at(6)));
+        assert!(
+            store
+                .instance_request_handoff("old", at(6))
+                .expect("handoff")
+        );
+        assert!(
+            !store
+                .instance_request_handoff("old", at(9))
+                .expect("handoff")
+        );
+        assert_eq!(
+            store.instance_list().expect("list")[0].handoff_requested_at,
+            Some(at(6))
+        );
 
-        assert!(store.instance_set_role("old", InstanceRole::Draining, at(7)).expect("role"));
+        assert!(
+            store
+                .instance_set_role("old", InstanceRole::Draining, at(7))
+                .expect("role")
+        );
         let after = &store.instance_list().expect("list")[0];
-        assert_eq!((after.role, after.heartbeat_at), (InstanceRole::Draining, at(7)));
+        assert_eq!(
+            (after.role, after.heartbeat_at),
+            (InstanceRole::Draining, at(7))
+        );
 
         assert!(store.instance_mark_drained("old", at(8)).expect("drained"));
-        assert_eq!(store.instance_list().expect("list")[0].drained_at, Some(at(8)));
+        assert_eq!(
+            store.instance_list().expect("list")[0].drained_at,
+            Some(at(8))
+        );
         assert!(store.instance_delete("old").expect("delete"));
         assert!(!store.instance_delete("old").expect("delete"));
         assert!(store.instance_list().expect("list").is_empty());
@@ -288,18 +320,34 @@ mod store_tests {
         first.handoff_requested_at = Some(at(1));
         first.drained_at = Some(at(2));
         store.instance_register(&first).expect("register");
-        assert_eq!(store.instance_list().expect("list")[0].drained_at, Some(at(2)));
+        assert_eq!(
+            store.instance_list().expect("list")[0].drained_at,
+            Some(at(2))
+        );
 
         let mut again = row("a", "r2", InstanceRole::Standby, 3);
         again.started_at = at(10);
         store.instance_register(&again).expect("register");
         let listed = store.instance_list().expect("list");
         assert_eq!(listed.len(), 1);
-        assert_eq!((listed[0].release.as_str(), listed[0].role), ("r2", InstanceRole::Standby));
-        assert_eq!((listed[0].handoff_requested_at, listed[0].drained_at), (None, None));
+        assert_eq!(
+            (listed[0].release.as_str(), listed[0].role),
+            ("r2", InstanceRole::Standby)
+        );
+        assert_eq!(
+            (listed[0].handoff_requested_at, listed[0].drained_at),
+            (None, None)
+        );
 
-        store.instance_register(&row("b", "r3", InstanceRole::Active, 0)).expect("register");
-        let ids: Vec<String> = store.instance_list().expect("list").into_iter().map(|i| i.instance_id).collect();
+        store
+            .instance_register(&row("b", "r3", InstanceRole::Active, 0))
+            .expect("register");
+        let ids: Vec<String> = store
+            .instance_list()
+            .expect("list")
+            .into_iter()
+            .map(|i| i.instance_id)
+            .collect();
         assert_eq!(ids, ["b", "a"], "started_at が古い方が先");
     }
 
@@ -307,18 +355,37 @@ mod store_tests {
     #[test]
     fn delete_stale_removes_drained_and_dead_rows_but_never_keep() {
         let store = SqliteStore::open_in_memory().expect("open");
-        store.instance_register(&row("me", "new", InstanceRole::Active, 100)).expect("register");
-        store.instance_register(&row("dead", "old", InstanceRole::Active, 0)).expect("register");
-        store.instance_register(&row("live", "other", InstanceRole::Standby, 100)).expect("register");
-        store.instance_register(&row("done", "old", InstanceRole::Draining, 100)).expect("register");
-        store.instance_mark_drained("done", at(100)).expect("drained");
+        store
+            .instance_register(&row("me", "new", InstanceRole::Active, 100))
+            .expect("register");
+        store
+            .instance_register(&row("dead", "old", InstanceRole::Active, 0))
+            .expect("register");
+        store
+            .instance_register(&row("live", "other", InstanceRole::Standby, 100))
+            .expect("register");
+        store
+            .instance_register(&row("done", "old", InstanceRole::Draining, 100))
+            .expect("register");
+        store
+            .instance_mark_drained("done", at(100))
+            .expect("drained");
         // 自分の行が古くても消えない。
         store.instance_heartbeat("me", at(0)).expect("heartbeat");
 
         let removed = store.instance_delete_stale("me", at(50)).expect("stale");
         assert_eq!(removed, ["dead", "done"]);
-        let ids: Vec<String> = store.instance_list().expect("list").into_iter().map(|i| i.instance_id).collect();
-        assert_eq!(ids, ["live", "me"], "started_at が同じなら instance_id 昇順");
+        let ids: Vec<String> = store
+            .instance_list()
+            .expect("list")
+            .into_iter()
+            .map(|i| i.instance_id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["live", "me"],
+            "started_at が同じなら instance_id 昇順"
+        );
     }
 
     /// `is_fresh` は `now - heartbeat_at < freshness`（未来の heartbeat も「新しい」）。
@@ -336,10 +403,18 @@ mod store_tests {
     #[test]
     fn the_role_column_rejects_unknown_spellings() {
         let store = SqliteStore::open_in_memory().expect("open");
-        store.instance_register(&row("a", "r", InstanceRole::Verify, 0)).expect("register");
-        assert_eq!(store.instance_list().expect("list")[0].role, InstanceRole::Verify);
+        store
+            .instance_register(&row("a", "r", InstanceRole::Verify, 0))
+            .expect("register");
+        assert_eq!(
+            store.instance_list().expect("list")[0].role,
+            InstanceRole::Verify
+        );
         let conn = store.lock().expect("lock");
-        let err = conn.execute("UPDATE daemon_instances SET role = 'nonsense' WHERE instance_id = 'a'", []);
+        let err = conn.execute(
+            "UPDATE daemon_instances SET role = 'nonsense' WHERE instance_id = 'a'",
+            [],
+        );
         assert!(err.is_err(), "CHECK(role IN (...)) が効いている");
     }
 }

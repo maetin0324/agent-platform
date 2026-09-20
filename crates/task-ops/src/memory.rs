@@ -16,7 +16,9 @@ pub fn notes_path(dir: &Path, node_id: &str) -> PathBuf {
 
 /// `<dir>/<node_id>/projects/<project_id>.md`。
 pub fn project_path(dir: &Path, node_id: &str, project_id: &str) -> PathBuf {
-    dir.join(node_id).join("projects").join(format!("{project_id}.md"))
+    dir.join(node_id)
+        .join("projects")
+        .join(format!("{project_id}.md"))
 }
 
 /// ファイルの全文を読む（無ければ空文字列。読めなくても呼び出し側は止めない）。
@@ -65,7 +67,10 @@ mod tests {
     #[test]
     fn paths_match_the_documented_layout() {
         let dir = PathBuf::from("/var/lib/celeris/memory");
-        assert_eq!(notes_path(&dir, "secretary"), dir.join("secretary/notes.md"));
+        assert_eq!(
+            notes_path(&dir, "secretary"),
+            dir.join("secretary/notes.md")
+        );
         assert_eq!(
             project_path(&dir, "secretary", "P1"),
             dir.join("secretary/projects/P1.md")
@@ -82,7 +87,10 @@ mod tests {
         assert_eq!(view.notes, "");
         assert_eq!(view.project.as_deref(), Some(""));
         assert_eq!(view.notes_path, dir.join("secretary/notes.md"));
-        assert_eq!(view.project_path, Some(dir.join("secretary/projects/P1.md")));
+        assert_eq!(
+            view.project_path,
+            Some(dir.join("secretary/projects/P1.md"))
+        );
 
         // 上限を超える長さでも全文を返す（前置き用の 8,000 字カットとは別）。
         std::fs::create_dir_all(dir.join("secretary/projects")).expect("mkdir");

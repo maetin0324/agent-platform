@@ -213,14 +213,19 @@ fn scan_milestone_ready(
 ) -> Result<Vec<Candidate>, StoreError> {
     let mut out = Vec::new();
     for ready in crate::milestone_review::ready_milestones(store)? {
-        let state = task_ops::milestone_review::review_state(store, ready.project.id, ready.milestone.id)?;
+        let state =
+            task_ops::milestone_review::review_state(store, ready.project.id, ready.milestone.id)?;
         // ADR-0038 D4: 秘書のまとめが付くまでは鳴らさない（「結果 → 提案」が手元で読めるように）。
         let Some(reply) = state.reply else {
             continue;
         };
-        let proposal = task_ops::milestone_review::latest_proposal(store, ready.project.id, Some(ready.milestone.id))
-            .ok()
-            .flatten();
+        let proposal = task_ops::milestone_review::latest_proposal(
+            store,
+            ready.project.id,
+            Some(ready.milestone.id),
+        )
+        .ok()
+        .flatten();
         let next = match &proposal {
             Some(m) => format!("次の提案: 『{}』。", m.title),
             None => String::new(),
@@ -292,7 +297,11 @@ fn scan_question_blocked(
         ..ListFilter::default()
     };
     let page = store.list_page(&filter, ListOrder::CreatedDesc, None, TASK_SCAN)?;
-    let mut tasks: Vec<_> = page.items.into_iter().filter(|t| t.updated_at >= started_at).collect();
+    let mut tasks: Vec<_> = page
+        .items
+        .into_iter()
+        .filter(|t| t.updated_at >= started_at)
+        .collect();
     tasks.sort_by_key(|a| a.id);
     let mut out = Vec::new();
     for task in tasks {
@@ -374,7 +383,10 @@ fn scan_secretary_reply(
         let mut replied = false;
         for node in org {
             let messages = store.message_list(&node.id, Some(project.id), MESSAGE_SCAN)?;
-            if messages.iter().any(|m| m.role == MessageRole::Node && m.created_at >= started_at) {
+            if messages
+                .iter()
+                .any(|m| m.role == MessageRole::Node && m.created_at >= started_at)
+            {
                 replied = true;
                 break;
             }
@@ -408,15 +420,13 @@ pub fn schedule(
 ) -> Result<Vec<Notification>, StoreError> {
     let mut created = Vec::new();
     for candidate in scan(store, started_at, config.base_url())? {
-        if let Some(row) =
-            store.notification_upsert_pending(
-                candidate.kind,
-                &candidate.key,
-                &candidate.body,
-                candidate.project_id,
-                now,
-            )?
-        {
+        if let Some(row) = store.notification_upsert_pending(
+            candidate.kind,
+            &candidate.key,
+            &candidate.body,
+            candidate.project_id,
+            now,
+        )? {
             created.push(row);
         }
     }
@@ -434,17 +444,30 @@ pub struct SendBatch {
 /// `pending` は `notification_pending()`（古い順）。`bad_news` が 2 件以上あれば、それらをまとめて
 /// 1 通にする（他の種が混ざっていても、その tick は bad_news を優先する）。それ以外は最古の 1 件だけ。
 pub fn select_batch(pending: &[Notification]) -> Option<SendBatch> {
-    let bad_news: Vec<&Notification> = pending.iter().filter(|n| n.kind == NotificationKind::BadNews).collect();
+    let bad_news: Vec<&Notification> = pending
+        .iter()
+        .filter(|n| n.kind == NotificationKind::BadNews)
+        .collect();
     if bad_news.len() >= 2 {
         let joined = bad_news
             .iter()
-            .map(|n| n.body.strip_prefix(BAD_NEWS_PREFIX).unwrap_or(n.body.as_str()))
+            .map(|n| {
+                n.body
+                    .strip_prefix(BAD_NEWS_PREFIX)
+                    .unwrap_or(n.body.as_str())
+            })
             .collect::<Vec<_>>()
             .join("／");
         let content = format!("悪い知らせ {} 件: {joined}", bad_news.len());
-        return Some(SendBatch { ids: bad_news.iter().map(|n| n.id).collect(), content });
+        return Some(SendBatch {
+            ids: bad_news.iter().map(|n| n.id).collect(),
+            content,
+        });
     }
-    pending.first().map(|n| SendBatch { ids: vec![n.id], content: n.body.clone() })
+    pending.first().map(|n| SendBatch {
+        ids: vec![n.id],
+        content: n.body.clone(),
+    })
 }
 
 // ---- 送信（ADR-0037 D3）----
@@ -501,7 +524,13 @@ pub async fn post_webhook(client: &reqwest::Client, url: &str, content: &str) ->
         "content": clamp_content(content),
         "username": WEBHOOK_USERNAME,
     });
-    let response = match client.post(url).json(&payload).timeout(REQUEST_TIMEOUT).send().await {
+    let response = match client
+        .post(url)
+        .json(&payload)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return SendOutcome::Failed(safe_error(&e)),
     };
@@ -549,7 +578,11 @@ pub fn record(
         SendOutcome::Failed(error) => {
             for id in &result.ids {
                 // 直前に読んだ pending の `attempts` で「これが最後の試行か」を決める（決定的）。
-                let attempts_before = pending.iter().find(|n| n.id == *id).map(|n| n.attempts).unwrap_or(0);
+                let attempts_before = pending
+                    .iter()
+                    .find(|n| n.id == *id)
+                    .map(|n| n.attempts)
+                    .unwrap_or(0);
                 let give_up = attempts_before + 1 >= MAX_NOTIFY_ATTEMPTS;
                 store.notification_mark(*id, None, Some(error), now)?;
                 if give_up {
@@ -563,7 +596,8 @@ pub fn record(
 }
 
 /// `POST /notify/test` で送る定型文（ADR-0037 D4）。
-pub const TEST_CONTENT: &str = "celeris のテスト送信です。ここに「人の判断が要るとき」だけ通知が届きます。";
+pub const TEST_CONTENT: &str =
+    "celeris のテスト送信です。ここに「人の判断が要るとき」だけ通知が届きます。";
 
 /// `POST /notify/test` の結果（ADR-0037 D4）。**どの枝にも URL・ホスト名は入らない**。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,7 +682,10 @@ mod tests {
     #[test]
     fn links_are_omitted_without_a_base_url() {
         assert_eq!(link(None, "/approvals"), "");
-        assert_eq!(link(Some("http://h:7700"), "/approvals"), "\nhttp://h:7700/approvals");
+        assert_eq!(
+            link(Some("http://h:7700"), "/approvals"),
+            "\nhttp://h:7700/approvals"
+        );
     }
 
     #[test]
@@ -685,8 +722,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         assert_eq!(webhook_url(None, "discord-webhook"), None);
         assert_eq!(webhook_url(Some(dir.path()), "discord-webhook"), None);
-        std::fs::write(dir.path().join("discord-webhook"), "https://example.invalid/hook\n")
-            .unwrap_or_else(|e| panic!("write: {e}"));
+        std::fs::write(
+            dir.path().join("discord-webhook"),
+            "https://example.invalid/hook\n",
+        )
+        .unwrap_or_else(|e| panic!("write: {e}"));
         assert_eq!(
             webhook_url(Some(dir.path()), "discord-webhook").as_deref(),
             Some("https://example.invalid/hook")

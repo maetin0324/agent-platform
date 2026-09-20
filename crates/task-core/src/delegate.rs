@@ -8,7 +8,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::model::{Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec};
+use crate::model::{
+    Criterion, GenreSpec, RoleSpec, Status, Task, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec,
+};
 use crate::org::OrgNode;
 
 /// `delegate.tasks[].depends_on[]` の 1 要素（ADR-0016 M7）: 同じ配列内のインデックス（整数）か、既存タスクの ID（文字列）。
@@ -105,20 +107,31 @@ pub enum DelegateError {
     #[error("dependency cycle involving tasks[{index}]")]
     Cycle { index: usize },
     #[error("tasks[{index}].depends_on[{position}] = {id:?} is not a task id")]
-    InvalidId { index: usize, position: usize, id: String },
+    InvalidId {
+        index: usize,
+        position: usize,
+        id: String,
+    },
     /// ADR-0027 D1: 知らない `genre`。
     #[error("tasks[{index}].genre {genre:?} is not a known genre")]
     UnknownGenre { index: usize, genre: String },
     /// ADR-0027 D1: `genre` と `role` を両方指定したが、`role` がその分野の `roles` に含まれない。
     #[error("tasks[{index}].role {role:?} is not one of genre {genre:?}'s roles")]
-    RoleNotInGenre { index: usize, role: String, genre: String },
+    RoleNotInGenre {
+        index: usize,
+        role: String,
+        genre: String,
+    },
 }
 
 /// ストアを見ない検証（ADR-0016 M7 / ADR-0027 D1）: 空欄、配列内インデックスの範囲・自己参照・閉路、
 /// ID の書式、`genre` が知っている分野か、`genre` と `role` を両方指定したときの整合。1 件ごとに結果を
 /// 返す（通ったものだけを挿入するため）。閉路は関係する全ての要素を不合格にする。`genres` が空（分野を
 /// 使わない設定）なら `genre` を指定した提案は全て `UnknownGenre` になる。
-pub fn validate_each(tasks: &[DelegateTask], genres: &[GenreSpec]) -> Vec<Result<(), DelegateError>> {
+pub fn validate_each(
+    tasks: &[DelegateTask],
+    genres: &[GenreSpec],
+) -> Vec<Result<(), DelegateError>> {
     let len = tasks.len();
     let mut results: Vec<Result<(), DelegateError>> = tasks
         .iter()
@@ -144,7 +157,9 @@ pub fn validate_each(tasks: &[DelegateTask], genres: &[GenreSpec]) -> Vec<Result
             if *pos < deps.len() {
                 let dep = &deps[*pos];
                 *pos += 1;
-                let DelegateDep::Index(child) = dep else { continue };
+                let DelegateDep::Index(child) = dep else {
+                    continue;
+                };
                 if *child >= len || *child == node {
                     continue; // 範囲外・自己参照は validate_one が既に不合格にしている
                 }
@@ -173,10 +188,18 @@ pub fn validate_each(tasks: &[DelegateTask], genres: &[GenreSpec]) -> Vec<Result
     results
 }
 
-fn validate_one(index: usize, t: &DelegateTask, len: usize, genres: &[GenreSpec]) -> Result<(), DelegateError> {
+fn validate_one(
+    index: usize,
+    t: &DelegateTask,
+    len: usize,
+    genres: &[GenreSpec],
+) -> Result<(), DelegateError> {
     if let Some(genre) = &t.genre {
         let Some(spec) = GenreSpec::find(genres, genre) else {
-            return Err(DelegateError::UnknownGenre { index, genre: genre.clone() });
+            return Err(DelegateError::UnknownGenre {
+                index,
+                genre: genre.clone(),
+            });
         };
         if let Some(role) = &t.role
             && !spec.roles.iter().any(|r| r == role)
@@ -189,7 +212,10 @@ fn validate_one(index: usize, t: &DelegateTask, len: usize, genres: &[GenreSpec]
         }
     }
     if t.title.trim().is_empty() {
-        return Err(DelegateError::EmptyField { index, field: "title" });
+        return Err(DelegateError::EmptyField {
+            index,
+            field: "title",
+        });
     }
     if t.objective.trim().is_empty() {
         return Err(DelegateError::EmptyField {
@@ -264,7 +290,11 @@ impl WorkspaceContext<'_> {
     /// 子 1 件の作業場所: **タスクが明示 > 案件の workspace > 親の workspace（従来）**（ADR-0039 D2）。
     /// 明示・案件のどちらから来た `Local` のパスも `~` を展開する（D5。`Remote` の `~` はクラスタ側の
     /// home なので触らない）。親から継いだときは（既に展開済みの値なので）そのまま。
-    pub fn child_workspace(&self, parent: &Task, explicit: Option<&WorkspaceSpec>) -> WorkspaceSpec {
+    pub fn child_workspace(
+        &self,
+        parent: &Task,
+        explicit: Option<&WorkspaceSpec>,
+    ) -> WorkspaceSpec {
         match explicit.or(self.project) {
             Some(spec) => spec.with_home_expanded(self.home),
             None => parent.workspace.clone(),
@@ -321,10 +351,17 @@ pub fn resolve_child_defaults(
     roles: &[RoleSpec],
     genres: &[GenreSpec],
 ) -> ResolvedChildDefaults {
-    let ChildSpec { genre: explicit_genre, role: role_id, tier: task_tier, assignee } = child;
+    let ChildSpec {
+        genre: explicit_genre,
+        role: role_id,
+        tier: task_tier,
+        assignee,
+    } = child;
     let role = role_id.and_then(|r| RoleSpec::find(roles, r));
     // ADR-0033 D4: 担当は組織にある id だけ記録する（知らない id は「誰の仕事か」を表さない）。
-    let assignee = assignee.filter(|a| org.iter().any(|n| &n.id == a)).map(str::to_string);
+    let assignee = assignee
+        .filter(|a| org.iter().any(|n| &n.id == a))
+        .map(str::to_string);
     // 分野: 明示 > `role` が一意に属する分野 > 担当の分野 > 親の分野。`role` を書いたときは
     // その役割の既定が勝つので、担当の分野は「role が無いとき」にだけ効く（ADR-0016 D1 の優先順）。
     let genre = explicit_genre
@@ -446,6 +483,10 @@ pub fn materialize_delegated(
                 conversation: None,
                 labels: Vec::new(),
                 category: Default::default(),
+                // ADR-0046 D2 / D4（Phase 59）: 委譲の子は親の進め方を継ぐ。必要な能力タグは
+                // 委譲の提案には無い（親が明示の担当を決めるか、親の担当がそのまま受ける）。
+                skills: Vec::new(),
+                mode: parent.mode,
             }
         })
         .collect()
@@ -480,6 +521,8 @@ mod tests {
     fn parent() -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -496,7 +539,8 @@ mod tests {
                 adapter: Some("fake".into()),
             },
             workspace: WorkspaceSpec::Local {
-                path: PathBuf::from("/tmp/ws"), mode: None,
+                path: PathBuf::from("/tmp/ws"),
+                mode: None,
             },
             budget: Budget {
                 max_turns: 10,
@@ -525,9 +569,22 @@ mod tests {
             "depends_on":[0,"01J9ZX5T3K8Q7W6V5R4P3N2M1H"]}"#;
         let t: DelegateTask = serde_json::from_str(json).unwrap();
         assert_eq!(t.depends_on[0], DelegateDep::Index(0));
-        assert_eq!(t.depends_on[1], DelegateDep::Id("01J9ZX5T3K8Q7W6V5R4P3N2M1H".into()));
-        assert!(serde_json::from_str::<DelegateTask>(r#"{"title":"a","objective":"o","acceptance":[],"bogus":1}"#).is_err());
-        assert!(serde_json::from_str::<DelegateTask>(r#"{"title":"a","objective":"o","acceptance":[],"depends_on":[true]}"#).is_err());
+        assert_eq!(
+            t.depends_on[1],
+            DelegateDep::Id("01J9ZX5T3K8Q7W6V5R4P3N2M1H".into())
+        );
+        assert!(
+            serde_json::from_str::<DelegateTask>(
+                r#"{"title":"a","objective":"o","acceptance":[],"bogus":1}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<DelegateTask>(
+                r#"{"title":"a","objective":"o","acceptance":[],"depends_on":[true]}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -544,16 +601,44 @@ mod tests {
         ];
         let r = validate_each(&tasks, &[]);
         assert!(r[0].is_ok());
-        assert_eq!(r[1], Err(DelegateError::EmptyField { index: 1, field: "title" }));
+        assert_eq!(
+            r[1],
+            Err(DelegateError::EmptyField {
+                index: 1,
+                field: "title"
+            })
+        );
         assert_eq!(r[2], Err(DelegateError::SelfDependency { index: 2 }));
-        assert!(matches!(r[3], Err(DelegateError::DependencyOutOfRange { index: 3, target: 9, len: 8, .. })));
-        assert!(matches!(r[4], Err(DelegateError::Cycle { .. })), "{:?}", r[4]);
-        assert!(matches!(r[5], Err(DelegateError::Cycle { .. })), "{:?}", r[5]);
-        assert!(matches!(r[6], Err(DelegateError::InvalidId { index: 6, .. })));
+        assert!(matches!(
+            r[3],
+            Err(DelegateError::DependencyOutOfRange {
+                index: 3,
+                target: 9,
+                len: 8,
+                ..
+            })
+        ));
+        assert!(
+            matches!(r[4], Err(DelegateError::Cycle { .. })),
+            "{:?}",
+            r[4]
+        );
+        assert!(
+            matches!(r[5], Err(DelegateError::Cycle { .. })),
+            "{:?}",
+            r[5]
+        );
+        assert!(matches!(
+            r[6],
+            Err(DelegateError::InvalidId { index: 6, .. })
+        ));
         assert!(r[7].is_ok());
         let mut no_acc = dt("x", vec![]);
         no_acc.acceptance.clear();
-        assert_eq!(validate_each(&[no_acc], &[])[0], Err(DelegateError::NoAcceptance { index: 0 }));
+        assert_eq!(
+            validate_each(&[no_acc], &[])[0],
+            Err(DelegateError::NoAcceptance { index: 0 })
+        );
     }
 
     fn genre(id: &str, default_role: Option<&str>, roles: &[&str]) -> GenreSpec {
@@ -570,7 +655,11 @@ mod tests {
     /// `roles` に無ければ `RoleNotInGenre`。分野を使わない設定（`genres` が空）でも同じ扱い。
     #[test]
     fn validate_each_rejects_unknown_genre_and_role_not_in_genre() {
-        let genres = vec![genre("coding", Some("implementer"), &["lead", "implementer"])];
+        let genres = vec![genre(
+            "coding",
+            Some("implementer"),
+            &["lead", "implementer"],
+        )];
         let mut unknown = dt("a", vec![]);
         unknown.genre = Some("literature".into());
         let mut mismatched = dt("b", vec![]);
@@ -582,7 +671,10 @@ mod tests {
         let r = validate_each(&[unknown, mismatched, ok], &genres);
         assert_eq!(
             r[0],
-            Err(DelegateError::UnknownGenre { index: 0, genre: "literature".into() })
+            Err(DelegateError::UnknownGenre {
+                index: 0,
+                genre: "literature".into()
+            })
         );
         assert_eq!(
             r[1],
@@ -599,7 +691,10 @@ mod tests {
         no_config.genre = Some("coding".into());
         assert_eq!(
             validate_each(&[no_config], &[])[0],
-            Err(DelegateError::UnknownGenre { index: 0, genre: "coding".into() })
+            Err(DelegateError::UnknownGenre {
+                index: 0,
+                genre: "coding".into()
+            })
         );
     }
 
@@ -621,7 +716,16 @@ mod tests {
         c.tier = Some(Tier::Standard);
         c.role = Some("implementer".into());
         let tasks = vec![a, b, c];
-        let out = materialize_delegated(&p, &tasks, &[0, 1], &[], &roles, &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let out = materialize_delegated(
+            &p,
+            &tasks,
+            &[0, 1],
+            &[],
+            &roles,
+            &[],
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].parent_id, Some(p.id));
         assert_eq!(out[0].status, Status::Draft);
@@ -639,7 +743,16 @@ mod tests {
         assert_eq!(out[1].worker_hint.tier, Tier::Frontier);
         assert_eq!(out[1].worker_hint.adapter.as_deref(), Some("fake"));
         // タスクの tier は役割の既定より優先。
-        let out = materialize_delegated(&p, &tasks, &[2], &[], &roles, &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let out = materialize_delegated(
+            &p,
+            &tasks,
+            &[2],
+            &[],
+            &roles,
+            &[],
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(out[0].worker_hint.tier, Tier::Standard);
     }
 
@@ -649,20 +762,42 @@ mod tests {
         let p = parent(); // genre = Some("coding")
         let genres = vec![
             genre("coding", Some("implementer"), &["lead", "implementer"]),
-            genre("literature", Some("literature-reader"), &["literature-scout", "literature-reader"]),
+            genre(
+                "literature",
+                Some("literature-reader"),
+                &["literature-scout", "literature-reader"],
+            ),
         ];
 
         // 1. 明示した genre が最優先（role の分野や親の分野より勝つ）。
         let mut explicit = dt("explicit", vec![]);
         explicit.role = Some("implementer".into()); // coding の役割
         explicit.genre = Some("literature".into());
-        let out = materialize_delegated(&p, &[explicit], &[0], &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let out = materialize_delegated(
+            &p,
+            &[explicit],
+            &[0],
+            &[],
+            &[],
+            &genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
 
         // 2. genre 未指定・role がちょうど 1 つの分野に属する: その分野を継ぐ。
         let mut by_role = dt("by-role", vec![]);
         by_role.role = Some("literature-scout".into());
-        let out = materialize_delegated(&p, &[by_role], &[0], &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let out = materialize_delegated(
+            &p,
+            &[by_role],
+            &[0],
+            &[],
+            &[],
+            &genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
 
         // 3. role が複数の分野に属する（一意に決まらない）: 親の分野を継ぐ。
@@ -672,12 +807,34 @@ mod tests {
         ];
         let mut ambiguous = dt("ambiguous", vec![]);
         ambiguous.role = Some("shared".into());
-        let out = materialize_delegated(&p, &[ambiguous], &[0], &[], &[], &ambiguous_genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
-        assert_eq!(out[0].genre.as_deref(), Some("coding"), "falls back to the parent's genre");
+        let out = materialize_delegated(
+            &p,
+            &[ambiguous],
+            &[0],
+            &[],
+            &[],
+            &ambiguous_genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
+        assert_eq!(
+            out[0].genre.as_deref(),
+            Some("coding"),
+            "falls back to the parent's genre"
+        );
 
         // 4. genre も role も無い: 親の分野を継ぐ。
         let none_of_either = dt("neither", vec![]);
-        let out = materialize_delegated(&p, &[none_of_either], &[0], &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let out = materialize_delegated(
+            &p,
+            &[none_of_either],
+            &[0],
+            &[],
+            &[],
+            &genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(out[0].genre.as_deref(), Some("coding"));
     }
 
@@ -694,11 +851,27 @@ mod tests {
             max_wall_secs: Some(1200),
             instructions: None,
         }];
-        let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
+        let genres = vec![genre(
+            "literature",
+            Some("literature-reader"),
+            &["literature-reader"],
+        )];
         let mut t = dt("investigate", vec![]);
         t.genre = Some("literature".into());
-        let out = materialize_delegated(&p, &[t], &[0], &[], &roles, &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
-        assert_eq!(out[0].role, None, "genre alone must not set the task's role");
+        let out = materialize_delegated(
+            &p,
+            &[t],
+            &[0],
+            &[],
+            &roles,
+            &genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
+        assert_eq!(
+            out[0].role, None,
+            "genre alone must not set the task's role"
+        );
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
         assert_eq!(out[0].worker_hint.tier, Tier::Standard);
         assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("acp"));
@@ -733,7 +906,16 @@ mod tests {
         let mut t = dt("impl", vec![]);
         t.role = Some("implementer".into());
         t.genre = Some("coding".into());
-        let out = materialize_delegated(&p, &[t], &[0], &[], &roles, &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let out = materialize_delegated(
+            &p,
+            &[t],
+            &[0],
+            &[],
+            &roles,
+            &genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         // adapter は role（implementer）の既定が優先（parent の "fake" にも分野の既定にも負けない）。
         assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("codex"));
         // tier は role（implementer）に既定が無いので、分野の既定役割（lead）の tier を借りる
@@ -750,6 +932,7 @@ mod tests {
         use crate::org::{OrgKind, OrgNode};
         let now = OffsetDateTime::now_utc();
         let node = |id: &str, genre_id: Option<&str>| OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: Some("research".into()),
             name: id.into(),
@@ -760,7 +943,10 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let org = vec![node("research-survey", Some("literature")), node("research-data", None)];
+        let org = vec![
+            node("research-survey", Some("literature")),
+            node("research-data", None),
+        ];
         let roles = vec![
             RoleSpec {
                 id: "literature-reader".into(),
@@ -776,13 +962,26 @@ mod tests {
                 ..RoleSpec::default()
             },
         ];
-        let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
+        let genres = vec![genre(
+            "literature",
+            Some("literature-reader"),
+            &["literature-reader"],
+        )];
         let p = parent();
 
         // 1. assignee だけ: そのノードの分野 → default_role の既定が効く。
         let mut t = dt("survey", vec![]);
         t.assignee = Some("research-survey".into());
-        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, WorkspaceContext::default(), now);
+        let out = materialize_delegated(
+            &p,
+            &[t],
+            &[0],
+            &org,
+            &roles,
+            &genres,
+            WorkspaceContext::default(),
+            now,
+        );
         assert_eq!(out[0].assignee.as_deref(), Some("research-survey"));
         assert_eq!(out[0].genre.as_deref(), Some("literature"));
         assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("paperqa"));
@@ -793,7 +992,16 @@ mod tests {
         let mut t = dt("survey", vec![]);
         t.assignee = Some("research-survey".into());
         t.role = Some("writer".into());
-        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, WorkspaceContext::default(), now);
+        let out = materialize_delegated(
+            &p,
+            &[t],
+            &[0],
+            &org,
+            &roles,
+            &genres,
+            WorkspaceContext::default(),
+            now,
+        );
         assert_eq!(out[0].assignee.as_deref(), Some("research-survey"));
         assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("claude-code"));
         assert_eq!(out[0].worker_hint.tier, Tier::Standard);
@@ -801,12 +1009,30 @@ mod tests {
         // 3. 分野を持たないノード・組織に無い id は既定を変えない（知らない id は担当にもしない）。
         let mut t = dt("tidy", vec![]);
         t.assignee = Some("research-data".into());
-        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, WorkspaceContext::default(), now);
+        let out = materialize_delegated(
+            &p,
+            &[t],
+            &[0],
+            &org,
+            &roles,
+            &genres,
+            WorkspaceContext::default(),
+            now,
+        );
         assert_eq!(out[0].assignee.as_deref(), Some("research-data"));
         assert_eq!(out[0].genre, p.genre);
         let mut t = dt("ghost", vec![]);
         t.assignee = Some("nobody".into());
-        let out = materialize_delegated(&p, &[t], &[0], &org, &roles, &genres, WorkspaceContext::default(), now);
+        let out = materialize_delegated(
+            &p,
+            &[t],
+            &[0],
+            &org,
+            &roles,
+            &genres,
+            WorkspaceContext::default(),
+            now,
+        );
         assert_eq!(out[0].assignee, None);
     }
 
@@ -816,7 +1042,8 @@ mod tests {
         let p = parent();
         let now = OffsetDateTime::now_utc();
         let project = WorkspaceSpec::Local {
-            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
+            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            mode: None,
         };
         let explicit = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
@@ -837,7 +1064,11 @@ mod tests {
         assert_eq!(out[0].workspace, p.workspace);
 
         // 2. 案件の作業場所 > 親。
-        let ws = WorkspaceContext { repos: &[], project: Some(&project), home: None };
+        let ws = WorkspaceContext {
+            repos: &[],
+            project: Some(&project),
+            home: None,
+        };
         let out = materialize_delegated(&p, &[dt("a", vec![])], &[0], &[], &[], &[], ws, now);
         assert_eq!(out[0].workspace, project);
 
@@ -848,7 +1079,11 @@ mod tests {
         assert_eq!(out[0].workspace, explicit);
 
         // 4. 案件が Remote なら子も Remote（ADR-0018 の写し + `.taskd/remote-exec` 経路に乗る）。
-        let ws = WorkspaceContext { repos: &[], project: Some(&explicit), home: None };
+        let ws = WorkspaceContext {
+            repos: &[],
+            project: Some(&explicit),
+            home: None,
+        };
         let out = materialize_delegated(&p, &[dt("c", vec![])], &[0], &[], &[], &[], ws, now);
         assert_eq!(out[0].workspace, explicit);
     }
@@ -858,27 +1093,40 @@ mod tests {
     fn tilde_is_expanded_for_local_workspaces_only() {
         let home = PathBuf::from("/home/rmaeda");
         let local = WorkspaceSpec::Local {
-            path: PathBuf::from("~/workspace/rust/pluvio-poc"), mode: None,
+            path: PathBuf::from("~/workspace/rust/pluvio-poc"),
+            mode: None,
         };
         assert_eq!(
             local.with_home_expanded(Some(&home)),
             WorkspaceSpec::Local {
-                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None
+                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+                mode: None
             }
         );
-        assert_eq!(local.with_home_expanded(None), local, "$HOME が無ければそのまま");
+        assert_eq!(
+            local.with_home_expanded(None),
+            local,
+            "$HOME が無ければそのまま"
+        );
         let remote = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: PathBuf::from("~/workspace/rust/benchfs"),
         };
         assert_eq!(remote.with_home_expanded(Some(&home)), remote);
-        let absolute = WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws"), mode: None };
+        let absolute = WorkspaceSpec::Local {
+            path: PathBuf::from("/tmp/ws"),
+            mode: None,
+        };
         assert_eq!(absolute.with_home_expanded(Some(&home)), absolute);
         // `~user` は展開しない（その home を知らない）。
         let other = WorkspaceSpec::Local {
-            path: PathBuf::from("~someone/ws"), mode: None,
+            path: PathBuf::from("~someone/ws"),
+            mode: None,
         };
         assert_eq!(other.with_home_expanded(Some(&home)), other);
-        assert_eq!(crate::model::expand_home(std::path::Path::new("~"), Some(&home)), home);
+        assert_eq!(
+            crate::model::expand_home(std::path::Path::new("~"), Some(&home)),
+            home
+        );
     }
 }

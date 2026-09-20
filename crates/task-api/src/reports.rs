@@ -64,7 +64,11 @@ pub struct ReportsNotifiedResult {
 }
 
 fn report_not_found(id: &str) -> ApiProblem {
-    ApiProblem::new(StatusCode::NOT_FOUND, "report_not_found", format!("no report {id}"))
+    ApiProblem::new(
+        StatusCode::NOT_FOUND,
+        "report_not_found",
+        format!("no report {id}"),
+    )
 }
 
 fn parse_report_id(raw: &str) -> Result<ReportId, ApiProblem> {
@@ -73,7 +77,10 @@ fn parse_report_id(raw: &str) -> Result<ReportId, ApiProblem> {
 
 /// ADR-0033 D3: スナップショットに載せる `reports`（未読の件数と通知の判定）。
 /// ディスパッチャではなく API がここで組む（`last_notified_at` は API のメモリにあるため）。
-pub(crate) fn reports_live(store: &SqliteStore, last_notified_at: Option<OffsetDateTime>) -> Option<ReportsLive> {
+pub(crate) fn reports_live(
+    store: &SqliteStore,
+    last_notified_at: Option<OffsetDateTime>,
+) -> Option<ReportsLive> {
     let (unread_secretary, unread_bad_news) = store.report_unread_counts(0).ok()?;
     Some(ReportsLive {
         unread_secretary,
@@ -89,7 +96,10 @@ pub(crate) fn reports_live(store: &SqliteStore, last_notified_at: Option<OffsetD
 }
 
 pub(crate) async fn list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
-    let query = QueryParams::parse(raw.as_deref(), &["project", "node", "level", "unread", "limit"])?;
+    let query = QueryParams::parse(
+        raw.as_deref(),
+        &["project", "node", "level", "unread", "limit"],
+    )?;
     let project_id = match query.single("project")? {
         Some(raw) => Some(
             raw.parse::<ProjectId>()
@@ -169,8 +179,16 @@ pub(crate) async fn mark_read(
                 .map_err(store_problem)
         })
         .await?;
-    tracing::info!(who = "admin", op = "reports_read", updated, "admin: reports marked as read");
-    Ok(json_response(StatusCode::OK, &ReportsReadResult { updated }))
+    tracing::info!(
+        who = "admin",
+        op = "reports_read",
+        updated,
+        "admin: reports marked as read"
+    );
+    Ok(json_response(
+        StatusCode::OK,
+        &ReportsReadResult { updated },
+    ))
 }
 
 pub(crate) async fn notified(
@@ -185,7 +203,11 @@ pub(crate) async fn notified(
         Ok(mut cell) => *cell = Some(now),
         Err(_) => return Err(ApiProblem::internal("the notification state is poisoned")),
     }
-    tracing::info!(who = "admin", op = "reports_notified", "admin: notification time advanced");
+    tracing::info!(
+        who = "admin",
+        op = "reports_notified",
+        "admin: notification time advanced"
+    );
     Ok(json_response(
         StatusCode::OK,
         &ReportsNotifiedResult {
@@ -196,7 +218,12 @@ pub(crate) async fn notified(
 
 /// ハンドラ以外から使う（`GET /daemon` がスナップショットに `reports` を載せる）。
 pub(crate) fn last_notified_at(state: &ApiState) -> Option<OffsetDateTime> {
-    state.inner.last_notified_at.lock().ok().and_then(|cell| *cell)
+    state
+        .inner
+        .last_notified_at
+        .lock()
+        .ok()
+        .and_then(|cell| *cell)
 }
 
 pub(crate) fn routes() -> axum::Router<ApiState> {

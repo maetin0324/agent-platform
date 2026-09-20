@@ -70,7 +70,10 @@ async fn patch_task_changes_only_the_written_fields_and_records_an_edited_event(
     assert_eq!(body["task"]["category"], "ops");
     assert_eq!(body["task"]["worker_hint"]["tier"], "frontier");
     assert_eq!(body["task"]["budget"]["max_turns"], 42);
-    assert_eq!(body["task"]["objective"], task.objective, "書かなかった項目は変わらない");
+    assert_eq!(
+        body["task"]["objective"], task.objective,
+        "書かなかった項目は変わらない"
+    );
 
     let events = env.store.events_for(id).expect("events");
     let edited = events
@@ -84,7 +87,9 @@ async fn patch_task_changes_only_the_written_fields_and_records_an_edited_event(
     assert_eq!(edited.0.len(), 6);
 
     // `GET /tasks/{id}` にも `priority_label` が出る。
-    let detail = send(&app, get_with(&format!("/api/v1/tasks/{id}"), &admin())).await.json();
+    let detail = send(&app, get_with(&format!("/api/v1/tasks/{id}"), &admin()))
+        .await
+        .json();
     assert_eq!(detail["priority_label"], "P0");
 }
 
@@ -107,16 +112,27 @@ async fn patch_task_validates_and_refuses_terminal_tasks() {
         )
         .await;
         let problem = assert_problem(&resp, 409, "invalid_transition");
-        assert_eq!(problem["task_status"], serde_json::to_value(status).expect("status"));
+        assert_eq!(
+            problem["task_status"],
+            serde_json::to_value(status).expect("status")
+        );
     }
 
     let ready = seeded(&env, Status::Ready);
     let path = format!("/api/v1/tasks/{}", ready.id);
     // 空の本文。
-    assert_problem(&send(&app, patch_json_with(&path, &json!({}), &admin())).await, 422, "validation");
+    assert_problem(
+        &send(&app, patch_json_with(&path, &json!({}), &admin())).await,
+        422,
+        "validation",
+    );
     // 壊れたラベル。
     assert_problem(
-        &send(&app, patch_json_with(&path, &json!({"labels": ["Bad Label"]}), &admin())).await,
+        &send(
+            &app,
+            patch_json_with(&path, &json!({"labels": ["Bad Label"]}), &admin()),
+        )
+        .await,
         422,
         "validation",
     );
@@ -130,7 +146,11 @@ async fn patch_task_validates_and_refuses_terminal_tasks() {
     assert_problem(
         &send(
             &app,
-            patch_json_with(&path, &json!({"title": "x", "expected_status": "running"}), &admin()),
+            patch_json_with(
+                &path,
+                &json!({"title": "x", "expected_status": "running"}),
+                &admin(),
+            ),
         )
         .await,
         409,
@@ -142,7 +162,10 @@ async fn patch_task_validates_and_refuses_terminal_tasks() {
         401,
         "unauthorized",
     );
-    assert_eq!(env.store.get(ready.id).expect("get").expect("task").title, ready.title);
+    assert_eq!(
+        env.store.get(ready.id).expect("get").expect("task").title,
+        ready.title
+    );
 
     // `running` は受け付けるが状態は変わらない（次の run から効く）。
     let running = seeded(&env, Status::Running);
@@ -202,11 +225,24 @@ async fn posting_a_human_comment_follows_the_effect_table() {
                 .expect("events")
                 .iter()
                 .any(|(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if outcome == "interrupted: comment"));
-            assert_eq!(finished, status == Status::Running, "{status:?}: WorkerFinished の有無");
+            assert_eq!(
+                finished,
+                status == Status::Running,
+                "{status:?}: WorkerFinished の有無"
+            );
         }
         // どの状態でも `GET` で読める。
-        let list = send(&app, get_with(&format!("/api/v1/tasks/{}/comments", task.id), &admin())).await.json();
-        assert_eq!(list["items"].as_array().map(Vec::len), Some(1), "{status:?}");
+        let list = send(
+            &app,
+            get_with(&format!("/api/v1/tasks/{}/comments", task.id), &admin()),
+        )
+        .await
+        .json();
+        assert_eq!(
+            list["items"].as_array().map(Vec::len),
+            Some(1),
+            "{status:?}"
+        );
         assert_eq!(list["items"][0]["author_kind"], "human");
     }
 
@@ -249,8 +285,20 @@ async fn comment_validation_and_auth() {
     let app = env.router();
     let task = seeded(&env, Status::Ready);
     let path = format!("/api/v1/tasks/{}/comments", task.id);
-    assert_problem(&send(&app, post_json_with(&path, &json!({"body": "  "}), &admin())).await, 422, "validation");
-    assert_problem(&send(&app, post_json_with(&path, &json!({"body": "x"}), &[])).await, 401, "unauthorized");
+    assert_problem(
+        &send(
+            &app,
+            post_json_with(&path, &json!({"body": "  "}), &admin()),
+        )
+        .await,
+        422,
+        "validation",
+    );
+    assert_problem(
+        &send(&app, post_json_with(&path, &json!({"body": "x"}), &[])).await,
+        401,
+        "unauthorized",
+    );
     // 以下は認証済みでの 404（トークンを設定した構成では読み取りにも認証が要る）。
     assert_problem(
         &send(
@@ -266,7 +314,14 @@ async fn comment_validation_and_auth() {
         "task_not_found",
     );
     assert_problem(
-        &send(&app, get_with(&format!("/api/v1/tasks/{}/comments", TaskId::new()), &admin())).await,
+        &send(
+            &app,
+            get_with(
+                &format!("/api/v1/tasks/{}/comments", TaskId::new()),
+                &admin(),
+            ),
+        )
+        .await,
         404,
         "task_not_found",
     );
@@ -284,7 +339,11 @@ async fn reopen_restarts_done_and_failed_tasks_only() {
         env.seed(&task);
         let resp = send(
             &app,
-            post_json_with(&format!("/api/v1/tasks/{}/reopen", task.id), &json!({}), &admin()),
+            post_json_with(
+                &format!("/api/v1/tasks/{}/reopen", task.id),
+                &json!({}),
+                &admin(),
+            ),
         )
         .await;
         assert_eq!(resp.status, 200, "{status:?}: {}", resp.text());
@@ -295,7 +354,12 @@ async fn reopen_restarts_done_and_failed_tasks_only() {
         assert_eq!(after.status, Status::Ready);
         assert_eq!(after.attempts, 0, "再開は attempts を 0 に戻す");
         // 再開した後は `actions` に `reopen` が無い。
-        let detail = send(&app, get_with(&format!("/api/v1/tasks/{}", task.id), &admin())).await.json();
+        let detail = send(
+            &app,
+            get_with(&format!("/api/v1/tasks/{}", task.id), &admin()),
+        )
+        .await
+        .json();
         let actions = detail["actions"].as_array().cloned().unwrap_or_default();
         assert!(!actions.contains(&json!("reopen")), "{detail}");
         assert!(actions.contains(&json!("edit")), "{detail}");
@@ -306,7 +370,11 @@ async fn reopen_restarts_done_and_failed_tasks_only() {
         assert_problem(
             &send(
                 &app,
-                post_json_with(&format!("/api/v1/tasks/{}/reopen", task.id), &json!({}), &admin()),
+                post_json_with(
+                    &format!("/api/v1/tasks/{}/reopen", task.id),
+                    &json!({}),
+                    &admin(),
+                ),
             )
             .await,
             409,
@@ -316,7 +384,15 @@ async fn reopen_restarts_done_and_failed_tasks_only() {
     // 管理系。
     let done = seeded(&env, Status::Done);
     assert_problem(
-        &send(&app, post_json_with(&format!("/api/v1/tasks/{}/reopen", done.id), &json!({}), &[])).await,
+        &send(
+            &app,
+            post_json_with(
+                &format!("/api/v1/tasks/{}/reopen", done.id),
+                &json!({}),
+                &[],
+            ),
+        )
+        .await,
         401,
         "unauthorized",
     );
@@ -358,8 +434,14 @@ async fn list_tasks_filters_by_label_category_tier_priority_and_comment_text() {
 
     let all = send(&app, get("/api/v1/tasks?label=infra")).await.json();
     assert_eq!(all["total"], 2, "{all}");
-    let both = send(&app, get("/api/v1/tasks?label=infra&label=urgent")).await.json();
-    assert_eq!(titles(&both), vec!["infra work".to_string()], "ラベルは AND");
+    let both = send(&app, get("/api/v1/tasks?label=infra&label=urgent"))
+        .await
+        .json();
+    assert_eq!(
+        titles(&both),
+        vec!["infra work".to_string()],
+        "ラベルは AND"
+    );
     let ops = send(&app, get("/api/v1/tasks?category=ops")).await.json();
     assert_eq!(titles(&ops), vec!["infra work".to_string()]);
     let cheap = send(&app, get("/api/v1/tasks?tier=cheap")).await.json();
@@ -370,7 +452,9 @@ async fn list_tasks_filters_by_label_category_tier_priority_and_comment_text() {
     assert_eq!(p0["items"][0]["category"], "ops");
     assert_eq!(p0["items"][0]["labels"], json!(["infra", "urgent"]));
     // 複数のフィルタは AND。
-    let none = send(&app, get("/api/v1/tasks?label=urgent&tier=cheap")).await.json();
+    let none = send(&app, get("/api/v1/tasks?label=urgent&tier=cheap"))
+        .await
+        .json();
     assert_eq!(none["total"], 0, "{none}");
 
     // `q` はコメント本文も見る。
@@ -391,11 +475,31 @@ async fn list_tasks_filters_by_label_category_tier_priority_and_comment_text() {
     assert_eq!(titles(&q), vec!["write docs".to_string()], "{q}");
 
     // 知らない値は 400。
-    assert_problem(&send(&app, get("/api/v1/tasks?category=bogus")).await, 400, "bad_request");
-    assert_problem(&send(&app, get("/api/v1/tasks?tier=bogus")).await, 400, "bad_request");
-    assert_problem(&send(&app, get("/api/v1/tasks?priority=bogus")).await, 400, "bad_request");
-    assert_problem(&send(&app, get("/api/v1/tasks?label=Bad")).await, 400, "bad_request");
-    assert_problem(&send(&app, get("/api/v1/tasks?milestone=nope")).await, 400, "bad_request");
+    assert_problem(
+        &send(&app, get("/api/v1/tasks?category=bogus")).await,
+        400,
+        "bad_request",
+    );
+    assert_problem(
+        &send(&app, get("/api/v1/tasks?tier=bogus")).await,
+        400,
+        "bad_request",
+    );
+    assert_problem(
+        &send(&app, get("/api/v1/tasks?priority=bogus")).await,
+        400,
+        "bad_request",
+    );
+    assert_problem(
+        &send(&app, get("/api/v1/tasks?label=Bad")).await,
+        400,
+        "bad_request",
+    );
+    assert_problem(
+        &send(&app, get("/api/v1/tasks?milestone=nope")).await,
+        400,
+        "bad_request",
+    );
 }
 
 // ---- D5: タイムライン ----
@@ -437,17 +541,27 @@ async fn the_timeline_merges_events_comments_and_delegations_in_time_order() {
     .await;
     assert_eq!(resp.status, 201, "{}", resp.text());
 
-    let timeline = send(&app, get_with(&format!("/api/v1/tasks/{}/timeline", parent.id), &admin())).await;
+    let timeline = send(
+        &app,
+        get_with(&format!("/api/v1/tasks/{}/timeline", parent.id), &admin()),
+    )
+    .await;
     assert_eq!(timeline.status, 200, "{}", timeline.text());
     let body = timeline.json();
     assert_eq!(body["task_id"], parent.id.to_string());
     let items = body["items"].as_array().cloned().expect("items");
-    let kinds: Vec<&str> = items.iter().map(|i| i["kind"].as_str().unwrap_or_default()).collect();
+    let kinds: Vec<&str> = items
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap_or_default())
+        .collect();
     assert!(kinds.contains(&"comment"), "{kinds:?}");
     assert!(kinds.contains(&"delegation"), "{kinds:?}");
     assert!(kinds.contains(&"event"), "{kinds:?}");
     // 委譲は 1 件にまとまり、子のタスクが載る（`event` としては出ない）。
-    let delegation = items.iter().find(|i| i["kind"] == "delegation").expect("delegation");
+    let delegation = items
+        .iter()
+        .find(|i| i["kind"] == "delegation")
+        .expect("delegation");
     assert_eq!(delegation["run_id"], "run-1");
     assert_eq!(delegation["tasks"][0]["title"], "子の仕事");
     assert!(
@@ -457,26 +571,31 @@ async fn the_timeline_merges_events_comments_and_delegations_in_time_order() {
         "委譲は 2 回出さない"
     );
     // 時刻の昇順。
-    let times: Vec<&str> = items.iter().map(|i| i["at"].as_str().unwrap_or_default()).collect();
+    let times: Vec<&str> = items
+        .iter()
+        .map(|i| i["at"].as_str().unwrap_or_default())
+        .collect();
     let mut sorted = times.clone();
     sorted.sort_unstable();
     assert_eq!(times, sorted, "{times:?}");
     // 割り込みと `WorkerFinished` がイベントとして載る。
-    assert!(
-        items
-            .iter()
-            .any(|i| i["kind"] == "event" && i["event"]["type"] == "transitioned" && i["event"]["reason"] == "comment")
-    );
-    assert!(
-        items.iter().any(
-            |i| i["kind"] == "event" && i["event"]["type"] == "worker_finished"
-                && i["event"]["outcome"] == "interrupted: comment"
-        )
-    );
+    assert!(items.iter().any(|i| i["kind"] == "event"
+        && i["event"]["type"] == "transitioned"
+        && i["event"]["reason"] == "comment"));
+    assert!(items.iter().any(|i| i["kind"] == "event"
+        && i["event"]["type"] == "worker_finished"
+        && i["event"]["outcome"] == "interrupted: comment"));
 
     // 知らないタスクは 404。
     assert_problem(
-        &send(&app, get_with(&format!("/api/v1/tasks/{}/timeline", TaskId::new()), &admin())).await,
+        &send(
+            &app,
+            get_with(
+                &format!("/api/v1/tasks/{}/timeline", TaskId::new()),
+                &admin(),
+            ),
+        )
+        .await,
         404,
         "task_not_found",
     );
@@ -519,11 +638,18 @@ async fn the_timeline_lists_the_integrations_of_this_task() {
     pr.updated_at = now;
     env.store.integration_put(&pr).expect("put pr");
 
-    let resp = send(&app, get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin())).await;
+    let resp = send(
+        &app,
+        get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin()),
+    )
+    .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     let body = resp.json();
     let items = body["items"].as_array().cloned().expect("items");
-    let integrations: Vec<&Value> = items.iter().filter(|i| i["kind"] == "integration").collect();
+    let integrations: Vec<&Value> = items
+        .iter()
+        .filter(|i| i["kind"] == "integration")
+        .collect();
     assert_eq!(integrations.len(), 2, "{items:?}");
     // 押した順（`created_at` の昇順）に並ぶ。
     assert_eq!(integrations[0]["action"], "merge");
@@ -541,7 +667,10 @@ async fn the_timeline_lists_the_integrations_of_this_task() {
         "`at` は押した時刻（同期した時刻ではない）"
     );
     // タイムライン全体は時刻の昇順のまま。
-    let times: Vec<&str> = items.iter().map(|i| i["at"].as_str().unwrap_or_default()).collect();
+    let times: Vec<&str> = items
+        .iter()
+        .map(|i| i["at"].as_str().unwrap_or_default())
+        .collect();
     let mut sorted = times.clone();
     sorted.sort_unstable();
     assert_eq!(times, sorted, "{times:?}");
@@ -565,7 +694,11 @@ async fn the_timeline_lists_the_releases_that_contain_this_tasks_commits() {
                 current: Some("aaaaaaaaaaaa".into()),
                 previous: None,
                 items: vec![
-                    release_item("bbbbbbbbbbbb", "2026-09-19T02:00:00Z", vec!["sha-mine", "sha-other"]),
+                    release_item(
+                        "bbbbbbbbbbbb",
+                        "2026-09-19T02:00:00Z",
+                        vec!["sha-mine", "sha-other"],
+                    ),
                     release_item("cccccccccccc", "2026-09-19T01:00:00Z", vec!["sha-nobody"]),
                 ],
             }
@@ -573,7 +706,8 @@ async fn the_timeline_lists_the_releases_that_contain_this_tasks_commits() {
         fn promote(
             &self,
             _sha12: &str,
-        ) -> Result<task_api::types::ReleasePromoteAccepted, task_api::ReleasePromoteError> {
+        ) -> Result<task_api::types::ReleasePromoteAccepted, task_api::ReleasePromoteError>
+        {
             Err(task_api::ReleasePromoteError::NotFound)
         }
         fn branch_commits(&self, _repo: &Path, branch: &str, _base: Option<&str>) -> Vec<String> {
@@ -585,7 +719,11 @@ async fn the_timeline_lists_the_releases_that_contain_this_tasks_commits() {
         }
     }
 
-    fn release_item(sha12: &str, built_at: &str, commits: Vec<&str>) -> task_api::types::ReleaseItem {
+    fn release_item(
+        sha12: &str,
+        built_at: &str,
+        commits: Vec<&str>,
+    ) -> task_api::types::ReleaseItem {
         task_api::types::ReleaseItem {
             sha12: sha12.into(),
             r#ref: None,
@@ -628,9 +766,12 @@ async fn the_timeline_lists_the_releases_that_contain_this_tasks_commits() {
     let task = seeded(&env, Status::Done);
 
     // 目印が無いうちはリリースを出さない。
-    let before = send(&app, get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin()))
-        .await
-        .json();
+    let before = send(
+        &app,
+        get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin()),
+    )
+    .await
+    .json();
     assert!(
         !before["items"]
             .as_array()
@@ -657,9 +798,12 @@ async fn the_timeline_lists_the_releases_that_contain_this_tasks_commits() {
     )
     .expect("marker");
 
-    let body = send(&app, get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin()))
-        .await
-        .json();
+    let body = send(
+        &app,
+        get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin()),
+    )
+    .await
+    .json();
     let releases: Vec<&Value> = body["items"]
         .as_array()
         .expect("items")
@@ -668,5 +812,9 @@ async fn the_timeline_lists_the_releases_that_contain_this_tasks_commits() {
         .collect();
     assert_eq!(releases.len(), 1, "{body}");
     assert_eq!(releases[0]["sha12"], "bbbbbbbbbbbb");
-    assert_eq!(releases[0]["commits"], json!(["sha-mine"]), "自分のコミットだけ");
+    assert_eq!(
+        releases[0]["commits"],
+        json!(["sha-mine"]),
+        "自分のコミットだけ"
+    );
 }

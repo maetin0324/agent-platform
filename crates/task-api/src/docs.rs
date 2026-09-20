@@ -24,7 +24,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{Project, ProjectId, ProjectRepo, RepoId, RepoKind, RepoRun, SqliteStore, Task, TaskStore, WorkspaceSpec};
+use task_core::{
+    Project, ProjectId, ProjectRepo, RepoId, RepoKind, RepoRun, SqliteStore, Task, TaskStore,
+    WorkspaceSpec,
+};
 use task_ops::changes as ops_changes;
 use task_ops::docs::{self as ops_docs, DocCommit, PageEdit, PathError, WriteOutcome};
 use time::OffsetDateTime;
@@ -208,7 +211,11 @@ fn default_branch_busy(detail: String) -> ApiProblem {
 }
 
 fn page_not_found(path: &str) -> ApiProblem {
-    ApiProblem::new(StatusCode::NOT_FOUND, "page_not_found", format!("page not found: {path}"))
+    ApiProblem::new(
+        StatusCode::NOT_FOUND,
+        "page_not_found",
+        format!("page not found: {path}"),
+    )
 }
 
 /// パスの検査（`..`・絶対パスは 403、`.md` 以外は 422）。
@@ -259,7 +266,10 @@ fn docs_target(
                 }
                 return Ok(DocsTarget {
                     repo: repo.name.clone(),
-                    default_branch: ops_changes::default_branch(path, repo.default_branch.as_deref()),
+                    default_branch: ops_changes::default_branch(
+                        path,
+                        repo.default_branch.as_deref(),
+                    ),
                     path: path.clone(),
                     root: ops_docs::normalize_root(&config.outputs.docs),
                     created: false,
@@ -353,7 +363,9 @@ fn link_base(project_id: ProjectId) -> String {
 
 /// 一時 worktree の置き場（取り込みの `.integrate` と同じ流儀）。
 fn temp_worktree(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".docs").join(ulid::Ulid::new().to_string())
+    workspace_root
+        .join(".docs")
+        .join(ulid::Ulid::new().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +379,11 @@ async fn docs_tree(
 ) -> ApiResult {
     let project_id = parse_project_id(&id)?;
     let query = QueryParams::parse(raw.as_deref(), &["q"])?;
-    let q = query.single("q")?.map(str::trim).filter(|q| !q.is_empty()).map(str::to_string);
+    let q = query
+        .single("q")?
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(str::to_string);
     let docs_repo_root = state.inner.docs_repo_root.clone();
     let view = state
         .blocking(move |store| {
@@ -385,7 +401,8 @@ async fn docs_tree(
             let items = paths
                 .into_iter()
                 .map(|path| {
-                    let raw = ops_docs::read_page(&target.path, &target.default_branch, &path).unwrap_or_default();
+                    let raw = ops_docs::read_page(&target.path, &target.default_branch, &path)
+                        .unwrap_or_default();
                     let commit = last.get(&path).cloned();
                     DocItem {
                         title: ops_docs::title_of(&raw, &path),
@@ -543,8 +560,15 @@ async fn delete_page(
     let project_id = parse_project_id(&id)?;
     let query = QueryParams::parse(raw.as_deref(), &["path", "etag", "message"])?;
     let requested = query.single("path")?.unwrap_or_default().to_string();
-    let etag = query.single("etag")?.map(str::to_string).filter(|e| !e.trim().is_empty());
-    let message = query.single("message")?.map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
+    let etag = query
+        .single("etag")?
+        .map(str::to_string)
+        .filter(|e| !e.trim().is_empty());
+    let message = query
+        .single("message")?
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
     let docs_repo_root = state.inner.docs_repo_root.clone();
     let workspace_root = state.inner.view.workspace_root.clone();
     let result = state
@@ -552,7 +576,9 @@ async fn delete_page(
             let project = load_project(store, project_id)?;
             let target = docs_target(store, &project, docs_repo_root.as_deref(), false)?;
             let path = page_path(&target.root, &requested)?;
-            let message = message.clone().unwrap_or_else(|| format!("docs: remove {path}"));
+            let message = message
+                .clone()
+                .unwrap_or_else(|| format!("docs: remove {path}"));
             let edit = PageEdit {
                 path,
                 body: None,
@@ -637,9 +663,9 @@ async fn promote(
                 .get(task_id)
                 .map_err(store_problem)?
                 .ok_or_else(|| ApiProblem::task_not_found(task_id))?;
-            let project_id = task
-                .project_id
-                .ok_or_else(|| docs_unavailable("このタスクは案件に属していません（文書の置き場がありません）"))?;
+            let project_id = task.project_id.ok_or_else(|| {
+                docs_unavailable("このタスクは案件に属していません（文書の置き場がありません）")
+            })?;
             let project = load_project(store, project_id)?;
             let target = docs_target(store, &project, docs_repo_root.as_deref(), true)?;
             let path = page_path(&target.root, &request.path)?;
@@ -680,18 +706,31 @@ fn artifact_text(
     workspace_root: &Path,
     name: &str,
 ) -> Result<String, ApiProblem> {
-    let rows = store.event_rows_for(task.id, None, usize::MAX).map_err(store_problem)?;
+    let rows = store
+        .event_rows_for(task.id, None, usize::MAX)
+        .map_err(store_problem)?;
     let views = crate::files::artifact_views(task, workspace_root, &rows);
     // 同じ名前が何度も出るなら**最後**のもの（いちばん新しい run）。
     let view = views
         .iter()
         .rev()
         .find(|v| v.artifact.name == name)
-        .ok_or_else(|| ApiProblem::new(StatusCode::NOT_FOUND, "artifact_not_found", format!("artifact not found: {name}")))?;
+        .ok_or_else(|| {
+            ApiProblem::new(
+                StatusCode::NOT_FOUND,
+                "artifact_not_found",
+                format!("artifact not found: {name}"),
+            )
+        })?;
     let ws = crate::files::canonical_workspace(task, workspace_root)?;
     let path = crate::files::resolve_artifact(&ws, &view.artifact.path)?;
-    let bytes = std::fs::read(&path)
-        .map_err(|_| ApiProblem::new(StatusCode::NOT_FOUND, "artifact_not_found", format!("artifact not readable: {name}")))?;
+    let bytes = std::fs::read(&path).map_err(|_| {
+        ApiProblem::new(
+            StatusCode::NOT_FOUND,
+            "artifact_not_found",
+            format!("artifact not readable: {name}"),
+        )
+    })?;
     String::from_utf8(bytes).map_err(|_| {
         ApiProblem::validation(vec![ValidationError {
             field: Some("name".into()),
@@ -737,7 +776,12 @@ pub(crate) fn backlinks(
             continue;
         }
         let at = last.get(&path).map(|c| c.at.clone()).unwrap_or_default();
-        out.push((at, path.clone(), ops_docs::title_of(&raw, &path), project_id));
+        out.push((
+            at,
+            path.clone(),
+            ops_docs::title_of(&raw, &path),
+            project_id,
+        ));
     }
     out
 }
@@ -754,7 +798,13 @@ mod tests {
             page_path("docs", "../escape.md").err().map(|p| p.code()),
             Some("path_forbidden")
         );
-        assert_eq!(page_path("docs", "a.txt").err().map(|p| p.code()), Some("validation"));
-        assert_eq!(page_path("docs", " ").err().map(|p| p.code()), Some("bad_request"));
+        assert_eq!(
+            page_path("docs", "a.txt").err().map(|p| p.code()),
+            Some("validation")
+        );
+        assert_eq!(
+            page_path("docs", " ").err().map(|p| p.code()),
+            Some("bad_request")
+        );
     }
 }

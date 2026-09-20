@@ -144,7 +144,10 @@ pub trait WorkerAdapter: Send + Sync {
     /// 既定は `None` = **この経路を持たないアダプタ**（`paperqa` / `local-deep-research` は道具立てが
     /// ホストの venv にあるので、そもそも `container::decide` がコンテナを選ばない）。
     /// `None` が返ったらディスパッチャはホストで走らせる。
-    fn with_container(&self, _plan: crate::container::SharedPlan) -> Option<Arc<dyn WorkerAdapter>> {
+    fn with_container(
+        &self,
+        _plan: crate::container::SharedPlan,
+    ) -> Option<Arc<dyn WorkerAdapter>> {
         None
     }
 }

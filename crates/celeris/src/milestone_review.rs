@@ -19,8 +19,8 @@
 
 use task_core::report::support_kind;
 use task_core::{
-    GenreSpec, ListFilter, ListOrder, Milestone, MilestoneStatus, Project, RoleSpec, Status, StoreError, Task,
-    TaskStore,
+    GenreSpec, ListFilter, ListOrder, Milestone, MilestoneStatus, Project, RoleSpec, Status,
+    StoreError, Task, TaskStore,
 };
 use task_ops::milestone_review::ReviewState;
 use time::OffsetDateTime;
@@ -118,7 +118,8 @@ pub fn schedule(
 ) -> Result<Vec<Task>, StoreError> {
     let mut started = Vec::new();
     for ready in ready_milestones(store)? {
-        let state = task_ops::milestone_review::review_state(store, ready.project.id, ready.milestone.id)?;
+        let state =
+            task_ops::milestone_review::review_state(store, ready.project.id, ready.milestone.id)?;
         if !needs_review(&state, ready.last_done_at) {
             continue;
         }
@@ -173,12 +174,17 @@ mod tests {
     use super::*;
 
     fn at(secs: i64) -> OffsetDateTime {
-        OffsetDateTime::from_unix_timestamp(1_800_000_000 + secs).unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        OffsetDateTime::from_unix_timestamp(1_800_000_000 + secs)
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH)
     }
 
     fn review_task(created_at: OffsetDateTime) -> Task {
-        use task_core::{Budget, MilestoneId, Status, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec};
+        use task_core::{
+            Budget, MilestoneId, Status, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec,
+        };
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -190,9 +196,19 @@ mod tests {
             depends_on: vec![],
             status: Status::Ready,
             priority: 1,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: "ws".into(), mode: None },
-            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: "ws".into(),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at,
@@ -212,11 +228,26 @@ mod tests {
     /// ADR-0038 D1: 同じ done の集合では 1 回だけ。done が増えたら（Go の後）また起きる。
     #[test]
     fn a_review_is_needed_once_per_set_of_finished_work() {
-        assert!(needs_review(&ReviewState::default(), Some(at(10))), "レビューがまだ無ければ起こす");
-        let state = ReviewState { task: Some(review_task(at(20))), reply: None };
-        assert!(!needs_review(&state, Some(at(10))), "同じ done の集合では 2 回目は起きない");
-        assert!(needs_review(&state, Some(at(30))), "レビューの後に done が増えたら再び起こす");
-        assert!(!needs_review(&state, None), "終わった仕事が無ければ起こさない");
+        assert!(
+            needs_review(&ReviewState::default(), Some(at(10))),
+            "レビューがまだ無ければ起こす"
+        );
+        let state = ReviewState {
+            task: Some(review_task(at(20))),
+            reply: None,
+        };
+        assert!(
+            !needs_review(&state, Some(at(10))),
+            "同じ done の集合では 2 回目は起きない"
+        );
+        assert!(
+            needs_review(&state, Some(at(30))),
+            "レビューの後に done が増えたら再び起こす"
+        );
+        assert!(
+            !needs_review(&state, None),
+            "終わった仕事が無ければ起こさない"
+        );
     }
 
     // ---- Phase 42（実機 2026-09-18）: 計画タスクは途中目標の「仕事」に数えない ----
@@ -230,6 +261,8 @@ mod tests {
     ) -> Task {
         use task_core::{Budget, TaskId, Tier, WorkerHint, WorkspaceSpec};
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -241,9 +274,19 @@ mod tests {
             depends_on: vec![],
             status,
             priority: 1,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: "ws".into(), mode: None },
-            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: "ws".into(),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at,
@@ -260,7 +303,10 @@ mod tests {
         }
     }
 
-    fn seed_project_and_milestone(store: &task_core::SqliteStore, title: &str) -> (task_core::Project, Milestone) {
+    fn seed_project_and_milestone(
+        store: &task_core::SqliteStore,
+        title: &str,
+    ) -> (task_core::Project, Milestone) {
         use task_core::{Project, ProjectId, ProjectStatus};
         let now = OffsetDateTime::now_utc();
         let project = Project {
@@ -275,7 +321,9 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        store.project_create(&project).unwrap_or_else(|e| panic!("project: {e}"));
+        store
+            .project_create(&project)
+            .unwrap_or_else(|e| panic!("project: {e}"));
         let milestone = store
             .milestone_create(project.id, "途中目標", "", MilestoneStatus::InProgress)
             .unwrap_or_else(|e| panic!("milestone: {e}"));
@@ -286,17 +334,36 @@ mod tests {
     /// 1 件以上」に見えてはいけない。計画 run は仕事に数えない。
     #[test]
     fn a_milestone_is_not_stalled_right_after_decomposition() {
-        let store = task_core::SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("open: {e}"));
+        let store =
+            task_core::SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("open: {e}"));
         let (project, milestone) = seed_project_and_milestone(&store, "分解直後");
         let now = OffsetDateTime::now_utc();
         store
-            .insert(&task_with(task_core::TaskKind::Plan, Status::Done, project.id, milestone.id, now))
+            .insert(&task_with(
+                task_core::TaskKind::Plan,
+                Status::Done,
+                project.id,
+                milestone.id,
+                now,
+            ))
             .unwrap_or_else(|e| panic!("insert plan: {e}"));
         store
-            .insert(&task_with(task_core::TaskKind::Execute, Status::Draft, project.id, milestone.id, now))
+            .insert(&task_with(
+                task_core::TaskKind::Execute,
+                Status::Draft,
+                project.id,
+                milestone.id,
+                now,
+            ))
             .unwrap_or_else(|e| panic!("insert child 1: {e}"));
         store
-            .insert(&task_with(task_core::TaskKind::Execute, Status::Draft, project.id, milestone.id, now))
+            .insert(&task_with(
+                task_core::TaskKind::Execute,
+                Status::Draft,
+                project.id,
+                milestone.id,
+                now,
+            ))
             .unwrap_or_else(|e| panic!("insert child 2: {e}"));
 
         let ready = ready_milestones(&store).unwrap_or_else(|e| panic!("ready: {e}"));
@@ -310,21 +377,44 @@ mod tests {
     /// （計画 run 自身は done の件数に数えない）。
     #[test]
     fn a_milestone_is_stalled_once_a_child_is_done_and_nothing_else_is_moving() {
-        let store = task_core::SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("open: {e}"));
+        let store =
+            task_core::SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("open: {e}"));
         let (project, milestone) = seed_project_and_milestone(&store, "1 件完了");
         let now = OffsetDateTime::now_utc();
         store
-            .insert(&task_with(task_core::TaskKind::Plan, Status::Done, project.id, milestone.id, now))
+            .insert(&task_with(
+                task_core::TaskKind::Plan,
+                Status::Done,
+                project.id,
+                milestone.id,
+                now,
+            ))
             .unwrap_or_else(|e| panic!("insert plan: {e}"));
         store
-            .insert(&task_with(task_core::TaskKind::Execute, Status::Done, project.id, milestone.id, now))
+            .insert(&task_with(
+                task_core::TaskKind::Execute,
+                Status::Done,
+                project.id,
+                milestone.id,
+                now,
+            ))
             .unwrap_or_else(|e| panic!("insert done child: {e}"));
         store
-            .insert(&task_with(task_core::TaskKind::Execute, Status::Draft, project.id, milestone.id, now))
+            .insert(&task_with(
+                task_core::TaskKind::Execute,
+                Status::Draft,
+                project.id,
+                milestone.id,
+                now,
+            ))
             .unwrap_or_else(|e| panic!("insert waiting child: {e}"));
 
         let ready = ready_milestones(&store).unwrap_or_else(|e| panic!("ready: {e}"));
-        assert_eq!(ready.len(), 1, "計画 run を除けば done 1 件・待ち 1 件で仕事は止まっている");
+        assert_eq!(
+            ready.len(),
+            1,
+            "計画 run を除けば done 1 件・待ち 1 件で仕事は止まっている"
+        );
         assert_eq!(ready[0].milestone.id, milestone.id);
         assert_eq!(ready[0].done, 1, "計画 run は done の件数に数えない");
         assert_eq!(ready[0].waiting.len(), 1);

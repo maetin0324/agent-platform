@@ -25,7 +25,9 @@ use crate::org::ProjectId;
 use crate::store::{SqliteStore, StoreError, format_rfc3339, parse_rfc3339};
 
 /// 認可 1 件の識別子（ULID）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct ApprovalId(#[schemars(with = "String")] pub Ulid);
 
 impl ApprovalId {
@@ -55,7 +57,9 @@ impl std::str::FromStr for ApprovalId {
 }
 
 /// 永続の規則の識別子（ULID）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct StandingRuleId(#[schemars(with = "String")] pub Ulid);
 
 impl StandingRuleId {
@@ -135,7 +139,11 @@ pub struct Approval {
     #[serde(with = "time::serde::rfc3339")]
     #[schemars(with = "String")]
     pub created_at: OffsetDateTime,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     #[schemars(with = "Option<String>")]
     pub decided_at: Option<OffsetDateTime>,
 }
@@ -208,27 +216,41 @@ fn row_to_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Approval,
     let created_at: String = row.get(7)?;
     let decided_at: Option<String> = row.get(8)?;
     let Ok(id) = id.parse::<ApprovalId>() else {
-        return Ok(Err(StoreError::Invalid(format!("invalid approval id: {id}"))));
+        return Ok(Err(StoreError::Invalid(format!(
+            "invalid approval id: {id}"
+        ))));
     };
     let project_id = match project_id {
         None => None,
         Some(raw) => match raw.parse::<ProjectId>() {
             Ok(v) => Some(v),
-            Err(_) => return Ok(Err(StoreError::Invalid(format!("invalid approval project_id: {raw}")))),
+            Err(_) => {
+                return Ok(Err(StoreError::Invalid(format!(
+                    "invalid approval project_id: {raw}"
+                ))));
+            }
         },
     };
     let task_id = match task_id {
         None => None,
         Some(raw) => match raw.parse::<TaskId>() {
             Ok(v) => Some(v),
-            Err(_) => return Ok(Err(StoreError::Invalid(format!("invalid approval task_id: {raw}")))),
+            Err(_) => {
+                return Ok(Err(StoreError::Invalid(format!(
+                    "invalid approval task_id: {raw}"
+                ))));
+            }
         },
     };
     let decision = match decision_col {
         None => None,
         Some(raw) => match Decision::parse(&raw) {
             Some(d) => Some(d),
-            None => return Ok(Err(StoreError::Invalid(format!("invalid approval decision: {raw}")))),
+            None => {
+                return Ok(Err(StoreError::Invalid(format!(
+                    "invalid approval decision: {raw}"
+                ))));
+            }
         },
     };
     Ok((|| {
@@ -249,13 +271,17 @@ fn row_to_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Approval,
     })())
 }
 
-fn row_to_standing_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<StandingRule, StoreError>> {
+fn row_to_standing_rule(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<StandingRule, StoreError>> {
     let id: String = row.get(0)?;
     let node_id: Option<String> = row.get(1)?;
     let rule: String = row.get(2)?;
     let created_at: String = row.get(3)?;
     let Ok(id) = id.parse::<StandingRuleId>() else {
-        return Ok(Err(StoreError::Invalid(format!("invalid standing rule id: {id}"))));
+        return Ok(Err(StoreError::Invalid(format!(
+            "invalid standing rule id: {id}"
+        ))));
     };
     Ok((|| {
         Ok(StandingRule {
@@ -295,7 +321,11 @@ impl ApprovalStore for SqliteStore {
     fn approval_get(&self, id: ApprovalId) -> Result<Option<Approval>, StoreError> {
         let conn = self.lock()?;
         let row = conn
-            .query_row(&format!("{SELECT_APPROVAL} WHERE id = ?1"), params![id.to_string()], row_to_approval)
+            .query_row(
+                &format!("{SELECT_APPROVAL} WHERE id = ?1"),
+                params![id.to_string()],
+                row_to_approval,
+            )
             .optional()?;
         match row {
             Some(r) => Ok(Some(r?)),
@@ -353,7 +383,11 @@ impl ApprovalStore for SqliteStore {
             return Ok(None);
         }
         let row = conn
-            .query_row(&format!("{SELECT_APPROVAL} WHERE id = ?1"), params![id.to_string()], row_to_approval)
+            .query_row(
+                &format!("{SELECT_APPROVAL} WHERE id = ?1"),
+                params![id.to_string()],
+                row_to_approval,
+            )
             .optional()?;
         match row {
             Some(r) => Ok(Some(r?)),
@@ -365,7 +399,12 @@ impl ApprovalStore for SqliteStore {
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO standing_rules (id, node_id, rule, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![rule.id.to_string(), rule.node_id, rule.rule, format_rfc3339(rule.created_at)?],
+            params![
+                rule.id.to_string(),
+                rule.node_id,
+                rule.rule,
+                format_rfc3339(rule.created_at)?
+            ],
         )?;
         Ok(())
     }
@@ -391,7 +430,10 @@ impl ApprovalStore for SqliteStore {
 
     fn standing_rule_delete(&self, id: StandingRuleId) -> Result<bool, StoreError> {
         let conn = self.lock()?;
-        let changed = conn.execute("DELETE FROM standing_rules WHERE id = ?1", params![id.to_string()])?;
+        let changed = conn.execute(
+            "DELETE FROM standing_rules WHERE id = ?1",
+            params![id.to_string()],
+        )?;
         Ok(changed > 0)
     }
 }
@@ -405,6 +447,7 @@ mod tests {
     fn node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
         OrgNode {
+            profile: Default::default(),
             id: id.to_string(),
             parent_id: parent.map(str::to_string),
             name: id.to_string(),
@@ -429,7 +472,12 @@ mod tests {
         store
     }
 
-    fn sample(node_id: &str, project: Option<ProjectId>, question: &str, at: OffsetDateTime) -> Approval {
+    fn sample(
+        node_id: &str,
+        project: Option<ProjectId>,
+        question: &str,
+        at: OffsetDateTime,
+    ) -> Approval {
         Approval {
             id: ApprovalId::new(),
             project_id: project,
@@ -469,19 +517,37 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let project = ProjectId::new();
         let other = ProjectId::new();
-        let a = sample("coding-poc", Some(project), "a", now - time::Duration::minutes(2));
-        let b = sample("coding-poc", Some(project), "b", now - time::Duration::minutes(1));
+        let a = sample(
+            "coding-poc",
+            Some(project),
+            "a",
+            now - time::Duration::minutes(2),
+        );
+        let b = sample(
+            "coding-poc",
+            Some(project),
+            "b",
+            now - time::Duration::minutes(1),
+        );
         let c = sample("secretary", Some(other), "c", now);
         store.approval_append(&a).expect("append");
         store.approval_append(&b).expect("append");
         store.approval_append(&c).expect("append");
 
         let all = store.approval_list(None, None, None).expect("list");
-        assert_eq!(all.iter().map(|x| x.id).collect::<Vec<_>>(), vec![a.id, b.id, c.id], "oldest first");
+        assert_eq!(
+            all.iter().map(|x| x.id).collect::<Vec<_>>(),
+            vec![a.id, b.id, c.id],
+            "oldest first"
+        );
 
-        let by_project = store.approval_list(None, Some(project), None).expect("list");
+        let by_project = store
+            .approval_list(None, Some(project), None)
+            .expect("list");
         assert_eq!(by_project.len(), 2);
-        let by_node = store.approval_list(None, None, Some("secretary")).expect("list");
+        let by_node = store
+            .approval_list(None, None, Some("secretary"))
+            .expect("list");
         assert_eq!(by_node.iter().map(|x| x.id).collect::<Vec<_>>(), vec![c.id]);
 
         store
@@ -489,14 +555,25 @@ mod tests {
             .expect("decide")
             .expect("some");
         let pending = store.approval_list(Some(true), None, None).expect("list");
-        assert_eq!(pending.iter().map(|x| x.id).collect::<Vec<_>>(), vec![b.id, c.id]);
+        assert_eq!(
+            pending.iter().map(|x| x.id).collect::<Vec<_>>(),
+            vec![b.id, c.id]
+        );
         // R5（Phase 27）: `Some(false)` は**決定済みだけ**（以前は絞り込み無しと同じだった）。
         let decided = store.approval_list(Some(false), None, None).expect("list");
         assert_eq!(decided.iter().map(|x| x.id).collect::<Vec<_>>(), vec![a.id]);
         assert!(decided.iter().all(|x| x.decision.is_some()));
         // 絞り込みは他の条件と AND で効く。
-        assert!(store.approval_list(Some(false), None, Some("secretary")).expect("list").is_empty());
-        assert_eq!(store.approval_list(None, None, None).expect("list").len(), 3);
+        assert!(
+            store
+                .approval_list(Some(false), None, Some("secretary"))
+                .expect("list")
+                .is_empty()
+        );
+        assert_eq!(
+            store.approval_list(None, None, None).expect("list").len(),
+            3
+        );
     }
 
     #[test]
@@ -517,7 +594,9 @@ mod tests {
 
         // 無い id は None（何も書かない）。
         assert_eq!(
-            store.approval_decide(ApprovalId::new(), Decision::Once, None, now).expect("decide"),
+            store
+                .approval_decide(ApprovalId::new(), Decision::Once, None, now)
+                .expect("decide"),
             None
         );
 
@@ -569,8 +648,14 @@ mod tests {
         );
 
         assert!(store.standing_rule_delete(for_coding.id).expect("delete"));
-        assert!(!store.standing_rule_delete(for_coding.id).expect("delete"), "already gone");
+        assert!(
+            !store.standing_rule_delete(for_coding.id).expect("delete"),
+            "already gone"
+        );
         let after = store.standing_rule_list(Some("coding-poc")).expect("list");
-        assert_eq!(after.iter().map(|r| r.id).collect::<Vec<_>>(), vec![global.id]);
+        assert_eq!(
+            after.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![global.id]
+        );
     }
 }

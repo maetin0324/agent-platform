@@ -49,7 +49,9 @@ pub(crate) async fn stream(
     let requested = header_after.or(query_after);
     let task_filter = query.task_id("task_id")?;
 
-    let slot = state.try_open_stream().ok_or_else(ApiProblem::too_many_streams)?;
+    let slot = state
+        .try_open_stream()
+        .ok_or_else(ApiProblem::too_many_streams)?;
     let latest = state
         .blocking(|store| store.latest_event_id().map_err(store_problem))
         .await?;
@@ -63,7 +65,10 @@ pub(crate) async fn stream(
         daemon: snapshot,
     };
     let (tx, rx) = mpsc::channel::<Bytes>(CHANNEL_CAPACITY);
-    let first_frames = [frame("hello", None, &hello), reset.as_ref().and_then(|r| frame("reset", None, r))];
+    let first_frames = [
+        frame("hello", None, &hello),
+        reset.as_ref().and_then(|r| frame("reset", None, r)),
+    ];
     for bytes in first_frames.into_iter().flatten() {
         if tx.try_send(bytes).is_err() {
             return Err(ApiProblem::internal("stream buffer is unavailable"));
@@ -72,7 +77,9 @@ pub(crate) async fn stream(
     tokio::spawn(run(state, slot, tx, cursor, task_filter, daemon));
 
     let body = futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|bytes| (Ok::<Bytes, Infallible>(bytes), rx))
+        rx.recv()
+            .await
+            .map(|bytes| (Ok::<Bytes, Infallible>(bytes), rx))
     });
     let mut response = Response::new(Body::from_stream(body));
     let headers = response.headers_mut();
@@ -87,7 +94,11 @@ pub(crate) async fn stream(
 
 /// 送信開始位置と、必要なら `reset`。省略時は「今」（最新 id）から。要求 id が最新より大きい（DB が入れ替わった）か、
 /// 最新までが `threshold` 件を超えるなら、最新 id から続ける。
-pub(crate) fn start_position(requested: Option<u64>, latest: u64, threshold: u64) -> (u64, Option<StreamReset>) {
+pub(crate) fn start_position(
+    requested: Option<u64>,
+    latest: u64,
+    threshold: u64,
+) -> (u64, Option<StreamReset>) {
     match requested {
         None => (latest, None),
         Some(after) if after > latest => (
@@ -120,8 +131,10 @@ async fn run(
     let mut shutdown = state.inner.shutdown.subscribe();
     let mut poll = tokio::time::interval(tuning.poll_interval);
     poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut heartbeat =
-        tokio::time::interval_at(Instant::now() + tuning.heartbeat_interval, tuning.heartbeat_interval);
+    let mut heartbeat = tokio::time::interval_at(
+        Instant::now() + tuning.heartbeat_interval,
+        tuning.heartbeat_interval,
+    );
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut daemon_open = true;
 
@@ -165,12 +178,19 @@ async fn poll_events(
         state.inner.stream_polls.fetch_add(1, Ordering::SeqCst);
         let after = *cursor;
         let rows = match state
-            .blocking(move |store| store.events_since(after, STREAM_BATCH).map_err(store_problem))
+            .blocking(move |store| {
+                store
+                    .events_since(after, STREAM_BATCH)
+                    .map_err(store_problem)
+            })
             .await
         {
             Ok(rows) => rows,
             Err(problem) => {
-                tracing::warn!(code = problem.code(), "SSE poll failed; retrying on the next tick");
+                tracing::warn!(
+                    code = problem.code(),
+                    "SSE poll failed; retrying on the next tick"
+                );
                 return true;
             }
         };
@@ -245,13 +265,20 @@ mod tests {
         assert_eq!(reset.map(|r| r.reason), Some("cursor_too_old".to_string()));
         let (cursor, reset) = start_position(Some(60), 50, 10_000);
         assert_eq!(cursor, 50);
-        assert_eq!(reset.map(|r| (r.reason, r.cursor)), Some(("cursor_ahead".to_string(), 50)));
+        assert_eq!(
+            reset.map(|r| (r.reason, r.cursor)),
+            Some(("cursor_ahead".to_string(), 50))
+        );
     }
 
     #[test]
     fn frames_carry_event_name_optional_id_and_single_line_data() {
-        let bytes = frame("task.event", Some(7), &serde_json::json!({"a": "x\ny"})).unwrap_or_default();
-        assert_eq!(&bytes[..], b"event: task.event\nid: 7\ndata: {\"a\":\"x\\ny\"}\n\n");
+        let bytes =
+            frame("task.event", Some(7), &serde_json::json!({"a": "x\ny"})).unwrap_or_default();
+        assert_eq!(
+            &bytes[..],
+            b"event: task.event\nid: 7\ndata: {\"a\":\"x\\ny\"}\n\n"
+        );
         let bytes = frame("heartbeat", None, &serde_json::json!({"now": "t"})).unwrap_or_default();
         assert_eq!(&bytes[..], b"event: heartbeat\ndata: {\"now\":\"t\"}\n\n");
     }

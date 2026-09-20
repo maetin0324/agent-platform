@@ -10,7 +10,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{Budget, Event, GenreSpec, MilestoneId, Status, Task, TaskCategory, TaskId, TaskStore, Tier};
+use task_core::{
+    Budget, Event, GenreSpec, MilestoneId, Status, Task, TaskCategory, TaskId, TaskStore, Tier,
+};
 use time::OffsetDateTime;
 
 use crate::add::{CriterionSpec, PriorityInput};
@@ -66,6 +68,16 @@ pub struct TaskEdit {
     pub max_wall_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
+    /// ADR-0046 D2（Phase 59）: 必要な能力タグの差し替え（小文字 `[a-z0-9._-]`、最大 12 個）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    /// ADR-0046 D4（Phase 59）: 進め方（`prototype` / `production` / `research`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<task_core::TaskMode>,
+    /// ADR-0046 D3（Phase 59）: ハーネス（`tasks.genre` 列をそのまま harness id として使う）。
+    /// `null` で外す。`genres`（= ハーネスのレジストリの射影）が空でなければ知らない id は 422。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<Option<String>>,
     /// 楽観的排他（現在の `status` と違えば 409）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_status: Option<Status>,
@@ -134,7 +146,9 @@ pub fn edit_task(
     }
     if let Some(objective) = edit.objective {
         if objective.trim().is_empty() {
-            return Err(OpsError::Validation("objective must not be blank".to_string()));
+            return Err(OpsError::Validation(
+                "objective must not be blank".to_string(),
+            ));
         }
         if objective != task.objective {
             task.objective = objective;
@@ -147,7 +161,10 @@ pub fn edit_task(
                 "acceptance must have at least one criterion".to_string(),
             ));
         }
-        let built: Vec<_> = acceptance.into_iter().map(CriterionSpec::into_criterion).collect();
+        let built: Vec<_> = acceptance
+            .into_iter()
+            .map(CriterionSpec::into_criterion)
+            .collect();
         if built != task.acceptance {
             task.acceptance = built;
             fields.push("acceptance".to_string());
@@ -173,6 +190,35 @@ pub fn edit_task(
         task.category = category;
         fields.push("category".to_string());
     }
+    // ADR-0046 D2（Phase 59）: 必要な能力タグ（差し替え）。
+    if let Some(skills) = edit.skills {
+        let normalized = task_core::normalize_skills(&skills).map_err(OpsError::Validation)?;
+        if normalized != task.skills {
+            task.skills = normalized;
+            fields.push("skills".to_string());
+        }
+    }
+    // ADR-0046 D4（Phase 59）: 進め方。
+    if let Some(mode) = edit.mode
+        && mode != task.mode
+    {
+        task.mode = mode;
+        fields.push("mode".to_string());
+    }
+    // ADR-0046 D3（Phase 59）: ハーネス（`tasks.genre` 列）。知らない id は 422
+    // （`genres` が空の設定では検証しない。作成時と同じ規律）。
+    if let Some(harness) = edit.harness {
+        if let Some(id) = harness.as_deref()
+            && !genres.is_empty()
+            && GenreSpec::find(genres, id).is_none()
+        {
+            return Err(OpsError::Validation(format!("unknown harness: {id:?}")));
+        }
+        if harness != task.genre {
+            task.genre = harness;
+            fields.push("harness".to_string());
+        }
+    }
     if let Some(names) = edit.repos {
         // ADR-0043 D2: 名前 → `RepoRef`。解決の規則は `POST /tasks`（`add::resolve_repos` の
         // 「明示」の枝）と同じ ＝ **そのタスクの案件の中**から引く。継承（親 → primary）は
@@ -186,7 +232,8 @@ pub fn edit_task(
                 ));
             };
             let available = store.repo_list(project_id)?;
-            task_core::resolve_task_repos(&available, &names).map_err(|e| OpsError::Validation(e.to_string()))?
+            task_core::resolve_task_repos(&available, &names)
+                .map_err(|e| OpsError::Validation(e.to_string()))?
         };
         if resolved != task.repos {
             task.repos = resolved;
@@ -197,7 +244,9 @@ pub fn edit_task(
         if let Some(node_id) = assignee.as_deref() {
             let org = store.org_list()?;
             if !org.iter().any(|n| n.id == node_id) {
-                return Err(OpsError::Validation(format!("assignee {node_id:?} is not an org node")));
+                return Err(OpsError::Validation(format!(
+                    "assignee {node_id:?} is not an org node"
+                )));
             }
         }
         if assignee != task.assignee {
@@ -241,7 +290,11 @@ pub fn edit_task(
                     "milestone_id requires the task to belong to a project".to_string(),
                 ));
             };
-            if !store.milestone_list(project_id)?.iter().any(|m| m.id == mid) {
+            if !store
+                .milestone_list(project_id)?
+                .iter()
+                .any(|m| m.id == mid)
+            {
                 return Err(OpsError::Validation(format!(
                     "milestone {mid} does not belong to project {project_id}"
                 )));
@@ -255,10 +308,16 @@ pub fn edit_task(
     if let Some(depends_on) = edit.depends_on {
         for dep in &depends_on {
             if *dep == id {
-                return Err(OpsError::Validation(format!("task {id} cannot depend on itself")));
+                return Err(OpsError::Validation(format!(
+                    "task {id} cannot depend on itself"
+                )));
             }
             match store.get(*dep)? {
-                None => return Err(OpsError::Validation(format!("dependency {dep} does not exist"))),
+                None => {
+                    return Err(OpsError::Validation(format!(
+                        "dependency {dep} does not exist"
+                    )));
+                }
                 Some(d) if matches!(d.status, Status::Failed | Status::Cancelled) => {
                     return Err(OpsError::Validation(format!(
                         "dependency {dep} has status {:?} and cannot be depended on",
@@ -280,6 +339,14 @@ pub fn edit_task(
             task.depends_on = depends_on;
             fields.push("depends_on".to_string());
         }
+    }
+    // ADR-0046 D5（Phase 59）: 担当かハーネスを変えたら、その担当がそのハーネスを受けられること。
+    if fields.iter().any(|f| f == "assignee" || f == "harness")
+        && let Some(assignee) = task.assignee.as_deref()
+    {
+        let org = store.org_list()?;
+        crate::matching::assignee_accepts(&org, assignee, task.genre.as_deref())
+            .map_err(OpsError::Validation)?;
     }
     let budget = Budget {
         max_turns: edit.max_turns.unwrap_or(task.budget.max_turns),
@@ -310,7 +377,11 @@ pub fn edit_task(
 
 /// `starts` から `depends_on` をたどって `target` に着くか（着くなら最初に見つけた経路上の id）。
 /// 深さではなく「訪れた集合」で止めるので、既に循環している DB でも終わる。
-fn reaches(store: &dyn TaskStore, starts: &[TaskId], target: TaskId) -> Result<Option<TaskId>, OpsError> {
+fn reaches(
+    store: &dyn TaskStore,
+    starts: &[TaskId],
+    target: TaskId,
+) -> Result<Option<TaskId>, OpsError> {
     let mut seen: std::collections::HashSet<TaskId> = std::collections::HashSet::new();
     let mut stack: Vec<TaskId> = starts.to_vec();
     while let Some(id) = stack.pop() {
@@ -337,6 +408,8 @@ mod tests {
     fn task_with(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
@@ -402,7 +475,11 @@ mod tests {
         let after = store.get(id).expect("get").expect("task");
         assert_eq!(after.title, "新しい題名");
         assert_eq!(after.priority, 30);
-        assert_eq!(after.labels, vec!["infra".to_string(), "urgent".to_string()], "重複は畳む");
+        assert_eq!(
+            after.labels,
+            vec!["infra".to_string(), "urgent".to_string()],
+            "重複は畳む"
+        );
         assert_eq!(after.category, TaskCategory::Bug);
         assert_eq!(after.worker_hint.tier, Tier::Frontier);
         assert_eq!(after.budget.max_turns, 30);
@@ -440,7 +517,10 @@ mod tests {
                 OffsetDateTime::now_utc(),
             )
             .unwrap_err();
-            assert!(matches!(err, OpsError::InvalidState { .. }), "{status:?}: {err}");
+            assert!(
+                matches!(err, OpsError::InvalidState { .. }),
+                "{status:?}: {err}"
+            );
         }
         for status in [Status::Running, Status::Reviewing] {
             let store = SqliteStore::open_in_memory().expect("store");
@@ -511,7 +591,10 @@ mod tests {
         }
         let after = store.get(id).expect("get").expect("task");
         assert_eq!(after.title, "t");
-        assert!(store.events_for(id).expect("events").is_empty(), "何も積まない");
+        assert!(
+            store.events_for(id).expect("events").is_empty(),
+            "何も積まない"
+        );
     }
 
     /// Phase 53 の監査: `PATCH depends_on` で**循環**は作れない（作成時は構造上できなかった）。
@@ -536,8 +619,18 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .unwrap_err();
-        assert!(matches!(err, OpsError::Validation(ref m) if m.contains("cycle")), "{err}");
-        assert!(store.get(a.id).expect("get").expect("task").depends_on.is_empty());
+        assert!(
+            matches!(err, OpsError::Validation(ref m) if m.contains("cycle")),
+            "{err}"
+        );
+        assert!(
+            store
+                .get(a.id)
+                .expect("get")
+                .expect("task")
+                .depends_on
+                .is_empty()
+        );
 
         // 循環にならない張り替えは通る。
         let c = task_with(Status::Ready);
@@ -582,7 +675,10 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .unwrap_err();
-        assert!(matches!(err, OpsError::Validation(ref m) if m.contains("is not one of genre")), "{err}");
+        assert!(
+            matches!(err, OpsError::Validation(ref m) if m.contains("is not one of genre")),
+            "{err}"
+        );
 
         let result = edit_task(
             &store,
@@ -615,7 +711,10 @@ mod tests {
         store
             .acquire_lease(id, "run-1", std::time::Duration::from_secs(60))
             .expect("lease");
-        assert_eq!(store.get(id).expect("get").expect("task").status, Status::Running);
+        assert_eq!(
+            store.get(id).expect("get").expect("task").status,
+            Status::Running
+        );
 
         // 古い写しを持ったまま編集しても、状態機械の 3 つは巻き戻らない。
         let result = edit_task(
@@ -684,7 +783,9 @@ mod tests {
     /// 空配列は「リポジトリを使わない」、案件に属さないタスクの `repos` も 422。
     #[test]
     fn repos_are_resolved_by_name_within_the_tasks_project() {
-        use task_core::{Project, ProjectId, ProjectRepo, ProjectStatus, RepoId, RepoKind, RepoRun};
+        use task_core::{
+            Project, ProjectId, ProjectRepo, ProjectStatus, RepoId, RepoKind, RepoRun,
+        };
 
         let store = SqliteStore::open_in_memory().expect("store");
         let now = OffsetDateTime::now_utc();
@@ -741,7 +842,12 @@ mod tests {
         .expect("edit repos");
         assert_eq!(result.fields, vec!["repos".to_string()]);
         assert_eq!(
-            result.task.repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            result
+                .task
+                .repos
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["benchfs-paper", "benchfs"],
             "書いた順がそのまま（先頭が cwd）"
         );

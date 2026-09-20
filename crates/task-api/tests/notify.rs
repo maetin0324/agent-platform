@@ -24,7 +24,11 @@ fn g(path: &str) -> axum::http::Request<axum::body::Body> {
 }
 
 fn p(path: &str) -> axum::http::Request<axum::body::Body> {
-    post_json_with(path, &serde_json::json!({}), &[("authorization", auth().as_str())])
+    post_json_with(
+        path,
+        &serde_json::json!({}),
+        &[("authorization", auth().as_str())],
+    )
 }
 
 fn spawn_test_double(
@@ -68,7 +72,11 @@ fn env_with_webhook(
 async fn the_test_endpoint_requires_a_token() {
     let (env, _tmp) = env_with_webhook(true, Some(TOKEN.into()), None);
     let app = env.router();
-    let resp = send(&app, post_json("/api/v1/notify/test", &serde_json::json!({}))).await;
+    let resp = send(
+        &app,
+        post_json("/api/v1/notify/test", &serde_json::json!({})),
+    )
+    .await;
     assert_problem(&resp, 401, "unauthorized");
 }
 
@@ -77,7 +85,11 @@ async fn the_test_endpoint_requires_a_token() {
 async fn the_test_endpoint_requires_a_token_when_token_file_is_not_configured() {
     let (env, _tmp) = env_with_webhook(true, None, None);
     let app = env.router();
-    let resp = send(&app, post_json("/api/v1/notify/test", &serde_json::json!({}))).await;
+    let resp = send(
+        &app,
+        post_json("/api/v1/notify/test", &serde_json::json!({})),
+    )
+    .await;
     assert_problem(&resp, 401, "unauthorized");
     // 読み取りの `GET /notify` は通常の認証だけ（トークン未設定なら誰でも読める）。
     let resp = send(&app, get("/api/v1/notify")).await;
@@ -93,7 +105,10 @@ async fn the_test_endpoint_is_409_when_no_webhook_is_registered() {
     let resp = send(&app, p("/api/v1/notify/test")).await;
     let problem = assert_problem(&resp, 409, "notify_unavailable");
     assert!(
-        problem["detail"].as_str().unwrap_or_default().contains("discord-webhook"),
+        problem["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("discord-webhook"),
         "{problem}"
     );
 }
@@ -123,7 +138,10 @@ async fn the_test_endpoint_returns_200_with_the_outcome_from_celeris() {
     let body = resp.json();
     assert_eq!(body["ok"], true);
     assert_eq!(body["detail"], "the test message was delivered");
-    assert!(!resp.text().contains("discord.invalid"), "URL must not leak");
+    assert!(
+        !resp.text().contains("discord.invalid"),
+        "URL must not leak"
+    );
 }
 
 /// 送れなかったときも 200（`ok = false`）。理由に URL は入らない。
@@ -220,7 +238,13 @@ async fn get_notify_omits_project_id_for_kinds_without_a_project() {
     let (env, _tmp) = env_with_webhook(true, Some(TOKEN.into()), None);
     let now = OffsetDateTime::now_utc();
     env.store
-        .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ: テスト", None, now)
+        .notification_upsert_pending(
+            NotificationKind::BadNews,
+            "r1",
+            "悪い知らせ: テスト",
+            None,
+            now,
+        )
         .expect("upsert");
     let app = env.router();
 
@@ -230,7 +254,10 @@ async fn get_notify_omits_project_id_for_kinds_without_a_project() {
     let recent = body["recent"].as_array().expect("recent");
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0]["kind"], "bad_news");
-    assert!(recent[0].get("project_id").is_none() || recent[0]["project_id"].is_null(), "{recent:?}");
+    assert!(
+        recent[0].get("project_id").is_none() || recent[0]["project_id"].is_null(),
+        "{recent:?}"
+    );
 }
 
 #[tokio::test]

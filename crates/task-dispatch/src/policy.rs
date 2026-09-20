@@ -46,7 +46,10 @@ pub struct Cooldown {
 /// `ProviderPolicy::select` の結果（ADR-0012 D2, P-20 / P-33）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
-    Picked { adapter: AdapterId, provider: ProviderId },
+    Picked {
+        adapter: AdapterId,
+        provider: ProviderId,
+    },
     /// 条件（adapter 指定・tier）に合うプロバイダはあるが、全て cooldown 中か除外されている。一時的。
     Busy,
     /// 条件に合うプロバイダが設定に 1 つも無い。設定を直さない限り解消しない。
@@ -63,7 +66,9 @@ pub trait ProviderPolicy: Send {
     /// 「候補なし」と「一時的に不可」を区別できず、選べなければ `Busy`（従来どおり待つ）を返す。
     fn select(&self, hint: &WorkerHint, now: Instant, excluded: &HashSet<ProviderId>) -> Selection {
         match self.pick(hint, now) {
-            Some((adapter, provider)) if !excluded.contains(&provider) => Selection::Picked { adapter, provider },
+            Some((adapter, provider)) if !excluded.contains(&provider) => {
+                Selection::Picked { adapter, provider }
+            }
             _ => Selection::Busy,
         }
     }
@@ -109,7 +114,9 @@ impl StaticPolicy {
     }
 
     fn cooling_down(&self, p: &ProviderSpec, now: Instant) -> bool {
-        self.cooldown_until.get(&p.id).is_some_and(|(until, _)| *until > now)
+        self.cooldown_until
+            .get(&p.id)
+            .is_some_and(|(until, _)| *until > now)
     }
 }
 
@@ -130,7 +137,8 @@ impl ProviderPolicy for StaticPolicy {
             ProviderOutcome::Throttled { retry_after } => {
                 let until = Instant::now() + *retry_after;
                 tracing::debug!(%provider, ?until, "policy: throttled");
-                self.cooldown_until.insert(provider, (until, CooldownReason::Throttled));
+                self.cooldown_until
+                    .insert(provider, (until, CooldownReason::Throttled));
             }
             ProviderOutcome::AuthFailed | ProviderOutcome::Exhausted => {
                 let until = Instant::now() + self.error_cooldown;
@@ -392,11 +400,19 @@ mod tests {
         );
         let now = Instant::now();
         let h = hint(Tier::Standard, Some("claude-code"));
-        let picked = |p: &str| Selection::Picked { adapter: "claude-code".into(), provider: p.into() };
+        let picked = |p: &str| Selection::Picked {
+            adapter: "claude-code".into(),
+            provider: p.into(),
+        };
         assert_eq!(policy.select(&h, now, &HashSet::new()), picked("acct-a"));
         let excluded: HashSet<ProviderId> = ["acct-a".to_string()].into();
         assert_eq!(policy.select(&h, now, &excluded), picked("acct-b"));
-        policy.report("acct-b".into(), &ProviderOutcome::Throttled { retry_after: Duration::from_secs(60) });
+        policy.report(
+            "acct-b".into(),
+            &ProviderOutcome::Throttled {
+                retry_after: Duration::from_secs(60),
+            },
+        );
         assert_eq!(policy.select(&h, now, &excluded), picked("acct-c"));
         let all: HashSet<ProviderId> = ["acct-a".to_string(), "acct-c".to_string()].into();
         assert_eq!(policy.select(&h, now, &all), Selection::Busy);
@@ -405,12 +421,28 @@ mod tests {
     /// ADR-0012 D2（P-33）: 設定に合う行が無い場合は `NoMatchingProvider`、合う行が cooldown 中なら `Busy`。
     #[test]
     fn select_distinguishes_no_matching_provider_from_busy() {
-        let mut policy = StaticPolicy::new(vec![spec("p1", "codex", &[Tier::Frontier], 1)], Duration::from_secs(5));
+        let mut policy = StaticPolicy::new(
+            vec![spec("p1", "codex", &[Tier::Frontier], 1)],
+            Duration::from_secs(5),
+        );
         let now = Instant::now();
-        assert_eq!(policy.select(&hint(Tier::Standard, None), now, &HashSet::new()), Selection::NoMatchingProvider);
-        assert_eq!(policy.select(&hint(Tier::Frontier, Some("claude-code")), now, &HashSet::new()), Selection::NoMatchingProvider);
+        assert_eq!(
+            policy.select(&hint(Tier::Standard, None), now, &HashSet::new()),
+            Selection::NoMatchingProvider
+        );
+        assert_eq!(
+            policy.select(
+                &hint(Tier::Frontier, Some("claude-code")),
+                now,
+                &HashSet::new()
+            ),
+            Selection::NoMatchingProvider
+        );
         policy.report("p1".into(), &ProviderOutcome::Exhausted);
-        assert_eq!(policy.select(&hint(Tier::Frontier, None), now, &HashSet::new()), Selection::Busy);
+        assert_eq!(
+            policy.select(&hint(Tier::Frontier, None), now, &HashSet::new()),
+            Selection::Busy
+        );
     }
 
     /// ADR-0013 D4: `cooldowns` は期限内のものだけを理由つきで返し、期限が過ぎたものは返さない。
@@ -426,17 +458,36 @@ mod tests {
         );
         let now = Instant::now();
         assert!(policy.cooldowns(now).is_empty());
-        policy.report("b".into(), &ProviderOutcome::Throttled { retry_after: Duration::from_secs(60) });
+        policy.report(
+            "b".into(),
+            &ProviderOutcome::Throttled {
+                retry_after: Duration::from_secs(60),
+            },
+        );
         policy.report("a".into(), &ProviderOutcome::AuthFailed);
         policy.report("c".into(), &ProviderOutcome::Exhausted);
         let active = policy.cooldowns(Instant::now());
         assert_eq!(
-            active.iter().map(|c| (c.provider.as_str(), c.reason)).collect::<Vec<_>>(),
-            vec![("a", CooldownReason::AuthFailed), ("b", CooldownReason::Throttled), ("c", CooldownReason::Exhausted)]
+            active
+                .iter()
+                .map(|c| (c.provider.as_str(), c.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                ("a", CooldownReason::AuthFailed),
+                ("b", CooldownReason::Throttled),
+                ("c", CooldownReason::Exhausted)
+            ]
         );
         // throttled（60 秒）だけが先に切れる。
         let later = Instant::now() + Duration::from_secs(120);
-        assert_eq!(policy.cooldowns(later).iter().map(|c| c.provider.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
+        assert_eq!(
+            policy
+                .cooldowns(later)
+                .iter()
+                .map(|c| c.provider.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
     }
 
     /// `select` を実装しない既存のポリシー（供給層）は、`pick` からの既定実装で従来どおり動く。
@@ -456,8 +507,14 @@ mod tests {
         let h = hint(Tier::Standard, None);
         assert_eq!(
             PickOnly.select(&h, now, &HashSet::new()),
-            Selection::Picked { adapter: "fake".into(), provider: "only".into() }
+            Selection::Picked {
+                adapter: "fake".into(),
+                provider: "only".into()
+            }
         );
-        assert_eq!(PickOnly.select(&h, now, &["only".to_string()].into()), Selection::Busy);
+        assert_eq!(
+            PickOnly.select(&h, now, &["only".to_string()].into()),
+            Selection::Busy
+        );
     }
 }

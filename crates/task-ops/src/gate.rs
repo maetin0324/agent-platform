@@ -32,7 +32,11 @@ pub struct TransitionResult {
 /// `since_id`（遷移前の `latest_event_id()`）より後に追記されたイベントのうち、`subject` 以外の
 /// タスクに付いた `Transitioned{to: Cancelled, reason: "cancel" | "dependency_failed"}` を
 /// `TaskRef` にして返す（`docs/gui/api.md` §5.7）。
-fn collect_cascaded(store: &dyn TaskStore, subject: TaskId, since_id: u64) -> Result<Vec<TaskRef>, OpsError> {
+fn collect_cascaded(
+    store: &dyn TaskStore,
+    subject: TaskId,
+    since_id: u64,
+) -> Result<Vec<TaskRef>, OpsError> {
     let rows = store.events_since(since_id, CASCADE_EVENTS_LIMIT)?;
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -58,7 +62,10 @@ fn collect_cascaded(store: &dyn TaskStore, subject: TaskId, since_id: u64) -> Re
 
 fn check_expected(actual: Status, expected: Option<Status>) -> Result<(), OpsError> {
     match expected {
-        Some(exp) if exp != actual => Err(OpsError::Conflict { expected: exp, actual }),
+        Some(exp) if exp != actual => Err(OpsError::Conflict {
+            expected: exp,
+            actual,
+        }),
         _ => Ok(()),
     }
 }
@@ -172,7 +179,10 @@ pub fn answer(
     let outcome = store.apply_transition(
         id,
         Trigger::Answer,
-        Some(Event::Answered { question, answer: answer.clone() }),
+        Some(Event::Answered {
+            question,
+            answer: answer.clone(),
+        }),
     )?;
     let cascaded = collect_cascaded(store, id, since_id)?;
     // GUI 監査 H2: `POST /tasks/{id}/answer` で答えたときも、そのタスクの未決の `approvals` を
@@ -191,7 +201,11 @@ pub fn answer(
 /// `task_id` に紐づく未決の `approvals` を、渡された `answer` で `once` に決定する。
 /// `task_ops::approval::decide` は呼ばない（そちらは決定のたびに `gate::answer` を呼び直すため、
 /// ここから呼ぶと循環する。ストアへの書き込みだけをここで完結させる）。
-pub(crate) fn settle_pending_approvals(store: &dyn TaskStore, task_id: TaskId, answer: &str) -> Result<(), OpsError> {
+pub(crate) fn settle_pending_approvals(
+    store: &dyn TaskStore,
+    task_id: TaskId,
+    answer: &str,
+) -> Result<(), OpsError> {
     let now = OffsetDateTime::now_utc();
     let pending = store.approval_list(Some(true), None, None)?;
     for approval in pending.into_iter().filter(|a| a.task_id == Some(task_id)) {
@@ -203,7 +217,11 @@ pub(crate) fn settle_pending_approvals(store: &dyn TaskStore, task_id: TaskId, a
 /// 非終端（`draft/ready/running/blocked/reviewing`）のタスクだけを `Trigger::Cancel` で
 /// `cancelled` にする。終端はエラーにし、状態は変えない（ADR-0010 D1, P-4）。子・後続への
 /// 取り消し伝播は `TaskStore::apply_transition` がストア側の同一トランザクションで行う。
-pub fn cancel(store: &dyn TaskStore, id: TaskId, expected: Option<Status>) -> Result<TransitionResult, OpsError> {
+pub fn cancel(
+    store: &dyn TaskStore,
+    id: TaskId,
+    expected: Option<Status>,
+) -> Result<TransitionResult, OpsError> {
     let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
     check_expected(task.status, expected)?;
 
@@ -231,12 +249,16 @@ pub fn cancel(store: &dyn TaskStore, id: TaskId, expected: Option<Status>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use task_core::{ArtifactRef, Budget, Check, Criterion, SqliteStore, Task, Tier, WorkerHint, WorkspaceSpec};
+    use task_core::{
+        ArtifactRef, Budget, Check, Criterion, SqliteStore, Task, Tier, WorkerHint, WorkspaceSpec,
+    };
     use time::OffsetDateTime;
 
     fn sample_task(kind: TaskKind, status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -264,7 +286,8 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: "/tmp/workspace".into(), mode: None,
+                path: "/tmp/workspace".into(),
+                mode: None,
             },
             budget: Budget {
                 max_turns: 10,
@@ -313,13 +336,11 @@ mod tests {
         assert_eq!(fetched.status, Status::Done);
 
         let events = store.events_for(task.id).expect("events_for");
-        assert!(events.iter().any(|(_, e)| matches!(
-            e,
-            Event::ApprovalDecided {
-                approved: true,
-                ..
-            }
-        )));
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ApprovalDecided { approved: true, .. }))
+        );
     }
 
     #[test]
@@ -348,7 +369,11 @@ mod tests {
         ));
 
         let fetched = store.get(task.id).expect("get").expect("some");
-        assert_eq!(fetched.status, Status::Draft, "no transition should have happened");
+        assert_eq!(
+            fetched.status,
+            Status::Draft,
+            "no transition should have happened"
+        );
     }
 
     #[test]
@@ -461,7 +486,10 @@ mod tests {
         assert!(decided.decided_at.is_some());
 
         // 他のタスクの approval は手つかず。
-        let untouched = store.approval_get(unrelated.id).expect("get").expect("some");
+        let untouched = store
+            .approval_get(unrelated.id)
+            .expect("get")
+            .expect("some");
         assert!(untouched.is_pending());
 
         // approvals が無いタスクへの answer はエラーにならない。
@@ -619,7 +647,11 @@ mod tests {
         ));
 
         let fetched = store.get(task.id).expect("get").expect("some");
-        assert_eq!(fetched.status, Status::Ready, "no transition should have happened");
+        assert_eq!(
+            fetched.status,
+            Status::Ready,
+            "no transition should have happened"
+        );
     }
 
     // ---- cascaded (docs/gui/api.md §5.7) ----

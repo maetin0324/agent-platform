@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{ArtifactRef, DelegateTask, GenreSpec, ProgressFields, ProgressKind, Status, Task, TaskId, Usage};
+use task_core::{
+    ArtifactRef, DelegateTask, GenreSpec, ProgressFields, ProgressKind, Status, Task, TaskId, Usage,
+};
 
 /// `run.protocol`。v2（ADR-0016 M9）: `delegate` メッセージ、`context.role`、`context.children`、`task.role` / `task.aggregate` を追加。
 /// v3（ADR-0027 D1）: `context.available_genres`、`task.genre`、`delegate` の `tasks[].genre` を追加。
@@ -21,6 +23,8 @@ use task_core::{ArtifactRef, DelegateTask, GenreSpec, ProgressFields, ProgressKi
 /// 従来の `<workspace>/artifacts` と同じ値なので、これを読まないワーカーも単独タスクではそのまま動く）。
 /// Phase 38（ADR-0028 追記）: `context.available_genres[].harness` と `context.subject_genre` を追加
 /// （計画とレビュアーに「ハーネスで動く分野の成果物の名前は固定」を伝えるため）。
+/// Phase 59（ADR-0046 D1/D4/D6）: `context.profile`（実効 profile）、`context.mode`（進め方）、
+/// `context.organization[].skills` / `.harnesses` を追加（版数は据え置き。追加だけなので v4 のまま）。
 /// 全て追加のみで v1〜v3 のワーカーはそのまま動く。
 pub const PROTOCOL_VERSION: u32 = 4;
 
@@ -116,7 +120,12 @@ impl GenreContext {
     pub fn output_artifacts_named(&self) -> Vec<(&str, Option<&str>)> {
         self.output_artifacts
             .iter()
-            .map(|a| (task_core::artifact_entry_name(a), task_core::artifact_entry_description(a)))
+            .map(|a| {
+                (
+                    task_core::artifact_entry_name(a),
+                    task_core::artifact_entry_description(a),
+                )
+            })
             .collect()
     }
 }
@@ -129,7 +138,14 @@ impl From<&GenreSpec> for GenreContext {
             capabilities: g.capabilities.clone(),
             input_artifacts: g.input_artifacts.clone(),
             output_artifacts: g.output_artifacts.clone(),
-            roles: g.roles.iter().map(|id| GenreRoleContext { id: id.clone(), description: None }).collect(),
+            roles: g
+                .roles
+                .iter()
+                .map(|id| GenreRoleContext {
+                    id: id.clone(),
+                    description: None,
+                })
+                .collect(),
             harness: None,
         }
     }
@@ -267,6 +283,13 @@ pub struct OrgNodeContext {
     pub brief: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genre: Option<String>,
+    /// ADR-0046 D2 / D6（Phase 59）: そのノードの**実効** skills（根→葉で継いだ結果）。
+    /// CoS の対話 run と分解 run に「誰が何をできるか」を出すために渡す。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// ADR-0046 D3 / D6（Phase 59）: そのノードが受けられる**実効**ハーネスの id。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<String>,
 }
 
 impl From<&task_core::OrgNode> for OrgNodeContext {
@@ -278,6 +301,19 @@ impl From<&task_core::OrgNode> for OrgNodeContext {
             parent_id: n.parent_id.clone(),
             brief: n.brief.clone(),
             genre: n.genre.clone(),
+            skills: Vec::new(),
+            harnesses: Vec::new(),
+        }
+    }
+}
+
+impl OrgNodeContext {
+    /// ADR-0046 D6: 実効 profile（`task_core::profile::resolve`）から skills / harnesses を足した版。
+    pub fn with_profile(n: &task_core::OrgNode, effective: &task_core::EffectiveProfile) -> Self {
+        Self {
+            skills: effective.skills.clone(),
+            harnesses: effective.harnesses_allowed.clone(),
+            ..Self::from(n)
         }
     }
 }
@@ -364,6 +400,16 @@ pub struct RunContext {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub comments_enabled: bool,
     // ---- ADR-0044 D2（Phase 53）: ここまで ----
+    // ---- ADR-0046（Phase 59）: 実効 profile と進め方。ここから ----
+    /// ADR-0046 D1: この run の**実効 profile**（担当ノードの根→葉の merge ＋ タスクの上書き）。
+    /// 担当が居ない run・profile を持たない組織では `None` で、前置きは Phase 58 までとバイト単位で同じ。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<task_core::EffectiveProfile>,
+    /// ADR-0046 D4: このタスクの進め方。既定（`production`）は `None` にして渡さない
+    /// （前置きを Phase 58 までと変えないため）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<task_core::TaskMode>,
+    // ---- ADR-0046（Phase 59）: ここまで ----
     // ---- ADR-0047 D2（Phase 61）: 知識ベース。ここから ----
     /// ADR-0047 D2: マウントされた知識の**索引だけ**（本文は入れない）。ディスパッチャが実効マウントと
     /// `index.json` から決定的に組む。`None` の run の前置きは Phase 60 までと 1 バイトも変わらない。
@@ -562,7 +608,9 @@ impl WorkerMessage {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            WorkerMessage::Question { .. } | WorkerMessage::Done { .. } | WorkerMessage::Error { .. }
+            WorkerMessage::Question { .. }
+                | WorkerMessage::Done { .. }
+                | WorkerMessage::Error { .. }
         )
     }
 
@@ -629,7 +677,11 @@ pub(crate) mod tests {
         let m: WorkerMessage = serde_json::from_str(line).unwrap();
         assert!(m.is_terminal());
         match &m {
-            WorkerMessage::Done { summary, evidence, usage } => {
+            WorkerMessage::Done {
+                summary,
+                evidence,
+                usage,
+            } => {
                 assert_eq!(summary, "s");
                 assert_eq!(evidence.len(), 1);
                 assert!(usage.is_none());
@@ -644,18 +696,28 @@ pub(crate) mod tests {
     #[test]
     fn unknown_type_is_a_parse_error_and_missing_required_is_error() {
         assert!(serde_json::from_str::<WorkerMessage>(r#"{"type":"bogus"}"#).is_err());
-        assert!(serde_json::from_str::<WorkerMessage>(r#"{"type":"error","message":"m"}"#).is_err());
-        assert!(!serde_json::from_str::<WorkerMessage>(r#"{"type":"progress","msg":"m"}"#).unwrap().is_terminal());
+        assert!(
+            serde_json::from_str::<WorkerMessage>(r#"{"type":"error","message":"m"}"#).is_err()
+        );
+        assert!(
+            !serde_json::from_str::<WorkerMessage>(r#"{"type":"progress","msg":"m"}"#)
+                .unwrap()
+                .is_terminal()
+        );
     }
 
     /// ADR-0048 D2（Phase 60a）: `progress` の構造化フィールドは**任意**。従来の `{"type":"progress","msg":…}`
     /// はそのまま読め（全て `None` / `false`）、書き戻しても余分な鍵は出ない。
     #[test]
     fn progress_accepts_both_the_plain_and_the_structured_form() {
-        let plain: WorkerMessage = serde_json::from_str(r#"{"type":"progress","msg":"working"}"#).expect("plain");
+        let plain: WorkerMessage =
+            serde_json::from_str(r#"{"type":"progress","msg":"working"}"#).expect("plain");
         let fields = plain.progress_fields().expect("progress");
         assert!(fields.is_plain());
-        assert_eq!(serde_json::to_string(&plain).expect("ser"), r#"{"type":"progress","msg":"working"}"#);
+        assert_eq!(
+            serde_json::to_string(&plain).expect("ser"),
+            r#"{"type":"progress","msg":"working"}"#
+        );
 
         let line = r#"{"type":"progress","msg":"tool_use: Bash …","kind":"tool_use","tool":"Bash",
             "summary":"cargo test --workspace","detail":"{\"command\":\"cargo test --workspace\"}","truncated":true,"error":false}"#;
@@ -670,31 +732,54 @@ pub(crate) mod tests {
         assert!(!structured.is_terminal());
 
         // 知らない `kind` の行は**行ごと**読めない（unknown type と同じ扱い）。混在は `msg` で救う。
-        assert!(serde_json::from_str::<WorkerMessage>(r#"{"type":"progress","msg":"m","kind":"bogus"}"#).is_err());
+        assert!(
+            serde_json::from_str::<WorkerMessage>(
+                r#"{"type":"progress","msg":"m","kind":"bogus"}"#
+            )
+            .is_err()
+        );
 
         // 組み立て側（`WorkerMessage::progress`）と対称。
         let built = WorkerMessage::progress(
             "tool_result: ok",
-            ProgressFields::of(ProgressKind::ToolResult).with_summary("ok").with_error(true),
+            ProgressFields::of(ProgressKind::ToolResult)
+                .with_summary("ok")
+                .with_error(true),
         );
         let json = serde_json::to_string(&built).expect("ser");
         assert!(json.contains(r#""kind":"tool_result""#), "{json}");
         assert!(json.contains(r#""error":true"#), "{json}");
         assert!(!json.contains("truncated"), "{json}");
-        assert_eq!(serde_json::from_str::<WorkerMessage>(&json).expect("round trip"), built);
+        assert_eq!(
+            serde_json::from_str::<WorkerMessage>(&json).expect("round trip"),
+            built
+        );
     }
 
     /// ADR-0012 D3（P-12）: コマンドを伴わない条件の evidence は `criterion` だけでよく、旧形式（全フィールドあり）も読める。
     #[test]
     fn evidence_fields_other_than_criterion_are_optional() {
         let line = r#"{"type":"done","summary":"s","evidence":[{"criterion":1},{"criterion":0,"command":"cargo test","exit":0,"stdout_tail":"ok"}]}"#;
-        let WorkerMessage::Done { evidence, .. } = serde_json::from_str::<WorkerMessage>(line).unwrap() else {
+        let WorkerMessage::Done { evidence, .. } =
+            serde_json::from_str::<WorkerMessage>(line).unwrap()
+        else {
             panic!("expected done");
         };
-        assert_eq!(evidence[0], Evidence { criterion: 1, command: None, exit: None, stdout_tail: None });
+        assert_eq!(
+            evidence[0],
+            Evidence {
+                criterion: 1,
+                command: None,
+                exit: None,
+                stdout_tail: None
+            }
+        );
         assert_eq!(evidence[1].command.as_deref(), Some("cargo test"));
         assert_eq!(evidence[1].exit, Some(0));
-        assert_eq!(serde_json::to_string(&evidence[0]).unwrap(), r#"{"criterion":1}"#);
+        assert_eq!(
+            serde_json::to_string(&evidence[0]).unwrap(),
+            r#"{"criterion":1}"#
+        );
     }
 
     /// ADR-0016 D2: `delegate` は非終端で、`tasks` は `DelegateTask`。`depends_on` は整数と ID 文字列を混ぜられる。
@@ -704,7 +789,9 @@ pub(crate) mod tests {
             {"title":"b","objective":"o","acceptance":[{"text":"c","check":{"type":"command","cmd":"true","expect_exit":0}}],"depends_on":[0]}]}"#;
         let m: WorkerMessage = serde_json::from_str(line).unwrap();
         assert!(!m.is_terminal());
-        let WorkerMessage::Delegate { tasks } = m else { panic!("expected delegate") };
+        let WorkerMessage::Delegate { tasks } = m else {
+            panic!("expected delegate")
+        };
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].role.as_deref(), Some("implementer"));
         // ADR-0027 D1: `genre` は任意。
@@ -741,7 +828,10 @@ pub(crate) mod tests {
         let genres = [task_core::GenreSpec {
             id: "literature".into(),
             description: "related work survey".into(),
-            capabilities: vec!["academic literature search".into(), "citation graph traversal".into()],
+            capabilities: vec![
+                "academic literature search".into(),
+                "citation graph traversal".into(),
+            ],
             input_artifacts: vec!["question".into(), "pdf".into()],
             output_artifacts: vec!["answer.md".into(), "citations.json".into()],
             default_role: Some("literature-reader".into()),
@@ -753,10 +843,22 @@ pub(crate) mod tests {
         };
         let v = serde_json::to_value(&context).unwrap();
         assert_eq!(v["available_genres"][0]["id"], "literature");
-        assert_eq!(v["available_genres"][0]["roles"][1]["id"], "literature-reader");
-        assert_eq!(v["available_genres"][0]["capabilities"][1], "citation graph traversal");
-        assert_eq!(v["available_genres"][0]["input_artifacts"], serde_json::json!(["question", "pdf"]));
-        assert_eq!(v["available_genres"][0]["output_artifacts"], serde_json::json!(["answer.md", "citations.json"]));
+        assert_eq!(
+            v["available_genres"][0]["roles"][1]["id"],
+            "literature-reader"
+        );
+        assert_eq!(
+            v["available_genres"][0]["capabilities"][1],
+            "citation graph traversal"
+        );
+        assert_eq!(
+            v["available_genres"][0]["input_artifacts"],
+            serde_json::json!(["question", "pdf"])
+        );
+        assert_eq!(
+            v["available_genres"][0]["output_artifacts"],
+            serde_json::json!(["answer.md", "citations.json"])
+        );
         let back: RunContext = serde_json::from_value(v).unwrap();
         assert_eq!(back, context);
 
@@ -803,10 +905,16 @@ pub(crate) mod tests {
 
         let empty = serde_json::to_value(RunContext::default()).unwrap();
         assert!(empty.get("subject_genre").is_none(), "{empty}");
-        let context = RunContext { subject_genre: Some(genre), ..RunContext::default() };
+        let context = RunContext {
+            subject_genre: Some(genre),
+            ..RunContext::default()
+        };
         let json = serde_json::to_value(&context).unwrap();
         assert_eq!(json["subject_genre"]["harness"], "paperqa");
-        assert_eq!(json["subject_genre"]["output_artifacts"][0], "answer.md: 引用付きの答え");
+        assert_eq!(
+            json["subject_genre"]["output_artifacts"][0],
+            "answer.md: 引用付きの答え"
+        );
         let back: RunContext = serde_json::from_value(json).unwrap();
         assert_eq!(back, context);
     }
@@ -814,34 +922,58 @@ pub(crate) mod tests {
     /// ADR-0003 D6: 生成スキーマとコミット済みファイルの一致。`UPDATE_SCHEMA=1` で再生成する。
     #[test]
     fn committed_schema_matches_generated() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/protocol/worker-protocol.schema.json");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/protocol/worker-protocol.schema.json"
+        );
         let generated = serde_json::to_string_pretty(&schema_value()).unwrap() + "\n";
         if std::env::var_os("UPDATE_SCHEMA").is_some() {
             std::fs::write(path, &generated).unwrap();
         }
         let committed = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {path}: {e} (run with UPDATE_SCHEMA=1 to generate)"));
-        assert_eq!(committed, generated, "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-worker`");
+        assert_eq!(
+            committed, generated,
+            "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-worker`"
+        );
     }
 
     pub(crate) fn sample_task() -> Task {
         use task_core::*;
         let now = time::OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
             title: "t".into(),
             objective: "o".into(),
-            acceptance: vec![Criterion { text: "c".into(), check: Check::Command { cmd: "true".into(), expect_exit: 0 } }],
+            acceptance: vec![Criterion {
+                text: "c".into(),
+                check: Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
+            }],
             inputs: vec![],
             depends_on: vec![],
             status: Status::Running,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws"), mode: None },
-            budget: Budget { max_turns: 10, max_wall_secs: 60, max_retries: 1 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: PathBuf::from("/tmp/ws"),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 10,
+                max_wall_secs: 60,
+                max_retries: 1,
+            },
             attempts: 0,
             lease: None,
             created_at: now,

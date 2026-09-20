@@ -26,7 +26,8 @@ use crate::integrations::{IntegrationId, IntegrationMethod, IntegrationState, Ta
 use crate::message::{Message, MessageId, MessageRole, is_conversation};
 use crate::model::{Event, Status, Task, TaskId, TaskKind, WorkspaceSpec};
 use crate::org::{
-    Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId, ProjectStatus,
+    Milestone, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId,
+    ProjectStatus,
 };
 use crate::repos::{ProjectRepo, RepoError, RepoId, RepoKind, RepoRun, RepoSync};
 use crate::transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
@@ -37,7 +38,8 @@ const MIGRATION_0003: &str = include_str!("../migrations/0003_tasks_list_columns
 const MIGRATION_0004: &str = include_str!("../migrations/0004_tasks_objective_column.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_tasks_genre_column.sql");
 const MIGRATION_0006: &str = include_str!("../migrations/0006_organization.sql");
-const MIGRATION_0007: &str = include_str!("../migrations/0007_messages_task_id_and_reports_project.sql");
+const MIGRATION_0007: &str =
+    include_str!("../migrations/0007_messages_task_id_and_reports_project.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_notifications.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_notifications_project_id.sql");
 const MIGRATION_0010: &str = include_str!("../migrations/0010_projects_workspace.sql");
@@ -51,10 +53,12 @@ const MIGRATION_0013: &str = include_str!("../migrations/0013_task_comments.sql"
 const MIGRATION_0014: &str = include_str!("../migrations/0014_task_integrations.sql");
 /// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ（`archived_at` / `paused_from`）。
 const MIGRATION_0015: &str = include_str!("../migrations/0015_lifecycle.sql");
+/// ADR-0046 D1/D2/D4（Phase 59）: `org_nodes.profile_json` と `tasks.skills_json` / `tasks.mode`。
+const MIGRATION_0016: &str = include_str!("../migrations/0016_org_profiles.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +109,56 @@ pub enum StoreError {
     /// ADR-0043 D1（Phase 52）: 案件のリポジトリの検証に落ちた（API は 422）。
     #[error(transparent)]
     Repo(#[from] RepoError),
+}
+
+/// ADR-0046 D1（Phase 59）: `org_nodes.profile_json` に書く値。空の profile は NULL
+/// （導入前のノードの行と 1 バイトも変わらない）。
+fn profile_json(profile: &crate::profile::Profile) -> Result<Option<String>, StoreError> {
+    if profile.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string(profile)?))
+}
+
+/// ADR-0046 D7: ノード id を持つ表と列（`celerisctl org migrate-v2` が触ってよいものだけ）。
+fn is_known_node_ref(table: &str, column: &str) -> bool {
+    matches!(
+        (table, column),
+        ("tasks", "assignee")
+            | ("messages", "node_id")
+            | ("reports", "node_id")
+            | ("approvals", "node_id")
+            | ("standing_rules", "node_id")
+    )
+}
+
+/// ADR-0046 D7: 1 行のノード id を書き換える。`tasks` は `json`（正本）も直す。
+fn set_node_ref(
+    tx: &Connection,
+    table: &str,
+    column: &str,
+    id: &str,
+    value: &str,
+) -> Result<(), StoreError> {
+    if table == "tasks" {
+        let json: Option<String> = tx
+            .query_row("SELECT json FROM tasks WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(json) = json else { return Ok(()) };
+        let mut task: Task = serde_json::from_str(&json)?;
+        task.assignee = Some(value.to_string());
+        let updated = serde_json::to_string(&task)?;
+        tx.execute(
+            "UPDATE tasks SET assignee = ?1, json = ?2 WHERE id = ?3",
+            params![value, updated, id],
+        )?;
+        return Ok(());
+    }
+    let sql = format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2");
+    tx.execute(&sql, params![value, id])?;
+    Ok(())
 }
 
 /// `events` テーブルの 1 行（ADR-0013 D6）。`id` はテーブル全体でのグローバル単調増加値。
@@ -219,7 +273,10 @@ fn encode_cursor(payload: &CursorPayload) -> Result<String, StoreError> {
 
 fn decode_cursor(cursor: &str) -> Result<CursorPayload, StoreError> {
     let invalid = || StoreError::Invalid(format!("invalid cursor: {cursor}"));
-    if cursor.is_empty() || !cursor.len().is_multiple_of(2) || !cursor.chars().all(|c| c.is_ascii_hexdigit()) {
+    if cursor.is_empty()
+        || !cursor.len().is_multiple_of(2)
+        || !cursor.chars().all(|c| c.is_ascii_hexdigit())
+    {
         return Err(invalid());
     }
     let bytes_chars: Vec<char> = cursor.chars().collect();
@@ -319,7 +376,9 @@ fn filter_predicate(filter: &ListFilter) -> (String, Vec<SqlValue>) {
     if !filter.tiers.is_empty() {
         // tier は `json` の中にしか無い（列を増やさない）。JSON1 の `json_extract` で決定的に引く。
         let placeholders = vec!["?"; filter.tiers.len()].join(", ");
-        clauses.push(format!("json_extract(json, '$.worker_hint.tier') IN ({placeholders})"));
+        clauses.push(format!(
+            "json_extract(json, '$.worker_hint.tier') IN ({placeholders})"
+        ));
         for t in &filter.tiers {
             params.push(SqlValue::Text(tier_str(*t).to_string()));
         }
@@ -417,7 +476,9 @@ fn parse_status(s: &str) -> Result<Status, StoreError> {
         "done" => Ok(Status::Done),
         "failed" => Ok(Status::Failed),
         "cancelled" => Ok(Status::Cancelled),
-        other => Err(StoreError::Invalid(format!("invalid status in tasks table: {other}"))),
+        other => Err(StoreError::Invalid(format!(
+            "invalid status in tasks table: {other}"
+        ))),
     }
 }
 
@@ -428,7 +489,11 @@ fn parse_status(s: &str) -> Result<Status, StoreError> {
 /// にある。
 /// ADR-0037 D1（Phase 39）: 通知の台帳（`notifications`）も同じ形で `crate::notify::NotificationStore` にある。
 pub trait TaskStore:
-    Send + Sync + crate::report::ReportStore + crate::approval::ApprovalStore + crate::notify::NotificationStore
+    Send
+    + Sync
+    + crate::report::ReportStore
+    + crate::approval::ApprovalStore
+    + crate::notify::NotificationStore
 {
     fn insert(&self, task: &Task) -> Result<(), StoreError>;
     fn get(&self, id: TaskId) -> Result<Option<Task>, StoreError>;
@@ -499,14 +564,24 @@ pub trait TaskStore:
     /// ADR-0016 D2 / M2: 実行中の委譲。子タスク群を挿入（`Created` → `Accept` で `ready`）し、親に
     /// `Event::Delegated{run_id, task_ids}` を追記する。全体が 1 トランザクション。親の状態は変えない。
     /// 子の `parent_id` が `parent_id` と違えば `StoreError::Invalid`。
-    fn delegate_children(&self, parent_id: TaskId, run_id: &str, children: Vec<Task>) -> Result<Vec<TaskId>, StoreError>;
+    fn delegate_children(
+        &self,
+        parent_id: TaskId,
+        run_id: &str,
+        children: Vec<Task>,
+    ) -> Result<Vec<TaskId>, StoreError>;
 
     /// `parent_id` を親に持つタスク（終端を含む）を `created_at` 昇順（同時刻は挿入順）で返す（ADR-0016 M5 / M6）。
     fn children(&self, parent_id: TaskId) -> Result<Vec<Task>, StoreError>;
 
     /// ADR-0010 D2 / D7（P-7）: `status = running` かつリースの run_id が一致するときだけ `expires_at = now + ttl` に
     /// 延長して true を返す。状態遷移ではないのでイベントは追記しない。
-    fn renew_lease(&self, task_id: TaskId, worker_run_id: &str, ttl: StdDuration) -> Result<bool, StoreError>;
+    fn renew_lease(
+        &self,
+        task_id: TaskId,
+        worker_run_id: &str,
+        ttl: StdDuration,
+    ) -> Result<bool, StoreError>;
 
     /// ADR-0013 D6: `events` を `id` 昇順で `after_id` より後、最大 `limit` 件返す。
     fn events_since(&self, after_id: u64, limit: usize) -> Result<Vec<EventRow>, StoreError>;
@@ -514,7 +589,12 @@ pub trait TaskStore:
     fn latest_event_id(&self) -> Result<u64, StoreError>;
     /// ADR-0013（Phase 9b）: 1 タスクのイベントを `seq` 昇順で、`after_seq` より後（`None` なら最初から）最大 `limit` 件、
     /// グローバル `id` と `ts` 付きで返す（API の `GET /tasks/{id}/events` と run の要約が使う）。
-    fn event_rows_for(&self, task_id: TaskId, after_seq: Option<u64>, limit: usize) -> Result<Vec<EventRow>, StoreError>;
+    fn event_rows_for(
+        &self,
+        task_id: TaskId,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<EventRow>, StoreError>;
 
     /// ADR-0013 D10: `filter` に一致する `tasks` を `order` で keyset ページングして返す。`cursor` は
     /// 前回の `Page::next_cursor`（不透明な文字列）。不正な `cursor` は `StoreError::Invalid`。
@@ -557,7 +637,11 @@ pub trait TaskStore:
     /// 状態だけを変える（`updated_at` も更新）。無い案件は `Ok(false)`。
     fn project_set_status(&self, id: ProjectId, status: ProjectStatus) -> Result<bool, StoreError>;
     /// ADR-0039 D1: 作業場所だけを変える（`None` で消す。`updated_at` も更新）。無い案件は `Ok(false)`。
-    fn project_set_workspace(&self, id: ProjectId, workspace: Option<&WorkspaceSpec>) -> Result<bool, StoreError>;
+    fn project_set_workspace(
+        &self,
+        id: ProjectId,
+        workspace: Option<&WorkspaceSpec>,
+    ) -> Result<bool, StoreError>;
     /// ADR-0044 D6（Phase 55）: 状態と `paused_from` を**同時に**書く（`pause` / `resume` / `cancel`）。
     /// `paused_from` は `Some(None)` で消し、`None` なら触らない。無い案件は `Ok(false)`。
     fn project_set_lifecycle(
@@ -567,7 +651,11 @@ pub trait TaskStore:
         paused_from: Option<Option<ProjectStatus>>,
     ) -> Result<bool, StoreError>;
     /// ADR-0044 D6（Phase 55）: アーカイブの時刻を書く（`None` で解除）。無い案件は `Ok(false)`。
-    fn project_set_archived_at(&self, id: ProjectId, at: Option<OffsetDateTime>) -> Result<bool, StoreError>;
+    fn project_set_archived_at(
+        &self,
+        id: ProjectId,
+        at: Option<OffsetDateTime>,
+    ) -> Result<bool, StoreError>;
 
     // ---- ADR-0043 D1（Phase 52）: 案件のリポジトリ（`project_repos`）----
 
@@ -593,9 +681,16 @@ pub trait TaskStore:
     fn integration_put(&self, integration: &TaskIntegration) -> Result<(), StoreError>;
     fn integration_get(&self, id: IntegrationId) -> Result<Option<TaskIntegration>, StoreError>;
     /// そのタスクの記録（新しい順）。ADR-0044 B1 の timeline はこれを読めばよい。
-    fn integration_list_for_task(&self, task_id: TaskId) -> Result<Vec<TaskIntegration>, StoreError>;
+    fn integration_list_for_task(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Vec<TaskIntegration>, StoreError>;
     /// そのタスクのそのリポジトリの**最新の** 1 件（`GET /tasks/{id}/changes` の `integration`）。
-    fn integration_latest(&self, task_id: TaskId, repo: &str) -> Result<Option<TaskIntegration>, StoreError>;
+    fn integration_latest(
+        &self,
+        task_id: TaskId,
+        repo: &str,
+    ) -> Result<Option<TaskIntegration>, StoreError>;
     /// 案件のタスクの取り込み（**タスク × リポジトリごとに最新の 1 件**。新しい順、`limit` 件まで）。
     /// 案件画面の「PR と取り込み」（ADR-0043 D5）。
     fn integration_list_for_project(
@@ -618,7 +713,11 @@ pub trait TaskStore:
     /// ADR-0044 D6（Phase 55）: 途中目標を id 1 つで引く（案件を知らなくてよい）。
     fn milestone_get(&self, id: MilestoneId) -> Result<Option<Milestone>, StoreError>;
     /// 状態だけを変える。無い途中目標は `Ok(false)`。
-    fn milestone_set_status(&self, id: MilestoneId, status: MilestoneStatus) -> Result<bool, StoreError>;
+    fn milestone_set_status(
+        &self,
+        id: MilestoneId,
+        status: MilestoneStatus,
+    ) -> Result<bool, StoreError>;
     /// ADR-0044 D6（Phase 55）: 状態と `paused_from` を**同時に**書く（`pause` / `resume` / `cancel`）。
     /// `paused_from` は `Some(None)` で消し、`None` なら触らない。無い途中目標は `Ok(false)`。
     fn milestone_set_lifecycle(
@@ -696,15 +795,28 @@ pub trait TaskStore:
     /// `handoff_requested_at` / `drained_at` は NULL に戻る。
     fn instance_register(&self, instance: &DaemonInstance) -> Result<(), StoreError>;
     /// 自分の行の `heartbeat_at` を更新する。行が無ければ `Ok(false)`（呼び出し側は登録し直す）。
-    fn instance_heartbeat(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError>;
+    fn instance_heartbeat(&self, instance_id: &str, at: OffsetDateTime)
+    -> Result<bool, StoreError>;
     /// `instance_id` の行に `handoff_requested_at` を書く（既に入っていれば**上書きしない**。
     /// 引き継ぎの要求は 1 回だけ）。書いたら `Ok(true)`。
-    fn instance_request_handoff(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError>;
+    fn instance_request_handoff(
+        &self,
+        instance_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
     /// 役割を変える（`heartbeat_at` も同時に更新する）。行が無ければ `Ok(false)`。
-    fn instance_set_role(&self, instance_id: &str, role: InstanceRole, at: OffsetDateTime)
-    -> Result<bool, StoreError>;
+    fn instance_set_role(
+        &self,
+        instance_id: &str,
+        role: InstanceRole,
+        at: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
     /// 手元の run が 0 になったので `drained_at` を書く（役割は `draining` のまま）。行が無ければ `Ok(false)`。
-    fn instance_mark_drained(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError>;
+    fn instance_mark_drained(
+        &self,
+        instance_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
     /// 全インスタンスを `started_at` 昇順（同時刻は `instance_id` 昇順）で返す。
     fn instance_list(&self) -> Result<Vec<DaemonInstance>, StoreError>;
     /// 1 行消す。無い id は `Ok(false)`。
@@ -798,6 +910,93 @@ impl SqliteStore {
         Self::from_connection(conn, &options)
     }
 
+    // ---- ADR-0046 D7（Phase 59）: `celerisctl org migrate-v2` のための低レベルの書き換え。
+    // 通常の経路（`org_upsert` / `update_task`）は状態機械と検証を通すが、移行は「id の付け替え」だけを
+    // まとめて行うので、ここに専用の関数を置く（`celerisctl` からしか呼ばない）。
+
+    /// ノード id を参照している行を `from` → `to` に書き換え、書き換えた行の主キーを返す。
+    /// `tasks` は `assignee` 列と `json`（正本）の両方を直す。
+    pub fn migrate_node_refs(
+        &self,
+        table: &str,
+        column: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        if !is_known_node_ref(table, column) {
+            return Err(StoreError::Invalid(format!(
+                "unknown node reference: {table}.{column}"
+            )));
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ids: Vec<String> = {
+            let sql = format!("SELECT id FROM {table} WHERE {column} = ?1");
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt.query_map(params![from], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        for id in &ids {
+            set_node_ref(&tx, table, column, id, to)?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    /// `migrate_node_refs` の逆（`--rollback`）。1 行だけを元の値に戻す。
+    pub fn restore_node_ref(
+        &self,
+        table: &str,
+        column: &str,
+        id: &str,
+        old: &str,
+    ) -> Result<(), StoreError> {
+        if !is_known_node_ref(table, column) {
+            return Err(StoreError::Invalid(format!(
+                "unknown node reference: {table}.{column}"
+            )));
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        set_node_ref(&tx, table, column, id, old)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `org_nodes` をまるごと差し替える（親が先に来る並びで渡すこと）。1 トランザクション。
+    pub fn replace_org_nodes(&self, nodes: &[OrgNode]) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM org_nodes", [])?;
+        let mut existing: Vec<OrgNode> = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            crate::org::validate_upsert(&existing, node)?;
+            tx.execute(
+                "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at, \
+                 profile_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    node.id,
+                    node.parent_id,
+                    node.name,
+                    node.kind.as_str(),
+                    node.genre,
+                    node.brief,
+                    node.position,
+                    format_rfc3339(node.created_at)?,
+                    format_rfc3339(node.updated_at)?,
+                    profile_json(&node.profile)?,
+                ],
+            )?;
+            existing.push(node.clone());
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 現在の DB のスキーマ版数（`schema_migrations` の最大 `version`。行が無ければ 0）。
     pub fn schema_version(&self) -> Result<u32, StoreError> {
         let conn = self.lock()?;
@@ -822,7 +1021,8 @@ impl SqliteStore {
     fn configure_pragmas(conn: &Connection, options: &StoreOptions) -> Result<(), StoreError> {
         conn.busy_timeout(options.busy_timeout)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        let _journal_mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        let _journal_mode: String =
+            conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         Ok(())
     }
 
@@ -895,7 +1095,10 @@ impl SqliteStore {
             13 => Ok(MIGRATION_0013),
             14 => Ok(MIGRATION_0014),
             15 => Ok(MIGRATION_0015),
-            other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
+            16 => Ok(MIGRATION_0016),
+            other => Err(StoreError::Invalid(format!(
+                "unknown migration version: {other}"
+            ))),
         }
     }
 
@@ -935,10 +1138,25 @@ impl SqliteStore {
         let kind_col: String = row.get(3)?;
         let created_at: String = row.get(7)?;
         let updated_at: String = row.get(8)?;
+        // ADR-0046 D1（Phase 59）: 10 列目は `profile_json`（NULL なら空の profile）。
+        let profile_col: Option<String> = row.get(9)?;
         let Some(kind) = OrgKind::parse(&kind_col) else {
             return Ok(Err(StoreError::Invalid(format!(
                 "invalid org node kind in org_nodes: {kind_col}"
             ))));
+        };
+        let profile = match profile_col.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => {
+                match serde_json::from_str::<crate::profile::Profile>(raw) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        return Ok(Err(StoreError::Invalid(format!(
+                            "invalid org profile for {id}: {e}"
+                        ))));
+                    }
+                }
+            }
+            _ => crate::profile::Profile::default(),
         };
         Ok((|| {
             Ok(OrgNode {
@@ -948,6 +1166,7 @@ impl SqliteStore {
                 kind,
                 genre: row.get(4)?,
                 brief: row.get(5)?,
+                profile,
                 position: row.get(6)?,
                 created_at: parse_rfc3339(&created_at)?,
                 updated_at: parse_rfc3339(&updated_at)?,
@@ -957,7 +1176,7 @@ impl SqliteStore {
 
     fn org_list_tx(conn: &Connection) -> Result<Vec<OrgNode>, StoreError> {
         let mut stmt = conn.prepare(
-            "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at \
+            "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at, profile_json \
              FROM org_nodes ORDER BY position ASC, id ASC",
         )?;
         let rows = stmt.query_map([], Self::org_row)?;
@@ -979,7 +1198,8 @@ impl SqliteStore {
         // ADR-0044 D6（Phase 55）: 8 列目 `archived_at`、9 列目 `paused_from`。
         let archived_at_col: Option<String> = row.get(8)?;
         let paused_from_col: Option<String> = row.get(9)?;
-        let (Ok(id), Some(status)) = (id.parse::<ProjectId>(), ProjectStatus::parse(&status_col)) else {
+        let (Ok(id), Some(status)) = (id.parse::<ProjectId>(), ProjectStatus::parse(&status_col))
+        else {
             return Ok(Err(StoreError::Invalid(format!(
                 "invalid project row: id={id} status={status_col}"
             ))));
@@ -1026,7 +1246,9 @@ impl SqliteStore {
     }
 
     /// ADR-0039 D1: 案件の作業場所を DB の列に入れる形（JSON か NULL）にする。
-    fn project_workspace_column(workspace: Option<&WorkspaceSpec>) -> Result<Option<String>, StoreError> {
+    fn project_workspace_column(
+        workspace: Option<&WorkspaceSpec>,
+    ) -> Result<Option<String>, StoreError> {
         match workspace {
             Some(spec) => serde_json::to_string(spec)
                 .map(Some)
@@ -1092,10 +1314,12 @@ impl SqliteStore {
         })())
     }
 
-    const REPO_COLUMNS: &'static str =
-        "id, project_id, name, kind, location_json, default_branch, sync, run, is_primary, created_at";
+    const REPO_COLUMNS: &'static str = "id, project_id, name, kind, location_json, default_branch, sync, run, is_primary, created_at";
 
-    fn repo_list_tx(conn: &Connection, project_id: ProjectId) -> Result<Vec<ProjectRepo>, StoreError> {
+    fn repo_list_tx(
+        conn: &Connection,
+        project_id: ProjectId,
+    ) -> Result<Vec<ProjectRepo>, StoreError> {
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM project_repos WHERE project_id = ?1 \
              ORDER BY is_primary DESC, created_at ASC, id ASC",
@@ -1111,7 +1335,10 @@ impl SqliteStore {
 
     fn repo_get_tx(conn: &Connection, id: RepoId) -> Result<Option<ProjectRepo>, StoreError> {
         conn.query_row(
-            &format!("SELECT {} FROM project_repos WHERE id = ?1", Self::REPO_COLUMNS),
+            &format!(
+                "SELECT {} FROM project_repos WHERE id = ?1",
+                Self::REPO_COLUMNS
+            ),
             params![id.to_string()],
             Self::repo_row,
         )
@@ -1145,7 +1372,11 @@ impl SqliteStore {
     }
 
     /// 1 案件に primary は 1 つ（ADR-0043 D1）。`keep` 以外の `is_primary` を落とす。
-    fn repo_clear_other_primaries_tx(conn: &Connection, project_id: ProjectId, keep: RepoId) -> Result<(), StoreError> {
+    fn repo_clear_other_primaries_tx(
+        conn: &Connection,
+        project_id: ProjectId,
+        keep: RepoId,
+    ) -> Result<(), StoreError> {
         conn.execute(
             "UPDATE project_repos SET is_primary = 0 WHERE project_id = ?1 AND id <> ?2",
             params![project_id.to_string(), keep.to_string()],
@@ -1155,7 +1386,10 @@ impl SqliteStore {
 
     /// `projects.workspace` 列を primary のリポジトリの写しに保つ（migration 0012 のコメント参照。
     /// ADR-0043 D1 は「書かない」だが、N-1 互換〈旧バイナリが新スキーマを読む〉のために写しを残す）。
-    fn sync_project_workspace_tx(conn: &Connection, project_id: ProjectId) -> Result<(), StoreError> {
+    fn sync_project_workspace_tx(
+        conn: &Connection,
+        project_id: ProjectId,
+    ) -> Result<(), StoreError> {
         let primary: Option<String> = conn
             .query_row(
                 "SELECT location_json FROM project_repos WHERE project_id = ?1 AND is_primary = 1 \
@@ -1194,7 +1428,9 @@ impl SqliteStore {
     const INTEGRATION_COLUMNS: &'static str = "id, task_id, repo_id, repo_name, method, state, pr_number, \
          pr_url, merged_at, detail, created_at, updated_at";
 
-    fn integration_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<TaskIntegration, StoreError>> {
+    fn integration_row(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<Result<TaskIntegration, StoreError>> {
         let id: String = row.get(0)?;
         let task_id: String = row.get(1)?;
         let repo_id: Option<String> = row.get(2)?;
@@ -1242,7 +1478,10 @@ impl SqliteStore {
         })())
     }
 
-    fn integration_put_tx(conn: &Connection, integration: &TaskIntegration) -> Result<(), StoreError> {
+    fn integration_put_tx(
+        conn: &Connection,
+        integration: &TaskIntegration,
+    ) -> Result<(), StoreError> {
         conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO task_integrations ({}) \
@@ -1288,7 +1527,9 @@ impl SqliteStore {
     /// リポジトリを 1 件作る。`kind` は「パスが git なら git、でなければ dir」だが、SQL からは
     /// ファイルシステムを見られないのでここ（Rust）で決める。
     fn backfill_project_repos(conn: &Connection) -> Result<(), StoreError> {
-        let mut stmt = conn.prepare("SELECT id, workspace, created_at FROM projects WHERE workspace IS NOT NULL")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace, created_at FROM projects WHERE workspace IS NOT NULL",
+        )?;
         let rows: Vec<(String, String, String)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1310,7 +1551,8 @@ impl SqliteStore {
                 sync: None,
                 run: RepoRun::Auto,
                 is_primary: true,
-                created_at: parse_rfc3339(&created_at).unwrap_or_else(|_| OffsetDateTime::now_utc()),
+                created_at: parse_rfc3339(&created_at)
+                    .unwrap_or_else(|_| OffsetDateTime::now_utc()),
             };
             Self::repo_write_tx(conn, &repo)?;
         }
@@ -1319,7 +1561,9 @@ impl SqliteStore {
 
     /// ADR-0044 D6（Phase 55）: いま dispatch を止めている案件の id（`paused` / `cancelled` /
     /// アーカイブ済み）。`ready_tasks` が 1 tick に 1 回だけ引く。
-    fn halted_projects_locked(conn: &Connection) -> Result<std::collections::HashSet<String>, StoreError> {
+    fn halted_projects_locked(
+        conn: &Connection,
+    ) -> Result<std::collections::HashSet<String>, StoreError> {
         let mut stmt = conn.prepare(
             "SELECT id FROM projects WHERE status IN ('paused', 'cancelled') OR archived_at IS NOT NULL",
         )?;
@@ -1332,8 +1576,11 @@ impl SqliteStore {
     }
 
     /// ADR-0044 D6（Phase 55）: いま dispatch を止めている途中目標の id（`paused` / `cancelled`）。
-    fn halted_milestones_locked(conn: &Connection) -> Result<std::collections::HashSet<String>, StoreError> {
-        let mut stmt = conn.prepare("SELECT id FROM milestones WHERE status IN ('paused', 'cancelled')")?;
+    fn halted_milestones_locked(
+        conn: &Connection,
+    ) -> Result<std::collections::HashSet<String>, StoreError> {
+        let mut stmt =
+            conn.prepare("SELECT id FROM milestones WHERE status IN ('paused', 'cancelled')")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut out = std::collections::HashSet::new();
         for row in rows {
@@ -1481,8 +1728,8 @@ impl SqliteStore {
         conn.execute(
             "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
              lease_worker_run_id, lease_expires_at, json, title, updated_at, objective, genre, \
-             project_id, milestone_id, assignee, repos_json, labels_json, category) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+             project_id, milestone_id, assignee, repos_json, labels_json, category, skills_json, mode) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 task.id.to_string(),
                 status_str(task.status),
@@ -1507,6 +1754,10 @@ impl SqliteStore {
                 // `update_task_tx` が同じ 2 列を書き直す。
                 serde_json::to_string(&task.labels)?,
                 task.category.as_str(),
+                // ADR-0046 D2 / D4（Phase 59）: skills と mode も `PATCH /tasks/{id}` で変わるので、
+                // `update_task_tx` が同じ 2 列を書き直す。
+                serde_json::to_string(&task.skills)?,
+                task.mode.as_str(),
             ],
         )?;
         Ok(())
@@ -1522,7 +1773,7 @@ impl SqliteStore {
         tx.execute(
             "UPDATE tasks SET json = ?1, title = ?2, updated_at = ?3, objective = ?4, genre = ?5, \
              priority = ?6, parent_id = ?7, project_id = ?8, milestone_id = ?9, assignee = ?10, \
-             labels_json = ?11, category = ?12 WHERE id = ?13",
+             labels_json = ?11, category = ?12, skills_json = ?13, mode = ?14 WHERE id = ?15",
             params![
                 json,
                 task.title,
@@ -1536,6 +1787,8 @@ impl SqliteStore {
                 task.assignee.clone(),
                 serde_json::to_string(&task.labels)?,
                 task.category.as_str(),
+                serde_json::to_string(&task.skills)?,
+                task.mode.as_str(),
                 task.id.to_string(),
             ],
         )?;
@@ -1590,7 +1843,13 @@ impl SqliteStore {
             tx.execute(
                 "UPDATE tasks SET status = ?1, lease_worker_run_id = NULL, \
                  lease_expires_at = NULL, json = ?2, title = ?3, updated_at = ?4 WHERE id = ?5",
-                params![status_str(task.status), new_json, task.title, updated_at_str, task_id.to_string()],
+                params![
+                    status_str(task.status),
+                    new_json,
+                    task.title,
+                    updated_at_str,
+                    task_id.to_string()
+                ],
             )?;
         } else {
             tx.execute(
@@ -1645,7 +1904,12 @@ impl SqliteStore {
     /// 1. `Approval` が failed/cancelled → 終端でない直接の子を `Cancel`（ADR-0008 D1 を reject 以外にも拡張）
     /// 2. `Approval` 以外が終端 → 終端でない直接の `Approval` 子を `Cancel`（P-37）
     /// 3. failed/cancelled → 終端でない後続（`depends_on` に含むタスク）を `DependencyFailed`（P-9、推移的）
-    fn cascade_after_transition_tx(tx: &Connection, task: &Task, from: Status, to: Status) -> Result<(), StoreError> {
+    fn cascade_after_transition_tx(
+        tx: &Connection,
+        task: &Task,
+        from: Status,
+        to: Status,
+    ) -> Result<(), StoreError> {
         if from.is_terminal() || !to.is_terminal() {
             return Ok(());
         }
@@ -1678,7 +1942,11 @@ impl SqliteStore {
     }
 
     /// 伝播の途中で既に終端になったタスク（例: 子でもあり後続でもある）は飛ばす。
-    fn transition_if_non_terminal_tx(tx: &Connection, id: TaskId, trigger: Trigger) -> Result<(), StoreError> {
+    fn transition_if_non_terminal_tx(
+        tx: &Connection,
+        id: TaskId,
+        trigger: Trigger,
+    ) -> Result<(), StoreError> {
         match Self::get_locked(tx, id)? {
             Some(t) if !t.status.is_terminal() => {
                 Self::apply_transition_tx(tx, id, trigger, vec![])?;
@@ -1715,10 +1983,18 @@ impl SqliteStore {
     }
 
     /// `depends_on` に `dep_id` を含む、終端でないタスク。JSON 列を `LIKE` で絞ってから型で確認する。
-    fn non_terminal_dependents_tx(tx: &Connection, dep_id: TaskId) -> Result<Vec<TaskId>, StoreError> {
-        let sql = format!("SELECT json FROM tasks WHERE {} AND json LIKE ?1", Self::NON_TERMINAL_SQL);
+    fn non_terminal_dependents_tx(
+        tx: &Connection,
+        dep_id: TaskId,
+    ) -> Result<Vec<TaskId>, StoreError> {
+        let sql = format!(
+            "SELECT json FROM tasks WHERE {} AND json LIKE ?1",
+            Self::NON_TERMINAL_SQL
+        );
         let mut stmt = tx.prepare(&sql)?;
-        let rows = stmt.query_map(params![format!("%{dep_id}%")], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![format!("%{dep_id}%")], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut out = Vec::new();
         for row in rows {
             let t = Self::row_to_task(row?)?;
@@ -1732,7 +2008,9 @@ impl SqliteStore {
     /// `depends_on` に `dep_id` を含むタスク（状態を問わない）。Phase 31（やり直し）が使う。
     fn dependents_of_tx(tx: &Connection, dep_id: TaskId) -> Result<Vec<TaskId>, StoreError> {
         let mut stmt = tx.prepare("SELECT json FROM tasks WHERE json LIKE ?1")?;
-        let rows = stmt.query_map(params![format!("%{dep_id}%")], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![format!("%{dep_id}%")], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut out = Vec::new();
         for row in rows {
             let t = Self::row_to_task(row?)?;
@@ -1745,7 +2023,10 @@ impl SqliteStore {
 
     /// `task_id` の最後の `Event::Transitioned` の `reason`。無ければ `None`。Phase 31 が「`cancelled` が
     /// `dependency_failed` 由来か」を見分けるのに使う。
-    fn last_transitioned_reason_tx(tx: &Connection, task_id: TaskId) -> Result<Option<String>, StoreError> {
+    fn last_transitioned_reason_tx(
+        tx: &Connection,
+        task_id: TaskId,
+    ) -> Result<Option<String>, StoreError> {
         let mut stmt = tx.prepare(
             "SELECT json FROM events WHERE task_id = ?1 AND json LIKE '%\"type\":\"transitioned\"%' ORDER BY seq DESC LIMIT 1",
         )?;
@@ -1769,7 +2050,13 @@ impl SqliteStore {
         let updated_at = format_rfc3339(task.updated_at)?;
         tx.execute(
             "UPDATE tasks SET status = ?1, json = ?2, title = ?3, updated_at = ?4 WHERE id = ?5",
-            params![status_str(task.status), json, task.title, updated_at, task.id.to_string()],
+            params![
+                status_str(task.status),
+                json,
+                task.title,
+                updated_at,
+                task.id.to_string()
+            ],
         )?;
         Ok(())
     }
@@ -1803,7 +2090,11 @@ impl SqliteStore {
         })())
     }
 
-    fn append_event_tx(conn: &Connection, task_id: TaskId, event: &Event) -> Result<u64, StoreError> {
+    fn append_event_tx(
+        conn: &Connection,
+        task_id: TaskId,
+        event: &Event,
+    ) -> Result<u64, StoreError> {
         let next_seq: i64 = conn.query_row(
             "SELECT COALESCE(MAX(seq), -1) + 1 FROM events WHERE task_id = ?1",
             params![task_id.to_string()],
@@ -1836,9 +2127,8 @@ impl TaskStore for SqliteStore {
         match filter {
             Some(status) => {
                 let mut stmt = conn.prepare("SELECT json FROM tasks WHERE status = ?1")?;
-                let rows = stmt.query_map(params![status_str(status)], |row| {
-                    row.get::<_, String>(0)
-                })?;
+                let rows =
+                    stmt.query_map(params![status_str(status)], |row| row.get::<_, String>(0))?;
                 for row in rows {
                     tasks.push(Self::row_to_task(row?)?);
                 }
@@ -1884,7 +2174,8 @@ impl TaskStore for SqliteStore {
 
     fn events_for_with_global_ids(&self, task_id: TaskId) -> Result<Vec<(u64, Event)>, StoreError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT id, json FROM events WHERE task_id = ?1 ORDER BY id ASC")?;
+        let mut stmt =
+            conn.prepare("SELECT id, json FROM events WHERE task_id = ?1 ORDER BY id ASC")?;
         let rows = stmt.query_map(params![task_id.to_string()], |row| {
             let id: i64 = row.get(0)?;
             let json: String = row.get(1)?;
@@ -2053,7 +2344,9 @@ impl TaskStore for SqliteStore {
 
             // ADR-0044 D6（Phase 55）: 止まっている案件・途中目標のタスクは見送る（対話は除く）。
             if !is_conversation(&task) {
-                let halted = task.project_id.is_some_and(|p| halted_projects.contains(&p.to_string()))
+                let halted = task
+                    .project_id
+                    .is_some_and(|p| halted_projects.contains(&p.to_string()))
                     || task
                         .milestone_id
                         .is_some_and(|m| halted_milestones.contains(&m.to_string()));
@@ -2163,7 +2456,12 @@ impl TaskStore for SqliteStore {
         Ok(())
     }
 
-    fn delegate_children(&self, parent_id: TaskId, run_id: &str, children: Vec<Task>) -> Result<Vec<TaskId>, StoreError> {
+    fn delegate_children(
+        &self,
+        parent_id: TaskId,
+        run_id: &str,
+        children: Vec<Task>,
+    ) -> Result<Vec<TaskId>, StoreError> {
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if Self::get_locked(&tx, parent_id)?.is_none() {
@@ -2234,7 +2532,8 @@ impl TaskStore for SqliteStore {
             let eligible = match dep.status {
                 Status::Draft | Status::Ready | Status::Blocked => true,
                 Status::Cancelled => {
-                    Self::last_transitioned_reason_tx(&tx, dep_id)?.as_deref() == Some(Trigger::DependencyFailed.name())
+                    Self::last_transitioned_reason_tx(&tx, dep_id)?.as_deref()
+                        == Some(Trigger::DependencyFailed.name())
                 }
                 _ => false,
             };
@@ -2274,8 +2573,12 @@ impl TaskStore for SqliteStore {
     fn children(&self, parent_id: TaskId) -> Result<Vec<Task>, StoreError> {
         let conn = self.lock()?;
         // 同じトランザクションで挿入した子（created_at が同じ）は挿入順（rowid）で返す。
-        let mut stmt = conn.prepare("SELECT json FROM tasks WHERE parent_id = ?1 ORDER BY created_at ASC, rowid ASC")?;
-        let rows = stmt.query_map(params![parent_id.to_string()], |row| row.get::<_, String>(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT json FROM tasks WHERE parent_id = ?1 ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![parent_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut out = Vec::new();
         for row in rows {
             out.push(Self::row_to_task(row?)?);
@@ -2283,7 +2586,12 @@ impl TaskStore for SqliteStore {
         Ok(out)
     }
 
-    fn renew_lease(&self, task_id: TaskId, worker_run_id: &str, ttl: StdDuration) -> Result<bool, StoreError> {
+    fn renew_lease(
+        &self,
+        task_id: TaskId,
+        worker_run_id: &str,
+        ttl: StdDuration,
+    ) -> Result<bool, StoreError> {
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(mut task) = Self::get_locked(&tx, task_id)? else {
@@ -2294,7 +2602,8 @@ impl TaskStore for SqliteStore {
         if !ours {
             return Ok(false);
         }
-        let expires_at = OffsetDateTime::now_utc() + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
+        let expires_at = OffsetDateTime::now_utc()
+            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
         task.lease = Some(crate::model::Lease {
             worker_run_id: worker_run_id.to_string(),
             expires_at,
@@ -2345,24 +2654,34 @@ impl TaskStore for SqliteStore {
 
     fn latest_event_id(&self) -> Result<u64, StoreError> {
         let conn = self.lock()?;
-        let id: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| row.get(0))?;
+        let id: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
+            row.get(0)
+        })?;
         Ok(id as u64)
     }
 
-    fn event_rows_for(&self, task_id: TaskId, after_seq: Option<u64>, limit: usize) -> Result<Vec<EventRow>, StoreError> {
+    fn event_rows_for(
+        &self,
+        task_id: TaskId,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<EventRow>, StoreError> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, task_id, seq, ts, json FROM events WHERE task_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3",
         )?;
         let after: i64 = after_seq.map(u64_to_i64).unwrap_or(-1);
-        let rows = stmt.query_map(params![task_id.to_string(), after, usize_to_i64(limit)], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![task_id.to_string(), after, usize_to_i64(limit)],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )?;
         let mut out = Vec::new();
         for row in rows {
             let (id, seq, ts, json) = row?;
@@ -2390,7 +2709,9 @@ impl TaskStore for SqliteStore {
 
         let total: i64 = {
             let sql = format!("SELECT COUNT(*) FROM tasks WHERE {filter_sql}");
-            conn.query_row(&sql, params_from_iter(filter_params.iter()), |row| row.get(0))?
+            conn.query_row(&sql, params_from_iter(filter_params.iter()), |row| {
+                row.get(0)
+            })?
         };
 
         let mut where_sql = format!("({filter_sql})");
@@ -2408,7 +2729,9 @@ impl TaskStore for SqliteStore {
         query_params.push(SqlValue::Integer(fetch_limit));
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut items = Vec::new();
         for row in rows {
             items.push(Self::row_to_task(row?)?);
@@ -2437,7 +2760,9 @@ impl TaskStore for SqliteStore {
     fn count_by_status(&self) -> Result<Vec<(Status, u64)>, StoreError> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status")?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
         let mut out = Vec::new();
         for row in rows {
             let (s, c) = row?;
@@ -2457,7 +2782,7 @@ impl TaskStore for SqliteStore {
         let conn = self.lock()?;
         let row = conn
             .query_row(
-                "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at \
+                "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at, profile_json \
                  FROM org_nodes WHERE id = ?1",
                 params![id],
                 Self::org_row,
@@ -2477,11 +2802,13 @@ impl TaskStore for SqliteStore {
             stored.created_at = previous.created_at;
         }
         tx.execute(
-            "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+            "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at, \
+             profile_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
              ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
              kind = excluded.kind, genre = excluded.genre, brief = excluded.brief, \
-             position = excluded.position, updated_at = excluded.updated_at",
+             position = excluded.position, updated_at = excluded.updated_at, \
+             profile_json = excluded.profile_json",
             params![
                 stored.id,
                 stored.parent_id,
@@ -2492,6 +2819,7 @@ impl TaskStore for SqliteStore {
                 stored.position,
                 format_rfc3339(stored.created_at)?,
                 format_rfc3339(stored.updated_at)?,
+                profile_json(&stored.profile)?,
             ],
         )?;
         tx.commit()?;
@@ -2505,11 +2833,13 @@ impl TaskStore for SqliteStore {
         for node in nodes {
             crate::org::validate_upsert(&existing, node)?;
             tx.execute(
-                "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at, \
+                 profile_json) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
                  ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
                  kind = excluded.kind, genre = excluded.genre, brief = excluded.brief, \
-                 position = excluded.position, updated_at = excluded.updated_at",
+                 position = excluded.position, updated_at = excluded.updated_at, \
+                 profile_json = excluded.profile_json",
                 params![
                     node.id,
                     node.parent_id,
@@ -2520,6 +2850,7 @@ impl TaskStore for SqliteStore {
                     node.position,
                     format_rfc3339(node.created_at)?,
                     format_rfc3339(node.updated_at)?,
+                    profile_json(&node.profile)?,
                 ],
             )?;
             existing.push(node.clone());
@@ -2541,7 +2872,10 @@ impl TaskStore for SqliteStore {
         }
         // ADR-0033 D1: 「消すときに仕事を抱えていたら 409」。抱えている＝未終了のタスクの assignee。
         let open_tasks: i64 = tx.query_row(
-            &format!("SELECT COUNT(*) FROM tasks WHERE assignee = ?1 AND {}", Self::NON_TERMINAL_SQL),
+            &format!(
+                "SELECT COUNT(*) FROM tasks WHERE assignee = ?1 AND {}",
+                Self::NON_TERMINAL_SQL
+            ),
             params![id],
             |row| row.get(0),
         )?;
@@ -2675,7 +3009,12 @@ impl TaskStore for SqliteStore {
         let affected = match paused_from {
             Some(from) => conn.execute(
                 "UPDATE projects SET status = ?1, paused_from = ?2, updated_at = ?3 WHERE id = ?4",
-                params![status.as_str(), from.map(|s| s.as_str()), now, id.to_string()],
+                params![
+                    status.as_str(),
+                    from.map(|s| s.as_str()),
+                    now,
+                    id.to_string()
+                ],
             )?,
             None => conn.execute(
                 "UPDATE projects SET status = ?1, updated_at = ?2 WHERE id = ?3",
@@ -2685,7 +3024,11 @@ impl TaskStore for SqliteStore {
         Ok(affected == 1)
     }
 
-    fn project_set_archived_at(&self, id: ProjectId, at: Option<OffsetDateTime>) -> Result<bool, StoreError> {
+    fn project_set_archived_at(
+        &self,
+        id: ProjectId,
+        at: Option<OffsetDateTime>,
+    ) -> Result<bool, StoreError> {
         let conn = self.lock()?;
         let affected = conn.execute(
             "UPDATE projects SET archived_at = ?1, updated_at = ?2 WHERE id = ?3",
@@ -2698,13 +3041,21 @@ impl TaskStore for SqliteStore {
         Ok(affected == 1)
     }
 
-    fn project_set_workspace(&self, id: ProjectId, workspace: Option<&WorkspaceSpec>) -> Result<bool, StoreError> {
+    fn project_set_workspace(
+        &self,
+        id: ProjectId,
+        workspace: Option<&WorkspaceSpec>,
+    ) -> Result<bool, StoreError> {
         let column = Self::project_workspace_column(workspace)?;
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let affected = tx.execute(
             "UPDATE projects SET workspace = ?1, updated_at = ?2 WHERE id = ?3",
-            params![column, format_rfc3339(OffsetDateTime::now_utc())?, id.to_string()],
+            params![
+                column,
+                format_rfc3339(OffsetDateTime::now_utc())?,
+                id.to_string()
+            ],
         )?;
         if affected != 1 {
             return Ok(false);
@@ -2723,7 +3074,11 @@ impl TaskStore for SqliteStore {
                 if matches!(location, WorkspaceSpec::Local { .. }) {
                     repo.sync = None;
                 }
-                let others: Vec<ProjectRepo> = existing.iter().filter(|r| r.id != repo.id).cloned().collect();
+                let others: Vec<ProjectRepo> = existing
+                    .iter()
+                    .filter(|r| r.id != repo.id)
+                    .cloned()
+                    .collect();
                 crate::repos::validate_upsert(&others, &repo)?;
                 Self::repo_write_tx(&tx, &repo)?;
             }
@@ -2760,7 +3115,10 @@ impl TaskStore for SqliteStore {
                         detail: format!("{} task(s) using it have not finished", open.len()),
                     });
                 }
-                tx.execute("DELETE FROM project_repos WHERE id = ?1", params![repo.id.to_string()])?;
+                tx.execute(
+                    "DELETE FROM project_repos WHERE id = ?1",
+                    params![repo.id.to_string()],
+                )?;
             }
             (None, None) => {}
         }
@@ -2780,7 +3138,10 @@ impl TaskStore for SqliteStore {
             |row| row.get(0),
         )?;
         if !exists {
-            return Err(StoreError::Invalid(format!("project not found: {}", repo.project_id)));
+            return Err(StoreError::Invalid(format!(
+                "project not found: {}",
+                repo.project_id
+            )));
         }
         let existing = Self::repo_list_tx(&tx, repo.project_id)?;
         crate::repos::validate_upsert(&existing, repo)?;
@@ -2848,7 +3209,10 @@ impl TaskStore for SqliteStore {
                 detail: format!("{} task(s) using it have not finished", open.len()),
             });
         }
-        tx.execute("DELETE FROM project_repos WHERE id = ?1", params![id.to_string()])?;
+        tx.execute(
+            "DELETE FROM project_repos WHERE id = ?1",
+            params![id.to_string()],
+        )?;
         // primary を消したら、残りのうち一番古いものを primary にする（案件に主なリポジトリを残す）。
         if repo.is_primary
             && let Some(next) = Self::repo_list_tx(&tx, repo.project_id)?.first()
@@ -2893,17 +3257,26 @@ impl TaskStore for SqliteStore {
 
     fn integration_get(&self, id: IntegrationId) -> Result<Option<TaskIntegration>, StoreError> {
         let conn = self.lock()?;
-        Ok(Self::integration_query_tx(&conn, "id = ?1", params![id.to_string()])?
-            .into_iter()
-            .next())
+        Ok(
+            Self::integration_query_tx(&conn, "id = ?1", params![id.to_string()])?
+                .into_iter()
+                .next(),
+        )
     }
 
-    fn integration_list_for_task(&self, task_id: TaskId) -> Result<Vec<TaskIntegration>, StoreError> {
+    fn integration_list_for_task(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Vec<TaskIntegration>, StoreError> {
         let conn = self.lock()?;
         Self::integration_query_tx(&conn, "task_id = ?1", params![task_id.to_string()])
     }
 
-    fn integration_latest(&self, task_id: TaskId, repo: &str) -> Result<Option<TaskIntegration>, StoreError> {
+    fn integration_latest(
+        &self,
+        task_id: TaskId,
+        repo: &str,
+    ) -> Result<Option<TaskIntegration>, StoreError> {
         let conn = self.lock()?;
         Ok(Self::integration_query_tx(
             &conn,
@@ -2938,7 +3311,10 @@ impl TaskStore for SqliteStore {
                 .join(", ")
         ))?;
         let rows = stmt.query_map(
-            params![project_id.to_string(), i64::try_from(limit).unwrap_or(i64::MAX)],
+            params![
+                project_id.to_string(),
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
             Self::integration_row,
         )?;
         let mut out = Vec::new();
@@ -2963,7 +3339,9 @@ impl TaskStore for SqliteStore {
             |row| row.get(0),
         )?;
         if !exists {
-            return Err(StoreError::Invalid(format!("project not found: {project_id}")));
+            return Err(StoreError::Invalid(format!(
+                "project not found: {project_id}"
+            )));
         }
         let seq: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM milestones WHERE project_id = ?1",
@@ -3027,7 +3405,11 @@ impl TaskStore for SqliteStore {
         row.transpose()
     }
 
-    fn milestone_set_status(&self, id: MilestoneId, status: MilestoneStatus) -> Result<bool, StoreError> {
+    fn milestone_set_status(
+        &self,
+        id: MilestoneId,
+        status: MilestoneStatus,
+    ) -> Result<bool, StoreError> {
         let conn = self.lock()?;
         let affected = conn.execute(
             "UPDATE milestones SET status = ?1, updated_at = ?2 WHERE id = ?3",
@@ -3143,7 +3525,10 @@ impl TaskStore for SqliteStore {
         );
         args.push(Box::new(limit as i64));
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(args.iter().map(|a| a.as_ref())), Self::message_row)?;
+        let rows = stmt.query_map(
+            params_from_iter(args.iter().map(|a| a.as_ref())),
+            Self::message_row,
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row??);
@@ -3196,7 +3581,10 @@ impl TaskStore for SqliteStore {
             .optional()?
             .is_some();
         if !exists {
-            return Err(StoreError::Invalid(format!("task not found: {}", comment.task_id)));
+            return Err(StoreError::Invalid(format!(
+                "task not found: {}",
+                comment.task_id
+            )));
         }
         tx.execute(
             "INSERT INTO task_comments (id, task_id, author_kind, author, body, run_id, created_at) \
@@ -3258,7 +3646,11 @@ impl TaskStore for SqliteStore {
         Ok(())
     }
 
-    fn instance_heartbeat(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError> {
+    fn instance_heartbeat(
+        &self,
+        instance_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
         let conn = self.lock()?;
         let affected = conn.execute(
             "UPDATE daemon_instances SET heartbeat_at = ?1 WHERE instance_id = ?2",
@@ -3267,7 +3659,11 @@ impl TaskStore for SqliteStore {
         Ok(affected == 1)
     }
 
-    fn instance_request_handoff(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError> {
+    fn instance_request_handoff(
+        &self,
+        instance_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
         let conn = self.lock()?;
         let affected = conn.execute(
             "UPDATE daemon_instances SET handoff_requested_at = ?1 \
@@ -3291,7 +3687,11 @@ impl TaskStore for SqliteStore {
         Ok(affected == 1)
     }
 
-    fn instance_mark_drained(&self, instance_id: &str, at: OffsetDateTime) -> Result<bool, StoreError> {
+    fn instance_mark_drained(
+        &self,
+        instance_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
         let conn = self.lock()?;
         let ts = format_rfc3339(at)?;
         let affected = conn.execute(
@@ -3303,8 +3703,9 @@ impl TaskStore for SqliteStore {
 
     fn instance_list(&self) -> Result<Vec<DaemonInstance>, StoreError> {
         let conn = self.lock()?;
-        let mut stmt =
-            conn.prepare(&format!("{SELECT_INSTANCE} ORDER BY started_at ASC, instance_id ASC"))?;
+        let mut stmt = conn.prepare(&format!(
+            "{SELECT_INSTANCE} ORDER BY started_at ASC, instance_id ASC"
+        ))?;
         let rows = stmt.query_map([], row_to_instance)?;
         let mut out = Vec::new();
         for row in rows {
@@ -3315,7 +3716,10 @@ impl TaskStore for SqliteStore {
 
     fn instance_delete(&self, instance_id: &str) -> Result<bool, StoreError> {
         let conn = self.lock()?;
-        let affected = conn.execute("DELETE FROM daemon_instances WHERE instance_id = ?1", params![instance_id])?;
+        let affected = conn.execute(
+            "DELETE FROM daemon_instances WHERE instance_id = ?1",
+            params![instance_id],
+        )?;
         Ok(affected == 1)
     }
 
@@ -3341,7 +3745,10 @@ impl TaskStore for SqliteStore {
         };
         removed.sort();
         for id in &removed {
-            tx.execute("DELETE FROM daemon_instances WHERE instance_id = ?1", params![id])?;
+            tx.execute(
+                "DELETE FROM daemon_instances WHERE instance_id = ?1",
+                params![id],
+            )?;
         }
         tx.commit()?;
         Ok(removed)
@@ -3360,6 +3767,8 @@ mod tests {
     fn sample_task(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -3387,7 +3796,8 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: "/tmp/workspace".into(), mode: None,
+                path: "/tmp/workspace".into(),
+                mode: None,
             },
             budget: Budget {
                 max_turns: 10,
@@ -3507,9 +3917,7 @@ mod tests {
             .expect("acquire second");
         assert!(!second);
 
-        store
-            .release_lease(task.id, "worker-a")
-            .expect("release");
+        store.release_lease(task.id, "worker-a").expect("release");
 
         let after_release = store.get(task.id).expect("get").expect("some");
         assert!(after_release.lease.is_none());
@@ -3749,12 +4157,25 @@ mod tests {
 
         let running_after = store.get(running.id).expect("get").expect("some");
         assert_eq!(running_after.status, Status::Cancelled);
-        assert!(running_after.lease.is_none(), "leaving running must release the lease");
+        assert!(
+            running_after.lease.is_none(),
+            "leaving running must release the lease"
+        );
 
         // 既に done の子は触らない。
-        assert_eq!(store.get(already_done.id).expect("get").expect("some").status, Status::Done);
+        assert_eq!(
+            store
+                .get(already_done.id)
+                .expect("get")
+                .expect("some")
+                .status,
+            Status::Done
+        );
         // 他タスクの子（parent_id が違う）も触らない。
-        assert_eq!(store.get(unrelated.id).expect("get").expect("some").status, Status::Draft);
+        assert_eq!(
+            store.get(unrelated.id).expect("get").expect("some").status,
+            Status::Draft
+        );
     }
 
     /// apply_transition が存在しない task_id に対して呼ばれた場合の扱い。
@@ -3808,32 +4229,61 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         let task = sample_task(Status::Ready);
         store.insert(&task).unwrap();
-        assert!(store.acquire_lease(task.id, "run-1", StdDuration::from_secs(60)).unwrap());
+        assert!(
+            store
+                .acquire_lease(task.id, "run-1", StdDuration::from_secs(60))
+                .unwrap()
+        );
         let extras = vec![
-            Event::WorkerFinished { run_id: "run-1".into(), outcome: "done: x".into(), usage: None, role: None },
+            Event::WorkerFinished {
+                run_id: "run-1".into(),
+                outcome: "done: x".into(),
+                usage: None,
+                role: None,
+            },
             Event::worker_progress("run-1", "extra"),
         ];
-        let outcome = store.apply_transition_with_events(task.id, Trigger::WorkerDone, extras).unwrap();
+        let outcome = store
+            .apply_transition_with_events(task.id, Trigger::WorkerDone, extras)
+            .unwrap();
         assert_eq!(outcome.next, Status::Reviewing);
         let events = store.events_for(task.id).unwrap();
         let tail: Vec<(u64, String)> = events[events.len() - 3..]
             .iter()
-            .map(|(seq, e)| (*seq, match e {
-                Event::Transitioned { to, reason, .. } => format!("transitioned:{to:?}:{reason}"),
-                Event::WorkerFinished { outcome, .. } => format!("finished:{outcome}"),
-                Event::WorkerProgress { msg, .. } => format!("progress:{msg}"),
-                _ => "other".into(),
-            }))
+            .map(|(seq, e)| {
+                (
+                    *seq,
+                    match e {
+                        Event::Transitioned { to, reason, .. } => {
+                            format!("transitioned:{to:?}:{reason}")
+                        }
+                        Event::WorkerFinished { outcome, .. } => format!("finished:{outcome}"),
+                        Event::WorkerProgress { msg, .. } => format!("progress:{msg}"),
+                        _ => "other".into(),
+                    },
+                )
+            })
             .collect();
-        assert_eq!(tail, vec![
-            (1, "transitioned:Reviewing:worker_done".to_string()),
-            (2, "finished:done: x".to_string()),
-            (3, "progress:extra".to_string()),
-        ]);
+        assert_eq!(
+            tail,
+            vec![
+                (1, "transitioned:Reviewing:worker_done".to_string()),
+                (2, "finished:done: x".to_string()),
+                (3, "progress:extra".to_string()),
+            ]
+        );
         assert!(store.get(task.id).unwrap().unwrap().lease.is_none());
         // 無効な遷移では何も追記されない。
         let before = store.events_for(task.id).unwrap().len();
-        assert!(store.apply_transition_with_events(task.id, Trigger::WorkerDone, vec![Event::ApprovalRequested]).is_err());
+        assert!(
+            store
+                .apply_transition_with_events(
+                    task.id,
+                    Trigger::WorkerDone,
+                    vec![Event::ApprovalRequested]
+                )
+                .is_err()
+        );
         assert_eq!(store.events_for(task.id).unwrap().len(), before);
     }
 
@@ -3862,8 +4312,15 @@ mod tests {
             .expect("complete_plan");
         assert_eq!(outcome.next, Status::Done);
         assert_eq!(store.get(plan.id).unwrap().unwrap().status, Status::Done);
-        let ev: Vec<Event> = store.events_for(plan.id).unwrap().into_iter().map(|(_, e)| e).collect();
-        assert!(matches!(&ev[0], Event::Transitioned { to: Status::Done, reason, .. } if reason == "review_pass"));
+        let ev: Vec<Event> = store
+            .events_for(plan.id)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect();
+        assert!(
+            matches!(&ev[0], Event::Transitioned { to: Status::Done, reason, .. } if reason == "review_pass")
+        );
         assert!(matches!(&ev[1], Event::ReviewVerdict { pass: true, .. }));
         for c in [&c1, &c2] {
             let got = store.get(c.id).unwrap().expect("child inserted");
@@ -3881,12 +4338,16 @@ mod tests {
         store.insert(&plan2).expect("insert plan2");
         let mut c3 = sample_task(Status::Draft);
         c3.parent_id = Some(plan2.id);
-        store.complete_plan(plan2.id, vec![], vec![c3.clone()], true).expect("complete_plan 2");
+        store
+            .complete_plan(plan2.id, vec![], vec![c3.clone()], true)
+            .expect("complete_plan 2");
         let got = store.get(c3.id).unwrap().unwrap();
         assert_eq!(got.status, Status::Ready);
         let ev = store.events_for(c3.id).unwrap();
         assert_eq!(ev.len(), 2);
-        assert!(matches!(&ev[1].1, Event::Transitioned { from: Status::Draft, to: Status::Ready, reason } if reason == "accept"));
+        assert!(
+            matches!(&ev[1].1, Event::Transitioned { from: Status::Draft, to: Status::Ready, reason } if reason == "accept")
+        );
         assert_eq!(store.ready_tasks(10).unwrap().len(), 1);
 
         // 親が reviewing でなければ全体がロールバックされ、子は挿入されない。
@@ -3895,7 +4356,9 @@ mod tests {
         store.insert(&not_reviewing).unwrap();
         let mut c4 = sample_task(Status::Draft);
         c4.parent_id = Some(not_reviewing.id);
-        let err = store.complete_plan(not_reviewing.id, vec![], vec![c4.clone()], true).unwrap_err();
+        let err = store
+            .complete_plan(not_reviewing.id, vec![], vec![c4.clone()], true)
+            .unwrap_err();
         assert!(matches!(err, StoreError::InvalidTransition(_)));
         assert!(store.get(c4.id).unwrap().is_none());
         assert!(store.events_for(c4.id).unwrap().is_empty());
@@ -3935,7 +4398,9 @@ mod tests {
         let mut b = sample_task(Status::Draft);
         b.parent_id = Some(parent.id);
         b.depends_on = vec![a.id];
-        let ids = store.delegate_children(parent.id, "run-1", vec![a.clone(), b.clone()]).unwrap();
+        let ids = store
+            .delegate_children(parent.id, "run-1", vec![a.clone(), b.clone()])
+            .unwrap();
         assert_eq!(ids, vec![a.id, b.id]);
         for id in &ids {
             let t = store.get(*id).unwrap().unwrap();
@@ -3945,12 +4410,21 @@ mod tests {
         let children = store.children(parent.id).unwrap();
         assert_eq!(children.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
         let events = store.events_for(parent.id).unwrap();
-        assert!(matches!(&events.last().unwrap().1, Event::Delegated { run_id, task_ids } if run_id == "run-1" && *task_ids == ids));
-        assert_eq!(store.get(parent.id).unwrap().unwrap().status, Status::Running);
+        assert!(
+            matches!(&events.last().unwrap().1, Event::Delegated { run_id, task_ids } if run_id == "run-1" && *task_ids == ids)
+        );
+        assert_eq!(
+            store.get(parent.id).unwrap().unwrap().status,
+            Status::Running
+        );
         // 親が違う子は拒否され、何も挿入されない。
         let mut stray = sample_task(Status::Draft);
         stray.parent_id = Some(a.id);
-        assert!(store.delegate_children(parent.id, "run-2", vec![stray.clone()]).is_err());
+        assert!(
+            store
+                .delegate_children(parent.id, "run-2", vec![stray.clone()])
+                .is_err()
+        );
         assert!(store.get(stray.id).unwrap().is_none());
         assert_eq!(store.children(parent.id).unwrap().len(), 2);
         // ready_tasks は a を返し、b は a が done になるまで返さない。
@@ -3962,14 +4436,20 @@ mod tests {
     fn create_task_inserts_task_and_events_atomically() {
         let store = SqliteStore::open_in_memory().unwrap();
         let task = sample_task(Status::Ready);
-        store.create_task(&task, vec![Event::ApprovalRequested]).unwrap();
+        store
+            .create_task(&task, vec![Event::ApprovalRequested])
+            .unwrap();
         assert_eq!(store.get(task.id).unwrap().unwrap(), task);
         let ev = store.events_for(task.id).unwrap();
         assert_eq!(ev.len(), 2);
         assert!(matches!(&ev[0].1, Event::Created { task: t } if t.id == task.id));
         assert_eq!(ev[1].1, Event::ApprovalRequested);
         // 同じ id の再作成は insert で失敗し、イベントも追記されない。
-        assert!(store.create_task(&task, vec![Event::ApprovalRequested]).is_err());
+        assert!(
+            store
+                .create_task(&task, vec![Event::ApprovalRequested])
+                .is_err()
+        );
         assert_eq!(store.events_for(task.id).unwrap().len(), 2);
     }
 
@@ -3979,23 +4459,55 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         let task = sample_task(Status::Ready);
         store.insert(&task).unwrap();
-        assert!(store.acquire_lease(task.id, "run-a", StdDuration::from_secs(5)).unwrap());
-        let before = store.get(task.id).unwrap().unwrap().lease.unwrap().expires_at;
-        assert!(store.renew_lease(task.id, "run-a", StdDuration::from_secs(3600)).unwrap());
+        assert!(
+            store
+                .acquire_lease(task.id, "run-a", StdDuration::from_secs(5))
+                .unwrap()
+        );
+        let before = store
+            .get(task.id)
+            .unwrap()
+            .unwrap()
+            .lease
+            .unwrap()
+            .expires_at;
+        assert!(
+            store
+                .renew_lease(task.id, "run-a", StdDuration::from_secs(3600))
+                .unwrap()
+        );
         let after = store.get(task.id).unwrap().unwrap().lease.unwrap();
         assert_eq!(after.worker_run_id, "run-a");
         assert!(after.expires_at > before + time::Duration::seconds(3000));
         let col: String = {
             let conn = store.conn.lock().unwrap();
-            conn.query_row("SELECT lease_expires_at FROM tasks WHERE id = ?1", params![task.id.to_string()], |r| r.get(0))
-                .unwrap()
+            conn.query_row(
+                "SELECT lease_expires_at FROM tasks WHERE id = ?1",
+                params![task.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
         assert_eq!(col, format_rfc3339(after.expires_at).unwrap());
         // 別 run_id や running でないタスクには効かない。
-        assert!(!store.renew_lease(task.id, "run-b", StdDuration::from_secs(1)).unwrap());
-        store.apply_transition(task.id, Trigger::WorkerDone, None).unwrap();
-        assert!(!store.renew_lease(task.id, "run-a", StdDuration::from_secs(1)).unwrap());
-        assert!(!store.renew_lease(TaskId::new(), "run-a", StdDuration::from_secs(1)).unwrap());
+        assert!(
+            !store
+                .renew_lease(task.id, "run-b", StdDuration::from_secs(1))
+                .unwrap()
+        );
+        store
+            .apply_transition(task.id, Trigger::WorkerDone, None)
+            .unwrap();
+        assert!(
+            !store
+                .renew_lease(task.id, "run-a", StdDuration::from_secs(1))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .renew_lease(TaskId::new(), "run-a", StdDuration::from_secs(1))
+                .unwrap()
+        );
         // 状態遷移ではないのでイベントは増えない（dispatch と worker_done の 2 件だけ）。
         assert_eq!(reasons(&store, task.id), vec!["dispatch", "worker_done"]);
     }
@@ -4023,7 +4535,10 @@ mod tests {
         for status in [Status::Done, Status::Failed, Status::Cancelled] {
             let t = sample_task(status);
             store.insert(&t).unwrap();
-            assert!(matches!(store.apply_transition(t.id, Trigger::Cancel, None), Err(StoreError::InvalidTransition(_))));
+            assert!(matches!(
+                store.apply_transition(t.id, Trigger::Cancel, None),
+                Err(StoreError::InvalidTransition(_))
+            ));
             assert_eq!(store.get(t.id).unwrap().unwrap().status, status);
             assert!(store.events_for(t.id).unwrap().is_empty());
         }
@@ -4039,8 +4554,13 @@ mod tests {
         let mut child = sample_task(Status::Ready);
         child.parent_id = Some(approval.id);
         store.insert(&child).unwrap();
-        store.apply_transition(approval.id, Trigger::Cancel, None).unwrap();
-        assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Cancelled);
+        store
+            .apply_transition(approval.id, Trigger::Cancel, None)
+            .unwrap();
+        assert_eq!(
+            store.get(child.id).unwrap().unwrap().status,
+            Status::Cancelled
+        );
         assert_eq!(reasons(&store, child.id), vec!["cancel"]);
     }
 
@@ -4062,10 +4582,21 @@ mod tests {
         exec_child.parent_id = Some(parent.id);
         store.insert(&exec_child).unwrap();
 
-        store.apply_transition(parent.id, Trigger::ReviewPass, None).unwrap();
-        assert_eq!(store.get(pending_approval.id).unwrap().unwrap().status, Status::Cancelled);
-        assert_eq!(store.get(decided_approval.id).unwrap().unwrap().status, Status::Done);
-        assert_eq!(store.get(exec_child.id).unwrap().unwrap().status, Status::Draft);
+        store
+            .apply_transition(parent.id, Trigger::ReviewPass, None)
+            .unwrap();
+        assert_eq!(
+            store.get(pending_approval.id).unwrap().unwrap().status,
+            Status::Cancelled
+        );
+        assert_eq!(
+            store.get(decided_approval.id).unwrap().unwrap().status,
+            Status::Done
+        );
+        assert_eq!(
+            store.get(exec_child.id).unwrap().unwrap().status,
+            Status::Draft
+        );
     }
 
     /// ADR-0010 D2（P-9）: 先行タスクが failed になると、終端でない後続が推移的に cancelled（dependency_failed）になる。
@@ -4087,8 +4618,14 @@ mod tests {
         let unrelated = sample_task(Status::Ready);
         store.insert(&unrelated).unwrap();
 
-        assert!(store.acquire_lease(a.id, "run-a", StdDuration::from_secs(60)).unwrap());
-        let outcome = store.apply_transition(a.id, Trigger::WorkerError { retryable: false }, None).unwrap();
+        assert!(
+            store
+                .acquire_lease(a.id, "run-a", StdDuration::from_secs(60))
+                .unwrap()
+        );
+        let outcome = store
+            .apply_transition(a.id, Trigger::WorkerError { retryable: false }, None)
+            .unwrap();
         assert_eq!(outcome.next, Status::Failed);
 
         for id in [b.id, c.id] {
@@ -4098,7 +4635,10 @@ mod tests {
             assert_eq!(reasons(&store, id), vec!["dependency_failed"]);
         }
         assert_eq!(store.get(d.id).unwrap().unwrap().status, Status::Done);
-        assert_eq!(store.get(unrelated.id).unwrap().unwrap().status, Status::Ready);
+        assert_eq!(
+            store.get(unrelated.id).unwrap().unwrap().status,
+            Status::Ready
+        );
     }
 
     /// ADR-0012 D1: `WorkerStarted.provider` は任意。導入前に記録されたイベント（provider 無し）も読める。
@@ -4127,7 +4667,11 @@ mod tests {
             role: None,
             task_role: None,
         };
-        assert!(serde_json::to_string(&new).unwrap().contains(r#""provider":"acct-a""#));
+        assert!(
+            serde_json::to_string(&new)
+                .unwrap()
+                .contains(r#""provider":"acct-a""#)
+        );
         assert_eq!(serde_json::to_string(&ev).unwrap(), old);
     }
 
@@ -4170,7 +4714,15 @@ mod tests {
     fn run_events_role_is_optional_and_reviewer_serializes_explicitly() {
         let old = r#"{"type":"worker_finished","run_id":"r","outcome":"done: x","usage":null}"#;
         let ev: Event = serde_json::from_str(old).unwrap();
-        assert_eq!(ev, Event::WorkerFinished { run_id: "r".into(), outcome: "done: x".into(), usage: None, role: None });
+        assert_eq!(
+            ev,
+            Event::WorkerFinished {
+                run_id: "r".into(),
+                outcome: "done: x".into(),
+                usage: None,
+                role: None
+            }
+        );
         assert_eq!(serde_json::to_string(&ev).unwrap(), old);
         let reviewer = Event::WorkerStarted {
             run_id: "rv".into(),
@@ -4194,10 +4746,14 @@ mod tests {
     fn insert_legacy_task(conn: &Connection, task: &Task) {
         let json = serde_json::to_string(task).unwrap();
         let created_at = format_rfc3339(task.created_at).unwrap();
-        let (lease_worker_run_id, lease_expires_at): (Option<String>, Option<String>) = match &task.lease {
-            Some(l) => (Some(l.worker_run_id.clone()), Some(format_rfc3339(l.expires_at).unwrap())),
-            None => (None, None),
-        };
+        let (lease_worker_run_id, lease_expires_at): (Option<String>, Option<String>) =
+            match &task.lease {
+                Some(l) => (
+                    Some(l.worker_run_id.clone()),
+                    Some(format_rfc3339(l.expires_at).unwrap()),
+                ),
+                None => (None, None),
+            };
         conn.execute(
             "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
              lease_worker_run_id, lease_expires_at, json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -4248,17 +4804,25 @@ mod tests {
             insert_legacy_task(&conn, &b);
 
             // events は task をまたいで rowid 順をばらして挿入する（各 task 内の seq 順は保つ）。
-            let ev = Event::Created { task: Box::new(a.clone()) };
+            let ev = Event::Created {
+                task: Box::new(a.clone()),
+            };
             insert_legacy_event(&conn, a.id, 0, &ev);
             expected_a.push((0, ev));
             expected_global.push((a.id, 0));
 
-            let ev = Event::Created { task: Box::new(b.clone()) };
+            let ev = Event::Created {
+                task: Box::new(b.clone()),
+            };
             insert_legacy_event(&conn, b.id, 0, &ev);
             expected_b.push((0, ev));
             expected_global.push((b.id, 0));
 
-            let ev = Event::Transitioned { from: Status::Draft, to: Status::Ready, reason: "accept".into() };
+            let ev = Event::Transitioned {
+                from: Status::Draft,
+                to: Status::Ready,
+                reason: "accept".into(),
+            };
             insert_legacy_event(&conn, a.id, 1, &ev);
             expected_a.push((1, ev));
             expected_global.push((a.id, 1));
@@ -4280,7 +4844,10 @@ mod tests {
         let since = store.events_since(0, 100).unwrap();
         assert_eq!(since.len(), 5);
         let got_order: Vec<(TaskId, u64)> = since.iter().map(|r| (r.task_id, r.seq)).collect();
-        assert_eq!(got_order, expected_global, "events_since id order must match original rowid order");
+        assert_eq!(
+            got_order, expected_global,
+            "events_since id order must match original rowid order"
+        );
         assert!(since.windows(2).all(|w| w[0].id < w[1].id));
 
         assert_eq!(store.events_for(a.id).unwrap(), expected_a);
@@ -4324,7 +4891,10 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
-        assert_eq!(applied_before, applied_after, "second open must not re-apply migrations");
+        assert_eq!(
+            applied_before, applied_after,
+            "second open must not re-apply migrations"
+        );
     }
 
     /// ADR-0027 D1: 版数 4 の DB（`genre` 列が無い）を `open` すると版数 5 に上がり、
@@ -4376,16 +4946,26 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
 
-        let got = store.get(task.id).unwrap().expect("task still readable after migration");
+        let got = store
+            .get(task.id)
+            .unwrap()
+            .expect("task still readable after migration");
         assert_eq!(got.genre, None);
         assert_eq!(got.objective, task.objective);
 
         let genre_col: Option<String> = {
             let conn = store.conn.lock().unwrap();
-            conn.query_row("SELECT genre FROM tasks WHERE id = ?1", params![task.id.to_string()], |row| row.get(0))
-                .unwrap()
+            conn.query_row(
+                "SELECT genre FROM tasks WHERE id = ?1",
+                params![task.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
         };
-        assert_eq!(genre_col, None, "migration must not invent a genre for pre-existing rows");
+        assert_eq!(
+            genre_col, None,
+            "migration must not invent a genre for pre-existing rows"
+        );
     }
 
     /// ADR-0013 D5: `schema_migrations` の最大版数がこのバイナリの `SCHEMA_VERSION` より大きい DB は
@@ -4417,7 +4997,8 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         let mode: String = {
             let conn = store.conn.lock().unwrap();
-            conn.query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap()
+            conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap()
         };
         assert_eq!(mode.to_lowercase(), "wal");
     }
@@ -4445,8 +5026,12 @@ mod tests {
         let a = Arc::new(SqliteStore::open(&path).unwrap());
         let b = Arc::new(SqliteStore::open(&path).unwrap());
         let (ha, hb) = (writer(Arc::clone(&a)), writer(Arc::clone(&b)));
-        ha.join().unwrap().expect("writer a never sees database is locked");
-        hb.join().unwrap().expect("writer b never sees database is locked");
+        ha.join()
+            .unwrap()
+            .expect("writer a never sees database is locked");
+        hb.join()
+            .unwrap()
+            .expect("writer b never sees database is locked");
         assert_eq!(a.list(Some(Status::Ready)).unwrap().len(), 400);
         assert_eq!(b.events_since(0, 10_000).unwrap().len(), 400 * 3);
     }
@@ -4504,7 +5089,12 @@ mod tests {
         assert!(rows.iter().all(|r| r.task_id == a.id && !r.ts.is_empty()));
         assert_eq!(store.event_rows_for(a.id, Some(0), 10).unwrap().len(), 1);
         assert_eq!(store.event_rows_for(a.id, None, 1).unwrap().len(), 1);
-        assert!(store.event_rows_for(TaskId::new(), None, 10).unwrap().is_empty());
+        assert!(
+            store
+                .event_rows_for(TaskId::new(), None, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4541,7 +5131,13 @@ mod tests {
         assert!(none.is_empty());
     }
 
-    fn task_with(title: &str, status: Status, kind: TaskKind, priority: i32, parent: Option<TaskId>) -> Task {
+    fn task_with(
+        title: &str,
+        status: Status,
+        kind: TaskKind,
+        priority: i32,
+        parent: Option<TaskId>,
+    ) -> Task {
         let mut t = sample_task(status);
         t.title = title.to_string();
         t.kind = kind;
@@ -4557,38 +5153,89 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         let root = task_with("root", Status::Ready, TaskKind::Plan, 0, None);
         store.insert(&root).unwrap();
-        let child_exec_ready = task_with("child a", Status::Ready, TaskKind::Execute, 0, Some(root.id));
+        let child_exec_ready = task_with(
+            "child a",
+            Status::Ready,
+            TaskKind::Execute,
+            0,
+            Some(root.id),
+        );
         store.insert(&child_exec_ready).unwrap();
-        let child_exec_done = task_with("child b", Status::Done, TaskKind::Execute, 0, Some(root.id));
+        let child_exec_done =
+            task_with("child b", Status::Done, TaskKind::Execute, 0, Some(root.id));
         store.insert(&child_exec_done).unwrap();
-        let child_approval = task_with("approve 100%", Status::Ready, TaskKind::Approval, 0, Some(root.id));
+        let child_approval = task_with(
+            "approve 100%",
+            Status::Ready,
+            TaskKind::Approval,
+            0,
+            Some(root.id),
+        );
         store.insert(&child_approval).unwrap();
         let other_root = task_with("other_root", Status::Draft, TaskKind::Execute, 0, None);
         store.insert(&other_root).unwrap();
 
         // statuses: 複数指定は OR。
-        let f = ListFilter { statuses: vec![Status::Ready, Status::Draft], ..Default::default() };
-        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let f = ListFilter {
+            statuses: vec![Status::Ready, Status::Draft],
+            ..Default::default()
+        };
+        let page = store
+            .list_page(&f, ListOrder::CreatedDesc, None, 10)
+            .unwrap();
         let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
-        assert_eq!(ids, [root.id, child_exec_ready.id, child_approval.id, other_root.id].into_iter().collect());
+        assert_eq!(
+            ids,
+            [
+                root.id,
+                child_exec_ready.id,
+                child_approval.id,
+                other_root.id
+            ]
+            .into_iter()
+            .collect()
+        );
         assert_eq!(page.total, 4);
 
         // kind
-        let f = ListFilter { kinds: vec![TaskKind::Approval], ..Default::default() };
-        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
-        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), vec![child_approval.id]);
+        let f = ListFilter {
+            kinds: vec![TaskKind::Approval],
+            ..Default::default()
+        };
+        let page = store
+            .list_page(&f, ListOrder::CreatedDesc, None, 10)
+            .unwrap();
+        assert_eq!(
+            page.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![child_approval.id]
+        );
         assert_eq!(page.total, 1);
 
         // parent
-        let f = ListFilter { parent_id: Some(root.id), ..Default::default() };
-        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let f = ListFilter {
+            parent_id: Some(root.id),
+            ..Default::default()
+        };
+        let page = store
+            .list_page(&f, ListOrder::CreatedDesc, None, 10)
+            .unwrap();
         let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
-        assert_eq!(ids, [child_exec_ready.id, child_exec_done.id, child_approval.id].into_iter().collect());
+        assert_eq!(
+            ids,
+            [child_exec_ready.id, child_exec_done.id, child_approval.id]
+                .into_iter()
+                .collect()
+        );
         assert_eq!(page.total, 3);
 
         // root_only
-        let f = ListFilter { root_only: true, ..Default::default() };
-        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let f = ListFilter {
+            root_only: true,
+            ..Default::default()
+        };
+        let page = store
+            .list_page(&f, ListOrder::CreatedDesc, None, 10)
+            .unwrap();
         let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
         assert_eq!(ids, [root.id, other_root.id].into_iter().collect());
         assert_eq!(page.total, 2);
@@ -4598,21 +5245,46 @@ mod tests {
         store.insert(&percent_task).unwrap();
         let no_percent_task = task_with("100 done", Status::Ready, TaskKind::Execute, 0, None);
         store.insert(&no_percent_task).unwrap();
-        let f = ListFilter { text_contains: Some("100%".to_string()), ..Default::default() };
-        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let f = ListFilter {
+            text_contains: Some("100%".to_string()),
+            ..Default::default()
+        };
+        let page = store
+            .list_page(&f, ListOrder::CreatedDesc, None, 10)
+            .unwrap();
         let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
-        assert_eq!(ids, [child_approval.id, percent_task.id].into_iter().collect());
+        assert_eq!(
+            ids,
+            [child_approval.id, percent_task.id].into_iter().collect()
+        );
         assert!(!ids.contains(&no_percent_task.id));
 
         // ADR-0014 D2: text_contains は objective も対象にする（ASCII の大文字小文字は区別しない）。
         let mut by_objective = task_with("plain title", Status::Ready, TaskKind::Execute, 0, None);
         by_objective.objective = "migrate the billing service".to_string();
         store.insert(&by_objective).unwrap();
-        let f = ListFilter { text_contains: Some("billing".to_string()), ..Default::default() };
-        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
-        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), vec![by_objective.id]);
-        let f = ListFilter { text_contains: Some("BILLING".to_string()), ..Default::default() };
-        assert_eq!(store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap().total, 1);
+        let f = ListFilter {
+            text_contains: Some("billing".to_string()),
+            ..Default::default()
+        };
+        let page = store
+            .list_page(&f, ListOrder::CreatedDesc, None, 10)
+            .unwrap();
+        assert_eq!(
+            page.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![by_objective.id]
+        );
+        let f = ListFilter {
+            text_contains: Some("BILLING".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store
+                .list_page(&f, ListOrder::CreatedDesc, None, 10)
+                .unwrap()
+                .total,
+            1
+        );
     }
 
     /// ADR-0027 D1: `genre` は `kind` と同じ形（完全一致、複数は OR）で絞り込める。
@@ -4628,16 +5300,26 @@ mod tests {
         let no_genre = task_with("no genre", Status::Ready, TaskKind::Execute, 0, None);
         store.insert(&no_genre).unwrap();
 
-        let f = ListFilter { genres: vec!["coding".to_string()], ..Default::default() };
-        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
-        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), vec![coding.id]);
+        let f = ListFilter {
+            genres: vec!["coding".to_string()],
+            ..Default::default()
+        };
+        let page = store
+            .list_page(&f, ListOrder::CreatedDesc, None, 10)
+            .unwrap();
+        assert_eq!(
+            page.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![coding.id]
+        );
         assert_eq!(page.total, 1);
 
         let f = ListFilter {
             genres: vec!["coding".to_string(), "literature".to_string()],
             ..Default::default()
         };
-        let page = store.list_page(&f, ListOrder::CreatedDesc, None, 10).unwrap();
+        let page = store
+            .list_page(&f, ListOrder::CreatedDesc, None, 10)
+            .unwrap();
         let ids: HashSet<_> = page.items.iter().map(|t| t.id).collect();
         assert_eq!(ids, [coding.id, literature.id].into_iter().collect());
         assert_eq!(page.total, 2);
@@ -4658,22 +5340,46 @@ mod tests {
         }
         let expected_desc: Vec<TaskId> = ids.iter().rev().copied().collect();
 
-        let page = store.list_page(&ListFilter::default(), ListOrder::Dispatch, None, 10).unwrap();
-        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), expected_desc);
+        let page = store
+            .list_page(&ListFilter::default(), ListOrder::Dispatch, None, 10)
+            .unwrap();
+        assert_eq!(
+            page.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+            expected_desc
+        );
 
-        let page = store.list_page(&ListFilter::default(), ListOrder::CreatedDesc, None, 10).unwrap();
-        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), expected_desc);
+        let page = store
+            .list_page(&ListFilter::default(), ListOrder::CreatedDesc, None, 10)
+            .unwrap();
+        assert_eq!(
+            page.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+            expected_desc
+        );
 
-        let page = store.list_page(&ListFilter::default(), ListOrder::UpdatedDesc, None, 10).unwrap();
-        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), expected_desc);
+        let page = store
+            .list_page(&ListFilter::default(), ListOrder::UpdatedDesc, None, 10)
+            .unwrap();
+        assert_eq!(
+            page.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+            expected_desc
+        );
 
         // ids[0] は priority 最小・最も古い。cancel して updated_at を更新すると UpdatedDesc の先頭になる。
-        store.apply_transition(ids[0], Trigger::Cancel, None).unwrap();
-        let page = store.list_page(&ListFilter::default(), ListOrder::UpdatedDesc, None, 10).unwrap();
+        store
+            .apply_transition(ids[0], Trigger::Cancel, None)
+            .unwrap();
+        let page = store
+            .list_page(&ListFilter::default(), ListOrder::UpdatedDesc, None, 10)
+            .unwrap();
         assert_eq!(page.items[0].id, ids[0]);
         // Dispatch 順は status を見ないので変わらない（cancelled でも一覧には出る）。
-        let page = store.list_page(&ListFilter::default(), ListOrder::Dispatch, None, 10).unwrap();
-        assert_eq!(page.items.iter().map(|t| t.id).collect::<Vec<_>>(), expected_desc);
+        let page = store
+            .list_page(&ListFilter::default(), ListOrder::Dispatch, None, 10)
+            .unwrap();
+        assert_eq!(
+            page.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+            expected_desc
+        );
     }
 
     /// ADR-0013 D10: `limit` より多い件数を cursor で辿ると、重複・欠落なく全件を1回ずつ得られる。
@@ -4686,13 +5392,22 @@ mod tests {
             store.insert(&t).unwrap();
         }
 
-        let full = store.list_page(&ListFilter::default(), ListOrder::Dispatch, None, 100).unwrap();
+        let full = store
+            .list_page(&ListFilter::default(), ListOrder::Dispatch, None, 100)
+            .unwrap();
         assert_eq!(full.total, 7);
 
         let mut seen = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let page = store.list_page(&ListFilter::default(), ListOrder::Dispatch, cursor.as_deref(), 3).unwrap();
+            let page = store
+                .list_page(
+                    &ListFilter::default(),
+                    ListOrder::Dispatch,
+                    cursor.as_deref(),
+                    3,
+                )
+                .unwrap();
             assert_eq!(page.total, 7);
             seen.extend(page.items.iter().map(|t| t.id));
             if page.next_cursor.is_none() {
@@ -4710,7 +5425,12 @@ mod tests {
     fn list_page_rejects_invalid_cursor() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert!(matches!(
-            store.list_page(&ListFilter::default(), ListOrder::Dispatch, Some("not-a-cursor"), 10),
+            store.list_page(
+                &ListFilter::default(),
+                ListOrder::Dispatch,
+                Some("not-a-cursor"),
+                10
+            ),
             Err(StoreError::Invalid(_))
         ));
         assert!(matches!(
@@ -4742,7 +5462,8 @@ mod tests {
     /// ADR-0013 D9: `ProviderThrottled.reason` は往復し、`reason` の無い旧 JSON も読める。
     #[test]
     fn provider_throttled_reason_roundtrips_and_reads_legacy_json() {
-        let old = r#"{"type":"provider_throttled","provider":"acct-a","until":"2024-01-01T00:00:00Z"}"#;
+        let old =
+            r#"{"type":"provider_throttled","provider":"acct-a","until":"2024-01-01T00:00:00Z"}"#;
         let ev: Event = serde_json::from_str(old).unwrap();
         assert_eq!(
             ev,
@@ -4769,14 +5490,20 @@ mod tests {
     /// `UPDATE_SCHEMA=1` で再生成。
     #[test]
     fn event_row_schema_matches_committed() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/api/v1/event.schema.json");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/api/v1/event.schema.json"
+        );
         let generated = serde_json::to_string_pretty(&event_row_schema_value()).unwrap() + "\n";
         if std::env::var_os("UPDATE_SCHEMA").is_some() {
             std::fs::write(path, &generated).unwrap();
         }
         let committed = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {path}: {e} (run with UPDATE_SCHEMA=1 to generate)"));
-        assert_eq!(committed, generated, "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-core`");
+        assert_eq!(
+            committed, generated,
+            "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-core`"
+        );
     }
 
     // ---- ADR-0033 D1/D2（Phase 23）: 組織・案件・途中目標 ----
@@ -4784,6 +5511,7 @@ mod tests {
     fn org_node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
         OrgNode {
+            profile: Default::default(),
             id: id.to_string(),
             parent_id: parent.map(str::to_string),
             name: format!("{id} の人"),
@@ -4797,7 +5525,9 @@ mod tests {
     }
 
     fn seed_secretary(store: &SqliteStore) {
-        store.org_upsert(&org_node("secretary", None, OrgKind::Secretary)).expect("secretary");
+        store
+            .org_upsert(&org_node("secretary", None, OrgKind::Secretary))
+            .expect("secretary");
     }
 
     /// 版数 5 の DB を開くと以後の migration（6, 7）が適用され、もう一度開いても何も起きない（冪等）。
@@ -4809,7 +5539,13 @@ mod tests {
         let task = sample_task(Status::Draft);
         {
             let conn = Connection::open(&path).unwrap();
-            for sql in [MIGRATION_0001, MIGRATION_0002, MIGRATION_0003, MIGRATION_0004, MIGRATION_0005] {
+            for sql in [
+                MIGRATION_0001,
+                MIGRATION_0002,
+                MIGRATION_0003,
+                MIGRATION_0004,
+                MIGRATION_0005,
+            ] {
                 conn.execute_batch(sql).unwrap();
             }
             conn.execute_batch(
@@ -4857,9 +5593,11 @@ mod tests {
         assert_eq!(store.org_list().unwrap().len(), 1);
         let applied = |version: u32| -> i64 {
             let conn = store.conn.lock().unwrap();
-            conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version = ?1", params![version], |r| {
-                r.get(0)
-            })
+            conn.query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                params![version],
+                |r| r.get(0),
+            )
             .unwrap()
         };
         assert_eq!(applied(6), 1, "migration 6 must be recorded exactly once");
@@ -4895,7 +5633,10 @@ mod tests {
                  (4, '2020-01-01T00:00:00Z'), (5, '2020-01-01T00:00:00Z'), (6, '2020-01-01T00:00:00Z');",
             )
             .unwrap();
-            for (id, project_id) in [(report_id, String::new()), (kept_id, project.id.to_string())] {
+            for (id, project_id) in [
+                (report_id, String::new()),
+                (kept_id, project.id.to_string()),
+            ] {
                 conn.execute(
                     "INSERT INTO reports (id, project_id, node_id, task_id, kind, level, headline, body, \
                      sources, read_at, created_at) VALUES (?1, ?2, 'infra', NULL, 'bad_news', 1, 'h', 'b', \
@@ -4908,8 +5649,14 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        let migrated = store.report_get(report_id).unwrap().expect("old row still readable");
-        assert_eq!(migrated.project_id, None, "空文字列のセンチネルは NULL になる");
+        let migrated = store
+            .report_get(report_id)
+            .unwrap()
+            .expect("old row still readable");
+        assert_eq!(
+            migrated.project_id, None,
+            "空文字列のセンチネルは NULL になる"
+        );
         assert_eq!(migrated.kind, ReportKind::BadNews);
         assert_eq!(
             store.report_get(kept_id).unwrap().map(|r| r.project_id),
@@ -4929,7 +5676,10 @@ mod tests {
             created_at: OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),
         };
         store.message_append(&message).unwrap();
-        assert_eq!(store.message_list("secretary", None, 10).unwrap()[0].task_id, Some(task_id));
+        assert_eq!(
+            store.message_list("secretary", None, 10).unwrap()[0].task_id,
+            Some(task_id)
+        );
     }
 
     /// Phase 39 / migration 0008（ADR-0037）: 版数 7 の DB を開くと版数 8 になり、`notifications` が
@@ -4964,11 +5714,17 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
-                .notification_upsert_pending(NotificationKind::BadNews, "r1", "悪い知らせ", None, now)
+                .notification_upsert_pending(
+                    NotificationKind::BadNews,
+                    "r1",
+                    "悪い知らせ",
+                    None,
+                    now
+                )
                 .unwrap()
                 .is_some()
         );
@@ -4977,7 +5733,13 @@ mod tests {
         // migration 9（ADR-0037 D6 / GUI 依頼 G13i-P1）: `project_id` が新しい DB でも往復する。
         let project_id = ProjectId::new();
         let with_project = store
-            .notification_upsert_pending(NotificationKind::MilestoneReady, "m1:2", "b", Some(project_id), now)
+            .notification_upsert_pending(
+                NotificationKind::MilestoneReady,
+                "m1:2",
+                "b",
+                Some(project_id),
+                now,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(with_project.project_id, Some(project_id));
@@ -4988,24 +5750,40 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(store.notification_pending().unwrap().len(), 2, "既存の行は残る");
+        assert_eq!(
+            store.notification_pending().unwrap().len(),
+            2,
+            "既存の行は残る"
+        );
         let found = store
             .notification_recent(10)
             .unwrap()
             .into_iter()
             .find(|n| n.id == with_project.id)
             .unwrap();
-        assert_eq!(found.project_id, Some(project_id), "project_id も再オープン後に残る");
+        assert_eq!(
+            found.project_id,
+            Some(project_id),
+            "project_id も再オープン後に残る"
+        );
         let applied: i64 = {
             let conn = store.conn.lock().unwrap();
-            conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version = 8", [], |r| r.get(0))
-                .unwrap()
+            conn.query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 8",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
         assert_eq!(applied, 1, "migration 8 must be recorded exactly once");
         let applied_9: i64 = {
             let conn = store.conn.lock().unwrap();
-            conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version = 9", [], |r| r.get(0))
-                .unwrap()
+            conn.query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 9",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
         assert_eq!(applied_9, 1, "migration 9 must be recorded exactly once");
     }
@@ -5025,7 +5803,10 @@ mod tests {
         renamed.genre = Some("coding".into());
         renamed.created_at = OffsetDateTime::now_utc() + time::Duration::days(1);
         let updated = store.org_upsert(&renamed).unwrap();
-        assert_eq!(updated.created_at, stored.created_at, "created_at is kept on update");
+        assert_eq!(
+            updated.created_at, stored.created_at,
+            "created_at is kept on update"
+        );
         assert_eq!(updated.name, "コーディング部");
         assert_eq!(updated.genre.as_deref(), Some("coding"));
 
@@ -5033,8 +5814,16 @@ mod tests {
         let mut infra = org_node("infra", Some("secretary"), OrgKind::Department);
         infra.position = 1;
         store.org_upsert(&infra).unwrap();
-        let ids: Vec<String> = store.org_list().unwrap().into_iter().map(|n| n.id).collect();
-        assert_eq!(ids, vec!["secretary".to_string(), "infra".into(), "coding".into()]);
+        let ids: Vec<String> = store
+            .org_list()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["secretary".to_string(), "infra".into(), "coding".into()]
+        );
     }
 
     /// 監査 D-4: `org_seed` は 1 トランザクション。途中の 1 件が不正（親が居ない）なら、それより前の
@@ -5049,8 +5838,14 @@ mod tests {
             org_node("orphan", Some("ghost"), OrgKind::Section),
         ];
         let err = store.org_seed(&nodes).unwrap_err();
-        assert!(matches!(err, StoreError::Org(OrgError::UnknownParent { .. })), "{err}");
-        assert!(store.org_list().unwrap().is_empty(), "nothing is written on failure");
+        assert!(
+            matches!(err, StoreError::Org(OrgError::UnknownParent { .. })),
+            "{err}"
+        );
+        assert!(
+            store.org_list().unwrap().is_empty(),
+            "nothing is written on failure"
+        );
 
         let ok_nodes = vec![
             org_node("secretary", None, OrgKind::Secretary),
@@ -5059,34 +5854,67 @@ mod tests {
         ];
         store.org_seed(&ok_nodes).unwrap();
         // `org_list` は position（同値なら id）の昇順で返す。全ノードが position = 0 なので id 順になる。
-        let ids: Vec<String> = store.org_list().unwrap().into_iter().map(|n| n.id).collect();
-        assert_eq!(ids, vec!["coding".to_string(), "poc".into(), "secretary".into()]);
+        let ids: Vec<String> = store
+            .org_list()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["coding".to_string(), "poc".into(), "secretary".into()]
+        );
     }
 
     #[test]
     fn org_upsert_rejects_a_second_secretary_and_cycles() {
         let store = SqliteStore::open_in_memory().unwrap();
         seed_secretary(&store);
-        store.org_upsert(&org_node("coding", Some("secretary"), OrgKind::Department)).unwrap();
-        store.org_upsert(&org_node("poc", Some("coding"), OrgKind::Section)).unwrap();
+        store
+            .org_upsert(&org_node("coding", Some("secretary"), OrgKind::Department))
+            .unwrap();
+        store
+            .org_upsert(&org_node("poc", Some("coding"), OrgKind::Section))
+            .unwrap();
 
-        let err = store.org_upsert(&org_node("boss", None, OrgKind::Secretary)).unwrap_err();
-        assert!(matches!(err, StoreError::Org(OrgError::DuplicateSecretary { .. })), "{err}");
+        let err = store
+            .org_upsert(&org_node("boss", None, OrgKind::Secretary))
+            .unwrap_err();
+        assert!(
+            matches!(err, StoreError::Org(OrgError::DuplicateSecretary { .. })),
+            "{err}"
+        );
         let err = store
             .org_upsert(&org_node("coding", Some("coding"), OrgKind::Department))
             .unwrap_err();
-        assert!(matches!(err, StoreError::Org(OrgError::Cycle { .. })), "{err}");
-        let err = store.org_upsert(&org_node("x", Some("ghost"), OrgKind::Section)).unwrap_err();
-        assert!(matches!(err, StoreError::Org(OrgError::UnknownParent { .. })), "{err}");
-        assert_eq!(store.org_list().unwrap().len(), 3, "nothing was written by the failed upserts");
+        assert!(
+            matches!(err, StoreError::Org(OrgError::Cycle { .. })),
+            "{err}"
+        );
+        let err = store
+            .org_upsert(&org_node("x", Some("ghost"), OrgKind::Section))
+            .unwrap_err();
+        assert!(
+            matches!(err, StoreError::Org(OrgError::UnknownParent { .. })),
+            "{err}"
+        );
+        assert_eq!(
+            store.org_list().unwrap().len(),
+            3,
+            "nothing was written by the failed upserts"
+        );
     }
 
     #[test]
     fn org_delete_refuses_while_a_task_is_open_or_children_remain() {
         let store = SqliteStore::open_in_memory().unwrap();
         seed_secretary(&store);
-        store.org_upsert(&org_node("coding", Some("secretary"), OrgKind::Department)).unwrap();
-        store.org_upsert(&org_node("poc", Some("coding"), OrgKind::Section)).unwrap();
+        store
+            .org_upsert(&org_node("coding", Some("secretary"), OrgKind::Department))
+            .unwrap();
+        store
+            .org_upsert(&org_node("poc", Some("coding"), OrgKind::Section))
+            .unwrap();
 
         let mut task = sample_task(Status::Ready);
         task.assignee = Some("poc".into());
@@ -5098,10 +5926,15 @@ mod tests {
         let err = store.org_delete("coding").unwrap_err();
         assert!(matches!(err, StoreError::InUse { .. }), "{err}");
         // タスクが終端になれば消せる。
-        store.apply_transition(task.id, Trigger::Cancel, None).unwrap();
+        store
+            .apply_transition(task.id, Trigger::Cancel, None)
+            .unwrap();
         assert!(store.org_delete("poc").unwrap());
         assert!(store.org_get("poc").unwrap().is_none());
-        assert!(!store.org_delete("poc").unwrap(), "deleting a missing node is Ok(false)");
+        assert!(
+            !store.org_delete("poc").unwrap(),
+            "deleting a missing node is Ok(false)"
+        );
     }
 
     fn sample_project() -> Project {
@@ -5138,7 +5971,11 @@ mod tests {
                 project_id,
                 role,
                 text: text.into(),
-                run_id: if role == MessageRole::Node { Some(format!("run-{n}")) } else { None },
+                run_id: if role == MessageRole::Node {
+                    Some(format!("run-{n}"))
+                } else {
+                    None
+                },
                 task_id: Some(task_id),
                 created_at: base + std::time::Duration::from_secs(n as u64),
             };
@@ -5146,39 +5983,104 @@ mod tests {
             m
         };
 
-        let q = append("secretary", Some(project.id), MessageRole::User, "この案件をお願い", 1);
-        let a = append("secretary", Some(project.id), MessageRole::Node, "承知しました", 2);
-        append("secretary", Some(other_project.id), MessageRole::User, "別の案件", 3);
-        append("research-survey", Some(project.id), MessageRole::User, "別の人", 4);
-        append("secretary", None, MessageRole::User, "案件に紐づかない雑談", 5);
+        let q = append(
+            "secretary",
+            Some(project.id),
+            MessageRole::User,
+            "この案件をお願い",
+            1,
+        );
+        let a = append(
+            "secretary",
+            Some(project.id),
+            MessageRole::Node,
+            "承知しました",
+            2,
+        );
+        append(
+            "secretary",
+            Some(other_project.id),
+            MessageRole::User,
+            "別の案件",
+            3,
+        );
+        append(
+            "research-survey",
+            Some(project.id),
+            MessageRole::User,
+            "別の人",
+            4,
+        );
+        append(
+            "secretary",
+            None,
+            MessageRole::User,
+            "案件に紐づかない雑談",
+            5,
+        );
 
         // 案件ごと・ノードごとに分かれ、古い順に並ぶ。
-        let thread = store.message_list("secretary", Some(project.id), 20).unwrap();
-        assert_eq!(thread.iter().map(|m| m.id).collect::<Vec<_>>(), vec![q.id, a.id]);
+        let thread = store
+            .message_list("secretary", Some(project.id), 20)
+            .unwrap();
+        assert_eq!(
+            thread.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![q.id, a.id]
+        );
         assert_eq!(thread[0].role, MessageRole::User);
         assert_eq!(thread[1].run_id.as_deref(), Some("run-2"));
         assert_eq!(thread[1].project_id, Some(project.id));
         // R4（migration 0007）: 1 往復の両方の行に、それを起こした対話用タスクの id が入る。
         assert_eq!(thread[0].task_id, Some(task_id));
         assert_eq!(thread[1].task_id, Some(task_id));
-        assert_eq!(store.message_list("secretary", Some(other_project.id), 20).unwrap().len(), 1);
-        assert_eq!(store.message_list("research-survey", Some(project.id), 20).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .message_list("secretary", Some(other_project.id), 20)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .message_list("research-survey", Some(project.id), 20)
+                .unwrap()
+                .len(),
+            1
+        );
         // `project_id = None` は案件に紐づかない行だけ（案件の行は混ざらない）。
         let chat = store.message_list("secretary", None, 20).unwrap();
         assert_eq!(chat.len(), 1);
         assert_eq!(chat[0].text, "案件に紐づかない雑談");
-        assert!(store.message_list("ghost", Some(project.id), 20).unwrap().is_empty());
+        assert!(
+            store
+                .message_list("ghost", Some(project.id), 20)
+                .unwrap()
+                .is_empty()
+        );
 
         // 件数上限は「新しい方を残して古い順に返す」。
         for n in 10..20 {
-            append("secretary", Some(project.id), MessageRole::User, &format!("m{n}"), n);
+            append(
+                "secretary",
+                Some(project.id),
+                MessageRole::User,
+                &format!("m{n}"),
+                n,
+            );
         }
-        let last3 = store.message_list("secretary", Some(project.id), 3).unwrap();
+        let last3 = store
+            .message_list("secretary", Some(project.id), 3)
+            .unwrap();
         assert_eq!(
             last3.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
             vec!["m17", "m18", "m19"]
         );
-        assert!(store.message_list("secretary", Some(project.id), 0).unwrap().is_empty());
+        assert!(
+            store
+                .message_list("secretary", Some(project.id), 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -5186,28 +6088,69 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         let project = sample_project();
         store.project_create(&project).unwrap();
-        assert_eq!(store.project_get(project.id).unwrap().as_ref(), Some(&project));
+        assert_eq!(
+            store.project_get(project.id).unwrap().as_ref(),
+            Some(&project)
+        );
         assert_eq!(store.project_list().unwrap().len(), 1);
 
-        assert!(store.project_set_status(project.id, ProjectStatus::Active).unwrap());
+        assert!(
+            store
+                .project_set_status(project.id, ProjectStatus::Active)
+                .unwrap()
+        );
         let got = store.project_get(project.id).unwrap().unwrap();
         assert_eq!(got.status, ProjectStatus::Active);
-        assert!(!store.project_set_status(ProjectId::new(), ProjectStatus::Done).unwrap());
+        assert!(
+            !store
+                .project_set_status(ProjectId::new(), ProjectStatus::Done)
+                .unwrap()
+        );
 
         let first = store
-            .milestone_create(project.id, "関連研究を棚卸しする", "候補を 3 本", MilestoneStatus::Proposed)
+            .milestone_create(
+                project.id,
+                "関連研究を棚卸しする",
+                "候補を 3 本",
+                MilestoneStatus::Proposed,
+            )
             .unwrap();
         let second = store
-            .milestone_create(project.id, "小さな検証を回す", "", MilestoneStatus::Proposed)
+            .milestone_create(
+                project.id,
+                "小さな検証を回す",
+                "",
+                MilestoneStatus::Proposed,
+            )
             .unwrap();
-        assert_eq!((first.seq, second.seq), (1, 2), "seq is numbered per project");
         assert_eq!(
-            store.milestone_list(project.id).unwrap().iter().map(|m| m.id).collect::<Vec<_>>(),
+            (first.seq, second.seq),
+            (1, 2),
+            "seq is numbered per project"
+        );
+        assert_eq!(
+            store
+                .milestone_list(project.id)
+                .unwrap()
+                .iter()
+                .map(|m| m.id)
+                .collect::<Vec<_>>(),
             vec![first.id, second.id]
         );
-        assert!(store.milestone_set_status(second.id, MilestoneStatus::Approved).unwrap());
-        assert_eq!(store.milestone_list(project.id).unwrap()[1].status, MilestoneStatus::Approved);
-        assert!(!store.milestone_set_status(MilestoneId::new(), MilestoneStatus::Reached).unwrap());
+        assert!(
+            store
+                .milestone_set_status(second.id, MilestoneStatus::Approved)
+                .unwrap()
+        );
+        assert_eq!(
+            store.milestone_list(project.id).unwrap()[1].status,
+            MilestoneStatus::Approved
+        );
+        assert!(
+            !store
+                .milestone_set_status(MilestoneId::new(), MilestoneStatus::Reached)
+                .unwrap()
+        );
 
         let err = store
             .milestone_create(ProjectId::new(), "無い案件", "", MilestoneStatus::Proposed)
@@ -5221,15 +6164,25 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         let none = sample_project();
         store.project_create(&none).unwrap();
-        assert_eq!(store.project_get(none.id).unwrap().and_then(|p| p.workspace), None);
+        assert_eq!(
+            store
+                .project_get(none.id)
+                .unwrap()
+                .and_then(|p| p.workspace),
+            None
+        );
 
         let local_spec = WorkspaceSpec::Local {
-            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
+            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            mode: None,
         };
         let mut local = sample_project();
         local.workspace = Some(local_spec.clone());
         store.project_create(&local).unwrap();
-        assert_eq!(store.project_get(local.id).unwrap().unwrap().workspace, Some(local_spec));
+        assert_eq!(
+            store.project_get(local.id).unwrap().unwrap().workspace,
+            Some(local_spec)
+        );
 
         let remote_spec = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
@@ -5238,14 +6191,24 @@ mod tests {
         let mut remote = sample_project();
         remote.workspace = Some(remote_spec.clone());
         store.project_create(&remote).unwrap();
-        assert_eq!(store.project_get(remote.id).unwrap().unwrap().workspace, Some(remote_spec.clone()));
+        assert_eq!(
+            store.project_get(remote.id).unwrap().unwrap().workspace,
+            Some(remote_spec.clone())
+        );
         // 一覧にも載る。
         let listed = store.project_list().unwrap();
         assert_eq!(listed.iter().filter(|p| p.workspace.is_some()).count(), 2);
 
         // 後から付ける / 消す。
-        assert!(store.project_set_workspace(none.id, Some(&remote_spec)).unwrap());
-        assert_eq!(store.project_get(none.id).unwrap().unwrap().workspace, Some(remote_spec));
+        assert!(
+            store
+                .project_set_workspace(none.id, Some(&remote_spec))
+                .unwrap()
+        );
+        assert_eq!(
+            store.project_get(none.id).unwrap().unwrap().workspace,
+            Some(remote_spec)
+        );
         assert!(store.project_set_workspace(none.id, None).unwrap());
         assert_eq!(store.project_get(none.id).unwrap().unwrap().workspace, None);
         assert!(!store.project_set_workspace(ProjectId::new(), None).unwrap());
@@ -5290,14 +6253,18 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
-            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
+            path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            mode: None,
         };
         assert!(store.project_set_workspace(legacy, Some(&spec)).unwrap());
-        assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, Some(spec));
+        assert_eq!(
+            store.project_get(legacy).unwrap().unwrap().workspace,
+            Some(spec)
+        );
     }
 
     /// ADR-0043 D1（Phase 52）: 版数 11 の DB に migration 0012 が当たり、既存の `projects.workspace` が
@@ -5312,8 +6279,12 @@ mod tests {
         std::fs::create_dir_all(&plain_dir).unwrap();
 
         let path = dir.path().join("schema11.sqlite3");
-        let (git_project, plain_project, none_project, remote_project) =
-            (ProjectId::new(), ProjectId::new(), ProjectId::new(), ProjectId::new());
+        let (git_project, plain_project, none_project, remote_project) = (
+            ProjectId::new(),
+            ProjectId::new(),
+            ProjectId::new(),
+            ProjectId::new(),
+        );
         {
             let conn = Connection::open(&path).unwrap();
             for sql in [
@@ -5343,16 +6314,25 @@ mod tests {
             let rows: [(ProjectId, Option<String>); 4] = [
                 (
                     git_project,
-                    Some(format!(r#"{{"kind":"local","path":"{}"}}"#, repo_dir.display())),
+                    Some(format!(
+                        r#"{{"kind":"local","path":"{}"}}"#,
+                        repo_dir.display()
+                    )),
                 ),
                 (
                     plain_project,
-                    Some(format!(r#"{{"kind":"local","path":"{}"}}"#, plain_dir.display())),
+                    Some(format!(
+                        r#"{{"kind":"local","path":"{}"}}"#,
+                        plain_dir.display()
+                    )),
                 ),
                 (none_project, None),
                 (
                     remote_project,
-                    Some(r#"{"kind":"remote","cluster":"pegasus","path":"/work/NBB/x/benchfs"}"#.to_string()),
+                    Some(
+                        r#"{"kind":"remote","cluster":"pegasus","path":"/work/NBB/x/benchfs"}"#
+                            .to_string(),
+                    ),
                 ),
             ];
             for (id, workspace) in rows {
@@ -5396,7 +6376,10 @@ mod tests {
             store.project_get(git_project).unwrap().unwrap().workspace,
             Some(WorkspaceSpec::local(repo_dir))
         );
-        assert_eq!(store.project_get(none_project).unwrap().unwrap().workspace, None);
+        assert_eq!(
+            store.project_get(none_project).unwrap().unwrap().workspace,
+            None
+        );
     }
 
     /// ADR-0043 D1: リポジトリの CRUD と primary の不変条件（1 案件に 1 つ）。
@@ -5440,8 +6423,14 @@ mod tests {
         assert!(!repos[1].is_primary);
 
         // 名前が重複したら 422（`StoreError::Repo`）。
-        let dup = ProjectRepo { id: RepoId::new(), ..paper.clone() };
-        assert!(matches!(store.repo_create(&dup), Err(StoreError::Repo(RepoError::DuplicateName(_)))));
+        let dup = ProjectRepo {
+            id: RepoId::new(),
+            ..paper.clone()
+        };
+        assert!(matches!(
+            store.repo_create(&dup),
+            Err(StoreError::Repo(RepoError::DuplicateName(_)))
+        ));
 
         // primary を移すと写しも移る。
         assert!(store.repo_set_primary(paper.id).unwrap());
@@ -5502,15 +6491,23 @@ mod tests {
         assert_eq!(store.repo_active_tasks(repo.id).unwrap(), vec![task.id]);
         assert!(matches!(
             store.repo_delete(repo.id),
-            Err(StoreError::InUse { kind: "project repo", .. })
+            Err(StoreError::InUse {
+                kind: "project repo",
+                ..
+            })
         ));
 
         // 終端になれば消せる。
-        store.apply_transition(task.id, Trigger::Cancel, None).unwrap();
+        store
+            .apply_transition(task.id, Trigger::Cancel, None)
+            .unwrap();
         assert!(store.repo_active_tasks(repo.id).unwrap().is_empty());
         assert!(store.repo_delete(repo.id).unwrap());
         // primary が消えたので案件は「作業場所なし」に戻る。
-        assert_eq!(store.project_get(project.id).unwrap().unwrap().workspace, None);
+        assert_eq!(
+            store.project_get(project.id).unwrap().unwrap().workspace,
+            None
+        );
     }
 
     /// ADR-0043 D5（Phase 54）: 取り込みの記録を書く → 最新を引く → 案件の一覧は
@@ -5558,8 +6555,14 @@ mod tests {
         );
         store.integration_put(&elsewhere).unwrap();
 
-        assert_eq!(store.integration_get(first.id).unwrap().as_ref(), Some(&first));
-        assert_eq!(store.integration_latest(task.id, "code").unwrap().as_ref(), Some(&first));
+        assert_eq!(
+            store.integration_get(first.id).unwrap().as_ref(),
+            Some(&first)
+        );
+        assert_eq!(
+            store.integration_latest(task.id, "code").unwrap().as_ref(),
+            Some(&first)
+        );
         assert_eq!(store.integration_latest(task.id, "nope").unwrap(), None);
         // 新しい順（ADR-0044 B1 の timeline はこれを読む）。
         assert_eq!(
@@ -5579,15 +6582,31 @@ mod tests {
         second.created_at = t0 + time::Duration::seconds(10);
         second.updated_at = second.created_at;
         store.integration_put(&second).unwrap();
-        assert_eq!(store.integration_latest(task.id, "code").unwrap().as_ref(), Some(&second));
+        assert_eq!(
+            store.integration_latest(task.id, "code").unwrap().as_ref(),
+            Some(&second)
+        );
 
         let listed = store.integration_list_for_project(project.id, 100).unwrap();
         assert_eq!(
-            listed.iter().map(|i| (i.repo.as_str(), i.state)).collect::<Vec<_>>(),
-            vec![("code", IntegrationState::Merged), ("paper", IntegrationState::Done)],
+            listed
+                .iter()
+                .map(|i| (i.repo.as_str(), i.state))
+                .collect::<Vec<_>>(),
+            vec![
+                ("code", IntegrationState::Merged),
+                ("paper", IntegrationState::Done)
+            ],
             "タスク × リポジトリごとに最新の 1 件、新しい順"
         );
-        assert_eq!(store.integration_list_for_project(project.id, 1).unwrap().len(), 1, "limit が効く");
+        assert_eq!(
+            store
+                .integration_list_for_project(project.id, 1)
+                .unwrap()
+                .len(),
+            1,
+            "limit が効く"
+        );
     }
 
     /// ADR-0043 D1: `PATCH /projects {workspace}`（従来のフォーム）は primary のリポジトリを書き換える。
@@ -5601,7 +6620,11 @@ mod tests {
 
         // 作業場所を付けると primary のリポジトリが 1 件できる。
         let first = WorkspaceSpec::local("/srv/benchfs");
-        assert!(store.project_set_workspace(project.id, Some(&first)).unwrap());
+        assert!(
+            store
+                .project_set_workspace(project.id, Some(&first))
+                .unwrap()
+        );
         let repos = store.repo_list(project.id).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, "benchfs");
@@ -5609,17 +6632,27 @@ mod tests {
 
         // 差し替えは場所だけを直す（名前は人の設定を残す）。
         let moved = WorkspaceSpec::local("/srv/moved");
-        assert!(store.project_set_workspace(project.id, Some(&moved)).unwrap());
+        assert!(
+            store
+                .project_set_workspace(project.id, Some(&moved))
+                .unwrap()
+        );
         let repos = store.repo_list(project.id).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, "benchfs");
         assert_eq!(repos[0].location, moved);
-        assert_eq!(store.project_get(project.id).unwrap().unwrap().workspace, Some(moved));
+        assert_eq!(
+            store.project_get(project.id).unwrap().unwrap().workspace,
+            Some(moved)
+        );
 
         // `null` は primary を消す（= 案件を「作業場所なし」に戻す）。
         assert!(store.project_set_workspace(project.id, None).unwrap());
         assert!(store.repo_list(project.id).unwrap().is_empty());
-        assert_eq!(store.project_get(project.id).unwrap().unwrap().workspace, None);
+        assert_eq!(
+            store.project_get(project.id).unwrap().unwrap().workspace,
+            None
+        );
     }
 
     #[test]
@@ -5638,8 +6671,13 @@ mod tests {
         store.insert(&mine).unwrap();
         store.insert(&sample_task(Status::Ready)).unwrap();
 
-        let filter = ListFilter { project_id: Some(project.id), ..ListFilter::default() };
-        let page = store.list_page(&filter, ListOrder::CreatedDesc, None, 10).unwrap();
+        let filter = ListFilter {
+            project_id: Some(project.id),
+            ..ListFilter::default()
+        };
+        let page = store
+            .list_page(&filter, ListOrder::CreatedDesc, None, 10)
+            .unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].id, mine.id);
         let back = store.get(mine.id).unwrap().unwrap();
@@ -5652,9 +6690,13 @@ mod tests {
     #[test]
     fn tasks_without_the_new_fields_still_deserialize() {
         let task = sample_task(Status::Draft);
-        let mut json: serde_json::Value = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
         let obj = json.as_object_mut().unwrap();
-        assert!(!obj.contains_key("project_id"), "None is skipped on serialization");
+        assert!(
+            !obj.contains_key("project_id"),
+            "None is skipped on serialization"
+        );
         obj.remove("genre");
         let back: Task = serde_json::from_value(json).unwrap();
         assert_eq!(back.project_id, None);
@@ -5702,19 +6744,26 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
 
         let project = store.project_get(project_id).unwrap().expect("project");
         assert_eq!(project.status, ProjectStatus::Active);
         assert_eq!(project.archived_at, None);
         assert_eq!(project.paused_from, None);
-        let milestone = store.milestone_get(milestone_id).unwrap().expect("milestone");
+        let milestone = store
+            .milestone_get(milestone_id)
+            .unwrap()
+            .expect("milestone");
         assert_eq!(milestone.status, MilestoneStatus::InProgress);
         assert_eq!(milestone.paused_from, None);
 
         // 新しい値も往復する。
         store
-            .project_set_lifecycle(project_id, ProjectStatus::Paused, Some(Some(ProjectStatus::Active)))
+            .project_set_lifecycle(
+                project_id,
+                ProjectStatus::Paused,
+                Some(Some(ProjectStatus::Active)),
+            )
             .unwrap();
         store.project_set_archived_at(project_id, None).unwrap();
         let project = store.project_get(project_id).unwrap().expect("project");
@@ -5724,7 +6773,10 @@ mod tests {
         store
             .milestone_set_lifecycle(milestone_id, MilestoneStatus::Cancelled, Some(None))
             .unwrap();
-        let milestone = store.milestone_get(milestone_id).unwrap().expect("milestone");
+        let milestone = store
+            .milestone_get(milestone_id)
+            .unwrap()
+            .expect("milestone");
         assert_eq!(milestone.status, MilestoneStatus::Cancelled);
         assert_eq!(milestone.paused_from, None);
     }
@@ -5765,7 +6817,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn
@@ -5850,7 +6902,10 @@ mod tests {
             None,
             base,
         );
-        assert!(matches!(store.comment_add(&orphan, None), Err(StoreError::Invalid(_))));
+        assert!(matches!(
+            store.comment_add(&orphan, None),
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     /// ADR-0044 D1: `update_task` は `json` と絞り込みの列を書き直し、`Event::Edited` を積む。
@@ -5924,7 +6979,13 @@ mod tests {
         let mut ghost = sample_task(Status::Ready);
         ghost.title = "いない".into();
         assert!(matches!(
-            store.update_task(&ghost, Event::Edited { fields: vec![], by: "human".into() }),
+            store.update_task(
+                &ghost,
+                Event::Edited {
+                    fields: vec![],
+                    by: "human".into()
+                }
+            ),
             Err(StoreError::Invalid(_))
         ));
     }
@@ -5958,7 +7019,11 @@ mod tests {
 
         // ラベルは AND。
         assert_eq!(
-            page(ListFilter { labels: vec!["infra".into()], ..ListFilter::default() }).len(),
+            page(ListFilter {
+                labels: vec!["infra".into()],
+                ..ListFilter::default()
+            })
+            .len(),
             2
         );
         assert_eq!(
@@ -5984,7 +7049,10 @@ mod tests {
             vec!["infra work".to_string()]
         );
         assert_eq!(
-            page(ListFilter { priorities: vec![30], ..ListFilter::default() }),
+            page(ListFilter {
+                priorities: vec![30],
+                ..ListFilter::default()
+            }),
             vec!["infra work".to_string()]
         );
         // 複数のフィルタは AND（種類が合わないので 0 件）。
@@ -6036,7 +7104,10 @@ mod tests {
         let available = conn
             .execute_batch("CREATE VIRTUAL TABLE temp.fts5_probe USING fts5(body)")
             .is_ok();
-        assert!(available, "rusqlite の bundled には FTS5 がある（ADR-0044 D4 の前提）");
+        assert!(
+            available,
+            "rusqlite の bundled には FTS5 がある（ADR-0044 D4 の前提）"
+        );
         // FTS5 はある。だが `unicode61` は日本語を 1 つの token にしてしまうので、
         // 「途中の語」では引けない（`LIKE` を選んだ理由）。
         conn.execute_batch("INSERT INTO temp.fts5_probe(body) VALUES ('関連研究の調査をする')")
@@ -6048,6 +7119,9 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap_or(0);
-        assert_eq!(hits, 0, "FTS5 の既定のトークナイザでは日本語の部分一致にならない");
+        assert_eq!(
+            hits, 0,
+            "FTS5 の既定のトークナイザでは日本語の部分一致にならない"
+        );
     }
 }

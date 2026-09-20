@@ -54,7 +54,11 @@ pub fn run_reject(store: &dyn TaskStore, args: RejectArgs) -> Result<ExitCode, C
 pub fn run_answer(store: &dyn TaskStore, args: AnswerArgs) -> Result<ExitCode, CliError> {
     let id = crate::error::parse_task_id(&args.id)?;
     let result = ops_answer(store, id, args.answer, None)?;
-    outln!("answer recorded; task {} moved to {:?}", result.id, result.to);
+    outln!(
+        "answer recorded; task {} moved to {:?}",
+        result.id,
+        result.to
+    );
     Ok(ExitCode::SUCCESS)
 }
 

@@ -15,8 +15,9 @@ use std::time::Duration;
 use common::*;
 use task_api::StreamTuning;
 use task_core::{
-    Approval, ApprovalStore, Event, Message, MessageId, MessageRole, MilestoneStatus, ProgressFields, ProgressKind,
-    Project, ProjectId, Report, ReportKind, ReportStore, Status, Task, TaskKind, TaskStore,
+    Approval, ApprovalStore, Event, Message, MessageId, MessageRole, MilestoneStatus,
+    ProgressFields, ProgressKind, Project, ProjectId, Report, ReportKind, ReportStore, Status,
+    Task, TaskKind, TaskStore,
 };
 use time::OffsetDateTime;
 
@@ -186,8 +187,14 @@ async fn a_fake_run_becomes_one_task_progress_and_report_stream() {
     assert_eq!(progress["title"], "直す");
     assert_eq!(progress["assignee"], "coding");
     // 折り畳みの見出し用に、始めと終わりの数行だけを載せる（全行は run の events で取る）。
-    assert_eq!(progress["progress"]["first"].as_array().map(Vec::len), Some(3));
-    assert_eq!(progress["progress"]["last"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        progress["progress"]["first"].as_array().map(Vec::len),
+        Some(3)
+    );
+    assert_eq!(
+        progress["progress"]["last"].as_array().map(Vec::len),
+        Some(2)
+    );
     assert_eq!(progress["progress"]["first"][0]["kind"], "status");
     assert_eq!(progress["progress"]["first"][1]["tool"], "Bash");
     // 構造化されていない行は `msg` がそのまま出る。
@@ -222,7 +229,12 @@ async fn scopes_filter_by_project_and_by_node() {
     fake_run(&env, &other);
 
     env.store
-        .message_append(&message("secretary", Some(pluvio.id), MessageRole::User, "進めて"))
+        .message_append(&message(
+            "secretary",
+            Some(pluvio.id),
+            MessageRole::User,
+            "進めて",
+        ))
         .expect("message");
     env.store
         .message_append(&message("research", None, MessageRole::Node, "読みました"))
@@ -237,17 +249,31 @@ async fn scopes_filter_by_project_and_by_node() {
     assert_eq!(kinds(&all).len(), 10, "{all:#}");
 
     // 案件で絞る: その案件のタスクと、その案件についての対話・報告だけ。
-    let scoped = send(&app, get(&format!("/api/v1/console?scope=project:{}", pluvio.id))).await;
+    let scoped = send(
+        &app,
+        get(&format!("/api/v1/console?scope=project:{}", pluvio.id)),
+    )
+    .await;
     let page = scoped.json();
-    assert_eq!(kinds(&page), vec!["task", "progress", "task", "human", "report"], "{page:#}");
+    assert_eq!(
+        kinds(&page),
+        vec!["task", "progress", "task", "human", "report"],
+        "{page:#}"
+    );
     for item in page["items"].as_array().expect("items") {
         let has_other = item.to_string().contains(&other.id.to_string());
         assert!(!has_other, "案件の外のタスクが混ざった: {item}");
     }
 
     // ノードで絞る: そのノードのタスクと、そのノードとの対話・報告だけ。
-    let page = send(&app, get("/api/v1/console?scope=node:research")).await.json();
-    assert_eq!(kinds(&page), vec!["task", "progress", "task", "reply", "report"], "{page:#}");
+    let page = send(&app, get("/api/v1/console?scope=node:research"))
+        .await
+        .json();
+    assert_eq!(
+        kinds(&page),
+        vec!["task", "progress", "task", "reply", "report"],
+        "{page:#}"
+    );
     assert_eq!(page["items"][3]["text"], "読みました");
     assert_eq!(page["items"][4]["report"]["headline"], "雑報告");
 
@@ -275,10 +301,18 @@ async fn the_cursor_pages_through_without_repeating_blocks() {
     let app = env.router();
     let first = send(&app, get("/api/v1/console?limit=3")).await.json();
     assert_eq!(first["items"].as_array().map(Vec::len), Some(3));
-    let cursor = first["next_cursor"].as_str().expect("next_cursor").to_string();
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("next_cursor")
+        .to_string();
 
     // 続きは重ならない。
-    let second = send(&app, get(&format!("/api/v1/console?limit=10&since={cursor}"))).await.json();
+    let second = send(
+        &app,
+        get(&format!("/api/v1/console?limit=10&since={cursor}")),
+    )
+    .await
+    .json();
     let seen: Vec<String> = first["items"]
         .as_array()
         .expect("items")
@@ -287,12 +321,25 @@ async fn the_cursor_pages_through_without_repeating_blocks() {
         .map(|b| b["cursor"].as_str().unwrap_or_default().to_string())
         .collect();
     let unique: std::collections::HashSet<&String> = seen.iter().collect();
-    assert_eq!(seen.len(), unique.len(), "同じブロックを 2 回返した: {seen:?}");
+    assert_eq!(
+        seen.len(),
+        unique.len(),
+        "同じブロックを 2 回返した: {seen:?}"
+    );
 
     // 全部読み切ったら空（カーソルはそのまま返る）。
-    let last = second["next_cursor"].as_str().expect("next_cursor").to_string();
-    let empty = send(&app, get(&format!("/api/v1/console?since={last}"))).await.json();
-    assert_eq!(empty["items"].as_array().map(Vec::len), Some(0), "{empty:#}");
+    let last = second["next_cursor"]
+        .as_str()
+        .expect("next_cursor")
+        .to_string();
+    let empty = send(&app, get(&format!("/api/v1/console?since={last}")))
+        .await
+        .json();
+    assert_eq!(
+        empty["items"].as_array().map(Vec::len),
+        Some(0),
+        "{empty:#}"
+    );
     assert_eq!(empty["next_cursor"], last);
 
     // 壊れたカーソルは 400、`limit` の上限は丸める。
@@ -335,24 +382,43 @@ async fn approvals_milestones_and_questions_carry_their_state() {
     env.store.approval_append(&approval).expect("approval");
     let milestone = env
         .store
-        .milestone_create(pluvio.id, "第 1 目標", "まず動かす", MilestoneStatus::Proposed)
+        .milestone_create(
+            pluvio.id,
+            "第 1 目標",
+            "まず動かす",
+            MilestoneStatus::Proposed,
+        )
         .expect("milestone");
 
     let app = env.router();
-    let page = send(&app, get(&format!("/api/v1/console?scope=project:{}", pluvio.id))).await.json();
+    let page = send(
+        &app,
+        get(&format!("/api/v1/console?scope=project:{}", pluvio.id)),
+    )
+    .await
+    .json();
     let items = page["items"].as_array().expect("items").clone();
 
-    let question = items.iter().find(|b| b["kind"] == "question").expect("question block");
+    let question = items
+        .iter()
+        .find(|b| b["kind"] == "question")
+        .expect("question block");
     assert_eq!(question["text"], "どのブランチに入れますか");
     assert_eq!(question["answered"], false);
     assert_eq!(question["node_id"], "coding");
     assert_eq!(question["run_id"], RUN);
 
-    let block = items.iter().find(|b| b["kind"] == "approval").expect("approval block");
+    let block = items
+        .iter()
+        .find(|b| b["kind"] == "approval")
+        .expect("approval block");
     assert_eq!(block["approval"]["id"], approval.id.to_string());
     assert!(block["approval"]["decision"].is_null(), "未決のまま渡る");
 
-    let block = items.iter().find(|b| b["kind"] == "milestone").expect("milestone block");
+    let block = items
+        .iter()
+        .find(|b| b["kind"] == "milestone")
+        .expect("milestone block");
     assert_eq!(block["milestone"]["id"], milestone.id.to_string());
     assert_eq!(block["milestone"]["status"], "proposed");
     assert!(block["review"].is_null(), "秘書の返事はまだ無い");
@@ -367,7 +433,12 @@ async fn approvals_milestones_and_questions_carry_their_state() {
             },
         )
         .expect("answered");
-    let page = send(&app, get(&format!("/api/v1/console?scope=project:{}", pluvio.id))).await.json();
+    let page = send(
+        &app,
+        get(&format!("/api/v1/console?scope=project:{}", pluvio.id)),
+    )
+    .await
+    .json();
     let question = page["items"]
         .as_array()
         .expect("items")
@@ -391,10 +462,15 @@ async fn the_stream_emits_a_progress_block_and_then_the_finished_task_block() {
     let mut sse = open_stream(&app, get("/api/v1/console/stream?scope=all")).await;
     assert_eq!(sse.status, 200);
     assert_eq!(
-        sse.headers.get("content-type").and_then(|v| v.to_str().ok()),
+        sse.headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
         Some("text/event-stream; charset=utf-8")
     );
-    let hello = sse.next_frame(Duration::from_millis(500)).await.expect("hello");
+    let hello = sse
+        .next_frame(Duration::from_millis(500))
+        .await
+        .expect("hello");
     assert_eq!(hello.event, "hello");
     assert_eq!(hello.data["scope"], "all");
     assert!(hello.data["cursor"].is_string());
@@ -418,7 +494,10 @@ async fn the_stream_emits_a_progress_block_and_then_the_finished_task_block() {
     assert_eq!(frame.data["kind"], "progress");
     assert_eq!(frame.data["progress"]["run_id"], RUN);
     assert_eq!(frame.data["progress"]["tool_count"], 1);
-    assert_eq!(frame.data["progress"]["first"][0]["text"], "cargo test --workspace");
+    assert_eq!(
+        frame.data["progress"]["first"][0]["text"],
+        "cargo test --workspace"
+    );
 
     env.store
         .append_event(
@@ -455,13 +534,20 @@ async fn run_events_returns_only_that_runs_rows() {
         .expect("progress");
 
     let app = env.router();
-    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{RUN}/events", task.id))).await;
+    let resp = send(
+        &app,
+        get(&format!("/api/v1/tasks/{}/runs/{RUN}/events", task.id)),
+    )
+    .await;
     assert_eq!(resp.status, 200);
     let page = resp.json();
     let items = page["items"].as_array().expect("items");
     // `worker_started` 1 + `worker_progress` 5（遷移は run に紐づかないので入らない）。
     assert_eq!(items.len(), 6, "{page:#}");
-    assert!(items.iter().all(|row| row["event"]["run_id"] == RUN), "{page:#}");
+    assert!(
+        items.iter().all(|row| row["event"]["run_id"] == RUN),
+        "{page:#}"
+    );
     assert_eq!(page["has_more"], false);
     // 構造化フィールドがイベントに残っている（ADR-0048 D2）。
     let tool = items
@@ -475,18 +561,30 @@ async fn run_events_returns_only_that_runs_rows() {
         .iter()
         .find(|row| row["event"]["msg"] == "plain line")
         .expect("plain row");
-    assert!(plain["event"]["kind"].is_null() && plain["event"]["tool"].is_null(), "{plain}");
+    assert!(
+        plain["event"]["kind"].is_null() && plain["event"]["tool"].is_null(),
+        "{plain}"
+    );
 
     // 知らないタスクは 404、`limit` は効く。
     let missing = send(
         &app,
-        get(&format!("/api/v1/tasks/{}/runs/{RUN}/events", task_core::TaskId::new())),
+        get(&format!(
+            "/api/v1/tasks/{}/runs/{RUN}/events",
+            task_core::TaskId::new()
+        )),
     )
     .await;
     assert_problem(&missing, 404, "task_not_found");
-    let page = send(&app, get(&format!("/api/v1/tasks/{}/runs/{RUN}/events?limit=2", task.id)))
-        .await
-        .json();
+    let page = send(
+        &app,
+        get(&format!(
+            "/api/v1/tasks/{}/runs/{RUN}/events?limit=2",
+            task.id
+        )),
+    )
+    .await
+    .json();
     assert_eq!(page["items"].as_array().map(Vec::len), Some(2));
     assert_eq!(page["has_more"], true);
 }

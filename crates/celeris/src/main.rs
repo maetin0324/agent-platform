@@ -6,14 +6,17 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
 use celeris::{Config, Overrides, RunOptions};
+use clap::Parser;
 
 /// ADR-0045 D2: `--config` の既定値（`~` は `$HOME` で展開する）。
 const DEFAULT_CONFIG: &str = "~/.config/celeris/config.toml";
 
 #[derive(Parser, Debug)]
-#[command(name = "celeris", about = "celeris daemon: deterministic task dispatcher (DESIGN.md §5.2)")]
+#[command(
+    name = "celeris",
+    about = "celeris daemon: deterministic task dispatcher (DESIGN.md §5.2)"
+)]
 struct Cli {
     /// 設定ファイル（TOML）。ADR-0045 D2: 既定は `~/.config/celeris/config.toml`
     /// （`~` は `$HOME` で展開する。`$HOME` が無い環境では `~/...` のまま渡って読めずに exit 2）。
@@ -74,7 +77,9 @@ enum LogFormat {
 fn init_tracing(format: LogFormat) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_env("CELERIS_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let builder = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr);
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr);
     match format {
         LogFormat::Json => builder.json().init(),
         LogFormat::Text => builder.init(),
@@ -121,7 +126,10 @@ async fn main() -> ExitCode {
             tracing::error!(error = %e, "celeris failed");
             eprintln!("error: {e}");
             // docs/gui/api.md §1.5: 知らない新しいスキーマ版数の DB は、設定エラーと同じく起動時の exit 2。
-            if matches!(e, celeris::DaemonError::Store(task_core::StoreError::SchemaTooNew { .. })) {
+            if matches!(
+                e,
+                celeris::DaemonError::Store(task_core::StoreError::SchemaTooNew { .. })
+            ) {
                 return ExitCode::from(2);
             }
             ExitCode::FAILURE

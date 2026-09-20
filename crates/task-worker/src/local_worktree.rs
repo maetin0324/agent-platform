@@ -111,7 +111,10 @@ impl LocalWorktree {
         let out = if branch_exists(&self.repo, &self.branch) {
             git(&self.repo, &["worktree", "add", &dir, &self.branch])
         } else {
-            git(&self.repo, &["worktree", "add", "-b", &self.branch, &dir, &self.base.sha])
+            git(
+                &self.repo,
+                &["worktree", "add", "-b", &self.branch, &dir, &self.base.sha],
+            )
         };
         match out {
             Some(o) if o.ok => Ok(()),
@@ -156,7 +159,8 @@ impl LocalWorktree {
         let dir = self.dir.to_string_lossy().into_owned();
         if existed {
             // `--force` は未コミットの変更ごと消す（cancel は人の指示）。
-            let removed = git(&self.repo, &["worktree", "remove", "--force", &dir]).is_some_and(|o| o.ok);
+            let removed =
+                git(&self.repo, &["worktree", "remove", "--force", &dir]).is_some_and(|o| o.ok);
             if !removed {
                 // 登録が壊れている（人が手で消した等）なら prune してからディレクトリを落とす。
                 let _ = git(&self.repo, &["worktree", "prune"]);
@@ -208,16 +212,29 @@ pub fn resolve_base(repo: &Path, current_sha: Option<&str>) -> Option<BaseRef> {
     let main = rev_parse(repo, "refs/heads/main");
     let Some(main_sha) = main else {
         let head = rev_parse(repo, "HEAD")?;
-        return Some(BaseRef { kind: BaseKind::Head, sha: head });
+        return Some(BaseRef {
+            kind: BaseKind::Head,
+            sha: head,
+        });
     };
     if let Some(current) = current_sha
         && let Some(current_full) = rev_parse(repo, &format!("{current}^{{commit}}"))
         && current_full != main_sha
-        && git(repo, &["merge-base", "--is-ancestor", &main_sha, &current_full]).is_some_and(|o| o.ok)
+        && git(
+            repo,
+            &["merge-base", "--is-ancestor", &main_sha, &current_full],
+        )
+        .is_some_and(|o| o.ok)
     {
-        return Some(BaseRef { kind: BaseKind::Current, sha: current_full });
+        return Some(BaseRef {
+            kind: BaseKind::Current,
+            sha: current_full,
+        });
     }
-    Some(BaseRef { kind: BaseKind::Main, sha: main_sha })
+    Some(BaseRef {
+        kind: BaseKind::Main,
+        sha: main_sha,
+    })
 }
 
 /// 本番の `current` リリースの sha（ADR-0040 D6: `current` は `releases_dir` の**親**にある）。
@@ -247,7 +264,16 @@ pub fn status_is_clean(dir: &Path) -> Option<bool> {
 }
 
 fn branch_exists(repo: &Path, branch: &str) -> bool {
-    git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_some_and(|o| o.ok)
+    git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_some_and(|o| o.ok)
 }
 
 fn rev_parse(repo: &Path, rev: &str) -> Option<String> {
@@ -291,7 +317,11 @@ struct WorktreeLock(#[allow(dead_code)] Option<nix::fcntl::Flock<std::fs::File>>
 impl WorktreeLock {
     fn acquire(root: &Path) -> WorktreeLock {
         let _ = std::fs::create_dir_all(root);
-        let file = match std::fs::OpenOptions::new().create(true).append(true).open(root.join(LOCK_FILE)) {
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join(LOCK_FILE))
+        {
             Ok(f) => f,
             Err(_) => return WorktreeLock(None),
         };
@@ -347,7 +377,10 @@ mod tests {
         init_repo(dir.path());
         let base = resolve_base(dir.path(), None).expect("base");
         assert_eq!(base.kind, BaseKind::Main);
-        assert_eq!(base.sha, rev_parse(dir.path(), "refs/heads/main").expect("main"));
+        assert_eq!(
+            base.sha,
+            rev_parse(dir.path(), "refs/heads/main").expect("main")
+        );
     }
 
     /// `main` が無いリポジトリでは `HEAD`。
@@ -411,8 +444,18 @@ mod tests {
         wt.ensure().await.expect("first");
         std::fs::write(wt.dir.join("work-in-progress"), b"x").expect("write");
         wt.ensure().await.expect("retry");
-        assert!(wt.dir.join("work-in-progress").is_file(), "やり直しで作業を消さない");
-        assert_eq!(git(repo.path(), &["worktree", "list"]).expect("git").stdout.lines().count(), 2);
+        assert!(
+            wt.dir.join("work-in-progress").is_file(),
+            "やり直しで作業を消さない"
+        );
+        assert_eq!(
+            git(repo.path(), &["worktree", "list"])
+                .expect("git")
+                .stdout
+                .lines()
+                .count(),
+            2
+        );
     }
 
     /// ブランチだけ残っている（前の run の後で worktree を消した）ときは、そのブランチで作り直す。
@@ -448,7 +491,10 @@ mod tests {
         clean.ensure().await.expect("ensure");
         assert_eq!(clean.remove_if_clean(), CleanupOutcome::Removed);
         assert!(!clean.dir.exists());
-        assert!(branch_exists(repo.path(), &clean.branch), "ブランチは消さない");
+        assert!(
+            branch_exists(repo.path(), &clean.branch),
+            "ブランチは消さない"
+        );
         assert_eq!(clean.remove_if_clean(), CleanupOutcome::AlreadyGone);
     }
 
@@ -461,9 +507,15 @@ mod tests {
         assert_eq!(current_release_sha(&releases), None);
         let current = home.path().join("current");
         std::fs::create_dir_all(&current).expect("mkdir");
-        std::fs::write(current.join("manifest.json"), br#"{"sha":"abc123def456789","sha12":"abc123def456"}"#)
-            .expect("write");
-        assert_eq!(current_release_sha(&releases).as_deref(), Some("abc123def456789"));
+        std::fs::write(
+            current.join("manifest.json"),
+            br#"{"sha":"abc123def456789","sha12":"abc123def456"}"#,
+        )
+        .expect("write");
+        assert_eq!(
+            current_release_sha(&releases).as_deref(),
+            Some("abc123def456789")
+        );
         std::fs::write(current.join("manifest.json"), b"not json").expect("write");
         assert_eq!(current_release_sha(&releases), None);
     }

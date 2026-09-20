@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    Budget, Check, Criterion, GenreSpec, MilestoneId, ProjectId, RoleSpec, Status, Task, TaskId, TaskKind, TaskStore,
-    Tier, WorkerHint, WorkspaceSpec,
+    Budget, Check, Criterion, GenreSpec, MilestoneId, ProjectId, RoleSpec, Status, Task, TaskId,
+    TaskKind, TaskStore, Tier, WorkerHint, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -137,6 +137,13 @@ pub struct NewTaskSpec {
     /// ADR-0044 D3: ラベル（小文字 `[a-z0-9-]`、最大 8 個）。省略時は無し。
     #[serde(default)]
     pub labels: Vec<String>,
+    /// ADR-0046 D2（Phase 59）: このタスクに必要な能力タグ（小文字 `[a-z0-9._-]`、最大 12 個）。
+    /// `assignee` を書かなければ、これとノードの実効 `skills` の重なりで担当が決まる（D5 の matching）。
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// ADR-0046 D4（Phase 59）: 進め方（`prototype` / `production` / `research`）。省略時は `production`。
+    #[serde(default)]
+    pub mode: Option<task_core::TaskMode>,
     /// ADR-0044 D3: 種類。省略時は `other`。
     #[serde(default)]
     pub category: Option<task_core::TaskCategory>,
@@ -206,7 +213,8 @@ fn resolve_repos(
     };
     let available = store.repo_list(project_id)?;
     if !names.is_empty() {
-        return task_core::resolve_task_repos(&available, names).map_err(|e| OpsError::Validation(e.to_string()));
+        return task_core::resolve_task_repos(&available, names)
+            .map_err(|e| OpsError::Validation(e.to_string()));
     }
     // 親から継ぐ（親が持っていなければ案件の primary）。
     if let Some(parent) = parent
@@ -237,7 +245,10 @@ fn build_acceptance(specs: Vec<CriterionSpec>) -> Result<Vec<Criterion>, OpsErro
                 .to_string(),
         ));
     }
-    Ok(specs.into_iter().map(CriterionSpec::into_criterion).collect())
+    Ok(specs
+        .into_iter()
+        .map(CriterionSpec::into_criterion)
+        .collect())
 }
 
 /// `depends_on` の各 ID が存在し、かつ `failed`/`cancelled` でないことを検証する
@@ -263,7 +274,10 @@ fn validate_depends_on(store: &dyn TaskStore, depends_on: &[TaskId]) -> Result<(
 }
 
 /// ADR-0033 D2: `project_id` / `milestone_id` の整合（存在すること、途中目標がその案件のものであること）。
-fn validate_project_and_milestone(store: &dyn TaskStore, spec: &NewTaskSpec) -> Result<(), OpsError> {
+fn validate_project_and_milestone(
+    store: &dyn TaskStore,
+    spec: &NewTaskSpec,
+) -> Result<(), OpsError> {
     let project = match spec.project_id {
         Some(id) => {
             let Some(project) = store.project_get(id)? else {
@@ -279,7 +293,11 @@ fn validate_project_and_milestone(store: &dyn TaskStore, spec: &NewTaskSpec) -> 
                 "milestone_id requires project_id".to_string(),
             ));
         };
-        if !store.milestone_list(project.id)?.iter().any(|m| m.id == milestone_id) {
+        if !store
+            .milestone_list(project.id)?
+            .iter()
+            .any(|m| m.id == milestone_id)
+        {
             return Err(OpsError::Validation(format!(
                 "milestone {milestone_id} does not belong to project {}",
                 project.id
@@ -290,7 +308,11 @@ fn validate_project_and_milestone(store: &dyn TaskStore, spec: &NewTaskSpec) -> 
 }
 
 /// `spec` から `Task` を組み立て、`store.create_task` で原子的に挿入する（役割・分野の既定は無し = 全体の既定だけ）。
-pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime) -> Result<Task, OpsError> {
+pub fn create_task(
+    store: &dyn TaskStore,
+    spec: NewTaskSpec,
+    now: OffsetDateTime,
+) -> Result<Task, OpsError> {
     create_task_with_roles(store, spec, &[], &[], now)
 }
 
@@ -327,7 +349,12 @@ pub fn create_support_task(
 ) -> Result<Task, OpsError> {
     let mut task = build_task(store, spec, roles, genres, false, now)?;
     task.status = Status::Ready;
-    store.create_task(&task, vec![task_core::Event::Created { task: Box::new(task.clone()) }])?;
+    store.create_task(
+        &task,
+        vec![task_core::Event::Created {
+            task: Box::new(task.clone()),
+        }],
+    )?;
     Ok(task)
 }
 
@@ -365,8 +392,14 @@ fn build_task(
         Some(assignee) => {
             let org = store.org_list()?;
             if !org.iter().any(|n| n.id == assignee) {
-                return Err(OpsError::Validation(format!("assignee {assignee:?} is not an org node")));
+                return Err(OpsError::Validation(format!(
+                    "assignee {assignee:?} is not an org node"
+                )));
             }
+            // ADR-0046 D5: 明示の `assignee` が、そのタスクのハーネスを `harnesses.allowed` に
+            // 持たなければ 422 で差し戻す（profile を持たないノードは従来どおり通る）。
+            crate::matching::assignee_accepts(&org, assignee, spec.genre.as_deref())
+                .map_err(OpsError::Validation)?;
             task_core::assignee_defaults(&org, assignee, roles, genres)
         }
         None => (None, None),
@@ -375,7 +408,11 @@ fn build_task(
     let genre_id = spec
         .genre
         .clone()
-        .or_else(|| spec.role.as_deref().and_then(|r| GenreSpec::unique_for_role(genres, r)))
+        .or_else(|| {
+            spec.role
+                .as_deref()
+                .and_then(|r| GenreSpec::unique_for_role(genres, r))
+        })
         .or(assignee_genre);
     let genre_role = genre_id
         .as_deref()
@@ -400,6 +437,8 @@ fn build_task(
     };
     // ADR-0044 D3（Phase 53）: ラベルの検証（小文字 `[a-z0-9-]`、最大 8 個、重複は畳む）。
     let labels = task_core::normalize_labels(&spec.labels).map_err(OpsError::Validation)?;
+    // ADR-0046 D2: 必要な能力タグ（綴りの規則は `labels` と同じ扱いで、違反は 422）。
+    let skills = task_core::normalize_skills(&spec.skills).map_err(OpsError::Validation)?;
     let category = spec.category.unwrap_or_default();
     // ADR-0044 D3: 省略時は P2（`celerisctl add` は `--priority` の既定 0 を明示して渡す）。
     let priority = spec
@@ -412,17 +451,24 @@ fn build_task(
         return Err(OpsError::Validation("title must not be blank".to_string()));
     }
     if spec.objective.trim().is_empty() {
-        return Err(OpsError::Validation("objective must not be blank".to_string()));
+        return Err(OpsError::Validation(
+            "objective must not be blank".to_string(),
+        ));
     }
     let acceptance = if require_acceptance {
         build_acceptance(spec.acceptance)?
     } else {
-        spec.acceptance.into_iter().map(CriterionSpec::into_criterion).collect()
+        spec.acceptance
+            .into_iter()
+            .map(CriterionSpec::into_criterion)
+            .collect()
     };
     if let Some(parent) = spec.parent
         && store.get(parent)?.is_none()
     {
-        return Err(OpsError::Validation(format!("parent {parent} does not exist")));
+        return Err(OpsError::Validation(format!(
+            "parent {parent} does not exist"
+        )));
     }
     validate_depends_on(store, &spec.depends_on)?;
 
@@ -439,7 +485,8 @@ fn build_task(
         },
         (None, Some(path)) => WorkspaceSpec::Local { path, mode: None },
         (None, None) => WorkspaceSpec::Local {
-            path: PathBuf::from(id.to_string()), mode: None,
+            path: PathBuf::from(id.to_string()),
+            mode: None,
         },
     };
 
@@ -501,6 +548,8 @@ fn build_task(
         assignee: spec.assignee,
         conversation: None,
         labels,
+        skills,
+        mode: spec.mode.unwrap_or_default(),
         category,
     };
     Ok(task)
@@ -513,6 +562,8 @@ mod tests {
 
     fn base_spec() -> NewTaskSpec {
         NewTaskSpec {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             title: "do something".to_string(),
             objective: "make it work".to_string(),
@@ -567,7 +618,8 @@ mod tests {
         assert_eq!(
             task.workspace,
             WorkspaceSpec::Local {
-                path: PathBuf::from("/tmp/workspace"), mode: None
+                path: PathBuf::from("/tmp/workspace"),
+                mode: None
             }
         );
 
@@ -602,7 +654,11 @@ mod tests {
         assert_eq!(task.role.as_deref(), Some("lead"));
         assert!(task.aggregate);
         assert_eq!(task.worker_hint.tier, Tier::Frontier, "role default");
-        assert_eq!(task.worker_hint.adapter.as_deref(), Some("claude-code"), "role default");
+        assert_eq!(
+            task.worker_hint.adapter.as_deref(),
+            Some("claude-code"),
+            "role default"
+        );
         assert_eq!(task.budget.max_turns, 7, "task value wins");
         assert_eq!(task.budget.max_wall_secs, 600, "global default");
         let json = serde_json::to_value(&task).unwrap();
@@ -611,7 +667,8 @@ mod tests {
 
         let mut spec = base_spec();
         spec.role = Some("nobody".to_string());
-        let task = create_task_with_roles(&store, spec, &roles, &[], now()).expect("unknown role is allowed");
+        let task = create_task_with_roles(&store, spec, &roles, &[], now())
+            .expect("unknown role is allowed");
         assert_eq!(task.role.as_deref(), Some("nobody"));
         assert_eq!(task.worker_hint.tier, Tier::Standard);
         assert_eq!(task.budget.max_turns, 10);
@@ -629,12 +686,17 @@ mod tests {
         assert!(spec.role.is_none());
     }
 
-
     // ---- ADR-0033 D2（Phase 23）: assignee から先に解決する ----
 
-    fn org_node(id: &str, parent: Option<&str>, kind: task_core::OrgKind, genre: Option<&str>) -> task_core::OrgNode {
+    fn org_node(
+        id: &str,
+        parent: Option<&str>,
+        kind: task_core::OrgKind,
+        genre: Option<&str>,
+    ) -> task_core::OrgNode {
         let now = OffsetDateTime::now_utc();
         task_core::OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: id.into(),
@@ -650,10 +712,20 @@ mod tests {
     fn org_store() -> SqliteStore {
         let store = SqliteStore::open_in_memory().expect("open store");
         store
-            .org_upsert(&org_node("secretary", None, task_core::OrgKind::Secretary, None))
+            .org_upsert(&org_node(
+                "secretary",
+                None,
+                task_core::OrgKind::Secretary,
+                None,
+            ))
             .expect("secretary");
         store
-            .org_upsert(&org_node("research", Some("secretary"), task_core::OrgKind::Department, None))
+            .org_upsert(&org_node(
+                "research",
+                Some("secretary"),
+                task_core::OrgKind::Department,
+                None,
+            ))
             .expect("department");
         store
             .org_upsert(&org_node(
@@ -683,7 +755,11 @@ mod tests {
                 ..RoleSpec::default()
             },
         ];
-        let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
+        let genres = vec![genre(
+            "literature",
+            Some("literature-reader"),
+            &["literature-reader"],
+        )];
         (roles, genres)
     }
 
@@ -696,7 +772,11 @@ mod tests {
         spec.assignee = Some("research-survey".into());
         let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
         assert_eq!(task.assignee.as_deref(), Some("research-survey"));
-        assert_eq!(task.genre.as_deref(), Some("literature"), "the node's genre is adopted");
+        assert_eq!(
+            task.genre.as_deref(),
+            Some("literature"),
+            "the node's genre is adopted"
+        );
         assert_eq!(task.worker_hint.tier, Tier::Cheap);
         assert_eq!(task.worker_hint.adapter.as_deref(), Some("paperqa"));
         assert_eq!(task.budget.max_turns, 5);
@@ -716,7 +796,11 @@ mod tests {
         let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
         assert_eq!(task.worker_hint.tier, Tier::Frontier, "the task value wins");
         assert_eq!(task.budget.max_turns, 33);
-        assert_eq!(task.worker_hint.adapter.as_deref(), Some("paperqa"), "still filled from the assignee");
+        assert_eq!(
+            task.worker_hint.adapter.as_deref(),
+            Some("paperqa"),
+            "still filled from the assignee"
+        );
 
         // 監査 D-2: `role` を明示すると、`role` の tier/adapter が `assignee` 由来の既定より勝つ
         // （解決順は task > role > assignee > genre.default_role）。`role` に無いフィールド（ここでは
@@ -724,10 +808,19 @@ mod tests {
         let mut spec = base_spec();
         spec.assignee = Some("research-survey".into());
         spec.role = Some("lead".into());
-        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("role wins over assignee");
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now())
+            .expect("role wins over assignee");
         assert_eq!(task.role.as_deref(), Some("lead"));
-        assert_eq!(task.assignee.as_deref(), Some("research-survey"), "assignee is still recorded");
-        assert_eq!(task.worker_hint.tier, Tier::Frontier, "the role's tier wins over the assignee's default");
+        assert_eq!(
+            task.assignee.as_deref(),
+            Some("research-survey"),
+            "assignee is still recorded"
+        );
+        assert_eq!(
+            task.worker_hint.tier,
+            Tier::Frontier,
+            "the role's tier wins over the assignee's default"
+        );
         assert_eq!(
             task.worker_hint.adapter.as_deref(),
             Some("claude-code"),
@@ -751,7 +844,8 @@ mod tests {
     fn without_an_assignee_nothing_changes() {
         let store = org_store();
         let (roles, genres) = literature_setup();
-        let task = create_task_with_roles(&store, base_spec(), &roles, &genres, now()).expect("create");
+        let task =
+            create_task_with_roles(&store, base_spec(), &roles, &genres, now()).expect("create");
         assert_eq!(task.worker_hint.tier, Tier::Standard, "global default");
         assert_eq!(task.worker_hint.adapter, None);
         assert_eq!(task.budget.max_turns, DEFAULT_MAX_TURNS);
@@ -794,7 +888,10 @@ mod tests {
             updated_at: now_ts,
         };
         store.project_create(&project).unwrap();
-        let other = task_core::Project { id: task_core::ProjectId::new(), ..project.clone() };
+        let other = task_core::Project {
+            id: task_core::ProjectId::new(),
+            ..project.clone()
+        };
         store.project_create(&other).unwrap();
         let milestone = store
             .milestone_create(other.id, "m", "", task_core::MilestoneStatus::Approved)
@@ -804,12 +901,18 @@ mod tests {
         spec.project_id = Some(project.id);
         spec.milestone_id = Some(milestone.id);
         let err = create_task_with_roles(&store, spec, &roles, &genres, now()).unwrap_err();
-        assert!(err.to_string().contains("does not belong to project"), "{err}");
+        assert!(
+            err.to_string().contains("does not belong to project"),
+            "{err}"
+        );
 
         let mut spec = base_spec();
         spec.milestone_id = Some(milestone.id);
         let err = create_task_with_roles(&store, spec, &roles, &genres, now()).unwrap_err();
-        assert!(err.to_string().contains("milestone_id requires project_id"), "{err}");
+        assert!(
+            err.to_string().contains("milestone_id requires project_id"),
+            "{err}"
+        );
 
         // 正しい組み合わせは通り、列にも載る。
         let mut spec = base_spec();
@@ -843,7 +946,11 @@ mod tests {
             max_wall_secs: Some(1200),
             instructions: None,
         }];
-        let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
+        let genres = vec![genre(
+            "literature",
+            Some("literature-reader"),
+            &["literature-reader"],
+        )];
         let mut spec = base_spec();
         spec.genre = Some("literature".to_string());
         let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
@@ -863,7 +970,11 @@ mod tests {
             id: "literature-scout".to_string(),
             ..RoleSpec::default()
         }];
-        let genres = vec![genre("literature", Some("literature-reader"), &["literature-scout"])];
+        let genres = vec![genre(
+            "literature",
+            Some("literature-reader"),
+            &["literature-scout"],
+        )];
         let mut spec = base_spec();
         spec.role = Some("literature-scout".to_string());
         let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
@@ -874,9 +985,14 @@ mod tests {
     /// 不整合（`role` がその分野の `roles` に無い）もエラー（何も挿入しない）。`genres` が空の設定
     /// （`--config` 無しの `celerisctl add`）では検証しない。
     #[test]
-    fn create_task_with_roles_rejects_unknown_genre_and_role_genre_mismatch_only_when_genres_configured() {
+    fn create_task_with_roles_rejects_unknown_genre_and_role_genre_mismatch_only_when_genres_configured()
+     {
         let store = SqliteStore::open_in_memory().expect("open store");
-        let genres = vec![genre("coding", Some("implementer"), &["lead", "implementer"])];
+        let genres = vec![genre(
+            "coding",
+            Some("implementer"),
+            &["lead", "implementer"],
+        )];
 
         let mut spec = base_spec();
         spec.genre = Some("literature".to_string());
@@ -894,7 +1010,8 @@ mod tests {
         // `genres` が空: 分野を使わない設定では検証しない（自由記述のまま保存する）。
         let mut spec = base_spec();
         spec.genre = Some("literature".to_string());
-        let task = create_task_with_roles(&store, spec, &[], &[], now()).expect("no genres configured");
+        let task =
+            create_task_with_roles(&store, spec, &[], &[], now()).expect("no genres configured");
         assert_eq!(task.genre.as_deref(), Some("literature"));
     }
 
@@ -913,17 +1030,29 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open store");
         let mut spec = base_spec();
         spec.acceptance = vec![
-            CriterionSpec::Human { text: "human check".to_string() },
-            CriterionSpec::Command { cmd: "cargo test".to_string(), expect_exit: 0 },
-            CriterionSpec::ArtifactExists { name: "bench.json".to_string() },
-            CriterionSpec::Reviewer { text: "looks good".to_string() },
+            CriterionSpec::Human {
+                text: "human check".to_string(),
+            },
+            CriterionSpec::Command {
+                cmd: "cargo test".to_string(),
+                expect_exit: 0,
+            },
+            CriterionSpec::ArtifactExists {
+                name: "bench.json".to_string(),
+            },
+            CriterionSpec::Reviewer {
+                text: "looks good".to_string(),
+            },
         ];
 
         let task = create_task(&store, spec, now()).expect("create_task");
         assert_eq!(task.acceptance.len(), 4);
         assert_eq!(task.acceptance[0].check, Check::Human);
         assert!(matches!(task.acceptance[1].check, Check::Command { .. }));
-        assert!(matches!(task.acceptance[2].check, Check::ArtifactExists { .. }));
+        assert!(matches!(
+            task.acceptance[2].check,
+            Check::ArtifactExists { .. }
+        ));
         assert_eq!(task.acceptance[3].check, Check::Reviewer);
     }
 
@@ -994,7 +1123,8 @@ mod tests {
         assert_eq!(
             task.workspace,
             WorkspaceSpec::Local {
-                path: PathBuf::from(task.id.to_string()), mode: None
+                path: PathBuf::from(task.id.to_string()),
+                mode: None
             }
         );
     }
@@ -1044,7 +1174,10 @@ mod tests {
         let task = create_task(&store, spec, now()).expect("create");
         assert_eq!(
             task.workspace,
-            task_core::WorkspaceSpec::Remote { cluster: "pegasus".to_string(), path: PathBuf::from(task.id.to_string()) }
+            task_core::WorkspaceSpec::Remote {
+                cluster: "pegasus".to_string(),
+                path: PathBuf::from(task.id.to_string())
+            }
         );
     }
 
@@ -1063,7 +1196,9 @@ mod tests {
             mutate(&mut spec);
             match create_task(&store, spec, now()) {
                 Err(OpsError::Validation(msg)) => assert!(msg.contains(expected), "{msg}"),
-                other => panic!("expected a validation error containing {expected:?}, got {other:?}"),
+                other => {
+                    panic!("expected a validation error containing {expected:?}, got {other:?}")
+                }
             }
         }
         assert!(store.list(None).expect("list tasks").is_empty());
@@ -1071,7 +1206,10 @@ mod tests {
         let parent = create_task(&store, base_spec(), now()).expect("parent");
         let mut child = base_spec();
         child.parent = Some(parent.id);
-        assert_eq!(create_task(&store, child, now()).expect("child").parent_id, Some(parent.id));
+        assert_eq!(
+            create_task(&store, child, now()).expect("child").parent_id,
+            Some(parent.id)
+        );
     }
 
     #[test]

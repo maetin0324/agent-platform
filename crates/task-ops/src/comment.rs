@@ -30,7 +30,9 @@ pub const INTERRUPTED_OUTCOME: &str = "interrupted: comment";
 pub const INTERRUPTED_OUTCOME_PREFIX: &str = "interrupted: ";
 
 /// 人のコメントが何を起こしたか（ADR-0044 D2 の表）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CommentEffect {
     /// 記録しただけ（`ready` / `draft`）。
@@ -175,7 +177,11 @@ pub fn list_comments(store: &dyn TaskStore, id: TaskId) -> Result<Vec<TaskCommen
 
 /// ADR-0044 D2: `POST /tasks/{id}/reopen`。`done` / `failed` を `ready` に戻す（attempts は 0）。
 /// `cancelled` は worktree もブランチも消してあるので再開しない（409）。
-pub fn reopen(store: &dyn TaskStore, id: TaskId, expected: Option<Status>) -> Result<TransitionResult, OpsError> {
+pub fn reopen(
+    store: &dyn TaskStore,
+    id: TaskId,
+    expected: Option<Status>,
+) -> Result<TransitionResult, OpsError> {
     let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
     if let Some(exp) = expected
         && exp != task.status
@@ -217,13 +223,16 @@ pub fn reopen(store: &dyn TaskStore, id: TaskId, expected: Option<Status>) -> Re
 /// 3. 残っていれば、その割り込みを起こした人のコメント = 最後の `author_kind = human` のコメント
 ///    （割り込みの後に人がさらに書き足していれば、その最新のもの。どちらも人が読ませたい文なので
 ///    先頭に出してよい、という判断）。
-pub fn interrupting_comment<'a>(events: &[(u64, Event)], comments: &'a [TaskComment]) -> Option<&'a TaskComment> {
+pub fn interrupting_comment<'a>(
+    events: &[(u64, Event)],
+    comments: &'a [TaskComment],
+) -> Option<&'a TaskComment> {
     let idx = events.iter().rposition(|(_, e)| {
         matches!(e, Event::Transitioned { reason, to, .. } if reason == "comment" && *to == Status::Ready)
     })?;
-    let consumed = events[idx + 1..]
-        .iter()
-        .any(|(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if consumes_interrupt(outcome)));
+    let consumed = events[idx + 1..].iter().any(
+        |(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if consumes_interrupt(outcome)),
+    );
     if consumed {
         return None;
     }
@@ -245,12 +254,15 @@ fn consumes_interrupt(outcome: &str) -> bool {
 mod tests {
     use super::*;
     use task_core::{
-        ArtifactRef, Budget, Check, Criterion, SqliteStore, Task, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec,
+        ArtifactRef, Budget, Check, Criterion, SqliteStore, Task, TaskId, TaskKind, Tier,
+        WorkerHint, WorkspaceSpec,
     };
 
     fn sample_task(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
@@ -315,12 +327,37 @@ mod tests {
         for (status, expected, expect_status, can_reopen) in [
             (Status::Draft, CommentEffect::Stored, Status::Draft, false),
             (Status::Ready, CommentEffect::Stored, Status::Ready, false),
-            (Status::Running, CommentEffect::Interrupted, Status::Ready, false),
-            (Status::Reviewing, CommentEffect::Interrupted, Status::Ready, false),
-            (Status::Blocked, CommentEffect::Answered, Status::Ready, false),
+            (
+                Status::Running,
+                CommentEffect::Interrupted,
+                Status::Ready,
+                false,
+            ),
+            (
+                Status::Reviewing,
+                CommentEffect::Interrupted,
+                Status::Ready,
+                false,
+            ),
+            (
+                Status::Blocked,
+                CommentEffect::Answered,
+                Status::Ready,
+                false,
+            ),
             (Status::Done, CommentEffect::Terminal, Status::Done, true),
-            (Status::Failed, CommentEffect::Terminal, Status::Failed, true),
-            (Status::Cancelled, CommentEffect::Terminal, Status::Cancelled, false),
+            (
+                Status::Failed,
+                CommentEffect::Terminal,
+                Status::Failed,
+                true,
+            ),
+            (
+                Status::Cancelled,
+                CommentEffect::Terminal,
+                Status::Cancelled,
+                false,
+            ),
         ] {
             let (store, id) = store_with(status);
             let result = post_human_comment(&store, id, "見てほしい".into(), now)
@@ -343,7 +380,11 @@ mod tests {
                 let finished = events.iter().any(|(_, e)| {
                     matches!(e, Event::WorkerFinished { outcome, .. } if outcome == INTERRUPTED_OUTCOME)
                 });
-                assert_eq!(finished, status == Status::Running, "{status:?}: WorkerFinished の有無");
+                assert_eq!(
+                    finished,
+                    status == Status::Running,
+                    "{status:?}: WorkerFinished の有無"
+                );
                 assert!(
                     events
                         .iter()
@@ -377,9 +418,15 @@ mod tests {
             assert_eq!(after.attempts, 0);
         }
         let (store, id) = store_with(Status::Cancelled);
-        assert!(matches!(reopen(&store, id, None), Err(OpsError::InvalidState { .. })));
+        assert!(matches!(
+            reopen(&store, id, None),
+            Err(OpsError::InvalidState { .. })
+        ));
         let (store, id) = store_with(Status::Ready);
-        assert!(matches!(reopen(&store, id, None), Err(OpsError::InvalidState { .. })));
+        assert!(matches!(
+            reopen(&store, id, None),
+            Err(OpsError::InvalidState { .. })
+        ));
     }
 
     /// ワーカーのコメントは記録だけ（状態を変えない）。空の本文は拒否する。
@@ -397,7 +444,10 @@ mod tests {
         )
         .expect("node comment");
         assert_eq!(comment.author.as_deref(), Some("impl"));
-        assert_eq!(store.get(id).expect("get").expect("task").status, Status::Running);
+        assert_eq!(
+            store.get(id).expect("get").expect("task").status,
+            Status::Running
+        );
         assert!(matches!(
             post_node_comment(&store, id, None, None, "  ".into(), now),
             Err(OpsError::Validation(_))
@@ -417,7 +467,9 @@ mod tests {
             let (store, id) = store_with(Status::Running);
             post_human_comment(&store, id, "止めて".into(), now).expect("comment");
             let comments = store.comments_for(id).expect("comments");
-            store.apply_transition(id, Trigger::Dispatch, None).expect("dispatch");
+            store
+                .apply_transition(id, Trigger::Dispatch, None)
+                .expect("dispatch");
             store
                 .apply_transition_with_events(
                     id,
@@ -450,9 +502,14 @@ mod tests {
         assert!(interrupting_comment(&events, &comments).is_some());
 
         // 次の run が始まっただけでは消えない（この run が前置きを受け取る）。
-        store.apply_transition(id, Trigger::Dispatch, None).expect("dispatch");
+        store
+            .apply_transition(id, Trigger::Dispatch, None)
+            .expect("dispatch");
         let events = store.events_for(id).expect("events");
-        assert!(interrupting_comment(&events, &comments).is_some(), "次の run はまだ受け取る");
+        assert!(
+            interrupting_comment(&events, &comments).is_some(),
+            "次の run はまだ受け取る"
+        );
 
         // その run が終わったら消える。
         store
@@ -468,6 +525,9 @@ mod tests {
             )
             .expect("worker_done");
         let events = store.events_for(id).expect("events");
-        assert!(interrupting_comment(&events, &comments).is_none(), "消化済み");
+        assert!(
+            interrupting_comment(&events, &comments).is_none(),
+            "消化済み"
+        );
     }
 }

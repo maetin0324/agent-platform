@@ -128,6 +128,13 @@
             "null"
           ]
         },
+        "harness": {
+          "description": "ADR-0046 D3（Phase 59）: `genre` の別名（ハーネス id）。新しい設定では分野ではなく\n**ハーネス**と呼ぶので、計画はどちらの名前で書いてもよい。両方書いたら `genre` が勝つ。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/NewTaskKind",
           "default": "execute"
@@ -138,6 +145,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0046 D4（Phase 59）: この子の進め方（`prototype` / `production` / `research`）。\n**省略時は親の mode を継ぐ**。"
         },
         "objective": {
           "type": "string"
@@ -155,6 +173,13 @@
             "string",
             "null"
           ]
+        },
+        "skills": {
+          "description": "ADR-0046 D2（Phase 59）: この子に**必要な能力タグ**（`[\"rust\", \"sqlite\"]`）。担当（`assignee`）を\n書かなかった子は、これとノードの実効 `skills` の重なりで担当が決まる（D5 の matching）。\n規則（小文字 `[a-z0-9._-]`、最大 12 個）に合わないタグは**落とす**（`labels` と同じ扱い）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "tier": {
           "anyOf": [
@@ -208,6 +233,26 @@
         "other"
       ],
       "type": "string"
+    },
+    "TaskMode": {
+      "description": "ADR-0046 D4（Phase 59）: タスクの進め方。前置きに足す規則とレビューの厳しさを切り替える。\n既定は `Production`（導入前のタスクは全部これ。従来の挙動と同じ）。状態機械は見ない。",
+      "oneOf": [
+        {
+          "const": "prototype",
+          "description": "動くことを最短で示す。レビューは明示の `acceptance` だけ（リポジトリの `check` は使わない）。",
+          "type": "string"
+        },
+        {
+          "const": "production",
+          "description": "既定。`acceptance` ＋ リポジトリの `check`（ADR-0043 D4）。",
+          "type": "string"
+        },
+        {
+          "const": "research",
+          "description": "主張には出典か計測を付ける。`acceptance` ＋ 結果に `sources`（または計測の記録）が無ければ不合格。",
+          "type": "string"
+        }
+      ]
     },
     "Tier": {
       "description": "DESIGN §5.4 の `WorkerHint`。",

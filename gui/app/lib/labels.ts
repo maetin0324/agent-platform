@@ -6,13 +6,16 @@ import type {
   IntegrationMethod,
   IntegrationState,
   MilestoneStatus,
+  MountKind,
   OrgKind,
+  ProfileRun,
   ProjectStatus,
   RepoKind,
   RepoRun,
   RepoSync,
   Status,
   TaskCategory,
+  TaskMode,
   Tier,
 } from "~/celeris/types";
 import type { BoardColumnId } from "~/lib/board";
@@ -335,6 +338,10 @@ const TASK_FIELD_LABEL: Record<string, string> = {
   adapter: "アダプタ",
   milestone_id: "途中目標",
   depends_on: "依存",
+  // ADR-0046 D2 / D3 / D4（Phase 59 / G21）。`EditResult.fields` にも入りうる。
+  skills: "能力タグ",
+  mode: "進め方",
+  harness: "ハーネス",
   max_turns: "max_turns",
   max_wall_secs: "max_wall_secs",
   max_retries: "max_retries",
@@ -543,6 +550,104 @@ export function cancelledCountLabel(tasks: number, milestones?: number): string 
   const parts = [`仕事 ${tasks} 件`];
   if (milestones !== undefined) parts.push(`途中目標 ${milestones} 件`);
   return `${parts.join("・")}を中止しました`;
+}
+
+/**
+ * ADR-0046（celeris Phase 59 / G21）: 組織 = Agent Profile の継承木と、タスクの harness / skills / mode。
+ * 値（`prototype` / `kb` / `host` / …）は celeris のものをそのまま送り返すだけで、画面に出す言葉だけを
+ * ここに集める。知らない値は素のまま出す（celeris が語彙を増やしても画面は壊れない）。
+ * **継承は計算しない**（実効 profile は `GET /org` の `effective_profiles` をそのまま出す）。
+ */
+
+/** タスクの進め方（ADR-0046 D4）。既定は `production`。 */
+const TASK_MODE_LABEL: Record<TaskMode, string> = {
+  prototype: "試作（小さく試す）",
+  production: "本番（きちんと作る）",
+  research: "研究（調べる）",
+};
+
+export const TASK_MODES: readonly TaskMode[] = ["prototype", "production", "research"];
+
+export function taskModeLabel(mode: TaskMode | string): string {
+  return TASK_MODE_LABEL[mode as TaskMode] ?? mode;
+}
+
+/** 知識のマウントの種類（ADR-0046 D1 / ADR-0047）。 */
+const KNOWLEDGE_KIND_LABEL: Record<MountKind, string> = {
+  kb: "知識ベース",
+  repo: "リポジトリ",
+  dir: "ディレクトリ",
+  memory: "記憶",
+};
+
+export const KNOWLEDGE_KINDS: readonly MountKind[] = ["kb", "repo", "dir", "memory"];
+
+export function knowledgeKindLabel(kind: MountKind | string): string {
+  return KNOWLEDGE_KIND_LABEL[kind as MountKind] ?? kind;
+}
+
+/** profile の `run`（どこで動かすか。ADR-0046 D1。子が勝つ）。 */
+const PROFILE_RUN_LABEL: Record<ProfileRun, string> = {
+  host: "ホスト",
+  container: "コンテナ",
+};
+
+export const PROFILE_RUNS: readonly ProfileRun[] = ["host", "container"];
+
+export function profileRunLabel(run: ProfileRun | string): string {
+  return PROFILE_RUN_LABEL[run as ProfileRun] ?? run;
+}
+
+/**
+ * profile の項目名（組織の画面のフォームと「実効 profile」の見出し）。API のフィールド名
+ * （`harnesses_allowed` / `deny_tools` …）を画面に出さないため。`EffectiveProfile` の項目名に合わせる。
+ */
+const PROFILE_FIELD_LABEL: Record<string, string> = {
+  chain: "どこから継いだか",
+  skills: "能力タグ",
+  knowledge: "知識",
+  harnesses_allowed: "使えるハーネス",
+  harness_default: "既定のハーネス",
+  tools: "使える道具",
+  deny_tools: "禁じる道具",
+  run: "動かす場所",
+  tier: "モデルの段",
+  allowed_tiers: "許すモデルの段",
+  policy: "文化（前置きに足す箇条書き）",
+  review_harness: "レビューのハーネス",
+  review_tier: "レビューのモデルの段",
+  approvals: "認可が要る操作",
+};
+
+export function profileFieldLabel(field: string): string {
+  return PROFILE_FIELD_LABEL[field] ?? field;
+}
+
+/**
+ * 道具の語彙（ADR-0046 D8、docs/celeris-api-v1.md §3.43）。`cluster:<id>` は設定ごとに違うので
+ * 選択肢にはできず、フォームは自由記述の欄を別に置く（正は celeris の 422）。
+ */
+export const PROFILE_TOOLS: readonly string[] = ["gh", "tavily", "exa", "docker"];
+
+/** `cluster:<id>` のように選択肢に無い道具を書く欄の案内。 */
+export const PROFILE_TOOLS_EXTRA_HINT = "選択肢に無い道具（例: cluster:pegasus）を空白かカンマで区切って書きます。";
+
+/**
+ * 組み込みのハーネス（docs/celeris-api-v1.md §3.43）。設定の `[[genres]]` の id と合わせたものが
+ * `harnesses.allowed` / `harnesses.default` / `review.harness` / タスクの `harness` の選択肢になる。
+ */
+export const BUILTIN_HARNESSES: readonly string[] = ["conversation", "plan", "reviewer", "smoke"];
+
+/** 設定の `[[genres]]` + 組み込みのハーネス（重複は落とす。並びは設定 → 組み込みの順）。 */
+export function harnessOptions(genres: readonly string[]): string[] {
+  return [...new Set([...genres, ...BUILTIN_HARNESSES])];
+}
+
+/** 「なぜこの担当か」（`Event::Assigned`。ADR-0046 D5）。`score` は能力タグの重なりの数。 */
+export const ASSIGNED_WHY_LABEL = "なぜこの担当か";
+
+export function assignedScoreLabel(score: number): string {
+  return `能力タグの重なり ${score} 件`;
 }
 
 /**

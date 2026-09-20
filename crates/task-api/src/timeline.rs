@@ -13,7 +13,8 @@ use std::collections::HashSet;
 use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use task_core::{
-    ApprovalStore, Event, ReportFilter, ReportStore, SqliteStore, Task, TaskId, TaskIntegration, TaskStore,
+    ApprovalStore, Event, ReportFilter, ReportStore, SqliteStore, Task, TaskId, TaskIntegration,
+    TaskStore,
 };
 
 use crate::handlers::{ApiResult, Params, json_response, no_query};
@@ -163,7 +164,11 @@ fn store_items(store: &SqliteStore, id: TaskId) -> Result<(Task, Vec<TimelineIte
 /// `action` は方法（`merge` / `pr` / `discard`）、`detail` は人が読む 1 行
 /// （`<リポジトリ>: <行方>` + PR の番号と URL + 記録の `detail`）。決定的（LLM も I/O も無い）。
 fn integration_item(integration: &TaskIntegration) -> TimelineItem {
-    let mut parts = vec![format!("{}: {}", integration.repo, integration.state.as_str())];
+    let mut parts = vec![format!(
+        "{}: {}",
+        integration.repo,
+        integration.state.as_str()
+    )];
     match (integration.pr_number, integration.pr_url.as_deref()) {
         (Some(number), Some(url)) => parts.push(format!("PR #{number} {url}")),
         (Some(number), None) => parts.push(format!("PR #{number}")),
@@ -181,7 +186,11 @@ fn integration_item(integration: &TaskIntegration) -> TimelineItem {
 }
 
 /// ADR-0044 D7（Phase 57）: そのタスクを front matter の `tasks:` に持つ文書のページ（逆リンク）。
-fn doc_items(store: &SqliteStore, task: &Task, docs_repo_root: Option<&std::path::Path>) -> Vec<TimelineItem> {
+fn doc_items(
+    store: &SqliteStore,
+    task: &Task,
+    docs_repo_root: Option<&std::path::Path>,
+) -> Vec<TimelineItem> {
     crate::docs::backlinks(store, task, docs_repo_root)
         .into_iter()
         .map(|(at, path, title, project_id)| TimelineItem::Doc {
@@ -215,7 +224,11 @@ fn release_items(
         marker.base.as_str()
     };
     let commits: HashSet<String> = source
-        .branch_commits(std::path::Path::new(&marker.repo), &marker.branch, Some(base))
+        .branch_commits(
+            std::path::Path::new(&marker.repo),
+            &marker.branch,
+            Some(base),
+        )
         .into_iter()
         .collect();
     if commits.is_empty() {
@@ -223,7 +236,9 @@ fn release_items(
     }
     let mut out = Vec::new();
     for item in source.list().items {
-        let Some(changes) = &item.changes else { continue };
+        let Some(changes) = &item.changes else {
+            continue;
+        };
         let mine: Vec<String> = changes
             .commits
             .iter()
@@ -273,7 +288,9 @@ mod tests {
         sort_items(&mut items);
         assert_eq!(at_of(&items[0]), "2026-09-19T01:00:00Z");
         assert!(matches!(&items[0], TimelineItem::Integration { detail, .. } if detail == "first"));
-        assert!(matches!(&items[1], TimelineItem::Integration { detail, .. } if detail == "second"));
+        assert!(
+            matches!(&items[1], TimelineItem::Integration { detail, .. } if detail == "second")
+        );
         assert_eq!(at_of(&items[2]), "2026-09-19T03:00:00Z");
     }
 

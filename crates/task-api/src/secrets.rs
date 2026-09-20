@@ -10,7 +10,11 @@ use time::format_description::well_known::Rfc3339;
 
 /// `^[A-Za-z0-9_-]{1,64}$`（プロバイダ/アカウント id と同じ規則。ADR-0030 D1）。
 pub fn valid_secret_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 pub fn secret_file_path(dir: &Path, id: &str) -> PathBuf {
@@ -50,7 +54,11 @@ fn create_secrets_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        match std::fs::DirBuilder::new().recursive(false).mode(0o700).create(dir) {
+        match std::fs::DirBuilder::new()
+            .recursive(false)
+            .mode(0o700)
+            .create(dir)
+        {
             Ok(()) => Ok(()),
             // 親が無い場合だけ recursive に作り直す（作った親は umask のまま。`dir` 自身は 0700 にする）。
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -68,24 +76,37 @@ fn create_secrets_dir(dir: &Path) -> std::io::Result<()> {
 /// `dir`（無ければ作る）の下に `id` という名前で `value` を 0600・atomic temp+rename で書く（ADR-0030 D1）。
 /// `dir` は呼び出し側で `valid_secret_id(id)` を確かめてから渡すこと（ここではパストラバーサルを検査しない）。
 pub fn write_secret_file(dir: &Path, id: &str, value: &str) -> Result<(), SecretFileError> {
-    create_secrets_dir(dir).map_err(|source| SecretFileError::Write { path: dir.to_path_buf(), source })?;
+    create_secrets_dir(dir).map_err(|source| SecretFileError::Write {
+        path: dir.to_path_buf(),
+        source,
+    })?;
     let path = secret_file_path(dir, id);
     let tmp_path = dir.join(format!(".{id}.tmp-{}", ulid::Ulid::new()));
     let result = (|| -> std::io::Result<()> {
         #[cfg(unix)]
         let mut file = {
             use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp_path)?
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp_path)?
         };
         #[cfg(not(unix))]
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp_path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
         file.write_all(value.as_bytes())?;
         file.sync_all()?;
         Ok(())
     })();
     if let Err(source) = result {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(SecretFileError::Write { path: tmp_path, source });
+        return Err(SecretFileError::Write {
+            path: tmp_path,
+            source,
+        });
     }
     std::fs::rename(&tmp_path, &path).map_err(|source| SecretFileError::Write { path, source })
 }
@@ -109,8 +130,10 @@ pub fn list_secret_files(dir: &Path) -> Result<Vec<SecretMeta>, SecretFileError>
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    let entries =
-        std::fs::read_dir(dir).map_err(|source| SecretFileError::Read { path: dir.to_path_buf(), source })?;
+    let entries = std::fs::read_dir(dir).map_err(|source| SecretFileError::Read {
+        path: dir.to_path_buf(),
+        source,
+    })?;
     for entry in entries.flatten() {
         let path = entry.path();
         // シンボリックリンクは追わない（リンク先の mtime や fingerprint を管理 API に出さない）。
@@ -118,22 +141,32 @@ pub fn list_secret_files(dir: &Path) -> Result<Vec<SecretMeta>, SecretFileError>
             Ok(meta) if meta.file_type().is_file() => {}
             _ => continue,
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if !valid_secret_id(name) {
             continue;
         }
-        let text =
-            std::fs::read_to_string(&path).map_err(|source| SecretFileError::Read { path: path.clone(), source })?;
+        let text = std::fs::read_to_string(&path).map_err(|source| SecretFileError::Read {
+            path: path.clone(),
+            source,
+        })?;
         let value = trim_secret_value(&text);
-        let metadata =
-            std::fs::metadata(&path).map_err(|source| SecretFileError::Read { path: path.clone(), source })?;
+        let metadata = std::fs::metadata(&path).map_err(|source| SecretFileError::Read {
+            path: path.clone(),
+            source,
+        })?;
         let updated_at = metadata
             .modified()
             .ok()
             .map(OffsetDateTime::from)
             .and_then(|t| t.format(&Rfc3339).ok())
             .unwrap_or_default();
-        out.push(SecretMeta { id: name.to_string(), updated_at, fingerprint: fingerprint(value) });
+        out.push(SecretMeta {
+            id: name.to_string(),
+            updated_at,
+            fingerprint: fingerprint(value),
+        });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
@@ -176,14 +209,19 @@ mod tests {
     #[test]
     fn write_then_list_round_trips_with_0600_and_trims_trailing_newline() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
-        write_secret_file(dir.path(), "tavily", "tvly-secret\n").unwrap_or_else(|e| panic!("write: {e}"));
+        write_secret_file(dir.path(), "tavily", "tvly-secret\n")
+            .unwrap_or_else(|e| panic!("write: {e}"));
 
         let path = secret_file_path(dir.path(), "tavily");
         assert!(path.is_file());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap_or_else(|e| panic!("metadata: {e}")).permissions().mode() & 0o777;
+            let mode = std::fs::metadata(&path)
+                .unwrap_or_else(|e| panic!("metadata: {e}"))
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(mode, 0o600);
         }
 
@@ -194,7 +232,8 @@ mod tests {
         assert!(!items[0].updated_at.is_empty());
 
         // 書き直すと（同じ id）値が置き換わる。
-        write_secret_file(dir.path(), "tavily", "tvly-new").unwrap_or_else(|e| panic!("rewrite: {e}"));
+        write_secret_file(dir.path(), "tavily", "tvly-new")
+            .unwrap_or_else(|e| panic!("rewrite: {e}"));
         let items = list_secret_files(dir.path()).unwrap_or_else(|e| panic!("list: {e}"));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].fingerprint, fingerprint("tvly-new"));
@@ -211,7 +250,8 @@ mod tests {
     #[test]
     fn list_secret_files_skips_hidden_and_invalid_names() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
-        std::fs::write(dir.path().join(".hidden-tmp"), "x").unwrap_or_else(|e| panic!("write: {e}"));
+        std::fs::write(dir.path().join(".hidden-tmp"), "x")
+            .unwrap_or_else(|e| panic!("write: {e}"));
         std::fs::write(dir.path().join("bad name!"), "x").unwrap_or_else(|e| panic!("write: {e}"));
         write_secret_file(dir.path(), "ok-id", "v").unwrap_or_else(|e| panic!("write: {e}"));
 
@@ -223,7 +263,8 @@ mod tests {
     #[test]
     fn list_secret_files_missing_dir_is_empty_not_an_error() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
-        let items = list_secret_files(&dir.path().join("nope")).unwrap_or_else(|e| panic!("list: {e}"));
+        let items =
+            list_secret_files(&dir.path().join("nope")).unwrap_or_else(|e| panic!("list: {e}"));
         assert!(items.is_empty());
     }
 

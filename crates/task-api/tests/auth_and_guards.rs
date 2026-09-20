@@ -6,7 +6,7 @@ use axum::body::{Body, Bytes};
 use axum::http::Request;
 use common::*;
 use serde_json::json;
-use task_core::{TaskStore, SCHEMA_VERSION};
+use task_core::{SCHEMA_VERSION, TaskStore};
 
 fn valid_task_body() -> serde_json::Value {
     json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}]})
@@ -47,21 +47,53 @@ async fn bearer_token_is_required_when_configured() {
 
     let missing = send(&app, get("/api/v1/events")).await;
     assert_problem(&missing, 401, "unauthorized");
-    assert_eq!(missing.header("www-authenticate"), Some("Bearer realm=\"celeris\""));
+    assert_eq!(
+        missing.header("www-authenticate"),
+        Some("Bearer realm=\"celeris\"")
+    );
 
-    let wrong = send(&app, get_with("/api/v1/events", &[("authorization", "Bearer not-the-token")])).await;
+    let wrong = send(
+        &app,
+        get_with(
+            "/api/v1/events",
+            &[("authorization", "Bearer not-the-token")],
+        ),
+    )
+    .await;
     assert_problem(&wrong, 401, "unauthorized");
 
-    let basic = send(&app, get_with("/api/v1/events", &[("authorization", "Basic czNjcmV0")])).await;
+    let basic = send(
+        &app,
+        get_with("/api/v1/events", &[("authorization", "Basic czNjcmV0")]),
+    )
+    .await;
     assert_problem(&basic, 401, "unauthorized");
 
-    let prefix = send(&app, get_with("/api/v1/events", &[("authorization", "Bearer s3cret")])).await;
+    let prefix = send(
+        &app,
+        get_with("/api/v1/events", &[("authorization", "Bearer s3cret")]),
+    )
+    .await;
     assert_problem(&prefix, 401, "unauthorized");
 
-    let ok = send(&app, get_with("/api/v1/events", &[("authorization", &format!("Bearer {TOKEN}"))])).await;
+    let ok = send(
+        &app,
+        get_with(
+            "/api/v1/events",
+            &[("authorization", &format!("Bearer {TOKEN}"))],
+        ),
+    )
+    .await;
     assert_eq!(ok.status, 200, "{}", ok.text());
 
-    let lower = send(&app, get_with("/api/v1/events", &[("authorization", &format!("bearer {TOKEN}"))])).await;
+    let lower = send(
+        &app,
+        get_with(
+            "/api/v1/events",
+            &[("authorization", &format!("bearer {TOKEN}"))],
+        ),
+    )
+    .await;
     assert_eq!(lower.status, 200);
 
     // 未定義のパスも認証が先（経路の有無を漏らさない）。
@@ -84,7 +116,10 @@ async fn health_is_unauthenticated_but_still_host_checked() {
 
     let health = send(&app, get("/api/v1/health")).await;
     assert_eq!(health.status, 200, "{}", health.text());
-    assert_eq!(health.header("content-type"), Some("application/json; charset=utf-8"));
+    assert_eq!(
+        health.header("content-type"),
+        Some("application/json; charset=utf-8")
+    );
     let body = health.json();
     assert_eq!(body["api_version"], "1");
     assert_eq!(body["schema_version"], SCHEMA_VERSION);
@@ -95,9 +130,16 @@ async fn health_is_unauthenticated_but_still_host_checked() {
     assert_eq!(body["db"]["journal_mode"], "wal");
     assert_eq!(body["db"]["busy_timeout_ms"], 5000);
     assert!(!health.text().contains(TOKEN));
-    assert!(!health.text().contains("celeris.db"), "health must not expose the DB path");
+    assert!(
+        !health.text().contains("celeris.db"),
+        "health must not expose the DB path"
+    );
 
-    let evil = send(&app, get_with("/api/v1/health", &[("host", "evil.example")])).await;
+    let evil = send(
+        &app,
+        get_with("/api/v1/health", &[("host", "evil.example")]),
+    )
+    .await;
     assert_problem(&evil, 400, "host_not_allowed");
 }
 
@@ -107,7 +149,11 @@ async fn no_token_means_no_authentication() {
     let app = env.router();
     let ok = send(&app, get("/api/v1/events")).await;
     assert_eq!(ok.status, 200);
-    let with_header = send(&app, get_with("/api/v1/events", &[("authorization", "Bearer whatever")])).await;
+    let with_header = send(
+        &app,
+        get_with("/api/v1/events", &[("authorization", "Bearer whatever")]),
+    )
+    .await;
     assert_eq!(with_header.status, 200);
 }
 
@@ -119,16 +165,32 @@ async fn host_header_is_checked_against_the_allow_list() {
     });
     let app = env.router();
 
-    for host in ["evil.example", "evil.example:7710", "127.0.0.2", "celeris.lab.example.evil.example"] {
+    for host in [
+        "evil.example",
+        "evil.example:7710",
+        "127.0.0.2",
+        "celeris.lab.example.evil.example",
+    ] {
         let resp = send(&app, get_with("/api/v1/events", &[("host", host)])).await;
         assert_problem(&resp, 400, "host_not_allowed");
     }
-    for host in ["localhost", "localhost:7710", "127.0.0.1", "127.0.0.1:9999", "[::1]:7710", "[::1]", "celeris.lab.example:7710", "CELERIS.lab.example"] {
+    for host in [
+        "localhost",
+        "localhost:7710",
+        "127.0.0.1",
+        "127.0.0.1:9999",
+        "[::1]:7710",
+        "[::1]",
+        "celeris.lab.example:7710",
+        "CELERIS.lab.example",
+    ] {
         let resp = send(&app, get_with("/api/v1/events", &[("host", host)])).await;
         assert_eq!(resp.status, 200, "host {host}: {}", resp.text());
     }
 
-    let no_host = Request::get("/api/v1/events").body(Body::empty()).expect("request");
+    let no_host = Request::get("/api/v1/events")
+        .body(Body::empty())
+        .expect("request");
     let resp = send(&app, no_host).await;
     assert_problem(&resp, 400, "host_not_allowed");
 
@@ -144,7 +206,9 @@ async fn host_header_is_checked_against_the_allow_list() {
         .body(Body::empty())
         .expect("request");
     assert_problem(&send(&app, absolute_form).await, 400, "host_not_allowed");
-    let absolute_ok = Request::get("http://localhost:7710/api/v1/events").body(Body::empty()).expect("request");
+    let absolute_ok = Request::get("http://localhost:7710/api/v1/events")
+        .body(Body::empty())
+        .expect("request");
     assert_eq!(send(&app, absolute_ok).await.status, 200);
 
     // Host 検査は POST の他の検査より先。
@@ -171,9 +235,18 @@ async fn post_with_origin_is_forbidden_and_changes_nothing() {
     assert!(env.store.list(None).expect("list").is_empty());
 
     // GET は Origin があっても通る（変更系だけの検査）。
-    let get_resp = send(&app, get_with("/api/v1/events", &[("origin", "http://localhost:7700")])).await;
+    let get_resp = send(
+        &app,
+        get_with("/api/v1/events", &[("origin", "http://localhost:7700")]),
+    )
+    .await;
     assert_eq!(get_resp.status, 200);
-    assert!(get_resp.headers.keys().all(|k| !k.as_str().starts_with("access-control-")));
+    assert!(
+        get_resp
+            .headers
+            .keys()
+            .all(|k| !k.as_str().starts_with("access-control-"))
+    );
 }
 
 #[tokio::test]
@@ -181,7 +254,11 @@ async fn post_requires_json_content_type() {
     let env = admin_env();
     let app = env.router();
 
-    let without = admin_post("/api/v1/tasks", None, Body::from(valid_task_body().to_string()));
+    let without = admin_post(
+        "/api/v1/tasks",
+        None,
+        Body::from(valid_task_body().to_string()),
+    );
     assert_problem(&send(&app, without).await, 415, "unsupported_media_type");
 
     let form = admin_post(
@@ -223,7 +300,10 @@ async fn bodies_over_one_mebibyte_are_rejected_with_413() {
     assert_problem(&send(&app, declared).await, 413, "payload_too_large");
 
     // Content-Length 無し（chunked 相当）でも読み取り中に打ち切る。
-    let chunks: Vec<Result<Bytes, std::io::Error>> = big.chunks(64 * 1024).map(|c| Ok(Bytes::copy_from_slice(c))).collect();
+    let chunks: Vec<Result<Bytes, std::io::Error>> = big
+        .chunks(64 * 1024)
+        .map(|c| Ok(Bytes::copy_from_slice(c)))
+        .collect();
     let streamed = admin_post(
         "/api/v1/tasks",
         Some("application/json"),
@@ -255,7 +335,11 @@ async fn malformed_and_unknown_fields_are_bad_requests() {
 
     let unknown_criterion = json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok", "extra": true}]});
     assert_problem(
-        &send(&app, post_json_with("/api/v1/tasks", &unknown_criterion, &headers)).await,
+        &send(
+            &app,
+            post_json_with("/api/v1/tasks", &unknown_criterion, &headers),
+        )
+        .await,
         400,
         "bad_request",
     );
@@ -267,11 +351,19 @@ async fn malformed_and_unknown_fields_are_bad_requests() {
         "bad_request",
     );
 
-    let syntax = admin_post("/api/v1/tasks", Some("application/json"), Body::from("{\"title\": "));
+    let syntax = admin_post(
+        "/api/v1/tasks",
+        Some("application/json"),
+        Body::from("{\"title\": "),
+    );
     assert_problem(&send(&app, syntax).await, 400, "bad_request");
 
     let id = task_core::TaskId::new();
-    let approve_unknown = post_json_with(&format!("/api/v1/tasks/{id}/approve"), &json!({"nope": true}), &headers);
+    let approve_unknown = post_json_with(
+        &format!("/api/v1/tasks/{id}/approve"),
+        &json!({"nope": true}),
+        &headers,
+    );
     assert_problem(&send(&app, approve_unknown).await, 400, "bad_request");
     let bad_status = post_json_with(
         &format!("/api/v1/tasks/{id}/cancel"),
@@ -279,7 +371,11 @@ async fn malformed_and_unknown_fields_are_bad_requests() {
         &headers,
     );
     assert_problem(&send(&app, bad_status).await, 400, "bad_request");
-    let plan_unknown = post_json_with("/api/v1/plans", &json!({"goal": "g", "tier": "cheap", "color": "red"}), &headers);
+    let plan_unknown = post_json_with(
+        "/api/v1/plans",
+        &json!({"goal": "g", "tier": "cheap", "color": "red"}),
+        &headers,
+    );
     assert_problem(&send(&app, plan_unknown).await, 400, "bad_request");
     let replay_unknown = post_json_with("/api/v1/replay", &json!({"dry_run": true}), &headers);
     assert_problem(&send(&app, replay_unknown).await, 400, "bad_request");
@@ -291,13 +387,21 @@ async fn common_headers_are_set_and_cors_is_never_emitted() {
     let env = TestEnv::new();
     let app = env.router();
 
-    let ok = send(&app, get_with("/api/v1/health", &[("origin", "http://localhost:7700")])).await;
+    let ok = send(
+        &app,
+        get_with("/api/v1/health", &[("origin", "http://localhost:7700")]),
+    )
+    .await;
     assert_eq!(ok.header("cache-control"), Some("no-store"));
     assert_eq!(ok.header("x-content-type-options"), Some("nosniff"));
     let request_id = ok.header("x-request-id").expect("x-request-id");
     assert_eq!(request_id.len(), 26);
     assert!(request_id.parse::<ulid::Ulid>().is_ok());
-    assert!(ok.headers.keys().all(|k| !k.as_str().starts_with("access-control-")));
+    assert!(
+        ok.headers
+            .keys()
+            .all(|k| !k.as_str().starts_with("access-control-"))
+    );
 
     let preflight = Request::builder()
         .method("OPTIONS")
@@ -309,7 +413,11 @@ async fn common_headers_are_set_and_cors_is_never_emitted() {
         .expect("request");
     let resp = send(&app, preflight).await;
     assert_problem(&resp, 405, "method_not_allowed");
-    assert!(resp.headers.keys().all(|k| !k.as_str().starts_with("access-control-")));
+    assert!(
+        resp.headers
+            .keys()
+            .all(|k| !k.as_str().starts_with("access-control-"))
+    );
     assert_eq!(resp.header("cache-control"), Some("no-store"));
 }
 
@@ -322,9 +430,16 @@ async fn unknown_paths_are_404_and_wrong_methods_are_405() {
     assert_problem(&send(&app, get("/")).await, 404, "not_found");
     assert_problem(&send(&app, get("/api/v2/health")).await, 404, "not_found");
 
-    let delete = Request::delete("/api/v1/tasks").header("host", HOST).body(Body::empty()).expect("request");
+    let delete = Request::delete("/api/v1/tasks")
+        .header("host", HOST)
+        .body(Body::empty())
+        .expect("request");
     assert_problem(&send(&app, delete).await, 405, "method_not_allowed");
-    assert_problem(&send(&app, get("/api/v1/replay")).await, 405, "method_not_allowed");
+    assert_problem(
+        &send(&app, get("/api/v1/replay")).await,
+        405,
+        "method_not_allowed",
+    );
     let post_health = post_json("/api/v1/health", &json!({}));
     assert_problem(&send(&app, post_health).await, 405, "method_not_allowed");
 }
@@ -355,7 +470,11 @@ async fn invalid_ids_and_query_values_are_bad_requests() {
         let resp = send(&app, get(path)).await;
         assert_problem(&resp, 400, "bad_request");
     }
-    let bad_last_event_id = send(&app, get_with("/api/v1/stream", &[("last-event-id", "abc")])).await;
+    let bad_last_event_id = send(
+        &app,
+        get_with("/api/v1/stream", &[("last-event-id", "abc")]),
+    )
+    .await;
     assert_problem(&bad_last_event_id, 400, "bad_request");
     let id = task_core::TaskId::new();
     let bad_idx = send(&app, get(&format!("/api/v1/tasks/{id}/artifacts/first"))).await;

@@ -11,13 +11,19 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use task_core::{Check, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, WorkspaceSpec};
+use task_core::{
+    Check, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, WorkspaceSpec,
+};
 
 fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
     let path = debug_dir.join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
@@ -34,7 +40,12 @@ impl Env {
         let root = tmp.path().canonicalize().unwrap();
         let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
-        Self { _tmp: tmp, root, db, store }
+        Self {
+            _tmp: tmp,
+            root,
+            db,
+            store,
+        }
     }
 
     fn write_script(&self, body: &str) -> PathBuf {
@@ -87,13 +98,22 @@ model = "fake"
     /// 成功を要求して stdout を返す。
     fn celerisctl(&self, args: &[&str]) -> String {
         let (code, stdout, stderr) = self.celerisctl_raw(args);
-        assert_eq!(code, Some(0), "celerisctl {args:?} failed: {stdout}{stderr}");
+        assert_eq!(
+            code,
+            Some(0),
+            "celerisctl {args:?} failed: {stdout}{stderr}"
+        );
         stdout
     }
 
     /// `(exit code, stdout, stderr)`。
     fn celerisctl_raw(&self, args: &[&str]) -> (Option<i32>, String, String) {
-        let out = Command::new(bin("celerisctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
+        let out = Command::new(bin("celerisctl"))
+            .arg("--db")
+            .arg(&self.db)
+            .args(args)
+            .output()
+            .unwrap();
         (
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -117,7 +137,15 @@ model = "fake"
     fn run_celeris(&self, config: &Path, timeout: Duration) -> String {
         let log = self.root.join("celeris.log");
         let mut child = Command::new(bin("celeris"))
-            .args(["--config", config.to_str().unwrap(), "--until-idle", "--max-ticks", "2000", "--log-format", "text"])
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "--until-idle",
+                "--max-ticks",
+                "2000",
+                "--log-format",
+                "text",
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).unwrap())
@@ -149,14 +177,21 @@ model = "fake"
     }
 
     fn events(&self, id: TaskId) -> Vec<Event> {
-        self.store.events_for(id).unwrap().into_iter().map(|(_, e)| e).collect()
+        self.store
+            .events_for(id)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect()
     }
 
     fn transitions(&self, id: TaskId) -> Vec<String> {
         self.events(id)
             .into_iter()
             .filter_map(|e| match e {
-                Event::Transitioned { from, to, reason } => Some(format!("{from:?}->{to:?}:{reason}")),
+                Event::Transitioned { from, to, reason } => {
+                    Some(format!("{from:?}->{to:?}:{reason}"))
+                }
                 _ => None,
             })
             .collect()
@@ -196,14 +231,31 @@ esac"#,
     );
     let config = env.write_config(&script);
     let id = env.add_approved(&[
-        "--title", "answer me", "--check-cmd", "test -f answered.txt", "--check-artifact", "report.md", "--workspace", &ws,
+        "--title",
+        "answer me",
+        "--check-cmd",
+        "test -f answered.txt",
+        "--check-artifact",
+        "report.md",
+        "--workspace",
+        &ws,
     ]);
-    let checks: Vec<Check> = env.task(id).acceptance.into_iter().map(|c| c.check).collect();
+    let checks: Vec<Check> = env
+        .task(id)
+        .acceptance
+        .into_iter()
+        .map(|c| c.check)
+        .collect();
     assert_eq!(
         checks,
         vec![
-            Check::Command { cmd: "test -f answered.txt".into(), expect_exit: 0 },
-            Check::ArtifactExists { name: "report.md".into() },
+            Check::Command {
+                cmd: "test -f answered.txt".into(),
+                expect_exit: 0
+            },
+            Check::ArtifactExists {
+                name: "report.md".into()
+            },
         ]
     );
 
@@ -218,10 +270,17 @@ esac"#,
 
     env.run_celeris(&config, Duration::from_secs(60));
     let t = env.task(id);
-    assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
+    assert_eq!(
+        (t.status, t.attempts),
+        (Status::Done, 0),
+        "{:?}",
+        env.events(id)
+    );
     let second = std::fs::read_to_string(Path::new(&ws).join("second-run.json")).unwrap();
     assert!(
-        second.contains(r#""answers":[{"question":"which version should I target?","answer":"target v2"}]"#),
+        second.contains(
+            r#""answers":[{"question":"which version should I target?","answer":"target v2"}]"#
+        ),
         "{second}"
     );
     assert_eq!(
@@ -243,24 +302,62 @@ esac"#,
 #[test]
 fn cancel_is_limited_to_non_terminal_tasks_and_failures_cancel_dependents() {
     let env = Env::new();
-    let script = env.write_script(r#"cat >/dev/null; echo '{"type":"done","summary":"claimed","evidence":[]}'"#);
+    let script = env.write_script(
+        r#"cat >/dev/null; echo '{"type":"done","summary":"claimed","evidence":[]}'"#,
+    );
     let config = env.write_config(&script);
     let ws_a = env.workspace("ws-a");
-    let a = env.add_approved(&["--title", "A", "--check-cmd", "false", "--max-retries", "0", "--workspace", &ws_a]);
+    let a = env.add_approved(&[
+        "--title",
+        "A",
+        "--check-cmd",
+        "false",
+        "--max-retries",
+        "0",
+        "--workspace",
+        &ws_a,
+    ]);
     let a_str = a.to_string();
     let ws_b = env.workspace("ws-b");
-    let b = env.add_approved(&["--title", "B", "--check-cmd", "true", "--depends-on", &a_str, "--workspace", &ws_b]);
+    let b = env.add_approved(&[
+        "--title",
+        "B",
+        "--check-cmd",
+        "true",
+        "--depends-on",
+        &a_str,
+        "--workspace",
+        &ws_b,
+    ]);
     let b_str = b.to_string();
     let ws_c = env.workspace("ws-c");
-    let c = env.add_approved(&["--title", "C", "--check-cmd", "true", "--depends-on", &b_str, "--workspace", &ws_c]);
+    let c = env.add_approved(&[
+        "--title",
+        "C",
+        "--check-cmd",
+        "true",
+        "--depends-on",
+        &b_str,
+        "--workspace",
+        &ws_c,
+    ]);
     let d = env.add(&["--title", "D", "--check-cmd", "true"]);
-    assert_eq!(env.task(d).workspace, WorkspaceSpec::Local { path: PathBuf::from(d.to_string()), mode: None });
+    assert_eq!(
+        env.task(d).workspace,
+        WorkspaceSpec::Local {
+            path: PathBuf::from(d.to_string()),
+            mode: None
+        }
+    );
 
     env.run_celeris(&config, Duration::from_secs(60));
     assert_eq!(env.task(a).status, Status::Failed);
     for id in [b, c] {
         assert_eq!(env.task(id).status, Status::Cancelled);
-        assert_eq!(env.transitions(id), vec!["Draft->Ready:accept", "Ready->Cancelled:dependency_failed"]);
+        assert_eq!(
+            env.transitions(id),
+            vec!["Draft->Ready:accept", "Ready->Cancelled:dependency_failed"]
+        );
     }
 
     let out = env.celerisctl(&["cancel", &d.to_string()]);
@@ -272,7 +369,17 @@ fn cancel_is_limited_to_non_terminal_tasks_and_failures_cancel_dependents() {
     assert!(stderr.contains("cannot be cancelled"), "{stderr}");
     assert_eq!(env.task(a).status, Status::Failed);
 
-    let (code, _, _) = env.celerisctl_raw(&["add", "--objective", "o", "--title", "E", "--check-cmd", "true", "--depends-on", &a_str]);
+    let (code, _, _) = env.celerisctl_raw(&[
+        "add",
+        "--objective",
+        "o",
+        "--title",
+        "E",
+        "--check-cmd",
+        "true",
+        "--depends-on",
+        &a_str,
+    ]);
     assert_eq!(code, Some(1), "depending on a failed task must be rejected");
     env.replay_is_consistent();
 }
@@ -289,13 +396,26 @@ echo '{"type":"done","summary":"ok","evidence":[]}'"#,
     let config = env.write_config(&script);
     let ws_h = env.workspace("ws-h");
     let h = env.add_approved(&[
-        "--title", "H", "--accept", "a human agrees", "--check-cmd", "test -f second", "--max-retries", "1", "--workspace", &ws_h,
+        "--title",
+        "H",
+        "--accept",
+        "a human agrees",
+        "--check-cmd",
+        "test -f second",
+        "--max-retries",
+        "1",
+        "--workspace",
+        &ws_h,
     ]);
 
     env.run_celeris(&config, Duration::from_secs(60));
     let first = env.approval_children(h);
     assert_eq!(first.len(), 1);
-    assert!(first[0].title.ends_with("(attempt 1)"), "{}", first[0].title);
+    assert!(
+        first[0].title.ends_with("(attempt 1)"),
+        "{}",
+        first[0].title
+    );
     assert_eq!(env.task(h).status, Status::Reviewing);
 
     env.celerisctl(&["approve", &first[0].id.to_string()]);
@@ -311,7 +431,14 @@ echo '{"type":"done","summary":"ok","evidence":[]}'"#,
     assert_eq!(env.task(h).status, Status::Done);
 
     let ws_o = env.workspace("ws-o");
-    let o = env.add_approved(&["--title", "O", "--accept", "someone signs off", "--workspace", &ws_o]);
+    let o = env.add_approved(&[
+        "--title",
+        "O",
+        "--accept",
+        "someone signs off",
+        "--workspace",
+        &ws_o,
+    ]);
     env.run_celeris(&config, Duration::from_secs(60));
     let pending = env.approval_children(o);
     assert_eq!(pending.len(), 1);
@@ -337,11 +464,25 @@ fi"#,
     );
     let config = env.write_config(&script);
     let ws = env.workspace("ws-p");
-    let id = env.add_approved(&["--title", "P", "--check-cmd", "test -f throttled-once", "--max-retries", "0", "--workspace", &ws]);
+    let id = env.add_approved(&[
+        "--title",
+        "P",
+        "--check-cmd",
+        "test -f throttled-once",
+        "--max-retries",
+        "0",
+        "--workspace",
+        &ws,
+    ]);
 
     env.run_celeris(&config, Duration::from_secs(60));
     let t = env.task(id);
-    assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
+    assert_eq!(
+        (t.status, t.attempts),
+        (Status::Done, 0),
+        "{:?}",
+        env.events(id)
+    );
     assert_eq!(
         env.transitions(id),
         vec![
@@ -370,11 +511,25 @@ echo '{"type":"error","message":"429 rate limited","retryable":true,"provider_fa
     );
     let config = env.write_config_with(&script, "max_requeues = 2");
     let ws = env.workspace("ws-limit");
-    let id = env.add_approved(&["--title", "L", "--check-cmd", "true", "--max-retries", "0", "--workspace", &ws]);
+    let id = env.add_approved(&[
+        "--title",
+        "L",
+        "--check-cmd",
+        "true",
+        "--max-retries",
+        "0",
+        "--workspace",
+        &ws,
+    ]);
 
     env.run_celeris(&config, Duration::from_secs(60));
     let t = env.task(id);
-    assert_eq!((t.status, t.attempts), (Status::Failed, 1), "{:?}", env.events(id));
+    assert_eq!(
+        (t.status, t.attempts),
+        (Status::Failed, 1),
+        "{:?}",
+        env.events(id)
+    );
     assert_eq!(
         env.transitions(id),
         vec![

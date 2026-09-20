@@ -62,13 +62,23 @@ async fn create_task_with_unknown_genre_is_422() {
     let env = env_with_coding_genre();
     let app = env.router();
 
-    let resp = send(&app, post_admin("/api/v1/tasks", &task_body(Some("literature"), None))).await;
+    let resp = send(
+        &app,
+        post_admin("/api/v1/tasks", &task_body(Some("literature"), None)),
+    )
+    .await;
     let problem = assert_problem(&resp, 422, "validation");
     assert!(
-        problem["detail"].as_str().expect("detail").contains("literature"),
+        problem["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("literature"),
         "{problem}"
     );
-    assert!(env.store.list(None).expect("list").is_empty(), "nothing must be inserted");
+    assert!(
+        env.store.list(None).expect("list").is_empty(),
+        "nothing must be inserted"
+    );
 }
 
 /// 受け入れ 1: `genre` はあるが `role` がその分野の `roles` に無ければ 422。
@@ -77,13 +87,26 @@ async fn create_task_with_role_not_in_genre_is_422() {
     let env = env_with_coding_genre();
     let app = env.router();
 
-    let resp = send(&app, post_admin("/api/v1/tasks", &task_body(Some("coding"), Some("literature-scout")))).await;
+    let resp = send(
+        &app,
+        post_admin(
+            "/api/v1/tasks",
+            &task_body(Some("coding"), Some("literature-scout")),
+        ),
+    )
+    .await;
     let problem = assert_problem(&resp, 422, "validation");
     assert!(
-        problem["detail"].as_str().expect("detail").contains("literature-scout"),
+        problem["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("literature-scout"),
         "{problem}"
     );
-    assert!(env.store.list(None).expect("list").is_empty(), "nothing must be inserted");
+    assert!(
+        env.store.list(None).expect("list").is_empty(),
+        "nothing must be inserted"
+    );
 }
 
 /// 受け入れ 1/2: 有効な `genre` は 201 になり、分野の `default_role` の既定（役割は付かない）が効く。
@@ -92,14 +115,27 @@ async fn create_task_with_valid_genre_returns_201_and_applies_genre_defaults() {
     let env = env_with_coding_genre();
     let app = env.router();
 
-    let resp = send(&app, post_admin("/api/v1/tasks", &task_body(Some("coding"), None))).await;
+    let resp = send(
+        &app,
+        post_admin("/api/v1/tasks", &task_body(Some("coding"), None)),
+    )
+    .await;
     assert_eq!(resp.status, 201, "{}", resp.text());
     let task = resp.json();
     assert_eq!(task["genre"], "coding");
-    assert!(task.get("role").is_none(), "genre alone must not set role: {task}");
+    assert!(
+        task.get("role").is_none(),
+        "genre alone must not set role: {task}"
+    );
     // `coding` の `default_role` は `implementer`（tier=cheap, adapter=fake, max_wall_secs=900）。
-    assert_eq!(task["worker_hint"], json!({"tier": "cheap", "adapter": "fake"}));
-    assert_eq!(task["budget"], json!({"max_turns": 10, "max_wall_secs": 900, "max_retries": 2}));
+    assert_eq!(
+        task["worker_hint"],
+        json!({"tier": "cheap", "adapter": "fake"})
+    );
+    assert_eq!(
+        task["budget"],
+        json!({"max_turns": 10, "max_wall_secs": 900, "max_retries": 2})
+    );
 
     let id = task["id"].as_str().expect("id").to_string();
     let resp = send(&app, get_admin(&format!("/api/v1/tasks/{id}"))).await;
@@ -112,7 +148,11 @@ async fn create_task_with_genre_and_matching_role_returns_201() {
     let env = env_with_coding_genre();
     let app = env.router();
 
-    let resp = send(&app, post_admin("/api/v1/tasks", &task_body(Some("coding"), Some("lead")))).await;
+    let resp = send(
+        &app,
+        post_admin("/api/v1/tasks", &task_body(Some("coding"), Some("lead"))),
+    )
+    .await;
     assert_eq!(resp.status, 201, "{}", resp.text());
     let task = resp.json();
     assert_eq!(task["genre"], "coding");
@@ -125,13 +165,25 @@ async fn list_tasks_filters_by_genre() {
     let env = env_with_coding_genre();
     let app = env.router();
 
-    let coding = send(&app, post_admin("/api/v1/tasks", &task_body(Some("coding"), None))).await.json();
-    let plain = send(&app, post_admin("/api/v1/tasks", &task_body(None, None))).await.json();
+    let coding = send(
+        &app,
+        post_admin("/api/v1/tasks", &task_body(Some("coding"), None)),
+    )
+    .await
+    .json();
+    let plain = send(&app, post_admin("/api/v1/tasks", &task_body(None, None)))
+        .await
+        .json();
 
     let resp = send(&app, get_admin("/api/v1/tasks?genre=coding")).await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     let list = resp.json();
-    let ids: Vec<&str> = list["items"].as_array().expect("items").iter().map(|t| t["id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = list["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
     assert_eq!(ids, vec![coding["id"].as_str().unwrap()]);
     assert!(!ids.contains(&plain["id"].as_str().unwrap()));
 }

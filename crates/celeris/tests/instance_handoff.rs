@@ -15,17 +15,16 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use task_core::{
-    Budget, Check, Criterion, Event, InstanceRole, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier,
-    WorkerHint, WorkspaceSpec,
-};
 use celeris::{Config, Exit, RunOptions};
+use task_core::{
+    Budget, Check, Criterion, Event, InstanceRole, SqliteStore, Status, Task, TaskId, TaskKind,
+    TaskStore, Tier, WorkerHint, WorkspaceSpec,
+};
 use time::OffsetDateTime;
 
 /// 偽のワーカー: 2 秒眠ってから `done` を 1 行返す（引き継ぎの間ずっと走っている run を作るため）。
 /// TOML には**リテラル文字列**（`'...'`）として書くので、ここの `\"` はそのまま `sh` に渡る。
-const SLOW_FAKE: &str =
-    r#"cat >/dev/null; sleep 2; printf "{\"type\":\"done\",\"summary\":\"fake\",\"evidence\":[]}\n""#;
+const SLOW_FAKE: &str = r#"cat >/dev/null; sleep 2; printf "{\"type\":\"done\",\"summary\":\"fake\",\"evidence\":[]}\n""#;
 
 struct Env {
     _dir: tempfile::TempDir,
@@ -80,7 +79,12 @@ drain_timeout_secs = 60
         )
         .unwrap_or_else(|e| panic!("config: {e}"));
         let db = root.join("celeris.sqlite3");
-        Self { _dir: dir, root, config_path, db }
+        Self {
+            _dir: dir,
+            root,
+            config_path,
+            db,
+        }
     }
 
     fn config(&self) -> Config {
@@ -108,6 +112,8 @@ drain_timeout_secs = 60
         std::fs::create_dir_all(&ws).unwrap_or_else(|e| panic!("ws: {e}"));
         let now = OffsetDateTime::now_utc();
         let task = Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -116,15 +122,28 @@ drain_timeout_secs = 60
             objective: "phase 47 handoff".into(),
             acceptance: vec![Criterion {
                 text: "true".into(),
-                check: Check::Command { cmd: "true".into(), expect_exit: 0 },
+                check: Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
             }],
             inputs: vec![],
             depends_on: vec![],
             status: Status::Ready,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: adapter.map(str::to_string) },
-            workspace: WorkspaceSpec::Local { path: ws, mode: None },
-            budget: Budget { max_turns: 4, max_wall_secs: 60, max_retries: 0 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: adapter.map(str::to_string),
+            },
+            workspace: WorkspaceSpec::Local {
+                path: ws,
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 4,
+                max_wall_secs: 60,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -140,7 +159,9 @@ drain_timeout_secs = 60
             category: Default::default(),
         };
         let store = self.store();
-        store.insert(&task).unwrap_or_else(|e| panic!("insert: {e}"));
+        store
+            .insert(&task)
+            .unwrap_or_else(|e| panic!("insert: {e}"));
         task.id
     }
 }
@@ -215,11 +236,15 @@ async fn a_newer_release_takes_over_while_the_old_one_finishes_its_run() {
 
     // (a) 新は standby → 旧が draining → 新が active。
     assert!(
-        wait_until(Duration::from_secs(10), || role_of(&store, "old") == Some(InstanceRole::Draining)).await,
+        wait_until(Duration::from_secs(10), || role_of(&store, "old")
+            == Some(InstanceRole::Draining))
+        .await,
         "旧が draining にならない"
     );
     assert!(
-        wait_until(Duration::from_secs(10), || role_of(&store, "new") == Some(InstanceRole::Active)).await,
+        wait_until(Duration::from_secs(10), || role_of(&store, "new")
+            == Some(InstanceRole::Active))
+        .await,
         "新が active にならない"
     );
 
@@ -245,14 +270,25 @@ async fn a_newer_release_takes_over_while_the_old_one_finishes_its_run() {
         .unwrap_or_else(|e| panic!("events: {e}"))
         .into_iter()
         .filter_map(|(_, e)| match e {
-            Event::WorkerFinished { run_id, outcome, role: None, .. } => Some((run_id, outcome)),
+            Event::WorkerFinished {
+                run_id,
+                outcome,
+                role: None,
+                ..
+            } => Some((run_id, outcome)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(finished.len(), 1, "{finished:?}");
-    assert_eq!(finished[0].0, lease_before.worker_run_id, "旧が起こした run が旧の手で終わっている");
+    assert_eq!(
+        finished[0].0, lease_before.worker_run_id,
+        "旧が起こした run が旧の手で終わっている"
+    );
     assert!(finished[0].1.starts_with("done"), "{finished:?}");
-    let status = store.get(task_id).unwrap_or_else(|e| panic!("get: {e}")).map(|t| t.status);
+    let status = store
+        .get(task_id)
+        .unwrap_or_else(|e| panic!("get: {e}"))
+        .map(|t| t.status);
     assert_eq!(status, Some(Status::Done));
 }
 
@@ -285,25 +321,43 @@ async fn verify_mode_never_dispatches_and_never_touches_daemon_instances() {
 
     // (b) 煙試験ではないタスクは 1 ミリも動かない。
     assert_eq!(
-        store.get(task_id).unwrap_or_else(|e| panic!("get: {e}")).map(|t| t.status),
+        store
+            .get(task_id)
+            .unwrap_or_else(|e| panic!("get: {e}"))
+            .map(|t| t.status),
         Some(Status::Ready),
         "verify は `smoke` 以外の ready なタスクに触れない"
     );
-    assert_eq!(worker_starts(&store, task_id), 0, "verify は `smoke` 以外のワーカーを起こさない");
+    assert_eq!(
+        worker_starts(&store, task_id),
+        0,
+        "verify は `smoke` 以外のワーカーを起こさない"
+    );
 
     // (a) 煙試験は dispatch → ワーカー → レビュー → 終端まで通る。
     assert_eq!(
-        store.get(smoke_id).unwrap_or_else(|e| panic!("get: {e}")).map(|t| t.status),
+        store
+            .get(smoke_id)
+            .unwrap_or_else(|e| panic!("get: {e}"))
+            .map(|t| t.status),
         Some(Status::Done),
         "verify は `smoke` のタスクを done まで流す（ADR-0041 D5）"
     );
-    assert_eq!(worker_starts(&store, smoke_id), 1, "煙試験のワーカーは 1 回だけ起きる");
+    assert_eq!(
+        worker_starts(&store, smoke_id),
+        1,
+        "煙試験のワーカーは 1 回だけ起きる"
+    );
     let finished: Vec<String> = store
         .events_for(smoke_id)
         .unwrap_or_else(|e| panic!("events: {e}"))
         .into_iter()
         .filter_map(|(_, e)| match e {
-            Event::WorkerFinished { outcome, role: None, .. } => Some(outcome),
+            Event::WorkerFinished {
+                outcome,
+                role: None,
+                ..
+            } => Some(outcome),
             _ => None,
         })
         .collect();
@@ -312,11 +366,19 @@ async fn verify_mode_never_dispatches_and_never_touches_daemon_instances() {
 
     // (c) それでも `daemon_instances` には 1 行も書かない。
     assert!(
-        store.instance_list().unwrap_or_else(|e| panic!("instances: {e}")).is_empty(),
+        store
+            .instance_list()
+            .unwrap_or_else(|e| panic!("instances: {e}"))
+            .is_empty(),
         "verify は daemon_instances に行を書かない"
     );
     // マイグレーションは適用されている（`SCHEMA_VERSION` まで上がっている）。
-    assert_eq!(store.schema_version().unwrap_or_else(|e| panic!("schema: {e}")), task_core::SCHEMA_VERSION);
+    assert_eq!(
+        store
+            .schema_version()
+            .unwrap_or_else(|e| panic!("schema: {e}")),
+        task_core::SCHEMA_VERSION
+    );
 }
 
 /// ADR-0041 D5 (d): 設定ファイルに `smoke` という名前の役割・分野・プロバイダがあっても、verify モードの
@@ -345,28 +407,48 @@ roles = ["smoke"]
 
     // 通常運転では設定ファイルのとおり（組み込みは足さない）。
     let plain = env.config();
-    let role = plain.role_specs().into_iter().find(|r| r.id == "smoke").unwrap_or_else(|| panic!("role"));
+    let role = plain
+        .role_specs()
+        .into_iter()
+        .find(|r| r.id == "smoke")
+        .unwrap_or_else(|| panic!("role"));
     assert_eq!(role.adapter.as_deref(), Some("claude-code"));
-    let genre = plain.genre_specs().into_iter().find(|g| g.id == "smoke").unwrap_or_else(|| panic!("genre"));
+    let genre = plain
+        .genre_specs()
+        .into_iter()
+        .find(|g| g.id == "smoke")
+        .unwrap_or_else(|| panic!("genre"));
     assert_eq!(genre.description, "設定ファイルの方の smoke");
 
     // verify モードでは組み込みが勝つ。
     let mut verify = env.config();
     verify.apply_verify_smoke();
 
-    let roles: Vec<_> = verify.role_specs().into_iter().filter(|r| r.id == "smoke").collect();
+    let roles: Vec<_> = verify
+        .role_specs()
+        .into_iter()
+        .filter(|r| r.id == "smoke")
+        .collect();
     assert_eq!(roles.len(), 1, "`smoke` の役割は 1 つだけ");
     assert_eq!(roles[0].adapter.as_deref(), Some("fake"));
     assert_eq!(roles[0].tier, Some(Tier::Standard));
     assert_eq!(roles[0].max_turns, Some(1));
 
-    let genres: Vec<_> = verify.genre_specs().into_iter().filter(|g| g.id == "smoke").collect();
+    let genres: Vec<_> = verify
+        .genre_specs()
+        .into_iter()
+        .filter(|g| g.id == "smoke")
+        .collect();
     assert_eq!(genres.len(), 1, "`smoke` の分野は 1 つだけ");
     assert_eq!(genres[0].description, "検証の煙試験");
     assert_eq!(genres[0].default_role.as_deref(), Some("smoke"));
     assert_eq!(genres[0].roles, vec!["smoke".to_string()]);
 
-    let providers: Vec<_> = verify.provider_specs().into_iter().filter(|p| p.id == "smoke").collect();
+    let providers: Vec<_> = verify
+        .provider_specs()
+        .into_iter()
+        .filter(|p| p.id == "smoke")
+        .collect();
     assert_eq!(providers.len(), 1, "`smoke` のプロバイダは 1 つだけ");
     assert_eq!(providers[0].adapter, "fake");
     assert_eq!(providers[0].tiers, vec![Tier::Standard]);
@@ -391,9 +473,18 @@ tiers = ["standard"]
 "#,
     );
     let plain = env.config();
-    assert!(plain.role_specs().iter().all(|r| r.id != "smoke"), "normal は `smoke` の役割を足さない");
-    assert!(plain.genre_specs().iter().all(|g| g.id != "smoke"), "normal は `smoke` の分野を足さない");
-    assert!(plain.provider_specs().iter().all(|p| p.id != "smoke"), "normal は `smoke` のプロバイダを足さない");
+    assert!(
+        plain.role_specs().iter().all(|r| r.id != "smoke"),
+        "normal は `smoke` の役割を足さない"
+    );
+    assert!(
+        plain.genre_specs().iter().all(|g| g.id != "smoke"),
+        "normal は `smoke` の分野を足さない"
+    );
+    assert!(
+        plain.provider_specs().iter().all(|p| p.id != "smoke"),
+        "normal は `smoke` のプロバイダを足さない"
+    );
 
     let smoke_id = env.smoke_task("smoke");
     let store = env.store();
@@ -411,7 +502,10 @@ tiers = ["standard"]
     .unwrap_or_else(|e| panic!("run: {e}"));
     assert_eq!(exit, Exit::MaxTicks);
     assert_eq!(
-        store.get(smoke_id).unwrap_or_else(|e| panic!("get: {e}")).map(|t| t.status),
+        store
+            .get(smoke_id)
+            .unwrap_or_else(|e| panic!("get: {e}"))
+            .map(|t| t.status),
         Some(Status::Ready),
         "normal モードには `fake` のプロバイダが無いので `smoke` は行き先が無い"
     );
@@ -431,12 +525,18 @@ tiers = ["standard"]
     .unwrap_or_else(|e| panic!("run: {e}"));
     assert!(matches!(exit, Exit::Idle | Exit::MaxTicks), "{exit:?}");
     assert_eq!(
-        store.get(smoke_id).unwrap_or_else(|e| panic!("get: {e}")).map(|t| t.status),
+        store
+            .get(smoke_id)
+            .unwrap_or_else(|e| panic!("get: {e}"))
+            .map(|t| t.status),
         Some(Status::Done),
         "verify は組み込みの `smoke` プロバイダ（偽のアダプタ）で煙試験を流す"
     );
     assert!(
-        store.instance_list().unwrap_or_else(|e| panic!("instances: {e}")).is_empty(),
+        store
+            .instance_list()
+            .unwrap_or_else(|e| panic!("instances: {e}"))
+            .is_empty(),
         "verify は daemon_instances に行を書かない"
     );
 }
@@ -465,7 +565,9 @@ async fn a_stale_heartbeat_promotes_the_standby() {
     let new = tokio::spawn(celeris::run(env.config(), options("fresh", 200, false)));
     // 最初は standby（`ghost` の heartbeat がまだ新しい）。
     assert!(
-        wait_until(Duration::from_secs(5), || role_of(&store, "fresh") == Some(InstanceRole::Standby)).await,
+        wait_until(Duration::from_secs(5), || role_of(&store, "fresh")
+            == Some(InstanceRole::Standby))
+        .await,
         "新しいインスタンスが standby にならない"
     );
     assert!(
@@ -480,7 +582,9 @@ async fn a_stale_heartbeat_promotes_the_standby() {
     );
     // `ghost` は heartbeat を打たないので、3 × tick + lease_grace（= 4.3 秒）で古くなる。
     assert!(
-        wait_until(Duration::from_secs(15), || role_of(&store, "fresh") == Some(InstanceRole::Active)).await,
+        wait_until(Duration::from_secs(15), || role_of(&store, "fresh")
+            == Some(InstanceRole::Active))
+        .await,
         "heartbeat が止まった active を置き換えられない"
     );
     assert!(
@@ -526,9 +630,17 @@ fn starting_the_same_release_twice_exits_three() {
         ])
         .output()
         .unwrap_or_else(|e| panic!("spawn: {e}"));
-    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(
-        store.instance_list().unwrap_or_else(|e| panic!("instances: {e}")).len(),
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        store
+            .instance_list()
+            .unwrap_or_else(|e| panic!("instances: {e}"))
+            .len(),
         1,
         "二重起動は行を増やさない"
     );
@@ -551,16 +663,32 @@ fn the_cli_overrides_replace_the_config_values() {
     });
     assert_eq!(config.db, env.root.join("staging.sqlite3"));
     assert_eq!(config.workspace_root, env.root.join("staging-ws"));
-    assert_eq!(config.api.listen.map(|a| a.to_string()).as_deref(), Some("127.0.0.1:7711"));
+    assert_eq!(
+        config.api.listen.map(|a| a.to_string()).as_deref(),
+        Some("127.0.0.1:7711")
+    );
     assert_eq!(config.api.token_file, Some(env.root.join("api.token")));
-    assert_eq!(config.api.read_token().unwrap_or_else(|e| panic!("{e}")).as_deref(), Some("s3cret"));
+    assert_eq!(
+        config
+            .api
+            .read_token()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .as_deref(),
+        Some("s3cret")
+    );
     // 絶対パスはそのまま。
     let elsewhere = Path::new("/tmp/celeris-absolute.sqlite3");
-    config.apply_overrides(&celeris::Overrides { db: Some(elsewhere.to_path_buf()), ..Default::default() });
+    config.apply_overrides(&celeris::Overrides {
+        db: Some(elsewhere.to_path_buf()),
+        ..Default::default()
+    });
     assert_eq!(config.db, elsewhere);
     // 既定は `[handoff] drain_timeout_secs = 3600`（この設定では 60 に上書きしてある）。
     assert_eq!(config.drain_timeout(), Duration::from_secs(60));
-    assert_eq!(celeris::config::HandoffConfig::default().drain_timeout_secs, 3600);
+    assert_eq!(
+        celeris::config::HandoffConfig::default().drain_timeout_secs,
+        3600
+    );
 }
 
 /// (g) `SO_REUSEPORT`: 同じポートに 2 つの listener が bind できる（新旧が並ぶ間、カーネルが振り分ける）。
@@ -569,8 +697,12 @@ async fn two_listeners_bind_the_same_port_with_so_reuseport() {
     let first = celeris::bind_reuseport("127.0.0.1:0".parse().unwrap_or_else(|e| panic!("{e}")))
         .unwrap_or_else(|e| panic!("first bind: {e}"));
     let addr = first.local_addr().unwrap_or_else(|e| panic!("addr: {e}"));
-    let second = celeris::bind_reuseport(addr).unwrap_or_else(|e| panic!("second bind on {addr}: {e}"));
-    assert_eq!(second.local_addr().unwrap_or_else(|e| panic!("addr: {e}")), addr);
+    let second =
+        celeris::bind_reuseport(addr).unwrap_or_else(|e| panic!("second bind on {addr}: {e}"));
+    assert_eq!(
+        second.local_addr().unwrap_or_else(|e| panic!("addr: {e}")),
+        addr
+    );
     // 従来の bind は同じポートを取れない（`SO_REUSEPORT` があってこそ並べる）。
     assert!(
         tokio::net::TcpListener::bind(addr).await.is_err(),

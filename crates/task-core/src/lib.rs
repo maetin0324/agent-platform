@@ -7,6 +7,8 @@ pub mod artifacts;
 /// ADR-0044 D2（Phase 53）: タスク単位のコメント。
 pub mod comment;
 pub mod delegate;
+/// ADR-0046 D3（Phase 59）: ハーネス = 実行契約（`[[harnesses]]`。旧 `[[genres]]` + `[[roles]]`）。
+pub mod harness;
 /// ADR-0040 D4（Phase 47）: celeris のインスタンスの役割（`daemon_instances`）。
 pub mod instance;
 /// ADR-0043 D5（Phase 54）: 変更の取り込みの記録（`task_integrations`）。
@@ -18,6 +20,8 @@ pub mod model;
 pub mod notify;
 pub mod org;
 pub mod plan;
+/// ADR-0046 D1（Phase 59）: 組織 = Agent Profile の継承木。
+pub mod profile;
 pub mod report;
 /// ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ（`project_repos`）とタスクの `repos`。
 pub mod repos;
@@ -27,52 +31,71 @@ pub mod transition;
 pub mod workspace_config;
 
 pub use accounts::{AccountAdapter, RateLimitObservation, RateWindow};
-pub use artifacts::{ARTIFACTS_DIR_NAME, SHARED_ARTIFACTS_PREFIX, artifacts_dir_for, artifacts_rel_for, owns_workspace, rel_from};
 pub use approval::{Approval, ApprovalId, ApprovalStore, Decision, StandingRule, StandingRuleId};
-pub use delegate::{
-    DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, WorkspaceContext,
-    materialize_delegated, validate_each,
+pub use artifacts::{
+    ARTIFACTS_DIR_NAME, SHARED_ARTIFACTS_PREFIX, artifacts_dir_for, artifacts_rel_for,
+    owns_workspace, rel_from,
 };
 pub use comment::{
     CommentAuthorKind, CommentId, MAX_COMMENT_CHARS, PREAMBLE_COMMENTS, TaskComment,
 };
+pub use delegate::{
+    DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, WorkspaceContext,
+    materialize_delegated, validate_each,
+};
 pub use instance::{DaemonInstance, DaemonMode, InstanceRole, SharedRole};
+// ---- ADR-0046 D3（Phase 59）: ハーネスのレジストリ ----
+pub use harness::{
+    BUILTIN_CONVERSATION, BUILTIN_HARNESSES, BUILTIN_PLAN, BUILTIN_REVIEWER, BUILTIN_SMOKE,
+    HarnessBudget, HarnessRegistry, HarnessSpec, builtin_harnesses, known_harness_ids,
+};
+// ---- ADR-0046 D1（Phase 59）: profile の継承木 ----
+// `KnowledgeMount` は ADR-0047（Phase 61）の型をそのまま使う（Phase 59 追記）。
+pub use profile::resolve as resolve_profile;
+pub use profile::{
+    CLUSTER_TOOL_PREFIX, COS_ID, COS_NAME, EffectiveProfile, HarnessPrefs, ModelPrefs, Permissions,
+    Profile, ProfileError, ProfileRun, ReviewPrefs, TOOL_VOCABULARY, ancestry, is_known_tool,
+    is_valid_skill, validate_profile,
+};
 // ---- ADR-0047（Phase 61）: 知識ベース ----
 pub use knowledge::{
     Confidence, Index as KnowledgeIndex, IndexItem as KnowledgeItem, KnowledgeMount, MountKind,
-    SearchHit as KnowledgeHit,
+    SearchHit as KnowledgeHit, merge_mounts,
 };
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use integrations::{IntegrationId, IntegrationMethod, IntegrationState, TaskIntegration};
 pub use message::{
-    CONVERSATION_GENRE, Message, MessageId, MessageRole, conversation_origin, conversation_title, failure_reply,
-    is_conversation, is_milestone_review, milestone_review_of,
+    CONVERSATION_GENRE, Message, MessageId, MessageRole, conversation_origin, conversation_title,
+    failure_reply, is_conversation, is_milestone_review, milestone_review_of,
 };
 pub use model::{
-    ArtifactRef, Budget, Check, Criterion, DEFAULT_PRIORITY, Event, GenreSpec, HARNESS_ADAPTERS, Lease, MAX_LABELS,
-    PRIORITY_LABELS, PROGRESS_DETAIL_MAX_BYTES, ProgressFields, ProgressKind, RoleSpec, RunRole, Status, Task,
-    TaskCategory, TaskId, TaskKind, Tier, Usage, WorkerHint,
-    WorkspaceMode, WorkspaceSpec, artifact_entry_description, artifact_entry_name, expand_home, home_dir,
-    is_valid_label, normalize_labels, priority_from_label, priority_label,
+    ArtifactRef, Budget, Check, Criterion, DEFAULT_PRIORITY, Event, GenreSpec, HARNESS_ADAPTERS,
+    Lease, MAX_LABELS, MAX_SKILLS, PRIORITY_LABELS, PROGRESS_DETAIL_MAX_BYTES, ProgressFields,
+    ProgressKind, RoleSpec, RunRole, Status, Task, TaskCategory, TaskId, TaskKind, TaskMode, Tier,
+    Usage, WorkerHint, WorkspaceMode, WorkspaceSpec, artifact_entry_description,
+    artifact_entry_name, expand_home, home_dir, is_valid_label, normalize_labels, normalize_skills,
+    priority_from_label, priority_label,
 };
 // ---- ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ ----
-pub use repos::{
-    ProjectRepo, RepoError, RepoId, RepoKind, RepoRef, RepoRun, RepoSync, default_repo_name, resolve_task_repos,
-    valid_repo_name,
-};
 pub use notify::{
     DEFAULT_WEBHOOK_SECRET_ID, MAX_NOTIFY_ATTEMPTS, Notification, NotificationId, NotificationKind,
     NotificationStore,
 };
 pub use org::{
-    Milestone, MilestoneDecision, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode, Project, ProjectId,
-    ProjectStatus, assignee_defaults, department_of, valid_org_id, validate_upsert,
-};
-pub use report::{
-    COMPACTION_ROLE, Report, ReportFilter, ReportId, ReportKind, ReportStore, ReportsLive, support_kind,
+    Milestone, MilestoneDecision, MilestoneId, MilestoneStatus, OrgError, OrgKind, OrgNode,
+    Project, ProjectId, ProjectStatus, assignee_defaults, department_of, valid_org_id,
+    validate_upsert,
 };
 pub use plan::{
     MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput, fix_harness_artifacts,
+};
+pub use report::{
+    COMPACTION_ROLE, Report, ReportFilter, ReportId, ReportKind, ReportStore, ReportsLive,
+    support_kind,
+};
+pub use repos::{
+    ProjectRepo, RepoError, RepoId, RepoKind, RepoRef, RepoRun, RepoSync, default_repo_name,
+    resolve_task_repos, valid_repo_name,
 };
 pub use store::{
     EventRow, ListFilter, ListOrder, Page, SCHEMA_VERSION, SqliteStore, StoreError, StoreOptions,

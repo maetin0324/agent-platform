@@ -16,11 +16,18 @@ use std::path::{Path, PathBuf};
 use task_core::{Status, TaskId, TaskKind};
 
 fn g(path: &str) -> axum::http::Request<axum::body::Body> {
-    get_with(path, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    get_with(
+        path,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn p(path: &str, body: &Value) -> axum::http::Request<axum::body::Body> {
-    post_json_with(path, body, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    post_json_with(
+        path,
+        body,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 /// `git -C <dir> <args...>`（テストの下ごしらえ専用）。
@@ -31,7 +38,11 @@ fn git(dir: &Path, args: &[&str]) {
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn git_out(dir: &Path, args: &[&str]) -> String {
@@ -48,7 +59,12 @@ fn branch_exists(repo: &Path, branch: &str) -> bool {
     std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
         .output()
         .is_ok_and(|o| o.status.success())
 }
@@ -100,7 +116,10 @@ fn env_with_gh() -> (TestEnv, PathBuf) {
     let dir = bin.keep();
     let env = TestEnv::with(EnvOptions {
         token: Some(TOKEN.into()),
-        github: task_api::GithubSettings { gh, merge_method: "merge".into() },
+        github: task_api::GithubSettings {
+            gh,
+            merge_method: "merge".into(),
+        },
         ..EnvOptions::default()
     });
     task_ops::changes::forget_gh_auth();
@@ -109,7 +128,10 @@ fn env_with_gh() -> (TestEnv, PathBuf) {
 
 /// git のリポジトリ（`main` に 1 コミット）と、そのタスクの worktree（ブランチに 1 コミット）と
 /// 目印（`worktree.json`）を用意する。
-fn seed_git_task(env: &TestEnv, project_id: Option<task_core::ProjectId>) -> (TaskId, PathBuf, PathBuf) {
+fn seed_git_task(
+    env: &TestEnv,
+    project_id: Option<task_core::ProjectId>,
+) -> (TaskId, PathBuf, PathBuf) {
     let mut task = new_task(TaskKind::Execute, Status::Done);
     task.project_id = project_id;
     env.seed(&task);
@@ -125,7 +147,17 @@ fn seed_git_task(env: &TestEnv, project_id: Option<task_core::ProjectId>) -> (Ta
     let task_dir = env.workspace(&task);
     let tree = task_dir.join("repos").join("code");
     let branch = format!("celeris/{}", task.id);
-    git(&repo, &["worktree", "add", "-b", &branch, &tree.to_string_lossy(), "main"]);
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            &tree.to_string_lossy(),
+            "main",
+        ],
+    );
     git(&tree, &["config", "user.email", "t@example.com"]);
     git(&tree, &["config", "user.name", "t"]);
     std::fs::write(tree.join("src.txt"), b"a\nb\n").expect("write");
@@ -154,7 +186,11 @@ fn seed_git_task(env: &TestEnv, project_id: Option<task_core::ProjectId>) -> (Ta
                 name: "data".into(),
                 kind: "dir".into(),
                 source: env.dir.path().join("data").to_string_lossy().into_owned(),
-                dir: task_dir.join("repos").join("data").to_string_lossy().into_owned(),
+                dir: task_dir
+                    .join("repos")
+                    .join("data")
+                    .to_string_lossy()
+                    .into_owned(),
                 branch: None,
                 base: None,
                 base_kind: None,
@@ -202,25 +238,49 @@ async fn the_changes_list_every_git_repo_and_serve_one_file_diff() {
     // 1 ファイルの diff。
     let diff = send(
         &app,
-        g(&format!("/api/v1/tasks/{task_id}/changes/code/diff?path=src.txt")),
+        g(&format!(
+            "/api/v1/tasks/{task_id}/changes/code/diff?path=src.txt"
+        )),
     )
     .await;
     assert_eq!(diff.status.as_u16(), 200, "{}", diff.text());
-    assert!(diff.json()["diff"].as_str().is_some_and(|d| d.contains("+a")), "{}", diff.text());
+    assert!(
+        diff.json()["diff"]
+            .as_str()
+            .is_some_and(|d| d.contains("+a")),
+        "{}",
+        diff.text()
+    );
     assert_eq!(diff.json()["truncated"], false);
 
     // 境界と 404。
     assert_eq!(
-        send(&app, g(&format!("/api/v1/tasks/{task_id}/changes/code/diff"))).await.status.as_u16(),
+        send(
+            &app,
+            g(&format!("/api/v1/tasks/{task_id}/changes/code/diff"))
+        )
+        .await
+        .status
+        .as_u16(),
         400
     );
     assert_problem(
-        &send(&app, g(&format!("/api/v1/tasks/{task_id}/changes/code/diff?path=../x"))).await,
+        &send(
+            &app,
+            g(&format!(
+                "/api/v1/tasks/{task_id}/changes/code/diff?path=../x"
+            )),
+        )
+        .await,
         403,
         "path_forbidden",
     );
     assert_problem(
-        &send(&app, g(&format!("/api/v1/tasks/{task_id}/changes/nope/diff?path=a"))).await,
+        &send(
+            &app,
+            g(&format!("/api/v1/tasks/{task_id}/changes/nope/diff?path=a")),
+        )
+        .await,
         404,
         "file_not_found",
     );
@@ -274,18 +334,25 @@ async fn merging_fast_forwards_the_default_branch_and_records_the_integration() 
     assert_eq!(body["integration"]["repo"], "code");
     assert!(body["child_task_id"].is_null());
     assert!(
-        body["integration"]["detail"].as_str().is_some_and(|d| d.starts_with("見たよ / ")),
+        body["integration"]["detail"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("見たよ / ")),
         "{body}"
     );
 
     // `main` が進み、worktree もブランチも消えている。
     assert_ne!(git_out(&repo, &["rev-parse", "refs/heads/main"]), before);
-    assert!(repo.join("src.txt").is_file(), "人の作業ツリーも早送りされる");
+    assert!(
+        repo.join("src.txt").is_file(),
+        "人の作業ツリーも早送りされる"
+    );
     assert!(!tree.exists());
     assert!(!branch_exists(&repo, &format!("celeris/{task_id}")));
 
     // 取り込んだ後の `changes` は「もう無い」。記録は残る。
-    let after = send(&app, g(&format!("/api/v1/tasks/{task_id}/changes"))).await.json();
+    let after = send(&app, g(&format!("/api/v1/tasks/{task_id}/changes")))
+        .await
+        .json();
     assert_eq!(after["repos"][0]["missing"], true, "{after}");
     assert_eq!(after["repos"][0]["ahead"], 0);
     assert_eq!(after["repos"][0]["integration"]["state"], "done");
@@ -313,7 +380,9 @@ async fn merging_while_the_default_branch_is_being_edited_is_409() {
     assert_eq!(git_out(&repo, &["rev-parse", "refs/heads/main"]), before);
     assert!(tree.join("src.txt").is_file(), "worktree は残る");
     // 何も起きていないので記録も残さない。
-    let after = send(&app, g(&format!("/api/v1/tasks/{task_id}/changes"))).await.json();
+    let after = send(&app, g(&format!("/api/v1/tasks/{task_id}/changes")))
+        .await
+        .json();
     assert!(after["repos"][0]["integration"].is_null(), "{after}");
 }
 
@@ -343,7 +412,9 @@ async fn a_conflicting_merge_records_a_conflict_and_creates_the_child_task() {
     let body = resp.json();
     assert_eq!(body["integration"]["state"], "conflict");
     assert!(
-        body["integration"]["detail"].as_str().is_some_and(|d| d.contains("README.md")),
+        body["integration"]["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("README.md")),
         "{body}"
     );
     let child_id = body["child_task_id"].as_str().expect("child").to_string();
@@ -360,15 +431,22 @@ async fn a_conflicting_merge_records_a_conflict_and_creates_the_child_task() {
     assert_eq!(task["parent_id"], task_id.to_string());
     assert_eq!(task["status"], "ready");
     assert!(
-        task["title"].as_str().is_some_and(|t| t.starts_with("衝突の解消: ")),
+        task["title"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("衝突の解消: ")),
         "{task}"
     );
     assert_eq!(task["workspace"]["kind"], "local");
     assert_eq!(task["workspace"]["path"], tree.to_string_lossy().as_ref());
     assert_eq!(task["workspace"]["mode"], "shared");
-    assert!(task["repos"].as_array().is_none_or(|r| r.is_empty()), "{task}");
     assert!(
-        task["objective"].as_str().is_some_and(|o| o.contains("README.md")),
+        task["repos"].as_array().is_none_or(|r| r.is_empty()),
+        "{task}"
+    );
+    assert!(
+        task["objective"]
+            .as_str()
+            .is_some_and(|o| o.contains("README.md")),
         "{task}"
     );
     let checks: Vec<&str> = task["acceptance"]
@@ -435,7 +513,12 @@ async fn a_pull_request_is_pushed_created_refreshed_and_merged_with_a_fake_gh() 
     )
     .await;
     let problem = assert_problem(&no_origin, 409, "pr_unavailable");
-    assert!(problem["detail"].as_str().is_some_and(|d| d.contains("origin")), "{problem}");
+    assert!(
+        problem["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("origin")),
+        "{problem}"
+    );
 
     // ローカルの bare リポジトリを `origin` にする。
     let origin = env.dir.path().join("origin.git");
@@ -444,8 +527,15 @@ async fn a_pull_request_is_pushed_created_refreshed_and_merged_with_a_fake_gh() 
         .arg(&origin)
         .output()
         .expect("git init --bare");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    git(&repo, &["remote", "add", "origin", &origin.to_string_lossy()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    git(
+        &repo,
+        &["remote", "add", "origin", &origin.to_string_lossy()],
+    );
 
     let created = send(
         &app,
@@ -460,7 +550,10 @@ async fn a_pull_request_is_pushed_created_refreshed_and_merged_with_a_fake_gh() 
     assert_eq!(body["integration"]["method"], "pr");
     assert_eq!(body["integration"]["state"], "open");
     assert_eq!(body["integration"]["pr_number"], 42);
-    assert_eq!(body["integration"]["pr_url"], "https://github.com/o/r/pull/42");
+    assert_eq!(
+        body["integration"]["pr_url"],
+        "https://github.com/o/r/pull/42"
+    );
 
     // 本当に push された（bare リポジトリにブランチが立っている）。
     assert!(branch_exists(&origin, &branch), "push されていない");
@@ -469,7 +562,9 @@ async fn a_pull_request_is_pushed_created_refreshed_and_merged_with_a_fake_gh() 
     assert!(calls.contains("pr create --base main --head"), "{calls}");
 
     // 画面を開いたら同期する（まだ OPEN なので何も変わらない）。
-    let open = send(&app, g(&format!("/api/v1/tasks/{task_id}/changes"))).await.json();
+    let open = send(&app, g(&format!("/api/v1/tasks/{task_id}/changes")))
+        .await
+        .json();
     assert_eq!(open["repos"][0]["integration"]["state"], "open", "{open}");
     assert_eq!(open["gh"], true);
     assert_eq!(open["repos"][0]["origin"], true);
@@ -477,7 +572,10 @@ async fn a_pull_request_is_pushed_created_refreshed_and_merged_with_a_fake_gh() 
     // 「Celeris で merge」。
     let merged = send(
         &app,
-        p(&format!("/api/v1/tasks/{task_id}/changes/code/pr/merge"), &json!({})),
+        p(
+            &format!("/api/v1/tasks/{task_id}/changes/code/pr/merge"),
+            &json!({}),
+        ),
     )
     .await;
     assert_eq!(merged.status.as_u16(), 200, "{}", merged.text());
@@ -492,7 +590,10 @@ async fn a_pull_request_is_pushed_created_refreshed_and_merged_with_a_fake_gh() 
     // 2 回目は 409（もう開いていない）。
     let again = send(
         &app,
-        p(&format!("/api/v1/tasks/{task_id}/changes/code/pr/merge"), &json!({})),
+        p(
+            &format!("/api/v1/tasks/{task_id}/changes/code/pr/merge"),
+            &json!({}),
+        ),
     )
     .await;
     assert_problem(&again, 409, "pr_unavailable");
@@ -505,7 +606,10 @@ async fn the_project_page_lists_the_integrations_of_its_tasks() {
     let app = env.router();
     let project = send(
         &app,
-        p("/api/v1/projects", &json!({"title": "benchfs", "request": "測る"})),
+        p(
+            "/api/v1/projects",
+            &json!({"title": "benchfs", "request": "測る"}),
+        ),
     )
     .await;
     assert_eq!(project.status.as_u16(), 201, "{}", project.text());
@@ -513,13 +617,20 @@ async fn the_project_page_lists_the_integrations_of_its_tasks() {
     let parsed: task_core::ProjectId = project_id.parse().expect("project id");
 
     // 空でも 200。
-    let empty = send(&app, g(&format!("/api/v1/projects/{project_id}/integrations"))).await;
+    let empty = send(
+        &app,
+        g(&format!("/api/v1/projects/{project_id}/integrations")),
+    )
+    .await;
     assert_eq!(empty.status.as_u16(), 200, "{}", empty.text());
     assert_eq!(empty.json()["items"].as_array().expect("items").len(), 0);
     assert_problem(
         &send(
             &app,
-            g(&format!("/api/v1/projects/{}/integrations", task_core::ProjectId::new())),
+            g(&format!(
+                "/api/v1/projects/{}/integrations",
+                task_core::ProjectId::new()
+            )),
         )
         .await,
         404,
@@ -545,10 +656,19 @@ async fn the_project_page_lists_the_integrations_of_its_tasks() {
     )
     .await;
 
-    let list = send(&app, g(&format!("/api/v1/projects/{project_id}/integrations"))).await;
+    let list = send(
+        &app,
+        g(&format!("/api/v1/projects/{project_id}/integrations")),
+    )
+    .await;
     assert_eq!(list.status.as_u16(), 200, "{}", list.text());
     let items = list.json()["items"].as_array().expect("items").clone();
-    assert_eq!(items.len(), 1, "タスク × リポジトリごとに最新の 1 件: {}", list.text());
+    assert_eq!(
+        items.len(),
+        1,
+        "タスク × リポジトリごとに最新の 1 件: {}",
+        list.text()
+    );
     assert_eq!(items[0]["integration"]["method"], "discard");
     assert_eq!(items[0]["integration"]["repo"], "code");
     assert_eq!(items[0]["task_title"], "Execute task");

@@ -68,7 +68,9 @@ pub const HEADLINE_MAX_CHARS: usize = 120;
 pub const ERROR_HEADLINE_MESSAGE_CHARS: usize = 80;
 
 /// 報告の一意識別子（ULID）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct ReportId(#[schemars(with = "String")] pub Ulid);
 
 impl ReportId {
@@ -158,7 +160,11 @@ pub struct Report {
     /// 元になった報告の id（まとめなら子の報告、悪い知らせの複製なら 1 段下の報告）。
     #[serde(default)]
     pub sources: Vec<ReportId>,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     #[schemars(with = "Option<String>")]
     pub read_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
@@ -220,7 +226,10 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 
 /// 最初の非空行（見出しに使う）。
 pub fn first_line(s: &str) -> &str {
-    s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
 }
 
 /// 組織の木の深さ（秘書 = 0）。知らないノード・壊れた親の連鎖は 0 を返す。
@@ -453,7 +462,12 @@ pub fn bad_news_chain(original: &Report, org: &[OrgNode], now: OffsetDateTime) -
 }
 
 /// 圧縮（まとめの run）を起こすか（ADR-0033 D3）。件数が閾値以上、または最古が `after_secs` 以上経過。
-pub fn compaction_due(pending: &[Report], now: OffsetDateTime, after_count: usize, after_secs: u64) -> bool {
+pub fn compaction_due(
+    pending: &[Report],
+    now: OffsetDateTime,
+    after_count: usize,
+    after_secs: u64,
+) -> bool {
     if pending.is_empty() {
         return false;
     }
@@ -461,7 +475,9 @@ pub fn compaction_due(pending: &[Report], now: OffsetDateTime, after_count: usiz
         return true;
     }
     match pending.iter().map(|r| r.created_at).min() {
-        Some(oldest) => (now - oldest).whole_seconds() >= i64::try_from(after_secs).unwrap_or(i64::MAX),
+        Some(oldest) => {
+            (now - oldest).whole_seconds() >= i64::try_from(after_secs).unwrap_or(i64::MAX)
+        }
         None => false,
     }
 }
@@ -553,7 +569,9 @@ fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Report, Sto
         return Ok(Err(StoreError::Invalid(format!("invalid report id: {id}"))));
     };
     let Some(kind) = ReportKind::parse(&kind_col) else {
-        return Ok(Err(StoreError::Invalid(format!("invalid report kind: {kind_col}"))));
+        return Ok(Err(StoreError::Invalid(format!(
+            "invalid report kind: {kind_col}"
+        ))));
     };
     // 案件なしは NULL（migration 0007 で NOT NULL を外した。ADR-0034 D1 の「将来」の項）。
     let project_id = match project_id {
@@ -561,7 +579,9 @@ fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Report, Sto
         Some(raw) => match raw.parse::<ProjectId>() {
             Ok(v) => Some(v),
             Err(_) => {
-                return Ok(Err(StoreError::Invalid(format!("invalid report project_id: {raw}"))));
+                return Ok(Err(StoreError::Invalid(format!(
+                    "invalid report project_id: {raw}"
+                ))));
             }
         },
     };
@@ -569,7 +589,11 @@ fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Report, Sto
         None => None,
         Some(raw) => match raw.parse::<TaskId>() {
             Ok(v) => Some(v),
-            Err(_) => return Ok(Err(StoreError::Invalid(format!("invalid report task_id: {raw}")))),
+            Err(_) => {
+                return Ok(Err(StoreError::Invalid(format!(
+                    "invalid report task_id: {raw}"
+                ))));
+            }
         },
     };
     let sources: Vec<ReportId> = match serde_json::from_str::<Vec<String>>(&sources_col) {
@@ -578,12 +602,20 @@ fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Report, Sto
             for s in raw {
                 match s.parse::<ReportId>() {
                     Ok(v) => out.push(v),
-                    Err(_) => return Ok(Err(StoreError::Invalid(format!("invalid report source id: {s}")))),
+                    Err(_) => {
+                        return Ok(Err(StoreError::Invalid(format!(
+                            "invalid report source id: {s}"
+                        ))));
+                    }
                 }
             }
             out
         }
-        Err(e) => return Ok(Err(StoreError::Invalid(format!("invalid report sources: {e}")))),
+        Err(e) => {
+            return Ok(Err(StoreError::Invalid(format!(
+                "invalid report sources: {e}"
+            ))));
+        }
     };
     Ok((|| {
         Ok(Report {
@@ -687,7 +719,8 @@ impl ReportStore for SqliteStore {
             where_sql.push_str(" AND read_at IS NULL");
         }
         let limit = filter.limit.clamp(1, 1_000);
-        let sql = format!("{SELECT_REPORT}{where_sql} ORDER BY created_at DESC, id DESC LIMIT {limit}");
+        let sql =
+            format!("{SELECT_REPORT}{where_sql} ORDER BY created_at DESC, id DESC LIMIT {limit}");
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(args), row_to_report)?;
@@ -759,6 +792,7 @@ mod tests {
     fn node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
         OrgNode {
+            profile: Default::default(),
             id: id.to_string(),
             parent_id: parent.map(str::to_string),
             name: id.to_string(),
@@ -786,7 +820,10 @@ mod tests {
         assert_eq!(level_of(&org, "secretary"), 0);
         assert_eq!(level_of(&org, "coding"), 1);
         assert_eq!(level_of(&org, "coding-poc"), 2);
-        assert_eq!(ancestors_of(&org, "coding-poc"), vec!["coding".to_string(), "secretary".to_string()]);
+        assert_eq!(
+            ancestors_of(&org, "coding-poc"),
+            vec!["coding".to_string(), "secretary".to_string()]
+        );
         assert!(ancestors_of(&org, "ghost").is_empty());
         assert_eq!(level_of(&org, "ghost"), 0);
     }
@@ -796,7 +833,10 @@ mod tests {
         let org = org();
         assert_eq!(infra_node(&org).map(|n| n.id.as_str()), Some("infra"));
         let without_infra: Vec<OrgNode> = org.into_iter().filter(|n| n.id != "infra").collect();
-        assert_eq!(infra_node(&without_infra).map(|n| n.id.as_str()), Some("secretary"));
+        assert_eq!(
+            infra_node(&without_infra).map(|n| n.id.as_str()),
+            Some("secretary")
+        );
     }
 
     #[test]
@@ -823,10 +863,21 @@ mod tests {
         let long = "x".repeat(200);
         let err = report_for_error("coding-poc", 2, None, task, "PoC を書く", &long, false, now);
         assert_eq!(err.kind, ReportKind::BadNews);
-        assert_eq!(err.headline, format!("PoC を書く が失敗: {}", "x".repeat(80)));
+        assert_eq!(
+            err.headline,
+            format!("PoC を書く が失敗: {}", "x".repeat(80))
+        );
         assert!(err.body.contains("retryable: false"), "{}", err.body);
 
-        let q = report_for_question("coding-poc", 2, None, task, "PoC を書く", "どのクラスタを使いますか\n（pegasus か sirius）", now);
+        let q = report_for_question(
+            "coding-poc",
+            2,
+            None,
+            task,
+            "PoC を書く",
+            "どのクラスタを使いますか\n（pegasus か sirius）",
+            now,
+        );
         assert_eq!(q.kind, ReportKind::Question);
         assert_eq!(q.headline, "どのクラスタを使いますか");
         assert!(q.body.contains("pegasus"), "{}", q.body);
@@ -835,7 +886,16 @@ mod tests {
     #[test]
     fn bad_news_is_copied_to_every_ancestor_up_to_the_secretary() {
         let now = OffsetDateTime::now_utc();
-        let original = report_for_error("coding-poc", 2, None, TaskId::new(), "PoC", "落ちた", true, now);
+        let original = report_for_error(
+            "coding-poc",
+            2,
+            None,
+            TaskId::new(),
+            "PoC",
+            "落ちた",
+            true,
+            now,
+        );
         let copies = bad_news_chain(&original, &org(), now);
         assert_eq!(copies.len(), 2);
         assert_eq!(copies[0].node_id, "coding");
@@ -844,13 +904,30 @@ mod tests {
         assert_eq!(copies[1].node_id, "secretary");
         assert_eq!(copies[1].level, 0);
         assert_eq!(copies[1].sources, vec![copies[0].id]);
-        assert!(copies.iter().all(|c| c.kind == ReportKind::BadNews && c.headline == original.headline));
+        assert!(
+            copies
+                .iter()
+                .all(|c| c.kind == ReportKind::BadNews && c.headline == original.headline)
+        );
     }
 
     #[test]
     fn compaction_is_due_on_the_count_or_on_the_age() {
         let now = OffsetDateTime::now_utc();
-        let make = |at: OffsetDateTime| report_for_done("coding-poc", 2, None, TaskId::new(), "t", "s", &[], &[], Vec::new(), at);
+        let make = |at: OffsetDateTime| {
+            report_for_done(
+                "coding-poc",
+                2,
+                None,
+                TaskId::new(),
+                "t",
+                "s",
+                &[],
+                &[],
+                Vec::new(),
+                at,
+            )
+        };
         let three: Vec<Report> = (0..3).map(|_| make(now)).collect();
         assert!(!compaction_due(&three, now, 4, 7200));
         let four: Vec<Report> = (0..4).map(|_| make(now)).collect();
@@ -863,9 +940,31 @@ mod tests {
     #[test]
     fn the_compaction_objective_contains_every_child_report() {
         let now = OffsetDateTime::now_utc();
-        let a = report_for_done("coding-poc", 2, None, TaskId::new(), "A", "A の結果", &[], &[], Vec::new(), now);
-        let b = report_for_question("coding-poc", 2, None, TaskId::new(), "B", "B を聞きたい", now);
-        let text = compaction_objective(&node("coding", Some("secretary"), OrgKind::Department), &[a.clone(), b.clone()]);
+        let a = report_for_done(
+            "coding-poc",
+            2,
+            None,
+            TaskId::new(),
+            "A",
+            "A の結果",
+            &[],
+            &[],
+            Vec::new(),
+            now,
+        );
+        let b = report_for_question(
+            "coding-poc",
+            2,
+            None,
+            TaskId::new(),
+            "B",
+            "B を聞きたい",
+            now,
+        );
+        let text = compaction_objective(
+            &node("coding", Some("secretary"), OrgKind::Department),
+            &[a.clone(), b.clone()],
+        );
         assert!(text.contains(&a.headline), "{text}");
         assert!(text.contains(&b.headline), "{text}");
         assert!(text.contains("3〜8 行"), "{text}");
@@ -875,11 +974,21 @@ mod tests {
     fn notification_waits_two_hours_unless_there_is_bad_news() {
         let now = OffsetDateTime::now_utc();
         // 2 時間未満で未読 → 通知しない。
-        assert!(!notify_now(3, 0, Some(now - time::Duration::minutes(30)), now));
+        assert!(!notify_now(
+            3,
+            0,
+            Some(now - time::Duration::minutes(30)),
+            now
+        ));
         // 2 時間以上で未読 → 通知する。
         assert!(notify_now(3, 0, Some(now - time::Duration::hours(3)), now));
         // 悪い知らせは即時。
-        assert!(notify_now(1, 1, Some(now - time::Duration::minutes(1)), now));
+        assert!(notify_now(
+            1,
+            1,
+            Some(now - time::Duration::minutes(1)),
+            now
+        ));
         // 未読が無ければ通知しない。
         assert!(!notify_now(0, 0, None, now));
     }
@@ -894,7 +1003,13 @@ mod tests {
         store
     }
 
-    fn sample(node_id: &str, level: u32, kind: ReportKind, project: Option<ProjectId>, at: OffsetDateTime) -> Report {
+    fn sample(
+        node_id: &str,
+        level: u32,
+        kind: ReportKind,
+        project: Option<ProjectId>,
+        at: OffsetDateTime,
+    ) -> Report {
         Report {
             id: ReportId::new(),
             project_id: project,
@@ -917,8 +1032,13 @@ mod tests {
         let project = ProjectId::new();
         let with_project = sample("coding-poc", 2, ReportKind::Result, Some(project), now);
         let without = sample("infra", 1, ReportKind::BadNews, None, now);
-        store.report_append_all(&[with_project.clone(), without.clone()]).expect("append");
-        assert_eq!(store.report_get(with_project.id).expect("get"), Some(with_project.clone()));
+        store
+            .report_append_all(&[with_project.clone(), without.clone()])
+            .expect("append");
+        assert_eq!(
+            store.report_get(with_project.id).expect("get"),
+            Some(with_project.clone())
+        );
         let read_back = store.report_get(without.id).expect("get").expect("some");
         assert_eq!(read_back.project_id, None);
         assert_eq!(read_back, without);
@@ -931,29 +1051,58 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let project = ProjectId::new();
         let other = ProjectId::new();
-        let old = sample("coding-poc", 2, ReportKind::Result, Some(project), now - time::Duration::hours(1));
+        let old = sample(
+            "coding-poc",
+            2,
+            ReportKind::Result,
+            Some(project),
+            now - time::Duration::hours(1),
+        );
         let new = sample("coding-poc", 2, ReportKind::Result, Some(project), now);
-        let elsewhere = sample("coding", 1, ReportKind::Result, Some(other), now - time::Duration::minutes(30));
-        store.report_append_all(&[old.clone(), new.clone(), elsewhere.clone()]).expect("append");
+        let elsewhere = sample(
+            "coding",
+            1,
+            ReportKind::Result,
+            Some(other),
+            now - time::Duration::minutes(30),
+        );
+        store
+            .report_append_all(&[old.clone(), new.clone(), elsewhere.clone()])
+            .expect("append");
 
         let all = store.report_list(&ReportFilter::default()).expect("list");
         assert_eq!(all.len(), 3);
         assert_eq!(all[0].id, new.id, "newest first");
 
         let by_project = store
-            .report_list(&ReportFilter { project_id: Some(project), ..ReportFilter::default() })
+            .report_list(&ReportFilter {
+                project_id: Some(project),
+                ..ReportFilter::default()
+            })
             .expect("list");
         assert_eq!(by_project.len(), 2);
         let by_node = store
-            .report_list(&ReportFilter { node_id: Some("coding".into()), ..ReportFilter::default() })
+            .report_list(&ReportFilter {
+                node_id: Some("coding".into()),
+                ..ReportFilter::default()
+            })
             .expect("list");
-        assert_eq!(by_node.iter().map(|r| r.id).collect::<Vec<_>>(), vec![elsewhere.id]);
+        assert_eq!(
+            by_node.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![elsewhere.id]
+        );
         let by_level = store
-            .report_list(&ReportFilter { level: Some(1), ..ReportFilter::default() })
+            .report_list(&ReportFilter {
+                level: Some(1),
+                ..ReportFilter::default()
+            })
             .expect("list");
         assert_eq!(by_level.len(), 1);
         let limited = store
-            .report_list(&ReportFilter { limit: 1, ..ReportFilter::default() })
+            .report_list(&ReportFilter {
+                limit: 1,
+                ..ReportFilter::default()
+            })
             .expect("list");
         assert_eq!(limited.len(), 1);
 
@@ -961,7 +1110,10 @@ mod tests {
         // 既読のものをもう一度既読にしても何も変わらない。
         assert_eq!(store.report_mark_read(&[new.id], now).expect("read"), 0);
         let unread = store
-            .report_list(&ReportFilter { unread_only: true, ..ReportFilter::default() })
+            .report_list(&ReportFilter {
+                unread_only: true,
+                ..ReportFilter::default()
+            })
             .expect("list");
         assert_eq!(unread.len(), 2);
         assert!(unread.iter().all(|r| r.id != new.id));
@@ -972,13 +1124,36 @@ mod tests {
     fn unreviewed_children_skips_reports_that_are_already_a_source() {
         let store = store_with_org();
         let now = OffsetDateTime::now_utc();
-        let a = sample("coding-poc", 2, ReportKind::Result, None, now - time::Duration::minutes(2));
-        let b = sample("coding-poc", 2, ReportKind::Result, None, now - time::Duration::minutes(1));
-        store.report_append_all(&[a.clone(), b.clone()]).expect("append");
+        let a = sample(
+            "coding-poc",
+            2,
+            ReportKind::Result,
+            None,
+            now - time::Duration::minutes(2),
+        );
+        let b = sample(
+            "coding-poc",
+            2,
+            ReportKind::Result,
+            None,
+            now - time::Duration::minutes(1),
+        );
+        store
+            .report_append_all(&[a.clone(), b.clone()])
+            .expect("append");
         let pending = store.report_unreviewed_children("coding").expect("pending");
-        assert_eq!(pending.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a.id, b.id], "oldest first");
+        assert_eq!(
+            pending.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![a.id, b.id],
+            "oldest first"
+        );
         // 別の親（secretary）から見ると、coding の報告だけが対象（孫は見ない）。
-        assert!(store.report_unreviewed_children("secretary").expect("pending").is_empty());
+        assert!(
+            store
+                .report_unreviewed_children("secretary")
+                .expect("pending")
+                .is_empty()
+        );
 
         // まとめの報告が a を取り込むと、a は次回の対象から外れる。
         let mut summary = sample("coding", 1, ReportKind::Result, None, now);
@@ -987,21 +1162,45 @@ mod tests {
         let pending = store.report_unreviewed_children("coding").expect("pending");
         assert_eq!(pending.iter().map(|r| r.id).collect::<Vec<_>>(), vec![b.id]);
         // まとめ自身は secretary から見たレビュー対象になる。
-        let up = store.report_unreviewed_children("secretary").expect("pending");
-        assert_eq!(up.iter().map(|r| r.id).collect::<Vec<_>>(), vec![summary.id]);
+        let up = store
+            .report_unreviewed_children("secretary")
+            .expect("pending");
+        assert_eq!(
+            up.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![summary.id]
+        );
     }
 
     #[test]
     fn a_bad_news_chain_leaves_only_the_top_copy_unreviewed() {
         let store = store_with_org();
         let now = OffsetDateTime::now_utc();
-        let original = report_for_error("coding-poc", 2, None, TaskId::new(), "PoC", "落ちた", true, now);
+        let original = report_for_error(
+            "coding-poc",
+            2,
+            None,
+            TaskId::new(),
+            "PoC",
+            "落ちた",
+            true,
+            now,
+        );
         let mut all = vec![original.clone()];
         all.extend(bad_news_chain(&original, &org(), now));
         store.report_append_all(&all).expect("append");
         // 各段のコピーが 1 段下を sources に持つので、圧縮の対象にはならない。
-        assert!(store.report_unreviewed_children("coding").expect("pending").is_empty());
-        assert!(store.report_unreviewed_children("secretary").expect("pending").is_empty());
+        assert!(
+            store
+                .report_unreviewed_children("coding")
+                .expect("pending")
+                .is_empty()
+        );
+        assert!(
+            store
+                .report_unreviewed_children("secretary")
+                .expect("pending")
+                .is_empty()
+        );
         assert_eq!(store.report_unread_counts(0).expect("counts"), (1, 1));
     }
 
@@ -1009,20 +1208,35 @@ mod tests {
         use crate::model::{Budget, Check, Criterion, Status, Tier, WorkerHint, WorkspaceSpec};
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind,
             title: "t".into(),
             objective: "o".into(),
-            acceptance: vec![Criterion { text: "c".into(), check: Check::Human }],
+            acceptance: vec![Criterion {
+                text: "c".into(),
+                check: Check::Human,
+            }],
             inputs: vec![],
             depends_on: vec![],
             status: Status::Draft,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: "ws".into(), mode: None },
-            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: "ws".into(),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -1043,7 +1257,11 @@ mod tests {
     #[test]
     fn support_kind_classifies_background_tasks_by_a_fixed_priority() {
         let mut plain = plain_task(TaskKind::Execute);
-        assert_eq!(support_kind(&plain), None, "人が見る本体の仕事には印を付けない");
+        assert_eq!(
+            support_kind(&plain),
+            None,
+            "人が見る本体の仕事には印を付けない"
+        );
 
         plain.conversation = Some(crate::message::MessageId::new());
         assert_eq!(support_kind(&plain), Some("conversation"));

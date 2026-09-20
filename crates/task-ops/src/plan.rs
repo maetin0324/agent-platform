@@ -11,7 +11,9 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{Budget, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint, WorkspaceSpec};
+use task_core::{
+    Budget, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint, WorkspaceSpec,
+};
 use time::OffsetDateTime;
 
 use crate::error::OpsError;
@@ -58,7 +60,11 @@ fn truncate_title(goal: &str, max_chars: usize) -> String {
 }
 
 /// `spec` から `Plan` kind の `Task` を組み立て、`store.create_task` で原子的に挿入する。
-pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime) -> Result<Task, OpsError> {
+pub fn create_plan(
+    store: &dyn TaskStore,
+    spec: NewPlanSpec,
+    now: OffsetDateTime,
+) -> Result<Task, OpsError> {
     if spec.goal.trim().is_empty() {
         return Err(OpsError::Validation("goal must not be blank".to_string()));
     }
@@ -69,7 +75,8 @@ pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime
     let workspace = match spec.workspace {
         Some(path) => WorkspaceSpec::Local { path, mode: None },
         None => WorkspaceSpec::Local {
-            path: PathBuf::from(id.to_string()), mode: None,
+            path: PathBuf::from(id.to_string()),
+            mode: None,
         },
     };
 
@@ -104,6 +111,9 @@ pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime
         role: None,
         genre: None,
         aggregate: false,
+        // ADR-0046 D2 / D4（Phase 59）: `celerisctl plan` の根は既定（能力タグ無し・production）。
+        skills: Vec::new(),
+        mode: task_core::TaskMode::default(),
         project_id: None,
         milestone_id: None,
         assignee: None,
@@ -215,7 +225,8 @@ mod tests {
         assert_eq!(
             task.workspace,
             WorkspaceSpec::Local {
-                path: PathBuf::from(task.id.to_string()), mode: None
+                path: PathBuf::from(task.id.to_string()),
+                mode: None
             }
         );
     }

@@ -16,7 +16,9 @@ use crate::types::ProviderConfigView;
 /// task-api → celeris（`ApiSettings.admin_tx` 経由）。稼働中の `Dispatcher`・ワーカーの起動が要る操作だけを運ぶ。
 pub enum AdminRequest {
     /// 設定ファイルと `providers.d/` を読み直し、稼働中のプロバイダ選定・アダプタ一式を差し替える。
-    Reload { reply: oneshot::Sender<Result<(), String>> },
+    Reload {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// 1 アカウントだけ短い疎通確認を行う（タスク・イベントには残さない。ADR-0017 D2）。
     Check {
         provider_id: String,
@@ -341,11 +343,22 @@ impl ProviderPatchBody {
     }
 }
 
-pub const KNOWN_ADAPTERS: [&str; 6] = ["fake", "claude-code", "codex", "acp", "paperqa", "local-deep-research"];
+pub const KNOWN_ADAPTERS: [&str; 6] = [
+    "fake",
+    "claude-code",
+    "codex",
+    "acp",
+    "paperqa",
+    "local-deep-research",
+];
 
 /// ファイル名に安全に使える id か（`providers.d/<id>.toml` のパストラバーサル防止）。
 pub fn valid_provider_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 pub fn valid_adapter(adapter: &str) -> bool {
@@ -385,16 +398,29 @@ pub enum AdminFileError {
 }
 
 pub fn read_provider_file(path: &Path) -> Result<ProviderConfigFile, AdminFileError> {
-    let text =
-        std::fs::read_to_string(path).map_err(|source| AdminFileError::Read { path: path.to_path_buf(), source })?;
-    toml::from_str(&text).map_err(|source| AdminFileError::Parse { path: path.to_path_buf(), source })
+    let text = std::fs::read_to_string(path).map_err(|source| AdminFileError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    toml::from_str(&text).map_err(|source| AdminFileError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
-pub fn write_provider_file(dir: &Path, provider: &ProviderConfigFile) -> Result<(), AdminFileError> {
-    std::fs::create_dir_all(dir).map_err(|source| AdminFileError::Write { path: dir.to_path_buf(), source })?;
+pub fn write_provider_file(
+    dir: &Path,
+    provider: &ProviderConfigFile,
+) -> Result<(), AdminFileError> {
+    std::fs::create_dir_all(dir).map_err(|source| AdminFileError::Write {
+        path: dir.to_path_buf(),
+        source,
+    })?;
     let path = provider_file_path(dir, &provider.id);
-    let text =
-        toml::to_string_pretty(provider).map_err(|source| AdminFileError::Encode { path: path.clone(), source })?;
+    let text = toml::to_string_pretty(provider).map_err(|source| AdminFileError::Encode {
+        path: path.clone(),
+        source,
+    })?;
     std::fs::write(&path, text).map_err(|source| AdminFileError::Write { path, source })
 }
 
@@ -456,7 +482,10 @@ mod tests {
         assert_eq!(patched.env.get("K"), Some(&"v".to_string()));
         assert!(!patched.account_pool);
 
-        let pool_patch = ProviderPatchBody { account_pool: Some(true), ..Default::default() };
+        let pool_patch = ProviderPatchBody {
+            account_pool: Some(true),
+            ..Default::default()
+        };
         assert!(pool_patch.apply(file).account_pool);
     }
 
@@ -477,11 +506,15 @@ mod tests {
             settings: None,
         };
         write_provider_file(dir.path(), &file).unwrap_or_else(|e| panic!("write: {e}"));
-        let read = read_provider_file(&provider_file_path(dir.path(), "acct-b")).unwrap_or_else(|e| panic!("read: {e}"));
+        let read = read_provider_file(&provider_file_path(dir.path(), "acct-b"))
+            .unwrap_or_else(|e| panic!("read: {e}"));
         assert_eq!(read.id, "acct-b");
         assert_eq!(read.concurrency, 3);
         assert_eq!(read.env.get("CLAUDE_CONFIG_DIR"), Some(&"/x".to_string()));
-        assert_eq!(read.env_from_secrets.get("K"), Some(&"secret-id".to_string()));
+        assert_eq!(
+            read.env_from_secrets.get("K"),
+            Some(&"secret-id".to_string())
+        );
         assert!(read.account_pool);
     }
 
@@ -510,16 +543,30 @@ mod tests {
         let current = read_provider_file(&path).unwrap_or_else(|e| panic!("read: {e}"));
         assert_eq!(current.command.as_deref(), Some("opencode"));
         assert_eq!(current.args.as_deref(), Some(&["acp".to_string()][..]));
-        assert_eq!(current.env_from_secrets.get("SOME_KEY"), Some(&"some-secret".to_string()));
+        assert_eq!(
+            current.env_from_secrets.get("SOME_KEY"),
+            Some(&"some-secret".to_string())
+        );
 
-        let patch = ProviderPatchBody { concurrency: Some(2), ..Default::default() };
+        let patch = ProviderPatchBody {
+            concurrency: Some(2),
+            ..Default::default()
+        };
         let updated = patch.apply(current);
         write_provider_file(dir.path(), &updated).unwrap_or_else(|e| panic!("write: {e}"));
 
         let after = read_provider_file(&path).unwrap_or_else(|e| panic!("read: {e}"));
         assert_eq!(after.concurrency, 2);
-        assert_eq!(after.command.as_deref(), Some("opencode"), "PATCH must not drop hand-edited command");
-        assert_eq!(after.args.as_deref(), Some(&["acp".to_string()][..]), "PATCH must not drop hand-edited args");
+        assert_eq!(
+            after.command.as_deref(),
+            Some("opencode"),
+            "PATCH must not drop hand-edited command"
+        );
+        assert_eq!(
+            after.args.as_deref(),
+            Some(&["acp".to_string()][..]),
+            "PATCH must not drop hand-edited args"
+        );
         assert_eq!(
             after.env_from_secrets.get("SOME_KEY"),
             Some(&"some-secret".to_string()),

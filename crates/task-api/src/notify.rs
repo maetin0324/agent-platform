@@ -146,19 +146,32 @@ pub(crate) async fn test(
         ));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if admin_tx.send(AdminRequest::NotifyTest { reply: reply_tx }).await.is_err() {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+    if admin_tx
+        .send(AdminRequest::NotifyTest { reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the notify test request")),
+        Ok(Err(_)) => {
+            return Err(ApiProblem::internal(
+                "celeris dropped the notify test request",
+            ));
+        }
         Err(_) => return Err(ApiProblem::internal("the notify test timed out")),
     };
     match outcome {
         Ok(outcome) => {
             tracing::info!(
-                who = "admin", op = "notify_test", ok = outcome.ok,
-                detail = outcome.detail.as_deref().unwrap_or(""), "admin: notify test sent"
+                who = "admin",
+                op = "notify_test",
+                ok = outcome.ok,
+                detail = outcome.detail.as_deref().unwrap_or(""),
+                "admin: notify test sent"
             );
             Ok(json_response(
                 StatusCode::OK,

@@ -30,10 +30,12 @@ pub fn resolve(
     if rel.is_absolute() || rel_path.is_empty() {
         return Err(ArtifactError::NotRelative(rel_path.to_string()));
     }
-    if rel
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir))
-    {
+    if rel.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    }) {
         return Err(ArtifactError::Escapes(rel_path.to_string()));
     }
     let full = workspace.join(rel);
@@ -82,8 +84,14 @@ mod tests {
         std::fs::write(dir.path().join("artifacts/a.json"), b"{}").unwrap();
         let a = resolve(dir.path(), "a", "artifacts/a.json", None).unwrap();
         assert_eq!(a.kind, "json");
-        assert_eq!(a.sha256, "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a");
-        assert_eq!(absolute_path(dir.path(), &a), dir.path().join("artifacts/a.json"));
+        assert_eq!(
+            a.sha256,
+            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        );
+        assert_eq!(
+            absolute_path(dir.path(), &a),
+            dir.path().join("artifacts/a.json")
+        );
     }
 
     #[test]
@@ -92,9 +100,21 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret"), b"x").unwrap();
         std::os::unix::fs::symlink(outside.path().join("secret"), dir.path().join("link")).unwrap();
-        assert!(matches!(resolve(dir.path(), "a", "/etc/passwd", None), Err(ArtifactError::NotRelative(_))));
-        assert!(matches!(resolve(dir.path(), "a", "../x", None), Err(ArtifactError::Escapes(_))));
-        assert!(matches!(resolve(dir.path(), "a", "nope.txt", None), Err(ArtifactError::NotFound(_))));
-        assert!(matches!(resolve(dir.path(), "a", "link", None), Err(ArtifactError::Escapes(_))));
+        assert!(matches!(
+            resolve(dir.path(), "a", "/etc/passwd", None),
+            Err(ArtifactError::NotRelative(_))
+        ));
+        assert!(matches!(
+            resolve(dir.path(), "a", "../x", None),
+            Err(ArtifactError::Escapes(_))
+        ));
+        assert!(matches!(
+            resolve(dir.path(), "a", "nope.txt", None),
+            Err(ArtifactError::NotFound(_))
+        ));
+        assert!(matches!(
+            resolve(dir.path(), "a", "link", None),
+            Err(ArtifactError::Escapes(_))
+        ));
     }
 }

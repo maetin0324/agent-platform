@@ -6,7 +6,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use task_core::{
-    Budget, Check, Criterion, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint, WorkspaceSpec,
+    Budget, Check, Criterion, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier,
+    WorkerHint, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -64,20 +65,38 @@ fn sigterm_kills_the_worker_process_and_exits_130() {
     let store = SqliteStore::open(&db).unwrap();
     let now = OffsetDateTime::now_utc();
     let task = Task {
+        mode: Default::default(),
+        skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
         kind: TaskKind::Execute,
         title: "long".into(),
         objective: "sleep".into(),
-        acceptance: vec![Criterion { text: "c".into(), check: Check::Command { cmd: "true".into(), expect_exit: 0 } }],
+        acceptance: vec![Criterion {
+            text: "c".into(),
+            check: Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        }],
         inputs: vec![],
         depends_on: vec![],
         status: Status::Ready,
         priority: 0,
-        worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-        workspace: WorkspaceSpec::Local { path: ws.clone(), mode: None },
-        budget: Budget { max_turns: 1, max_wall_secs: 600, max_retries: 0 },
+        worker_hint: WorkerHint {
+            tier: Tier::Standard,
+            adapter: None,
+        },
+        workspace: WorkspaceSpec::Local {
+            path: ws.clone(),
+            mode: None,
+        },
+        budget: Budget {
+            max_turns: 1,
+            max_wall_secs: 600,
+            max_retries: 0,
+        },
         attempts: 0,
         lease: None,
         created_at: now,
@@ -94,7 +113,11 @@ fn sigterm_kills_the_worker_process_and_exits_130() {
     };
     store.create_task(&task, vec![]).unwrap();
     let script = root.join("worker.sh");
-    std::fs::write(&script, "cat >/dev/null\necho $$ > worker.pid\nexec sleep 60\n").unwrap();
+    std::fs::write(
+        &script,
+        "cat >/dev/null\necho $$ > worker.pid\nexec sleep 60\n",
+    )
+    .unwrap();
     let config = write_config(&root, &script);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_celerisctl"))
@@ -109,11 +132,20 @@ fn sigterm_kills_the_worker_process_and_exits_130() {
         .unwrap();
 
     let pid_file = ws.join("worker.pid");
-    assert!(wait_until(Duration::from_secs(10), || pid_file.is_file()), "worker did not start");
-    let worker_pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_string();
+    assert!(
+        wait_until(Duration::from_secs(10), || pid_file.is_file()),
+        "worker did not start"
+    );
+    let worker_pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_string();
     assert!(process_alive(&worker_pid));
 
-    let status = Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap();
+    let status = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
     assert!(status.success());
     let mut exit = None;
     assert!(

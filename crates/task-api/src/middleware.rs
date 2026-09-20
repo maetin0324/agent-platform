@@ -38,7 +38,10 @@ pub(crate) async fn guard(State(state): State<ApiState>, req: Request, next: Nex
     }
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         headers.insert(X_REQUEST_ID, value);
     }
@@ -92,7 +95,10 @@ fn check_request(state: &ApiState, req: &Request) -> Result<(), ApiProblem> {
     // ADR-0017 で PATCH/DELETE（プロバイダ管理）が加わるまでは変更系 = POST だけだった。ADR-0030 で
     // `PUT /secrets/{id}` が加わり PUT も同じ扱いにする。`Origin` の拒否は本文の有無に関わらず全ての変更系
     // メソッドに掛ける（監査で発見: PATCH/DELETE が POST 専用のこのチェックを素通りしていた）。
-    let is_mutating = matches!(*req.method(), Method::POST | Method::PUT | Method::PATCH | Method::DELETE);
+    let is_mutating = matches!(
+        *req.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
     if is_mutating && req.headers().contains_key(header::ORIGIN) {
         return Err(ApiProblem::origin_forbidden());
     }
@@ -187,7 +193,9 @@ pub(crate) fn host_without_port(value: &str) -> Option<String> {
         format!("[{}]", &rest[..end])
     } else {
         match value.rsplit_once(':') {
-            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) && !host.contains(':') => {
+            Some((host, port))
+                if port.chars().all(|c| c.is_ascii_digit()) && !host.contains(':') =>
+            {
                 host.to_string()
             }
             Some(_) => return None,
@@ -228,7 +236,10 @@ mod tests {
 
     #[test]
     fn host_without_port_strips_ports_and_normalizes_case() {
-        assert_eq!(host_without_port("localhost:7710").as_deref(), Some("localhost"));
+        assert_eq!(
+            host_without_port("localhost:7710").as_deref(),
+            Some("localhost")
+        );
         assert_eq!(host_without_port("LOCALHOST").as_deref(), Some("localhost"));
         assert_eq!(host_without_port("127.0.0.1").as_deref(), Some("127.0.0.1"));
         assert_eq!(host_without_port("[::1]:7710").as_deref(), Some("[::1]"));
@@ -244,7 +255,11 @@ mod tests {
         let listen: SocketAddr = "10.0.0.5:7710".parse().unwrap_or_else(|e| panic!("{e}"));
         let hosts = allowed_host_list(
             listen,
-            &["Celeris.Lab.Example".to_string(), "::1".to_string(), "fe80::1".to_string()],
+            &[
+                "Celeris.Lab.Example".to_string(),
+                "::1".to_string(),
+                "fe80::1".to_string(),
+            ],
         );
         assert!(hosts.contains(&"localhost".to_string()));
         assert!(hosts.contains(&"127.0.0.1".to_string()));
@@ -257,7 +272,13 @@ mod tests {
 
     #[test]
     fn constant_time_eq_compares_digests() {
-        assert!(constant_time_eq(&token_digest("secret"), &token_digest("secret")));
-        assert!(!constant_time_eq(&token_digest("secret"), &token_digest("secret2")));
+        assert!(constant_time_eq(
+            &token_digest("secret"),
+            &token_digest("secret")
+        ));
+        assert!(!constant_time_eq(
+            &token_digest("secret"),
+            &token_digest("secret2")
+        ));
     }
 }

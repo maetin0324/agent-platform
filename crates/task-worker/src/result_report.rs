@@ -13,7 +13,9 @@
 use std::path::Path;
 
 /// 結果ファイルの `report`（`kind` だけ。未知の値もそのまま文字列で持つ）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 pub struct ReportDeclaration {
     /// `"result"` / `"proposal"` / `"bad_news"` / `"question"`。欠落・未知の値は呼び出し側が既定に倒す。
     #[serde(default)]
@@ -29,9 +31,14 @@ pub fn read_result_report_kind(artifacts_dir: &Path) -> Option<String> {
 /// 結果ファイルの本文から `report.kind` を取り出す（純粋関数）。
 pub fn report_kind_from_result_json(text: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    let declaration: ReportDeclaration = serde_json::from_value(value.get("report")?.clone()).ok()?;
+    let declaration: ReportDeclaration =
+        serde_json::from_value(value.get("report")?.clone()).ok()?;
     let kind = declaration.kind?;
-    if kind.trim().is_empty() { None } else { Some(kind) }
+    if kind.trim().is_empty() {
+        None
+    } else {
+        Some(kind)
+    }
 }
 
 /// 結果ファイルの `milestone_proposal`（ADR-0038 D1。Phase 41）。対話 run（途中目標のレビュー）が
@@ -42,7 +49,9 @@ pub fn report_kind_from_result_json(text: &str) -> Option<String> {
 /// ```
 ///
 /// ここも**ファイルを読んで文字列を取り出すだけ**で、`milestones` に行を作るのは celeris 側（決定的）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 pub struct MilestoneProposal {
     pub title: String,
     #[serde(default)]
@@ -58,7 +67,8 @@ pub fn read_result_milestone_proposal(artifacts_dir: &Path) -> Option<MilestoneP
 /// 結果ファイルの本文から `milestone_proposal` を取り出す（純粋関数）。`title` が空なら提案なし。
 pub fn milestone_proposal_from_result_json(text: &str) -> Option<MilestoneProposal> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    let proposal: MilestoneProposal = serde_json::from_value(value.get("milestone_proposal")?.clone()).ok()?;
+    let proposal: MilestoneProposal =
+        serde_json::from_value(value.get("milestone_proposal")?.clone()).ok()?;
     if proposal.title.trim().is_empty() {
         return None;
     }
@@ -75,7 +85,8 @@ mod tests {
     #[test]
     fn the_declared_kind_is_read_and_anything_else_is_none() {
         assert_eq!(
-            report_kind_from_result_json(r#"{"summary":"s","report":{"kind":"proposal"}}"#).as_deref(),
+            report_kind_from_result_json(r#"{"summary":"s","report":{"kind":"proposal"}}"#)
+                .as_deref(),
             Some("proposal")
         );
         // 未知の値もそのまま返す（固定表に無い値を既定に倒すのは呼び出し側）。
@@ -86,8 +97,14 @@ mod tests {
         // 無い・空・形違い・JSON でない。
         assert_eq!(report_kind_from_result_json(r#"{"summary":"s"}"#), None);
         assert_eq!(report_kind_from_result_json(r#"{"report":{}}"#), None);
-        assert_eq!(report_kind_from_result_json(r#"{"report":{"kind":"  "}}"#), None);
-        assert_eq!(report_kind_from_result_json(r#"{"report":"proposal"}"#), None);
+        assert_eq!(
+            report_kind_from_result_json(r#"{"report":{"kind":"  "}}"#),
+            None
+        );
+        assert_eq!(
+            report_kind_from_result_json(r#"{"report":"proposal"}"#),
+            None
+        );
         assert_eq!(report_kind_from_result_json("not json"), None);
     }
 
@@ -98,9 +115,15 @@ mod tests {
         let artifacts = dir.path().join(".taskd/artifacts/01HTASK");
         assert_eq!(read_result_report_kind(&artifacts), None);
         std::fs::create_dir_all(&artifacts).expect("mkdir");
-        std::fs::write(artifacts.join("result.json"), r#"{"summary":"s","report":{"kind":"proposal"}}"#)
-            .expect("write");
-        assert_eq!(read_result_report_kind(&artifacts).as_deref(), Some("proposal"));
+        std::fs::write(
+            artifacts.join("result.json"),
+            r#"{"summary":"s","report":{"kind":"proposal"}}"#,
+        )
+        .expect("write");
+        assert_eq!(
+            read_result_report_kind(&artifacts).as_deref(),
+            Some("proposal")
+        );
     }
 }
 
@@ -125,9 +148,18 @@ mod milestone_proposal_tests {
             ""
         );
         // 無い・空の題名・形違い・JSON でない。
-        assert_eq!(milestone_proposal_from_result_json(r#"{"summary":"s"}"#), None);
-        assert_eq!(milestone_proposal_from_result_json(r#"{"milestone_proposal":{"title":"  "}}"#), None);
-        assert_eq!(milestone_proposal_from_result_json(r#"{"milestone_proposal":"次"}"#), None);
+        assert_eq!(
+            milestone_proposal_from_result_json(r#"{"summary":"s"}"#),
+            None
+        );
+        assert_eq!(
+            milestone_proposal_from_result_json(r#"{"milestone_proposal":{"title":"  "}}"#),
+            None
+        );
+        assert_eq!(
+            milestone_proposal_from_result_json(r#"{"milestone_proposal":"次"}"#),
+            None
+        );
         assert_eq!(milestone_proposal_from_result_json("not json"), None);
     }
 
@@ -143,7 +175,9 @@ mod milestone_proposal_tests {
         )
         .expect("write");
         assert_eq!(
-            read_result_milestone_proposal(&artifacts).expect("proposal").title,
+            read_result_milestone_proposal(&artifacts)
+                .expect("proposal")
+                .title,
             "次の途中目標"
         );
     }

@@ -9,14 +9,15 @@
 //! - `reached` の途中目標、動いている仕事がある途中目標、done が無い途中目標では起きない。
 //! - 通知（`milestone_ready`）は返事が `messages` に入ってから出て、文面に要約と提案の題名が入る。
 
+use celeris::notify::{self, NotifyConfig};
 use task_core::message::{Message, MessageId, MessageRole};
 use task_core::notify::{NotificationKind, NotificationStore};
 use task_core::org::{OrgKind, OrgNode};
 use task_core::{
-    Budget, Check, Criterion, Milestone, MilestoneStatus, Project, ProjectId, ProjectStatus, SqliteStore, Status,
-    Task, TaskId, TaskKind, TaskStore, Tier, Trigger, WorkerHint, WorkspaceSpec,
+    Budget, Check, Criterion, Milestone, MilestoneStatus, Project, ProjectId, ProjectStatus,
+    SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, Trigger, WorkerHint,
+    WorkspaceSpec,
 };
-use celeris::notify::{self, NotifyConfig};
 use time::OffsetDateTime;
 
 /// 2023-11 を基準にする（`apply_transition` が打つ現在時刻より**前**であること: レビューを起こし直す
@@ -33,10 +34,12 @@ struct Env {
 impl Env {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
-        let store = SqliteStore::open(&dir.path().join("celeris.db")).unwrap_or_else(|e| panic!("open: {e}"));
+        let store = SqliteStore::open(&dir.path().join("celeris.db"))
+            .unwrap_or_else(|e| panic!("open: {e}"));
         let env = Self { _dir: dir, store };
         env.store
             .org_upsert(&OrgNode {
+                profile: Default::default(),
                 id: "secretary".into(),
                 parent_id: None,
                 name: "秘書".into(),
@@ -64,7 +67,9 @@ impl Env {
             created_at: at(0),
             updated_at: at(0),
         };
-        self.store.project_create(&project).unwrap_or_else(|e| panic!("project: {e}"));
+        self.store
+            .project_create(&project)
+            .unwrap_or_else(|e| panic!("project: {e}"));
         project
     }
 
@@ -78,14 +83,22 @@ impl Env {
         let mut t = task(status);
         t.project_id = Some(project);
         t.milestone_id = Some(milestone.id);
-        self.store.insert(&t).unwrap_or_else(|e| panic!("insert: {e}"));
+        self.store
+            .insert(&t)
+            .unwrap_or_else(|e| panic!("insert: {e}"));
         t
     }
 
     /// tick 1 回ぶんのレビューの判定（作られた対話タスクを返す）。
     fn schedule(&self, now: OffsetDateTime) -> Vec<Task> {
-        celeris::milestone_review::schedule(&self.store, &[], &[], task_core::CONVERSATION_GENRE, now)
-            .unwrap_or_else(|e| panic!("schedule: {e}"))
+        celeris::milestone_review::schedule(
+            &self.store,
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            now,
+        )
+        .unwrap_or_else(|e| panic!("schedule: {e}"))
     }
 
     /// その対話 run の返事（ディスパッチャがするのと同じこと）。
@@ -107,20 +120,35 @@ impl Env {
 
 fn task(status: Status) -> Task {
     Task {
+        mode: Default::default(),
+        skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
         kind: TaskKind::Execute,
         title: "候補テーマの調査".into(),
         objective: "o".into(),
-        acceptance: vec![Criterion { text: "c".into(), check: Check::Human }],
+        acceptance: vec![Criterion {
+            text: "c".into(),
+            check: Check::Human,
+        }],
         inputs: vec![],
         depends_on: vec![],
         status,
         priority: 0,
-        worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-        workspace: WorkspaceSpec::Local { path: "ws".into(), mode: None },
-        budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+        worker_hint: WorkerHint {
+            tier: Tier::Standard,
+            adapter: None,
+        },
+        workspace: WorkspaceSpec::Local {
+            path: "ws".into(),
+            mode: None,
+        },
+        budget: Budget {
+            max_turns: 1,
+            max_wall_secs: 1,
+            max_retries: 0,
+        },
         attempts: 0,
         lease: None,
         created_at: at(0),
@@ -142,7 +170,11 @@ fn task(status: Status) -> Task {
 fn the_review_run_happens_once_per_set_of_finished_work() {
     let env = Env::new();
     let project = env.project();
-    let milestone = env.milestone(project.id, "隣接領域の動向調査", MilestoneStatus::InProgress);
+    let milestone = env.milestone(
+        project.id,
+        "隣接領域の動向調査",
+        MilestoneStatus::InProgress,
+    );
     env.work(project.id, &milestone, Status::Done);
     let draft = env.work(project.id, &milestone, Status::Draft);
 
@@ -151,23 +183,47 @@ fn the_review_run_happens_once_per_set_of_finished_work() {
     let review = &started[0];
     assert_eq!(review.assignee.as_deref(), Some("secretary"));
     assert_eq!(review.milestone_id, Some(milestone.id));
-    assert_eq!(task_core::support_kind(review), Some("milestone_review"), "裏方の印");
+    assert_eq!(
+        task_core::support_kind(review),
+        Some("milestone_review"),
+        "裏方の印"
+    );
     assert_eq!(review.status, Status::Ready);
-    assert!(review.objective.contains("隣接領域の動向調査"), "{}", review.objective);
-    assert!(review.objective.contains("done 1 / failed 0、Go 待ち 1 件"), "{}", review.objective);
+    assert!(
+        review.objective.contains("隣接領域の動向調査"),
+        "{}",
+        review.objective
+    );
+    assert!(
+        review.objective.contains("done 1 / failed 0、Go 待ち 1 件"),
+        "{}",
+        review.objective
+    );
 
     // 2 回目の tick では起きない（done の集合が同じ）。
-    assert!(env.schedule(at(20)).is_empty(), "同じ done の集合で 2 回目は起きない");
+    assert!(
+        env.schedule(at(20)).is_empty(),
+        "同じ done の集合で 2 回目は起きない"
+    );
 
     // Go: draft を最後まで進めて done にすると、結果が増えたのでもう一度まとめてもらう。
-    for trigger in [Trigger::Accept, Trigger::Dispatch, Trigger::WorkerDone, Trigger::ReviewPass] {
+    for trigger in [
+        Trigger::Accept,
+        Trigger::Dispatch,
+        Trigger::WorkerDone,
+        Trigger::ReviewPass,
+    ] {
         env.store
             .apply_transition(draft.id, trigger, None)
             .unwrap_or_else(|e| panic!("transition: {e}"));
     }
     let again = env.schedule(OffsetDateTime::now_utc());
     assert_eq!(again.len(), 1, "done が増えたら再び起きる: {again:?}");
-    assert!(again[0].objective.contains("done 2"), "{}", again[0].objective);
+    assert!(
+        again[0].objective.contains("done 2"),
+        "{}",
+        again[0].objective
+    );
 }
 
 /// 受け入れ 1: 動いている仕事がある／done が無い／`reached` の途中目標ではレビューは起きない。
@@ -175,10 +231,17 @@ fn the_review_run_happens_once_per_set_of_finished_work() {
 fn no_review_while_work_is_running_or_when_the_milestone_is_reached() {
     let env = Env::new();
     let project = env.project();
-    let milestone = env.milestone(project.id, "隣接領域の動向調査", MilestoneStatus::InProgress);
+    let milestone = env.milestone(
+        project.id,
+        "隣接領域の動向調査",
+        MilestoneStatus::InProgress,
+    );
     let running = env.work(project.id, &milestone, Status::Running);
     env.work(project.id, &milestone, Status::Done);
-    assert!(env.schedule(at(10)).is_empty(), "動いているものがあれば起こさない");
+    assert!(
+        env.schedule(at(10)).is_empty(),
+        "動いているものがあれば起こさない"
+    );
 
     // draft しか無い（done が 0）途中目標でも起こさない。
     let fresh = env.milestone(project.id, "これから", MilestoneStatus::Approved);
@@ -204,7 +267,11 @@ fn no_review_while_work_is_running_or_when_the_milestone_is_reached() {
 fn the_notification_waits_for_the_reply_and_carries_the_summary() {
     let env = Env::new();
     let project = env.project();
-    let milestone = env.milestone(project.id, "隣接領域の動向調査", MilestoneStatus::InProgress);
+    let milestone = env.milestone(
+        project.id,
+        "隣接領域の動向調査",
+        MilestoneStatus::InProgress,
+    );
     env.work(project.id, &milestone, Status::Done);
 
     let started = env.schedule(at(10));
@@ -213,14 +280,26 @@ fn the_notification_waits_for_the_reply_and_carries_the_summary() {
     let created = notify::schedule(&env.store, &NotifyConfig::default(), at(0), at(11))
         .unwrap_or_else(|e| panic!("notify: {e}"));
     assert!(
-        created.iter().all(|n| n.kind != NotificationKind::MilestoneReady),
+        created
+            .iter()
+            .all(|n| n.kind != NotificationKind::MilestoneReady),
         "返事の前に鳴ってはいけない: {created:?}"
     );
 
     // 返事（と、その返事が宣言した次の途中目標）が入ると鳴る。
-    env.reply(started[0].id, project.id, "候補を 3 本に絞りました。次は比較実験です。");
-    task_ops::milestone_review::record_proposal(&env.store, project.id, Some(milestone.id), "候補の比較実験", "")
-        .unwrap_or_else(|e| panic!("record: {e}"));
+    env.reply(
+        started[0].id,
+        project.id,
+        "候補を 3 本に絞りました。次は比較実験です。",
+    );
+    task_ops::milestone_review::record_proposal(
+        &env.store,
+        project.id,
+        Some(milestone.id),
+        "候補の比較実験",
+        "",
+    )
+    .unwrap_or_else(|e| panic!("record: {e}"));
     let created = notify::schedule(&env.store, &NotifyConfig::default(), at(0), at(12))
         .unwrap_or_else(|e| panic!("notify: {e}"));
     let row = created
@@ -228,13 +307,20 @@ fn the_notification_waits_for_the_reply_and_carries_the_summary() {
         .find(|n| n.kind == NotificationKind::MilestoneReady)
         .unwrap_or_else(|| panic!("no milestone_ready: {created:?}"));
     assert!(row.body.contains("候補を 3 本に絞りました"), "{}", row.body);
-    assert!(row.body.contains("次の提案: 『候補の比較実験』"), "{}", row.body);
+    assert!(
+        row.body.contains("次の提案: 『候補の比較実験』"),
+        "{}",
+        row.body
+    );
     assert!(row.body.contains("ok / 議論 / ng"), "{}", row.body);
     assert_eq!(row.project_id, Some(project.id));
 
     // レビューの対話タスクそのものは「動いている仕事」に数えない（数えると条件が二度と成立しない）。
     assert_eq!(
-        env.store.notification_recent(10).unwrap_or_else(|e| panic!("recent: {e}")).len(),
+        env.store
+            .notification_recent(10)
+            .unwrap_or_else(|e| panic!("recent: {e}"))
+            .len(),
         1
     );
 }

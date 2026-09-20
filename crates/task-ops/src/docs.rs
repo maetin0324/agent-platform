@@ -47,7 +47,11 @@ pub enum PathError {
 /// 文書の根（`docs`）を `.`・`/` の揺れを取り除いた形にする。ルートそのものは `""`。
 pub fn normalize_root(docs: &str) -> String {
     let trimmed = docs.trim().trim_start_matches("./").trim_matches('/');
-    if trimmed == "." { String::new() } else { trimmed.to_string() }
+    if trimmed == "." {
+        String::new()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// API が受け取った `path` を**リポジトリ相対**に正規化する（ADR-0044 D7 の境界）。
@@ -63,9 +67,12 @@ pub fn page_path(root: &str, raw: &str) -> Result<String, PathError> {
     }
     let path = Path::new(raw);
     let escapes = path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)));
+        || path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        });
     if escapes {
         return Err(PathError::Forbidden);
     }
@@ -94,7 +101,10 @@ pub fn page_path(root: &str, raw: &str) -> Result<String, PathError> {
 /// `a/b/c.md` と `../d.md` → `a/d.md`（ページの中の `[[…]]` の解決。根の外には出ない）。
 pub fn resolve_relative(root: &str, from: &str, link: &str) -> Option<String> {
     let base: Vec<&str> = from.split('/').collect();
-    let mut parts: Vec<String> = base[..base.len().saturating_sub(1)].iter().map(|s| (*s).to_string()).collect();
+    let mut parts: Vec<String> = base[..base.len().saturating_sub(1)]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     for part in link.trim().split('/') {
         match part {
             "" | "." => {}
@@ -142,7 +152,9 @@ pub fn project_slug(title: &str, project_id: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// ページの先頭の `---` … `---`（ADR-0044 D7。`title` / `tags` / `tasks` だけ読む）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct FrontMatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -168,7 +180,10 @@ pub struct FrontMatter {
 /// ```
 pub fn front_matter(raw: &str) -> (FrontMatter, &str) {
     let body = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    let Some(rest) = body.strip_prefix("---\n").or_else(|| body.strip_prefix("---\r\n")) else {
+    let Some(rest) = body
+        .strip_prefix("---\n")
+        .or_else(|| body.strip_prefix("---\r\n"))
+    else {
         return (FrontMatter::default(), body);
     };
     let mut front = FrontMatter::default();
@@ -268,7 +283,12 @@ pub fn title_of(raw: &str, path: &str) -> String {
 /// front matter を書き足す（昇格のとき。既にあれば `title` / `tasks` を混ぜる）。
 pub fn merge_front_matter(raw: &str, title: Option<&str>, task_id: &str) -> String {
     let (mut front, body) = front_matter(raw);
-    if front.title.as_deref().map(str::trim).unwrap_or("").is_empty()
+    if front
+        .title
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
         && let Some(title) = title.map(str::trim).filter(|t| !t.is_empty())
     {
         front.title = Some(title.to_string());
@@ -283,12 +303,22 @@ pub fn merge_front_matter(raw: &str, title: Option<&str>, task_id: &str) -> Stri
     if !front.tags.is_empty() {
         out.push_str(&format!(
             "tags: [{}]\n",
-            front.tags.iter().map(|t| yaml_scalar(t)).collect::<Vec<_>>().join(", ")
+            front
+                .tags
+                .iter()
+                .map(|t| yaml_scalar(t))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     out.push_str(&format!(
         "tasks: [{}]\n",
-        front.tasks.iter().map(|t| yaml_scalar(t)).collect::<Vec<_>>().join(", ")
+        front
+            .tasks
+            .iter()
+            .map(|t| yaml_scalar(t))
+            .collect::<Vec<_>>()
+            .join(", ")
     ));
     out.push_str("---\n");
     let body = body.trim_start_matches(['\n', '\r']);
@@ -302,7 +332,9 @@ pub fn merge_front_matter(raw: &str, title: Option<&str>, task_id: &str) -> Stri
 /// YAML のスカラ（記号を含むなら引用する。最小限）。
 fn yaml_scalar(value: &str) -> String {
     let plain = !value.is_empty()
-        && !value.starts_with(['-', '[', '{', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`'])
+        && !value.starts_with([
+            '-', '[', '{', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`',
+        ])
         && !value.contains([':', ',', '[', ']', '{', '}', '\n', '"']);
     if plain {
         value.to_string()
@@ -333,7 +365,12 @@ pub fn render(body: &str, root: &str, from: &str, link_base: &str) -> String {
     let parser = Parser::new_ext(&expanded, options).filter_map(|event| match event {
         // 生 HTML は捨てる（`dangerouslySetInnerHTML` で描く側の安全はここが全部）。
         Event::Html(_) | Event::InlineHtml(_) => None,
-        Event::Start(Tag::Link { link_type, dest_url, title, id }) => Some(Event::Start(Tag::Link {
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Some(Event::Start(Tag::Link {
             link_type,
             dest_url: rewrite_link(&dest_url).into(),
             title,
@@ -371,7 +408,9 @@ fn expand_wiki_links(body: &str, root: &str, from: &str, link_base: &str) -> Str
             Some((t, l)) => (t.trim(), l.trim().to_string()),
             None => (inner.trim(), inner.trim().to_string()),
         };
-        match resolve_relative(root, from, target).filter(|_| !target.is_empty() && !target.contains(['\n', ']'])) {
+        match resolve_relative(root, from, target)
+            .filter(|_| !target.is_empty() && !target.contains(['\n', ']']))
+        {
             Some(path) => out.push_str(&format!(
                 "[{}]({}?path={})",
                 escape_markdown(&label),
@@ -409,7 +448,9 @@ pub fn urlencode(value: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// コミット 1 件（ツリーの「最終コミット」とページの履歴）。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct DocCommit {
     pub sha: String,
     /// RFC 3339（`%aI`）。
@@ -430,7 +471,12 @@ fn branch_ref(default_branch: &str) -> String {
 pub fn branch_exists(repo: &Path, default_branch: &str) -> bool {
     git(
         repo,
-        &["rev-parse", "--verify", "--quiet", &branch_ref(default_branch)],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &branch_ref(default_branch),
+        ],
         GIT_TIMEOUT,
     )
     .is_some_and(|o| o.ok)
@@ -479,7 +525,10 @@ pub fn grep(repo: &Path, default_branch: &str, root: &str, needle: &str) -> Vec<
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .filter_map(|l| l.strip_prefix(&prefix).or_else(|| l.split_once(':').map(|(_, p)| p)))
+        .filter_map(|l| {
+            l.strip_prefix(&prefix)
+                .or_else(|| l.split_once(':').map(|(_, p)| p))
+        })
         .filter(|p| p.to_ascii_lowercase().ends_with(".md"))
         .take(MAX_TREE_ITEMS)
         .map(str::to_string)
@@ -504,9 +553,12 @@ pub fn last_commits(repo: &Path, default_branch: &str, root: &str) -> HashMap<St
     for record in result.stdout.split(RECORD).skip(1) {
         let mut lines = record.lines();
         let Some(header) = lines.next() else { continue };
-        let Some(commit) = parse_commit(header) else { continue };
+        let Some(commit) = parse_commit(header) else {
+            continue;
+        };
         for path in lines.map(str::trim).filter(|p| !p.is_empty()) {
-            out.entry(path.to_string()).or_insert_with(|| commit.clone());
+            out.entry(path.to_string())
+                .or_insert_with(|| commit.clone());
         }
     }
     out
@@ -555,7 +607,11 @@ pub fn read_page(repo: &Path, default_branch: &str, path: &str) -> Option<String
 /// ページの blob sha（`etag`）。無ければ `None`。
 pub fn blob_sha(repo: &Path, default_branch: &str, path: &str) -> Option<String> {
     let target = format!("{}:{path}", branch_ref(default_branch));
-    let out = git(repo, &["rev-parse", "--verify", "--quiet", &target], GIT_TIMEOUT)?;
+    let out = git(
+        repo,
+        &["rev-parse", "--verify", "--quiet", &target],
+        GIT_TIMEOUT,
+    )?;
     if !out.ok {
         return None;
     }
@@ -610,7 +666,12 @@ pub struct PageEdit {
 /// 2. 人のチェックアウトが default_branch を出していて dirty なら 409（ADR-0043 D5 と同じ規則）
 /// 3. 一時 worktree（detach）で書き、`Celeris (human)` としてコミット
 /// 4. default_branch を進める（人が出していて綺麗なら `merge --ff-only`、そうでなければ `update-ref`）
-pub fn commit_page(repo: &Path, default_branch: &str, temp_dir: &Path, edit: &PageEdit) -> WriteOutcome {
+pub fn commit_page(
+    repo: &Path,
+    default_branch: &str,
+    temp_dir: &Path,
+    edit: &PageEdit,
+) -> WriteOutcome {
     if !branch_exists(repo, default_branch) {
         return WriteOutcome::Failed {
             detail: format!("既定のブランチ {default_branch} がありません"),
@@ -626,11 +687,14 @@ pub fn commit_page(repo: &Path, default_branch: &str, temp_dir: &Path, edit: &Pa
     }
 
     let reference = branch_ref(default_branch);
-    let Some(default_sha) = git(repo, &["rev-parse", "--verify", "--quiet", &reference], GIT_TIMEOUT)
-        .filter(|o| o.ok)
-        .map(|o| o.stdout.trim().to_string())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(default_sha) = git(
+        repo,
+        &["rev-parse", "--verify", "--quiet", &reference],
+        GIT_TIMEOUT,
+    )
+    .filter(|o| o.ok)
+    .map(|o| o.stdout.trim().to_string())
+    .filter(|s| !s.is_empty()) else {
         return WriteOutcome::Failed {
             detail: format!("既定のブランチ {default_branch} を読めませんでした"),
         };
@@ -650,7 +714,11 @@ pub fn commit_page(repo: &Path, default_branch: &str, temp_dir: &Path, edit: &Pa
         };
     }
     let temp = temp_dir.to_string_lossy().into_owned();
-    match git(repo, &["worktree", "add", "--detach", &temp, &reference], GIT_WRITE_TIMEOUT) {
+    match git(
+        repo,
+        &["worktree", "add", "--detach", &temp, &reference],
+        GIT_WRITE_TIMEOUT,
+    ) {
         Some(o) if o.ok => {}
         Some(o) => {
             return WriteOutcome::Failed {
@@ -663,8 +731,19 @@ pub fn commit_page(repo: &Path, default_branch: &str, temp_dir: &Path, edit: &Pa
             };
         }
     }
-    let outcome = write_and_advance(repo, temp_dir, default_branch, &default_sha, checked_out, edit);
-    let _ = git(repo, &["worktree", "remove", "--force", &temp], GIT_WRITE_TIMEOUT);
+    let outcome = write_and_advance(
+        repo,
+        temp_dir,
+        default_branch,
+        &default_sha,
+        checked_out,
+        edit,
+    );
+    let _ = git(
+        repo,
+        &["worktree", "remove", "--force", &temp],
+        GIT_WRITE_TIMEOUT,
+    );
     let _ = git(repo, &["worktree", "prune"], GIT_TIMEOUT);
     if temp_dir.exists() {
         let _ = std::fs::remove_dir_all(temp_dir);
@@ -708,13 +787,20 @@ fn write_and_advance(
             }
         }
     }
-    if !git(temp_dir, &["add", "-A", "--", &edit.path], GIT_WRITE_TIMEOUT).is_some_and(|o| o.ok) {
+    if !git(
+        temp_dir,
+        &["add", "-A", "--", &edit.path],
+        GIT_WRITE_TIMEOUT,
+    )
+    .is_some_and(|o| o.ok)
+    {
         return WriteOutcome::Failed {
             detail: format!("{} を git に載せられませんでした", edit.path),
         };
     }
     // 中身が同じなら何もコミットしない（`git commit` は「何も変わっていない」で失敗する）。
-    let nothing = git(temp_dir, &["diff", "--cached", "--quiet"], GIT_TIMEOUT).is_some_and(|o| o.ok);
+    let nothing =
+        git(temp_dir, &["diff", "--cached", "--quiet"], GIT_TIMEOUT).is_some_and(|o| o.ok);
     if nothing {
         return WriteOutcome::Written {
             sha: default_sha.to_string(),
@@ -727,7 +813,16 @@ fn write_and_advance(
     let email = format!("user.email={DOCS_AUTHOR_EMAIL}");
     match git(
         temp_dir,
-        &["-c", &author, "-c", &email, "commit", "-q", "-m", &edit.message],
+        &[
+            "-c",
+            &author,
+            "-c",
+            &email,
+            "commit",
+            "-q",
+            "-m",
+            &edit.message,
+        ],
         GIT_WRITE_TIMEOUT,
     ) {
         Some(o) if o.ok => {}
@@ -794,7 +889,8 @@ pub fn init_docs_repo(dir: &Path, project_title: &str) -> Result<(), String> {
     {
         return Err(format!("{} は空ではありません", dir.display()));
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("{} を作れませんでした: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("{} を作れませんでした: {e}", dir.display()))?;
     match git(dir, &["init", "-q", "-b", "main"], GIT_WRITE_TIMEOUT) {
         Some(o) if o.ok => {}
         Some(o) => return Err(format!("git init に失敗しました: {}", o.why())),
@@ -810,7 +906,8 @@ pub fn init_docs_repo(dir: &Path, project_title: &str) -> Result<(), String> {
         "# {title}\n\nこの案件の文書はここ（`docs/`）に Markdown で置く。\
          題名は 1 行目の `# `、タスクとの紐付けは front matter の `tasks: [<タスク id>]`。\n"
     );
-    std::fs::write(&readme, body.as_bytes()).map_err(|e| format!("{INITIAL_PAGE} を書けませんでした: {e}"))?;
+    std::fs::write(&readme, body.as_bytes())
+        .map_err(|e| format!("{INITIAL_PAGE} を書けませんでした: {e}"))?;
     if !git(dir, &["add", "-A"], GIT_WRITE_TIMEOUT).is_some_and(|o| o.ok) {
         return Err("git add に失敗しました".to_string());
     }
@@ -818,7 +915,16 @@ pub fn init_docs_repo(dir: &Path, project_title: &str) -> Result<(), String> {
     let email = format!("user.email={DOCS_AUTHOR_EMAIL}");
     match git(
         dir,
-        &["-c", &author, "-c", &email, "commit", "-q", "-m", "docs: 文書リポジトリを作る"],
+        &[
+            "-c",
+            &author,
+            "-c",
+            &email,
+            "commit",
+            "-q",
+            "-m",
+            "docs: 文書リポジトリを作る",
+        ],
         GIT_WRITE_TIMEOUT,
     ) {
         Some(o) if o.ok => Ok(()),
@@ -834,8 +940,15 @@ pub fn docs_repo_dir(base: &Path, title: &str, project_id: &str) -> PathBuf {
     if !first.exists() || first.join(".git").exists() {
         return first;
     }
-    let tail: String = project_id.to_ascii_lowercase().chars().rev().take(8).collect::<Vec<_>>()
-        .into_iter().rev().collect();
+    let tail: String = project_id
+        .to_ascii_lowercase()
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     base.join(format!("{slug}-{tail}"))
 }
 
@@ -868,7 +981,10 @@ mod tests {
             resolve_relative("docs", "docs/a/b.md", "../c.md").as_deref(),
             Some("docs/c.md")
         );
-        assert_eq!(resolve_relative("docs", "docs/a.md", "b.md").as_deref(), Some("docs/b.md"));
+        assert_eq!(
+            resolve_relative("docs", "docs/a.md", "b.md").as_deref(),
+            Some("docs/b.md")
+        );
         assert_eq!(resolve_relative("docs", "docs/a.md", "../../etc.md"), None);
         assert_eq!(resolve_relative("docs", "docs/a.md", "../out.md"), None);
     }
@@ -904,7 +1020,10 @@ mod tests {
     #[test]
     fn merging_front_matter_keeps_what_is_there_and_adds_the_task() {
         let merged = merge_front_matter("# 答え\n\n本文\n", Some("答え"), "01J1");
-        assert!(merged.starts_with("---\ntitle: 答え\ntasks: [01J1]\n---\n"), "{merged}");
+        assert!(
+            merged.starts_with("---\ntitle: 答え\ntasks: [01J1]\n---\n"),
+            "{merged}"
+        );
         assert!(merged.ends_with("# 答え\n\n本文\n"), "{merged}");
         // 既に front matter があれば混ぜる（同じタスクは 2 回足さない）。
         let again = merge_front_matter(&merged, Some("別"), "01J1");
@@ -914,7 +1033,10 @@ mod tests {
         assert!(two.contains("tasks: [01J1, 01J2]"), "{two}");
         // `tags` は残る。
         let tagged = merge_front_matter("---\ntags: [a]\n---\n本文\n", Some("題"), "01J3");
-        assert!(tagged.contains("tags: [a]") && tagged.contains("tasks: [01J3]"), "{tagged}");
+        assert!(
+            tagged.contains("tags: [a]") && tagged.contains("tasks: [01J3]"),
+            "{tagged}"
+        );
     }
 
     #[test]
@@ -927,9 +1049,15 @@ mod tests {
             "/projects/P1/docs",
         );
         assert!(!html.contains("<script"), "{html}");
-        assert!(html.contains("alert(1)") || !html.contains("script"), "{html}");
+        assert!(
+            html.contains("alert(1)") || !html.contains("script"),
+            "{html}"
+        );
         assert!(html.contains("href=\"/tasks/01J1\""), "{html}");
-        assert!(html.contains("/projects/P1/docs?path=docs/sub/other.md"), "{html}");
+        assert!(
+            html.contains("/projects/P1/docs?path=docs/sub/other.md"),
+            "{html}"
+        );
         // 根の外に出る `[[…]]` はリンクにしない。
         assert!(html.contains("[[../out.md]]"), "{html}");
         assert!(html.contains("<table>"), "{html}");
@@ -980,13 +1108,18 @@ mod tests {
             },
         );
         let etag = match created {
-            WriteOutcome::Written { etag, unchanged, .. } => {
+            WriteOutcome::Written {
+                etag, unchanged, ..
+            } => {
                 assert!(!unchanged);
                 etag.expect("etag")
             }
             other => panic!("{other:?}"),
         };
-        assert_eq!(read_page(&repo, "main", "docs/a.md").as_deref(), Some("# A\n"));
+        assert_eq!(
+            read_page(&repo, "main", "docs/a.md").as_deref(),
+            Some("# A\n")
+        );
 
         // 既にあるのに etag が無ければ 409。
         assert!(matches!(
@@ -1053,7 +1186,10 @@ mod tests {
                 overwrite: false,
             },
         );
-        assert!(matches!(deleted, WriteOutcome::Written { etag: None, .. }), "{deleted:?}");
+        assert!(
+            matches!(deleted, WriteOutcome::Written { etag: None, .. }),
+            "{deleted:?}"
+        );
         assert!(read_page(&repo, "main", "docs/a.md").is_none());
         // 無いものは消せない。
         assert_eq!(
@@ -1116,15 +1252,24 @@ mod tests {
                     overwrite: false,
                 },
             );
-            assert!(matches!(outcome, WriteOutcome::Written { .. }), "{path}: {outcome:?}");
+            assert!(
+                matches!(outcome, WriteOutcome::Written { .. }),
+                "{path}: {outcome:?}"
+            );
         }
         let mut paths = list(&repo, "main", "docs");
         paths.sort();
-        assert_eq!(paths, vec!["docs/README.md", "docs/one.md", "docs/sub/two.md"]);
+        assert_eq!(
+            paths,
+            vec!["docs/README.md", "docs/one.md", "docs/sub/two.md"]
+        );
         assert_eq!(grep(&repo, "main", "docs", "調査"), vec!["docs/one.md"]);
         assert!(grep(&repo, "main", "docs", "見つからない").is_empty());
         let last = last_commits(&repo, "main", "docs");
-        assert_eq!(last.get("docs/one.md").map(|c| c.subject.as_str()), Some("docs: docs/one.md"));
+        assert_eq!(
+            last.get("docs/one.md").map(|c| c.subject.as_str()),
+            Some("docs: docs/one.md")
+        );
         assert!(last.get("docs/one.md").is_some_and(|c| c.at.contains('T')));
     }
 }

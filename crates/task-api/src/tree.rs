@@ -19,9 +19,9 @@ use task_core::{Task, TaskStore};
 use task_ops::workspace::{WorktreeMarker, WorktreeMarkerRepo};
 
 use crate::handlers::{ApiResult, Params, json_response};
-use crate::query::parse_task_id;
 use crate::problem::{ApiProblem, store_problem};
 use crate::query::QueryParams;
+use crate::query::parse_task_id;
 use crate::state::ApiState;
 use crate::types::{TreeEntry, TreeFileView, TreeRepoView, TreeView};
 
@@ -49,7 +49,11 @@ pub(crate) fn marker_repos(marker: &WorktreeMarker) -> Vec<WorktreeMarkerRepo> {
     }
     vec![WorktreeMarkerRepo {
         name: "tree".to_string(),
-        kind: if marker.branch.is_empty() { "dir".into() } else { "git".into() },
+        kind: if marker.branch.is_empty() {
+            "dir".into()
+        } else {
+            "git".into()
+        },
         source: marker.repo.clone(),
         dir: marker.dir.clone(),
         branch: Some(marker.branch.clone()).filter(|b| !b.is_empty()),
@@ -72,7 +76,10 @@ fn repo_views(repos: &[WorktreeMarkerRepo]) -> Vec<TreeRepoView> {
 }
 
 /// `?repo=` の解決。省略したら先頭（= ワーカーのカレントディレクトリになったリポジトリ）。
-fn pick_repo(repos: &[WorktreeMarkerRepo], name: Option<&str>) -> Result<WorktreeMarkerRepo, ApiProblem> {
+fn pick_repo(
+    repos: &[WorktreeMarkerRepo],
+    name: Option<&str>,
+) -> Result<WorktreeMarkerRepo, ApiProblem> {
     match name.map(str::trim).filter(|n| !n.is_empty()) {
         None => repos
             .first()
@@ -82,7 +89,9 @@ fn pick_repo(repos: &[WorktreeMarkerRepo], name: Option<&str>) -> Result<Worktre
             .iter()
             .find(|r| r.name == name)
             .cloned()
-            .ok_or_else(|| ApiProblem::file_not_found(format!("repo not found in this task: {name}"))),
+            .ok_or_else(|| {
+                ApiProblem::file_not_found(format!("repo not found in this task: {name}"))
+            }),
     }
 }
 
@@ -94,11 +103,16 @@ fn relative_path(raw: Option<&str>) -> Result<PathBuf, ApiProblem> {
     }
     let path = Path::new(raw);
     let escapes = path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)));
+        || path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        });
     if escapes {
-        return Err(ApiProblem::path_forbidden("path must be relative and must not contain `..`"));
+        return Err(ApiProblem::path_forbidden(
+            "path must be relative and must not contain `..`",
+        ));
     }
     Ok(path.to_path_buf())
 }
@@ -106,9 +120,9 @@ fn relative_path(raw: Option<&str>) -> Result<PathBuf, ApiProblem> {
 /// リポジトリの根（`canonicalize` 済み）。`dir` のリポジトリはシンボリックリンクなので、
 /// 根そのものも解決してから比べる（そうしないと全てのファイルが「外」になる）。
 fn repo_root(repo: &WorktreeMarkerRepo) -> Result<PathBuf, ApiProblem> {
-    Path::new(&repo.dir)
-        .canonicalize()
-        .map_err(|_| ApiProblem::file_not_found(format!("the working tree of {} does not exist", repo.name)))
+    Path::new(&repo.dir).canonicalize().map_err(|_| {
+        ApiProblem::file_not_found(format!("the working tree of {} does not exist", repo.name))
+    })
 }
 
 /// 根 + 相対パスを解決し、根の**外**に出ていないことを確かめる（シンボリックリンクの脱出も 403）。
@@ -118,7 +132,9 @@ fn resolve_within(root: &Path, rel: &Path) -> Result<PathBuf, ApiProblem> {
         .canonicalize()
         .map_err(|_| ApiProblem::file_not_found("path does not exist"))?;
     if !canonical.starts_with(root) {
-        return Err(ApiProblem::path_forbidden("path resolves outside the working tree"));
+        return Err(ApiProblem::path_forbidden(
+            "path resolves outside the working tree",
+        ));
     }
     Ok(canonical)
 }
@@ -152,7 +168,8 @@ async fn tree(
                 return Err(ApiProblem::path_forbidden("path is not a directory"));
             }
             let mut entries = Vec::new();
-            let read = std::fs::read_dir(&dir).map_err(|_| ApiProblem::file_not_found("directory could not be read"))?;
+            let read = std::fs::read_dir(&dir)
+                .map_err(|_| ApiProblem::file_not_found("directory could not be read"))?;
             for entry in read.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 // `metadata()` はリンクを辿る（辿れなければ `other`）。
@@ -161,12 +178,19 @@ async fn tree(
                     Ok(m) if m.is_file() => ("file", Some(m.len())),
                     _ => ("other", None),
                 };
-                entries.push(TreeEntry { path: rel_string(&rel, &name), name, kind: kind.to_string(), size });
+                entries.push(TreeEntry {
+                    path: rel_string(&rel, &name),
+                    name,
+                    kind: kind.to_string(),
+                    size,
+                });
             }
             // ディレクトリが先、あとは名前順（決定的）。
             entries.sort_by(|a, b| {
                 let rank = |k: &str| if k == "dir" { 0 } else { 1 };
-                rank(&a.kind).cmp(&rank(&b.kind)).then_with(|| a.name.cmp(&b.name))
+                rank(&a.kind)
+                    .cmp(&rank(&b.kind))
+                    .then_with(|| a.name.cmp(&b.name))
             });
             Ok(TreeView {
                 repo: repo.name.clone(),
@@ -202,7 +226,8 @@ async fn tree_file(
             let repo = pick_repo(&repos, repo_name.as_deref())?;
             let root = repo_root(&repo)?;
             let file = resolve_within(&root, &rel)?;
-            let meta = std::fs::metadata(&file).map_err(|_| ApiProblem::file_not_found("file does not exist"))?;
+            let meta = std::fs::metadata(&file)
+                .map_err(|_| ApiProblem::file_not_found("file does not exist"))?;
             if !meta.is_file() {
                 return Err(ApiProblem::path_forbidden("path is not a regular file"));
             }
@@ -218,7 +243,8 @@ async fn tree_file(
                     text: None,
                 });
             }
-            let bytes = std::fs::read(&file).map_err(|_| ApiProblem::file_not_found("file could not be read"))?;
+            let bytes = std::fs::read(&file)
+                .map_err(|_| ApiProblem::file_not_found("file could not be read"))?;
             let binary = bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
             Ok(TreeFileView {
                 repo: repo.name.clone(),
@@ -226,7 +252,11 @@ async fn tree_file(
                 size,
                 binary,
                 too_large: false,
-                text: if binary { None } else { String::from_utf8(bytes).ok() },
+                text: if binary {
+                    None
+                } else {
+                    String::from_utf8(bytes).ok()
+                },
             })
         })
         .await?;
@@ -241,8 +271,14 @@ mod tests {
     fn relative_paths_reject_escapes() {
         assert_eq!(relative_path(None).expect("none"), PathBuf::new());
         assert_eq!(relative_path(Some("")).expect("empty"), PathBuf::new());
-        assert_eq!(relative_path(Some("src/main.rs")).expect("ok"), PathBuf::from("src/main.rs"));
-        assert_eq!(relative_path(Some("./src")).expect("ok"), PathBuf::from("src"));
+        assert_eq!(
+            relative_path(Some("src/main.rs")).expect("ok"),
+            PathBuf::from("src/main.rs")
+        );
+        assert_eq!(
+            relative_path(Some("./src")).expect("ok"),
+            PathBuf::from("src")
+        );
         for bad in ["..", "../x", "src/../../etc", "/etc/passwd"] {
             assert_eq!(
                 relative_path(Some(bad)).err().map(|p| p.code()),
@@ -260,10 +296,13 @@ mod tests {
         let outside = dir.path().join("secret.txt");
         std::fs::write(&outside, b"nope").unwrap_or_else(|e| panic!("{e}"));
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, root.join("escape.txt")).unwrap_or_else(|e| panic!("{e}"));
+        std::os::unix::fs::symlink(&outside, root.join("escape.txt"))
+            .unwrap_or_else(|e| panic!("{e}"));
         let canonical_root = root.canonicalize().unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
-            resolve_within(&canonical_root, Path::new("escape.txt")).err().map(|p| p.code()),
+            resolve_within(&canonical_root, Path::new("escape.txt"))
+                .err()
+                .map(|p| p.code()),
             Some("path_forbidden")
         );
         std::fs::write(root.join("inside.txt"), b"ok").unwrap_or_else(|e| panic!("{e}"));

@@ -38,7 +38,10 @@ fn env_with_accounts_root() -> (TestEnv, tempfile::TempDir, std::path::PathBuf) 
 /// celeris の代わりに、同じ fs 操作（`.removed/<id>-<unix>` への move）と `in_use` の判定を行うダブルを立てる
 /// （celeris 側の本物の実装とその単体テストは `crates/celeris/src/accounts_admin.rs`）。`in_use` はこのダブルが
 /// 見る集合で、ディスパッチャの `account_in_use` の代わり。
-fn spawn_account_remove_double(root: std::path::PathBuf, in_use: Arc<StdMutex<HashSet<String>>>) -> mpsc::Sender<AdminRequest> {
+fn spawn_account_remove_double(
+    root: std::path::PathBuf,
+    in_use: Arc<StdMutex<HashSet<String>>>,
+) -> mpsc::Sender<AdminRequest> {
     let (tx, mut rx) = mpsc::channel::<AdminRequest>(8);
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
@@ -48,13 +51,22 @@ fn spawn_account_remove_double(root: std::path::PathBuf, in_use: Arc<StdMutex<Ha
                     if !dir.is_dir() {
                         return Err(AccountAdminError::NotFound);
                     }
-                    if in_use.lock().unwrap_or_else(|e| e.into_inner()).contains(&id) {
+                    if in_use
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains(&id)
+                    {
                         return Err(AccountAdminError::InUse);
                     }
                     let removed_dir = root.join(".removed");
-                    std::fs::create_dir_all(&removed_dir).map_err(|e| AccountAdminError::Unavailable(e.to_string()))?;
-                    let dest = removed_dir.join(format!("{id}-{}", time::OffsetDateTime::now_utc().unix_timestamp()));
-                    std::fs::rename(&dir, &dest).map_err(|e| AccountAdminError::Unavailable(e.to_string()))?;
+                    std::fs::create_dir_all(&removed_dir)
+                        .map_err(|e| AccountAdminError::Unavailable(e.to_string()))?;
+                    let dest = removed_dir.join(format!(
+                        "{id}-{}",
+                        time::OffsetDateTime::now_utc().unix_timestamp()
+                    ));
+                    std::fs::rename(&dir, &dest)
+                        .map_err(|e| AccountAdminError::Unavailable(e.to_string()))?;
                     Ok(())
                 })();
                 let _ = reply.send(result);
@@ -65,7 +77,12 @@ fn spawn_account_remove_double(root: std::path::PathBuf, in_use: Arc<StdMutex<Ha
 }
 
 /// `env_with_accounts_root` に `spawn_account_remove_double` を配線したもの。
-fn env_with_accounts_root_and_remove_double() -> (TestEnv, tempfile::TempDir, std::path::PathBuf, Arc<StdMutex<HashSet<String>>>) {
+fn env_with_accounts_root_and_remove_double() -> (
+    TestEnv,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    Arc<StdMutex<HashSet<String>>>,
+) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("claude-accounts");
     std::fs::create_dir_all(&root).unwrap();
@@ -111,7 +128,11 @@ async fn management_routes_all_require_a_token() {
     let resp = send(&app, delete_with("/api/v1/accounts/a/login", &[])).await;
     assert_problem(&resp, 401, "unauthorized");
 
-    let resp = send(&app, post_json("/api/v1/accounts/a/login/code", &json!({"code": "x"}))).await;
+    let resp = send(
+        &app,
+        post_json("/api/v1/accounts/a/login/code", &json!({"code": "x"})),
+    )
+    .await;
     assert_problem(&resp, 401, "unauthorized");
 
     // GET /accounts は読み取りなので token 不要（他のトークン無しの読み取りエンドポイントと同じ扱い）。
@@ -130,19 +151,43 @@ async fn no_accounts_section_yields_null_root_and_unavailable_management() {
     let auth = auth();
 
     // GET は認証ありでも普通に読める（他の読み取りエンドポイントと同じ）。
-    let resp = send(&app, get_with("/api/v1/accounts", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        get_with("/api/v1/accounts", &[("authorization", &auth)]),
+    )
+    .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     let v = resp.json();
     assert_eq!(v["root"], json!(null));
     assert_eq!(v["items"], json!([]));
 
-    let resp = send(&app, post_json_with("/api/v1/accounts", &json!({"id": "a"}), &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/accounts",
+            &json!({"id": "a"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
     assert_problem(&resp, 409, "accounts_unavailable");
 
-    let resp = send(&app, delete_with("/api/v1/accounts/a", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        delete_with("/api/v1/accounts/a", &[("authorization", &auth)]),
+    )
+    .await;
     assert_problem(&resp, 409, "accounts_unavailable");
 
-    let resp = send(&app, post_json_with("/api/v1/accounts/a/check", &json!({}), &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/accounts/a/check",
+            &json!({}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
     assert_problem(&resp, 409, "accounts_unavailable");
 }
 
@@ -153,10 +198,26 @@ async fn create_account_makes_a_directory_and_rejects_duplicates_and_bad_ids() {
     let app = env.router();
     let auth = auth();
 
-    let resp = send(&app, post_json_with("/api/v1/accounts", &json!({"id": "../escape"}), &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/accounts",
+            &json!({"id": "../escape"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
     assert_problem(&resp, 400, "bad_request");
 
-    let resp = send(&app, post_json_with("/api/v1/accounts", &json!({"id": "acct-b"}), &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/accounts",
+            &json!({"id": "acct-b"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
     assert_eq!(resp.status, 201, "{}", resp.text());
     assert_eq!(resp.header("location"), Some("/api/v1/accounts/acct-b"));
     let v = resp.json();
@@ -167,11 +228,23 @@ async fn create_account_makes_a_directory_and_rejects_duplicates_and_bad_ids() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(root.join("acct-b")).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(root.join("acct-b"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o700);
     }
 
-    let resp = send(&app, post_json_with("/api/v1/accounts", &json!({"id": "acct-b"}), &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/accounts",
+            &json!({"id": "acct-b"}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
     assert_problem(&resp, 409, "account_exists");
 }
 
@@ -186,17 +259,37 @@ async fn delete_account_moves_the_directory_to_removed_and_missing_is_404() {
     std::fs::create_dir_all(root.join("acct-b")).unwrap();
     std::fs::write(root.join("acct-b").join(".credentials.json"), "{}").unwrap();
 
-    let resp = send(&app, delete_with("/api/v1/accounts/does-not-exist", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        delete_with(
+            "/api/v1/accounts/does-not-exist",
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
     assert_problem(&resp, 404, "account_not_found");
 
-    let resp = send(&app, delete_with("/api/v1/accounts/acct-b", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        delete_with("/api/v1/accounts/acct-b", &[("authorization", &auth)]),
+    )
+    .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     assert!(!root.join("acct-b").exists());
     let removed_entries: Vec<_> = std::fs::read_dir(root.join(".removed")).unwrap().collect();
     assert_eq!(removed_entries.len(), 1);
     let moved = removed_entries.into_iter().next().unwrap().unwrap().path();
-    assert!(moved.file_name().unwrap().to_string_lossy().starts_with("acct-b-"));
-    assert!(moved.join(".credentials.json").is_file(), "credentials are not deleted, just moved");
+    assert!(
+        moved
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("acct-b-")
+    );
+    assert!(
+        moved.join(".credentials.json").is_file(),
+        "credentials are not deleted, just moved"
+    );
 }
 
 /// `[accounts]` はあるが `admin_tx`（celeris への経路）が無い構成は 409 `accounts_unavailable`（celeris 側で
@@ -208,7 +301,11 @@ async fn delete_account_without_admin_tx_is_accounts_unavailable() {
     let auth = auth();
     std::fs::create_dir_all(root.join("acct-b")).unwrap();
 
-    let resp = send(&app, delete_with("/api/v1/accounts/acct-b", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        delete_with("/api/v1/accounts/acct-b", &[("authorization", &auth)]),
+    )
+    .await;
     assert_problem(&resp, 409, "accounts_unavailable");
     assert!(root.join("acct-b").exists());
 }
@@ -222,7 +319,11 @@ async fn delete_account_in_use_is_conflict() {
     std::fs::create_dir_all(root.join("acct-b")).unwrap();
     in_use.lock().unwrap().insert("acct-b".to_string());
 
-    let resp = send(&app, delete_with("/api/v1/accounts/acct-b", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        delete_with("/api/v1/accounts/acct-b", &[("authorization", &auth)]),
+    )
+    .await;
     assert_problem(&resp, 409, "account_in_use");
     assert!(root.join("acct-b").exists());
 }
@@ -255,7 +356,10 @@ async fn list_accounts_merges_filesystem_snapshot_and_stats() {
             Event::WorkerFinished {
                 run_id: "r1".into(),
                 outcome: "done: ok".into(),
-                usage: Some(task_core::Usage { input_tokens: Some(10), output_tokens: Some(4) }),
+                usage: Some(task_core::Usage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(4),
+                }),
                 role: None,
             },
         ],
@@ -270,7 +374,10 @@ async fn list_accounts_merges_filesystem_snapshot_and_stats() {
         logged_in: true,
         in_use: 1,
         usage: Some(AccountUsageLive {
-            five_hour: Some(task_core::RateWindow { utilization: 0.2, resets_at: 2_000_000_000 }),
+            five_hour: Some(task_core::RateWindow {
+                utilization: 0.2,
+                resets_at: 2_000_000_000,
+            }),
             seven_day: None,
             status: Some("allowed".into()),
             observed_at: 1_900_000_000,
@@ -278,13 +385,20 @@ async fn list_accounts_merges_filesystem_snapshot_and_stats() {
         }),
         score: Some(0.8),
         excluded_reason: None,
-        cooldown: Some(AccountCooldownLive { until: 1_900_000_100, reason: "throttled".into() }),
+        cooldown: Some(AccountCooldownLive {
+            until: 1_900_000_100,
+            reason: "throttled".into(),
+        }),
         last_check: None,
         login_pending: true,
     }];
     env.daemon_tx.send(Some(snap)).unwrap();
 
-    let resp = send(&app, get_with("/api/v1/accounts", &[("authorization", &auth())])).await;
+    let resp = send(
+        &app,
+        get_with("/api/v1/accounts", &[("authorization", &auth())]),
+    )
+    .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     let v = resp.json();
     assert_eq!(v["root"], json!(root.display().to_string()));
@@ -324,7 +438,9 @@ async fn account_admin_unavailable_error_maps_to_409_not_500() {
     tokio::spawn(async move {
         while let Some(req) = admin_rx.recv().await {
             if let AdminRequest::AccountCheck { reply, .. } = req {
-                let _ = reply.send(Err(AccountAdminError::Unavailable("celeris could not do this right now".into())));
+                let _ = reply.send(Err(AccountAdminError::Unavailable(
+                    "celeris could not do this right now".into(),
+                )));
             }
         }
     });
@@ -337,7 +453,15 @@ async fn account_admin_unavailable_error_maps_to_409_not_500() {
     });
     let app = env.router();
 
-    let resp = send(&app, post_json_with("/api/v1/accounts/a/check", &json!({}), &[("authorization", &auth())])).await;
+    let resp = send(
+        &app,
+        post_json_with(
+            "/api/v1/accounts/a/check",
+            &json!({}),
+            &[("authorization", &auth())],
+        ),
+    )
+    .await;
     assert_problem(&resp, 409, "accounts_unavailable");
 }
 
@@ -391,7 +515,11 @@ async fn provider_admin_round_trips_account_pool_and_validates_the_adapter() {
     // PATCH で false に戻せる。
     let resp = send(
         &app,
-        patch_json_with("/api/v1/providers/pool", &json!({"account_pool": false}), &[("authorization", &auth)]),
+        patch_json_with(
+            "/api/v1/providers/pool",
+            &json!({"account_pool": false}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
@@ -401,13 +529,21 @@ async fn provider_admin_round_trips_account_pool_and_validates_the_adapter() {
     // account_pool だけを true に戻すと claude-code のままなので通る。fake のプロバイダで確かめる）。
     let resp = send(
         &app,
-        post_json_with("/api/v1/providers", &json!({"id": "plain", "adapter": "fake"}), &[("authorization", &auth)]),
+        post_json_with(
+            "/api/v1/providers",
+            &json!({"id": "plain", "adapter": "fake"}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_eq!(resp.status, 201, "{}", resp.text());
     let resp = send(
         &app,
-        patch_json_with("/api/v1/providers/plain", &json!({"account_pool": true}), &[("authorization", &auth)]),
+        patch_json_with(
+            "/api/v1/providers/plain",
+            &json!({"account_pool": true}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_problem(&resp, 422, "invalid_provider");
@@ -445,13 +581,21 @@ async fn provider_admin_account_pool_requires_the_accounts_section() {
     // 既存のプロバイダを PATCH で account_pool = true にする場合も同様に拒否する。
     let resp = send(
         &app,
-        post_json_with("/api/v1/providers", &json!({"id": "plain", "adapter": "claude-code"}), &[("authorization", &auth)]),
+        post_json_with(
+            "/api/v1/providers",
+            &json!({"id": "plain", "adapter": "claude-code"}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_eq!(resp.status, 201, "{}", resp.text());
     let resp = send(
         &app,
-        patch_json_with("/api/v1/providers/plain", &json!({"account_pool": true}), &[("authorization", &auth)]),
+        patch_json_with(
+            "/api/v1/providers/plain",
+            &json!({"account_pool": true}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_problem(&resp, 422, "invalid_provider");
@@ -496,17 +640,28 @@ async fn create_account_with_codex_adapter_uses_the_codex_root_and_list_shows_bo
     // Also create a claude-code account (default adapter) to check the merged listing.
     let resp = send(
         &app,
-        post_json_with("/api/v1/accounts", &json!({"id": "claude-a"}), &[("authorization", &auth)]),
+        post_json_with(
+            "/api/v1/accounts",
+            &json!({"id": "claude-a"}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_eq!(resp.status, 201, "{}", resp.text());
     assert_eq!(resp.json()["adapter"], json!("claude-code"));
 
-    let resp = send(&app, get_with("/api/v1/accounts", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        get_with("/api/v1/accounts", &[("authorization", &auth)]),
+    )
+    .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     let v = resp.json();
     assert_eq!(v["root"], json!(claude_root.display().to_string()));
-    assert_eq!(v["roots"]["claude-code"], json!(claude_root.display().to_string()));
+    assert_eq!(
+        v["roots"]["claude-code"],
+        json!(claude_root.display().to_string())
+    );
     assert_eq!(v["roots"]["codex"], json!(codex_root.display().to_string()));
     let items = v["items"].as_array().unwrap();
     assert_eq!(items.len(), 2, "{items:?}");
@@ -586,14 +741,22 @@ async fn management_endpoints_forward_the_adapter_query_parameter() {
 
     let resp = send(
         &app,
-        post_json_with("/api/v1/accounts/a/check?adapter=codex", &json!({}), &[("authorization", &auth)]),
+        post_json_with(
+            "/api/v1/accounts/a/check?adapter=codex",
+            &json!({}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_eq!(resp.status, 404, "{}", resp.text());
 
     let resp = send(
         &app,
-        post_json_with("/api/v1/accounts/a/login?adapter=codex", &json!({}), &[("authorization", &auth)]),
+        post_json_with(
+            "/api/v1/accounts/a/login?adapter=codex",
+            &json!({}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
@@ -602,10 +765,24 @@ async fn management_endpoints_forward_the_adapter_query_parameter() {
     assert_eq!(v["user_code"], json!("ABCD-EFGHI"));
     assert_eq!(v["url"], json!("https://auth.openai.com/codex/device"));
 
-    let resp = send(&app, delete_with("/api/v1/accounts/a/login?adapter=codex", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        delete_with(
+            "/api/v1/accounts/a/login?adapter=codex",
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
 
-    let resp = send(&app, delete_with("/api/v1/accounts/a?adapter=codex", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        delete_with(
+            "/api/v1/accounts/a?adapter=codex",
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
     assert_eq!(resp.status, 404, "{}", resp.text());
 
     let seen = seen_adapters.lock().unwrap().clone();
@@ -656,7 +833,11 @@ async fn unknown_adapter_query_value_is_bad_request() {
 
     let resp = send(
         &app,
-        post_json_with("/api/v1/accounts/a/check?adapter=bogus", &json!({}), &[("authorization", &auth)]),
+        post_json_with(
+            "/api/v1/accounts/a/check?adapter=bogus",
+            &json!({}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_problem(&resp, 400, "bad_request");

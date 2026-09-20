@@ -9,11 +9,18 @@ use common::*;
 use serde_json::{Value, json};
 
 fn g(path: &str) -> axum::http::Request<axum::body::Body> {
-    get_with(path, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    get_with(
+        path,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn p(path: &str, body: &Value) -> axum::http::Request<axum::body::Body> {
-    post_json_with(path, body, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    post_json_with(
+        path,
+        body,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn env_with_memory(dir: &std::path::Path) -> TestEnv {
@@ -25,7 +32,10 @@ fn env_with_memory(dir: &std::path::Path) -> TestEnv {
 }
 
 fn env_without_memory() -> TestEnv {
-    TestEnv::with(EnvOptions { token: Some(TOKEN.into()), ..Default::default() })
+    TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        ..Default::default()
+    })
 }
 
 async fn seed_secretary(app: &axum::Router) {
@@ -51,7 +61,11 @@ async fn missing_files_read_as_empty_and_paths_are_returned() {
     assert_eq!(body["project"], Value::Null);
     assert_eq!(
         body["notes_path"],
-        memory_dir.path().join("secretary/notes.md").to_string_lossy().into_owned()
+        memory_dir
+            .path()
+            .join("secretary/notes.md")
+            .to_string_lossy()
+            .into_owned()
     );
     assert_eq!(body["project_path"], Value::Null);
 }
@@ -62,7 +76,11 @@ async fn existing_notes_and_a_projects_drawer_are_returned_in_full() {
     std::fs::create_dir_all(memory_dir.path().join("secretary/projects")).expect("mkdir");
     let long = "あ".repeat(9_000);
     std::fs::write(memory_dir.path().join("secretary/notes.md"), &long).expect("write");
-    std::fs::write(memory_dir.path().join("secretary/projects/P1.md"), "project notes").expect("write");
+    std::fs::write(
+        memory_dir.path().join("secretary/projects/P1.md"),
+        "project notes",
+    )
+    .expect("write");
     let env = env_with_memory(memory_dir.path());
     let app = env.router();
     seed_secretary(&app).await;
@@ -78,7 +96,11 @@ async fn existing_notes_and_a_projects_drawer_are_returned_in_full() {
     assert_eq!(body["project"], "project notes");
     assert_eq!(
         body["project_path"],
-        memory_dir.path().join("secretary/projects/P1.md").to_string_lossy().into_owned()
+        memory_dir
+            .path()
+            .join("secretary/projects/P1.md")
+            .to_string_lossy()
+            .into_owned()
     );
 }
 
@@ -109,6 +131,10 @@ async fn there_is_no_write_endpoint() {
     let app = env.router();
     seed_secretary(&app).await;
 
-    let resp = send(&app, p("/api/v1/org/secretary/memory", &json!({"notes": "x"}))).await;
+    let resp = send(
+        &app,
+        p("/api/v1/org/secretary/memory", &json!({"notes": "x"})),
+    )
+    .await;
     assert_eq!(resp.status.as_u16(), 405, "{}", resp.text());
 }

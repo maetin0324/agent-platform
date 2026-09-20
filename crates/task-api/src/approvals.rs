@@ -15,7 +15,9 @@ use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::approval::{Approval, ApprovalId, ApprovalStore, Decision, StandingRule, StandingRuleId};
+use task_core::approval::{
+    Approval, ApprovalId, ApprovalStore, Decision, StandingRule, StandingRuleId,
+};
 use task_core::{ProjectId, SqliteStore};
 use task_ops::approval::Scope;
 use time::OffsetDateTime;
@@ -73,19 +75,29 @@ pub struct StandingRuleCreateBody {
 }
 
 fn approval_not_found(id: &str) -> ApiProblem {
-    ApiProblem::new(StatusCode::NOT_FOUND, "approval_not_found", format!("no approval {id}"))
+    ApiProblem::new(
+        StatusCode::NOT_FOUND,
+        "approval_not_found",
+        format!("no approval {id}"),
+    )
 }
 
 fn parse_approval_id(raw: &str) -> Result<ApprovalId, ApiProblem> {
-    raw.parse::<ApprovalId>().map_err(|_| approval_not_found(raw))
+    raw.parse::<ApprovalId>()
+        .map_err(|_| approval_not_found(raw))
 }
 
 fn standing_rule_not_found(id: &str) -> ApiProblem {
-    ApiProblem::new(StatusCode::NOT_FOUND, "standing_rule_not_found", format!("no standing rule {id}"))
+    ApiProblem::new(
+        StatusCode::NOT_FOUND,
+        "standing_rule_not_found",
+        format!("no standing rule {id}"),
+    )
 }
 
 fn parse_standing_rule_id(raw: &str) -> Result<StandingRuleId, ApiProblem> {
-    raw.parse::<StandingRuleId>().map_err(|_| standing_rule_not_found(raw))
+    raw.parse::<StandingRuleId>()
+        .map_err(|_| standing_rule_not_found(raw))
 }
 
 /// ADR-0033 D5: スナップショットに載せる未決定の認可の件数（`GET /daemon` から呼ぶ）。
@@ -96,7 +108,10 @@ pub(crate) fn approvals_pending(store: &SqliteStore) -> u32 {
         .unwrap_or(0)
 }
 
-pub(crate) async fn list_approvals(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
+pub(crate) async fn list_approvals(
+    State(state): State<ApiState>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     let query = QueryParams::parse(raw.as_deref(), &["pending", "project", "node"])?;
     // R5（Phase 27）: `pending=true` は未決定だけ、`pending=false` は**決定済みだけ**、省略で全件。
     let pending = query.bool("pending")?;
@@ -140,8 +155,15 @@ pub(crate) async fn decide(
             let Some(approval) = store.approval_get(approval_id).map_err(store_problem)? else {
                 return Err(approval_not_found(&approval_id.to_string()));
             };
-            task_ops::approval::decide(store, approval, decision, payload.answer, scope, OffsetDateTime::now_utc())
-                .map_err(|e| ops_problem(store, e, Some("decide")))
+            task_ops::approval::decide(
+                store,
+                approval,
+                decision,
+                payload.answer,
+                scope,
+                OffsetDateTime::now_utc(),
+            )
+            .map_err(|e| ops_problem(store, e, Some("decide")))
         })
         .await?;
     tracing::info!(
@@ -161,11 +183,18 @@ pub(crate) async fn decide(
     ))
 }
 
-pub(crate) async fn list_standing_rules(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
+pub(crate) async fn list_standing_rules(
+    State(state): State<ApiState>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     let query = QueryParams::parse(raw.as_deref(), &["node"])?;
     let node_id = query.single("node")?.map(str::to_string);
     let items = state
-        .blocking(move |store| store.standing_rule_list(node_id.as_deref()).map_err(store_problem))
+        .blocking(move |store| {
+            store
+                .standing_rule_list(node_id.as_deref())
+                .map_err(store_problem)
+        })
         .await?;
     Ok(json_response(StatusCode::OK, &StandingRuleList { items }))
 }
@@ -180,10 +209,12 @@ pub(crate) async fn create_standing_rule(
     require_admin(&state, &headers)?;
     let payload: StandingRuleCreateBody = read_json(body, false).await?;
     if payload.rule.trim().is_empty() {
-        return Err(ApiProblem::validation(vec![crate::types::ValidationError {
-            field: Some("rule".to_string()),
-            message: "rule must not be blank".to_string(),
-        }]));
+        return Err(ApiProblem::validation(vec![
+            crate::types::ValidationError {
+                field: Some("rule".to_string()),
+                message: "rule must not be blank".to_string(),
+            },
+        ]));
     }
     let rule = StandingRule {
         id: StandingRuleId::new(),
@@ -223,7 +254,9 @@ pub(crate) async fn delete_standing_rule(
             Ok(())
         })
         .await?;
-    Ok(axum::response::IntoResponse::into_response(StatusCode::NO_CONTENT))
+    Ok(axum::response::IntoResponse::into_response(
+        StatusCode::NO_CONTENT,
+    ))
 }
 
 pub(crate) fn routes() -> axum::Router<ApiState> {
@@ -231,6 +264,9 @@ pub(crate) fn routes() -> axum::Router<ApiState> {
     axum::Router::new()
         .route("/api/v1/approvals", get(list_approvals))
         .route("/api/v1/approvals/{id}/decide", post(decide))
-        .route("/api/v1/standing-rules", get(list_standing_rules).post(create_standing_rule))
+        .route(
+            "/api/v1/standing-rules",
+            get(list_standing_rules).post(create_standing_rule),
+        )
         .route("/api/v1/standing-rules/{id}", delete(delete_standing_rule))
 }

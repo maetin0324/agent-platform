@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use task_api::types::{ReleaseChanges, ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseVerify};
+use task_api::types::{
+    ReleaseChanges, ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseVerify,
+};
 use task_api::{ReleasePromoteError, ReleaseSource, ReleasesFs};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -83,7 +85,11 @@ impl ReleaseSource for FsReleases {
 /// git が無い・リポジトリが無い・ブランチが無い・時間切れなら空。
 fn branch_commits(repo: &Path, branch: &str, base: Option<&str>) -> Vec<String> {
     // ブランチ名・sha に変な文字が混じっていたら走らせない。
-    let safe = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/_-.".contains(c));
+    let safe = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "/_-.".contains(c))
+    };
     if !repo.is_dir() || !safe(branch) {
         return Vec::new();
     }
@@ -238,7 +244,8 @@ fn git_status(repo: &Path, args: &[&str]) -> Option<i32> {
 
 /// そのディレクトリが git リポジトリで、`main` という commit を持っているか。
 fn git_has_main(repo: &Path) -> bool {
-    repo.is_dir() && git_status(repo, &["rev-parse", "--verify", "--quiet", "main^{commit}"]) == Some(0)
+    repo.is_dir()
+        && git_status(repo, &["rev-parse", "--verify", "--quiet", "main^{commit}"]) == Some(0)
 }
 
 /// ADR-0041 D3: `<sha>` が `main` の祖先か。分からなければ `None`（一覧は落とさない）。
@@ -255,7 +262,10 @@ fn on_main(repo: &Path, sha: &str) -> Option<bool> {
 /// （`base` が**いまの** `current` と違えば、この一覧は「いま昇格したら何が変わるか」ではない）。
 fn read_changes(dir: &Path, current: Option<&str>) -> Option<ReleaseChanges> {
     let raw = read_json(&dir.join("changes.json"))?;
-    let base = raw.get("base").and_then(serde_json::Value::as_str).map(str::to_string);
+    let base = raw
+        .get("base")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let files = raw.get("files").and_then(serde_json::Value::as_array);
     let sensitive = raw
         .get("sensitive")
@@ -331,11 +341,22 @@ fn read_release(
         schema_version: field(&manifest, "schema_version")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok()),
-        gate_ok: field(&gate, "ok").and_then(|v| v.as_bool()).unwrap_or(false),
+        gate_ok: field(&gate, "ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         verify: verify.as_ref().map(|v| ReleaseVerify {
-            ok: v.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false),
-            live_ok: v.get("live_ok").and_then(serde_json::Value::as_bool).unwrap_or(false),
-            at: v.get("at").and_then(serde_json::Value::as_str).map(str::to_string),
+            ok: v
+                .get("ok")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            live_ok: v
+                .get("live_ok")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            at: v
+                .get("at")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
         }),
         promoted_at: as_string(field(&promoted, "promoted_at")),
         on_main: repo.and_then(|r| on_main(r, &full_sha)),
@@ -369,7 +390,10 @@ fn sh_quote(s: &str) -> String {
 ///
 /// 昇格は**この celeris 自身を drain させうる**（ADR-0040 D4）。だから `promote.sh` は celeris の
 /// 子プロセスとして待たず、`setsid` で新しいセッションに切り離して孤児にする（親が消えても走り続ける）。
-pub fn start_promote(root: &Path, sha12: &str) -> Result<ReleasePromoteAccepted, ReleasePromoteError> {
+pub fn start_promote(
+    root: &Path,
+    sha12: &str,
+) -> Result<ReleasePromoteAccepted, ReleasePromoteError> {
     if !valid_sha12(sha12) {
         return Err(ReleasePromoteError::NotFound);
     }
@@ -388,12 +412,16 @@ pub fn start_promote(root: &Path, sha12: &str) -> Result<ReleasePromoteAccepted,
     if !verified {
         return Err(ReleasePromoteError::NotVerified(match verify {
             None => format!("{sha12} has no verify.json — run scripts/selfdeploy/verify.sh first"),
-            Some(_) => format!("verify.json of {sha12} is not ok — there is no --force (ADR-0040 D2)"),
+            Some(_) => {
+                format!("verify.json of {sha12} is not ok — there is no --force (ADR-0040 D2)")
+            }
         }));
     }
 
     // 2. 既に current か。
-    let current = root.parent().and_then(|h| link_target_name(&h.join("current")));
+    let current = root
+        .parent()
+        .and_then(|h| link_target_name(&h.join("current")));
     if current.as_deref() == Some(sha12) {
         return Err(ReleasePromoteError::AlreadyCurrent);
     }
@@ -470,10 +498,20 @@ mod tests {
     use super::*;
 
     /// `<root>/<sha>/` を作り、渡した JSON を置く（`None` はファイルを作らない）。
-    fn release(root: &Path, sha: &str, manifest: Option<&str>, gate: Option<&str>, verify: Option<&str>) {
+    fn release(
+        root: &Path,
+        sha: &str,
+        manifest: Option<&str>,
+        gate: Option<&str>,
+        verify: Option<&str>,
+    ) {
         let dir = root.join(sha);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        for (name, body) in [("manifest.json", manifest), ("gate.json", gate), ("verify.json", verify)] {
+        for (name, body) in [
+            ("manifest.json", manifest),
+            ("gate.json", gate),
+            ("verify.json", verify),
+        ] {
             if let Some(body) = body {
                 std::fs::write(dir.join(name), body).expect("write");
             }
@@ -486,7 +524,11 @@ mod tests {
         let scripts = root.join(sha).join("scripts");
         std::fs::create_dir_all(&scripts).expect("mkdir");
         let script = scripts.join("promote.sh");
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '{marker} %s\\n' \"$1\"\nsleep 2\n")).expect("write");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '{marker} %s\\n' \"$1\"\nsleep 2\n"),
+        )
+        .expect("write");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
@@ -553,14 +595,20 @@ mod tests {
             None,
         );
         // `~/.local/celeris/current -> releases/aaaaaaaaaaaa`（releases_dir の親に張る）。
-        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current")).expect("symlink");
-        std::os::unix::fs::symlink("releases/bbbbbbbbbbbb", dir.path().join("previous")).expect("symlink");
+        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current"))
+            .expect("symlink");
+        std::os::unix::fs::symlink("releases/bbbbbbbbbbbb", dir.path().join("previous"))
+            .expect("symlink");
 
         let scanned = scan(&root, None);
         assert_eq!(scanned.current.as_deref(), Some("aaaaaaaaaaaa"));
         assert_eq!(scanned.previous.as_deref(), Some("bbbbbbbbbbbb"));
         assert_eq!(
-            scanned.items.iter().map(|i| i.sha12.as_str()).collect::<Vec<_>>(),
+            scanned
+                .items
+                .iter()
+                .map(|i| i.sha12.as_str())
+                .collect::<Vec<_>>(),
             ["bbbbbbbbbbbb", "aaaaaaaaaaaa"],
             "built_at の新しい順"
         );
@@ -584,7 +632,13 @@ mod tests {
     #[test]
     fn broken_json_and_build_directories_do_not_break_the_scan() {
         let (_dir, root) = env();
-        release(&root, "cccccccccccc", Some("{ this is not json"), None, None);
+        release(
+            &root,
+            "cccccccccccc",
+            Some("{ this is not json"),
+            None,
+            None,
+        );
         // `.build` / `.cargo-target` / `<sha>.partial` は一覧に出ない。
         std::fs::create_dir_all(root.join(".build").join("dddddddddddd")).expect("mkdir");
         std::fs::create_dir_all(root.join(".cargo-target")).expect("mkdir");
@@ -617,32 +671,59 @@ mod tests {
     fn promotion_is_refused_for_unknown_unverified_current_and_running_releases() {
         let (dir, root) = env();
         // 知らない sha / 形が違う sha。
-        assert_eq!(start_promote(&root, "aaaaaaaaaaaa"), Err(ReleasePromoteError::NotFound));
-        assert_eq!(start_promote(&root, "../etc"), Err(ReleasePromoteError::NotFound));
+        assert_eq!(
+            start_promote(&root, "aaaaaaaaaaaa"),
+            Err(ReleasePromoteError::NotFound)
+        );
+        assert_eq!(
+            start_promote(&root, "../etc"),
+            Err(ReleasePromoteError::NotFound)
+        );
 
         // verify.json が無い。
-        release(&root, "aaaaaaaaaaaa", Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
+        release(
+            &root,
+            "aaaaaaaaaaaa",
+            Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
         assert!(matches!(
             start_promote(&root, "aaaaaaaaaaaa"),
             Err(ReleasePromoteError::NotVerified(_))
         ));
         // verify.json は在るが ok ではない。
-        std::fs::write(root.join("aaaaaaaaaaaa").join("verify.json"), r#"{"ok":false,"live_ok":false}"#)
-            .expect("write");
+        std::fs::write(
+            root.join("aaaaaaaaaaaa").join("verify.json"),
+            r#"{"ok":false,"live_ok":false}"#,
+        )
+        .expect("write");
         assert!(matches!(
             start_promote(&root, "aaaaaaaaaaaa"),
             Err(ReleasePromoteError::NotVerified(_))
         ));
 
         // 検証済みだが既に current。
-        std::fs::write(root.join("aaaaaaaaaaaa").join("verify.json"), r#"{"ok":true,"live_ok":true}"#)
-            .expect("write");
-        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current")).expect("symlink");
-        assert_eq!(start_promote(&root, "aaaaaaaaaaaa"), Err(ReleasePromoteError::AlreadyCurrent));
+        std::fs::write(
+            root.join("aaaaaaaaaaaa").join("verify.json"),
+            r#"{"ok":true,"live_ok":true}"#,
+        )
+        .expect("write");
+        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current"))
+            .expect("symlink");
+        assert_eq!(
+            start_promote(&root, "aaaaaaaaaaaa"),
+            Err(ReleasePromoteError::AlreadyCurrent)
+        );
 
         // current ではないが `scripts/promote.sh` が無い（Phase 48 より前に作られたリリース）。
-        release(&root, "bbbbbbbbbbbb", Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#), Some(r#"{"ok":true}"#),
-            Some(r#"{"ok":true,"live_ok":true}"#));
+        release(
+            &root,
+            "bbbbbbbbbbbb",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#),
+        );
         assert!(matches!(
             start_promote(&root, "bbbbbbbbbbbb"),
             Err(ReleasePromoteError::Unavailable(_))
@@ -652,9 +733,15 @@ mod tests {
         let scripts = root.join("bbbbbbbbbbbb").join("scripts");
         std::fs::create_dir_all(&scripts).expect("mkdir");
         std::fs::write(scripts.join("promote.sh"), "#!/bin/sh\nexit 0\n").expect("write");
-        std::fs::write(root.join("bbbbbbbbbbbb").join("promote.lock"), format!("{}\n", std::process::id()))
-            .expect("write");
-        assert_eq!(start_promote(&root, "bbbbbbbbbbbb"), Err(ReleasePromoteError::AlreadyPromoting));
+        std::fs::write(
+            root.join("bbbbbbbbbbbb").join("promote.lock"),
+            format!("{}\n", std::process::id()),
+        )
+        .expect("write");
+        assert_eq!(
+            start_promote(&root, "bbbbbbbbbbbb"),
+            Err(ReleasePromoteError::AlreadyPromoting)
+        );
     }
 
     /// 偽の `scripts/promote.sh`（ログに 1 行書いて少し眠る）を detached で起こす。
@@ -664,17 +751,30 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let (_dir, root) = env();
-        release(&root, "abcdef123456", Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#), Some(r#"{"ok":true}"#),
-            Some(r#"{"ok":true,"live_ok":true}"#));
+        release(
+            &root,
+            "abcdef123456",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#),
+        );
         let scripts = root.join("abcdef123456").join("scripts");
         std::fs::create_dir_all(&scripts).expect("mkdir");
         let script = scripts.join("promote.sh");
-        std::fs::write(&script, "#!/bin/sh\nprintf 'promote %s\\n' \"$1\"\nsleep 2\n").expect("write");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'promote %s\\n' \"$1\"\nsleep 2\n",
+        )
+        .expect("write");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
         let accepted = start_promote(&root, "abcdef123456").expect("202");
         assert_eq!(accepted.sha12, "abcdef123456");
-        assert!(accepted.log.ends_with("abcdef123456/promote.log"), "{}", accepted.log);
+        assert!(
+            accepted.log.ends_with("abcdef123456/promote.log"),
+            "{}",
+            accepted.log
+        );
         assert!(accepted.started_at.contains('T'));
 
         // lock に pid が書かれ、ログに 1 行出る（少し待つ）。
@@ -697,10 +797,18 @@ mod tests {
         assert!(pid > 0);
 
         // 走っている間は 409（二重に起こさない）。
-        assert_eq!(start_promote(&root, "abcdef123456"), Err(ReleasePromoteError::AlreadyPromoting));
+        assert_eq!(
+            start_promote(&root, "abcdef123456"),
+            Err(ReleasePromoteError::AlreadyPromoting)
+        );
         // 一覧にも `promoting = true` で出る。
         let scanned = scan(&root, None);
-        assert!(scanned.items.iter().any(|i| i.sha12 == "abcdef123456" && i.promoting));
+        assert!(
+            scanned
+                .items
+                .iter()
+                .any(|i| i.sha12 == "abcdef123456" && i.promoting)
+        );
     }
 
     /// ADR-0041 D4: 昇格に使うのは **`current` に同梱された** `promote.sh`。
@@ -708,11 +816,22 @@ mod tests {
     #[test]
     fn promotion_runs_the_promote_script_of_the_current_release() {
         let (dir, root) = env();
-        release(&root, "aaaaaaaaaaaa", Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#), Some(r#"{"ok":true}"#),
-            Some(r#"{"ok":true,"live_ok":true}"#));
-        release(&root, "bbbbbbbbbbbb", Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#), Some(r#"{"ok":true}"#),
-            Some(r#"{"ok":true,"live_ok":true}"#));
-        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current")).expect("symlink");
+        release(
+            &root,
+            "aaaaaaaaaaaa",
+            Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#),
+        );
+        release(
+            &root,
+            "bbbbbbbbbbbb",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#),
+        );
+        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current"))
+            .expect("symlink");
 
         // (1) current にも昇格先にも `scripts/` が無い → 409。
         assert!(matches!(
@@ -743,7 +862,11 @@ mod tests {
         let accepted = start_promote(&root, "bbbbbbbbbbbb").expect("202");
         assert_eq!(accepted.script_from, "current");
         // ログは**昇格先**の promote.log（人が見る場所は変わらない）。
-        assert!(accepted.log.ends_with("bbbbbbbbbbbb/promote.log"), "{}", accepted.log);
+        assert!(
+            accepted.log.ends_with("bbbbbbbbbbbb/promote.log"),
+            "{}",
+            accepted.log
+        );
         for _ in 0..100 {
             logged = std::fs::read_to_string(&log).unwrap_or_default();
             if logged.contains("current-script") {
@@ -758,18 +881,44 @@ mod tests {
     #[test]
     fn promoted_json_becomes_promoted_at() {
         let (_dir, root) = env();
-        release(&root, "aaaaaaaaaaaa", Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
+        release(
+            &root,
+            "aaaaaaaaaaaa",
+            Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
         std::fs::write(
             root.join("aaaaaaaaaaaa").join("promoted.json"),
             r#"{"promoted_at":"2026-09-19T12:31:36Z","mode":"stop-start","from":null}"#,
         )
         .expect("write");
-        release(&root, "bbbbbbbbbbbb", Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
+        release(
+            &root,
+            "bbbbbbbbbbbb",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
 
         let scanned = scan(&root, None);
-        let by = |sha: &str| scanned.items.iter().find(|i| i.sha12 == sha).expect("item").clone();
-        assert_eq!(by("aaaaaaaaaaaa").promoted_at.as_deref(), Some("2026-09-19T12:31:36Z"));
-        assert_eq!(by("bbbbbbbbbbbb").promoted_at, None, "昇格していないリリースは null");
+        let by = |sha: &str| {
+            scanned
+                .items
+                .iter()
+                .find(|i| i.sha12 == sha)
+                .expect("item")
+                .clone()
+        };
+        assert_eq!(
+            by("aaaaaaaaaaaa").promoted_at.as_deref(),
+            Some("2026-09-19T12:31:36Z")
+        );
+        assert_eq!(
+            by("bbbbbbbbbbbb").promoted_at,
+            None,
+            "昇格していないリリースは null"
+        );
         // 壊れた promoted.json でも落ちない。
         std::fs::write(root.join("bbbbbbbbbbbb").join("promoted.json"), "{ broken").expect("write");
         assert_eq!(scan(&root, None).items.len(), 2);
@@ -780,8 +929,20 @@ mod tests {
     #[test]
     fn changes_json_becomes_changes_with_stale_computed_against_current() {
         let (dir, root) = env();
-        release(&root, "aaaaaaaaaaaa", Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
-        release(&root, "bbbbbbbbbbbb", Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
+        release(
+            &root,
+            "aaaaaaaaaaaa",
+            Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
+        release(
+            &root,
+            "bbbbbbbbbbbb",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
         std::fs::write(
             root.join("bbbbbbbbbbbb").join("changes.json"),
             r#"{"base":"aaaaaaaaaaaa",
@@ -791,7 +952,8 @@ mod tests {
                 "sensitive":["crates/celeris/src/releases.rs"]}"#,
         )
         .expect("write");
-        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current")).expect("symlink");
+        std::os::unix::fs::symlink("releases/aaaaaaaaaaaa", dir.path().join("current"))
+            .expect("symlink");
 
         let scanned = scan(&root, None);
         let newest = &scanned.items[0];
@@ -802,14 +964,18 @@ mod tests {
         assert_eq!(changes.commit_count, 2);
         assert_eq!(changes.file_count, 3);
         assert_eq!(changes.sensitive, ["crates/celeris/src/releases.rs"]);
-        assert_eq!(changes.commits[0].sha, "1111111111111111111111111111111111111111");
+        assert_eq!(
+            changes.commits[0].sha,
+            "1111111111111111111111111111111111111111"
+        );
         assert_eq!(changes.commits[0].subject, "phase 50");
         // `changes.json` が無いリリース（Phase 48 以前）は `null`。
         assert!(scanned.items[1].changes.is_none());
 
         // `current` が動いたら stale になる（差分の起点がもう「いま」ではない）。
         std::fs::remove_file(dir.path().join("current")).expect("rm");
-        std::os::unix::fs::symlink("releases/cccccccccccc", dir.path().join("current")).expect("symlink");
+        std::os::unix::fs::symlink("releases/cccccccccccc", dir.path().join("current"))
+            .expect("symlink");
         let stale = scan(&root, None).items[0].changes.clone().expect("changes");
         assert!(stale.stale);
     }
@@ -825,23 +991,64 @@ mod tests {
             return;
         };
 
-        release(&root, "aaaaaaaaaaaa", Some(&format!(r#"{{"sha":"{merged}","built_at":"2026-09-18T00:00:00Z"}}"#)),
-            Some(r#"{"ok":true}"#), None);
-        release(&root, "bbbbbbbbbbbb", Some(&format!(r#"{{"sha":"{unmerged}","built_at":"2026-09-19T00:00:00Z"}}"#)),
-            Some(r#"{"ok":true}"#), None);
+        release(
+            &root,
+            "aaaaaaaaaaaa",
+            Some(&format!(
+                r#"{{"sha":"{merged}","built_at":"2026-09-18T00:00:00Z"}}"#
+            )),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
+        release(
+            &root,
+            "bbbbbbbbbbbb",
+            Some(&format!(
+                r#"{{"sha":"{unmerged}","built_at":"2026-09-19T00:00:00Z"}}"#
+            )),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
         // このリポジトリが知らない sha（別のチェックアウトでビルドした版）。
-        release(&root, "cccccccccccc", Some(r#"{"sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","built_at":"2026-09-17T00:00:00Z"}"#),
-            Some(r#"{"ok":true}"#), None);
+        release(
+            &root,
+            "cccccccccccc",
+            Some(
+                r#"{"sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","built_at":"2026-09-17T00:00:00Z"}"#,
+            ),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
 
         let scanned = scan(&root, Some(&repo));
-        let by = |sha: &str| scanned.items.iter().find(|i| i.sha12 == sha).expect("item").clone();
+        let by = |sha: &str| {
+            scanned
+                .items
+                .iter()
+                .find(|i| i.sha12 == sha)
+                .expect("item")
+                .clone()
+        };
         assert_eq!(by("aaaaaaaaaaaa").on_main, Some(true), "main の祖先");
-        assert_eq!(by("bbbbbbbbbbbb").on_main, Some(false), "main に入っていない");
-        assert_eq!(by("cccccccccccc").on_main, None, "このリポジトリが知らない sha");
+        assert_eq!(
+            by("bbbbbbbbbbbb").on_main,
+            Some(false),
+            "main に入っていない"
+        );
+        assert_eq!(
+            by("cccccccccccc").on_main,
+            None,
+            "このリポジトリが知らない sha"
+        );
 
         // リポジトリが無ければ全部 null（`git` を 1 回試して諦める）。
         let missing = dir.path().join("no-such-repo");
-        assert!(scan(&root, Some(&missing)).items.iter().all(|i| i.on_main.is_none()));
+        assert!(
+            scan(&root, Some(&missing))
+                .items
+                .iter()
+                .all(|i| i.on_main.is_none())
+        );
         // `repo` を渡さなければそもそも見ない。
         assert!(scan(&root, None).items.iter().all(|i| i.on_main.is_none()));
     }

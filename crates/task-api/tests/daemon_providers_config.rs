@@ -22,11 +22,14 @@ async fn daemon_view_is_null_until_a_snapshot_is_sent() {
     assert!(body["now"].as_str().is_some_and(|s| s.ends_with('Z')));
 
     let snapshot = snapshot(7);
-    env.daemon_tx.send(Some(snapshot.clone())).expect("send snapshot");
+    env.daemon_tx
+        .send(Some(snapshot.clone()))
+        .expect("send snapshot");
     let after = send(&app, get("/api/v1/daemon")).await.json();
     // ADR-0033 D3（Phase 25）: `reports` だけは API が応答を組むときに埋める（未読が無ければ通知もしない）。
     let mut expected = serde_json::to_value(&snapshot).expect("json");
-    expected["reports"] = serde_json::json!({"unread_secretary": 0, "unread_bad_news": 0, "notify_now": false});
+    expected["reports"] =
+        serde_json::json!({"unread_secretary": 0, "unread_bad_news": 0, "notify_now": false});
     assert_eq!(after["snapshot"], expected);
     assert_eq!(after["snapshot"]["cooldowns"][0]["reason"], "throttled");
     assert_eq!(after["snapshot"]["in_flight"][0]["kind"], "worker");
@@ -45,19 +48,36 @@ async fn stream_sends_daemon_events_when_the_snapshot_changes() {
 
     let first = snapshot(1);
     env.daemon_tx.send(Some(first.clone())).expect("send");
-    let frame = sse.next_named("daemon", Duration::from_secs(2)).await.expect("daemon event");
+    let frame = sse
+        .next_named("daemon", Duration::from_secs(2))
+        .await
+        .expect("daemon event");
     assert_eq!(frame.data, serde_json::to_value(&first).expect("json"));
     assert!(frame.id.is_none());
 
     let second = snapshot(2);
     env.daemon_tx.send(Some(second.clone())).expect("send");
-    let frame = sse.next_named("daemon", Duration::from_secs(2)).await.expect("daemon event");
+    let frame = sse
+        .next_named("daemon", Duration::from_secs(2))
+        .await
+        .expect("daemon event");
     assert_eq!(frame.data["ticks"], 2);
 
     let mut late = open_stream(&app, get("/api/v1/stream")).await;
-    let hello = late.next_frame(Duration::from_secs(2)).await.expect("hello");
-    assert_eq!(hello.data["daemon"], serde_json::to_value(&second).expect("json"));
-    assert!(late.next_named("daemon", Duration::from_millis(300)).await.is_none(), "unchanged snapshot is not resent");
+    let hello = late
+        .next_frame(Duration::from_secs(2))
+        .await
+        .expect("hello");
+    assert_eq!(
+        hello.data["daemon"],
+        serde_json::to_value(&second).expect("json")
+    );
+    assert!(
+        late.next_named("daemon", Duration::from_millis(300))
+            .await
+            .is_none(),
+        "unchanged snapshot is not resent"
+    );
 }
 
 fn started(run_id: &str, provider: Option<&str>) -> Event {
@@ -90,11 +110,25 @@ async fn providers_combine_config_snapshot_and_incremental_stats() {
         &task,
         vec![
             started("r1", Some("claude-a")),
-            finished("r1", "done: ok", Some(Usage { input_tokens: Some(100), output_tokens: Some(20) })),
+            finished(
+                "r1",
+                "done: ok",
+                Some(Usage {
+                    input_tokens: Some(100),
+                    output_tokens: Some(20),
+                }),
+            ),
             started("r2", Some("claude-b")),
             finished("r2", "requeue: throttled", None),
             started("r3", None),
-            finished("r3", "error(retryable=false): boom", Some(Usage { input_tokens: None, output_tokens: Some(3) })),
+            finished(
+                "r3",
+                "error(retryable=false): boom",
+                Some(Usage {
+                    input_tokens: None,
+                    output_tokens: Some(3),
+                }),
+            ),
             started("r4", Some("claude-a")),
         ],
     );
@@ -113,8 +147,14 @@ async fn providers_combine_config_snapshot_and_incremental_stats() {
     assert_eq!(items[0]["concurrency"], 2);
     assert_eq!(items[0]["model"], "claude-sonnet-5");
     assert_eq!(items[0]["env_keys"], json!(["CLAUDE_CONFIG_DIR"]));
-    assert!(items[0]["in_use"].is_null() && items[0]["cooldown"].is_null(), "no snapshot yet");
-    assert!(items[0]["last_check"].is_null(), "ADR-0022 D2: スナップショットが無ければ確認の記録も無い");
+    assert!(
+        items[0]["in_use"].is_null() && items[0]["cooldown"].is_null(),
+        "no snapshot yet"
+    );
+    assert!(
+        items[0]["last_check"].is_null(),
+        "ADR-0022 D2: スナップショットが無ければ確認の記録も無い"
+    );
     assert_eq!(
         items[0]["stats"],
         json!({"runs": 2, "done": 1, "question": 0, "error": 0, "requeue": 0, "lease_expired": 0,
@@ -126,21 +166,42 @@ async fn providers_combine_config_snapshot_and_incremental_stats() {
     assert_eq!(items[1]["stats"]["runs"], 1);
 
     env.daemon_tx.send(Some(snapshot(3))).expect("send");
-    env.store.append_event(task.id, &finished("r4", "question: which?", None)).expect("append");
-    env.store.append_event(task.id, &started("r5", Some("claude-b"))).expect("append");
-    env.store.append_event(task.id, &finished("r5", "lease_expired", None)).expect("append");
+    env.store
+        .append_event(task.id, &finished("r4", "question: which?", None))
+        .expect("append");
+    env.store
+        .append_event(task.id, &started("r5", Some("claude-b")))
+        .expect("append");
+    env.store
+        .append_event(task.id, &finished("r5", "lease_expired", None))
+        .expect("append");
 
-    let items = send(&app, get("/api/v1/providers")).await.json()["items"].as_array().cloned().expect("items");
+    let items = send(&app, get("/api/v1/providers")).await.json()["items"]
+        .as_array()
+        .cloned()
+        .expect("items");
     assert_eq!(items[0]["in_use"], 1);
     assert!(items[0]["cooldown"].is_null());
     // ADR-0022 D2: 一度 check したアカウントには「いつ・どうだったか」が出る。していないものは null のまま。
-    assert_eq!(items[0]["last_check"], json!({"at": "2026-09-16T01:00:00Z", "result": "ok", "detail": "ready"}));
+    assert_eq!(
+        items[0]["last_check"],
+        json!({"at": "2026-09-16T01:00:00Z", "result": "ok", "detail": "ready"})
+    );
     assert!(items[1]["last_check"].is_null());
     assert_eq!(items[0]["stats"]["question"], 1);
     assert_eq!(items[0]["stats"]["by_day"][0]["runs"], 2);
     assert_eq!(items[1]["in_use"], 0);
-    assert_eq!(items[1]["cooldown"], json!({"provider": "claude-b", "until": "2026-09-14T00:05:00Z", "reason": "throttled"}));
-    assert_eq!((items[1]["stats"]["runs"].as_u64(), items[1]["stats"]["lease_expired"].as_u64()), (Some(2), Some(1)));
+    assert_eq!(
+        items[1]["cooldown"],
+        json!({"provider": "claude-b", "until": "2026-09-14T00:05:00Z", "reason": "throttled"})
+    );
+    assert_eq!(
+        (
+            items[1]["stats"]["runs"].as_u64(),
+            items[1]["stats"]["lease_expired"].as_u64()
+        ),
+        (Some(2), Some(1))
+    );
 }
 
 #[tokio::test]
@@ -166,16 +227,24 @@ async fn clusters_combine_config_and_snapshot() {
     assert!(items[0]["in_use"].is_null(), "no snapshot yet");
     assert!(items[0]["connected"].is_null(), "no snapshot yet");
     assert!(items[0]["cooldown_until"].is_null(), "no snapshot yet");
-    assert!(items[0]["cooldown_remaining_secs"].is_null(), "no snapshot yet");
+    assert!(
+        items[0]["cooldown_remaining_secs"].is_null(),
+        "no snapshot yet"
+    );
 
-    env.daemon_tx.send(Some(snapshot(1))).expect("send snapshot");
+    env.daemon_tx
+        .send(Some(snapshot(1)))
+        .expect("send snapshot");
     let after = send(&app, get("/api/v1/clusters")).await;
     let items = after.json()["items"].as_array().cloned().expect("items");
     assert_eq!(items[0]["in_use"], 1);
     assert_eq!(items[0]["connected"], false);
     assert_eq!(items[0]["cooldown_until"], "2099-01-01T00:00:00Z");
     assert!(
-        items[0]["cooldown_remaining_secs"].as_u64().expect("remaining secs") > 0,
+        items[0]["cooldown_remaining_secs"]
+            .as_u64()
+            .expect("remaining secs")
+            > 0,
         "{}",
         items[0]
     );
@@ -197,15 +266,29 @@ async fn config_is_returned_as_given_and_secrets_never_appear() {
     });
     let app = env.router();
     let auth = format!("Bearer {TOKEN}");
-    let resp = send(&app, get_with("/api/v1/config", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        get_with("/api/v1/config", &[("authorization", &auth)]),
+    )
+    .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
-    assert_eq!(resp.json(), serde_json::to_value(config_view()).expect("json"));
+    assert_eq!(
+        resp.json(),
+        serde_json::to_value(config_view()).expect("json")
+    );
     assert_eq!(resp.json()["clusters"][0]["has_setup"], true);
     let text = resp.text();
     assert!(!text.contains("\"setup\""), "{text}");
     assert!(!text.contains("\"env\""), "{text}");
 
-    for path in ["/api/v1/config", "/api/v1/providers", "/api/v1/clusters", "/api/v1/daemon", "/api/v1/health", "/api/v1/events"] {
+    for path in [
+        "/api/v1/config",
+        "/api/v1/providers",
+        "/api/v1/clusters",
+        "/api/v1/daemon",
+        "/api/v1/health",
+        "/api/v1/events",
+    ] {
         let resp = send(&app, get_with(path, &[("authorization", &auth)])).await;
         assert_eq!(resp.status, 200, "{path}");
         assert!(!resp.text().contains(TOKEN), "{path} leaks the token");
@@ -220,8 +303,11 @@ async fn schema_endpoint_returns_the_committed_file() {
     let resp = send(&env.router(), get("/api/v1/schema")).await;
     assert_eq!(resp.status, 200);
     assert_eq!(resp.header("content-type"), Some("application/schema+json"));
-    let committed = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/api/v1/api-v1.schema.json"))
-        .expect("committed schema");
+    let committed = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/api/v1/api-v1.schema.json"
+    ))
+    .expect("committed schema");
     assert_eq!(resp.text(), committed);
     assert_eq!(resp.text(), task_api::API_V1_SCHEMA_JSON);
     let value: Value = resp.json();

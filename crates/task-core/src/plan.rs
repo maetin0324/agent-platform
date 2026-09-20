@@ -10,8 +10,8 @@ use time::OffsetDateTime;
 
 use crate::delegate::{ChildSpec, WorkspaceContext, resolve_child_defaults};
 use crate::model::{
-    Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskCategory, TaskId, TaskKind, Tier, WorkerHint,
-    WorkspaceSpec,
+    Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskCategory, TaskId, TaskKind,
+    TaskMode, Tier, WorkerHint, WorkspaceSpec,
 };
 use crate::org::OrgNode;
 
@@ -75,6 +75,26 @@ pub struct NewTask {
     /// 規則に合わないラベルは**落とす**（計画 run を失敗させない。人がボードで直せる）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// ADR-0046 D2（Phase 59）: この子に**必要な能力タグ**（`["rust", "sqlite"]`）。担当（`assignee`）を
+    /// 書かなかった子は、これとノードの実効 `skills` の重なりで担当が決まる（D5 の matching）。
+    /// 規則（小文字 `[a-z0-9._-]`、最大 12 個）に合わないタグは**落とす**（`labels` と同じ扱い）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// ADR-0046 D4（Phase 59）: この子の進め方（`prototype` / `production` / `research`）。
+    /// **省略時は親の mode を継ぐ**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TaskMode>,
+    /// ADR-0046 D3（Phase 59）: `genre` の別名（ハーネス id）。新しい設定では分野ではなく
+    /// **ハーネス**と呼ぶので、計画はどちらの名前で書いてもよい。両方書いたら `genre` が勝つ。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+}
+
+impl NewTask {
+    /// ADR-0046 D3: この子のハーネス id（`genre` 明示 > `harness` の別名）。
+    pub fn harness_id(&self) -> Option<&str> {
+        self.genre.as_deref().or(self.harness.as_deref())
+    }
 }
 
 /// DESIGN §5.6 の `PlanOutput{ tasks: Vec<NewTask> }`。
@@ -103,7 +123,11 @@ impl Default for PlanLimits {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
     #[error("plan has {actual} tasks; expected between {min} and {max}")]
-    TaskCount { actual: usize, min: usize, max: usize },
+    TaskCount {
+        actual: usize,
+        min: usize,
+        max: usize,
+    },
     #[error("tasks[{index}].{field} must not be empty")]
     EmptyField { index: usize, field: &'static str },
     #[error("tasks[{index}].acceptance must have at least one criterion")]
@@ -128,9 +152,15 @@ pub enum PlanError {
     UnknownGenre { index: usize, genre: String },
     /// ADR-0028 D3: `genre` と `role` を両方指定したが、`role` がその分野の `roles` に含まれない。
     #[error("tasks[{index}].role {role:?} is not one of genre {genre:?}'s roles")]
-    RoleNotInGenre { index: usize, role: String, genre: String },
+    RoleNotInGenre {
+        index: usize,
+        role: String,
+        genre: String,
+    },
     /// ADR-0043 D2: 知らないリポジトリの名前（案件の `project_repos` に無い）。
-    #[error("tasks[{index}].repos[{position}] = {repo:?} is not one of this project's repositories ({known})")]
+    #[error(
+        "tasks[{index}].repos[{position}] = {repo:?} is not one of this project's repositories ({known})"
+    )]
     UnknownRepo {
         index: usize,
         position: usize,
@@ -149,7 +179,8 @@ pub fn parse_and_validate(
     genres: &[GenreSpec],
     repos: &[String],
 ) -> Result<PlanOutput, String> {
-    let plan: PlanOutput = serde_json::from_str(json).map_err(|e| format!("invalid plan.json: {e}"))?;
+    let plan: PlanOutput =
+        serde_json::from_str(json).map_err(|e| format!("invalid plan.json: {e}"))?;
     validate(&plan, plan_depth, limits, genres, repos).map_err(|e| e.to_string())?;
     Ok(plan)
 }
@@ -171,9 +202,13 @@ pub fn validate(
         });
     }
     for (index, t) in plan.tasks.iter().enumerate() {
-        if let Some(genre) = &t.genre {
-            let Some(spec) = GenreSpec::find(genres, genre) else {
-                return Err(PlanError::UnknownGenre { index, genre: genre.clone() });
+        if let Some(genre) = t.harness_id() {
+            let genre = genre.to_string();
+            let Some(spec) = GenreSpec::find(genres, &genre) else {
+                return Err(PlanError::UnknownGenre {
+                    index,
+                    genre: genre.clone(),
+                });
             };
             if let Some(role) = &t.role
                 && !spec.roles.iter().any(|r| r == role)
@@ -186,7 +221,10 @@ pub fn validate(
             }
         }
         if t.title.trim().is_empty() {
-            return Err(PlanError::EmptyField { index, field: "title" });
+            return Err(PlanError::EmptyField {
+                index,
+                field: "title",
+            });
         }
         if t.objective.trim().is_empty() {
             return Err(PlanError::EmptyField {
@@ -223,7 +261,11 @@ pub fn validate(
                     index,
                     position,
                     repo: repo.clone(),
-                    known: if repos.is_empty() { "none".to_string() } else { repos.join(", ") },
+                    known: if repos.is_empty() {
+                        "none".to_string()
+                    } else {
+                        repos.join(", ")
+                    },
                 });
             }
         }
@@ -307,7 +349,11 @@ pub fn fix_harness_artifacts(
             roles,
             genres,
         );
-        let Some(spec) = resolved.genre.as_deref().and_then(|g| GenreSpec::find(genres, g)) else {
+        let Some(spec) = resolved
+            .genre
+            .as_deref()
+            .and_then(|g| GenreSpec::find(genres, g))
+        else {
             continue;
         };
         if !spec.is_harness(roles) {
@@ -388,7 +434,8 @@ pub fn materialize(
             let defaults = resolve_child_defaults(
                 parent,
                 ChildSpec {
-                    genre: t.genre.as_deref(),
+                    // ADR-0046 D3: `harness` は `genre` の別名（明示の `genre` が勝つ）。
+                    genre: t.harness_id(),
                     role: t.role.as_deref(),
                     tier: t.tier,
                     assignee: t.assignee.as_deref(),
@@ -445,8 +492,12 @@ pub fn materialize(
                 // 規則に合わないラベルは黙って落とす（計画 run は失敗させない）。
                 labels: crate::model::normalize_labels(&t.labels).unwrap_or_else(|_| {
                     // 規則に合わないものを落としてからもう一度正規化する（重複も上限もここで揃う）。
-                    let kept: Vec<String> =
-                        t.labels.iter().filter(|l| crate::model::is_valid_label(l)).cloned().collect();
+                    let kept: Vec<String> = t
+                        .labels
+                        .iter()
+                        .filter(|l| crate::model::is_valid_label(l))
+                        .cloned()
+                        .collect();
                     crate::model::normalize_labels(&kept).unwrap_or_else(|_| {
                         let mut out: Vec<String> = Vec::new();
                         for label in kept {
@@ -459,9 +510,27 @@ pub fn materialize(
                     })
                 }),
                 category: t.category.unwrap_or_default(),
+                // ADR-0046 D2 / D4（Phase 59）: 必要な能力タグ（規則に合わないものは黙って落とす）と
+                // 進め方（省略時は親の mode を継ぐ）。
+                skills: keep_valid_skills(&t.skills),
+                mode: t.mode.unwrap_or(parent.mode),
             }
         })
         .collect()
+}
+
+/// ADR-0046 D2: 計画が書いた skill タグのうち規則に合うものだけを、順を保って重複なく残す
+/// （上限を超えた分は落とす。計画 run は失敗させない。`labels` と同じ扱い）。
+pub fn keep_valid_skills(skills: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for skill in skills {
+        if !crate::profile::is_valid_skill(skill) || out.iter().any(|s| s == skill) {
+            continue;
+        }
+        out.push(skill.clone());
+    }
+    out.truncate(crate::model::MAX_SKILLS);
+    out
 }
 
 /// 生成したスキーマ（`serde_json::Value`）。
@@ -478,6 +547,9 @@ mod tests {
 
     fn new_task(title: &str, deps: Vec<usize>) -> NewTask {
         NewTask {
+            harness: None,
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             title: title.into(),
             objective: format!("do {title}"),
@@ -513,6 +585,8 @@ mod tests {
     fn parent() -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -529,7 +603,8 @@ mod tests {
                 adapter: Some("fake".into()),
             },
             workspace: WorkspaceSpec::Local {
-                path: PathBuf::from("/tmp/ws"), mode: None,
+                path: PathBuf::from("/tmp/ws"),
+                mode: None,
             },
             budget: Budget {
                 max_turns: 30,
@@ -555,11 +630,23 @@ mod tests {
     #[test]
     fn valid_plan_passes_and_materializes_children_with_inherited_fields() {
         let plan = PlanOutput {
-            tasks: vec![new_task("a", vec![]), new_task("b", vec![0]), new_task("c", vec![0, 1])],
+            tasks: vec![
+                new_task("a", vec![]),
+                new_task("b", vec![0]),
+                new_task("c", vec![0, 1]),
+            ],
         };
         validate(&plan, 1, &PlanLimits::default(), &[], &[]).unwrap();
         let p = parent();
-        let children = materialize(&p, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let children = materialize(
+            &p,
+            &plan,
+            &[],
+            &[],
+            &[],
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(children.len(), 3);
         for c in &children {
             assert_eq!(c.parent_id, Some(p.id));
@@ -584,17 +671,42 @@ mod tests {
         let mut p = parent();
         p.project_id = Some(crate::org::ProjectId::new());
         p.milestone_id = Some(crate::org::MilestoneId::new());
-        let plan = PlanOutput { tasks: vec![new_task("a", vec![]), new_task("b", vec![])] };
-        let children = materialize(&p, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let plan = PlanOutput {
+            tasks: vec![new_task("a", vec![]), new_task("b", vec![])],
+        };
+        let children = materialize(
+            &p,
+            &plan,
+            &[],
+            &[],
+            &[],
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         for c in &children {
-            assert_eq!(c.project_id, p.project_id, "child must stay in the parent's project");
+            assert_eq!(
+                c.project_id, p.project_id,
+                "child must stay in the parent's project"
+            );
             assert_eq!(c.milestone_id, p.milestone_id);
         }
 
         // 案件が無い Plan（従来どおり）では子にも付かない。
         let none = parent();
-        let children = materialize(&none, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
-        assert!(children.iter().all(|c| c.project_id.is_none() && c.milestone_id.is_none()));
+        let children = materialize(
+            &none,
+            &plan,
+            &[],
+            &[],
+            &[],
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
+        assert!(
+            children
+                .iter()
+                .all(|c| c.project_id.is_none() && c.milestone_id.is_none())
+        );
     }
 
     #[test]
@@ -608,7 +720,11 @@ mod tests {
         };
         assert!(matches!(
             validate(&one, 1, &limits, &[], &[]),
-            Err(PlanError::TaskCount { actual: 1, min: 2, max: 3 })
+            Err(PlanError::TaskCount {
+                actual: 1,
+                min: 2,
+                max: 3
+            })
         ));
         let mut empty_title = PlanOutput {
             tasks: vec![new_task("a", vec![]), new_task("b", vec![])],
@@ -616,13 +732,19 @@ mod tests {
         empty_title.tasks[1].title = "  ".into();
         assert!(matches!(
             validate(&empty_title, 1, &limits, &[], &[]),
-            Err(PlanError::EmptyField { index: 1, field: "title" })
+            Err(PlanError::EmptyField {
+                index: 1,
+                field: "title"
+            })
         ));
         let mut no_acc = PlanOutput {
             tasks: vec![new_task("a", vec![]), new_task("b", vec![])],
         };
         no_acc.tasks[0].acceptance.clear();
-        assert!(matches!(validate(&no_acc, 1, &limits, &[], &[]), Err(PlanError::NoAcceptance { index: 0 })));
+        assert!(matches!(
+            validate(&no_acc, 1, &limits, &[], &[]),
+            Err(PlanError::NoAcceptance { index: 0 })
+        ));
     }
 
     #[test]
@@ -631,7 +753,14 @@ mod tests {
             tasks: vec![new_task("a", vec![7])],
         };
         let err = validate(&oor, 1, &PlanLimits::default(), &[], &[]).unwrap_err();
-        assert!(matches!(err, PlanError::DependencyOutOfRange { index: 0, target: 7, .. }));
+        assert!(matches!(
+            err,
+            PlanError::DependencyOutOfRange {
+                index: 0,
+                target: 7,
+                ..
+            }
+        ));
         assert!(err.to_string().contains("out of range"));
 
         let self_dep = PlanOutput {
@@ -643,7 +772,11 @@ mod tests {
         ));
 
         let cycle = PlanOutput {
-            tasks: vec![new_task("a", vec![2]), new_task("b", vec![0]), new_task("c", vec![1])],
+            tasks: vec![
+                new_task("a", vec![2]),
+                new_task("b", vec![0]),
+                new_task("c", vec![1]),
+            ],
         };
         assert!(matches!(
             validate(&cycle, 1, &PlanLimits::default(), &[], &[]),
@@ -671,10 +804,22 @@ mod tests {
         validate(&nested, 2, &PlanLimits::default(), &[], &[]).unwrap();
         assert!(matches!(
             validate(&nested, 3, &PlanLimits::default(), &[], &[]),
-            Err(PlanError::DepthExceeded { index: 0, depth: 4, max: 3 })
+            Err(PlanError::DepthExceeded {
+                index: 0,
+                depth: 4,
+                max: 3
+            })
         ));
         let p = parent();
-        let children = materialize(&p, &nested, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let children = materialize(
+            &p,
+            &nested,
+            &[],
+            &[],
+            &[],
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(children[0].kind, TaskKind::Plan);
     }
 
@@ -697,7 +842,11 @@ mod tests {
         p.genre = Some("coding".into());
         let genres = vec![
             genre("coding", Some("implementer"), &["lead", "implementer"]),
-            genre("literature", Some("literature-reader"), &["literature-scout", "literature-reader"]),
+            genre(
+                "literature",
+                Some("literature-reader"),
+                &["literature-scout", "literature-reader"],
+            ),
         ];
 
         // 1. 明示した genre が最優先（`materialize` は検証済みの plan だけを渡す前提で、ここでは
@@ -705,20 +854,50 @@ mod tests {
         let mut explicit = new_task("explicit", vec![]);
         explicit.role = Some("implementer".into());
         explicit.genre = Some("literature".into());
-        let plan = PlanOutput { tasks: vec![explicit] };
-        let children = materialize(&p, &plan, &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let plan = PlanOutput {
+            tasks: vec![explicit],
+        };
+        let children = materialize(
+            &p,
+            &plan,
+            &[],
+            &[],
+            &genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(children[0].genre.as_deref(), Some("literature"));
 
         // 2. genre 未指定・role が一意に決まる分野に属する。
         let mut by_role = new_task("by-role", vec![]);
         by_role.role = Some("literature-scout".into());
-        let plan = PlanOutput { tasks: vec![by_role] };
-        let children = materialize(&p, &plan, &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let plan = PlanOutput {
+            tasks: vec![by_role],
+        };
+        let children = materialize(
+            &p,
+            &plan,
+            &[],
+            &[],
+            &genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(children[0].genre.as_deref(), Some("literature"));
 
         // 3. genre も role も無ければ親の分野を継ぐ。
-        let plan = PlanOutput { tasks: vec![new_task("neither", vec![])] };
-        let children = materialize(&p, &plan, &[], &[], &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let plan = PlanOutput {
+            tasks: vec![new_task("neither", vec![])],
+        };
+        let children = materialize(
+            &p,
+            &plan,
+            &[],
+            &[],
+            &genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(children[0].genre.as_deref(), Some("coding"));
     }
 
@@ -750,7 +929,15 @@ mod tests {
         t.role = Some("implementer".into());
         t.genre = Some("coding".into());
         let plan = PlanOutput { tasks: vec![t] };
-        let children = materialize(&p, &plan, &[], &all_roles, &genres, WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let children = materialize(
+            &p,
+            &plan,
+            &[],
+            &all_roles,
+            &genres,
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         // adapter: role(implementer) の既定が優先。
         assert_eq!(children[0].worker_hint.adapter.as_deref(), Some("codex"));
         // tier: role に既定が無いので分野の既定役割（lead）から。
@@ -766,6 +953,7 @@ mod tests {
         use crate::org::{OrgKind, OrgNode};
         let now = OffsetDateTime::now_utc();
         let node = |id: &str, genre_id: Option<&str>| OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: Some("research".into()),
             name: id.into(),
@@ -776,7 +964,10 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let org = vec![node("research-survey", Some("literature")), node("research-writing", None)];
+        let org = vec![
+            node("research-survey", Some("literature")),
+            node("research-writing", None),
+        ];
         let roles = vec![
             RoleSpec {
                 id: "literature-reader".into(),
@@ -792,7 +983,11 @@ mod tests {
                 ..RoleSpec::default()
             },
         ];
-        let genres = vec![genre("literature", Some("literature-reader"), &["literature-reader"])];
+        let genres = vec![genre(
+            "literature",
+            Some("literature-reader"),
+            &["literature-reader"],
+        )];
         let p = parent();
 
         let mut only_assignee = new_task("調べる", vec![]);
@@ -802,8 +997,18 @@ mod tests {
         with_role.role = Some("writer".into());
         let mut unknown = new_task("誰？", vec![]);
         unknown.assignee = Some("nobody".into());
-        let plan = PlanOutput { tasks: vec![only_assignee, with_role, unknown] };
-        let children = materialize(&p, &plan, &org, &roles, &genres, WorkspaceContext::default(), now);
+        let plan = PlanOutput {
+            tasks: vec![only_assignee, with_role, unknown],
+        };
+        let children = materialize(
+            &p,
+            &plan,
+            &org,
+            &roles,
+            &genres,
+            WorkspaceContext::default(),
+            now,
+        );
 
         assert_eq!(children[0].assignee.as_deref(), Some("research-survey"));
         assert_eq!(children[0].genre.as_deref(), Some("literature"));
@@ -811,7 +1016,10 @@ mod tests {
         assert_eq!(children[0].budget.max_turns, 5);
 
         assert_eq!(children[1].assignee.as_deref(), Some("research-writing"));
-        assert_eq!(children[1].worker_hint.adapter.as_deref(), Some("claude-code"));
+        assert_eq!(
+            children[1].worker_hint.adapter.as_deref(),
+            Some("claude-code")
+        );
         assert_eq!(children[1].worker_hint.tier, Tier::Frontier);
 
         // 組織に無い id は担当にしない（既定も変えない）。
@@ -825,6 +1033,7 @@ mod tests {
         use crate::org::{OrgKind, OrgNode};
         let now = OffsetDateTime::now_utc();
         let node = |id: &str, genre_id: &str| OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: Some("research".into()),
             name: id.into(),
@@ -835,10 +1044,21 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let org = vec![node("research-literature", "literature"), node("coding-poc", "coding")];
+        let org = vec![
+            node("research-literature", "literature"),
+            node("coding-poc", "coding"),
+        ];
         let roles = vec![
-            RoleSpec { id: "literature-reader".into(), adapter: Some("paperqa".into()), ..RoleSpec::default() },
-            RoleSpec { id: "implementer".into(), adapter: Some("claude-code".into()), ..RoleSpec::default() },
+            RoleSpec {
+                id: "literature-reader".into(),
+                adapter: Some("paperqa".into()),
+                ..RoleSpec::default()
+            },
+            RoleSpec {
+                id: "implementer".into(),
+                adapter: Some("claude-code".into()),
+                ..RoleSpec::default()
+            },
         ];
         let genres = vec![
             GenreSpec {
@@ -847,7 +1067,11 @@ mod tests {
                     "papers.json: 検索した論文の一覧（コーパス）".into(),
                     "sources.json".into(),
                 ],
-                ..genre("literature", Some("literature-reader"), &["literature-reader"])
+                ..genre(
+                    "literature",
+                    Some("literature-reader"),
+                    &["literature-reader"],
+                )
             },
             GenreSpec {
                 output_artifacts: vec!["diff".into()],
@@ -867,18 +1091,37 @@ mod tests {
         t.assignee = Some("research-literature".into());
         t.objective = "候補テーマを 3〜5 件、引用付きで candidates.json にまとめよ".into();
         t.acceptance = vec![
-            Criterion { text: "candidates.json がある".into(), check: Check::ArtifactExists { name: "candidates.json".into() } },
-            Criterion { text: "answer.md がある".into(), check: Check::ArtifactExists { name: "answer.md".into() } },
+            Criterion {
+                text: "candidates.json がある".into(),
+                check: Check::ArtifactExists {
+                    name: "candidates.json".into(),
+                },
+            },
+            Criterion {
+                text: "answer.md がある".into(),
+                check: Check::ArtifactExists {
+                    name: "answer.md".into(),
+                },
+            },
         ];
         let mut plan = PlanOutput { tasks: vec![t] };
         let warnings = fix_harness_artifacts(&mut plan, &parent(), &org, &roles, &genres);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("candidates.json"), "{}", warnings[0]);
-        assert!(warnings[0].contains("answer.md / papers.json / sources.json"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("answer.md / papers.json / sources.json"),
+            "{}",
+            warnings[0]
+        );
         let fixed = &plan.tasks[0];
         assert_eq!(
             fixed.acceptance,
-            vec![Criterion { text: "answer.md がある".into(), check: Check::ArtifactExists { name: "answer.md".into() } }],
+            vec![Criterion {
+                text: "answer.md がある".into(),
+                check: Check::ArtifactExists {
+                    name: "answer.md".into()
+                }
+            }],
             "名前が一致する条件だけが残る"
         );
         assert!(
@@ -901,14 +1144,19 @@ mod tests {
         t.assignee = Some("research-literature".into());
         t.acceptance = vec![Criterion {
             text: "候補テーマ 3 件が引用付きで書かれている".into(),
-            check: Check::ArtifactExists { name: "candidates.json".into() },
+            check: Check::ArtifactExists {
+                name: "candidates.json".into(),
+            },
         }];
         let mut plan = PlanOutput { tasks: vec![t] };
         let warnings = fix_harness_artifacts(&mut plan, &parent(), &org, &roles, &genres);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(
             plan.tasks[0].acceptance,
-            vec![Criterion { text: "候補テーマ 3 件が引用付きで書かれている".into(), check: Check::Reviewer }]
+            vec![Criterion {
+                text: "候補テーマ 3 件が引用付きで書かれている".into(),
+                check: Check::Reviewer
+            }]
         );
         validate(&plan, 1, &PlanLimits::default(), &genres, &[]).unwrap();
     }
@@ -922,15 +1170,21 @@ mod tests {
         coding.assignee = Some("coding-poc".into());
         coding.acceptance = vec![Criterion {
             text: "design.md がある".into(),
-            check: Check::ArtifactExists { name: "design.md".into() },
+            check: Check::ArtifactExists {
+                name: "design.md".into(),
+            },
         }];
         let mut literature = new_task("調べる", vec![]);
         literature.assignee = Some("research-literature".into());
         literature.acceptance = vec![Criterion {
             text: "answer.md がある".into(),
-            check: Check::ArtifactExists { name: "answer.md".into() },
+            check: Check::ArtifactExists {
+                name: "answer.md".into(),
+            },
         }];
-        let mut plan = PlanOutput { tasks: vec![coding, literature] };
+        let mut plan = PlanOutput {
+            tasks: vec![coding, literature],
+        };
         let before = plan.clone();
         let warnings = fix_harness_artifacts(&mut plan, &parent(), &org, &roles, &genres);
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -940,20 +1194,31 @@ mod tests {
     /// ADR-0028 D3: 知らない `genre`、または `genre` + `role` の不整合は Plan の失敗になる。
     #[test]
     fn validate_rejects_unknown_genre_and_role_not_in_genre() {
-        let genres = vec![genre("coding", Some("implementer"), &["lead", "implementer"])];
+        let genres = vec![genre(
+            "coding",
+            Some("implementer"),
+            &["lead", "implementer"],
+        )];
 
         let mut unknown = new_task("a", vec![]);
         unknown.genre = Some("literature".into());
-        let plan = PlanOutput { tasks: vec![unknown] };
+        let plan = PlanOutput {
+            tasks: vec![unknown],
+        };
         assert_eq!(
             validate(&plan, 1, &PlanLimits::default(), &genres, &[]),
-            Err(PlanError::UnknownGenre { index: 0, genre: "literature".into() })
+            Err(PlanError::UnknownGenre {
+                index: 0,
+                genre: "literature".into()
+            })
         );
 
         let mut mismatched = new_task("b", vec![]);
         mismatched.genre = Some("coding".into());
         mismatched.role = Some("literature-scout".into());
-        let plan = PlanOutput { tasks: vec![mismatched] };
+        let plan = PlanOutput {
+            tasks: vec![mismatched],
+        };
         assert_eq!(
             validate(&plan, 1, &PlanLimits::default(), &genres, &[]),
             Err(PlanError::RoleNotInGenre {
@@ -966,10 +1231,15 @@ mod tests {
         // 分野を使わない設定（`genres` が空）でも `genre` を指定すれば同じくエラー。
         let mut no_config = new_task("c", vec![]);
         no_config.genre = Some("coding".into());
-        let plan = PlanOutput { tasks: vec![no_config] };
+        let plan = PlanOutput {
+            tasks: vec![no_config],
+        };
         assert_eq!(
             validate(&plan, 1, &PlanLimits::default(), &[], &[]),
-            Err(PlanError::UnknownGenre { index: 0, genre: "coding".into() })
+            Err(PlanError::UnknownGenre {
+                index: 0,
+                genre: "coding".into()
+            })
         );
 
         // parse_and_validate 経由でも同じ（Plan run の暗黙条件から見えるエラー文言）。
@@ -983,19 +1253,35 @@ mod tests {
     fn child_workspace_is_explicit_then_project_then_parent() {
         let p = parent();
         let project = WorkspaceSpec::Local {
-            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
+            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            mode: None,
         };
         let explicit = WorkspaceSpec::Local {
-            path: PathBuf::from("/home/rmaeda/workspace/rust/other"), mode: None,
+            path: PathBuf::from("/home/rmaeda/workspace/rust/other"),
+            mode: None,
         };
 
         // 案件も明示も無ければ従来どおり親を継ぐ。
-        let plan = PlanOutput { tasks: vec![new_task("a", vec![])] };
-        let children = materialize(&p, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let plan = PlanOutput {
+            tasks: vec![new_task("a", vec![])],
+        };
+        let children = materialize(
+            &p,
+            &plan,
+            &[],
+            &[],
+            &[],
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(children[0].workspace, p.workspace);
 
         // 案件の作業場所は親より強い。
-        let ws = WorkspaceContext { repos: &[], project: Some(&project), home: None };
+        let ws = WorkspaceContext {
+            repos: &[],
+            project: Some(&project),
+            home: None,
+        };
         let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
         assert_eq!(children[0].workspace, project);
 
@@ -1018,21 +1304,36 @@ mod tests {
             cluster: "pegasus".into(),
             path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
         };
-        let plan = PlanOutput { tasks: vec![new_task("a", vec![])] };
+        let plan = PlanOutput {
+            tasks: vec![new_task("a", vec![])],
+        };
         let home = PathBuf::from("/home/rmaeda");
-        let ws = WorkspaceContext { repos: &[], project: Some(&remote), home: Some(&home) };
+        let ws = WorkspaceContext {
+            repos: &[],
+            project: Some(&remote),
+            home: Some(&home),
+        };
         let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
-        assert_eq!(children[0].workspace, remote, "Remote の path はクラスタ側なので触らない");
+        assert_eq!(
+            children[0].workspace, remote,
+            "Remote の path はクラスタ側なので触らない"
+        );
 
         let tilde = WorkspaceSpec::Local {
-            path: PathBuf::from("~/workspace/rust/pluvio-poc"), mode: None,
+            path: PathBuf::from("~/workspace/rust/pluvio-poc"),
+            mode: None,
         };
-        let ws = WorkspaceContext { repos: &[], project: Some(&tilde), home: Some(&home) };
+        let ws = WorkspaceContext {
+            repos: &[],
+            project: Some(&tilde),
+            home: Some(&home),
+        };
         let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
         assert_eq!(
             children[0].workspace,
             WorkspaceSpec::Local {
-                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None
+                path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+                mode: None
             }
         );
     }
@@ -1059,7 +1360,10 @@ mod tests {
         let mut ok = new_task("a", vec![]);
         ok.repos = vec!["benchfs".into(), "benchfs-paper".into()];
         let plan = PlanOutput { tasks: vec![ok] };
-        assert_eq!(validate(&plan, 1, &PlanLimits::default(), &[], &known), Ok(()));
+        assert_eq!(
+            validate(&plan, 1, &PlanLimits::default(), &[], &known),
+            Ok(())
+        );
 
         let mut bad = new_task("b", vec![]);
         bad.repos = vec!["benchfs".into(), "nope".into()];
@@ -1095,47 +1399,92 @@ mod tests {
     /// ADR-0043 D2: 子のリポジトリは **明示（名前）> 親 > 案件の primary**。
     #[test]
     fn child_repos_are_explicit_then_parent_then_the_project_primary() {
-        let repos = vec![project_repo("benchfs", true), project_repo("benchfs-paper", false)];
+        let repos = vec![
+            project_repo("benchfs", true),
+            project_repo("benchfs-paper", false),
+        ];
         let primary = crate::repos::RepoRef::of(&repos[0]);
         let paper = crate::repos::RepoRef::of(&repos[1]);
-        let ws = WorkspaceContext { repos: &repos, project: None, home: None };
+        let ws = WorkspaceContext {
+            repos: &repos,
+            project: None,
+            home: None,
+        };
 
         // 何も書かず、親も持たなければ案件の primary。
         let p = parent();
         assert!(p.repos.is_empty());
-        let plan = PlanOutput { tasks: vec![new_task("a", vec![])] };
+        let plan = PlanOutput {
+            tasks: vec![new_task("a", vec![])],
+        };
         let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
         assert_eq!(children[0].repos, vec![primary.clone()]);
 
         // 親が持っていれば親を継ぐ（primary ではない）。
         let mut inheriting = parent();
         inheriting.repos = vec![paper.clone()];
-        let children = materialize(&inheriting, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
+        let children = materialize(
+            &inheriting,
+            &plan,
+            &[],
+            &[],
+            &[],
+            ws,
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(children[0].repos, vec![paper.clone()]);
 
         // 明示が一番強い（複数可。並びはそのまま = `repos[0]` が cwd）。
         let mut explicit = new_task("b", vec![]);
         explicit.repos = vec!["benchfs-paper".into(), "benchfs".into()];
-        let plan = PlanOutput { tasks: vec![new_task("a", vec![]), explicit] };
-        let children = materialize(&inheriting, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
-        assert_eq!(children[0].repos, vec![paper.clone()], "書かない子は親を継ぐ");
+        let plan = PlanOutput {
+            tasks: vec![new_task("a", vec![]), explicit],
+        };
+        let children = materialize(
+            &inheriting,
+            &plan,
+            &[],
+            &[],
+            &[],
+            ws,
+            OffsetDateTime::now_utc(),
+        );
+        assert_eq!(
+            children[0].repos,
+            vec![paper.clone()],
+            "書かない子は親を継ぐ"
+        );
         assert_eq!(children[1].repos, vec![paper, primary]);
 
         // 案件にリポジトリが無ければ空のまま（従来の 1 つの `workspace` だけで動く）。
-        let children = materialize(&p, &plan, &[], &[], &[], WorkspaceContext::default(), OffsetDateTime::now_utc());
+        let children = materialize(
+            &p,
+            &plan,
+            &[],
+            &[],
+            &[],
+            WorkspaceContext::default(),
+            OffsetDateTime::now_utc(),
+        );
         assert!(children[0].repos.is_empty());
     }
 
     /// ADR-0007 D2 / ADR-0003 D6: 生成スキーマとコミット済みファイルの一致。`UPDATE_SCHEMA=1` で再生成。
     #[test]
     fn committed_schema_matches_generated() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/protocol/plan-output.schema.json");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/protocol/plan-output.schema.json"
+        );
         let generated = serde_json::to_string_pretty(&schema_value()).unwrap() + "\n";
         if std::env::var_os("UPDATE_SCHEMA").is_some() {
             std::fs::write(path, &generated).unwrap();
         }
         let committed = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {path}: {e} (run with UPDATE_SCHEMA=1 to generate)"));
-        assert_eq!(committed, generated, "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-core`");
+        assert_eq!(
+            committed, generated,
+            "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-core`"
+        );
     }
 }

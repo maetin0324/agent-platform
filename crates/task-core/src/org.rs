@@ -12,7 +12,9 @@ use ulid::Ulid;
 use crate::model::{GenreSpec, RoleSpec};
 
 /// 案件の一意識別子（ULID）。`TaskId` と同じ形。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct ProjectId(#[schemars(with = "String")] pub Ulid);
 
 impl ProjectId {
@@ -42,7 +44,9 @@ impl std::str::FromStr for ProjectId {
 }
 
 /// 途中目標の一意識別子（ULID）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct MilestoneId(#[schemars(with = "String")] pub Ulid);
 
 impl MilestoneId {
@@ -123,6 +127,11 @@ pub struct OrgNode {
     /// 担当の一言（プロンプトに前置きされる）。
     #[serde(default)]
     pub brief: String,
+    /// ADR-0046 D1（Phase 59）: このノードの profile（`org_nodes.profile_json`）。子は親を継ぐ
+    /// （merge は `crate::profile::resolve`）。既定は空で、空なら JSON にも出さない
+    /// （導入前のノードと 1 バイトも変わらない）。
+    #[serde(default, skip_serializing_if = "crate::profile::Profile::is_empty")]
+    pub profile: crate::profile::Profile,
     /// 同じ親の中での並び順（GUI の組織図の表示順）。
     #[serde(default)]
     pub position: i64,
@@ -152,14 +161,19 @@ pub enum OrgError {
     #[error("org node {id:?} cannot be its own ancestor")]
     Cycle { id: String },
     #[error("a {child} cannot be placed under a {parent}")]
-    BadNesting { child: &'static str, parent: &'static str },
+    BadNesting {
+        child: &'static str,
+        parent: &'static str,
+    },
 }
 
 /// 英小文字ケバブの id（設定の種と API で同じ規則）。
 pub fn valid_org_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
-        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && !id.starts_with('-')
         && !id.ends_with('-')
 }
@@ -181,20 +195,28 @@ pub fn validate_upsert(existing: &[OrgNode], node: &OrgNode) -> Result<(), OrgEr
             .iter()
             .find(|n| n.kind == OrgKind::Secretary && n.id != node.id)
         {
-            return Err(OrgError::DuplicateSecretary { existing: other.id.clone() });
+            return Err(OrgError::DuplicateSecretary {
+                existing: other.id.clone(),
+            });
         }
         return Ok(());
     }
 
     // 根は secretary だけ（ADR-0033 D1: 組織は一つの木）。
     let Some(parent_id) = node.parent_id.as_deref() else {
-        return Err(OrgError::MissingParent { id: node.id.clone() });
+        return Err(OrgError::MissingParent {
+            id: node.id.clone(),
+        });
     };
     if parent_id == node.id {
-        return Err(OrgError::Cycle { id: node.id.clone() });
+        return Err(OrgError::Cycle {
+            id: node.id.clone(),
+        });
     }
     let Some(parent) = existing.iter().find(|n| n.id == parent_id) else {
-        return Err(OrgError::UnknownParent { parent: parent_id.to_string() });
+        return Err(OrgError::UnknownParent {
+            parent: parent_id.to_string(),
+        });
     };
     // 自分を祖先にできない（親を辿って自分に戻ってこないこと）。種類の検査より先に見る。
     // 「自分の子孫にぶら下げた」は種類の順序違反としても現れるが、理由としては循環の方が正確。
@@ -202,12 +224,16 @@ pub fn validate_upsert(existing: &[OrgNode], node: &OrgNode) -> Result<(), OrgEr
     let mut cursor = Some(parent);
     while let Some(current) = cursor {
         if current.id == node.id {
-            return Err(OrgError::Cycle { id: node.id.clone() });
+            return Err(OrgError::Cycle {
+                id: node.id.clone(),
+            });
         }
         seen += 1;
         if seen > existing.len() {
             // 既存データが壊れている（親の連鎖が閉じている）場合も、ここで打ち切って拒否する。
-            return Err(OrgError::Cycle { id: node.id.clone() });
+            return Err(OrgError::Cycle {
+                id: node.id.clone(),
+            });
         }
         cursor = current
             .parent_id
@@ -224,7 +250,10 @@ pub fn validate_upsert(existing: &[OrgNode], node: &OrgNode) -> Result<(), OrgEr
     // 整合しなければならない。そうしないと「department → section」のような変更で、既存の子（section）
     // が「section の下に section」という壊れた木を作ってしまう（そのまま気づかれず、以後その子は
     // 名前の変更すら拒否され続ける）。
-    for child in existing.iter().filter(|n| n.parent_id.as_deref() == Some(node.id.as_str())) {
+    for child in existing
+        .iter()
+        .filter(|n| n.parent_id.as_deref() == Some(node.id.as_str()))
+    {
         if node.kind.depth() >= child.kind.depth() {
             return Err(OrgError::BadNesting {
                 child: child.kind.as_str(),
@@ -267,7 +296,10 @@ pub fn department_of(org: &[OrgNode], id: &str) -> Option<String> {
             OrgKind::Department => return Some(node.id.clone()),
             OrgKind::Secretary => return None,
             OrgKind::Section => {
-                cursor = node.parent_id.as_deref().and_then(|p| org.iter().find(|n| n.id == p));
+                cursor = node
+                    .parent_id
+                    .as_deref()
+                    .and_then(|p| org.iter().find(|n| n.id == p));
             }
         }
     }
@@ -335,7 +367,11 @@ pub struct Project {
     pub workspace: Option<crate::model::WorkspaceSpec>,
     /// ADR-0044 D6: アーカイブした時刻。`None` ならアーカイブされていない。一覧は既定でこれが
     /// `Some` の案件（とそのタスク）を隠す。
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     #[schemars(with = "Option<String>")]
     pub archived_at: Option<OffsetDateTime>,
     /// ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。
@@ -468,6 +504,7 @@ mod tests {
             kind,
             genre: None,
             brief: String::new(),
+            profile: crate::profile::Profile::default(),
             position: 0,
             created_at: now,
             updated_at: now,
@@ -477,10 +514,12 @@ mod tests {
     #[test]
     fn a_second_secretary_is_rejected() {
         let existing = vec![node("secretary", None, OrgKind::Secretary)];
-        let err = validate_upsert(&existing, &node("boss", None, OrgKind::Secretary)).expect_err("rejected");
+        let err = validate_upsert(&existing, &node("boss", None, OrgKind::Secretary))
+            .expect_err("rejected");
         assert!(matches!(err, OrgError::DuplicateSecretary { .. }), "{err}");
         // 同じ id の更新は「1 つだけ」に反しない。
-        validate_upsert(&existing, &node("secretary", None, OrgKind::Secretary)).expect("update is fine");
+        validate_upsert(&existing, &node("secretary", None, OrgKind::Secretary))
+            .expect("update is fine");
     }
 
     #[test]
@@ -491,10 +530,17 @@ mod tests {
             Err(OrgError::MissingParent { .. })
         ));
         assert!(matches!(
-            validate_upsert(&existing, &node("coding", Some("ghost"), OrgKind::Department)),
+            validate_upsert(
+                &existing,
+                &node("coding", Some("ghost"), OrgKind::Department)
+            ),
             Err(OrgError::UnknownParent { .. })
         ));
-        validate_upsert(&existing, &node("coding", Some("secretary"), OrgKind::Department)).expect("ok");
+        validate_upsert(
+            &existing,
+            &node("coding", Some("secretary"), OrgKind::Department),
+        )
+        .expect("ok");
     }
 
     #[test]
@@ -509,7 +555,10 @@ mod tests {
             Err(OrgError::BadNesting { .. })
         ));
         assert!(matches!(
-            validate_upsert(&existing, &node("dept", Some("frontend"), OrgKind::Department)),
+            validate_upsert(
+                &existing,
+                &node("dept", Some("frontend"), OrgKind::Department)
+            ),
             Err(OrgError::BadNesting { .. })
         ));
         validate_upsert(&existing, &node("perf", Some("coding"), OrgKind::Section)).expect("ok");
@@ -527,7 +576,10 @@ mod tests {
         ];
         // coding（部）を section に変えると、既にぶら下がる frontend（課）が「section の下の section」になる。
         assert!(matches!(
-            validate_upsert(&existing, &node("coding", Some("secretary"), OrgKind::Section)),
+            validate_upsert(
+                &existing,
+                &node("coding", Some("secretary"), OrgKind::Section)
+            ),
             Err(OrgError::BadNesting { .. })
         ));
         // 子が無ければ kind を変えても通る。
@@ -535,7 +587,11 @@ mod tests {
             node("secretary", None, OrgKind::Secretary),
             node("infra", Some("secretary"), OrgKind::Department),
         ];
-        validate_upsert(&childless, &node("infra", Some("secretary"), OrgKind::Section)).expect("no children, ok");
+        validate_upsert(
+            &childless,
+            &node("infra", Some("secretary"), OrgKind::Section),
+        )
+        .expect("no children, ok");
     }
 
     #[test]
@@ -547,12 +603,18 @@ mod tests {
         ];
         // coding の親を自分の子（frontend）にしようとする。
         assert!(matches!(
-            validate_upsert(&existing, &node("coding", Some("frontend"), OrgKind::Department)),
+            validate_upsert(
+                &existing,
+                &node("coding", Some("frontend"), OrgKind::Department)
+            ),
             Err(OrgError::Cycle { .. })
         ));
         // 自分自身を親にするのも循環。
         assert!(matches!(
-            validate_upsert(&existing, &node("coding", Some("coding"), OrgKind::Department)),
+            validate_upsert(
+                &existing,
+                &node("coding", Some("coding"), OrgKind::Department)
+            ),
             Err(OrgError::Cycle { .. })
         ));
         // 既存データの親の連鎖が閉じていても（壊れた DB）、無限に辿らずに拒否する。
@@ -575,7 +637,10 @@ mod tests {
         ));
         let mut blank = node("secretary", None, OrgKind::Secretary);
         blank.name = "   ".into();
-        assert!(matches!(validate_upsert(&existing, &blank), Err(OrgError::BlankName)));
+        assert!(matches!(
+            validate_upsert(&existing, &blank),
+            Err(OrgError::BlankName)
+        ));
     }
 
     #[test]
@@ -589,7 +654,10 @@ mod tests {
         ];
         assert_eq!(department_of(&org, "coding-poc").as_deref(), Some("coding"));
         assert_eq!(department_of(&org, "coding").as_deref(), Some("coding"));
-        assert_eq!(department_of(&org, "research-survey").as_deref(), Some("research"));
+        assert_eq!(
+            department_of(&org, "research-survey").as_deref(),
+            Some("research")
+        );
         assert_eq!(department_of(&org, "secretary"), None);
         assert_eq!(department_of(&org, "ghost"), None);
         // 親の連鎖が閉じた壊れたデータでも止まる。
@@ -618,8 +686,14 @@ mod tests {
         assert_eq!(genre.as_deref(), Some("coding"));
         assert_eq!(role.map(|r| r.id.as_str()), Some("implementer"));
         // 知らない assignee・分野を持たないノードは何も返さない。
-        assert_eq!(assignee_defaults(&org, "ghost", &roles, &genres), (None, None));
+        assert_eq!(
+            assignee_defaults(&org, "ghost", &roles, &genres),
+            (None, None)
+        );
         let no_genre = vec![node("infra", Some("secretary"), OrgKind::Department)];
-        assert_eq!(assignee_defaults(&no_genre, "infra", &roles, &genres), (None, None));
+        assert_eq!(
+            assignee_defaults(&no_genre, "infra", &roles, &genres),
+            (None, None)
+        );
     }
 }

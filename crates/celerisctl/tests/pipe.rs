@@ -17,6 +17,8 @@ use time::OffsetDateTime;
 fn sample_task(i: usize) -> Task {
     let now = OffsetDateTime::now_utc();
     Task {
+        mode: Default::default(),
+        skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
@@ -44,7 +46,8 @@ fn sample_task(i: usize) -> Task {
             adapter: None,
         },
         workspace: WorkspaceSpec::Local {
-            path: format!("ws-{i}").into(), mode: None,
+            path: format!("ws-{i}").into(),
+            mode: None,
         },
         budget: Budget {
             max_turns: 10,

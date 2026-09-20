@@ -22,17 +22,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use celeris::Config;
 use clap::{Args, Subcommand};
 use task_core::{ArtifactRef, Event, Status, Task, TaskId, TaskStore, WorkspaceSpec};
 use task_dispatch::policy::Selection;
 use task_dispatch::{ClusterSpec, ProviderPolicy, StaticPolicy};
 use task_ops::derive::{AnswerNote, ReviewNote, answers_from_events, prior_review_from_events};
 use task_worker::{
-    Answer, AdapterError, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview, ProviderFailure, RunContext,
-    RunLimits, RunOutcome, RunRequest, SshWorkspace, Terminal, WorkerAdapter, WorkerMessage, Workspace,
-    WorkspaceError, remote_exec_instructions,
+    AdapterError, Answer, EventSink, LocalWorkspace, PROTOCOL_VERSION, PriorReview,
+    ProviderFailure, RunContext, RunLimits, RunOutcome, RunRequest, SshWorkspace, Terminal,
+    WorkerAdapter, WorkerMessage, Workspace, WorkspaceError, remote_exec_instructions,
 };
-use celeris::Config;
 
 use crate::error::CliError;
 use crate::outln;
@@ -147,7 +147,12 @@ fn resolve_cluster_target(
     };
 
     let mirror_dir = config.workspace_root.join(task.id.to_string());
-    Ok(ClusterTarget { spec, remote_path, mirror_dir, warning })
+    Ok(ClusterTarget {
+        spec,
+        remote_path,
+        mirror_dir,
+        warning,
+    })
 }
 
 /// 選ばれたプロバイダ（`--provider`/`--adapter`/`select` のいずれか）。
@@ -169,20 +174,26 @@ fn resolve_account(
     adapter_kind: &str,
     args: &WorkerRunArgs,
 ) -> Result<Option<String>, CliError> {
-    let is_pool = config.providers.iter().any(|p| p.id == provider_id && p.account_pool);
+    let is_pool = config
+        .providers
+        .iter()
+        .any(|p| p.id == provider_id && p.account_pool);
     if !is_pool {
         if args.account.is_some() {
-            return Err(CliError::msg(format!("provider {provider_id} does not have account_pool = true; --account is not applicable")));
+            return Err(CliError::msg(format!(
+                "provider {provider_id} does not have account_pool = true; --account is not applicable"
+            )));
         }
         return Ok(None);
     }
     let account_adapter = task_core::AccountAdapter::parse(adapter_kind).ok_or_else(|| {
         CliError::msg(format!("provider {provider_id} has account_pool = true but adapter {adapter_kind:?} is not a pool adapter"))
     })?;
-    let accounts = config
-        .accounts
-        .as_ref()
-        .ok_or_else(|| CliError::msg(format!("provider {provider_id} has account_pool = true but [accounts] is not configured")))?;
+    let accounts = config.accounts.as_ref().ok_or_else(|| {
+        CliError::msg(format!(
+            "provider {provider_id} has account_pool = true but [accounts] is not configured"
+        ))
+    })?;
     let root = accounts.root_for(account_adapter).ok_or_else(|| {
         CliError::msg(format!(
             "provider {provider_id} has account_pool = true but [accounts] has no root configured for adapter {adapter_kind}"
@@ -193,7 +204,10 @@ fn resolve_account(
             return Err(CliError::msg(format!("invalid --account id: {id}")));
         }
         if !root.join(id).is_dir() {
-            return Err(CliError::msg(format!("account not found: {id} (looked in {})", root.display())));
+            return Err(CliError::msg(format!(
+                "account not found: {id} (looked in {})",
+                root.display()
+            )));
         }
         return Ok(Some(id.clone()));
     }
@@ -202,17 +216,29 @@ fn resolve_account(
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let candidates: Vec<task_dispatch::AccountCandidate<'_>> = dirs
         .iter()
-        .map(|d| task_dispatch::AccountCandidate { id: d.id.as_str(), logged_in: d.logged_in, in_use: 0 })
+        .map(|d| task_dispatch::AccountCandidate {
+            id: d.id.as_str(),
+            logged_in: d.logged_in,
+            in_use: 0,
+        })
         .collect();
     task_dispatch::select_account(&candidates, &book, accounts.max_runs_per_account, now)
         .map(Some)
-        .ok_or_else(|| CliError::msg(format!("no eligible account in the pool for provider {provider_id}")))
+        .ok_or_else(|| {
+            CliError::msg(format!(
+                "no eligible account in the pool for provider {provider_id}"
+            ))
+        })
 }
 
 pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, CliError> {
     let task_id = crate::error::parse_task_id(&args.task)?;
-    let config = Config::load(&args.config)
-        .map_err(|e| CliError::msg(format!("failed to load config {}: {e}", args.config.display())))?;
+    let config = Config::load(&args.config).map_err(|e| {
+        CliError::msg(format!(
+            "failed to load config {}: {e}",
+            args.config.display()
+        ))
+    })?;
 
     let task = store.get(task_id)?.ok_or_else(|| {
         CliError::msg(format!(
@@ -238,22 +264,33 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
             let account_adapter = task_core::AccountAdapter::parse(&adapter_kind).ok_or_else(|| {
                 CliError::msg(format!("provider {provider_id} resolved an account but adapter {adapter_kind:?} is not a pool adapter"))
             })?;
-            let accounts = config
-                .accounts
-                .as_ref()
-                .ok_or_else(|| CliError::msg(format!("provider {provider_id} resolved an account but [accounts] is not configured")))?;
+            let accounts = config.accounts.as_ref().ok_or_else(|| {
+                CliError::msg(format!(
+                    "provider {provider_id} resolved an account but [accounts] is not configured"
+                ))
+            })?;
             let root = accounts.root_for(account_adapter).ok_or_else(|| {
                 CliError::msg(format!("provider {provider_id} resolved an account but [accounts] has no root for adapter {adapter_kind}"))
             })?;
             let dir = root.join(account_id);
             base_adapter
-                .with_env(&[(account_adapter.env_var().to_string(), dir.display().to_string())])
-                .ok_or_else(|| CliError::msg(format!("adapter for provider {provider_id} does not support account pools")))?
+                .with_env(&[(
+                    account_adapter.env_var().to_string(),
+                    dir.display().to_string(),
+                )])
+                .ok_or_else(|| {
+                    CliError::msg(format!(
+                        "adapter for provider {provider_id} does not support account pools"
+                    ))
+                })?
         }
         None => base_adapter.clone(),
     };
     let adapter = effective_adapter.as_ref();
-    let model = celeris::effective_models(&config).get(&provider_id).cloned().unwrap_or_default();
+    let model = celeris::effective_models(&config)
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_default();
 
     let selected = Selected {
         provider_id,
@@ -272,7 +309,9 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
         if let Some(warning) = &target.warning {
             eprintln!("warning: {warning}");
         }
-        return rt.block_on(execute_on_cluster(&task, &events, target, &config, &selected, adapter));
+        return rt.block_on(execute_on_cluster(
+            &task, &events, target, &config, &selected, adapter,
+        ));
     }
 
     if args.workspace.is_none() && matches!(task.status, Status::Running | Status::Reviewing) {
@@ -285,20 +324,35 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
     let workspace_dir = match &args.workspace {
         Some(dir) => dir.clone(),
         None => match &task.workspace {
-            WorkspaceSpec::Local { path, .. } if path.is_relative() => config.workspace_root.join(path),
+            WorkspaceSpec::Local { path, .. } if path.is_relative() => {
+                config.workspace_root.join(path)
+            }
             WorkspaceSpec::Local { path, .. } => path.clone(),
             WorkspaceSpec::Remote { .. } => {
-                return Err(CliError::msg("task workspace is remote; pass --workspace to run it locally"));
+                return Err(CliError::msg(
+                    "task workspace is remote; pass --workspace to run it locally",
+                ));
             }
         },
     };
 
-    rt.block_on(execute(&task, &events, workspace_dir, &config, &selected, adapter))
+    rt.block_on(execute(
+        &task,
+        &events,
+        workspace_dir,
+        &config,
+        &selected,
+        adapter,
+    ))
 }
 
 /// `--provider` / `--adapter` / どちらも省略（`select`、cooldown なし）の順でプロバイダを決める
 /// （ADR-0012 D4）。
-fn select_provider(config: &Config, task: &Task, args: &WorkerRunArgs) -> Result<(String, String), CliError> {
+fn select_provider(
+    config: &Config,
+    task: &Task,
+    args: &WorkerRunArgs,
+) -> Result<(String, String), CliError> {
     let specs = config.provider_specs();
 
     if let Some(provider) = &args.provider {
@@ -314,7 +368,9 @@ fn select_provider(config: &Config, task: &Task, args: &WorkerRunArgs) -> Result
             .iter()
             .find(|p| &p.adapter == adapter)
             .map(|p| (p.id.clone(), p.adapter.clone()))
-            .ok_or_else(|| CliError::msg(format!("no provider configured for adapter: {adapter}")));
+            .ok_or_else(|| {
+                CliError::msg(format!("no provider configured for adapter: {adapter}"))
+            });
     }
 
     let policy = StaticPolicy::new(specs, Duration::from_secs(config.error_cooldown_secs));
@@ -323,9 +379,10 @@ fn select_provider(config: &Config, task: &Task, args: &WorkerRunArgs) -> Result
         Selection::Busy => Err(CliError::msg(
             "no provider available right now (matching providers are all cooling down)",
         )),
-        Selection::NoMatchingProvider => {
-            Err(CliError::msg(format!("no provider configured for worker_hint {:?}", task.worker_hint)))
-        }
+        Selection::NoMatchingProvider => Err(CliError::msg(format!(
+            "no provider configured for worker_hint {:?}",
+            task.worker_hint
+        ))),
     }
 }
 
@@ -399,8 +456,8 @@ async fn execute(
         return Ok(ExitCode::from(130));
     };
     let (message, exit) = normalize_outcome(result);
-    let json =
-        serde_json::to_string(&message).map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
+    let json = serde_json::to_string(&message)
+        .map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
     outln!("result: {json}");
     Ok(ExitCode::from(exit))
 }
@@ -436,7 +493,9 @@ async fn execute_on_cluster(
 
     // ADR-0018 D3: DB のタスクは変えない。渡す写しの `objective` だけにラッパの使い方を足す。
     let mut run_task = task.clone();
-    run_task.objective.push_str(&remote_exec_instructions(&settings));
+    run_task
+        .objective
+        .push_str(&remote_exec_instructions(&settings));
 
     let run_id = TaskId::new().to_string();
     // ADR-0036 D1: Remote の写しは `workspace_root/<task_id>` でタスクごとなので `<写し>/artifacts`。
@@ -497,15 +556,19 @@ async fn execute_on_cluster(
     // ADR-0018 D4: run が終わった（アダプタ自体が Ok を返した）ら、手元の編集をクラスタへ push する。
     if result.is_ok() {
         match ws.push().await {
-            Ok(()) => outln!("progress: pushed to cluster {}:{}", target.spec.id, target.remote_path.display()),
+            Ok(()) => outln!(
+                "progress: pushed to cluster {}:{}",
+                target.spec.id,
+                target.remote_path.display()
+            ),
             Err(WorkspaceError::Unreachable(msg)) => return unreachable_result(msg),
             Err(e) => return Err(CliError::msg(format!("failed to push to cluster: {e}"))),
         }
     }
 
     let (message, exit) = normalize_outcome(result);
-    let json =
-        serde_json::to_string(&message).map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
+    let json = serde_json::to_string(&message)
+        .map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
     outln!("result: {json}");
     Ok(ExitCode::from(exit))
 }
@@ -518,7 +581,8 @@ fn unreachable_result(message: String) -> Result<ExitCode, CliError> {
         retryable: true,
         provider_failure: None,
     };
-    let json = serde_json::to_string(&msg).map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
+    let json = serde_json::to_string(&msg)
+        .map_err(|e| CliError::msg(format!("failed to encode result: {e}")))?;
     outln!("result: {json}");
     Ok(ExitCode::from(4))
 }
@@ -551,17 +615,33 @@ fn to_answers(notes: Vec<AnswerNote>) -> Vec<Answer> {
 fn normalize_outcome(result: Result<RunOutcome, AdapterError>) -> (WorkerMessage, u8) {
     match result {
         Ok(outcome) => match outcome.terminal {
-            Terminal::Done { summary, evidence, usage } => (WorkerMessage::Done { summary, evidence, usage }, 0),
+            Terminal::Done {
+                summary,
+                evidence,
+                usage,
+            } => (
+                WorkerMessage::Done {
+                    summary,
+                    evidence,
+                    usage,
+                },
+                0,
+            ),
             Terminal::Question { text } => (WorkerMessage::Question { text }, 3),
-            Terminal::Error { message, retryable } => {
-                (WorkerMessage::Error { message, retryable, provider_failure: None }, 4)
-            }
+            Terminal::Error { message, retryable } => (
+                WorkerMessage::Error {
+                    message,
+                    retryable,
+                    provider_failure: None,
+                },
+                4,
+            ),
         },
         Err(e) => {
             let provider_failure = match &e {
-                AdapterError::Throttled { retry_after } => {
-                    Some(ProviderFailure::Throttled { retry_after_secs: retry_after.as_secs() })
-                }
+                AdapterError::Throttled { retry_after } => Some(ProviderFailure::Throttled {
+                    retry_after_secs: retry_after.as_secs(),
+                }),
                 AdapterError::AuthFailed(_) => Some(ProviderFailure::AuthFailed),
                 AdapterError::Exhausted(_) => Some(ProviderFailure::Exhausted),
                 _ => None,
@@ -588,7 +668,12 @@ impl EventSink for PrintSink {
     }
 
     fn artifact(&self, artifact: &ArtifactRef) {
-        outln!("artifact: {} {} sha256={}", artifact.name, artifact.path, artifact.sha256);
+        outln!(
+            "artifact: {} {} sha256={}",
+            artifact.name,
+            artifact.path,
+            artifact.sha256
+        );
     }
 
     /// ADR-0016 D2: `worker run` は DB を変えないので、提案は表示するだけで子タスクは挿入しない。
@@ -609,7 +694,11 @@ mod tests {
     #[test]
     fn normalize_outcome_maps_done_question_and_error_to_exit_codes() {
         let (msg, exit) = normalize_outcome(Ok(RunOutcome {
-            terminal: Terminal::Done { summary: "s".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "s".into(),
+                evidence: vec![],
+                usage: None,
+            },
             exit_code: Some(0),
         }));
         assert!(matches!(msg, WorkerMessage::Done { .. }));
@@ -623,20 +712,33 @@ mod tests {
         assert_eq!(exit, 3);
 
         let (msg, exit) = normalize_outcome(Ok(RunOutcome {
-            terminal: Terminal::Error { message: "m".into(), retryable: false },
+            terminal: Terminal::Error {
+                message: "m".into(),
+                retryable: false,
+            },
             exit_code: Some(1),
         }));
-        assert!(matches!(msg, WorkerMessage::Error { provider_failure: None, .. }));
+        assert!(matches!(
+            msg,
+            WorkerMessage::Error {
+                provider_failure: None,
+                ..
+            }
+        ));
         assert_eq!(exit, 4);
     }
 
     #[test]
     fn normalize_outcome_maps_adapter_errors_to_provider_failure() {
-        let (msg, exit) = normalize_outcome(Err(AdapterError::Throttled { retry_after: Duration::from_secs(7) }));
+        let (msg, exit) = normalize_outcome(Err(AdapterError::Throttled {
+            retry_after: Duration::from_secs(7),
+        }));
         assert!(matches!(
             msg,
             WorkerMessage::Error {
-                provider_failure: Some(ProviderFailure::Throttled { retry_after_secs: 7 }),
+                provider_failure: Some(ProviderFailure::Throttled {
+                    retry_after_secs: 7
+                }),
                 retryable: true,
                 ..
             }
@@ -644,18 +746,37 @@ mod tests {
         assert_eq!(exit, 4);
 
         let (msg, _) = normalize_outcome(Err(AdapterError::AuthFailed("nope".into())));
-        assert!(matches!(msg, WorkerMessage::Error { provider_failure: Some(ProviderFailure::AuthFailed), .. }));
+        assert!(matches!(
+            msg,
+            WorkerMessage::Error {
+                provider_failure: Some(ProviderFailure::AuthFailed),
+                ..
+            }
+        ));
 
         let (msg, _) = normalize_outcome(Err(AdapterError::Exhausted("nope".into())));
-        assert!(matches!(msg, WorkerMessage::Error { provider_failure: Some(ProviderFailure::Exhausted), .. }));
+        assert!(matches!(
+            msg,
+            WorkerMessage::Error {
+                provider_failure: Some(ProviderFailure::Exhausted),
+                ..
+            }
+        ));
 
         let (msg, _) = normalize_outcome(Err(AdapterError::Other("boom".into())));
-        assert!(matches!(msg, WorkerMessage::Error { provider_failure: None, .. }));
+        assert!(matches!(
+            msg,
+            WorkerMessage::Error {
+                provider_failure: None,
+                ..
+            }
+        ));
     }
 
     /// `Config` を toml を経由せず直接組み立てる（celerisctl は `toml` crate に依存していないため）。
     fn cluster_config(clusters: Vec<celeris::config::ClusterConfig>) -> Config {
         Config {
+            harnesses: Vec::new(),
             db: PathBuf::from("celeris.sqlite3"),
             workspace_root: PathBuf::from("workspaces"),
             tick_ms: 2000,
@@ -718,6 +839,8 @@ mod tests {
     fn task_fixture(status: Status, workspace: WorkspaceSpec) -> Task {
         let now = time::OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -729,9 +852,16 @@ mod tests {
             depends_on: vec![],
             status,
             priority: 0,
-            worker_hint: task_core::WorkerHint { tier: task_core::Tier::Standard, adapter: None },
+            worker_hint: task_core::WorkerHint {
+                tier: task_core::Tier::Standard,
+                adapter: None,
+            },
             workspace,
-            budget: task_core::Budget { max_turns: 1, max_wall_secs: 30, max_retries: 0 },
+            budget: task_core::Budget {
+                max_turns: 1,
+                max_wall_secs: 30,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -751,15 +881,31 @@ mod tests {
     #[test]
     fn resolve_cluster_target_errors_when_cluster_missing() {
         let config = cluster_config(vec![]);
-        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into(), mode: None });
+        let task = task_fixture(
+            Status::Ready,
+            WorkspaceSpec::Local {
+                path: "/tmp/x".into(),
+                mode: None,
+            },
+        );
         let err = resolve_cluster_target(&config, &task, "local", None).unwrap_err();
-        assert!(err.to_string().contains("cluster not found in config: local"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("cluster not found in config: local"),
+            "{err}"
+        );
     }
 
     #[test]
     fn resolve_cluster_target_requires_workspace_arg_for_local_task() {
         let config = cluster_config(vec![cluster("local", "h")]);
-        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into(), mode: None });
+        let task = task_fixture(
+            Status::Ready,
+            WorkspaceSpec::Local {
+                path: "/tmp/x".into(),
+                mode: None,
+            },
+        );
         let err = resolve_cluster_target(&config, &task, "local", None).unwrap_err();
         assert!(err.to_string().contains("has a local workspace"), "{err}");
     }
@@ -769,11 +915,17 @@ mod tests {
         let config = cluster_config(vec![cluster("local", "h")]);
         let task = task_fixture(
             Status::Ready,
-            WorkspaceSpec::Remote { cluster: "local".into(), path: "/remote/proj".into() },
+            WorkspaceSpec::Remote {
+                cluster: "local".into(),
+                path: "/remote/proj".into(),
+            },
         );
         let target = resolve_cluster_target(&config, &task, "local", None).unwrap();
         assert_eq!(target.remote_path, PathBuf::from("/remote/proj"));
-        assert_eq!(target.mirror_dir, config.workspace_root.join(task.id.to_string()));
+        assert_eq!(
+            target.mirror_dir,
+            config.workspace_root.join(task.id.to_string())
+        );
         assert!(target.warning.is_none());
         assert_eq!(target.spec.host, "h");
     }
@@ -781,8 +933,16 @@ mod tests {
     #[test]
     fn resolve_cluster_target_workspace_arg_overrides_task_path() {
         let config = cluster_config(vec![cluster("local", "h")]);
-        let task = task_fixture(Status::Ready, WorkspaceSpec::Local { path: "/tmp/x".into(), mode: None });
-        let target = resolve_cluster_target(&config, &task, "local", Some(Path::new("/remote/other"))).unwrap();
+        let task = task_fixture(
+            Status::Ready,
+            WorkspaceSpec::Local {
+                path: "/tmp/x".into(),
+                mode: None,
+            },
+        );
+        let target =
+            resolve_cluster_target(&config, &task, "local", Some(Path::new("/remote/other")))
+                .unwrap();
         assert_eq!(target.remote_path, PathBuf::from("/remote/other"));
         assert!(target.warning.is_none());
     }
@@ -792,7 +952,10 @@ mod tests {
         let config = cluster_config(vec![cluster("local", "h")]);
         let task = task_fixture(
             Status::Ready,
-            WorkspaceSpec::Remote { cluster: "other".into(), path: "/remote/proj".into() },
+            WorkspaceSpec::Remote {
+                cluster: "other".into(),
+                path: "/remote/proj".into(),
+            },
         );
         let target = resolve_cluster_target(&config, &task, "local", None).unwrap();
         assert_eq!(target.remote_path, PathBuf::from("/remote/proj"));
@@ -803,8 +966,15 @@ mod tests {
     fn resolve_cluster_target_rejects_running_or_reviewing_task_even_with_workspace_arg() {
         let config = cluster_config(vec![cluster("local", "h")]);
         for status in [Status::Running, Status::Reviewing] {
-            let task = task_fixture(status, WorkspaceSpec::Local { path: "/tmp/x".into(), mode: None });
-            let err = resolve_cluster_target(&config, &task, "local", Some(Path::new("/remote/x"))).unwrap_err();
+            let task = task_fixture(
+                status,
+                WorkspaceSpec::Local {
+                    path: "/tmp/x".into(),
+                    mode: None,
+                },
+            );
+            let err = resolve_cluster_target(&config, &task, "local", Some(Path::new("/remote/x")))
+                .unwrap_err();
             assert!(err.to_string().contains("stop celeris or wait"), "{err}");
         }
     }
@@ -850,9 +1020,16 @@ mod tests {
     #[test]
     fn resolve_account_non_pool_provider_ignores_missing_account_and_rejects_explicit_one() {
         let config = cluster_config(vec![]);
-        assert_eq!(resolve_account(&config, "p1", "claude-code", &args_fixture(None)).unwrap(), None);
-        let err = resolve_account(&config, "p1", "claude-code", &args_fixture(Some("a"))).unwrap_err();
-        assert!(err.to_string().contains("does not have account_pool"), "{err}");
+        assert_eq!(
+            resolve_account(&config, "p1", "claude-code", &args_fixture(None)).unwrap(),
+            None
+        );
+        let err =
+            resolve_account(&config, "p1", "claude-code", &args_fixture(Some("a"))).unwrap_err();
+        assert!(
+            err.to_string().contains("does not have account_pool"),
+            "{err}"
+        );
     }
 
     /// ADR-0026 D5: acp はアカウントのプールを使わない（`Config::validate` が `account_pool = true` を
@@ -874,9 +1051,16 @@ mod tests {
             args: None,
             settings: None,
         }];
-        assert_eq!(resolve_account(&config, "opencode-qwen", "acp", &args_fixture(None)).unwrap(), None);
-        let err = resolve_account(&config, "opencode-qwen", "acp", &args_fixture(Some("a"))).unwrap_err();
-        assert!(err.to_string().contains("does not have account_pool"), "{err}");
+        assert_eq!(
+            resolve_account(&config, "opencode-qwen", "acp", &args_fixture(None)).unwrap(),
+            None
+        );
+        let err =
+            resolve_account(&config, "opencode-qwen", "acp", &args_fixture(Some("a"))).unwrap_err();
+        assert!(
+            err.to_string().contains("does not have account_pool"),
+            "{err}"
+        );
     }
 
     /// ADR-0026 D2: `celerisctl worker run` の `build_adapters` 経由でも acp プロバイダのアダプタが引ける
@@ -898,7 +1082,9 @@ mod tests {
             settings: None,
         }];
         let adapters = celeris::build_adapters(&config);
-        let adapter = adapters.get("opencode-qwen").expect("acp provider has an adapter instance");
+        let adapter = adapters
+            .get("opencode-qwen")
+            .expect("acp provider has an adapter instance");
         assert_eq!(adapter.id(), "acp");
     }
 
@@ -919,7 +1105,10 @@ mod tests {
             settings: None,
         }];
         let err = resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap_err();
-        assert!(err.to_string().contains("[accounts] is not configured"), "{err}");
+        assert!(
+            err.to_string().contains("[accounts] is not configured"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -928,12 +1117,22 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("b")).unwrap();
         let config = pool_provider_config(tmp.path(), 2);
 
-        assert_eq!(resolve_account(&config, "pool", "claude-code", &args_fixture(Some("b"))).unwrap(), Some("b".into()));
+        assert_eq!(
+            resolve_account(&config, "pool", "claude-code", &args_fixture(Some("b"))).unwrap(),
+            Some("b".into())
+        );
 
-        let err = resolve_account(&config, "pool", "claude-code", &args_fixture(Some("missing"))).unwrap_err();
+        let err = resolve_account(
+            &config,
+            "pool",
+            "claude-code",
+            &args_fixture(Some("missing")),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("account not found"), "{err}");
 
-        let err = resolve_account(&config, "pool", "claude-code", &args_fixture(Some("../x"))).unwrap_err();
+        let err = resolve_account(&config, "pool", "claude-code", &args_fixture(Some("../x")))
+            .unwrap_err();
         assert!(err.to_string().contains("invalid --account id"), "{err}");
     }
 
@@ -947,7 +1146,10 @@ mod tests {
         let mut book = task_dispatch::AccountBook::load(&tmp.path().join(".celeris-usage.json"));
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let window = |u: f64| task_core::RateLimitObservation {
-            five_hour: Some(task_core::RateWindow { utilization: u, resets_at: now + 90_000 }),
+            five_hour: Some(task_core::RateWindow {
+                utilization: u,
+                resets_at: now + 90_000,
+            }),
             seven_day: None,
             status: None,
             resets_at: None,
@@ -958,7 +1160,10 @@ mod tests {
         book.save().unwrap();
 
         let config = pool_provider_config(tmp.path(), 2);
-        assert_eq!(resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap(), Some("b".into()));
+        assert_eq!(
+            resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap(),
+            Some("b".into())
+        );
     }
 
     #[test]
@@ -999,10 +1204,20 @@ mod tests {
             check_model: "haiku".into(),
         });
 
-        assert_eq!(resolve_account(&config, "pool", "codex", &args_fixture(Some("c"))).unwrap(), Some("c".into()));
-        assert_eq!(resolve_account(&config, "pool", "codex", &args_fixture(None)).unwrap(), Some("c".into()));
+        assert_eq!(
+            resolve_account(&config, "pool", "codex", &args_fixture(Some("c"))).unwrap(),
+            Some("c".into())
+        );
+        assert_eq!(
+            resolve_account(&config, "pool", "codex", &args_fixture(None)).unwrap(),
+            Some("c".into())
+        );
 
         let err = resolve_account(&config, "pool", "claude-code", &args_fixture(None)).unwrap_err();
-        assert!(err.to_string().contains("not a pool adapter") || err.to_string().contains("no root configured"), "{err}");
+        assert!(
+            err.to_string().contains("not a pool adapter")
+                || err.to_string().contains("no root configured"),
+            "{err}"
+        );
     }
 }

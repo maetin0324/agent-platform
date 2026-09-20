@@ -24,9 +24,17 @@ use time::OffsetDateTime;
 /// run の終端のうち、報告に必要な部分だけを取り出したもの。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TerminalReport {
-    Done { summary: String, evidence: Vec<String> },
-    Error { message: String, retryable: bool },
-    Question { text: String },
+    Done {
+        summary: String,
+        evidence: Vec<String>,
+    },
+    Error {
+        message: String,
+        retryable: bool,
+    },
+    Question {
+        text: String,
+    },
 }
 
 /// `evidence` を報告の本文用に整形する（ワーカー run の直接の `Done` からでも、レビュー後の `entry.subject` からでも使う）。
@@ -51,7 +59,9 @@ pub(crate) fn format_evidence(evidence: &[Evidence]) -> Vec<String> {
 pub(crate) fn terminal_report(result: &Result<RunOutcome, AdapterError>) -> Option<TerminalReport> {
     match result {
         Ok(RunOutcome {
-            terminal: Terminal::Done { summary, evidence, .. },
+            terminal: Terminal::Done {
+                summary, evidence, ..
+            },
             ..
         }) => Some(TerminalReport::Done {
             summary: summary.clone(),
@@ -83,10 +93,17 @@ pub(crate) fn declared_kind(declared: Option<&str>) -> report::ReportKind {
 }
 
 /// その run が出した成果物の一覧（`ArtifactProduced` イベントから。決定的）。
-fn artifacts_of_run(store: &dyn TaskStore, task_id: TaskId, run_id: &str) -> Result<Vec<String>, StoreError> {
+fn artifacts_of_run(
+    store: &dyn TaskStore,
+    task_id: TaskId,
+    run_id: &str,
+) -> Result<Vec<String>, StoreError> {
     let mut out = Vec::new();
     for (_, event) in store.events_for(task_id)? {
-        if let Event::ArtifactProduced { run_id: rid, artifact } = event
+        if let Event::ArtifactProduced {
+            run_id: rid,
+            artifact,
+        } = event
             && rid == run_id
         {
             out.push(format!("{} ({})", artifact.name, artifact.path));
@@ -166,9 +183,15 @@ pub(crate) fn record_run_report(
             *retryable,
             now,
         ),
-        TerminalReport::Question { text } => {
-            report::report_for_question(assignee, level, task.project_id, task.id, &task.title, text, now)
-        }
+        TerminalReport::Question { text } => report::report_for_question(
+            assignee,
+            level,
+            task.project_id,
+            task.id,
+            &task.title,
+            text,
+            now,
+        ),
     };
     append_with_escalation(store, &org, report).map(Some)
 }
@@ -204,7 +227,9 @@ pub(crate) fn record_cluster_unavailable_report(
     };
     let node_id = node.id.clone();
     let level = report::level_of(&org, &node_id);
-    let report = report::report_for_cluster_unavailable(&node_id, level, cluster, host, reason, task_id, now);
+    let report = report::report_for_cluster_unavailable(
+        &node_id, level, cluster, host, reason, task_id, now,
+    );
     append_with_escalation(store, &org, report).map(Some)
 }
 
@@ -216,7 +241,10 @@ pub(crate) fn cluster_report_recently_recorded(
     now: OffsetDateTime,
     within_secs: i64,
 ) -> Result<bool, StoreError> {
-    let headline = report::truncate_chars(&format!("{host} に接続できない"), report::HEADLINE_MAX_CHARS);
+    let headline = report::truncate_chars(
+        &format!("{host} に接続できない"),
+        report::HEADLINE_MAX_CHARS,
+    );
     // 監査 L-1: docstring どおり「未読」だけを見る（既読の古い障害報告に引きずられない）。
     let recent = store.report_list(&task_core::ReportFilter {
         level: Some(0),
@@ -234,12 +262,15 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use task_core::org::{OrgKind, OrgNode};
-    use task_core::{Budget, ProjectId, SqliteStore, Status, TaskKind, Tier, WorkerHint, WorkspaceSpec};
+    use task_core::{
+        Budget, ProjectId, SqliteStore, Status, TaskKind, Tier, WorkerHint, WorkspaceSpec,
+    };
     use task_worker::Evidence;
 
     fn org_node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
         OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: id.into(),
@@ -268,6 +299,8 @@ mod tests {
     fn task(assignee: Option<&str>, project: Option<ProjectId>) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -283,7 +316,10 @@ mod tests {
                 tier: Tier::Cheap,
                 adapter: None,
             },
-            workspace: WorkspaceSpec::Local { path: ".".into(), mode: None },
+            workspace: WorkspaceSpec::Local {
+                path: ".".into(),
+                mode: None,
+            },
             budget: Budget {
                 max_turns: 1,
                 max_wall_secs: 1,
@@ -328,9 +364,16 @@ mod tests {
         let task = task(Some("coding-poc"), Some(project));
         store.insert(&task).expect("insert");
         let terminal = terminal_report(&done("ベンチが 1.8 倍速くなった")).expect("terminal");
-        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
-            .expect("record")
-            .expect("some");
+        let report = record_run_report(
+            store.as_ref(),
+            &task,
+            "run-1",
+            &terminal,
+            None,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("record")
+        .expect("some");
         assert_eq!(report.kind, report::ReportKind::Result);
         assert_eq!(report.node_id, "coding-poc");
         assert_eq!(report.level, 2);
@@ -338,7 +381,9 @@ mod tests {
         assert_eq!(report.headline, "ベンチが 1.8 倍速くなった");
         assert!(report.body.contains("cargo test"), "{}", report.body);
         // 良い知らせは複製されない（圧縮を待つ）。
-        let all = store.report_list(&task_core::ReportFilter::default()).expect("list");
+        let all = store
+            .report_list(&task_core::ReportFilter::default())
+            .expect("list");
         assert_eq!(all.len(), 1);
     }
 
@@ -362,7 +407,10 @@ mod tests {
         .expect("some");
         assert_eq!(report.kind, report::ReportKind::Proposal);
         // 固定表（未知・欠落は `result`。`bad_news` / `question` を `done` から名乗らせはしない）。
-        assert_eq!(declared_kind(Some("proposal")), report::ReportKind::Proposal);
+        assert_eq!(
+            declared_kind(Some("proposal")),
+            report::ReportKind::Proposal
+        );
         assert_eq!(declared_kind(Some("bad_news")), report::ReportKind::Result);
         assert_eq!(declared_kind(Some("bogus")), report::ReportKind::Result);
         assert_eq!(declared_kind(None), report::ReportKind::Result);
@@ -377,16 +425,33 @@ mod tests {
         store.insert(&task).expect("insert");
         for terminal in [
             terminal_report(&done("順調です")).expect("terminal"),
-            TerminalReport::Error { message: "落ちた".into(), retryable: false },
-            TerminalReport::Question { text: "どちらにしますか".into() },
+            TerminalReport::Error {
+                message: "落ちた".into(),
+                retryable: false,
+            },
+            TerminalReport::Question {
+                text: "どちらにしますか".into(),
+            },
         ] {
             assert_eq!(
-                record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
-                    .expect("record"),
+                record_run_report(
+                    store.as_ref(),
+                    &task,
+                    "run-1",
+                    &terminal,
+                    None,
+                    OffsetDateTime::now_utc()
+                )
+                .expect("record"),
                 None
             );
         }
-        assert!(store.report_list(&task_core::ReportFilter::default()).expect("list").is_empty());
+        assert!(
+            store
+                .report_list(&task_core::ReportFilter::default())
+                .expect("list")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -395,10 +460,22 @@ mod tests {
         let task = task(None, Some(ProjectId::new()));
         store.insert(&task).expect("insert");
         let terminal = terminal_report(&done("できました")).expect("terminal");
-        let made = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
-            .expect("record");
+        let made = record_run_report(
+            store.as_ref(),
+            &task,
+            "run-1",
+            &terminal,
+            None,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("record");
         assert!(made.is_none());
-        assert!(store.report_list(&task_core::ReportFilter::default()).expect("list").is_empty());
+        assert!(
+            store
+                .report_list(&task_core::ReportFilter::default())
+                .expect("list")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -408,10 +485,22 @@ mod tests {
         let task = task(Some("no-such-node"), Some(ProjectId::new()));
         store.insert(&task).expect("insert");
         let terminal = terminal_report(&done("できました")).expect("terminal");
-        let made = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
-            .expect("record");
+        let made = record_run_report(
+            store.as_ref(),
+            &task,
+            "run-1",
+            &terminal,
+            None,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("record");
         assert!(made.is_none());
-        assert!(store.report_list(&task_core::ReportFilter::default()).expect("list").is_empty());
+        assert!(
+            store
+                .report_list(&task_core::ReportFilter::default())
+                .expect("list")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -427,9 +516,16 @@ mod tests {
             exit_code: Some(1),
         });
         let terminal = terminal_report(&result).expect("terminal");
-        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
-            .expect("record")
-            .expect("some");
+        let report = record_run_report(
+            store.as_ref(),
+            &task,
+            "run-1",
+            &terminal,
+            None,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("record")
+        .expect("some");
         assert_eq!(report.kind, report::ReportKind::BadNews);
         assert_eq!(report.headline, "PoC を書く が失敗: ビルドが壊れている");
         assert!(report.body.contains("retryable: true"), "{}", report.body);
@@ -441,7 +537,13 @@ mod tests {
             .expect("list");
         assert_eq!(at_secretary.len(), 1, "秘書まで複製される");
         assert_eq!(at_secretary[0].headline, report.headline);
-        assert_eq!(store.report_list(&task_core::ReportFilter::default()).expect("list").len(), 3);
+        assert_eq!(
+            store
+                .report_list(&task_core::ReportFilter::default())
+                .expect("list")
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -456,13 +558,26 @@ mod tests {
             exit_code: Some(0),
         });
         let terminal = terminal_report(&result).expect("terminal");
-        let report = record_run_report(store.as_ref(), &task, "run-1", &terminal, None, OffsetDateTime::now_utc())
-            .expect("record")
-            .expect("some");
+        let report = record_run_report(
+            store.as_ref(),
+            &task,
+            "run-1",
+            &terminal,
+            None,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("record")
+        .expect("some");
         assert_eq!(report.kind, report::ReportKind::Question);
         assert_eq!(report.headline, "どのクラスタを使いますか");
         // 質問は複製しない（悪い知らせではない）。
-        assert_eq!(store.report_list(&task_core::ReportFilter::default()).expect("list").len(), 1);
+        assert_eq!(
+            store
+                .report_list(&task_core::ReportFilter::default())
+                .expect("list")
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -477,9 +592,16 @@ mod tests {
     fn a_cluster_that_cannot_be_reached_is_bad_news_for_infra() {
         let store = store_with_org();
         let now = OffsetDateTime::now_utc();
-        let report = record_cluster_unavailable_report(store.as_ref(), "pegasus", "pegasus.ccs", "no master", None, now)
-            .expect("record")
-            .expect("some");
+        let report = record_cluster_unavailable_report(
+            store.as_ref(),
+            "pegasus",
+            "pegasus.ccs",
+            "no master",
+            None,
+            now,
+        )
+        .expect("record")
+        .expect("some");
         assert_eq!(report.node_id, "infra");
         assert_eq!(report.kind, report::ReportKind::BadNews);
         assert_eq!(report.project_id, None, "案件なし");
@@ -493,8 +615,13 @@ mod tests {
             .expect("list");
         assert_eq!(at_secretary.len(), 1);
         // 同じホストの障害は間引かれる。
-        assert!(cluster_report_recently_recorded(store.as_ref(), "pegasus.ccs", now, 3600).expect("check"));
-        assert!(!cluster_report_recently_recorded(store.as_ref(), "sirius", now, 3600).expect("check"));
+        assert!(
+            cluster_report_recently_recorded(store.as_ref(), "pegasus.ccs", now, 3600)
+                .expect("check")
+        );
+        assert!(
+            !cluster_report_recently_recorded(store.as_ref(), "sirius", now, 3600).expect("check")
+        );
     }
 
     #[test]
@@ -525,7 +652,8 @@ mod tests {
         compaction.title = "報告のまとめ: coding".into();
         store.insert(&compaction).expect("insert");
 
-        let terminal = terminal_report(&done("PoC は 1.8 倍速く、論文の framing は X で書けそう")).expect("terminal");
+        let terminal = terminal_report(&done("PoC は 1.8 倍速く、論文の framing は X で書けそう"))
+            .expect("terminal");
         let summary = record_run_report(store.as_ref(), &compaction, "run-1", &terminal, None, now)
             .expect("record")
             .expect("some");
@@ -538,12 +666,23 @@ mod tests {
         want.sort();
         assert_eq!(got, want, "子の報告が sources に入る");
         // 子は次回の対象から外れ、まとめは 1 段上（秘書）の対象になる。
-        assert!(store.report_unreviewed_children("coding").expect("pending").is_empty());
-        let up = store.report_unreviewed_children("secretary").expect("pending");
-        assert_eq!(up.iter().map(|r| r.id).collect::<Vec<_>>(), vec![summary.id]);
+        assert!(
+            store
+                .report_unreviewed_children("coding")
+                .expect("pending")
+                .is_empty()
+        );
+        let up = store
+            .report_unreviewed_children("secretary")
+            .expect("pending");
+        assert_eq!(
+            up.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![summary.id]
+        );
 
         // まとめる対象が 1 件も無ければ報告を作らない（やり直しで二重に作らないため）。
-        let again = record_run_report(store.as_ref(), &compaction, "run-2", &terminal, None, now).expect("record");
+        let again = record_run_report(store.as_ref(), &compaction, "run-2", &terminal, None, now)
+            .expect("record");
         assert!(again.is_none());
     }
 
@@ -580,7 +719,9 @@ mod tests {
             read_at: None,
             created_at: now - time::Duration::minutes(10),
         };
-        store.report_append_all(&[child_a.clone(), child_b.clone()]).expect("append");
+        store
+            .report_append_all(&[child_a.clone(), child_b.clone()])
+            .expect("append");
 
         let mut compaction_a = task(Some("coding"), Some(project_a));
         compaction_a.role = Some(report::COMPACTION_ROLE.into());
@@ -590,17 +731,32 @@ mod tests {
         store.insert(&compaction_b).expect("insert");
 
         let terminal = terminal_report(&done("A の案件のまとめ")).expect("terminal");
-        let summary_a = record_run_report(store.as_ref(), &compaction_a, "run-a", &terminal, None, now)
-            .expect("record")
-            .expect("some");
-        assert_eq!(summary_a.sources, vec![child_a.id], "A のまとめには A の子だけが入る");
+        let summary_a =
+            record_run_report(store.as_ref(), &compaction_a, "run-a", &terminal, None, now)
+                .expect("record")
+                .expect("some");
+        assert_eq!(
+            summary_a.sources,
+            vec![child_a.id],
+            "A のまとめには A の子だけが入る"
+        );
 
         // B は A のまとめが done になった後でも、自分の子だけをまとめて done にできる。
         let terminal_b = terminal_report(&done("B の案件のまとめ")).expect("terminal");
-        let summary_b = record_run_report(store.as_ref(), &compaction_b, "run-b", &terminal_b, None, now)
-            .expect("record")
-            .expect("some");
-        assert_eq!(summary_b.sources, vec![child_b.id], "B のまとめには B の子だけが入る");
+        let summary_b = record_run_report(
+            store.as_ref(),
+            &compaction_b,
+            "run-b",
+            &terminal_b,
+            None,
+            now,
+        )
+        .expect("record")
+        .expect("some");
+        assert_eq!(
+            summary_b.sources,
+            vec![child_b.id],
+            "B のまとめには B の子だけが入る"
+        );
     }
-
 }

@@ -16,7 +16,9 @@ use crate::model::TaskId;
 use crate::repos::RepoId;
 
 /// 取り込みの記録の一意識別子（ULID）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct IntegrationId(#[schemars(with = "String")] pub Ulid);
 
 impl IntegrationId {
@@ -140,7 +142,11 @@ pub struct TaskIntegration {
     pub pr_number: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     #[schemars(with = "Option<String>")]
     pub merged_at: Option<OffsetDateTime>,
     /// 人に見せる 1 行（409 の理由、衝突したファイル、gh の失敗など）。
@@ -182,7 +188,11 @@ impl TaskIntegration {
 
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         let detail = detail.into();
-        self.detail = if detail.trim().is_empty() { None } else { Some(detail) };
+        self.detail = if detail.trim().is_empty() {
+            None
+        } else {
+            Some(detail)
+        };
         self
     }
 
@@ -204,7 +214,11 @@ mod tests {
 
     #[test]
     fn methods_and_states_round_trip_through_their_column_strings() {
-        for m in [IntegrationMethod::Merge, IntegrationMethod::Pr, IntegrationMethod::Discard] {
+        for m in [
+            IntegrationMethod::Merge,
+            IntegrationMethod::Pr,
+            IntegrationMethod::Discard,
+        ] {
             assert_eq!(IntegrationMethod::parse(m.as_str()), Some(m));
         }
         assert_eq!(IntegrationMethod::parse("nope"), None);
@@ -226,9 +240,18 @@ mod tests {
     /// ADR-0043 D5: `gh pr view --json state` の値を `open` / `merged` / `closed` に写す。
     #[test]
     fn the_github_pr_state_maps_onto_the_integration_state() {
-        assert_eq!(TaskIntegration::pr_state("OPEN"), Some(IntegrationState::Open));
-        assert_eq!(TaskIntegration::pr_state("merged"), Some(IntegrationState::Merged));
-        assert_eq!(TaskIntegration::pr_state(" CLOSED "), Some(IntegrationState::Closed));
+        assert_eq!(
+            TaskIntegration::pr_state("OPEN"),
+            Some(IntegrationState::Open)
+        );
+        assert_eq!(
+            TaskIntegration::pr_state("merged"),
+            Some(IntegrationState::Merged)
+        );
+        assert_eq!(
+            TaskIntegration::pr_state(" CLOSED "),
+            Some(IntegrationState::Closed)
+        );
         assert_eq!(TaskIntegration::pr_state("DRAFT"), None);
         assert_eq!(TaskIntegration::pr_state(""), None);
     }

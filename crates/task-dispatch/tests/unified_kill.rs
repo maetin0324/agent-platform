@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use task_core::{
-    Budget, Check, Criterion, DelegationLimits, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, Trigger,
-    WorkerHint, WorkspaceSpec,
+    Budget, Check, Criterion, DelegationLimits, SqliteStore, Status, Task, TaskId, TaskKind,
+    TaskStore, Tier, Trigger, WorkerHint, WorkspaceSpec,
 };
 use task_dispatch::dispatcher::{DispatchConfig, Dispatcher};
 use task_dispatch::policy::{ProviderSpec, StaticPolicy};
@@ -38,6 +38,8 @@ fn worker_that_spawns_a_grandchild(pidfile: &Path) -> Arc<dyn WorkerAdapter> {
 fn new_task(dir: &Path) -> Task {
     let now = OffsetDateTime::now_utc();
     Task {
+        mode: Default::default(),
+        skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
@@ -85,7 +87,11 @@ fn new_task(dir: &Path) -> Task {
     }
 }
 
-fn dispatcher(store: Arc<dyn TaskStore>, adapter: Arc<dyn WorkerAdapter>, workspace_root: PathBuf) -> Dispatcher {
+fn dispatcher(
+    store: Arc<dyn TaskStore>,
+    adapter: Arc<dyn WorkerAdapter>,
+    workspace_root: PathBuf,
+) -> Dispatcher {
     let policy = StaticPolicy::new(
         vec![ProviderSpec {
             id: "p1".into(),
@@ -150,7 +156,10 @@ async fn wait_for_grandchild(path: &Path) -> i32 {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("the worker never spawned its grandchild ({})", path.display());
+    panic!(
+        "the worker never spawned its grandchild ({})",
+        path.display()
+    );
 }
 
 async fn wait_until_gone(pid: i32) -> bool {
@@ -167,7 +176,8 @@ async fn wait_until_gone(pid: i32) -> bool {
 async fn stopping_a_run_kills_the_grandchild(trigger: Trigger) {
     let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
     let pidfile = dir.path().join("grandchild.pid");
-    let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("{e}")));
+    let store: Arc<dyn TaskStore> =
+        Arc::new(SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("{e}")));
     let task = new_task(dir.path());
     store.insert(&task).unwrap_or_else(|e| panic!("{e}"));
 
@@ -214,7 +224,8 @@ async fn interrupt_kills_the_worker_process_group_including_grandchildren() {
 async fn the_wall_clock_timeout_kills_the_worker_process_group_including_grandchildren() {
     let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
     let pidfile = dir.path().join("grandchild.pid");
-    let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("{e}")));
+    let store: Arc<dyn TaskStore> =
+        Arc::new(SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("{e}")));
     let mut task = new_task(dir.path());
     task.budget.max_wall_secs = 1;
     store.insert(&task).unwrap_or_else(|e| panic!("{e}"));
@@ -246,7 +257,8 @@ async fn the_wall_clock_timeout_kills_the_worker_process_group_including_grandch
 async fn the_drain_timeout_kills_the_worker_process_group_including_grandchildren() {
     let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
     let pidfile = dir.path().join("grandchild.pid");
-    let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("{e}")));
+    let store: Arc<dyn TaskStore> =
+        Arc::new(SqliteStore::open_in_memory().unwrap_or_else(|e| panic!("{e}")));
     let task = new_task(dir.path());
     store.insert(&task).unwrap_or_else(|e| panic!("{e}"));
 

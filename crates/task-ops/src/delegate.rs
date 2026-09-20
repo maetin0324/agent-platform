@@ -4,7 +4,8 @@
 //! （挿入は `TaskStore::delegate_children` が行う）。
 
 use task_core::{
-    DelegateDep, DelegateTask, DelegationLimits, GenreSpec, RoleSpec, Status, Task, TaskId, TaskStore, WorkspaceSpec,
+    DelegateDep, DelegateTask, DelegationLimits, GenreSpec, RoleSpec, Status, Task, TaskId,
+    TaskStore, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -105,7 +106,10 @@ pub fn ancestors(store: &dyn TaskStore, task: &Task) -> Result<Vec<TaskId>, OpsE
 
 /// ADR-0039 D2: そのタスクが属する案件の作業場所（`projects.workspace`）。案件に属さない・案件が
 /// 作業場所を決めていないなら `None`（従来どおり、子は親の workspace を継ぐ）。ストアの読み取りだけ。
-pub fn project_workspace(store: &dyn TaskStore, task: &Task) -> Result<Option<WorkspaceSpec>, OpsError> {
+pub fn project_workspace(
+    store: &dyn TaskStore,
+    task: &Task,
+) -> Result<Option<WorkspaceSpec>, OpsError> {
     let Some(project_id) = task.project_id else {
         return Ok(None);
     };
@@ -114,7 +118,10 @@ pub fn project_workspace(store: &dyn TaskStore, task: &Task) -> Result<Option<Wo
 
 /// ADR-0043 D1 / D2: そのタスクが属する案件のリポジトリ（primary が先頭）。案件に属さない・
 /// リポジトリを 1 つも登録していない案件では空。ストアの読み取りだけ。
-pub fn project_repos(store: &dyn TaskStore, task: &Task) -> Result<Vec<task_core::ProjectRepo>, OpsError> {
+pub fn project_repos(
+    store: &dyn TaskStore,
+    task: &Task,
+) -> Result<Vec<task_core::ProjectRepo>, OpsError> {
     let Some(project_id) = task.project_id else {
         return Ok(Vec::new());
     };
@@ -142,7 +149,10 @@ pub fn plan_delegation(
     // 1. 木全体の上限。1 件でも当たれば全件拒否。
     let would_be_depth = tree_depth(store, parent)? + 1;
     if would_be_depth > limits.max_tree_depth {
-        let reason = format!("tree depth would become {would_be_depth} (max {})", limits.max_tree_depth);
+        let reason = format!(
+            "tree depth would become {would_be_depth} (max {})",
+            limits.max_tree_depth
+        );
         let rejected = proposals
             .iter()
             .enumerate()
@@ -156,7 +166,10 @@ pub fn plan_delegation(
     let root = tree_root(store, parent)?;
     let runs = tree_worker_runs(store, root)?;
     if runs >= limits.max_tree_runs {
-        let reason = format!("tree already has {runs} worker runs (max {})", limits.max_tree_runs);
+        let reason = format!(
+            "tree already has {runs} worker runs (max {})",
+            limits.max_tree_runs
+        );
         let rejected = proposals
             .iter()
             .enumerate()
@@ -192,7 +205,9 @@ pub fn plan_delegation(
                     break;
                 }
                 if ancestor_ids.contains(&dep_id) {
-                    item_err = Some(format!("dependency {dep_id} is an ancestor of the delegating task"));
+                    item_err = Some(format!(
+                        "dependency {dep_id} is an ancestor of the delegating task"
+                    ));
                     break;
                 }
                 match store.get(dep_id)? {
@@ -229,7 +244,10 @@ pub fn plan_delegation(
                     rejected.push(reject(
                         i,
                         &proposals[i].title,
-                        format!("per-run delegation limit ({}) reached", limits.max_delegate_per_run),
+                        format!(
+                            "per-run delegation limit ({}) reached",
+                            limits.max_delegate_per_run
+                        ),
                     ));
                     continue;
                 }
@@ -251,8 +269,16 @@ pub fn plan_delegation(
         project: project.as_ref(),
         home: home.as_deref(),
     };
-    let accepted =
-        task_core::materialize_delegated(parent, proposals, &accepted_indices, &org, roles, genres, workspace, now);
+    let accepted = task_core::materialize_delegated(
+        parent,
+        proposals,
+        &accepted_indices,
+        &org,
+        roles,
+        genres,
+        workspace,
+        now,
+    );
 
     Ok(DelegationOutcome { accepted, rejected })
 }
@@ -262,7 +288,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use task_core::{
-        Budget, Check, Criterion, Event, RunRole, SqliteStore, Task, TaskKind, Tier, WorkerHint, WorkspaceSpec,
+        Budget, Check, Criterion, Event, RunRole, SqliteStore, Task, TaskKind, Tier, WorkerHint,
+        WorkspaceSpec,
     };
 
     fn now() -> OffsetDateTime {
@@ -292,6 +319,8 @@ mod tests {
     fn make_task(parent_id: Option<TaskId>, status: Status) -> Task {
         let t = now();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id,
@@ -307,7 +336,10 @@ mod tests {
                 tier: Tier::Frontier,
                 adapter: Some("fake".into()),
             },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws"), mode: None },
+            workspace: WorkspaceSpec::Local {
+                path: PathBuf::from("/tmp/ws"),
+                mode: None,
+            },
             budget: Budget {
                 max_turns: 10,
                 max_wall_secs: 600,
@@ -352,8 +384,17 @@ mod tests {
         let b = dt("b", vec![DelegateDep::Index(0)]);
         let proposals = vec![a, b];
 
-        let out = plan_delegation(&store, &parent, &proposals, 0, &roles, &[], &DelegationLimits::default(), now())
-            .expect("plan_delegation");
+        let out = plan_delegation(
+            &store,
+            &parent,
+            &proposals,
+            0,
+            &roles,
+            &[],
+            &DelegationLimits::default(),
+            now(),
+        )
+        .expect("plan_delegation");
         assert_eq!(out.accepted.len(), 2);
         assert!(out.rejected.is_empty());
         assert_eq!(out.accepted[0].worker_hint.tier, Tier::Cheap);
@@ -389,16 +430,33 @@ mod tests {
         let inherits = dt("inherits", vec![]);
 
         let proposals = vec![by_role, mismatched, inherits];
-        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &genres, &DelegationLimits::default(), now())
-            .expect("plan_delegation");
+        let out = plan_delegation(
+            &store,
+            &parent,
+            &proposals,
+            0,
+            &[],
+            &genres,
+            &DelegationLimits::default(),
+            now(),
+        )
+        .expect("plan_delegation");
         assert_eq!(out.accepted.len(), 2);
         assert_eq!(out.accepted[0].title, "by-role");
         assert_eq!(out.accepted[0].genre.as_deref(), Some("literature"));
         assert_eq!(out.accepted[1].title, "inherits");
         assert_eq!(out.accepted[1].genre.as_deref(), Some("coding"));
         assert_eq!(out.rejected.len(), 1);
-        assert!(out.rejected[0].contains("mismatched"), "{}", out.rejected[0]);
-        assert!(out.rejected[0].contains("is not one of genre"), "{}", out.rejected[0]);
+        assert!(
+            out.rejected[0].contains("mismatched"),
+            "{}",
+            out.rejected[0]
+        );
+        assert!(
+            out.rejected[0].contains("is not one of genre"),
+            "{}",
+            out.rejected[0]
+        );
     }
 
     #[test]
@@ -412,10 +470,15 @@ mod tests {
             ..DelegationLimits::default()
         };
         let proposals = vec![dt("a", vec![]), dt("b", vec![])];
-        let out = plan_delegation(&store, &parent, &proposals, 1, &[], &[], &limits, now()).expect("plan_delegation");
+        let out = plan_delegation(&store, &parent, &proposals, 1, &[], &[], &limits, now())
+            .expect("plan_delegation");
         assert_eq!(out.accepted.len(), 1);
         assert_eq!(out.rejected.len(), 1);
-        assert!(out.rejected[0].contains("per-run delegation limit"), "{}", out.rejected[0]);
+        assert!(
+            out.rejected[0].contains("per-run delegation limit"),
+            "{}",
+            out.rejected[0]
+        );
     }
 
     #[test]
@@ -433,10 +496,15 @@ mod tests {
             ..DelegationLimits::default()
         };
         let proposals = vec![dt("a", vec![]), dt("b", vec![])];
-        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &[], &limits, now()).expect("plan_delegation");
+        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &[], &limits, now())
+            .expect("plan_delegation");
         assert!(out.accepted.is_empty());
         assert_eq!(out.rejected.len(), 2);
-        assert!(out.rejected[0].contains("tree depth would become 4"), "{}", out.rejected[0]);
+        assert!(
+            out.rejected[0].contains("tree depth would become 4"),
+            "{}",
+            out.rejected[0]
+        );
     }
 
     #[test]
@@ -498,10 +566,15 @@ mod tests {
             ..DelegationLimits::default()
         };
         let proposals = vec![dt("a", vec![])];
-        let out = plan_delegation(&store, &child, &proposals, 0, &[], &[], &limits, now()).expect("plan_delegation");
+        let out = plan_delegation(&store, &child, &proposals, 0, &[], &[], &limits, now())
+            .expect("plan_delegation");
         assert!(out.accepted.is_empty());
         assert_eq!(out.rejected.len(), 1);
-        assert!(out.rejected[0].contains("tree already has 2 worker runs"), "{}", out.rejected[0]);
+        assert!(
+            out.rejected[0].contains("tree already has 2 worker runs"),
+            "{}",
+            out.rejected[0]
+        );
     }
 
     #[test]
@@ -515,18 +588,42 @@ mod tests {
 
         let proposals = vec![
             dt("self-ref", vec![DelegateDep::Id(parent.id.to_string())]),
-            dt("ancestor-ref", vec![DelegateDep::Id(grandparent.id.to_string())]),
+            dt(
+                "ancestor-ref",
+                vec![DelegateDep::Id(grandparent.id.to_string())],
+            ),
             dt("missing-ref", vec![DelegateDep::Id(missing_id.to_string())]),
             dt("ok", vec![]),
         ];
-        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &[], &DelegationLimits::default(), now())
-            .expect("plan_delegation");
+        let out = plan_delegation(
+            &store,
+            &parent,
+            &proposals,
+            0,
+            &[],
+            &[],
+            &DelegationLimits::default(),
+            now(),
+        )
+        .expect("plan_delegation");
         assert_eq!(out.accepted.len(), 1);
         assert_eq!(out.accepted[0].title, "ok");
         assert_eq!(out.rejected.len(), 3);
-        assert!(out.rejected[0].contains("is the delegating task itself"), "{}", out.rejected[0]);
-        assert!(out.rejected[1].contains("is an ancestor of the delegating task"), "{}", out.rejected[1]);
-        assert!(out.rejected[2].contains("does not exist"), "{}", out.rejected[2]);
+        assert!(
+            out.rejected[0].contains("is the delegating task itself"),
+            "{}",
+            out.rejected[0]
+        );
+        assert!(
+            out.rejected[1].contains("is an ancestor of the delegating task"),
+            "{}",
+            out.rejected[1]
+        );
+        assert!(
+            out.rejected[2].contains("does not exist"),
+            "{}",
+            out.rejected[2]
+        );
     }
 
     #[test]
@@ -538,11 +635,24 @@ mod tests {
         insert(&store, &failed_dep);
 
         let proposals = vec![dt("a", vec![DelegateDep::Id(failed_dep.id.to_string())])];
-        let out = plan_delegation(&store, &parent, &proposals, 0, &[], &[], &DelegationLimits::default(), now())
-            .expect("plan_delegation");
+        let out = plan_delegation(
+            &store,
+            &parent,
+            &proposals,
+            0,
+            &[],
+            &[],
+            &DelegationLimits::default(),
+            now(),
+        )
+        .expect("plan_delegation");
         assert!(out.accepted.is_empty());
         assert_eq!(out.rejected.len(), 1);
-        assert!(out.rejected[0].contains("has status Failed and cannot be depended on"), "{}", out.rejected[0]);
+        assert!(
+            out.rejected[0].contains("has status Failed and cannot be depended on"),
+            "{}",
+            out.rejected[0]
+        );
     }
 
     /// ADR-0039 D2: 委譲した子は **明示 > 案件の workspace > 親** の順で作業場所を決める。
@@ -573,25 +683,56 @@ mod tests {
         insert(&store, &parent);
 
         // 1. 何も書かなければ案件の作業場所（親の `/tmp/ws` ではない）。
-        let out = plan_delegation(&store, &parent, &[dt("a", vec![])], 0, &[], &[], &DelegationLimits::default(), now())
-            .expect("plan_delegation");
-        assert_eq!(out.accepted[0].workspace, project.workspace.clone().expect("some"));
+        let out = plan_delegation(
+            &store,
+            &parent,
+            &[dt("a", vec![])],
+            0,
+            &[],
+            &[],
+            &DelegationLimits::default(),
+            now(),
+        )
+        .expect("plan_delegation");
+        assert_eq!(
+            out.accepted[0].workspace,
+            project.workspace.clone().expect("some")
+        );
 
         // 2. 子が明示すれば案件より強い。
         let mut explicit = dt("b", vec![]);
         let elsewhere = WorkspaceSpec::Local {
-            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
+            path: PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+            mode: None,
         };
         explicit.workspace = Some(elsewhere.clone());
-        let out = plan_delegation(&store, &parent, &[explicit], 0, &[], &[], &DelegationLimits::default(), now())
-            .expect("plan_delegation");
+        let out = plan_delegation(
+            &store,
+            &parent,
+            &[explicit],
+            0,
+            &[],
+            &[],
+            &DelegationLimits::default(),
+            now(),
+        )
+        .expect("plan_delegation");
         assert_eq!(out.accepted[0].workspace, elsewhere);
 
         // 3. 案件に属さない親では従来どおり親を継ぐ。
         let orphan = make_task(None, Status::Running);
         insert(&store, &orphan);
-        let out = plan_delegation(&store, &orphan, &[dt("c", vec![])], 0, &[], &[], &DelegationLimits::default(), now())
-            .expect("plan_delegation");
+        let out = plan_delegation(
+            &store,
+            &orphan,
+            &[dt("c", vec![])],
+            0,
+            &[],
+            &[],
+            &DelegationLimits::default(),
+            now(),
+        )
+        .expect("plan_delegation");
         assert_eq!(out.accepted[0].workspace, orphan.workspace);
     }
 

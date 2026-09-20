@@ -14,7 +14,10 @@ use task_core::{ListFilter, ListOrder, Status, Task, TaskKind, TaskStore};
 async fn a_project(app: &axum::Router, title: &str) -> String {
     let resp = send(
         app,
-        post_admin("/api/v1/projects", &json!({"title": title, "request": "やって"})),
+        post_admin(
+            "/api/v1/projects",
+            &json!({"title": title, "request": "やって"}),
+        ),
     )
     .await;
     assert_eq!(resp.status, 201, "{}", resp.text());
@@ -90,7 +93,10 @@ async fn cancelling_a_project_cascades_to_its_tasks_and_milestones() {
     assert_eq!(env.status_of(running.id), Status::Cancelled);
     assert_eq!(env.status_of(ready.id), Status::Cancelled);
     assert_eq!(env.status_of(done.id), Status::Done);
-    assert_eq!(transition_reason(&env, running.id), Some("project_cancelled".to_string()));
+    assert_eq!(
+        transition_reason(&env, running.id),
+        Some("project_cancelled".to_string())
+    );
 
     // 二度目は 409。
     let again = act(&app, &format!("/api/v1/projects/{project}/cancel")).await;
@@ -113,9 +119,14 @@ async fn cancelling_a_milestone_only_touches_its_own_tasks() {
     assert_eq!(resp.json()["milestone"]["status"], "cancelled");
     assert_eq!(env.status_of(inside.id), Status::Cancelled);
     assert_eq!(env.status_of(outside.id), Status::Ready);
-    assert_eq!(transition_reason(&env, inside.id), Some("milestone_cancelled".to_string()));
+    assert_eq!(
+        transition_reason(&env, inside.id),
+        Some("milestone_cancelled".to_string())
+    );
 
-    let detail = send(&app, get_admin(&format!("/api/v1/projects/{project}"))).await.json();
+    let detail = send(&app, get_admin(&format!("/api/v1/projects/{project}")))
+        .await
+        .json();
     assert_eq!(detail["project"]["status"], "proposed");
 }
 
@@ -222,7 +233,12 @@ async fn archive_requires_a_terminal_project_and_hides_it_and_its_tasks_by_defau
     );
 
     // 中止してから（＝終端にしてから）ならアーカイブできる。
-    assert_eq!(act(&app, &format!("/api/v1/projects/{project}/cancel")).await.status, 200);
+    assert_eq!(
+        act(&app, &format!("/api/v1/projects/{project}/cancel"))
+            .await
+            .status,
+        200
+    );
     let archived = act(&app, &format!("/api/v1/projects/{project}/archive")).await;
     assert_eq!(archived.status, 200, "{}", archived.text());
     assert!(archived.json()["project"]["archived_at"].is_string());
@@ -230,21 +246,32 @@ async fn archive_requires_a_terminal_project_and_hides_it_and_its_tasks_by_defau
     // 一覧から消える。
     let list = send(&app, get_admin("/api/v1/projects")).await.json();
     assert!(!project_ids(&list).contains(&project), "{list}");
-    let all = send(&app, get_admin("/api/v1/projects?archived=1")).await.json();
+    let all = send(&app, get_admin("/api/v1/projects?archived=1"))
+        .await
+        .json();
     assert!(project_ids(&all).contains(&project), "{all}");
 
     // タスクも隠れる（ただし個別の `GET /tasks/{id}` は従来どおり見える）。
     let tasks = send(&app, get_admin("/api/v1/tasks")).await.json();
     assert!(!task_ids(&tasks).contains(&task.id.to_string()), "{tasks}");
-    let tasks = send(&app, get_admin("/api/v1/tasks?archived=1")).await.json();
+    let tasks = send(&app, get_admin("/api/v1/tasks?archived=1"))
+        .await
+        .json();
     assert!(task_ids(&tasks).contains(&task.id.to_string()), "{tasks}");
     assert_eq!(
-        send(&app, get_admin(&format!("/api/v1/tasks/{}", task.id))).await.status,
+        send(&app, get_admin(&format!("/api/v1/tasks/{}", task.id)))
+            .await
+            .status,
         200
     );
 
     // 解除すれば戻る（二度押しても 409 にはしない）。
-    assert_eq!(act(&app, &format!("/api/v1/projects/{project}/archive")).await.status, 200);
+    assert_eq!(
+        act(&app, &format!("/api/v1/projects/{project}/archive"))
+            .await
+            .status,
+        200
+    );
     let unarchived = act(&app, &format!("/api/v1/projects/{project}/unarchive")).await;
     assert_eq!(unarchived.status, 200, "{}", unarchived.text());
     assert_eq!(unarchived.json()["project"]["archived_at"], Value::Null);
@@ -283,7 +310,10 @@ async fn patch_cannot_set_paused_or_cancelled_on_a_project_or_a_milestone() {
     for status in ["paused", "cancelled"] {
         let resp = send(
             &app,
-            patch_admin(&format!("/api/v1/projects/{project}"), &json!({"status": status})),
+            patch_admin(
+                &format!("/api/v1/projects/{project}"),
+                &json!({"status": status}),
+            ),
         )
         .await;
         let problem = assert_problem(&resp, 422, "validation");
@@ -291,7 +321,10 @@ async fn patch_cannot_set_paused_or_cancelled_on_a_project_or_a_milestone() {
 
         let resp = send(
             &app,
-            patch_admin(&format!("/api/v1/milestones/{milestone}"), &json!({"status": status})),
+            patch_admin(
+                &format!("/api/v1/milestones/{milestone}"),
+                &json!({"status": status}),
+            ),
         )
         .await;
         let problem = assert_problem(&resp, 422, "validation");
@@ -299,12 +332,17 @@ async fn patch_cannot_set_paused_or_cancelled_on_a_project_or_a_milestone() {
     }
 
     // 何も変わっていない。他の状態は従来どおり `PATCH` で入る。
-    let detail = send(&app, get_admin(&format!("/api/v1/projects/{project}"))).await.json();
+    let detail = send(&app, get_admin(&format!("/api/v1/projects/{project}")))
+        .await
+        .json();
     assert_eq!(detail["project"]["status"], "proposed");
     assert_eq!(
         send(
             &app,
-            patch_admin(&format!("/api/v1/projects/{project}"), &json!({"status": "active"}))
+            patch_admin(
+                &format!("/api/v1/projects/{project}"),
+                &json!({"status": "active"})
+            )
         )
         .await
         .status,
@@ -313,7 +351,10 @@ async fn patch_cannot_set_paused_or_cancelled_on_a_project_or_a_milestone() {
     assert_eq!(
         send(
             &app,
-            patch_admin(&format!("/api/v1/milestones/{milestone}"), &json!({"status": "in_progress"}))
+            patch_admin(
+                &format!("/api/v1/milestones/{milestone}"),
+                &json!({"status": "in_progress"})
+            )
         )
         .await
         .status,

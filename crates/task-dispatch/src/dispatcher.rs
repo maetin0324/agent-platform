@@ -22,27 +22,28 @@ use std::time::{Duration, Instant};
 use task_core::plan::{PlanLimits, PlanOutput, materialize};
 use task_core::report::{HEADLINE_MAX_CHARS, first_line, truncate_chars};
 use task_core::{
-    AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec, ListFilter, ListOrder,
-    OnChildFailure, OrgKind, ProjectId, RateLimitObservation, RoleSpec, RunRole, Status, StoreError, Task, TaskId,
-    TaskKind, TaskStore, Trigger, WorkspaceSpec, support_kind,
+    AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec,
+    ListFilter, ListOrder, OnChildFailure, OrgKind, ProjectId, RateLimitObservation, RoleSpec,
+    RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
+    support_kind,
+};
+use task_ops::daemon::{
+    AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot,
+    InFlight, InFlightKind, ProviderCheckView, ProviderLive,
 };
 use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
     AnswerNote, REVIEWER_REQUEUED_PREFIX, ReviewNote, answers_from_events, approval_decision_note,
-    artifacts_for_run, consecutive_requeues, consecutive_reviewer_requeues, human_approval_title, last_run_id,
-    prior_review_from_events, retry_backoff,
+    artifacts_for_run, consecutive_requeues, consecutive_reviewer_requeues, human_approval_title,
+    last_run_id, prior_review_from_events, retry_backoff,
 };
 use task_worker::{
-    AdapterError, Answer, ChildSummary, CommentContext, ConversationAddressee, ConversationTurn, EventSink,
-    GenreContext,
-    LocalWorkspace, MemoryContext, MemoryDir, MilestoneBrief, MilestoneReviewContext, MilestoneTaskResult,
-    NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview,
-    RecentWork, RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace, SyncMode,
-    Terminal, WorkerMessage, Workspace, WorkerAdapter, control_master_alive_blocking, remote_exec_instructions,
-};
-use task_ops::daemon::{
-    AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot, InFlight,
-    InFlightKind, ProviderCheckView, ProviderLive,
+    AdapterError, Answer, ChildSummary, CommentContext, ConversationAddressee, ConversationTurn,
+    EventSink, GenreContext, LocalWorkspace, MemoryContext, MemoryDir, MilestoneBrief,
+    MilestoneReviewContext, MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION,
+    PriorReview, RecentWork, RoleContext, RunContext, RunLimits, RunOutcome, RunRequest,
+    SshSettings, SshWorkspace, SyncMode, Terminal, WorkerAdapter, WorkerMessage, Workspace,
+    control_master_alive_blocking, remote_exec_instructions,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -50,10 +51,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::accounts::{
-    AccountBook, AccountCandidate, AccountCheckRecord, AccountCooldownReason, AccountDir, ExcludedReason,
-    ObservationSource, cooldown_for_failure, evaluate, scan_accounts, select_account,
+    AccountBook, AccountCandidate, AccountCheckRecord, AccountCooldownReason, AccountDir,
+    ExcludedReason, ObservationSource, cooldown_for_failure, evaluate, scan_accounts,
+    select_account,
 };
-use crate::policy::{AdapterId, CooldownReason, ProviderId, ProviderOutcome, ProviderPolicy, Selection};
+use crate::policy::{
+    AdapterId, CooldownReason, ProviderId, ProviderOutcome, ProviderPolicy, Selection,
+};
 
 /// これを超えた tick は段階ごとの所要時間を `warn` で出す（ADR-0015 D2）。
 const SLOW_TICK: Duration = Duration::from_secs(1);
@@ -64,7 +68,11 @@ const SLOW_STEP: Duration = Duration::from_millis(500);
 fn log_slow_step(step: &'static str, started: Instant) {
     let elapsed = started.elapsed();
     if elapsed >= SLOW_STEP {
-        tracing::warn!(step, duration_ms = elapsed.as_millis() as u64, "slow dispatcher step");
+        tracing::warn!(
+            step,
+            duration_ms = elapsed.as_millis() as u64,
+            "slow dispatcher step"
+        );
     }
 }
 
@@ -106,7 +114,11 @@ pub type TaskFilter = Arc<dyn Fn(&Task) -> bool + Send + Sync>;
 impl ClusterSpec {
     /// このタスクの写し（ローカル）とリモートのパスから、ワーカー用の設定を作る。
     /// `task_id` は worktree のディレクトリ名とブランチ名に使う（ADR-0019 D2）。
-    pub fn ssh_settings(&self, remote_path: &std::path::Path, task_id: task_core::TaskId) -> SshSettings {
+    pub fn ssh_settings(
+        &self,
+        remote_path: &std::path::Path,
+        task_id: task_core::TaskId,
+    ) -> SshSettings {
         let mut settings = SshSettings::new(self.id.clone(), self.host.clone(), remote_path);
         settings.sync = self.sync;
         settings.delete_on_push = self.delete_on_push;
@@ -127,8 +139,8 @@ fn rfc3339(t: OffsetDateTime) -> String {
     t.format(&Rfc3339).unwrap_or_default()
 }
 use crate::review::{
-    HumanVerdicts, PLAN_FILE_NAME, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject, ReviewerRun, Verdict,
-    needs_reviewer_run, review_task,
+    HumanVerdicts, PLAN_FILE_NAME, PlanCheck, ReviewExtras, ReviewOutcome, ReviewSubject,
+    ReviewerRun, Verdict, needs_reviewer_run, review_task,
 };
 
 /// `task_ops::derive::ReviewNote` をワーカープロトコルの `task_worker::PriorReview` に写す
@@ -335,7 +347,6 @@ struct RunEntry {
     container: Option<Arc<dyn task_worker::ContainerStopper>>,
 }
 
-
 /// ADR-0033 D4（Phase 24 / Phase 27）: この run の途中で「部をまたぐ委譲」を止めたときに `StoreSink` が
 /// 残した質問（1 件の部またぎにつき 1 件。同じ文面は 1 回だけ）。
 fn cross_department_questions_of(events: &[(u64, Event)], run_id: &str) -> Vec<String> {
@@ -387,17 +398,29 @@ fn artifact_names_of(events: &[(u64, Event)]) -> Vec<String> {
 fn recent_work_outcome(task: &Task, events: &[(u64, Event)]) -> Option<String> {
     match task.status {
         Status::Done => events.iter().rev().find_map(|(_, e)| match e {
-            Event::WorkerFinished { outcome, role: None, .. } => {
-                outcome.strip_prefix("done: ").map(|s| truncate_chars(first_line(s), HEADLINE_MAX_CHARS))
-            }
+            Event::WorkerFinished {
+                outcome,
+                role: None,
+                ..
+            } => outcome
+                .strip_prefix("done: ")
+                .map(|s| truncate_chars(first_line(s), HEADLINE_MAX_CHARS)),
             _ => None,
         }),
         Status::Failed => events
             .iter()
             .rev()
             .find_map(|(_, e)| match e {
-                Event::ReviewVerdict { pass: false, reason, .. } => Some(truncate_chars(reason, HEADLINE_MAX_CHARS)),
-                Event::WorkerFinished { outcome, role: None, .. } => outcome
+                Event::ReviewVerdict {
+                    pass: false,
+                    reason,
+                    ..
+                } => Some(truncate_chars(reason, HEADLINE_MAX_CHARS)),
+                Event::WorkerFinished {
+                    outcome,
+                    role: None,
+                    ..
+                } => outcome
                     .strip_prefix("error(retryable=")
                     .and_then(|rest| rest.split_once("): "))
                     .map(|(_, message)| truncate_chars(message, HEADLINE_MAX_CHARS)),
@@ -405,15 +428,23 @@ fn recent_work_outcome(task: &Task, events: &[(u64, Event)]) -> Option<String> {
             })
             .or_else(|| {
                 events.iter().rev().find_map(|(_, e)| match e {
-                    Event::Transitioned { to: Status::Failed, reason, .. } => Some(reason.clone()),
+                    Event::Transitioned {
+                        to: Status::Failed,
+                        reason,
+                        ..
+                    } => Some(reason.clone()),
                     _ => None,
                 })
             }),
         Status::Blocked => events.iter().rev().find_map(|(_, e)| match e {
             Event::QuestionRaised { text, .. } => Some(truncate_chars(text, HEADLINE_MAX_CHARS)),
-            Event::WorkerFinished { outcome, role: None, .. } => {
-                outcome.strip_prefix("question: ").map(|s| truncate_chars(s, HEADLINE_MAX_CHARS))
-            }
+            Event::WorkerFinished {
+                outcome,
+                role: None,
+                ..
+            } => outcome
+                .strip_prefix("question: ")
+                .map(|s| truncate_chars(s, HEADLINE_MAX_CHARS)),
             _ => None,
         }),
         _ => None,
@@ -461,6 +492,11 @@ struct RunExtras {
     comments: Vec<CommentContext>,
     /// ADR-0044 D2: 直前の run を止めた人のコメント（あれば前置きの先頭に「人からの割り込み」として出る）。
     interrupt: Option<String>,
+    /// ADR-0046 D1（Phase 59）: 担当ノードの実効 profile ＋ タスクの上書き。profile を 1 つも書いて
+    /// いない組織では `None`（前置きは Phase 58 までとバイト単位で同じ）。
+    profile: Option<task_core::EffectiveProfile>,
+    /// ADR-0046 D4（Phase 59）: 既定（`production`）以外の進め方のときだけ `Some`。
+    mode: Option<task_core::TaskMode>,
     /// ADR-0047 D2（Phase 61）: マウントされた知識の索引（本文は入れない）。
     knowledge: Option<task_worker::protocol::KnowledgeContext>,
 }
@@ -538,7 +574,8 @@ impl StoreSink {
             .map_err(|e| format!("store: {e}"))?
             .ok_or_else(|| "task vanished".to_string())?;
         let ours = parent.status == Status::Running
-            && parent.lease.as_ref().map(|l| l.worker_run_id.as_str()) == Some(self.run_id.as_str());
+            && parent.lease.as_ref().map(|l| l.worker_run_id.as_str())
+                == Some(self.run_id.as_str());
         if !ours {
             return Err("task is no longer running under this run".to_string());
         }
@@ -553,10 +590,14 @@ impl StoreSink {
         // `standing_rules` の前方一致だけを見る決定的なもので、LLM は使わない（DESIGN 原則 1）。
         // Phase 27（監査 H-2）: **バッチは分ける** — 同じ部宛ての提案はその場で子にする。
         let org = self.store.org_list().map_err(|e| format!("store: {e}"))?;
-        let split = task_ops::conversation::split_delegation(self.store.as_ref(), &org, &parent, tasks)
-            .map_err(|e| format!("authorization: {e}"))?;
+        let split =
+            task_ops::conversation::split_delegation(self.store.as_ref(), &org, &parent, tasks)
+                .map_err(|e| format!("authorization: {e}"))?;
         for denied in &split.denied {
-            self.note(format!("delegate denied: {} は人が認めなかった（子は作っていない）", denied.key()));
+            self.note(format!(
+                "delegate denied: {} は人が認めなかった（子は作っていない）",
+                denied.key()
+            ));
         }
         for pending in &split.pending {
             self.store
@@ -573,14 +614,21 @@ impl StoreSink {
             self.note(format!(
                 "delegate deferred: {} 件は秘書の認可待ち（部をまたぐ委譲。子は作っていない）: {}",
                 split.pending.len(),
-                split.pending.iter().map(|c| c.key()).collect::<Vec<_>>().join(", ")
+                split
+                    .pending
+                    .iter()
+                    .map(|c| c.key())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if split.allowed.is_empty() {
             return Ok(());
         }
         let tasks: &[DelegateTask] = &split.allowed;
-        let already = self.delegated_this_run.load(std::sync::atomic::Ordering::SeqCst);
+        let already = self
+            .delegated_this_run
+            .load(std::sync::atomic::Ordering::SeqCst);
         let outcome = plan_delegation(
             self.store.as_ref(),
             &parent,
@@ -612,7 +660,10 @@ impl StoreSink {
         } else {
             format!("（{} 件は秘書の認可待ち）", split.pending.len())
         };
-        self.note(format!("delegated {n} child task(s){pending}: {}", listed.join(", ")));
+        self.note(format!(
+            "delegated {n} child task(s){pending}: {}",
+            listed.join(", ")
+        ));
         tracing::info!(task_id = %self.task_id, run_id = %self.run_id, children = n, "delegated child tasks inserted");
         Ok(())
     }
@@ -684,7 +735,10 @@ impl EventSink for StoreSink {
             return;
         }
         *last = Instant::now();
-        match self.store.renew_lease(self.task_id, &self.run_id, self.lease_ttl) {
+        match self
+            .store
+            .renew_lease(self.task_id, &self.run_id, self.lease_ttl)
+        {
             Ok(true) => {}
             Ok(false) => {
                 tracing::debug!(task_id = %self.task_id, run_id = %self.run_id, "lease not renewed (no longer running under this run)")
@@ -697,7 +751,9 @@ impl EventSink for StoreSink {
     /// `account` が `None` なので no-op。
     fn rate_limit(&self, obs: RateLimitObservation) {
         let Some(account) = &self.account else { return };
-        let Some(book) = &self.account_book else { return };
+        let Some(book) = &self.account_book else {
+            return;
+        };
         let Ok(mut book) = book.lock() else { return };
         book.record_observation(account, obs, ObservationSource::Run);
         if let Err(e) = book.save() {
@@ -737,7 +793,9 @@ impl EventSink for ReviewerSink {
 
     fn rate_limit(&self, obs: RateLimitObservation) {
         let Some(account) = &self.account else { return };
-        let Some(book) = &self.account_book else { return };
+        let Some(book) = &self.account_book else {
+            return;
+        };
         let Ok(mut book) = book.lock() else { return };
         book.record_observation(account, obs, ObservationSource::Run);
         if let Err(e) = book.save() {
@@ -838,16 +896,22 @@ impl Dispatcher {
         let (tx, rx) = mpsc::unbounded_channel();
         // ADR-0024 D4 / ADR-0025 D1: `<root>/.celeris-usage.json` から観測値・cooldown を読む（無ければ空から始める）。
         // アダプタごとに別の根ディレクトリ・別の帳簿（アカウントの記録はそのアダプタの中で閉じる）。
-        let account_books: HashMap<AccountAdapter, Arc<StdMutex<AccountBook>>> = match &config.accounts {
-            Some(accounts) => accounts
-                .roots
-                .iter()
-                .map(|(adapter, root)| {
-                    (*adapter, Arc::new(StdMutex::new(AccountBook::load(&root.join(".celeris-usage.json")))))
-                })
-                .collect(),
-            None => HashMap::new(),
-        };
+        let account_books: HashMap<AccountAdapter, Arc<StdMutex<AccountBook>>> =
+            match &config.accounts {
+                Some(accounts) => accounts
+                    .roots
+                    .iter()
+                    .map(|(adapter, root)| {
+                        (
+                            *adapter,
+                            Arc::new(StdMutex::new(AccountBook::load(
+                                &root.join(".celeris-usage.json"),
+                            ))),
+                        )
+                    })
+                    .collect(),
+                None => HashMap::new(),
+            };
         Self {
             store,
             policy,
@@ -888,7 +952,10 @@ impl Dispatcher {
     /// 結果はログと `GET /daemon` に出る。**呼ばなければコンテナが要るタスクは `blocked`** になる
     /// （テストは `set_container_probe` で差し替える。`cargo test` は runtime を起こさない）。
     pub fn detect_container_runtime(&mut self) {
-        let probe = task_worker::container::detect(self.config.containers.preference, CONTAINER_PROBE_TIMEOUT);
+        let probe = task_worker::container::detect(
+            self.config.containers.preference,
+            CONTAINER_PROBE_TIMEOUT,
+        );
         match probe.runtime {
             Some(rt) => tracing::info!(
                 runtime = rt.as_str(),
@@ -1021,7 +1088,12 @@ impl Dispatcher {
     /// `reload_providers` とは別トランザクション（呼び出し側が両方呼ぶ）。実行中の run はそれぞれ `spawn_worker`
     /// 時点でこれらの値の写しを既に掴んでいるので、反映されるのは**次に起動する run から**
     /// （委譲で作られる子の budget を含む）。
-    pub fn reload_config(&mut self, roles: Vec<RoleSpec>, genres: Vec<GenreSpec>, delegation: DelegationLimits) {
+    pub fn reload_config(
+        &mut self,
+        roles: Vec<RoleSpec>,
+        genres: Vec<GenreSpec>,
+        delegation: DelegationLimits,
+    ) {
         self.config.roles = roles;
         self.config.genres = genres;
         self.config.delegation = delegation;
@@ -1034,8 +1106,15 @@ impl Dispatcher {
         let matches = |a: &Option<AccountAdapter>, acct: &Option<String>| {
             *a == Some(adapter) && acct.as_deref() == Some(id)
         };
-        self.running.values().filter(|e| matches(&e.account_adapter, &e.account)).count()
-            + self.reviewing.values().filter(|e| matches(&e.account_adapter, &e.account)).count()
+        self.running
+            .values()
+            .filter(|e| matches(&e.account_adapter, &e.account))
+            .count()
+            + self
+                .reviewing
+                .values()
+                .filter(|e| matches(&e.account_adapter, &e.account))
+                .count()
     }
 
     /// ADR-0025 D1: `login_pending_accounts` のキー（同じ id でもアダプタが違えば別のログインとして扱う）。
@@ -1068,12 +1147,21 @@ impl Dispatcher {
         observation: Option<RateLimitObservation>,
     ) {
         let now = (self.now_unix_fn)();
-        let Some(book) = self.account_book(adapter) else { return };
+        let Some(book) = self.account_book(adapter) else {
+            return;
+        };
         let Ok(mut book) = book.lock() else { return };
         if let Some(obs) = observation {
             book.record_observation(id, obs, ObservationSource::Check);
         }
-        book.record_check(id, AccountCheckRecord { at: now, result: result.to_string(), detail });
+        book.record_check(
+            id,
+            AccountCheckRecord {
+                at: now,
+                result: result.to_string(),
+                detail,
+            },
+        );
         if let Err(e) = book.save() {
             tracing::warn!(account_id = %id, %adapter, error = %e, "failed to save account book after check");
         }
@@ -1081,7 +1169,9 @@ impl Dispatcher {
 
     /// D5 `DELETE /accounts/{id}`: 帳簿からもこのアカウントの記録を消す（ディレクトリの移動は celeris/task-api が行う）。
     pub fn remove_account_book_entry(&mut self, adapter: AccountAdapter, id: &str) {
-        let Some(book) = self.account_book(adapter) else { return };
+        let Some(book) = self.account_book(adapter) else {
+            return;
+        };
         let Ok(mut book) = book.lock() else { return };
         book.remove(id);
         if let Err(e) = book.save() {
@@ -1094,8 +1184,11 @@ impl Dispatcher {
     pub fn set_snapshot_providers(&mut self, providers: Vec<ProviderLive>) {
         if let Some(publisher) = self.publisher.as_mut() {
             // ADR-0022 D2: 消えた id の確認記録は落とし、残った id の記録は保つ。
-            let ids: std::collections::HashSet<&str> = providers.iter().map(|p| p.id.as_str()).collect();
-            publisher.provider_checks.retain(|id, _| ids.contains(id.as_str()));
+            let ids: std::collections::HashSet<&str> =
+                providers.iter().map(|p| p.id.as_str()).collect();
+            publisher
+                .provider_checks
+                .retain(|id, _| ids.contains(id.as_str()));
             publisher.providers = providers;
         }
     }
@@ -1103,7 +1196,9 @@ impl Dispatcher {
     /// ADR-0022 D2: 疎通確認の結果をスナップショットに載せる（DB には書かない）。次の tick から `GET /providers` に出る。
     pub fn set_provider_check(&mut self, provider_id: &str, check: ProviderCheckView) {
         if let Some(publisher) = self.publisher.as_mut() {
-            publisher.provider_checks.insert(provider_id.to_string(), check);
+            publisher
+                .provider_checks
+                .insert(provider_id.to_string(), check);
         }
     }
 
@@ -1146,7 +1241,11 @@ impl Dispatcher {
         let recover_ms = lap(&mut at);
         self.refresh_cluster_liveness();
         let cluster_ms = lap(&mut at);
-        report.dispatched = if self.accepting_new_work { self.dispatch_ready()? } else { 0 };
+        report.dispatched = if self.accepting_new_work {
+            self.dispatch_ready()?
+        } else {
+            0
+        };
         let dispatch_ms = lap(&mut at);
         report.in_flight = self.running.len() + self.reviewing.len();
         report.idle = self.is_idle()?;
@@ -1179,7 +1278,10 @@ impl Dispatcher {
     ) -> Result<(), DispatchError> {
         let first = self
             .cluster_cooldown
-            .insert(spec.id.clone(), Instant::now() + self.config.cluster_cooldown)
+            .insert(
+                spec.id.clone(),
+                Instant::now() + self.config.cluster_cooldown,
+            )
             .is_none();
         if first {
             tracing::warn!(
@@ -1198,8 +1300,14 @@ impl Dispatcher {
         // ADR-0033 D3: クラスタが落ちたことは `infra` 相当のノードの悪い知らせとして人まで上げる
         // （案件に紐づかない）。同じホストの障害を毎 tick 繰り返さないよう、cooldown の間は 1 件だけにする。
         let now = OffsetDateTime::now_utc();
-        let cooldown_secs = i64::try_from(self.config.cluster_cooldown.as_secs()).unwrap_or(i64::MAX);
-        match crate::reports::cluster_report_recently_recorded(self.store.as_ref(), &spec.host, now, cooldown_secs) {
+        let cooldown_secs =
+            i64::try_from(self.config.cluster_cooldown.as_secs()).unwrap_or(i64::MAX);
+        match crate::reports::cluster_report_recently_recorded(
+            self.store.as_ref(),
+            &spec.host,
+            now,
+            cooldown_secs,
+        ) {
             Ok(true) => {}
             Ok(false) => {
                 if let Err(e) = crate::reports::record_cluster_unavailable_report(
@@ -1213,7 +1321,9 @@ impl Dispatcher {
                     tracing::warn!(cluster = %spec.id, error = %e, "failed to record the cluster report");
                 }
             }
-            Err(e) => tracing::warn!(cluster = %spec.id, error = %e, "failed to read the recent cluster reports"),
+            Err(e) => {
+                tracing::warn!(cluster = %spec.id, error = %e, "failed to read the recent cluster reports")
+            }
         }
         Ok(())
     }
@@ -1246,8 +1356,12 @@ impl Dispatcher {
         }
         self.last_cluster_liveness = Some(now);
         let ssh_command = SshSettings::new("", "", "/").ssh_command;
-        let mut specs: Vec<(String, String)> =
-            self.config.clusters.values().map(|c| (c.id.clone(), c.host.clone())).collect();
+        let mut specs: Vec<(String, String)> = self
+            .config
+            .clusters
+            .values()
+            .map(|c| (c.id.clone(), c.host.clone()))
+            .collect();
         specs.sort();
         for (id, host) in specs {
             let alive = control_master_alive_blocking(&ssh_command, &host);
@@ -1264,7 +1378,8 @@ impl Dispatcher {
             return;
         }
         // `&mut self` が要る（アカウントのスキャンキャッシュを埋める）ので、`self.publisher` を借りる前に計算する。
-        let (accounts_root, accounts_roots, max_runs_per_account, accounts) = self.accounts_snapshot();
+        let (accounts_root, accounts_roots, max_runs_per_account, accounts) =
+            self.accounts_snapshot();
         let Some(publisher) = &self.publisher else {
             return;
         };
@@ -1332,7 +1447,11 @@ impl Dispatcher {
                 host: spec.host.clone(),
                 concurrency: spec.concurrency,
                 in_use: self.cluster_in_use(&spec.id) as u32,
-                connected: self.cluster_connected.get(&spec.id).copied().unwrap_or(false),
+                connected: self
+                    .cluster_connected
+                    .get(&spec.id)
+                    .copied()
+                    .unwrap_or(false),
                 cooldown_until: self
                     .cluster_cooldown
                     .get(&spec.id)
@@ -1390,7 +1509,14 @@ impl Dispatcher {
     /// （アダプタ → 根ディレクトリ）/ `max_runs_per_account` / `accounts[]`（`adapter` → `id` の順）。
     /// `[accounts]` が無ければ全て空。
     #[allow(clippy::type_complexity)]
-    fn accounts_snapshot(&mut self) -> (Option<String>, HashMap<String, String>, Option<usize>, Vec<AccountLive>) {
+    fn accounts_snapshot(
+        &mut self,
+    ) -> (
+        Option<String>,
+        HashMap<String, String>,
+        Option<usize>,
+        Vec<AccountLive>,
+    ) {
         let Some(cfg) = self.config.accounts.clone() else {
             return (None, HashMap::new(), None, Vec::new());
         };
@@ -1398,20 +1524,28 @@ impl Dispatcher {
         let mut items = Vec::new();
         let mut roots = HashMap::new();
         for adapter in AccountAdapter::ALL {
-            let Some(root) = cfg.root_for(adapter) else { continue };
+            let Some(root) = cfg.root_for(adapter) else {
+                continue;
+            };
             roots.insert(adapter.as_str().to_string(), root.display().to_string());
             let dirs = self
                 .accounts_scan_cache
                 .entry(adapter)
                 .or_insert_with(|| scan_accounts(root, adapter))
                 .clone();
-            let Some(book) = self.account_book(adapter) else { continue };
+            let Some(book) = self.account_book(adapter) else {
+                continue;
+            };
             let book = book.lock().unwrap_or_else(|e| e.into_inner());
             for d in &dirs {
                 let in_use = self.account_in_use(adapter, &d.id);
                 let state = book.state(&d.id);
                 let eval = evaluate(
-                    &AccountCandidate { id: &d.id, logged_in: d.logged_in, in_use },
+                    &AccountCandidate {
+                        id: &d.id,
+                        logged_in: d.logged_in,
+                        in_use,
+                    },
                     state,
                     cfg.max_runs_per_account,
                     now,
@@ -1421,29 +1555,40 @@ impl Dispatcher {
                     id: d.id.clone(),
                     logged_in: d.logged_in,
                     in_use: in_use as u32,
-                    usage: state.and_then(|s| s.usage.as_ref()).map(|u| AccountUsageLive {
-                        five_hour: u.five_hour,
-                        seven_day: u.seven_day,
-                        status: u.status.clone(),
-                        observed_at: u.observed_at,
-                        source: match state.and_then(|s| s.source) {
-                            Some(ObservationSource::Check) => "check",
-                            _ => "run",
-                        }
-                        .to_string(),
-                    }),
+                    usage: state
+                        .and_then(|s| s.usage.as_ref())
+                        .map(|u| AccountUsageLive {
+                            five_hour: u.five_hour,
+                            seven_day: u.seven_day,
+                            status: u.status.clone(),
+                            observed_at: u.observed_at,
+                            source: match state.and_then(|s| s.source) {
+                                Some(ObservationSource::Check) => "check",
+                                _ => "run",
+                            }
+                            .to_string(),
+                        }),
                     score: eval.score,
                     excluded_reason: eval.excluded.map(excluded_reason_name).map(str::to_string),
-                    cooldown: state.and_then(|s| s.cooldown.as_ref()).map(|c| AccountCooldownLive {
-                        until: c.until,
-                        reason: account_cooldown_reason_name(c.reason).to_string(),
+                    cooldown: state.and_then(|s| s.cooldown.as_ref()).map(|c| {
+                        AccountCooldownLive {
+                            until: c.until,
+                            reason: account_cooldown_reason_name(c.reason).to_string(),
+                        }
                     }),
-                    last_check: state.and_then(|s| s.last_check.as_ref()).map(|c| ProviderCheckView {
-                        at: rfc3339(OffsetDateTime::from_unix_timestamp(c.at).unwrap_or(OffsetDateTime::UNIX_EPOCH)),
-                        result: c.result.clone(),
-                        detail: c.detail.clone(),
+                    last_check: state.and_then(|s| s.last_check.as_ref()).map(|c| {
+                        ProviderCheckView {
+                            at: rfc3339(
+                                OffsetDateTime::from_unix_timestamp(c.at)
+                                    .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+                            ),
+                            result: c.result.clone(),
+                            detail: c.detail.clone(),
+                        }
                     }),
-                    login_pending: self.login_pending_accounts.contains(&Self::login_pending_key(adapter, &d.id)),
+                    login_pending: self
+                        .login_pending_accounts
+                        .contains(&Self::login_pending_key(adapter, &d.id)),
                 });
             }
         }
@@ -1518,10 +1663,16 @@ impl Dispatcher {
         self.absorb_memory(&task);
         // ADR-0033 D4 / SPEC §3.1: 部をまたぐ委譲を試みた run は、子を作らずに秘書へ聞く終わり方にする
         // （`StoreSink::delegate_impl` が `QuestionRaised` を残している）。
-        let cross_department = cross_department_questions_of(&self.store.events_for(task_id)?, &run_id);
+        let cross_department =
+            cross_department_questions_of(&self.store.events_for(task_id)?, &run_id);
         let (mut trigger, mut outcome_str, usage, provider_outcome) = match result {
             Ok(RunOutcome {
-                terminal: Terminal::Done { summary, usage, evidence },
+                terminal:
+                    Terminal::Done {
+                        summary,
+                        usage,
+                        evidence,
+                    },
                 ..
             }) => {
                 subject = ReviewSubject {
@@ -1546,7 +1697,12 @@ impl Dispatcher {
                     summary: text.clone(),
                     evidence: Vec::new(),
                 };
-                (Trigger::WorkerDone, format!("done: {text}"), None, ProviderOutcome::Ok)
+                (
+                    Trigger::WorkerDone,
+                    format!("done: {text}"),
+                    None,
+                    ProviderOutcome::Ok,
+                )
             }
             Ok(RunOutcome {
                 terminal: Terminal::Question { text },
@@ -1568,7 +1724,10 @@ impl Dispatcher {
             ),
             Err(e) => match provider_failure_outcome(&e) {
                 // ADR-0010 D5（P-21）: 供給側失敗は attempts を消費せず requeue し、プロバイダを cooldown にする。
-                Some(po) if consecutive_requeues(&self.store.events_for(task_id)?) < self.config.max_requeues => {
+                Some(po)
+                    if consecutive_requeues(&self.store.events_for(task_id)?)
+                        < self.config.max_requeues =>
+                {
                     (Trigger::Requeue, format!("requeue: adapter: {e}"), None, po)
                 }
                 // ADR-0011（P-38）: 同じ試行での連続 requeue が上限に達したら、通常の失敗として attempts を消費する。
@@ -1612,7 +1771,11 @@ impl Dispatcher {
         // アカウントを cooldown にしプロバイダは cooldown にしない。`Spawn` 失敗（起動できない）はアカウントの
         // 責任ではないので、通常どおりプロバイダを cooldown にする（`failure_reason == Some("spawn")`）。
         let account_at_fault = account.is_some() && failure_reason != Some("spawn");
-        let policy_outcome = if account_at_fault { ProviderOutcome::Ok } else { provider_outcome.clone() };
+        let policy_outcome = if account_at_fault {
+            ProviderOutcome::Ok
+        } else {
+            provider_outcome.clone()
+        };
         self.policy.report(provider.clone(), &policy_outcome);
 
         let finished = Event::WorkerFinished {
@@ -1631,7 +1794,9 @@ impl Dispatcher {
                 // ADR-0013 D9 / S10: プールを使わない、または Spawn 失敗（アカウント非依存）はプロバイダの
                 // cooldown として、遷移と同じトランザクションで記録する。
                 _ => {
-                    if let Some(ev) = self.provider_throttled_event(&provider, &provider_outcome, reason) {
+                    if let Some(ev) =
+                        self.provider_throttled_event(&provider, &provider_outcome, reason)
+                    {
                         events.push(ev);
                     }
                 }
@@ -1670,7 +1835,10 @@ impl Dispatcher {
                 // Phase 28: 対話 run の `Question` は `Done` 扱い（上の match）なので、ここでは報告しない
                 // （レビューが通れば `on_review_finished` 側が通常の `Done` 報告を作る）。
                 if !task_core::is_conversation(&task)
-                    && matches!(terminal_report, Some(crate::reports::TerminalReport::Question { .. }))
+                    && matches!(
+                        terminal_report,
+                        Some(crate::reports::TerminalReport::Question { .. })
+                    )
                     && let Some(question) = terminal_report.as_ref()
                     && let Err(e) = crate::reports::record_run_report(
                         self.store.as_ref(),
@@ -1688,12 +1856,12 @@ impl Dispatcher {
                 if outcome.next == Status::Failed {
                     let bad_news = match &terminal_report {
                         Some(t @ crate::reports::TerminalReport::Error { .. }) => Some(t.clone()),
-                        _ => adapter_error_text
-                            .as_ref()
-                            .map(|message| crate::reports::TerminalReport::Error {
+                        _ => adapter_error_text.as_ref().map(|message| {
+                            crate::reports::TerminalReport::Error {
                                 message: message.clone(),
                                 retryable: true,
-                            }),
+                            }
+                        }),
                     };
                     if let Some(terminal) = bad_news.as_ref()
                         && let Err(e) = crate::reports::record_run_report(
@@ -1708,7 +1876,9 @@ impl Dispatcher {
                         tracing::warn!(%task_id, %run_id, error = %e, "failed to record the report for this run");
                     }
                 }
-                if outcome.next == Status::Reviewing && !self.spawn_review(task_id, run_id, &subject)? {
+                if outcome.next == Status::Reviewing
+                    && !self.spawn_review(task_id, run_id, &subject)?
+                {
                     // Reviewer run の枠が無い: 次 tick の recover_reviews で再試行する。
                     self.pending_subjects.insert(task_id, subject);
                 }
@@ -1721,7 +1891,6 @@ impl Dispatcher {
         Ok(())
     }
 
-
     /// ADR-0033 D6（Phase 24）: 結果ファイル（`<artifacts_dir>/result.json`）の `memory` を担当の記憶に追記する。
     /// `[memory]` を設定していない・担当がいない・`memory` が無いときは何もしない。失敗しても run は壊さない。
     fn absorb_memory(&self, task: &Task) {
@@ -1732,7 +1901,8 @@ impl Dispatcher {
             return;
         };
         // ADR-0036 D2: 結果ファイルはそのタスクの成果物ディレクトリの中。
-        let Some(update) = task_worker::read_result_memory(&self.artifacts_dir(task, &workspace)) else {
+        let Some(update) = task_worker::read_result_memory(&self.artifacts_dir(task, &workspace))
+        else {
             return;
         };
         let today = OffsetDateTime::now_utc().date().to_string();
@@ -1756,7 +1926,8 @@ impl Dispatcher {
         let Some(workspace) = self.task_dir(task) else {
             return;
         };
-        let Some(proposal) = task_worker::read_result_milestone_proposal(&self.artifacts_dir(task, &workspace))
+        let Some(proposal) =
+            task_worker::read_result_milestone_proposal(&self.artifacts_dir(task, &workspace))
         else {
             return;
         };
@@ -1773,7 +1944,9 @@ impl Dispatcher {
                 "the reply proposed the next milestone; recorded as proposed"
             ),
             Ok(None) => {}
-            Err(e) => tracing::warn!(task_id = %task.id, error = %e, "failed to record the proposed milestone"),
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, error = %e, "failed to record the proposed milestone")
+            }
         }
     }
 
@@ -1781,7 +1954,13 @@ impl Dispatcher {
     /// `messages` に残す。`outcome_str` は `done: <summary>` / `question: <text>` /
     /// `error(...): <message>` のいずれか。`next` は遷移後の状態で、**失敗の返事は `Failed` のときだけ**
     /// 書く（retryable な途中失敗や requeue では、同じ問いに何度も「返事できませんでした」が並ばない）。
-    fn record_conversation_reply(&self, task: &Task, run_id: &str, outcome_str: &str, next: Status) {
+    fn record_conversation_reply(
+        &self,
+        task: &Task,
+        run_id: &str,
+        outcome_str: &str,
+        next: Status,
+    ) {
         if !task_core::is_conversation(task) {
             return;
         }
@@ -1836,14 +2015,25 @@ impl Dispatcher {
             let review_account_adapter = entry.as_ref().and_then(|e| e.account_adapter);
             if let Some(provider) = entry.as_ref().and_then(|e| e.provider.clone()) {
                 // ADR-0024 D4: プール経由の Reviewer run の失敗もプロバイダを cooldown にせず、アカウントに向ける。
-                let policy_outcome = if review_account.is_some() { ProviderOutcome::Ok } else { pf.outcome.clone() };
+                let policy_outcome = if review_account.is_some() {
+                    ProviderOutcome::Ok
+                } else {
+                    pf.outcome.clone()
+                };
                 self.policy.report(provider.clone(), &policy_outcome);
                 match (&review_account, review_account_adapter) {
-                    (Some(acct), Some(adapter)) => {
-                        self.record_account_failure(adapter, acct, cooldown_reason_name(&pf.outcome), &pf.outcome)
-                    }
+                    (Some(acct), Some(adapter)) => self.record_account_failure(
+                        adapter,
+                        acct,
+                        cooldown_reason_name(&pf.outcome),
+                        &pf.outcome,
+                    ),
                     _ => {
-                        if let Some(ev) = self.provider_throttled_event(&provider, &pf.outcome, cooldown_reason_name(&pf.outcome)) {
+                        if let Some(ev) = self.provider_throttled_event(
+                            &provider,
+                            &pf.outcome,
+                            cooldown_reason_name(&pf.outcome),
+                        ) {
                             throttled_events.push(ev);
                         }
                     }
@@ -1855,7 +2045,10 @@ impl Dispatcher {
                 // プロバイダを cooldown にする（attempts を消費しない）。
                 self.store.append_event(
                     task_id,
-                    &Event::worker_progress(run_id.clone(), format!("{REVIEWER_REQUEUED_PREFIX}{}", pf.message)),
+                    &Event::worker_progress(
+                        run_id.clone(),
+                        format!("{REVIEWER_REQUEUED_PREFIX}{}", pf.message),
+                    ),
                 )?;
                 if let Some(ev) = &reviewer_finished {
                     self.store.append_event(task_id, ev)?;
@@ -1871,18 +2064,27 @@ impl Dispatcher {
             }
             // ADR-0011（P-38）: 連続延期が上限に達したら、未判定の Reviewer 条件を fail として通常どおり判定を適用する。
             tracing::warn!(%task_id, %run_id, reason = %pf.message, max_requeues = self.config.max_requeues, "reviewer run requeue limit reached; failing reviewer criteria");
-            if let Some(Event::WorkerFinished { outcome: finished_outcome, .. }) = reviewer_finished.as_mut() {
+            if let Some(Event::WorkerFinished {
+                outcome: finished_outcome,
+                ..
+            }) = reviewer_finished.as_mut()
+            {
                 *finished_outcome = format!(
                     "error(retryable=false): requeue limit ({}) reached: {}",
                     self.config.max_requeues, pf.message
                 );
             }
             for (idx, criterion) in task.acceptance.iter().enumerate() {
-                if matches!(criterion.check, Check::Reviewer) && !outcome.verdicts.iter().any(|v| v.criterion_idx == idx) {
+                if matches!(criterion.check, Check::Reviewer)
+                    && !outcome.verdicts.iter().any(|v| v.criterion_idx == idx)
+                {
                     outcome.verdicts.push(Verdict {
                         criterion_idx: idx,
                         pass: false,
-                        reason: format!("requeue limit ({}) reached: {}", self.config.max_requeues, pf.message),
+                        reason: format!(
+                            "requeue limit ({}) reached: {}",
+                            self.config.max_requeues, pf.message
+                        ),
                     });
                 }
             }
@@ -1951,9 +2153,12 @@ impl Dispatcher {
                 let org = self.store.org_list()?;
                 self.fix_plan_for_harness(&task, &mut plan, &org);
                 // ADR-0039 D2: 子の作業場所は 明示 > 案件 > 親。
-                let project_workspace = task_ops::delegate::project_workspace(self.store.as_ref(), &task).map_err(ops_to_store)?;
+                let project_workspace =
+                    task_ops::delegate::project_workspace(self.store.as_ref(), &task)
+                        .map_err(ops_to_store)?;
                 // ADR-0043 D2: 子のリポジトリは 明示（計画の `repos`）> 親 > 案件の primary。
-                let project_repos = task_ops::delegate::project_repos(self.store.as_ref(), &task).map_err(ops_to_store)?;
+                let project_repos = task_ops::delegate::project_repos(self.store.as_ref(), &task)
+                    .map_err(ops_to_store)?;
                 let home = task_core::home_dir();
                 let workspace = task_core::WorkspaceContext {
                     project: project_workspace.as_ref(),
@@ -1970,9 +2175,12 @@ impl Dispatcher {
                     OffsetDateTime::now_utc(),
                 );
                 let n = children.len();
-                let r = self
-                    .store
-                    .complete_plan(task_id, events, children, self.config.plan_auto_accept);
+                let r = self.store.complete_plan(
+                    task_id,
+                    events,
+                    children,
+                    self.config.plan_auto_accept,
+                );
                 if r.is_ok() {
                     tracing::info!(%task_id, %run_id, children = n, auto_accept = self.config.plan_auto_accept, "plan completed; children inserted");
                 }
@@ -1984,12 +2192,14 @@ impl Dispatcher {
                 self.store
                     .apply_transition_with_events(task_id, Trigger::ReviewFail, events)
             }
-            (true, _, _) => self
-                .store
-                .apply_transition_with_events(task_id, Trigger::ReviewPass, events),
-            (false, _, _) => self
-                .store
-                .apply_transition_with_events(task_id, Trigger::ReviewFail, events),
+            (true, _, _) => {
+                self.store
+                    .apply_transition_with_events(task_id, Trigger::ReviewPass, events)
+            }
+            (false, _, _) => {
+                self.store
+                    .apply_transition_with_events(task_id, Trigger::ReviewFail, events)
+            }
         };
         match result {
             Ok(outcome) => {
@@ -2004,9 +2214,9 @@ impl Dispatcher {
                         evidence: crate::reports::format_evidence(&review_entry.subject.evidence),
                     };
                     // ADR-0034 D7: ワーカーが結果ファイルで宣言した `report.kind`（無ければ既定の `result`）。
-                    let declared = self
-                        .task_dir(&task)
-                        .and_then(|ws| task_worker::read_result_report_kind(&self.artifacts_dir(&task, &ws)));
+                    let declared = self.task_dir(&task).and_then(|ws| {
+                        task_worker::read_result_report_kind(&self.artifacts_dir(&task, &ws))
+                    });
                     if let Err(e) = crate::reports::record_run_report(
                         self.store.as_ref(),
                         &task,
@@ -2070,14 +2280,19 @@ impl Dispatcher {
     /// ローカルな `seq`）ではなく `events_for_with_global_ids`（`events` テーブルの全タスク共通の `id`）を
     /// 使わなければならない。`seq` で比較すると、子の方がイベント数が多い（＝ `seq` が大きい）場合に
     /// 「一度扱った失敗」でも毎回「新規」と判定され、同じ質問が繰り返し出る。
-    fn newly_failed_delegated_children(&self, task_id: TaskId) -> Result<Vec<(Task, Option<String>)>, DispatchError> {
+    fn newly_failed_delegated_children(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Vec<(Task, Option<String>)>, DispatchError> {
         let events = self.store.events_for_with_global_ids(task_id)?;
         // 直近に子の失敗を扱った時点（グローバル id。イベント id は単調増加）。
         let handled_at = events
             .iter()
             .rev()
             .find_map(|(id, e)| match e {
-                Event::Transitioned { reason, .. } if reason == Trigger::ChildFailed.name() => Some(*id),
+                Event::Transitioned { reason, .. } if reason == Trigger::ChildFailed.name() => {
+                    Some(*id)
+                }
                 _ => None,
             })
             .unwrap_or(0);
@@ -2094,13 +2309,17 @@ impl Dispatcher {
 
         let mut out = Vec::new();
         for id in delegated {
-            let Some(child) = self.store.get(id)? else { continue };
+            let Some(child) = self.store.get(id)? else {
+                continue;
+            };
             if child.status != Status::Failed {
                 continue;
             }
             let child_events = self.store.events_for_with_global_ids(id)?;
             let failed_at = child_events.iter().rev().find_map(|(eid, e)| match e {
-                Event::Transitioned { to: Status::Failed, .. } => Some(*eid),
+                Event::Transitioned {
+                    to: Status::Failed, ..
+                } => Some(*eid),
                 _ => None,
             });
             // 既に扱った失敗（id が前回の child_failed より前）は数えない。
@@ -2108,7 +2327,11 @@ impl Dispatcher {
                 continue;
             }
             let outcome = child_events.iter().rev().find_map(|(_, e)| match e {
-                Event::WorkerFinished { outcome, role: None, .. } => Some(outcome.clone()),
+                Event::WorkerFinished {
+                    outcome,
+                    role: None,
+                    ..
+                } => Some(outcome.clone()),
                 _ => None,
             });
             out.push((child, outcome));
@@ -2143,7 +2366,12 @@ impl Dispatcher {
         let listed = failed
             .iter()
             .map(|(child, outcome)| {
-                format!("{} ({}): {}", child.title, child.id, outcome.as_deref().unwrap_or("(no outcome recorded)"))
+                format!(
+                    "{} ({}): {}",
+                    child.title,
+                    child.id,
+                    outcome.as_deref().unwrap_or("(no outcome recorded)")
+                )
             })
             .collect::<Vec<_>>()
             .join("; ");
@@ -2169,13 +2397,23 @@ impl Dispatcher {
             // Phase 44（実機 2026-09-18）: この質問はディスパッチャ由来（ワーカーの `Question` ではない）だが、
             // Phase 26 と同じく `approvals` にも残す。そうしないと認可画面に出ず、`approval_pending` の
             // Discord 通知も飛ばない（受信箱にだけ出て気づかれない）。
-            if let Err(e) = crate::approvals::record_question_approval(self.store.as_ref(), task, &text, OffsetDateTime::now_utc())
-            {
+            if let Err(e) = crate::approvals::record_question_approval(
+                self.store.as_ref(),
+                task,
+                &text,
+                OffsetDateTime::now_utc(),
+            ) {
                 tracing::warn!(task_id = %task.id, %run_id, error = %e, "failed to record the approval for the child-failure question");
             }
-            events.push(Event::QuestionRaised { run_id: run_id.to_string(), text });
+            events.push(Event::QuestionRaised {
+                run_id: run_id.to_string(),
+                text,
+            });
         }
-        match self.store.apply_transition_with_events(task.id, Trigger::ChildFailed, events) {
+        match self
+            .store
+            .apply_transition_with_events(task.id, Trigger::ChildFailed, events)
+        {
             Ok(outcome) => {
                 tracing::info!(
                     task_id = %task.id, %run_id, next = ?outcome.next, failed = failed.len(),
@@ -2192,13 +2430,23 @@ impl Dispatcher {
     }
 
     /// ADR-0016 M1 / M4: `Aggregate`（reviewing → ready、attempts 据え置き）を適用し、次の dispatch を集約 run にする。
-    fn schedule_aggregate_run(&mut self, task_id: TaskId, run_id: &str, mut events: Vec<Event>) -> Result<(), DispatchError> {
+    fn schedule_aggregate_run(
+        &mut self,
+        task_id: TaskId,
+        run_id: &str,
+        mut events: Vec<Event>,
+    ) -> Result<(), DispatchError> {
         let children = self.store.children(task_id)?.len();
         events.push(Event::worker_progress(
             run_id,
-            format!("all {children} delegated child task(s) finished; scheduling the aggregate run"),
+            format!(
+                "all {children} delegated child task(s) finished; scheduling the aggregate run"
+            ),
         ));
-        match self.store.apply_transition_with_events(task_id, Trigger::Aggregate, events) {
+        match self
+            .store
+            .apply_transition_with_events(task_id, Trigger::Aggregate, events)
+        {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, next = ?outcome.next, "aggregate run scheduled");
             }
@@ -2242,9 +2490,13 @@ impl Dispatcher {
                     let org = self.store.org_list()?;
                     self.fix_plan_for_harness(&task, &mut plan, &org);
                     // ADR-0039 D2: 子の作業場所は 明示 > 案件 > 親。
-                    let project_workspace = task_ops::delegate::project_workspace(self.store.as_ref(), &task).map_err(ops_to_store)?;
+                    let project_workspace =
+                        task_ops::delegate::project_workspace(self.store.as_ref(), &task)
+                            .map_err(ops_to_store)?;
                     // ADR-0043 D2: 子のリポジトリは 明示（計画の `repos`）> 親 > 案件の primary。
-                    let project_repos = task_ops::delegate::project_repos(self.store.as_ref(), &task).map_err(ops_to_store)?;
+                    let project_repos =
+                        task_ops::delegate::project_repos(self.store.as_ref(), &task)
+                            .map_err(ops_to_store)?;
                     let home = task_core::home_dir();
                     let workspace = task_core::WorkspaceContext {
                         project: project_workspace.as_ref(),
@@ -2260,12 +2512,18 @@ impl Dispatcher {
                         workspace,
                         OffsetDateTime::now_utc(),
                     );
-                    self.store
-                        .complete_plan(task_id, Vec::new(), children, self.config.plan_auto_accept)
+                    self.store.complete_plan(
+                        task_id,
+                        Vec::new(),
+                        children,
+                        self.config.plan_auto_accept,
+                    )
                 }
-                _ => self
-                    .store
-                    .apply_transition_with_events(task_id, Trigger::ReviewPass, Vec::new()),
+                _ => self.store.apply_transition_with_events(
+                    task_id,
+                    Trigger::ReviewPass,
+                    Vec::new(),
+                ),
             };
             match result {
                 Ok(outcome) => {
@@ -2303,10 +2561,11 @@ impl Dispatcher {
                 usage: None,
                 role: None,
             };
-            match self
-                .store
-                .apply_transition_with_events(task.id, Trigger::LeaseExpired, vec![finished])
-            {
+            match self.store.apply_transition_with_events(
+                task.id,
+                Trigger::LeaseExpired,
+                vec![finished],
+            ) {
                 Ok(outcome) => {
                     tracing::warn!(task_id = %task.id, run_id = %lease.worker_run_id, next = ?outcome.next, attempts = outcome.attempts, "lease expired; reclaimed");
                     count += 1;
@@ -2336,7 +2595,12 @@ impl Dispatcher {
     /// `--label celeris.task=<task_id>` 越しにも送る（`<runtime> kill --signal TERM` → `grace` →
     /// `<runtime> rm -f`）。`killpg` は `<runtime> run` のクライアントにしか届かず、
     /// コンテナの中は別の PID 名前空間なので、これが無いと中のハーネスが生き残る。
-    fn stop_run(&self, run_id: &str, handle: JoinHandle<()>, container: Option<Arc<dyn task_worker::ContainerStopper>>) {
+    fn stop_run(
+        &self,
+        run_id: &str,
+        handle: JoinHandle<()>,
+        container: Option<Arc<dyn task_worker::ContainerStopper>>,
+    ) {
         task_worker::kill_tree_with(run_id, self.config.kill_grace, container);
         handle.abort();
     }
@@ -2375,7 +2639,8 @@ impl Dispatcher {
         // レビュー中に cancel されたタスクの判定（Reviewer run を含む）も中断する。
         let ids: Vec<TaskId> = self.reviewing.keys().copied().collect();
         for id in ids {
-            let still_reviewing = matches!(self.store.get(id)?, Some(t) if t.status == Status::Reviewing);
+            let still_reviewing =
+                matches!(self.store.get(id)?, Some(t) if t.status == Status::Reviewing);
             if !still_reviewing && let Some(entry) = self.reviewing.remove(&id) {
                 tracing::warn!(task_id = %id, "aborting review (task no longer reviewing)");
                 self.stop_review(entry);
@@ -2391,7 +2656,9 @@ impl Dispatcher {
         self.awaiting_human
             .retain(|id| reviewing_tasks.iter().any(|t| t.id == *id));
         for task in reviewing_tasks {
-            if self.reviewing.contains_key(&task.id) || self.awaiting_children.contains_key(&task.id) {
+            if self.reviewing.contains_key(&task.id)
+                || self.awaiting_children.contains_key(&task.id)
+            {
                 continue;
             }
             // ADR-0041 D5: 面倒を見ないタスクのレビューは拾わない（verify は他人のタスクを判定しない）。
@@ -2417,11 +2684,19 @@ impl Dispatcher {
 
     /// 実行中の run と、プロバイダを使っているレビュー run の合計（並列度の分母）。
     fn workers_in_flight(&self) -> usize {
-        self.running.len() + self.reviewing.values().filter(|e| e.provider.is_some()).count()
+        self.running.len()
+            + self
+                .reviewing
+                .values()
+                .filter(|e| e.provider.is_some())
+                .count()
     }
 
     fn provider_in_use(&self, provider: &ProviderId) -> usize {
-        self.running.values().filter(|e| &e.provider == provider).count()
+        self.running
+            .values()
+            .filter(|e| &e.provider == provider)
+            .count()
             + self
                 .reviewing
                 .values()
@@ -2481,9 +2756,20 @@ impl Dispatcher {
             if !self.is_eligible(&task) {
                 continue;
             }
+            // ADR-0046 D5（Phase 59）: 担当が決まっていないタスクは dispatch の前に matching で決める
+            // （計画 run の子、人が作ったタスク、Console から作られたタスクが全部ここを通る）。
+            let task = match self.assign_if_needed(task)? {
+                Some(task) => task,
+                // 候補が無くて `blocked` にした（人に聞いた）。この tick では dispatch しない。
+                None => continue,
+            };
             // ADR-0010 D6（P-3）: ready に入った時刻（DB の updated_at）からのバックオフ。
             if task.attempts > 0 {
-                let delay = retry_backoff(self.config.retry_backoff_base, self.config.retry_backoff_max, task.attempts);
+                let delay = retry_backoff(
+                    self.config.retry_backoff_base,
+                    self.config.retry_backoff_max,
+                    task.attempts,
+                );
                 if OffsetDateTime::now_utc() < task.updated_at + delay {
                     tracing::debug!(task_id = %task.id, attempts = task.attempts, delay_ms = delay.as_millis() as u64, "retry backoff; not dispatching yet");
                     continue;
@@ -2504,7 +2790,11 @@ impl Dispatcher {
                 },
             };
             if let Some((spec, _)) = &cluster {
-                if self.cluster_cooldown.get(&spec.id).is_some_and(|until| *until > now) {
+                if self
+                    .cluster_cooldown
+                    .get(&spec.id)
+                    .is_some_and(|until| *until > now)
+                {
                     // ADR-0018 D2: 人がログインするまで進まないので、待ち対象には数えない（`--until-idle` を止めない）。
                     self.cluster_waiting.insert(task.id);
                     continue;
@@ -2513,7 +2803,11 @@ impl Dispatcher {
                     continue;
                 }
                 // この tick の `refresh_cluster_liveness` の結果を使う（1 tick に 1 回だけ `ssh -O check` を呼ぶ）。
-                let alive = self.cluster_connected.get(&spec.id).copied().unwrap_or(false);
+                let alive = self
+                    .cluster_connected
+                    .get(&spec.id)
+                    .copied()
+                    .unwrap_or(false);
                 if !alive {
                     let spec = spec.clone();
                     // ADR-0032 D3: `auth = "publickey"` かつ接続フックがあれば、cooldown にする前に
@@ -2537,7 +2831,10 @@ impl Dispatcher {
                             self.mark_cluster_unavailable(
                                 task.id,
                                 &spec,
-                                format!("no ssh ControlMaster connection to {} (host {})", spec.id, spec.host),
+                                format!(
+                                    "no ssh ControlMaster connection to {} (host {})",
+                                    spec.id, spec.host
+                                ),
                             )?;
                             self.cluster_waiting.insert(task.id);
                             continue;
@@ -2573,13 +2870,15 @@ impl Dispatcher {
             // アダプタの実装漏れ（設定検証で account_pool は claude-code/codex 限定にしているため通常は起きない）
             // なので、このタスクは今回見送る。
             let adapter = match &selected_account {
-                Some((account_adapter, account_id)) => match self.adapter_for_account(&base_adapter, *account_adapter, account_id) {
-                    Some(a) => a,
-                    None => {
-                        tracing::warn!(task_id = %task.id, provider = %provider_id, account_id, "adapter does not support account pools (with_env returned None); skipping this tick");
-                        continue;
+                Some((account_adapter, account_id)) => {
+                    match self.adapter_for_account(&base_adapter, *account_adapter, account_id) {
+                        Some(a) => a,
+                        None => {
+                            tracing::warn!(task_id = %task.id, provider = %provider_id, account_id, "adapter does not support account pools (with_env returned None); skipping this tick");
+                            continue;
+                        }
                     }
-                },
+                }
                 None => base_adapter,
             };
             let account = selected_account.as_ref().map(|(_, id)| id.clone());
@@ -2616,9 +2915,12 @@ impl Dispatcher {
                 kill_grace: self.config.kill_grace,
             };
             tracing::info!(task_id = %task.id, %run_id, adapter = %adapter_id, provider = %provider_id, account = account.as_deref(), "dispatching");
-            let remote = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path, task.id));
+            let remote = cluster
+                .as_ref()
+                .map(|(spec, path)| spec.ssh_settings(path, task.id));
             // ADR-0043 D3（Phase 56）: ホストか、コンテナか、runtime が無くて `blocked` か。
-            let container = self.container_decision(&task, worktree.as_ref(), &adapter_id, remote.is_some());
+            let container =
+                self.container_decision(&task, worktree.as_ref(), &adapter_id, remote.is_some());
             // Phase 55/56 の合流: コンテナで走らせるなら、止めるための口（runtime の実行ファイルと
             // `--label celeris.task=<task_id>`）を覚えておく（ADR-0044 P55-4 / ADR-0043 P56-7）。
             let container_stop: Option<Arc<dyn task_worker::ContainerStopper>> = match &container {
@@ -2682,7 +2984,11 @@ impl Dispatcher {
         // （プロンプト側の条件と同じ。`claude_code::build_prompt` 参照）。
         // ADR-0033 D4 / Phase 28: 対話 run は委譲できないので渡さない（`delegate.json` を書かせない）。
         let is_conv = task_core::is_conversation(task);
-        let available_genres = if !is_conv && matches!(task.kind, TaskKind::Execute | TaskKind::Approval | TaskKind::Plan) {
+        let available_genres = if !is_conv
+            && matches!(
+                task.kind,
+                TaskKind::Execute | TaskKind::Approval | TaskKind::Plan
+            ) {
             self.config
                 .genres
                 .iter()
@@ -2721,19 +3027,25 @@ impl Dispatcher {
             None => Vec::new(),
         };
         let memory = match (&self.config.memory_dir, assigned) {
-            (Some(dir), Some(n)) => Some(MemoryDir::new(dir).load(
-                &n.id,
-                task.project_id.map(|p| p.to_string()).as_deref(),
-            )),
+            (Some(dir), Some(n)) => Some(
+                MemoryDir::new(dir).load(&n.id, task.project_id.map(|p| p.to_string()).as_deref()),
+            ),
             _ => None,
         };
         let conversation = match assigned {
             Some(n) => {
                 let mut turns: Vec<ConversationTurn> = self
                     .store
-                    .message_list(&n.id, task.project_id, task_ops::conversation::CONVERSATION_HISTORY)?
+                    .message_list(
+                        &n.id,
+                        task.project_id,
+                        task_ops::conversation::CONVERSATION_HISTORY,
+                    )?
                     .iter()
-                    .map(|m| ConversationTurn { role: m.role, text: m.text.clone() })
+                    .map(|m| ConversationTurn {
+                        role: m.role,
+                        text: m.text.clone(),
+                    })
                     .collect();
                 // 監査 L-6: 今回の本文（`objective`）と同じ最後の `user` の行は落とす（二重に載せない）。
                 if let Some(last) = turns.last()
@@ -2746,15 +3058,9 @@ impl Dispatcher {
             }
             None => Vec::new(),
         };
-        // 分解・委譲できる run（`available_genres` を渡す run と同じ条件）にだけ組織図を渡す。
-        let organization = if available_genres.is_empty() {
-            Vec::new()
-        } else {
-            org.iter().map(OrgNodeContext::from).collect()
-        };
-        // ADR-0033 D4 / Phase 28: 対話 run にだけ、相手が秘書かそれ以外かを渡す（`preamble` が
-        // 「作業を始めるな、返事だけ書け」の指示文を出し分けるためだけの印。担当が組織に無ければ
-        // 秘書以外扱いにする。判定は決定的で LLM は使わない）。
+        // ADR-0033 D4 / Phase 28: 対話 run にだけ、相手が秘書（ADR-0046 D6 の CoS）かそれ以外かを渡す
+        // （`preamble` が「作業を始めるな、返事だけ書け」の指示文を出し分けるためだけの印。担当が組織に
+        // 無ければ CoS 以外扱いにする。判定は決定的で LLM は使わない）。
         let conversation_addressee = if is_conv {
             Some(match assigned {
                 Some(n) if n.kind == OrgKind::Secretary => ConversationAddressee::Secretary,
@@ -2762,6 +3068,32 @@ impl Dispatcher {
             })
         } else {
             None
+        };
+        // 分解・委譲できる run（`available_genres` を渡す run と同じ条件）にだけ組織図を渡す。
+        // ADR-0046 D6: **CoS の対話 run** にも渡す（誰が何をできるかを見せる。人選はしない）。
+        let is_cos_conversation = conversation_addressee == Some(ConversationAddressee::Secretary);
+        let organization = if available_genres.is_empty() && !is_cos_conversation {
+            Vec::new()
+        } else {
+            org.iter()
+                .map(|n| OrgNodeContext::with_profile(n, &task_core::resolve_profile(&org, &n.id)))
+                .collect()
+        };
+        // ADR-0046 D1（Phase 59）: 担当ノードの実効 profile（根→葉の merge ＋ タスクの上書き）。
+        // profile を 1 つも書いていない組織では `None`（前置きは Phase 58 までとバイト単位で同じ）。
+        let profile = assigned.and_then(|n| {
+            let effective = task_core::resolve_profile(&org, &n.id);
+            if effective.is_trivial() {
+                None
+            } else {
+                Some(effective.with_task(task))
+            }
+        });
+        // ADR-0046 D4（Phase 59）: 既定（`production`）の進め方は渡さない（前置きを変えない）。
+        let mode = if task.mode == task_core::TaskMode::Production {
+            None
+        } else {
+            Some(task.mode)
         };
         // Phase 30（ADR-0033 D4 追記）: 対話は常に対話用分野で走る（`task.genre`）。その人が自分の仕事で
         // 何を使うかを知って答えられるように、対話 run にだけ、担当ノード**自身**の分野
@@ -2796,7 +3128,8 @@ impl Dispatcher {
         // 出さない（会話は編集をしないので、人のリポジトリの中で走らせる理由が無い。ADR-0039 D2）。
         let mut workspace_note = match conversation_addressee {
             Some(_) => None,
-            None => task_ops::delegate::project_workspace(self.store.as_ref(), task).map_err(ops_to_store)?
+            None => task_ops::delegate::project_workspace(self.store.as_ref(), task)
+                .map_err(ops_to_store)?
                 .as_ref()
                 .map(task_worker::preamble::workspace_note),
         };
@@ -2814,7 +3147,8 @@ impl Dispatcher {
         // ADR-0043 D2: 計画 run には**案件のリポジトリの一覧**（名前 / 種類 / 説明）を渡す。
         // プランナーは子タスクごとに `repos: ["benchfs"]` と名前で指定する。
         if task.kind == TaskKind::Plan && conversation_addressee.is_none() {
-            let listing = task_worker::preamble::project_repos_note(&self.project_repo_notes(task)?);
+            let listing =
+                task_worker::preamble::project_repos_note(&self.project_repo_notes(task)?);
             if !listing.is_empty() {
                 workspace_note = Some(match workspace_note {
                     Some(note) => format!("{note}\n{listing}"),
@@ -2824,7 +3158,9 @@ impl Dispatcher {
         }
         let events = self.store.events_for(task.id)?;
         // 集約 run（ADR-0016 D3）と、子の失敗によるやり直し run（ADR-0021 D1）は、子の結果を見て判断する。
-        let children = if (task.aggregate && has_aggregate_transition(&events)) || has_child_failed_transition(&events) {
+        let children = if (task.aggregate && has_aggregate_transition(&events))
+            || has_child_failed_transition(&events)
+        {
             let mut out = Vec::new();
             for child in self.store.children(task.id)? {
                 if child.kind == TaskKind::Approval {
@@ -2832,7 +3168,11 @@ impl Dispatcher {
                 }
                 let child_events = self.store.events_for(child.id)?;
                 let outcome = child_events.iter().rev().find_map(|(_, e)| match e {
-                    Event::WorkerFinished { outcome, role: None, .. } => Some(outcome.clone()),
+                    Event::WorkerFinished {
+                        outcome,
+                        role: None,
+                        ..
+                    } => Some(outcome.clone()),
                     _ => None,
                 });
                 let artifacts = child_events
@@ -2856,8 +3196,11 @@ impl Dispatcher {
                         .as_ref()
                         .map(|ws| ws.task_dir.clone())
                         .or_else(|| self.task_dir(&child)),
-                    branch: child_worktree
-                        .and_then(|ws| ws.repos.first().and_then(|r| r.branch().map(str::to_string))),
+                    branch: child_worktree.and_then(|ws| {
+                        ws.repos
+                            .first()
+                            .and_then(|r| r.branch().map(str::to_string))
+                    }),
                 });
             }
             out
@@ -2867,15 +3210,25 @@ impl Dispatcher {
         // ADR-0044 D2（Phase 53）: コメントの糸（最新 20 件、古い順）と、直前の run を止めた人のコメント。
         // どちらも決定的に引くだけ（LLM は関与しない）。
         let all_comments = self.store.comments_for(task.id)?;
-        let interrupt = task_ops::comment::interrupting_comment(&events, &all_comments).map(|c| c.body.clone());
+        let interrupt =
+            task_ops::comment::interrupting_comment(&events, &all_comments).map(|c| c.body.clone());
         let comments: Vec<CommentContext> = all_comments
             .iter()
-            .skip(all_comments.len().saturating_sub(task_core::PREAMBLE_COMMENTS))
+            .skip(
+                all_comments
+                    .len()
+                    .saturating_sub(task_core::PREAMBLE_COMMENTS),
+            )
             .map(CommentContext::from)
             .collect();
-        // ADR-0047 D2（Phase 61）: 実効マウント（設定の既定 ＋ 案件の `projects/<slug>`）と、その索引。
+        // ADR-0047 D2（Phase 61）/ ADR-0046 D1（Phase 59 追記）: 実効マウント（担当ノードの実効
+        // profile が継いだ知識 ＋ 設定の既定 ＋ 案件の `projects/<slug>`）と、その索引。
         // 決定的（`index.json` とファイルを読むだけ。LLM も判断も無い）。
-        let knowledge = self.knowledge_context(task, assigned.map(|n| n.id.as_str()));
+        let profile_knowledge: Vec<task_core::KnowledgeMount> = assigned
+            .map(|n| task_core::resolve_profile(&org, &n.id).knowledge)
+            .unwrap_or_default();
+        let knowledge =
+            self.knowledge_context(task, assigned.map(|n| n.id.as_str()), &profile_knowledge);
         Ok(RunExtras {
             role,
             children,
@@ -2890,6 +3243,8 @@ impl Dispatcher {
             recent_work,
             milestone_review,
             workspace_note,
+            profile,
+            mode,
             comments,
             interrupt,
             knowledge,
@@ -2901,18 +3256,31 @@ impl Dispatcher {
     ///
     /// 実効マウント = `[knowledge] default_mounts` ＋ 案件の `projects/<slug>`（自動）
     /// ＋ タスクの明示（Phase 61 では無い。Phase 59 の実効 profile がここに合流する）。
-    fn knowledge_context(&self, task: &Task, node_id: Option<&str>) -> Option<task_worker::protocol::KnowledgeContext> {
+    /// ADR-0046 D1（Phase 59 追記）: `profile_knowledge` は担当ノードの**実効 profile**が継いだ
+    /// マウント（`task_core::resolve_profile(..).knowledge`）。組織の和 → 設定の既定 → 案件の順で
+    /// `merge_mounts` に渡す（先に出てきたものが前置きの索引で先頭に来る）。
+    fn knowledge_context(
+        &self,
+        task: &Task,
+        node_id: Option<&str>,
+        profile_knowledge: &[task_core::KnowledgeMount],
+    ) -> Option<task_worker::protocol::KnowledgeContext> {
         let root = &self.config.knowledge.root;
-        let mut mounts = self.config.knowledge.default_mounts.clone();
         // 案件は自動で `projects/<slug>` をマウントする（ADR-0047 D2）。
         let project = task
             .project_id
             .and_then(|id| self.store.project_get(id).ok().flatten());
+        let mut project_mounts = Vec::new();
         if let Some(project) = &project {
             let slug = task_ops::docs::project_slug(&project.title, &project.id.to_string());
-            mounts.push(task_core::KnowledgeMount::kb(format!("projects/{slug}")));
+            project_mounts.push(task_core::KnowledgeMount::kb(format!("projects/{slug}")));
         }
-        let mounts = task_core::knowledge::merge_mounts(&[&mounts]);
+        // ADR-0046 D1（Phase 59 追記）: 実効 profile ＋ 設定の既定 ＋ 案件の順で和を取る。
+        let mounts = task_core::knowledge::merge_mounts(&[
+            profile_knowledge,
+            &self.config.knowledge.default_mounts,
+            &project_mounts,
+        ]);
         if mounts.is_empty() {
             return None;
         }
@@ -2925,7 +3293,12 @@ impl Dispatcher {
         for mount in &mounts {
             match mount.kind {
                 task_core::MountKind::Kb => {
-                    items.extend(index.iter().filter(|i| task_core::knowledge::mount_matches(mount, i)).cloned());
+                    items.extend(
+                        index
+                            .iter()
+                            .filter(|i| task_core::knowledge::mount_matches(mount, i))
+                            .cloned(),
+                    );
                 }
                 // `repo` は案件のリポジトリの文書の根のページ（ADR-0043 / ADR-0044 D7）。
                 task_core::MountKind::Repo => {
@@ -2937,14 +3310,17 @@ impl Dispatcher {
                 task_core::MountKind::Dir => {
                     if let Some(dir) = mount.path.as_deref() {
                         let label = mount.label();
-                        items.extend(task_ops::knowledge::list_pages(dir).into_iter().take(200).map(|rel| {
-                            task_core::KnowledgeItem {
-                                title: rel.rsplit('/').next().unwrap_or(&rel).to_string(),
-                                path: dir.join(&rel).display().to_string(),
-                                scope: Some(label.clone()),
-                                ..task_core::KnowledgeItem::default()
-                            }
-                        }));
+                        items.extend(
+                            task_ops::knowledge::list_pages(dir)
+                                .into_iter()
+                                .take(200)
+                                .map(|rel| task_core::KnowledgeItem {
+                                    title: rel.rsplit('/').next().unwrap_or(&rel).to_string(),
+                                    path: dir.join(&rel).display().to_string(),
+                                    scope: Some(label.clone()),
+                                    ..task_core::KnowledgeItem::default()
+                                }),
+                        );
                     }
                 }
                 // `memory` はそのノードの手帳（ADR-0033 D3。中身は「覚えていること」の節に既に出ている）。
@@ -2964,7 +3340,10 @@ impl Dispatcher {
                 }
             }
         }
-        Some(task_worker::protocol::KnowledgeContext { mounts, index: items })
+        Some(task_worker::protocol::KnowledgeContext {
+            mounts,
+            index: items,
+        })
     }
 
     /// `repo` マウント 1 件分（案件のその名前のリポジトリの文書の根のページ）。
@@ -3025,9 +3404,12 @@ impl Dispatcher {
             project_id: Some(project_id),
             ..ListFilter::default()
         };
-        let page = self
-            .store
-            .list_page(&filter, ListOrder::CreatedDesc, None, MILESTONE_REVIEW_TASK_SCAN)?;
+        let page = self.store.list_page(
+            &filter,
+            ListOrder::CreatedDesc,
+            None,
+            MILESTONE_REVIEW_TASK_SCAN,
+        )?;
         let mut subjects: Vec<Task> = page
             .items
             .into_iter()
@@ -3079,7 +3461,13 @@ impl Dispatcher {
     /// 壊さず直す（Plan run は失敗させず、`Question` にもしない）。判定は決定的で LLM は呼ばない
     /// （DESIGN 原則 1）。直した事実は `warn` に残す。
     fn fix_plan_for_harness(&self, task: &Task, plan: &mut PlanOutput, org: &[task_core::OrgNode]) {
-        for note in task_core::fix_harness_artifacts(plan, task, org, &self.config.roles, &self.config.genres) {
+        for note in task_core::fix_harness_artifacts(
+            plan,
+            task,
+            org,
+            &self.config.roles,
+            &self.config.genres,
+        ) {
             tracing::warn!(task_id = %task.id, "{note}");
         }
     }
@@ -3100,23 +3488,34 @@ impl Dispatcher {
         let page = self
             .store
             .list_page(&filter, ListOrder::UpdatedDesc, None, RECENT_WORK_SCAN)?;
-        let candidates: Vec<Task> = page.items.into_iter().filter(|t| support_kind(t).is_none()).collect();
+        let candidates: Vec<Task> = page
+            .items
+            .into_iter()
+            .filter(|t| support_kind(t).is_none())
+            .collect();
         let (same_project, other_project): (Vec<Task>, Vec<Task>) = if current_project.is_some() {
-            candidates.into_iter().partition(|t| t.project_id == current_project)
+            candidates
+                .into_iter()
+                .partition(|t| t.project_id == current_project)
         } else {
             (Vec::new(), candidates)
         };
         let mut project_titles: HashMap<ProjectId, Option<String>> = HashMap::new();
         let mut out = Vec::with_capacity(RECENT_WORK_LIMIT);
-        for task in same_project.into_iter().chain(other_project).take(RECENT_WORK_LIMIT) {
+        for task in same_project
+            .into_iter()
+            .chain(other_project)
+            .take(RECENT_WORK_LIMIT)
+        {
             let events = self.store.events_for(task.id)?;
             let artifacts = artifact_names_of(&events);
             let outcome = recent_work_outcome(&task, &events);
-            let finished_at = if matches!(task.status, Status::Done | Status::Failed | Status::Blocked) {
-                Some(rfc3339(task.updated_at))
-            } else {
-                None
-            };
+            let finished_at =
+                if matches!(task.status, Status::Done | Status::Failed | Status::Blocked) {
+                    Some(rfc3339(task.updated_at))
+                } else {
+                    None
+                };
             let project_title = match task.project_id {
                 Some(pid) => project_titles
                     .entry(pid)
@@ -3237,7 +3636,9 @@ impl Dispatcher {
         let account = selected_account.as_ref().map(|(_, id)| id.clone());
         let account_adapter = selected_account.as_ref().map(|(a, _)| *a);
         // ADR-0014 D1: (provider, Reviewer run の id, adapter) — WorkerStarted の記録と in_flight に使う。
-        let review_run = reviewer.as_ref().map(|(p, _, r)| (p.clone(), r.run_id.clone(), r.adapter.id().to_string()));
+        let review_run = reviewer
+            .as_ref()
+            .map(|(p, _, r)| (p.clone(), r.run_id.clone(), r.adapter.id().to_string()));
         let reviewer_run = reviewer.map(|(_, _, r)| r);
 
         let plan = if task.kind == TaskKind::Plan {
@@ -3256,11 +3657,14 @@ impl Dispatcher {
             None
         };
         // ADR-0016 M4: 集約 run のレビューには暗黙の条件「artifacts/summary.md がある」が加わる。
-        let aggregate = task.aggregate && has_aggregate_transition(&self.store.events_for(task_id)?);
+        let aggregate =
+            task.aggregate && has_aggregate_transition(&self.store.events_for(task_id)?);
 
         // ADR-0018: 判定コマンドもクラスタで実行する。
         let cluster = self.cluster_of(&task);
-        let remote_settings = cluster.as_ref().map(|(spec, path)| spec.ssh_settings(path, task.id));
+        let remote_settings = cluster
+            .as_ref()
+            .map(|(spec, path)| spec.ssh_settings(path, task.id));
         let cluster_id = cluster.as_ref().map(|(spec, _)| spec.id.clone());
         let events = self.store.events_for(task_id)?;
         let produced = artifacts_for_run(&events, &run_id);
@@ -3292,7 +3696,14 @@ impl Dispatcher {
         // ADR-0019 D1 6. / ADR-0041 D1: 判定コマンドは worktree の中で実行する（元のリポジトリでは実行しない）。
         let review_work_dir = self.work_dir_for(&task);
         // ADR-0043 D4: リポジトリが宣言した検査コマンド（`workspace.toml` の `[commands] check`）。
-        let repo_checks = self.default_checks(&task);
+        // ADR-0046 D4（Phase 59）: `mode = prototype` は「明示の受け入れ条件だけ」なので使わない。
+        let repo_checks = if task.mode == task_core::TaskMode::Prototype {
+            Vec::new()
+        } else {
+            self.default_checks(&task)
+        };
+        // ADR-0046 D4（Phase 59）: `mode = research` は「結果に出典か計測の記録」を暗黙の条件に足す。
+        let research = task.mode == task_core::TaskMode::Research;
         let handle = tokio::spawn(async move {
             let ws: Box<dyn Workspace> = match remote_review {
                 Some(settings) => Box::new(SshWorkspace::new(&dir, settings)),
@@ -3309,9 +3720,19 @@ impl Dispatcher {
                 aggregate,
                 // ADR-0043 D4: リポジトリの `[commands] check`（タスクに検査コマンドが無いときだけ効く）。
                 repo_checks,
+                // ADR-0046 D4: `mode = research` の暗黙の条件。
+                research,
             };
-            let outcome =
-                review_task(&task, ws.as_ref(), &dir, &artifacts_dir, &produced, timeout, extras).await;
+            let outcome = review_task(
+                &task,
+                ws.as_ref(),
+                &dir,
+                &artifacts_dir,
+                &produced,
+                timeout,
+                extras,
+            )
+            .await;
             let _ = tx.send(Completion::Review {
                 task_id,
                 run_id,
@@ -3354,23 +3775,34 @@ impl Dispatcher {
         let mut resolved = HashMap::with_capacity(human_indices.len());
         for idx in human_indices {
             let title = human_approval_title(task, idx);
-            let child = match existing_children
-                .iter()
-                .find(|c| c.parent_id == Some(task.id) && c.kind == TaskKind::Approval && c.title == title)
-            {
+            let child = match existing_children.iter().find(|c| {
+                c.parent_id == Some(task.id) && c.kind == TaskKind::Approval && c.title == title
+            }) {
                 Some(c) => c.clone(),
                 None => self.create_human_approval_child(task, idx, &title)?,
             };
             match child.status {
                 Status::Done => {
-                    resolved.insert(idx, (true, format!("approved (approval task {})", child.id)));
+                    resolved.insert(
+                        idx,
+                        (true, format!("approved (approval task {})", child.id)),
+                    );
                 }
                 Status::Failed => {
                     let note = approval_decision_note(&self.store.events_for(child.id)?);
-                    resolved.insert(idx, (false, format!("rejected (approval task {}){note}", child.id)));
+                    resolved.insert(
+                        idx,
+                        (
+                            false,
+                            format!("rejected (approval task {}){note}", child.id),
+                        ),
+                    );
                 }
                 Status::Cancelled => {
-                    resolved.insert(idx, (false, format!("approval task {} was cancelled", child.id)));
+                    resolved.insert(
+                        idx,
+                        (false, format!("approval task {} was cancelled", child.id)),
+                    );
                 }
                 _ => return Ok(None),
             }
@@ -3379,7 +3811,12 @@ impl Dispatcher {
     }
 
     /// `Human` criterion のための `Approval` 子タスクを新規作成する（ADR-0008 D2）。
-    fn create_human_approval_child(&self, task: &Task, idx: usize, title: &str) -> Result<Task, DispatchError> {
+    fn create_human_approval_child(
+        &self,
+        task: &Task,
+        idx: usize,
+        title: &str,
+    ) -> Result<Task, DispatchError> {
         let now = OffsetDateTime::now_utc();
         let approval = Task {
             repos: Vec::new(),
@@ -3410,9 +3847,13 @@ impl Dispatcher {
             conversation: None,
             labels: Vec::new(),
             category: Default::default(),
+            // ADR-0046 D4（Phase 59）: 派生タスクは親の進め方を継ぐ。
+            skills: Vec::new(),
+            mode: task.mode,
         };
         // ADR-0010 D2: 挿入・Created・ApprovalRequested を 1 トランザクションで。
-        self.store.create_task(&approval, vec![Event::ApprovalRequested])?;
+        self.store
+            .create_task(&approval, vec![Event::ApprovalRequested])?;
         tracing::info!(task_id = %task.id, approval_id = %approval.id, criterion_idx = idx, "created approval child for human check");
         Ok(approval)
     }
@@ -3431,7 +3872,8 @@ impl Dispatcher {
         // ADR-0012 D2: ワーカー run と同じ手順（上限のプロバイダを飛ばして次へ、候補なしは warn）で選ぶ。
         let hint = self.config.reviewer_hint.clone();
         let mut full = std::collections::HashSet::new();
-        let (adapter_id, provider_id, selected_account) = self.select_provider(&hint, Instant::now(), task.id, &mut full)?;
+        let (adapter_id, provider_id, selected_account) =
+            self.select_provider(&hint, Instant::now(), task.id, &mut full)?;
         let base_adapter = match self.adapters.get(&provider_id) {
             Some(a) => a.clone(),
             None => {
@@ -3440,13 +3882,15 @@ impl Dispatcher {
             }
         };
         let adapter = match &selected_account {
-            Some((account_adapter, account_id)) => match self.adapter_for_account(&base_adapter, *account_adapter, account_id) {
-                Some(a) => a,
-                None => {
-                    tracing::warn!(task_id = %task.id, provider = %provider_id, account_id, "adapter does not support account pools for reviewer run; deferring");
-                    return None;
+            Some((account_adapter, account_id)) => {
+                match self.adapter_for_account(&base_adapter, *account_adapter, account_id) {
+                    Some(a) => a,
+                    None => {
+                        tracing::warn!(task_id = %task.id, provider = %provider_id, account_id, "adapter does not support account pools for reviewer run; deferring");
+                        return None;
+                    }
                 }
-            },
+            }
             None => base_adapter,
         };
         let account = selected_account.as_ref().map(|(_, id)| id.clone());
@@ -3486,7 +3930,12 @@ impl Dispatcher {
 
     /// ADR-0013 D9: cooldown に入った供給側失敗の `ProviderThrottled`。期限はポリシーの `cooldowns()` から取り、
     /// ポリシーが公開しない場合は `Throttled.retry_after` から計算する（どちらも無ければ記録しない）。
-    fn provider_throttled_event(&self, provider: &str, outcome: &ProviderOutcome, reason: &str) -> Option<Event> {
+    fn provider_throttled_event(
+        &self,
+        provider: &str,
+        outcome: &ProviderOutcome,
+        reason: &str,
+    ) -> Option<Event> {
         let now = Instant::now();
         let until = self
             .policy
@@ -3545,7 +3994,11 @@ impl Dispatcher {
                         match self.pick_account(account_adapter) {
                             Some(account_id) => {
                                 self.warned_unroutable.remove(&task_id);
-                                return Some((adapter, provider, Some((account_adapter, account_id))));
+                                return Some((
+                                    adapter,
+                                    provider,
+                                    Some((account_adapter, account_id)),
+                                ));
                             }
                             None => {
                                 tracing::debug!(%task_id, %provider, "no eligible account in the pool; trying the next provider");
@@ -3580,28 +4033,48 @@ impl Dispatcher {
     fn pick_account(&mut self, adapter: AccountAdapter) -> Option<String> {
         let cfg = self.config.accounts.clone()?;
         let root = cfg.root_for(adapter)?;
-        let dirs = self.accounts_scan_cache.entry(adapter).or_insert_with(|| scan_accounts(root, adapter)).clone();
+        let dirs = self
+            .accounts_scan_cache
+            .entry(adapter)
+            .or_insert_with(|| scan_accounts(root, adapter))
+            .clone();
         let now = (self.now_unix_fn)();
         let book = self.account_book(adapter)?;
         let book = book.lock().unwrap_or_else(|e| e.into_inner());
         let candidates: Vec<AccountCandidate<'_>> = dirs
             .iter()
-            .map(|d| AccountCandidate { id: d.id.as_str(), logged_in: d.logged_in, in_use: self.account_in_use(adapter, &d.id) })
+            .map(|d| AccountCandidate {
+                id: d.id.as_str(),
+                logged_in: d.logged_in,
+                in_use: self.account_in_use(adapter, &d.id),
+            })
             .collect();
         select_account(&candidates, &book, cfg.max_runs_per_account, now)
     }
 
     /// ADR-0024 D4: プール run の供給側失敗をアカウントの cooldown として記録する（プロバイダは cooldown にしない）。
     /// `reason` は `provider_failure_reason` と同じ語彙（`throttled` / `auth_failed` / `exhausted` / `spawn`）。
-    fn record_account_failure(&self, adapter: AccountAdapter, account_id: &str, reason: &str, outcome: &ProviderOutcome) {
-        let Some(cfg) = &self.config.accounts else { return };
+    fn record_account_failure(
+        &self,
+        adapter: AccountAdapter,
+        account_id: &str,
+        reason: &str,
+        outcome: &ProviderOutcome,
+    ) {
+        let Some(cfg) = &self.config.accounts else {
+            return;
+        };
         let now = (self.now_unix_fn)();
         let fallback_secs = match outcome {
-            ProviderOutcome::Throttled { retry_after } if retry_after.as_secs() > 0 => retry_after.as_secs(),
+            ProviderOutcome::Throttled { retry_after } if retry_after.as_secs() > 0 => {
+                retry_after.as_secs()
+            }
             _ => cfg.fallback_cooldown_secs,
         };
         let cooldown_reason = account_cooldown_reason_from_failure(reason);
-        let Some(book) = self.account_book(adapter) else { return };
+        let Some(book) = self.account_book(adapter) else {
+            return;
+        };
         let Ok(mut book) = book.lock() else { return };
         let cooldown = {
             let state = book.state(account_id);
@@ -3625,7 +4098,10 @@ impl Dispatcher {
         let cfg = self.config.accounts.as_ref()?;
         let root = cfg.root_for(account_adapter)?;
         let dir = root.join(account_id);
-        base.with_env(&[(account_adapter.env_var().to_string(), dir.display().to_string())])
+        base.with_env(&[(
+            account_adapter.env_var().to_string(),
+            dir.display().to_string(),
+        )])
     }
 
     /// ADR-0005 D3: `Local{path}` がそのタスクの作業ディレクトリ。相対なら `workspace_root` 基準。
@@ -3641,7 +4117,9 @@ impl Dispatcher {
                 None => self.config.workspace_root.join(path),
             }),
             // ADR-0018 D1: クラスタ側が正で、手元は写し（`workspace_root/<task_id>`）。
-            WorkspaceSpec::Remote { .. } => Some(self.config.workspace_root.join(task.id.to_string())),
+            WorkspaceSpec::Remote { .. } => {
+                Some(self.config.workspace_root.join(task.id.to_string()))
+            }
         }
     }
 
@@ -3685,12 +4163,20 @@ impl Dispatcher {
                 // ADR-0043 D2 / D7: リモートは従来の経路（手元の写し + rsync）。
                 return None;
             };
-            let source = if path.is_absolute() { path.clone() } else { self.config.workspace_root.join(path) };
+            let source = if path.is_absolute() {
+                path.clone()
+            } else {
+                self.config.workspace_root.join(path)
+            };
             let dir = task_dir.join(task_worker::REPOS_DIR_NAME).join(&row.name);
             let wants_worktree = row.kind == task_core::RepoKind::Git
                 && mode.unwrap_or_default() == task_core::WorkspaceMode::Worktree
                 && task_worker::is_git_repo(&source);
-            let base = if wants_worktree { self.worktree_base(&source) } else { None };
+            let base = if wants_worktree {
+                self.worktree_base(&source)
+            } else {
+                None
+            };
             match base {
                 Some(base) => repos.push(task_worker::TaskRepo::git(
                     row.name.clone(),
@@ -3741,14 +4227,21 @@ impl Dispatcher {
                 .find(|r| r.name == repo.name)
                 .and_then(|r| self.store.repo_get(r.repo_id).ok().flatten());
             // `workspace.toml` は作業ツリーがあればそこ、無ければ元のリポジトリ（`repo_notes` と同じ規則）。
-            let from = if repo.dir.is_dir() { &repo.dir } else { &repo.source };
+            let from = if repo.dir.is_dir() {
+                &repo.dir
+            } else {
+                &repo.source
+            };
             let (config, warning) = task_core::workspace_config::load_or_default(from);
             if let Some(warning) = warning {
                 tracing::warn!(repo = %repo.name, %warning, "cannot read workspace.toml; using the defaults");
             }
             inputs.push(task_worker::RepoRunInput {
                 name: repo.name.clone(),
-                run: row.as_ref().map(|r| r.run).unwrap_or(task_core::RepoRun::Auto),
+                run: row
+                    .as_ref()
+                    .map(|r| r.run)
+                    .unwrap_or(task_core::RepoRun::Auto),
                 is_primary: row.as_ref().map(|r| r.is_primary).unwrap_or(true),
                 config,
                 config_dir: from.clone(),
@@ -3759,7 +4252,10 @@ impl Dispatcher {
         };
         let Some(runtime) = self.container_probe.runtime else {
             return ContainerDecision::Unavailable {
-                question: task_worker::container::unavailable_question(&self.container_probe, &choice.repo),
+                question: task_worker::container::unavailable_question(
+                    &self.container_probe,
+                    &choice.repo,
+                ),
             };
         };
         // `dir` のリポジトリ（シンボリックリンク）は**実体**を同じパスでマウントする。
@@ -3797,14 +4293,22 @@ impl Dispatcher {
     }
 
     /// Phase 49（ADR-0041 D1）の 1 リポジトリだけの worktree（`<task_dir>/tree`）。
-    fn legacy_worktree_for(&self, task: &Task, task_dir: &Path) -> Option<task_worker::LocalWorktree> {
+    fn legacy_worktree_for(
+        &self,
+        task: &Task,
+        task_dir: &Path,
+    ) -> Option<task_worker::LocalWorktree> {
         let WorkspaceSpec::Local { path, .. } = &task.workspace else {
             return None;
         };
         if task.workspace.local_mode() != task_core::WorkspaceMode::Worktree {
             return None;
         }
-        let repo = if path.is_absolute() { path.clone() } else { self.config.workspace_root.join(path) };
+        let repo = if path.is_absolute() {
+            path.clone()
+        } else {
+            self.config.workspace_root.join(path)
+        };
         if !task_worker::is_git_repo(&repo) {
             return None;
         }
@@ -3861,18 +4365,29 @@ impl Dispatcher {
 
     /// ADR-0043 D2 / D4: 計画 run に渡す「この案件のリポジトリ」（名前 / 種類 / 置き場 / `workspace.toml` の
     /// `description`）。ストアと `workspace.toml` を読むだけで、判断も LLM も無い。
-    fn project_repo_notes(&self, task: &Task) -> Result<Vec<task_worker::preamble::ProjectRepoNote>, DispatchError> {
-        let repos = task_ops::delegate::project_repos(self.store.as_ref(), task).map_err(ops_to_store)?;
+    fn project_repo_notes(
+        &self,
+        task: &Task,
+    ) -> Result<Vec<task_worker::preamble::ProjectRepoNote>, DispatchError> {
+        let repos =
+            task_ops::delegate::project_repos(self.store.as_ref(), task).map_err(ops_to_store)?;
         Ok(repos
             .into_iter()
             .map(|repo| {
                 let (location, local) = match &repo.location {
-                    WorkspaceSpec::Local { path, .. } => (path.display().to_string(), Some(path.clone())),
-                    WorkspaceSpec::Remote { cluster, path } => (format!("{cluster}:{}", path.display()), None),
+                    WorkspaceSpec::Local { path, .. } => {
+                        (path.display().to_string(), Some(path.clone()))
+                    }
+                    WorkspaceSpec::Remote { cluster, path } => {
+                        (format!("{cluster}:{}", path.display()), None)
+                    }
                 };
-                let description = local
-                    .as_deref()
-                    .and_then(|dir| task_core::workspace_config::load_or_default(dir).0.workspace.description);
+                let description = local.as_deref().and_then(|dir| {
+                    task_core::workspace_config::load_or_default(dir)
+                        .0
+                        .workspace
+                        .description
+                });
                 task_worker::preamble::ProjectRepoNote {
                     name: repo.name,
                     kind: repo.kind.as_str().to_string(),
@@ -3887,6 +4402,79 @@ impl Dispatcher {
     /// ADR-0043 D4: レビュー担当の `Check::Command` の既定になる検査コマンド
     /// （タスクに `acceptance` が明示されていればそれが勝つ。決めるのはここではなく `review.rs` の
     /// 呼び出し側）。**先頭のリポジトリの** `[commands] check` だけを使う。
+    /// ADR-0046 D5（Phase 59）: `assignee` が無い `ready` のタスクの担当を**決定的に**決める。
+    ///
+    /// - 決まったら `Event::Assigned { node, score, reason }` を残して担当を書き戻し、そのタスクを返す。
+    /// - 候補が 1 つも無ければ `blocked` にして人に聞き（ADR-0021 の質問経路）、`None` を返す。
+    /// - matching の対象でない（担当が居る・ハーネスが無い）タスクはそのまま返す。
+    ///
+    /// LLM は使わない（DESIGN 原則 1）。
+    fn assign_if_needed(&mut self, task: Task) -> Result<Option<Task>, DispatchError> {
+        use task_ops::matching::Assignment;
+        let org = self.store.org_list()?;
+        match task_ops::matching::decide(&org, &task) {
+            Assignment::NotApplicable => Ok(Some(task)),
+            Assignment::Assigned {
+                node,
+                score,
+                reason,
+            } => {
+                let mut updated = task.clone();
+                updated.assignee = Some(node.clone());
+                updated.updated_at = OffsetDateTime::now_utc();
+                let event = Event::Assigned {
+                    node: node.clone(),
+                    score,
+                    reason: reason.clone(),
+                };
+                match self.store.update_task(&updated, event) {
+                    Ok(stored) => {
+                        tracing::info!(
+                            task_id = %task.id, assignee = %node, score, reason = %reason,
+                            "matching decided the assignee (ADR-0046 D5)"
+                        );
+                        Ok(Some(stored))
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = %task.id, error = %e, "could not write the matched assignee");
+                        Ok(Some(task))
+                    }
+                }
+            }
+            Assignment::Unroutable { question } => {
+                // Phase 44 と同じ規律: ディスパッチャ由来の質問も `approvals` に残す（そうしないと
+                // 認可画面に出ず、Discord にも飛ばない）。
+                let now = OffsetDateTime::now_utc();
+                if let Err(e) = crate::approvals::record_question_approval(
+                    self.store.as_ref(),
+                    &task,
+                    &question,
+                    now,
+                ) {
+                    tracing::warn!(task_id = %task.id, error = %e, "failed to record the approval for the unroutable question");
+                }
+                let run_id = format!("matching-{}", task.id);
+                let events = vec![Event::QuestionRaised {
+                    run_id,
+                    text: question,
+                }];
+                match self
+                    .store
+                    .apply_transition_with_events(task.id, Trigger::Unroutable, events)
+                {
+                    Ok(_) => {
+                        tracing::info!(task_id = %task.id, "no org node can take this task; asking a human (ADR-0046 D5)")
+                    }
+                    Err(StoreError::InvalidTransition(e)) => {
+                        tracing::warn!(task_id = %task.id, error = %e, "unroutable transition could not be applied");
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+                Ok(None)
+            }
+        }
+    }
+
     fn default_checks(&self, task: &Task) -> Vec<String> {
         let Some(ws) = self.task_workspaces_for(task) else {
             return Vec::new();
@@ -3894,8 +4482,15 @@ impl Dispatcher {
         let Some(repo) = ws.repos.first() else {
             return Vec::new();
         };
-        let from = if repo.dir.is_dir() { &repo.dir } else { &repo.source };
-        task_core::workspace_config::load_or_default(from).0.commands.check
+        let from = if repo.dir.is_dir() {
+            &repo.dir
+        } else {
+            &repo.source
+        };
+        task_core::workspace_config::load_or_default(from)
+            .0
+            .commands
+            .check
     }
 
     /// テスト用: Phase 49 のときの「1 つだけの worktree」の姿（`task_workspaces_for` の先頭）。
@@ -3958,7 +4553,9 @@ impl Dispatcher {
                     let dirty: Vec<String> = workspaces
                         .repos
                         .iter()
-                        .filter(|r| r.is_git() && task_worker::status_is_clean(&r.dir) == Some(false))
+                        .filter(|r| {
+                            r.is_git() && task_worker::status_is_clean(&r.dir) == Some(false)
+                        })
                         .map(|r| r.dir.to_string_lossy().into_owned())
                         .collect();
                     if !dirty.is_empty() {
@@ -3985,21 +4582,64 @@ impl Dispatcher {
     }
 
     /// ADR-0018: `WorkspaceSpec::Remote` のタスクのクラスタ設定とリモートのパス。ローカルのタスクは `None`。
+    ///
+    /// ADR-0046 D8（Phase 59）: **担当が `cluster:<id>` を持たないなら接続経路を渡さない**（remote を
+    /// 組まない）。ただし「道具を 1 つも宣言していない」ノード（Phase 59 より前の組織、profile を
+    /// 書いていないノード）は従来どおり通す — 宣言した許可リストだけを許可リストとして扱う。
     fn cluster_of(&self, task: &Task) -> Option<(ClusterSpec, PathBuf)> {
         match &task.workspace {
             WorkspaceSpec::Local { .. } => None,
-            WorkspaceSpec::Remote { cluster, path } => self
-                .config
-                .clusters
-                .get(cluster)
-                .map(|spec| (spec.clone(), path.clone())),
+            WorkspaceSpec::Remote { cluster, path } => {
+                if !self.task_may_use_cluster(task, cluster) {
+                    return None;
+                }
+                self.config
+                    .clusters
+                    .get(cluster)
+                    .map(|spec| (spec.clone(), path.clone()))
+            }
         }
+    }
+
+    /// ADR-0046 D8: そのタスクの担当がそのクラスタを使えるか（決定的。組織の profile だけを見る）。
+    fn task_may_use_cluster(&self, task: &Task, cluster: &str) -> bool {
+        let Some(assignee) = task.assignee.as_deref() else {
+            return true;
+        };
+        let org = match self.store.org_list() {
+            Ok(org) => org,
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, error = %e, "could not read the org tree; allowing the cluster");
+                return true;
+            }
+        };
+        let effective = task_core::resolve_profile(&org, assignee);
+        // 道具を 1 つも宣言していないノードは従来どおり（Phase 59 より前の組織を壊さない）。
+        if effective.tools.is_empty() {
+            return true;
+        }
+        let wanted = format!("{}{cluster}", task_core::CLUSTER_TOOL_PREFIX);
+        if effective.has_tool(&wanted) {
+            return true;
+        }
+        tracing::warn!(
+            task_id = %task.id, %assignee, %cluster,
+            "assignee does not have the cluster tool; not wiring the remote (ADR-0046 D8)"
+        );
+        false
     }
 
     /// そのクラスタで走っている run の数（ADR-0018 D5: プロバイダとクラスタの二次元）。
     fn cluster_in_use(&self, cluster: &str) -> usize {
-        self.running.values().filter(|e| e.cluster.as_deref() == Some(cluster)).count()
-            + self.reviewing.values().filter(|e| e.cluster.as_deref() == Some(cluster)).count()
+        self.running
+            .values()
+            .filter(|e| e.cluster.as_deref() == Some(cluster))
+            .count()
+            + self
+                .reviewing
+                .values()
+                .filter(|e| e.cluster.as_deref() == Some(cluster))
+                .count()
     }
 
     fn is_idle(&self) -> Result<bool, DispatchError> {
@@ -4010,12 +4650,9 @@ impl Dispatcher {
             return Ok(false);
         }
         // ADR-0010 D8: 人間の承認待ちで延期中の reviewing は、人間が操作しない限り進まないので idle とみなす。
-        if self
-            .store
-            .list(Some(Status::Reviewing))?
-            .iter()
-            .any(|t| !self.awaiting_human.contains(&t.id) && !self.awaiting_children.contains_key(&t.id))
-        {
+        if self.store.list(Some(Status::Reviewing))?.iter().any(|t| {
+            !self.awaiting_human.contains(&t.id) && !self.awaiting_children.contains_key(&t.id)
+        }) {
             return Ok(false);
         }
         // ADR-0012 D2（P-33）: 設定に合うプロバイダが無い ready タスクは、設定を直さない限り進まないので待ち対象から外す。
@@ -4028,7 +4665,9 @@ impl Dispatcher {
         // ADR-0041 D5: 面倒を見ないタスク（verify の非 `smoke`）は、このインスタンスでは決して進まないので
         // 待ち対象に数えない。
         Ok(ready.iter().all(|t| {
-            !self.is_eligible(t) || self.unroutable.contains(&t.id) || self.cluster_waiting.contains(&t.id)
+            !self.is_eligible(t)
+                || self.unroutable.contains(&t.id)
+                || self.cluster_waiting.contains(&t.id)
         }))
     }
 }
@@ -4045,9 +4684,16 @@ const CONTAINER_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 fn worktree_marker(ws: &task_worker::TaskWorkspaces) -> task_ops::workspace::WorktreeMarker {
     let first = ws.repos.first();
     task_ops::workspace::WorktreeMarker {
-        repo: first.map(|r| r.source.to_string_lossy().into_owned()).unwrap_or_default(),
-        dir: first.map(|r| r.dir.to_string_lossy().into_owned()).unwrap_or_default(),
-        branch: first.and_then(|r| r.branch()).unwrap_or_default().to_string(),
+        repo: first
+            .map(|r| r.source.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        dir: first
+            .map(|r| r.dir.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        branch: first
+            .and_then(|r| r.branch())
+            .unwrap_or_default()
+            .to_string(),
         base: first
             .and_then(|r| r.worktree.as_ref())
             .map(|w| w.base.sha.clone())
@@ -4061,12 +4707,19 @@ fn worktree_marker(ws: &task_worker::TaskWorkspaces) -> task_ops::workspace::Wor
             .iter()
             .map(|r| task_ops::workspace::WorktreeMarkerRepo {
                 name: r.name.clone(),
-                kind: if r.is_git() { "git".into() } else { "dir".into() },
+                kind: if r.is_git() {
+                    "git".into()
+                } else {
+                    "dir".into()
+                },
                 source: r.source.to_string_lossy().into_owned(),
                 dir: r.dir.to_string_lossy().into_owned(),
                 branch: r.branch().map(str::to_string),
                 base: r.worktree.as_ref().map(|w| w.base.sha.clone()),
-                base_kind: r.worktree.as_ref().map(|w| w.base.kind.as_str().to_string()),
+                base_kind: r
+                    .worktree
+                    .as_ref()
+                    .map(|w| w.base.kind.as_str().to_string()),
             })
             .collect(),
     }
@@ -4121,7 +4774,9 @@ async fn run_worker(
                     .map_err(|e| workspace_error_to_adapter(e, "worktree prepare"))?;
                 // 目印（`<task_dir>/worktree.json`）: API・CLI はこれを見て「run のログと成果物は
                 // 作業ツリーの外にある」と判断する（git を起こさない。worktree を消した後も残す）。
-                if let Err(e) = task_ops::workspace::write_marker(&wt.task_dir, &worktree_marker(wt)) {
+                if let Err(e) =
+                    task_ops::workspace::write_marker(&wt.task_dir, &worktree_marker(wt))
+                {
                     tracing::warn!(task_id = %task_id, error = %e, "could not write the worktree marker");
                 }
                 if let Some(cwd) = wt.cwd() {
@@ -4148,24 +4803,28 @@ async fn run_worker(
         ContainerDecision::Container(run) => {
             let mut run = *run;
             let log_path = dir.join(task_worker::container::BUILD_LOG);
-            let resolved =
-                match task_worker::container::resolve_image(&run.image, &run.image_default, &run.build_root) {
-                    Ok(resolved) => resolved,
-                    Err(e) => {
-                        tracing::warn!(task_id = %task_id, error = %e, "cannot resolve the container image");
-                        return Ok(RunOutcome {
-                            terminal: Terminal::Question {
-                                text: task_worker::container::image_question(&run.repo, &e, &log_path),
-                            },
-                            exit_code: None,
-                        });
-                    }
-                };
+            let resolved = match task_worker::container::resolve_image(
+                &run.image,
+                &run.image_default,
+                &run.build_root,
+            ) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, error = %e, "cannot resolve the container image");
+                    return Ok(RunOutcome {
+                        terminal: Terminal::Question {
+                            text: task_worker::container::image_question(&run.repo, &e, &log_path),
+                        },
+                        exit_code: None,
+                    });
+                }
+            };
             match resolved {
                 task_worker::container::ResolvedImage::Ready(tag) => run.plan.image = tag,
                 task_worker::container::ResolvedImage::Build(request) => {
                     let program = run.plan.program.clone();
-                    let exists = move |tag: &str| task_worker::container::image_exists(&program, tag);
+                    let exists =
+                        move |tag: &str| task_worker::container::image_exists(&program, tag);
                     if let Err(e) = task_worker::container::ensure_image(
                         &run.plan.program,
                         &request,
@@ -4178,7 +4837,9 @@ async fn run_worker(
                         tracing::warn!(task_id = %task_id, error = %e, "container image build failed");
                         return Ok(RunOutcome {
                             terminal: Terminal::Question {
-                                text: task_worker::container::image_question(&run.repo, &e, &log_path),
+                                text: task_worker::container::image_question(
+                                    &run.repo, &e, &log_path,
+                                ),
                             },
                             exit_code: None,
                         });
@@ -4196,9 +4857,19 @@ async fn run_worker(
     // タスクを `blocked` にして人に聞く。
     if let Some(wt) = &worktree
         && remote.is_none()
-        && !wt.task_dir.join(task_worker::task_repos::SETUP_LOG).exists()
+        && !wt
+            .task_dir
+            .join(task_worker::task_repos::SETUP_LOG)
+            .exists()
     {
-        match task_worker::run_setup_in(&wt.repos, &wt.task_dir, SETUP_TIMEOUT, container_plan.as_ref()).await {
+        match task_worker::run_setup_in(
+            &wt.repos,
+            &wt.task_dir,
+            SETUP_TIMEOUT,
+            container_plan.as_ref(),
+        )
+        .await
+        {
             Ok(outcome) if outcome.ok => {}
             Ok(outcome) => {
                 tracing::warn!(task_id = %task_id, failures = ?outcome.failures, "setup failed; asking a human");
@@ -4208,7 +4879,9 @@ async fn run_worker(
                             "setup が失敗しました（`.config/celeris/workspace.toml` の `[commands] setup`）: {}。\
                              記録は `{}` にあります。直し方を教えてください（設定を直す／この手順を飛ばす）。",
                             outcome.failures.join(" / "),
-                            wt.task_dir.join(task_worker::task_repos::SETUP_LOG).display()
+                            wt.task_dir
+                                .join(task_worker::task_repos::SETUP_LOG)
+                                .display()
                         ),
                     },
                     exit_code: None,
@@ -4277,6 +4950,9 @@ async fn run_worker(
             // ADR-0044 D2（Phase 53）: コメントの糸と、直前の run を止めた人のコメント。
             comments: extras.comments,
             interrupt: extras.interrupt,
+            // ADR-0046 D1 / D4（Phase 59）: 実効 profile と進め方（どちらも既定なら `None`）。
+            profile: extras.profile,
+            mode: extras.mode,
             // 仕事の run はコメントを書ける。**対話 run は書かせない**（Phase 28 の「返事だけをする」と
             // ぶつかる）。レビュー run は `review.rs` が `RunContext::default()` を使うので既定の false。
             comments_enabled: writes_comments,
@@ -4430,7 +5106,9 @@ fn subject_from_run_dir(dir: &std::path::Path, run_id: &str) -> ReviewSubject {
         return ReviewSubject::default();
     };
     match serde_json::from_str::<WorkerMessage>(&text) {
-        Ok(WorkerMessage::Done { summary, evidence, .. }) => ReviewSubject { summary, evidence },
+        Ok(WorkerMessage::Done {
+            summary, evidence, ..
+        }) => ReviewSubject { summary, evidence },
         _ => ReviewSubject::default(),
     }
 }
@@ -4440,8 +5118,8 @@ mod tests {
     use super::*;
     use crate::policy::{ProviderSpec, StaticPolicy};
     use async_trait::async_trait;
-    use task_core::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use task_core::*;
     use task_worker::Evidence;
 
     /// 同プロセスで即座に終端を返すテスト用アダプタ（サブプロセスは起動しない）。
@@ -4475,20 +5153,35 @@ mod tests {
     fn new_task(dir: &std::path::Path, check: Check, max_retries: u32) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
             title: "t".into(),
             objective: "o".into(),
-            acceptance: vec![Criterion { text: "c".into(), check }],
+            acceptance: vec![Criterion {
+                text: "c".into(),
+                check,
+            }],
             inputs: vec![],
             depends_on: vec![],
             status: Status::Ready,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: dir.to_path_buf(), mode: None },
-            budget: Budget { max_turns: 1, max_wall_secs: 30, max_retries },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: dir.to_path_buf(),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 30,
+                max_retries,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -4505,7 +5198,11 @@ mod tests {
         }
     }
 
-    fn dispatcher(store: Arc<dyn TaskStore>, adapter: Arc<dyn WorkerAdapter>, max_concurrency: usize) -> Dispatcher {
+    fn dispatcher(
+        store: Arc<dyn TaskStore>,
+        adapter: Arc<dyn WorkerAdapter>,
+        max_concurrency: usize,
+    ) -> Dispatcher {
         let policy = StaticPolicy::new(
             vec![ProviderSpec {
                 id: "p1".into(),
@@ -4567,10 +5264,26 @@ mod tests {
     async fn done_then_command_review_passes_and_events_are_recorded() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![Evidence { criterion: 0, command: Some("x".into()), exit: Some(0), stdout_tail: None }], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![Evidence {
+                    criterion: 0,
+                    command: Some("x".into()),
+                    exit: Some(0),
+                    stdout_tail: None,
+                }],
+                usage: None,
+            },
             delay: Duration::from_millis(10),
         });
         let mut d = dispatcher(store.clone(), adapter, 2);
@@ -4618,38 +5331,72 @@ mod tests {
         seed_org_for_reports(&store);
 
         // 子: 委譲され、走って失敗する（max_retries = 0 なので 1 回で failed）。
-        let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut parent = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         parent.status = Status::Reviewing;
         parent.assignee = Some("coding-poc".into());
         store.insert(&parent).unwrap();
-        let mut child = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut child = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         child.parent_id = Some(parent.id);
-        store.delegate_children(parent.id, "run-1", vec![child.clone()]).unwrap();
-        store.apply_transition(child.id, Trigger::Dispatch, None).unwrap();
+        store
+            .delegate_children(parent.id, "run-1", vec![child.clone()])
+            .unwrap();
+        store
+            .apply_transition(child.id, Trigger::Dispatch, None)
+            .unwrap();
         store
             .apply_transition(child.id, Trigger::WorkerError { retryable: false }, None)
             .unwrap();
         assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Failed);
 
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 1);
-        let handled = d.escalate_failed_children(&parent, "run-1", &mut Vec::new()).unwrap();
+        let handled = d
+            .escalate_failed_children(&parent, "run-1", &mut Vec::new())
+            .unwrap();
         assert!(handled);
         let after = store.get(parent.id).unwrap().unwrap();
-        assert_eq!(after.status, Status::Blocked, "max_retries = 0 なのでやり直せず、人に聞く");
+        assert_eq!(
+            after.status,
+            Status::Blocked,
+            "max_retries = 0 なのでやり直せず、人に聞く"
+        );
 
         // ADR-0033 D5（Phase 26）と同じく `approvals` に 1 件残る。
         let approvals = store.approval_list(Some(true), None, None).unwrap();
         assert_eq!(approvals.len(), 1, "{approvals:?}");
         assert_eq!(approvals[0].node_id, "coding-poc");
         assert_eq!(approvals[0].task_id, Some(parent.id));
-        assert!(approvals[0].question.contains("委譲した子タスクが失敗し"), "{}", approvals[0].question);
+        assert!(
+            approvals[0].question.contains("委譲した子タスクが失敗し"),
+            "{}",
+            approvals[0].question
+        );
 
         // 答えれば ready に戻る（既存の answers[] の経路。Phase 29 の一本化はここでは検証しない）。
-        store.apply_transition(parent.id, Trigger::Answer, None).unwrap();
+        store
+            .apply_transition(parent.id, Trigger::Answer, None)
+            .unwrap();
         assert_eq!(store.get(parent.id).unwrap().unwrap().status, Status::Ready);
     }
 
@@ -4661,24 +5408,46 @@ mod tests {
     /// `events_for_with_global_ids`（`events` テーブルのグローバル `id`）で比較すれば、2 回目以降は
     /// 「既に扱った失敗」と正しく判定され、親はやり直しの review pass だけで `done` になる。
     #[tokio::test]
-    async fn child_failure_question_is_not_repeated_when_the_child_has_more_events_than_the_parent() {
+    async fn child_failure_question_is_not_repeated_when_the_child_has_more_events_than_the_parent()
+    {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_org_for_reports(&store);
 
-        let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut parent = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         parent.assignee = Some("coding-poc".into());
         store.insert(&parent).unwrap();
 
-        let mut child = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut child = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         child.parent_id = Some(parent.id);
-        store.delegate_children(parent.id, "run-1", vec![child.clone()]).unwrap();
-        store.apply_transition(child.id, Trigger::Dispatch, None).unwrap();
+        store
+            .delegate_children(parent.id, "run-1", vec![child.clone()])
+            .unwrap();
+        store
+            .apply_transition(child.id, Trigger::Dispatch, None)
+            .unwrap();
         // 子に、親が今後 2 回の run で積む以上のイベントを積んでから失敗させる（実機の形の再現）。
         // 子の `seq`（タスクごとのローカルな連番）が親のどの `seq` よりも大きくなるようにする。
         for i in 0..200u32 {
             store
-                .append_event(child.id, &Event::worker_progress("child-run", format!("padding {i}")))
+                .append_event(
+                    child.id,
+                    &Event::worker_progress("child-run", format!("padding {i}")),
+                )
                 .unwrap();
         }
         store
@@ -4687,7 +5456,11 @@ mod tests {
         assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Failed);
 
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 1);
@@ -4697,10 +5470,16 @@ mod tests {
         let report1 = run_until_idle(&mut d, 200).await;
         assert!(report1.idle);
         let after_first = store.get(parent.id).unwrap().unwrap();
-        assert_eq!(after_first.status, Status::Blocked, "max_retries = 0 なのでやり直せず、人に聞く");
+        assert_eq!(
+            after_first.status,
+            Status::Blocked,
+            "max_retries = 0 なのでやり直せず、人に聞く"
+        );
 
         // 人間が答えると ready に戻る。
-        store.apply_transition(parent.id, Trigger::Answer, None).unwrap();
+        store
+            .apply_transition(parent.id, Trigger::Answer, None)
+            .unwrap();
         assert_eq!(store.get(parent.id).unwrap().unwrap().status, Status::Ready);
 
         // 2 回目: 親がもう一度走って review pass する。子は同じ失敗のままだが、既に扱った失敗なので
@@ -4716,7 +5495,10 @@ mod tests {
             "既に扱った子の失敗を数え直してはいけない: {parent_events:?}"
         );
 
-        let questions = parent_events.iter().filter(|(_, e)| matches!(e, Event::QuestionRaised { .. })).count();
+        let questions = parent_events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::QuestionRaised { .. }))
+            .count();
         assert_eq!(questions, 1, "{parent_events:?}");
         let child_failed_transitions = parent_events
             .iter()
@@ -4733,9 +5515,21 @@ mod tests {
     async fn question_blocks_task_and_review_fail_retries_until_budget() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let q = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let q = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&q).unwrap();
-        let adapter = Arc::new(InstantAdapter { terminal: Terminal::Question { text: "which?".into() }, delay: Duration::ZERO });
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Question {
+                text: "which?".into(),
+            },
+            delay: Duration::ZERO,
+        });
         let mut d = dispatcher(store.clone(), adapter, 1);
         let report = run_until_idle(&mut d, 100).await;
         assert!(report.idle);
@@ -4744,10 +5538,21 @@ mod tests {
         // レビュー失敗（存在しないファイル）は max_retries=1 で 2 回実行して failed。
         let dir2 = tempfile::tempdir().unwrap();
         let store2: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let f = new_task(dir2.path(), Check::Command { cmd: "test -f never".into(), expect_exit: 0 }, 1);
+        let f = new_task(
+            dir2.path(),
+            Check::Command {
+                cmd: "test -f never".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
         store2.insert(&f).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "claimed".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "claimed".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d2 = dispatcher(store2.clone(), adapter, 1);
@@ -4757,7 +5562,10 @@ mod tests {
         assert_eq!(t.status, Status::Failed);
         assert_eq!(t.attempts, 2);
         let events = store2.events_for(f.id).unwrap();
-        let starts = events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { .. })).count();
+        let starts = events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::WorkerStarted { .. }))
+            .count();
         assert_eq!(starts, 2);
         // 2 回目の run には 1 回目のレビュー結果が prior_review として渡る。
         let prior = prior_review_from_events(&events[..events.len() - 2]);
@@ -4770,10 +5578,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         for _ in 0..3 {
-            store.insert(&new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0)).unwrap();
+            store
+                .insert(&new_task(
+                    dir.path(),
+                    Check::Command {
+                        cmd: "true".into(),
+                        expect_exit: 0,
+                    },
+                    0,
+                ))
+                .unwrap();
         }
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::from_millis(200),
         });
         let mut d = dispatcher(store.clone(), adapter, 2);
@@ -4807,18 +5628,26 @@ mod tests {
         ) -> Result<RunOutcome, AdapterError> {
             let id = req.task.id.to_string();
             std::fs::create_dir_all(&req.artifacts_dir).unwrap();
-            std::fs::write(req.artifacts_dir.join("result.json"), format!(r#"{{"summary":"{id}","evidence":[]}}"#))
-                .unwrap();
+            std::fs::write(
+                req.artifacts_dir.join("result.json"),
+                format!(r#"{{"summary":"{id}","evidence":[]}}"#),
+            )
+            .unwrap();
             std::fs::write(req.artifacts_dir.join("report.md"), &id).unwrap();
             // 兄弟の run と重なる窓。
             tokio::time::sleep(self.delay).await;
             let back = std::fs::read_to_string(req.artifacts_dir.join("result.json")).unwrap();
             assert!(back.contains(&id), "兄弟に上書きされた: {back}");
             let rel = format!("{}/report.md", req.artifacts_rel());
-            let artifact = task_worker::artifact::resolve(&req.workspace, "report.md", &rel, None).unwrap();
+            let artifact =
+                task_worker::artifact::resolve(&req.workspace, "report.md", &rel, None).unwrap();
             sink.artifact(&artifact);
             Ok(RunOutcome {
-                terminal: Terminal::Done { summary: id, evidence: vec![], usage: None },
+                terminal: Terminal::Done {
+                    summary: id,
+                    evidence: vec![],
+                    usage: None,
+                },
                 exit_code: Some(0),
             })
         }
@@ -4829,14 +5658,25 @@ mod tests {
     async fn a_standalone_task_keeps_the_plain_artifacts_dir() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(dir.path(), Check::ArtifactExists { name: "report.md".into() }, 0);
+        let task = new_task(
+            dir.path(),
+            Check::ArtifactExists {
+                name: "report.md".into(),
+            },
+            0,
+        );
         store.insert(&task).unwrap();
-        let adapter = Arc::new(SiblingAdapter { delay: Duration::ZERO });
+        let adapter = Arc::new(SiblingAdapter {
+            delay: Duration::ZERO,
+        });
         let mut d = dispatcher(store.clone(), adapter, 2);
         assert!(run_until_idle(&mut d, 200).await.idle);
 
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
-        assert!(!dir.path().join(".taskd").exists(), "単独タスクは `.taskd/artifacts/` を使わない");
+        assert!(
+            !dir.path().join(".taskd").exists(),
+            "単独タスクは `.taskd/artifacts/` を使わない"
+        );
         let result = std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
         assert!(result.contains(&task.id.to_string()), "{result}");
         let produced: Vec<String> = store
@@ -4865,28 +5705,47 @@ mod tests {
         let children: Vec<Task> = (0..2)
             .map(|_| {
                 // plan / delegate の子は親の workspace をそのまま継ぐ（`plan::materialize`）。
-                let mut c = new_task(dir.path(), Check::ArtifactExists { name: "report.md".into() }, 0);
+                let mut c = new_task(
+                    dir.path(),
+                    Check::ArtifactExists {
+                        name: "report.md".into(),
+                    },
+                    0,
+                );
                 c.parent_id = Some(parent.id);
                 store.insert(&c).unwrap();
                 c
             })
             .collect();
 
-        let adapter = Arc::new(SiblingAdapter { delay: Duration::from_millis(150) });
+        let adapter = Arc::new(SiblingAdapter {
+            delay: Duration::from_millis(150),
+        });
         let mut d = dispatcher(store.clone(), adapter, 2);
         // 2 件が同じ tick で走り出す（並列度 2）。
         assert_eq!(d.tick().unwrap().dispatched, 2);
         let report = run_until_idle(&mut d, 400).await;
         assert!(report.idle);
 
-        assert!(!dir.path().join("artifacts").exists(), "共有の `artifacts/` は作られない");
+        assert!(
+            !dir.path().join("artifacts").exists(),
+            "共有の `artifacts/` は作られない"
+        );
         for c in &children {
             let t = store.get(c.id).unwrap().unwrap();
-            assert_eq!(t.status, Status::Done, "{:?}", store.events_for(c.id).unwrap());
+            assert_eq!(
+                t.status,
+                Status::Done,
+                "{:?}",
+                store.events_for(c.id).unwrap()
+            );
             let own = dir.path().join(".taskd/artifacts").join(c.id.to_string());
             let result = std::fs::read_to_string(own.join("result.json")).unwrap();
             assert!(result.contains(&c.id.to_string()), "{result}");
-            assert_eq!(std::fs::read_to_string(own.join("report.md")).unwrap(), c.id.to_string());
+            assert_eq!(
+                std::fs::read_to_string(own.join("report.md")).unwrap(),
+                c.id.to_string()
+            );
             // 申告された成果物のパスは workspace 相対のタスクごとの形（GUI がそのまま読める）。
             let produced: Vec<String> = store
                 .events_for(c.id)
@@ -4897,7 +5756,10 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(produced, vec![format!(".taskd/artifacts/{}/report.md", c.id)]);
+            assert_eq!(
+                produced,
+                vec![format!(".taskd/artifacts/{}/report.md", c.id)]
+            );
         }
     }
 
@@ -4933,7 +5795,8 @@ mod tests {
                 }
                 TaskKind::Review => {
                     assert!(req.context.review.is_some());
-                    std::fs::write(req.artifacts_dir.join("review.json"), &self.review_json).unwrap();
+                    std::fs::write(req.artifacts_dir.join("review.json"), &self.review_json)
+                        .unwrap();
                 }
                 _ => {
                     std::fs::write(req.workspace.join("touched"), "1").unwrap();
@@ -4942,7 +5805,11 @@ mod tests {
             sink.progress("working");
             tokio::time::sleep(self.delay).await;
             Ok(RunOutcome {
-                terminal: Terminal::Done { summary: format!("{:?}", req.task.kind), evidence: vec![], usage: None },
+                terminal: Terminal::Done {
+                    summary: format!("{:?}", req.task.kind),
+                    evidence: vec![],
+                    usage: None,
+                },
                 exit_code: Some(0),
             })
         }
@@ -4955,7 +5822,14 @@ mod tests {
     ]}"#;
 
     fn plan_task(dir: &std::path::Path, max_retries: u32) -> Task {
-        let mut t = new_task(dir, Check::Command { cmd: "true".into(), expect_exit: 0 }, max_retries);
+        let mut t = new_task(
+            dir,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            max_retries,
+        );
         t.kind = TaskKind::Plan;
         t.acceptance.clear();
         t.worker_hint.tier = Tier::Frontier;
@@ -4979,7 +5853,11 @@ mod tests {
         let p = store.get(plan.id).unwrap().unwrap();
         assert_eq!(p.status, Status::Done);
         let children: Vec<Task> = store.list(Some(Status::Draft)).unwrap();
-        assert_eq!(children.len(), 3, "auto_accept=false leaves children in draft");
+        assert_eq!(
+            children.len(),
+            3,
+            "auto_accept=false leaves children in draft"
+        );
         for c in &children {
             assert_eq!(c.parent_id, Some(plan.id));
             assert_eq!(c.workspace, plan.workspace);
@@ -4989,7 +5867,12 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter_map(|(_, e)| match e {
-                Event::ReviewVerdict { criterion_idx, pass, reason, .. } => Some((criterion_idx, pass, reason)),
+                Event::ReviewVerdict {
+                    criterion_idx,
+                    pass,
+                    reason,
+                    ..
+                } => Some((criterion_idx, pass, reason)),
                 _ => None,
             })
             .collect();
@@ -5006,7 +5889,13 @@ mod tests {
         assert!(report.idle);
         for c in &children {
             let t = store.get(c.id).unwrap().unwrap();
-            assert_eq!(t.status, Status::Done, "{}: {:?}", c.title, store.events_for(c.id).unwrap());
+            assert_eq!(
+                t.status,
+                Status::Done,
+                "{}: {:?}",
+                c.title,
+                store.events_for(c.id).unwrap()
+            );
         }
         let c = children.iter().find(|c| c.title == "c").unwrap();
         assert_eq!(c.worker_hint.tier, Tier::Cheap);
@@ -5019,9 +5908,24 @@ mod tests {
         assert!(reviewer_progress >= 2, "{events:?}");
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: true, reason, .. } if reason.contains("reviewer(") && reason.contains("fine"))));
         // WorkerStarted はワーカー run の 1 回と、ADR-0014 D1 で記録する Reviewer run の 1 回。
-        assert_eq!(events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. })).count(), 1);
         assert_eq!(
-            events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { role: Some(RunRole::Reviewer), .. })).count(),
+            events
+                .iter()
+                .filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(_, e)| matches!(
+                    e,
+                    Event::WorkerStarted {
+                        role: Some(RunRole::Reviewer),
+                        ..
+                    }
+                ))
+                .count(),
             1
         );
     }
@@ -5053,21 +5957,43 @@ mod tests {
             })
             .collect();
         assert_eq!(verdicts.len(), 2);
-        assert!(!verdicts[0].0 && verdicts[0].1.contains("out of range"), "{:?}", verdicts[0]);
+        assert!(
+            !verdicts[0].0 && verdicts[0].1.contains("out of range"),
+            "{:?}",
+            verdicts[0]
+        );
         assert!(verdicts[1].0);
         // auto_accept=true: 子は ready で挿入され、その後 done まで進む（a, b は Command、c は Reviewer で review.json 無し→ fail → failed）。
-        let children: Vec<Task> = store.list(None).unwrap().into_iter().filter(|t| t.parent_id == Some(plan.id)).collect();
+        let children: Vec<Task> = store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.parent_id == Some(plan.id))
+            .collect();
         assert_eq!(children.len(), 3);
         for c in &children {
             let ev = store.events_for(c.id).unwrap();
             assert!(matches!(&ev[0].1, Event::Created { task } if task.status == Status::Draft));
-            assert!(matches!(&ev[1].1, Event::Transitioned { from: Status::Draft, to: Status::Ready, reason } if reason == "accept"));
+            assert!(
+                matches!(&ev[1].1, Event::Transitioned { from: Status::Draft, to: Status::Ready, reason } if reason == "accept")
+            );
         }
-        let by_title = |t: &str| children.iter().find(|c| c.title == t).map(|c| store.get(c.id).unwrap().unwrap()).unwrap();
+        let by_title = |t: &str| {
+            children
+                .iter()
+                .find(|c| c.title == t)
+                .map(|c| store.get(c.id).unwrap().unwrap())
+                .unwrap()
+        };
         assert_eq!(by_title("a").status, Status::Done);
         assert_eq!(by_title("b").status, Status::Done);
         let c = by_title("c");
-        assert_eq!(c.status, Status::Failed, "{:?}", store.events_for(c.id).unwrap());
+        assert_eq!(
+            c.status,
+            Status::Failed,
+            "{:?}",
+            store.events_for(c.id).unwrap()
+        );
         assert!(store.events_for(c.id).unwrap().iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: false, reason, .. } if reason.contains("review.json"))));
     }
 
@@ -5089,7 +6015,14 @@ mod tests {
         // ワーカーが終わるのを待ってから、次の tick で reviewing に入る。
         tokio::time::sleep(Duration::from_millis(250)).await;
         // 2 つ目のタスクを ready にしておき、Reviewer run が枠を取っている間は dispatch されないことを見る。
-        let other = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let other = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&other).unwrap();
         let second = d.tick().unwrap();
         assert_eq!(second.finished, 1);
@@ -5110,7 +6043,11 @@ mod tests {
         let task = new_task(dir.path(), Check::Human, 1);
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 2);
@@ -5127,7 +6064,11 @@ mod tests {
             .apply_transition(
                 approval.id,
                 Trigger::Approve,
-                Some(Event::ApprovalDecided { by: "human".into(), approved: true, note: Some("looks good".into()) }),
+                Some(Event::ApprovalDecided {
+                    by: "human".into(),
+                    approved: true,
+                    note: Some("looks good".into()),
+                }),
             )
             .unwrap();
         let report = run_until_idle(&mut d, 200).await;
@@ -5156,7 +6097,11 @@ mod tests {
         task.assignee = Some("research-survey".into());
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 2);
@@ -5176,7 +6121,11 @@ mod tests {
         let task = new_task(dir.path(), Check::Human, 0);
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 2);
@@ -5186,7 +6135,11 @@ mod tests {
             .apply_transition(
                 approval.id,
                 Trigger::Reject,
-                Some(Event::ApprovalDecided { by: "human".into(), approved: false, note: Some("not ready".into()) }),
+                Some(Event::ApprovalDecided {
+                    by: "human".into(),
+                    approved: false,
+                    note: Some("not ready".into()),
+                }),
             )
             .unwrap();
         let report = run_until_idle(&mut d, 200).await;
@@ -5211,18 +6164,36 @@ mod tests {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
 
         let now = OffsetDateTime::now_utc();
-        let mut approval = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut approval = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         approval.kind = TaskKind::Approval;
         approval.status = Status::Ready;
         store.insert(&approval).unwrap();
 
-        let mut child = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut child = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         child.parent_id = Some(approval.id);
         child.created_at = now;
         store.insert(&child).unwrap();
 
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 2);
@@ -5230,7 +6201,10 @@ mod tests {
         // 承認前: 何 tick 回しても子は dispatch されず Ready のまま。
         for _ in 0..5 {
             let report = d.tick().unwrap();
-            assert_eq!(report.dispatched, 0, "child must not be dispatched while its Approval parent is pending");
+            assert_eq!(
+                report.dispatched, 0,
+                "child must not be dispatched while its Approval parent is pending"
+            );
         }
         assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Ready);
 
@@ -5239,21 +6213,38 @@ mod tests {
             .apply_transition(
                 approval.id,
                 Trigger::Reject,
-                Some(Event::ApprovalDecided { by: "human".into(), approved: false, note: None }),
+                Some(Event::ApprovalDecided {
+                    by: "human".into(),
+                    approved: false,
+                    note: None,
+                }),
             )
             .unwrap();
-        assert_eq!(store.get(approval.id).unwrap().unwrap().status, Status::Failed);
-        assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Cancelled);
+        assert_eq!(
+            store.get(approval.id).unwrap().unwrap().status,
+            Status::Failed
+        );
+        assert_eq!(
+            store.get(child.id).unwrap().unwrap().status,
+            Status::Cancelled
+        );
         for _ in 0..5 {
             let report = d.tick().unwrap();
             assert_eq!(report.dispatched, 0);
         }
-        assert_eq!(store.get(child.id).unwrap().unwrap().status, Status::Cancelled);
+        assert_eq!(
+            store.get(child.id).unwrap().unwrap().status,
+            Status::Cancelled
+        );
     }
 
     fn done_outcome() -> RunOutcome {
         RunOutcome {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             exit_code: Some(0),
         }
     }
@@ -5268,9 +6259,17 @@ mod tests {
         fn id(&self) -> &str {
             "instant"
         }
-        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, _sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(AdapterError::Throttled { retry_after: Duration::from_millis(200) });
+                return Err(AdapterError::Throttled {
+                    retry_after: Duration::from_millis(200),
+                });
             }
             std::fs::write(req.workspace.join("touched"), "1").unwrap();
             Ok(done_outcome())
@@ -5282,9 +6281,18 @@ mod tests {
     async fn provider_failure_requeues_without_consuming_attempts() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task).unwrap();
-        let adapter = Arc::new(FlakyProviderAdapter { calls: AtomicUsize::new(0) });
+        let adapter = Arc::new(FlakyProviderAdapter {
+            calls: AtomicUsize::new(0),
+        });
         let mut d = dispatcher(store.clone(), adapter.clone(), 1);
         assert_eq!(d.tick().unwrap().dispatched, 1);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -5314,10 +6322,21 @@ mod tests {
     async fn retry_backoff_delays_redispatch() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(dir.path(), Check::Command { cmd: "test -f never".into(), expect_exit: 0 }, 1);
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "test -f never".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "claimed".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "claimed".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 1);
@@ -5358,7 +6377,13 @@ mod tests {
         fn id(&self) -> &str {
             "instant"
         }
-        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
             for _ in 0..8 {
                 sink.heartbeat();
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -5374,18 +6399,43 @@ mod tests {
     async fn heartbeat_renews_the_lease() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task).unwrap();
         let mut d = dispatcher(store.clone(), Arc::new(HeartbeatAdapter), 1);
         d.config.lease_grace = Duration::from_millis(400);
         let before = OffsetDateTime::now_utc();
         assert_eq!(d.tick().unwrap().dispatched, 1);
-        let initial = store.get(task.id).unwrap().unwrap().lease.unwrap().expires_at;
-        assert!(initial > before + time::Duration::seconds(25), "acquired with max_wall_secs + grace");
+        let initial = store
+            .get(task.id)
+            .unwrap()
+            .unwrap()
+            .lease
+            .unwrap()
+            .expires_at;
+        assert!(
+            initial > before + time::Duration::seconds(25),
+            "acquired with max_wall_secs + grace"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let renewed = store.get(task.id).unwrap().unwrap().lease.expect("still running").expires_at;
+        let renewed = store
+            .get(task.id)
+            .unwrap()
+            .unwrap()
+            .lease
+            .expect("still running")
+            .expires_at;
         assert!(renewed < initial, "renewed={renewed} initial={initial}");
-        assert!(renewed > OffsetDateTime::now_utc() + time::Duration::seconds(4), "ttl = idle_timeout(5s) + grace");
+        assert!(
+            renewed > OffsetDateTime::now_utc() + time::Duration::seconds(4),
+            "ttl = idle_timeout(5s) + grace"
+        );
         let report = run_until_idle(&mut d, 200).await;
         assert!(report.idle);
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
@@ -5401,7 +6451,13 @@ mod tests {
         fn id(&self) -> &str {
             "instant"
         }
-        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, _sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) >= 1 {
                 std::fs::write(req.workspace.join("second"), "1").unwrap();
             }
@@ -5418,7 +6474,10 @@ mod tests {
         let mut task = new_task(dir.path(), Check::Human, 1);
         task.acceptance.push(Criterion {
             text: "second run".into(),
-            check: Check::Command { cmd: "test -f second".into(), expect_exit: 0 },
+            check: Check::Command {
+                cmd: "test -f second".into(),
+                expect_exit: 0,
+            },
         });
         store.insert(&task).unwrap();
         let task_id = task.id;
@@ -5434,17 +6493,38 @@ mod tests {
         };
         let approve = |store: &Arc<dyn TaskStore>, id: TaskId| {
             store
-                .apply_transition(id, Trigger::Approve, Some(Event::ApprovalDecided { by: "human".into(), approved: true, note: None }))
+                .apply_transition(
+                    id,
+                    Trigger::Approve,
+                    Some(Event::ApprovalDecided {
+                        by: "human".into(),
+                        approved: true,
+                        note: None,
+                    }),
+                )
                 .unwrap();
         };
-        let mut d = dispatcher(store.clone(), Arc::new(CountingAdapter { calls: AtomicUsize::new(0) }), 2);
+        let mut d = dispatcher(
+            store.clone(),
+            Arc::new(CountingAdapter {
+                calls: AtomicUsize::new(0),
+            }),
+            2,
+        );
 
         let report = run_until_idle(&mut d, 200).await;
         assert!(report.idle, "only a human can make progress now");
         let first = approvals(&store);
         assert_eq!(first.len(), 1);
-        assert!(first[0].title.ends_with("(attempt 1)"), "{}", first[0].title);
-        assert_eq!(store.get(task_id).unwrap().unwrap().status, Status::Reviewing);
+        assert!(
+            first[0].title.ends_with("(attempt 1)"),
+            "{}",
+            first[0].title
+        );
+        assert_eq!(
+            store.get(task_id).unwrap().unwrap().status,
+            Status::Reviewing
+        );
 
         // 承認 → Command 条件が fail → attempts 1 → 2 回目の run → 新しい Approval 子を待って idle。
         approve(&store, first[0].id);
@@ -5474,10 +6554,18 @@ mod tests {
         fn id(&self) -> &str {
             "instant"
         }
-        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, _sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
             if req.task.kind == TaskKind::Review {
                 if self.review_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return Err(AdapterError::Throttled { retry_after: Duration::from_millis(200) });
+                    return Err(AdapterError::Throttled {
+                        retry_after: Duration::from_millis(200),
+                    });
                 }
                 std::fs::create_dir_all(&req.artifacts_dir).unwrap();
                 std::fs::write(
@@ -5497,7 +6585,9 @@ mod tests {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         let task = new_task(dir.path(), Check::Reviewer, 0);
         store.insert(&task).unwrap();
-        let adapter = Arc::new(FlakyReviewerAdapter { review_calls: AtomicUsize::new(0) });
+        let adapter = Arc::new(FlakyReviewerAdapter {
+            review_calls: AtomicUsize::new(0),
+        });
         let mut d = dispatcher(store.clone(), adapter.clone(), 2);
         let report = run_until_idle(&mut d, 400).await;
         assert!(report.idle);
@@ -5522,13 +6612,23 @@ mod tests {
         let reviewer_outcomes: Vec<&str> = events
             .iter()
             .filter_map(|(_, e)| match e {
-                Event::WorkerFinished { outcome, role: Some(RunRole::Reviewer), .. } => Some(outcome.as_str()),
+                Event::WorkerFinished {
+                    outcome,
+                    role: Some(RunRole::Reviewer),
+                    ..
+                } => Some(outcome.as_str()),
                 _ => None,
             })
             .collect();
         assert_eq!(reviewer_outcomes.len(), 2, "{events:?}");
-        assert!(reviewer_outcomes[0].starts_with("requeue: "), "{reviewer_outcomes:?}");
-        assert!(reviewer_outcomes[1].starts_with("done: "), "{reviewer_outcomes:?}");
+        assert!(
+            reviewer_outcomes[0].starts_with("requeue: "),
+            "{reviewer_outcomes:?}"
+        );
+        assert!(
+            reviewer_outcomes[1].starts_with("done: "),
+            "{reviewer_outcomes:?}"
+        );
     }
 
     /// ADR-0014 D1（P-G14）: Reviewer run も対象タスクに WorkerStarted / WorkerFinished（role: reviewer、provider つき）を残す。
@@ -5552,24 +6652,38 @@ mod tests {
         let started: Vec<(String, Option<RunRole>, Option<String>)> = events
             .iter()
             .filter_map(|(_, e)| match e {
-                Event::WorkerStarted { run_id, role, provider, .. } => Some((run_id.clone(), *role, provider.clone())),
+                Event::WorkerStarted {
+                    run_id,
+                    role,
+                    provider,
+                    ..
+                } => Some((run_id.clone(), *role, provider.clone())),
                 _ => None,
             })
             .collect();
         assert_eq!(started.len(), 2, "{events:?}");
-        assert_eq!((started[0].1, started[1].1), (None, Some(RunRole::Reviewer)));
+        assert_eq!(
+            (started[0].1, started[1].1),
+            (None, Some(RunRole::Reviewer))
+        );
         assert_eq!(started[1].2.as_deref(), Some("p1"));
         let reviewer_finished: Vec<&str> = events
             .iter()
             .filter_map(|(_, e)| match e {
-                Event::WorkerFinished { run_id, outcome, role: Some(RunRole::Reviewer), .. } if *run_id == started[1].0 => {
-                    Some(outcome.as_str())
-                }
+                Event::WorkerFinished {
+                    run_id,
+                    outcome,
+                    role: Some(RunRole::Reviewer),
+                    ..
+                } if *run_id == started[1].0 => Some(outcome.as_str()),
                 _ => None,
             })
             .collect();
         assert_eq!(reviewer_finished.len(), 1, "{events:?}");
-        assert!(reviewer_finished[0].starts_with("done: "), "{reviewer_finished:?}");
+        assert!(
+            reviewer_finished[0].starts_with("done: "),
+            "{reviewer_finished:?}"
+        );
         assert_eq!(last_run_id(&events).as_deref(), Some(started[0].0.as_str()));
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { run_id, pass: true, .. } if *run_id == started[0].0)));
     }
@@ -5585,12 +6699,20 @@ mod tests {
         fn id(&self) -> &str {
             "instant"
         }
-        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, _sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
             if self.review_only && req.task.kind != TaskKind::Review {
                 return Ok(done_outcome());
             }
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(AdapterError::Throttled { retry_after: Duration::from_millis(10) })
+            Err(AdapterError::Throttled {
+                retry_after: Duration::from_millis(10),
+            })
         }
     }
 
@@ -5612,9 +6734,19 @@ mod tests {
     async fn requeue_limit_turns_persistent_provider_failures_into_ordinary_failures() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 1);
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
         store.insert(&task).unwrap();
-        let adapter = Arc::new(AlwaysThrottledAdapter { calls: AtomicUsize::new(0), review_only: false });
+        let adapter = Arc::new(AlwaysThrottledAdapter {
+            calls: AtomicUsize::new(0),
+            review_only: false,
+        });
         let mut d = dispatcher(store.clone(), adapter.clone(), 1);
         d.config.max_requeues = 2;
         let report = run_until_idle(&mut d, 500).await;
@@ -5622,19 +6754,40 @@ mod tests {
         let t = store.get(task.id).unwrap().unwrap();
         assert_eq!((t.status, t.attempts), (Status::Failed, 2));
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 6);
-        let one_attempt = ["dispatch", "requeue", "dispatch", "requeue", "dispatch", "worker_error"];
-        let expected: Vec<&str> = one_attempt.iter().chain(one_attempt.iter()).copied().collect();
+        let one_attempt = [
+            "dispatch",
+            "requeue",
+            "dispatch",
+            "requeue",
+            "dispatch",
+            "worker_error",
+        ];
+        let expected: Vec<&str> = one_attempt
+            .iter()
+            .chain(one_attempt.iter())
+            .copied()
+            .collect();
         assert_eq!(transition_reasons(&store, task.id), expected);
         let events = store.events_for(task.id).unwrap();
         assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if outcome.contains("requeue limit (2) reached"))));
 
         // max_requeues = 0 なら最初の供給側失敗から attempts を消費する。
-        let task0 = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let task0 = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task0).unwrap();
         d.config.max_requeues = 0;
         let report = run_until_idle(&mut d, 200).await;
         assert!(report.idle);
-        assert_eq!(transition_reasons(&store, task0.id), vec!["dispatch", "worker_error"]);
+        assert_eq!(
+            transition_reasons(&store, task0.id),
+            vec!["dispatch", "worker_error"]
+        );
     }
 
     /// 監査 M-1〜M-3（ADR-0034 D2）: 報告はタスクの終端状態に合わせて作るテスト向けの、最小の組織（秘書 → coding → coding-poc）。
@@ -5647,6 +6800,7 @@ mod tests {
         ] {
             store
                 .org_upsert(&OrgNode {
+                    profile: Default::default(),
                     id: id.into(),
                     parent_id: parent.map(str::to_string),
                     name: id.into(),
@@ -5671,14 +6825,24 @@ mod tests {
         fn id(&self) -> &str {
             "instant"
         }
-        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
             sink.progress("working");
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             if n >= 1 {
                 std::fs::write(req.workspace.join("ready"), "1").unwrap();
             }
             Ok(RunOutcome {
-                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
                 exit_code: Some(0),
             })
         }
@@ -5690,20 +6854,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_org_for_reports(&store);
-        let mut task = new_task(dir.path(), Check::Command { cmd: "test -f ready".into(), expect_exit: 0 }, 1);
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "test -f ready".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
         task.assignee = Some("coding-poc".into());
         task.project_id = Some(ProjectId::new());
         store.insert(&task).unwrap();
-        let adapter = Arc::new(AttemptGatedAdapter { calls: AtomicUsize::new(0) });
+        let adapter = Arc::new(AttemptGatedAdapter {
+            calls: AtomicUsize::new(0),
+        });
         let mut d = dispatcher(store.clone(), adapter, 1);
         let report = run_until_idle(&mut d, 300).await;
         assert!(report.idle);
         let t = store.get(task.id).unwrap().unwrap();
         assert_eq!(t.status, Status::Done);
-        assert_eq!(t.attempts, 1, "1 回目のレビュー差し戻しで attempts を消費し、2 回目で done になる");
+        assert_eq!(
+            t.attempts, 1,
+            "1 回目のレビュー差し戻しで attempts を消費し、2 回目で done になる"
+        );
         let reports = store.report_list(&ReportFilter::default()).unwrap();
-        let done_reports: Vec<_> = reports.iter().filter(|r| r.kind == ReportKind::Result).collect();
-        assert_eq!(done_reports.len(), 1, "差し戻された 1 回目は報告にせず、done の報告は 1 件だけ: {reports:?}");
+        let done_reports: Vec<_> = reports
+            .iter()
+            .filter(|r| r.kind == ReportKind::Result)
+            .collect();
+        assert_eq!(
+            done_reports.len(),
+            1,
+            "差し戻された 1 回目は報告にせず、done の報告は 1 件だけ: {reports:?}"
+        );
     }
 
     /// 監査 M-1: 供給側失敗が requeue の上限に達して通常の失敗（`Status::Failed`）になったら、bad_news を 1 件作る。
@@ -5712,11 +6895,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_org_for_reports(&store);
-        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         task.assignee = Some("coding-poc".into());
         task.project_id = Some(ProjectId::new());
         store.insert(&task).unwrap();
-        let adapter = Arc::new(AlwaysThrottledAdapter { calls: AtomicUsize::new(0), review_only: false });
+        let adapter = Arc::new(AlwaysThrottledAdapter {
+            calls: AtomicUsize::new(0),
+            review_only: false,
+        });
         let mut d = dispatcher(store.clone(), adapter.clone(), 1);
         d.config.max_requeues = 1;
         let report = run_until_idle(&mut d, 500).await;
@@ -5728,7 +6921,11 @@ mod tests {
             .iter()
             .filter(|r| r.kind == ReportKind::BadNews && r.node_id == "coding-poc")
             .collect();
-        assert_eq!(bad_news_at_source.len(), 1, "requeue 上限で failed になったら bad_news は 1 件だけ: {reports:?}");
+        assert_eq!(
+            bad_news_at_source.len(),
+            1,
+            "requeue 上限で failed になったら bad_news は 1 件だけ: {reports:?}"
+        );
     }
 
     /// worker が返す `retryable: true` の `error` を毎回返すアダプタ(供給側失敗ではなく、ワーカー自身の申告)。
@@ -5739,10 +6936,19 @@ mod tests {
         fn id(&self) -> &str {
             "instant"
         }
-        async fn run(&self, _req: RunRequest, _run_id: &str, _limits: RunLimits, sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+        async fn run(
+            &self,
+            _req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
             sink.progress("working");
             Ok(RunOutcome {
-                terminal: Terminal::Error { message: "flaky".into(), retryable: true },
+                terminal: Terminal::Error {
+                    message: "flaky".into(),
+                    retryable: true,
+                },
                 exit_code: Some(1),
             })
         }
@@ -5756,7 +6962,14 @@ mod tests {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_org_for_reports(&store);
         // max_retries は大きめに取り、3 回失敗するまでの間は確実に `ready` に戻るだけにする。
-        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 50);
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            50,
+        );
         task.assignee = Some("coding-poc".into());
         task.project_id = Some(ProjectId::new());
         store.insert(&task).unwrap();
@@ -5773,11 +6986,22 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let t = store.get(task.id).unwrap().unwrap();
-        assert!(t.attempts >= 3, "少なくとも 3 回は retryable な失敗を経たはず: attempts={}", t.attempts);
-        assert_ne!(t.status, Status::Failed, "max_retries=50 なのでまだ failed にならない");
+        assert!(
+            t.attempts >= 3,
+            "少なくとも 3 回は retryable な失敗を経たはず: attempts={}",
+            t.attempts
+        );
+        assert_ne!(
+            t.status,
+            Status::Failed,
+            "max_retries=50 なのでまだ failed にならない"
+        );
         let reports = store.report_list(&ReportFilter::default()).unwrap();
         assert_eq!(
-            reports.iter().filter(|r| r.kind == ReportKind::BadNews).count(),
+            reports
+                .iter()
+                .filter(|r| r.kind == ReportKind::BadNews)
+                .count(),
             0,
             "途中の retryable な失敗では bad_news を作らない: {reports:?}"
         );
@@ -5790,7 +7014,10 @@ mod tests {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         let task = new_task(dir.path(), Check::Reviewer, 0);
         store.insert(&task).unwrap();
-        let adapter = Arc::new(AlwaysThrottledAdapter { calls: AtomicUsize::new(0), review_only: true });
+        let adapter = Arc::new(AlwaysThrottledAdapter {
+            calls: AtomicUsize::new(0),
+            review_only: true,
+        });
         let mut d = dispatcher(store.clone(), adapter.clone(), 2);
         d.config.max_requeues = 2;
         let report = run_until_idle(&mut d, 500).await;
@@ -5816,24 +7043,48 @@ mod tests {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         let mut unroutable = Vec::new();
         for _ in 0..25 {
-            let mut t = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+            let mut t = new_task(
+                dir.path(),
+                Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
+                0,
+            );
             t.priority = 10;
             t.worker_hint.adapter = Some("nonexistent".into());
             store.insert(&t).unwrap();
             unroutable.push(t.id);
         }
-        let routable = new_task(dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let routable = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&routable).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 1);
         let first = d.tick().unwrap();
-        assert!(!first.idle, "a routable task is still waiting beyond the window");
+        assert!(
+            !first.idle,
+            "a routable task is still waiting beyond the window"
+        );
         let report = run_until_idle(&mut d, 200).await;
         assert!(report.idle);
-        assert_eq!(store.get(routable.id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(
+            store.get(routable.id).unwrap().unwrap().status,
+            Status::Done
+        );
         for id in unroutable {
             assert_eq!(store.get(id).unwrap().unwrap().status, Status::Ready);
         }
@@ -5849,16 +7100,37 @@ mod tests {
         // 同じクラスタを指すリモートのタスク 2 件と、ローカルのタスク 1 件。
         let mut remote_ids = Vec::new();
         for _ in 0..2 {
-            let mut t = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
-            t.workspace = WorkspaceSpec::Remote { cluster: "slow".into(), path: dir.path().to_path_buf() };
+            let mut t = new_task(
+                dir.path(),
+                Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
+                0,
+            );
+            t.workspace = WorkspaceSpec::Remote {
+                cluster: "slow".into(),
+                path: dir.path().to_path_buf(),
+            };
             store.insert(&t).unwrap();
             remote_ids.push(t.id);
         }
-        let local = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let local = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&local).unwrap();
 
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::from_millis(400),
         });
         let mut d = dispatcher(store.clone(), adapter, 3);
@@ -5893,7 +7165,11 @@ mod tests {
             .filter(|id| store.get(**id).unwrap().unwrap().status == Status::Running)
             .count();
         assert_eq!(running_remote, 1, "クラスタの上限 1 を超えない");
-        assert_eq!(store.get(local.id).unwrap().unwrap().status, Status::Running, "ローカルはクラスタの枠を使わない");
+        assert_eq!(
+            store.get(local.id).unwrap().unwrap().status,
+            Status::Running,
+            "ローカルはクラスタの枠を使わない"
+        );
 
         let report = run_until_idle(&mut d, 400).await;
         assert!(report.idle);
@@ -5914,11 +7190,25 @@ mod tests {
     async fn offline_cluster_is_reported_in_the_snapshot_and_the_event_carries_the_host() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
-        task.workspace = WorkspaceSpec::Remote { cluster: "offline".into(), path: PathBuf::from("/remote/project") };
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "offline".into(),
+            path: PathBuf::from("/remote/project"),
+        };
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 1);
@@ -5950,18 +7240,34 @@ mod tests {
 
         let report = d.tick().unwrap();
         assert_eq!(report.dispatched, 0);
-        assert!(report.idle, "a task waiting for a human login does not keep the daemon from going idle");
+        assert!(
+            report.idle,
+            "a task waiting for a human login does not keep the daemon from going idle"
+        );
 
         let snap = rx.borrow().clone().expect("snapshot published");
         assert_eq!(snap.clusters.len(), 1, "{snap:?}");
         let live = &snap.clusters[0];
         assert_eq!(
-            (live.id.as_str(), live.host.as_str(), live.concurrency, live.in_use, live.connected),
+            (
+                live.id.as_str(),
+                live.host.as_str(),
+                live.concurrency,
+                live.in_use,
+                live.connected
+            ),
             ("offline", "celeris-no-such-host-for-tests", 1, 0, false)
         );
         let until = live.cooldown_until.clone().expect("cooldown_until");
-        assert!(until > snap.last_tick_at, "cooldown ends after the tick: {until} vs {}", snap.last_tick_at);
-        assert!(!snap.unroutable.contains(&task.id), "人待ちは経路なしではない（監査 4-1）: {snap:?}");
+        assert!(
+            until > snap.last_tick_at,
+            "cooldown ends after the tick: {until} vs {}",
+            snap.last_tick_at
+        );
+        assert!(
+            !snap.unroutable.contains(&task.id),
+            "人待ちは経路なしではない（監査 4-1）: {snap:?}"
+        );
         assert!(d.cluster_waiting.contains(&task.id));
 
         let t = store.get(task.id).unwrap().unwrap();
@@ -5978,7 +7284,10 @@ mod tests {
         d.tick().unwrap();
         let again = store.events_for(task.id).unwrap();
         assert_eq!(
-            again.iter().filter(|(_, e)| matches!(e, Event::ClusterUnavailable { .. })).count(),
+            again
+                .iter()
+                .filter(|(_, e)| matches!(e, Event::ClusterUnavailable { .. }))
+                .count(),
             1,
             "{again:?}"
         );
@@ -6006,22 +7315,43 @@ mod tests {
     async fn publickey_cluster_auto_connects_and_dispatch_continues_on_success() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
-        task.workspace = WorkspaceSpec::Remote { cluster: "auto".into(), path: PathBuf::from("/remote/project") };
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "auto".into(),
+            path: PathBuf::from("/remote/project"),
+        };
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 1);
         d.config.clusters.insert(
             "auto".into(),
-            cluster_spec_with_auth("auto", "celeris-no-such-host-for-tests-auto-ok", "publickey"),
+            cluster_spec_with_auth(
+                "auto",
+                "celeris-no-such-host-for-tests-auto-ok",
+                "publickey",
+            ),
         );
         let calls: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
         let calls_for_hook = calls.clone();
         d.set_cluster_connector(Arc::new(move |id: &str, host: &str| {
-            calls_for_hook.lock().unwrap().push((id.to_string(), host.to_string()));
+            calls_for_hook
+                .lock()
+                .unwrap()
+                .push((id.to_string(), host.to_string()));
             Ok(())
         }));
 
@@ -6029,13 +7359,21 @@ mod tests {
         assert_eq!(report.dispatched, 1, "{report:?}");
         assert_eq!(
             *calls.lock().unwrap(),
-            vec![("auto".to_string(), "celeris-no-such-host-for-tests-auto-ok".to_string())]
+            vec![(
+                "auto".to_string(),
+                "celeris-no-such-host-for-tests-auto-ok".to_string()
+            )]
         );
         assert_eq!(d.cluster_connected.get("auto"), Some(&true));
-        assert!(!d.cluster_cooldown.contains_key("auto"), "success does not cool the cluster down");
+        assert!(
+            !d.cluster_cooldown.contains_key("auto"),
+            "success does not cool the cluster down"
+        );
         let events = store.events_for(task.id).unwrap();
         assert!(
-            !events.iter().any(|(_, e)| matches!(e, Event::ClusterUnavailable { .. })),
+            !events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ClusterUnavailable { .. })),
             "no ClusterUnavailable when the auto-connect succeeded: {events:?}"
         );
     }
@@ -6047,17 +7385,35 @@ mod tests {
     async fn publickey_cluster_auto_connect_failure_gets_a_distinguishable_reason() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
-        task.workspace = WorkspaceSpec::Remote { cluster: "auto".into(), path: PathBuf::from("/remote/project") };
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "auto".into(),
+            path: PathBuf::from("/remote/project"),
+        };
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 1);
         d.config.clusters.insert(
             "auto".into(),
-            cluster_spec_with_auth("auto", "celeris-no-such-host-for-tests-auto-fail", "publickey"),
+            cluster_spec_with_auth(
+                "auto",
+                "celeris-no-such-host-for-tests-auto-fail",
+                "publickey",
+            ),
         );
         let call_count = Arc::new(StdMutex::new(0u32));
         let call_count_for_hook = call_count.clone();
@@ -6092,11 +7448,25 @@ mod tests {
         for auth in ["manual", "totp"] {
             let dir = tempfile::tempdir().unwrap();
             let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-            let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
-            task.workspace = WorkspaceSpec::Remote { cluster: "auto".into(), path: PathBuf::from("/remote/project") };
+            let mut task = new_task(
+                dir.path(),
+                Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
+                0,
+            );
+            task.workspace = WorkspaceSpec::Remote {
+                cluster: "auto".into(),
+                path: PathBuf::from("/remote/project"),
+            };
             store.insert(&task).unwrap();
             let adapter = Arc::new(InstantAdapter {
-                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
                 delay: Duration::ZERO,
             });
             let mut d = dispatcher(store.clone(), adapter, 1);
@@ -6113,7 +7483,11 @@ mod tests {
 
             let report = d.tick().unwrap();
             assert_eq!(report.dispatched, 0, "{auth}: {report:?}");
-            assert_eq!(*call_count.lock().unwrap(), 0, "{auth}: hook must not run for auth={auth:?}");
+            assert_eq!(
+                *call_count.lock().unwrap(),
+                0,
+                "{auth}: hook must not run for auth={auth:?}"
+            );
             let events = store.events_for(task.id).unwrap();
             let reason = events
                 .iter()
@@ -6132,7 +7506,11 @@ mod tests {
     async fn cluster_live_carries_auth_and_connect_pending() {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store, adapter, 1);
@@ -6153,19 +7531,34 @@ mod tests {
 
         d.tick().unwrap();
         let snap = rx.borrow().clone().expect("snapshot published");
-        let live = snap.clusters.iter().find(|c| c.id == "fern03").expect("fern03 in snapshot");
-        assert_eq!((live.auth.as_str(), live.connect_pending), ("publickey", false));
+        let live = snap
+            .clusters
+            .iter()
+            .find(|c| c.id == "fern03")
+            .expect("fern03 in snapshot");
+        assert_eq!(
+            (live.auth.as_str(), live.connect_pending),
+            ("publickey", false)
+        );
 
         d.set_cluster_connect_pending("fern03", true);
         d.tick().unwrap();
         let snap = rx.borrow().clone().expect("snapshot published");
-        let live = snap.clusters.iter().find(|c| c.id == "fern03").expect("fern03 in snapshot");
+        let live = snap
+            .clusters
+            .iter()
+            .find(|c| c.id == "fern03")
+            .expect("fern03 in snapshot");
         assert!(live.connect_pending, "connect_pending set");
 
         d.set_cluster_connect_pending("fern03", false);
         d.tick().unwrap();
         let snap = rx.borrow().clone().expect("snapshot published");
-        let live = snap.clusters.iter().find(|c| c.id == "fern03").expect("fern03 in snapshot");
+        let live = snap
+            .clusters
+            .iter()
+            .find(|c| c.id == "fern03")
+            .expect("fern03 in snapshot");
         assert!(!live.connect_pending, "connect_pending cleared");
     }
 
@@ -6178,7 +7571,11 @@ mod tests {
         }
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store, adapter, 1);
@@ -6197,19 +7594,32 @@ mod tests {
                 auth: "manual".into(),
             },
         );
-        d.cluster_cooldown.insert("local".into(), Instant::now() + Duration::from_secs(3600));
+        d.cluster_cooldown
+            .insert("local".into(), Instant::now() + Duration::from_secs(3600));
         d.refresh_cluster_liveness();
         assert_eq!(d.cluster_connected.get("local"), Some(&true));
-        assert!(!d.cluster_cooldown.contains_key("local"), "cooldown is cleared when the connection is back");
+        assert!(
+            !d.cluster_cooldown.contains_key("local"),
+            "cooldown is cleared when the connection is back"
+        );
 
         // ADR-0023 D1: 5 秒以内の 2 回目は `ssh -O check` を回さず、前回の結果をそのまま使う。
         d.cluster_connected.insert("local".into(), false);
         d.refresh_cluster_liveness();
-        assert_eq!(d.cluster_connected.get("local"), Some(&false), "間引いた回は確認し直さない");
+        assert_eq!(
+            d.cluster_connected.get("local"),
+            Some(&false),
+            "間引いた回は確認し直さない"
+        );
         // 前回の確認を古くすると、次の呼び出しで確認し直す。
-        d.last_cluster_liveness = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.last_cluster_liveness =
+            Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
         d.refresh_cluster_liveness();
-        assert_eq!(d.cluster_connected.get("local"), Some(&true), "間隔を過ぎたら確認し直す");
+        assert_eq!(
+            d.cluster_connected.get("local"),
+            Some(&true),
+            "間隔を過ぎたら確認し直す"
+        );
     }
 
     /// ADR-0013 D4: tick の最後にメモリ上のスナップショットが `watch` に送られる（実行中の run、プロバイダの使用数、cooldown）。
@@ -6217,10 +7627,21 @@ mod tests {
     async fn tick_publishes_daemon_snapshot_to_watch() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::from_millis(300),
         });
         let mut d = dispatcher(store.clone(), adapter, 1);
@@ -6244,11 +7665,17 @@ mod tests {
             }],
             provider_checks: Default::default(),
         });
-        assert!(rx.borrow().is_none(), "nothing is published before the first tick");
+        assert!(
+            rx.borrow().is_none(),
+            "nothing is published before the first tick"
+        );
 
         d.tick().unwrap();
         let snap = rx.borrow().clone().expect("snapshot after the first tick");
-        assert_eq!((snap.ticks, snap.instance_id.as_str(), snap.tick_ms), (1, "inst-1", 50));
+        assert_eq!(
+            (snap.ticks, snap.instance_id.as_str(), snap.tick_ms),
+            (1, "inst-1", 50)
+        );
         assert_eq!(snap.pid, std::process::id());
         assert_eq!(snap.in_flight.len(), 1);
         assert_eq!(snap.in_flight[0].task_id, task.id);
@@ -6257,7 +7684,12 @@ mod tests {
         assert_eq!(snap.providers[0].in_use, 1);
         assert!(snap.cooldowns.is_empty());
 
-        d.policy.report("p1".into(), &ProviderOutcome::Throttled { retry_after: Duration::from_secs(60) });
+        d.policy.report(
+            "p1".into(),
+            &ProviderOutcome::Throttled {
+                retry_after: Duration::from_secs(60),
+            },
+        );
         let report = run_until_idle(&mut d, 200).await;
         assert!(report.idle);
         let snap = rx.borrow().clone().unwrap();
@@ -6265,17 +7697,37 @@ mod tests {
         assert!(snap.in_flight.is_empty());
         assert_eq!(snap.providers[0].in_use, 0);
         assert_eq!(snap.cooldowns.len(), 1);
-        assert_eq!((snap.cooldowns[0].provider.as_str(), snap.cooldowns[0].reason.as_str()), ("p1", "throttled"));
-        assert!(snap.cooldowns[0].until > snap.last_tick_at, "until is in the future");
+        assert_eq!(
+            (
+                snap.cooldowns[0].provider.as_str(),
+                snap.cooldowns[0].reason.as_str()
+            ),
+            ("p1", "throttled")
+        );
+        assert!(
+            snap.cooldowns[0].until > snap.last_tick_at,
+            "until is in the future"
+        );
 
         // ADR-0022 D2: 疎通確認の結果はスナップショットにだけ載る（DB には書かない）。
         assert!(snap.providers[0].last_check.is_none(), "確認する前は空");
-        d.set_provider_check("p1", ProviderCheckView { at: "2026-09-16T02:00:00Z".into(), result: "ok".into(), detail: None });
+        d.set_provider_check(
+            "p1",
+            ProviderCheckView {
+                at: "2026-09-16T02:00:00Z".into(),
+                result: "ok".into(),
+                detail: None,
+            },
+        );
         d.tick().unwrap();
         let snap = rx.borrow().clone().unwrap();
         assert_eq!(
             snap.providers[0].last_check,
-            Some(ProviderCheckView { at: "2026-09-16T02:00:00Z".into(), result: "ok".into(), detail: None })
+            Some(ProviderCheckView {
+                at: "2026-09-16T02:00:00Z".into(),
+                result: "ok".into(),
+                detail: None
+            })
         );
 
         // reload でプロバイダ表を差し替えても、残った id の記録は保つ。消えた id の記録は落とす。
@@ -6305,8 +7757,18 @@ mod tests {
         ]);
         d.tick().unwrap();
         let snap = rx.borrow().clone().unwrap();
-        assert_eq!(snap.providers[0].last_check.as_ref().map(|c| c.result.as_str()), Some("ok"), "p1 の記録は残る");
-        assert!(snap.providers[1].last_check.is_none(), "p2 はまだ確認していない");
+        assert_eq!(
+            snap.providers[0]
+                .last_check
+                .as_ref()
+                .map(|c| c.result.as_str()),
+            Some("ok"),
+            "p1 の記録は残る"
+        );
+        assert!(
+            snap.providers[1].last_check.is_none(),
+            "p2 はまだ確認していない"
+        );
 
         d.set_snapshot_providers(vec![ProviderLive {
             id: "p2".into(),
@@ -6322,7 +7784,10 @@ mod tests {
         d.tick().unwrap();
         let snap = rx.borrow().clone().unwrap();
         assert_eq!(snap.providers.len(), 1);
-        assert!(snap.providers[0].last_check.is_none(), "消えた p1 の記録は残さない");
+        assert!(
+            snap.providers[0].last_check.is_none(),
+            "消えた p1 の記録は残さない"
+        );
     }
 
     /// `task_id` の直接の `Approval` 子タスクが現れるまで tick を回す（Human check の生成を待つ）。
@@ -6349,7 +7814,11 @@ mod tests {
         ) -> Result<RunOutcome, AdapterError> {
             let done = |summary: &str| {
                 Ok(RunOutcome {
-                    terminal: Terminal::Done { summary: summary.into(), evidence: vec![], usage: None },
+                    terminal: Terminal::Done {
+                        summary: summary.into(),
+                        evidence: vec![],
+                        usage: None,
+                    },
                     exit_code: Some(0),
                 })
             };
@@ -6360,7 +7829,8 @@ mod tests {
             }
             *self.seen_role.lock().unwrap() = req.context.role.clone();
             if !req.context.children.is_empty() {
-                self.aggregate_children.store(req.context.children.len(), Ordering::SeqCst);
+                self.aggregate_children
+                    .store(req.context.children.len(), Ordering::SeqCst);
                 if self.write_summary {
                     std::fs::create_dir_all(&req.artifacts_dir).unwrap();
                     std::fs::write(req.artifacts_dir.join("summary.md"), "# summary\n").unwrap();
@@ -6376,7 +7846,13 @@ mod tests {
         DelegateTask {
             title: title.into(),
             objective: format!("do {title}"),
-            acceptance: vec![Criterion { text: "c".into(), check: Check::Command { cmd: "true".into(), expect_exit: 0 } }],
+            acceptance: vec![Criterion {
+                text: "c".into(),
+                check: Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
+            }],
             role: Some("implementer".into()),
             genre: None,
             depends_on: deps,
@@ -6393,7 +7869,11 @@ mod tests {
                 instructions: Some("You lead; delegate implementation.".into()),
                 ..RoleSpec::default()
             },
-            RoleSpec { id: "implementer".into(), tier: Some(Tier::Cheap), ..RoleSpec::default() },
+            RoleSpec {
+                id: "implementer".into(),
+                tier: Some(Tier::Cheap),
+                ..RoleSpec::default()
+            },
         ]
     }
 
@@ -6415,7 +7895,14 @@ mod tests {
     async fn delegate_inserts_validated_children_and_aggregate_parent_runs_once_more() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 1);
+        let mut parent = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
         parent.role = Some("lead".into());
         parent.aggregate = true;
         store.insert(&parent).unwrap();
@@ -6426,7 +7913,10 @@ mod tests {
                 proposal("a", vec![]),
                 proposal("b", vec![task_core::DelegateDep::Index(0)]),
                 bad_title,
-                proposal("self", vec![task_core::DelegateDep::Id(parent.id.to_string())]),
+                proposal(
+                    "self",
+                    vec![task_core::DelegateDep::Id(parent.id.to_string())],
+                ),
             ],
             child_delay: Duration::from_millis(30),
             seen_role: std::sync::Mutex::new(None),
@@ -6439,15 +7929,28 @@ mod tests {
         assert!(report.idle);
 
         let p = store.get(parent.id).unwrap().unwrap();
-        assert_eq!(p.status, Status::Done, "{:?}", store.events_for(parent.id).unwrap());
+        assert_eq!(
+            p.status,
+            Status::Done,
+            "{:?}",
+            store.events_for(parent.id).unwrap()
+        );
         assert_eq!(p.attempts, 0, "aggregate does not consume attempts");
         let children = store.children(parent.id).unwrap();
-        assert_eq!(children.len(), 2, "only the two valid proposals were inserted");
+        assert_eq!(
+            children.len(),
+            2,
+            "only the two valid proposals were inserted"
+        );
         assert_eq!(children[0].title, "a");
         assert_eq!(children[1].title, "b");
         assert_eq!(children[1].depends_on, vec![children[0].id]);
         assert_eq!(children[0].role.as_deref(), Some("implementer"));
-        assert_eq!(children[0].worker_hint.tier, Tier::Cheap, "role default applied to the child");
+        assert_eq!(
+            children[0].worker_hint.tier,
+            Tier::Cheap,
+            "role default applied to the child"
+        );
         for c in &children {
             assert_eq!(store.get(c.id).unwrap().unwrap().status, Status::Done);
         }
@@ -6462,26 +7965,62 @@ mod tests {
             .collect();
         assert_eq!(delegated, vec![vec![children[0].id, children[1].id]]);
         let msgs = progress_msgs(&store, parent.id);
-        assert!(msgs.iter().any(|m| m.starts_with("delegate rejected: tasks[2]") && m.contains("title")), "{msgs:?}");
-        assert!(msgs.iter().any(|m| m.starts_with("delegate rejected: tasks[3]") && m.contains("delegating task itself")), "{msgs:?}");
-        assert!(msgs.iter().any(|m| m.starts_with("waiting for ") && m.contains("delegated child task")), "{msgs:?}");
+        assert!(
+            msgs.iter()
+                .any(|m| m.starts_with("delegate rejected: tasks[2]") && m.contains("title")),
+            "{msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.starts_with("delegate rejected: tasks[3]")
+                    && m.contains("delegating task itself")),
+            "{msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.starts_with("waiting for ") && m.contains("delegated child task")),
+            "{msgs:?}"
+        );
         assert_eq!(
             transition_reasons(&store, parent.id),
-            vec!["dispatch", "worker_done", "aggregate", "dispatch", "worker_done", "review_pass"]
+            vec![
+                "dispatch",
+                "worker_done",
+                "aggregate",
+                "dispatch",
+                "worker_done",
+                "review_pass"
+            ]
         );
         // 親の run は 2 回（最初 + 集約）。役割名が WorkerStarted に残り、指示文が RunContext に載る。
         let started: Vec<Option<String>> = events
             .iter()
             .filter_map(|(_, e)| match e {
-                Event::WorkerStarted { role: None, task_role, .. } => Some(task_role.clone()),
+                Event::WorkerStarted {
+                    role: None,
+                    task_role,
+                    ..
+                } => Some(task_role.clone()),
                 _ => None,
             })
             .collect();
-        assert_eq!(started, vec![Some("lead".to_string()), Some("lead".to_string())]);
-        let role = adapter.seen_role.lock().unwrap().clone().expect("role context");
+        assert_eq!(
+            started,
+            vec![Some("lead".to_string()), Some("lead".to_string())]
+        );
+        let role = adapter
+            .seen_role
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("role context");
         assert_eq!(role.id, "lead");
         assert_eq!(role.instructions, "You lead; delegate implementation.");
-        assert_eq!(adapter.aggregate_children.load(Ordering::SeqCst), 2, "aggregate run saw both children");
+        assert_eq!(
+            adapter.aggregate_children.load(Ordering::SeqCst),
+            2,
+            "aggregate run saw both children"
+        );
         // 集約 run のレビューには暗黙の summary.md 条件（idx = acceptance.len()）が入る。
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { criterion_idx: 1, pass: true, reason, .. } if reason.contains("summary.md"))), "{events:?}");
     }
@@ -6507,14 +8046,19 @@ mod tests {
         ) -> Result<RunOutcome, AdapterError> {
             let done = |summary: &str| {
                 Ok(RunOutcome {
-                    terminal: Terminal::Done { summary: summary.into(), evidence: vec![], usage: None },
+                    terminal: Terminal::Done {
+                        summary: summary.into(),
+                        evidence: vec![],
+                        usage: None,
+                    },
                     exit_code: Some(0),
                 })
             };
             if req.task.role.as_deref() == Some("literature-reader") {
                 return done("child");
             }
-            *self.seen_available_genres.lock().unwrap() = Some(req.context.available_genres.clone());
+            *self.seen_available_genres.lock().unwrap() =
+                Some(req.context.available_genres.clone());
             sink.delegate(std::slice::from_ref(&self.proposal));
             done("delegated")
         }
@@ -6524,7 +8068,14 @@ mod tests {
     async fn delegate_can_select_a_different_genre_and_available_genres_reach_the_prompt_context() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut parent = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         parent.role = Some("lead".into());
         parent.genre = Some("coding".into());
         store.insert(&parent).unwrap();
@@ -6538,8 +8089,14 @@ mod tests {
         });
         let mut d = dispatcher(store.clone(), adapter.clone(), 4);
         d.config.roles = vec![
-            RoleSpec { id: "lead".into(), ..RoleSpec::default() },
-            RoleSpec { id: "literature-reader".into(), ..RoleSpec::default() },
+            RoleSpec {
+                id: "lead".into(),
+                ..RoleSpec::default()
+            },
+            RoleSpec {
+                id: "literature-reader".into(),
+                ..RoleSpec::default()
+            },
         ];
         d.config.genres = vec![
             task_core::GenreSpec {
@@ -6561,13 +8118,27 @@ mod tests {
         assert!(report.idle);
 
         let p = store.get(parent.id).unwrap().unwrap();
-        assert_eq!(p.status, Status::Done, "{:?}", store.events_for(parent.id).unwrap());
+        assert_eq!(
+            p.status,
+            Status::Done,
+            "{:?}",
+            store.events_for(parent.id).unwrap()
+        );
         let children = store.children(parent.id).unwrap();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].role.as_deref(), Some("literature-reader"));
-        assert_eq!(children[0].genre.as_deref(), Some("literature"), "explicit genre wins");
+        assert_eq!(
+            children[0].genre.as_deref(),
+            Some("literature"),
+            "explicit genre wins"
+        );
 
-        let available = adapter.seen_available_genres.lock().unwrap().clone().expect("available_genres seen");
+        let available = adapter
+            .seen_available_genres
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("available_genres seen");
         let ids: Vec<&str> = available.iter().map(|g| g.id.as_str()).collect();
         assert!(ids.contains(&"coding"), "{ids:?}");
         assert!(ids.contains(&"literature"), "{ids:?}");
@@ -6593,7 +8164,11 @@ mod tests {
             ..task_core::GenreSpec::default()
         }];
         let extras = d.run_extras(&plan, None).unwrap();
-        let ids: Vec<&str> = extras.available_genres.iter().map(|g| g.id.as_str()).collect();
+        let ids: Vec<&str> = extras
+            .available_genres
+            .iter()
+            .map(|g| g.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["coding"]);
 
         // 分野が無い設定では空のまま。
@@ -6633,17 +8208,25 @@ mod tests {
         }];
 
         let extras = d.run_extras(&plan_parent, None).unwrap();
-        assert_eq!(extras.available_genres[0].harness.as_deref(), Some("paperqa"));
+        assert_eq!(
+            extras.available_genres[0].harness.as_deref(),
+            Some("paperqa")
+        );
         assert!(extras.available_genres[0].is_harness());
 
         let mut plan = task_core::PlanOutput {
             tasks: vec![task_core::NewTask {
+                harness: None,
+                mode: Default::default(),
+                skills: Vec::new(),
                 repos: Vec::new(),
                 title: "候補テーマの抽出".into(),
                 objective: "候補テーマを candidates.json にまとめよ".into(),
                 acceptance: vec![Criterion {
                     text: "candidates.json に候補テーマがある".into(),
-                    check: Check::ArtifactExists { name: "candidates.json".into() },
+                    check: Check::ArtifactExists {
+                        name: "candidates.json".into(),
+                    },
                 }],
                 depends_on: vec![],
                 kind: task_core::NewTaskKind::Execute,
@@ -6657,7 +8240,11 @@ mod tests {
             }],
         };
         d.fix_plan_for_harness(&plan_parent, &mut plan, &[]);
-        assert_eq!(plan.tasks[0].acceptance[0].check, Check::Reviewer, "落とすと 0 件になるので内容はレビュアーが見る");
+        assert_eq!(
+            plan.tasks[0].acceptance[0].check,
+            Check::Reviewer,
+            "落とすと 0 件になるので内容はレビュアーが見る"
+        );
         assert!(
             plan.tasks[0].objective.ends_with(
                 "（注: この担当の成果物は answer.md / papers.json に固定。要求した内容は answer.md の中で述べる）"
@@ -6672,7 +8259,14 @@ mod tests {
     async fn non_aggregate_parent_stays_reviewing_until_children_finish_then_completes() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let parent = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&parent).unwrap();
         let adapter = Arc::new(DelegatingAdapter {
             proposals: vec![proposal("slow", vec![])],
@@ -6698,8 +8292,15 @@ mod tests {
         for _ in 0..200 {
             let r = d.tick().unwrap();
             let p = store.get(parent.id).unwrap().unwrap();
-            let child_running = store.children(parent.id).unwrap().iter().any(|c| c.status == Status::Running);
-            if p.status == Status::Reviewing && child_running && d.awaiting_children.contains_key(&parent.id) {
+            let child_running = store
+                .children(parent.id)
+                .unwrap()
+                .iter()
+                .any(|c| c.status == Status::Running);
+            if p.status == Status::Reviewing
+                && child_running
+                && d.awaiting_children.contains_key(&parent.id)
+            {
                 observed_waiting = true;
                 break;
             }
@@ -6708,7 +8309,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(observed_waiting, "parent should be reviewing while its delegated child runs");
+        assert!(
+            observed_waiting,
+            "parent should be reviewing while its delegated child runs"
+        );
         assert_eq!(
             rx.borrow().as_ref().map(|s| s.awaiting_children.clone()),
             Some(vec![parent.id]),
@@ -6723,28 +8327,59 @@ mod tests {
             Some(vec![]),
             "子が終われば待ちも消える"
         );
-        assert_eq!(transition_reasons(&store, parent.id), vec!["dispatch", "worker_done", "review_pass"]);
+        assert_eq!(
+            transition_reasons(&store, parent.id),
+            vec!["dispatch", "worker_done", "review_pass"]
+        );
         let events = store.events_for(parent.id).unwrap();
-        assert_eq!(events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. })).count(), 1);
-        assert!(events.iter().any(|(_, e)| matches!(e, Event::Delegated { .. })));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. }))
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::Delegated { .. }))
+        );
     }
 
     /// 受け入れ 2: 上限（1 run の件数・木の深さ・木の run 数）を超える提案は拒否され、理由が WorkerProgress に残り、親は失敗しない。
     #[tokio::test]
     async fn delegation_limits_reject_with_reasons_and_do_not_fail_the_run() {
-        async fn run_with(limits: DelegationLimits, proposals: Vec<DelegateTask>, depth: u32) -> (Vec<String>, usize, Status) {
+        async fn run_with(
+            limits: DelegationLimits,
+            proposals: Vec<DelegateTask>,
+            depth: u32,
+        ) -> (Vec<String>, usize, Status) {
             let dir = tempfile::tempdir().unwrap();
             let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
             // depth 個の祖先の下に親を置く（根 = 深さ 1）。
             let mut ancestor: Option<TaskId> = None;
             for _ in 1..depth {
-                let mut a = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+                let mut a = new_task(
+                    dir.path(),
+                    Check::Command {
+                        cmd: "true".into(),
+                        expect_exit: 0,
+                    },
+                    0,
+                );
                 a.parent_id = ancestor;
                 a.status = Status::Done;
                 store.insert(&a).unwrap();
                 ancestor = Some(a.id);
             }
-            let mut parent = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+            let mut parent = new_task(
+                dir.path(),
+                Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
+                0,
+            );
             parent.parent_id = ancestor;
             store.insert(&parent).unwrap();
             let adapter = Arc::new(DelegatingAdapter {
@@ -6759,44 +8394,74 @@ mod tests {
             let report = run_until_idle(&mut d, 400).await;
             assert!(report.idle);
             let p = store.get(parent.id).unwrap().unwrap();
-            (progress_msgs(&store, parent.id), store.children(parent.id).unwrap().len(), p.status)
+            (
+                progress_msgs(&store, parent.id),
+                store.children(parent.id).unwrap().len(),
+                p.status,
+            )
         }
 
         // 1 run の件数: 2 件のうち 1 件だけ。
         let (msgs, n, status) = run_with(
-            DelegationLimits { max_delegate_per_run: 1, ..DelegationLimits::default() },
+            DelegationLimits {
+                max_delegate_per_run: 1,
+                ..DelegationLimits::default()
+            },
             vec![proposal("a", vec![]), proposal("b", vec![])],
             1,
         )
         .await;
         assert_eq!(n, 1, "{msgs:?}");
         assert_eq!(status, Status::Done);
-        assert!(msgs.iter().any(|m| m.contains("delegate rejected: tasks[1]") && m.contains("per-run delegation limit (1)")), "{msgs:?}");
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("delegate rejected: tasks[1]")
+                    && m.contains("per-run delegation limit (1)")),
+            "{msgs:?}"
+        );
 
         // 木の深さ: 深さ 2 の親は max_tree_depth = 2 で子を作れない。
         let (msgs, n, status) = run_with(
-            DelegationLimits { max_tree_depth: 2, ..DelegationLimits::default() },
+            DelegationLimits {
+                max_tree_depth: 2,
+                ..DelegationLimits::default()
+            },
             vec![proposal("a", vec![])],
             2,
         )
         .await;
         assert_eq!(n, 0, "{msgs:?}");
         assert_eq!(status, Status::Done);
-        assert!(msgs.iter().any(|m| m.contains("delegate rejected") && m.contains("tree depth would become 3 (max 2)")), "{msgs:?}");
+        assert!(
+            msgs.iter().any(|m| m.contains("delegate rejected")
+                && m.contains("tree depth would become 3 (max 2)")),
+            "{msgs:?}"
+        );
 
         // 木の run 数: 親自身の run が 1 回目なので max_tree_runs = 1 で拒否。
         let (msgs, n, status) = run_with(
-            DelegationLimits { max_tree_runs: 1, ..DelegationLimits::default() },
+            DelegationLimits {
+                max_tree_runs: 1,
+                ..DelegationLimits::default()
+            },
             vec![proposal("a", vec![])],
             1,
         )
         .await;
         assert_eq!(n, 0, "{msgs:?}");
         assert_eq!(status, Status::Done);
-        assert!(msgs.iter().any(|m| m.contains("delegate rejected") && m.contains("worker runs (max 1)")), "{msgs:?}");
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("delegate rejected") && m.contains("worker runs (max 1)")),
+            "{msgs:?}"
+        );
     }
 
-    async fn wait_for_approval_child(d: &mut Dispatcher, store: &Arc<dyn TaskStore>, task_id: TaskId) -> Task {
+    async fn wait_for_approval_child(
+        d: &mut Dispatcher,
+        store: &Arc<dyn TaskStore>,
+        task_id: TaskId,
+    ) -> Task {
         for _ in 0..100 {
             d.tick().unwrap();
             if let Some(child) = store
@@ -6833,7 +8498,13 @@ mod tests {
         fn id(&self) -> &str {
             "claude-code"
         }
-        async fn run(&self, req: RunRequest, _run_id: &str, _limits: RunLimits, sink: &dyn EventSink) -> Result<RunOutcome, AdapterError> {
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
             self.captured.lock().unwrap().push(self.env.clone());
             if let Some(obs) = self.observation.clone() {
                 sink.rate_limit(obs);
@@ -6844,14 +8515,22 @@ mod tests {
                 return Err(AdapterError::Spawn(std::io::Error::other("boom")));
             }
             match &self.terminal_or_throttled {
-                Ok(terminal) => Ok(RunOutcome { terminal: terminal.clone(), exit_code: Some(0) }),
-                Err(retry_after) => Err(AdapterError::Throttled { retry_after: *retry_after }),
+                Ok(terminal) => Ok(RunOutcome {
+                    terminal: terminal.clone(),
+                    exit_code: Some(0),
+                }),
+                Err(retry_after) => Err(AdapterError::Throttled {
+                    retry_after: *retry_after,
+                }),
             }
         }
         fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
             let mut env = self.env.clone();
             env.extend(extra.iter().cloned());
-            Some(Arc::new(PoolAdapter { env, ..self.clone() }))
+            Some(Arc::new(PoolAdapter {
+                env,
+                ..self.clone()
+            }))
         }
     }
 
@@ -6875,7 +8554,15 @@ mod tests {
         max_runs_per_account: usize,
         max_concurrency: usize,
     ) -> Dispatcher {
-        pool_dispatcher_with_requeues(store, adapter, second_provider, accounts_root, max_runs_per_account, max_concurrency, 5)
+        pool_dispatcher_with_requeues(
+            store,
+            adapter,
+            second_provider,
+            accounts_root,
+            max_runs_per_account,
+            max_concurrency,
+            5,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6908,7 +8595,8 @@ mod tests {
             adapters.insert(id.into(), a);
         }
         let policy = StaticPolicy::new(providers, Duration::from_secs(1));
-        let account_pool_providers: std::collections::HashSet<ProviderId> = ["p1".to_string()].into();
+        let account_pool_providers: std::collections::HashSet<ProviderId> =
+            ["p1".to_string()].into();
         Dispatcher::new(
             store,
             Box::new(policy),
@@ -6949,7 +8637,10 @@ mod tests {
 
     fn usage_window(utilization: f64, resets_at_secs_from_now: i64) -> RateLimitObservation {
         RateLimitObservation {
-            five_hour: Some(task_core::RateWindow { utilization, resets_at: 10_000 + resets_at_secs_from_now }),
+            five_hour: Some(task_core::RateWindow {
+                utilization,
+                resets_at: 10_000 + resets_at_secs_from_now,
+            }),
             seven_day: None,
             status: None,
             resets_at: None,
@@ -6972,12 +8663,23 @@ mod tests {
 
         let ws_dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(ws_dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let task = new_task(
+            ws_dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task).unwrap();
 
         let captured = Arc::new(StdMutex::new(Vec::new()));
         let adapter = Arc::new(PoolAdapter {
-            terminal_or_throttled: Ok(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }),
+            terminal_or_throttled: Ok(Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            }),
             delay: Duration::ZERO,
             observation: None,
             env: Vec::new(),
@@ -7004,7 +8706,10 @@ mod tests {
             .iter()
             .find(|(k, _)| k == "CLAUDE_SECURESTORAGE_CONFIG_DIR")
             .map(|(_, v)| v.clone());
-        assert_eq!(dir_value.as_deref(), Some(dir.path().join("b").to_string_lossy().as_ref()));
+        assert_eq!(
+            dir_value.as_deref(),
+            Some(dir.path().join("b").to_string_lossy().as_ref())
+        );
     }
 
     /// (b) 片方が throttled で終わると、そのアカウントだけが cooldown になり、次の run はもう片方に行く。
@@ -7016,7 +8721,14 @@ mod tests {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         // `max_requeues = 0` にして、1 回失敗したらすぐ通常の失敗（`max_retries = 0` で即 `failed`）にする。
         // そうしないと供給側失敗は requeue され続け、"a" だけでなく "b" も使い切って cooldown にしてしまう。
-        let task1 = new_task(ws_dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let task1 = new_task(
+            ws_dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task1).unwrap();
 
         let captured = Arc::new(StdMutex::new(Vec::new()));
@@ -7029,7 +8741,15 @@ mod tests {
             captured: captured.clone(),
             spawn_failure: false,
         });
-        let mut d = pool_dispatcher_with_requeues(store.clone(), adapter, None, dir.path().to_path_buf(), 1, 1, 0);
+        let mut d = pool_dispatcher_with_requeues(
+            store.clone(),
+            adapter,
+            None,
+            dir.path().to_path_buf(),
+            1,
+            1,
+            0,
+        );
         // 1 tick で dispatch → 完了まで待つ。
         for _ in 0..50 {
             d.tick().unwrap();
@@ -7053,15 +8773,29 @@ mod tests {
         // プロバイダ自体は cooldown にならない（ADR-0024 D4）。
         assert!(d.policy.cooldowns(Instant::now()).is_empty());
         // `ProviderThrottled` イベントは記録されない（アカウントの cooldown として扱われるため）。
-        assert!(!events.iter().any(|(_, e)| matches!(e, Event::ProviderThrottled { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ProviderThrottled { .. }))
+        );
 
         // 次に投入したタスクは、cooldown 中の "a" を避けて "b" に行く。
-        let task2 = new_task(ws_dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let task2 = new_task(
+            ws_dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task2).unwrap();
         for _ in 0..50 {
             d.tick().unwrap();
             let events2 = store.events_for(task2.id).unwrap();
-            if events2.iter().any(|(_, e)| matches!(e, Event::WorkerStarted { .. })) {
+            if events2
+                .iter()
+                .any(|(_, e)| matches!(e, Event::WorkerStarted { .. }))
+            {
                 let acct = events2.iter().find_map(|(_, e)| match e {
                     Event::WorkerStarted { account, .. } => account.clone(),
                     _ => None,
@@ -7081,19 +8815,38 @@ mod tests {
         let dir = accounts_fixture();
         let ws_dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(ws_dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let task = new_task(
+            ws_dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task).unwrap();
 
         let captured = Arc::new(StdMutex::new(Vec::new()));
         let adapter = Arc::new(PoolAdapter {
-            terminal_or_throttled: Ok(Terminal::Done { summary: "unused".into(), evidence: vec![], usage: None }),
+            terminal_or_throttled: Ok(Terminal::Done {
+                summary: "unused".into(),
+                evidence: vec![],
+                usage: None,
+            }),
             delay: Duration::ZERO,
             observation: None,
             env: Vec::new(),
             captured: captured.clone(),
             spawn_failure: true,
         });
-        let mut d = pool_dispatcher_with_requeues(store.clone(), adapter, None, dir.path().to_path_buf(), 1, 1, 0);
+        let mut d = pool_dispatcher_with_requeues(
+            store.clone(),
+            adapter,
+            None,
+            dir.path().to_path_buf(),
+            1,
+            1,
+            0,
+        );
         let (tx, mut rx) = tokio::sync::watch::channel(None);
         d.set_snapshot_publisher(SnapshotPublisher {
             tx,
@@ -7106,7 +8859,12 @@ mod tests {
         });
         for _ in 0..50 {
             d.tick().unwrap();
-            if store.events_for(task.id).unwrap().iter().any(|(_, e)| matches!(e, Event::WorkerFinished { .. })) {
+            if store
+                .events_for(task.id)
+                .unwrap()
+                .iter()
+                .any(|(_, e)| matches!(e, Event::WorkerFinished { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -7116,15 +8874,25 @@ mod tests {
             Event::WorkerStarted { account, .. } => account.clone(),
             _ => None,
         });
-        assert!(account.is_some(), "run should have used a pooled account: {events:?}");
+        assert!(
+            account.is_some(),
+            "run should have used a pooled account: {events:?}"
+        );
         // `ProviderThrottled` イベントが記録される（アカウントの cooldown としては扱わない）。
-        assert!(events.iter().any(|(_, e)| matches!(e, Event::ProviderThrottled { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ProviderThrottled { .. }))
+        );
 
         // プロバイダは cooldown になる。アカウント自体は cooldown にならない。
         d.tick().unwrap(); // もう 1 tick 回し、最新のスナップショットを送らせる。
         rx.changed().await.ok();
         let snapshot = rx.borrow().clone().unwrap();
-        assert!(!snapshot.cooldowns.is_empty(), "provider should be cooling down: {snapshot:?}");
+        assert!(
+            !snapshot.cooldowns.is_empty(),
+            "provider should be cooling down: {snapshot:?}"
+        );
         assert!(
             snapshot.accounts.iter().all(|a| a.cooldown.is_none()),
             "no account should be cooling down: {:?}",
@@ -7140,12 +8908,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws_dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(ws_dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let task = new_task(
+            ws_dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task).unwrap();
 
         let captured = Arc::new(StdMutex::new(Vec::new()));
         let pool_adapter = Arc::new(PoolAdapter {
-            terminal_or_throttled: Ok(Terminal::Done { summary: "should not run".into(), evidence: vec![], usage: None }),
+            terminal_or_throttled: Ok(Terminal::Done {
+                summary: "should not run".into(),
+                evidence: vec![],
+                usage: None,
+            }),
             delay: Duration::ZERO,
             observation: None,
             env: Vec::new(),
@@ -7153,7 +8932,11 @@ mod tests {
             spawn_failure: false,
         });
         let fallback_adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             delay: Duration::ZERO,
         });
         let mut d = pool_dispatcher(
@@ -7172,7 +8955,9 @@ mod tests {
         let (provider, account) = events
             .iter()
             .find_map(|(_, e)| match e {
-                Event::WorkerStarted { provider, account, .. } => Some((provider.clone(), account.clone())),
+                Event::WorkerStarted {
+                    provider, account, ..
+                } => Some((provider.clone(), account.clone())),
                 _ => None,
             })
             .unwrap();
@@ -7186,12 +8971,23 @@ mod tests {
         let dir = accounts_fixture();
         let ws_dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(ws_dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let task = new_task(
+            ws_dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task).unwrap();
 
         let captured = Arc::new(StdMutex::new(Vec::new()));
         let adapter = Arc::new(PoolAdapter {
-            terminal_or_throttled: Ok(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }),
+            terminal_or_throttled: Ok(Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            }),
             delay: Duration::from_millis(20),
             observation: Some(usage_window(0.42, 90_000)),
             env: Vec::new(),
@@ -7214,13 +9010,21 @@ mod tests {
         d.tick().unwrap(); // 完了後もう 1 tick 回し、最新のスナップショットを送らせる。
         rx.changed().await.ok();
         let snapshot = rx.borrow().clone().unwrap();
-        assert_eq!(snapshot.accounts_root.as_deref(), Some(dir.path().to_string_lossy().as_ref()));
+        assert_eq!(
+            snapshot.accounts_root.as_deref(),
+            Some(dir.path().to_string_lossy().as_ref())
+        );
         assert_eq!(snapshot.max_runs_per_account, Some(2));
         let a_or_b = snapshot
             .accounts
             .iter()
             .find(|a| a.usage.is_some())
-            .unwrap_or_else(|| panic!("no account carries the observation: {:?}", snapshot.accounts));
+            .unwrap_or_else(|| {
+                panic!(
+                    "no account carries the observation: {:?}",
+                    snapshot.accounts
+                )
+            });
         let usage = a_or_b.usage.as_ref().unwrap();
         assert_eq!(usage.five_hour.map(|w| w.utilization), Some(0.42));
         assert_eq!(usage.source, "run");
@@ -7232,12 +9036,23 @@ mod tests {
         let dir = accounts_fixture();
         let ws_dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = new_task(ws_dir.path(), Check::Command { cmd: "test -f touched".into(), expect_exit: 0 }, 0);
+        let task = new_task(
+            ws_dir.path(),
+            Check::Command {
+                cmd: "test -f touched".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&task).unwrap();
 
         let captured = Arc::new(StdMutex::new(Vec::new()));
         let adapter = Arc::new(PoolAdapter {
-            terminal_or_throttled: Ok(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }),
+            terminal_or_throttled: Ok(Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            }),
             delay: Duration::ZERO,
             observation: Some(usage_window(0.33, 90_000)),
             env: Vec::new(),
@@ -7252,14 +9067,25 @@ mod tests {
 
         // "celeris を再起動" = 新しい Dispatcher（同じ store・同じ accounts root）を作る。
         let never_used = Arc::new(PoolAdapter {
-            terminal_or_throttled: Ok(Terminal::Done { summary: "unused".into(), evidence: vec![], usage: None }),
+            terminal_or_throttled: Ok(Terminal::Done {
+                summary: "unused".into(),
+                evidence: vec![],
+                usage: None,
+            }),
             delay: Duration::ZERO,
             observation: None,
             env: Vec::new(),
             captured: Arc::new(StdMutex::new(Vec::new())),
             spawn_failure: false,
         });
-        let mut d2 = pool_dispatcher(store.clone(), never_used, None, dir.path().to_path_buf(), 2, 2);
+        let mut d2 = pool_dispatcher(
+            store.clone(),
+            never_used,
+            None,
+            dir.path().to_path_buf(),
+            2,
+            2,
+        );
         let (tx, mut rx) = tokio::sync::watch::channel(None);
         d2.set_snapshot_publisher(SnapshotPublisher {
             tx,
@@ -7274,7 +9100,11 @@ mod tests {
         rx.changed().await.ok();
         let snapshot = rx.borrow().clone().unwrap();
         let used_account = snapshot.accounts.iter().find(|a| a.usage.is_some());
-        let usage = used_account.expect("observation survives restart").usage.as_ref().unwrap();
+        let usage = used_account
+            .expect("observation survives restart")
+            .usage
+            .as_ref()
+            .unwrap();
         assert_eq!(usage.five_hour.map(|w| w.utilization), Some(0.33));
     }
 
@@ -7307,10 +9137,14 @@ mod tests {
                 std::fs::create_dir_all(&artifacts).unwrap();
                 std::fs::write(artifacts.join("result.json"), memory).unwrap();
             }
-            if !self.proposals.is_empty() && req.task.assignee.as_deref() == Some("research-survey") {
+            if !self.proposals.is_empty() && req.task.assignee.as_deref() == Some("research-survey")
+            {
                 sink.delegate(&self.proposals);
             }
-            Ok(RunOutcome { terminal: self.terminal.clone(), exit_code: Some(0) })
+            Ok(RunOutcome {
+                terminal: self.terminal.clone(),
+                exit_code: Some(0),
+            })
         }
     }
 
@@ -7326,6 +9160,7 @@ mod tests {
     fn org_node_of(id: &str, parent: Option<&str>, kind: OrgKind, genre: Option<&str>) -> OrgNode {
         let now = OffsetDateTime::now_utc();
         OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: format!("{id} 課"),
@@ -7382,7 +9217,10 @@ mod tests {
         DelegateTask {
             title: "任せたい仕事".into(),
             objective: "やっておいて".into(),
-            acceptance: vec![Criterion { text: "できた".into(), check: Check::Human }],
+            acceptance: vec![Criterion {
+                text: "できた".into(),
+                check: Check::Human,
+            }],
             role: None,
             genre: None,
             depends_on: vec![],
@@ -7408,7 +9246,10 @@ mod tests {
             .append(
                 "secretary",
                 None,
-                &task_worker::MemoryUpdate { notes: vec!["人は図より表が好き".into()], project: vec![] },
+                &task_worker::MemoryUpdate {
+                    notes: vec!["人は図より表が好き".into()],
+                    project: vec![],
+                },
                 "2026-09-10",
             )
             .unwrap();
@@ -7427,12 +9268,23 @@ mod tests {
 
         let seen = Arc::new(StdMutex::new(None));
         let adapter = Arc::new(PersonAdapter {
-            terminal: Terminal::Done { summary: "3 本の候補が出ています".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "3 本の候補が出ています".into(),
+                evidence: vec![],
+                usage: None,
+            },
             seen: seen.clone(),
-            memory: Some(r#"{"summary":"ok","evidence":[],"memory":{"notes":["pegasus は pjsub"]}}"#),
+            memory: Some(
+                r#"{"summary":"ok","evidence":[],"memory":{"notes":["pegasus は pjsub"]}}"#,
+            ),
             proposals: Vec::new(),
         });
-        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, Some(memory_root.clone()));
+        let mut d = person_dispatcher(
+            store.clone(),
+            adapter,
+            workspace_root,
+            Some(memory_root.clone()),
+        );
         run_until_idle(&mut d, 40).await;
 
         // 1. 返事が `role = node` の行になり、run_id が付く。
@@ -7442,26 +9294,52 @@ mod tests {
         assert_eq!(thread[1].role, MessageRole::Node);
         assert_eq!(thread[1].text, "3 本の候補が出ています");
         assert!(thread[1].run_id.is_some(), "返事には run_id が付く");
-        assert_eq!(store.get(started.task.id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(
+            store.get(started.task.id).unwrap().unwrap().status,
+            Status::Done
+        );
 
         // 2. 前置きに役職・brief・記憶・直近のやり取りが載っている。
         let context = seen.lock().unwrap().clone().expect("the run happened");
         let node = context.node.clone().expect("node context");
         assert_eq!(node.id, "secretary");
         assert_eq!(node.brief, "secretary の担当");
-        assert_eq!(context.memory.clone().expect("memory").notes, "- 2026-09-10: 人は図より表が好き\n");
+        assert_eq!(
+            context.memory.clone().expect("memory").notes,
+            "- 2026-09-10: 人は図より表が好き\n"
+        );
         // 監査 L-6: 今回の本文は `objective` に載るので、直近のやり取りには**入れない**（二重に載せない）。
-        assert!(context.conversation.is_empty(), "{:?}", context.conversation);
+        assert!(
+            context.conversation.is_empty(),
+            "{:?}",
+            context.conversation
+        );
         let preamble = task_worker::preamble::render(&context, "artifacts");
-        assert!(preamble.contains("## あなた: secretary 課 (secretary)"), "{preamble}");
-        assert!(preamble.contains("- 2026-09-10: 人は図より表が好き"), "{preamble}");
+        assert!(
+            preamble.contains("## あなた: secretary 課 (secretary)"),
+            "{preamble}"
+        );
+        assert!(
+            preamble.contains("- 2026-09-10: 人は図より表が好き"),
+            "{preamble}"
+        );
         assert!(!preamble.contains("## 直近のやり取り"), "{preamble}");
 
         // 3. 結果ファイルの `memory` が追記されている（古い記憶の後ろに）。
         let notes = std::fs::read_to_string(memory_root.join("secretary/notes.md")).unwrap();
         assert_eq!(notes.lines().count(), 2, "{notes}");
-        assert!(notes.lines().next().unwrap().contains("人は図より表が好き"), "{notes}");
-        assert!(notes.lines().next_back().unwrap().contains("pegasus は pjsub"), "{notes}");
+        assert!(
+            notes.lines().next().unwrap().contains("人は図より表が好き"),
+            "{notes}"
+        );
+        assert!(
+            notes
+                .lines()
+                .next_back()
+                .unwrap()
+                .contains("pegasus は pjsub"),
+            "{notes}"
+        );
     }
 
     /// ADR-0033 D6: `[memory]` を設定していない構成では記憶を読まないし書かない。
@@ -7472,12 +9350,25 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_conversation_org(store.as_ref());
-        task_ops::conversation::start(store.as_ref(), "secretary", None, "やあ", &[], &[], task_core::CONVERSATION_GENRE, OffsetDateTime::now_utc())
-            .unwrap();
+        task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "やあ",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
 
         let seen = Arc::new(StdMutex::new(None));
         let adapter = Arc::new(PersonAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             seen: seen.clone(),
             memory: Some(r#"{"summary":"ok","memory":{"notes":["覚えて"]}}"#),
             proposals: Vec::new(),
@@ -7499,8 +9390,17 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_conversation_org(store.as_ref());
-        task_ops::conversation::start(store.as_ref(), "secretary", None, "調子はどう", &[], &[], task_core::CONVERSATION_GENRE, OffsetDateTime::now_utc())
-            .unwrap();
+        task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "調子はどう",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
 
         let adapter = Arc::new(person_adapter(Terminal::Error {
             message: "harness died".into(),
@@ -7512,7 +9412,11 @@ mod tests {
         let thread = store.message_list("secretary", None, 20).unwrap();
         let reply = thread.last().expect("a reply");
         assert_eq!(reply.role, MessageRole::Node);
-        assert!(reply.text.starts_with("返事できませんでした: "), "{}", reply.text);
+        assert!(
+            reply.text.starts_with("返事できませんでした: "),
+            "{}",
+            reply.text
+        );
         assert!(reply.text.contains("harness died"), "{}", reply.text);
     }
 
@@ -7563,8 +9467,16 @@ mod tests {
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root, None);
         let extras = d.run_extras(&second.task, None).unwrap();
-        let texts: Vec<&str> = extras.conversation.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(texts, vec!["先週の続きを教えて", "承知しました"], "{texts:?}");
+        let texts: Vec<&str> = extras
+            .conversation
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["先週の続きを教えて", "承知しました"],
+            "{texts:?}"
+        );
     }
 
     /// 監査 M-5（Phase 27）: 途中の失敗（retryable でまだ試行が残る）では返事を書かない。
@@ -7589,12 +9501,19 @@ mod tests {
                 if self.failures_left.load(Ordering::SeqCst) > 0 {
                     self.failures_left.fetch_sub(1, Ordering::SeqCst);
                     return Ok(RunOutcome {
-                        terminal: Terminal::Error { message: "harness hiccup".into(), retryable: true },
+                        terminal: Terminal::Error {
+                            message: "harness hiccup".into(),
+                            retryable: true,
+                        },
                         exit_code: Some(1),
                     });
                 }
                 Ok(RunOutcome {
-                    terminal: Terminal::Done { summary: "順調です".into(), evidence: vec![], usage: None },
+                    terminal: Terminal::Done {
+                        summary: "順調です".into(),
+                        evidence: vec![],
+                        usage: None,
+                    },
                     exit_code: Some(0),
                 })
             }
@@ -7617,17 +9536,27 @@ mod tests {
         )
         .unwrap();
 
-        let adapter = Arc::new(FlakyPersonAdapter { failures_left: AtomicUsize::new(1) });
+        let adapter = Arc::new(FlakyPersonAdapter {
+            failures_left: AtomicUsize::new(1),
+        });
         let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
         run_until_idle(&mut d, 60).await;
 
-        assert_eq!(store.get(started.task.id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(
+            store.get(started.task.id).unwrap().unwrap().status,
+            Status::Done
+        );
         let thread = store.message_list("secretary", None, 20).unwrap();
-        let replies: Vec<&Message> = thread.iter().filter(|m| m.role == MessageRole::Node).collect();
+        let replies: Vec<&Message> = thread
+            .iter()
+            .filter(|m| m.role == MessageRole::Node)
+            .collect();
         assert_eq!(replies.len(), 1, "返事は 1 行だけ: {replies:?}");
         assert_eq!(replies[0].text, "順調です");
         assert!(
-            !thread.iter().any(|m| m.text.starts_with("返事できませんでした")),
+            !thread
+                .iter()
+                .any(|m| m.text.starts_with("返事できませんでした")),
             "途中の失敗は返事にしない: {thread:?}"
         );
     }
@@ -7645,7 +9574,11 @@ mod tests {
         store.create_task(&task, vec![]).unwrap();
 
         let adapter = Arc::new(PersonAdapter {
-            terminal: Terminal::Done { summary: "delegated".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "delegated".into(),
+                evidence: vec![],
+                usage: None,
+            },
             seen: Arc::new(StdMutex::new(None)),
             memory: None,
             proposals: vec![delegate_to("coding-poc")],
@@ -7653,12 +9586,18 @@ mod tests {
         let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
         run_until_idle(&mut d, 40).await;
 
-        assert!(store.children(task.id).unwrap().is_empty(), "子は作られない");
+        assert!(
+            store.children(task.id).unwrap().is_empty(),
+            "子は作られない"
+        );
         let after = store.get(task.id).unwrap().unwrap();
         assert_eq!(after.status, Status::Blocked, "秘書の返事待ちで止まる");
         // Phase 27（監査 H-1）: 質問は `approvals` の行として構造化された固定の形。
         let question = task_ops::derive::latest_question(&store.events_for(task.id).unwrap());
-        assert_eq!(question, "cross-department: research-survey -> coding-poc: 任せたい仕事");
+        assert_eq!(
+            question,
+            "cross-department: research-survey -> coding-poc: 任せたい仕事"
+        );
         let pending = store.approval_list(Some(true), None, None).unwrap();
         assert_eq!(pending.len(), 1, "{pending:?}");
         assert_eq!(pending[0].node_id, "research-survey", "委譲元のノード宛て");
@@ -7684,7 +9623,11 @@ mod tests {
             store.create_task(&task, vec![]).unwrap();
 
             let adapter = Arc::new(PersonAdapter {
-                terminal: Terminal::Done { summary: "delegated".into(), evidence: vec![], usage: None },
+                terminal: Terminal::Done {
+                    summary: "delegated".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
                 seen: Arc::new(StdMutex::new(None)),
                 memory: None,
                 proposals: vec![delegate_to("coding-poc")],
@@ -7704,7 +9647,11 @@ mod tests {
                 OffsetDateTime::now_utc(),
             )
             .unwrap();
-            assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Ready, "答えるとタスクが再開する");
+            assert_eq!(
+                store.get(task.id).unwrap().unwrap().status,
+                Status::Ready,
+                "答えるとタスクが再開する"
+            );
 
             // 2 回目の run: 同じ提案が上がってくる。
             run_until_idle(&mut d, 40).await;
@@ -7714,7 +9661,11 @@ mod tests {
                 .into_iter()
                 .filter(|c| c.kind == TaskKind::Execute)
                 .collect();
-            assert_eq!(children.len(), expect_children, "{decision:?}: {children:?}");
+            assert_eq!(
+                children.len(),
+                expect_children,
+                "{decision:?}: {children:?}"
+            );
             if decision == Decision::Standing {
                 let rules = store.standing_rule_list(Some("research-survey")).unwrap();
                 assert_eq!(
@@ -7725,7 +9676,12 @@ mod tests {
             }
             if decision == Decision::Denied {
                 // もう聞き直さない（同じ質問の未決の行は増えない）。
-                assert!(store.approval_list(Some(true), None, None).unwrap().is_empty());
+                assert!(
+                    store
+                        .approval_list(Some(true), None, None)
+                        .unwrap()
+                        .is_empty()
+                );
             }
         }
     }
@@ -7742,7 +9698,11 @@ mod tests {
         store.create_task(&task, vec![]).unwrap();
 
         let adapter = Arc::new(PersonAdapter {
-            terminal: Terminal::Done { summary: "delegated".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "delegated".into(),
+                evidence: vec![],
+                usage: None,
+            },
             seen: Arc::new(StdMutex::new(None)),
             memory: None,
             proposals: vec![delegate_to("research-data"), delegate_to("coding-poc")],
@@ -7758,10 +9718,17 @@ mod tests {
             .collect();
         assert_eq!(children.len(), 1, "同じ部宛ては止めない: {children:?}");
         assert_eq!(children[0].assignee.as_deref(), Some("research-data"));
-        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Blocked, "部またぎは聞いて止まる");
+        assert_eq!(
+            store.get(task.id).unwrap().unwrap().status,
+            Status::Blocked,
+            "部またぎは聞いて止まる"
+        );
         let pending = store.approval_list(Some(true), None, None).unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].question, "cross-department: research-survey -> coding-poc: 任せたい仕事");
+        assert_eq!(
+            pending[0].question,
+            "cross-department: research-survey -> coding-poc: 任せたい仕事"
+        );
         // ワーカーには「N 件は作った、M 件は秘書の認可待ち」が見える（`progress` として残る）。
         let notes: Vec<String> = store
             .events_for(task.id)
@@ -7773,7 +9740,9 @@ mod tests {
             })
             .collect();
         assert!(
-            notes.iter().any(|m| m.contains("delegated 1 child task(s)（1 件は秘書の認可待ち）")),
+            notes
+                .iter()
+                .any(|m| m.contains("delegated 1 child task(s)（1 件は秘書の認可待ち）")),
             "{notes:?}"
         );
     }
@@ -7791,7 +9760,11 @@ mod tests {
         store.create_task(&task, vec![]).unwrap();
 
         let adapter = Arc::new(PersonAdapter {
-            terminal: Terminal::Done { summary: "delegated".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "delegated".into(),
+                evidence: vec![],
+                usage: None,
+            },
             seen: Arc::new(StdMutex::new(None)),
             memory: None,
             proposals: vec![delegate_to("research-data")],
@@ -7835,7 +9808,11 @@ mod tests {
         .unwrap();
 
         let adapter = Arc::new(PersonAdapter {
-            terminal: Terminal::Done { summary: "やっておきます".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "やっておきます".into(),
+                evidence: vec![],
+                usage: None,
+            },
             seen: Arc::new(StdMutex::new(None)),
             memory: None,
             proposals: vec![delegate_to("research-data")],
@@ -7858,7 +9835,10 @@ mod tests {
             notes.iter().any(|m| m.contains("対話では委譲できない")),
             "{notes:?}"
         );
-        assert_eq!(store.get(started.task.id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(
+            store.get(started.task.id).unwrap().unwrap().status,
+            Status::Done
+        );
     }
 
     /// Phase 28（ADR-0033 D4 追記）: 対話 run は `Question` を出さない。そのまま `Done` の返事になり、
@@ -7904,8 +9884,10 @@ mod tests {
         );
     }
 
-    /// Phase 28（ADR-0033 D4 追記）: 対話 run には委譲の道具（`available_genres` / `organization`）を渡さない。
+    /// Phase 28（ADR-0033 D4 追記）: 対話 run には委譲の道具（`available_genres`）を渡さない。
     /// 相手が秘書かそれ以外かで `conversation_addressee` を出し分ける。通常タスクには付かない。
+    /// ADR-0046 D6（Phase 59 追記）: **CoS（根）の対話 run** にだけ、誰が何をできるかの組織図
+    /// （`organization`）を渡す（人選はしない。matching が決める）。CoS 以外の対話 run には渡さない。
     #[test]
     fn conversation_runs_get_no_delegation_tools_but_get_the_addressee() {
         let dir = tempfile::tempdir().unwrap();
@@ -7914,9 +9896,18 @@ mod tests {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_conversation_org(store.as_ref());
 
-        let to_secretary = task_ops::conversation::start(store.as_ref(), "secretary", None, "hi", &[], &[], task_core::CONVERSATION_GENRE, OffsetDateTime::now_utc())
-            .unwrap()
-            .task;
+        let to_secretary = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "hi",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
         let to_survey = task_ops::conversation::start(
             store.as_ref(),
             "research-survey",
@@ -7930,16 +9921,44 @@ mod tests {
         .unwrap()
         .task;
 
-        let adapter = Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let adapter = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
 
         let extras = d.run_extras(&to_secretary, None).unwrap();
-        assert!(extras.available_genres.is_empty(), "対話 run は委譲できない: {extras:?}");
-        assert!(extras.organization.is_empty());
-        assert_eq!(extras.conversation_addressee, Some(ConversationAddressee::Secretary));
+        assert!(
+            extras.available_genres.is_empty(),
+            "対話 run は委譲できない: {extras:?}"
+        );
+        // ADR-0046 D6: CoS（根 = `secretary`。`OrgKind::Secretary`）宛ての対話には組織の一覧が付く。
+        assert!(
+            !extras.organization.is_empty(),
+            "CoS 宛ての対話には組織の一覧が付く: {extras:?}"
+        );
+        assert!(
+            extras
+                .organization
+                .iter()
+                .any(|n| n.id == "research-survey")
+        );
+        assert_eq!(
+            extras.conversation_addressee,
+            Some(ConversationAddressee::Secretary)
+        );
 
         let extras = d.run_extras(&to_survey, None).unwrap();
-        assert_eq!(extras.conversation_addressee, Some(ConversationAddressee::Other));
+        assert_eq!(
+            extras.conversation_addressee,
+            Some(ConversationAddressee::Other)
+        );
+        // CoS 以外（`research-survey`）宛ての対話には組織の一覧を付けない。
+        assert!(
+            extras.organization.is_empty(),
+            "CoS 以外の対話には付けない: {extras:?}"
+        );
 
         // 通常タスク（対話由来でない）には付かない。
         let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
@@ -7967,7 +9986,11 @@ mod tests {
         let plain = titled_project("作業場所なし");
         store.project_create(&plain).unwrap();
 
-        let adapter = Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let adapter = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
 
         let mut task = assigned_task(&workspace_root, "poc", "research-survey");
@@ -7999,7 +10022,10 @@ mod tests {
         )
         .unwrap()
         .task;
-        assert_eq!(d.run_extras(&conversation, None).unwrap().workspace_note, None);
+        assert_eq!(
+            d.run_extras(&conversation, None).unwrap().workspace_note,
+            None
+        );
     }
 
     /// Phase 30（ADR-0033 D4 追記）: 対話は**ノードの `genre`（仕事のハーネス）に関係なく**常に対話用分野
@@ -8016,7 +10042,12 @@ mod tests {
         for n in [
             org_node_of("secretary", None, OrgKind::Secretary, Some("secretary")),
             org_node_of("research", Some("secretary"), OrgKind::Department, None),
-            org_node_of("research-survey", Some("research"), OrgKind::Section, Some("literature")),
+            org_node_of(
+                "research-survey",
+                Some("research"),
+                OrgKind::Section,
+                Some("literature"),
+            ),
             org_node_of("research-data", Some("research"), OrgKind::Section, None),
         ] {
             store.org_upsert(&n).unwrap();
@@ -8051,7 +10082,11 @@ mod tests {
         // `task_ops::conversation` 側のテストで見ているのでここでは genre 未指定 = `None` のまま）。
         assert_eq!(to_survey.genre, None);
 
-        let adapter = Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let adapter = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
         let mut d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
         d.config.genres.push(GenreSpec {
             id: "literature".into(),
@@ -8063,7 +10098,9 @@ mod tests {
         });
 
         let extras = d.run_extras(&to_survey, None).unwrap();
-        let work_genre = extras.work_genre.expect("research-survey has its own genre");
+        let work_genre = extras
+            .work_genre
+            .expect("research-survey has its own genre");
         assert_eq!(work_genre.id, "literature");
         assert_eq!(work_genre.description, "関連研究の調査");
         assert_eq!(
@@ -8095,11 +10132,17 @@ mod tests {
         let task = assigned_task(&workspace_root, "t3", "research-survey");
         store.create_task(&task, vec![]).unwrap();
 
-        let adapter = Arc::new(person_adapter(Terminal::Question { text: "どのクラスタを使いますか".into() }));
+        let adapter = Arc::new(person_adapter(Terminal::Question {
+            text: "どのクラスタを使いますか".into(),
+        }));
         let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
         run_until_idle(&mut d, 40).await;
 
-        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Blocked, "既存の質問の終端はそのまま");
+        assert_eq!(
+            store.get(task.id).unwrap().unwrap().status,
+            Status::Blocked,
+            "既存の質問の終端はそのまま"
+        );
         let pending = store.approval_list(Some(true), None, None).unwrap();
         assert_eq!(pending.len(), 1, "{pending:?}");
         assert_eq!(pending[0].node_id, "research-survey");
@@ -8114,10 +10157,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         seed_conversation_org(store.as_ref());
-        let q = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let q = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         store.insert(&q).unwrap();
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Question { text: "続けますか".into() },
+            terminal: Terminal::Question {
+                text: "続けますか".into(),
+            },
             delay: Duration::ZERO,
         });
         let mut d = dispatcher(store.clone(), adapter, 1);
@@ -8164,11 +10216,25 @@ mod tests {
             })
             .unwrap();
 
-        task_ops::conversation::start(store.as_ref(), "secretary", None, "やあ", &[], &[], task_core::CONVERSATION_GENRE, now).unwrap();
+        task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "やあ",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            now,
+        )
+        .unwrap();
 
         let seen = Arc::new(StdMutex::new(None));
         let adapter = Arc::new(PersonAdapter {
-            terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
             seen: seen.clone(),
             memory: None,
             proposals: Vec::new(),
@@ -8188,7 +10254,10 @@ mod tests {
         let preamble = task_worker::preamble::render(&context, "artifacts");
         assert!(preamble.contains("永続の認可"), "{preamble}");
         assert!(preamble.contains("深夜は連絡しない"), "{preamble}");
-        assert!(preamble.contains("pegasus のジョブは 1 ノードで始めてよい"), "{preamble}");
+        assert!(
+            preamble.contains("pegasus のジョブは 1 ノードで始めてよい"),
+            "{preamble}"
+        );
         assert!(!preamble.contains("coding-poc だけの規則"), "{preamble}");
     }
 
@@ -8289,12 +10358,20 @@ mod tests {
         compaction.role = Some(task_core::COMPACTION_ROLE.to_string());
         store.insert(&compaction).unwrap();
         // 他の担当の仕事は一番新しいが除外される。
-        let other_assignee =
-            work_task("other", Status::Done, "research-data", None, base + time::Duration::seconds(999));
+        let other_assignee = work_task(
+            "other",
+            Status::Done,
+            "research-data",
+            None,
+            base + time::Duration::seconds(999),
+        );
         store.insert(&other_assignee).unwrap();
 
-        let adapter: Arc<dyn WorkerAdapter> =
-            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
         let dir = tempfile::tempdir().unwrap();
         let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
 
@@ -8310,7 +10387,12 @@ mod tests {
         store.insert(&conv).unwrap();
 
         let extras = d.run_extras(&conv, None).unwrap();
-        assert_eq!(extras.recent_work.len(), 10, "capped at 10: {:?}", extras.recent_work);
+        assert_eq!(
+            extras.recent_work.len(),
+            10,
+            "capped at 10: {:?}",
+            extras.recent_work
+        );
         let ids: Vec<TaskId> = extras.recent_work.iter().map(|w| w.task_id).collect();
         let mut expected_a = a_ids.clone();
         expected_a.reverse();
@@ -8322,7 +10404,10 @@ mod tests {
         assert_eq!(ids, expected, "案件 A が先、残りは更新の新しい順");
         assert!(!ids.contains(&support.id), "承認は裏方なので除外");
         assert!(!ids.contains(&compaction.id), "まとめは裏方なので除外");
-        assert!(!ids.contains(&other_assignee.id), "他の担当の仕事は含めない");
+        assert!(
+            !ids.contains(&other_assignee.id),
+            "他の担当の仕事は含めない"
+        );
     }
 
     // ---- Phase 41（ADR-0038 D1）: 途中目標レビューの対話 run ----
@@ -8337,7 +10422,12 @@ mod tests {
         let project = titled_project("Pluvio");
         store.project_create(&project).unwrap();
         let milestone = store
-            .milestone_create(project.id, "隣接領域の動向調査", "近い分野を洗う", MilestoneStatus::InProgress)
+            .milestone_create(
+                project.id,
+                "隣接領域の動向調査",
+                "近い分野を洗う",
+                MilestoneStatus::InProgress,
+            )
             .unwrap();
 
         // 成果物を持つ done の仕事（`answer.md` を書いてある）。
@@ -8345,8 +10435,17 @@ mod tests {
         let ws = dir.path().join("survey");
         std::fs::create_dir_all(ws.join("artifacts")).unwrap();
         std::fs::write(ws.join("artifacts/answer.md"), "候補 A / 候補 B / 候補 C\n").unwrap();
-        let mut done = work_task("web 調査", Status::Done, "research-survey", Some(project.id), base);
-        done.workspace = WorkspaceSpec::Local { path: ws.clone(), mode: None };
+        let mut done = work_task(
+            "web 調査",
+            Status::Done,
+            "research-survey",
+            Some(project.id),
+            base,
+        );
+        done.workspace = WorkspaceSpec::Local {
+            path: ws.clone(),
+            mode: None,
+        };
         done.milestone_id = Some(milestone.id);
         store.insert(&done).unwrap();
         store
@@ -8382,8 +10481,11 @@ mod tests {
         support.milestone_id = Some(milestone.id);
         store.insert(&support).unwrap();
 
-        let adapter: Arc<dyn WorkerAdapter> =
-            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
         let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
 
         let started = task_ops::milestone_review::start_review(
@@ -8399,20 +10501,41 @@ mod tests {
         .unwrap();
 
         let extras = d.run_extras(&started.task, None).unwrap();
-        let review = extras.milestone_review.expect("the review context is filled");
+        let review = extras
+            .milestone_review
+            .expect("the review context is filled");
         assert_eq!(review.milestone.title, "隣接領域の動向調査");
         assert_eq!(review.milestone.status, "in_progress");
         assert_eq!(review.tasks.len(), 2, "裏方は入らない: {:?}", review.tasks);
         assert_eq!(review.tasks[0].title, "web 調査");
-        assert_eq!(review.tasks[0].outcome.as_deref(), Some("候補を 3 本に絞った"));
-        assert!(review.tasks[0].artifacts_excerpt.contains("候補 A / 候補 B / 候補 C"), "{:?}", review.tasks[0]);
-        assert!(review.tasks[0].artifacts_excerpt.contains("answer.md"), "{:?}", review.tasks[0]);
+        assert_eq!(
+            review.tasks[0].outcome.as_deref(),
+            Some("候補を 3 本に絞った")
+        );
+        assert!(
+            review.tasks[0]
+                .artifacts_excerpt
+                .contains("候補 A / 候補 B / 候補 C"),
+            "{:?}",
+            review.tasks[0]
+        );
+        assert!(
+            review.tasks[0].artifacts_excerpt.contains("answer.md"),
+            "{:?}",
+            review.tasks[0]
+        );
         assert_eq!(review.tasks[1].title, "候補の比較");
         assert_eq!(review.tasks[1].status, Status::Draft);
         // 前置きにも出る。
-        let context = RunContext { milestone_review: Some(review), ..RunContext::default() };
+        let context = RunContext {
+            milestone_review: Some(review),
+            ..RunContext::default()
+        };
         let preamble = task_worker::preamble::render(&context, "artifacts");
-        assert!(preamble.contains("## 途中目標『隣接領域の動向調査』のここまで"), "{preamble}");
+        assert!(
+            preamble.contains("## 途中目標『隣接領域の動向調査』のここまで"),
+            "{preamble}"
+        );
         assert!(preamble.contains("候補 A / 候補 B / 候補 C"), "{preamble}");
 
         // 普通の対話 run（`milestone_id` 無し）には何も渡らない。
@@ -8427,7 +10550,12 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .unwrap();
-        assert!(d.run_extras(&plain.task, None).unwrap().milestone_review.is_none());
+        assert!(
+            d.run_extras(&plain.task, None)
+                .unwrap()
+                .milestone_review
+                .is_none()
+        );
     }
 
     /// 受け入れ 1: 対話 run の結果ファイルの `milestone_proposal` から `proposed` の途中目標が 1 件できる
@@ -8439,18 +10567,35 @@ mod tests {
         let project = titled_project("Pluvio");
         store.project_create(&project).unwrap();
         let milestone = store
-            .milestone_create(project.id, "隣接領域の動向調査", "", MilestoneStatus::InProgress)
+            .milestone_create(
+                project.id,
+                "隣接領域の動向調査",
+                "",
+                MilestoneStatus::InProgress,
+            )
             .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("review");
         std::fs::create_dir_all(ws.join("artifacts")).unwrap();
-        let adapter: Arc<dyn WorkerAdapter> =
-            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
         let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
 
-        let mut task = work_task("対話", Status::Done, "secretary", Some(project.id), OffsetDateTime::now_utc());
-        task.workspace = WorkspaceSpec::Local { path: ws.clone(), mode: None };
+        let mut task = work_task(
+            "対話",
+            Status::Done,
+            "secretary",
+            Some(project.id),
+            OffsetDateTime::now_utc(),
+        );
+        task.workspace = WorkspaceSpec::Local {
+            path: ws.clone(),
+            mode: None,
+        };
         task.milestone_id = Some(milestone.id);
         task.conversation = Some(task_core::MessageId::new());
         store.insert(&task).unwrap();
@@ -8467,7 +10612,10 @@ mod tests {
         d.absorb_milestone_proposal(&task);
         let all = store.milestone_list(project.id).unwrap();
         assert_eq!(all.len(), 2, "{all:?}");
-        let proposal = all.iter().find(|m| m.title == "候補の絞り込み").expect("the proposal");
+        let proposal = all
+            .iter()
+            .find(|m| m.title == "候補の絞り込み")
+            .expect("the proposal");
         assert_eq!(proposal.status, MilestoneStatus::Proposed);
         assert_eq!(proposal.description, "3 本に");
         // 判定中の途中目標はそのまま。
@@ -8485,7 +10633,9 @@ mod tests {
         d.absorb_milestone_proposal(&task);
         let all = store.milestone_list(project.id).unwrap();
         assert_eq!(
-            all.iter().filter(|m| m.status == MilestoneStatus::Proposed).count(),
+            all.iter()
+                .filter(|m| m.status == MilestoneStatus::Proposed)
+                .count(),
             1,
             "{all:?}"
         );
@@ -8505,13 +10655,21 @@ mod tests {
         let done = work_task("done work", Status::Done, "research-survey", None, base);
         store.insert(&done).unwrap();
 
-        let adapter: Arc<dyn WorkerAdapter> =
-            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
         let dir = tempfile::tempdir().unwrap();
         let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
 
-        let ordinary =
-            work_task("ordinary", Status::Ready, "research-survey", None, base + time::Duration::seconds(1));
+        let ordinary = work_task(
+            "ordinary",
+            Status::Ready,
+            "research-survey",
+            None,
+            base + time::Duration::seconds(1),
+        );
         store.insert(&ordinary).unwrap();
         let extras = d.run_extras(&ordinary, None).unwrap();
         assert!(extras.recent_work.is_empty(), "{:?}", extras.recent_work);
@@ -8527,12 +10685,17 @@ mod tests {
             0u64,
             Event::WorkerFinished {
                 run_id: "r1".into(),
-                outcome: "done: Pluvio と比較可能な非同期ランタイムを 3 件確認した\n詳細は成果物を参照".into(),
+                outcome:
+                    "done: Pluvio と比較可能な非同期ランタイムを 3 件確認した\n詳細は成果物を参照"
+                        .into(),
                 usage: None,
                 role: None,
             },
         )];
-        let done_task = Task { status: Status::Done, ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0) };
+        let done_task = Task {
+            status: Status::Done,
+            ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0)
+        };
         assert_eq!(
             recent_work_outcome(&done_task, &done_events),
             Some("Pluvio と比較可能な非同期ランタイムを 3 件確認した".to_string())
@@ -8547,9 +10710,14 @@ mod tests {
                 role: None,
             },
         )];
-        let failed_task =
-            Task { status: Status::Failed, ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0) };
-        assert_eq!(recent_work_outcome(&failed_task, &idle_timeout_events), Some("idle timeout".to_string()));
+        let failed_task = Task {
+            status: Status::Failed,
+            ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0)
+        };
+        assert_eq!(
+            recent_work_outcome(&failed_task, &idle_timeout_events),
+            Some("idle timeout".to_string())
+        );
 
         let search_nothing_events = vec![(
             0u64,
@@ -8572,7 +10740,15 @@ mod tests {
 
         // レビュー不合格は、その前のワーカーの `done` より優先される（より後のイベントだから）。
         let review_failed_events = vec![
-            (0u64, Event::WorkerFinished { run_id: "r1".into(), outcome: "done: 一見よさそう".into(), usage: None, role: None }),
+            (
+                0u64,
+                Event::WorkerFinished {
+                    run_id: "r1".into(),
+                    outcome: "done: 一見よさそう".into(),
+                    usage: None,
+                    role: None,
+                },
+            ),
             (
                 1u64,
                 Event::ReviewVerdict {
@@ -8589,22 +10765,40 @@ mod tests {
         );
 
         // どちらも無ければ `Failed` への遷移理由にフォールバックする。
-        let fallback_events =
-            vec![(0u64, Event::Transitioned { from: Status::Reviewing, to: Status::Failed, reason: "child_failed".into() })];
-        assert_eq!(recent_work_outcome(&failed_task, &fallback_events), Some("child_failed".to_string()));
+        let fallback_events = vec![(
+            0u64,
+            Event::Transitioned {
+                from: Status::Reviewing,
+                to: Status::Failed,
+                reason: "child_failed".into(),
+            },
+        )];
+        assert_eq!(
+            recent_work_outcome(&failed_task, &fallback_events),
+            Some("child_failed".to_string())
+        );
 
-        let question_events =
-            vec![(0u64, Event::QuestionRaised { run_id: "r1".into(), text: "どちらの案で進めますか？".into() })];
-        let blocked_task =
-            Task { status: Status::Blocked, ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0) };
+        let question_events = vec![(
+            0u64,
+            Event::QuestionRaised {
+                run_id: "r1".into(),
+                text: "どちらの案で進めますか？".into(),
+            },
+        )];
+        let blocked_task = Task {
+            status: Status::Blocked,
+            ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0)
+        };
         assert_eq!(
             recent_work_outcome(&blocked_task, &question_events),
             Some("どちらの案で進めますか？".to_string())
         );
 
         // 進行中のタスクには要約を出さない。
-        let running_task =
-            Task { status: Status::Running, ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0) };
+        let running_task = Task {
+            status: Status::Running,
+            ..new_task(std::path::Path::new("/nonexistent"), Check::Human, 0)
+        };
         assert_eq!(recent_work_outcome(&running_task, &done_events), None);
     }
 
@@ -8617,7 +10811,13 @@ mod tests {
         let project = titled_project("Pluvio の新テーマ");
         store.project_create(&project).unwrap();
 
-        let done = work_task("先行研究のまとめ", Status::Done, "research-survey", Some(project.id), base);
+        let done = work_task(
+            "先行研究のまとめ",
+            Status::Done,
+            "research-survey",
+            Some(project.id),
+            base,
+        );
         store.insert(&done).unwrap();
         store
             .append_event(
@@ -8645,8 +10845,11 @@ mod tests {
             )
             .unwrap();
 
-        let adapter: Arc<dyn WorkerAdapter> =
-            Arc::new(person_adapter(Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None }));
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
         let dir = tempfile::tempdir().unwrap();
         let d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
 
@@ -8668,7 +10871,10 @@ mod tests {
         assert_eq!(w.project_title.as_deref(), Some("Pluvio の新テーマ"));
         assert_eq!(w.status, Status::Done);
         assert!(w.finished_at.is_some());
-        assert_eq!(w.outcome.as_deref(), Some("Pluvio と比較可能な非同期ランタイムを 3 件確認した"));
+        assert_eq!(
+            w.outcome.as_deref(),
+            Some("Pluvio と比較可能な非同期ランタイムを 3 件確認した")
+        );
         assert_eq!(w.artifacts, vec!["survey.md".to_string()]);
     }
 
@@ -8682,21 +10888,48 @@ mod tests {
             vec!["config", "user.email", "t@example.com"],
             vec!["config", "user.name", "t"],
         ] {
-            let out = std::process::Command::new("git").arg("-C").arg(dir).args(&args).output().unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         std::fs::write(dir.join("README.md"), b"hello\n").unwrap();
         for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "first"]] {
-            let out = std::process::Command::new("git").arg("-C").arg(dir).args(&args).output().unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         git_out(dir, &["rev-parse", "HEAD"])
     }
 
     /// `git -C <dir> <args...>` の stdout（trim 済み）。失敗したら panic。
     fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -8744,7 +10977,11 @@ mod tests {
                 tokio::time::sleep(self.hold).await;
             }
             Ok(RunOutcome {
-                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
                 exit_code: Some(0),
             })
         }
@@ -8803,7 +11040,8 @@ mod tests {
         // 次の tick で走っていた run が止まり、同じ tick で走り直す。
         d.tick().unwrap();
         assert!(
-            !d.running.contains_key(&task.id) || store.get(task.id).unwrap().unwrap().status == Status::Running,
+            !d.running.contains_key(&task.id)
+                || store.get(task.id).unwrap().unwrap().status == Status::Running,
             "古い run は捨てられている"
         );
         // 走り直した run の前置きに割り込みが載るまで回す。
@@ -8815,7 +11053,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let contexts = seen.lock().unwrap().clone();
-        assert!(contexts.len() >= 2, "2 回目の run が始まっていない: {}", contexts.len());
+        assert!(
+            contexts.len() >= 2,
+            "2 回目の run が始まっていない: {}",
+            contexts.len()
+        );
         let second = &contexts[1];
         assert_eq!(
             second.interrupt.as_deref(),
@@ -8823,15 +11065,24 @@ mod tests {
             "次の run に割り込みが渡る"
         );
         assert_eq!(second.comments.len(), 1);
-        assert_eq!(second.comments[0].author_kind, task_core::CommentAuthorKind::Human);
+        assert_eq!(
+            second.comments[0].author_kind,
+            task_core::CommentAuthorKind::Human
+        );
         assert!(second.comments_enabled, "ワーカー run はコメントを書ける");
         assert!(contexts[0].interrupt.is_none(), "1 回目には割り込みが無い");
 
         // 前置きの先頭に「人からの割り込み」として出る。
         let preamble = task_worker::preamble::render(second, "artifacts");
         assert!(preamble.starts_with("## コメント"), "{preamble}");
-        assert!(preamble.contains("**人からの割り込み**: 方針を変えたい。まず設計を書いて"), "{preamble}");
-        assert!(preamble.contains("短い進捗や判断の記録はコメントに書け"), "{preamble}");
+        assert!(
+            preamble.contains("**人からの割り込み**: 方針を変えたい。まず設計を書いて"),
+            "{preamble}"
+        );
+        assert!(
+            preamble.contains("短い進捗や判断の記録はコメントに書け"),
+            "{preamble}"
+        );
     }
 
     /// ADR-0044 D2: ワーカーの `{"type":"comment"}` 行は `author_kind = node` で残り、状態は変えない。
@@ -8839,7 +11090,14 @@ mod tests {
     async fn a_worker_comment_is_recorded_as_a_node_comment_without_touching_the_state() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let mut task = new_task(dir.path(), Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         task.assignee = Some("impl".into());
         store.insert(&task).unwrap();
         let adapter = Arc::new(CommentingAdapter);
@@ -8852,7 +11110,11 @@ mod tests {
         assert_eq!(comments[0].author.as_deref(), Some("impl"));
         assert_eq!(comments[0].body, "ビルドが通った");
         assert!(comments[0].run_id.is_some(), "run に紐づく");
-        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done, "状態は変えない");
+        assert_eq!(
+            store.get(task.id).unwrap().unwrap().status,
+            Status::Done,
+            "状態は変えない"
+        );
     }
 
     /// `comment` を 1 行出してから終わるアダプタ。
@@ -8872,7 +11134,11 @@ mod tests {
         ) -> Result<RunOutcome, AdapterError> {
             sink.comment("ビルドが通った");
             Ok(RunOutcome {
-                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
                 exit_code: Some(0),
             })
         }
@@ -8897,13 +11163,21 @@ mod tests {
             _sink: &dyn EventSink,
         ) -> Result<RunOutcome, AdapterError> {
             if let Ok(mut seen) = self.seen.lock() {
-                seen.push((req.cwd().to_path_buf(), req.workspace.clone(), req.artifacts_dir.clone()));
+                seen.push((
+                    req.cwd().to_path_buf(),
+                    req.workspace.clone(),
+                    req.artifacts_dir.clone(),
+                ));
             }
             for name in &self.files {
                 std::fs::write(req.cwd().join(name), b"x").unwrap();
             }
             Ok(RunOutcome {
-                terminal: Terminal::Done { summary: "ok".into(), evidence: vec![], usage: None },
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
                 exit_code: Some(0),
             })
         }
@@ -8922,9 +11196,16 @@ mod tests {
         d
     }
 
-    fn git_task(repo: &std::path::Path, mode: Option<task_core::WorkspaceMode>, check: Check) -> Task {
+    fn git_task(
+        repo: &std::path::Path,
+        mode: Option<task_core::WorkspaceMode>,
+        check: Check,
+    ) -> Task {
         let mut task = new_task(repo, check, 0);
-        task.workspace = WorkspaceSpec::Local { path: repo.to_path_buf(), mode };
+        task.workspace = WorkspaceSpec::Local {
+            path: repo.to_path_buf(),
+            mode,
+        };
         task
     }
 
@@ -8938,38 +11219,87 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         // 判定コマンドも worktree の中で走る（ADR-0019 D1 6.）: アダプタが cwd に置いたファイルが見える。
-        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "test -f in-tree".into(), expect_exit: 0 });
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "test -f in-tree".into(),
+                expect_exit: 0,
+            },
+        );
         store.insert(&task).unwrap();
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec!["in-tree".into()] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen: seen.clone(),
+            files: vec!["in-tree".into()],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
         run_until_idle(&mut d, 60).await;
 
         let task_dir = root.path().join(task.id.to_string());
         let tree = task_dir.join("tree");
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
-        assert!(tree.join(".git").exists(), "worktree at <workspace_root>/<task_id>/tree");
-        assert!(tree.join("README.md").is_file(), "追跡ファイルが checkout されている");
+        assert!(
+            tree.join(".git").exists(),
+            "worktree at <workspace_root>/<task_id>/tree"
+        );
+        assert!(
+            tree.join("README.md").is_file(),
+            "追跡ファイルが checkout されている"
+        );
         // ワーカーの cwd は worktree、`workspace`（= `runs/` の親）と成果物はその外。
         let runs = seen.lock().unwrap().clone();
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].0.canonicalize().unwrap(), tree.canonicalize().unwrap(), "cwd は worktree");
-        assert_eq!(runs[0].1.canonicalize().unwrap(), task_dir.canonicalize().unwrap(), "workspace は worktree の親");
-        assert_eq!(runs[0].2, task_dir.canonicalize().unwrap().join("artifacts"), "成果物は作業ツリーの外");
+        assert_eq!(
+            runs[0].0.canonicalize().unwrap(),
+            tree.canonicalize().unwrap(),
+            "cwd は worktree"
+        );
+        assert_eq!(
+            runs[0].1.canonicalize().unwrap(),
+            task_dir.canonicalize().unwrap(),
+            "workspace は worktree の親"
+        );
+        assert_eq!(
+            runs[0].2,
+            task_dir.canonicalize().unwrap().join("artifacts"),
+            "成果物は作業ツリーの外"
+        );
         assert!(task_dir.join("artifacts").is_dir());
         assert!(task_dir.join("runs").is_dir());
-        assert!(!tree.join("runs").exists(), "`runs/` を作業ツリーに作らない（git status を汚さない）");
+        assert!(
+            !tree.join("runs").exists(),
+            "`runs/` を作業ツリーに作らない（git status を汚さない）"
+        );
         // ブランチは `celeris/<task_id>` で、base は `main`。celeris はコミットしない。
         let branch = format!("celeris/{}", task.id);
-        assert!(git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]));
-        assert_eq!(git_out(&tree, &["rev-parse", "HEAD"]), main_sha, "base は main");
-        assert_eq!(git_out(&tree, &["rev-parse", "--abbrev-ref", "HEAD"]), branch);
+        assert!(git_ok(
+            repo_dir.path(),
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}")
+            ]
+        ));
+        assert_eq!(
+            git_out(&tree, &["rev-parse", "HEAD"]),
+            main_sha,
+            "base は main"
+        );
+        assert_eq!(
+            git_out(&tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            branch
+        );
         // 目印（API / CLI が「run のログは作業ツリーの外」と判断するのに使う）。
         let marker = task_ops::workspace::read_marker(&task_dir).expect("worktree.json");
         assert_eq!(marker.branch, branch);
         assert_eq!(marker.base, main_sha);
         assert_eq!(marker.base_kind, "main");
-        assert_eq!(task_ops::workspace::local_dir(&store.get(task.id).unwrap().unwrap(), root.path()), task_dir);
+        assert_eq!(
+            task_ops::workspace::local_dir(&store.get(task.id).unwrap().unwrap(), root.path()),
+            task_dir
+        );
     }
 
     /// ADR-0041 D1: 前置きに作業ツリー・ブランチ・base と「このブランチにコミットせよ」が出る。
@@ -8979,22 +11309,52 @@ mod tests {
         let main_sha = init_test_repo(repo_dir.path());
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
         store.insert(&task).unwrap();
-        let d = worktree_dispatcher(store.clone(), Arc::new(RecordingAdapter { seen: Arc::new(StdMutex::new(Vec::new())), files: vec![] }), root.path(), None);
+        let d = worktree_dispatcher(
+            store.clone(),
+            Arc::new(RecordingAdapter {
+                seen: Arc::new(StdMutex::new(Vec::new())),
+                files: vec![],
+            }),
+            root.path(),
+            None,
+        );
         let worktree = d.task_workspaces_for(&task).expect("worktree plan");
         let extras = d.run_extras(&task, Some(&worktree)).unwrap();
         let note = extras.workspace_note.expect("workspace_note");
         let tree = root.path().join(task.id.to_string()).join("tree");
         assert!(note.contains(&format!("→ `{}`", tree.display())), "{note}");
-        assert!(note.contains(&format!("ブランチ `celeris/{}`", task.id)), "{note}");
-        assert!(note.contains(&format!("base `{}`（main）", &main_sha[..12])), "{note}");
-        assert!(note.contains(&format!("カレントディレクトリは `{}`", tree.display())), "{note}");
+        assert!(
+            note.contains(&format!("ブランチ `celeris/{}`", task.id)),
+            "{note}"
+        );
+        assert!(
+            note.contains(&format!("base `{}`（main）", &main_sha[..12])),
+            "{note}"
+        );
+        assert!(
+            note.contains(&format!("カレントディレクトリは `{}`", tree.display())),
+            "{note}"
+        );
         assert!(note.contains("ブランチにコミットせよ"), "{note}");
         assert!(note.contains("`main` に直接コミットするな"), "{note}");
-        assert!(note.contains("`git checkout` でブランチを変えるな"), "{note}");
+        assert!(
+            note.contains("`git checkout` でブランチを変えるな"),
+            "{note}"
+        );
         // ADR-0043 D8: 成果物と文書の置き場。
-        assert!(note.contains(&format!("は `{}/docs` の下に置け", tree.display())), "{note}");
+        assert!(
+            note.contains(&format!("は `{}/docs` の下に置け", tree.display())),
+            "{note}"
+        );
         assert!(note.contains("`artifacts/` は run の中間物"), "{note}");
     }
 
@@ -9024,10 +11384,20 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
         store.insert(&task).unwrap();
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen, files: vec![] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen,
+            files: vec![],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), Some(releases));
         let worktree = d.local_worktree_for(&task).expect("worktree plan");
         assert_eq!(worktree.base.kind.as_str(), "current");
@@ -9046,10 +11416,20 @@ mod tests {
         init_test_repo(repo_dir.path());
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
         store.insert(&task).unwrap();
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen, files: vec![] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen,
+            files: vec![],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
         run_until_idle(&mut d, 60).await;
         // 終端に達した次の tick で「片付け」が回っても消えない。
@@ -9057,10 +11437,21 @@ mod tests {
 
         let task_dir = root.path().join(task.id.to_string());
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
-        assert!(task_dir.join("tree").is_dir(), "ADR-0043 D2: 終端では消さない");
+        assert!(
+            task_dir.join("tree").is_dir(),
+            "ADR-0043 D2: 終端では消さない"
+        );
         assert!(task_dir.join("artifacts").is_dir(), "成果物は残る");
         assert!(
-            git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/celeris/{}", task.id)]),
+            git_ok(
+                repo_dir.path(),
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/celeris/{}", task.id)
+                ]
+            ),
             "ブランチも残る"
         );
         let events = store.events_for(task.id).unwrap();
@@ -9077,11 +11468,20 @@ mod tests {
         init_test_repo(repo_dir.path());
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
         store.insert(&task).unwrap();
         // 質問で止まる run（`blocked`）にして、終端になる前に人が中止できるようにする。
         let adapter = Arc::new(InstantAdapter {
-            terminal: Terminal::Question { text: "どちらで進めますか".into() },
+            terminal: Terminal::Question {
+                text: "どちらで進めますか".into(),
+            },
             delay: Duration::ZERO,
         });
         let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
@@ -9098,11 +11498,28 @@ mod tests {
             .unwrap();
         d.tick().unwrap();
 
-        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Cancelled);
-        assert!(!task_dir.join("tree").exists(), "中止したら worktree は消える");
-        assert!(task_dir.join("artifacts").is_dir(), "run の記録と成果物は残る");
+        assert_eq!(
+            store.get(task.id).unwrap().unwrap().status,
+            Status::Cancelled
+        );
         assert!(
-            !git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/celeris/{}", task.id)]),
+            !task_dir.join("tree").exists(),
+            "中止したら worktree は消える"
+        );
+        assert!(
+            task_dir.join("artifacts").is_dir(),
+            "run の記録と成果物は残る"
+        );
+        assert!(
+            !git_ok(
+                repo_dir.path(),
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/celeris/{}", task.id)
+                ]
+            ),
             "中止したらブランチも消える"
         );
     }
@@ -9114,26 +11531,45 @@ mod tests {
         init_test_repo(repo_dir.path());
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "test -f left-behind".into(), expect_exit: 0 });
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "test -f left-behind".into(),
+                expect_exit: 0,
+            },
+        );
         store.insert(&task).unwrap();
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen, files: vec!["left-behind".into()] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen,
+            files: vec!["left-behind".into()],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
         run_until_idle(&mut d, 60).await;
         d.tick().unwrap();
 
         let tree = root.path().join(task.id.to_string()).join("tree");
-        assert!(tree.join("left-behind").is_file(), "未コミットの変更ごと残す");
+        assert!(
+            tree.join("left-behind").is_file(),
+            "未コミットの変更ごと残す"
+        );
         let events = store.events_for(task.id).unwrap();
         let progress: Vec<&String> = events
             .iter()
             .filter_map(|(_, e)| match e {
-                Event::WorkerProgress { msg, .. } if msg.starts_with("未コミット") => Some(msg),
+                Event::WorkerProgress { msg, .. } if msg.starts_with("未コミット") => {
+                    Some(msg)
+                }
                 _ => None,
             })
             .collect();
         assert_eq!(progress.len(), 1, "1 行だけ");
-        assert!(progress[0].contains(&tree.display().to_string()), "{}", progress[0]);
+        assert!(
+            progress[0].contains(&tree.display().to_string()),
+            "{}",
+            progress[0]
+        );
         // 2 回目の tick で重ねて積まない（記録は片付けたら落とす）。
         d.tick().unwrap();
         let again = store
@@ -9210,23 +11646,43 @@ mod tests {
             ],
         );
         // 先頭が cwd になる（`repos[0]`）。
-        let mut task = new_task(&code, Check::Command { cmd: "test -f in-tree".into(), expect_exit: 0 }, 0);
+        let mut task = new_task(
+            &code,
+            Check::Command {
+                cmd: "test -f in-tree".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         task.project_id = Some(project_id);
         task.repos = repos.iter().map(task_core::RepoRef::of).collect();
         store.insert(&task).unwrap();
 
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec!["in-tree".into()] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen: seen.clone(),
+            files: vec!["in-tree".into()],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, ws_root.path(), None);
         // 前置き（`run_extras`）は dispatch の前に組める。
         let workspaces = d.task_workspaces_for(&task).expect("workspaces");
         assert_eq!(workspaces.repos.len(), 3);
-        let note = d.run_extras(&task, Some(&workspaces)).unwrap().workspace_note.expect("note");
+        let note = d
+            .run_extras(&task, Some(&workspaces))
+            .unwrap()
+            .workspace_note
+            .expect("note");
         for name in ["benchfs", "benchfs-paper", "data"] {
             assert!(note.contains(&format!("- `{name}` →")), "{note}");
         }
-        assert!(note.contains("ディレクトリ。読み書き可。git ではない"), "{note}");
-        assert!(note.contains(&format!("ブランチ `celeris/{}`", task.id)), "{note}");
+        assert!(
+            note.contains("ディレクトリ。読み書き可。git ではない"),
+            "{note}"
+        );
+        assert!(
+            note.contains(&format!("ブランチ `celeris/{}`", task.id)),
+            "{note}"
+        );
 
         run_until_idle(&mut d, 60).await;
 
@@ -9240,13 +11696,21 @@ mod tests {
         }
         // `dir` はシンボリックリンク（コピーしない）。
         let link = task_dir.join("repos").join("data");
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert!(link.join("one.csv").is_file());
         // cwd は先頭のリポジトリ。`runs/` と `artifacts/` は作業ツリーの外。
         let (cwd, workspace, artifacts) = seen.lock().unwrap()[0].clone();
         assert_eq!(cwd, task_dir.join("repos/benchfs").canonicalize().unwrap());
         assert_eq!(workspace, task_dir.canonicalize().unwrap());
-        assert_eq!(artifacts, task_dir.canonicalize().unwrap().join("artifacts"));
+        assert_eq!(
+            artifacts,
+            task_dir.canonicalize().unwrap().join("artifacts")
+        );
         assert!(task_dir.join("runs").is_dir());
         // 判定コマンドも先頭の worktree で走った（`test -f in-tree` が通っている）。
         assert!(task_dir.join("repos/benchfs/in-tree").is_file());
@@ -9257,7 +11721,10 @@ mod tests {
         assert_eq!(marker.repos[0].name, "benchfs");
         assert_eq!(marker.repos[0].kind, "git");
         assert_eq!(marker.repos[2].kind, "dir");
-        assert_eq!(marker.dir, marker.repos[0].dir, "先頭の写しが Phase 49 の目印になる");
+        assert_eq!(
+            marker.dir, marker.repos[0].dir,
+            "先頭の写しが Phase 49 の目印になる"
+        );
         assert_eq!(
             task_ops::workspace::local_dir(&store.get(task.id).unwrap().unwrap(), ws_root.path()),
             task_dir
@@ -9277,21 +11744,42 @@ mod tests {
         )
         .unwrap();
         for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "setup"]] {
-            let out = std::process::Command::new("git").arg("-C").arg(&code).args(&args).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&code)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
 
         let ws_root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let (project_id, repos) =
-            project_with_repos(&store, &[("benchfs", code.as_path(), task_core::RepoKind::Git)]);
-        let mut task = new_task(&code, Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let (project_id, repos) = project_with_repos(
+            &store,
+            &[("benchfs", code.as_path(), task_core::RepoKind::Git)],
+        );
+        let mut task = new_task(
+            &code,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         task.project_id = Some(project_id);
         task.repos = repos.iter().map(task_core::RepoRef::of).collect();
         store.insert(&task).unwrap();
 
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen: seen.clone(),
+            files: vec![],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, ws_root.path(), None);
         run_until_idle(&mut d, 60).await;
 
@@ -9304,7 +11792,9 @@ mod tests {
         let question = events
             .iter()
             .find_map(|(_, e)| match e {
-                Event::WorkerFinished { outcome, .. } if outcome.starts_with("question:") => Some(outcome.clone()),
+                Event::WorkerFinished { outcome, .. } if outcome.starts_with("question:") => {
+                    Some(outcome.clone())
+                }
                 _ => None,
             })
             .expect("question outcome");
@@ -9329,14 +11819,26 @@ mod tests {
         )
         .unwrap();
         for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "container"]] {
-            let out = std::process::Command::new("git").arg("-C").arg(&code).args(&args).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&code)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
 
         // 偽の runtime: `info` が必ず落ちる（podman は rootless、docker はデーモン不在を模す）。
         let bin = root.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        for (name, message) in [("podman", "newuidmap: Operation not permitted"), ("docker", "Cannot connect to the Docker daemon")] {
+        for (name, message) in [
+            ("podman", "newuidmap: Operation not permitted"),
+            ("docker", "Cannot connect to the Docker daemon"),
+        ] {
             let path = bin.join(name);
             std::fs::write(&path, format!("#!/bin/sh\necho '{message}' 1>&2\nexit 1\n")).unwrap();
             let mut perms = std::fs::metadata(&path).unwrap().permissions();
@@ -9346,23 +11848,36 @@ mod tests {
 
         let ws_root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let (project_id, repos) =
-            project_with_repos(&store, &[("benchfs", code.as_path(), task_core::RepoKind::Git)]);
-        let mut task = new_task(&code, Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let (project_id, repos) = project_with_repos(
+            &store,
+            &[("benchfs", code.as_path(), task_core::RepoKind::Git)],
+        );
+        let mut task = new_task(
+            &code,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         task.project_id = Some(project_id);
         task.repos = repos.iter().map(task_core::RepoRef::of).collect();
         store.insert(&task).unwrap();
 
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen: seen.clone(),
+            files: vec![],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, ws_root.path(), None);
         // 実物の検出（`detect_with` + `probe_program`）を偽の実行ファイルに向ける。
-        let probe = task_worker::container::detect_with(task_worker::RuntimePreference::Auto, |rt| {
-            task_worker::container::probe_program(
-                &bin.join(rt.as_str()).display().to_string(),
-                Duration::from_secs(10),
-            )
-        });
+        let probe =
+            task_worker::container::detect_with(task_worker::RuntimePreference::Auto, |rt| {
+                task_worker::container::probe_program(
+                    &bin.join(rt.as_str()).display().to_string(),
+                    Duration::from_secs(10),
+                )
+            });
         assert!(!probe.is_available(), "{probe:?}");
         d.set_container_probe(probe);
         run_until_idle(&mut d, 60).await;
@@ -9373,16 +11888,27 @@ mod tests {
         let question = events
             .iter()
             .find_map(|(_, e)| match e {
-                Event::WorkerFinished { outcome, .. } if outcome.starts_with("question:") => Some(outcome.clone()),
+                Event::WorkerFinished { outcome, .. } if outcome.starts_with("question:") => {
+                    Some(outcome.clone())
+                }
                 _ => None,
             })
             .expect("question outcome");
-        assert!(question.contains("コンテナ runtime が使えません"), "{question}");
+        assert!(
+            question.contains("コンテナ runtime が使えません"),
+            "{question}"
+        );
         assert!(question.contains("benchfs"), "{question}");
         assert!(question.contains("newuidmap"), "{question}");
         assert!(question.contains("Cannot connect"), "{question}");
         // `setup` も走らない（実行環境が決まらないので run の手前で止まる）。
-        assert!(!ws_root.path().join(task.id.to_string()).join("runs/setup.log").exists());
+        assert!(
+            !ws_root
+                .path()
+                .join(task.id.to_string())
+                .join("runs/setup.log")
+                .exists()
+        );
     }
 
     /// ADR-0043 D3（Phase 56）: `[run] mode` を書いていない（= `host`）リポジトリのタスクは、
@@ -9393,16 +11919,30 @@ mod tests {
         init_test_repo(repo_dir.path());
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
         store.insert(&task).unwrap();
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen: seen.clone(),
+            files: vec![],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
         // 既定（`RuntimeProbe::default()` = 何も使えない）のまま走らせる。
         assert!(!d.container_probe().is_available());
         run_until_idle(&mut d, 60).await;
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
-        assert_eq!(seen.lock().unwrap().len(), 1, "ホストのタスクはそのまま走る");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "ホストのタスクはそのまま走る"
+        );
     }
 
     /// ADR-0043 D4: リポジトリの `[commands] check` は、タスクが検査コマンドを書いていないときだけ
@@ -9419,30 +11959,60 @@ mod tests {
         )
         .unwrap();
         for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "check"]] {
-            let out = std::process::Command::new("git").arg("-C").arg(&code).args(&args).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&code)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
 
         let ws_root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let (project_id, repos) =
-            project_with_repos(&store, &[("benchfs", code.as_path(), task_core::RepoKind::Git)]);
+        let (project_id, repos) = project_with_repos(
+            &store,
+            &[("benchfs", code.as_path(), task_core::RepoKind::Git)],
+        );
         // 受け入れ条件に `Check::Command` が無い → リポジトリの `check` が暗黙の条件として足される。
-        let mut task = new_task(&code, Check::ArtifactExists { name: "missing.json".into() }, 0);
+        let mut task = new_task(
+            &code,
+            Check::ArtifactExists {
+                name: "missing.json".into(),
+            },
+            0,
+        );
         task.project_id = Some(project_id);
         task.repos = repos.iter().map(task_core::RepoRef::of).collect();
         store.insert(&task).unwrap();
         // 自分で検査コマンドを書いたタスクには足さない（明示が勝つ）。
-        let mut explicit = new_task(&code, Check::Command { cmd: "true".into(), expect_exit: 0 }, 0);
+        let mut explicit = new_task(
+            &code,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
         explicit.project_id = Some(project_id);
         explicit.repos = task.repos.clone();
         store.insert(&explicit).unwrap();
 
         let seen = Arc::new(StdMutex::new(Vec::new()));
         // ワーカーが cwd に `in-tree` を置くので、リポジトリの `check` は通る。
-        let adapter = Arc::new(RecordingAdapter { seen, files: vec!["in-tree".into()] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen,
+            files: vec!["in-tree".into()],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, ws_root.path(), None);
-        assert_eq!(d.default_checks(&store.get(task.id).unwrap().unwrap()), vec!["test -f in-tree".to_string()]);
+        assert_eq!(
+            d.default_checks(&store.get(task.id).unwrap().unwrap()),
+            vec!["test -f in-tree".to_string()]
+        );
         run_until_idle(&mut d, 60).await;
 
         let verdicts = |id: TaskId| -> Vec<(usize, bool, String)> {
@@ -9451,9 +12021,12 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter_map(|(_, e)| match e {
-                    Event::ReviewVerdict { criterion_idx, pass, reason, .. } => {
-                        Some((*criterion_idx, *pass, reason.clone()))
-                    }
+                    Event::ReviewVerdict {
+                        criterion_idx,
+                        pass,
+                        reason,
+                        ..
+                    } => Some((*criterion_idx, *pass, reason.clone())),
                     _ => None,
                 })
                 .collect()
@@ -9471,7 +12044,10 @@ mod tests {
         let theirs = verdicts(explicit.id);
         assert_eq!(theirs.len(), 1, "{theirs:?}");
         assert!(theirs[0].1, "{theirs:?}");
-        assert_eq!(store.get(explicit.id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(
+            store.get(explicit.id).unwrap().unwrap().status,
+            Status::Done
+        );
     }
 
     /// ADR-0041 D1: `mode = "shared"` は従来どおり `path` をそのまま作業ディレクトリにする。
@@ -9484,19 +12060,35 @@ mod tests {
         let task = git_task(
             repo_dir.path(),
             Some(task_core::WorkspaceMode::Shared),
-            Check::Command { cmd: "true".into(), expect_exit: 0 },
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
         );
         store.insert(&task).unwrap();
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen: seen.clone(),
+            files: vec![],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
         assert!(d.local_worktree_for(&task).is_none());
         run_until_idle(&mut d, 60).await;
 
         let runs = seen.lock().unwrap().clone();
-        assert_eq!(runs[0].0, repo_dir.path().canonicalize().unwrap(), "cwd はリポジトリそのもの");
-        assert_eq!(runs[0].2, repo_dir.path().canonicalize().unwrap().join("artifacts"));
-        assert!(!root.path().join(task.id.to_string()).exists(), "タスクごとのディレクトリは作らない");
+        assert_eq!(
+            runs[0].0,
+            repo_dir.path().canonicalize().unwrap(),
+            "cwd はリポジトリそのもの"
+        );
+        assert_eq!(
+            runs[0].2,
+            repo_dir.path().canonicalize().unwrap().join("artifacts")
+        );
+        assert!(
+            !root.path().join(task.id.to_string()).exists(),
+            "タスクごとのディレクトリは作らない"
+        );
     }
 
     /// ADR-0041 D1: git リポジトリでない `path` は `mode` の既定が `worktree` でも従来どおり。
@@ -9505,10 +12097,20 @@ mod tests {
         let plain = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let task = git_task(plain.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        let task = git_task(
+            plain.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
         store.insert(&task).unwrap();
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter { seen: seen.clone(), files: vec![] });
+        let adapter = Arc::new(RecordingAdapter {
+            seen: seen.clone(),
+            files: vec![],
+        });
         let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
         assert!(d.local_worktree_for(&task).is_none());
         run_until_idle(&mut d, 60).await;
@@ -9527,12 +12129,26 @@ mod tests {
         init_test_repo(repo_dir.path());
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let mut parent = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+        let mut parent = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
         parent.aggregate = true;
         store.insert(&parent).unwrap();
         let mut children = Vec::new();
         for title in ["a", "b"] {
-            let mut child = git_task(repo_dir.path(), None, Check::Command { cmd: "true".into(), expect_exit: 0 });
+            let mut child = git_task(
+                repo_dir.path(),
+                None,
+                Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
+            );
             child.parent_id = Some(parent.id);
             child.title = title.into();
             child.status = Status::Done;
@@ -9542,14 +12158,33 @@ mod tests {
         store
             .append_event(
                 parent.id,
-                &Event::Transitioned { from: Status::Running, to: Status::Reviewing, reason: "aggregate".into() },
+                &Event::Transitioned {
+                    from: Status::Running,
+                    to: Status::Reviewing,
+                    reason: "aggregate".into(),
+                },
             )
             .unwrap();
-        let d = worktree_dispatcher(store.clone(), Arc::new(RecordingAdapter { seen: Arc::new(StdMutex::new(Vec::new())), files: vec![] }), root.path(), None);
+        let d = worktree_dispatcher(
+            store.clone(),
+            Arc::new(RecordingAdapter {
+                seen: Arc::new(StdMutex::new(Vec::new())),
+                files: vec![],
+            }),
+            root.path(),
+            None,
+        );
         let extras = d.run_extras(&parent, None).unwrap();
-        let mut branches: Vec<String> = extras.children.iter().filter_map(|c| c.branch.clone()).collect();
+        let mut branches: Vec<String> = extras
+            .children
+            .iter()
+            .filter_map(|c| c.branch.clone())
+            .collect();
         branches.sort();
-        let mut expected: Vec<String> = children.iter().map(|c| format!("celeris/{}", c.id)).collect();
+        let mut expected: Vec<String> = children
+            .iter()
+            .map(|c| format!("celeris/{}", c.id))
+            .collect();
         expected.sort();
         assert_eq!(branches, expected, "子ごとに別のブランチ");
         // 子の worktree は互いに別のディレクトリ（親の作業ツリーも共有しない）。
@@ -9558,7 +12193,10 @@ mod tests {
             .map(|c| d.local_worktree_for(c).expect("child worktree").dir)
             .collect();
         assert_ne!(dirs[0], dirs[1]);
-        assert_ne!(dirs[0], d.local_worktree_for(&parent).expect("parent worktree").dir);
+        assert_ne!(
+            dirs[0],
+            d.local_worktree_for(&parent).expect("parent worktree").dir
+        );
         // 子でも成果物はタスクごとのディレクトリの中（`.taskd/artifacts/<id>` ではない）。
         assert_eq!(
             extras.children[0].workspace.as_deref(),

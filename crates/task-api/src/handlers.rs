@@ -13,8 +13,8 @@ use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    EventRow, ListFilter, ListOrder, Milestone, MilestoneId, MilestoneStatus, OrgNode, Project, ProjectId,
-    ProjectStatus, SqliteStore, Status, StoreError, Task, TaskId, TaskKind, TaskStore,
+    EventRow, ListFilter, ListOrder, Milestone, MilestoneId, MilestoneStatus, OrgNode, Project,
+    ProjectId, ProjectStatus, SqliteStore, Status, StoreError, Task, TaskId, TaskKind, TaskStore,
 };
 use task_ops::OpsError;
 use task_ops::add::NewTaskSpec;
@@ -23,8 +23,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::admin::{
-    AccountAdminError, AdminRequest, ClusterAdminError, ProviderCreateBody, ProviderPatchBody, read_provider_file,
-    valid_adapter, valid_provider_id, write_provider_file,
+    AccountAdminError, AdminRequest, ClusterAdminError, ProviderCreateBody, ProviderPatchBody,
+    read_provider_file, valid_adapter, valid_provider_id, write_provider_file,
 };
 use crate::files::{self, FileRequest, FileTarget, RunFile};
 use crate::middleware::{require_active, require_admin};
@@ -33,14 +33,15 @@ use crate::query::{QueryParams, event_type_name, parse_snake, parse_task_id};
 use crate::schema::API_V1_SCHEMA_JSON;
 use crate::state::ApiState;
 use crate::types::{
-    AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult, AccountLoginStart,
-    AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody, ClusterConnectCodeBody, ClusterConnectResult,
-    ClusterConnectStart, ClusterView, Clusters, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
-    CommentBody, CommentList, ReopenBody,
-    MilestoneCreateBody, MilestonePatchBody, MilestoneReviewView, MilestoneView, OrgCreateBody, OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail,
-    ProjectList, ProjectPatchBody, ProjectTaskView, ProviderCheckResponse, ProviderConfigView, ProviderView,
-    Providers, ReloadResult, RetryBody, RunList, SecretList, SecretPutBody, SecretPutResult, SecretView,
-    ValidationError,
+    AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult,
+    AccountLoginStart, AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody,
+    ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters,
+    CommentBody, CommentList, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
+    MilestoneCreateBody, MilestonePatchBody, MilestoneReviewView, MilestoneView, OrgCreateBody,
+    OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody,
+    ProjectTaskView, ProviderCheckResponse, ProviderConfigView, ProviderView, Providers,
+    ReloadResult, ReopenBody, RetryBody, RunList, SecretList, SecretPutBody, SecretPutResult,
+    SecretView, ValidationError,
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
@@ -74,7 +75,10 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/tasks", get(list_tasks).post(create_task))
         .route("/api/v1/tasks/{id}", get(task_detail).patch(patch_task))
         // ADR-0044 D2（Phase 53）: タスク単位のコメントと再開。
-        .route("/api/v1/tasks/{id}/comments", get(list_comments).post(create_comment))
+        .route(
+            "/api/v1/tasks/{id}/comments",
+            get(list_comments).post(create_comment),
+        )
         .route("/api/v1/tasks/{id}/reopen", post(reopen))
         .route("/api/v1/tasks/{id}/events", get(task_events))
         .route("/api/v1/tasks/{id}/runs", get(task_runs))
@@ -96,28 +100,52 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/events", get(events))
         .route("/api/v1/stream", get(crate::sse::stream))
         .route("/api/v1/providers", get(providers).post(create_provider))
-        .route("/api/v1/providers/{id}", patch(patch_provider).delete(delete_provider))
+        .route(
+            "/api/v1/providers/{id}",
+            patch(patch_provider).delete(delete_provider),
+        )
         .route("/api/v1/providers/{id}/check", post(check_provider))
         .route("/api/v1/reload", post(reload))
         .route("/api/v1/accounts", get(accounts).post(create_account))
         .route("/api/v1/accounts/{id}", delete(delete_account))
         .route("/api/v1/accounts/{id}/check", post(check_account))
-        .route("/api/v1/accounts/{id}/login", post(start_account_login).delete(cancel_account_login))
-        .route("/api/v1/accounts/{id}/login/code", post(submit_account_login_code))
+        .route(
+            "/api/v1/accounts/{id}/login",
+            post(start_account_login).delete(cancel_account_login),
+        )
+        .route(
+            "/api/v1/accounts/{id}/login/code",
+            post(submit_account_login_code),
+        )
         .route("/api/v1/clusters", get(clusters))
-        .route("/api/v1/clusters/{id}/connect", post(start_cluster_connect).delete(cancel_cluster_connect))
-        .route("/api/v1/clusters/{id}/connect/code", post(submit_cluster_connect_code))
+        .route(
+            "/api/v1/clusters/{id}/connect",
+            post(start_cluster_connect).delete(cancel_cluster_connect),
+        )
+        .route(
+            "/api/v1/clusters/{id}/connect/code",
+            post(submit_cluster_connect_code),
+        )
         .route("/api/v1/secrets", get(secrets_list))
-        .route("/api/v1/secrets/{id}", put(put_secret).delete(delete_secret))
+        .route(
+            "/api/v1/secrets/{id}",
+            put(put_secret).delete(delete_secret),
+        )
         .route("/api/v1/org", get(org_list).post(create_org_node))
-        .route("/api/v1/org/{id}", patch(patch_org_node).delete(delete_org_node))
+        .route(
+            "/api/v1/org/{id}",
+            patch(patch_org_node).delete(delete_org_node),
+        )
         // ADR-0033 D4（Phase 24）: 対話。実装は `crate::conversation`。
         .route(
             "/api/v1/org/{id}/messages",
             get(crate::conversation::list_messages).post(crate::conversation::post_message),
         )
         .route("/api/v1/projects", get(project_list).post(create_project))
-        .route("/api/v1/projects/{id}", get(project_detail).patch(patch_project))
+        .route(
+            "/api/v1/projects/{id}",
+            get(project_detail).patch(patch_project),
+        )
         .route("/api/v1/projects/{id}/milestones", post(create_milestone))
         // ADR-0043 D1（Phase 52）: 案件のリポジトリ。実装は `crate::repos`。
         .merge(crate::repos::routes())
@@ -172,12 +200,15 @@ pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
         Ok(body) => {
             let mut response = Response::new(Body::from(body));
             *response.status_mut() = status;
-            response
-                .headers_mut()
-                .insert(header::CONTENT_TYPE, HeaderValue::from_static(JSON_CONTENT_TYPE));
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(JSON_CONTENT_TYPE),
+            );
             response
         }
-        Err(e) => ApiProblem::internal(format!("failed to serialize the response: {e}")).into_response(),
+        Err(e) => {
+            ApiProblem::internal(format!("failed to serialize the response: {e}")).into_response()
+        }
     }
 }
 
@@ -212,7 +243,9 @@ async fn read_body(body: Body) -> Result<Vec<u8>, ApiProblem> {
     let mut stream = body.into_data_stream();
     let mut buf = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| ApiProblem::bad_request(format!("failed to read the request body: {e}")))?;
+        let chunk = chunk.map_err(|e| {
+            ApiProblem::bad_request(format!("failed to read the request body: {e}"))
+        })?;
         if buf.len() + chunk.len() > MAX_BODY_BYTES {
             return Err(ApiProblem::payload_too_large());
         }
@@ -222,14 +255,18 @@ async fn read_body(body: Body) -> Result<Vec<u8>, ApiProblem> {
 }
 
 /// JSON 本文を解析する。構文誤り・未知フィールド・型誤りは 400。`empty_is_object` なら空本体を `{}` とみなす。
-pub(crate) async fn read_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Result<T, ApiProblem> {
+pub(crate) async fn read_json<T: DeserializeOwned>(
+    body: Body,
+    empty_is_object: bool,
+) -> Result<T, ApiProblem> {
     let bytes = read_body(body).await?;
     let text: &[u8] = if empty_is_object && bytes.iter().all(u8::is_ascii_whitespace) {
         b"{}"
     } else {
         &bytes
     };
-    serde_json::from_slice(text).map_err(|e| ApiProblem::bad_request(format!("invalid JSON body: {e}")))
+    serde_json::from_slice(text)
+        .map_err(|e| ApiProblem::bad_request(format!("invalid JSON body: {e}")))
 }
 
 /// ADR-0026 D7 / ADR-0027 D3 / ADR-0030 D2: `command`/`args`/`settings`/`env_from_secrets` は
@@ -237,7 +274,9 @@ pub(crate) async fn read_json<T: DeserializeOwned>(body: Body, empty_is_object: 
 /// `[api]` のトークンだけで任意コマンド実行に道が開くので、`POST /providers` と `PATCH /providers/{id}` の
 /// 本文にこのいずれかのキーがあれば、値の型や中身を見る前に拒否する（`env_from_secrets` は実行コマンドの
 /// 差し替えではないが、`ProviderConfigFile` の素通り用フィールドと同じ扱いにして往復で失われないようにする）。
-fn reject_provider_command_and_args(map: &serde_json::Map<String, serde_json::Value>) -> Result<(), ApiProblem> {
+fn reject_provider_command_and_args(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), ApiProblem> {
     if map.contains_key("command")
         || map.contains_key("args")
         || map.contains_key("settings")
@@ -253,7 +292,10 @@ fn reject_provider_command_and_args(map: &serde_json::Map<String, serde_json::Va
 /// `read_json` と同じだが、先に §ADR-0026 D7 / ADR-0027 D3 / ADR-0030 D2 の
 /// `command`/`args`/`settings`/`env_from_secrets` 拒否を通す（`ProviderCreateBody`/`ProviderPatchBody` は
 /// このキーを知らないので、素の `read_json` では黙って無視されてしまう）。
-async fn read_provider_json<T: DeserializeOwned>(body: Body, empty_is_object: bool) -> Result<T, ApiProblem> {
+async fn read_provider_json<T: DeserializeOwned>(
+    body: Body,
+    empty_is_object: bool,
+) -> Result<T, ApiProblem> {
     let bytes = read_body(body).await?;
     let text: &[u8] = if empty_is_object && bytes.iter().all(u8::is_ascii_whitespace) {
         b"{}"
@@ -263,7 +305,8 @@ async fn read_provider_json<T: DeserializeOwned>(body: Body, empty_is_object: bo
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(text) {
         reject_provider_command_and_args(&map)?;
     }
-    serde_json::from_slice(text).map_err(|e| ApiProblem::bad_request(format!("invalid JSON body: {e}")))
+    serde_json::from_slice(text)
+        .map_err(|e| ApiProblem::bad_request(format!("invalid JSON body: {e}")))
 }
 
 fn load_task(store: &SqliteStore, id: TaskId) -> Result<Task, ApiProblem> {
@@ -285,7 +328,6 @@ async fn method_not_allowed() -> ApiProblem {
     ApiProblem::method_not_allowed()
 }
 
-
 // ---- ADR-0033 D1/D2（Phase 23）: 組織・案件・途中目標 ----
 //
 // 読み取り（`GET /org`、`GET /projects`、`GET /projects/{id}`）は他の読み取りと同じで無認証でよい。
@@ -301,11 +343,13 @@ fn load_org_node(store: &SqliteStore, id: &str) -> Result<OrgNode, ApiProblem> {
 }
 
 pub(crate) fn parse_project_id(raw: &str) -> Result<ProjectId, ApiProblem> {
-    raw.parse::<ProjectId>().map_err(|_| ApiProblem::project_not_found(raw))
+    raw.parse::<ProjectId>()
+        .map_err(|_| ApiProblem::project_not_found(raw))
 }
 
 pub(crate) fn parse_milestone_id(raw: &str) -> Result<MilestoneId, ApiProblem> {
-    raw.parse::<MilestoneId>().map_err(|_| ApiProblem::milestone_not_found(raw))
+    raw.parse::<MilestoneId>()
+        .map_err(|_| ApiProblem::milestone_not_found(raw))
 }
 
 /// 監査 L-1: 組織のノードの `genre` は設定の `[[genres]]` にあるものだけ（分野を 1 つも設定していない
@@ -321,12 +365,42 @@ fn validate_genre(state: &ApiState, genre: Option<&str>) -> Result<(), ApiProble
     }]))
 }
 
+/// ADR-0046 D1（Phase 59）: profile の決定的な検証（知らない道具・知らないハーネス・skill の綴り）。
+/// ハーネスの集合は設定の `[[genres]]`（= `[[harnesses]]` の射影）＋ 組み込み。分野を 1 つも設定して
+/// いない構成では検証しない（`validate_genre` と同じ規律）。
+fn validate_profile_body(
+    state: &ApiState,
+    profile: Option<&task_core::Profile>,
+) -> Result<(), ApiProblem> {
+    let Some(profile) = profile else {
+        return Ok(());
+    };
+    let known = task_core::known_harness_ids(&state.inner.genres);
+    task_core::validate_profile(profile, &known).map_err(|e| {
+        ApiProblem::validation(vec![ValidationError {
+            field: Some("profile".into()),
+            message: e.to_string(),
+        }])
+    })
+}
+
 async fn org_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
     let items = state
         .blocking(|store| store.org_list().map_err(store_problem))
         .await?;
-    Ok(json_response(StatusCode::OK, &OrgList { items }))
+    // ADR-0046 D1: 継いだ後の実効 profile も一緒に返す（計算は純粋関数。DB には保存しない）。
+    let effective_profiles = items
+        .iter()
+        .map(|n| task_core::resolve_profile(&items, &n.id))
+        .collect();
+    Ok(json_response(
+        StatusCode::OK,
+        &OrgList {
+            items,
+            effective_profiles,
+        },
+    ))
 }
 
 async fn create_org_node(
@@ -340,6 +414,7 @@ async fn create_org_node(
     let create: OrgCreateBody = read_json(body, false).await?;
     // 監査 L-1: `genre` は `[[genres]]` にあるものだけ受ける（`genres` が空の設定では検証しない）。
     validate_genre(&state, create.genre.as_deref())?;
+    validate_profile_body(&state, create.profile.as_ref())?;
     let node = state
         .blocking(move |store| {
             if store.org_get(&create.id).map_err(store_problem)?.is_some() {
@@ -353,6 +428,8 @@ async fn create_org_node(
                 kind: create.kind,
                 genre: create.genre,
                 brief: create.brief.unwrap_or_default(),
+                // ADR-0046 D1（Phase 59）: 省略時は空の profile。
+                profile: create.profile.unwrap_or_default(),
                 position: create.position.unwrap_or(0),
                 created_at: now,
                 updated_at: now,
@@ -381,6 +458,7 @@ async fn patch_org_node(
     if let Some(genre) = &patch.genre {
         validate_genre(&state, genre.as_deref())?;
     }
+    validate_profile_body(&state, patch.profile.as_ref())?;
     let node = state
         .blocking(move |store| {
             let mut node = load_org_node(store, &id)?;
@@ -401,6 +479,10 @@ async fn patch_org_node(
             }
             if let Some(position) = patch.position {
                 node.position = position;
+            }
+            // ADR-0046 D1（Phase 59）: profile は**丸ごと差し替え**（書かなければ今のまま）。
+            if let Some(profile) = patch.profile {
+                node.profile = profile;
             }
             node.updated_at = OffsetDateTime::now_utc();
             store.org_upsert(&node).map_err(store_problem)
@@ -440,7 +522,9 @@ async fn project_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) ->
             Ok(if show_archived {
                 all
             } else {
-                all.into_iter().filter(|p| p.archived_at.is_none()).collect()
+                all.into_iter()
+                    .filter(|p| p.archived_at.is_none())
+                    .collect()
             })
         })
         .await?;
@@ -497,7 +581,13 @@ async fn create_project(
             store.project_create(&project).map_err(store_problem)?;
             // SPEC §7 / ADR-0033 D4: 案件を受けたら、秘書が最初に「理解の確認・大まかな方針・最初の
             // 途中目標の提案」を返す。ここは対話を 1 回起こすだけ（中身はプロンプトの仕事）。
-            crate::conversation::greet_the_secretary(store, &project, &roles, &genres, &conversation_genre);
+            crate::conversation::greet_the_secretary(
+                store,
+                &project,
+                &roles,
+                &genres,
+                &conversation_genre,
+            );
             Ok(project)
         })
         .await?;
@@ -522,27 +612,36 @@ async fn project_detail(
             };
             // ADR-0038 D1 / D4（Phase 41）: 途中目標ごとに、秘書のレビューの返事と、提案された次の
             // 途中目標を添える（GUI のカードが「結果 → 提案 → ok / 議論 / ng」を出せるように）。
-            let latest_proposal = task_ops::milestone_review::latest_proposal(store, project_id, None)
-                .map_err(|e| ops_problem(store, e, None))?;
+            let latest_proposal =
+                task_ops::milestone_review::latest_proposal(store, project_id, None)
+                    .map_err(|e| ops_problem(store, e, None))?;
             let mut milestones = Vec::new();
             for milestone in store.milestone_list(project_id).map_err(store_problem)? {
-                let review = task_ops::milestone_review::review_state(store, project_id, milestone.id)
-                    .map_err(store_problem)?
-                    .reply
-                    .map(|reply| MilestoneReviewView {
-                        message_id: reply.id.to_string(),
-                        text: reply.text,
-                        at: rfc3339(reply.created_at),
-                    });
+                let review =
+                    task_ops::milestone_review::review_state(store, project_id, milestone.id)
+                        .map_err(store_problem)?
+                        .reply
+                        .map(|reply| MilestoneReviewView {
+                            message_id: reply.id.to_string(),
+                            text: reply.text,
+                            at: rfc3339(reply.created_at),
+                        });
                 // 提案は「返事が付いた途中目標のカード」にだけ添える（自分自身は除く）。
                 let proposal = match &review {
                     Some(_) => latest_proposal.clone().filter(|p| p.id != milestone.id),
                     None => None,
                 };
-                milestones.push(MilestoneView { milestone, review, proposal });
+                milestones.push(MilestoneView {
+                    milestone,
+                    review,
+                    proposal,
+                });
             }
             // ADR-0033 D2: 案件の仕事の木 = `tasks WHERE project_id = ?`（DAG は `parent_id` / `depends_on`）。
-            let filter = ListFilter { project_id: Some(project_id), ..ListFilter::default() };
+            let filter = ListFilter {
+                project_id: Some(project_id),
+                ..ListFilter::default()
+            };
             let page = store
                 .list_page(&filter, ListOrder::CreatedDesc, None, PROJECT_TASKS_LIMIT)
                 .map_err(store_problem)?;
@@ -563,7 +662,12 @@ async fn project_detail(
                 .collect();
             // ADR-0043 D1: この案件のリポジトリ（primary が先頭）。
             let repos = store.repo_list(project_id).map_err(store_problem)?;
-            Ok(ProjectDetail { project, repos, milestones, tasks })
+            Ok(ProjectDetail {
+                project,
+                repos,
+                milestones,
+                tasks,
+            })
         })
         .await?;
     Ok(json_response(StatusCode::OK, &detail))
@@ -594,7 +698,11 @@ async fn patch_project(
             field: Some("status".into()),
             message: format!(
                 "use POST /projects/{{id}}/{} instead of PATCH to set {:?} (it also records paused_from and cascades)",
-                if status == ProjectStatus::Paused { "pause" } else { "cancel" },
+                if status == ProjectStatus::Paused {
+                    "pause"
+                } else {
+                    "cancel"
+                },
                 status.as_str()
             ),
         }]));
@@ -608,7 +716,9 @@ async fn patch_project(
     let project = state
         .blocking(move |store| {
             if let Some(status) = patch.status
-                && !store.project_set_status(project_id, status).map_err(store_problem)?
+                && !store
+                    .project_set_status(project_id, status)
+                    .map_err(store_problem)?
             {
                 return Err(ApiProblem::project_not_found(&project_id.to_string()));
             }
@@ -630,9 +740,17 @@ async fn patch_project(
 
 /// ADR-0039 D1 / D5: 案件の作業場所を受け取るときの検証と正規化（純粋に近い: 設定の一覧と `$HOME` を見るだけ）。
 /// `Remote` の `cluster` は `[[clusters]]` にあること（無ければ 422）、`Local` の `~` は `$HOME` で展開する。
-pub(crate) fn validated_workspace(state: &ApiState, spec: task_core::WorkspaceSpec) -> Result<task_core::WorkspaceSpec, ApiProblem> {
+pub(crate) fn validated_workspace(
+    state: &ApiState,
+    spec: task_core::WorkspaceSpec,
+) -> Result<task_core::WorkspaceSpec, ApiProblem> {
     if let task_core::WorkspaceSpec::Remote { cluster, .. } = &spec
-        && !state.inner.config_view.clusters.iter().any(|c| &c.id == cluster)
+        && !state
+            .inner
+            .config_view
+            .clusters
+            .iter()
+            .any(|c| &c.id == cluster)
     {
         return Err(ApiProblem::validation(vec![ValidationError {
             field: Some("workspace.cluster".into()),
@@ -661,7 +779,11 @@ async fn create_milestone(
     }
     let milestone: Milestone = state
         .blocking(move |store| {
-            if store.project_get(project_id).map_err(store_problem)?.is_none() {
+            if store
+                .project_get(project_id)
+                .map_err(store_problem)?
+                .is_none()
+            {
                 return Err(ApiProblem::project_not_found(&project_id.to_string()));
             }
             store
@@ -693,19 +815,29 @@ async fn patch_milestone(
     let milestone_id = parse_milestone_id(&id)?;
     let patch: MilestonePatchBody = read_json(body, false).await?;
     // ADR-0044 D6（Phase 55）: 案件と同じ理由で、`paused` / `cancelled` は `PATCH` では入れない。
-    if matches!(patch.status, MilestoneStatus::Paused | MilestoneStatus::Cancelled) {
+    if matches!(
+        patch.status,
+        MilestoneStatus::Paused | MilestoneStatus::Cancelled
+    ) {
         return Err(ApiProblem::validation(vec![ValidationError {
             field: Some("status".into()),
             message: format!(
                 "use POST /milestones/{{id}}/{} instead of PATCH to set {:?} (it also records paused_from and cascades)",
-                if patch.status == MilestoneStatus::Paused { "pause" } else { "cancel" },
+                if patch.status == MilestoneStatus::Paused {
+                    "pause"
+                } else {
+                    "cancel"
+                },
                 patch.status.as_str()
             ),
         }]));
     }
     let milestone = state
         .blocking(move |store| {
-            if !store.milestone_set_status(milestone_id, patch.status).map_err(store_problem)? {
+            if !store
+                .milestone_set_status(milestone_id, patch.status)
+                .map_err(store_problem)?
+            {
                 return Err(ApiProblem::milestone_not_found(&milestone_id.to_string()));
             }
             // 更新後の行を返す（案件が分からないと引けないので、状態を変えた後に案件ごと引き直す）。
@@ -773,7 +905,8 @@ async fn inbox(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRes
             )
             .map_err(|e| ops_problem(store, e, None))?;
             for item in &mut inbox.approvals {
-                let (Some(parent), Some(run)) = (item.parent.as_ref(), item.last_run.as_mut()) else {
+                let (Some(parent), Some(run)) = (item.parent.as_ref(), item.last_run.as_mut())
+                else {
                     continue;
                 };
                 if run.files.is_none()
@@ -794,16 +927,32 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
     let query = QueryParams::parse(
         raw.as_deref(),
         &[
-            "status", "kind", "genre", "parent", "project", "root_only", "q", "order", "limit", "cursor",
+            "status",
+            "kind",
+            "genre",
+            "parent",
+            "project",
+            "root_only",
+            "q",
+            "order",
+            "limit",
+            "cursor",
             // ADR-0044 D4（Phase 53）: ボードと検索のフィルタ。複数指定は AND。
-            "label", "category", "assignee", "milestone", "tier", "priority",
+            "label",
+            "category",
+            "assignee",
+            "milestone",
+            "tier",
+            "priority",
             // ADR-0044 D6（Phase 55）: アーカイブされた案件のタスクは既定で隠す。
             "archived",
         ],
     )?;
     let mut filter = ListFilter::default();
     for status in query.list("status") {
-        filter.statuses.push(parse_snake::<Status>("status", status)?);
+        filter
+            .statuses
+            .push(parse_snake::<Status>("status", status)?);
     }
     for kind in query.list("kind") {
         filter.kinds.push(parse_snake::<TaskKind>("kind", kind)?);
@@ -815,9 +964,10 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
     filter.parent_id = query.task_id("parent")?;
     // ADR-0033 D2: 案件で絞る（案件の仕事の木。`GET /projects/{id}` は同じ絞り込みを使う）。
     if let Some(raw) = query.single("project")? {
-        filter.project_id = Some(raw.parse::<ProjectId>().map_err(|_| {
-            ApiProblem::bad_request("query parameter `project` must be a ULID")
-        })?);
+        filter.project_id =
+            Some(raw.parse::<ProjectId>().map_err(|_| {
+                ApiProblem::bad_request("query parameter `project` must be a ULID")
+            })?);
     }
     filter.root_only = query.bool("root_only")?.unwrap_or(false);
     // ADR-0044 D6（Phase 55）: `?archived=1` を付けたときだけアーカイブされた案件のタスクも返す。
@@ -833,7 +983,9 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
     }
     for category in query.list("category") {
         let Some(parsed) = task_core::TaskCategory::parse(category) else {
-            return Err(ApiProblem::bad_request(format!("unknown category `{category}`")));
+            return Err(ApiProblem::bad_request(format!(
+                "unknown category `{category}`"
+            )));
         };
         filter.categories.push(parsed);
     }
@@ -841,12 +993,15 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
         filter.assignee = Some(assignee.to_string());
     }
     if let Some(raw) = query.single("milestone")? {
-        filter.milestone_id = Some(raw.parse::<MilestoneId>().map_err(|_| {
-            ApiProblem::bad_request("query parameter `milestone` must be a ULID")
-        })?);
+        filter.milestone_id =
+            Some(raw.parse::<MilestoneId>().map_err(|_| {
+                ApiProblem::bad_request("query parameter `milestone` must be a ULID")
+            })?);
     }
     for tier in query.list("tier") {
-        filter.tiers.push(parse_snake::<task_core::Tier>("tier", tier)?);
+        filter
+            .tiers
+            .push(parse_snake::<task_core::Tier>("tier", tier)?);
     }
     for priority in query.list("priority") {
         // `P0`〜`P3` でも生の整数でも受ける（`priority_label` と対）。
@@ -860,7 +1015,9 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
     }
     if let Some(text) = query.single("q")? {
         if text.chars().count() > TITLE_QUERY_MAX_CHARS {
-            return Err(ApiProblem::bad_request("query parameter `q` must be at most 200 characters"));
+            return Err(ApiProblem::bad_request(
+                "query parameter `q` must be at most 200 characters",
+            ));
         }
         if !text.is_empty() {
             filter.text_contains = Some(text.to_string());
@@ -875,7 +1032,10 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
         Some(other) => return Err(ApiProblem::bad_request(format!("unknown order `{other}`"))),
     };
     let limit = query.limit("limit", 100, 500)?;
-    let cursor = query.single("cursor")?.filter(|c| !c.is_empty()).map(str::to_string);
+    let cursor = query
+        .single("cursor")?
+        .filter(|c| !c.is_empty())
+        .map(str::to_string);
     let ctx = state.inner.view.clone();
     let list = state
         .blocking(move |store| {
@@ -889,7 +1049,9 @@ async fn list_tasks(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> A
                 OffsetDateTime::now_utc(),
             )
             .map_err(|e| match e {
-                OpsError::Store(StoreError::Invalid(message)) if message.starts_with("invalid cursor") => {
+                OpsError::Store(StoreError::Invalid(message))
+                    if message.starts_with("invalid cursor") =>
+                {
                     ApiProblem::bad_request("invalid cursor")
                 }
                 other => ops_problem(store, other, None),
@@ -924,8 +1086,14 @@ async fn create_task(
     let genres = state.inner.genres.clone();
     let task = state
         .blocking(move |store| {
-            task_ops::add::create_task_with_roles(store, spec, &roles, &genres, OffsetDateTime::now_utc())
-                .map_err(|e| ops_problem(store, e, None))
+            task_ops::add::create_task_with_roles(
+                store,
+                spec,
+                &roles,
+                &genres,
+                OffsetDateTime::now_utc(),
+            )
+            .map_err(|e| ops_problem(store, e, None))
         })
         .await?;
     Ok(created_task(&task))
@@ -933,14 +1101,19 @@ async fn create_task(
 
 // ---- 5. GET /tasks/{id} ----
 
-async fn task_detail(State(state): State<ApiState>, Params(id): Params<String>, RawQuery(raw): RawQuery) -> ApiResult {
+async fn task_detail(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     no_query(&raw)?;
     let id = parse_task_id(&id)?;
     let ctx = state.inner.view.clone();
     let detail = state
         .blocking(move |store| {
-            let mut detail = task_ops::view::task_detail(store, id, &ctx, OffsetDateTime::now_utc())
-                .map_err(|e| ops_problem(store, e, None))?;
+            let mut detail =
+                task_ops::view::task_detail(store, id, &ctx, OffsetDateTime::now_utc())
+                    .map_err(|e| ops_problem(store, e, None))?;
             let task = &detail.task;
             for run in &mut detail.runs {
                 run.files = Some(files::run_files(task, &ctx.workspace_root, &run.run_id));
@@ -976,24 +1149,38 @@ fn collect_events(
             after = Some(key(&row));
             if keep(&row) {
                 if items.len() == limit {
-                    return Ok(EventsPage { items, has_more: true });
+                    return Ok(EventsPage {
+                        items,
+                        has_more: true,
+                    });
                 }
                 items.push(row);
             }
         }
         if exhausted {
-            return Ok(EventsPage { items, has_more: false });
+            return Ok(EventsPage {
+                items,
+                has_more: false,
+            });
         }
     }
 }
 
-async fn task_events(State(state): State<ApiState>, Params(id): Params<String>, RawQuery(raw): RawQuery) -> ApiResult {
+async fn task_events(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     let query = QueryParams::parse(raw.as_deref(), &["after_seq", "limit", "types"])?;
     let id = parse_task_id(&id)?;
     let after_seq = match query.i64("after_seq")? {
         None | Some(-1) => None,
         Some(n) if n >= 0 => Some(n.unsigned_abs()),
-        Some(_) => return Err(ApiProblem::bad_request("query parameter `after_seq` must be -1 or greater")),
+        Some(_) => {
+            return Err(ApiProblem::bad_request(
+                "query parameter `after_seq` must be -1 or greater",
+            ));
+        }
     };
     let limit = query.limit("limit", 500, 5_000)?;
     let types = query.event_types()?;
@@ -1003,7 +1190,11 @@ async fn task_events(State(state): State<ApiState>, Params(id): Params<String>, 
             collect_events(
                 limit,
                 types.is_some(),
-                |row| types.as_ref().is_none_or(|t| t.contains(event_type_name(&row.event))),
+                |row| {
+                    types
+                        .as_ref()
+                        .is_none_or(|t| t.contains(event_type_name(&row.event)))
+                },
                 |row| row.seq,
                 after_seq,
                 |after, batch| store.event_rows_for(id, after, batch),
@@ -1022,7 +1213,11 @@ async fn events(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
     let types = query.event_types()?;
     let page = state
         .blocking(move |store| {
-            let type_ok = |row: &EventRow| types.as_ref().is_none_or(|t| t.contains(event_type_name(&row.event)));
+            let type_ok = |row: &EventRow| {
+                types
+                    .as_ref()
+                    .is_none_or(|t| t.contains(event_type_name(&row.event)))
+            };
             match task_id {
                 Some(task_id) => collect_events(
                     limit,
@@ -1049,14 +1244,20 @@ async fn events(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
 
 // ---- 7. GET /tasks/{id}/runs ----
 
-async fn task_runs(State(state): State<ApiState>, Params(id): Params<String>, RawQuery(raw): RawQuery) -> ApiResult {
+async fn task_runs(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     no_query(&raw)?;
     let id = parse_task_id(&id)?;
     let root = state.inner.view.workspace_root.clone();
     let list = state
         .blocking(move |store| {
             let task = load_task(store, id)?;
-            let rows = store.event_rows_for(id, None, usize::MAX).map_err(store_problem)?;
+            let rows = store
+                .event_rows_for(id, None, usize::MAX)
+                .map_err(store_problem)?;
             let mut runs = task_ops::view::runs(&rows);
             for run in &mut runs {
                 run.files = Some(files::run_files(&task, &root, &run.run_id));
@@ -1144,14 +1345,20 @@ async fn run_file(
 
 // ---- 11. GET /tasks/{id}/artifacts, 12. GET /tasks/{id}/artifacts/{idx} ----
 
-async fn artifact_list(State(state): State<ApiState>, Params(id): Params<String>, RawQuery(raw): RawQuery) -> ApiResult {
+async fn artifact_list(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     no_query(&raw)?;
     let id = parse_task_id(&id)?;
     let root = state.inner.view.workspace_root.clone();
     let list = state
         .blocking(move |store| {
             let task = load_task(store, id)?;
-            let rows = store.event_rows_for(id, None, usize::MAX).map_err(store_problem)?;
+            let rows = store
+                .event_rows_for(id, None, usize::MAX)
+                .map_err(store_problem)?;
             Ok(ArtifactList {
                 items: files::artifact_views(&task, &root, &rows),
             })
@@ -1175,8 +1382,11 @@ async fn artifact_body(
     let target = state
         .blocking(move |store| {
             let task = load_task(store, id)?;
-            let rows = store.event_rows_for(id, None, usize::MAX).map_err(store_problem)?;
-            let artifact = files::nth_artifact(&rows, idx).ok_or_else(|| ApiProblem::artifact_not_found(idx))?;
+            let rows = store
+                .event_rows_for(id, None, usize::MAX)
+                .map_err(store_problem)?;
+            let artifact = files::nth_artifact(&rows, idx)
+                .ok_or_else(|| ApiProblem::artifact_not_found(idx))?;
             let ws = files::canonical_workspace(&task, &root)?;
             let path = files::resolve_artifact(&ws, &artifact.path)?;
             let size = files::file_size(&path)?;
@@ -1208,10 +1418,14 @@ async fn approve(
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
-    let DecisionBody { note, expected_status } = read_json(body, true).await?;
+    let DecisionBody {
+        note,
+        expected_status,
+    } = read_json(body, true).await?;
     let result = state
         .blocking(move |store| {
-            task_ops::gate::approve(store, id, note, expected_status).map_err(|e| ops_problem(store, e, Some("approve")))
+            task_ops::gate::approve(store, id, note, expected_status)
+                .map_err(|e| ops_problem(store, e, Some("approve")))
         })
         .await?;
     Ok(json_response(StatusCode::OK, &result))
@@ -1227,10 +1441,14 @@ async fn reject(
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
-    let DecisionBody { note, expected_status } = read_json(body, true).await?;
+    let DecisionBody {
+        note,
+        expected_status,
+    } = read_json(body, true).await?;
     let result = state
         .blocking(move |store| {
-            task_ops::gate::reject(store, id, note, expected_status).map_err(|e| ops_problem(store, e, Some("reject")))
+            task_ops::gate::reject(store, id, note, expected_status)
+                .map_err(|e| ops_problem(store, e, Some("reject")))
         })
         .await?;
     Ok(json_response(StatusCode::OK, &result))
@@ -1246,7 +1464,10 @@ async fn answer(
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
-    let AnswerBody { answer, expected_status } = read_json(body, false).await?;
+    let AnswerBody {
+        answer,
+        expected_status,
+    } = read_json(body, false).await?;
     if answer.trim().is_empty() {
         return Err(ApiProblem::validation(vec![ValidationError {
             field: Some("answer".to_string()),
@@ -1255,7 +1476,8 @@ async fn answer(
     }
     let result = state
         .blocking(move |store| {
-            task_ops::gate::answer(store, id, answer, expected_status).map_err(|e| ops_problem(store, e, Some("answer")))
+            task_ops::gate::answer(store, id, answer, expected_status)
+                .map_err(|e| ops_problem(store, e, Some("answer")))
         })
         .await?;
     Ok(json_response(StatusCode::OK, &result))
@@ -1274,7 +1496,8 @@ async fn cancel(
     let CancelBody { expected_status } = read_json(body, true).await?;
     let result = state
         .blocking(move |store| {
-            task_ops::gate::cancel(store, id, expected_status).map_err(|e| ops_problem(store, e, Some("cancel")))
+            task_ops::gate::cancel(store, id, expected_status)
+                .map_err(|e| ops_problem(store, e, Some("cancel")))
         })
         .await?;
     Ok(json_response(StatusCode::OK, &result))
@@ -1337,11 +1560,17 @@ async fn patch_task(
 }
 
 /// `GET /tasks/{id}/comments`（読み取り。古い順）。
-async fn list_comments(State(state): State<ApiState>, Params(id): Params<String>, RawQuery(raw): RawQuery) -> ApiResult {
+async fn list_comments(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     no_query(&raw)?;
     let id = parse_task_id(&id)?;
     let items = state
-        .blocking(move |store| task_ops::comment::list_comments(store, id).map_err(|e| ops_problem(store, e, None)))
+        .blocking(move |store| {
+            task_ops::comment::list_comments(store, id).map_err(|e| ops_problem(store, e, None))
+        })
         .await?;
     Ok(json_response(StatusCode::OK, &CommentList { items }))
 }
@@ -1383,7 +1612,8 @@ async fn reopen(
     let ReopenBody { expected_status } = read_json(body, true).await?;
     let result = state
         .blocking(move |store| {
-            task_ops::comment::reopen(store, id, expected_status).map_err(|e| ops_problem(store, e, Some("reopen")))
+            task_ops::comment::reopen(store, id, expected_status)
+                .map_err(|e| ops_problem(store, e, Some("reopen")))
         })
         .await?;
     Ok(json_response(StatusCode::OK, &result))
@@ -1402,7 +1632,8 @@ async fn create_plan(
     let spec: NewPlanSpec = read_json(body, false).await?;
     let task = state
         .blocking(move |store| {
-            task_ops::plan::create_plan(store, spec, OffsetDateTime::now_utc()).map_err(|e| ops_problem(store, e, None))
+            task_ops::plan::create_plan(store, spec, OffsetDateTime::now_utc())
+                .map_err(|e| ops_problem(store, e, None))
         })
         .await?;
     Ok(created_task(&task))
@@ -1424,7 +1655,9 @@ async fn replay(
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let ReplayBody {} = read_json(body, true).await?;
-    let guard = state.try_begin_replay().ok_or_else(ApiProblem::replay_in_progress)?;
+    let guard = state
+        .try_begin_replay()
+        .ok_or_else(ApiProblem::replay_in_progress)?;
     let report = state
         .blocking(move |store| {
             // 要求が切断されても replay が終わるまで枠を持つ。
@@ -1442,12 +1675,16 @@ async fn graph(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRes
     let root = query.task_id("root")?;
     let depth = query
         .u64("depth")?
-        .map(|d| u32::try_from(d).map_err(|_| ApiProblem::bad_request("query parameter `depth` is too large")))
+        .map(|d| {
+            u32::try_from(d)
+                .map_err(|_| ApiProblem::bad_request("query parameter `depth` is too large"))
+        })
         .transpose()?;
     let include_terminal = query.bool("include_terminal")?.unwrap_or(true);
     let graph = state
         .blocking(move |store| {
-            task_ops::graph::graph(store, root, depth, include_terminal).map_err(|e| ops_problem(store, e, None))
+            task_ops::graph::graph(store, root, depth, include_terminal)
+                .map_err(|e| ops_problem(store, e, None))
         })
         .await?;
     Ok(json_response(StatusCode::OK, &graph))
@@ -1457,7 +1694,10 @@ async fn graph(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRes
 
 /// ADR-0017 M4: `reload` 後は `config_view.providers`（起動時に固定）ではなく、次 tick のスナップショットに
 /// 乗った一覧を正とする（`Dispatcher::set_snapshot_providers` が更新する）。最初の tick 前だけ静的な値にフォールバックする。
-fn current_providers(state: &ApiState, snapshot: Option<&task_ops::daemon::DaemonSnapshot>) -> Vec<ProviderConfigView> {
+fn current_providers(
+    state: &ApiState,
+    snapshot: Option<&task_ops::daemon::DaemonSnapshot>,
+) -> Vec<ProviderConfigView> {
     match snapshot {
         Some(s) if !s.providers.is_empty() || state.inner.config_view.providers.is_empty() => s
             .providers
@@ -1485,9 +1725,15 @@ async fn providers(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Ap
     let today = OffsetDateTime::now_utc().date();
     let stats = state
         .blocking(move |store| {
-            let mut guard = inner.stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut guard = inner
+                .stats
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             guard.catch_up(store).map_err(store_problem)?;
-            Ok(ids.iter().map(|id| guard.view(id, today)).collect::<Vec<_>>())
+            Ok(ids
+                .iter()
+                .map(|id| guard.view(id, today))
+                .collect::<Vec<_>>())
         })
         .await?;
     let items = providers
@@ -1522,7 +1768,12 @@ async fn providers(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Ap
 
 // ---- 27〜31. プロバイダ管理（ADR-0017） ----
 
-async fn create_provider(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
+async fn create_provider(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let Some(dir) = state.inner.providers_dir.clone() else {
@@ -1622,7 +1873,11 @@ async fn delete_provider(
     Ok(json_response(StatusCode::OK, &serde_json::json!({})))
 }
 
-async fn reload(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery) -> ApiResult {
+async fn reload(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     require_active(&state)?;
@@ -1630,15 +1885,26 @@ async fn reload(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw)
         return Err(ApiProblem::providers_admin_unavailable());
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if admin_tx.send(AdminRequest::Reload { reply: reply_tx }).await.is_err() {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+    if admin_tx
+        .send(AdminRequest::Reload { reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
             tracing::info!(who = "admin", op = "reload", "admin: providers reloaded");
-            Ok(json_response(StatusCode::OK, &ReloadResult { reloaded: true }))
+            Ok(json_response(
+                StatusCode::OK,
+                &ReloadResult { reloaded: true },
+            ))
         }
-        Ok(Ok(Err(message))) => Err(ApiProblem::bad_request(format!("invalid config: {message}"))),
+        Ok(Ok(Err(message))) => Err(ApiProblem::bad_request(format!(
+            "invalid config: {message}"
+        ))),
         Ok(Err(_)) => Err(ApiProblem::internal("celeris dropped the reload request")),
         Err(_) => Err(ApiProblem::internal("reload timed out")),
     }
@@ -1658,11 +1924,16 @@ async fn check_provider(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::Check { provider_id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::Check {
+            provider_id: id.clone(),
+            reply: reply_tx,
+        })
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
         Ok(Ok(result)) => result,
@@ -1685,9 +1956,9 @@ async fn check_provider(
             ))
         }
         Err(crate::admin::CheckError::NotFound) => Err(ApiProblem::provider_not_found(&id)),
-        Err(crate::admin::CheckError::ConfigInvalid(message)) => {
-            Err(ApiProblem::bad_request(format!("invalid config: {message}")))
-        }
+        Err(crate::admin::CheckError::ConfigInvalid(message)) => Err(ApiProblem::bad_request(
+            format!("invalid config: {message}"),
+        )),
         Err(crate::admin::CheckError::Unavailable(message)) => Err(ApiProblem::internal(message)),
     }
 }
@@ -1701,38 +1972,57 @@ async fn accounts(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
     if state.inner.accounts_roots.is_empty() {
         return Ok(json_response(
             StatusCode::OK,
-            &AccountList { root: None, roots: std::collections::HashMap::new(), max_runs_per_account: 0, items: Vec::new() },
+            &AccountList {
+                root: None,
+                roots: std::collections::HashMap::new(),
+                max_runs_per_account: 0,
+                items: Vec::new(),
+            },
         ));
     }
     let snapshot = state.snapshot();
     let mut items = Vec::new();
     for adapter in task_core::AccountAdapter::ALL {
-        let Some(root) = state.inner.accounts_roots.get(&adapter) else { continue };
+        let Some(root) = state.inner.accounts_roots.get(&adapter) else {
+            continue;
+        };
         let dirs = crate::accounts::scan_accounts(root, adapter);
         let ids: Vec<String> = dirs.iter().map(|d| d.id.clone()).collect();
         let inner = Arc::clone(&state.inner);
         let adapter_str = adapter.as_str().to_string();
         let stats = state
             .blocking(move |store| {
-                let mut guard = inner.account_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut guard = inner
+                    .account_stats
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard.catch_up(store).map_err(store_problem)?;
-                Ok(ids.iter().map(|id| guard.view(&adapter_str, id)).collect::<Vec<_>>())
+                Ok(ids
+                    .iter()
+                    .map(|id| guard.view(&adapter_str, id))
+                    .collect::<Vec<_>>())
             })
             .await?;
         for (d, stats) in dirs.iter().zip(stats) {
-            let live = snapshot
-                .as_ref()
-                .and_then(|s| s.accounts.iter().find(|a| a.adapter == adapter.as_str() && a.id == d.id));
+            let live = snapshot.as_ref().and_then(|s| {
+                s.accounts
+                    .iter()
+                    .find(|a| a.adapter == adapter.as_str() && a.id == d.id)
+            });
             items.push(AccountView {
                 adapter: adapter.as_str().to_string(),
                 id: d.id.clone(),
                 dir: d.dir.display().to_string(),
                 logged_in: d.logged_in,
                 in_use: live.map(|l| l.in_use).unwrap_or(0),
-                usage: live.and_then(|l| l.usage.as_ref()).map(crate::accounts::usage_view_from_live),
+                usage: live
+                    .and_then(|l| l.usage.as_ref())
+                    .map(crate::accounts::usage_view_from_live),
                 score: live.and_then(|l| l.score),
                 excluded_reason: live.and_then(|l| l.excluded_reason.clone()),
-                cooldown: live.and_then(|l| l.cooldown.as_ref()).map(crate::accounts::cooldown_view_from_live),
+                cooldown: live
+                    .and_then(|l| l.cooldown.as_ref())
+                    .map(crate::accounts::cooldown_view_from_live),
                 last_check: live.and_then(|l| l.last_check.clone()),
                 login_pending: live.map(|l| l.login_pending).unwrap_or(false),
                 stats,
@@ -1741,12 +2031,24 @@ async fn accounts(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
     }
     let roots: std::collections::HashMap<String, Option<String>> = task_core::AccountAdapter::ALL
         .into_iter()
-        .map(|a| (a.as_str().to_string(), state.inner.accounts_roots.get(&a).map(|p| p.display().to_string())))
+        .map(|a| {
+            (
+                a.as_str().to_string(),
+                state
+                    .inner
+                    .accounts_roots
+                    .get(&a)
+                    .map(|p| p.display().to_string()),
+            )
+        })
         .collect();
     Ok(json_response(
         StatusCode::OK,
         &AccountList {
-            root: roots.get(task_core::AccountAdapter::ClaudeCode.as_str()).cloned().flatten(),
+            root: roots
+                .get(task_core::AccountAdapter::ClaudeCode.as_str())
+                .cloned()
+                .flatten(),
             roots,
             max_runs_per_account: state.inner.max_runs_per_account,
             items,
@@ -1757,15 +2059,24 @@ async fn accounts(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
 /// 3.30 `POST /accounts`: ディレクトリを 0700 で作る。task-api 自身は `Dispatcher`/`AccountBook` に触れない
 /// （次の選択のタイミングで celeris がディレクトリを見つける。ADR-0024 D1）。`adapter`（既定 `claude-code`）が
 /// 指す根ディレクトリが設定されていなければ 409（ADR-0025 D6）。
-async fn create_account(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
+async fn create_account(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let create: AccountCreateBody = read_json(body, false).await?;
     if !crate::accounts::valid_account_id(&create.id) {
-        return Err(ApiProblem::bad_request("id must be 1-64 ASCII alphanumeric/-/_ characters"));
+        return Err(ApiProblem::bad_request(
+            "id must be 1-64 ASCII alphanumeric/-/_ characters",
+        ));
     }
     let Some(account_adapter) = task_core::AccountAdapter::parse(&create.adapter) else {
-        return Err(ApiProblem::bad_request("adapter must be claude-code or codex"));
+        return Err(ApiProblem::bad_request(
+            "adapter must be claude-code or codex",
+        ));
     };
     let Some(root) = state.inner.accounts_roots.get(&account_adapter).cloned() else {
         return Err(ApiProblem::accounts_unavailable());
@@ -1782,7 +2093,9 @@ async fn create_account(State(state): State<ApiState>, headers: HeaderMap, RawQu
     }
     match builder.create(&dir) {
         Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(ApiProblem::account_exists(&create.id)),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(ApiProblem::account_exists(&create.id));
+        }
         Err(e) => return Err(ApiProblem::internal(e.to_string())),
     }
     tracing::info!(who = "admin", op = "account_create", account_id = %create.id, adapter = %account_adapter, "admin: account created");
@@ -1828,11 +2141,17 @@ async fn delete_account(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::AccountRemove { adapter, id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::AccountRemove {
+            adapter,
+            id: id.clone(),
+            reply: reply_tx,
+        })
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
@@ -1840,7 +2159,9 @@ async fn delete_account(
             Ok(json_response(StatusCode::OK, &serde_json::json!({})))
         }
         Ok(Ok(Err(e))) => Err(account_admin_error(&id, e)),
-        Ok(Err(_)) => Err(ApiProblem::internal("celeris dropped the account remove request")),
+        Ok(Err(_)) => Err(ApiProblem::internal(
+            "celeris dropped the account remove request",
+        )),
         Err(_) => Err(ApiProblem::internal("account remove timed out")),
     }
 }
@@ -1877,11 +2198,17 @@ async fn check_account(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::AccountCheck { adapter, id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::AccountCheck {
+            adapter,
+            id: id.clone(),
+            reply: reply_tx,
+        })
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(70), reply_rx).await {
         Ok(Ok(result)) => result,
@@ -1927,11 +2254,17 @@ async fn start_account_login(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::AccountLoginStart { adapter, id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::AccountLoginStart {
+            adapter,
+            id: id.clone(),
+            reply: reply_tx,
+        })
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(20), reply_rx).await {
         Ok(Ok(result)) => result,
@@ -1990,15 +2323,25 @@ async fn submit_account_login_code(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::AccountLoginCode { id: id.clone(), code, reply: reply_tx })
+        .send(AdminRequest::AccountLoginCode {
+            id: id.clone(),
+            code,
+            reply: reply_tx,
+        })
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the login code request")),
+        Ok(Err(_)) => {
+            return Err(ApiProblem::internal(
+                "celeris dropped the login code request",
+            ));
+        }
         Err(_) => return Err(ApiProblem::internal("login code timed out")),
     };
     match outcome {
@@ -2035,11 +2378,17 @@ async fn cancel_account_login(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::AccountLoginCancel { adapter, id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::AccountLoginCancel {
+            adapter,
+            id: id.clone(),
+            reply: reply_tx,
+        })
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
@@ -2047,7 +2396,9 @@ async fn cancel_account_login(
             Ok(json_response(StatusCode::OK, &serde_json::json!({})))
         }
         Ok(Ok(Err(e))) => Err(account_admin_error(&id, e)),
-        Ok(Err(_)) => Err(ApiProblem::internal("celeris dropped the login cancel request")),
+        Ok(Err(_)) => Err(ApiProblem::internal(
+            "celeris dropped the login cancel request",
+        )),
         Err(_) => Err(ApiProblem::internal("login cancel timed out")),
     }
 }
@@ -2064,12 +2415,19 @@ async fn clusters(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
         .clusters
         .iter()
         .map(|cluster| {
-            let live = snapshot.as_ref().and_then(|s| s.clusters.iter().find(|live| live.id == cluster.id));
+            let live = snapshot
+                .as_ref()
+                .and_then(|s| s.clusters.iter().find(|live| live.id == cluster.id));
             let (cooldown_until, cooldown_remaining_secs) = live
                 .and_then(|live| live.cooldown_until.as_ref())
                 .and_then(|until| OffsetDateTime::parse(until, &Rfc3339).ok())
                 .filter(|until| *until > now)
-                .map(|until| (Some(rfc3339(until)), Some((until - now).whole_seconds().max(0) as u64)))
+                .map(|until| {
+                    (
+                        Some(rfc3339(until)),
+                        Some((until - now).whole_seconds().max(0) as u64),
+                    )
+                })
                 .unwrap_or((None, None));
             ClusterView {
                 id: cluster.id.clone(),
@@ -2126,19 +2484,30 @@ async fn start_cluster_connect(
     require_active(&state)?;
     require_known_cluster(&state, &id)?;
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::ClusterConnectStart { id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::ClusterConnectStart {
+            id: id.clone(),
+            reply: reply_tx,
+        })
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the cluster connect request")),
+        Ok(Err(_)) => {
+            return Err(ApiProblem::internal(
+                "celeris dropped the cluster connect request",
+            ));
+        }
         Err(_) => return Err(ApiProblem::internal("cluster connect timed out")),
     };
     match outcome {
@@ -2171,33 +2540,55 @@ async fn submit_cluster_connect_code(
     require_active(&state)?;
     require_known_cluster(&state, &id)?;
     // 監査指摘 D-6 と同じ規律: 型違いで serde のエラー文が値を反射しないよう、専用のメッセージに差し替える。
-    let ClusterConnectCodeBody { code } = read_json(body, false)
-        .await
-        .map_err(|e| if e.status() == StatusCode::BAD_REQUEST { ApiProblem::cluster_connect_body_invalid() } else { e })?;
+    let ClusterConnectCodeBody { code } = read_json(body, false).await.map_err(|e| {
+        if e.status() == StatusCode::BAD_REQUEST {
+            ApiProblem::cluster_connect_body_invalid()
+        } else {
+            e
+        }
+    })?;
     let trimmed = code.trim();
     if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
         return Err(ApiProblem::cluster_connect_code_invalid());
     }
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::ClusterConnectCode { id: id.clone(), code, reply: reply_tx })
+        .send(AdminRequest::ClusterConnectCode {
+            id: id.clone(),
+            code,
+            reply: reply_tx,
+        })
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the cluster connect code request")),
+        Ok(Err(_)) => {
+            return Err(ApiProblem::internal(
+                "celeris dropped the cluster connect code request",
+            ));
+        }
         Err(_) => return Err(ApiProblem::internal("cluster connect code timed out")),
     };
     match outcome {
         Ok(result) => {
             tracing::info!(who = "admin", op = "cluster_connect_code", cluster = %id, ok = result.ok, "admin: cluster connect code submitted");
-            Ok(json_response(StatusCode::OK, &ClusterConnectResult { ok: result.ok, detail: result.detail }))
+            Ok(json_response(
+                StatusCode::OK,
+                &ClusterConnectResult {
+                    ok: result.ok,
+                    detail: result.detail,
+                },
+            ))
         }
         Err(e) => Err(cluster_admin_error(&id, e)),
     }
@@ -2215,15 +2606,22 @@ async fn cancel_cluster_connect(
     require_active(&state)?;
     require_known_cluster(&state, &id)?;
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
-        .send(AdminRequest::ClusterConnectCancel { id: id.clone(), reply: reply_tx })
+        .send(AdminRequest::ClusterConnectCancel {
+            id: id.clone(),
+            reply: reply_tx,
+        })
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
+        return Err(ApiProblem::internal(
+            "celeris is not accepting admin requests",
+        ));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
@@ -2231,24 +2629,36 @@ async fn cancel_cluster_connect(
             Ok(json_response(StatusCode::OK, &serde_json::json!({})))
         }
         Ok(Ok(Err(e))) => Err(cluster_admin_error(&id, e)),
-        Ok(Err(_)) => Err(ApiProblem::internal("celeris dropped the cluster disconnect request")),
+        Ok(Err(_)) => Err(ApiProblem::internal(
+            "celeris dropped the cluster disconnect request",
+        )),
         Err(_) => Err(ApiProblem::internal("cluster disconnect timed out")),
     }
 }
 
 // ---- 秘密（API キー等）の管理（ADR-0030、Phase 20。すべて管理系: `token_file` 未設定でも 401） ----
 
-async fn secrets_list(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery) -> ApiResult {
+async fn secrets_list(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let Some(dir) = state.inner.secrets_dir.clone() else {
         return Err(ApiProblem::secrets_unavailable());
     };
-    let metas = crate::secrets::list_secret_files(&dir).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    let metas =
+        crate::secrets::list_secret_files(&dir).map_err(|e| ApiProblem::internal(e.to_string()))?;
     let mut items: Vec<SecretView> = metas
         .into_iter()
         .map(|m| SecretView {
-            used_by: state.inner.secret_usage.get(&m.id).cloned().unwrap_or_default(),
+            used_by: state
+                .inner
+                .secret_usage
+                .get(&m.id)
+                .cloned()
+                .unwrap_or_default(),
             id: m.id,
             updated_at: Some(m.updated_at),
             fingerprint: Some(m.fingerprint),
@@ -2271,7 +2681,13 @@ async fn secrets_list(State(state): State<ApiState>, headers: HeaderMap, RawQuer
         .collect();
     missing.sort_by(|a, b| a.id.cmp(&b.id));
     items.extend(missing);
-    Ok(json_response(StatusCode::OK, &SecretList { dir: Some(dir.display().to_string()), items }))
+    Ok(json_response(
+        StatusCode::OK,
+        &SecretList {
+            dir: Some(dir.display().to_string()),
+            items,
+        },
+    ))
 }
 
 /// `id` はファイル名に使う（`secret_file_path`）。パストラバーサル防止のため、無効な形は
@@ -2294,19 +2710,31 @@ async fn put_secret(
     // ADR-0030 D3 の規律「値はログにも応答にも出さない」を、解析エラーの経路でも守る。`read_json` の
     // 400 は serde_json のエラー文をそのまま返すので、型違い（`{"value": 12345678}` 等）だと値の
     // リテラルが応答に反射する。ここだけは本文を見ないメッセージに差し替える（監査指摘 D-6）。
-    let put: SecretPutBody = read_json(body, false)
-        .await
-        .map_err(|e| if e.status() == StatusCode::BAD_REQUEST { ApiProblem::secret_body_invalid() } else { e })?;
+    let put: SecretPutBody = read_json(body, false).await.map_err(|e| {
+        if e.status() == StatusCode::BAD_REQUEST {
+            ApiProblem::secret_body_invalid()
+        } else {
+            e
+        }
+    })?;
     if put.value.trim().is_empty() {
         return Err(ApiProblem::secret_value_invalid());
     }
-    crate::secrets::write_secret_file(&dir, &id, &put.value).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    crate::secrets::write_secret_file(&dir, &id, &put.value)
+        .map_err(|e| ApiProblem::internal(e.to_string()))?;
     // ADR-0030 D3: 応答の fingerprint は、以後の `GET /secrets` と一致するよう読み取り側と同じ
     // trim（末尾改行を落とす）を経た値から計算する。
     let fingerprint = crate::secrets::fingerprint(crate::secrets::trim_secret_value(&put.value));
     let updated_at = now_rfc3339();
     tracing::info!(who = "admin", op = "secret_put", secret_id = %id, "admin: secret stored");
-    Ok(json_response(StatusCode::OK, &SecretPutResult { id, updated_at, fingerprint }))
+    Ok(json_response(
+        StatusCode::OK,
+        &SecretPutResult {
+            id,
+            updated_at,
+            fingerprint,
+        },
+    ))
 }
 
 async fn delete_secret(
@@ -2350,7 +2778,8 @@ async fn daemon(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
 /// 認可の件数を載せる。
 fn daemon_snapshot_with_reports(state: &ApiState) -> Option<task_ops::daemon::DaemonSnapshot> {
     let mut snapshot = state.snapshot()?;
-    snapshot.reports = crate::reports::reports_live(&state.inner.store, crate::reports::last_notified_at(state));
+    snapshot.reports =
+        crate::reports::reports_live(&state.inner.store, crate::reports::last_notified_at(state));
     snapshot.approvals_pending = crate::approvals::approvals_pending(&state.inner.store);
     Some(snapshot)
 }
@@ -2366,9 +2795,10 @@ async fn config(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
 async fn schema(RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
     let mut response = Response::new(Body::from(API_V1_SCHEMA_JSON));
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/schema+json"));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/schema+json"),
+    );
     Ok(response)
 }
 
@@ -2492,17 +2922,30 @@ mod tests {
 
         let guard = state.try_begin_replay();
         assert!(guard.is_some());
-        let busy = app.clone().oneshot(replay_request()).await.unwrap_or_else(|e| match e {});
+        let busy = app
+            .clone()
+            .oneshot(replay_request())
+            .await
+            .unwrap_or_else(|e| match e {});
         assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(busy.headers().get("retry-after").and_then(|v| v.to_str().ok()), Some("5"));
+        assert_eq!(
+            busy.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("5")
+        );
         let body = axum::body::to_bytes(busy.into_body(), usize::MAX)
             .await
             .unwrap_or_else(|e| panic!("{e}"));
-        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|e| panic!("{e}"));
+        let problem: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(problem["code"], "replay_in_progress");
 
         drop(guard);
-        let ok = app.oneshot(replay_request()).await.unwrap_or_else(|e| match e {});
+        let ok = app
+            .oneshot(replay_request())
+            .await
+            .unwrap_or_else(|e| match e {});
         assert_eq!(ok.status(), StatusCode::OK);
         let _ = PathBuf::new();
     }

@@ -181,7 +181,14 @@ fn run_search(args: &SearchArgs) -> Result<ExitCode, CliError> {
         };
         let scope = hit.item.scope.as_deref().unwrap_or("-");
         let updated = hit.item.updated.as_deref().unwrap_or("-");
-        outln!("{}\t{}{}\t{}\t{}", hit.item.path, hit.item.title, tags, scope, updated);
+        outln!(
+            "{}\t{}{}\t{}\t{}",
+            hit.item.path,
+            hit.item.title,
+            tags,
+            scope,
+            updated
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -241,7 +248,10 @@ fn run_record(args: &RecordArgs) -> Result<ExitCode, CliError> {
                     .map_err(|e| CliError::msg(format!("failed to render json: {e}")))?;
                 outln!("{json}");
             } else {
-                outln!("recorded {} （人が確認してから正本に入ります）", outcome.path);
+                outln!(
+                    "recorded {} （人が確認してから正本に入ります）",
+                    outcome.path
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -286,14 +296,16 @@ mod tests {
 
         // `search` は KB が無ければエラー（黙って空にしない）。
         let missing = dir.path().join("nope");
-        assert!(run_search(&SearchArgs {
-            query: vec!["x".into()],
-            scope: None,
-            limit: 10,
-            json: false,
-            root: args(&missing),
-        })
-        .is_err());
+        assert!(
+            run_search(&SearchArgs {
+                query: vec!["x".into()],
+                scope: None,
+                limit: 10,
+                json: false,
+                root: args(&missing),
+            })
+            .is_err()
+        );
 
         assert_eq!(
             run_search(&SearchArgs {

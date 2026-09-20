@@ -10,7 +10,10 @@ use sha2::{Digest, Sha256};
 use task_core::{ArtifactRef, Event, Status, Task, TaskKind, TaskStore, WorkspaceSpec};
 
 fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn write(path: &Path, contents: &[u8]) {
@@ -19,7 +22,10 @@ fn write(path: &Path, contents: &[u8]) {
 }
 
 fn produced(env: &TestEnv, task: &Task, run_id: &str, path: &str, sha: &str) {
-    let name = Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     env.store
         .append_event(
             task.id,
@@ -49,35 +55,72 @@ fn fixture() -> Fixture {
     let run_id = ulid::Ulid::new().to_string();
     let run_dir = env.workspace(&task).join("runs").join(&run_id);
     write(&run_dir.join("stdout.jsonl"), b"0123456789");
-    write(&run_dir.join("result.json"), b"{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}\n");
+    write(
+        &run_dir.join("result.json"),
+        b"{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}\n",
+    );
     Fixture { env, task, run_id }
 }
 
 #[tokio::test]
 async fn run_logs_are_served_with_closed_content_types() {
     let Fixture { env, task, run_id } = fixture();
-    write(&env.workspace(&task).join("runs").join(&run_id).join("stderr.log"), b"warn\n");
+    write(
+        &env.workspace(&task)
+            .join("runs")
+            .join(&run_id)
+            .join("stderr.log"),
+        b"warn\n",
+    );
     let app = env.router();
 
-    let stdout = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stdout", task.id))).await;
+    let stdout = send(
+        &app,
+        get(&format!("/api/v1/tasks/{}/runs/{run_id}/stdout", task.id)),
+    )
+    .await;
     assert_eq!(stdout.status, 200, "{}", stdout.text());
     assert_eq!(stdout.body, b"0123456789");
-    assert_eq!(stdout.header("content-type"), Some("text/plain; charset=utf-8"));
-    assert_eq!(stdout.header("content-disposition"), Some("inline; filename=\"stdout.jsonl\"; filename*=UTF-8''stdout.jsonl"));
+    assert_eq!(
+        stdout.header("content-type"),
+        Some("text/plain; charset=utf-8")
+    );
+    assert_eq!(
+        stdout.header("content-disposition"),
+        Some("inline; filename=\"stdout.jsonl\"; filename*=UTF-8''stdout.jsonl")
+    );
     assert_eq!(stdout.header("x-celeris-size"), Some("10"));
     assert_eq!(stdout.header("content-length"), Some("10"));
     assert_eq!(stdout.header("x-content-type-options"), Some("nosniff"));
     assert_eq!(stdout.header("x-celeris-sha256"), None);
 
-    let stderr = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stderr", task.id))).await;
+    let stderr = send(
+        &app,
+        get(&format!("/api/v1/tasks/{}/runs/{run_id}/stderr", task.id)),
+    )
+    .await;
     assert_eq!(stderr.status, 200);
-    assert_eq!(stderr.header("content-type"), Some("text/plain; charset=utf-8"));
+    assert_eq!(
+        stderr.header("content-type"),
+        Some("text/plain; charset=utf-8")
+    );
     assert_eq!(stderr.body, b"warn\n");
 
-    let result = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/result?download=1", task.id))).await;
+    let result = send(
+        &app,
+        get(&format!(
+            "/api/v1/tasks/{}/runs/{run_id}/result?download=1",
+            task.id
+        )),
+    )
+    .await;
     assert_eq!(result.status, 200);
     assert_eq!(result.header("content-type"), Some("application/json"));
-    assert!(result.header("content-disposition").is_some_and(|v| v.starts_with("attachment; filename=\"result.json\"")));
+    assert!(
+        result
+            .header("content-disposition")
+            .is_some_and(|v| v.starts_with("attachment; filename=\"result.json\""))
+    );
 }
 
 #[tokio::test]
@@ -85,8 +128,19 @@ async fn run_ids_that_are_not_ulids_are_forbidden() {
     let Fixture { env, task, .. } = fixture();
     let app = env.router();
     let lower = ulid::Ulid::new().to_string().to_ascii_lowercase();
-    for run_id in ["%2E%2E", "..", "abc", lower.as_str(), "%2E%2E%2F%2E%2E%2Fetc", "01J9ZX5T3K8Q7W6V5R4P3N2M1I"] {
-        let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stdout", task.id))).await;
+    for run_id in [
+        "%2E%2E",
+        "..",
+        "abc",
+        lower.as_str(),
+        "%2E%2E%2F%2E%2E%2Fetc",
+        "01J9ZX5T3K8Q7W6V5R4P3N2M1I",
+    ] {
+        let resp = send(
+            &app,
+            get(&format!("/api/v1/tasks/{}/runs/{run_id}/stdout", task.id)),
+        )
+        .await;
         assert_problem(&resp, 403, "path_forbidden");
     }
 }
@@ -97,13 +151,31 @@ async fn missing_runs_files_workspaces_and_tasks_are_404() {
     let app = env.router();
 
     let unknown_run = ulid::Ulid::new().to_string();
-    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{unknown_run}/stdout", task.id))).await;
+    let resp = send(
+        &app,
+        get(&format!(
+            "/api/v1/tasks/{}/runs/{unknown_run}/stdout",
+            task.id
+        )),
+    )
+    .await;
     assert_problem(&resp, 404, "run_not_found");
 
-    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stderr", task.id))).await;
+    let resp = send(
+        &app,
+        get(&format!("/api/v1/tasks/{}/runs/{run_id}/stderr", task.id)),
+    )
+    .await;
     assert_problem(&resp, 404, "file_not_found");
 
-    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stdout", task_core::TaskId::new()))).await;
+    let resp = send(
+        &app,
+        get(&format!(
+            "/api/v1/tasks/{}/runs/{run_id}/stdout",
+            task_core::TaskId::new()
+        )),
+    )
+    .await;
     assert_problem(&resp, 404, "task_not_found");
 
     let mut remote = new_task(TaskKind::Execute, Status::Running);
@@ -113,18 +185,41 @@ async fn missing_runs_files_workspaces_and_tasks_are_404() {
     };
     env.store.create_task(&remote, vec![]).expect("create");
     // ADR-0018 D1: Remote の run ファイルは写し `workspace_root/<task_id>` にある。写しがまだ無ければ 404。
-    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stdout", remote.id))).await;
+    let resp = send(
+        &app,
+        get(&format!("/api/v1/tasks/{}/runs/{run_id}/stdout", remote.id)),
+    )
+    .await;
     let problem = assert_problem(&resp, 404, "file_not_found");
     assert_eq!(problem["detail"], "workspace directory does not exist");
 
     let no_workspace = new_task(TaskKind::Execute, Status::Running);
-    env.store.create_task(&no_workspace, vec![]).expect("create");
-    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stdout", no_workspace.id))).await;
+    env.store
+        .create_task(&no_workspace, vec![])
+        .expect("create");
+    let resp = send(
+        &app,
+        get(&format!(
+            "/api/v1/tasks/{}/runs/{run_id}/stdout",
+            no_workspace.id
+        )),
+    )
+    .await;
     assert_problem(&resp, 404, "file_not_found");
 
     // ディレクトリはファイルとして返さない。
-    std::fs::create_dir_all(env.workspace(&task).join("runs").join(&run_id).join("stderr.log")).expect("mkdir");
-    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stderr", task.id))).await;
+    std::fs::create_dir_all(
+        env.workspace(&task)
+            .join("runs")
+            .join(&run_id)
+            .join("stderr.log"),
+    )
+    .expect("mkdir");
+    let resp = send(
+        &app,
+        get(&format!("/api/v1/tasks/{}/runs/{run_id}/stderr", task.id)),
+    )
+    .await;
     assert_problem(&resp, 403, "path_forbidden");
 }
 
@@ -135,8 +230,19 @@ async fn symlinked_run_directory_outside_the_workspace_is_forbidden() {
     let outside = env.dir.path().join("outside-run");
     write(&outside.join("stdout.jsonl"), b"secret");
     let linked_run = ulid::Ulid::new().to_string();
-    std::os::unix::fs::symlink(&outside, env.workspace(&task).join("runs").join(&linked_run)).expect("symlink");
-    let resp = send(&app, get(&format!("/api/v1/tasks/{}/runs/{linked_run}/stdout", task.id))).await;
+    std::os::unix::fs::symlink(
+        &outside,
+        env.workspace(&task).join("runs").join(&linked_run),
+    )
+    .expect("symlink");
+    let resp = send(
+        &app,
+        get(&format!(
+            "/api/v1/tasks/{}/runs/{linked_run}/stdout",
+            task.id
+        )),
+    )
+    .await;
     assert_problem(&resp, 403, "path_forbidden");
     assert!(!resp.text().contains("secret"));
 }
@@ -153,7 +259,13 @@ async fn artifact_paths_escaping_the_workspace_are_forbidden_but_listed() {
 
     produced(&env, &task, &run_id, "artifacts/ok.txt", &sha256(b"hello"));
     produced(&env, &task, &run_id, "../outside.txt", "x");
-    produced(&env, &task, &run_id, outside.to_str().expect("utf-8 path"), "x");
+    produced(
+        &env,
+        &task,
+        &run_id,
+        outside.to_str().expect("utf-8 path"),
+        "x",
+    );
     produced(&env, &task, &run_id, "artifacts/link.txt", "x");
     produced(&env, &task, &run_id, "artifacts/missing.txt", "x");
 
@@ -161,12 +273,24 @@ async fn artifact_paths_escaping_the_workspace_are_forbidden_but_listed() {
     assert_eq!(ok.status, 200, "{}", ok.text());
     assert_eq!(ok.body, b"hello");
     for idx in 1..=3 {
-        let resp = send(&app, get(&format!("/api/v1/tasks/{}/artifacts/{idx}", task.id))).await;
+        let resp = send(
+            &app,
+            get(&format!("/api/v1/tasks/{}/artifacts/{idx}", task.id)),
+        )
+        .await;
         assert_problem(&resp, 403, "path_forbidden");
         assert!(!resp.text().contains("outside secret"));
     }
-    assert_problem(&send(&app, get(&format!("/api/v1/tasks/{}/artifacts/4", task.id))).await, 404, "file_not_found");
-    assert_problem(&send(&app, get(&format!("/api/v1/tasks/{}/artifacts/5", task.id))).await, 404, "artifact_not_found");
+    assert_problem(
+        &send(&app, get(&format!("/api/v1/tasks/{}/artifacts/4", task.id))).await,
+        404,
+        "file_not_found",
+    );
+    assert_problem(
+        &send(&app, get(&format!("/api/v1/tasks/{}/artifacts/5", task.id))).await,
+        404,
+        "artifact_not_found",
+    );
 
     let list = send(&app, get(&format!("/api/v1/tasks/{}/artifacts", task.id))).await;
     assert_eq!(list.status, 200, "{}", list.text());
@@ -182,13 +306,34 @@ async fn artifact_paths_escaping_the_workspace_are_forbidden_but_listed() {
     assert_eq!(items[0]["sha256_matches"], true);
     assert_eq!(items[0]["artifact"]["path"], "artifacts/ok.txt");
     for item in &items[1..=3] {
-        assert_eq!((item["exists"].as_bool(), item["forbidden"].as_bool()), (Some(false), Some(true)), "{item}");
-        assert!(item["size"].is_null() && item["sha256_current"].is_null() && item["sha256_matches"].is_null());
+        assert_eq!(
+            (item["exists"].as_bool(), item["forbidden"].as_bool()),
+            (Some(false), Some(true)),
+            "{item}"
+        );
+        assert!(
+            item["size"].is_null()
+                && item["sha256_current"].is_null()
+                && item["sha256_matches"].is_null()
+        );
     }
-    assert_eq!((items[4]["exists"].as_bool(), items[4]["forbidden"].as_bool()), (Some(false), Some(false)));
+    assert_eq!(
+        (
+            items[4]["exists"].as_bool(),
+            items[4]["forbidden"].as_bool()
+        ),
+        (Some(false), Some(false))
+    );
     assert!(items[4]["sha256_matches"].is_null());
 
-    let missing = send(&app, get(&format!("/api/v1/tasks/{}/artifacts", task_core::TaskId::new()))).await;
+    let missing = send(
+        &app,
+        get(&format!(
+            "/api/v1/tasks/{}/artifacts",
+            task_core::TaskId::new()
+        )),
+    )
+    .await;
     assert_problem(&missing, 404, "task_not_found");
 }
 
@@ -230,9 +375,15 @@ async fn range_and_offset_requests_follow_the_spec() {
     assert_eq!(partial.header("accept-ranges"), Some("bytes"));
 
     let suffix = send(&app, get_with(&path, &[("range", "bytes=-3")])).await;
-    assert_eq!((suffix.status.as_u16(), suffix.body.as_slice()), (206, b"789".as_slice()));
+    assert_eq!(
+        (suffix.status.as_u16(), suffix.body.as_slice()),
+        (206, b"789".as_slice())
+    );
     let open_end = send(&app, get_with(&path, &[("range", "bytes=7-")])).await;
-    assert_eq!((open_end.status.as_u16(), open_end.body.as_slice()), (206, b"789".as_slice()));
+    assert_eq!(
+        (open_end.status.as_u16(), open_end.body.as_slice()),
+        (206, b"789".as_slice())
+    );
 
     for range in ["bytes=10-", "bytes=0-1,4-5", "bytes=5-2", "bytes=x-y"] {
         let resp = send(&app, get_with(&path, &[("range", range)])).await;
@@ -242,9 +393,15 @@ async fn range_and_offset_requests_follow_the_spec() {
     }
 
     let offset = send(&app, get(&format!("{path}?offset=4"))).await;
-    assert_eq!((offset.status.as_u16(), offset.body.as_slice()), (200, b"456789".as_slice()));
+    assert_eq!(
+        (offset.status.as_u16(), offset.body.as_slice()),
+        (200, b"456789".as_slice())
+    );
     let window = send(&app, get(&format!("{path}?offset=4&length=2"))).await;
-    assert_eq!((window.status.as_u16(), window.body.as_slice()), (200, b"45".as_slice()));
+    assert_eq!(
+        (window.status.as_u16(), window.body.as_slice()),
+        (200, b"45".as_slice())
+    );
     let at_end = send(&app, get(&format!("{path}?offset=10"))).await;
     assert_eq!(at_end.status, 200);
     assert!(at_end.body.is_empty());
@@ -252,14 +409,25 @@ async fn range_and_offset_requests_follow_the_spec() {
     let past_end = send(&app, get(&format!("{path}?offset=11"))).await;
     assert_problem(&past_end, 416, "range_not_satisfiable");
 
-    let both = send(&app, get_with(&format!("{path}?offset=1"), &[("range", "bytes=0-1")])).await;
+    let both = send(
+        &app,
+        get_with(&format!("{path}?offset=1"), &[("range", "bytes=0-1")]),
+    )
+    .await;
     assert_problem(&both, 400, "bad_request");
 
     // 追尾: ファイルが伸びたら続きだけ取れる。
-    let stdout = env.workspace(&task).join("runs").join(&run_id).join("stdout.jsonl");
+    let stdout = env
+        .workspace(&task)
+        .join("runs")
+        .join(&run_id)
+        .join("stdout.jsonl");
     std::fs::write(&stdout, b"0123456789abc").expect("append");
     let tail = send(&app, get(&format!("{path}?offset=10"))).await;
-    assert_eq!((tail.body.as_slice(), tail.header("x-celeris-size")), (b"abc".as_slice(), Some("13")));
+    assert_eq!(
+        (tail.body.as_slice(), tail.header("x-celeris-size")),
+        (b"abc".as_slice(), Some("13"))
+    );
 }
 
 #[tokio::test]
@@ -278,22 +446,51 @@ async fn artifact_content_types_never_include_active_types() {
     ];
     for (path, _) in &cases {
         write(&ws.join(path), b"<script>alert(1)</script>");
-        produced(&env, &task, &run_id, path, &sha256(b"<script>alert(1)</script>"));
+        produced(
+            &env,
+            &task,
+            &run_id,
+            path,
+            &sha256(b"<script>alert(1)</script>"),
+        );
     }
     for (idx, (path, content_type)) in cases.iter().enumerate() {
-        let resp = send(&app, get(&format!("/api/v1/tasks/{}/artifacts/{idx}", task.id))).await;
+        let resp = send(
+            &app,
+            get(&format!("/api/v1/tasks/{}/artifacts/{idx}", task.id)),
+        )
+        .await;
         assert_eq!(resp.status, 200, "{path}");
         assert_eq!(resp.header("content-type"), Some(*content_type), "{path}");
         assert_eq!(resp.header("x-content-type-options"), Some("nosniff"));
     }
-    let download = send(&app, get(&format!("/api/v1/tasks/{}/artifacts/0?download=1", task.id))).await;
+    let download = send(
+        &app,
+        get(&format!("/api/v1/tasks/{}/artifacts/0?download=1", task.id)),
+    )
+    .await;
     assert_eq!(
         download.header("content-disposition"),
         Some("attachment; filename=\"report.html\"; filename*=UTF-8''report.html")
     );
-    let inline = send(&app, get(&format!("/api/v1/tasks/{}/artifacts/0?download=0", task.id))).await;
-    assert!(inline.header("content-disposition").is_some_and(|v| v.starts_with("inline;")));
-    let bad = send(&app, get(&format!("/api/v1/tasks/{}/artifacts/0?download=yes", task.id))).await;
+    let inline = send(
+        &app,
+        get(&format!("/api/v1/tasks/{}/artifacts/0?download=0", task.id)),
+    )
+    .await;
+    assert!(
+        inline
+            .header("content-disposition")
+            .is_some_and(|v| v.starts_with("inline;"))
+    );
+    let bad = send(
+        &app,
+        get(&format!(
+            "/api/v1/tasks/{}/artifacts/0?download=yes",
+            task.id
+        )),
+    )
+    .await;
     assert_problem(&bad, 400, "bad_request");
 }
 
@@ -309,19 +506,30 @@ async fn sha256_current_changes_when_the_artifact_is_modified() {
 
     let before = send(&app, get(&path)).await;
     assert_eq!(before.header("x-celeris-sha256"), Some(recorded.as_str()));
-    assert_eq!(before.header("x-celeris-sha256-current"), Some(recorded.as_str()));
+    assert_eq!(
+        before.header("x-celeris-sha256-current"),
+        Some(recorded.as_str())
+    );
 
     std::fs::write(&file, b"{\"ns\":2}").expect("modify");
     let after = send(&app, get(&path)).await;
     assert_eq!(after.header("x-celeris-sha256"), Some(recorded.as_str()));
-    assert_eq!(after.header("x-celeris-sha256-current"), Some(sha256(b"{\"ns\":2}").as_str()));
+    assert_eq!(
+        after.header("x-celeris-sha256-current"),
+        Some(sha256(b"{\"ns\":2}").as_str())
+    );
 
     // Range 付きでもハッシュはファイル全体。
     let ranged = send(&app, get_with(&path, &[("range", "bytes=0-0")])).await;
     assert_eq!(ranged.status, 206);
-    assert_eq!(ranged.header("x-celeris-sha256-current"), Some(sha256(b"{\"ns\":2}").as_str()));
+    assert_eq!(
+        ranged.header("x-celeris-sha256-current"),
+        Some(sha256(b"{\"ns\":2}").as_str())
+    );
 
-    let list = send(&app, get(&format!("/api/v1/tasks/{}/artifacts", task.id))).await.json();
+    let list = send(&app, get(&format!("/api/v1/tasks/{}/artifacts", task.id)))
+        .await
+        .json();
     assert_eq!(list["items"][0]["sha256_matches"], false);
     assert_eq!(list["items"][0]["sha256_current"], sha256(b"{\"ns\":2}"));
 }

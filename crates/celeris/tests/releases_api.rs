@@ -21,8 +21,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use task_core::{DaemonMode, InstanceRole, SharedRole, SqliteStore};
 use celeris::Config;
+use task_core::{DaemonMode, InstanceRole, SharedRole, SqliteStore};
 
 const TOKEN: &str = "releases-test-token";
 
@@ -46,7 +46,8 @@ impl Api {
         let releases = home.join("releases");
         std::fs::create_dir_all(&releases).unwrap_or_else(|e| panic!("releases: {e}"));
         std::fs::create_dir_all(home.join("ws")).unwrap_or_else(|e| panic!("ws: {e}"));
-        std::fs::write(home.join("api.token"), format!("{TOKEN}\n")).unwrap_or_else(|e| panic!("token: {e}"));
+        std::fs::write(home.join("api.token"), format!("{TOKEN}\n"))
+            .unwrap_or_else(|e| panic!("token: {e}"));
         let config_path = home.join("config.toml");
         std::fs::write(
             &config_path,
@@ -71,17 +72,26 @@ adapter = "fake"
         .unwrap_or_else(|e| panic!("config: {e}"));
 
         let config = Config::load(&config_path).unwrap_or_else(|e| panic!("load: {e}"));
-        assert_eq!(config.selfdeploy.releases_dir, releases, "relative releases_dir must be config-dir based");
+        assert_eq!(
+            config.selfdeploy.releases_dir, releases,
+            "relative releases_dir must be config-dir based"
+        );
         // ADR-0041 D3: `on_main` が見る作業チェックアウトも tempdir の中に閉じる
         // （**人の本物のリポジトリは触らない**。既定の `~/workspace/agent-platform` を使わせない）。
-        assert_eq!(config.selfdeploy.repo, home.join("repo"), "relative repo must be config-dir based");
+        assert_eq!(
+            config.selfdeploy.repo,
+            home.join("repo"),
+            "relative repo must be config-dir based"
+        );
         // マイグレーションを流す（`GET /releases` は `daemon_instances` を読む）。
         let _store = SqliteStore::open(&config.db).unwrap_or_else(|e| panic!("open: {e}"));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap_or_else(|e| panic!("bind: {e}"));
-        let addr: SocketAddr = listener.local_addr().unwrap_or_else(|e| panic!("addr: {e}"));
+        let addr: SocketAddr = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("addr: {e}"));
         let settings = celeris::api_settings(
             &config,
             addr,
@@ -94,7 +104,8 @@ adapter = "fake"
             SharedRole::new(InstanceRole::Active),
         );
         let (daemon_tx, daemon_rx) = tokio::sync::watch::channel(None);
-        let state = task_api::ApiState::new(settings, daemon_rx).unwrap_or_else(|e| panic!("state: {e}"));
+        let state =
+            task_api::ApiState::new(settings, daemon_rx).unwrap_or_else(|e| panic!("state: {e}"));
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let handle = tokio::spawn(task_api::serve_with_listener(listener, state, async move {
             let _ = stopped.await;
@@ -121,10 +132,20 @@ adapter = "fake"
     }
 
     /// `<releases>/<sha>/` を作り、渡した JSON を置く。
-    fn release(&self, sha: &str, manifest: Option<&str>, gate: Option<&str>, verify: Option<&str>) -> PathBuf {
+    fn release(
+        &self,
+        sha: &str,
+        manifest: Option<&str>,
+        gate: Option<&str>,
+        verify: Option<&str>,
+    ) -> PathBuf {
         let dir = self.releases.join(sha);
         std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
-        for (name, body) in [("manifest.json", manifest), ("gate.json", gate), ("verify.json", verify)] {
+        for (name, body) in [
+            ("manifest.json", manifest),
+            ("gate.json", gate),
+            ("verify.json", verify),
+        ] {
             if let Some(body) = body {
                 std::fs::write(dir.join(name), body).unwrap_or_else(|e| panic!("write: {e}"));
             }
@@ -138,8 +159,11 @@ adapter = "fake"
         let scripts = self.releases.join(sha).join("scripts");
         std::fs::create_dir_all(&scripts).unwrap_or_else(|e| panic!("mkdir: {e}"));
         let script = scripts.join("promote.sh");
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '{marker} %s\\n' \"$1\"\nsleep 3\n"))
-            .unwrap_or_else(|e| panic!("write: {e}"));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '{marker} %s\\n' \"$1\"\nsleep 3\n"),
+        )
+        .unwrap_or_else(|e| panic!("write: {e}"));
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|e| panic!("chmod: {e}"));
     }
@@ -174,7 +198,8 @@ adapter = "fake"
     fn link(&self, name: &str, sha: &str) {
         let link = self.home.join(name);
         let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(format!("releases/{sha}"), &link).unwrap_or_else(|e| panic!("symlink: {e}"));
+        std::os::unix::fs::symlink(format!("releases/{sha}"), &link)
+            .unwrap_or_else(|e| panic!("symlink: {e}"));
     }
 
     /// 読み取り（`GET /releases` は**管理系ではない**が、`token_file` を設定した構成では通常の
@@ -188,10 +213,16 @@ adapter = "fake"
         if let Some(token) = token {
             req = req.header("authorization", format!("Bearer {token}"));
         }
-        let resp = req.send().await.unwrap_or_else(|e| panic!("get {path}: {e}"));
+        let resp = req
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("get {path}: {e}"));
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        (status, serde_json::from_str(&body).unwrap_or(serde_json::Value::Null))
+        (
+            status,
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null),
+        )
     }
 
     async fn post(&self, path: &str, token: Option<&str>) -> (u16, serde_json::Value) {
@@ -202,10 +233,16 @@ adapter = "fake"
         if let Some(token) = token {
             req = req.header("authorization", format!("Bearer {token}"));
         }
-        let resp = req.send().await.unwrap_or_else(|e| panic!("post {path}: {e}"));
+        let resp = req
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("post {path}: {e}"));
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        (status, serde_json::from_str(&body).unwrap_or(serde_json::Value::Null))
+        (
+            status,
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null),
+        )
     }
 }
 
@@ -266,9 +303,14 @@ async fn get_releases_sorts_newest_first_and_tolerates_broken_releases() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["current"], "aaaaaaaaaaaa");
     assert!(body["previous"].is_null());
-    let items = body["items"].as_array().unwrap_or_else(|| panic!("items: {body}"));
+    let items = body["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("items: {body}"));
     assert_eq!(
-        items.iter().map(|i| i["sha12"].as_str().unwrap_or("")).collect::<Vec<_>>(),
+        items
+            .iter()
+            .map(|i| i["sha12"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>(),
         ["bbbbbbbbbbbb", "aaaaaaaaaaaa", "cccccccccccc"],
         "built_at の新しい順（読めなかったものは最後）: {body}"
     );
@@ -283,7 +325,10 @@ async fn get_releases_sorts_newest_first_and_tolerates_broken_releases() {
     assert_eq!(items[1]["verify"]["at"], "2026-09-18T01:00:00Z");
     assert_eq!(items[2]["gate_ok"], false);
     assert!(
-        items[2]["problem"].as_str().unwrap_or_default().contains("manifest.json"),
+        items[2]["problem"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("manifest.json"),
         "{body}"
     );
     // `.build` は一覧に出ない。
@@ -295,7 +340,12 @@ async fn get_releases_sorts_newest_first_and_tolerates_broken_releases() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn promote_requires_a_token() {
     let api = Api::start().await;
-    api.release("aaaaaaaaaaaa", Some("{}"), Some(r#"{"ok":true}"#), Some(r#"{"ok":true,"live_ok":true}"#));
+    api.release(
+        "aaaaaaaaaaaa",
+        Some("{}"),
+        Some(r#"{"ok":true}"#),
+        Some(r#"{"ok":true,"live_ok":true}"#),
+    );
     let (status, body) = api.post("/releases/aaaaaaaaaaaa/promote", None).await;
     assert_eq!(status, 401, "{body}");
     assert_eq!(body["code"], "unauthorized");
@@ -306,7 +356,9 @@ async fn promote_requires_a_token() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn promoting_an_unknown_release_is_404() {
     let api = Api::start().await;
-    let (status, body) = api.post("/releases/aaaaaaaaaaaa/promote", Some(TOKEN)).await;
+    let (status, body) = api
+        .post("/releases/aaaaaaaaaaaa/promote", Some(TOKEN))
+        .await;
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["code"], "release_not_found");
     let (status, body) = api.post("/releases/notahexsha/promote", Some(TOKEN)).await;
@@ -321,12 +373,25 @@ async fn promoting_is_409_when_unverified_already_current_or_already_promoting()
     let api = Api::start().await;
 
     // (1) verify.json が無い＝未検証。
-    api.release("aaaaaaaaaaaa", Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#), Some(r#"{"ok":true}"#), None);
+    api.release(
+        "aaaaaaaaaaaa",
+        Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#),
+        Some(r#"{"ok":true}"#),
+        None,
+    );
     api.fake_promote_script("aaaaaaaaaaaa", "fake promote");
-    let (status, body) = api.post("/releases/aaaaaaaaaaaa/promote", Some(TOKEN)).await;
+    let (status, body) = api
+        .post("/releases/aaaaaaaaaaaa/promote", Some(TOKEN))
+        .await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["code"], "release_not_promotable");
-    assert!(body["detail"].as_str().unwrap_or_default().contains("verify"), "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("verify"),
+        "{body}"
+    );
 
     // (2) 既に current。
     std::fs::write(
@@ -335,10 +400,18 @@ async fn promoting_is_409_when_unverified_already_current_or_already_promoting()
     )
     .unwrap_or_else(|e| panic!("write: {e}"));
     api.link("current", "aaaaaaaaaaaa");
-    let (status, body) = api.post("/releases/aaaaaaaaaaaa/promote", Some(TOKEN)).await;
+    let (status, body) = api
+        .post("/releases/aaaaaaaaaaaa/promote", Some(TOKEN))
+        .await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["code"], "release_not_promotable");
-    assert!(body["detail"].as_str().unwrap_or_default().contains("current"), "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("current"),
+        "{body}"
+    );
 
     // (3) 既に昇格中（生きている pid の promote.lock）。
     api.release(
@@ -353,10 +426,18 @@ async fn promoting_is_409_when_unverified_already_current_or_already_promoting()
         format!("{}\n", std::process::id()),
     )
     .unwrap_or_else(|e| panic!("write: {e}"));
-    let (status, body) = api.post("/releases/bbbbbbbbbbbb/promote", Some(TOKEN)).await;
+    let (status, body) = api
+        .post("/releases/bbbbbbbbbbbb/promote", Some(TOKEN))
+        .await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["code"], "release_not_promotable");
-    assert!(body["detail"].as_str().unwrap_or_default().contains("already running"), "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already running"),
+        "{body}"
+    );
     api.shutdown().await;
 }
 
@@ -373,14 +454,25 @@ async fn promoting_a_verified_release_starts_the_bundled_script_and_returns_202(
     );
     api.fake_promote_script("abcdef123456", "fake promote");
 
-    let (status, body) = api.post("/releases/abcdef123456/promote", Some(TOKEN)).await;
+    let (status, body) = api
+        .post("/releases/abcdef123456/promote", Some(TOKEN))
+        .await;
     assert_eq!(status, 202, "{body}");
     assert_eq!(body["sha12"], "abcdef123456");
     assert!(
-        body["log"].as_str().unwrap_or_default().ends_with("abcdef123456/promote.log"),
+        body["log"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("abcdef123456/promote.log"),
         "{body}"
     );
-    assert!(body["started_at"].as_str().unwrap_or_default().contains('T'), "{body}");
+    assert!(
+        body["started_at"]
+            .as_str()
+            .unwrap_or_default()
+            .contains('T'),
+        "{body}"
+    );
     // `current` が無い（初回）ので、昇格先に同梱されたスクリプトを使う（ADR-0041 D4）。
     assert_eq!(body["script_from"], "target", "{body}");
 
@@ -399,7 +491,9 @@ async fn promoting_a_verified_release_starts_the_bundled_script_and_returns_202(
     let (status, body) = api.get("/releases").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["items"][0]["promoting"], true, "{body}");
-    let (status, body) = api.post("/releases/abcdef123456/promote", Some(TOKEN)).await;
+    let (status, body) = api
+        .post("/releases/abcdef123456/promote", Some(TOKEN))
+        .await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["code"], "release_not_promotable");
     api.shutdown().await;
@@ -427,18 +521,26 @@ async fn promoting_prefers_the_promote_script_of_the_current_release() {
     api.fake_promote_script("aaaaaaaaaaaa", "current-script");
     api.link("current", "aaaaaaaaaaaa");
 
-    let (status, body) = api.post("/releases/bbbbbbbbbbbb/promote", Some(TOKEN)).await;
+    let (status, body) = api
+        .post("/releases/bbbbbbbbbbbb/promote", Some(TOKEN))
+        .await;
     assert_eq!(status, 202, "{body}");
     assert_eq!(body["script_from"], "current", "{body}");
     // ログは昇格先の `promote.log`（人が見る場所は変わらない）。
     assert!(
-        body["log"].as_str().unwrap_or_default().ends_with("bbbbbbbbbbbb/promote.log"),
+        body["log"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("bbbbbbbbbbbb/promote.log"),
         "{body}"
     );
     let log = api.releases.join("bbbbbbbbbbbb").join("promote.log");
     let text = wait_for(&log, "current-script bbbbbbbbbbbb");
     assert!(text.contains("current-script bbbbbbbbbbbb"), "{text:?}");
-    assert!(!text.contains("target-script"), "昇格先のスクリプトは走らない: {text:?}");
+    assert!(
+        !text.contains("target-script"),
+        "昇格先のスクリプトは走らない: {text:?}"
+    );
     api.shutdown().await;
 }
 
@@ -489,18 +591,29 @@ async fn get_releases_carries_promoted_at_on_main_and_changes() {
 
     let (status, body) = api.get("/releases").await;
     assert_eq!(status, 200, "{body}");
-    let items = body["items"].as_array().unwrap_or_else(|| panic!("items: {body}"));
+    let items = body["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("items: {body}"));
     assert_eq!(items[0]["sha12"], "bbbbbbbbbbbb", "{body}");
 
     // 新しい方: 未昇格・main に未反映・差分あり（安全に関わる変更 1 件）。
     assert!(items[0]["promoted_at"].is_null(), "{body}");
     assert_eq!(items[0]["on_main"], false, "{body}");
     assert_eq!(items[0]["changes"]["base"], "aaaaaaaaaaaa", "{body}");
-    assert_eq!(items[0]["changes"]["stale"], false, "base == current: {body}");
+    assert_eq!(
+        items[0]["changes"]["stale"], false,
+        "base == current: {body}"
+    );
     assert_eq!(items[0]["changes"]["commit_count"], 1, "{body}");
     assert_eq!(items[0]["changes"]["file_count"], 2, "{body}");
-    assert_eq!(items[0]["changes"]["sensitive"][0], "scripts/selfdeploy/verify.sh", "{body}");
-    assert_eq!(items[0]["changes"]["commits"][0]["subject"], "phase 50: 検証の直列化", "{body}");
+    assert_eq!(
+        items[0]["changes"]["sensitive"][0], "scripts/selfdeploy/verify.sh",
+        "{body}"
+    );
+    assert_eq!(
+        items[0]["changes"]["commits"][0]["subject"], "phase 50: 検証の直列化",
+        "{body}"
+    );
 
     // いまの current: 昇格済み・main に反映済み・`changes.json` が無いので null。
     assert_eq!(items[1]["promoted_at"], "2026-09-18T02:00:00Z", "{body}");

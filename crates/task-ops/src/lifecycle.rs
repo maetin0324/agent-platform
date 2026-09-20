@@ -24,7 +24,8 @@
 //! LLM も I/O も使わない（DESIGN 原則 1）。
 
 use task_core::{
-    Milestone, MilestoneId, MilestoneStatus, Project, ProjectId, ProjectStatus, Status, TaskStore, Trigger,
+    Milestone, MilestoneId, MilestoneStatus, Project, ProjectId, ProjectStatus, Status, TaskStore,
+    Trigger,
 };
 use time::OffsetDateTime;
 
@@ -57,9 +58,17 @@ const CASCADE_TASK_LIMIT: usize = 5_000;
 
 /// `filter` に合うタスクを（アーカイブの有無に関わらず）集める。索引の効く列で絞るので
 /// 全件を読まない。
-fn tasks_matching(store: &dyn TaskStore, filter: task_core::ListFilter) -> Result<Vec<task_core::Task>, OpsError> {
+fn tasks_matching(
+    store: &dyn TaskStore,
+    filter: task_core::ListFilter,
+) -> Result<Vec<task_core::Task>, OpsError> {
     Ok(store
-        .list_page(&filter, task_core::ListOrder::CreatedDesc, None, CASCADE_TASK_LIMIT)?
+        .list_page(
+            &filter,
+            task_core::ListOrder::CreatedDesc,
+            None,
+            CASCADE_TASK_LIMIT,
+        )?
         .items)
 }
 
@@ -75,7 +84,10 @@ fn project_tasks(store: &dyn TaskStore, id: ProjectId) -> Result<Vec<task_core::
 }
 
 /// その途中目標のタスク。
-fn milestone_tasks(store: &dyn TaskStore, id: MilestoneId) -> Result<Vec<task_core::Task>, OpsError> {
+fn milestone_tasks(
+    store: &dyn TaskStore,
+    id: MilestoneId,
+) -> Result<Vec<task_core::Task>, OpsError> {
     tasks_matching(
         store,
         task_core::ListFilter {
@@ -118,7 +130,9 @@ fn project_or_404(store: &dyn TaskStore, id: ProjectId) -> Result<Project, OpsEr
 }
 
 fn milestone_or_404(store: &dyn TaskStore, id: MilestoneId) -> Result<Milestone, OpsError> {
-    store.milestone_get(id)?.ok_or(OpsError::MilestoneNotFound(id))
+    store
+        .milestone_get(id)?
+        .ok_or(OpsError::MilestoneNotFound(id))
 }
 
 fn project_conflict(project: &Project, action: &str) -> OpsError {
@@ -151,7 +165,8 @@ pub fn cancel_project(store: &dyn TaskStore, id: ProjectId) -> Result<ProjectLif
     if project.status == ProjectStatus::Cancelled {
         return Err(project_conflict(&project, "cancelled"));
     }
-    let cancelled_tasks = cancel_tasks(store, project_tasks(store, id)?, Trigger::ProjectCancelled)?;
+    let cancelled_tasks =
+        cancel_tasks(store, project_tasks(store, id)?, Trigger::ProjectCancelled)?;
     let mut cancelled_milestones = Vec::new();
     for milestone in store.milestone_list(id)? {
         if milestone_is_cancellable(milestone.status) {
@@ -218,7 +233,10 @@ pub fn archive_project(
 }
 
 /// `POST /projects/{id}/unarchive`。アーカイブされていなければそのまま返す。
-pub fn unarchive_project(store: &dyn TaskStore, id: ProjectId) -> Result<ProjectLifecycle, OpsError> {
+pub fn unarchive_project(
+    store: &dyn TaskStore,
+    id: ProjectId,
+) -> Result<ProjectLifecycle, OpsError> {
     let project = project_or_404(store, id)?;
     if project.archived_at.is_some() {
         store.project_set_archived_at(id, None)?;
@@ -233,12 +251,19 @@ pub fn unarchive_project(store: &dyn TaskStore, id: ProjectId) -> Result<Project
 // ---- 途中目標 ----
 
 /// `POST /milestones/{id}/cancel`。既に `cancelled` なら 409。
-pub fn cancel_milestone(store: &dyn TaskStore, id: MilestoneId) -> Result<MilestoneLifecycle, OpsError> {
+pub fn cancel_milestone(
+    store: &dyn TaskStore,
+    id: MilestoneId,
+) -> Result<MilestoneLifecycle, OpsError> {
     let milestone = milestone_or_404(store, id)?;
     if !milestone_is_cancellable(milestone.status) {
         return Err(milestone_conflict(&milestone, "cancelled"));
     }
-    let cancelled_tasks = cancel_tasks(store, milestone_tasks(store, id)?, Trigger::MilestoneCancelled)?;
+    let cancelled_tasks = cancel_tasks(
+        store,
+        milestone_tasks(store, id)?,
+        Trigger::MilestoneCancelled,
+    )?;
     store.milestone_set_lifecycle(id, MilestoneStatus::Cancelled, Some(None))?;
     Ok(MilestoneLifecycle {
         milestone: milestone_or_404(store, id)?,
@@ -247,7 +272,10 @@ pub fn cancel_milestone(store: &dyn TaskStore, id: MilestoneId) -> Result<Milest
 }
 
 /// `POST /milestones/{id}/pause`。`cancelled` と既に `paused` は 409。
-pub fn pause_milestone(store: &dyn TaskStore, id: MilestoneId) -> Result<MilestoneLifecycle, OpsError> {
+pub fn pause_milestone(
+    store: &dyn TaskStore,
+    id: MilestoneId,
+) -> Result<MilestoneLifecycle, OpsError> {
     let milestone = milestone_or_404(store, id)?;
     if milestone.status == MilestoneStatus::Paused || milestone.status.is_terminal() {
         return Err(milestone_conflict(&milestone, "paused"));
@@ -261,7 +289,10 @@ pub fn pause_milestone(store: &dyn TaskStore, id: MilestoneId) -> Result<Milesto
 
 /// `POST /milestones/{id}/resume`。`paused` でなければ 409。戻り先は `paused_from`
 /// （無ければ `in_progress`）。
-pub fn resume_milestone(store: &dyn TaskStore, id: MilestoneId) -> Result<MilestoneLifecycle, OpsError> {
+pub fn resume_milestone(
+    store: &dyn TaskStore,
+    id: MilestoneId,
+) -> Result<MilestoneLifecycle, OpsError> {
     let milestone = milestone_or_404(store, id)?;
     if milestone.status != MilestoneStatus::Paused {
         return Err(milestone_conflict(&milestone, "resumed"));
@@ -278,8 +309,8 @@ pub fn resume_milestone(store: &dyn TaskStore, id: MilestoneId) -> Result<Milest
 mod tests {
     use super::*;
     use task_core::{
-        ArtifactRef, Budget, Check, Criterion, ListFilter, ListOrder, SqliteStore, Task, TaskKind, Tier, WorkerHint,
-        WorkspaceSpec,
+        ArtifactRef, Budget, Check, Criterion, ListFilter, ListOrder, SqliteStore, Task, TaskKind,
+        Tier, WorkerHint, WorkspaceSpec,
     };
 
     fn store() -> SqliteStore {
@@ -300,7 +331,9 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        store.project_create(&project).unwrap_or_else(|e| panic!("create: {e}"));
+        store
+            .project_create(&project)
+            .unwrap_or_else(|e| panic!("create: {e}"));
         project
     }
 
@@ -312,6 +345,8 @@ mod tests {
     ) -> Task {
         let now = OffsetDateTime::now_utc();
         let task = Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,
@@ -356,7 +391,9 @@ mod tests {
             labels: Vec::new(),
             category: Default::default(),
         };
-        store.insert(&task).unwrap_or_else(|e| panic!("insert: {e}"));
+        store
+            .insert(&task)
+            .unwrap_or_else(|e| panic!("insert: {e}"));
         task
     }
 
@@ -380,14 +417,24 @@ mod tests {
         assert_eq!(result.cancelled_tasks.len(), 2);
         assert_eq!(result.cancelled_milestones, vec![open.id]);
 
-        let status_of = |id| store.get(id).unwrap_or_else(|e| panic!("{e}")).map(|t| t.status);
+        let status_of = |id| {
+            store
+                .get(id)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .map(|t| t.status)
+        };
         assert_eq!(status_of(running.id), Some(Status::Cancelled));
         assert_eq!(status_of(ready.id), Some(Status::Cancelled));
         assert_eq!(status_of(done.id), Some(Status::Done));
         // 他の案件のタスクは触らない。
         assert_eq!(status_of(other.id), Some(Status::Ready));
-        let milestones = store.milestone_list(project.id).unwrap_or_else(|e| panic!("{e}"));
-        let reached_now = milestones.iter().find(|m| m.id == reached.id).map(|m| m.status);
+        let milestones = store
+            .milestone_list(project.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let reached_now = milestones
+            .iter()
+            .find(|m| m.id == reached.id)
+            .map(|m| m.status);
         assert_eq!(reached_now, Some(MilestoneStatus::Reached));
     }
 
@@ -451,7 +498,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         let paused = pause_milestone(&store, milestone.id).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(paused.milestone.status, MilestoneStatus::Paused);
-        assert_eq!(paused.milestone.paused_from, Some(MilestoneStatus::InProgress));
+        assert_eq!(
+            paused.milestone.paused_from,
+            Some(MilestoneStatus::InProgress)
+        );
         let resumed = resume_milestone(&store, milestone.id).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(resumed.milestone.status, MilestoneStatus::InProgress);
         assert_eq!(resumed.milestone.paused_from, None);
@@ -518,7 +568,10 @@ mod tests {
         assert!(!ready(&store).contains(&task.id));
         // 状態機械は触らない: タスクは `ready` のまま。
         assert_eq!(
-            store.get(task.id).unwrap_or_else(|e| panic!("{e}")).map(|t| t.status),
+            store
+                .get(task.id)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .map(|t| t.status),
             Some(Status::Ready)
         );
 
@@ -562,11 +615,17 @@ mod tests {
                 .milestone_create(project.id, "終わった", "", status)
                 .unwrap_or_else(|e| panic!("{e}"));
             assert!(
-                matches!(cancel_milestone(&store, milestone.id), Err(OpsError::InvalidLifecycle { .. })),
+                matches!(
+                    cancel_milestone(&store, milestone.id),
+                    Err(OpsError::InvalidLifecycle { .. })
+                ),
                 "cancel {status:?}"
             );
             assert!(
-                matches!(pause_milestone(&store, milestone.id), Err(OpsError::InvalidLifecycle { .. })),
+                matches!(
+                    pause_milestone(&store, milestone.id),
+                    Err(OpsError::InvalidLifecycle { .. })
+                ),
                 "pause {status:?}"
             );
         }

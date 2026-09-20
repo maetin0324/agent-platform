@@ -54,7 +54,12 @@ impl ConsoleCursor {
 
     /// 文字列表現（GUI にはただの不透明な文字列として渡す）。`at_nanos` は 0 詰め 20 桁。
     pub fn encode(&self) -> String {
-        format!("{:020}.{}.{}", self.at_nanos.max(0), self.event_id, self.tie)
+        format!(
+            "{:020}.{}.{}",
+            self.at_nanos.max(0),
+            self.event_id,
+            self.tie
+        )
     }
 
     /// `encode` の逆。形が違えば `None`（API は 400 にする）。
@@ -131,7 +136,8 @@ pub struct ConsoleProgress {
 /// 混ざって入るため。ADR-0007 D5）。`WorkerProgress` 以外の行は無視する。
 pub fn group_progress<'a>(rows: impl IntoIterator<Item = &'a EventRow>) -> Vec<ConsoleProgress> {
     let mut order: Vec<(TaskId, String)> = Vec::new();
-    let mut groups: std::collections::HashMap<(TaskId, String), ConsoleProgress> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<(TaskId, String), ConsoleProgress> =
+        std::collections::HashMap::new();
     for row in rows {
         let Event::WorkerProgress { run_id, msg, .. } = &row.event else {
             continue;
@@ -321,7 +327,11 @@ mod tests {
         let t2 = TaskId::new();
         let mut rows = Vec::new();
         let mut id = 0;
-        let mut push = |rows: &mut Vec<EventRow>, task: TaskId, run: &str, secs: u32, fields: ProgressFields| {
+        let mut push = |rows: &mut Vec<EventRow>,
+                        task: TaskId,
+                        run: &str,
+                        secs: u32,
+                        fields: ProgressFields| {
             id += 1;
             let ts = format!("2026-09-20T01:00:{secs:02}Z");
             rows.push(row(
@@ -332,19 +342,33 @@ mod tests {
                 Event::worker_progress_with(run, format!("msg {id}"), fields),
             ));
         };
-        push(&mut rows, t1, "r1", 0, ProgressFields::of(ProgressKind::Status).with_summary("starting"));
+        push(
+            &mut rows,
+            t1,
+            "r1",
+            0,
+            ProgressFields::of(ProgressKind::Status).with_summary("starting"),
+        );
         for i in 1..=8u32 {
             push(
                 &mut rows,
                 t1,
                 "r1",
                 i,
-                ProgressFields::of(ProgressKind::ToolUse).with_tool("Bash").with_summary(format!("cmd {i}")),
+                ProgressFields::of(ProgressKind::ToolUse)
+                    .with_tool("Bash")
+                    .with_summary(format!("cmd {i}")),
             );
         }
         // 別のタスク・別の run は別の束。間に挟まっても 1 件にまとまる。
         push(&mut rows, t2, "r2", 3, ProgressFields::default());
-        push(&mut rows, t1, "r1", 9, ProgressFields::of(ProgressKind::Status).with_summary("finishing"));
+        push(
+            &mut rows,
+            t1,
+            "r1",
+            9,
+            ProgressFields::of(ProgressKind::Status).with_summary("finishing"),
+        );
 
         let groups = group_progress(&rows);
         assert_eq!(groups.len(), 2);
@@ -370,7 +394,13 @@ mod tests {
         assert!(g2.first[0].text.starts_with("msg "));
         assert!(g2.last.is_empty());
         // `WorkerProgress` 以外は無視する。
-        let other = vec![row(99, 0, t1, "2026-09-20T02:00:00Z", Event::ApprovalRequested)];
+        let other = vec![row(
+            99,
+            0,
+            t1,
+            "2026-09-20T02:00:00Z",
+            Event::ApprovalRequested,
+        )];
         assert!(group_progress(&other).is_empty());
     }
 }

@@ -204,11 +204,26 @@ deliverables = "figures"
     fn every_section_of_the_adr_example_parses() {
         let cfg = parse(FULL).expect("parse");
         assert_eq!(cfg.workspace.name.as_deref(), Some("benchfs"));
-        assert_eq!(cfg.workspace.description.as_deref(), Some("ad-hoc FS のベンチマーク（Rust）"));
+        assert_eq!(
+            cfg.workspace.description.as_deref(),
+            Some("ad-hoc FS のベンチマーク（Rust）")
+        );
         assert_eq!(cfg.run.mode, RunMode::Container);
-        assert_eq!(cfg.container.image.as_deref(), Some("ghcr.io/x/rust-dev:1.90"));
-        assert_eq!(cfg.container.mounts, vec!["/dev/infiniband:/dev/infiniband"]);
-        assert_eq!(cfg.container.env.get("CARGO_TARGET_DIR").map(String::as_str), Some("/workspaces/.cargo-target"));
+        assert_eq!(
+            cfg.container.image.as_deref(),
+            Some("ghcr.io/x/rust-dev:1.90")
+        );
+        assert_eq!(
+            cfg.container.mounts,
+            vec!["/dev/infiniband:/dev/infiniband"]
+        );
+        assert_eq!(
+            cfg.container
+                .env
+                .get("CARGO_TARGET_DIR")
+                .map(String::as_str),
+            Some("/workspaces/.cargo-target")
+        );
         assert_eq!(cfg.commands.setup, vec!["cargo fetch"]);
         assert_eq!(cfg.commands.check.len(), 2);
         assert_eq!(cfg.outputs.docs, "doc");

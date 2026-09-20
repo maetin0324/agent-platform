@@ -11,7 +11,9 @@ use ulid::Ulid;
 use crate::model::TaskId;
 
 /// コメントの一意識別子（ULID）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct CommentId(#[schemars(with = "String")] pub Ulid);
 
 impl CommentId {
@@ -122,7 +124,9 @@ impl TaskComment {
             return Err("comment body must not be blank".to_string());
         }
         if body.chars().count() > MAX_COMMENT_CHARS {
-            return Err(format!("comment body must be at most {MAX_COMMENT_CHARS} characters"));
+            return Err(format!(
+                "comment body must be at most {MAX_COMMENT_CHARS} characters"
+            ));
         }
         Ok(())
     }

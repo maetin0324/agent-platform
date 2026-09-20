@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use task_core::{
-    AccountAdapter, CONVERSATION_GENRE, DelegationLimits, OrgKind, OrgNode, RoleSpec, Tier, WorkerHint, valid_org_id,
+    AccountAdapter, CONVERSATION_GENRE, DelegationLimits, HarnessBudget, HarnessRegistry,
+    HarnessSpec, OrgKind, OrgNode, Profile, RoleSpec, Tier, WorkerHint, valid_org_id,
 };
 use task_dispatch::{AccountsRuntimeConfig, ClusterSpec, DispatchConfig, ProviderSpec};
 
@@ -79,8 +80,15 @@ pub struct Config {
     #[serde(default)]
     pub roles: Vec<RoleConfig>,
     /// ADR-0027 D1: 分野ごとの説明と既定の役割。タスクの値 > 役割の既定 > 分野の既定（`default_role` の役割）> 親の値。
+    /// **ADR-0046 D3（Phase 59）以降は `[[harnesses]]` が正**で、ここは旧い設定の互換読み込みと、
+    /// `[[harnesses]]` からの射影（`Config::load` が埋める）の置き場になる。
     #[serde(default)]
     pub genres: Vec<GenreConfig>,
+    /// ADR-0046 D3（Phase 59）: ハーネス = 実行契約（`[[genres]]` + `[[roles]]` の後継）。
+    /// 書けばこちらが正で、`Config::load` が `genres` / `roles` に射影する（既存の経路はそのまま動く）。
+    /// 書かなければ旧い `[[genres]]` + `[[roles]]` を決定的に写す（warn を 1 行出す）。
+    #[serde(default)]
+    pub harnesses: Vec<HarnessConfig>,
     /// Phase 30（ADR-0033 D4 追記）: 対話が常に走る分野。実機の事故（関連研究調査課＝検索ハーネスに
     /// 話しかけたら検索ハーネスが会話しようとして落ちた）を受けて、対話は**ノードの `genre` を使わない**。
     /// 省略時は `conversation_genre_id()` が `task_core::CONVERSATION_GENRE`（`"secretary"`）を返す
@@ -479,11 +487,18 @@ impl ApiConfig {
         let Some(path) = &self.token_file else {
             return Ok(None);
         };
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::Invalid(format!("[api] token_file {} cannot be read: {e}", path.display())))?;
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            ConfigError::Invalid(format!(
+                "[api] token_file {} cannot be read: {e}",
+                path.display()
+            ))
+        })?;
         let token = text.trim();
         if token.is_empty() {
-            return Err(ConfigError::Invalid(format!("[api] token_file {} is empty", path.display())));
+            return Err(ConfigError::Invalid(format!(
+                "[api] token_file {} is empty",
+                path.display()
+            )));
         }
         Ok(Some(token.to_string()))
     }
@@ -501,6 +516,97 @@ pub const SMOKE_MAX_WALL_SECS: u64 = 60;
 /// 組み込みの役割 `smoke` の指示文。
 pub const SMOKE_INSTRUCTIONS: &str =
     "検証（staging）の煙試験。偽のアダプタが 1 往復するだけで、外に出る操作は何もしない。";
+
+/// ADR-0046 D3: TOML の基本文字列（`"` と `\\` と改行だけを逃がす。決定的）。
+fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// ADR-0046 D3: `Tier` の TOML の綴り。
+fn tier_str(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Frontier => "frontier",
+        Tier::Standard => "standard",
+        Tier::Cheap => "cheap",
+    }
+}
+
+/// `[[harnesses]] budget`（ADR-0046 D3）。
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessBudgetConfig {
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+}
+
+/// `[[harnesses]]`（ADR-0046 D3）: 実行契約。今までの `[[genres]]`（能力・入出力の契約・対話用か）と
+/// `[[roles]]`（adapter・tier・指示文・予算）を 1 つにしたもの。**組織と 1 対 1 にしない**。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessConfig {
+    /// タスクの `genre` 列がそのまま指す id（例 `"coding"` / `"literature"`）。
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    /// 省略時は tier だけで選ぶ（fake / claude-code / codex / acp / paperqa / local-deep-research）。
+    #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    pub tier: Option<Tier>,
+    /// ワーカーのプロンプトに前置きする指示文。`GET /config` には**出さない**。
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub input_artifacts: Vec<String>,
+    #[serde(default)]
+    pub output_artifacts: Vec<String>,
+    #[serde(default)]
+    pub budget: HarnessBudgetConfig,
+    /// 対話用のハーネスか（今までの「対話用分野」）。
+    #[serde(default)]
+    pub conversation: bool,
+}
+
+impl HarnessConfig {
+    /// task-core の型に写す（設定の順）。
+    pub fn to_spec(&self) -> HarnessSpec {
+        HarnessSpec {
+            id: self.id.clone(),
+            description: self.description.clone(),
+            adapter: self.adapter.clone(),
+            tier: self.tier,
+            instructions: self.instructions.clone(),
+            capabilities: self.capabilities.clone(),
+            input_artifacts: self.input_artifacts.clone(),
+            output_artifacts: self.output_artifacts.clone(),
+            budget: HarnessBudget {
+                max_turns: self.budget.max_turns,
+                max_wall_secs: self.budget.max_wall_secs,
+                max_retries: self.budget.max_retries,
+            },
+            conversation: self.conversation,
+        }
+    }
+}
 
 /// `[[roles]]`（ADR-0016 D1）: 役割ごとの既定。タスクに書かれた値 > ここの既定 > 全体の既定の順に効く。
 /// `id` は自由記述で、ここに無い役割名をタスクに付けてもよい（既定も指示文も無いだけ）。
@@ -593,6 +699,10 @@ pub struct OrgSeedConfig {
     /// 担当の一言。
     #[serde(default)]
     pub brief: String,
+    /// ADR-0046 D1（Phase 59）: このノードの profile（skills / knowledge / harnesses / tools / …）。
+    /// 種を蒔くときだけ使う（以後は DB が正）。
+    #[serde(default)]
+    pub profile: Option<Profile>,
     /// 同じ親の中での並び順。省略したらファイルの並び順（0 始まり）。
     #[serde(default)]
     pub position: Option<i64>,
@@ -1117,12 +1227,18 @@ fn default_provider_concurrency() -> usize {
 /// `providers_include` の glob（`<dir>/*.toml` の形だけを受け付ける）からディレクトリを取り出し、
 /// 相対なら `base` 基準で絶対化する（ADR-0017 M1）。
 fn providers_include_dir(pattern: &str, base: &Path) -> Result<PathBuf, ConfigError> {
-    let dir_part = pattern
-        .strip_suffix("*.toml")
-        .ok_or_else(|| ConfigError::Invalid(format!("providers_include must end with \"*.toml\" (got {pattern:?})")))?;
+    let dir_part = pattern.strip_suffix("*.toml").ok_or_else(|| {
+        ConfigError::Invalid(format!(
+            "providers_include must end with \"*.toml\" (got {pattern:?})"
+        ))
+    })?;
     let dir_part = dir_part.strip_suffix('/').unwrap_or(dir_part);
     let dir = PathBuf::from(dir_part);
-    Ok(if dir.is_relative() { base.join(dir) } else { dir })
+    Ok(if dir.is_relative() {
+        base.join(dir)
+    } else {
+        dir
+    })
 }
 
 /// `dir` 配下の `*.toml` をファイル名昇順で読み、それぞれを 1 件の `ProviderConfig`（`[[providers]]` の 1 行と同じ形）として
@@ -1132,7 +1248,10 @@ pub fn load_provider_files(dir: &Path) -> Result<Vec<ProviderConfig>, ConfigErro
         return Ok(Vec::new());
     }
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|source| ConfigError::Read { path: dir.to_path_buf(), source })?
+        .map_err(|source| ConfigError::Read {
+            path: dir.to_path_buf(),
+            source,
+        })?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
@@ -1140,7 +1259,10 @@ pub fn load_provider_files(dir: &Path) -> Result<Vec<ProviderConfig>, ConfigErro
     paths.sort();
     let mut providers = Vec::with_capacity(paths.len());
     for path in paths {
-        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read { path: path.clone(), source })?;
+        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+            path: path.clone(),
+            source,
+        })?;
         let provider: ProviderConfig = toml::from_str(&text)?;
         providers.push(provider);
     }
@@ -1171,7 +1293,8 @@ impl Config {
         // ADR-0042 D3: `workspace_root` の既定は `~/.local/celeris/workspaces`。`~` を展開してから、
         // それでも相対なら他のパス設定と同じく設定ファイルのディレクトリ基準にする
         // （`$HOME` が無い環境や `workspace_root = "workspaces"` と書いた既存の設定は従来どおり）。
-        cfg.workspace_root = task_core::expand_home(&cfg.workspace_root, task_core::home_dir().as_deref());
+        cfg.workspace_root =
+            task_core::expand_home(&cfg.workspace_root, task_core::home_dir().as_deref());
         if cfg.workspace_root.is_relative() {
             cfg.workspace_root = base.join(&cfg.workspace_root);
         }
@@ -1192,7 +1315,10 @@ impl Config {
                 let p = PathBuf::from(org_include);
                 if p.is_relative() { base.join(p) } else { p }
             };
-            let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read { path: path.clone(), source })?;
+            let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+                path: path.clone(),
+                source,
+            })?;
             let file: OrgSeedFile = toml::from_str(&text)?;
             cfg.org = file.org;
         }
@@ -1208,7 +1334,11 @@ impl Config {
             for slot in [&mut accounts.claude_dir, &mut accounts.codex_dir] {
                 if let Some(dir) = slot {
                     let expanded = task_core::expand_home(dir, home.as_deref());
-                    *slot = Some(if expanded.is_relative() { base.join(expanded) } else { expanded });
+                    *slot = Some(if expanded.is_relative() {
+                        base.join(expanded)
+                    } else {
+                        expanded
+                    });
                 }
             }
         }
@@ -1227,21 +1357,25 @@ impl Config {
             }
         }
         // ADR-0047 D1（Phase 61）: `[knowledge] root` も同じ扱い（既定の `~/knowledge` もここで絶対パスになる）。
-        cfg.knowledge.root = task_core::expand_home(&cfg.knowledge.root, task_core::home_dir().as_deref());
+        cfg.knowledge.root =
+            task_core::expand_home(&cfg.knowledge.root, task_core::home_dir().as_deref());
         if cfg.knowledge.root.is_relative() {
             cfg.knowledge.root = base.join(&cfg.knowledge.root);
         }
         // ADR-0040 D6 / ADR-0045 D2: `[selfdeploy] releases_dir` も同じ扱い
         // （既定の `~/.local/celeris/releases` もここで絶対パスになる）。
-        cfg.selfdeploy.releases_dir =
-            task_core::expand_home(&cfg.selfdeploy.releases_dir, task_core::home_dir().as_deref());
+        cfg.selfdeploy.releases_dir = task_core::expand_home(
+            &cfg.selfdeploy.releases_dir,
+            task_core::home_dir().as_deref(),
+        );
         if cfg.selfdeploy.releases_dir.is_relative() {
             cfg.selfdeploy.releases_dir = base.join(&cfg.selfdeploy.releases_dir);
         }
         // ADR-0041 D3: `[selfdeploy] repo` は**人のチェックアウト**なので `~` を展開する
         // （既定の `~/workspace/agent-platform` もここで絶対パスになる）。`$HOME` が無い環境や
         // 相対で書かれたときは、他のパス設定と同じく設定ファイルのディレクトリ基準。
-        cfg.selfdeploy.repo = task_core::expand_home(&cfg.selfdeploy.repo, task_core::home_dir().as_deref());
+        cfg.selfdeploy.repo =
+            task_core::expand_home(&cfg.selfdeploy.repo, task_core::home_dir().as_deref());
         if cfg.selfdeploy.repo.is_relative() {
             cfg.selfdeploy.repo = base.join(&cfg.selfdeploy.repo);
         }
@@ -1260,7 +1394,8 @@ impl Config {
         if let Some(settings) = &cfg.adapters.paperqa.settings
             && Path::new(settings).is_relative()
         {
-            cfg.adapters.paperqa.settings = Some(base.join(settings).to_string_lossy().into_owned());
+            cfg.adapters.paperqa.settings =
+                Some(base.join(settings).to_string_lossy().into_owned());
         }
         // ADR-0027 D3: 行ごとの `settings` の上書きも同じ基準で絶対化する。
         for p in &mut cfg.providers {
@@ -1269,6 +1404,19 @@ impl Config {
             {
                 p.settings = Some(base.join(settings).to_string_lossy().into_owned());
             }
+        }
+        // ADR-0046 D3（Phase 59）: `[[harnesses]]` があれば `genres` / `roles` に射影してから検証する
+        // （既存の経路は `genre` / `role` のまま動く）。無ければ旧い形のまま検証し、warn を 1 行出す。
+        if cfg.harnesses.is_empty() {
+            if !cfg.genres.is_empty() || !cfg.roles.is_empty() {
+                tracing::warn!(
+                    genres = cfg.genres.len(),
+                    roles = cfg.roles.len(),
+                    "config: [[genres]] + [[roles]] は ADR-0046 D3 で [[harnesses]] に置き換わった。                     互換で読み込んだ。`celerisctl config to-harnesses --config <this file>` で新しい形を書き出せる"
+                );
+            }
+        } else {
+            cfg.project_harnesses();
         }
         cfg.validate()?;
         // API を有効にするなら、トークンが読めることを起動時に確かめる（exit 2）。
@@ -1292,6 +1440,7 @@ impl Config {
                 kind: seed.kind,
                 genre: seed.genre.clone(),
                 brief: seed.brief.clone(),
+                profile: seed.profile.clone().unwrap_or_default(),
                 position: seed.position.unwrap_or(i as i64),
                 created_at: now,
                 updated_at: now,
@@ -1324,7 +1473,9 @@ impl Config {
         }
         // ADR-0047 D2（Phase 61）: `[knowledge] default_mounts` の綴り（間違いで黙って無視しない）。
         if let Err(why) = self.knowledge.mounts() {
-            return Err(ConfigError::Invalid(format!("[knowledge] default_mounts: {why}")));
+            return Err(ConfigError::Invalid(format!(
+                "[knowledge] default_mounts: {why}"
+            )));
         }
         // ADR-0043 D3: runtime は 3 つだけ（綴り間違いで黙ってホスト実行に倒れないように）。
         if task_worker::RuntimePreference::parse(&self.containers.runtime).is_none() {
@@ -1334,19 +1485,28 @@ impl Config {
             )));
         }
         if self.containers.image_default.trim().is_empty() {
-            return Err(ConfigError::Invalid("[containers] image_default must not be blank".into()));
+            return Err(ConfigError::Invalid(
+                "[containers] image_default must not be blank".into(),
+            ));
         }
         if self.containers.build_timeout_secs == 0 {
-            return Err(ConfigError::Invalid("[containers] build_timeout_secs must be >= 1".into()));
+            return Err(ConfigError::Invalid(
+                "[containers] build_timeout_secs must be >= 1".into(),
+            ));
         }
         if self.providers.is_empty() {
-            return Err(ConfigError::Invalid("at least one [[providers]] entry is required".into()));
+            return Err(ConfigError::Invalid(
+                "at least one [[providers]] entry is required".into(),
+            ));
         }
         let mut seen_ids = std::collections::HashSet::new();
         for p in &self.providers {
             // ADR-0012 D1: アダプタのインスタンスはプロバイダ ID で引くので重複は許さない。
             if !seen_ids.insert(p.id.as_str()) {
-                return Err(ConfigError::Invalid(format!("duplicate provider id {:?}", p.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "duplicate provider id {:?}",
+                    p.id
+                )));
             }
             if p.adapter != task_worker::FakeAdapter::ID
                 && p.adapter != task_worker::ClaudeCodeAdapter::ID
@@ -1361,11 +1521,15 @@ impl Config {
                 )));
             }
             if p.concurrency == 0 {
-                return Err(ConfigError::Invalid(format!("provider {}: concurrency must be >= 1", p.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "provider {}: concurrency must be >= 1",
+                    p.id
+                )));
             }
             // ADR-0026 D2: `command`/`args` は `adapter = "acp"` の行だけで意味を持つ。他のアダプタに書いたら
             // 静かに無視せず設定エラーにする（書いた本人の勘違いを早く見つけるため）。
-            if p.adapter != task_worker::AcpAdapter::ID && (p.command.is_some() || p.args.is_some()) {
+            if p.adapter != task_worker::AcpAdapter::ID && (p.command.is_some() || p.args.is_some())
+            {
                 return Err(ConfigError::Invalid(format!(
                     "provider {}: command/args are only allowed when adapter = \"acp\" (ADR-0026 D2)",
                     p.id
@@ -1419,18 +1583,25 @@ impl Config {
         if let Some(accounts) = &self.accounts
             && accounts.max_runs_per_account == 0
         {
-            return Err(ConfigError::Invalid("[accounts] max_runs_per_account must be >= 1".into()));
+            return Err(ConfigError::Invalid(
+                "[accounts] max_runs_per_account must be >= 1".into(),
+            ));
         }
         // ADR-0010 D9: Reviewer run を満たせるプロバイダが無い設定は、Reviewer 条件のタスクが無音で待ち続ける原因になる。
         let reviewer = &self.reviewer;
         let reviewer_ok = self.providers.iter().any(|p| {
-            p.tiers.contains(&reviewer.tier) && reviewer.adapter.as_deref().is_none_or(|a| p.adapter == a)
+            p.tiers.contains(&reviewer.tier)
+                && reviewer.adapter.as_deref().is_none_or(|a| p.adapter == a)
         });
         if !reviewer_ok {
             return Err(ConfigError::Invalid(format!(
                 "[reviewer] no provider offers tier {:?}{} for reviewer runs",
                 reviewer.tier,
-                reviewer.adapter.as_deref().map(|a| format!(" with adapter {a:?}")).unwrap_or_default()
+                reviewer
+                    .adapter
+                    .as_deref()
+                    .map(|a| format!(" with adapter {a:?}"))
+                    .unwrap_or_default()
             )));
         }
         // ADR-0013 D11: loopback 以外で API をリッスンするならトークンを必須にする。
@@ -1446,13 +1617,21 @@ impl Config {
         let mut cluster_ids = std::collections::HashSet::new();
         for c in &self.clusters {
             if c.id.trim().is_empty() {
-                return Err(ConfigError::Invalid("[[clusters]] id must not be empty".to_string()));
+                return Err(ConfigError::Invalid(
+                    "[[clusters]] id must not be empty".to_string(),
+                ));
             }
             if !cluster_ids.insert(&c.id) {
-                return Err(ConfigError::Invalid(format!("duplicate cluster id: {}", c.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "duplicate cluster id: {}",
+                    c.id
+                )));
             }
             if c.host.trim().is_empty() {
-                return Err(ConfigError::Invalid(format!("[[clusters]] {}: host must not be empty", c.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "[[clusters]] {}: host must not be empty",
+                    c.id
+                )));
             }
             if !matches!(c.sync.as_str(), "rsync" | "none" | "worktree") {
                 return Err(ConfigError::Invalid(format!(
@@ -1475,10 +1654,16 @@ impl Config {
                 )));
             }
             if c.worktree_base.trim().is_empty() {
-                return Err(ConfigError::Invalid(format!("[[clusters]] {}: worktree_base must not be empty", c.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "[[clusters]] {}: worktree_base must not be empty",
+                    c.id
+                )));
             }
             if c.concurrency == 0 {
-                return Err(ConfigError::Invalid(format!("[[clusters]] {}: concurrency must be >= 1", c.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "[[clusters]] {}: concurrency must be >= 1",
+                    c.id
+                )));
             }
         }
         // ADR-0041 D1: ローカルの worktree のブランチ名は `<接頭辞><task_id>`。接頭辞が空だと
@@ -1488,11 +1673,53 @@ impl Config {
                 "[workspace] worktree_branch_prefix must not be empty".to_string(),
             ));
         }
+        // ADR-0046 D3（Phase 59）: ハーネスの id は重複させない。adapter は providers と同じ判定。
+        let mut harness_ids = std::collections::HashSet::new();
+        for h in &self.harnesses {
+            if h.id.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "[[harnesses]] id must not be empty".to_string(),
+                ));
+            }
+            if !harness_ids.insert(&h.id) {
+                return Err(ConfigError::Invalid(format!(
+                    "duplicate harness id: {}",
+                    h.id
+                )));
+            }
+            if let Some(adapter) = &h.adapter
+                && adapter != task_worker::FakeAdapter::ID
+                && adapter != task_worker::ClaudeCodeAdapter::ID
+                && adapter != task_worker::CodexAdapter::ID
+                && adapter != task_worker::AcpAdapter::ID
+                && adapter != task_worker::PaperQaAdapter::ID
+                && adapter != task_worker::LdrAdapter::ID
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "[[harnesses]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research only)",
+                    h.id
+                )));
+            }
+            if h.budget.max_turns == Some(0) {
+                return Err(ConfigError::Invalid(format!(
+                    "[[harnesses]] {}: max_turns must be >= 1",
+                    h.id
+                )));
+            }
+            if h.budget.max_wall_secs == Some(0) {
+                return Err(ConfigError::Invalid(format!(
+                    "[[harnesses]] {}: max_wall_secs must be >= 1",
+                    h.id
+                )));
+            }
+        }
         // ADR-0016 D1: 役割の id は重複させない。adapter は providers と同じ判定。上限は 1 以上。
         let mut role_ids = std::collections::HashSet::new();
         for r in &self.roles {
             if r.id.trim().is_empty() {
-                return Err(ConfigError::Invalid("[[roles]] id must not be empty".to_string()));
+                return Err(ConfigError::Invalid(
+                    "[[roles]] id must not be empty".to_string(),
+                ));
             }
             if !role_ids.insert(&r.id) {
                 return Err(ConfigError::Invalid(format!("duplicate role id: {}", r.id)));
@@ -1511,10 +1738,16 @@ impl Config {
                 )));
             }
             if r.max_turns == Some(0) {
-                return Err(ConfigError::Invalid(format!("[[roles]] {}: max_turns must be >= 1", r.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "[[roles]] {}: max_turns must be >= 1",
+                    r.id
+                )));
             }
             if r.max_wall_secs == Some(0) {
-                return Err(ConfigError::Invalid(format!("[[roles]] {}: max_wall_secs must be >= 1", r.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "[[roles]] {}: max_wall_secs must be >= 1",
+                    r.id
+                )));
             }
         }
         // ADR-0027 D1: 分野の id は重複させない。`default_role` と `roles` の各要素は `[[roles]]` に存在すること、
@@ -1522,10 +1755,15 @@ impl Config {
         let mut genre_ids = std::collections::HashSet::new();
         for g in &self.genres {
             if g.id.trim().is_empty() {
-                return Err(ConfigError::Invalid("[[genres]] id must not be empty".to_string()));
+                return Err(ConfigError::Invalid(
+                    "[[genres]] id must not be empty".to_string(),
+                ));
             }
             if !genre_ids.insert(&g.id) {
-                return Err(ConfigError::Invalid(format!("duplicate genre id: {}", g.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "duplicate genre id: {}",
+                    g.id
+                )));
             }
             for role_id in &g.roles {
                 if !role_ids.contains(role_id) {
@@ -1576,10 +1814,16 @@ impl Config {
                 )));
             }
             if !org_ids.insert(node.id.as_str()) {
-                return Err(ConfigError::Invalid(format!("duplicate org id: {}", node.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "duplicate org id: {}",
+                    node.id
+                )));
             }
             if node.name.trim().is_empty() {
-                return Err(ConfigError::Invalid(format!("[[org]] {}: name must not be empty", node.id)));
+                return Err(ConfigError::Invalid(format!(
+                    "[[org]] {}: name must not be empty",
+                    node.id
+                )));
             }
             if node.kind == OrgKind::Secretary {
                 secretaries += 1;
@@ -1621,27 +1865,46 @@ impl Config {
                 }
                 _ => {}
             }
+            // ADR-0046 D1（Phase 59）: 種の profile も起動時に検証する（知らない道具・知らない
+            // ハーネス・skill の綴り）。ハーネスの集合は射影後の `[[genres]]` ＋ 組み込み。
+            if let Some(profile) = &node.profile {
+                let known = task_core::known_harness_ids(&self.genre_specs());
+                task_core::validate_profile(profile, &known).map_err(|e| {
+                    ConfigError::Invalid(format!("[[org]] {}: profile: {e}", node.id))
+                })?;
+            }
         }
         // ADR-0016 D2 / M6: 0 の上限は「委譲を止める」ではなく設定ミス（拒否理由が毎回出るだけ）なので拒否する。
         // ADR-0021 D4: 知らない値は設定エラー（黙って既定に落とさない）。
-        if !matches!(self.delegation.on_child_failure.as_str(), "retry_then_ask" | "ignore") {
+        if !matches!(
+            self.delegation.on_child_failure.as_str(),
+            "retry_then_ask" | "ignore"
+        ) {
             return Err(ConfigError::Invalid(format!(
                 "[delegation] on_child_failure must be \"retry_then_ask\" or \"ignore\" (got {:?})",
                 self.delegation.on_child_failure
             )));
         }
         if self.delegation.max_delegate_per_run == 0 {
-            return Err(ConfigError::Invalid("[delegation] max_delegate_per_run must be >= 1".to_string()));
+            return Err(ConfigError::Invalid(
+                "[delegation] max_delegate_per_run must be >= 1".to_string(),
+            ));
         }
         if self.delegation.max_tree_depth == 0 {
-            return Err(ConfigError::Invalid("[delegation] max_tree_depth must be >= 1".to_string()));
+            return Err(ConfigError::Invalid(
+                "[delegation] max_tree_depth must be >= 1".to_string(),
+            ));
         }
         if self.delegation.max_tree_runs == 0 {
-            return Err(ConfigError::Invalid("[delegation] max_tree_runs must be >= 1".to_string()));
+            return Err(ConfigError::Invalid(
+                "[delegation] max_tree_runs must be >= 1".to_string(),
+            ));
         }
         // Phase 7 監査: cooldown 0 だと供給側失敗の requeue が毎 tick の再 dispatch になる。
         if self.error_cooldown_secs == 0 {
-            return Err(ConfigError::Invalid("error_cooldown_secs must be >= 1".into()));
+            return Err(ConfigError::Invalid(
+                "error_cooldown_secs must be >= 1".into(),
+            ));
         }
         // ADR-0010 D7 の前提: 無出力で強制終了された run の結果（SIGKILL までの kill_grace + 次 tick での取り込み）が、
         // 延長後のリース期限より先に処理されること。
@@ -1651,7 +1914,9 @@ impl Config {
             ));
         }
         if self.retry_backoff_max_secs < self.retry_backoff_base_secs {
-            return Err(ConfigError::Invalid("retry_backoff_max_secs must be >= retry_backoff_base_secs".into()));
+            return Err(ConfigError::Invalid(
+                "retry_backoff_max_secs must be >= retry_backoff_base_secs".into(),
+            ));
         }
         Ok(())
     }
@@ -1678,7 +1943,11 @@ impl Config {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let resolve = |p: &PathBuf| -> PathBuf {
-            if p.is_relative() { base.join(p) } else { p.clone() }
+            if p.is_relative() {
+                base.join(p)
+            } else {
+                p.clone()
+            }
         };
         if let Some(db) = &overrides.db {
             self.db = resolve(db);
@@ -1792,7 +2061,8 @@ impl Config {
             releases_dir: Some(self.selfdeploy.releases_dir.clone()),
             // ADR-0043 D3（Phase 56）: コンテナ実行。綴りは `validate()` が通してある。
             containers: task_dispatch::ContainersRuntimeConfig {
-                preference: task_worker::RuntimePreference::parse(&self.containers.runtime).unwrap_or_default(),
+                preference: task_worker::RuntimePreference::parse(&self.containers.runtime)
+                    .unwrap_or_default(),
                 image_default: self.containers.image_default.clone(),
                 build_dir: self.containers.build_dir.clone(),
                 build_timeout: Duration::from_secs(self.containers.build_timeout_secs),
@@ -1819,7 +2089,10 @@ impl Config {
             if dir.exists() {
                 continue;
             }
-            std::fs::create_dir_all(dir).map_err(|source| ConfigError::Read { path: dir.clone(), source })?;
+            std::fs::create_dir_all(dir).map_err(|source| ConfigError::Read {
+                path: dir.clone(),
+                source,
+            })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1838,8 +2111,10 @@ impl Config {
         let Some(memory) = &self.memory else {
             return Ok(());
         };
-        task_worker::memory::create_dir_all_0700(&memory.dir)
-            .map_err(|source| ConfigError::Read { path: memory.dir.clone(), source })
+        task_worker::memory::create_dir_all_0700(&memory.dir).map_err(|source| ConfigError::Read {
+            path: memory.dir.clone(),
+            source,
+        })
     }
 
     /// ADR-0030 D1: `[secrets] dir` を 0700 で作る（無ければ）。`[secrets]` が無ければ何もしない。
@@ -1850,7 +2125,10 @@ impl Config {
         if secrets.dir.exists() {
             return Ok(());
         }
-        std::fs::create_dir_all(&secrets.dir).map_err(|source| ConfigError::Read { path: secrets.dir.clone(), source })?;
+        std::fs::create_dir_all(&secrets.dir).map_err(|source| ConfigError::Read {
+            path: secrets.dir.clone(),
+            source,
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1894,10 +2172,256 @@ impl Config {
             .collect()
     }
 
+    /// ADR-0046 D3（Phase 59）: ハーネスのレジストリ（`HarnessRegistry::get(id)` が唯一の引き方）。
+    ///
+    /// `[[harnesses]]` があればそれが正。無ければ旧い `[[genres]]` + `[[roles]]` を決定的に写す
+    /// （互換の読み込み）。どちらの場合も組み込み（conversation / plan / reviewer / smoke）が足される。
+    pub fn harness_registry(&self) -> HarnessRegistry {
+        if !self.harnesses.is_empty() {
+            return HarnessRegistry::new(
+                self.harnesses.iter().map(HarnessConfig::to_spec).collect(),
+            );
+        }
+        let (registry, _dropped) = HarnessRegistry::from_legacy(
+            &self.genre_specs(),
+            &self.role_specs(),
+            self.conversation_genre_id(),
+        );
+        registry
+    }
+
+    /// ADR-0046 D3: 旧い設定を写したときに「写さなかった役割」（どの分野の `default_role` でもなく、
+    /// 同名のハーネスも無い役割）の id。`celerisctl config to-harnesses` が注意書きに出す。
+    pub fn legacy_dropped_roles(&self) -> Vec<String> {
+        if !self.harnesses.is_empty() {
+            return Vec::new();
+        }
+        let (_, dropped) = HarnessRegistry::from_legacy(
+            &self.genre_specs(),
+            &self.role_specs(),
+            self.conversation_genre_id(),
+        );
+        dropped
+    }
+
+    /// ADR-0046 D3（Phase 59）: `[[harnesses]]` を書いた設定を、既存の経路（`genre` / `role` を見る
+    /// ディスパッチャ・task-ops）がそのまま使えるように `genres` / `roles` へ射影する。
+    ///
+    /// 射影するのは**設定に書かれたハーネスだけ**（組み込みの `plan` / `reviewer` / `smoke` は
+    /// タスクの `genre` として使わないので、計画 run の「使える分野」に混ぜない）。ただし
+    /// `[conversation] genre` が組み込みを指しているときは、その 1 件だけ足す（対話が指示文を失わないように）。
+    /// `[[harnesses]]` が無い設定では**何もしない**（Phase 58 までと 1 バイトも変わらない）。
+    pub fn project_harnesses(&mut self) {
+        if self.harnesses.is_empty() {
+            return;
+        }
+        let registry = self.harness_registry();
+        let mut specs: Vec<HarnessSpec> =
+            self.harnesses.iter().map(HarnessConfig::to_spec).collect();
+        let conversation = self.conversation_genre_id().to_string();
+        if !specs.iter().any(|h| h.id == conversation)
+            && let Some(builtin) = registry.get(&conversation)
+        {
+            specs.push(builtin.clone());
+        }
+        self.genres = specs
+            .iter()
+            .map(|h| {
+                let g = h.genre_spec();
+                GenreConfig {
+                    id: g.id,
+                    description: g.description,
+                    capabilities: g.capabilities,
+                    input_artifacts: g.input_artifacts,
+                    output_artifacts: g.output_artifacts,
+                    default_role: g.default_role,
+                    roles: g.roles,
+                }
+            })
+            .collect();
+        self.roles = specs
+            .iter()
+            .map(|h| {
+                let r = h.role_spec();
+                RoleConfig {
+                    id: r.id,
+                    tier: r.tier,
+                    adapter: r.adapter,
+                    max_turns: r.max_turns,
+                    max_wall_secs: r.max_wall_secs,
+                    instructions: r.instructions,
+                }
+            })
+            .collect();
+    }
+
+    /// ADR-0046 D3（Phase 59）: `celerisctl config to-harnesses` の出力。旧い `[[genres]]` + `[[roles]]`
+    /// を `[[harnesses]]` の形に書き出す（人がこれで設定を差し替える）。決定的（LLM は使わない）。
+    ///
+    /// ADR-0046 D6 の改名に合わせて、旧い対話用分野の id が `secretary` のときは **`conversation`**
+    /// という id で書き出し、`[conversation] genre = "conversation"` も一緒に出す。
+    pub fn to_harnesses_toml(&self) -> String {
+        let registry = self.harness_registry();
+        let declared: Vec<&HarnessSpec> = if self.harnesses.is_empty() {
+            // 旧い設定から写したもののうち、**設定に由来するもの**だけを書き出す
+            // （組み込みだけのハーネスは書き出さない。設定に同じ id があれば書き出す）。
+            registry
+                .all()
+                .iter()
+                .filter(|h| {
+                    self.genres.iter().any(|g| g.id == h.id)
+                        || self.roles.iter().any(|r| r.id == h.id)
+                })
+                .collect()
+        } else {
+            registry
+                .all()
+                .iter()
+                .filter(|h| self.harnesses.iter().any(|c| c.id == h.id))
+                .collect()
+        };
+        let legacy_conversation = self.conversation_genre_id().to_string();
+        let rename_conversation = legacy_conversation == CONVERSATION_GENRE;
+        let mut out = String::new();
+        out.push_str(
+            "# ADR-0046 D3: `[[genres]]` + `[[roles]]` を `[[harnesses]]` に写したもの
+",
+        );
+        out.push_str(
+            "# （`celerisctl config to-harnesses` が生成。決定的で、LLM は使っていない）。
+",
+        );
+        out.push_str(
+            "#
+",
+        );
+        out.push_str(
+            "# 使い方: 下の `[[harnesses]]` と `[conversation]` を config.toml に貼り、
+",
+        );
+        out.push_str("#   **既存の `[[genres]]` と `[[roles]]` の節を全部消す**（両方あると `[[harnesses]]` が勝つ）。
+");
+        let dropped = self.legacy_dropped_roles();
+        if !dropped.is_empty() {
+            out.push_str(&format!(
+                "#
+# 写せなかった役割（どの分野の `default_role` でもなく、同名のハーネスも無い）: {}
+                 #   これらは `tasks.role` の互換としてしか使われない。必要なら手で `[[harnesses]]` に足すこと。
+",
+                dropped.join(", ")
+            ));
+        }
+        if rename_conversation {
+            out.push_str(&format!(
+                "#
+# ADR-0046 D6: 対話用のハーネスは `{CONVERSATION_GENRE}` から `conversation` に改名した
+                 #   （根ノードも `secretary` → `cos`）。下の `[conversation]` も一緒に貼ること。
+"
+            ));
+        }
+        for h in declared {
+            let id = if rename_conversation && h.id == legacy_conversation {
+                task_core::BUILTIN_CONVERSATION.to_string()
+            } else {
+                h.id.clone()
+            };
+            out.push_str(
+                "
+[[harnesses]]
+",
+            );
+            out.push_str(&format!(
+                "id = {}
+",
+                toml_string(&id)
+            ));
+            out.push_str(&format!(
+                "description = {}
+",
+                toml_string(&h.description)
+            ));
+            if let Some(adapter) = &h.adapter {
+                out.push_str(&format!(
+                    "adapter = {}
+",
+                    toml_string(adapter)
+                ));
+            }
+            if let Some(tier) = h.tier {
+                out.push_str(&format!(
+                    "tier = {}
+",
+                    toml_string(tier_str(tier))
+                ));
+            }
+            if h.conversation {
+                out.push_str(
+                    "conversation = true
+",
+                );
+            }
+            for (name, list) in [
+                ("capabilities", &h.capabilities),
+                ("input_artifacts", &h.input_artifacts),
+                ("output_artifacts", &h.output_artifacts),
+            ] {
+                if list.is_empty() {
+                    continue;
+                }
+                let items: Vec<String> = list.iter().map(|v| toml_string(v)).collect();
+                out.push_str(&format!(
+                    "{name} = [{}]
+",
+                    items.join(", ")
+                ));
+            }
+            if !h.budget.is_empty() {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(v) = h.budget.max_turns {
+                    parts.push(format!("max_turns = {v}"));
+                }
+                if let Some(v) = h.budget.max_wall_secs {
+                    parts.push(format!("max_wall_secs = {v}"));
+                }
+                if let Some(v) = h.budget.max_retries {
+                    parts.push(format!("max_retries = {v}"));
+                }
+                out.push_str(&format!(
+                    "budget = {{ {} }}
+",
+                    parts.join(", ")
+                ));
+            }
+            if let Some(instructions) = &h.instructions {
+                out.push_str(&format!(
+                    "instructions = {}
+",
+                    toml_string(instructions)
+                ));
+            }
+        }
+        let conversation_id = if rename_conversation {
+            task_core::BUILTIN_CONVERSATION
+        } else {
+            legacy_conversation.as_str()
+        };
+        out.push_str(&format!(
+            "
+[conversation]
+genre = {}
+",
+            toml_string(conversation_id)
+        ));
+        out
+    }
+
     /// Phase 30（ADR-0033 D4 追記）: 対話が常に走る分野の id。`[conversation] genre`、省略時は
     /// `task_core::CONVERSATION_GENRE`（`"secretary"`）。
     pub fn conversation_genre_id(&self) -> &str {
-        self.conversation.as_ref().map(|c| c.genre.as_str()).unwrap_or(CONVERSATION_GENRE)
+        self.conversation
+            .as_ref()
+            .map(|c| c.genre.as_str())
+            .unwrap_or(CONVERSATION_GENRE)
     }
 
     /// ADR-0016 D2: `[delegation]` を task-core の型に写す。
@@ -1918,7 +2442,8 @@ impl Config {
         self.clusters
             .iter()
             .map(|c| {
-                let mut env: Vec<(String, String)> = c.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let mut env: Vec<(String, String)> =
+                    c.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 env.sort();
                 (
                     c.id.clone(),
@@ -1983,7 +2508,9 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// `config/org.example.toml` が指す分野（`coding` / `literature` / `web-research`）を持つ最小の設定。
+    /// ADR-0046 D3（Phase 59）: `config/org.example.toml` の `genre` が指す全ての harness を、
+    /// 互換の `[[genres]]`（`conversation` / `coding` / `literature` / `web-research` / `data-analysis` /
+    /// `writing`）として定義する（`config/celeris.example.toml` の `[[harnesses]]` の互換の射影と同じ集合）。
     const ORG_TEST_GENRES: &str = r#"
 [[providers]]
 id = "x"
@@ -1996,13 +2523,13 @@ id = "implementer"
 id = "literature-reader"
 
 [[roles]]
-id = "secretary"
+id = "cos-role"
 
 [[genres]]
-id = "secretary"
+id = "conversation"
 description = "人と話す"
-default_role = "secretary"
-roles = ["secretary"]
+default_role = "cos-role"
+roles = ["cos-role"]
 
 [[genres]]
 id = "coding"
@@ -2024,13 +2551,35 @@ id = "web-research"
 description = "一般 Web の調査"
 default_role = "web-researcher"
 roles = ["web-researcher"]
+
+[[roles]]
+id = "data-analyst"
+
+[[genres]]
+id = "data-analysis"
+description = "データを整える"
+default_role = "data-analyst"
+roles = ["data-analyst"]
+
+[[roles]]
+id = "writer"
+
+[[genres]]
+id = "writing"
+description = "書く"
+default_role = "writer"
+roles = ["writer"]
+
+[conversation]
+genre = "conversation"
 "#;
 
     // ---- ADR-0033 D1（Phase 23）: 組織図の種 ----
 
-    /// 例の設定（`config/org.example.toml`）が読め、SPEC §3.2 の組織図（11 ノード。2026-09-18 に
-    /// 研究部が「研究文献調査課」と「Web 調査課」に分かれて 1 つ増えた）になる。
-    /// `genre` は実在する分野 id（`coding` / `literature` / `web-research`）だけを指す。
+    /// 例の設定（`config/org.example.toml`）が読め、ADR-0046 D7 の組織図（13 ノード。cos を根に
+    /// Engineering / Research / Operations の 3 部、それぞれの下に課）になる。`genre` は実在する
+    /// harness id（`conversation` / `coding` / `literature` / `web-research` / `data-analysis` /
+    /// `writing`）だけを指す。
     #[test]
     fn loads_the_org_example_and_maps_it_to_org_nodes() {
         let dir = tempfile::tempdir().unwrap();
@@ -2040,46 +2589,92 @@ roles = ["web-researcher"]
         )
         .unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, format!("db = \"t.sqlite3\"\norg_include = \"org.toml\"\n{}", ORG_TEST_GENRES)).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "db = \"t.sqlite3\"\norg_include = \"org.toml\"\n{}",
+                ORG_TEST_GENRES
+            ),
+        )
+        .unwrap();
 
         let cfg = Config::load(&path).unwrap();
         let ids: Vec<&str> = cfg.org.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
-                "secretary",
-                "coding",
-                "coding-frontend",
-                "coding-performance",
-                "coding-poc",
+                "cos",
+                "engineering",
+                "software-engineering",
+                "systems-performance",
                 "research",
-                "research-survey",
-                "research-web",
-                "research-writing",
-                "research-data",
-                "infra",
+                "literature-research",
+                "web-research",
+                "experiment-data",
+                "scientific-writing",
+                "operations",
+                "cluster-hpc",
+                "infrastructure",
+                "monitoring-automation",
             ]
         );
         let nodes = cfg.org_nodes(time::OffsetDateTime::now_utc());
-        assert_eq!(nodes.len(), 11);
-        // 親が子より先に来る（secretary → 部 → 課）。
+        assert_eq!(nodes.len(), 13);
+        // 親が子より先に来る（cos → 部 → 課）。
         let order: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
-        assert_eq!(order[0], "secretary");
-        assert!(order.iter().position(|id| *id == "coding") < order.iter().position(|id| *id == "coding-poc"));
-        // ADR-0033 D4（Phase 24）: 秘書は対話用の分野を持つ。
-        assert_eq!(nodes.iter().find(|n| n.id == "secretary").unwrap().genre.as_deref(), Some("secretary"));
-        let survey = nodes.iter().find(|n| n.id == "research-survey").unwrap();
-        assert_eq!(survey.kind, OrgKind::Section);
-        assert_eq!(survey.genre.as_deref(), Some("literature"));
-        assert_eq!(survey.parent_id.as_deref(), Some("research"));
-        assert!(!survey.brief.is_empty());
+        assert_eq!(order[0], "cos");
+        assert!(
+            order.iter().position(|id| *id == "engineering")
+                < order.iter().position(|id| *id == "software-engineering")
+        );
+        // ADR-0046 D6: CoS（根）は対話用の harness を持つ。
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|n| n.id == "cos")
+                .unwrap()
+                .genre
+                .as_deref(),
+            Some("conversation")
+        );
+        let literature = nodes
+            .iter()
+            .find(|n| n.id == "literature-research")
+            .unwrap();
+        assert_eq!(literature.kind, OrgKind::Section);
+        assert_eq!(literature.genre.as_deref(), Some("literature"));
+        assert_eq!(literature.parent_id.as_deref(), Some("research"));
+        assert!(!literature.brief.is_empty());
         // 人間の決定（2026-09-18、ADR-0035 §1）: 学術文献は PaperQA2（literature）、一般 Web は LDR。
-        let web = nodes.iter().find(|n| n.id == "research-web").unwrap();
+        let web = nodes.iter().find(|n| n.id == "web-research").unwrap();
         assert_eq!(web.genre.as_deref(), Some("web-research"));
         assert_eq!(web.parent_id.as_deref(), Some("research"));
-        // 分野を当てていないノードもある（まだその分野が無い）。
-        assert_eq!(nodes.iter().find(|n| n.id == "research-writing").unwrap().genre, None);
-        assert_eq!(nodes.iter().filter(|n| n.kind == OrgKind::Secretary).count(), 1);
+        // ADR-0046 D7: 新しい harness `data-analysis` / `writing` はそれぞれの課の分野。
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|n| n.id == "experiment-data")
+                .unwrap()
+                .genre
+                .as_deref(),
+            Some("data-analysis")
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|n| n.id == "scientific-writing")
+                .unwrap()
+                .genre
+                .as_deref(),
+            Some("writing")
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|n| n.kind == OrgKind::Secretary)
+                .count(),
+            1
+        );
     }
 
     /// `[[genres]]` に無い分野・重複 id・秘書が 0 か 2・知らない親は設定エラー。
@@ -2096,9 +2691,11 @@ roles = ["web-researcher"]
         let secretary = "[[org]]\nid = \"secretary\"\nname = \"秘書\"\nkind = \"secretary\"\n";
         load(secretary).expect("a lone secretary is fine");
 
-        let err = load(&format!("{secretary}[[org]]\nid = \"coding\"\nname = \"部\"\nkind = \"department\"\n"))
-            .unwrap_err()
-            .to_string();
+        let err = load(&format!(
+            "{secretary}[[org]]\nid = \"coding\"\nname = \"部\"\nkind = \"department\"\n"
+        ))
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("parent_id is required"), "{err}");
 
         let err = load("[[org]]\nid = \"coding\"\nname = \"部\"\nkind = \"department\"\nparent_id = \"secretary\"\n")
@@ -2106,7 +2703,9 @@ roles = ["web-researcher"]
             .to_string();
         assert!(err.contains("exactly one node"), "{err}");
 
-        let err = load(&format!("{secretary}{secretary}")).unwrap_err().to_string();
+        let err = load(&format!("{secretary}{secretary}"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("duplicate org id"), "{err}");
 
         let err = load(&format!(
@@ -2134,7 +2733,8 @@ roles = ["web-researcher"]
     /// `org_include` を書かなければ種は空、書いたのにファイルが無ければ設定エラー。
     #[test]
     fn org_include_is_optional_but_must_exist_when_written() {
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert!(cfg.org.is_empty());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -2144,7 +2744,10 @@ roles = ["web-researcher"]
 
     #[test]
     fn loads_example_config_and_resolves_relative_paths() {
-        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/celeris.example.toml"));
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/celeris.example.toml"
+        ));
         let cfg = Config::load(path).unwrap();
         assert!(cfg.db.is_absolute());
         assert!(cfg.workspace_root.is_absolute());
@@ -2155,14 +2758,29 @@ roles = ["web-researcher"]
         assert!(!cfg.plan.auto_accept);
         assert!(!cfg.dispatch_config().plan_auto_accept);
         cfg.validate().unwrap();
-        // 監査 M-1: 役割は tier だけ（`fake` のプロバイダでもそのまま回る）で、分野は
-        // `config/org.example.toml` の課が使う 4 つが揃っている（2026-09-18 に `web-research` が増えた）。
-        assert!(cfg.roles.iter().all(|r| r.adapter.is_none()), "{:?}", cfg.roles);
+        // 監査 M-1（Phase 59 追記）: `[[harnesses]]`（互換の射影で `[[genres]]` になる）は
+        // `config/org.example.toml` の課が使うもの全部が揃っている（`[[harnesses]]` の宣言順）。
+        assert!(
+            cfg.roles.iter().all(|r| r.adapter.is_none()),
+            "{:?}",
+            cfg.roles
+        );
         let mut genres: Vec<&str> = cfg.genres.iter().map(|g| g.id.as_str()).collect();
         genres.sort_unstable();
-        assert_eq!(genres, vec!["coding", "literature", "secretary", "web-research"]);
-        // Phase 30: `[conversation]` は例では省略（コメントアウト）してあり、既定の `secretary` が使われる。
-        assert_eq!(cfg.conversation_genre_id(), "secretary");
+        assert_eq!(
+            genres,
+            vec![
+                "coding",
+                "conversation",
+                "data-analysis",
+                "literature",
+                "plan",
+                "web-research",
+                "writing"
+            ]
+        );
+        // ADR-0046 D6（Phase 59）: `[conversation] genre = "conversation"` を明示している。
+        assert_eq!(cfg.conversation_genre_id(), "conversation");
     }
 
     /// 監査 M-1: 例の設定 2 つ（`celeris.example.toml` + `org.example.toml`）を**組み合わせて**読める。
@@ -2173,31 +2791,54 @@ roles = ["web-researcher"]
         let dir = tempfile::tempdir().unwrap();
         let example = std::fs::read_to_string(config_dir.join("celeris.example.toml")).unwrap();
         let enabled = example.replace("# org_include = \"org.toml\"", "org_include = \"org.toml\"");
-        assert!(enabled.contains("\norg_include = \"org.toml\""), "org_include の行が見つからない");
+        assert!(
+            enabled.contains("\norg_include = \"org.toml\""),
+            "org_include の行が見つからない"
+        );
         std::fs::write(dir.path().join("config.toml"), enabled).unwrap();
-        std::fs::copy(config_dir.join("org.example.toml"), dir.path().join("org.toml")).unwrap();
+        std::fs::copy(
+            config_dir.join("org.example.toml"),
+            dir.path().join("org.toml"),
+        )
+        .unwrap();
 
         let cfg = Config::load(&dir.path().join("config.toml")).unwrap();
         cfg.validate().unwrap();
         let ids: Vec<&str> = cfg.org.iter().map(|n| n.id.as_str()).collect();
-        assert!(ids.contains(&"secretary") && ids.contains(&"coding-poc") && ids.contains(&"research-survey"));
-        assert_eq!(cfg.org.iter().filter(|n| n.kind == task_core::OrgKind::Secretary).count(), 1);
+        assert!(
+            ids.contains(&"cos")
+                && ids.contains(&"software-engineering")
+                && ids.contains(&"literature-research")
+        );
+        assert_eq!(
+            cfg.org
+                .iter()
+                .filter(|n| n.kind == task_core::OrgKind::Secretary)
+                .count(),
+            1
+        );
         // 課の分野はすべて `[[genres]]` にある（`validate` が見ているのと同じ条件を明示しておく）。
         for node in &cfg.org {
             if let Some(genre) = &node.genre {
-                assert!(cfg.genres.iter().any(|g| &g.id == genre), "{genre} が [[genres]] に無い");
+                assert!(
+                    cfg.genres.iter().any(|g| &g.id == genre),
+                    "{genre} が [[genres]] に無い"
+                );
             }
         }
     }
 
     #[test]
     fn plan_auto_accept_is_parsed_and_unknown_plan_keys_are_rejected() {
-        let cfg: Config = toml::from_str(r#"[plan]
+        let cfg: Config = toml::from_str(
+            r#"[plan]
 auto_accept = true
 [[providers]]
 id = "x"
 adapter = "fake"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(cfg.plan.auto_accept);
         assert!(cfg.dispatch_config().plan_auto_accept);
         assert!(toml::from_str::<Config>("[plan]\nbogus = 1\n").is_err());
@@ -2207,7 +2848,8 @@ adapter = "fake"
     fn rejects_unknown_adapter_and_missing_providers() {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(matches!(cfg.validate(), Err(ConfigError::Invalid(_))));
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"bogus-adapter\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"bogus-adapter\"\n").unwrap();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("bogus-adapter"));
         assert!(toml::from_str::<Config>("bogus = 1\n").is_err());
@@ -2217,7 +2859,10 @@ adapter = "fake"
     /// 例の設定ファイル（config/celeris.clusters.example.toml）もここで一度読んで、書き間違いを拾う。
     #[test]
     fn parses_worktree_sync_and_maps_it_to_the_worker_settings() {
-        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/celeris.clusters.example.toml"));
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/celeris.clusters.example.toml"
+        ));
         let cfg = Config::load(path).unwrap();
         cfg.validate().unwrap();
         let specs = cfg.cluster_specs();
@@ -2244,13 +2889,22 @@ worktree_paths = ["src", "Cargo.toml"]
         cfg.validate().unwrap();
         let spec = &cfg.cluster_specs()["pegasus"];
         assert_eq!(spec.sync, task_worker::SyncMode::Worktree);
-        assert_eq!(spec.worktree.root.as_deref(), Some(Path::new("/work/NBB/rmaeda/.celeris-worktrees")));
+        assert_eq!(
+            spec.worktree.root.as_deref(),
+            Some(Path::new("/work/NBB/rmaeda/.celeris-worktrees"))
+        );
         assert_eq!(spec.worktree.base, "origin/main");
-        assert_eq!(spec.worktree.paths, vec!["src".to_string(), "Cargo.toml".to_string()]);
+        assert_eq!(
+            spec.worktree.paths,
+            vec!["src".to_string(), "Cargo.toml".to_string()]
+        );
         assert_eq!(spec.worktree.branch_prefix, "celeris/");
         let view = &cfg.cluster_view_infos()["pegasus"];
         assert_eq!(view.sync, "worktree");
-        assert_eq!(view.worktree_root.as_deref(), Some(Path::new("/work/NBB/rmaeda/.celeris-worktrees")));
+        assert_eq!(
+            view.worktree_root.as_deref(),
+            Some(Path::new("/work/NBB/rmaeda/.celeris-worktrees"))
+        );
     }
 
     /// 既定は `sync = "rsync"` のまま（ADR-0018 からの互換）。知らない sync と自動削除は設定エラー。
@@ -2332,10 +2986,14 @@ host = "h"
 
     #[test]
     fn accepts_claude_code_adapter_with_default_config() {
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"claude-code\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"claude-code\"\n").unwrap();
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.adapters.claude_code.command, "claude");
-        assert_eq!(cfg.adapters.claude_code.permission_mode, "bypassPermissions");
+        assert_eq!(
+            cfg.adapters.claude_code.permission_mode,
+            "bypassPermissions"
+        );
     }
 
     #[test]
@@ -2346,7 +3004,10 @@ host = "h"
 
     #[test]
     fn loads_codex_dogfood_example_config() {
-        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/celeris.codex.example.toml"));
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/celeris.codex.example.toml"
+        ));
         let cfg = Config::load(path).unwrap();
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.providers[0].adapter, "codex");
@@ -2355,7 +3016,8 @@ host = "h"
 
     #[test]
     fn accepts_codex_adapter_with_default_config() {
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"codex\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"codex\"\n").unwrap();
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.adapters.codex.command, "codex");
         assert!(cfg.adapters.codex.model.is_none());
@@ -2368,7 +3030,10 @@ host = "h"
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.adapters.acp.command, "opencode");
         assert_eq!(cfg.adapters.acp.args, vec!["acp".to_string()]);
-        assert_eq!(cfg.adapters.acp.permission, task_worker::AcpPermission::Allow);
+        assert_eq!(
+            cfg.adapters.acp.permission,
+            task_worker::AcpPermission::Allow
+        );
         assert_eq!(cfg.adapters.acp.model_option_id, "model");
         assert_eq!(cfg.adapters.acp.startup_timeout_secs, 300);
         assert!(cfg.adapters.acp.env.is_empty());
@@ -2393,11 +3058,19 @@ host = "h"
     /// ADR-0026 D2: `command`/`args` は `adapter = "acp"` の行だけで意味を持つ。行ごとに上書きできる。
     #[test]
     fn command_and_args_are_only_allowed_on_acp_providers_and_override_per_row() {
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\ncommand = \"whatever\"\n").unwrap();
+        let cfg: Config = toml::from_str(
+            "[[providers]]\nid = \"x\"\nadapter = \"fake\"\ncommand = \"whatever\"\n",
+        )
+        .unwrap();
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("command/args are only allowed when adapter"), "{err}");
+        assert!(
+            err.contains("command/args are only allowed when adapter"),
+            "{err}"
+        );
 
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"codex\"\nargs = [\"x\"]\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"codex\"\nargs = [\"x\"]\n")
+                .unwrap();
         assert!(cfg.validate().is_err());
 
         let cfg: Config = toml::from_str(
@@ -2406,7 +3079,10 @@ host = "h"
         .unwrap();
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.providers[0].command.as_deref(), Some("goose"));
-        assert_eq!(cfg.providers[0].args.as_deref(), Some(&["acp".to_string()][..]));
+        assert_eq!(
+            cfg.providers[0].args.as_deref(),
+            Some(&["acp".to_string()][..])
+        );
     }
 
     /// ADR-0026 D6: 冷スタート用の例の設定ファイルが読め、Phase 15 の設定検証を通る。
@@ -2420,14 +3096,24 @@ host = "h"
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.providers[0].adapter, "acp");
         assert_eq!(cfg.adapters.acp.command, "opencode");
-        assert_eq!(cfg.adapters.acp.permission, task_worker::AcpPermission::Allow);
-        assert_eq!(cfg.providers[0].env.get("OPENCODE_DISABLE_PROJECT_CONFIG").map(String::as_str), Some("1"));
+        assert_eq!(
+            cfg.adapters.acp.permission,
+            task_worker::AcpPermission::Allow
+        );
+        assert_eq!(
+            cfg.providers[0]
+                .env
+                .get("OPENCODE_DISABLE_PROJECT_CONFIG")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     /// ADR-0027 D3: `[adapters.paperqa]` の既定値（`pqa` を素の状態で使う）。
     #[test]
     fn accepts_paperqa_adapter_with_default_config() {
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n").unwrap();
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.adapters.paperqa.command, "pqa");
         assert!(cfg.adapters.paperqa.settings.is_none());
@@ -2438,7 +3124,10 @@ host = "h"
         assert!(cfg.adapters.paperqa.env.is_empty());
         assert!(cfg.providers[0].settings.is_none());
         // ADR-0035 D1 / D3: 取得と証拠ゲートの既定値。
-        assert_eq!(cfg.adapters.paperqa.acquire, task_worker::AcquireConfig::default());
+        assert_eq!(
+            cfg.adapters.paperqa.acquire,
+            task_worker::AcquireConfig::default()
+        );
         assert!(cfg.adapters.paperqa.acquire.command.is_none());
         assert_eq!(cfg.adapters.paperqa.acquire.max_candidates, 30);
         assert_eq!(cfg.adapters.paperqa.acquire.max_pdfs, 12);
@@ -2447,7 +3136,11 @@ host = "h"
         assert!(cfg.adapters.paperqa.acquire.mailto.is_none());
         assert_eq!(
             cfg.adapters.paperqa.evidence,
-            task_worker::PaperQaEvidence { min_candidates: 5, min_pdfs: 3, min_cited: 2 }
+            task_worker::PaperQaEvidence {
+                min_candidates: 5,
+                min_pdfs: 3,
+                min_cited: 2
+            }
         );
     }
 
@@ -2462,7 +3155,10 @@ host = "h"
         let cfg: Config = toml::from_str(text).unwrap();
         assert!(cfg.validate().is_ok());
         let acquire = &cfg.adapters.paperqa.acquire;
-        assert_eq!(acquire.command.as_deref(), Some("/opt/pq/.venv/bin/python3"));
+        assert_eq!(
+            acquire.command.as_deref(),
+            Some("/opt/pq/.venv/bin/python3")
+        );
         assert_eq!(acquire.max_candidates, 40);
         assert_eq!(acquire.max_pdfs, 4);
         assert_eq!(acquire.per_query, 10);
@@ -2470,7 +3166,11 @@ host = "h"
         assert_eq!(acquire.mailto.as_deref(), Some("who@example.org"));
         assert_eq!(
             cfg.adapters.paperqa.evidence,
-            task_worker::PaperQaEvidence { min_candidates: 0, min_pdfs: 1, min_cited: 0 }
+            task_worker::PaperQaEvidence {
+                min_candidates: 0,
+                min_pdfs: 1,
+                min_cited: 0
+            }
         );
         // 部分指定でも残りは既定値。
         let partial: Config = toml::from_str(
@@ -2496,23 +3196,37 @@ host = "h"
 
     #[test]
     fn rejects_unknown_fields_in_paperqa_adapter_config() {
-        let text = "[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n\n[adapters.paperqa]\nbogus = 1\n";
+        let text =
+            "[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n\n[adapters.paperqa]\nbogus = 1\n";
         assert!(toml::from_str::<Config>(text).is_err());
     }
 
     /// ADR-0029 D1: `[adapters.local_deep_research]` の既定値（`python3` を素の状態で使う。mode 既定 quick）。
     #[test]
     fn accepts_local_deep_research_adapter_with_default_config() {
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\n")
+                .unwrap();
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.adapters.local_deep_research.command, "python3");
-        assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Quick);
+        assert_eq!(
+            cfg.adapters.local_deep_research.mode,
+            task_worker::LdrMode::Quick
+        );
         assert!(cfg.adapters.local_deep_research.iterations.is_none());
-        assert!(cfg.adapters.local_deep_research.questions_per_iteration.is_none());
+        assert!(
+            cfg.adapters
+                .local_deep_research
+                .questions_per_iteration
+                .is_none()
+        );
         assert!(cfg.adapters.local_deep_research.settings.is_empty());
         assert!(cfg.adapters.local_deep_research.env.is_empty());
         // ADR-0031 D2: 既定の閾値。
-        assert_eq!(cfg.adapters.local_deep_research.evidence.min_search_results, 5);
+        assert_eq!(
+            cfg.adapters.local_deep_research.evidence.min_search_results,
+            5
+        );
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_sources, 3);
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_cited, 2);
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_domains, 2);
@@ -2520,8 +3234,7 @@ host = "h"
 
     #[test]
     fn rejects_unknown_fields_in_local_deep_research_adapter_config() {
-        let text =
-            "[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\n\n[adapters.local_deep_research]\nbogus = 1\n";
+        let text = "[[providers]]\nid = \"x\"\nadapter = \"local-deep-research\"\n\n[adapters.local_deep_research]\nbogus = 1\n";
         assert!(toml::from_str::<Config>(text).is_err());
     }
 
@@ -2571,12 +3284,25 @@ host = "h"
              adapter = \"local-deep-research\"\n";
         let cfg: Config = toml::from_str(text).unwrap();
         assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.adapters.local_deep_research.command, "/home/u/celeris/ldr/.venv/bin/python");
-        assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Detailed);
-        assert_eq!(cfg.adapters.local_deep_research.iterations, Some(2));
-        assert_eq!(cfg.adapters.local_deep_research.questions_per_iteration, Some(2));
         assert_eq!(
-            cfg.adapters.local_deep_research.settings.get("llm.provider").map(String::as_str),
+            cfg.adapters.local_deep_research.command,
+            "/home/u/celeris/ldr/.venv/bin/python"
+        );
+        assert_eq!(
+            cfg.adapters.local_deep_research.mode,
+            task_worker::LdrMode::Detailed
+        );
+        assert_eq!(cfg.adapters.local_deep_research.iterations, Some(2));
+        assert_eq!(
+            cfg.adapters.local_deep_research.questions_per_iteration,
+            Some(2)
+        );
+        assert_eq!(
+            cfg.adapters
+                .local_deep_research
+                .settings
+                .get("llm.provider")
+                .map(String::as_str),
             Some("openai_endpoint")
         );
         assert_eq!(
@@ -2587,7 +3313,14 @@ host = "h"
                 .map(String::as_str),
             Some("[\"bing\"]")
         );
-        assert_eq!(cfg.adapters.local_deep_research.env.get("OPENAI_API_KEY").map(String::as_str), Some("unused"));
+        assert_eq!(
+            cfg.adapters
+                .local_deep_research
+                .env
+                .get("OPENAI_API_KEY")
+                .map(String::as_str),
+            Some("unused")
+        );
     }
 
     /// ADR-0029 D1: `local-deep-research` の行には `paperqa` 専用の `settings`（`ProviderConfig.settings`）を
@@ -2600,24 +3333,35 @@ host = "h"
         )
         .unwrap();
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("settings is only allowed when adapter"), "{err}");
+        assert!(
+            err.contains("settings is only allowed when adapter"),
+            "{err}"
+        );
     }
 
     /// ADR-0027 D3: `settings` は `adapter = "paperqa"` の行だけで意味を持つ。行ごとに上書きできる
     /// （`acp` の `command`/`args` と同じ作り）。
     #[test]
     fn settings_is_only_allowed_on_paperqa_providers_and_overrides_per_row() {
-        let cfg: Config =
-            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\nsettings = \"whatever\"\n").unwrap();
+        let cfg: Config = toml::from_str(
+            "[[providers]]\nid = \"x\"\nadapter = \"fake\"\nsettings = \"whatever\"\n",
+        )
+        .unwrap();
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("settings is only allowed when adapter"), "{err}");
+        assert!(
+            err.contains("settings is only allowed when adapter"),
+            "{err}"
+        );
 
         let cfg: Config = toml::from_str(
             "[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\nsettings = \"/settings/other\"\n",
         )
         .unwrap();
         assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.providers[0].settings.as_deref(), Some("/settings/other"));
+        assert_eq!(
+            cfg.providers[0].settings.as_deref(),
+            Some("/settings/other")
+        );
     }
 
     /// ADR-0027 D3: `[adapters.paperqa]` の `paper_directory`/`index_directory`/`settings`（共通・行の上書き
@@ -2641,15 +3385,31 @@ host = "h"
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         let base = dir.path().canonicalize().unwrap();
-        assert_eq!(cfg.adapters.paperqa.paper_directory, Some(base.join("papers")));
-        assert_eq!(cfg.adapters.paperqa.index_directory, Some(base.join("index")));
+        assert_eq!(
+            cfg.adapters.paperqa.paper_directory,
+            Some(base.join("papers"))
+        );
+        assert_eq!(
+            cfg.adapters.paperqa.index_directory,
+            Some(base.join("index"))
+        );
         assert_eq!(
             cfg.adapters.paperqa.settings.as_deref(),
-            Some(base.join("settings/qwen-local").to_string_lossy().into_owned().as_str())
+            Some(
+                base.join("settings/qwen-local")
+                    .to_string_lossy()
+                    .into_owned()
+                    .as_str()
+            )
         );
         assert_eq!(
             cfg.providers[0].settings.as_deref(),
-            Some(base.join("settings/other").to_string_lossy().into_owned().as_str())
+            Some(
+                base.join("settings/other")
+                    .to_string_lossy()
+                    .into_owned()
+                    .as_str()
+            )
         );
     }
 
@@ -2662,23 +3422,51 @@ host = "h"
         ));
         let cfg = Config::load(path).unwrap();
         assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.adapters.paperqa.command, "/home/u/celeris/paperqa/.venv/bin/pqa");
+        assert_eq!(
+            cfg.adapters.paperqa.command,
+            "/home/u/celeris/paperqa/.venv/bin/pqa"
+        );
         // `.json` を付けずに渡す（実機の仕様）。
-        assert_eq!(cfg.adapters.paperqa.settings.as_deref(), Some("/home/u/celeris/paperqa/settings/qwen-local"));
+        assert_eq!(
+            cfg.adapters.paperqa.settings.as_deref(),
+            Some("/home/u/celeris/paperqa/settings/qwen-local")
+        );
         assert_eq!(
             cfg.adapters.paperqa.paper_directory.as_deref(),
             Some(Path::new("/home/u/celeris/paperqa/papers"))
         );
-        assert_eq!(cfg.adapters.paperqa.env.get("OPENAI_BASE_URL").map(String::as_str), Some("http://127.0.0.1:18000/v1"));
-        let paperqa_provider = cfg.providers.iter().find(|p| p.adapter == "paperqa").expect("paperqa provider");
+        assert_eq!(
+            cfg.adapters
+                .paperqa
+                .env
+                .get("OPENAI_BASE_URL")
+                .map(String::as_str),
+            Some("http://127.0.0.1:18000/v1")
+        );
+        let paperqa_provider = cfg
+            .providers
+            .iter()
+            .find(|p| p.adapter == "paperqa")
+            .expect("paperqa provider");
         assert_eq!(paperqa_provider.model, "openai/qwen3.8-27b");
         let genre_ids: Vec<&str> = cfg.genres.iter().map(|g| g.id.as_str()).collect();
         assert_eq!(genre_ids, vec!["coding", "literature"]);
-        let literature = cfg.genres.iter().find(|g| g.id == "literature").expect("literature genre");
-        assert_eq!(literature.default_role.as_deref(), Some("literature-reader"));
+        let literature = cfg
+            .genres
+            .iter()
+            .find(|g| g.id == "literature")
+            .expect("literature genre");
+        assert_eq!(
+            literature.default_role.as_deref(),
+            Some("literature-reader")
+        );
         assert_eq!(
             literature.roles,
-            vec!["literature-scout".to_string(), "literature-reader".to_string(), "novelty-skeptic".to_string()]
+            vec![
+                "literature-scout".to_string(),
+                "literature-reader".to_string(),
+                "novelty-skeptic".to_string()
+            ]
         );
         // ADR-0028 D1: 能力・入出力の目安も読める（ADR-0035 で取得の段が入ったので中身が変わった）。
         assert_eq!(
@@ -2689,7 +3477,14 @@ host = "h"
                 "引用付きの要約".to_string()
             ]
         );
-        assert_eq!(literature.input_artifacts, vec!["question".to_string(), "pdf".to_string(), "bibliography".to_string()]);
+        assert_eq!(
+            literature.input_artifacts,
+            vec![
+                "question".to_string(),
+                "pdf".to_string(),
+                "bibliography".to_string()
+            ]
+        );
         // Phase 38（ADR-0028 追記）: `名前: 説明` の形で書ける（設定は文字列のまま読み、名前は `:` の前）。
         assert_eq!(
             literature.output_artifacts,
@@ -2705,19 +3500,42 @@ host = "h"
                 .iter()
                 .find(|g| g.id == "literature")
                 .map(|g| g.output_artifact_names()),
-            Some(vec!["answer.md", "papers.json", "sources.json", "queries.json"])
+            Some(vec![
+                "answer.md",
+                "papers.json",
+                "sources.json",
+                "queries.json"
+            ])
         );
         // ADR-0035 D1 / D3: 取得と証拠ゲートの例の値。
         assert_eq!(cfg.adapters.paperqa.acquire.max_candidates, 30);
         assert_eq!(cfg.adapters.paperqa.acquire.max_pdfs, 12);
         assert_eq!(cfg.adapters.paperqa.acquire.per_query, 20);
-        assert!(cfg.adapters.paperqa.acquire.command.is_none(), "既定は pqa の隣の python3");
+        assert!(
+            cfg.adapters.paperqa.acquire.command.is_none(),
+            "既定は pqa の隣の python3"
+        );
         assert_eq!(
             cfg.adapters.paperqa.evidence,
-            task_worker::PaperQaEvidence { min_candidates: 5, min_pdfs: 3, min_cited: 2 }
+            task_worker::PaperQaEvidence {
+                min_candidates: 5,
+                min_pdfs: 3,
+                min_cited: 2
+            }
         );
-        assert_eq!(cfg.adapters.paperqa.env.get("RES_OPTIONS").map(String::as_str), Some("single-request"));
-        let coding = cfg.genres.iter().find(|g| g.id == "coding").expect("coding genre");
+        assert_eq!(
+            cfg.adapters
+                .paperqa
+                .env
+                .get("RES_OPTIONS")
+                .map(String::as_str),
+            Some("single-request")
+        );
+        let coding = cfg
+            .genres
+            .iter()
+            .find(|g| g.id == "coding")
+            .expect("coding genre");
         assert!(!coding.capabilities.is_empty());
         assert!(!coding.input_artifacts.is_empty());
         assert!(!coding.output_artifacts.is_empty());
@@ -2733,27 +3551,52 @@ host = "h"
         ));
         let cfg = Config::load(path).unwrap();
         assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.adapters.local_deep_research.command, "/home/u/celeris/ldr/.venv/bin/python");
-        assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Quick);
+        assert_eq!(
+            cfg.adapters.local_deep_research.command,
+            "/home/u/celeris/ldr/.venv/bin/python"
+        );
+        assert_eq!(
+            cfg.adapters.local_deep_research.mode,
+            task_worker::LdrMode::Quick
+        );
         // ADR-0031 D4: 既定は Tavily（鍵は `env_from_secrets` で渡す）。
         assert_eq!(
-            cfg.adapters.local_deep_research.settings.get("search.tool").map(String::as_str),
+            cfg.adapters
+                .local_deep_research
+                .settings
+                .get("search.tool")
+                .map(String::as_str),
             Some("tavily")
         );
         // 実機の罠（PROGRESS の Phase 21「真因: DNS」）: これが無いと、このホストの DNS では
         // LDR の DNS ピン留めが 5 秒で fail-closed し、どのエンジンでも「0 件」になる。
         assert_eq!(
-            cfg.adapters.local_deep_research.env.get("RES_OPTIONS").map(String::as_str),
+            cfg.adapters
+                .local_deep_research
+                .env
+                .get("RES_OPTIONS")
+                .map(String::as_str),
             Some("single-request")
         );
-        let ldr_provider = cfg.providers.iter().find(|p| p.adapter == "local-deep-research").expect("ldr provider");
+        let ldr_provider = cfg
+            .providers
+            .iter()
+            .find(|p| p.adapter == "local-deep-research")
+            .expect("ldr provider");
         assert_eq!(ldr_provider.model, "qwen3.8-27b");
         // ADR-0031 D2: 既定の証拠ゲート閾値を明示している。
-        assert_eq!(cfg.adapters.local_deep_research.evidence.min_search_results, 5);
+        assert_eq!(
+            cfg.adapters.local_deep_research.evidence.min_search_results,
+            5
+        );
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_sources, 3);
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_cited, 2);
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_domains, 2);
-        let genre = cfg.genres.iter().find(|g| g.id == "web-research").expect("web-research genre");
+        let genre = cfg
+            .genres
+            .iter()
+            .find(|g| g.id == "web-research")
+            .expect("web-research genre");
         assert_eq!(genre.default_role.as_deref(), Some("web-scout"));
         assert_eq!(genre.roles, vec!["web-scout".to_string()]);
         // Phase 38（ADR-0028 追記）: `名前: 説明` で書ける（名前は `:` の前）。
@@ -2772,25 +3615,42 @@ host = "h"
                 .map(|g| g.output_artifact_names()),
             Some(vec!["report.md", "sources.json", "research.json"])
         );
-        let role = cfg.roles.iter().find(|r| r.id == "web-scout").expect("web-scout role");
+        let role = cfg
+            .roles
+            .iter()
+            .find(|r| r.id == "web-scout")
+            .expect("web-scout role");
         assert_eq!(role.adapter.as_deref(), Some("local-deep-research"));
         // ADR-0030 D1: `[secrets] dir` が読め、設定ファイル基準で絶対化される。鍵の値そのものはファイルに無い。
         let secrets = cfg.secrets.as_ref().expect("[secrets]");
         assert!(secrets.dir.is_absolute());
-        assert_eq!(secrets.dir.file_name().and_then(|n| n.to_str()), Some("secrets"));
-        assert!(!std::fs::read_to_string(path).unwrap().contains("tvly-"), "example config must not contain a real key");
+        assert_eq!(
+            secrets.dir.file_name().and_then(|n| n.to_str()),
+            Some("secrets")
+        );
+        assert!(
+            !std::fs::read_to_string(path).unwrap().contains("tvly-"),
+            "example config must not contain a real key"
+        );
     }
 
     /// ADR-0010 D6/D9: バックオフと `[reviewer]` の既定値・指定値が DispatchConfig に写る。
     #[test]
     fn backoff_and_reviewer_settings_map_to_dispatch_config() {
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert!(cfg.validate().is_ok());
         let d = cfg.dispatch_config();
         assert_eq!(d.retry_backoff_base, Duration::from_secs(10));
         assert_eq!(d.retry_backoff_max, Duration::from_secs(300));
         assert_eq!(d.max_requeues, 5);
-        assert_eq!(d.reviewer_hint, WorkerHint { tier: Tier::Standard, adapter: None });
+        assert_eq!(
+            d.reviewer_hint,
+            WorkerHint {
+                tier: Tier::Standard,
+                adapter: None
+            }
+        );
 
         let text = r#"retry_backoff_base_secs = 0
 retry_backoff_max_secs = 0
@@ -2811,16 +3671,28 @@ tiers = ["cheap"]
         let d = cfg.dispatch_config();
         assert_eq!(d.retry_backoff_base, Duration::ZERO);
         assert_eq!(d.max_requeues, 0);
-        assert_eq!(d.reviewer_hint, WorkerHint { tier: Tier::Cheap, adapter: Some("claude-code".into()) });
+        assert_eq!(
+            d.reviewer_hint,
+            WorkerHint {
+                tier: Tier::Cheap,
+                adapter: Some("claude-code".into())
+            }
+        );
     }
 
     /// ADR-0010 D9: Reviewer run を満たせるプロバイダが無い設定はエラー。未知キーも拒否。
     #[test]
     fn rejects_reviewer_without_matching_provider_and_unknown_reviewer_keys() {
-        let cfg: Config = toml::from_str("[reviewer]\nadapter = \"codex\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let cfg: Config = toml::from_str(
+            "[reviewer]\nadapter = \"codex\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("[reviewer]") && err.contains("codex"), "{err}");
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\ntiers = [\"frontier\"]\n").unwrap();
+        let cfg: Config = toml::from_str(
+            "[[providers]]\nid = \"x\"\nadapter = \"fake\"\ntiers = [\"frontier\"]\n",
+        )
+        .unwrap();
         assert!(cfg.validate().unwrap_err().to_string().contains("Standard"));
         assert!(toml::from_str::<Config>("[reviewer]\nbogus = 1\n").is_err());
         let cfg: Config = toml::from_str("retry_backoff_base_secs = 20\nretry_backoff_max_secs = 10\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
@@ -2832,25 +3704,56 @@ tiers = ["cheap"]
     fn rejects_zero_cooldown_and_unsafe_lease_grace() {
         let providers = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
         let cfg: Config = toml::from_str(&format!("error_cooldown_secs = 0\n{providers}")).unwrap();
-        assert!(cfg.validate().unwrap_err().to_string().contains("error_cooldown_secs"));
-        let cfg: Config = toml::from_str(&format!("lease_grace_secs = 10\nkill_grace_secs = 10\n{providers}")).unwrap();
-        assert!(cfg.validate().unwrap_err().to_string().contains("lease_grace_secs"));
-        let cfg: Config = toml::from_str(&format!("lease_grace_secs = 60\nkill_grace_secs = 1\ntick_ms = 50\n{providers}")).unwrap();
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("error_cooldown_secs")
+        );
+        let cfg: Config = toml::from_str(&format!(
+            "lease_grace_secs = 10\nkill_grace_secs = 10\n{providers}"
+        ))
+        .unwrap();
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("lease_grace_secs")
+        );
+        let cfg: Config = toml::from_str(&format!(
+            "lease_grace_secs = 60\nkill_grace_secs = 1\ntick_ms = 50\n{providers}"
+        ))
+        .unwrap();
         assert!(cfg.validate().is_ok());
     }
 
     /// ADR-0012 D1: 同じアダプタ種別のプロバイダを複数並べ、それぞれに env を持たせられる。ID の重複は拒否。
     #[test]
     fn multi_account_providers_parse_and_duplicate_ids_are_rejected() {
-        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/celeris.multi-account.example.toml"));
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/celeris.multi-account.example.toml"
+        ));
         let cfg = Config::load(path).unwrap();
-        let claude: Vec<&ProviderConfig> = cfg.providers.iter().filter(|p| p.adapter == "claude-code").collect();
+        let claude: Vec<&ProviderConfig> = cfg
+            .providers
+            .iter()
+            .filter(|p| p.adapter == "claude-code")
+            .collect();
         assert!(claude.len() >= 2);
-        assert_ne!(claude[0].env.get("CLAUDE_CONFIG_DIR"), claude[1].env.get("CLAUDE_CONFIG_DIR"));
+        assert_ne!(
+            claude[0].env.get("CLAUDE_CONFIG_DIR"),
+            claude[1].env.get("CLAUDE_CONFIG_DIR")
+        );
 
         let dup = "[[providers]]\nid = \"a\"\nadapter = \"fake\"\n[[providers]]\nid = \"a\"\nadapter = \"fake\"\n";
         let cfg: Config = toml::from_str(dup).unwrap();
-        assert!(cfg.validate().unwrap_err().to_string().contains("duplicate provider id"));
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate provider id")
+        );
     }
 
     /// ADR-0013 D3 / D11: `[api]` は既定で無効。loopback 以外はトークンファイル必須。相対パスは設定ファイル基準。
@@ -2861,15 +3764,25 @@ tiers = ["cheap"]
         assert!(cfg.validate().is_ok());
         assert!(cfg.api.listen.is_none());
 
-        let cfg: Config = toml::from_str(&format!("[api]\nlisten = \"127.0.0.1:7700\"\n{providers}")).unwrap();
+        let cfg: Config =
+            toml::from_str(&format!("[api]\nlisten = \"127.0.0.1:7700\"\n{providers}")).unwrap();
         assert!(cfg.validate().is_ok());
-        let cfg: Config = toml::from_str(&format!("[api]\nlisten = \"[::1]:7700\"\n{providers}")).unwrap();
+        let cfg: Config =
+            toml::from_str(&format!("[api]\nlisten = \"[::1]:7700\"\n{providers}")).unwrap();
         assert!(cfg.validate().is_ok());
 
-        let cfg: Config = toml::from_str(&format!("[api]\nlisten = \"0.0.0.0:7700\"\n{providers}")).unwrap();
-        assert!(cfg.validate().unwrap_err().to_string().contains("token_file is required"));
         let cfg: Config =
-            toml::from_str(&format!("[api]\nlisten = \"0.0.0.0:7700\"\ntoken_file = \"api.token\"\n{providers}")).unwrap();
+            toml::from_str(&format!("[api]\nlisten = \"0.0.0.0:7700\"\n{providers}")).unwrap();
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("token_file is required")
+        );
+        let cfg: Config = toml::from_str(&format!(
+            "[api]\nlisten = \"0.0.0.0:7700\"\ntoken_file = \"api.token\"\n{providers}"
+        ))
+        .unwrap();
         assert!(cfg.validate().is_ok());
         assert!(toml::from_str::<Config>("[api]\nbogus = 1\n").is_err());
 
@@ -2878,10 +3791,18 @@ tiers = ["cheap"]
         std::fs::write(&path, format!("[api]\nlisten = \"127.0.0.1:7700\"\ntoken_file = \"secrets/api.token\"\n{providers}")).unwrap();
         // token_file が無い・空なら起動時の設定エラー（値は出さない）。
         let err = Config::load(&path).unwrap_err().to_string();
-        assert!(err.contains("token_file") && err.contains("cannot be read"), "{err}");
+        assert!(
+            err.contains("token_file") && err.contains("cannot be read"),
+            "{err}"
+        );
         std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
         std::fs::write(dir.path().join("secrets/api.token"), " \n").unwrap();
-        assert!(Config::load(&path).unwrap_err().to_string().contains("is empty"));
+        assert!(
+            Config::load(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("is empty")
+        );
         std::fs::write(dir.path().join("secrets/api.token"), "  tok-123\n").unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.api.read_token().unwrap().as_deref(), Some("tok-123"));
@@ -2899,7 +3820,10 @@ tiers = ["cheap"]
         let cfg: Config = toml::from_str(providers).unwrap();
         assert!(cfg.validate().is_ok());
         assert!(cfg.roles.is_empty());
-        assert_eq!(cfg.delegation_limits(), task_core::DelegationLimits::default());
+        assert_eq!(
+            cfg.delegation_limits(),
+            task_core::DelegationLimits::default()
+        );
         assert_eq!(
             cfg.delegation_limits(),
             DelegationLimits {
@@ -2934,8 +3858,17 @@ max_tree_depth = 2
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].id, "lead");
         assert_eq!(specs[0].tier, Some(Tier::Frontier));
-        assert_eq!((specs[0].max_turns, specs[0].max_wall_secs), (Some(40), Some(1800)));
-        assert!(specs[0].instructions.as_deref().unwrap().starts_with("You lead"));
+        assert_eq!(
+            (specs[0].max_turns, specs[0].max_wall_secs),
+            (Some(40), Some(1800))
+        );
+        assert!(
+            specs[0]
+                .instructions
+                .as_deref()
+                .unwrap()
+                .starts_with("You lead")
+        );
         assert_eq!(specs[0].adapter, None);
         assert_eq!(specs[1].adapter.as_deref(), Some("fake"));
         assert_eq!(specs[1].tier, None);
@@ -2962,15 +3895,23 @@ max_tree_depth = 2
     #[test]
     fn delegation_on_child_failure_is_parsed_and_validated() {
         let with = |v: &str| {
-            format!("[delegation]\non_child_failure = \"{v}\"\n[[providers]]\nid = \"p\"\nadapter = \"fake\"\n")
+            format!(
+                "[delegation]\non_child_failure = \"{v}\"\n[[providers]]\nid = \"p\"\nadapter = \"fake\"\n"
+            )
         };
         let cfg: Config = toml::from_str(&with("ignore")).unwrap();
         cfg.validate().unwrap();
-        assert_eq!(cfg.delegation_limits().on_child_failure, task_core::OnChildFailure::Ignore);
+        assert_eq!(
+            cfg.delegation_limits().on_child_failure,
+            task_core::OnChildFailure::Ignore
+        );
 
         let cfg: Config = toml::from_str(&with("retry_then_ask")).unwrap();
         cfg.validate().unwrap();
-        assert_eq!(cfg.delegation_limits().on_child_failure, task_core::OnChildFailure::RetryThenAsk);
+        assert_eq!(
+            cfg.delegation_limits().on_child_failure,
+            task_core::OnChildFailure::RetryThenAsk
+        );
 
         let cfg: Config = toml::from_str(&with("fail_parent")).unwrap();
         let err = cfg.validate().unwrap_err().to_string();
@@ -2983,7 +3924,10 @@ max_tree_depth = 2
         let providers = "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n";
         let dup = format!("[[roles]]\nid = \"lead\"\n[[roles]]\nid = \"lead\"\n{providers}");
         let cfg: Config = toml::from_str(&dup).unwrap();
-        assert_eq!(cfg.validate().unwrap_err().to_string(), "invalid config: duplicate role id: lead");
+        assert_eq!(
+            cfg.validate().unwrap_err().to_string(),
+            "invalid config: duplicate role id: lead"
+        );
 
         let bogus = format!("[[roles]]\nid = \"lead\"\nadapter = \"bogus\"\n{providers}");
         let cfg: Config = toml::from_str(&bogus).unwrap();
@@ -2994,20 +3938,38 @@ max_tree_depth = 2
 
         let empty = format!("[[roles]]\nid = \"  \"\n{providers}");
         let cfg: Config = toml::from_str(&empty).unwrap();
-        assert!(cfg.validate().unwrap_err().to_string().contains("id must not be empty"));
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("id must not be empty")
+        );
 
         let zero_turns = format!("[[roles]]\nid = \"lead\"\nmax_turns = 0\n{providers}");
         let cfg: Config = toml::from_str(&zero_turns).unwrap();
-        assert!(cfg.validate().unwrap_err().to_string().contains("max_turns must be >= 1"));
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("max_turns must be >= 1")
+        );
         let zero_wall = format!("[[roles]]\nid = \"lead\"\nmax_wall_secs = 0\n{providers}");
         let cfg: Config = toml::from_str(&zero_wall).unwrap();
-        assert!(cfg.validate().unwrap_err().to_string().contains("max_wall_secs must be >= 1"));
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("max_wall_secs must be >= 1")
+        );
 
         for key in ["max_delegate_per_run", "max_tree_depth", "max_tree_runs"] {
             let text = format!("[delegation]\n{key} = 0\n{providers}");
             let cfg: Config = toml::from_str(&text).unwrap();
             let err = cfg.validate().unwrap_err().to_string();
-            assert_eq!(err, format!("invalid config: [delegation] {key} must be >= 1"));
+            assert_eq!(
+                err,
+                format!("invalid config: [delegation] {key} must be >= 1")
+            );
         }
     }
 
@@ -3052,7 +4014,10 @@ roles = ["lead"]
         assert_eq!(specs[0].id, "coding");
         assert_eq!(specs[0].description, "write and fix code");
         assert_eq!(specs[0].default_role.as_deref(), Some("implementer"));
-        assert_eq!(specs[0].roles, vec!["lead".to_string(), "implementer".to_string()]);
+        assert_eq!(
+            specs[0].roles,
+            vec!["lead".to_string(), "implementer".to_string()]
+        );
         // ADR-0028 D1: 3 フィールドを書かなければ空（既存設定との互換）。
         assert!(specs[0].capabilities.is_empty());
         assert!(specs[0].input_artifacts.is_empty());
@@ -3060,14 +4025,31 @@ roles = ["lead"]
         // ADR-0028 D1: 書けば `GenreSpec` に写る。
         assert_eq!(
             specs[1].capabilities,
-            vec!["学術文献の検索".to_string(), "引用グラフの探索".to_string(), "PDF 全文からの根拠抽出".to_string()]
+            vec![
+                "学術文献の検索".to_string(),
+                "引用グラフの探索".to_string(),
+                "PDF 全文からの根拠抽出".to_string()
+            ]
         );
-        assert_eq!(specs[1].input_artifacts, vec!["question".to_string(), "pdf".to_string(), "bibliography".to_string()]);
-        assert_eq!(specs[1].output_artifacts, vec!["answer.md".to_string(), "citations.json".to_string()]);
+        assert_eq!(
+            specs[1].input_artifacts,
+            vec![
+                "question".to_string(),
+                "pdf".to_string(),
+                "bibliography".to_string()
+            ]
+        );
+        assert_eq!(
+            specs[1].output_artifacts,
+            vec!["answer.md".to_string(), "citations.json".to_string()]
+        );
         let d = cfg.dispatch_config();
         assert_eq!(d.genres, specs);
 
-        assert!(toml::from_str::<Config>("[[genres]]\nid = \"a\"\ndescription = \"d\"\nbogus = 1\n").is_err());
+        assert!(
+            toml::from_str::<Config>("[[genres]]\nid = \"a\"\ndescription = \"d\"\nbogus = 1\n")
+                .is_err()
+        );
     }
 
     /// ADR-0027 D1: 分野 id の重複、知らない役割を指す `roles`/`default_role`、`roles` に無い
@@ -3081,11 +4063,19 @@ roles = ["lead"]
             "{roles}[[genres]]\nid = \"coding\"\ndescription = \"d\"\n[[genres]]\nid = \"coding\"\ndescription = \"d\"\n{providers}"
         );
         let cfg: Config = toml::from_str(&dup).unwrap();
-        assert_eq!(cfg.validate().unwrap_err().to_string(), "invalid config: duplicate genre id: coding");
+        assert_eq!(
+            cfg.validate().unwrap_err().to_string(),
+            "invalid config: duplicate genre id: coding"
+        );
 
         let empty_id = format!("[[genres]]\nid = \"  \"\ndescription = \"d\"\n{providers}");
         let cfg: Config = toml::from_str(&empty_id).unwrap();
-        assert!(cfg.validate().unwrap_err().to_string().contains("id must not be empty"));
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("id must not be empty")
+        );
 
         let unknown_role_in_roles = format!(
             "{roles}[[genres]]\nid = \"coding\"\ndescription = \"d\"\nroles = [\"lead\", \"nobody\"]\n{providers}"
@@ -3161,7 +4151,8 @@ roles = ["lead"]
 
     #[test]
     fn rejects_unknown_fields_in_codex_adapter_config() {
-        let text = "[[providers]]\nid = \"x\"\nadapter = \"codex\"\n\n[adapters.codex]\nbogus = 1\n";
+        let text =
+            "[[providers]]\nid = \"x\"\nadapter = \"codex\"\n\n[adapters.codex]\nbogus = 1\n";
         assert!(toml::from_str::<Config>(text).is_err());
     }
 
@@ -3190,11 +4181,27 @@ roles = ["lead"]
 
         let cfg = Config::load(&path).unwrap();
         let ids: Vec<&str> = cfg.providers.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["inline", "a-acct", "b-acct"], "providers.d files load in filename order after inline ones");
+        assert_eq!(
+            ids,
+            vec!["inline", "a-acct", "b-acct"],
+            "providers.d files load in filename order after inline ones"
+        );
         let b = cfg.providers.iter().find(|p| p.id == "b-acct").unwrap();
         assert_eq!(b.concurrency, 2);
-        assert_eq!(b.env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/x/b"));
-        assert_eq!(cfg.providers_dir.as_deref(), Some(dir.path().join("providers.d").canonicalize().unwrap().as_path()));
+        assert_eq!(
+            b.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/x/b")
+        );
+        assert_eq!(
+            cfg.providers_dir.as_deref(),
+            Some(
+                dir.path()
+                    .join("providers.d")
+                    .canonicalize()
+                    .unwrap()
+                    .as_path()
+            )
+        );
 
         // 重複 id（inline と providers.d の両方に "inline"）は既存の検証がそのまま拒否する。
         std::fs::write(
@@ -3298,15 +4305,24 @@ roles = ["lead"]
         let claude_dir = accounts.claude_dir.clone().expect("claude_dir");
         let codex_dir = accounts.codex_dir.clone().expect("codex_dir");
         assert!(claude_dir.is_absolute());
-        assert_eq!(claude_dir, dir.path().canonicalize().unwrap().join("claude-accounts"));
+        assert_eq!(
+            claude_dir,
+            dir.path().canonicalize().unwrap().join("claude-accounts")
+        );
         assert!(codex_dir.is_absolute());
-        assert_eq!(codex_dir, dir.path().canonicalize().unwrap().join("codex-accounts"));
+        assert_eq!(
+            codex_dir,
+            dir.path().canonicalize().unwrap().join("codex-accounts")
+        );
         assert_eq!(accounts.max_runs_per_account, 2);
         assert_eq!(accounts.check_model, "haiku");
 
         let d = cfg.dispatch_config();
         let runtime = d.accounts.expect("dispatch_config carries [accounts]");
-        assert_eq!(runtime.root_for(AccountAdapter::ClaudeCode), Some(&claude_dir));
+        assert_eq!(
+            runtime.root_for(AccountAdapter::ClaudeCode),
+            Some(&claude_dir)
+        );
         assert_eq!(runtime.root_for(AccountAdapter::Codex), Some(&codex_dir));
         assert_eq!(runtime.max_runs_per_account, 2);
         assert_eq!(runtime.check_model, "haiku");
@@ -3326,9 +4342,13 @@ roles = ["lead"]
         assert!(toml::from_str::<Config>("[accounts]\nbogus = 1\n").is_err());
 
         // Neither claude_dir nor codex_dir: deserializes fine (both optional) but validate() rejects it.
-        let cfg: Config = toml::from_str("[accounts]\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[accounts]\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("claude_dir") && err.contains("codex_dir"), "{err}");
+        assert!(
+            err.contains("claude_dir") && err.contains("codex_dir"),
+            "{err}"
+        );
     }
 
     /// `ensure_accounts_dir` は設定された根ディレクトリ（claude_dir・codex_dir それぞれ）を 0700 で作る
@@ -3362,7 +4382,8 @@ roles = ["lead"]
         cfg.ensure_accounts_dir().unwrap();
 
         // [accounts] 無しは no-op。
-        let no_accounts: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let no_accounts: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert!(no_accounts.ensure_accounts_dir().is_ok());
     }
 
@@ -3371,7 +4392,8 @@ roles = ["lead"]
     /// `[notify]` は書かなくてよく（既定値が入る）、書けば 3 つのキーだけを受ける。
     #[test]
     fn notify_defaults_are_used_when_the_section_is_absent() {
-        let cfg: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert_eq!(cfg.notify, crate::notify::NotifyConfig::default());
         assert_eq!(cfg.notify.discord_webhook_secret, "discord-webhook");
         assert_eq!(cfg.notify.interval_secs, 30);
@@ -3405,10 +4427,14 @@ roles = ["lead"]
         let cfg = Config::load(&path).unwrap();
         let secrets = cfg.secrets.as_ref().unwrap();
         assert!(secrets.dir.is_absolute());
-        assert_eq!(secrets.dir, dir.path().canonicalize().unwrap().join("secrets"));
+        assert_eq!(
+            secrets.dir,
+            dir.path().canonicalize().unwrap().join("secrets")
+        );
 
         // 節を書かなければ `None`。
-        let no_secrets: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let no_secrets: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert!(no_secrets.secrets.is_none());
         // 未知キーは拒否。
         assert!(toml::from_str::<Config>("[secrets]\nbogus = 1\n").is_err());
@@ -3429,7 +4455,10 @@ roles = ["lead"]
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert!(cfg.knowledge.root.is_absolute());
-        assert_eq!(cfg.knowledge.root, dir.path().canonicalize().unwrap().join("kb"));
+        assert_eq!(
+            cfg.knowledge.root,
+            dir.path().canonicalize().unwrap().join("kb")
+        );
         // 読んだだけでは作らない。
         assert!(!cfg.knowledge.root.exists());
         assert_eq!(
@@ -3443,9 +4472,13 @@ roles = ["lead"]
         assert_eq!(cfg.dispatch_config().knowledge.default_mounts.len(), 2);
 
         // 節を書かなければ既定（`~/knowledge` と `kb:user` / `kb:environment`）。
-        let default: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let default: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert_eq!(default.knowledge.root, PathBuf::from("~/knowledge"));
-        assert_eq!(default.knowledge.default_mounts, vec!["kb:user", "kb:environment"]);
+        assert_eq!(
+            default.knowledge.default_mounts,
+            vec!["kb:user", "kb:environment"]
+        );
         // 未知キーは拒否。
         assert!(toml::from_str::<Config>("[knowledge]\nbogus = 1\n").is_err());
         // 綴り間違いは `validate()` で落ちる（黙って無視しない）。
@@ -3489,7 +4522,8 @@ roles = ["lead"]
         // 2 回目は何もしない（既にある）。
         cfg.ensure_memory_dir().unwrap();
 
-        let without: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let without: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert!(without.memory.is_none());
         assert!(without.dispatch_config().memory_dir.is_none());
         assert!(without.ensure_memory_dir().is_ok());
@@ -3504,11 +4538,17 @@ roles = ["lead"]
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         // 節を書かない構成では新しい既定が効く。
-        std::fs::write(&path, "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert!(cfg.selfdeploy.releases_dir.is_absolute());
         assert!(
-            cfg.selfdeploy.releases_dir.ends_with(".local/celeris/releases"),
+            cfg.selfdeploy
+                .releases_dir
+                .ends_with(".local/celeris/releases"),
             "{:?}",
             cfg.selfdeploy.releases_dir
         );
@@ -3535,12 +4575,19 @@ roles = ["lead"]
         assert!(toml::from_str::<Config>("[selfdeploy]\nbogus = 1\n").is_err());
 
         // ADR-0041 D3: `repo` は既定 `~/workspace/agent-platform` で、`~` は celeris の $HOME で展開する。
-        std::fs::write(&path, "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
         let cfg = Config::load(&path).unwrap();
         match task_core::home_dir() {
             Some(home) => assert_eq!(cfg.selfdeploy.repo, home.join("workspace/agent-platform")),
             // $HOME が無い環境では展開できないので、設定ファイル基準の相対として残る。
-            None => assert_eq!(cfg.selfdeploy.repo, dir.path().join("~/workspace/agent-platform")),
+            None => assert_eq!(
+                cfg.selfdeploy.repo,
+                dir.path().join("~/workspace/agent-platform")
+            ),
         }
         // 明示した絶対パスはそのまま（存在しなくてよい。`on_main` が `null` になるだけ）。
         std::fs::write(
@@ -3562,16 +4609,23 @@ roles = ["lead"]
         assert_eq!(cfg.github.merge_method, "merge");
         assert!(cfg.validate().is_ok());
 
-        let cfg: Config = toml::from_str(&format!("{base}\n[github]\ngh = \"/opt/gh\"\nmerge_method = \"squash\"\n"))
-            .expect("explicit");
+        let cfg: Config = toml::from_str(&format!(
+            "{base}\n[github]\ngh = \"/opt/gh\"\nmerge_method = \"squash\"\n"
+        ))
+        .expect("explicit");
         assert_eq!(cfg.github.gh, "/opt/gh");
         assert_eq!(cfg.github.merge_method, "squash");
         assert!(cfg.validate().is_ok());
 
-        let bad: Config = toml::from_str(&format!("{base}\n[github]\nmerge_method = \"rebase-merge\"\n"))
-            .expect("parse");
-        assert!(matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("merge_method")));
-        let blank: Config = toml::from_str(&format!("{base}\n[github]\ngh = \"  \"\n")).expect("parse");
+        let bad: Config = toml::from_str(&format!(
+            "{base}\n[github]\nmerge_method = \"rebase-merge\"\n"
+        ))
+        .expect("parse");
+        assert!(
+            matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("merge_method"))
+        );
+        let blank: Config =
+            toml::from_str(&format!("{base}\n[github]\ngh = \"  \"\n")).expect("parse");
         assert!(matches!(blank.validate(), Err(ConfigError::Invalid(m)) if m.contains("gh")));
         // 未知のキーは弾く（他の節と同じ流儀）。
         assert!(toml::from_str::<Config>(&format!("{base}\n[github]\nbogus = 1\n")).is_err());
@@ -3588,7 +4642,10 @@ roles = ["lead"]
         assert_eq!(cfg.containers.build_timeout_secs, 1800);
         assert!(cfg.validate().is_ok());
         let dispatch = cfg.dispatch_config();
-        assert_eq!(dispatch.containers.preference, task_worker::RuntimePreference::Auto);
+        assert_eq!(
+            dispatch.containers.preference,
+            task_worker::RuntimePreference::Auto
+        );
         assert_eq!(dispatch.containers.image_default, "celeris-worker:latest");
         assert_eq!(dispatch.containers.build_timeout, Duration::from_secs(1800));
 
@@ -3597,18 +4654,31 @@ roles = ["lead"]
         ))
         .expect("explicit");
         assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.dispatch_config().containers.preference, task_worker::RuntimePreference::Podman);
-        assert_eq!(cfg.dispatch_config().containers.build_timeout, Duration::from_secs(60));
+        assert_eq!(
+            cfg.dispatch_config().containers.preference,
+            task_worker::RuntimePreference::Podman
+        );
+        assert_eq!(
+            cfg.dispatch_config().containers.build_timeout,
+            Duration::from_secs(60)
+        );
 
         // 知らない runtime・空のイメージ・0 秒は設定エラー（黙ってホスト実行に倒れない）。
-        let bad: Config = toml::from_str(&format!("{base}\n[containers]\nruntime = \"lxc\"\n")).expect("parse");
+        let bad: Config =
+            toml::from_str(&format!("{base}\n[containers]\nruntime = \"lxc\"\n")).expect("parse");
         assert!(matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("runtime")));
         let bad: Config =
-            toml::from_str(&format!("{base}\n[containers]\nimage_default = \"  \"\n")).expect("parse");
-        assert!(matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("image_default")));
+            toml::from_str(&format!("{base}\n[containers]\nimage_default = \"  \"\n"))
+                .expect("parse");
+        assert!(
+            matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("image_default"))
+        );
         let bad: Config =
-            toml::from_str(&format!("{base}\n[containers]\nbuild_timeout_secs = 0\n")).expect("parse");
-        assert!(matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("build_timeout_secs")));
+            toml::from_str(&format!("{base}\n[containers]\nbuild_timeout_secs = 0\n"))
+                .expect("parse");
+        assert!(
+            matches!(bad.validate(), Err(ConfigError::Invalid(m)) if m.contains("build_timeout_secs"))
+        );
         // 未知のキーは弾く。
         assert!(toml::from_str::<Config>(&format!("{base}\n[containers]\nbogus = 1\n")).is_err());
     }
@@ -3625,11 +4695,26 @@ roles = ["lead"]
         )
         .unwrap();
         assert_eq!(raw.db, PathBuf::from("~/.local/celeris/celeris.sqlite3"));
-        assert_eq!(raw.workspace_root, PathBuf::from("~/.local/celeris/workspaces"));
-        assert_eq!(raw.selfdeploy.releases_dir, PathBuf::from("~/.local/celeris/releases"));
-        assert_eq!(raw.containers.build_dir, PathBuf::from("~/.local/celeris/containers"));
-        assert_eq!(raw.memory.as_ref().expect("[memory]").dir, PathBuf::from("~/.local/celeris/memory"));
-        assert_eq!(raw.secrets.as_ref().expect("[secrets]").dir, PathBuf::from("~/.config/celeris/secrets"));
+        assert_eq!(
+            raw.workspace_root,
+            PathBuf::from("~/.local/celeris/workspaces")
+        );
+        assert_eq!(
+            raw.selfdeploy.releases_dir,
+            PathBuf::from("~/.local/celeris/releases")
+        );
+        assert_eq!(
+            raw.containers.build_dir,
+            PathBuf::from("~/.local/celeris/containers")
+        );
+        assert_eq!(
+            raw.memory.as_ref().expect("[memory]").dir,
+            PathBuf::from("~/.local/celeris/memory")
+        );
+        assert_eq!(
+            raw.secrets.as_ref().expect("[secrets]").dir,
+            PathBuf::from("~/.config/celeris/secrets")
+        );
         // `[accounts]` の 2 つは Option のまま（`None` = 設定していない。ADR-0024 D2 / ADR-0025 D1）。
         let accounts = raw.accounts.as_ref().expect("[accounts]");
         assert!(accounts.claude_dir.is_none() && accounts.codex_dir.is_none());
@@ -3637,7 +4722,11 @@ roles = ["lead"]
         // `Config::load` は `~` を `$HOME` で展開し、絶対パスにする。
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n[memory]\n[secrets]\n").unwrap();
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n[memory]\n[secrets]\n",
+        )
+        .unwrap();
         let cfg = Config::load(&path).unwrap();
         for p in [
             &cfg.db,
@@ -3649,10 +4738,32 @@ roles = ["lead"]
         ] {
             assert!(p.is_absolute(), "{p:?}");
         }
-        assert!(cfg.db.ends_with(".local/celeris/celeris.sqlite3"), "{:?}", cfg.db);
-        assert!(cfg.selfdeploy.releases_dir.ends_with(".local/celeris/releases"), "{:?}", cfg.selfdeploy.releases_dir);
-        assert!(cfg.memory.as_ref().expect("[memory]").dir.ends_with(".local/celeris/memory"));
-        assert!(cfg.secrets.as_ref().expect("[secrets]").dir.ends_with(".config/celeris/secrets"));
+        assert!(
+            cfg.db.ends_with(".local/celeris/celeris.sqlite3"),
+            "{:?}",
+            cfg.db
+        );
+        assert!(
+            cfg.selfdeploy
+                .releases_dir
+                .ends_with(".local/celeris/releases"),
+            "{:?}",
+            cfg.selfdeploy.releases_dir
+        );
+        assert!(
+            cfg.memory
+                .as_ref()
+                .expect("[memory]")
+                .dir
+                .ends_with(".local/celeris/memory")
+        );
+        assert!(
+            cfg.secrets
+                .as_ref()
+                .expect("[secrets]")
+                .dir
+                .ends_with(".config/celeris/secrets")
+        );
 
         // 書いてあれば従来どおり（相対は設定ファイルのディレクトリ基準）。
         std::fs::write(
@@ -3668,10 +4779,19 @@ roles = ["lead"]
         assert_eq!(cfg.workspace_root, base.join("ws"));
         assert_eq!(cfg.selfdeploy.releases_dir, base.join("rel"));
         assert_eq!(cfg.memory.as_ref().expect("[memory]").dir, base.join("mem"));
-        assert_eq!(cfg.secrets.as_ref().expect("[secrets]").dir, base.join("sec"));
+        assert_eq!(
+            cfg.secrets.as_ref().expect("[secrets]").dir,
+            base.join("sec")
+        );
         let accounts = cfg.accounts.as_ref().expect("[accounts]");
-        assert_eq!(accounts.claude_dir.as_deref(), Some(base.join("ca").as_path()));
-        assert_eq!(accounts.codex_dir.as_deref(), Some(base.join("co").as_path()));
+        assert_eq!(
+            accounts.claude_dir.as_deref(),
+            Some(base.join("ca").as_path())
+        );
+        assert_eq!(
+            accounts.codex_dir.as_deref(),
+            Some(base.join("co").as_path())
+        );
     }
 
     /// ADR-0043 D3 / ADR-0042 D3: `[containers] build_dir` の既定は `~/.local/celeris/containers`
@@ -3680,11 +4800,21 @@ roles = ["lead"]
     fn containers_build_dir_expands_home_and_resolves_relative_paths() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
         let cfg = Config::load(&path).unwrap();
-        assert!(cfg.containers.build_dir.is_absolute(), "{:?}", cfg.containers.build_dir);
         assert!(
-            cfg.containers.build_dir.ends_with(".local/celeris/containers"),
+            cfg.containers.build_dir.is_absolute(),
+            "{:?}",
+            cfg.containers.build_dir
+        );
+        assert!(
+            cfg.containers
+                .build_dir
+                .ends_with(".local/celeris/containers"),
             "{:?}",
             cfg.containers.build_dir
         );
@@ -3695,7 +4825,10 @@ roles = ["lead"]
         )
         .unwrap();
         let cfg = Config::load(&path).unwrap();
-        assert_eq!(cfg.containers.build_dir, dir.path().canonicalize().unwrap().join("images"));
+        assert_eq!(
+            cfg.containers.build_dir,
+            dir.path().canonicalize().unwrap().join("images")
+        );
     }
 
     /// ADR-0041 D1（Phase 49）/ ADR-0042 D3（Phase 52）: `[workspace] worktree_branch_prefix` は
@@ -3705,21 +4838,34 @@ roles = ["lead"]
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         // 節を書かなくても既定が効く。
-        std::fs::write(&path, "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.workspace.worktree_branch_prefix, "celeris/");
         let dispatch = cfg.dispatch_config();
         assert_eq!(dispatch.worktree_branch_prefix, "celeris/");
         // ADR-0045 D2: `releases_dir` の既定は `~/.local/celeris/releases`。
         let releases = dispatch.releases_dir.as_deref().expect("releases_dir");
-        assert!(releases.ends_with(".local/celeris/releases"), "{releases:?}");
+        assert!(
+            releases.ends_with(".local/celeris/releases"),
+            "{releases:?}"
+        );
 
         std::fs::write(
             &path,
             "db = \"t.sqlite3\"\n[workspace]\nworktree_branch_prefix = \"bot/\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
         )
         .unwrap();
-        assert_eq!(Config::load(&path).unwrap().workspace.worktree_branch_prefix, "bot/");
+        assert_eq!(
+            Config::load(&path)
+                .unwrap()
+                .workspace
+                .worktree_branch_prefix,
+            "bot/"
+        );
 
         // 空は拒否する（ブランチ名がタスク id そのものになってしまう）。
         std::fs::write(
@@ -3750,14 +4896,19 @@ roles = ["lead"]
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&secrets_dir).unwrap().permissions().mode() & 0o777;
+            let mode = std::fs::metadata(&secrets_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(mode, 0o700);
         }
         // 既にあれば触らない。
         cfg.ensure_secrets_dir().unwrap();
 
         // [secrets] 無しは no-op。
-        let no_secrets: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        let no_secrets: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert!(no_secrets.ensure_secrets_dir().is_ok());
     }
 
@@ -3775,11 +4926,18 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily-row" }
         let cfg: Config = toml::from_str(text).unwrap();
         assert!(cfg.validate().is_ok());
         assert_eq!(
-            cfg.adapters.local_deep_research.env_from_secrets.get("LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY").map(String::as_str),
+            cfg.adapters
+                .local_deep_research
+                .env_from_secrets
+                .get("LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY")
+                .map(String::as_str),
             Some("tavily")
         );
         assert_eq!(
-            cfg.providers[0].env_from_secrets.get("LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY").map(String::as_str),
+            cfg.providers[0]
+                .env_from_secrets
+                .get("LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY")
+                .map(String::as_str),
             Some("tavily-row")
         );
 

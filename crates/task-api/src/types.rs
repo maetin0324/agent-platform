@@ -3,8 +3,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    ArtifactRef, EventRow, Milestone, MilestoneId, MilestoneStatus, OrgKind, OrgNode, Project, ProjectStatus,
-    Status, TaskId, Tier,
+    ArtifactRef, EventRow, Milestone, MilestoneId, MilestoneStatus, OrgKind, OrgNode, Project,
+    ProjectStatus, Status, TaskId, Tier,
 };
 use task_ops::daemon::{CooldownView, DaemonSnapshot};
 use task_ops::view::RunSummary;
@@ -112,14 +112,20 @@ pub enum TimelineItem {
         event: task_core::Event,
     },
     /// コメント（人・組織の「人」・celeris）。
-    Comment { at: String, comment: task_core::TaskComment },
+    Comment {
+        at: String,
+        comment: task_core::TaskComment,
+    },
     /// 認可（ADR-0033 D5）。`decided_at` があれば決まった時刻、無ければ聞いた時刻。
     Approval {
         at: String,
         approval: task_core::Approval,
     },
     /// 報告（ADR-0034）。
-    Report { at: String, report: task_core::Report },
+    Report {
+        at: String,
+        report: task_core::Report,
+    },
     /// 委譲（`Event::Delegated`。作られた子のタスク）。
     Delegation {
         at: String,
@@ -690,11 +696,22 @@ pub struct ClusterConnectResult {
 
 // ---- ADR-0033 D1/D2（Phase 23）: 組織・案件・途中目標 ----
 
+// ---- ADR-0046（Phase 59）: 組織 = Agent Profile の継承木。ここから ----
+
 /// `GET /org` の応答。木は GUI が `parent_id` で組む（順序は `position`、同値なら `id` の昇順）。
+///
+/// ADR-0046 D1（Phase 59）: 各ノードの `profile` は `items[]` にそのまま載る（空なら省略）。
+/// **継いだ後の実効 profile** は `effective_profiles[]` に、`node_id` で引ける形で並べて返す
+/// （`items` と同じ並び。GUI は「どこから継いだか」を `chain` で出す）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OrgList {
     pub items: Vec<OrgNode>,
+    /// ADR-0046 D1: `items` と同じ並びの実効 profile（`EffectiveProfile.node_id` で対応づく）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_profiles: Vec<task_core::EffectiveProfile>,
 }
+
+// ---- ADR-0046（Phase 59）: ここまで ----
 
 /// `POST /org` の要求本文（管理系）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -711,6 +728,9 @@ pub struct OrgCreateBody {
     pub brief: Option<String>,
     #[serde(default)]
     pub position: Option<i64>,
+    /// ADR-0046 D1（Phase 59）: このノードの profile（省略時は空）。
+    #[serde(default)]
+    pub profile: Option<task_core::Profile>,
 }
 
 /// `PATCH /org/{id}` の要求本文（管理系）。書いた項目だけを変える。
@@ -730,6 +750,9 @@ pub struct OrgPatchBody {
     pub brief: Option<String>,
     #[serde(default)]
     pub position: Option<i64>,
+    /// ADR-0046 D1（Phase 59）: profile の**丸ごと差し替え**（部分更新はしない。書かなければ今のまま）。
+    #[serde(default)]
+    pub profile: Option<task_core::Profile>,
 }
 
 /// 「書かなかった」と「`null` を書いた」を区別するための小道具（`Option<Option<T>>`）。
@@ -768,10 +791,13 @@ pub struct ProjectPatchBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ProjectStatus>,
     /// ADR-0039 D1: 省略（`None`）なら変えない、`null`（`Some(None)`）なら消す、値なら差し替える。
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub workspace: Option<Option<task_core::WorkspaceSpec>>,
 }
-
 
 /// `GET /projects/{id}` の応答。案件 + 途中目標 + その案件のタスクの要約（GUI の「仕事の木」用）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1015,10 +1041,18 @@ pub struct RepoPatchBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<task_core::WorkspaceSpec>,
     /// 省略なら変えない、`null` なら消す。
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub default_branch: Option<Option<String>>,
     /// 省略なら変えない、`null` なら消す（＝既定の `worktree`）。
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub sync: Option<Option<task_core::RepoSync>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<task_core::RepoRun>,

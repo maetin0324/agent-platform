@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use task_core::{
-    Budget, Check, Criterion, Event, Lease, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, Trigger,
-    WorkerHint, WorkspaceSpec,
+    Budget, Check, Criterion, Event, Lease, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore,
+    Tier, Trigger, WorkerHint, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -22,7 +22,11 @@ fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
     let path = debug_dir.join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
@@ -39,7 +43,12 @@ impl Env {
         let root = tmp.path().canonicalize().unwrap();
         let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
-        Self { _tmp: tmp, root, db, store }
+        Self {
+            _tmp: tmp,
+            root,
+            db,
+            store,
+        }
     }
 
     fn write_script(&self, body: &str) -> PathBuf {
@@ -84,23 +93,48 @@ model = "fake"
     }
 
     /// `celerisctl add` → `approve` と同じ経路（insert + Created、Accept）で ready にする。
-    fn add_ready_task(&self, title: &str, dir: &Path, checks: Vec<Check>, depends_on: Vec<TaskId>, max_retries: u32) -> TaskId {
+    fn add_ready_task(
+        &self,
+        title: &str,
+        dir: &Path,
+        checks: Vec<Check>,
+        depends_on: Vec<TaskId>,
+        max_retries: u32,
+    ) -> TaskId {
         let now = OffsetDateTime::now_utc();
         let task = Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
             title: title.into(),
             objective: format!("e2e: {title}"),
-            acceptance: checks.into_iter().map(|check| Criterion { text: "e2e".into(), check }).collect(),
+            acceptance: checks
+                .into_iter()
+                .map(|check| Criterion {
+                    text: "e2e".into(),
+                    check,
+                })
+                .collect(),
             inputs: vec![],
             depends_on,
             status: Status::Draft,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: dir.to_path_buf(), mode: None },
-            budget: Budget { max_turns: 5, max_wall_secs: 20, max_retries },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: dir.to_path_buf(),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 5,
+                max_wall_secs: 20,
+                max_retries,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -116,15 +150,32 @@ model = "fake"
             category: Default::default(),
         };
         self.store.insert(&task).unwrap();
-        self.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();
-        self.store.apply_transition(task.id, Trigger::Accept, None).unwrap();
+        self.store
+            .append_event(
+                task.id,
+                &Event::Created {
+                    task: Box::new(task.clone()),
+                },
+            )
+            .unwrap();
+        self.store
+            .apply_transition(task.id, Trigger::Accept, None)
+            .unwrap();
         task.id
     }
 
     fn run_celeris(&self, config: &Path, timeout: Duration) -> String {
         let log = self.root.join("celeris.log");
         let mut child = Command::new(bin("celeris"))
-            .args(["--config", config.to_str().unwrap(), "--until-idle", "--max-ticks", "2000", "--log-format", "text"])
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "--until-idle",
+                "--max-ticks",
+                "2000",
+                "--log-format",
+                "text",
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).unwrap())
@@ -152,7 +203,11 @@ model = "fake"
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "celerisctl replay failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "celerisctl replay failed: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(stdout.contains("replay: 0 mismatches"), "{stdout}");
     }
 
@@ -166,7 +221,9 @@ model = "fake"
             .unwrap()
             .into_iter()
             .filter_map(|(_, e)| match e {
-                Event::Transitioned { from, to, reason } => Some(format!("{from:?}->{to:?}:{reason}")),
+                Event::Transitioned { from, to, reason } => {
+                    Some(format!("{from:?}->{to:?}:{reason}"))
+                }
                 _ => None,
             })
             .collect()
@@ -194,7 +251,10 @@ echo '{{"type":"done","summary":"fake finished","evidence":[{{"criterion":0,"com
     let config = env.write_config(2, &script, "");
     let checks = || {
         vec![
-            Check::Command { cmd: "test -f artifacts/out.txt".into(), expect_exit: 0 },
+            Check::Command {
+                cmd: "test -f artifacts/out.txt".into(),
+                expect_exit: 0,
+            },
             Check::ArtifactExists { name: "out".into() },
         ]
     };
@@ -211,11 +271,20 @@ echo '{{"type":"done","summary":"fake finished","evidence":[{{"criterion":0,"com
         assert!(t.lease.is_none());
         assert_eq!(
             env.transitions(id),
-            vec!["Draft->Ready:accept", "Ready->Running:dispatch", "Running->Reviewing:worker_done", "Reviewing->Done:review_pass"]
+            vec![
+                "Draft->Ready:accept",
+                "Ready->Running:dispatch",
+                "Running->Reviewing:worker_done",
+                "Reviewing->Done:review_pass"
+            ]
         );
         let events = env.store.events_for(id).unwrap();
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ArtifactProduced { artifact, .. } if artifact.name == "out" && artifact.sha256.len() == 64)));
-        assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::WorkerProgress { .. }))
+        );
         let verdicts: Vec<bool> = events
             .iter()
             .filter_map(|(_, e)| match e {
@@ -245,8 +314,16 @@ echo '{{"type":"done","summary":"fake finished","evidence":[{{"criterion":0,"com
         max = max.max(cur);
     }
     assert_eq!(max, 2, "expected exactly 2 concurrent workers:\n{text}");
-    let end_a = events.iter().find(|(_, d, id)| *d == -1 && id == &a.to_string()).unwrap().0;
-    let start_c = events.iter().find(|(_, d, id)| *d == 1 && id == &c.to_string()).unwrap().0;
+    let end_a = events
+        .iter()
+        .find(|(_, d, id)| *d == -1 && id == &a.to_string())
+        .unwrap()
+        .0;
+    let start_c = events
+        .iter()
+        .find(|(_, d, id)| *d == 1 && id == &c.to_string())
+        .unwrap()
+        .0;
     assert!(start_c >= end_a, "C must start after A finished:\n{text}");
     assert!(log.contains("idle; exiting"));
     env.replay_is_consistent();
@@ -266,7 +343,16 @@ echo '{"type":"done","summary":"attempt '"$N"'","evidence":[{"criterion":0,"comm
     );
     let config = env.write_config(2, &script, "");
     let dir = env.workspace_for("retry");
-    let id = env.add_ready_task("retry", &dir, vec![Check::Command { cmd: "test -f ok.txt".into(), expect_exit: 0 }], vec![], 1);
+    let id = env.add_ready_task(
+        "retry",
+        &dir,
+        vec![Check::Command {
+            cmd: "test -f ok.txt".into(),
+            expect_exit: 0,
+        }],
+        vec![],
+        1,
+    );
 
     let log = env.run_celeris(&config, Duration::from_secs(60));
 
@@ -296,13 +382,20 @@ echo '{"type":"done","summary":"attempt '"$N"'","evidence":[{"criterion":0,"comm
         })
         .collect();
     assert_eq!(verdicts.len(), 2);
-    assert!(!verdicts[0].0 && verdicts[0].1.contains("exit=Some(1)"), "{:?}", verdicts[0]);
+    assert!(
+        !verdicts[0].0 && verdicts[0].1.contains("exit=Some(1)"),
+        "{:?}",
+        verdicts[0]
+    );
     assert!(verdicts[1].0);
     // 2 回目の run には 1 回目のレビュー結果が context.prior_review として渡っている。
     let run0 = std::fs::read_to_string(dir.join("run-0.json")).unwrap();
     let run1 = std::fs::read_to_string(dir.join("run-1.json")).unwrap();
     assert!(run0.contains(r#""prior_review":[]"#));
-    assert!(run1.contains(r#""prior_review":[{"criterion":0,"pass":false"#), "{run1}");
+    assert!(
+        run1.contains(r#""prior_review":[{"criterion":0,"pass":false"#),
+        "{run1}"
+    );
     assert!(run1.contains(r#""attempts":1"#));
     // ADR-0033 D4/D6: protocol は 4（context.node / memory / conversation / standing_rules /
     // organization、delegate の assignee、結果ファイルの memory を追加）。いずれも追加のみ。
@@ -314,28 +407,50 @@ echo '{"type":"done","summary":"attempt '"$N"'","evidence":[{"criterion":0,"comm
 #[test]
 fn expired_lease_is_reclaimed_and_task_completes() {
     let env = Env::new();
-    let script = env.write_script(r#"cat >/dev/null; echo '{"type":"done","summary":"ok","evidence":[]}'"#);
+    let script =
+        env.write_script(r#"cat >/dev/null; echo '{"type":"done","summary":"ok","evidence":[]}'"#);
     let config = env.write_config(1, &script, "");
     let dir = env.workspace_for("stale");
     // 前世代の celeris が落ちた状態を再現: running + 期限切れリース。
     let now = OffsetDateTime::now_utc();
     let task = Task {
+        mode: Default::default(),
+        skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
         kind: TaskKind::Execute,
         title: "stale".into(),
         objective: "e2e".into(),
-        acceptance: vec![Criterion { text: "e2e".into(), check: Check::Command { cmd: "true".into(), expect_exit: 0 } }],
+        acceptance: vec![Criterion {
+            text: "e2e".into(),
+            check: Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        }],
         inputs: vec![],
         depends_on: vec![],
         status: Status::Running,
         priority: 0,
-        worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-        workspace: WorkspaceSpec::Local { path: dir.clone(), mode: None },
-        budget: Budget { max_turns: 5, max_wall_secs: 20, max_retries: 1 },
+        worker_hint: WorkerHint {
+            tier: Tier::Standard,
+            adapter: None,
+        },
+        workspace: WorkspaceSpec::Local {
+            path: dir.clone(),
+            mode: None,
+        },
+        budget: Budget {
+            max_turns: 5,
+            max_wall_secs: 20,
+            max_retries: 1,
+        },
         attempts: 0,
-        lease: Some(Lease { worker_run_id: "stale-run".into(), expires_at: now - time::Duration::minutes(5) }),
+        lease: Some(Lease {
+            worker_run_id: "stale-run".into(),
+            expires_at: now - time::Duration::minutes(5),
+        }),
         created_at: now,
         updated_at: now,
         role: None,
@@ -349,13 +464,23 @@ fn expired_lease_is_reclaimed_and_task_completes() {
         category: Default::default(),
     };
     env.store.insert(&task).unwrap();
-    env.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();
+    env.store
+        .append_event(
+            task.id,
+            &Event::Created {
+                task: Box::new(task.clone()),
+            },
+        )
+        .unwrap();
 
     let log = env.run_celeris(&config, Duration::from_secs(60));
 
     let t = env.task(task.id);
     assert_eq!(t.status, Status::Done, "{log}");
-    assert_eq!(t.attempts, 1, "lease expiry counts as a failed attempt (ADR-0002 D3)");
+    assert_eq!(
+        t.attempts, 1,
+        "lease expiry counts as a failed attempt (ADR-0002 D3)"
+    );
     assert!(t.lease.is_none());
     assert_eq!(
         env.transitions(task.id),
@@ -377,10 +502,21 @@ fn expired_lease_is_reclaimed_and_task_completes() {
 #[test]
 fn worker_crash_without_terminal_message_fails_after_retries() {
     let env = Env::new();
-    let script = env.write_script(r#"cat >/dev/null; echo '{"type":"progress","msg":"about to crash"}'; exit 9"#);
+    let script = env.write_script(
+        r#"cat >/dev/null; echo '{"type":"progress","msg":"about to crash"}'; exit 9"#,
+    );
     let config = env.write_config(1, &script, "");
     let dir = env.workspace_for("crash");
-    let id = env.add_ready_task("crash", &dir, vec![Check::Command { cmd: "true".into(), expect_exit: 0 }], vec![], 1);
+    let id = env.add_ready_task(
+        "crash",
+        &dir,
+        vec![Check::Command {
+            cmd: "true".into(),
+            expect_exit: 0,
+        }],
+        vec![],
+        1,
+    );
     let log = env.run_celeris(&config, Duration::from_secs(60));
     let t = env.task(id);
     assert_eq!(t.status, Status::Failed, "{log}");
@@ -396,6 +532,8 @@ fn worker_crash_without_terminal_message_fails_after_retries() {
         ]
     );
     let events = env.store.events_for(id).unwrap();
-    assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if outcome.contains("exit=9"))));
+    assert!(events.iter().any(
+        |(_, e)| matches!(e, Event::WorkerFinished { outcome, .. } if outcome.contains("exit=9"))
+    ));
     env.replay_is_consistent();
 }

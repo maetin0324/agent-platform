@@ -35,66 +35,78 @@ pub mod knowledge;
 pub mod lifecycle;
 pub mod memory;
 mod middleware;
+pub mod milestones;
 pub mod notify;
 mod problem;
-pub mod milestones;
 pub mod project_plan;
 mod query;
-/// ADR-0043 D1（Phase 52）: 案件のリポジトリ（`project_repos`）の CRUD。
-pub mod repos;
 pub mod releases;
 mod reports;
+/// ADR-0043 D1（Phase 52）: 案件のリポジトリ（`project_repos`）の CRUD。
+pub mod repos;
 pub mod schema;
 pub mod secrets;
 mod sse;
-pub mod timeline;
 mod state;
 mod stats;
+pub mod timeline;
 /// ADR-0043 D6（Phase 52）: タスクの作業ツリーの閲覧（読み取り）。
 pub mod tree;
 pub mod types;
 
+pub use admin::{
+    AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome,
+    AdminRequest, CheckError, ClusterAdminError, ClusterConnectCodeOutcome,
+    ClusterConnectStartOutcome, NotifyAdminError, NotifyTestOutcome, ProviderCheckOutcome,
+    ProviderCheckResult,
+};
 pub use approvals::{
-    ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody, StandingRuleList,
+    ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody,
+    StandingRuleList,
 };
 pub use conversation::{MessageAccepted, MessageList, MessagePostBody};
 pub use memory::MemoryView;
 pub use milestones::{MilestoneDecideBody, MilestoneDecided};
-pub use project_plan::{ProjectPlanAccepted, ProjectPlanBody};
-pub use admin::{
-    AccountAdminError, AccountCheckOutcome, AccountLoginCodeOutcome, AccountLoginStartOutcome, AdminRequest,
-    CheckError, ClusterAdminError, ClusterConnectCodeOutcome, ClusterConnectStartOutcome, NotifyAdminError,
-    NotifyTestOutcome, ProviderCheckOutcome, ProviderCheckResult,
-};
 pub use notify::{NotifyRecent, NotifyTestResult, NotifyView};
-pub use releases::{BRANCH_COMMITS_LIMIT, ReleasePromoteError, ReleaseSource, ReleasesFs, SharedReleaseSource};
-pub use reports::{ReportDetail, ReportList, ReportsNotifiedResult, ReportsReadBody, ReportsReadResult};
+pub use project_plan::{ProjectPlanAccepted, ProjectPlanBody};
+pub use releases::{
+    BRANCH_COMMITS_LIMIT, ReleasePromoteError, ReleaseSource, ReleasesFs, SharedReleaseSource,
+};
+pub use reports::{
+    ReportDetail, ReportList, ReportsNotifiedResult, ReportsReadBody, ReportsReadResult,
+};
 pub use schema::{API_V1_SCHEMA_JSON, ApiV1Schema, api_v1_schema_json, api_v1_schema_value};
 pub use state::{ApiState, StreamTuning};
 pub use stats::classify_outcome;
 pub use tree::MAX_TEXT_BYTES;
 pub use types::{
-    AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView, ClusterConnectCodeBody,
-    ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters, ConfigView, DaemonView, DailyUsage, DbInfo,
-    DecisionBody, EventsPage, GenreConfigView, Health, Problem, ProviderConfigView, ProviderStats, ProviderView,
-    Providers, ReleaseChanges, ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseRunning, ReleaseVerify,
-    Releases, RetryBody,
-    ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody, SecretPutResult, SecretUse, SecretView,
-    StreamHeartbeat, StreamHello, StreamReset, ValidationError,
+    AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView,
+    ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters,
+    ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, GenreConfigView, Health,
+    Problem, ProviderConfigView, ProviderStats, ProviderView, Providers, ReleaseChanges,
+    ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseRunning, ReleaseVerify, Releases,
+    RetryBody, ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody,
+    SecretPutResult, SecretUse, SecretView, StreamHeartbeat, StreamHello, StreamReset,
+    ValidationError,
 };
 // ---- ADR-0043（Phase 52）: 案件のリポジトリとファイル閲覧 ----
-pub use types::{RepoCreateBody, RepoList, RepoPatchBody, TreeEntry, TreeFileView, TreeRepoView, TreeView};
+pub use types::{
+    RepoCreateBody, RepoList, RepoPatchBody, TreeEntry, TreeFileView, TreeRepoView, TreeView,
+};
 // ---- ADR-0044 D7（Phase 57）: 文書 ----
 pub use docs::{
-    ArtifactPromoteBody, DocItem, DocPage, DocPagePutBody, DocPageResult, DocsInitResult, DocsTree, MAX_TREE_PAGES,
+    ArtifactPromoteBody, DocItem, DocPage, DocPagePutBody, DocPageResult, DocsInitResult, DocsTree,
+    MAX_TREE_PAGES,
 };
 // ---- ADR-0048 D1/D2（Phase 60a）: Console ----
-pub use console::{ConsoleHello, EVENT_WINDOW as CONSOLE_EVENT_WINDOW, MAX_LIMIT as CONSOLE_MAX_LIMIT};
+pub use console::{
+    ConsoleHello, EVENT_WINDOW as CONSOLE_EVENT_WINDOW, MAX_LIMIT as CONSOLE_MAX_LIMIT,
+};
 pub use types::{ConsoleBlock, ConsolePage};
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use types::{
-    ChangeDiffView, ChangesView, IntegrateBody, IntegrateResult, ProjectIntegrationItem, ProjectIntegrations,
-    RepoChangesView,
+    ChangeDiffView, ChangesView, IntegrateBody, IntegrateResult, ProjectIntegrationItem,
+    ProjectIntegrations, RepoChangesView,
 };
 
 /// `GET /health` の `api_version`。互換性を壊す変更は `/api/v2` で行う（ADR-0013 D8）。
@@ -229,7 +241,10 @@ impl std::fmt::Debug for ApiSettings {
             .field("accounts_roots", &self.accounts_roots)
             .field("max_runs_per_account", &self.max_runs_per_account)
             .field("secrets_dir", &self.secrets_dir)
-            .field("secret_usage", &self.secret_usage.keys().collect::<Vec<_>>())
+            .field(
+                "secret_usage",
+                &self.secret_usage.keys().collect::<Vec<_>>(),
+            )
             .field("memory_dir", &self.memory_dir)
             .field("notify_secret_id", &self.notify_secret_id)
             .field("notify_gui_base_url", &self.notify_gui_base_url)

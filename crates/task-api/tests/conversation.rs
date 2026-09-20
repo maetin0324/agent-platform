@@ -12,11 +12,18 @@ use serde_json::{Value, json};
 use task_core::{GenreSpec, MessageRole, RoleSpec, Status, TaskStore, Tier};
 
 fn g(path: &str) -> axum::http::Request<axum::body::Body> {
-    get_with(path, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    get_with(
+        path,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn p(path: &str, body: &Value) -> axum::http::Request<axum::body::Body> {
-    post_json_with(path, body, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    post_json_with(
+        path,
+        body,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn env_with_token() -> TestEnv {
@@ -80,13 +87,23 @@ async fn talking_to_a_node_returns_202_and_makes_one_ready_conversation_task() {
 
     let resp = send(
         &app,
-        p("/api/v1/org/research-survey/messages", &json!({"text": "先週の続きで、隣接分野も見てほしい"})),
+        p(
+            "/api/v1/org/research-survey/messages",
+            &json!({"text": "先週の続きで、隣接分野も見てほしい"}),
+        ),
     )
     .await;
     assert_eq!(resp.status.as_u16(), 202, "{}", resp.text());
     let body = resp.json();
-    let task_id: task_core::TaskId = body["task_id"].as_str().expect("task_id").parse().expect("ulid");
-    assert!(body["message_id"].as_str().is_some_and(|s| s.len() == 26), "{body}");
+    let task_id: task_core::TaskId = body["task_id"]
+        .as_str()
+        .expect("task_id")
+        .parse()
+        .expect("ulid");
+    assert!(
+        body["message_id"].as_str().is_some_and(|s| s.len() == 26),
+        "{body}"
+    );
 
     let task = env.store.get(task_id).expect("get").expect("task");
     assert_eq!(task.status, Status::Ready);
@@ -121,15 +138,26 @@ async fn talking_to_a_node_returns_202_and_makes_one_ready_conversation_task() {
     // 2 通目は 1 通目の後ろに並ぶ（監査 M-3: 返事は送った順に返る）。
     let second = send(
         &app,
-        p("/api/v1/org/research-survey/messages", &json!({"text": "追加で 1 点"})),
+        p(
+            "/api/v1/org/research-survey/messages",
+            &json!({"text": "追加で 1 点"}),
+        ),
     )
     .await;
     assert_eq!(second.status.as_u16(), 202, "{}", second.text());
-    let second_id: task_core::TaskId = second.json()["task_id"].as_str().expect("task_id").parse().expect("ulid");
+    let second_id: task_core::TaskId = second.json()["task_id"]
+        .as_str()
+        .expect("task_id")
+        .parse()
+        .expect("ulid");
     let second_task = env.store.get(second_id).expect("get").expect("task");
     assert_eq!(second_task.depends_on, vec![task_id]);
     assert!(
-        !env.store.ready_tasks(10).expect("ready").iter().any(|t| t.id == second_id),
+        !env.store
+            .ready_tasks(10)
+            .expect("ready")
+            .iter()
+            .any(|t| t.id == second_id),
         "1 通目が終わるまで run しない"
     );
 }
@@ -142,14 +170,30 @@ async fn the_runs_summary_becomes_the_nodes_reply_and_errors_say_so() {
     let app = env.router();
     seed_org(&app).await;
 
-    let accepted = send(&app, p("/api/v1/org/secretary/messages", &json!({"text": "状況を教えて"})))
-        .await
-        .json();
-    let task_id: task_core::TaskId = accepted["task_id"].as_str().expect("id").parse().expect("ulid");
+    let accepted = send(
+        &app,
+        p(
+            "/api/v1/org/secretary/messages",
+            &json!({"text": "状況を教えて"}),
+        ),
+    )
+    .await
+    .json();
+    let task_id: task_core::TaskId = accepted["task_id"]
+        .as_str()
+        .expect("id")
+        .parse()
+        .expect("ulid");
     let task = env.store.get(task_id).expect("get").expect("task");
 
-    task_ops::conversation::record_reply(&env.store, &task, "run-1", "3 本の候補が出ています", time::OffsetDateTime::now_utc())
-        .expect("reply");
+    task_ops::conversation::record_reply(
+        &env.store,
+        &task,
+        "run-1",
+        "3 本の候補が出ています",
+        time::OffsetDateTime::now_utc(),
+    )
+    .expect("reply");
     task_ops::conversation::record_reply(
         &env.store,
         &task,
@@ -159,9 +203,7 @@ async fn the_runs_summary_becomes_the_nodes_reply_and_errors_say_so() {
     )
     .expect("reply");
 
-    let items = send(&app, g("/api/v1/org/secretary/messages"))
-        .await
-        .json()["items"]
+    let items = send(&app, g("/api/v1/org/secretary/messages")).await.json()["items"]
         .as_array()
         .cloned()
         .expect("items");
@@ -171,12 +213,16 @@ async fn the_runs_summary_becomes_the_nodes_reply_and_errors_say_so() {
     assert_eq!(items[1]["text"], "3 本の候補が出ています");
     assert_eq!(items[1]["run_id"], "run-1");
     assert!(
-        items[2]["text"].as_str().is_some_and(|t| t.starts_with("返事できませんでした: ")),
+        items[2]["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("返事できませんでした: ")),
         "{items:?}"
     );
 
     // `limit` は新しい方を残す。
-    let last = send(&app, g("/api/v1/org/secretary/messages?limit=1")).await.json();
+    let last = send(&app, g("/api/v1/org/secretary/messages?limit=1"))
+        .await
+        .json();
     assert_eq!(last["items"].as_array().expect("items").len(), 1);
     assert_eq!(last["items"][0]["run_id"], "run-2");
 }
@@ -189,13 +235,20 @@ async fn threads_are_separated_by_project() {
     seed_org(&app).await;
     let project = send(
         &app,
-        p("/api/v1/projects", &json!({"title": "Pluvio", "request": "新テーマの模索、検証"})),
+        p(
+            "/api/v1/projects",
+            &json!({"title": "Pluvio", "request": "新テーマの模索、検証"}),
+        ),
     )
     .await
     .json();
     let project_id = project["id"].as_str().expect("id").to_string();
 
-    send(&app, p("/api/v1/org/secretary/messages", &json!({"text": "雑談"}))).await;
+    send(
+        &app,
+        p("/api/v1/org/secretary/messages", &json!({"text": "雑談"})),
+    )
+    .await;
     let in_project = send(
         &app,
         p(
@@ -206,7 +259,13 @@ async fn threads_are_separated_by_project() {
     .await;
     assert_eq!(in_project.status.as_u16(), 202, "{}", in_project.text());
 
-    let scoped = send(&app, g(&format!("/api/v1/org/secretary/messages?project={project_id}"))).await;
+    let scoped = send(
+        &app,
+        g(&format!(
+            "/api/v1/org/secretary/messages?project={project_id}"
+        )),
+    )
+    .await;
     let items = scoped.json()["items"].as_array().cloned().expect("items");
     // 案件を作った時点の最初の相談（SPEC §7）＋ 今の 1 件。
     assert_eq!(items.len(), 2, "{items:?}");
@@ -218,10 +277,23 @@ async fn threads_are_separated_by_project() {
     assert_eq!(chat["items"][0]["text"], "雑談");
 
     // 知らない案件の id は「そのスレッドが無い」だけ（空の一覧）。ULID でない文字列は 404。
-    let unknown = send(&app, g("/api/v1/org/secretary/messages?project=01J9ZX5T3K8Q7W6V5R4P3N2M1H")).await;
+    let unknown = send(
+        &app,
+        g("/api/v1/org/secretary/messages?project=01J9ZX5T3K8Q7W6V5R4P3N2M1H"),
+    )
+    .await;
     assert_eq!(unknown.status.as_u16(), 200, "{}", unknown.text());
-    assert!(unknown.json()["items"].as_array().expect("items").is_empty());
-    assert_problem(&send(&app, g("/api/v1/org/secretary/messages?project=nope")).await, 404, "project_not_found");
+    assert!(
+        unknown.json()["items"]
+            .as_array()
+            .expect("items")
+            .is_empty()
+    );
+    assert_problem(
+        &send(&app, g("/api/v1/org/secretary/messages?project=nope")).await,
+        404,
+        "project_not_found",
+    );
 }
 
 /// SPEC §7: 案件を作った直後に、秘書への対話用タスクが 1 件できて依頼文が渡っている。
@@ -242,30 +314,56 @@ async fn creating_a_project_asks_the_secretary_first() {
     .json();
     let project_id = project["id"].as_str().expect("id").to_string();
 
-    let items = send(&app, g(&format!("/api/v1/org/secretary/messages?project={project_id}")))
-        .await
-        .json()["items"]
+    let items = send(
+        &app,
+        g(&format!(
+            "/api/v1/org/secretary/messages?project={project_id}"
+        )),
+    )
+    .await
+    .json()["items"]
         .as_array()
         .cloned()
         .expect("items");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["role"], "user");
-    assert_eq!(items[0]["text"], "Pluvio を基盤に用いた新たな研究テーマの模索、検証");
+    assert_eq!(
+        items[0]["text"],
+        "Pluvio を基盤に用いた新たな研究テーマの模索、検証"
+    );
 
-    let tasks = send(&app, g(&format!("/api/v1/tasks?project={project_id}"))).await.json();
+    let tasks = send(&app, g(&format!("/api/v1/tasks?project={project_id}")))
+        .await
+        .json();
     assert_eq!(tasks["total"], 1);
-    let task_id: task_core::TaskId = tasks["items"][0]["id"].as_str().expect("id").parse().expect("ulid");
+    let task_id: task_core::TaskId = tasks["items"][0]["id"]
+        .as_str()
+        .expect("id")
+        .parse()
+        .expect("ulid");
     let task = env.store.get(task_id).expect("get").expect("task");
     assert_eq!(task.assignee.as_deref(), Some("secretary"));
-    assert_eq!(task.project_id.map(|p| p.to_string()).as_deref(), Some(project_id.as_str()));
+    assert_eq!(
+        task.project_id.map(|p| p.to_string()).as_deref(),
+        Some(project_id.as_str())
+    );
     assert_eq!(task.status, Status::Ready);
     assert_eq!(task.genre.as_deref(), Some("secretary"));
     assert!(task.title.starts_with("対話: "));
-    let thread = env.store.message_list("secretary", task.project_id, 20).expect("list");
+    let thread = env
+        .store
+        .message_list("secretary", task.project_id, 20)
+        .expect("list");
     assert_eq!(thread[0].role, MessageRole::User);
-    assert_eq!(thread[0].task_id, Some(task.id), "R4: 1 往復と run を 1 段で辿れる");
+    assert_eq!(
+        thread[0].task_id,
+        Some(task.id),
+        "R4: 1 往復と run を 1 段で辿れる"
+    );
     // R3: 案件の仕事の木からも対話用タスクが分かる。
-    let detail = send(&app, g(&format!("/api/v1/projects/{project_id}"))).await.json();
+    let detail = send(&app, g(&format!("/api/v1/projects/{project_id}")))
+        .await
+        .json();
     assert_eq!(detail["tasks"][0]["conversation"], true, "{detail}");
     assert_eq!(detail["tasks"][0]["assignee"], "secretary");
 }
@@ -275,10 +373,16 @@ async fn creating_a_project_asks_the_secretary_first() {
 async fn a_project_can_be_created_without_an_organization() {
     let env = env_with_token();
     let app = env.router();
-    let resp = send(&app, p("/api/v1/projects", &json!({"title": "t", "request": "r"}))).await;
+    let resp = send(
+        &app,
+        p("/api/v1/projects", &json!({"title": "t", "request": "r"})),
+    )
+    .await;
     assert_eq!(resp.status.as_u16(), 201, "{}", resp.text());
     let project_id = resp.json()["id"].as_str().expect("id").to_string();
-    let tasks = send(&app, g(&format!("/api/v1/tasks?project={project_id}"))).await.json();
+    let tasks = send(&app, g(&format!("/api/v1/tasks?project={project_id}")))
+        .await
+        .json();
     assert_eq!(tasks["total"], 0);
 }
 
@@ -290,22 +394,45 @@ async fn unknown_nodes_and_bad_bodies_are_rejected() {
     seed_org(&app).await;
 
     assert_problem(
-        &send(&app, p("/api/v1/org/ghost/messages", &json!({"text": "hi"}))).await,
+        &send(
+            &app,
+            p("/api/v1/org/ghost/messages", &json!({"text": "hi"})),
+        )
+        .await,
         404,
         "org_node_not_found",
     );
-    assert_problem(&send(&app, g("/api/v1/org/ghost/messages")).await, 404, "org_node_not_found");
     assert_problem(
-        &send(&app, p("/api/v1/org/secretary/messages", &json!({"text": "   "}))).await,
+        &send(&app, g("/api/v1/org/ghost/messages")).await,
+        404,
+        "org_node_not_found",
+    );
+    assert_problem(
+        &send(
+            &app,
+            p("/api/v1/org/secretary/messages", &json!({"text": "   "})),
+        )
+        .await,
         422,
         "validation",
     );
     assert_problem(
-        &send(&app, p("/api/v1/org/secretary/messages", &json!({"text": "x", "bogus": 1}))).await,
+        &send(
+            &app,
+            p(
+                "/api/v1/org/secretary/messages",
+                &json!({"text": "x", "bogus": 1}),
+            ),
+        )
+        .await,
         400,
         "bad_request",
     );
-    assert_problem(&send(&app, g("/api/v1/org/secretary/messages?bogus=1")).await, 400, "bad_request");
+    assert_problem(
+        &send(&app, g("/api/v1/org/secretary/messages?bogus=1")).await,
+        400,
+        "bad_request",
+    );
     assert_problem(
         &send(
             &app,
@@ -328,7 +455,11 @@ async fn posting_a_message_is_an_admin_endpoint() {
     seed_org(&app).await;
     // トークンを付けない要求は共通ガードで 401。
     assert_problem(
-        &send(&app, post_json("/api/v1/org/secretary/messages", &json!({"text": "hi"}))).await,
+        &send(
+            &app,
+            post_json("/api/v1/org/secretary/messages", &json!({"text": "hi"})),
+        )
+        .await,
         401,
         "unauthorized",
     );
@@ -337,9 +468,17 @@ async fn posting_a_message_is_an_admin_endpoint() {
     let open = TestEnv::with(EnvOptions::default());
     let open_app = open.router();
     assert_problem(
-        &send(&open_app, post_json("/api/v1/org/secretary/messages", &json!({"text": "hi"}))).await,
+        &send(
+            &open_app,
+            post_json("/api/v1/org/secretary/messages", &json!({"text": "hi"})),
+        )
+        .await,
         401,
         "unauthorized",
     );
-    assert_problem(&send(&open_app, get("/api/v1/org/secretary/messages")).await, 404, "org_node_not_found");
+    assert_problem(
+        &send(&open_app, get("/api/v1/org/secretary/messages")).await,
+        404,
+        "org_node_not_found",
+    );
 }

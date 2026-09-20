@@ -27,7 +27,8 @@ use crate::progress;
 use crate::protocol::{Answer, RunContext, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
-    LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, read_tail, write_result_json,
+    LineOutcome, MAX_LINE_BYTES, kill_now, read_line_limited, read_tail, reap_after_terminal,
+    write_result_json,
 };
 
 /// run ごとに `runs/<run_id>/ldr_run.py` として書き出す本体（ADR-0029 D1）。
@@ -232,7 +233,8 @@ async fn run_ldr(
     crate::subprocess::write_run_prompt(&run_dir, &query, run_id).await;
 
     // `model` は `settings` の `llm.model` より優先する（ADR-0029 D1）。`BTreeMap` で決定的な順序にする。
-    let mut settings: std::collections::BTreeMap<String, String> = config.settings.iter().cloned().collect();
+    let mut settings: std::collections::BTreeMap<String, String> =
+        config.settings.iter().cloned().collect();
     if let Some(model) = &config.model {
         settings.insert("llm.model".to_string(), model.clone());
     }
@@ -320,7 +322,12 @@ async fn run_ldr(
         }
         let wait = (limits.wall_clock - wall_elapsed).min(limits.idle_timeout - idle_elapsed);
 
-        let outcome = match tokio::time::timeout(wait, read_line_limited(&mut reader, MAX_LINE_BYTES)).await {
+        let outcome = match tokio::time::timeout(
+            wait,
+            read_line_limited(&mut reader, MAX_LINE_BYTES),
+        )
+        .await
+        {
             Err(_elapsed) => continue, // タイムアウト。ループ先頭で上限超過を検知する。
             Ok(Err(e)) => return Err(AdapterError::Io(e)),
             Ok(Ok(outcome)) => outcome,
@@ -345,7 +352,10 @@ async fn run_ldr(
                 stdout_buf.push('\n');
                 if let Some(rest) = trimmed.strip_prefix(PROGRESS_PREFIX) {
                     // ADR-0029 D1 手順 3: ランナーは検索・要約の進捗を `progress: <text>` の形で出す。
-                    progress::emit_status(sink, &truncate_chars(rest.trim(), PROGRESS_LINE_MAX_CHARS));
+                    progress::emit_status(
+                        sink,
+                        &truncate_chars(rest.trim(), PROGRESS_LINE_MAX_CHARS),
+                    );
                 } else if let Some(rest) = trimmed.strip_prefix(RESULT_PREFIX) {
                     match serde_json::from_str::<serde_json::Value>(rest) {
                         Ok(value) => task_result = Some(value),
@@ -379,7 +389,10 @@ async fn run_ldr(
     let stderr_tail = read_tail(&stderr_log_path, 4096).await;
     let classify_text = format!("{stdout_buf}\n{stderr_tail}");
 
-    let report_len = tokio::fs::metadata(&report_path).await.map(|m| m.len()).unwrap_or(0);
+    let report_len = tokio::fs::metadata(&report_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     let (terminal, provider_failure) = if !exit_status.success() {
         let exit_repr = match exit_status.code() {
@@ -389,7 +402,9 @@ async fn run_ldr(
         let pf = classify_provider_failure(&classify_text);
         (
             Terminal::Error {
-                message: format!("local-deep-research runner exited with a non-zero status (exit={exit_repr})"),
+                message: format!(
+                    "local-deep-research runner exited with a non-zero status (exit={exit_repr})"
+                ),
                 retryable: true,
             },
             pf,
@@ -398,7 +413,8 @@ async fn run_ldr(
         let pf = classify_provider_failure(&classify_text);
         (
             Terminal::Error {
-                message: "local-deep-research runner did not print a CELERIS_RESULT line".to_string(),
+                message: "local-deep-research runner did not print a CELERIS_RESULT line"
+                    .to_string(),
                 retryable: true,
             },
             pf,
@@ -417,7 +433,10 @@ async fn run_ldr(
         // `artifacts/result.json` を書く。exit=0 かつ `report_len > 0` の枝で `task_result` は必ず
         // `Some`（上の 2 つの分岐で `None`/空報告は既に処理済み）なので `unwrap_or_default` で十分。
         let value = task_result.unwrap_or(serde_json::Value::Null);
-        let raw_summary = value.get("summary").and_then(|v| v.as_str()).unwrap_or_default();
+        let raw_summary = value
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let summary = single_line_summary(raw_summary, SUMMARY_MAX_CHARS);
 
         // ADR-0031 D1: `report.md` に加えて、ランナーが機械的に作った証拠の記録
@@ -425,9 +444,21 @@ async fn run_ldr(
         // **消さずに残す**（D2: 人が読めるように）ので、この申告はゲートの判定より前に行う。
         // ADR-0036 D4: 申告する `path` は workspace 相対のまま（`artifacts_dir` 基準で組む）。
         for (name, rel_path, kind) in [
-            ("report.md", format!("{artifacts_rel}/report.md"), "markdown"),
-            ("sources.json", format!("{artifacts_rel}/sources.json"), "json"),
-            ("research.json", format!("{artifacts_rel}/research.json"), "json"),
+            (
+                "report.md",
+                format!("{artifacts_rel}/report.md"),
+                "markdown",
+            ),
+            (
+                "sources.json",
+                format!("{artifacts_rel}/sources.json"),
+                "json",
+            ),
+            (
+                "research.json",
+                format!("{artifacts_rel}/research.json"),
+                "json",
+            ),
         ] {
             match crate::artifact::resolve(&req.workspace, name, &rel_path, Some(kind)) {
                 Ok(artifact) => sink.artifact(&artifact),
@@ -439,7 +470,10 @@ async fn run_ldr(
         // 無ければ全 0 扱い＝閾値を全部 0 にしないと落ちる）。LLM には判断させない。
         let counts = value.get("counts");
         let count_of = |key: &str| -> u32 {
-            counts.and_then(|c| c.get(key)).and_then(serde_json::Value::as_u64).unwrap_or(0) as u32
+            counts
+                .and_then(|c| c.get(key))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32
         };
         let search_results = count_of("search_results");
         let sources = count_of("sources");
@@ -448,8 +482,10 @@ async fn run_ldr(
         let ev = &config.evidence;
 
         // どれか 1 つでも閾値が立っているか（全部 0 なら ADR-0031 D2 どおりゲートを見ない）。
-        let gate_enabled =
-            ev.min_search_results > 0 || ev.min_sources > 0 || ev.min_cited > 0 || ev.min_domains > 0;
+        let gate_enabled = ev.min_search_results > 0
+            || ev.min_sources > 0
+            || ev.min_cited > 0
+            || ev.min_domains > 0;
         let gate_message = if gate_enabled && search_results == 0 {
             // 検索経路そのものの問題（鍵切れ・CAPTCHA・ネットワーク遮断）を、調べた結果情報が無かった
             // ケースと区別できるように、別メッセージにする（ADR-0031 D2）。`min_search_results = 0` に
@@ -461,7 +497,10 @@ async fn run_ldr(
         } else {
             let mut problems = Vec::new();
             if ev.min_search_results > 0 && search_results < ev.min_search_results {
-                problems.push(format!("search_results={search_results} (min {})", ev.min_search_results));
+                problems.push(format!(
+                    "search_results={search_results} (min {})",
+                    ev.min_search_results
+                ));
             }
             if ev.min_sources > 0 && sources < ev.min_sources {
                 problems.push(format!("sources={sources} (min {})", ev.min_sources));
@@ -475,19 +514,31 @@ async fn run_ldr(
             if problems.is_empty() {
                 None
             } else {
-                Some(format!("insufficient web evidence: {}", problems.join(", ")))
+                Some(format!(
+                    "insufficient web evidence: {}",
+                    problems.join(", ")
+                ))
             }
         };
 
         if let Some(message) = gate_message {
             // ADR-0031 D2: retryable な `Terminal::Error`。供給側の失敗（`AdapterError`）にはしない
             // （プロバイダを cooldown にする話ではない）ので `provider_failure` は `None` のまま。
-            (Terminal::Error { message, retryable: true }, None)
+            (
+                Terminal::Error {
+                    message,
+                    retryable: true,
+                },
+                None,
+            )
         } else {
             let result_file = serde_json::json!({ "summary": summary, "evidence": [] });
             match serde_json::to_string_pretty(&result_file) {
                 Ok(text) => {
-                    if let Err(e) = tokio::fs::write(artifacts_dir.join("result.json"), format!("{text}\n")).await {
+                    if let Err(e) =
+                        tokio::fs::write(artifacts_dir.join("result.json"), format!("{text}\n"))
+                            .await
+                    {
                         warn!("run {run_id}: could not write artifacts/result.json: {e}");
                     }
                 }
@@ -552,7 +603,10 @@ mod tests {
 
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
-            self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+            self.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(msg.to_string());
         }
         fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
             self.progress(msg);
@@ -562,10 +616,16 @@ mod tests {
                 .push((msg.to_string(), fields.clone()));
         }
         fn artifact(&self, artifact: &ArtifactRef) {
-            self.artifacts.lock().unwrap_or_else(|e| e.into_inner()).push(artifact.clone());
+            self.artifacts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(artifact.clone());
         }
         fn heartbeat(&self) {
-            *self.heartbeat_count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            *self
+                .heartbeat_count
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) += 1;
         }
     }
 
@@ -599,8 +659,7 @@ mod tests {
     }
 
     /// counts が満たす閾値（既定: min_search_results=5, min_sources=3, min_cited=2, min_domains=2。ADR-0031 D2）。
-    const PASSING_COUNTS: &str =
-        r#"{"queries": 1, "search_results": 5, "sources": 3, "sources_cited": 2, "unique_domains": 3}"#;
+    const PASSING_COUNTS: &str = r#"{"queries": 1, "search_results": 5, "sources": 3, "sources_cited": 2, "unique_domains": 3}"#;
 
     /// スタブは argv[2]（`ldr_input.json` のパス）に成功時の `report.md`/`sources.json`/`research.json` を
     /// 書き、progress と `CELERIS_RESULT`（`counts` 込み）を出す（実際のランナーの動きを最小限まねる。ADR-0031 D1）。
@@ -608,8 +667,11 @@ mod tests {
     fn script_with_counts(counts_json: Option<&str>) -> String {
         let counts = counts_json.unwrap_or(r#"{"queries": 0, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}"#);
         let result_line = match counts_json {
-            Some(counts) => format!(r#"CELERIS_RESULT {{"summary": "found X and Y with sources", "sources": 3, "counts": {counts}}}"#),
-            None => r#"CELERIS_RESULT {"summary": "found X and Y with sources", "sources": 3}"#.to_string(),
+            Some(counts) => format!(
+                r#"CELERIS_RESULT {{"summary": "found X and Y with sources", "sources": 3, "counts": {counts}}}"#
+            ),
+            None => r#"CELERIS_RESULT {"summary": "found X and Y with sources", "sources": 3}"#
+                .to_string(),
         };
         format!(
             r#"input="$2"
@@ -638,9 +700,16 @@ echo '{result_line}'
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req.clone(), "run-1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req.clone(), "run-1", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
-            Terminal::Done { summary, evidence, usage } => {
+            Terminal::Done {
+                summary,
+                evidence,
+                usage,
+            } => {
                 assert_eq!(summary, "found X and Y with sources");
                 assert!(evidence.is_empty());
                 assert!(usage.is_none());
@@ -661,7 +730,10 @@ echo '{result_line}'
                 .all(|(_, f)| f.kind == Some(task_core::ProgressKind::Status)),
             "{structured:#?}"
         );
-        assert!(structured.iter().all(|(_, f)| f.summary.is_some()), "{structured:#?}");
+        assert!(
+            structured.iter().all(|(_, f)| f.summary.is_some()),
+            "{structured:#?}"
+        );
 
         // ADR-0031 受け入れ条件 1: report.md / sources.json / research.json の 3 つが成果物として申告される。
         let artifacts = sink.artifacts.lock().unwrap();
@@ -675,21 +747,29 @@ echo '{result_line}'
         }
         let sources_artifact = artifacts.iter().find(|a| a.name == "sources.json").unwrap();
         assert_eq!(sources_artifact.path, "artifacts/sources.json");
-        let research_artifact = artifacts.iter().find(|a| a.name == "research.json").unwrap();
+        let research_artifact = artifacts
+            .iter()
+            .find(|a| a.name == "research.json")
+            .unwrap();
         assert_eq!(research_artifact.path, "artifacts/research.json");
         drop(artifacts);
 
-        let sources_json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap()).unwrap();
+        let sources_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(sources_json.as_array().unwrap().len(), 3);
-        let research_json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap()).unwrap();
+        let research_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(research_json["counts"]["sources"], 3);
 
         let report_md = std::fs::read_to_string(dir.path().join("artifacts/report.md")).unwrap();
         assert!(report_md.contains("found X and Y with sources"));
 
-        let result_json = std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
+        let result_json =
+            std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result_json).unwrap();
         assert_eq!(parsed["summary"], "found X and Y with sources");
         assert_eq!(parsed["evidence"], serde_json::json!([]));
@@ -698,9 +778,12 @@ echo '{result_line}'
         assert!(dir.path().join("runs/run-1/stderr.log").is_file());
         assert!(dir.path().join("runs/run-1/ldr_run.py").is_file());
         assert!(dir.path().join("runs/run-1/ldr_input.json").is_file());
-        let run_result = std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
+        let run_result =
+            std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
         match serde_json::from_str::<crate::protocol::WorkerMessage>(run_result.trim()).unwrap() {
-            crate::protocol::WorkerMessage::Done { summary, .. } => assert_eq!(summary, "found X and Y with sources"),
+            crate::protocol::WorkerMessage::Done { summary, .. } => {
+                assert_eq!(summary, "found X and Y with sources")
+            }
             other => panic!("expected done in runs/<run_id>/result.json, got {other:?}"),
         }
     }
@@ -718,8 +801,15 @@ echo '{result_line}'
         let mut req = sample_req(dir.path().to_path_buf());
         req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
-        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        let outcome = adapter
+            .run(req, "run-shared", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
         let artifacts = sink.artifacts.lock().unwrap();
         let mut paths: Vec<&str> = artifacts.iter().map(|a| a.path.as_str()).collect();
         paths.sort_unstable();
@@ -734,7 +824,10 @@ echo '{result_line}'
         drop(artifacts);
         assert!(dir.path().join(".taskd/artifacts/T1/result.json").is_file());
         // 兄弟の `artifacts/sources.json` は触らない（実機の上書き事故の再発防止）。
-        assert_eq!(std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap(), "sibling");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap(),
+            "sibling"
+        );
     }
 
     #[tokio::test]
@@ -744,7 +837,10 @@ echo '{result_line}'
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-2", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-2", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -766,7 +862,10 @@ echo '{result_line}'
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-3", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-3", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -787,7 +886,10 @@ echo '{result_line}'
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-4", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-4", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -830,9 +932,16 @@ while true; do sleep 0.1; done
             }
             other => panic!("expected error, got {other:?}"),
         }
-        let pid_text = std::fs::read_to_string(&pid_file).expect("stub should have recorded its pid before looping");
-        let pid: i32 = pid_text.trim().parse().expect("pid.txt should contain a pid");
-        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists(), "process {pid} should have been killed");
+        let pid_text = std::fs::read_to_string(&pid_file)
+            .expect("stub should have recorded its pid before looping");
+        let pid: i32 = pid_text
+            .trim()
+            .parse()
+            .expect("pid.txt should contain a pid");
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "process {pid} should have been killed"
+        );
     }
 
     fn read_json(path: &Path) -> serde_json::Value {
@@ -878,9 +987,15 @@ while true; do sleep 0.1; done
         assert!(!query.contains("先週の続きを"), "{query}");
         assert!(!query.contains("覚えておくこと"), "{query}");
 
-        context.answers = vec![Answer { question: "対象は?".into(), answer: "v1.31".into() }];
+        context.answers = vec![Answer {
+            question: "対象は?".into(),
+            answer: "v1.31".into(),
+        }];
         let with_answers = build_query(&task, &context);
-        assert!(with_answers.starts_with("What is Kubernetes"), "{with_answers}");
+        assert!(
+            with_answers.starts_with("What is Kubernetes"),
+            "{with_answers}"
+        );
         assert!(with_answers.contains("対象は? → v1.31"), "{with_answers}");
     }
 
@@ -906,15 +1021,26 @@ while true; do sleep 0.1; done
         config.model = Some("qwen3.8-27b".to_string());
         // このテストは入力 JSON の組み立てを見るだけで、証拠ゲート（ADR-0031 D2）とは無関係なので無効にする
         // （スタブの CELERIS_RESULT に counts が無い）。
-        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
+        config.evidence = EvidenceThresholds {
+            min_search_results: 0,
+            min_sources: 0,
+            min_cited: 0,
+            min_domains: 0,
+        };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req.clone(), "run-6", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req.clone(), "run-6", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
 
         let seen = read_json(&dir.path().join("seen_input.json"));
-        assert_eq!(seen["query"], serde_json::Value::String(build_query(&req.task, &req.context)));
+        assert_eq!(
+            seen["query"],
+            serde_json::Value::String(build_query(&req.task, &req.context))
+        );
         assert_eq!(seen["mode"], "detailed");
         assert_eq!(seen["iterations"], 3);
         assert_eq!(seen["questions_per_iteration"], 2);
@@ -922,7 +1048,12 @@ while true; do sleep 0.1; done
         assert_eq!(seen["settings"]["search.tool"], "searxng");
         // `model` が `settings` の `llm.model` を上書きする。
         assert_eq!(seen["settings"]["llm.model"], "qwen3.8-27b");
-        assert!(seen["report_path"].as_str().unwrap().ends_with("artifacts/report.md"));
+        assert!(
+            seen["report_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("artifacts/report.md")
+        );
 
         // `runs/<run_id>/ldr_run.py` は埋め込みランナーそのもの。
         let script = std::fs::read_to_string(dir.path().join("runs/run-6/ldr_run.py")).unwrap();
@@ -942,7 +1073,10 @@ while true; do sleep 0.1; done
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        adapter.run(req, "run-7", default_limits(), &sink).await.unwrap();
+        adapter
+            .run(req, "run-7", default_limits(), &sink)
+            .await
+            .unwrap();
         let seen = read_json(&dir.path().join("seen_input.json"));
         assert_eq!(seen["mode"], "quick");
         assert!(seen["iterations"].is_null());
@@ -963,10 +1097,17 @@ while true; do sleep 0.1; done
                 out = out_file.display()
             ),
         );
-        config.env.push(("OPENAI_BASE_URL".to_string(), "http://old:1".to_string()));
+        config
+            .env
+            .push(("OPENAI_BASE_URL".to_string(), "http://old:1".to_string()));
         // このテストは環境変数の上書きを見るだけで、証拠ゲート（ADR-0031 D2）とは無関係なので無効にする
         // （スタブの CELERIS_RESULT に counts が無い）。
-        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
+        config.evidence = EvidenceThresholds {
+            min_search_results: 0,
+            min_sources: 0,
+            min_cited: 0,
+            min_domains: 0,
+        };
         let base = LdrAdapter::new(config);
         let with_env = base
             .with_env(&[("OPENAI_BASE_URL".to_string(), "http://new:2".to_string())])
@@ -974,7 +1115,10 @@ while true; do sleep 0.1; done
 
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = with_env.run(req, "run-8", default_limits(), &sink).await.unwrap();
+        let outcome = with_env
+            .run(req, "run-8", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let seen = std::fs::read_to_string(&out_file).unwrap();
         assert_eq!(seen, "http://new:2");
@@ -1017,7 +1161,10 @@ while true; do sleep 0.1; done
     /// ランナーがさらに `# ` を足すと `# # タイトル` になる。見出しで始まっていればそのまま使う。
     #[test]
     fn runner_report_does_not_double_the_markdown_heading() {
-        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
             eprintln!("skipping: python3 not available");
             return;
         };
@@ -1048,8 +1195,13 @@ print(json.dumps(out))
             .arg(&script_path)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let values: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let values: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
         assert_eq!(values, serde_json::json!(["# Title", "# plain question"]));
     }
 
@@ -1060,7 +1212,10 @@ print(json.dumps(out))
     /// `#` 見出しを使い、出典は URL で重複排除されつつ元の引用番号（`[n]`）との対応が保たれる。
     #[test]
     fn runner_report_deduplicates_the_body_and_sources_like_the_real_incident() {
-        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
             eprintln!("skipping: python3 not available");
             return;
         };
@@ -1116,13 +1271,24 @@ print(json.dumps({
             .arg(&script_path)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
-        assert_eq!(value["title"], "# Pluvioの隣接領域に関する研究動向と研究テーマ候補");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(
+            value["title"],
+            "# Pluvioの隣接領域に関する研究動向と研究テーマ候補"
+        );
         assert_eq!(value["body_occurrences"], serde_json::json!(1));
         assert_eq!(value["has_summary_heading"], serde_json::json!(false));
         assert_eq!(value["has_findings_heading"], serde_json::json!(false));
-        assert_eq!(value["has_final_synthesis_heading"], serde_json::json!(false));
+        assert_eq!(
+            value["has_final_synthesis_heading"],
+            serde_json::json!(false)
+        );
         assert_eq!(
             value["sources_section"],
             serde_json::json!([
@@ -1140,7 +1306,10 @@ print(json.dumps({
     /// （実機の回帰: 1 行目が objective 丸ごとになっていた）。
     #[test]
     fn runner_report_title_falls_back_to_the_objectives_first_sentence_when_capped() {
-        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
             eprintln!("skipping: python3 not available");
             return;
         };
@@ -1186,13 +1355,21 @@ print(json.dumps({
             .arg(&script_path)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
         // 長い objective: 最初の「。」より前に 80 字上限に達するので、そこで切り詰められる
         // （objective 全文を見出しにしない。実機の回帰の是正）。
         let long_title = value["long_title"].as_str().expect("long_title string");
         assert!(long_title.starts_with("# Pluvio"), "{long_title}");
-        assert!(!long_title.contains("優先すること"), "{long_title} should not include the whole objective");
+        assert!(
+            !long_title.contains("優先すること"),
+            "{long_title} should not include the whole objective"
+        );
         let long_title_len = value["long_title_len"].as_u64().expect("long_title_len");
         assert!(long_title_len <= 80, "{long_title_len}");
         // 短い objective: 最初の「。」が 80 字より前にあるので、そこで文が終わる（それ以降の
@@ -1205,7 +1382,10 @@ print(json.dumps({
     /// `main()` の中だけにあるので、パッケージ未導入でもモジュールとして読み込める。ネットワークには出ない）。
     #[test]
     fn runner_convert_setting_value_handles_bool_int_float_and_json() {
-        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
             eprintln!("skipping: python3 not available");
             return;
         };
@@ -1233,8 +1413,13 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
             .arg(&script_path)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let values: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let values: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
         assert_eq!(
             values,
             serde_json::json!([
@@ -1255,19 +1440,28 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
 
     /// 検索が 1 件も返らなかった（`search_results == 0`）ときは別メッセージになり、`report.md` /
     /// `sources.json` / `research.json` は消さずに残る（ADR-0031 D2 / 受け入れ条件 2）。
-        /// ADR-0031 D2 の監査指摘（D-5）: `min_search_results = 0` にしていても、検索が 0 件なら
+    /// ADR-0031 D2 の監査指摘（D-5）: `min_search_results = 0` にしていても、検索が 0 件なら
     /// 「検索経路の問題かもしれない」側のメッセージを出す（他の項目でゲートに落ちる場合でも、
     /// 運用者が知りたい原因は同じ）。閾値が全部 0 のときだけゲート自体を見ない。
     #[tokio::test]
-    async fn gate_zero_search_results_keeps_the_distinct_message_even_when_that_threshold_is_zero() {
+    async fn gate_zero_search_results_keeps_the_distinct_message_even_when_that_threshold_is_zero()
+    {
         let dir = tempfile::tempdir().unwrap();
         let counts = r#"{"queries": 1, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}"#;
         let mut config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
-        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 3, min_cited: 2, min_domains: 2 };
+        config.evidence = EvidenceThresholds {
+            min_search_results: 0,
+            min_sources: 3,
+            min_cited: 2,
+            min_domains: 2,
+        };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-gate-0sr", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-gate-0sr", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1277,7 +1471,7 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
         }
     }
 
-#[tokio::test]
+    #[tokio::test]
     async fn gate_zero_search_results_uses_the_distinct_message_and_keeps_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let counts = r#"{"queries": 0, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}"#;
@@ -1285,7 +1479,10 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-gate-1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-gate-1", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1310,11 +1507,17 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-gate-2", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-gate-2", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
-                assert!(message.starts_with("insufficient web evidence:"), "{message}");
+                assert!(
+                    message.starts_with("insufficient web evidence:"),
+                    "{message}"
+                );
                 assert!(message.contains("sources=1 (min 3)"), "{message}");
                 assert!(!message.contains("cited="), "{message}");
                 assert!(!message.contains("domains="), "{message}");
@@ -1334,7 +1537,10 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-gate-3", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-gate-3", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1356,7 +1562,10 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-gate-4", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-gate-4", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1375,12 +1584,24 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
         let dir = tempfile::tempdir().unwrap();
         let counts = r#"{"queries": 0, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}"#;
         let mut config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
-        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
+        config.evidence = EvidenceThresholds {
+            min_search_results: 0,
+            min_sources: 0,
+            min_cited: 0,
+            min_domains: 0,
+        };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-gate-5", default_limits(), &sink).await.unwrap();
-        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        let outcome = adapter
+            .run(req, "run-gate-5", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
         assert!(dir.path().join("artifacts/result.json").exists());
     }
 
@@ -1393,7 +1614,10 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-gate-6", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-gate-6", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1408,12 +1632,24 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
     async fn gate_missing_counts_is_done_when_all_thresholds_are_zero() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = stub_ldr(dir.path(), &script_with_counts(None));
-        config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
+        config.evidence = EvidenceThresholds {
+            min_search_results: 0,
+            min_sources: 0,
+            min_cited: 0,
+            min_domains: 0,
+        };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-gate-7", default_limits(), &sink).await.unwrap();
-        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        let outcome = adapter
+            .run(req, "run-gate-7", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
     }
 
     /// ランナーの `build_evidence_manifest`（URL での重複排除、`[n]` からの `cited` 判定、ドメイン数、
@@ -1421,7 +1657,10 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
     /// 出典のエンジン名は `source` から取る（ADR-0031 D1 の記録が 0 件のままにならないように）。
     #[test]
     fn runner_manifest_uses_findings_questions_and_source_engine() {
-        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
             eprintln!("skipping: python3 not available");
             return;
         };
@@ -1463,18 +1702,32 @@ print(json.dumps({
             .arg(&script_path)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
-        assert_eq!(value["queries"], serde_json::json!(["what is k8s?", "what is etcd?"]));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(
+            value["queries"],
+            serde_json::json!(["what is k8s?", "what is etcd?"])
+        );
         assert_eq!(value["counts"]["queries"], serde_json::json!(2));
         assert_eq!(value["counts"]["unique_domains"], serde_json::json!(2));
-        assert_eq!(value["engines"], serde_json::json!(["wikipedia", "wikipedia"]));
+        assert_eq!(
+            value["engines"],
+            serde_json::json!(["wikipedia", "wikipedia"])
+        );
     }
 
     /// `questions` が dict/list どちらでも扱えること）を python3 で直接確認する（ADR-0031 D1）。
     #[test]
     fn runner_build_evidence_manifest_dedupes_cites_and_flattens_questions() {
-        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
             eprintln!("skipping: python3 not available");
             return;
         };
@@ -1519,8 +1772,13 @@ print(json.dumps({
             .arg(&script_path)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let values: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let values: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
 
         // 重複排除: 2 件（a.example.com/x は 2 回出るが 1 件に）。`[1]` と `[3]` は両方 a.example.com/x を指す
         // ので cited=true、`b.example.org/y` は引用されていないので cited=false。
@@ -1546,7 +1804,10 @@ print(json.dumps({
             ])
         );
         // `questions` が list（要素がリストまたは文字列）のときも同じように平らにする。
-        assert_eq!(values["queries_from_list_questions"], serde_json::json!(["qa", "qb"]));
+        assert_eq!(
+            values["queries_from_list_questions"],
+            serde_json::json!(["qa", "qb"])
+        );
     }
 
     /// 実機の不具合（本番、2026-09-18）の回帰: `detailed_research` は `settings_override` という
@@ -1559,7 +1820,10 @@ print(json.dumps({
     /// （`settings_override` としては渡らないこと）を検証する。ADR-0029 参照。
     #[test]
     fn runner_detailed_mode_passes_settings_via_settings_snapshot() {
-        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
             eprintln!("skipping: python3 not available");
             return;
         };
@@ -1637,15 +1901,26 @@ print(json.dumps({
             .arg(&script_path)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let values: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let values: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
         assert_eq!(values["rc"], serde_json::json!(0));
         assert_eq!(
             values["overrides_passed_to_snapshot"],
             serde_json::json!({"llm.provider": "openai_endpoint", "llm.model": "qwen3.8-27b"})
         );
-        assert_eq!(values["has_settings_snapshot_kwarg"], serde_json::json!(true));
-        assert_eq!(values["has_settings_override_kwarg"], serde_json::json!(false));
+        assert_eq!(
+            values["has_settings_snapshot_kwarg"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            values["has_settings_override_kwarg"],
+            serde_json::json!(false)
+        );
         assert_eq!(
             values["settings_snapshot_value"],
             serde_json::json!({"snapshot": true, "from_overrides": {"llm.provider": "openai_endpoint", "llm.model": "qwen3.8-27b"}})

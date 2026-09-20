@@ -12,27 +12,51 @@ use serde_json::{Value, json};
 use task_core::{Status, TaskKind};
 
 fn g(path: &str) -> axum::http::Request<axum::body::Body> {
-    get_with(path, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    get_with(
+        path,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn p(path: &str, body: &Value) -> axum::http::Request<axum::body::Body> {
-    post_json_with(path, body, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    post_json_with(
+        path,
+        body,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn pa(path: &str, body: &Value) -> axum::http::Request<axum::body::Body> {
-    patch_json_with(path, body, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    patch_json_with(
+        path,
+        body,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn d(path: &str) -> axum::http::Request<axum::body::Body> {
-    delete_with(path, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    delete_with(
+        path,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn env() -> TestEnv {
-    TestEnv::with(EnvOptions { token: Some(TOKEN.into()), ..EnvOptions::default() })
+    TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        ..EnvOptions::default()
+    })
 }
 
 async fn make_project(app: &axum::Router) -> String {
-    let resp = send(app, p("/api/v1/projects", &json!({"title": "benchfs", "request": "測る"}))).await;
+    let resp = send(
+        app,
+        p(
+            "/api/v1/projects",
+            &json!({"title": "benchfs", "request": "測る"}),
+        ),
+    )
+    .await;
     assert_eq!(resp.status.as_u16(), 201, "{}", resp.text());
     resp.json()["id"].as_str().expect("id").to_string()
 }
@@ -67,9 +91,14 @@ async fn repos_can_be_created_listed_repointed_and_deleted() {
     let first_id = first["id"].as_str().expect("id").to_string();
 
     // `Project.workspace` は primary の写し（GUI の後方互換）。
-    let detail = send(&app, g(&format!("/api/v1/projects/{project}"))).await.json();
+    let detail = send(&app, g(&format!("/api/v1/projects/{project}")))
+        .await
+        .json();
     assert_eq!(detail["project"]["workspace"]["kind"], "local");
-    assert_eq!(detail["project"]["workspace"]["path"], code.to_string_lossy().as_ref());
+    assert_eq!(
+        detail["project"]["workspace"]["path"],
+        code.to_string_lossy().as_ref()
+    );
     assert_eq!(detail["repos"].as_array().expect("repos").len(), 1);
 
     // 2 件目（git ではないディレクトリ）。
@@ -86,23 +115,40 @@ async fn repos_can_be_created_listed_repointed_and_deleted() {
     assert_eq!(second.json()["kind"], "dir", "`.git` が無ければ dir");
     assert_eq!(second.json()["is_primary"], false);
 
-    let list = send(&app, g(&format!("/api/v1/projects/{project}/repos"))).await.json();
+    let list = send(&app, g(&format!("/api/v1/projects/{project}/repos")))
+        .await
+        .json();
     let items = list["items"].as_array().expect("items");
     assert_eq!(items.len(), 2);
     assert_eq!(items[0]["name"], "benchfs", "primary が先頭");
 
     // primary を移す。
-    let moved = send(&app, pa(&format!("/api/v1/repos/{second_id}"), &json!({"is_primary": true}))).await;
+    let moved = send(
+        &app,
+        pa(
+            &format!("/api/v1/repos/{second_id}"),
+            &json!({"is_primary": true}),
+        ),
+    )
+    .await;
     assert_eq!(moved.status.as_u16(), 200, "{}", moved.text());
     assert_eq!(moved.json()["is_primary"], true);
-    let detail = send(&app, g(&format!("/api/v1/projects/{project}"))).await.json();
-    assert_eq!(detail["project"]["workspace"]["path"], paper.to_string_lossy().as_ref());
+    let detail = send(&app, g(&format!("/api/v1/projects/{project}")))
+        .await
+        .json();
+    assert_eq!(
+        detail["project"]["workspace"]["path"],
+        paper.to_string_lossy().as_ref()
+    );
     assert_eq!(detail["repos"][0]["name"], "paper");
 
     // 名前と run を直す。
     let patched = send(
         &app,
-        pa(&format!("/api/v1/repos/{first_id}"), &json!({"name": "code", "run": "host"})),
+        pa(
+            &format!("/api/v1/repos/{first_id}"),
+            &json!({"name": "code", "run": "host"}),
+        ),
     )
     .await;
     assert_eq!(patched.status.as_u16(), 200, "{}", patched.text());
@@ -112,10 +158,15 @@ async fn repos_can_be_created_listed_repointed_and_deleted() {
     // 消す。
     let deleted = send(&app, d(&format!("/api/v1/repos/{first_id}"))).await;
     assert_eq!(deleted.status.as_u16(), 204, "{}", deleted.text());
-    let list = send(&app, g(&format!("/api/v1/projects/{project}/repos"))).await.json();
+    let list = send(&app, g(&format!("/api/v1/projects/{project}/repos")))
+        .await
+        .json();
     assert_eq!(list["items"].as_array().expect("items").len(), 1);
     assert_eq!(
-        send(&app, d(&format!("/api/v1/repos/{first_id}"))).await.status.as_u16(),
+        send(&app, d(&format!("/api/v1/repos/{first_id}")))
+            .await
+            .status
+            .as_u16(),
         404
     );
 }
@@ -130,7 +181,11 @@ async fn changing_repos_needs_the_admin_token_but_reading_does_not() {
 
     for request in [
         post_json(&format!("/api/v1/projects/{project}/repos"), &body),
-        patch_json_with(&format!("/api/v1/repos/{}", task_core::RepoId::new()), &body, &[]),
+        patch_json_with(
+            &format!("/api/v1/repos/{}", task_core::RepoId::new()),
+            &body,
+            &[],
+        ),
         delete_with(&format!("/api/v1/repos/{}", task_core::RepoId::new()), &[]),
     ] {
         let resp = send(&app, request).await;
@@ -149,23 +204,47 @@ async fn invalid_repo_input_is_422_and_unknown_ids_are_404() {
     let project = make_project(&app).await;
     let base = format!("/api/v1/projects/{project}/repos");
 
-    let ok = send(&app, p(&base, &json!({"name": "code", "location": {"kind": "local", "path": "/srv/code"}}))).await;
+    let ok = send(
+        &app,
+        p(
+            &base,
+            &json!({"name": "code", "location": {"kind": "local", "path": "/srv/code"}}),
+        ),
+    )
+    .await;
     assert_eq!(ok.status.as_u16(), 201, "{}", ok.text());
 
     // 名前の重複。
-    let dup = send(&app, p(&base, &json!({"name": "code", "location": {"kind": "local", "path": "/srv/other"}}))).await;
+    let dup = send(
+        &app,
+        p(
+            &base,
+            &json!({"name": "code", "location": {"kind": "local", "path": "/srv/other"}}),
+        ),
+    )
+    .await;
     assert_problem(&dup, 422, "validation");
 
     // slug でない名前（`repos/<name>/` というディレクトリ名になるので境界）。
     for bad in ["../escape", "Upper", "", ".hidden"] {
-        let resp = send(&app, p(&base, &json!({"name": bad, "location": {"kind": "local", "path": "/srv/x"}}))).await;
+        let resp = send(
+            &app,
+            p(
+                &base,
+                &json!({"name": bad, "location": {"kind": "local", "path": "/srv/x"}}),
+            ),
+        )
+        .await;
         assert_problem(&resp, 422, "validation");
     }
 
     // 知らないクラスタ（ADR-0039 D1 と同じ規律）。
     let unknown_cluster = send(
         &app,
-        p(&base, &json!({"location": {"kind": "remote", "cluster": "nope", "path": "/work/x"}})),
+        p(
+            &base,
+            &json!({"location": {"kind": "remote", "cluster": "nope", "path": "/work/x"}}),
+        ),
     )
     .await;
     let problem = assert_problem(&unknown_cluster, 422, "validation");
@@ -183,19 +262,41 @@ async fn invalid_repo_input_is_422_and_unknown_ids_are_404() {
     assert_problem(&reserved, 422, "validation");
 
     // 相対パス。
-    let relative = send(&app, p(&base, &json!({"location": {"kind": "local", "path": "relative"}}))).await;
+    let relative = send(
+        &app,
+        p(
+            &base,
+            &json!({"location": {"kind": "local", "path": "relative"}}),
+        ),
+    )
+    .await;
     assert_problem(&relative, 422, "validation");
 
     // 知らない id。
     let missing = task_core::RepoId::new();
     assert_problem(
-        &send(&app, pa(&format!("/api/v1/repos/{missing}"), &json!({"run": "host"}))).await,
+        &send(
+            &app,
+            pa(&format!("/api/v1/repos/{missing}"), &json!({"run": "host"})),
+        )
+        .await,
         404,
         "repo_not_found",
     );
-    assert_problem(&send(&app, d(&format!("/api/v1/repos/{missing}"))).await, 404, "repo_not_found");
     assert_problem(
-        &send(&app, g(&format!("/api/v1/projects/{}/repos", task_core::ProjectId::new()))).await,
+        &send(&app, d(&format!("/api/v1/repos/{missing}"))).await,
+        404,
+        "repo_not_found",
+    );
+    assert_problem(
+        &send(
+            &app,
+            g(&format!(
+                "/api/v1/projects/{}/repos",
+                task_core::ProjectId::new()
+            )),
+        )
+        .await,
         404,
         "project_not_found",
     );
@@ -211,9 +312,23 @@ async fn a_task_picks_repos_by_name_and_blocks_their_deletion_until_it_finishes(
     let app = env.router();
     let project = make_project(&app).await;
     let base = format!("/api/v1/projects/{project}/repos");
-    let code = send(&app, p(&base, &json!({"name": "code", "location": {"kind": "local", "path": "/srv/code"}}))).await;
+    let code = send(
+        &app,
+        p(
+            &base,
+            &json!({"name": "code", "location": {"kind": "local", "path": "/srv/code"}}),
+        ),
+    )
+    .await;
     let code_id = code.json()["id"].as_str().expect("id").to_string();
-    send(&app, p(&base, &json!({"name": "paper", "location": {"kind": "local", "path": "/srv/paper"}}))).await;
+    send(
+        &app,
+        p(
+            &base,
+            &json!({"name": "paper", "location": {"kind": "local", "path": "/srv/paper"}}),
+        ),
+    )
+    .await;
 
     let body = |repos: Value, project: Option<&str>| {
         let mut task = json!({
@@ -229,7 +344,14 @@ async fn a_task_picks_repos_by_name_and_blocks_their_deletion_until_it_finishes(
     };
 
     // 名前で選ぶ（並びはそのまま = `repos[0]` が cwd）。
-    let created = send(&app, p("/api/v1/tasks", &body(json!(["paper", "code"]), Some(&project)))).await;
+    let created = send(
+        &app,
+        p(
+            "/api/v1/tasks",
+            &body(json!(["paper", "code"]), Some(&project)),
+        ),
+    )
+    .await;
     assert_eq!(created.status.as_u16(), 201, "{}", created.text());
     let task = created.json();
     assert_eq!(task["repos"][0]["name"], "paper");
@@ -238,10 +360,19 @@ async fn a_task_picks_repos_by_name_and_blocks_their_deletion_until_it_finishes(
 
     // 書かなければ案件の primary を継ぐ。
     let inherited = send(&app, p("/api/v1/tasks", &body(json!([]), Some(&project)))).await;
-    assert_eq!(inherited.json()["repos"][0]["name"], "code", "{}", inherited.text());
+    assert_eq!(
+        inherited.json()["repos"][0]["name"],
+        "code",
+        "{}",
+        inherited.text()
+    );
 
     // 知らない名前は 422。
-    let unknown = send(&app, p("/api/v1/tasks", &body(json!(["nope"]), Some(&project)))).await;
+    let unknown = send(
+        &app,
+        p("/api/v1/tasks", &body(json!(["nope"]), Some(&project))),
+    )
+    .await;
     assert_problem(&unknown, 422, "validation");
 
     // 案件に属さないタスクに `repos` は書けない。
@@ -253,7 +384,10 @@ async fn a_task_picks_repos_by_name_and_blocks_their_deletion_until_it_finishes(
     assert_problem(&busy, 409, "repo_in_use");
 
     // 終わったら消せる。
-    for id in [task_id.as_str(), inherited.json()["id"].as_str().expect("id")] {
+    for id in [
+        task_id.as_str(),
+        inherited.json()["id"].as_str().expect("id"),
+    ] {
         let cancelled = send(&app, p(&format!("/api/v1/tasks/{id}/cancel"), &json!({}))).await;
         assert_eq!(cancelled.status.as_u16(), 200, "{}", cancelled.text());
     }
@@ -268,7 +402,14 @@ async fn mixing_a_remote_repo_with_a_local_one_is_rejected() {
     let app = env.router();
     let project = make_project(&app).await;
     let base = format!("/api/v1/projects/{project}/repos");
-    send(&app, p(&base, &json!({"name": "code", "location": {"kind": "local", "path": "/srv/code"}}))).await;
+    send(
+        &app,
+        p(
+            &base,
+            &json!({"name": "code", "location": {"kind": "local", "path": "/srv/code"}}),
+        ),
+    )
+    .await;
     let remote = send(
         &app,
         p(
@@ -293,7 +434,9 @@ async fn mixing_a_remote_repo_with_a_local_one_is_rejected() {
     let mixed = send(&app, p("/api/v1/tasks", &task(json!(["cluster", "code"])))).await;
     let problem = assert_problem(&mixed, 422, "validation");
     assert!(
-        problem["errors"][0]["message"].as_str().is_some_and(|m| m.contains("remote")),
+        problem["errors"][0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("remote")),
         "{problem}"
     );
 }
@@ -335,7 +478,11 @@ fn seed_tree(env: &TestEnv) -> (task_core::TaskId, std::path::PathBuf) {
                 name: "data".into(),
                 kind: "dir".into(),
                 source: data_target.to_string_lossy().into_owned(),
-                dir: task_dir.join("repos").join("data").to_string_lossy().into_owned(),
+                dir: task_dir
+                    .join("repos")
+                    .join("data")
+                    .to_string_lossy()
+                    .into_owned(),
                 branch: None,
                 base: None,
                 base_kind: None,
@@ -368,7 +515,9 @@ async fn the_tree_lists_every_repo_of_the_task() {
     assert_eq!(view["entries"][1]["kind"], "file");
     assert_eq!(view["entries"][1]["size"], 8);
 
-    let sub = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree?path=src"))).await.json();
+    let sub = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree?path=src")))
+        .await
+        .json();
     assert_eq!(sub["path"], "src");
     assert_eq!(sub["entries"][0]["path"], "src/lib.rs");
 
@@ -385,7 +534,11 @@ async fn the_tree_file_returns_text_and_only_the_size_for_binaries() {
     let app = env.router();
     let (task_id, code) = seed_tree(&env);
 
-    let text = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree/file?path=README.md"))).await;
+    let text = send(
+        &app,
+        g(&format!("/api/v1/tasks/{task_id}/tree/file?path=README.md")),
+    )
+    .await;
     assert_eq!(text.status.as_u16(), 200, "{}", text.text());
     let view = text.json();
     assert_eq!(view["repo"], "code");
@@ -394,14 +547,24 @@ async fn the_tree_file_returns_text_and_only_the_size_for_binaries() {
     assert_eq!(view["too_large"], false);
 
     std::fs::write(code.join("blob.bin"), [0u8, 1, 2, 3]).expect("write");
-    let binary = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree/file?path=blob.bin"))).await.json();
+    let binary = send(
+        &app,
+        g(&format!("/api/v1/tasks/{task_id}/tree/file?path=blob.bin")),
+    )
+    .await
+    .json();
     assert_eq!(binary["binary"], true);
     assert_eq!(binary["size"], 4);
     assert!(binary.get("text").is_none(), "{binary}");
 
     let big = vec![b'a'; (task_api::MAX_TEXT_BYTES + 1) as usize];
     std::fs::write(code.join("big.txt"), &big).expect("write");
-    let large = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree/file?path=big.txt"))).await.json();
+    let large = send(
+        &app,
+        g(&format!("/api/v1/tasks/{task_id}/tree/file?path=big.txt")),
+    )
+    .await
+    .json();
     assert_eq!(large["too_large"], true);
     assert_eq!(large["size"], big.len());
     assert!(large.get("text").is_none(), "{large}");
@@ -419,16 +582,34 @@ async fn the_tree_refuses_to_leave_the_working_tree() {
     std::os::unix::fs::symlink(&secret, code.join("escape.txt")).expect("symlink");
 
     for path in ["..", "../..", "src/../../secret.txt", "/etc/passwd"] {
-        let resp = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree?path={path}"))).await;
+        let resp = send(
+            &app,
+            g(&format!("/api/v1/tasks/{task_id}/tree?path={path}")),
+        )
+        .await;
         assert_problem(&resp, 403, "path_forbidden");
-        let resp = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree/file?path={path}"))).await;
+        let resp = send(
+            &app,
+            g(&format!("/api/v1/tasks/{task_id}/tree/file?path={path}")),
+        )
+        .await;
         assert_problem(&resp, 403, "path_forbidden");
     }
     // 作業ツリーの外を指すシンボリックリンクも 403。
-    let escaped = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree/file?path=escape.txt"))).await;
+    let escaped = send(
+        &app,
+        g(&format!(
+            "/api/v1/tasks/{task_id}/tree/file?path=escape.txt"
+        )),
+    )
+    .await;
     assert_problem(&escaped, 403, "path_forbidden");
     // ディレクトリを本文として読もうとしたら 403。
-    let dir = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree/file?path=src"))).await;
+    let dir = send(
+        &app,
+        g(&format!("/api/v1/tasks/{task_id}/tree/file?path=src")),
+    )
+    .await;
     assert_problem(&dir, 403, "path_forbidden");
     // `path` 無しの本文は 400。
     let missing_path = send(&app, g(&format!("/api/v1/tasks/{task_id}/tree/file"))).await;

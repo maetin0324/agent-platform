@@ -4,13 +4,18 @@ use std::collections::{HashMap, HashSet};
 
 use schemars::JsonSchema;
 use serde::Serialize;
-use task_core::{ArtifactRef, Event, Status, Task, TaskId, TaskKind, TaskStore, WorkerHint, WorkspaceSpec};
+use task_core::{
+    ArtifactRef, Event, Status, Task, TaskId, TaskKind, TaskStore, WorkerHint, WorkspaceSpec,
+};
 use time::OffsetDateTime;
 
 use crate::daemon::DaemonSnapshot;
 use crate::derive::{self, AnswerNote};
 use crate::error::OpsError;
-use crate::view::{self, ApprovalDecisionView, RunOutcomeKind, RunSummary, TaskRef, TaskSummary, VerdictView, ViewContext};
+use crate::view::{
+    self, ApprovalDecisionView, RunOutcomeKind, RunSummary, TaskRef, TaskSummary, VerdictView,
+    ViewContext,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct Inbox {
@@ -77,11 +82,29 @@ pub struct DraftGroup {
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AttentionItem {
-    Failed { task: TaskRef, reason: String, at: String },
-    RequeueLimitNear { task: TaskRef, count: u32, max: u32, at: String },
-    Unroutable { task: TaskRef, hint: WorkerHint, at: String },
+    Failed {
+        task: TaskRef,
+        reason: String,
+        at: String,
+    },
+    RequeueLimitNear {
+        task: TaskRef,
+        count: u32,
+        max: u32,
+        at: String,
+    },
+    Unroutable {
+        task: TaskRef,
+        hint: WorkerHint,
+        at: String,
+    },
     /// ADR-0018 D2: 直近 24 時間に `ClusterUnavailable` があったクラスタ（人がログインし直すまで用件が続く）。
-    ClusterUnavailable { cluster: String, host: String, at: String, tasks: u32 },
+    ClusterUnavailable {
+        cluster: String,
+        host: String,
+        at: String,
+        tasks: u32,
+    },
 }
 
 fn attention_at(item: &AttentionItem) -> &str {
@@ -159,7 +182,10 @@ fn build_approvals(
                         });
                     }
                 }
-                let is_done = matches!(last_run.as_ref().and_then(|r| r.outcome), Some(RunOutcomeKind::Done));
+                let is_done = matches!(
+                    last_run.as_ref().and_then(|r| r.outcome),
+                    Some(RunOutcomeKind::Done)
+                );
                 if is_done {
                     evidence_items = evidence(parent_task, &run_id);
                 }
@@ -168,10 +194,9 @@ fn build_approvals(
 
         let mut previous_decisions: Vec<ApprovalDecisionView> = Vec::new();
         if let (Some(parent_task), Some(idx)) = (parent, criterion_idx) {
-            for sibling in all_tasks
-                .iter()
-                .filter(|s| s.parent_id == Some(parent_task.id) && s.kind == TaskKind::Approval && s.id != t.id)
-            {
+            for sibling in all_tasks.iter().filter(|s| {
+                s.parent_id == Some(parent_task.id) && s.kind == TaskKind::Approval && s.id != t.id
+            }) {
                 if view::parse_human_approval_title(&sibling.title).map(|(i, _)| i) != Some(idx) {
                     continue;
                 }
@@ -211,7 +236,10 @@ fn build_approvals(
 }
 
 /// `status == Blocked` のタスク。
-fn build_questions(store: &dyn TaskStore, all_tasks: &[Task]) -> Result<Vec<QuestionItem>, OpsError> {
+fn build_questions(
+    store: &dyn TaskStore,
+    all_tasks: &[Task],
+) -> Result<Vec<QuestionItem>, OpsError> {
     // GUI 監査対応 Phase 29: 未決の approvals を task_id で引けるように 1 回だけ読む。
     let pending_approval_by_task: HashMap<TaskId, task_core::approval::ApprovalId> = store
         .approval_list(Some(true), None, None)?
@@ -229,9 +257,12 @@ fn build_questions(store: &dyn TaskStore, all_tasks: &[Task]) -> Result<Vec<Ques
         let mut run_id: Option<String> = None;
         for r in rows.iter().rev() {
             match &r.event {
-                Event::WorkerFinished { run_id: rid, outcome, role, .. }
-                    if !derive::is_reviewer(*role) && outcome.starts_with("question: ") =>
-                {
+                Event::WorkerFinished {
+                    run_id: rid,
+                    outcome,
+                    role,
+                    ..
+                } if !derive::is_reviewer(*role) && outcome.starts_with("question: ") => {
                     asked_at = Some(r.ts.clone());
                     run_id = Some(rid.clone());
                     break;
@@ -316,11 +347,17 @@ fn build_drafts(
 }
 
 /// 親の `created_at` 昇順、根（`None`）は最後になるようなソートキー。
-fn sort_key_for_draft_group(key: &Option<TaskId>, by_id: &HashMap<TaskId, Task>) -> (u8, String, String) {
+fn sort_key_for_draft_group(
+    key: &Option<TaskId>,
+    by_id: &HashMap<TaskId, Task>,
+) -> (u8, String, String) {
     match key {
         Some(pid) => (
             0,
-            by_id.get(pid).map(|p| view::to_rfc3339(p.created_at)).unwrap_or_default(),
+            by_id
+                .get(pid)
+                .map(|p| view::to_rfc3339(p.created_at))
+                .unwrap_or_default(),
             pid.to_string(),
         ),
         None => (1, String::new(), String::new()),
@@ -348,14 +385,21 @@ fn build_attention(
 
         let mut reasons: Vec<String> = Vec::new();
         if let Some(outcome) = rows.iter().rev().find_map(|r| match &r.event {
-            Event::WorkerFinished { outcome, role, .. } if !derive::is_reviewer(*role) => Some(outcome.clone()),
+            Event::WorkerFinished { outcome, role, .. } if !derive::is_reviewer(*role) => {
+                Some(outcome.clone())
+            }
             _ => None,
         }) {
             reasons.push(outcome);
         }
         if let Some(run_id) = derive::last_run_id(&events) {
             for r in &rows {
-                if let Event::ReviewVerdict { run_id: rid, pass, reason, .. } = &r.event
+                if let Event::ReviewVerdict {
+                    run_id: rid,
+                    pass,
+                    reason,
+                    ..
+                } = &r.event
                     && rid == &run_id
                     && !*pass
                 {
@@ -403,17 +447,25 @@ fn build_attention(
     // (d) 直近 24 時間に `ClusterUnavailable` があったクラスタを 1 件ずつ出す（ADR-0018 D2）。
     // ワークスペースが `Remote` で**終端でない**タスクだけを対象にする（`Local` はクラスタと無関係。done / failed / cancelled の
     // タスクはもうクラスタを待っていないので、イベント列を読まない。監査 4-2: 走査を待っているタスクの数に抑える）。
-    let mut cluster_agg: HashMap<String, (OffsetDateTime, String, String, HashSet<TaskId>)> = HashMap::new();
+    let mut cluster_agg: HashMap<String, (OffsetDateTime, String, String, HashSet<TaskId>)> =
+        HashMap::new();
     for t in all_tasks.iter() {
         if t.status.is_terminal() || !matches!(t.workspace, WorkspaceSpec::Remote { .. }) {
             continue;
         }
         let rows = store.event_rows_for(t.id, None, view::ALL_EVENTS)?;
         for r in &rows {
-            let Event::ClusterUnavailable { cluster: ev_cluster, host, .. } = &r.event else {
+            let Event::ClusterUnavailable {
+                cluster: ev_cluster,
+                host,
+                ..
+            } = &r.event
+            else {
                 continue;
             };
-            let Ok(ts) = OffsetDateTime::parse(&r.ts, &time::format_description::well_known::Rfc3339) else {
+            let Ok(ts) =
+                OffsetDateTime::parse(&r.ts, &time::format_description::well_known::Rfc3339)
+            else {
                 continue;
             };
             if ts < cutoff {
@@ -436,7 +488,10 @@ fn build_attention(
     for cluster_id in cluster_ids {
         // 接続が戻っている（人が再度ログインした）なら、この呼びかけはもう不要。
         if let Some(snap) = snapshot
-            && snap.clusters.iter().any(|c| c.id == cluster_id && c.connected)
+            && snap
+                .clusters
+                .iter()
+                .any(|c| c.id == cluster_id && c.connected)
         {
             continue;
         }
@@ -522,6 +577,8 @@ mod tests {
     fn sample_task(kind: TaskKind, status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -543,7 +600,10 @@ mod tests {
                 tier: Tier::Standard,
                 adapter: None,
             },
-            workspace: WorkspaceSpec::Local { path: "workspace".into(), mode: None },
+            workspace: WorkspaceSpec::Local {
+                path: "workspace".into(),
+                mode: None,
+            },
             budget: Budget {
                 max_turns: 10,
                 max_wall_secs: 600,
@@ -619,7 +679,9 @@ mod tests {
         approval.parent_id = Some(parent.id);
         approval.title = derive::human_approval_title(&parent, 0);
         store.insert(&approval).expect("insert approval");
-        store.append_event(approval.id, &Event::ApprovalRequested).expect("requested");
+        store
+            .append_event(approval.id, &Event::ApprovalRequested)
+            .expect("requested");
 
         let calls: Cell<u32> = Cell::new(0);
         let evidence_fn = |task: &Task, run_id: &str| {
@@ -635,7 +697,8 @@ mod tests {
         };
 
         let ctx = view_ctx();
-        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &evidence_fn).expect("inbox");
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &evidence_fn).expect("inbox");
 
         assert_eq!(result.approvals.len(), 1);
         let item = &result.approvals[0];
@@ -644,7 +707,10 @@ mod tests {
         assert_eq!(item.criterion_idx, Some(0));
         assert_eq!(item.attempt, Some(1));
         assert_eq!(item.criterion_text, "looks good");
-        assert_eq!(item.last_run.as_ref().map(|r| r.run_id.clone()), Some("run-1".to_string()));
+        assert_eq!(
+            item.last_run.as_ref().map(|r| r.run_id.clone()),
+            Some("run-1".to_string())
+        );
         assert_eq!(item.other_verdicts.len(), 1);
         assert_eq!(item.artifacts.len(), 0);
         assert_eq!(item.evidence.len(), 1);
@@ -685,17 +751,23 @@ mod tests {
         attempt2.parent_id = Some(parent.id);
         attempt2.title = derive::human_approval_title(&attempt2_parent_snapshot, 0);
         store.insert(&attempt2).expect("insert attempt2");
-        store.append_event(attempt2.id, &Event::ApprovalRequested).expect("requested attempt2");
+        store
+            .append_event(attempt2.id, &Event::ApprovalRequested)
+            .expect("requested attempt2");
 
         let ctx = view_ctx();
-        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
 
         assert_eq!(result.approvals.len(), 1, "only the ready approval appears");
         let pending = &result.approvals[0];
         assert_eq!(pending.approval.id, attempt2.id);
         assert_eq!(pending.previous_decisions.len(), 1);
         assert!(!pending.previous_decisions[0].approved);
-        assert_eq!(pending.previous_decisions[0].note.as_deref(), Some("not yet"));
+        assert_eq!(
+            pending.previous_decisions[0].note.as_deref(),
+            Some("not yet")
+        );
     }
 
     #[test]
@@ -716,7 +788,8 @@ mod tests {
             .expect("finished");
 
         let ctx = view_ctx();
-        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
         assert_eq!(result.questions.len(), 1);
         let q = &result.questions[0];
         assert_eq!(q.task.id, task.id);
@@ -766,8 +839,15 @@ mod tests {
         store.approval_append(&decided).expect("append");
 
         let ctx = view_ctx();
-        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
-        let find = |id: TaskId| result.questions.iter().find(|q| q.task.id == id).expect("question");
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let find = |id: TaskId| {
+            result
+                .questions
+                .iter()
+                .find(|q| q.task.id == id)
+                .expect("question")
+        };
         assert_eq!(find(with_pending.id).approval_id, Some(pending.id));
         assert_eq!(find(with_decided_only.id).approval_id, None);
     }
@@ -797,11 +877,18 @@ mod tests {
         store.insert(&root_draft).expect("insert root draft");
 
         let ctx = view_ctx();
-        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
 
         assert_eq!(result.drafts.len(), 2);
-        assert_eq!(result.drafts[0].parent.as_ref().map(|p| p.id), Some(plan.id));
-        assert_eq!(result.drafts[0].plan_summary.as_deref(), Some("built the plan"));
+        assert_eq!(
+            result.drafts[0].parent.as_ref().map(|p| p.id),
+            Some(plan.id)
+        );
+        assert_eq!(
+            result.drafts[0].plan_summary.as_deref(),
+            Some("built the plan")
+        );
         assert_eq!(result.drafts[0].drafts.len(), 1);
         assert_eq!(result.drafts[0].drafts[0].id, child.id);
 
@@ -846,13 +933,24 @@ mod tests {
         }
 
         let ctx = view_ctx(); // max_requeues = 5, so >= 4 triggers RequeueLimitNear.
-        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
 
-        assert!(result.attention.iter().any(|a| matches!(a, AttentionItem::Failed { task, .. } if task.id == failed.id)));
+        assert!(
+            result
+                .attention
+                .iter()
+                .any(|a| matches!(a, AttentionItem::Failed { task, .. } if task.id == failed.id))
+        );
         assert!(result.attention.iter().any(
             |a| matches!(a, AttentionItem::RequeueLimitNear { task, count, max, .. } if task.id == near_limit.id && *count == 4 && *max == 5)
         ));
-        assert!(!result.attention.iter().any(|a| matches!(a, AttentionItem::Unroutable { .. })));
+        assert!(
+            !result
+                .attention
+                .iter()
+                .any(|a| matches!(a, AttentionItem::Unroutable { .. }))
+        );
     }
 
     #[test]
@@ -862,8 +960,14 @@ mod tests {
         store.insert(&stuck).expect("insert stuck");
 
         let ctx = view_ctx();
-        let without_snapshot = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
-        assert!(!without_snapshot.attention.iter().any(|a| matches!(a, AttentionItem::Unroutable { .. })));
+        let without_snapshot =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        assert!(
+            !without_snapshot
+                .attention
+                .iter()
+                .any(|a| matches!(a, AttentionItem::Unroutable { .. }))
+        );
 
         let snapshot = DaemonSnapshot {
             instance_id: "01J000000000000000000000AA".into(),
@@ -888,26 +992,44 @@ mod tests {
             accounts: vec![],
             containers: None,
         };
-        let with_snapshot = inbox(&store, Some(&snapshot), &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let with_snapshot = inbox(
+            &store,
+            Some(&snapshot),
+            &ctx,
+            OffsetDateTime::now_utc(),
+            &no_evidence,
+        )
+        .expect("inbox");
         assert!(
-            with_snapshot
-                .attention
-                .iter()
-                .any(|a| matches!(a, AttentionItem::Unroutable { task, .. } if task.id == stuck.id))
+            with_snapshot.attention.iter().any(
+                |a| matches!(a, AttentionItem::Unroutable { task, .. } if task.id == stuck.id)
+            )
         );
     }
 
     #[test]
     fn inbox_counts_match_section_lengths_and_status_totals() {
         let store = SqliteStore::open_in_memory().expect("open store");
-        store.insert(&sample_task(TaskKind::Execute, Status::Draft)).expect("insert");
-        store.insert(&sample_task(TaskKind::Execute, Status::Ready)).expect("insert");
+        store
+            .insert(&sample_task(TaskKind::Execute, Status::Draft))
+            .expect("insert");
+        store
+            .insert(&sample_task(TaskKind::Execute, Status::Ready))
+            .expect("insert");
 
         let ctx = view_ctx();
-        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
         assert_eq!(result.counts.approvals, result.approvals.len() as u32);
         assert_eq!(result.counts.questions, result.questions.len() as u32);
-        assert_eq!(result.counts.drafts, result.drafts.iter().map(|g| g.drafts.len() as u32).sum::<u32>());
+        assert_eq!(
+            result.counts.drafts,
+            result
+                .drafts
+                .iter()
+                .map(|g| g.drafts.len() as u32)
+                .sum::<u32>()
+        );
         assert_eq!(result.counts.attention, result.attention.len() as u32);
         assert_eq!(result.counts.by_status.get("draft").copied(), Some(1));
         assert_eq!(result.counts.by_status.get("ready").copied(), Some(1));
@@ -924,13 +1046,30 @@ mod tests {
             child.parent_id = Some(parent.id);
             store.insert(&child).expect("insert child");
         }
-        store.insert(&sample_task(TaskKind::Execute, Status::Draft)).expect("insert other root");
+        store
+            .insert(&sample_task(TaskKind::Execute, Status::Draft))
+            .expect("insert other root");
 
-        let result = inbox(&store, None, &view_ctx(), OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let result = inbox(
+            &store,
+            None,
+            &view_ctx(),
+            OffsetDateTime::now_utc(),
+            &no_evidence,
+        )
+        .expect("inbox");
         assert_eq!(result.drafts.len(), 2, "root group + the parent's group");
         assert_eq!(result.counts.drafts, 3);
-        let root_group = result.drafts.iter().find(|g| g.parent.is_none()).expect("root group");
-        let summary = root_group.drafts.iter().find(|s| s.id == parent.id).expect("parent summary");
+        let root_group = result
+            .drafts
+            .iter()
+            .find(|g| g.parent.is_none())
+            .expect("root group");
+        let summary = root_group
+            .drafts
+            .iter()
+            .find(|s| s.id == parent.id)
+            .expect("parent summary");
         assert_eq!((summary.children, summary.pending_children), (2, 1));
     }
 
@@ -938,18 +1077,28 @@ mod tests {
     #[test]
     fn inbox_requeue_limit_near_ignores_tasks_that_never_requeued() {
         let store = SqliteStore::open_in_memory().expect("open store");
-        store.insert(&sample_task(TaskKind::Execute, Status::Ready)).expect("insert fresh");
+        store
+            .insert(&sample_task(TaskKind::Execute, Status::Ready))
+            .expect("insert fresh");
         let requeued = sample_task(TaskKind::Execute, Status::Ready);
         store.insert(&requeued).expect("insert requeued");
         store
             .append_event(
                 requeued.id,
-                &Event::Transitioned { from: Status::Running, to: Status::Ready, reason: "requeue".into() },
+                &Event::Transitioned {
+                    from: Status::Running,
+                    to: Status::Ready,
+                    reason: "requeue".into(),
+                },
             )
             .expect("requeue event");
 
-        let ctx = ViewContext { max_requeues: 1, ..view_ctx() };
-        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let ctx = ViewContext {
+            max_requeues: 1,
+            ..view_ctx()
+        };
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
         let near: Vec<(TaskId, u32)> = result
             .attention
             .iter()
@@ -963,15 +1112,24 @@ mod tests {
 
     fn remote_task(status: Status, cluster: &str) -> Task {
         let mut t = sample_task(TaskKind::Execute, status);
-        t.workspace = WorkspaceSpec::Remote { cluster: cluster.to_string(), path: "workspace".into() };
+        t.workspace = WorkspaceSpec::Remote {
+            cluster: cluster.to_string(),
+            path: "workspace".into(),
+        };
         t
     }
 
-    fn cluster_unavailable_find<'a>(items: &'a [AttentionItem], cluster: &str) -> Option<(&'a str, &'a str, u32)> {
+    fn cluster_unavailable_find<'a>(
+        items: &'a [AttentionItem],
+        cluster: &str,
+    ) -> Option<(&'a str, &'a str, u32)> {
         items.iter().find_map(|a| match a {
-            AttentionItem::ClusterUnavailable { cluster: c, host, at, tasks } if c == cluster => {
-                Some((host.as_str(), at.as_str(), *tasks))
-            }
+            AttentionItem::ClusterUnavailable {
+                cluster: c,
+                host,
+                at,
+                tasks,
+            } if c == cluster => Some((host.as_str(), at.as_str(), *tasks)),
             _ => None,
         })
     }
@@ -1022,10 +1180,15 @@ mod tests {
             .expect("cluster unavailable local");
 
         let ctx = view_ctx();
-        let result = inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
-        let (host, at, tasks) = cluster_unavailable_find(&result.attention, "pegasus").expect("cluster item present");
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+        let (host, at, tasks) =
+            cluster_unavailable_find(&result.attention, "pegasus").expect("cluster item present");
         assert_eq!(host, "pegasus");
-        assert_eq!(tasks, 2, "only the remote tasks count, the local one does not");
+        assert_eq!(
+            tasks, 2,
+            "only the remote tasks count, the local one does not"
+        );
         assert!(!at.is_empty());
         assert_eq!(result.counts.attention, result.attention.len() as u32);
     }
@@ -1110,10 +1273,20 @@ mod tests {
             accounts: vec![],
             containers: None,
         };
-        let still_present = inbox(&store, Some(&disconnected_snapshot), &ctx, now, &no_evidence).expect("inbox");
-        let (host, _, _) =
-            cluster_unavailable_find(&still_present.attention, "pegasus").expect("item present while disconnected");
-        assert_eq!(host, "pegasus", "host filled from the snapshot's cluster entry");
+        let still_present = inbox(
+            &store,
+            Some(&disconnected_snapshot),
+            &ctx,
+            now,
+            &no_evidence,
+        )
+        .expect("inbox");
+        let (host, _, _) = cluster_unavailable_find(&still_present.attention, "pegasus")
+            .expect("item present while disconnected");
+        assert_eq!(
+            host, "pegasus",
+            "host filled from the snapshot's cluster entry"
+        );
 
         let connected_snapshot = DaemonSnapshot {
             clusters: vec![crate::daemon::ClusterLive {
@@ -1128,7 +1301,8 @@ mod tests {
             }],
             ..disconnected_snapshot
         };
-        let hidden = inbox(&store, Some(&connected_snapshot), &ctx, now, &no_evidence).expect("inbox");
+        let hidden =
+            inbox(&store, Some(&connected_snapshot), &ctx, now, &no_evidence).expect("inbox");
         assert!(cluster_unavailable_find(&hidden.attention, "pegasus").is_none());
     }
 }

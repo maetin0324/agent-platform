@@ -41,6 +41,8 @@ fn main() {
 
     let now = time::OffsetDateTime::now_utc();
     let task = Task {
+        mode: Default::default(),
+        skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
@@ -76,7 +78,10 @@ fn main() {
             tier: Tier::Standard,
             adapter: Some(cli.adapter.clone()),
         },
-        workspace: WorkspaceSpec::Local { path: cli.workspace, mode: None },
+        workspace: WorkspaceSpec::Local {
+            path: cli.workspace,
+            mode: None,
+        },
         budget: Budget {
             max_turns: 30,
             max_wall_secs: 600,
@@ -97,7 +102,11 @@ fn main() {
         category: Default::default(),
     };
 
-    let WorkspaceSpec::Local { path: workspace_path, mode: None } = &task.workspace else {
+    let WorkspaceSpec::Local {
+        path: workspace_path,
+        mode: None,
+    } = &task.workspace
+    else {
         unreachable!("this seed always creates a Local workspace")
     };
     let workspace_display = workspace_path.display().to_string();
@@ -105,5 +114,8 @@ fn main() {
     // ADR-0010 D2: insert と Created を 1 トランザクションで。
     store.create_task(&task, vec![]).expect("create task");
 
-    println!("seeded task {} (status=ready, workspace={workspace_display})", task.id);
+    println!(
+        "seeded task {} (status=ready, workspace={workspace_display})",
+        task.id
+    );
 }

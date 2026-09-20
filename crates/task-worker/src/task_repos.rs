@@ -50,7 +50,11 @@ impl TaskRepo {
     }
 
     /// シンボリックリンクで見せるリポジトリ（`kind = dir` など）。
-    pub fn link(name: impl Into<String>, source: impl Into<PathBuf>, dir: impl Into<PathBuf>) -> Self {
+    pub fn link(
+        name: impl Into<String>,
+        source: impl Into<PathBuf>,
+        dir: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             name: name.into(),
             source: source.into(),
@@ -94,7 +98,9 @@ impl TaskWorkspaces {
                     let (source, dir) = (repo.source.clone(), repo.dir.clone());
                     tokio::task::spawn_blocking(move || ensure_link(&source, &dir))
                         .await
-                        .map_err(|e| WorkspaceError::Io(std::io::Error::other(format!("link task: {e}"))))??;
+                        .map_err(|e| {
+                            WorkspaceError::Io(std::io::Error::other(format!("link task: {e}")))
+                        })??;
                 }
             }
         }
@@ -120,7 +126,10 @@ impl TaskWorkspaces {
 /// Phase 49 の 1 リポジトリだけの作業ツリーに付ける表示用の名前（ディレクトリ名の slug）。
 /// 目印（`worktree.json`）の `repos[].name` とファイル閲覧 API の `?repo=` に使う。
 pub fn repo_display_name(repo: &Path) -> String {
-    let raw = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let raw = repo
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     task_core::repos::slugify_repo_name(&raw)
 }
 
@@ -166,13 +175,26 @@ pub async fn run_setup_in(
 
     let mut log = String::new();
     if let Some(plan) = plan {
-        let _ = writeln!(log, "# 実行環境: コンテナ {} （{}）", plan.image, plan.runtime.as_str());
+        let _ = writeln!(
+            log,
+            "# 実行環境: コンテナ {} （{}）",
+            plan.image,
+            plan.runtime.as_str()
+        );
     }
-    let mut out = SetupOutcome { ok: true, ran: 0, failures: Vec::new() };
+    let mut out = SetupOutcome {
+        ok: true,
+        ran: 0,
+        failures: Vec::new(),
+    };
     for repo in repos {
         let (config, warning) = task_core::workspace_config::load_or_default(&repo.dir);
         if let Some(warning) = warning {
-            let _ = writeln!(log, "# {}: workspace.toml が読めないので既定にした: {warning}", repo.name);
+            let _ = writeln!(
+                log,
+                "# {}: workspace.toml が読めないので既定にした: {warning}",
+                repo.name
+            );
             tracing::warn!(repo = %repo.name, %warning, "cannot read workspace.toml; using the defaults");
         }
         for cmd in &config.commands.setup {
@@ -189,9 +211,16 @@ pub async fn run_setup_in(
                 let _ = writeln!(log, "[stderr] {}", result.stderr_tail.trim_end());
             }
             let detail = if result.timed_out {
-                Some(format!("`{cmd}`（{}）が {} 秒で終わらなかった", repo.name, timeout.as_secs()))
+                Some(format!(
+                    "`{cmd}`（{}）が {} 秒で終わらなかった",
+                    repo.name,
+                    timeout.as_secs()
+                ))
             } else if result.exit != Some(0) {
-                Some(format!("`{cmd}`（{}）が exit {:?} で落ちた", repo.name, result.exit))
+                Some(format!(
+                    "`{cmd}`（{}）が exit {:?} で落ちた",
+                    repo.name, result.exit
+                ))
             } else {
                 None
             };
@@ -234,7 +263,9 @@ fn ensure_link(source: &Path, dir: &Path) -> Result<(), WorkspaceError> {
     #[cfg(unix)]
     std::os::unix::fs::symlink(source, dir)?;
     #[cfg(not(unix))]
-    return Err(WorkspaceError::Io(std::io::Error::other("symlinks are only supported on unix")));
+    return Err(WorkspaceError::Io(std::io::Error::other(
+        "symlinks are only supported on unix",
+    )));
     #[cfg(unix)]
     Ok(())
 }
@@ -264,7 +295,11 @@ mod tests {
             .args(args)
             .output()
             .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     fn init_repo(dir: &Path) {
@@ -277,7 +312,11 @@ mod tests {
         git(dir, &["commit", "-q", "-m", "first"]);
     }
 
-    fn workspaces(task_dir: &Path, gits: &[(&str, &Path)], dirs: &[(&str, &Path)]) -> TaskWorkspaces {
+    fn workspaces(
+        task_dir: &Path,
+        gits: &[(&str, &Path)],
+        dirs: &[(&str, &Path)],
+    ) -> TaskWorkspaces {
         let id = "01TASK";
         let mut repos = Vec::new();
         for (name, repo) in gits {
@@ -294,9 +333,16 @@ mod tests {
             ));
         }
         for (name, target) in dirs {
-            repos.push(TaskRepo::link(*name, *target, task_dir.join(REPOS_DIR_NAME).join(name)));
+            repos.push(TaskRepo::link(
+                *name,
+                *target,
+                task_dir.join(REPOS_DIR_NAME).join(name),
+            ));
         }
-        TaskWorkspaces { task_dir: task_dir.to_path_buf(), repos }
+        TaskWorkspaces {
+            task_dir: task_dir.to_path_buf(),
+            repos,
+        }
     }
 
     /// ADR-0043 D2: git 2 つ + `dir` 1 つ → worktree 2 つ + シンボリックリンク 1 つ。cwd は先頭。
@@ -312,15 +358,28 @@ mod tests {
         std::fs::write(data.join("runs/one.csv"), b"1\n").expect("write");
 
         let task_dir = root.path().join("ws").join("01TASK");
-        let ws = workspaces(&task_dir, &[("benchfs", &code), ("benchfs-paper", &paper)], &[("data", &data)]);
+        let ws = workspaces(
+            &task_dir,
+            &[("benchfs", &code), ("benchfs-paper", &paper)],
+            &[("data", &data)],
+        );
         ws.ensure().await.expect("ensure");
 
-        assert_eq!(ws.cwd(), Some(task_dir.join("repos/benchfs").as_path()), "cwd は先頭のリポジトリ");
+        assert_eq!(
+            ws.cwd(),
+            Some(task_dir.join("repos/benchfs").as_path()),
+            "cwd は先頭のリポジトリ"
+        );
         assert!(task_dir.join("repos/benchfs/README.md").is_file());
         assert!(task_dir.join("repos/benchfs-paper/README.md").is_file());
         // `dir` はシンボリックリンク（コピーしない）。
         let link = task_dir.join("repos/data");
-        assert!(std::fs::symlink_metadata(&link).expect("meta").file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("meta")
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read_link(&link).expect("readlink"), data);
         assert!(link.join("runs/one.csv").is_file(), "リンク越しに読める");
 
@@ -348,7 +407,10 @@ mod tests {
 
         let outcomes = ws.remove_for_cancel();
         assert_eq!(outcomes.len(), 2);
-        assert!(outcomes.iter().all(|(_, o)| *o == CleanupOutcome::Removed), "{outcomes:?}");
+        assert!(
+            outcomes.iter().all(|(_, o)| *o == CleanupOutcome::Removed),
+            "{outcomes:?}"
+        );
         assert!(!task_dir.join("repos/benchfs").exists());
         assert!(!task_dir.join("repos/data").exists());
         assert!(data.join("keep.txt").is_file(), "リンク先の実体は消さない");
@@ -364,7 +426,11 @@ mod tests {
             String::from_utf8_lossy(&branches.stdout)
         );
         // 2 回目は「もう無い」。
-        assert!(ws.remove_for_cancel().iter().all(|(_, o)| *o == CleanupOutcome::AlreadyGone));
+        assert!(
+            ws.remove_for_cancel()
+                .iter()
+                .all(|(_, o)| *o == CleanupOutcome::AlreadyGone)
+        );
     }
 
     /// ADR-0043 D3 / D4: `[commands] setup` は worktree の中で走り、`runs/setup.log` に残る。
@@ -388,7 +454,14 @@ mod tests {
         let outcome = run_setup(&ws.repos, &task_dir, std::time::Duration::from_secs(30))
             .await
             .expect("setup");
-        assert_eq!(outcome, SetupOutcome { ok: true, ran: 1, failures: Vec::new() });
+        assert_eq!(
+            outcome,
+            SetupOutcome {
+                ok: true,
+                ran: 1,
+                failures: Vec::new()
+            }
+        );
         let ran = task_dir.join("repos/benchfs/setup-ran.txt");
         assert!(ran.is_file(), "setup は worktree の中で走る");
         let log = std::fs::read_to_string(task_dir.join(SETUP_LOG)).expect("log");
@@ -420,7 +493,11 @@ mod tests {
         assert!(!outcome.ok);
         assert_eq!(outcome.ran, 1);
         assert_eq!(outcome.failures.len(), 1);
-        assert!(outcome.failures[0].contains("exit Some(7)"), "{:?}", outcome.failures);
+        assert!(
+            outcome.failures[0].contains("exit Some(7)"),
+            "{:?}",
+            outcome.failures
+        );
         let log = std::fs::read_to_string(task_dir.join(SETUP_LOG)).expect("log");
         assert!(log.contains("[stderr] boom"), "{log}");
     }
@@ -472,24 +549,37 @@ exec "$@"
         let ws = workspaces(&task_dir, &[("benchfs", &code)], &[]);
         ws.ensure().await.expect("ensure");
 
-        let plan: crate::container::SharedPlan = std::sync::Arc::new(crate::container::ContainerPlan {
-            runtime: crate::container::Runtime::Podman,
-            program: fake.display().to_string(),
-            image: "celeris-worker:latest".to_string(),
-            task_dir: task_dir.clone(),
-            dir_repos: vec![],
-            creds: vec![],
-            extra_mounts: vec![],
-            knowledge_root: None,
-            env: vec![],
-            task_id: "01TASK".to_string(),
-            uid: 1000,
-            gid: 1000,
-        });
-        let outcome = run_setup_in(&ws.repos, &task_dir, std::time::Duration::from_secs(60), Some(&plan))
-            .await
-            .expect("setup");
-        assert_eq!(outcome, SetupOutcome { ok: true, ran: 1, failures: Vec::new() });
+        let plan: crate::container::SharedPlan =
+            std::sync::Arc::new(crate::container::ContainerPlan {
+                runtime: crate::container::Runtime::Podman,
+                program: fake.display().to_string(),
+                image: "celeris-worker:latest".to_string(),
+                task_dir: task_dir.clone(),
+                dir_repos: vec![],
+                creds: vec![],
+                extra_mounts: vec![],
+                knowledge_root: None,
+                env: vec![],
+                task_id: "01TASK".to_string(),
+                uid: 1000,
+                gid: 1000,
+            });
+        let outcome = run_setup_in(
+            &ws.repos,
+            &task_dir,
+            std::time::Duration::from_secs(60),
+            Some(&plan),
+        )
+        .await
+        .expect("setup");
+        assert_eq!(
+            outcome,
+            SetupOutcome {
+                ok: true,
+                ran: 1,
+                failures: Vec::new()
+            }
+        );
 
         // コマンドは runtime 越しに渡っている（ホストで直接 `sh -c` していない）。
         let argv = std::fs::read(&argv_log).expect("argv.log");
@@ -499,16 +589,31 @@ exec "$@"
             .map(str::to_string)
             .collect();
         let line = argv.join(" ");
-        assert!(line.starts_with("run --rm -i --network host --userns=keep-id"), "{line}");
-        assert!(line.contains(&format!("-w {}", task_dir.join("repos/benchfs").display())), "{line}");
-        assert!(line.contains(&format!("-v {0}:{0}", task_dir.display())), "{line}");
+        assert!(
+            line.starts_with("run --rm -i --network host --userns=keep-id"),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("-w {}", task_dir.join("repos/benchfs").display())),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("-v {0}:{0}", task_dir.display())),
+            "{line}"
+        );
         assert!(line.contains("--label celeris.task=01TASK"), "{line}");
-        assert!(line.contains("celeris-worker:latest sh -c pwd > setup-ran.txt"), "{line}");
+        assert!(
+            line.contains("celeris-worker:latest sh -c pwd > setup-ran.txt"),
+            "{line}"
+        );
 
         // 中身も本当に走っている（worktree の中に結果が残る）。
         assert!(task_dir.join("repos/benchfs/setup-ran.txt").is_file());
         let log = std::fs::read_to_string(task_dir.join(SETUP_LOG)).expect("log");
-        assert!(log.contains("# 実行環境: コンテナ celeris-worker:latest （podman）"), "{log}");
+        assert!(
+            log.contains("# 実行環境: コンテナ celeris-worker:latest （podman）"),
+            "{log}"
+        );
         assert!(log.contains("=> exit 0"), "{log}");
     }
 
@@ -526,8 +631,16 @@ exec "$@"
         let ws = workspaces(&task_dir, &[], &[("data", &data)]);
         ws.ensure().await.expect("ensure");
         assert!(real.join("mine.txt").is_file());
-        assert!(!std::fs::symlink_metadata(&real).expect("meta").file_type().is_symlink());
-        assert_eq!(ws.remove_for_cancel(), vec![("data".to_string(), CleanupOutcome::Dirty)]);
+        assert!(
+            !std::fs::symlink_metadata(&real)
+                .expect("meta")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            ws.remove_for_cancel(),
+            vec![("data".to_string(), CleanupOutcome::Dirty)]
+        );
         assert!(real.join("mine.txt").is_file());
     }
 }

@@ -75,10 +75,15 @@ pub(crate) async fn create_project_plan(
     );
     Ok(json_response(
         StatusCode::ACCEPTED,
-        &ProjectPlanAccepted { task_id: started.task.id },
+        &ProjectPlanAccepted {
+            task_id: started.task.id,
+        },
     ))
 }
 
 pub(crate) fn routes() -> axum::Router<ApiState> {
-    axum::Router::new().route("/api/v1/projects/{id}/plan", axum::routing::post(create_project_plan))
+    axum::Router::new().route(
+        "/api/v1/projects/{id}/plan",
+        axum::routing::post(create_project_plan),
+    )
 }

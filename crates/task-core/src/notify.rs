@@ -28,7 +28,9 @@ pub const MAX_NOTIFY_ATTEMPTS: u32 = 3;
 pub const DEFAULT_WEBHOOK_SECRET_ID: &str = "discord-webhook";
 
 /// 1 件の通知の識別子（ULID）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct NotificationId(#[schemars(with = "String")] pub Ulid);
 
 impl NotificationId {
@@ -59,7 +61,9 @@ impl std::str::FromStr for NotificationId {
 
 /// 知らせる理由（ADR-0037 D1 の 5 種）。**どれも「人の判断が要る」ときだけ**。
 /// `result` / `progress` は入れない（SPEC §3.5 の数時間単位の流れは GUI の報告の仕事）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
     /// 途中目標に属する仕事がすべて終端になった（達成の判定と次の Go を人に求める）。`key` = 途中目標 id。
@@ -129,7 +133,11 @@ pub struct Notification {
     #[serde(with = "time::serde::rfc3339")]
     #[schemars(with = "String")]
     pub created_at: OffsetDateTime,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     #[schemars(with = "Option<String>")]
     pub sent_at: Option<OffsetDateTime>,
     /// POST を試した回数。
@@ -190,10 +198,11 @@ pub trait NotificationStore: Send + Sync {
     fn notification_pending(&self) -> Result<Vec<Notification>, StoreError>;
 }
 
-const SELECT_NOTIFICATION: &str =
-    "SELECT id, kind, key, body, created_at, sent_at, attempts, ok, error, project_id FROM notifications";
+const SELECT_NOTIFICATION: &str = "SELECT id, kind, key, body, created_at, sent_at, attempts, ok, error, project_id FROM notifications";
 
-fn row_to_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Notification, StoreError>> {
+fn row_to_notification(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<Notification, StoreError>> {
     let id: String = row.get(0)?;
     let kind_col: String = row.get(1)?;
     let key: String = row.get(2)?;
@@ -205,7 +214,9 @@ fn row_to_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Notif
     let error: Option<String> = row.get(8)?;
     let project_id_col: Option<String> = row.get(9)?;
     let Ok(id) = id.parse::<NotificationId>() else {
-        return Ok(Err(StoreError::Invalid(format!("invalid notification id: {id}"))));
+        return Ok(Err(StoreError::Invalid(format!(
+            "invalid notification id: {id}"
+        ))));
     };
     let Some(kind) = NotificationKind::parse(&kind_col) else {
         return Ok(Err(StoreError::Invalid(format!(
@@ -215,7 +226,11 @@ fn row_to_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Notif
     let project_id = match project_id_col {
         Some(raw) => match raw.parse::<ProjectId>() {
             Ok(id) => Some(id),
-            Err(_) => return Ok(Err(StoreError::Invalid(format!("invalid notification project_id: {raw}")))),
+            Err(_) => {
+                return Ok(Err(StoreError::Invalid(format!(
+                    "invalid notification project_id: {raw}"
+                ))));
+            }
         },
         None => None,
     };
@@ -295,9 +310,13 @@ impl NotificationStore for SqliteStore {
 
     fn notification_recent(&self, limit: usize) -> Result<Vec<Notification>, StoreError> {
         let conn = self.lock()?;
-        let mut stmt =
-            conn.prepare(&format!("{SELECT_NOTIFICATION} ORDER BY created_at DESC, id DESC LIMIT ?1"))?;
-        let rows = stmt.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], row_to_notification)?;
+        let mut stmt = conn.prepare(&format!(
+            "{SELECT_NOTIFICATION} ORDER BY created_at DESC, id DESC LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(
+            params![i64::try_from(limit).unwrap_or(i64::MAX)],
+            row_to_notification,
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row??);
@@ -307,8 +326,9 @@ impl NotificationStore for SqliteStore {
 
     fn notification_pending(&self) -> Result<Vec<Notification>, StoreError> {
         let conn = self.lock()?;
-        let mut stmt =
-            conn.prepare(&format!("{SELECT_NOTIFICATION} WHERE ok IS NULL ORDER BY created_at ASC, id ASC"))?;
+        let mut stmt = conn.prepare(&format!(
+            "{SELECT_NOTIFICATION} WHERE ok IS NULL ORDER BY created_at ASC, id ASC"
+        ))?;
         let rows = stmt.query_map([], row_to_notification)?;
         let mut out = Vec::new();
         for row in rows {
@@ -360,7 +380,13 @@ mod tests {
 
         // kind が違えば別物。
         let other = store
-            .notification_upsert_pending(NotificationKind::QuestionBlocked, "k1", "body", None, at(2))
+            .notification_upsert_pending(
+                NotificationKind::QuestionBlocked,
+                "k1",
+                "body",
+                None,
+                at(2),
+            )
             .expect("upsert");
         assert!(other.is_some());
         assert_eq!(store.notification_pending().expect("pending").len(), 2);
@@ -375,7 +401,11 @@ mod tests {
             .expect("row");
 
         // 失敗（まだ諦めない）: attempts が増え、pending のまま。
-        assert!(store.notification_mark(row.id, None, Some("timeout"), at(1)).expect("mark"));
+        assert!(
+            store
+                .notification_mark(row.id, None, Some("timeout"), at(1))
+                .expect("mark")
+        );
         let pending = store.notification_pending().expect("pending");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].attempts, 1);
@@ -400,7 +430,11 @@ mod tests {
             .notification_upsert_pending(NotificationKind::MilestoneReady, "m1", "b", None, at(3))
             .expect("upsert")
             .expect("row");
-        assert!(store.notification_mark(sent.id, Some(true), None, at(4)).expect("mark"));
+        assert!(
+            store
+                .notification_mark(sent.id, Some(true), None, at(4))
+                .expect("mark")
+        );
         let recent = store.notification_recent(10).expect("recent");
         let found = recent.iter().find(|n| n.id == sent.id).expect("row");
         assert_eq!(found.ok, Some(true));
@@ -421,7 +455,13 @@ mod tests {
         let store = store();
         for (i, key) in ["k1", "k2", "k3"].iter().enumerate() {
             store
-                .notification_upsert_pending(NotificationKind::BadNews, key, "b", None, at(i as i64))
+                .notification_upsert_pending(
+                    NotificationKind::BadNews,
+                    key,
+                    "b",
+                    None,
+                    at(i as i64),
+                )
                 .expect("upsert");
         }
         let recent = store.notification_recent(2).expect("recent");
@@ -430,7 +470,10 @@ mod tests {
         assert_eq!(recent[1].key, "k2");
 
         let pending = store.notification_pending().expect("pending");
-        assert_eq!(pending.iter().map(|n| n.key.as_str()).collect::<Vec<_>>(), ["k1", "k2", "k3"]);
+        assert_eq!(
+            pending.iter().map(|n| n.key.as_str()).collect::<Vec<_>>(),
+            ["k1", "k2", "k3"]
+        );
     }
 
     #[test]

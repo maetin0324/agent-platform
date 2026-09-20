@@ -171,6 +171,8 @@ mod tests {
     fn sample_task(kind: TaskKind, status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -192,7 +194,10 @@ mod tests {
                 tier: Tier::Standard,
                 adapter: None,
             },
-            workspace: WorkspaceSpec::Local { path: "workspace".into(), mode: None },
+            workspace: WorkspaceSpec::Local {
+                path: "workspace".into(),
+                mode: None,
+            },
             budget: Budget {
                 max_turns: 10,
                 max_wall_secs: 600,
@@ -242,7 +247,14 @@ mod tests {
         store.insert(&plain).expect("insert plain");
 
         let g = graph(&store, None, None, true).expect("graph");
-        let role_of = |id| g.nodes.iter().find(|n| n.id == id).expect("in graph").role.clone();
+        let role_of = |id| {
+            g.nodes
+                .iter()
+                .find(|n| n.id == id)
+                .expect("in graph")
+                .role
+                .clone()
+        };
         assert_eq!(role_of(lead.id).as_deref(), Some("lead"));
         assert_eq!(role_of(plain.id), None);
     }
@@ -300,7 +312,10 @@ mod tests {
         let g = graph(&store, None, None, false).expect("graph");
         assert_eq!(g.nodes.len(), 1);
         assert_eq!(g.nodes[0].id, ready.id);
-        assert!(g.edges.is_empty(), "edge to the excluded terminal node must be dropped too");
+        assert!(
+            g.edges.is_empty(),
+            "edge to the excluded terminal node must be dropped too"
+        );
     }
 
     #[test]
@@ -315,7 +330,9 @@ mod tests {
     fn graph_over_node_limit_is_a_validation_error() {
         let store = SqliteStore::open_in_memory().expect("open store");
         for _ in 0..(MAX_GRAPH_NODES + 1) {
-            store.insert(&sample_task(TaskKind::Execute, Status::Draft)).expect("insert");
+            store
+                .insert(&sample_task(TaskKind::Execute, Status::Draft))
+                .expect("insert");
         }
         let result = graph(&store, None, None, true);
         assert!(matches!(result, Err(OpsError::Validation(_))));

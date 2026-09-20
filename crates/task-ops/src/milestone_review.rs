@@ -12,8 +12,8 @@
 //! I/O は `TaskStore` の読み書きだけ（DESIGN 原則 1）。
 
 use task_core::{
-    GenreSpec, Message, MessageId, MessageRole, Milestone, MilestoneDecision, MilestoneId, MilestoneStatus, OrgKind,
-    Project, ProjectId, RoleSpec, Task, TaskId, TaskStore,
+    GenreSpec, Message, MessageId, MessageRole, Milestone, MilestoneDecision, MilestoneId,
+    MilestoneStatus, OrgKind, Project, ProjectId, RoleSpec, Task, TaskId, TaskStore,
 };
 use time::OffsetDateTime;
 
@@ -29,9 +29,16 @@ const REVIEW_TASK_SCAN: usize = 1_000;
 const REVIEW_MESSAGE_SCAN: usize = 200;
 
 /// 途中目標とその案件を id から引く（`milestones` は案件ごとにしか引けないので順に見る）。
-pub fn find(store: &dyn TaskStore, id: MilestoneId) -> Result<Option<(Project, Milestone)>, OpsError> {
+pub fn find(
+    store: &dyn TaskStore,
+    id: MilestoneId,
+) -> Result<Option<(Project, Milestone)>, OpsError> {
     for project in store.project_list()?.into_iter().take(PROJECT_SCAN) {
-        if let Some(found) = store.milestone_list(project.id)?.into_iter().find(|m| m.id == id) {
+        if let Some(found) = store
+            .milestone_list(project.id)?
+            .into_iter()
+            .find(|m| m.id == id)
+        {
             return Ok(Some((project, found)));
         }
     }
@@ -57,13 +64,21 @@ pub fn latest_proposal(
 
 /// レビューの対話に渡す本文（決定的。中身を書くのは run の仕事で、ここは「何が起きたか」だけを伝える）。
 /// 指示文そのもの（ADR-0038 D1 の (a)〜(d)）は前置き（`task_worker::preamble`）が出す。
-pub fn review_request_text(milestone: &Milestone, done: usize, failed: usize, waiting: usize) -> String {
+pub fn review_request_text(
+    milestone: &Milestone,
+    done: usize,
+    failed: usize,
+    waiting: usize,
+) -> String {
     let mut out = format!(
         "途中目標『{}』の仕事が止まりました（done {done} / failed {failed}、Go 待ち {waiting} 件）。",
         milestone.title
     );
     if !milestone.description.trim().is_empty() {
-        out.push_str(&format!("この途中目標のねらい: {}。", milestone.description.trim()));
+        out.push_str(&format!(
+            "この途中目標のねらい: {}。",
+            milestone.description.trim()
+        ));
     }
     out.push_str(
         "ここまでで得られた結果をまとめ、達成と言えるかの見立てと、次の途中目標の提案を人に返してください。",
@@ -125,7 +140,12 @@ pub fn review_state(
         project_id: Some(project_id),
         ..task_core::ListFilter::default()
     };
-    let page = store.list_page(&filter, task_core::ListOrder::CreatedDesc, None, REVIEW_TASK_SCAN)?;
+    let page = store.list_page(
+        &filter,
+        task_core::ListOrder::CreatedDesc,
+        None,
+        REVIEW_TASK_SCAN,
+    )?;
     let mut reviews: Vec<Task> = page
         .items
         .into_iter()
@@ -142,7 +162,10 @@ pub fn review_state(
             .rfind(|m| m.role == MessageRole::Node && m.task_id == Some(task.id)),
         None => None,
     };
-    Ok(ReviewState { task: Some(task), reply })
+    Ok(ReviewState {
+        task: Some(task),
+        reply,
+    })
 }
 
 // ---- D1 / D2: 結果ファイルの `milestone_proposal` を `milestones` に入れる ----
@@ -165,7 +188,12 @@ pub fn record_proposal(
             store.milestone_set_status(old.id, MilestoneStatus::Redesigned)?;
         }
     }
-    let created = store.milestone_create(project_id, title.trim(), description.trim(), MilestoneStatus::Proposed)?;
+    let created = store.milestone_create(
+        project_id,
+        title.trim(),
+        description.trim(),
+        MilestoneStatus::Proposed,
+    )?;
     Ok(Some(created))
 }
 
@@ -225,7 +253,8 @@ pub fn decide(
             if let Some(next) = &proposal {
                 store.milestone_set_status(next.id, MilestoneStatus::Approved)?;
                 // Phase 29 と同じ経路。この計画 run が次の途中目標を `in_progress` にし、`draft` の仕事を作る。
-                let started = project_plan::start(store, project, Some(next.id), note, roles, genres, now)?;
+                let started =
+                    project_plan::start(store, project, Some(next.id), note, roles, genres, now)?;
                 plan_task_id = Some(started.task.id);
             }
             Ok(Decided {
@@ -241,7 +270,15 @@ pub fn decide(
         }
         MilestoneDecision::Discuss => {
             let text = discuss_text(milestone, note.unwrap_or_default());
-            let started = send_to_secretary(store, project, &text, roles, genres, conversation_genre, now)?;
+            let started = send_to_secretary(
+                store,
+                project,
+                &text,
+                roles,
+                genres,
+                conversation_genre,
+                now,
+            )?;
             Ok(Decided {
                 milestone: reload(store, project.id, milestone.id)?,
                 next_milestone: proposal,
@@ -256,7 +293,15 @@ pub fn decide(
                 store.milestone_set_status(next.id, MilestoneStatus::Redesigned)?;
             }
             let text = redesign_text(milestone, note.unwrap_or_default());
-            let started = send_to_secretary(store, project, &text, roles, genres, conversation_genre, now)?;
+            let started = send_to_secretary(
+                store,
+                project,
+                &text,
+                roles,
+                genres,
+                conversation_genre,
+                now,
+            )?;
             Ok(Decided {
                 milestone: reload(store, project.id, milestone.id)?,
                 next_milestone: match &proposal {
@@ -273,7 +318,10 @@ pub fn decide(
 
 /// `discuss` で秘書に送る文面（人の言葉に、どの途中目標の話かを添えるだけ）。
 pub fn discuss_text(milestone: &Milestone, note: &str) -> String {
-    format!("途中目標『{}』の判定について相談です。{note}", milestone.title)
+    format!(
+        "途中目標『{}』の判定について相談です。{note}",
+        milestone.title
+    )
 }
 
 /// `ng` で秘書に送る文面（ADR-0038 D2: 理由 + 「この途中目標の再設計を提案せよ」の定型）。
@@ -308,7 +356,16 @@ fn send_to_secretary(
     now: OffsetDateTime,
 ) -> Result<StartedConversation, OpsError> {
     let secretary = secretary_id(store)?;
-    conversation::start(store, &secretary, Some(project.id), text, roles, genres, conversation_genre, now)
+    conversation::start(
+        store,
+        &secretary,
+        Some(project.id),
+        text,
+        roles,
+        genres,
+        conversation_genre,
+        now,
+    )
 }
 
 /// 返事を待たない一言（`role = user` の行だけを残す。run は起こさない）。
@@ -333,7 +390,11 @@ fn append_user_note(
 }
 
 /// 状態を変えた後の行を引き直す（`milestones` は案件ごとにしか引けない）。
-fn reload(store: &dyn TaskStore, project_id: ProjectId, id: MilestoneId) -> Result<Milestone, OpsError> {
+fn reload(
+    store: &dyn TaskStore,
+    project_id: ProjectId,
+    id: MilestoneId,
+) -> Result<Milestone, OpsError> {
     store
         .milestone_list(project_id)?
         .into_iter()
@@ -358,13 +419,15 @@ mod tests {
     impl Env {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
-            let store = SqliteStore::open(&dir.path().join("t.db")).unwrap_or_else(|e| panic!("open: {e}"));
+            let store =
+                SqliteStore::open(&dir.path().join("t.db")).unwrap_or_else(|e| panic!("open: {e}"));
             Self { _dir: dir, store }
         }
 
         fn seed_secretary(&self) {
             self.store
                 .org_upsert(&task_core::OrgNode {
+                    profile: Default::default(),
                     id: "secretary".into(),
                     parent_id: None,
                     name: "秘書".into(),
@@ -391,7 +454,9 @@ mod tests {
                 created_at: now(),
                 updated_at: now(),
             };
-            self.store.project_create(&project).unwrap_or_else(|e| panic!("project: {e}"));
+            self.store
+                .project_create(&project)
+                .unwrap_or_else(|e| panic!("project: {e}"));
             project
         }
     }
@@ -408,7 +473,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("record: {e}"))
             .unwrap_or_else(|| panic!("no milestone"));
         assert!(second.seq > first.seq, "seq は末尾");
-        let all = env.store.milestone_list(project.id).unwrap_or_else(|e| panic!("list: {e}"));
+        let all = env
+            .store
+            .milestone_list(project.id)
+            .unwrap_or_else(|e| panic!("list: {e}"));
         let status = |id: MilestoneId| all.iter().find(|m| m.id == id).map(|m| m.status);
         assert_eq!(status(first.id), Some(MilestoneStatus::Redesigned));
         assert_eq!(status(second.id), Some(MilestoneStatus::Proposed));
@@ -420,15 +488,20 @@ mod tests {
         );
         // 題名が空なら何もしない。
         assert_eq!(
-            record_proposal(&env.store, project.id, None, "  ", "d").unwrap_or_else(|e| panic!("record: {e}")),
+            record_proposal(&env.store, project.id, None, "  ", "d")
+                .unwrap_or_else(|e| panic!("record: {e}")),
             None
         );
         // 判定中の途中目標（`keep`）は差し替えの対象にしない。
         let keep = record_proposal(&env.store, project.id, None, "そのまま", "")
             .unwrap_or_else(|e| panic!("record: {e}"))
             .unwrap_or_else(|| panic!("no milestone"));
-        record_proposal(&env.store, project.id, Some(keep.id), "次", "").unwrap_or_else(|e| panic!("record: {e}"));
-        let all = env.store.milestone_list(project.id).unwrap_or_else(|e| panic!("list: {e}"));
+        record_proposal(&env.store, project.id, Some(keep.id), "次", "")
+            .unwrap_or_else(|e| panic!("record: {e}"));
+        let all = env
+            .store
+            .milestone_list(project.id)
+            .unwrap_or_else(|e| panic!("list: {e}"));
         assert_eq!(
             all.iter().find(|m| m.id == keep.id).map(|m| m.status),
             Some(MilestoneStatus::Proposed)
@@ -443,7 +516,12 @@ mod tests {
         let project = env.seed_project();
         let milestone = env
             .store
-            .milestone_create(project.id, "隣接領域の調査", "", MilestoneStatus::InProgress)
+            .milestone_create(
+                project.id,
+                "隣接領域の調査",
+                "",
+                MilestoneStatus::InProgress,
+            )
             .unwrap_or_else(|e| panic!("milestone: {e}"));
         for decision in [MilestoneDecision::Discuss, MilestoneDecision::Ng] {
             let err = decide(
@@ -462,7 +540,10 @@ mod tests {
             assert!(matches!(err, OpsError::Validation(_)), "{err:?}");
         }
         // 何も変わっていない。
-        let after = env.store.milestone_list(project.id).unwrap_or_else(|e| panic!("list: {e}"));
+        let after = env
+            .store
+            .milestone_list(project.id)
+            .unwrap_or_else(|e| panic!("list: {e}"));
         assert_eq!(after[0].status, MilestoneStatus::InProgress);
     }
 
@@ -474,11 +555,22 @@ mod tests {
         let project = env.seed_project();
         let milestone = env
             .store
-            .milestone_create(project.id, "隣接領域の調査", "", MilestoneStatus::InProgress)
+            .milestone_create(
+                project.id,
+                "隣接領域の調査",
+                "",
+                MilestoneStatus::InProgress,
+            )
             .unwrap_or_else(|e| panic!("milestone: {e}"));
-        let proposal = record_proposal(&env.store, project.id, Some(milestone.id), "候補の絞り込み", "3 本に")
-            .unwrap_or_else(|e| panic!("record: {e}"))
-            .unwrap_or_else(|| panic!("no proposal"));
+        let proposal = record_proposal(
+            &env.store,
+            project.id,
+            Some(milestone.id),
+            "候補の絞り込み",
+            "3 本に",
+        )
+        .unwrap_or_else(|e| panic!("record: {e}"))
+        .unwrap_or_else(|| panic!("no proposal"));
 
         // discuss: 何も変えず、対話が 1 件。
         let decided = decide(
@@ -495,10 +587,23 @@ mod tests {
         .unwrap_or_else(|e| panic!("decide: {e}"));
         assert_eq!(decided.milestone.status, MilestoneStatus::InProgress);
         assert!(decided.plan_task_id.is_none());
-        let task_id = decided.conversation_task_id.unwrap_or_else(|| panic!("no conversation"));
-        let task = env.store.get(task_id).unwrap_or_else(|e| panic!("get: {e}")).unwrap_or_else(|| panic!("none"));
-        assert!(task.objective.contains("候補 B の根拠が弱い"), "{}", task.objective);
-        assert_eq!(task.milestone_id, None, "人との議論は裏方のレビュー run ではない");
+        let task_id = decided
+            .conversation_task_id
+            .unwrap_or_else(|| panic!("no conversation"));
+        let task = env
+            .store
+            .get(task_id)
+            .unwrap_or_else(|e| panic!("get: {e}"))
+            .unwrap_or_else(|| panic!("none"));
+        assert!(
+            task.objective.contains("候補 B の根拠が弱い"),
+            "{}",
+            task.objective
+        );
+        assert_eq!(
+            task.milestone_id, None,
+            "人との議論は裏方のレビュー run ではない"
+        );
 
         // ok: reached + 提案を approved（計画 run が in_progress にする）+ 計画 run。
         let decided = decide(
@@ -514,14 +619,23 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("decide: {e}"));
         assert_eq!(decided.milestone.status, MilestoneStatus::Reached);
-        assert_eq!(decided.next_milestone.as_ref().map(|m| m.id), Some(proposal.id));
+        assert_eq!(
+            decided.next_milestone.as_ref().map(|m| m.id),
+            Some(proposal.id)
+        );
         assert_eq!(
             decided.next_milestone.as_ref().map(|m| m.status),
             Some(MilestoneStatus::InProgress),
             "承認したうえで分解が始まったので in_progress"
         );
-        let plan_id = decided.plan_task_id.unwrap_or_else(|| panic!("no plan run"));
-        let plan = env.store.get(plan_id).unwrap_or_else(|e| panic!("get: {e}")).unwrap_or_else(|| panic!("none"));
+        let plan_id = decided
+            .plan_task_id
+            .unwrap_or_else(|| panic!("no plan run"));
+        let plan = env
+            .store
+            .get(plan_id)
+            .unwrap_or_else(|e| panic!("get: {e}"))
+            .unwrap_or_else(|| panic!("none"));
         assert_eq!(plan.kind, task_core::TaskKind::Plan);
         assert_eq!(plan.milestone_id, Some(proposal.id));
         assert!(plan.objective.contains("その方針で"), "{}", plan.objective);
@@ -530,7 +644,11 @@ mod tests {
             .store
             .message_list("secretary", Some(project.id), 50)
             .unwrap_or_else(|e| panic!("messages: {e}"));
-        assert!(messages.iter().any(|m| m.text == "その方針で" && m.role == MessageRole::User));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.text == "その方針で" && m.role == MessageRole::User)
+        );
 
         // ng: この途中目標と提案を redesigned にし、再設計の対話を送る。
         let third = env
@@ -557,10 +675,23 @@ mod tests {
             decided.next_milestone.as_ref().map(|m| m.status),
             Some(MilestoneStatus::Redesigned)
         );
-        assert_eq!(decided.next_milestone.as_ref().map(|m| m.id), Some(next_proposal.id));
-        let task_id = decided.conversation_task_id.unwrap_or_else(|| panic!("no conversation"));
-        let task = env.store.get(task_id).unwrap_or_else(|e| panic!("get: {e}")).unwrap_or_else(|| panic!("none"));
-        assert!(task.objective.contains("切り方が違う"), "{}", task.objective);
+        assert_eq!(
+            decided.next_milestone.as_ref().map(|m| m.id),
+            Some(next_proposal.id)
+        );
+        let task_id = decided
+            .conversation_task_id
+            .unwrap_or_else(|| panic!("no conversation"));
+        let task = env
+            .store
+            .get(task_id)
+            .unwrap_or_else(|e| panic!("get: {e}"))
+            .unwrap_or_else(|| panic!("none"));
+        assert!(
+            task.objective.contains("切り方が違う"),
+            "{}",
+            task.objective
+        );
         assert!(task.objective.contains("再設計"), "{}", task.objective);
     }
 
@@ -572,7 +703,12 @@ mod tests {
         let project = env.seed_project();
         let milestone = env
             .store
-            .milestone_create(project.id, "隣接領域の調査", "近い分野を洗う", MilestoneStatus::InProgress)
+            .milestone_create(
+                project.id,
+                "隣接領域の調査",
+                "近い分野を洗う",
+                MilestoneStatus::InProgress,
+            )
             .unwrap_or_else(|e| panic!("milestone: {e}"));
         let text = review_request_text(&milestone, 2, 0, 1);
         assert!(text.contains("done 2 / failed 0、Go 待ち 1 件"), "{text}");
@@ -591,7 +727,10 @@ mod tests {
         assert_eq!(started.task.milestone_id, Some(milestone.id));
         assert_eq!(started.task.assignee.as_deref(), Some("secretary"));
         assert!(task_core::is_milestone_review(&started.task));
-        assert_eq!(task_core::support_kind(&started.task), Some("milestone_review"));
+        assert_eq!(
+            task_core::support_kind(&started.task),
+            Some("milestone_review")
+        );
         assert_eq!(started.task.status, task_core::Status::Ready);
     }
 }

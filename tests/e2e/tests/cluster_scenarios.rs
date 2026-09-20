@@ -19,7 +19,11 @@ const HOST: &str = "celeris-localhost";
 fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let path = exe.parent().unwrap().parent().unwrap().join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
@@ -44,7 +48,12 @@ impl Env {
         let root = tmp.path().canonicalize().unwrap();
         let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
-        Self { _tmp: tmp, root, db, store }
+        Self {
+            _tmp: tmp,
+            root,
+            db,
+            store,
+        }
     }
 
     /// fake ワーカー: リモートに置かれたファイルを読み、手元の写しに答えを書く（クラスタ側のデータを使う仕事の代役）。
@@ -94,9 +103,18 @@ model = "fake"
     }
 
     fn celerisctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("celerisctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
+        let out = Command::new(bin("celerisctl"))
+            .arg("--db")
+            .arg(&self.db)
+            .args(args)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "celerisctl {args:?}: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "celerisctl {args:?}: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         stdout
     }
 
@@ -104,8 +122,17 @@ model = "fake"
     fn add_remote(&self, title: &str, cluster: &str, remote: &Path, check: &str) -> TaskId {
         let id: TaskId = self
             .celerisctl(&[
-                "add", "--title", title, "--objective", "cluster task", "--check-cmd", check,
-                "--cluster", cluster, "--workspace", remote.to_str().unwrap(),
+                "add",
+                "--title",
+                title,
+                "--objective",
+                "cluster task",
+                "--check-cmd",
+                check,
+                "--cluster",
+                cluster,
+                "--workspace",
+                remote.to_str().unwrap(),
             ])
             .trim()
             .parse()
@@ -117,7 +144,15 @@ model = "fake"
     fn run_celeris(&self, config: &Path, timeout: Duration) -> String {
         let log = self.root.join("celeris.log");
         let mut child = Command::new(bin("celeris"))
-            .args(["--config", config.to_str().unwrap(), "--until-idle", "--max-ticks", "2000", "--log-format", "text"])
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "--until-idle",
+                "--max-ticks",
+                "2000",
+                "--log-format",
+                "text",
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(&log).unwrap())
@@ -144,7 +179,12 @@ model = "fake"
     }
 
     fn events(&self, id: TaskId) -> Vec<Event> {
-        self.store.events_for(id).unwrap().into_iter().map(|(_, e)| e).collect()
+        self.store
+            .events_for(id)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect()
     }
 }
 
@@ -167,16 +207,35 @@ fn remote_task_syncs_runs_and_is_checked_on_the_cluster() {
         &format!("[[clusters]]\nid = \"local\"\nhost = \"{HOST}\"\nconcurrency = 2\n"),
     );
     // 判定コマンドはクラスタ側で走る（答えのファイルが push されていることを確かめる）。
-    let id = env.add_remote("cluster work", "local", &remote, "grep -q cluster-only answer.txt");
+    let id = env.add_remote(
+        "cluster work",
+        "local",
+        &remote,
+        "grep -q cluster-only answer.txt",
+    );
 
     env.run_celeris(&config, Duration::from_secs(120));
 
     let t = env.task(id);
-    assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
-    assert!(remote.join("answer.txt").exists(), "push でクラスタ側に届く");
-    assert!(remote.join("keep.txt").exists(), "既定の push は既存ファイルを消さない");
+    assert_eq!(
+        (t.status, t.attempts),
+        (Status::Done, 0),
+        "{:?}",
+        env.events(id)
+    );
+    assert!(
+        remote.join("answer.txt").exists(),
+        "push でクラスタ側に届く"
+    );
+    assert!(
+        remote.join("keep.txt").exists(),
+        "既定の push は既存ファイルを消さない"
+    );
     let mirror = env.root.join("workspaces").join(id.to_string());
-    assert!(mirror.join("secret.txt").exists(), "pull でクラスタの内容が写しに来る");
+    assert!(
+        mirror.join("secret.txt").exists(),
+        "pull でクラスタの内容が写しに来る"
+    );
 }
 
 /// 受け入れ 2: 多重接続が無いクラスタは dispatch されず、`ClusterUnavailable` が残り、`--until-idle` は止まる。
@@ -195,9 +254,15 @@ fn missing_control_master_records_cluster_unavailable_and_does_not_block_idle() 
     env.run_celeris(&config, Duration::from_secs(60));
 
     let t = env.task(id);
-    assert_eq!((t.status, t.attempts), (Status::Ready, 0), "接続が無い間は ready のまま（attempts も消費しない）");
+    assert_eq!(
+        (t.status, t.attempts),
+        (Status::Ready, 0),
+        "接続が無い間は ready のまま（attempts も消費しない）"
+    );
     assert!(
-        env.events(id).iter().any(|e| matches!(e, Event::ClusterUnavailable { cluster, .. } if cluster == "offline")),
+        env.events(id).iter().any(
+            |e| matches!(e, Event::ClusterUnavailable { cluster, .. } if cluster == "offline")
+        ),
         "{:?}",
         env.events(id)
     );
@@ -259,18 +324,36 @@ fn worker_run_cluster_executes_one_run_against_the_cluster_dir() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert_eq!(out.status.code(), Some(0), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
     assert!(stdout.contains("cluster=local"), "{stdout}");
-    assert!(remote.join("answer.txt").exists(), "push でクラスタ側に answer.txt が届く");
+    assert!(
+        remote.join("answer.txt").exists(),
+        "push でクラスタ側に answer.txt が届く"
+    );
 
     let mirror = env.root.join("workspaces").join(id.to_string());
-    assert!(mirror.join("secret.txt").exists(), "pull でクラスタの内容が写しに来る");
+    assert!(
+        mirror.join("secret.txt").exists(),
+        "pull でクラスタの内容が写しに来る"
+    );
 
     let task_after = env.task(id);
     let events_after = env.events(id);
-    assert_eq!((task_after.status, task_after.attempts), (task_before.status, task_before.attempts));
-    assert_eq!(events_after.len(), events_before.len(), "DB のイベントは増えない");
+    assert_eq!(
+        (task_after.status, task_after.attempts),
+        (task_before.status, task_before.attempts)
+    );
+    assert_eq!(
+        events_after.len(),
+        events_before.len(),
+        "DB のイベントは増えない"
+    );
 }
 
 /// 受け入れ 10: 多重接続が無いクラスタでは、アダプタを起動せず exit 4 と理由（ssh 接続は不要なので常に走る）。
@@ -302,7 +385,12 @@ fn worker_run_cluster_without_control_master_exits_4() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert_eq!(out.status.code(), Some(4), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout.contains("ControlMaster"), "{stdout}");
 }
 
@@ -335,35 +423,82 @@ fn worktree_cluster_runs_in_a_worktree_and_leaves_the_repository_alone() {
         vec!["add", "tracked.txt"],
         vec!["commit", "-q", "-m", "initial"],
     ] {
-        let out = Command::new("git").args(&args).current_dir(&repo).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .args(&args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     let config = env.write_config(
         &script,
         &format!("[[clusters]]\nid = \"local\"\nhost = \"{HOST}\"\nconcurrency = 1\nsync = \"worktree\"\n"),
     );
-    let id = env.add_remote("worktree work", "local", &repo, "grep -q edited tracked.txt");
+    let id = env.add_remote(
+        "worktree work",
+        "local",
+        &repo,
+        "grep -q edited tracked.txt",
+    );
 
     env.run_celeris(&config, Duration::from_secs(120));
 
     let t = env.task(id);
-    assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
+    assert_eq!(
+        (t.status, t.attempts),
+        (Status::Done, 0),
+        "{:?}",
+        env.events(id)
+    );
 
     // 手元の写しには追跡ファイルだけが来る。
     let mirror = env.root.join("workspaces").join(id.to_string());
-    assert!(mirror.join("tracked.txt").exists(), "追跡ファイルは写しに来る");
-    assert!(!mirror.join("untracked-huge.bin").exists(), "未追跡の巨大データは持ち込まれない");
+    assert!(
+        mirror.join("tracked.txt").exists(),
+        "追跡ファイルは写しに来る"
+    );
+    assert!(
+        !mirror.join("untracked-huge.bin").exists(),
+        "未追跡の巨大データは持ち込まれない"
+    );
 
     // 編集は worktree のブランチにだけ入る。元のリポジトリの作業ツリーは変わらない（ADR-0019 D3）。
     let worktree = repo.join(".celeris-worktrees").join(id.to_string());
-    assert_eq!(std::fs::read_to_string(worktree.join("tracked.txt")).unwrap().trim(), "edited");
-    assert_eq!(std::fs::read_to_string(repo.join("tracked.txt")).unwrap(), "original\n", "元のリポジトリは触らない");
-    let branch = Command::new("git").args(["rev-parse", "--abbrev-ref", "HEAD"]).current_dir(&worktree).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), format!("celeris/{id}"));
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("tracked.txt"))
+            .unwrap()
+            .trim(),
+        "edited"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+        "original\n",
+        "元のリポジトリは触らない"
+    );
+    let branch = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&branch.stdout).trim(),
+        format!("celeris/{id}")
+    );
     // celeris は commit しない（変更は作業ツリーに残る。ADR-0019 D2）。
-    let status = Command::new("git").args(["status", "--porcelain"]).current_dir(&worktree).output().unwrap();
-    assert!(String::from_utf8_lossy(&status.stdout).contains("tracked.txt"), "commit せず作業ツリーに残す");
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("tracked.txt"),
+        "commit せず作業ツリーに残す"
+    );
 
     // 後片付け（本番では人の操作。テストの tempdir は消えるが、worktree の登録を残さないため）。
     let _ = Command::new("git")

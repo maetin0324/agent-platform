@@ -156,3 +156,36 @@ operations               Operations                 tools: cluster:*, docker
    （`PATCH /org/{id}` に `profile`）、タスク画面に harness / skills / mode の表示と編集（B1 の編集フォームに追加）、「なぜこの担当か」。
 7. 実機: 本番 DB を `migrate-v2` で写像し、`config.toml` を harnesses 形式に書き直し、自己改善案件の計画 run が skills / harness / mode を
    書き、matching で担当が決まる。
+
+## Phase 59 追記（実装時の逸脱・明確化。2026-09-20）
+
+前段の agent が実装したコードは `cargo test` を 1 度も走らせずに中断していた。実際にテストを通したところ
+見つかった、本文に明示が無かった／実装が本文と食い違っていた点を以下に記録する（`docs/PROGRESS.md` の
+Phase 59 節に証跡がある）。
+
+- **D5 の matching は「組織を 1 つも作っていない構成」では走らせない**。`org_nodes` が空（`org_include` を
+  書いていない・組織を使わない従来どおりの運用）のとき、`task_ops::matching::decide` は候補を探さずに
+  `NotApplicable` を返す。本文は「候補が無ければ blocked」としか書いていなかったが、それだと ADR-0041 D5 の
+  `smoke` 煙試験のような、組織を使わない既存の genre 付きタスクが**組織を作っていないだけで**軒並み
+  `blocked` になってしまう（`crates/celeris/tests/instance_handoff.rs` の実機相当のテストで発覚）。
+- **D1 の `harnesses.allowed` の和（親と和）は、根専用のつもりの harness（`conversation` / `plan`）も
+  子へ継がせる**。`cos` だけが `conversation` を `allowed` に持つ構成でも、`engineering` 以下の実効
+  `harnesses_allowed` には `conversation` が含まれる（和なので）。D5 の「根は候補から除く」規則はそのまま
+  効くので、`conversation` 系のタスクが誤って子に配られることは無い（そもそも対話タスクは常に明示の
+  `assignee` を持つので matching 自体を通らない）が、**根しか無い組織**（子が 1 つも無い）でなければ、
+  「根だけが持つ harness」というものは実効的には存在しない。テスト（`task_ops::matching::the_root_is_never_a_candidate`）
+  はこの前提で書き直した。
+- **`celerisctl org migrate-v2 --rollback` は `--dry-run` 無しの本番と同じ並べ替え規律が要る**。
+  `replace_org_nodes` は「親が先に来る並び」を要求するが、`--rollback` が読み戻す `backup.nodes`
+  （移行前の `org_list()` のスナップショット）は `position ASC, id ASC` の並びで、`position` が全ノード
+  同じ値の組織では id の辞書順になり、親（`secretary`）が子より後ろに来て失敗しうる。`migrate()` の
+  `next.sort_by_key`（kind 順: secretary → department → section）と同じ並べ替えを `rollback()` にも適用する。
+- D7 の「本番 `org.toml`」（`config/org.example.toml`）は D7 の木そのまま（`cos` 根、13 ノード）で確定。
+  `celerisctl org migrate-v2` のテスト用 `[[harnesses]]`（`crates/celerisctl/tests/org_migrate_v2.rs`）も
+  この 7 harness（`conversation` / `plan` / `coding` / `data-analysis` / `writing` / `literature` /
+  `web-research`）に揃えた。
+- GUI（D6 の「GUI の `/org/cos`。`/` → 秘書の導線は CoS へ」）は**今回は値の対応だけ**を直した
+  （`SECRETARY_NODE_ID` を `"secretary"` → `"cos"`。`celerisctl org migrate-v2` 後の本番で `/org/secretary`
+  が 404 になる実害を防ぐため）。URL パス・「秘書」という画面の言葉・ナビの全面改名は、GUI 側の 8 ファイルに
+  またがる別 Phase として `docs/PROGRESS.md` の「提案 P-59-a」に送った。§4-6 の受け入れ条件（profile の
+  表示・編集、harness/skills/mode の編集、「なぜこの担当か」）はこの Phase で満たしている。

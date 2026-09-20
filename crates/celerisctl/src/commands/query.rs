@@ -85,7 +85,10 @@ impl From<StatusArg> for Status {
 
 fn print_task_line(task: &Task, indent: usize) {
     let prefix = "  ".repeat(indent);
-    let mut line = format!("{prefix}{} {:?} {:?} {}", task.id, task.status, task.kind, task.title);
+    let mut line = format!(
+        "{prefix}{} {:?} {:?} {}",
+        task.id, task.status, task.kind, task.title
+    );
     // ADR-0016 D1 / ADR-0027 D1: role/genre がある行にだけ `[role=.. genre=..]` を付ける（無い方が普通の celerisctl の使い方なので、
     // 常に `(none)` を書いて行を汚さない）。
     match (&task.role, &task.genre) {
@@ -210,10 +213,9 @@ fn task_detail_json(
     config: Option<&PathBuf>,
 ) -> Result<String, CliError> {
     let config = match config {
-        Some(path) => Some(
-            celeris::Config::load(path)
-                .map_err(|e| CliError::msg(format!("failed to load config {}: {e}", path.display())))?,
-        ),
+        Some(path) => Some(celeris::Config::load(path).map_err(|e| {
+            CliError::msg(format!("failed to load config {}: {e}", path.display()))
+        })?),
         None => None,
     };
     let ctx = match &config {
@@ -234,7 +236,8 @@ fn task_detail_json(
     };
     let detail = view::task_detail(store, id, &ctx, OffsetDateTime::now_utc())?;
     // `GET /api/v1/tasks/{id}` と同じ compact な直列化（docs/gui/api.md §3.5）。整形は `jq` 等で行う。
-    serde_json::to_string(&detail).map_err(|e| CliError::msg(format!("failed to encode task detail: {e}")))
+    serde_json::to_string(&detail)
+        .map_err(|e| CliError::msg(format!("failed to encode task detail: {e}")))
 }
 
 fn run_show_json(
@@ -282,6 +285,8 @@ mod tests {
     fn sample_task(status: Status, parent_id: Option<TaskId>) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id,
@@ -298,7 +303,8 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: "/tmp".into(), mode: None,
+                path: "/tmp".into(),
+                mode: None,
             },
             budget: Budget {
                 max_turns: 10,
@@ -441,10 +447,19 @@ mod tests {
         store.insert(&task).expect("insert task");
 
         let json = task_detail_json(&store, task.id, None, None).expect("task_detail_json");
-        let value: serde_json::Value = serde_json::from_str(&json).expect("output must be valid json");
-        assert_eq!(value["task"]["id"], serde_json::Value::String(task.id.to_string()));
-        let actions = value["actions"].as_array().expect("actions must be an array");
-        assert!(!actions.is_empty(), "a draft task should have at least the `approve` action");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("output must be valid json");
+        assert_eq!(
+            value["task"]["id"],
+            serde_json::Value::String(task.id.to_string())
+        );
+        let actions = value["actions"]
+            .as_array()
+            .expect("actions must be an array");
+        assert!(
+            !actions.is_empty(),
+            "a draft task should have at least the `approve` action"
+        );
     }
 
     /// ADR-0019 D2 / P-54: `--config`（`CELERIS_CONFIG`）を渡すと `celerisctl show --json` が API と同じ値になる。
@@ -476,17 +491,27 @@ sync = "worktree"
         )
         .expect("write config");
 
-        let json = task_detail_json(&store, task.id, None, Some(&config_path)).expect("task_detail_json");
+        let json =
+            task_detail_json(&store, task.id, None, Some(&config_path)).expect("task_detail_json");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(value["worktree"]["branch"], serde_json::Value::String(format!("celeris/{}", task.id)));
+        assert_eq!(
+            value["worktree"]["branch"],
+            serde_json::Value::String(format!("celeris/{}", task.id))
+        );
         assert_eq!(
             value["worktree"]["dir"],
-            serde_json::Value::String(format!("/work/NBB/x/benchfs/.celeris-worktrees/{}", task.id))
+            serde_json::Value::String(format!(
+                "/work/NBB/x/benchfs/.celeris-worktrees/{}",
+                task.id
+            ))
         );
         // 設定の値が効く（既定の 5 ではなく 3）。workspace_root も設定ファイル基準の絶対パスになる。
         assert_eq!(value["timers"]["max_requeues"], serde_json::json!(3));
         assert!(
-            value["workspace_dir"].as_str().expect("workspace_dir").starts_with(&dir.path().to_string_lossy().to_string()),
+            value["workspace_dir"]
+                .as_str()
+                .expect("workspace_dir")
+                .starts_with(&dir.path().to_string_lossy().to_string()),
             "{}",
             value["workspace_dir"]
         );

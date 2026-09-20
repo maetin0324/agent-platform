@@ -91,7 +91,9 @@ pub fn consecutive_reviewer_requeues(events: &[(u64, Event)]) -> u32 {
     for (_, ev) in events.iter().rev() {
         match ev {
             Event::Transitioned { .. } => break,
-            Event::WorkerProgress { msg, .. } if msg.starts_with(REVIEWER_REQUEUED_PREFIX) => n += 1,
+            Event::WorkerProgress { msg, .. } if msg.starts_with(REVIEWER_REQUEUED_PREFIX) => {
+                n += 1
+            }
             _ => {}
         }
     }
@@ -112,7 +114,10 @@ pub fn artifacts_for_run(events: &[(u64, Event)], run_id: &str) -> Vec<ArtifactR
     events
         .iter()
         .filter_map(|(_, ev)| match ev {
-            Event::ArtifactProduced { run_id: r, artifact } if r == run_id => Some(artifact.clone()),
+            Event::ArtifactProduced {
+                run_id: r,
+                artifact,
+            } if r == run_id => Some(artifact.clone()),
             _ => None,
         })
         .collect()
@@ -198,7 +203,11 @@ mod tests {
             started("run-1", None),
             finished("run-1", "question: which version?", None),
             started("rev-1", Some(RunRole::Reviewer)),
-            finished("rev-1", "question: reviewer asked instead of judging", Some(RunRole::Reviewer)),
+            finished(
+                "rev-1",
+                "question: reviewer asked instead of judging",
+                Some(RunRole::Reviewer),
+            ),
         ]
         .into_iter()
         .enumerate()
@@ -262,8 +271,14 @@ mod tests {
         assert_eq!(
             answers,
             vec![
-                AnswerNote { question: "q1".into(), answer: "a1".into() },
-                AnswerNote { question: "q2".into(), answer: "a2".into() },
+                AnswerNote {
+                    question: "q1".into(),
+                    answer: "a1".into()
+                },
+                AnswerNote {
+                    question: "q2".into(),
+                    answer: "a2".into()
+                },
             ]
         );
     }
@@ -290,7 +305,8 @@ mod tests {
 
     #[test]
     fn consecutive_requeues_stops_at_non_requeue_non_dispatch_reason() {
-        let events: Vec<(u64, Event)> = vec![(0, transitioned("requeue")), (1, transitioned("accept"))];
+        let events: Vec<(u64, Event)> =
+            vec![(0, transitioned("requeue")), (1, transitioned("accept"))];
         // 新しい順に見るので末尾の "accept" で即座に止まり、0を返す。
         assert_eq!(consecutive_requeues(&events), 0);
     }
@@ -336,7 +352,10 @@ mod tests {
 
     #[test]
     fn retry_backoff_zero_base_is_always_zero() {
-        assert_eq!(retry_backoff(Duration::ZERO, Duration::from_secs(300), 5), Duration::ZERO);
+        assert_eq!(
+            retry_backoff(Duration::ZERO, Duration::from_secs(300), 5),
+            Duration::ZERO
+        );
     }
 
     fn artifact(name: &str) -> ArtifactRef {
@@ -351,9 +370,27 @@ mod tests {
     #[test]
     fn artifacts_for_run_filters_by_run_id() {
         let events: Vec<(u64, Event)> = vec![
-            (0, Event::ArtifactProduced { run_id: "run-1".into(), artifact: artifact("a") }),
-            (1, Event::ArtifactProduced { run_id: "run-2".into(), artifact: artifact("b") }),
-            (2, Event::ArtifactProduced { run_id: "run-1".into(), artifact: artifact("c") }),
+            (
+                0,
+                Event::ArtifactProduced {
+                    run_id: "run-1".into(),
+                    artifact: artifact("a"),
+                },
+            ),
+            (
+                1,
+                Event::ArtifactProduced {
+                    run_id: "run-2".into(),
+                    artifact: artifact("b"),
+                },
+            ),
+            (
+                2,
+                Event::ArtifactProduced {
+                    run_id: "run-1".into(),
+                    artifact: artifact("c"),
+                },
+            ),
         ];
         let produced = artifacts_for_run(&events, "run-1");
         assert_eq!(produced.len(), 2);
@@ -400,6 +437,8 @@ mod tests {
     fn sample_task(title: &str, attempts: u32) -> Task {
         let now = time::OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,
@@ -411,9 +450,19 @@ mod tests {
             depends_on: vec![],
             status: task_core::Status::Running,
             priority: 0,
-            worker_hint: task_core::WorkerHint { tier: task_core::Tier::Standard, adapter: None },
-            workspace: task_core::WorkspaceSpec::Local { path: "/tmp".into(), mode: None },
-            budget: task_core::Budget { max_turns: 1, max_wall_secs: 1, max_retries: 1 },
+            worker_hint: task_core::WorkerHint {
+                tier: task_core::Tier::Standard,
+                adapter: None,
+            },
+            workspace: task_core::WorkspaceSpec::Local {
+                path: "/tmp".into(),
+                mode: None,
+            },
+            budget: task_core::Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 1,
+            },
             attempts,
             lease: None,
             created_at: now,
@@ -441,12 +490,22 @@ mod tests {
     fn approval_decision_note_returns_note_or_empty() {
         let with_note: Vec<(u64, Event)> = vec![(
             0,
-            Event::ApprovalDecided { by: "human".into(), approved: false, note: Some("nope".into()) },
+            Event::ApprovalDecided {
+                by: "human".into(),
+                approved: false,
+                note: Some("nope".into()),
+            },
         )];
         assert_eq!(approval_decision_note(&with_note), ": nope");
 
-        let without_note: Vec<(u64, Event)> =
-            vec![(0, Event::ApprovalDecided { by: "human".into(), approved: false, note: None })];
+        let without_note: Vec<(u64, Event)> = vec![(
+            0,
+            Event::ApprovalDecided {
+                by: "human".into(),
+                approved: false,
+                note: None,
+            },
+        )];
         assert_eq!(approval_decision_note(&without_note), "");
 
         assert_eq!(approval_decision_note(&[]), "");

@@ -61,7 +61,12 @@ pub trait ReleaseSource: Send + Sync + 'static {
     /// **git を起こすのは celeris 側の実装**（task-api はプロセスを起こさない）。git が無い・リポジトリが
     /// 無い・そのブランチが無い・base が分からないときは空を返す（タイムラインからリリースが消えるだけ）。
     /// 既定は空（git を起こさない実装・テスト用）。
-    fn branch_commits(&self, _repo: &std::path::Path, _branch: &str, _base: Option<&str>) -> Vec<String> {
+    fn branch_commits(
+        &self,
+        _repo: &std::path::Path,
+        _branch: &str,
+        _base: Option<&str>,
+    ) -> Vec<String> {
         Vec::new()
     }
 }
@@ -81,7 +86,9 @@ pub(crate) async fn list(State(state): State<ApiState>, RawQuery(raw): RawQuery)
     let fs = match state.inner.releases.clone() {
         Some(source) => tokio::task::spawn_blocking(move || source.list())
             .await
-            .map_err(|e| ApiProblem::internal(format!("reading the releases directory failed: {e}")))?,
+            .map_err(|e| {
+                ApiProblem::internal(format!("reading the releases directory failed: {e}"))
+            })?,
         None => ReleasesFs::default(),
     };
     Ok(json_response(
@@ -126,14 +133,18 @@ pub(crate) async fn promote(
             Ok(json_response(StatusCode::ACCEPTED, &accepted))
         }
         Err(ReleasePromoteError::NotFound) => Err(ApiProblem::release_not_found(&sha12)),
-        Err(ReleasePromoteError::NotVerified(detail)) => Err(ApiProblem::release_not_promotable(detail)),
-        Err(ReleasePromoteError::AlreadyCurrent) => Err(ApiProblem::release_not_promotable(format!(
-            "{sha12} is already the current release"
-        ))),
-        Err(ReleasePromoteError::AlreadyPromoting) => Err(ApiProblem::release_not_promotable(format!(
-            "a promotion of {sha12} is already running"
-        ))),
-        Err(ReleasePromoteError::Unavailable(detail)) => Err(ApiProblem::release_not_promotable(detail)),
+        Err(ReleasePromoteError::NotVerified(detail)) => {
+            Err(ApiProblem::release_not_promotable(detail))
+        }
+        Err(ReleasePromoteError::AlreadyCurrent) => Err(ApiProblem::release_not_promotable(
+            format!("{sha12} is already the current release"),
+        )),
+        Err(ReleasePromoteError::AlreadyPromoting) => Err(ApiProblem::release_not_promotable(
+            format!("a promotion of {sha12} is already running"),
+        )),
+        Err(ReleasePromoteError::Unavailable(detail)) => {
+            Err(ApiProblem::release_not_promotable(detail))
+        }
     }
 }
 

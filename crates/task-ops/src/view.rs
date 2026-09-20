@@ -11,8 +11,8 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::Serialize;
 use task_core::{
-    Check, Event, EventRow, ListFilter, ListOrder, RunRole, Status, Task, TaskId, TaskKind, TaskStore, Tier,
-    Usage, WorkspaceSpec,
+    Check, Event, EventRow, ListFilter, ListOrder, RunRole, Status, Task, TaskId, TaskKind,
+    TaskStore, Tier, Usage, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -291,7 +291,9 @@ pub fn task_ref(task: &Task) -> TaskRef {
 /// `docs/gui/api.md` §5.4: 今この状態で許される操作。
 pub fn actions(task: &Task) -> Vec<Action> {
     let mut out = Vec::new();
-    if task.status == Status::Draft || (task.kind == TaskKind::Approval && task.status == Status::Ready) {
+    if task.status == Status::Draft
+        || (task.kind == TaskKind::Approval && task.status == Status::Ready)
+    {
         out.push(Action::Approve);
     }
     if task.kind == TaskKind::Approval && task.status == Status::Ready {
@@ -358,12 +360,17 @@ fn backoff_until_str(task: &Task, ctx: &ViewContext, now: OffsetDateTime) -> Opt
     if task.status != Status::Ready || task.attempts == 0 {
         return None;
     }
-    let backoff = derive::retry_backoff(ctx.retry_backoff_base, ctx.retry_backoff_max, task.attempts);
+    let backoff =
+        derive::retry_backoff(ctx.retry_backoff_base, ctx.retry_backoff_max, task.attempts);
     if backoff.is_zero() {
         return None;
     }
     let until = task.updated_at + std_duration_to_time_duration(backoff);
-    if until > now { Some(to_rfc3339(until)) } else { None }
+    if until > now {
+        Some(to_rfc3339(until))
+    } else {
+        None
+    }
 }
 
 /// `parent_id` ごとの `(children, pending_children)`（`pending` = 非終端）。一覧と受信箱で全件を 1 回だけ走査するために使う。
@@ -496,7 +503,12 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                     r.verdicts += 1;
                 }
             }
-            Event::WorkerFinished { run_id, outcome, usage, .. } => {
+            Event::WorkerFinished {
+                run_id,
+                outcome,
+                usage,
+                ..
+            } => {
                 if let Some(r) = by_run.get_mut(run_id) {
                     r.finished_at = Some(row.ts.clone());
                     r.usage = *usage;
@@ -509,7 +521,10 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
         }
     }
 
-    let mut out: Vec<RunSummary> = order.into_iter().filter_map(|id| by_run.remove(&id)).collect();
+    let mut out: Vec<RunSummary> = order
+        .into_iter()
+        .filter_map(|id| by_run.remove(&id))
+        .collect();
     out.sort_by(|a, b| a.started_at.cmp(&b.started_at));
     out
 }
@@ -534,8 +549,17 @@ pub fn task_summary(
     ctx: &ViewContext,
     now: OffsetDateTime,
 ) -> Result<TaskSummary, OpsError> {
-    let (children, pending_children) = child_counts(&store.list(None)?).get(&task.id).copied().unwrap_or((0, 0));
-    Ok(build_task_summary(task, children, pending_children, ctx, now))
+    let (children, pending_children) = child_counts(&store.list(None)?)
+        .get(&task.id)
+        .copied()
+        .unwrap_or((0, 0));
+    Ok(build_task_summary(
+        task,
+        children,
+        pending_children,
+        ctx,
+        now,
+    ))
 }
 
 /// `docs/gui/api.md` §3.3: `list_page` の結果を `TaskSummary` に写し、`counts_by_status` を付ける。
@@ -578,7 +602,12 @@ pub fn task_list(
 }
 
 /// `docs/gui/api.md` §3.5。
-pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: OffsetDateTime) -> Result<TaskDetail, OpsError> {
+pub fn task_detail(
+    store: &dyn TaskStore,
+    id: TaskId,
+    ctx: &ViewContext,
+    now: OffsetDateTime,
+) -> Result<TaskDetail, OpsError> {
     let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
     let rows = store.event_rows_for(id, None, ALL_EVENTS)?;
     let events = seq_pairs(&rows);
@@ -701,19 +730,31 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
             .get(cluster)
             .filter(|c| c.sync == "worktree")
             .map(|c| {
-                let root = c.worktree_root.clone().unwrap_or_else(|| path.join(".celeris-worktrees"));
+                let root = c
+                    .worktree_root
+                    .clone()
+                    .unwrap_or_else(|| path.join(".celeris-worktrees"));
                 WorktreeView {
                     project: path.to_string_lossy().into_owned(),
-                    dir: root.join(task.id.to_string()).to_string_lossy().into_owned(),
+                    dir: root
+                        .join(task.id.to_string())
+                        .to_string_lossy()
+                        .into_owned(),
                     branch: format!("{WORKTREE_BRANCH_PREFIX}{}", task.id),
                 }
             }),
         // ADR-0041 D1: ローカルも worktree を切る。目印（`worktree.json`）があればそれを出す。
         WorkspaceSpec::Local { path, .. } => {
-            crate::workspace::read_marker(&ctx.workspace_root.join(task.id.to_string())).map(|m| WorktreeView {
-                project: if m.repo.is_empty() { path.to_string_lossy().into_owned() } else { m.repo },
-                dir: m.dir,
-                branch: m.branch,
+            crate::workspace::read_marker(&ctx.workspace_root.join(task.id.to_string())).map(|m| {
+                WorktreeView {
+                    project: if m.repo.is_empty() {
+                        path.to_string_lossy().into_owned()
+                    } else {
+                        m.repo
+                    },
+                    dir: m.dir,
+                    branch: m.branch,
+                }
             })
         }
     };
@@ -722,7 +763,9 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
     let worker_run_hint = if task.status.is_terminal() {
         None
     } else {
-        Some(format!("celerisctl worker run --config <config.toml> --task {id}"))
+        Some(format!(
+            "celerisctl worker run --config <config.toml> --task {id}"
+        ))
     };
 
     let delegated: Vec<DelegatedView> = rows
@@ -731,7 +774,10 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
             Event::Delegated { run_id, task_ids } => Some(DelegatedView {
                 run_id: run_id.clone(),
                 ts: r.ts.clone(),
-                tasks: task_ids.iter().filter_map(|tid| by_id.get(tid).map(task_ref)).collect(),
+                tasks: task_ids
+                    .iter()
+                    .filter_map(|tid| by_id.get(tid).map(task_ref))
+                    .collect(),
             }),
             _ => None,
         })
@@ -804,6 +850,8 @@ mod tests {
     fn sample_task(kind: TaskKind, status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -831,7 +879,8 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: "workspace".into(), mode: None,
+                path: "workspace".into(),
+                mode: None,
             },
             budget: Budget {
                 max_turns: 10,
@@ -877,7 +926,12 @@ mod tests {
     #[test]
     fn runs_expose_the_pool_account_of_the_run() {
         let tid = TaskId::new();
-        let pooled = vec![row(0, "t0", tid, started_with_account("r1", Some("claude-pool"), Some("acct-a")))];
+        let pooled = vec![row(
+            0,
+            "t0",
+            tid,
+            started_with_account("r1", Some("claude-pool"), Some("acct-a")),
+        )];
         let summaries = runs(&pooled);
         assert_eq!(summaries[0].account.as_deref(), Some("acct-a"));
         assert_eq!(summaries[0].provider.as_deref(), Some("claude-pool"));
@@ -888,8 +942,15 @@ mod tests {
     }
 
     fn started_with_account(run_id: &str, provider: Option<&str>, account: Option<&str>) -> Event {
-        let Event::WorkerStarted { run_id, adapter, model, provider, role, task_role, .. } =
-            started(run_id, provider)
+        let Event::WorkerStarted {
+            run_id,
+            adapter,
+            model,
+            provider,
+            role,
+            task_role,
+            ..
+        } = started(run_id, provider)
         else {
             unreachable!("started builds a WorkerStarted")
         };
@@ -946,21 +1007,39 @@ mod tests {
             Event::WorkerFinished {
                 run_id: "rev-1".into(),
                 outcome: "done: reviewed".into(),
-                usage: Some(Usage { input_tokens: Some(5), output_tokens: Some(7) }),
+                usage: Some(Usage {
+                    input_tokens: Some(5),
+                    output_tokens: Some(7),
+                }),
                 role: Some(RunRole::Reviewer),
             },
         ];
         let rows: Vec<EventRow> = events
             .into_iter()
             .enumerate()
-            .map(|(i, event)| EventRow { id: i as u64 + 1, task_id, seq: i as u64, ts: format!("2026-09-14T00:00:0{i}Z"), event })
+            .map(|(i, event)| EventRow {
+                id: i as u64 + 1,
+                task_id,
+                seq: i as u64,
+                ts: format!("2026-09-14T00:00:0{i}Z"),
+                event,
+            })
             .collect();
         let runs = runs(&rows);
         assert_eq!(runs.len(), 2);
-        assert_eq!((runs[0].run_id.as_str(), runs[0].role), ("run-1", RunRole::Worker));
-        assert_eq!((runs[1].run_id.as_str(), runs[1].role), ("rev-1", RunRole::Reviewer));
+        assert_eq!(
+            (runs[0].run_id.as_str(), runs[0].role),
+            ("run-1", RunRole::Worker)
+        );
+        assert_eq!(
+            (runs[1].run_id.as_str(), runs[1].role),
+            ("rev-1", RunRole::Reviewer)
+        );
         assert_eq!(runs[1].provider.as_deref(), Some("acct-b"));
-        assert_eq!((runs[1].outcome, runs[1].outcome_text.as_deref()), (Some(RunOutcomeKind::Done), Some("reviewed")));
+        assert_eq!(
+            (runs[1].outcome, runs[1].outcome_text.as_deref()),
+            (Some(RunOutcomeKind::Done), Some("reviewed"))
+        );
         assert_eq!(runs[1].usage.and_then(|u| u.input_tokens), Some(5));
     }
 
@@ -968,8 +1047,18 @@ mod tests {
     fn runs_classifies_done_outcome_with_provider_and_outcome_text() {
         let tid = TaskId::new();
         let rows = vec![
-            row(0, "2024-01-01T00:00:00Z", tid, started("r1", Some("claude-a"))),
-            row(1, "2024-01-01T00:00:05Z", tid, finished("r1", "done: all good")),
+            row(
+                0,
+                "2024-01-01T00:00:00Z",
+                tid,
+                started("r1", Some("claude-a")),
+            ),
+            row(
+                1,
+                "2024-01-01T00:00:05Z",
+                tid,
+                finished("r1", "done: all good"),
+            ),
         ];
         let summaries = runs(&rows);
         assert_eq!(summaries.len(), 1);
@@ -986,7 +1075,10 @@ mod tests {
     #[test]
     fn runs_classifies_question_outcome() {
         let tid = TaskId::new();
-        let rows = vec![row(0, "t0", tid, started("r1", None)), row(1, "t1", tid, finished("r1", "question: which?"))];
+        let rows = vec![
+            row(0, "t0", tid, started("r1", None)),
+            row(1, "t1", tid, finished("r1", "question: which?")),
+        ];
         let s = &runs(&rows)[0];
         assert_eq!(s.outcome, Some(RunOutcomeKind::Question));
         assert_eq!(s.outcome_text.as_deref(), Some("which?"));
@@ -1008,7 +1100,10 @@ mod tests {
     #[test]
     fn runs_classifies_lease_expired_as_exact_match() {
         let tid = TaskId::new();
-        let rows = vec![row(0, "t0", tid, started("r1", None)), row(1, "t1", tid, finished("r1", "lease_expired"))];
+        let rows = vec![
+            row(0, "t0", tid, started("r1", None)),
+            row(1, "t1", tid, finished("r1", "lease_expired")),
+        ];
         let s = &runs(&rows)[0];
         assert_eq!(s.outcome, Some(RunOutcomeKind::LeaseExpired));
         assert!(s.outcome_text.is_none());
@@ -1044,9 +1139,20 @@ mod tests {
                 2,
                 "t2",
                 tid,
-                Event::worker_progress("r1", format!("{}throttled", derive::REVIEWER_REQUEUED_PREFIX)),
+                Event::worker_progress(
+                    "r1",
+                    format!("{}throttled", derive::REVIEWER_REQUEUED_PREFIX),
+                ),
             ),
-            row(3, "t3", tid, Event::ArtifactProduced { run_id: "r1".into(), artifact: artifact("a") }),
+            row(
+                3,
+                "t3",
+                tid,
+                Event::ArtifactProduced {
+                    run_id: "r1".into(),
+                    artifact: artifact("a"),
+                },
+            ),
             row(
                 4,
                 "t4",
@@ -1195,8 +1301,16 @@ mod tests {
             statuses: vec![Status::Ready],
             ..Default::default()
         };
-        let list = task_list(&store, &filter, ListOrder::CreatedDesc, None, 100, &ctx, OffsetDateTime::now_utc())
-            .expect("task_list");
+        let list = task_list(
+            &store,
+            &filter,
+            ListOrder::CreatedDesc,
+            None,
+            100,
+            &ctx,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("task_list");
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].id, t2.id);
         assert_eq!(list.total, 1);
@@ -1205,17 +1319,31 @@ mod tests {
     #[test]
     fn task_list_counts_by_status_ignores_filter() {
         let store = SqliteStore::open_in_memory().expect("open store");
-        store.insert(&sample_task(TaskKind::Execute, Status::Draft)).expect("insert");
-        store.insert(&sample_task(TaskKind::Execute, Status::Ready)).expect("insert");
-        store.insert(&sample_task(TaskKind::Execute, Status::Ready)).expect("insert");
+        store
+            .insert(&sample_task(TaskKind::Execute, Status::Draft))
+            .expect("insert");
+        store
+            .insert(&sample_task(TaskKind::Execute, Status::Ready))
+            .expect("insert");
+        store
+            .insert(&sample_task(TaskKind::Execute, Status::Ready))
+            .expect("insert");
 
         let ctx = view_ctx();
         let filter = ListFilter {
             statuses: vec![Status::Ready],
             ..Default::default()
         };
-        let list = task_list(&store, &filter, ListOrder::CreatedDesc, None, 100, &ctx, OffsetDateTime::now_utc())
-            .expect("task_list");
+        let list = task_list(
+            &store,
+            &filter,
+            ListOrder::CreatedDesc,
+            None,
+            100,
+            &ctx,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("task_list");
         assert_eq!(list.items.len(), 2);
         assert_eq!(list.counts_by_status.get("draft").copied(), Some(1));
         assert_eq!(list.counts_by_status.get("ready").copied(), Some(2));
@@ -1225,7 +1353,9 @@ mod tests {
     fn task_list_paginates_with_cursor_without_duplicates() {
         let store = SqliteStore::open_in_memory().expect("open store");
         for _ in 0..5 {
-            store.insert(&sample_task(TaskKind::Execute, Status::Draft)).expect("insert");
+            store
+                .insert(&sample_task(TaskKind::Execute, Status::Draft))
+                .expect("insert");
         }
         let ctx = view_ctx();
         let now = OffsetDateTime::now_utc();
@@ -1277,7 +1407,11 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .expect("task_list");
-        let parent_summary = list.items.iter().find(|t| t.id == parent.id).expect("parent in list");
+        let parent_summary = list
+            .items
+            .iter()
+            .find(|t| t.id == parent.id)
+            .expect("parent in list");
         assert_eq!(parent_summary.children, 2);
         assert_eq!(parent_summary.pending_children, 1);
     }
@@ -1290,20 +1424,25 @@ mod tests {
     fn task_detail_reports_cluster_and_mirror_for_remote_workspaces() {
         let store = SqliteStore::open_in_memory().expect("open");
         let mut remote = sample_task(TaskKind::Execute, Status::Ready);
-        remote.workspace = WorkspaceSpec::Remote { cluster: "pegasus".into(), path: PathBuf::from("/work/NBB/x/project") };
+        remote.workspace = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("/work/NBB/x/project"),
+        };
         store.insert(&remote).expect("insert");
         let local = sample_task(TaskKind::Execute, Status::Ready);
         store.insert(&local).expect("insert");
 
         let ctx = view_ctx();
-        let detail = task_detail(&store, remote.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        let detail =
+            task_detail(&store, remote.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         assert_eq!(detail.cluster.as_deref(), Some("pegasus"));
         assert_eq!(
             detail.workspace_dir.as_deref(),
             Some(format!("/tmp/workspaces/{}", remote.id).as_str()),
             "the mirror where runs/ live"
         );
-        let detail = task_detail(&store, local.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        let detail =
+            task_detail(&store, local.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         assert_eq!(detail.cluster, None);
     }
 
@@ -1313,31 +1452,52 @@ mod tests {
     fn task_detail_reports_the_worktree_for_worktree_clusters() {
         let store = SqliteStore::open_in_memory().expect("open");
         let mut on_worktree = sample_task(TaskKind::Execute, Status::Ready);
-        on_worktree.workspace =
-            WorkspaceSpec::Remote { cluster: "pegasus".into(), path: PathBuf::from("/work/NBB/x/benchfs") };
+        on_worktree.workspace = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("/work/NBB/x/benchfs"),
+        };
         store.insert(&on_worktree).expect("insert");
         let mut on_rsync = sample_task(TaskKind::Execute, Status::Ready);
-        on_rsync.workspace = WorkspaceSpec::Remote { cluster: "sirius".into(), path: PathBuf::from("/work/NBB/x/scratch") };
+        on_rsync.workspace = WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: PathBuf::from("/work/NBB/x/scratch"),
+        };
         store.insert(&on_rsync).expect("insert");
 
         let mut ctx = view_ctx();
         ctx.clusters.insert(
             "pegasus".to_string(),
-            ClusterViewInfo { sync: "worktree".to_string(), worktree_root: None, ..Default::default() },
+            ClusterViewInfo {
+                sync: "worktree".to_string(),
+                worktree_root: None,
+                ..Default::default()
+            },
         );
         ctx.clusters.insert(
             "sirius".to_string(),
-            ClusterViewInfo { sync: "rsync".to_string(), worktree_root: None, ..Default::default() },
+            ClusterViewInfo {
+                sync: "rsync".to_string(),
+                worktree_root: None,
+                ..Default::default()
+            },
         );
 
-        let detail = task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        let detail =
+            task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         let wt = detail.worktree.expect("worktree cluster");
         assert_eq!(wt.project, "/work/NBB/x/benchfs");
-        assert_eq!(wt.dir, format!("/work/NBB/x/benchfs/.celeris-worktrees/{}", on_worktree.id));
+        assert_eq!(
+            wt.dir,
+            format!("/work/NBB/x/benchfs/.celeris-worktrees/{}", on_worktree.id)
+        );
         assert_eq!(wt.branch, format!("celeris/{}", on_worktree.id));
 
-        let detail = task_detail(&store, on_rsync.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
-        assert_eq!(detail.worktree, None, "rsync のクラスタには worktree が無い");
+        let detail =
+            task_detail(&store, on_rsync.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        assert_eq!(
+            detail.worktree, None,
+            "rsync のクラスタには worktree が無い"
+        );
 
         // worktree_root を設定したらそちらが親になる。
         ctx.clusters.insert(
@@ -1348,8 +1508,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let detail = task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
-        assert_eq!(detail.worktree.expect("worktree").dir, format!("/work/NBB/x/wt/{}", on_worktree.id));
+        let detail =
+            task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        assert_eq!(
+            detail.worktree.expect("worktree").dir,
+            format!("/work/NBB/x/wt/{}", on_worktree.id)
+        );
     }
 
     /// GUI-R2（ADR-0016 D1）: 一覧の各行にも `role` が出る（詳細を N+1 で引かなくてよい）。
@@ -1372,7 +1536,14 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .expect("task_list");
-        let role_of = |id| list.items.iter().find(|t| t.id == id).expect("in list").role.clone();
+        let role_of = |id| {
+            list.items
+                .iter()
+                .find(|t| t.id == id)
+                .expect("in list")
+                .role
+                .clone()
+        };
         assert_eq!(role_of(lead.id).as_deref(), Some("lead"));
         assert_eq!(role_of(plain.id), None);
     }
@@ -1402,7 +1573,14 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .expect("task_list");
-        let support_of = |id| list.items.iter().find(|t| t.id == id).expect("in list").support.clone();
+        let support_of = |id| {
+            list.items
+                .iter()
+                .find(|t| t.id == id)
+                .expect("in list")
+                .support
+                .clone()
+        };
         assert_eq!(support_of(plain.id), None);
         assert_eq!(support_of(compaction.id).as_deref(), Some("compaction"));
         assert_eq!(support_of(approval.id).as_deref(), Some("approval"));
@@ -1429,7 +1607,14 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .expect("task_list");
-        let genre_of = |id| list.items.iter().find(|t| t.id == id).expect("in list").genre.clone();
+        let genre_of = |id| {
+            list.items
+                .iter()
+                .find(|t| t.id == id)
+                .expect("in list")
+                .genre
+                .clone()
+        };
         assert_eq!(genre_of(with_genre.id).as_deref(), Some("coding"));
         assert_eq!(genre_of(plain.id), None);
     }
@@ -1458,11 +1643,16 @@ mod tests {
             .expect("append delegated");
 
         let ctx = view_ctx();
-        let detail = task_detail(&store, parent.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        let detail =
+            task_detail(&store, parent.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         assert_eq!(detail.role.as_deref(), Some("lead"));
         assert_eq!(detail.delegated.len(), 1);
         assert_eq!(detail.delegated[0].run_id, "run-1");
-        assert_eq!(detail.delegated[0].tasks.len(), 1, "missing child id is dropped");
+        assert_eq!(
+            detail.delegated[0].tasks.len(),
+            1,
+            "missing child id is dropped"
+        );
         assert_eq!(detail.delegated[0].tasks[0].id, child.id);
     }
 
@@ -1504,10 +1694,20 @@ mod tests {
         store.insert(&child).expect("insert child");
 
         let ctx = view_ctx();
-        let detail = task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
-        assert_eq!(detail.dependencies.iter().map(|r| r.id).collect::<Vec<_>>(), vec![dep.id]);
-        assert_eq!(detail.dependents.iter().map(|r| r.id).collect::<Vec<_>>(), vec![dependent.id]);
-        assert_eq!(detail.children.iter().map(|r| r.id).collect::<Vec<_>>(), vec![child.id]);
+        let detail =
+            task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
+        assert_eq!(
+            detail.dependencies.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![dep.id]
+        );
+        assert_eq!(
+            detail.dependents.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![dependent.id]
+        );
+        assert_eq!(
+            detail.children.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![child.id]
+        );
         assert!(detail.actions.contains(&Action::Cancel));
         assert!(detail.worker_run_hint.is_some());
     }
@@ -1530,7 +1730,8 @@ mod tests {
             .expect("append worker finished");
 
         let ctx = view_ctx();
-        let detail = task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
+        let detail =
+            task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
         assert_eq!(detail.latest_question.as_deref(), Some("which version?"));
         assert!(detail.actions.contains(&Action::Answer));
     }
@@ -1541,7 +1742,8 @@ mod tests {
         let task = sample_task(TaskKind::Execute, Status::Done);
         store.insert(&task).expect("insert task");
         let ctx = view_ctx();
-        let detail = task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
+        let detail =
+            task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
         assert!(detail.worker_run_hint.is_none());
         // ADR-0044 D2（Phase 53）: `done` は編集できないが「再開」はできる。
         assert_eq!(detail.actions, vec![Action::Reopen]);
@@ -1588,7 +1790,8 @@ mod tests {
         store.insert(&approval2).expect("insert approval2");
 
         let ctx = view_ctx();
-        let detail = task_detail(&store, parent.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
+        let detail =
+            task_detail(&store, parent.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
 
         assert_eq!(detail.approvals.len(), 2);
         let approved = detail
@@ -1598,7 +1801,12 @@ mod tests {
             .expect("approval1 link present");
         assert_eq!(approved.criterion_idx, Some(0));
         assert_eq!(approved.attempt, Some(1));
-        assert!(approved.decided.as_ref().is_some_and(|d| d.approved && d.note.as_deref() == Some("lgtm")));
+        assert!(
+            approved
+                .decided
+                .as_ref()
+                .is_some_and(|d| d.approved && d.note.as_deref() == Some("lgtm"))
+        );
 
         let pending = detail
             .approvals
@@ -1609,7 +1817,10 @@ mod tests {
         assert!(pending.decided.is_none());
 
         assert_eq!(detail.criteria.len(), 1);
-        assert_eq!(detail.criteria[0].approval.as_ref().map(|a| a.approval.id), Some(approval2.id));
+        assert_eq!(
+            detail.criteria[0].approval.as_ref().map(|a| a.approval.id),
+            Some(approval2.id)
+        );
     }
 
     // ---- parse_human_approval_title ----
@@ -1635,7 +1846,13 @@ mod tests {
     #[test]
     fn parse_human_approval_title_none_for_unrelated_or_malformed_strings() {
         assert_eq!(parse_human_approval_title("just a regular title"), None);
-        assert_eq!(parse_human_approval_title("Approval needed: x — criterion abc (attempt 1)"), None);
-        assert_eq!(parse_human_approval_title("Approval needed: x — criterion 1 (attempt)"), None);
+        assert_eq!(
+            parse_human_approval_title("Approval needed: x — criterion abc (attempt 1)"),
+            None
+        );
+        assert_eq!(
+            parse_human_approval_title("Approval needed: x — criterion 1 (attempt)"),
+            None
+        );
     }
 }

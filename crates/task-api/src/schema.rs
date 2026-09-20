@@ -14,19 +14,23 @@ use task_ops::replay::ReplayReport;
 use task_ops::retry::RetryResult;
 use task_ops::view::{TaskDetail, TaskList};
 
-use crate::approvals::{ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody, StandingRuleList};
+use crate::approvals::{
+    ApprovalDecideBody, ApprovalDecideResult, ApprovalList, StandingRuleCreateBody,
+    StandingRuleList,
+};
 use crate::conversation::{MessageAccepted, MessageList, MessagePostBody};
 use crate::memory::MemoryView;
 use crate::milestones::{MilestoneDecideBody, MilestoneDecided};
 use crate::project_plan::{ProjectPlanAccepted, ProjectPlanBody};
 use crate::types::{
-    AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView, AnswerBody, ArtifactList,
-    CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters, CommentBody, CommentList, ConfigView,
-    DaemonView, DecisionBody, ReopenBody, Timeline,
-    EventsPage, Health, MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, Problem,
-    ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody, ProviderCheckResponse, ProviderConfigView,
-    Providers, ReleasePromoteAccepted, Releases, ReloadResult, RetryBody, RunList, SecretList, SecretPutResult,
-    StreamHeartbeat, StreamHello, StreamReset,
+    AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView,
+    AnswerBody, ArtifactList, CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters,
+    CommentBody, CommentList, ConfigView, DaemonView, DecisionBody, EventsPage, Health,
+    MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, Problem,
+    ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody, ProviderCheckResponse,
+    ProviderConfigView, Providers, ReleasePromoteAccepted, Releases, ReloadResult, ReopenBody,
+    RetryBody, RunList, SecretList, SecretPutResult, StreamHeartbeat, StreamHello, StreamReset,
+    Timeline,
 };
 
 /// コミット済みのスキーマ（`GET /schema` の本体）。
@@ -191,7 +195,10 @@ mod tests {
 
     #[test]
     fn committed_schema_matches_generated() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/api/v1/api-v1.schema.json");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/api/v1/api-v1.schema.json"
+        );
         let generated = api_v1_schema_json();
         if std::env::var_os("UPDATE_SCHEMA").is_some() {
             std::fs::write(path, &generated).unwrap_or_else(|e| panic!("write {path}: {e}"));
@@ -207,7 +214,11 @@ mod tests {
     #[test]
     fn schema_uses_defs_once_for_shared_types() {
         let value = api_v1_schema_value();
-        let defs = value.get("$defs").and_then(|d| d.as_object()).cloned().unwrap_or_default();
+        let defs = value
+            .get("$defs")
+            .and_then(|d| d.as_object())
+            .cloned()
+            .unwrap_or_default();
         for name in ["Task", "Event", "EventRow", "DaemonSnapshot", "Status"] {
             assert!(defs.contains_key(name), "missing $defs/{name}");
         }

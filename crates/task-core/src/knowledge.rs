@@ -111,7 +111,9 @@ impl FromStr for Confidence {
             "high" => Ok(Confidence::High),
             "medium" | "med" => Ok(Confidence::Medium),
             "low" => Ok(Confidence::Low),
-            other => Err(format!("confidence must be high | medium | low (got {other:?})")),
+            other => Err(format!(
+                "confidence must be high | medium | low (got {other:?})"
+            )),
         }
     }
 }
@@ -133,7 +135,10 @@ impl FromStr for Confidence {
 /// ```
 pub fn front_matter(raw: &str) -> (FrontMatter, &str) {
     let body = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    let Some(rest) = body.strip_prefix("---\n").or_else(|| body.strip_prefix("---\r\n")) else {
+    let Some(rest) = body
+        .strip_prefix("---\n")
+        .or_else(|| body.strip_prefix("---\r\n"))
+    else {
         return (FrontMatter::default(), body);
     };
     let mut front = FrontMatter::default();
@@ -205,28 +210,53 @@ pub fn front_matter(raw: &str) -> (FrontMatter, &str) {
 /// front matter と本文から 1 ページを組む（[`front_matter`] と往復する）。
 pub fn render_page(front: &FrontMatter, body: &str) -> String {
     let mut out = String::from("---\n");
-    if let Some(title) = front.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+    if let Some(title) = front
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
         out.push_str(&format!("title: {}\n", yaml_scalar(title)));
     }
     if !front.tags.is_empty() {
         out.push_str(&format!("tags: [{}]\n", yaml_list(&front.tags)));
     }
-    if let Some(scope) = front.scope.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(scope) = front
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         out.push_str(&format!("scope: {}\n", yaml_scalar(scope)));
     }
     if !front.sources.is_empty() {
         out.push_str(&format!("sources: [{}]\n", yaml_list(&front.sources)));
     }
-    if let Some(created) = front.created.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(created) = front
+        .created
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         out.push_str(&format!("created: {}\n", yaml_scalar(created)));
     }
-    if let Some(updated) = front.updated.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(updated) = front
+        .updated
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         out.push_str(&format!("updated: {}\n", yaml_scalar(updated)));
     }
     if let Some(confidence) = front.confidence {
         out.push_str(&format!("confidence: {confidence}\n"));
     }
-    if let Some(path) = front.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(path) = front
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         out.push_str(&format!("path: {}\n", yaml_scalar(path)));
     }
     out.push_str("---\n");
@@ -259,7 +289,11 @@ pub fn title_of(raw: &str, path: &str) -> String {
 }
 
 fn non_empty(value: String) -> Option<String> {
-    if value.trim().is_empty() { None } else { Some(value) }
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 /// `[a, b]` / 空（次の行から `- ` が続く）。
@@ -292,7 +326,9 @@ fn unquote(value: &str) -> String {
 /// YAML のスカラ（記号を含むなら引用する。最小限。`task_ops::docs` と同じ規則）。
 fn yaml_scalar(value: &str) -> String {
     let plain = !value.is_empty()
-        && !value.starts_with(['-', '[', '{', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`'])
+        && !value.starts_with([
+            '-', '[', '{', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`',
+        ])
         && !value.contains([':', ',', '[', ']', '{', '}', '\n', '"']);
     if plain {
         value.to_string()
@@ -302,7 +338,11 @@ fn yaml_scalar(value: &str) -> String {
 }
 
 fn yaml_list(items: &[String]) -> String {
-    items.iter().map(|t| yaml_scalar(t)).collect::<Vec<_>>().join(", ")
+    items
+        .iter()
+        .map(|t| yaml_scalar(t))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ---------------------------------------------------------------------------
@@ -344,9 +384,12 @@ fn clean_relative(raw: &str) -> Result<String, PathError> {
     }
     let path = Path::new(raw);
     let escapes = path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)));
+        || path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        });
     if escapes {
         return Err(PathError::Forbidden);
     }
@@ -393,7 +436,11 @@ pub fn scope_dir(scope: &str) -> Option<String> {
     }
     if let Some(slug) = scope.strip_prefix("project:") {
         let slug = slug.trim();
-        return if slug.is_empty() { None } else { Some(format!("projects/{slug}")) };
+        return if slug.is_empty() {
+            None
+        } else {
+            Some(format!("projects/{slug}"))
+        };
     }
     scope_path(scope).ok()
 }
@@ -484,7 +531,13 @@ pub struct SearchHit {
 /// 順位: tag 一致数（多い順）→ title 一致数（多い順）→ 本文一致 → `updated` の新しい順 → パスの辞書順。
 /// 語は空白で切り、大文字小文字を区別しない部分一致。`query` が空なら `scope` の全件を
 /// `updated` の新しい順で返す。
-pub fn search(index: &Index, query: &str, scope: Option<&str>, limit: usize, body_hits: &[String]) -> Vec<SearchHit> {
+pub fn search(
+    index: &Index,
+    query: &str,
+    scope: Option<&str>,
+    limit: usize,
+    body_hits: &[String],
+) -> Vec<SearchHit> {
     let terms: Vec<String> = query
         .split_whitespace()
         .map(|t| t.to_ascii_lowercase())
@@ -509,7 +562,11 @@ pub fn search(index: &Index, query: &str, scope: Option<&str>, limit: usize, bod
             let path = item.path.to_ascii_lowercase();
             let tag_matches = terms
                 .iter()
-                .filter(|term| item.tags.iter().any(|tag| tag.to_ascii_lowercase().contains(term.as_str())))
+                .filter(|term| {
+                    item.tags
+                        .iter()
+                        .any(|tag| tag.to_ascii_lowercase().contains(term.as_str()))
+                })
                 .count();
             let title_matches = terms
                 .iter()
@@ -545,7 +602,9 @@ pub fn search(index: &Index, query: &str, scope: Option<&str>, limit: usize, bod
 // ---------------------------------------------------------------------------
 
 /// ADR-0047 D2: 何をマウントするか。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MountKind {
     /// KB の一部（`scope` = KB の相対パス。`user`、`environment/clusters`、`projects/<slug>`）。
@@ -651,7 +710,10 @@ impl KnowledgeMount {
             MountKind::Repo => format!("repo:{}", self.name.as_deref().unwrap_or("")),
             MountKind::Dir => format!(
                 "dir:{}",
-                self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+                self.path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
             ),
             MountKind::Memory => match self.name.as_deref() {
                 Some(node) => format!("memory:{node}"),
@@ -719,7 +781,10 @@ pub fn mount_matches(mount: &KnowledgeMount, item: &IndexItem) -> bool {
         },
         MountKind::Repo | MountKind::Dir => item.scope.as_deref() == Some(mount.label().as_str()),
         // `memory` は担当のノードが決まってから label が定まるので、接頭辞で見る。
-        MountKind::Memory => item.scope.as_deref().is_some_and(|s| s.starts_with("memory")),
+        MountKind::Memory => item
+            .scope
+            .as_deref()
+            .is_some_and(|s| s.starts_with("memory")),
     }
 }
 
@@ -793,7 +858,10 @@ mod tests {
         // 2 回目も同じ（冪等）。
         assert_eq!(render_page(&again, body), page);
         // 題名は front matter が勝つ。
-        assert_eq!(title_of(&page, "environment/clusters/pegasus.md"), "pegasus の使い方");
+        assert_eq!(
+            title_of(&page, "environment/clusters/pegasus.md"),
+            "pegasus の使い方"
+        );
     }
 
     #[test]
@@ -824,7 +892,10 @@ mod tests {
         assert_eq!(page_path("  "), Err(PathError::Empty));
         assert!(is_inbox("_inbox/2026-x.md"));
         assert!(!is_inbox("_inboxed/x.md"));
-        assert_eq!(scope_dir("project:pluvio").as_deref(), Some("projects/pluvio"));
+        assert_eq!(
+            scope_dir("project:pluvio").as_deref(),
+            Some("projects/pluvio")
+        );
         assert_eq!(scope_dir("user").as_deref(), Some("user"));
         assert_eq!(scope_dir("  "), None);
     }
@@ -871,7 +942,13 @@ mod tests {
     #[test]
     fn search_ranks_tags_above_titles_above_bodies() {
         let index = sample_index();
-        let hits = search(&index, "cluster", None, 10, &["experience/2026/09/hpc-run.md".to_string()]);
+        let hits = search(
+            &index,
+            "cluster",
+            None,
+            10,
+            &["experience/2026/09/hpc-run.md".to_string()],
+        );
         let paths: Vec<&str> = hits.iter().map(|h| h.item.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -891,7 +968,10 @@ mod tests {
         let only_env = search(&index, "cluster", Some("environment"), 10, &[]);
         assert_eq!(only_env.len(), 1);
         assert_eq!(only_env[0].item.path, "environment/clusters/pegasus.md");
-        assert_eq!(search(&index, "cluster", Some("environment/clusters"), 10, &[]).len(), 1);
+        assert_eq!(
+            search(&index, "cluster", Some("environment/clusters"), 10, &[]).len(),
+            1
+        );
         assert!(search(&index, "cluster", Some("projects/pluvio"), 10, &[]).is_empty());
 
         // limit で切る。
@@ -912,9 +992,14 @@ mod tests {
 
     #[test]
     fn mounts_parse_from_the_short_form_and_merge_without_duplicates() {
-        assert_eq!("kb:user".parse::<KnowledgeMount>().expect("kb"), KnowledgeMount::kb("user"));
         assert_eq!(
-            "kb:environment/clusters".parse::<KnowledgeMount>().expect("kb"),
+            "kb:user".parse::<KnowledgeMount>().expect("kb"),
+            KnowledgeMount::kb("user")
+        );
+        assert_eq!(
+            "kb:environment/clusters"
+                .parse::<KnowledgeMount>()
+                .expect("kb"),
             KnowledgeMount::kb("environment/clusters")
         );
         assert_eq!(
@@ -925,7 +1010,10 @@ mod tests {
             "dir:/opt/notes".parse::<KnowledgeMount>().expect("dir"),
             KnowledgeMount::dir("/opt/notes")
         );
-        assert_eq!("memory".parse::<KnowledgeMount>().expect("memory"), KnowledgeMount::memory(None));
+        assert_eq!(
+            "memory".parse::<KnowledgeMount>().expect("memory"),
+            KnowledgeMount::memory(None)
+        );
         assert_eq!(
             "memory:cos".parse::<KnowledgeMount>().expect("memory"),
             KnowledgeMount::memory(Some("cos".into()))
@@ -935,7 +1023,10 @@ mod tests {
         assert_eq!(KnowledgeMount::kb("user").label(), "kb:user");
 
         let org = vec![KnowledgeMount::kb("user"), KnowledgeMount::memory(None)];
-        let project = vec![KnowledgeMount::kb("projects/pluvio"), KnowledgeMount::kb("user")];
+        let project = vec![
+            KnowledgeMount::kb("projects/pluvio"),
+            KnowledgeMount::kb("user"),
+        ];
         let merged = merge_mounts(&[&org, &project]);
         assert_eq!(
             merged,

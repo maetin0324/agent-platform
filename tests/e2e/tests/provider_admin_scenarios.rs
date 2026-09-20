@@ -22,12 +22,20 @@ fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
     let path = debug_dir.join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
@@ -67,7 +75,8 @@ struct Resp {
 
 impl Resp {
     fn json(&self) -> Value {
-        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("not JSON ({e}): {} {}", self.status, self.body))
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {} {}", self.status, self.body))
     }
 
     #[track_caller]
@@ -91,7 +100,12 @@ impl Env {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        Self { _tmp: tmp, root, port: free_port(), token: None }
+        Self {
+            _tmp: tmp,
+            root,
+            port: free_port(),
+            token: None,
+        }
     }
 
     fn write_script(&self, body: &str) -> PathBuf {
@@ -152,9 +166,18 @@ model = "fake"
     }
 
     fn celerisctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("celerisctl")).arg("--db").arg(self.root.join("celeris.sqlite3")).args(args).output().unwrap();
+        let out = Command::new(bin("celerisctl"))
+            .arg("--db")
+            .arg(self.root.join("celeris.sqlite3"))
+            .args(args)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "celerisctl {args:?} failed: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         stdout
     }
 
@@ -166,7 +189,10 @@ model = "fake"
 
     fn start_celeris(&self, config: &Path) -> Proc {
         static STARTS: AtomicUsize = AtomicUsize::new(0);
-        let log = self.root.join(format!("celeris-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
+        let log = self.root.join(format!(
+            "celeris-{}.log",
+            STARTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--log-format", "text"])
             .stdin(Stdio::null())
@@ -193,8 +219,23 @@ model = "fake"
 
     fn request(&self, method: &str, path: &str, body: Option<&str>, headers: &[&str]) -> Resp {
         let mut cmd = Command::new("curl");
-        cmd.args(["-s", "-S", "-D", "-", "--max-time", "35", "-H", "Expect:", "-X", method]);
-        let has = |name: &str| headers.iter().any(|h| h.to_ascii_lowercase().starts_with(&format!("{name}:")));
+        cmd.args([
+            "-s",
+            "-S",
+            "-D",
+            "-",
+            "--max-time",
+            "35",
+            "-H",
+            "Expect:",
+            "-X",
+            method,
+        ]);
+        let has = |name: &str| {
+            headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with(&format!("{name}:")))
+        };
         if let Some(token) = &self.token
             && !has("authorization")
         {
@@ -212,11 +253,23 @@ model = "fake"
         let out = cmd.arg(self.url(path)).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let Some((head, body)) = text.split_once("\r\n\r\n") else {
-            return Resp { status: 0, headers: vec![], body: String::from_utf8_lossy(&out.stderr).into_owned() };
+            return Resp {
+                status: 0,
+                headers: vec![],
+                body: String::from_utf8_lossy(&out.stderr).into_owned(),
+            };
         };
         let mut lines = head.lines();
-        let status = lines.next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).unwrap_or(0);
-        Resp { status, headers: lines.map(str::to_string).collect(), body: body.to_string() }
+        let status = lines
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Resp {
+            status,
+            headers: lines.map(str::to_string).collect(),
+            body: body.to_string(),
+        }
     }
 
     fn get(&self, path: &str) -> Resp {
@@ -242,7 +295,9 @@ model = "fake"
     fn header(&self, resp: &Resp, name: &str) -> Option<String> {
         resp.headers.iter().find_map(|h| {
             let (n, v) = h.split_once(':')?;
-            n.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+            n.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| v.trim().to_string())
         })
     }
 
@@ -257,18 +312,25 @@ model = "fake"
 #[test]
 fn admin_endpoints_require_token_even_without_token_file_on_loopback() {
     let env = Env::new();
-    let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
+    let script = env.write_script(
+        "cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'",
+    );
     let config = env.write_config(&script, None, "");
     let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
 
     assert_eq!(env.get("/providers").status, 200);
 
-    env.post("/providers", json!({"id": "x", "adapter": "fake"})).assert_problem(401, "unauthorized");
-    env.post_empty("/reload").assert_problem(401, "unauthorized");
-    env.post_empty("/providers/x/check").assert_problem(401, "unauthorized");
-    env.patch("/providers/x", json!({"concurrency": 2})).assert_problem(401, "unauthorized");
-    env.delete("/providers/x").assert_problem(401, "unauthorized");
+    env.post("/providers", json!({"id": "x", "adapter": "fake"}))
+        .assert_problem(401, "unauthorized");
+    env.post_empty("/reload")
+        .assert_problem(401, "unauthorized");
+    env.post_empty("/providers/x/check")
+        .assert_problem(401, "unauthorized");
+    env.patch("/providers/x", json!({"concurrency": 2}))
+        .assert_problem(401, "unauthorized");
+    env.delete("/providers/x")
+        .assert_problem(401, "unauthorized");
 }
 
 /// 受け入れ 1・3・4・5: `providers.d/` への作成・変更・削除・重複/未知 id のエラー、`check` の `ok`/`auth_failed`、
@@ -290,15 +352,21 @@ else
   echo '{"type":"done","summary":"ok","evidence":[]}'
 fi"#,
     );
-    let config = env.write_config(&script, Some("s3cret-admin-token"), "providers_include = \"providers.d/*.toml\"");
+    let config = env.write_config(
+        &script,
+        Some("s3cret-admin-token"),
+        "providers_include = \"providers.d/*.toml\"",
+    );
     let mut daemon = env.start_celeris(&config);
     let mut env = env;
     env.token = Some("s3cret-admin-token".into());
     env.wait_api(&mut daemon);
 
     // --- 受け入れ 5: 未知 id の変更・削除は 404 ---
-    env.patch("/providers/does-not-exist", json!({"concurrency": 2})).assert_problem(404, "provider_not_found");
-    env.delete("/providers/does-not-exist").assert_problem(404, "provider_not_found");
+    env.patch("/providers/does-not-exist", json!({"concurrency": 2}))
+        .assert_problem(404, "provider_not_found");
+    env.delete("/providers/does-not-exist")
+        .assert_problem(404, "provider_not_found");
 
     // --- 作成: acct-c-authfail（env にトークンらしき値を含める。応答にもログにも出てはいけない） ---
     let created = env.post(
@@ -310,18 +378,37 @@ fi"#,
         }),
     );
     assert_eq!(created.status, 201, "{}", created.body);
-    assert_eq!(env.header(&created, "location").as_deref(), Some("/api/v1/providers/acct-c-authfail"));
+    assert_eq!(
+        env.header(&created, "location").as_deref(),
+        Some("/api/v1/providers/acct-c-authfail")
+    );
     let created_json = created.json();
-    let mut env_keys =
-        created_json["env_keys"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>();
+    let mut env_keys = created_json["env_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect::<Vec<_>>();
     env_keys.sort();
     assert_eq!(env_keys, vec!["AUTH_FAIL", "CLAUDE_CONFIG_DIR"]);
     assert!(created_json.get("env").is_none(), "{}", created.body);
-    assert!(!created.body.contains("claude-super-secret-path"), "{}", created.body);
-    assert!(std::fs::read_to_string(env.root.join("providers.d/acct-c-authfail.toml")).unwrap().contains("claude-super-secret-path"));
+    assert!(
+        !created.body.contains("claude-super-secret-path"),
+        "{}",
+        created.body
+    );
+    assert!(
+        std::fs::read_to_string(env.root.join("providers.d/acct-c-authfail.toml"))
+            .unwrap()
+            .contains("claude-super-secret-path")
+    );
 
     // --- 受け入れ 5: 重複 id は 409 ---
-    env.post("/providers", json!({"id": "acct-c-authfail", "adapter": "fake"})).assert_problem(409, "provider_exists");
+    env.post(
+        "/providers",
+        json!({"id": "acct-c-authfail", "adapter": "fake"}),
+    )
+    .assert_problem(409, "provider_exists");
 
     // --- 受け入れ 4: check は `auth_failed` を返す（タスクにもイベントにも残らない） ---
     let checked = env.post_empty("/providers/acct-c-authfail/check");
@@ -346,19 +433,35 @@ fi"#,
     // reload 前は acct-b がまだ稼働中のプロバイダ一覧に出ない（`providers.d/` に書いただけ）。
     let before = env.get("/providers").json();
     assert!(
-        !before["items"].as_array().unwrap().iter().any(|p| p["id"] == "acct-b"),
+        !before["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "acct-b"),
         "acct-b must not be in rotation before reload: {before}"
     );
 
     // --- 受け入れ 1: acct-a を長時間タスクで埋めてから acct-b を追加・reload し、次の tick から使われることを確かめる。
     // 実行中の run（acct-a 側）は影響を受けない。
     let ws_slow = env.workspace("ws-slow");
-    let slow = env.add(&["--title", "slow", "--check-cmd", "true", "--workspace", &ws_slow]);
+    let slow = env.add(&[
+        "--title",
+        "slow",
+        "--check-cmd",
+        "true",
+        "--workspace",
+        &ws_slow,
+    ]);
     env.celerisctl(&["approve", &slow]);
     assert!(
-        wait_until(Duration::from_secs(10), || env.get("/daemon").json()["snapshot"]["in_flight"]
-            .as_array()
-            .is_some_and(|v| v.iter().any(|r| r["task_id"] == slow && r["provider"] == "acct-a"))),
+        wait_until(Duration::from_secs(10), || {
+            env.get("/daemon").json()["snapshot"]["in_flight"]
+                .as_array()
+                .is_some_and(|v| {
+                    v.iter()
+                        .any(|r| r["task_id"] == slow && r["provider"] == "acct-a")
+                })
+        }),
         "slow run never started on acct-a: {}",
         env.get("/daemon").body
     );
@@ -368,11 +471,26 @@ fi"#,
     assert_eq!(reloaded.json()["reloaded"], true);
 
     let after = env.get("/providers").json();
-    let ids: Vec<&str> = after["items"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
-    assert!(ids.contains(&"acct-b") && ids.contains(&"acct-c-authfail"), "{after}");
+    let ids: Vec<&str> = after["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"acct-b") && ids.contains(&"acct-c-authfail"),
+        "{after}"
+    );
 
     let ws_quick = env.workspace("ws-quick");
-    let quick = env.add(&["--title", "quick", "--check-cmd", "true", "--workspace", &ws_quick]);
+    let quick = env.add(&[
+        "--title",
+        "quick",
+        "--check-cmd",
+        "true",
+        "--workspace",
+        &ws_quick,
+    ]);
     env.celerisctl(&["approve", &quick]);
     let quick_dispatched_to_b = wait_until(Duration::from_secs(10), || {
         let store = task_core::SqliteStore::open(&env.root.join("celeris.sqlite3")).unwrap();
@@ -383,7 +501,9 @@ fi"#,
     });
     if !quick_dispatched_to_b {
         let store = task_core::SqliteStore::open(&env.root.join("celeris.sqlite3")).unwrap();
-        let task = task_core::TaskStore::get(&store, quick.parse().unwrap()).unwrap().unwrap();
+        let task = task_core::TaskStore::get(&store, quick.parse().unwrap())
+            .unwrap()
+            .unwrap();
         let events = task_core::TaskStore::events_for(&store, quick.parse().unwrap()).unwrap();
         panic!(
             "quick task never dispatched to acct-b (busy acct-a should overflow to it); status={:?} events={:#?}\ndaemon={}",
@@ -397,7 +517,11 @@ fi"#,
     assert!(
         wait_until(Duration::from_secs(20), || {
             let store = task_core::SqliteStore::open(&env.root.join("celeris.sqlite3")).unwrap();
-            task_core::TaskStore::get(&store, slow.parse().unwrap()).unwrap().unwrap().status == task_core::Status::Done
+            task_core::TaskStore::get(&store, slow.parse().unwrap())
+                .unwrap()
+                .unwrap()
+                .status
+                == task_core::Status::Done
         }),
         "slow task on acct-a never completed"
     );
@@ -411,7 +535,8 @@ fi"#,
     let deleted = env.delete("/providers/acct-c-authfail");
     assert_eq!(deleted.status, 200, "{}", deleted.body);
     assert!(!std::fs::exists(env.root.join("providers.d/acct-c-authfail.toml")).unwrap());
-    env.delete("/providers/acct-c-authfail").assert_problem(404, "provider_not_found");
+    env.delete("/providers/acct-c-authfail")
+        .assert_problem(404, "provider_not_found");
 
     // --- 受け入れ 3: env の値も token_file の中身もログに出ない ---
     let log = daemon.log_text();
@@ -430,22 +555,43 @@ fn reload_clears_provider_cooldown() {
         r#"cat >/dev/null
 echo '{"type":"error","message":"429 rate limited","retryable":true,"provider_failure":{"kind":"throttled","retry_after_secs":120}}'"#,
     );
-    let config = env.write_config(&script, Some("s3cret-admin-token"), "providers_include = \"providers.d/*.toml\"");
+    let config = env.write_config(
+        &script,
+        Some("s3cret-admin-token"),
+        "providers_include = \"providers.d/*.toml\"",
+    );
     let mut daemon = env.start_celeris(&config);
     let mut env = env;
     env.token = Some("s3cret-admin-token".into());
     env.wait_api(&mut daemon);
 
     let ws = env.workspace("ws-throttle");
-    let task = env.add(&["--title", "t", "--check-cmd", "true", "--max-retries", "0", "--workspace", &ws]);
+    let task = env.add(&[
+        "--title",
+        "t",
+        "--check-cmd",
+        "true",
+        "--max-retries",
+        "0",
+        "--workspace",
+        &ws,
+    ]);
     env.celerisctl(&["approve", &task]);
 
     let cooling = wait_until(Duration::from_secs(10), || {
         env.get("/providers").json()["items"]
             .as_array()
-            .is_some_and(|items| items.iter().any(|p| p["id"] == "acct-a" && !p["cooldown"].is_null()))
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|p| p["id"] == "acct-a" && !p["cooldown"].is_null())
+            })
     });
-    assert!(cooling, "acct-a never entered cooldown: {}", env.get("/providers").body);
+    assert!(
+        cooling,
+        "acct-a never entered cooldown: {}",
+        env.get("/providers").body
+    );
 
     let reloaded = env.post_empty("/reload");
     assert_eq!(reloaded.status, 200, "{}", reloaded.body);
@@ -453,9 +599,17 @@ echo '{"type":"error","message":"429 rate limited","retryable":true,"provider_fa
     let cleared = wait_until(Duration::from_secs(5), || {
         env.get("/providers").json()["items"]
             .as_array()
-            .is_some_and(|items| items.iter().any(|p| p["id"] == "acct-a" && p["cooldown"].is_null()))
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|p| p["id"] == "acct-a" && p["cooldown"].is_null())
+            })
     });
-    assert!(cleared, "cooldown was not cleared by reload: {}", env.get("/providers").body);
+    assert!(
+        cleared,
+        "cooldown was not cleared by reload: {}",
+        env.get("/providers").body
+    );
 
     drop(daemon);
     env.replay_is_consistent();

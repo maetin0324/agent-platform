@@ -66,16 +66,24 @@ mod tests {
 
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
-            self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+            self.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(msg.to_string());
         }
         fn artifact(&self, _artifact: &ArtifactRef) {}
         fn delegate(&self, tasks: &[DelegateTask]) {
-            self.delegated.lock().unwrap_or_else(|e| e.into_inner()).push(tasks.to_vec());
+            self.delegated
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(tasks.to_vec());
         }
     }
 
     fn sample_task_json(title: &str) -> String {
-        format!(r#"{{"title":"{title}","objective":"o","acceptance":[{{"text":"c","check":{{"type":"human"}}}}]}}"#)
+        format!(
+            r#"{{"title":"{title}","objective":"o","acceptance":[{{"text":"c","check":{{"type":"human"}}}}]}}"#
+        )
     }
 
     #[tokio::test]
@@ -93,7 +101,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(DELEGATE_FILE_NAME),
-            format!(r#"{{"tasks":[{},{}]}}"#, sample_task_json("a"), sample_task_json("b")),
+            format!(
+                r#"{{"tasks":[{},{}]}}"#,
+                sample_task_json("a"),
+                sample_task_json("b")
+            ),
         )
         .unwrap();
         let sink = RecordingSink::default();

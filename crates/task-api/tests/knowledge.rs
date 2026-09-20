@@ -15,15 +15,26 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 fn g(path: &str) -> axum::http::Request<axum::body::Body> {
-    get_with(path, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    get_with(
+        path,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn p(path: &str, body: &Value) -> axum::http::Request<axum::body::Body> {
-    post_json_with(path, body, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    post_json_with(
+        path,
+        body,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn pu(path: &str, body: &Value) -> axum::http::Request<axum::body::Body> {
-    put_json_with(path, body, &[("authorization", format!("Bearer {TOKEN}").as_str())])
+    put_json_with(
+        path,
+        body,
+        &[("authorization", format!("Bearer {TOKEN}").as_str())],
+    )
 }
 
 fn env() -> TestEnv {
@@ -70,11 +81,17 @@ async fn an_uninitialized_knowledge_base_reads_empty_and_refuses_writes() {
     assert_eq!(inbox.json()["initialized"], false);
 
     // 読み取りは**何も作らない**（ディレクトリすらできない）。
-    assert!(!env.knowledge_root.exists(), "読み取りが KB を作ってはいけない");
+    assert!(
+        !env.knowledge_root.exists(),
+        "読み取りが KB を作ってはいけない"
+    );
 
     let put = send(
         &app,
-        pu("/api/v1/knowledge/page", &json!({"path": "user/x.md", "body": "# x\n"})),
+        pu(
+            "/api/v1/knowledge/page",
+            &json!({"path": "user/x.md", "body": "# x\n"}),
+        ),
     )
     .await;
     assert_problem(&put, 409, "knowledge_unavailable");
@@ -104,9 +121,17 @@ async fn the_tree_lists_pages_and_filters_by_scope_and_query() {
     let body = tree.json();
     assert_eq!(body["initialized"], true);
     assert_eq!(body["root"], env.knowledge_root.display().to_string());
-    assert!(body["generated_at"].as_str().is_some_and(|s| s.contains('T')), "{body}");
+    assert!(
+        body["generated_at"]
+            .as_str()
+            .is_some_and(|s| s.contains('T')),
+        "{body}"
+    );
     let paths = item_paths(&body);
-    assert!(paths.iter().any(|p| p == "environment/clusters/pegasus.md"), "{paths:?}");
+    assert!(
+        paths.iter().any(|p| p == "environment/clusters/pegasus.md"),
+        "{paths:?}"
+    );
     assert!(paths.iter().any(|p| p == "user/profile.md"), "{paths:?}");
     // `_inbox` は索引に出ない。
     assert!(!paths.iter().any(|p| p.starts_with("_inbox/")), "{paths:?}");
@@ -115,14 +140,22 @@ async fn the_tree_lists_pages_and_filters_by_scope_and_query() {
     sorted.sort();
     assert_eq!(paths, sorted, "{paths:?}");
     // 見出し（ディレクトリ）の一覧。
-    let scopes: Vec<&str> = body["scopes"].as_array().expect("scopes").iter().filter_map(Value::as_str).collect();
+    let scopes: Vec<&str> = body["scopes"]
+        .as_array()
+        .expect("scopes")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
     assert!(scopes.contains(&"environment/clusters"), "{scopes:?}");
 
     // `?scope=` で絞る（`init` の雛形の pegasus / sirius / fern03 がここに居る）。
     let scoped = send(&app, g("/api/v1/knowledge/tree?scope=environment/clusters")).await;
     let items = scoped.json()["items"].as_array().expect("items").clone();
     assert!(
-        items.iter().all(|i| i["path"].as_str().unwrap_or("").starts_with("environment/clusters/")),
+        items.iter().all(|i| i["path"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("environment/clusters/")),
         "{}",
         scoped.text()
     );
@@ -134,23 +167,41 @@ async fn the_tree_lists_pages_and_filters_by_scope_and_query() {
     assert_eq!(pegasus["tags"][0], "hpc");
     assert_eq!(scoped.json()["scope"], "environment/clusters");
     // `user/` のページはこの scope には出ない。
-    assert!(!items.iter().any(|i| i["path"] == "user/profile.md"), "{}", scoped.text());
+    assert!(
+        !items.iter().any(|i| i["path"] == "user/profile.md"),
+        "{}",
+        scoped.text()
+    );
 
     // `?q=`: 本文でしか当たらないページも拾う（全文一致）。
     let q = send(&app, g("/api/v1/knowledge/tree?q=pjsub")).await;
     let hits = item_paths(&q.json());
-    assert!(hits.iter().any(|p| p == "environment/clusters/pegasus.md"), "{hits:?}");
-    assert!(hits.iter().any(|p| p == "experience/2026/09/hpc.md"), "{hits:?}");
+    assert!(
+        hits.iter().any(|p| p == "environment/clusters/pegasus.md"),
+        "{hits:?}"
+    );
+    assert!(
+        hits.iter().any(|p| p == "experience/2026/09/hpc.md"),
+        "{hits:?}"
+    );
     // tag で当たるページだけが返り、当たらないページ（`experience`）は出ない。
     let cluster = send(&app, g("/api/v1/knowledge/tree?q=cluster")).await;
     let hits = item_paths(&cluster.json());
-    assert!(hits.iter().any(|p| p == "environment/clusters/pegasus.md"), "{hits:?}");
+    assert!(
+        hits.iter().any(|p| p == "environment/clusters/pegasus.md"),
+        "{hits:?}"
+    );
     // tag で当たるページが先、本文でしか当たらないページ（README）は後ろ。
     assert!(
-        hits[..3].iter().all(|p| p.starts_with("environment/clusters/")),
+        hits[..3]
+            .iter()
+            .all(|p| p.starts_with("environment/clusters/")),
         "tag 一致が先: {hits:?}"
     );
-    assert!(!hits.iter().any(|p| p.starts_with("experience/")), "{hits:?}");
+    assert!(
+        !hits.iter().any(|p| p.starts_with("experience/")),
+        "{hits:?}"
+    );
 }
 
 /// ページは front matter を分けて描画し、履歴と etag を返す。生 HTML は捨てる。
@@ -176,7 +227,11 @@ async fn a_page_is_rendered_with_its_front_matter_history_and_etag() {
     assert_eq!(created.json()["unchanged"], false);
     let etag = created.json()["etag"].as_str().expect("etag").to_string();
 
-    let page = send(&app, g("/api/v1/knowledge/page?path=environment/clusters/wisteria.md")).await;
+    let page = send(
+        &app,
+        g("/api/v1/knowledge/page?path=environment/clusters/wisteria.md"),
+    )
+    .await;
     assert_eq!(page.status.as_u16(), 200, "{}", page.text());
     let body = page.json();
     assert_eq!(body["title"], "wisteria の使い方");
@@ -189,16 +244,27 @@ async fn a_page_is_rendered_with_its_front_matter_history_and_etag() {
     assert!(!html.contains("<script"), "{html}");
     assert!(html.contains("href=\"/tasks/01J1\""), "{html}");
     assert!(html.contains("/knowledge?path=user/profile.md"), "{html}");
-    assert!(body["raw"].as_str().is_some_and(|r| r.starts_with("---\n")), "{body}");
+    assert!(
+        body["raw"].as_str().is_some_and(|r| r.starts_with("---\n")),
+        "{body}"
+    );
     let history = body["history"].as_array().expect("history");
     assert_eq!(history.len(), 1, "{body}");
     assert_eq!(history[0]["author"], "Celeris (human)");
-    assert_eq!(history[0]["subject"], "knowledge: environment/clusters/wisteria.md");
+    assert_eq!(
+        history[0]["subject"],
+        "knowledge: environment/clusters/wisteria.md"
+    );
 
     // 書いたら索引が作り直されている（`reindex` を別に呼ばなくてもツリーに出る）。
     let tree = send(&app, g("/api/v1/knowledge/tree?scope=environment")).await;
     let paths = item_paths(&tree.json());
-    assert!(paths.iter().any(|p| p == "environment/clusters/wisteria.md"), "{paths:?}");
+    assert!(
+        paths
+            .iter()
+            .any(|p| p == "environment/clusters/wisteria.md"),
+        "{paths:?}"
+    );
 
     // 無いページは 404。
     let missing = send(&app, g("/api/v1/knowledge/page?path=user/nope.md")).await;
@@ -212,36 +278,89 @@ async fn writing_a_page_checks_the_etag_and_the_path() {
     init_kb(&env.knowledge_root);
     let app = env.router();
 
-    let first = send(&app, pu("/api/v1/knowledge/page", &json!({"path": "user/notes.md", "body": "# メモ\n"}))).await;
+    let first = send(
+        &app,
+        pu(
+            "/api/v1/knowledge/page",
+            &json!({"path": "user/notes.md", "body": "# メモ\n"}),
+        ),
+    )
+    .await;
     assert_eq!(first.status.as_u16(), 200, "{}", first.text());
     let etag = first.json()["etag"].as_str().expect("etag").to_string();
 
     // 既にあるのに etag 無しは 409（いまの値が載る）。
-    let clash = send(&app, pu("/api/v1/knowledge/page", &json!({"path": "user/notes.md", "body": "# 別\n"}))).await;
+    let clash = send(
+        &app,
+        pu(
+            "/api/v1/knowledge/page",
+            &json!({"path": "user/notes.md", "body": "# 別\n"}),
+        ),
+    )
+    .await;
     let problem = assert_problem(&clash, 409, "etag_mismatch");
     assert_eq!(problem["etag"], etag);
 
     // 正しい etag なら通る。同じ中身なら `unchanged`。
     let same = send(
         &app,
-        pu("/api/v1/knowledge/page", &json!({"path": "user/notes.md", "body": "# メモ\n", "etag": etag})),
+        pu(
+            "/api/v1/knowledge/page",
+            &json!({"path": "user/notes.md", "body": "# メモ\n", "etag": etag}),
+        ),
     )
     .await;
     assert_eq!(same.status.as_u16(), 200, "{}", same.text());
     assert_eq!(same.json()["unchanged"], true);
 
     // 根の外・`.md` 以外・`_inbox` は弾く。
-    let escape = send(&app, pu("/api/v1/knowledge/page", &json!({"path": "../etc/passwd.md", "body": "x"}))).await;
+    let escape = send(
+        &app,
+        pu(
+            "/api/v1/knowledge/page",
+            &json!({"path": "../etc/passwd.md", "body": "x"}),
+        ),
+    )
+    .await;
     assert_problem(&escape, 403, "path_forbidden");
-    let absolute = send(&app, pu("/api/v1/knowledge/page", &json!({"path": "/etc/passwd.md", "body": "x"}))).await;
+    let absolute = send(
+        &app,
+        pu(
+            "/api/v1/knowledge/page",
+            &json!({"path": "/etc/passwd.md", "body": "x"}),
+        ),
+    )
+    .await;
     assert_problem(&absolute, 403, "path_forbidden");
-    let not_md = send(&app, pu("/api/v1/knowledge/page", &json!({"path": "user/a.txt", "body": "x"}))).await;
+    let not_md = send(
+        &app,
+        pu(
+            "/api/v1/knowledge/page",
+            &json!({"path": "user/a.txt", "body": "x"}),
+        ),
+    )
+    .await;
     assert_problem(&not_md, 422, "validation");
-    let inbox = send(&app, pu("/api/v1/knowledge/page", &json!({"path": "_inbox/x.md", "body": "x"}))).await;
+    let inbox = send(
+        &app,
+        pu(
+            "/api/v1/knowledge/page",
+            &json!({"path": "_inbox/x.md", "body": "x"}),
+        ),
+    )
+    .await;
     assert_problem(&inbox, 403, "path_forbidden");
     // 読み取りも同じ境界。
-    assert_problem(&send(&app, g("/api/v1/knowledge/page?path=../x.md")).await, 403, "path_forbidden");
-    assert_problem(&send(&app, g("/api/v1/knowledge/page?path=x.txt")).await, 422, "validation");
+    assert_problem(
+        &send(&app, g("/api/v1/knowledge/page?path=../x.md")).await,
+        403,
+        "path_forbidden",
+    );
+    assert_problem(
+        &send(&app, g("/api/v1/knowledge/page?path=x.txt")).await,
+        422,
+        "validation",
+    );
 }
 
 /// 候補（`_inbox`）の一覧と accept / reject。コミットは git に残る。
@@ -275,7 +394,13 @@ async fn candidates_can_be_accepted_or_rejected() {
     assert_eq!(items[0]["target_exists"], false);
     assert_eq!(items[0]["confidence"], "medium");
     assert_eq!(items[0]["sources"][0], "task:01J1");
-    assert!(items[0]["html"].as_str().is_some_and(|h| h.contains("ssh fern03")), "{}", inbox.text());
+    assert!(
+        items[0]["html"]
+            .as_str()
+            .is_some_and(|h| h.contains("ssh fern03")),
+        "{}",
+        inbox.text()
+    );
     // 候補はツリー（索引）には出ない。
     let tree = send(&app, g("/api/v1/knowledge/tree")).await;
     assert_eq!(tree.json()["inbox_count"], 1);
@@ -290,26 +415,60 @@ async fn candidates_can_be_accepted_or_rejected() {
     );
     // `%2F` はデコードされて `/` を含む id になるので、境界で 403 になる。
     assert_problem(
-        &send(&app, p("/api/v1/knowledge/inbox/..%2F..%2Fetc/reject", &json!({}))).await,
+        &send(
+            &app,
+            p("/api/v1/knowledge/inbox/..%2F..%2Fetc/reject", &json!({})),
+        )
+        .await,
         403,
         "path_forbidden",
     );
 
     // accept は正本に移してコミットする。
-    let accepted = send(&app, p(&format!("/api/v1/knowledge/inbox/{}/accept", one.id), &json!({}))).await;
+    let accepted = send(
+        &app,
+        p(
+            &format!("/api/v1/knowledge/inbox/{}/accept", one.id),
+            &json!({}),
+        ),
+    )
+    .await;
     assert_eq!(accepted.status.as_u16(), 200, "{}", accepted.text());
     assert_eq!(accepted.json()["path"], "environment/servers/fern03.md");
     assert!(accepted.json()["etag"].as_str().is_some());
-    let page = send(&app, g("/api/v1/knowledge/page?path=environment/servers/fern03.md")).await;
+    let page = send(
+        &app,
+        g("/api/v1/knowledge/page?path=environment/servers/fern03.md"),
+    )
+    .await;
     assert_eq!(page.status.as_u16(), 200, "{}", page.text());
     assert_eq!(page.json()["title"], "fern03 の使い方");
     // `_inbox` 専用の `path:` は落ちる。
-    assert!(!page.json()["raw"].as_str().unwrap_or("").contains("\npath:"), "{}", page.text());
+    assert!(
+        !page.json()["raw"]
+            .as_str()
+            .unwrap_or("")
+            .contains("\npath:"),
+        "{}",
+        page.text()
+    );
     assert_eq!(page.json()["history"].as_array().map(Vec::len), Some(1));
-    assert_eq!(send(&app, g("/api/v1/knowledge/inbox")).await.json()["items"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        send(&app, g("/api/v1/knowledge/inbox")).await.json()["items"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
     // 同じ id はもう無い。
     assert_problem(
-        &send(&app, p(&format!("/api/v1/knowledge/inbox/{}/accept", one.id), &json!({}))).await,
+        &send(
+            &app,
+            p(
+                &format!("/api/v1/knowledge/inbox/{}/accept", one.id),
+                &json!({}),
+            ),
+        )
+        .await,
         404,
         "candidate_not_found",
     );
@@ -330,13 +489,23 @@ async fn candidates_can_be_accepted_or_rejected() {
     let listed = send(&app, g("/api/v1/knowledge/inbox")).await;
     assert_eq!(listed.json()["items"][0]["target_exists"], true);
     assert_problem(
-        &send(&app, p(&format!("/api/v1/knowledge/inbox/{}/accept", two.id), &json!({}))).await,
+        &send(
+            &app,
+            p(
+                &format!("/api/v1/knowledge/inbox/{}/accept", two.id),
+                &json!({}),
+            ),
+        )
+        .await,
         409,
         "page_exists",
     );
     let forced = send(
         &app,
-        p(&format!("/api/v1/knowledge/inbox/{}/accept", two.id), &json!({"overwrite": true})),
+        p(
+            &format!("/api/v1/knowledge/inbox/{}/accept", two.id),
+            &json!({"overwrite": true}),
+        ),
     )
     .await;
     assert_eq!(forced.status.as_u16(), 200, "{}", forced.text());
@@ -353,13 +522,31 @@ async fn candidates_can_be_accepted_or_rejected() {
         },
     )
     .expect("record");
-    let rejected = send(&app, p(&format!("/api/v1/knowledge/inbox/{}/reject", three.id), &json!({}))).await;
+    let rejected = send(
+        &app,
+        p(
+            &format!("/api/v1/knowledge/inbox/{}/reject", three.id),
+            &json!({}),
+        ),
+    )
+    .await;
     assert_eq!(rejected.status.as_u16(), 200, "{}", rejected.text());
     assert_eq!(rejected.json()["id"], three.id);
-    assert!(rejected.json()["sha"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(
+        rejected.json()["sha"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
     assert!(!env.knowledge_root.join(&three.path).exists());
     assert_problem(
-        &send(&app, p(&format!("/api/v1/knowledge/inbox/{}/reject", three.id), &json!({}))).await,
+        &send(
+            &app,
+            p(
+                &format!("/api/v1/knowledge/inbox/{}/reject", three.id),
+                &json!({}),
+            ),
+        )
+        .await,
         404,
         "candidate_not_found",
     );
@@ -374,7 +561,12 @@ async fn the_write_endpoints_are_admin_only() {
 
     // 読み取りはトークン無しでも通る（`token_file` 設定時の共通規則に従う）。
     let anonymous_tree = send(&app, get("/api/v1/knowledge/tree")).await;
-    assert_eq!(anonymous_tree.status.as_u16(), 401, "{}", anonymous_tree.text());
+    assert_eq!(
+        anonymous_tree.status.as_u16(),
+        401,
+        "{}",
+        anonymous_tree.text()
+    );
 
     // 変更系はトークンがあっても管理系のヘッダが要る（ここでは Bearer が管理系の資格）。
     let no_token = send(
@@ -385,7 +577,11 @@ async fn the_write_endpoints_are_admin_only() {
     assert_eq!(no_token.status.as_u16(), 401, "{}", no_token.text());
     let put_no_token = send(
         &app,
-        put_json_with("/api/v1/knowledge/page", &json!({"path": "user/a.md", "body": "x"}), &[]),
+        put_json_with(
+            "/api/v1/knowledge/page",
+            &json!({"path": "user/a.md", "body": "x"}),
+            &[],
+        ),
     )
     .await;
     assert_eq!(put_no_token.status.as_u16(), 401, "{}", put_no_token.text());

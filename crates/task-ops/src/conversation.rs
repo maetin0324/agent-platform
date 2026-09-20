@@ -11,9 +11,9 @@ use std::path::PathBuf;
 
 use task_core::approval::{Approval, Decision, StandingRule};
 use task_core::{
-    Budget, DelegateTask, GenreSpec, ListFilter, ListOrder, Message, MessageId, MessageRole, OrgNode, ProjectId,
-    RoleSpec, Status, Task, TaskId, TaskKind, TaskStore, Tier, Trigger, WorkerHint, WorkspaceSpec, conversation_title,
-    department_of, failure_reply,
+    Budget, DelegateTask, GenreSpec, ListFilter, ListOrder, Message, MessageId, MessageRole,
+    OrgNode, ProjectId, RoleSpec, Status, Task, TaskId, TaskKind, TaskStore, Tier, Trigger,
+    WorkerHint, WorkspaceSpec, conversation_title, department_of, failure_reply,
 };
 use time::OffsetDateTime;
 
@@ -59,7 +59,17 @@ pub fn start(
     conversation_genre: &str,
     now: OffsetDateTime,
 ) -> Result<StartedConversation, OpsError> {
-    start_with_milestone(store, node_id, project_id, None, text, roles, genres, conversation_genre, now)
+    start_with_milestone(
+        store,
+        node_id,
+        project_id,
+        None,
+        text,
+        roles,
+        genres,
+        conversation_genre,
+        now,
+    )
 }
 
 /// Phase 41（ADR-0038 D1）: `start` と同じ対話を、**途中目標に紐づけて**起こす（レビューの対話）。
@@ -81,18 +91,30 @@ pub fn start_with_milestone(
         return Err(OpsError::Validation("text must not be blank".to_string()));
     }
     let Some(node) = store.org_get(node_id)? else {
-        return Err(OpsError::Validation(format!("{node_id:?} is not an org node")));
+        return Err(OpsError::Validation(format!(
+            "{node_id:?} is not an org node"
+        )));
     };
     if let Some(project_id) = project_id
         && store.project_get(project_id)?.is_none()
     {
-        return Err(OpsError::Validation(format!("project {project_id} does not exist")));
+        return Err(OpsError::Validation(format!(
+            "project {project_id} does not exist"
+        )));
     }
 
     // 監査 M-3: 同じノード・同じ案件に未終了の対話タスクがあれば、その後ろに並べる（返事は送った順に返る）。
     let depends_on = open_conversation_tasks(store, &node.id, project_id)?;
 
-    let mut task = conversation_task(&node, project_id, text, roles, genres, conversation_genre, now);
+    let mut task = conversation_task(
+        &node,
+        project_id,
+        text,
+        roles,
+        genres,
+        conversation_genre,
+        now,
+    );
     task.depends_on = depends_on;
     task.milestone_id = milestone_id;
     let message = Message {
@@ -141,7 +163,9 @@ fn open_conversation_tasks(
         .items
         .iter()
         .filter(|t| {
-            task_core::is_conversation(t) && t.assignee.as_deref() == Some(node_id) && t.project_id == project_id
+            task_core::is_conversation(t)
+                && t.assignee.as_deref() == Some(node_id)
+                && t.project_id == project_id
         })
         .collect();
     open.sort_by_key(|t| t.created_at);
@@ -183,7 +207,8 @@ fn conversation_task(
             adapter: role.and_then(|r| r.adapter.clone()),
         },
         workspace: WorkspaceSpec::Local {
-            path: PathBuf::from(id.to_string()), mode: None,
+            path: PathBuf::from(id.to_string()),
+            mode: None,
         },
         budget: Budget {
             max_turns: CONVERSATION_MAX_TURNS,
@@ -197,6 +222,9 @@ fn conversation_task(
         role: role.map(|r| r.id.clone()),
         genre: genre.map(|g| g.id.clone()),
         aggregate: false,
+        // ADR-0046 D2 / D4（Phase 59）: 対話には必要な能力タグも進め方も無い（返事に合否は無い）。
+        skills: Vec::new(),
+        mode: task_core::TaskMode::default(),
         project_id,
         milestone_id: None,
         assignee: Some(node.id.clone()),
@@ -398,7 +426,10 @@ pub fn split_delegation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use task_core::{CONVERSATION_GENRE, Check, Criterion, DelegateTask, OrgKind, Project, ProjectStatus, SqliteStore};
+    use task_core::{
+        CONVERSATION_GENRE, Check, Criterion, DelegateTask, OrgKind, Project, ProjectStatus,
+        SqliteStore,
+    };
 
     fn now() -> OffsetDateTime {
         OffsetDateTime::now_utc()
@@ -407,6 +438,7 @@ mod tests {
     fn node(id: &str, parent: Option<&str>, kind: OrgKind, genre: Option<&str>) -> OrgNode {
         let t = now();
         OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: format!("{id} さん"),
@@ -423,10 +455,20 @@ mod tests {
         for n in [
             node("secretary", None, OrgKind::Secretary, Some("secretary")),
             node("research", Some("secretary"), OrgKind::Department, None),
-            node("research-survey", Some("research"), OrgKind::Section, Some("literature")),
+            node(
+                "research-survey",
+                Some("research"),
+                OrgKind::Section,
+                Some("literature"),
+            ),
             node("research-data", Some("research"), OrgKind::Section, None),
             node("coding", Some("secretary"), OrgKind::Department, None),
-            node("coding-poc", Some("coding"), OrgKind::Section, Some("coding")),
+            node(
+                "coding-poc",
+                Some("coding"),
+                OrgKind::Section,
+                Some("coding"),
+            ),
         ] {
             store.org_upsert(&n).expect("org upsert");
         }
@@ -499,7 +541,13 @@ mod tests {
         .expect("start");
 
         assert_eq!(started.message.role, MessageRole::User);
-        assert_eq!(store.message_list("secretary", Some(project.id), 20).expect("list").len(), 1);
+        assert_eq!(
+            store
+                .message_list("secretary", Some(project.id), 20)
+                .expect("list")
+                .len(),
+            1
+        );
 
         let task = store.get(started.task.id).expect("get").expect("task");
         assert_eq!(task.status, Status::Ready, "話しかけた時点で run できる");
@@ -512,8 +560,14 @@ mod tests {
         assert_eq!(task.genre.as_deref(), Some("secretary"));
         assert_eq!(task.role.as_deref(), Some("secretary"));
         assert_eq!(task.worker_hint.adapter.as_deref(), Some("claude-code"));
-        assert_eq!(task.budget.max_turns, CONVERSATION_MAX_TURNS, "役割の 40 ではなく対話用の予算");
-        assert_eq!(task_core::conversation_origin(&task), Some(started.message.id));
+        assert_eq!(
+            task.budget.max_turns, CONVERSATION_MAX_TURNS,
+            "役割の 40 ではなく対話用の予算"
+        );
+        assert_eq!(
+            task_core::conversation_origin(&task),
+            Some(started.message.id)
+        );
     }
 
     /// Phase 30（ADR-0033 D4 追記）: 対話はノードの `genre`（仕事のハーネス）に関係なく、常に対話用分野
@@ -528,19 +582,45 @@ mod tests {
         let (roles, genres) = specs();
 
         // 分野を持たないノード（従来どおり対話用分野）。
-        let started = start(&store, "research-data", None, "図表の体裁を相談したい", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start");
+        let started = start(
+            &store,
+            "research-data",
+            None,
+            "図表の体裁を相談したい",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start");
         assert_eq!(started.task.genre.as_deref(), Some(CONVERSATION_GENRE));
         assert_eq!(started.task.role.as_deref(), Some("secretary"));
         assert_eq!(started.task.project_id, None);
 
         // 分野を持つノード（`research-survey` = 関連研究調査課、`genre = literature`）に話しかけても、
         // その分野（実機では web-research = LDR）ではなく、常に対話用分野・役割・adapter で run する。
-        let survey = start(&store, "research-survey", None, "先行研究の当て方", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start");
-        assert_eq!(survey.task.genre.as_deref(), Some(CONVERSATION_GENRE), "ノードの genre ではなく対話用分野");
+        let survey = start(
+            &store,
+            "research-survey",
+            None,
+            "先行研究の当て方",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start");
+        assert_eq!(
+            survey.task.genre.as_deref(),
+            Some(CONVERSATION_GENRE),
+            "ノードの genre ではなく対話用分野"
+        );
         assert_eq!(survey.task.role.as_deref(), Some("secretary"));
-        assert_eq!(survey.task.worker_hint.adapter.as_deref(), Some("claude-code"), "paperqa ではなく対話用の adapter");
+        assert_eq!(
+            survey.task.worker_hint.adapter.as_deref(),
+            Some("claude-code"),
+            "paperqa ではなく対話用の adapter"
+        );
     }
 
     /// 完了条件: `research-survey`（`genre = web-research`）への対話タスクが `secretary` 分野の役割・adapter
@@ -552,6 +632,7 @@ mod tests {
         let t = now();
         store
             .org_upsert(&OrgNode {
+                profile: Default::default(),
                 id: "secretary".into(),
                 parent_id: None,
                 name: "秘書".into(),
@@ -565,6 +646,7 @@ mod tests {
             .expect("org upsert");
         store
             .org_upsert(&OrgNode {
+                profile: Default::default(),
                 id: "research-survey".into(),
                 parent_id: Some("secretary".into()),
                 name: "関連研究調査課".into(),
@@ -597,9 +679,16 @@ mod tests {
             now(),
         )
         .expect("start");
-        assert_eq!(started.task.genre.as_deref(), Some("secretary"), "web-research（LDR）ではない");
+        assert_eq!(
+            started.task.genre.as_deref(),
+            Some("secretary"),
+            "web-research（LDR）ではない"
+        );
         assert_eq!(started.task.role.as_deref(), Some("secretary"));
-        assert_eq!(started.task.worker_hint.adapter.as_deref(), Some("claude-code"));
+        assert_eq!(
+            started.task.worker_hint.adapter.as_deref(),
+            Some("claude-code")
+        );
     }
 
     #[test]
@@ -608,19 +697,56 @@ mod tests {
         seed_org(&store);
         let (roles, genres) = specs();
         assert!(matches!(
-            start(&store, "ghost", None, "hello", &roles, &genres, CONVERSATION_GENRE, now()),
+            start(
+                &store,
+                "ghost",
+                None,
+                "hello",
+                &roles,
+                &genres,
+                CONVERSATION_GENRE,
+                now()
+            ),
             Err(OpsError::Validation(_))
         ));
         assert!(matches!(
-            start(&store, "secretary", Some(ProjectId::new()), "hello", &roles, &genres, CONVERSATION_GENRE, now()),
+            start(
+                &store,
+                "secretary",
+                Some(ProjectId::new()),
+                "hello",
+                &roles,
+                &genres,
+                CONVERSATION_GENRE,
+                now()
+            ),
             Err(OpsError::Validation(_))
         ));
         assert!(matches!(
-            start(&store, "secretary", None, "   ", &roles, &genres, CONVERSATION_GENRE, now()),
+            start(
+                &store,
+                "secretary",
+                None,
+                "   ",
+                &roles,
+                &genres,
+                CONVERSATION_GENRE,
+                now()
+            ),
             Err(OpsError::Validation(_))
         ));
-        assert!(store.message_list("secretary", None, 20).expect("list").is_empty());
-        assert!(store.message_list("ghost", None, 20).expect("list").is_empty());
+        assert!(
+            store
+                .message_list("secretary", None, 20)
+                .expect("list")
+                .is_empty()
+        );
+        assert!(
+            store
+                .message_list("ghost", None, 20)
+                .expect("list")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -628,7 +754,17 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         seed_org(&store);
         let (roles, genres) = specs();
-        let started = start(&store, "secretary", None, "状況を教えて", &roles, &genres, CONVERSATION_GENRE, now()).expect("start");
+        let started = start(
+            &store,
+            "secretary",
+            None,
+            "状況を教えて",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start");
 
         let reply = record_reply(&store, &started.task, "run-1", "順調です", now())
             .expect("record")
@@ -641,20 +777,36 @@ mod tests {
 
         // 空の summary は「返事できませんでした」に寄せる（空行は残さない）。
         record_reply(&store, &started.task, "run-2", "  ", now()).expect("record");
-        assert!(store.message_list("secretary", None, 20).expect("list")[2].text.starts_with("返事できませんでした"));
+        assert!(
+            store.message_list("secretary", None, 20).expect("list")[2]
+                .text
+                .starts_with("返事できませんでした")
+        );
 
         // 対話由来でないタスクは何も書かない。
         let mut plain = started.task.clone();
         plain.conversation = None;
-        assert_eq!(record_reply(&store, &plain, "run-3", "x", now()).expect("record"), None);
-        assert_eq!(store.message_list("secretary", None, 20).expect("list").len(), 3);
+        assert_eq!(
+            record_reply(&store, &plain, "run-3", "x", now()).expect("record"),
+            None
+        );
+        assert_eq!(
+            store
+                .message_list("secretary", None, 20)
+                .expect("list")
+                .len(),
+            3
+        );
     }
 
     fn proposal(assignee: Option<&str>, title: &str) -> DelegateTask {
         DelegateTask {
             title: title.into(),
             objective: "o".into(),
-            acceptance: vec![Criterion { text: "c".into(), check: Check::Human }],
+            acceptance: vec![Criterion {
+                text: "c".into(),
+                check: Check::Human,
+            }],
             role: None,
             genre: None,
             depends_on: vec![],
@@ -672,13 +824,27 @@ mod tests {
         seed_org(&store);
         let org = store.org_list().expect("org");
         let (roles, genres) = specs();
-        let mut parent = start(&store, "research-survey", None, "調べて", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
+        let mut parent = start(
+            &store,
+            "research-survey",
+            None,
+            "調べて",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
 
         // 同じ部（研究部）の課へ: 聞かない。
-        let split = split_delegation(&store, &org, &parent, &[proposal(Some("research-data"), "整理")])
-            .expect("split");
+        let split = split_delegation(
+            &store,
+            &org,
+            &parent,
+            &[proposal(Some("research-data"), "整理")],
+        )
+        .expect("split");
         assert_eq!(split.allowed.len(), 1);
         assert!(split.pending.is_empty() && split.denied.is_empty());
         // 担当なしの提案: 従来どおり（聞かない）。
@@ -691,7 +857,10 @@ mod tests {
             &store,
             &org,
             &parent,
-            &[proposal(Some("research-data"), "整理"), proposal(Some("coding-poc"), "PoC を書く")],
+            &[
+                proposal(Some("research-data"), "整理"),
+                proposal(Some("coding-poc"), "PoC を書く"),
+            ],
         )
         .expect("split");
         assert_eq!(split.allowed.len(), 1, "同じ部宛ては止めない: {split:?}");
@@ -705,7 +874,10 @@ mod tests {
                 title: "PoC を書く".into()
             }
         );
-        assert_eq!(split.pending[0].key(), "cross-department: research-survey -> coding-poc");
+        assert_eq!(
+            split.pending[0].key(),
+            "cross-department: research-survey -> coding-poc"
+        );
         assert_eq!(
             split.pending[0].question(),
             "cross-department: research-survey -> coding-poc: PoC を書く"
@@ -718,11 +890,13 @@ mod tests {
 
         // 委譲元が秘書（部に属さない）なら誰にでも振れる。
         parent.assignee = Some("secretary".into());
-        let split = split_delegation(&store, &org, &parent, &[proposal(Some("coding-poc"), "t")]).expect("split");
+        let split = split_delegation(&store, &org, &parent, &[proposal(Some("coding-poc"), "t")])
+            .expect("split");
         assert_eq!(split.allowed.len(), 1);
         // 担当を持たないタスクも従来どおり。
         parent.assignee = None;
-        let split = split_delegation(&store, &org, &parent, &[proposal(Some("coding-poc"), "t")]).expect("split");
+        let split = split_delegation(&store, &org, &parent, &[proposal(Some("coding-poc"), "t")])
+            .expect("split");
         assert_eq!(split.allowed.len(), 1);
     }
 
@@ -730,15 +904,26 @@ mod tests {
     /// `standing` は以後ずっと、`denied` は通さない。照合は鍵の前方一致で決定的。
     #[test]
     fn once_standing_and_denied_decide_whether_the_next_run_may_delegate_across_departments() {
-        use task_core::approval::{Approval, ApprovalId, ApprovalStore, Decision, StandingRule, StandingRuleId};
+        use task_core::approval::{
+            Approval, ApprovalId, ApprovalStore, Decision, StandingRule, StandingRuleId,
+        };
 
         let store = SqliteStore::open_in_memory().expect("open");
         seed_org(&store);
         let org = store.org_list().expect("org");
         let (roles, genres) = specs();
-        let parent = start(&store, "research-survey", None, "調べて", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
+        let parent = start(
+            &store,
+            "research-survey",
+            None,
+            "調べて",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
         let proposals = [proposal(Some("coding-poc"), "PoC を書く")];
         let crossing = CrossDepartment {
             from: "research-survey".into(),
@@ -748,7 +933,9 @@ mod tests {
 
         // まだ聞いていない: 認可待ち。
         assert_eq!(
-            split_delegation(&store, &org, &parent, &proposals).expect("split").pending,
+            split_delegation(&store, &org, &parent, &proposals)
+                .expect("split")
+                .pending,
             vec![crossing.clone()]
         );
 
@@ -773,11 +960,22 @@ mod tests {
         assert!(split.pending.is_empty());
 
         // 別のタスクの同じ委譲は、`once` では通らない（今回だけ）。
-        let other = start(&store, "research-survey", None, "別の件", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
+        let other = start(
+            &store,
+            "research-survey",
+            None,
+            "別の件",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
         assert_eq!(
-            split_delegation(&store, &org, &other, &proposals).expect("split").pending,
+            split_delegation(&store, &org, &other, &proposals)
+                .expect("split")
+                .pending,
             vec![crossing.clone()]
         );
 
@@ -796,9 +994,18 @@ mod tests {
         // `denied`: 子を作らず、もう聞かない（`answers[]` の「認めない」がワーカーに見える）。
         let store = SqliteStore::open_in_memory().expect("open");
         seed_org(&store);
-        let parent = start(&store, "research-survey", None, "調べて", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
+        let parent = start(
+            &store,
+            "research-survey",
+            None,
+            "調べて",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
         let approval = Approval {
             id: ApprovalId::new(),
             project_id: None,
@@ -812,7 +1019,12 @@ mod tests {
         };
         store.approval_append(&approval).expect("append");
         store
-            .approval_decide(approval.id, Decision::Denied, Some("認めない".into()), now())
+            .approval_decide(
+                approval.id,
+                Decision::Denied,
+                Some("認めない".into()),
+                now(),
+            )
             .expect("decide");
         let split = split_delegation(&store, &org, &parent, &proposals).expect("split");
         assert!(split.allowed.is_empty() && split.pending.is_empty());
@@ -839,34 +1051,87 @@ mod tests {
         };
         store.project_create(&project).expect("project");
 
-        let first = start(&store, "secretary", Some(project.id), "1 通目", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
-        let second = start(&store, "secretary", Some(project.id), "2 通目", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
+        let first = start(
+            &store,
+            "secretary",
+            Some(project.id),
+            "1 通目",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
+        let second = start(
+            &store,
+            "secretary",
+            Some(project.id),
+            "2 通目",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
         assert_eq!(second.depends_on, vec![first.id]);
-        let ready: Vec<TaskId> = store.ready_tasks(10).expect("ready").iter().map(|t| t.id).collect();
+        let ready: Vec<TaskId> = store
+            .ready_tasks(10)
+            .expect("ready")
+            .iter()
+            .map(|t| t.id)
+            .collect();
         assert_eq!(ready, vec![first.id], "2 通目はまだ run できない");
 
         // 別のノード宛て・別の案件（案件なし）は別の列（待たない）。
-        let other_node = start(&store, "research-survey", Some(project.id), "別の人へ", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
+        let other_node = start(
+            &store,
+            "research-survey",
+            Some(project.id),
+            "別の人へ",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
         assert!(other_node.depends_on.is_empty());
-        let no_project = start(&store, "secretary", None, "雑談", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
+        let no_project = start(
+            &store,
+            "secretary",
+            None,
+            "雑談",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
         assert!(no_project.depends_on.is_empty());
 
         // 1 通目が終われば 2 通目が run できる。
         store
             .acquire_lease(first.id, "run-1", std::time::Duration::from_secs(60))
             .expect("lease");
-        store.apply_transition(first.id, Trigger::WorkerDone, None).expect("done");
-        store.apply_transition(first.id, Trigger::ReviewPass, None).expect("pass");
-        let ready: Vec<TaskId> = store.ready_tasks(10).expect("ready").iter().map(|t| t.id).collect();
-        assert!(ready.contains(&second.id), "1 通目が done なら 2 通目が ready: {ready:?}");
+        store
+            .apply_transition(first.id, Trigger::WorkerDone, None)
+            .expect("done");
+        store
+            .apply_transition(first.id, Trigger::ReviewPass, None)
+            .expect("pass");
+        let ready: Vec<TaskId> = store
+            .ready_tasks(10)
+            .expect("ready")
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(
+            ready.contains(&second.id),
+            "1 通目が done なら 2 通目が ready: {ready:?}"
+        );
     }
 
     /// P-78（ADR-0033 D4 / Phase 28）: 対話タスクの `depends_on` は返事を送った順に返すための直列化だけが
@@ -878,12 +1143,30 @@ mod tests {
         seed_org(&store);
         let (roles, genres) = specs();
 
-        let first = start(&store, "secretary", None, "1 通目", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
-        let second = start(&store, "secretary", None, "2 通目", &roles, &genres, CONVERSATION_GENRE, now())
-            .expect("start")
-            .task;
+        let first = start(
+            &store,
+            "secretary",
+            None,
+            "1 通目",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
+        let second = start(
+            &store,
+            "secretary",
+            None,
+            "2 通目",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
         assert_eq!(second.depends_on, vec![first.id]);
 
         // 1 通目が失敗（非 retryable なので即 `Failed`）しても、2 通目は `cancelled` に連鎖しない。
@@ -893,14 +1176,25 @@ mod tests {
         store
             .apply_transition(first.id, Trigger::WorkerError { retryable: false }, None)
             .expect("fail");
-        assert_eq!(store.get(first.id).expect("get").expect("some").status, Status::Failed);
+        assert_eq!(
+            store.get(first.id).expect("get").expect("some").status,
+            Status::Failed
+        );
         assert_eq!(
             store.get(second.id).expect("get").expect("some").status,
             Status::Ready,
             "対話タスクは DependencyFailed の対象から外れる"
         );
-        let ready: Vec<TaskId> = store.ready_tasks(10).expect("ready").iter().map(|t| t.id).collect();
-        assert!(ready.contains(&second.id), "前が failed でも次は ready になる: {ready:?}");
+        let ready: Vec<TaskId> = store
+            .ready_tasks(10)
+            .expect("ready")
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(
+            ready.contains(&second.id),
+            "前が failed でも次は ready になる: {ready:?}"
+        );
     }
 
     /// R4（migration 0007）: 1 往復の両方の行に、それを起こした対話用タスクの id が入る。
@@ -909,10 +1203,23 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         seed_org(&store);
         let (roles, genres) = specs();
-        let started = start(&store, "secretary", None, "状況を教えて", &roles, &genres, CONVERSATION_GENRE, now()).expect("start");
+        let started = start(
+            &store,
+            "secretary",
+            None,
+            "状況を教えて",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start");
         assert_eq!(started.message.task_id, Some(started.task.id));
         record_reply(&store, &started.task, "run-1", "順調です", now()).expect("record");
         let thread = store.message_list("secretary", None, 20).expect("list");
-        assert!(thread.iter().all(|m| m.task_id == Some(started.task.id)), "{thread:?}");
+        assert!(
+            thread.iter().all(|m| m.task_id == Some(started.task.id)),
+            "{thread:?}"
+        );
     }
 }

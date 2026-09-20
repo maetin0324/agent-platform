@@ -109,20 +109,35 @@ mod tests {
         use task_core::*;
         let now = time::OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
             title: "t".into(),
             objective: "o".into(),
-            acceptance: vec![Criterion { text: "c".into(), check: Check::Human }],
+            acceptance: vec![Criterion {
+                text: "c".into(),
+                check: Check::Human,
+            }],
             inputs: vec![],
             depends_on: vec![],
             status: Status::Ready,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from(path), mode },
-            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: PathBuf::from(path),
+                mode,
+            },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at: now,

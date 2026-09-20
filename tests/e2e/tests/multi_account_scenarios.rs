@@ -17,7 +17,11 @@ fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
     let path = debug_dir.join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
@@ -34,7 +38,12 @@ impl Env {
         let root = tmp.path().canonicalize().unwrap();
         let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
-        Self { _tmp: tmp, root, db, store }
+        Self {
+            _tmp: tmp,
+            root,
+            db,
+            store,
+        }
     }
 
     /// `script` を fake ワーカーにし、`providers`（TOML の `[[providers]]` 群）を持つ設定を書く。
@@ -72,9 +81,18 @@ command = ["sh", "{script}"]
     }
 
     fn celerisctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("celerisctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
+        let out = Command::new(bin("celerisctl"))
+            .arg("--db")
+            .arg(&self.db)
+            .args(args)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "celerisctl {args:?} failed: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         stdout
     }
 
@@ -89,7 +107,15 @@ command = ["sh", "{script}"]
     fn run_celeris(&self, config: &std::path::Path, timeout: Duration) -> String {
         let log = self.root.join("celeris.log");
         let mut child = Command::new(bin("celeris"))
-            .args(["--config", config.to_str().unwrap(), "--until-idle", "--max-ticks", "2000", "--log-format", "text"])
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "--until-idle",
+                "--max-ticks",
+                "2000",
+                "--log-format",
+                "text",
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).unwrap())
@@ -116,7 +142,12 @@ command = ["sh", "{script}"]
     }
 
     fn events(&self, id: TaskId) -> Vec<Event> {
-        self.store.events_for(id).unwrap().into_iter().map(|(_, e)| e).collect()
+        self.store
+            .events_for(id)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect()
     }
 
     fn started_models(&self, id: TaskId) -> Vec<String> {
@@ -185,8 +216,22 @@ echo '{"type":"done","summary":"ok","evidence":[]}'"#,
     );
     let ws1 = env.workspace("ws-1");
     let ws2 = env.workspace("ws-2");
-    let t1 = env.add_approved(&["--title", "one", "--check-cmd", "test -f account.txt", "--workspace", &ws1]);
-    let t2 = env.add_approved(&["--title", "two", "--check-cmd", "test -f account.txt", "--workspace", &ws2]);
+    let t1 = env.add_approved(&[
+        "--title",
+        "one",
+        "--check-cmd",
+        "test -f account.txt",
+        "--workspace",
+        &ws1,
+    ]);
+    let t2 = env.add_approved(&[
+        "--title",
+        "two",
+        "--check-cmd",
+        "test -f account.txt",
+        "--workspace",
+        &ws2,
+    ]);
 
     let started = Instant::now();
     env.run_celeris(&config, Duration::from_secs(60));
@@ -200,10 +245,22 @@ echo '{"type":"done","summary":"ok","evidence":[]}'"#,
         .map(|ws| std::fs::read_to_string(PathBuf::from(ws).join("account.txt")).unwrap())
         .collect();
     assert_eq!(accounts, BTreeSet::from(["a".to_string(), "b".to_string()]));
-    let models: BTreeSet<String> = [t1, t2].iter().flat_map(|id| env.started_models(*id)).collect();
-    assert_eq!(models, BTreeSet::from(["model-a".to_string(), "model-b".to_string()]));
-    let providers: BTreeSet<String> = [t1, t2].iter().flat_map(|id| env.started_providers(*id)).collect();
-    assert_eq!(providers, BTreeSet::from(["acct-a".to_string(), "acct-b".to_string()]));
+    let models: BTreeSet<String> = [t1, t2]
+        .iter()
+        .flat_map(|id| env.started_models(*id))
+        .collect();
+    assert_eq!(
+        models,
+        BTreeSet::from(["model-a".to_string(), "model-b".to_string()])
+    );
+    let providers: BTreeSet<String> = [t1, t2]
+        .iter()
+        .flat_map(|id| env.started_providers(*id))
+        .collect();
+    assert_eq!(
+        providers,
+        BTreeSet::from(["acct-a".to_string(), "acct-b".to_string()])
+    );
     env.replay_is_consistent();
 }
 
@@ -223,12 +280,36 @@ fi"#,
         "",
     );
     let ws = env.workspace("ws-fallback");
-    let id = env.add_approved(&["--title", "fallback", "--check-cmd", "test -f account.txt", "--max-retries", "0", "--workspace", &ws]);
+    let id = env.add_approved(&[
+        "--title",
+        "fallback",
+        "--check-cmd",
+        "test -f account.txt",
+        "--max-retries",
+        "0",
+        "--workspace",
+        &ws,
+    ]);
 
     env.run_celeris(&config, Duration::from_secs(60));
     let t = env.task(id);
-    assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
-    assert_eq!(env.transition_reasons(id), vec!["accept", "dispatch", "requeue", "dispatch", "worker_done", "review_pass"]);
+    assert_eq!(
+        (t.status, t.attempts),
+        (Status::Done, 0),
+        "{:?}",
+        env.events(id)
+    );
+    assert_eq!(
+        env.transition_reasons(id),
+        vec![
+            "accept",
+            "dispatch",
+            "requeue",
+            "dispatch",
+            "worker_done",
+            "review_pass"
+        ]
+    );
     assert_eq!(env.started_models(id), vec!["model-a", "model-b"]);
     assert_eq!(env.started_providers(id), vec!["acct-a", "acct-b"]);
     // ADR-0013 D9: A の cooldown の開始が期限と種別つきでイベントに残る。
@@ -236,7 +317,10 @@ fi"#,
         e,
         Event::ProviderThrottled { provider, reason, .. } if provider == "acct-a" && reason.as_deref() == Some("throttled")
     )));
-    assert_eq!(std::fs::read_to_string(PathBuf::from(&ws).join("account.txt")).unwrap(), "b");
+    assert_eq!(
+        std::fs::read_to_string(PathBuf::from(&ws).join("account.txt")).unwrap(),
+        "b"
+    );
     env.replay_is_consistent();
 }
 
@@ -250,7 +334,16 @@ fn task_without_a_matching_provider_does_not_block_until_idle() {
         "[reviewer]\ntier = \"frontier\"",
     );
     let ws = env.workspace("ws-unroutable");
-    let id = env.add_approved(&["--title", "cheap", "--tier", "cheap", "--check-cmd", "true", "--workspace", &ws]);
+    let id = env.add_approved(&[
+        "--title",
+        "cheap",
+        "--tier",
+        "cheap",
+        "--check-cmd",
+        "true",
+        "--workspace",
+        &ws,
+    ]);
 
     let log = env.run_celeris(&config, Duration::from_secs(30));
     assert_eq!(env.task(id).status, Status::Ready);

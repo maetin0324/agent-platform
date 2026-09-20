@@ -96,12 +96,18 @@ impl RateLimitObservation {
         let info = line.get("rate_limit_info")?;
         let window = |name: &str| -> Option<RateWindow> {
             let w = info.get("unifiedWindows")?.get(name)?;
-            Some(RateWindow { utilization: w.get("utilization")?.as_f64()?, resets_at: w.get("resetsAt")?.as_i64()? })
+            Some(RateWindow {
+                utilization: w.get("utilization")?.as_f64()?,
+                resets_at: w.get("resetsAt")?.as_i64()?,
+            })
         };
         let obs = Self {
             five_hour: window("five_hour"),
             seven_day: window("seven_day"),
-            status: info.get("status").and_then(|v| v.as_str()).map(str::to_owned),
+            status: info
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             resets_at: info.get("resetsAt").and_then(|v| v.as_i64()),
             observed_at,
         };
@@ -153,7 +159,13 @@ fn codex_window(value: &serde_json::Value, observed_at: i64) -> Option<(RateWind
         .iter()
         .find_map(|key| value.get(key).and_then(|v| v.as_i64()));
     let resets_at = observed_at + resets_in_seconds.unwrap_or(window_minutes * 60);
-    Some((RateWindow { utilization: used_percent / 100.0, resets_at }, window_minutes > 1440))
+    Some((
+        RateWindow {
+            utilization: used_percent / 100.0,
+            resets_at,
+        },
+        window_minutes > 1440,
+    ))
 }
 
 #[cfg(test)]
@@ -167,8 +179,20 @@ mod tests {
         )
         .expect("json");
         let obs = RateLimitObservation::from_stream_json(&line, 100).expect("observation");
-        assert_eq!(obs.five_hour, Some(RateWindow { utilization: 0.14, resets_at: 1789605600 }));
-        assert_eq!(obs.seven_day, Some(RateWindow { utilization: 0.24, resets_at: 1790031600 }));
+        assert_eq!(
+            obs.five_hour,
+            Some(RateWindow {
+                utilization: 0.14,
+                resets_at: 1789605600
+            })
+        );
+        assert_eq!(
+            obs.seven_day,
+            Some(RateWindow {
+                utilization: 0.24,
+                resets_at: 1790031600
+            })
+        );
         assert_eq!(obs.status.as_deref(), Some("allowed"));
         assert_eq!(obs.resets_at, Some(1789605600));
         assert_eq!(obs.observed_at, 100);
@@ -176,17 +200,20 @@ mod tests {
 
     #[test]
     fn missing_windows_and_other_types_are_tolerated() {
-        let partial: serde_json::Value =
-            serde_json::from_str(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":5}}"#)
-                .expect("json");
+        let partial: serde_json::Value = serde_json::from_str(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":5}}"#,
+        )
+        .expect("json");
         let obs = RateLimitObservation::from_stream_json(&partial, 1).expect("status only");
         assert!(obs.five_hour.is_none() && obs.seven_day.is_none());
         assert_eq!(obs.status.as_deref(), Some("rejected"));
 
-        let other: serde_json::Value = serde_json::from_str(r#"{"type":"assistant"}"#).expect("json");
+        let other: serde_json::Value =
+            serde_json::from_str(r#"{"type":"assistant"}"#).expect("json");
         assert!(RateLimitObservation::from_stream_json(&other, 1).is_none());
         let empty: serde_json::Value =
-            serde_json::from_str(r#"{"type":"rate_limit_event","rate_limit_info":{}}"#).expect("json");
+            serde_json::from_str(r#"{"type":"rate_limit_event","rate_limit_info":{}}"#)
+                .expect("json");
         assert!(RateLimitObservation::from_stream_json(&empty, 1).is_none());
     }
 
@@ -196,15 +223,30 @@ mod tests {
     fn account_adapter_string_round_trip_and_markers() {
         assert_eq!(AccountAdapter::ClaudeCode.as_str(), "claude-code");
         assert_eq!(AccountAdapter::Codex.as_str(), "codex");
-        assert_eq!(AccountAdapter::parse("claude-code"), Some(AccountAdapter::ClaudeCode));
+        assert_eq!(
+            AccountAdapter::parse("claude-code"),
+            Some(AccountAdapter::ClaudeCode)
+        );
         assert_eq!(AccountAdapter::parse("codex"), Some(AccountAdapter::Codex));
         assert_eq!(AccountAdapter::parse("fake"), None);
-        assert_eq!(AccountAdapter::ClaudeCode.credentials_marker(), ".credentials.json");
+        assert_eq!(
+            AccountAdapter::ClaudeCode.credentials_marker(),
+            ".credentials.json"
+        );
         assert_eq!(AccountAdapter::Codex.credentials_marker(), "auth.json");
-        assert_eq!(AccountAdapter::ClaudeCode.env_var(), "CLAUDE_SECURESTORAGE_CONFIG_DIR");
+        assert_eq!(
+            AccountAdapter::ClaudeCode.env_var(),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+        );
         assert_eq!(AccountAdapter::Codex.env_var(), "CODEX_HOME");
-        assert_eq!(serde_json::to_string(&AccountAdapter::Codex).expect("json"), "\"codex\"");
-        assert_eq!(serde_json::to_string(&AccountAdapter::ClaudeCode).expect("json"), "\"claude-code\"");
+        assert_eq!(
+            serde_json::to_string(&AccountAdapter::Codex).expect("json"),
+            "\"codex\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AccountAdapter::ClaudeCode).expect("json"),
+            "\"claude-code\""
+        );
     }
 
     // ---- RateLimitObservation::from_codex_token_count (ADR-0025 D3) ----
@@ -217,8 +259,20 @@ mod tests {
         )
         .expect("json");
         let obs = RateLimitObservation::from_codex_token_count(&line, 1_000).expect("observation");
-        assert_eq!(obs.five_hour, Some(RateWindow { utilization: 0.14, resets_at: 1_000 + 3_600 }));
-        assert_eq!(obs.seven_day, Some(RateWindow { utilization: 0.24, resets_at: 1_000 + 432_000 }));
+        assert_eq!(
+            obs.five_hour,
+            Some(RateWindow {
+                utilization: 0.14,
+                resets_at: 1_000 + 3_600
+            })
+        );
+        assert_eq!(
+            obs.seven_day,
+            Some(RateWindow {
+                utilization: 0.24,
+                resets_at: 1_000 + 432_000
+            })
+        );
         assert_eq!(obs.observed_at, 1_000);
     }
 
@@ -230,7 +284,13 @@ mod tests {
         )
         .expect("json");
         let obs = RateLimitObservation::from_codex_token_count(&line, 500).expect("observation");
-        assert_eq!(obs.five_hour, Some(RateWindow { utilization: 0.5, resets_at: 500 + 7_200 }));
+        assert_eq!(
+            obs.five_hour,
+            Some(RateWindow {
+                utilization: 0.5,
+                resets_at: 500 + 7_200
+            })
+        );
         assert!(obs.seven_day.is_none());
     }
 
@@ -242,7 +302,13 @@ mod tests {
         )
         .expect("json");
         let obs = RateLimitObservation::from_codex_token_count(&line, 2_000).expect("observation");
-        assert_eq!(obs.seven_day, Some(RateWindow { utilization: 0.1, resets_at: 2_000 + 86_400 }));
+        assert_eq!(
+            obs.seven_day,
+            Some(RateWindow {
+                utilization: 0.1,
+                resets_at: 2_000 + 86_400
+            })
+        );
         assert!(obs.five_hour.is_none());
     }
 
@@ -254,7 +320,13 @@ mod tests {
         )
         .expect("json");
         let obs = RateLimitObservation::from_codex_token_count(&line, 100).expect("observation");
-        assert_eq!(obs.five_hour, Some(RateWindow { utilization: 0.2, resets_at: 100 + 300 * 60 }));
+        assert_eq!(
+            obs.five_hour,
+            Some(RateWindow {
+                utilization: 0.2,
+                resets_at: 100 + 300 * 60
+            })
+        );
     }
 
     /// `window_minutes` による枠の割り当て: 1440 以下は five_hour（短い枠）、それより長ければ seven_day（長い枠）。
@@ -266,7 +338,10 @@ mod tests {
         )
         .expect("json");
         let obs = RateLimitObservation::from_codex_token_count(&boundary, 0).expect("observation");
-        assert!(obs.five_hour.is_some(), "1440 minutes is still the short window");
+        assert!(
+            obs.five_hour.is_some(),
+            "1440 minutes is still the short window"
+        );
         assert!(obs.seven_day.is_none());
 
         // 名前が "secondary" でも window_minutes が短ければ five_hour 枠に入る。
@@ -289,10 +364,12 @@ mod tests {
 
     #[test]
     fn codex_token_count_wrong_type_or_missing_rate_limits_is_none() {
-        let wrong_type: serde_json::Value = serde_json::from_str(r#"{"type":"item.started"}"#).expect("json");
+        let wrong_type: serde_json::Value =
+            serde_json::from_str(r#"{"type":"item.started"}"#).expect("json");
         assert!(RateLimitObservation::from_codex_token_count(&wrong_type, 0).is_none());
 
-        let no_limits: serde_json::Value = serde_json::from_str(r#"{"type":"token_count"}"#).expect("json");
+        let no_limits: serde_json::Value =
+            serde_json::from_str(r#"{"type":"token_count"}"#).expect("json");
         assert!(RateLimitObservation::from_codex_token_count(&no_limits, 0).is_none());
 
         let empty_limits: serde_json::Value =

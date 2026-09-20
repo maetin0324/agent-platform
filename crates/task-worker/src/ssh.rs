@@ -39,7 +39,12 @@ pub struct WorktreeSettings {
 
 impl Default for WorktreeSettings {
     fn default() -> Self {
-        Self { root: None, base: "HEAD".to_string(), paths: Vec::new(), branch_prefix: "celeris/".to_string() }
+        Self {
+            root: None,
+            base: "HEAD".to_string(),
+            paths: Vec::new(),
+            branch_prefix: "celeris/".to_string(),
+        }
     }
 }
 
@@ -81,7 +86,11 @@ pub struct SshSettings {
 }
 
 impl SshSettings {
-    pub fn new(cluster: impl Into<String>, host: impl Into<String>, remote_dir: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        cluster: impl Into<String>,
+        host: impl Into<String>,
+        remote_dir: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             cluster: cluster.into(),
             host: host.into(),
@@ -109,7 +118,11 @@ impl SshSettings {
 
     /// worktree のパス（`worktree_root`/`<task_id>`。既定の root は `<project>/.celeris-worktrees`）。
     pub fn worktree_dir(&self) -> PathBuf {
-        let root = self.worktree.root.clone().unwrap_or_else(|| self.remote_dir.join(".celeris-worktrees"));
+        let root = self
+            .worktree
+            .root
+            .clone()
+            .unwrap_or_else(|| self.remote_dir.join(".celeris-worktrees"));
         root.join(&self.task_id)
     }
 
@@ -133,7 +146,10 @@ pub struct SshWorkspace {
 
 impl SshWorkspace {
     pub fn new(dir: impl Into<PathBuf>, settings: SshSettings) -> Self {
-        Self { local: LocalWorkspace::new(dir), settings }
+        Self {
+            local: LocalWorkspace::new(dir),
+            settings,
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -177,7 +193,13 @@ impl SshWorkspace {
             base = shq(base),
         );
         if !self.settings.worktree.paths.is_empty() {
-            let paths: Vec<String> = self.settings.worktree.paths.iter().map(|p| shq(p)).collect();
+            let paths: Vec<String> = self
+                .settings
+                .worktree
+                .paths
+                .iter()
+                .map(|p| shq(p))
+                .collect();
             inner.push_str(&format!(
                 "git -C {wt} sparse-checkout set --cone {paths} >/dev/null\n",
                 wt = shq(&wt),
@@ -246,7 +268,10 @@ impl SshWorkspace {
     /// リモートで走らせるスクリプト（作業ディレクトリへ移動 → env → setup → コマンド）。
     fn remote_script(&self, cmd: &str, timeout: Duration) -> String {
         let mut script = String::new();
-        script.push_str(&format!("cd {} && ", shq(&self.effective_remote_dir().to_string_lossy())));
+        script.push_str(&format!(
+            "cd {} && ",
+            shq(&self.effective_remote_dir().to_string_lossy())
+        ));
         for (k, v) in &self.settings.env {
             script.push_str(&format!("export {k}={} && ", shq(v)));
         }
@@ -266,7 +291,9 @@ impl SshWorkspace {
             return self.ensure_worktree().await;
         }
         let dir = self.effective_remote_dir().to_string_lossy().to_string();
-        let out = self.run_ssh(&format!("mkdir -p {}", shq(&dir)), Duration::from_secs(60)).await?;
+        let out = self
+            .run_ssh(&format!("mkdir -p {}", shq(&dir)), Duration::from_secs(60))
+            .await?;
         if out.exit != Some(0) {
             return Err(WorkspaceError::Remote(format!(
                 "cannot create the remote directory {dir} on {}: {}",
@@ -318,7 +345,11 @@ impl SshWorkspace {
             args.push(pattern.clone());
         }
         args.push(format!("{}/", self.local.dir().to_string_lossy()));
-        args.push(format!("{}:{}/", self.settings.host, self.effective_remote_dir().to_string_lossy()));
+        args.push(format!(
+            "{}:{}/",
+            self.settings.host,
+            self.effective_remote_dir().to_string_lossy()
+        ));
         self.run_rsync(&args, "push").await
     }
 
@@ -342,7 +373,11 @@ impl SshWorkspace {
             args.push("--exclude".into());
             args.push(pattern.clone());
         }
-        args.push(format!("{}:{}/", self.settings.host, self.effective_remote_dir().to_string_lossy()));
+        args.push(format!(
+            "{}:{}/",
+            self.settings.host,
+            self.effective_remote_dir().to_string_lossy()
+        ));
         args.push(format!("{}/", self.local.dir().to_string_lossy()));
         self.run_rsync(&args, "pull").await
     }
@@ -498,7 +533,9 @@ impl Workspace for SshWorkspace {
         }
         let script = self.remote_script(cmd, timeout);
         // ssh 自体のタイムアウトは、リモートの timeout より少し長くする。
-        let result = self.run_ssh(&script, timeout + Duration::from_secs(30)).await?;
+        let result = self
+            .run_ssh(&script, timeout + Duration::from_secs(30))
+            .await?;
         if self.settings.sync_around_exec {
             self.pull().await?;
         }

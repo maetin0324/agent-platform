@@ -69,7 +69,12 @@ impl ApiProblem {
     }
 
     pub(crate) fn unauthorized() -> Self {
-        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "a valid bearer token is required").with_header(
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "a valid bearer token is required",
+        )
+        .with_header(
             header::WWW_AUTHENTICATE,
             HeaderValue::from_static("Bearer realm=\"celeris\""),
         )
@@ -88,15 +93,27 @@ impl ApiProblem {
     }
 
     pub(crate) fn task_not_found(id: TaskId) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "task_not_found", format!("task not found: {id}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "task_not_found",
+            format!("task not found: {id}"),
+        )
     }
 
     pub(crate) fn run_not_found(run_id: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "run_not_found", format!("run directory not found: {run_id}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            format!("run directory not found: {run_id}"),
+        )
     }
 
     pub(crate) fn artifact_not_found(idx: usize) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "artifact_not_found", format!("artifact index out of range: {idx}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "artifact_not_found",
+            format!("artifact index out of range: {idx}"),
+        )
     }
 
     pub(crate) fn file_not_found(detail: impl Into<String>) -> Self {
@@ -109,12 +126,20 @@ impl ApiProblem {
 
     /// ADR-0017: 指定した provider id が `providers.d/` に無い。
     pub(crate) fn provider_not_found(id: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "provider_not_found", format!("provider not found: {id}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "provider_not_found",
+            format!("provider not found: {id}"),
+        )
     }
 
     /// ADR-0017 D1: `POST /api/v1/providers` の id が既に `providers.d/<id>.toml` にある。
     pub(crate) fn provider_exists(id: &str) -> Self {
-        Self::new(StatusCode::CONFLICT, "provider_exists", format!("provider already exists: {id}"))
+        Self::new(
+            StatusCode::CONFLICT,
+            "provider_exists",
+            format!("provider already exists: {id}"),
+        )
     }
 
     /// ADR-0017 M1: `providers_include` が未設定で、管理系の書き込みができない。
@@ -136,12 +161,20 @@ impl ApiProblem {
 
     /// ADR-0024 D5: 指定した account id が `[accounts] claude_dir` に無い。
     pub(crate) fn account_not_found(id: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "account_not_found", format!("account not found: {id}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "account_not_found",
+            format!("account not found: {id}"),
+        )
     }
 
     /// ADR-0024 D5: `POST /api/v1/accounts` の id が既にディレクトリとして存在する。
     pub(crate) fn account_exists(id: &str) -> Self {
-        Self::new(StatusCode::CONFLICT, "account_exists", format!("account already exists: {id}"))
+        Self::new(
+            StatusCode::CONFLICT,
+            "account_exists",
+            format!("account already exists: {id}"),
+        )
     }
 
     /// ADR-0024 D5: `[accounts]` が設定されていない。
@@ -155,12 +188,20 @@ impl ApiProblem {
 
     /// ADR-0024 D5: `in_use > 0` のアカウントは削除できない。
     pub(crate) fn account_in_use(id: &str) -> Self {
-        Self::new(StatusCode::CONFLICT, "account_in_use", format!("account is in use: {id}"))
+        Self::new(
+            StatusCode::CONFLICT,
+            "account_in_use",
+            format!("account is in use: {id}"),
+        )
     }
 
     /// ADR-0024 D5/D7: `login/code` を呼んだが進行中のログインが無い。
     pub(crate) fn login_not_started() -> Self {
-        Self::new(StatusCode::CONFLICT, "login_not_started", "no login is in progress for this account")
+        Self::new(
+            StatusCode::CONFLICT,
+            "login_not_started",
+            "no login is in progress for this account",
+        )
     }
 
     /// ADR-0024 D5/D7: `login` の開始自体に失敗した（15 秒以内に URL が出ない等）。
@@ -193,12 +234,20 @@ impl ApiProblem {
 
     /// ADR-0030 D3: 指定した secret id が `[secrets] dir` に無い（または id の形が不正）。
     pub(crate) fn secret_not_found(id: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "secret_not_found", format!("secret not found: {id}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "secret_not_found",
+            format!("secret not found: {id}"),
+        )
     }
 
     /// ADR-0032 D5: 指定した cluster id が `[[clusters]]` に無い。
     pub(crate) fn cluster_not_found(id: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "cluster_not_found", format!("cluster not found: {id}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "cluster_not_found",
+            format!("cluster not found: {id}"),
+        )
     }
 
     /// ADR-0032 D5: `auth = "manual"` のクラスタに `connect` した（人の操作で接続する運用のまま）。
@@ -242,12 +291,20 @@ impl ApiProblem {
     // ---- ADR-0033 D1/D2（Phase 23）: 組織・案件・途中目標 ----
 
     pub(crate) fn org_node_not_found(id: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "org_node_not_found", format!("org node not found: {id}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "org_node_not_found",
+            format!("org node not found: {id}"),
+        )
     }
 
     /// `POST /org` の id が既にある（更新は `PATCH /org/{id}`）。
     pub(crate) fn org_node_exists(id: &str) -> Self {
-        Self::new(StatusCode::CONFLICT, "org_node_exists", format!("org node already exists: {id}"))
+        Self::new(
+            StatusCode::CONFLICT,
+            "org_node_exists",
+            format!("org node already exists: {id}"),
+        )
     }
 
     /// ADR-0033 D1: 仕事を抱えている（または子を持つ）ノードは消せない。
@@ -261,11 +318,19 @@ impl ApiProblem {
     }
 
     pub(crate) fn project_not_found(id: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "project_not_found", format!("project not found: {id}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "project_not_found",
+            format!("project not found: {id}"),
+        )
     }
 
     pub(crate) fn milestone_not_found(id: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "milestone_not_found", format!("milestone not found: {id}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "milestone_not_found",
+            format!("milestone not found: {id}"),
+        )
     }
 
     /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory]` が設定されていない。
@@ -286,7 +351,11 @@ impl ApiProblem {
 
     /// ADR-0040 D6（Phase 48）: `POST /releases/{sha12}/promote` の sha12 が `releases_dir` に無い。
     pub(crate) fn release_not_found(sha12: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "release_not_found", format!("release not found: {sha12}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "release_not_found",
+            format!("release not found: {sha12}"),
+        )
     }
 
     /// ADR-0040 D6: 昇格を受け付けられない（未検証 / 既に current / 既に昇格中 / `[selfdeploy]` が無い）。
@@ -308,7 +377,11 @@ impl ApiProblem {
 
     /// ADR-0030 D3: `PUT /secrets/{id}` の値が空白だけ。
     pub(crate) fn secret_value_invalid() -> Self {
-        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "validation", "value must not be empty or whitespace-only")
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation",
+            "value must not be empty or whitespace-only",
+        )
     }
 
     pub(crate) fn method_not_allowed() -> Self {
@@ -354,7 +427,8 @@ impl ApiProblem {
             .map(|e| e.message.as_str())
             .collect::<Vec<_>>()
             .join("; ");
-        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "validation", detail).with_extra("errors", errors)
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "validation", detail)
+            .with_extra("errors", errors)
     }
 
     pub(crate) fn too_many_streams() -> Self {
@@ -367,8 +441,12 @@ impl ApiProblem {
     }
 
     pub(crate) fn db_busy() -> Self {
-        Self::new(StatusCode::SERVICE_UNAVAILABLE, "db_busy", "the database is busy")
-            .with_header(header::RETRY_AFTER, HeaderValue::from_static("1"))
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "db_busy",
+            "the database is busy",
+        )
+        .with_header(header::RETRY_AFTER, HeaderValue::from_static("1"))
     }
 
     pub(crate) fn replay_in_progress() -> Self {
@@ -399,7 +477,10 @@ impl ApiProblem {
         let mut response = Response::new(Body::from(body));
         *response.status_mut() = self.status;
         let headers = response.headers_mut();
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(PROBLEM_CONTENT_TYPE));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(PROBLEM_CONTENT_TYPE),
+        );
         for (name, value) in self.headers {
             headers.insert(name, value);
         }
@@ -437,14 +518,20 @@ pub(crate) fn validation_field(message: &str) -> Option<&'static str> {
 
 /// `OpsError` → HTTP（api.md §1.5 の写像表）。`trigger` は操作名（`approve` 等）。`InvalidState` の
 /// `task_status` / `kind` は現在のタスクから読む。
-pub(crate) fn ops_problem(store: &dyn TaskStore, err: OpsError, trigger: Option<&str>) -> ApiProblem {
+pub(crate) fn ops_problem(
+    store: &dyn TaskStore,
+    err: OpsError,
+    trigger: Option<&str>,
+) -> ApiProblem {
     let detail = err.to_string();
     match err {
         OpsError::NotFound(id) => ApiProblem::task_not_found(id),
         OpsError::InvalidState { id, .. } => {
             let mut problem = ApiProblem::new(StatusCode::CONFLICT, "invalid_transition", detail);
             if let Ok(Some(task)) = store.get(id) {
-                problem = problem.with_extra("task_status", task.status).with_extra("kind", task.kind);
+                problem = problem
+                    .with_extra("task_status", task.status)
+                    .with_extra("kind", task.kind);
             }
             if let Some(trigger) = trigger {
                 problem = problem.with_extra("trigger", trigger);
@@ -455,9 +542,11 @@ pub(crate) fn ops_problem(store: &dyn TaskStore, err: OpsError, trigger: Option<
             field: validation_field(&message).map(str::to_string),
             message,
         }]),
-        OpsError::Conflict { expected, actual } => ApiProblem::new(StatusCode::CONFLICT, "conflict", detail)
-            .with_extra("expected", expected)
-            .with_extra("actual", actual),
+        OpsError::Conflict { expected, actual } => {
+            ApiProblem::new(StatusCode::CONFLICT, "conflict", detail)
+                .with_extra("expected", expected)
+                .with_extra("actual", actual)
+        }
         // ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
         OpsError::ProjectNotFound(id) => ApiProblem::project_not_found(&id.to_string()),
         OpsError::MilestoneNotFound(id) => ApiProblem::milestone_not_found(&id.to_string()),
@@ -475,13 +564,18 @@ pub(crate) fn ops_problem(store: &dyn TaskStore, err: OpsError, trigger: Option<
 /// `StoreError` → HTTP。`InvalidTransition` は 409、`SQLITE_BUSY` は 503 `db_busy`、その他は 500。
 pub(crate) fn store_problem(err: StoreError) -> ApiProblem {
     match &err {
-        StoreError::InvalidTransition(t) => ApiProblem::new(StatusCode::CONFLICT, "invalid_transition", err.to_string())
-            .with_extra("task_status", t.status)
-            .with_extra("kind", t.kind)
-            .with_extra("trigger", t.trigger),
+        StoreError::InvalidTransition(t) => {
+            ApiProblem::new(StatusCode::CONFLICT, "invalid_transition", err.to_string())
+                .with_extra("task_status", t.status)
+                .with_extra("kind", t.kind)
+                .with_extra("trigger", t.trigger)
+        }
         StoreError::Sqlite(e) if is_busy(e) => ApiProblem::db_busy(),
         // ADR-0033 D1 / ADR-0043 D1: 使用中は 409、検証違反は 422（`OpsError::Validation` と同じ形）。
-        StoreError::InUse { kind: "project repo", .. } => ApiProblem::repo_in_use(err.to_string()),
+        StoreError::InUse {
+            kind: "project repo",
+            ..
+        } => ApiProblem::repo_in_use(err.to_string()),
         StoreError::InUse { .. } => ApiProblem::org_node_in_use(err.to_string()),
         StoreError::Org(_) | StoreError::Repo(_) => ApiProblem::validation(vec![ValidationError {
             field: None,
@@ -512,11 +606,20 @@ mod tests {
             ),
             Some("acceptance")
         );
-        assert_eq!(validation_field("dependency 01J does not exist"), Some("depends_on"));
+        assert_eq!(
+            validation_field("dependency 01J does not exist"),
+            Some("depends_on")
+        );
         assert_eq!(validation_field("goal must not be blank"), Some("goal"));
         assert_eq!(validation_field("title must not be blank"), Some("title"));
-        assert_eq!(validation_field("objective must not be blank"), Some("objective"));
-        assert_eq!(validation_field("parent 01J does not exist"), Some("parent"));
+        assert_eq!(
+            validation_field("objective must not be blank"),
+            Some("objective")
+        );
+        assert_eq!(
+            validation_field("parent 01J does not exist"),
+            Some("parent")
+        );
         assert_eq!(validation_field("graph has too many nodes"), None);
     }
 

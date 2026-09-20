@@ -22,12 +22,20 @@ fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
     let path = debug_dir.join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
@@ -68,7 +76,8 @@ struct Resp {
 
 impl Resp {
     fn json(&self) -> Value {
-        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("not JSON ({e}): {} {}", self.status, self.body))
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {} {}", self.status, self.body))
     }
 
     #[track_caller]
@@ -93,7 +102,13 @@ impl Env {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         let accounts_dir = root.join("codex-accounts");
-        Self { _tmp: tmp, root, accounts_dir, port: free_port(), token: None }
+        Self {
+            _tmp: tmp,
+            root,
+            accounts_dir,
+            port: free_port(),
+            token: None,
+        }
     }
 
     /// スタブの `codex`。`exec --json --skip-git-repo-check "..."`（check）と `exec --json <prompt>`（run）の
@@ -206,9 +221,18 @@ account_pool = true
     }
 
     fn celerisctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("celerisctl")).arg("--db").arg(self.root.join("celeris.sqlite3")).args(args).output().unwrap();
+        let out = Command::new(bin("celerisctl"))
+            .arg("--db")
+            .arg(self.root.join("celeris.sqlite3"))
+            .args(args)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "celerisctl {args:?} failed: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         stdout
     }
 
@@ -231,7 +255,10 @@ account_pool = true
 
     fn start_celeris(&self, config: &Path) -> Proc {
         static STARTS: AtomicUsize = AtomicUsize::new(0);
-        let log = self.root.join(format!("celeris-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
+        let log = self.root.join(format!(
+            "celeris-{}.log",
+            STARTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--log-format", "text"])
             .stdin(Stdio::null())
@@ -259,7 +286,11 @@ account_pool = true
             let resp = self.request("GET", "/daemon", None, &[]);
             resp.status != 200 || resp.json()["snapshot"].is_object()
         });
-        assert!(ticked, "the dispatcher never published a snapshot\n{}", daemon.log_text());
+        assert!(
+            ticked,
+            "the dispatcher never published a snapshot\n{}",
+            daemon.log_text()
+        );
     }
 
     fn url(&self, path: &str) -> String {
@@ -268,8 +299,23 @@ account_pool = true
 
     fn request(&self, method: &str, path: &str, body: Option<&str>, headers: &[&str]) -> Resp {
         let mut cmd = Command::new("curl");
-        cmd.args(["-s", "-S", "-D", "-", "--max-time", "35", "-H", "Expect:", "-X", method]);
-        let has = |name: &str| headers.iter().any(|h| h.to_ascii_lowercase().starts_with(&format!("{name}:")));
+        cmd.args([
+            "-s",
+            "-S",
+            "-D",
+            "-",
+            "--max-time",
+            "35",
+            "-H",
+            "Expect:",
+            "-X",
+            method,
+        ]);
+        let has = |name: &str| {
+            headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with(&format!("{name}:")))
+        };
         if let Some(token) = &self.token
             && !has("authorization")
         {
@@ -287,11 +333,23 @@ account_pool = true
         let out = cmd.arg(self.url(path)).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let Some((head, body)) = text.split_once("\r\n\r\n") else {
-            return Resp { status: 0, headers: vec![], body: String::from_utf8_lossy(&out.stderr).into_owned() };
+            return Resp {
+                status: 0,
+                headers: vec![],
+                body: String::from_utf8_lossy(&out.stderr).into_owned(),
+            };
         };
         let mut lines = head.lines();
-        let status = lines.next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).unwrap_or(0);
-        Resp { status, headers: lines.map(str::to_string).collect(), body: body.to_string() }
+        let status = lines
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Resp {
+            status,
+            headers: lines.map(str::to_string).collect(),
+            body: body.to_string(),
+        }
     }
 
     fn get(&self, path: &str) -> Resp {
@@ -321,14 +379,19 @@ account_pool = true
             .unwrap()
             .into_iter()
             .find_map(|(_, e)| match e {
-                task_core::Event::WorkerStarted { adapter, account, .. } => Some((adapter, account)),
+                task_core::Event::WorkerStarted {
+                    adapter, account, ..
+                } => Some((adapter, account)),
                 _ => None,
             })
     }
 
     fn task_status(&self, task_id: &str) -> task_core::Status {
         let store = task_core::SqliteStore::open(&self.root.join("celeris.sqlite3")).unwrap();
-        task_core::TaskStore::get(&store, task_id.parse().unwrap()).unwrap().unwrap().status
+        task_core::TaskStore::get(&store, task_id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .status
     }
 }
 
@@ -348,7 +411,11 @@ fn codex_account_selection_follows_headroom_and_sets_codex_home_and_records_rate
     // 1 回目は観測値が無いので id 昇順のタイブレークで "a" に行く。
     let t1 = env.add("t1");
     env.celerisctl(&["approve", &t1]);
-    assert!(wait_until(Duration::from_secs(10), || env.task_status(&t1) == task_core::Status::Done), "t1 never completed");
+    assert!(
+        wait_until(Duration::from_secs(10), || env.task_status(&t1)
+            == task_core::Status::Done),
+        "t1 never completed"
+    );
     let (adapter1, account1) = env.worker_started(&t1).expect("worker started");
     assert_eq!(adapter1, "codex");
     assert_eq!(account1.as_deref(), Some("a"));
@@ -356,21 +423,40 @@ fn codex_account_selection_follows_headroom_and_sets_codex_home_and_records_rate
     // "a" は util 0.9 の観測値がついた。"b" はまだ観測値が無い（score 1.0）ので次はそちらへ行く。
     let t2 = env.add("t2");
     env.celerisctl(&["approve", &t2]);
-    assert!(wait_until(Duration::from_secs(10), || env.task_status(&t2) == task_core::Status::Done), "t2 never completed");
-    assert_eq!(env.worker_started(&t2).and_then(|(_, a)| a).as_deref(), Some("b"));
+    assert!(
+        wait_until(Duration::from_secs(10), || env.task_status(&t2)
+            == task_core::Status::Done),
+        "t2 never completed"
+    );
+    assert_eq!(
+        env.worker_started(&t2).and_then(|(_, a)| a).as_deref(),
+        Some("b")
+    );
 
     // GET /accounts に反映されている: short window (300 min <= 1440) -> five_hour, long window (10080 min) -> seven_day。
     let accounts = env.get("/accounts").json();
-    assert_eq!(accounts["roots"]["codex"], json!(env.accounts_dir.display().to_string()));
+    assert_eq!(
+        accounts["roots"]["codex"],
+        json!(env.accounts_dir.display().to_string())
+    );
     let items = accounts["items"].as_array().unwrap();
-    let a = items.iter().find(|it| it["id"] == "a" && it["adapter"] == "codex").unwrap();
+    let a = items
+        .iter()
+        .find(|it| it["id"] == "a" && it["adapter"] == "codex")
+        .unwrap();
     assert_eq!(a["usage"]["five_hour"]["utilization"], json!(0.9));
     assert_eq!(a["usage"]["seven_day"]["utilization"], json!(0.1));
-    let b = items.iter().find(|it| it["id"] == "b" && it["adapter"] == "codex").unwrap();
+    let b = items
+        .iter()
+        .find(|it| it["id"] == "b" && it["adapter"] == "codex")
+        .unwrap();
     assert_eq!(b["usage"]["five_hour"]["utilization"], json!(0.2));
 
     // プールを使う run の cooldown はプロバイダには付かない。
-    assert_eq!(env.get("/daemon").json()["snapshot"]["cooldowns"], json!([]));
+    assert_eq!(
+        env.get("/daemon").json()["snapshot"]["cooldowns"],
+        json!([])
+    );
 
     // 再起動しても観測値は残る。
     drop(daemon);
@@ -419,9 +505,17 @@ fn codex_device_login_flow_completes_without_login_code_and_logs_no_secrets() {
     let logged_in = wait_until(Duration::from_secs(10), || {
         env.get("/accounts").json()["items"]
             .as_array()
-            .is_some_and(|items| items.iter().any(|it| it["id"] == "c" && it["logged_in"] == true))
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|it| it["id"] == "c" && it["logged_in"] == true)
+            })
     });
-    assert!(logged_in, "codex account never became logged_in: {}", env.get("/accounts").body);
+    assert!(
+        logged_in,
+        "codex account never became logged_in: {}",
+        env.get("/accounts").body
+    );
     assert!(env.accounts_dir.join("c").join("auth.json").is_file());
 
     // ログもコードも URL も出ない（D5）。

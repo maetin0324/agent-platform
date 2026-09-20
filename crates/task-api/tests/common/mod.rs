@@ -12,14 +12,16 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use futures_util::StreamExt;
 use serde_json::Value;
 use task_api::{
-    AdminRequest, ApiConfigView, ApiSettings, ApiState, ClusterConfigView, ConfigView, GenreConfigView,
-    ProviderConfigView, ReviewerConfigView, RoleConfigView,
+    AdminRequest, ApiConfigView, ApiSettings, ApiState, ClusterConfigView, ConfigView,
+    GenreConfigView, ProviderConfigView, ReviewerConfigView, RoleConfigView,
 };
 use task_core::{
-    Budget, Check, Criterion, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
-    WorkspaceSpec,
+    Budget, Check, Criterion, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier,
+    WorkerHint, WorkspaceSpec,
 };
-use task_ops::daemon::{ClusterLive, CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive};
+use task_ops::daemon::{
+    ClusterLive, CooldownView, DaemonSnapshot, InFlight, InFlightKind, ProviderLive,
+};
 use task_ops::view::ViewContext;
 use time::OffsetDateTime;
 use tokio::sync::{mpsc, watch};
@@ -125,7 +127,13 @@ impl TestEnv {
         let docs_repo_root = dir.path().join("workspace");
         // ADR-0047（Phase 61）: 知識ベースも tempdir の中（実ホームの `~/knowledge` には絶対に触らない）。
         let knowledge_root = dir.path().join("knowledge");
-        let settings = settings(&db_path, &workspace_root, &docs_repo_root, &knowledge_root, options);
+        let settings = settings(
+            &db_path,
+            &workspace_root,
+            &docs_repo_root,
+            &knowledge_root,
+            options,
+        );
         let state = ApiState::new(settings, daemon_rx).expect("api state");
         Self {
             docs_repo_root,
@@ -162,7 +170,11 @@ impl TestEnv {
     }
 
     pub fn status_of(&self, id: TaskId) -> Status {
-        self.store.get(id).expect("get").expect("task exists").status
+        self.store
+            .get(id)
+            .expect("get")
+            .expect("task exists")
+            .status
     }
 }
 
@@ -308,6 +320,8 @@ pub fn new_task(kind: TaskKind, status: Status) -> Task {
     let id = TaskId::new();
     let now = OffsetDateTime::now_utc();
     Task {
+        mode: Default::default(),
+        skills: Vec::new(),
         repos: Vec::new(),
         id,
         parent_id: None,
@@ -327,7 +341,8 @@ pub fn new_task(kind: TaskKind, status: Status) -> Task {
             adapter: None,
         },
         workspace: WorkspaceSpec::Local {
-            path: PathBuf::from(id.to_string()), mode: None,
+            path: PathBuf::from(id.to_string()),
+            mode: None,
         },
         budget: Budget {
             max_turns: 10,
@@ -426,7 +441,10 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
 // ---- 要求と応答 ----
 
 pub fn get(path: &str) -> Request<Body> {
-    Request::get(path).header("host", HOST).body(Body::empty()).expect("request")
+    Request::get(path)
+        .header("host", HOST)
+        .body(Body::empty())
+        .expect("request")
 }
 
 /// `get` にヘッダを足す（同名のヘッダは置き換える。`host` を渡すと既定の Host を差し替える）。
@@ -519,7 +537,10 @@ pub fn put_json_with(path: &str, body: &Value, headers: &[(&str, &str)]) -> Requ
 }
 
 pub fn delete_with(path: &str, headers: &[(&str, &str)]) -> Request<Body> {
-    let mut request = Request::delete(path).header("host", HOST).body(Body::empty()).expect("request");
+    let mut request = Request::delete(path)
+        .header("host", HOST)
+        .body(Body::empty())
+        .expect("request");
     for (name, value) in headers {
         request.headers_mut().insert(
             axum::http::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
@@ -537,7 +558,8 @@ pub struct Resp {
 
 impl Resp {
     pub fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|e| panic!("not JSON ({e}): {}", self.text()))
+        serde_json::from_slice(&self.body)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {}", self.text()))
     }
 
     pub fn text(&self) -> String {
@@ -557,20 +579,35 @@ pub async fn send(app: &Router, request: Request<Body>) -> Resp {
         .await
         .expect("body")
         .to_vec();
-    Resp { status, headers, body }
+    Resp {
+        status,
+        headers,
+        body,
+    }
 }
 
 /// problem+json の共通部分（`type` / `code` / `status` / `instance` = `X-Request-Id`）を確かめて本体を返す。
 #[track_caller]
 pub fn assert_problem(resp: &Resp, status: u16, code: &str) -> Value {
-    assert_eq!(resp.status.as_u16(), status, "unexpected status; body: {}", resp.text());
-    assert_eq!(resp.header("content-type"), Some("application/problem+json"));
+    assert_eq!(
+        resp.status.as_u16(),
+        status,
+        "unexpected status; body: {}",
+        resp.text()
+    );
+    assert_eq!(
+        resp.header("content-type"),
+        Some("application/problem+json")
+    );
     let problem = resp.json();
     assert_eq!(problem["code"], code, "{problem}");
     assert_eq!(problem["status"], status);
     assert_eq!(problem["type"], format!("urn:celeris:problem:{code}"));
     let request_id = resp.header("x-request-id").expect("x-request-id");
-    assert_eq!(problem["instance"], format!("urn:celeris:request:{request_id}"));
+    assert_eq!(
+        problem["instance"],
+        format!("urn:celeris:request:{request_id}")
+    );
     assert!(problem["title"].is_string() && problem["detail"].is_string());
     problem
 }
@@ -611,7 +648,9 @@ impl Sse {
                 return Some(parse_frame(&raw));
             }
             match tokio::time::timeout_at(deadline, self.stream.next()).await {
-                Ok(Some(Ok(bytes))) => self.buf.push_str(std::str::from_utf8(&bytes).expect("utf-8 frame")),
+                Ok(Some(Ok(bytes))) => self
+                    .buf
+                    .push_str(std::str::from_utf8(&bytes).expect("utf-8 frame")),
                 _ => return None,
             }
         }

@@ -64,7 +64,11 @@ pub struct LocalWorkspace {
 impl LocalWorkspace {
     /// `dir` はそのタスクの作業ディレクトリ（ADR-0005 D3）。
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), work_dir: None, container: None }
+        Self {
+            dir: dir.into(),
+            work_dir: None,
+            container: None,
+        }
     }
 
     /// ADR-0041 D1: `runs/` `inputs/` `artifacts/` は `dir`、コマンドは `work_dir`（worktree）で動かす。
@@ -118,9 +122,9 @@ impl Workspace for LocalWorkspace {
             let src = Path::new(&input.path);
             if src.is_absolute() {
                 let dest = self.dir.join("inputs").join(&input.name);
-                tokio::fs::copy(src, &dest).await.map_err(|_| {
-                    WorkspaceError::InputNotFound(input.name.clone())
-                })?;
+                tokio::fs::copy(src, &dest)
+                    .await
+                    .map_err(|_| WorkspaceError::InputNotFound(input.name.clone()))?;
             } else if self.dir.join(src).exists() {
                 // すでに配置済み。何もしない。
             } else {
@@ -198,7 +202,12 @@ impl Workspace for LocalWorkspace {
                     }
                 }
                 let _ = child.wait().await;
-                Ok(ExecResult { exit: None, stdout_tail: String::new(), stderr_tail: String::new(), timed_out: true })
+                Ok(ExecResult {
+                    exit: None,
+                    stdout_tail: String::new(),
+                    stderr_tail: String::new(),
+                    timed_out: true,
+                })
             }
         }
     }
@@ -214,9 +223,9 @@ impl Workspace for LocalWorkspace {
 
         let mut refs = Vec::with_capacity(files.len());
         for file in &files {
-            let rel = file
-                .strip_prefix(&self.dir)
-                .map_err(|_| WorkspaceError::Io(std::io::Error::other("artifact path outside workspace")))?;
+            let rel = file.strip_prefix(&self.dir).map_err(|_| {
+                WorkspaceError::Io(std::io::Error::other("artifact path outside workspace"))
+            })?;
             let rel_str = rel
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -231,7 +240,12 @@ impl Workspace for LocalWorkspace {
                 .map(|e| e.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "file".to_string());
             let sha256 = crate::artifact::sha256_file(file)?;
-            refs.push(ArtifactRef { name, path: rel_str, sha256, kind });
+            refs.push(ArtifactRef {
+                name,
+                path: rel_str,
+                sha256,
+                kind,
+            });
         }
 
         refs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -281,20 +295,38 @@ mod tests {
         use task_core::*;
         let now = time::OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
             title: "t".into(),
             objective: "o".into(),
-            acceptance: vec![Criterion { text: "c".into(), check: Check::Command { cmd: "true".into(), expect_exit: 0 } }],
+            acceptance: vec![Criterion {
+                text: "c".into(),
+                check: Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
+            }],
             inputs: vec![],
             depends_on: vec![],
             status: Status::Running,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws"), mode: None },
-            budget: Budget { max_turns: 10, max_wall_secs: 60, max_retries: 1 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: PathBuf::from("/tmp/ws"),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 10,
+                max_wall_secs: 60,
+                max_retries: 1,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -323,7 +355,10 @@ mod tests {
 
         let ws = LocalWorkspace::new(dir.path());
         let mut task = sample_task();
-        task.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf(), mode: None };
+        task.workspace = WorkspaceSpec::Local {
+            path: dir.path().to_path_buf(),
+            mode: None,
+        };
         task.inputs = vec![task_core::ArtifactRef {
             name: "data.txt".into(),
             path: abs_input_path.to_string_lossy().into_owned(),
@@ -354,7 +389,10 @@ mod tests {
 
         let ws = LocalWorkspace::new(dir.path());
         let mut task = sample_task();
-        task.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf(), mode: None };
+        task.workspace = WorkspaceSpec::Local {
+            path: dir.path().to_path_buf(),
+            mode: None,
+        };
         task.inputs = vec![task_core::ArtifactRef {
             name: "run.sh".into(),
             path: "scripts/run.sh".into(),
@@ -370,7 +408,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let ws = LocalWorkspace::new(dir.path());
         let mut task = sample_task();
-        task.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf(), mode: None };
+        task.workspace = WorkspaceSpec::Local {
+            path: dir.path().to_path_buf(),
+            mode: None,
+        };
         task.inputs = vec![task_core::ArtifactRef {
             name: "missing.txt".into(),
             path: "does/not/exist.txt".into(),
@@ -401,7 +442,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let ws = LocalWorkspace::new(dir.path());
         let start = Instant::now();
-        let result = ws.exec("sleep 30", Duration::from_millis(300)).await.expect("exec");
+        let result = ws
+            .exec("sleep 30", Duration::from_millis(300))
+            .await
+            .expect("exec");
         assert!(result.timed_out);
         assert_eq!(result.exit, None);
         assert!(start.elapsed() < Duration::from_secs(5));
@@ -413,7 +457,9 @@ mod tests {
         let ws = LocalWorkspace::new(dir.path());
         let result = ws.exec("pwd", Duration::from_secs(5)).await.expect("exec");
         let printed = result.stdout_tail.trim();
-        let printed_canon = std::path::Path::new(printed).canonicalize().expect("canonicalize pwd output");
+        let printed_canon = std::path::Path::new(printed)
+            .canonicalize()
+            .expect("canonicalize pwd output");
         let expected = dir.path().canonicalize().expect("canonicalize dir");
         assert_eq!(printed_canon, expected);
     }
@@ -436,7 +482,10 @@ mod tests {
         assert_eq!(refs[1].path, "artifacts/sub/a.json");
         assert_eq!(refs[1].name, "a.json");
         assert_eq!(refs[1].kind, "json");
-        assert_eq!(refs[1].sha256, crate::artifact::sha256_file(&dir.path().join("artifacts/sub/a.json")).expect("sha"));
+        assert_eq!(
+            refs[1].sha256,
+            crate::artifact::sha256_file(&dir.path().join("artifacts/sub/a.json")).expect("sha")
+        );
     }
 
     /// ADR-0036 D1/D4: 親から workspace を継いだタスクは `.taskd/artifacts/<task_id>/` に置き、
@@ -447,12 +496,25 @@ mod tests {
         let ws = LocalWorkspace::new(dir.path());
         let mut child = sample_task();
         child.parent_id = Some(task_core::TaskId::new());
-        child.workspace = WorkspaceSpec::Local { path: dir.path().to_path_buf(), mode: None };
+        child.workspace = WorkspaceSpec::Local {
+            path: dir.path().to_path_buf(),
+            mode: None,
+        };
 
         ws.prepare(&child).await.expect("prepare");
-        let own = dir.path().join(".taskd").join("artifacts").join(child.id.to_string());
-        assert!(own.is_dir(), "共有 workspace ではタスクごとのディレクトリを作る");
-        assert!(!dir.path().join("artifacts").exists(), "共有の `artifacts/` は作らない");
+        let own = dir
+            .path()
+            .join(".taskd")
+            .join("artifacts")
+            .join(child.id.to_string());
+        assert!(
+            own.is_dir(),
+            "共有 workspace ではタスクごとのディレクトリを作る"
+        );
+        assert!(
+            !dir.path().join("artifacts").exists(),
+            "共有の `artifacts/` は作らない"
+        );
 
         std::fs::write(own.join("report.md"), b"# r").expect("write report");
         // 兄弟が共有 `artifacts/` に置いた同名のファイルは、このタスクの成果物にはならない。
@@ -461,7 +523,10 @@ mod tests {
 
         let refs = ws.collect(&child).await.expect("collect");
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].path, format!(".taskd/artifacts/{}/report.md", child.id));
+        assert_eq!(
+            refs[0].path,
+            format!(".taskd/artifacts/{}/report.md", child.id)
+        );
         assert_eq!(refs[0].name, "report.md");
         assert_eq!(refs[0].kind, "md");
     }

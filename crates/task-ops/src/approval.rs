@@ -9,8 +9,8 @@
 //! `Approval` の取得と「無い id は 404」の判定は呼び出し側（`task-api`）が行う（`report.rs` / `reports.rs`
 //! と同じ役割分担）。ここは判断と、決まった後の書き込みだけ。
 
-use task_core::approval::{Approval, ApprovalId, Decision, StandingRule, StandingRuleId};
 use task_core::TaskStore;
+use task_core::approval::{Approval, ApprovalId, Decision, StandingRule, StandingRuleId};
 use time::OffsetDateTime;
 
 use crate::error::OpsError;
@@ -80,7 +80,8 @@ pub fn decide(
     let standing_rule = if decision == Decision::Standing {
         // Phase 27（監査 H-1）: 部をまたぐ委譲の質問だけは、答えの文ではなく**質問の鍵**を規則にする
         // （`delegate` の照合が前方一致でできるように）。それ以外の質問は従来どおり答えの文。
-        let rule = crate::conversation::cross_department_key(&decided.question).unwrap_or_else(|| answer.clone());
+        let rule = crate::conversation::cross_department_key(&decided.question)
+            .unwrap_or_else(|| answer.clone());
         let rule = StandingRule {
             id: StandingRuleId::new(),
             node_id: match scope {
@@ -109,12 +110,14 @@ mod tests {
     use task_core::approval::ApprovalStore;
     use task_core::org::{OrgKind, OrgNode};
     use task_core::{
-        Budget, Check, Criterion, SqliteStore, Status, Task, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec,
+        Budget, Check, Criterion, SqliteStore, Status, Task, TaskId, TaskKind, Tier, WorkerHint,
+        WorkspaceSpec,
     };
 
     fn node(id: &str, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
         OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: None,
             name: id.into(),
@@ -132,20 +135,35 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let id = TaskId::new();
         let task = Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id,
             parent_id: None,
             kind: TaskKind::Execute,
             title: "t".into(),
             objective: "o".into(),
-            acceptance: vec![Criterion { text: "c".into(), check: Check::Human }],
+            acceptance: vec![Criterion {
+                text: "c".into(),
+                check: Check::Human,
+            }],
             inputs: vec![],
             depends_on: vec![],
             status: Status::Blocked,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: "ws".into(), mode: None },
-            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: "ws".into(),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -179,23 +197,41 @@ mod tests {
     #[test]
     fn once_answers_the_task_and_leaves_no_standing_rule() {
         let store = SqliteStore::open_in_memory().expect("open");
-        store.org_upsert(&node("coding-poc", OrgKind::Secretary)).expect("seed");
+        store
+            .org_upsert(&node("coding-poc", OrgKind::Secretary))
+            .expect("seed");
         let (task, approval) = blocked_task_with_approval(&store, "coding-poc");
 
-        let outcome = decide(&store, approval.clone(), Decision::Once, "pegasus".into(), Scope::Node, OffsetDateTime::now_utc())
-            .expect("decide");
+        let outcome = decide(
+            &store,
+            approval.clone(),
+            Decision::Once,
+            "pegasus".into(),
+            Scope::Node,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("decide");
         assert_eq!(outcome.approval.decision, Some(Decision::Once));
         assert_eq!(outcome.approval.answer.as_deref(), Some("pegasus"));
         assert!(outcome.standing_rule.is_none());
         let transition = outcome.transition.expect("transition");
-        assert_eq!(transition.to, Status::Ready, "既存の答える経路（blocked → ready）で再開する");
-        assert_eq!(store.get(task.id).expect("get").expect("task").status, Status::Ready);
+        assert_eq!(
+            transition.to,
+            Status::Ready,
+            "既存の答える経路（blocked → ready）で再開する"
+        );
+        assert_eq!(
+            store.get(task.id).expect("get").expect("task").status,
+            Status::Ready
+        );
     }
 
     #[test]
     fn standing_records_a_rule_scoped_to_the_node_by_default() {
         let store = SqliteStore::open_in_memory().expect("open");
-        store.org_upsert(&node("coding-poc", OrgKind::Secretary)).expect("seed");
+        store
+            .org_upsert(&node("coding-poc", OrgKind::Secretary))
+            .expect("seed");
         let (_, approval) = blocked_task_with_approval(&store, "coding-poc");
 
         let outcome = decide(
@@ -219,7 +255,9 @@ mod tests {
     #[test]
     fn standing_with_scope_all_applies_to_everyone() {
         let store = SqliteStore::open_in_memory().expect("open");
-        store.org_upsert(&node("coding-poc", OrgKind::Secretary)).expect("seed");
+        store
+            .org_upsert(&node("coding-poc", OrgKind::Secretary))
+            .expect("seed");
         let (_, approval) = blocked_task_with_approval(&store, "coding-poc");
 
         let outcome = decide(
@@ -233,17 +271,32 @@ mod tests {
         .expect("decide");
         assert_eq!(outcome.standing_rule.expect("rule").node_id, None);
         // 全員向けなので他ノードの一覧にも出る。
-        assert_eq!(store.standing_rule_list(Some("someone-else")).expect("list").len(), 1);
+        assert_eq!(
+            store
+                .standing_rule_list(Some("someone-else"))
+                .expect("list")
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn denied_prefixes_the_answer_so_the_worker_can_tell() {
         let store = SqliteStore::open_in_memory().expect("open");
-        store.org_upsert(&node("coding-poc", OrgKind::Secretary)).expect("seed");
+        store
+            .org_upsert(&node("coding-poc", OrgKind::Secretary))
+            .expect("seed");
         let (task, approval) = blocked_task_with_approval(&store, "coding-poc");
 
-        let outcome = decide(&store, approval, Decision::Denied, "予算超過".into(), Scope::Node, OffsetDateTime::now_utc())
-            .expect("decide");
+        let outcome = decide(
+            &store,
+            approval,
+            Decision::Denied,
+            "予算超過".into(),
+            Scope::Node,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("decide");
         assert_eq!(outcome.approval.decision, Some(Decision::Denied));
         assert!(outcome.standing_rule.is_none());
         let events = store.events_for(task.id).expect("events");
@@ -257,19 +310,36 @@ mod tests {
     #[test]
     fn a_blank_answer_is_rejected_without_writing_anything() {
         let store = SqliteStore::open_in_memory().expect("open");
-        store.org_upsert(&node("coding-poc", OrgKind::Secretary)).expect("seed");
+        store
+            .org_upsert(&node("coding-poc", OrgKind::Secretary))
+            .expect("seed");
         let (_, approval) = blocked_task_with_approval(&store, "coding-poc");
         assert!(matches!(
-            decide(&store, approval.clone(), Decision::Once, "   ".into(), Scope::Node, OffsetDateTime::now_utc()),
+            decide(
+                &store,
+                approval.clone(),
+                Decision::Once,
+                "   ".into(),
+                Scope::Node,
+                OffsetDateTime::now_utc()
+            ),
             Err(OpsError::Validation(_))
         ));
-        assert!(store.approval_get(approval.id).expect("get").expect("some").is_pending());
+        assert!(
+            store
+                .approval_get(approval.id)
+                .expect("get")
+                .expect("some")
+                .is_pending()
+        );
     }
 
     #[test]
     fn an_approval_without_a_task_id_only_records_the_decision() {
         let store = SqliteStore::open_in_memory().expect("open");
-        store.org_upsert(&node("secretary", OrgKind::Secretary)).expect("seed");
+        store
+            .org_upsert(&node("secretary", OrgKind::Secretary))
+            .expect("seed");
         let approval = Approval {
             id: task_core::approval::ApprovalId::new(),
             project_id: None,
@@ -282,8 +352,15 @@ mod tests {
             decided_at: None,
         };
         store.approval_append(&approval).expect("append");
-        let outcome = decide(&store, approval, Decision::Once, "待つ".into(), Scope::Node, OffsetDateTime::now_utc())
-            .expect("decide");
+        let outcome = decide(
+            &store,
+            approval,
+            Decision::Once,
+            "待つ".into(),
+            Scope::Node,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("decide");
         assert!(outcome.transition.is_none());
         assert_eq!(outcome.approval.answer.as_deref(), Some("待つ"));
     }

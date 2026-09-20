@@ -35,7 +35,9 @@ pub struct SubprocessSpec {
 pub(crate) async fn write_run_request(run_dir: &Path, req: &RunRequest, run_id: &str) {
     match serde_json::to_string_pretty(req) {
         Ok(pretty) => {
-            if let Err(e) = tokio::fs::write(run_dir.join("request.json"), format!("{pretty}\n")).await {
+            if let Err(e) =
+                tokio::fs::write(run_dir.join("request.json"), format!("{pretty}\n")).await
+            {
                 tracing::warn!(%run_id, error = %e, "could not write runs/<run_id>/request.json");
             }
         }
@@ -146,7 +148,12 @@ pub async fn run_subprocess(
         }
         let wait = (limits.wall_clock - wall_elapsed).min(limits.idle_timeout - idle_elapsed);
 
-        let outcome = match tokio::time::timeout(wait, read_line_limited(&mut reader, MAX_LINE_BYTES)).await {
+        let outcome = match tokio::time::timeout(
+            wait,
+            read_line_limited(&mut reader, MAX_LINE_BYTES),
+        )
+        .await
+        {
             Err(_elapsed) => continue, // タイムアウト。ループ先頭で上限超過を検知する。
             Ok(Err(e)) => return Err(AdapterError::Io(e)),
             Ok(Ok(outcome)) => outcome,
@@ -207,20 +214,39 @@ pub async fn run_subprocess(
                         WorkerMessage::Comment { body } => sink.comment(&body),
                         WorkerMessage::Delegate { tasks } => sink.delegate(&tasks),
                         WorkerMessage::Artifact { name, path, kind } => {
-                            match crate::artifact::resolve(&req.workspace, &name, &path, kind.as_deref()) {
+                            match crate::artifact::resolve(
+                                &req.workspace,
+                                &name,
+                                &path,
+                                kind.as_deref(),
+                            ) {
                                 Ok(aref) => sink.artifact(&aref),
-                                Err(e) => warn!("run {run_id}: discarding invalid artifact {name:?}: {e}"),
+                                Err(e) => {
+                                    warn!("run {run_id}: discarding invalid artifact {name:?}: {e}")
+                                }
                             }
                         }
                         WorkerMessage::Question { text } => {
                             terminal_raw = Some(trimmed.to_string());
                             terminal = Some(Terminal::Question { text });
                         }
-                        WorkerMessage::Done { summary, evidence, usage } => {
+                        WorkerMessage::Done {
+                            summary,
+                            evidence,
+                            usage,
+                        } => {
                             terminal_raw = Some(trimmed.to_string());
-                            terminal = Some(Terminal::Done { summary, evidence, usage });
+                            terminal = Some(Terminal::Done {
+                                summary,
+                                evidence,
+                                usage,
+                            });
                         }
-                        WorkerMessage::Error { message, retryable, provider_failure: pf } => {
+                        WorkerMessage::Error {
+                            message,
+                            retryable,
+                            provider_failure: pf,
+                        } => {
                             terminal_raw = Some(trimmed.to_string());
                             provider_failure = pf;
                             terminal = Some(Terminal::Error { message, retryable });
@@ -235,7 +261,9 @@ pub async fn run_subprocess(
                             });
                             force_kill = true;
                         } else {
-                            warn!("run {run_id}: discarding non-json line from worker stdout: {trimmed}");
+                            warn!(
+                                "run {run_id}: discarding non-json line from worker stdout: {trimmed}"
+                            );
                         }
                     }
                 }
@@ -255,7 +283,10 @@ pub async fn run_subprocess(
     // 取り残さないようラベルでも消す（ADR-0044 B2 のプロセスグループ kill からも同じ口を呼べる）。
     if let Some(plan) = &spec.container {
         let plan = Arc::clone(plan);
-        let _ = tokio::task::spawn_blocking(move || crate::container::ContainerStopper::stop_blocking(&*plan)).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::container::ContainerStopper::stop_blocking(&*plan)
+        })
+        .await;
     }
 
     if let Err(e) = stderr_task.await {
@@ -299,7 +330,11 @@ pub(crate) async fn write_result_json(
     provider_failure: Option<ProviderFailure>,
 ) -> std::io::Result<()> {
     let msg = match terminal {
-        Terminal::Done { summary, evidence, usage } => WorkerMessage::Done {
+        Terminal::Done {
+            summary,
+            evidence,
+            usage,
+        } => WorkerMessage::Done {
             summary: summary.clone(),
             evidence: evidence.clone(),
             usage: *usage,
@@ -340,7 +375,10 @@ where
     R: AsyncBufRead + Unpin,
 {
     let mut buf: Vec<u8> = Vec::new();
-    let n = reader.take(max as u64 + 1).read_until(b'\n', &mut buf).await?;
+    let n = reader
+        .take(max as u64 + 1)
+        .read_until(b'\n', &mut buf)
+        .await?;
     if n == 0 {
         return Ok(LineOutcome::Eof);
     }
@@ -380,7 +418,10 @@ pub(crate) async fn kill_now(child: &mut Child, grace: Duration) -> std::io::Res
 }
 
 /// 終端メッセージ受信後の後始末: 最大 `grace` 待ち、まだ生きていれば kill する（仕様 6）。
-pub(crate) async fn reap_after_terminal(child: &mut Child, grace: Duration) -> std::io::Result<ExitStatus> {
+pub(crate) async fn reap_after_terminal(
+    child: &mut Child,
+    grace: Duration,
+) -> std::io::Result<ExitStatus> {
     match tokio::time::timeout(grace, child.wait()).await {
         Ok(status) => status,
         Err(_elapsed) => kill_now(child, grace).await,
@@ -394,7 +435,7 @@ mod tests {
     use task_core::ArtifactRef;
 
     use super::*;
-    use crate::protocol::{RunContext, PROTOCOL_VERSION};
+    use crate::protocol::{PROTOCOL_VERSION, RunContext};
 
     #[derive(Default)]
     struct RecordingSink {
@@ -407,10 +448,16 @@ mod tests {
 
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
-            self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+            self.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(msg.to_string());
         }
         fn comment(&self, body: &str) {
-            self.comments.lock().unwrap_or_else(|e| e.into_inner()).push(body.to_string());
+            self.comments
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(body.to_string());
         }
         fn artifact(&self, artifact: &ArtifactRef) {
             self.artifacts
@@ -419,7 +466,10 @@ mod tests {
                 .push(artifact.clone());
         }
         fn heartbeat(&self) {
-            *self.heartbeat_count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            *self
+                .heartbeat_count
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) += 1;
         }
     }
 
@@ -463,7 +513,9 @@ mod tests {
         );
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = run_subprocess(&spec, &req, "run-1", &default_limits(), &sink).await.unwrap();
+        let outcome = run_subprocess(&spec, &req, "run-1", &default_limits(), &sink)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.exit_code, Some(0));
         match outcome.terminal {
@@ -488,7 +540,8 @@ mod tests {
 
         // ADR-0023 D2: ワーカーに渡した指示そのものが残る（stdin に書いたものと同じ内容）。
         let request = std::fs::read_to_string(run_dir.join("request.json")).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&request).expect("request.json は JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&request).expect("request.json は JSON");
         assert_eq!(parsed["type"], "run");
         assert_eq!(parsed["task"]["id"], req.task.id.to_string());
         assert!(request.contains('\n'), "人が読めるよう整形して書く");
@@ -504,7 +557,9 @@ mod tests {
         );
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = run_subprocess(&spec, &req, "run-2", &default_limits(), &sink).await.unwrap();
+        let outcome = run_subprocess(&spec, &req, "run-2", &default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Done { summary, .. } => assert_eq!(summary, "ok"),
             other => panic!("expected done, got {other:?}"),
@@ -517,7 +572,9 @@ mod tests {
         let spec = sh_spec("cat >/dev/null; echo '{\"type\":\"bogus\"}'");
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = run_subprocess(&spec, &req, "run-3", &default_limits(), &sink).await.unwrap();
+        let outcome = run_subprocess(&spec, &req, "run-3", &default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(!retryable);
@@ -533,17 +590,31 @@ mod tests {
     #[tokio::test]
     async fn a_comment_line_is_passed_to_the_sink_and_does_not_end_the_run() {
         let dir = tempfile::tempdir().unwrap();
-        let spec = sh_spec("cat >/dev/null\necho '{\"type\":\"comment\",\"body\":\"ビルドが通った\"}'\necho '{\"type\":\"progress\",\"msg\":\"next\"}'\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
+        let spec = sh_spec(
+            "cat >/dev/null\necho '{\"type\":\"comment\",\"body\":\"ビルドが通った\"}'\necho '{\"type\":\"progress\",\"msg\":\"next\"}'\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'",
+        );
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = run_subprocess(&spec, &req, "run-comment", &default_limits(), &sink).await.unwrap();
-        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        let outcome = run_subprocess(&spec, &req, "run-comment", &default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
         assert_eq!(
-            sink.comments.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            sink.comments
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             vec!["ビルドが通った".to_string()]
         );
         assert_eq!(
-            sink.progress.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            sink.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             vec!["next".to_string()],
             "コメントは progress には入らない"
         );
@@ -556,7 +627,9 @@ mod tests {
         let spec = sh_spec("cat >/dev/null; exit 3");
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = run_subprocess(&spec, &req, "run-4", &default_limits(), &sink).await.unwrap();
+        let outcome = run_subprocess(&spec, &req, "run-4", &default_limits(), &sink)
+            .await
+            .unwrap();
         assert_eq!(outcome.exit_code, Some(3));
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
@@ -579,7 +652,9 @@ mod tests {
             kill_grace: Duration::from_millis(200),
         };
         let start = Instant::now();
-        let outcome = run_subprocess(&spec, &req, "run-5", &limits, &sink).await.unwrap();
+        let outcome = run_subprocess(&spec, &req, "run-5", &limits, &sink)
+            .await
+            .unwrap();
         assert!(start.elapsed() < Duration::from_secs(5));
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
@@ -605,7 +680,9 @@ mod tests {
             kill_grace: Duration::from_millis(200),
         };
         let start = Instant::now();
-        let outcome = run_subprocess(&spec, &req, "run-6", &limits, &sink).await.unwrap();
+        let outcome = run_subprocess(&spec, &req, "run-6", &limits, &sink)
+            .await
+            .unwrap();
         assert!(start.elapsed() < Duration::from_secs(5));
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
@@ -626,7 +703,9 @@ mod tests {
         );
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = run_subprocess(&spec, &req, "run-7", &default_limits(), &sink).await.unwrap();
+        let outcome = run_subprocess(&spec, &req, "run-7", &default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Done { summary, .. } => assert_eq!(summary, "ok"),
             other => panic!("expected done, got {other:?}"),
@@ -650,7 +729,9 @@ mod tests {
             .await
             .expect_err("expected provider failure to surface as an AdapterError");
         match err {
-            AdapterError::Throttled { retry_after } => assert_eq!(retry_after, Duration::from_secs(7)),
+            AdapterError::Throttled { retry_after } => {
+                assert_eq!(retry_after, Duration::from_secs(7))
+            }
             other => panic!("expected Throttled, got {other:?}"),
         }
         assert!(dir.path().join("runs/run-9/result.json").is_file());
@@ -667,7 +748,9 @@ mod tests {
         );
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = run_subprocess(&spec, &req, "run-8", &default_limits(), &sink).await.unwrap();
+        let outcome = run_subprocess(&spec, &req, "run-8", &default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(sink.artifacts.lock().unwrap().is_empty());
         match outcome.terminal {
             Terminal::Done { summary, .. } => assert_eq!(summary, "ok"),

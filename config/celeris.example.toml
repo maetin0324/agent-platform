@@ -33,7 +33,7 @@ max_requeues = 5                   # ADR-0011: 同じ試行での連続 requeue�
 # 蒔く。以後の編集は GUI（`POST/PATCH/DELETE /api/v1/org`）から行い、この設定は再読込されない。
 # 書かなければ種を蒔かない（組織を使わない従来どおりの運用）。
 # `config/org.example.toml` をこのファイルと同じディレクトリに `org.toml` として置けば、下の
-# `[[genres]]`（coding / literature）とそのまま噛み合う（監査 M-1。分野の不整合は起動時に弾かれる）。
+# `[[harnesses]]`（coding / literature / …）とそのまま噛み合う（監査 M-1。不整合は起動時に弾かれる）。
 # org_include = "org.toml"
 
 # 組織のノードごとの長期記憶（ADR-0033 D6、SPEC §3.2「各ノードは長期記憶を持つ」「記憶は案件をまたぐ」）。
@@ -134,119 +134,119 @@ tier = "standard"
 [plan]
 auto_accept = false
 
-# 対話が常に走る分野（Phase 30、ADR-0033 D4 追記）。`POST /api/v1/org/{id}/messages` で話しかけたときの
-# run は、話しかけたノードの `genre`（仕事のハーネス）に関係なく、常にこの分野の役割・tier・adapter で走る
-# （実機の事故: 検索ハーネス genre のノードに話しかけたら検索ハーネスが会話しようとして落ちた。検索ハーネスや
-# PaperQA は会話ができない）。省略すればこの例と同じ既定（`secretary`）になる。指す id は下の
-# `[[genres]]` に存在すること（無ければ起動時の設定エラー「対話用の分野が無い」）。
-# [conversation]
-# genre = "secretary"
+# 対話が常に走るハーネス（Phase 30、ADR-0033 D4 追記 / ADR-0046 D3・D6）。
+# `POST /api/v1/org/{id}/messages` で話しかけたときの run は、話しかけたノードの `genre`
+# （仕事のハーネス）に関係なく、常にこのハーネスの tier・adapter・指示文で走る
+# （実機の事故: 検索ハーネスのノードに話しかけたら検索ハーネスが会話しようとして落ちた）。
+# 指す id は下の `[[harnesses]]` に存在すること（無ければ起動時の設定エラー）。
+[conversation]
+genre = "conversation"
 
-# 役割（ADR-0016 D1）。タスクの `role` がここの `id` を指すと、省略された tier / adapter / 予算がこの既定で埋まり
-# （タスクの値 > 役割の既定 > 全体の既定）、run のプロンプトに `instructions` が `## Role` として前置きされる。
-# 役割名は自由記述なので、ここに無い名前をタスクに付けてもよい（既定も指示文も無いだけ）。
-# `celerisctl add --role lead --config <このファイル>` / API の `POST /tasks` の `"role"` で指定する。
+# ハーネス = 実行契約（ADR-0046 D3）。**今までの `[[genres]]`（能力・入出力の契約・対話用か）と
+# `[[roles]]`（adapter・tier・指示文・予算）を 1 つにしたもの**。
 #
-# ここに並ぶ役割は `adapter` を書かずに **tier だけ**にしてある（Phase 27 / 監査 M-1）: この例の
+#   - タスクの `genre` 列がそのまま harness id を指す（GUI とプランナーは「ハーネス」と呼ぶ）。
+#   - **組織と 1 対 1 にしない**。1 つのノードが複数のハーネスを受けられるし、同じハーネスを
+#     複数のノードが使う（誰が受けられるかは `config/org.example.toml` の `profile.harnesses`）。
+#   - 組み込みで `conversation` / `plan` / `reviewer` / `smoke` がある。ここに同じ id を書けば上書きできる。
+#   - 旧い `[[genres]]` + `[[roles]]` もそのまま読める（互換。起動時に warn が 1 行出る）。
+#     `celerisctl config to-harnesses --config <this file>` で新しい形を書き出し、
+#     旧い `[[genres]]` / `[[roles]]` の節を消して差し替える。
+#
+# `capabilities` / `input_artifacts` / `output_artifacts`（ADR-0028 D1）は 3 つとも任意の自由記述。
+# 各要素は `名前` でも `名前: 説明` でもよい（`:` の前が名前。`artifact_exists` の照合には名前だけを使う）。
+# ここに並ぶハーネスは `adapter` を書かずに **tier だけ**にしてある（監査 M-1）: この例の
 # `[[providers]]` は `fake` なので、そのまま起動して組織・案件・対話の流れを一通り試せる。実機の
-# ハーネスに切り替えるときは、役割ごとに `adapter = "claude-code"` などを足す。
-[[roles]]
-id = "lead"
-tier = "frontier"
-max_turns = 40
-max_wall_secs = 1800
-instructions = "あなたは取りまとめ役。実装は delegate で部下に任せ、自分は分割とレビューに集中する。"
+# ハーネスに切り替えるときは `adapter = "claude-code"` などを足す。
 
-[[roles]]
-id = "implementer"
+[[harnesses]]
+id = "conversation"
+description = "人と話し、案件を理解し、組織に流す"
 tier = "standard"
-max_turns = 20
-instructions = "あなたは実装担当。受け取った範囲だけを実装し、終わったら summary を書く。"
-
-# 対話用の役割（ADR-0033 D4）。組織のノードに話しかけたときの run はこの役割で走る（そのノードが自分の
-# 分野を持っていれば、そちらの `default_role` が使われる）。秘書の返事の作法をここに書く。
-[[roles]]
-id = "secretary"
-tier = "standard"
-instructions = """あなたは人の秘書。案件を受け取り、組織に流し、報告を集めて人に渡す。部をまたぐ連携はあなたが認める。
+conversation = true
+capabilities = ["案件の理解の確認", "大まかな方針の提案", "途中目標の提案と再設計"]
+input_artifacts = ["人の依頼文", "下から上がった報告"]
+output_artifacts = ["返事（result.json の summary）", "plan.json"]
+instructions = """あなたは人の Chief of Staff。案件を受け取り、組織に流し、報告を集めて人に渡す。
 案件の依頼を受けたら、返事に (a) 案件の理解の確認 (b) 大まかな方針 (c) 最初の途中目標の提案 を必ず含め、
 分からないことは質問する。長々と書かず、人が数十秒で読める分量にする。
 コードを扱う案件なら、最初の返事で必ず「作業場所（どのリポジトリか。手元のパスか、どのクラスタのどのパスか）」を聞く。
 決まったら人に GUI で案件の作業場所として登録してもらう（ADR-0039）。仕事の場所は案件に持たせ、担当に ssh で
-リモートの作業ツリーへ直接書かせない（編集は手元、検証はリモート）。"""
+リモートの作業ツリーへ直接書かせない（編集は手元、検証はリモート）。
+担当（誰がやるか）は celeris が決めるので、あなたが名指しで人を選ぶ必要はない。"""
 
-# 調査分野の役割（ADR-0027）。役割名は自由記述で、下の [[genres]] roles に含めれば分野に属する。
-[[roles]]
-id = "literature-scout"
-tier = "cheap"
-instructions = "あなたは調査担当。広く候補論文を探し、見落としが無いか洗い出す（深読みはしない）。"
-
-[[roles]]
-id = "literature-reader"
+[[harnesses]]
+id = "plan"
+description = "案件を分解し、子タスクの計画を書く"
 tier = "standard"
-instructions = "あなたは精読担当。候補論文を読み込み、引用付きで要点と新規性への影響をまとめる。"
+input_artifacts = ["案件の依頼文", "途中目標"]
+output_artifacts = ["plan.json"]
 
-# Web 調査（ADR-0029 / ADR-0035 §1）。人間の決定（2026-09-18）で、学術文献（PaperQA2）と一般 Web（LDR）は
-# 別の課に分けた。実際に LDR を使う設定は `config/celeris.web-research.example.toml` にある。
-[[roles]]
-id = "web-researcher"
-tier = "standard"
-instructions = "あなたは Web 調査担当。論文化されていない実装・製品・仕様を一般 Web 検索で調べ、出典付きでまとめる。"
-
-# 分野（ADR-0027 D1）。タスクの `genre` がここの `id` を指すと、role が省略されたときの既定として
-# `default_role` の役割（tier / adapter / 予算）が使われ（タスクの値 > 役割の既定 > 分野の既定 > 親の値）、
-# 委譲できる run（lead など）のプロンプトに「使える専門家」として一覧が渡る。分野そのものにはアダプタを持たせない
-# （D2: `default_role` の役割が持つ。同じ分野でも役割ごとに違うハーネス・モデルを使い分けられる）。
-# `default_role` と `roles` の各要素は上の [[roles]] に存在すること、`default_role`（あれば）は `roles` に
-# 含まれることを起動時に検証する（`celerisctl add --genre <id> --config <このファイル>` / API の `POST /tasks` の
-# `"genre"` で指定する）。
-# `capabilities` / `input_artifacts` / `output_artifacts`（ADR-0028 D1）は 3 つとも任意の自由記述。
-# 各要素は `名前` でも `名前: 説明` でもよい（Phase 38。`:` の前が名前。計画・レビュアーのプロンプトには
-# 説明も出るが、名前の照合（`artifact_exists`）には `:` の前だけを使う）。
-# celeris は中身を検査しない（Planner・委譲できる run のプロンプトに「できること」「渡すもの→返るもの」として出るだけ）。
-#
-# 対話用の分野（ADR-0033 D4、Phase 30 で解決を変更）。`POST /api/v1/org/{id}/messages` で話しかけたときの
-# run は、話しかけた**ノードの `genre`（仕事のハーネス）に関係なく、常にこの分野**で走る
-# （下の `[conversation]` が指す。省略時の既定はこの id = `secretary`）。実機の事故: 関連研究調査課
-# （`genre = web-research` = Local Deep Research）に話しかけたら検索ハーネスが会話しようとして
-# 証拠ゲートで落ちた。検索ハーネスや PaperQA は会話ができないため、対話は常にこの分野に固定する。
-[[genres]]
-id = "secretary"
-description = "人と話し、案件を理解し、組織に流す"
-capabilities = ["案件の理解の確認", "大まかな方針の提案", "途中目標の提案と再設計", "組織への割り当て"]
-input_artifacts = ["人の依頼文", "下から上がった報告"]
-output_artifacts = ["返事（result.json の summary）", "plan.json"]
-default_role = "secretary"
-roles = ["secretary"]
-
-# `config/org.example.toml` の課が使う分野（監査 M-1: 例の設定 2 つを組み合わせてそのまま起動できる）。
-[[genres]]
+[[harnesses]]
 id = "coding"
 description = "コードを書く・直す・テストする"
+tier = "standard"
 capabilities = ["ソースコードの読み書き", "テストの実行", "パッチの作成"]
 input_artifacts = ["issue description", "repository"]
 output_artifacts = ["diff", "test results"]
-default_role = "implementer"
-roles = ["lead", "implementer"]
+budget = { max_turns = 20 }
+instructions = "あなたは実装担当。受け取った範囲だけを実装し、終わったら summary を書く。"
 
-[[genres]]
+# ADR-0046 D7: `data-analysis` と `writing` は coding と同じアダプタで、指示文が違うだけ。
+[[harnesses]]
+id = "data-analysis"
+description = "実験の生データを整え、統計と図表にする"
+tier = "standard"
+capabilities = ["データの整形", "統計", "作図"]
+input_artifacts = ["生データ", "測定の条件"]
+output_artifacts = ["figures", "tables", "summary.md"]
+budget = { max_turns = 20 }
+instructions = "あなたはデータ整理担当。数値は再現手順と一緒に残し、図表の体裁を整える。"
+
+[[harnesses]]
+id = "writing"
+description = "結果を framing し、論文・報告の形にする"
+tier = "standard"
+capabilities = ["論文の構成", "本文の執筆", "推敲"]
+input_artifacts = ["結果", "図表", "関連研究"]
+output_artifacts = ["draft", "summary.md"]
+budget = { max_turns = 20 }
+instructions = "あなたは執筆担当。主張と根拠の対応を崩さず、読者が追える順に並べ直す。"
+
+[[harnesses]]
 id = "literature"
 description = "関連研究の調査・先行研究の確認・新規性の検討（PaperQA2 + arXiv / OpenAlex）"
+tier = "standard"
 capabilities = ["学術文献の検索と取得", "PDF 全文からの根拠抽出", "引用付きの要約"]
 input_artifacts = ["question", "pdf", "bibliography"]
 output_artifacts = ["answer.md: 引用付きの答え（これが答え）", "papers.json: 検索した論文の一覧（コーパス。答えではない）", "sources.json: 出典と引用の有無", "queries.json: 使った検索語"]
-default_role = "literature-reader"
-roles = ["literature-scout", "literature-reader"]
+instructions = "あなたは精読担当。候補論文を読み込み、引用付きで要点と新規性への影響をまとめる。"
 
-# 一般 Web の調査（`config/org.example.toml` の Web 調査課が使う分野）。論文は上の `literature` に投げる。
-[[genres]]
+# 一般 Web の調査。論文は上の `literature` に投げる（実機の事故: 一般 Web 検索で関連研究を調べさせたら、
+# レビュアーが「出典が Medium / Qiita / note のブログ」と不合格にした）。
+[[harnesses]]
 id = "web-research"
 description = "論文化されていない GitHub 上の実装・製品・仕様・技術報告の調査（Local Deep Research）"
+tier = "standard"
 capabilities = ["一般 Web 検索", "複数ページの読解", "出典付きの報告"]
 input_artifacts = ["question"]
 output_artifacts = ["report.md: 出典付きの調査報告（これが答え）", "sources.json: 出典と引用の有無", "research.json: 検索の記録（クエリと件数）"]
-default_role = "web-researcher"
-roles = ["web-researcher"]
+instructions = "あなたは Web 調査担当。論文化されていない実装・製品・仕様を一般 Web 検索で調べ、出典付きでまとめる。"
+
+# 旧い形（Phase 58 まで）。`[[harnesses]]` を書くならこちらは**消すこと**（両方あると `[[harnesses]]` が勝つ）。
+# 互換のためだけに残してあり、`[[harnesses]]` が 1 つも無いときだけ読まれる（起動時に warn が 1 行出る）。
+#
+# [[roles]]
+# id = "implementer"
+# tier = "standard"
+# max_turns = 20
+# instructions = "あなたは実装担当。…"
+#
+# [[genres]]
+# id = "coding"
+# description = "コードを書く・直す・テストする"
+# default_role = "implementer"
+# roles = ["implementer"]
 
 # 実行中の委譲の上限（ADR-0016 D2 / M6）。既定は下の値。超える提案は拒否され、理由が WorkerProgress に残る（run は失敗しない）。
 [delegation]

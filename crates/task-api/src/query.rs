@@ -14,18 +14,25 @@ pub(crate) struct QueryParams {
 impl QueryParams {
     /// `allowed` 以外のキーがあれば 400。
     pub(crate) fn parse(raw: Option<&str>, allowed: &[&str]) -> Result<Self, ApiProblem> {
-        let pairs: Vec<(String, String)> = form_urlencoded::parse(raw.unwrap_or_default().as_bytes())
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
+        let pairs: Vec<(String, String)> =
+            form_urlencoded::parse(raw.unwrap_or_default().as_bytes())
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
         if let Some((key, _)) = pairs.iter().find(|(k, _)| !allowed.contains(&k.as_str())) {
-            return Err(ApiProblem::bad_request(format!("unknown query parameter `{key}`")));
+            return Err(ApiProblem::bad_request(format!(
+                "unknown query parameter `{key}`"
+            )));
         }
         Ok(Self { pairs })
     }
 
     /// 1 回だけ現れるべきキーの値（重複は 400）。
     pub(crate) fn single(&self, key: &str) -> Result<Option<&str>, ApiProblem> {
-        let mut values = self.pairs.iter().filter(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        let mut values = self
+            .pairs
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str());
         let first = values.next();
         if values.next().is_some() {
             return Err(ApiProblem::bad_request(format!(
@@ -50,7 +57,9 @@ impl QueryParams {
         self.single(key)?
             .map(|v| {
                 v.trim().parse::<u64>().map_err(|_| {
-                    ApiProblem::bad_request(format!("query parameter `{key}` must be a non-negative integer"))
+                    ApiProblem::bad_request(format!(
+                        "query parameter `{key}` must be a non-negative integer"
+                    ))
                 })
             })
             .transpose()
@@ -59,9 +68,9 @@ impl QueryParams {
     pub(crate) fn i64(&self, key: &str) -> Result<Option<i64>, ApiProblem> {
         self.single(key)?
             .map(|v| {
-                v.trim()
-                    .parse::<i64>()
-                    .map_err(|_| ApiProblem::bad_request(format!("query parameter `{key}` must be an integer")))
+                v.trim().parse::<i64>().map_err(|_| {
+                    ApiProblem::bad_request(format!("query parameter `{key}` must be an integer"))
+                })
             })
             .transpose()
     }
@@ -85,7 +94,9 @@ impl QueryParams {
     pub(crate) fn limit(&self, key: &str, default: usize, max: usize) -> Result<usize, ApiProblem> {
         match self.u64(key)? {
             None => Ok(default),
-            Some(0) => Err(ApiProblem::bad_request(format!("query parameter `{key}` must be at least 1"))),
+            Some(0) => Err(ApiProblem::bad_request(format!(
+                "query parameter `{key}` must be at least 1"
+            ))),
             Some(n) => Ok(usize::try_from(n).unwrap_or(usize::MAX).min(max)),
         }
     }
@@ -94,8 +105,11 @@ impl QueryParams {
     pub(crate) fn account_adapter(&self) -> Result<AccountAdapter, ApiProblem> {
         match self.single("adapter")? {
             None => Ok(AccountAdapter::ClaudeCode),
-            Some(s) => AccountAdapter::parse(s)
-                .ok_or_else(|| ApiProblem::bad_request(format!("unknown adapter `{s}` (must be claude-code or codex)"))),
+            Some(s) => AccountAdapter::parse(s).ok_or_else(|| {
+                ApiProblem::bad_request(format!(
+                    "unknown adapter `{s}` (must be claude-code or codex)"
+                ))
+            }),
         }
     }
 
@@ -111,7 +125,11 @@ impl QueryParams {
                 Some(known) => {
                     set.insert(*known);
                 }
-                None => return Err(ApiProblem::bad_request(format!("unknown event type `{name}`"))),
+                None => {
+                    return Err(ApiProblem::bad_request(format!(
+                        "unknown event type `{name}`"
+                    )));
+                }
             }
         }
         Ok(Some(set))
@@ -131,7 +149,7 @@ pub(crate) fn parse_snake<T: DeserializeOwned>(what: &str, value: &str) -> Resul
 }
 
 /// `Event` の serde の `type` 名（`types` クエリの語彙）。
-pub(crate) const EVENT_TYPES: [&str; 16] = [
+pub(crate) const EVENT_TYPES: [&str; 17] = [
     "created",
     "transitioned",
     "worker_started",
@@ -148,6 +166,8 @@ pub(crate) const EVENT_TYPES: [&str; 16] = [
     "question_raised",
     "retried",
     "edited",
+    // ADR-0046 D5（Phase 59）: matching が担当を決めた。
+    "assigned",
 ];
 
 pub(crate) fn event_type_name(event: &Event) -> &'static str {
@@ -168,6 +188,7 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::QuestionRaised { .. } => "question_raised",
         Event::Retried { .. } => "retried",
         Event::Edited { .. } => "edited",
+        Event::Assigned { .. } => "assigned",
     }
 }
 
@@ -179,7 +200,8 @@ mod tests {
     #[test]
     fn unknown_and_repeated_keys_are_rejected() {
         assert!(QueryParams::parse(Some("limit=1&bogus=2"), &["limit"]).is_err());
-        let q = QueryParams::parse(Some("limit=1&limit=2"), &["limit"]).unwrap_or_else(|_| panic!("parse"));
+        let q = QueryParams::parse(Some("limit=1&limit=2"), &["limit"])
+            .unwrap_or_else(|_| panic!("parse"));
         assert!(q.single("limit").is_err());
     }
 
@@ -199,7 +221,9 @@ mod tests {
 
     #[test]
     fn limit_defaults_rejects_zero_and_clamps() {
-        let parse = |raw: &str| QueryParams::parse(Some(raw), &["limit"]).unwrap_or_else(|_| panic!("parse"));
+        let parse = |raw: &str| {
+            QueryParams::parse(Some(raw), &["limit"]).unwrap_or_else(|_| panic!("parse"))
+        };
         assert_eq!(parse("").limit("limit", 100, 500).ok(), Some(100));
         assert!(parse("limit=0").limit("limit", 100, 500).is_err());
         assert!(parse("limit=-1").limit("limit", 100, 500).is_err());
@@ -212,7 +236,8 @@ mod tests {
             .unwrap_or_else(|_| panic!("parse"));
         let set = q.event_types().ok().flatten().unwrap_or_default();
         assert!(set.contains("transitioned") && set.contains("worker_finished") && set.len() == 2);
-        let bad = QueryParams::parse(Some("types=nope"), &["types"]).unwrap_or_else(|_| panic!("parse"));
+        let bad =
+            QueryParams::parse(Some("types=nope"), &["types"]).unwrap_or_else(|_| panic!("parse"));
         assert!(bad.event_types().is_err());
     }
 }

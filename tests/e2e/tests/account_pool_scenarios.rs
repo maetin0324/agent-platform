@@ -22,12 +22,20 @@ fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
     let path = debug_dir.join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
@@ -68,7 +76,8 @@ struct Resp {
 
 impl Resp {
     fn json(&self) -> Value {
-        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("not JSON ({e}): {} {}", self.status, self.body))
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {} {}", self.status, self.body))
     }
 
     #[track_caller]
@@ -93,7 +102,13 @@ impl Env {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         let accounts_dir = root.join("claude-accounts");
-        Self { _tmp: tmp, root, accounts_dir, port: free_port(), token: None }
+        Self {
+            _tmp: tmp,
+            root,
+            accounts_dir,
+            port: free_port(),
+            token: None,
+        }
     }
 
     /// スタブの `claude`。`-p ...`（run/check の両方）では `$CLAUDE_SECURESTORAGE_CONFIG_DIR/util`
@@ -202,9 +217,18 @@ account_pool = true
     }
 
     fn celerisctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("celerisctl")).arg("--db").arg(self.root.join("celeris.sqlite3")).args(args).output().unwrap();
+        let out = Command::new(bin("celerisctl"))
+            .arg("--db")
+            .arg(self.root.join("celeris.sqlite3"))
+            .args(args)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "celerisctl {args:?} failed: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         stdout
     }
 
@@ -227,7 +251,10 @@ account_pool = true
 
     fn start_celeris(&self, config: &Path) -> Proc {
         static STARTS: AtomicUsize = AtomicUsize::new(0);
-        let log = self.root.join(format!("celeris-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
+        let log = self.root.join(format!(
+            "celeris-{}.log",
+            STARTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--log-format", "text"])
             .stdin(Stdio::null())
@@ -255,7 +282,11 @@ account_pool = true
             let resp = self.request("GET", "/daemon", None, &[]);
             resp.status != 200 || resp.json()["snapshot"].is_object()
         });
-        assert!(ticked, "the dispatcher never published a snapshot\n{}", daemon.log_text());
+        assert!(
+            ticked,
+            "the dispatcher never published a snapshot\n{}",
+            daemon.log_text()
+        );
     }
 
     fn url(&self, path: &str) -> String {
@@ -264,8 +295,23 @@ account_pool = true
 
     fn request(&self, method: &str, path: &str, body: Option<&str>, headers: &[&str]) -> Resp {
         let mut cmd = Command::new("curl");
-        cmd.args(["-s", "-S", "-D", "-", "--max-time", "35", "-H", "Expect:", "-X", method]);
-        let has = |name: &str| headers.iter().any(|h| h.to_ascii_lowercase().starts_with(&format!("{name}:")));
+        cmd.args([
+            "-s",
+            "-S",
+            "-D",
+            "-",
+            "--max-time",
+            "35",
+            "-H",
+            "Expect:",
+            "-X",
+            method,
+        ]);
+        let has = |name: &str| {
+            headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with(&format!("{name}:")))
+        };
         if let Some(token) = &self.token
             && !has("authorization")
         {
@@ -283,11 +329,23 @@ account_pool = true
         let out = cmd.arg(self.url(path)).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let Some((head, body)) = text.split_once("\r\n\r\n") else {
-            return Resp { status: 0, headers: vec![], body: String::from_utf8_lossy(&out.stderr).into_owned() };
+            return Resp {
+                status: 0,
+                headers: vec![],
+                body: String::from_utf8_lossy(&out.stderr).into_owned(),
+            };
         };
         let mut lines = head.lines();
-        let status = lines.next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).unwrap_or(0);
-        Resp { status, headers: lines.map(str::to_string).collect(), body: body.to_string() }
+        let status = lines
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Resp {
+            status,
+            headers: lines.map(str::to_string).collect(),
+            body: body.to_string(),
+        }
     }
 
     fn get(&self, path: &str) -> Resp {
@@ -324,7 +382,10 @@ account_pool = true
 
     fn task_status(&self, task_id: &str) -> task_core::Status {
         let store = task_core::SqliteStore::open(&self.root.join("celeris.sqlite3")).unwrap();
-        task_core::TaskStore::get(&store, task_id.parse().unwrap()).unwrap().unwrap().status
+        task_core::TaskStore::get(&store, task_id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .status
     }
 }
 
@@ -346,7 +407,8 @@ fn account_selection_follows_headroom_and_survives_restart_and_throttle_only_coo
     let t1 = env.add("t1");
     env.celerisctl(&["approve", &t1]);
     assert!(
-        wait_until(Duration::from_secs(10), || env.task_status(&t1) == task_core::Status::Done),
+        wait_until(Duration::from_secs(10), || env.task_status(&t1)
+            == task_core::Status::Done),
         "t1 never completed"
     );
     assert_eq!(env.worker_started_account(&t1).as_deref(), Some("a"));
@@ -355,7 +417,8 @@ fn account_selection_follows_headroom_and_survives_restart_and_throttle_only_coo
     let t2 = env.add("t2");
     env.celerisctl(&["approve", &t2]);
     assert!(
-        wait_until(Duration::from_secs(10), || env.task_status(&t2) == task_core::Status::Done),
+        wait_until(Duration::from_secs(10), || env.task_status(&t2)
+            == task_core::Status::Done),
         "t2 never completed"
     );
     assert_eq!(env.worker_started_account(&t2).as_deref(), Some("b"));
@@ -364,7 +427,8 @@ fn account_selection_follows_headroom_and_survives_restart_and_throttle_only_coo
     let t3 = env.add("t3");
     env.celerisctl(&["approve", &t3]);
     assert!(
-        wait_until(Duration::from_secs(10), || env.task_status(&t3) == task_core::Status::Done),
+        wait_until(Duration::from_secs(10), || env.task_status(&t3)
+            == task_core::Status::Done),
         "t3 never completed"
     );
     assert_eq!(env.worker_started_account(&t3).as_deref(), Some("b"));
@@ -378,7 +442,10 @@ fn account_selection_follows_headroom_and_survives_restart_and_throttle_only_coo
     assert_eq!(b["usage"]["five_hour"]["utilization"], json!(0.2));
 
     // プールを使う run の cooldown はプロバイダには付かない（daemon.cooldowns は空のまま）。
-    assert_eq!(env.get("/daemon").json()["snapshot"]["cooldowns"], json!([]));
+    assert_eq!(
+        env.get("/daemon").json()["snapshot"]["cooldowns"],
+        json!([])
+    );
 
     // 再起動しても観測値は残る（受け入れ 3 後半、AccountBook の永続化）。
     drop(daemon);
@@ -422,7 +489,8 @@ exec "{claude}" "$@"
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&claude_conditional, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&claude_conditional, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
     }
     let config = env.write_config(&claude_conditional, None, "");
     let mut daemon = env.start_celeris(&config);
@@ -431,7 +499,9 @@ exec "{claude}" "$@"
     let t1 = env.add("throttle1");
     env.celerisctl(&["approve", &t1]);
     assert!(
-        wait_until(Duration::from_secs(10), || env.worker_started_account(&t1).is_some()),
+        wait_until(Duration::from_secs(10), || env
+            .worker_started_account(&t1)
+            .is_some()),
         "t1 was never dispatched"
     );
     assert_eq!(env.worker_started_account(&t1).as_deref(), Some("a"));
@@ -440,17 +510,30 @@ exec "{claude}" "$@"
     let cooling = wait_until(Duration::from_secs(10), || {
         env.get("/accounts").json()["items"]
             .as_array()
-            .is_some_and(|items| items.iter().any(|it| it["id"] == "a" && !it["cooldown"].is_null()))
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|it| it["id"] == "a" && !it["cooldown"].is_null())
+            })
     });
-    assert!(cooling, "account a never cooled down: {}", env.get("/accounts").body);
+    assert!(
+        cooling,
+        "account a never cooled down: {}",
+        env.get("/accounts").body
+    );
     // プロバイダ自体は cooldown にならない。
-    assert_eq!(env.get("/daemon").json()["snapshot"]["cooldowns"], json!([]));
+    assert_eq!(
+        env.get("/daemon").json()["snapshot"]["cooldowns"],
+        json!([])
+    );
 
     // 次のタスクは cooldown 中の "a" を避けて "b" に行く。
     let t2 = env.add("throttle2");
     env.celerisctl(&["approve", &t2]);
     assert!(
-        wait_until(Duration::from_secs(10), || env.worker_started_account(&t2).is_some()),
+        wait_until(Duration::from_secs(10), || env
+            .worker_started_account(&t2)
+            .is_some()),
         "t2 was never dispatched"
     );
     assert_eq!(env.worker_started_account(&t2).as_deref(), Some("b"));
@@ -470,7 +553,8 @@ fn http_login_flow_ends_with_logged_in_true_and_management_requires_a_token() {
         env.wait_api(&mut daemon);
 
         assert_eq!(env.get("/accounts").status, 200);
-        env.post("/accounts", json!({"id": "c"})).assert_problem(401, "unauthorized");
+        env.post("/accounts", json!({"id": "c"}))
+            .assert_problem(401, "unauthorized");
     }
 
     // token_file 設定あり: 認証を通した後、POST /accounts → login → login/code → logged_in: true の一連が通る。
@@ -497,7 +581,12 @@ fn http_login_flow_ends_with_logged_in_true_and_management_requires_a_token() {
     assert_eq!(coded.json()["result"], "ok", "{}", coded.body);
 
     let listed = env.get("/accounts").json();
-    let c = listed["items"].as_array().unwrap().iter().find(|it| it["id"] == "c").unwrap();
+    let c = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|it| it["id"] == "c")
+        .unwrap();
     assert_eq!(c["logged_in"], json!(true));
 
     // ログもコードも URL も出ない（D5）。

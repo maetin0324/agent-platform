@@ -274,7 +274,9 @@ fn path_problem(e: PathError) -> ApiProblem {
 /// KB の根（設定していなければ 409）。
 fn root_of(state: &ApiState) -> Result<PathBuf, ApiProblem> {
     state.inner.knowledge_root.clone().ok_or_else(|| {
-        knowledge_unavailable("`[knowledge] root` が設定されていません（config.toml に `[knowledge]` を足す）")
+        knowledge_unavailable(
+            "`[knowledge] root` が設定されていません（config.toml に `[knowledge]` を足す）",
+        )
     })
 }
 
@@ -306,8 +308,16 @@ async fn tree(
     axum::extract::RawQuery(raw): axum::extract::RawQuery,
 ) -> ApiResult {
     let query = QueryParams::parse(raw.as_deref(), &["scope", "q", "limit"])?;
-    let scope = query.single("scope")?.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-    let q = query.single("q")?.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let scope = query
+        .single("scope")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let q = query
+        .single("q")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let root = root_of(&state)?;
     let view = state
         .blocking(move |_| {
@@ -385,7 +395,11 @@ async fn page(
             let raw = ops_kb::read_page(&root, &path).ok_or_else(|| page_not_found(&path))?;
             let too_large = raw.len() > kb::MAX_PAGE_BYTES;
             let (front, body) = kb::front_matter(&raw);
-            let html = if too_large { String::new() } else { render_markdown(body, &path) };
+            let html = if too_large {
+                String::new()
+            } else {
+                render_markdown(body, &path)
+            };
             Ok(KnowledgePage {
                 root: root.display().to_string(),
                 title: kb::title_of(&raw, &path),
@@ -441,10 +455,17 @@ async fn put_page(
                 body: Some(request.body.clone()),
                 etag: request.etag.clone().filter(|e| !e.trim().is_empty()),
                 message,
-                author: (kb::HUMAN_AUTHOR_NAME.to_string(), kb::HUMAN_AUTHOR_EMAIL.to_string()),
+                author: (
+                    kb::HUMAN_AUTHOR_NAME.to_string(),
+                    kb::HUMAN_AUTHOR_EMAIL.to_string(),
+                ),
             };
             match ops_kb::commit_page(&root, &edit) {
-                WriteOutcome::Written { sha, etag, unchanged } => {
+                WriteOutcome::Written {
+                    sha,
+                    etag,
+                    unchanged,
+                } => {
                     // ADR-0047 D3: 書いたら必ず索引を作り直す。
                     let _ = ops_kb::reindex(&root);
                     tracing::info!(
@@ -600,10 +621,16 @@ mod tests {
             page_path("../escape.md").err().map(|p| p.code()),
             Some("path_forbidden")
         );
-        assert_eq!(page_path("a.txt").err().map(|p| p.code()), Some("validation"));
+        assert_eq!(
+            page_path("a.txt").err().map(|p| p.code()),
+            Some("validation")
+        );
         assert_eq!(page_path(" ").err().map(|p| p.code()), Some("bad_request"));
         assert_eq!(
-            ops_kb::inbox_path("../../etc/passwd").err().map(path_problem).map(|p| p.code()),
+            ops_kb::inbox_path("../../etc/passwd")
+                .err()
+                .map(path_problem)
+                .map(|p| p.code()),
             Some("path_forbidden")
         );
     }

@@ -66,8 +66,11 @@ pub const HOST_ONLY_ADAPTERS: [&str; 2] = ["paperqa", "local-deep-research"];
 
 /// 認証情報の置き場を指しているとみなす環境変数（値のパスを**読み取り専用**で同じ場所にマウントする）。
 /// `OPENCODE_CONFIG` だけはファイルを指すので、その**親ディレクトリ**を渡す。
-pub const CREDENTIAL_ENV_DIRS: [&str; 3] =
-    ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CODEX_HOME"];
+pub const CREDENTIAL_ENV_DIRS: [&str; 3] = [
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    "CODEX_HOME",
+];
 /// 値が**ファイル**の認証情報（親ディレクトリをマウントする）。
 pub const CREDENTIAL_ENV_FILES: [&str; 1] = ["OPENCODE_CONFIG"];
 
@@ -183,7 +186,9 @@ pub fn probe_program(program: &str, timeout: Duration) -> Result<(), String> {
         .spawn()
     {
         Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(format!("{program} が見つからない")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("{program} が見つからない"));
+        }
         Err(e) => return Err(format!("{program} を起こせない: {e}")),
     };
     let deadline = std::time::Instant::now() + timeout;
@@ -194,7 +199,10 @@ pub fn probe_program(program: &str, timeout: Duration) -> Result<(), String> {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("`{program} info` が {} 秒で終わらなかった", timeout.as_secs()));
+                    return Err(format!(
+                        "`{program} info` が {} 秒で終わらなかった",
+                        timeout.as_secs()
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -232,7 +240,8 @@ where
     for candidate in preference.candidates() {
         match probe(candidate) {
             Ok(()) => {
-                out.tried.push((candidate.as_str().to_string(), "ok".to_string()));
+                out.tried
+                    .push((candidate.as_str().to_string(), "ok".to_string()));
                 out.runtime = Some(candidate);
                 break;
             }
@@ -318,7 +327,9 @@ pub fn decide(repos: &[RepoRunInput], adapter_id: &str) -> Option<ContainerChoic
         .or_else(|| repos.iter().find(|r| wants_container(r)))?;
     let container = &chosen.config.container;
     let image = match (&container.image, &container.dockerfile) {
-        (Some(image), _) if !image.trim().is_empty() => ImageSource::Named(image.trim().to_string()),
+        (Some(image), _) if !image.trim().is_empty() => {
+            ImageSource::Named(image.trim().to_string())
+        }
         (_, Some(dockerfile)) if !dockerfile.trim().is_empty() => ImageSource::Dockerfile {
             repo_dir: chosen.config_dir.clone(),
             dockerfile: dockerfile.trim().to_string(),
@@ -329,7 +340,11 @@ pub fn decide(repos: &[RepoRunInput], adapter_id: &str) -> Option<ContainerChoic
         repo: chosen.name.clone(),
         image,
         mounts: container.mounts.clone(),
-        env: container.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        env: container
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
     })
 }
 
@@ -373,8 +388,20 @@ impl ContainerPlan {
 }
 
 /// `(program, args, env, cwd)` → `<runtime> run …` の**引数**（`plan.program` は含まない）。純粋関数。
-pub fn argv(plan: &ContainerPlan, program: &str, args: &[String], env: &[(String, String)], cwd: &Path) -> Vec<String> {
-    let mut out: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--network".into(), "host".into()];
+pub fn argv(
+    plan: &ContainerPlan,
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    cwd: &Path,
+) -> Vec<String> {
+    let mut out: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "-i".into(),
+        "--network".into(),
+        "host".into(),
+    ];
     match plan.runtime {
         // rootless の podman はホストと同じ uid に見せる（マウントした worktree にそのまま書ける）。
         Runtime::Podman => out.push("--userns=keep-id".into()),
@@ -454,7 +481,10 @@ pub fn argv(plan: &ContainerPlan, program: &str, args: &[String], env: &[(String
 /// `plan` が `None` なら**そのまま返す**（ホスト実行は従来どおり 1 バイトも変わらない）。
 ///
 /// stdio・`kill_on_drop`・`process_group` は呼び出し側がこの後で付けるので、ここでは触らない。
-pub fn wrap(command: tokio::process::Command, plan: Option<&ContainerPlan>) -> tokio::process::Command {
+pub fn wrap(
+    command: tokio::process::Command,
+    plan: Option<&ContainerPlan>,
+) -> tokio::process::Command {
     let Some(plan) = plan else {
         return command;
     };
@@ -466,7 +496,14 @@ pub fn wrap(command: tokio::process::Command, plan: Option<&ContainerPlan>) -> t
         .collect();
     let env: Vec<(String, String)> = std_command
         .get_envs()
-        .filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())))
+        .filter_map(|(k, v)| {
+            v.map(|v| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+        })
         .collect();
     let cwd = std_command
         .get_current_dir()
@@ -502,7 +539,9 @@ fn credential_dirs(env: &[(String, String)]) -> Vec<PathBuf> {
 
 /// `path` が `roots` のどれかの下（か同じ）か。
 fn is_under(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path == root || path.starts_with(root))
+    roots
+        .iter()
+        .any(|root| path == root || path.starts_with(root))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -523,7 +562,10 @@ pub fn image_tag(dockerfile: &str, context_digest: &str) -> String {
     h.update([0u8]);
     h.update(context_digest.as_bytes());
     let digest = h.finalize();
-    let hex = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let hex = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     format!("{BUILT_IMAGE_PREFIX}{}", &hex[..12])
 }
 
@@ -597,11 +639,18 @@ pub struct BuildRequest {
 }
 
 /// `ImageSource` を実際のタグに落とす（I/O は `context_digest` の読み取りだけ）。
-pub fn resolve_image(source: &ImageSource, image_default: &str, build_root: &Path) -> Result<ResolvedImage, String> {
+pub fn resolve_image(
+    source: &ImageSource,
+    image_default: &str,
+    build_root: &Path,
+) -> Result<ResolvedImage, String> {
     match source {
         ImageSource::Named(image) => Ok(ResolvedImage::Ready(image.clone())),
         ImageSource::Default => Ok(ResolvedImage::Ready(image_default.to_string())),
-        ImageSource::Dockerfile { repo_dir, dockerfile } => {
+        ImageSource::Dockerfile {
+            repo_dir,
+            dockerfile,
+        } => {
             let path = repo_dir.join(dockerfile);
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("Dockerfile `{}` が読めない: {e}", path.display()))?;
@@ -653,12 +702,18 @@ pub async fn ensure_image(
     // 文脈は `<build_dir>/context/`（`.config/celeris/` の写し）。リポジトリ全体は送らない。
     let context = request.build_dir.join("context");
     if let Err(e) = tokio::fs::create_dir_all(&context).await {
-        return Err(format!("ビルドの作業場所 `{}` を作れない: {e}", context.display()));
+        return Err(format!(
+            "ビルドの作業場所 `{}` を作れない: {e}",
+            context.display()
+        ));
     }
     if request.context_src.is_dir()
         && let Err(e) = copy_tree(&request.context_src, &context)
     {
-        return Err(format!("`{}` を写せない: {e}", request.context_src.display()));
+        return Err(format!(
+            "`{}` を写せない: {e}",
+            request.context_src.display()
+        ));
     }
     // Dockerfile が `.config/celeris/` の外にある場合も、写しの中に 1 つ置く。
     let dockerfile_in_context = match request.dockerfile.strip_prefix(&request.context_src) {
@@ -702,7 +757,10 @@ pub async fn ensure_image(
         Err(_) => {
             append_log(
                 log_path,
-                &format!("{started}=> 失敗: {} 秒で終わらなかった\n", timeout.as_secs()),
+                &format!(
+                    "{started}=> 失敗: {} 秒で終わらなかった\n",
+                    timeout.as_secs()
+                ),
             )
             .await;
             return Err(format!(
@@ -753,11 +811,18 @@ async fn append_log(path: &Path, text: &str) {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     use tokio::io::AsyncWriteExt as _;
-    match tokio::fs::OpenOptions::new().create(true).append(true).open(path).await {
+    match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+    {
         Ok(mut file) => {
             let _ = file.write_all(text.as_bytes()).await;
         }
-        Err(e) => tracing::warn!(path = %path.display(), error = %e, "could not write the container build log"),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "could not write the container build log")
+        }
     }
 }
 
@@ -919,7 +984,10 @@ pub fn image_question(repo: &str, reason: &str, log_path: &Path) -> String {
 /// ホストの uid / gid（docker の `--user` に渡す。podman は `--userns=keep-id` なので要らないが、
 /// どちらでも同じ計画を作れるように常に取る）。
 pub fn host_ids() -> (u32, u32) {
-    (nix::unistd::getuid().as_raw(), nix::unistd::getgid().as_raw())
+    (
+        nix::unistd::getuid().as_raw(),
+        nix::unistd::getgid().as_raw(),
+    )
 }
 
 /// `ContainerPlan` を `Arc` で持ち回すときの別名（アダプタの設定に入る）。
@@ -963,22 +1031,39 @@ mod tests {
         for got in [&podman, &docker] {
             let line = joined(got);
             assert!(line.starts_with("run --rm -i --network host"), "{line}");
-            assert!(line.contains("-w /home/u/.local/celeris/workspaces/01TASK/repos/benchfs"), "{line}");
+            assert!(
+                line.contains("-w /home/u/.local/celeris/workspaces/01TASK/repos/benchfs"),
+                "{line}"
+            );
             assert!(
                 line.contains(
                     "-v /home/u/.local/celeris/workspaces/01TASK:/home/u/.local/celeris/workspaces/01TASK"
                 ),
                 "{line}"
             );
-            assert!(line.contains("-v /data/benchfs-runs:/data/benchfs-runs"), "{line}");
+            assert!(
+                line.contains("-v /data/benchfs-runs:/data/benchfs-runs"),
+                "{line}"
+            );
             assert!(line.contains("--label celeris.task=01TASK"), "{line}");
-            assert!(line.ends_with("celeris-worker:latest sh -c echo hi"), "{line}");
+            assert!(
+                line.ends_with("celeris-worker:latest sh -c echo hi"),
+                "{line}"
+            );
             // cwd は task_dir の下なので、重ねてマウントしない。
             assert_eq!(got.iter().filter(|a| *a == "-v").count(), 2, "{line}");
         }
-        assert!(joined(&podman).contains("--userns=keep-id"), "{}", joined(&podman));
+        assert!(
+            joined(&podman).contains("--userns=keep-id"),
+            "{}",
+            joined(&podman)
+        );
         assert!(!joined(&podman).contains("--user 1001:1001"));
-        assert!(joined(&docker).contains("--user 1001:1001"), "{}", joined(&docker));
+        assert!(
+            joined(&docker).contains("--user 1001:1001"),
+            "{}",
+            joined(&docker)
+        );
         assert!(!joined(&docker).contains("keep-id"));
     }
 
@@ -988,9 +1073,18 @@ mod tests {
     fn credentials_from_the_adapter_env_are_mounted_read_only() {
         let cwd = PathBuf::from("/home/u/.local/celeris/workspaces/01TASK/repos/benchfs");
         let env = vec![
-            ("CLAUDE_CONFIG_DIR".to_string(), "/home/u/.local/celeris/accounts/claude/a1".to_string()),
-            ("CODEX_HOME".to_string(), "/home/u/.local/celeris/accounts/codex/c1".to_string()),
-            ("OPENCODE_CONFIG".to_string(), "/home/u/qwen/opencode.json".to_string()),
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/home/u/.local/celeris/accounts/claude/a1".to_string(),
+            ),
+            (
+                "CODEX_HOME".to_string(),
+                "/home/u/.local/celeris/accounts/codex/c1".to_string(),
+            ),
+            (
+                "OPENCODE_CONFIG".to_string(),
+                "/home/u/qwen/opencode.json".to_string(),
+            ),
             ("ANTHROPIC_MODEL".to_string(), "sonnet".to_string()),
         ];
         let got = argv(&plan(Runtime::Podman), "claude", &[], &env, &cwd);
@@ -998,13 +1092,25 @@ mod tests {
         assert!(line.contains("-v /home/u/.local/celeris/accounts/claude/a1:/home/u/.local/celeris/accounts/claude/a1:ro"), "{line}");
         assert!(line.contains("-v /home/u/.local/celeris/accounts/codex/c1:/home/u/.local/celeris/accounts/codex/c1:ro"), "{line}");
         assert!(line.contains("-v /home/u/qwen:/home/u/qwen:ro"), "{line}");
-        assert!(!line.contains("-v /home/u/.local/celeris:/"), "celeris の根を丸ごと見せない: {line}");
-        assert!(!line.contains("-v /home/u:/home/u"), "ホームを丸ごと見せない: {line}");
+        assert!(
+            !line.contains("-v /home/u/.local/celeris:/"),
+            "celeris の根を丸ごと見せない: {line}"
+        );
+        assert!(
+            !line.contains("-v /home/u:/home/u"),
+            "ホームを丸ごと見せない: {line}"
+        );
         // env はそのまま渡る（値も含めて）。
         assert!(line.contains("--env ANTHROPIC_MODEL=sonnet"), "{line}");
-        assert!(line.contains("--env CLAUDE_CONFIG_DIR=/home/u/.local/celeris/accounts/claude/a1"), "{line}");
+        assert!(
+            line.contains("--env CLAUDE_CONFIG_DIR=/home/u/.local/celeris/accounts/claude/a1"),
+            "{line}"
+        );
         // HOME はタスクのディレクトリ（ホストのホームは見せない）。
-        assert!(line.contains("--env HOME=/home/u/.local/celeris/workspaces/01TASK"), "{line}");
+        assert!(
+            line.contains("--env HOME=/home/u/.local/celeris/workspaces/01TASK"),
+            "{line}"
+        );
     }
 
     /// ADR-0047 D3（Phase 61）: 知識ベースは**同じパスに読み取り専用**、`_inbox` だけ書き込み可。
@@ -1018,8 +1124,14 @@ mod tests {
         let mut p = plan(Runtime::Podman);
         p.knowledge_root = Some(PathBuf::from("/home/u/knowledge"));
         let line = joined(&argv(&p, "sh", &[], &[], &cwd));
-        assert!(line.contains("-v /home/u/knowledge:/home/u/knowledge:ro"), "{line}");
-        assert!(line.contains("-v /home/u/knowledge/_inbox:/home/u/knowledge/_inbox"), "{line}");
+        assert!(
+            line.contains("-v /home/u/knowledge:/home/u/knowledge:ro"),
+            "{line}"
+        );
+        assert!(
+            line.contains("-v /home/u/knowledge/_inbox:/home/u/knowledge/_inbox"),
+            "{line}"
+        );
         // `_inbox` の方は `:ro` が付かない（候補を書けないと `record` が使えない）。
         assert!(!line.contains("/home/u/knowledge/_inbox:ro"), "{line}");
         // 相対パスは無視する（ホストのどこを指すか分からないものはマウントしない）。
@@ -1034,13 +1146,21 @@ mod tests {
         let cwd = PathBuf::from("/home/u/.local/celeris/workspaces/01TASK/repos/benchfs");
         let mut p = plan(Runtime::Podman);
         p.extra_mounts = vec!["/dev/infiniband:/dev/infiniband".to_string()];
-        p.env = vec![("CARGO_TARGET_DIR".to_string(), "/w/.cargo-target".to_string())];
+        p.env = vec![(
+            "CARGO_TARGET_DIR".to_string(),
+            "/w/.cargo-target".to_string(),
+        )];
         let env = vec![("CARGO_TARGET_DIR".to_string(), "/host".to_string())];
         let got = argv(&p, "sh", &[], &env, &cwd);
         let line = joined(&got);
-        assert!(line.contains("-v /dev/infiniband:/dev/infiniband"), "{line}");
+        assert!(
+            line.contains("-v /dev/infiniband:/dev/infiniband"),
+            "{line}"
+        );
         let host_at = line.find("--env CARGO_TARGET_DIR=/host").expect(&line);
-        let toml_at = line.find("--env CARGO_TARGET_DIR=/w/.cargo-target").expect(&line);
+        let toml_at = line
+            .find("--env CARGO_TARGET_DIR=/w/.cargo-target")
+            .expect(&line);
         assert!(host_at < toml_at, "workspace.toml が後（後勝ち）: {line}");
     }
 
@@ -1050,7 +1170,10 @@ mod tests {
         let cwd = PathBuf::from("/home/u/workspace/agent-platform");
         let got = argv(&plan(Runtime::Docker), "sh", &[], &[], &cwd);
         let line = joined(&got);
-        assert!(line.contains("-v /home/u/workspace/agent-platform:/home/u/workspace/agent-platform"), "{line}");
+        assert!(
+            line.contains("-v /home/u/workspace/agent-platform:/home/u/workspace/agent-platform"),
+            "{line}"
+        );
     }
 
     /// ADR-0043 D3: 1 つでも `container` を要求したら、そのタスクはコンテナ。
@@ -1092,17 +1215,27 @@ mod tests {
         // auto + toml → そのイメージ
         let got = decide(&[host.clone(), auto.clone()], "claude-code").expect("container");
         assert_eq!(got.repo, "benchfs");
-        assert_eq!(got.image, ImageSource::Named("ghcr.io/x/rust-dev:1.90".into()));
+        assert_eq!(
+            got.image,
+            ImageSource::Named("ghcr.io/x/rust-dev:1.90".into())
+        );
         // 混在: primary が先（`repos[0]` の順より primary が勝つ）
         let got = decide(&[auto.clone(), explicit.clone()], "claude-code").expect("container");
         assert_eq!(got.repo, "paper");
         assert_eq!(got.image, ImageSource::Default);
         // `auto` で `mode = host`（既定）のリポジトリはコンテナを要求しない
-        let plain_auto = RepoRunInput { run: RepoRun::Auto, ..host.clone() };
+        let plain_auto = RepoRunInput {
+            run: RepoRun::Auto,
+            ..host.clone()
+        };
         assert_eq!(decide(&[plain_auto], "claude-code"), None);
         // paperqa / local-deep-research は常にホスト（道具立てがホストの venv にある）
         for adapter in HOST_ONLY_ADAPTERS {
-            assert_eq!(decide(&[auto.clone(), explicit.clone()], adapter), None, "{adapter}");
+            assert_eq!(
+                decide(&[auto.clone(), explicit.clone()], adapter),
+                None,
+                "{adapter}"
+            );
         }
     }
 
@@ -1148,21 +1281,42 @@ mod tests {
         assert_eq!(tag_a.len(), BUILT_IMAGE_PREFIX.len() + 12, "{tag_a}");
         // 同じ内容なら同じタグ。
         assert_eq!(
-            resolve_image(&source, DEFAULT_IMAGE, &build_root).expect("resolve").tag(),
+            resolve_image(&source, DEFAULT_IMAGE, &build_root)
+                .expect("resolve")
+                .tag(),
             tag_a
         );
         // 文脈（`.config/celeris/` の別のファイル）が変わればタグも変わる。
-        std::fs::write(config.join("workspace.toml"), b"[run]\nmode = \"container\"\n").expect("write");
-        let tag_b = resolve_image(&source, DEFAULT_IMAGE, &build_root).expect("resolve").tag().to_string();
+        std::fs::write(
+            config.join("workspace.toml"),
+            b"[run]\nmode = \"container\"\n",
+        )
+        .expect("write");
+        let tag_b = resolve_image(&source, DEFAULT_IMAGE, &build_root)
+            .expect("resolve")
+            .tag()
+            .to_string();
         assert_ne!(tag_a, tag_b);
         // Dockerfile が変わってもタグは変わる。
-        std::fs::write(config.join("Dockerfile"), b"FROM debian:stable-slim\nRUN true\n").expect("write");
-        let tag_c = resolve_image(&source, DEFAULT_IMAGE, &build_root).expect("resolve").tag().to_string();
+        std::fs::write(
+            config.join("Dockerfile"),
+            b"FROM debian:stable-slim\nRUN true\n",
+        )
+        .expect("write");
+        let tag_c = resolve_image(&source, DEFAULT_IMAGE, &build_root)
+            .expect("resolve")
+            .tag()
+            .to_string();
         assert_ne!(tag_b, tag_c);
 
         // `image` / 既定はビルドしない。
         assert_eq!(
-            resolve_image(&ImageSource::Named("x:1".into()), DEFAULT_IMAGE, &build_root).expect("resolve"),
+            resolve_image(
+                &ImageSource::Named("x:1".into()),
+                DEFAULT_IMAGE,
+                &build_root
+            )
+            .expect("resolve"),
             ResolvedImage::Ready("x:1".into())
         );
         assert_eq!(
@@ -1183,9 +1337,15 @@ mod tests {
             build_dir: dir.path().join("containers/celeris-ws-0123456789ab"),
         };
         // 在る → 何もしない（存在しない runtime の名前を渡しても落ちない = 起こしていない証拠）。
-        ensure_image("no-such-runtime", &request, Duration::from_secs(5), &log, &|_| true)
-            .await
-            .expect("cache hit");
+        ensure_image(
+            "no-such-runtime",
+            &request,
+            Duration::from_secs(5),
+            &log,
+            &|_| true,
+        )
+        .await
+        .expect("cache hit");
         assert!(!log.exists(), "ビルドしていないので記録も無い");
         assert!(!request.build_dir.exists());
     }
@@ -1198,7 +1358,11 @@ mod tests {
         std::fs::create_dir_all(&config).expect("mkdir");
         std::fs::write(config.join("Dockerfile"), b"FROM scratch\n").expect("write");
         let fake = dir.path().join("fake-runtime");
-        std::fs::write(&fake, "#!/bin/sh\necho \"argv: $*\"\necho 'boom' 1>&2\nexit 9\n").expect("write");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho \"argv: $*\"\necho 'boom' 1>&2\nexit 9\n",
+        )
+        .expect("write");
         set_executable(&fake);
 
         let log = dir.path().join("runs/container-build.log");
@@ -1229,7 +1393,10 @@ mod tests {
         assert!(err.contains("celeris-ws-aaaaaaaaaaaa"), "{err}");
         assert!(err.contains("boom"), "{err}");
         let text = std::fs::read_to_string(&log).expect("log");
-        assert!(text.contains("argv: build --network host -t celeris-ws-aaaaaaaaaaaa -f"), "{text}");
+        assert!(
+            text.contains("argv: build --network host -t celeris-ws-aaaaaaaaaaaa -f"),
+            "{text}"
+        );
         assert!(text.contains("[stderr] boom"), "{text}");
         // 文脈は `.config/celeris/` の写しだけ（リポジトリ全体は送らない）。
         assert!(request.build_dir.join("context/Dockerfile").is_file());
@@ -1250,7 +1417,9 @@ mod tests {
         assert_eq!(fallback.tried.len(), 2);
         assert!(fallback.tried[0].1.contains("newuidmap"));
 
-        let none = detect_with(RuntimePreference::Auto, |rt| Err(format!("{} が見つからない", rt.as_str())));
+        let none = detect_with(RuntimePreference::Auto, |rt| {
+            Err(format!("{} が見つからない", rt.as_str()))
+        });
         assert!(!none.is_available());
         assert!(none.summary().contains("podman"), "{}", none.summary());
         assert!(none.summary().contains("docker"), "{}", none.summary());
@@ -1269,9 +1438,16 @@ mod tests {
     fn probing_a_runtime_sees_success_failure_and_absence() {
         let dir = tempfile::tempdir().expect("tempdir");
         let good = dir.path().join("podman");
-        std::fs::write(&good, "#!/bin/sh\n[ \"$1\" = info ] || exit 2\necho host: ok\n").expect("write");
+        std::fs::write(
+            &good,
+            "#!/bin/sh\n[ \"$1\" = info ] || exit 2\necho host: ok\n",
+        )
+        .expect("write");
         set_executable(&good);
-        assert_eq!(probe_program(&good.display().to_string(), Duration::from_secs(10)), Ok(()));
+        assert_eq!(
+            probe_program(&good.display().to_string(), Duration::from_secs(10)),
+            Ok(())
+        );
 
         let bad = dir.path().join("docker");
         std::fs::write(
@@ -1280,11 +1456,13 @@ mod tests {
         )
         .expect("write");
         set_executable(&bad);
-        let err = probe_program(&bad.display().to_string(), Duration::from_secs(10)).expect_err("info fails");
+        let err = probe_program(&bad.display().to_string(), Duration::from_secs(10))
+            .expect_err("info fails");
         assert!(err.contains("Cannot connect"), "{err}");
 
         let missing = dir.path().join("nope");
-        let err = probe_program(&missing.display().to_string(), Duration::from_secs(10)).expect_err("missing");
+        let err = probe_program(&missing.display().to_string(), Duration::from_secs(10))
+            .expect_err("missing");
         assert!(err.contains("見つからない"), "{err}");
     }
 
@@ -1292,26 +1470,42 @@ mod tests {
     #[tokio::test]
     async fn wrap_is_a_no_op_without_a_plan_and_rewrites_the_command_with_one() {
         let mut host = tokio::process::Command::new("claude");
-        host.arg("-p").arg("hi").env("CODEX_HOME", "/creds/c1").current_dir("/w/01TASK/repos/x");
+        host.arg("-p")
+            .arg("hi")
+            .env("CODEX_HOME", "/creds/c1")
+            .current_dir("/w/01TASK/repos/x");
         let kept = wrap(host, None);
         assert_eq!(kept.as_std().get_program().to_string_lossy(), "claude");
 
         let mut inner = tokio::process::Command::new("claude");
-        inner.arg("-p").arg("hi").env("CODEX_HOME", "/creds/c1").current_dir("/w/01TASK/repos/x");
+        inner
+            .arg("-p")
+            .arg("hi")
+            .env("CODEX_HOME", "/creds/c1")
+            .current_dir("/w/01TASK/repos/x");
         let mut p = plan(Runtime::Podman);
         p.task_dir = PathBuf::from("/w/01TASK");
         p.dir_repos = vec![];
         let wrapped = wrap(inner, Some(&p));
         let std_cmd = wrapped.as_std();
         assert_eq!(std_cmd.get_program().to_string_lossy(), "podman");
-        let args: Vec<String> = std_cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         let line = joined(&args);
-        assert!(line.starts_with("run --rm -i --network host --userns=keep-id"), "{line}");
+        assert!(
+            line.starts_with("run --rm -i --network host --userns=keep-id"),
+            "{line}"
+        );
         assert!(line.contains("-w /w/01TASK/repos/x"), "{line}");
         assert!(line.contains("-v /w/01TASK:/w/01TASK"), "{line}");
         assert!(line.contains("-v /creds/c1:/creds/c1:ro"), "{line}");
         assert!(line.contains("--env CODEX_HOME=/creds/c1"), "{line}");
-        assert!(line.ends_with("celeris-worker:latest claude -p hi"), "{line}");
+        assert!(
+            line.ends_with("celeris-worker:latest claude -p hi"),
+            "{line}"
+        );
     }
 
     #[cfg(unix)]

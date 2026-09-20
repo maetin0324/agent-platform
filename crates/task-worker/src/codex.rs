@@ -25,7 +25,8 @@ use crate::progress;
 use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
-    LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, read_tail, write_result_json,
+    LineOutcome, MAX_LINE_BYTES, kill_now, read_line_limited, read_tail, reap_after_terminal,
+    write_result_json,
 };
 
 /// `[adapters.codex]`（config.toml, ADR-0008 D4）。
@@ -171,7 +172,9 @@ async fn run_codex(
     }
     command.args(&config.extra_args);
     command.arg(&prompt);
-    command.envs(config.env.iter().cloned()).current_dir(req.cwd());
+    command
+        .envs(config.env.iter().cloned())
+        .current_dir(req.cwd());
     // ★ ADR-0043 D3 の差し込み点（コンテナ実行）。`None` ならそのまま（ホスト実行は変わらない）。
     let mut command = crate::container::wrap(command, config.container.as_deref());
     command
@@ -240,7 +243,12 @@ async fn run_codex(
         }
         let wait = (limits.wall_clock - wall_elapsed).min(limits.idle_timeout - idle_elapsed);
 
-        let outcome = match tokio::time::timeout(wait, read_line_limited(&mut reader, MAX_LINE_BYTES)).await {
+        let outcome = match tokio::time::timeout(
+            wait,
+            read_line_limited(&mut reader, MAX_LINE_BYTES),
+        )
+        .await
+        {
             Err(_elapsed) => continue,
             Ok(Err(e)) => return Err(AdapterError::Io(e)),
             Ok(Ok(outcome)) => outcome,
@@ -278,7 +286,10 @@ async fn run_codex(
     }
     stdout_file.flush().await?;
 
-    let (terminal, provider_failure): (Terminal, Option<ProviderFailure>) = match (timeout_terminal, &last_signal) {
+    let (terminal, provider_failure): (Terminal, Option<ProviderFailure>) = match (
+        timeout_terminal,
+        &last_signal,
+    ) {
         // タイムアウト（wall-clock / idle）は分類しない（ADR-0010 D5）。
         (Some(t), _) => (t, None),
         // `turn.completed`/`turn.failed` を一度も観測できずに exit した場合はクラッシュとして扱い、
@@ -289,14 +300,18 @@ async fn run_codex(
                 Some(code) => code.to_string(),
                 None => "signal".to_string(),
             };
-            let mut pf = last_error_message.as_deref().and_then(classify_provider_failure);
+            let mut pf = last_error_message
+                .as_deref()
+                .and_then(classify_provider_failure);
             if pf.is_none() {
                 let tail = read_tail(&stderr_log_path, 4096).await;
                 pf = classify_provider_failure(&tail);
             }
             (
                 Terminal::Error {
-                    message: format!("worker exited without a turn.completed/turn.failed message (exit={exit_repr})"),
+                    message: format!(
+                        "worker exited without a turn.completed/turn.failed message (exit={exit_repr})"
+                    ),
                     retryable: true,
                 },
                 pf,
@@ -312,9 +327,10 @@ async fn run_codex(
                 pf,
             )
         }
-        (None, Some(TurnSignal::Completed { usage })) => {
-            (terminal_from_result(&req.artifacts_dir, &artifacts_rel, *usage).await, None)
-        }
+        (None, Some(TurnSignal::Completed { usage })) => (
+            terminal_from_result(&req.artifacts_dir, &artifacts_rel, *usage).await,
+            None,
+        ),
     };
 
     forward_delegate_file(&req.artifacts_dir, sink).await;
@@ -373,7 +389,10 @@ fn handle_line(
         "turn.failed" => {
             // 実機（codex-cli 0.154.0）では `error` はオブジェクト（`{"message":"..."}`）で返る。
             // 将来のバージョンで文字列に変わっても読めるよう両方を受け付ける。
-            let message = value.get("error").map(describe_error).unwrap_or_else(|| "turn.failed".to_string());
+            let message = value
+                .get("error")
+                .map(describe_error)
+                .unwrap_or_else(|| "turn.failed".to_string());
             *last_signal = Some(TurnSignal::Failed { message });
         }
         _ => {}
@@ -418,7 +437,10 @@ fn item_progress(ty: &str, item: Option<&serde_json::Value>) -> task_core::Progr
                     .or_else(|| item.get("output"))
                     .and_then(|o| o.as_str())
                     .unwrap_or("");
-                let error = item.get("exit_code").and_then(|c| c.as_i64()).is_some_and(|c| c != 0)
+                let error = item
+                    .get("exit_code")
+                    .and_then(|c| c.as_i64())
+                    .is_some_and(|c| c != 0)
                     || item.get("status").and_then(|s| s.as_str()) == Some("failed");
                 progress::tool_result(Some(item_type), body, error)
             } else {
@@ -432,13 +454,20 @@ fn item_progress(ty: &str, item: Option<&serde_json::Value>) -> task_core::Progr
                     .unwrap_or_else(|| progress::one_line(&item.to_string()));
                 task_core::ProgressFields::of(task_core::ProgressKind::ToolUse)
                     .with_tool(item_type)
-                    .with_summary(progress::truncate_chars(&summary, progress::SUMMARY_MAX_CHARS))
+                    .with_summary(progress::truncate_chars(
+                        &summary,
+                        progress::SUMMARY_MAX_CHARS,
+                    ))
                     .with_detail(item.to_string())
             }
         }
         // 知らない item は節目として残す（Console は折り畳んだ見出しに最後の `status` を出す）。
         other => {
-            let summary = if other.is_empty() { ty.to_string() } else { format!("{ty} {other}") };
+            let summary = if other.is_empty() {
+                ty.to_string()
+            } else {
+                format!("{ty} {other}")
+            };
             progress::status().with_summary(summary)
         }
     }
@@ -496,7 +525,9 @@ async fn terminal_from_result(
                 }
             } else {
                 Terminal::Error {
-                    message: format!("{artifacts_rel}/result.json has neither 'summary' nor 'question'"),
+                    message: format!(
+                        "{artifacts_rel}/result.json has neither 'summary' nor 'question'"
+                    ),
                     retryable: true,
                 }
             }
@@ -529,7 +560,10 @@ mod tests {
 
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
-            self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+            self.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(msg.to_string());
         }
         fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
             self.progress(msg);
@@ -540,10 +574,16 @@ mod tests {
         }
         fn artifact(&self, _artifact: &ArtifactRef) {}
         fn delegate(&self, tasks: &[DelegateTask]) {
-            self.delegated.lock().unwrap_or_else(|e| e.into_inner()).push(tasks.to_vec());
+            self.delegated
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(tasks.to_vec());
         }
         fn rate_limit(&self, obs: task_core::RateLimitObservation) {
-            self.rate_limits.lock().unwrap_or_else(|e| e.into_inner()).push(obs);
+            self.rate_limits
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(obs);
         }
     }
 
@@ -583,14 +623,21 @@ mod tests {
     fn json_events_map_to_structured_progress() {
         use task_core::ProgressKind;
 
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-stream.jsonl");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/codex-stream.jsonl"
+        );
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         let sink = RecordingSink::default();
         let (mut signal, mut error) = (None, None);
         for line in text.lines() {
             handle_line(line, &sink, &mut signal, &mut error);
         }
-        let items = sink.structured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let items = sink
+            .structured
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let kinds: Vec<Option<ProgressKind>> = items.iter().map(|(_, f)| f.kind).collect();
         assert_eq!(
             kinds,
@@ -604,16 +651,28 @@ mod tests {
             ],
             "{items:#?}"
         );
-        assert_eq!(items[0].1.summary.as_deref(), Some("テストを回して確かめる"));
+        assert_eq!(
+            items[0].1.summary.as_deref(),
+            Some("テストを回して確かめる")
+        );
         assert_eq!(items[1].1.tool.as_deref(), Some("command_execution"));
-        assert_eq!(items[1].1.summary.as_deref(), Some("cargo test --workspace"));
-        assert_eq!(items[2].1.summary.as_deref(), Some("test result: ok. 812 passed"));
+        assert_eq!(
+            items[1].1.summary.as_deref(),
+            Some("cargo test --workspace")
+        );
+        assert_eq!(
+            items[2].1.summary.as_deref(),
+            Some("test result: ok. 812 passed")
+        );
         assert!(!items[2].1.error);
         // `exit_code != 0` は失敗の印。
         assert!(items[3].1.error, "{:?}", items[3]);
         assert_eq!(items[4].1.summary.as_deref(), Some("テストは通りました。"));
         // 知らない item（`todo_list`）は節目として残る。
-        assert_eq!(items[5].1.summary.as_deref(), Some("item.completed todo_list"));
+        assert_eq!(
+            items[5].1.summary.as_deref(),
+            Some("item.completed todo_list")
+        );
         // `msg` は従来どおり行そのもの。
         assert!(items[1].0.contains("command_execution"), "{}", items[1].0);
         assert!(matches!(signal, Some(TurnSignal::Completed { .. })));
@@ -635,12 +694,25 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-1", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
-            Terminal::Done { summary, evidence, usage } => {
+            Terminal::Done {
+                summary,
+                evidence,
+                usage,
+            } => {
                 assert_eq!(summary, "added usage example");
                 assert!(evidence.is_empty());
-                assert_eq!(usage, Some(Usage { input_tokens: Some(10), output_tokens: Some(20) }));
+                assert_eq!(
+                    usage,
+                    Some(Usage {
+                        input_tokens: Some(10),
+                        output_tokens: Some(20)
+                    })
+                );
             }
             other => panic!("expected done, got {other:?}"),
         }
@@ -650,9 +722,12 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
 
         // P-26 (ADR-0010 D10): the terminal is also normalized into `runs/<run_id>/result.json`,
         // readable by task-dispatch as a `WorkerMessage::Done`.
-        let result_json = std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
+        let result_json =
+            std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
         match serde_json::from_str::<crate::protocol::WorkerMessage>(result_json.trim()).unwrap() {
-            crate::protocol::WorkerMessage::Done { summary, .. } => assert_eq!(summary, "added usage example"),
+            crate::protocol::WorkerMessage::Done { summary, .. } => {
+                assert_eq!(summary, "added usage example")
+            }
             other => panic!("expected done in result.json, got {other:?}"),
         }
     }
@@ -667,7 +742,10 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-2", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-2", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -689,7 +767,10 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-2b", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-2b", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -752,18 +833,29 @@ echo '{"type":"turn.completed"}'
 "#,
         );
         std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
-        std::fs::write(dir.path().join("artifacts/result.json"), r#"{"summary":"sibling"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("artifacts/result.json"),
+            r#"{"summary":"sibling"}"#,
+        )
+        .unwrap();
         let adapter = CodexAdapter::new(config);
         let mut req = sample_req(dir.path().to_path_buf());
         req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-shared", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Done { summary, .. } => assert_eq!(summary, "mine"),
             other => panic!("expected done, got {other:?}"),
         }
-        let prompt = std::fs::read_to_string(dir.path().join("runs/run-shared/prompt.txt")).unwrap();
-        assert!(prompt.contains(".taskd/artifacts/T1/result.json"), "{prompt}");
+        let prompt =
+            std::fs::read_to_string(dir.path().join("runs/run-shared/prompt.txt")).unwrap();
+        assert!(
+            prompt.contains(".taskd/artifacts/T1/result.json"),
+            "{prompt}"
+        );
     }
 
     #[tokio::test]
@@ -773,7 +865,10 @@ echo '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-3", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-3", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -796,7 +891,10 @@ echo '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-4", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-4", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Question { text } => assert_eq!(text, "which crate version?"),
             other => panic!("expected question, got {other:?}"),
@@ -810,7 +908,10 @@ echo '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-5", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-5", default_limits(), &sink)
+            .await
+            .unwrap();
         assert_eq!(outcome.exit_code, Some(9));
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
@@ -836,7 +937,10 @@ exit 9
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-6", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-6", default_limits(), &sink)
+            .await
+            .unwrap();
         assert_eq!(outcome.exit_code, Some(9));
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
@@ -861,13 +965,18 @@ exit 9
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-7", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-7", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
                 assert!(message.contains("artifacts/result.json"), "{message}");
             }
-            other => panic!("expected error (stale file must be cleared, not reused), got {other:?}"),
+            other => {
+                panic!("expected error (stale file must be cleared, not reused), got {other:?}")
+            }
         }
     }
 
@@ -937,9 +1046,14 @@ echo '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-10", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-10", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
-            Terminal::Done { summary, evidence, .. } => {
+            Terminal::Done {
+                summary, evidence, ..
+            } => {
                 assert_eq!(summary, "all good");
                 assert_eq!(evidence.len(), 1);
                 assert_eq!(evidence[0].command.as_deref(), Some("cargo test"));
@@ -961,7 +1075,10 @@ echo '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-11", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-11", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -995,16 +1112,26 @@ echo '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-12", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-12", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Error { .. }));
 
         let args_log = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
         let args: Vec<&str> = args_log.split('\0').filter(|s| !s.is_empty()).collect();
-        assert_eq!(args.len(), 7, "expected exactly one trailing prompt arg, got {args:?}");
+        assert_eq!(
+            args.len(),
+            7,
+            "expected exactly one trailing prompt arg, got {args:?}"
+        );
         assert_eq!(&args[..4], ["exec", "--json", "--model", "gpt-5-codex"]);
         assert_eq!(&args[4..6], ["--sandbox", "read-only"]);
         let prompt = args[6];
-        assert!(prompt.contains("# Task:"), "prompt should be the last arg: {prompt}");
+        assert!(
+            prompt.contains("# Task:"),
+            "prompt should be the last arg: {prompt}"
+        );
     }
 
     /// ADR-0016 M8: `codex` も run の終わりに `artifacts/delegate.json` があれば `sink.delegate` を 1 回呼ぶ。
@@ -1022,7 +1149,10 @@ echo '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-13", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-13", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let delegated = sink.delegated.lock().unwrap();
         assert_eq!(delegated.len(), 1);
@@ -1044,7 +1174,10 @@ echo '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-rate-1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-rate-1", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let observed = sink.rate_limits.lock().unwrap();
         assert_eq!(observed.len(), 1);
@@ -1072,7 +1205,9 @@ echo '{"type":"turn.completed"}'
             },
             ..CodexConfig::default()
         };
-        config.env.push(("CODEX_HOME".to_string(), "old-account-dir".to_string()));
+        config
+            .env
+            .push(("CODEX_HOME".to_string(), "old-account-dir".to_string()));
         let base = CodexAdapter::new(config);
         let with_env = base
             .with_env(&[("CODEX_HOME".to_string(), "new-account-dir".to_string())])
@@ -1080,7 +1215,10 @@ echo '{"type":"turn.completed"}'
 
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = with_env.run(req, "run-env-1", default_limits(), &sink).await.unwrap();
+        let outcome = with_env
+            .run(req, "run-env-1", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let seen = std::fs::read_to_string(&out_file).unwrap();
         assert_eq!(seen, "new-account-dir");

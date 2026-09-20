@@ -21,20 +21,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use task_api::types::{
-    ApiConfigView, ClusterConfigView, ConfigView, GenreConfigView, ProviderConfigView, ReviewerConfigView,
-    RoleConfigView,
+    ApiConfigView, ClusterConfigView, ConfigView, GenreConfigView, ProviderConfigView,
+    ReviewerConfigView, RoleConfigView,
 };
 use task_api::{ApiError, ApiSettings, ApiState};
-use task_core::{DaemonMode, InstanceRole, SharedRole, SqliteStore, StoreError, StoreOptions, TaskStore};
-use task_ops::view::ViewContext;
-use task_dispatch::{DispatchError, Dispatcher, ProviderId, SnapshotPublisher, StaticPolicy, TickReport};
+use task_core::{
+    DaemonMode, InstanceRole, SharedRole, SqliteStore, StoreError, StoreOptions, TaskStore,
+};
+use task_dispatch::{
+    DispatchError, Dispatcher, ProviderId, SnapshotPublisher, StaticPolicy, TickReport,
+};
 use task_ops::daemon::{ProviderCheckView, ProviderLive};
+use task_ops::view::ViewContext;
+use task_worker::{
+    AcpAdapter, AcpConfig, ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig,
+    FakeAdapter, LdrAdapter, LdrConfig, PaperQaAdapter, PaperQaConfig, WorkerAdapter, Workspace,
+};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use task_worker::{
-    AcpAdapter, AcpConfig, ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig, FakeAdapter, LdrAdapter,
-    LdrConfig, PaperQaAdapter, PaperQaConfig, WorkerAdapter, Workspace,
-};
 
 pub use config::{Config, ConfigError, Overrides};
 pub use instance::InstanceIdentity;
@@ -83,8 +87,12 @@ pub enum Exit {
 /// ADR-0030 以降、本体（`build_adapters`）は `merged_env_with_secrets` を使う。これはテストが期待値を
 /// 組み立てるのに使う（`env_from_secrets` が空なら `merged_env_with_secrets` と同じ結果になる）。
 #[cfg(test)]
-fn merged_env(base: &HashMap<String, String>, provider: &HashMap<String, String>) -> Vec<(String, String)> {
-    let mut merged: BTreeMap<String, String> = base.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+fn merged_env(
+    base: &HashMap<String, String>,
+    provider: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut merged: BTreeMap<String, String> =
+        base.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     merged.extend(provider.iter().map(|(k, v)| (k.clone(), v.clone())));
     merged.into_iter().collect()
 }
@@ -109,7 +117,11 @@ fn resolve_secret(secrets_dir: Option<&Path>, id: &str) -> Option<String> {
 
 /// `mapping`（環境変数名 → 秘密 id）のキーを決定的な順で解決し、見つかったものだけ `merged` に上書きする
 /// （見つからなければそのキーには**触れない**。下の層の値が残る。ADR-0030 D2）。
-fn apply_env_from_secrets(merged: &mut BTreeMap<String, String>, mapping: &HashMap<String, String>, secrets_dir: Option<&Path>) {
+fn apply_env_from_secrets(
+    merged: &mut BTreeMap<String, String>,
+    mapping: &HashMap<String, String>,
+    secrets_dir: Option<&Path>,
+) {
     let mut env_keys: Vec<&String> = mapping.keys().collect();
     env_keys.sort();
     for env_key in env_keys {
@@ -129,7 +141,10 @@ fn merged_env_with_secrets(
     row_env_from_secrets: &HashMap<String, String>,
     secrets_dir: Option<&Path>,
 ) -> Vec<(String, String)> {
-    let mut merged: BTreeMap<String, String> = base_env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut merged: BTreeMap<String, String> = base_env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     apply_env_from_secrets(&mut merged, base_env_from_secrets, secrets_dir);
     merged.extend(row_env.iter().map(|(k, v)| (k.clone(), v.clone())));
     apply_env_from_secrets(&mut merged, row_env_from_secrets, secrets_dir);
@@ -159,7 +174,13 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     extra_args: base.extra_args.clone(),
                     permission_mode: base.permission_mode.clone(),
                     model: effective_model(&p.model, &base.model),
-                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
+                    env: merged_env_with_secrets(
+                        &base.env,
+                        &base.env_from_secrets,
+                        &p.env,
+                        &p.env_from_secrets,
+                        secrets_dir,
+                    ),
                     // ADR-0043 D3（Phase 56）: コンテナで走らせるかはタスクごとに決まるので、ここでは常に `None`
                     // （ディスパッチャが `with_container` で包んだ複製を作る）。
                     container: None,
@@ -171,7 +192,13 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     command: base.command.clone(),
                     extra_args: base.extra_args.clone(),
                     model: effective_model(&p.model, &base.model),
-                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
+                    env: merged_env_with_secrets(
+                        &base.env,
+                        &base.env_from_secrets,
+                        &p.env,
+                        &p.env_from_secrets,
+                        secrets_dir,
+                    ),
                     // ADR-0043 D3（Phase 56）: コンテナで走らせるかはタスクごとに決まるので、ここでは常に `None`
                     // （ディスパッチャが `with_container` で包んだ複製を作る）。
                     container: None,
@@ -184,7 +211,13 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     // ため）。`Config::validate` が acp 以外の行での指定を拒否している。
                     command: p.command.clone().unwrap_or_else(|| base.command.clone()),
                     args: p.args.clone().unwrap_or_else(|| base.args.clone()),
-                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
+                    env: merged_env_with_secrets(
+                        &base.env,
+                        &base.env_from_secrets,
+                        &p.env,
+                        &p.env_from_secrets,
+                        secrets_dir,
+                    ),
                     permission: base.permission,
                     // ADR-0026 D3: `[adapters.acp]` にモデルの既定値は無い（CLI の `--model` フラグではなく
                     // `session/set_config_option` で渡すので、行の `model` が空ならモデル指定なしになるだけ）。
@@ -208,7 +241,13 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     // ADR-0027 D3: `model`（行の値。空なら None）は PaperQA の設定ファイルより優先して `--llm` に渡す。
                     // `[adapters.paperqa]` にモデルの既定値は無い（acp と同じ理由: 行＝アカウント/エンドポイントごと）。
                     model: effective_model(&p.model, &None),
-                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
+                    env: merged_env_with_secrets(
+                        &base.env,
+                        &base.env_from_secrets,
+                        &p.env,
+                        &p.env_from_secrets,
+                        secrets_dir,
+                    ),
                     extra_args: base.extra_args.clone(),
                     // ADR-0035 D1 / D3: 取得と証拠ゲートは行ごとの上書きが無い（他の paperqa 設定と同じ扱い）。
                     acquire: base.acquire.clone(),
@@ -220,7 +259,11 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                 // ADR-0029 D1: 行ごとの上書きは `model`（`settings` の `llm.model` を上書き）と `env` だけ
                 // （`ProviderConfig.settings` は `paperqa` 専用フィールドなので LDR では再利用しない。
                 // celeris 側の実装判断。行ごとに調査対象を変えたければ `[[roles]]`/`[[genres]]` で使い分ける）。
-                let mut settings: Vec<(String, String)> = base.settings.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let mut settings: Vec<(String, String)> = base
+                    .settings
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 settings.sort();
                 Arc::new(LdrAdapter::new(LdrConfig {
                     command: base.command.clone(),
@@ -229,7 +272,13 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     questions_per_iteration: base.questions_per_iteration,
                     settings,
                     model: effective_model(&p.model, &None),
-                    env: merged_env_with_secrets(&base.env, &base.env_from_secrets, &p.env, &p.env_from_secrets, secrets_dir),
+                    env: merged_env_with_secrets(
+                        &base.env,
+                        &base.env_from_secrets,
+                        &p.env,
+                        &p.env_from_secrets,
+                        secrets_dir,
+                    ),
                     // ADR-0031 D2: 証拠ゲートの閾値は行ごとの上書きが無い（他の LDR 設定と同じ扱い）。
                     evidence: base.evidence,
                 }))
@@ -262,21 +311,32 @@ pub fn secret_usage(config: &Config) -> HashMap<String, Vec<task_api::types::Sec
         name: &str,
         env: &str,
     ) {
-        map.entry(secret_id.to_string()).or_default().push(task_api::types::SecretUse {
-            scope: scope.to_string(),
-            name: name.to_string(),
-            env: env.to_string(),
-        });
+        map.entry(secret_id.to_string())
+            .or_default()
+            .push(task_api::types::SecretUse {
+                scope: scope.to_string(),
+                name: name.to_string(),
+                env: env.to_string(),
+            });
     }
 
     let mut map: HashMap<String, Vec<task_api::types::SecretUse>> = HashMap::new();
     let adapters: [(&str, &HashMap<String, String>); 6] = [
-        (ClaudeCodeAdapter::ID, &config.adapters.claude_code.env_from_secrets),
+        (
+            ClaudeCodeAdapter::ID,
+            &config.adapters.claude_code.env_from_secrets,
+        ),
         (CodexAdapter::ID, &config.adapters.codex.env_from_secrets),
         (FakeAdapter::ID, &config.adapters.fake.env_from_secrets),
         (AcpAdapter::ID, &config.adapters.acp.env_from_secrets),
-        (PaperQaAdapter::ID, &config.adapters.paperqa.env_from_secrets),
-        (LdrAdapter::ID, &config.adapters.local_deep_research.env_from_secrets),
+        (
+            PaperQaAdapter::ID,
+            &config.adapters.paperqa.env_from_secrets,
+        ),
+        (
+            LdrAdapter::ID,
+            &config.adapters.local_deep_research.env_from_secrets,
+        ),
     ];
     for (name, from_secrets) in adapters {
         let mut env_keys: Vec<&String> = from_secrets.keys().collect();
@@ -291,7 +351,13 @@ pub fn secret_usage(config: &Config) -> HashMap<String, Vec<task_api::types::Sec
         let mut env_keys: Vec<&String> = p.env_from_secrets.keys().collect();
         env_keys.sort();
         for env_key in env_keys {
-            push(&mut map, &p.env_from_secrets[env_key], "provider", &p.id, env_key);
+            push(
+                &mut map,
+                &p.env_from_secrets[env_key],
+                "provider",
+                &p.id,
+                env_key,
+            );
         }
     }
     map
@@ -310,7 +376,10 @@ pub fn effective_models(config: &Config) -> HashMap<ProviderId, String> {
                 // 行の `model` が空なら `None` になる。
                 _ => None,
             };
-            (p.id.clone(), effective_model(&p.model, &adapter_model).unwrap_or_default())
+            (
+                p.id.clone(),
+                effective_model(&p.model, &adapter_model).unwrap_or_default(),
+            )
         })
         .collect()
 }
@@ -342,7 +411,17 @@ pub fn provider_lives(config: &Config) -> Vec<ProviderLive> {
 
 /// ADR-0013 D5 の前提（DB はローカルディスク）を破っている場合に警告するための、ネットワーク FS の一覧。
 const NETWORK_FILESYSTEMS: &[&str] = &[
-    "nfs", "nfs4", "cifs", "smb3", "9p", "afs", "ceph", "lustre", "gpfs", "beegfs", "glusterfs",
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smb3",
+    "9p",
+    "afs",
+    "ceph",
+    "lustre",
+    "gpfs",
+    "beegfs",
+    "glusterfs",
 ];
 
 /// `/proc/self/mountinfo` の内容から、`target` を含む最長一致のマウント点のファイルシステム種別を返す。
@@ -359,7 +438,11 @@ fn filesystem_type_in(mountinfo: &str, target: &Path) -> Option<String> {
             continue;
         };
         // 同じマウント点の行が複数ある場合（autofs → nfs4 など）は後の行が有効なので `>=` で上書きする。
-        if target.starts_with(mount_point) && best.as_ref().is_none_or(|(len, _)| mount_point.len() >= *len) {
+        if target.starts_with(mount_point)
+            && best
+                .as_ref()
+                .is_none_or(|(len, _)| mount_point.len() >= *len)
+        {
             best = Some((mount_point.len(), fstype.to_string()));
         }
     }
@@ -400,7 +483,10 @@ fn hostname() -> String {
 
 /// 設定から `Dispatcher` を組み立てる。`[accounts]`/`[secrets]`/`[memory]` があればディレクトリを 0700 で作る
 /// （ADR-0024 D1、ADR-0030 D1、ADR-0033 D6）。
-pub fn build_dispatcher(config: &Config, masters: ClusterMasters) -> Result<Dispatcher, DaemonError> {
+pub fn build_dispatcher(
+    config: &Config,
+    masters: ClusterMasters,
+) -> Result<Dispatcher, DaemonError> {
     config.ensure_accounts_dir()?;
     config.ensure_secrets_dir()?;
     config.ensure_memory_dir()?;
@@ -426,7 +512,6 @@ pub fn build_dispatcher(config: &Config, masters: ClusterMasters) -> Result<Disp
     Ok(dispatcher)
 }
 
-
 /// ADR-0033 D1: 組織図の種を蒔く。**`org_nodes` が空のときだけ**書き、それ以外は何もしない
 /// （以後の編集は GUI → API → DB。設定は再読込しない）。蒔いた件数を返す。
 pub fn seed_org_if_empty(store: &dyn TaskStore, config: &Config) -> Result<usize, DaemonError> {
@@ -434,7 +519,9 @@ pub fn seed_org_if_empty(store: &dyn TaskStore, config: &Config) -> Result<usize
         return Ok(0);
     }
     if !store.org_list()?.is_empty() {
-        tracing::debug!("org: org_nodes is not empty; the config seed is not applied (the DB wins)");
+        tracing::debug!(
+            "org: org_nodes is not empty; the config seed is not applied (the DB wins)"
+        );
         return Ok(0);
     }
     let now = OffsetDateTime::now_utc();
@@ -442,14 +529,18 @@ pub fn seed_org_if_empty(store: &dyn TaskStore, config: &Config) -> Result<usize
     // 監査 D-4: 1 トランザクションで蒔く。途中の 1 件が不正でも部分的に書かれた組織が残らない
     // （残ると次回起動時は `org_list` が空でなくなり、二度と補完されない）。
     store.org_seed(&nodes)?;
-    tracing::info!(count = nodes.len(), "org: seeded the organization from the config");
+    tracing::info!(
+        count = nodes.len(),
+        "org: seeded the organization from the config"
+    );
     Ok(nodes.len())
 }
 
 /// ADR-0032 D2: celeris が張った ssh master を保持する場所。`ClusterMaster` を落とすと接続も切れるので、
 /// **接続を生かしておきたい間はここに置く**（`DELETE /clusters/{id}/connect` はここから取り除く）。
 /// 人が `cluster-login.sh` で張った master はこのマップに載らない（celeris の持ち物ではないため）。
-pub type ClusterMasters = Arc<std::sync::Mutex<HashMap<String, task_worker::cluster_login::ClusterMaster>>>;
+pub type ClusterMasters =
+    Arc<std::sync::Mutex<HashMap<String, task_worker::cluster_login::ClusterMaster>>>;
 
 /// ADR-0032 D3: `auth = "publickey"` のクラスタを、ディスパッチの直前に 1 回だけ自分で張る。
 ///
@@ -496,19 +587,25 @@ fn cluster_connector(masters: ClusterMasters) -> task_dispatch::dispatcher::Clus
             // `interactive = false` では起こらないが、型のうえではありうる。
             Ok(task_worker::cluster_login::ClusterConnectStart::NeedsCode { session, .. }) => {
                 runtime.block_on(session.cancel());
-                Err("the host asked for a verification code; set auth = \"totp\" for this cluster".to_string())
+                Err(
+                    "the host asked for a verification code; set auth = \"totp\" for this cluster"
+                        .to_string(),
+                )
             }
             Err(e) => Err(format!("{e}")),
         }
     })
 }
 
-
 /// ADR-0013 / `docs/gui/api.md` §3.21: `GET /api/v1/config` に出す設定の要約。env は**キー名だけ**、トークンとその場所は出さない。
 pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
     let models = effective_models(config);
     ConfigView {
-        config_path: config.source_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+        config_path: config
+            .source_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
         db: config.db.display().to_string(),
         workspace_root: config.workspace_root.display().to_string(),
         tick_ms: config.tick_ms,
@@ -522,7 +619,10 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
         retry_backoff_max_secs: config.retry_backoff_max_secs,
         max_requeues: config.max_requeues,
         plan_auto_accept: config.plan.auto_accept,
-        reviewer: ReviewerConfigView { adapter: config.reviewer.adapter.clone(), tier: config.reviewer.tier },
+        reviewer: ReviewerConfigView {
+            adapter: config.reviewer.adapter.clone(),
+            tier: config.reviewer.tier,
+        },
         providers: config
             .providers
             .iter()
@@ -632,8 +732,16 @@ pub fn api_settings(
         started_at,
         providers_dir: config.providers_dir.clone(),
         admin_tx,
-        accounts_roots: config.accounts.as_ref().map(|a| a.roots()).unwrap_or_default(),
-        max_runs_per_account: config.accounts.as_ref().map(|a| a.max_runs_per_account).unwrap_or(0),
+        accounts_roots: config
+            .accounts
+            .as_ref()
+            .map(|a| a.roots())
+            .unwrap_or_default(),
+        max_runs_per_account: config
+            .accounts
+            .as_ref()
+            .map(|a| a.max_runs_per_account)
+            .unwrap_or(0),
         secrets_dir: config.secrets.as_ref().map(|s| s.dir.clone()),
         secret_usage: secret_usage(config),
         memory_dir: config.memory.as_ref().map(|m| m.dir.clone()),
@@ -707,10 +815,18 @@ async fn start_api(
     mode: DaemonMode,
     role: SharedRole,
     admin: bool,
-) -> Result<(RunningApi, Option<tokio::sync::mpsc::Receiver<task_api::AdminRequest>>), DaemonError> {
+) -> Result<
+    (
+        RunningApi,
+        Option<tokio::sync::mpsc::Receiver<task_api::AdminRequest>>,
+    ),
+    DaemonError,
+> {
     let token = config.api.read_token()?;
     let instance_id = identity.instance_id.clone();
-    let started_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default();
+    let started_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default();
     let (tx, rx) = tokio::sync::watch::channel(None);
     dispatcher.set_snapshot_publisher(SnapshotPublisher {
         tx,
@@ -744,7 +860,10 @@ async fn start_api(
     let state = tokio::task::spawn_blocking(move || ApiState::new(settings, rx))
         .await
         .map_err(|e| ApiError::Startup(e.to_string()))??;
-    let listener = bind_reuseport(listen).map_err(|source| ApiError::Bind { addr: listen, source })?;
+    let listener = bind_reuseport(listen).map_err(|source| ApiError::Bind {
+        addr: listen,
+        source,
+    })?;
     let addr = listener.local_addr().unwrap_or(listen);
     tracing::info!(%addr, auth_required = config.api.token_file.is_some(), "api listening");
     let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -782,7 +901,11 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
     let identity = InstanceIdentity::new(opts.release.as_deref());
     let cluster_masters: ClusterMasters = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let mut dispatcher = build_dispatcher(&config, Arc::clone(&cluster_masters))?;
-    let role = SharedRole::new(if verify { InstanceRole::Verify } else { InstanceRole::Active });
+    let role = SharedRole::new(if verify {
+        InstanceRole::Verify
+    } else {
+        InstanceRole::Active
+    });
     let supervisor = match verify {
         // ADR-0040 D3: verify は本番の表に触れない（そもそも DB のコピーだが、規約として）。
         true => {
@@ -829,14 +952,34 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
     let (api, admin_rx) = match config.api.listen {
         Some(listen) => {
             // `standby` も起きてすぐ API を受ける（同じポートに `SO_REUSEPORT` で bind する）。
-            let (api, admin_rx) =
-                start_api(&config, listen, &mut dispatcher, &identity, opts.mode, role.clone(), !verify).await?;
+            let (api, admin_rx) = start_api(
+                &config,
+                listen,
+                &mut dispatcher,
+                &identity,
+                opts.mode,
+                role.clone(),
+                !verify,
+            )
+            .await?;
             (Some(api), admin_rx)
         }
         None => (None, None),
     };
-    let mut roles = RoleState { role, supervisor, api };
-    let result = tick_loop(&mut dispatcher, &mut config, opts, admin_rx, cluster_masters, &mut roles).await;
+    let mut roles = RoleState {
+        role,
+        supervisor,
+        api,
+    };
+    let result = tick_loop(
+        &mut dispatcher,
+        &mut config,
+        opts,
+        admin_rx,
+        cluster_masters,
+        &mut roles,
+    )
+    .await;
     if let Some(api) = roles.api.take() {
         api.stop().await;
     }
@@ -865,12 +1008,14 @@ async fn tick_loop(
     // ADR-0022 D2: `check` は spawn した先で終わるので、結果をここへ戻してスナップショットに載せる。
     let (check_tx, mut check_rx) = tokio::sync::mpsc::channel::<(String, ProviderCheckView)>(16);
     // ADR-0024 D5〜D7: アカウントの確認・ログイン中継も同様に、spawn した先の結果をここへ戻す。
-    let (account_tx, mut account_rx) = tokio::sync::mpsc::channel::<accounts_admin::AccountAdminEvent>(16);
+    let (account_tx, mut account_rx) =
+        tokio::sync::mpsc::channel::<accounts_admin::AccountAdminEvent>(16);
     let login_sessions = accounts_admin::new_sessions();
     // ADR-0025 D5: codex のログイン中継（別の流儀なので別のマップ）。
     let codex_login_sessions = accounts_admin::new_codex_sessions();
     // ADR-0032 D4: クラスタ接続の中継（進行中のセッションと、celeris が保持している ssh master）。
-    let (cluster_tx, mut cluster_rx) = tokio::sync::mpsc::channel::<cluster_admin::ClusterConnectPending>(16);
+    let (cluster_tx, mut cluster_rx) =
+        tokio::sync::mpsc::channel::<cluster_admin::ClusterConnectPending>(16);
     let cluster_sessions: cluster_admin::ClusterConnectSessions = Default::default();
     // ADR-0037 D3 / B1: 通知。判定はこのループの中で同期に、送信は `tokio::spawn` で（tick を止めない）。
     // 送信の結果は `notify_rx` に戻り、**次の tick の先頭**で `notifications` に書かれる。
@@ -891,7 +1036,8 @@ async fn tick_loop(
     let mut in_flight: usize = 0;
     tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, role = %roles.role.get(), "celeris started");
 
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
     // ADR-0015 D2: tick の所要時間を測り、遅い tick を警告する（止まっているのがディスパッチャか API かの切り分け用）。
     let slow_tick = std::cmp::max(Duration::from_secs(1), tick * 2);
     loop {
@@ -903,7 +1049,10 @@ async fn tick_loop(
                 Ok(instance::Step::Stay) => {}
                 Ok(instance::Step::Promoted) => {
                     dispatcher.set_accepting_new_work(true);
-                    tracing::info!(ticks, "now active: dispatching and the tick background jobs are on");
+                    tracing::info!(
+                        ticks,
+                        "now active: dispatching and the tick background jobs are on"
+                    );
                 }
                 Ok(instance::Step::Draining) => {
                     // 受け付け済みの要求は完了させてから listener を閉じる（graceful shutdown）。
@@ -911,153 +1060,195 @@ async fn tick_loop(
                     if let Some(api) = roles.api.take() {
                         api.stop().await;
                     }
-                    tracing::info!(ticks, in_flight, "draining: the API listener is closed; supervising the runs in hand");
+                    tracing::info!(
+                        ticks,
+                        in_flight,
+                        "draining: the API listener is closed; supervising the runs in hand"
+                    );
                 }
                 Ok(instance::Step::Drained) => return Ok(Exit::Drained),
                 Ok(instance::Step::DrainTimedOut) => {
                     let aborted = dispatcher.abort_all_runs();
-                    tracing::warn!(ticks, aborted, "drain timeout; the remaining runs were aborted");
+                    tracing::warn!(
+                        ticks,
+                        aborted,
+                        "drain timeout; the remaining runs were aborted"
+                    );
                     return Ok(Exit::Drained);
                 }
-                Err(e) => tracing::warn!(error = %e, "could not update the instance role this tick"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not update the instance role this tick")
+                }
             }
         }
         let role = roles.role.get();
         // ADR-0040 D3 / D4: tick の裏方（報告の圧縮・途中目標レビュー・通知）を動かすのは `active` だけ。
         // `standby` はまだ自分の番ではなく、`draining` は手元の run の面倒だけ見る。`verify` は何もしない。
         if role == InstanceRole::Active {
-        // ADR-0024 D7 / B1: 10 分を超えたログイン中継を打ち切る（tick をブロックしない軽い処理）。
-        // `expire_stale_logins` はチャネルを使わない（このループ自身が drain するチャネルへ `await` で
-        // 送るとデッドロックしうるため）。打ち切った id は戻り値で受け取り、ここで直接反映する。
-        for id in accounts_admin::expire_stale_logins(&login_sessions, accounts_admin::LOGIN_EXPIRY).await {
-            dispatcher.set_account_login_pending(task_core::AccountAdapter::ClaudeCode, &id, false);
-        }
-        // ADR-0025 D5: codex も同様に 15 分で打ち切り、完了したものはポーリングで検知する（どちらもチャネルを
-        // 使わない。B1 と同じ理由）。
-        for id in accounts_admin::expire_stale_codex_logins(&codex_login_sessions, accounts_admin::LOGIN_EXPIRY_CODEX).await {
-            dispatcher.set_account_login_pending(task_core::AccountAdapter::Codex, &id, false);
-        }
-        for (id, _ok) in accounts_admin::poll_codex_logins(&codex_login_sessions).await {
-            dispatcher.set_account_login_pending(task_core::AccountAdapter::Codex, &id, false);
-        }
-        // ADR-0032 D4 / B1: 放置されたクラスタ接続のセッションも同じ規約で畳む（チャネルを使わない）。
-        for id in
-            cluster_admin::expire_stale_cluster_sessions(&cluster_sessions, cluster_admin::SESSION_EXPIRY).await
-        {
-            dispatcher.set_cluster_connect_pending(&id, false);
-        }
-        // ADR-0033 D3 / B1: 報告の圧縮（まとめの run を起こすかの決定的な判断）。チャネルには送らず、
-        // tick の直前にストアを見るだけ（LLM もワーカーも起動しない。起動するのは次の tick の dispatch）。
-        {
-            let store = dispatcher.store();
-            match reports::schedule_report_compaction(
-                store.as_ref(),
-                &config.reports,
-                &config.role_specs(),
-                &config.genre_specs(),
-                OffsetDateTime::now_utc(),
-            ) {
-                Ok(created) if !created.is_empty() => {
-                    tracing::info!(count = created.len(), "reports: compaction runs scheduled");
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "reports: could not schedule the compaction runs"),
+            // ADR-0024 D7 / B1: 10 分を超えたログイン中継を打ち切る（tick をブロックしない軽い処理）。
+            // `expire_stale_logins` はチャネルを使わない（このループ自身が drain するチャネルへ `await` で
+            // 送るとデッドロックしうるため）。打ち切った id は戻り値で受け取り、ここで直接反映する。
+            for id in
+                accounts_admin::expire_stale_logins(&login_sessions, accounts_admin::LOGIN_EXPIRY)
+                    .await
+            {
+                dispatcher.set_account_login_pending(
+                    task_core::AccountAdapter::ClaudeCode,
+                    &id,
+                    false,
+                );
             }
-        }
-        // ADR-0038 D1 / B1（Phase 41）: 途中目標の仕事が止まったら、秘書の「途中目標レビュー」の対話を
-        // 1 回だけ起こす（**通知の前に**）。ここも判断は決定的で、ストアを見て対話用タスクを 1 件作るだけ
-        // （LLM もワーカーも起動しない。起動するのは次の tick の dispatch）。
-        {
-            let store = dispatcher.store();
-            match milestone_review::schedule(
-                store.as_ref(),
-                &config.role_specs(),
-                &config.genre_specs(),
-                config.conversation_genre_id(),
-                OffsetDateTime::now_utc(),
-            ) {
-                Ok(started) if !started.is_empty() => {
-                    tracing::info!(count = started.len(), "milestone review: runs scheduled");
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "milestone review: could not evaluate the milestones"),
+            // ADR-0025 D5: codex も同様に 15 分で打ち切り、完了したものはポーリングで検知する（どちらもチャネルを
+            // 使わない。B1 と同じ理由）。
+            for id in accounts_admin::expire_stale_codex_logins(
+                &codex_login_sessions,
+                accounts_admin::LOGIN_EXPIRY_CODEX,
+            )
+            .await
+            {
+                dispatcher.set_account_login_pending(task_core::AccountAdapter::Codex, &id, false);
             }
-        }
-        // ADR-0037 D1/D3 / B1: 通知。ここもチャネルには送らず、その場で store を見るだけ（LLM もワーカーも
-        // 起動しない）。実際の POST だけが `tokio::spawn` の先で走る。
-        {
-            let store = dispatcher.store();
-            let now = OffsetDateTime::now_utc();
-            // 1. 前の tick で spawn した送信の結果を書く。429 は attempts に数えず、
-            //    `Retry-After` の間だけ次の送信を控える（ADR-0037 D5）。
-            while let Ok(result) = notify_rx.try_recv() {
-                for id in &result.ids {
-                    notify_in_flight.remove(id);
-                }
-                if let notify::SendOutcome::RateLimited(wait) = &result.outcome {
-                    notify_blocked_until = Some(std::time::Instant::now() + *wait);
-                }
-                if let Err(e) = notify::record(store.as_ref(), &notify_pending, &result, now) {
-                    tracing::warn!(error = %e, "notify: could not record the send result");
-                }
+            for (id, _ok) in accounts_admin::poll_codex_logins(&codex_login_sessions).await {
+                dispatcher.set_account_login_pending(task_core::AccountAdapter::Codex, &id, false);
             }
-            // 2. `interval_secs` ごとに判定し、1 tick に最大 1 通だけ送る（ADR-0037 D5）。
-            let due = notify_last.map(|t| t.elapsed() >= notify_interval).unwrap_or(true)
-                && notify_blocked_until.map(|t| std::time::Instant::now() >= t).unwrap_or(true);
-            if due {
-                notify_last = Some(std::time::Instant::now());
-                match notify::schedule(store.as_ref(), &config.notify, notify_started_at, now) {
+            // ADR-0032 D4 / B1: 放置されたクラスタ接続のセッションも同じ規約で畳む（チャネルを使わない）。
+            for id in cluster_admin::expire_stale_cluster_sessions(
+                &cluster_sessions,
+                cluster_admin::SESSION_EXPIRY,
+            )
+            .await
+            {
+                dispatcher.set_cluster_connect_pending(&id, false);
+            }
+            // ADR-0033 D3 / B1: 報告の圧縮（まとめの run を起こすかの決定的な判断）。チャネルには送らず、
+            // tick の直前にストアを見るだけ（LLM もワーカーも起動しない。起動するのは次の tick の dispatch）。
+            {
+                let store = dispatcher.store();
+                match reports::schedule_report_compaction(
+                    store.as_ref(),
+                    &config.reports,
+                    &config.role_specs(),
+                    &config.genre_specs(),
+                    OffsetDateTime::now_utc(),
+                ) {
                     Ok(created) if !created.is_empty() => {
-                        tracing::info!(count = created.len(), "notify: new notifications");
+                        tracing::info!(count = created.len(), "reports: compaction runs scheduled");
                     }
                     Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "notify: could not evaluate the conditions"),
-                }
-                match store.notification_pending() {
-                    Ok(pending) => {
-                        let url = notify::webhook_url(
-                            notify_secrets_dir.as_deref(),
-                            &config.notify.discord_webhook_secret,
-                        );
-                        match (url, notify_client.as_ref()) {
-                            (Some(url), Some(client)) => {
-                                let available: Vec<task_core::Notification> = pending
-                                    .iter()
-                                    .filter(|n| !notify_in_flight.contains(&n.id))
-                                    .cloned()
-                                    .collect();
-                                if let Some(batch) = notify::select_batch(&available) {
-                                    for id in &batch.ids {
-                                        notify_in_flight.insert(*id);
-                                    }
-                                    notify::spawn_send(client.clone(), url.clone(), &batch, notify_tx.clone());
-                                }
-                            }
-                            // ADR-0037 D2: 秘密が無い間は送らず、pending も溜めない。
-                            _ => {
-                                let idle: Vec<_> = pending
-                                    .iter()
-                                    .filter(|n| !notify_in_flight.contains(&n.id))
-                                    .cloned()
-                                    .collect();
-                                match notify::discard_pending(store.as_ref(), &idle, now) {
-                                    Ok(n) if n > 0 => tracing::debug!(
-                                        count = n,
-                                        "notify: no webhook secret; nothing was sent"
-                                    ),
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "notify: could not discard the pending rows")
-                                    }
-                                }
-                            }
-                        }
-                        notify_pending = pending;
+                    Err(e) => {
+                        tracing::warn!(error = %e, "reports: could not schedule the compaction runs")
                     }
-                    Err(e) => tracing::warn!(error = %e, "notify: could not read the pending rows"),
                 }
             }
-        }
+            // ADR-0038 D1 / B1（Phase 41）: 途中目標の仕事が止まったら、秘書の「途中目標レビュー」の対話を
+            // 1 回だけ起こす（**通知の前に**）。ここも判断は決定的で、ストアを見て対話用タスクを 1 件作るだけ
+            // （LLM もワーカーも起動しない。起動するのは次の tick の dispatch）。
+            {
+                let store = dispatcher.store();
+                match milestone_review::schedule(
+                    store.as_ref(),
+                    &config.role_specs(),
+                    &config.genre_specs(),
+                    config.conversation_genre_id(),
+                    OffsetDateTime::now_utc(),
+                ) {
+                    Ok(started) if !started.is_empty() => {
+                        tracing::info!(count = started.len(), "milestone review: runs scheduled");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "milestone review: could not evaluate the milestones")
+                    }
+                }
+            }
+            // ADR-0037 D1/D3 / B1: 通知。ここもチャネルには送らず、その場で store を見るだけ（LLM もワーカーも
+            // 起動しない）。実際の POST だけが `tokio::spawn` の先で走る。
+            {
+                let store = dispatcher.store();
+                let now = OffsetDateTime::now_utc();
+                // 1. 前の tick で spawn した送信の結果を書く。429 は attempts に数えず、
+                //    `Retry-After` の間だけ次の送信を控える（ADR-0037 D5）。
+                while let Ok(result) = notify_rx.try_recv() {
+                    for id in &result.ids {
+                        notify_in_flight.remove(id);
+                    }
+                    if let notify::SendOutcome::RateLimited(wait) = &result.outcome {
+                        notify_blocked_until = Some(std::time::Instant::now() + *wait);
+                    }
+                    if let Err(e) = notify::record(store.as_ref(), &notify_pending, &result, now) {
+                        tracing::warn!(error = %e, "notify: could not record the send result");
+                    }
+                }
+                // 2. `interval_secs` ごとに判定し、1 tick に最大 1 通だけ送る（ADR-0037 D5）。
+                let due = notify_last
+                    .map(|t| t.elapsed() >= notify_interval)
+                    .unwrap_or(true)
+                    && notify_blocked_until
+                        .map(|t| std::time::Instant::now() >= t)
+                        .unwrap_or(true);
+                if due {
+                    notify_last = Some(std::time::Instant::now());
+                    match notify::schedule(store.as_ref(), &config.notify, notify_started_at, now) {
+                        Ok(created) if !created.is_empty() => {
+                            tracing::info!(count = created.len(), "notify: new notifications");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "notify: could not evaluate the conditions")
+                        }
+                    }
+                    match store.notification_pending() {
+                        Ok(pending) => {
+                            let url = notify::webhook_url(
+                                notify_secrets_dir.as_deref(),
+                                &config.notify.discord_webhook_secret,
+                            );
+                            match (url, notify_client.as_ref()) {
+                                (Some(url), Some(client)) => {
+                                    let available: Vec<task_core::Notification> = pending
+                                        .iter()
+                                        .filter(|n| !notify_in_flight.contains(&n.id))
+                                        .cloned()
+                                        .collect();
+                                    if let Some(batch) = notify::select_batch(&available) {
+                                        for id in &batch.ids {
+                                            notify_in_flight.insert(*id);
+                                        }
+                                        notify::spawn_send(
+                                            client.clone(),
+                                            url.clone(),
+                                            &batch,
+                                            notify_tx.clone(),
+                                        );
+                                    }
+                                }
+                                // ADR-0037 D2: 秘密が無い間は送らず、pending も溜めない。
+                                _ => {
+                                    let idle: Vec<_> = pending
+                                        .iter()
+                                        .filter(|n| !notify_in_flight.contains(&n.id))
+                                        .cloned()
+                                        .collect();
+                                    match notify::discard_pending(store.as_ref(), &idle, now) {
+                                        Ok(n) if n > 0 => tracing::debug!(
+                                            count = n,
+                                            "notify: no webhook secret; nothing was sent"
+                                        ),
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "notify: could not discard the pending rows")
+                                        }
+                                    }
+                                }
+                            }
+                            notify_pending = pending;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "notify: could not read the pending rows")
+                        }
+                    }
+                }
+            }
         }
         // ADR-0040 D3 / D4: `active` と `draining` が `Dispatcher::tick` を回す（`draining` は
         // `set_accepting_new_work(false)` により新しい run を起こさず、手元の run の完了・リース更新・
@@ -1068,14 +1259,21 @@ async fn tick_loop(
         let report: TickReport = match role {
             // ADR-0041 D5: `verify` も tick を回すが、`set_eligible_tasks` で `smoke` の煙試験だけに
             // 絞られている（他の ready なタスクは拾わない・リースも奪わない・レビューもしない）。
-            InstanceRole::Active | InstanceRole::Draining | InstanceRole::Verify => dispatcher.tick()?,
+            InstanceRole::Active | InstanceRole::Draining | InstanceRole::Verify => {
+                dispatcher.tick()?
+            }
             InstanceRole::Standby => TickReport::default(),
         };
         in_flight = report.in_flight;
         let tick_elapsed = tick_started.elapsed();
         ticks += 1;
         if tick_elapsed >= slow_tick {
-            tracing::warn!(ticks, duration_ms = tick_elapsed.as_millis() as u64, ?report, "slow tick");
+            tracing::warn!(
+                ticks,
+                duration_ms = tick_elapsed.as_millis() as u64,
+                ?report,
+                "slow tick"
+            );
         }
         if report.reclaimed + report.dispatched + report.finished + report.reviewed > 0 {
             tracing::info!(ticks, ?report, "tick");
@@ -1085,7 +1283,10 @@ async fn tick_loop(
         // `standby` は `report.idle` を計算していないので `until_idle` では止まらない。
         if opts.until_idle
             && report.idle
-            && matches!(role, InstanceRole::Active | InstanceRole::Draining | InstanceRole::Verify)
+            && matches!(
+                role,
+                InstanceRole::Active | InstanceRole::Draining | InstanceRole::Verify
+            )
         {
             tracing::info!(ticks, "idle; exiting");
             return Ok(Exit::Idle);
@@ -1183,7 +1384,9 @@ async fn handle_admin_request(
                 // ADR-0022 D2: 確認できたときだけ記録する（設定エラー・celeris 側の都合は「確認の結果」ではない）。
                 if let Ok(outcome) = &outcome {
                     let check = ProviderCheckView {
-                        at: OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default(),
+                        at: OffsetDateTime::now_utc()
+                            .format(&Rfc3339)
+                            .unwrap_or_default(),
                         result: provider_check_result_name(&outcome.result).to_string(),
                         detail: outcome.detail.clone(),
                     };
@@ -1196,17 +1399,39 @@ async fn handle_admin_request(
             accounts_admin::spawn_check(config, adapter, id, account_tx, reply);
         }
         task_api::AdminRequest::AccountLoginStart { adapter, id, reply } => {
-            accounts_admin::spawn_login_start(config, login_sessions, codex_login_sessions, adapter, id, account_tx, reply);
+            accounts_admin::spawn_login_start(
+                config,
+                login_sessions,
+                codex_login_sessions,
+                adapter,
+                id,
+                account_tx,
+                reply,
+            );
         }
         task_api::AdminRequest::AccountLoginCode { id, code, reply } => {
             accounts_admin::spawn_login_code(login_sessions, id, code, account_tx, reply);
         }
         task_api::AdminRequest::AccountLoginCancel { adapter, id, reply } => {
-            accounts_admin::spawn_login_cancel(login_sessions, codex_login_sessions, adapter, id, account_tx, reply);
+            accounts_admin::spawn_login_cancel(
+                login_sessions,
+                codex_login_sessions,
+                adapter,
+                id,
+                account_tx,
+                reply,
+            );
         }
         // ADR-0032 D5: クラスタ接続の中継。どれも `tokio::spawn` するので tick を止めない。
         task_api::AdminRequest::ClusterConnectStart { id, reply } => {
-            cluster_admin::spawn_connect_start(config, cluster_sessions, cluster_masters, id, cluster_tx, reply);
+            cluster_admin::spawn_connect_start(
+                config,
+                cluster_sessions,
+                cluster_masters,
+                id,
+                cluster_tx,
+                reply,
+            );
         }
         task_api::AdminRequest::ClusterConnectCode { id, code, reply } => {
             cluster_admin::spawn_connect_code(
@@ -1220,12 +1445,27 @@ async fn handle_admin_request(
             );
         }
         task_api::AdminRequest::ClusterConnectCancel { id, reply } => {
-            cluster_admin::spawn_connect_cancel(config, cluster_sessions, cluster_masters, id, cluster_tx, reply);
+            cluster_admin::spawn_connect_cancel(
+                config,
+                cluster_sessions,
+                cluster_masters,
+                id,
+                cluster_tx,
+                reply,
+            );
         }
         // S2+S8: cheap な fs 操作（ディレクトリの rename）だけなので spawn せず、ここで直接（同期的に）行う。
         // ディスパッチャの権威ある `account_in_use` を使うため `&mut Dispatcher` が要る。
         task_api::AdminRequest::AccountRemove { adapter, id, reply } => {
-            let result = accounts_admin::remove_account(config, dispatcher, &login_sessions, &codex_login_sessions, adapter, &id).await;
+            let result = accounts_admin::remove_account(
+                config,
+                dispatcher,
+                &login_sessions,
+                &codex_login_sessions,
+                adapter,
+                &id,
+            )
+            .await;
             if result.is_ok() {
                 tracing::info!(who = "admin", op = "account_remove", account_id = %id, %adapter, "admin: account removed");
             } else {
@@ -1240,7 +1480,8 @@ async fn handle_admin_request(
             let secret_id = config.notify.discord_webhook_secret.clone();
             let client = notify::client();
             tokio::spawn(async move {
-                let result = notify::send_test(client.as_ref(), secrets_dir.as_deref(), &secret_id).await;
+                let result =
+                    notify::send_test(client.as_ref(), secrets_dir.as_deref(), &secret_id).await;
                 let _ = reply.send(notify_test_outcome(result));
             });
         }
@@ -1260,7 +1501,9 @@ fn notify_test_outcome(
             ok: false,
             detail: Some(detail),
         }),
-        notify::TestSend::NotConfigured(detail) => Err(task_api::NotifyAdminError::Unavailable(detail)),
+        notify::TestSend::NotConfigured(detail) => {
+            Err(task_api::NotifyAdminError::Unavailable(detail))
+        }
     }
 }
 
@@ -1293,10 +1536,19 @@ fn reload_providers(dispatcher: &mut Dispatcher, config: &mut Config) -> Result<
     );
     let adapters = build_adapters(&new_config);
     let models = effective_models(&new_config);
-    dispatcher.reload_providers(Box::new(policy), models, adapters, new_config.account_pool_providers());
+    dispatcher.reload_providers(
+        Box::new(policy),
+        models,
+        adapters,
+        new_config.account_pool_providers(),
+    );
     dispatcher.set_snapshot_providers(provider_lives(&new_config));
     // Phase 44: 役割・分野・委譲設定はディスパッチャ側（次に起動する run から効く）。
-    dispatcher.reload_config(new_config.role_specs(), new_config.genre_specs(), new_config.delegation_limits());
+    dispatcher.reload_config(
+        new_config.role_specs(),
+        new_config.genre_specs(),
+        new_config.delegation_limits(),
+    );
     // Phase 44: `[reports]` / `[notify]` / `[conversation]` は celeris の tick ループが直接読むので、
     // ここで `config` 自身を更新する（次 tick から効く）。他のフィールド（`[accounts]` / `[[clusters]]` /
     // `[api]` / `db` / `workspace_root` 等）には触れない。
@@ -1311,7 +1563,10 @@ fn reload_providers(dispatcher: &mut Dispatcher, config: &mut Config) -> Result<
 
 /// S7: `claude_dir` / `max_runs_per_account` / `check_model` のどれかが変わっていれば `true`
 /// （`None` ⇔ `Some` の変化も含む）。
-fn accounts_section_changed(old: &Option<config::AccountsConfig>, new: &Option<config::AccountsConfig>) -> bool {
+fn accounts_section_changed(
+    old: &Option<config::AccountsConfig>,
+    new: &Option<config::AccountsConfig>,
+) -> bool {
     match (old, new) {
         (None, None) => false,
         (Some(o), Some(n)) => {
@@ -1340,14 +1595,19 @@ async fn check_provider(
     config_path: Option<PathBuf>,
     provider_id: String,
 ) -> Result<task_api::ProviderCheckOutcome, task_api::CheckError> {
-    let path = config_path
-        .ok_or_else(|| task_api::CheckError::Unavailable("config was not loaded from a file; cannot check".into()))?;
-    let config = Config::load(&path).map_err(|e| task_api::CheckError::ConfigInvalid(e.to_string()))?;
+    let path = config_path.ok_or_else(|| {
+        task_api::CheckError::Unavailable("config was not loaded from a file; cannot check".into())
+    })?;
+    let config =
+        Config::load(&path).map_err(|e| task_api::CheckError::ConfigInvalid(e.to_string()))?;
     if !config.providers.iter().any(|p| p.id == provider_id) {
         return Err(task_api::CheckError::NotFound);
     }
     let adapters = build_adapters(&config);
-    let adapter = adapters.get(&provider_id).ok_or(task_api::CheckError::NotFound)?.clone();
+    let adapter = adapters
+        .get(&provider_id)
+        .ok_or(task_api::CheckError::NotFound)?
+        .clone();
 
     let dir = std::env::temp_dir().join(format!("celeris-provider-check-{}", ulid::Ulid::new()));
     let now = OffsetDateTime::now_utc();
@@ -1357,17 +1617,31 @@ async fn check_provider(
         parent_id: None,
         kind: task_core::TaskKind::Execute,
         title: "provider check".into(),
-        objective: "Reply with a short confirmation that you are ready. Do not change any files.".into(),
-        acceptance: vec![task_core::Criterion { text: "reply".into(), check: task_core::Check::Human }],
+        objective: "Reply with a short confirmation that you are ready. Do not change any files."
+            .into(),
+        acceptance: vec![task_core::Criterion {
+            text: "reply".into(),
+            check: task_core::Check::Human,
+        }],
         inputs: vec![],
         depends_on: vec![],
         status: task_core::Status::Ready,
         priority: 0,
-        worker_hint: task_core::WorkerHint { tier: task_core::Tier::Standard, adapter: None },
-        workspace: task_core::WorkspaceSpec::Local { path: dir.clone(), mode: None },
+        worker_hint: task_core::WorkerHint {
+            tier: task_core::Tier::Standard,
+            adapter: None,
+        },
+        workspace: task_core::WorkspaceSpec::Local {
+            path: dir.clone(),
+            mode: None,
+        },
         // ADR-0022 M1: 1 ターンではワーカープロトコル（`artifacts/result.json` を書く）を完了できず、
         // 健全なアカウントでも `error_max_turns` になる。人が読む信号にするため少しだけ余裕を持たせる。
-        budget: task_core::Budget { max_turns: 3, max_wall_secs: 30, max_retries: 0 },
+        budget: task_core::Budget {
+            max_turns: 3,
+            max_wall_secs: 30,
+            max_retries: 0,
+        },
         attempts: 0,
         lease: None,
         created_at: now,
@@ -1379,13 +1653,17 @@ async fn check_provider(
         milestone_id: None,
         assignee: None,
         conversation: None,
+        skills: Vec::new(),
+        mode: task_core::TaskMode::default(),
         labels: Vec::new(),
         category: Default::default(),
     };
     let prepared = task_worker::LocalWorkspace::new(dir.clone())
         .prepare(&task)
         .await
-        .map_err(|e| task_api::CheckError::Unavailable(format!("failed to prepare check workspace: {e}")))?;
+        .map_err(|e| {
+            task_api::CheckError::Unavailable(format!("failed to prepare check workspace: {e}"))
+        })?;
     let run_id = task_core::TaskId::new().to_string();
     // ADR-0036 D1: 疎通確認用の単独タスク（親なし）なので従来どおり `<workspace>/artifacts`。
     let artifacts_dir = task_core::artifacts::artifacts_dir_for(&task, &prepared);
@@ -1413,7 +1691,9 @@ async fn check_provider(
         idle_timeout: Duration::from_secs(config.idle_timeout_secs.min(30)),
         kill_grace: Duration::from_secs(config.kill_grace_secs),
     };
-    let result = adapter.run(req, &run_id, limits, &task_worker::adapter::NullSink).await;
+    let result = adapter
+        .run(req, &run_id, limits, &task_worker::adapter::NullSink)
+        .await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
     // ADR-0022 M1（実機確認で修正）: 見ているのは「このアカウントで CLI が起動して応答するか」だけ。
     // ワーカープロトコル上のエラー（`Terminal::Error`。1 ターンでは result.json を書けない等）は
@@ -1421,17 +1701,36 @@ async fn check_provider(
     // 枯渇は `AdapterError` 側で分かる。
     Ok(match result {
         Ok(outcome) => match outcome.terminal {
-            task_worker::Terminal::Done { summary, .. } => (task_api::ProviderCheckResult::Ok, Some(summary)),
-            task_worker::Terminal::Question { text } => (task_api::ProviderCheckResult::Ok, Some(text)),
-            task_worker::Terminal::Error { message, .. } => (task_api::ProviderCheckResult::Ok, Some(message)),
+            task_worker::Terminal::Done { summary, .. } => {
+                (task_api::ProviderCheckResult::Ok, Some(summary))
+            }
+            task_worker::Terminal::Question { text } => {
+                (task_api::ProviderCheckResult::Ok, Some(text))
+            }
+            task_worker::Terminal::Error { message, .. } => {
+                (task_api::ProviderCheckResult::Ok, Some(message))
+            }
         },
-        Err(e @ task_worker::AdapterError::AuthFailed(_)) => (task_api::ProviderCheckResult::AuthFailed, Some(e.to_string())),
-        Err(e @ (task_worker::AdapterError::Throttled { .. } | task_worker::AdapterError::Exhausted(_))) => {
-            (task_api::ProviderCheckResult::Throttled, Some(e.to_string()))
-        }
-        Err(e) => (task_api::ProviderCheckResult::SpawnFailed, Some(e.to_string())),
+        Err(e @ task_worker::AdapterError::AuthFailed(_)) => (
+            task_api::ProviderCheckResult::AuthFailed,
+            Some(e.to_string()),
+        ),
+        Err(
+            e @ (task_worker::AdapterError::Throttled { .. }
+            | task_worker::AdapterError::Exhausted(_)),
+        ) => (
+            task_api::ProviderCheckResult::Throttled,
+            Some(e.to_string()),
+        ),
+        Err(e) => (
+            task_api::ProviderCheckResult::SpawnFailed,
+            Some(e.to_string()),
+        ),
     })
-    .map(|(result, detail)| task_api::ProviderCheckOutcome { result, detail: detail.map(|d| truncate_detail(&d)) })
+    .map(|(result, detail)| task_api::ProviderCheckOutcome {
+        result,
+        detail: detail.map(|d| truncate_detail(&d)),
+    })
 }
 
 /// `detail` は人が読む手がかりなので短くする（1 行・200 文字まで）。
@@ -1475,13 +1774,13 @@ id = "implementer"
 id = "literature-reader"
 
 [[roles]]
-id = "secretary"
+id = "cos-role"
 
 [[genres]]
-id = "secretary"
+id = "conversation"
 description = "人と話す"
-default_role = "secretary"
-roles = ["secretary"]
+default_role = "cos-role"
+roles = ["cos-role"]
 
 [[genres]]
 id = "coding"
@@ -1503,6 +1802,27 @@ id = "web-research"
 description = "一般 Web の調査"
 default_role = "web-researcher"
 roles = ["web-researcher"]
+
+[[roles]]
+id = "data-analyst"
+
+[[genres]]
+id = "data-analysis"
+description = "データを整える"
+default_role = "data-analyst"
+roles = ["data-analyst"]
+
+[[roles]]
+id = "writer"
+
+[[genres]]
+id = "writing"
+description = "書く"
+default_role = "writer"
+roles = ["writer"]
+
+[conversation]
+genre = "conversation"
 "#
             ),
         )
@@ -1510,21 +1830,29 @@ roles = ["web-researcher"]
         let config = Config::load(&path).unwrap();
         let store = SqliteStore::open(&config.db).unwrap();
 
-        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 11);
+        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 13);
         let nodes = store.org_list().unwrap();
-        assert_eq!(nodes.len(), 11);
-        let secretary = nodes.iter().find(|n| n.id == "secretary").unwrap();
-        assert_eq!(secretary.kind, task_core::OrgKind::Secretary);
-        assert_eq!(secretary.parent_id, None);
-        assert_eq!(nodes.iter().find(|n| n.id == "coding-poc").unwrap().genre.as_deref(), Some("coding"));
+        assert_eq!(nodes.len(), 13);
+        let cos = nodes.iter().find(|n| n.id == "cos").unwrap();
+        assert_eq!(cos.kind, task_core::OrgKind::Secretary);
+        assert_eq!(cos.parent_id, None);
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|n| n.id == "software-engineering")
+                .unwrap()
+                .genre
+                .as_deref(),
+            Some("coding")
+        );
 
         // 人が GUI で名前を変えても、次の起動で設定に戻されない。
-        let mut renamed = secretary.clone();
+        let mut renamed = cos.clone();
         renamed.name = "本人".into();
         store.org_upsert(&renamed).unwrap();
         assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 0);
-        assert_eq!(store.org_get("secretary").unwrap().unwrap().name, "本人");
-        assert_eq!(store.org_list().unwrap().len(), 11);
+        assert_eq!(store.org_get("cos").unwrap().unwrap().name, "本人");
+        assert_eq!(store.org_list().unwrap().len(), 13);
     }
 
     /// 監査 D-4: `org_include` の並びに木としての不整合（種類の順序。`Config::load` は循環・順序までは
@@ -1572,7 +1900,10 @@ parent_id = "research-survey"
 
         let err = seed_org_if_empty(&store, &config).unwrap_err();
         assert!(err.to_string().contains("placed under"), "{err}");
-        assert!(store.org_list().unwrap().is_empty(), "nothing is written on failure");
+        assert!(
+            store.org_list().unwrap().is_empty(),
+            "nothing is written on failure"
+        );
     }
 
     /// `org_include` が無い設定では何も蒔かない。
@@ -1622,7 +1953,13 @@ model = "fake"
         assert_eq!(adapters["local-fake"].id(), "fake");
 
         let a = merged_env(&cfg.adapters.claude_code.env, &cfg.providers[0].env);
-        assert_eq!(a, vec![("CLAUDE_CONFIG_DIR".into(), "/accounts/a".into()), ("SHARED".into(), "base".into())]);
+        assert_eq!(
+            a,
+            vec![
+                ("CLAUDE_CONFIG_DIR".into(), "/accounts/a".into()),
+                ("SHARED".into(), "base".into())
+            ]
+        );
         let b = merged_env(&cfg.adapters.claude_code.env, &cfg.providers[1].env);
         assert!(b.contains(&("CLAUDE_CONFIG_DIR".into(), "/accounts/b".into())));
 
@@ -1636,7 +1973,14 @@ model = "fake"
         let ids: Vec<&str> = lives.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["acct-a", "acct-b", "local-fake"]);
         assert_eq!(lives[1].model.as_deref(), Some("adapter-default-model"));
-        assert_eq!((lives[0].adapter.as_str(), lives[0].concurrency, lives[0].in_use), ("claude-code", 1, 0));
+        assert_eq!(
+            (
+                lives[0].adapter.as_str(),
+                lives[0].concurrency,
+                lives[0].in_use
+            ),
+            ("claude-code", 1, 0)
+        );
         assert!(!hostname().is_empty());
 
         // ADR-0015 D3: マウント点の最長一致でファイルシステム種別を引く。
@@ -1644,22 +1988,40 @@ model = "fake"
 25 30 0:24 / / rw,relatime shared:1 - ext4 /dev/mapper/root rw
 26 25 0:52 / /home rw,relatime shared:2 - nfs4 server:/home rw,vers=4.2
 27 26 0:53 / /home/u/local rw,relatime shared:3 - ext4 /dev/sdb1 rw";
-        assert_eq!(filesystem_type_in(mountinfo, Path::new("/var/lib/celeris")).as_deref(), Some("ext4"));
-        assert_eq!(filesystem_type_in(mountinfo, Path::new("/home/u/workspace")).as_deref(), Some("nfs4"));
+        assert_eq!(
+            filesystem_type_in(mountinfo, Path::new("/var/lib/celeris")).as_deref(),
+            Some("ext4")
+        );
+        assert_eq!(
+            filesystem_type_in(mountinfo, Path::new("/home/u/workspace")).as_deref(),
+            Some("nfs4")
+        );
         // 同じマウント点に autofs と実体が並ぶ場合は後の行（実体）を採る。
         let autofs_first = "\
 25 30 0:24 / / rw,relatime shared:1 - ext4 /dev/mapper/root rw
 26 25 0:51 / /home rw,relatime shared:2 - autofs systemd-1 rw
 27 25 0:52 / /home rw,relatime shared:3 - nfs4 server:/home rw,vers=4.2";
-        assert_eq!(filesystem_type_in(autofs_first, Path::new("/home/u/x")).as_deref(), Some("nfs4"));
-        assert_eq!(filesystem_type_in(mountinfo, Path::new("/home/u/local/db")).as_deref(), Some("ext4"));
+        assert_eq!(
+            filesystem_type_in(autofs_first, Path::new("/home/u/x")).as_deref(),
+            Some("nfs4")
+        );
+        assert_eq!(
+            filesystem_type_in(mountinfo, Path::new("/home/u/local/db")).as_deref(),
+            Some("ext4")
+        );
         assert_eq!(filesystem_type_in("garbage", Path::new("/home")), None);
 
         // ADR-0013 D11: /config の要約には env のキー名だけが載り、値は載らない。
         let view = config_view(&cfg, "127.0.0.1:7710".parse().unwrap());
         assert_eq!(view.providers[0].env_keys, ["CLAUDE_CONFIG_DIR"]);
-        assert_eq!(view.providers[1].model.as_deref(), Some("adapter-default-model"));
-        assert_eq!((view.api.bind.as_str(), view.api.auth_required), ("127.0.0.1:7710", false));
+        assert_eq!(
+            view.providers[1].model.as_deref(),
+            Some("adapter-default-model")
+        );
+        assert_eq!(
+            (view.api.bind.as_str(), view.api.auth_required),
+            ("127.0.0.1:7710", false)
+        );
         let json = serde_json::to_string(&view).unwrap();
         for secret in ["/accounts/a", "/accounts/b", "/base", "base\""] {
             assert!(!json.contains(secret), "{secret} leaked: {json}");
@@ -1730,13 +2092,25 @@ model = "fake"
         let cfg: Config = toml::from_str(text).unwrap();
         cfg.validate().unwrap();
         let view = config_view(&cfg, "127.0.0.1:7710".parse().unwrap());
-        assert_eq!(view.genres[0].capabilities, vec!["academic literature search".to_string(), "citation graph traversal".to_string()]);
-        assert_eq!(view.genres[0].input_artifacts, vec!["question".to_string(), "pdf".to_string()]);
+        assert_eq!(
+            view.genres[0].capabilities,
+            vec![
+                "academic literature search".to_string(),
+                "citation graph traversal".to_string()
+            ]
+        );
+        assert_eq!(
+            view.genres[0].input_artifacts,
+            vec!["question".to_string(), "pdf".to_string()]
+        );
         // Phase 38（ADR-0028 追記）: `名前: 説明` を書いても `GenreConfigView` の型は変わらず、値の文字列に
         // 説明が付くだけ（GUI は `:` の前を名前として扱う。`docs/gui/api.md`）。
         assert_eq!(
             view.genres[0].output_artifacts,
-            vec!["answer.md: 引用付きの答え".to_string(), "citations.json".to_string()]
+            vec![
+                "answer.md: 引用付きの答え".to_string(),
+                "citations.json".to_string()
+            ]
         );
         let json = serde_json::to_value(&view.genres[0]).unwrap();
         assert_eq!(json["capabilities"][0], "academic literature search");
@@ -1787,14 +2161,20 @@ args = ["acp"]
             merged,
             vec![
                 ("OPENCODE_CONFIG".to_string(), "/x/qwen.json".to_string()),
-                ("OPENCODE_DISABLE_PROJECT_CONFIG".to_string(), "1".to_string()),
+                (
+                    "OPENCODE_DISABLE_PROJECT_CONFIG".to_string(),
+                    "1".to_string()
+                ),
                 ("SHARED".to_string(), "base".to_string()),
             ]
         );
 
         // 行の command/args が [adapters.acp] の既定（opencode/["acp"]）を上書きする。
         assert_eq!(cfg.providers[1].command.as_deref(), Some("goose"));
-        assert_eq!(cfg.providers[1].args.as_deref(), Some(&["acp".to_string()][..]));
+        assert_eq!(
+            cfg.providers[1].args.as_deref(),
+            Some(&["acp".to_string()][..])
+        );
     }
 
     /// ADR-0027 D3: `paperqa` プロバイダの行は `[adapters.paperqa]` の env に重ね、`settings` は行の値が
@@ -1839,15 +2219,24 @@ tiers = ["standard"]
         assert_eq!(
             merged,
             vec![
-                ("OPENAI_BASE_URL".to_string(), "http://127.0.0.1:18000/v1".to_string()),
+                (
+                    "OPENAI_BASE_URL".to_string(),
+                    "http://127.0.0.1:18000/v1".to_string()
+                ),
                 ("SHARED".to_string(), "base".to_string()),
             ]
         );
 
         // 行の settings が [adapters.paperqa] の既定を上書きする。上書きしない行は共通設定のまま。
-        assert_eq!(cfg.providers[0].settings.as_deref(), Some("/opt/paperqa/settings/qwen-local"));
+        assert_eq!(
+            cfg.providers[0].settings.as_deref(),
+            Some("/opt/paperqa/settings/qwen-local")
+        );
         assert!(cfg.providers[1].settings.is_none());
-        assert_eq!(cfg.adapters.paperqa.settings.as_deref(), Some("/opt/paperqa/settings/base"));
+        assert_eq!(
+            cfg.adapters.paperqa.settings.as_deref(),
+            Some("/opt/paperqa/settings/base")
+        );
     }
 
     /// ADR-0029 D1: `local-deep-research` プロバイダの行は `[adapters.local_deep_research]` の env に重ね、
@@ -1895,16 +2284,26 @@ tiers = ["standard"]
         assert_eq!(
             merged,
             vec![
-                ("OPENAI_BASE_URL".to_string(), "http://127.0.0.1:18000/v1".to_string()),
+                (
+                    "OPENAI_BASE_URL".to_string(),
+                    "http://127.0.0.1:18000/v1".to_string()
+                ),
                 ("SHARED".to_string(), "base".to_string()),
             ]
         );
 
         assert_eq!(
-            cfg.adapters.local_deep_research.settings.get("llm.provider").map(String::as_str),
+            cfg.adapters
+                .local_deep_research
+                .settings
+                .get("llm.provider")
+                .map(String::as_str),
             Some("openai_endpoint")
         );
-        assert_eq!(cfg.adapters.local_deep_research.mode, task_worker::LdrMode::Detailed);
+        assert_eq!(
+            cfg.adapters.local_deep_research.mode,
+            task_worker::LdrMode::Detailed
+        );
         assert_eq!(cfg.adapters.local_deep_research.iterations, Some(3));
     }
 
@@ -1914,46 +2313,80 @@ tiers = ["standard"]
     /// （celeris 自身の環境はプロセス継承なのでここでは扱わない）。秘密が見つからない層はそのキーに触れず、
     /// 下の層の値が残る。
     #[test]
-    fn merged_env_with_secrets_follows_the_precedence_order_and_falls_back_when_a_secret_is_missing() {
+    fn merged_env_with_secrets_follows_the_precedence_order_and_falls_back_when_a_secret_is_missing()
+     {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let secrets_dir = dir.path().join("secrets");
         std::fs::create_dir_all(&secrets_dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
-        std::fs::write(secrets_dir.join("id-base"), "base-secret\n").unwrap_or_else(|e| panic!("write: {e}"));
-        std::fs::write(secrets_dir.join("id-row"), "row-secret").unwrap_or_else(|e| panic!("write: {e}"));
+        std::fs::write(secrets_dir.join("id-base"), "base-secret\n")
+            .unwrap_or_else(|e| panic!("write: {e}"));
+        std::fs::write(secrets_dir.join("id-row"), "row-secret")
+            .unwrap_or_else(|e| panic!("write: {e}"));
         // `id-row-missing` はわざと作らない（欠落を再現する）。
 
-        let base_env = HashMap::from([("K".to_string(), "base-env".to_string()), ("ONLY_BASE".to_string(), "b".to_string())]);
+        let base_env = HashMap::from([
+            ("K".to_string(), "base-env".to_string()),
+            ("ONLY_BASE".to_string(), "b".to_string()),
+        ]);
         let base_secrets = HashMap::from([("K".to_string(), "id-base".to_string())]);
         let row_env = HashMap::from([("K".to_string(), "row-env".to_string())]);
         let row_secrets = HashMap::from([("K".to_string(), "id-row".to_string())]);
 
         // 全層が揃っていれば行の env_from_secrets が勝つ。
-        let merged = merged_env_with_secrets(&base_env, &base_secrets, &row_env, &row_secrets, Some(&secrets_dir));
+        let merged = merged_env_with_secrets(
+            &base_env,
+            &base_secrets,
+            &row_env,
+            &row_secrets,
+            Some(&secrets_dir),
+        );
         let map: HashMap<String, String> = merged.into_iter().collect();
         assert_eq!(map.get("K"), Some(&"row-secret".to_string()));
         assert_eq!(map.get("ONLY_BASE"), Some(&"b".to_string()));
 
         // 行の env_from_secrets の秘密が無ければ、そのキーには触れず 1 段下（行の env）が残る。
         let row_secrets_missing = HashMap::from([("K".to_string(), "id-row-missing".to_string())]);
-        let merged =
-            merged_env_with_secrets(&base_env, &base_secrets, &row_env, &row_secrets_missing, Some(&secrets_dir));
+        let merged = merged_env_with_secrets(
+            &base_env,
+            &base_secrets,
+            &row_env,
+            &row_secrets_missing,
+            Some(&secrets_dir),
+        );
         let map: HashMap<String, String> = merged.into_iter().collect();
         assert_eq!(map.get("K"), Some(&"row-env".to_string()));
 
         // 行の env も無ければ、その下（`[adapters.*].env_from_secrets`）が残る。
         let empty: HashMap<String, String> = HashMap::new();
-        let merged = merged_env_with_secrets(&base_env, &base_secrets, &empty, &row_secrets_missing, Some(&secrets_dir));
+        let merged = merged_env_with_secrets(
+            &base_env,
+            &base_secrets,
+            &empty,
+            &row_secrets_missing,
+            Some(&secrets_dir),
+        );
         let map: HashMap<String, String> = merged.into_iter().collect();
         assert_eq!(map.get("K"), Some(&"base-secret".to_string()));
 
         // `[secrets]` 自体が未設定（`secrets_dir: None`）なら env_from_secrets は何も足さない（設定エラーにしない）。
-        let merged = merged_env_with_secrets(&base_env, &base_secrets, &row_env, &row_secrets, None);
+        let merged =
+            merged_env_with_secrets(&base_env, &base_secrets, &row_env, &row_secrets, None);
         let map: HashMap<String, String> = merged.into_iter().collect();
-        assert_eq!(map.get("K"), Some(&"row-env".to_string()), "missing [secrets] falls back to the env layer, not an error");
+        assert_eq!(
+            map.get("K"),
+            Some(&"row-env".to_string()),
+            "missing [secrets] falls back to the env layer, not an error"
+        );
 
         // 末尾の改行は読み取り時に落ちる。
         let base_secrets_only = HashMap::from([("K".to_string(), "id-base".to_string())]);
-        let merged = merged_env_with_secrets(&empty, &base_secrets_only, &empty, &empty, Some(&secrets_dir));
+        let merged = merged_env_with_secrets(
+            &empty,
+            &base_secrets_only,
+            &empty,
+            &empty,
+            Some(&secrets_dir),
+        );
         let map: HashMap<String, String> = merged.into_iter().collect();
         assert_eq!(map.get("K"), Some(&"base-secret".to_string()));
     }
@@ -2012,18 +2445,29 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
         assert_eq!(usage.len(), 2);
         let tavily = usage.get("tavily").expect("tavily uses");
         assert_eq!(tavily.len(), 2);
-        assert!(tavily.iter().any(|u| u.scope == "adapter" && u.name == "local-deep-research" && u.env == "LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY"));
-        assert!(tavily.iter().any(|u| u.scope == "provider" && u.name == "ldr-tavily" && u.env == "LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY"));
+        assert!(tavily.iter().any(|u| u.scope == "adapter"
+            && u.name == "local-deep-research"
+            && u.env == "LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY"));
+        assert!(tavily.iter().any(|u| u.scope == "provider"
+            && u.name == "ldr-tavily"
+            && u.env == "LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY"));
         let exa = usage.get("exa").expect("exa uses");
         assert_eq!(exa.len(), 2);
-        assert!(exa.iter().any(|u| u.scope == "adapter" && u.name == "local-deep-research"));
-        assert!(exa.iter().any(|u| u.scope == "provider" && u.name == "ldr-exa"));
+        assert!(
+            exa.iter()
+                .any(|u| u.scope == "adapter" && u.name == "local-deep-research")
+        );
+        assert!(
+            exa.iter()
+                .any(|u| u.scope == "provider" && u.name == "ldr-exa")
+        );
 
         // 未参照の id は現れない。
         assert!(!usage.contains_key("unused"));
 
         // `env_from_secrets` を書かない設定は空のまま。
-        let plain: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap_or_else(|e| panic!("{e}"));
+        let plain: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n")
+            .unwrap_or_else(|e| panic!("{e}"));
         assert!(secret_usage(&plain).is_empty());
     }
 
@@ -2049,7 +2493,10 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
             DaemonMode::Verify,
             SharedRole::new(InstanceRole::Standby),
         );
-        assert_eq!(settings.secrets_dir, cfg.secrets.as_ref().map(|s| s.dir.clone()));
+        assert_eq!(
+            settings.secrets_dir,
+            cfg.secrets.as_ref().map(|s| s.dir.clone())
+        );
         assert!(settings.secret_usage.contains_key("tavily"));
         // ADR-0040 D3 / D4: `release` / `mode` / `role` はそのまま API へ渡る（`GET /health` に出る）。
         assert_eq!(settings.release, "sha12sha12ab");
@@ -2078,7 +2525,8 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
         };
         write_config(2);
         let mut config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
-        let mut dispatcher = build_dispatcher(&config, Default::default()).unwrap_or_else(|e| panic!("{e}"));
+        let mut dispatcher =
+            build_dispatcher(&config, Default::default()).unwrap_or_else(|e| panic!("{e}"));
 
         // [accounts] が変わっていなければ通る。
         assert!(reload_providers(&mut dispatcher, &mut config).is_ok());
@@ -2114,7 +2562,8 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
         };
         write_config(20, 30);
         let mut config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
-        let mut dispatcher = build_dispatcher(&config, Default::default()).unwrap_or_else(|e| panic!("{e}"));
+        let mut dispatcher =
+            build_dispatcher(&config, Default::default()).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(dispatcher.config().roles[0].max_turns, Some(20));
         assert_eq!(dispatcher.config().delegation.max_delegate_per_run, 3);
 

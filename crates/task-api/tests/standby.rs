@@ -16,7 +16,13 @@ fn auth() -> String {
     format!("Bearer {TOKEN}")
 }
 
-fn env_with_role(role: InstanceRole) -> (TestEnv, SharedRole, tokio::sync::mpsc::Receiver<task_api::AdminRequest>) {
+fn env_with_role(
+    role: InstanceRole,
+) -> (
+    TestEnv,
+    SharedRole,
+    tokio::sync::mpsc::Receiver<task_api::AdminRequest>,
+) {
     let shared = SharedRole::new(role);
     // `admin_tx` があるのに 503 になる（＝ 役割だけで断っている）ことを見るため、受信側も保持する。
     let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -38,18 +44,29 @@ async fn standby_refuses_the_dispatcher_admin_endpoints_with_503_and_retry_after
     let app = env.router();
     let auth = auth();
 
-    let resp = send(&app, post_json_with("/api/v1/reload", &json!({}), &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        post_json_with("/api/v1/reload", &json!({}), &[("authorization", &auth)]),
+    )
+    .await;
     let problem = assert_problem(&resp, 503, "standby");
     assert_eq!(problem["detail"], json!("standby"));
     assert_eq!(resp.header("retry-after"), Some("2"));
-    assert!(admin_rx.try_recv().is_err(), "503 の間はディスパッチャへ要求を送らない");
+    assert!(
+        admin_rx.try_recv().is_err(),
+        "503 の間はディスパッチャへ要求を送らない"
+    );
 
     // 引き継ぎが終わって active になれば、同じ要求が tick ループまで届く（ここでは応答を待たない）。
     role.set(InstanceRole::Active);
     let app2 = app.clone();
     let auth2 = auth.clone();
     let pending = tokio::spawn(async move {
-        send(&app2, post_json_with("/api/v1/reload", &json!({}), &[("authorization", &auth2)])).await
+        send(
+            &app2,
+            post_json_with("/api/v1/reload", &json!({}), &[("authorization", &auth2)]),
+        )
+        .await
     });
     let request = tokio::time::timeout(std::time::Duration::from_secs(5), admin_rx.recv())
         .await
@@ -77,13 +94,25 @@ async fn draining_refuses_the_same_endpoints_and_plain_endpoints_keep_working() 
         ("POST", "/api/v1/providers/p1/check", Some(json!({}))),
         ("POST", "/api/v1/notify/test", Some(json!({}))),
         ("POST", "/api/v1/accounts/a/login", Some(json!({}))),
-        ("POST", "/api/v1/accounts/a/login/code", Some(json!({"code": "x"}))),
+        (
+            "POST",
+            "/api/v1/accounts/a/login/code",
+            Some(json!({"code": "x"})),
+        ),
         ("POST", "/api/v1/clusters/c1/connect", Some(json!({}))),
-        ("POST", "/api/v1/clusters/c1/connect/code", Some(json!({"code": "x"}))),
+        (
+            "POST",
+            "/api/v1/clusters/c1/connect/code",
+            Some(json!({"code": "x"})),
+        ),
     ] {
         assert_eq!(method, "POST");
         let body = body.unwrap_or(json!({}));
-        let resp = send(&app, post_json_with(path, &body, &[("authorization", &auth)])).await;
+        let resp = send(
+            &app,
+            post_json_with(path, &body, &[("authorization", &auth)]),
+        )
+        .await;
         let problem = assert_problem(&resp, 503, "standby");
         assert_eq!(problem["detail"], json!("standby"), "{path}");
         assert_eq!(resp.header("retry-after"), Some("2"), "{path}");

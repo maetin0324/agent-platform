@@ -134,7 +134,10 @@ async fn reports_are_listed_newest_first_and_can_be_filtered() {
     assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
     let body = resp.json();
     assert_eq!(body["report"]["headline"], "落ちました");
-    let expanded = body["sources_expanded"].as_array().cloned().expect("sources");
+    let expanded = body["sources_expanded"]
+        .as_array()
+        .cloned()
+        .expect("sources");
     assert_eq!(expanded.len(), 1);
     assert_eq!(expanded[0]["id"], old.id.to_string());
     assert_eq!(new.sources.len(), 0);
@@ -152,21 +155,55 @@ async fn marking_reports_read_is_an_admin_operation() {
     let env = env_with_token();
     let app = env.router();
     let now = OffsetDateTime::now_utc();
-    let one = report(&env.store, "secretary", 0, ReportKind::Result, None, "まとめ", now, vec![]);
+    let one = report(
+        &env.store,
+        "secretary",
+        0,
+        ReportKind::Result,
+        None,
+        "まとめ",
+        now,
+        vec![],
+    );
 
     // トークンが無ければ 401（共通ガード）。
-    let resp = send(&app, post_json("/api/v1/reports/read", &json!({"ids": [one.id.to_string()]}))).await;
+    let resp = send(
+        &app,
+        post_json(
+            "/api/v1/reports/read",
+            &json!({"ids": [one.id.to_string()]}),
+        ),
+    )
+    .await;
     assert_eq!(resp.status.as_u16(), 401);
 
-    let resp = send(&app, p("/api/v1/reports/read", &json!({"ids": [one.id.to_string()]}))).await;
+    let resp = send(
+        &app,
+        p(
+            "/api/v1/reports/read",
+            &json!({"ids": [one.id.to_string()]}),
+        ),
+    )
+    .await;
     assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
     assert_eq!(resp.json()["updated"], 1);
     // 2 回目は 0 件（既読は触らない）。
-    let resp = send(&app, p("/api/v1/reports/read", &json!({"ids": [one.id.to_string()]}))).await;
+    let resp = send(
+        &app,
+        p(
+            "/api/v1/reports/read",
+            &json!({"ids": [one.id.to_string()]}),
+        ),
+    )
+    .await;
     assert_eq!(resp.json()["updated"], 0);
 
     // 知らない id は 404。
-    let resp = send(&app, p("/api/v1/reports/read", &json!({"ids": ["not-a-ulid"]}))).await;
+    let resp = send(
+        &app,
+        p("/api/v1/reports/read", &json!({"ids": ["not-a-ulid"]})),
+    )
+    .await;
     assert_eq!(resp.status.as_u16(), 404);
 
     let resp = send(&app, p("/api/v1/reports/notified", &json!({}))).await;
@@ -202,7 +239,16 @@ async fn the_daemon_snapshot_carries_the_unread_counts_and_the_notification_deci
     assert_eq!(reports["notify_now"], false);
 
     // 秘書レベルの未読ができ、まだ通知したことが無ければ通知する。
-    let good = report(&env.store, "secretary", 0, ReportKind::Result, None, "まとめ", now, vec![]);
+    let good = report(
+        &env.store,
+        "secretary",
+        0,
+        ReportKind::Result,
+        None,
+        "まとめ",
+        now,
+        vec![],
+    );
     let resp = send(&app, get("/api/v1/daemon")).await;
     let reports = resp.json()["snapshot"]["reports"].clone();
     assert_eq!(reports["unread_secretary"], 1);
@@ -213,7 +259,16 @@ async fn the_daemon_snapshot_carries_the_unread_counts_and_the_notification_deci
     let env2 = env_with_token();
     let app2 = env2.router();
     env2.daemon_tx.send_replace(Some(snapshot(3)));
-    let unread = report(&env2.store, "secretary", 0, ReportKind::Result, None, "まとめ", now, vec![]);
+    let unread = report(
+        &env2.store,
+        "secretary",
+        0,
+        ReportKind::Result,
+        None,
+        "まとめ",
+        now,
+        vec![],
+    );
     let resp = send(&app2, p("/api/v1/reports/notified", &json!({}))).await;
     assert_eq!(resp.status.as_u16(), 200);
     let resp = send(&app2, g("/api/v1/daemon")).await;

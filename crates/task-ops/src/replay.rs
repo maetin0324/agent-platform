@@ -107,7 +107,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use task_core::{
-        ArtifactRef, Budget, Check, Criterion, SqliteStore, Tier, TaskKind, Trigger, WorkerHint,
+        ArtifactRef, Budget, Check, Criterion, SqliteStore, TaskKind, Tier, Trigger, WorkerHint,
         WorkspaceSpec,
     };
     use time::OffsetDateTime;
@@ -115,6 +115,8 @@ mod tests {
     fn sample_task(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -139,7 +141,8 @@ mod tests {
                 adapter: None,
             },
             workspace: WorkspaceSpec::Local {
-                path: PathBuf::from("/tmp/ws"), mode: None,
+                path: PathBuf::from("/tmp/ws"),
+                mode: None,
             },
             budget: Budget {
                 max_turns: 10,
@@ -297,19 +300,36 @@ mod tests {
             let task = sample_task(Status::Reviewing);
             store.insert(&task).expect("insert");
             store
-                .append_event(task.id, &Event::Created { task: Box::new(task.clone()) })
+                .append_event(
+                    task.id,
+                    &Event::Created {
+                        task: Box::new(task.clone()),
+                    },
+                )
                 .expect("append created");
             store
                 .append_event(
                     task.id,
-                    &Event::Transitioned { from: Status::Reviewing, to, reason: "child_failed".to_string() },
+                    &Event::Transitioned {
+                        from: Status::Reviewing,
+                        to,
+                        reason: "child_failed".to_string(),
+                    },
                 )
                 .expect("append transitioned");
             let events = store.events_for(task.id).expect("events_for");
             replay_status_and_attempts(&events).expect("some state")
         };
-        assert_eq!(replayed(Status::Ready), (Status::Ready, 1), "やり直しは attempts を使う");
-        assert_eq!(replayed(Status::Blocked), (Status::Blocked, 0), "人に聞くときは使わない");
+        assert_eq!(
+            replayed(Status::Ready),
+            (Status::Ready, 1),
+            "やり直しは attempts を使う"
+        );
+        assert_eq!(
+            replayed(Status::Blocked),
+            (Status::Blocked, 0),
+            "人に聞くときは使わない"
+        );
     }
 
     /// ADR-0044 D2（Phase 53）: `reopen` は attempts を **0 に戻す**唯一のトリガ。
@@ -321,11 +341,20 @@ mod tests {
         let mut task = sample_task(Status::Draft);
         task.budget.max_retries = 0;
         store
-            .create_task(&task, vec![Event::Created { task: Box::new(task.clone()) }])
+            .create_task(
+                &task,
+                vec![Event::Created {
+                    task: Box::new(task.clone()),
+                }],
+            )
             .expect("create");
         // draft → ready → running → failed（attempts を 1 使う）。
-        store.apply_transition(task.id, Trigger::Accept, None).expect("accept");
-        store.apply_transition(task.id, Trigger::Dispatch, None).expect("dispatch");
+        store
+            .apply_transition(task.id, Trigger::Accept, None)
+            .expect("accept");
+        store
+            .apply_transition(task.id, Trigger::Dispatch, None)
+            .expect("dispatch");
         store
             .apply_transition(task.id, Trigger::WorkerError { retryable: false }, None)
             .expect("worker_error");
@@ -338,7 +367,10 @@ mod tests {
 
         // `celerisctl replay` は不一致を報告しない。
         let events = store.events_for(task.id).expect("events_for");
-        assert_eq!(replay_status_and_attempts(&events), Some((Status::Ready, 0)));
+        assert_eq!(
+            replay_status_and_attempts(&events),
+            Some((Status::Ready, 0))
+        );
         let report = replay(&store).expect("replay");
         assert_eq!(report.mismatches, Vec::new(), "{report:?}");
     }

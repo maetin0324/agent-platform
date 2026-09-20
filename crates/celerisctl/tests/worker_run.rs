@@ -7,14 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use task_core::{
-    Budget, Check, Criterion, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier, WorkerHint,
-    WorkspaceSpec,
+    Budget, Check, Criterion, Event, SqliteStore, Status, Task, TaskId, TaskKind, TaskStore, Tier,
+    WorkerHint, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
 fn sample_task(status: Status, workspace: WorkspaceSpec) -> Task {
     let now = OffsetDateTime::now_utc();
     Task {
+        mode: Default::default(),
+        skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,
@@ -23,15 +25,25 @@ fn sample_task(status: Status, workspace: WorkspaceSpec) -> Task {
         objective: "do it".to_string(),
         acceptance: vec![Criterion {
             text: "ok".to_string(),
-            check: Check::Command { cmd: "true".to_string(), expect_exit: 0 },
+            check: Check::Command {
+                cmd: "true".to_string(),
+                expect_exit: 0,
+            },
         }],
         inputs: vec![],
         depends_on: vec![],
         status,
         priority: 0,
-        worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
+        worker_hint: WorkerHint {
+            tier: Tier::Standard,
+            adapter: None,
+        },
         workspace,
-        budget: Budget { max_turns: 10, max_wall_secs: 30, max_retries: 1 },
+        budget: Budget {
+            max_turns: 10,
+            max_wall_secs: 30,
+            max_retries: 1,
+        },
         attempts: 0,
         lease: None,
         created_at: now,
@@ -104,10 +116,22 @@ echo '{"type":"done","summary":"ok","evidence":[]}'
     let workspace_dir = tmp.path().join("ws");
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
+    let task = sample_task(
+        Status::Ready,
+        WorkspaceSpec::Local {
+            path: PathBuf::from("unused"),
+            mode: None,
+        },
+    );
     store.insert(&task).expect("insert task");
     store
-        .append_event(task.id, &Event::Answered { question: "q?".to_string(), answer: "a!".to_string() })
+        .append_event(
+            task.id,
+            &Event::Answered {
+                question: "q?".to_string(),
+                answer: "a!".to_string(),
+            },
+        )
         .expect("append answered");
 
     let events_before = store.events_for(task.id).expect("events_for before");
@@ -127,12 +151,18 @@ echo '{"type":"done","summary":"ok","evidence":[]}'
     );
 
     let stdout = stdout_of(&out);
-    assert_eq!(out.status.code(), Some(0), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout.contains("progress: working"), "{stdout}");
     assert!(stdout.contains("artifact: out"), "{stdout}");
     assert!(stdout.contains("result: {\"type\":\"done\""), "{stdout}");
 
-    let stdin_json = std::fs::read_to_string(workspace_dir.join("stdin.json")).expect("read stdin.json");
+    let stdin_json =
+        std::fs::read_to_string(workspace_dir.join("stdin.json")).expect("read stdin.json");
     assert!(
         stdin_json.contains(r#""answers":[{"question":"q?","answer":"a!"}]"#),
         "{stdin_json}"
@@ -160,7 +190,13 @@ echo '{"type":"question","text":"which one?"}'
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
+    let task = sample_task(
+        Status::Ready,
+        WorkspaceSpec::Local {
+            path: PathBuf::from("unused"),
+            mode: None,
+        },
+    );
     store.insert(&task).expect("insert task");
 
     let out = run_celerisctl(
@@ -178,7 +214,12 @@ echo '{"type":"question","text":"which one?"}'
     );
 
     let stdout = stdout_of(&out);
-    assert_eq!(out.status.code(), Some(3), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout.contains(r#"result: {"type":"question""#), "{stdout}");
 }
 
@@ -196,7 +237,13 @@ fn provider_selects_the_matching_account_env() {
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
+    let task = sample_task(
+        Status::Ready,
+        WorkspaceSpec::Local {
+            path: PathBuf::from("unused"),
+            mode: None,
+        },
+    );
     store.insert(&task).expect("insert task");
 
     let out = run_celerisctl(
@@ -214,7 +261,12 @@ fn provider_selects_the_matching_account_env() {
             tmp.path().join("ws-b").to_str().expect("utf8"),
         ],
     );
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout_of(&out).contains("account=b"), "{}", stdout_of(&out));
 
     let out = run_celerisctl(
@@ -230,7 +282,12 @@ fn provider_selects_the_matching_account_env() {
             tmp.path().join("ws-default").to_str().expect("utf8"),
         ],
     );
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout_of(&out).contains("account=a"), "{}", stdout_of(&out));
 }
 
@@ -248,14 +305,32 @@ fn running_task_requires_explicit_workspace() {
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Running, WorkspaceSpec::Local { path: PathBuf::from("running-task-ws"), mode: None });
+    let task = sample_task(
+        Status::Running,
+        WorkspaceSpec::Local {
+            path: PathBuf::from("running-task-ws"),
+            mode: None,
+        },
+    );
     store.insert(&task).expect("insert task");
 
     let without_workspace = run_celerisctl(
         &db_path,
-        &["worker", "run", "--config", config_path.to_str().expect("utf8"), "--task", &task.id.to_string()],
+        &[
+            "worker",
+            "run",
+            "--config",
+            config_path.to_str().expect("utf8"),
+            "--task",
+            &task.id.to_string(),
+        ],
     );
-    assert_eq!(without_workspace.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&without_workspace.stderr));
+    assert_eq!(
+        without_workspace.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&without_workspace.stderr)
+    );
 
     let with_workspace = run_celerisctl(
         &db_path,
@@ -270,7 +345,12 @@ fn running_task_requires_explicit_workspace() {
             tmp.path().join("separate-ws").to_str().expect("utf8"),
         ],
     );
-    assert_eq!(with_workspace.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&with_workspace.stderr));
+    assert_eq!(
+        with_workspace.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&with_workspace.stderr)
+    );
 }
 
 /// 存在しないプロバイダ ID は exit 1。
@@ -287,7 +367,13 @@ fn unknown_provider_id_errors() {
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
+    let task = sample_task(
+        Status::Ready,
+        WorkspaceSpec::Local {
+            path: PathBuf::from("unused"),
+            mode: None,
+        },
+    );
     store.insert(&task).expect("insert task");
 
     let out = run_celerisctl(
@@ -305,7 +391,12 @@ fn unknown_provider_id_errors() {
             tmp.path().join("ws").to_str().expect("utf8"),
         ],
     );
-    assert_eq!(out.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// `error.provider_failure` 付きのワーカー error は、アダプタの `Err` 経由で
@@ -325,7 +416,13 @@ echo '{"type":"error","message":"429","retryable":true,"provider_failure":{"kind
     let config_path = write_config(tmp.path(), &script, providers);
 
     let store = SqliteStore::open(&db_path).expect("open store");
-    let task = sample_task(Status::Ready, WorkspaceSpec::Local { path: PathBuf::from("unused"), mode: None });
+    let task = sample_task(
+        Status::Ready,
+        WorkspaceSpec::Local {
+            path: PathBuf::from("unused"),
+            mode: None,
+        },
+    );
     store.insert(&task).expect("insert task");
 
     let out = run_celerisctl(
@@ -343,10 +440,14 @@ echo '{"type":"error","message":"429","retryable":true,"provider_failure":{"kind
     );
 
     let stdout = stdout_of(&out);
-    assert_eq!(out.status.code(), Some(4), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         stdout.contains(r#""provider_failure":{"kind":"throttled","retry_after_secs":7}"#),
         "{stdout}"
     );
 }
-

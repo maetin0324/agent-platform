@@ -25,7 +25,10 @@ pub(crate) fn write_executable(path: &Path, contents: &str) {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn stub writer for {}: {e}", path.display()));
 
-    let mut stdin = child.stdin.take().unwrap_or_else(|| panic!("stub writer stdin was not piped"));
+    let mut stdin = child
+        .stdin
+        .take()
+        .unwrap_or_else(|| panic!("stub writer stdin was not piped"));
     stdin
         .write_all(contents.as_bytes())
         .unwrap_or_else(|e| panic!("failed to write stub contents for {}: {e}", path.display()));
@@ -34,5 +37,9 @@ pub(crate) fn write_executable(path: &Path, contents: &str) {
     let status = child
         .wait()
         .unwrap_or_else(|e| panic!("failed to wait for stub writer for {}: {e}", path.display()));
-    assert!(status.success(), "stub writer failed for {}: {status}", path.display());
+    assert!(
+        status.success(),
+        "stub writer failed for {}: {status}",
+        path.display()
+    );
 }

@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use task_core::{
-    ApprovalStore, Event, EventRow, ListFilter, ListOrder, Message, MessageRole, MilestoneStatus, ProjectId,
-    ReportFilter, ReportStore, SqliteStore, Status, Task, TaskId, TaskStore,
+    ApprovalStore, Event, EventRow, ListFilter, ListOrder, Message, MessageRole, MilestoneStatus,
+    ProjectId, ReportFilter, ReportStore, SqliteStore, Status, Task, TaskId, TaskStore,
 };
 use task_ops::console::{ConsoleCursor, at_nanos, group_progress, task_line};
 
@@ -63,10 +63,11 @@ impl Scope {
         match value.map(str::trim) {
             None | Some("") | Some("all") => Ok(Scope::All),
             Some(s) => match s.split_once(':') {
-                Some(("project", id)) => id
-                    .parse::<ProjectId>()
-                    .map(Scope::Project)
-                    .map_err(|_| ApiProblem::bad_request(format!("`{id}` is not a project id (ULID)"))),
+                Some(("project", id)) => {
+                    id.parse::<ProjectId>().map(Scope::Project).map_err(|_| {
+                        ApiProblem::bad_request(format!("`{id}` is not a project id (ULID)"))
+                    })
+                }
                 Some(("node", id)) if !id.is_empty() => Ok(Scope::Node(id.to_string())),
                 _ => Err(ApiProblem::bad_request(
                     "query parameter `scope` must be `all`, `project:<id>` or `node:<id>`",
@@ -144,11 +145,15 @@ pub(crate) fn collect(
             latest.saturating_sub(EVENT_WINDOW as u64)
         }
     };
-    let rows = store.events_since(after_id, EVENT_WINDOW).map_err(store_problem)?;
+    let rows = store
+        .events_since(after_id, EVENT_WINDOW)
+        .map_err(store_problem)?;
     blocks.extend(event_blocks(store, scope, &rows, &mut tasks)?);
 
     // 2. イベントに無いもの（対話・認可・途中目標・報告）。
-    let side_limit = limit.saturating_mul(4).clamp(DEFAULT_LIMIT, SIDE_WINDOW_MAX);
+    let side_limit = limit
+        .saturating_mul(4)
+        .clamp(DEFAULT_LIMIT, SIDE_WINDOW_MAX);
     let after_at = since.map(|c| c.at_nanos);
     blocks.extend(side_blocks(store, scope, after_at, side_limit, &mut tasks)?);
 
@@ -194,7 +199,10 @@ pub(crate) fn event_blocks(
     // 範囲に入るタスクの行だけを残す（消えたタスクの行は捨てる）。
     let mut mine: Vec<&EventRow> = Vec::new();
     for row in rows {
-        if tasks.get(store, row.task_id)?.is_some_and(|t| scope.covers(t)) {
+        if tasks
+            .get(store, row.task_id)?
+            .is_some_and(|t| scope.covers(t))
+        {
             mine.push(row);
         }
     }
@@ -248,7 +256,9 @@ pub(crate) fn event_blocks(
         // 束の位置は「最初の行の時刻」、読み進みは「最後の行の id」。
         let last_id = mine
             .iter()
-            .filter(|r| r.task_id == group.task_id && progress_run(&r.event) == Some(group.run_id.as_str()))
+            .filter(|r| {
+                r.task_id == group.task_id && progress_run(&r.event) == Some(group.run_id.as_str())
+            })
             .map(|r| r.id)
             .max()
             .unwrap_or(0);
@@ -290,7 +300,10 @@ fn answered_texts(rows: &[&EventRow]) -> HashMap<(TaskId, String), String> {
 }
 
 /// 認可として残っている質問（タスク × 質問文）。ここに有る質問はイベント側では出さない。
-fn approval_question_texts(store: &SqliteStore, scope: &Scope) -> Result<HashSet<(TaskId, String)>, ApiProblem> {
+fn approval_question_texts(
+    store: &SqliteStore,
+    scope: &Scope,
+) -> Result<HashSet<(TaskId, String)>, ApiProblem> {
     let mut out = HashSet::new();
     for approval in store
         .approval_list(None, scope.project(), scope.node())
@@ -354,14 +367,15 @@ pub(crate) fn side_blocks(
             if after_nanos.is_some_and(|a| nanos < a) {
                 continue;
             }
-            let review = task_ops::milestone_review::review_state(store, milestone.project_id, milestone.id)
-                .map_err(store_problem)?
-                .reply
-                .map(|reply| MilestoneReviewView {
-                    message_id: reply.id.to_string(),
-                    text: reply.text,
-                    at: rfc3339(reply.created_at),
-                });
+            let review =
+                task_ops::milestone_review::review_state(store, milestone.project_id, milestone.id)
+                    .map_err(store_problem)?
+                    .reply
+                    .map(|reply| MilestoneReviewView {
+                        message_id: reply.id.to_string(),
+                        text: reply.text,
+                        at: rfc3339(reply.created_at),
+                    });
             blocks.push(ConsoleBlock::Milestone {
                 cursor: ConsoleCursor::new(nanos, format!("ms{}", milestone.id), 0).encode(),
                 at,
@@ -398,7 +412,10 @@ pub(crate) fn side_blocks(
 }
 
 /// 提案中（`proposed`）の途中目標。`all` のときは案件をなめる（案件の数は人が作る数なので小さい）。
-fn proposed_milestones(store: &SqliteStore, scope: &Scope) -> Result<Vec<task_core::Milestone>, ApiProblem> {
+fn proposed_milestones(
+    store: &SqliteStore,
+    scope: &Scope,
+) -> Result<Vec<task_core::Milestone>, ApiProblem> {
     let project_ids: Vec<ProjectId> = match scope.project() {
         Some(id) => vec![id],
         None => store
@@ -485,7 +502,11 @@ pub(crate) struct TaskCache {
 }
 
 impl TaskCache {
-    pub(crate) fn get(&mut self, store: &SqliteStore, id: TaskId) -> Result<Option<&Task>, ApiProblem> {
+    pub(crate) fn get(
+        &mut self,
+        store: &SqliteStore,
+        id: TaskId,
+    ) -> Result<Option<&Task>, ApiProblem> {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.by_id.entry(id) {
             let task = store.get(id).map_err(store_problem)?;
             slot.insert(task);
@@ -515,7 +536,10 @@ pub(crate) async fn run_events(
             let rows = store
                 .event_rows_for(task_id, after_seq, RUN_EVENTS_SCAN)
                 .map_err(store_problem)?;
-            let mut items: Vec<EventRow> = rows.into_iter().filter(|row| run_of(&row.event) == Some(run_id.as_str())).collect();
+            let mut items: Vec<EventRow> = rows
+                .into_iter()
+                .filter(|row| run_of(&row.event) == Some(run_id.as_str()))
+                .collect();
             let has_more = items.len() > limit;
             items.truncate(limit);
             Ok(crate::types::EventsPage { items, has_more })
@@ -544,7 +568,11 @@ fn run_of(event: &Event) -> Option<&str> {
 /// 案件の全タスクを引く（`Scope::Project` の範囲検査を SQL 側でやりたくなったときの入口。
 /// いまは `Scope::covers` が `Task.project_id` を見るので使っていない）。
 #[allow(dead_code)]
-fn project_task_ids(store: &SqliteStore, project_id: ProjectId, limit: usize) -> Result<Vec<TaskId>, ApiProblem> {
+fn project_task_ids(
+    store: &SqliteStore,
+    project_id: ProjectId,
+    limit: usize,
+) -> Result<Vec<TaskId>, ApiProblem> {
     let filter = ListFilter {
         project_id: Some(project_id),
         ..ListFilter::default()
@@ -586,7 +614,9 @@ pub(crate) async fn stream(
     let query = QueryParams::parse(raw.as_deref(), &["scope", "since"])?;
     let scope = Scope::parse(query.single("scope")?)?;
     let since = parse_since(query.single("since")?)?;
-    let slot = state.try_open_stream().ok_or_else(ApiProblem::too_many_streams)?;
+    let slot = state
+        .try_open_stream()
+        .ok_or_else(ApiProblem::too_many_streams)?;
 
     // 位置を決める: `since` があればそこから、無ければ「今」（履歴は `GET /console` で取る）。
     let cursor = match since {
@@ -626,7 +656,10 @@ pub(crate) async fn stream(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
     );
-    headers.insert(crate::sse::X_ACCEL_BUFFERING, axum::http::HeaderValue::from_static("no"));
+    headers.insert(
+        crate::sse::X_ACCEL_BUFFERING,
+        axum::http::HeaderValue::from_static("no"),
+    );
     Ok(response)
 }
 
@@ -707,11 +740,19 @@ async fn poll_console(
     let fetched = state
         .blocking(move |store| {
             let mut cache = TaskCache::default();
-            let rows = store.events_since(after_id, EVENT_WINDOW).map_err(store_problem)?;
+            let rows = store
+                .events_since(after_id, EVENT_WINDOW)
+                .map_err(store_problem)?;
             let watermark = rows.last().map(|r| r.id).unwrap_or(after_id);
             let events = event_blocks(store, &scope_for_task, &rows, &mut cache)?;
             let side = if want_side {
-                side_blocks(store, &scope_for_task, Some(after_nanos), DEFAULT_LIMIT, &mut cache)?
+                side_blocks(
+                    store,
+                    &scope_for_task,
+                    Some(after_nanos),
+                    DEFAULT_LIMIT,
+                    &mut cache,
+                )?
             } else {
                 Vec::new()
             };
@@ -721,7 +762,10 @@ async fn poll_console(
     let (events, side, watermark) = match fetched {
         Ok(v) => v,
         Err(problem) => {
-            tracing::warn!(code = problem.code(), "console SSE poll failed; retrying on the next tick");
+            tracing::warn!(
+                code = problem.code(),
+                "console SSE poll failed; retrying on the next tick"
+            );
             return true;
         }
     };
@@ -737,7 +781,11 @@ async fn poll_console(
             ConsoleBlock::Progress { progress, .. } => {
                 let key = task_ops::console::progress_tie(progress.task_id, &progress.run_id);
                 match pending.blocks.get_mut(&key) {
-                    Some(ConsoleBlock::Progress { progress: acc, cursor, .. }) => {
+                    Some(ConsoleBlock::Progress {
+                        progress: acc,
+                        cursor,
+                        ..
+                    }) => {
                         task_ops::console::merge_progress(acc, progress);
                         if let ConsoleBlock::Progress { cursor: next, .. } = &block {
                             *cursor = next.clone();
@@ -813,9 +861,15 @@ mod tests {
     fn scopes_parse_all_project_and_node() {
         assert_eq!(Scope::parse(None).ok(), Some(Scope::All));
         assert_eq!(Scope::parse(Some("all")).ok(), Some(Scope::All));
-        assert_eq!(Scope::parse(Some("node:secretary")).ok(), Some(Scope::Node("secretary".into())));
+        assert_eq!(
+            Scope::parse(Some("node:secretary")).ok(),
+            Some(Scope::Node("secretary".into()))
+        );
         let id = ProjectId::new();
-        assert_eq!(Scope::parse(Some(&format!("project:{id}"))).ok(), Some(Scope::Project(id)));
+        assert_eq!(
+            Scope::parse(Some(&format!("project:{id}"))).ok(),
+            Some(Scope::Project(id))
+        );
         assert!(Scope::parse(Some("project:nope")).is_err());
         assert!(Scope::parse(Some("node:")).is_err());
         assert!(Scope::parse(Some("bogus")).is_err());
@@ -827,7 +881,10 @@ mod tests {
         assert!(parse_since(None).ok().flatten().is_none());
         assert!(parse_since(Some("")).ok().flatten().is_none());
         let cursor = ConsoleCursor::new(42, "e7", 7);
-        assert_eq!(parse_since(Some(&cursor.encode())).ok().flatten(), Some(cursor));
+        assert_eq!(
+            parse_since(Some(&cursor.encode())).ok().flatten(),
+            Some(cursor)
+        );
         assert!(parse_since(Some("nope")).is_err());
     }
 }

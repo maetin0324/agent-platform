@@ -143,11 +143,12 @@ fn build_criteria(args: &mut AddArgs) -> Vec<CriterionSpec> {
             .into_iter()
             .map(|text| CriterionSpec::Human { text }),
     );
-    acceptance.extend(
-        std::mem::take(&mut args.check_cmd)
-            .into_iter()
-            .map(|cmd| CriterionSpec::Command { cmd, expect_exit: 0 }),
-    );
+    acceptance.extend(std::mem::take(&mut args.check_cmd).into_iter().map(|cmd| {
+        CriterionSpec::Command {
+            cmd,
+            expect_exit: 0,
+        }
+    }));
     acceptance.extend(
         std::mem::take(&mut args.check_artifact)
             .into_iter()
@@ -170,8 +171,9 @@ fn load_roles_and_genres(
 ) -> Result<(Vec<RoleSpec>, Vec<GenreSpec>), CliError> {
     match config {
         Some(path) => {
-            let config = celeris::Config::load(path)
-                .map_err(|e| CliError::msg(format!("failed to load config {}: {e}", path.display())))?;
+            let config = celeris::Config::load(path).map_err(|e| {
+                CliError::msg(format!("failed to load config {}: {e}", path.display()))
+            })?;
             Ok((config.role_specs(), config.genre_specs()))
         }
         None => {
@@ -192,8 +194,11 @@ fn load_roles_and_genres(
 
 pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliError> {
     let acceptance = build_criteria(&mut args);
-    let (roles, genres) =
-        load_roles_and_genres(args.config.as_ref(), args.role.as_deref(), args.genre.as_deref())?;
+    let (roles, genres) = load_roles_and_genres(
+        args.config.as_ref(),
+        args.role.as_deref(),
+        args.genre.as_deref(),
+    )?;
 
     let parent = match &args.parent {
         Some(s) => Some(parse_task_id(s)?),
@@ -206,7 +211,8 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         .map(|s| parse_task_id(s))
         .collect::<Result<_, _>>()?;
 
-    let spec = NewTaskSpec { repos: Vec::new(),
+    let spec = NewTaskSpec {
+        repos: Vec::new(),
         title: args.title,
         objective: args.objective,
         acceptance,
@@ -231,6 +237,9 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         // ADR-0044 D1/D3: `celerisctl add` は引数を増やさない（ラベル・種類・初期状態は GUI から）。
         labels: Vec::new(),
         category: None,
+        // ADR-0046 D2/D4: skills と mode も GUI から（`celerisctl add` は引数を増やさない）。
+        skills: Vec::new(),
+        mode: None,
         status: None,
     };
 
@@ -385,7 +394,10 @@ adapter = "fake"
         let task = &tasks[0];
         assert_eq!(task.role.as_deref(), Some("lead"));
         assert_eq!(task.worker_hint.tier, Tier::Frontier);
-        assert_eq!((task.budget.max_turns, task.budget.max_wall_secs), (40, 1800));
+        assert_eq!(
+            (task.budget.max_turns, task.budget.max_wall_secs),
+            (40, 1800)
+        );
         // --max-retries は役割の既定を持たない（既定 2 のまま）。
         assert_eq!(task.budget.max_retries, 2);
         assert!(!task.aggregate);
@@ -408,7 +420,10 @@ adapter = "fake"
         let task = &tasks[0];
         assert_eq!(task.role.as_deref(), Some("lead"));
         assert_eq!(task.worker_hint.tier, Tier::Standard);
-        assert_eq!((task.budget.max_turns, task.budget.max_wall_secs), (10, 600));
+        assert_eq!(
+            (task.budget.max_turns, task.budget.max_wall_secs),
+            (10, 600)
+        );
         assert!(task.aggregate);
     }
 
@@ -454,7 +469,10 @@ adapter = "fake"
         assert_eq!(task.role, None, "genre alone must not set role");
         assert_eq!(task.genre.as_deref(), Some("literature"));
         assert_eq!(task.worker_hint.tier, Tier::Standard);
-        assert_eq!((task.budget.max_turns, task.budget.max_wall_secs), (5, 1200));
+        assert_eq!(
+            (task.budget.max_turns, task.budget.max_wall_secs),
+            (5, 1200)
+        );
     }
 
     /// `--config` 無しの `--genre` は分野名だけを保存する（検証しない。警告は stderr）。

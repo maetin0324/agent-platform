@@ -19,7 +19,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use task_core::knowledge::{
-    self as kb, Confidence, FrontMatter, INBOX_DIR, INDEX_FILE, Index, IndexItem, PathError, SearchHit,
+    self as kb, Confidence, FrontMatter, INBOX_DIR, INDEX_FILE, Index, IndexItem, PathError,
+    SearchHit,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -53,25 +54,38 @@ pub fn exists(root: &Path) -> bool {
 }
 
 fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default()
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default()
 }
 
 fn today() -> String {
-    now_rfc3339().split('T').next().unwrap_or_default().to_string()
+    now_rfc3339()
+        .split('T')
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn author_args(name: &str, email: &str) -> (String, String) {
     (format!("user.name={name}"), format!("user.email={email}"))
 }
 
-fn commit_paths(root: &Path, message: &str, author: (&str, &str), paths: &[&str]) -> Result<String, String> {
+fn commit_paths(
+    root: &Path,
+    message: &str,
+    author: (&str, &str),
+    paths: &[&str],
+) -> Result<String, String> {
     let mut add: Vec<&str> = vec!["add", "-A", "--"];
     add.extend_from_slice(paths);
     if !git(root, &add, GIT_WRITE_TIMEOUT).is_some_and(|o| o.ok) {
         return Err("git add に失敗しました".to_string());
     }
     let (name, email) = author_args(author.0, author.1);
-    let mut args: Vec<&str> = vec!["-c", &name, "-c", &email, "commit", "-q", "-m", message, "--"];
+    let mut args: Vec<&str> = vec![
+        "-c", &name, "-c", &email, "commit", "-q", "-m", message, "--",
+    ];
     args.extend_from_slice(paths);
     match git(root, &args, GIT_WRITE_TIMEOUT) {
         Some(o) if o.ok => {}
@@ -107,7 +121,8 @@ pub struct InitOutcome {
 /// 既にあるファイルは 1 バイトも触らない。足りないディレクトリ・雛形・`README.md`・`.gitignore`・
 /// `_inbox/.gitkeep` だけを書き、変わったものがあれば 1 回コミットして `index.json` を作り直す。
 pub fn init(root: &Path) -> Result<InitOutcome, String> {
-    std::fs::create_dir_all(root).map_err(|e| format!("{} を作れませんでした: {e}", root.display()))?;
+    std::fs::create_dir_all(root)
+        .map_err(|e| format!("{} を作れませんでした: {e}", root.display()))?;
     let created = !root.join(".git").exists();
     if created {
         match git(root, &["init", "-q", "-b", "main"], GIT_WRITE_TIMEOUT) {
@@ -117,7 +132,8 @@ pub fn init(root: &Path) -> Result<InitOutcome, String> {
         }
     }
     for dir in kb::SKELETON_DIRS.iter().chain([INBOX_DIR].iter()) {
-        std::fs::create_dir_all(root.join(dir)).map_err(|e| format!("{dir} を作れませんでした: {e}"))?;
+        std::fs::create_dir_all(root.join(dir))
+            .map_err(|e| format!("{dir} を作れませんでした: {e}"))?;
     }
     let mut added = Vec::new();
     for (path, body) in seed_files() {
@@ -126,9 +142,11 @@ pub fn init(root: &Path) -> Result<InitOutcome, String> {
             continue;
         }
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{} を作れませんでした: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("{} を作れませんでした: {e}", parent.display()))?;
         }
-        std::fs::write(&target, body.as_bytes()).map_err(|e| format!("{path} を書けませんでした: {e}"))?;
+        std::fs::write(&target, body.as_bytes())
+            .map_err(|e| format!("{path} を書けませんでした: {e}"))?;
         added.push(path);
     }
     if !added.is_empty() || created {
@@ -137,7 +155,12 @@ pub fn init(root: &Path) -> Result<InitOutcome, String> {
         } else {
             format!("knowledge: 雛形を追加（{} 件）", added.len())
         };
-        commit_paths(root, &message, (kb::HUMAN_AUTHOR_NAME, kb::HUMAN_AUTHOR_EMAIL), &["."])?;
+        commit_paths(
+            root,
+            &message,
+            (kb::HUMAN_AUTHOR_NAME, kb::HUMAN_AUTHOR_EMAIL),
+            &["."],
+        )?;
     }
     reindex(root)?;
     Ok(InitOutcome {
@@ -266,7 +289,8 @@ fn cluster_page(today: &str, id: &str) -> String {
     )
 }
 
-const GITIGNORE: &str = "# ADR-0047 D1 / D6: 索引は再生成できる派生物（正本は Markdown）。\nindex.json\nindex.*/\n";
+const GITIGNORE: &str =
+    "# ADR-0047 D1 / D6: 索引は再生成できる派生物（正本は Markdown）。\nindex.json\nindex.*/\n";
 
 fn readme() -> String {
     format!(
@@ -326,7 +350,9 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Ok(rel) = path.strip_prefix(root) else { continue };
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
         let rel = rel.to_string_lossy().replace('\\', "/");
         if rel.starts_with('.') || kb::is_inbox(&rel) {
             continue;
@@ -381,7 +407,8 @@ fn default_scope(path: &str) -> Option<String> {
 }
 
 fn write_index(root: &Path, index: &Index) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(index).map_err(|e| format!("索引を組み立てられませんでした: {e}"))?;
+    let json = serde_json::to_string_pretty(index)
+        .map_err(|e| format!("索引を組み立てられませんでした: {e}"))?;
     std::fs::write(root.join(INDEX_FILE), format!("{json}\n").as_bytes())
         .map_err(|e| format!("{INDEX_FILE} を書けませんでした: {e}"))
 }
@@ -417,16 +444,23 @@ pub fn ensure_index(root: &Path) -> Index {
 pub fn last_commits(root: &Path) -> BTreeMap<String, DocCommit> {
     let format = format!("--format={RECORD}%H{UNIT}%aI{UNIT}%an{UNIT}%s");
     let mut out = BTreeMap::new();
-    let Some(result) = git(root, &["log", "--no-merges", "--name-only", &format], GIT_TIMEOUT).filter(|o| o.ok)
-    else {
+    let Some(result) = git(
+        root,
+        &["log", "--no-merges", "--name-only", &format],
+        GIT_TIMEOUT,
+    )
+    .filter(|o| o.ok) else {
         return out;
     };
     for record in result.stdout.split(RECORD).skip(1) {
         let mut lines = record.lines();
         let Some(header) = lines.next() else { continue };
-        let Some(commit) = parse_commit(header) else { continue };
+        let Some(commit) = parse_commit(header) else {
+            continue;
+        };
         for path in lines.map(str::trim).filter(|p| !p.is_empty()) {
-            out.entry(path.to_string()).or_insert_with(|| commit.clone());
+            out.entry(path.to_string())
+                .or_insert_with(|| commit.clone());
         }
     }
     out
@@ -481,7 +515,8 @@ fn content_etag(bytes: &[u8]) -> String {
 pub fn history(root: &Path, path: &str) -> Vec<DocCommit> {
     let format = format!("--format=%H{UNIT}%aI{UNIT}%an{UNIT}%s");
     let limit = format!("-{}", kb::HISTORY_LIMIT);
-    let Some(out) = git(root, &["log", &limit, &format, "--", path], GIT_TIMEOUT).filter(|o| o.ok) else {
+    let Some(out) = git(root, &["log", &limit, &format, "--", path], GIT_TIMEOUT).filter(|o| o.ok)
+    else {
         return Vec::new();
     };
     out.stdout.lines().filter_map(parse_commit).collect()
@@ -510,17 +545,24 @@ pub enum WriteOutcome {
         unchanged: bool,
     },
     /// `etag` が現在の中身と違う（409）。`etag` はいまの値。
-    EtagMismatch { etag: Option<String> },
+    EtagMismatch {
+        etag: Option<String>,
+    },
     /// 消そうとしたページが無い（404）。
     Missing,
-    Failed { detail: String },
+    Failed {
+        detail: String,
+    },
 }
 
 /// ADR-0047 D1: **1 件 1 コミット**。作業ツリーに書いてからそのパスだけをコミットする。
 pub fn commit_page(root: &Path, edit: &PageEdit) -> WriteOutcome {
     if !exists(root) {
         return WriteOutcome::Failed {
-            detail: format!("{} は知識ベースではありません（celerisctl knowledge init）", root.display()),
+            detail: format!(
+                "{} は知識ベースではありません（celerisctl knowledge init）",
+                root.display()
+            ),
         };
     }
     let current = etag(root, &edit.path);
@@ -593,7 +635,18 @@ pub fn grep(root: &Path, needle: &str) -> Vec<String> {
     // `--untracked` は「人がまだコミットしていないページ」も見る（正本は作業ツリーなので）。
     let out = git(
         root,
-        &["grep", "-I", "-i", "-l", "-F", "--untracked", "-e", needle, "--", "*.md"],
+        &[
+            "grep",
+            "-I",
+            "-i",
+            "-l",
+            "-F",
+            "--untracked",
+            "-e",
+            needle,
+            "--",
+            "*.md",
+        ],
         GIT_TIMEOUT,
     );
     let text = match out {
@@ -627,7 +680,12 @@ fn plain_grep(root: &Path, needle: &str) -> String {
 }
 
 /// 子プロセスを 1 つ起こす（`crate::changes::git` と同じ上限の付け方）。
-fn run(dir: &Path, program: &str, args: &[&str], timeout: std::time::Duration) -> Option<CmdOutput> {
+fn run(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<CmdOutput> {
     crate::changes::run_with_timeout(dir, program, args, timeout)
 }
 
@@ -751,7 +809,12 @@ pub fn record(root: &Path, request: &RecordRequest) -> Result<RecordOutcome, Rec
     let page = kb::render_page(
         &FrontMatter {
             title: Some(title.to_string()),
-            tags: request.tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+            tags: request
+                .tags
+                .iter()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect(),
             scope: Some(scope.to_string()),
             sources,
             created: Some(today()),
@@ -762,7 +825,8 @@ pub fn record(root: &Path, request: &RecordRequest) -> Result<RecordOutcome, Rec
         body,
     );
     let dir = root.join(INBOX_DIR);
-    std::fs::create_dir_all(&dir).map_err(|e| RecordError::Failed(format!("{INBOX_DIR} を作れませんでした: {e}")))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| RecordError::Failed(format!("{INBOX_DIR} を作れませんでした: {e}")))?;
     std::fs::write(dir.join(format!("{id}.md")), page.as_bytes())
         .map_err(|e| RecordError::Failed(format!("{path} を書けませんでした: {e}")))?;
     let sha = commit_paths(
@@ -853,7 +917,9 @@ pub fn inbox_get(root: &Path, id: &str) -> Option<InboxItem> {
 
 /// 取り込み先の既定（`scope` のディレクトリ ＋ 題名の slug）。
 fn default_target(scope: Option<&str>, title: &str, id: &str) -> String {
-    let dir = scope.and_then(kb::scope_dir).unwrap_or_else(|| "experience".to_string());
+    let dir = scope
+        .and_then(kb::scope_dir)
+        .unwrap_or_else(|| "experience".to_string());
     let slug = kb::slugify(title).unwrap_or_else(|| id.to_ascii_lowercase());
     format!("{dir}/{slug}.md")
 }
@@ -862,14 +928,24 @@ fn default_target(scope: Option<&str>, title: &str, id: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboxOutcome {
     /// 取り込んだ（`path` は正本の中での置き場）。
-    Accepted { path: String, sha: String, etag: Option<String> },
+    Accepted {
+        path: String,
+        sha: String,
+        etag: Option<String>,
+    },
     /// 破棄した。
-    Rejected { sha: String },
+    Rejected {
+        sha: String,
+    },
     /// その id が無い（404）。
     Missing,
     /// 宛先が既にある（409）。
-    Exists { path: String },
-    Failed { detail: String },
+    Exists {
+        path: String,
+    },
+    Failed {
+        detail: String,
+    },
 }
 
 /// ADR-0047 D3 / D5: 候補を正本に取り込む（`_inbox` から消して、`path` にコミットする）。
@@ -884,7 +960,9 @@ pub fn inbox_accept(root: &Path, id: &str, path: Option<&str>, overwrite: bool) 
         Some(p) => match kb::page_path(p) {
             Ok(p) => p,
             Err(e) => {
-                return InboxOutcome::Failed { detail: e.to_string() };
+                return InboxOutcome::Failed {
+                    detail: e.to_string(),
+                };
             }
         },
         None => item.target.clone(),
@@ -993,19 +1071,32 @@ mod tests {
         let index = load_index(&root).expect("index");
         assert!(index.items.iter().any(|i| i.path == "user/profile.md"));
         assert!(!index.items.iter().any(|i| kb::is_inbox(&i.path)));
-        assert!(index.items.iter().any(|i| i.path == "environment/clusters/pegasus.md"));
+        assert!(
+            index
+                .items
+                .iter()
+                .any(|i| i.path == "environment/clusters/pegasus.md")
+        );
         // `index.json` は派生物なので git には入れない。
-        let tracked = git(&root, &["ls-files"], GIT_TIMEOUT).expect("ls-files").stdout;
+        let tracked = git(&root, &["ls-files"], GIT_TIMEOUT)
+            .expect("ls-files")
+            .stdout;
         assert!(!tracked.contains(INDEX_FILE), "{tracked}");
         let commits_before = history(&root, "README.md").len();
 
         // 人が書き換えたページは 2 回目の `init` で上書きされない。
-        std::fs::write(root.join("user/profile.md"), "---\ntitle: 私\n---\n\n# 私\n".as_bytes()).expect("write");
+        std::fs::write(
+            root.join("user/profile.md"),
+            "---\ntitle: 私\n---\n\n# 私\n".as_bytes(),
+        )
+        .expect("write");
         let again = init(&root).expect("again");
         assert!(!again.created);
         assert!(again.added.is_empty(), "{again:?}");
         assert!(
-            std::fs::read_to_string(root.join("user/profile.md")).expect("read").contains("# 私"),
+            std::fs::read_to_string(root.join("user/profile.md"))
+                .expect("read")
+                .contains("# 私"),
         );
         assert_eq!(history(&root, "README.md").len(), commits_before);
     }
@@ -1015,7 +1106,11 @@ mod tests {
     fn reindex_reads_front_matter_and_defaults_the_scope() {
         let (_dir, root) = kb_dir();
         std::fs::create_dir_all(root.join("projects/pluvio")).expect("mkdir");
-        std::fs::write(root.join("projects/pluvio/design.md"), "# Pluvio の設計\n".as_bytes()).expect("write");
+        std::fs::write(
+            root.join("projects/pluvio/design.md"),
+            "# Pluvio の設計\n".as_bytes(),
+        )
+        .expect("write");
         std::fs::write(
             root.join("environment/tools/git.md"),
             "---\ntitle: git\ntags: [tool, vcs]\nconfidence: high\n---\n\n本文\n".as_bytes(),
@@ -1044,18 +1139,25 @@ mod tests {
         .expect("write");
         std::fs::write(
             root.join("experience/2026-pjsub.md"),
-            "---\ntitle: 計測の記録\nscope: experience\n---\n\npjsub の待ち行列が長い。\n".as_bytes(),
+            "---\ntitle: 計測の記録\nscope: experience\n---\n\npjsub の待ち行列が長い。\n"
+                .as_bytes(),
         )
         .expect("write");
         reindex(&root).expect("reindex");
 
         let hits = search(&root, "cluster", None, 10);
-        assert_eq!(hits.first().map(|h| h.item.path.as_str()), Some("environment/clusters/pegasus.md"));
+        assert_eq!(
+            hits.first().map(|h| h.item.path.as_str()),
+            Some("environment/clusters/pegasus.md")
+        );
         // 本文にしか無い語も当たる（`git grep`）。
         let body = search(&root, "pjsub", None, 10);
         let paths: Vec<&str> = body.iter().map(|h| h.item.path.as_str()).collect();
         assert!(paths.contains(&"experience/2026-pjsub.md"), "{paths:?}");
-        assert!(paths.contains(&"environment/clusters/pegasus.md"), "{paths:?}");
+        assert!(
+            paths.contains(&"environment/clusters/pegasus.md"),
+            "{paths:?}"
+        );
         // scope で絞る。
         let only = search(&root, "pjsub", Some("experience"), 10);
         assert_eq!(only.len(), 1);
@@ -1162,7 +1264,10 @@ mod tests {
         assert_eq!(history(&root, &path).len(), 1);
         assert_eq!(history(&root, &path)[0].author, kb::HUMAN_AUTHOR_NAME);
         // 同じ id はもう無い。
-        assert_eq!(inbox_accept(&root, &one.id, None, false), InboxOutcome::Missing);
+        assert_eq!(
+            inbox_accept(&root, &one.id, None, false),
+            InboxOutcome::Missing
+        );
 
         // 宛先が既にあれば 409。
         let two = record(
@@ -1184,7 +1289,10 @@ mod tests {
             }
         );
         // reject は捨てる。
-        assert!(matches!(inbox_reject(&root, &two.id), InboxOutcome::Rejected { .. }));
+        assert!(matches!(
+            inbox_reject(&root, &two.id),
+            InboxOutcome::Rejected { .. }
+        ));
         assert!(inbox_list(&root).is_empty());
         assert_eq!(inbox_reject(&root, &two.id), InboxOutcome::Missing);
         // id の境界。
@@ -1196,7 +1304,10 @@ mod tests {
     #[test]
     fn commit_page_checks_the_etag_and_makes_one_commit_per_change() {
         let (_dir, root) = kb_dir();
-        let human = (kb::HUMAN_AUTHOR_NAME.to_string(), kb::HUMAN_AUTHOR_EMAIL.to_string());
+        let human = (
+            kb::HUMAN_AUTHOR_NAME.to_string(),
+            kb::HUMAN_AUTHOR_EMAIL.to_string(),
+        );
         let created = commit_page(
             &root,
             &PageEdit {
@@ -1208,13 +1319,18 @@ mod tests {
             },
         );
         let tag = match created {
-            WriteOutcome::Written { etag, unchanged, .. } => {
+            WriteOutcome::Written {
+                etag, unchanged, ..
+            } => {
                 assert!(!unchanged);
                 etag.expect("etag")
             }
             other => panic!("{other:?}"),
         };
-        assert_eq!(read_page(&root, "user/notes.md").as_deref(), Some("# メモ\n"));
+        assert_eq!(
+            read_page(&root, "user/notes.md").as_deref(),
+            Some("# メモ\n")
+        );
         // 既にあるのに etag 無しは 409。
         assert!(matches!(
             commit_page(
@@ -1240,7 +1356,16 @@ mod tests {
                 author: human.clone(),
             },
         );
-        assert!(matches!(same, WriteOutcome::Written { unchanged: true, .. }), "{same:?}");
+        assert!(
+            matches!(
+                same,
+                WriteOutcome::Written {
+                    unchanged: true,
+                    ..
+                }
+            ),
+            "{same:?}"
+        );
         assert_eq!(history(&root, "user/notes.md").len(), 1);
         // 正しい etag なら通る。
         let updated = commit_page(
@@ -1269,7 +1394,10 @@ mod tests {
                 author: human.clone(),
             },
         );
-        assert!(matches!(deleted, WriteOutcome::Written { etag: None, .. }), "{deleted:?}");
+        assert!(
+            matches!(deleted, WriteOutcome::Written { etag: None, .. }),
+            "{deleted:?}"
+        );
         assert!(read_page(&root, "user/notes.md").is_none());
         assert_eq!(
             commit_page(
@@ -1297,6 +1425,10 @@ mod tests {
         // 既定は `~/knowledge`（`~` は展開される）。
         let fallback = resolve_root(None, None);
         assert!(fallback.ends_with("knowledge"), "{}", fallback.display());
-        assert!(!fallback.to_string_lossy().starts_with('~'), "{}", fallback.display());
+        assert!(
+            !fallback.to_string_lossy().starts_with('~'),
+            "{}",
+            fallback.display()
+        );
     }
 }

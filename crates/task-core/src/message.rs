@@ -16,7 +16,9 @@ use crate::model::{Task, TaskId};
 use crate::org::ProjectId;
 
 /// 対話の 1 行の識別子（ULID）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct MessageId(#[schemars(with = "String")] pub Ulid);
 
 impl MessageId {
@@ -127,7 +129,11 @@ pub fn is_milestone_review(task: &Task) -> bool {
 
 /// Phase 41（ADR-0038 D1）: レビュー対象の途中目標（レビューの対話タスクでなければ `None`）。
 pub fn milestone_review_of(task: &Task) -> Option<crate::org::MilestoneId> {
-    if is_milestone_review(task) { task.milestone_id } else { None }
+    if is_milestone_review(task) {
+        task.milestone_id
+    } else {
+        None
+    }
 }
 
 /// run が `Error` に終わったときの返事の文面（ADR-0033 D4 / Phase 24）。
@@ -143,6 +149,8 @@ mod tests {
         use crate::model::{Budget, Status, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec};
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -154,9 +162,19 @@ mod tests {
             depends_on: vec![],
             status: Status::Draft,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: std::path::PathBuf::from("ws"), mode: None },
-            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: std::path::PathBuf::from("ws"),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -179,10 +197,16 @@ mod tests {
         let title = conversation_title(text);
         assert!(title.starts_with("対話: "));
         assert!(!title.contains('\n'));
-        assert_eq!(title.chars().count(), "対話: ".chars().count() + CONVERSATION_TITLE_CHARS);
+        assert_eq!(
+            title.chars().count(),
+            "対話: ".chars().count() + CONVERSATION_TITLE_CHARS
+        );
         // 40 字に満たない本文はそのまま。
         assert_eq!(conversation_title("短い用件"), "対話: 短い用件");
-        assert_eq!(conversation_title("  空白  を   畳む "), "対話: 空白 を 畳む");
+        assert_eq!(
+            conversation_title("  空白  を   畳む "),
+            "対話: 空白 を 畳む"
+        );
     }
 
     /// 対話由来の印は `Task.conversation`（DB の列は増やさない）。導入前の JSON もそのまま読める。
@@ -201,7 +225,12 @@ mod tests {
         // 導入前のタスク（`conversation` が無い JSON）は `None` として読める。
         let old = serde_json::to_string(&task_with(None)).expect("serialize");
         assert!(!old.contains("conversation"));
-        assert_eq!(serde_json::from_str::<Task>(&old).expect("deserialize").conversation, None);
+        assert_eq!(
+            serde_json::from_str::<Task>(&old)
+                .expect("deserialize")
+                .conversation,
+            None
+        );
     }
 
     #[test]
@@ -209,6 +238,9 @@ mod tests {
         assert_eq!(MessageRole::User.as_str(), "user");
         assert_eq!(MessageRole::parse("node"), Some(MessageRole::Node));
         assert_eq!(MessageRole::parse("bogus"), None);
-        assert_eq!(failure_reply("タイムアウト"), "返事できませんでした: タイムアウト");
+        assert_eq!(
+            failure_reply("タイムアウト"),
+            "返事できませんでした: タイムアウト"
+        );
     }
 }

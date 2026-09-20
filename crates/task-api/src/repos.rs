@@ -14,7 +14,9 @@ use axum::routing::{get, patch};
 use task_core::{ProjectRepo, RepoId, RepoKind, RepoRun, TaskStore};
 use time::OffsetDateTime;
 
-use crate::handlers::{ApiResult, Params, json_response, no_query, parse_project_id, read_json, validated_workspace};
+use crate::handlers::{
+    ApiResult, Params, json_response, no_query, parse_project_id, read_json, validated_workspace,
+};
 use crate::middleware::require_admin;
 use crate::problem::{ApiProblem, store_problem};
 use crate::state::ApiState;
@@ -22,7 +24,10 @@ use crate::types::{RepoCreateBody, RepoList, RepoPatchBody, ValidationError};
 
 pub(crate) fn routes() -> axum::Router<ApiState> {
     axum::Router::new()
-        .route("/api/v1/projects/{id}/repos", get(list_repos).post(create_repo))
+        .route(
+            "/api/v1/projects/{id}/repos",
+            get(list_repos).post(create_repo),
+        )
         .route("/api/v1/repos/{id}", patch(patch_repo).delete(delete_repo))
 }
 
@@ -32,7 +37,11 @@ fn parse_repo_id(raw: &str) -> Result<RepoId, ApiProblem> {
 }
 
 fn repo_not_found(id: RepoId) -> ApiProblem {
-    ApiProblem::new(StatusCode::NOT_FOUND, "repo_not_found", format!("repo not found: {id}"))
+    ApiProblem::new(
+        StatusCode::NOT_FOUND,
+        "repo_not_found",
+        format!("repo not found: {id}"),
+    )
 }
 
 async fn list_repos(
@@ -44,7 +53,11 @@ async fn list_repos(
     let project_id = parse_project_id(&id)?;
     let items = state
         .blocking(move |store| {
-            if store.project_get(project_id).map_err(store_problem)?.is_none() {
+            if store
+                .project_get(project_id)
+                .map_err(store_problem)?
+                .is_none()
+            {
                 return Err(ApiProblem::project_not_found(&project_id.to_string()));
             }
             store.repo_list(project_id).map_err(store_problem)
@@ -73,14 +86,18 @@ async fn create_repo(
     if !task_core::valid_repo_name(&name) {
         return Err(ApiProblem::validation(vec![ValidationError {
             field: Some("name".into()),
-            message: format!("repo name must be a lowercase slug ([a-z0-9._-], 1..64 chars): {name:?}"),
+            message: format!(
+                "repo name must be a lowercase slug ([a-z0-9._-], 1..64 chars): {name:?}"
+            ),
         }]));
     }
     let repo = ProjectRepo {
         id: RepoId::new(),
         project_id,
         name,
-        kind: create.kind.unwrap_or_else(|| task_core::store::detect_repo_kind(&location)),
+        kind: create
+            .kind
+            .unwrap_or_else(|| task_core::store::detect_repo_kind(&location)),
         location,
         default_branch: create.default_branch.filter(|b| !b.trim().is_empty()),
         sync: create.sync,
@@ -137,7 +154,9 @@ async fn patch_repo(
     {
         return Err(ApiProblem::validation(vec![ValidationError {
             field: Some("name".into()),
-            message: format!("repo name must be a lowercase slug ([a-z0-9._-], 1..64 chars): {name:?}"),
+            message: format!(
+                "repo name must be a lowercase slug ([a-z0-9._-], 1..64 chars): {name:?}"
+            ),
         }]));
     }
     let updated = state

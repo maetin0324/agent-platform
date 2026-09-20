@@ -46,8 +46,8 @@ use crate::progress;
 use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
-    LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, read_tail, send_signal_to_group,
-    write_result_json,
+    LineOutcome, MAX_LINE_BYTES, kill_now, read_line_limited, read_tail, reap_after_terminal,
+    send_signal_to_group, write_result_json,
 };
 
 /// `session/request_permission` への即答（ADR-0026 D4）。
@@ -191,7 +191,10 @@ fn jsonrpc_error_response(id: serde_json::Value, code: i64, message: String) -> 
 
 /// エラーオブジェクト（`{"code":.., "message":..}`）を分類・ログ用の 1 行にする。
 fn jsonrpc_error_text(error: &serde_json::Value) -> String {
-    let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+    let message = error
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown error");
     match error.get("code").and_then(|c| c.as_i64()) {
         Some(code) => format!("{message} (code {code})"),
         None => message.to_string(),
@@ -282,21 +285,37 @@ async fn handle_incoming_request(
                 .cloned()
                 .unwrap_or_default();
             let outcome = match choose_permission_option(&options, config.permission, run_id) {
-                Some(option_id) => serde_json::json!({"outcome": "selected", "optionId": option_id}),
+                Some(option_id) => {
+                    serde_json::json!({"outcome": "selected", "optionId": option_id})
+                }
                 None => serde_json::json!({"outcome": "cancelled"}),
             };
-            write_line(stdin, &jsonrpc_response(id, serde_json::json!({"outcome": outcome}))).await
+            write_line(
+                stdin,
+                &jsonrpc_response(id, serde_json::json!({"outcome": outcome})),
+            )
+            .await
         }
         other => {
-            warn!("run {run_id}: acp agent sent an unsupported request {other:?}; responding with method not found");
-            write_line(stdin, &jsonrpc_error_response(id, -32601, format!("unsupported method: {other}"))).await
+            warn!(
+                "run {run_id}: acp agent sent an unsupported request {other:?}; responding with method not found"
+            );
+            write_line(
+                stdin,
+                &jsonrpc_error_response(id, -32601, format!("unsupported method: {other}")),
+            )
+            .await
         }
     }
 }
 
 /// `permission` に沿って選択肢を選ぶ。Allow は "allow always" → "allow once"、Deny は "reject always" →
 /// "reject once" の優先順（task 指示: 要求が一致する選択肢を提供しなければ最初の選択肢を選び warn する）。
-fn choose_permission_option(options: &[serde_json::Value], permission: AcpPermission, run_id: &str) -> Option<String> {
+fn choose_permission_option(
+    options: &[serde_json::Value],
+    permission: AcpPermission,
+    run_id: &str,
+) -> Option<String> {
     let preferred_kinds: &[&str] = match permission {
         AcpPermission::Allow => &["allow_always", "allow_once"],
         AcpPermission::Deny => &["reject_always", "reject_once"],
@@ -310,8 +329,13 @@ fn choose_permission_option(options: &[serde_json::Value], permission: AcpPermis
             return Some(option_id.to_string());
         }
     }
-    if let Some(option_id) = options.first().and_then(|o| o.get("optionId").and_then(|v| v.as_str())) {
-        warn!("run {run_id}: acp permission request offered no option matching {permission:?}; choosing the first offered option");
+    if let Some(option_id) = options
+        .first()
+        .and_then(|o| o.get("optionId").and_then(|v| v.as_str()))
+    {
+        warn!(
+            "run {run_id}: acp permission request offered no option matching {permission:?}; choosing the first offered option"
+        );
         return Some(option_id.to_string());
     }
     warn!("run {run_id}: acp permission request offered no options at all");
@@ -386,7 +410,11 @@ fn handle_notification(value: &serde_json::Value, sink: &dyn EventSink, chunks: 
     let Some(update) = value.pointer("/params/update") else {
         return;
     };
-    match update.get("sessionUpdate").and_then(|k| k.as_str()).unwrap_or("") {
+    match update
+        .get("sessionUpdate")
+        .and_then(|k| k.as_str())
+        .unwrap_or("")
+    {
         // ADR-0048 D2（Phase 60a）: 発話は `text`、思考は `thinking`（要約だけ）。
         kind @ ("agent_message_chunk" | "agent_thought_chunk") => {
             if let Some(text) = update.pointer("/content/text").and_then(|t| t.as_str()) {
@@ -401,8 +429,14 @@ fn handle_notification(value: &serde_json::Value, sink: &dyn EventSink, chunks: 
         "tool_call" | "tool_call_update" => {
             // 本文の途中でツールが動いたら、溜めていた本文を先に出して順序を保つ。
             chunks.flush(sink);
-            let name = update.get("title").and_then(|t| t.as_str()).unwrap_or("tool");
-            let status = update.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
+            let name = update
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("tool");
+            let status = update
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("pending");
             // ADR-0048 D2: 終わった道具（`completed` / `failed`）は `tool_result`、それ以外は `tool_use`。
             let fields = match status {
                 "completed" | "failed" => {
@@ -467,7 +501,11 @@ async fn wait_for_initialize_response(
         if remaining.is_zero() {
             return Ok(None);
         }
-        let pumped = match tokio::time::timeout(remaining, pump_one_line(reader, stdin, stdout_file, sink, config, run_id, chunks)).await
+        let pumped = match tokio::time::timeout(
+            remaining,
+            pump_one_line(reader, stdin, stdout_file, sink, config, run_id, chunks),
+        )
+        .await
         {
             Err(_elapsed) => return Ok(None),
             Ok(Err(e)) => return Err(AdapterError::Io(e)),
@@ -523,7 +561,12 @@ async fn wait_for_response(
             }));
         }
         let wait = (limits.wall_clock - wall_elapsed).min(limits.idle_timeout - idle_elapsed);
-        let pumped = match tokio::time::timeout(wait, pump_one_line(reader, stdin, stdout_file, sink, config, run_id, chunks)).await {
+        let pumped = match tokio::time::timeout(
+            wait,
+            pump_one_line(reader, stdin, stdout_file, sink, config, run_id, chunks),
+        )
+        .await
+        {
             Err(_elapsed) => continue, // タイムアウト。ループ先頭で上限超過を検知する。
             Ok(Err(e)) => return Err(AdapterError::Io(e)),
             Ok(Ok(p)) => p,
@@ -567,7 +610,10 @@ async fn kill_and_classify(
         None => tail,
     };
     match classify_provider_failure(&combined) {
-        Some(pf) => AdapterError::from_provider_failure(pf, jsonrpc_error_text.as_deref().unwrap_or(&fallback_message)),
+        Some(pf) => AdapterError::from_provider_failure(
+            pf,
+            jsonrpc_error_text.as_deref().unwrap_or(&fallback_message),
+        ),
         None => AdapterError::Spawn(std::io::Error::other(fallback_message)),
     }
 }
@@ -575,9 +621,16 @@ async fn kill_and_classify(
 /// Phase B（セッションが存在する状態）で run を終えるときの生データ。
 enum RawOutcome {
     TimedOut(Terminal),
-    Eof { context: &'static str },
-    RpcError { context: &'static str, error_text: String },
-    Success { stop_reason: String },
+    Eof {
+        context: &'static str,
+    },
+    RpcError {
+        context: &'static str,
+        error_text: String,
+    },
+    Success {
+        stop_reason: String,
+    },
 }
 
 /// プロセスを止め（タイムアウトなら `session/cancel` → `kill_grace` 後 SIGKILL、そうでなければ穏やかな
@@ -603,7 +656,14 @@ async fn finish_run(
     let force_kill = matches!(outcome, RawOutcome::TimedOut(_));
     let exit_status = if force_kill {
         // ADR-0026 D4: まず `session/cancel` を送り、`kill_grace` 待ってからプロセスグループへ SIGKILL。
-        let _ = write_line(&mut stdin, &jsonrpc_notification("session/cancel", serde_json::json!({"sessionId": session_id}))).await;
+        let _ = write_line(
+            &mut stdin,
+            &jsonrpc_notification(
+                "session/cancel",
+                serde_json::json!({"sessionId": session_id}),
+            ),
+        )
+        .await;
         match tokio::time::timeout(limits.kill_grace, child.wait()).await {
             Ok(status) => status?,
             Err(_elapsed) => {
@@ -631,13 +691,18 @@ async fn finish_run(
             let pf = classify_provider_failure(&tail);
             (
                 Terminal::Error {
-                    message: format!("acp agent exited before responding to {context} (exit={exit_repr})"),
+                    message: format!(
+                        "acp agent exited before responding to {context} (exit={exit_repr})"
+                    ),
                     retryable: true,
                 },
                 pf,
             )
         }
-        RawOutcome::RpcError { context, error_text } => {
+        RawOutcome::RpcError {
+            context,
+            error_text,
+        } => {
             let tail = read_tail(stderr_log_path, 4096).await;
             let combined = format!("{error_text}\n{tail}");
             let pf = classify_provider_failure(&combined);
@@ -649,9 +714,10 @@ async fn finish_run(
                 pf,
             )
         }
-        RawOutcome::Success { stop_reason } => {
-            (terminal_from_result_file(artifacts_dir, artifacts_rel, &stop_reason).await, None)
-        }
+        RawOutcome::Success { stop_reason } => (
+            terminal_from_result_file(artifacts_dir, artifacts_rel, &stop_reason).await,
+            None,
+        ),
     };
 
     forward_delegate_file(artifacts_dir, sink).await;
@@ -670,13 +736,19 @@ async fn finish_run(
 /// 結果ファイル（`<artifacts_dir>/result.json`）から終端を合成する（ADR-0026 D3 手順 7、ADR-0036 D2）。
 /// ACP 自体には成功/失敗の強い意味論が無いので（D1: 運搬・観測・生存管理だけ）、`stopReason` に関わらず
 /// 常にこのファイルを見る。ファイルが無ければ `stopReason` を理由として `Error{retryable:true}` にする。
-async fn terminal_from_result_file(artifacts_dir: &Path, artifacts_rel: &str, stop_reason: &str) -> Terminal {
+async fn terminal_from_result_file(
+    artifacts_dir: &Path,
+    artifacts_rel: &str,
+    stop_reason: &str,
+) -> Terminal {
     let result_path = artifacts_dir.join("result.json");
     let text = match tokio::fs::read_to_string(&result_path).await {
         Ok(t) => t,
         Err(_) => {
             return Terminal::Error {
-                message: format!("acp agent stopped ({stop_reason}) without {artifacts_rel}/result.json"),
+                message: format!(
+                    "acp agent stopped ({stop_reason}) without {artifacts_rel}/result.json"
+                ),
                 retryable: true,
             };
         }
@@ -696,7 +768,9 @@ async fn terminal_from_result_file(artifacts_dir: &Path, artifacts_rel: &str, st
                 }
             } else {
                 Terminal::Error {
-                    message: format!("{artifacts_rel}/result.json has neither 'summary' nor 'question'"),
+                    message: format!(
+                        "{artifacts_rel}/result.json has neither 'summary' nor 'question'"
+                    ),
                     retryable: true,
                 }
             }
@@ -787,82 +861,78 @@ async fn run_acp(
         "protocolVersion": 1,
         "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
     });
-    if write_line(&mut stdin, &jsonrpc_request(1, "initialize", init_params)).await.is_err() {
-        return Err(
-            kill_and_classify(
+    if write_line(&mut stdin, &jsonrpc_request(1, "initialize", init_params))
+        .await
+        .is_err()
+    {
+        return Err(kill_and_classify(
+            &mut child,
+            stderr_task,
+            &stderr_log_path,
+            limits.kill_grace,
+            None,
+            "failed to write the initialize request to the acp agent's stdin".into(),
+        )
+        .await);
+    }
+
+    let init_response = match wait_for_initialize_response(
+        &mut reader,
+        &mut stdin,
+        &mut stdout_file,
+        sink,
+        config,
+        run_id,
+        config.startup_timeout,
+        &mut chunks,
+    )
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return Err(kill_and_classify(
                 &mut child,
                 stderr_task,
                 &stderr_log_path,
                 limits.kill_grace,
                 None,
-                "failed to write the initialize request to the acp agent's stdin".into(),
+                "acp agent did not respond to initialize within the startup timeout".into(),
             )
-            .await,
-        );
-    }
-
-    let init_response =
-        match wait_for_initialize_response(
-            &mut reader,
-            &mut stdin,
-            &mut stdout_file,
-            sink,
-            config,
-            run_id,
-            config.startup_timeout,
-            &mut chunks,
-        )
-            .await
-        {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                return Err(
-                    kill_and_classify(
-                        &mut child,
-                        stderr_task,
-                        &stderr_log_path,
-                        limits.kill_grace,
-                        None,
-                        "acp agent did not respond to initialize within the startup timeout".into(),
-                    )
-                    .await,
-                );
-            }
-            Err(e) => {
-                let _ = kill_now(&mut child, limits.kill_grace).await;
-                let _ = stderr_task.await;
-                return Err(e);
-            }
-        };
+            .await);
+        }
+        Err(e) => {
+            let _ = kill_now(&mut child, limits.kill_grace).await;
+            let _ = stderr_task.await;
+            return Err(e);
+        }
+    };
 
     if let Some(error) = init_response.get("error") {
         let msg = jsonrpc_error_text(error);
-        return Err(
-            kill_and_classify(
-                &mut child,
-                stderr_task,
-                &stderr_log_path,
-                limits.kill_grace,
-                Some(msg.clone()),
-                format!("acp agent rejected initialize: {msg}"),
-            )
-            .await,
-        );
+        return Err(kill_and_classify(
+            &mut child,
+            stderr_task,
+            &stderr_log_path,
+            limits.kill_grace,
+            Some(msg.clone()),
+            format!("acp agent rejected initialize: {msg}"),
+        )
+        .await);
     }
-    let negotiated = init_response.pointer("/result/protocolVersion").and_then(|v| v.as_u64());
+    let negotiated = init_response
+        .pointer("/result/protocolVersion")
+        .and_then(|v| v.as_u64());
     if negotiated != Some(1) {
         // ADR-0026 D3: 版の交渉はアダプタの中に閉じる。V1 でなければ spawn_failed として終える。
-        return Err(
-            kill_and_classify(
-                &mut child,
-                stderr_task,
-                &stderr_log_path,
-                limits.kill_grace,
-                None,
-                format!("acp agent negotiated protocol version {negotiated:?}, expected 1"),
-            )
-            .await,
-        );
+        return Err(kill_and_classify(
+            &mut child,
+            stderr_task,
+            &stderr_log_path,
+            limits.kill_grace,
+            None,
+            format!("acp agent negotiated protocol version {negotiated:?}, expected 1"),
+        )
+        .await);
     }
 
     // ここから先は通常の壁時計・アイドルタイムアウトを使う（ADR-0026 D4。`startup_timeout` は
@@ -875,18 +945,22 @@ async fn run_acp(
         "cwd": req.cwd().to_string_lossy(),
         "mcpServers": [],
     });
-    if write_line(&mut stdin, &jsonrpc_request(2, "session/new", new_session_params)).await.is_err() {
-        return Err(
-            kill_and_classify(
-                &mut child,
-                stderr_task,
-                &stderr_log_path,
-                limits.kill_grace,
-                None,
-                "failed to write the session/new request to the acp agent's stdin".into(),
-            )
-            .await,
-        );
+    if write_line(
+        &mut stdin,
+        &jsonrpc_request(2, "session/new", new_session_params),
+    )
+    .await
+    .is_err()
+    {
+        return Err(kill_and_classify(
+            &mut child,
+            stderr_task,
+            &stderr_log_path,
+            limits.kill_grace,
+            None,
+            "failed to write the session/new request to the acp agent's stdin".into(),
+        )
+        .await);
     }
     let new_session_response = match wait_for_response(
         &mut reader,
@@ -905,26 +979,30 @@ async fn run_acp(
     {
         Ok(WaitOutcome::Response(v)) => v,
         Ok(WaitOutcome::Eof) => {
-            return Err(
-                kill_and_classify(
-                    &mut child,
-                    stderr_task,
-                    &stderr_log_path,
-                    limits.kill_grace,
-                    None,
-                    "acp agent exited before responding to session/new".into(),
-                )
-                .await,
-            );
+            return Err(kill_and_classify(
+                &mut child,
+                stderr_task,
+                &stderr_log_path,
+                limits.kill_grace,
+                None,
+                "acp agent exited before responding to session/new".into(),
+            )
+            .await);
         }
         Ok(WaitOutcome::TimedOut(terminal)) => {
             let message = match &terminal {
                 Terminal::Error { message, .. } => message.clone(),
                 _ => "timeout waiting for session/new".to_string(),
             };
-            return Err(
-                kill_and_classify(&mut child, stderr_task, &stderr_log_path, limits.kill_grace, None, message).await,
-            );
+            return Err(kill_and_classify(
+                &mut child,
+                stderr_task,
+                &stderr_log_path,
+                limits.kill_grace,
+                None,
+                message,
+            )
+            .await);
         }
         Err(e) => {
             let _ = kill_now(&mut child, limits.kill_grace).await;
@@ -934,34 +1012,30 @@ async fn run_acp(
     };
     if let Some(error) = new_session_response.get("error") {
         let msg = jsonrpc_error_text(error);
-        return Err(
-            kill_and_classify(
-                &mut child,
-                stderr_task,
-                &stderr_log_path,
-                limits.kill_grace,
-                Some(msg.clone()),
-                format!("acp agent rejected session/new: {msg}"),
-            )
-            .await,
-        );
+        return Err(kill_and_classify(
+            &mut child,
+            stderr_task,
+            &stderr_log_path,
+            limits.kill_grace,
+            Some(msg.clone()),
+            format!("acp agent rejected session/new: {msg}"),
+        )
+        .await);
     }
     let Some(session_id) = new_session_response
         .pointer("/result/sessionId")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
     else {
-        return Err(
-            kill_and_classify(
-                &mut child,
-                stderr_task,
-                &stderr_log_path,
-                limits.kill_grace,
-                None,
-                "acp agent session/new response had no sessionId".into(),
-            )
-            .await,
-        );
+        return Err(kill_and_classify(
+            &mut child,
+            stderr_task,
+            &stderr_log_path,
+            limits.kill_grace,
+            None,
+            "acp agent session/new response had no sessionId".into(),
+        )
+        .await);
     };
 
     // --- Phase B: セッションが存在する。以降の失敗は artifacts/result.json 経由の終端として扱う。 ---
@@ -972,7 +1046,11 @@ async fn run_acp(
         let has_option = new_session_response
             .pointer("/result/configOptions")
             .and_then(|v| v.as_array())
-            .map(|opts| opts.iter().any(|o| o.get("id").and_then(|i| i.as_str()) == Some(config.model_option_id.as_str())))
+            .map(|opts| {
+                opts.iter().any(|o| {
+                    o.get("id").and_then(|i| i.as_str()) == Some(config.model_option_id.as_str())
+                })
+            })
             .unwrap_or(false);
         if has_option {
             let id = next_id;
@@ -984,7 +1062,13 @@ async fn run_acp(
                 "configId": config.model_option_id,
                 "value": model,
             });
-            if write_line(&mut stdin, &jsonrpc_request(id, "session/set_config_option", params)).await.is_ok() {
+            if write_line(
+                &mut stdin,
+                &jsonrpc_request(id, "session/set_config_option", params),
+            )
+            .await
+            .is_ok()
+            {
                 match wait_for_response(
                     &mut reader,
                     &mut stdin,
@@ -1021,7 +1105,9 @@ async fn run_acp(
                             &artifacts_rel,
                             &stderr_log_path,
                             sink,
-                            RawOutcome::Eof { context: "session/set_config_option" },
+                            RawOutcome::Eof {
+                                context: "session/set_config_option",
+                            },
                             run_id,
                         )
                         .await;
@@ -1051,7 +1137,9 @@ async fn run_acp(
                     }
                 }
             } else {
-                warn!("run {run_id}: failed to write session/set_config_option to the acp agent's stdin");
+                warn!(
+                    "run {run_id}: failed to write session/set_config_option to the acp agent's stdin"
+                );
             }
         } else {
             warn!(
@@ -1067,7 +1155,12 @@ async fn run_acp(
         "sessionId": session_id,
         "prompt": [{"type": "text", "text": prompt}],
     });
-    if let Err(e) = write_line(&mut stdin, &jsonrpc_request(prompt_id, "session/prompt", prompt_params)).await {
+    if let Err(e) = write_line(
+        &mut stdin,
+        &jsonrpc_request(prompt_id, "session/prompt", prompt_params),
+    )
+    .await
+    {
         let _ = kill_now(&mut child, limits.kill_grace).await;
         let _ = stderr_task.await;
         return Err(AdapterError::Io(e));
@@ -1101,7 +1194,9 @@ async fn run_acp(
 
     let outcome = match prompt_wait {
         WaitOutcome::TimedOut(terminal) => RawOutcome::TimedOut(terminal),
-        WaitOutcome::Eof => RawOutcome::Eof { context: "session/prompt" },
+        WaitOutcome::Eof => RawOutcome::Eof {
+            context: "session/prompt",
+        },
         WaitOutcome::Response(value) => match value.get("error") {
             Some(error) => RawOutcome::RpcError {
                 context: "session/prompt",
@@ -1157,7 +1252,10 @@ mod tests {
 
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
-            self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+            self.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(msg.to_string());
         }
         fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
             self.progress(msg);
@@ -1168,15 +1266,24 @@ mod tests {
         }
         fn artifact(&self, _artifact: &ArtifactRef) {}
         fn delegate(&self, tasks: &[DelegateTask]) {
-            self.delegated.lock().unwrap_or_else(|e| e.into_inner()).push(tasks.to_vec());
+            self.delegated
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(tasks.to_vec());
         }
         fn rate_limit(&self, obs: RateLimitObservation) {
-            self.rate_limits.lock().unwrap_or_else(|e| e.into_inner()).push(obs);
+            self.rate_limits
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(obs);
         }
     }
 
     fn progress_of(sink: &RecordingSink) -> Vec<String> {
-        sink.progress.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        sink.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// ADR-0048 D2（Phase 60a）: `session/update` の標本（`tests/fixtures/acp-session-update.jsonl`）を
@@ -1184,16 +1291,24 @@ mod tests {
     /// `agent_message_chunk` → `text`、`agent_thought_chunk` → `thinking`。`plan` は何も出さない。
     #[test]
     fn session_updates_map_to_structured_progress() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/acp-session-update.jsonl");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/acp-session-update.jsonl"
+        );
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         let sink = RecordingSink::default();
         let mut chunks = ChunkBuffer::default();
         for line in text.lines() {
-            let value: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+            let value: serde_json::Value =
+                serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
             handle_notification(&value, &sink, &mut chunks);
         }
         chunks.flush(&sink);
-        let items = sink.structured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let items = sink
+            .structured
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let kinds: Vec<Option<ProgressKind>> = items.iter().map(|(_, f)| f.kind).collect();
         assert_eq!(
             kinds,
@@ -1206,13 +1321,22 @@ mod tests {
             ],
             "{items:#?}"
         );
-        assert_eq!(items[0].1.summary.as_deref(), Some("どのファイルから見るか考える"));
+        assert_eq!(
+            items[0].1.summary.as_deref(),
+            Some("どのファイルから見るか考える")
+        );
         // 細切れの本文は 1 件にまとまる。
         assert_eq!(items[1].1.summary.as_deref(), Some("テストを回します。"));
         assert_eq!(items[2].1.tool.as_deref(), Some("Bash"));
-        assert_eq!(items[2].1.summary.as_deref(), Some("cargo test --workspace"));
+        assert_eq!(
+            items[2].1.summary.as_deref(),
+            Some("cargo test --workspace")
+        );
         assert!(items[2].0.starts_with("tool: Bash"), "{}", items[2].0);
-        assert_eq!(items[3].1.summary.as_deref(), Some("test result: ok. 812 passed"));
+        assert_eq!(
+            items[3].1.summary.as_deref(),
+            Some("test result: ok. 812 passed")
+        );
         assert!(!items[3].1.error);
         // `failed` は失敗の印（本文は `rawOutput`）。
         assert!(items[4].1.error, "{:?}", items[4]);
@@ -1277,9 +1401,16 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         let adapter = AcpAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-1", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
-            Terminal::Done { summary, evidence, usage } => {
+            Terminal::Done {
+                summary,
+                evidence,
+                usage,
+            } => {
                 assert_eq!(summary, "added usage example");
                 assert!(evidence.is_empty());
                 assert_eq!(usage, None);
@@ -1291,9 +1422,12 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         assert!(progress.iter().any(|m| m.starts_with("tool: Bash")));
         assert!(dir.path().join("runs/run-1/stdout.jsonl").is_file());
 
-        let result_json = std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
+        let result_json =
+            std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
         match serde_json::from_str::<crate::protocol::WorkerMessage>(result_json.trim()).unwrap() {
-            crate::protocol::WorkerMessage::Done { summary, .. } => assert_eq!(summary, "added usage example"),
+            crate::protocol::WorkerMessage::Done { summary, .. } => {
+                assert_eq!(summary, "added usage example")
+            }
             other => panic!("expected done in result.json, got {other:?}"),
         }
     }
@@ -1314,18 +1448,29 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
             ),
         );
         std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
-        std::fs::write(dir.path().join("artifacts/result.json"), r#"{"summary":"sibling"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("artifacts/result.json"),
+            r#"{"summary":"sibling"}"#,
+        )
+        .unwrap();
         let adapter = AcpAdapter::new(config);
         let mut req = sample_req(dir.path().to_path_buf());
         req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-shared", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Done { summary, .. } => assert_eq!(summary, "mine"),
             other => panic!("expected done, got {other:?}"),
         }
-        let prompt = std::fs::read_to_string(dir.path().join("runs/run-shared/prompt.txt")).unwrap();
-        assert!(prompt.contains(".taskd/artifacts/T1/result.json"), "{prompt}");
+        let prompt =
+            std::fs::read_to_string(dir.path().join("runs/run-shared/prompt.txt")).unwrap();
+        assert!(
+            prompt.contains(".taskd/artifacts/T1/result.json"),
+            "{prompt}"
+        );
     }
 
     #[tokio::test]
@@ -1344,7 +1489,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         let adapter = AcpAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-2", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-2", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Question { text } => assert_eq!(text, "which crate version?"),
             other => panic!("expected question, got {other:?}"),
@@ -1366,7 +1514,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"refusal"}}}}'
         let adapter = AcpAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-3", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-3", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1443,9 +1594,13 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         let adapter = AcpAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-6", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-6", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
-        let response = std::fs::read_to_string(dir.path().join("permission_response.json")).unwrap();
+        let response =
+            std::fs::read_to_string(dir.path().join("permission_response.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["result"]["outcome"]["optionId"], "allow-always");
     }
@@ -1473,9 +1628,13 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         let adapter = AcpAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-7", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-7", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
-        let response = std::fs::read_to_string(dir.path().join("permission_response.json")).unwrap();
+        let response =
+            std::fs::read_to_string(dir.path().join("permission_response.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["result"]["outcome"]["optionId"], "reject-always");
     }
@@ -1517,9 +1676,16 @@ while true; do sleep 0.1; done
         }
         // stub は 3 番目の read の直後に自分の pid を書く。読めなかった (=タイムアウト前に到達できなかった)
         // 場合はテストの前提が崩れているのでそこで失敗させる。
-        let pid_text = std::fs::read_to_string(&pid_file).expect("stub should have recorded its pid before looping");
-        let pid: i32 = pid_text.trim().parse().expect("pid.txt should contain a pid");
-        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists(), "process {pid} should have been killed");
+        let pid_text = std::fs::read_to_string(&pid_file)
+            .expect("stub should have recorded its pid before looping");
+        let pid: i32 = pid_text
+            .trim()
+            .parse()
+            .expect("pid.txt should contain a pid");
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "process {pid} should have been killed"
+        );
     }
 
     #[tokio::test]
@@ -1573,7 +1739,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         let adapter = AcpAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-10", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-10", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let delegated = sink.delegated.lock().unwrap();
         assert_eq!(delegated.len(), 1);
@@ -1589,15 +1758,24 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         for chunk in ["Cre", "ated ", "artifacts", "/ok.txt"] {
             buffer.push(chunk, ProgressKind::Text, &sink);
         }
-        assert!(progress_of(&sink).is_empty(), "改行も上限も来ていないので、まだ出さない");
+        assert!(
+            progress_of(&sink).is_empty(),
+            "改行も上限も来ていないので、まだ出さない"
+        );
 
         buffer.push(" done\nnext line", ProgressKind::Text, &sink);
-        assert_eq!(progress_of(&sink), vec!["Created artifacts/ok.txt done".to_string()]);
+        assert_eq!(
+            progress_of(&sink),
+            vec!["Created artifacts/ok.txt done".to_string()]
+        );
 
         buffer.flush(&sink);
         assert_eq!(
             progress_of(&sink),
-            vec!["Created artifacts/ok.txt done".to_string(), "next line".to_string()]
+            vec![
+                "Created artifacts/ok.txt done".to_string(),
+                "next line".to_string()
+            ]
         );
 
         // 上限（FLUSH_AT）を超えたら改行が無くても出す。
@@ -1636,7 +1814,10 @@ printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}'
         let adapter = AcpAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-11", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-11", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let received = std::fs::read_to_string(dir.path().join("received.log")).unwrap();
         assert!(received.contains("session/set_config_option"), "{received}");
@@ -1666,10 +1847,16 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
         let adapter = AcpAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-12", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-12", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let received = std::fs::read_to_string(dir.path().join("received.log")).unwrap();
-        assert!(!received.contains("session/set_config_option"), "{received}");
+        assert!(
+            !received.contains("session/set_config_option"),
+            "{received}"
+        );
         assert!(received.contains("session/prompt"), "{received}");
     }
 
@@ -1738,7 +1925,9 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
                 out = out_file.display()
             ),
         );
-        config.env.push(("ACP_TEST_VAR".to_string(), "old".to_string()));
+        config
+            .env
+            .push(("ACP_TEST_VAR".to_string(), "old".to_string()));
         let base = AcpAdapter::new(config);
         let with_env = base
             .with_env(&[("ACP_TEST_VAR".to_string(), "new".to_string())])
@@ -1746,7 +1935,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
 
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = with_env.run(req, "run-15", default_limits(), &sink).await.unwrap();
+        let outcome = with_env
+            .run(req, "run-15", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let seen = std::fs::read_to_string(&out_file).unwrap();
         assert_eq!(seen, "new");

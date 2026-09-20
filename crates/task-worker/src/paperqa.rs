@@ -37,7 +37,8 @@ use crate::progress;
 use crate::protocol::{Answer, RunContext, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
-    LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, read_tail, write_result_json,
+    LineOutcome, MAX_LINE_BYTES, kill_now, read_line_limited, read_tail, reap_after_terminal,
+    write_result_json,
 };
 
 /// run ごとに `runs/<run_id>/paperqa_acquire.py` として書き出す取得ランナー（ADR-0035 D1）。
@@ -297,9 +298,19 @@ pub fn project_key(task: &Task) -> String {
     };
     let safe: String = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if safe.trim_matches('_').is_empty() { SHARED_PROJECT_KEY.to_string() } else { safe }
+    if safe.trim_matches('_').is_empty() {
+        SHARED_PROJECT_KEY.to_string()
+    } else {
+        safe
+    }
 }
 
 /// 依頼文（`objective`）から検索語を決定的に作る（ADR-0035 D1 手順 1。**LLM は使わない**）。
@@ -375,7 +386,11 @@ pub fn build_search_queries(objective: &str) -> Vec<String> {
     let mut kept: Vec<String> = Vec::new();
     for phrase in phrases {
         let words: Vec<&str> = phrase.split(' ').filter(|w| !w.is_empty()).collect();
-        let meaningful: Vec<&str> = words.iter().copied().filter(|w| !is_stopword(&w.to_ascii_lowercase())).collect();
+        let meaningful: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|w| !is_stopword(&w.to_ascii_lowercase()))
+            .collect();
         if meaningful.is_empty() {
             continue;
         }
@@ -417,11 +432,19 @@ pub fn build_search_queries(objective: &str) -> Vec<String> {
         .map(|(i, p)| (p.split(' ').count(), i, p))
         .collect();
     ordered.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    let queries: Vec<String> = ordered.into_iter().take(MAX_SEARCH_QUERIES).map(|(_, _, p)| p).collect();
+    let queries: Vec<String> = ordered
+        .into_iter()
+        .take(MAX_SEARCH_QUERIES)
+        .map(|(_, _, p)| p)
+        .collect();
 
     if queries.is_empty() {
         let fallback = objective.split_whitespace().collect::<Vec<_>>().join(" ");
-        if fallback.is_empty() { Vec::new() } else { vec![fallback] }
+        if fallback.is_empty() {
+            Vec::new()
+        } else {
+            vec![fallback]
+        }
     } else {
         queries
     }
@@ -437,7 +460,9 @@ fn strip_provider_prefix(model: &str) -> String {
         Some((prefix, rest))
             if !rest.is_empty()
                 && !prefix.is_empty()
-                && prefix.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
+                && prefix
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
         {
             rest.to_string()
         }
@@ -456,13 +481,20 @@ async fn settings_llm(settings: &str) -> Option<String> {
     let text = tokio::fs::read_to_string(&path).await.ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let llm = value.get("llm").and_then(serde_json::Value::as_str)?.trim();
-    if llm.is_empty() { None } else { Some(llm.to_string()) }
+    if llm.is_empty() {
+        None
+    } else {
+        Some(llm.to_string())
+    }
 }
 
 /// 検索語を立てる LLM のモデル名（ADR-0035 D5）。`acquire.query_model` → `[[providers]] model`
 /// （`--llm`）→ PaperQA の `settings` の `llm` の順。**PaperQA2 と同じ LLM 先**を使うため。
 async fn query_llm_model(config: &PaperQaConfig) -> Option<String> {
-    for candidate in [config.acquire.query_model.clone(), config.model.clone()].into_iter().flatten() {
+    for candidate in [config.acquire.query_model.clone(), config.model.clone()]
+        .into_iter()
+        .flatten()
+    {
         let model = strip_provider_prefix(&candidate);
         if !model.is_empty() {
             return Some(model);
@@ -477,7 +509,12 @@ async fn query_llm_model(config: &PaperQaConfig) -> Option<String> {
 /// `config.env` に入っている値（`OPENAI_BASE_URL` / `OPENAI_API_KEY`）。同名キーは後の行が勝つ
 /// （`with_env` の規則と同じ）。
 fn env_value(config: &PaperQaConfig, key: &str) -> Option<String> {
-    config.env.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    config
+        .env
+        .iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
 }
 
 /// 検索語を立てる LLM に渡すもの（ADR-0035 D5）。タスクの `title` / `objective` と、
@@ -505,7 +542,9 @@ fn acquire_python(config: &PaperQaConfig) -> String {
         return command.clone();
     }
     match Path::new(&config.command).parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join("python3").to_string_lossy().into_owned(),
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            parent.join("python3").to_string_lossy().into_owned()
+        }
         _ => "python3".to_string(),
     }
 }
@@ -618,7 +657,12 @@ async fn stream_child(
         }
         let wait = (limits.wall_clock - wall_elapsed).min(limits.idle_timeout - idle_elapsed);
 
-        let outcome = match tokio::time::timeout(wait, read_line_limited(&mut reader, MAX_LINE_BYTES)).await {
+        let outcome = match tokio::time::timeout(
+            wait,
+            read_line_limited(&mut reader, MAX_LINE_BYTES),
+        )
+        .await
+        {
             Err(_elapsed) => continue, // タイムアウト。ループ先頭で上限超過を検知する。
             Ok(Err(e)) => return Err(AdapterError::Io(e)),
             Ok(Ok(outcome)) => outcome,
@@ -685,20 +729,30 @@ async fn run_acquire(
     // ADR-0035 D5（Phase 36）: 検索語はランナーの中で LLM が立てる。ここで作るのは
     // **LLM の答えが壊れていたときの受け皿**（Phase 34 までの決定的な抽出）。
     let queries = build_search_queries(&req.task.objective);
-    let model = if config.acquire.query_llm { query_llm_model(config).await } else { None };
+    let model = if config.acquire.query_llm {
+        query_llm_model(config).await
+    } else {
+        None
+    };
     match &model {
-        Some(model) => progress::emit_status(sink, &truncate_chars(
-            &format!("acquiring literature; the search terms are written by {model}"),
-            PROGRESS_LINE_MAX_CHARS,
-        )),
-        None => progress::emit_status(sink, &truncate_chars(
-            &format!(
-                "acquiring literature for {} search term(s) (deterministic): {}",
-                queries.len(),
-                queries.join(" | ")
+        Some(model) => progress::emit_status(
+            sink,
+            &truncate_chars(
+                &format!("acquiring literature; the search terms are written by {model}"),
+                PROGRESS_LINE_MAX_CHARS,
             ),
-            PROGRESS_LINE_MAX_CHARS,
-        )),
+        ),
+        None => progress::emit_status(
+            sink,
+            &truncate_chars(
+                &format!(
+                    "acquiring literature for {} search term(s) (deterministic): {}",
+                    queries.len(),
+                    queries.join(" | ")
+                ),
+                PROGRESS_LINE_MAX_CHARS,
+            ),
+        ),
     }
 
     let script_path = run_dir.join("paperqa_acquire.py");
@@ -754,11 +808,16 @@ async fn run_acquire(
         Err(e) => {
             // 取得ランナーが起動できないのは設定の誤り（python のパス）だが、ここでは run を止めず
             // 0 件として先に進む（ゲートが「取得が 0 件」として人に返す）。
-            warn!("run {run_id}: could not start the literature acquisition runner ({python}): {e}");
-            progress::emit_status(sink, &truncate_chars(
-                &format!("literature acquisition could not start ({python}): {e}"),
-                PROGRESS_LINE_MAX_CHARS,
-            ));
+            warn!(
+                "run {run_id}: could not start the literature acquisition runner ({python}): {e}"
+            );
+            progress::emit_status(
+                sink,
+                &truncate_chars(
+                    &format!("literature acquisition could not start ({python}): {e}"),
+                    PROGRESS_LINE_MAX_CHARS,
+                ),
+            );
             return Ok((AcquireCounts::default(), None));
         }
     };
@@ -774,12 +833,21 @@ async fn run_acquire(
         sink,
         |line| {
             if let Some(rest) = line.strip_prefix(PROGRESS_PREFIX) {
-                progress::emit_status(sink, &truncate_chars(&format!("acquire: {}", rest.trim()), PROGRESS_LINE_MAX_CHARS));
+                progress::emit_status(
+                    sink,
+                    &truncate_chars(
+                        &format!("acquire: {}", rest.trim()),
+                        PROGRESS_LINE_MAX_CHARS,
+                    ),
+                );
             } else if let Some(rest) = line.strip_prefix(ACQUIRE_RESULT_PREFIX) {
                 match serde_json::from_str::<serde_json::Value>(rest) {
                     Ok(value) => {
                         let number = |key: &str| -> u32 {
-                            value.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0) as u32
+                            value
+                                .get(key)
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0) as u32
                         };
                         counts = Some(AcquireCounts {
                             candidates: number("candidates"),
@@ -797,18 +865,29 @@ async fn run_acquire(
         return Ok((counts.unwrap_or_default(), Some(terminal)));
     }
     if !streamed.exit.success() {
-        let tail = streamed.stderr_tail.lines().next_back().unwrap_or("").to_string();
+        let tail = streamed
+            .stderr_tail
+            .lines()
+            .next_back()
+            .unwrap_or("")
+            .to_string();
         warn!("run {run_id}: the literature acquisition runner failed: {tail}");
-        progress::emit_status(sink, &truncate_chars(
-            &format!("literature acquisition failed: {tail}"),
-            PROGRESS_LINE_MAX_CHARS,
-        ));
+        progress::emit_status(
+            sink,
+            &truncate_chars(
+                &format!("literature acquisition failed: {tail}"),
+                PROGRESS_LINE_MAX_CHARS,
+            ),
+        );
     }
     let counts = counts.unwrap_or_default();
-    progress::emit_status(sink, &format!(
-        "acquire: {} candidate(s), {} PDF(s) in the corpus",
-        counts.candidates, counts.pdfs
-    ));
+    progress::emit_status(
+        sink,
+        &format!(
+            "acquire: {} candidate(s), {} PDF(s) in the corpus",
+            counts.candidates, counts.pdfs
+        ),
+    );
     Ok((counts, None))
 }
 
@@ -853,7 +932,10 @@ pub fn answer_cites(answer: &str, candidate: &Candidate) -> bool {
 }
 
 fn normalize_alnum(text: &str) -> String {
-    text.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase()
+    text.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 fn normalize_doi(doi: &str) -> String {
@@ -868,24 +950,34 @@ fn normalize_doi(doi: &str) -> String {
 
 fn strip_arxiv_version(id: &str) -> String {
     match id.rfind('v') {
-        Some(pos) if id[pos + 1..].chars().all(|c| c.is_ascii_digit()) && pos + 1 < id.len() => id[..pos].to_string(),
+        Some(pos) if id[pos + 1..].chars().all(|c| c.is_ascii_digit()) && pos + 1 < id.len() => {
+            id[..pos].to_string()
+        }
         _ => id.to_string(),
     }
 }
 
 fn first_author_surname(authors: &[String]) -> String {
-    let Some(first) = authors.first() else { return String::new() };
+    let Some(first) = authors.first() else {
+        return String::new();
+    };
     first
         .split_whitespace()
         .next_back()
-        .map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase())
+        .map(|s| {
+            s.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
         .unwrap_or_default()
 }
 
 /// `artifacts/answer.md` の末尾に足す `## 出典`（ADR-0035 D4）。引用されたものを先に、
 /// `[n] 著者 (年). タイトル. venue. URL` の形で並べる（欠けている項目は飛ばす）。
 fn render_sources_section(candidates: &[(Candidate, bool)]) -> String {
-    let mut ordered: Vec<&(Candidate, bool)> = candidates.iter().filter(|(_, cited)| *cited).collect();
+    let mut ordered: Vec<&(Candidate, bool)> =
+        candidates.iter().filter(|(_, cited)| *cited).collect();
     ordered.extend(candidates.iter().filter(|(_, cited)| !*cited));
 
     let mut out = String::from("\n\n## 出典\n\n");
@@ -914,7 +1006,11 @@ fn render_sources_section(candidates: &[(Candidate, bool)]) -> String {
         if !candidate.venue.is_empty() {
             parts.push(candidate.venue.clone());
         }
-        let url = if !candidate.url.is_empty() { &candidate.url } else { &candidate.pdf_url };
+        let url = if !candidate.url.is_empty() {
+            &candidate.url
+        } else {
+            &candidate.pdf_url
+        };
         if !url.is_empty() {
             parts.push(url.clone());
         }
@@ -940,7 +1036,13 @@ async fn run_paperqa(
     let artifacts_dir = req.artifacts_dir.clone();
     let artifacts_rel = req.artifacts_rel();
     // ADR-0035 D5: `queries.json`（どの検索語で探したか）も前回の残りを消す。
-    for stale in ["result.json", "answer.md", "papers.json", "sources.json", "queries.json"] {
+    for stale in [
+        "result.json",
+        "answer.md",
+        "papers.json",
+        "sources.json",
+        "queries.json",
+    ] {
         let _ = tokio::fs::remove_file(artifacts_dir.join(stale)).await;
     }
 
@@ -990,7 +1092,10 @@ async fn run_paperqa(
         if let Some(terminal) = timeout {
             // タイムアウトは供給側失敗として分類しない（他アダプタと同じ。ADR-0010 D5）。
             write_result_json(&run_dir, &terminal, None).await?;
-            return Ok(RunOutcome { terminal, exit_code: None });
+            return Ok(RunOutcome {
+                terminal,
+                exit_code: None,
+            });
         }
         counts
     } else {
@@ -1117,13 +1222,28 @@ async fn run_paperqa(
         // 他のアダプタではワーカー自身が `artifact` メッセージで申告するが、pqa は申告しないのでアダプタが行う。
         // ADR-0035 D3: ゲートに落ちても成果物は残す（人が読めるように）ので、申告はゲートより前に行う。
         // ADR-0036 D4: 申告する `path` は workspace 相対のまま（`artifacts_dir` 基準で組む）。
-        let mut to_register: Vec<(&str, String, &str)> =
-            vec![("answer.md", format!("{artifacts_rel}/answer.md"), "markdown")];
+        let mut to_register: Vec<(&str, String, &str)> = vec![(
+            "answer.md",
+            format!("{artifacts_rel}/answer.md"),
+            "markdown",
+        )];
         if acquiring {
-            to_register.push(("papers.json", format!("{artifacts_rel}/papers.json"), "json"));
-            to_register.push(("sources.json", format!("{artifacts_rel}/sources.json"), "json"));
+            to_register.push((
+                "papers.json",
+                format!("{artifacts_rel}/papers.json"),
+                "json",
+            ));
+            to_register.push((
+                "sources.json",
+                format!("{artifacts_rel}/sources.json"),
+                "json",
+            ));
             // ADR-0035 D5: どの検索語で探したか（LLM の出力そのまま、落ちたなら落ちた理由も）。
-            to_register.push(("queries.json", format!("{artifacts_rel}/queries.json"), "json"));
+            to_register.push((
+                "queries.json",
+                format!("{artifacts_rel}/queries.json"),
+                "json",
+            ));
         }
         for (name, rel_path, kind) in to_register {
             if !req.workspace.join(&rel_path).is_file() {
@@ -1136,18 +1256,30 @@ async fn run_paperqa(
         }
 
         // ADR-0035 D3: 決定的な証拠ゲート（LLM には判断させない）。取得の段を行わない構成では見ない。
-        let gate_message =
-            if acquiring { evidence_gate(&config.evidence, acquired, cited_count) } else { None };
+        let gate_message = if acquiring {
+            evidence_gate(&config.evidence, acquired, cited_count)
+        } else {
+            None
+        };
 
         if let Some(message) = gate_message {
             // ADR-0031 D2 と同じ: retryable な `Terminal::Error`。供給側の失敗（`AdapterError`）にはしない。
-            (Terminal::Error { message, retryable: true }, None)
+            (
+                Terminal::Error {
+                    message,
+                    retryable: true,
+                },
+                None,
+            )
         } else {
             let summary = single_line_summary(&answer, SUMMARY_MAX_CHARS);
             let result_file = serde_json::json!({ "summary": summary, "evidence": [] });
             match serde_json::to_string_pretty(&result_file) {
                 Ok(text) => {
-                    if let Err(e) = tokio::fs::write(artifacts_dir.join("result.json"), format!("{text}\n")).await {
+                    if let Err(e) =
+                        tokio::fs::write(artifacts_dir.join("result.json"), format!("{text}\n"))
+                            .await
+                    {
                         warn!("run {run_id}: could not write artifacts/result.json: {e}");
                     }
                 }
@@ -1177,8 +1309,13 @@ async fn run_paperqa(
 }
 
 /// ADR-0035 D3: 閾値を満たさなければメッセージを返す（満たせば `None`）。
-fn evidence_gate(thresholds: &PaperQaEvidence, acquired: AcquireCounts, cited: u32) -> Option<String> {
-    let enabled = thresholds.min_candidates > 0 || thresholds.min_pdfs > 0 || thresholds.min_cited > 0;
+fn evidence_gate(
+    thresholds: &PaperQaEvidence,
+    acquired: AcquireCounts,
+    cited: u32,
+) -> Option<String> {
+    let enabled =
+        thresholds.min_candidates > 0 || thresholds.min_pdfs > 0 || thresholds.min_cited > 0;
     if !enabled {
         return None;
     }
@@ -1191,10 +1328,16 @@ fn evidence_gate(thresholds: &PaperQaEvidence, acquired: AcquireCounts, cited: u
     }
     let mut problems = Vec::new();
     if thresholds.min_candidates > 0 && acquired.candidates < thresholds.min_candidates {
-        problems.push(format!("candidates={} (min {})", acquired.candidates, thresholds.min_candidates));
+        problems.push(format!(
+            "candidates={} (min {})",
+            acquired.candidates, thresholds.min_candidates
+        ));
     }
     if thresholds.min_pdfs > 0 && acquired.pdfs < thresholds.min_pdfs {
-        problems.push(format!("pdfs={} (min {})", acquired.pdfs, thresholds.min_pdfs));
+        problems.push(format!(
+            "pdfs={} (min {})",
+            acquired.pdfs, thresholds.min_pdfs
+        ));
     }
     if thresholds.min_cited > 0 && cited < thresholds.min_cited {
         problems.push(format!("cited={cited} (min {})", thresholds.min_cited));
@@ -1202,7 +1345,10 @@ fn evidence_gate(thresholds: &PaperQaEvidence, acquired: AcquireCounts, cited: u
     if problems.is_empty() {
         None
     } else {
-        Some(format!("insufficient literature evidence: {}", problems.join(", ")))
+        Some(format!(
+            "insufficient literature evidence: {}",
+            problems.join(", ")
+        ))
     }
 }
 
@@ -1218,11 +1364,18 @@ async fn write_sources_json(path: &Path, marked: &[(Candidate, bool)], run_id: &
     let sources: Vec<BTreeMap<&str, serde_json::Value>> = marked
         .iter()
         .map(|(candidate, cited)| {
-            let url = if !candidate.url.is_empty() { &candidate.url } else { &candidate.pdf_url };
+            let url = if !candidate.url.is_empty() {
+                &candidate.url
+            } else {
+                &candidate.pdf_url
+            };
             BTreeMap::from([
                 ("url", serde_json::Value::String(url.clone())),
                 ("title", serde_json::Value::String(candidate.title.clone())),
-                ("engine", serde_json::Value::String(candidate.source_engine.clone())),
+                (
+                    "engine",
+                    serde_json::Value::String(candidate.source_engine.clone()),
+                ),
                 ("cited", serde_json::Value::Bool(*cited)),
             ])
         })
@@ -1237,16 +1390,18 @@ async fn write_sources_json(path: &Path, marked: &[(Candidate, bool)], run_id: &
     }
 }
 
-
 /// `pqa ask` の標準出力から回答部分を切り出す。`Answer:` で始まる行が見つかればそこから末尾まで、
 /// 見つからなければ標準出力全体を返す（ADR-0027 D3: 「回答本文と引用」、見つからない場合は全体）。
 fn extract_answer(stdout: &str) -> String {
     // 実機（pqa 2026.8.12）の出力は rich で整形されていて、各行が `[04:38:30] ` のような時刻と
     // 折り返し用の左詰めと色コードを含む。回答の始まりは `Answer:` の行。
     let clean: Vec<String> = stdout.lines().map(strip_ansi).collect();
-    let marker = clean
-        .iter()
-        .position(|l| strip_log_prefix(l).trim_start().to_ascii_lowercase().starts_with("answer:"));
+    let marker = clean.iter().position(|l| {
+        strip_log_prefix(l)
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("answer:")
+    });
     let Some(idx) = marker else {
         return stdout.trim_end_matches('\n').to_string();
     };
@@ -1277,7 +1432,16 @@ fn extract_answer(stdout: &str) -> String {
         .map(|l| l.len() - l.trim_start().len())
         .min()
         .unwrap_or(0);
-    out.iter().map(|l| if l.len() >= indent { l[indent..].to_string() } else { l.clone() }).collect::<Vec<_>>().join("\n")
+    out.iter()
+        .map(|l| {
+            if l.len() >= indent {
+                l[indent..].to_string()
+            } else {
+                l.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `[04:38:30] ` のような時刻の前置きを落とす（無ければそのまま）。
@@ -1286,10 +1450,18 @@ fn strip_log_prefix(line: &str) -> &str {
     if !trimmed.starts_with('[') {
         return line;
     }
-    let Some(close) = trimmed.find(']') else { return line };
+    let Some(close) = trimmed.find(']') else {
+        return line;
+    };
     let inside = &trimmed[1..close];
     let looks_like_time = inside.len() == 8
-        && inside.as_bytes().iter().enumerate().all(|(i, b)| if i == 2 || i == 5 { *b == b':' } else { b.is_ascii_digit() });
+        && inside.as_bytes().iter().enumerate().all(|(i, b)| {
+            if i == 2 || i == 5 {
+                *b == b':'
+            } else {
+                b.is_ascii_digit()
+            }
+        });
     if looks_like_time {
         let rest = &trimmed[close + 1..];
         // 時刻の分だけ左詰めを保つ（折り返し行と桁を揃えるため、先頭 1 つの空白だけ落とす）。
@@ -1366,7 +1538,10 @@ mod tests {
 
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
-            self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+            self.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(msg.to_string());
         }
         fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
             self.progress(msg);
@@ -1376,10 +1551,16 @@ mod tests {
                 .push((msg.to_string(), fields.clone()));
         }
         fn artifact(&self, artifact: &ArtifactRef) {
-            self.artifacts.lock().unwrap_or_else(|e| e.into_inner()).push(artifact.clone());
+            self.artifacts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(artifact.clone());
         }
         fn heartbeat(&self) {
-            *self.heartbeat_count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            *self
+                .heartbeat_count
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) += 1;
         }
     }
 
@@ -1492,9 +1673,16 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req.clone(), "run-1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req.clone(), "run-1", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
-            Terminal::Done { summary, evidence, usage } => {
+            Terminal::Done {
+                summary,
+                evidence,
+                usage,
+            } => {
                 assert!(summary.contains("PaperQA2 finds no evidence"), "{summary}");
                 assert!(evidence.is_empty());
                 assert!(usage.is_none());
@@ -1502,7 +1690,11 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
             other => panic!("expected done, got {other:?}"),
         }
         let progress = sink.progress.lock().unwrap();
-        assert!(progress.iter().any(|m| m.contains("Searching for relevant papers")));
+        assert!(
+            progress
+                .iter()
+                .any(|m| m.contains("Searching for relevant papers"))
+        );
         assert!(progress.iter().any(|m| m.contains("Gathering evidence")));
         assert!(*sink.heartbeat_count.lock().unwrap() >= 3);
         // ADR-0048 D2（Phase 60a）: このアダプタが出せる進行は節目（`status`）だけで、
@@ -1515,7 +1707,10 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
                 .all(|(_, f)| f.kind == Some(task_core::ProgressKind::Status)),
             "{structured:#?}"
         );
-        assert!(structured.iter().all(|(_, f)| f.summary.is_some()), "{structured:#?}");
+        assert!(
+            structured.iter().all(|(_, f)| f.summary.is_some()),
+            "{structured:#?}"
+        );
 
         // 成果物として申告される（run の一覧と Check::ArtifactExists の解決に使われる）。
         let artifacts = sink.artifacts.lock().unwrap();
@@ -1527,17 +1722,30 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
 
         let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
         // `Answer:` の見出しは落とし、本文だけを残す（実機の出力は時刻と左詰めが付くため）。
-        assert!(answer_md.starts_with("PaperQA2 finds no evidence"), "{answer_md}");
-        assert!(!answer_md.contains("Gathering evidence"), "進捗のログは含めない: {answer_md}");
+        assert!(
+            answer_md.starts_with("PaperQA2 finds no evidence"),
+            "{answer_md}"
+        );
+        assert!(
+            !answer_md.contains("Gathering evidence"),
+            "進捗のログは含めない: {answer_md}"
+        );
 
-        let result_json = std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
+        let result_json =
+            std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result_json).unwrap();
-        assert!(parsed["summary"].as_str().unwrap().contains("PaperQA2 finds no evidence"));
+        assert!(
+            parsed["summary"]
+                .as_str()
+                .unwrap()
+                .contains("PaperQA2 finds no evidence")
+        );
         assert_eq!(parsed["evidence"], serde_json::json!([]));
 
         assert!(dir.path().join("runs/run-1/stdout.log").is_file());
         assert!(dir.path().join("runs/run-1/stderr.log").is_file());
-        let run_result = std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
+        let run_result =
+            std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
         match serde_json::from_str::<crate::protocol::WorkerMessage>(run_result.trim()).unwrap() {
             crate::protocol::WorkerMessage::Done { summary, .. } => {
                 assert!(summary.contains("PaperQA2 finds no evidence"))
@@ -1563,15 +1771,25 @@ echo 'Answer: no prior work on X [Doe2020].'
         let mut req = sample_req(dir.path().to_path_buf());
         req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
-        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        let outcome = adapter
+            .run(req, "run-shared", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
         let artifacts = sink.artifacts.lock().unwrap();
         assert_eq!(artifacts.len(), 1, "{artifacts:?}");
         assert_eq!(artifacts[0].path, ".taskd/artifacts/T1/answer.md");
         drop(artifacts);
         assert!(dir.path().join(".taskd/artifacts/T1/answer.md").is_file());
         assert!(dir.path().join(".taskd/artifacts/T1/result.json").is_file());
-        assert_eq!(std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap(), "sibling");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap(),
+            "sibling"
+        );
     }
 
     #[tokio::test]
@@ -1581,7 +1799,10 @@ echo 'Answer: no prior work on X [Doe2020].'
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-2", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-2", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1599,7 +1820,10 @@ echo 'Answer: no prior work on X [Doe2020].'
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-3", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-3", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1643,9 +1867,16 @@ while true; do sleep 0.1; done
             }
             other => panic!("expected error, got {other:?}"),
         }
-        let pid_text = std::fs::read_to_string(&pid_file).expect("stub should have recorded its pid before looping");
-        let pid: i32 = pid_text.trim().parse().expect("pid.txt should contain a pid");
-        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists(), "process {pid} should have been killed");
+        let pid_text = std::fs::read_to_string(&pid_file)
+            .expect("stub should have recorded its pid before looping");
+        let pid: i32 = pid_text
+            .trim()
+            .parse()
+            .expect("pid.txt should contain a pid");
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "process {pid} should have been killed"
+        );
     }
 
     fn read_argv(path: &Path) -> Vec<String> {
@@ -1675,7 +1906,10 @@ while true; do sleep 0.1; done
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req.clone(), "run-5", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req.clone(), "run-5", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
 
         let argv = read_argv(&dir.path().join("args.log"));
@@ -1710,7 +1944,10 @@ while true; do sleep 0.1; done
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-6", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-6", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
 
         let argv = read_argv(&dir.path().join("args.log"));
@@ -1739,7 +1976,10 @@ while true; do sleep 0.1; done
         let adapter = PaperQaAdapter::new(config_without);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        adapter.run(req, "run-7a", default_limits(), &sink).await.unwrap();
+        adapter
+            .run(req, "run-7a", default_limits(), &sink)
+            .await
+            .unwrap();
         let argv_without = read_argv(&dir.path().join("args-without.log"));
         assert!(!argv_without.contains(&"--llm".to_string()));
 
@@ -1755,9 +1995,15 @@ while true; do sleep 0.1; done
         let adapter2 = PaperQaAdapter::new(config_with);
         let req2 = sample_req(dir2.path().to_path_buf());
         let sink2 = RecordingSink::default();
-        adapter2.run(req2, "run-7b", default_limits(), &sink2).await.unwrap();
+        adapter2
+            .run(req2, "run-7b", default_limits(), &sink2)
+            .await
+            .unwrap();
         let argv_with = read_argv(&dir2.path().join("args-with.log"));
-        let llm_idx = argv_with.iter().position(|a| a == "--llm").expect("--llm should be present");
+        let llm_idx = argv_with
+            .iter()
+            .position(|a| a == "--llm")
+            .expect("--llm should be present");
         assert_eq!(argv_with[llm_idx + 1], "qwen3.8-27b");
     }
 
@@ -1773,7 +2019,9 @@ while true; do sleep 0.1; done
                 out = out_file.display()
             ),
         );
-        config.env.push(("OPENAI_BASE_URL".to_string(), "http://old:1".to_string()));
+        config
+            .env
+            .push(("OPENAI_BASE_URL".to_string(), "http://old:1".to_string()));
         let base = PaperQaAdapter::new(config);
         let with_env = base
             .with_env(&[("OPENAI_BASE_URL".to_string(), "http://new:2".to_string())])
@@ -1781,7 +2029,10 @@ while true; do sleep 0.1; done
 
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = with_env.run(req, "run-8", default_limits(), &sink).await.unwrap();
+        let outcome = with_env
+            .run(req, "run-8", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let seen = std::fs::read_to_string(&out_file).unwrap();
         assert_eq!(seen, "http://new:2");
@@ -1838,7 +2089,10 @@ while true; do sleep 0.1; done
             answer,
             "UnifyFS and GekkoFS aggregate node-local NVMe\ninto a job-scoped file system (Unify2020)."
         );
-        assert!(!answer.contains("New file to index"), "索引のログは含めない: {answer}");
+        assert!(
+            !answer.contains("New file to index"),
+            "索引のログは含めない: {answer}"
+        );
         assert!(!answer.contains('\u{1b}'), "色コードは落とす: {answer:?}");
     }
 
@@ -1849,7 +2103,10 @@ while true; do sleep 0.1; done
         assert_eq!(extract_answer(stdout), "X causes Y [Doe2020].");
 
         let no_answer_marker = "just some raw output\nwithout the marker\n";
-        assert_eq!(extract_answer(no_answer_marker), no_answer_marker.trim_end_matches('\n'));
+        assert_eq!(
+            extract_answer(no_answer_marker),
+            no_answer_marker.trim_end_matches('\n')
+        );
     }
     // ------------------------------------------------------------ ADR-0035（Phase 34）
 
@@ -1860,9 +2117,18 @@ while true; do sleep 0.1; done
         let objective = "Pluvio（ad-hoc FS の I/O サーバ向け非同期ランタイム）の隣接領域: \
              asynchronous I/O runtime, ad-hoc file system, I/O offload — 直近の研究動向と候補テーマ";
         let queries = build_search_queries(objective);
-        assert!(queries.len() >= 2 && queries.len() <= MAX_SEARCH_QUERIES, "{queries:?}");
-        assert!(queries.contains(&"asynchronous I/O runtime".to_string()), "{queries:?}");
-        assert!(queries.contains(&"ad-hoc file system".to_string()), "{queries:?}");
+        assert!(
+            queries.len() >= 2 && queries.len() <= MAX_SEARCH_QUERIES,
+            "{queries:?}"
+        );
+        assert!(
+            queries.contains(&"asynchronous I/O runtime".to_string()),
+            "{queries:?}"
+        );
+        assert!(
+            queries.contains(&"ad-hoc file system".to_string()),
+            "{queries:?}"
+        );
         // 語数の多い句が先（relevance の当たりが良い順）。
         assert_eq!(queries[0].split(' ').count(), 3, "{queries:?}");
         // 日本語はそのまま検索語にしない（英語の検索 API に投げるため）。
@@ -1876,10 +2142,17 @@ while true; do sleep 0.1; done
         assert_eq!(queries, vec!["Pluvio".to_string()]);
         // ストップワードだけ・短い小文字 1 語は落とす。
         let queries = build_search_queries("of the あれ、to be な話");
-        assert!(queries.is_empty() || queries.iter().all(|q| q != "of the"), "{queries:?}");
+        assert!(
+            queries.is_empty() || queries.iter().all(|q| q != "of the"),
+            "{queries:?}"
+        );
         // 他の句に丸ごと含まれる句は落とす。
-        let queries = build_search_queries("ad-hoc file system、ad-hoc file system checkpointing について");
-        assert_eq!(queries, vec!["ad-hoc file system checkpointing".to_string()]);
+        let queries =
+            build_search_queries("ad-hoc file system、ad-hoc file system checkpointing について");
+        assert_eq!(
+            queries,
+            vec!["ad-hoc file system checkpointing".to_string()]
+        );
     }
 
     /// 英数字が 1 つも無ければ objective 全文を 1 本の検索語にする（最後の手段）。
@@ -1907,7 +2180,10 @@ while true; do sleep 0.1; done
             command: "/home/u/celeris/paperqa/.venv/bin/pqa".to_string(),
             ..PaperQaConfig::default()
         };
-        assert_eq!(acquire_python(&config), "/home/u/celeris/paperqa/.venv/bin/python3");
+        assert_eq!(
+            acquire_python(&config),
+            "/home/u/celeris/paperqa/.venv/bin/python3"
+        );
         config.command = "pqa".to_string();
         assert_eq!(acquire_python(&config), "python3");
         config.acquire.command = Some("/usr/bin/python3.12".to_string());
@@ -1927,16 +2203,25 @@ while true; do sleep 0.1; done
             ..Candidate::default()
         };
         // ファイル名（PaperQA2 は use_doc_details = false でファイル名から引用の鍵を作る）
-        assert!(answer_cites("see (brinkmann2020_10-1007-s11390-020-9801-1.pdf)", &base));
+        assert!(answer_cites(
+            "see (brinkmann2020_10-1007-s11390-020-9801-1.pdf)",
+            &base
+        ));
         // DOI
         assert!(answer_cites("as shown in 10.1007/s11390-020-9801-1", &base));
         // 著者姓 + 年
         assert!(answer_cites("prior work (Brinkmann 2020) shows", &base));
         assert!(answer_cites("prior work (Brinkmann2020) shows", &base));
         // タイトル
-        assert!(answer_cites("Ad Hoc File Systems for High-Performance Computing is a survey", &base));
+        assert!(answer_cites(
+            "Ad Hoc File Systems for High-Performance Computing is a survey",
+            &base
+        ));
         // 何も合わなければ false
-        assert!(!answer_cites("no evidence was found in the provided context", &base));
+        assert!(!answer_cites(
+            "no evidence was found in the provided context",
+            &base
+        ));
 
         let arxiv = Candidate {
             title: "An Asynchronous IO Runtime".to_string(),
@@ -1954,17 +2239,49 @@ while true; do sleep 0.1; done
     #[test]
     fn evidence_gate_counts_candidates_pdfs_and_citations() {
         let thresholds = PaperQaEvidence::default();
-        assert_eq!(thresholds, PaperQaEvidence { min_candidates: 5, min_pdfs: 3, min_cited: 2 });
-        assert!(evidence_gate(&thresholds, AcquireCounts { candidates: 6, pdfs: 3 }, 2).is_none());
-        let message = evidence_gate(&thresholds, AcquireCounts { candidates: 4, pdfs: 1 }, 1).unwrap();
+        assert_eq!(
+            thresholds,
+            PaperQaEvidence {
+                min_candidates: 5,
+                min_pdfs: 3,
+                min_cited: 2
+            }
+        );
+        assert!(
+            evidence_gate(
+                &thresholds,
+                AcquireCounts {
+                    candidates: 6,
+                    pdfs: 3
+                },
+                2
+            )
+            .is_none()
+        );
+        let message = evidence_gate(
+            &thresholds,
+            AcquireCounts {
+                candidates: 4,
+                pdfs: 1,
+            },
+            1,
+        )
+        .unwrap();
         assert!(message.contains("candidates=4 (min 5)"), "{message}");
         assert!(message.contains("pdfs=1 (min 3)"), "{message}");
         assert!(message.contains("cited=1 (min 2)"), "{message}");
         // 0 件は別メッセージ（検索経路の問題と区別する）。
         let zero = evidence_gate(&thresholds, AcquireCounts::default(), 0).unwrap();
-        assert!(zero.contains("literature search returned nothing"), "{zero}");
+        assert!(
+            zero.contains("literature search returned nothing"),
+            "{zero}"
+        );
         // 全部 0 ならゲート無し。
-        let off = PaperQaEvidence { min_candidates: 0, min_pdfs: 0, min_cited: 0 };
+        let off = PaperQaEvidence {
+            min_candidates: 0,
+            min_pdfs: 0,
+            min_cited: 0,
+        };
         assert!(evidence_gate(&off, AcquireCounts::default(), 0).is_none());
     }
 
@@ -1981,32 +2298,58 @@ while true; do sleep 0.1; done
                 order = order_log.display(),
                 answer = STUB_ANSWER
             ),
-            &format!("echo acquire >> {order}\n{script}", order = order_log.display(), script = acquire_stub_script(6, 3)),
+            &format!(
+                "echo acquire >> {order}\n{script}",
+                order = order_log.display(),
+                script = acquire_stub_script(6, 3)
+            ),
         );
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req.clone(), "run-a1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req.clone(), "run-a1", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
-            Terminal::Done { summary, .. } => assert!(summary.contains("Ad hoc file systems"), "{summary}"),
+            Terminal::Done { summary, .. } => {
+                assert!(summary.contains("Ad hoc file systems"), "{summary}")
+            }
             other => panic!("expected done, got {other:?}"),
         }
 
         // 1. 順序（取得 → pqa）
         let order = std::fs::read_to_string(&order_log).unwrap();
-        assert_eq!(order.lines().collect::<Vec<_>>(), vec!["acquire", "pqa"], "{order}");
+        assert_eq!(
+            order.lines().collect::<Vec<_>>(),
+            vec!["acquire", "pqa"],
+            "{order}"
+        );
 
         // 2. 取得ランナーは run ディレクトリに書き出されて起動される（埋め込みの本体そのまま）。
-        let written = std::fs::read_to_string(dir.path().join("runs/run-a1/paperqa_acquire.py")).unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join("runs/run-a1/paperqa_acquire.py")).unwrap();
         assert_eq!(written, ACQUIRE_SCRIPT);
-        let input: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("runs/run-a1/acquire_input.json")).unwrap())
-                .unwrap();
+        let input: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("runs/run-a1/acquire_input.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(input["max_candidates"], 30);
         assert_eq!(input["max_pdfs"], 12);
-        assert!(input["paper_directory"].as_str().unwrap().ends_with(&format!("papers/{SHARED_PROJECT_KEY}")));
+        assert!(
+            input["paper_directory"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("papers/{SHARED_PROJECT_KEY}"))
+        );
         assert!(!input["queries"].as_array().unwrap().is_empty());
-        assert!(input["queries_path"].as_str().unwrap().ends_with("artifacts/queries.json"), "{input}");
+        assert!(
+            input["queries_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("artifacts/queries.json"),
+            "{input}"
+        );
         // ADR-0035 D5: モデルが分からない構成（settings も `--llm` も無い）では LLM の段は動かさず、
         // 決定的な検索語だけで検索する。
         assert_eq!(input["query_llm"]["enabled"], false, "{input}");
@@ -2014,29 +2357,64 @@ while true; do sleep 0.1; done
         // 3. 成果物 4 つの申告（ADR-0035 D5: `queries.json` も）
         let artifacts = sink.artifacts.lock().unwrap();
         let names: Vec<&str> = artifacts.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["answer.md", "papers.json", "sources.json", "queries.json"], "{names:?}");
+        assert_eq!(
+            names,
+            vec!["answer.md", "papers.json", "sources.json", "queries.json"],
+            "{names:?}"
+        );
         drop(artifacts);
 
         // 4. `cited` の突き合わせ（答えが引用した 2 件だけ true）
-        let sources: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap()).unwrap();
-        let cited: Vec<bool> =
-            sources.as_array().unwrap().iter().map(|s| s["cited"].as_bool().unwrap()).collect();
+        let sources: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap(),
+        )
+        .unwrap();
+        let cited: Vec<bool> = sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["cited"].as_bool().unwrap())
+            .collect();
         assert_eq!(cited, vec![true, true, false], "{sources}");
         assert_eq!(sources[0]["engine"], "openalex");
 
         // 5. `## 出典`（引用されたものが先。`[n] 著者 (年). タイトル. venue. URL`）
         let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
-        assert!(answer_md.starts_with("Ad hoc file systems aggregate"), "{answer_md}");
-        let sources_section = answer_md.split("## 出典").nth(1).expect("出典の節があること");
-        let lines: Vec<&str> = sources_section.lines().filter(|l| l.starts_with('[')).collect();
+        assert!(
+            answer_md.starts_with("Ad hoc file systems aggregate"),
+            "{answer_md}"
+        );
+        let sources_section = answer_md
+            .split("## 出典")
+            .nth(1)
+            .expect("出典の節があること");
+        let lines: Vec<&str> = sources_section
+            .lines()
+            .filter(|l| l.starts_with('['))
+            .collect();
         assert_eq!(lines.len(), 3, "{sources_section}");
-        assert!(lines[0].contains("Andre Brinkmann, Kathryn Mohror, Weikuan Yu (2020)"), "{}", lines[0]);
-        assert!(lines[0].contains("Ad Hoc File Systems for High-Performance Computing"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("Andre Brinkmann, Kathryn Mohror, Weikuan Yu (2020)"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("Ad Hoc File Systems for High-Performance Computing"),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].contains("JCST"), "{}", lines[0]);
-        assert!(lines[0].contains("https://doi.org/10.1007/s11390-020-9801-1"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("https://doi.org/10.1007/s11390-020-9801-1"),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].contains("(引用)"), "{}", lines[0]);
-        assert!(!lines[2].contains("(引用)"), "引用されていないものは後ろ: {}", lines[2]);
+        assert!(
+            !lines[2].contains("(引用)"),
+            "引用されていないものは後ろ: {}",
+            lines[2]
+        );
 
         assert!(dir.path().join("artifacts/result.json").is_file());
         assert!(dir.path().join("runs/run-a1/acquire.stdout.log").is_file());
@@ -2054,11 +2432,17 @@ while true; do sleep 0.1; done
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-a2", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-a2", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
-                assert!(message.contains("insufficient literature evidence"), "{message}");
+                assert!(
+                    message.contains("insufficient literature evidence"),
+                    "{message}"
+                );
                 assert!(message.contains("candidates=3 (min 5)"), "{message}");
                 assert!(message.contains("pdfs=1 (min 3)"), "{message}");
                 // 引用は 2 件あるので、その項目は文面に出ない。
@@ -2076,7 +2460,8 @@ while true; do sleep 0.1; done
         // ワーカープロトコル上は done ではないので `artifacts/result.json` は書かない。
         assert!(!dir.path().join("artifacts/result.json").exists());
         // 供給側の失敗にはしない（プロバイダを cooldown にする話ではない）。
-        let run_result = std::fs::read_to_string(dir.path().join("runs/run-a2/result.json")).unwrap();
+        let run_result =
+            std::fs::read_to_string(dir.path().join("runs/run-a2/result.json")).unwrap();
         assert!(!run_result.contains("provider_failure"), "{run_result}");
     }
 
@@ -2092,15 +2477,24 @@ while true; do sleep 0.1; done
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-a3", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-a3", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
-                assert_eq!(message, "literature search returned nothing (possible network or API problem)");
+                assert_eq!(
+                    message,
+                    "literature search returned nothing (possible network or API problem)"
+                );
             }
             other => panic!("expected error, got {other:?}"),
         }
-        assert!(dir.path().join("artifacts/answer.md").is_file(), "答えは残す");
+        assert!(
+            dir.path().join("artifacts/answer.md").is_file(),
+            "答えは残す"
+        );
     }
 
     /// 取得ランナーが起動できない／落ちても run はそこで止めず、`pqa` まで進む（判定はゲートが行う）。
@@ -2113,14 +2507,30 @@ while true; do sleep 0.1; done
             "echo 'boom' 1>&2\nexit 3\n",
         );
         // ゲートを切っておけば（既存 corpus だけで答える運用）取得の失敗でも done になる。
-        config.evidence = PaperQaEvidence { min_candidates: 0, min_pdfs: 0, min_cited: 0 };
+        config.evidence = PaperQaEvidence {
+            min_candidates: 0,
+            min_pdfs: 0,
+            min_cited: 0,
+        };
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-a4", default_limits(), &sink).await.unwrap();
-        assert!(matches!(outcome.terminal, Terminal::Done { .. }), "{:?}", outcome.terminal);
+        let outcome = adapter
+            .run(req, "run-a4", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
         let progress = sink.progress.lock().unwrap();
-        assert!(progress.iter().any(|m| m.contains("literature acquisition failed")), "{progress:?}");
+        assert!(
+            progress
+                .iter()
+                .any(|m| m.contains("literature acquisition failed")),
+            "{progress:?}"
+        );
     }
 
     /// `max_candidates = 0` なら取得の段を行わず、ゲートも見ない（従来どおり手元の corpus だけで答える）。
@@ -2128,11 +2538,17 @@ while true; do sleep 0.1; done
     async fn acquire_and_the_gate_are_skipped_when_max_candidates_is_zero() {
         let dir = tempfile::tempdir().unwrap();
         // `stub_pqa` は `max_candidates = 0`。
-        let config = stub_pqa(dir.path(), "cat >/dev/null\necho 'Answer: from the local corpus only.'\n");
+        let config = stub_pqa(
+            dir.path(),
+            "cat >/dev/null\necho 'Answer: from the local corpus only.'\n",
+        );
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-a5", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-a5", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         assert!(!dir.path().join("runs/run-a5/paperqa_acquire.py").exists());
         assert!(!dir.path().join("artifacts/papers.json").exists());
@@ -2144,7 +2560,10 @@ while true; do sleep 0.1; done
     // ---------------------------------------------------- 取得ランナー（python3、ネットワーク無し）
 
     fn python3_available() -> bool {
-        match std::process::Command::new("python3").arg("--version").output() {
+        match std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        {
             Ok(output) => output.status.success(),
             Err(_) => false,
         }
@@ -2249,10 +2668,17 @@ while true; do sleep 0.1; done
             .output()
             .expect("failed to run python3");
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(stdout.contains("progress: arxiv: 2 result(s)"), "{stdout}");
 
-        let result_line = stdout.lines().find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX)).expect("CELERIS_ACQUIRE");
+        let result_line = stdout
+            .lines()
+            .find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX))
+            .expect("CELERIS_ACQUIRE");
         let counts: serde_json::Value =
             serde_json::from_str(result_line.trim_start_matches(ACQUIRE_RESULT_PREFIX)).unwrap();
         // 5 件返ってきたうち、DOI 一致とタイトル一致の 2 件が畳まれて 3 件。
@@ -2261,9 +2687,10 @@ while true; do sleep 0.1; done
         assert_eq!(counts["engines"]["arxiv"], 1, "{counts}");
         assert_eq!(counts["engines"]["openalex"], 2, "{counts}");
 
-        let candidates: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/papers.json")).unwrap())
-                .unwrap();
+        let candidates: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/papers.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 3);
         assert_eq!(candidates[0]["title"], "An Asynchronous IO Runtime");
         assert_eq!(candidates[0]["arxiv_id"], "2101.00001v1");
@@ -2271,27 +2698,46 @@ while true; do sleep 0.1; done
         assert_eq!(candidates[0]["pdf_downloaded"], true);
         assert_eq!(candidates[0]["file"], "roe2021_arxiv-2101-00001v1.pdf");
         // DOI が同じ arXiv の preprint は OpenAlex 側の 1 件に畳まれ、arXiv id が補われる。
-        assert_eq!(candidates[1]["title"], "Ad Hoc File Systems for High-Performance Computing");
-        assert_eq!(candidates[1]["doi"], "https://doi.org/10.1007/s11390-020-9801-1");
+        assert_eq!(
+            candidates[1]["title"],
+            "Ad Hoc File Systems for High-Performance Computing"
+        );
+        assert_eq!(
+            candidates[1]["doi"],
+            "https://doi.org/10.1007/s11390-020-9801-1"
+        );
         assert_eq!(candidates[1]["arxiv_id"], "2202.00002v1");
-        assert_eq!(candidates[1]["venue"], "Journal of Computer Science and Technology");
+        assert_eq!(
+            candidates[1]["venue"],
+            "Journal of Computer Science and Technology"
+        );
         assert_eq!(candidates[1]["year"], 2020);
-        assert_eq!(candidates[1]["pdf_downloaded"], false, "max_pdfs を超えた分は落とさない");
+        assert_eq!(
+            candidates[1]["pdf_downloaded"], false,
+            "max_pdfs を超えた分は落とさない"
+        );
         // 3 件目は PDF の URL が無い候補（それでも候補としては残る）。
         assert_eq!(candidates[2]["title"], "Something Unrelated");
         assert_eq!(candidates[2]["pdf_url"], "");
 
         // 案件ごとの corpus にだけ書かれ、PDF は 1 本。
-        let mut files: Vec<String> =
-            std::fs::read_dir(&corpus).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let mut files: Vec<String> = std::fs::read_dir(&corpus)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
         files.sort();
         assert_eq!(files, vec!["roe2021_arxiv-2101-00001v1.pdf".to_string()]);
-        assert!(std::fs::read(corpus.join(&files[0])).unwrap().starts_with(b"%PDF"));
+        assert!(
+            std::fs::read(corpus.join(&files[0]))
+                .unwrap()
+                .starts_with(b"%PDF")
+        );
 
         // `sources.json` は LDR と同じ 4 つの鍵だけ。`cited` はこの時点では全部 false（ADR-0035 D2）。
-        let sources: Vec<serde_json::Map<String, serde_json::Value>> =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap())
-                .unwrap();
+        let sources: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(sources.len(), 3);
         for source in &sources {
             let mut keys: Vec<&str> = source.keys().map(|k| k.as_str()).collect();
@@ -2337,12 +2783,25 @@ while true; do sleep 0.1; done
             .arg(&fixture)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        assert!(stdout.contains("already in the corpus: roe2021_arxiv-2101-00001v1.pdf"), "{stdout}");
+        assert!(
+            stdout.contains("already in the corpus: roe2021_arxiv-2101-00001v1.pdf"),
+            "{stdout}"
+        );
         // 上書きされていない（= 取り直していない）。corpus にある分は PDF 数に数える。
-        assert_eq!(std::fs::read(&existing).unwrap(), b"%PDF-1.4 already here\n");
-        let result_line = stdout.lines().find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX)).unwrap();
+        assert_eq!(
+            std::fs::read(&existing).unwrap(),
+            b"%PDF-1.4 already here\n"
+        );
+        let result_line = stdout
+            .lines()
+            .find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX))
+            .unwrap();
         let counts: serde_json::Value =
             serde_json::from_str(result_line.trim_start_matches(ACQUIRE_RESULT_PREFIX)).unwrap();
         assert_eq!(counts["pdfs"], 1, "{counts}");
@@ -2400,43 +2859,81 @@ print(json.dumps(out))
             .arg(&script_path)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
         let arxiv_url = v["arxiv_url"].as_str().unwrap();
-        assert!(arxiv_url.starts_with("https://export.arxiv.org/api/query?"), "{arxiv_url}");
+        assert!(
+            arxiv_url.starts_with("https://export.arxiv.org/api/query?"),
+            "{arxiv_url}"
+        );
         // ADR-0035 D5: 語は AND で綴じる（`all:a b c` は API では OR になり、実機で
         // 「モバイル ad hoc ネットワーク」を連れてきた）。
-        assert!(arxiv_url.contains("search_query=all%3Aad-hoc+AND+all%3Afile+AND+all%3Asystem"), "{arxiv_url}");
+        assert!(
+            arxiv_url.contains("search_query=all%3Aad-hoc+AND+all%3Afile+AND+all%3Asystem"),
+            "{arxiv_url}"
+        );
         assert!(!arxiv_url.contains("%22"), "引用符で括らない: {arxiv_url}");
-        assert!(!arxiv_url.contains("cat%3A"), "カテゴリを渡さなければ cat: は付かない: {arxiv_url}");
+        assert!(
+            !arxiv_url.contains("cat%3A"),
+            "カテゴリを渡さなければ cat: は付かない: {arxiv_url}"
+        );
         assert!(arxiv_url.contains("sortBy=relevance"), "{arxiv_url}");
         assert!(arxiv_url.contains("max_results=20"), "{arxiv_url}");
         // カテゴリ付き: 語は AND、`for` のような機能語は落ち、形の壊れたカテゴリは無視される。
         let with_cats = v["arxiv_url_cats"].as_str().unwrap();
         assert!(
-            with_cats.contains("all%3Aad+AND+all%3Ahoc+AND+all%3Afile+AND+all%3Asystem+AND+all%3AHPC"),
+            with_cats
+                .contains("all%3Aad+AND+all%3Ahoc+AND+all%3Afile+AND+all%3Asystem+AND+all%3AHPC"),
             "{with_cats}"
         );
-        assert!(with_cats.contains("AND+%28cat%3Acs.DC+OR+cat%3Acs.OS%29"), "{with_cats}");
-        assert!(!with_cats.contains("bogus"), "形の壊れたカテゴリは渡さない: {with_cats}");
+        assert!(
+            with_cats.contains("AND+%28cat%3Acs.DC+OR+cat%3Acs.OS%29"),
+            "{with_cats}"
+        );
+        assert!(
+            !with_cats.contains("bogus"),
+            "形の壊れたカテゴリは渡さない: {with_cats}"
+        );
         // 0 件だったときの再検索は同じ語を OR で（カテゴリの縛りは残す）。
         let or_url = v["arxiv_url_or"].as_str().unwrap();
         assert!(
-            or_url.contains("%28all%3Aad+OR+all%3Ahoc+OR+all%3Afile+OR+all%3Asystem%29+AND+%28cat%3Acs.DC%29"),
+            or_url.contains(
+                "%28all%3Aad+OR+all%3Ahoc+OR+all%3Afile+OR+all%3Asystem%29+AND+%28cat%3Acs.DC%29"
+            ),
             "{or_url}"
         );
         let openalex_url = v["openalex_url"].as_str().unwrap();
-        assert!(openalex_url.starts_with("https://api.openalex.org/works?"), "{openalex_url}");
+        assert!(
+            openalex_url.starts_with("https://api.openalex.org/works?"),
+            "{openalex_url}"
+        );
         // ADR-0035 D5: open access かつ Computer Science（実機で `GET /fields` で確認した id 17）。
         assert!(
             openalex_url.contains("filter=is_oa%3Atrue%2Cprimary_topic.field.id%3A17"),
             "{openalex_url}"
         );
         assert!(openalex_url.contains("per_page=20"), "{openalex_url}");
-        assert!(openalex_url.contains("mailto=who%40example.org"), "{openalex_url}");
-        assert!(!v["openalex_url_no_mailto"].as_str().unwrap().contains("mailto"), "{v}");
         assert!(
-            v["openalex_url_filter"].as_str().unwrap().ends_with("filter=is_oa%3Atrue"),
+            openalex_url.contains("mailto=who%40example.org"),
+            "{openalex_url}"
+        );
+        assert!(
+            !v["openalex_url_no_mailto"]
+                .as_str()
+                .unwrap()
+                .contains("mailto"),
+            "{v}"
+        );
+        assert!(
+            v["openalex_url_filter"]
+                .as_str()
+                .unwrap()
+                .ends_with("filter=is_oa%3Atrue"),
             "設定で filter を差し替えられる: {v}"
         );
         // 除外語は決定的に効く（タイトルでも要旨でも）。
@@ -2449,9 +2946,15 @@ print(json.dumps(out))
         assert_eq!(v["interleave"], serde_json::json!(["a1", "b1", "a2", "a3"]));
         // 2 件目はタイトル一致、3 件目は DOI の大文字小文字違いで 1 件目に畳まれる。
         assert_eq!(v["dedup_titles"], serde_json::json!(["T One", "Third"]));
-        assert_eq!(v["dedup_filled_arxiv"], "2101.1v1", "畳んだ側の欠けた項目を補う");
+        assert_eq!(
+            v["dedup_filled_arxiv"], "2101.1v1",
+            "畳んだ側の欠けた項目を補う"
+        );
         assert_eq!(v["dedup_limit"], serde_json::json!(["T One"]));
-        assert_eq!(v["pdf_filename"], "brinkmann2020_10-1007-s11390-020-9801-1.pdf");
+        assert_eq!(
+            v["pdf_filename"],
+            "brinkmann2020_10-1007-s11390-020-9801-1.pdf"
+        );
         assert_eq!(v["pdf_filename_anon"], "anonnd_a-title-here.pdf");
     }
 
@@ -2468,7 +2971,11 @@ print(json.dumps(out))
         let fixture = dir.path().join("fixture");
         write_fixtures(&fixture);
         // arXiv の PDF の URL に HTML を返させる。
-        std::fs::write(fixture.join("pdf-2101.00001v1"), "<html>login required</html>").unwrap();
+        std::fs::write(
+            fixture.join("pdf-2101.00001v1"),
+            "<html>login required</html>",
+        )
+        .unwrap();
         let corpus = dir.path().join("papers/_shared");
         let input_path = dir.path().join("acquire_input.json");
         let input = serde_json::json!({
@@ -2488,7 +2995,11 @@ print(json.dumps(out))
             .arg(&fixture)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         assert!(stdout.contains("not a PDF, skipped"), "{stdout}");
         assert!(!corpus.join("roe2021_arxiv-2101-00001v1.pdf").exists());
@@ -2504,7 +3015,10 @@ print(json.dumps(out))
         assert_eq!(strip_provider_prefix(" openai/gpt-4o "), "gpt-4o");
         assert_eq!(strip_provider_prefix("qwen3.8-27b"), "qwen3.8-27b");
         // 接頭辞に見えないもの（大文字を含む組織名など）はそのまま残す。
-        assert_eq!(strip_provider_prefix("Qwen/Qwen3.8-27B-FP8"), "Qwen/Qwen3.8-27B-FP8");
+        assert_eq!(
+            strip_provider_prefix("Qwen/Qwen3.8-27B-FP8"),
+            "Qwen/Qwen3.8-27B-FP8"
+        );
         assert_eq!(strip_provider_prefix("openai/"), "openai/");
     }
 
@@ -2525,13 +3039,22 @@ print(json.dumps(out))
             ..PaperQaConfig::default()
         };
         // settings の `llm`（`.json` は付けずに渡す実機の仕様）。
-        assert_eq!(query_llm_model(&config).await.as_deref(), Some("qwen3.8-27b"));
+        assert_eq!(
+            query_llm_model(&config).await.as_deref(),
+            Some("qwen3.8-27b")
+        );
         // `[[providers]] model`（`--llm`）が勝つ。
         config.model = Some("openai/other-model".to_string());
-        assert_eq!(query_llm_model(&config).await.as_deref(), Some("other-model"));
+        assert_eq!(
+            query_llm_model(&config).await.as_deref(),
+            Some("other-model")
+        );
         // `acquire.query_model` が最も強い。
         config.acquire.query_model = Some("explicit-model".to_string());
-        assert_eq!(query_llm_model(&config).await.as_deref(), Some("explicit-model"));
+        assert_eq!(
+            query_llm_model(&config).await.as_deref(),
+            Some("explicit-model")
+        );
         // 何も分からなければ `None`（= LLM の段を動かさない）。
         let bare = PaperQaConfig::default();
         assert_eq!(query_llm_model(&bare).await, None);
@@ -2547,7 +3070,11 @@ print(json.dumps(out))
     #[tokio::test]
     async fn the_acquire_input_carries_the_query_llm_and_the_request() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("qwen-local.json"), r#"{"llm": "openai/qwen3.8-27b"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("qwen-local.json"),
+            r#"{"llm": "openai/qwen3.8-27b"}"#,
+        )
+        .unwrap();
         let mut config = stub_pqa_with_acquire(
             dir.path(),
             &format!("cat >/dev/null\nprintf 'Answer: {STUB_ANSWER}\\n'\n"),
@@ -2555,7 +3082,10 @@ print(json.dumps(out))
         );
         config.settings = Some(dir.path().join("qwen-local").to_string_lossy().into_owned());
         config.env = vec![
-            ("OPENAI_BASE_URL".to_string(), "http://127.0.0.1:18000/v1".to_string()),
+            (
+                "OPENAI_BASE_URL".to_string(),
+                "http://127.0.0.1:18000/v1".to_string(),
+            ),
             ("OPENAI_API_KEY".to_string(), "unused".to_string()),
         ];
         let adapter = PaperQaAdapter::new(config);
@@ -2565,26 +3095,39 @@ print(json.dumps(out))
             project: "  Pluvio は ad-hoc FS 向けの非同期 I/O ランタイム  ".to_string(),
         });
         let sink = RecordingSink::default();
-        let _ = adapter.run(req.clone(), "run-a6", default_limits(), &sink).await.unwrap();
+        let _ = adapter
+            .run(req.clone(), "run-a6", default_limits(), &sink)
+            .await
+            .unwrap();
 
-        let input: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("runs/run-a6/acquire_input.json")).unwrap())
-                .unwrap();
+        let input: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("runs/run-a6/acquire_input.json")).unwrap(),
+        )
+        .unwrap();
         let llm = &input["query_llm"];
         assert_eq!(llm["enabled"], true, "{input}");
-        assert_eq!(llm["model"], "qwen3.8-27b", "settings の llm から供給者の接頭辞を落として渡す: {input}");
+        assert_eq!(
+            llm["model"], "qwen3.8-27b",
+            "settings の llm から供給者の接頭辞を落として渡す: {input}"
+        );
         assert_eq!(llm["base_url"], "http://127.0.0.1:18000/v1");
         assert_eq!(llm["api_key"], "unused");
         assert_eq!(llm["max_queries"], 6);
         assert_eq!(llm["timeout_secs"], 300);
         assert_eq!(input["request"]["title"], req.task.title);
         assert_eq!(input["request"]["objective"], req.task.objective);
-        assert_eq!(input["request"]["context"], "Pluvio は ad-hoc FS 向けの非同期 I/O ランタイム");
+        assert_eq!(
+            input["request"]["context"],
+            "Pluvio は ad-hoc FS 向けの非同期 I/O ランタイム"
+        );
         // 決定的な抽出も「受け皿」として一緒に渡す。
         assert!(!input["queries"].as_array().unwrap().is_empty(), "{input}");
         // 進捗に「誰が検索語を立てるか」が出る。
         let progress = sink.progress.lock().unwrap().join("\n");
-        assert!(progress.contains("the search terms are written by qwen3.8-27b"), "{progress}");
+        assert!(
+            progress.contains("the search terms are written by qwen3.8-27b"),
+            "{progress}"
+        );
 
         // `acquire.query_llm = false` にすると LLM の段は動かさない（従来の決定的な抽出だけ）。
         let mut off = stub_pqa_with_acquire(
@@ -2596,13 +3139,20 @@ print(json.dumps(out))
         off.acquire.query_llm = false;
         let adapter = PaperQaAdapter::new(off);
         let sink = RecordingSink::default();
-        let _ = adapter.run(req, "run-a7", default_limits(), &sink).await.unwrap();
-        let input: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("runs/run-a7/acquire_input.json")).unwrap())
-                .unwrap();
+        let _ = adapter
+            .run(req, "run-a7", default_limits(), &sink)
+            .await
+            .unwrap();
+        let input: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("runs/run-a7/acquire_input.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(input["query_llm"]["enabled"], false, "{input}");
         let progress = sink.progress.lock().unwrap().join("\n");
-        assert!(progress.contains("search term(s) (deterministic)"), "{progress}");
+        assert!(
+            progress.contains("search term(s) (deterministic)"),
+            "{progress}"
+        );
     }
 
     /// LLM の応答の差し替え（`--fixture` の `llm-1.json`）用の検索結果。1 件目の arXiv の 2 件目と
@@ -2672,12 +3222,19 @@ print(json.dumps(out))
             .arg(fixture)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
     fn acquire_counts(stdout: &str) -> serde_json::Value {
-        let line = stdout.lines().find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX)).expect("CELERIS_ACQUIRE");
+        let line = stdout
+            .lines()
+            .find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX))
+            .expect("CELERIS_ACQUIRE");
         serde_json::from_str(line.trim_start_matches(ACQUIRE_RESULT_PREFIX)).expect("valid JSON")
     }
 
@@ -2725,48 +3282,97 @@ print(json.dumps(out))
         let fixture = dir.path().join("fixture");
         write_llm_stage_fixtures(&fixture, &serde_json::to_string(&body).unwrap());
         let corpus = dir.path().join("papers").join("01PROJECT");
-        let stdout = run_acquire_runner(dir.path(), &llm_stage_input(dir.path(), &corpus), &fixture);
+        let stdout =
+            run_acquire_runner(dir.path(), &llm_stage_input(dir.path(), &corpus), &fixture);
 
-        assert!(stdout.contains("asking test-model-x for the search terms"), "{stdout}");
-        assert!(stdout.contains("search term: 'ad hoc file system HPC' (arxiv, openalex; cs.DC, cs.OS)"), "{stdout}");
+        assert!(
+            stdout.contains("asking test-model-x for the search terms"),
+            "{stdout}"
+        );
+        assert!(
+            stdout
+                .contains("search term: 'ad hoc file system HPC' (arxiv, openalex; cs.DC, cs.OS)"),
+            "{stdout}"
+        );
         // 2 本目は OpenAlex だけ → arXiv は 1 回しか呼ばれない。
         assert_eq!(stdout.matches("progress: arxiv:").count(), 1, "{stdout}");
-        assert!(stdout.contains("excluded ('mobile ad hoc network'): Routing in Mobile Ad Hoc Networks"), "{stdout}");
-        assert!(stdout.contains("2 result(s) dropped by the exclude terms"), "{stdout}");
+        assert!(
+            stdout
+                .contains("excluded ('mobile ad hoc network'): Routing in Mobile Ad Hoc Networks"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("2 result(s) dropped by the exclude terms"),
+            "{stdout}"
+        );
 
         let counts = acquire_counts(&stdout);
         assert_eq!(counts["query_source"], "llm", "{counts}");
         assert_eq!(counts["queries"], 2, "{counts}");
         assert_eq!(counts["excluded"], 2, "{counts}");
-        assert_eq!(counts["candidates"], 2, "除外語で落ちた 2 件は候補に入らない: {counts}");
+        assert_eq!(
+            counts["candidates"], 2,
+            "除外語で落ちた 2 件は候補に入らない: {counts}"
+        );
 
-        let plan_file: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/queries.json")).unwrap()).unwrap();
+        let plan_file: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/queries.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan_file["generated_by"], "llm");
         assert_eq!(plan_file["model"], "test-model-x");
         assert_eq!(plan_file["error"], "");
-        assert!(plan_file["raw"].as_str().unwrap().contains("ad hoc file system HPC"), "{plan_file}");
+        assert!(
+            plan_file["raw"]
+                .as_str()
+                .unwrap()
+                .contains("ad hoc file system HPC"),
+            "{plan_file}"
+        );
         assert_eq!(plan_file["queries"][0]["text"], "ad hoc file system HPC");
-        assert_eq!(plan_file["queries"][1]["engines"], serde_json::json!(["openalex"]));
+        assert_eq!(
+            plan_file["queries"][1]["engines"],
+            serde_json::json!(["openalex"])
+        );
         // カテゴリを書かなかった検索語には既定（cs.DC / cs.OS / cs.PF / cs.NI）が入る。
         assert_eq!(
             plan_file["queries"][1]["arxiv_categories"],
             serde_json::json!(["cs.DC", "cs.OS", "cs.PF", "cs.NI"])
         );
         // 除外語は小文字化され、短すぎるもの（"no"）は落ちる。
-        assert_eq!(plan_file["exclude_terms"], serde_json::json!(["mobile ad hoc network"]));
+        assert_eq!(
+            plan_file["exclude_terms"],
+            serde_json::json!(["mobile ad hoc network"])
+        );
 
         // どの検索語がどの候補を持ってきたか（ADR-0035 D5 手順 4）。
-        let candidates: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/papers.json")).unwrap())
-                .unwrap();
+        let candidates: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/papers.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0]["title"], "Ad Hoc File Systems for HPC Burst Buffers");
+        assert_eq!(
+            candidates[0]["title"],
+            "Ad Hoc File Systems for HPC Burst Buffers"
+        );
         assert_eq!(candidates[0]["query_text"], "ad hoc file system HPC");
         assert_eq!(candidates[0]["source_engine"], "arxiv");
-        assert!(candidates[0]["abstract"].as_str().unwrap().contains("node-local NVMe"), "{:?}", candidates[0]);
-        assert_eq!(candidates[1]["title"], "An Asynchronous IO Runtime for Storage");
-        assert_eq!(candidates[1]["query_text"], "asynchronous I/O runtime storage");
+        assert!(
+            candidates[0]["abstract"]
+                .as_str()
+                .unwrap()
+                .contains("node-local NVMe"),
+            "{:?}",
+            candidates[0]
+        );
+        assert_eq!(
+            candidates[1]["title"],
+            "An Asynchronous IO Runtime for Storage"
+        );
+        assert_eq!(
+            candidates[1]["query_text"],
+            "asynchronous I/O runtime storage"
+        );
         assert_eq!(candidates[1]["source_engine"], "openalex");
         // OpenAlex の逆引き索引から戻した要旨。
         assert_eq!(candidates[1]["abstract"], "We offload I/O");
@@ -2786,10 +3392,13 @@ print(json.dumps(out))
         let fixture = dir.path().join("fixture");
         write_llm_stage_fixtures(&fixture, &serde_json::to_string(&body).unwrap());
         let corpus = dir.path().join("papers").join("01PROJECT");
-        let stdout = run_acquire_runner(dir.path(), &llm_stage_input(dir.path(), &corpus), &fixture);
+        let stdout =
+            run_acquire_runner(dir.path(), &llm_stage_input(dir.path(), &corpus), &fixture);
 
         assert!(
-            stdout.contains("falling back to the deterministic extraction (no JSON object in the answer)"),
+            stdout.contains(
+                "falling back to the deterministic extraction (no JSON object in the answer)"
+            ),
             "{stdout}"
         );
         let counts = acquire_counts(&stdout);
@@ -2801,8 +3410,10 @@ print(json.dumps(out))
         assert_eq!(counts["excluded"], 0, "{counts}");
         assert!(counts["candidates"].as_u64().unwrap() >= 3, "{counts}");
 
-        let plan_file: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("artifacts/queries.json")).unwrap()).unwrap();
+        let plan_file: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/queries.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan_file["generated_by"], "fallback");
         assert_eq!(plan_file["error"], "no JSON object in the answer");
         assert_eq!(plan_file["queries"][0]["text"], "ad-hoc FS");
@@ -2811,7 +3422,10 @@ print(json.dumps(out))
             serde_json::json!(["cs.DC", "cs.OS", "cs.PF", "cs.NI"])
         );
         assert_eq!(plan_file["exclude_terms"], serde_json::json!([]));
-        assert_eq!(plan_file["raw"], "I'm sorry, I cannot help with that request.");
+        assert_eq!(
+            plan_file["raw"],
+            "I'm sorry, I cannot help with that request."
+        );
     }
 
     /// LLM の応答を読む部分（`chat/completions` の URL・本文の取り出し・JSON の切り出し・検査）は
@@ -2878,14 +3492,22 @@ print(json.dumps(out, ensure_ascii=False))
             .arg(&script_path)
             .output()
             .expect("failed to run python3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
 
         assert_eq!(v["url_v1"], "http://127.0.0.1:18000/v1/chat/completions");
         assert_eq!(v["url_slash"], "http://h/v1/chat/completions");
         assert_eq!(v["url_full"], "http://h/v1/chat/completions");
         assert_eq!(v["url_empty"], "");
-        assert!(v["text_reasoning"].as_str().unwrap().contains("thinking"), "{v}");
+        assert!(
+            v["text_reasoning"].as_str().unwrap().contains("thinking"),
+            "{v}"
+        );
         assert_eq!(v["text_no_choices"], "no choices in the response");
         assert_eq!(v["json_from_fence"], "{\"a\": {\"b\": 1}}");
         assert_eq!(v["json_none"], serde_json::Value::Null);
@@ -2898,9 +3520,20 @@ print(json.dumps(out, ensure_ascii=False))
         assert_eq!(queries[0]["engines"], serde_json::json!(["arxiv"]));
         assert_eq!(queries[0]["arxiv_categories"], serde_json::json!(["cs.DC"]));
         assert_eq!(queries[1]["text"], "asynchronous I/O runtime storage");
-        assert_eq!(queries[1]["engines"], serde_json::json!(["arxiv", "openalex"]), "既定は両方");
-        assert_eq!(queries[1]["arxiv_categories"], serde_json::json!(["cs.DC", "cs.NI"]), "既定のカテゴリ");
-        assert_eq!(queries[2]["text"], "one two three four five six seven eight", "8 語で切る");
+        assert_eq!(
+            queries[1]["engines"],
+            serde_json::json!(["arxiv", "openalex"]),
+            "既定は両方"
+        );
+        assert_eq!(
+            queries[1]["arxiv_categories"],
+            serde_json::json!(["cs.DC", "cs.NI"]),
+            "既定のカテゴリ"
+        );
+        assert_eq!(
+            queries[2]["text"], "one two three four five six seven eight",
+            "8 語で切る"
+        );
         assert_eq!(
             v["excludes"],
             serde_json::json!(["mobile ad hoc network", "vehicular network"]),
@@ -2910,7 +3543,13 @@ print(json.dumps(out, ensure_ascii=False))
 
         // 壊れた答えは必ず `ValueError`（呼び出し側が決定的な抽出に落ちる）。
         assert_eq!(v["err_nojson"], "no JSON object in the answer");
-        assert!(v["err_broken"].as_str().unwrap().starts_with("the JSON object is broken"), "{v}");
+        assert!(
+            v["err_broken"]
+                .as_str()
+                .unwrap()
+                .starts_with("the JSON object is broken"),
+            "{v}"
+        );
         assert_eq!(v["err_empty"], "no usable query in `queries`");
         assert_eq!(v["err_nolist"], "`queries` is not a list");
 

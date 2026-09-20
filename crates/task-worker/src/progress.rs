@@ -107,8 +107,12 @@ mod tests {
     /// ADR-0048 D2: 道具ごとに要約に使う鍵が決まっている。
     #[test]
     fn the_summary_picks_the_one_value_a_human_reads() {
-        let input = serde_json::json!({"command": "cargo test --workspace", "description": "run tests"});
-        assert_eq!(tool_input_summary("Bash", Some(&input)), "cargo test --workspace");
+        let input =
+            serde_json::json!({"command": "cargo test --workspace", "description": "run tests"});
+        assert_eq!(
+            tool_input_summary("Bash", Some(&input)),
+            "cargo test --workspace"
+        );
         let input = serde_json::json!({"file_path": "/x/y.rs", "offset": 1});
         assert_eq!(tool_input_summary("Read", Some(&input)), "/x/y.rs");
         let input = serde_json::json!({"pattern": "fn main", "path": "crates"});
@@ -129,8 +133,14 @@ mod tests {
         let fields = tool_result(Some("Bash"), &long, true);
         assert_eq!(fields.kind, Some(ProgressKind::ToolResult));
         assert!(fields.error);
-        assert_eq!(fields.summary.as_deref().map(|s| s.chars().count()), Some(RESULT_MAX_CHARS + 1));
-        assert_eq!(fields.detail.as_deref().map(str::len), Some(task_core::PROGRESS_DETAIL_MAX_BYTES));
+        assert_eq!(
+            fields.summary.as_deref().map(|s| s.chars().count()),
+            Some(RESULT_MAX_CHARS + 1)
+        );
+        assert_eq!(
+            fields.detail.as_deref().map(str::len),
+            Some(task_core::PROGRESS_DETAIL_MAX_BYTES)
+        );
         assert!(fields.truncated);
         let fields = thinking("考えている");
         assert_eq!(fields.kind, Some(ProgressKind::Thinking));

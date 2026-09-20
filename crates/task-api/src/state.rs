@@ -16,7 +16,8 @@ use crate::problem::ApiProblem;
 use crate::stats::StatsState;
 use crate::types::ConfigView;
 use crate::{
-    ApiError, ApiSettings, MAX_STREAMS, STREAM_HEARTBEAT_INTERVAL, STREAM_POLL_INTERVAL, STREAM_RESET_THRESHOLD,
+    ApiError, ApiSettings, MAX_STREAMS, STREAM_HEARTBEAT_INTERVAL, STREAM_POLL_INTERVAL,
+    STREAM_RESET_THRESHOLD,
 };
 
 /// SSE の上限と間隔。既定は api.md §4 の定数。テストでは短くしてよい。
@@ -104,7 +105,10 @@ pub(crate) struct Inner {
 
 impl ApiState {
     /// API 専用の `SqliteStore` を開き（`open_with`）、`journal_mode` を実測して状態を作る。
-    pub fn new(settings: ApiSettings, daemon: watch::Receiver<Option<DaemonSnapshot>>) -> Result<Self, ApiError> {
+    pub fn new(
+        settings: ApiSettings,
+        daemon: watch::Receiver<Option<DaemonSnapshot>>,
+    ) -> Result<Self, ApiError> {
         let store = SqliteStore::open_with(
             &settings.db_path,
             StoreOptions {
@@ -211,7 +215,9 @@ impl ApiState {
         let max = self.tuning.max_streams;
         self.inner
             .streams
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1))
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < max).then_some(n + 1)
+            })
             .ok()
             .map(|_| StreamSlot {
                 inner: Arc::clone(&self.inner),

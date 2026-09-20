@@ -70,12 +70,19 @@ pub(crate) fn canonical_workspace(task: &Task, root: &Path) -> Result<PathBuf, A
 }
 
 /// `candidate` を canonicalize し、`ws` 配下の通常ファイルであることを確かめる。
-fn contained_file(ws: &Path, candidate: &Path, missing: impl FnOnce() -> ApiProblem) -> Result<PathBuf, ApiProblem> {
+fn contained_file(
+    ws: &Path,
+    candidate: &Path,
+    missing: impl FnOnce() -> ApiProblem,
+) -> Result<PathBuf, ApiProblem> {
     let canonical = candidate.canonicalize().map_err(|_| missing())?;
     if !canonical.starts_with(ws) {
-        return Err(ApiProblem::path_forbidden("path resolves outside the workspace"));
+        return Err(ApiProblem::path_forbidden(
+            "path resolves outside the workspace",
+        ));
     }
-    let metadata = std::fs::metadata(&canonical).map_err(|_| ApiProblem::file_not_found("file does not exist"))?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|_| ApiProblem::file_not_found("file does not exist"))?;
     if !metadata.is_file() {
         return Err(ApiProblem::path_forbidden("path is not a regular file"));
     }
@@ -83,7 +90,12 @@ fn contained_file(ws: &Path, candidate: &Path, missing: impl FnOnce() -> ApiProb
 }
 
 /// `<ws>/runs/<run_id>/<file>`。`run_id` が ULID でなければ（ファイルシステムに触る前に）403。
-pub(crate) fn resolve_run_file(task: &Task, root: &Path, run_id: &str, file: RunFile) -> Result<PathBuf, ApiProblem> {
+pub(crate) fn resolve_run_file(
+    task: &Task,
+    root: &Path,
+    run_id: &str,
+    file: RunFile,
+) -> Result<PathBuf, ApiProblem> {
     if !is_ulid_text(run_id) {
         return Err(ApiProblem::path_forbidden("run_id must be a ULID"));
     }
@@ -94,7 +106,9 @@ pub(crate) fn resolve_run_file(task: &Task, root: &Path, run_id: &str, file: Run
         .canonicalize()
         .map_err(|_| ApiProblem::run_not_found(run_id))?;
     if !run_dir.starts_with(&ws) {
-        return Err(ApiProblem::path_forbidden("run directory resolves outside the workspace"));
+        return Err(ApiProblem::path_forbidden(
+            "run directory resolves outside the workspace",
+        ));
     }
     if !run_dir.is_dir() {
         return Err(ApiProblem::run_not_found(run_id));
@@ -109,11 +123,16 @@ pub(crate) fn resolve_artifact(ws: &Path, recorded: &str) -> Result<PathBuf, Api
     let relative = Path::new(recorded);
     let escapes = recorded.is_empty()
         || relative.is_absolute()
-        || relative
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)));
+        || relative.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        });
     if escapes {
-        return Err(ApiProblem::path_forbidden("artifact path is not workspace-relative"));
+        return Err(ApiProblem::path_forbidden(
+            "artifact path is not workspace-relative",
+        ));
     }
     contained_file(ws, &ws.join(relative), || {
         ApiProblem::file_not_found("artifact file does not exist")
@@ -248,7 +267,9 @@ pub(crate) fn artifact_views(task: &Task, root: &Path, rows: &[EventRow]) -> Vec
                 Ok(path) => {
                     let size = file_size(&path).ok();
                     let current = size.and_then(|s| current_sha256(&path, s));
-                    let matches = current.as_ref().map(|c| c.eq_ignore_ascii_case(&artifact.sha256));
+                    let matches = current
+                        .as_ref()
+                        .map(|c| c.eq_ignore_ascii_case(&artifact.sha256));
                     ArtifactView {
                         exists: size.is_some(),
                         size,
@@ -274,8 +295,8 @@ pub(crate) fn content_type_for(path: &Path) -> &'static str {
         .map(str::to_ascii_lowercase);
     match ext.as_deref() {
         Some(
-            "txt" | "log" | "jsonl" | "diff" | "patch" | "csv" | "tsv" | "toml" | "yaml" | "yml" | "rs" | "py" | "sh"
-            | "ts" | "js" | "c" | "h" | "cpp" | "go" | "java" | "sql",
+            "txt" | "log" | "jsonl" | "diff" | "patch" | "csv" | "tsv" | "toml" | "yaml" | "yml"
+            | "rs" | "py" | "sh" | "ts" | "js" | "c" | "h" | "cpp" | "go" | "java" | "sql",
         ) => "text/plain; charset=utf-8",
         Some("json") => "application/json",
         Some("md") => "text/markdown; charset=utf-8",
@@ -437,7 +458,10 @@ pub(crate) struct FileTarget {
 }
 
 /// 本体をストリーミングで返す。`X-Celeris-Size` は常に、成果物は `X-Celeris-Sha256(-Current)` も付ける。
-pub(crate) async fn respond_file(target: FileTarget, request: &FileRequest) -> Result<Response, ApiProblem> {
+pub(crate) async fn respond_file(
+    target: FileTarget,
+    request: &FileRequest,
+) -> Result<Response, ApiProblem> {
     let slice = plan_slice(request, target.size)?;
     let body = if slice.len == 0 {
         Body::empty()
@@ -453,7 +477,10 @@ pub(crate) async fn respond_file(target: FileTarget, request: &FileRequest) -> R
         StatusCode::OK
     };
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type_for(&target.path)));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type_for(&target.path)),
+    );
     let name = target
         .path
         .file_name()
@@ -467,14 +494,24 @@ pub(crate) async fn respond_file(target: FileTarget, request: &FileRequest) -> R
     headers.insert(X_CELERIS_SIZE, HeaderValue::from(target.size));
     if slice.partial {
         let end = slice.start + slice.len - 1;
-        if let Ok(value) = HeaderValue::from_str(&format!("bytes {}-{end}/{}", slice.start, target.size)) {
+        if let Ok(value) =
+            HeaderValue::from_str(&format!("bytes {}-{end}/{}", slice.start, target.size))
+        {
             headers.insert(header::CONTENT_RANGE, value);
         }
     }
-    if let Some(value) = target.recorded_sha256.as_deref().and_then(|s| HeaderValue::from_str(s).ok()) {
+    if let Some(value) = target
+        .recorded_sha256
+        .as_deref()
+        .and_then(|s| HeaderValue::from_str(s).ok())
+    {
         headers.insert(X_CELERIS_SHA256, value);
     }
-    if let Some(value) = target.current_sha256.as_deref().and_then(|s| HeaderValue::from_str(s).ok()) {
+    if let Some(value) = target
+        .current_sha256
+        .as_deref()
+        .and_then(|s| HeaderValue::from_str(s).ok())
+    {
         headers.insert(X_CELERIS_SHA256_CURRENT, value);
     }
     Ok(response)
@@ -554,27 +591,107 @@ mod tests {
     fn range_and_offset_planning_follows_the_spec() {
         let ok = |r: &FileRequest, size| plan_slice(r, size).ok();
         let code = |r: &FileRequest, size| plan_slice(r, size).err().map(|p| p.code());
-        assert_eq!(ok(&req(None, None, None), 10), Some(Slice { start: 0, len: 10, partial: false }));
-        assert_eq!(ok(&req(Some("bytes=2-5"), None, None), 10), Some(Slice { start: 2, len: 4, partial: true }));
-        assert_eq!(ok(&req(Some("bytes=8-"), None, None), 10), Some(Slice { start: 8, len: 2, partial: true }));
-        assert_eq!(ok(&req(Some("bytes=5-100"), None, None), 10), Some(Slice { start: 5, len: 5, partial: true }));
-        assert_eq!(ok(&req(Some("bytes=-3"), None, None), 10), Some(Slice { start: 7, len: 3, partial: true }));
-        assert_eq!(code(&req(Some("bytes=10-"), None, None), 10), Some("range_not_satisfiable"));
-        assert_eq!(code(&req(Some("bytes=0-1,4-5"), None, None), 10), Some("range_not_satisfiable"));
-        assert_eq!(code(&req(Some("bytes=5-2"), None, None), 10), Some("range_not_satisfiable"));
-        assert_eq!(code(&req(Some("bytes=abc"), None, None), 10), Some("range_not_satisfiable"));
-        assert_eq!(ok(&req(Some("items=0-1"), None, None), 10), Some(Slice { start: 0, len: 10, partial: false }));
-        assert_eq!(ok(&req(None, Some(4), None), 10), Some(Slice { start: 4, len: 6, partial: false }));
-        assert_eq!(ok(&req(None, Some(4), Some(3)), 10), Some(Slice { start: 4, len: 3, partial: false }));
-        assert_eq!(ok(&req(None, Some(10), None), 10), Some(Slice { start: 10, len: 0, partial: false }));
-        assert_eq!(code(&req(None, Some(11), None), 10), Some("range_not_satisfiable"));
+        assert_eq!(
+            ok(&req(None, None, None), 10),
+            Some(Slice {
+                start: 0,
+                len: 10,
+                partial: false
+            })
+        );
+        assert_eq!(
+            ok(&req(Some("bytes=2-5"), None, None), 10),
+            Some(Slice {
+                start: 2,
+                len: 4,
+                partial: true
+            })
+        );
+        assert_eq!(
+            ok(&req(Some("bytes=8-"), None, None), 10),
+            Some(Slice {
+                start: 8,
+                len: 2,
+                partial: true
+            })
+        );
+        assert_eq!(
+            ok(&req(Some("bytes=5-100"), None, None), 10),
+            Some(Slice {
+                start: 5,
+                len: 5,
+                partial: true
+            })
+        );
+        assert_eq!(
+            ok(&req(Some("bytes=-3"), None, None), 10),
+            Some(Slice {
+                start: 7,
+                len: 3,
+                partial: true
+            })
+        );
+        assert_eq!(
+            code(&req(Some("bytes=10-"), None, None), 10),
+            Some("range_not_satisfiable")
+        );
+        assert_eq!(
+            code(&req(Some("bytes=0-1,4-5"), None, None), 10),
+            Some("range_not_satisfiable")
+        );
+        assert_eq!(
+            code(&req(Some("bytes=5-2"), None, None), 10),
+            Some("range_not_satisfiable")
+        );
+        assert_eq!(
+            code(&req(Some("bytes=abc"), None, None), 10),
+            Some("range_not_satisfiable")
+        );
+        assert_eq!(
+            ok(&req(Some("items=0-1"), None, None), 10),
+            Some(Slice {
+                start: 0,
+                len: 10,
+                partial: false
+            })
+        );
+        assert_eq!(
+            ok(&req(None, Some(4), None), 10),
+            Some(Slice {
+                start: 4,
+                len: 6,
+                partial: false
+            })
+        );
+        assert_eq!(
+            ok(&req(None, Some(4), Some(3)), 10),
+            Some(Slice {
+                start: 4,
+                len: 3,
+                partial: false
+            })
+        );
+        assert_eq!(
+            ok(&req(None, Some(10), None), 10),
+            Some(Slice {
+                start: 10,
+                len: 0,
+                partial: false
+            })
+        );
+        assert_eq!(
+            code(&req(None, Some(11), None), 10),
+            Some("range_not_satisfiable")
+        );
     }
 
     #[test]
     fn range_and_offset_together_are_a_bad_request() {
         let mut headers = HeaderMap::new();
         headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-1"));
-        let err = FileRequest::parse(Some("offset=1"), &headers).err().map(|p| p.code());
+        let err = FileRequest::parse(Some("offset=1"), &headers)
+            .err()
+            .map(|p| p.code());
         assert_eq!(err, Some("bad_request"));
     }
 
@@ -583,10 +700,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
         let ws = dir.path().canonicalize().unwrap_or_else(|e| panic!("{e}"));
         for bad in ["", "/etc/passwd", "../x", "artifacts/../../x"] {
-            assert_eq!(resolve_artifact(&ws, bad).err().map(|p| p.code()), Some("path_forbidden"), "{bad}");
+            assert_eq!(
+                resolve_artifact(&ws, bad).err().map(|p| p.code()),
+                Some("path_forbidden"),
+                "{bad}"
+            );
         }
         assert_eq!(
-            resolve_artifact(&ws, "artifacts/missing.txt").err().map(|p| p.code()),
+            resolve_artifact(&ws, "artifacts/missing.txt")
+                .err()
+                .map(|p| p.code()),
             Some("file_not_found")
         );
     }

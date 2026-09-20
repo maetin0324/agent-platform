@@ -21,7 +21,10 @@ pub fn run(store: &dyn TaskStore, _args: ReplayArgs) -> Result<ExitCode, CliErro
     for m in &report.mismatches {
         outln!(
             "MISMATCH task={} field={} replayed={} stored={}",
-            m.task_id, m.field, m.replayed, m.stored
+            m.task_id,
+            m.field,
+            m.replayed,
+            m.stored
         );
     }
     outln!(
@@ -54,6 +57,8 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         let now = time::OffsetDateTime::now_utc();
         let task = task_core::Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,
@@ -70,7 +75,8 @@ mod tests {
                 adapter: None,
             },
             workspace: task_core::WorkspaceSpec::Local {
-                path: "/tmp/ws".into(), mode: None,
+                path: "/tmp/ws".into(),
+                mode: None,
             },
             budget: task_core::Budget {
                 max_turns: 1,

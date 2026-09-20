@@ -5,16 +5,18 @@ mod error;
 mod output;
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use task_core::{SqliteStore, TaskStore};
+use task_core::SqliteStore;
 
 use commands::add::{self, AddArgs};
 use commands::cancel::{self, CancelArgs};
+use commands::config::{self as config_cmd, ConfigCommand};
 use commands::gate::{self, AnswerArgs, ApproveArgs, RejectArgs};
 use commands::knowledge::{self, KnowledgeCommand};
+use commands::org::{self as org_cmd, OrgCommand};
 use commands::plan::{self, PlanArgs};
 use commands::query::{self, LogArgs, LsArgs, ShowArgs};
 use commands::replay::{self, ReplayArgs};
@@ -22,7 +24,10 @@ use commands::worker::{self, WorkerCommand};
 use error::CliError;
 
 #[derive(Parser, Debug)]
-#[command(name = "celerisctl", about = "celeris task control CLI (DESIGN.md §5.9)")]
+#[command(
+    name = "celerisctl",
+    about = "celeris task control CLI (DESIGN.md §5.9)"
+)]
 struct Cli {
     /// SQLite データベースファイルのパス（ADR-0004 D5）。
     /// 優先順位: --db > 環境変数 CELERIS_DB > ./celeris.sqlite3
@@ -56,6 +61,16 @@ enum Command {
         #[command(subcommand)]
         command: WorkerCommand,
     },
+    /// ADR-0046 D3: 設定の変換（`config to-harnesses`）。DB には触らない。
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// ADR-0046 D7: 組織の移行（`org migrate-v2`）。
+    Org {
+        #[command(subcommand)]
+        command: OrgCommand,
+    },
 }
 
 fn resolve_db_path(cli_db: Option<PathBuf>) -> PathBuf {
@@ -64,8 +79,11 @@ fn resolve_db_path(cli_db: Option<PathBuf>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("celeris.sqlite3"))
 }
 
-fn dispatch(store: &dyn TaskStore, command: Command) -> Result<ExitCode, CliError> {
+fn dispatch(store: &SqliteStore, db_path: &Path, command: Command) -> Result<ExitCode, CliError> {
     match command {
+        Command::Org { command } => org_cmd::run(store, db_path, command),
+        // `Config` は DB を開く前に処理される（`main` を見よ）。
+        Command::Config { command } => config_cmd::run(command),
         Command::Add(args) => add::run(store, args),
         Command::Plan(args) => plan::run(store, args),
         Command::Ls(args) => query::run_ls(store, args),
@@ -86,6 +104,16 @@ fn dispatch(store: &dyn TaskStore, command: Command) -> Result<ExitCode, CliErro
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // ADR-0046 D3: `config to-harnesses` は設定ファイルしか読まない（DB を開かない）。
+    if let Command::Config { command } = cli.command {
+        return match config_cmd::run(command) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // ADR-0047 D3: 知識ベースの道具は **DB を開かない**（ワーカーのコンテナには DB が無い）。
     if let Command::Knowledge { command } = cli.command {
         return match knowledge::run(command) {
@@ -106,7 +134,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match dispatch(&store, cli.command) {
+    match dispatch(&store, &db_path, cli.command) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e}");

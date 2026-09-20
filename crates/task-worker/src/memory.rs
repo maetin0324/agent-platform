@@ -29,7 +29,9 @@ pub struct MemoryDir {
 }
 
 /// 結果ファイル（`artifacts/result.json`）の `memory`（ADR-0033 D6）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 pub struct MemoryUpdate {
     /// 案件をまたぐ記憶に足す箇条書き。
     #[serde(default)]
@@ -41,7 +43,8 @@ pub struct MemoryUpdate {
 
 impl MemoryUpdate {
     pub fn is_empty(&self) -> bool {
-        self.notes.iter().all(|n| n.trim().is_empty()) && self.project.iter().all(|n| n.trim().is_empty())
+        self.notes.iter().all(|n| n.trim().is_empty())
+            && self.project.iter().all(|n| n.trim().is_empty())
     }
 }
 
@@ -65,7 +68,9 @@ impl MemoryDir {
 
     /// `<dir>/<node_id>/projects/<project_id>.md`。
     pub fn project_path(&self, node_id: &str, project_id: &str) -> PathBuf {
-        self.node_dir(node_id).join("projects").join(format!("{project_id}.md"))
+        self.node_dir(node_id)
+            .join("projects")
+            .join(format!("{project_id}.md"))
     }
 
     /// run の前に読む（無ければ空。読めなくても run は止めない）。それぞれ `MEMORY_MAX_CHARS` で切り、
@@ -93,7 +98,11 @@ impl MemoryDir {
         }
         match project_id {
             Some(project_id) if !update.project.is_empty() => {
-                append_bullets(&self.project_path(node_id, project_id), &update.project, date)?;
+                append_bullets(
+                    &self.project_path(node_id, project_id),
+                    &update.project,
+                    date,
+                )?;
             }
             _ => {}
         }
@@ -114,7 +123,11 @@ pub fn memory_from_result_json(text: &str) -> Option<MemoryUpdate> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let memory = value.get("memory")?;
     let update: MemoryUpdate = serde_json::from_value(memory.clone()).ok()?;
-    if update.is_empty() { None } else { Some(update) }
+    if update.is_empty() {
+        None
+    } else {
+        Some(update)
+    }
 }
 
 fn read_tail(path: &Path) -> String {
@@ -138,7 +151,12 @@ fn append_bullets(path: &Path, items: &[String], date: &str) -> io::Result<()> {
     let lines: Vec<String> = items
         .iter()
         .filter(|item| !item.trim().is_empty())
-        .map(|item| format!("- {date}: {}\n", item.split_whitespace().collect::<Vec<_>>().join(" ")))
+        .map(|item| {
+            format!(
+                "- {date}: {}\n",
+                item.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        })
         .collect();
     if lines.is_empty() {
         return Ok(());
@@ -147,7 +165,10 @@ fn append_bullets(path: &Path, items: &[String], date: &str) -> io::Result<()> {
         create_dir_all_0700(parent)?;
     }
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     file.write_all(lines.concat().as_bytes())
 }
 
@@ -182,7 +203,10 @@ mod tests {
     #[test]
     fn nothing_written_yet_reads_as_empty() {
         let (_tmp, memory) = dir();
-        assert_eq!(memory.load("secretary", Some("P1")), MemoryContext::default());
+        assert_eq!(
+            memory.load("secretary", Some("P1")),
+            MemoryContext::default()
+        );
         assert_eq!(memory.load("secretary", None), MemoryContext::default());
     }
 
@@ -193,14 +217,30 @@ mod tests {
             notes: vec!["pegasus は pjsub で投げる".into(), "  ".into()],
             project: vec!["Pluvio は非同期ランタイム基盤\nらしい".into()],
         };
-        memory.append("secretary", Some("P1"), &update, "2026-09-17").expect("append");
+        memory
+            .append("secretary", Some("P1"), &update, "2026-09-17")
+            .expect("append");
         let loaded = memory.load("secretary", Some("P1"));
-        assert_eq!(loaded.notes, "- 2026-09-17: pegasus は pjsub で投げる\n", "空白だけの項目は捨てる");
-        assert_eq!(loaded.project, "- 2026-09-17: Pluvio は非同期ランタイム基盤 らしい\n");
+        assert_eq!(
+            loaded.notes, "- 2026-09-17: pegasus は pjsub で投げる\n",
+            "空白だけの項目は捨てる"
+        );
+        assert_eq!(
+            loaded.project,
+            "- 2026-09-17: Pluvio は非同期ランタイム基盤 らしい\n"
+        );
 
         // 2 回目は追記（上書きしない）。
         memory
-            .append("secretary", Some("P1"), &MemoryUpdate { notes: vec!["人は図より表が好き".into()], project: vec![] }, "2026-09-18")
+            .append(
+                "secretary",
+                Some("P1"),
+                &MemoryUpdate {
+                    notes: vec!["人は図より表が好き".into()],
+                    project: vec![],
+                },
+                "2026-09-18",
+            )
             .expect("append");
         let loaded = memory.load("secretary", Some("P1"));
         assert_eq!(loaded.notes.lines().count(), 2);
@@ -213,7 +253,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(memory.root()).expect("meta").permissions().mode();
+            let mode = std::fs::metadata(memory.root())
+                .expect("meta")
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o700, "記憶のディレクトリは 0700");
         }
     }
@@ -221,15 +264,38 @@ mod tests {
     #[test]
     fn an_empty_or_missing_memory_writes_nothing() {
         let (_tmp, memory) = dir();
-        memory.append("secretary", Some("P1"), &MemoryUpdate::default(), "2026-09-17").expect("append");
         memory
-            .append("secretary", Some("P1"), &MemoryUpdate { notes: vec![" ".into()], project: vec![] }, "2026-09-17")
+            .append(
+                "secretary",
+                Some("P1"),
+                &MemoryUpdate::default(),
+                "2026-09-17",
+            )
+            .expect("append");
+        memory
+            .append(
+                "secretary",
+                Some("P1"),
+                &MemoryUpdate {
+                    notes: vec![" ".into()],
+                    project: vec![],
+                },
+                "2026-09-17",
+            )
             .expect("append");
         assert!(!memory.notes_path("secretary").exists());
         assert!(!memory.project_path("secretary", "P1").exists());
         // 案件が無い run の `project` は行き先が無いので捨てる（notes だけ残る）。
         memory
-            .append("secretary", None, &MemoryUpdate { notes: vec!["a".into()], project: vec!["b".into()] }, "2026-09-17")
+            .append(
+                "secretary",
+                None,
+                &MemoryUpdate {
+                    notes: vec!["a".into()],
+                    project: vec!["b".into()],
+                },
+                "2026-09-17",
+            )
             .expect("append");
         assert_eq!(memory.load("secretary", None).notes, "- 2026-09-17: a\n");
     }
@@ -237,18 +303,34 @@ mod tests {
     #[test]
     fn the_preamble_is_cut_at_eight_thousand_characters_keeping_the_newest() {
         let (_tmp, memory) = dir();
-        let items: Vec<String> = (0..500).map(|i| format!("{i:03} {}", "あ".repeat(40))).collect();
+        let items: Vec<String> = (0..500)
+            .map(|i| format!("{i:03} {}", "あ".repeat(40)))
+            .collect();
         memory
-            .append("secretary", Some("P1"), &MemoryUpdate { notes: items, project: vec![] }, "2026-09-17")
+            .append(
+                "secretary",
+                Some("P1"),
+                &MemoryUpdate {
+                    notes: items,
+                    project: vec![],
+                },
+                "2026-09-17",
+            )
             .expect("append");
         let raw = std::fs::read_to_string(memory.notes_path("secretary")).expect("read");
         assert!(raw.chars().count() > MEMORY_MAX_CHARS);
         let loaded = memory.load("secretary", Some("P1"));
         assert!(loaded.notes.chars().count() <= MEMORY_MAX_CHARS + TRUNCATED_MARK.chars().count());
-        assert!(loaded.notes.starts_with(TRUNCATED_MARK), "切ったことが分かる");
+        assert!(
+            loaded.notes.starts_with(TRUNCATED_MARK),
+            "切ったことが分かる"
+        );
         let last = loaded.notes.lines().next_back().unwrap_or_default();
         assert!(last.starts_with("- 2026-09-17: 499 "), "{last}");
-        assert!(!loaded.notes.contains("- 2026-09-17: 000 "), "古い方から落ちる");
+        assert!(
+            !loaded.notes.contains("- 2026-09-17: 000 "),
+            "古い方から落ちる"
+        );
     }
 
     #[test]
@@ -260,14 +342,25 @@ mod tests {
         // ファイルが無い
         assert_eq!(read_result_memory(&tmp.path().join("nowhere")), None);
         // `memory` が無い
-        std::fs::write(artifacts.join("result.json"), r#"{"summary":"ok","evidence":[]}"#).expect("write");
+        std::fs::write(
+            artifacts.join("result.json"),
+            r#"{"summary":"ok","evidence":[]}"#,
+        )
+        .expect("write");
         assert_eq!(read_result_memory(&artifacts), None);
         // 形が違う（配列でない）
-        std::fs::write(artifacts.join("result.json"), r#"{"summary":"ok","memory":{"notes":"x"}}"#).expect("write");
+        std::fs::write(
+            artifacts.join("result.json"),
+            r#"{"summary":"ok","memory":{"notes":"x"}}"#,
+        )
+        .expect("write");
         assert_eq!(read_result_memory(&artifacts), None);
         // 空の配列は「何も無い」
-        std::fs::write(artifacts.join("result.json"), r#"{"summary":"ok","memory":{"notes":[],"project":[]}}"#)
-            .expect("write");
+        std::fs::write(
+            artifacts.join("result.json"),
+            r#"{"summary":"ok","memory":{"notes":[],"project":[]}}"#,
+        )
+        .expect("write");
         assert_eq!(read_result_memory(&artifacts), None);
         // 正常
         std::fs::write(

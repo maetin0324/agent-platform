@@ -25,7 +25,9 @@ use crate::subprocess::{LineOutcome, MAX_LINE_BYTES, read_line_limited, send_sig
 pub(crate) const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `check_account` / `AccountLoginResult` の結果種別（ADR-0024 D5/D6。serde は `snake_case`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountCheckResult {
     Ok,
@@ -83,12 +85,22 @@ impl Drop for TempCwdGuard {
     }
 }
 
-async fn run_check(command: &str, account_dir: &Path, model: &str, base_env: &[(String, String)]) -> AccountCheck {
-    let cwd = std::env::temp_dir().join(format!("celeris-account-check-{}", task_core::TaskId::new()));
+async fn run_check(
+    command: &str,
+    account_dir: &Path,
+    model: &str,
+    base_env: &[(String, String)],
+) -> AccountCheck {
+    let cwd = std::env::temp_dir().join(format!(
+        "celeris-account-check-{}",
+        task_core::TaskId::new()
+    ));
     if let Err(e) = tokio::fs::create_dir_all(&cwd).await {
         return AccountCheck {
             result: AccountCheckResult::SpawnFailed,
-            detail: Some(truncate_detail(&format!("failed to create check workspace: {e}"))),
+            detail: Some(truncate_detail(&format!(
+                "failed to create check workspace: {e}"
+            ))),
             observation: None,
         };
     }
@@ -166,11 +178,22 @@ async fn run_check(command: &str, account_dir: &Path, model: &str, base_env: &[(
     let stderr_bytes = stderr_task.await.unwrap_or_default();
     drop(cwd_guard);
 
-    let (result, detail) = classify(last_result.as_ref(), &String::from_utf8_lossy(&stderr_bytes));
-    AccountCheck { result, detail, observation: last_observation }
+    let (result, detail) = classify(
+        last_result.as_ref(),
+        &String::from_utf8_lossy(&stderr_bytes),
+    );
+    AccountCheck {
+        result,
+        detail,
+        observation: last_observation,
+    }
 }
 
-fn handle_check_line(line: &str, last_result: &mut Option<ResultMeta>, last_observation: &mut Option<RateLimitObservation>) {
+fn handle_check_line(
+    line: &str,
+    last_result: &mut Option<ResultMeta>,
+    last_observation: &mut Option<RateLimitObservation>,
+) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         return;
     };
@@ -183,17 +206,34 @@ fn handle_check_line(line: &str, last_result: &mut Option<ResultMeta>, last_obse
         *last_observation = Some(obs);
     }
     if ty == "result" {
-        let subtype = value.get("subtype").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
-        let is_error = value.get("is_error").and_then(|b| b.as_bool()).unwrap_or(subtype != "success");
-        let result = value.get("result").and_then(|r| r.as_str()).map(str::to_string);
-        *last_result = Some(ResultMeta { subtype, is_error, result });
+        let subtype = value
+            .get("subtype")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let is_error = value
+            .get("is_error")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(subtype != "success");
+        let result = value
+            .get("result")
+            .and_then(|r| r.as_str())
+            .map(str::to_string);
+        *last_result = Some(ResultMeta {
+            subtype,
+            is_error,
+            result,
+        });
     }
 }
 
 /// D6 の分類規則: `result` が成功なら `Ok`。それ以外（エラー・`result` 行が来なかった）は
 /// `classify_provider_failure` に通す。分類できず `result` 行も無ければ `SpawnFailed`、分類できないが
 /// `result` 行はあれば（アカウント自体の問題ではないので）`Ok` とする。
-fn classify(last_result: Option<&ResultMeta>, stderr_tail: &str) -> (AccountCheckResult, Option<String>) {
+fn classify(
+    last_result: Option<&ResultMeta>,
+    stderr_tail: &str,
+) -> (AccountCheckResult, Option<String>) {
     match last_result {
         Some(meta) if !meta.is_error && meta.subtype == "success" => {
             let text = meta.result.clone().unwrap_or_default();
@@ -202,7 +242,9 @@ fn classify(last_result: Option<&ResultMeta>, stderr_tail: &str) -> (AccountChec
         Some(meta) => {
             let text = meta.result.clone().unwrap_or_else(|| meta.subtype.clone());
             match classify_provider_failure(&text) {
-                Some(ProviderFailure::AuthFailed) => (AccountCheckResult::AuthFailed, Some(truncate_detail(&text))),
+                Some(ProviderFailure::AuthFailed) => {
+                    (AccountCheckResult::AuthFailed, Some(truncate_detail(&text)))
+                }
                 Some(ProviderFailure::Throttled { .. }) | Some(ProviderFailure::Exhausted) => {
                     (AccountCheckResult::Throttled, Some(truncate_detail(&text)))
                 }
@@ -210,10 +252,14 @@ fn classify(last_result: Option<&ResultMeta>, stderr_tail: &str) -> (AccountChec
             }
         }
         None => match classify_provider_failure(stderr_tail) {
-            Some(ProviderFailure::AuthFailed) => (AccountCheckResult::AuthFailed, Some(truncate_detail(stderr_tail))),
-            Some(ProviderFailure::Throttled { .. }) | Some(ProviderFailure::Exhausted) => {
-                (AccountCheckResult::Throttled, Some(truncate_detail(stderr_tail)))
-            }
+            Some(ProviderFailure::AuthFailed) => (
+                AccountCheckResult::AuthFailed,
+                Some(truncate_detail(stderr_tail)),
+            ),
+            Some(ProviderFailure::Throttled { .. }) | Some(ProviderFailure::Exhausted) => (
+                AccountCheckResult::Throttled,
+                Some(truncate_detail(stderr_tail)),
+            ),
             None => {
                 let detail = if stderr_tail.trim().is_empty() {
                     "worker exited without a result message".to_string()
@@ -237,7 +283,9 @@ pub(crate) fn truncate_detail(text: &str) -> String {
 }
 
 /// ADR-0024 D7 のログイン中継の結果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LoginOutcome {
     Ok,
@@ -300,7 +348,9 @@ where
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                buf.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]);
+                buf.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(&chunk[..n]);
             }
         }
     }
@@ -379,7 +429,11 @@ pub async fn start_login(
             let _ = child.wait().await;
             join_with_timeout(out_task, READER_JOIN_TIMEOUT).await;
             join_with_timeout(err_task, READER_JOIN_TIMEOUT).await;
-            Err(if exited { LoginError::ProcessExited } else { LoginError::Timeout })
+            Err(if exited {
+                LoginError::ProcessExited
+            } else {
+                LoginError::Timeout
+            })
         }
     }
 }
@@ -435,7 +489,14 @@ impl LoginSession {
         let snapshot = self.buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let detail = last_line_detail(&snapshot);
 
-        LoginResult { result: if ok { LoginOutcome::Ok } else { LoginOutcome::Failed }, detail }
+        LoginResult {
+            result: if ok {
+                LoginOutcome::Ok
+            } else {
+                LoginOutcome::Failed
+            },
+            detail,
+        }
     }
 
     /// 進行中のログインを止める（ADR-0024 D7: `DELETE /accounts/{id}/login` / 10 分での打ち切り / celeris 終了時）。
@@ -460,7 +521,11 @@ impl Drop for LoginSession {
 /// エスケープを除いた出力の最後の空でない行を `detail` にする（1 行・200 文字まで、URL は伏せる）。
 fn last_line_detail(bytes: &[u8]) -> Option<String> {
     let stripped = strip_escape_codes(bytes);
-    let last = stripped.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
+    let last = stripped
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())?;
     let redacted = redact_urls(last);
     Some(truncate_detail(&redacted))
 }
@@ -645,9 +710,14 @@ fi
         let dir = tempfile::tempdir().unwrap();
         let command = login_stub(dir.path());
         let acct = account_dir(dir.path(), "a");
-        let session = start_login(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
+        let session = start_login(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
         assert_eq!(
             session.url,
             "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=abc"
@@ -660,10 +730,17 @@ fi
         let dir = tempfile::tempdir().unwrap();
         let command = login_stub(dir.path());
         let acct = account_dir(dir.path(), "a");
-        let session = start_login(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
-        let result = session.submit_code("good-code", Duration::from_secs(5)).await;
+        let session = start_login(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
+        let result = session
+            .submit_code("good-code", Duration::from_secs(5))
+            .await;
         assert_eq!(result.result, LoginOutcome::Ok);
         assert!(acct.join(".credentials.json").is_file());
     }
@@ -673,10 +750,17 @@ fi
         let dir = tempfile::tempdir().unwrap();
         let command = login_stub(dir.path());
         let acct = account_dir(dir.path(), "a");
-        let session = start_login(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
-        let result = session.submit_code("bad-code", Duration::from_secs(5)).await;
+        let session = start_login(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
+        let result = session
+            .submit_code("bad-code", Duration::from_secs(5))
+            .await;
         assert_eq!(result.result, LoginOutcome::Failed);
         let detail = result.detail.expect("detail");
         assert!(detail.contains("400"), "{detail}");
@@ -690,10 +774,17 @@ fi
         let dir = tempfile::tempdir().unwrap();
         let command = login_stub(dir.path());
         let acct = account_dir(dir.path(), "a");
-        let session = start_login(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
-        let result = session.submit_code("good-code\nrm -rf /", Duration::from_secs(5)).await;
+        let session = start_login(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
+        let result = session
+            .submit_code("good-code\nrm -rf /", Duration::from_secs(5))
+            .await;
         assert_eq!(result.result, LoginOutcome::Failed);
         let detail = result.detail.expect("detail");
         assert!(!detail.contains("good-code"), "{detail}");
@@ -707,9 +798,14 @@ fi
         let dir = tempfile::tempdir().unwrap();
         let command = login_stub(dir.path());
         let acct = account_dir(dir.path(), "a");
-        let session = start_login(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
+        let session = start_login(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
         let result = session.submit_code("   ", Duration::from_secs(5)).await;
         assert_eq!(result.result, LoginOutcome::Failed);
         assert!(!acct.join(".credentials.json").is_file());
@@ -720,9 +816,14 @@ fi
         let dir = tempfile::tempdir().unwrap();
         let command = login_stub(dir.path());
         let acct = account_dir(dir.path(), "a");
-        let session = start_login(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
+        let session = start_login(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
         let pid = session.child.as_ref().and_then(|c| c.id()).expect("pid");
         session.cancel();
         // The child should exit shortly after being killed.

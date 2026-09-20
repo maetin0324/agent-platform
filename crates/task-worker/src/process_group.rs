@@ -126,7 +126,11 @@ pub fn kill_tree(run_id: &str, grace: Duration) -> bool {
 /// これが**唯一の合流点**である（呼ぶ側は `Dispatcher::stop_run` 1 か所）。`container` が `None` なら
 /// 従来と 1 バイトも変わらない。プロセスグループの登録が無くても `container` があれば
 /// コンテナ側だけは止める（クライアントが先に死んでコンテナが取り残された場合）。
-pub fn kill_tree_with(run_id: &str, grace: Duration, container: Option<Arc<dyn ContainerStopper>>) -> bool {
+pub fn kill_tree_with(
+    run_id: &str,
+    grace: Duration,
+    container: Option<Arc<dyn ContainerStopper>>,
+) -> bool {
     let pgid = pgid_of(run_id);
     if pgid.is_some() {
         // 表からは先に落とす（同じ run に二重に止めを掛けない）。
@@ -192,10 +196,7 @@ mod tests {
     async fn kill_tree_terminates_the_whole_group_including_grandchildren() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let pidfile = dir.path().join("grandchild.pid");
-        let script = format!(
-            "sleep 300 & echo $! > {}; wait",
-            pidfile.to_string_lossy()
-        );
+        let script = format!("sleep 300 & echo $! > {}; wait", pidfile.to_string_lossy());
         let mut command = tokio::process::Command::new("sh");
         command
             .arg("-c")
@@ -255,7 +256,11 @@ mod tests {
             program: runtime.to_string_lossy().into_owned(),
             task_id: "01TASKCONTAINER".into(),
         });
-        assert!(kill_tree_with(&run_id, Duration::from_millis(200), Some(stopper)));
+        assert!(kill_tree_with(
+            &run_id,
+            Duration::from_millis(200),
+            Some(stopper)
+        ));
 
         // SIGTERM の段は同期に出ている。
         let first = read_lines(&log);
@@ -304,7 +309,11 @@ mod tests {
             program: runtime.to_string_lossy().into_owned(),
             task_id: "01TASKORPHAN".into(),
         });
-        assert!(kill_tree_with("no-such-run", Duration::from_millis(100), Some(stopper)));
+        assert!(kill_tree_with(
+            "no-such-run",
+            Duration::from_millis(100),
+            Some(stopper)
+        ));
         let lines = wait_for_lines(&log, 4).await;
         assert_eq!(lines[1], "kill --signal TERM c0ffee111111");
         assert_eq!(lines[3], "rm -f c0ffee111111");

@@ -40,7 +40,10 @@ pub(crate) async fn get_memory(
     // `project` はメモリファイルの置き場所を選ぶ生の文字列（`projects` 表の存在確認はしない。記憶の
     // 引き出しはファイルが正で、`projects` 行が消えても読めてよいため）。空文字列は「指定なし」扱い。
     let query = QueryParams::parse(raw.as_deref(), &["project"])?;
-    let project_id = query.single("project")?.filter(|p| !p.is_empty()).map(str::to_string);
+    let project_id = query
+        .single("project")?
+        .filter(|p| !p.is_empty())
+        .map(str::to_string);
     let Some(dir) = state.inner.memory_dir.clone() else {
         return Err(ApiProblem::memory_unavailable());
     };
@@ -49,7 +52,11 @@ pub(crate) async fn get_memory(
             if store.org_get(&id).map_err(store_problem)?.is_none() {
                 return Err(ApiProblem::org_node_not_found(&id));
             }
-            Ok(task_ops::memory::read_memory(&dir, &id, project_id.as_deref()))
+            Ok(task_ops::memory::read_memory(
+                &dir,
+                &id,
+                project_id.as_deref(),
+            ))
         })
         .await?;
     Ok(json_response(

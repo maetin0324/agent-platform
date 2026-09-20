@@ -15,8 +15,8 @@
 use serde::Deserialize;
 use task_core::report::{self, Report};
 use task_core::{
-    Budget, GenreSpec, ListFilter, ListOrder, OrgNode, ProjectId, RoleSpec, Status, StoreError, TaskId,
-    TaskKind, TaskStore,
+    Budget, GenreSpec, ListFilter, ListOrder, OrgNode, ProjectId, RoleSpec, Status, StoreError,
+    TaskId, TaskKind, TaskStore,
 };
 use task_ops::add::NewTaskSpec;
 use time::OffsetDateTime;
@@ -63,7 +63,10 @@ impl Default for ReportsConfig {
 /// 親になっているノード（子を 1 つ以上持つノード）。
 fn parents(org: &[OrgNode]) -> Vec<&OrgNode> {
     org.iter()
-        .filter(|n| org.iter().any(|c| c.parent_id.as_deref() == Some(n.id.as_str())))
+        .filter(|n| {
+            org.iter()
+                .any(|c| c.parent_id.as_deref() == Some(n.id.as_str()))
+        })
         .collect()
 }
 
@@ -137,8 +140,13 @@ fn has_recently_failed_compaction_task(
 /// 監査 L-4（Phase 27）: tier / アダプタ / 分野は自分で決めず、`task_ops::add::create_support_task` の
 /// 解決順（タスクの値 > 役割の既定 > `assignee` 由来 > 分野の既定 > 全体の既定）に任せる。
 /// `role = report-compressor` が `[[roles]]` に無い構成でも落ちない（既定が埋まらないだけ）。
-fn compaction_spec(node: &OrgNode, project_id: Option<ProjectId>, pending: &[Report]) -> NewTaskSpec {
-    NewTaskSpec { repos: Vec::new(),
+fn compaction_spec(
+    node: &OrgNode,
+    project_id: Option<ProjectId>,
+    pending: &[Report],
+) -> NewTaskSpec {
+    NewTaskSpec {
+        repos: Vec::new(),
         title: format!("報告のまとめ: {}", node.name),
         objective: report::compaction_objective(node, pending),
         acceptance: Vec::new(),
@@ -153,6 +161,9 @@ fn compaction_spec(node: &OrgNode, project_id: Option<ProjectId>, pending: &[Rep
         role: Some(report::COMPACTION_ROLE.to_string()),
         genre: None,
         aggregate: false,
+        // ADR-0046 D2 / D4（Phase 59）: 裏方のまとめ run に能力タグは要らない（担当は親ノード固定）。
+        skills: Vec::new(),
+        mode: None,
         project_id,
         milestone_id: None,
         assignee: Some(node.id.clone()),
@@ -184,14 +195,25 @@ pub fn schedule_report_compaction(
             continue;
         }
         for (project_id, items) in group_by_project(pending) {
-            if !report::compaction_due(&items, now, config.compress_after, config.compress_after_secs) {
+            if !report::compaction_due(
+                &items,
+                now,
+                config.compress_after,
+                config.compress_after_secs,
+            ) {
                 continue;
             }
             if has_open_compaction_task(store, &node.id, project_id)? {
                 continue;
             }
             // 監査 H-2: 直近で失敗したまとめタスクがあれば、`compress_after_secs` 経つまでバックオフする。
-            if has_recently_failed_compaction_task(store, &node.id, project_id, now, config.compress_after_secs)? {
+            if has_recently_failed_compaction_task(
+                store,
+                &node.id,
+                project_id,
+                now,
+                config.compress_after_secs,
+            )? {
                 tracing::debug!(node = %node.id, ?project_id, "reports: backing off after a recently failed compaction run");
                 continue;
             }
@@ -227,6 +249,7 @@ mod tests {
     fn org_node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
         OrgNode {
+            profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: id.into(),
@@ -294,7 +317,9 @@ mod tests {
         let cfg = ReportsConfig::default();
 
         for n in 0..3 {
-            store.report_append(&child_report(Some(project), now, n)).expect("append");
+            store
+                .report_append(&child_report(Some(project), now, n))
+                .expect("append");
         }
         assert!(
             schedule_report_compaction(&store, &cfg, &[], &[], now)
@@ -303,7 +328,9 @@ mod tests {
             "3 件では起きない"
         );
 
-        store.report_append(&child_report(Some(project), now, 3)).expect("append");
+        store
+            .report_append(&child_report(Some(project), now, 3))
+            .expect("append");
         let created = schedule_report_compaction(&store, &cfg, &[], &[], now).expect("schedule");
         assert_eq!(created.len(), 1, "4 件で起きる");
 
@@ -313,8 +340,16 @@ mod tests {
         assert_eq!(task.project_id, Some(project));
         assert_eq!(task.role.as_deref(), Some(report::COMPACTION_ROLE));
         for n in 0..4 {
-            assert!(task.objective.contains(&format!("結果 {n}")), "{}", task.objective);
-            assert!(task.objective.contains(&format!("本文 {n}")), "{}", task.objective);
+            assert!(
+                task.objective.contains(&format!("結果 {n}")),
+                "{}",
+                task.objective
+            );
+            assert!(
+                task.objective.contains(&format!("本文 {n}")),
+                "{}",
+                task.objective
+            );
         }
 
         // 開いているまとめがある間は二重に作らない。
@@ -331,7 +366,11 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let cfg = ReportsConfig::default();
         store
-            .report_append(&child_report(Some(seed_project(&store)), now - time::Duration::hours(1), 0))
+            .report_append(&child_report(
+                Some(seed_project(&store)),
+                now - time::Duration::hours(1),
+                0,
+            ))
             .expect("append");
         assert!(
             schedule_report_compaction(&store, &cfg, &[], &[], now)
@@ -339,7 +378,9 @@ mod tests {
                 .is_empty(),
             "1 時間では起きない"
         );
-        let created = schedule_report_compaction(&store, &cfg, &[], &[], now + time::Duration::hours(2)).expect("schedule");
+        let created =
+            schedule_report_compaction(&store, &cfg, &[], &[], now + time::Duration::hours(2))
+                .expect("schedule");
         assert_eq!(created.len(), 1, "2 時間経過で起きる");
     }
 
@@ -352,11 +393,14 @@ mod tests {
         let cfg = ReportsConfig::default();
 
         for n in 0..4 {
-            store.report_append(&child_report(Some(project), now, n)).expect("append");
+            store
+                .report_append(&child_report(Some(project), now, n))
+                .expect("append");
         }
 
         // 同じノード・同じ案件の、直近失敗したまとめタスク。
         let node = OrgNode {
+            profile: Default::default(),
             id: "coding".into(),
             parent_id: Some("secretary".into()),
             name: "coding".into(),
@@ -379,7 +423,11 @@ mod tests {
             .acquire_lease(failed.id, "run-failed", std::time::Duration::from_secs(60))
             .expect("lease");
         let outcome = store
-            .apply_transition(failed.id, task_core::Trigger::WorkerError { retryable: false }, None)
+            .apply_transition(
+                failed.id,
+                task_core::Trigger::WorkerError { retryable: false },
+                None,
+            )
             .expect("fail");
         assert_eq!(outcome.next, Status::Failed);
 
@@ -391,7 +439,9 @@ mod tests {
         );
 
         // `compress_after_secs` が経てば作られる。
-        let later = now + time::Duration::seconds(cfg.compress_after_secs as i64) + time::Duration::minutes(11);
+        let later = now
+            + time::Duration::seconds(cfg.compress_after_secs as i64)
+            + time::Duration::minutes(11);
         let created = schedule_report_compaction(&store, &cfg, &[], &[], later).expect("schedule");
         assert_eq!(created.len(), 1, "バックオフ期間を過ぎればまた作られる");
     }
@@ -404,8 +454,12 @@ mod tests {
         let a = seed_project(&store);
         let b = seed_project(&store);
         for n in 0..4 {
-            store.report_append(&child_report(Some(a), now, n)).expect("append");
-            store.report_append(&child_report(Some(b), now, n)).expect("append");
+            store
+                .report_append(&child_report(Some(a), now, n))
+                .expect("append");
+            store
+                .report_append(&child_report(Some(b), now, n))
+                .expect("append");
         }
         let created = schedule_report_compaction(&store, &cfg, &[], &[], now).expect("schedule");
         assert_eq!(created.len(), 2);
@@ -423,7 +477,9 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let project = seed_project(&store);
         let cfg = ReportsConfig::default();
-        let children: Vec<Report> = (0..4).map(|n| child_report(Some(project), now, n)).collect();
+        let children: Vec<Report> = (0..4)
+            .map(|n| child_report(Some(project), now, n))
+            .collect();
         store.report_append_all(&children).expect("append");
         let created = schedule_report_compaction(&store, &cfg, &[], &[], now).expect("schedule");
         assert_eq!(created.len(), 1);
@@ -443,14 +499,24 @@ mod tests {
             created_at: now,
         };
         store.report_append(&summary).expect("append");
-        assert!(store.report_unreviewed_children("coding").expect("pending").is_empty());
+        assert!(
+            store
+                .report_unreviewed_children("coding")
+                .expect("pending")
+                .is_empty()
+        );
 
         // まとめの報告は、その 1 段上（秘書）のレビュー対象になる。
-        let up = store.report_unreviewed_children("secretary").expect("pending");
+        let up = store
+            .report_unreviewed_children("secretary")
+            .expect("pending");
         assert_eq!(up.len(), 1);
         assert_eq!(up[0].id, summary.id);
         assert_eq!(
-            store.report_list(&ReportFilter::default()).expect("list").len(),
+            store
+                .report_list(&ReportFilter::default())
+                .expect("list")
+                .len(),
             5
         );
     }

@@ -7,7 +7,12 @@ use crate::protocol::ProviderFailure;
 const EXHAUSTED_PATTERNS: &[&str] = &["usage limit", "quota", "credit balance"];
 const THROTTLED_PATTERNS: &[&str] = &["rate limit", "rate_limit", "overloaded"];
 const THROTTLED_CODES: &[&str] = &["429", "529"];
-const AUTH_FAILED_PATTERNS: &[&str] = &["invalid api key", "authentication", "not logged in", "/login"];
+const AUTH_FAILED_PATTERNS: &[&str] = &[
+    "invalid api key",
+    "authentication",
+    "not logged in",
+    "/login",
+];
 const AUTH_FAILED_CODES: &[&str] = &["401"];
 
 /// `text` を大文字小文字を無視した部分一致で分類する。判定順は Exhausted → Throttled → AuthFailed
@@ -29,10 +34,16 @@ pub fn classify_provider_failure(text: &str) -> Option<ProviderFailure> {
     }
     // コード（`429` 等）の判定は数字そのものは大文字小文字の影響を受けないので、`has_status_context`
     // の「直後が大文字始まりの語」判定のために元の大文字小文字を保った `text` をそのまま渡す。
-    if THROTTLED_PATTERNS.iter().any(|p| lower.contains(p)) || THROTTLED_CODES.iter().any(|c| contains_code(text, c)) {
-        return Some(ProviderFailure::Throttled { retry_after_secs: 60 });
+    if THROTTLED_PATTERNS.iter().any(|p| lower.contains(p))
+        || THROTTLED_CODES.iter().any(|c| contains_code(text, c))
+    {
+        return Some(ProviderFailure::Throttled {
+            retry_after_secs: 60,
+        });
     }
-    if AUTH_FAILED_PATTERNS.iter().any(|p| lower.contains(p)) || AUTH_FAILED_CODES.iter().any(|c| contains_code(text, c)) {
+    if AUTH_FAILED_PATTERNS.iter().any(|p| lower.contains(p))
+        || AUTH_FAILED_CODES.iter().any(|c| contains_code(text, c))
+    {
         return Some(ProviderFailure::AuthFailed);
     }
     None
@@ -57,7 +68,8 @@ fn contains_code(text: &str, code: &str) -> bool {
         let mut after = text[end..].chars();
         let joined_before = match before.next() {
             Some(':') => {
-                before.next().is_some_and(|c| c.is_ascii_digit()) || ends_with_file_path(&text[..start - 1])
+                before.next().is_some_and(|c| c.is_ascii_digit())
+                    || ends_with_file_path(&text[..start - 1])
             }
             Some(c) => is_joined(c),
             None => false,
@@ -86,7 +98,9 @@ fn ends_with_file_path(prefix: &str) -> bool {
                 && !ext.is_empty()
                 && ext.len() <= 5
                 && ext.chars().all(|c| c.is_ascii_alphanumeric())
-                && base.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '-' | '.'))
+                && base
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '-' | '.'))
         }
         None => false,
     }
@@ -120,8 +134,14 @@ mod tests {
 
     #[test]
     fn classifies_exhausted() {
-        assert_eq!(classify_provider_failure("You've hit your usage limit"), Some(ProviderFailure::Exhausted));
-        assert_eq!(classify_provider_failure("Quota exceeded for this project"), Some(ProviderFailure::Exhausted));
+        assert_eq!(
+            classify_provider_failure("You've hit your usage limit"),
+            Some(ProviderFailure::Exhausted)
+        );
+        assert_eq!(
+            classify_provider_failure("Quota exceeded for this project"),
+            Some(ProviderFailure::Exhausted)
+        );
         assert_eq!(
             classify_provider_failure("Your credit balance is too low to access the API"),
             Some(ProviderFailure::Exhausted)
@@ -132,21 +152,34 @@ mod tests {
     fn classifies_throttled_with_fixed_retry_after() {
         assert_eq!(
             classify_provider_failure("API Error: 429 rate limit exceeded"),
-            Some(ProviderFailure::Throttled { retry_after_secs: 60 })
+            Some(ProviderFailure::Throttled {
+                retry_after_secs: 60
+            })
         );
         assert_eq!(
             classify_provider_failure("Overloaded, please retry later"),
-            Some(ProviderFailure::Throttled { retry_after_secs: 60 })
+            Some(ProviderFailure::Throttled {
+                retry_after_secs: 60
+            })
         );
         assert_eq!(
             classify_provider_failure("HTTP 529: too many requests"),
-            Some(ProviderFailure::Throttled { retry_after_secs: 60 })
+            Some(ProviderFailure::Throttled {
+                retry_after_secs: 60
+            })
         );
         assert_eq!(
             classify_provider_failure("upstream returned rate_limit_error"),
-            Some(ProviderFailure::Throttled { retry_after_secs: 60 })
+            Some(ProviderFailure::Throttled {
+                retry_after_secs: 60
+            })
         );
-        assert_eq!(classify_provider_failure("status=429"), Some(ProviderFailure::Throttled { retry_after_secs: 60 }));
+        assert_eq!(
+            classify_provider_failure("status=429"),
+            Some(ProviderFailure::Throttled {
+                retry_after_secs: 60
+            })
+        );
     }
 
     #[test]
@@ -155,16 +188,28 @@ mod tests {
             classify_provider_failure("Invalid API key \u{b7} Please run /login"),
             Some(ProviderFailure::AuthFailed)
         );
-        assert_eq!(classify_provider_failure("401 Unauthorized"), Some(ProviderFailure::AuthFailed));
-        assert_eq!(classify_provider_failure("authentication required"), Some(ProviderFailure::AuthFailed));
-        assert_eq!(classify_provider_failure("you are not logged in"), Some(ProviderFailure::AuthFailed));
+        assert_eq!(
+            classify_provider_failure("401 Unauthorized"),
+            Some(ProviderFailure::AuthFailed)
+        );
+        assert_eq!(
+            classify_provider_failure("authentication required"),
+            Some(ProviderFailure::AuthFailed)
+        );
+        assert_eq!(
+            classify_provider_failure("you are not logged in"),
+            Some(ProviderFailure::AuthFailed)
+        );
     }
 
     #[test]
     fn exhausted_takes_priority_over_throttled_patterns() {
         // "usage limit" 自体には throttled のパターンは含まれないが、判定順（Exhausted が先）を
         // 明示的に固定するため、優先順位そのものを検証する。
-        assert_eq!(classify_provider_failure("usage limit reached, try again tomorrow"), Some(ProviderFailure::Exhausted));
+        assert_eq!(
+            classify_provider_failure("usage limit reached, try again tomorrow"),
+            Some(ProviderFailure::Exhausted)
+        );
     }
 
     #[test]
@@ -215,10 +260,18 @@ ImportError: cannot import name 'Image' from 'PIL' (unknown location)
     /// 決定に挙げた「ステータスの文脈」の形はすべて Throttled/AuthFailed に一致する。
     #[test]
     fn status_context_forms_match() {
-        for text in ["HTTP 529 received", "status 529", "529 Too Many Requests", "Error 529", "got (529) back"] {
+        for text in [
+            "HTTP 529 received",
+            "status 529",
+            "529 Too Many Requests",
+            "Error 529",
+            "got (529) back",
+        ] {
             assert_eq!(
                 classify_provider_failure(text),
-                Some(ProviderFailure::Throttled { retry_after_secs: 60 }),
+                Some(ProviderFailure::Throttled {
+                    retry_after_secs: 60
+                }),
                 "{text}"
             );
         }
@@ -242,8 +295,13 @@ ImportError: cannot import name 'Image' from 'PIL' (unknown location)
     fn matching_is_case_insensitive() {
         assert_eq!(
             classify_provider_failure("RATE LIMIT EXCEEDED"),
-            Some(ProviderFailure::Throttled { retry_after_secs: 60 })
+            Some(ProviderFailure::Throttled {
+                retry_after_secs: 60
+            })
         );
-        assert_eq!(classify_provider_failure("NOT LOGGED IN"), Some(ProviderFailure::AuthFailed));
+        assert_eq!(
+            classify_provider_failure("NOT LOGGED IN"),
+            Some(ProviderFailure::AuthFailed)
+        );
     }
 }

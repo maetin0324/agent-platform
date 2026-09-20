@@ -83,12 +83,21 @@ impl StatsState {
         }
         self.cursor = row.id;
         match &row.event {
-            Event::WorkerStarted { run_id, provider, .. } => {
-                let provider = provider.clone().unwrap_or_else(|| UNKNOWN_PROVIDER.to_string());
+            Event::WorkerStarted {
+                run_id, provider, ..
+            } => {
+                let provider = provider
+                    .clone()
+                    .unwrap_or_else(|| UNKNOWN_PROVIDER.to_string());
                 self.providers.entry(provider.clone()).or_default().runs += 1;
                 self.open_runs.insert(run_id.clone(), provider);
             }
-            Event::WorkerFinished { run_id, outcome, usage, .. } => {
+            Event::WorkerFinished {
+                run_id,
+                outcome,
+                usage,
+                ..
+            } => {
                 let provider = self
                     .open_runs
                     .remove(run_id)
@@ -157,7 +166,12 @@ fn utc_day(ts: &str) -> Option<Date> {
 }
 
 fn format_day(day: Date) -> String {
-    format!("{:04}-{:02}-{:02}", day.year(), u8::from(day.month()), day.day())
+    format!(
+        "{:04}-{:02}-{:02}",
+        day.year(),
+        u8::from(day.month()),
+        day.day()
+    )
 }
 
 /// ADR-0024/0025: `WorkerStarted.account` と対応する `WorkerFinished` から集計する（`docs/gui/api.md` §3.29 の
@@ -207,12 +221,22 @@ impl AccountStatsState {
         }
         self.cursor = row.id;
         match &row.event {
-            Event::WorkerStarted { run_id, adapter, account: Some(account), .. } => {
+            Event::WorkerStarted {
+                run_id,
+                adapter,
+                account: Some(account),
+                ..
+            } => {
                 let key = account_key(adapter, account);
                 self.accounts.entry(key.clone()).or_default().runs += 1;
                 self.open_runs.insert(run_id.clone(), key);
             }
-            Event::WorkerFinished { run_id, outcome, usage, .. } => {
+            Event::WorkerFinished {
+                run_id,
+                outcome,
+                usage,
+                ..
+            } => {
                 let Some(key) = self.open_runs.remove(run_id) else {
                     return;
                 };
@@ -289,33 +313,79 @@ mod tests {
     #[test]
     fn outcome_prefixes_are_classified() {
         assert_eq!(classify_outcome("done: ok"), RunOutcomeKind::Done);
-        assert_eq!(classify_outcome("question: which?"), RunOutcomeKind::Question);
-        assert_eq!(classify_outcome("requeue: throttled"), RunOutcomeKind::Requeue);
-        assert_eq!(classify_outcome("lease_expired"), RunOutcomeKind::LeaseExpired);
+        assert_eq!(
+            classify_outcome("question: which?"),
+            RunOutcomeKind::Question
+        );
+        assert_eq!(
+            classify_outcome("requeue: throttled"),
+            RunOutcomeKind::Requeue
+        );
+        assert_eq!(
+            classify_outcome("lease_expired"),
+            RunOutcomeKind::LeaseExpired
+        );
         assert_eq!(classify_outcome("lease_expired: x"), RunOutcomeKind::Error);
         // ADR-0044 D2/D8（Phase 53）: 人のコメントで止めた run は失敗ではない。
-        assert_eq!(classify_outcome("interrupted: comment"), RunOutcomeKind::Interrupted);
-        assert_eq!(classify_outcome("error(retryable=true): boom"), RunOutcomeKind::Error);
+        assert_eq!(
+            classify_outcome("interrupted: comment"),
+            RunOutcomeKind::Interrupted
+        );
+        assert_eq!(
+            classify_outcome("error(retryable=true): boom"),
+            RunOutcomeKind::Error
+        );
     }
 
     #[test]
     fn runs_are_attributed_to_providers_with_daily_usage() {
         let mut stats = StatsState::default();
-        let usage = |i, o| Some(Usage { input_tokens: Some(i), output_tokens: o });
-        stats.apply(&row(1, "2026-09-13T23:00:00Z", started("r1", Some("claude-a"))));
-        stats.apply(&row(2, "2026-09-14T00:30:00+09:00", finished("r1", "done: ok", usage(10, Some(5)))));
+        let usage = |i, o| {
+            Some(Usage {
+                input_tokens: Some(i),
+                output_tokens: o,
+            })
+        };
+        stats.apply(&row(
+            1,
+            "2026-09-13T23:00:00Z",
+            started("r1", Some("claude-a")),
+        ));
+        stats.apply(&row(
+            2,
+            "2026-09-14T00:30:00+09:00",
+            finished("r1", "done: ok", usage(10, Some(5))),
+        ));
         stats.apply(&row(3, "2026-09-14T01:00:00Z", started("r2", None)));
-        stats.apply(&row(4, "2026-09-14T02:00:00Z", finished("r2", "requeue: throttled", usage(1, None))));
-        stats.apply(&row(5, "2026-09-14T03:00:00Z", started("r3", Some("claude-a"))));
-        stats.apply(&row(2, "2026-09-14T03:00:00Z", finished("r3", "done: dup", None)));
+        stats.apply(&row(
+            4,
+            "2026-09-14T02:00:00Z",
+            finished("r2", "requeue: throttled", usage(1, None)),
+        ));
+        stats.apply(&row(
+            5,
+            "2026-09-14T03:00:00Z",
+            started("r3", Some("claude-a")),
+        ));
+        stats.apply(&row(
+            2,
+            "2026-09-14T03:00:00Z",
+            finished("r3", "done: dup", None),
+        ));
 
         let today = Date::from_calendar_date(2026, time::Month::September, 14).unwrap_or(Date::MIN);
         let a = stats.view("claude-a", today);
-        assert_eq!((a.runs, a.done, a.input_tokens, a.output_tokens), (2, 1, 10, 5));
+        assert_eq!(
+            (a.runs, a.done, a.input_tokens, a.output_tokens),
+            (2, 1, 10, 5)
+        );
         assert_eq!(a.by_day.len(), 1);
         assert_eq!(a.by_day[0].day, "2026-09-13");
         let unknown = stats.view("unknown", today);
-        assert_eq!((unknown.runs, unknown.requeue, unknown.input_tokens), (1, 1, 1));
+        assert_eq!(
+            (unknown.runs, unknown.requeue, unknown.input_tokens),
+            (1, 1, 1)
+        );
         assert_eq!(stats.view("nobody", today), ProviderStats::default());
 
         let later = Date::from_calendar_date(2026, time::Month::November, 1).unwrap_or(Date::MIN);
@@ -346,13 +416,19 @@ mod tests {
             Event::WorkerFinished {
                 run_id: "rev".into(),
                 outcome: "done: reviewed".into(),
-                usage: Some(Usage { input_tokens: Some(3), output_tokens: Some(4) }),
+                usage: Some(Usage {
+                    input_tokens: Some(3),
+                    output_tokens: Some(4),
+                }),
                 role,
             },
         ));
         let today = Date::from_calendar_date(2026, time::Month::September, 14).unwrap_or(Date::MIN);
         let b = stats.view("claude-b", today);
-        assert_eq!((b.runs, b.done, b.input_tokens, b.output_tokens), (1, 1, 3, 4));
+        assert_eq!(
+            (b.runs, b.done, b.input_tokens, b.output_tokens),
+            (1, 1, 3, 4)
+        );
     }
 
     fn started_with_account(run_id: &str, provider: Option<&str>, account: Option<&str>) -> Event {
@@ -372,20 +448,58 @@ mod tests {
     #[test]
     fn account_stats_are_attributed_by_account_and_ignore_pool_less_runs() {
         let mut stats = AccountStatsState::default();
-        let usage = |i, o| Some(Usage { input_tokens: Some(i), output_tokens: o });
-        stats.apply(&row(1, "2026-09-14T00:00:00Z", started_with_account("r1", Some("pool"), Some("b"))));
-        stats.apply(&row(2, "2026-09-14T00:01:00Z", finished("r1", "done: ok", usage(10, Some(5)))));
-        stats.apply(&row(3, "2026-09-14T00:02:00Z", started_with_account("r2", Some("pool"), Some("b"))));
-        stats.apply(&row(4, "2026-09-14T00:03:00Z", finished("r2", "error(retryable=false): boom", None)));
+        let usage = |i, o| {
+            Some(Usage {
+                input_tokens: Some(i),
+                output_tokens: o,
+            })
+        };
+        stats.apply(&row(
+            1,
+            "2026-09-14T00:00:00Z",
+            started_with_account("r1", Some("pool"), Some("b")),
+        ));
+        stats.apply(&row(
+            2,
+            "2026-09-14T00:01:00Z",
+            finished("r1", "done: ok", usage(10, Some(5))),
+        ));
+        stats.apply(&row(
+            3,
+            "2026-09-14T00:02:00Z",
+            started_with_account("r2", Some("pool"), Some("b")),
+        ));
+        stats.apply(&row(
+            4,
+            "2026-09-14T00:03:00Z",
+            finished("r2", "error(retryable=false): boom", None),
+        ));
         // プールを使わない run: account が無いので集計に入らない。
-        stats.apply(&row(5, "2026-09-14T00:04:00Z", started_with_account("r3", Some("other"), None)));
-        stats.apply(&row(6, "2026-09-14T00:05:00Z", finished("r3", "done: ok", None)));
+        stats.apply(&row(
+            5,
+            "2026-09-14T00:04:00Z",
+            started_with_account("r3", Some("other"), None),
+        ));
+        stats.apply(&row(
+            6,
+            "2026-09-14T00:05:00Z",
+            finished("r3", "done: ok", None),
+        ));
 
         let b = stats.view("claude-code", "b");
-        assert_eq!((b.runs, b.done, b.error, b.input_tokens, b.output_tokens), (2, 1, 1, 10, 5));
-        assert_eq!(stats.view("claude-code", "a"), crate::types::AccountStats::default());
+        assert_eq!(
+            (b.runs, b.done, b.error, b.input_tokens, b.output_tokens),
+            (2, 1, 1, 10, 5)
+        );
+        assert_eq!(
+            stats.view("claude-code", "a"),
+            crate::types::AccountStats::default()
+        );
         // 違うアダプタの同じ id は別のアカウントとして扱う（ADR-0025 D1）。
-        assert_eq!(stats.view("codex", "b"), crate::types::AccountStats::default());
+        assert_eq!(
+            stats.view("codex", "b"),
+            crate::types::AccountStats::default()
+        );
     }
 
     /// S5: `error` は `RunOutcomeKind::Error` だけを数える。`question`/`requeue`/`lease_expired` はエラーではない
@@ -393,14 +507,46 @@ mod tests {
     #[test]
     fn account_stats_error_only_counts_the_error_outcome_kind() {
         let mut stats = AccountStatsState::default();
-        stats.apply(&row(1, "2026-09-14T00:00:00Z", started_with_account("r1", Some("pool"), Some("b"))));
-        stats.apply(&row(2, "2026-09-14T00:01:00Z", finished("r1", "question: which?", None)));
-        stats.apply(&row(3, "2026-09-14T00:02:00Z", started_with_account("r2", Some("pool"), Some("b"))));
-        stats.apply(&row(4, "2026-09-14T00:03:00Z", finished("r2", "requeue: throttled", None)));
-        stats.apply(&row(5, "2026-09-14T00:04:00Z", started_with_account("r3", Some("pool"), Some("b"))));
-        stats.apply(&row(6, "2026-09-14T00:05:00Z", finished("r3", "lease_expired", None)));
-        stats.apply(&row(7, "2026-09-14T00:06:00Z", started_with_account("r4", Some("pool"), Some("b"))));
-        stats.apply(&row(8, "2026-09-14T00:07:00Z", finished("r4", "error(retryable=true): boom", None)));
+        stats.apply(&row(
+            1,
+            "2026-09-14T00:00:00Z",
+            started_with_account("r1", Some("pool"), Some("b")),
+        ));
+        stats.apply(&row(
+            2,
+            "2026-09-14T00:01:00Z",
+            finished("r1", "question: which?", None),
+        ));
+        stats.apply(&row(
+            3,
+            "2026-09-14T00:02:00Z",
+            started_with_account("r2", Some("pool"), Some("b")),
+        ));
+        stats.apply(&row(
+            4,
+            "2026-09-14T00:03:00Z",
+            finished("r2", "requeue: throttled", None),
+        ));
+        stats.apply(&row(
+            5,
+            "2026-09-14T00:04:00Z",
+            started_with_account("r3", Some("pool"), Some("b")),
+        ));
+        stats.apply(&row(
+            6,
+            "2026-09-14T00:05:00Z",
+            finished("r3", "lease_expired", None),
+        ));
+        stats.apply(&row(
+            7,
+            "2026-09-14T00:06:00Z",
+            started_with_account("r4", Some("pool"), Some("b")),
+        ));
+        stats.apply(&row(
+            8,
+            "2026-09-14T00:07:00Z",
+            finished("r4", "error(retryable=true): boom", None),
+        ));
 
         let b = stats.view("claude-code", "b");
         assert_eq!((b.runs, b.done, b.error), (4, 0, 1));

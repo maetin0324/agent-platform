@@ -22,8 +22,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use task_core::{
-    IntegrationMethod, IntegrationState, ProjectId, ReportFilter, ReportStore, RepoId, Task, TaskId, TaskIntegration,
-    TaskStore,
+    IntegrationMethod, IntegrationState, ProjectId, RepoId, ReportFilter, ReportStore, Task,
+    TaskId, TaskIntegration, TaskStore,
 };
 use task_ops::changes::{self as ops_changes, MergeOutcome};
 use time::OffsetDateTime;
@@ -34,8 +34,8 @@ use crate::problem::{ApiProblem, store_problem};
 use crate::query::{QueryParams, parse_task_id};
 use crate::state::ApiState;
 use crate::types::{
-    ChangeDiffView, ChangesView, IntegrateBody, IntegrateResult, ProjectIntegrationItem, ProjectIntegrations,
-    RepoChangesView, ValidationError,
+    ChangeDiffView, ChangesView, IntegrateBody, IntegrateResult, ProjectIntegrationItem,
+    ProjectIntegrations, RepoChangesView, ValidationError,
 };
 
 /// ADR-0043 D5: 案件画面の一覧で 1 回に同期する PR の上限（画面を開くたびに `gh` を起こすので抑える）。
@@ -49,9 +49,15 @@ pub(crate) fn routes() -> axum::Router<ApiState> {
     axum::Router::new()
         .route("/api/v1/tasks/{id}/changes", get(changes))
         .route("/api/v1/tasks/{id}/changes/{repo}/diff", get(diff))
-        .route("/api/v1/tasks/{id}/changes/{repo}/integrate", post(integrate))
+        .route(
+            "/api/v1/tasks/{id}/changes/{repo}/integrate",
+            post(integrate),
+        )
         .route("/api/v1/tasks/{id}/changes/{repo}/pr/merge", post(pr_merge))
-        .route("/api/v1/projects/{id}/integrations", get(project_integrations))
+        .route(
+            "/api/v1/projects/{id}/integrations",
+            get(project_integrations),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +81,11 @@ struct RepoTarget {
 }
 
 /// そのタスクの git のリポジトリを並べる（`dir` のリポジトリは対象外。ADR-0043 D5）。
-fn targets_for(store: &dyn TaskStore, task: &Task, workspace_root: &Path) -> Result<Vec<RepoTarget>, ApiProblem> {
+fn targets_for(
+    store: &dyn TaskStore,
+    task: &Task,
+    workspace_root: &Path,
+) -> Result<Vec<RepoTarget>, ApiProblem> {
     let marker = crate::tree::marker_of(task, workspace_root)?;
     let repos = crate::tree::marker_repos(&marker);
     // その案件のリポジトリの行（`default_branch` と `repo_id` を引くため）。
@@ -95,7 +105,8 @@ fn targets_for(store: &dyn TaskStore, task: &Task, workspace_root: &Path) -> Res
             .and_then(|r| rows.iter().find(|row| row.id == r.repo_id))
             .or_else(|| rows.iter().find(|row| row.name == repo.name));
         let source = PathBuf::from(&repo.source);
-        let default_branch = ops_changes::default_branch(&source, row.and_then(|r| r.default_branch.as_deref()));
+        let default_branch =
+            ops_changes::default_branch(&source, row.and_then(|r| r.default_branch.as_deref()));
         out.push(RepoTarget {
             name: repo.name.clone(),
             repo_id: row.map(|r| r.id),
@@ -152,14 +163,19 @@ fn refresh_pr(
     let mut next = integration;
     if state == IntegrationState::Merged {
         // ADR-0043 D5: merge されたら（開いたときに検知して）worktree を消す。
-        if let Err(e) = ops_changes::remove_worktree_and_branch(&target.source, Some(&target.worktree), &target.branch)
-        {
+        if let Err(e) = ops_changes::remove_worktree_and_branch(
+            &target.source,
+            Some(&target.worktree),
+            &target.branch,
+        ) {
             tracing::warn!(repo = %target.name, error = %e, "cannot clean up the worktree of a merged pull request");
         }
         next.merged_at = view
             .merged_at
             .as_deref()
-            .and_then(|s| OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok())
+            .and_then(|s| {
+                OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+            })
             .or(Some(now));
     }
     if state == next.state && view.url.as_deref() == next.pr_url.as_deref() {
@@ -256,11 +272,16 @@ async fn diff(
         .to_string();
     // 境界は Phase 52（§3.72）と同じ規則。`git` に渡す前にここで弾く。
     if Path::new(&path).is_absolute()
-        || Path::new(&path)
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)))
+        || Path::new(&path).components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
     {
-        return Err(ApiProblem::path_forbidden("path must be relative and must not contain `..`"));
+        return Err(ApiProblem::path_forbidden(
+            "path must be relative and must not contain `..`",
+        ));
     }
     let workspace_root = state.inner.view.workspace_root.clone();
     let view = state
@@ -276,7 +297,9 @@ async fn diff(
                 target.base.as_deref(),
                 &path,
             )
-            .ok_or_else(|| ApiProblem::file_not_found(format!("{repo} has no working tree or branch any more")))?;
+            .ok_or_else(|| {
+                ApiProblem::file_not_found(format!("{repo} has no working tree or branch any more"))
+            })?;
             Ok(ChangeDiffView {
                 repo: target.name.clone(),
                 path: diff.path,
@@ -506,8 +529,13 @@ async fn pr_merge(
             let integration = store
                 .integration_latest(task_id, &target.name)
                 .map_err(store_problem)?
-                .ok_or_else(|| pr_unavailable(format!("{} にはまだ PR がありません", target.name)))?;
-            let Some(number) = integration.pr_number.filter(|_| integration.state == IntegrationState::Open) else {
+                .ok_or_else(|| {
+                    pr_unavailable(format!("{} にはまだ PR がありません", target.name))
+                })?;
+            let Some(number) = integration
+                .pr_number
+                .filter(|_| integration.state == IntegrationState::Open)
+            else {
                 return Err(pr_unavailable(format!(
                     "{} の PR は開いていません（いまは {}）",
                     target.name,
@@ -515,7 +543,9 @@ async fn pr_merge(
                 )));
             };
             let mut integration = integration;
-            if let Err(detail) = ops_changes::gh_pr_merge(&github.gh, &target.source, number, &github.merge_method) {
+            if let Err(detail) =
+                ops_changes::gh_pr_merge(&github.gh, &target.source, number, &github.merge_method)
+            {
                 integration.state = IntegrationState::Failed;
                 integration.detail = Some(detail);
                 integration.updated_at = now;
@@ -559,7 +589,11 @@ async fn project_integrations(
     let github = state.inner.github.clone();
     let view = state
         .blocking(move |store| {
-            if store.project_get(project_id).map_err(store_problem)?.is_none() {
+            if store
+                .project_get(project_id)
+                .map_err(store_problem)?
+                .is_none()
+            {
                 return Err(ApiProblem::project_not_found(&project_id.to_string()));
             }
             let rows = store
@@ -601,7 +635,10 @@ async fn project_integrations(
 
 /// そのタスクの最新の報告（`reports.task_id`）。無ければ `None`。
 /// `ReportFilter` に `task_id` が無いので、案件（あれば）で絞ってから突き合わせる。
-fn latest_report_for(store: &(impl ReportStore + ?Sized), task: &Task) -> Option<task_core::Report> {
+fn latest_report_for(
+    store: &(impl ReportStore + ?Sized),
+    task: &Task,
+) -> Option<task_core::Report> {
     let filter = ReportFilter {
         project_id: task.project_id,
         limit: 200,
@@ -615,7 +652,11 @@ fn latest_report_for(store: &(impl ReportStore + ?Sized), task: &Task) -> Option
 }
 
 /// ADR-0043 D5 の PR の本文（**決定的**: 目的 / 受け入れ条件 / 最新の報告の要約 / Celeris のタスクへのリンク）。
-pub fn pr_body(task: &Task, report: Option<&task_core::Report>, gui_base_url: Option<&str>) -> String {
+pub fn pr_body(
+    task: &Task,
+    report: Option<&task_core::Report>,
+    gui_base_url: Option<&str>,
+) -> String {
     let mut out = String::new();
     out.push_str("## 目的\n\n");
     out.push_str(task.objective.trim());
@@ -654,12 +695,17 @@ pub fn pr_body(task: &Task, report: Option<&task_core::Report>, gui_base_url: Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use task_core::{Budget, Check, Criterion, Report, ReportKind, Status, TaskKind, Tier, WorkerHint, WorkspaceSpec};
+    use task_core::{
+        Budget, Check, Criterion, Report, ReportKind, Status, TaskKind, Tier, WorkerHint,
+        WorkspaceSpec,
+    };
 
     fn task() -> Task {
         let id = TaskId::new();
         let now = OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id,
             parent_id: None,
@@ -667,19 +713,35 @@ mod tests {
             title: "ワークスペース A2".into(),
             objective: "変更の取り込みを作る".into(),
             acceptance: vec![
-                Criterion { text: "テストが通る".into(), check: Check::Human },
+                Criterion {
+                    text: "テストが通る".into(),
+                    check: Check::Human,
+                },
                 Criterion {
                     text: "`cargo test` が exit 0".into(),
-                    check: Check::Command { cmd: "cargo test".into(), expect_exit: 0 },
+                    check: Check::Command {
+                        cmd: "cargo test".into(),
+                        expect_exit: 0,
+                    },
                 },
             ],
             inputs: vec![],
             depends_on: vec![],
             status: Status::Done,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from("/srv/repo"), mode: None },
-            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: PathBuf::from("/srv/repo"),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -701,17 +763,26 @@ mod tests {
     fn the_pull_request_body_is_deterministic_and_links_back_to_celeris() {
         let task = task();
         let body = pr_body(&task, None, Some("http://192.168.1.103:7700/"));
-        assert_eq!(body, pr_body(&task, None, Some("http://192.168.1.103:7700/")));
+        assert_eq!(
+            body,
+            pr_body(&task, None, Some("http://192.168.1.103:7700/"))
+        );
         assert!(body.contains("## 目的"), "{body}");
         assert!(body.contains("変更の取り込みを作る"), "{body}");
         assert!(body.contains("- テストが通る"), "{body}");
         assert!(
-            body.contains(&format!("Celeris task {id}: http://192.168.1.103:7700/tasks/{id}", id = task.id)),
+            body.contains(&format!(
+                "Celeris task {id}: http://192.168.1.103:7700/tasks/{id}",
+                id = task.id
+            )),
             "{body}"
         );
         // `gui_base_url` が無ければリンクは付けない。
         let plain = pr_body(&task, None, None);
-        assert!(plain.contains(&format!("Celeris task {}", task.id)), "{plain}");
+        assert!(
+            plain.contains(&format!("Celeris task {}", task.id)),
+            "{plain}"
+        );
         assert!(!plain.contains("http"), "{plain}");
     }
 
@@ -727,7 +798,10 @@ mod tests {
             kind: ReportKind::Result,
             level: 1,
             headline: "取り込みを実装した".into(),
-            body: (1..=20).map(|i| format!("行 {i}")).collect::<Vec<_>>().join("\n"),
+            body: (1..=20)
+                .map(|i| format!("行 {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             sources: vec![],
             read_at: None,
             created_at: OffsetDateTime::now_utc(),
@@ -736,7 +810,13 @@ mod tests {
         assert!(body.contains("**取り込みを実装した**"), "{body}");
         assert!(body.contains("行 1"), "{body}");
         assert!(body.contains(&format!("行 {REPORT_BODY_LINES}")), "{body}");
-        assert!(!body.contains(&format!("行 {}", REPORT_BODY_LINES + 1)), "{body}");
-        assert!(body.contains("（報告の続きは Celeris で読めます）"), "{body}");
+        assert!(
+            !body.contains(&format!("行 {}", REPORT_BODY_LINES + 1)),
+            "{body}"
+        );
+        assert!(
+            body.contains("（報告の続きは Celeris で読めます）"),
+            "{body}"
+        );
     }
 }

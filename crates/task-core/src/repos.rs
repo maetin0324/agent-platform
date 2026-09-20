@@ -16,7 +16,9 @@ use crate::model::WorkspaceSpec;
 use crate::org::ProjectId;
 
 /// リポジトリの一意識別子（ULID）。`TaskId` / `ProjectId` と同じ形。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct RepoId(#[schemars(with = "String")] pub Ulid);
 
 impl RepoId {
@@ -179,7 +181,9 @@ impl RepoRef {
 /// リポジトリの検証の失敗（ADR-0043 D1）。ストアが `StoreError::Invalid` に包み、API は 422 にする。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RepoError {
-    #[error("repo name must be a lowercase slug ([a-z0-9._-], 1..64 chars, not starting with '.' or '-'): {0:?}")]
+    #[error(
+        "repo name must be a lowercase slug ([a-z0-9._-], 1..64 chars, not starting with '.' or '-'): {0:?}"
+    )]
     InvalidName(String),
     #[error("repo name {0:?} is already used in this project")]
     DuplicateName(String),
@@ -189,7 +193,9 @@ pub enum RepoError {
     BranchOnDir,
     #[error("sync is only meaningful for a remote location")]
     SyncOnLocal,
-    #[error("remote repositories with sync = \"none\" and run = \"remote\" are not supported yet (ADR-0043 D7)")]
+    #[error(
+        "remote repositories with sync = \"none\" and run = \"remote\" are not supported yet (ADR-0043 D7)"
+    )]
     RemoteBUnsupported,
     #[error("task repo {0:?} is not one of this project's repositories")]
     UnknownName(String),
@@ -202,9 +208,9 @@ pub enum RepoError {
 pub fn valid_repo_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' || c == '.')
+        && name.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' || c == '.'
+        })
         && !name.starts_with('.')
         && !name.starts_with('-')
         && !name.ends_with('-')
@@ -241,7 +247,11 @@ pub fn slugify_repo_name(raw: &str) -> String {
     let out = out.trim_matches('-').trim_start_matches('.').to_string();
     let out: String = out.chars().take(64).collect();
     let out = out.trim_end_matches('-').to_string();
-    if valid_repo_name(&out) { out } else { "repo".to_string() }
+    if valid_repo_name(&out) {
+        out
+    } else {
+        "repo".to_string()
+    }
 }
 
 /// `existing`（その案件の既存の行。`repo.id` の行があればそれも含む）に対して `repo` を upsert して
@@ -250,7 +260,10 @@ pub fn validate_upsert(existing: &[ProjectRepo], repo: &ProjectRepo) -> Result<(
     if !valid_repo_name(&repo.name) {
         return Err(RepoError::InvalidName(repo.name.clone()));
     }
-    if existing.iter().any(|r| r.name == repo.name && r.id != repo.id) {
+    if existing
+        .iter()
+        .any(|r| r.name == repo.name && r.id != repo.id)
+    {
         return Err(RepoError::DuplicateName(repo.name.clone()));
     }
     match &repo.location {
@@ -284,7 +297,10 @@ pub fn validate_upsert(existing: &[ProjectRepo], repo: &ProjectRepo) -> Result<(
 /// - **リモートのリポジトリを他と混ぜたタスクは `MixedLocalAndRemote`**。リモートは従来の
 ///   ADR-0018 / ADR-0019 の経路（手元の写し + rsync）をそのまま使うので、この Phase では
 ///   1 つだけのときに限る
-pub fn resolve_task_repos(available: &[ProjectRepo], names: &[String]) -> Result<Vec<RepoRef>, RepoError> {
+pub fn resolve_task_repos(
+    available: &[ProjectRepo],
+    names: &[String],
+) -> Result<Vec<RepoRef>, RepoError> {
     let mut out = Vec::with_capacity(names.len());
     let mut remote = 0usize;
     for name in names {
@@ -327,17 +343,38 @@ mod tests {
 
     #[test]
     fn repo_names_are_directory_safe_slugs() {
-        for ok in ["benchfs", "benchfs-paper", "agent_platform", "a", "v1.2", "x0"] {
+        for ok in [
+            "benchfs",
+            "benchfs-paper",
+            "agent_platform",
+            "a",
+            "v1.2",
+            "x0",
+        ] {
             assert!(valid_repo_name(ok), "{ok}");
         }
-        for bad in ["", "..", ".", ".hidden", "-lead", "trail-", "Upper", "with space", "a/b", &"x".repeat(65)] {
+        for bad in [
+            "",
+            "..",
+            ".",
+            ".hidden",
+            "-lead",
+            "trail-",
+            "Upper",
+            "with space",
+            "a/b",
+            &"x".repeat(65),
+        ] {
             assert!(!valid_repo_name(bad), "{bad}");
         }
     }
 
     #[test]
     fn the_default_name_comes_from_the_directory_name() {
-        assert_eq!(default_repo_name(&WorkspaceSpec::local("/home/u/workspace/benchfs")), "benchfs");
+        assert_eq!(
+            default_repo_name(&WorkspaceSpec::local("/home/u/workspace/benchfs")),
+            "benchfs"
+        );
         assert_eq!(
             default_repo_name(&WorkspaceSpec::Remote {
                 cluster: "pegasus".into(),
@@ -358,12 +395,16 @@ mod tests {
         let paper = repo("benchfs-paper", WorkspaceSpec::local("/srv/benchfs-paper"));
         let mut cluster = repo(
             "remote",
-            WorkspaceSpec::Remote { cluster: "pegasus".into(), path: PathBuf::from("/work/x") },
+            WorkspaceSpec::Remote {
+                cluster: "pegasus".into(),
+                path: PathBuf::from("/work/x"),
+            },
         );
         cluster.project_id = code.project_id;
         let available = vec![code.clone(), paper.clone(), cluster.clone()];
 
-        let picked = resolve_task_repos(&available, &["benchfs".into(), "benchfs-paper".into()]).expect("resolve");
+        let picked = resolve_task_repos(&available, &["benchfs".into(), "benchfs-paper".into()])
+            .expect("resolve");
         assert_eq!(picked, vec![RepoRef::of(&code), RepoRef::of(&paper)]);
         // 同じ名前を 2 回書いても 1 件。
         assert_eq!(
@@ -383,14 +424,20 @@ mod tests {
             resolve_task_repos(&available, &["remote".into(), "benchfs".into()]),
             Err(RepoError::MixedLocalAndRemote)
         );
-        assert_eq!(resolve_task_repos(&available, &[]).expect("resolve"), Vec::new());
+        assert_eq!(
+            resolve_task_repos(&available, &[]).expect("resolve"),
+            Vec::new()
+        );
     }
 
     #[test]
     fn upsert_rejects_duplicates_relative_paths_and_reserved_combinations() {
         let a = repo("benchfs", WorkspaceSpec::local("/srv/benchfs"));
         let mut b = repo("benchfs", WorkspaceSpec::local("/srv/other"));
-        assert_eq!(validate_upsert(std::slice::from_ref(&a), &b), Err(RepoError::DuplicateName("benchfs".into())));
+        assert_eq!(
+            validate_upsert(std::slice::from_ref(&a), &b),
+            Err(RepoError::DuplicateName("benchfs".into()))
+        );
         b.name = "other".into();
         assert_eq!(validate_upsert(std::slice::from_ref(&a), &b), Ok(()));
         // 自分自身との衝突は起きない（更新）。
@@ -399,24 +446,39 @@ mod tests {
         assert_eq!(validate_upsert(std::slice::from_ref(&a), &same), Ok(()));
 
         let relative = repo("x", WorkspaceSpec::local("relative/path"));
-        assert!(matches!(validate_upsert(&[], &relative), Err(RepoError::RelativePath(_))));
+        assert!(matches!(
+            validate_upsert(&[], &relative),
+            Err(RepoError::RelativePath(_))
+        ));
 
         let mut local_sync = repo("x", WorkspaceSpec::local("/srv/x"));
         local_sync.sync = Some(RepoSync::Rsync);
-        assert_eq!(validate_upsert(&[], &local_sync), Err(RepoError::SyncOnLocal));
+        assert_eq!(
+            validate_upsert(&[], &local_sync),
+            Err(RepoError::SyncOnLocal)
+        );
 
         let mut remote_b = repo(
             "x",
-            WorkspaceSpec::Remote { cluster: "pegasus".into(), path: PathBuf::from("/work/x") },
+            WorkspaceSpec::Remote {
+                cluster: "pegasus".into(),
+                path: PathBuf::from("/work/x"),
+            },
         );
         remote_b.sync = Some(RepoSync::None);
-        assert_eq!(validate_upsert(&[], &remote_b), Err(RepoError::RemoteBUnsupported));
+        assert_eq!(
+            validate_upsert(&[], &remote_b),
+            Err(RepoError::RemoteBUnsupported)
+        );
         remote_b.sync = Some(RepoSync::Worktree);
         assert_eq!(validate_upsert(&[], &remote_b), Ok(()));
 
         let mut dir_branch = repo("x", WorkspaceSpec::local("/srv/data"));
         dir_branch.kind = RepoKind::Dir;
         dir_branch.default_branch = Some("main".into());
-        assert_eq!(validate_upsert(&[], &dir_branch), Err(RepoError::BranchOnDir));
+        assert_eq!(
+            validate_upsert(&[], &dir_branch),
+            Err(RepoError::BranchOnDir)
+        );
     }
 }

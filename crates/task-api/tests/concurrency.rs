@@ -33,9 +33,14 @@ async fn api_reads_do_not_see_database_locked_while_another_connection_writes() 
                     "title": format!("writer {i}"), "objective": "o", "acceptance": [{"type": "human", "text": "ok"}]
                 }))
                 .map_err(|e| e.to_string())?;
-                let task = task_ops::add::create_task(&store, spec, OffsetDateTime::now_utc()).map_err(|e| e.to_string())?;
-                store.append_event(seed_id, &progress(&format!("tick {i}"))).map_err(|e| e.to_string())?;
-                store.apply_transition(task.id, Trigger::Accept, None).map_err(|e| e.to_string())?;
+                let task = task_ops::add::create_task(&store, spec, OffsetDateTime::now_utc())
+                    .map_err(|e| e.to_string())?;
+                store
+                    .append_event(seed_id, &progress(&format!("tick {i}")))
+                    .map_err(|e| e.to_string())?;
+                store
+                    .apply_transition(task.id, Trigger::Accept, None)
+                    .map_err(|e| e.to_string())?;
                 writes.fetch_add(1, Ordering::SeqCst);
                 i += 1;
             }
@@ -58,10 +63,16 @@ async fn api_reads_do_not_see_database_locked_while_another_connection_writes() 
         reads += 1;
     }
     stop.store(true, Ordering::SeqCst);
-    writer.join().expect("writer thread").expect("writer never saw database is locked");
+    writer
+        .join()
+        .expect("writer thread")
+        .expect("writer never saw database is locked");
 
     assert_eq!(reads, 1_000);
-    assert!(writes.load(Ordering::SeqCst) > 0, "the writer made progress concurrently");
+    assert!(
+        writes.load(Ordering::SeqCst) > 0,
+        "the writer made progress concurrently"
+    );
     let health = send(&app, get("/api/v1/health")).await.json();
     assert_eq!(health["db"]["journal_mode"], "wal");
     let total = env.store.list(None).expect("list").len() as u64;

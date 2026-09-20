@@ -21,13 +21,21 @@ fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
     let path = debug_dir.join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
 /// OS に空きポートを選ばせて閉じる（celeris が bind するまでの僅かな競合は許容する）。
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
@@ -69,14 +77,17 @@ struct Resp {
 
 impl Resp {
     fn json(&self) -> Value {
-        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("not JSON ({e}): {} {}", self.status, self.body))
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {} {}", self.status, self.body))
     }
 
     /// ヘッダ名は大文字小文字を区別せず、値はそのまま返す。
     fn header(&self, name: &str) -> Option<String> {
         self.headers.iter().find_map(|h| {
             let (n, v) = h.split_once(':')?;
-            n.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+            n.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| v.trim().to_string())
         })
     }
 
@@ -84,7 +95,11 @@ impl Resp {
     fn assert_problem(&self, status: u16, code: &str) -> Value {
         assert_eq!(self.status, status, "{}", self.body);
         let ct = self.header("content-type").unwrap_or_default();
-        assert!(ct.starts_with("application/problem+json"), "content-type {ct}: {}", self.body);
+        assert!(
+            ct.starts_with("application/problem+json"),
+            "content-type {ct}: {}",
+            self.body
+        );
         let v = self.json();
         assert_eq!(v["code"], code, "{v}");
         assert_eq!(v["status"], status, "{v}");
@@ -107,7 +122,14 @@ impl Env {
         let root = tmp.path().canonicalize().unwrap();
         let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
-        Self { _tmp: tmp, root, db, store, port: free_port(), token: None }
+        Self {
+            _tmp: tmp,
+            root,
+            db,
+            store,
+            port: free_port(),
+            token: None,
+        }
     }
 
     fn write_script(&self, body: &str) -> PathBuf {
@@ -119,7 +141,11 @@ impl Env {
     /// `api` は `[api]` 節の本体（空なら節を書かない）。`provider_env` は `[[providers]]` の `env` の TOML インライン表。
     fn write_config(&self, script: &Path, api: &str, provider_env: &str) -> PathBuf {
         let path = self.root.join("config.toml");
-        let api_section = if api.is_empty() { String::new() } else { format!("[api]\n{api}\n") };
+        let api_section = if api.is_empty() {
+            String::new()
+        } else {
+            format!("[api]\n{api}\n")
+        };
         let text = format!(
             r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
@@ -145,7 +171,11 @@ model = "fake"
 env = {provider_env}
 "#,
             script = script.display(),
-            provider_env = if provider_env.is_empty() { "{}" } else { provider_env },
+            provider_env = if provider_env.is_empty() {
+                "{}"
+            } else {
+                provider_env
+            },
         );
         std::fs::write(&path, text).unwrap();
         path
@@ -171,9 +201,18 @@ env = {provider_env}
     }
 
     fn celerisctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("celerisctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
+        let out = Command::new(bin("celerisctl"))
+            .arg("--db")
+            .arg(&self.db)
+            .args(args)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "celerisctl {args:?} failed: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         stdout
     }
 
@@ -185,7 +224,10 @@ env = {provider_env}
 
     fn start_celeris(&self, config: &Path) -> Proc {
         static STARTS: AtomicUsize = AtomicUsize::new(0);
-        let log = self.root.join(format!("celeris-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
+        let log = self.root.join(format!(
+            "celeris-{}.log",
+            STARTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--log-format", "text"])
             .stdin(Stdio::null())
@@ -214,8 +256,23 @@ env = {provider_env}
     /// `curl` で 1 要求。接続できなければ `status = 0`。`token` があれば `Authorization` を付ける（`headers` に明示があればそちら）。
     fn request(&self, method: &str, path: &str, body: Option<&str>, headers: &[&str]) -> Resp {
         let mut cmd = Command::new("curl");
-        cmd.args(["-s", "-S", "-D", "-", "--max-time", "10", "-H", "Expect:", "-X", method]);
-        let has = |name: &str| headers.iter().any(|h| h.to_ascii_lowercase().starts_with(&format!("{name}:")));
+        cmd.args([
+            "-s",
+            "-S",
+            "-D",
+            "-",
+            "--max-time",
+            "10",
+            "-H",
+            "Expect:",
+            "-X",
+            method,
+        ]);
+        let has = |name: &str| {
+            headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with(&format!("{name}:")))
+        };
         if let Some(token) = &self.token
             && !has("authorization")
         {
@@ -233,11 +290,23 @@ env = {provider_env}
         let out = cmd.arg(self.url(path)).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let Some((head, body)) = text.split_once("\r\n\r\n") else {
-            return Resp { status: 0, headers: vec![], body: String::from_utf8_lossy(&out.stderr).into_owned() };
+            return Resp {
+                status: 0,
+                headers: vec![],
+                body: String::from_utf8_lossy(&out.stderr).into_owned(),
+            };
         };
         let mut lines = head.lines();
-        let status = lines.next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).unwrap_or(0);
-        Resp { status, headers: lines.map(str::to_string).collect(), body: body.to_string() }
+        let status = lines
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Resp {
+            status,
+            headers: lines.map(str::to_string).collect(),
+            body: body.to_string(),
+        }
     }
 
     fn get(&self, path: &str) -> Resp {
@@ -253,7 +322,12 @@ env = {provider_env}
     }
 
     fn events(&self, id: TaskId) -> Vec<Event> {
-        self.store.events_for(id).unwrap().into_iter().map(|(_, e)| e).collect()
+        self.store
+            .events_for(id)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect()
     }
 
     fn replay_is_consistent(&self) {
@@ -263,7 +337,11 @@ env = {provider_env}
 }
 
 fn id_of(v: &Value) -> TaskId {
-    v["id"].as_str().unwrap_or_else(|| panic!("no id: {v}")).parse().unwrap()
+    v["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no id: {v}"))
+        .parse()
+        .unwrap()
 }
 
 /// SSE の本文を `(event, id, data)` に分ける。
@@ -292,13 +370,23 @@ fn sse_events(text: &str) -> Vec<(String, Option<u64>, Value)> {
 #[test]
 fn api_is_off_by_default_and_health_reports_versions_when_enabled() {
     let env = Env::new();
-    let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
+    let script = env.write_script(
+        "cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'",
+    );
 
     let config = env.write_config(&script, "", "");
     let mut daemon = env.start_celeris(&config);
     std::thread::sleep(Duration::from_millis(800));
-    assert!(daemon.child.try_wait().unwrap().is_none(), "celeris should keep running\n{}", daemon.log_text());
-    assert_eq!(env.get("/health").status, 0, "nothing listens without [api]");
+    assert!(
+        daemon.child.try_wait().unwrap().is_none(),
+        "celeris should keep running\n{}",
+        daemon.log_text()
+    );
+    assert_eq!(
+        env.get("/health").status,
+        0,
+        "nothing listens without [api]"
+    );
     drop(daemon);
 
     let config = env.write_config(&script, &env.api_listen(), "");
@@ -311,14 +399,23 @@ fn api_is_off_by_default_and_health_reports_versions_when_enabled() {
     assert_eq!(v["schema_version"], json!(SCHEMA_VERSION), "{v}");
     assert_eq!(v["db"]["journal_mode"], "wal", "{v}");
     assert_eq!(health.header("cache-control").as_deref(), Some("no-store"));
-    assert!(health.header("access-control-allow-origin").is_none(), "no CORS headers");
+    assert!(
+        health.header("access-control-allow-origin").is_none(),
+        "no CORS headers"
+    );
 
     // 最初の tick の後はメモリ上のスナップショットが見える（DB を読まない。ADR-0013 D4）。
-    assert!(wait_until(Duration::from_secs(5), || !env.get("/daemon").json()["snapshot"].is_null()));
+    assert!(wait_until(Duration::from_secs(5), || !env
+        .get("/daemon")
+        .json()["snapshot"]
+        .is_null()));
     let snap = env.get("/daemon").json()["snapshot"].clone();
     assert_eq!(snap["providers"][0]["id"], "fake-local", "{snap}");
     assert_eq!(snap["tick_ms"], 50, "{snap}");
-    assert_eq!(env.get("/config").json()["db"], env.db.to_string_lossy().as_ref());
+    assert_eq!(
+        env.get("/config").json()["db"],
+        env.db.to_string_lossy().as_ref()
+    );
     assert_eq!(env.get("/no-such-endpoint").status, 404);
 }
 
@@ -356,12 +453,25 @@ esac"#,
     let task = created.json();
     let id = id_of(&task);
     assert_eq!(task["status"], "draft");
-    assert!(created.header("location").unwrap_or_default().ends_with(&format!("/api/v1/tasks/{id}")));
-    env.post("/tasks", json!({"title": "x", "objective": "y", "acceptance": []}))
-        .assert_problem(422, "validation");
+    assert!(
+        created
+            .header("location")
+            .unwrap_or_default()
+            .ends_with(&format!("/api/v1/tasks/{id}"))
+    );
+    env.post(
+        "/tasks",
+        json!({"title": "x", "objective": "y", "acceptance": []}),
+    )
+    .assert_problem(422, "validation");
     // ADR-0014 D3（P-G16）: 空白だけの title と存在しない親は 422（field 付き）で、何も作らない。
     let human = json!([{"type": "human", "text": "t"}]);
-    let v = env.post("/tasks", json!({"title": "  ", "objective": "y", "acceptance": human})).assert_problem(422, "validation");
+    let v = env
+        .post(
+            "/tasks",
+            json!({"title": "  ", "objective": "y", "acceptance": human}),
+        )
+        .assert_problem(422, "validation");
     assert_eq!(v["errors"][0]["field"], "title", "{v}");
     let v = env
         .post("/tasks", json!({"title": "x", "objective": "y", "acceptance": human, "parent": TaskId::new().to_string()}))
@@ -381,40 +491,86 @@ esac"#,
     assert_eq!(labelled["status"], "ready", "人が作ったタスクは ready");
     assert_eq!(labelled["priority"], 30);
     assert_eq!(labelled["category"], "ops");
-    let by_label = env.get("/tasks?label=infra&label=urgent&category=ops&priority=P0").json();
+    let by_label = env
+        .get("/tasks?label=infra&label=urgent&category=ops&priority=P0")
+        .json();
     assert_eq!(by_label["total"].as_u64(), Some(1), "{by_label}");
     assert_eq!(by_label["items"][0]["priority_label"], "P0", "{by_label}");
-    assert_eq!(env.get("/tasks?label=infra&label=nope").json()["total"].as_u64(), Some(0));
+    assert_eq!(
+        env.get("/tasks?label=infra&label=nope").json()["total"].as_u64(),
+        Some(0)
+    );
     env.post("/tasks", json!({"title": "x", "objective": "y", "acceptance": [{"type": "human", "text": "t"}], "bogus": 1}))
         .assert_problem(400, "bad_request");
 
     // expected_status の不一致は状態を変えずに 409 conflict。
-    let conflict = env.post(&format!("/tasks/{id}/approve"), json!({"expected_status": "ready"})).assert_problem(409, "conflict");
-    assert_eq!((conflict["expected"].as_str(), conflict["actual"].as_str()), (Some("ready"), Some("draft")), "{conflict}");
+    let conflict = env
+        .post(
+            &format!("/tasks/{id}/approve"),
+            json!({"expected_status": "ready"}),
+        )
+        .assert_problem(409, "conflict");
+    assert_eq!(
+        (conflict["expected"].as_str(), conflict["actual"].as_str()),
+        (Some("ready"), Some("draft")),
+        "{conflict}"
+    );
     assert_eq!(env.task(id).status, Status::Draft);
 
-    let accepted = env.post(&format!("/tasks/{id}/approve"), json!({"expected_status": "draft"}));
+    let accepted = env.post(
+        &format!("/tasks/{id}/approve"),
+        json!({"expected_status": "draft"}),
+    );
     assert_eq!(accepted.status, 200, "{}", accepted.body);
-    assert_eq!((accepted.json()["from"].clone(), accepted.json()["to"].clone()), (json!("draft"), json!("ready")));
+    assert_eq!(
+        (
+            accepted.json()["from"].clone(),
+            accepted.json()["to"].clone()
+        ),
+        (json!("draft"), json!("ready"))
+    );
 
     // 二度目の approve と execute への reject は状態機械が拒否する。
-    let invalid = env.post(&format!("/tasks/{id}/approve"), json!({})).assert_problem(409, "invalid_transition");
+    let invalid = env
+        .post(&format!("/tasks/{id}/approve"), json!({}))
+        .assert_problem(409, "invalid_transition");
     assert_eq!(invalid["trigger"], "approve", "{invalid}");
-    env.post(&format!("/tasks/{id}/reject"), json!({})).assert_problem(409, "invalid_transition");
+    env.post(&format!("/tasks/{id}/reject"), json!({}))
+        .assert_problem(409, "invalid_transition");
 
     // ワーカーの質問 → API で回答 → done。
-    assert!(wait_until(Duration::from_secs(20), || env.task(id).status == Status::Blocked), "{:?}", env.events(id));
+    assert!(
+        wait_until(Duration::from_secs(20), || env.task(id).status
+            == Status::Blocked),
+        "{:?}",
+        env.events(id)
+    );
     let detail = env.get(&format!("/tasks/{id}")).json();
-    assert!(detail["actions"].as_array().unwrap().contains(&json!("answer")), "{detail}");
-    env.post(&format!("/tasks/{id}/answer"), json!({"answer": "   "})).assert_problem(422, "validation");
-    let answered = env.post(&format!("/tasks/{id}/answer"), json!({"answer": "target v2", "expected_status": "blocked"}));
+    assert!(
+        detail["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("answer")),
+        "{detail}"
+    );
+    env.post(&format!("/tasks/{id}/answer"), json!({"answer": "   "}))
+        .assert_problem(422, "validation");
+    let answered = env.post(
+        &format!("/tasks/{id}/answer"),
+        json!({"answer": "target v2", "expected_status": "blocked"}),
+    );
     assert_eq!(answered.status, 200, "{}", answered.body);
     assert_eq!(answered.json()["to"], "ready");
     assert!(env.events(id).iter().any(|e| matches!(
         e,
         Event::Answered { question, answer } if question == "which version should I target?" && answer == "target v2"
     )));
-    assert!(wait_until(Duration::from_secs(20), || env.task(id).status == Status::Done), "{:?}", env.events(id));
+    assert!(
+        wait_until(Duration::from_secs(20), || env.task(id).status
+            == Status::Done),
+        "{:?}",
+        env.events(id)
+    );
 
     // Approval の承認と却下。
     let approval = |title: &str| {
@@ -427,36 +583,86 @@ esac"#,
         id_of(&r.json())
     };
     let a = approval("approve me");
-    let r = env.post(&format!("/tasks/{a}/approve"), json!({"note": "lgtm", "expected_status": "ready"}));
-    assert_eq!((r.status, r.json()["to"].clone()), (200, json!("done")), "{}", r.body);
-    assert!(env.events(a).iter().any(|e| matches!(e, Event::ApprovalDecided { approved: true, .. })));
+    let r = env.post(
+        &format!("/tasks/{a}/approve"),
+        json!({"note": "lgtm", "expected_status": "ready"}),
+    );
+    assert_eq!(
+        (r.status, r.json()["to"].clone()),
+        (200, json!("done")),
+        "{}",
+        r.body
+    );
+    assert!(
+        env.events(a)
+            .iter()
+            .any(|e| matches!(e, Event::ApprovalDecided { approved: true, .. }))
+    );
     let b = approval("reject me");
     let r = env.post(&format!("/tasks/{b}/reject"), json!({"note": "no"}));
-    assert_eq!((r.status, r.json()["to"].clone()), (200, json!("failed")), "{}", r.body);
+    assert_eq!(
+        (r.status, r.json()["to"].clone()),
+        (200, json!("failed")),
+        "{}",
+        r.body
+    );
 
     // cancel は非終端だけ（`status: "draft"` を明示して draft のまま止めておく。ADR-0044 D1）。
     let draft = id_of(&env.post("/tasks", json!({"title": "c", "objective": "o", "acceptance": [{"type": "human", "text": "t"}], "status": "draft"})).json());
-    let r = env.post(&format!("/tasks/{draft}/cancel"), json!({"expected_status": "draft"}));
-    assert_eq!((r.status, r.json()["to"].clone()), (200, json!("cancelled")), "{}", r.body);
+    let r = env.post(
+        &format!("/tasks/{draft}/cancel"),
+        json!({"expected_status": "draft"}),
+    );
+    assert_eq!(
+        (r.status, r.json()["to"].clone()),
+        (200, json!("cancelled")),
+        "{}",
+        r.body
+    );
     assert!(r.json()["cascaded"].is_array(), "{}", r.body);
-    env.post(&format!("/tasks/{draft}/cancel"), json!({})).assert_problem(409, "invalid_transition");
-    env.post(&format!("/tasks/{}/cancel", TaskId::new()), json!({})).assert_problem(404, "task_not_found");
+    env.post(&format!("/tasks/{draft}/cancel"), json!({}))
+        .assert_problem(409, "invalid_transition");
+    env.post(&format!("/tasks/{}/cancel", TaskId::new()), json!({}))
+        .assert_problem(404, "task_not_found");
 
     // plan（celerisctl plan 相当）。
     let plan = env.post("/plans", json!({"goal": "split the work\nsecond line"}));
     assert_eq!(plan.status, 201, "{}", plan.body);
     let plan = plan.json();
-    assert_eq!((plan["kind"].clone(), plan["status"].clone(), plan["title"].clone()), (json!("plan"), json!("draft"), json!("split the work")));
-    env.post("/plans", json!({"goal": "  "})).assert_problem(422, "validation");
+    assert_eq!(
+        (
+            plan["kind"].clone(),
+            plan["status"].clone(),
+            plan["title"].clone()
+        ),
+        (json!("plan"), json!("draft"), json!("split the work"))
+    );
+    env.post("/plans", json!({"goal": "  "}))
+        .assert_problem(422, "validation");
 
     // 変更系の前提（Content-Type と Origin）。
-    let r = env.request("POST", &format!("/tasks/{draft}/cancel"), Some("{}"), &["Content-Type: text/plain"]);
+    let r = env.request(
+        "POST",
+        &format!("/tasks/{draft}/cancel"),
+        Some("{}"),
+        &["Content-Type: text/plain"],
+    );
     r.assert_problem(415, "unsupported_media_type");
-    let r = env.request("POST", "/plans", Some(r#"{"goal":"g"}"#), &["Origin: http://evil.example"]);
+    let r = env.request(
+        "POST",
+        "/plans",
+        Some(r#"{"goal":"g"}"#),
+        &["Origin: http://evil.example"],
+    );
     r.assert_problem(403, "origin_forbidden");
 
     let replay = env.post("/replay", json!({}));
-    assert_eq!((replay.status, replay.json()["mismatches"].clone()), (200, json!([])), "{}", replay.body);
+    assert_eq!(
+        (replay.status, replay.json()["mismatches"].clone()),
+        (200, json!([])),
+        "{}",
+        replay.body
+    );
     env.replay_is_consistent();
 }
 
@@ -464,7 +670,9 @@ esac"#,
 #[test]
 fn sse_delivers_created_quickly_and_resumes_from_last_event_id() {
     let env = Env::new();
-    let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
+    let script = env.write_script(
+        "cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'",
+    );
     let config = env.write_config(&script, &env.api_listen(), "");
     let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
@@ -484,23 +692,44 @@ fn sse_delivers_created_quickly_and_resumes_from_last_event_id() {
             .spawn()
             .unwrap();
         let p = Proc { child, log };
-        assert!(wait_until(Duration::from_secs(5), || p.log_text().contains("event: hello")), "no hello: {}", p.log_text());
+        assert!(
+            wait_until(Duration::from_secs(5), || p
+                .log_text()
+                .contains("event: hello")),
+            "no hello: {}",
+            p.log_text()
+        );
         p
     };
     let created_id = |p: &Proc, task: TaskId| {
-        sse_events(&p.log_text()).into_iter().find_map(|(event, id, data)| {
-            (event == "task.event" && data["event"]["type"] == "created" && data["task_id"] == task.to_string()).then_some(id)
-        })
+        sse_events(&p.log_text())
+            .into_iter()
+            .find_map(|(event, id, data)| {
+                (event == "task.event"
+                    && data["event"]["type"] == "created"
+                    && data["task_id"] == task.to_string())
+                .then_some(id)
+            })
     };
 
     let first = subscribe("sse-1.txt", None);
     let started = Instant::now();
     let t1 = env.add(&["--title", "sse one", "--check-cmd", "true"]);
-    assert!(wait_until(Duration::from_secs(2), || created_id(&first, t1).is_some()), "Created not delivered: {}", first.log_text());
+    assert!(
+        wait_until(Duration::from_secs(2), || created_id(&first, t1).is_some()),
+        "Created not delivered: {}",
+        first.log_text()
+    );
     let elapsed = started.elapsed();
     assert!(elapsed <= Duration::from_secs(2), "took {elapsed:?}");
-    let last_seen = created_id(&first, t1).flatten().expect("task.event carries an id");
-    let hello = sse_events(&first.log_text()).into_iter().find(|(e, _, _)| e == "hello").unwrap().2;
+    let last_seen = created_id(&first, t1)
+        .flatten()
+        .expect("task.event carries an id");
+    let hello = sse_events(&first.log_text())
+        .into_iter()
+        .find(|(e, _, _)| e == "hello")
+        .unwrap()
+        .2;
     assert!(hello["cursor"].as_u64().unwrap() < last_seen, "{hello}");
     drop(first);
 
@@ -508,20 +737,36 @@ fn sse_delivers_created_quickly_and_resumes_from_last_event_id() {
     let t2 = env.add(&["--title", "sse two", "--check-cmd", "true"]);
     env.celerisctl(&["approve", &t1.to_string()]);
     let second = subscribe("sse-2.txt", Some(last_seen));
-    assert!(wait_until(Duration::from_secs(5), || created_id(&second, t2).is_some()), "missed Created: {}", second.log_text());
     assert!(
-        wait_until(Duration::from_secs(5), || sse_events(&second.log_text()).iter().any(|(e, _, d)| e == "task.event"
-            && d["task_id"] == t1.to_string()
-            && d["event"]["type"] == "transitioned")),
+        wait_until(Duration::from_secs(5), || created_id(&second, t2).is_some()),
+        "missed Created: {}",
+        second.log_text()
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || sse_events(&second.log_text())
+            .iter()
+            .any(|(e, _, d)| e == "task.event"
+                && d["task_id"] == t1.to_string()
+                && d["event"]["type"] == "transitioned")),
         "missed the approval of t1: {}",
         second.log_text()
     );
     let events = sse_events(&second.log_text());
     let hello = &events.iter().find(|(e, _, _)| e == "hello").unwrap().2;
     assert_eq!(hello["cursor"].as_u64(), Some(last_seen), "{hello}");
-    let ids: Vec<u64> = events.iter().filter(|(e, _, _)| e == "task.event").filter_map(|(_, id, _)| *id).collect();
-    assert!(ids.iter().all(|id| *id > last_seen), "replayed an already-seen event: {ids:?}");
-    assert!(ids.windows(2).all(|w| w[0] < w[1]), "ids must increase: {ids:?}");
+    let ids: Vec<u64> = events
+        .iter()
+        .filter(|(e, _, _)| e == "task.event")
+        .filter_map(|(_, id, _)| *id)
+        .collect();
+    assert!(
+        ids.iter().all(|id| *id > last_seen),
+        "replayed an already-seen event: {ids:?}"
+    );
+    assert!(
+        ids.windows(2).all(|w| w[0] < w[1]),
+        "ids must increase: {ids:?}"
+    );
     drop(second);
     env.replay_is_consistent();
 }
@@ -543,8 +788,24 @@ fi"#,
     let ws_slow = env.workspace("ws-slow");
     let ws_throttle = env.workspace("ws-throttle");
     std::fs::write(Path::new(&ws_throttle).join("throttle-me"), "").unwrap();
-    let slow = env.add(&["--title", "slow", "--check-cmd", "true", "--workspace", &ws_slow]);
-    let throttled = env.add(&["--title", "throttled", "--check-cmd", "true", "--max-retries", "0", "--workspace", &ws_throttle]);
+    let slow = env.add(&[
+        "--title",
+        "slow",
+        "--check-cmd",
+        "true",
+        "--workspace",
+        &ws_slow,
+    ]);
+    let throttled = env.add(&[
+        "--title",
+        "throttled",
+        "--check-cmd",
+        "true",
+        "--max-retries",
+        "0",
+        "--workspace",
+        &ws_throttle,
+    ]);
 
     let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
@@ -552,11 +813,17 @@ fi"#,
     env.celerisctl(&["approve", &slow.to_string()]);
     let in_flight_has_slow = |snap: &Value| {
         snap["in_flight"].as_array().is_some_and(|v| {
-            v.iter().any(|r| r["task_id"] == slow.to_string() && r["kind"] == "worker" && r["provider"] == "fake-local")
+            v.iter().any(|r| {
+                r["task_id"] == slow.to_string()
+                    && r["kind"] == "worker"
+                    && r["provider"] == "fake-local"
+            })
         })
     };
     assert!(
-        wait_until(Duration::from_secs(10), || in_flight_has_slow(&env.get("/daemon").json()["snapshot"])),
+        wait_until(Duration::from_secs(10), || in_flight_has_slow(
+            &env.get("/daemon").json()["snapshot"]
+        )),
         "slow run never appeared in /daemon: {}",
         env.get("/daemon").body
     );
@@ -565,11 +832,20 @@ fi"#,
     let mut snap = Value::Null;
     let seen = wait_until(Duration::from_secs(5), || {
         snap = env.get("/daemon").json()["snapshot"].clone();
-        snap["cooldowns"].as_array().is_some_and(|c| c.iter().any(|c| c["provider"] == "fake-local" && c["reason"] == "throttled"))
+        snap["cooldowns"].as_array().is_some_and(|c| {
+            c.iter()
+                .any(|c| c["provider"] == "fake-local" && c["reason"] == "throttled")
+        })
     });
     assert!(seen, "no cooldown in /daemon: {snap}");
-    assert!(in_flight_has_slow(&snap), "the slow run is still in flight during the cooldown: {snap}");
-    assert!(snap["providers"][0]["in_use"].as_u64().unwrap() >= 1, "{snap}");
+    assert!(
+        in_flight_has_slow(&snap),
+        "the slow run is still in flight during the cooldown: {snap}"
+    );
+    assert!(
+        snap["providers"][0]["in_use"].as_u64().unwrap() >= 1,
+        "{snap}"
+    );
     assert!(
         snap["cooldowns"][0]["until"].as_str().unwrap() > snap["last_tick_at"].as_str().unwrap(),
         "cooldown ends in the future: {snap}"
@@ -579,9 +855,17 @@ fi"#,
         e,
         Event::ProviderThrottled { provider, reason, .. } if provider == "fake-local" && reason.as_deref() == Some("throttled")
     )), "{:?}", env.events(throttled));
-    let page = env.get(&format!("/events?task_id={throttled}&types=provider_throttled")).json();
+    let page = env
+        .get(&format!(
+            "/events?task_id={throttled}&types=provider_throttled"
+        ))
+        .json();
     assert_eq!(page["items"].as_array().map(Vec::len), Some(1), "{page}");
-    assert_eq!(env.task(throttled).attempts, 0, "a requeue does not consume attempts");
+    assert_eq!(
+        env.task(throttled).attempts,
+        0,
+        "a requeue does not consume attempts"
+    );
     drop(daemon);
     env.replay_is_consistent();
 }
@@ -590,60 +874,119 @@ fi"#,
 #[test]
 fn api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values() {
     let mut env = Env::new();
-    let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
+    let script = env.write_script(
+        "cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'",
+    );
 
     // loopback 以外で token_file 無し → 設定エラー（exit 2）。
     let config = env.write_config(&script, &format!("listen = \"0.0.0.0:{}\"", env.port), "");
     let mut bad = env.start_celeris(&config);
-    assert!(wait_until(Duration::from_secs(10), || bad.child.try_wait().unwrap().is_some()), "celeris must refuse the config");
+    assert!(
+        wait_until(Duration::from_secs(10), || bad
+            .child
+            .try_wait()
+            .unwrap()
+            .is_some()),
+        "celeris must refuse the config"
+    );
     assert_eq!(bad.child.wait().unwrap().code(), Some(2));
-    assert!(bad.log_text().contains("token_file is required"), "{}", bad.log_text());
+    assert!(
+        bad.log_text().contains("token_file is required"),
+        "{}",
+        bad.log_text()
+    );
     drop(bad);
 
     std::fs::write(env.root.join("api.token"), "  tok-9f8e7d\n").unwrap();
     let api = format!("{}\ntoken_file = \"api.token\"", env.api_listen());
-    let config = env.write_config(&script, &api, r#"{ SECRET_TOKEN = "s3cr3t-provider-value" }"#);
+    let config = env.write_config(
+        &script,
+        &api,
+        r#"{ SECRET_TOKEN = "s3cr3t-provider-value" }"#,
+    );
     let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
 
     // Bearer。
     let r = env.get("/tasks");
     r.assert_problem(401, "unauthorized");
-    assert!(r.header("www-authenticate").unwrap_or_default().starts_with("Bearer"), "{:?}", r.headers);
-    env.request("GET", "/tasks", None, &["Authorization: Bearer wrong"]).assert_problem(401, "unauthorized");
+    assert!(
+        r.header("www-authenticate")
+            .unwrap_or_default()
+            .starts_with("Bearer"),
+        "{:?}",
+        r.headers
+    );
+    env.request("GET", "/tasks", None, &["Authorization: Bearer wrong"])
+        .assert_problem(401, "unauthorized");
     env.token = Some("tok-9f8e7d".into());
     assert_eq!(env.get("/tasks").status, 200);
 
     // Host 検査（/health も対象）。
-    env.request("GET", "/tasks", None, &["Host: evil.example"]).assert_problem(400, "host_not_allowed");
-    env.request("GET", "/health", None, &["Host: evil.example:80"]).assert_problem(400, "host_not_allowed");
+    env.request("GET", "/tasks", None, &["Host: evil.example"])
+        .assert_problem(400, "host_not_allowed");
+    env.request("GET", "/health", None, &["Host: evil.example:80"])
+        .assert_problem(400, "host_not_allowed");
     let localhost = format!("Host: localhost:{}", env.port);
-    assert_eq!(env.request("GET", "/health", None, &[localhost.as_str()]).status, 200);
+    assert_eq!(
+        env.request("GET", "/health", None, &[localhost.as_str()])
+            .status,
+        200
+    );
 
     // env の値・トークン・token_file の場所は応答に出ない（キー名は出る）。
     for path in ["/config", "/providers", "/daemon", "/health"] {
         let r = env.get(path);
         assert_eq!(r.status, 200, "{path}: {}", r.body);
-        for secret in ["s3cr3t-provider-value", "adapter-s3cr3t-value", "tok-9f8e7d", "api.token"] {
-            assert!(!r.body.contains(secret), "{path} leaks {secret}: {}", r.body);
+        for secret in [
+            "s3cr3t-provider-value",
+            "adapter-s3cr3t-value",
+            "tok-9f8e7d",
+            "api.token",
+        ] {
+            assert!(
+                !r.body.contains(secret),
+                "{path} leaks {secret}: {}",
+                r.body
+            );
         }
     }
     let cfg = env.get("/config").json();
-    assert!(cfg.to_string().contains("SECRET_TOKEN"), "env keys are listed: {cfg}");
+    assert!(
+        cfg.to_string().contains("SECRET_TOKEN"),
+        "env keys are listed: {cfg}"
+    );
     assert_eq!(cfg["api"]["auth_required"], true, "{cfg}");
 
     // ワークスペース外を指す成果物は 403（`..` と symlink の両方）。中のものは読める。
     let ws = env.workspace("ws-files");
     std::fs::write(env.root.join("outside.txt"), "top secret").unwrap();
     std::fs::write(Path::new(&ws).join("inside.txt"), "inside").unwrap();
-    std::os::unix::fs::symlink(env.root.join("outside.txt"), Path::new(&ws).join("link.txt")).unwrap();
+    std::os::unix::fs::symlink(
+        env.root.join("outside.txt"),
+        Path::new(&ws).join("link.txt"),
+    )
+    .unwrap();
     let created = env.post("/tasks", json!({"title": "files", "objective": "o", "acceptance": [{"type": "human", "text": "t"}], "workspace": ws}));
     assert_eq!(created.status, 201, "{}", created.body);
     let id = id_of(&created.json());
     let run_id = TaskId::new().to_string();
     for path in ["inside.txt", "../outside.txt", "link.txt"] {
-        let artifact = ArtifactRef { name: path.into(), path: path.into(), sha256: "0".repeat(64), kind: "file".into() };
-        env.store.append_event(id, &Event::ArtifactProduced { run_id: run_id.clone(), artifact }).unwrap();
+        let artifact = ArtifactRef {
+            name: path.into(),
+            path: path.into(),
+            sha256: "0".repeat(64),
+            kind: "file".into(),
+        };
+        env.store
+            .append_event(
+                id,
+                &Event::ArtifactProduced {
+                    run_id: run_id.clone(),
+                    artifact,
+                },
+            )
+            .unwrap();
     }
     let inside = env.get(&format!("/tasks/{id}/artifacts/0"));
     assert_eq!((inside.status, inside.body.as_str()), (200, "inside"));
@@ -654,7 +997,8 @@ fn api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values()
     }
     let list = env.get(&format!("/tasks/{id}/artifacts")).json();
     assert_eq!(list["items"][1]["forbidden"], true, "{list}");
-    env.get(&format!("/tasks/{id}/runs/not-a-ulid/stdout")).assert_problem(403, "path_forbidden");
+    env.get(&format!("/tasks/{id}/runs/not-a-ulid/stdout"))
+        .assert_problem(403, "path_forbidden");
     env.replay_is_consistent();
 }
 
@@ -663,11 +1007,15 @@ fn api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values()
 #[test]
 fn writes_from_celerisctl_and_api_while_celeris_ticks_fast_never_hit_database_is_locked() {
     let mut env = Env::new();
-    let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
+    let script = env.write_script(
+        "cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'",
+    );
     // ADR-0044 Phase 53 追記（Phase 55）: `POST /tasks` は管理系になったのでトークンを持たせる。
     let api = env.api_listen_with_token();
     let config = env.write_config(&script, &api, "");
-    let text = std::fs::read_to_string(&config).unwrap().replace("tick_ms = 50", "tick_ms = 20");
+    let text = std::fs::read_to_string(&config)
+        .unwrap()
+        .replace("tick_ms = 50", "tick_ms = 20");
     std::fs::write(&config, text).unwrap();
     let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
@@ -675,7 +1023,14 @@ fn writes_from_celerisctl_and_api_while_celeris_ticks_fast_never_hit_database_is
 
     let mut ids = Vec::new();
     for i in 0..150 {
-        let id = env.add(&["--title", &format!("cli {i}"), "--check-cmd", "true", "--workspace", &ws]);
+        let id = env.add(&[
+            "--title",
+            &format!("cli {i}"),
+            "--check-cmd",
+            "true",
+            "--workspace",
+            &ws,
+        ]);
         env.celerisctl(&["approve", &id.to_string()]);
         ids.push(id);
         if i % 5 == 0 {
@@ -689,15 +1044,29 @@ fn writes_from_celerisctl_and_api_while_celeris_ticks_fast_never_hit_database_is
             assert_eq!(created["status"], "ready", "{created}");
             ids.push(id_of(&created));
         }
-        assert!(daemon.child.try_wait().unwrap().is_none(), "celeris exited at iteration {i}\n{}", daemon.log_text());
+        assert!(
+            daemon.child.try_wait().unwrap().is_none(),
+            "celeris exited at iteration {i}\n{}",
+            daemon.log_text()
+        );
     }
     assert!(
-        wait_until(Duration::from_secs(120), || ids.iter().all(|id| env.task(*id).status == Status::Done)),
+        wait_until(Duration::from_secs(120), || ids
+            .iter()
+            .all(|id| env.task(*id).status == Status::Done)),
         "not all tasks finished\n{}",
         daemon.log_text()
     );
-    assert!(daemon.child.try_wait().unwrap().is_none(), "celeris must still be running\n{}", daemon.log_text());
-    assert!(!daemon.log_text().contains("database is locked"), "{}", daemon.log_text());
+    assert!(
+        daemon.child.try_wait().unwrap().is_none(),
+        "celeris must still be running\n{}",
+        daemon.log_text()
+    );
+    assert!(
+        !daemon.log_text().contains("database is locked"),
+        "{}",
+        daemon.log_text()
+    );
     env.replay_is_consistent();
 }
 
@@ -706,7 +1075,8 @@ fn writes_from_celerisctl_and_api_while_celeris_ticks_fast_never_hit_database_is
 #[test]
 fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
     let env = Env::new();
-    let script = env.write_script(r#"cat >/dev/null; echo '{"type":"done","summary":"unused","evidence":[]}'"#);
+    let script = env
+        .write_script(r#"cat >/dev/null; echo '{"type":"done","summary":"unused","evidence":[]}'"#);
     let config = env.write_config(&script, &env.api_listen(), "");
     let mut text = std::fs::read_to_string(&config).unwrap();
     text.push_str(
@@ -715,7 +1085,16 @@ fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
     );
     std::fs::write(&config, text).unwrap();
     let remote = env.workspace("remote-project");
-    let id = env.add(&["--title", "offline work", "--check-cmd", "true", "--cluster", "offline", "--workspace", &remote]);
+    let id = env.add(&[
+        "--title",
+        "offline work",
+        "--check-cmd",
+        "true",
+        "--cluster",
+        "offline",
+        "--workspace",
+        &remote,
+    ]);
 
     let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
@@ -727,7 +1106,10 @@ fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
         clusters = env.get("/clusters").json();
         clusters["items"][0]["cooldown_until"].is_string()
     });
-    assert!(seen, "the offline cluster never entered cooldown: {clusters}");
+    assert!(
+        seen,
+        "the offline cluster never entered cooldown: {clusters}"
+    );
     let c = &clusters["items"][0];
     assert_eq!(c["id"], "offline", "{clusters}");
     assert_eq!(c["host"], "celeris-no-such-host-for-tests");
@@ -739,39 +1121,77 @@ fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
     assert_eq!(c["has_setup"], true);
     assert_eq!(c["env_keys"], json!(["SECRET_CLUSTER_VALUE"]));
     assert_eq!(c["rsync_excludes"], json!([".git/"]));
-    assert!(c["cooldown_remaining_secs"].as_u64().is_some(), "{clusters}");
-    assert!(!clusters.to_string().contains("cluster-s3cr3t-value"), "env values must not leak: {clusters}");
+    assert!(
+        c["cooldown_remaining_secs"].as_u64().is_some(),
+        "{clusters}"
+    );
+    assert!(
+        !clusters.to_string().contains("cluster-s3cr3t-value"),
+        "env values must not leak: {clusters}"
+    );
     let config_view = env.get("/config");
-    assert!(!config_view.body.contains("cluster-s3cr3t-value"), "{}", config_view.body);
-    assert!(!config_view.body.contains("\"setup\""), "{}", config_view.body);
-    assert_eq!(config_view.json()["clusters"][0]["has_setup"], true, "{}", config_view.body);
+    assert!(
+        !config_view.body.contains("cluster-s3cr3t-value"),
+        "{}",
+        config_view.body
+    );
+    assert!(
+        !config_view.body.contains("\"setup\""),
+        "{}",
+        config_view.body
+    );
+    assert_eq!(
+        config_view.json()["clusters"][0]["has_setup"],
+        true,
+        "{}",
+        config_view.body
+    );
     let snap = env.get("/daemon").json()["snapshot"].clone();
     assert_eq!(snap["clusters"][0]["connected"], false, "{snap}");
-    assert_eq!(snap["clusters"][0]["host"], "celeris-no-such-host-for-tests", "{snap}");
+    assert_eq!(
+        snap["clusters"][0]["host"], "celeris-no-such-host-for-tests",
+        "{snap}"
+    );
 
     // 9. 受信箱の注意: クラスタごとに 1 件、host と対象タスク数。
     let inbox = env.get("/inbox").json();
-    let attention = inbox["attention"].as_array().unwrap_or_else(|| panic!("{inbox}"));
-    let items: Vec<&Value> = attention.iter().filter(|a| a["type"] == "cluster_unavailable").collect();
+    let attention = inbox["attention"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{inbox}"));
+    let items: Vec<&Value> = attention
+        .iter()
+        .filter(|a| a["type"] == "cluster_unavailable")
+        .collect();
     assert_eq!(items.len(), 1, "{inbox}");
     // ADR-0018 M8: 人のログイン待ちは経路なし（unroutable）ではないので、同じタスクが 2 件に出ない。
-    assert!(!attention.iter().any(|a| a["type"] == "unroutable"), "{inbox}");
+    assert!(
+        !attention.iter().any(|a| a["type"] == "unroutable"),
+        "{inbox}"
+    );
     assert_eq!(items[0]["cluster"], "offline");
     assert_eq!(items[0]["host"], "celeris-no-such-host-for-tests");
     assert_eq!(items[0]["tasks"], 1);
     assert!(items[0]["at"].is_string(), "{inbox}");
-    assert_eq!(inbox["counts"]["attention"].as_u64().unwrap() as usize, attention.len());
+    assert_eq!(
+        inbox["counts"]["attention"].as_u64().unwrap() as usize,
+        attention.len()
+    );
 
     // 11. 詳細にクラスタが出る（API と `celerisctl show --json` の両方）。`workspace_dir` は手元の写し。
     let detail = env.get(&format!("/tasks/{id}")).json();
     assert_eq!(detail["cluster"], "offline", "{detail}");
     assert_eq!(
         detail["workspace_dir"],
-        env.root.join("workspaces").join(id.to_string()).to_string_lossy().as_ref(),
+        env.root
+            .join("workspaces")
+            .join(id.to_string())
+            .to_string_lossy()
+            .as_ref(),
         "{detail}"
     );
     assert_eq!(detail["task"]["workspace"]["path"], remote, "{detail}");
-    let show: Value = serde_json::from_str(env.celerisctl(&["show", "--json", &id.to_string()]).trim()).unwrap();
+    let show: Value =
+        serde_json::from_str(env.celerisctl(&["show", "--json", &id.to_string()]).trim()).unwrap();
     assert_eq!(show["cluster"], "offline", "{show}");
 
     // タスクは ready のまま（attempts も消費しない）。

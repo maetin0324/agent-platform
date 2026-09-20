@@ -36,7 +36,10 @@ pub fn artifacts_dir_for(task: &Task, workspace_dir: &Path) -> PathBuf {
     if owns_workspace(task, workspace_dir) {
         workspace_dir.join(ARTIFACTS_DIR_NAME)
     } else {
-        workspace_dir.join(".taskd").join(ARTIFACTS_DIR_NAME).join(task.id.to_string())
+        workspace_dir
+            .join(".taskd")
+            .join(ARTIFACTS_DIR_NAME)
+            .join(task.id.to_string())
     }
 }
 
@@ -72,20 +75,35 @@ mod tests {
         use crate::model::*;
         let now = time::OffsetDateTime::now_utc();
         Task {
+            mode: Default::default(),
+            skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: parent,
             kind: TaskKind::Execute,
             title: "t".into(),
             objective: "o".into(),
-            acceptance: vec![Criterion { text: "c".into(), check: Check::Human }],
+            acceptance: vec![Criterion {
+                text: "c".into(),
+                check: Check::Human,
+            }],
             inputs: vec![],
             depends_on: vec![],
             status: Status::Ready,
             priority: 0,
-            worker_hint: WorkerHint { tier: Tier::Standard, adapter: None },
-            workspace: WorkspaceSpec::Local { path: PathBuf::from("/tmp/ws"), mode: None },
-            budget: Budget { max_turns: 1, max_wall_secs: 1, max_retries: 0 },
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::Local {
+                path: PathBuf::from("/tmp/ws"),
+                mode: None,
+            },
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
             attempts: 0,
             lease: None,
             created_at: now,
@@ -121,12 +139,20 @@ mod tests {
         assert!(!owns_workspace(&child, &dir));
         assert_eq!(
             artifacts_dir_for(&child, &dir),
-            dir.join(".taskd").join("artifacts").join(child.id.to_string())
+            dir.join(".taskd")
+                .join("artifacts")
+                .join(child.id.to_string())
         );
-        assert_eq!(artifacts_rel_for(&child, &dir), format!(".taskd/artifacts/{}", child.id));
+        assert_eq!(
+            artifacts_rel_for(&child, &dir),
+            format!(".taskd/artifacts/{}", child.id)
+        );
         // 兄弟同士でぶつからない。
         let sibling = task(Some(parent.id));
-        assert_ne!(artifacts_dir_for(&child, &dir), artifacts_dir_for(&sibling, &dir));
+        assert_ne!(
+            artifacts_dir_for(&child, &dir),
+            artifacts_dir_for(&sibling, &dir)
+        );
     }
 
     /// 子でも、作業ディレクトリが自分の id（既定の `workspace_root/<task_id>`、Remote の写し）なら所有。
@@ -143,7 +169,10 @@ mod tests {
     fn rel_from_strips_the_workspace_and_falls_back_to_artifacts() {
         let ws = Path::new("/srv/ws");
         assert_eq!(rel_from(ws, &ws.join("artifacts")), "artifacts");
-        assert_eq!(rel_from(ws, &ws.join(".taskd/artifacts/01H")), ".taskd/artifacts/01H");
+        assert_eq!(
+            rel_from(ws, &ws.join(".taskd/artifacts/01H")),
+            ".taskd/artifacts/01H"
+        );
         assert_eq!(rel_from(ws, Path::new("/elsewhere/artifacts")), "artifacts");
         assert_eq!(rel_from(ws, ws), "artifacts");
     }

@@ -38,7 +38,11 @@ pub struct ClusterConnectPending {
 }
 
 fn find_cluster<'a>(config: &'a Config, id: &str) -> Result<&'a ClusterConfig, ClusterAdminError> {
-    config.clusters.iter().find(|c| c.id == id).ok_or(ClusterAdminError::NotFound)
+    config
+        .clusters
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or(ClusterAdminError::NotFound)
 }
 
 fn unix_now() -> i64 {
@@ -79,8 +83,14 @@ pub fn spawn_connect_start(
         if let Some(old) = sessions.lock().await.remove(&id) {
             old.cancel().await;
         }
-        let outcome =
-            start_connect(&["ssh".to_string()], &host, interactive, PROMPT_TIMEOUT, CONNECT_TIMEOUT).await;
+        let outcome = start_connect(
+            &["ssh".to_string()],
+            &host,
+            interactive,
+            PROMPT_TIMEOUT,
+            CONNECT_TIMEOUT,
+        )
+        .await;
         match outcome {
             Ok(ClusterConnectStart::Connected(master)) => {
                 hold_master(&masters, &id, master);
@@ -93,7 +103,12 @@ pub fn spawn_connect_start(
             }
             Ok(ClusterConnectStart::NeedsCode { prompt, session }) => {
                 sessions.lock().await.insert(id.clone(), session);
-                let _ = events.send(ClusterConnectPending { id: id.clone(), pending: true }).await;
+                let _ = events
+                    .send(ClusterConnectPending {
+                        id: id.clone(),
+                        pending: true,
+                    })
+                    .await;
                 // プロンプトの中身はログに出さない（D4）。
                 tracing::info!(
                     who = "admin",
@@ -136,13 +151,21 @@ pub fn spawn_connect_code(
         };
         let result = session.submit_code(&code, CODE_WAIT).await;
         // 成否にかかわらずセッションは終わったので pending を降ろす。
-        let _ = events.send(ClusterConnectPending { id: id.clone(), pending: false }).await;
+        let _ = events
+            .send(ClusterConnectPending {
+                id: id.clone(),
+                pending: false,
+            })
+            .await;
         match result {
             // `None` は失敗ではない（ssh が `ControlPersist` で master を切り離した場合。保持する子が無いだけ）。
             Ok(master) => {
                 hold_master(&masters, &id, master);
                 tracing::info!(who = "admin", op = "cluster_connect_code", cluster = %id, "cluster: connected");
-                let _ = reply.send(Ok(ClusterConnectCodeOutcome { ok: true, detail: None }));
+                let _ = reply.send(Ok(ClusterConnectCodeOutcome {
+                    ok: true,
+                    detail: None,
+                }));
             }
             Err(task_worker::cluster_login::ClusterConnectError::InvalidCode) => {
                 // コードそのものは出さない。
@@ -150,7 +173,10 @@ pub fn spawn_connect_code(
             }
             Err(e) => {
                 tracing::warn!(who = "admin", op = "cluster_connect_code", cluster = %id, error = %e, "cluster: connect failed");
-                let _ = reply.send(Ok(ClusterConnectCodeOutcome { ok: false, detail: Some(e.to_string()) }));
+                let _ = reply.send(Ok(ClusterConnectCodeOutcome {
+                    ok: false,
+                    detail: Some(e.to_string()),
+                }));
             }
         }
     });
@@ -177,7 +203,12 @@ pub fn spawn_connect_cancel(
     tokio::spawn(async move {
         if let Some(session) = sessions.lock().await.remove(&id) {
             session.cancel().await;
-            let _ = events.send(ClusterConnectPending { id: id.clone(), pending: false }).await;
+            let _ = events
+                .send(ClusterConnectPending {
+                    id: id.clone(),
+                    pending: false,
+                })
+                .await;
         }
         // celeris が保持している master を落とす（Drop でプロセスグループごと SIGKILL）。
         drop_master(&masters, &id);
@@ -210,7 +241,9 @@ fn hold_master(
         Ok(mut held) => {
             held.insert(id.to_string(), master);
         }
-        Err(_) => tracing::warn!(cluster = %id, "cluster: master registry is poisoned; the connection will close"),
+        Err(_) => {
+            tracing::warn!(cluster = %id, "cluster: master registry is poisoned; the connection will close")
+        }
     }
 }
 
@@ -275,11 +308,26 @@ mod tests {
         let (tx, _rx) = channels();
 
         let (reply, rx) = oneshot::channel();
-        spawn_connect_start(&config, sessions.clone(), masters.clone(), "nope".into(), tx.clone(), reply);
+        spawn_connect_start(
+            &config,
+            sessions.clone(),
+            masters.clone(),
+            "nope".into(),
+            tx.clone(),
+            reply,
+        );
         assert!(matches!(rx.await, Ok(Err(ClusterAdminError::NotFound))));
 
         let (reply, rx) = oneshot::channel();
-        spawn_connect_code(&config, sessions.clone(), masters.clone(), "nope".into(), "1".into(), tx.clone(), reply);
+        spawn_connect_code(
+            &config,
+            sessions.clone(),
+            masters.clone(),
+            "nope".into(),
+            "1".into(),
+            tx.clone(),
+            reply,
+        );
         assert!(matches!(rx.await, Ok(Err(ClusterAdminError::NotFound))));
 
         let (reply, rx) = oneshot::channel();
@@ -293,7 +341,14 @@ mod tests {
         let config = config_with("manual");
         let (tx, _rx) = channels();
         let (reply, rx) = oneshot::channel();
-        spawn_connect_start(&config, Default::default(), Default::default(), "c1".into(), tx, reply);
+        spawn_connect_start(
+            &config,
+            Default::default(),
+            Default::default(),
+            "c1".into(),
+            tx,
+            reply,
+        );
         assert!(matches!(rx.await, Ok(Err(ClusterAdminError::NotSupported))));
     }
 
@@ -321,7 +376,14 @@ mod tests {
         let config = config_with("totp");
         let (tx, _rx) = channels();
         let (reply, rx) = oneshot::channel();
-        spawn_connect_cancel(&config, Default::default(), Default::default(), "c1".into(), tx, reply);
+        spawn_connect_cancel(
+            &config,
+            Default::default(),
+            Default::default(),
+            "c1".into(),
+            tx,
+            reply,
+        );
         assert!(matches!(rx.await, Ok(Ok(()))));
     }
 
@@ -329,7 +391,8 @@ mod tests {
     #[tokio::test]
     async fn expire_returns_ids_and_does_not_send_on_a_channel() {
         let sessions: ClusterConnectSessions = Default::default();
-        let expired = expire_stale_cluster_sessions(&sessions, std::time::Duration::from_secs(0)).await;
+        let expired =
+            expire_stale_cluster_sessions(&sessions, std::time::Duration::from_secs(0)).await;
         assert!(expired.is_empty());
     }
 }

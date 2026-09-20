@@ -14,7 +14,11 @@ use crate::types::{AccountCooldownView, AccountUsageView, RateWindowView};
 
 /// `^[A-Za-z0-9_-]{1,64}$`（プロバイダ id と同じ規則。ADR-0024 D1）。
 pub fn valid_account_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// `claude_dir` 直下の 1 ディレクトリ。
@@ -46,7 +50,11 @@ pub fn scan_accounts(root: &Path, adapter: AccountAdapter) -> Vec<AccountDirEntr
             continue;
         }
         let logged_in = path.join(marker).exists();
-        out.push(AccountDirEntry { id: name, dir: path, logged_in });
+        out.push(AccountDirEntry {
+            id: name,
+            dir: path,
+            logged_in,
+        });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
@@ -61,14 +69,19 @@ pub(crate) fn rfc3339_unix(secs: i64) -> String {
 }
 
 /// `RateLimitObservation`（task-core、run/check の直後）を `AccountUsageView` に写す。
-pub(crate) fn usage_view_from_observation(obs: &task_core::RateLimitObservation, source: &str) -> AccountUsageView {
+pub(crate) fn usage_view_from_observation(
+    obs: &task_core::RateLimitObservation,
+    source: &str,
+) -> AccountUsageView {
     AccountUsageView {
-        five_hour: obs
-            .five_hour
-            .map(|w| RateWindowView { utilization: w.utilization, resets_at: rfc3339_unix(w.resets_at) }),
-        seven_day: obs
-            .seven_day
-            .map(|w| RateWindowView { utilization: w.utilization, resets_at: rfc3339_unix(w.resets_at) }),
+        five_hour: obs.five_hour.map(|w| RateWindowView {
+            utilization: w.utilization,
+            resets_at: rfc3339_unix(w.resets_at),
+        }),
+        seven_day: obs.seven_day.map(|w| RateWindowView {
+            utilization: w.utilization,
+            resets_at: rfc3339_unix(w.resets_at),
+        }),
         status: obs.status.clone(),
         observed_at: rfc3339_unix(obs.observed_at),
         source: source.to_string(),
@@ -78,20 +91,27 @@ pub(crate) fn usage_view_from_observation(obs: &task_core::RateLimitObservation,
 /// `AccountUsageLive`（task-ops、スナップショット）を `AccountUsageView` に写す。
 pub(crate) fn usage_view_from_live(live: &task_ops::daemon::AccountUsageLive) -> AccountUsageView {
     AccountUsageView {
-        five_hour: live
-            .five_hour
-            .map(|w| RateWindowView { utilization: w.utilization, resets_at: rfc3339_unix(w.resets_at) }),
-        seven_day: live
-            .seven_day
-            .map(|w| RateWindowView { utilization: w.utilization, resets_at: rfc3339_unix(w.resets_at) }),
+        five_hour: live.five_hour.map(|w| RateWindowView {
+            utilization: w.utilization,
+            resets_at: rfc3339_unix(w.resets_at),
+        }),
+        seven_day: live.seven_day.map(|w| RateWindowView {
+            utilization: w.utilization,
+            resets_at: rfc3339_unix(w.resets_at),
+        }),
         status: live.status.clone(),
         observed_at: rfc3339_unix(live.observed_at),
         source: live.source.clone(),
     }
 }
 
-pub(crate) fn cooldown_view_from_live(live: &task_ops::daemon::AccountCooldownLive) -> AccountCooldownView {
-    AccountCooldownView { until: rfc3339_unix(live.until), reason: live.reason.clone() }
+pub(crate) fn cooldown_view_from_live(
+    live: &task_ops::daemon::AccountCooldownLive,
+) -> AccountCooldownView {
+    AccountCooldownView {
+        until: rfc3339_unix(live.until),
+        reason: live.reason.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -114,7 +134,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tmp: {e}"));
         let root = tmp.path();
         std::fs::create_dir(root.join("bravo")).unwrap_or_else(|e| panic!("mkdir: {e}"));
-        std::fs::write(root.join("bravo").join(".credentials.json"), "{}").unwrap_or_else(|e| panic!("write: {e}"));
+        std::fs::write(root.join("bravo").join(".credentials.json"), "{}")
+            .unwrap_or_else(|e| panic!("write: {e}"));
         std::fs::create_dir(root.join("alpha")).unwrap_or_else(|e| panic!("mkdir: {e}"));
         std::fs::create_dir(root.join(".removed")).unwrap_or_else(|e| panic!("mkdir: {e}"));
         std::fs::write(root.join("not-a-dir"), "x").unwrap_or_else(|e| panic!("write: {e}"));
@@ -123,8 +144,16 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                AccountDirEntry { id: "alpha".into(), dir: root.join("alpha"), logged_in: false },
-                AccountDirEntry { id: "bravo".into(), dir: root.join("bravo"), logged_in: true },
+                AccountDirEntry {
+                    id: "alpha".into(),
+                    dir: root.join("alpha"),
+                    logged_in: false
+                },
+                AccountDirEntry {
+                    id: "bravo".into(),
+                    dir: root.join("bravo"),
+                    logged_in: true
+                },
             ]
         );
     }
@@ -132,6 +161,9 @@ mod tests {
     #[test]
     fn scan_accounts_missing_root_is_empty() {
         let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tmp: {e}"));
-        assert_eq!(scan_accounts(&tmp.path().join("nope"), AccountAdapter::ClaudeCode), Vec::new());
+        assert_eq!(
+            scan_accounts(&tmp.path().join("nope"), AccountAdapter::ClaudeCode),
+            Vec::new()
+        );
     }
 }

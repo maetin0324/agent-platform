@@ -202,3 +202,17 @@ export function isValidLabel(label: string): boolean {
 
 /** ADR-0044 D3: ラベルは最大 8 個。 */
 export const MAX_LABELS = 8;
+
+/**
+ * ADR-0046 D2 の能力タグ（小文字・`[a-z0-9._-]`・1〜64 文字）。ラベルと同じく**検証の正は celeris**で、
+ * ここは入力補助（チップを足す前に弾いてやり直させる）にだけ使う。タスクの `skills` と
+ * 組織の profile の `skills` の両方で使う。
+ */
+const SKILL_RE = /^[a-z0-9._-]+$/;
+
+export function isValidSkill(skill: string): boolean {
+  return skill.length > 0 && skill.length <= 64 && SKILL_RE.test(skill);
+}
+
+/** ADR-0046 D2: タスクの能力タグは最大 12 個（profile 側に上限は無い）。 */
+export const MAX_SKILLS = 12;

@@ -10,7 +10,9 @@ mod common;
 
 use common::*;
 use serde_json::json;
-use task_api::{AdminRequest, ClusterAdminError, ClusterConnectCodeOutcome, ClusterConnectStartOutcome};
+use task_api::{
+    AdminRequest, ClusterAdminError, ClusterConnectCodeOutcome, ClusterConnectStartOutcome,
+};
 use tokio::sync::mpsc;
 
 const CLUSTER: &str = "pegasus";
@@ -27,7 +29,9 @@ fn env_with_admin(admin_tx: mpsc::Sender<AdminRequest>) -> TestEnv {
     })
 }
 
-fn spawn_start_double(result: Result<ClusterConnectStartOutcome, ClusterAdminError>) -> mpsc::Sender<AdminRequest> {
+fn spawn_start_double(
+    result: Result<ClusterConnectStartOutcome, ClusterAdminError>,
+) -> mpsc::Sender<AdminRequest> {
     let (tx, mut rx) = mpsc::channel::<AdminRequest>(4);
     tokio::spawn(async move {
         if let Some(AdminRequest::ClusterConnectStart { reply, .. }) = rx.recv().await {
@@ -37,7 +41,9 @@ fn spawn_start_double(result: Result<ClusterConnectStartOutcome, ClusterAdminErr
     tx
 }
 
-fn spawn_code_double(result: Result<ClusterConnectCodeOutcome, ClusterAdminError>) -> mpsc::Sender<AdminRequest> {
+fn spawn_code_double(
+    result: Result<ClusterConnectCodeOutcome, ClusterAdminError>,
+) -> mpsc::Sender<AdminRequest> {
     let (tx, mut rx) = mpsc::channel::<AdminRequest>(4);
     tokio::spawn(async move {
         if let Some(AdminRequest::ClusterConnectCode { reply, .. }) = rx.recv().await {
@@ -60,20 +66,34 @@ fn spawn_cancel_double(result: Result<(), ClusterAdminError>) -> mpsc::Sender<Ad
 /// 管理系エンドポイントは `token_file` を設定していても、トークンを付けなければ 401（ADR-0017 M3）。
 #[tokio::test]
 async fn management_routes_all_require_a_token() {
-    let env = TestEnv::with(EnvOptions { token: Some(TOKEN.into()), ..Default::default() });
+    let env = TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        ..Default::default()
+    });
     let app = env.router();
-
-    let resp = send(&app, post_json(&format!("/api/v1/clusters/{CLUSTER}/connect"), &json!({}))).await;
-    assert_problem(&resp, 401, "unauthorized");
 
     let resp = send(
         &app,
-        post_json(&format!("/api/v1/clusters/{CLUSTER}/connect/code"), &json!({"code": "123456"})),
+        post_json(&format!("/api/v1/clusters/{CLUSTER}/connect"), &json!({})),
     )
     .await;
     assert_problem(&resp, 401, "unauthorized");
 
-    let resp = send(&app, delete_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &[])).await;
+    let resp = send(
+        &app,
+        post_json(
+            &format!("/api/v1/clusters/{CLUSTER}/connect/code"),
+            &json!({"code": "123456"}),
+        ),
+    )
+    .await;
+    assert_problem(&resp, 401, "unauthorized");
+
+    let resp = send(
+        &app,
+        delete_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &[]),
+    )
+    .await;
     assert_problem(&resp, 401, "unauthorized");
 }
 
@@ -81,20 +101,34 @@ async fn management_routes_all_require_a_token() {
 /// 読み取りなので token 不要（`accounts_admin.rs`/`secrets_admin.rs` と同じ形の回帰テスト）。
 #[tokio::test]
 async fn management_routes_require_a_token_even_when_token_file_is_not_configured() {
-    let env = TestEnv::with(EnvOptions { token: None, ..Default::default() });
+    let env = TestEnv::with(EnvOptions {
+        token: None,
+        ..Default::default()
+    });
     let app = env.router();
-
-    let resp = send(&app, post_json(&format!("/api/v1/clusters/{CLUSTER}/connect"), &json!({}))).await;
-    assert_problem(&resp, 401, "unauthorized");
 
     let resp = send(
         &app,
-        post_json(&format!("/api/v1/clusters/{CLUSTER}/connect/code"), &json!({"code": "123456"})),
+        post_json(&format!("/api/v1/clusters/{CLUSTER}/connect"), &json!({})),
     )
     .await;
     assert_problem(&resp, 401, "unauthorized");
 
-    let resp = send(&app, delete_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &[])).await;
+    let resp = send(
+        &app,
+        post_json(
+            &format!("/api/v1/clusters/{CLUSTER}/connect/code"),
+            &json!({"code": "123456"}),
+        ),
+    )
+    .await;
+    assert_problem(&resp, 401, "unauthorized");
+
+    let resp = send(
+        &app,
+        delete_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &[]),
+    )
+    .await;
     assert_problem(&resp, 401, "unauthorized");
 
     let resp = send(&app, get("/api/v1/clusters")).await;
@@ -105,13 +139,20 @@ async fn management_routes_require_a_token_even_when_token_file_is_not_configure
 /// に無い id は celeris に問い合わせる前に弾く）。
 #[tokio::test]
 async fn unknown_cluster_id_is_404_on_all_three_endpoints() {
-    let env = TestEnv::with(EnvOptions { token: Some(TOKEN.into()), ..Default::default() });
+    let env = TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        ..Default::default()
+    });
     let app = env.router();
     let auth = auth();
 
     let resp = send(
         &app,
-        post_json_with("/api/v1/clusters/does-not-exist/connect", &json!({}), &[("authorization", &auth)]),
+        post_json_with(
+            "/api/v1/clusters/does-not-exist/connect",
+            &json!({}),
+            &[("authorization", &auth)],
+        ),
     )
     .await;
     assert_problem(&resp, 404, "cluster_not_found");
@@ -127,7 +168,14 @@ async fn unknown_cluster_id_is_404_on_all_three_endpoints() {
     .await;
     assert_problem(&resp, 404, "cluster_not_found");
 
-    let resp = send(&app, delete_with("/api/v1/clusters/does-not-exist/connect", &[("authorization", &auth)])).await;
+    let resp = send(
+        &app,
+        delete_with(
+            "/api/v1/clusters/does-not-exist/connect",
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
     assert_problem(&resp, 404, "cluster_not_found");
 }
 
@@ -140,7 +188,11 @@ async fn connect_maps_not_supported_to_409() {
 
     let resp = send(
         &app,
-        post_json_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &json!({}), &[("authorization", &auth())]),
+        post_json_with(
+            &format!("/api/v1/clusters/{CLUSTER}/connect"),
+            &json!({}),
+            &[("authorization", &auth())],
+        ),
     )
     .await;
     assert_problem(&resp, 409, "cluster_connect_not_supported");
@@ -188,13 +240,19 @@ async fn connect_code_maps_admin_invalid_code_to_422() {
 /// `ClusterAdminError::Failed`（接続そのものの失敗）は 502 `cluster_connect_failed`（`login_failed` と同じ扱い）。
 #[tokio::test]
 async fn connect_maps_failed_to_502() {
-    let admin_tx = spawn_start_double(Err(ClusterAdminError::Failed("ssh: connection refused".into())));
+    let admin_tx = spawn_start_double(Err(ClusterAdminError::Failed(
+        "ssh: connection refused".into(),
+    )));
     let env = env_with_admin(admin_tx);
     let app = env.router();
 
     let resp = send(
         &app,
-        post_json_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &json!({}), &[("authorization", &auth())]),
+        post_json_with(
+            &format!("/api/v1/clusters/{CLUSTER}/connect"),
+            &json!({}),
+            &[("authorization", &auth())],
+        ),
     )
     .await;
     assert_problem(&resp, 502, "cluster_connect_failed");
@@ -213,7 +271,11 @@ async fn connect_returns_connected_without_a_code() {
 
     let resp = send(
         &app,
-        post_json_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &json!({}), &[("authorization", &auth())]),
+        post_json_with(
+            &format!("/api/v1/clusters/{CLUSTER}/connect"),
+            &json!({}),
+            &[("authorization", &auth())],
+        ),
     )
     .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
@@ -235,13 +297,20 @@ async fn connect_returns_needs_code_with_prompt_and_expiry() {
 
     let resp = send(
         &app,
-        post_json_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &json!({}), &[("authorization", &auth())]),
+        post_json_with(
+            &format!("/api/v1/clusters/{CLUSTER}/connect"),
+            &json!({}),
+            &[("authorization", &auth())],
+        ),
     )
     .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     let v = resp.json();
     assert_eq!(v["kind"], json!("needs_code"));
-    assert_eq!(v["prompt"], json!("(rmaeda@130.158.241.2) Verification code: "));
+    assert_eq!(
+        v["prompt"],
+        json!("(rmaeda@130.158.241.2) Verification code: ")
+    );
     assert!(v["expires_at"].is_string());
 }
 
@@ -287,22 +356,36 @@ async fn connect_code_body_type_mismatch_does_not_reflect_the_value_and_skips_ad
     let app = env.router();
     let auth = auth();
 
-    for body in [json!({"code": 123456}), json!({"code": ["a", "b"]}), json!({"notcode": "x"})] {
+    for body in [
+        json!({"code": 123456}),
+        json!({"code": ["a", "b"]}),
+        json!({"notcode": "x"}),
+    ] {
         let resp = send(
             &app,
-            post_json_with(&format!("/api/v1/clusters/{CLUSTER}/connect/code"), &body, &[("authorization", &auth)]),
+            post_json_with(
+                &format!("/api/v1/clusters/{CLUSTER}/connect/code"),
+                &body,
+                &[("authorization", &auth)],
+            ),
         )
         .await;
         assert_problem(&resp, 400, "bad_request");
         let text = resp.text();
-        assert!(!text.contains("123456"), "value leaked in parse error: {text}");
+        assert!(
+            !text.contains("123456"),
+            "value leaked in parse error: {text}"
+        );
     }
 }
 
 /// `connect/code` の成功は `{ok, detail}` を返す（コード自体は応答に含まれない）。
 #[tokio::test]
 async fn connect_code_success_returns_ok_and_detail_without_the_code() {
-    let admin_tx = spawn_code_double(Ok(ClusterConnectCodeOutcome { ok: true, detail: Some("connected".into()) }));
+    let admin_tx = spawn_code_double(Ok(ClusterConnectCodeOutcome {
+        ok: true,
+        detail: Some("connected".into()),
+    }));
     let env = env_with_admin(admin_tx);
     let app = env.router();
 
@@ -329,7 +412,14 @@ async fn disconnect_success_returns_empty_object() {
     let env = env_with_admin(admin_tx);
     let app = env.router();
 
-    let resp = send(&app, delete_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &[("authorization", &auth())])).await;
+    let resp = send(
+        &app,
+        delete_with(
+            &format!("/api/v1/clusters/{CLUSTER}/connect"),
+            &[("authorization", &auth())],
+        ),
+    )
+    .await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     assert_eq!(resp.json(), json!({}));
 }
@@ -337,11 +427,20 @@ async fn disconnect_success_returns_empty_object() {
 /// `DELETE` も `ClusterAdminError` を同じ規則で写す（ここでは `Failed` → 502）。
 #[tokio::test]
 async fn disconnect_maps_failed_to_502() {
-    let admin_tx = spawn_cancel_double(Err(ClusterAdminError::Failed("no such control socket".into())));
+    let admin_tx = spawn_cancel_double(Err(ClusterAdminError::Failed(
+        "no such control socket".into(),
+    )));
     let env = env_with_admin(admin_tx);
     let app = env.router();
 
-    let resp = send(&app, delete_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &[("authorization", &auth())])).await;
+    let resp = send(
+        &app,
+        delete_with(
+            &format!("/api/v1/clusters/{CLUSTER}/connect"),
+            &[("authorization", &auth())],
+        ),
+    )
+    .await;
     assert_problem(&resp, 502, "cluster_connect_failed");
 }
 
@@ -349,12 +448,19 @@ async fn disconnect_maps_failed_to_502() {
 /// 内部エラーとして扱う（accounts/providers の `reload`/`check` と同じ、celeris が受け取れない場合の扱い）。
 #[tokio::test]
 async fn connect_without_admin_tx_does_not_panic() {
-    let env = TestEnv::with(EnvOptions { token: Some(TOKEN.into()), ..Default::default() });
+    let env = TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        ..Default::default()
+    });
     let app = env.router();
 
     let resp = send(
         &app,
-        post_json_with(&format!("/api/v1/clusters/{CLUSTER}/connect"), &json!({}), &[("authorization", &auth())]),
+        post_json_with(
+            &format!("/api/v1/clusters/{CLUSTER}/connect"),
+            &json!({}),
+            &[("authorization", &auth())],
+        ),
     )
     .await;
     assert_problem(&resp, 500, "internal");
@@ -375,7 +481,10 @@ async fn get_clusters_reports_auth_and_connect_pending_but_never_a_prompt() {
     assert_eq!(resp.status, 200, "{}", resp.text());
     let v = resp.json();
     let items = v["items"].as_array().expect("items array");
-    let pegasus = items.iter().find(|c| c["id"] == CLUSTER).expect("pegasus present");
+    let pegasus = items
+        .iter()
+        .find(|c| c["id"] == CLUSTER)
+        .expect("pegasus present");
     assert_eq!(pegasus["auth"], json!("manual"));
     assert_eq!(pegasus["connect_pending"], json!(true));
     assert!(pegasus.get("prompt").is_none());
@@ -392,7 +501,10 @@ async fn get_clusters_connect_pending_defaults_to_false_without_a_snapshot() {
     assert_eq!(resp.status, 200, "{}", resp.text());
     let v = resp.json();
     let items = v["items"].as_array().expect("items array");
-    let pegasus = items.iter().find(|c| c["id"] == CLUSTER).expect("pegasus present");
+    let pegasus = items
+        .iter()
+        .find(|c| c["id"] == CLUSTER)
+        .expect("pegasus present");
     assert_eq!(pegasus["auth"], json!("manual"));
     assert_eq!(pegasus["connect_pending"], json!(false));
 }

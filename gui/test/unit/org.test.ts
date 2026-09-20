@@ -3,6 +3,7 @@ import { CelerisClient } from "~/celeris/client.server";
 import {
   buildOrgCreateInput,
   buildOrgPatchInput,
+  buildProfileInput,
   createOrgNode,
   deleteOrgNode,
   patchOrgNode,
@@ -92,6 +93,101 @@ describe("buildOrgPatchInput", () => {
     form.set("parent_id", "");
     form.set("brief", "");
     expect(buildOrgPatchInput(form).parent_id).toBeNull();
+  });
+
+  it("profile_present が無ければ profile を本文に入れない（片方だけ変えられる）", () => {
+    const form = new FormData();
+    form.set("name", "N");
+    expect(buildOrgPatchInput(form)).toEqual({ name: "N" });
+  });
+
+  it("profile_present が付いていれば、profile 欄が全部空でも {} を送る（空にする）", () => {
+    const form = new FormData();
+    form.set("id", "cos");
+    form.set("profile_present", "1");
+    expect(buildOrgPatchInput(form)).toEqual({ profile: {} });
+  });
+});
+
+describe("buildProfileInput（ADR-0046 D1、GUI の「profile を編集」フォーム）", () => {
+  it("空のフォームは空の profile（{}）を組む", () => {
+    expect(buildProfileInput(new FormData())).toEqual({});
+  });
+
+  it("skills: 空白・カンマ区切りの自由記述を配列にする（開いた語彙なのでチェックボックスにできない）", () => {
+    const form = new FormData();
+    form.set("profile_skills", "rust, sqlite  io_uring");
+    expect(buildProfileInput(form).skills).toEqual(["rust", "sqlite", "io_uring"]);
+  });
+
+  it("knowledge: 並行配列を行ごとに組み直し、kind が空の行は落とす", () => {
+    const form = new FormData();
+    form.append("profile_knowledge_kind", "kb");
+    form.append("profile_knowledge_scope", "environment/clusters");
+    form.append("profile_knowledge_name", "");
+    form.append("profile_knowledge_path", "");
+    form.append("profile_knowledge_docs", "");
+    form.append("profile_knowledge_kind", "");
+    form.append("profile_knowledge_scope", "");
+    form.append("profile_knowledge_name", "");
+    form.append("profile_knowledge_path", "");
+    form.append("profile_knowledge_docs", "");
+    form.append("profile_knowledge_kind", "repo");
+    form.append("profile_knowledge_scope", "");
+    form.append("profile_knowledge_name", "pluvio");
+    form.append("profile_knowledge_path", "");
+    form.append("profile_knowledge_docs", "doc");
+    expect(buildProfileInput(form).knowledge).toEqual([
+      { kind: "kb", scope: "environment/clusters" },
+      { kind: "repo", name: "pluvio", docs: "doc" },
+    ]);
+  });
+
+  it("harnesses: allowed はチェックボックスの複数選択、default は 1 つの select", () => {
+    const form = new FormData();
+    form.append("profile_harnesses_allowed", "coding");
+    form.append("profile_harnesses_allowed", "data-analysis");
+    form.set("profile_harness_default", "coding");
+    expect(buildProfileInput(form).harnesses).toEqual({ allowed: ["coding", "data-analysis"], default: "coding" });
+  });
+
+  it("tools / deny_tools: 固定の選択肢（チェックボックス）と自由記述（cluster:<id>）を合わせて重複を落とす", () => {
+    const form = new FormData();
+    form.append("profile_tools", "gh");
+    form.set("profile_tools_extra", "cluster:pegasus, gh");
+    form.append("profile_deny_tools", "docker");
+    expect(buildProfileInput(form).tools).toEqual(["gh", "cluster:pegasus"]);
+    expect(buildProfileInput(form).deny_tools).toEqual(["docker"]);
+  });
+
+  it("run / model.tier / model.allowed_tiers / review.*", () => {
+    const form = new FormData();
+    form.set("profile_run", "container");
+    form.set("profile_model_tier", "cheap");
+    form.append("profile_model_allowed_tiers", "standard");
+    form.append("profile_model_allowed_tiers", "cheap");
+    form.set("profile_review_harness", "reviewer");
+    form.set("profile_review_tier", "cheap");
+    const profile = buildProfileInput(form);
+    expect(profile.run).toBe("container");
+    expect(profile.model).toEqual({ tier: "cheap", allowed_tiers: ["standard", "cheap"] });
+    expect(profile.review).toEqual({ harness: "reviewer", tier: "cheap" });
+  });
+
+  it("policy / permissions.approvals: 1 行 1 件のテキスト欄。空行は落とす", () => {
+    const form = new FormData();
+    form.set("profile_policy", "根の方針\n\n部の方針\n");
+    form.set("profile_approvals", "cluster-write\nexternal-post");
+    const profile = buildProfileInput(form);
+    expect(profile.policy).toEqual(["根の方針", "部の方針"]);
+    expect(profile.permissions).toEqual({ approvals: ["cluster-write", "external-post"] });
+  });
+
+  it("空の項目は書かない（celeris 側の空 profile と 1 バイトも変わらないように）", () => {
+    const form = new FormData();
+    form.set("profile_run", "");
+    form.set("profile_model_tier", "");
+    expect(buildProfileInput(form)).toEqual({});
   });
 });
 

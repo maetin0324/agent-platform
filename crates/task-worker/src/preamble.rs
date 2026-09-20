@@ -43,6 +43,12 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
     // コメントが 1 件も無ければ何も出さないので、Phase 52 までの出力とバイト単位で同じ。
     let mut out = comments_section(context);
     out.push_str(&person_sections(context));
+    // ADR-0046 D1 / D4（Phase 59）: 実効 profile（能力・方針・道具・知識・ハーネス）と進め方。
+    // どちらも `None` / 空なら節ごと出さないので、Phase 58 までの出力とバイト単位で同じ。
+    // 61（ADR-0047 の知識の索引）は `knowledge_section` を別に足す。ここには入れない。
+    out.push_str(&profile_section(context));
+    out.push_str(&mode_section(context));
+    out.push_str(&organization_section(context));
     out.push_str(&workspace_section(context));
     // ADR-0047 D2（Phase 61）: マウントされた知識の**索引だけ**（本文は入れない。道具で読む）。
     // `context.knowledge` が無い run の前置きは Phase 60 までと 1 バイトも変わらない。
@@ -90,7 +96,12 @@ fn comments_section(context: &RunContext) -> String {
             },
             task_core::CommentAuthorKind::System => "celeris".to_string(),
         };
-        out.push_str(&format!("- [{}] {}: {}\n", comment.at, who, one_line(&comment.body)));
+        out.push_str(&format!(
+            "- [{}] {}: {}\n",
+            comment.at,
+            who,
+            one_line(&comment.body)
+        ));
     }
     out.push('\n');
     out
@@ -119,9 +130,15 @@ fn person_sections(context: &RunContext) -> String {
         // Phase 30（ADR-0033 D4 追記）: 対話は常に対話用分野で走るが、担当ノード自身の仕事の分野が
         // あれば「仕事で使う道具」を 1 行足す（その人が自分の得意分野を知って答えられるように）。
         if let Some(genre) = &context.work_genre {
-            out.push_str(&format!("あなたの仕事で使う道具（分野）: {}", genre.description));
+            out.push_str(&format!(
+                "あなたの仕事で使う道具（分野）: {}",
+                genre.description
+            ));
             if !genre.capabilities.is_empty() {
-                out.push_str(&format!("（できること: {}）", genre.capabilities.join("、")));
+                out.push_str(&format!(
+                    "（できること: {}）",
+                    genre.capabilities.join("、")
+                ));
             }
             out.push('\n');
         }
@@ -152,7 +169,11 @@ fn person_sections(context: &RunContext) -> String {
     if !context.recent_work.is_empty() {
         out.push_str("## あなたの直近の仕事\n");
         for w in &context.recent_work {
-            out.push_str(&format!("- [{}] {}", status_label(w.status), one_line(&w.title)));
+            out.push_str(&format!(
+                "- [{}] {}",
+                status_label(w.status),
+                one_line(&w.title)
+            ));
             if let Some(project_title) = &w.project_title {
                 out.push_str(&format!("（案件: {}）", one_line(project_title)));
             }
@@ -181,6 +202,196 @@ fn person_sections(context: &RunContext) -> String {
     out
 }
 
+/// ADR-0046 D1（Phase 59）: 「あなたの実効 profile」の節。根→葉で継いだ結果（`EffectiveProfile`）を
+/// そのまま箇条書きにする。`context.profile` が `None` なら**何も出さない**（Phase 58 までと同じ出力）。
+///
+/// ADR-0046 D8: 道具は「使ってよいものの一覧」と「ここに無いものは使うな」を必ず書く。
+pub fn profile_section(context: &RunContext) -> String {
+    let Some(profile) = &context.profile else {
+        return String::new();
+    };
+    if profile.skills.is_empty()
+        && profile.policy.is_empty()
+        && profile.tools.is_empty()
+        && profile.deny_tools.is_empty()
+        && profile.knowledge.is_empty()
+        && profile.harnesses_allowed.is_empty()
+        && profile.run.is_none()
+        && profile.tier.is_none()
+    {
+        return String::new();
+    }
+    let mut out = String::from("## あなたの実効 profile (inherited from the org tree)\n");
+    if !profile.chain.is_empty() {
+        out.push_str(&format!("継承: {}\n", profile.chain.join(" > ")));
+    }
+    if !profile.skills.is_empty() {
+        out.push_str(&format!("能力（skills）: {}\n", profile.skills.join(", ")));
+    }
+    if !profile.harnesses_allowed.is_empty() {
+        out.push_str(&format!(
+            "受けられるハーネス: {}{}\n",
+            profile.harnesses_allowed.join(", "),
+            match profile.harness_default.as_deref() {
+                Some(d) => format!("（既定 {d}）"),
+                None => String::new(),
+            }
+        ));
+    }
+    if let Some(tier) = profile.tier {
+        let allowed = if profile.allowed_tiers.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "（許可: {}）",
+                profile
+                    .allowed_tiers
+                    .iter()
+                    .map(tier_label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        out.push_str(&format!("モデルの段: {}{allowed}\n", tier_label(&tier)));
+    }
+    if let Some(run) = profile.run {
+        out.push_str(&format!(
+            "実行場所: {}\n",
+            match run {
+                task_core::ProfileRun::Host => "host（この計算機の上）",
+                task_core::ProfileRun::Container => "container（コンテナの中）",
+            }
+        ));
+    }
+    if !profile.knowledge.is_empty() {
+        out.push_str(&format!(
+            "使える知識: {}\n",
+            profile
+                .knowledge
+                .iter()
+                .map(knowledge_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    // ADR-0046 D8: 道具は許可制。ここに無いものは使わせない。
+    if profile.tools.is_empty() {
+        out.push_str(
+            "使ってよい外部の道具: **無し**。gh / tavily / exa / docker / クラスタへの ssh は\
+             このタスクでは使うな（必要なら人に聞け）。\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "使ってよい外部の道具: {}\n",
+            profile.tools.join(", ")
+        ));
+        out.push_str(
+            "ここに挙がっていない外部の道具（gh / tavily / exa / docker / クラスタへの ssh）は使うな。\n",
+        );
+    }
+    if !profile.deny_tools.is_empty() {
+        out.push_str(&format!(
+            "**禁止された道具**: {}\n",
+            profile.deny_tools.join(", ")
+        ));
+    }
+    if !profile.policy.is_empty() {
+        out.push_str("組織の方針（根から順に。上ほど強い）:\n");
+        for line in &profile.policy {
+            out.push_str(&format!("- {}\n", one_line(line)));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+fn tier_label(tier: &task_core::Tier) -> &'static str {
+    match tier {
+        task_core::Tier::Frontier => "frontier",
+        task_core::Tier::Standard => "standard",
+        task_core::Tier::Cheap => "cheap",
+    }
+}
+
+/// `KnowledgeMount::label`（ADR-0047 D2 の `kb:<scope>` / `repo:<name>` / `dir:<path>` / `memory[:<node>]`）
+/// に、`repo` の文書ディレクトリ（`docs`。既定と違うときだけ）を添える（Phase 59 追記）。
+fn knowledge_label(mount: &task_core::KnowledgeMount) -> String {
+    let mut out = mount.label();
+    if let Some(docs) = mount.docs.as_deref().filter(|d| !d.is_empty()) {
+        out.push_str(&format!("（docs: {docs}）"));
+    }
+    out
+}
+
+/// ADR-0046 D4（Phase 59）: 「この仕事の進め方」の節。`context.mode` が `None`（= 既定の
+/// `production`）なら**何も出さない**（Phase 58 までと同じ出力）。
+pub fn mode_section(context: &RunContext) -> String {
+    let Some(mode) = context.mode else {
+        return String::new();
+    };
+    let (name, rules): (&str, &[&str]) = match mode {
+        task_core::TaskMode::Prototype => (
+            "prototype（試作）",
+            &[
+                "動くことを最短で示す。テストは動作確認の最小限でよい。",
+                "捨てる前提で書く。作り込むな。",
+                "結論と次の一手を summary に書く。",
+                "レビューは明示の受け入れ条件だけ。リポジトリの検査コマンド（check）は使わない。",
+            ],
+        ),
+        task_core::TaskMode::Production => (
+            "production（本番）",
+            &[
+                "既存のテストと lint を通す。",
+                "変更は小さく、理由をコミットに書く。",
+                "レビューは受け入れ条件 ＋ リポジトリの検査コマンド（check）。",
+            ],
+        ),
+        task_core::TaskMode::Research => (
+            "research（研究）",
+            &[
+                "主張には出典か計測を付ける。",
+                "数値は再現手順と一緒に書く。",
+                "採らなかった案と理由も残す。",
+                "結果に出典（`sources`）か計測の記録が無ければ不合格になる。",
+            ],
+        ),
+    };
+    let mut out = format!("## この仕事の進め方 (mode: {name})\n");
+    for rule in rules {
+        out.push_str(&format!("- {rule}\n"));
+    }
+    out.push('\n');
+    out
+}
+
+/// ADR-0046 D6（Phase 59）: CoS（根ノード）の対話 run にだけ出す「組織の一覧」。
+/// 誰が何をできるか（id / 名前 / skills / harnesses）を見せるが、**人選はしない**
+/// （担当は D5 の matching が決定的に決める）。それ以外の run では何も出さない。
+pub fn organization_section(context: &RunContext) -> String {
+    if context.conversation_addressee != Some(ConversationAddressee::Secretary)
+        || context.organization.is_empty()
+    {
+        return String::new();
+    }
+    let mut out = String::from("## 組織 (who is in the org)\n");
+    for node in &context.organization {
+        out.push_str(&format!("- `{}` {}", node.id, node.name));
+        if !node.skills.is_empty() {
+            out.push_str(&format!(" — skills: {}", node.skills.join(", ")));
+        }
+        if !node.harnesses.is_empty() {
+            out.push_str(&format!(" / harnesses: {}", node.harnesses.join(", ")));
+        }
+        out.push('\n');
+    }
+    out.push_str(
+        "担当は celeris が決める（必要な skills と harness をタスクに書けば、そこから決定的に選ばれる）。\
+         あなたが名指しで人を選ぶ必要はない。\n\n",
+    );
+    out
+}
+
 /// ADR-0039 D3: 案件の作業場所から、前置きに出す 1 行を組む（純粋関数。ディスパッチャがこれを
 /// `RunContext::workspace_note` に入れる）。`Remote` は ADR-0018 D1 の「クラスタ側が正、手元は写し」を書く。
 pub fn workspace_note(spec: &task_core::WorkspaceSpec) -> String {
@@ -198,7 +409,13 @@ pub fn workspace_note(spec: &task_core::WorkspaceSpec) -> String {
 
 /// ADR-0041 D1: タスクごとの worktree を前置きに書く 1 行（純粋関数。ディスパッチャが
 /// `workspace_note` の後ろに足す）。「このブランチにコミットせよ」までをここに書く。
-pub fn worktree_note(repo: &std::path::Path, dir: &std::path::Path, branch: &str, base_sha12: &str, base_kind: &str) -> String {
+pub fn worktree_note(
+    repo: &std::path::Path,
+    dir: &std::path::Path,
+    branch: &str,
+    base_sha12: &str,
+    base_kind: &str,
+) -> String {
     format!(
         "作業ツリー `{}`（`{}` の worktree）、ブランチ `{branch}`、base `{base_sha12}`（{base_kind}）。\
          このブランチにコミットせよ。`main` に直接コミットするな。`git checkout` でブランチを変えるな。",
@@ -248,7 +465,9 @@ pub fn repos_note(repos: &[RepoNote]) -> String {
             let branch = repo.branch.as_deref().unwrap_or("");
             let base = repo.base.as_deref().unwrap_or("");
             let base_kind = repo.base_kind.as_deref().unwrap_or("");
-            out.push_str(&format!("（worktree、ブランチ `{branch}`、base `{base}`（{base_kind}））"));
+            out.push_str(&format!(
+                "（worktree、ブランチ `{branch}`、base `{base}`（{base_kind}））"
+            ));
         } else {
             out.push_str("（ディレクトリ。読み書き可。git ではない）");
         }
@@ -271,7 +490,11 @@ pub fn repos_note(repos: &[RepoNote]) -> String {
         out.push_str(&format!(
             "`{}` のこのリポジトリの検査コマンド: {}\n",
             repo.name,
-            repo.check.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(" / ")
+            repo.check
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(" / ")
         ));
     }
     // ADR-0043 D8: 成果物は案件のリポジトリの中。`artifacts/` は中間物だけ。
@@ -283,7 +506,11 @@ pub fn repos_note(repos: &[RepoNote]) -> String {
     ));
     // ADR-0044 D7（Phase 57）: 文書の書き方（正本は git。人は GUI の「文書」タブで同じファイルを読む）。
     let docs_dir = join_repo_path(&first.dir, &first.docs);
-    let docs_dir = if docs_dir.ends_with('/') { docs_dir } else { format!("{docs_dir}/") };
+    let docs_dir = if docs_dir.ends_with('/') {
+        docs_dir
+    } else {
+        format!("{docs_dir}/")
+    };
     out.push_str(&format!(
         "文書は `{docs_dir}` に Markdown で書く（題名は 1 行目の `# `。タスクとの紐付けは front matter の \
          `tasks: [<このタスクの id>]`）。既定のブランチに直接コミットせず、上のブランチに置け（人が取り込む）。\n"
@@ -323,9 +550,7 @@ pub fn project_repos_note(repos: &[ProjectRepoNote]) -> String {
         }
         out.push('\n');
     }
-    out.push_str(
-        "子タスクが使うリポジトリは `repos` に**この名前で**書く（例 `\"repos\": [\"",
-    );
+    out.push_str("子タスクが使うリポジトリは `repos` に**この名前で**書く（例 `\"repos\": [\"");
     out.push_str(&repos[0].name);
     out.push_str(
         "\"]`）。書かなければ主なリポジトリを継ぐ。ここに無い名前を書くと計画は差し戻される。\n",
@@ -378,7 +603,11 @@ pub fn knowledge_section(
     let mut out = String::from("## 知識 (knowledge base — 索引だけ。本文は道具で読む)\n");
     out.push_str(&format!(
         "あなたが読める知識: {}。\n",
-        mounts.iter().map(|m| format!("`{}`", m.label())).collect::<Vec<_>>().join("、")
+        mounts
+            .iter()
+            .map(|m| format!("`{}`", m.label()))
+            .collect::<Vec<_>>()
+            .join("、")
     ));
     // ADR-0047 D3 の案内文。
     out.push_str(
@@ -399,7 +628,10 @@ pub fn knowledge_section(
         sections.push_str(&format!("### {}\n", mount.label()));
         for (n, item) in items.iter().enumerate() {
             if shown >= task_core::knowledge::MAX_PREAMBLE_ITEMS {
-                sections.push_str(&format!("- （ほか {} 件。`search` で探す）\n", items.len() - n));
+                sections.push_str(&format!(
+                    "- （ほか {} 件。`search` で探す）\n",
+                    items.len() - n
+                ));
                 break;
             }
             sections.push_str(&format!("- `{}` — {}", item.path, one_line(&item.title)));
@@ -490,7 +722,11 @@ fn milestone_review_section(context: &RunContext) -> String {
         out.push_str(&format!("{}\n", one_line(&review.milestone.description)));
     }
     for task in &review.tasks {
-        out.push_str(&format!("\n### [{}] {}\n", status_label(task.status), one_line(&task.title)));
+        out.push_str(&format!(
+            "\n### [{}] {}\n",
+            status_label(task.status),
+            one_line(&task.title)
+        ));
         if let Some(outcome) = &task.outcome {
             out.push_str(&format!("要約: {}\n", one_line(outcome)));
         }
@@ -545,7 +781,9 @@ fn status_label(status: task_core::Status) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ConversationTurn, GenreContext, MemoryContext, NodeContext, RoleContext};
+    use crate::protocol::{
+        ConversationTurn, GenreContext, MemoryContext, NodeContext, RoleContext,
+    };
     use task_core::Status;
 
     fn full_context() -> RunContext {
@@ -561,8 +799,14 @@ mod tests {
                 project: "- 2026-09-16: Pluvio は非同期ランタイム基盤".into(),
             }),
             conversation: vec![
-                ConversationTurn { role: MessageRole::User, text: "先週の続きを\nお願い".into() },
-                ConversationTurn { role: MessageRole::Node, text: "承知しました".into() },
+                ConversationTurn {
+                    role: MessageRole::User,
+                    text: "先週の続きを\nお願い".into(),
+                },
+                ConversationTurn {
+                    role: MessageRole::Node,
+                    text: "承知しました".into(),
+                },
             ],
             role: Some(RoleContext {
                 id: "literature-reader".into(),
@@ -576,7 +820,10 @@ mod tests {
     #[test]
     fn the_sections_come_in_the_order_the_adr_asks_for() {
         let out = render(&full_context(), "artifacts");
-        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"))
+        };
         assert!(at("## あなた: 関連研究調査課 (research-survey)") < at("## 永続の認可"));
         assert!(at("## 永続の認可") < at("## 覚えていること"));
         assert!(at("## 覚えていること") < at("## 直近のやり取り"));
@@ -607,7 +854,10 @@ mod tests {
             ..full_context()
         };
         let out = render(&context, "artifacts");
-        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"))
+        };
         assert!(at("## あなた: 関連研究調査課 (research-survey)") < at("あなたの仕事で使う道具"));
         assert!(at("あなたの仕事で使う道具") < at("## 永続の認可"));
         assert!(
@@ -616,14 +866,21 @@ mod tests {
         );
 
         // 担当が自分の仕事の分野を持たない（対話用分野のみで走る）ときは何も足さない。
-        let without = RunContext { work_genre: None, ..full_context() };
+        let without = RunContext {
+            work_genre: None,
+            ..full_context()
+        };
         let out = render(&without, "artifacts");
         assert!(!out.contains("あなたの仕事で使う道具"), "{out}");
 
         // `context.node` が無ければ、`work_genre` があっても出さない（役職の節そのものが無いため）。
         let no_node = RunContext {
             node: None,
-            work_genre: Some(GenreContext { id: "coding".into(), description: "d".into(), ..GenreContext::default() }),
+            work_genre: Some(GenreContext {
+                id: "coding".into(),
+                description: "d".into(),
+                ..GenreContext::default()
+            }),
             ..RunContext::default()
         };
         assert!(!render(&no_node, "artifacts").contains("あなたの仕事で使う道具"));
@@ -660,24 +917,50 @@ mod tests {
             ..full_context()
         };
         let out = render(&context, "artifacts");
-        assert!(out.starts_with("## コメント (comments on this task)\n"), "{out}");
+        assert!(
+            out.starts_with("## コメント (comments on this task)\n"),
+            "{out}"
+        );
         let interrupt_at = out.find("**人からの割り込み**").expect("interrupt line");
-        let thread_at = out.find("- [2026-09-19T01:00:00Z] impl:").expect("thread line");
+        let thread_at = out
+            .find("- [2026-09-19T01:00:00Z] impl:")
+            .expect("thread line");
         assert!(interrupt_at < thread_at, "割り込みが糸より先: {out}");
         // 複数行の本文は 1 行に畳む（他の節と同じ規則）。
-        assert!(out.contains("- [2026-09-19T01:00:00Z] impl: ビルドは通った （続き）"), "{out}");
-        assert!(out.contains("- [2026-09-19T02:00:00Z] 人: 方針を変えたい。まず設計を書いて"), "{out}");
+        assert!(
+            out.contains("- [2026-09-19T01:00:00Z] impl: ビルドは通った （続き）"),
+            "{out}"
+        );
+        assert!(
+            out.contains("- [2026-09-19T02:00:00Z] 人: 方針を変えたい。まず設計を書いて"),
+            "{out}"
+        );
         // 役職の節はコメントの後ろ。
-        assert!(out.find("## あなた:").expect("node section") > interrupt_at, "{out}");
+        assert!(
+            out.find("## あなた:").expect("node section") > interrupt_at,
+            "{out}"
+        );
         // 書き方の指示（ADR-0044 D2）。
-        assert!(out.contains("短い進捗や判断の記録はコメントに書け"), "{out}");
+        assert!(
+            out.contains("短い進捗や判断の記録はコメントに書け"),
+            "{out}"
+        );
         assert!(out.contains(r#"{"type":"comment","body":"…"}"#), "{out}");
 
         // コメントが無ければ節ごと出ない（`comments_enabled` だけなら指示だけ）。
-        let quiet = RunContext { comments_enabled: true, ..full_context() };
+        let quiet = RunContext {
+            comments_enabled: true,
+            ..full_context()
+        };
         let quiet_out = render(&quiet, "artifacts");
-        assert!(!quiet_out.contains("## コメント (comments on this task)"), "{quiet_out}");
-        assert!(quiet_out.contains("短い進捗や判断の記録はコメントに書け"), "{quiet_out}");
+        assert!(
+            !quiet_out.contains("## コメント (comments on this task)"),
+            "{quiet_out}"
+        );
+        assert!(
+            quiet_out.contains("短い進捗や判断の記録はコメントに書け"),
+            "{quiet_out}"
+        );
         let silent = render(&full_context(), "artifacts");
         assert!(!silent.contains("コメント"), "{silent}");
     }
@@ -686,12 +969,21 @@ mod tests {
     #[test]
     fn a_role_only_context_renders_exactly_the_old_role_section() {
         let with_instructions = RunContext {
-            role: Some(RoleContext { id: "lead".into(), instructions: "You coordinate.".into() }),
+            role: Some(RoleContext {
+                id: "lead".into(),
+                instructions: "You coordinate.".into(),
+            }),
             ..RunContext::default()
         };
-        assert_eq!(render(&with_instructions, "artifacts"), "## Role: lead\nYou coordinate.\n\n");
+        assert_eq!(
+            render(&with_instructions, "artifacts"),
+            "## Role: lead\nYou coordinate.\n\n"
+        );
         let bare = RunContext {
-            role: Some(RoleContext { id: "lead".into(), instructions: String::new() }),
+            role: Some(RoleContext {
+                id: "lead".into(),
+                instructions: String::new(),
+            }),
             ..RunContext::default()
         };
         assert_eq!(render(&bare, "artifacts"), "## Role: lead\n\n");
@@ -710,12 +1002,18 @@ mod tests {
             ..ordinary.clone()
         };
         let out = render(&secretary, "artifacts");
-        assert!(out.starts_with(&ordinary_out), "対話の指示は末尾に足すだけ: {out}");
+        assert!(
+            out.starts_with(&ordinary_out),
+            "対話の指示は末尾に足すだけ: {out}"
+        );
         assert!(out.contains("この返事では作業を始めないでください"));
         assert!(out.contains("(a) 理解の確認"));
         assert!(out.contains("(d) 判断を仰ぎたいこと"));
         // Phase 33: 人に聞き返す前に、まず「あなたの直近の仕事」を見るよう促す一文。
-        assert!(out.contains("自分の直近の仕事とその結果は上に書いてある"), "{out}");
+        assert!(
+            out.contains("自分の直近の仕事とその結果は上に書いてある"),
+            "{out}"
+        );
 
         let other = RunContext {
             conversation_addressee: Some(ConversationAddressee::Other),
@@ -724,7 +1022,10 @@ mod tests {
         let out = render(&other, "artifacts");
         assert!(out.contains("聞かれたことに答え"));
         assert!(!out.contains("(a) 理解の確認"), "{out}");
-        assert!(out.contains("自分の直近の仕事とその結果は上に書いてある"), "{out}");
+        assert!(
+            out.contains("自分の直近の仕事とその結果は上に書いてある"),
+            "{out}"
+        );
 
         // 対話でない run（既定値の `None`）では何も足さない。
         assert_eq!(render(&RunContext::default(), "artifacts"), "");
@@ -754,7 +1055,9 @@ mod tests {
                     Status::Failed,
                     "web-research タスク A",
                     Some("Pluvio の関連研究調査"),
-                    Some("web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)"),
+                    Some(
+                        "web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)",
+                    ),
                     &[],
                 ),
                 task_worker_recent_work_sample(
@@ -768,9 +1071,18 @@ mod tests {
             ..full_context()
         };
         let out = render(&context, "artifacts");
-        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
-        assert!(at("## 覚えていること") < at("## あなたの直近の仕事"), "{out}");
-        assert!(at("## あなたの直近の仕事") < at("## 直近のやり取り"), "{out}");
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"))
+        };
+        assert!(
+            at("## 覚えていること") < at("## あなたの直近の仕事"),
+            "{out}"
+        );
+        assert!(
+            at("## あなたの直近の仕事") < at("## 直近のやり取り"),
+            "{out}"
+        );
         assert!(
             out.contains(
                 "- [failed] web-research タスク A（案件: Pluvio の関連研究調査）: web search returned nothing \
@@ -786,7 +1098,10 @@ mod tests {
         );
 
         // 空なら節そのものが無い。
-        let without = RunContext { recent_work: Vec::new(), ..full_context() };
+        let without = RunContext {
+            recent_work: Vec::new(),
+            ..full_context()
+        };
         assert!(!render(&without, "artifacts").contains("あなたの直近の仕事"));
         // 対話でない通常 run の前置きは 1 バイトも変わらない（既定値には `recent_work` が無い）。
         assert_eq!(render(&RunContext::default(), "artifacts"), "");
@@ -816,23 +1131,41 @@ mod tests {
             ..full_context()
         };
         let out = render(&context, "artifacts");
-        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"))
+        };
         // 節は「あなたの直近の仕事」の後、直近のやり取りの前。
-        assert!(at("## 覚えていること") < at("## 途中目標『隣接領域の動向調査』のここまで"), "{out}");
-        assert!(at("## 途中目標『隣接領域の動向調査』のここまで") < at("## 直近のやり取り"), "{out}");
+        assert!(
+            at("## 覚えていること") < at("## 途中目標『隣接領域の動向調査』のここまで"),
+            "{out}"
+        );
+        assert!(
+            at("## 途中目標『隣接領域の動向調査』のここまで") < at("## 直近のやり取り"),
+            "{out}"
+        );
         assert!(out.contains("(in_progress)"), "{out}");
         assert!(out.contains("### [done] web 調査"), "{out}");
         assert!(out.contains("要約: 候補を 3 本に絞った"), "{out}");
         assert!(out.contains("候補 A / 候補 B / 候補 C"), "{out}");
         // 指示は対話の指示の後ろ。
-        assert!(at("これは対話です") < at("## 途中目標の判定をお願いする返事です"), "{out}");
+        assert!(
+            at("これは対話です") < at("## 途中目標の判定をお願いする返事です"),
+            "{out}"
+        );
         assert!(out.contains("(c) **次の途中目標の提案**"), "{out}");
         assert!(out.contains("milestone_proposal"), "{out}");
 
         // レビューでない run には何も出ない（通常の対話 run の前置きは 1 バイトも変わらない）。
-        let plain = RunContext { milestone_review: None, ..context.clone() };
+        let plain = RunContext {
+            milestone_review: None,
+            ..context.clone()
+        };
         let plain_out = render(&plain, "artifacts");
-        assert!(!plain_out.contains("途中目標の判定をお願いする返事です"), "{plain_out}");
+        assert!(
+            !plain_out.contains("途中目標の判定をお願いする返事です"),
+            "{plain_out}"
+        );
         assert!(!plain_out.contains("のここまで"), "{plain_out}");
     }
 
@@ -858,10 +1191,16 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("題名は 1 行目の `# `"), "{out}");
-        assert!(out.contains("front matter の `tasks: [<このタスクの id>]`"), "{out}");
+        assert!(
+            out.contains("front matter の `tasks: [<このタスクの id>]`"),
+            "{out}"
+        );
         assert!(out.contains("既定のブランチに直接コミットせず"), "{out}");
         // `[outputs] docs` を変えるとその場所になる。
-        let moved = RepoNote { docs: "doc/pages".into(), ..note };
+        let moved = RepoNote {
+            docs: "doc/pages".into(),
+            ..note
+        };
         assert!(
             repos_note(&[moved]).contains("文書は `/ws/01J/repos/benchfs/doc/pages/` に"),
             "{out}"
@@ -910,26 +1249,47 @@ mod tests {
             },
         ];
         let out = knowledge_section(&mounts, &index);
-        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
-        assert!(out.starts_with("## 知識 (knowledge base — 索引だけ。本文は道具で読む)\n"), "{out}");
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"))
+        };
+        assert!(
+            out.starts_with("## 知識 (knowledge base — 索引だけ。本文は道具で読む)\n"),
+            "{out}"
+        );
         assert!(
             out.contains("あなたが読める知識: `kb:environment/clusters`、`repo:pluvio`、`memory:cluster-hpc`。"),
             "{out}"
         );
         // ADR-0047 D3 の案内文。
-        assert!(out.contains("`celerisctl knowledge search <語> [--scope …]` で探し"), "{out}");
-        assert!(out.contains("`celerisctl knowledge get <path>` で読む"), "{out}");
+        assert!(
+            out.contains("`celerisctl knowledge search <語> [--scope …]` で探し"),
+            "{out}"
+        );
+        assert!(
+            out.contains("`celerisctl knowledge get <path>` で読む"),
+            "{out}"
+        );
         assert!(out.contains("`celerisctl knowledge record"), "{out}");
         assert!(out.contains("一時的な情報・雑談・推測は入れない"), "{out}");
         // マウントごとに並ぶ（マウントの順）。
-        assert!(at("### kb:environment/clusters") < at("### repo:pluvio"), "{out}");
-        assert!(at("### repo:pluvio") < at("### memory:cluster-hpc"), "{out}");
+        assert!(
+            at("### kb:environment/clusters") < at("### repo:pluvio"),
+            "{out}"
+        );
+        assert!(
+            at("### repo:pluvio") < at("### memory:cluster-hpc"),
+            "{out}"
+        );
         assert!(
             out.contains("- `environment/clusters/pegasus.md` — pegasus の使い方（hpc、cluster）"),
             "{out}"
         );
         assert!(out.contains("- `docs/design.md` — design.md\n"), "{out}");
-        assert!(out.contains("/memory/cluster-hpc/notes.md` — あなたの手帳"), "{out}");
+        assert!(
+            out.contains("/memory/cluster-hpc/notes.md` — あなたの手帳"),
+            "{out}"
+        );
         // マウントしていない scope のページは出ない（本文も出ない）。
         assert!(!out.contains("user/profile.md"), "{out}");
 
@@ -946,10 +1306,24 @@ mod tests {
             ..full_context()
         };
         let rendered = render(&context, "artifacts");
-        let at = |needle: &str| rendered.find(needle).unwrap_or_else(|| panic!("missing {needle:?}"));
-        assert_eq!(rendered.matches("## 知識 (knowledge base").count(), 1, "{rendered}");
-        assert!(at("## 覚えていること") < at("## 知識 (knowledge base"), "{rendered}");
-        assert!(at("## 知識 (knowledge base") < at("## Role: literature-reader"), "{rendered}");
+        let at = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?}"))
+        };
+        assert_eq!(
+            rendered.matches("## 知識 (knowledge base").count(),
+            1,
+            "{rendered}"
+        );
+        assert!(
+            at("## 覚えていること") < at("## 知識 (knowledge base"),
+            "{rendered}"
+        );
+        assert!(
+            at("## 知識 (knowledge base") < at("## Role: literature-reader"),
+            "{rendered}"
+        );
         // 知識を渡さない run の前置きは 1 バイトも変わらない。
         assert!(!render(&full_context(), "artifacts").contains("知識"));
         assert_eq!(render(&RunContext::default(), "artifacts"), "");
@@ -969,7 +1343,10 @@ mod tests {
             })
             .collect();
         let out = knowledge_section(&mounts, &index);
-        assert_eq!(out.matches("- `user/p").count(), task_core::knowledge::MAX_PREAMBLE_ITEMS);
+        assert_eq!(
+            out.matches("- `user/p").count(),
+            task_core::knowledge::MAX_PREAMBLE_ITEMS
+        );
         assert!(out.contains("- （ほか 50 件。`search` で探す）"), "{out}");
     }
 

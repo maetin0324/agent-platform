@@ -23,7 +23,8 @@ use crate::progress;
 use crate::protocol::{Answer, Evidence, ProviderFailure, RunContext, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
-    LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, read_tail, write_result_json,
+    LineOutcome, MAX_LINE_BYTES, kill_now, read_line_limited, read_tail, reap_after_terminal,
+    write_result_json,
 };
 
 /// `[adapters.claude_code]`（config.toml, ADR-0006 D6）。
@@ -111,7 +112,9 @@ pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts: 
     match task.kind {
         TaskKind::Plan => build_plan_prompt(task, context, run_id, artifacts),
         TaskKind::Review => build_review_prompt(task, context, run_id, artifacts),
-        TaskKind::Execute | TaskKind::Approval => build_execute_prompt(task, context, run_id, artifacts),
+        TaskKind::Execute | TaskKind::Approval => {
+            build_execute_prompt(task, context, run_id, artifacts)
+        }
     }
 }
 
@@ -133,7 +136,10 @@ fn prompt_header(task: &Task, context: &RunContext, run_id: &str, artifacts: &st
     if let Some(genre_id) = &task.genre
         && let Some(genre) = context.available_genres.iter().find(|g| &g.id == genre_id)
     {
-        out.push_str(&format!("## Genre: {}\n{}\n\n", genre.id, genre.description));
+        out.push_str(&format!(
+            "## Genre: {}\n{}\n\n",
+            genre.id, genre.description
+        ));
     }
     out.push_str(&format!("## Objective\n{}\n\n", task.objective));
     out
@@ -159,7 +165,11 @@ fn genre_list_lines(context: &RunContext) -> String {
         let roles = if g.roles.is_empty() {
             "-".to_string()
         } else {
-            g.roles.iter().map(|r| r.id.as_str()).collect::<Vec<_>>().join(", ")
+            g.roles
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         out.push_str(&format!("  役割: {roles}\n"));
     }
@@ -197,7 +207,6 @@ fn available_genres_section_for_plan(context: &RunContext, artifacts: &str) -> S
     ));
     out
 }
-
 
 /// 1 つの分野の「成果物の名前は固定」の箇条書き（Phase 38。`名前: 説明` の `名前` と `説明` に分けて出す）。
 fn harness_artifact_lines(genre: &crate::protocol::GenreContext) -> String {
@@ -258,7 +267,10 @@ fn organization_section(context: &RunContext) -> String {
         };
         let parent = n.parent_id.as_deref().unwrap_or("-");
         let genre = n.genre.as_deref().unwrap_or("-");
-        out.push_str(&format!("- {} [{kind}] {} (親: {parent}, 分野: {genre})", n.id, n.name));
+        out.push_str(&format!(
+            "- {} [{kind}] {} (親: {parent}, 分野: {genre})",
+            n.id, n.name
+        ));
         if !n.brief.is_empty() {
             out.push_str(&format!(" — {}", n.brief));
         }
@@ -288,7 +300,11 @@ fn children_section(context: &RunContext, artifacts: &str) -> String {
         let artifacts = if c.artifacts.is_empty() {
             "-".to_string()
         } else {
-            c.artifacts.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(",")
+            c.artifacts
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
         };
         // ADR-0041 D1: 子が worktree で作業したときだけブランチを足す（無い子の文面は従来どおり）。
         let branch = match &c.branch {
@@ -307,16 +323,26 @@ fn children_section(context: &RunContext, artifacts: &str) -> String {
     out
 }
 
-
-/// ADR-0033 D4（Phase 24）: 「どの課に何を振るか」を `assignee` で指定させる指示（Plan run 用）。
+/// ADR-0046 D2 / D4 / D5（Phase 59）: 計画には**人選をさせない**。
+///
+/// Phase 58 までは「上の組織図を見て子タスクごとに `assignee` を必ず書け」と指示していたが、
+/// ADR-0046 D5 で担当は決定的な matching が決めるようになった。代わりに、子タスクごとに
+/// **`harness` / `skills` / `mode`** を宣言させる（それが matching の入力になる）。
 /// 組織図を渡していない run（Phase 23 までの構成）では何も出さない。
 fn assignee_instructions_for_plan(context: &RunContext) -> String {
     if context.organization.is_empty() {
         return String::new();
     }
-    "上の組織図を見て、**子タスクごとに `assignee` を必ず書け**（その仕事を任せる課の id）。\n\
-     `role` は必要なときだけ書けばよい（書かなければその課の分野の既定の役割で走る）。\n\
-     `role` を書いた場合は、そちらの tier / アダプタ / 予算が使われ、`assignee` は「誰の仕事か」だけを表す。\n\n"
+    "## 誰がやるか (ADR-0046 D5)\n\
+     **`assignee`（担当）は書くな。組織図から人を選ぶ必要は無い。** 誰がやるかは celeris が決定的に決める\n\
+     （必要な skill と harness の重なりで選ぶ）。代わりに、子タスクごとに次の 3 つを書け:\n\
+     - `harness`: その仕事の実行契約の id（下の「使える分野」から選ぶ）\n\
+     - `skills`: その仕事に**必要な能力タグ**の配列（例 `[\"rust\",\"sqlite\"]`）。小文字・`[a-z0-9._-]`、最大 12 個。\n\
+     \u{3000}分からなければ空でよい（その harness を既定に持つ担当に回る）\n\
+     - `mode`: `prototype`（動くことを最短で示す）/ `production`（既定。テストと lint を通す）/ \
+     `research`（主張に出典か計測を付ける）\n\
+     どうしても人を名指ししたいときだけ `assignee` を書ける。その人がその harness を受けられなければ\n\
+     その計画は差し戻される。\n\n"
         .to_string()
 }
 
@@ -339,7 +365,10 @@ fn prior_review_section(context: &RunContext) -> String {
         out.push_str("## Previous attempt's review result (this is a retry)\n");
         for pr in &context.prior_review {
             let verdict = if pr.pass { "pass" } else { "fail" };
-            out.push_str(&format!("- criterion {}: {verdict} ({})\n", pr.criterion, pr.reason));
+            out.push_str(&format!(
+                "- criterion {}: {verdict} ({})\n",
+                pr.criterion, pr.reason
+            ));
         }
         out.push('\n');
     }
@@ -426,7 +455,12 @@ fn workspace_section_for_plan(context: &RunContext) -> String {
 }
 
 /// `Execute`（および `Approval`）用プロンプト（ADR-0006 D2。既存のワーカー用プロンプトのまま）。
-fn build_execute_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts: &str) -> String {
+fn build_execute_prompt(
+    task: &Task,
+    context: &RunContext,
+    run_id: &str,
+    artifacts: &str,
+) -> String {
     let mut out = prompt_header(task, context, run_id, artifacts);
     out.push_str("## Acceptance criteria\n");
     for (i, c) in task.acceptance.iter().enumerate() {
@@ -478,6 +512,8 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
          \"acceptance\":[{{\"text\":\"...\",\"check\":{{\"type\":\"command\",\"cmd\":\"...\",\
          \"expect_exit\":0}}}}],\"depends_on\":[<index into this same tasks array>],\
          \"kind\":\"execute\"|\"plan\" (omit for \"execute\"),\
+         \"harness\":\"<harness id>\", \"skills\":[\"<skill tag>\"], \
+         \"mode\":\"prototype\"|\"production\"|\"research\" (optional), \
          \"assignee\":\"<org node id>\" (optional), \
          \"tier\":\"frontier\"|\"standard\"|\"cheap\" (optional)}}]}}\n\
          ```\n\
@@ -494,12 +530,15 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
     ));
     let schema = serde_json::to_string(&task_core::plan::schema_value())
         .unwrap_or_else(|_| "{}".to_string());
-    out.push_str(&format!("### Schema for the `{artifacts}/plan.json` object\n```json\n"));
+    out.push_str(&format!(
+        "### Schema for the `{artifacts}/plan.json` object\n```json\n"
+    ));
     out.push_str(&schema);
     out.push_str("\n```\n\n");
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
-    out.push_str(&organization_section(context));
+    // ADR-0046 D5（Phase 59）: 計画に組織図は渡さない（人選をさせない）。代わりに harness / skills /
+    // mode を宣言させ、担当は決定的な matching が決める。
     out.push_str(&assignee_instructions_for_plan(context));
     out.push_str(&available_genres_section_for_plan(context, artifacts));
     out.push_str(&workspace_section_for_plan(context));
@@ -565,10 +604,21 @@ fn build_review_prompt(task: &Task, context: &RunContext, run_id: &str, artifact
             }
             for e in &review.evidence {
                 // ADR-0012 D3: command / exit / stdout_tail は任意。
-                let command = e.command.as_deref().map(|c| format!(" command `{c}`")).unwrap_or_default();
+                let command = e
+                    .command
+                    .as_deref()
+                    .map(|c| format!(" command `{c}`"))
+                    .unwrap_or_default();
                 let exit = e.exit.map(|x| format!(" exit={x}")).unwrap_or_default();
-                let tail = e.stdout_tail.as_deref().map(|t| format!(" stdout_tail={t:?}")).unwrap_or_default();
-                out.push_str(&format!("- criterion {}:{command}{exit}{tail}\n", e.criterion));
+                let tail = e
+                    .stdout_tail
+                    .as_deref()
+                    .map(|t| format!(" stdout_tail={t:?}"))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "- criterion {}:{command}{exit}{tail}\n",
+                    e.criterion
+                ));
             }
             out.push('\n');
         }
@@ -581,7 +631,10 @@ fn build_review_prompt(task: &Task, context: &RunContext, run_id: &str, artifact
         out.push_str("(none)\n");
     }
     for a in &context.inputs {
-        out.push_str(&format!("- {} at `{}` (sha256={})\n", a.name, a.path, a.sha256));
+        out.push_str(&format!(
+            "- {} at `{}` (sha256={})\n",
+            a.name, a.path, a.sha256
+        ));
     }
     out.push('\n');
     out.push_str(&format!(
@@ -674,7 +727,9 @@ async fn run_claude_code(
         command.arg("--model").arg(model);
     }
     command.args(&config.extra_args);
-    command.envs(config.env.iter().cloned()).current_dir(req.cwd());
+    command
+        .envs(config.env.iter().cloned())
+        .current_dir(req.cwd());
     // ★ ADR-0043 D3 の差し込み点（コンテナ実行）。`None` ならそのまま（ホスト実行は変わらない）。
     let mut command = crate::container::wrap(command, config.container.as_deref());
     command
@@ -740,7 +795,12 @@ async fn run_claude_code(
         }
         let wait = (limits.wall_clock - wall_elapsed).min(limits.idle_timeout - idle_elapsed);
 
-        let outcome = match tokio::time::timeout(wait, read_line_limited(&mut reader, MAX_LINE_BYTES)).await {
+        let outcome = match tokio::time::timeout(
+            wait,
+            read_line_limited(&mut reader, MAX_LINE_BYTES),
+        )
+        .await
+        {
             Err(_elapsed) => continue, // タイムアウト。ループ先頭で上限超過を検知する。
             Ok(Err(e)) => return Err(AdapterError::Io(e)),
             Ok(Ok(outcome)) => outcome,
@@ -779,29 +839,34 @@ async fn run_claude_code(
     }
     stdout_file.flush().await?;
 
-    let (terminal, provider_failure): (Terminal, Option<ProviderFailure>) = match (timeout_terminal, &last_result) {
-        // タイムアウト（wall-clock / idle）は分類しない（ADR-0010 D5）。
-        (Some(t), _) => (t, None),
-        // `result` メッセージを一度も観測できずに exit した場合はクラッシュとして扱い、
-        // artifacts/result.json（前回の run の名残や書きかけの内容）を一切信用しない（ADR-0006 D4）。
-        // stderr.log の末尾を供給側失敗として分類する（ADR-0010 D5）。
-        (None, None) => {
-            let exit_repr = match exit_status.code() {
-                Some(code) => code.to_string(),
-                None => "signal".to_string(),
-            };
-            let tail = read_tail(&stderr_log_path, 4096).await;
-            let pf = classify_provider_failure(&tail);
-            (
-                Terminal::Error {
-                    message: format!("worker exited without a result message (exit={exit_repr})"),
-                    retryable: true,
-                },
-                pf,
-            )
-        }
-        (None, Some(meta)) => terminal_from_result(&req.artifacts_dir, &artifacts_rel, meta).await,
-    };
+    let (terminal, provider_failure): (Terminal, Option<ProviderFailure>) =
+        match (timeout_terminal, &last_result) {
+            // タイムアウト（wall-clock / idle）は分類しない（ADR-0010 D5）。
+            (Some(t), _) => (t, None),
+            // `result` メッセージを一度も観測できずに exit した場合はクラッシュとして扱い、
+            // artifacts/result.json（前回の run の名残や書きかけの内容）を一切信用しない（ADR-0006 D4）。
+            // stderr.log の末尾を供給側失敗として分類する（ADR-0010 D5）。
+            (None, None) => {
+                let exit_repr = match exit_status.code() {
+                    Some(code) => code.to_string(),
+                    None => "signal".to_string(),
+                };
+                let tail = read_tail(&stderr_log_path, 4096).await;
+                let pf = classify_provider_failure(&tail);
+                (
+                    Terminal::Error {
+                        message: format!(
+                            "worker exited without a result message (exit={exit_repr})"
+                        ),
+                        retryable: true,
+                    },
+                    pf,
+                )
+            }
+            (None, Some(meta)) => {
+                terminal_from_result(&req.artifacts_dir, &artifacts_rel, meta).await
+            }
+        };
 
     forward_delegate_file(&req.artifacts_dir, sink).await;
 
@@ -871,7 +936,10 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
                                 .unwrap_or("");
                             if !summary.trim().is_empty() {
                                 let fields = progress::thinking(&progress::one_line(summary));
-                                let msg = format!("thinking: {}", fields.summary.clone().unwrap_or_default());
+                                let msg = format!(
+                                    "thinking: {}",
+                                    fields.summary.clone().unwrap_or_default()
+                                );
                                 sink.progress_with(&msg, &fields);
                             }
                         }
@@ -879,7 +947,9 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
                             flush(&mut texts, sink);
                             let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
                             let input = item.get("input");
-                            let shown = input.map(|v| truncate(&v.to_string(), 200)).unwrap_or_default();
+                            let shown = input
+                                .map(|v| truncate(&v.to_string(), 200))
+                                .unwrap_or_default();
                             sink.progress_with(
                                 &format!("tool_use: {name} {shown}"),
                                 &progress::tool_use(name, input),
@@ -899,7 +969,10 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
                         continue;
                     }
                     let body = tool_result_text(item);
-                    let error = item.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let error = item
+                        .get("is_error")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
                     let fields = progress::tool_result(None, &body, error);
                     let head = fields.summary.clone().unwrap_or_default();
                     let msg = if error {
@@ -925,7 +998,10 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
                 input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
                 output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
             });
-            let result = value.get("result").and_then(|r| r.as_str()).map(|s| s.to_string());
+            let result = value
+                .get("result")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string());
             *last_result = Some(ResultMeta {
                 subtype,
                 is_error,
@@ -979,13 +1055,22 @@ async fn terminal_from_result(
     last_result: &ResultMeta,
 ) -> (Terminal, Option<ProviderFailure>) {
     if last_result.is_error || last_result.subtype != "success" {
-        let text_for_classification = last_result.result.clone().unwrap_or_else(|| last_result.subtype.clone());
+        let text_for_classification = last_result
+            .result
+            .clone()
+            .unwrap_or_else(|| last_result.subtype.clone());
         let pf = classify_provider_failure(&text_for_classification);
         let message = match &last_result.result {
             Some(result_text) => format!("claude result: {}: {result_text}", last_result.subtype),
             None => format!("claude result: {}", last_result.subtype),
         };
-        return (Terminal::Error { message, retryable: true }, pf);
+        return (
+            Terminal::Error {
+                message,
+                retryable: true,
+            },
+            pf,
+        );
     }
 
     let result_path = artifacts_dir.join("result.json");
@@ -1014,7 +1099,9 @@ async fn terminal_from_result(
                 }
             } else {
                 Terminal::Error {
-                    message: format!("{artifacts_rel}/result.json has neither 'summary' nor 'question'"),
+                    message: format!(
+                        "{artifacts_rel}/result.json has neither 'summary' nor 'question'"
+                    ),
                     retryable: true,
                 }
             }
@@ -1048,7 +1135,10 @@ mod tests {
 
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
-            self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+            self.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(msg.to_string());
         }
         fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
             self.progress(msg);
@@ -1059,10 +1149,16 @@ mod tests {
         }
         fn artifact(&self, _artifact: &ArtifactRef) {}
         fn delegate(&self, tasks: &[DelegateTask]) {
-            self.delegated.lock().unwrap_or_else(|e| e.into_inner()).push(tasks.to_vec());
+            self.delegated
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(tasks.to_vec());
         }
         fn rate_limit(&self, obs: RateLimitObservation) {
-            self.rate_limits.lock().unwrap_or_else(|e| e.into_inner()).push(obs);
+            self.rate_limits
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(obs);
         }
     }
 
@@ -1135,7 +1231,8 @@ mod tests {
         assert!(plan_prompt.contains("- Q: which crate version?"));
 
         // No answers: the section must not appear at all.
-        let no_answers_prompt = build_prompt(&execute_task, &RunContext::default(), "run-a3", "artifacts");
+        let no_answers_prompt =
+            build_prompt(&execute_task, &RunContext::default(), "run-a3", "artifacts");
         assert!(!no_answers_prompt.contains("Answers from a human"));
     }
 
@@ -1204,14 +1301,21 @@ mod tests {
     fn stream_json_maps_to_structured_progress() {
         use task_core::ProgressKind;
 
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude-code-stream.jsonl");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/claude-code-stream.jsonl"
+        );
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         let sink = RecordingSink::default();
         let mut last_result = None;
         for line in text.lines() {
             handle_line(line, &sink, &mut last_result);
         }
-        let items = sink.structured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let items = sink
+            .structured
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let kinds: Vec<Option<ProgressKind>> = items.iter().map(|(_, f)| f.kind).collect();
         assert_eq!(
             kinds,
@@ -1230,22 +1334,50 @@ mod tests {
         );
 
         // thinking は要約だけ（本文は流さない）。
-        assert_eq!(items[0].1.summary.as_deref(), Some("まず現状のテストを確かめる それから直す"));
+        assert_eq!(
+            items[0].1.summary.as_deref(),
+            Some("まず現状のテストを確かめる それから直す")
+        );
         assert!(items[0].1.detail.is_none());
         // 1 つの assistant メッセージの本文は 1 件にまとまる。
-        assert_eq!(items[1].1.summary.as_deref(), Some("まずテストを回します。 結果を見てから直します。"));
-        assert_eq!(items[1].0, "まずテストを回します。\n結果を見てから直します。");
+        assert_eq!(
+            items[1].1.summary.as_deref(),
+            Some("まずテストを回します。 結果を見てから直します。")
+        );
+        assert_eq!(
+            items[1].0,
+            "まずテストを回します。\n結果を見てから直します。"
+        );
         // Bash は入力のコマンドが 1 行要約、`detail` は入力そのもの。
         assert_eq!(items[2].1.tool.as_deref(), Some("Bash"));
-        assert_eq!(items[2].1.summary.as_deref(), Some("cargo test --workspace"));
-        assert!(items[2].1.detail.as_deref().unwrap_or("").contains("run the tests"));
+        assert_eq!(
+            items[2].1.summary.as_deref(),
+            Some("cargo test --workspace")
+        );
+        assert!(
+            items[2]
+                .1
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("run the tests")
+        );
         assert!(items[2].0.starts_with("tool_use: Bash"), "{}", items[2].0);
         // tool_result は先頭 200 文字の要約と失敗の印。
-        assert_eq!(items[3].1.summary.as_deref(), Some("test result: ok. 812 passed; 0 failed"));
+        assert_eq!(
+            items[3].1.summary.as_deref(),
+            Some("test result: ok. 812 passed; 0 failed")
+        );
         assert!(!items[3].1.error);
         // Read はパス、Grep は模様。配列の `content` も読める。
-        assert_eq!(items[4].1.summary.as_deref(), Some("/repo/crates/task-api/src/console.rs"));
-        assert_eq!(items[5].1.summary.as_deref(), Some("//! Console の読み取り側"));
+        assert_eq!(
+            items[4].1.summary.as_deref(),
+            Some("/repo/crates/task-api/src/console.rs")
+        );
+        assert_eq!(
+            items[5].1.summary.as_deref(),
+            Some("//! Console の読み取り側")
+        );
         assert_eq!(items[6].1.summary.as_deref(), Some("fn console"));
         // `is_error` は `error` に写る。
         assert!(items[7].1.error, "{:?}", items[7]);
@@ -1253,7 +1385,14 @@ mod tests {
         assert!(items[7].0.contains("(error)"));
         // 知らない道具は入力そのものの先頭（120 文字）。
         assert_eq!(items[8].1.tool.as_deref(), Some("WebFetch"));
-        assert!(items[8].1.summary.as_deref().unwrap_or("").contains("example.invalid"));
+        assert!(
+            items[8]
+                .1
+                .summary
+                .as_deref()
+                .unwrap_or("")
+                .contains("example.invalid")
+        );
         // `result` は進行ではない（終端の合成に使う）。
         assert!(last_result.is_some());
     }
@@ -1273,12 +1412,25 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-1", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
-            Terminal::Done { summary, evidence, usage } => {
+            Terminal::Done {
+                summary,
+                evidence,
+                usage,
+            } => {
                 assert_eq!(summary, "added usage example");
                 assert!(evidence.is_empty());
-                assert_eq!(usage, Some(Usage { input_tokens: Some(10), output_tokens: Some(20) }));
+                assert_eq!(
+                    usage,
+                    Some(Usage {
+                        input_tokens: Some(10),
+                        output_tokens: Some(20)
+                    })
+                );
             }
             other => panic!("expected done, got {other:?}"),
         }
@@ -1289,9 +1441,12 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
 
         // P-26 (ADR-0010 D10): the terminal is also normalized into `runs/<run_id>/result.json`,
         // readable by task-dispatch as a `WorkerMessage::Done`.
-        let result_json = std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
+        let result_json =
+            std::fs::read_to_string(dir.path().join("runs/run-1/result.json")).unwrap();
         match serde_json::from_str::<crate::protocol::WorkerMessage>(result_json.trim()).unwrap() {
-            crate::protocol::WorkerMessage::Done { summary, .. } => assert_eq!(summary, "added usage example"),
+            crate::protocol::WorkerMessage::Done { summary, .. } => {
+                assert_eq!(summary, "added usage example")
+            }
             other => panic!("expected done in result.json, got {other:?}"),
         }
     }
@@ -1309,18 +1464,29 @@ echo '{"type":"result","subtype":"success","is_error":false}'
 "#,
         );
         std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
-        std::fs::write(dir.path().join("artifacts/result.json"), r#"{"summary":"sibling"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("artifacts/result.json"),
+            r#"{"summary":"sibling"}"#,
+        )
+        .unwrap();
         let adapter = ClaudeCodeAdapter::new(config);
         let mut req = sample_req(dir.path().to_path_buf());
         req.artifacts_dir = dir.path().join(".taskd/artifacts/T1");
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-shared", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-shared", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Done { summary, .. } => assert_eq!(summary, "mine"),
             other => panic!("expected done, got {other:?}"),
         }
-        let prompt = std::fs::read_to_string(dir.path().join("runs/run-shared/prompt.txt")).unwrap();
-        assert!(prompt.contains(".taskd/artifacts/T1/result.json"), "{prompt}");
+        let prompt =
+            std::fs::read_to_string(dir.path().join("runs/run-shared/prompt.txt")).unwrap();
+        assert!(
+            prompt.contains(".taskd/artifacts/T1/result.json"),
+            "{prompt}"
+        );
         assert!(!prompt.contains("`artifacts/result.json`"), "{prompt}");
         // 兄弟のファイルは消していない（自分のディレクトリだけを掃除する）。
         assert_eq!(
@@ -1339,7 +1505,10 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-2", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-2", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1362,7 +1531,10 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-3", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-3", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Question { text } => assert_eq!(text, "which crate version?"),
             other => panic!("expected question, got {other:?}"),
@@ -1382,7 +1554,10 @@ echo '{"type":"result","subtype":"error_max_turns","is_error":true}'
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-4", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-4", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1459,7 +1634,10 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-5", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-5", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
@@ -1529,7 +1707,10 @@ sleep 30
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-8", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-8", default_limits(), &sink)
+            .await
+            .unwrap();
         assert_eq!(outcome.exit_code, Some(9));
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
@@ -1556,7 +1737,10 @@ exit 9
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-9", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-9", default_limits(), &sink)
+            .await
+            .unwrap();
         assert_eq!(outcome.exit_code, Some(9));
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
@@ -1578,17 +1762,25 @@ exit 9
             r#"{"summary":"stale from a previous attempt","evidence":[]}"#,
         )
         .unwrap();
-        let config = stub_claude(dir.path(), r#"echo '{"type":"result","subtype":"success","is_error":false}'"#);
+        let config = stub_claude(
+            dir.path(),
+            r#"echo '{"type":"result","subtype":"success","is_error":false}'"#,
+        );
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-10", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-10", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
                 assert!(message.contains("artifacts/result.json"), "{message}");
             }
-            other => panic!("expected error (stale file must be cleared, not reused), got {other:?}"),
+            other => {
+                panic!("expected error (stale file must be cleared, not reused), got {other:?}")
+            }
         }
     }
 
@@ -1607,16 +1799,26 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-11", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-11", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
-            Terminal::Done { summary, evidence, .. } => {
+            Terminal::Done {
+                summary, evidence, ..
+            } => {
                 assert_eq!(summary, "all good");
                 assert_eq!(evidence.len(), 1);
                 assert_eq!(evidence[0].command.as_deref(), Some("cargo test"));
             }
             other => panic!("expected done, got {other:?}"),
         }
-        let prompt = build_prompt(&crate::protocol::tests::sample_task(), &RunContext::default(), "r", "artifacts");
+        let prompt = build_prompt(
+            &crate::protocol::tests::sample_task(),
+            &RunContext::default(),
+            "r",
+            "artifacts",
+        );
         assert!(prompt.contains("plain strings are not accepted"));
     }
 
@@ -1644,7 +1846,11 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             ..RunContext::default()
         };
         let prompt = build_prompt(&task, &context, "run-p1", "artifacts");
-        let at = |n: &str| prompt.find(n).unwrap_or_else(|| panic!("missing {n:?} in\n{prompt}"));
+        let at = |n: &str| {
+            prompt
+                .find(n)
+                .unwrap_or_else(|| panic!("missing {n:?} in\n{prompt}"))
+        };
         assert!(at("(run run-p1") < at("## あなた: 関連研究調査課 (research-survey)"));
         assert!(at("## あなた:") < at("## 覚えていること"));
         assert!(at("## 覚えていること") < at("## 直近のやり取り"));
@@ -1654,7 +1860,10 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         // Phase 23 までの `RunContext` では 1 バイトも変わらない。
         assert!(!bare.contains("## あなた"));
         assert!(!bare.contains("覚えておくこと"));
-        assert_eq!(bare, build_prompt(&task, &RunContext::default(), "run-p0", "artifacts"));
+        assert_eq!(
+            bare,
+            build_prompt(&task, &RunContext::default(), "run-p0", "artifacts")
+        );
     }
 
     /// ADR-0033 D4（Phase 24）: 組織図を渡した run には `## 組織図` と `assignee` の指示が入る。
@@ -1664,6 +1873,8 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let mut task = crate::protocol::tests::sample_task();
         let org = vec![
             crate::protocol::OrgNodeContext {
+                harnesses: Vec::new(),
+                skills: Vec::new(),
                 id: "research".into(),
                 name: "研究部".into(),
                 kind: task_core::OrgKind::Department,
@@ -1672,6 +1883,8 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 genre: None,
             },
             crate::protocol::OrgNodeContext {
+                harnesses: Vec::new(),
+                skills: Vec::new(),
                 id: "research-survey".into(),
                 name: "関連研究調査課".into(),
                 kind: task_core::OrgKind::Section,
@@ -1680,21 +1893,37 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 genre: Some("literature".into()),
             },
         ];
-        let context = RunContext { organization: org, ..RunContext::default() };
+        let context = RunContext {
+            organization: org,
+            ..RunContext::default()
+        };
 
         let execute = build_prompt(&task, &context, "run-o1", "artifacts");
         assert!(execute.contains("## 組織図 (who you can assign work to)"));
         assert!(execute.contains("- research-survey [課] 関連研究調査課 (親: research, 分野: literature) — 関連研究を洗う"));
-        assert!(execute.contains("別の部"), "部をまたぐ委譲の注意が入る: {execute}");
+        assert!(
+            execute.contains("別の部"),
+            "部をまたぐ委譲の注意が入る: {execute}"
+        );
         assert!(execute.contains("\"assignee\":\"<optional org node id>\""));
 
         task.kind = task_core::TaskKind::Plan;
         let plan = build_prompt(&task, &context, "run-o2", "artifacts");
-        assert!(plan.contains("## 組織図"));
-        assert!(plan.contains("子タスクごとに `assignee` を必ず書け"));
-        assert!(plan.contains("`role` は必要なときだけ"));
+        // ADR-0046 D5（Phase 59）: 計画は人選をしない。組織図も渡さない。
+        assert!(plan.contains("**`assignee`（担当）は書くな"), "{plan}");
+        assert!(
+            plan.contains("`harness`: その仕事の実行契約の id"),
+            "{plan}"
+        );
+        assert!(plan.contains("`mode`: `prototype`"), "{plan}");
+        assert!(
+            !plan.contains("## 組織図 (who you can assign work to)"),
+            "{plan}"
+        );
 
-        assert!(!build_prompt(&task, &RunContext::default(), "run-o3", "artifacts").contains("組織図"));
+        assert!(
+            !build_prompt(&task, &RunContext::default(), "run-o3", "artifacts").contains("組織図")
+        );
     }
 
     /// ADR-0016 D1 / M3: `context.role` があれば `## Role: <id>` と指示文がプロンプトに入る。無ければ入らない。
@@ -1763,7 +1992,8 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert!(prompt.contains("literature-scout"));
         assert!(prompt.contains("literature-reader"));
 
-        let no_genres_prompt = build_prompt(&task, &RunContext::default(), "run-avail-2", "artifacts");
+        let no_genres_prompt =
+            build_prompt(&task, &RunContext::default(), "run-avail-2", "artifacts");
         assert!(!no_genres_prompt.contains("使える専門家"));
     }
 
@@ -1783,7 +2013,11 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             input_artifacts: vec!["question".into(), "pdf".into(), "bibliography".into()],
             output_artifacts: vec!["answer.md".into(), "citations.json".into()],
             default_role: Some("literature-reader".into()),
-            roles: vec!["literature-scout".into(), "literature-reader".into(), "novelty-skeptic".into()],
+            roles: vec![
+                "literature-scout".into(),
+                "literature-reader".into(),
+                "novelty-skeptic".into(),
+            ],
         };
         let context = RunContext {
             available_genres: vec![GenreContext::from(&genre_spec)],
@@ -1843,7 +2077,12 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert!(prompt.contains("literature-reader"));
         assert!(prompt.contains("artifacts/plan.json"));
 
-        let no_genres_prompt = build_prompt(&task, &RunContext::default(), "run-plan-avail-2", "artifacts");
+        let no_genres_prompt = build_prompt(
+            &task,
+            &RunContext::default(),
+            "run-plan-avail-2",
+            "artifacts",
+        );
         assert!(!no_genres_prompt.contains("使える専門家"));
     }
 
@@ -1911,10 +2150,19 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             ),
             "{prompt}"
         );
-        assert!(prompt.contains("受け入れ条件（`artifact_exists`）にはこの名前だけを使うこと。"), "{prompt}");
-        assert!(prompt.contains("レビュアー条件（`{\"type\":\"reviewer\"}`）で判定させること"), "{prompt}");
+        assert!(
+            prompt.contains("受け入れ条件（`artifact_exists`）にはこの名前だけを使うこと。"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("レビュアー条件（`{\"type\":\"reviewer\"}`）で判定させること"),
+            "{prompt}"
+        );
         // ハーネスでない分野（coding）は規約の節に出ない（「使える専門家」節には出る）。
-        assert!(!prompt.contains("- coding: この分野の担当は**ハーネス**で動く"), "{prompt}");
+        assert!(
+            !prompt.contains("- coding: この分野の担当は**ハーネス**で動く"),
+            "{prompt}"
+        );
         assert!(prompt.contains("- coding: コードを書く"), "{prompt}");
     }
 
@@ -1931,11 +2179,19 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         };
         assert_eq!(harness_artifacts_section_for_plan(&coding_only), "");
         let prompt = build_prompt(&task, &coding_only, "run-plan-harness-2", "artifacts");
-        assert!(!prompt.contains("ハーネス"), "{prompt}");
+        // Phase 59（ADR-0046 D3）: 計画の JSON スキーマには `harness` の説明が入るので、"ハーネス" の
+        // 文字だけでは判定できない。規約の節そのものが無いことを見る。
+        assert!(
+            !prompt.contains("## ハーネスで動く分野の成果物"),
+            "{prompt}"
+        );
 
         // `output_artifacts` を書いていないハーネス系の分野も、出す名前が無いので節は出ない。
         let bare = RunContext {
-            available_genres: vec![GenreContext { output_artifacts: Vec::new(), ..literature }],
+            available_genres: vec![GenreContext {
+                output_artifacts: Vec::new(),
+                ..literature
+            }],
             ..RunContext::default()
         };
         assert_eq!(harness_artifacts_section_for_plan(&bare), "");
@@ -1944,9 +2200,15 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let mut execute = crate::protocol::tests::sample_task();
         execute.kind = task_core::TaskKind::Execute;
         let (literature, _) = harness_genre_contexts();
-        let context = RunContext { available_genres: vec![literature], ..RunContext::default() };
+        let context = RunContext {
+            available_genres: vec![literature],
+            ..RunContext::default()
+        };
         let execute_prompt = build_prompt(&execute, &context, "run-exec-harness", "artifacts");
-        assert!(!execute_prompt.contains("## ハーネスで動く分野の成果物"), "{execute_prompt}");
+        assert!(
+            !execute_prompt.contains("## ハーネスで動く分野の成果物"),
+            "{execute_prompt}"
+        );
     }
 
     /// Phase 43（ADR-0039 D3）: 案件が作業場所を決めている run では、前置きに「## 作業場所」が出て
@@ -1955,30 +2217,47 @@ echo '{"type":"result","subtype":"success","is_error":false}'
     fn build_prompt_states_the_project_workspace_when_the_project_has_one() {
         let task = crate::protocol::tests::sample_task();
         let context = RunContext {
-            workspace_note: Some(crate::preamble::workspace_note(&task_core::WorkspaceSpec::Remote {
-                cluster: "pegasus".into(),
-                path: std::path::PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
-            })),
+            workspace_note: Some(crate::preamble::workspace_note(
+                &task_core::WorkspaceSpec::Remote {
+                    cluster: "pegasus".into(),
+                    path: std::path::PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+                },
+            )),
             ..RunContext::default()
         };
         let prompt = build_prompt(&task, &context, "run-ws-1", "artifacts");
-        assert!(prompt.contains("## 作業場所 (where this project's code lives)"), "{prompt}");
+        assert!(
+            prompt.contains("## 作業場所 (where this project's code lives)"),
+            "{prompt}"
+        );
         assert!(
             prompt.contains("この案件のコードはクラスタ pegasus の `/work/NBB/rmaeda/workspace/rust/benchfs` にある。"),
             "{prompt}"
         );
-        assert!(prompt.contains("`ssh` で直接書き込んではいけない"), "{prompt}");
-        assert!(prompt.contains("Children you delegate inherit this project's workspace"), "{prompt}");
+        assert!(
+            prompt.contains("`ssh` で直接書き込んではいけない"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Children you delegate inherit this project's workspace"),
+            "{prompt}"
+        );
 
         // Local の案件では「クラスタ」とは言わない。
         let local = RunContext {
-            workspace_note: Some(crate::preamble::workspace_note(&task_core::WorkspaceSpec::Local {
-                path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
-            })),
+            workspace_note: Some(crate::preamble::workspace_note(
+                &task_core::WorkspaceSpec::Local {
+                    path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+                    mode: None,
+                },
+            )),
             ..RunContext::default()
         };
         let prompt = build_prompt(&task, &local, "run-ws-2", "artifacts");
-        assert!(prompt.contains("この案件のコードは `/home/rmaeda/workspace/rust/pluvio-poc` にある。"), "{prompt}");
+        assert!(
+            prompt.contains("この案件のコードは `/home/rmaeda/workspace/rust/pluvio-poc` にある。"),
+            "{prompt}"
+        );
     }
 
     /// Phase 43（ADR-0039 D3）: 計画 run には「子タスクの作業場所」と `plan.json` の `workspace` の
@@ -1993,15 +2272,27 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert!(!bare.contains("## 作業場所"), "{bare}");
 
         let context = RunContext {
-            workspace_note: Some(crate::preamble::workspace_note(&task_core::WorkspaceSpec::Local {
-                path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"), mode: None,
-            })),
+            workspace_note: Some(crate::preamble::workspace_note(
+                &task_core::WorkspaceSpec::Local {
+                    path: std::path::PathBuf::from("/home/rmaeda/workspace/rust/pluvio-poc"),
+                    mode: None,
+                },
+            )),
             ..RunContext::default()
         };
         let prompt = build_prompt(&task, &context, "run-ws-3", "artifacts");
-        assert!(prompt.contains("## 子タスクの作業場所 (the workspace child tasks inherit)"), "{prompt}");
-        assert!(prompt.contains("分解した子タスクはこの作業場所をそのまま継ぐ"), "{prompt}");
-        assert!(prompt.contains("`{\"kind\":\"remote\",\"cluster\":\"...\",\"path\":\"...\"}`"), "{prompt}");
+        assert!(
+            prompt.contains("## 子タスクの作業場所 (the workspace child tasks inherit)"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("分解した子タスクはこの作業場所をそのまま継ぐ"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("`{\"kind\":\"remote\",\"cluster\":\"...\",\"path\":\"...\"}`"),
+            "{prompt}"
+        );
         // 作業場所の 2 節を取り除けば、Phase 42 までのプロンプトとバイト単位で一致する。
         let preamble = crate::preamble::render(&context, "artifacts");
         assert!(!preamble.is_empty());
@@ -2019,7 +2310,10 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let before = build_prompt(&task, &RunContext::default(), "run-ws-4", "artifacts");
         assert!(!before.contains("## 作業場所"), "{before}");
         assert_eq!(delegate_workspace_instruction(&RunContext::default()), "");
-        assert_eq!(crate::preamble::render(&RunContext::default(), "artifacts"), "");
+        assert_eq!(
+            crate::preamble::render(&RunContext::default(), "artifacts"),
+            ""
+        );
     }
 
     /// Phase 38（ADR-0028 追記）: レビュアーのプロンプトにも同じ規約が出る（対象タスクの分野が
@@ -2034,18 +2328,37 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             ..RunContext::default()
         };
         let prompt = build_prompt(&task, &context, "run-review-harness-1", "artifacts");
-        assert!(prompt.contains("## この担当の成果物（名前は固定。判定はこの前提で行う）"), "{prompt}");
-        assert!(prompt.contains("  - `papers.json`: 検索した論文の一覧（コーパス）\n"), "{prompt}");
         assert!(
-            prompt.contains("`papers.json` は検索したコーパスで\nあって答えではない。答えは `answer.md`"),
+            prompt.contains("## この担当の成果物（名前は固定。判定はこの前提で行う）"),
             "{prompt}"
         );
-        assert!(prompt.contains("ファイル名の不一致だけを理由に不合格にはせず"), "{prompt}");
+        assert!(
+            prompt.contains("  - `papers.json`: 検索した論文の一覧（コーパス）\n"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "`papers.json` は検索したコーパスで\nあって答えではない。答えは `answer.md`"
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("ファイル名の不一致だけを理由に不合格にはせず"),
+            "{prompt}"
+        );
 
         // ハーネスでない分野・分野が渡っていないレビューでは何も出ない。
-        let coding_context = RunContext { subject_genre: Some(coding), ..RunContext::default() };
+        let coding_context = RunContext {
+            subject_genre: Some(coding),
+            ..RunContext::default()
+        };
         assert_eq!(harness_artifacts_section_for_review(&coding_context), "");
-        let none = build_prompt(&task, &RunContext::default(), "run-review-harness-2", "artifacts");
+        let none = build_prompt(
+            &task,
+            &RunContext::default(),
+            "run-review-harness-2",
+            "artifacts",
+        );
         assert!(!none.contains("この担当の成果物"), "{none}");
     }
 
@@ -2072,7 +2385,8 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert!(prompt.contains("implement parser"));
         assert!(prompt.contains("artifacts/summary.md"));
 
-        let no_children_prompt = build_prompt(&task, &RunContext::default(), "run-agg-2", "artifacts");
+        let no_children_prompt =
+            build_prompt(&task, &RunContext::default(), "run-agg-2", "artifacts");
         assert!(!no_children_prompt.contains("Delegated child tasks"));
         assert!(!no_children_prompt.contains("artifacts/summary.md"));
     }
@@ -2092,7 +2406,10 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-delegate-1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-delegate-1", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let delegated = sink.delegated.lock().unwrap();
         assert_eq!(delegated.len(), 1);
@@ -2114,14 +2431,20 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-delegate-2", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-delegate-2", default_limits(), &sink)
+            .await
+            .unwrap();
         match outcome.terminal {
             Terminal::Done { .. } => {}
             other => panic!("expected done, got {other:?}"),
         }
         assert!(sink.delegated.lock().unwrap().is_empty());
         let progress = sink.progress.lock().unwrap();
-        assert!(progress.iter().any(|m| m.contains("delegate.json ignored")), "{progress:?}");
+        assert!(
+            progress.iter().any(|m| m.contains("delegate.json ignored")),
+            "{progress:?}"
+        );
     }
 
     /// ADR-0024 D4: `rate_limit_event` を解析すると `sink.rate_limit` に観測値が渡る。ADR に載っている
@@ -2140,7 +2463,10 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter.run(req, "run-rate-1", default_limits(), &sink).await.unwrap();
+        let outcome = adapter
+            .run(req, "run-rate-1", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let observed = sink.rate_limits.lock().unwrap();
         assert_eq!(observed.len(), 1);
@@ -2166,15 +2492,24 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'
                 out = out_file.display()
             ),
         );
-        config.env.push(("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(), "old-account-dir".to_string()));
+        config.env.push((
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(),
+            "old-account-dir".to_string(),
+        ));
         let base = ClaudeCodeAdapter::new(config);
         let with_env = base
-            .with_env(&[("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(), "new-account-dir".to_string())])
+            .with_env(&[(
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(),
+                "new-account-dir".to_string(),
+            )])
             .expect("claude-code supports with_env");
 
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = with_env.run(req, "run-env-1", default_limits(), &sink).await.unwrap();
+        let outcome = with_env
+            .run(req, "run-env-1", default_limits(), &sink)
+            .await
+            .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let seen = std::fs::read_to_string(&out_file).unwrap();
         assert_eq!(seen, "new-account-dir");

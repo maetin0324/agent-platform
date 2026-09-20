@@ -18,8 +18,8 @@ use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::claude_account::{
-    AccountCheck, AccountCheckResult, LoginError, LoginOutcome, LoginResult, READER_JOIN_TIMEOUT, join_with_timeout,
-    pump_reader, strip_escape_codes, truncate_detail,
+    AccountCheck, AccountCheckResult, LoginError, LoginOutcome, LoginResult, READER_JOIN_TIMEOUT,
+    join_with_timeout, pump_reader, strip_escape_codes, truncate_detail,
 };
 use crate::codex::now_unix_secs;
 use crate::protocol::ProviderFailure;
@@ -61,12 +61,19 @@ pub async fn check_account_codex(
     }
 }
 
-async fn run_check(command: &str, account_dir: &Path, base_env: &[(String, String)]) -> AccountCheck {
-    let cwd = std::env::temp_dir().join(format!("celeris-codex-check-{}", task_core::TaskId::new()));
+async fn run_check(
+    command: &str,
+    account_dir: &Path,
+    base_env: &[(String, String)],
+) -> AccountCheck {
+    let cwd =
+        std::env::temp_dir().join(format!("celeris-codex-check-{}", task_core::TaskId::new()));
     if let Err(e) = tokio::fs::create_dir_all(&cwd).await {
         return AccountCheck {
             result: AccountCheckResult::SpawnFailed,
-            detail: Some(truncate_detail(&format!("failed to create check workspace: {e}"))),
+            detail: Some(truncate_detail(&format!(
+                "failed to create check workspace: {e}"
+            ))),
             observation: None,
         };
     }
@@ -134,7 +141,12 @@ async fn run_check(command: &str, account_dir: &Path, base_env: &[(String, Strin
                         send_signal_to_group(&child, Signal::SIGKILL);
                         break;
                     }
-                    handle_check_line(trimmed, &mut observation, &mut last_error_message, &mut completed);
+                    handle_check_line(
+                        trimmed,
+                        &mut observation,
+                        &mut last_error_message,
+                        &mut completed,
+                    );
                 }
                 Err(_) => break,
             }
@@ -146,18 +158,32 @@ async fn run_check(command: &str, account_dir: &Path, base_env: &[(String, Strin
     drop(cwd_guard);
 
     if let Some(detail) = auth_failed_detail {
-        return AccountCheck { result: AccountCheckResult::AuthFailed, detail: Some(detail), observation };
+        return AccountCheck {
+            result: AccountCheckResult::AuthFailed,
+            detail: Some(detail),
+            observation,
+        };
     }
     if completed {
-        return AccountCheck { result: AccountCheckResult::Ok, detail: Some("ok".to_string()), observation };
+        return AccountCheck {
+            result: AccountCheckResult::Ok,
+            detail: Some("ok".to_string()),
+            observation,
+        };
     }
     let stderr_tail = String::from_utf8_lossy(&stderr_bytes).to_string();
-    let text_for_classification = last_error_message.clone().unwrap_or_else(|| stderr_tail.clone());
+    let text_for_classification = last_error_message
+        .clone()
+        .unwrap_or_else(|| stderr_tail.clone());
     let (result, detail) = match classify_provider_failure(&text_for_classification) {
-        Some(ProviderFailure::AuthFailed) => (AccountCheckResult::AuthFailed, truncate_detail(&text_for_classification)),
-        Some(ProviderFailure::Throttled { .. }) | Some(ProviderFailure::Exhausted) => {
-            (AccountCheckResult::Throttled, truncate_detail(&text_for_classification))
-        }
+        Some(ProviderFailure::AuthFailed) => (
+            AccountCheckResult::AuthFailed,
+            truncate_detail(&text_for_classification),
+        ),
+        Some(ProviderFailure::Throttled { .. }) | Some(ProviderFailure::Exhausted) => (
+            AccountCheckResult::Throttled,
+            truncate_detail(&text_for_classification),
+        ),
         None => {
             let detail = if text_for_classification.trim().is_empty() {
                 "worker exited without a turn.completed/turn.failed message".to_string()
@@ -167,7 +193,11 @@ async fn run_check(command: &str, account_dir: &Path, base_env: &[(String, Strin
             (AccountCheckResult::SpawnFailed, detail)
         }
     };
-    AccountCheck { result, detail: Some(detail), observation }
+    AccountCheck {
+        result,
+        detail: Some(detail),
+        observation,
+    }
 }
 
 fn handle_check_line(
@@ -195,7 +225,10 @@ fn handle_check_line(
             }
         }
         "turn.failed" => {
-            let message = value.get("error").map(describe_error).unwrap_or_else(|| "turn.failed".to_string());
+            let message = value
+                .get("error")
+                .map(describe_error)
+                .unwrap_or_else(|| "turn.failed".to_string());
             *last_error_message = Some(message);
         }
         _ => {}
@@ -295,7 +328,11 @@ pub async fn start_login_codex(
             let _ = child.wait().await;
             join_with_timeout(out_task, READER_JOIN_TIMEOUT).await;
             join_with_timeout(err_task, READER_JOIN_TIMEOUT).await;
-            Err(if exited { LoginError::ProcessExited } else { LoginError::Timeout })
+            Err(if exited {
+                LoginError::ProcessExited
+            } else {
+                LoginError::Timeout
+            })
         }
     }
 }
@@ -319,7 +356,14 @@ impl CodexLoginSession {
         };
         let auth_exists = self.account_dir.join("auth.json").is_file();
         let ok = status.map(|s| s.success()).unwrap_or(false) && auth_exists;
-        LoginResult { result: if ok { LoginOutcome::Ok } else { LoginOutcome::Failed }, detail: None }
+        LoginResult {
+            result: if ok {
+                LoginOutcome::Ok
+            } else {
+                LoginOutcome::Failed
+            },
+            detail: None,
+        }
     }
 
     /// 非同期にブロックせず、子が終了していれば結果を返す（tick ごとのポーリング用。ADR-0025 D5）。
@@ -331,7 +375,14 @@ impl CodexLoginSession {
                 let auth_exists = self.account_dir.join("auth.json").is_file();
                 let ok = status.success() && auth_exists;
                 self.child = None;
-                Some(LoginResult { result: if ok { LoginOutcome::Ok } else { LoginOutcome::Failed }, detail: None })
+                Some(LoginResult {
+                    result: if ok {
+                        LoginOutcome::Ok
+                    } else {
+                        LoginOutcome::Failed
+                    },
+                    detail: None,
+                })
             }
             _ => None,
         }
@@ -377,7 +428,11 @@ fn extract_device_url(bytes: &[u8]) -> Option<String> {
 /// 本物のコードは大文字と数字だけで、単独の行に出る。
 fn extract_device_code(bytes: &[u8]) -> Option<String> {
     let stripped = strip_escape_codes(bytes);
-    stripped.lines().map(str::trim).find(|line| is_device_code(line)).map(str::to_string)
+    stripped
+        .lines()
+        .map(str::trim)
+        .find(|line| is_device_code(line))
+        .map(str::to_string)
 }
 
 /// `ABCD-1EFGH` の形（大文字か数字の塊を `-` でつないだもの。各塊 3〜8 文字、塊は 2〜3 個）。
@@ -387,7 +442,10 @@ fn is_device_code(line: &str) -> bool {
         return false;
     }
     parts.iter().all(|part| {
-        (3..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        (3..=8).contains(&part.len())
+            && part
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
     })
 }
 
@@ -419,7 +477,13 @@ echo '{"type":"turn.completed"}'
 "#,
         );
         let acct = account_dir(dir.path(), "a");
-        let check = check_account_codex(command.to_str().unwrap(), &acct, Duration::from_secs(5), &[]).await;
+        let check = check_account_codex(
+            command.to_str().unwrap(),
+            &acct,
+            Duration::from_secs(5),
+            &[],
+        )
+        .await;
         assert_eq!(check.result, AccountCheckResult::Ok);
         let obs = check.observation.expect("observation");
         assert_eq!(obs.five_hour.map(|w| w.utilization), Some(0.14));
@@ -439,8 +503,18 @@ sleep 30
         );
         let acct = account_dir(dir.path(), "a");
         let start = Instant::now();
-        let check = check_account_codex(command.to_str().unwrap(), &acct, Duration::from_secs(20), &[]).await;
-        assert!(start.elapsed() < Duration::from_secs(10), "should not wait for retries: {:?}", start.elapsed());
+        let check = check_account_codex(
+            command.to_str().unwrap(),
+            &acct,
+            Duration::from_secs(20),
+            &[],
+        )
+        .await;
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "should not wait for retries: {:?}",
+            start.elapsed()
+        );
         assert_eq!(check.result, AccountCheckResult::AuthFailed);
     }
 
@@ -452,7 +526,13 @@ sleep 30
             r#"echo '{"type":"turn.failed","error":{"message":"You'"'"'ve hit your usage limit"}}'"#,
         );
         let acct = account_dir(dir.path(), "a");
-        let check = check_account_codex(command.to_str().unwrap(), &acct, Duration::from_secs(5), &[]).await;
+        let check = check_account_codex(
+            command.to_str().unwrap(),
+            &acct,
+            Duration::from_secs(5),
+            &[],
+        )
+        .await;
         assert_eq!(check.result, AccountCheckResult::Throttled);
     }
 
@@ -461,7 +541,13 @@ sleep 30
         let dir = tempfile::tempdir().unwrap();
         let acct = account_dir(dir.path(), "a");
         let missing = dir.path().join("does-not-exist");
-        let check = check_account_codex(missing.to_str().unwrap(), &acct, Duration::from_secs(5), &[]).await;
+        let check = check_account_codex(
+            missing.to_str().unwrap(),
+            &acct,
+            Duration::from_secs(5),
+            &[],
+        )
+        .await;
         assert_eq!(check.result, AccountCheckResult::SpawnFailed);
     }
 
@@ -470,7 +556,13 @@ sleep 30
         let dir = tempfile::tempdir().unwrap();
         let command = stub(dir.path(), "sleep 30");
         let acct = account_dir(dir.path(), "a");
-        let check = check_account_codex(command.to_str().unwrap(), &acct, Duration::from_millis(200), &[]).await;
+        let check = check_account_codex(
+            command.to_str().unwrap(),
+            &acct,
+            Duration::from_millis(200),
+            &[],
+        )
+        .await;
         assert_eq!(check.result, AccountCheckResult::SpawnFailed);
         assert_eq!(check.detail.as_deref(), Some("timeout"));
     }
@@ -481,7 +573,11 @@ sleep 30
     /// exit 0 する）。
     fn login_stub(dir: &Path, ok: bool) -> PathBuf {
         let exit_code = if ok { 0 } else { 1 };
-        let write_auth_json = if ok { r#"printf '%s' '{}' > "$CODEX_HOME/auth.json""# } else { "true" };
+        let write_auth_json = if ok {
+            r#"printf '%s' '{}' > "$CODEX_HOME/auth.json""#
+        } else {
+            "true"
+        };
         stub(
             dir,
             &format!(
@@ -499,9 +595,14 @@ sleep 30
         let dir = tempfile::tempdir().unwrap();
         let command = login_stub(dir.path(), true);
         let acct = account_dir(dir.path(), "a");
-        let session = start_login_codex(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
+        let session = start_login_codex(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
         assert_eq!(session.url, "https://auth.openai.com/codex/device");
         assert_eq!(session.user_code, "ABCD-EFGHI");
         let result = session.wait(Duration::from_secs(5)).await;
@@ -514,9 +615,14 @@ sleep 30
         let dir = tempfile::tempdir().unwrap();
         let command = login_stub(dir.path(), false);
         let acct = account_dir(dir.path(), "a");
-        let session = start_login_codex(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
+        let session = start_login_codex(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
         let result = session.wait(Duration::from_secs(5)).await;
         assert_eq!(result.result, LoginOutcome::Failed);
         assert!(!acct.join("auth.json").is_file());
@@ -534,9 +640,14 @@ exit 0
 "#,
         );
         let acct = account_dir(dir.path(), "a");
-        let session = start_login_codex(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
+        let session = start_login_codex(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
         let result = session.wait(Duration::from_secs(5)).await;
         assert_eq!(result.result, LoginOutcome::Failed);
     }
@@ -552,9 +663,14 @@ sleep 30
 "#,
         );
         let acct = account_dir(dir.path(), "a");
-        let session = start_login_codex(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
+        let session = start_login_codex(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
         let pid = session.child.as_ref().and_then(|c| c.id()).expect("pid");
         session.cancel();
         for _ in 0..100 {
@@ -573,9 +689,14 @@ sleep 30
         let dir = tempfile::tempdir().unwrap();
         let command = login_stub(dir.path(), true);
         let acct = account_dir(dir.path(), "a");
-        let mut session = start_login_codex(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
+        let mut session = start_login_codex(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
         // Not finished yet (the stub sleeps 0.2s before exiting).
         assert_eq!(session.try_finished(), None);
         for _ in 0..100 {
@@ -601,9 +722,14 @@ sleep 30
 "#,
         );
         let acct = account_dir(dir.path(), "a");
-        let session = start_login_codex(command.to_str().unwrap(), &acct, &[], Duration::from_secs(5))
-            .await
-            .expect("session");
+        let session = start_login_codex(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("session");
         let pid = session.child.as_ref().and_then(|c| c.id()).expect("pid");
         let result = session.wait(Duration::from_millis(200)).await;
         assert_eq!(result.result, LoginOutcome::Failed);
@@ -649,13 +775,19 @@ sleep 30
             &b"2. Enter this one-time code (expires in 15 minutes)\n"[..],
             &b"codex_home: /tmp/claude-1001/-home-rmaeda/workspace-agent\n"[..],
         ] {
-            assert_eq!(extract_device_code(text), None, "should not match: {}", String::from_utf8_lossy(text));
+            assert_eq!(
+                extract_device_code(text),
+                None,
+                "should not match: {}",
+                String::from_utf8_lossy(text)
+            );
         }
     }
 
     #[test]
     fn extract_device_code_none_when_absent() {
-        let text = b"Visit https://auth.openai.com/codex/device and enter the code shown on the page\n";
+        let text =
+            b"Visit https://auth.openai.com/codex/device and enter the code shown on the page\n";
         assert_eq!(extract_device_code(text), None);
     }
 }

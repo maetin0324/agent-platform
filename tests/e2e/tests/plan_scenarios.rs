@@ -19,7 +19,11 @@ fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
     let path = debug_dir.join(name);
-    assert!(path.exists(), "{} not found; run `cargo test --workspace`", path.display());
+    assert!(
+        path.exists(),
+        "{} not found; run `cargo test --workspace`",
+        path.display()
+    );
     path
 }
 
@@ -36,7 +40,12 @@ impl Env {
         let root = tmp.path().canonicalize().unwrap();
         let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
-        Self { _tmp: tmp, root, db, store }
+        Self {
+            _tmp: tmp,
+            root,
+            db,
+            store,
+        }
     }
 
     fn write_script(&self, body: &str) -> PathBuf {
@@ -96,7 +105,15 @@ model = "fake"
     fn run_celeris(&self, config: &Path, timeout: Duration) -> String {
         let log = self.root.join("celeris.log");
         let mut child = Command::new(bin("celeris"))
-            .args(["--config", config.to_str().unwrap(), "--until-idle", "--max-ticks", "2000", "--log-format", "text"])
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "--until-idle",
+                "--max-ticks",
+                "2000",
+                "--log-format",
+                "text",
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).unwrap())
@@ -145,7 +162,9 @@ model = "fake"
             .unwrap()
             .into_iter()
             .filter_map(|(_, e)| match e {
-                Event::Transitioned { from, to, reason } => Some(format!("{from:?}->{to:?}:{reason}")),
+                Event::Transitioned { from, to, reason } => {
+                    Some(format!("{from:?}->{to:?}:{reason}"))
+                }
                 _ => None,
             })
             .collect()
@@ -243,7 +262,10 @@ fn celerisctl_plan_generates_children_that_complete_after_human_approval() {
     assert_eq!(plan.budget.max_retries, 1);
 
     // celerisctl approve → ready。celeris がプランナーを走らせ、子を draft で挿入して plan は done。
-    assert_eq!(env.celerisctl(&["approve", &id.to_string()]).trim(), "Ready");
+    assert_eq!(
+        env.celerisctl(&["approve", &id.to_string()]).trim(),
+        "Ready"
+    );
     let log1 = env.run_celeris(&config, Duration::from_secs(60));
     let plan = env.task(id);
     assert_eq!(plan.status, Status::Done, "{log1}");
@@ -263,14 +285,23 @@ fn celerisctl_plan_generates_children_that_complete_after_human_approval() {
         .unwrap()
         .into_iter()
         .filter_map(|(_, e)| match e {
-            Event::ReviewVerdict { criterion_idx, pass, reason, .. } => Some((criterion_idx, pass, reason)),
+            Event::ReviewVerdict {
+                criterion_idx,
+                pass,
+                reason,
+                ..
+            } => Some((criterion_idx, pass, reason)),
             _ => None,
         })
         .collect();
     assert_eq!(plan_verdicts.len(), 1, "{plan_verdicts:?}");
     assert_eq!(plan_verdicts[0].0, 0);
     assert!(plan_verdicts[0].1);
-    assert!(plan_verdicts[0].2.contains("valid PlanOutput with 4 tasks"), "{}", plan_verdicts[0].2);
+    assert!(
+        plan_verdicts[0].2.contains("valid PlanOutput with 4 tasks"),
+        "{}",
+        plan_verdicts[0].2
+    );
     assert!(log1.contains("plan completed; children inserted"), "{log1}");
 
     // 子 4 件（3〜6 件の範囲）が draft で、plan.auto_accept = false なので dispatch されていない。
@@ -289,7 +320,10 @@ fn celerisctl_plan_generates_children_that_complete_after_human_approval() {
     }
     assert_eq!(by_title("B").depends_on, vec![by_title("A").id]);
     assert_eq!(by_title("C").depends_on, vec![by_title("A").id]);
-    assert_eq!(by_title("D").depends_on, vec![by_title("B").id, by_title("C").id]);
+    assert_eq!(
+        by_title("D").depends_on,
+        vec![by_title("B").id, by_title("C").id]
+    );
     assert_eq!(by_title("C").worker_hint.tier, Tier::Cheap);
     // ADR-0028 D3: `tier` を指定していない子は、役割・分野の既定も無ければ親（Plan）の tier を継ぐ
     // （委譲と同じ規則。以前は独立した既定 `Standard` だった）。
@@ -298,16 +332,28 @@ fn celerisctl_plan_generates_children_that_complete_after_human_approval() {
     assert_eq!(ls.lines().count(), 4, "{ls}");
     let tree = env.celerisctl(&["ls", "--tree"]);
     assert!(tree.contains(&id.to_string()));
-    assert!(tree.lines().filter(|l| l.starts_with("  ")).count() >= 4, "{tree}");
+    assert!(
+        tree.lines().filter(|l| l.starts_with("  ")).count() >= 4,
+        "{tree}"
+    );
 
     // 人間が子を承認 → celeris 再実行 → 全て done。
     for c in &children {
-        assert_eq!(env.celerisctl(&["approve", &c.id.to_string()]).trim(), "Ready");
+        assert_eq!(
+            env.celerisctl(&["approve", &c.id.to_string()]).trim(),
+            "Ready"
+        );
     }
     let log2 = env.run_celeris(&config, Duration::from_secs(60));
     for c in &children {
         let t = env.task(c.id);
-        assert_eq!(t.status, Status::Done, "{}: {:?}\n{log2}", c.title, env.transitions(c.id));
+        assert_eq!(
+            t.status,
+            Status::Done,
+            "{}: {:?}\n{log2}",
+            c.title,
+            env.transitions(c.id)
+        );
         assert_eq!(t.attempts, 0);
         assert!(t.lease.is_none());
         assert_eq!(
@@ -326,11 +372,24 @@ fn celerisctl_plan_generates_children_that_complete_after_human_approval() {
     assert!(c_events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { criterion_idx: 0, pass: true, reason, .. } if reason.contains("reviewer(") && reason.contains("tests cover the parser"))), "{c_events:?}");
     assert!(c_events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.starts_with("reviewer run ") && msg.contains("started"))), "{c_events:?}");
     // ADR-0014 D1（P-G14）: WorkerStarted はワーカー run の 1 回と、provider 付きで記録する Reviewer run の 1 回。
-    assert_eq!(c_events.iter().filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. })).count(), 1);
     assert_eq!(
         c_events
             .iter()
-            .filter(|(_, e)| matches!(e, Event::WorkerStarted { role: Some(task_core::RunRole::Reviewer), provider: Some(_), .. }))
+            .filter(|(_, e)| matches!(e, Event::WorkerStarted { role: None, .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        c_events
+            .iter()
+            .filter(|(_, e)| matches!(
+                e,
+                Event::WorkerStarted {
+                    role: Some(task_core::RunRole::Reviewer),
+                    provider: Some(_),
+                    ..
+                }
+            ))
             .count(),
         1,
         "{c_events:?}"
@@ -338,9 +397,18 @@ fn celerisctl_plan_generates_children_that_complete_after_human_approval() {
     assert!(c_events.iter().any(|(_, e)| matches!(e, Event::WorkerFinished { role: Some(task_core::RunRole::Reviewer), outcome, .. } if outcome.starts_with("done: "))), "{c_events:?}");
     let review_run = std::fs::read_to_string(dir.join("review-run.json")).unwrap();
     assert!(review_run.contains(r#""kind":"review""#), "{review_run}");
-    assert!(review_run.contains(r#""title":"Review: C""#), "{review_run}");
-    assert!(review_run.contains(r#""review":{"summary":"did C","evidence":[],"criteria":[0]}"#), "{review_run}");
-    assert!(review_run.contains(r#""inputs":[{"name":"C-report.md""#), "{review_run}");
+    assert!(
+        review_run.contains(r#""title":"Review: C""#),
+        "{review_run}"
+    );
+    assert!(
+        review_run.contains(r#""review":{"summary":"did C","evidence":[],"criteria":[0]}"#),
+        "{review_run}"
+    );
+    assert!(
+        review_run.contains(r#""inputs":[{"name":"C-report.md""#),
+        "{review_run}"
+    );
     assert!(log2.contains("starting reviewer run"), "{log2}");
 
     // 依存順: D は B と C の後、B/C は A の後（timeline.log は fake が書く）。
@@ -409,11 +477,18 @@ fn invalid_plan_is_retried_once_with_prior_review() {
         })
         .collect();
     assert_eq!(verdicts.len(), 2);
-    assert!(!verdicts[0].0 && verdicts[0].1.contains("out of range"), "{:?}", verdicts[0]);
+    assert!(
+        !verdicts[0].0 && verdicts[0].1.contains("out of range"),
+        "{:?}",
+        verdicts[0]
+    );
     assert!(verdicts[1].0);
     // 2 回目の run の stdin に 1 回目の検証エラーが prior_review として入っている。
     let run1 = std::fs::read_to_string(dir.join("plan-run-1.marker")).unwrap();
-    assert!(run1.contains(r#""prior_review":[{"criterion":0,"pass":false"#), "{run1}");
+    assert!(
+        run1.contains(r#""prior_review":[{"criterion":0,"pass":false"#),
+        "{run1}"
+    );
     assert!(run1.contains("out of range"), "{run1}");
     assert!(run1.contains(r#""attempts":1"#));
     // 1 回目の不正な plan からは子が作られていない。

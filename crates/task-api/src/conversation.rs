@@ -120,7 +120,9 @@ pub(crate) async fn list_messages(
             if store.org_get(&id).map_err(store_problem)?.is_none() {
                 return Err(ApiProblem::org_node_not_found(&id));
             }
-            store.message_list(&id, project_id, limit).map_err(store_problem)
+            store
+                .message_list(&id, project_id, limit)
+                .map_err(store_problem)
         })
         .await?;
     Ok(json_response(StatusCode::OK, &MessageList { items }))
