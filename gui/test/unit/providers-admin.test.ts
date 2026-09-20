@@ -195,3 +195,29 @@ describe("checkProvider", () => {
     expect(mock.requests.some((r) => r.url === "/api/v1/reload")).toBe(false);
   });
 });
+
+describe("tier model form", () => {
+  it("keeps labels distinct from model IDs and preserves explicit unavailability", () => {
+    const form = new FormData();
+    form.set("routing_form", "1");
+    form.set("tier_models_enabled", "on");
+    form.set("account_pool", "on");
+    form.set("account_id", "subscription-a");
+    form.set("name_frontier", "fable");
+    form.set("reason_frontier", "unverified");
+    form.set("name_standard", "opus");
+    form.set("model_standard", "explicit-model-id");
+    const input = buildProviderPatchInput(form);
+    expect(input.account_id).toBe("subscription-a");
+    expect(input.tier_models?.frontier).toEqual({ name: "fable", model_id: null, unavailable_reason: "unverified" });
+    expect(input.tier_models?.standard?.model_id).toBe("explicit-model-id");
+    expect(input.env).toBeUndefined();
+    expect(input.credential_refs).toBeUndefined();
+  });
+  it("clears explicit tier mapping and account only through the routing form", () => {
+    const form = new FormData();
+    form.set("routing_form", "1");
+    expect(buildProviderPatchInput(form)).toMatchObject({ tier_models: {}, account_id: "" });
+    expect(buildProviderPatchInput(new FormData()).tier_models).toBeUndefined();
+  });
+});

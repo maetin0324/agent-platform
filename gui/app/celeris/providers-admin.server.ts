@@ -18,6 +18,9 @@ export interface ProviderCreateInput {
   tiers?: Tier[];
   concurrency?: number;
   model?: string;
+  account_id?: string;
+  credential_refs?: Record<string, string>;
+  tier_models?: Partial<Record<Tier, { name: string; model_id: string | null; unavailable_reason: string | null }>>;
   account_pool?: boolean;
   env?: Record<string, string>;
 }
@@ -26,6 +29,9 @@ export interface ProviderPatchInput {
   tiers?: Tier[];
   concurrency?: number;
   model?: string;
+  account_id?: string;
+  credential_refs?: Record<string, string>;
+  tier_models?: Partial<Record<Tier, { name: string; model_id: string | null; unavailable_reason: string | null }>>;
   account_pool?: boolean;
   env?: Record<string, string>;
 }
@@ -73,6 +79,28 @@ export function buildProviderCreateInput(form: FormData): ProviderCreateInput {
   if (form.get("account_pool") != null) input.account_pool = true;
   const env = parseEnvText(formString(form, "env") ?? "");
   if (env) input.env = env;
+  if (form.has("routing_form")) {
+    const credentialKey = formString(form, "credential_key");
+    const credentialRef = formString(form, "credential_ref");
+    // Only modify this credential when explicitly requested, preserving other legacy refs.
+    if (form.has("update_credential_ref") && credentialKey)
+      input.credential_refs = credentialRef ? { [credentialKey]: credentialRef } : {};
+
+    input.account_id = formString(form, "account_id") ?? "";
+    input.tier_models = form.has("tier_models_enabled")
+      ? Object.fromEntries(
+          TIERS.map((tier) => [
+            tier,
+            {
+              name: formString(form, `name_${tier}`) ?? tier,
+              model_id: formString(form, `model_${tier}`) || null,
+              unavailable_reason: formString(form, `reason_${tier}`) || null,
+            },
+          ]),
+        )
+      : {};
+    if (!input.account_id) delete input.account_id;
+  }
   return input;
 }
 
@@ -89,6 +117,27 @@ export function buildProviderPatchInput(form: FormData): ProviderPatchInput {
   else input.account_pool = false;
   const env = parseEnvText(formString(form, "env") ?? "");
   if (env) input.env = env;
+  if (form.has("routing_form")) {
+    const credentialKey = formString(form, "credential_key");
+    const credentialRef = formString(form, "credential_ref");
+    // Only modify this credential when explicitly requested, preserving other legacy refs.
+    if (form.has("update_credential_ref") && credentialKey)
+      input.credential_refs = credentialRef ? { [credentialKey]: credentialRef } : {};
+
+    input.account_id = formString(form, "account_id") ?? "";
+    input.tier_models = form.has("tier_models_enabled")
+      ? Object.fromEntries(
+          TIERS.map((tier) => [
+            tier,
+            {
+              name: formString(form, `name_${tier}`) ?? tier,
+              model_id: formString(form, `model_${tier}`) || null,
+              unavailable_reason: formString(form, `reason_${tier}`) || null,
+            },
+          ]),
+        )
+      : {};
+  }
   return input;
 }
 

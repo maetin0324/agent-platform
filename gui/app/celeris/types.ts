@@ -1418,12 +1418,16 @@ export interface GenreConfigView {
   roles: string[];
 }
 export interface ProviderConfigView {
+  account_id?: string | null;
   /**
    * ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。
    */
   account_pool?: boolean;
   adapter: string;
   concurrency: number;
+  credential_refs?: {
+    [k: string]: string;
+  };
   /**
    * `[[providers]].env` のキー名だけ。
    */
@@ -1433,7 +1437,17 @@ export interface ProviderConfigView {
    * 実効モデル（空なら `null`）。
    */
   model?: string | null;
+  tier_models?: {
+    cheap?: ModelBinding;
+    frontier?: ModelBinding;
+    standard?: ModelBinding;
+  };
   tiers: Tier[];
+}
+export interface ModelBinding {
+  model_id?: string | null;
+  name: string;
+  unavailable_reason?: string | null;
 }
 export interface ReviewerConfigView {
   adapter?: string | null;
@@ -1935,12 +1949,16 @@ export interface InFlight {
  * プロバイダ（`[[providers]]` の行 = アカウント）の稼働状況。`env` の値は含めない。
  */
 export interface ProviderLive {
+  account_id?: string | null;
   /**
    * ADR-0024 D2: `[accounts]` のプールから選ぶか。古いスナップショットには無いので既定 `false`。
    */
   account_pool?: boolean;
   adapter: string;
   concurrency: number;
+  credential_refs?: {
+    [k: string]: string;
+  };
   /**
    * `env` のキー名だけ（値は出さない）。古いスナップショットには無いので既定は空（ADR-0017 M4）。
    */
@@ -1959,6 +1977,11 @@ export interface ProviderLive {
    * 実効モデル（空なら `None`）。
    */
   model?: string | null;
+  tier_models?: {
+    cheap?: ModelBinding;
+    frontier?: ModelBinding;
+    standard?: ModelBinding;
+  };
   tiers: Tier[];
 }
 /**
@@ -3565,12 +3588,16 @@ export interface ProviderCheckResponse {
  * `POST /api/v1/providers` と `PATCH /api/v1/providers/{id}` の応答（ADR-0017）。
  */
 export interface ProviderConfigView1 {
+  account_id?: string | null;
   /**
    * ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。
    */
   account_pool?: boolean;
   adapter: string;
   concurrency: number;
+  credential_refs?: {
+    [k: string]: string;
+  };
   /**
    * `[[providers]].env` のキー名だけ。
    */
@@ -3580,6 +3607,11 @@ export interface ProviderConfigView1 {
    * 実効モデル（空なら `null`）。
    */
   model?: string | null;
+  tier_models?: {
+    cheap?: ModelBinding;
+    frontier?: ModelBinding;
+    standard?: ModelBinding;
+  };
   tiers: Tier[];
 }
 /**
@@ -3589,6 +3621,7 @@ export interface Providers {
   items: ProviderView[];
 }
 export interface ProviderView {
+  account_id?: string | null;
   /**
    * ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。
    */
@@ -3599,6 +3632,9 @@ export interface ProviderView {
    * スナップショットが無い、または cooldown 中でなければ `null`。
    */
   cooldown?: CooldownView | null;
+  credential_refs?: {
+    [k: string]: string;
+  };
   /**
    * `env` のキー名だけ（値は出さない）。
    */
@@ -3615,6 +3651,11 @@ export interface ProviderView {
   last_check?: ProviderCheckView | null;
   model?: string | null;
   stats: ProviderStats;
+  tier_models?: {
+    cheap?: ModelBinding;
+    frontier?: ModelBinding;
+    standard?: ModelBinding;
+  };
   tiers: Tier[];
 }
 /**

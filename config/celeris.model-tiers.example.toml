@@ -1,0 +1,35 @@
+# Desired names are labels, not verified executable model IDs.
+# Set model_id and REMOVE unavailable_reason only after verifying access.
+# Credentials live in Accounts; both providers can reuse their adapter's pool.
+[accounts]
+claude_dir = "claude-accounts"
+codex_dir = "codex-accounts"
+
+[[providers]]
+id = "claude"
+adapter = "claude-code"
+account_pool = true
+# account_id = "subscription-a" # optional; omitted means automatic pool selection
+[providers.tier_models.frontier]
+name = "fable"
+unavailable_reason = "実行モデルID未確認"
+[providers.tier_models.standard]
+name = "opus"
+unavailable_reason = "実行モデルID未確認"
+[providers.tier_models.cheap]
+name = "sonnet"
+unavailable_reason = "実行モデルID未確認"
+
+[[providers]]
+id = "gpt"
+adapter = "codex"
+account_pool = true
+[providers.tier_models.frontier]
+name = "astra"
+unavailable_reason = "実行モデルID未確認"
+[providers.tier_models.standard]
+name = "sol"
+unavailable_reason = "実行モデルID未確認"
+[providers.tier_models.cheap]
+name = "luna"
+unavailable_reason = "実行モデルID未確認"

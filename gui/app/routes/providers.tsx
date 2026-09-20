@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher } from "react-router";
 import type { ProviderActionResult } from "~/celeris/action-types";
 import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
@@ -17,15 +18,7 @@ import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import {
-  checkboxClass,
-  chipLabelClass,
-  hintClass,
-  inputClass,
-  labelClass,
-  selectClass,
-  textareaClass,
-} from "~/components/ui/form";
+import { checkboxClass, chipLabelClass, hintClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
@@ -109,9 +102,10 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
   // （fetcher の状態は revalidate() の影響を受けない。ADR-GUI-0012 D2）。
   const fetcher = useFetcher<ProviderActionResult>();
   const submitting = fetcher.state !== "idle";
+  const [adapter, setAdapter] = useState("codex");
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-8 [&_button]:min-h-11 [&_summary]:min-h-11">
       <PageHeader
         icon="cpu"
         title={
@@ -120,7 +114,7 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="接続先プロバイダの稼働状況・累積 usage・直近の疎通確認をまとめて確認します。追加・編集・削除は管理系 API（トークン必須）を使います。"
+        description="Claude／GPT の階層と実行モデルを設定します。ログイン・認証情報はアカウント画面で管理し、ここでは参照するアカウントを選びます。"
       />
 
       <ProviderActionFlash result={fetcher.data} />
@@ -132,7 +126,7 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
         {providers.items.length === 0 ? (
           <EmptyState icon="cpu" title="プロバイダがありません" />
         ) : (
-          <div className="grid gap-4 xl:grid-cols-2">
+          <div className="grid items-start gap-4 xl:grid-cols-2">
             {providers.items.map((item) => (
               <ProviderCard key={item.id} item={item} fetchedAt={fetchedAt} fetcher={fetcher} submitting={submitting} />
             ))}
@@ -164,10 +158,16 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
                   <label htmlFor="add-adapter" className={labelClass}>
                     adapter
                   </label>
-                  <select id="add-adapter" name="adapter" defaultValue="fake" className={cnField(selectClass)}>
+                  <select
+                    id="add-adapter"
+                    name="adapter"
+                    value={adapter}
+                    onChange={(e) => setAdapter(e.target.value)}
+                    className={cnField(selectClass)}
+                  >
                     {ADAPTER_OPTIONS.map((a) => (
                       <option key={a} value={a}>
-                        {a}
+                        {a === "codex" ? "GPT (Codex)" : a === "claude-code" ? "Claude" : a}
                       </option>
                     ))}
                   </select>
@@ -186,7 +186,7 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
                 </div>
                 <div className="col-span-2 sm:col-span-3">
                   <label htmlFor="add-model" className={labelClass}>
-                    model
+                    共通モデル（階層別設定が無効な場合）
                   </label>
                   <input id="add-model" name="model" type="text" className={cnField(inputClass)} />
                 </div>
@@ -208,13 +208,8 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
                     のそのアダプタのプールから残量でアカウントを選びます）
                   </label>
                 </div>
-                <div className="col-span-2 sm:col-span-3">
-                  <label htmlFor="add-env" className={labelClass}>
-                    env（1 行に 1 つ、KEY=VALUE）
-                  </label>
-                  <textarea id="add-env" name="env" rows={3} className={cnField(textareaClass, "w-full")} />
-                </div>
               </div>
+              <ModelRoutingFields key={adapter} adapter={adapter} prefix="add" />
               <Button type="submit" variant="primary" disabled={submitting} data-testid="provider-add-submit">
                 <Icon name="plus" />
                 追加
@@ -228,7 +223,7 @@ export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
 }
 
 function cnField(base: string, extra?: string): string {
-  return extra ? `${base} mt-1.5 ${extra}` : `${base} mt-1.5 w-full`;
+  return extra ? `${base} mt-1.5 min-h-11 min-w-0 ${extra}` : `${base} mt-1.5 min-h-11 min-w-0 w-full`;
 }
 
 function ProviderCard({
@@ -245,12 +240,15 @@ function ProviderCard({
   const tone: Tone = item.cooldown ? "warning" : "success";
 
   return (
-    <Card data-testid="provider-row" data-provider-id={item.id} className="hover:shadow-md">
+    <Card data-testid="provider-row" data-provider-id={item.id} className="min-w-0 hover:shadow-md">
       <CardHeader
+        className="flex-wrap [&>div:last-child]:w-full sm:[&>div:last-child]:w-auto"
         icon="cpu"
         tone={tone}
         title={<Mono className="text-sm font-semibold text-fg">{item.id}</Mono>}
-        description={item.adapter}
+        description={
+          item.adapter === "codex" ? "GPT (Codex)" : item.adapter === "claude-code" ? "Claude" : item.adapter
+        }
         actions={
           <>
             {item.account_pool && (
@@ -259,7 +257,7 @@ function ProviderCard({
               </Badge>
             )}
             <Badge tone={tone} dot pulse={!!item.cooldown}>
-              {item.cooldown ? "cooldown" : "利用可"}
+              {item.cooldown ? "cooldown" : "稼働枠あり"}
             </Badge>
           </>
         }
@@ -276,7 +274,29 @@ function ProviderCard({
             </div>
           </DataItem>
           <DataItem label="concurrency">{item.concurrency}</DataItem>
-          <DataItem label="model">{item.model ?? "-"}</DataItem>
+          <DataItem label="旧設定の共通モデル">{item.model ?? "-"}</DataItem>
+          <DataItem label="認証アカウント" wide>
+            {item.account_pool
+              ? `${item.adapter} / ${item.account_id || "プールから自動選択"}`
+              : "既存の認証設定を保持"}
+          </DataItem>
+          <DataItem label="階層 → 実行モデル" wide>
+            <div className="space-y-2 break-all">
+              {TIER_OPTIONS.map((tier) => {
+                const binding = item.tier_models?.[tier];
+                return (
+                  <p key={tier}>
+                    {tier}:{" "}
+                    {binding
+                      ? `${binding.name} → ${binding.unavailable_reason || binding.model_id || "未対応: 実行モデルID未設定"}`
+                      : Object.keys(item.tier_models ?? {}).length > 0
+                        ? "未対応: 階層の対応なし"
+                        : `旧設定 (${item.model || "アダプター既定"})`}
+                  </p>
+                );
+              })}
+            </div>
+          </DataItem>
           <DataItem label="in_use">{item.in_use == null ? "-" : item.in_use}</DataItem>
           <DataItem label="env_keys（キー名のみ）" wide>
             {item.env_keys.length > 0 ? (
@@ -350,7 +370,7 @@ function ProviderCard({
             </Button>
           </fetcher.Form>
 
-          <details className="group">
+          <details className="group min-w-0 w-full">
             <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-sm text-fg shadow-xs hover:bg-surface-2">
               <Icon name="settings" className="size-4" />
               編集
@@ -374,7 +394,7 @@ function ProviderCard({
                 </div>
                 <div className="col-span-2">
                   <label className={labelClass} htmlFor={`edit-model-${item.id}`}>
-                    model
+                    共通モデル（階層別設定が無効な場合）
                   </label>
                   <input
                     id={`edit-model-${item.id}`}
@@ -414,20 +434,8 @@ function ProviderCard({
                     のときだけ意味があります。そのアダプタのプールから選びます）
                   </label>
                 </div>
-                <div className="col-span-2 sm:col-span-3">
-                  <label className={labelClass} htmlFor={`edit-env-${item.id}`}>
-                    env（1 行に 1 つ、KEY=VALUE。空欄なら変更しません）
-                  </label>
-                  <textarea
-                    id={`edit-env-${item.id}`}
-                    name="env"
-                    rows={2}
-                    placeholder="空欄なら変更しない"
-                    className={cnField(textareaClass, "w-full")}
-                  />
-                  <p className={hintClass}>値は表示されません（一度設定したら書き直すまで見えません）。</p>
-                </div>
               </div>
+              <ModelRoutingFields adapter={item.adapter} prefix={item.id} item={item} />
               <Button type="submit" variant="primary" size="sm" disabled={submitting} data-testid="provider-edit">
                 <Icon name="check" />
                 保存
@@ -486,5 +494,92 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       <h1 className="text-xl font-semibold">エラー</h1>
       <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
     </main>
+  );
+}
+
+function ModelRoutingFields({ adapter, prefix, item }: { adapter: string; prefix: string; item?: ProviderView }) {
+  const [enabled, setEnabled] = useState(item ? Object.keys(item.tier_models ?? {}).length > 0 : true);
+  if (adapter !== "codex" && adapter !== "claude-code") return null;
+  const names = adapter === "codex" ? ["astra", "sol", "luna"] : ["fable", "opus", "sonnet"];
+  return (
+    <fieldset className="min-w-0 space-y-3 border-t border-border pt-3">
+      <legend className={labelClass}>{adapter === "codex" ? "GPT" : "Claude"} のモデル階層</legend>
+      <input type="hidden" name="routing_form" value="1" />
+      <label className={chipLabelClass}>
+        <input
+          type="checkbox"
+          name="tier_models_enabled"
+          checked={enabled}
+          onChange={(e) => setEnabled(e.target.checked)}
+          className={checkboxClass}
+        />
+        階層別モデルを使う
+      </label>
+      <p className={hintClass}>
+        名称は希望名です。実行IDは利用可能なものを明示してください。未設定・未対応の階層では実行を停止します。無効にすると従来の共通モデル設定を使います。
+      </p>
+      {enabled &&
+        TIER_OPTIONS.map((tier, i) => (
+          <div key={tier} className="min-w-0 space-y-2 rounded-lg border border-border p-3">
+            <strong>{tier}</strong>
+            <div className="grid min-w-0 grid-cols-1 gap-3 md:grid-cols-2">
+              <label className={labelClass} htmlFor={`${prefix}-name-${tier}`}>
+                名称
+                <input
+                  id={`${prefix}-name-${tier}`}
+                  name={`name_${tier}`}
+                  defaultValue={item?.tier_models?.[tier]?.name ?? names[i]}
+                  className={cnField(inputClass)}
+                />
+              </label>
+              <label className={labelClass} htmlFor={`${prefix}-model-${tier}`}>
+                実行モデルID
+                <input
+                  id={`${prefix}-model-${tier}`}
+                  name={`model_${tier}`}
+                  defaultValue={item?.tier_models?.[tier]?.model_id ?? ""}
+                  className={cnField(inputClass)}
+                />
+              </label>
+            </div>
+            <label className={labelClass} htmlFor={`${prefix}-reason-${tier}`}>
+              未対応の理由（指定すると実行停止）
+              <input
+                id={`${prefix}-reason-${tier}`}
+                name={`reason_${tier}`}
+                defaultValue={item?.tier_models?.[tier]?.unavailable_reason ?? ""}
+                className={cnField(inputClass)}
+              />
+            </label>
+          </div>
+        ))}
+      <input type="hidden" name="credential_key" value={adapter === "codex" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"} />
+      <label className={chipLabelClass}>
+        <input type="checkbox" name="update_credential_ref" className={checkboxClass} />
+        APIキーの参照を更新する（他のキー参照を置き換え）
+      </label>
+      <label className={labelClass} htmlFor={`${prefix}-credential`}>
+        APIキーID（アカウント画面で管理）
+        <input
+          id={`${prefix}-credential`}
+          name="credential_ref"
+          defaultValue={item?.credential_refs?.[adapter === "codex" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"] ?? ""}
+          className={cnField(inputClass)}
+        />
+      </label>
+      <label className={labelClass} htmlFor={`${prefix}-account`}>
+        認証アカウントID（空欄はプール自動選択）
+        <input
+          id={`${prefix}-account`}
+          name="account_id"
+          defaultValue={item?.account_id ?? ""}
+          className={cnField(inputClass)}
+        />
+      </label>
+      <p className={hintClass}>
+        アカウント画面の同じ種類のIDを参照します。account_pool
+        を有効にしてください。認証情報はこの画面には入力しません。
+      </p>
+    </fieldset>
   );
 }

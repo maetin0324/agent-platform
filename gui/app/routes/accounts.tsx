@@ -198,7 +198,7 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="account_pool = true のプロバイダが使う claude-code / codex アカウントのプール。ログイン・残量の確認・削除をここで行います。"
+        description="Claude／GPT のログイン・サブスクリプション・APIキーを管理します。実行モデルと階層はプロバイダ画面で設定し、この画面のアカウントIDまたはAPIキーIDを参照します。"
       />
 
       <p className="text-sm text-fg-muted">
@@ -230,8 +230,14 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
               const items = accounts.items.filter((item) => accountAdapter(item) === adapter);
               return (
                 <section key={adapter} aria-labelledby={`accounts-heading-${adapter}`} className="space-y-4">
-                  <SectionTitle icon="users" id={`accounts-heading-${adapter}`} count={items.length}>
-                    <Badge tone={ADAPTER_TONE[adapter]}>{adapter}</Badge> プール（{root}）
+                  <SectionTitle
+                    icon="users"
+                    id={`accounts-heading-${adapter}`}
+                    count={items.length}
+                    className="flex-wrap"
+                  >
+                    <Badge tone={ADAPTER_TONE[adapter]}>{adapter}</Badge>
+                    <span className="min-w-0 basis-full break-all sm:basis-auto">プール（{root}）</span>
                   </SectionTitle>
 
                   {items.length === 0 ? (
@@ -362,13 +368,14 @@ function AccountCard({
       data-testid="account-card"
       data-account-id={item.id}
       data-account-adapter={adapter}
-      className="hover:shadow-md"
+      className="min-w-0 hover:shadow-md"
     >
       <CardHeader
+        className="flex-wrap [&>div:last-child]:w-full sm:[&>div:last-child]:w-auto"
         icon="user"
         tone={tone}
-        title={<Mono className="text-sm font-semibold text-fg">{item.id}</Mono>}
-        description={item.dir}
+        title={<Mono className="break-all text-sm font-semibold text-fg">{item.id}</Mono>}
+        description={<span className="break-all">{item.dir}</span>}
         actions={
           <>
             <Badge tone={ADAPTER_TONE[adapter]} data-testid="account-adapter">
@@ -785,11 +792,11 @@ function SecretCard({
 }) {
   const isSet = item.updated_at != null;
   return (
-    <Card data-testid="secret-card" data-secret-id={item.id} className="hover:shadow-md">
+    <Card data-testid="secret-card" data-secret-id={item.id} className="min-w-0 hover:shadow-md">
       <CardHeader
         icon="lock"
         tone={isSet ? "success" : "warning"}
-        title={<Mono className="text-sm font-semibold text-fg">{item.id}</Mono>}
+        title={<Mono className="break-all text-sm font-semibold text-fg">{item.id}</Mono>}
         actions={
           isSet ? (
             <Badge tone="success" dot>
