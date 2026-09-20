@@ -8596,3 +8596,9 @@ scripts/selfdeploy/migrate-to-celeris.sh --rollback
 - 教訓（P-58-d）: 移行の脚本は「事前検査 → 何も作らずに移す → 作る」の順を守り、ログは行き先側に書き、途中で止まっても再実行できる
   こと（今回の 3 つの修正はすべてそれ）。一度の本番停止で 3 回直すのは避けたい: 次からは偽の `OLD_HOME` に本番の写しを作って
   **通しで 1 回**リハーサルする（`--dry-run` は mv を実行しないので、この種の順序の穴は見えない）。
+
+### Phase 58 実機: 改名後の初のライブ昇格（2026-09-20 00:47 UTC）
+
+- `release.sh main`（環境変数なし。新しい既定のパス）→ `08e5e4a52fb5`。`verify.sh` → 検査 1〜6 すべて true（N-1: 旧 `926e19c0b408` の `bin/celeris`）→ live_ok。
+- `promote.sh 08e5e4a52fb5`（mode=live）: 2 秒で新が active、GUI 9 秒で切替、旧 `celeris@926e19c0b408` は drain して exit 0。
+  `current -> 08e5e4a52fb5`、`previous -> 926e19c0b408`。ADR-0045 §3 の受け入れ条件 4 をすべて満たした。
