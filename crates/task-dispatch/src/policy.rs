@@ -110,7 +110,15 @@ impl StaticPolicy {
     }
 
     fn matches(p: &ProviderSpec, hint: &WorkerHint) -> bool {
-        hint.adapter.as_deref().is_none_or(|a| p.adapter == a) && p.tiers.contains(&hint.tier)
+        let compatible = match hint.adapter.as_deref() {
+            Some(adapter) => p.adapter == adapter,
+            // 専用契約のアダプタへ対話・計画・通常の作業を渡さない（ADR-0049）。
+            None => !matches!(
+                p.adapter.as_str(),
+                "paperqa" | "local-deep-research" | "langmem"
+            ),
+        };
+        compatible && p.tiers.contains(&hint.tier)
     }
 
     fn cooling_down(&self, p: &ProviderSpec, now: Instant) -> bool {
@@ -219,6 +227,41 @@ mod tests {
             tier,
             adapter: adapter.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn unpinned_agent_work_never_uses_specialized_harnesses() {
+        let policy = StaticPolicy::new(
+            vec![
+                spec("research", "paperqa", &[Tier::Standard], 2),
+                spec("web", "local-deep-research", &[Tier::Standard], 2),
+                spec("memory", "langmem", &[Tier::Standard], 2),
+                spec("agent", "codex", &[Tier::Standard], 2),
+            ],
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            policy
+                .pick(&hint(Tier::Standard, None), Instant::now())
+                .unwrap()
+                .1,
+            "agent"
+        );
+        assert_eq!(
+            policy
+                .pick(&hint(Tier::Standard, Some("paperqa")), Instant::now())
+                .unwrap()
+                .1,
+            "research"
+        );
+        assert_eq!(
+            policy.select(
+                &hint(Tier::Standard, None),
+                Instant::now(),
+                &["agent".into()].into()
+            ),
+            Selection::Busy
+        );
     }
 
     #[test]

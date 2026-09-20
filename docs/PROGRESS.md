@@ -9461,3 +9461,59 @@ environment/hosts/home-dev.md (task 01M2ZFBS5JSYSH6XAF73HG8M4K)`（front matter 
 
 未解決: 知識整理 run 自体も通常の完了報告を作る（P-62-g）。トンネル（ローカル Qwen）が落ちている間は知識整理 run が失敗する —
 失敗の扱い（再試行の間隔・bad_news に数えない）は実際に落ちたときに見る。
+
+## Phase 63 — 供給元をまたぐ選択と Codex の残量取得（ADR-0049。2026-09-20）
+
+人の依頼: アカウント・プロバイダが Claude Code 前提になり、Codex の残量が見えず、Claude の残量が無いと CoS も使えない問題を修正する。
+
+### 原因と変更
+
+- 実際の設定を秘密の値を出さずに確認したところ、`conversation` / `coding` / `data-analysis` / `writing` が
+  `adapter = "claude-code"` に固定されていた。Codex プールは登録済みでも候補にならない。
+  汎用ハーネスは adapter 省略で供給元を選ぶ。明示固定は維持するので、設定移行用に
+  `scripts/portable-providers.py` を追加した。既知の汎用ハーネス・旧 role の固定だけを外し、他の設定を保持する。
+  既定は変更点の名前だけを出す dry-run、`--apply` は 0600 のバックアップを作って原子的に差し替える。
+- `StaticPolicy` は adapter 未指定の仕事を PaperQA / Local Deep Research / LangMem に流さない。
+  `Dispatcher::select_provider` は使用可能なプールをアダプタ横断で残量スコア比較し、同点は設定順。
+  プールが利用不能なら非プールへフォールバックする。tier と明示 adapter は維持する。
+- Codex のアカウント確認は `exec` の token_count 待ちから、app-server の
+  initialize → initialized → account/read → account/rateLimits/read に変更。推論しない。
+  確認用プロセスは成功・失敗・タイムアウト時に終了して wait する。ログイン取消も wait して回収する。
+- Codex の `resetsAt` / `resets_at` は絶対 Unix 秒。従来の「現在時刻へ加算」を修正。
+  窓の期間からリセット時刻を推定する処理を削除し、不正値・欠損は不明のままにした。
+  `rateLimitsByLimitId.codex` を優先し、他 bucket は混ぜない。
+- active デーモンから Codex プールを 5 分ごとに確認する。未ログイン・ログイン中・使用中は除外。
+  確認の認証失敗・制限は選択用 cooldown に反映し、成功した再確認で解除する。
+  通信失敗では前回の観測を保持する。Codex の正常応答で利用枠が無い場合は古い利用枠を消す。
+- GUI は短期枠 / 長期枠とし、使用率と残り割合を併記。API キー認証の取得対象外も説明する。
+  API・DB スキーマの変更は無い。
+- `docs/providers.md` に設定、選択規則、残量の意味、移行と再起動の手順を記載。
+
+### 検証
+
+- `cargo test --workspace --no-fail-fast`: **最終実行 exit 0**。
+  初回は sandbox のローカル HTTP bind が EPERM で失敗し、許可を得て制限外で再実行した。
+  既存 Codex E2E のスタブを app-server と実測リセット時刻に合わせ、最初の仕事の前に残量が API に届くことも確認した。
+  （途中の再実行で同じログファイルを共有したため、ログ末尾に前回の失敗サマリが残ったが、最終プロセスの exit は 0。）
+- 新しい回帰テスト: 異なるアダプタのプールの残量比較、同点の設定順、Claude 枯渇時の Codex 選択、
+  全プール利用不能時の ACP フォールバック、明示固定、認証復帰、専用ハーネスの除外、定期確認の間隔・ログイン中除外。
+- Codex 確認のスタブ: handshake と要求順、通知の混在、絶対リセット時刻、未ログイン・API key、
+  認証失敗・制限・不正 JSON・EOF・timeout。秘密を応答詳細へ転送しない。
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0。
+- GUI: `pnpm lint`、`pnpm typecheck`、`pnpm test`（**838 passed**）、`pnpm build`: exit 0。
+  GUI テストもローカル HTTP bind のため許可を得て制限外で実行した。
+- `python3 scripts/test_portable_providers.py`: **3 passed**（対象以外の保持、冪等性、複数行文字列を壊す編集の拒否）。
+- `python3 scripts/portable-providers.py ~/.config/celeris/config.toml`: dry-run で上記 4 ハーネスだけが対象になることを確認。
+- `git diff --check`: exit 0。
+
+### 実機確認と反映状況
+
+- 許可を得て `target/debug/examples/codex_usage <登録済み CODEX_HOME>` を実行（診断用 example を追加）。
+  **exit 0 / result Ok / detail ok**。推論を起こさず、長期枠 `utilization = 0.03`、
+  `resets_at = 1790517670`、`observed_at = 1789921794` を取得した。
+  短期枠は有効な観測が返らず、値を補わず省略した。
+- **本番設定の移行とデーモン・GUI のデプロイは未実施**。稼働中の設定・DB・リリースを変更していない。
+  新しい版を用意し、移行ツールの `--apply` とデーモン再起動が必要。
+  既存タスクに保存された adapter 固定は書き換えない。移行後の新しい依頼から自動選択になる。
+- 任意のモデルを他社専用ハーネスへ注入する全面的な供給層の置換は行っていない。
+  この変更は、既存の共通ワーカープロトコルを使う汎用ハーネスの供給元選択と残量観測を修正するもの。

@@ -1052,6 +1052,7 @@ async fn tick_loop(
     // ADR-0024 D5〜D7: アカウントの確認・ログイン中継も同様に、spawn した先の結果をここへ戻す。
     let (account_tx, mut account_rx) =
         tokio::sync::mpsc::channel::<accounts_admin::AccountAdminEvent>(16);
+    let mut codex_usage_checks = accounts_admin::UsageChecks::default();
     let login_sessions = accounts_admin::new_sessions();
     // ADR-0025 D5: codex のログイン中継（別の流儀なので別のマップ）。
     let codex_login_sessions = accounts_admin::new_codex_sessions();
@@ -1127,6 +1128,7 @@ async fn tick_loop(
         // ADR-0040 D3 / D4: tick の裏方（報告の圧縮・途中目標レビュー・通知）を動かすのは `active` だけ。
         // `standby` はまだ自分の番ではなく、`draining` は手元の run の面倒だけ見る。`verify` は何もしない。
         if role == InstanceRole::Active {
+            codex_usage_checks.poll(config, dispatcher, account_tx.clone());
             // ADR-0024 D7 / B1: 10 分を超えたログイン中継を打ち切る（tick をブロックしない軽い処理）。
             // `expire_stale_logins` はチャネルを使わない（このループ自身が drain するチャネルへ `await` で
             // 送るとデッドロックしうるため）。打ち切った id は戻り値で受け取り、ここで直接反映する。

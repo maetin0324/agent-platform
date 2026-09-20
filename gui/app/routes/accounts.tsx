@@ -29,7 +29,7 @@ import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/accounts";
 
 /**
- * `/accounts`（Claude アカウントのプール、ADR-GUI-0012 D3、docs/celeris-api-v1.md §3.29）。
+ * `/accounts`（Claude Code / Codex アカウントのプール、ADR-GUI-0012 D3、docs/celeris-api-v1.md §3.29）。
  * `GET /accounts` をそのまま描く。値の再計算（スコアやリセット判定）はしない。
  * `observed_at` の相対時刻表示・cooldown/resets_at の残り時間だけは表示のための変換として行う
  * （`/providers` の cooldown 残り時間と同じ扱い、docs/adr/0007 D3）。
@@ -141,8 +141,8 @@ const EXCLUDED_REASON_LABEL: Record<string, string> = {
   not_logged_in: "未ログイン",
   at_capacity: "上限に達しています",
   cooldown: "cooldown 中",
-  five_hour_exhausted: "5 時間枠を使い切りました",
-  seven_day_exhausted: "週次枠を使い切りました",
+  five_hour_exhausted: "短期枠を使い切りました",
+  seven_day_exhausted: "長期枠を使い切りました",
   rejected: "拒否されました",
 };
 
@@ -201,6 +201,10 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
         description="account_pool = true のプロバイダが使う claude-code / codex アカウントのプール。ログイン・残量の確認・削除をここで行います。"
       />
 
+      <p className="text-sm text-fg-muted">
+        Codex の利用枠は推論を使わず定期更新します。「確認」で今すぐ更新できます。API キー認証には ChatGPT
+        の利用枠はありません。
+      </p>
       <AccountActionFlash outcome={fetcher.data} />
 
       {(() => {
@@ -378,13 +382,13 @@ function AccountCard({
       />
       <CardBody className="space-y-4">
         <UsageBar
-          label="5 時間枠"
+          label="短期枠"
           testId="account-usage-five-hour"
           window={item.usage?.five_hour ?? null}
           fetchedAt={fetchedAt}
         />
         <UsageBar
-          label="週次枠"
+          label="長期枠"
           testId="account-usage-seven-day"
           window={item.usage?.seven_day ?? null}
           fetchedAt={fetchedAt}
@@ -643,7 +647,9 @@ function UsageBar({
     <div data-testid={testId}>
       <div className="flex items-center justify-between text-xs text-fg-muted">
         <span>{label}</span>
-        <span className="tabular-nums">{pct}%</span>
+        <span className="tabular-nums">
+          使用 {pct}% / 残り {Math.max(0, 100 - pct)}%
+        </span>
       </div>
       <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-surface-2">
         <div className={`h-full rounded-full ${TONE_SOLID_BG[tone]}`} style={{ width: `${Math.min(100, pct)}%` }} />

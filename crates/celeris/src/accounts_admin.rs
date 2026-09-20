@@ -243,6 +243,47 @@ pub async fn remove_account(
     Ok(())
 }
 
+/// Codex の確認は推論を消費しないので、active の tick から定期的に更新する。
+#[derive(Default)]
+pub struct UsageChecks {
+    last: std::collections::HashMap<String, std::time::Instant>,
+}
+
+impl UsageChecks {
+    pub fn poll(
+        &mut self,
+        config: &Config,
+        dispatcher: &task_dispatch::Dispatcher,
+        events: mpsc::Sender<AccountAdminEvent>,
+    ) {
+        let Some(root) = config.accounts.as_ref().and_then(|a| a.codex_dir.as_ref()) else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        for account in task_dispatch::accounts::scan_accounts(root, AccountAdapter::Codex) {
+            if !account.logged_in
+                || dispatcher.account_in_use(AccountAdapter::Codex, &account.id) > 0
+                || dispatcher.account_login_pending(AccountAdapter::Codex, &account.id)
+                || self
+                    .last
+                    .get(&account.id)
+                    .is_some_and(|last| now.duration_since(*last) < Duration::from_secs(300))
+            {
+                continue;
+            }
+            self.last.insert(account.id.clone(), now);
+            let (reply, _rx) = oneshot::channel();
+            spawn_check(
+                config,
+                AccountAdapter::Codex,
+                account.id,
+                events.clone(),
+                reply,
+            );
+        }
+    }
+}
+
 /// D6 / ADR-0025 D4: `POST /accounts/{id}/check`。設定は呼び出しごとに読み直さない（`config` は tick_loop が
 /// 持つ最新の写し）。claude-code は `[accounts].check_model` を使い、codex はモデルを指定しない。
 pub fn spawn_check(
@@ -629,7 +670,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let acct = tmp.path().join("codex-accounts");
         std::fs::create_dir_all(acct.join("a")).unwrap();
-        let command = stub_command(tmp.path(), r#"echo '{"type":"turn.completed"}'"#);
+        let command = stub_command(
+            tmp.path(),
+            r#"read -r init
+echo '{"id":1,"result":{}}'
+read -r initialized
+read -r account
+echo '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+read -r limits
+echo '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300,"resetsAt":2000000000}}}}'"#,
+        );
         let config = config_with_codex_accounts(acct, command);
         let (tx, mut rx) = mpsc::channel(4);
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -666,7 +716,8 @@ mod tests {
         std::fs::create_dir_all(acct.join("a")).unwrap();
         let command = stub_command(
             tmp.path(),
-            "echo 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header'",
+            r#"read -r init
+echo '{"id":1,"error":{"message":"401 Unauthorized"}}'"#,
         );
         let config = config_with_codex_accounts(acct, command);
         let (tx, _rx) = mpsc::channel(4);
@@ -913,6 +964,57 @@ sleep 30
         let expired = expire_stale_logins(&sessions, Duration::from_millis(10)).await;
         assert_eq!(expired, vec!["a".to_string()]);
         assert!(!sessions.lock().await.contains_key("a"));
+    }
+
+    #[tokio::test]
+    async fn usage_poll_skips_logged_out_and_logging_in_accounts_and_throttles_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = tmp.path().join("codex-accounts");
+        for id in ["a", "logged-out"] {
+            std::fs::create_dir_all(acct.join(id)).unwrap();
+        }
+        std::fs::write(acct.join("a/auth.json"), "{}").unwrap();
+        let command = stub_command(
+            tmp.path(),
+            r#"read -r init
+echo '{"id":1,"result":{}}'
+read -r initialized
+read -r account
+echo '{"id":2,"result":{"account":{"type":"apiKey"}}}'"#,
+        );
+        let mut config = config_with_codex_accounts(acct, command);
+        config.db = tmp.path().join("db");
+        config.workspace_root = tmp.path().join("ws");
+        let mut dispatcher = crate::build_dispatcher(&config, Default::default()).unwrap();
+        let mut checks = UsageChecks::default();
+        let (tx, mut rx) = mpsc::channel(8);
+        dispatcher.set_account_login_pending(AccountAdapter::Codex, "a", true);
+        checks.poll(&config, &dispatcher, tx.clone());
+        assert!(checks.last.is_empty());
+        dispatcher.set_account_login_pending(AccountAdapter::Codex, "a", false);
+        checks.poll(&config, &dispatcher, tx.clone());
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, AccountAdminEvent::Checked { adapter: AccountAdapter::Codex, result, .. } if result == "ok")
+        );
+        assert_eq!(checks.last.len(), 1);
+        assert!(checks.last.contains_key("a"));
+        checks.poll(&config, &dispatcher, tx.clone());
+        assert!(rx.try_recv().is_err());
+        checks.last.insert(
+            "a".into(),
+            std::time::Instant::now() - Duration::from_secs(301),
+        );
+        checks.poll(&config, &dispatcher, tx);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     // ---- S2+S8: remove_account ----

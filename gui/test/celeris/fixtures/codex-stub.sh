@@ -1,16 +1,28 @@
 #!/bin/sh
 # `codex` CLI の代わりに `[adapters.codex] command` へ置くスタブ（e2e/g9、scripts/celeris.sh fixture accounts）。
-# celeris 側 crates/task-worker/src/codex_account.rs の実装・テスト（login_stub / check_account_codex_ok_path_records_observation）
+# celeris 側 crates/task-worker/src/codex_account.rs の実装・テスト（login_stub / check_account_codex_reads_limits_without_inference）
 # と同じ形の出力をする:
 #   (a) `codex login --device-auth`: ANSI で色付けした認可 URL の行と `ABCD-EFGHI` 形式の一回限りのコードを出し、
 #       標準入力は使わず、約 1 秒後に $CODEX_HOME/auth.json を書いて exit 0（ADR-0025 D5）。
-#   (b) それ以外（`exec --json ...`。疎通確認・アカウント確認の実行）: `token_count`（primary 30% / 300 分、
+#   (b) `exec --json ...`（プロバイダの疎通確認）: `token_count`（primary 30% / 300 分、
 #       secondary 12% / 10080 分）を 1 行、続けて `turn.completed` を 1 行出す。
 if [ "$1" = "login" ] && [ "$2" = "--device-auth" ]; then
   printf '\033[1mVisit\033[0m \033[36mhttps://auth.openai.com/codex/device\033[0m and enter the code below:\n'
   printf '\033[32mABCD-EFGHI\033[0m\n'
   sleep 1
   printf '%s' '{}' > "$CODEX_HOME/auth.json"
+  exit 0
+fi
+
+# 残量の確認は推論ではなく app-server（ADR-0049）。
+if [ "$1" = "app-server" ]; then
+  read -r init
+  echo '{"id":1,"result":{}}'
+  read -r initialized
+  read -r account
+  echo '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+  read -r limits
+  echo '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":30,"windowDurationMins":300,"resetsAt":2000000000},"secondary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":2000600000}}}}'
   exit 0
 fi
 

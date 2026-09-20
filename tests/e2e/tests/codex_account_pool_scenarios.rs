@@ -111,8 +111,8 @@ impl Env {
         }
     }
 
-    /// スタブの `codex`。`exec --json --skip-git-repo-check "..."`（check）と `exec --json <prompt>`（run）の
-    /// どちらも `$CODEX_HOME/util`（無ければ 0）の値で `token_count` の `rate_limits` を出す。`login --device-auth`
+    /// スタブの `codex`。app-server（確認）と exec（run）は `$CODEX_HOME/util` の残量を返す。
+    /// app-server は実際の JSON-RPC handshake に応じる。`login --device-auth`
     /// は URL と一回限りのコードを出し、標準入力は読まずに完了後 `auth.json` を書いて exit 0 する。
     fn write_codex_stub(&self) -> PathBuf {
         let path = self.root.join("codex-stub.sh");
@@ -138,7 +138,18 @@ if [ -n "${CODEX_HOME:-}" ] && [ -f "${CODEX_HOME}/util" ]; then
   util=$(cat "${CODEX_HOME}/util")
 fi
 percent=$(awk "BEGIN { printf \"%.1f\", $util * 100 }")
-printf '{"type":"token_count","rate_limits":{"primary":{"used_percent":%s,"window_minutes":300},"secondary":{"used_percent":10.0,"window_minutes":10080}}}\n' "$percent"
+if [ "${1:-}" = "app-server" ]; then
+  read -r init
+  echo '{"id":1,"result":{}}'
+  read -r initialized
+  read -r account
+  echo '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+  read -r limits
+  reset=$(date +%s)
+  printf '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":%s,"windowDurationMins":300,"resetsAt":%s},"secondary":{"usedPercent":10,"windowDurationMins":10080,"resetsAt":%s}}}}\n' "$percent" "$((reset + 3600))" "$((reset + 432000))"
+  exit 0
+fi
+printf '{"type":"token_count","rate_limits":{"primary":{"used_percent":%s,"window_minutes":300,"resets_in_seconds":3600},"secondary":{"used_percent":10.0,"window_minutes":10080,"resets_in_seconds":432000}}}\n' "$percent"
 
 case " $* " in
   *" --skip-git-repo-check "*)
@@ -408,7 +419,20 @@ fn codex_account_selection_follows_headroom_and_sets_codex_home_and_records_rate
     let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
 
-    // 1 回目は観測値が無いので id 昇順のタイブレークで "a" に行く。
+    // ADR-0049: 起動時の推論不要な確認で、最初の仕事より前に残量が GUI に届く。
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            let accounts = env.get("/accounts").json();
+            accounts["items"].as_array().is_some_and(|items| {
+                items.len() == 2
+                    && items.iter().all(|item| {
+                        item["usage"]["source"] == "check"
+                            && item["usage"]["five_hour"]["utilization"].is_number()
+                    })
+            })
+        }),
+        "automatic Codex usage refresh did not reach the API"
+    );
     let t1 = env.add("t1");
     env.celerisctl(&["approve", &t1]);
     assert!(
@@ -418,9 +442,9 @@ fn codex_account_selection_follows_headroom_and_sets_codex_home_and_records_rate
     );
     let (adapter1, account1) = env.worker_started(&t1).expect("worker started");
     assert_eq!(adapter1, "codex");
-    assert_eq!(account1.as_deref(), Some("a"));
+    assert_eq!(account1.as_deref(), Some("b"));
 
-    // "a" は util 0.9 の観測値がついた。"b" はまだ観測値が無い（score 1.0）ので次はそちらへ行く。
+    // 引き続き残量の多い b を使う。run の観測値も同じ API に反映される。
     let t2 = env.add("t2");
     env.celerisctl(&["approve", &t2]);
     assert!(

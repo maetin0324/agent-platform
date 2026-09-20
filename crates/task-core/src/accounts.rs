@@ -117,16 +117,31 @@ impl RateLimitObservation {
         Some(obs)
     }
 
-    /// codex の `token_count` イベント（`{"type":"token_count","rate_limits":{"primary":{...},"secondary":{...}}}`）
-    /// を解析する（ADR-0025 D3）。実測でフィールド名が確定していない「リセットまでの秒数」は
-    /// `resets_in_seconds` / `reset_after_seconds` / `resets_at` のどれでも読み、無ければ `window_minutes` から
-    /// 見積もる。`window_minutes` が 1440 以下なら `five_hour`（短い枠）、それより長ければ `seven_day`（長い枠）に
-    /// 割り当てる（`primary`/`secondary` という名前ではなく窓の長さで判断する）。
+    /// Codex rollout の観測値。リセット時刻は絶対秒と相対秒を区別する。
     pub fn from_codex_token_count(line: &serde_json::Value, observed_at: i64) -> Option<Self> {
         if line.get("type").and_then(|v| v.as_str()) != Some("token_count") {
             return None;
         }
-        let limits = line.get("rate_limits")?;
+        Self::from_codex_limits(line.get("rate_limits")?, observed_at)
+    }
+
+    /// account/rateLimits/read の result。複数 bucket があれば Codex の枠だけを読む。
+    pub fn from_codex_account_limits(result: &serde_json::Value, observed_at: i64) -> Option<Self> {
+        let limits = result
+            .get("rateLimitsByLimitId")
+            .and_then(|buckets| buckets.get("codex"))
+            .or_else(|| result.get("rateLimits"))?;
+        if limits
+            .get("limitId")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id != "codex")
+        {
+            return None;
+        }
+        Self::from_codex_limits(limits, observed_at)
+    }
+
+    fn from_codex_limits(limits: &serde_json::Value, observed_at: i64) -> Option<Self> {
         let mut obs = Self {
             five_hour: None,
             seven_day: None,
@@ -135,36 +150,53 @@ impl RateLimitObservation {
             observed_at,
         };
         for key in ["primary", "secondary"] {
-            if let Some(window) = limits.get(key).and_then(|w| codex_window(w, observed_at)) {
-                if window.1 {
-                    obs.seven_day = Some(window.0);
+            if let Some((window, long)) = limits.get(key).and_then(|w| codex_window(w, observed_at))
+            {
+                if long {
+                    obs.seven_day = Some(window);
                 } else {
-                    obs.five_hour = Some(window.0);
+                    obs.five_hour = Some(window);
                 }
             }
         }
-        if obs.five_hour.is_none() && obs.seven_day.is_none() {
-            return None;
-        }
-        Some(obs)
+        (obs.five_hour.is_some() || obs.seven_day.is_some()).then_some(obs)
     }
 }
 
-/// codex の 1 つの窓（`primary`/`secondary` のどちらか）を解析する。戻り値の `bool` は「長い枠
-/// （`window_minutes > 1440`）かどうか」（ADR-0025 D3）。`used_percent`/`window_minutes` を読めなければ `None`。
 fn codex_window(value: &serde_json::Value, observed_at: i64) -> Option<(RateWindow, bool)> {
-    let used_percent = value.get("used_percent")?.as_f64()?;
-    let window_minutes = value.get("window_minutes")?.as_i64()?;
-    let resets_in_seconds = ["resets_in_seconds", "reset_after_seconds", "resets_at"]
-        .iter()
-        .find_map(|key| value.get(key).and_then(|v| v.as_i64()));
-    let resets_at = observed_at + resets_in_seconds.unwrap_or(window_minutes * 60);
+    let used_percent = value
+        .get("usedPercent")
+        .or_else(|| value.get("used_percent"))?
+        .as_f64()?;
+    let minutes = value
+        .get("windowDurationMins")
+        .or_else(|| value.get("window_minutes"))?
+        .as_i64()?;
+    if !used_percent.is_finite() || !(0.0..=100.0).contains(&used_percent) || minutes <= 0 {
+        return None;
+    }
+    let resets_at = if let Some(absolute) = value.get("resetsAt").or_else(|| value.get("resets_at"))
+    {
+        absolute.as_i64()?
+    } else {
+        let seconds = value
+            .get("resets_in_seconds")
+            .or_else(|| value.get("reset_after_seconds"))?
+            .as_i64()?;
+        if seconds < 0 {
+            return None;
+        }
+        observed_at.checked_add(seconds)?
+    };
+    if resets_at < 0 {
+        return None;
+    }
     Some((
         RateWindow {
             utilization: used_percent / 100.0,
             resets_at,
         },
-        window_minutes > 1440,
+        minutes > 1440,
     ))
 }
 
@@ -294,9 +326,9 @@ mod tests {
         assert!(obs.seven_day.is_none());
     }
 
-    /// `resets_at`（ADR の記述どおり、リセットまでの秒数として読む候補の 1 つ）を使う形。
+    /// `resets_at` は Unix 絶対秒。
     #[test]
-    fn codex_token_count_with_resets_at_field_as_seconds_remaining() {
+    fn codex_token_count_with_absolute_resets_at() {
         let line: serde_json::Value = serde_json::from_str(
             r#"{"type":"token_count","rate_limits":{"secondary":{"used_percent":10.0,"window_minutes":10080,"resets_at":86400}}}"#,
         )
@@ -306,27 +338,55 @@ mod tests {
             obs.seven_day,
             Some(RateWindow {
                 utilization: 0.1,
-                resets_at: 2_000 + 86_400
+                resets_at: 86_400
             })
         );
         assert!(obs.five_hour.is_none());
     }
 
-    /// リセットまでの秒数が無ければ `window_minutes * 60` から見積もる。
     #[test]
-    fn codex_token_count_without_a_reset_field_falls_back_to_window_minutes() {
-        let line: serde_json::Value = serde_json::from_str(
-            r#"{"type":"token_count","rate_limits":{"primary":{"used_percent":20.0,"window_minutes":300}}}"#,
-        )
-        .expect("json");
-        let obs = RateLimitObservation::from_codex_token_count(&line, 100).expect("observation");
+    fn codex_missing_or_invalid_windows_are_unknown() {
+        for primary in [
+            serde_json::json!({"usedPercent": 20, "windowDurationMins": 300}),
+            serde_json::json!({"usedPercent": -1, "windowDurationMins": 300, "resetsAt": 1000}),
+            serde_json::json!({"usedPercent": 101, "windowDurationMins": 300, "resetsAt": 1000}),
+            serde_json::json!({"usedPercent": 20, "windowDurationMins": 0, "resetsAt": 1000}),
+        ] {
+            assert!(
+                RateLimitObservation::from_codex_account_limits(
+                    &serde_json::json!({"rateLimits": {"primary": primary}}),
+                    100
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn codex_app_server_prefers_codex_bucket_and_absolute_time() {
+        let result = serde_json::json!({
+            "rateLimits": {"primary": {"usedPercent": 99, "windowDurationMins": 300, "resetsAt": 2000}},
+            "rateLimitsByLimitId": {"codex": {
+                "primary": {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 2000},
+                "secondary": {"usedPercent": 40, "windowDurationMins": 10080, "resetsAt": 9000}
+            }}
+        });
+        let obs = RateLimitObservation::from_codex_account_limits(&result, 1000).unwrap();
         assert_eq!(
             obs.five_hour,
             Some(RateWindow {
-                utilization: 0.2,
-                resets_at: 100 + 300 * 60
+                utilization: 0.25,
+                resets_at: 2000
             })
         );
+        assert_eq!(
+            obs.seven_day,
+            Some(RateWindow {
+                utilization: 0.4,
+                resets_at: 9000
+            })
+        );
+        assert!(RateLimitObservation::from_codex_account_limits(&serde_json::json!({"rateLimits": {"limitId": "other", "primary": {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 2000}}}), 1000).is_none());
     }
 
     /// `window_minutes` による枠の割り当て: 1440 以下は five_hour（短い枠）、それより長ければ seven_day（長い枠）。

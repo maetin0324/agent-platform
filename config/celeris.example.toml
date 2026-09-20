@@ -165,6 +165,10 @@ auto_accept = false
 [conversation]
 genre = "conversation"
 
+# ADR-0049: 汎用ハーネスでは adapter を省略して Claude Code / Codex / ACP から自動選択する。
+# 明示するとそのアダプタに固定する。PaperQA / LDR / LangMem は専用なので明示が必要。
+# プール同士は adapter をまたいで残量を比較し、利用不能なら非プールの供給元へ進む。
+# 既存設定の移行・残量取得は docs/providers.md を参照。
 # ハーネス = 実行契約（ADR-0046 D3）。**今までの `[[genres]]`（能力・入出力の契約・対話用か）と
 # `[[roles]]`（adapter・tier・指示文・予算）を 1 つにしたもの**。
 #
@@ -180,7 +184,7 @@ genre = "conversation"
 # 各要素は `名前` でも `名前: 説明` でもよい（`:` の前が名前。`artifact_exists` の照合には名前だけを使う）。
 # ここに並ぶハーネスは `adapter` を書かずに **tier だけ**にしてある（監査 M-1）: この例の
 # `[[providers]]` は `fake` なので、そのまま起動して組織・案件・対話の流れを一通り試せる。実機の
-# ハーネスに切り替えるときは `adapter = "claude-code"` などを足す。
+# ハーネスに切り替えるときは providers を実際の供給元へ変更する。汎用ハーネスの adapter は省略のままでよい。
 
 [[harnesses]]
 id = "conversation"

@@ -211,6 +211,20 @@ impl AccountBook {
         }
     }
 
+    /// 認証の再確認が成功したときの解除。新しい観測値による枯渇判定は evaluate が行う。
+    pub fn clear_cooldown(&mut self, id: &str) {
+        if let Some(state) = self.states.get_mut(id) {
+            state.cooldown = None;
+        }
+    }
+
+    pub fn clear_observation(&mut self, id: &str) {
+        if let Some(state) = self.states.get_mut(id) {
+            state.usage = None;
+            state.source = None;
+        }
+    }
+
     pub fn state(&self, id: &str) -> Option<&AccountState> {
         self.states.get(id)
     }

@@ -14,236 +14,182 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::Signal;
 use task_core::RateLimitObservation;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::claude_account::{
     AccountCheck, AccountCheckResult, LoginError, LoginOutcome, LoginResult, READER_JOIN_TIMEOUT,
-    join_with_timeout, pump_reader, strip_escape_codes, truncate_detail,
+    join_with_timeout, pump_reader, strip_escape_codes,
 };
 use crate::codex::now_unix_secs;
 use crate::protocol::ProviderFailure;
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{LineOutcome, MAX_LINE_BYTES, read_line_limited, send_signal_to_group};
 
-/// 実機（codex-cli 0.154.0）で観測された未ログイン時の文言（ADR-0025 D4）。再試行を待たずに打ち切るための目印。
-const AUTH_401_MARKERS: [&str; 2] = ["401 Unauthorized", "Missing bearer or basic authentication"];
-
-fn looks_like_401(text: &str) -> bool {
-    AUTH_401_MARKERS.iter().any(|m| text.contains(m))
-}
-
-/// 一時 cwd を確実に消す（`claude_account::TempCwdGuard` と同じ理由）。
-struct TempCwdGuard(PathBuf);
-
-impl Drop for TempCwdGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// ADR-0025 D4: `codex exec --json --skip-git-repo-check "Reply with exactly: ok"` を使い捨てディレクトリで
-/// `timeout` まで実行する（モデルは指定しない）。出力に 401 の行が出たら再試行を待たずに打ち切って `AuthFailed`
-/// にする。`turn.completed` が来れば `Ok`、分類できない失敗は `SpawnFailed`。`token_count` があれば観測値として返す。
+/// ADR-0049: 推論を使わず app-server のアカウント API で認証と利用枠を確認する。
 pub async fn check_account_codex(
     command: &str,
     account_dir: &Path,
     timeout: Duration,
     base_env: &[(String, String)],
 ) -> AccountCheck {
-    match tokio::time::timeout(timeout, run_check(command, account_dir, base_env)).await {
-        Ok(check) => check,
-        Err(_elapsed) => AccountCheck {
-            result: AccountCheckResult::SpawnFailed,
-            detail: Some("timeout".to_string()),
-            observation: None,
-        },
-    }
-}
-
-async fn run_check(
-    command: &str,
-    account_dir: &Path,
-    base_env: &[(String, String)],
-) -> AccountCheck {
-    let cwd =
-        std::env::temp_dir().join(format!("celeris-codex-check-{}", task_core::TaskId::new()));
-    if let Err(e) = tokio::fs::create_dir_all(&cwd).await {
-        return AccountCheck {
-            result: AccountCheckResult::SpawnFailed,
-            detail: Some(truncate_detail(&format!(
-                "failed to create check workspace: {e}"
-            ))),
-            observation: None,
-        };
-    }
-    let cwd_guard = TempCwdGuard(cwd.clone());
-
-    let mut command_builder = Command::new(command);
-    command_builder
-        .arg("exec")
-        .arg("--json")
-        .arg("--skip-git-repo-check")
-        .arg("Reply with exactly: ok");
-    command_builder
+    let mut builder = Command::new(command);
+    builder
+        .arg("app-server")
         .envs(base_env.iter().cloned())
         .env("CODEX_HOME", account_dir)
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
+        .current_dir(account_dir)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .kill_on_drop(true);
     #[cfg(unix)]
-    command_builder.process_group(0);
-
-    let mut child = match command_builder.spawn() {
+    builder.process_group(0);
+    let child = match builder.spawn() {
         Ok(child) => child,
-        Err(e) => {
-            drop(cwd_guard);
-            return AccountCheck {
-                result: AccountCheckResult::SpawnFailed,
-                detail: Some(truncate_detail(&e.to_string())),
-                observation: None,
-            };
+        Err(_) => {
+            return failed_check(
+                AccountCheckResult::SpawnFailed,
+                "could not start codex app-server",
+            );
         }
     };
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(mut stderr) = stderr {
-            let _ = stderr.read_to_end(&mut buf).await;
-        }
-        buf
-    });
-
-    let mut observation: Option<RateLimitObservation> = None;
-    let mut last_error_message: Option<String> = None;
-    let mut completed = false;
-    let mut auth_failed_detail: Option<String> = None;
-
-    if let Some(stdout) = stdout {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            match read_line_limited(&mut reader, MAX_LINE_BYTES).await {
-                Ok(LineOutcome::Eof) => break,
-                Ok(LineOutcome::TooLong) => continue,
-                Ok(LineOutcome::Line(bytes)) => {
-                    let text = String::from_utf8_lossy(&bytes);
-                    let trimmed = text.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if looks_like_401(trimmed) {
-                        auth_failed_detail = Some(truncate_detail(trimmed));
-                        send_signal_to_group(&child, Signal::SIGKILL);
-                        break;
-                    }
-                    handle_check_line(
-                        trimmed,
-                        &mut observation,
-                        &mut last_error_message,
-                        &mut completed,
-                    );
-                }
-                Err(_) => break,
-            }
-        }
+    let mut process = AccountServer(child);
+    let outcome = tokio::time::timeout(timeout, read_account_limits(&mut process.0)).await;
+    // 成功・RPC エラー・timeout すべてで終了を待つ。外側のキャンセル時も Drop がグループを止める。
+    send_signal_to_group(&process.0, Signal::SIGKILL);
+    let _ = process.0.wait().await;
+    match outcome {
+        Ok(Ok(check)) => check,
+        Ok(Err(check)) => check,
+        Err(_) => failed_check(AccountCheckResult::SpawnFailed, "timeout"),
     }
+}
 
-    let _ = child.wait().await;
-    let stderr_bytes = stderr_task.await.unwrap_or_default();
-    drop(cwd_guard);
+struct AccountServer(Child);
 
-    if let Some(detail) = auth_failed_detail {
-        return AccountCheck {
-            result: AccountCheckResult::AuthFailed,
-            detail: Some(detail),
-            observation,
-        };
+impl Drop for AccountServer {
+    fn drop(&mut self) {
+        send_signal_to_group(&self.0, Signal::SIGKILL);
     }
-    if completed {
-        return AccountCheck {
-            result: AccountCheckResult::Ok,
-            detail: Some("ok".to_string()),
-            observation,
-        };
-    }
-    let stderr_tail = String::from_utf8_lossy(&stderr_bytes).to_string();
-    let text_for_classification = last_error_message
-        .clone()
-        .unwrap_or_else(|| stderr_tail.clone());
-    let (result, detail) = match classify_provider_failure(&text_for_classification) {
-        Some(ProviderFailure::AuthFailed) => (
-            AccountCheckResult::AuthFailed,
-            truncate_detail(&text_for_classification),
-        ),
-        Some(ProviderFailure::Throttled { .. }) | Some(ProviderFailure::Exhausted) => (
-            AccountCheckResult::Throttled,
-            truncate_detail(&text_for_classification),
-        ),
-        None => {
-            let detail = if text_for_classification.trim().is_empty() {
-                "worker exited without a turn.completed/turn.failed message".to_string()
-            } else {
-                truncate_detail(&text_for_classification)
-            };
-            (AccountCheckResult::SpawnFailed, detail)
-        }
-    };
+}
+
+fn failed_check(result: AccountCheckResult, detail: &str) -> AccountCheck {
     AccountCheck {
         result,
-        detail: Some(detail),
-        observation,
+        detail: Some(detail.into()),
+        observation: None,
     }
 }
 
-fn handle_check_line(
-    line: &str,
-    observation: &mut Option<RateLimitObservation>,
-    last_error_message: &mut Option<String>,
-    completed: &mut bool,
-) {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return;
-    };
-    let Some(ty) = value.get("type").and_then(|t| t.as_str()) else {
-        return;
-    };
-    if ty == "token_count"
-        && let Some(obs) = RateLimitObservation::from_codex_token_count(&value, now_unix_secs())
-    {
-        *observation = Some(obs);
-    }
-    match ty {
-        "turn.completed" => *completed = true,
-        "error" => {
-            if let Some(m) = value.get("message").and_then(|m| m.as_str()) {
-                *last_error_message = Some(m.to_string());
+async fn rpc(
+    input: &mut tokio::process::ChildStdin,
+    output: &mut BufReader<tokio::process::ChildStdout>,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, AccountCheck> {
+    let msg = serde_json::json!({"id": id, "method": method, "params": params});
+    input
+        .write_all(format!("{msg}\n").as_bytes())
+        .await
+        .map_err(|_| failed_check(AccountCheckResult::SpawnFailed, "app-server input closed"))?;
+    loop {
+        let line = match read_line_limited(output, MAX_LINE_BYTES).await {
+            Ok(LineOutcome::Line(bytes)) => bytes,
+            _ => {
+                return Err(failed_check(
+                    AccountCheckResult::SpawnFailed,
+                    "app-server response missing or too large",
+                ));
             }
+        };
+        let value: serde_json::Value = serde_json::from_slice(&line).map_err(|_| {
+            failed_check(AccountCheckResult::SpawnFailed, "invalid app-server JSON")
+        })?;
+        if value.get("id").and_then(|v| v.as_u64()) != Some(id) {
+            continue; // 通知や別の応答。認証のための server request は実行しない。
         }
-        "turn.failed" => {
-            let message = value
-                .get("error")
-                .map(describe_error)
-                .unwrap_or_else(|| "turn.failed".to_string());
-            *last_error_message = Some(message);
+        if let Some(error) = value.get("error") {
+            let kind = match classify_provider_failure(&error.to_string()) {
+                Some(ProviderFailure::AuthFailed) => AccountCheckResult::AuthFailed,
+                Some(ProviderFailure::Throttled { .. } | ProviderFailure::Exhausted) => {
+                    AccountCheckResult::Throttled
+                }
+                None => AccountCheckResult::SpawnFailed,
+            };
+            // サーバの本文にはアカウント情報が含まれうる。GUI/ログへそのまま転送しない。
+            return Err(failed_check(kind, &format!("codex {method} failed")));
         }
-        _ => {}
+        return value.get("result").cloned().ok_or_else(|| {
+            failed_check(AccountCheckResult::SpawnFailed, "app-server result missing")
+        });
     }
 }
 
-/// `codex::describe_error` と同じ規則（`turn.failed.error` は文字列でもオブジェクトでも読める）。
-fn describe_error(value: &serde_json::Value) -> String {
-    if let Some(s) = value.as_str() {
-        return s.to_string();
+async fn read_account_limits(child: &mut Child) -> Result<AccountCheck, AccountCheck> {
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| failed_check(AccountCheckResult::SpawnFailed, "app-server stdin missing"))?;
+    let mut output = BufReader::new(child.stdout.take().ok_or_else(|| {
+        failed_check(AccountCheckResult::SpawnFailed, "app-server stdout missing")
+    })?);
+    rpc(
+        &mut input,
+        &mut output,
+        1,
+        "initialize",
+        serde_json::json!({
+            "clientInfo": {"name": "celeris", "version": env!("CARGO_PKG_VERSION")}
+        }),
+    )
+    .await?;
+    input
+        .write_all(b"{\"method\":\"initialized\",\"params\":{}}\n")
+        .await
+        .map_err(|_| failed_check(AccountCheckResult::SpawnFailed, "app-server input closed"))?;
+    let account = rpc(
+        &mut input,
+        &mut output,
+        2,
+        "account/read",
+        serde_json::json!({"refreshToken": false}),
+    )
+    .await?;
+    let Some(kind) = account.pointer("/account/type").and_then(|v| v.as_str()) else {
+        return Ok(failed_check(
+            AccountCheckResult::AuthFailed,
+            "not logged in",
+        ));
+    };
+    if kind != "chatgpt" {
+        return Ok(failed_check(
+            AccountCheckResult::Ok,
+            "authenticated; ChatGPT usage limits are unavailable for this authentication type",
+        ));
     }
-    if let Some(msg) = value.get("message").and_then(|m| m.as_str()) {
-        return msg.to_string();
-    }
-    value.to_string()
+    let result = rpc(
+        &mut input,
+        &mut output,
+        3,
+        "account/rateLimits/read",
+        serde_json::json!({}),
+    )
+    .await?;
+    let observation = RateLimitObservation::from_codex_account_limits(&result, now_unix_secs());
+    Ok(AccountCheck {
+        result: AccountCheckResult::Ok,
+        detail: Some(
+            if observation.is_some() {
+                "ok"
+            } else {
+                "authenticated; usage limits unavailable"
+            }
+            .into(),
+        ),
+        observation,
+    })
 }
 
 /// ADR-0025 D5: `codex login --device-auth` で得た認可 URL と一回限りのコード。標準入力は使わない
@@ -389,17 +335,20 @@ impl CodexLoginSession {
     }
 
     /// 進行中のログインを止める（ADR-0025 D5: `DELETE /accounts/{id}/login?adapter=codex` / 15 分での打ち切り）。
-    pub fn cancel(mut self) {
-        if let Some(child) = self.child.take() {
-            send_signal_to_group(&child, Signal::SIGKILL);
-        }
+    pub fn cancel(self) {
+        drop(self);
     }
 }
 
 impl Drop for CodexLoginSession {
     fn drop(&mut self) {
-        if let Some(child) = self.child.take() {
+        if let Some(mut child) = self.child.take() {
             send_signal_to_group(&child, Signal::SIGKILL);
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = child.wait().await;
+                });
+            }
         }
     }
 }
@@ -465,16 +414,36 @@ mod tests {
         dir
     }
 
-    // ---- check_account_codex ----
+    // app-server の要求を確認して返す。推論コマンドを起こしたら失敗する。
+    fn check_stub(dir: &Path, response: &str) -> PathBuf {
+        stub(
+            dir,
+            &format!(
+                r#"
+[ "$1" = app-server ] || exit 9
+read -r init
+case "$init" in *initialize*) ;; *) exit 10 ;; esac
+echo '{{"id":1,"result":{{}}}}'
+read -r initialized
+case "$initialized" in *initialized*) ;; *) exit 11 ;; esac
+read -r account
+case "$account" in *account/read*) ;; *) exit 12 ;; esac
+echo '{{"id":2,"result":{{"account":{{"type":"chatgpt"}}}}}}'
+read -r limits
+case "$limits" in *account/rateLimits/read*) ;; *) exit 13 ;; esac
+{response}
+"#
+            ),
+        )
+    }
 
     #[tokio::test]
-    async fn check_account_codex_ok_path_records_observation() {
+    async fn check_account_codex_reads_limits_without_inference() {
         let dir = tempfile::tempdir().unwrap();
-        let command = stub(
+        let command = check_stub(
             dir.path(),
-            r#"echo '{"type":"token_count","rate_limits":{"primary":{"used_percent":14.0,"window_minutes":300,"resets_in_seconds":3600},"secondary":{"used_percent":24.0,"window_minutes":10080,"resets_in_seconds":432000}}}'
-echo '{"type":"turn.completed"}'
-"#,
+            r#"echo '{"method":"account/updated","params":{}}'
+echo '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":14,"windowDurationMins":300,"resetsAt":2000000000},"secondary":{"usedPercent":24,"windowDurationMins":10080,"resetsAt":2000600000}}}}'"#,
         );
         let acct = account_dir(dir.path(), "a");
         let check = check_account_codex(
@@ -485,86 +454,81 @@ echo '{"type":"turn.completed"}'
         )
         .await;
         assert_eq!(check.result, AccountCheckResult::Ok);
-        let obs = check.observation.expect("observation");
-        assert_eq!(obs.five_hour.map(|w| w.utilization), Some(0.14));
-        assert_eq!(obs.seven_day.map(|w| w.utilization), Some(0.24));
-    }
-
-    /// ADR-0025 D4: 401 の行が出たら再試行を待たずに打ち切って `AuthFailed` にする（未ログインだと codex は
-    /// 10 回ほど再試行して約 40 秒かかるため）。
-    #[tokio::test]
-    async fn check_account_codex_401_aborts_immediately_without_waiting_for_retries() {
-        let dir = tempfile::tempdir().unwrap();
-        let command = stub(
-            dir.path(),
-            r#"echo 'ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header'
-sleep 30
-"#,
-        );
-        let acct = account_dir(dir.path(), "a");
-        let start = Instant::now();
-        let check = check_account_codex(
-            command.to_str().unwrap(),
-            &acct,
-            Duration::from_secs(20),
-            &[],
-        )
-        .await;
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "should not wait for retries: {:?}",
-            start.elapsed()
-        );
-        assert_eq!(check.result, AccountCheckResult::AuthFailed);
+        let obs = check.observation.unwrap();
+        assert_eq!(obs.five_hour.unwrap().utilization, 0.14);
+        assert_eq!(obs.five_hour.unwrap().resets_at, 2000000000);
+        assert_eq!(obs.seven_day.unwrap().utilization, 0.24);
     }
 
     #[tokio::test]
-    async fn check_account_codex_turn_failed_classified() {
+    async fn check_account_codex_failures_are_bounded_and_sanitized() {
         let dir = tempfile::tempdir().unwrap();
-        let command = stub(
-            dir.path(),
-            r#"echo '{"type":"turn.failed","error":{"message":"You'"'"'ve hit your usage limit"}}'"#,
-        );
         let acct = account_dir(dir.path(), "a");
-        let check = check_account_codex(
-            command.to_str().unwrap(),
-            &acct,
-            Duration::from_secs(5),
-            &[],
-        )
-        .await;
-        assert_eq!(check.result, AccountCheckResult::Throttled);
+        for (response, expected) in [
+            (
+                r#"echo '{"id":3,"error":{"message":"401 Unauthorized secret-token"}}'"#,
+                AccountCheckResult::AuthFailed,
+            ),
+            (
+                r#"echo '{"id":3,"error":{"message":"usage limit"}}'"#,
+                AccountCheckResult::Throttled,
+            ),
+            ("echo invalid-json", AccountCheckResult::SpawnFailed),
+            ("exit 0", AccountCheckResult::SpawnFailed),
+            ("sleep 30", AccountCheckResult::SpawnFailed),
+        ] {
+            let command = check_stub(dir.path(), response);
+            let check = check_account_codex(
+                command.to_str().unwrap(),
+                &acct,
+                Duration::from_millis(300),
+                &[],
+            )
+            .await;
+            assert_eq!(check.result, expected, "{response}");
+            assert!(!check.detail.unwrap().contains("secret-token"));
+        }
+    }
+
+    #[tokio::test]
+    async fn check_account_codex_handles_logged_out_and_api_key_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let acct = account_dir(dir.path(), "a");
+        for (account, expected) in [
+            ("null", AccountCheckResult::AuthFailed),
+            (r#"{"type":"apiKey"}"#, AccountCheckResult::Ok),
+        ] {
+            let command = stub(
+                dir.path(),
+                &format!(
+                    r#"read -r init
+echo '{{"id":1,"result":{{}}}}'
+read -r initialized
+read -r account
+echo '{{"id":2,"result":{{"account":{account}}}}}'
+# 次の要求は無い。親が終了させる。
+sleep 30"#
+                ),
+            );
+            let check = check_account_codex(
+                command.to_str().unwrap(),
+                &acct,
+                Duration::from_secs(2),
+                &[],
+            )
+            .await;
+            assert_eq!(check.result, expected);
+            assert!(check.observation.is_none());
+        }
     }
 
     #[tokio::test]
     async fn check_account_codex_spawn_failure_for_nonexistent_command() {
         let dir = tempfile::tempdir().unwrap();
         let acct = account_dir(dir.path(), "a");
-        let missing = dir.path().join("does-not-exist");
-        let check = check_account_codex(
-            missing.to_str().unwrap(),
-            &acct,
-            Duration::from_secs(5),
-            &[],
-        )
-        .await;
+        let check =
+            check_account_codex("/nonexistent/codex", &acct, Duration::from_secs(1), &[]).await;
         assert_eq!(check.result, AccountCheckResult::SpawnFailed);
-    }
-
-    #[tokio::test]
-    async fn check_account_codex_timeout_is_spawn_failed() {
-        let dir = tempfile::tempdir().unwrap();
-        let command = stub(dir.path(), "sleep 30");
-        let acct = account_dir(dir.path(), "a");
-        let check = check_account_codex(
-            command.to_str().unwrap(),
-            &acct,
-            Duration::from_millis(200),
-            &[],
-        )
-        .await;
-        assert_eq!(check.result, AccountCheckResult::SpawnFailed);
-        assert_eq!(check.detail.as_deref(), Some("timeout"));
     }
 
     // ---- device login ----

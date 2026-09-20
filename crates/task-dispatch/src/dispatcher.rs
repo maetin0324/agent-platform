@@ -1138,7 +1138,12 @@ impl Dispatcher {
         }
     }
 
-    /// このアダプタの帳簿（設定されていなければ `None`）。
+    /// ログイン中継の実行中は定期確認しない。
+    pub fn account_login_pending(&self, adapter: AccountAdapter, id: &str) -> bool {
+        self.login_pending_accounts
+            .contains(&Self::login_pending_key(adapter, id))
+    }
+
     fn account_book(&self, adapter: AccountAdapter) -> Option<Arc<StdMutex<AccountBook>>> {
         self.account_books.get(&adapter).cloned()
     }
@@ -1157,8 +1162,35 @@ impl Dispatcher {
             return;
         };
         let Ok(mut book) = book.lock() else { return };
+        let has_observation = observation.is_some();
         if let Some(obs) = observation {
             book.record_observation(id, obs, ObservationSource::Check);
+        }
+        match result {
+            "ok" => {
+                book.clear_cooldown(id);
+                if adapter == AccountAdapter::Codex && !has_observation {
+                    book.clear_observation(id);
+                }
+            }
+            "auth_failed" | "throttled" => {
+                let reason = if result == "auth_failed" {
+                    AccountCooldownReason::AuthFailed
+                } else {
+                    AccountCooldownReason::Throttled
+                };
+                let cooldown = cooldown_for_failure(
+                    book.state(id),
+                    reason,
+                    now,
+                    self.config
+                        .accounts
+                        .as_ref()
+                        .map_or(300, |c| c.fallback_cooldown_secs),
+                );
+                book.set_cooldown(id, cooldown, now);
+            }
+            _ => {} // 通信失敗だけでは前回の観測を消さない。
         }
         book.record_check(
             id,
@@ -4069,58 +4101,81 @@ impl Dispatcher {
         task_id: TaskId,
         full: &mut std::collections::HashSet<ProviderId>,
     ) -> Option<(AdapterId, ProviderId, Option<(AccountAdapter, String)>)> {
-        // 外部の ProviderPolicy が除外集合を無視しても止まるよう、試行回数に上限を置く。
+        // 候補を列挙するための除外はこの選択だけ。満杯の集合へ候補自体を混ぜない。
+        let mut visited = full.clone();
+        let mut best_pool = None;
+        let mut best_score = f64::NEG_INFINITY;
+        let mut fallback = None;
         for _ in 0..64 {
-            match self.policy.select(hint, now, full) {
+            match self.policy.select(hint, now, &visited) {
                 Selection::Picked { adapter, provider } => {
+                    if !visited.insert(provider.clone()) {
+                        break;
+                    }
                     let limit = self.policy.concurrency_limit(provider.clone());
                     if self.provider_in_use(&provider) >= limit {
-                        tracing::debug!(%task_id, %provider, limit, "provider at capacity; trying the next one");
                         full.insert(provider);
                         continue;
                     }
                     if self.account_pool_providers.contains(&provider) {
-                        // ADR-0025 D1: プールのアダプタは、そのプロバイダ自身のワーカーアダプタと同じ
-                        // （`account_pool = true` は claude-code/codex 限定。設定検証済み）。
                         let Some(account_adapter) = AccountAdapter::parse(&adapter) else {
-                            tracing::warn!(%task_id, %provider, %adapter, "account_pool provider has an adapter that is not a pool adapter; treating as full");
                             full.insert(provider);
                             continue;
                         };
-                        match self.pick_account(account_adapter) {
-                            Some(account_id) => {
-                                self.warned_unroutable.remove(&task_id);
-                                return Some((
-                                    adapter,
-                                    provider,
-                                    Some((account_adapter, account_id)),
-                                ));
-                            }
-                            None => {
-                                tracing::debug!(%task_id, %provider, "no eligible account in the pool; trying the next provider");
-                                full.insert(provider);
-                                continue;
-                            }
+                        let Some(account_id) = self.pick_account(account_adapter) else {
+                            full.insert(provider);
+                            continue;
+                        };
+                        let score = self.account_score(account_adapter, &account_id);
+                        if score > best_score {
+                            best_score = score;
+                            best_pool =
+                                Some((adapter, provider, Some((account_adapter, account_id))));
+                        }
+                    } else if fallback.is_none() {
+                        fallback = Some((adapter, provider, None));
+                    }
+                }
+                Selection::Busy => break,
+                Selection::NoMatchingProvider => {
+                    if best_pool.is_none() && fallback.is_none() {
+                        self.unroutable.insert(task_id);
+                        if self.warned_unroutable.insert(task_id) {
+                            tracing::warn!(%task_id, ?hint, "no provider in the config matches this worker_hint");
                         }
                     }
-                    self.warned_unroutable.remove(&task_id);
-                    return Some((adapter, provider, None));
-                }
-                Selection::Busy => {
-                    tracing::debug!(%task_id, ?hint, "all matching providers are cooling down or at capacity");
-                    return None;
-                }
-                Selection::NoMatchingProvider => {
-                    self.unroutable.insert(task_id);
-                    if self.warned_unroutable.insert(task_id) {
-                        tracing::warn!(%task_id, ?hint, "no provider in the config matches this worker_hint; the task waits until the config changes");
-                    }
-                    return None;
+                    break;
                 }
             }
         }
-        tracing::warn!(%task_id, ?hint, "provider policy kept returning excluded providers; giving up for this tick");
-        None
+        let selected = best_pool.or(fallback);
+        if selected.is_some() {
+            self.warned_unroutable.remove(&task_id);
+        }
+        selected
+    }
+
+    fn account_score(&self, adapter: AccountAdapter, id: &str) -> f64 {
+        let Some(book) = self.account_book(adapter) else {
+            return f64::NEG_INFINITY;
+        };
+        let book = book.lock().unwrap_or_else(|e| e.into_inner());
+        let candidate = AccountCandidate {
+            id,
+            logged_in: true,
+            in_use: self.account_in_use(adapter, id),
+        };
+        crate::accounts::evaluate(
+            &candidate,
+            book.state(id),
+            self.config
+                .accounts
+                .as_ref()
+                .map_or(1, |c| c.max_runs_per_account),
+            (self.now_unix_fn)(),
+        )
+        .score
+        .unwrap_or(f64::NEG_INFINITY)
     }
 
     /// ADR-0024 D3 / ADR-0025 D2: `[accounts]` の指定アダプタのプールから 1 アカウントを選ぶ（残量に基づく決定的な
@@ -9061,6 +9116,133 @@ mod tests {
             .unwrap();
         assert_eq!(provider.as_deref(), Some("p2"));
         assert_eq!(account, None);
+    }
+
+    #[test]
+    fn portable_work_uses_headroom_across_pools_then_falls_back() {
+        let claude = accounts_fixture();
+        let codex = tempfile::tempdir().unwrap();
+        std::fs::create_dir(codex.path().join("gpt")).unwrap();
+        std::fs::write(codex.path().join("gpt/auth.json"), "{}").unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = pool_dispatcher(store, adapter, None, claude.path().into(), 2, 2);
+        d.now_unix_fn = Arc::new(|| 10_000);
+        d.config
+            .accounts
+            .as_mut()
+            .unwrap()
+            .roots
+            .insert(AccountAdapter::Codex, codex.path().into());
+        d.account_books.insert(
+            AccountAdapter::Codex,
+            Arc::new(StdMutex::new(AccountBook::new_in_memory())),
+        );
+        d.account_pool_providers.insert("gpt".into());
+        d.policy = Box::new(StaticPolicy::new(
+            [
+                ("p1", "claude-code"),
+                ("local", "acp"),
+                ("gpt", "codex"),
+                ("research", "paperqa"),
+            ]
+            .into_iter()
+            .map(|(id, adapter)| ProviderSpec {
+                id: id.into(),
+                adapter: adapter.into(),
+                tiers: vec![Tier::Standard],
+                concurrency: 2,
+                model: String::new(),
+            })
+            .collect(),
+            Duration::from_secs(5),
+        ));
+        let hint = WorkerHint {
+            tier: Tier::Standard,
+            adapter: None,
+        };
+        let now = Instant::now();
+        let task = TaskId::new();
+        let mut full = std::collections::HashSet::new();
+        for id in ["a", "b"] {
+            d.record_account_check(
+                AccountAdapter::ClaudeCode,
+                id,
+                "ok",
+                None,
+                Some(usage_window(0.8, 3600)),
+            );
+        }
+        d.record_account_check(
+            AccountAdapter::Codex,
+            "gpt",
+            "ok",
+            None,
+            Some(usage_window(0.2, 3600)),
+        );
+        assert_eq!(
+            d.select_provider(&hint, now, task, &mut full).unwrap().1,
+            "gpt"
+        );
+        assert!(
+            full.is_empty(),
+            "enumeration must not exclude eligible providers for other tasks"
+        );
+        // 同点なら設定順。Codex を優先する固定ではない。
+        d.record_account_check(
+            AccountAdapter::Codex,
+            "gpt",
+            "ok",
+            None,
+            Some(usage_window(0.8, 3600)),
+        );
+        assert_eq!(
+            d.select_provider(&hint, now, task, &mut full).unwrap().1,
+            "p1"
+        );
+        for id in ["a", "b"] {
+            d.record_account_check(
+                AccountAdapter::ClaudeCode,
+                id,
+                "ok",
+                None,
+                Some(usage_window(1.0, 3600)),
+            );
+        }
+        assert_eq!(
+            d.select_provider(&hint, now, task, &mut full).unwrap().1,
+            "gpt"
+        );
+        let pinned = WorkerHint {
+            tier: Tier::Standard,
+            adapter: Some("claude-code".into()),
+        };
+        assert!(d.select_provider(&pinned, now, task, &mut full).is_none());
+        d.record_account_check(AccountAdapter::Codex, "gpt", "auth_failed", None, None);
+        assert_eq!(
+            d.select_provider(&hint, now, task, &mut full).unwrap().1,
+            "local"
+        );
+        // 再確認が成功すれば cooldown を解除して復帰する。
+        d.record_account_check(
+            AccountAdapter::Codex,
+            "gpt",
+            "ok",
+            None,
+            Some(usage_window(0.1, 3600)),
+        );
+        full.clear();
+        assert_eq!(
+            d.select_provider(&hint, now, task, &mut full).unwrap().1,
+            "gpt"
+        );
     }
 
     /// (d) run の途中で受け取った `rate_limit_event` の観測値が `AccountBook` とスナップショットに反映される。
