@@ -153,6 +153,9 @@ fn compaction_spec(node: &OrgNode, project_id: Option<ProjectId>, pending: &[Rep
         role: Some(report::COMPACTION_ROLE.to_string()),
         genre: None,
         aggregate: false,
+        // ADR-0046 D2 / D4（Phase 59）: 裏方のまとめ run に能力タグは要らない（担当は親ノード固定）。
+        skills: Vec::new(),
+        mode: None,
         project_id,
         milestone_id: None,
         assignee: Some(node.id.clone()),
@@ -226,7 +229,7 @@ mod tests {
 
     fn org_node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
-        OrgNode {
+        OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: id.into(),
@@ -356,7 +359,7 @@ mod tests {
         }
 
         // 同じノード・同じ案件の、直近失敗したまとめタスク。
-        let node = OrgNode {
+        let node = OrgNode { profile: Default::default(),
             id: "coding".into(),
             parent_id: Some("secretary".into()),
             name: "coding".into(),

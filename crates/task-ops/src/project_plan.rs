@@ -113,6 +113,10 @@ pub fn start(
         // ADR-0044 D3: 裏方の計画タスクにラベル・種類は付けない（`create_support_task` が `ready` にする）。
         labels: Vec::new(),
         category: None,
+        // ADR-0046 D2 / D4（Phase 59）: 計画 run 自身に能力タグは要らない。進め方は子ごとに
+        // 計画が決める（`NewTask.mode`）ので、ここは既定のまま。
+        skills: Vec::new(),
+        mode: None,
         status: None,
     };
     let task = add::create_support_task(store, spec, roles, genres, now)?;
@@ -180,7 +184,7 @@ mod tests {
 
     fn node(id: &str, parent: Option<&str>, kind: OrgKind, genre: Option<&str>) -> OrgNode {
         let t = now();
-        OrgNode {
+        OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: id.into(),

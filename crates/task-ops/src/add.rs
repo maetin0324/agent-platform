@@ -137,6 +137,13 @@ pub struct NewTaskSpec {
     /// ADR-0044 D3: ラベル（小文字 `[a-z0-9-]`、最大 8 個）。省略時は無し。
     #[serde(default)]
     pub labels: Vec<String>,
+    /// ADR-0046 D2（Phase 59）: このタスクに必要な能力タグ（小文字 `[a-z0-9._-]`、最大 12 個）。
+    /// `assignee` を書かなければ、これとノードの実効 `skills` の重なりで担当が決まる（D5 の matching）。
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// ADR-0046 D4（Phase 59）: 進め方（`prototype` / `production` / `research`）。省略時は `production`。
+    #[serde(default)]
+    pub mode: Option<task_core::TaskMode>,
     /// ADR-0044 D3: 種類。省略時は `other`。
     #[serde(default)]
     pub category: Option<task_core::TaskCategory>,
@@ -367,6 +374,10 @@ fn build_task(
             if !org.iter().any(|n| n.id == assignee) {
                 return Err(OpsError::Validation(format!("assignee {assignee:?} is not an org node")));
             }
+            // ADR-0046 D5: 明示の `assignee` が、そのタスクのハーネスを `harnesses.allowed` に
+            // 持たなければ 422 で差し戻す（profile を持たないノードは従来どおり通る）。
+            crate::matching::assignee_accepts(&org, assignee, spec.genre.as_deref())
+                .map_err(OpsError::Validation)?;
             task_core::assignee_defaults(&org, assignee, roles, genres)
         }
         None => (None, None),
@@ -400,6 +411,8 @@ fn build_task(
     };
     // ADR-0044 D3（Phase 53）: ラベルの検証（小文字 `[a-z0-9-]`、最大 8 個、重複は畳む）。
     let labels = task_core::normalize_labels(&spec.labels).map_err(OpsError::Validation)?;
+    // ADR-0046 D2: 必要な能力タグ（綴りの規則は `labels` と同じ扱いで、違反は 422）。
+    let skills = task_core::normalize_skills(&spec.skills).map_err(OpsError::Validation)?;
     let category = spec.category.unwrap_or_default();
     // ADR-0044 D3: 省略時は P2（`celerisctl add` は `--priority` の既定 0 を明示して渡す）。
     let priority = spec
@@ -501,6 +514,8 @@ fn build_task(
         assignee: spec.assignee,
         conversation: None,
         labels,
+        skills,
+        mode: spec.mode.unwrap_or_default(),
         category,
     };
     Ok(task)
@@ -512,7 +527,7 @@ mod tests {
     use task_core::{Event, SqliteStore};
 
     fn base_spec() -> NewTaskSpec {
-        NewTaskSpec {
+        NewTaskSpec { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             title: "do something".to_string(),
             objective: "make it work".to_string(),
@@ -634,7 +649,7 @@ mod tests {
 
     fn org_node(id: &str, parent: Option<&str>, kind: task_core::OrgKind, genre: Option<&str>) -> task_core::OrgNode {
         let now = OffsetDateTime::now_utc();
-        task_core::OrgNode {
+        task_core::OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: id.into(),

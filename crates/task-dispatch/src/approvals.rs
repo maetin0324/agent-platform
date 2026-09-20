@@ -64,7 +64,7 @@ mod tests {
 
     fn node(id: &str, parent: Option<&str>, kind: OK) -> OrgNode {
         let now = OffsetDateTime::now_utc();
-        OrgNode {
+        OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: id.into(),
@@ -79,7 +79,7 @@ mod tests {
 
     fn task(assignee: Option<&str>, project: Option<ProjectId>) -> Task {
         let now = OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,

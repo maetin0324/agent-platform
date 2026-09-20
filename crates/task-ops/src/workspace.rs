@@ -108,7 +108,7 @@ mod tests {
     fn task(path: &str, mode: Option<WorkspaceMode>) -> Task {
         use task_core::*;
         let now = time::OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,

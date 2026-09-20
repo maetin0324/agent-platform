@@ -404,7 +404,7 @@ mod tests {
 
     fn node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
-        OrgNode {
+        OrgNode { profile: Default::default(),
             id: id.to_string(),
             parent_id: parent.map(str::to_string),
             name: id.to_string(),

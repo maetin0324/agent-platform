@@ -122,7 +122,7 @@ async fn children_materialized_from_the_plan_output_stay_in_the_same_project() {
     let plan_task = env.store.get(plan_id).expect("get").expect("some");
 
     let plan_output = task_core::PlanOutput {
-        tasks: vec![task_core::NewTask { repos: Vec::new(),
+        tasks: vec![task_core::NewTask { harness: None, mode: Default::default(), skills: Vec::new(), repos: Vec::new(),
             title: "a".into(),
             objective: "b".into(),
             acceptance: vec![task_core::Criterion { text: "c".into(), check: task_core::Check::Human }],

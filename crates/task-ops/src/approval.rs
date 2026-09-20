@@ -114,7 +114,7 @@ mod tests {
 
     fn node(id: &str, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
-        OrgNode {
+        OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: None,
             name: id.into(),
@@ -131,7 +131,7 @@ mod tests {
     fn blocked_task_with_approval(store: &SqliteStore, node_id: &str) -> (Task, Approval) {
         let now = OffsetDateTime::now_utc();
         let id = TaskId::new();
-        let task = Task {
+        let task = Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id,
             parent_id: None,

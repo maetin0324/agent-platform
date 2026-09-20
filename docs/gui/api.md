@@ -1,6 +1,15 @@
 # celeris HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-20 Phase 59（ADR-0046、組織 = Agent Profile の継承木）— **追加のみ。v1 のまま**。
+  (1) 組織のノードが `profile` を持つようになった（`OrgNode.profile`、`GET /org` の `effective_profiles[]`、
+  `POST /org` と `PATCH /org/{id}` の `profile`。§3.42〜3.44）。
+  (2) タスクに `skills` / `mode` が増え、`harness`（= `Task.genre`）が編集できるようになった
+  （`POST /tasks`、`PATCH /tasks/{id}`。§3.74）。
+  (3) イベント種別 `assigned`（matching が担当を決めた。`{node, score, reason}`）が増えた。
+  DB のスキーマ版数は **16**（migration 0016: `org_nodes.profile_json` / `tasks.skills_json` / `tasks.mode`）。
+  設定は `[[genres]]` + `[[roles]]` から `[[harnesses]]` に移った（互換の読み込みは残る。GUI からは
+  `GET /config` の `genres[]` がそのままハーネスの一覧として見える）
 - 改訂: 2026-09-19 Phase 57（ADR-0044 B3、文書）— **追加のみ。v1 のまま。DB は変わらない**（正本は
   git のファイル）。案件の文書が GUI から読み書きできるようになった: エンドポイント 81〜86
   （`GET /projects/{id}/docs`、`GET|PUT|DELETE /projects/{id}/docs/page`、
@@ -1010,6 +1019,34 @@ Phase 27 の監査 M-4）。読み取りと途中目標の操作は通常の要�
 - 初期の形は `org_include` が指すファイル（`config/org.example.toml`）から、**DB の `org_nodes` が空のときだけ**
   蒔かれる。以後は DB が正で、設定を書き換えても反映されない（ADR-0033 D1）。
 
+**Phase 59（ADR-0046 D1）**: 各ノードは `profile` を持ち、**子は親を継ぐ**。応答には
+そのノード自身の `profile`（空なら項目ごと出ない）と、**継いだ後**の `effective_profiles[]` の両方が入る。
+
+```json
+{"items":[{"id":"cos","parent_id":null,"name":"Chief of Staff","kind":"secretary",
+           "profile":{"harnesses":{"allowed":["conversation","plan"],"default":"conversation"},
+                      "knowledge":[{"kind":"kb","scope":"user"}],
+                      "policy":["人に返す文は、人が数十秒で読める分量にする。"]},
+           "position":0,"created_at":"…","updated_at":"…"},
+          {"id":"software-engineering","parent_id":"engineering","name":"Software Engineering","kind":"section",
+           "profile":{"skills":["rust","sqlite"],"tools":["gh"],"harnesses":{"default":"coding"}},
+           "position":0,"created_at":"…","updated_at":"…"}],
+ "effective_profiles":[{"node_id":"cos","chain":["cos"],"harnesses_allowed":["conversation","plan"],
+                        "harness_default":"conversation","policy":["…"]},
+                       {"node_id":"software-engineering","chain":["cos","engineering","software-engineering"],
+                        "skills":["software","rust","sqlite"],"harnesses_allowed":["coding"],
+                        "harness_default":"coding","tools":["gh"],"policy":["…","…"]}]}
+```
+
+- `effective_profiles[]` は `items[]` と**同じ並び**で、`node_id` で対応づく。`chain` は根から葉までの
+  ノード id（GUI の「どこから継いだか」）。
+- 継ぎ方（ADR-0046 D1。GUI はこれを再実装しない。表示は `effective_profiles` をそのまま使う）:
+  `skills` / `knowledge` / `tools` / `harnesses.allowed` / `permissions.approvals` は**親と和**（根→葉の順、
+  重複は落ちる）、`deny_tools` は和だが**常に勝つ**（実効の `tools` から引かれる）、
+  `run` / `model.tier` / `harnesses.default` / `review.*` は**子が勝つ**、`model.allowed_tiers` は**交わり**
+  （空の親は制限なし）、`policy` は根→葉の順に**連結**。
+- `profile` の項目はすべて任意。空の `profile` は応答に出ない（Phase 58 までのノードと 1 バイトも変わらない）。
+
 #### 3.43 `POST /org` → 201 `OrgNode`（`Location: /api/v1/org/{id}`）（**管理系**）
 
 要求本文 `{"id":"coding-poc","name":"PoC・R&D 課","kind":"section","parent_id":"coding","genre":"coding","brief":"…","position":4}`。
@@ -1020,12 +1057,26 @@ Phase 27 の監査 M-4）。読み取りと途中目標の操作は通常の要�
 - 検証に落ちたら 422 `validation`: 秘書が 2 人、秘書に親がある、秘書以外に親が無い、親が存在しない、
   自分を祖先にする、種類の順序違反（`secretary` > `department` > `section`）。
 
+**Phase 59（ADR-0046 D1）**: 任意で `profile` を受ける（省略時は空）。`profile` の検証に落ちたら
+422 `validation`（`errors[0].field = "profile"`）:
+
+- `tools` / `deny_tools` の語彙は `gh` / `tavily` / `exa` / `docker` / `cluster:<id>` だけ（それ以外は 422）。
+- `harnesses.allowed[]` / `harnesses.default` / `review.harness` は**設定にあるハーネス id**か組み込み
+  （`conversation` / `plan` / `reviewer` / `smoke`）だけ（ハーネスを 1 つも設定していない celeris では検証しない）。
+- `skills[]` は小文字の `[a-z0-9._-]`、1〜64 文字。
+- `run` は `"host"` / `"container"`、`model.tier` と `model.allowed_tiers[]` と `review.tier` は
+  `"frontier"` / `"standard"` / `"cheap"` だけ（知らない綴りは本文の解析で落ちて 400 `bad_request`）。
+
 #### 3.44 `PATCH /org/{id}` → 200 `OrgNode`（**管理系**）
 
 `{"name":…, "kind":…, "parent_id":…, "genre":…, "brief":…, "position":…}` のうち**書いた項目だけ**を変える。
 `genre` は設定の `[[genres]]` にある id だけ（無い id は 422 `validation`）。
 `"genre": null` と書けば分野を外せる（書かなければ今の値のまま）。無い id は 404 `org_node_not_found`。
 検証は 3.43 と同じ（付け替えで木が壊れるなら 422）。
+
+**Phase 59（ADR-0046 D1）**: `profile` は**丸ごと差し替え**（部分更新はしない）。書かなければ今の値のまま、
+`{}` を書けば空になる。検証は 3.43 と同じ。実効 profile（継いだ後）は `GET /org` の
+`effective_profiles[]` で読む（`PATCH` の応答は**そのノード自身の** `profile` だけを返す）。
 
 #### 3.45 `DELETE /org/{id}` → 204（**管理系**）
 
@@ -1681,6 +1732,20 @@ stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid �
 
 ### 3.74〜3.78 タスク管理: 編集・コメント・再開・タイムライン（ADR-0044 B1、Phase 53）
 
+**Phase 59（ADR-0046 D2 / D3 / D4）**: `POST /tasks` と `PATCH /tasks/{id}` は 3 つの項目を足した。
+
+| 項目 | 型 | 意味 |
+|---|---|---|
+| `skills` | `string[]` | そのタスクに**必要な能力タグ**（小文字 `[a-z0-9._-]`、最大 12 個）。`assignee` が無いタスクの担当は、これとノードの実効 `skills` の重なりで決まる（ADR-0046 D5） |
+| `mode` | `"prototype"` / `"production"` / `"research"` | 進め方。既定 `production`。前置きの規則とレビューの厳しさが変わる（ADR-0046 D4） |
+| `harness` | `string`（`PATCH` は `null` で外せる） | 実行契約の id。**`Task.genre` 列がそのまま harness id**（応答の `Task` では従来どおり `genre` として出る） |
+
+- `skills` の綴り違反・件数超過は 422 `validation`。`mode` / `harness` の知らない綴りは本文の解析で落ちて
+  400 `bad_request`（`harness` は「設定に無い id」なら 422 `validation`）。
+- `assignee` と `harness` の組み合わせが合わない（その担当が `harnesses.allowed` にその harness を持たない）
+  ときは 422 `validation`（作成時も編集時も）。**profile を 1 つも書いていないノードは従来どおり通る**。
+- `EditResult.fields` には `"skills"` / `"mode"` / `"harness"` が入りうる。
+
 人がタスクに手を入れるための 5 本。**`PATCH /tasks/{id}` と `POST /tasks/{id}/comments`、
 `POST /tasks/{id}/reopen` は管理系**（`token_file` 未設定でも 401）。読み取り 2 本は通常の認証だけ。
 
@@ -2290,6 +2355,46 @@ pub enum TaskCategory { Feature, Bug, Research, Ops, Docs, Other }   // 既定 O
 // Event に足した 1 つ（type 名 `edited`。状態は変えない。replay は無視する）:
 //   Edited { fields: Vec<String>, by: String }
 
+// ---- Phase 59（ADR-0046）: 組織 = Agent Profile の継承木 ----
+// #[serde(rename_all = "snake_case")]
+pub enum KnowledgeKind { Kb, Repo, Memory }
+// #[serde(rename_all = "snake_case")]
+pub enum ProfileRun { Host, Container }
+// #[serde(rename_all = "snake_case")]
+pub enum TaskMode { Prototype, Production, Research }   // 既定 Production（Task の JSON では省略）
+
+pub struct KnowledgeMount { pub kind: KnowledgeKind, pub scope: Option<String>, pub name: Option<String>,
+                            pub path: Option<String>, pub docs: Option<String> }
+pub struct HarnessPrefs { pub allowed: Vec<String>, pub default: Option<String> }
+pub struct ModelPrefs   { pub tier: Option<Tier>, pub allowed_tiers: Vec<Tier> }
+pub struct ReviewPrefs  { pub harness: Option<String>, pub tier: Option<Tier> }
+pub struct Permissions  { pub approvals: Vec<String> }
+
+// `OrgNode.profile`（deny_unknown_fields。**全項目が任意**。空なら JSON に出ない）
+pub struct Profile {
+    pub skills: Vec<String>, pub knowledge: Vec<KnowledgeMount>, pub harnesses: HarnessPrefs,
+    pub tools: Vec<String>, pub deny_tools: Vec<String>, pub run: Option<ProfileRun>,
+    pub model: ModelPrefs, pub policy: Vec<String>, pub review: ReviewPrefs, pub permissions: Permissions,
+}
+
+// `GET /org` の `effective_profiles[]`（継いだ後。GUI はこれをそのまま表示する。再計算しない）
+pub struct EffectiveProfile {
+    pub node_id: String, pub chain: Vec<String> /* 根→葉 */,
+    pub skills: Vec<String>, pub knowledge: Vec<KnowledgeMount>,
+    pub harnesses_allowed: Vec<String>, pub harness_default: Option<String>,
+    pub tools: Vec<String> /* deny_tools を引いた後 */, pub deny_tools: Vec<String>,
+    pub run: Option<ProfileRun>, pub tier: Option<Tier>, pub allowed_tiers: Vec<Tier>,
+    pub policy: Vec<String>, pub review_harness: Option<String>, pub review_tier: Option<Tier>,
+    pub approvals: Vec<String>,
+}
+
+// Task に足した 2 つ（どちらも既定なら JSON に出ない）:
+//   pub skills: Vec<String>,   // 必要な能力タグ（小文字 [a-z0-9._-]、最大 12 個）
+//   pub mode: TaskMode,        // 既定 production
+// Event に足した 1 つ（type 名 `assigned`。状態は変えない。replay は無視する）:
+//   Assigned { node: String, score: usize, reason: String }
+//   → GUI のタスク画面の「なぜこの担当か」。`score` は タスクの skills ∩ ノードの実効 skills の件数
+
 // `PATCH /tasks/{id}` の本文（deny_unknown_fields。省略 = 据え置き、Option<Option<T>> は null で消す）
 pub struct TaskEdit {
     pub title: Option<String>, pub objective: Option<String>, pub acceptance: Option<Vec<CriterionSpec>>,
@@ -2300,6 +2405,8 @@ pub struct TaskEdit {
     pub tier: Option<Tier>, pub adapter: Option<Option<String>>, pub milestone_id: Option<Option<MilestoneId>>,
     pub depends_on: Option<Vec<TaskId>>,
     pub max_turns: Option<u32>, pub max_wall_secs: Option<u64>, pub max_retries: Option<u32>,
+    // ---- Phase 59（ADR-0046 D2 / D3 / D4）----
+    pub skills: Option<Vec<String>>, pub mode: Option<TaskMode>, pub harness: Option<Option<String>>,
     pub expected_status: Option<Status>,
 }
 pub struct EditResult { pub task: Task, pub fields: Vec<String> }

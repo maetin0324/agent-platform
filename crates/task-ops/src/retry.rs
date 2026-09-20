@@ -66,6 +66,9 @@ pub fn retry_task(store: &dyn TaskStore, id: TaskId, accept: bool, now: OffsetDa
         // ADR-0044 D3（Phase 53）: やり直したタスクは元のラベル・種類を引き継ぐ（人が付けた分類なので）。
         labels: original.labels.clone(),
         category: original.category,
+        // ADR-0046 D2 / D4（Phase 59）: やり直しは元の能力タグと進め方をそのまま引き継ぐ。
+        skills: original.skills.clone(),
+        mode: original.mode,
     };
     let new_id = new_task.id;
     let rewired = store.retry_task(id, &new_task)?;
@@ -89,7 +92,7 @@ mod tests {
     }
 
     fn base_spec(title: &str) -> crate::add::NewTaskSpec {
-        crate::add::NewTaskSpec {
+        crate::add::NewTaskSpec { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             title: title.to_string(),
             objective: "do it".to_string(),
@@ -137,7 +140,7 @@ mod tests {
     /// `store.insert` で直接書く（`add.rs` の検証を経由しない。依存関係の状態を自由に組み立てるため）。
     fn raw_task(status: Status, depends_on: Vec<TaskId>, conversation: Option<MessageId>) -> Task {
         let t = now();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,

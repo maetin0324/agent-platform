@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use task_core::{
-    AccountAdapter, CONVERSATION_GENRE, DelegationLimits, OrgKind, OrgNode, RoleSpec, Tier, WorkerHint, valid_org_id,
+    AccountAdapter, CONVERSATION_GENRE, DelegationLimits, HarnessBudget, HarnessRegistry, HarnessSpec, OrgKind,
+    OrgNode, Profile, RoleSpec, Tier, WorkerHint, valid_org_id,
 };
 use task_dispatch::{AccountsRuntimeConfig, ClusterSpec, DispatchConfig, ProviderSpec};
 
@@ -79,8 +80,15 @@ pub struct Config {
     #[serde(default)]
     pub roles: Vec<RoleConfig>,
     /// ADR-0027 D1: 分野ごとの説明と既定の役割。タスクの値 > 役割の既定 > 分野の既定（`default_role` の役割）> 親の値。
+    /// **ADR-0046 D3（Phase 59）以降は `[[harnesses]]` が正**で、ここは旧い設定の互換読み込みと、
+    /// `[[harnesses]]` からの射影（`Config::load` が埋める）の置き場になる。
     #[serde(default)]
     pub genres: Vec<GenreConfig>,
+    /// ADR-0046 D3（Phase 59）: ハーネス = 実行契約（`[[genres]]` + `[[roles]]` の後継）。
+    /// 書けばこちらが正で、`Config::load` が `genres` / `roles` に射影する（既存の経路はそのまま動く）。
+    /// 書かなければ旧い `[[genres]]` + `[[roles]]` を決定的に写す（warn を 1 行出す）。
+    #[serde(default)]
+    pub harnesses: Vec<HarnessConfig>,
     /// Phase 30（ADR-0033 D4 追記）: 対話が常に走る分野。実機の事故（関連研究調査課＝検索ハーネスに
     /// 話しかけたら検索ハーネスが会話しようとして落ちた）を受けて、対話は**ノードの `genre` を使わない**。
     /// 省略時は `conversation_genre_id()` が `task_core::CONVERSATION_GENRE`（`"secretary"`）を返す
@@ -439,6 +447,97 @@ pub const SMOKE_MAX_WALL_SECS: u64 = 60;
 pub const SMOKE_INSTRUCTIONS: &str =
     "検証（staging）の煙試験。偽のアダプタが 1 往復するだけで、外に出る操作は何もしない。";
 
+/// ADR-0046 D3: TOML の基本文字列（`"` と `\\` と改行だけを逃がす。決定的）。
+fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// ADR-0046 D3: `Tier` の TOML の綴り。
+fn tier_str(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Frontier => "frontier",
+        Tier::Standard => "standard",
+        Tier::Cheap => "cheap",
+    }
+}
+
+/// `[[harnesses]] budget`（ADR-0046 D3）。
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessBudgetConfig {
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+}
+
+/// `[[harnesses]]`（ADR-0046 D3）: 実行契約。今までの `[[genres]]`（能力・入出力の契約・対話用か）と
+/// `[[roles]]`（adapter・tier・指示文・予算）を 1 つにしたもの。**組織と 1 対 1 にしない**。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessConfig {
+    /// タスクの `genre` 列がそのまま指す id（例 `"coding"` / `"literature"`）。
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    /// 省略時は tier だけで選ぶ（fake / claude-code / codex / acp / paperqa / local-deep-research）。
+    #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    pub tier: Option<Tier>,
+    /// ワーカーのプロンプトに前置きする指示文。`GET /config` には**出さない**。
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub input_artifacts: Vec<String>,
+    #[serde(default)]
+    pub output_artifacts: Vec<String>,
+    #[serde(default)]
+    pub budget: HarnessBudgetConfig,
+    /// 対話用のハーネスか（今までの「対話用分野」）。
+    #[serde(default)]
+    pub conversation: bool,
+}
+
+impl HarnessConfig {
+    /// task-core の型に写す（設定の順）。
+    pub fn to_spec(&self) -> HarnessSpec {
+        HarnessSpec {
+            id: self.id.clone(),
+            description: self.description.clone(),
+            adapter: self.adapter.clone(),
+            tier: self.tier,
+            instructions: self.instructions.clone(),
+            capabilities: self.capabilities.clone(),
+            input_artifacts: self.input_artifacts.clone(),
+            output_artifacts: self.output_artifacts.clone(),
+            budget: HarnessBudget {
+                max_turns: self.budget.max_turns,
+                max_wall_secs: self.budget.max_wall_secs,
+                max_retries: self.budget.max_retries,
+            },
+            conversation: self.conversation,
+        }
+    }
+}
+
 /// `[[roles]]`（ADR-0016 D1）: 役割ごとの既定。タスクに書かれた値 > ここの既定 > 全体の既定の順に効く。
 /// `id` は自由記述で、ここに無い役割名をタスクに付けてもよい（既定も指示文も無いだけ）。
 #[derive(Debug, Clone, Deserialize)]
@@ -530,6 +629,10 @@ pub struct OrgSeedConfig {
     /// 担当の一言。
     #[serde(default)]
     pub brief: String,
+    /// ADR-0046 D1（Phase 59）: このノードの profile（skills / knowledge / harnesses / tools / …）。
+    /// 種を蒔くときだけ使う（以後は DB が正）。
+    #[serde(default)]
+    pub profile: Option<Profile>,
     /// 同じ親の中での並び順。省略したらファイルの並び順（0 始まり）。
     #[serde(default)]
     pub position: Option<i64>,
@@ -1202,6 +1305,19 @@ impl Config {
                 p.settings = Some(base.join(settings).to_string_lossy().into_owned());
             }
         }
+        // ADR-0046 D3（Phase 59）: `[[harnesses]]` があれば `genres` / `roles` に射影してから検証する
+        // （既存の経路は `genre` / `role` のまま動く）。無ければ旧い形のまま検証し、warn を 1 行出す。
+        if cfg.harnesses.is_empty() {
+            if !cfg.genres.is_empty() || !cfg.roles.is_empty() {
+                tracing::warn!(
+                    genres = cfg.genres.len(),
+                    roles = cfg.roles.len(),
+                    "config: [[genres]] + [[roles]] は ADR-0046 D3 で [[harnesses]] に置き換わった。                     互換で読み込んだ。`celerisctl config to-harnesses --config <this file>` で新しい形を書き出せる"
+                );
+            }
+        } else {
+            cfg.project_harnesses();
+        }
         cfg.validate()?;
         // API を有効にするなら、トークンが読めることを起動時に確かめる（exit 2）。
         if cfg.api.listen.is_some() {
@@ -1224,6 +1340,7 @@ impl Config {
                 kind: seed.kind,
                 genre: seed.genre.clone(),
                 brief: seed.brief.clone(),
+                profile: seed.profile.clone().unwrap_or_default(),
                 position: seed.position.unwrap_or(i as i64),
                 created_at: now,
                 updated_at: now,
@@ -1416,6 +1533,38 @@ impl Config {
                 "[workspace] worktree_branch_prefix must not be empty".to_string(),
             ));
         }
+        // ADR-0046 D3（Phase 59）: ハーネスの id は重複させない。adapter は providers と同じ判定。
+        let mut harness_ids = std::collections::HashSet::new();
+        for h in &self.harnesses {
+            if h.id.trim().is_empty() {
+                return Err(ConfigError::Invalid("[[harnesses]] id must not be empty".to_string()));
+            }
+            if !harness_ids.insert(&h.id) {
+                return Err(ConfigError::Invalid(format!("duplicate harness id: {}", h.id)));
+            }
+            if let Some(adapter) = &h.adapter
+                && adapter != task_worker::FakeAdapter::ID
+                && adapter != task_worker::ClaudeCodeAdapter::ID
+                && adapter != task_worker::CodexAdapter::ID
+                && adapter != task_worker::AcpAdapter::ID
+                && adapter != task_worker::PaperQaAdapter::ID
+                && adapter != task_worker::LdrAdapter::ID
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "[[harnesses]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research only)",
+                    h.id
+                )));
+            }
+            if h.budget.max_turns == Some(0) {
+                return Err(ConfigError::Invalid(format!("[[harnesses]] {}: max_turns must be >= 1", h.id)));
+            }
+            if h.budget.max_wall_secs == Some(0) {
+                return Err(ConfigError::Invalid(format!(
+                    "[[harnesses]] {}: max_wall_secs must be >= 1",
+                    h.id
+                )));
+            }
+        }
         // ADR-0016 D1: 役割の id は重複させない。adapter は providers と同じ判定。上限は 1 以上。
         let mut role_ids = std::collections::HashSet::new();
         for r in &self.roles {
@@ -1548,6 +1697,13 @@ impl Config {
                     )));
                 }
                 _ => {}
+            }
+            // ADR-0046 D1（Phase 59）: 種の profile も起動時に検証する（知らない道具・知らない
+            // ハーネス・skill の綴り）。ハーネスの集合は射影後の `[[genres]]` ＋ 組み込み。
+            if let Some(profile) = &node.profile {
+                let known = task_core::known_harness_ids(&self.genre_specs());
+                task_core::validate_profile(profile, &known)
+                    .map_err(|e| ConfigError::Invalid(format!("[[org]] {}: profile: {e}", node.id)))?;
             }
         }
         // ADR-0016 D2 / M6: 0 の上限は「委譲を止める」ではなく設定ミス（拒否理由が毎回出るだけ）なので拒否する。
@@ -1815,6 +1971,203 @@ impl Config {
                 roles: g.roles.clone(),
             })
             .collect()
+    }
+
+    /// ADR-0046 D3（Phase 59）: ハーネスのレジストリ（`HarnessRegistry::get(id)` が唯一の引き方）。
+    ///
+    /// `[[harnesses]]` があればそれが正。無ければ旧い `[[genres]]` + `[[roles]]` を決定的に写す
+    /// （互換の読み込み）。どちらの場合も組み込み（conversation / plan / reviewer / smoke）が足される。
+    pub fn harness_registry(&self) -> HarnessRegistry {
+        if !self.harnesses.is_empty() {
+            return HarnessRegistry::new(self.harnesses.iter().map(HarnessConfig::to_spec).collect());
+        }
+        let (registry, _dropped) =
+            HarnessRegistry::from_legacy(&self.genre_specs(), &self.role_specs(), self.conversation_genre_id());
+        registry
+    }
+
+    /// ADR-0046 D3: 旧い設定を写したときに「写さなかった役割」（どの分野の `default_role` でもなく、
+    /// 同名のハーネスも無い役割）の id。`celerisctl config to-harnesses` が注意書きに出す。
+    pub fn legacy_dropped_roles(&self) -> Vec<String> {
+        if !self.harnesses.is_empty() {
+            return Vec::new();
+        }
+        let (_, dropped) =
+            HarnessRegistry::from_legacy(&self.genre_specs(), &self.role_specs(), self.conversation_genre_id());
+        dropped
+    }
+
+    /// ADR-0046 D3（Phase 59）: `[[harnesses]]` を書いた設定を、既存の経路（`genre` / `role` を見る
+    /// ディスパッチャ・task-ops）がそのまま使えるように `genres` / `roles` へ射影する。
+    ///
+    /// 射影するのは**設定に書かれたハーネスだけ**（組み込みの `plan` / `reviewer` / `smoke` は
+    /// タスクの `genre` として使わないので、計画 run の「使える分野」に混ぜない）。ただし
+    /// `[conversation] genre` が組み込みを指しているときは、その 1 件だけ足す（対話が指示文を失わないように）。
+    /// `[[harnesses]]` が無い設定では**何もしない**（Phase 58 までと 1 バイトも変わらない）。
+    pub fn project_harnesses(&mut self) {
+        if self.harnesses.is_empty() {
+            return;
+        }
+        let registry = self.harness_registry();
+        let mut specs: Vec<HarnessSpec> = self.harnesses.iter().map(HarnessConfig::to_spec).collect();
+        let conversation = self.conversation_genre_id().to_string();
+        if !specs.iter().any(|h| h.id == conversation)
+            && let Some(builtin) = registry.get(&conversation)
+        {
+            specs.push(builtin.clone());
+        }
+        self.genres = specs
+            .iter()
+            .map(|h| {
+                let g = h.genre_spec();
+                GenreConfig {
+                    id: g.id,
+                    description: g.description,
+                    capabilities: g.capabilities,
+                    input_artifacts: g.input_artifacts,
+                    output_artifacts: g.output_artifacts,
+                    default_role: g.default_role,
+                    roles: g.roles,
+                }
+            })
+            .collect();
+        self.roles = specs
+            .iter()
+            .map(|h| {
+                let r = h.role_spec();
+                RoleConfig {
+                    id: r.id,
+                    tier: r.tier,
+                    adapter: r.adapter,
+                    max_turns: r.max_turns,
+                    max_wall_secs: r.max_wall_secs,
+                    instructions: r.instructions,
+                }
+            })
+            .collect();
+    }
+
+    /// ADR-0046 D3（Phase 59）: `celerisctl config to-harnesses` の出力。旧い `[[genres]]` + `[[roles]]`
+    /// を `[[harnesses]]` の形に書き出す（人がこれで設定を差し替える）。決定的（LLM は使わない）。
+    ///
+    /// ADR-0046 D6 の改名に合わせて、旧い対話用分野の id が `secretary` のときは **`conversation`**
+    /// という id で書き出し、`[conversation] genre = "conversation"` も一緒に出す。
+    pub fn to_harnesses_toml(&self) -> String {
+        let registry = self.harness_registry();
+        let declared: Vec<&HarnessSpec> = if self.harnesses.is_empty() {
+            // 旧い設定から写したもののうち、**設定に由来するもの**だけを書き出す
+            // （組み込みだけのハーネスは書き出さない。設定に同じ id があれば書き出す）。
+            registry
+                .all()
+                .iter()
+                .filter(|h| {
+                    self.genres.iter().any(|g| g.id == h.id) || self.roles.iter().any(|r| r.id == h.id)
+                })
+                .collect()
+        } else {
+            registry
+                .all()
+                .iter()
+                .filter(|h| self.harnesses.iter().any(|c| c.id == h.id))
+                .collect()
+        };
+        let legacy_conversation = self.conversation_genre_id().to_string();
+        let rename_conversation = legacy_conversation == CONVERSATION_GENRE;
+        let mut out = String::new();
+        out.push_str("# ADR-0046 D3: `[[genres]]` + `[[roles]]` を `[[harnesses]]` に写したもの
+");
+        out.push_str("# （`celerisctl config to-harnesses` が生成。決定的で、LLM は使っていない）。
+");
+        out.push_str("#
+");
+        out.push_str("# 使い方: 下の `[[harnesses]]` と `[conversation]` を config.toml に貼り、
+");
+        out.push_str("#   **既存の `[[genres]]` と `[[roles]]` の節を全部消す**（両方あると `[[harnesses]]` が勝つ）。
+");
+        let dropped = self.legacy_dropped_roles();
+        if !dropped.is_empty() {
+            out.push_str(&format!(
+                "#
+# 写せなかった役割（どの分野の `default_role` でもなく、同名のハーネスも無い）: {}
+                 #   これらは `tasks.role` の互換としてしか使われない。必要なら手で `[[harnesses]]` に足すこと。
+",
+                dropped.join(", ")
+            ));
+        }
+        if rename_conversation {
+            out.push_str(&format!(
+                "#
+# ADR-0046 D6: 対話用のハーネスは `{CONVERSATION_GENRE}` から `conversation` に改名した
+                 #   （根ノードも `secretary` → `cos`）。下の `[conversation]` も一緒に貼ること。
+"
+            ));
+        }
+        for h in declared {
+            let id = if rename_conversation && h.id == legacy_conversation {
+                task_core::BUILTIN_CONVERSATION.to_string()
+            } else {
+                h.id.clone()
+            };
+            out.push_str("
+[[harnesses]]
+");
+            out.push_str(&format!("id = {}
+", toml_string(&id)));
+            out.push_str(&format!("description = {}
+", toml_string(&h.description)));
+            if let Some(adapter) = &h.adapter {
+                out.push_str(&format!("adapter = {}
+", toml_string(adapter)));
+            }
+            if let Some(tier) = h.tier {
+                out.push_str(&format!("tier = {}
+", toml_string(tier_str(tier))));
+            }
+            if h.conversation {
+                out.push_str("conversation = true
+");
+            }
+            for (name, list) in [
+                ("capabilities", &h.capabilities),
+                ("input_artifacts", &h.input_artifacts),
+                ("output_artifacts", &h.output_artifacts),
+            ] {
+                if list.is_empty() {
+                    continue;
+                }
+                let items: Vec<String> = list.iter().map(|v| toml_string(v)).collect();
+                out.push_str(&format!("{name} = [{}]
+", items.join(", ")));
+            }
+            if !h.budget.is_empty() {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(v) = h.budget.max_turns {
+                    parts.push(format!("max_turns = {v}"));
+                }
+                if let Some(v) = h.budget.max_wall_secs {
+                    parts.push(format!("max_wall_secs = {v}"));
+                }
+                if let Some(v) = h.budget.max_retries {
+                    parts.push(format!("max_retries = {v}"));
+                }
+                out.push_str(&format!("budget = {{ {} }}
+", parts.join(", ")));
+            }
+            if let Some(instructions) = &h.instructions {
+                out.push_str(&format!("instructions = {}
+", toml_string(instructions)));
+            }
+        }
+        let conversation_id = if rename_conversation {
+            task_core::BUILTIN_CONVERSATION
+        } else {
+            legacy_conversation.as_str()
+        };
+        out.push_str(&format!("
+[conversation]
+genre = {}
+", toml_string(conversation_id)));
+        out
     }
 
     /// Phase 30（ADR-0033 D4 追記）: 対話が常に走る分野の id。`[conversation] genre`、省略時は

@@ -178,7 +178,7 @@ mod tests {
 
     fn review_task(created_at: OffsetDateTime) -> Task {
         use task_core::{Budget, MilestoneId, Status, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec};
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -229,7 +229,7 @@ mod tests {
         created_at: OffsetDateTime,
     ) -> Task {
         use task_core::{Budget, TaskId, Tier, WorkerHint, WorkspaceSpec};
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,

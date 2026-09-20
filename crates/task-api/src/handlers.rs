@@ -317,12 +317,31 @@ fn validate_genre(state: &ApiState, genre: Option<&str>) -> Result<(), ApiProble
     }]))
 }
 
+/// ADR-0046 D1（Phase 59）: profile の決定的な検証（知らない道具・知らないハーネス・skill の綴り）。
+/// ハーネスの集合は設定の `[[genres]]`（= `[[harnesses]]` の射影）＋ 組み込み。分野を 1 つも設定して
+/// いない構成では検証しない（`validate_genre` と同じ規律）。
+fn validate_profile_body(state: &ApiState, profile: Option<&task_core::Profile>) -> Result<(), ApiProblem> {
+    let Some(profile) = profile else { return Ok(()) };
+    let known = task_core::known_harness_ids(&state.inner.genres);
+    task_core::validate_profile(profile, &known).map_err(|e| {
+        ApiProblem::validation(vec![ValidationError {
+            field: Some("profile".into()),
+            message: e.to_string(),
+        }])
+    })
+}
+
 async fn org_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
     let items = state
         .blocking(|store| store.org_list().map_err(store_problem))
         .await?;
-    Ok(json_response(StatusCode::OK, &OrgList { items }))
+    // ADR-0046 D1: 継いだ後の実効 profile も一緒に返す（計算は純粋関数。DB には保存しない）。
+    let effective_profiles = items
+        .iter()
+        .map(|n| task_core::resolve_profile(&items, &n.id))
+        .collect();
+    Ok(json_response(StatusCode::OK, &OrgList { items, effective_profiles }))
 }
 
 async fn create_org_node(
@@ -336,6 +355,7 @@ async fn create_org_node(
     let create: OrgCreateBody = read_json(body, false).await?;
     // 監査 L-1: `genre` は `[[genres]]` にあるものだけ受ける（`genres` が空の設定では検証しない）。
     validate_genre(&state, create.genre.as_deref())?;
+    validate_profile_body(&state, create.profile.as_ref())?;
     let node = state
         .blocking(move |store| {
             if store.org_get(&create.id).map_err(store_problem)?.is_some() {
@@ -349,6 +369,8 @@ async fn create_org_node(
                 kind: create.kind,
                 genre: create.genre,
                 brief: create.brief.unwrap_or_default(),
+                // ADR-0046 D1（Phase 59）: 省略時は空の profile。
+                profile: create.profile.unwrap_or_default(),
                 position: create.position.unwrap_or(0),
                 created_at: now,
                 updated_at: now,
@@ -377,6 +399,7 @@ async fn patch_org_node(
     if let Some(genre) = &patch.genre {
         validate_genre(&state, genre.as_deref())?;
     }
+    validate_profile_body(&state, patch.profile.as_ref())?;
     let node = state
         .blocking(move |store| {
             let mut node = load_org_node(store, &id)?;
@@ -397,6 +420,10 @@ async fn patch_org_node(
             }
             if let Some(position) = patch.position {
                 node.position = position;
+            }
+            // ADR-0046 D1（Phase 59）: profile は**丸ごと差し替え**（書かなければ今のまま）。
+            if let Some(profile) = patch.profile {
+                node.profile = profile;
             }
             node.updated_at = OffsetDateTime::now_utc();
             store.org_upsert(&node).map_err(store_problem)

@@ -231,6 +231,9 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         // ADR-0044 D1/D3: `celerisctl add` は引数を増やさない（ラベル・種類・初期状態は GUI から）。
         labels: Vec::new(),
         category: None,
+        // ADR-0046 D2/D4: skills と mode も GUI から（`celerisctl add` は引数を増やさない）。
+        skills: Vec::new(),
+        mode: None,
         status: None,
     };
 

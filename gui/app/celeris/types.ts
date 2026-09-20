@@ -191,6 +191,21 @@ export type Event =
       by: string;
       fields: string[];
       type: "edited";
+    }
+  | {
+      /**
+       * 決まった担当（`org_nodes.id`）。
+       */
+      node: string;
+      /**
+       * 決め手（決定的な文面。LLM は使わない）。
+       */
+      reason: string;
+      /**
+       * タスクの skills とノードの実効 skills の重なりの数。
+       */
+      score: number;
+      type: "assigned";
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -311,6 +326,11 @@ export type CriterionSpec =
  */
 export type TaskCategory = "feature" | "bug" | "research" | "ops" | "docs" | "other";
 /**
+ * ADR-0046 D4（Phase 59）: タスクの進め方。前置きに足す規則とレビューの厳しさを切り替える。
+ * 既定は `Production`（導入前のタスクは全部これ。従来の挙動と同じ）。状態機械は見ない。
+ */
+export type TaskMode = "prototype" | "production" | "research";
+/**
  * ADR-0044 D3: `priority` の入力。`"P1"` のようなラベルでも整数でも書ける（API は `priority_label` を
  * 返すので、GUI はラベルだけを扱えばよい。`i32` は互換のため残す）。
  */
@@ -325,6 +345,15 @@ export type NotificationKind =
  * 組織のノードの種類（ADR-0033 D1）。`secretary` は根で 1 つだけ。
  */
 export type OrgKind = "secretary" | "department" | "section";
+/**
+ * ADR-0046 D1: 知識のマウントの種類（ADR-0047 の知識。ここでは「何をマウントするか」の宣言だけを持ち、
+ * 実際に読むのは Knowledge Base 側）。
+ */
+export type KnowledgeKind = "kb" | "repo" | "memory";
+/**
+ * ADR-0046 D1: `run`（どこで動かすか）。子が勝つ。
+ */
+export type ProfileRun = "host" | "container";
 /**
  * 案件の状態（ADR-0033 D2、ADR-0044 D6）。
  */
@@ -1729,6 +1758,10 @@ export interface Task {
    * ADR-0033 D2: このタスクが属する途中目標（`project_id` の案件のもの）。
    */
   milestone_id?: MilestoneId | null;
+  /**
+   * ADR-0046 D4: 進め方（`prototype` / `production` / `research`。既定 `production`）。
+   */
+  mode?: "prototype" | "production" | "research";
   objective: string;
   parent_id?: TaskId | null;
   priority: number;
@@ -1748,6 +1781,11 @@ export interface Task {
    * 導入前のタスクには無いので任意。
    */
   role?: string | null;
+  /**
+   * ADR-0046 D2: このタスクに必要な能力タグ（`org_nodes` の実効 `skills` と突き合わせて担当を決める。
+   * ADR-0046 D5 の matching）。導入前のタスクには無いので既定は空。
+   */
+  skills?: string[];
   status: Status;
   title: string;
   updated_at: string;
@@ -2323,6 +2361,10 @@ export interface NewTaskSpec {
    * ADR-0033 D2: このタスクが属する途中目標。`project_id` と同じ案件のものであること。
    */
   milestone_id?: MilestoneId | null;
+  /**
+   * ADR-0046 D4（Phase 59）: 進め方（`prototype` / `production` / `research`）。省略時は `production`。
+   */
+  mode?: TaskMode | null;
   objective: string;
   parent?: TaskId | null;
   /**
@@ -2345,6 +2387,11 @@ export interface NewTaskSpec {
    * ADR-0016 D1: 役割名（自由記述）。`[[roles]]` にあれば省略値の既定と run 時の指示文が効く。
    */
   role?: string | null;
+  /**
+   * ADR-0046 D2（Phase 59）: このタスクに必要な能力タグ（小文字 `[a-z0-9._-]`、最大 12 個）。
+   * `assignee` を書かなければ、これとノードの実効 `skills` の重なりで担当が決まる（D5 の matching）。
+   */
+  skills?: string[];
   /**
    * ADR-0044 D1: 初期状態。`draft` か `ready` だけ（それ以外は 422）。**省略時は呼び出し側の既定**
    * （`celerisctl add` と委譲・計画の経路は従来どおり `draft`、`POST /tasks` は `ready`。人は Go を出す
@@ -2430,12 +2477,129 @@ export interface OrgCreateBody {
   name: string;
   parent_id?: string | null;
   position?: number | null;
+  /**
+   * ADR-0046 D1（Phase 59）: このノードの profile（省略時は空）。
+   */
+  profile?: Profile | null;
+}
+/**
+ * ADR-0046 D1: ノードが持つ profile。**全ての項目が任意**（既定は空）で、空の profile は
+ * `org_nodes.profile_json` にも JSON にも出ない（導入前のノードと 1 バイトも変わらない）。
+ */
+export interface Profile {
+  /**
+   * 禁止する道具。和だが**常に勝つ**（実効の `tools` から引かれる）。
+   */
+  deny_tools?: string[];
+  harnesses?: HarnessPrefs;
+  /**
+   * ADR-0047 の知識のマウント。親と和。
+   */
+  knowledge?: KnowledgeMount[];
+  model?: ModelPrefs;
+  permissions?: Permissions;
+  /**
+   * 根→葉の順に連結される（「文化」の箇条書き）。
+   */
+  policy?: string[];
+  review?: ReviewPrefs;
+  run?: ProfileRun | null;
+  /**
+   * 能力タグ（ADR-0046 D2）。親と和。
+   */
+  skills?: string[];
+  /**
+   * ADR-0046 D8 の語彙。親と和。
+   */
+  tools?: string[];
+}
+/**
+ * ADR-0046 D1 / D3: このノードが受けられるハーネス。`allowed` は親と和、`default` は子が勝つ。
+ */
+export interface HarnessPrefs {
+  allowed?: string[];
+  default?: string | null;
+}
+/**
+ * ADR-0046 D1: 知識のマウント 1 件。
+ */
+export interface KnowledgeMount {
+  /**
+   * `repo` の文書ディレクトリ（既定は無し）。
+   */
+  docs?: string | null;
+  kind: KnowledgeKind;
+  /**
+   * `repo` のリポジトリ名。
+   */
+  name?: string | null;
+  /**
+   * 任意のパス（`repo` の中の場所、`kb` のファイル）。
+   */
+  path?: string | null;
+  /**
+   * `kb` の範囲（`environment/clusters` など）。
+   */
+  scope?: string | null;
+}
+/**
+ * ADR-0046 D1: モデルの段（`tier` は子が勝つ、`allowed_tiers` は交わり）。
+ */
+export interface ModelPrefs {
+  allowed_tiers?: Tier[];
+  tier?: Tier | null;
+}
+/**
+ * ADR-0046 D1 / D8: そのノード以下で once / standing の対象になる操作の名前（親と和）。
+ */
+export interface Permissions {
+  approvals?: string[];
+}
+/**
+ * ADR-0046 D1: レビューの既定（子が勝つ）。
+ */
+export interface ReviewPrefs {
+  harness?: string | null;
+  tier?: Tier | null;
 }
 /**
  * Phase 23（ADR-0033 D1）: 組織（一つ、役割の木）。
  */
 export interface OrgList {
+  /**
+   * ADR-0046 D1: `items` と同じ並びの実効 profile（`EffectiveProfile.node_id` で対応づく）。
+   */
+  effective_profiles?: EffectiveProfile[];
   items: OrgNode[];
+}
+/**
+ * ADR-0046 D1: 根から葉まで merge した結果。前置き・matching・道具の受け渡しはこれだけを見る。
+ */
+export interface EffectiveProfile {
+  allowed_tiers?: Tier[];
+  approvals?: string[];
+  /**
+   * 根→葉のノード id（GUI が「どこから継いだか」を出すため）。
+   */
+  chain?: string[];
+  deny_tools?: string[];
+  harness_default?: string | null;
+  harnesses_allowed?: string[];
+  knowledge?: KnowledgeMount[];
+  /**
+   * 対象のノード（知らない id なら空文字列）。
+   */
+  node_id: string;
+  policy?: string[];
+  review_harness?: string | null;
+  review_tier?: Tier | null;
+  run?: ProfileRun | null;
+  skills?: string[];
+  tier?: Tier | null;
+  /**
+   * `deny_tools` を引いた後の道具。
+   */
+  tools?: string[];
 }
 /**
  * 組織の 1 ノード（＝ SPEC §3.2 の「人」）。
@@ -2464,7 +2628,39 @@ export interface OrgNode {
    * 同じ親の中での並び順（GUI の組織図の表示順）。
    */
   position?: number;
+  profile?: Profile1;
   updated_at: string;
+}
+/**
+ * ADR-0046 D1: ノードが持つ profile。**全ての項目が任意**（既定は空）で、空の profile は
+ * `org_nodes.profile_json` にも JSON にも出ない（導入前のノードと 1 バイトも変わらない）。
+ */
+export interface Profile1 {
+  /**
+   * 禁止する道具。和だが**常に勝つ**（実効の `tools` から引かれる）。
+   */
+  deny_tools?: string[];
+  harnesses?: HarnessPrefs;
+  /**
+   * ADR-0047 の知識のマウント。親と和。
+   */
+  knowledge?: KnowledgeMount[];
+  model?: ModelPrefs;
+  permissions?: Permissions;
+  /**
+   * 根→葉の順に連結される（「文化」の箇条書き）。
+   */
+  policy?: string[];
+  review?: ReviewPrefs;
+  run?: ProfileRun | null;
+  /**
+   * 能力タグ（ADR-0046 D2）。親と和。
+   */
+  skills?: string[];
+  /**
+   * ADR-0046 D8 の語彙。親と和。
+   */
+  tools?: string[];
 }
 /**
  * `PATCH /org/{id}` の要求本文（管理系）。書いた項目だけを変える。
@@ -2477,6 +2673,10 @@ export interface OrgPatchBody {
   name?: string | null;
   parent_id?: string | null;
   position?: number | null;
+  /**
+   * ADR-0046 D1（Phase 59）: profile の**丸ごと差し替え**（部分更新はしない。書かなければ今のまま）。
+   */
+  profile?: Profile | null;
 }
 /**
  * RFC 9457 の problem details（`application/problem+json`）。`extra` は `code` ごとの付加フィールド。
@@ -3469,6 +3669,11 @@ export interface TaskEdit {
    */
   expected_status?: Status | null;
   /**
+   * ADR-0046 D3（Phase 59）: ハーネス（`tasks.genre` 列をそのまま harness id として使う）。
+   * `null` で外す。`genres`（= ハーネスのレジストリの射影）が空でなければ知らない id は 422。
+   */
+  harness?: string | null;
+  /**
    * ADR-0044 D3: 差し替え（小文字 `[a-z0-9-]`、最大 8 個）。
    */
   labels?: string[] | null;
@@ -3479,6 +3684,10 @@ export interface TaskEdit {
    * 途中目標（`null` で外す）。そのタスクの案件のものであること。
    */
   milestone_id?: MilestoneId | null;
+  /**
+   * ADR-0046 D4（Phase 59）: 進め方（`prototype` / `production` / `research`）。
+   */
+  mode?: TaskMode | null;
   objective?: string | null;
   /**
    * ADR-0044 D3: `"P1"` でも `20` でもよい。
@@ -3495,6 +3704,10 @@ export interface TaskEdit {
    * 役割名（`null` で外す）。
    */
   role?: string | null;
+  /**
+   * ADR-0046 D2（Phase 59）: 必要な能力タグの差し替え（小文字 `[a-z0-9._-]`、最大 12 個）。
+   */
+  skills?: string[] | null;
   /**
    * ADR-0033 D2 の最上位「タスク」の tier 指定（`worker_hint.tier`）。
    */

@@ -7,6 +7,8 @@ pub mod artifacts;
 /// ADR-0044 D2（Phase 53）: タスク単位のコメント。
 pub mod comment;
 pub mod delegate;
+/// ADR-0046 D3（Phase 59）: ハーネス = 実行契約（`[[harnesses]]`。旧 `[[genres]]` + `[[roles]]`）。
+pub mod harness;
 /// ADR-0040 D4（Phase 47）: celeris のインスタンスの役割（`daemon_instances`）。
 pub mod instance;
 /// ADR-0043 D5（Phase 54）: 変更の取り込みの記録（`task_integrations`）。
@@ -16,6 +18,8 @@ pub mod model;
 pub mod notify;
 pub mod org;
 pub mod plan;
+/// ADR-0046 D1（Phase 59）: 組織 = Agent Profile の継承木。
+pub mod profile;
 pub mod report;
 /// ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ（`project_repos`）とタスクの `repos`。
 pub mod repos;
@@ -35,6 +39,18 @@ pub use comment::{
     CommentAuthorKind, CommentId, MAX_COMMENT_CHARS, PREAMBLE_COMMENTS, TaskComment,
 };
 pub use instance::{DaemonInstance, DaemonMode, InstanceRole, SharedRole};
+// ---- ADR-0046 D3（Phase 59）: ハーネスのレジストリ ----
+pub use harness::{
+    BUILTIN_CONVERSATION, BUILTIN_HARNESSES, BUILTIN_PLAN, BUILTIN_REVIEWER, BUILTIN_SMOKE, HarnessBudget,
+    HarnessRegistry, HarnessSpec, builtin_harnesses, known_harness_ids,
+};
+// ---- ADR-0046 D1（Phase 59）: profile の継承木 ----
+pub use profile::{
+    CLUSTER_TOOL_PREFIX, COS_ID, COS_NAME, EffectiveProfile, HarnessPrefs, KnowledgeKind, KnowledgeMount,
+    ModelPrefs, Permissions, Profile, ProfileError, ProfileRun, ReviewPrefs, TOOL_VOCABULARY, ancestry,
+    is_known_tool, is_valid_skill, validate_profile,
+};
+pub use profile::resolve as resolve_profile;
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use integrations::{IntegrationId, IntegrationMethod, IntegrationState, TaskIntegration};
 pub use message::{
@@ -43,9 +59,9 @@ pub use message::{
 };
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, DEFAULT_PRIORITY, Event, GenreSpec, HARNESS_ADAPTERS, Lease, MAX_LABELS,
-    PRIORITY_LABELS, RoleSpec, RunRole, Status, Task, TaskCategory, TaskId, TaskKind, Tier, Usage, WorkerHint,
-    WorkspaceMode, WorkspaceSpec, artifact_entry_description, artifact_entry_name, expand_home, home_dir,
-    is_valid_label, normalize_labels, priority_from_label, priority_label,
+    MAX_SKILLS, PRIORITY_LABELS, RoleSpec, RunRole, Status, Task, TaskCategory, TaskId, TaskKind, TaskMode, Tier,
+    Usage, WorkerHint, WorkspaceMode, WorkspaceSpec, artifact_entry_description, artifact_entry_name, expand_home,
+    home_dir, is_valid_label, normalize_labels, normalize_skills, priority_from_label, priority_label,
 };
 // ---- ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ ----
 pub use repos::{

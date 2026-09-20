@@ -36,7 +36,7 @@ impl Env {
         let store = SqliteStore::open(&dir.path().join("celeris.db")).unwrap_or_else(|e| panic!("open: {e}"));
         let env = Self { _dir: dir, store };
         env.store
-            .org_upsert(&OrgNode {
+            .org_upsert(&OrgNode { profile: Default::default(),
                 id: "secretary".into(),
                 parent_id: None,
                 name: "秘書".into(),
@@ -106,7 +106,7 @@ impl Env {
 }
 
 fn task(status: Status) -> Task {
-    Task {
+    Task { mode: Default::default(), skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,

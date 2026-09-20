@@ -1377,6 +1377,8 @@ async fn check_provider(
         milestone_id: None,
         assignee: None,
         conversation: None,
+        skills: Vec::new(),
+        mode: task_core::TaskMode::default(),
         labels: Vec::new(),
         category: Default::default(),
     };

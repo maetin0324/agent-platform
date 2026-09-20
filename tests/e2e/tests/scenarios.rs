@@ -86,7 +86,7 @@ model = "fake"
     /// `celerisctl add` → `approve` と同じ経路（insert + Created、Accept）で ready にする。
     fn add_ready_task(&self, title: &str, dir: &Path, checks: Vec<Check>, depends_on: Vec<TaskId>, max_retries: u32) -> TaskId {
         let now = OffsetDateTime::now_utc();
-        let task = Task {
+        let task = Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -319,7 +319,7 @@ fn expired_lease_is_reclaimed_and_task_completes() {
     let dir = env.workspace_for("stale");
     // 前世代の celeris が落ちた状態を再現: running + 期限切れリース。
     let now = OffsetDateTime::now_utc();
-    let task = Task {
+    let task = Task { mode: Default::default(), skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,

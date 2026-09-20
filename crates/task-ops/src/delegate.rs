@@ -291,7 +291,7 @@ mod tests {
 
     fn make_task(parent_id: Option<TaskId>, status: Status) -> Task {
         let t = now();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id,

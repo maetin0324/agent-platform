@@ -197,6 +197,9 @@ fn conversation_task(
         role: role.map(|r| r.id.clone()),
         genre: genre.map(|g| g.id.clone()),
         aggregate: false,
+        // ADR-0046 D2 / D4（Phase 59）: 対話には必要な能力タグも進め方も無い（返事に合否は無い）。
+        skills: Vec::new(),
+        mode: task_core::TaskMode::default(),
         project_id,
         milestone_id: None,
         assignee: Some(node.id.clone()),
@@ -406,7 +409,7 @@ mod tests {
 
     fn node(id: &str, parent: Option<&str>, kind: OrgKind, genre: Option<&str>) -> OrgNode {
         let t = now();
-        OrgNode {
+        OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: format!("{id} さん"),
@@ -551,7 +554,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         let t = now();
         store
-            .org_upsert(&OrgNode {
+            .org_upsert(&OrgNode { profile: Default::default(),
                 id: "secretary".into(),
                 parent_id: None,
                 name: "秘書".into(),
@@ -564,7 +567,7 @@ mod tests {
             })
             .expect("org upsert");
         store
-            .org_upsert(&OrgNode {
+            .org_upsert(&OrgNode { profile: Default::default(),
                 id: "research-survey".into(),
                 parent_id: Some("secretary".into()),
                 name: "関連研究調査課".into(),

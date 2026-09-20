@@ -154,7 +154,61 @@ pub struct ReviewExtras {
     /// ADR-0043 D4: 先頭のリポジトリの `.config/celeris/workspace.toml` の `[commands] check`。
     /// **タスクの `acceptance` に `Check::Command` が 1 つも無いときだけ**、暗黙の条件として
     /// `exit 0` を期待して実行する（タスクに明示があればそれが勝つ）。空なら何もしない。
+    ///
+    /// ADR-0046 D4（Phase 59）: `mode = prototype` のタスクではディスパッチャがこれを**空にする**
+    /// （「明示の受け入れ条件だけ。リポジトリの check は使わない」）。
     pub repo_checks: Vec<String>,
+    /// ADR-0046 D4（Phase 59）: `mode = research` のタスクだけ true。暗黙の条件として
+    /// 「結果に出典（`sources`）か計測の記録がある」を足す（[`research_evidence`] が決定的に判定する）。
+    pub research: bool,
+}
+
+/// ADR-0046 D4（Phase 59）: `mode = research` の暗黙の条件。**決定的**（LLM は使わない）。
+///
+/// `<artifacts_dir>/result.json` を読み、次のどれかがあれば合格:
+/// - `sources` が非空の配列（トップレベル、または `done` の下）
+/// - `measurements` が非空の配列（計測の記録。同上）
+/// - `<artifacts_dir>/sources.json` が非空の配列（PaperQA2 / Local Deep Research が書くファイル）
+pub fn research_evidence(artifacts_dir: &Path, artifacts_rel: &str) -> (bool, String) {
+    let result_path = artifacts_dir.join("result.json");
+    let result_rel = format!("{artifacts_rel}/result.json");
+    if let Ok(text) = std::fs::read_to_string(&result_path)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
+    {
+        for key in ["sources", "measurements"] {
+            if let Some(n) = non_empty_array_len(&value, key) {
+                return (true, format!("{result_rel}: {key} に {n} 件（mode = research）"));
+            }
+            if let Some(done) = value.get("done")
+                && let Some(n) = non_empty_array_len(done, key)
+            {
+                return (true, format!("{result_rel}: done.{key} に {n} 件（mode = research）"));
+            }
+        }
+    }
+    let sources_path = artifacts_dir.join("sources.json");
+    if let Ok(text) = std::fs::read_to_string(&sources_path)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
+    {
+        let n = match &value {
+            serde_json::Value::Array(items) => items.len(),
+            other => other.get("sources").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0),
+        };
+        if n > 0 {
+            return (true, format!("{artifacts_rel}/sources.json: 出典 {n} 件（mode = research）"));
+        }
+    }
+    (
+        false,
+        format!(
+            "mode = research だが、結果に出典も計測の記録も無い（{result_rel} の `sources` / `measurements`、             または {artifacts_rel}/sources.json のどれかに 1 件以上必要）"
+        ),
+    )
+}
+
+fn non_empty_array_len(value: &serde_json::Value, key: &str) -> Option<usize> {
+    let items = value.get(key)?.as_array()?;
+    if items.is_empty() { None } else { Some(items.len()) }
 }
 
 pub const SUMMARY_FILE_NAME: &str = "summary.md";
@@ -179,6 +233,7 @@ pub async fn review_task(
         human,
         aggregate,
         repo_checks,
+        research,
     } = extras;
     let subject = &subject;
     let mut verdicts = Vec::with_capacity(task.acceptance.len() + 1);
@@ -300,6 +355,20 @@ pub async fn review_task(
         }
     }
 
+    // ADR-0046 D4（Phase 59）: `mode = research` は「結果に出典か計測の記録があること」を暗黙の条件に足す。
+    if research {
+        let idx = task.acceptance.len()
+            + usize::from(plan.is_some())
+            + usize::from(aggregate)
+            + if task.acceptance.iter().any(|c| matches!(c.check, Check::Command { .. })) {
+                0
+            } else {
+                repo_checks.len()
+            };
+        let (pass, reason) = research_evidence(artifacts_dir, &artifacts_rel);
+        verdicts.push(Verdict { criterion_idx: idx, pass, reason });
+    }
+
     // ADR-0007 D5 2./3.: 決定的条件が全 pass のときだけ LLM レビュー run を起動する。
     let mut provider_failure = None;
     let mut reviewer_run = None;
@@ -398,6 +467,10 @@ pub fn synthetic_review_task(subject_task: &Task, run_id: &str, hint: &WorkerHin
         worker_hint: hint.clone(),
         workspace: subject_task.workspace.clone(),
         budget: subject_task.budget,
+        // ADR-0046 D4（Phase 59）: 合成したレビューのタスクは対象タスクの進め方を継ぐ
+        // （前置きに mode の規則が出る）。
+        skills: Vec::new(),
+        mode: subject_task.mode,
         attempts: 0,
         lease: Some(task_core::Lease {
             worker_run_id: run_id.to_string(),
@@ -575,7 +648,7 @@ mod tests {
 
     fn task_with(checks: Vec<Check>, dir: &Path) -> Task {
         let now = time::OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,

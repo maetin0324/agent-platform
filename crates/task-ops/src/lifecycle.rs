@@ -311,7 +311,7 @@ mod tests {
         status: Status,
     ) -> Task {
         let now = OffsetDateTime::now_utc();
-        let task = Task {
+        let task = Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,

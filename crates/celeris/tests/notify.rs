@@ -72,7 +72,7 @@ impl Env {
             ("poc", "検証課", Some("secretary"), OrgKind::Section),
         ] {
             self.store
-                .org_upsert(&OrgNode {
+                .org_upsert(&OrgNode { profile: Default::default(),
                     id: id.into(),
                     parent_id: parent.map(str::to_string),
                     name: name.into(),
@@ -133,7 +133,7 @@ impl Env {
 
 fn task(status: Status) -> Task {
     let now = at(0);
-    Task {
+    Task { mode: Default::default(), skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,

@@ -10,8 +10,8 @@ use time::OffsetDateTime;
 
 use crate::delegate::{ChildSpec, WorkspaceContext, resolve_child_defaults};
 use crate::model::{
-    Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskCategory, TaskId, TaskKind, Tier, WorkerHint,
-    WorkspaceSpec,
+    Budget, Check, Criterion, GenreSpec, RoleSpec, Status, Task, TaskCategory, TaskId, TaskKind, TaskMode, Tier,
+    WorkerHint, WorkspaceSpec,
 };
 use crate::org::OrgNode;
 
@@ -75,6 +75,26 @@ pub struct NewTask {
     /// 規則に合わないラベルは**落とす**（計画 run を失敗させない。人がボードで直せる）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// ADR-0046 D2（Phase 59）: この子に**必要な能力タグ**（`["rust", "sqlite"]`）。担当（`assignee`）を
+    /// 書かなかった子は、これとノードの実効 `skills` の重なりで担当が決まる（D5 の matching）。
+    /// 規則（小文字 `[a-z0-9._-]`、最大 12 個）に合わないタグは**落とす**（`labels` と同じ扱い）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// ADR-0046 D4（Phase 59）: この子の進め方（`prototype` / `production` / `research`）。
+    /// **省略時は親の mode を継ぐ**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TaskMode>,
+    /// ADR-0046 D3（Phase 59）: `genre` の別名（ハーネス id）。新しい設定では分野ではなく
+    /// **ハーネス**と呼ぶので、計画はどちらの名前で書いてもよい。両方書いたら `genre` が勝つ。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+}
+
+impl NewTask {
+    /// ADR-0046 D3: この子のハーネス id（`genre` 明示 > `harness` の別名）。
+    pub fn harness_id(&self) -> Option<&str> {
+        self.genre.as_deref().or(self.harness.as_deref())
+    }
 }
 
 /// DESIGN §5.6 の `PlanOutput{ tasks: Vec<NewTask> }`。
@@ -171,8 +191,9 @@ pub fn validate(
         });
     }
     for (index, t) in plan.tasks.iter().enumerate() {
-        if let Some(genre) = &t.genre {
-            let Some(spec) = GenreSpec::find(genres, genre) else {
+        if let Some(genre) = t.harness_id() {
+            let genre = genre.to_string();
+            let Some(spec) = GenreSpec::find(genres, &genre) else {
                 return Err(PlanError::UnknownGenre { index, genre: genre.clone() });
             };
             if let Some(role) = &t.role
@@ -388,7 +409,8 @@ pub fn materialize(
             let defaults = resolve_child_defaults(
                 parent,
                 ChildSpec {
-                    genre: t.genre.as_deref(),
+                    // ADR-0046 D3: `harness` は `genre` の別名（明示の `genre` が勝つ）。
+                    genre: t.harness_id(),
                     role: t.role.as_deref(),
                     tier: t.tier,
                     assignee: t.assignee.as_deref(),
@@ -459,9 +481,27 @@ pub fn materialize(
                     })
                 }),
                 category: t.category.unwrap_or_default(),
+                // ADR-0046 D2 / D4（Phase 59）: 必要な能力タグ（規則に合わないものは黙って落とす）と
+                // 進め方（省略時は親の mode を継ぐ）。
+                skills: keep_valid_skills(&t.skills),
+                mode: t.mode.unwrap_or(parent.mode),
             }
         })
         .collect()
+}
+
+/// ADR-0046 D2: 計画が書いた skill タグのうち規則に合うものだけを、順を保って重複なく残す
+/// （上限を超えた分は落とす。計画 run は失敗させない。`labels` と同じ扱い）。
+pub fn keep_valid_skills(skills: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for skill in skills {
+        if !crate::profile::is_valid_skill(skill) || out.iter().any(|s| s == skill) {
+            continue;
+        }
+        out.push(skill.clone());
+    }
+    out.truncate(crate::model::MAX_SKILLS);
+    out
 }
 
 /// 生成したスキーマ（`serde_json::Value`）。
@@ -477,7 +517,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn new_task(title: &str, deps: Vec<usize>) -> NewTask {
-        NewTask {
+        NewTask { harness: None, mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             title: title.into(),
             objective: format!("do {title}"),
@@ -512,7 +552,7 @@ mod tests {
 
     fn parent() -> Task {
         let now = OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -765,7 +805,7 @@ mod tests {
     fn materialize_carries_the_assignee_and_uses_its_genre_only_without_a_role() {
         use crate::org::{OrgKind, OrgNode};
         let now = OffsetDateTime::now_utc();
-        let node = |id: &str, genre_id: Option<&str>| OrgNode {
+        let node = |id: &str, genre_id: Option<&str>| OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: Some("research".into()),
             name: id.into(),
@@ -824,7 +864,7 @@ mod tests {
     fn harness_setup() -> (Vec<crate::org::OrgNode>, Vec<RoleSpec>, Vec<GenreSpec>) {
         use crate::org::{OrgKind, OrgNode};
         let now = OffsetDateTime::now_utc();
-        let node = |id: &str, genre_id: &str| OrgNode {
+        let node = |id: &str, genre_id: &str| OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: Some("research".into()),
             name: id.into(),

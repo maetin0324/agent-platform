@@ -53,7 +53,7 @@ mod tests {
     fn run_reports_failure_exit_code_on_drift() {
         let store = SqliteStore::open_in_memory().expect("open");
         let now = time::OffsetDateTime::now_utc();
-        let task = task_core::Task {
+        let task = task_core::Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,

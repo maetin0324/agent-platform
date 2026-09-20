@@ -281,7 +281,7 @@ mod tests {
 
     fn sample_task(status: Status, parent_id: Option<TaskId>) -> Task {
         let now = OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id,

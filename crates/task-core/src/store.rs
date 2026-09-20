@@ -51,10 +51,12 @@ const MIGRATION_0013: &str = include_str!("../migrations/0013_task_comments.sql"
 const MIGRATION_0014: &str = include_str!("../migrations/0014_task_integrations.sql");
 /// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ（`archived_at` / `paused_from`）。
 const MIGRATION_0015: &str = include_str!("../migrations/0015_lifecycle.sql");
+/// ADR-0046 D1/D2/D4（Phase 59）: `org_nodes.profile_json` と `tasks.skills_json` / `tasks.mode`。
+const MIGRATION_0016: &str = include_str!("../migrations/0016_org_profiles.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +107,48 @@ pub enum StoreError {
     /// ADR-0043 D1（Phase 52）: 案件のリポジトリの検証に落ちた（API は 422）。
     #[error(transparent)]
     Repo(#[from] RepoError),
+}
+
+/// ADR-0046 D1（Phase 59）: `org_nodes.profile_json` に書く値。空の profile は NULL
+/// （導入前のノードの行と 1 バイトも変わらない）。
+fn profile_json(profile: &crate::profile::Profile) -> Result<Option<String>, StoreError> {
+    if profile.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string(profile)?))
+}
+
+/// ADR-0046 D7: ノード id を持つ表と列（`celerisctl org migrate-v2` が触ってよいものだけ）。
+fn is_known_node_ref(table: &str, column: &str) -> bool {
+    matches!(
+        (table, column),
+        ("tasks", "assignee")
+            | ("messages", "node_id")
+            | ("reports", "node_id")
+            | ("approvals", "node_id")
+            | ("standing_rules", "node_id")
+    )
+}
+
+/// ADR-0046 D7: 1 行のノード id を書き換える。`tasks` は `json`（正本）も直す。
+fn set_node_ref(tx: &Connection, table: &str, column: &str, id: &str, value: &str) -> Result<(), StoreError> {
+    if table == "tasks" {
+        let json: Option<String> = tx
+            .query_row("SELECT json FROM tasks WHERE id = ?1", params![id], |row| row.get(0))
+            .optional()?;
+        let Some(json) = json else { return Ok(()) };
+        let mut task: Task = serde_json::from_str(&json)?;
+        task.assignee = Some(value.to_string());
+        let updated = serde_json::to_string(&task)?;
+        tx.execute(
+            "UPDATE tasks SET assignee = ?1, json = ?2 WHERE id = ?3",
+            params![value, updated, id],
+        )?;
+        return Ok(());
+    }
+    let sql = format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2");
+    tx.execute(&sql, params![value, id])?;
+    Ok(())
 }
 
 /// `events` テーブルの 1 行（ADR-0013 D6）。`id` はテーブル全体でのグローバル単調増加値。
@@ -784,6 +828,83 @@ impl SqliteStore {
     }
 
     /// 現在の DB のスキーマ版数（`schema_migrations` の最大 `version`。行が無ければ 0）。
+    // ---- ADR-0046 D7（Phase 59）: `celerisctl org migrate-v2` のための低レベルの書き換え。
+    // 通常の経路（`org_upsert` / `update_task`）は状態機械と検証を通すが、移行は「id の付け替え」だけを
+    // まとめて行うので、ここに専用の関数を置く（`celerisctl` からしか呼ばない）。
+
+    /// ノード id を参照している行を `from` → `to` に書き換え、書き換えた行の主キーを返す。
+    /// `tasks` は `assignee` 列と `json`（正本）の両方を直す。
+    pub fn migrate_node_refs(
+        &self,
+        table: &str,
+        column: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        if !is_known_node_ref(table, column) {
+            return Err(StoreError::Invalid(format!("unknown node reference: {table}.{column}")));
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ids: Vec<String> = {
+            let sql = format!("SELECT id FROM {table} WHERE {column} = ?1");
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt.query_map(params![from], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        for id in &ids {
+            set_node_ref(&tx, table, column, id, to)?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    /// `migrate_node_refs` の逆（`--rollback`）。1 行だけを元の値に戻す。
+    pub fn restore_node_ref(&self, table: &str, column: &str, id: &str, old: &str) -> Result<(), StoreError> {
+        if !is_known_node_ref(table, column) {
+            return Err(StoreError::Invalid(format!("unknown node reference: {table}.{column}")));
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        set_node_ref(&tx, table, column, id, old)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `org_nodes` をまるごと差し替える（親が先に来る並びで渡すこと）。1 トランザクション。
+    pub fn replace_org_nodes(&self, nodes: &[OrgNode]) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM org_nodes", [])?;
+        let mut existing: Vec<OrgNode> = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            crate::org::validate_upsert(&existing, node)?;
+            tx.execute(
+                "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at, \
+                 profile_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    node.id,
+                    node.parent_id,
+                    node.name,
+                    node.kind.as_str(),
+                    node.genre,
+                    node.brief,
+                    node.position,
+                    format_rfc3339(node.created_at)?,
+                    format_rfc3339(node.updated_at)?,
+                    profile_json(&node.profile)?,
+                ],
+            )?;
+            existing.push(node.clone());
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn schema_version(&self) -> Result<u32, StoreError> {
         let conn = self.lock()?;
         let v: i64 = conn.query_row(
@@ -880,6 +1001,7 @@ impl SqliteStore {
             13 => Ok(MIGRATION_0013),
             14 => Ok(MIGRATION_0014),
             15 => Ok(MIGRATION_0015),
+            16 => Ok(MIGRATION_0016),
             other => Err(StoreError::Invalid(format!("unknown migration version: {other}"))),
         }
     }
@@ -920,10 +1042,21 @@ impl SqliteStore {
         let kind_col: String = row.get(3)?;
         let created_at: String = row.get(7)?;
         let updated_at: String = row.get(8)?;
+        // ADR-0046 D1（Phase 59）: 10 列目は `profile_json`（NULL なら空の profile）。
+        let profile_col: Option<String> = row.get(9)?;
         let Some(kind) = OrgKind::parse(&kind_col) else {
             return Ok(Err(StoreError::Invalid(format!(
                 "invalid org node kind in org_nodes: {kind_col}"
             ))));
+        };
+        let profile = match profile_col.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => match serde_json::from_str::<crate::profile::Profile>(raw) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return Ok(Err(StoreError::Invalid(format!("invalid org profile for {id}: {e}"))));
+                }
+            },
+            _ => crate::profile::Profile::default(),
         };
         Ok((|| {
             Ok(OrgNode {
@@ -933,6 +1066,7 @@ impl SqliteStore {
                 kind,
                 genre: row.get(4)?,
                 brief: row.get(5)?,
+                profile,
                 position: row.get(6)?,
                 created_at: parse_rfc3339(&created_at)?,
                 updated_at: parse_rfc3339(&updated_at)?,
@@ -942,7 +1076,7 @@ impl SqliteStore {
 
     fn org_list_tx(conn: &Connection) -> Result<Vec<OrgNode>, StoreError> {
         let mut stmt = conn.prepare(
-            "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at \
+            "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at, profile_json \
              FROM org_nodes ORDER BY position ASC, id ASC",
         )?;
         let rows = stmt.query_map([], Self::org_row)?;
@@ -1466,8 +1600,8 @@ impl SqliteStore {
         conn.execute(
             "INSERT INTO tasks (id, status, kind, parent_id, priority, created_at, \
              lease_worker_run_id, lease_expires_at, json, title, updated_at, objective, genre, \
-             project_id, milestone_id, assignee, repos_json, labels_json, category) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+             project_id, milestone_id, assignee, repos_json, labels_json, category, skills_json, mode) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 task.id.to_string(),
                 status_str(task.status),
@@ -1492,6 +1626,10 @@ impl SqliteStore {
                 // `update_task_tx` が同じ 2 列を書き直す。
                 serde_json::to_string(&task.labels)?,
                 task.category.as_str(),
+                // ADR-0046 D2 / D4（Phase 59）: skills と mode も `PATCH /tasks/{id}` で変わるので、
+                // `update_task_tx` が同じ 2 列を書き直す。
+                serde_json::to_string(&task.skills)?,
+                task.mode.as_str(),
             ],
         )?;
         Ok(())
@@ -1507,7 +1645,7 @@ impl SqliteStore {
         tx.execute(
             "UPDATE tasks SET json = ?1, title = ?2, updated_at = ?3, objective = ?4, genre = ?5, \
              priority = ?6, parent_id = ?7, project_id = ?8, milestone_id = ?9, assignee = ?10, \
-             labels_json = ?11, category = ?12 WHERE id = ?13",
+             labels_json = ?11, category = ?12, skills_json = ?13, mode = ?14 WHERE id = ?15",
             params![
                 json,
                 task.title,
@@ -1521,6 +1659,8 @@ impl SqliteStore {
                 task.assignee.clone(),
                 serde_json::to_string(&task.labels)?,
                 task.category.as_str(),
+                serde_json::to_string(&task.skills)?,
+                task.mode.as_str(),
                 task.id.to_string(),
             ],
         )?;
@@ -2442,7 +2582,7 @@ impl TaskStore for SqliteStore {
         let conn = self.lock()?;
         let row = conn
             .query_row(
-                "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at \
+                "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at, profile_json \
                  FROM org_nodes WHERE id = ?1",
                 params![id],
                 Self::org_row,
@@ -2462,11 +2602,13 @@ impl TaskStore for SqliteStore {
             stored.created_at = previous.created_at;
         }
         tx.execute(
-            "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+            "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at, \
+             profile_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
              ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
              kind = excluded.kind, genre = excluded.genre, brief = excluded.brief, \
-             position = excluded.position, updated_at = excluded.updated_at",
+             position = excluded.position, updated_at = excluded.updated_at, \
+             profile_json = excluded.profile_json",
             params![
                 stored.id,
                 stored.parent_id,
@@ -2477,6 +2619,7 @@ impl TaskStore for SqliteStore {
                 stored.position,
                 format_rfc3339(stored.created_at)?,
                 format_rfc3339(stored.updated_at)?,
+                profile_json(&stored.profile)?,
             ],
         )?;
         tx.commit()?;
@@ -2490,11 +2633,13 @@ impl TaskStore for SqliteStore {
         for node in nodes {
             crate::org::validate_upsert(&existing, node)?;
             tx.execute(
-                "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                "INSERT INTO org_nodes (id, parent_id, name, kind, genre, brief, position, created_at, updated_at, \
+                 profile_json) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
                  ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
                  kind = excluded.kind, genre = excluded.genre, brief = excluded.brief, \
-                 position = excluded.position, updated_at = excluded.updated_at",
+                 position = excluded.position, updated_at = excluded.updated_at, \
+                 profile_json = excluded.profile_json",
                 params![
                     node.id,
                     node.parent_id,
@@ -2505,6 +2650,7 @@ impl TaskStore for SqliteStore {
                     node.position,
                     format_rfc3339(node.created_at)?,
                     format_rfc3339(node.updated_at)?,
+                    profile_json(&node.profile)?,
                 ],
             )?;
             existing.push(node.clone());
@@ -3302,7 +3448,7 @@ mod tests {
 
     fn sample_task(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -4726,7 +4872,7 @@ mod tests {
 
     fn org_node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
         let now = OffsetDateTime::now_utc();
-        OrgNode {
+        OrgNode { profile: Default::default(),
             id: id.to_string(),
             parent_id: parent.map(str::to_string),
             name: format!("{id} の人"),
@@ -4907,7 +5053,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -5233,7 +5379,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -5645,7 +5791,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
 
         let project = store.project_get(project_id).unwrap().expect("project");
         assert_eq!(project.status, ProjectStatus::Active);
@@ -5708,7 +5854,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn

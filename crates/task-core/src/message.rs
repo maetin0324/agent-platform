@@ -142,7 +142,7 @@ mod tests {
     fn task_with(conversation: Option<MessageId>) -> Task {
         use crate::model::{Budget, Status, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec};
         let now = OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,

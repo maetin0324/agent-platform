@@ -655,7 +655,7 @@ mod tests {
 
     /// `Config` を toml を経由せず直接組み立てる（celerisctl は `toml` crate に依存していないため）。
     fn cluster_config(clusters: Vec<celeris::config::ClusterConfig>) -> Config {
-        Config {
+        Config { harnesses: Vec::new(),
             db: PathBuf::from("celeris.sqlite3"),
             workspace_root: PathBuf::from("workspaces"),
             tick_ms: 2000,
@@ -716,7 +716,7 @@ mod tests {
 
     fn task_fixture(status: Status, workspace: WorkspaceSpec) -> Task {
         let now = time::OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,

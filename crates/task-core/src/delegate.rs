@@ -446,6 +446,10 @@ pub fn materialize_delegated(
                 conversation: None,
                 labels: Vec::new(),
                 category: Default::default(),
+                // ADR-0046 D2 / D4（Phase 59）: 委譲の子は親の進め方を継ぐ。必要な能力タグは
+                // 委譲の提案には無い（親が明示の担当を決めるか、親の担当がそのまま受ける）。
+                skills: Vec::new(),
+                mode: parent.mode,
             }
         })
         .collect()
@@ -479,7 +483,7 @@ mod tests {
 
     fn parent() -> Task {
         let now = OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -749,7 +753,7 @@ mod tests {
     fn materialize_records_the_assignee_and_uses_its_genre_only_when_no_role_is_given() {
         use crate::org::{OrgKind, OrgNode};
         let now = OffsetDateTime::now_utc();
-        let node = |id: &str, genre_id: Option<&str>| OrgNode {
+        let node = |id: &str, genre_id: Option<&str>| OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: Some("research".into()),
             name: id.into(),

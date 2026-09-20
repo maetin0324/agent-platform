@@ -240,6 +240,7 @@ version = "0.1.0"
 dependencies = [
  "celeris",
  "clap",
+ "serde",
  "serde_json",
  "task-core",
  "task-dispatch",

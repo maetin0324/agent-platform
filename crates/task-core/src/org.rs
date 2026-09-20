@@ -123,6 +123,11 @@ pub struct OrgNode {
     /// 担当の一言（プロンプトに前置きされる）。
     #[serde(default)]
     pub brief: String,
+    /// ADR-0046 D1（Phase 59）: このノードの profile（`org_nodes.profile_json`）。子は親を継ぐ
+    /// （merge は `crate::profile::resolve`）。既定は空で、空なら JSON にも出さない
+    /// （導入前のノードと 1 バイトも変わらない）。
+    #[serde(default, skip_serializing_if = "crate::profile::Profile::is_empty")]
+    pub profile: crate::profile::Profile,
     /// 同じ親の中での並び順（GUI の組織図の表示順）。
     #[serde(default)]
     pub position: i64,
@@ -468,6 +473,7 @@ mod tests {
             kind,
             genre: None,
             brief: String::new(),
+            profile: crate::profile::Profile::default(),
             position: 0,
             created_at: now,
             updated_at: now,

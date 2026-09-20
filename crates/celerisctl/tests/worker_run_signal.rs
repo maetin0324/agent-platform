@@ -63,7 +63,7 @@ fn sigterm_kills_the_worker_process_and_exits_130() {
     let db = root.join("celeris.sqlite3");
     let store = SqliteStore::open(&db).unwrap();
     let now = OffsetDateTime::now_utc();
-    let task = Task {
+    let task = Task { mode: Default::default(), skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,

@@ -104,6 +104,9 @@ pub fn create_plan(store: &dyn TaskStore, spec: NewPlanSpec, now: OffsetDateTime
         role: None,
         genre: None,
         aggregate: false,
+        // ADR-0046 D2 / D4（Phase 59）: `celerisctl plan` の根は既定（能力タグ無し・production）。
+        skills: Vec::new(),
+        mode: task_core::TaskMode::default(),
         project_id: None,
         milestone_id: None,
         assignee: None,

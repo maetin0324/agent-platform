@@ -540,6 +540,36 @@
             "by"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0046 D5（Phase 59）: `assignee` が無いタスクの担当を matching が決めた。状態は変えない\n（`replay` は無視する）。GUI のタスク画面が「なぜこの担当か」をこの 1 件から出す。",
+          "properties": {
+            "node": {
+              "description": "決まった担当（`org_nodes.id`）。",
+              "type": "string"
+            },
+            "reason": {
+              "description": "決め手（決定的な文面。LLM は使わない）。",
+              "type": "string"
+            },
+            "score": {
+              "description": "タスクの skills とノードの実効 skills の重なりの数。",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "assigned",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "node",
+            "score",
+            "reason"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -712,6 +742,10 @@
           ],
           "description": "ADR-0033 D2: このタスクが属する途中目標（`project_id` の案件のもの）。"
         },
+        "mode": {
+          "$ref": "#/$defs/TaskMode",
+          "description": "ADR-0046 D4: 進め方（`prototype` / `production` / `research`。既定 `production`）。"
+        },
         "objective": {
           "type": "string"
         },
@@ -753,6 +787,13 @@
             "string",
             "null"
           ]
+        },
+        "skills": {
+          "description": "ADR-0046 D2: このタスクに必要な能力タグ（`org_nodes` の実効 `skills` と突き合わせて担当を決める。\nADR-0046 D5 の matching）。導入前のタスクには無いので既定は空。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "status": {
           "$ref": "#/$defs/Status"
@@ -814,6 +855,26 @@
         "approval"
       ],
       "type": "string"
+    },
+    "TaskMode": {
+      "description": "ADR-0046 D4（Phase 59）: タスクの進め方。前置きに足す規則とレビューの厳しさを切り替える。\n既定は `Production`（導入前のタスクは全部これ。従来の挙動と同じ）。状態機械は見ない。",
+      "oneOf": [
+        {
+          "const": "prototype",
+          "description": "動くことを最短で示す。レビューは明示の `acceptance` だけ（リポジトリの `check` は使わない）。",
+          "type": "string"
+        },
+        {
+          "const": "production",
+          "description": "既定。`acceptance` ＋ リポジトリの `check`（ADR-0043 D4）。",
+          "type": "string"
+        },
+        {
+          "const": "research",
+          "description": "主張には出典か計測を付ける。`acceptance` ＋ 結果に `sources`（または計測の記録）が無ければ不合格。",
+          "type": "string"
+        }
+      ]
     },
     "Tier": {
       "description": "DESIGN §5.4 の `WorkerHint`。",

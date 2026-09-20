@@ -659,7 +659,7 @@ mod tests {
     fn task() -> Task {
         let id = TaskId::new();
         let now = OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id,
             parent_id: None,

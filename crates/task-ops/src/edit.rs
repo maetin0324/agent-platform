@@ -66,6 +66,16 @@ pub struct TaskEdit {
     pub max_wall_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
+    /// ADR-0046 D2（Phase 59）: 必要な能力タグの差し替え（小文字 `[a-z0-9._-]`、最大 12 個）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    /// ADR-0046 D4（Phase 59）: 進め方（`prototype` / `production` / `research`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<task_core::TaskMode>,
+    /// ADR-0046 D3（Phase 59）: ハーネス（`tasks.genre` 列をそのまま harness id として使う）。
+    /// `null` で外す。`genres`（= ハーネスのレジストリの射影）が空でなければ知らない id は 422。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<Option<String>>,
     /// 楽観的排他（現在の `status` と違えば 409）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_status: Option<Status>,
@@ -172,6 +182,35 @@ pub fn edit_task(
     {
         task.category = category;
         fields.push("category".to_string());
+    }
+    // ADR-0046 D2（Phase 59）: 必要な能力タグ（差し替え）。
+    if let Some(skills) = edit.skills {
+        let normalized = task_core::normalize_skills(&skills).map_err(OpsError::Validation)?;
+        if normalized != task.skills {
+            task.skills = normalized;
+            fields.push("skills".to_string());
+        }
+    }
+    // ADR-0046 D4（Phase 59）: 進め方。
+    if let Some(mode) = edit.mode
+        && mode != task.mode
+    {
+        task.mode = mode;
+        fields.push("mode".to_string());
+    }
+    // ADR-0046 D3（Phase 59）: ハーネス（`tasks.genre` 列）。知らない id は 422
+    // （`genres` が空の設定では検証しない。作成時と同じ規律）。
+    if let Some(harness) = edit.harness {
+        if let Some(id) = harness.as_deref()
+            && !genres.is_empty()
+            && GenreSpec::find(genres, id).is_none()
+        {
+            return Err(OpsError::Validation(format!("unknown harness: {id:?}")));
+        }
+        if harness != task.genre {
+            task.genre = harness;
+            fields.push("harness".to_string());
+        }
     }
     if let Some(names) = edit.repos {
         // ADR-0043 D2: 名前 → `RepoRef`。解決の規則は `POST /tasks`（`add::resolve_repos` の
@@ -281,6 +320,13 @@ pub fn edit_task(
             fields.push("depends_on".to_string());
         }
     }
+    // ADR-0046 D5（Phase 59）: 担当かハーネスを変えたら、その担当がそのハーネスを受けられること。
+    if fields.iter().any(|f| f == "assignee" || f == "harness")
+        && let Some(assignee) = task.assignee.as_deref()
+    {
+        let org = store.org_list()?;
+        crate::matching::assignee_accepts(&org, assignee, task.genre.as_deref()).map_err(OpsError::Validation)?;
+    }
     let budget = Budget {
         max_turns: edit.max_turns.unwrap_or(task.budget.max_turns),
         max_wall_secs: edit.max_wall_secs.unwrap_or(task.budget.max_wall_secs),
@@ -336,7 +382,7 @@ mod tests {
 
     fn task_with(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,

@@ -37,7 +37,7 @@ fn env_with_token() -> TestEnv {
 
 fn node(id: &str, parent: Option<&str>, kind: OrgKind) -> OrgNode {
     let now = OffsetDateTime::now_utc();
-    OrgNode {
+    OrgNode { profile: Default::default(),
         id: id.into(),
         parent_id: parent.map(str::to_string),
         name: id.into(),
@@ -61,7 +61,7 @@ fn seed_org(env: &TestEnv) {
 fn blocked_task_with_approval(env: &TestEnv, node_id: &str, project: Option<ProjectId>) -> (Task, Approval) {
     let now = OffsetDateTime::now_utc();
     let id = TaskId::new();
-    let task = Task {
+    let task = Task { mode: Default::default(), skills: Vec::new(),
         repos: Vec::new(),
         id,
         parent_id: None,

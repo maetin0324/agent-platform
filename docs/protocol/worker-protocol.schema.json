@@ -362,6 +362,117 @@
       ],
       "type": "object"
     },
+    "EffectiveProfile": {
+      "description": "ADR-0046 D1: 根から葉まで merge した結果。前置き・matching・道具の受け渡しはこれだけを見る。",
+      "properties": {
+        "allowed_tiers": {
+          "items": {
+            "$ref": "#/$defs/Tier"
+          },
+          "type": "array"
+        },
+        "approvals": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "chain": {
+          "description": "根→葉のノード id（GUI が「どこから継いだか」を出すため）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "deny_tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "harness_default": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "harnesses_allowed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "knowledge": {
+          "items": {
+            "$ref": "#/$defs/KnowledgeMount"
+          },
+          "type": "array"
+        },
+        "node_id": {
+          "description": "対象のノード（知らない id なら空文字列）。",
+          "type": "string"
+        },
+        "policy": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "review_harness": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review_tier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileRun"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tools": {
+          "description": "`deny_tools` を引いた後の道具。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "type": "object"
+    },
     "Evidence": {
       "description": "`done.evidence[]`。`command` / `exit` / `stdout_tail` は、コマンドを伴わない条件（`ArtifactExists` / `Reviewer` / `Human`）では\n存在しないので任意（ADR-0012 D3, P-12。必須 → 任意の緩和なので後方互換）。",
       "properties": {
@@ -460,6 +571,67 @@
       },
       "required": [
         "id"
+      ],
+      "type": "object"
+    },
+    "KnowledgeKind": {
+      "description": "ADR-0046 D1: 知識のマウントの種類（ADR-0047 の知識。ここでは「何をマウントするか」の宣言だけを持ち、\n実際に読むのは Knowledge Base 側）。",
+      "oneOf": [
+        {
+          "const": "kb",
+          "description": "Knowledge Base の範囲（`scope`）。",
+          "type": "string"
+        },
+        {
+          "const": "repo",
+          "description": "リポジトリの文書（`name` のリポジトリの `docs`）。",
+          "type": "string"
+        },
+        {
+          "const": "memory",
+          "description": "このノードの長期記憶（`memory/<node>/`）。",
+          "type": "string"
+        }
+      ]
+    },
+    "KnowledgeMount": {
+      "additionalProperties": false,
+      "description": "ADR-0046 D1: 知識のマウント 1 件。",
+      "properties": {
+        "docs": {
+          "description": "`repo` の文書ディレクトリ（既定は無し）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/KnowledgeKind"
+        },
+        "name": {
+          "description": "`repo` のリポジトリ名。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "任意のパス（`repo` の中の場所、`kb` のファイル）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "`kb` の範囲（`environment/clusters` など）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
       ],
       "type": "object"
     },
@@ -619,6 +791,13 @@
             "null"
           ]
         },
+        "harnesses": {
+          "description": "ADR-0046 D3 / D6（Phase 59）: そのノードが受けられる**実効**ハーネスの id。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "id": {
           "type": "string"
         },
@@ -634,6 +813,13 @@
             "string",
             "null"
           ]
+        },
+        "skills": {
+          "description": "ADR-0046 D2 / D6（Phase 59）: そのノードの**実効** skills（根→葉で継いだ結果）。\nCoS の対話 run と分解 run に「誰が何をできるか」を出すために渡す。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -664,6 +850,14 @@
         "reason"
       ],
       "type": "object"
+    },
+    "ProfileRun": {
+      "description": "ADR-0046 D1: `run`（どこで動かすか）。子が勝つ。",
+      "enum": [
+        "host",
+        "container"
+      ],
+      "type": "string"
     },
     "ProjectId": {
       "description": "案件の一意識別子（ULID）。`TaskId` と同じ形。",
@@ -954,6 +1148,17 @@
           ],
           "description": "Phase 41（ADR-0038 D1）: **途中目標レビューの対話 run** にだけ `Some`。その途中目標と、そこまでの\n仕事の成果（`preamble` が「これまでの結果」の節を出し、ADR D1 の指示文を足す）。"
         },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0046 D4: このタスクの進め方。既定（`production`）は `None` にして渡さない\n（前置きを Phase 58 までと変えないため）。"
+        },
         "node": {
           "anyOf": [
             {
@@ -977,6 +1182,17 @@
             "$ref": "#/$defs/PriorReview"
           },
           "type": "array"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0046 D1: この run の**実効 profile**（担当ノードの根→葉の merge ＋ タスクの上書き）。\n担当が居ない run・profile を持たない組織では `None` で、前置きは Phase 58 までとバイト単位で同じ。"
         },
         "recent_work": {
           "description": "Phase 33（ADR-0033 D4 追記。実機の事故の再発防止）: 対話 run にだけ、その担当の直近の仕事\n（最大 10 件、更新の新しい順。案件を選んでいる対話ならその案件のものを先に）を渡す。\n通常の run（対話でない）では常に空。",
@@ -1163,6 +1379,10 @@
           ],
           "description": "ADR-0033 D2: このタスクが属する途中目標（`project_id` の案件のもの）。"
         },
+        "mode": {
+          "$ref": "#/$defs/TaskMode",
+          "description": "ADR-0046 D4: 進め方（`prototype` / `production` / `research`。既定 `production`）。"
+        },
         "objective": {
           "type": "string"
         },
@@ -1204,6 +1424,13 @@
             "string",
             "null"
           ]
+        },
+        "skills": {
+          "description": "ADR-0046 D2: このタスクに必要な能力タグ（`org_nodes` の実効 `skills` と突き合わせて担当を決める。\nADR-0046 D5 の matching）。導入前のタスクには無いので既定は空。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "status": {
           "$ref": "#/$defs/Status"
@@ -1265,6 +1492,26 @@
         "approval"
       ],
       "type": "string"
+    },
+    "TaskMode": {
+      "description": "ADR-0046 D4（Phase 59）: タスクの進め方。前置きに足す規則とレビューの厳しさを切り替える。\n既定は `Production`（導入前のタスクは全部これ。従来の挙動と同じ）。状態機械は見ない。",
+      "oneOf": [
+        {
+          "const": "prototype",
+          "description": "動くことを最短で示す。レビューは明示の `acceptance` だけ（リポジトリの `check` は使わない）。",
+          "type": "string"
+        },
+        {
+          "const": "production",
+          "description": "既定。`acceptance` ＋ リポジトリの `check`（ADR-0043 D4）。",
+          "type": "string"
+        },
+        {
+          "const": "research",
+          "description": "主張には出典か計測を付ける。`acceptance` ＋ 結果に `sources`（または計測の記録）が無ければ不合格。",
+          "type": "string"
+        }
+      ]
     },
     "Tier": {
       "description": "DESIGN §5.4 の `WorkerHint`。",

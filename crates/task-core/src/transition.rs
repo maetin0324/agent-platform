@@ -49,6 +49,10 @@ pub enum Trigger {
     ProjectCancelled,
     /// ADR-0044 D6（Phase 55）: 途中目標の中止による連鎖。理由は `"milestone_cancelled"`。
     MilestoneCancelled,
+    /// ADR-0046 D5（Phase 59）: 担当が決まらない（matching の候補が 1 つも無い）タスク:
+    /// `ready → blocked`、attempts 据え置き。人が組織を直すか担当を指定したら `Answer` で再開する
+    /// （ADR-0021 の質問経路と同じ出口）。
+    Unroutable,
 }
 
 impl Trigger {
@@ -76,6 +80,7 @@ impl Trigger {
             Trigger::Reopen => "reopen",
             Trigger::ProjectCancelled => "project_cancelled",
             Trigger::MilestoneCancelled => "milestone_cancelled",
+            Trigger::Unroutable => "unroutable",
         }
     }
 
@@ -264,6 +269,19 @@ pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransiti
 
         Trigger::WorkerQuestion => {
             if s.status == Status::Running {
+                Ok(Outcome {
+                    next: Status::Blocked,
+                    attempts: s.attempts,
+                    reason: t.name(),
+                })
+            } else {
+                Err(invalid(s, t))
+            }
+        }
+
+        // ADR-0046 D5（Phase 59）: 担当が見つからないタスクは人に聞く（`ready → blocked`）。
+        Trigger::Unroutable => {
+            if s.status == Status::Ready {
                 Ok(Outcome {
                     next: Status::Blocked,
                     attempts: s.attempts,
@@ -463,6 +481,14 @@ mod tests {
                     expect_err()
                 }
             }
+            // ADR-0046 D5（Phase 59）: 担当が見つからない `ready` のタスクだけが `blocked` になる。
+            Trigger::Unroutable => {
+                if status == Status::Ready {
+                    expect_ok(Status::Blocked)
+                } else {
+                    expect_err()
+                }
+            }
             Trigger::ReviewPass => {
                 if status == Status::Reviewing {
                     expect_ok(Status::Done)
@@ -514,6 +540,8 @@ mod tests {
             // ADR-0044 D2（Phase 53）: 割り込みと再開も attempts を絡めない（据え置き / 0 に戻す）。
             Trigger::Interrupt,
             Trigger::Reopen,
+            // ADR-0046 D5（Phase 59）: 担当が決まらない `ready` → `blocked`（attempts 据え置き）。
+            Trigger::Unroutable,
         ];
 
         let mut count = 0usize;
@@ -557,8 +585,8 @@ mod tests {
                 }
             }
         }
-        // 4 kinds * 8 statuses * 14 triggers（Phase 53 で Interrupt / Reopen を追加）
-        assert_eq!(count, 4 * 8 * 14);
+        // 4 kinds * 8 statuses * 15 triggers（Phase 53 で Interrupt / Reopen、Phase 59 で Unroutable を追加）
+        assert_eq!(count, 4 * 8 * 15);
     }
 
     /// ADR-0044 D2（Phase 53）: 割り込みは attempts を消費せず理由は `comment`、再開は attempts を 0 に戻す。

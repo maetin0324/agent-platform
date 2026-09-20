@@ -71,7 +71,7 @@ mod tests {
     fn task(parent: Option<TaskId>) -> Task {
         use crate::model::*;
         let now = time::OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: parent,

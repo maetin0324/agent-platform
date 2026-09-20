@@ -307,15 +307,26 @@ fn children_section(context: &RunContext, artifacts: &str) -> String {
 }
 
 
-/// ADR-0033 D4（Phase 24）: 「どの課に何を振るか」を `assignee` で指定させる指示（Plan run 用）。
+/// ADR-0046 D2 / D4 / D5（Phase 59）: 計画には**人選をさせない**。
+///
+/// Phase 58 までは「上の組織図を見て子タスクごとに `assignee` を必ず書け」と指示していたが、
+/// ADR-0046 D5 で担当は決定的な matching が決めるようになった。代わりに、子タスクごとに
+/// **`harness` / `skills` / `mode`** を宣言させる（それが matching の入力になる）。
 /// 組織図を渡していない run（Phase 23 までの構成）では何も出さない。
 fn assignee_instructions_for_plan(context: &RunContext) -> String {
     if context.organization.is_empty() {
         return String::new();
     }
-    "上の組織図を見て、**子タスクごとに `assignee` を必ず書け**（その仕事を任せる課の id）。\n\
-     `role` は必要なときだけ書けばよい（書かなければその課の分野の既定の役割で走る）。\n\
-     `role` を書いた場合は、そちらの tier / アダプタ / 予算が使われ、`assignee` は「誰の仕事か」だけを表す。\n\n"
+    "## 誰がやるか (ADR-0046 D5)\n\
+     **`assignee`（担当）は書くな。組織図から人を選ぶ必要は無い。** 誰がやるかは celeris が決定的に決める\n\
+     （必要な skill と harness の重なりで選ぶ）。代わりに、子タスクごとに次の 3 つを書け:\n\
+     - `harness`: その仕事の実行契約の id（下の「使える分野」から選ぶ）\n\
+     - `skills`: その仕事に**必要な能力タグ**の配列（例 `[\"rust\",\"sqlite\"]`）。小文字・`[a-z0-9._-]`、最大 12 個。\n\
+     \u{3000}分からなければ空でよい（その harness を既定に持つ担当に回る）\n\
+     - `mode`: `prototype`（動くことを最短で示す）/ `production`（既定。テストと lint を通す）/ \
+     `research`（主張に出典か計測を付ける）\n\
+     どうしても人を名指ししたいときだけ `assignee` を書ける。その人がその harness を受けられなければ\n\
+     その計画は差し戻される。\n\n"
         .to_string()
 }
 
@@ -477,6 +488,8 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
          \"acceptance\":[{{\"text\":\"...\",\"check\":{{\"type\":\"command\",\"cmd\":\"...\",\
          \"expect_exit\":0}}}}],\"depends_on\":[<index into this same tasks array>],\
          \"kind\":\"execute\"|\"plan\" (omit for \"execute\"),\
+         \"harness\":\"<harness id>\", \"skills\":[\"<skill tag>\"], \
+         \"mode\":\"prototype\"|\"production\"|\"research\" (optional), \
          \"assignee\":\"<org node id>\" (optional), \
          \"tier\":\"frontier\"|\"standard\"|\"cheap\" (optional)}}]}}\n\
          ```\n\
@@ -498,7 +511,8 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
     out.push_str("\n```\n\n");
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
-    out.push_str(&organization_section(context));
+    // ADR-0046 D5（Phase 59）: 計画に組織図は渡さない（人選をさせない）。代わりに harness / skills /
+    // mode を宣言させ、担当は決定的な matching が決める。
     out.push_str(&assignee_instructions_for_plan(context));
     out.push_str(&available_genres_section_for_plan(context, artifacts));
     out.push_str(&workspace_section_for_plan(context));
@@ -1521,7 +1535,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
     fn build_prompt_includes_the_org_chart_and_the_assignee_instruction_only_when_present() {
         let mut task = crate::protocol::tests::sample_task();
         let org = vec![
-            crate::protocol::OrgNodeContext {
+            crate::protocol::OrgNodeContext { harnesses: Vec::new(), skills: Vec::new(),
                 id: "research".into(),
                 name: "研究部".into(),
                 kind: task_core::OrgKind::Department,
@@ -1529,7 +1543,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 brief: "課に振り分ける".into(),
                 genre: None,
             },
-            crate::protocol::OrgNodeContext {
+            crate::protocol::OrgNodeContext { harnesses: Vec::new(), skills: Vec::new(),
                 id: "research-survey".into(),
                 name: "関連研究調査課".into(),
                 kind: task_core::OrgKind::Section,
@@ -1548,9 +1562,11 @@ echo '{"type":"result","subtype":"success","is_error":false}'
 
         task.kind = task_core::TaskKind::Plan;
         let plan = build_prompt(&task, &context, "run-o2", "artifacts");
-        assert!(plan.contains("## 組織図"));
-        assert!(plan.contains("子タスクごとに `assignee` を必ず書け"));
-        assert!(plan.contains("`role` は必要なときだけ"));
+        // ADR-0046 D5（Phase 59）: 計画は人選をしない。組織図も渡さない。
+        assert!(plan.contains("**`assignee`（担当）は書くな"), "{plan}");
+        assert!(plan.contains("`harness`: その仕事の実行契約の id"), "{plan}");
+        assert!(plan.contains("`mode`: `prototype`"), "{plan}");
+        assert!(!plan.contains("## 組織図 (who you can assign work to)"), "{plan}");
 
         assert!(!build_prompt(&task, &RunContext::default(), "run-o3", "artifacts").contains("組織図"));
     }
@@ -1789,7 +1805,9 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         };
         assert_eq!(harness_artifacts_section_for_plan(&coding_only), "");
         let prompt = build_prompt(&task, &coding_only, "run-plan-harness-2", "artifacts");
-        assert!(!prompt.contains("ハーネス"), "{prompt}");
+        // Phase 59（ADR-0046 D3）: 計画の JSON スキーマには `harness` の説明が入るので、"ハーネス" の
+        // 文字だけでは判定できない。規約の節そのものが無いことを見る。
+        assert!(!prompt.contains("## ハーネスで動く分野の成果物"), "{prompt}");
 
         // `output_artifacts` を書いていないハーネス系の分野も、出す名前が無いので節は出ない。
         let bare = RunContext {

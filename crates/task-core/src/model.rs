@@ -248,6 +248,67 @@ impl TaskCategory {
     }
 }
 
+/// ADR-0046 D4（Phase 59）: タスクの進め方。前置きに足す規則とレビューの厳しさを切り替える。
+/// 既定は `Production`（導入前のタスクは全部これ。従来の挙動と同じ）。状態機械は見ない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskMode {
+    /// 動くことを最短で示す。レビューは明示の `acceptance` だけ（リポジトリの `check` は使わない）。
+    Prototype,
+    /// 既定。`acceptance` ＋ リポジトリの `check`（ADR-0043 D4）。
+    #[default]
+    Production,
+    /// 主張には出典か計測を付ける。`acceptance` ＋ 結果に `sources`（または計測の記録）が無ければ不合格。
+    Research,
+}
+
+impl TaskMode {
+    /// serde の `skip_serializing_if` 用。既定の `production` は JSON に出さないので、導入前のタスクの
+    /// JSON と 1 バイトも変わらない。
+    pub fn is_default(&self) -> bool {
+        *self == TaskMode::Production
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskMode::Prototype => "prototype",
+            TaskMode::Production => "production",
+            TaskMode::Research => "research",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<TaskMode> {
+        match s {
+            "prototype" => Some(TaskMode::Prototype),
+            "production" => Some(TaskMode::Production),
+            "research" => Some(TaskMode::Research),
+            _ => None,
+        }
+    }
+}
+
+/// ADR-0046 D2: 1 タスクに書ける skill（必要な能力タグ）の上限。
+pub const MAX_SKILLS: usize = 12;
+
+/// ADR-0046 D2: skill の一覧を検証する（重複は取り除き、順は保つ）。違反があれば理由を返す。
+pub fn normalize_skills(skills: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::with_capacity(skills.len());
+    for skill in skills {
+        if !crate::profile::is_valid_skill(skill) {
+            return Err(format!(
+                "skill {skill:?} must match [a-z0-9._-] (lowercase, 1..=64 characters)"
+            ));
+        }
+        if !out.iter().any(|s| s == skill) {
+            out.push(skill.clone());
+        }
+    }
+    if out.len() > MAX_SKILLS {
+        return Err(format!("at most {MAX_SKILLS} skills are allowed (got {})", out.len()));
+    }
+    Ok(out)
+}
+
 /// ADR-0044 D3: 1 タスクに付けられるラベルの上限。
 pub const MAX_LABELS: usize = 8;
 
@@ -364,6 +425,15 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "TaskCategory::is_default")]
     pub category: TaskCategory,
     // ---- ADR-0044 D3（Phase 53）: ここまで ----
+    // ---- ADR-0046 D2 / D4（Phase 59）: 必要な能力タグと進め方。ここから ----
+    /// ADR-0046 D2: このタスクに必要な能力タグ（`org_nodes` の実効 `skills` と突き合わせて担当を決める。
+    /// ADR-0046 D5 の matching）。導入前のタスクには無いので既定は空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// ADR-0046 D4: 進め方（`prototype` / `production` / `research`。既定 `production`）。
+    #[serde(default, skip_serializing_if = "TaskMode::is_default")]
+    pub mode: TaskMode,
+    // ---- ADR-0046 D2 / D4（Phase 59）: ここまで ----
     /// ADR-0033 D4（Phase 24）: 対話由来のタスクなら、きっかけになった人の発言（`messages.id`）。
     /// run が終わると、その結果が `assignee` のノードの返事として `messages` に入る。
     /// **DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。
@@ -603,6 +673,16 @@ pub enum Event {
     Edited {
         fields: Vec<String>,
         by: String,
+    },
+    /// ADR-0046 D5（Phase 59）: `assignee` が無いタスクの担当を matching が決めた。状態は変えない
+    /// （`replay` は無視する）。GUI のタスク画面が「なぜこの担当か」をこの 1 件から出す。
+    Assigned {
+        /// 決まった担当（`org_nodes.id`）。
+        node: String,
+        /// タスクの skills とノードの実効 skills の重なりの数。
+        score: usize,
+        /// 決め手（決定的な文面。LLM は使わない）。
+        reason: String,
     },
 }
 

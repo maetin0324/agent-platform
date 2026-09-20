@@ -21,6 +21,8 @@ use task_core::{ArtifactRef, DelegateTask, GenreSpec, Status, Task, TaskId, Usag
 /// 従来の `<workspace>/artifacts` と同じ値なので、これを読まないワーカーも単独タスクではそのまま動く）。
 /// Phase 38（ADR-0028 追記）: `context.available_genres[].harness` と `context.subject_genre` を追加
 /// （計画とレビュアーに「ハーネスで動く分野の成果物の名前は固定」を伝えるため）。
+/// Phase 59（ADR-0046 D1/D4/D6）: `context.profile`（実効 profile）、`context.mode`（進め方）、
+/// `context.organization[].skills` / `.harnesses` を追加（版数は据え置き。追加だけなので v4 のまま）。
 /// 全て追加のみで v1〜v3 のワーカーはそのまま動く。
 pub const PROTOCOL_VERSION: u32 = 4;
 
@@ -267,6 +269,13 @@ pub struct OrgNodeContext {
     pub brief: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genre: Option<String>,
+    /// ADR-0046 D2 / D6（Phase 59）: そのノードの**実効** skills（根→葉で継いだ結果）。
+    /// CoS の対話 run と分解 run に「誰が何をできるか」を出すために渡す。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// ADR-0046 D3 / D6（Phase 59）: そのノードが受けられる**実効**ハーネスの id。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<String>,
 }
 
 impl From<&task_core::OrgNode> for OrgNodeContext {
@@ -278,6 +287,19 @@ impl From<&task_core::OrgNode> for OrgNodeContext {
             parent_id: n.parent_id.clone(),
             brief: n.brief.clone(),
             genre: n.genre.clone(),
+            skills: Vec::new(),
+            harnesses: Vec::new(),
+        }
+    }
+}
+
+impl OrgNodeContext {
+    /// ADR-0046 D6: 実効 profile（`task_core::profile::resolve`）から skills / harnesses を足した版。
+    pub fn with_profile(n: &task_core::OrgNode, effective: &task_core::EffectiveProfile) -> Self {
+        Self {
+            skills: effective.skills.clone(),
+            harnesses: effective.harnesses_allowed.clone(),
+            ..Self::from(n)
         }
     }
 }
@@ -364,6 +386,16 @@ pub struct RunContext {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub comments_enabled: bool,
     // ---- ADR-0044 D2（Phase 53）: ここまで ----
+    // ---- ADR-0046（Phase 59）: 実効 profile と進め方。ここから ----
+    /// ADR-0046 D1: この run の**実効 profile**（担当ノードの根→葉の merge ＋ タスクの上書き）。
+    /// 担当が居ない run・profile を持たない組織では `None` で、前置きは Phase 58 までとバイト単位で同じ。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<task_core::EffectiveProfile>,
+    /// ADR-0046 D4: このタスクの進め方。既定（`production`）は `None` にして渡さない
+    /// （前置きを Phase 58 までと変えないため）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<task_core::TaskMode>,
+    // ---- ADR-0046（Phase 59）: ここまで ----
 }
 
 /// `context.comments[]`（ADR-0044 D2 / Phase 53）: タスクに付いたコメントの 1 件。
@@ -723,7 +755,7 @@ pub(crate) mod tests {
     pub(crate) fn sample_task() -> Task {
         use task_core::*;
         let now = time::OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,

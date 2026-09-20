@@ -12,7 +12,7 @@ const HOST: &str = "celeris-localhost";
 
 fn task(dir: &std::path::Path) -> Task {
     let now = OffsetDateTime::now_utc();
-    Task {
+    Task { mode: Default::default(), skills: Vec::new(),
         repos: Vec::new(),
         id: TaskId::new(),
         parent_id: None,

@@ -448,6 +448,11 @@ struct RunExtras {
     comments: Vec<CommentContext>,
     /// ADR-0044 D2: 直前の run を止めた人のコメント（あれば前置きの先頭に「人からの割り込み」として出る）。
     interrupt: Option<String>,
+    /// ADR-0046 D1（Phase 59）: 担当ノードの実効 profile ＋ タスクの上書き。profile を 1 つも書いて
+    /// いない組織では `None`（前置きは Phase 58 までとバイト単位で同じ）。
+    profile: Option<task_core::EffectiveProfile>,
+    /// ADR-0046 D4（Phase 59）: 既定（`production`）以外の進め方のときだけ `Some`。
+    mode: Option<task_core::TaskMode>,
 }
 
 struct ReviewEntry {
@@ -2466,6 +2471,13 @@ impl Dispatcher {
             if !self.is_eligible(&task) {
                 continue;
             }
+            // ADR-0046 D5（Phase 59）: 担当が決まっていないタスクは dispatch の前に matching で決める
+            // （計画 run の子、人が作ったタスク、Console から作られたタスクが全部ここを通る）。
+            let task = match self.assign_if_needed(task)? {
+                Some(task) => task,
+                // 候補が無くて `blocked` にした（人に聞いた）。この tick では dispatch しない。
+                None => continue,
+            };
             // ADR-0010 D6（P-3）: ready に入った時刻（DB の updated_at）からのバックオフ。
             if task.attempts > 0 {
                 let delay = retry_backoff(self.config.retry_backoff_base, self.config.retry_backoff_max, task.attempts);
@@ -2731,15 +2743,9 @@ impl Dispatcher {
             }
             None => Vec::new(),
         };
-        // 分解・委譲できる run（`available_genres` を渡す run と同じ条件）にだけ組織図を渡す。
-        let organization = if available_genres.is_empty() {
-            Vec::new()
-        } else {
-            org.iter().map(OrgNodeContext::from).collect()
-        };
-        // ADR-0033 D4 / Phase 28: 対話 run にだけ、相手が秘書かそれ以外かを渡す（`preamble` が
-        // 「作業を始めるな、返事だけ書け」の指示文を出し分けるためだけの印。担当が組織に無ければ
-        // 秘書以外扱いにする。判定は決定的で LLM は使わない）。
+        // ADR-0033 D4 / Phase 28: 対話 run にだけ、相手が秘書（ADR-0046 D6 の CoS）かそれ以外かを渡す
+        // （`preamble` が「作業を始めるな、返事だけ書け」の指示文を出し分けるためだけの印。担当が組織に
+        // 無ければ CoS 以外扱いにする。判定は決定的で LLM は使わない）。
         let conversation_addressee = if is_conv {
             Some(match assigned {
                 Some(n) if n.kind == OrgKind::Secretary => ConversationAddressee::Secretary,
@@ -2747,6 +2753,32 @@ impl Dispatcher {
             })
         } else {
             None
+        };
+        // 分解・委譲できる run（`available_genres` を渡す run と同じ条件）にだけ組織図を渡す。
+        // ADR-0046 D6: **CoS の対話 run** にも渡す（誰が何をできるかを見せる。人選はしない）。
+        let is_cos_conversation = conversation_addressee == Some(ConversationAddressee::Secretary);
+        let organization = if available_genres.is_empty() && !is_cos_conversation {
+            Vec::new()
+        } else {
+            org.iter()
+                .map(|n| OrgNodeContext::with_profile(n, &task_core::resolve_profile(&org, &n.id)))
+                .collect()
+        };
+        // ADR-0046 D1（Phase 59）: 担当ノードの実効 profile（根→葉の merge ＋ タスクの上書き）。
+        // profile を 1 つも書いていない組織では `None`（前置きは Phase 58 までとバイト単位で同じ）。
+        let profile = assigned.and_then(|n| {
+            let effective = task_core::resolve_profile(&org, &n.id);
+            if effective.is_trivial() {
+                None
+            } else {
+                Some(effective.with_task(task))
+            }
+        });
+        // ADR-0046 D4（Phase 59）: 既定（`production`）の進め方は渡さない（前置きを変えない）。
+        let mode = if task.mode == task_core::TaskMode::Production {
+            None
+        } else {
+            Some(task.mode)
         };
         // Phase 30（ADR-0033 D4 追記）: 対話は常に対話用分野で走る（`task.genre`）。その人が自分の仕事で
         // 何を使うかを知って答えられるように、対話 run にだけ、担当ノード**自身**の分野
@@ -2872,6 +2904,8 @@ impl Dispatcher {
             recent_work,
             milestone_review,
             workspace_note,
+            profile,
+            mode,
             comments,
             interrupt,
         })
@@ -3167,7 +3201,14 @@ impl Dispatcher {
         // ADR-0019 D1 6. / ADR-0041 D1: 判定コマンドは worktree の中で実行する（元のリポジトリでは実行しない）。
         let review_work_dir = self.work_dir_for(&task);
         // ADR-0043 D4: リポジトリが宣言した検査コマンド（`workspace.toml` の `[commands] check`）。
-        let repo_checks = self.default_checks(&task);
+        // ADR-0046 D4（Phase 59）: `mode = prototype` は「明示の受け入れ条件だけ」なので使わない。
+        let repo_checks = if task.mode == task_core::TaskMode::Prototype {
+            Vec::new()
+        } else {
+            self.default_checks(&task)
+        };
+        // ADR-0046 D4（Phase 59）: `mode = research` は「結果に出典か計測の記録」を暗黙の条件に足す。
+        let research = task.mode == task_core::TaskMode::Research;
         let handle = tokio::spawn(async move {
             let ws: Box<dyn Workspace> = match remote_review {
                 Some(settings) => Box::new(SshWorkspace::new(&dir, settings)),
@@ -3184,6 +3225,8 @@ impl Dispatcher {
                 aggregate,
                 // ADR-0043 D4: リポジトリの `[commands] check`（タスクに検査コマンドが無いときだけ効く）。
                 repo_checks,
+                // ADR-0046 D4: `mode = research` の暗黙の条件。
+                research,
             };
             let outcome =
                 review_task(&task, ws.as_ref(), &dir, &artifacts_dir, &produced, timeout, extras).await;
@@ -3285,6 +3328,9 @@ impl Dispatcher {
             conversation: None,
             labels: Vec::new(),
             category: Default::default(),
+            // ADR-0046 D4（Phase 59）: 派生タスクは親の進め方を継ぐ。
+            skills: Vec::new(),
+            mode: task.mode,
         };
         // ADR-0010 D2: 挿入・Created・ApprovalRequested を 1 トランザクションで。
         self.store.create_task(&approval, vec![Event::ApprovalRequested])?;
@@ -3760,6 +3806,62 @@ impl Dispatcher {
     /// ADR-0043 D4: レビュー担当の `Check::Command` の既定になる検査コマンド
     /// （タスクに `acceptance` が明示されていればそれが勝つ。決めるのはここではなく `review.rs` の
     /// 呼び出し側）。**先頭のリポジトリの** `[commands] check` だけを使う。
+    /// ADR-0046 D5（Phase 59）: `assignee` が無い `ready` のタスクの担当を**決定的に**決める。
+    ///
+    /// - 決まったら `Event::Assigned { node, score, reason }` を残して担当を書き戻し、そのタスクを返す。
+    /// - 候補が 1 つも無ければ `blocked` にして人に聞き（ADR-0021 の質問経路）、`None` を返す。
+    /// - matching の対象でない（担当が居る・ハーネスが無い）タスクはそのまま返す。
+    ///
+    /// LLM は使わない（DESIGN 原則 1）。
+    fn assign_if_needed(&mut self, task: Task) -> Result<Option<Task>, DispatchError> {
+        use task_ops::matching::Assignment;
+        let org = self.store.org_list()?;
+        match task_ops::matching::decide(&org, &task) {
+            Assignment::NotApplicable => Ok(Some(task)),
+            Assignment::Assigned { node, score, reason } => {
+                let mut updated = task.clone();
+                updated.assignee = Some(node.clone());
+                updated.updated_at = OffsetDateTime::now_utc();
+                let event = Event::Assigned {
+                    node: node.clone(),
+                    score,
+                    reason: reason.clone(),
+                };
+                match self.store.update_task(&updated, event) {
+                    Ok(stored) => {
+                        tracing::info!(
+                            task_id = %task.id, assignee = %node, score, reason = %reason,
+                            "matching decided the assignee (ADR-0046 D5)"
+                        );
+                        Ok(Some(stored))
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = %task.id, error = %e, "could not write the matched assignee");
+                        Ok(Some(task))
+                    }
+                }
+            }
+            Assignment::Unroutable { question } => {
+                // Phase 44 と同じ規律: ディスパッチャ由来の質問も `approvals` に残す（そうしないと
+                // 認可画面に出ず、Discord にも飛ばない）。
+                let now = OffsetDateTime::now_utc();
+                if let Err(e) = crate::approvals::record_question_approval(self.store.as_ref(), &task, &question, now) {
+                    tracing::warn!(task_id = %task.id, error = %e, "failed to record the approval for the unroutable question");
+                }
+                let run_id = format!("matching-{}", task.id);
+                let events = vec![Event::QuestionRaised { run_id, text: question }];
+                match self.store.apply_transition_with_events(task.id, Trigger::Unroutable, events) {
+                    Ok(_) => tracing::info!(task_id = %task.id, "no org node can take this task; asking a human (ADR-0046 D5)"),
+                    Err(StoreError::InvalidTransition(e)) => {
+                        tracing::warn!(task_id = %task.id, error = %e, "unroutable transition could not be applied");
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+                Ok(None)
+            }
+        }
+    }
+
     fn default_checks(&self, task: &Task) -> Vec<String> {
         let Some(ws) = self.task_workspaces_for(task) else {
             return Vec::new();
@@ -3858,15 +3960,51 @@ impl Dispatcher {
     }
 
     /// ADR-0018: `WorkspaceSpec::Remote` のタスクのクラスタ設定とリモートのパス。ローカルのタスクは `None`。
+    ///
+    /// ADR-0046 D8（Phase 59）: **担当が `cluster:<id>` を持たないなら接続経路を渡さない**（remote を
+    /// 組まない）。ただし「道具を 1 つも宣言していない」ノード（Phase 59 より前の組織、profile を
+    /// 書いていないノード）は従来どおり通す — 宣言した許可リストだけを許可リストとして扱う。
     fn cluster_of(&self, task: &Task) -> Option<(ClusterSpec, PathBuf)> {
         match &task.workspace {
             WorkspaceSpec::Local { .. } => None,
-            WorkspaceSpec::Remote { cluster, path } => self
-                .config
-                .clusters
-                .get(cluster)
-                .map(|spec| (spec.clone(), path.clone())),
+            WorkspaceSpec::Remote { cluster, path } => {
+                if !self.task_may_use_cluster(task, cluster) {
+                    return None;
+                }
+                self.config
+                    .clusters
+                    .get(cluster)
+                    .map(|spec| (spec.clone(), path.clone()))
+            }
         }
+    }
+
+    /// ADR-0046 D8: そのタスクの担当がそのクラスタを使えるか（決定的。組織の profile だけを見る）。
+    fn task_may_use_cluster(&self, task: &Task, cluster: &str) -> bool {
+        let Some(assignee) = task.assignee.as_deref() else {
+            return true;
+        };
+        let org = match self.store.org_list() {
+            Ok(org) => org,
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, error = %e, "could not read the org tree; allowing the cluster");
+                return true;
+            }
+        };
+        let effective = task_core::resolve_profile(&org, assignee);
+        // 道具を 1 つも宣言していないノードは従来どおり（Phase 59 より前の組織を壊さない）。
+        if effective.tools.is_empty() {
+            return true;
+        }
+        let wanted = format!("{}{cluster}", task_core::CLUSTER_TOOL_PREFIX);
+        if effective.has_tool(&wanted) {
+            return true;
+        }
+        tracing::warn!(
+            task_id = %task.id, %assignee, %cluster,
+            "assignee does not have the cluster tool; not wiring the remote (ADR-0046 D8)"
+        );
+        false
     }
 
     /// そのクラスタで走っている run の数（ADR-0018 D5: プロバイダとクラスタの二次元）。
@@ -4149,6 +4287,9 @@ async fn run_worker(
             // ADR-0044 D2（Phase 53）: コメントの糸と、直前の run を止めた人のコメント。
             comments: extras.comments,
             interrupt: extras.interrupt,
+            // ADR-0046 D1 / D4（Phase 59）: 実効 profile と進め方（どちらも既定なら `None`）。
+            profile: extras.profile,
+            mode: extras.mode,
             // 仕事の run はコメントを書ける。**対話 run は書かせない**（Phase 28 の「返事だけをする」と
             // ぶつかる）。レビュー run は `review.rs` が `RunContext::default()` を使うので既定の false。
             comments_enabled: writes_comments,
@@ -4346,7 +4487,7 @@ mod tests {
 
     fn new_task(dir: &std::path::Path, check: Check, max_retries: u32) -> Task {
         let now = OffsetDateTime::now_utc();
-        Task {
+        Task { mode: Default::default(), skills: Vec::new(),
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: None,
@@ -5517,7 +5658,7 @@ mod tests {
             ("coding-poc", Some("coding"), OrgKind::Section),
         ] {
             store
-                .org_upsert(&OrgNode {
+                .org_upsert(&OrgNode { profile: Default::default(),
                     id: id.into(),
                     parent_id: parent.map(str::to_string),
                     name: id.into(),
@@ -6508,7 +6649,7 @@ mod tests {
         assert!(extras.available_genres[0].is_harness());
 
         let mut plan = task_core::PlanOutput {
-            tasks: vec![task_core::NewTask {
+            tasks: vec![task_core::NewTask { harness: None, mode: Default::default(), skills: Vec::new(),
                 repos: Vec::new(),
                 title: "候補テーマの抽出".into(),
                 objective: "候補テーマを candidates.json にまとめよ".into(),
@@ -7195,7 +7336,7 @@ mod tests {
 
     fn org_node_of(id: &str, parent: Option<&str>, kind: OrgKind, genre: Option<&str>) -> OrgNode {
         let now = OffsetDateTime::now_utc();
-        OrgNode {
+        OrgNode { profile: Default::default(),
             id: id.into(),
             parent_id: parent.map(str::to_string),
             name: format!("{id} 課"),

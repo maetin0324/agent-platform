@@ -43,6 +43,12 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
     // コメントが 1 件も無ければ何も出さないので、Phase 52 までの出力とバイト単位で同じ。
     let mut out = comments_section(context);
     out.push_str(&person_sections(context));
+    // ADR-0046 D1 / D4（Phase 59）: 実効 profile（能力・方針・道具・知識・ハーネス）と進め方。
+    // どちらも `None` / 空なら節ごと出さないので、Phase 58 までの出力とバイト単位で同じ。
+    // 61（ADR-0047 の知識の索引）は `knowledge_section` を別に足す。ここには入れない。
+    out.push_str(&profile_section(context));
+    out.push_str(&mode_section(context));
+    out.push_str(&organization_section(context));
     out.push_str(&workspace_section(context));
     out.push_str(&role_section(context));
     out.push_str(&memory_instructions(context, artifacts));
@@ -173,6 +179,184 @@ fn person_sections(context: &RunContext) -> String {
         }
         out.push('\n');
     }
+    out
+}
+
+/// ADR-0046 D1（Phase 59）: 「あなたの実効 profile」の節。根→葉で継いだ結果（`EffectiveProfile`）を
+/// そのまま箇条書きにする。`context.profile` が `None` なら**何も出さない**（Phase 58 までと同じ出力）。
+///
+/// ADR-0046 D8: 道具は「使ってよいものの一覧」と「ここに無いものは使うな」を必ず書く。
+pub fn profile_section(context: &RunContext) -> String {
+    let Some(profile) = &context.profile else {
+        return String::new();
+    };
+    if profile.skills.is_empty()
+        && profile.policy.is_empty()
+        && profile.tools.is_empty()
+        && profile.deny_tools.is_empty()
+        && profile.knowledge.is_empty()
+        && profile.harnesses_allowed.is_empty()
+        && profile.run.is_none()
+        && profile.tier.is_none()
+    {
+        return String::new();
+    }
+    let mut out = String::from("## あなたの実効 profile (inherited from the org tree)\n");
+    if !profile.chain.is_empty() {
+        out.push_str(&format!("継承: {}\n", profile.chain.join(" > ")));
+    }
+    if !profile.skills.is_empty() {
+        out.push_str(&format!("能力（skills）: {}\n", profile.skills.join(", ")));
+    }
+    if !profile.harnesses_allowed.is_empty() {
+        out.push_str(&format!(
+            "受けられるハーネス: {}{}\n",
+            profile.harnesses_allowed.join(", "),
+            match profile.harness_default.as_deref() {
+                Some(d) => format!("（既定 {d}）"),
+                None => String::new(),
+            }
+        ));
+    }
+    if let Some(tier) = profile.tier {
+        let allowed = if profile.allowed_tiers.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "（許可: {}）",
+                profile.allowed_tiers.iter().map(tier_label).collect::<Vec<_>>().join(", ")
+            )
+        };
+        out.push_str(&format!("モデルの段: {}{allowed}\n", tier_label(&tier)));
+    }
+    if let Some(run) = profile.run {
+        out.push_str(&format!(
+            "実行場所: {}\n",
+            match run {
+                task_core::ProfileRun::Host => "host（この計算機の上）",
+                task_core::ProfileRun::Container => "container（コンテナの中）",
+            }
+        ));
+    }
+    if !profile.knowledge.is_empty() {
+        out.push_str(&format!(
+            "使える知識: {}\n",
+            profile.knowledge.iter().map(knowledge_label).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    // ADR-0046 D8: 道具は許可制。ここに無いものは使わせない。
+    if profile.tools.is_empty() {
+        out.push_str(
+            "使ってよい外部の道具: **無し**。gh / tavily / exa / docker / クラスタへの ssh は\
+             このタスクでは使うな（必要なら人に聞け）。\n",
+        );
+    } else {
+        out.push_str(&format!("使ってよい外部の道具: {}\n", profile.tools.join(", ")));
+        out.push_str(
+            "ここに挙がっていない外部の道具（gh / tavily / exa / docker / クラスタへの ssh）は使うな。\n",
+        );
+    }
+    if !profile.deny_tools.is_empty() {
+        out.push_str(&format!("**禁止された道具**: {}\n", profile.deny_tools.join(", ")));
+    }
+    if !profile.policy.is_empty() {
+        out.push_str("組織の方針（根から順に。上ほど強い）:\n");
+        for line in &profile.policy {
+            out.push_str(&format!("- {}\n", one_line(line)));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+fn tier_label(tier: &task_core::Tier) -> &'static str {
+    match tier {
+        task_core::Tier::Frontier => "frontier",
+        task_core::Tier::Standard => "standard",
+        task_core::Tier::Cheap => "cheap",
+    }
+}
+
+fn knowledge_label(mount: &task_core::KnowledgeMount) -> String {
+    let mut out = mount.kind.as_str().to_string();
+    for part in [mount.scope.as_deref(), mount.name.as_deref(), mount.path.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|p| !p.is_empty())
+    {
+        out.push(':');
+        out.push_str(part);
+    }
+    if let Some(docs) = mount.docs.as_deref().filter(|d| !d.is_empty()) {
+        out.push_str(&format!("（docs: {docs}）"));
+    }
+    out
+}
+
+/// ADR-0046 D4（Phase 59）: 「この仕事の進め方」の節。`context.mode` が `None`（= 既定の
+/// `production`）なら**何も出さない**（Phase 58 までと同じ出力）。
+pub fn mode_section(context: &RunContext) -> String {
+    let Some(mode) = context.mode else {
+        return String::new();
+    };
+    let (name, rules): (&str, &[&str]) = match mode {
+        task_core::TaskMode::Prototype => (
+            "prototype（試作）",
+            &[
+                "動くことを最短で示す。テストは動作確認の最小限でよい。",
+                "捨てる前提で書く。作り込むな。",
+                "結論と次の一手を summary に書く。",
+                "レビューは明示の受け入れ条件だけ。リポジトリの検査コマンド（check）は使わない。",
+            ],
+        ),
+        task_core::TaskMode::Production => (
+            "production（本番）",
+            &[
+                "既存のテストと lint を通す。",
+                "変更は小さく、理由をコミットに書く。",
+                "レビューは受け入れ条件 ＋ リポジトリの検査コマンド（check）。",
+            ],
+        ),
+        task_core::TaskMode::Research => (
+            "research（研究）",
+            &[
+                "主張には出典か計測を付ける。",
+                "数値は再現手順と一緒に書く。",
+                "採らなかった案と理由も残す。",
+                "結果に出典（`sources`）か計測の記録が無ければ不合格になる。",
+            ],
+        ),
+    };
+    let mut out = format!("## この仕事の進め方 (mode: {name})\n");
+    for rule in rules {
+        out.push_str(&format!("- {rule}\n"));
+    }
+    out.push('\n');
+    out
+}
+
+/// ADR-0046 D6（Phase 59）: CoS（根ノード）の対話 run にだけ出す「組織の一覧」。
+/// 誰が何をできるか（id / 名前 / skills / harnesses）を見せるが、**人選はしない**
+/// （担当は D5 の matching が決定的に決める）。それ以外の run では何も出さない。
+pub fn organization_section(context: &RunContext) -> String {
+    if context.conversation_addressee != Some(ConversationAddressee::Secretary) || context.organization.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## 組織 (who is in the org)\n");
+    for node in &context.organization {
+        out.push_str(&format!("- `{}` {}", node.id, node.name));
+        if !node.skills.is_empty() {
+            out.push_str(&format!(" — skills: {}", node.skills.join(", ")));
+        }
+        if !node.harnesses.is_empty() {
+            out.push_str(&format!(" / harnesses: {}", node.harnesses.join(", ")));
+        }
+        out.push('\n');
+    }
+    out.push_str(
+        "担当は celeris が決める（必要な skills と harness をタスクに書けば、そこから決定的に選ばれる）。\
+         あなたが名指しで人を選ぶ必要はない。\n\n",
+    );
     out
 }
 

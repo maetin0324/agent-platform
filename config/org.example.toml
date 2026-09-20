@@ -1,112 +1,262 @@
-# 組織図の種（ADR-0033 D1、SPEC §3.2）。`config.toml` の `org_include = "org.toml"` が指すファイル。
+# 組織図の種（ADR-0033 D1 / ADR-0046 D1・D6・D7、SPEC §3.2）。`config.toml` の `org_include = "org.toml"`
+# が指すファイル。
 #
 # **このファイルは DB の `org_nodes` が空のときにだけ読まれる**。一度蒔いたら以後は DB が正で、
 # 役職を足す・分ける・消すのは GUI（`POST/PATCH/DELETE /api/v1/org`）から行う。ここを書き換えても
 # 既にある組織は変わらない（ADR-0024 の accounts と同じ「DB が正」の扱い）。
+# 既に Phase 58 までの木が入っている DB は `celerisctl org migrate-v2 --config <config.toml>` で写す。
+#
+# ADR-0046 の考え方:
+#   - 木が継がせるのは**文化・知識・権限・既定値**（`profile`）。能力は**タグ**（`skills`）。
+#   - 「組織にする」判定は機械的: そのノード以下に共通で継がせたい knowledge / harness / tools /
+#     policy / 実行環境 / 権限 / 品質基準のどれかがあるときだけ。「役割が違う」だけなら skill。
+#   - ハーネス（`[[harnesses]]`）は**組織と 1 対 1 にしない**。1 つのノードが複数を受けられる。
+#   - 担当は**決定的に**決まる（ADR-0046 D5 の matching）。LLM が組織図を読んで人選する経路は無い。
 #
 # 各行の意味:
 #   id        英小文字ケバブ。API と GUI で使う不変の名前。
-#   name      人が読む役職名（SPEC §3.2 の言葉）。
-#   kind      secretary（根。1 つだけ）/ department（部）/ section（課）。
-#   parent_id secretary 以外は必須。
-#   genre     その「人」が**仕事をするとき**に使うハーネスの束（`[[genres]] id`）。部は持たなくてよい
-#             （課に振る）。ここに書く id は config.toml の `[[genres]]` に存在すること（設定検証で確かめる）。
-#             Phase 30（ADR-0033 D4 追記）: **対話にはこの genre を使わない**。ノードに話しかけたときの
-#             run は、genre の有無に関係なく常に対話用分野（`config.toml` の `[conversation]`、既定
-#             `[[genres]] id = "secretary"`）で走る（実機の事故: 検索ハーネス genre のノードに話しかけると
-#             検索ハーネスが会話しようとして落ちた）。
+#   name      人が読む役職名。
+#   kind      secretary（根 = Chief of Staff。1 つだけ）/ department / section。
+#   parent_id 根以外は必須。
+#   genre     そのノードが**自分の仕事で使う**ハーネス（`[[harnesses]] id`）。`profile.harnesses.default`
+#             と同じ値を書いておくと、対話 run の前置きに「仕事で使う道具」として出る（Phase 30）。
 #   brief     担当の一言。run のプロンプトに前置きされる。
+#   profile   ADR-0046 D1。子は親を継ぐ（和・子勝ち・deny 勝ち・交わり・連結）。
+#             skills / knowledge / harnesses / tools / deny_tools / run / model / policy / review / permissions。
 #   position  同じ親の中での並び順（省略したらこのファイルの並び順）。
 
+# ---- 根: Chief of Staff（ADR-0046 D6）----
 [[org]]
-id = "secretary"
-name = "秘書"
+id = "cos"
+name = "Chief of Staff"
 kind = "secretary"
-# 秘書自身の仕事の分野（ADR-0027/0028）。対話用分野（`[conversation]`）の既定と同じ id にしてあるが、
-# 別物: 対話は Phase 30 により常に `[conversation]`（既定 `secretary`）で走り、ここの `genre` は使わない。
-genre = "secretary"
-brief = """案件を受け取り、組織に流し、報告を集めて人に渡す。部をまたぐ連携はここが認める。
+genre = "conversation"
+brief = """人と話し、案件を理解し、組織に流し、報告を集めて人に返す。
 案件の依頼を受けたら、返事に (a) 案件の理解の確認 (b) 大まかな方針 (c) 最初の途中目標の提案 を必ず含め、
-分からないことは質問する。"""
+分からないことは質問する。担当は celeris が決めるので、あなたが名指しで人を選ぶ必要はない。"""
 
+[org.profile]
+tools = []
+policy = ["人に返す文は、人が数十秒で読める分量にする。"]
+
+[org.profile.harnesses]
+allowed = ["conversation", "plan"]
+default = "conversation"
+
+[org.profile.model]
+tier = "standard"
+
+# CoS が読む知識（ADR-0047）: 人のことと、案件のこと。
+[[org.profile.knowledge]]
+kind = "kb"
+scope = "user"
+
+[[org.profile.knowledge]]
+kind = "kb"
+scope = "projects"
+
+[[org.profile.knowledge]]
+kind = "memory"
+
+# ---- Engineering ----
 [[org]]
-id = "coding"
-name = "コーディング部"
+id = "engineering"
+name = "Engineering"
 kind = "department"
-parent_id = "secretary"
-brief = "実装の案件を受け持ち、課に振り分ける。"
+parent_id = "cos"
+brief = "コードを書く仕事を受け持つ。"
+
+[org.profile]
+skills = ["software"]
+policy = ["変更は小さく、理由をコミットに書く。"]
+
+[org.profile.harnesses]
+allowed = ["coding"]
+
+[[org.profile.knowledge]]
+kind = "memory"
 
 [[org]]
-id = "coding-frontend"
-name = "フロントエンドデザイン課"
+id = "software-engineering"
+name = "Software Engineering"
 kind = "section"
-parent_id = "coding"
+parent_id = "engineering"
 genre = "coding"
-brief = "画面と使い勝手を作る。"
+brief = "アプリケーションと API を作る・直す・テストする。"
+
+[org.profile]
+skills = ["software", "rust", "typescript", "react", "sqlite", "api", "frontend"]
+tools = ["gh"]
+
+[org.profile.harnesses]
+default = "coding"
 
 [[org]]
-id = "coding-performance"
-name = "パフォーマンス課"
+id = "systems-performance"
+name = "Systems & Performance"
 kind = "section"
-parent_id = "coding"
+parent_id = "engineering"
 genre = "coding"
-brief = "速さと資源の使い方を測り、直す。"
+brief = "速さと資源の使い方を測り、直す。ストレージと通信の下回り。"
 
-[[org]]
-id = "coding-poc"
-name = "PoC・R&D 課"
-kind = "section"
-parent_id = "coding"
-genre = "coding"
-brief = "小さく作って確かめる。研究の検証コードはここ。"
+[org.profile]
+skills = ["hpc", "storage", "rdma", "io_uring", "benchmark", "perf"]
 
+[org.profile.harnesses]
+allowed = ["coding", "data-analysis"]
+default = "coding"
+
+# ---- Research ----
 [[org]]
 id = "research"
-name = "研究部"
+name = "Research"
 kind = "department"
-parent_id = "secretary"
-brief = "調査・実験・執筆の案件を受け持ち、課に振り分ける。"
+parent_id = "cos"
+brief = "調査・実験・執筆の仕事を受け持つ。"
+
+[org.profile]
+policy = ["主張には根拠（論文か計測）を付ける。"]
+
+[[org.profile.knowledge]]
+kind = "kb"
+scope = "user"
+
+[[org.profile.knowledge]]
+kind = "kb"
+scope = "projects"
+
+[[org.profile.knowledge]]
+kind = "memory"
 
 [[org]]
-id = "research-survey"
-parent_id = "research"
+id = "literature-research"
+name = "Literature Research"
 kind = "section"
-name = "研究文献調査課"
-# 人間の決定（2026-09-18）: 学術検索は PaperQA2（literature）、一般 Web は LDR（web-research）に分ける。
-# 一般 Web 検索で関連研究を調べさせたら、レビュアーが「出典が Medium / Qiita / note のブログ」と不合格にしたため。
-brief = "学術論文を探して読み、引用付きで動向と候補テーマをまとめる（PaperQA2 + arXiv / OpenAlex）"
+parent_id = "research"
 genre = "literature"
+brief = "学術論文を探して読み、引用付きで動向と候補テーマをまとめる（PaperQA2 + arXiv / OpenAlex）。"
 position = 10
 
+[org.profile]
+skills = ["survey", "related-work"]
+
+[org.profile.harnesses]
+allowed = ["literature", "web-research"]
+default = "literature"
+
 [[org]]
-id = "research-web"
-parent_id = "research"
+id = "web-research"
+name = "Web Research"
 kind = "section"
-name = "Web 調査課"
-brief = "論文化されていない GitHub 上の実装・製品・仕様・技術報告を一般 Web 検索で調べる（Local Deep Research + Tavily）"
+parent_id = "research"
 genre = "web-research"
+brief = "論文化されていない実装・製品・仕様・技術報告を一般 Web 検索で調べる（Local Deep Research）。"
 position = 15
 
+[org.profile]
+skills = ["web-search"]
+tools = ["tavily", "exa"]
+
+[org.profile.harnesses]
+allowed = ["web-research", "literature"]
+default = "web-research"
+
 [[org]]
-id = "research-writing"
-name = "論文執筆課"
+id = "experiment-data"
+name = "Experiment & Data"
 kind = "section"
 parent_id = "research"
-# 執筆に当てる分野はまだ無い（`[[genres]]` に追加したらここに書く）。対話は秘書と同じ対話用分野で行う。
+genre = "data-analysis"
+brief = "実験の生データを整え、統計と図表にする。"
+position = 20
+
+[org.profile]
+skills = ["benchmark", "statistics", "plotting"]
+
+[org.profile.harnesses]
+allowed = ["coding", "data-analysis"]
+default = "data-analysis"
+
+[[org]]
+id = "scientific-writing"
+name = "Scientific Writing"
+kind = "section"
+parent_id = "research"
+genre = "writing"
 brief = "結果を framing し、論文の形にする。"
+position = 25
 
-[[org]]
-id = "research-data"
-name = "データ整理課"
-kind = "section"
-parent_id = "research"
-# 整理に当てる分野はまだ無い。
-brief = "実験の生データを整え、図表にする。"
+[org.profile]
+skills = ["paper-writing", "latex"]
 
+[org.profile.harnesses]
+allowed = ["writing", "literature"]
+default = "writing"
+
+# ---- Operations ----
 [[org]]
-id = "infra"
-name = "インフラ部"
+id = "operations"
+name = "Operations"
 kind = "department"
-parent_id = "secretary"
-# クラスタ作業に当てる分野はまだ無い（課を足すときに `genre` を当てる）。
-brief = "クラスタとジョブの面倒を見る。悪い知らせは早く上げる。"
+parent_id = "cos"
+brief = "計算機・クラスタ・ジョブの面倒を見る。悪い知らせは早く上げる。"
+
+[org.profile]
+# ADR-0046 D8: `cluster:<id>` の `<id>` は config.toml の `[[clusters]]` の id と揃えること
+# （ここに無いクラスタには、そのノードのタスクから接続経路を渡さない）。
+tools = ["docker"]
+
+[org.profile.harnesses]
+allowed = ["coding"]
+
+[[org.profile.knowledge]]
+kind = "memory"
+
+[[org]]
+id = "cluster-hpc"
+name = "Cluster & HPC Operations"
+kind = "section"
+parent_id = "operations"
+genre = "coding"
+brief = "クラスタのジョブ・モジュール・ファイルシステムの面倒を見る。"
+
+[org.profile]
+skills = ["slurm", "ssh", "module"]
+# 例: `[[clusters]]` に pegasus / sirius / fern03 がある構成。無い id を書いても設定は通るが、
+# そのクラスタは存在しないので接続はできない。
+tools = ["cluster:pegasus", "cluster:sirius", "cluster:fern03"]
+
+[org.profile.harnesses]
+default = "coding"
+
+[[org.profile.knowledge]]
+kind = "kb"
+scope = "environment/clusters"
+
+[[org]]
+id = "infrastructure"
+name = "Infrastructure"
+kind = "section"
+parent_id = "operations"
+genre = "coding"
+brief = "手元のサービス（systemd・ネットワーク・コンテナ）の面倒を見る。"
+
+[org.profile]
+skills = ["systemd", "docker", "networking"]
+
+[org.profile.harnesses]
+default = "coding"
+
+[[org]]
+id = "monitoring-automation"
+name = "Monitoring & Automation"
+kind = "section"
+parent_id = "operations"
+genre = "coding"
+brief = "監視と定型作業の自動化。"
+
+[org.profile]
+skills = ["monitoring", "scripting"]
+
+[org.profile.harnesses]
+default = "coding"

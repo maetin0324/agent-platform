@@ -364,7 +364,7 @@ mod tests {
 
         fn seed_secretary(&self) {
             self.store
-                .org_upsert(&task_core::OrgNode {
+                .org_upsert(&task_core::OrgNode { profile: Default::default(),
                     id: "secretary".into(),
                     parent_id: None,
                     name: "秘書".into(),
