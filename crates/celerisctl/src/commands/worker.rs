@@ -74,8 +74,9 @@ pub struct WorkerRunArgs {
     pub cluster: Option<String>,
 
     /// ADR-0024 D2 / ADR-0025 D2: `account_pool = true` のプロバイダで使うアカウント id（プロバイダの
-    /// `adapter` に応じて `[accounts] claude_dir`/`codex_dir` の下のディレクトリ）。省略時は
-    /// `<root>/.celeris-usage.json`（永続化された観測値。celeris が更新するのと同じファイル）を読むだけで選ぶ
+    /// `adapter` に応じて `[accounts] claude_dir`/`codex_dir` の下のディレクトリ）。
+    /// 固定 `account_id` があればそのアカウントのみを使い、異なる `--account` は拒否する。
+    /// 固定参照も `--account` もなければ `<root>/.celeris-usage.json` の観測値を読むだけで選ぶ
     /// （in_use は分からないので 0 として扱う）。`account_pool` でないプロバイダに指定するとエラー。
     #[arg(long)]
     pub account: Option<String>,
@@ -165,7 +166,7 @@ struct Selected {
 }
 
 /// ADR-0024 D2 / ADR-0025 D2: `account_pool = true` のプロバイダのアカウントを決める。`--account` があれば
-/// それ、無ければ `<root>/.celeris-usage.json`（永続化された観測値）を読み取り専用で見て選ぶ（`in_use` は 0
+/// それ（固定 account_id と異なる指定は拒否）、無ければ固定参照または `<root>/.celeris-usage.json`（永続化された観測値）を読み取り専用で見て選ぶ（`in_use` は 0
 /// 扱い）。`account_pool` でないプロバイダに `--account` を渡したらエラー。アダプタ（claude-code/codex）は
 /// プロバイダの `adapter` から決まる。
 fn resolve_account(
@@ -174,10 +175,16 @@ fn resolve_account(
     adapter_kind: &str,
     args: &WorkerRunArgs,
 ) -> Result<Option<String>, CliError> {
-    let is_pool = config
-        .providers
-        .iter()
-        .any(|p| p.id == provider_id && p.account_pool);
+    let provider = config.providers.iter().find(|p| p.id == provider_id);
+    let fixed_account = provider.and_then(|p| p.account_id.as_deref());
+    let is_pool = provider.is_some_and(|p| p.account_pool);
+    if let (Some(fixed), Some(requested)) = (fixed_account, args.account.as_deref())
+        && fixed != requested
+    {
+        return Err(CliError::msg(format!(
+            "--account {requested} conflicts with provider {provider_id} fixed account_id {fixed}"
+        )));
+    }
     if !is_pool {
         if args.account.is_some() {
             return Err(CliError::msg(format!(
@@ -199,7 +206,9 @@ fn resolve_account(
             "provider {provider_id} has account_pool = true but [accounts] has no root configured for adapter {adapter_kind}"
         ))
     })?;
-    if let Some(id) = &args.account {
+    if fixed_account.is_none()
+        && let Some(id) = &args.account
+    {
         if !task_dispatch::valid_account_id(id) {
             return Err(CliError::msg(format!("invalid --account id: {id}")));
         }
@@ -211,11 +220,17 @@ fn resolve_account(
         }
         return Ok(Some(id.clone()));
     }
+    if let Some(id) = fixed_account
+        && !task_dispatch::valid_account_id(id)
+    {
+        return Err(CliError::msg(format!("invalid fixed account_id: {id}")));
+    }
     let dirs = task_dispatch::scan_accounts(root, account_adapter);
     let book = task_dispatch::AccountBook::load(&root.join(".celeris-usage.json"));
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let candidates: Vec<task_dispatch::AccountCandidate<'_>> = dirs
         .iter()
+        .filter(|d| fixed_account.is_none_or(|id| d.id == id))
         .map(|d| task_dispatch::AccountCandidate {
             id: d.id.as_str(),
             logged_in: d.logged_in,
@@ -240,7 +255,7 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
         ))
     })?;
 
-    let task = store.get(task_id)?.ok_or_else(|| {
+    let mut task = store.get(task_id)?.ok_or_else(|| {
         CliError::msg(format!(
             "task not found: {task_id} (check that --db points at the same db as `db` in {})",
             args.config.display()
@@ -287,10 +302,40 @@ pub fn run_run(store: &dyn TaskStore, args: WorkerRunArgs) -> Result<ExitCode, C
         None => base_adapter.clone(),
     };
     let adapter = effective_adapter.as_ref();
-    let model = celeris::effective_models(&config)
-        .get(&provider_id)
-        .cloned()
-        .unwrap_or_default();
+    let remaining = account.as_deref().and_then(|id| {
+        let kind = task_core::AccountAdapter::parse(&adapter_kind)?;
+        let root = config.accounts.as_ref()?.root_for(kind)?;
+        let book = task_dispatch::AccountBook::load(&root.join(".celeris-usage.json"));
+        task_dispatch::accounts::measured_remaining(
+            book.state(id)?.usage.as_ref()?,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+    });
+    let (tier, reason) = task_core::model_routing::select_tier(task.worker_hint.tier, remaining)
+        .map_err(CliError::msg)?;
+    // Match dispatch: legacy providers retain their historical model/tier.
+    if adapter
+        .model_for_tier(task.worker_hint.tier)
+        .map_err(CliError::msg)?
+        .is_some()
+    {
+        task.worker_hint.tier = tier;
+    }
+    let model = adapter
+        .model_for_tier(task.worker_hint.tier)
+        .map_err(CliError::msg)?
+        .unwrap_or_else(|| {
+            celeris::effective_models(&config)
+                .get(&provider_id)
+                .cloned()
+                .unwrap_or_default()
+        });
+    outln!(
+        "routing: tier={:?} model={} reason={}",
+        task.worker_hint.tier,
+        model,
+        reason
+    );
 
     let selected = Selected {
         provider_id,

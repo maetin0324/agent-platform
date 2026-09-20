@@ -451,3 +451,216 @@ echo '{"type":"error","message":"429","retryable":true,"provider_failure":{"kind
         "{stdout}"
     );
 }
+
+/// Exercise the actual CLI, account environment and final --model without an LLM service.
+#[cfg(unix)]
+#[test]
+fn fixed_account_and_quota_routing_reach_the_cli_without_mutating_the_store() {
+    use std::os::unix::fs::PermissionsExt;
+    for (fixed, flag, utilization, stale, binding, expected, error) in [
+        ("b", None, None, false, "fixture-cheap", "frontier", ""),
+        (
+            "b",
+            Some("b"),
+            Some(0.1),
+            false,
+            "fixture-cheap",
+            "frontier",
+            "",
+        ),
+        ("b", None, Some(0.8), false, "fixture-cheap", "standard", ""),
+        ("b", None, Some(0.95), false, "fixture-cheap", "cheap", ""),
+        (
+            "",
+            Some("b"),
+            Some(0.95),
+            false,
+            "fixture-cheap",
+            "cheap",
+            "",
+        ),
+        ("b", None, Some(0.95), true, "fixture-cheap", "frontier", ""),
+        (
+            "missing-fixed-account",
+            None,
+            None,
+            false,
+            "fixture-cheap",
+            "",
+            "no eligible account",
+        ),
+        (
+            "b",
+            Some("a"),
+            None,
+            false,
+            "fixture-cheap",
+            "",
+            "conflicts",
+        ),
+        (
+            "b",
+            None,
+            Some(0.97),
+            false,
+            "fixture-cheap",
+            "",
+            "no eligible account",
+        ),
+        (
+            "b",
+            None,
+            Some(0.95),
+            false,
+            "bad model",
+            "",
+            "executable model ID",
+        ),
+        (
+            "",
+            Some("b"),
+            Some(0.97),
+            false,
+            "fixture-cheap",
+            "",
+            "execution deferred",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("accounts");
+        for id in ["a", "b"] {
+            std::fs::create_dir_all(root.join(id)).unwrap();
+            std::fs::write(root.join(id).join("auth.json"), "{}").unwrap();
+        }
+        if let Some(u) = utilization {
+            let now = OffsetDateTime::now_utc().unix_timestamp();
+            let window = task_core::RateWindow {
+                utilization: u,
+                resets_at: now + 3600,
+            };
+            let mut book = task_dispatch::AccountBook::load(&root.join(".celeris-usage.json"));
+            book.record_observation(
+                "b",
+                task_core::RateLimitObservation {
+                    five_hour: Some(window),
+                    seven_day: Some(window),
+                    status: None,
+                    resets_at: None,
+                    observed_at: now - if stale { 600 } else { 0 },
+                },
+                task_dispatch::ObservationSource::Run,
+            );
+            book.save().unwrap();
+        }
+        let book_before = std::fs::read(root.join(".celeris-usage.json")).ok();
+        let script = write_script(
+            tmp.path(),
+            "codex-stub",
+            r#"#!/bin/sh
+printf '%s\n' "$CODEX_HOME" > account.txt
+printf '%s\n' "$@" > args.txt
+mkdir -p artifacts
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+echo '{"type":"turn.completed"}'
+"#,
+        );
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let fixed_line = if fixed.is_empty() {
+            String::new()
+        } else {
+            format!("account_id = {fixed:?}")
+        };
+        let config = tmp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+workspace_root = {:?}
+[accounts]
+codex_dir = {:?}
+[[providers]]
+id = "gpt"
+adapter = "codex"
+account_pool = true
+{fixed_line}
+[adapters.codex]
+command = {:?}
+[providers.tier_models.frontier]
+name = "astra"
+model_id = "fixture-frontier"
+[providers.tier_models.standard]
+name = "sol"
+model_id = "fixture-standard"
+[providers.tier_models.cheap]
+name = "luna"
+model_id = {binding:?}
+"#,
+                tmp.path().join("workspaces"),
+                root,
+                script
+            ),
+        )
+        .unwrap();
+        let ws = tmp.path().join("ws");
+        let db = tmp.path().join("tasks.db");
+        let store = SqliteStore::open(&db).unwrap();
+        let mut task = sample_task(
+            Status::Ready,
+            WorkspaceSpec::Local {
+                path: ws.clone(),
+                mode: None,
+            },
+        );
+        task.worker_hint.tier = Tier::Frontier;
+        store.insert(&task).unwrap();
+        let id = task.id.to_string();
+        let mut args = vec![
+            "worker",
+            "run",
+            "--config",
+            config.to_str().unwrap(),
+            "--task",
+            &id,
+            "--provider",
+            "gpt",
+        ];
+        if let Some(flag) = flag {
+            args.extend(["--account", flag]);
+        }
+        let out = run_celerisctl(&db, &args);
+        let stdout = stdout_of(&out);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if error.is_empty() {
+            assert!(out.status.success(), "{stdout}\n{stderr}");
+            let argv = std::fs::read_to_string(ws.join("args.txt")).unwrap();
+            assert!(
+                argv.contains(&format!("--model\nfixture-{expected}\n")),
+                "{argv}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(ws.join("account.txt"))
+                    .unwrap()
+                    .trim(),
+                root.join("b").to_str().unwrap()
+            );
+            assert!(
+                stdout.contains(&format!("model=fixture-{expected}")),
+                "{stdout}"
+            );
+            assert!(stdout.contains("difficulty=Frontier"), "{stdout}");
+            if utilization.is_none() || stale {
+                assert!(stdout.contains("remaining unknown"), "{stdout}");
+            }
+        } else {
+            assert!(!out.status.success(), "{stdout}");
+            assert!(stderr.contains(error), "expected {error}: {stderr}");
+            assert!(!ws.join("args.txt").exists(), "CLI must not start");
+        }
+        assert_eq!(
+            std::fs::read(root.join(".celeris-usage.json")).ok(),
+            book_before
+        );
+        assert_eq!(store.get(task.id).unwrap().unwrap(), task);
+        assert!(store.events_for(task.id).unwrap().is_empty());
+    }
+}

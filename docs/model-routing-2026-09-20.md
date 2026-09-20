@@ -6,7 +6,7 @@ tasks: [01M305NG9QRX7HE59VF6K3FZ7H]
 
 ## 実装と反映範囲
 
-作業ブランチ `celeris/01M305NG9QRX7HE59VF6K3FZ7H` に実装。バックエンドのコミットは `042d024`。運用中の設定・認証ファイル・サービス、元リポジトリ、リモート作業ツリーは変更していない。取り込みとリリースへの反映は未実施。
+作業ブランチ `celeris/01M305NG9QRX7HE59VF6K3FZ7H` に実装。main `d89015802e102e89d558bb8307149bafa8997ae2` へrebase済み。既存実装は `3b75909`（バックエンド）、`e97f807`（GUI）、`36dfdd3`（スキーマ同期）。運用中の設定・認証ファイル・サービス、元リポジトリ、リモート作業ツリーは変更していない。取り込みとリリースへの反映は未実施。
 
 - アカウント画面: 既存のClaude／GPTログイン、利用枠、APIキーの秘密ストアを認証情報の管理場所として維持。
 - プロバイダー画面: Claude／GPTを明記し、階層ごとの希望名・実行ID・未対応理由、認証参照IDを編集・保存。秘密の値を入力する欄を削除。
@@ -66,7 +66,7 @@ GUI再現: `cd gui && ./node_modules/.bin/react-router build` の後、リポジ
 
 ## 再試行での修正・再検証（run 01M3083Y5XE4N3TFJH63ZE5ZF0）
 
-前回レビューでは `schema::tests::committed_schema_matches_generated` が失敗し、受け入れ項目は未評価だった。原因は `ProviderLive` のRust説明を「認証アカウントは別参照」に変更した後、コミット済みAPIスキーマとGUI生成型の説明が旧「行 = アカウント」のまま残っていたこと。既存実装 `042d024`・`02c29ad` を保持し、両生成物の説明を再生成して同期した。
+前回レビューでは `schema::tests::committed_schema_matches_generated` が失敗し、受け入れ項目は未評価だった。原因は `ProviderLive` のRust説明を「認証アカウントは別参照」に変更した後、コミット済みAPIスキーマとGUI生成型の説明が旧「行 = アカウント」のまま残っていたこと。既存実装（最新rebase後 `3b75909`・`e97f807`） を保持し、両生成物の説明を再生成して同期した。
 
 - `UPDATE_SCHEMA=1 cargo test -p task-api schema::tests::committed_schema_matches_generated` で生成後、**UPDATE_SCHEMAなし**の `cargo test --workspace` を実行。終了コード0、1,522件成功、0件失敗、3件ignore。移行、モデル解決、委譲と残量選択、CLI実引数、スキーマ整合性を含む。
 - `cargo clippy --workspace -- -D warnings`: 終了コード0。
@@ -75,3 +75,21 @@ GUI再現: `cd gui && ./node_modules/.bin/react-router build` の後、リポジ
 - `node scripts/check-model-routing.mjs /tmp/model-routing-retry-images /tmp/model-routing-retry-measurements.json`: 終了コード0。両設定画面を360／393／412／1440pxで再描画、全8画面で文書幅＝ビューポート幅。実行IDの保存とJSエラー0件を確認。プロバイダーの入力高44px、既存アカウント入力高は約36px。既存の画面画像は上記リンクに保持。
 
 このrunの機械向けログと測定JSONはワークスペースの `artifacts/model-routing-retry/` に保存。実装の運用取り込み・サービス反映、実サービスの6モデルID確認、Nothing 2a実機／IME確認は未実施であり、再検証の完了には含めない。
+
+
+## 再差し戻し P1/P2 の修正（2026-09-20）
+
+`celerisctl worker run` の直接実行経路を修正した。固定 `account_id` を候補の制約として扱い、欠損・未ログイン・利用不可なら停止する。別アカウントへの代替は行わず、固定参照と異なる `--account` はエラー。同一IDの明示指定も固定参照の利用可否検査を通す。
+
+選択したアカウントの保存済み利用枠を、デーモンと共通の `measured_remaining` / `select_tier` で評価し、実行用タスクの階層と `--model` に反映する。古い観測・残量不明は要求維持、利用枠枯渇は起動前に停止（直接CLIは再試行待ちを登録せず非ゼロ終了）。階層マッピングのない旧設定は既存モデルを維持。標準出力に実行階層・モデル・選択理由を表示する。ローカル／クラスタの実行分岐より前に共通で適用する。
+
+`crates/celerisctl/tests/worker_run.rs` の実バイナリ統合テストは11条件を検証する。固定IDが別の健全なアカウントより優先されること、欠損固定ID・競合フラグ、残量90%/20%/5%・不明・古い観測・枯渇、無効モデル、明示アカウントでも予算判定を迂回しないことを含む。スタブが受け取る `CODEX_HOME` と `--model`、表示内容、起動前停止、タスク・イベント・利用量ファイルの不変を確認する。外部LLMへの接続はしない。
+
+GUIは今回変更しておらず、前節のスマホ幅／PC検証を継承する。Nothing 2a実機・IMEと6モデルの実サービス利用可否は引き続き未検証。
+
+main `4444719`（レビュー条件の修正）を取り込み、検証中に進んだ最新main `d89015802e102e89d558bb8307149bafa8997ae2`（リリーススクリプト修正）も競合なくrebaseで取り込んだ。登録元mainにある `run-phases.sh` / `run-gphases.sh` の未コミット削除はユーザーの既存変更であり、一切操作していない。cleanを確認する対象は実装worktree。登録元mainへのマージ・本番デプロイは実施していない。
+
+
+今回の検証結果: `cargo test -p celerisctl --test worker_run` は7テスト成功（追加テスト内11条件）。`cargo test --workspace` は1531成功・0失敗・3ignore、`cargo clippy --workspace -- -D warnings` は成功。最初のsandbox内workspace実行は既存socket bindテストのEPERMで停止し、localhost接続を許可した再実行で全件成功した。ログはrun成果物 `artifacts/model-routing-final/` の `worker-run.log`、`workspace-test-unrestricted.log`、`clippy.log`。追加main差分は `scripts/selfdeploy/promote.sh` のみで、検証済みRustコードは同一。
+
+最新main取り込み後も `cargo test -p celerisctl --test worker_run`（7件）、`cargo test --workspace`（1531成功・0失敗・3ignore）、`cargo clippy --workspace -- -D warnings` を再実行し、すべて終了コード0。追加ログは同成果物ディレクトリの `workspace-test-after-rebase.log` / `clippy-after-rebase.log`。`git merge-base main HEAD` は `d89015802e102e89d558bb8307149bafa8997ae2` と一致し、fast-forward可能。
