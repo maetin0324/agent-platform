@@ -210,7 +210,13 @@ plan_moves() {
     for f in "$OLD_HOME/releases/"* "$OLD_HOME/releases/".*; do
       case "$(basename -- "$f")" in . | .. | '*' | '.*') continue ;; esac
       [ -e "$f" ] || continue
-      printf '%s\t%s\n' "$f" "$STATE/releases/$(basename -- "$f")"
+      # release.sh が先に新しい置き場で走っているので `.cargo-target` / `.build` は既にある。衝突する
+      # ディレクトリは `<name>-pre-celeris` に逃がす（新しい方は改名後の crate 名で温まっている。旧は人が消す）。
+      if [ -e "$STATE/releases/$(basename -- "$f")" ]; then
+        printf '%s\t%s\n' "$f" "$STATE/releases/$(basename -- "$f")-pre-celeris"
+      else
+        printf '%s\t%s\n' "$f" "$STATE/releases/$(basename -- "$f")"
+      fi
     done
   fi
   # 3. 状態のディレクトリ
@@ -374,6 +380,17 @@ trap 'rm -f "$NEW_CONFIG_TEXT"' EXIT
 rewrite_config "$OLD_CONFIG" >"$NEW_CONFIG_TEXT" \
   || sd_die "the config still mentions paths this script does not know (see above); nothing was moved"
 sd_log "config rewrite ok ($(wc -l <"$NEW_CONFIG_TEXT") lines)"
+
+# ---- 0. 行き先が空いていることを、何かを止める前に確かめる ------------------
+while IFS=$'\t' read -r src dst; do
+  [ -n "$src" ] || continue
+  { [ -e "$src" ] || [ -L "$src" ]; } || continue
+  case "$src" in "$STATE"/*) continue ;; esac   # 8. の usage.json の改名は動いた後の場所なのでここでは見ない
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    sd_die "destination already exists: $dst (for $src); nothing was stopped or moved"
+  fi
+done < <(plan_moves)
+sd_log "all planned destinations are free"
 
 # ---- 1. 旧 unit を止める（SD_STOP_WAIT、既定 300 秒）-----------------------
 
