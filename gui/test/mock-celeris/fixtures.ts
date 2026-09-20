@@ -12,6 +12,12 @@ import type {
   EditResult,
   Health,
   IntegrateResult,
+  KnowledgeCandidate,
+  KnowledgeInbox,
+  KnowledgePage,
+  KnowledgePageResult,
+  KnowledgeRejectResult,
+  KnowledgeTree,
   Milestone,
   MilestoneLifecycle,
   Project,
@@ -588,6 +594,43 @@ export function consolePage(overrides: Partial<ConsolePage> = {}): ConsolePage {
   };
 }
 
+// ---------------------------------------------------------------------------
+// 知識ベース（ADR-0047 D5、docs/celeris-api-v1.md §3.101〜3.106。Phase 61 / G21）
+// ---------------------------------------------------------------------------
+
+/** `GET /knowledge/tree` の既定応答（用意済み。2 つの置き場に 1 ページずつ、候補が 2 件）。 */
+export function knowledgeTree(overrides: Partial<KnowledgeTree> = {}): KnowledgeTree {
+  return {
+    root: "/home/celeris/knowledge",
+    initialized: true,
+    generated_at: "2026-09-20T01:00:00Z",
+    inbox_count: 2,
+    truncated: false,
+    scopes: ["environment/clusters", "user"],
+    items: [
+      {
+        path: "environment/clusters/pegasus.md",
+        title: "pegasus の使い方",
+        tags: ["environment", "cluster", "pegasus"],
+        scope: "environment",
+        sources: ["human", "task:01TASKPEGASUS0000000000001"],
+        updated: "2026-09-20",
+        confidence: "low",
+      },
+      {
+        path: "user/profile.md",
+        title: "人のこと",
+        tags: ["user"],
+        scope: "user",
+        sources: ["human"],
+        updated: "2026-09-19",
+        confidence: "high",
+      },
+    ],
+    ...overrides,
+  };
+}
+
 /** `GET /console` / `GET /console/stream` の 1 本の流れ（4 ブロック）。 */
 export function consoleBlocks(): ConsoleBlock[] {
   return [
@@ -675,5 +718,127 @@ export function consoleProgressBlock(overrides: Partial<ConsoleProgress> = {}): 
       truncated: true,
       ...overrides,
     },
+  };
+}
+
+/** `GET /knowledge/tree` の応答（`celerisctl knowledge init` がまだ）。 */
+export function knowledgeTreeUninitialized(overrides: Partial<KnowledgeTree> = {}): KnowledgeTree {
+  return knowledgeTree({
+    initialized: false,
+    generated_at: null,
+    inbox_count: 0,
+    scopes: [],
+    items: [],
+    ...overrides,
+  });
+}
+
+/** `GET /knowledge/page?path=` の既定応答（front matter + 履歴 + etag）。 */
+export function knowledgePage(overrides: Partial<KnowledgePage> = {}): KnowledgePage {
+  const raw = [
+    "---",
+    "title: pegasus の使い方",
+    "tags: [environment, cluster, pegasus]",
+    "scope: environment",
+    "sources: [human, 'task:01TASKPEGASUS0000000000001']",
+    "confidence: low",
+    "updated: 2026-09-20",
+    "---",
+    "",
+    "# pegasus の使い方",
+    "",
+    "ログインは踏み台から。詳しくは [[../../user/profile.md]] と [担当](celeris:task/01TASKPEGASUS0000000000001)。",
+    "",
+  ].join("\n");
+  return {
+    root: "/home/celeris/knowledge",
+    path: "environment/clusters/pegasus.md",
+    title: "pegasus の使い方",
+    raw,
+    html: "<h1>pegasus の使い方</h1>",
+    tags: ["environment", "cluster", "pegasus"],
+    scope: "environment",
+    sources: ["human", "task:01TASKPEGASUS0000000000001"],
+    confidence: "low",
+    updated: "2026-09-20",
+    history: [
+      {
+        sha: "6666666666666666666666666666666666666666",
+        at: "2026-09-20T01:00:00Z",
+        author: "Celeris (human)",
+        subject: "knowledge: environment/clusters/pegasus.md",
+      },
+    ],
+    etag: "7777777777777777777777777777777777777777777777777777777777777777",
+    too_large: false,
+    ...overrides,
+  };
+}
+
+/** `PUT /knowledge/page` と `POST /knowledge/inbox/{id}/accept` の既定応答。 */
+export function knowledgePageResult(overrides: Partial<KnowledgePageResult> = {}): KnowledgePageResult {
+  return {
+    path: "environment/clusters/pegasus.md",
+    etag: "8888888888888888888888888888888888888888888888888888888888888888",
+    sha: "9999999999999999999999999999999999999999",
+    unchanged: false,
+    ...overrides,
+  };
+}
+
+/** `POST /knowledge/inbox/{id}/reject` の既定応答。 */
+export function knowledgeRejectResult(overrides: Partial<KnowledgeRejectResult> = {}): KnowledgeRejectResult {
+  return {
+    id: "20260920T010000-pegasus",
+    sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ...overrides,
+  };
+}
+
+/**
+ * `GET /knowledge/inbox` の既定応答（候補 2 件。新しい順）。
+ * 1 件目は**取り込み先に既にページがある**（`target_exists: true` = accept に `overwrite` が要る）。
+ */
+export function knowledgeInbox(overrides: Partial<KnowledgeInbox> = {}): KnowledgeInbox {
+  return {
+    root: "/home/celeris/knowledge",
+    initialized: true,
+    items: [
+      knowledgeCandidate(),
+      knowledgeCandidate({
+        id: "20260919T220000-ldr-tunnel",
+        path: "_inbox/20260919T220000-ldr-tunnel.md",
+        title: "LDR のトンネルは 900 秒で切れる",
+        tags: ["environment", "ldr"],
+        scope: "environment",
+        sources: ["message:01MESSAGE0000000000000001", "url:https://example.invalid/ldr"],
+        confidence: "medium",
+        created: "2026-09-19T22:00:00Z",
+        body: "アイドル 900 秒でトンネルが落ちる。落ちたら張り直す。\n",
+        html: "<p>アイドル 900 秒でトンネルが落ちる。落ちたら張り直す。</p>",
+        target: "environment/ldr.md",
+        target_exists: false,
+      }),
+    ],
+    ...overrides,
+  };
+}
+
+/** `_inbox/` の候補 1 件（既定は取り込み先が既にある = `target_exists: true`）。 */
+export function knowledgeCandidate(overrides: Partial<KnowledgeCandidate> = {}): KnowledgeCandidate {
+  return {
+    id: "20260920T010000-pegasus",
+    path: "_inbox/20260920T010000-pegasus.md",
+    title: "pegasus は踏み台を通す",
+    tags: ["environment", "cluster", "pegasus"],
+    scope: "environment",
+    sources: ["task:01TASKPEGASUS0000000000001", "human"],
+    confidence: "low",
+    created: "2026-09-20T01:00:00Z",
+    body: "pegasus には踏み台（jump host）を通してつなぐ。\n",
+    html: "<p>pegasus には踏み台（jump host）を通してつなぐ。</p>",
+    target: "environment/clusters/pegasus.md",
+    target_exists: true,
+    ...overrides,
   };
 }

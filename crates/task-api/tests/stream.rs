@@ -293,7 +293,7 @@ async fn serve_over_loopback_tcp_streams_events_and_closes_on_shutdown() {
 async fn serve_binds_the_configured_address_and_reports_bind_errors() {
     let env = TestEnv::new();
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let mut settings = settings(&env.db_path, &env.workspace_root, &env.docs_repo_root, EnvOptions::default());
+    let mut settings = settings(&env.db_path, &env.workspace_root, &env.docs_repo_root, &env.knowledge_root, EnvOptions::default());
     settings.listen = occupied.local_addr().expect("addr");
     let (_tx, rx) = tokio::sync::watch::channel(None);
     let err = task_api::serve(settings.clone(), rx.clone(), std::future::pending()).await;

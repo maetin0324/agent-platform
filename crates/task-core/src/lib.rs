@@ -11,6 +11,8 @@ pub mod delegate;
 pub mod instance;
 /// ADR-0043 D5（Phase 54）: 変更の取り込みの記録（`task_integrations`）。
 pub mod integrations;
+/// ADR-0047（Phase 61）: 知識ベース（front matter・索引・検索・マウント。純粋関数だけ）。
+pub mod knowledge;
 pub mod message;
 pub mod model;
 pub mod notify;
@@ -35,6 +37,11 @@ pub use comment::{
     CommentAuthorKind, CommentId, MAX_COMMENT_CHARS, PREAMBLE_COMMENTS, TaskComment,
 };
 pub use instance::{DaemonInstance, DaemonMode, InstanceRole, SharedRole};
+// ---- ADR-0047（Phase 61）: 知識ベース ----
+pub use knowledge::{
+    Confidence, Index as KnowledgeIndex, IndexItem as KnowledgeItem, KnowledgeMount, MountKind,
+    SearchHit as KnowledgeHit,
+};
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use integrations::{IntegrationId, IntegrationMethod, IntegrationState, TaskIntegration};
 pub use message::{

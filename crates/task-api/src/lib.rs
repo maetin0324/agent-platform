@@ -29,6 +29,8 @@ pub mod conversation;
 pub mod docs;
 mod files;
 mod handlers;
+/// ADR-0047（Phase 61）: 知識ベース（`~/knowledge` の Markdown が正本）。ツリー・ページ・`_inbox`。
+pub mod knowledge;
 /// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
 pub mod lifecycle;
 pub mod memory;
@@ -181,6 +183,11 @@ pub struct ApiSettings {
     /// ADR-0044 D7（Phase 57）: 既定の文書リポジトリを作る場所の根（SPEC §5 の `~/workspace`）。
     /// celeris が `$HOME` を展開して渡す。`None` なら文書リポジトリを作れない（409 `docs_unavailable`）。
     pub docs_repo_root: Option<PathBuf>,
+    // ---- ADR-0047（Phase 61）: 知識ベース。ここから ----
+    /// ADR-0047 D1: `[knowledge] root` の絶対パス（既定 `~/knowledge`）。`None` ならこの機能は無効
+    /// （`/knowledge/*` は 409 `knowledge_unavailable`）。
+    pub knowledge_root: Option<PathBuf>,
+    // ---- ADR-0047（Phase 61）: ここまで ----
 }
 
 /// ADR-0043 D5（Phase 54）: `[github]` の写し。celeris が設定から渡す（task-api は TOML を読まない）。

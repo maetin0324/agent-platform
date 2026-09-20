@@ -12,6 +12,8 @@ import type {
   DocsInitResult,
   EditResult,
   IntegrateResult,
+  KnowledgePageResult,
+  KnowledgeRejectResult,
   MessageAccepted,
   Milestone,
   MilestoneDecided,
@@ -349,3 +351,18 @@ export type DocsOpOutcome =
       op: "docs_init" | "docs_put" | "docs_delete" | "docs_promote";
       error: ActionError;
     };
+
+/**
+ * 知識ベース（ADR-0047 D5、celeris Phase 61 / G21。**管理系。正本は `[knowledge] root` の Markdown**）:
+ * `PUT /knowledge/page`、`POST /knowledge/inbox/{id}/accept`、`POST /knowledge/inbox/{id}/reject` の結果。
+ * celeris のエラーは例外にせず `{ok:false, error}` にする（409 `etag_mismatch`＝「読んでから誰かが直した」/
+ * 409 `page_exists`＝「宛先に既にある」/ 409 `knowledge_unavailable`＝「`[knowledge] root` が無い」/
+ * 404 `candidate_not_found` / 403 `path_forbidden` / 422 `validation` / 401 `unauthorized` を含む）。
+ * 衝突の判定は celeris 側にあるので GUI では作り直さない。
+ */
+export type KnowledgeOpOutcome =
+  | { ok: true; op: "knowledge_put"; result: KnowledgePageResult }
+  | { ok: true; op: "knowledge_accept"; id: string; result: KnowledgePageResult }
+  | { ok: true; op: "knowledge_reject"; id: string; result: KnowledgeRejectResult }
+  | { ok: false; op: "knowledge_put"; error: ActionError }
+  | { ok: false; op: "knowledge_accept" | "knowledge_reject"; id: string; error: ActionError };

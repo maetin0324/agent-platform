@@ -130,6 +130,11 @@ pub struct Config {
     /// ADR-0043 D3（Phase 56）: コンテナ実行（runtime・既定のイメージ・ビルドの置き場）。
     #[serde(default)]
     pub containers: ContainersConfig,
+    // ---- ADR-0047（Phase 61）: 知識ベース。ここから ----
+    /// ADR-0047 D1: `[knowledge]`。正本の置き場と、実効 profile が何も言わないときの既定のマウント。
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
+    // ---- ADR-0047（Phase 61）: ここまで ----
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -328,6 +333,64 @@ pub struct MemoryConfig {
 fn default_memory_dir() -> PathBuf {
     PathBuf::from("~/.local/celeris/memory")
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0047（Phase 61）: `[knowledge]`。ここから
+// ---------------------------------------------------------------------------
+
+/// `[knowledge]`（ADR-0047 D1 / D2）: 知識ベースの正本の置き場と、既定のマウント。
+///
+/// ```toml
+/// [knowledge]
+/// root = "~/knowledge"
+/// default_mounts = ["kb:user", "kb:environment"]
+/// ```
+///
+/// **celeris はこのディレクトリを勝手に作らない**（用意するのは `celerisctl knowledge init` だけ）。
+/// 無ければ `GET /knowledge/tree` は `initialized: false` を返し、前置きの索引は空になる。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeConfig {
+    /// ADR-0047 D1: 既定は `~/knowledge`。相対なら設定ファイル基準。`Config::load` が絶対化する。
+    #[serde(default = "default_knowledge_root")]
+    pub root: PathBuf,
+    /// ADR-0047 D2: 実効 profile（ADR-0046 D1）の `knowledge` に何も無いときに全ノードが継ぐマウント。
+    /// 書き方は `kb:<scope>` / `repo:<name>[:<docs>]` / `dir:<path>` / `memory[:<node>]`。
+    #[serde(default = "default_knowledge_mounts")]
+    pub default_mounts: Vec<String>,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            root: default_knowledge_root(),
+            default_mounts: default_knowledge_mounts(),
+        }
+    }
+}
+
+impl KnowledgeConfig {
+    /// `default_mounts` を [`task_core::KnowledgeMount`] にする（綴り間違いは `validate()` が弾く）。
+    pub fn mounts(&self) -> Result<Vec<task_core::KnowledgeMount>, String> {
+        self.default_mounts
+            .iter()
+            .map(|m| m.parse::<task_core::KnowledgeMount>())
+            .collect()
+    }
+}
+
+fn default_knowledge_root() -> PathBuf {
+    PathBuf::from(task_core::knowledge::DEFAULT_ROOT)
+}
+
+/// ADR-0046 D7 の木が `knowledge` を書くまでの既定（人のことと環境は誰でも読む）。
+fn default_knowledge_mounts() -> Vec<String> {
+    vec!["kb:user".to_string(), "kb:environment".to_string()]
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0047（Phase 61）: `[knowledge]`。ここまで
+// ---------------------------------------------------------------------------
 
 /// `[secrets]`（ADR-0030 D1）: 1 秘密 = 1 ファイル（ファイル名 = id、中身 = 値 1 行）。`dir` を 0700 で作る。
 #[derive(Debug, Clone, Deserialize)]
@@ -1163,6 +1226,11 @@ impl Config {
                 memory.dir = base.join(&memory.dir);
             }
         }
+        // ADR-0047 D1（Phase 61）: `[knowledge] root` も同じ扱い（既定の `~/knowledge` もここで絶対パスになる）。
+        cfg.knowledge.root = task_core::expand_home(&cfg.knowledge.root, task_core::home_dir().as_deref());
+        if cfg.knowledge.root.is_relative() {
+            cfg.knowledge.root = base.join(&cfg.knowledge.root);
+        }
         // ADR-0040 D6 / ADR-0045 D2: `[selfdeploy] releases_dir` も同じ扱い
         // （既定の `~/.local/celeris/releases` もここで絶対パスになる）。
         cfg.selfdeploy.releases_dir =
@@ -1253,6 +1321,10 @@ impl Config {
         }
         if self.github.gh.trim().is_empty() {
             return Err(ConfigError::Invalid("[github] gh must not be blank".into()));
+        }
+        // ADR-0047 D2（Phase 61）: `[knowledge] default_mounts` の綴り（間違いで黙って無視しない）。
+        if let Err(why) = self.knowledge.mounts() {
+            return Err(ConfigError::Invalid(format!("[knowledge] default_mounts: {why}")));
         }
         // ADR-0043 D3: runtime は 3 つだけ（綴り間違いで黙ってホスト実行に倒れないように）。
         if task_worker::RuntimePreference::parse(&self.containers.runtime).is_none() {
@@ -1710,6 +1782,11 @@ impl Config {
             }),
             // ADR-0033 D6: `[memory]` が無ければ記憶を読まないし書かない。
             memory_dir: self.memory.as_ref().map(|m| m.dir.clone()),
+            // ADR-0047 D2（Phase 61）: 知識ベースの根と既定のマウント（前置きの索引を組むのに使う）。
+            knowledge: task_dispatch::KnowledgeRuntimeConfig {
+                root: self.knowledge.root.clone(),
+                default_mounts: self.knowledge.mounts().unwrap_or_default(),
+            },
             // ADR-0041 D1 / ADR-0042 D3: ローカルの worktree（既定 `celeris/`）。
             worktree_branch_prefix: self.workspace.worktree_branch_prefix.clone(),
             releases_dir: Some(self.selfdeploy.releases_dir.clone()),
@@ -3335,6 +3412,53 @@ roles = ["lead"]
         assert!(no_secrets.secrets.is_none());
         // 未知キーは拒否。
         assert!(toml::from_str::<Config>("[secrets]\nbogus = 1\n").is_err());
+    }
+
+    /// ADR-0047 D1 / D2（Phase 61）: `[knowledge]` は既定でも値を持ち（`~/knowledge`）、
+    /// 相対パスは設定ファイル基準で絶対化され、`default_mounts` の綴り間違いは `validate()` が弾く。
+    /// **ディレクトリは作らない**（用意するのは `celerisctl knowledge init` だけ）。
+    #[test]
+    fn the_knowledge_section_resolves_its_root_and_checks_the_default_mounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[knowledge]\nroot = \"kb\"\ndefault_mounts = [\"kb:user\", \"memory\"]\n\
+             [[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.knowledge.root.is_absolute());
+        assert_eq!(cfg.knowledge.root, dir.path().canonicalize().unwrap().join("kb"));
+        // 読んだだけでは作らない。
+        assert!(!cfg.knowledge.root.exists());
+        assert_eq!(
+            cfg.knowledge.mounts().expect("mounts"),
+            vec![
+                task_core::KnowledgeMount::kb("user"),
+                task_core::KnowledgeMount::memory(None)
+            ]
+        );
+        assert_eq!(cfg.dispatch_config().knowledge.root, cfg.knowledge.root);
+        assert_eq!(cfg.dispatch_config().knowledge.default_mounts.len(), 2);
+
+        // 節を書かなければ既定（`~/knowledge` と `kb:user` / `kb:environment`）。
+        let default: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert_eq!(default.knowledge.root, PathBuf::from("~/knowledge"));
+        assert_eq!(default.knowledge.default_mounts, vec!["kb:user", "kb:environment"]);
+        // 未知キーは拒否。
+        assert!(toml::from_str::<Config>("[knowledge]\nbogus = 1\n").is_err());
+        // 綴り間違いは `validate()` で落ちる（黙って無視しない）。
+        let bad: Config =
+            toml::from_str("[knowledge]\ndefault_mounts = [\"nope:x\"]\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n")
+                .unwrap();
+        let why = bad.validate().expect_err("bad mount").to_string();
+        assert!(why.contains("[knowledge] default_mounts"), "{why}");
+        // KB の外を指す scope も落ちる。
+        let escape: Config =
+            toml::from_str("[knowledge]\ndefault_mounts = [\"kb:../etc\"]\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n")
+                .unwrap();
+        assert!(escape.validate().is_err());
     }
 
     /// ADR-0033 D6（Phase 24）: `[memory] dir` は設定ファイル基準で絶対化され、0700 で作られ、

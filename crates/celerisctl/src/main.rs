@@ -14,6 +14,7 @@ use task_core::{SqliteStore, TaskStore};
 use commands::add::{self, AddArgs};
 use commands::cancel::{self, CancelArgs};
 use commands::gate::{self, AnswerArgs, ApproveArgs, RejectArgs};
+use commands::knowledge::{self, KnowledgeCommand};
 use commands::plan::{self, PlanArgs};
 use commands::query::{self, LogArgs, LsArgs, ShowArgs};
 use commands::replay::{self, ReplayArgs};
@@ -44,6 +45,12 @@ enum Command {
     Answer(AnswerArgs),
     Log(LogArgs),
     Replay(ReplayArgs),
+    /// ADR-0047 D3（Phase 61）: 知識ベース（`init` / `search` / `get` / `record` / `reindex`）。
+    /// **DB を開かない**ので、コンテナの中でも KB さえマウントされていれば動く。
+    Knowledge {
+        #[command(subcommand)]
+        command: KnowledgeCommand,
+    },
     /// `celerisctl worker run` 等（デバッグ用。ADR-0012 D4）。
     Worker {
         #[command(subcommand)]
@@ -69,6 +76,8 @@ fn dispatch(store: &dyn TaskStore, command: Command) -> Result<ExitCode, CliErro
         Command::Answer(args) => gate::run_answer(store, args),
         Command::Log(args) => query::run_log(store, args),
         Command::Replay(args) => replay::run(store, args),
+        // `main` が先に処理する（DB を開かない）。
+        Command::Knowledge { .. } => unreachable!("handled before the store is opened"),
         Command::Worker { command } => match command {
             WorkerCommand::Run(args) => worker::run_run(store, args),
         },
@@ -77,6 +86,16 @@ fn dispatch(store: &dyn TaskStore, command: Command) -> Result<ExitCode, CliErro
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // ADR-0047 D3: 知識ベースの道具は **DB を開かない**（ワーカーのコンテナには DB が無い）。
+    if let Command::Knowledge { command } = cli.command {
+        return match knowledge::run(command) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let db_path = resolve_db_path(cli.db);
 
     let store = match SqliteStore::open(&db_path) {
