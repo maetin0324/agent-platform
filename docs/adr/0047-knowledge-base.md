@@ -141,3 +141,83 @@
 
 - LangMem（`tools/langmem`・`langmem` アダプタ・知識整理 run のトリガ・候補の適用規則・手帳の昇格）
 - タスクのタイムライン（ADR-0044 D5）への「この仕事から知識 N 件」の表示
+
+---
+
+## Phase 62 追記（2026-09-20。D4 = LangMem を実装したときの逸脱と細部）
+
+実装は ADR の決定どおり。**決定を変えた点は無い**。Phase 61 の 3 つの提案（P-61-i〜k）に答え、
+書いていなかった細部を残す。
+
+### 提案への答え
+
+- **P-61-i（daemon の起動時 reindex）**: 採用した。celeris の起動時（`--mode verify` を除く）に KB が
+  あれば `ensure_index` を 1 回呼ぶ（`crates/celeris/src/lib.rs`）。`_inbox` の変化を tick ごとに見る
+  仕組み（inotify・mtime 比較）はまだ無いが、知識整理 run の適用（`apply_candidates`）が毎回
+  `reindex` するので、有効にしている環境では実質的に索引が古くなり続けることはない。
+- **P-61-j（`[knowledge] default_mounts` の既定を Phase 59 後に `[]` へ）**: **見送り**。ADR-0046 D7 の
+  木はまだ `knowledge` を明示的に持たない（Phase 59 のノードの profile を見ても `knowledge` フィールドは
+  空）ので、`default_mounts` は今も唯一の実効マウントの出所。Phase 62 の範囲外（今回の Phase の
+  受け入れ条件でもない）。次に組織側へ `knowledge` を足す Phase が判断すること。
+- **P-61-k（`DELETE /knowledge/page` か retire-only か）**: **retire-only に決めた**。新しい API
+  エンドポイントは足さない。「ページを捨てる」は `op: retire`（知識整理 run が提案する、または
+  人が `celerisctl knowledge record` で候補を作って手で accept する）の 1 本に統一し、
+  accept が対象ページを `_retired/<同じ相対パス>` へ動かしてコミットする（`task_ops::knowledge::
+  RETIRED_DIR`）。`_retired/` は `_inbox/` と同じく索引にも検索にも出ない。理由: `DELETE` は
+  「消えて終わり」だが、KB は git が正本なので実は `git rm` と同じことしかできない。それなら
+  「今の場所から動かして、人の判断が要ったことを front matter の `op` に残す」retire の方が、
+  「なぜ消えたか」を後から追える（`_retired/` のページ自体に理由を書ける。`git log` も残る）。
+  ページを直接消したい人はエディタ + `git rm` + `celerisctl knowledge reindex`（Phase 61 のまま）。
+
+### 決めた細部（ADR が書いていなかったこと）
+
+- **P-62-a: `knowledge` harness は `[[harnesses]]`/`[[genres]]` に射影されない組み込みのまま**。
+  ADR-0046 D3（`Config::project_harnesses`）は「組み込みの `plan`/`reviewer`/`smoke` はタスクの
+  `genre` として使わない（計画 run の『使える分野』に混ぜない）」と決めている。`knowledge` も同じ
+  理由でこの規則に従わせた。そのため知識整理タスクの生成（`crates/celeris/src/knowledge_maint.rs`）は
+  役割・分野の解決に頼らず、`NewTaskSpec.adapter = Some("langmem")` / `tier = Some(Tier::Cheap)` を
+  **直接指定**する（`role` は `task_core::report::KNOWLEDGE_ROLE`（= `"knowledge"`）を印として
+  付けるだけで、これが `[[roles]]` に無くても落ちない。`report-compressor` と同じ扱い）。
+- **P-62-b: 知識整理タスクの担当ノードは「元のタスクの担当」**。ADR の「その案件・ノードに対して
+  知識整理 run」の「ノード」を、元のタスクの `assignee` と読んだ（自分の仕事を自分で棚卸しする形）。
+  担当が無いタスク（`assignee = None`）は対象外。
+- **P-62-c: 知識整理 run の「適用」は、まとめの run（ADR-0033 D3）と違って `task-dispatch` に手を
+  入れず、celeris の tick 側だけで完結させた**。`task_ops::knowledge::apply_candidates` の呼び出しと
+  `knowledge_runs` の状態遷移は `crates/celeris/src/knowledge_maint.rs::apply_finished`
+  （tick から `schedule` の直後に呼ぶ）が行う: `knowledge_runs` が `scheduled` のまま、その
+  run のタスクが終端になったものを見つけ、`done` なら `artifacts/knowledge-candidates.json`
+  （`task_core::artifacts::artifacts_dir_for` で決定的に場所を計算。知識整理タスクは既定の
+  `workspace: None` → 自分の workspace を所有するので `<workspace_root>/<task_id>/artifacts/`）を
+  読んで適用、`failed`/`cancelled` なら候補を読まず `failed` にする。まとめの run（`report-compressor`）
+  は「ディスパッチャが `done` を親の報告にする」という**既存の別経路**を使っているが、知識整理は
+  そのような既存の合流点が無いので、Phase 25 の圧縮と同じ「tick が同期でストアと結果ファイルを見る」
+  形を素直に踏襲した。結果として、知識整理 run 自身の「done/failed」は**通常のタスク終端の報告**
+  （担当ノードの通常の報告）としても 1 件残る（ADR は禁止していないので、特別扱いはしていない）。
+- **P-62-d: `result_summary`（ADR-0047 D4「report・result.json summary」の後者）は依頼文に別枠で
+  入れていない**。終端になったタスクの報告本文（`report.body`）は、そのタスクの run が `done` の
+  ときに `report::report_for_done` が `summary`（result.json の値そのもの）＋証拠＋成果物一覧から
+  組み立てたものなので、`result.json` の `summary` は実質的に `report.body` に既に入っている。
+  二重に持たせず `report_headline`/`report_body` だけを渡す（`MaintenanceInput.result_summary` は
+  フィールドとして残してあるので、将来 result.json を別途読みたくなったときに埋める先はある）。
+- **P-62-e: Console の `knowledge` ブロックと Timeline の `knowledge` 項目の形を、Phase 60a が
+  予約した形（`entry_id`/`title`/`state`。KB の 1 ページの状態変化を指す形）から書き換えた**。
+  D5 の要求（「この仕事から知識 N 件が候補になった／取り込まれた」）はタスク単位の集計であって
+  KB ページ単位ではないため、`task_id`/`task_title`/`run_task_id`/`state`
+  （`applied`/`failed`。`scheduled` は Console には出さず、Timeline には出す）/`ingested`/`inbox`/
+  `discarded` を持つ形にした（`docs/api/v1/api-v1.schema.json` を `UPDATE_SCHEMA=1` で作り直し済み）。
+- **P-62-f: `langmem` の python 依存が無い（venv 未セットアップ）は `retryable = false`**。
+  ランナーが `import langmem` に失敗すると `CELERIS_LANGMEM_MISSING` を stderr に出して exit 1 し、
+  アダプタ（`crates/task-worker/src/langmem.rs`）がこれを見て非再試行のエラーにする（ADR-0047 D4
+  「if langmem is not importable, the runner exits with a clear error (retryable=false)」）。
+  再試行しても直らない設定の誤りだからで、他アダプタの「供給側の失敗」分類（`classify_provider_failure`）
+  とは別の、この 1 パターンだけの決定的な検査。
+
+### 実機（まだやっていない。ADR-0009 P-34）
+
+- `scripts/knowledge/setup-langmem.sh` を実行して venv を作る（ネットワークに出るので、このセッションからは
+  行っていない）。
+- `[adapters.langmem]` / `[knowledge.langmem]` / `[[providers]] adapter = "langmem"` を本番の
+  `config.toml` に足し、celeris を再起動する（設定の再読み込みでは拾えない節が混ざる）。
+- 終端になったタスクを 1 本用意し、知識整理 run が起き、`confidence: high` の候補が知識ベースへ
+  コミットされ、GUI の Console/タイムライン/`_inbox` から見えることを確認する。
+- 詳しい手順は `docs/PROGRESS.md` の「Phase 62」節の「本番の手順」を参照。

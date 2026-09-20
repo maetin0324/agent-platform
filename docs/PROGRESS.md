@@ -9173,3 +9173,247 @@ releases/$SHA12/bin/celerisctl --db ~/.local/celeris/celeris.sqlite3 org migrate
   `GET /knowledge/tree` initialized・10 ページ、`GET /config` の harness 6 種、GUI `/healthz` 一致。
   元の設定は `config.toml.pre-org-v2` / `org.toml.pre-org-v2`、逆写像は `~/.local/celeris/backups/org-v1-map.json`。
 - 人にお願い: `~/knowledge/user/*.md` と `environment/clusters/{pegasus,sirius,fern03}.md` の雛形を埋める（Celeris は出典の無い知識を書かない）。
+
+## Phase 62 — 知識の自動メンテナンス（LangMem は抽出と整理の層。ADR-0047 D4。2026-09-20）
+
+**完了日**: 2026-09-20。`langmem` アダプタ（`crates/task-worker/src/langmem.rs` + 埋め込みランナー
+`langmem_run.py`）、`knowledge` harness（組み込み。`task_core::harness::BUILTIN_KNOWLEDGE`）、決定的な
+トリガと適用（`crates/celeris/src/knowledge_maint.rs`）、候補の検査と適用規則
+（`task_core::knowledge::{Candidate, CandidateOp, validate_candidate}` + `task_ops::knowledge::
+apply_candidates`）、`knowledge_runs` の追跡（migration 0018、schema 17→18）、Console の `knowledge`
+ブロックとタスクのタイムラインの `knowledge` 項目、`_inbox` の `op`（`merge`/`retire`）対応、
+`config/celeris.example.toml` と `docs/knowledge.md`・ADR-0047 の追記、`tools/langmem/requirements.txt` +
+`scripts/knowledge/setup-langmem.sh` を実装した。**LLM 呼び出しは `langmem` アダプタが起こす python
+プロセスの中だけ**（CLAUDE.md「ディスパッチャやストアに LLM 呼び出しを入れない」を厳守。celeris 本体
+（tick・ディスパッチャ・ストア・`task_ops::knowledge::apply_candidates`）は決定的な判断だけを行う）。
+
+### 受け入れ条件（本文の指示。ADR-0047 §3 Phase 62）ごとの証跡
+
+1. **`langmem` アダプタと `tools/langmem`**（`langmem_run.py` + `crates/task-worker/src/langmem.rs`。
+   ADR-0006 D3 の結果ファイル規約をアダプタが代わりに書く） —
+   `cargo test -p task-worker --lib langmem::`（8 本）: `happy_path_writes_candidates_and_result_files`
+   （`artifacts/knowledge-candidates.json` を書き、成果物として申告し、`result.json`/`summary` を書く）、
+   `missing_langmem_package_is_not_retryable`（`CELERIS_LANGMEM_MISSING` マーカーで
+   `retryable = false`）、`a_non_zero_exit_without_the_missing_marker_is_retryable`、
+   `missing_candidates_file_is_retryable_error`、`zero_candidates_is_still_done`（候補 0 件でも `done`）、
+   `wall_clock_exceeded_kills_the_process_group`、`idle_timeout_secs_cannot_exceed_the_harness_budget`
+   （`[adapters.langmem].idle_timeout_secs` はハーネス予算を上回れない）、`with_env_overrides_a_same_
+   name_key_already_in_config_env`。**実物の `langmem_run.py` を実行するテストは無い**（§7 で明記した
+   fake extractor だけを使う。ネットワーク・本物の LLM 無しで検証できるのはアダプタ ↔ python の
+   プロトコルだけ）。`python3 -m py_compile crates/task-worker/src/langmem_run.py` → exit 0（構文チェック。
+   `langmem`/LangChain が入っていない環境でも import せずに読めるモジュール構成にしてある）。
+2. **知識整理 run のトリガ**（`crates/celeris/src/knowledge_maint.rs::schedule`。tick から role が
+   active のときだけ、`[knowledge.langmem] enabled = true` のときだけ、1 tick に最大 1 件） —
+   `cargo test -p celeris --lib knowledge_maint::`（5 本）:
+   `schedule_creates_one_maintenance_task_and_is_idempotent`（`knowledge` harness = adapter
+   `langmem` / tier `cheap` を明示指定、`support_kind` が `"knowledge"` になる、`knowledge_runs` に
+   `scheduled` の目印、2 回目は同じ元タスクから作らない）、`schedule_noops_when_disabled_or_the_kb_is_
+   missing`、`schedule_skips_support_tasks_unassigned_tasks_and_archived_projects`（対話・圧縮・担当
+   なし・案件アーカイブ済みは対象外）、`schedule_skips_a_terminal_task_without_a_report_yet`。
+   tick への配線は `crates/celeris/src/lib.rs`（`milestone_review::schedule` の直後、通知の前。
+   `reports.rs`/`milestone_review.rs` と同じ「tick から同期で呼び、LLM もワーカーも起動しない」形）。
+3. **候補の適用規則**（`task_ops::knowledge::apply_candidates`。confidence × op の全組み合わせ） —
+   `cargo test -p task-ops --lib knowledge::`（13 本のうち Phase 62 で足した 6 本）:
+   `apply_candidates_commits_high_confidence_create_and_update_directly`（`confidence: high` の
+   `create`/`update` は KB へ直接コミット。author `Celeris (knowledge) <celeris@local>`、message
+   `knowledge: <op> <path> (task <id>)`、`update` は既存の `sources` と和集合にする）、
+   `apply_candidates_routes_merge_retire_and_low_confidence_to_the_inbox`（`merge`/`retire` は
+   confidence に関わらず常に `_inbox`、`medium`/`low` の `create`/`update` も `_inbox`）、
+   `apply_candidates_sends_a_human_dirty_target_to_the_inbox`（対象ページに人の未コミット編集が
+   あれば `confidence: high` でも直接コミットしない）、`apply_candidates_drops_hard_invalid_candidates`
+   （出典なし・秘密混入・path 境界違反は**どこにも書かず**落とす）、
+   `apply_candidates_is_idempotent_for_an_unchanged_high_confidence_candidate`、
+   `inbox_accept_handles_merge_and_retire`（`_inbox` の accept: `merge` は対象を必ず上書き、`retire`
+   は対象を `_retired/` へ動かす）。`crates/task-api/tests/knowledge.rs` の
+   `candidates_with_an_op_show_it_and_accept_behaves_per_op` で HTTP 経由でも確認。
+4. **秘密の検査（適用前）** — `task_core::knowledge::validate_candidate` が Phase 61 の
+   `secret_finding` をそのまま使う（`cargo test -p task-core --lib knowledge::
+   validate_candidate_checks_path_title_sources_body_size_and_secrets`）。二重に検査しない
+   （python ランナー側の抽出指示文にも明記してあるが、決定的な検査は Rust 側だけで行う）。
+5. **手帳の昇格** — `crates/celeris/src/knowledge_maint.rs::schedule` が
+   `task_worker::MemoryDir::load` で担当ノードの `notes.md` を読み、
+   `task_core::knowledge::MaintenanceInput.notes_excerpt` として依頼文（`maintenance_objective`）に
+   含める（`cargo test -p task-core --lib knowledge::maintenance_objective_includes_every_section`
+   で本文に含まれることを確認）。KB への昇格そのもの（`op: create`/`update` の候補にするか）は
+   langmem（python）の抽出判断で、celeris 側は「読んで渡す」までが決定的な仕事。
+6. **タイムラインの表示** —
+   `GET /tasks/{id}/timeline` に `kind: "knowledge"` を追加（`crates/task-api/src/timeline.rs` +
+   `types.rs`）。`cargo test -p task-api --test task_management
+   the_timeline_shows_the_knowledge_maintenance_run`: `scheduled`（`ingested`/`inbox`/`discarded` 無し）
+   → `apply` 後は `applied` + 件数、知識整理 run を持たないタスクには出ない、の 3 点を確認。
+7. **Console の `knowledge` ブロック**（ADR-0048 D1 が予約していた 9 種目を Phase 62 で埋めた） —
+   `GET /console` に「この仕事から知識 N 件: 取り込み a / 候補 b / 破棄 c」（`crates/task-api/src/
+   console.rs` の `side_blocks` に「5. 知識整理 run」節を追加、`types.rs` の `ConsoleBlock::Knowledge`
+   を `task_id`/`task_title`/`run_task_id`/`state`/`ingested`/`inbox`/`discarded` の形に書き換え）。
+   `cargo test -p task-api --test console knowledge_blocks_show_the_applied_summary_and_respect_scope`:
+   `scheduled`（未適用）では出ない、`applied` で出る、`project:<id>`/`node:<id>` で絞れる、を確認。
+   GUI（`gui/app/components/ConsoleBlockItem.tsx` の `KnowledgeBlockView`）は件数の 1 行 + 対象タスクへの
+   リンク + `候補 > 0` のときだけ `/knowledge/inbox` へのリンクを出す。
+8. **`_inbox` の `op` 対応（`merge`/`retire`）と P-61-k の決着** — `task_core::knowledge::FrontMatter`
+   に `op` を足し（往復テスト `front_matter_round_trips_the_op_key`）、`task_ops::knowledge::InboxItem`
+   /`inbox_accept` を拡張。**P-61-k の答え: `DELETE /knowledge/page` は足さず、retire-only にした**
+   （新しい API エンドポイントは追加していない。「ページを捨てる」は `op: retire` の accept が
+   `_retired/<同じ相対パス>` へ動かす 1 本に統一。理由と代替経路は `docs/adr/0047-knowledge-base.md`
+   の「Phase 62 追記」に書いた）。GUI（`gui/app/routes/knowledge.inbox.tsx`）は `op` をバッジで出し、
+   `merge`/`retire` のときだけヒント文を出す。
+
+### 実行したコマンドと出力の要点
+
+```
+cargo test --workspace --no-fail-fast          → exit 0、grep -c "^test result: FAILED" = 0、
+                                                   passed 合計 1496（baseline 1466 から純増）
+cargo clippy --workspace --all-targets -- -D warnings
+                                                → exit 0（警告 0）
+UPDATE_SCHEMA=1 cargo test -p task-core -p task-api -p task-worker --lib
+                                                → exit 0（193 + 51 + 291 = 535 passed）。
+                                                   docs/api/v1/api-v1.schema.json を作り直し
+                                                   （worker-protocol.schema.json は無変更 = protocol.rs
+                                                   に触れていない）
+python3 -m py_compile crates/task-worker/src/langmem_run.py
+                                                → exit 0
+```
+
+主なクレート別（`cargo test --workspace` の内訳。抜粋）:
+
+```
+task-core   --lib             193 passed
+task-ops    --lib             251 passed
+task-worker --lib             291 passed（langmem:: 8 本を含む）
+task-api    --lib + 統合       51 + 335 passed（console 8・knowledge 7・task_management 10 を含む）
+celeris     --lib + 統合       139 + 39 passed（knowledge_maint:: 5 本を含む）
+celerisctl  --lib + 統合       49 + 4 passed
+```
+
+GUI（`gui/` で実行）:
+
+```
+pnpm install --frozen-lockfile → exit 0
+pnpm gen:types                 → exit 0（ConsoleBlock::Knowledge / TimelineItem::Knowledge /
+                                   KnowledgeCandidate.op の型が変わった。2 回目は無変更）
+pnpm lint                      → exit 0（Checked 219 files）
+pnpm typecheck                 → exit 0
+pnpm test                      → exit 0。Test Files 59 passed / Tests 838 passed（baseline 836 から純増。
+                                   knowledge.test.ts に op の色・ヒント・mock round-trip の 3 本を追加）
+pnpm build                     → exit 0（client + SSR）
+bash ../scripts/sync-gui-docs.sh --check
+                                → up to date（先に `sync-gui-docs.sh` で `gui/docs/celeris-api-v1.md` を
+                                   `docs/gui/api.md` に合わせてから確認）
+pnpm e2e                       → **実行していない**（実 celeris のバイナリが要る。Phase 61/G21・
+                                   Phase 59 と同じ理由。ゲートの一覧にも含まれていない）
+```
+
+### 逸脱（明示）
+
+- **P-62-a〜f**: `docs/adr/0047-knowledge-base.md` の「Phase 62 追記」に決めた細部を 6 件まとめた
+  （harness の射影規則・担当ノードの決め方・適用を task-dispatch でなく celeris tick 側で完結させた
+  こと・`result_summary` を別枠で持たせなかったこと・Console/Timeline の予約形の書き換え・
+  `retryable = false` の判定基準）。決定を変えた点は無い。
+- **P-61-i を採用**: celeris の起動時（`--mode verify` を除く）に KB があれば `ensure_index` を 1 回
+  呼ぶようにした（`crates/celeris/src/lib.rs`）。
+- **P-61-j は見送り**: `[knowledge] default_mounts` の既定を `[]` にする変更は、ADR-0046 D7 の木が
+  まだ `knowledge` を持たないため今回は行っていない（Phase 62 の受け入れ条件の範囲外）。
+- **P-61-k を「retire-only」に決着**: 上の受け入れ条件 8 を参照。
+
+### 未解決事項
+
+- **実機はまだ**。`scripts/knowledge/setup-langmem.sh` はネットワークに出る（`pip install`）ので、この
+  セッションからは実行していない。`~/knowledge` にも一度も触れていない（テストは全部 tempdir。
+  `[knowledge.langmem] enabled` は既定 `false` のまま）。
+- **`langmem`/LangChain の実際の API 呼び出しは検証できていない**。`langmem_run.py` は
+  「`langmem.create_memory_manager(model, instructions=…, enable_inserts=True)` を呼び、
+  `manager.invoke({"messages": [...]})` の戻り値から候補を取り出す」という、ドキュメントから読み取った
+  想定の実装。実際の LangMem の戻り値の形（pydantic モデルか dict か、`enable_inserts` の効き方）は
+  venv を用意して 1 回実行してみないと確定しない。`parse_candidates` はできるだけ寛容
+  （`model_dump()`/`dict()`/dict のどれでも受ける）に書いてあるが、実機で崩れたら直す前提。
+- **知識整理 run 自身の「done/failed」が通常のタスク終端の報告としても 1 件残る**（P-62-c）。
+  ノイズになるようなら、`task-dispatch::reports::record_run_report` に `role ==
+  task_core::report::KNOWLEDGE_ROLE` の特別扱い（報告を作らない）を足す Phase を起こす。
+- **GUI の e2e が無い**（`pnpm e2e` はビルド済みの celeris バイナリが要る。Phase 59/61 と同じ理由）。
+  `KnowledgeBlockView`/知識整理タイムライン項目の実際の描画は目視確認していない
+  （DOM を描画する unit テストがこのリポジトリに無い方針。`~/lib/knowledge.ts` の純粋関数だけ検証済み）。
+
+### 本番の手順（人が実行する。**まだやっていない**。ADR-0009 P-34）
+
+スキーマが 17 → **18**（`knowledge_runs`）に上がる。`[knowledge.langmem]` を有効にするまでは
+知識整理 run は 1 件も起きない（既定 `enabled = false`）ので、この Phase の昇格そのものは
+Phase 59〜61 と同じ「schema だけ上がる」昇格（新しいテーブルが増えるだけで、既存の挙動は変わらない）。
+
+```bash
+# 0. 現在地の確認
+curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" http://127.0.0.1:7710/api/v1/health \
+  | python3 -m json.tool   # → schema_version（17 のはず）
+
+# 1. 新しいリリースを作る
+scripts/selfdeploy/release.sh main
+SHA12=<出力された sha12>
+
+# 2. 検証して昇格する（schema 17→18 だけなので、org 移行のような追加フックは不要。
+#    Phase 59/60/61 の「stop-start」ではなく通常のライブ引き継ぎで昇格できる）
+scripts/selfdeploy/verify.sh $SHA12
+scripts/selfdeploy/promote.sh $SHA12
+
+# 3. 事後確認
+curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" http://127.0.0.1:7710/api/v1/health \
+  | python3 -m json.tool   # → schema_version: 18, release: $SHA12, role: active
+
+# 4. 知識の自動メンテナンスを有効にする（ここまでは何も変わらない。ここからが本番の受け入れ）
+scripts/knowledge/setup-langmem.sh
+#    → $CELERIS_STATE_DIR/tools/langmem/.venv を作り、langmem の import を確認する
+
+$EDITOR ~/.config/celeris/config.toml
+#    [adapters.langmem]
+#    command = "~/.local/celeris/tools/langmem/.venv/bin/python"
+#
+#    [knowledge.langmem]
+#    enabled = true
+#    provider = "openai-compatible"   # 本番の Qwen トンネル
+#    base_url = "http://127.0.0.1:18000/v1"   # qwen-tunnel-and-ldr-ops のトンネル経由
+#    model = "qwen3.8-27b"
+#
+#    [[providers]]
+#    id = "langmem-main"
+#    adapter = "langmem"
+#    tiers = ["cheap"]
+#    concurrency = 1
+python3 -c "import tomllib; tomllib.load(open('/home/$USER/.config/celeris/config.toml','rb'))"  # 構文だけ確認
+
+# 5. 設定の再読み込み（[adapters.*] / [knowledge.*] / [[providers]] は再起動が要る節。
+#    POST /reload では拾えないので、通常のライブ引き継ぎでもう一度昇格するか、明示的に再起動する）
+scripts/selfdeploy/release.sh main   # コードは変わっていなくても設定だけ差し替えたい場合はここで
+                                       # 同じ sha12 のまま再起動する運用にするか、後述の 5b を使う
+# 5b（コードの変更が無いとき）: systemctl --user restart celeris@<いま動いている sha12>
+#    その後 verify.sh 相当の確認（health / schema_version）を手で行う
+
+# 6. 実機の受け入れ
+#    終端になるタスクを 1 本用意する（既存の自己改善タスクでよい）。数分後:
+curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" \
+  "http://127.0.0.1:7710/api/v1/console?scope=all" | python3 -m json.tool | grep -A5 '"kind": "knowledge"'
+#    → 知識整理 run が起き、`state: "applied"` の knowledge ブロックが出ることを確認する
+ls ~/knowledge/_inbox/   # confidence が medium/low、または merge/retire の候補が並ぶ
+git -C ~/knowledge log --oneline -5   # confidence: high の create/update が
+                                       # `Celeris (knowledge) <celeris@local>` でコミットされている
+# GUI（:7700）の Console でその仕事のブロックに「取り込み a / 候補 b / 破棄 c」が出て、
+# `/knowledge/inbox` に候補が並ぶことを見る
+```
+
+**ロールバック**: 昇格前なら何もしなくてよい（`[knowledge.langmem] enabled = false` のまま据え置けば
+知識整理 run は起きない）。昇格後に問題が見つかったら、まず `[knowledge.langmem] enabled = false` に
+戻して再起動すれば新規の知識整理 run は止まる（`knowledge_runs` の既存の行・`~/knowledge` への
+コミットは残る。git なので `git revert`/`git reset` で戻せる）。schema のロールバックが要る場合は
+通常の `scripts/selfdeploy/rollback.sh`（`promote.sh` が取った DB バックアップから）。
+
+### 提案
+
+- **P-62-g**: 知識整理 run 自身の通常の報告（上の「未解決事項」参照）を作らないようにするなら、
+  `task-dispatch::reports::record_run_report` に 1 分岐足す小さな Phase。実機で人が「知識整理 run の
+  報告がうるさい」と感じたら起こす（先回りして今回やらない: CLAUDE.md「今回の Phase だけをやる」）。
+  `report::support_kind` は既に `role == KNOWLEDGE_ROLE` を `"knowledge"` として分類しているので、
+  GUI の仕事の木からは既に隠れている（隠れるのは表示だけで、報告そのものは残る、という違い）。
+- **P-62-h**: `langmem_run.py` の実際の LangMem API 呼び出しは、venv を用意した実機確認
+  （本番の手順の 4〜6）で初めて検証できる。もし戻り値の形が想定と違えば `parse_candidates` を
+  直す（ここは python だけの変更で、Rust 側のアダプタ・トリガ・適用規則には影響しない契約
+  になっている）。
+- **P-62-i**: `_inbox` の `op` ごとの UI（`gui/app/routes/knowledge.inbox.tsx`）は最小限（バッジ +
+  ヒント文）。`retire` のときは取り込み先（`target`）の編集フィールドを触っても意味が無い
+  （accept は常に候補の `target` を使う）ので、次の GUI Phase で `retire`/`merge` のときは
+  そのフィールドを読み取り専用にする等の UX 改善ができる。

@@ -552,6 +552,111 @@ async fn candidates_can_be_accepted_or_rejected() {
     );
 }
 
+/// ADR-0047 D4（Phase 62）: `GET /knowledge/inbox` は `op` を出す（`record` の候補には無い）。
+/// `op = retire` の accept は対象ページを `_retired/` へ動かし、`op = merge` の accept は対象を
+/// 上書きする（P-61-k）。
+#[tokio::test]
+async fn candidates_with_an_op_show_it_and_accept_behaves_per_op() {
+    let env = env();
+    init_kb(&env.knowledge_root);
+    write_page(
+        &env.knowledge_root,
+        "environment/tools/old.md",
+        "---\ntitle: old\nsources: [human]\n---\n\n古い内容。\n",
+    );
+
+    let candidates = [
+        task_core::knowledge::Candidate {
+            op: task_core::knowledge::CandidateOp::Merge,
+            path: "environment/tools/old.md".into(),
+            title: "old（書き直し）".into(),
+            tags: vec![],
+            scope: "environment".into(),
+            body: "書き直した完全な版。".into(),
+            sources: vec!["task:01J9".into()],
+            confidence: task_core::Confidence::Medium,
+        },
+        task_core::knowledge::Candidate {
+            op: task_core::knowledge::CandidateOp::Retire,
+            path: "environment/tools/old.md".into(),
+            title: "old（退役）".into(),
+            tags: vec![],
+            scope: "environment".into(),
+            body: "もう使われていない。".into(),
+            sources: vec!["task:01J9".into()],
+            confidence: task_core::Confidence::Low,
+        },
+    ];
+    let outcome =
+        task_ops::knowledge::apply_candidates(&env.knowledge_root, "01J9", &candidates);
+    assert_eq!(outcome.inboxed.len(), 2, "{outcome:?}");
+
+    let app = env.router();
+    let inbox = send(&app, g("/api/v1/knowledge/inbox")).await;
+    let items = inbox.json()["items"].as_array().expect("items").clone();
+    assert_eq!(items.len(), 2, "{}", inbox.text());
+    let merge_item = items
+        .iter()
+        .find(|i| i["op"] == "merge")
+        .expect("merge candidate");
+    let retire_item = items
+        .iter()
+        .find(|i| i["op"] == "retire")
+        .expect("retire candidate");
+    assert_eq!(merge_item["target"], "environment/tools/old.md");
+    assert_eq!(retire_item["target"], "environment/tools/old.md");
+
+    // merge の accept: 対象を必ず上書き（`overwrite` を渡さなくても 409 にならない）。
+    let merge_id = merge_item["id"].as_str().expect("id").to_string();
+    let accepted = send(
+        &app,
+        p(
+            &format!("/api/v1/knowledge/inbox/{merge_id}/accept"),
+            &json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status.as_u16(), 200, "{}", accepted.text());
+    let page = send(
+        &app,
+        g("/api/v1/knowledge/page?path=environment/tools/old.md"),
+    )
+    .await;
+    assert!(
+        page.json()["raw"]
+            .as_str()
+            .is_some_and(|r| r.contains("書き直した完全な版")),
+        "{}",
+        page.text()
+    );
+
+    // retire の accept: 対象ページが `_retired/` へ動く。
+    let retire_id = retire_item["id"].as_str().expect("id").to_string();
+    let accepted = send(
+        &app,
+        p(
+            &format!("/api/v1/knowledge/inbox/{retire_id}/accept"),
+            &json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status.as_u16(), 200, "{}", accepted.text());
+    assert_eq!(
+        accepted.json()["path"],
+        "_retired/environment/tools/old.md"
+    );
+    assert!(!env.knowledge_root.join("environment/tools/old.md").exists());
+    assert!(
+        env.knowledge_root
+            .join("_retired/environment/tools/old.md")
+            .exists()
+    );
+    // 退役したページは索引にも出ない。
+    let tree = send(&app, g("/api/v1/knowledge/tree")).await;
+    let paths = item_paths(&tree.json());
+    assert!(!paths.iter().any(|p| p.contains("old.md")), "{paths:?}");
+}
+
 /// 変更系は管理系（ADR-0013 D11）。トークン無しは 401、読み取りは通る。
 #[tokio::test]
 async fn the_write_endpoints_are_admin_only() {

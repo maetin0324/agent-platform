@@ -13,6 +13,8 @@ pub mod codex_account;
 pub mod container;
 pub mod delegate_file;
 pub mod fake;
+/// ADR-0047 D4（Phase 62）: 知識整理 run（`langmem` の memory manager を包む）。
+pub mod langmem;
 pub mod local_deep_research;
 pub mod local_worktree;
 pub mod memory;
@@ -52,6 +54,7 @@ pub use container::{
 };
 pub use delegate_file::{DELEGATE_FILE_NAME, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
+pub use langmem::{LANGMEM_MISSING_MARKER, LangMemAdapter, LangMemConfig, LangMemProvider};
 pub use local_deep_research::{EvidenceThresholds, LdrAdapter, LdrConfig, LdrMode};
 pub use local_worktree::{
     BaseKind, BaseRef, CleanupOutcome, DEFAULT_BRANCH_PREFIX, LocalWorktree, WORKTREE_DIR_NAME,

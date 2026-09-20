@@ -155,6 +155,20 @@ pub enum TimelineItem {
         path: String,
         title: String,
     },
+    /// ADR-0047 D4/D5（Phase 62）: このタスクの終端から起きた知識整理 run。`at` は適用済みなら
+    /// `applied_at`、まだなら `created_at`（run を起こした時刻）。
+    Knowledge {
+        at: String,
+        run_task_id: TaskId,
+        /// `scheduled`（起こしたが未適用）| `applied` | `failed`。
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ingested: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inbox: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discarded: Option<u32>,
+    },
 }
 
 // ========== ADR-0044 D2/D5（Phase 53）: ここまで ==========
@@ -1326,18 +1340,27 @@ pub enum ConsoleBlock {
         cursor: String,
         report: task_core::Report,
     },
-    /// 知識の候補が入った・取り込まれた（ADR-0047）。**Phase 60a では誰も作らない**予約の形で、
-    /// 知識の側（Phase 61）が埋める。
+    /// 知識整理 run の結果（ADR-0047 D4 / D5。Phase 62）。「この仕事から知識 N 件: 取り込み a /
+    /// 候補 b / 破棄 c」の 1 行。`task_id` の終端から知識整理 run（`run_task_id`）が起き、
+    /// `apply_candidates` の集計が付いたときに 1 件出る（`state = applied`。適用前は出さない）。
     Knowledge {
         at: String,
         cursor: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project_id: Option<task_core::ProjectId>,
-        /// 知識の項目の id。
-        entry_id: String,
-        title: String,
-        /// `candidate` / `accepted` など（ADR-0047 が決める語）。
+        /// 知識整理 run の元になったタスク。
+        task_id: TaskId,
+        task_title: String,
+        /// 知識整理 run（裏方の支援タスク）自身の id。
+        run_task_id: TaskId,
+        /// `applied`（適用済み）| `failed`（run が失敗し候補が無い）。
         state: String,
+        /// 直接 KB にコミットした件数。
+        ingested: u32,
+        /// `_inbox/` へ送った件数（人の確認待ち）。
+        inbox: u32,
+        /// 検査で落とした件数。
+        discarded: u32,
     },
 }
 // ========== ADR-0048 D1（Phase 60a）: ここまで ==========

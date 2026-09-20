@@ -676,6 +676,70 @@ async fn the_timeline_lists_the_integrations_of_this_task() {
     assert_eq!(times, sorted, "{times:?}");
 }
 
+/// ADR-0047 D4/D5（Phase 62）: このタスクの終端から起きた知識整理 run が `knowledge` 項目になる。
+/// `scheduled`（未適用）では件数を出さず、適用されれば `ingested`/`inbox`/`discarded` を出す。
+#[tokio::test]
+async fn the_timeline_shows_the_knowledge_maintenance_run() {
+    use task_core::{KnowledgeRunState, KnowledgeRunStore, KnowledgeRunSummary};
+
+    let env = env_with_token();
+    let app = env.router();
+    let task = seeded(&env, Status::Done);
+    let run_task = seeded(&env, Status::Done);
+    let now = time::OffsetDateTime::now_utc();
+
+    env.store
+        .knowledge_run_create(task.id, run_task.id, now)
+        .expect("create run");
+    let scheduled = send(
+        &app,
+        get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin()),
+    )
+    .await;
+    let items = scheduled.json()["items"].as_array().cloned().expect("items");
+    let knowledge: Vec<&Value> = items.iter().filter(|i| i["kind"] == "knowledge").collect();
+    assert_eq!(knowledge.len(), 1, "{items:?}");
+    assert_eq!(knowledge[0]["state"], "scheduled");
+    assert_eq!(knowledge[0]["run_task_id"], run_task.id.to_string());
+    assert!(knowledge[0].get("ingested").is_none(), "{knowledge:?}");
+
+    env.store
+        .knowledge_run_finish(
+            task.id,
+            KnowledgeRunState::Done,
+            now,
+            Some(&KnowledgeRunSummary {
+                candidates: 2,
+                ingested: 1,
+                inbox: 1,
+                discarded: 0,
+            }),
+        )
+        .expect("finish run");
+    let applied = send(
+        &app,
+        get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin()),
+    )
+    .await;
+    let items = applied.json()["items"].as_array().cloned().expect("items");
+    let knowledge: Vec<&Value> = items.iter().filter(|i| i["kind"] == "knowledge").collect();
+    assert_eq!(knowledge.len(), 1, "{items:?}");
+    assert_eq!(knowledge[0]["state"], "applied");
+    assert_eq!(knowledge[0]["ingested"], 1);
+    assert_eq!(knowledge[0]["inbox"], 1);
+    assert_eq!(knowledge[0]["discarded"], 0);
+
+    // 知識整理 run を持たないタスクには出ない。
+    let plain = seeded(&env, Status::Done);
+    let resp = send(
+        &app,
+        get_with(&format!("/api/v1/tasks/{}/timeline", plain.id), &admin()),
+    )
+    .await;
+    let items = resp.json()["items"].as_array().cloned().expect("items");
+    assert!(!items.iter().any(|i| i["kind"] == "knowledge"), "{items:?}");
+}
+
 /// ADR-0044 D5: `worktree.json` のブランチのコミットが `changes.json` に入っているリリースが
 /// タイムラインに出る。目印が無ければ何も出さない（タイムラインは落ちない）。
 #[tokio::test]

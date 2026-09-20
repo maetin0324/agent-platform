@@ -20,7 +20,13 @@ import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { checkboxClass, chipLabelClass, hintClass, inputClass, labelClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, Mono, PageHeader } from "~/components/ui/misc";
-import { knowledgeHref, knowledgePathProblem, prepareKnowledgeBody } from "~/lib/knowledge";
+import {
+  knowledgeHref,
+  knowledgeOpHint,
+  knowledgeOpTone,
+  knowledgePathProblem,
+  prepareKnowledgeBody,
+} from "~/lib/knowledge";
 import {
   KNOWLEDGE_ACCEPT_LABEL,
   KNOWLEDGE_CANCEL_LABEL,
@@ -161,7 +167,16 @@ function CandidateCard({ candidate }: { candidate: KnowledgeCandidate }) {
     <Card data-testid="knowledge-candidate" data-candidate-id={candidate.id}>
       <CardHeader
         icon="file"
-        title={<h2 data-testid="knowledge-candidate-title">{candidate.title}</h2>}
+        title={
+          <h2 data-testid="knowledge-candidate-title" className="flex flex-wrap items-center gap-2">
+            {candidate.title}
+            {candidate.op && (
+              <Badge tone={knowledgeOpTone(candidate.op)} data-testid="knowledge-candidate-op">
+                {candidate.op}
+              </Badge>
+            )}
+          </h2>
+        }
         description={
           <span className="flex flex-wrap items-center gap-2">
             <Mono data-testid="knowledge-candidate-path">{candidate.path}</Mono>
@@ -203,6 +218,12 @@ function CandidateCard({ candidate }: { candidate: KnowledgeCandidate }) {
         {candidate.target_exists && (
           <Alert tone="warning" data-testid="knowledge-target-exists">
             {KNOWLEDGE_TARGET_EXISTS_LABEL}
+          </Alert>
+        )}
+
+        {knowledgeOpHint(candidate.op) && (
+          <Alert tone="info" data-testid="knowledge-op-hint">
+            {knowledgeOpHint(candidate.op)}
           </Alert>
         )}
 

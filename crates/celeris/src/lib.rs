@@ -6,6 +6,8 @@ mod cluster_admin;
 pub mod config;
 /// ADR-0040 D4（Phase 47）: インスタンスの役割（active / standby / draining / verify）とライブ引き継ぎ。
 pub mod instance;
+/// ADR-0047 D4（Phase 62）: 知識の自動メンテナンス（決定的なトリガと適用。LLM は `langmem` アダプタの中）。
+pub mod knowledge_maint;
 /// ADR-0037（Phase 39）: 人の判断が要るときだけ Discord に知らせる（判定は決定的、送信は spawn）。
 pub mod milestone_review;
 pub mod notify;
@@ -35,7 +37,8 @@ use task_ops::daemon::{ProviderCheckView, ProviderLive};
 use task_ops::view::ViewContext;
 use task_worker::{
     AcpAdapter, AcpConfig, ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig,
-    FakeAdapter, LdrAdapter, LdrConfig, PaperQaAdapter, PaperQaConfig, WorkerAdapter, Workspace,
+    FakeAdapter, LangMemAdapter, LangMemConfig, LdrAdapter, LdrConfig, PaperQaAdapter,
+    PaperQaConfig, WorkerAdapter, Workspace,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -283,7 +286,32 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     evidence: base.evidence,
                 }))
             }
-            // `Config::validate` が fake / claude-code / codex / acp / paperqa / local-deep-research 以外を拒否している。
+            LangMemAdapter::ID => {
+                let base = &config.adapters.langmem;
+                let llm = &config.knowledge.langmem;
+                // ADR-0047 D4: `[adapters.langmem]`（起動コマンド・無出力タイムアウト）と
+                // `[knowledge.langmem]`（LLM の接続先）を合わせて 1 つのアダプタ設定にする。
+                Arc::new(LangMemAdapter::new(LangMemConfig {
+                    command: base.command.clone(),
+                    idle_timeout_secs: base.idle_timeout_secs,
+                    provider: llm.provider,
+                    base_url: llm.base_url.clone(),
+                    model: llm.model.clone(),
+                    api_key: llm
+                        .api_key_secret
+                        .as_deref()
+                        .and_then(|id| resolve_secret(secrets_dir, id)),
+                    env: merged_env_with_secrets(
+                        &base.env,
+                        &base.env_from_secrets,
+                        &p.env,
+                        &p.env_from_secrets,
+                        secrets_dir,
+                    ),
+                }))
+            }
+            // `Config::validate` が fake / claude-code / codex / acp / paperqa / local-deep-research /
+            // langmem 以外を拒否している。
             _ => {
                 let mut fake = FakeAdapter::new(config.adapters.fake.command.clone());
                 fake.set_env(merged_env_with_secrets(
@@ -321,7 +349,7 @@ pub fn secret_usage(config: &Config) -> HashMap<String, Vec<task_api::types::Sec
     }
 
     let mut map: HashMap<String, Vec<task_api::types::SecretUse>> = HashMap::new();
-    let adapters: [(&str, &HashMap<String, String>); 6] = [
+    let adapters: [(&str, &HashMap<String, String>); 7] = [
         (
             ClaudeCodeAdapter::ID,
             &config.adapters.claude_code.env_from_secrets,
@@ -337,6 +365,7 @@ pub fn secret_usage(config: &Config) -> HashMap<String, Vec<task_api::types::Sec
             LdrAdapter::ID,
             &config.adapters.local_deep_research.env_from_secrets,
         ),
+        (LangMemAdapter::ID, &config.adapters.langmem.env_from_secrets),
     ];
     for (name, from_secrets) in adapters {
         let mut env_keys: Vec<&String> = from_secrets.keys().collect();
@@ -344,6 +373,10 @@ pub fn secret_usage(config: &Config) -> HashMap<String, Vec<task_api::types::Sec
         for env_key in env_keys {
             push(&mut map, &from_secrets[env_key], "adapter", name, env_key);
         }
+    }
+    // ADR-0047 D4: `[knowledge.langmem].api_key_secret`（環境変数の写像ではなく 1 つの LLM 鍵）。
+    if let Some(id) = &config.knowledge.langmem.api_key_secret {
+        push(&mut map, id, "adapter", LangMemAdapter::ID, "api_key");
     }
     let mut providers: Vec<&config::ProviderConfig> = config.providers.iter().collect();
     providers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -898,6 +931,12 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
         config.apply_verify_smoke();
     }
     warn_if_db_on_network_filesystem(&config.db);
+    // ADR-0047 D3 / D4（P-61-i、Phase 62）: 起動時に索引が無ければ作る（`_inbox` の変化を tick ごとに
+    // 見る仕組みは無いが、知識整理 run が `apply_candidates` の後に必ず `reindex` するので、起動後は
+    // それで追随する）。`--mode verify` では KB に触れない。
+    if !verify && task_ops::knowledge::exists(&config.knowledge.root) {
+        let _ = task_ops::knowledge::ensure_index(&config.knowledge.root);
+    }
     let identity = InstanceIdentity::new(opts.release.as_deref());
     let cluster_masters: ClusterMasters = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let mut dispatcher = build_dispatcher(&config, Arc::clone(&cluster_masters))?;
@@ -1158,6 +1197,49 @@ async fn tick_loop(
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, "milestone review: could not evaluate the milestones")
+                    }
+                }
+            }
+            // ADR-0047 D4 / B1（Phase 62）: 知識の自動メンテナンス。判断は決定的（ストアと KB のファイルを
+            // 見るだけ）で、LLM が動くのは `langmem` アダプタが起こす python プロセスの中だけ。
+            // 1. まだ知識整理 run を持たない終端タスクから、1 tick に最大 1 件の支援タスクを作る。
+            // 2. `knowledge_runs` が `scheduled` のまま終端になった run を見つけて KB へ適用する。
+            {
+                let store = dispatcher.store();
+                let now = OffsetDateTime::now_utc();
+                let memory_dir = config.memory.as_ref().map(|m| task_worker::MemoryDir::new(&m.dir));
+                match knowledge_maint::schedule(
+                    store.as_ref(),
+                    &config.knowledge.root,
+                    config.knowledge.langmem.enabled,
+                    config.knowledge.langmem.max_related_pages,
+                    memory_dir.as_ref(),
+                    &config.role_specs(),
+                    &config.genre_specs(),
+                    now,
+                ) {
+                    Ok(created) if !created.is_empty() => {
+                        tracing::info!(count = created.len(), "knowledge: maintenance runs scheduled");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "knowledge: could not schedule the maintenance runs")
+                    }
+                }
+                if config.knowledge.langmem.enabled {
+                    match knowledge_maint::apply_finished(
+                        store.as_ref(),
+                        &config.knowledge.root,
+                        &config.workspace_root,
+                        now,
+                    ) {
+                        Ok(applied) if applied > 0 => {
+                            tracing::info!(count = applied, "knowledge: maintenance runs applied");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "knowledge: could not apply finished maintenance runs")
+                        }
                     }
                 }
             }
@@ -2305,6 +2387,85 @@ tiers = ["standard"]
             task_worker::LdrMode::Detailed
         );
         assert_eq!(cfg.adapters.local_deep_research.iterations, Some(3));
+    }
+
+    /// ADR-0047 D4: `[adapters.langmem]`（起動コマンド）と `[knowledge.langmem]`（LLM の接続先）を
+    /// 合わせて 1 つの `LangMemConfig` にする。`api_key_secret` は `[secrets] dir` から解決される。
+    #[test]
+    fn build_adapters_wires_a_langmem_provider_from_both_config_sections() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let secrets_dir = dir.path().join("secrets");
+        std::fs::create_dir_all(&secrets_dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
+        std::fs::write(secrets_dir.join("langmem-key"), "sk-test-value\n")
+            .unwrap_or_else(|e| panic!("write: {e}"));
+        let text = format!(
+            r#"
+[secrets]
+dir = "{secrets}"
+
+[adapters.langmem]
+command = "/opt/langmem/.venv/bin/python"
+idle_timeout_secs = 120
+env = {{ SHARED = "base" }}
+
+[knowledge.langmem]
+enabled = true
+provider = "openai-compatible"
+base_url = "http://bnode150:18000/v1"
+model = "qwen3.8-27b"
+api_key_secret = "langmem-key"
+max_related_pages = 5
+
+[[providers]]
+id = "langmem-main"
+adapter = "langmem"
+tiers = ["cheap", "standard"]
+"#,
+            secrets = secrets_dir.display()
+        );
+        let cfg: Config = toml::from_str(&text).unwrap_or_else(|e| panic!("parse: {e}"));
+        cfg.validate().unwrap_or_else(|e| panic!("validate: {e}"));
+        assert!(cfg.knowledge.langmem.enabled);
+        assert_eq!(cfg.knowledge.langmem.max_related_pages, 5);
+        let adapters = build_adapters(&cfg);
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters["langmem-main"].id(), "langmem");
+
+        let usage = secret_usage(&cfg);
+        assert!(
+            usage["langmem-key"]
+                .iter()
+                .any(|u| u.scope == "adapter" && u.name == "langmem" && u.env == "api_key"),
+            "{usage:?}"
+        );
+    }
+
+    /// `[knowledge.langmem]` の既定は無効（`enabled = false`）で、`base_url`/`model`/`api_key_secret` は
+    /// 無い（ADR-0047 D4 §6: 明示的に有効化するまで知識整理 run は起きない）。
+    #[test]
+    fn langmem_knowledge_config_defaults_to_disabled() {
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(!cfg.knowledge.langmem.enabled);
+        assert_eq!(
+            cfg.knowledge.langmem.provider,
+            task_worker::LangMemProvider::OpenaiCompatible
+        );
+        assert!(cfg.knowledge.langmem.base_url.is_none());
+        assert!(cfg.knowledge.langmem.model.is_none());
+        assert!(cfg.knowledge.langmem.api_key_secret.is_none());
+        assert_eq!(cfg.knowledge.langmem.max_related_pages, 10);
+        assert_eq!(cfg.adapters.langmem.command, "python3");
+        assert!(cfg.adapters.langmem.idle_timeout_secs.is_none());
+    }
+
+    /// 未知のアダプタは `langmem` を含めた既知の一覧で拒否される。
+    #[test]
+    fn unknown_adapter_message_lists_langmem() {
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"bogus\"\n").unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("langmem"), "{err}");
     }
 
     // ---- ADR-0030 D2: `env_from_secrets` の優先順と欠落時の扱い ----

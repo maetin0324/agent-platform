@@ -156,6 +156,8 @@ const TIMELINE_TONE: Record<string, Tone> = {
   release: "success",
   integration: "neutral",
   doc: "teal",
+  // ADR-0047 D4/D5（Phase 62）。
+  knowledge: "primary",
 };
 
 export interface TaskDetailData {
@@ -1765,8 +1767,10 @@ function timelineItemKey(item: TimelineItem): string {
       return `release-${item.sha12}`;
     case "doc":
       return `doc-${item.path}`;
-    default:
-      return `${item.kind}-${item.at}-${item.action}`;
+    case "integration":
+      return `integration-${item.at}-${item.action}`;
+    case "knowledge":
+      return `knowledge-${item.run_task_id}`;
   }
 }
 
@@ -1866,6 +1870,31 @@ function TimelineBody({ taskId, item }: { taskId: string; item: TimelineItem }) 
           <Mono className="text-xs">{item.path}</Mono>
         </p>
       );
+    // ADR-0047 D4/D5（Phase 62）: このタスクの終端から起きた知識整理 run。
+    case "knowledge": {
+      const total = (item.ingested ?? 0) + (item.inbox ?? 0) + (item.discarded ?? 0);
+      return (
+        <p className="mt-1.5 text-fg-muted" data-testid="timeline-knowledge">
+          {item.state === "scheduled" ? (
+            "知識整理 run を起こしました（まだ適用されていません）。"
+          ) : item.state === "failed" ? (
+            "知識整理 run が失敗しました（候補はありません）。"
+          ) : (
+            <>
+              知識 {total} 件: 取り込み {item.ingested ?? 0} / 候補 {item.inbox ?? 0} / 破棄 {item.discarded ?? 0}
+              {(item.inbox ?? 0) > 0 && (
+                <>
+                  {" "}
+                  <Link to="/knowledge/inbox" className="font-medium text-primary hover:underline">
+                    知識の候補を見る
+                  </Link>
+                </>
+              )}
+            </>
+          )}
+        </p>
+      );
+    }
     default:
       return null;
   }

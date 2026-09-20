@@ -350,6 +350,79 @@ async fn scopes_filter_by_project_and_by_node() {
     assert_problem(&bad, 400, "bad_request");
 }
 
+/// ADR-0047 D4/D5（Phase 62）: 適用済みの知識整理 run は「この仕事から知識 N 件」の `knowledge`
+/// ブロックになる。`scheduled`（未適用）は出ず、案件・ノードで絞れる。
+#[tokio::test]
+async fn knowledge_blocks_show_the_applied_summary_and_respect_scope() {
+    use task_core::{KnowledgeRunState, KnowledgeRunStore, KnowledgeRunSummary};
+
+    let env = TestEnv::new();
+    let pluvio = project(&env, "Pluvio");
+
+    let mut source = new_task(TaskKind::Execute, Status::Done);
+    source.title = "pegasus の初期セットアップ".into();
+    source.project_id = Some(pluvio.id);
+    source.assignee = Some("coding".into());
+    env.seed(&source);
+
+    let mut run_task = new_task(TaskKind::Execute, Status::Done);
+    run_task.title = "知識整理: pegasus の初期セットアップ".into();
+    run_task.role = Some(task_core::report::KNOWLEDGE_ROLE.to_string());
+    run_task.project_id = Some(pluvio.id);
+    run_task.assignee = Some("coding".into());
+    env.seed(&run_task);
+
+    env.store
+        .knowledge_run_create(source.id, run_task.id, OffsetDateTime::now_utc())
+        .expect("create run");
+    // まだ適用していない（`scheduled`）うちは出ない。
+    let before = send(&env.router(), get("/api/v1/console?scope=all")).await.json();
+    assert!(!kinds(&before).contains(&"knowledge".to_string()), "{before:#}");
+
+    env.store
+        .knowledge_run_finish(
+            source.id,
+            KnowledgeRunState::Done,
+            OffsetDateTime::now_utc(),
+            Some(&KnowledgeRunSummary {
+                candidates: 3,
+                ingested: 1,
+                inbox: 2,
+                discarded: 0,
+            }),
+        )
+        .expect("finish run");
+
+    let app = env.router();
+    let page = send(&app, get("/api/v1/console?scope=all")).await.json();
+    assert!(kinds(&page).contains(&"knowledge".to_string()), "{page:#}");
+    let block = page["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|b| b["kind"] == "knowledge")
+        .expect("knowledge block");
+    assert_eq!(block["task_id"], source.id.to_string());
+    assert_eq!(block["task_title"], "pegasus の初期セットアップ");
+    assert_eq!(block["run_task_id"], run_task.id.to_string());
+    assert_eq!(block["state"], "applied");
+    assert_eq!(block["ingested"], 1);
+    assert_eq!(block["inbox"], 2);
+    assert_eq!(block["discarded"], 0);
+    assert_eq!(block["project_id"], pluvio.id.to_string());
+
+    // 案件で絞れる。
+    let scoped = send(&app, get(&format!("/api/v1/console?scope=project:{}", pluvio.id)))
+        .await
+        .json();
+    assert!(kinds(&scoped).contains(&"knowledge".to_string()));
+    // 別のノードでは出ない。
+    let other_node = send(&app, get("/api/v1/console?scope=node:research"))
+        .await
+        .json();
+    assert!(!kinds(&other_node).contains(&"knowledge".to_string()), "{other_node:#}");
+}
+
 /// 受け入れ 1: `limit` と `since` で続きが読める（同じブロックを 2 回返さない）。
 #[tokio::test]
 async fn the_cursor_pages_through_without_repeating_blocks() {

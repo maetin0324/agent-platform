@@ -233,7 +233,28 @@ export function timeline(items: TimelineItem[] = [], taskId = "01BOARDTASK000000
               sha12: "aaaaaaaaaaaa",
               commits: ["1111111111111111111111111111111111111111"],
             },
+            knowledgeTimelineItem(),
           ],
+  };
+}
+
+/**
+ * タイムラインの `knowledge` 項目（ADR-0047 D4/D5、Phase 62）。既定は `applied`
+ * （取り込み 1 / 候補 2 / 破棄 0）。`state: "scheduled"` のときは `ingested`/`inbox`/`discarded` は
+ * 付かない（celeris が適用前は出さない）。
+ */
+export function knowledgeTimelineItem(
+  overrides: Partial<Extract<TimelineItem, { kind: "knowledge" }>> = {},
+): TimelineItem {
+  return {
+    kind: "knowledge",
+    at: "2026-09-19T00:03:00Z",
+    run_task_id: "01BOARDTASK00000000000099",
+    state: "applied",
+    ingested: 1,
+    inbox: 2,
+    discarded: 0,
+    ...overrides,
   };
 }
 
@@ -687,7 +708,32 @@ export function consoleBlocks(): ConsoleBlock[] {
         created_at: "2026-09-20T01:00:40Z",
       },
     },
+    consoleKnowledgeBlock(),
   ];
+}
+
+/**
+ * `knowledge` ブロック（ADR-0047 D4/D5、Phase 62）: 「この仕事から知識 N 件」。既定は `applied`
+ * （取り込み 1 / 候補 2 / 破棄 0）。`state: "failed"` のときも `ingested`/`inbox`/`discarded` は
+ * 0 のまま返る（celeris 側の既定）。
+ */
+export function consoleKnowledgeBlock(
+  overrides: Partial<Extract<ConsoleBlock, { kind: "knowledge" }>> = {},
+): ConsoleBlock {
+  return {
+    kind: "knowledge",
+    at: "2026-09-20T01:00:50Z",
+    cursor: "00001789000000050000.5.k01BOARDTASK00000000000001",
+    project_id: "p1",
+    task_id: "01BOARDTASK00000000000001",
+    task_title: "関連研究を調べる",
+    run_task_id: "01BOARDTASK00000000000099",
+    state: "applied",
+    ingested: 1,
+    inbox: 2,
+    discarded: 0,
+    ...overrides,
+  };
 }
 
 /** 折り畳んだ `progress` ブロック 1 件（SSE の `event: console.block` でも同じ形）。 */

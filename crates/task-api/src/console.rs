@@ -23,8 +23,9 @@ use axum::http::{HeaderMap, StatusCode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    ApprovalStore, Event, EventRow, ListFilter, ListOrder, Message, MessageRole, MilestoneStatus,
-    OrgKind, ProjectId, ReportFilter, ReportStore, SqliteStore, Status, Task, TaskId, TaskStore,
+    ApprovalStore, Event, EventRow, KnowledgeRunState, KnowledgeRunStore, ListFilter, ListOrder,
+    Message, MessageRole, MilestoneStatus, OrgKind, ProjectId, ReportFilter, ReportStore,
+    SqliteStore, Status, Task, TaskId, TaskStore,
 };
 use task_ops::console::{ConsoleCursor, at_nanos, group_progress, task_line};
 use time::OffsetDateTime;
@@ -543,9 +544,47 @@ pub(crate) fn side_blocks(
         });
     }
 
-    // 範囲がノードのときは、そのノードのタスクのコメント由来の報告も混ざらない（`reports.node_id` で
-    // 絞っているため）。タスクの引き当ては呼び出し側の `TaskCache` を使い回す（同じ接続で引き直さない）。
-    let _ = tasks;
+    // 5. 知識整理 run（ADR-0047 D4 / D5。Phase 62）。`knowledge_runs` に `project_id`/`node_id` の
+    // 列は無いので、元のタスク（`TaskCache` 経由）で絞る。`scheduled`（まだ適用されていない）は出さない。
+    for run in store.knowledge_run_recent(limit).map_err(store_problem)? {
+        if run.state == KnowledgeRunState::Scheduled {
+            continue;
+        }
+        let Some(source) = tasks.get(store, run.task_id)?.cloned() else {
+            continue;
+        };
+        match scope {
+            Scope::Project(id) if source.project_id != Some(*id) => continue,
+            Scope::Node(node_id) if source.assignee.as_deref() != Some(node_id.as_str()) => {
+                continue;
+            }
+            _ => {}
+        }
+        let applied_at = run.applied_at.unwrap_or(run.created_at);
+        let at = rfc3339(applied_at);
+        let nanos = at_nanos(&at);
+        if after_nanos.is_some_and(|a| nanos < a) {
+            continue;
+        }
+        let summary = run.summary.unwrap_or_default();
+        blocks.push(ConsoleBlock::Knowledge {
+            cursor: ConsoleCursor::new(nanos, format!("k{}", run.task_id), 0).encode(),
+            at,
+            project_id: source.project_id,
+            task_id: source.id,
+            task_title: source.title,
+            run_task_id: run.run_task_id,
+            state: match run.state {
+                KnowledgeRunState::Done => "applied".to_string(),
+                KnowledgeRunState::Failed => "failed".to_string(),
+                KnowledgeRunState::Scheduled => unreachable!("filtered above"),
+            },
+            ingested: summary.ingested,
+            inbox: summary.inbox,
+            discarded: summary.discarded,
+        });
+    }
+
     Ok(blocks)
 }
 

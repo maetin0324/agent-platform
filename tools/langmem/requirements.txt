@@ -1,0 +1,14 @@
+# ADR-0047 D4（Phase 62）: 知識整理 run（`langmem` アダプタ）が使う python の依存。
+#
+# `scripts/knowledge/setup-langmem.sh` が venv を作ってこれを入れる。celeris 本体（Rust）はこれらに
+# 依存しない（LLM 呼び出しはこの venv の python プロセスの中だけで起き、celeris 側はサブプロセスとして
+# 起こすだけ。CLAUDE.md「ディスパッチャやストアに LLM 呼び出しを入れない」）。
+#
+# 小さく・依存を軽く保つ（ADR-0047 D4 §1「Keep the python small and dependency-light」）:
+# LangMem 本体 と、`[knowledge.langmem] provider` の 2 択に対応する LangChain のチャットモデルの
+# 薄いラッパーだけを入れる（フレームワーク全体は入れない）。
+
+langmem>=0.1
+langchain-core>=0.3
+langchain-openai>=0.3
+langchain-anthropic>=0.3

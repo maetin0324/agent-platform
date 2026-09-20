@@ -170,16 +170,32 @@ export type ConsoleBlock =
       at: string;
       cursor: string;
       /**
-       * 知識の項目の id。
+       * 検査で落とした件数。
        */
-      entry_id: string;
+      discarded: number;
+      /**
+       * `_inbox/` へ送った件数（人の確認待ち）。
+       */
+      inbox: number;
+      /**
+       * 直接 KB にコミットした件数。
+       */
+      ingested: number;
       kind: "knowledge";
       project_id?: ProjectId | null;
       /**
-       * `candidate` / `accepted` など（ADR-0047 が決める語）。
+       * タスクの一意識別子（ULID）。DESIGN §4.1。
+       */
+      run_task_id: string;
+      /**
+       * `applied`（適用済み）| `failed`（run が失敗し候補が無い）。
        */
       state: string;
-      title: string;
+      /**
+       * タスクの一意識別子（ULID）。DESIGN §4.1。
+       */
+      task_id: string;
+      task_title: string;
     };
 /**
  * 途中目標の一意識別子（ULID）。
@@ -567,6 +583,18 @@ export type TimelineItem =
       path: string;
       project_id: ProjectId;
       title: string;
+    }
+  | {
+      at: string;
+      discarded?: number | null;
+      inbox?: number | null;
+      ingested?: number | null;
+      kind: "knowledge";
+      run_task_id: TaskId;
+      /**
+       * `scheduled`（起こしたが未適用）| `applied` | `failed`。
+       */
+      state: string;
     };
 
 /**
@@ -2529,6 +2557,12 @@ export interface KnowledgeCandidate {
    */
   html: string;
   id: string;
+  /**
+   * ADR-0047 D4（Phase 62）: `create` / `update` / `merge` / `retire`。`celerisctl knowledge record`
+   * が書いた候補（Phase 61）には無い（`null`）。`retire` の accept は `target` を `_retired/` へ動かし、
+   * `merge` の accept は `target` を必ず上書きする（P-61-k。`docs/knowledge.md` 参照）。
+   */
+  op?: string | null;
   /**
    * `_inbox/<id>.md`。
    */

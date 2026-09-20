@@ -15,7 +15,6 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { hintClass, textareaClass } from "./ui/form";
 import { Icon } from "./ui/Icon";
-import { Mono } from "./ui/misc";
 
 /**
  * Console（ADR-0048 D1/D4、GUI Phase G22）の 1 ブロック。`kind` ごとに 1 分岐（8 種 + 予約の `knowledge`）。
@@ -640,11 +639,32 @@ function ReportBlockView({
 }
 
 function KnowledgeBlockView({ block }: { block: Extract<ConsoleBlock, { kind: "knowledge" }> }) {
+  const total = (block.ingested ?? 0) + (block.inbox ?? 0) + (block.discarded ?? 0);
   return (
     <BlockShell testId="console-block-knowledge" className="w-full max-w-none">
-      <p className="text-sm text-fg-muted" data-testid="console-knowledge-line">
-        <Mono>知識</Mono>: {block.title}（{block.state}）
+      <p className="flex flex-wrap items-center gap-2 text-xs font-medium text-fg-subtle">
+        <Icon name="send" className="size-3.5" />
+        <Link to={`/tasks/${block.task_id}`} className="underline underline-offset-2">
+          {block.task_title}
+        </Link>
+        {block.state === "failed" && <Badge tone="danger">失敗</Badge>}
       </p>
+      <p className="mt-1 text-sm" data-testid="console-knowledge-line">
+        この仕事から知識 {total} 件: 取り込み {block.ingested ?? 0} / 候補 {block.inbox ?? 0} / 破棄{" "}
+        {block.discarded ?? 0}
+      </p>
+      <div className="mt-1.5 flex items-center justify-between text-[0.7rem] text-fg-subtle">
+        <span>{block.at}</span>
+        {(block.inbox ?? 0) > 0 && (
+          <Link
+            to="/knowledge/inbox"
+            className="underline underline-offset-2"
+            data-testid="console-knowledge-inbox-link"
+          >
+            知識の候補（_inbox）を見る
+          </Link>
+        )}
+      </div>
     </BlockShell>
   );
 }

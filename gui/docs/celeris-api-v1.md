@@ -2183,8 +2183,8 @@ CoS の `actions` は ADR-0048 D3（Phase 60b。§3.107）。
 - 引きはすべて上限付き（`events` は 1 回 4,000 件の窓、対話・認可・報告は `limit × 4`（最大 800））。
   窓より古いものは `GET /tasks/{id}/events` や `GET /reports` で見る。
 
-ブロックは `kind` で 9 種（ADR-0048 D1 の 8 種 + 予約の `knowledge`）。どれも `at`（RFC 3339）と
-`cursor` を持つ:
+ブロックは `kind` で 9 種（ADR-0048 D1 の 8 種 + ADR-0047 D5 の `knowledge`。Phase 62 で埋まった）。
+どれも `at`（RFC 3339）と `cursor` を持つ:
 
 | `kind` | 中身 | 由来 |
 |---|---|---|
@@ -2196,7 +2196,7 @@ CoS の `actions` は ADR-0048 D3（Phase 60b。§3.107）。
 | `approval` | 認可 1 件（`Approval` をそのまま。`decision` / `answer` / `decided_at` 付き） | `approvals` |
 | `milestone` | 途中目標の提案（`proposed` のものだけ）と秘書のレビューの返事 | `milestones` + `messages` |
 | `report` | 報告（見出しと本文） | `reports` |
-| `knowledge` | **予約**。Phase 60a では誰も作らない（ADR-0047 側が埋める） | – |
+| `knowledge` | 知識整理 run の結果（ADR-0047 D4/D5、Phase 62）。`task_id` / `task_title` / `run_task_id` / `state`（`applied` \| `failed`。`scheduled` は出ない）/ `ingested` / `inbox` / `discarded` | `knowledge_runs`（`state != scheduled`）+ 元のタスク |
 
 範囲の効き方:
 
@@ -2660,7 +2660,10 @@ pub enum TimelineItem {
     Report { at: String, report: Report },
     Delegation { at: String, run_id: String, tasks: Vec<TaskRef> },
     Release { at: String, sha12: String, commits: Vec<String> },
-    Integration { at: String, action: String, detail: String },        // ADR-0043 A2。今は作られない
+    Integration { at: String, action: String, detail: String },        // ADR-0043 A2
+    Doc { at: String, project_id: ProjectId, path: String, title: String },   // ADR-0044 D7（Phase 57）
+    Knowledge { at: String, run_task_id: TaskId, state: String,               // ADR-0047 D4/D5（Phase 62）
+        ingested: Option<u32>, inbox: Option<u32>, discarded: Option<u32> },
 }
 
 // ---- task-ops: 受信箱 ----
@@ -3038,8 +3041,9 @@ pub enum ConsoleBlock {
     Approval { at: String, cursor: String, approval: Approval },
     Milestone { at: String, cursor: String, milestone: Milestone, review: Option<MilestoneReviewView> },
     Report { at: String, cursor: String, report: Report },
-    /// 予約（Phase 60a では誰も作らない。ADR-0047）。
-    Knowledge { at: String, cursor: String, project_id: Option<ProjectId>, entry_id: String, title: String, state: String },
+    /// 知識整理 run の結果（ADR-0047 D4/D5、Phase 62）。`state` は `applied` | `failed`（`scheduled` は出ない）。
+    Knowledge { at: String, cursor: String, project_id: Option<ProjectId>, task_id: TaskId, task_title: String,
+        run_task_id: TaskId, state: String, ingested: u32, inbox: u32, discarded: u32 },
 }
 
 /// `task` ブロックの 1 行（`task_ops::console`）。

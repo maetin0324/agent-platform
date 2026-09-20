@@ -15,6 +15,8 @@ import {
   knowledgeGroups,
   knowledgeHref,
   knowledgeInboxHref,
+  knowledgeOpHint,
+  knowledgeOpTone,
   knowledgePathProblem,
   knowledgeSource,
   parseKnowledgeFrontMatter,
@@ -226,6 +228,21 @@ describe("言葉", () => {
     expect(knowledgeErrorHint("candidate_not_found")).toContain("再読み込み");
     expect(knowledgeErrorHint("unknown_code")).toBeNull();
   });
+
+  /** ADR-0047 D4（Phase 62）: `op` の色と、accept したときに何が起きるかのヒント。 */
+  it("知識整理 run の候補の op（create/update/merge/retire）", () => {
+    expect(knowledgeOpTone("create")).toBe("info");
+    expect(knowledgeOpTone("update")).toBe("neutral");
+    expect(knowledgeOpTone("merge")).toBe("warning");
+    expect(knowledgeOpTone("retire")).toBe("danger");
+    expect(knowledgeOpTone(null)).toBe("neutral");
+    expect(knowledgeOpTone(undefined)).toBe("neutral");
+
+    expect(knowledgeOpHint("merge")).toContain("上書き");
+    expect(knowledgeOpHint("retire")).toContain("_retired/");
+    expect(knowledgeOpHint("create")).toBeNull();
+    expect(knowledgeOpHint(null)).toBeNull();
+  });
 });
 
 describe("celeris の中継", () => {
@@ -286,6 +303,21 @@ describe("celeris の中継", () => {
     expect(inbox?.items[0].target_exists).toBe(true);
     expect(inbox?.items[1].target_exists).toBe(false);
     expect(inbox?.items[0].target).toBe("environment/clusters/pegasus.md");
+  });
+
+  /** ADR-0047 D4（Phase 62）: 知識整理 run が書いた候補（`op` 付き）。`record`（Phase 61）の候補は `op` が無い。 */
+  it("知識整理 run の候補は `op` を持つ（record の候補は持たない）", async () => {
+    serveKnowledge(mock, {
+      inbox: knowledgeInbox({
+        items: [
+          knowledgeCandidate({ id: "merge-1", op: "merge" }),
+          knowledgeCandidate({ id: "retire-1", op: "retire" }),
+          knowledgeCandidate({ id: "record-1" }),
+        ],
+      }),
+    });
+    const { inbox } = await loadKnowledgeInbox(client);
+    expect(inbox?.items.map((i) => i.op)).toEqual(["merge", "retire", undefined]);
   });
 
   it("保存・取り込み・捨てる（管理系）", async () => {

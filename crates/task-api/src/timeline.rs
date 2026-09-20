@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use task_core::{
-    ApprovalStore, Event, ReportFilter, ReportStore, SqliteStore, Task, TaskId, TaskIntegration,
-    TaskStore,
+    ApprovalStore, Event, KnowledgeRunStore, ReportFilter, ReportStore, SqliteStore, Task, TaskId,
+    TaskIntegration, TaskStore,
 };
 
 use crate::handlers::{ApiResult, Params, json_response, no_query};
@@ -80,7 +80,8 @@ pub(crate) fn at_of(item: &TimelineItem) -> &str {
         | TimelineItem::Delegation { at, .. }
         | TimelineItem::Release { at, .. }
         | TimelineItem::Doc { at, .. }
-        | TimelineItem::Integration { at, .. } => at,
+        | TimelineItem::Integration { at, .. }
+        | TimelineItem::Knowledge { at, .. } => at,
     }
 }
 
@@ -154,6 +155,32 @@ fn store_items(store: &SqliteStore, id: TaskId) -> Result<(Task, Vec<TimelineIte
     // PR の同期（`updated_at`）ではタイムラインの中を動かさない。
     for integration in store.integration_list_for_task(id).map_err(store_problem)? {
         items.push(integration_item(&integration));
+    }
+
+    // ADR-0047 D4/D5（Phase 62）: このタスクの終端から知識整理 run が起きていれば 1 件。
+    if let Some(run) = store.knowledge_run_get(id).map_err(store_problem)? {
+        let at = crate::handlers::rfc3339(run.applied_at.unwrap_or(run.created_at));
+        let (state, ingested, inbox, discarded) = match run.state {
+            task_core::KnowledgeRunState::Scheduled => ("scheduled", None, None, None),
+            task_core::KnowledgeRunState::Failed => ("failed", None, None, None),
+            task_core::KnowledgeRunState::Done => {
+                let summary = run.summary.unwrap_or_default();
+                (
+                    "applied",
+                    Some(summary.ingested),
+                    Some(summary.inbox),
+                    Some(summary.discarded),
+                )
+            }
+        };
+        items.push(TimelineItem::Knowledge {
+            at,
+            run_task_id: run.run_task_id,
+            state: state.to_string(),
+            ingested,
+            inbox,
+            discarded,
+        });
     }
 
     Ok((task, items))

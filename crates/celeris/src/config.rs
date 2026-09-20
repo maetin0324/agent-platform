@@ -366,6 +366,9 @@ pub struct KnowledgeConfig {
     /// 書き方は `kb:<scope>` / `repo:<name>[:<docs>]` / `dir:<path>` / `memory[:<node>]`。
     #[serde(default = "default_knowledge_mounts")]
     pub default_mounts: Vec<String>,
+    /// ADR-0047 D4（Phase 62）: LangMem による自動メンテナンス（既定は無効）。
+    #[serde(default)]
+    pub langmem: LangMemKnowledgeConfig,
 }
 
 impl Default for KnowledgeConfig {
@@ -373,8 +376,58 @@ impl Default for KnowledgeConfig {
         Self {
             root: default_knowledge_root(),
             default_mounts: default_knowledge_mounts(),
+            langmem: LangMemKnowledgeConfig::default(),
         }
     }
+}
+
+/// `[knowledge.langmem]`（ADR-0047 D4）: 知識整理 run のトリガと LLM の接続先。
+///
+/// ```toml
+/// [knowledge.langmem]
+/// enabled = true
+/// provider = "openai-compatible"   # "openai-compatible" | "anthropic"
+/// base_url = "http://bnode150:18000/v1"
+/// model = "qwen3.8-27b"
+/// api_key_secret = "langmem-openai-key"   # [secrets] の下の id。無ければ渡さない
+/// max_related_pages = 10
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LangMemKnowledgeConfig {
+    /// 既定 `false`（ADR-0047 D4 / §6: 明示的に有効化するまで知識整理 run は起きない）。
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub provider: task_worker::LangMemProvider,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// `[secrets] dir` の下の id（LLM の API キー）。省略すると渡さない
+    /// （ローカルの OpenAI 互換エンドポイントは鍵を確認しないことが多い）。
+    #[serde(default)]
+    pub api_key_secret: Option<String>,
+    /// ADR-0047 D3: 関連する既存の KB ページを検索の上位何件まで依頼文に入れるか。
+    #[serde(default = "default_max_related_pages")]
+    pub max_related_pages: usize,
+}
+
+impl Default for LangMemKnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: task_worker::LangMemProvider::default(),
+            base_url: None,
+            model: None,
+            api_key_secret: None,
+            max_related_pages: default_max_related_pages(),
+        }
+    }
+}
+
+fn default_max_related_pages() -> usize {
+    10
 }
 
 impl KnowledgeConfig {
@@ -870,6 +923,47 @@ pub struct AdaptersConfig {
     pub paperqa: PaperQaAdapterConfig,
     #[serde(default)]
     pub local_deep_research: LdrAdapterConfig,
+    /// ADR-0047 D4（Phase 62）: 知識整理 run を起こす python（venv の python）と無出力タイムアウト。
+    /// LLM の接続先（provider/base_url/model/api_key_secret）は `[knowledge.langmem]` の方（`build_adapters`
+    /// が両方を合わせて `task_worker::LangMemConfig` を作る）。
+    #[serde(default)]
+    pub langmem: LangMemAdapterConfig,
+}
+
+/// `[adapters.langmem]`（ADR-0047 D4）。フィールドの意味は `task_worker::LangMemConfig` の
+/// `command`/`idle_timeout_secs`/`env` と同じ。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LangMemAdapterConfig {
+    /// 起動するコマンド（`tools/langmem/.venv/bin/python` のような venv の python）。既定 `"python3"`
+    /// （venv を用意していない構成では `langmem` の import に失敗し、`retryable = false` のエラーになる）。
+    #[serde(default = "default_langmem_command")]
+    pub command: String,
+    /// 無出力タイムアウト（秒）。省略時はハーネスの予算（`[[harnesses]] budget.max_wall_secs` 由来）の
+    /// まま（このキーは harness の予算を**縮める**方向にしか効かない。`task_worker::LangMemConfig` が
+    /// `min` を取る）。
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。`env` より優先。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
+}
+
+impl Default for LangMemAdapterConfig {
+    fn default() -> Self {
+        Self {
+            command: default_langmem_command(),
+            idle_timeout_secs: None,
+            env: HashMap::new(),
+            env_from_secrets: HashMap::new(),
+        }
+    }
+}
+
+fn default_langmem_command() -> String {
+    "python3".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1514,9 +1608,10 @@ impl Config {
                 && p.adapter != task_worker::AcpAdapter::ID
                 && p.adapter != task_worker::PaperQaAdapter::ID
                 && p.adapter != task_worker::LdrAdapter::ID
+                && p.adapter != task_worker::LangMemAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research only)",
+                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research, langmem only)",
                     p.id, p.adapter
                 )));
             }
@@ -1694,9 +1789,10 @@ impl Config {
                 && adapter != task_worker::AcpAdapter::ID
                 && adapter != task_worker::PaperQaAdapter::ID
                 && adapter != task_worker::LdrAdapter::ID
+                && adapter != task_worker::LangMemAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "[[harnesses]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research only)",
+                    "[[harnesses]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research, langmem only)",
                     h.id
                 )));
             }
@@ -1731,9 +1827,10 @@ impl Config {
                 && adapter != task_worker::AcpAdapter::ID
                 && adapter != task_worker::PaperQaAdapter::ID
                 && adapter != task_worker::LdrAdapter::ID
+                && adapter != task_worker::LangMemAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "[[roles]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research only)",
+                    "[[roles]] {}: adapter {adapter:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research, langmem only)",
                     r.id
                 )));
             }
@@ -3933,7 +4030,7 @@ max_tree_depth = 2
         let cfg: Config = toml::from_str(&bogus).unwrap();
         assert_eq!(
             cfg.validate().unwrap_err().to_string(),
-            "invalid config: [[roles]] lead: adapter \"bogus\" is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research only)"
+            "invalid config: [[roles]] lead: adapter \"bogus\" is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research, langmem only)"
         );
 
         let empty = format!("[[roles]]\nid = \"  \"\n{providers}");

@@ -240,6 +240,37 @@ export function confidenceTone(confidence: Confidence | null | undefined): "succ
   return "neutral";
 }
 
+/**
+ * 候補の `op`（ADR-0047 D4、Phase 62）の色。`retire`/`merge` は既存ページに手を入れる操作なので
+ * 目立たせる（accept すると対象ページが動く・上書きされる）。
+ */
+export function knowledgeOpTone(op: string | null | undefined): "neutral" | "info" | "warning" | "danger" {
+  switch (op) {
+    case "create":
+      return "info";
+    case "update":
+      return "neutral";
+    case "merge":
+      return "warning";
+    case "retire":
+      return "danger";
+    default:
+      return "neutral";
+  }
+}
+
+/** `op` ごとの、accept したときに何が起きるかの短い説明（Phase 62。GUI のヒント用）。 */
+export function knowledgeOpHint(op: string | null | undefined): string | null {
+  switch (op) {
+    case "merge":
+      return "取り込むと、この本文で取り込み先のページを上書きします。";
+    case "retire":
+      return "取り込むと、取り込み先のページを `_retired/` へ動かします（本文は使いません）。";
+    default:
+      return null;
+  }
+}
+
 /** `environment/clusters/a.md` と `../b.md` → `environment/b.md`。KB の根の外に出るものは `null`。 */
 export function resolveKnowledgePath(from: string, link: string): string | null {
   const parts = from.split("/").slice(0, -1);

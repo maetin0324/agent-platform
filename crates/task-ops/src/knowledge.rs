@@ -364,7 +364,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
             continue;
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
-        if rel.starts_with('.') || kb::is_inbox(&rel) {
+        if rel.starts_with('.') || kb::is_inbox(&rel) || is_retired(&rel) {
             continue;
         }
         if path.is_dir() {
@@ -670,7 +670,7 @@ pub fn grep(root: &Path, needle: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(|l| l.trim_start_matches("./").to_string())
-        .filter(|p| p.to_ascii_lowercase().ends_with(".md") && !kb::is_inbox(p))
+        .filter(|p| p.to_ascii_lowercase().ends_with(".md") && !kb::is_inbox(p) && !is_retired(p))
         .collect();
     paths.sort();
     paths.dedup();
@@ -867,6 +867,9 @@ pub struct InboxItem {
     pub created: Option<String>,
     /// 本文（front matter を除く）。
     pub body: String,
+    /// ADR-0047 D4（Phase 62）: `create` / `update` / `merge` / `retire`。`record`（Phase 61）が書いた
+    /// 候補（人・ワーカーの `celerisctl knowledge record`）は `None`（従来どおりの素の accept/reject）。
+    pub op: Option<kb::CandidateOp>,
 }
 
 /// `_inbox/` の候補（新しい順 = id の降順）。
@@ -912,6 +915,7 @@ pub fn inbox_get(root: &Path, id: &str) -> Option<InboxItem> {
         .filter(|p| !p.is_empty())
         .and_then(|p| kb::page_path(p).ok())
         .unwrap_or_else(|| default_target(front.scope.as_deref(), &title, id));
+    let op = front.op.as_deref().and_then(|o| o.parse().ok());
     Some(InboxItem {
         id: id.trim().to_string(),
         path,
@@ -923,6 +927,7 @@ pub fn inbox_get(root: &Path, id: &str) -> Option<InboxItem> {
         target,
         created: front.created,
         body: body.trim_start_matches(['\n', '\r']).to_string(),
+        op,
     })
 }
 
@@ -1701,6 +1706,230 @@ mod tests {
             !fallback.to_string_lossy().starts_with('~'),
             "{}",
             fallback.display()
+        );
+    }
+
+    fn candidate(op: kb::CandidateOp, path: &str, confidence: Confidence) -> kb::Candidate {
+        kb::Candidate {
+            op,
+            path: path.to_string(),
+            title: "pegasus の使い方".into(),
+            tags: vec!["hpc".into()],
+            scope: "environment".into(),
+            body: "pjsub -L node=1 で投げる。".into(),
+            sources: vec!["task:01J1".into()],
+            confidence,
+        }
+    }
+
+    /// ADR-0047 D4: `confidence = high` の `create`/`update` は KB へ直接コミットする。
+    #[test]
+    fn apply_candidates_commits_high_confidence_create_and_update_directly() {
+        let (_dir, root) = kb_dir();
+        let created = candidate(
+            kb::CandidateOp::Create,
+            "environment/tools/newtool.md",
+            Confidence::High,
+        );
+        let out = apply_candidates(&root, "01JTASK", &[created]);
+        assert_eq!(out.committed, vec!["environment/tools/newtool.md"]);
+        assert!(out.inboxed.is_empty());
+        assert!(out.dropped.is_empty());
+        assert_eq!(out.summary().ingested, 1);
+        let raw = std::fs::read_to_string(root.join("environment/tools/newtool.md")).expect("read");
+        assert!(raw.contains("title: pegasus の使い方"), "{raw}");
+        assert!(raw.contains("sources: [\"task:01J1\"]"), "{raw}");
+        let hist = history(&root, "environment/tools/newtool.md");
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].author, kb::AGENT_AUTHOR_NAME);
+        assert!(hist[0].subject.contains("knowledge: create"), "{hist:?}");
+        assert!(hist[0].subject.contains("01JTASK"), "{hist:?}");
+
+        // update: 既存の sources を引き継ぎ、和集合にする。
+        let mut update = candidate(
+            kb::CandidateOp::Update,
+            "environment/tools/newtool.md",
+            Confidence::High,
+        );
+        update.sources = vec!["task:01J2".into()];
+        update.body = "続き。".into();
+        let out2 = apply_candidates(&root, "01JTASK2", &[update]);
+        assert_eq!(out2.committed, vec!["environment/tools/newtool.md"]);
+        let raw2 =
+            std::fs::read_to_string(root.join("environment/tools/newtool.md")).expect("read");
+        assert!(raw2.contains("task:01J1"), "{raw2}");
+        assert!(raw2.contains("task:01J2"), "{raw2}");
+        assert_eq!(history(&root, "environment/tools/newtool.md").len(), 2);
+    }
+
+    /// ADR-0047 D4: `merge`/`retire` は常に `_inbox/` へ（`confidence = high` でも直接コミットしない）。
+    /// `medium`/`low` の `create`/`update` も同様。
+    #[test]
+    fn apply_candidates_routes_merge_retire_and_low_confidence_to_the_inbox() {
+        let (_dir, root) = kb_dir();
+        let merge = candidate(
+            kb::CandidateOp::Merge,
+            "environment/clusters/pegasus.md",
+            Confidence::High,
+        );
+        let retire = candidate(
+            kb::CandidateOp::Retire,
+            "environment/clusters/pegasus.md",
+            Confidence::High,
+        );
+        let mut medium = candidate(
+            kb::CandidateOp::Create,
+            "environment/tools/other.md",
+            Confidence::Medium,
+        );
+        medium.path = "environment/tools/other.md".into();
+        let out = apply_candidates(&root, "01JTASK", &[merge, retire, medium]);
+        assert!(out.committed.is_empty(), "{out:?}");
+        assert_eq!(out.inboxed.len(), 3, "{out:?}");
+        assert_eq!(out.summary().inbox, 3);
+        for path in &out.inboxed {
+            assert!(kb::is_inbox(path), "{path}");
+            let raw = std::fs::read_to_string(root.join(path)).expect("read");
+            assert!(raw.contains("path: environment/"), "{raw}");
+        }
+    }
+
+    /// ADR-0047 D4: 対象ページに人の未コミット編集があれば、`confidence = high` の `update` でも
+    /// 直接コミットせず `_inbox/` へ。
+    #[test]
+    fn apply_candidates_sends_a_human_dirty_target_to_the_inbox() {
+        let (_dir, root) = kb_dir();
+        std::fs::write(
+            root.join("environment/clusters/pegasus.md"),
+            "---\ntitle: 人が今書いている\n---\n\n下書き\n",
+        )
+        .expect("write");
+        let update = candidate(
+            kb::CandidateOp::Update,
+            "environment/clusters/pegasus.md",
+            Confidence::High,
+        );
+        let out = apply_candidates(&root, "01JTASK", &[update]);
+        assert!(out.committed.is_empty(), "{out:?}");
+        assert_eq!(out.inboxed.len(), 1, "{out:?}");
+        // 人の下書きは触らない。
+        assert_eq!(
+            std::fs::read_to_string(root.join("environment/clusters/pegasus.md")).expect("read"),
+            "---\ntitle: 人が今書いている\n---\n\n下書き\n"
+        );
+    }
+
+    /// ADR-0047 D4: 検査を通らない候補（出典なし・秘密）は落とす（どこにも書かない）。
+    #[test]
+    fn apply_candidates_drops_hard_invalid_candidates() {
+        let (_dir, root) = kb_dir();
+        let mut no_sources = candidate(
+            kb::CandidateOp::Create,
+            "environment/tools/x.md",
+            Confidence::High,
+        );
+        no_sources.sources = vec![];
+        let mut secret = candidate(
+            kb::CandidateOp::Create,
+            "environment/tools/y.md",
+            Confidence::High,
+        );
+        secret.body = "API キーは sk-abc123def456 です".into();
+        let escapes = candidate(kb::CandidateOp::Create, "../../etc/passwd", Confidence::High);
+        let out = apply_candidates(&root, "01JTASK", &[no_sources, secret, escapes]);
+        assert!(out.committed.is_empty());
+        assert!(out.inboxed.is_empty());
+        assert_eq!(out.dropped.len(), 3, "{out:?}");
+        assert_eq!(out.summary().discarded, 3);
+        assert_eq!(out.summary().candidates, 3);
+    }
+
+    /// ADR-0047 D4: 適用は冪等（同じ high の候補をもう一度適用しても、中身が同じなら新しいコミットは作らない）。
+    #[test]
+    fn apply_candidates_is_idempotent_for_an_unchanged_high_confidence_candidate() {
+        let (_dir, root) = kb_dir();
+        let c = candidate(
+            kb::CandidateOp::Create,
+            "environment/tools/idempotent.md",
+            Confidence::High,
+        );
+        let first = apply_candidates(&root, "01JTASK", std::slice::from_ref(&c));
+        assert_eq!(first.committed.len(), 1);
+        assert_eq!(
+            history(&root, "environment/tools/idempotent.md").len(),
+            1
+        );
+        // 2 回目: op は create のままだが対象が既にあるので「create なのに既にある」= inbox へ。
+        let second = apply_candidates(&root, "01JTASK", &[c]);
+        assert!(second.committed.is_empty(), "{second:?}");
+        assert_eq!(second.inboxed.len(), 1);
+    }
+
+    /// ADR-0047 D4: `_inbox` の accept は `op = merge` なら対象を必ず上書きし、`op = retire` なら
+    /// 対象を `_retired/` へ動かす。
+    #[test]
+    fn inbox_accept_handles_merge_and_retire() {
+        let (_dir, root) = kb_dir();
+        // merge: 対象は既にある。上書きされる。
+        let merge = candidate(
+            kb::CandidateOp::Merge,
+            "environment/clusters/pegasus.md",
+            Confidence::Medium,
+        );
+        let out = apply_candidates(&root, "01JTASK", &[merge]);
+        assert_eq!(out.inboxed.len(), 1);
+        let merge_id = out.inboxed[0]
+            .strip_prefix(&format!("{INBOX_DIR}/"))
+            .and_then(|s| s.strip_suffix(".md"))
+            .expect("id")
+            .to_string();
+        let accepted = inbox_accept(&root, &merge_id, None, false);
+        match accepted {
+            InboxOutcome::Accepted { path, .. } => {
+                assert_eq!(path, "environment/clusters/pegasus.md")
+            }
+            other => panic!("{other:?}"),
+        }
+        let raw =
+            std::fs::read_to_string(root.join("environment/clusters/pegasus.md")).expect("read");
+        assert!(raw.contains("pjsub -L node=1"), "{raw}");
+
+        // retire: 対象ページが `_retired/` へ動く。
+        let retire = candidate(
+            kb::CandidateOp::Retire,
+            "environment/clusters/pegasus.md",
+            Confidence::Medium,
+        );
+        let out2 = apply_candidates(&root, "01JTASK2", &[retire]);
+        assert_eq!(out2.inboxed.len(), 1);
+        let retire_id = out2.inboxed[0]
+            .strip_prefix(&format!("{INBOX_DIR}/"))
+            .and_then(|s| s.strip_suffix(".md"))
+            .expect("id")
+            .to_string();
+        let retired = inbox_accept(&root, &retire_id, None, false);
+        match retired {
+            InboxOutcome::Accepted { path, .. } => {
+                assert_eq!(path, format!("{RETIRED_DIR}/environment/clusters/pegasus.md"))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!root.join("environment/clusters/pegasus.md").exists());
+        assert!(
+            root.join(format!(
+                "{RETIRED_DIR}/environment/clusters/pegasus.md"
+            ))
+            .exists()
+        );
+        // 退役したページは索引にも `_inbox` にも出ない。
+        assert!(inbox_list(&root).is_empty());
+        let index = reindex(&root).expect("reindex");
+        assert!(
+            !index
+                .items
+                .iter()
+                .any(|i| i.path.contains("pegasus")),
+            "{index:?}"
         );
     }
 }

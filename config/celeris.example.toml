@@ -124,6 +124,29 @@ dir = "../memory"
 # root = "~/knowledge"
 # default_mounts = ["kb:user", "kb:environment"]
 
+# 知識の自動メンテナンス（ADR-0047 D4、Phase 62）。**既定は無効**。終端になったタスクから
+# LangMem（`tools/langmem/`。`scripts/knowledge/setup-langmem.sh` が venv を作る）で知識の候補を
+# 抽出し、`confidence = high` の `create`/`update` は知識ベースへ直接コミット、それ以外は
+# `_inbox/` へ（人が GUI で accept/reject）。LLM 呼び出しはこの python プロセスの中だけで起き、
+# celeris 本体（tick・ディスパッチャ・ストア）はいつ起こすか・どう適用するかを決定的に決めるだけ。
+#
+#   enabled            — true にすると tick が知識整理 run を起こすようになる。
+#   provider            — "openai-compatible"（既定。ローカルの Qwen OpenAI 互換エンドポイントもこちら）
+#                          | "anthropic"。
+#   base_url            — "openai-compatible" のときの接続先（例: 本番の Qwen トンネル
+#                          "http://127.0.0.1:18000/v1"）。
+#   model               — 例 "qwen3.8-27b"。
+#   api_key_secret      — `[secrets] dir` の下の id。省略すると渡さない（ローカルの OpenAI 互換
+#                          エンドポイントは鍵を確認しないことが多い）。
+#   max_related_pages   — 依頼文に入れる関連ページの上限（既定 10）。
+[knowledge.langmem]
+# enabled = false
+# provider = "openai-compatible"
+# base_url = "http://127.0.0.1:18000/v1"
+# model = "qwen3.8-27b"
+# api_key_secret = "langmem-openai-key"
+# max_related_pages = 10
+
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]
 # adapter = "claude-code"
@@ -319,6 +342,14 @@ interval_secs = 30                                # 判定と送信の間隔（�
 [adapters.fake]
 # command = ["sh", "-c", "cat >/dev/null; echo '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'"]
 
+# 知識整理 run を起こす python（ADR-0047 D4、Phase 62）。`scripts/knowledge/setup-langmem.sh` が
+# `$CELERIS_STATE_DIR/tools/langmem/.venv` を作る（既定は `~/.local/celeris/tools/langmem/.venv`）。
+# LLM の接続先は `[knowledge.langmem]` の方（上）。`[knowledge.langmem] enabled = true` にし、
+# 下の `[[providers]]` の行を有効にして初めて知識整理 run が走る。
+# [adapters.langmem]
+# command = "~/.local/celeris/tools/langmem/.venv/bin/python"
+# idle_timeout_secs = 300
+
 # プロバイダ表。上から順に優先（StaticPolicy）。Phase 3 では adapter = "fake" のみ使える。
 [[providers]]
 id = "fake-local"
@@ -326,3 +357,11 @@ adapter = "fake"
 tiers = ["frontier", "standard", "cheap"]
 concurrency = 2
 model = "fake"
+
+# 知識整理 run 用のプロバイダ（ADR-0047 D4、Phase 62）。有効化するには上の `[adapters.langmem]` と
+# `[knowledge.langmem]` を有効にしたうえで、このコメントを外す。
+# [[providers]]
+# id = "langmem-main"
+# adapter = "langmem"
+# tiers = ["cheap"]
+# concurrency = 1

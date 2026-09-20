@@ -318,6 +318,8 @@ const TIMELINE_KIND_LABEL: Record<string, string> = {
   release: "リリース",
   integration: "取り込み",
   doc: "文書",
+  // ADR-0047 D4/D5（Phase 62）。
+  knowledge: "知識",
 };
 
 export function timelineKindLabel(kind: string): string {

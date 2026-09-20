@@ -2143,7 +2143,7 @@
           "type": "object"
         },
         {
-          "description": "知識の候補が入った・取り込まれた（ADR-0047）。**Phase 60a では誰も作らない**予約の形で、\n知識の側（Phase 61）が埋める。",
+          "description": "知識整理 run の結果（ADR-0047 D4 / D5。Phase 62）。「この仕事から知識 N 件: 取り込み a /\n候補 b / 破棄 c」の 1 行。`task_id` の終端から知識整理 run（`run_task_id`）が起き、\n`apply_candidates` の集計が付いたときに 1 件出る（`state = applied`。適用前は出さない）。",
           "properties": {
             "at": {
               "type": "string"
@@ -2151,9 +2151,23 @@
             "cursor": {
               "type": "string"
             },
-            "entry_id": {
-              "description": "知識の項目の id。",
-              "type": "string"
+            "discarded": {
+              "description": "検査で落とした件数。",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "inbox": {
+              "description": "`_inbox/` へ送った件数（人の確認待ち）。",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ingested": {
+              "description": "直接 KB にコミットした件数。",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
             },
             "kind": {
               "const": "knowledge",
@@ -2169,11 +2183,19 @@
                 }
               ]
             },
+            "run_task_id": {
+              "$ref": "#/$defs/TaskId",
+              "description": "知識整理 run（裏方の支援タスク）自身の id。"
+            },
             "state": {
-              "description": "`candidate` / `accepted` など（ADR-0047 が決める語）。",
+              "description": "`applied`（適用済み）| `failed`（run が失敗し候補が無い）。",
               "type": "string"
             },
-            "title": {
+            "task_id": {
+              "$ref": "#/$defs/TaskId",
+              "description": "知識整理 run の元になったタスク。"
+            },
+            "task_title": {
               "type": "string"
             }
           },
@@ -2181,9 +2203,13 @@
             "kind",
             "at",
             "cursor",
-            "entry_id",
-            "title",
-            "state"
+            "task_id",
+            "task_title",
+            "run_task_id",
+            "state",
+            "ingested",
+            "inbox",
+            "discarded"
           ],
           "type": "object"
         }
@@ -4594,6 +4620,13 @@
         },
         "id": {
           "type": "string"
+        },
+        "op": {
+          "description": "ADR-0047 D4（Phase 62）: `create` / `update` / `merge` / `retire`。`celerisctl knowledge record`\nが書いた候補（Phase 61）には無い（`null`）。`retire` の accept は `target` を `_retired/` へ動かし、\n`merge` の accept は `target` を必ず上書きする（P-61-k。`docs/knowledge.md` 参照）。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "path": {
           "description": "`_inbox/<id>.md`。",
@@ -9901,6 +9934,56 @@
             "project_id",
             "path",
             "title"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0047 D4/D5（Phase 62）: このタスクの終端から起きた知識整理 run。`at` は適用済みなら\n`applied_at`、まだなら `created_at`（run を起こした時刻）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "discarded": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "inbox": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "ingested": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "knowledge",
+              "type": "string"
+            },
+            "run_task_id": {
+              "$ref": "#/$defs/TaskId"
+            },
+            "state": {
+              "description": "`scheduled`（起こしたが未適用）| `applied` | `failed`。",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "run_task_id",
+            "state"
           ],
           "type": "object"
         }

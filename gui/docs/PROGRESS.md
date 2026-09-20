@@ -3524,3 +3524,29 @@ celeris 側の Phase 60b の変更一式（`crates/` と `docs/api/v1/`・`docs/
   `/projects/:id` 側で使っている「次の途中目標の提案」（`proposal.title` / `proposal.description`）に
   相当する情報が無い。Console の `milestone` ブロックのレビューカードは、そのため提案の見出しを
   出していない（`review` の Markdown 本文には書かれているはずだが、構造化はされていない）。
+
+## celeris Phase 62 に合わせた GUI の追従（ADR-0047 D4。2026-09-20）
+
+celeris 側の Phase 62（`docs/PROGRESS.md` の同名節）が Console の予約ブロック `knowledge`
+（G22 では「Phase 60a では誰も作らない予約」だった）を埋め、`_inbox` の候補に `op`
+（`create`/`update`/`merge`/`retire`）を追加し、タスクのタイムラインに `knowledge` 項目を足した。
+GUI 側はこの celeris の変更に**追従しただけ**で、新しい画面・新しい GUI 独自の判断は無い
+（celeris が返す形をそのまま出す、という既存の方針のまま）。独立した G フェーズとしては起こしていない
+（celeris 側の Phase 62 の一部として実施。番号は振らない）。
+
+- `pnpm gen:types` で `ConsoleBlock::Knowledge`（`task_id`/`task_title`/`run_task_id`/`state`/
+  `ingested`/`inbox`/`discarded`）、`TimelineItem::Knowledge`、`KnowledgeCandidate.op` を取り込んだ。
+- `app/components/ConsoleBlockItem.tsx` の `KnowledgeBlockView`（Phase 60b / G22 で足した予約の描画）を
+  新しい形に合わせて書き換えた:「この仕事から知識 N 件: 取り込み a / 候補 b / 破棄 c」+ 対象タスクへの
+  リンク + 候補が 1 件以上あれば `/knowledge/inbox` へのリンク。
+- `app/routes/tasks.$id.tsx` のタイムライン（`timelineItemKey`/`TimelineBody`/`TIMELINE_TONE`）に
+  `knowledge` の分岐を足した（`scheduled`/`applied`/`failed` で文面を変える）。
+- `app/routes/knowledge.inbox.tsx` の候補カードに `op` のバッジ（`~/lib/knowledge.ts` の
+  `knowledgeOpTone`）と、`merge`/`retire` のときだけ出るヒント文（`knowledgeOpHint`）を足した。
+  出典（`sources`）の `task:<id>` は既存の `KnowledgeSources` がそのままリンクにするので、
+  「候補の元になったタスクへのリンク」に新しいコードは要らなかった。
+- 証跡: `pnpm lint` / `pnpm typecheck` / `pnpm test`（838 passed。`~/lib/knowledge.ts` の
+  `knowledgeOpTone`/`knowledgeOpHint` の単体テストと、mock サーバ経由で `op` が往復することを
+  確認する 1 本を追加）/ `pnpm build` はいずれも exit 0。`bash scripts/sync-gui-docs.sh --check` は
+  `up to date`。DOM を描画する unit テストは無い方針（G10-U1）のまま、`e2e` は実行していない
+  （実 celeris バイナリが要る。既存の理由と同じ）。

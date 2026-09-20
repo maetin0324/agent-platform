@@ -190,6 +190,11 @@ pub struct KnowledgeCandidate {
     pub html: String,
     /// 取り込み先に既にページがある（accept は `overwrite` が要る）。
     pub target_exists: bool,
+    /// ADR-0047 D4（Phase 62）: `create` / `update` / `merge` / `retire`。`celerisctl knowledge record`
+    /// が書いた候補（Phase 61）には無い（`null`）。`retire` の accept は `target` を `_retired/` へ動かし、
+    /// `merge` の accept は `target` を必ず上書きする（P-61-k。`docs/knowledge.md` 参照）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
 }
 
 /// `GET /knowledge/inbox`。
@@ -520,6 +525,7 @@ async fn inbox(
                         target: item.target,
                         created: item.created,
                         body: item.body,
+                        op: item.op.map(|o| o.as_str().to_string()),
                     })
                     .collect()
             } else {
