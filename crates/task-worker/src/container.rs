@@ -819,6 +819,9 @@ async fn append_log(path: &Path, text: &str) {
     {
         Ok(mut file) => {
             let _ = file.write_all(text.as_bytes()).await;
+            // Tokio may still have a blocking write queued after write_all returns.
+            // Build callers inspect this log as soon as ensure_image completes.
+            let _ = file.flush().await;
         }
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "could not write the container build log")
