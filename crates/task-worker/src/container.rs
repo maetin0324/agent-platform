@@ -1438,24 +1438,20 @@ mod tests {
     fn probing_a_runtime_sees_success_failure_and_absence() {
         let dir = tempfile::tempdir().expect("tempdir");
         let good = dir.path().join("podman");
-        std::fs::write(
+        crate::test_support::write_executable(
             &good,
             "#!/bin/sh\n[ \"$1\" = info ] || exit 2\necho host: ok\n",
-        )
-        .expect("write");
-        set_executable(&good);
+        );
         assert_eq!(
             probe_program(&good.display().to_string(), Duration::from_secs(10)),
             Ok(())
         );
 
         let bad = dir.path().join("docker");
-        std::fs::write(
+        crate::test_support::write_executable(
             &bad,
             "#!/bin/sh\necho 'Cannot connect to the Docker daemon' 1>&2\nexit 1\n",
-        )
-        .expect("write");
-        set_executable(&bad);
+        );
         let err = probe_program(&bad.display().to_string(), Duration::from_secs(10))
             .expect_err("info fails");
         assert!(err.contains("Cannot connect"), "{err}");
