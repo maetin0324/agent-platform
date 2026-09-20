@@ -9606,3 +9606,14 @@ Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus
 - 検証: `cargo test -p celeris --test notify` 23 passed、`cargo test -p task-ops actions::tests` 11 passed、`cargo test -p task-worker preamble::tests`、`cargo test -p task-core migration_0019` 1 passed。API schema/GUI型を再生成。GUI typecheck/build と unit 839 passed。
 - `node scripts/check-mobile.mjs`: 独立した合成API/GUI（17971/17901）、Chromium 153.0.8010.12、7画面×360/393/412/1023/1024/1440px=42描画、HTTP200・pageerror0・文書横はみ出し0。タスク題名幅は294/327/346/933/646/166px（以前360–1024pxで0）、Console見出し232/265/284/879/592/704px。スマホ送信ボタン下端760/812/875pxで各高さ800/852/915px内。全19リンクの到達、Escape、タッチEnter/IMEイベントを検査。API操作はGETのみ。証跡 `/tmp/celeris-mobile-after/`。Nothing 2a実機のソフトキーボードは未検証。
 - 本番反映は既存の release → verify → promote 手順。schema更新のため旧版との同時稼働はできず、バックアップ後の停止切替となる。結果は反映後に追記する。
+
+### 本番反映と実機確認（同日 19:31 UTC）
+
+- リリース `2209b8736343` を本番へ反映。`release.sh` の7ゲート全て exit 0: Rust 1,511 passed / 0 failed / 3 ignored、clippy warnings 0、GUI 839 passed、typecheck/build成功。通知・CoS・移行の追加テストを含む。
+- `verify.sh` は schema 18 → 19 の移行後も104タスク、3案件、13組織ノード、100報告、38メッセージとタスクdigestが一致。主要API/GUIが200、smokeタスクが5.03秒でdone。`ok=true / live_ok=false`（旧schema 18バイナリはschema 19を拒否するので、停止切替を選択）。
+- `promote.sh` 成功。API/GUIともrelease `2209b8736343`、schema19、active1プロセス。バックアップ `~/.local/celeris/backups/20260920-193108-pre-2209b8736343.sqlite3`。
+- 起動直後に漏れていた `task_ready` の `01M3000W211ER7RBDDFCFWY8PD:271` を回収し、19:31:11 UTCにDiscord送信成功（ok=true, attempts=1）。重複通知なし。テスト送信だけではなく実際の完了通知の送信台帳を確認。
+- 本番GUIへログインし、393/1024pxのConsole・タスク・案件・報告の8表示を確認。全てHTTP200、pageerror0、横はみ出し0、タスク題名幅327/646px。全19画面メニューも確認。ログイン以外の変更系リクエストなし。証跡 `/tmp/celeris-live-gui-result.json` と `/tmp/celeris-live-mobile-console.png`。
+- 実際に利用中の config.toml の conversation 指示と org.toml/DBのCoS briefも更新・reload済み。バックアップは各ファイルの `.before-workflow-repair`。Codex `--approve-for-me`、Software EngineeringのPegasus許可とTOTP運用方針は維持。元の調査タスクに、実装・検証・本番反映まで終えたコメントを記録。
+- 追加確認でQwenトンネルの認証反復（旧transient unitのNRestarts=150）を検出し停止。`~/.config/systemd/user/celeris-qwen-tunnel.service` を `ssh -O check pegasus` が成功した場合だけ起動する形にし、minutely timerでGUI接続後の復旧を行う。TOTP認証そのものを自動反復しない。制御ソケットが無い場合はローカルチェックで終了することを確認。
+- その後Pegasus `connected=true`、Qwen `/v1/models` HTTP200、トンネルactive/NRestarts=0を確認。Siriusは未接続のまま（使う際は既存方針どおりGUIからTOTP入力）。Nothing 2a実機のソフトキーボード動作は未検証。
