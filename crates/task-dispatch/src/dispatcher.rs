@@ -509,6 +509,8 @@ struct RunExtras {
 }
 
 struct ReviewEntry {
+    /// Keep ownership until the verdict transaction has completed, across daemon handoff.
+    _review_lock: Arc<std::fs::File>,
     handle: JoinHandle<()>,
     /// `Reviewer` run を起動する場合に選んだプロバイダ（並列度の枠を消費する）。
     provider: Option<ProviderId>,
@@ -3772,13 +3774,46 @@ impl Dispatcher {
         run_id: String,
         subject: &ReviewSubject,
     ) -> Result<bool, DispatchError> {
-        let Some(mut task) = self.store.get(task_id)? else {
+        if !self.accepting_new_work {
+            return Ok(false);
+        }
+        let Some(task) = self.store.get(task_id)? else {
             return Ok(true);
         };
+        if task.status != Status::Reviewing {
+            return Ok(true);
+        }
         let Some(dir) = self.task_dir(&task) else {
             tracing::warn!(%task_id, "cannot review task with remote workspace");
             return Ok(true);
         };
+        // Old and new daemons can overlap during live handoff. Both command checks
+        // and model review hold the same per-task lock through verdict persistence.
+        let lock_dir = dir.join("runs");
+        std::fs::create_dir_all(&lock_dir)
+            .map_err(|e| StoreError::Invalid(format!("review lock directory: {e}")))?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_dir.join(format!(".review-{task_id}.lock")))
+            .map_err(|e| StoreError::Invalid(format!("review lock: {e}")))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(StoreError::Invalid(format!("review lock: {e}")).into());
+            }
+        }
+        let review_lock = Arc::new(lock);
+        // The previous owner may have committed a verdict after our first read.
+        let Some(mut task) = self.store.get(task_id)? else {
+            return Ok(true);
+        };
+        if task.status != Status::Reviewing {
+            return Ok(true);
+        }
 
         let human = match self.resolve_human_approvals(&task)? {
             Some(h) => {
@@ -3888,7 +3923,9 @@ impl Dispatcher {
         };
         // ADR-0046 D4（Phase 59）: `mode = research` は「結果に出典か計測の記録」を暗黙の条件に足す。
         let research = task.mode == task_core::TaskMode::Research;
+        let running_review_lock = review_lock.clone();
         let handle = tokio::spawn(async move {
+            let _review_lock = running_review_lock;
             let ws: Box<dyn Workspace> = match remote_review {
                 Some(settings) => Box::new(SshWorkspace::new(&dir, settings)),
                 None => Box::new(match review_work_dir {
@@ -3926,6 +3963,7 @@ impl Dispatcher {
         self.reviewing.insert(
             task_id,
             ReviewEntry {
+                _review_lock: review_lock,
                 handle,
                 provider,
                 subject: entry_subject,
@@ -5478,6 +5516,115 @@ mod tests {
                 knowledge: KnowledgeRuntimeConfig::default(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn draining_worker_completion_leaves_review_to_the_active_dispatcher() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: ":".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut old = dispatcher(store.clone(), adapter.clone(), 1);
+        assert_eq!(old.tick().unwrap().dispatched, 1);
+        old.set_accepting_new_work(false);
+        for _ in 0..100 {
+            old.tick().unwrap();
+            if old.in_flight() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(old.in_flight(), 0);
+        assert_eq!(
+            store.get(task.id).unwrap().unwrap().status,
+            Status::Reviewing
+        );
+        assert!(old.reviewing.is_empty());
+        let mut active = dispatcher(store.clone(), adapter, 1);
+        assert!(run_until_idle(&mut active, 100).await.idle);
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+    }
+
+    #[tokio::test]
+    async fn overlapping_dispatchers_share_review_ownership_until_verdict_is_saved() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: ":".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.status = Status::Reviewing;
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut old = dispatcher(store.clone(), adapter.clone(), 1);
+        let mut active = dispatcher(store.clone(), adapter, 1);
+        assert!(
+            old.spawn_review(task.id, "subject".into(), &ReviewSubject::default())
+                .unwrap()
+        );
+        old.set_accepting_new_work(false);
+        assert!(
+            !active
+                .spawn_review(task.id, "subject".into(), &ReviewSubject::default())
+                .unwrap()
+        );
+        // Even after the async check finishes, the first owner must persist its verdict.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !active
+                .spawn_review(task.id, "subject".into(), &ReviewSubject::default())
+                .unwrap()
+        );
+        assert!(run_until_idle(&mut old, 100).await.idle);
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        active.tick().unwrap();
+        assert!(active.reviewing.is_empty());
+        assert_eq!(
+            store
+                .events_for(task.id)
+                .unwrap()
+                .iter()
+                .filter(|(_, e)| matches!(e, Event::ReviewVerdict { .. }))
+                .count(),
+            1
+        );
+        // A later explicit review can reuse the lock; no stale lock file blocks recovery.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(
+                dir.path()
+                    .join("runs")
+                    .join(format!(".review-{}.lock", task.id)),
+            )
+            .unwrap();
+        file.try_lock().unwrap();
     }
 
     async fn run_until_idle(d: &mut Dispatcher, max_ticks: usize) -> TickReport {
