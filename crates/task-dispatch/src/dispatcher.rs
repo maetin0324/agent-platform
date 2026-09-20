@@ -4006,6 +4006,9 @@ impl Dispatcher {
                 extras,
             )
             .await;
+            // The entry owns the lock through verdict persistence. Release this
+            // task's copy before sending completion so it cannot outlive that entry.
+            drop(_review_lock);
             let _ = tx.send(Completion::Review {
                 task_id,
                 run_id,
