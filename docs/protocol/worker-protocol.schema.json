@@ -33,6 +33,13 @@
           },
           "type": "array"
         },
+        "repos": {
+          "description": "Repository names valid for create_task.repos within this project.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "status": {
           "description": "`proposed` / `active`。",
           "type": "string"
