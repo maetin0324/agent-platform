@@ -366,8 +366,14 @@ WANT_SCHEMA="$(sd_json_get "$REL/manifest.json" schema_version)" || sd_die "mani
 command -v sqlite3 >/dev/null 2>&1 || sd_die "sqlite3 not found"
 
 # 旧の DB のスキーマ版数（移行の前後で変わらないことを後で確かめる）
-BEFORE_SCHEMA="$(sqlite3 "file:$OLD_HOME/$OLD_DB_NAME?mode=ro" 'SELECT COALESCE(MAX(version), 0) FROM schema_migrations;')" \
-  || sd_die "cannot read $OLD_HOME/$OLD_DB_NAME"
+# 途中で止まった移行の再実行（DB は既に新しい場所）にも耐える: 旧が無ければ新を読む。
+DB_FOR_CHECK="$OLD_HOME/$OLD_DB_NAME"
+if [ ! -f "$DB_FOR_CHECK" ] && [ -f "$STATE/celeris.sqlite3" ]; then
+  DB_FOR_CHECK="$STATE/celeris.sqlite3"
+  sd_log "resuming: the DB is already at $DB_FOR_CHECK"
+fi
+BEFORE_SCHEMA="$(sqlite3 "file:$DB_FOR_CHECK?mode=ro" 'SELECT COALESCE(MAX(version), 0) FROM schema_migrations;')" \
+  || sd_die "cannot read $DB_FOR_CHECK"
 sd_log "old DB schema_version=$BEFORE_SCHEMA (release wants $WANT_SCHEMA)"
 
 OLD_SHA="$(basename "$(readlink -f "$OLD_HOME/current" 2>/dev/null || echo '')" 2>/dev/null || true)"
@@ -395,6 +401,15 @@ while IFS=$'\t' read -r src dst; do
     elif [ -d "$dst" ] && [ -z "$(ls -A -- "$dst")" ]; then
       rmdir -- "$dst"
       sd_log "removed the empty $dst"
+    elif [ -d "$dst" ] && [ -d "$src" ] && [ ! -L "$src" ]; then
+      # ディレクトリ同士は中身を合流させる（backups/ など）。子の名前が衝突していたら止まる。
+      for child in "$src"/* "$src"/.[!.]*; do
+        [ -e "$child" ] || [ -L "$child" ] || continue
+        if [ -e "$dst/$(basename -- "$child")" ]; then
+          sd_die "destination already exists: $dst/$(basename -- "$child") (for $child); nothing was stopped or moved"
+        fi
+      done
+      sd_log "will merge $src into the existing $dst"
     else
       sd_die "destination already exists: $dst (for $src); nothing was stopped or moved"
     fi
@@ -435,7 +450,7 @@ fi
 
 # ---- 2. 移す（同一ファイルシステムなので mv。順序固定）--------------------
 
-mkdir -p "$CONFIG" "$STATE" "$STATE/releases" "$STATE/tools" "$STATE/logs" "$PRE"
+mkdir -p "$CONFIG" "$STATE" "$STATE/releases" "$STATE/tools" "$STATE/logs"
 chmod 700 "$CONFIG"
 
 MOVED=0
@@ -443,10 +458,22 @@ while IFS=$'\t' read -r src dst; do
   [ -n "$src" ] || continue
   { [ -e "$src" ] || [ -L "$src" ]; } || continue
   mkdir -p "$(dirname "$dst")"
+  if [ -d "$dst" ] && [ -d "$src" ] && [ ! -L "$src" ]; then
+    # 行き先が既にある（自分が先に作った backups/ や、途中で止まった前回の移行）: 中身を合流させる。
+    for child in "$src"/* "$src"/.[!.]*; do
+      [ -e "$child" ] || [ -L "$child" ] || continue
+      mv -T "$child" "$dst/$(basename -- "$child")"
+      MOVED=$((MOVED + 1))
+    done
+    rmdir -- "$src"
+    sd_log "merged $src into $dst"
+    continue
+  fi
   mv -T "$src" "$dst"
   sd_log "mv $src -> $dst"
   MOVED=$((MOVED + 1))
 done < <(plan_moves)
+mkdir -p "$PRE"
 sd_log "moved $MOVED entr(ies)"
 
 # 旧 unit のテンプレートを控えてから消す（`--rollback` が戻す）。
