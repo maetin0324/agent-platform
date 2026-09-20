@@ -767,6 +767,7 @@ fn actions_instructions() -> String {
      - `{\"type\": \"propose_project\", \"title\": \"…\", \"request\": \"…\", \"repos\": [\"/abs/path\"]}`\n\
      - `{\"type\": \"add_milestone\", \"project\": \"<案件の id>\", \"title\": \"…\", \"description\": \"…\"}`\n\
      - `{\"type\": \"ask_human\", \"text\": \"…\"}`\n\
+     `create_task.tier` は難易度に合わせ cheap（定型）、standard（通常実装）、frontier（難しい設計・調査）を指定できます。残量による調整は実行直前の観測値で行います。\n\
      `create_task.repos` は案件内の登録名です。指定するときは必ず所属する案件の ID を `project` に書き、\
      上の登録済み repos から選んでください。`project: null` と非空の `repos` の組み合わせは禁止です。\
      既存のコードを直す依頼は、そのリポジトリが登録された既存案件に紐づけます。\

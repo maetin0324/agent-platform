@@ -164,7 +164,7 @@ fn effective_model(provider_model: &str, adapter_model: &Option<String>) -> Opti
     }
 }
 
-/// ADR-0012 D1: `[[providers]]` の各行（= 1 アカウント）ごとにアダプタのインスタンスを作る。`[adapters.<種別>]` を基本設定とし、
+/// ADR-0012 D1: `[[providers]]` の各行（モデル供給元）ごとにアダプタのインスタンスを作る。`[adapters.<種別>]` を基本設定とし、
 /// プロバイダの `env` と `model` を重ねる。キーはプロバイダ ID。
 pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdapter>> {
     let secrets_dir = config.secrets.as_ref().map(|s| s.dir.as_path());
@@ -325,7 +325,17 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                 Arc::new(fake)
             }
         };
-        adapters.insert(p.id.clone(), adapter);
+        adapters.insert(
+            p.id.clone(),
+            Arc::new(task_worker::tiered::TieredAdapter {
+                base: adapter,
+                models: p.tier_models.clone(),
+                account_id: p.account_id.clone(),
+                credential_error: p.env_from_secrets.iter()
+                    .find(|(key, id)| task_core::model_routing::CREDENTIAL_KEYS.contains(&key.as_str()) && resolve_secret(secrets_dir, id).is_none())
+                    .map(|(_, id)| format!("credential reference {id} is missing or unreadable; configure it in Accounts")),
+            }),
+        );
     }
     adapters
 }
@@ -431,6 +441,9 @@ pub fn provider_lives(config: &Config) -> Vec<ProviderLive> {
             let mut env_keys: Vec<String> = p.env.keys().cloned().collect();
             env_keys.sort();
             ProviderLive {
+                credential_refs: task_core::model_routing::credential_refs(&p.env_from_secrets),
+                tier_models: p.tier_models.clone(),
+                account_id: p.account_id.clone(),
                 id: p.id.clone(),
                 adapter: p.adapter.clone(),
                 tiers: p.tiers.clone(),
@@ -667,6 +680,9 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                 let mut env_keys: Vec<String> = p.env.keys().cloned().collect();
                 env_keys.sort();
                 ProviderConfigView {
+                    credential_refs: task_core::model_routing::credential_refs(&p.env_from_secrets),
+                    tier_models: p.tier_models.clone(),
+                    account_id: p.account_id.clone(),
                     id: p.id.clone(),
                     adapter: p.adapter.clone(),
                     tiers: p.tiers.clone(),
@@ -2761,5 +2777,27 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
         assert_eq!(config.role_specs()[0].max_turns, Some(60));
         // celeris の tick ループが直接読む `[notify]`。
         assert_eq!(config.notify.interval_secs, 90);
+    }
+    #[test]
+    fn explicit_credential_reference_missing_blocks_instead_of_using_inherited_auth() {
+        let cfg: Config = toml::from_str(
+            r#"[[providers]]
+id = "gpt"
+adapter = "codex"
+[providers.env_from_secrets]
+OPENAI_API_KEY = "missing-key"
+[providers.tier_models.standard]
+name = "sol"
+model_id = "explicit-id"
+"#,
+        )
+        .unwrap();
+        let adapters = build_adapters(&cfg);
+        assert!(
+            adapters["gpt"]
+                .model_for_tier(task_core::Tier::Standard)
+                .unwrap_err()
+                .contains("missing-key")
+        );
     }
 }

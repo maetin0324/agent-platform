@@ -1724,6 +1724,9 @@ fn current_providers(
             .providers
             .iter()
             .map(|p| ProviderConfigView {
+                credential_refs: p.credential_refs.clone(),
+                tier_models: p.tier_models.clone(),
+                account_id: p.account_id.clone(),
                 id: p.id.clone(),
                 adapter: p.adapter.clone(),
                 tiers: p.tiers.clone(),
@@ -1761,6 +1764,9 @@ async fn providers(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Ap
         .iter()
         .zip(stats)
         .map(|(provider, stats)| ProviderView {
+            credential_refs: provider.credential_refs.clone(),
+            tier_models: provider.tier_models.clone(),
+            account_id: provider.account_id.clone(),
             id: provider.id.clone(),
             adapter: provider.adapter.clone(),
             tiers: provider.tiers.clone(),
@@ -1823,7 +1829,10 @@ async fn create_provider(
     if path.exists() {
         return Err(ApiProblem::provider_exists(&create.id));
     }
-    let file = create.into_file();
+    validate_credential_refs(&create.credential_refs)?;
+    let mut file = create.into_file();
+    check_model_routing(&file)?;
+    migrate_credentials(&state, &mut file)?;
     write_provider_file(&dir, &file).map_err(|e| ApiProblem::internal(e.to_string()))?;
     tracing::info!(who = "admin", op = "provider_create", provider_id = %file.id, adapter = %file.adapter, "admin: provider created");
     let mut response = json_response(StatusCode::CREATED, &file.to_view());
@@ -1858,12 +1867,19 @@ async fn patch_provider(
     if patch.concurrency.is_some_and(|c| c == 0) {
         return Err(ApiProblem::bad_request("concurrency must be >= 1"));
     }
-    let current = read_provider_file(&path).map_err(|e| ApiProblem::internal(e.to_string()))?;
-    let updated = patch.apply(current);
+    if let Some(refs) = &patch.credential_refs {
+        validate_credential_refs(refs)?;
+    }
+    let mut current = read_provider_file(&path).map_err(|e| ApiProblem::internal(e.to_string()))?;
+    check_model_routing(&patch.apply(current.clone()))?;
+    migrate_credentials(&state, &mut current)?;
+    let mut updated = patch.apply(current);
+    check_model_routing(&updated)?;
     // ADR-0024 D2 / ADR-0025 D1 / S1: patch 後の組み合わせも検証する（`id`/`adapter` は patch で変わらない）。
     if updated.account_pool {
         check_account_pool_adapter(&state, &updated.adapter)?;
     }
+    migrate_credentials(&state, &mut updated)?;
     write_provider_file(&dir, &updated).map_err(|e| ApiProblem::internal(e.to_string()))?;
     tracing::info!(who = "admin", op = "provider_patch", provider_id = %id, "admin: provider patched");
     Ok(json_response(StatusCode::OK, &updated.to_view()))
@@ -2970,4 +2986,46 @@ mod tests {
         assert_eq!(ok.status(), StatusCode::OK);
         let _ = PathBuf::new();
     }
+}
+
+fn check_model_routing(file: &crate::admin::ProviderConfigFile) -> Result<(), ApiProblem> {
+    if file
+        .account_id
+        .as_ref()
+        .is_some_and(|id| !crate::accounts::valid_account_id(id))
+    {
+        return Err(ApiProblem::bad_request("invalid account_id"));
+    }
+    if file.account_id.is_some() && !file.account_pool {
+        return Err(ApiProblem::bad_request("account_id requires account_pool"));
+    }
+    if !file.tier_models.is_empty() && !matches!(file.adapter.as_str(), "claude-code" | "codex") {
+        return Err(ApiProblem::bad_request(
+            "tier_models supported only for Claude/GPT",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_credential_refs(
+    refs: &std::collections::HashMap<String, String>,
+) -> Result<(), ApiProblem> {
+    if refs.iter().any(|(key, id)| {
+        !task_core::model_routing::CREDENTIAL_KEYS.contains(&key.as_str())
+            || !crate::secrets::valid_secret_id(id)
+    }) {
+        return Err(ApiProblem::bad_request(
+            "credential_refs requires an LLM credential environment key and a valid secret ID",
+        ));
+    }
+    Ok(())
+}
+fn migrate_credentials(
+    state: &ApiState,
+    file: &mut crate::admin::ProviderConfigFile,
+) -> Result<(), ApiProblem> {
+    let Some(dir) = &state.inner.secrets_dir else {
+        return Ok(());
+    };
+    crate::admin::migrate_credentials(file, dir).map_err(|e| ApiProblem::internal(e.to_string()))
 }

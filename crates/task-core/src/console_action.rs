@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConsoleAction {
     CreateTask {
+        #[serde(default)]
+        tier: Option<crate::Tier>,
         title: String,
         objective: String,
         #[serde(default, deserialize_with = "lenient_acceptance")]

@@ -88,6 +88,11 @@ impl WorkerAdapter for CodexAdapter {
 
     /// ADR-0025 D2: `extra`（`CODEX_HOME` を含む）を `config.env` の末尾に足した複製を返す
     /// （`claude_code::ClaudeCodeAdapter::with_env` と同じ規則: 同名キーは後勝ち）。
+    fn with_model(&self, model: &str) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut config = self.config.clone();
+        config.model = Some(model.to_owned());
+        Some(Arc::new(Self::new(config)))
+    }
     fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
         let mut config = self.config.clone();
         config.env.extend(extra.iter().cloned());
@@ -1363,5 +1368,55 @@ echo '{"type":"turn.completed"}'
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let seen = std::fs::read_to_string(&out_file).unwrap();
         assert_eq!(seen, "new-account-dir");
+    }
+    #[tokio::test]
+    async fn tier_binding_reaches_cli_model_argument_and_preserves_account_env() {
+        use task_core::{Tier, model_routing::ModelBinding};
+        for tier in [Tier::Frontier, Tier::Standard, Tier::Cheap] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = stub_codex(
+                dir.path(),
+                r#"
+for a in "$@"; do printf '%s\0' "$a" >> args.log; done
+printf '%s' "$ROUTING_ACCOUNT" > account.log
+mkdir -p artifacts
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"type":"turn.completed"}'
+"#,
+            );
+            let expected = format!("explicit-{tier:?}");
+            let adapter = crate::tiered::TieredAdapter {
+                base: Arc::new(CodexAdapter::new(config)),
+                account_id: Some("account-a".into()),
+                credential_error: None,
+                models: [(
+                    tier,
+                    ModelBinding {
+                        name: "requested-name".into(),
+                        model_id: Some(expected.clone()),
+                        unavailable_reason: None,
+                    },
+                )]
+                .into(),
+            };
+            let adapter = adapter
+                .with_env(&[("ROUTING_ACCOUNT".into(), "account-a".into())])
+                .unwrap();
+            assert_eq!(adapter.account_id(), Some("account-a"));
+            let mut req = sample_req(dir.path().to_path_buf());
+            req.task.worker_hint.tier = tier;
+            let _ = adapter
+                .run(req, "tier-run", default_limits(), &RecordingSink::default())
+                .await
+                .unwrap();
+            let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+            let args: Vec<_> = args.split('\0').collect();
+            let model = args.windows(2).find(|pair| pair[0] == "--model").unwrap()[1];
+            assert_eq!(model, expected);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("account.log")).unwrap(),
+                "account-a"
+            );
+        }
     }
 }

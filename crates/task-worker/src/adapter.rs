@@ -122,6 +122,16 @@ impl EventSink for NullSink {
 pub trait WorkerAdapter: Send + Sync {
     /// アダプタ識別子（設定の `adapter` と一致。例: `"fake"`）。
     fn id(&self) -> &str;
+    fn account_id(&self) -> Option<&str> {
+        None
+    }
+    fn model_for_tier(&self, _tier: task_core::Tier) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    fn with_model(&self, _model: &str) -> Option<Arc<dyn WorkerAdapter>> {
+        None
+    }
+
     async fn run(
         &self,
         req: RunRequest,

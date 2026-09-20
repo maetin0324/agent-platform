@@ -996,6 +996,8 @@ mod tests {
     fn pool_provider_config(accounts_dir: &Path, max_runs_per_account: usize) -> Config {
         let mut config = cluster_config(vec![]);
         config.providers = vec![celeris::config::ProviderConfig {
+            tier_models: Default::default(),
+            account_id: None,
             id: "pool".into(),
             adapter: "claude-code".into(),
             tiers: vec![task_core::Tier::Standard],
@@ -1039,6 +1041,8 @@ mod tests {
     fn resolve_account_ignores_or_rejects_account_flag_for_acp_provider() {
         let mut config = cluster_config(vec![]);
         config.providers = vec![celeris::config::ProviderConfig {
+            tier_models: Default::default(),
+            account_id: None,
             id: "opencode-qwen".into(),
             adapter: "acp".into(),
             tiers: vec![task_core::Tier::Standard],
@@ -1069,6 +1073,8 @@ mod tests {
     fn build_adapters_resolves_an_instance_for_an_acp_provider_selected_by_worker_run() {
         let mut config = cluster_config(vec![]);
         config.providers = vec![celeris::config::ProviderConfig {
+            tier_models: Default::default(),
+            account_id: None,
             id: "opencode-qwen".into(),
             adapter: "acp".into(),
             tiers: vec![task_core::Tier::Standard],
@@ -1092,6 +1098,8 @@ mod tests {
     fn resolve_account_pool_provider_without_accounts_section_errors() {
         let mut config = cluster_config(vec![]);
         config.providers = vec![celeris::config::ProviderConfig {
+            tier_models: Default::default(),
+            account_id: None,
             id: "pool".into(),
             adapter: "claude-code".into(),
             tiers: vec![task_core::Tier::Standard],
@@ -1185,6 +1193,8 @@ mod tests {
         std::fs::write(tmp.path().join("c").join("auth.json"), "{}").unwrap();
         let mut config = cluster_config(vec![]);
         config.providers = vec![celeris::config::ProviderConfig {
+            tier_models: Default::default(),
+            account_id: None,
             id: "pool".into(),
             adapter: "codex".into(),
             tiers: vec![task_core::Tier::Standard],

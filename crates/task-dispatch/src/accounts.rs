@@ -1214,3 +1214,46 @@ mod tests {
         );
     }
 }
+
+/// Conservative quota evidence: require both unexpired windows and a recent observation.
+/// Missing/expired/stale values are unknown, never estimated as a full allowance.
+pub fn measured_remaining(obs: &RateLimitObservation, now: i64) -> Option<f64> {
+    if now < obs.observed_at || now - obs.observed_at > 300 {
+        return None;
+    }
+    let windows = [obs.five_hour?, obs.seven_day?];
+    if windows.iter().any(|w| {
+        w.resets_at <= now || !w.utilization.is_finite() || !(0.0..=1.0).contains(&w.utilization)
+    }) {
+        return None;
+    }
+    Some(1.0 - windows.iter().map(|w| w.utilization).fold(0.0, f64::max))
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    #[test]
+    fn missing_stale_and_expired_quota_are_unknown() {
+        let mut obs = RateLimitObservation {
+            five_hour: Some(RateWindow {
+                utilization: 0.5,
+                resets_at: 2000,
+            }),
+            seven_day: Some(RateWindow {
+                utilization: 0.8,
+                resets_at: 3000,
+            }),
+            observed_at: 1000,
+            status: None,
+            resets_at: None,
+        };
+        assert!((measured_remaining(&obs, 1100).unwrap() - 0.2).abs() < 1e-6);
+        assert_eq!(measured_remaining(&obs, 1301), None);
+        assert_eq!(measured_remaining(&obs, 999), None);
+        obs.observed_at = 1999;
+        assert_eq!(measured_remaining(&obs, 2000), None);
+        obs.seven_day = None;
+        assert_eq!(measured_remaining(&obs, 1999), None);
+    }
+}

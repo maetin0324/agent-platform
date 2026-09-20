@@ -210,6 +210,9 @@ pub fn config_view() -> ConfigView {
         },
         providers: vec![
             ProviderConfigView {
+                credential_refs: Default::default(),
+                tier_models: Default::default(),
+                account_id: None,
                 id: "claude-a".into(),
                 adapter: "claude-code".into(),
                 tiers: vec![Tier::Frontier, Tier::Standard],
@@ -219,6 +222,9 @@ pub fn config_view() -> ConfigView {
                 account_pool: false,
             },
             ProviderConfigView {
+                credential_refs: Default::default(),
+                tier_models: Default::default(),
+                account_id: None,
                 id: "claude-b".into(),
                 adapter: "claude-code".into(),
                 tiers: vec![Tier::Frontier],
@@ -408,6 +414,9 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
         }],
         providers: vec![
             ProviderLive {
+                credential_refs: Default::default(),
+                tier_models: Default::default(),
+                account_id: None,
                 id: "claude-a".into(),
                 adapter: "claude-code".into(),
                 tiers: vec![Tier::Frontier, Tier::Standard],
@@ -424,6 +433,9 @@ pub fn snapshot(ticks: u64) -> DaemonSnapshot {
                 account_pool: false,
             },
             ProviderLive {
+                credential_refs: Default::default(),
+                tier_models: Default::default(),
+                account_id: None,
                 id: "claude-b".into(),
                 adapter: "claude-code".into(),
                 tiers: vec![Tier::Frontier],

@@ -490,3 +490,79 @@ async fn create_and_patch_reject_env_from_secrets_in_the_body() {
         "{written}"
     );
 }
+
+#[tokio::test]
+async fn tier_models_and_secret_references_round_trip_without_credential_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let providers = tmp.path().join("providers");
+    let secrets = tmp.path().join("secrets");
+    std::fs::create_dir(&providers).unwrap();
+    let env = TestEnv::with(EnvOptions {
+        token: Some(TOKEN.into()),
+        providers_dir: Some(providers.clone()),
+        secrets_dir: Some(secrets.clone()),
+        ..Default::default()
+    });
+    let app = env.router();
+    let auth = auth();
+    let response = send(
+        &app,
+        post_json_with(
+            "/api/v1/providers",
+            &json!({
+                "id":"gpt", "adapter":"codex", "model":"old-id",
+                "env":{"OPENAI_API_KEY":"test-private-key", "CODEX_HOME":"/old/home"},
+                "tier_models":{
+                    "frontier":{"name":"astra","model_id":"explicit-frontier"},
+                    "standard":{"name":"sol","model_id":"explicit-standard"},
+                    "cheap":{"name":"luna","model_id":null,"unavailable_reason":"not verified"}
+                }
+            }),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 201, "{}", response.text());
+    assert!(!response.text().contains("test-private-key"));
+    let value = response.json();
+    let id = value["credential_refs"]["OPENAI_API_KEY"].as_str().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(secrets.join(id)).unwrap(),
+        "test-private-key"
+    );
+    #[derive(serde::Deserialize)]
+    struct StoredProvider {
+        env: std::collections::HashMap<String, String>,
+        tier_models: task_core::model_routing::TierModels,
+    }
+    let file: StoredProvider =
+        toml::from_str(&std::fs::read_to_string(providers.join("gpt.toml")).unwrap()).unwrap();
+    assert_eq!(file.env["CODEX_HOME"], "/old/home");
+    assert_eq!(
+        task_core::model_routing::resolve(&file.tier_models, task_core::Tier::Standard).unwrap(),
+        Some("explicit-standard".into())
+    );
+    assert!(task_core::model_routing::resolve(&file.tier_models, task_core::Tier::Cheap).is_err());
+    let response = send(
+        &app,
+        patch_json_with(
+            "/api/v1/providers/gpt",
+            &json!({"concurrency":2}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["credential_refs"], value["credential_refs"]);
+    assert_eq!(response.json()["tier_models"], value["tier_models"]);
+    let response = send(
+        &app,
+        patch_json_with(
+            "/api/v1/providers/gpt",
+            &json!({"credential_refs":{"PATH":"arbitrary"}}),
+            &[("authorization", &auth)],
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 400);
+}

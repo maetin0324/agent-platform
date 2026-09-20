@@ -89,6 +89,11 @@ impl WorkerAdapter for ClaudeCodeAdapter {
 
     /// ADR-0024 D2: `extra` を `config.env` の末尾に足した複製を返す。同名キーは後勝ち（`envs()` に渡す順で
     /// 最後に指定した値が使われる）ので、末尾に足すだけで `extra` が既存の同名キーに勝つ。
+    fn with_model(&self, model: &str) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut config = self.config.clone();
+        config.model = Some(model.to_owned());
+        Some(Arc::new(Self::new(config)))
+    }
     fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
         let mut config = self.config.clone();
         config.env.extend(extra.iter().cloned());
@@ -414,6 +419,7 @@ fn delegation_instructions(artifacts: &str) -> String {
          \"check\":{{\"type\":\"command\",\"cmd\":\"...\",\"expect_exit\":0}}}}],\"role\":\"<optional>\",\
          \"genre\":\"<optional>\",\"assignee\":\"<optional org node id>\",\
          \"depends_on\":[<index into this array, or an existing task id>]}}]}}`. \
+         Set `tier` to `cheap` for routine work, `standard` for normal implementation, or `frontier` for difficult design/research. The dispatcher adjusts it only using observed quota; unknown remaining quota is not assumed.\n\
          `check` may also be \
          `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, `{{\"type\":\"reviewer\"}}`, or `{{\"type\":\"human\"}}`. \
          celeris will validate this after this run ends and insert whatever proposals pass validation as child \
@@ -2513,5 +2519,55 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let seen = std::fs::read_to_string(&out_file).unwrap();
         assert_eq!(seen, "new-account-dir");
+    }
+    #[tokio::test]
+    async fn tier_binding_reaches_cli_model_argument_and_preserves_account_env() {
+        use task_core::{Tier, model_routing::ModelBinding};
+        for tier in [Tier::Frontier, Tier::Standard, Tier::Cheap] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = stub_claude(
+                dir.path(),
+                r#"
+for a in "$@"; do printf '%s\0' "$a" >> args.log; done
+printf '%s' "$ROUTING_ACCOUNT" > account.log
+mkdir -p artifacts
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"type":"turn.completed"}'
+"#,
+            );
+            let expected = format!("explicit-{tier:?}");
+            let adapter = crate::tiered::TieredAdapter {
+                base: Arc::new(ClaudeCodeAdapter::new(config)),
+                account_id: Some("account-a".into()),
+                credential_error: None,
+                models: [(
+                    tier,
+                    ModelBinding {
+                        name: "requested-name".into(),
+                        model_id: Some(expected.clone()),
+                        unavailable_reason: None,
+                    },
+                )]
+                .into(),
+            };
+            let adapter = adapter
+                .with_env(&[("ROUTING_ACCOUNT".into(), "account-a".into())])
+                .unwrap();
+            assert_eq!(adapter.account_id(), Some("account-a"));
+            let mut req = sample_req(dir.path().to_path_buf());
+            req.task.worker_hint.tier = tier;
+            let _ = adapter
+                .run(req, "tier-run", default_limits(), &RecordingSink::default())
+                .await
+                .unwrap();
+            let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+            let args: Vec<_> = args.split('\0').collect();
+            let model = args.windows(2).find(|pair| pair[0] == "--model").unwrap()[1];
+            assert_eq!(model, expected);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("account.log")).unwrap(),
+                "account-a"
+            );
+        }
     }
 }

@@ -278,6 +278,7 @@ mod actions_tests {
                 project,
                 milestone,
                 assignee,
+                ..
             } => {
                 assert_eq!(title, "直す");
                 assert_eq!(objective, "直して");

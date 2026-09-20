@@ -258,6 +258,12 @@ pub struct ProviderCheckResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderView {
+    #[serde(default)]
+    pub credential_refs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub tier_models: task_core::model_routing::TierModels,
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub id: String,
     pub adapter: String,
     pub tiers: Vec<Tier>,
@@ -386,6 +392,12 @@ pub struct ReviewerConfigView {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderConfigView {
+    #[serde(default)]
+    pub credential_refs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub tier_models: task_core::model_routing::TierModels,
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub id: String,
     pub adapter: String,
     pub tiers: Vec<Tier>,

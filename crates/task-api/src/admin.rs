@@ -208,6 +208,10 @@ pub enum CheckError {
 /// task-api は celeris に依存できない（循環依存になる）ので、独立に同じ形の型を持つ。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfigFile {
+    #[serde(default)]
+    pub tier_models: task_core::model_routing::TierModels,
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub id: String,
     pub adapter: String,
     #[serde(default = "default_tiers")]
@@ -246,6 +250,9 @@ impl ProviderConfigFile {
         let mut env_keys: Vec<String> = self.env.keys().cloned().collect();
         env_keys.sort();
         ProviderConfigView {
+            credential_refs: task_core::model_routing::credential_refs(&self.env_from_secrets),
+            tier_models: self.tier_models.clone(),
+            account_id: self.account_id.clone(),
             id: self.id.clone(),
             adapter: self.adapter.clone(),
             tiers: self.tiers.clone(),
@@ -268,6 +275,12 @@ fn default_concurrency() -> usize {
 /// `POST /api/v1/providers` の本文。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderCreateBody {
+    #[serde(default)]
+    pub credential_refs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub tier_models: task_core::model_routing::TierModels,
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub id: String,
     pub adapter: String,
     #[serde(default)]
@@ -286,6 +299,8 @@ pub struct ProviderCreateBody {
 impl ProviderCreateBody {
     pub fn into_file(self) -> ProviderConfigFile {
         ProviderConfigFile {
+            tier_models: self.tier_models,
+            account_id: self.account_id.clone(),
             id: self.id,
             adapter: self.adapter,
             tiers: self.tiers.unwrap_or_else(default_tiers),
@@ -294,7 +309,7 @@ impl ProviderCreateBody {
             env: self.env,
             // ADR-0030 D2: 管理 API は env_from_secrets を書かない（`create` された行は必ず空。人が後から
             // ファイルへ足す）。
-            env_from_secrets: HashMap::new(),
+            env_from_secrets: self.credential_refs,
             account_pool: self.account_pool,
             // ADR-0026 D7 / ADR-0027 D3: 管理 API は command/args/settings を書かない（`create` された行は
             // 必ず `None`。人が後からファイルへ足す）。
@@ -310,6 +325,12 @@ impl ProviderCreateBody {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProviderPatchBody {
     #[serde(default)]
+    pub credential_refs: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub tier_models: Option<task_core::model_routing::TierModels>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
     pub tiers: Option<Vec<Tier>>,
     #[serde(default)]
     pub concurrency: Option<usize>,
@@ -324,6 +345,18 @@ pub struct ProviderPatchBody {
 
 impl ProviderPatchBody {
     pub fn apply(&self, mut file: ProviderConfigFile) -> ProviderConfigFile {
+        if let Some(refs) = &self.credential_refs {
+            for key in task_core::model_routing::CREDENTIAL_KEYS {
+                file.env_from_secrets.remove(*key);
+            }
+            file.env_from_secrets.extend(refs.clone());
+        }
+        if let Some(id) = &self.account_id {
+            file.account_id = (!id.is_empty()).then(|| id.clone());
+        }
+        if let Some(models) = &self.tier_models {
+            file.tier_models = models.clone();
+        }
         if let Some(tiers) = &self.tiers {
             file.tiers = tiers.clone();
         }
@@ -441,6 +474,9 @@ mod tests {
     #[test]
     fn create_body_fills_defaults_like_provider_config() {
         let body = ProviderCreateBody {
+            credential_refs: Default::default(),
+            tier_models: Default::default(),
+            account_id: None,
             id: "acct-b".into(),
             adapter: "fake".into(),
             tiers: None,
@@ -459,6 +495,8 @@ mod tests {
     #[test]
     fn patch_only_overwrites_provided_fields() {
         let file = ProviderConfigFile {
+            tier_models: Default::default(),
+            account_id: None,
             id: "acct-b".into(),
             adapter: "fake".into(),
             tiers: vec![Tier::Standard],
@@ -472,6 +510,9 @@ mod tests {
             settings: None,
         };
         let patch = ProviderPatchBody {
+            credential_refs: None,
+            tier_models: None,
+            account_id: None,
             concurrency: Some(5),
             ..Default::default()
         };
@@ -493,6 +534,8 @@ mod tests {
     fn write_then_read_round_trips() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let file = ProviderConfigFile {
+            tier_models: Default::default(),
+            account_id: None,
             id: "acct-b".into(),
             adapter: "claude-code".into(),
             tiers: vec![Tier::Frontier],
@@ -525,6 +568,8 @@ mod tests {
     fn patch_round_trip_preserves_hand_edited_command_and_args() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let file = ProviderConfigFile {
+            tier_models: Default::default(),
+            account_id: None,
             id: "opencode-qwen".into(),
             adapter: "acp".into(),
             tiers: vec![Tier::Standard],
@@ -549,6 +594,9 @@ mod tests {
         );
 
         let patch = ProviderPatchBody {
+            credential_refs: None,
+            tier_models: None,
+            account_id: None,
             concurrency: Some(2),
             ..Default::default()
         };
@@ -571,6 +619,94 @@ mod tests {
             after.env_from_secrets.get("SOME_KEY"),
             Some(&"some-secret".to_string()),
             "PATCH must not drop hand-edited env_from_secrets"
+        );
+    }
+}
+
+/// Copy legacy inline credentials into the existing account secret store before
+/// atomically saving a provider reference. A failed write never removes the source.
+/// Existing secret references keep their precedence; shadowed values are archived.
+pub fn migrate_credentials(
+    file: &mut ProviderConfigFile,
+    dir: &Path,
+) -> Result<(), crate::secrets::SecretFileError> {
+    for key in task_core::model_routing::CREDENTIAL_KEYS {
+        let Some(value) = file.env.get(*key) else {
+            continue;
+        };
+        let id = format!("migrated-{}", ulid::Ulid::new());
+        crate::secrets::write_secret_file(dir, &id, value)?;
+        file.env_from_secrets.entry((*key).to_owned()).or_insert(id);
+        file.env.remove(*key);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    #[test]
+    fn legacy_credentials_migrate_without_losing_settings_or_exposing_values() {
+        let legacy = r#"
+id = "gpt"
+adapter = "codex"
+model = "legacy-exact-id"
+[env]
+OPENAI_API_KEY = "secret-test-value"
+CODEX_HOME = "/existing/account"
+[env_from_secrets]
+CUSTOM_ENV = "existing-reference"
+"#;
+        let mut file: ProviderConfigFile = toml::from_str(legacy).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        migrate_credentials(&mut file, dir.path()).unwrap();
+        assert!(!file.env.contains_key("OPENAI_API_KEY"));
+        assert_eq!(file.env["CODEX_HOME"], "/existing/account");
+        assert_eq!(file.env_from_secrets["CUSTOM_ENV"], "existing-reference");
+        let id = &file.env_from_secrets["OPENAI_API_KEY"];
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(id)).unwrap(),
+            "secret-test-value"
+        );
+        let view = serde_json::to_string(&file.to_view()).unwrap();
+        assert!(!view.contains("secret-test-value"));
+        assert_eq!(file.model, "legacy-exact-id");
+        assert!(file.tier_models.is_empty());
+        let encoded = toml::to_string(&file).unwrap();
+        let mut restored: ProviderConfigFile = toml::from_str(&encoded).unwrap();
+        migrate_credentials(&mut restored, dir.path()).unwrap();
+        assert_eq!(restored.env_from_secrets, file.env_from_secrets);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.path().join(id))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+    #[test]
+    fn failed_migration_retains_source_and_tier_patch_preserves_authentication() {
+        let mut file: ProviderConfigFile = toml::from_str(
+            "id='claude'\nadapter='claude-code'\n[env]\nANTHROPIC_API_KEY='private'",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let invalid = dir.path().join("file");
+        std::fs::write(&invalid, "not a directory").unwrap();
+        assert!(migrate_credentials(&mut file, &invalid).is_err());
+        assert_eq!(file.env["ANTHROPIC_API_KEY"], "private");
+        let patch: ProviderPatchBody = serde_json::from_value(serde_json::json!({"tier_models":{"frontier":{"name":"fable","model_id":null,"unavailable_reason":"unverified"}}})).unwrap();
+        let file = patch.apply(file);
+        assert_eq!(file.env["ANTHROPIC_API_KEY"], "private");
+        assert!(
+            task_core::model_routing::resolve(&file.tier_models, Tier::Frontier)
+                .unwrap_err()
+                .contains("unverified")
         );
     }
 }

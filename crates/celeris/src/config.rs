@@ -1249,6 +1249,10 @@ fn default_ldr_command() -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
+    #[serde(default)]
+    pub tier_models: task_core::model_routing::TierModels,
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub id: String,
     pub adapter: String,
     #[serde(default = "default_tiers")]
@@ -1258,7 +1262,7 @@ pub struct ProviderConfig {
     /// 空でなければ、このプロバイダの run の `--model` に使う（空なら `[adapters.<種別>].model`。ADR-0012 D1）。
     #[serde(default)]
     pub model: String,
-    /// このプロバイダ（アカウント）の run にだけ渡す環境変数。`[adapters.<種別>].env` に重ね、同名キーはこちらが優先
+    /// このプロバイダの run にだけ渡す環境変数（旧認証設定も互換性のため保持）。`[adapters.<種別>].env` に重ね、同名キーはこちらが優先
     /// （例: `CLAUDE_CONFIG_DIR`、`CODEX_HOME`。ADR-0012 D1）。
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -1614,6 +1618,19 @@ impl Config {
         }
         let mut seen_ids = std::collections::HashSet::new();
         for p in &self.providers {
+            if p.account_id.is_some() && !p.account_pool {
+                return Err(ConfigError::Invalid(format!(
+                    "provider {}: account_id requires account_pool",
+                    p.id
+                )));
+            }
+            if !p.tier_models.is_empty() && !matches!(p.adapter.as_str(), "claude-code" | "codex") {
+                return Err(ConfigError::Invalid(format!(
+                    "provider {}: tier_models supported only for Claude/GPT",
+                    p.id
+                )));
+            }
+
             // ADR-0012 D1: アダプタのインスタンスはプロバイダ ID で引くので重複は許さない。
             if !seen_ids.insert(p.id.as_str()) {
                 return Err(ConfigError::Invalid(format!(
@@ -2104,6 +2121,8 @@ impl Config {
 
         self.providers.retain(|p| p.id != SMOKE_ID);
         self.providers.push(ProviderConfig {
+            tier_models: Default::default(),
+            account_id: None,
             id: SMOKE_ID.to_string(),
             adapter: FakeAdapter::ID.to_string(),
             tiers: vec![Tier::Standard],

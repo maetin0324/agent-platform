@@ -175,6 +175,7 @@ fn execute_one(
 ) -> Result<ExecutedAction, String> {
     match action {
         ConsoleAction::CreateTask {
+            tier,
             title,
             objective,
             acceptance,
@@ -187,7 +188,7 @@ fn execute_one(
             assignee,
         } => create_task_action(
             store, roles, genres, title, objective, acceptance, harness, skills, mode, repos,
-            project, milestone, assignee, now,
+            project, milestone, assignee, *tier, now,
         ),
         ConsoleAction::ProposeProject {
             title,
@@ -226,6 +227,7 @@ fn create_task_action(
     project: &Option<String>,
     milestone: &Option<String>,
     assignee: &Option<String>,
+    tier: Option<task_core::Tier>,
     now: OffsetDateTime,
 ) -> Result<ExecutedAction, String> {
     if acceptance.is_empty() {
@@ -264,7 +266,7 @@ fn create_task_action(
             .map(|text| CriterionSpec::Reviewer { text: text.clone() })
             .collect(),
         kind: task_core::TaskKind::Execute,
-        tier: None,
+        tier,
         priority: None,
         parent: None,
         depends_on: Vec::new(),
@@ -550,7 +552,7 @@ mod tests {
         let task = cos_task();
         let parsed = parse(
             r#"{"actions":[{"type":"create_task","title":"直す","objective":"直して",
-               "acceptance":["直った"],"harness":"coding"}]}"#,
+               "acceptance":["直った"],"harness":"coding","tier":"frontier"}]}"#,
         );
         let outcome = execute(
             &store,
@@ -569,6 +571,7 @@ mod tests {
         assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
         let created = outcome.executed[0].task_id.expect("task id");
         let stored = store.get(created).unwrap().expect("task exists");
+        assert_eq!(stored.worker_hint.tier, task_core::Tier::Frontier);
         assert_eq!(stored.title, "直す");
         assert_eq!(stored.status, Status::Ready);
         assert_eq!(stored.genre.as_deref(), Some("coding"));

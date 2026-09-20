@@ -166,9 +166,15 @@ pub struct CooldownView {
     pub reason: String,
 }
 
-/// プロバイダ（`[[providers]]` の行 = アカウント）の稼働状況。`env` の値は含めない。
+/// プロバイダ（`[[providers]]` の行。認証アカウントは別参照）の稼働状況。`env` の値は含めない。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderLive {
+    #[serde(default)]
+    pub credential_refs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub tier_models: task_core::model_routing::TierModels,
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub id: String,
     pub adapter: String,
     pub tiers: Vec<Tier>,

@@ -5745,6 +5745,31 @@
       ],
       "type": "object"
     },
+    "ModelBinding": {
+      "properties": {
+        "model_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "unavailable_reason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "ModelPrefs": {
       "additionalProperties": false,
       "description": "ADR-0046 D1: モデルの段（`tier` は子が勝つ、`allowed_tiers` は交わり）。",
@@ -7130,6 +7155,13 @@
     },
     "ProviderConfigView": {
       "properties": {
+        "account_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "account_pool": {
           "default": false,
           "description": "ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。",
@@ -7142,6 +7174,13 @@
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "credential_refs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
         },
         "env_keys": {
           "description": "`[[providers]].env` のキー名だけ。",
@@ -7159,6 +7198,22 @@
             "string",
             "null"
           ]
+        },
+        "tier_models": {
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "cheap": {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            "frontier": {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            "standard": {
+              "$ref": "#/$defs/ModelBinding"
+            }
+          },
+          "type": "object"
         },
         "tiers": {
           "items": {
@@ -7179,6 +7234,13 @@
     "ProviderLive": {
       "description": "プロバイダ（`[[providers]]` の行 = アカウント）の稼働状況。`env` の値は含めない。",
       "properties": {
+        "account_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "account_pool": {
           "default": false,
           "description": "ADR-0024 D2: `[accounts]` のプールから選ぶか。古いスナップショットには無いので既定 `false`。",
@@ -7191,6 +7253,13 @@
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "credential_refs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
         },
         "env_keys": {
           "default": [],
@@ -7226,6 +7295,22 @@
             "string",
             "null"
           ]
+        },
+        "tier_models": {
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "cheap": {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            "frontier": {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            "standard": {
+              "$ref": "#/$defs/ModelBinding"
+            }
+          },
+          "type": "object"
         },
         "tiers": {
           "items": {
@@ -7310,6 +7395,13 @@
     },
     "ProviderView": {
       "properties": {
+        "account_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "account_pool": {
           "default": false,
           "description": "ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。",
@@ -7333,6 +7425,13 @@
             }
           ],
           "description": "スナップショットが無い、または cooldown 中でなければ `null`。"
+        },
+        "credential_refs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
         },
         "env_keys": {
           "description": "`env` のキー名だけ（値は出さない）。",
@@ -7372,6 +7471,22 @@
         },
         "stats": {
           "$ref": "#/$defs/ProviderStats"
+        },
+        "tier_models": {
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "cheap": {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            "frontier": {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            "standard": {
+              "$ref": "#/$defs/ModelBinding"
+            }
+          },
+          "type": "object"
         },
         "tiers": {
           "items": {

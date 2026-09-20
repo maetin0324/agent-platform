@@ -2889,7 +2889,7 @@ impl Dispatcher {
             }
             // ADR-0046 D5（Phase 59）: 担当が決まっていないタスクは dispatch の前に matching で決める
             // （計画 run の子、人が作ったタスク、Console から作られたタスクが全部ここを通る）。
-            let task = match self.assign_if_needed(task)? {
+            let mut task = match self.assign_if_needed(task)? {
                 Some(task) => task,
                 // 候補が無くて `blocked` にした（人に聞いた）。この tick では dispatch しない。
                 None => continue,
@@ -3012,6 +3012,40 @@ impl Dispatcher {
                 }
                 None => base_adapter,
             };
+            let remaining = selected_account.as_ref().and_then(|(kind, id)| {
+                let book = self.account_book(*kind)?;
+                let book = book.lock().ok()?;
+                let observation = book.state(id)?.usage.as_ref()?;
+                crate::accounts::measured_remaining(observation, (self.now_unix_fn)())
+            });
+            let (tier, routing_reason) =
+                match task_core::model_routing::select_tier(task.worker_hint.tier, remaining) {
+                    Ok(decision) => decision,
+                    Err(_) => continue, // quota refresh will make this task eligible again
+                };
+            // A legacy provider has no tier mapping: keep its historical behavior.
+            if adapter
+                .model_for_tier(task.worker_hint.tier)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                task.worker_hint.tier = tier;
+            }
+            let resolved_model = match adapter.model_for_tier(task.worker_hint.tier) {
+                Ok(model) => model,
+                Err(reason) => {
+                    self.store.apply_transition_with_events(
+                        task.id,
+                        Trigger::Unroutable,
+                        vec![Event::worker_progress(
+                            "routing",
+                            format!("model routing blocked: {reason}"),
+                        )],
+                    )?;
+                    continue;
+                }
+            };
             let account = selected_account.as_ref().map(|(_, id)| id.clone());
             let account_adapter = selected_account.as_ref().map(|(a, _)| *a);
 
@@ -3024,7 +3058,9 @@ impl Dispatcher {
             if !acquired {
                 continue;
             }
-            let model = self.models.get(&provider_id).cloned().unwrap_or_default();
+            let model = resolved_model
+                .or_else(|| self.models.get(&provider_id).cloned())
+                .unwrap_or_default();
             let event_started = Instant::now();
             self.store.append_event(
                 task.id,
@@ -3039,6 +3075,10 @@ impl Dispatcher {
                     task_role: task.role.clone(),
                 },
             )?;
+            if matches!(adapter_id.as_str(), "claude-code" | "codex") {
+                self.store.append_event(task.id, &Event::worker_progress(&run_id,
+                    format!("model routing: {routing_reason}; execution tier={:?}; provider={provider_id}", task.worker_hint.tier)))?;
+            }
             log_slow_step("append_worker_started", event_started);
             let limits = RunLimits {
                 wall_clock: wall,
@@ -3067,6 +3107,7 @@ impl Dispatcher {
             }
             let handle = self.spawn_worker(
                 task.id,
+                task.worker_hint.tier,
                 run_id.clone(),
                 provider_id.clone(),
                 account.clone(),
@@ -3713,6 +3754,7 @@ impl Dispatcher {
     fn spawn_worker(
         &self,
         task_id: TaskId,
+        execution_tier: task_core::Tier,
         run_id: String,
         provider: ProviderId,
         account: Option<String>,
@@ -3740,6 +3782,7 @@ impl Dispatcher {
                 store,
                 adapter,
                 task_id,
+                execution_tier,
                 dir,
                 &run_id,
                 limits,
@@ -3854,7 +3897,16 @@ impl Dispatcher {
         let produced = artifacts_for_run(&events, &run_id);
         // ADR-0014 D1: Reviewer run も対象タスクに WorkerStarted（role: reviewer）を残す（アカウント別の集計に含めるため）。
         if let Some((provider_id, review_run_id, adapter_id)) = &review_run {
-            let model = self.models.get(provider_id).cloned().unwrap_or_default();
+            let model = self
+                .adapters
+                .get(provider_id)
+                .and_then(|a| {
+                    a.model_for_tier(self.config.reviewer_hint.tier)
+                        .ok()
+                        .flatten()
+                })
+                .or_else(|| self.models.get(provider_id).cloned())
+                .unwrap_or_default();
             self.store.append_event(
                 task_id,
                 &Event::WorkerStarted {
@@ -4085,6 +4137,18 @@ impl Dispatcher {
                 return None;
             }
         };
+        if let Err(reason) = base_adapter.model_for_tier(hint.tier) {
+            if self.warned_unroutable.insert(task.id) {
+                let _ = self.store.append_event(
+                    task.id,
+                    &Event::worker_progress(
+                        subject_run_id,
+                        format!("review model routing blocked: {reason}"),
+                    ),
+                );
+            }
+            return None;
+        }
         let adapter = match &selected_account {
             Some((account_adapter, account_id)) => {
                 match self.adapter_for_account(&base_adapter, *account_adapter, account_id) {
@@ -4200,7 +4264,14 @@ impl Dispatcher {
                             full.insert(provider);
                             continue;
                         };
-                        let Some(account_id) = self.pick_account(account_adapter) else {
+                        let requested_account = self
+                            .adapters
+                            .get(&provider)
+                            .and_then(|a| a.account_id())
+                            .map(str::to_owned);
+                        let Some(account_id) =
+                            self.pick_account(account_adapter, requested_account.as_deref())
+                        else {
                             full.insert(provider);
                             continue;
                         };
@@ -4259,7 +4330,7 @@ impl Dispatcher {
     /// ADR-0024 D3 / ADR-0025 D2: `[accounts]` の指定アダプタのプールから 1 アカウントを選ぶ（残量に基づく決定的な
     /// 選択）。そのアダプタの根ディレクトリが無い、または選べるアカウントが無ければ `None`。
     /// ディレクトリのスキャンは tick につき高々 1 回（アダプタごと）。
-    fn pick_account(&mut self, adapter: AccountAdapter) -> Option<String> {
+    fn pick_account(&mut self, adapter: AccountAdapter, requested: Option<&str>) -> Option<String> {
         let cfg = self.config.accounts.clone()?;
         let root = cfg.root_for(adapter)?;
         let dirs = self
@@ -4272,6 +4343,7 @@ impl Dispatcher {
         let book = book.lock().unwrap_or_else(|e| e.into_inner());
         let candidates: Vec<AccountCandidate<'_>> = dirs
             .iter()
+            .filter(|d| requested.is_none_or(|id| d.id == id))
             .map(|d| AccountCandidate {
                 id: d.id.as_str(),
                 logged_in: d.logged_in,
@@ -4959,6 +5031,7 @@ async fn run_worker(
     store: Arc<dyn TaskStore>,
     adapter: Arc<dyn WorkerAdapter>,
     task_id: TaskId,
+    execution_tier: task_core::Tier,
     dir: PathBuf,
     run_id: &str,
     limits: RunLimits,
@@ -4978,6 +5051,7 @@ async fn run_worker(
         .get(task_id)
         .map_err(|e| AdapterError::Other(format!("store: {e}")))?
         .ok_or_else(|| AdapterError::Other("task vanished".into()))?;
+    task.worker_hint.tier = execution_tier;
     // ADR-0018 D1/D3: リモート実行のタスクは、クラスタの内容を写しに取り込み、ラッパを置き、その使い方を指示文に足す
     // （DB のタスクは変えない。ワーカーに渡す写しだけ）。
     let workspace = match &remote {
@@ -7885,6 +7959,9 @@ mod tests {
             started_at: "2026-09-14T00:00:00Z".into(),
             tick_ms: 50,
             providers: vec![ProviderLive {
+                credential_refs: Default::default(),
+                tier_models: Default::default(),
+                account_id: None,
                 id: "p1".into(),
                 adapter: "instant".into(),
                 tiers: vec![Tier::Standard],
@@ -7965,6 +8042,9 @@ mod tests {
         // reload でプロバイダ表を差し替えても、残った id の記録は保つ。消えた id の記録は落とす。
         d.set_snapshot_providers(vec![
             ProviderLive {
+                credential_refs: Default::default(),
+                tier_models: Default::default(),
+                account_id: None,
                 id: "p1".into(),
                 adapter: "instant".into(),
                 tiers: vec![Tier::Standard],
@@ -7976,6 +8056,9 @@ mod tests {
                 account_pool: false,
             },
             ProviderLive {
+                credential_refs: Default::default(),
+                tier_models: Default::default(),
+                account_id: None,
                 id: "p2".into(),
                 adapter: "instant".into(),
                 tiers: vec![Tier::Standard],
@@ -8003,6 +8086,9 @@ mod tests {
         );
 
         d.set_snapshot_providers(vec![ProviderLive {
+            credential_refs: Default::default(),
+            tier_models: Default::default(),
+            account_id: None,
             id: "p2".into(),
             adapter: "instant".into(),
             tiers: vec![Tier::Standard],
@@ -8755,6 +8841,9 @@ mod tests {
                     retry_after: *retry_after,
                 }),
             }
+        }
+        fn with_model(&self, model: &str) -> Option<Arc<dyn WorkerAdapter>> {
+            self.with_env(&[("TEST_MODEL".into(), model.into())])
         }
         fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
             let mut env = self.env.clone();
@@ -12800,5 +12889,123 @@ mod tests {
             extras.children[0].workspace.as_deref(),
             Some(root.path().join(children[0].id.to_string()).as_path())
         );
+    }
+    #[tokio::test]
+    async fn routing_applies_quota_tier_and_explicit_account_to_the_executed_model() {
+        use task_core::model_routing::ModelBinding;
+        for (utilization, expected, known) in [
+            (0.1, "frontier-id", true),
+            (0.8, "standard-id", true),
+            (0.95, "cheap-id", true),
+            (0.8, "frontier-id", false),
+        ] {
+            let accounts = accounts_fixture();
+            let mut book = AccountBook::load(&accounts.path().join(".celeris-usage.json"));
+            let mut obs = usage_window(utilization, 90_000);
+            obs.seven_day = if known { obs.five_hour } else { None };
+            book.record_observation("a", obs, ObservationSource::Run);
+            book.save().unwrap();
+            let ws = tempfile::tempdir().unwrap();
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+            let mut task = new_task(
+                ws.path(),
+                Check::Command {
+                    cmd: "test -f touched".into(),
+                    expect_exit: 0,
+                },
+                0,
+            );
+            task.worker_hint.tier = Tier::Frontier;
+            store.insert(&task).unwrap();
+            let captured = Arc::new(StdMutex::new(Vec::new()));
+            let adapter = Arc::new(task_worker::tiered::TieredAdapter {
+                base: Arc::new(PoolAdapter {
+                    terminal_or_throttled: Ok(Terminal::Done {
+                        summary: "ok".into(),
+                        evidence: vec![],
+                        usage: None,
+                    }),
+                    delay: Duration::ZERO,
+                    observation: None,
+                    env: vec![],
+                    captured: captured.clone(),
+                    spawn_failure: false,
+                }),
+                models: [
+                    (Tier::Frontier, "frontier-id"),
+                    (Tier::Standard, "standard-id"),
+                    (Tier::Cheap, "cheap-id"),
+                ]
+                .into_iter()
+                .map(|(tier, id)| {
+                    (
+                        tier,
+                        ModelBinding {
+                            name: id.into(),
+                            model_id: Some(id.into()),
+                            unavailable_reason: None,
+                        },
+                    )
+                })
+                .collect(),
+                account_id: Some("a".into()),
+                credential_error: None,
+            });
+            let mut d = pool_dispatcher(
+                store.clone(),
+                adapter,
+                None,
+                accounts.path().to_path_buf(),
+                2,
+                2,
+            );
+            d.set_now_unix_fn(Arc::new(|| 10_000));
+            assert!(run_until_idle(&mut d, 200).await.idle);
+            let envs = captured.lock().unwrap();
+            assert_eq!(envs.len(), 1);
+            assert!(
+                envs[0].contains(&("TEST_MODEL".into(), expected.into())),
+                "{envs:?}"
+            );
+            let events = store.events_for(task.id).unwrap();
+            assert!(events.iter().any(|(_,e)| matches!(e,Event::WorkerStarted {model,account,..} if model == expected && account.as_deref() == Some("a"))));
+            assert!(events.iter().any(|(_,e)| matches!(e,Event::WorkerProgress {msg,..} if msg.contains(if known { "measured quota remaining" } else { "quota remaining unknown" }))));
+        }
+    }
+    #[tokio::test]
+    async fn unavailable_tier_blocks_before_starting_any_worker() {
+        let ws = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(ws.path(), Check::Human, 0);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(task_worker::tiered::TieredAdapter {
+            base: Arc::new(InstantAdapter {
+                terminal: Terminal::Question {
+                    text: "must not run".into(),
+                },
+                delay: Duration::ZERO,
+            }),
+            models: [(
+                task.worker_hint.tier,
+                task_core::model_routing::ModelBinding {
+                    name: "fable".into(),
+                    model_id: None,
+                    unavailable_reason: Some("unverified executable ID".into()),
+                },
+            )]
+            .into(),
+            account_id: None,
+            credential_error: None,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.tick().unwrap();
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Blocked);
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::WorkerStarted { .. }))
+        );
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.contains("unverified executable ID"))));
     }
 }
