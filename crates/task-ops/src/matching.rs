@@ -69,6 +69,13 @@ pub fn decide(org: &[OrgNode], task: &Task) -> Assignment {
     if org.is_empty() {
         return Assignment::NotApplicable;
     }
+    // 組み込みの裏方ハーネス（conversation / plan / reviewer / smoke / knowledge）は組織の仕事ではない。
+    // 実機 2026-09-20: 本番の組織が profile を持つようになった後、verify の煙試験（harness `smoke`）が
+    // 「担当が見つからない」で `blocked` になり検査 6 が落ちた。どのノードの `allowed` にも無いのが正しい姿なので、
+    // matching の対象から外す（担当なしで走る。Phase 59 以前と同じ）。
+    if task_core::harness::BUILTIN_HARNESSES.contains(&harness) {
+        return Assignment::NotApplicable;
+    }
 
     // 候補: 根を除く全ノードのうち、実効 profile がその harness を許すもの。
     let mut candidates: Vec<Candidate> = Vec::new();
@@ -352,29 +359,25 @@ mod tests {
         assert_eq!(node, "systems-performance");
     }
 
-    /// 根（CoS）は候補に入らない。`harnesses.allowed` は親と和なので、根だけに書いた harness
-    /// （`conversation`）も子は実効的に継ぐ——それでも根自身が担当に選ばれることは無い。
+    /// 根（CoS）は候補に入らない。`harnesses.allowed` は親と和なので、根だけに書いた harness も子は実効的に
+    /// 継ぐ——それでも根自身が担当に選ばれることは無い（例は組み込みでない harness `triage`。組み込みの
+    /// `conversation` などはそもそも matching に掛からない）。
     #[test]
     fn the_root_is_never_a_candidate() {
-        let org = org();
-        let Assignment::Assigned { node: assigned, .. } =
-            decide(&org, &task(Some("conversation"), &[]))
+        let org = vec![
+            node("cos", None, &["triage"], Some("triage"), &[]),
+            node("engineering", Some("cos"), &[], None, &[]),
+        ];
+        let Assignment::Assigned { node: assigned, .. } = decide(&org, &task(Some("triage"), &[]))
         else {
-            panic!("engineering 以下が継いでいるので Assigned のはず");
+            panic!("engineering が継いでいるので Assigned のはず");
         };
-        assert_ne!(assigned, "cos");
-        assert_eq!(assigned, "engineering", "根の直下でいちばん浅い");
+        assert_eq!(assigned, "engineering", "根ではなく、継いだ子");
 
         // 根しか無い組織では、根だけが持つ harness は誰にも継がれず候補が無い。
-        let root_only = vec![node(
-            "cos",
-            None,
-            &["conversation"],
-            Some("conversation"),
-            &[],
-        )];
+        let root_only = vec![node("cos", None, &["triage"], Some("triage"), &[])];
         assert!(matches!(
-            decide(&root_only, &task(Some("conversation"), &[])),
+            decide(&root_only, &task(Some("triage"), &[])),
             Assignment::Unroutable { .. }
         ));
     }
@@ -424,6 +427,25 @@ mod tests {
             decide(&[], &task(Some("coding"), &["rust"])),
             Assignment::NotApplicable
         );
+    }
+
+    /// 実機 2026-09-20: 組織が profile を持っていても、組み込みの裏方ハーネスは matching に掛けない
+    /// （掛けると verify の煙試験が `blocked` になり、検査 6 が落ちる）。
+    #[test]
+    fn builtin_support_harnesses_are_never_routed_through_the_org() {
+        let org = org();
+        for harness in task_core::harness::BUILTIN_HARNESSES {
+            assert_eq!(
+                decide(&org, &task(Some(harness), &[])),
+                Assignment::NotApplicable,
+                "{harness}"
+            );
+        }
+        // ふつうのハーネスは従来どおり担当が決まる。
+        assert!(matches!(
+            decide(&org, &task(Some("coding"), &["rust"])),
+            Assignment::Assigned { .. }
+        ));
     }
 
     /// ADR-0046 D5: 明示の `assignee` が受けられないハーネスは弾く（API は 422）。

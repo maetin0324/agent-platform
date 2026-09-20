@@ -1835,7 +1835,11 @@ mod tests {
             Confidence::High,
         );
         secret.body = "API キーは sk-abc123def456 です".into();
-        let escapes = candidate(kb::CandidateOp::Create, "../../etc/passwd", Confidence::High);
+        let escapes = candidate(
+            kb::CandidateOp::Create,
+            "../../etc/passwd",
+            Confidence::High,
+        );
         let out = apply_candidates(&root, "01JTASK", &[no_sources, secret, escapes]);
         assert!(out.committed.is_empty());
         assert!(out.inboxed.is_empty());
@@ -1855,10 +1859,7 @@ mod tests {
         );
         let first = apply_candidates(&root, "01JTASK", std::slice::from_ref(&c));
         assert_eq!(first.committed.len(), 1);
-        assert_eq!(
-            history(&root, "environment/tools/idempotent.md").len(),
-            1
-        );
+        assert_eq!(history(&root, "environment/tools/idempotent.md").len(), 1);
         // 2 回目: op は create のままだが対象が既にあるので「create なのに既にある」= inbox へ。
         let second = apply_candidates(&root, "01JTASK", &[c]);
         assert!(second.committed.is_empty(), "{second:?}");
@@ -1910,25 +1911,23 @@ mod tests {
         let retired = inbox_accept(&root, &retire_id, None, false);
         match retired {
             InboxOutcome::Accepted { path, .. } => {
-                assert_eq!(path, format!("{RETIRED_DIR}/environment/clusters/pegasus.md"))
+                assert_eq!(
+                    path,
+                    format!("{RETIRED_DIR}/environment/clusters/pegasus.md")
+                )
             }
             other => panic!("{other:?}"),
         }
         assert!(!root.join("environment/clusters/pegasus.md").exists());
         assert!(
-            root.join(format!(
-                "{RETIRED_DIR}/environment/clusters/pegasus.md"
-            ))
-            .exists()
+            root.join(format!("{RETIRED_DIR}/environment/clusters/pegasus.md"))
+                .exists()
         );
         // 退役したページは索引にも `_inbox` にも出ない。
         assert!(inbox_list(&root).is_empty());
         let index = reindex(&root).expect("reindex");
         assert!(
-            !index
-                .items
-                .iter()
-                .any(|i| i.path.contains("pegasus")),
+            !index.items.iter().any(|i| i.path.contains("pegasus")),
             "{index:?}"
         );
     }
