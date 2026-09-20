@@ -9512,7 +9512,7 @@ environment/hosts/home-dev.md (task 01M2ZFBS5JSYSH6XAF73HG8M4K)`（front matter 
   **exit 0 / result Ok / detail ok**。推論を起こさず、長期枠 `utilization = 0.03`、
   `resets_at = 1790517670`、`observed_at = 1789921794` を取得した。
   短期枠は有効な観測が返らず、値を補わず省略した。
-- **本番設定の移行とデーモン・GUI のデプロイは未実施**。稼働中の設定・DB・リリースを変更していない。
+- **実装完了時点では本番未反映（下記の本番移行追記で実施済み）**。稼働中の設定・DB・リリースを変更していない。
   新しい版を用意し、移行ツールの `--apply` とデーモン再起動が必要。
   既存タスクに保存された adapter 固定は書き換えない。移行後の新しい依頼から自動選択になる。
 - 任意のモデルを他社専用ハーネスへ注入する全面的な供給層の置換は行っていない。
@@ -9527,3 +9527,14 @@ environment/hosts/home-dev.md (task 01M2ZFBS5JSYSH6XAF73HG8M4K)`（front matter 
 実 CoS テストで非 Git 作業領域による起動拒否を発見し、この追補で
 Git 所在確認の省略と workspace-write 既定値を追加する。
 実 Codex CLI を隔離した非 Git 一時領域で起動し、結果 JSON の書き込み成功を確認した。
+
+### Phase 63 本番移行完了（2026-09-20 17:06 UTC）
+
+- 最終リリース **5e841393e9de**。daemon active / GUI health ok とも同一版、schema 18。旧 daemon は drain 完了。
+- release の 7 gates 全成功、verify は `ok=true / live_ok=true`。DB件数・状態一致、旧版互換、GUI、staging smoke を確認し live promote。
+- 非 Git 起動と書き込み設定に加え、対話の直接返答を受け取る処理を修正。関連 worker テスト 21 件成功。通常の仕事・失敗・不正結果ファイルは成功に変換しない。
+- 本番 CoS タスク `01M2ZWFRXNJ6DCR4BPV2J0Q49A` は Codex / codex-pool / chatgpt_plus_personal で **done「接続確認OK」**（17:05:56 UTC）。
+- 同時点で Claude 2 アカウントは rejected / seven_day_exhausted。Codex 長期枠は使用率 7%（残り 93%）、短期枠は未取得として表示。
+- 設定バックアップ: `~/.config/celeris/config.toml.before-portable-jn9gq8sm`。
+- 最終切替前DB: `~/.local/celeris/backups/20260920-170438-pre-5e841393e9de.sqlite3`。移行開始前DBは `20260920-164211-pre-ad516f322de2.sqlite3`。
+- 試験で失敗した対話 2 件は監査履歴として残した。新しい案件や仕事の起票は行っていない（接続確認用の対話タスクのみ）。
