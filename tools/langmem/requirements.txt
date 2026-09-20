@@ -8,7 +8,7 @@
 # LangMem 本体 と、`[knowledge.langmem] provider` の 2 択に対応する LangChain のチャットモデルの
 # 薄いラッパーだけを入れる（フレームワーク全体は入れない）。
 
-langmem>=0.1
+langmem>=0.0.30
 langchain-core>=0.3
 langchain-openai>=0.3
 langchain-anthropic>=0.3

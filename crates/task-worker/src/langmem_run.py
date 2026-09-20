@@ -128,6 +128,28 @@ def build_chat_model(llm):
     raise ValueError(f"unknown [knowledge.langmem] provider: {provider!r}")
 
 
+def candidate_schema():
+    """The structured shape LangMem must fill (without `schemas=` it returns free text only).
+    Built lazily: pydantic is only present in the langmem venv."""
+    from typing import List, Literal
+
+    from pydantic import BaseModel, Field
+
+    class KnowledgeCandidate(BaseModel):
+        """One reusable fact worth keeping in the knowledge base."""
+
+        op: Literal["create", "update", "merge", "retire"] = Field(description="create a new page, or update/merge/retire an existing one")
+        path: str = Field(description="KB-relative Markdown path, e.g. environment/servers/home-dev.md or experience/2026/09/<slug>.md")
+        title: str
+        tags: List[str] = Field(default_factory=list)
+        scope: str = Field(description="user | environment | project:<id> | experience")
+        body: str = Field(description="Markdown body: the fact, why it matters, how to apply it")
+        sources: List[str] = Field(description="where this came from, e.g. task:<id>, message:<id>, human, url:<...>")
+        confidence: Literal["high", "medium", "low"] = "medium"
+
+    return KnowledgeCandidate
+
+
 def parse_candidates(raw):
     """Normalize whatever LangMem's memory manager returned into the plain
     list-of-dict shape `task_core::knowledge::Candidate` expects. Accepts a
@@ -143,6 +165,10 @@ def parse_candidates(raw):
         return []
     out = []
     for item in raw:
+        # LangMem 0.0.x は `ExtractedMemory(id, content)`（namedtuple）の列を返し、`content` が
+        # `schemas=[…]` で渡した pydantic のインスタンス（実機 2026-09-20 で確認）。
+        if hasattr(item, "content") and not isinstance(item, dict):
+            item = item.content
         if hasattr(item, "model_dump"):
             item = item.model_dump()
         elif hasattr(item, "dict"):
@@ -205,8 +231,11 @@ def main():
     try:
         manager = create_memory_manager(
             model,
+            schemas=[candidate_schema()],
             instructions=EXTRACTION_INSTRUCTIONS,
             enable_inserts=True,
+            enable_updates=False,
+            enable_deletes=False,
         )
         result = manager.invoke(
             {

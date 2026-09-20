@@ -30,9 +30,17 @@ echo "venv:         $venv_dir"
 echo "requirements: $requirements"
 
 mkdir -p "$(dirname "$venv_dir")"
-"$python_bin" -m venv "$venv_dir"
-"$venv_dir/bin/pip" install --upgrade pip
-"$venv_dir/bin/pip" install -r "$requirements"
+# `uv` があればそれを使う（この機械には python3-venv が無く `python -m venv` が ensurepip で落ちる。
+# ldr / paperqa の venv も uv で作ってある）。無ければ従来どおり venv + pip。
+if command -v uv >/dev/null 2>&1; then
+  rm -rf "$venv_dir"
+  uv venv --python "$python_bin" "$venv_dir"
+  uv pip install --python "$venv_dir/bin/python" -r "$requirements"
+else
+  "$python_bin" -m venv "$venv_dir"
+  "$venv_dir/bin/pip" install --upgrade pip
+  "$venv_dir/bin/pip" install -r "$requirements"
+fi
 
 echo
 echo "できました。設定に次を書いてください:"
