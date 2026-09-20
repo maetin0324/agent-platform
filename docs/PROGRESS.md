@@ -9153,3 +9153,23 @@ releases/$SHA12/bin/celerisctl --db ~/.local/celeris/celeris.sqlite3 org migrate
   毎回書かずに済む。
 - **P-59-c**: matching の「組織が空なら NotApplicable」（§5 で追加した規律）は ADR-0046 の本文には明示が無い。
   ADR-0046 に「Phase 59 追記」として文言を足した（後述）。次に matching を触るときはこの前提を壊さないこと。
+
+### Phase 59 / 60a / 60b / 61 実機: 9 回目の昇格（停止→起動、schema 15→17、組織の移行つき。2026-09-20 07:47 UTC）
+
+- **リハーサルで見つけた 2 つの穴**（本番の写しで `migrate-v2` を通しで試した。Phase 58 の教訓）:
+  1. `migrate-v2` は移行先の木を設定の `org.toml` から読む。本番の `org.toml` が旧い木のままだと、改名した後に**旧ノードを全部作り直す**。
+     → 先に `org.toml` を新しい seed（`config/org.example.toml`）に差し替える。
+  2. 新しい seed は `conversation` ハーネスを参照するが、旧形式（`[[genres]]` + `[[roles]]`）の設定には無い → 設定エラー。
+     → **設定の harnesses 化は任意ではなく必須**（PROGRESS の Phase 59 の手順 2）。`data-analysis` / `writing` も足す。
+- **道具**: `promote.sh <sha12> --pre-start <script>`（旧停止 → DB バックアップ → **フック** → 新起動。フック失敗なら DB を戻して旧 unit を
+  起こし直す。指定があれば停止→起動に倒す）。`scripts/selfdeploy/hooks/org-migrate-v2.sh`（用意した `config.toml.next` / `org.toml.next` に
+  差し替え → `celerisctl org migrate-v2`。失敗時は設定を戻し `--rollback`）、`hooks/convert-config-to-harnesses.py`（決定的な変換）。
+  フックも本番の写し（DB・設定）で通しでリハーサルした（exit 0、13 ノード）。
+- **実行**: `release.sh main` → `4d2dc67bda5d`。`CELERIS_CONFIG=~/.config/celeris/config.toml.next verify.sh` → 1〜4・6 true、5 false（schema 17）。
+  `celerisctl knowledge init`（`~/knowledge` を作成、雛形 12 ファイル）。in-flight 0・load 0.44 を確認して
+  `promote.sh 4d2dc67bda5d --pre-start …/org-migrate-v2.sh` → 旧 1 秒で終了 → バックアップ → フック 1 秒 → 新 1 秒で health 200 / schema 17 →
+  GUI 切替。**API の停止は約 4 秒、1 回で完了**。
+- 事後: health `4d2dc67bda5d` active schema 17、`GET /org` 13 ノード（根 `cos`、profile 付き）、`GET /console` 200、
+  `GET /knowledge/tree` initialized・10 ページ、`GET /config` の harness 6 種、GUI `/healthz` 一致。
+  元の設定は `config.toml.pre-org-v2` / `org.toml.pre-org-v2`、逆写像は `~/.local/celeris/backups/org-v1-map.json`。
+- 人にお願い: `~/knowledge/user/*.md` と `environment/clusters/{pegasus,sirius,fern03}.md` の雛形を埋める（Celeris は出典の無い知識を書かない）。
