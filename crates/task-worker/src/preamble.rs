@@ -44,6 +44,11 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
     let mut out = comments_section(context);
     out.push_str(&person_sections(context));
     out.push_str(&workspace_section(context));
+    // ADR-0047 D2（Phase 61）: マウントされた知識の**索引だけ**（本文は入れない。道具で読む）。
+    // `context.knowledge` が無い run の前置きは Phase 60 までと 1 バイトも変わらない。
+    if let Some(knowledge) = &context.knowledge {
+        out.push_str(&knowledge_section(&knowledge.mounts, &knowledge.index));
+    }
     out.push_str(&role_section(context));
     out.push_str(&memory_instructions(context, artifacts));
     // ADR-0044 D2（Phase 53）: コメントの書き方（`comments_enabled` の run にだけ）。
@@ -353,6 +358,65 @@ fn workspace_section(context: &RunContext) -> String {
          `ssh` で直接書き込んではいけない**（同期は celeris が行う。検証・計測だけをリモートで実行する。\
          SPEC §3.7「手元で編集してリモートで検証」）。\n\n"
     )
+}
+
+/// ADR-0047 D2 / D3（Phase 61）: 知識の節（**索引だけ**。本文は入れない）。
+///
+/// `mounts` は実効マウント（ADR-0047 D2: 組織の和 ＋ 案件 ＋ タスクの明示）、`index` はそのマウントで
+/// 読めるページの索引（[`task_core::knowledge::mount_matches`] で振り分ける）。純粋関数で、
+/// マウントが 1 つも無い・索引が空なら**空文字列**（前置きは 1 バイトも変わらない）。
+///
+/// 出るもの: マウントの一覧 → D3 の使い方 → マウントごとの `path` / `title` / `tags`
+/// （全体で最大 [`task_core::knowledge::MAX_PREAMBLE_ITEMS`] 件。溢れた分は件数だけ出す）。
+pub fn knowledge_section(
+    mounts: &[task_core::KnowledgeMount],
+    index: &[task_core::KnowledgeItem],
+) -> String {
+    if mounts.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## 知識 (knowledge base — 索引だけ。本文は道具で読む)\n");
+    out.push_str(&format!(
+        "あなたが読める知識: {}。\n",
+        mounts.iter().map(|m| format!("`{}`", m.label())).collect::<Vec<_>>().join("、")
+    ));
+    // ADR-0047 D3 の案内文。
+    out.push_str(
+        "知識は `celerisctl knowledge search <語> [--scope …]` で探し、`celerisctl knowledge get <path>` で読む。\
+         将来も使える事実を得たら `celerisctl knowledge record --title … --scope … --source task:<このタスクの id>` \
+         で候補に入れる（一時的な情報・雑談・推測は入れない。出典を付ける）。候補は人が確認してから正本に入る。\n",
+    );
+    let mut shown = 0usize;
+    let mut sections = String::new();
+    for mount in mounts {
+        let items: Vec<&task_core::KnowledgeItem> = index
+            .iter()
+            .filter(|item| task_core::knowledge::mount_matches(mount, item))
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        sections.push_str(&format!("### {}\n", mount.label()));
+        for (n, item) in items.iter().enumerate() {
+            if shown >= task_core::knowledge::MAX_PREAMBLE_ITEMS {
+                sections.push_str(&format!("- （ほか {} 件。`search` で探す）\n", items.len() - n));
+                break;
+            }
+            sections.push_str(&format!("- `{}` — {}", item.path, one_line(&item.title)));
+            if !item.tags.is_empty() {
+                sections.push_str(&format!("（{}）", item.tags.join("、")));
+            }
+            sections.push('\n');
+            shown += 1;
+        }
+    }
+    if sections.is_empty() {
+        // マウントはあるが 1 件も読めるものが無い（KB がまだ無い・空）。索引の節は出さない。
+        return String::new();
+    }
+    out.push_str(&sections);
+    out.push('\n');
+    out
 }
 
 /// 5. 役割の指示文（ADR-0016 D1 / M3。Phase 23 までと同じ文面）。
@@ -804,6 +868,109 @@ mod tests {
         );
         // リポジトリが無いタスクの前置きは 1 バイトも変わらない（空）。
         assert_eq!(repos_note(&[]), "");
+    }
+
+    /// ADR-0047 D2（Phase 61）: 知識の節は**索引だけ**（本文は入れない）。マウントごとに並び、
+    /// D3 の使い方（`search` / `get` / `record`）が出る。マウントが無い run の前置きは
+    /// Phase 60 までと 1 バイトも変わらない。
+    #[test]
+    fn the_knowledge_section_lists_the_index_of_every_mount_kind() {
+        use task_core::{KnowledgeItem, KnowledgeMount};
+        let mounts = vec![
+            KnowledgeMount::kb("environment/clusters"),
+            KnowledgeMount::repo("pluvio", None),
+            KnowledgeMount::memory(Some("cluster-hpc".into())),
+        ];
+        let index = vec![
+            KnowledgeItem {
+                path: "environment/clusters/pegasus.md".into(),
+                title: "pegasus の使い方".into(),
+                tags: vec!["hpc".into(), "cluster".into()],
+                scope: Some("environment".into()),
+                ..KnowledgeItem::default()
+            },
+            // 別の scope のページはこのマウントには出ない。
+            KnowledgeItem {
+                path: "user/profile.md".into(),
+                title: "人のプロフィール".into(),
+                scope: Some("user".into()),
+                ..KnowledgeItem::default()
+            },
+            KnowledgeItem {
+                path: "docs/design.md".into(),
+                title: "design.md".into(),
+                scope: Some("repo:pluvio".into()),
+                ..KnowledgeItem::default()
+            },
+            KnowledgeItem {
+                path: "/home/u/.local/celeris/memory/cluster-hpc/notes.md".into(),
+                title: "あなたの手帳（案件をまたぐ記憶）".into(),
+                scope: Some("memory:cluster-hpc".into()),
+                ..KnowledgeItem::default()
+            },
+        ];
+        let out = knowledge_section(&mounts, &index);
+        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in:\n{out}"));
+        assert!(out.starts_with("## 知識 (knowledge base — 索引だけ。本文は道具で読む)\n"), "{out}");
+        assert!(
+            out.contains("あなたが読める知識: `kb:environment/clusters`、`repo:pluvio`、`memory:cluster-hpc`。"),
+            "{out}"
+        );
+        // ADR-0047 D3 の案内文。
+        assert!(out.contains("`celerisctl knowledge search <語> [--scope …]` で探し"), "{out}");
+        assert!(out.contains("`celerisctl knowledge get <path>` で読む"), "{out}");
+        assert!(out.contains("`celerisctl knowledge record"), "{out}");
+        assert!(out.contains("一時的な情報・雑談・推測は入れない"), "{out}");
+        // マウントごとに並ぶ（マウントの順）。
+        assert!(at("### kb:environment/clusters") < at("### repo:pluvio"), "{out}");
+        assert!(at("### repo:pluvio") < at("### memory:cluster-hpc"), "{out}");
+        assert!(
+            out.contains("- `environment/clusters/pegasus.md` — pegasus の使い方（hpc、cluster）"),
+            "{out}"
+        );
+        assert!(out.contains("- `docs/design.md` — design.md\n"), "{out}");
+        assert!(out.contains("/memory/cluster-hpc/notes.md` — あなたの手帳"), "{out}");
+        // マウントしていない scope のページは出ない（本文も出ない）。
+        assert!(!out.contains("user/profile.md"), "{out}");
+
+        // マウントが無い・索引が空なら節ごと出ない。
+        assert_eq!(knowledge_section(&[], &index), "");
+        assert_eq!(knowledge_section(&mounts, &[]), "");
+
+        // `render` に入れても、他の節の後ろ（作業場所の後、役割の前）に 1 回だけ出る。
+        let context = RunContext {
+            knowledge: Some(crate::protocol::KnowledgeContext {
+                mounts: mounts.clone(),
+                index: index.clone(),
+            }),
+            ..full_context()
+        };
+        let rendered = render(&context, "artifacts");
+        let at = |needle: &str| rendered.find(needle).unwrap_or_else(|| panic!("missing {needle:?}"));
+        assert_eq!(rendered.matches("## 知識 (knowledge base").count(), 1, "{rendered}");
+        assert!(at("## 覚えていること") < at("## 知識 (knowledge base"), "{rendered}");
+        assert!(at("## 知識 (knowledge base") < at("## Role: literature-reader"), "{rendered}");
+        // 知識を渡さない run の前置きは 1 バイトも変わらない。
+        assert!(!render(&full_context(), "artifacts").contains("知識"));
+        assert_eq!(render(&RunContext::default(), "artifacts"), "");
+    }
+
+    /// ADR-0047 D2: 索引は最大 200 件（溢れた分は件数だけ）。
+    #[test]
+    fn the_knowledge_index_is_capped_at_two_hundred_items() {
+        use task_core::{KnowledgeItem, KnowledgeMount};
+        let mounts = vec![KnowledgeMount::kb("user")];
+        let index: Vec<KnowledgeItem> = (0..250)
+            .map(|n| KnowledgeItem {
+                path: format!("user/p{n}.md"),
+                title: format!("page {n}"),
+                scope: Some("user".into()),
+                ..KnowledgeItem::default()
+            })
+            .collect();
+        let out = knowledge_section(&mounts, &index);
+        assert_eq!(out.matches("- `user/p").count(), task_core::knowledge::MAX_PREAMBLE_ITEMS);
+        assert!(out.contains("- （ほか 50 件。`search` で探す）"), "{out}");
     }
 
     fn task_worker_recent_work_sample(

@@ -20,7 +20,7 @@ pub use accounts::{
 pub use task_core::AccountAdapter;
 pub use dispatcher::{
     AccountsRuntimeConfig, ClusterSpec, ContainerDecision, ContainerRun, ContainersRuntimeConfig, DispatchConfig,
-    DispatchError, Dispatcher, SnapshotPublisher, TaskFilter, TickReport,
+    DispatchError, Dispatcher, KnowledgeRuntimeConfig, SnapshotPublisher, TaskFilter, TickReport,
 };
 pub use policy::{AdapterId, ProviderId, ProviderOutcome, ProviderPolicy, ProviderSpec, StaticPolicy};
 pub use review::{

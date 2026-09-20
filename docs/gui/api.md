@@ -219,7 +219,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（86）
+## 2. エンドポイント一覧（92）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -309,6 +309,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 84 | PUT | `/projects/{id}/docs/page` | ページを既定のブランチに直接コミットする（**管理系**） | 200 `DocPageResult` | 一時 worktree + `git commit` |
 | 85 | DELETE | `/projects/{id}/docs/page` | ページを消す（**管理系**） | 200 `DocPageResult` | 一時 worktree + `git commit` |
 | 86 | POST | `/tasks/{id}/artifacts/promote` | 成果物をページに昇格する（**管理系**） | 200 `DocPageResult` | 成果物 + 一時 worktree |
+| 87 | GET | `/knowledge/tree` | 知識ベースのツリー（`?scope=` / `?q=`。ADR-0047、Phase 61） | `KnowledgeTree` | `index.json` + `grep` |
+| 88 | GET | `/knowledge/page` | ページ 1 枚（raw / html / front matter / 履歴 / etag） | `KnowledgePage` | ファイル + 履歴 |
+| 89 | PUT | `/knowledge/page` | ページを 1 件 1 コミットで書く（**管理系**） | 200 `KnowledgePageResult` | ファイル + コミット |
+| 90 | GET | `/knowledge/inbox` | `_inbox/` の候補（出典・取り込み先つき） | `KnowledgeInbox` | ファイル |
+| 91 | POST | `/knowledge/inbox/{id}/accept` | 候補を正本に取り込む（**管理系**） | 200 `KnowledgePageResult` | ファイル + コミット |
+| 92 | POST | `/knowledge/inbox/{id}/reject` | 候補を捨てる（**管理系**） | 200 `KnowledgeRejectResult` | ファイル + コミット |
 
 ---
 
@@ -2078,6 +2084,93 @@ fast-forward** する（ADR-0043 D5 の `merge` と同じやり方）。author /
 - 案件に属さないタスクは 409 `docs_unavailable`、知らないタスクは 404 `task_not_found`
 - コミットの規則（一時 worktree・fast-forward・`default_branch_busy`）は §3.95 と同じ
 - 昇格したページはそのタスクの `GET /tasks/{id}/timeline` に `kind = "doc"` として出る（逆リンク）
+
+### 3.98〜3.103 知識ベース（ADR-0047、Phase 61。**87〜92。変更系は管理系: `token_file` 未設定でも 401**）
+
+**正本は `[knowledge] root`（既定 `~/knowledge`）の Markdown**（DB には何も持たない）。案件の文書（§3.92〜3.97）と
+同じ流儀だが、**正本は作業ツリーのファイルそのもの**なので、読み取りは常にファイルを読む（人が編集中の未コミットの
+変更もそのまま見える）。書き込みは作業ツリーに書いてから**そのパスだけを 1 件 1 コミット**する。
+author / committer は `Celeris (human) <celeris@local>`（`celerisctl knowledge record` が作る候補だけ
+`Celeris (knowledge) <celeris@local>`）。
+
+- `path` は **KB の根からの相対**（`environment/clusters/pegasus.md`）。`..`・絶対パスは **403 `path_forbidden`**、
+  `.md` で終わらないパスは **422 `validation`**
+- `etag` は**ページの中身の sha256**（文書の blob sha とは別物。GUI は opaque な値として扱う）
+- `[knowledge] root` が設定されていなければ **409 `knowledge_unavailable`**。設定されていてもディレクトリが
+  まだ無ければ、**読み取りは `initialized: false` を返すだけ**（何も作らない）、変更系は
+  409 `knowledge_unavailable`（用意するのは `celerisctl knowledge init` だけ）
+- 書き込みのあとは必ず `index.json` を作り直す（索引は**再生成できる派生物**。バージョン管理には入らない）
+- `_inbox/` の候補は**索引にも検索にも出ない**。人が §3.102 / §3.103 で accept / reject する
+
+組織の「人」（ワーカー）はこの HTTP ではなく **`celerisctl knowledge`**（ADR-0047 D3）で KB を読む。
+前置きには索引（`path` / `title` / `tags`、最大 200 件）だけが載り、本文は載らない。
+
+#### 3.98 `GET /knowledge/tree?scope=&q=` → 200 `KnowledgeTree`
+
+- `root`（絶対パス）・`initialized`・`generated_at`（`index.json` を作った時刻）・`inbox_count`
+- `items`: `path` / `title` / `tags[]` / `scope` / `sources[]` / `updated` / `confidence`
+  （`?q=` が無ければパスの昇順、最大 500。超えたら `truncated: true`）
+- `scopes`: **ページのあるディレクトリ**の一覧（`items[].path` の親ディレクトリを重複無し・名前順に並べたもの。
+  画面のツリーの見出し）。front matter の `scope`（`project:pluvio` のようなラベル）はここには入らない
+  — それは `items[].scope` の方。`?scope=` / `?q=` で絞っても **`scopes` は KB 全体のまま**（見出しは動かない）
+- `?scope=` は **KB の相対パスの接頭辞**（`user` / `environment/clusters` / `projects/pluvio`）か
+  front matter の `scope` の値（`project:pluvio`）
+- `?q=` があれば **索引の `tags` / `title` と本文の全文一致**で絞り、
+  **tag 一致数 → title 一致数 → 本文一致 → `updated` の新しい順**に並べる（ADR-0047 D3）
+
+```json
+{"root": "/home/u/knowledge", "initialized": true, "generated_at": "2026-09-20T01:00:00Z",
+ "inbox_count": 2, "truncated": false, "scopes": ["environment/clusters", "user"],
+ "items": [{"path": "environment/clusters/pegasus.md", "title": "pegasus の使い方",
+            "tags": ["environment", "cluster", "pegasus"], "scope": "environment",
+            "sources": ["human"], "updated": "2026-09-20", "confidence": "low"}]}
+```
+
+#### 3.99 `GET /knowledge/page?path=` → 200 `KnowledgePage`
+
+- `raw`（front matter を含む Markdown のもと）、`html`（**サーバで描画**。`pulldown-cmark`、
+  **生 HTML は捨てる**）、`title` / `tags[]` / `scope` / `sources[]` / `confidence` / `updated`、
+  `history`（直近 20 件、新しい順）、`etag`
+- 本文中の `celeris:task/<ULID>` は `/tasks/<ULID>` に、`[[相対パス.md]]` は `/knowledge?path=…` に開く
+- 512 KiB を超えるページは `too_large: true` で `raw` / `html` が空
+- 無いページは 404 `page_not_found`
+
+#### 3.100 `PUT /knowledge/page` → 200 `KnowledgePageResult`（**管理系**）
+
+```json
+{"path": "environment/clusters/pegasus.md", "body": "---\ntitle: …\n---\n…", "etag": "<sha256>", "message": "knowledge: 直した"}
+```
+
+- `etag` は **§3.99 が返した値**。ページが既にあるのに `etag` が無い / 違えば **409 `etag_mismatch`**
+  （`etag` 拡張フィールドにいまの値が載る）。新しいページは `etag` を付けない
+- `message` の既定は `knowledge: <path>`
+- 中身が同じなら新しいコミットを作らず `unchanged: true`
+- `_inbox/` のパスは **403 `path_forbidden`**（候補は §3.102 / §3.103 で扱う）
+
+#### 3.101 `GET /knowledge/inbox` → 200 `KnowledgeInbox`
+
+- `items`: `id`（`_inbox/<id>.md` のファイル名から `.md` を取ったもの）/ `path` / `title` / `tags[]` /
+  `scope` / `sources[]` / `confidence` / `created`（front matter のまま。RFC 3339 か `YYYY-MM-DD`）/ `body` / `html` /
+  `target`（取り込み先。front matter の `path`、無ければ `scope` と題名からの既定）/ `target_exists`
+- 新しい順（id の降順 = 記録した時刻の降順）
+
+#### 3.102 `POST /knowledge/inbox/{id}/accept` → 200 `KnowledgePageResult`（**管理系**）
+
+```json
+{"path": "environment/clusters/pegasus.md", "overwrite": false}
+```
+
+- 本文は省略してよい（`{}` か空）。`path` を渡せばそこへ、渡さなければ候補の `target` へ移す
+- `_inbox/` から消して宛先に書き、**両方のパスを 1 コミット**にする。`path:`（候補専用の鍵）は落ち、
+  `updated` は今日になる
+- 宛先が既にあれば **409 `page_exists`**（`overwrite: true` なら上書き）
+- 知らない id は 404 `candidate_not_found`、`/` や `..` を含む id は 403 `path_forbidden`
+
+#### 3.103 `POST /knowledge/inbox/{id}/reject` → 200 `KnowledgeRejectResult`（**管理系**）
+
+- `_inbox/<id>.md` を消してコミットする（履歴には残る）。応答は `{"id": "…", "sha": "…"}`
+- 知らない id は 404 `candidate_not_found`
+
 
 ---
 

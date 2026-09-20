@@ -3,6 +3,11 @@ import type { AddressInfo } from "node:net";
 import type {
   CommentResult,
   EditResult,
+  KnowledgeInbox,
+  KnowledgePage,
+  KnowledgePageResult,
+  KnowledgeRejectResult,
+  KnowledgeTree,
   MilestoneLifecycle,
   Problem,
   Project,
@@ -17,6 +22,11 @@ import {
   commentResult,
   defaultHealth,
   editResult,
+  knowledgeInbox,
+  knowledgePage,
+  knowledgePageResult,
+  knowledgeRejectResult,
+  knowledgeTree,
   milestone,
   milestoneLifecycle,
   project,
@@ -302,4 +312,48 @@ export async function startMockCeleris(options: StartMockCelerisOptions = {}): P
     });
 
   return { baseUrl, requests, on, close };
+}
+
+/**
+ * 知識ベース（ADR-0047 D5、docs/celeris-api-v1.md §3.98〜3.103。Phase 61 / G21）の 6 経路を
+ * まとめて登録する: `GET /knowledge/tree`、`GET|PUT /knowledge/page`、`GET /knowledge/inbox`、
+ * `POST /knowledge/inbox/{id}/{accept|reject}`。
+ *
+ * **絞り込み（`?q=` / `?scope=`）も取り込みの判定も celeris の仕事**なので、ここでは決め打ちの応答を
+ * 返すだけ（受け取ったクエリと本文は `mock.requests` に残るので、GUI がどう組み立てたかを検証できる）。
+ */
+export interface KnowledgeOptions {
+  tree?: KnowledgeTree;
+  page?: KnowledgePage;
+  /** `PUT /knowledge/page` の応答。 */
+  put?: KnowledgePageResult;
+  inbox?: KnowledgeInbox;
+  /** `POST /knowledge/inbox/{id}/accept` の応答。 */
+  accept?: KnowledgePageResult;
+  /** `POST /knowledge/inbox/{id}/reject` の応答。 */
+  reject?: KnowledgeRejectResult;
+}
+
+export function serveKnowledge(mock: MockCeleris, options: KnowledgeOptions = {}): void {
+  const inbox = options.inbox ?? knowledgeInbox();
+  mock.on("GET", "/api/v1/knowledge/tree", (_req, res) => {
+    sendJson(res, 200, options.tree ?? knowledgeTree());
+  });
+  mock.on("GET", "/api/v1/knowledge/page", (_req, res) => {
+    sendJson(res, 200, options.page ?? knowledgePage());
+  });
+  mock.on("PUT", "/api/v1/knowledge/page", (_req, res) => {
+    sendJson(res, 200, options.put ?? knowledgePageResult());
+  });
+  mock.on("GET", "/api/v1/knowledge/inbox", (_req, res) => {
+    sendJson(res, 200, inbox);
+  });
+  for (const candidate of inbox.items) {
+    mock.on("POST", `/api/v1/knowledge/inbox/${candidate.id}/accept`, (_req, res) => {
+      sendJson(res, 200, options.accept ?? knowledgePageResult({ path: candidate.target }));
+    });
+    mock.on("POST", `/api/v1/knowledge/inbox/${candidate.id}/reject`, (_req, res) => {
+      sendJson(res, 200, options.reject ?? knowledgeRejectResult({ id: candidate.id }));
+    });
+  }
 }

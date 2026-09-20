@@ -222,6 +222,19 @@ pub struct DispatchConfig {
     pub releases_dir: Option<PathBuf>,
     /// ADR-0043 D3（Phase 56）: `[containers]`。コンテナ実行の runtime・既定のイメージ・ビルドの置き場。
     pub containers: ContainersRuntimeConfig,
+    // ---- ADR-0047（Phase 61）: 知識ベース。ここから ----
+    /// ADR-0047 D1 / D2: `[knowledge]`。正本の置き場と既定のマウント。
+    pub knowledge: KnowledgeRuntimeConfig,
+    // ---- ADR-0047（Phase 61）: ここまで ----
+}
+
+/// `[knowledge]`（ADR-0047 D1 / D2。Phase 61）。
+#[derive(Debug, Clone, Default)]
+pub struct KnowledgeRuntimeConfig {
+    /// 正本の置き場（絶対パス。既定 `~/knowledge`）。**celeris は作らない**。
+    pub root: PathBuf,
+    /// 実効 profile（ADR-0046 D1）が何も言わないときに全ノードが継ぐマウント。
+    pub default_mounts: Vec<task_core::KnowledgeMount>,
 }
 
 /// `[containers]`（ADR-0043 D3 / ADR-0042 D3）。
@@ -448,6 +461,8 @@ struct RunExtras {
     comments: Vec<CommentContext>,
     /// ADR-0044 D2: 直前の run を止めた人のコメント（あれば前置きの先頭に「人からの割り込み」として出る）。
     interrupt: Option<String>,
+    /// ADR-0047 D2（Phase 61）: マウントされた知識の索引（本文は入れない）。
+    knowledge: Option<task_worker::protocol::KnowledgeContext>,
 }
 
 struct ReviewEntry {
@@ -2858,6 +2873,9 @@ impl Dispatcher {
             .skip(all_comments.len().saturating_sub(task_core::PREAMBLE_COMMENTS))
             .map(CommentContext::from)
             .collect();
+        // ADR-0047 D2（Phase 61）: 実効マウント（設定の既定 ＋ 案件の `projects/<slug>`）と、その索引。
+        // 決定的（`index.json` とファイルを読むだけ。LLM も判断も無い）。
+        let knowledge = self.knowledge_context(task, assigned.map(|n| n.id.as_str()));
         Ok(RunExtras {
             role,
             children,
@@ -2874,7 +2892,114 @@ impl Dispatcher {
             workspace_note,
             comments,
             interrupt,
+            knowledge,
         })
+    }
+
+    /// ADR-0047 D2（Phase 61）: この run が読める知識の**索引だけ**を組む（純粋に近い: 設定・DB・
+    /// `index.json`・ファイル名を読むだけ。本文は入れない）。
+    ///
+    /// 実効マウント = `[knowledge] default_mounts` ＋ 案件の `projects/<slug>`（自動）
+    /// ＋ タスクの明示（Phase 61 では無い。Phase 59 の実効 profile がここに合流する）。
+    fn knowledge_context(&self, task: &Task, node_id: Option<&str>) -> Option<task_worker::protocol::KnowledgeContext> {
+        let root = &self.config.knowledge.root;
+        let mut mounts = self.config.knowledge.default_mounts.clone();
+        // 案件は自動で `projects/<slug>` をマウントする（ADR-0047 D2）。
+        let project = task
+            .project_id
+            .and_then(|id| self.store.project_get(id).ok().flatten());
+        if let Some(project) = &project {
+            let slug = task_ops::docs::project_slug(&project.title, &project.id.to_string());
+            mounts.push(task_core::KnowledgeMount::kb(format!("projects/{slug}")));
+        }
+        let mounts = task_core::knowledge::merge_mounts(&[&mounts]);
+        if mounts.is_empty() {
+            return None;
+        }
+        let index = if task_ops::knowledge::exists(root) {
+            task_ops::knowledge::ensure_index(root).items
+        } else {
+            Vec::new()
+        };
+        let mut items: Vec<task_core::KnowledgeItem> = Vec::new();
+        for mount in &mounts {
+            match mount.kind {
+                task_core::MountKind::Kb => {
+                    items.extend(index.iter().filter(|i| task_core::knowledge::mount_matches(mount, i)).cloned());
+                }
+                // `repo` は案件のリポジトリの文書の根のページ（ADR-0043 / ADR-0044 D7）。
+                task_core::MountKind::Repo => {
+                    if let Some(name) = mount.name.as_deref() {
+                        items.extend(self.repo_doc_items(task, name, mount));
+                    }
+                }
+                // `dir` は任意のローカルディレクトリの `*.md`（読み取り）。
+                task_core::MountKind::Dir => {
+                    if let Some(dir) = mount.path.as_deref() {
+                        let label = mount.label();
+                        items.extend(task_ops::knowledge::list_pages(dir).into_iter().take(200).map(|rel| {
+                            task_core::KnowledgeItem {
+                                title: rel.rsplit('/').next().unwrap_or(&rel).to_string(),
+                                path: dir.join(&rel).display().to_string(),
+                                scope: Some(label.clone()),
+                                ..task_core::KnowledgeItem::default()
+                            }
+                        }));
+                    }
+                }
+                // `memory` はそのノードの手帳（ADR-0033 D3。中身は「覚えていること」の節に既に出ている）。
+                task_core::MountKind::Memory => {
+                    let node = mount.name.as_deref().or(node_id);
+                    if let (Some(dir), Some(node)) = (&self.config.memory_dir, node) {
+                        let notes = dir.join(node).join("notes.md");
+                        if notes.exists() {
+                            items.push(task_core::KnowledgeItem {
+                                path: notes.display().to_string(),
+                                title: "あなたの手帳（案件をまたぐ記憶）".to_string(),
+                                scope: Some(format!("memory:{node}")),
+                                ..task_core::KnowledgeItem::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Some(task_worker::protocol::KnowledgeContext { mounts, index: items })
+    }
+
+    /// `repo` マウント 1 件分（案件のその名前のリポジトリの文書の根のページ）。
+    fn repo_doc_items(
+        &self,
+        task: &Task,
+        name: &str,
+        mount: &task_core::KnowledgeMount,
+    ) -> Vec<task_core::KnowledgeItem> {
+        let Some(project_id) = task.project_id else {
+            return Vec::new();
+        };
+        let Ok(repos) = self.store.repo_list(project_id) else {
+            return Vec::new();
+        };
+        let Some(repo) = repos.iter().find(|r| r.name == name) else {
+            return Vec::new();
+        };
+        let task_core::WorkspaceSpec::Local { path, .. } = &repo.location else {
+            return Vec::new();
+        };
+        let (config, _) = task_core::workspace_config::load_or_default(path);
+        let docs_root = mount.docs.clone().unwrap_or(config.outputs.docs);
+        let branch = task_ops::changes::default_branch(path, repo.default_branch.as_deref());
+        let label = mount.label();
+        task_ops::docs::list(path, &branch, &docs_root)
+            .into_iter()
+            .take(200)
+            .map(|rel| task_core::KnowledgeItem {
+                title: rel.rsplit('/').next().unwrap_or(&rel).to_string(),
+                path: rel,
+                scope: Some(label.clone()),
+                ..task_core::KnowledgeItem::default()
+            })
+            .collect()
     }
 
     /// Phase 41（ADR-0038 D1）: レビューの対話 run に渡す「その途中目標のここまで」。
@@ -3654,6 +3779,8 @@ impl Dispatcher {
             dir_repos,
             creds: Vec::new(),
             extra_mounts: choice.mounts.clone(),
+            // ADR-0047 D3（Phase 61）: 知識ベースがあれば同じパスで見せる（`_inbox` だけ書き込み可）。
+            knowledge_root: Some(self.config.knowledge.root.clone()).filter(|r| r.is_dir()),
             env: choice.env.clone(),
             task_id: task.id.to_string(),
             uid,
@@ -4146,6 +4273,7 @@ async fn run_worker(
             milestone_review: extras.milestone_review,
             // Phase 43（ADR-0039 D3）: 案件が作業場所を決めている run だけに入る。
             workspace_note: extras.workspace_note,
+            knowledge: extras.knowledge,
             // ADR-0044 D2（Phase 53）: コメントの糸と、直前の run を止めた人のコメント。
             comments: extras.comments,
             interrupt: extras.interrupt,
@@ -4418,6 +4546,7 @@ mod tests {
                 worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
                 releases_dir: None,
                 containers: ContainersRuntimeConfig::default(),
+                knowledge: KnowledgeRuntimeConfig::default(),
             },
         )
     }
@@ -6813,6 +6942,7 @@ mod tests {
                 worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
                 releases_dir: None,
                 containers: ContainersRuntimeConfig::default(),
+                knowledge: KnowledgeRuntimeConfig::default(),
             },
         )
     }

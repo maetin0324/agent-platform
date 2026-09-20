@@ -8602,3 +8602,163 @@ scripts/selfdeploy/migrate-to-celeris.sh --rollback
 - `release.sh main`（環境変数なし。新しい既定のパス）→ `08e5e4a52fb5`。`verify.sh` → 検査 1〜6 すべて true（N-1: 旧 `926e19c0b408` の `bin/celeris`）→ live_ok。
 - `promote.sh 08e5e4a52fb5`（mode=live）: 2 秒で新が active、GUI 9 秒で切替、旧 `celeris@926e19c0b408` は drain して exit 0。
   `current -> 08e5e4a52fb5`、`previous -> 926e19c0b408`。ADR-0045 §3 の受け入れ条件 4 をすべて満たした。
+
+## Phase 61 — Knowledge Base v1（ADR-0047 D1–D3。2026-09-20）
+
+**正本はローカルの Markdown**（`[knowledge] root`、既定 `~/knowledge`）。DB には何も持たない。索引（`index.json`）は
+再生成できる派生物。エージェントからのアクセスは `celerisctl knowledge`（DB を開かない）、人からは GUI の「知識」画面と
+API 6 本。LangMem（D4）は Phase 62。
+
+### 入れたもの
+
+| 層 | ファイル | 中身 |
+|---|---|---|
+| core | `crates/task-core/src/knowledge.rs`（新） | front matter の読み書き（往復）、パスの境界、`Index` / `IndexItem`、検索の順位付け（純粋関数）、`KnowledgeMount`（ADR-0046 D1 の型。**Phase 59 の `Profile.knowledge` はこれを持つ**）、D4 の秘密の検査 |
+| ops | `crates/task-ops/src/knowledge.rs`（新） | `init` / `reindex` / `read_page` / `etag` / `history` / `commit_page` / `grep` / `search` / `record` / `inbox_list` / `inbox_accept` / `inbox_reject`。`git` を上限付きで起こすだけ |
+| api | `crates/task-api/src/knowledge.rs`（新） | `GET /knowledge/tree`・`GET /knowledge/page`・`PUT /knowledge/page`（管理系）・`GET /knowledge/inbox`・`POST /knowledge/inbox/{id}/{accept,reject}`（管理系） |
+| cli | `crates/celerisctl/src/commands/knowledge.rs`（新） | `init` / `search` / `get` / `record` / `reindex`。**`main` が DB を開く前に処理する**（コンテナの中で動くため） |
+| 前置き | `crates/task-worker/src/preamble.rs` | `knowledge_section(mounts, index)` を追加し、`render` から 1 回呼ぶ |
+| コンテナ | `crates/task-worker/src/container.rs` | `ContainerPlan.knowledge_root` → KB を同じパスに `:ro`、`_inbox` だけ書き込み可 |
+| 設定 | `crates/celeris/src/config.rs` | `[knowledge] root` / `default_mounts`（新しい節。`validate()` が綴りを見る） |
+| 文書 | `docs/knowledge.md`（新）、`docs/gui/api.md` §3.98〜3.103、`config/celeris.example.toml` `[knowledge]`、ADR-0047 `## Phase 61 追記` | |
+
+GUI は同じ worktree で Phase G21 として実装した（`gui/docs/PROGRESS.md` を参照）。
+`gui/app/routes/knowledge.tsx` / `knowledge.inbox.tsx`、`gui/app/celeris/knowledge.ts`、`gui/app/lib/knowledge.ts`、
+`gui/app/components/KnowledgeMeta.tsx`、mock-celeris の fixtures / handlers、vitest 27 本。
+
+### 受け入れ条件ごとの証跡
+
+- **条件: `~/knowledge` の初期化（git、雛形）** — `cargo test -p task-ops knowledge` の
+  `init_creates_the_skeleton_and_is_idempotent`。骨組み 7 ディレクトリ ＋ `_inbox` ＋ `README.md` ＋
+  `user/{profile,expertise,preferences,goals}.md` ＋ `environment/clusters/{pegasus,sirius,fern03}.md` ＋
+  `projects/README.md` ＋ `experience/README.md` ＋ `.gitignore` ＋ `index.json`。**2 回目は何も足さず、
+  人が書き換えたページも触らない**（履歴の件数が増えないことを assert）。
+- **条件: front matter と `index.json`** — `cargo test -p task-core knowledge`（6 本）の
+  `front_matter_round_trips` / `front_matter_reads_block_lists_and_ignores_unclosed_blocks`、
+  `cargo test -p task-ops knowledge` の `reindex_reads_front_matter_and_defaults_the_scope`
+  （`scope` が無いページは置き場から `project:<slug>` などを当てる）。
+- **条件: `celerisctl knowledge search|get|record|reindex`（tempdir の KB でテスト）** —
+  `cargo test -p celerisctl knowledge`（2 本）の `the_cli_works_on_a_temporary_knowledge_base`（`--root` に
+  tempdir を渡し、`--config /nonexistent` で**実ホームの設定を読ませない**）と
+  `the_root_flag_wins_over_an_unreadable_config`。順位付けは `task_core` の
+  `search_ranks_tags_above_titles_above_bodies`、本文一致は `task_ops` の `search_finds_pages_by_tag_title_and_body`。
+  `record` は `record_writes_a_candidate_and_refuses_secrets_and_missing_sources`
+  （`_inbox` に書く / `--source` 無しは `NoSources` / `sk-…` は `Secret`）。
+- **条件: API と管理系の認可** — `cargo test -p task-api --test knowledge` の 6 本:
+  `an_uninitialized_knowledge_base_reads_empty_and_refuses_writes`（読み取りは**何も作らない**、
+  変更系は 409）、`the_tree_lists_pages_and_filters_by_scope_and_query`、
+  `a_page_is_rendered_with_its_front_matter_history_and_etag`（生 HTML を捨てる / `celeris:task/` と `[[…]]` /
+  履歴の author が `Celeris (human)` / 書いたら索引が作り直る）、
+  `writing_a_page_checks_the_etag_and_the_path`（409 etag / 403 `..` / 403 絶対パス / 422 `.md` 以外 /
+  403 `_inbox`）、`candidates_can_be_accepted_or_rejected`（404 / 403 / 409 `page_exists` / `overwrite` /
+  `path:` が落ちる / reject）、`the_write_endpoints_are_admin_only`（401）。
+- **条件: profile の `knowledge` マウントの実効化と前置きの索引** —
+  `cargo test -p task-worker preamble` の `the_knowledge_section_lists_the_index_of_every_mount_kind`
+  （`kb` / `repo` / `memory` の 3 種、マウントの順、D3 の案内文、マウントしていない scope は出ない、
+  索引を渡さない run の前置きは 1 バイトも変わらない）と
+  `the_knowledge_index_is_capped_at_two_hundred_items`。実効マウントの計算はディスパッチャの
+  `knowledge_context`（`[knowledge] default_mounts` ＋ 案件の `projects/<slug>`）。
+- **条件: コンテナへのマウント** — `cargo test -p task-worker container::` の
+  `the_knowledge_base_is_mounted_read_only_with_a_writable_inbox`（`-v <root>:<root>:ro` と
+  `-v <root>/_inbox:<root>/_inbox`、設定しなければ 1 バイトも変わらない、相対パスは無視）。
+- **条件: GUI「知識」画面と `_inbox`** — `gui/docs/PROGRESS.md` の Phase G21。
+
+### 実行したコマンドと出力の要点
+
+```
+cargo test --workspace                          → exit 0、grep -c "^test result: FAILED" = 0、passed 合計 1399
+cargo clippy --workspace --all-targets -- -D warnings → exit 0（警告 0）
+UPDATE_SCHEMA=1 cargo test -p task-api -p task-worker -p task-core
+                                                → docs/api/v1/api-v1.schema.json +435 行、
+                                                  docs/protocol/worker-protocol.schema.json +157 行
+cargo test --workspace（UPDATE_SCHEMA 無し）    → スキーマ一致テストを含めて exit 0
+python3 -c "import tomllib; tomllib.load(...)"  → config/celeris.example.toml は TOML として読める
+bash scripts/sync-gui-docs.sh --check           → up to date
+```
+
+GUI（`gui/` で実行。詳細は `gui/docs/PROGRESS.md`）:
+
+```
+pnpm gen:types   → exit 0。types.ts の sha256 は 3 回とも c10e490b…（冪等）
+pnpm lint        → exit 0（Checked 211 files）
+pnpm typecheck   → exit 0
+pnpm test        → exit 0。Test Files 55 passed / Tests 802 passed（新規 27 本）
+pnpm build       → exit 0（client 127 modules + SSR）
+pnpm e2e         → **実行していない**（実 celeris のバイナリと `[knowledge] root` を用意した fixture が要る）
+```
+
+### 本番の手順（人が実行する。**まだやっていない**）
+
+```bash
+# 1. 知識ベースを用意する（1 回だけ。冪等。既にあるファイルは触らない）
+celerisctl knowledge init
+ls ~/knowledge                       # user/ environment/ projects/ experience/ _inbox/ README.md .gitignore
+cd ~/knowledge && git log --oneline  # "knowledge: 知識ベースを作る（ADR-0047 D1）" 1 件
+
+# 2. 設定に `[knowledge]` を足す（既定でよければ省略できる。足すなら ~/.config/celeris/config.toml）
+#    [knowledge]
+#    root = "~/knowledge"
+#    default_mounts = ["kb:user", "kb:environment"]
+#    → 綴りを間違えると起動時に exit 2（設定エラー）。先に python3 -c "import tomllib; …" で読めることを確認する
+
+# 3. 雛形を埋める（**celeris は埋めない**。出典の無い知識を作らないため）
+$EDITOR ~/knowledge/user/profile.md            # 所属・呼び方・連絡の好み
+$EDITOR ~/knowledge/user/preferences.md
+$EDITOR ~/knowledge/environment/clusters/pegasus.md   # 接続 / 作業場所 / ジョブ / 環境
+$EDITOR ~/knowledge/environment/clusters/sirius.md
+$EDITOR ~/knowledge/environment/clusters/fern03.md
+#    中身は docs/workspace.md と ~/.config/celeris/config.toml の [[clusters]] に既に書いてあることを書き写す
+#    （host / 踏み台 / auth / worktree_root / setup / env / 投げ方）。埋めたら confidence: high にする
+cd ~/knowledge && git add -A && git commit -m "knowledge: 雛形を埋めた"
+celerisctl knowledge reindex          # → "<N> pages (<時刻>)"
+
+# 4. 道具が動くことを確かめる
+celerisctl knowledge search pegasus --scope environment
+celerisctl knowledge get environment/clusters/pegasus.md | head -20
+echo "テストの記録" | celerisctl knowledge record --title "動作確認" --scope user --source human
+celerisctl knowledge search 動作確認   # → 出ない（候補は索引に入らない）
+ls ~/knowledge/_inbox                  # → 1 件
+
+# 5. 昇格して GUI で見る（release.sh → verify.sh → promote.sh。従来どおり）
+scripts/selfdeploy/release.sh main
+scripts/selfdeploy/verify.sh <sha12>
+scripts/selfdeploy/promote.sh <sha12>
+curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" \
+  http://127.0.0.1:7710/api/v1/knowledge/tree | python3 -m json.tool | head -30
+#    → initialized: true、items に user/profile.md と environment/clusters/pegasus.md、inbox_count: 1
+#    GUI の「知識」→ 4 の候補を reject（または accept）して、コミットが 1 件増えることを見る
+
+# 6. 実機の受け入れ（ADR-0047 §3）
+#    自己改善案件のタスクを 1 本走らせ、runs/<run_id>/stdout.jsonl の前置きに
+#    「## 知識 (knowledge base — 索引だけ。本文は道具で読む)」と environment/clusters/pegasus.md が出ること、
+#    ワーカーが `celerisctl knowledge search` でそのページを引けることを確認する
+```
+
+### 未解決
+
+- **実機はまだ**（上の 1〜6）。`~/knowledge` は**このフェーズでは 1 度も触っていない**（テストは全部 tempdir。
+  `celerisctl knowledge` のテストは `--config /nonexistent` で実ホームの設定も読ませない）。
+- **Phase 59（ADR-0046）との合流**が必要。`KnowledgeMount` は `task_core::knowledge` に定義してあるので、
+  Phase 59 の `Profile.knowledge` はこの型（`Vec<KnowledgeMount>`）を持てばよい。合流点は
+  `task_dispatch::Dispatcher::knowledge_context`（いまは `[knowledge] default_mounts` ＋ 案件の
+  `projects/<slug>`）で、ここに実効 profile の `knowledge` を
+  `task_core::knowledge::merge_mounts(&[profile, default, project, task])` の形で足す。
+- **Phase 60a（protocol.rs）との合流**: `RunContext` の末尾に `knowledge: Option<KnowledgeContext>` を 1 つ足した
+  （`KnowledgeContext` も `protocol.rs` に定義）。衝突したら両方を残せばよい。
+- `GET /knowledge/tree` は毎回 `ensure_index` を通るので、索引が 6 時間より古ければその場で作り直す
+  （大きな KB では最初の 1 回が遅くなる）。実測して困るようなら `reindex` を裏方 tick に移す。
+- GUI の e2e が無い（`gui/docs/PROGRESS.md` U1）。`DELETE /knowledge/page` も無いので、ページを消すのは
+  エディタ ＋ `reindex`（または `git rm`）。
+
+### 提案
+
+- **P-61-i**: ADR-0047 D3 は「daemon は起動時と `_inbox` 変化時に `reindex` を呼ぶ」と書いているが、Phase 61 では
+  **API の読み取りが `ensure_index`（無い・6 時間より古ければ作り直す）で代用**している。daemon の tick に
+  入れるのは、`_inbox` の変化を見る仕組み（inotify か tick ごとの mtime 比較）が要るので Phase 62 の
+  知識整理 run と一緒に入れたい。
+- **P-61-j**: `[knowledge] default_mounts` は Phase 59 が入ったら**役目を終える**（実効 profile が
+  `knowledge` を持つ）。ADR-0046 D7 の木に `knowledge` を書いたら、この設定の既定を `[]` に落として
+  「設定で上書きしたい人だけが書く」ものにしたい。
+- **P-61-k**: `DELETE /knowledge/page` が無い（文書には §3.96 がある）。人がページを捨てる経路が
+  エディタしか無いので、GUI から消せるようにするか、「捨てずに `confidence: low` にして `retire` する」
+  （D4 の `op: retire`）に一本化するかを、Phase 62 で決めたい。

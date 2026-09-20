@@ -480,6 +480,7 @@ exec "$@"
             dir_repos: vec![],
             creds: vec![],
             extra_mounts: vec![],
+            knowledge_root: None,
             env: vec![],
             task_id: "01TASK".to_string(),
             uid: 1000,

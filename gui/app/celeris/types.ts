@@ -276,6 +276,10 @@ export type AttentionItem =
       type: "cluster_unavailable";
     };
 /**
+ * ADR-0047 D1 / D4。
+ */
+export type Confidence = "high" | "medium" | "low";
+/**
  * 誰が言ったか（ADR-0033 D4）。`user` = 人、`node` = 組織のノード（その run の返事）。
  */
 export type MessageRole = "user" | "node";
@@ -451,6 +455,13 @@ export interface ApiV1Schema {
   inbox: Inbox;
   integrate: IntegrateBody;
   integrate_result: IntegrateResult;
+  knowledge_accept: KnowledgeAcceptBody;
+  knowledge_inbox: KnowledgeInbox;
+  knowledge_page: KnowledgePage;
+  knowledge_page_put: KnowledgePagePutBody;
+  knowledge_page_result: KnowledgePageResult;
+  knowledge_reject_result: KnowledgeRejectResult;
+  knowledge_tree: KnowledgeTree;
   memory: MemoryView;
   message_accepted: MessageAccepted;
   message_list: MessageList;
@@ -2070,6 +2081,188 @@ export interface IntegrateResult {
    */
   child_task_id?: string | null;
   integration: TaskIntegration;
+}
+/**
+ * `POST /knowledge/inbox/{id}/accept` の本文（省略してよい）。
+ */
+export interface KnowledgeAcceptBody {
+  /**
+   * 宛先が既にあっても上書きする。
+   */
+  overwrite?: boolean;
+  /**
+   * 取り込む先（省略なら候補の front matter の `path`）。
+   */
+  path?: string | null;
+}
+/**
+ * `GET /knowledge/inbox`。
+ */
+export interface KnowledgeInbox {
+  initialized: boolean;
+  items: KnowledgeCandidate[];
+  root: string;
+}
+/**
+ * `_inbox/` の候補 1 件。
+ */
+export interface KnowledgeCandidate {
+  /**
+   * 本文（front matter を除く）。
+   */
+  body: string;
+  confidence?: Confidence | null;
+  created?: string | null;
+  /**
+   * 本文を描画した HTML（生 HTML は捨ててある）。
+   */
+  html: string;
+  id: string;
+  /**
+   * `_inbox/<id>.md`。
+   */
+  path: string;
+  scope?: string | null;
+  /**
+   * `task:<id>` / `message:<id>` / `human` / `url:<…>`（GUI は出典へのリンクにする）。
+   */
+  sources?: string[];
+  tags?: string[];
+  /**
+   * 取り込む先（front matter の `path`、無ければ `scope` と題名からの既定）。
+   */
+  target: string;
+  /**
+   * 取り込み先に既にページがある（accept は `overwrite` が要る）。
+   */
+  target_exists: boolean;
+  title: string;
+}
+/**
+ * `GET /knowledge/page`。`crate::docs::DocPage` と同じ形（描画・履歴・etag）。
+ */
+export interface KnowledgePage {
+  confidence?: Confidence | null;
+  /**
+   * いまの中身の sha256。`PUT` にそのまま渡す。
+   */
+  etag?: string | null;
+  /**
+   * 直近 20 件（新しい順）。
+   */
+  history: DocCommit[];
+  /**
+   * サーバで描画した HTML（生 HTML は捨ててある）。
+   */
+  html: string;
+  path: string;
+  /**
+   * Markdown のもと（front matter を含む）。`too_large` なら空。
+   */
+  raw: string;
+  root: string;
+  scope?: string | null;
+  sources?: string[];
+  tags?: string[];
+  title: string;
+  too_large: boolean;
+  updated?: string | null;
+}
+/**
+ * `PUT /knowledge/page` の本文。
+ */
+export interface KnowledgePagePutBody {
+  body: string;
+  /**
+   * 既にあるページを直すときは必須（無ければ 409 `etag_mismatch`）。
+   */
+  etag?: string | null;
+  /**
+   * コミットメッセージ（既定 `knowledge: <path>`）。
+   */
+  message?: string | null;
+  path: string;
+}
+/**
+ * `PUT /knowledge/page` と `inbox/{id}/accept` の応答。
+ */
+export interface KnowledgePageResult {
+  etag?: string | null;
+  path: string;
+  /**
+   * 新しいコミットの sha。
+   */
+  sha: string;
+  /**
+   * 中身が同じだったので新しいコミットは作らなかった。
+   */
+  unchanged: boolean;
+}
+/**
+ * `POST /knowledge/inbox/{id}/reject` の応答。
+ */
+export interface KnowledgeRejectResult {
+  id: string;
+  sha: string;
+}
+/**
+ * Phase 61（ADR-0047 D3 / D5）: 知識ベース。ツリー・ページ・編集・`_inbox`。
+ */
+export interface KnowledgeTree {
+  /**
+   * `index.json` を作った時刻（RFC 3339）。
+   */
+  generated_at?: string | null;
+  /**
+   * `_inbox/` にある候補の数（画面のバッジ）。
+   */
+  inbox_count: number;
+  /**
+   * `celerisctl knowledge init` が済んでいるか。偽なら `items` は空。
+   */
+  initialized: boolean;
+  items: KnowledgeItem[];
+  /**
+   * `?q=` で絞ったならその文字列。
+   */
+  q?: string | null;
+  /**
+   * KB の根（絶対パス）。
+   */
+  root: string;
+  /**
+   * `?scope=` で絞ったならその文字列。
+   */
+  scope?: string | null;
+  /**
+   * KB にある scope の一覧（画面のツリーの見出し。`user` / `environment/clusters` / `projects/<slug>` …）。
+   */
+  scopes?: string[];
+  /**
+   * [`MAX_TREE_PAGES`] で切った。
+   */
+  truncated: boolean;
+}
+/**
+ * ツリーの 1 件（`GET /knowledge/tree`）。
+ */
+export interface KnowledgeItem {
+  confidence?: Confidence | null;
+  /**
+   * KB の根からの相対パス（`environment/clusters/pegasus.md`）。
+   */
+  path: string;
+  /**
+   * front matter の `scope`（無ければ置き場から決めた既定）。
+   */
+  scope?: string | null;
+  sources?: string[];
+  tags?: string[];
+  title: string;
+  /**
+   * RFC 3339 か `YYYY-MM-DD`（front matter の `updated` → 最後のコミット）。
+   */
+  updated?: string | null;
 }
 /**
  * GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。

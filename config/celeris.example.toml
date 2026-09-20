@@ -108,6 +108,22 @@ dir = "../memory"
 # build_dir = "~/.local/celeris/containers"
 # build_timeout_secs = 1800
 
+# 知識ベース（ADR-0047 D1 / D2、Phase 61）。**正本は root の下の Markdown**（DB でも外部サービスでもない）。
+#
+#   root           — 正本の置き場（既定 "~/knowledge"）。**celeris は作らない**。
+#                    人が 1 回だけ `celerisctl knowledge init` で用意する（リポジトリ化 + 骨組み + 雛形 + 索引）。
+#                    無ければ GUI の「知識」は `initialized: false`、前置きの索引は空（エラーにはしない）。
+#   default_mounts — 実効 profile（ADR-0046 D1）の `knowledge` が何も言わないときに全ノードが継ぐマウント。
+#                    `kb:<scope>` / `repo:<name>[:<docs>]` / `dir:<path>` / `memory[:<node>]`。
+#                    案件のタスクにはこれに加えて `projects/<案件 slug>` が自動で付く。
+#                    綴りを間違えると起動時に設定エラー（黙って無視しない）。
+#
+# ワーカーは `celerisctl knowledge search|get|record` で読み書きする（HTTP は使わない）。コンテナ実行では
+# root を同じパスに読み取り専用で、`_inbox` だけ書き込み可でマウントする（ADR-0043 D3 / ADR-0047 D3）。
+[knowledge]
+# root = "~/knowledge"
+# default_mounts = ["kb:user", "kb:environment"]
+
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]
 # adapter = "claude-code"

@@ -3232,3 +3232,90 @@ production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/
 - 決めたこと・未解決・提案は **taskd 側の `docs/PROGRESS.md` の「Phase 57」**（P57-1〜P57-6、
   とくに **P57-4「GUI は `html` ではなく `raw` を描く」**＝`dangerouslySetInnerHTML` の禁止を守る）に
   まとめてある。ここでは重複して書かない。
+
+---
+
+## Phase G21 — 知識ベースの画面（ADR-0047 D5。2026-09-20）
+
+- 完了日: 2026-09-20
+- 目的: celeris Phase 61（ADR-0047 D5）で入った「知識ベース（**正本は `[knowledge] root` の Markdown**）」を
+  画面にする。使う API は 6 つ（`docs/celeris-api-v1.md` §3.98〜3.103、エンドポイント 87〜92。
+  **変更系はすべて管理系**）: `GET /knowledge/tree`、`GET|PUT /knowledge/page`、`GET /knowledge/inbox`、
+  `POST /knowledge/inbox/{id}/accept`、`POST /knowledge/inbox/{id}/reject`。
+
+### 作ったもの
+
+- `app/routes/knowledge.tsx`（`/knowledge`。左は置き場ごとに束ねたツリー + 検索（`?q=`） + 置き場の絞り込み
+  （`?scope=`）、右は選んだページ（`?path=`）の描画・メタ情報・編集フォーム・履歴）。
+- `app/routes/knowledge.inbox.tsx`（`/knowledge/inbox`。`_inbox` の候補を 1 枚ずつ出し、取り込み先を
+  書き換えられる accept（`overwrite` のチェック付き）と reject）。**別ルートにした**（`/knowledge` の中の
+  タブではなく）: 候補は索引にも検索にも出ない別の世界で、`GET /knowledge/inbox` も別の呼び出しだから。
+- `app/routes.ts` に 2 行（`reports` の前）、`app/root.tsx` の `NAV_GROUPS`「業務」に「知識」（`database`）。
+- `app/celeris/knowledge.ts`（読み取りの中継。`loadKnowledge` / `loadKnowledgeInbox` / `readKnowledgeQuery`）、
+  `app/celeris/knowledge-admin.server.ts`（変更系。§3.100 / §3.102 / §3.103）、
+  `app/celeris/action-types.ts` に `KnowledgeOpOutcome`。
+- `app/lib/knowledge.ts`（**純粋関数**。置き場ごとの束ね方・URL・パスの検査・front matter の読み取り・
+  出典の開き先・`[[相対パス]]` と `celeris:task/<id>` の書き換え）と `app/components/KnowledgeMeta.tsx`
+  （置き場 / タグ / 出典 / 確度 / 更新。ページと候補で共用）。
+- `app/lib/labels.ts` に知識ベースの言葉と `knowledgeErrorHint`。
+- `test/mock-celeris/fixtures.ts` に 7 つ（`knowledgeTree` / `knowledgeTreeUninitialized` / `knowledgePage` /
+  `knowledgePageResult` / `knowledgeRejectResult` / `knowledgeInbox` / `knowledgeCandidate`）と
+  `test/mock-celeris/server.ts` に `serveKnowledge`（6 経路を一度に登録）。
+- `test/unit/knowledge.test.ts`（**27 件**）。
+
+### 決めたこと
+
+- **G21-1: `html` は使わない。`raw` を `react-markdown` で描く。** celeris は `html` も返すが、
+  `dangerouslySetInnerHTML` の禁止（gui/CLAUDE.md、DESIGN §8.3）を守る。文書タブ（G20 / P57-4）と同じ判断。
+  `celeris:task/<ULID>` は `/tasks/<ULID>` に、`[[相対パス.md]]` は `/knowledge?path=…` に、
+  **KB の根の外に出るものは文字のまま**（`resolveKnowledgePath` が `null` を返す）。
+- **G21-2: 「用意する」ボタンは出さない。** `initialized === false` のときは置き場（`root`）を見せて
+  「`celerisctl knowledge init` で用意してください」と書くだけ（init の API が無い。§3.98）。
+  `[knowledge] root` 自体が無い 409 `knowledge_unavailable` は別の板で `detail` + 案内を出す。
+- **G21-3: 送る前のパスの検査は「先に見せるだけ」。** `knowledgePathProblem` が `..`・絶対パス・`\`・
+  `.md` で終わらないもの・`_inbox/` を止めるが、**判定の正本は celeris**（403 `path_forbidden` /
+  422 `validation`）。GUI は通してしまっても構わない前提で、保存ボタンを無効にするだけ。
+- **G21-4: `?q=` のときは束ねない。** 検索の並びは celeris が決める（タグ一致数 → title 一致数 → 本文 →
+  `updated` の新しい順。ADR-0047 D3）ので、束ねると順位が壊れる。`?q=` があれば平らな一覧を
+  celeris が返した順のまま出し、無いときだけ `scopes` + ディレクトリで束ねる。
+- **G21-5: 出典（`sources[]`）の開き先。** `task:<ULID>` → `/tasks/<ULID>`、
+  `url:<…>` → 外部リンク（`target="_blank" rel="noreferrer noopener"`。**`http`/`https` だけ**。
+  `javascript:` 等は文字のまま）、`message:<id>` と `human` は文字のまま。
+- **G21-6: front matter の読み取りは編集画面のためだけ。** `parseKnowledgeFrontMatter` は
+  `key: value` / `key: [a, b]` / `key:` + `- a` という**ごく狭い YAML** しか読まない。
+  書いている最中の本文を人に見せ返す用で、正本は保存後に celeris が返す `KnowledgePage`。
+
+### 実行したコマンドと出力の要点
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| 型が生成できる・二度目で変わらない | `pnpm gen:types`（2 回） | exit 0。`app/celeris/types.ts` の sha256 は 2 回目も `c10e490b…` で**同一**（生成は冪等）。HEAD との差分は **+193 行 / -0 行**＝`Confidence` と `Knowledge*` 9 型の追加だけ（celeris 側の `docs/api/v1/api-v1.schema.json` が未コミットなので `git diff --exit-code` は 1 を返す。スキーマを含めてコミットすれば 0） |
+| lint | `pnpm lint` | exit 0。`Checked 211 files in 84ms. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（`react-router typegen && tsc -b`、出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 55 passed (55) / Tests 802 passed (802)**。うち `test/unit/knowledge.test.ts` が **27 件** |
+| build | `pnpm build` | exit 0。client 127 modules / SSR ともに成功。新しいチャンク `knowledge-*.js`（12.52 kB）・`knowledge.inbox-*.js`（6.77 kB）・`KnowledgeMeta-*.js`（5.32 kB） |
+| e2e | （実行せず） | `pnpm e2e` は実 celeris のバイナリが要るのでこの枝では**動かしていない**。知識ベースの e2e は celeris 側の `[knowledge] root` を設定した fixture が必要 |
+
+### 未解決事項
+
+- **U1: e2e が無い。** `/knowledge` と `/knowledge/inbox` は unit（純粋関数 + mock celeris）だけで見ている。
+  実 celeris に `[knowledge] root` と `celerisctl knowledge init` 済みの KB を用意する fixture
+  （`test/celeris/celeris.toml.tmpl` に `[knowledge]`）を足せば e2e にできる。
+- **U2: 候補の件数バッジがナビに出ない。** `tree.inbox_count` は `/knowledge` のヘッダにしか出していない。
+  ナビのバッジ（「認可」「報告」と同じ）にするには root の loader で `GET /knowledge/tree` を引く必要があり、
+  全画面に 1 回の呼び出しを足すことになるので今回は見送った。
+- **U3: ページの削除が無い。** `DELETE /knowledge/page` は API に無い（文書には §3.96 がある）。
+  画面にも出していない。消すのは手元の git で。
+
+### 提案
+
+- **P-G21-1: `docs/celeris-api-v1.md` §3.98 の `scopes` の意味を書き足してほしい。**
+  いまは「ページのあるディレクトリの一覧」とあるが、`?scope=` は「KB 相対の接頭辞**か** front matter の
+  `scope` の値（`project:pluvio`）」の両方を受ける。`scopes[]` に返るのがどちらの世界の値なのか
+  （ディレクトリだけか、front matter の `scope` も混ざるか）が読み取れない。GUI は
+  「`scopes` はディレクトリ、`items[].scope` は front matter」と解釈して**別々に**出している。
+- **P-G21-2: §3.101 の `created` の形を決めてほしい。** `KnowledgeItem.updated` は「RFC 3339 か
+  `YYYY-MM-DD`」と書いてあるが、`KnowledgeCandidate.created` には何も書いていない。GUI はそのまま出している。
+- **P-G21-3: `GET /knowledge/tree` に `?q=` を付けたときの `scopes` の扱い。** 絞った結果に合わせて
+  減るのか、KB 全体のままなのかが書かれていない。GUI は `?q=` のときツリーを束ねない（G21-4）ので
+  実害は無いが、絞り込みの `<select>` には `scopes` をそのまま出している。

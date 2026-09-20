@@ -128,6 +128,14 @@ pub fn git(dir: &Path, args: &[&str], timeout: Duration) -> Option<CmdOutput> {
     run(cmd, timeout)
 }
 
+/// 任意の子プロセスを 1 つ起こす（上限つき）。`git` が無い環境での `grep` の代わりなど、
+/// **`git` 以外の決定的な道具**を呼ぶときだけ使う（ADR-0047 D3 の全文検索のフォールバック）。
+pub fn run_with_timeout(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Option<CmdOutput> {
+    let mut cmd = Command::new(program);
+    cmd.current_dir(dir).args(args);
+    run(cmd, timeout)
+}
+
 fn git_ok(dir: &Path, args: &[&str]) -> bool {
     git(dir, args, GIT_TIMEOUT).is_some_and(|o| o.ok)
 }

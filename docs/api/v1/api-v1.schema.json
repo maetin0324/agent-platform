@@ -1643,6 +1643,15 @@
       ],
       "type": "object"
     },
+    "Confidence": {
+      "description": "ADR-0047 D1 / D4。",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ],
+      "type": "string"
+    },
     "ConfigView": {
       "description": "`GET /config`: `config.toml` の要約。env の値・トークンは含めない。celeris が起動時に作る。",
       "properties": {
@@ -3665,6 +3674,403 @@
           "type": "string"
         }
       ]
+    },
+    "KnowledgeAcceptBody": {
+      "additionalProperties": false,
+      "description": "`POST /knowledge/inbox/{id}/accept` の本文（省略してよい）。",
+      "properties": {
+        "overwrite": {
+          "default": false,
+          "description": "宛先が既にあっても上書きする。",
+          "type": "boolean"
+        },
+        "path": {
+          "default": null,
+          "description": "取り込む先（省略なら候補の front matter の `path`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "KnowledgeCandidate": {
+      "description": "`_inbox/` の候補 1 件。",
+      "properties": {
+        "body": {
+          "description": "本文（front matter を除く）。",
+          "type": "string"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Confidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "description": "本文を描画した HTML（生 HTML は捨ててある）。",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "description": "`_inbox/<id>.md`。",
+          "type": "string"
+        },
+        "scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sources": {
+          "description": "`task:<id>` / `message:<id>` / `human` / `url:<…>`（GUI は出典へのリンクにする）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "target": {
+          "description": "取り込む先（front matter の `path`、無ければ `scope` と題名からの既定）。",
+          "type": "string"
+        },
+        "target_exists": {
+          "description": "取り込み先に既にページがある（accept は `overwrite` が要る）。",
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "title",
+        "target",
+        "body",
+        "html",
+        "target_exists"
+      ],
+      "type": "object"
+    },
+    "KnowledgeInbox": {
+      "description": "`GET /knowledge/inbox`。",
+      "properties": {
+        "initialized": {
+          "type": "boolean"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/KnowledgeCandidate"
+          },
+          "type": "array"
+        },
+        "root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "initialized",
+        "items"
+      ],
+      "type": "object"
+    },
+    "KnowledgeItem": {
+      "description": "ツリーの 1 件（`GET /knowledge/tree`）。",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Confidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "description": "KB の根からの相対パス（`environment/clusters/pegasus.md`）。",
+          "type": "string"
+        },
+        "scope": {
+          "description": "front matter の `scope`（無ければ置き場から決めた既定）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated": {
+          "description": "RFC 3339 か `YYYY-MM-DD`（front matter の `updated` → 最後のコミット）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "title"
+      ],
+      "type": "object"
+    },
+    "KnowledgePage": {
+      "description": "`GET /knowledge/page`。`crate::docs::DocPage` と同じ形（描画・履歴・etag）。",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Confidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "etag": {
+          "description": "いまの中身の sha256。`PUT` にそのまま渡す。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "history": {
+          "description": "直近 20 件（新しい順）。",
+          "items": {
+            "$ref": "#/$defs/DocCommit"
+          },
+          "type": "array"
+        },
+        "html": {
+          "description": "サーバで描画した HTML（生 HTML は捨ててある）。",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "raw": {
+          "description": "Markdown のもと（front matter を含む）。`too_large` なら空。",
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        },
+        "scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        },
+        "too_large": {
+          "type": "boolean"
+        },
+        "updated": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "root",
+        "path",
+        "title",
+        "raw",
+        "html",
+        "history",
+        "too_large"
+      ],
+      "type": "object"
+    },
+    "KnowledgePagePutBody": {
+      "additionalProperties": false,
+      "description": "`PUT /knowledge/page` の本文。",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "etag": {
+          "default": null,
+          "description": "既にあるページを直すときは必須（無ければ 409 `etag_mismatch`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "default": null,
+          "description": "コミットメッセージ（既定 `knowledge: <path>`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "body"
+      ],
+      "type": "object"
+    },
+    "KnowledgePageResult": {
+      "description": "`PUT /knowledge/page` と `inbox/{id}/accept` の応答。",
+      "properties": {
+        "etag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha": {
+          "description": "新しいコミットの sha。",
+          "type": "string"
+        },
+        "unchanged": {
+          "description": "中身が同じだったので新しいコミットは作らなかった。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "sha",
+        "unchanged"
+      ],
+      "type": "object"
+    },
+    "KnowledgeRejectResult": {
+      "description": "`POST /knowledge/inbox/{id}/reject` の応答。",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "sha"
+      ],
+      "type": "object"
+    },
+    "KnowledgeTree": {
+      "description": "`GET /knowledge/tree`。",
+      "properties": {
+        "generated_at": {
+          "description": "`index.json` を作った時刻（RFC 3339）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inbox_count": {
+          "description": "`_inbox/` にある候補の数（画面のバッジ）。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initialized": {
+          "description": "`celerisctl knowledge init` が済んでいるか。偽なら `items` は空。",
+          "type": "boolean"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/KnowledgeItem"
+          },
+          "type": "array"
+        },
+        "q": {
+          "description": "`?q=` で絞ったならその文字列。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root": {
+          "description": "KB の根（絶対パス）。",
+          "type": "string"
+        },
+        "scope": {
+          "description": "`?scope=` で絞ったならその文字列。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "description": "KB にある scope の一覧（画面のツリーの見出し。`user` / `environment/clusters` / `projects/<slug>` …）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "[`MAX_TREE_PAGES`] で切った。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "root",
+        "initialized",
+        "items",
+        "inbox_count",
+        "truncated"
+      ],
+      "type": "object"
     },
     "Lease": {
       "description": "DESIGN §4.1 の `Lease`。ADR-0002 D7: `expires_at` は\n`budget.max_wall_secs + 猶予` から `acquire_lease` 呼び出し側が計算する。",
@@ -8676,6 +9082,28 @@
     "integrate_result": {
       "$ref": "#/$defs/IntegrateResult"
     },
+    "knowledge_accept": {
+      "$ref": "#/$defs/KnowledgeAcceptBody"
+    },
+    "knowledge_inbox": {
+      "$ref": "#/$defs/KnowledgeInbox"
+    },
+    "knowledge_page": {
+      "$ref": "#/$defs/KnowledgePage"
+    },
+    "knowledge_page_put": {
+      "$ref": "#/$defs/KnowledgePagePutBody"
+    },
+    "knowledge_page_result": {
+      "$ref": "#/$defs/KnowledgePageResult"
+    },
+    "knowledge_reject_result": {
+      "$ref": "#/$defs/KnowledgeRejectResult"
+    },
+    "knowledge_tree": {
+      "$ref": "#/$defs/KnowledgeTree",
+      "description": "Phase 61（ADR-0047 D3 / D5）: 知識ベース。ツリー・ページ・編集・`_inbox`。"
+    },
     "memory": {
       "$ref": "#/$defs/MemoryView",
       "description": "GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。"
@@ -8970,6 +9398,13 @@
     "doc_page_result",
     "docs_init",
     "artifact_promote",
+    "knowledge_tree",
+    "knowledge_page",
+    "knowledge_page_put",
+    "knowledge_page_result",
+    "knowledge_inbox",
+    "knowledge_accept",
+    "knowledge_reject_result",
     "daemon",
     "config",
     "stream_hello",

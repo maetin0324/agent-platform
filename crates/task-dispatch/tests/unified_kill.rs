@@ -131,6 +131,7 @@ fn dispatcher(store: Arc<dyn TaskStore>, adapter: Arc<dyn WorkerAdapter>, worksp
             releases_dir: None,
             // ADR-0043 D3（Phase 56）: このテストはホスト実行だけを見る（コンテナは要求しない）。
             containers: task_dispatch::ContainersRuntimeConfig::default(),
+            knowledge: task_dispatch::KnowledgeRuntimeConfig::default(),
         },
     )
 }

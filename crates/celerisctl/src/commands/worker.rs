@@ -692,6 +692,7 @@ mod tests {
             workspace: Default::default(),
             github: Default::default(),
             containers: Default::default(),
+            knowledge: Default::default(),
             source_path: None,
         }
     }

@@ -19,6 +19,9 @@ export default [
   route("projects/:id/docs", "routes/projects.$id.docs.tsx"),
   // ボード（ADR-0044 D4、Phase 53）。案件を選んで 6 列で見る。絞り込みは URL がそのまま状態
   route("board", "routes/board.tsx"),
+  // 知識ベース（ADR-0047 D5、Phase 61 / G21）。候補（`_inbox`）は兄弟のルートに分ける
+  route("knowledge", "routes/knowledge.tsx"),
+  route("knowledge/inbox", "routes/knowledge.inbox.tsx"),
   route("reports", "routes/reports.tsx"),
   // resource route（コンポーネント無し）。`/reports` の行の展開・`sources_expanded` の追い掛けに使う
   route("reports/:id", "routes/reports.$id.tsx"),
