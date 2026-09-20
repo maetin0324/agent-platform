@@ -1,6 +1,6 @@
 //! プロバイダ（アカウント）の管理（ADR-0017）。`create`/`patch`/`delete` は `providers.d/<id>.toml` への
 //! ファイル読み書きだけで完結する（LLM もワーカーも起動しない、DESIGN §5.10 の境界を守る）。`reload`/`check` は
-//! 稼働中の `Dispatcher` の差し替え・実際のワーカー起動が要るので、taskd（task-worker/task-dispatch に依存する側）
+//! 稼働中の `Dispatcher` の差し替え・実際のワーカー起動が要るので、celeris（task-worker/task-dispatch に依存する側）
 //! へ `AdminRequest` で委譲する（ADR-0017 M2）。
 
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 
 use crate::types::ProviderConfigView;
 
-/// task-api → taskd（`ApiSettings.admin_tx` 経由）。稼働中の `Dispatcher`・ワーカーの起動が要る操作だけを運ぶ。
+/// task-api → celeris（`ApiSettings.admin_tx` 経由）。稼働中の `Dispatcher`・ワーカーの起動が要る操作だけを運ぶ。
 pub enum AdminRequest {
     /// 設定ファイルと `providers.d/` を読み直し、稼働中のプロバイダ選定・アダプタ一式を差し替える。
     Reload { reply: oneshot::Sender<Result<(), String>> },
@@ -48,7 +48,7 @@ pub enum AdminRequest {
         id: String,
         reply: oneshot::Sender<Result<(), AccountAdminError>>,
     },
-    /// S2+S8: `DELETE /accounts/{id}`。taskd 側（ディスパッチャの権威ある `account_in_use`）で行う
+    /// S2+S8: `DELETE /accounts/{id}`。celeris 側（ディスパッチャの権威ある `account_in_use`）で行う
     /// （task-api のスナップショット由来の `in_use` はレースしうるため。ADR-0024 D5 の実装をここへ寄せる）。
     AccountRemove {
         adapter: AccountAdapter,
@@ -73,8 +73,8 @@ pub enum AdminRequest {
         id: String,
         reply: oneshot::Sender<Result<(), ClusterAdminError>>,
     },
-    /// ADR-0037 D4（Phase 39）: `POST /notify/test`。taskd が `[secrets]` から webhook の URL を読み、
-    /// その場で 1 通送る（HTTP クライアントを持つのは taskd 側だけ）。
+    /// ADR-0037 D4（Phase 39）: `POST /notify/test`。celeris が `[secrets]` から webhook の URL を読み、
+    /// その場で 1 通送る（HTTP クライアントを持つのは celeris 側だけ）。
     NotifyTest {
         reply: oneshot::Sender<Result<NotifyTestOutcome, NotifyAdminError>>,
     },
@@ -127,7 +127,7 @@ pub struct AccountLoginCodeOutcome {
 pub enum AccountAdminError {
     /// 指定した id のアカウントディレクトリが無い。
     NotFound,
-    /// `[accounts]` が設定されていない、または taskd 側に届かなかった。
+    /// `[accounts]` が設定されていない、または celeris 側に届かなかった。
     Unavailable(String),
     /// `login/code` を呼んだが進行中のログインが無い。
     LoginNotStarted,
@@ -191,19 +191,19 @@ pub enum ClusterAdminError {
     Failed(String),
 }
 
-/// `check` が完了できなかった理由（taskd 側の都合。ハンドラがこれを HTTP へ写す）。
+/// `check` が完了できなかった理由（celeris 側の都合。ハンドラがこれを HTTP へ写す）。
 #[derive(Debug, Clone)]
 pub enum CheckError {
     /// 指定した id が現在の設定（`[[providers]]` + `providers.d/`）に無い。
     NotFound,
     /// 設定の再読込に失敗した（`Config::load` のエラー文言）。
     ConfigInvalid(String),
-    /// 受け取り側（taskd）に届かなかった（チャネルが閉じている・タイムアウト）。
+    /// 受け取り側（celeris）に届かなかった（チャネルが閉じている・タイムアウト）。
     Unavailable(String),
 }
 
-/// `providers.d/<id>.toml` の中身（`taskd::config::ProviderConfig` と同じ形。ADR-0017 M1）。
-/// task-api は taskd に依存できない（循環依存になる）ので、独立に同じ形の型を持つ。
+/// `providers.d/<id>.toml` の中身（`celeris::config::ProviderConfig` と同じ形。ADR-0017 M1）。
+/// task-api は celeris に依存できない（循環依存になる）ので、独立に同じ形の型を持つ。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfigFile {
     pub id: String,

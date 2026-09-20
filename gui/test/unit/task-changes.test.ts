@@ -1,6 +1,15 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import {
+  integrateChange,
+  loadTaskChanges,
+  mergePullRequest,
+  readIntegrateBody,
+  readTaskChangesQuery,
+} from "~/celeris/task-changes";
+import type { ProjectDetail } from "~/celeris/types";
 import {
   CHANGES_MISSING_LABEL,
   changedFileStatusLabel,
@@ -21,15 +30,6 @@ import {
   taskChangesHref,
 } from "~/lib/task-changes";
 import { loadProjectDetail } from "~/routes/projects.$id";
-import { TaskdClient } from "~/taskd/client.server";
-import {
-  integrateChange,
-  loadTaskChanges,
-  mergePullRequest,
-  readIntegrateBody,
-  readTaskChangesQuery,
-} from "~/taskd/task-changes";
-import type { ProjectDetail } from "~/taskd/types";
 import {
   changeDiffView,
   changesView,
@@ -37,21 +37,21 @@ import {
   integrateResult,
   repoChangesView,
   taskIntegration,
-} from "../mock-taskd/fixtures";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+} from "../mock-celeris/fixtures";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * 変更の取り込み（ADR-0043 D5、taskd Phase 54 / G18）。DOM を描画する unit テストが無い（G10-U1）ので、
+ * 変更の取り込み（ADR-0043 D5、celeris Phase 54 / G18）。DOM を描画する unit テストが無い（G10-U1）ので、
  * 表示の判断は `~/lib/task-changes.ts` / `~/lib/labels.ts` の純粋関数、取得と送信は
- * `~/taskd/task-changes.ts` で見る（`test/unit/task-files.test.ts` と同じ作り）。
+ * `~/celeris/task-changes.ts` で見る（`test/unit/task-files.test.ts` と同じ作り）。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -127,12 +127,12 @@ describe("言葉（知らない値は素のまま）", () => {
     expect(integrationStateLabel("queued")).toBe("queued");
   });
 
-  it("「取り込む」ボタンは taskd が返した default_branch を使う（main とは限らない）", () => {
+  it("「取り込む」ボタンは celeris が返した default_branch を使う（main とは限らない）", () => {
     expect(integrateMergeLabel("main")).toBe("main に取り込む");
     expect(integrateMergeLabel("develop")).toBe("develop に取り込む");
   });
 
-  it("PR を作れない理由（`origin` / `gh` は taskd が判定した値）", () => {
+  it("PR を作れない理由（`origin` / `gh` は celeris が判定した値）", () => {
     expect(prUnavailableReason(true, true)).toBeNull();
     expect(prUnavailableReason(false, true)).toBe("origin リモートが無いので PR を作れません");
     expect(prUnavailableReason(true, false)).toBe("gh が使えない（PATH に無い・未認証）ので PR を作れません");
@@ -176,7 +176,7 @@ describe("taskChangesHref / readTaskChangesQuery", () => {
 });
 
 describe("loadTaskChanges (GET /tasks/{id}/changes)", () => {
-  it("一覧: taskd の並びと値をそのまま返す（ファイルを選ばなければ差分は引かない）", async () => {
+  it("一覧: celeris の並びと値をそのまま返す（ファイルを選ばなければ差分は引かない）", async () => {
     const changes = changesView();
     mock.on("GET", "/api/v1/tasks/t1/changes", (_req, res) => sendJson(res, 200, changes));
 
@@ -202,7 +202,7 @@ describe("loadTaskChanges (GET /tasks/{id}/changes)", () => {
     expect(result.diff?.diff).toContain("@@ -1,3 +1,3 @@");
     expect(result.diffError).toBeNull();
     const diffReq = mock.requests.find((r) => r.url.startsWith("/api/v1/tasks/t1/changes/benchfs/diff"));
-    expect(new URL(diffReq?.url ?? "", "http://mock-taskd.invalid").searchParams.get("path")).toBe("src/lib.rs");
+    expect(new URL(diffReq?.url ?? "", "http://mock-celeris.invalid").searchParams.get("path")).toBe("src/lib.rs");
   });
 
   it("repo だけ・file だけのときは差分を引かない（400 `path` 必須を踏みに行かない）", async () => {
@@ -224,7 +224,7 @@ describe("loadTaskChanges (GET /tasks/{id}/changes)", () => {
     expect(result.diff?.truncated).toBe(true);
   });
 
-  it("差分の 403 / 404 は一覧を出したまま taskd の文言を diffError に載せる", async () => {
+  it("差分の 403 / 404 は一覧を出したまま celeris の文言を diffError に載せる", async () => {
     mock.on("GET", "/api/v1/tasks/t1/changes", (_req, res) => sendJson(res, 200, changesView()));
     mock.on("GET", "/api/v1/tasks/t1/changes/benchfs/diff", (_req, res) =>
       sendProblem(res, { status: 403, code: "path_forbidden", detail: "path escapes the repo: ../../etc/passwd" }),
@@ -293,7 +293,7 @@ describe("readIntegrateBody（空欄はキーごと送らない）", () => {
 });
 
 describe("integrateChange (POST /tasks/{id}/changes/{repo}/integrate)", () => {
-  const onIntegrate = (handler: Parameters<MockTaskd["on"]>[2]) =>
+  const onIntegrate = (handler: Parameters<MockCeleris["on"]>[2]) =>
     mock.on("POST", "/api/v1/tasks/t1/changes/benchfs/integrate", handler);
 
   it("merge: 本文をそのまま送り、200 の記録を返す", async () => {
@@ -474,7 +474,7 @@ describe("案件の「PR と取り込み」（GET /projects/{id}/integrations）
     tasks: [],
   };
 
-  it("taskd の並び（新しい順）をそのまま通す", async () => {
+  it("celeris の並び（新しい順）をそのまま通す", async () => {
     mock.on("GET", "/api/v1/projects/p1", (_req, res) => sendJson(res, 200, detail));
     mock.on("GET", "/api/v1/projects/p1/integrations", (_req, res) => sendJson(res, 200, defaultProjectIntegrations));
 
@@ -513,9 +513,9 @@ describe("画面の作り（ソースの確認。G10-U1 の制約）", () => {
     expect(component).toContain("export function TaskChanges");
   });
 
-  it("クライアントから taskd を呼ばない（fetch も TASKD_API_URL も無い）", () => {
+  it("クライアントから celeris を呼ばない（fetch も CELERIS_API_URL も無い）", () => {
     expect(component).not.toContain("fetch(");
-    expect(component).not.toContain("TASKD_API_URL");
+    expect(component).not.toContain("CELERIS_API_URL");
     expect(projectIntegrations).not.toContain("fetch(");
   });
 

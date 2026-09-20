@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { CelerisError } from "~/celeris/errors";
+import type { MilestoneView, OrgList, ProjectDetail, ProjectList } from "~/celeris/types";
 import { loadBoard } from "~/routes/board";
-import { TaskdClient } from "~/taskd/client.server";
-import { TaskdError } from "~/taskd/errors";
-import type { MilestoneView, OrgList, ProjectDetail, ProjectList } from "~/taskd/types";
-import { taskSummary } from "../mock-taskd/fixtures";
-import { type MockTaskd, sendJson, sendProblem, serveTaskManagement, startMockTaskd } from "../mock-taskd/server";
+import { taskSummary } from "../mock-celeris/fixtures";
+import { type MockCeleris, sendJson, sendProblem, serveTaskManagement, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * `/board`（ADR-0044 D4）の loader。**絞り込みは taskd に丸投げ**なので、ここで見るのは
+ * `/board`（ADR-0044 D4）の loader。**絞り込みは celeris に丸投げ**なので、ここで見るのは
  * 「URL の検索パラメータが `GET /tasks` のクエリにどう写るか」と「補助の読み取りが落ちても出ること」。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 const PROJECT_ID = "01PROJECT000000000000001";
 
@@ -53,8 +53,8 @@ const org: OrgList = {
 };
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
   serveTaskManagement(mock, { items: [taskSummary()] });
   mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, projects));
   mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, org));
@@ -89,7 +89,7 @@ describe("loadBoard", () => {
     expect(tasksQuery()).toBe("limit=500&order=created_desc");
   });
 
-  it("フィルタをそのまま `GET /tasks` のクエリに写す（繰り返しは繰り返しのまま。AND は taskd の仕事）", async () => {
+  it("フィルタをそのまま `GET /tasks` のクエリに写す（繰り返しは繰り返しのまま。AND は celeris の仕事）", async () => {
     await loadBoard(
       client,
       new Request(
@@ -154,7 +154,7 @@ describe("loadBoard", () => {
       error = e;
     }
 
-    expect(error).toBeInstanceOf(TaskdError);
-    expect((error as TaskdError).status).toBe(400);
+    expect(error).toBeInstanceOf(CelerisError);
+    expect((error as CelerisError).status).toBe(400);
   });
 });

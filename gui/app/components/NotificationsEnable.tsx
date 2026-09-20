@@ -3,7 +3,7 @@ import { cn } from "~/lib/utils";
 
 /**
  * 「通知を有効にする」（SPEC §3.5、ADR-0034 D6）。ブラウザの Notification の許可をここで求める
- * （許可が無ければ `NotificationsWatcher` は何もしない）。`taskd` には問い合わせない、純粋にブラウザ API だけの操作。
+ * （許可が無ければ `NotificationsWatcher` は何もしない）。`celeris` には問い合わせない、純粋にブラウザ API だけの操作。
  *
  * Phase G13f-1（監査 9）でナビゲーションから**報告の画面の中**へ移した（ナビの項目に見えてしまい、
  * 押すと別の画面へ行くように見えていた）。

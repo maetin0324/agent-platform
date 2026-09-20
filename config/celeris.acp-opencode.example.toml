@@ -1,0 +1,65 @@
+# ACP アダプタ（ADR-0026）の設定例。最初の実装は opencode（`opencode acp` が stdio 上の JSON-RPC で動く）を
+# 使って OpenAI 互換の LLM（ローカル vLLM / llama.cpp 等）をワーカーに使う。相対パスはこのファイルのある
+# ディレクトリ基準。
+#
+# 前提: PATH 上に opencode があること（`opencode acp` が動くこと）。opencode 側の設定ファイル（下の env の
+# OPENCODE_CONFIG が指す先）は config/opencode.openai-compat.example.json をコピーして書き換える。そこで
+# OpenAI 互換プロバイダ（`npm = "@ai-sdk/openai-compatible"`, `options.baseURL`）と既定モデル、権限を決める。
+#
+# 冷スタートの暖気（ADR-0026 D6）: 初回起動は opencode 側がプロバイダの npm パッケージ
+# （`@ai-sdk/openai-compatible`）を取得するのに数分かかる（2 回目以降は数秒）。デーモンに載せる前に一度、
+#   celerisctl worker run --config config/celeris.acp-opencode.example.toml --task <id> --provider opencode-qwen
+# で 1 回実行して暖めておく。`startup_timeout_secs`（既定 300 秒）はこの初回取得を待てるように長めにしてある。
+
+db = "../celeris-acp-demo.sqlite3"
+workspace_root = "../workspaces"
+tick_ms = 2000
+max_concurrency = 1
+lease_grace_secs = 60
+idle_timeout_secs = 300
+kill_grace_secs = 10
+review_timeout_secs = 600
+error_cooldown_secs = 300
+
+[plan]
+auto_accept = false
+
+# `[adapters.acp]` は共通設定（ADR-0026 D2）。`command`/`args`/`env`/`model` は `[[providers]]` の行ごとに
+# 上書きできる（別の ACP エージェント、例えば `goose acp` を同居させるときはプロバイダ行を増やすだけでよい。
+# コードは変えない）。
+[adapters.acp]
+# command = "opencode"          # 既定。PATH 上の opencode を使うなら省略可
+# args = ["acp"]                # 既定
+permission = "allow"            # session/request_permission への即答（"allow" | "deny"。既定 "allow"）。
+                                 # celeris は対話できず、ワークスペースは使い捨ての作業ディレクトリなので既定 allow
+model_option_id = "model"       # session/set_config_option の configId（既定 "model"。opencode 1.18.31 で
+                                 # 実機確認済み。opencode は optionId だと -32602 Invalid params を返す）
+startup_timeout_secs = 300      # initialize の応答を待つ上限。初回のプロバイダ取得で数分かかりうる
+
+[[providers]]
+id = "opencode-qwen"
+adapter = "acp"
+tiers = ["standard", "cheap"]
+concurrency = 1
+# ADR-0026 D3: 空でなければ session/set_config_option { configId: model_option_id, value: model } で設定する。
+# opencode 側の設定ファイルの "model" と合わせておく（下の env の OPENCODE_CONFIG を参照）。
+# CLI の --model フラグは使わない（acp はモデルを ACP のセッション経由で渡す）。
+model = "qwen-local/qwen3.8-27b"
+# env はこの行にだけ渡す（優先順: celeris 自身の環境 < [adapters.acp].env < この行の env。同名キーはこちらが勝つ。
+# ADR-0026 D2）。
+#
+# OPENCODE_CONFIG: celeris 側が用意した opencode の設定ファイル（config/opencode.openai-compat.example.json を
+#   コピーして書き換えたもの）。OpenAI 互換プロバイダ・既定モデル・権限をここで決める。
+# OPENCODE_DISABLE_PROJECT_CONFIG=1: **必ず**渡す。ワークスペース（run ごとの作業ディレクトリ）はエージェント
+#   自身が読み書きする使い捨ての場所なので、そこに書かれた opencode.json（エージェントが自分で作れる）に
+#   celeris が用意したこの設定を上書きさせない。渡し忘れると、エージェントが自分の権限やモデルを書き換えられて
+#   しまう（ADR-0026 D6）。
+env = { OPENCODE_CONFIG = "/home/u/celeris/opencode/qwen.json", OPENCODE_DISABLE_PROJECT_CONFIG = "1" }
+
+# OPENCODE_CONFIG が指す opencode 側の設定ファイル（config/opencode.openai-compat.example.json）では:
+#   - OpenAI 互換プロバイダを `provider.<name>.npm = "@ai-sdk/openai-compatible"` /
+#     `provider.<name>.options.baseURL = "http://<host>:<port>/v1"` で定義する
+#   - `permission.task = "deny"` にして opencode 自身のサブエージェント委譲を止める。仕事の分割は celeris の
+#     `delegate.json` → 子タスクだけで行う（SQLite に残り `celerisctl replay` で再構成できる。ADR-0026 D6 /
+#     ADR-0016）
+#   - `read` / `edit` / `bash` / `grep` / `glob` はワークスペースが使い捨てなので許可してよい

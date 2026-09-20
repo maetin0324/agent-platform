@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Runner embedded in the taskd `local-deep-research` adapter (ADR-0029 D1,
+"""Runner embedded in the celeris `local-deep-research` adapter (ADR-0029 D1,
 extended by ADR-0031 D1 for the evidence record).
 
 Contract with the adapter (crates/task-worker/src/local_deep_research.rs):
   argv[1]  path to a JSON file: {query, mode, settings, iterations,
            questions_per_iteration, report_path}
   stdout   one message per line: "progress: <text>" while running, and
-           exactly one final line "TASKD_RESULT {json}" with
+           exactly one final line "CELERIS_RESULT {json}" with
            {"summary": <=1500 chars, single line, "sources": <int>,
             "counts": {queries, search_results, sources, sources_cited,
                        unique_domains}}
@@ -19,8 +19,8 @@ On success this also writes, next to `report_path` (i.e. in the same
                     counts: {queries, search_results, sources, sources_cited,
                              unique_domains}}
 These are built mechanically from what the `local_deep_research` API
-returned -- no LLM is involved (ADR-0031 D1: "LLM に書かせない"). The taskd
-adapter reads `counts` straight off the TASKD_RESULT line to run the
+returned -- no LLM is involved (ADR-0031 D1: "LLM に書かせない"). The celeris
+adapter reads `counts` straight off the CELERIS_RESULT line to run the
 evidence gate (ADR-0031 D2); it does not re-read research.json, but writes
 it anyway for humans.
 
@@ -526,7 +526,7 @@ def main():
         return 1
 
     # ADR-0031 D1: write the evidence record next to report.md. Mechanical
-    # (no LLM), so this happens even when the gate below (taskd-side, ADR-0031
+    # (no LLM), so this happens even when the gate below (celeris-side, ADR-0031
     # D2) will later reject the run -- the files stay for a human to read.
     artifacts_dir = os.path.dirname(report_path) or "."
     with open(os.path.join(artifacts_dir, "sources.json"), "w", encoding="utf-8") as handle:
@@ -537,7 +537,7 @@ def main():
         handle.write("\n")
 
     print(
-        "TASKD_RESULT "
+        "CELERIS_RESULT "
         + json.dumps({"summary": summary_line, "sources": len(sources_list), "counts": research["counts"]})
     )
     return 0

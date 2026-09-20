@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TaskdClient } from "~/taskd/client.server";
-import { runTaskAction } from "~/taskd/route-actions.server";
-import type { TransitionResult } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { CelerisClient } from "~/celeris/client.server";
+import { runTaskAction } from "~/celeris/route-actions.server";
+import type { TransitionResult } from "~/celeris/types";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {

@@ -1,6 +1,6 @@
 //! ADR-0037 D4（Phase 39）: `GET /notify` と `POST /notify/test`。
 //!
-//! 実際の送信は taskd 側（`AdminRequest::NotifyTest`）なので、ここで見るのは task-api だけで
+//! 実際の送信は celeris 側（`AdminRequest::NotifyTest`）なので、ここで見るのは task-api だけで
 //! 完結する部分: 認証ガード（管理系は `token_file` の有無にかかわらず 401）、秘密が無いときの
 //! 409 `notify_unavailable`、委譲できたときの 200、そして **`GET /notify` に URL が出ないこと**。
 
@@ -111,7 +111,7 @@ async fn the_test_endpoint_is_409_without_a_secrets_section() {
 }
 
 #[tokio::test]
-async fn the_test_endpoint_returns_200_with_the_outcome_from_taskd() {
+async fn the_test_endpoint_returns_200_with_the_outcome_from_celeris() {
     let admin_tx = spawn_test_double(Ok(NotifyTestOutcome {
         ok: true,
         detail: Some("the test message was delivered".into()),
@@ -142,9 +142,9 @@ async fn a_failed_send_is_reported_as_ok_false() {
     assert_eq!(body["detail"], "http status 404");
 }
 
-/// taskd 側が「送れない」と言ったら 409。
+/// celeris 側が「送れない」と言ったら 409。
 #[tokio::test]
-async fn taskd_side_unavailability_becomes_409() {
+async fn celeris_side_unavailability_becomes_409() {
     let admin_tx = spawn_test_double(Err(NotifyAdminError::Unavailable(
         "no Discord webhook is registered".into(),
     )));
@@ -154,7 +154,7 @@ async fn taskd_side_unavailability_becomes_409() {
     assert_problem(&resp, 409, "notify_unavailable");
 }
 
-/// taskd に委譲できない構成（`admin_tx` が無い）は 409。
+/// celeris に委譲できない構成（`admin_tx` が無い）は 409。
 #[tokio::test]
 async fn the_test_endpoint_is_409_without_an_admin_channel() {
     let (env, _tmp) = env_with_webhook(true, Some(TOKEN.into()), None);

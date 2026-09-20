@@ -8386,3 +8386,194 @@ main（`ef639ea`）に `git merge --no-ff` で合わせた。衝突は **12 か�
   `ok=true live_ok=true`。
 - `promote.sh 3aa24c8536fc`（mode=live）: 2 秒で新が active、GUI は 48 秒で切替（load 約 6 の中）、旧は drain して exit 0。
   `current -> 3aa24c8536fc`、`previous -> a96919eebd98`。これで ADR-0043 A1〜A3 と ADR-0044 B1〜B3 がすべて本番。
+
+## Phase 58 — 全面改名 → Celeris（ADR-0045。2026-09-20）
+
+完了日: 2026-09-20（ADR-0045 D1〜D5。**実機の移行は人がこれから**行う。下の「実機の手順」）
+
+### 変更
+
+**名前**（ADR-0045 D1）:
+
+| いま | これから |
+|---|---|
+| crate / バイナリ `taskd`（`crates/taskd`） | **`celeris`**（`crates/celeris`） |
+| crate / バイナリ `taskctl`（`crates/taskctl`） | **`celerisctl`**（`crates/celerisctl`） |
+| ライブラリ crate `task-core` / `task-ops` / `task-dispatch` / `task-worker` / `task-api` | そのまま（ADR-0045 D1） |
+| `deploy/systemd/taskd@.service` / `taskd-gui@.service` | **`celeris@.service` / `celeris-gui@.service`**（旧ファイルは削除） |
+| GUI パッケージ `taskd-gui`、`/healthz.name` | **`celeris-gui`** |
+| 環境変数 `TASKD_*` | **`CELERIS_*`**（読み替えの互換は無い。unit と GUI を同時に直した） |
+| `urn:taskd:problem:*` / `urn:taskd:request:*`、`realm="taskd"` | **`urn:celeris:…`、`realm="celeris"`** |
+| ヘッダ `X-Taskd-Size` / `X-Taskd-Sha256[-Current]` | **`X-Celeris-*`**（GUI が唯一のクライアント。同時に直した） |
+| Discord の `username: "taskd"`、`User-Agent: taskd/<ver>` | **`Celeris`** / `celeris/<ver>` |
+| `manifest.json` / `GET /health` の `taskd_version` | **`celeris_version`** |
+| `config/taskd*.example.toml`（8 件） | **`config/celeris*.example.toml`** |
+| `gui/docs/taskd-api-v1.md` ほか GUI の写し 3 件 | **`celeris-api-v1.md` / `celeris-proposals.md` / `celeris-requests.md`** |
+| `gui/app/taskd/` / `gui/test/taskd/` / `gui/test/mock-taskd/` / `gui/scripts/taskd.sh` / `gui/app/hooks/useTaskdStream.ts` | **`celeris` / `celeris` / `mock-celeris` / `celeris.sh` / `useCelerisStream.ts`** |
+| クラスタ側 worktree の既定 `.taskd-worktrees` と枝の接頭辞 | **`.celeris-worktrees` / `celeris/`**（ADR-0042 D3 の「クラスタ側は据え置き」を ADR-0045 D1 の全面改名で改めた） |
+| アカウントの観測値 `<root>/.taskd-usage.json` | **`.celeris-usage.json`**（移行スクリプトが改名して引き継ぐ） |
+
+**パス**（ADR-0045 D2。XDG 流）: 設定と秘密は `~/.config/celeris/`（`config.toml` / `org.toml` / `providers.d/` /
+`api.token` / `gui.password` / `gui.session-secret` / `secrets/`）、状態は `~/.local/celeris/`（`celeris.sqlite3` /
+`releases/` / `backups/` / `staging/` / `workspaces/` / `memory/` / `logs/` / `{claude,codex}-accounts/` /
+`containers/` / `tools/{ldr,paperqa,opencode}`）。`celeris --config` の既定値は `~/.config/celeris/config.toml`
+（`~` は `$HOME` で展開）。**省略したときの既定**を新しい置き場に変えた: `db` / `workspace_root` /
+`[selfdeploy] releases_dir` / `[memory] dir` / `[containers] build_dir` / `[secrets] dir`。
+書いてあれば従来どおり（相対は設定ファイルのディレクトリ基準）。
+
+**selfdeploy**: `TASKD_HOME` → `CELERIS_CONFIG_DIR`（既定 `~/.config/celeris`）と `CELERIS_STATE_DIR`
+（既定 `~/.local/celeris`）。`SD_DB` は `config.toml` の `db =` から決まり、`CELERIS_DB` で上書きできる。
+設定ファイルそのものは `CELERIS_CONFIG` で上書きできる（移行のあいだ旧い名前のファイルを読ませるため）。
+`install-units.sh --remove-old` は `SD_OLD_UNITS`（移行スクリプトが渡す）のテンプレートを消す。
+`verify.sh` の検査 5 は `current` の実行ファイルが `bin/celeris` でも `bin/taskd` でも動く（初回の移行の `current` は改名前）。
+新しい `scripts/selfdeploy/migrate-to-celeris.sh <new sha12> [--dry-run | --rollback]`（ADR-0045 D3）。
+
+### 証拠（このワークツリーで実行。本番には 1 バイトも書いていない）
+
+- `cargo build --workspace` → exit 0。`target/debug/` に **`celeris` と `celerisctl` があり、`taskd` / `taskctl` は無い**
+  （`ls -1 target/debug | grep -E '^(celeris|celerisctl|taskd|taskctl)$'` → `celeris` / `celerisctl` の 2 行だけ）。
+- `cargo test --workspace` → exit 0、**1373 passed / 0 failed / 3 ignored**、`grep -c "^test result: FAILED"` = **0**。
+- `cargo clippy --workspace --all-targets -- -D warnings` → exit 0（警告ゼロ）。
+- `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema` と
+  `UPDATE_SCHEMA=1 cargo test -p task-worker --lib protocol::tests::committed_schema_matches_generated`
+  でスキーマを再生成（`docs/api/v1/*.json`、`docs/protocol/*.schema.json`、`docs/protocol/worker-protocol.md`）。
+  その後 `UPDATE_SCHEMA` 無しの `cargo test --workspace` で一致テストが緑。
+- GUI: `pnpm gen:types`（2 回走らせて差分ゼロ = べき等）/ `pnpm lint`（204 files、エラー 0。
+  import の並び替えは `biome check --write` で 85 件自動修正）/ `pnpm typecheck`（exit 0）/
+  `pnpm test`（**54 files / 775 tests passed**）/ `pnpm build`（exit 0）。
+- `bash scripts/sync-gui-docs.sh --check` → `sync-gui-docs: up to date`（exit 0）。
+- `bash -n` を全 26 スクリプト（`scripts/`・`gui/scripts/`・`gui/test/`・`deploy/`・`run-*phases.sh`）に → 全部 exit 0。
+- `systemd-analyze --user verify deploy/systemd/*.service` → 実機の `%h` では
+  「`/home/rmaeda/.local/celeris/releases/test_instance/bin/celeris` is not executable」1 件だけ
+  （**リリースがまだ無いだけ**。`%h` を偽の home に差し替え、そこに実行ファイルを置いて同じ検証をすると **exit 0**）。
+- `scripts/selfdeploy/lib.sh` の新しい環境変数を偽の `CELERIS_CONFIG_DIR` / `CELERIS_STATE_DIR`（`mktemp -d`）で確認:
+  `db` の相対 / 絶対 / `~` の 3 通り、`CELERIS_DB` の上書き、`CELERIS_CONFIG` の上書き、設定が無いときの既定、
+  `release.sh` の usage、`verify.sh --dry-run` の前提チェック、`status.sh` の JSON（`config_dir` / `state_dir`）。
+
+### 実機の `--dry-run`（読むだけ。2026-09-20）
+
+```
+CELERIS_CONFIG_DIR=~/.config/celeris CELERIS_STATE_DIR=~/.local/celeris \
+  scripts/selfdeploy/migrate-to-celeris.sh <sha12> --dry-run
+```
+
+exit 0。**52 件の `mv`**（`taskd.sqlite3{,-wal,-shm}` → `celeris.sqlite3*`、`releases/` の 4 リリース + `.build` + `.cargo-target`、
+`backups staging workspaces memory claude-accounts codex-accounts`、`ldr paperqa opencode` → `tools/`、
+`api.token gui.password gui.session-secret org.toml providers.d secrets` → 設定、`*.log` → `logs/`、
+`taskd.toml.bak-*` 14 件と `taskd.sqlite3.bak-*` 6 件 → `backups/pre-celeris/`、
+`{claude,codex}-accounts/.taskd-usage.json` の改名）。**知らないパスは 0 件**
+（表に無いものが 1 つでも残ったら移動の前に exit 1 する。実際、最初の実行では役割の指示文の中の
+`~/taskd/*.sqlite3` と `~/taskd/taskd.toml` で止まり、対応表に足してから通した）。書き換え後の設定のパス行:
+
+```
+db = "/home/rmaeda/.local/celeris/celeris.sqlite3"
+workspace_root = "/home/rmaeda/.local/celeris/workspaces"
+providers_include = "/home/rmaeda/.config/celeris/providers.d/*.toml"
+org_include = "/home/rmaeda/.config/celeris/org.toml"
+token_file = "/home/rmaeda/.config/celeris/api.token"
+claude_dir = "/home/rmaeda/.local/celeris/claude-accounts"
+codex_dir = "/home/rmaeda/.local/celeris/codex-accounts"
+[secrets] dir = "/home/rmaeda/.config/celeris/secrets"
+[memory]  dir = "/home/rmaeda/.local/celeris/memory"
+env = { OPENCODE_CONFIG = "/home/rmaeda/.local/celeris/tools/opencode/qwen.json", ... }
+[adapters.local_deep_research] command = "/home/rmaeda/.local/celeris/tools/ldr/.venv/bin/python"
+[adapters.paperqa] command         = "/home/rmaeda/.local/celeris/tools/paperqa/.venv/bin/pqa"
+                   settings        = "/home/rmaeda/.local/celeris/tools/paperqa/settings/qwen-local"
+                   paper_directory = "/home/rmaeda/.local/celeris/tools/paperqa/papers"
+                   index_directory = "/home/rmaeda/.local/celeris/tools/paperqa/index"
+```
+
+`/home/rmaeda/.local/bin/claude`・`/home/rmaeda/.opencode/bin/opencode` のように旧い置き場の外にある絶対パスは触らない。
+役割の指示文の中の `TASKD_*` と旧い名前も `CELERIS_*` / `celeris` に改まる（枝の接頭辞の指示も `celeris/<task-id>` になる）。
+書き換えた全文を `python3 -c "import tomllib; tomllib.load(...)"` に通して**TOML として読めること**も確認した。
+
+### `grep -rIw taskd` に残るもの（ADR-0045 §3 の受け入れ条件 1 の例外）
+
+`crates tests gui/app gui/e2e gui/test gui/server.js gui/package.json scripts deploy config CLAUDE.md
+docs/selfdeploy.md docs/workspace.md docs/gui/api.md` に対して **114 行**。内訳は次の 4 つだけ:
+
+1. **`.taskd/` の互換**（71 行。ADR-0018 D1 / ADR-0036 / ADR-0042 D2）— 共有 workspace の成果物
+   `.taskd/artifacts/<task_id>/`、クラスタのラッパ `.taskd/remote-exec`、`SYNC_ALWAYS_EXCLUDED`。
+   **既存のワークスペースとクラスタに残っているディレクトリ名**なので変えない。
+2. **migration SQL の歴史**（5 行。`crates/task-core/migrations/0009, 0011, 0012, 0013`）。
+3. **移行スクリプトと移行の手順書が旧い世界を指す記述**（36 行。
+   `scripts/selfdeploy/migrate-to-celeris.sh` 25 行と `docs/selfdeploy.md` §9 の 11 行）—
+   旧い名前を知っているのはここだけ、という置き方（ADR-0045 D4）。
+4. **`verify.sh` の検査 5 の後方互換 2 行** — `current` が改名前のリリース（`bin/taskd`）のことがあるため
+   （初回の移行では必ずそうなる）。移行が済めば当たらない。
+
+確認コマンド（1〜4 を除くと 0 行）:
+
+```
+grep -rIw taskd crates tests gui/app gui/e2e gui/test gui/server.js gui/package.json scripts deploy \
+  config CLAUDE.md docs/selfdeploy.md docs/workspace.md docs/gui/api.md \
+  | grep -v '\.taskd' | grep -v '^crates/task-core/migrations/' \
+  | grep -v '^scripts/selfdeploy/migrate-to-celeris.sh' | grep -v '^docs/selfdeploy.md' \
+  | grep -v '^scripts/selfdeploy/verify.sh'
+```
+
+### 未解決
+
+- **実機の移行はまだ**。人が下の「実機の手順」を実行する。停止 → 起動なので数十秒 API と GUI が止まる。
+- `[api] token_file` と `[accounts] claude_dir` / `codex_dir` に**暗黙の既定を入れなかった**
+  （ADR-0045 D2 からの逸脱。理由は P-58-a）。本番の設定はどちらも明示しているので、移行の結果は ADR のとおりになる。
+- クラスタ（pegasus / sirius）に残っている `.taskd-worktrees/` と旧い接頭辞のブランチは**使われなくなるだけ**
+  （celeris は消さない）。次にクラスタで走るタスクは `.celeris-worktrees/` と `celeris/<task_id>` を新しく作る。
+- 改名前のリリース（`previous` になる `3aa24c8536fc`）の `manifest.json` は旧い鍵の版数を持つので、
+  `GET /releases` / `status.sh` のその行の `celeris_version` は `null` に見える。動作には影響しない。
+- `gui/docs/PROGRESS.md` と `gui/docs/adr/*`、`docs/PROGRESS.md`、`docs/adr/*` は歴史なので書き換えていない。
+  その中の旧いファイル名へのリンクは古いままになる。
+
+### 提案
+
+- **P-58-a**: ADR-0045 D2 は `[api] token_file` の既定を `~/.config/celeris/api.token` と書いているが、
+  この 1 つだけは**「書いていない」こと自体が意味を持つ**（ADR-0013 D3: `token_file` が無い = 認証なし。
+  loopback ではそれが正しい使い方で、GUI の fixture と e2e がそれに依っている）。暗黙の既定を入れると
+  「認証なし」が表現できなくなり、ファイルが無い環境では起動が exit 2 になる。同じ理由で
+  `[accounts] claude_dir` / `codex_dir` も入れなかった（`None` = そのプールを設定していない。
+  ADR-0024 D2 / ADR-0025 D1 の検査がそれを見ている。実際、既定を入れた状態で `cargo test` を回したら
+  `ensure_accounts_dir` が**実ホームに** `~/.local/celeris/codex-accounts` を作り、検査も素通りになった。
+  作ってしまった空ディレクトリは `rmdir` で戻した）。推奨の置き場は `config/celeris.example.toml` と
+  移行スクリプトに書いた。ADR-0045 D2 にこの例外を追記したい。
+- **P-58-b**: `manifest.json` の `taskd_version` → `celeris_version` は改名だが、**過去のリリースの
+  `manifest.json` は読み替えない**（互換を残さない方針どおり）。`status.sh` / `GET /releases` が
+  古い鍵も見るようにするかは、次に困ったときに決める。
+- **P-58-c**: 移行は「設定を書き換えてみてから止める」順にしてあり、知らないパスがあれば**何も動かさずに**止まる。
+  それでも「書き換えた設定を新バイナリが読めるか」は、実際に `celeris@<new>` を起こすまで分からない。
+  起こせなければ `--rollback` で戻す（DB は schema 据え置きなのでそのまま読める）。将来
+  `celeris --check-config <path>` のような「読むだけ」の入口があると、停止の前に確かめられる。
+
+### 実機の手順（人が実行する）
+
+```bash
+cd ~/workspace/agent-platform
+# main を Phase 58 の sha に進める（ff-only）
+
+# 1. 新しい置き場でリリースを作る（本番に触れない。30〜60 分）
+CELERIS_STATE_DIR=~/.local/celeris scripts/selfdeploy/release.sh main
+#    → 出力の最後の行が <new sha12>
+
+# 2. 旧い置き場の設定と DB で検証する（本番に触れない）
+CELERIS_STATE_DIR=~/.local/celeris \
+CELERIS_CONFIG=~/taskd/taskd.toml \
+CELERIS_DB=~/taskd/taskd.sqlite3 \
+  scripts/selfdeploy/verify.sh <new sha12>
+#    → verify.json.ok = true（live_ok は false。`current` が無いので N-1 検査は行われない）
+
+# 3. 計画と書き換え後の設定を読む（何も変えない）
+scripts/selfdeploy/migrate-to-celeris.sh <new sha12> --dry-run | less
+
+# 4. 移行する（停止 → 起動。ログは ~/.local/celeris/backups/migrate-<ts>.log）
+scripts/selfdeploy/migrate-to-celeris.sh <new sha12>
+
+# 5. 確かめる
+curl -s http://127.0.0.1:7710/api/v1/health | python3 -m json.tool   # release = <new sha12>
+curl -s http://127.0.0.1:7700/healthz | python3 -m json.tool         # name = "celeris-gui"
+ls ~/.config/celeris ~/.local/celeris ; ls ~/taskd 2>&1              # ~/taskd は無い
+scripts/selfdeploy/status.sh | head -20
+
+# 戻すとき
+scripts/selfdeploy/migrate-to-celeris.sh --rollback
+```
+
+以後の昇格は従来どおり（環境変数は要らない）: `release.sh main` → `verify.sh <sha12>` → `promote.sh <sha12>`。

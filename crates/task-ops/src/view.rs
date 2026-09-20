@@ -1,6 +1,6 @@
 //! 表示用のビュー型とその組み立て（ADR-0013 D7 / D12、`docs/gui/api.md` §3.3 / §3.5 / §5.2〜§5.4 / §6.2）。
 //!
-//! `taskctl show --json`、API の `GET /tasks` / `GET /tasks/{id}` / `GET /tasks/{id}/runs` が同じ関数を使う。GUI は結果を表示するだけで
+//! `celerisctl show --json`、API の `GET /tasks` / `GET /tasks/{id}` / `GET /tasks/{id}/runs` が同じ関数を使う。GUI は結果を表示するだけで
 //! 再計算しない。I/O はストアの読み取りだけで、ファイル（`runs/<run_id>/` の存在確認など）は呼び出し側（task-api）が埋める。
 //! 時刻は RFC 3339 の文字列。
 
@@ -23,7 +23,7 @@ use crate::error::OpsError;
 /// `event_rows_for` に渡す「実質無制限」の件数上限（タスク 1 件分の全イベントを読む用途）。
 pub(crate) const ALL_EVENTS: usize = usize::MAX;
 
-/// ビューの組み立てに必要な設定値（taskd の設定から呼び出し側が詰める）。
+/// ビューの組み立てに必要な設定値（celeris の設定から呼び出し側が詰める）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewContext {
     /// `WorkspaceSpec::Local` の相対パスの基準。
@@ -41,14 +41,14 @@ pub struct ViewContext {
 pub struct ClusterViewInfo {
     /// `"worktree"` のときだけ `TaskDetail.worktree` が出る（`"rsync"` / `"none"` では `null`）。
     pub sync: String,
-    /// worktree を置く親ディレクトリ。`None` なら `<project>/.taskd-worktrees`。
+    /// worktree を置く親ディレクトリ。`None` なら `<project>/.celeris-worktrees`。
     pub worktree_root: Option<PathBuf>,
     /// ADR-0032 D1: `"manual"` / `"publickey"` / `"totp"`（既定 `"manual"`）。
     pub auth: String,
 }
 
 /// worktree のブランチ名の接頭辞（ADR-0019 D2）。`task_worker::WorktreeSettings::default().branch_prefix` と同じ値。
-pub const WORKTREE_BRANCH_PREFIX: &str = "taskd/";
+pub const WORKTREE_BRANCH_PREFIX: &str = "celeris/";
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct TaskRef {
@@ -115,7 +115,7 @@ pub struct TaskList {
     pub counts_by_status: BTreeMap<String, u64>,
 }
 
-/// `taskctl show --json` と `GET /api/v1/tasks/{id}` の本体。
+/// `celerisctl show --json` と `GET /api/v1/tasks/{id}` の本体。
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct TaskDetail {
     pub task: Task,
@@ -147,14 +147,14 @@ pub struct TaskDetail {
     pub worktree: Option<WorktreeView>,
 }
 
-/// ADR-0019 D2: クラスタ側の worktree（taskd はここだけを触り、commit はしない）。
+/// ADR-0019 D2: クラスタ側の worktree（celeris はここだけを触り、commit はしない）。
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct WorktreeView {
     /// 元のリポジトリ（`WorkspaceSpec::Remote.path`）。
     pub project: String,
     /// worktree のパス（クラスタ上）。
     pub dir: String,
-    /// worktree のブランチ（`taskd/<task_id>`）。taskd は commit しないので、変更は作業ツリーに残る。
+    /// worktree のブランチ（`celeris/<task_id>`）。celeris は commit しないので、変更は作業ツリーに残る。
     pub branch: String,
 }
 
@@ -701,7 +701,7 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
             .get(cluster)
             .filter(|c| c.sync == "worktree")
             .map(|c| {
-                let root = c.worktree_root.clone().unwrap_or_else(|| path.join(".taskd-worktrees"));
+                let root = c.worktree_root.clone().unwrap_or_else(|| path.join(".celeris-worktrees"));
                 WorktreeView {
                     project: path.to_string_lossy().into_owned(),
                     dir: root.join(task.id.to_string()).to_string_lossy().into_owned(),
@@ -722,7 +722,7 @@ pub fn task_detail(store: &dyn TaskStore, id: TaskId, ctx: &ViewContext, now: Of
     let worker_run_hint = if task.status.is_terminal() {
         None
     } else {
-        Some(format!("taskctl worker run --config <taskd.toml> --task {id}"))
+        Some(format!("celerisctl worker run --config <config.toml> --task {id}"))
     };
 
     let delegated: Vec<DelegatedView> = rows
@@ -1336,8 +1336,8 @@ mod tests {
         let detail = task_detail(&store, on_worktree.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         let wt = detail.worktree.expect("worktree cluster");
         assert_eq!(wt.project, "/work/NBB/x/benchfs");
-        assert_eq!(wt.dir, format!("/work/NBB/x/benchfs/.taskd-worktrees/{}", on_worktree.id));
-        assert_eq!(wt.branch, format!("taskd/{}", on_worktree.id));
+        assert_eq!(wt.dir, format!("/work/NBB/x/benchfs/.celeris-worktrees/{}", on_worktree.id));
+        assert_eq!(wt.branch, format!("celeris/{}", on_worktree.id));
 
         let detail = task_detail(&store, on_rsync.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
         assert_eq!(detail.worktree, None, "rsync のクラスタには worktree が無い");

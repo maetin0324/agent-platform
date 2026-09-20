@@ -208,7 +208,7 @@ fn doc_items(store: &SqliteStore, task: &Task, docs_repo_root: Option<&std::path
 
 /// ADR-0044 D5: そのタスクのブランチのコミットが入ったリリース。
 ///
-/// ブランチ名は `worktree.json`（ADR-0041 D1 の目印。`celeris/<task_id>` / `taskd/<task_id>`）から取る。
+/// ブランチ名は `worktree.json`（ADR-0041 D1 の目印。`celeris/<task_id>` / `celeris/<task_id>`）から取る。
 /// 目印が無い・git が動かない・`changes.json` が無いリリースしかない、のどれでも**何も足さない**。
 fn release_items(
     task: &Task,

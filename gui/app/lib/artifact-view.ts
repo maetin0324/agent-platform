@@ -1,6 +1,6 @@
 /**
  * 成果物・ログの本体をどのビューアで表示するかを決める純粋関数。
- * docs/adr/0006 D3: 選択は `Content-Type` と名前だけで行い、taskd 側の値をそのまま使う（GUI で再判定・再計算しない）。
+ * docs/adr/0006 D3: 選択は `Content-Type` と名前だけで行い、celeris 側の値をそのまま使う（GUI で再判定・再計算しない）。
  */
 
 export type ViewerKind = "code" | "markdown" | "image";
@@ -22,7 +22,7 @@ export function isJson(contentType: string): boolean {
 
 /**
  * 成果物一覧の 1 件に添える状態メッセージ（`null` なら何も出さない）。
- * `ArtifactView.forbidden` / `exists` は taskd が計算済みの値をそのまま使う（GUI で再判定しない）。
+ * `ArtifactView.forbidden` / `exists` は celeris が計算済みの値をそのまま使う（GUI で再判定しない）。
  * 文言をここに集約することで、DOM 描画ライブラリ無しでも（`test/unit/artifact-view.test.ts`）表示文言を検証できる
  * （docs/DESIGN.md §10 Phase G3 受け入れ条件 5。本体の 403 中継は `test/unit/files.route.test.ts` で別途確認）。
  */

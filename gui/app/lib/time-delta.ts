@@ -1,6 +1,6 @@
 /**
  * `/daemon` の in_flight 経過時間・`/providers` の cooldown 残り時間の表示用（docs/adr/0007 D3）。
- * taskd の値（`since` / `until` / `DaemonView.now`）の単純な差分表示であり、判断ロジックの再実装ではない。
+ * celeris の値（`since` / `until` / `DaemonView.now`）の単純な差分表示であり、判断ロジックの再実装ではない。
  */
 export function secondsBetween(fromIso: string, toIso: string): number {
   return (new Date(toIso).getTime() - new Date(fromIso).getTime()) / 1000;

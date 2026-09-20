@@ -1,5 +1,5 @@
+import type { ArtifactView, OrgNode, ProjectTaskView, Status, TaskId, WorkspaceSpec } from "~/celeris/types";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
-import type { ArtifactView, OrgNode, ProjectTaskView, Status, TaskId, WorkspaceSpec } from "~/taskd/types";
 
 /**
  * 「成果物」（SPEC §2.1・§2.2・§3.7・§4 の 6）の純粋関数。DOM を描画する unit テストが無い件（G10-U1）を
@@ -16,7 +16,7 @@ export interface ProjectArtifactRow {
   artifact: ArtifactView;
 }
 
-/** タスク 1 件ぶんの成果物一覧 + 置き場所（`~/taskd/artifacts.server.ts` が taskd への問い合わせで組む）。 */
+/** タスク 1 件ぶんの成果物一覧 + 置き場所（`~/celeris/artifacts.server.ts` が celeris への問い合わせで組む）。 */
 export interface TaskArtifactBundle {
   workspace: WorkspacePlace;
   artifacts: ArtifactView[];
@@ -70,7 +70,7 @@ export interface WorkspacePlace {
 
 /**
  * `Task.workspace`（`WorkspaceSpec::Local{path}` / `Remote{cluster, path}`）を「置き場所」の表示に変える。
- * - Local: `workspace_dir`（taskd が絶対化した値、docs/gui/api.md §3.5）をそのまま出す。無ければ生の `path`。
+ * - Local: `workspace_dir`（celeris が絶対化した値、docs/gui/api.md §3.5）をそのまま出す。無ければ生の `path`。
  * - Remote: コードが実際にあるのはクラスタ側（`task.workspace.path`）。`workspace_dir` は手元の写しでしかない
  *   ので `text` には使わない（docs/gui/api.md §3.5「Remote{cluster, path} では手元の写し…クラスタ側のパスは
  *   task.workspace.path」）。ローカルのパスではないのでリンクにはしないが、ADR-0039 D3 どおり「手元の写し」

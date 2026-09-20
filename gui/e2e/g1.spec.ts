@@ -1,43 +1,43 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { TaskList } from "~/celeris/types";
 import { isSupportTask } from "~/lib/work-tree";
-import type { TaskList } from "~/taskd/types";
 import { expect, test } from "./test";
 
 // Phase G1 の受け入れ条件 2〜5（docs/DESIGN.md §10 Phase G1）。
-// `scripts/taskd.sh fixture basic && scripts/taskd.sh start basic` で作った既知の DB に対して検証する。
+// `scripts/celeris.sh fixture basic && scripts/celeris.sh start basic` で作った既知の DB に対して検証する。
 // このファイルは `basic` を起動したまま終える（他の G フェーズの e2e が上書きする）。
 //
 // 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
-// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
+// `CELERIS_GUI_BIND` / `CELERIS_API_URL` / `CELERIS_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7710";
-const TASKD_API_URL = process.env.TASKD_API_URL ?? `http://${TASKD_API_LISTEN}`;
-const GUI_BIND = process.env.TASKD_GUI_BIND ?? "127.0.0.1:7700";
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_LISTEN = process.env.CELERIS_API_LISTEN ?? "127.0.0.1:7710";
+const CELERIS_API_URL = process.env.CELERIS_API_URL ?? `http://${CELERIS_API_LISTEN}`;
+const GUI_BIND = process.env.CELERIS_GUI_BIND ?? "127.0.0.1:7700";
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, {
+  return execFileSync(CELERIS_SH, args, {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   }).toString();
 }
 
-function taskctl(...args: string[]): string {
-  return execFileSync(TASKD_SH, ["taskctl", "basic", ...args], {
+function celerisctl(...args: string[]): string {
+  return execFileSync(CELERIS_SH, ["celerisctl", "basic", ...args], {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   }).toString();
 }
 
 async function apiGet<T>(pathAndQuery: string): Promise<T> {
-  const res = await fetch(`${TASKD_API_URL}/api/v1${pathAndQuery}`);
-  if (!res.ok) throw new Error(`taskd ${pathAndQuery} responded ${res.status}`);
+  const res = await fetch(`${CELERIS_API_URL}/api/v1${pathAndQuery}`);
+  if (!res.ok) throw new Error(`celeris ${pathAndQuery} responded ${res.status}`);
   return (await res.json()) as T;
 }
 
@@ -49,7 +49,7 @@ async function idOf(title: string, kind?: string): Promise<string> {
 }
 
 test.beforeAll(() => {
-  // 既に別 name の taskd が 7710 を掴んでいる可能性がある（G0 の e2e は 'dev' を使う）。ポートを空けてから basic を作る。
+  // 既に別 name の celeris が 7710 を掴んでいる可能性がある（G0 の e2e は 'dev' を使う）。ポートを空けてから basic を作る。
   try {
     sh("stop", "dev");
   } catch {
@@ -94,8 +94,8 @@ test.describe("受け入れ条件 2: 受信箱", () => {
 });
 
 test.describe("受け入れ条件 3: 一覧", () => {
-  test("/tasks?status=done の行数が taskctl ls --status done と一致する", async ({ page }) => {
-    const expectedLines = taskctl("ls", "--status", "done")
+  test("/tasks?status=done の行数が celerisctl ls --status done と一致する", async ({ page }) => {
+    const expectedLines = celerisctl("ls", "--status", "done")
       .trim()
       .split("\n")
       .filter((l) => l.length > 0);
@@ -165,18 +165,18 @@ test.describe("受け入れ条件 4: 詳細", () => {
 });
 
 test.describe("受け入れ条件 5: SSE", () => {
-  test("taskctl add がリロード無しで /tasks に反映される", async ({ page }) => {
+  test("celerisctl add がリロード無しで /tasks に反映される", async ({ page }) => {
     // ナビゲーション前に登録する（goto 直後だと EventSource の接続が先に確立してしまい、
     // waitForResponse がその応答を取りこぼすレースになるため）。
     const eventsConnected = page.waitForResponse((res) => res.url().endsWith("/events") && res.status() === 200);
     await page.goto("/tasks");
     await expect(page.getByText("sse probe")).toHaveCount(0);
-    // ブラウザの EventSource が /events への接続を確立するまで待つ（それより前に taskctl add すると
+    // ブラウザの EventSource が /events への接続を確立するまで待つ（それより前に celerisctl add すると
     // Created イベントが接続確立時刻より前になり SSE では届かない。実利用ではページを開いてから
     // しばらくして操作が起きるのが通常なので、この待ちは実態に即している）。
     await eventsConnected;
 
-    taskctl("add", "--title", "sse probe", "--objective", "x", "--accept", "y", "--workspace", "ws-sse-probe");
+    celerisctl("add", "--title", "sse probe", "--objective", "x", "--accept", "y", "--workspace", "ws-sse-probe");
 
     await expect(page.getByText("sse probe")).toBeVisible({ timeout: 3_000 });
   });
@@ -188,7 +188,7 @@ test.describe("受け入れ条件 5: SSE", () => {
         "sh",
         [
           "-c",
-          `curl -N -m 3 http://${GUI_BIND}/events & PID=$!; sleep 0.3; ${TASKD_SH} taskctl basic add --title "sse curl probe" --objective x --accept y --workspace ws-sse-curl-probe >/dev/null; wait $PID`,
+          `curl -N -m 3 http://${GUI_BIND}/events & PID=$!; sleep 0.3; ${CELERIS_SH} celerisctl basic add --title "sse curl probe" --objective x --accept y --workspace ws-sse-curl-probe >/dev/null; wait $PID`,
         ],
         { cwd: REPO_ROOT, stdio: "pipe" },
       ).toString();
@@ -203,13 +203,13 @@ test.describe("受け入れ条件 5: SSE", () => {
 });
 
 test.describe("回帰: 子ルートのエラー表示（docs/adr/0004 D6）", () => {
-  test("taskd 停止中の /tasks はバナーを出し、500 の汎用エラーにならない", async ({ page }) => {
+  test("celeris 停止中の /tasks はバナーを出し、500 の汎用エラーにならない", async ({ page }) => {
     try {
       sh("stop", "basic");
 
       const response = await page.goto("/tasks");
       expect(response?.status()).not.toBe(500);
-      await expect(page.getByTestId("taskd-banner")).toBeVisible();
+      await expect(page.getByTestId("celeris-banner")).toBeVisible();
       await expect(page.locator("body")).not.toContainText("予期しないエラーが起きました");
     } finally {
       sh("start", "basic");

@@ -136,7 +136,7 @@ async fn changing_repos_needs_the_admin_token_but_reading_does_not() {
         let resp = send(&app, request).await;
         assert_problem(&resp, 401, "unauthorized");
     }
-    // 読み取りはトークンだけあればよい（このテストの taskd はトークンを設定しているので共通ガードは効く）。
+    // 読み取りはトークンだけあればよい（このテストの celeris はトークンを設定しているので共通ガードは効く）。
     let resp = send(&app, g(&format!("/api/v1/projects/{project}/repos"))).await;
     assert_eq!(resp.status.as_u16(), 200, "{}", resp.text());
 }

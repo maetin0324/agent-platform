@@ -112,7 +112,7 @@ pub struct AccountBook {
 }
 
 impl AccountBook {
-    /// 保存先を持たない帳簿（テストや `taskctl worker run` 向け）。`save` は no-op。
+    /// 保存先を持たない帳簿（テストや `celerisctl worker run` 向け）。`save` は no-op。
     pub fn new_in_memory() -> Self {
         Self { states: BTreeMap::new(), path: None }
     }

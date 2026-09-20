@@ -7,22 +7,22 @@ import { request as playwrightRequest } from "@playwright/test";
 import { expect, test } from "./test";
 
 // Phase G5 の受け入れ条件 1〜3（docs/DESIGN.md §10 Phase G5、docs/adr/0008-g5-decisions.md）。
-// 条件 1（パスワード認証）は `TASKD_GUI_BIND=0.0.0.0:<port>` の GUI をこのファイルが自分で起動する（数秒間、ランダムなパスワード付き）。
-// 条件 2（トークン）は `scripts/taskd.sh fixture auth`（`[api] token_file`）の taskd に対して、トークンあり / 無しの GUI を起動して見る。
+// 条件 1（パスワード認証）は `CELERIS_GUI_BIND=0.0.0.0:<port>` の GUI をこのファイルが自分で起動する（数秒間、ランダムなパスワード付き）。
+// 条件 2（トークン）は `scripts/celeris.sh fixture auth`（`[api] token_file`）の celeris に対して、トークンあり / 無しの GUI を起動して見る。
 // 条件 3（Host / CSP）は Playwright の webServer（7700）に対して行う。CSP 違反 0 件は `./test` の auto fixture が全シナリオで assert する。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_URL = process.env.TASKD_API_URL ?? "http://127.0.0.1:7710";
-const GUI_BASE = `http://${process.env.TASKD_GUI_BIND ?? "127.0.0.1:7700"}`;
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_URL = process.env.CELERIS_API_URL ?? "http://127.0.0.1:7710";
+const GUI_BASE = `http://${process.env.CELERIS_GUI_BIND ?? "127.0.0.1:7700"}`;
 const AUTH_PORT = 7721;
 const TOKEN_PORT = 7722;
 const NOTOKEN_PORT = 7723;
 const INSTANCE_NAMES = ["dev", "basic", "multi-account", "unroutable", "auth"] as const;
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
+  return execFileSync(CELERIS_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
 }
 
 function stopAll(): void {
@@ -44,7 +44,7 @@ async function startGui(env: Record<string, string>, logFile: string): Promise<C
     stdio: ["ignore", out, out],
   });
   fs.closeSync(out);
-  const port = env.TASKD_GUI_BIND.split(":").pop();
+  const port = env.CELERIS_GUI_BIND.split(":").pop();
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null)
@@ -155,7 +155,7 @@ test.describe("受け入れ条件 1: 非 loopback バインドのパスワード
     fs.mkdirSync(path.dirname(passwordFile), { recursive: true });
     fs.writeFileSync(passwordFile, `${password}\n`, { mode: 0o600 });
     gui = await startGui(
-      { TASKD_GUI_BIND: `0.0.0.0:${AUTH_PORT}`, TASKD_GUI_PASSWORD_FILE: passwordFile, TASKD_API_URL },
+      { CELERIS_GUI_BIND: `0.0.0.0:${AUTH_PORT}`, CELERIS_GUI_PASSWORD_FILE: passwordFile, CELERIS_API_URL },
       path.join(REPO_ROOT, ".run", "g5-auth-gui.log"),
     );
   });
@@ -165,15 +165,15 @@ test.describe("受け入れ条件 1: 非 loopback バインドのパスワード
     fs.rmSync(passwordFile, { force: true });
   });
 
-  test("TASKD_GUI_PASSWORD_FILE 無しの 0.0.0.0 バインドは exit 2（stderr に理由）", () => {
+  test("CELERIS_GUI_PASSWORD_FILE 無しの 0.0.0.0 バインドは exit 2（stderr に理由）", () => {
     const r = spawnSync("node", ["server.js"], {
       cwd: REPO_ROOT,
-      env: { ...process.env, TASKD_GUI_BIND: `0.0.0.0:${AUTH_PORT + 10}`, TASKD_GUI_PASSWORD_FILE: "" },
+      env: { ...process.env, CELERIS_GUI_BIND: `0.0.0.0:${AUTH_PORT + 10}`, CELERIS_GUI_PASSWORD_FILE: "" },
       encoding: "utf8",
       timeout: 20_000,
     });
     expect(r.status).toBe(2);
-    expect(r.stderr).toContain("TASKD_GUI_PASSWORD_FILE is required");
+    expect(r.stderr).toContain("CELERIS_GUI_PASSWORD_FILE is required");
   });
 
   test("未ログインの GET / は /login へ 302、/events はクッキー無しで 401", async () => {
@@ -204,7 +204,7 @@ test.describe("受け入れ条件 1: 非 loopback バインドのパスワード
   }) => {
     await page.goto(`${AUTH_BASE}/tasks`);
     await expect(page).toHaveURL(/\/login\?next=%2Ftasks$/);
-    await expect(page.locator("nav")).toHaveCount(0); // ログイン前はナビゲーションも taskd の情報も出さない
+    await expect(page.locator("nav")).toHaveCount(0); // ログイン前はナビゲーションも celeris の情報も出さない
     await expect(page.locator('[data-testid="footer"]')).toHaveCount(0);
 
     // 誤パスワード（ブラウザのフォーム）: 1 秒待ってから 401 のログインページを再描画
@@ -227,7 +227,7 @@ test.describe("受け入れ条件 1: 非 loopback バインドのパスワード
     expect(ok.status()).toBe(302);
     expect(ok.headers().location).toBe("/tasks");
     const setCookie = ok.headersArray().find((h) => h.name.toLowerCase() === "set-cookie")?.value ?? "";
-    expect(setCookie).toMatch(/^__taskd_gui_session=/);
+    expect(setCookie).toMatch(/^__celeris_gui_session=/);
     expect(setCookie).toContain("HttpOnly");
     expect(setCookie).toContain("SameSite=Strict");
     expect(setCookie).toContain("Path=/");
@@ -250,7 +250,7 @@ test.describe("受け入れ条件 1: 非 loopback バインドのパスワード
   });
 });
 
-test.describe("受け入れ条件 2: BFF → taskd のトークン", () => {
+test.describe("受け入れ条件 2: BFF → celeris のトークン", () => {
   let withToken: ChildProcess | undefined;
   let withoutToken: ChildProcess | undefined;
   let token = "";
@@ -263,11 +263,11 @@ test.describe("受け入れ条件 2: BFF → taskd のトークン", () => {
     token = fs.readFileSync(tokenFile, "utf8").trim();
     expect(token.length).toBeGreaterThanOrEqual(32);
     withToken = await startGui(
-      { TASKD_GUI_BIND: `127.0.0.1:${TOKEN_PORT}`, TASKD_API_TOKEN_FILE: tokenFile, TASKD_API_URL },
+      { CELERIS_GUI_BIND: `127.0.0.1:${TOKEN_PORT}`, CELERIS_API_TOKEN_FILE: tokenFile, CELERIS_API_URL },
       path.join(REPO_ROOT, ".run", "auth", "gui.log"),
     );
     withoutToken = await startGui(
-      { TASKD_GUI_BIND: `127.0.0.1:${NOTOKEN_PORT}`, TASKD_API_TOKEN_FILE: "", TASKD_API_URL },
+      { CELERIS_GUI_BIND: `127.0.0.1:${NOTOKEN_PORT}`, CELERIS_API_TOKEN_FILE: "", CELERIS_API_URL },
       path.join(REPO_ROOT, ".run", "auth", "gui-notoken.log"),
     );
   });
@@ -279,16 +279,16 @@ test.describe("受け入れ条件 2: BFF → taskd のトークン", () => {
     stopAll();
   });
 
-  test("token_file 付き taskd に TASKD_API_TOKEN_FILE を渡すと動く", async ({ page }) => {
+  test("token_file 付き celeris に CELERIS_API_TOKEN_FILE を渡すと動く", async ({ page }) => {
     const health = await rawGet({
       host: "127.0.0.1",
-      port: Number(new URL(TASKD_API_URL).port),
+      port: Number(new URL(CELERIS_API_URL).port),
       path: "/api/v1/inbox",
     });
-    expect(health.status).toBe(401); // taskd 自身がトークン無しを拒む（前提の確認）
+    expect(health.status).toBe(401); // celeris 自身がトークン無しを拒む（前提の確認）
     const res = await page.goto(`http://127.0.0.1:${TOKEN_PORT}/tasks`);
     expect(res?.status()).toBe(200);
-    await expect(page.locator('[data-testid="taskd-banner"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="celeris-banner"]')).toHaveCount(0);
     await expect(page.locator("main")).toContainText("Auth-A");
     await expect(page.locator('[data-testid="footer"]')).toContainText("api_version 1");
   });
@@ -296,7 +296,7 @@ test.describe("受け入れ条件 2: BFF → taskd のトークン", () => {
   test("渡さないとバナーに unauthorized", async ({ page }) => {
     const res = await page.goto(`http://127.0.0.1:${NOTOKEN_PORT}/`);
     expect(res?.status()).toBe(401);
-    const banner = page.locator('[data-testid="taskd-banner"]').first();
+    const banner = page.locator('[data-testid="celeris-banner"]').first();
     await expect(banner).toBeVisible();
     await expect(banner).toContainText("unauthorized");
   });

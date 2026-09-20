@@ -1,0 +1,35 @@
+# scripts/celeris.sh fixture unroutable 用の config.toml（docs/adr/0007 D2）。
+# cheap タスクに frontier だけのプロバイダを与え、`GET /daemon` の unroutable と
+# 受信箱の注意区画に同じ id が出ることを確認する（tests/e2e/tests/multi_account_scenarios.rs
+# `task_without_a_matching_provider_does_not_block_until_idle` と同じ設定）。
+db = "celeris.sqlite3"
+workspace_root = "workspaces"
+tick_ms = 200
+max_concurrency = 2
+lease_grace_secs = 60
+idle_timeout_secs = 30
+kill_grace_secs = 1
+review_timeout_secs = 30
+error_cooldown_secs = 300
+retry_backoff_base_secs = 0
+retry_backoff_max_secs = 0
+max_requeues = 5
+
+[plan]
+auto_accept = false
+
+[reviewer]
+tier = "frontier"
+
+[api]
+listen = "@API_LISTEN@"
+
+[adapters.fake]
+command = ["sh", "@RUN_DIR@/fake-worker.sh"]
+
+[[providers]]
+id = "frontier-only"
+adapter = "fake"
+tiers = ["frontier"]
+concurrency = 2
+model = "fake"

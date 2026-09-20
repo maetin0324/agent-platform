@@ -1,8 +1,8 @@
-//! DESIGN §6 Phase 7 の受け入れ条件（ADR-0010）のうち、実バイナリ `taskctl` / `taskd` と fake ワーカー
-//! （`sh` スクリプト）で再現するもの。ネットワークに出ない。タスクは全て `taskctl add` で作る。
+//! DESIGN §6 Phase 7 の受け入れ条件（ADR-0010）のうち、実バイナリ `celerisctl` / `celeris` と fake ワーカー
+//! （`sh` スクリプト）で再現するもの。ネットワークに出ない。タスクは全て `celerisctl add` で作る。
 //!
-//! 1/2. `question` → `taskctl answer` → 次 run の `context.answers` に回答が載り `done`（条件は `--check-cmd` / `--check-artifact`）
-//! 3.   `taskctl cancel` は非終端のみ。先行タスクの `failed` が後続へ推移的に伝播する（`dependency_failed`）
+//! 1/2. `question` → `celerisctl answer` → 次 run の `context.answers` に回答が載り `done`（条件は `--check-cmd` / `--check-artifact`）
+//! 3.   `celerisctl cancel` は非終端のみ。先行タスクの `failed` が後続へ推移的に伝播する（`dependency_failed`）
 //! 4.   Human check は再レビューで新しい `Approval` 子を要求し、親の cancel で未決の `Approval` 子が `cancelled`
 //! 5.   `provider_failure` 付きの `error` は attempts を消費せず `requeue` され、cooldown 明けに `done`
 
@@ -32,7 +32,7 @@ impl Env {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        let db = root.join("taskd.sqlite3");
+        let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
         Self { _tmp: tmp, root, db, store }
     }
@@ -49,9 +49,9 @@ impl Env {
 
     /// `extra` はトップレベルに追加する TOML 行。
     fn write_config_with(&self, script: &Path, extra: &str) -> PathBuf {
-        let path = self.root.join("taskd.toml");
+        let path = self.root.join("config.toml");
         let text = format!(
-            r#"db = "taskd.sqlite3"
+            r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 50
 max_concurrency = 2
@@ -85,15 +85,15 @@ model = "fake"
     }
 
     /// 成功を要求して stdout を返す。
-    fn taskctl(&self, args: &[&str]) -> String {
-        let (code, stdout, stderr) = self.taskctl_raw(args);
-        assert_eq!(code, Some(0), "taskctl {args:?} failed: {stdout}{stderr}");
+    fn celerisctl(&self, args: &[&str]) -> String {
+        let (code, stdout, stderr) = self.celerisctl_raw(args);
+        assert_eq!(code, Some(0), "celerisctl {args:?} failed: {stdout}{stderr}");
         stdout
     }
 
     /// `(exit code, stdout, stderr)`。
-    fn taskctl_raw(&self, args: &[&str]) -> (Option<i32>, String, String) {
-        let out = Command::new(bin("taskctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
+    fn celerisctl_raw(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let out = Command::new(bin("celerisctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
         (
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -101,22 +101,22 @@ model = "fake"
         )
     }
 
-    /// `taskctl add ...` → `approve` し、ID を返す。
+    /// `celerisctl add ...` → `approve` し、ID を返す。
     fn add_approved(&self, args: &[&str]) -> TaskId {
         let id = self.add(args);
-        self.taskctl(&["approve", &id.to_string()]);
+        self.celerisctl(&["approve", &id.to_string()]);
         id
     }
 
     fn add(&self, args: &[&str]) -> TaskId {
         let mut full = vec!["add", "--objective", "phase 7 scenario"];
         full.extend_from_slice(args);
-        self.taskctl(&full).trim().parse().unwrap()
+        self.celerisctl(&full).trim().parse().unwrap()
     }
 
-    fn run_taskd(&self, config: &Path, timeout: Duration) -> String {
-        let log = self.root.join("taskd.log");
-        let mut child = Command::new(bin("taskd"))
+    fn run_celeris(&self, config: &Path, timeout: Duration) -> String {
+        let log = self.root.join("celeris.log");
+        let mut child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--until-idle", "--max-ticks", "2000", "--log-format", "text"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -127,20 +127,20 @@ model = "fake"
         loop {
             if let Some(status) = child.try_wait().unwrap() {
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                assert!(status.success(), "taskd exited with {status}\n{text}");
+                assert!(status.success(), "celeris exited with {status}\n{text}");
                 return text;
             }
             if start.elapsed() > timeout {
                 let _ = child.kill();
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                panic!("taskd did not reach idle within {timeout:?}\n{text}");
+                panic!("celeris did not reach idle within {timeout:?}\n{text}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
     }
 
     fn replay_is_consistent(&self) {
-        let out = self.taskctl(&["replay"]);
+        let out = self.celerisctl(&["replay"]);
         assert!(out.contains("replay: 0 mismatches"), "{out}");
     }
 
@@ -207,16 +207,16 @@ esac"#,
         ]
     );
 
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.run_celeris(&config, Duration::from_secs(60));
     assert_eq!(env.task(id).status, Status::Blocked);
 
-    env.taskctl(&["answer", &id.to_string(), "target v2"]);
+    env.celerisctl(&["answer", &id.to_string(), "target v2"]);
     assert!(env.events(id).iter().any(|e| matches!(
         e,
         Event::Answered { question, answer } if question == "which version should I target?" && answer == "target v2"
     )));
 
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.run_celeris(&config, Duration::from_secs(60));
     let t = env.task(id);
     assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
     let second = std::fs::read_to_string(Path::new(&ws).join("second-run.json")).unwrap();
@@ -256,23 +256,23 @@ fn cancel_is_limited_to_non_terminal_tasks_and_failures_cancel_dependents() {
     let d = env.add(&["--title", "D", "--check-cmd", "true"]);
     assert_eq!(env.task(d).workspace, WorkspaceSpec::Local { path: PathBuf::from(d.to_string()), mode: None });
 
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.run_celeris(&config, Duration::from_secs(60));
     assert_eq!(env.task(a).status, Status::Failed);
     for id in [b, c] {
         assert_eq!(env.task(id).status, Status::Cancelled);
         assert_eq!(env.transitions(id), vec!["Draft->Ready:accept", "Ready->Cancelled:dependency_failed"]);
     }
 
-    let out = env.taskctl(&["cancel", &d.to_string()]);
+    let out = env.celerisctl(&["cancel", &d.to_string()]);
     assert!(out.contains("Cancelled"), "{out}");
     assert_eq!(env.task(d).status, Status::Cancelled);
 
-    let (code, _, stderr) = env.taskctl_raw(&["cancel", &a_str]);
+    let (code, _, stderr) = env.celerisctl_raw(&["cancel", &a_str]);
     assert_eq!(code, Some(1), "cancelling a failed task must exit 1");
     assert!(stderr.contains("cannot be cancelled"), "{stderr}");
     assert_eq!(env.task(a).status, Status::Failed);
 
-    let (code, _, _) = env.taskctl_raw(&["add", "--objective", "o", "--title", "E", "--check-cmd", "true", "--depends-on", &a_str]);
+    let (code, _, _) = env.celerisctl_raw(&["add", "--objective", "o", "--title", "E", "--check-cmd", "true", "--depends-on", &a_str]);
     assert_eq!(code, Some(1), "depending on a failed task must be rejected");
     env.replay_is_consistent();
 }
@@ -292,31 +292,31 @@ echo '{"type":"done","summary":"ok","evidence":[]}'"#,
         "--title", "H", "--accept", "a human agrees", "--check-cmd", "test -f second", "--max-retries", "1", "--workspace", &ws_h,
     ]);
 
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.run_celeris(&config, Duration::from_secs(60));
     let first = env.approval_children(h);
     assert_eq!(first.len(), 1);
     assert!(first[0].title.ends_with("(attempt 1)"), "{}", first[0].title);
     assert_eq!(env.task(h).status, Status::Reviewing);
 
-    env.taskctl(&["approve", &first[0].id.to_string()]);
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.celerisctl(&["approve", &first[0].id.to_string()]);
+    env.run_celeris(&config, Duration::from_secs(60));
     let all = env.approval_children(h);
     assert_eq!(all.len(), 2, "{all:?}");
     assert!(all[1].title.ends_with("(attempt 2)"), "{}", all[1].title);
     let t = env.task(h);
     assert_eq!((t.status, t.attempts), (Status::Reviewing, 1));
 
-    env.taskctl(&["approve", &all[1].id.to_string()]);
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.celerisctl(&["approve", &all[1].id.to_string()]);
+    env.run_celeris(&config, Duration::from_secs(60));
     assert_eq!(env.task(h).status, Status::Done);
 
     let ws_o = env.workspace("ws-o");
     let o = env.add_approved(&["--title", "O", "--accept", "someone signs off", "--workspace", &ws_o]);
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.run_celeris(&config, Duration::from_secs(60));
     let pending = env.approval_children(o);
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].status, Status::Ready);
-    env.taskctl(&["cancel", &o.to_string()]);
+    env.celerisctl(&["cancel", &o.to_string()]);
     assert_eq!(env.task(o).status, Status::Cancelled);
     assert_eq!(env.task(pending[0].id).status, Status::Cancelled);
     env.replay_is_consistent();
@@ -339,7 +339,7 @@ fi"#,
     let ws = env.workspace("ws-p");
     let id = env.add_approved(&["--title", "P", "--check-cmd", "test -f throttled-once", "--max-retries", "0", "--workspace", &ws]);
 
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.run_celeris(&config, Duration::from_secs(60));
     let t = env.task(id);
     assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
     assert_eq!(
@@ -372,7 +372,7 @@ echo '{"type":"error","message":"429 rate limited","retryable":true,"provider_fa
     let ws = env.workspace("ws-limit");
     let id = env.add_approved(&["--title", "L", "--check-cmd", "true", "--max-retries", "0", "--workspace", &ws]);
 
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.run_celeris(&config, Duration::from_secs(60));
     let t = env.task(id);
     assert_eq!((t.status, t.attempts), (Status::Failed, 1), "{:?}", env.events(id));
     assert_eq!(

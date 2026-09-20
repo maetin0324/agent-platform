@@ -1,4 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { sendNotifyTest } from "~/celeris/notify-admin.server";
+import { markReportsNotified, markReportsRead } from "~/celeris/reports-admin.server";
+import type {
+  NotifyRecent,
+  NotifyView,
+  OrgList,
+  OrgNode,
+  Project,
+  ProjectList,
+  Report,
+  ReportDetail,
+  ReportList,
+} from "~/celeris/types";
 import {
   buildReportsQuery,
   filterReportsByKind,
@@ -12,28 +26,14 @@ import {
 } from "~/lib/reports";
 import { loadReports } from "~/routes/reports";
 import { loadReportDetail } from "~/routes/reports.$id";
-import { TaskdClient } from "~/taskd/client.server";
-import { sendNotifyTest } from "~/taskd/notify-admin.server";
-import { markReportsNotified, markReportsRead } from "~/taskd/reports-admin.server";
-import type {
-  NotifyRecent,
-  NotifyView,
-  OrgList,
-  OrgNode,
-  Project,
-  ProjectList,
-  Report,
-  ReportDetail,
-  ReportList,
-} from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -93,7 +93,7 @@ describe("buildReportsQuery (docs/gui/api.md §3.50)", () => {
     });
   });
 
-  it("kind は送らない（taskd の GET /reports は kind を受け付けず、知らないクエリキーは 400 になるため）", () => {
+  it("kind は送らない（celeris の GET /reports は kind を受け付けず、知らないクエリキーは 400 になるため）", () => {
     const q = buildReportsQuery(new URLSearchParams("kind=bad_news&kind=result"));
     expect(q).not.toHaveProperty("kind");
   });
@@ -224,7 +224,7 @@ describe("loadReports (app/routes/reports.tsx)", () => {
 
     const req = mock.requests.find((r) => r.url.startsWith("/api/v1/reports"));
     expect(req).toBeDefined();
-    const url = new URL(req?.url ?? "", "http://mock-taskd.invalid");
+    const url = new URL(req?.url ?? "", "http://mock-celeris.invalid");
     expect(url.searchParams.get("unread")).toBe("true");
     expect(url.searchParams.get("level")).toBe("0");
     expect(url.searchParams.has("kind")).toBe(false);
@@ -238,7 +238,7 @@ describe("loadReports (app/routes/reports.tsx)", () => {
     await loadReports(client, new Request("http://gui.invalid/reports?filter=all&level="));
 
     const req = mock.requests.find((r) => r.url.startsWith("/api/v1/reports"));
-    const url = new URL(req?.url ?? "", "http://mock-taskd.invalid");
+    const url = new URL(req?.url ?? "", "http://mock-celeris.invalid");
     expect(url.searchParams.has("unread")).toBe(false);
     expect(url.searchParams.has("level")).toBe(false);
   });

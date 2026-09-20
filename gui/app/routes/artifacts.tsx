@@ -1,4 +1,7 @@
 import { Form, isRouteErrorResponse } from "react-router";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { CelerisError, type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import type { ArtifactList, OrgList, Project, ProjectDetail, ProjectList, TaskDetail, TaskId } from "~/celeris/types";
 import { ArtifactsList } from "~/components/ArtifactsList";
 import { HelpLink } from "~/components/HelpLink";
 import { Button } from "~/components/ui/button";
@@ -12,21 +15,18 @@ import {
   type TaskArtifactBundle,
   workspacePlace,
 } from "~/lib/artifacts";
-import { TaskdBanner } from "~/root";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { TaskdError, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import type { ArtifactList, OrgList, Project, ProjectDetail, ProjectList, TaskDetail, TaskId } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/artifacts";
 
 /**
  * 1 タスクぶんの成果物 + 置き場所を束ねる（N+1。`GET /tasks/{id}` と `GET /tasks/{id}/artifacts`）。
  * `~/routes/projects.$id.tsx::loadProjectDetail` にも同じ形の私的ヘルパーがある（docs/DESIGN.md §6.3 の
- * 「BFF の loader は taskd を直接呼ぶ」規則により、GET の集約はモジュール分割せず各 loader に閉じる。
+ * 「BFF の loader は celeris を直接呼ぶ」規則により、GET の集約はモジュール分割せず各 loader に閉じる。
  * `.server.ts` への切り出しは React Router のクライアントバンドル除去の対象が `loader`/`action` 等に
  * 限られるため、公開関数からの参照は避ける）。
  */
 async function loadTaskArtifactBundles(
-  client: TaskdClient,
+  client: CelerisClient,
   taskIds: readonly TaskId[],
   signal: AbortSignal | undefined,
 ): Promise<Map<TaskId, TaskArtifactBundle>> {
@@ -57,7 +57,7 @@ async function loadTaskArtifactBundles(
  * ADR-0033 D2）の成果物を横断して一覧する。1 タスクごとに `GET /tasks/{id}/artifacts` と
  * `GET /tasks/{id}`（`workspace_dir` / `task.workspace` を「置き場所」に使う）を束ねる（N+1。G13a と
  * 同じ判断: 一人で使う前提で案件のタスク数は少ない）。担当ノード名は `GET /org` から解決する
- * （taskd 側に判断値を作らせない。`~/lib/work-tree.ts` と同じ規則）。
+ * （celeris 側に判断値を作らせない。`~/lib/work-tree.ts` と同じ規則）。
  */
 
 export interface ArtifactsData {
@@ -68,7 +68,7 @@ export interface ArtifactsData {
   fetchedAt: string;
 }
 
-export async function loadArtifacts(client: TaskdClient, request: Request): Promise<ArtifactsData> {
+export async function loadArtifacts(client: CelerisClient, request: Request): Promise<ArtifactsData> {
   const url = new URL(request.url);
   const projectId = url.searchParams.get("project");
   const fetchedAt = new Date().toISOString();
@@ -86,7 +86,7 @@ export async function loadArtifacts(client: TaskdClient, request: Request): Prom
       signal: request.signal,
     });
   } catch (e) {
-    if (e instanceof TaskdError && e.status === 404) {
+    if (e instanceof CelerisError && e.status === 404) {
       return { projects, selectedProjectId: projectId, projectNotFound: true, rows: [], fetchedAt };
     }
     throw e;
@@ -103,9 +103,9 @@ export async function loadArtifacts(client: TaskdClient, request: Request): Prom
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ArtifactsData> {
   try {
-    return await loadArtifacts(getTaskdClient(), request);
+    return await loadArtifacts(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -184,11 +184,11 @@ export default function ArtifactsPage({ loaderData }: Route.ComponentProps) {
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

@@ -1,10 +1,10 @@
-//! DESIGN §6 Phase 12（ADR-0018）: クラスタでのコマンド実行を、実バイナリの `taskd` / `taskctl` と
+//! DESIGN §6 Phase 12（ADR-0018）: クラスタでのコマンド実行を、実バイナリの `celeris` / `celerisctl` と
 //! **localhost への ssh** で確かめる（外部ネットワークに出ない）。多重接続が無い環境では skip する。
 //!
 //! 1. `WorkspaceSpec::Remote` のタスクが、pull → run → push → クラスタでの判定 → pull を通って done になる
 //! 2. 多重接続が無いクラスタのタスクは dispatch されず、`ClusterUnavailable` が残り、`--until-idle` を止めない
 //! 3. 設定に無いクラスタのタスクは経路なしとして扱われる
-//! 10. `taskctl worker run --cluster <id>` が、デーモン無しでクラスタ側の作業ディレクトリに対して
+//! 10. `celerisctl worker run --cluster <id>` が、デーモン無しでクラスタ側の作業ディレクトリに対して
 //!     1 回 run する（DB は変えない）。多重接続が無ければ exit 4 と理由。
 
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use task_core::{Event, SqliteStore, Status, Task, TaskId, TaskStore};
 
-const HOST: &str = "taskd-localhost";
+const HOST: &str = "celeris-localhost";
 
 fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
@@ -42,7 +42,7 @@ impl Env {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        let db = root.join("taskd.sqlite3");
+        let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
         Self { _tmp: tmp, root, db, store }
     }
@@ -59,11 +59,11 @@ impl Env {
     }
 
     fn write_config(&self, script: &Path, clusters: &str) -> PathBuf {
-        let path = self.root.join("taskd.toml");
+        let path = self.root.join("config.toml");
         std::fs::write(
             &path,
             format!(
-                r#"db = "taskd.sqlite3"
+                r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 50
 max_concurrency = 2
@@ -93,30 +93,30 @@ model = "fake"
         path
     }
 
-    fn taskctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("taskctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
+    fn celerisctl(&self, args: &[&str]) -> String {
+        let out = Command::new(bin("celerisctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "taskctl {args:?}: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "celerisctl {args:?}: {stdout}{}", String::from_utf8_lossy(&out.stderr));
         stdout
     }
 
-    /// クラスタ側のパスを指すタスクを作って承認する（ADR-0018: `taskctl add --cluster`）。
+    /// クラスタ側のパスを指すタスクを作って承認する（ADR-0018: `celerisctl add --cluster`）。
     fn add_remote(&self, title: &str, cluster: &str, remote: &Path, check: &str) -> TaskId {
         let id: TaskId = self
-            .taskctl(&[
+            .celerisctl(&[
                 "add", "--title", title, "--objective", "cluster task", "--check-cmd", check,
                 "--cluster", cluster, "--workspace", remote.to_str().unwrap(),
             ])
             .trim()
             .parse()
             .unwrap();
-        self.taskctl(&["approve", &id.to_string()]);
+        self.celerisctl(&["approve", &id.to_string()]);
         id
     }
 
-    fn run_taskd(&self, config: &Path, timeout: Duration) -> String {
-        let log = self.root.join("taskd.log");
-        let mut child = Command::new(bin("taskd"))
+    fn run_celeris(&self, config: &Path, timeout: Duration) -> String {
+        let log = self.root.join("celeris.log");
+        let mut child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--until-idle", "--max-ticks", "2000", "--log-format", "text"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -127,13 +127,13 @@ model = "fake"
         loop {
             if let Some(status) = child.try_wait().unwrap() {
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                assert!(status.success(), "taskd exited with {status}\n{text}");
+                assert!(status.success(), "celeris exited with {status}\n{text}");
                 return text;
             }
             if start.elapsed() > timeout {
                 let _ = child.kill();
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                panic!("taskd did not reach idle within {timeout:?}\n{text}");
+                panic!("celeris did not reach idle within {timeout:?}\n{text}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -169,7 +169,7 @@ fn remote_task_syncs_runs_and_is_checked_on_the_cluster() {
     // 判定コマンドはクラスタ側で走る（答えのファイルが push されていることを確かめる）。
     let id = env.add_remote("cluster work", "local", &remote, "grep -q cluster-only answer.txt");
 
-    env.run_taskd(&config, Duration::from_secs(120));
+    env.run_celeris(&config, Duration::from_secs(120));
 
     let t = env.task(id);
     assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
@@ -188,11 +188,11 @@ fn missing_control_master_records_cluster_unavailable_and_does_not_block_idle() 
     std::fs::create_dir_all(&remote).unwrap();
     let config = env.write_config(
         &script,
-        "[[clusters]]\nid = \"offline\"\nhost = \"taskd-no-such-host-for-tests\"\nconcurrency = 1\n",
+        "[[clusters]]\nid = \"offline\"\nhost = \"celeris-no-such-host-for-tests\"\nconcurrency = 1\n",
     );
     let id = env.add_remote("offline work", "offline", &remote, "true");
 
-    env.run_taskd(&config, Duration::from_secs(60));
+    env.run_celeris(&config, Duration::from_secs(60));
 
     let t = env.task(id);
     assert_eq!((t.status, t.attempts), (Status::Ready, 0), "接続が無い間は ready のまま（attempts も消費しない）");
@@ -213,13 +213,13 @@ fn unknown_cluster_is_unroutable() {
     let config = env.write_config(&script, "");
     let id = env.add_remote("no cluster", "does-not-exist", &remote, "true");
 
-    let log = env.run_taskd(&config, Duration::from_secs(60));
+    let log = env.run_celeris(&config, Duration::from_secs(60));
 
     assert_eq!(env.task(id).status, Status::Ready);
     assert!(log.contains("no such cluster in the config"), "{log}");
 }
 
-/// 受け入れ 10: `taskctl worker run --cluster` はデーモン無しでクラスタ側のディレクトリに対して
+/// 受け入れ 10: `celerisctl worker run --cluster` はデーモン無しでクラスタ側のディレクトリに対して
 /// 1 回だけ run する。pull でクラスタのファイルが写しに来て、push で編集結果がクラスタに届く。
 /// DB は一切変わらない（status/attempts/events の件数が実行前後で不変）。
 #[test]
@@ -243,7 +243,7 @@ fn worker_run_cluster_executes_one_run_against_the_cluster_dir() {
     let task_before = env.task(id);
     let events_before = env.events(id);
 
-    let out = Command::new(bin("taskctl"))
+    let out = Command::new(bin("celerisctl"))
         .arg("--db")
         .arg(&env.db)
         .args([
@@ -282,11 +282,11 @@ fn worker_run_cluster_without_control_master_exits_4() {
     std::fs::create_dir_all(&remote).unwrap();
     let config = env.write_config(
         &script,
-        "[[clusters]]\nid = \"offline\"\nhost = \"taskd-no-such-host-for-tests\"\nconcurrency = 1\n",
+        "[[clusters]]\nid = \"offline\"\nhost = \"celeris-no-such-host-for-tests\"\nconcurrency = 1\n",
     );
     let id = env.add_remote("offline worker run", "offline", &remote, "true");
 
-    let out = Command::new(bin("taskctl"))
+    let out = Command::new(bin("celerisctl"))
         .arg("--db")
         .arg(&env.db)
         .args([
@@ -330,8 +330,8 @@ fn worktree_cluster_runs_in_a_worktree_and_leaves_the_repository_alone() {
     std::fs::write(repo.join("untracked-huge.bin"), "x".repeat(4096)).unwrap();
     for args in [
         vec!["init", "-q", "-b", "main"],
-        vec!["config", "user.email", "taskd@example.com"],
-        vec!["config", "user.name", "taskd"],
+        vec!["config", "user.email", "celeris@example.com"],
+        vec!["config", "user.name", "celeris"],
         vec!["add", "tracked.txt"],
         vec!["commit", "-q", "-m", "initial"],
     ] {
@@ -345,7 +345,7 @@ fn worktree_cluster_runs_in_a_worktree_and_leaves_the_repository_alone() {
     );
     let id = env.add_remote("worktree work", "local", &repo, "grep -q edited tracked.txt");
 
-    env.run_taskd(&config, Duration::from_secs(120));
+    env.run_celeris(&config, Duration::from_secs(120));
 
     let t = env.task(id);
     assert_eq!((t.status, t.attempts), (Status::Done, 0), "{:?}", env.events(id));
@@ -356,12 +356,12 @@ fn worktree_cluster_runs_in_a_worktree_and_leaves_the_repository_alone() {
     assert!(!mirror.join("untracked-huge.bin").exists(), "未追跡の巨大データは持ち込まれない");
 
     // 編集は worktree のブランチにだけ入る。元のリポジトリの作業ツリーは変わらない（ADR-0019 D3）。
-    let worktree = repo.join(".taskd-worktrees").join(id.to_string());
+    let worktree = repo.join(".celeris-worktrees").join(id.to_string());
     assert_eq!(std::fs::read_to_string(worktree.join("tracked.txt")).unwrap().trim(), "edited");
     assert_eq!(std::fs::read_to_string(repo.join("tracked.txt")).unwrap(), "original\n", "元のリポジトリは触らない");
     let branch = Command::new("git").args(["rev-parse", "--abbrev-ref", "HEAD"]).current_dir(&worktree).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), format!("taskd/{id}"));
-    // taskd は commit しない（変更は作業ツリーに残る。ADR-0019 D2）。
+    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), format!("celeris/{id}"));
+    // celeris は commit しない（変更は作業ツリーに残る。ADR-0019 D2）。
     let status = Command::new("git").args(["status", "--porcelain"]).current_dir(&worktree).output().unwrap();
     assert!(String::from_utf8_lossy(&status.stdout).contains("tracked.txt"), "commit せず作業ツリーに残す");
 

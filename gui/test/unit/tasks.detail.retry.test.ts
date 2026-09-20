@@ -1,21 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TaskdClient } from "~/taskd/client.server";
-import { runRetryAction, runTaskAction } from "~/taskd/route-actions.server";
-import type { RetryResult } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { CelerisClient } from "~/celeris/client.server";
+import { runRetryAction, runTaskAction } from "~/celeris/route-actions.server";
+import type { RetryResult } from "~/celeris/types";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * `POST /tasks/{id}/retry`（Phase 31。実機の事故、2026-09-18。docs/taskd-api-v1.md §3.63）。
+ * `POST /tasks/{id}/retry`（Phase 31。実機の事故、2026-09-18。docs/celeris-api-v1.md §3.63）。
  * `runRetryAction` / `runTaskAction` の意図の振り分けは `app/routes/tasks.$id.tsx` の `action` が行う
  * （`intent === "retry"` を先に見る）ので、ここは `route-actions.server.ts` の 2 つの関数を直接確かめる。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -87,7 +87,7 @@ describe("runRetryAction", () => {
     expect(outcome.error.detail).toContain("cannot be retried");
   });
 
-  it("returns a 401 ActionError when taskd requires a token (propagated, not thrown)", async () => {
+  it("returns a 401 ActionError when celeris requires a token (propagated, not thrown)", async () => {
     mock.on("POST", "/api/v1/tasks/T1/retry", (_req, res) => {
       sendProblem(res, { status: 401, code: "unauthorized", detail: "a valid bearer token is required" });
     });

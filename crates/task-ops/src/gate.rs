@@ -1,7 +1,7 @@
 //! `approve` / `reject` / `answer` / `cancel` の判断と検証 — DESIGN.md §5.9 / ADR-0002 D4 /
 //! ADR-0004 D1-D3 / ADR-0010 D3/D4（ADR-0013 D7）。
 //!
-//! 元は `taskctl` の `commands/gate.rs` と `commands/cancel.rs` にあったロジックをそのまま移した。
+//! 元は `celerisctl` の `commands/gate.rs` と `commands/cancel.rs` にあったロジックをそのまま移した。
 //! 状態変更は `TaskStore::apply_transition` だけで行う。`expected` が `Some` で現在の `status` と
 //! 違えば、遷移を試みずに `OpsError::Conflict` を返す。
 

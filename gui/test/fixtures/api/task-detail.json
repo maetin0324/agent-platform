@@ -28,7 +28,7 @@
         "created_at": "2026-09-15T23:48:58.859508503Z",
         "updated_at": "2026-09-15T23:48:58.859508503Z"
     },
-    "workspace_dir": "/local/rmaeda/taskd-gui-run/basic/workspaces/ws-b",
+    "workspace_dir": "/local/rmaeda/celeris-gui-run/basic/workspaces/ws-b",
     "cluster": null,
     "role": null,
     "delegated": [],
@@ -54,6 +54,6 @@
         "reject",
         "cancel"
     ],
-    "worker_run_hint": "taskctl worker run --config <taskd.toml> --task 01M2KQJJBBG83DWH7Y8AWNMK0K",
+    "worker_run_hint": "celerisctl worker run --config <config.toml> --task 01M2KQJJBBG83DWH7Y8AWNMK0K",
     "priority_label": "P3"
 }

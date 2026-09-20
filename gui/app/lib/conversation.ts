@@ -1,8 +1,8 @@
-import type { AttentionItem, ClusterView, Message, OrgNode, Project } from "~/taskd/types";
+import type { AttentionItem, ClusterView, Message, OrgNode, Project } from "~/celeris/types";
 
 /**
  * 秘書・各ノードとの対話（SPEC §3.4「組織の木を見て誰に言うかを決め、その担当に直接言う」、
- * ADR-0033 D4、docs/taskd-api-v1.md §3.54〜3.55）の純粋な補助。
+ * ADR-0033 D4、docs/celeris-api-v1.md §3.54〜3.55）の純粋な補助。
  * ここには HTTP も React も持ち込まない（画面と server 側の両方から使い、単体で試せるようにする）。
  */
 
@@ -18,7 +18,7 @@ export const PROJECT_TITLE_LIMIT = 40;
 /** 秘書のノード id（`/org/secretary` はこの人との対話。`POST /projects` の最初の返事も同じ相手）。 */
 export const SECRETARY_NODE_ID = "secretary";
 
-/** 対話画面 1 枚ぶんのデータ（loader が組む。`~/taskd/conversation.server.ts`）。 */
+/** 対話画面 1 枚ぶんのデータ（loader が組む。`~/celeris/conversation.server.ts`）。 */
 export interface ConversationData {
   /** 話し相手のノード id（URL から。`/org/secretary` は `secretary`） */
   nodeId: string;
@@ -32,12 +32,12 @@ export interface ConversationData {
   messages: Message[];
   /**
    * `GET /inbox` の `attention`（Phase G13f-1、監査 M1）。返事を待っている間に「経路なし」等が出たら
-   * 待つのをやめて知らせるために読む。taskd に届かないときは空（画面は従来どおり待つだけになる）。
+   * 待つのをやめて知らせるために読む。celeris に届かないときは空（画面は従来どおり待つだけになる）。
    */
   attention: AttentionItem[];
   /**
    * `GET /clusters` の選択肢（ADR-0039 D1、Phase G13k）。秘書に「新しい案件として」投げるときの
-   * 作業場所（クラスタ）の選択肢に使う。taskd に届かないときは空。
+   * 作業場所（クラスタ）の選択肢に使う。celeris に届かないときは空。
    */
   clusters: ClusterView[];
 }
@@ -59,7 +59,7 @@ export function conversationTaskIds(messages: readonly Message[]): Set<string> {
 
 /**
  * この対話の裏方のタスクが `attention` に出ていたら、その理由を返す（出ていなければ `null`）。
- * 理由の文言は taskd の値をそのまま写す（GUI 側で新しい判断はしない。`app/routes/inbox.tsx` の
+ * 理由の文言は celeris の値をそのまま写す（GUI 側で新しい判断はしない。`app/routes/inbox.tsx` の
  * `attentionText` と同じ材料を、対話の画面の言葉で言い直しているだけ）。
  */
 export function conversationTrouble(

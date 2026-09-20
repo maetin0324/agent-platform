@@ -4,7 +4,7 @@
 #
 #   bash scripts/live-check-phase53.sh
 #
-# 本番（~/taskd/、ポート 7710/7700、systemd）には一切触らない:
+# 本番（~/.local/celeris/、ポート 7710/7700、systemd）には一切触らない:
 #   - DB・workspaces・設定は `mktemp -d` の下だけ
 #   - API は 127.0.0.1 の**空きポート**（既定 7719。`PORT=... ` で変えられる）
 #   - ワーカーは `fake` アダプタ（LLM を呼ばない。ADR-0041 D5 と同じ流儀）
@@ -17,10 +17,10 @@ RUN="$(mktemp -d "${TMPDIR:-/tmp}/celeris-phase53-XXXXXX")"
 TOKEN="phase53-live-token"
 
 cleanup() {
-  if [ -n "${TASKD_PID:-}" ] && kill -0 "$TASKD_PID" 2>/dev/null; then
-    kill "$TASKD_PID" 2>/dev/null || true
+  if [ -n "${CELERIS_PID:-}" ] && kill -0 "$CELERIS_PID" 2>/dev/null; then
+    kill "$CELERIS_PID" 2>/dev/null || true
     sleep 1
-    kill -9 "$TASKD_PID" 2>/dev/null || true
+    kill -9 "$CELERIS_PID" 2>/dev/null || true
   fi
   echo "run dir: $RUN"
 }
@@ -29,7 +29,7 @@ trap cleanup EXIT
 [ "$PORT" != "7710" ] && [ "$PORT" != "7700" ] || { echo "本番のポートは使わない" >&2; exit 2; }
 
 echo "== build =="
-(cd "$ROOT" && cargo build -q -p taskd -p taskctl)
+(cd "$ROOT" && cargo build -q -p celeris -p celerisctl)
 
 printf '%s' "$TOKEN" > "$RUN/token"
 chmod 600 "$RUN/token"
@@ -52,8 +52,8 @@ echo '{"type":"done","summary":"fake done","evidence":[]}'
 WORKER
 chmod +x "$RUN/worker.sh"
 
-cat > "$RUN/taskd.toml" <<CONF
-db = "taskd.sqlite3"
+cat > "$RUN/config.toml" <<CONF
+db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 200
 max_concurrency = 2
@@ -90,10 +90,10 @@ CONF
 
 mkdir -p "$RUN/workspaces"
 
-echo "== start taskd on 127.0.0.1:$PORT (本番ではない) =="
-(cd "$RUN" && "$ROOT/target/debug/taskd" --config "$RUN/taskd.toml" --log-format text) \
-  > "$RUN/taskd.log" 2>&1 &
-TASKD_PID=$!
+echo "== start celeris on 127.0.0.1:$PORT (本番ではない) =="
+(cd "$RUN" && "$ROOT/target/debug/celeris" --config "$RUN/config.toml" --log-format text) \
+  > "$RUN/celeris.log" 2>&1 &
+CELERIS_PID=$!
 
 for _ in $(seq 1 60); do
   if curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE/health" > /dev/null 2>&1; then break; fi
@@ -132,7 +132,7 @@ for _ in $(seq 1 120); do
   [ -f "$RUN/request-2.json" ] && break
   sleep 0.5
 done
-[ -f "$RUN/request-2.json" ] || { echo "FAIL: 2 回目の run が始まらない" >&2; tail -40 "$RUN/taskd.log" >&2; exit 1; }
+[ -f "$RUN/request-2.json" ] || { echo "FAIL: 2 回目の run が始まらない" >&2; tail -40 "$RUN/celeris.log" >&2; exit 1; }
 python3 - "$RUN/request-2.json" <<'PY'
 import json, sys
 req = json.load(open(sys.argv[1], encoding="utf-8"))

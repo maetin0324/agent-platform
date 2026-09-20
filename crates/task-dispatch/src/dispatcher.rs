@@ -68,7 +68,7 @@ fn log_slow_step(step: &'static str, started: Instant) {
     }
 }
 
-/// ADR-0018: コマンドを実行するクラスタ 1 つ分の設定（`taskd::config::ClusterConfig` の写し。task-dispatch は taskd に依存しない）。
+/// ADR-0018: コマンドを実行するクラスタ 1 つ分の設定（`celeris::config::ClusterConfig` の写し。task-dispatch は celeris に依存しない）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterSpec {
     pub id: String,
@@ -91,13 +91,13 @@ pub struct ClusterSpec {
 
 /// ADR-0032 D3: `auth = "publickey"` のクラスタに未接続なら、cooldown にする前にディスパッチャが 1 回だけ
 /// 接続を試みるためのフック。引数は `(cluster_id, host)`。同期でブロックしてよい（`control_master_alive_blocking`
-/// と同じ扱い）。本番では taskd が `task_worker::cluster_login::start_connect` 相当の実装を挿す。テストでは
+/// と同じ扱い）。本番では celeris が `task_worker::cluster_login::start_connect` 相当の実装を挿す。テストでは
 /// 偽物を挿す。未設定（`None`）なら自動接続はせず、従来どおり cooldown に落ちる。
 pub type ClusterConnector = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
-/// ADR-0041 D5: この taskd が**面倒を見てよいタスク**の述語。`None`（既定）は「全部」＝従来どおり。
+/// ADR-0041 D5: この celeris が**面倒を見てよいタスク**の述語。`None`（既定）は「全部」＝従来どおり。
 ///
-/// 検証（`--mode verify`）の taskd は、ここに「`genre = "smoke"` で、かつアダプタが `fake`」を渡す。
+/// 検証（`--mode verify`）の celeris は、ここに「`genre = "smoke"` で、かつアダプタが `fake`」を渡す。
 /// dispatch だけでなく、**ストア上の他のタスクの状態を変えうる経路すべて**（期限切れリースの回収、
 /// `reviewing` の拾い上げ）で同じ述語を使う。手元で起こした run の後始末はこの述語に関係なく続ける
 /// （自分が起こしたものは必ず自分が畳む）。
@@ -155,13 +155,13 @@ fn to_answers(notes: Vec<AnswerNote>) -> Vec<Answer> {
         .collect()
 }
 
-/// ADR-0024/0025: `[accounts]` があるときのプール実行時設定（`taskd::config::AccountsConfig` の写し）。
+/// ADR-0024/0025: `[accounts]` があるときのプール実行時設定（`celeris::config::AccountsConfig` の写し）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountsRuntimeConfig {
     /// ADR-0025 D1: アダプタごとの根ディレクトリ。`<root>/<id>/` が 1 アカウント。どちらか一方だけでもよい。
     pub roots: HashMap<AccountAdapter, PathBuf>,
     pub max_runs_per_account: usize,
-    /// D6 の確認に使うモデル（taskd 側が使う。ディスパッチャ自身は確認を行わない。claude-code のみ）。
+    /// D6 の確認に使うモデル（celeris 側が使う。ディスパッチャ自身は確認を行わない。claude-code のみ）。
     pub check_model: String,
     /// 供給側失敗でアカウントを cooldown にするときのフォールバック秒数（= `error_cooldown_secs`）。
     pub fallback_cooldown_secs: u64,
@@ -173,7 +173,7 @@ impl AccountsRuntimeConfig {
     }
 }
 
-/// ディスパッチャの設定（`taskd.toml` から組み立てる。ADR-0005 D7）。
+/// ディスパッチャの設定（`config.toml` から組み立てる。ADR-0005 D7）。
 #[derive(Debug, Clone)]
 pub struct DispatchConfig {
     /// 全体の並列度上限。
@@ -469,7 +469,7 @@ struct ReviewEntry {
     account_adapter: Option<AccountAdapter>,
 }
 
-/// デーモン状態をメモリから公開するための送り口（ADR-0013 D4）。taskd が `[api]` 有効時に `set_snapshot_publisher` で渡す。
+/// デーモン状態をメモリから公開するための送り口（ADR-0013 D4）。celeris が `[api]` 有効時に `set_snapshot_publisher` で渡す。
 pub struct SnapshotPublisher {
     pub tx: tokio::sync::watch::Sender<Option<DaemonSnapshot>>,
     /// 起動ごとの ULID（API の `/health` と同じ値）。
@@ -481,7 +481,7 @@ pub struct SnapshotPublisher {
     /// `[[providers]]` の定義（`in_use` は毎 tick に埋める）。
     pub providers: Vec<ProviderLive>,
     /// ADR-0022 D2: プロバイダ id → 直近の疎通確認。`reload` でプロバイダ表を差し替えても保持する
-    /// （確認した事実は設定の書き換えでは古くならない）。taskd を再起動すると消える。
+    /// （確認した事実は設定の書き換えでは古くならない）。celeris を再起動すると消える。
     pub provider_checks: HashMap<String, ProviderCheckView>,
 }
 
@@ -774,18 +774,18 @@ pub struct Dispatcher {
     account_books: HashMap<AccountAdapter, Arc<StdMutex<AccountBook>>>,
     /// ADR-0024 D1: 選択のたびにディレクトリを読み直さないよう、tick につき高々 1 回だけスキャンする（アダプタごと）。
     accounts_scan_cache: HashMap<AccountAdapter, Vec<AccountDir>>,
-    /// ADR-0024 D5/D7 / ADR-0025 D5: taskd（GUI の管理 API）が進行中のログイン中継を持っているアカウント
+    /// ADR-0024 D5/D7 / ADR-0025 D5: celeris（GUI の管理 API）が進行中のログイン中継を持っているアカウント
     /// （キーは `"<adapter>:<id>"`。同じ id でもアダプタが違えば別のログインとして扱う）。
     login_pending_accounts: std::collections::HashSet<String>,
-    /// ADR-0043 D3（Phase 56）: 起動時に調べたコンテナ runtime（観測値）。taskd が
+    /// ADR-0043 D3（Phase 56）: 起動時に調べたコンテナ runtime（観測値）。celeris が
     /// `detect_container_runtime()` を呼んで埋める。埋まっていなければ「使えない」と同じ扱いで、
     /// コンテナが要るタスクは `blocked` になる。
     container_probe: task_worker::RuntimeProbe,
     /// ADR-0032 D3: `auth = "publickey"` のクラスタに自動で接続を張るフック。`None` なら自動接続しない
-    /// （taskd 側が `set_cluster_connector` で挿す。未設定＝従来どおりの挙動）。
+    /// （celeris 側が `set_cluster_connector` で挿す。未設定＝従来どおりの挙動）。
     cluster_connector: Option<ClusterConnector>,
     /// ADR-0032 D4/D5: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中のクラスタ id
-    /// （taskd が `set_cluster_connect_pending` で反映する。D3 の自動接続とは別物）。
+    /// （celeris が `set_cluster_connect_pending` で反映する。D3 の自動接続とは別物）。
     connect_pending_clusters: std::collections::HashSet<String>,
     /// 壁時計の Unix 秒（テストで差し替えられるようにした関数。既定は実時刻）。
     now_unix_fn: Arc<dyn Fn() -> i64 + Send + Sync>,
@@ -793,7 +793,7 @@ pub struct Dispatcher {
     /// `dispatch_ready` も `recover_reviews` も動かさず、**手元の run とレビューの面倒だけ見続ける**
     /// （完了の記録、リースの更新、`aggregate` / `child_failed` の後処理は通常どおり動く）。
     accepting_new_work: bool,
-    /// ADR-0041 D1 / ADR-0043 D2: この taskd が用意したローカルの作業場所（1 つ以上のリポジトリ）。
+    /// ADR-0041 D1 / ADR-0043 D2: この celeris が用意したローカルの作業場所（1 つ以上のリポジトリ）。
     /// **終端では消さない**（ADR-0043 D2 の改定。差分を見るために残す）。消すのは**中止**（cancel）
     /// のときだけで、worktree とブランチを消す。再起動では失われる（残った worktree は人が
     /// `git worktree remove` する。PROGRESS の未解決）。
@@ -818,14 +818,14 @@ impl Dispatcher {
         config: DispatchConfig,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        // ADR-0024 D4 / ADR-0025 D1: `<root>/.taskd-usage.json` から観測値・cooldown を読む（無ければ空から始める）。
+        // ADR-0024 D4 / ADR-0025 D1: `<root>/.celeris-usage.json` から観測値・cooldown を読む（無ければ空から始める）。
         // アダプタごとに別の根ディレクトリ・別の帳簿（アカウントの記録はそのアダプタの中で閉じる）。
         let account_books: HashMap<AccountAdapter, Arc<StdMutex<AccountBook>>> = match &config.accounts {
             Some(accounts) => accounts
                 .roots
                 .iter()
                 .map(|(adapter, root)| {
-                    (*adapter, Arc::new(StdMutex::new(AccountBook::load(&root.join(".taskd-usage.json")))))
+                    (*adapter, Arc::new(StdMutex::new(AccountBook::load(&root.join(".celeris-usage.json")))))
                 })
                 .collect(),
             None => HashMap::new(),
@@ -887,7 +887,7 @@ impl Dispatcher {
         self.container_probe = probe;
     }
 
-    /// 調べた結果を差し替える（taskd の起動経路とテスト用）。
+    /// 調べた結果を差し替える（celeris の起動経路とテスト用）。
     pub fn set_container_probe(&mut self, probe: task_worker::RuntimeProbe) {
         self.container_probe = probe;
     }
@@ -948,13 +948,13 @@ impl Dispatcher {
         aborted
     }
 
-    /// ADR-0032 D3: `auth = "publickey"` のクラスタへの自動接続を有効にする（taskd 側が本番の実装を挿す）。
+    /// ADR-0032 D3: `auth = "publickey"` のクラスタへの自動接続を有効にする（celeris 側が本番の実装を挿す）。
     /// 呼ばなければ従来どおり自動接続しない。
     pub fn set_cluster_connector(&mut self, connector: ClusterConnector) {
         self.cluster_connector = Some(connector);
     }
 
-    /// ADR-0032 D4/D5: GUI 発の接続が進行中かを記録する（taskd の管理 API が呼ぶ。呼び出しは taskd 側の配線）。
+    /// ADR-0032 D4/D5: GUI 発の接続が進行中かを記録する（celeris の管理 API が呼ぶ。呼び出しは celeris 側の配線）。
     pub fn set_cluster_connect_pending(&mut self, id: &str, pending: bool) {
         if pending {
             self.connect_pending_clusters.insert(id.to_string());
@@ -967,7 +967,7 @@ impl Dispatcher {
         &self.config
     }
 
-    /// ADR-0033 D3: tick ループ（taskd）が報告の圧縮のためにストアを読む。ディスパッチャ自身の
+    /// ADR-0033 D3: tick ループ（celeris）が報告の圧縮のためにストアを読む。ディスパッチャ自身の
     /// 判断には使わない（ここから LLM を呼ぶこともない）。
     pub fn store(&self) -> Arc<dyn TaskStore> {
         Arc::clone(&self.store)
@@ -1009,7 +1009,7 @@ impl Dispatcher {
         self.config.delegation = delegation;
     }
 
-    // ---- ADR-0024/0025: taskd（GUI の管理 API）が使うアカウント操作 ----
+    // ---- ADR-0024/0025: celeris（GUI の管理 API）が使うアカウント操作 ----
 
     /// そのアダプタ・アカウントで走っている run（ワーカー run + Reviewer run）の数。
     pub fn account_in_use(&self, adapter: AccountAdapter, id: &str) -> usize {
@@ -1025,7 +1025,7 @@ impl Dispatcher {
         format!("{adapter}:{id}")
     }
 
-    /// D7: 進行中のログイン中継の有無を記録する（taskd の `HashMap<String, LoginSession>` と対）。
+    /// D7: 進行中のログイン中継の有無を記録する（celeris の `HashMap<String, LoginSession>` と対）。
     pub fn set_account_login_pending(&mut self, adapter: AccountAdapter, id: &str, pending: bool) {
         let key = Self::login_pending_key(adapter, id);
         if pending {
@@ -1061,7 +1061,7 @@ impl Dispatcher {
         }
     }
 
-    /// D5 `DELETE /accounts/{id}`: 帳簿からもこのアカウントの記録を消す（ディレクトリの移動は taskd/task-api が行う）。
+    /// D5 `DELETE /accounts/{id}`: 帳簿からもこのアカウントの記録を消す（ディレクトリの移動は celeris/task-api が行う）。
     pub fn remove_account_book_entry(&mut self, adapter: AccountAdapter, id: &str) {
         let Some(book) = self.account_book(adapter) else { return };
         let Ok(mut book) = book.lock() else { return };
@@ -2148,7 +2148,7 @@ impl Dispatcher {
             let text = format!(
                 "委譲した子タスクが失敗し、やり直し（max_retries = {}）でも解決しませんでした。どうしますか。\n\
                  失敗した子: {listed}\n\
-                 回答するとこのタスクは指示を持って再開します: taskctl answer {} \"…\"",
+                 回答するとこのタスクは指示を持って再開します: celerisctl answer {} \"…\"",
                 task.budget.max_retries, task.id,
             );
             // Phase 44（実機 2026-09-18）: この質問はディスパッチャ由来（ワーカーの `Question` ではない）だが、
@@ -3790,7 +3790,7 @@ impl Dispatcher {
     /// のときだけで、worktree を消し、ブランチも `git branch -D` する（人の指示）。
     ///
     /// `done` / `failed` のときは、未コミットの変更があれば `WorkerProgress` を 1 行積んで記録だけ落とす。
-    /// **taskd はコミットしない**（ADR-0019 D2）。
+    /// **celeris はコミットしない**（ADR-0019 D2）。
     fn cleanup_cancelled_worktrees(&mut self) -> Result<(), DispatchError> {
         let ids: Vec<TaskId> = self.task_workspaces.keys().copied().collect();
         for id in ids {
@@ -5740,7 +5740,7 @@ mod tests {
             ClusterSpec {
                 id: "slow".into(),
                 // 実際に ssh はせず、多重接続の確認だけが通ればよいので localhost 向けの Host 名を使う。
-                host: "taskd-localhost".into(),
+                host: "celeris-localhost".into(),
                 concurrency: 1,
                 sync: SyncMode::None,
                 delete_on_push: false,
@@ -5751,8 +5751,8 @@ mod tests {
                 auth: "manual".into(),
             },
         );
-        if !control_master_alive_blocking(&["ssh".to_string()], "taskd-localhost") {
-            eprintln!("skip: taskd-localhost への多重接続が無い");
+        if !control_master_alive_blocking(&["ssh".to_string()], "celeris-localhost") {
+            eprintln!("skip: celeris-localhost への多重接続が無い");
             return;
         }
 
@@ -5797,7 +5797,7 @@ mod tests {
             "offline".into(),
             ClusterSpec {
                 id: "offline".into(),
-                host: "taskd-no-such-host-for-tests".into(),
+                host: "celeris-no-such-host-for-tests".into(),
                 concurrency: 1,
                 sync: SyncMode::Rsync,
                 delete_on_push: false,
@@ -5828,7 +5828,7 @@ mod tests {
         let live = &snap.clusters[0];
         assert_eq!(
             (live.id.as_str(), live.host.as_str(), live.concurrency, live.in_use, live.connected),
-            ("offline", "taskd-no-such-host-for-tests", 1, 0, false)
+            ("offline", "celeris-no-such-host-for-tests", 1, 0, false)
         );
         let until = live.cooldown_until.clone().expect("cooldown_until");
         assert!(until > snap.last_tick_at, "cooldown ends after the tick: {until} vs {}", snap.last_tick_at);
@@ -5841,7 +5841,7 @@ mod tests {
         assert!(
             events.iter().any(|(_, e)| matches!(
                 e,
-                Event::ClusterUnavailable { cluster, host, .. } if cluster == "offline" && host == "taskd-no-such-host-for-tests"
+                Event::ClusterUnavailable { cluster, host, .. } if cluster == "offline" && host == "celeris-no-such-host-for-tests"
             )),
             "{events:?}"
         );
@@ -5887,7 +5887,7 @@ mod tests {
         let mut d = dispatcher(store.clone(), adapter, 1);
         d.config.clusters.insert(
             "auto".into(),
-            cluster_spec_with_auth("auto", "taskd-no-such-host-for-tests-auto-ok", "publickey"),
+            cluster_spec_with_auth("auto", "celeris-no-such-host-for-tests-auto-ok", "publickey"),
         );
         let calls: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
         let calls_for_hook = calls.clone();
@@ -5900,7 +5900,7 @@ mod tests {
         assert_eq!(report.dispatched, 1, "{report:?}");
         assert_eq!(
             *calls.lock().unwrap(),
-            vec![("auto".to_string(), "taskd-no-such-host-for-tests-auto-ok".to_string())]
+            vec![("auto".to_string(), "celeris-no-such-host-for-tests-auto-ok".to_string())]
         );
         assert_eq!(d.cluster_connected.get("auto"), Some(&true));
         assert!(!d.cluster_cooldown.contains_key("auto"), "success does not cool the cluster down");
@@ -5928,7 +5928,7 @@ mod tests {
         let mut d = dispatcher(store.clone(), adapter, 1);
         d.config.clusters.insert(
             "auto".into(),
-            cluster_spec_with_auth("auto", "taskd-no-such-host-for-tests-auto-fail", "publickey"),
+            cluster_spec_with_auth("auto", "celeris-no-such-host-for-tests-auto-fail", "publickey"),
         );
         let call_count = Arc::new(StdMutex::new(0u32));
         let call_count_for_hook = call_count.clone();
@@ -5973,7 +5973,7 @@ mod tests {
             let mut d = dispatcher(store.clone(), adapter, 1);
             d.config.clusters.insert(
                 "auto".into(),
-                cluster_spec_with_auth("auto", "taskd-no-such-host-for-tests-not-auto", auth),
+                cluster_spec_with_auth("auto", "celeris-no-such-host-for-tests-not-auto", auth),
             );
             let call_count = Arc::new(StdMutex::new(0u32));
             let call_count_for_hook = call_count.clone();
@@ -6009,7 +6009,7 @@ mod tests {
         let mut d = dispatcher(store, adapter, 1);
         d.config.clusters.insert(
             "fern03".into(),
-            cluster_spec_with_auth("fern03", "taskd-no-such-host-for-tests-live", "publickey"),
+            cluster_spec_with_auth("fern03", "celeris-no-such-host-for-tests-live", "publickey"),
         );
         let (tx, rx) = tokio::sync::watch::channel(None);
         d.set_snapshot_publisher(SnapshotPublisher {
@@ -6040,11 +6040,11 @@ mod tests {
         assert!(!live.connect_pending, "connect_pending cleared");
     }
 
-    /// ADR-0018 実装メモ M1: 接続が戻っていれば、その tick で cooldown が解ける。`taskd-localhost` への多重接続が無い環境では skip。
+    /// ADR-0018 実装メモ M1: 接続が戻っていれば、その tick で cooldown が解ける。`celeris-localhost` への多重接続が無い環境では skip。
     #[tokio::test]
     async fn cluster_cooldown_is_cleared_once_the_control_master_is_back() {
-        if !control_master_alive_blocking(&["ssh".to_string()], "taskd-localhost") {
-            eprintln!("skip: taskd-localhost への多重接続が無い");
+        if !control_master_alive_blocking(&["ssh".to_string()], "celeris-localhost") {
+            eprintln!("skip: celeris-localhost への多重接続が無い");
             return;
         }
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
@@ -6057,7 +6057,7 @@ mod tests {
             "local".into(),
             ClusterSpec {
                 id: "local".into(),
-                host: "taskd-localhost".into(),
+                host: "celeris-localhost".into(),
                 concurrency: 1,
                 sync: SyncMode::Rsync,
                 delete_on_push: false,
@@ -6832,7 +6832,7 @@ mod tests {
     #[tokio::test]
     async fn pool_run_goes_to_the_account_with_more_headroom_and_sets_the_env() {
         let dir = accounts_fixture();
-        let book_path = dir.path().join(".taskd-usage.json");
+        let book_path = dir.path().join(".celeris-usage.json");
         {
             let mut book = AccountBook::load(&book_path);
             book.record_observation("a", usage_window(0.8, 90_000), ObservationSource::Run);
@@ -7096,7 +7096,7 @@ mod tests {
         assert_eq!(usage.source, "run");
     }
 
-    /// (e) 帳簿（`AccountBook`）はファイルに保存され、taskd の再起動（新しい `Dispatcher`）後も残る。
+    /// (e) 帳簿（`AccountBook`）はファイルに保存され、celeris の再起動（新しい `Dispatcher`）後も残る。
     #[tokio::test]
     async fn account_book_is_persisted_and_reloaded_after_restart() {
         let dir = accounts_fixture();
@@ -7117,10 +7117,10 @@ mod tests {
         let mut d1 = pool_dispatcher(store.clone(), adapter, None, dir.path().to_path_buf(), 2, 2);
         let report = run_until_idle(&mut d1, 200).await;
         assert!(report.idle);
-        assert!(dir.path().join(".taskd-usage.json").exists());
+        assert!(dir.path().join(".celeris-usage.json").exists());
         drop(d1);
 
-        // "taskd を再起動" = 新しい Dispatcher（同じ store・同じ accounts root）を作る。
+        // "celeris を再起動" = 新しい Dispatcher（同じ store・同じ accounts root）を作る。
         let never_used = Arc::new(PoolAdapter {
             terminal_or_throttled: Ok(Terminal::Done { summary: "unused".into(), evidence: vec![], usage: None }),
             delay: Duration::ZERO,
@@ -7847,7 +7847,7 @@ mod tests {
             extras.workspace_note.as_deref(),
             Some(
                 "この案件のコードはクラスタ pegasus の `/work/NBB/rmaeda/workspace/rust/benchfs` にある。\
-                 いまのカレントディレクトリはその写しで、taskd が run の前後で同期する。"
+                 いまのカレントディレクトリはその写しで、celeris が run の前後で同期する。"
             )
         );
 
@@ -8829,7 +8829,7 @@ mod tests {
         assert!(task_dir.join("artifacts").is_dir());
         assert!(task_dir.join("runs").is_dir());
         assert!(!tree.join("runs").exists(), "`runs/` を作業ツリーに作らない（git status を汚さない）");
-        // ブランチは `taskd/<task_id>` で、base は `main`。taskd はコミットしない。
+        // ブランチは `celeris/<task_id>` で、base は `main`。celeris はコミットしない。
         let branch = format!("celeris/{}", task.id);
         assert!(git_ok(repo_dir.path(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]));
         assert_eq!(git_out(&tree, &["rev-parse", "HEAD"]), main_sha, "base は main");

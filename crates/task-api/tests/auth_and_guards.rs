@@ -47,7 +47,7 @@ async fn bearer_token_is_required_when_configured() {
 
     let missing = send(&app, get("/api/v1/events")).await;
     assert_problem(&missing, 401, "unauthorized");
-    assert_eq!(missing.header("www-authenticate"), Some("Bearer realm=\"taskd\""));
+    assert_eq!(missing.header("www-authenticate"), Some("Bearer realm=\"celeris\""));
 
     let wrong = send(&app, get_with("/api/v1/events", &[("authorization", "Bearer not-the-token")])).await;
     assert_problem(&wrong, 401, "unauthorized");
@@ -88,14 +88,14 @@ async fn health_is_unauthenticated_but_still_host_checked() {
     let body = health.json();
     assert_eq!(body["api_version"], "1");
     assert_eq!(body["schema_version"], SCHEMA_VERSION);
-    assert_eq!(body["taskd_version"], "0.9.0-test");
+    assert_eq!(body["celeris_version"], "0.9.0-test");
     assert_eq!(body["instance_id"], "01J9ZX5T3K8Q7W6V5R4P3N2M1H");
     assert_eq!(body["started_at"], "2026-09-14T00:00:00Z");
     assert!(body["now"].as_str().is_some_and(|s| s.ends_with('Z')));
     assert_eq!(body["db"]["journal_mode"], "wal");
     assert_eq!(body["db"]["busy_timeout_ms"], 5000);
     assert!(!health.text().contains(TOKEN));
-    assert!(!health.text().contains("taskd.db"), "health must not expose the DB path");
+    assert!(!health.text().contains("celeris.db"), "health must not expose the DB path");
 
     let evil = send(&app, get_with("/api/v1/health", &[("host", "evil.example")])).await;
     assert_problem(&evil, 400, "host_not_allowed");
@@ -114,16 +114,16 @@ async fn no_token_means_no_authentication() {
 #[tokio::test]
 async fn host_header_is_checked_against_the_allow_list() {
     let env = TestEnv::with(EnvOptions {
-        allowed_hosts: vec!["taskd.lab.example".into()],
+        allowed_hosts: vec!["celeris.lab.example".into()],
         ..Default::default()
     });
     let app = env.router();
 
-    for host in ["evil.example", "evil.example:7710", "127.0.0.2", "taskd.lab.example.evil.example"] {
+    for host in ["evil.example", "evil.example:7710", "127.0.0.2", "celeris.lab.example.evil.example"] {
         let resp = send(&app, get_with("/api/v1/events", &[("host", host)])).await;
         assert_problem(&resp, 400, "host_not_allowed");
     }
-    for host in ["localhost", "localhost:7710", "127.0.0.1", "127.0.0.1:9999", "[::1]:7710", "[::1]", "taskd.lab.example:7710", "TASKD.lab.example"] {
+    for host in ["localhost", "localhost:7710", "127.0.0.1", "127.0.0.1:9999", "[::1]:7710", "[::1]", "celeris.lab.example:7710", "CELERIS.lab.example"] {
         let resp = send(&app, get_with("/api/v1/events", &[("host", host)])).await;
         assert_eq!(resp.status, 200, "host {host}: {}", resp.text());
     }

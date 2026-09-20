@@ -1,4 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import {
+  archiveProject,
+  cancelMilestone,
+  cancelProject,
+  pauseMilestone,
+  pauseProject,
+  resumeMilestone,
+  resumeProject,
+  unarchiveProject,
+} from "~/celeris/projects-admin.server";
+import type { MilestoneStatus, ProjectStatus } from "~/celeris/types";
 import {
   archivedQuery,
   milestoneIsPaused,
@@ -10,36 +22,24 @@ import {
   projectLifecycleButtons,
   readArchivedParam,
 } from "~/lib/lifecycle";
-import { TaskdClient } from "~/taskd/client.server";
-import {
-  archiveProject,
-  cancelMilestone,
-  cancelProject,
-  pauseMilestone,
-  pauseProject,
-  resumeMilestone,
-  resumeProject,
-  unarchiveProject,
-} from "~/taskd/projects-admin.server";
-import type { MilestoneStatus, ProjectStatus } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, serveLifecycle, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, sendProblem, serveLifecycle, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * 中止・一時停止・アーカイブ（ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.91。Phase 55 / G19）。
+ * 中止・一時停止・アーカイブ（ADR-0044 D6、docs/celeris-api-v1.md §3.84〜3.91。Phase 55 / G19）。
  *
  * ここで確かめるのは 2 つだけ:
  * 1. **どのボタンをどの状態で出すか**（`~/lib/lifecycle.ts` の純関数）。押せるかどうかの最終判断は
- *    taskd（409 `invalid_transition`）なので、ここは「意味の無いボタンを出さない」ことの確認。
- * 2. **BFF がどの経路に何を送るか**（`~/taskd/projects-admin.server.ts`）。本文は `{}` で、
- *    taskd の応答（`ProjectLifecycle` / `MilestoneLifecycle`）と 404 / 409 / 401 をそのまま通す。
+ *    celeris（409 `invalid_transition`）なので、ここは「意味の無いボタンを出さない」ことの確認。
+ * 2. **BFF がどの経路に何を送るか**（`~/celeris/projects-admin.server.ts`）。本文は `{}` で、
+ *    celeris の応答（`ProjectLifecycle` / `MilestoneLifecycle`）と 404 / 409 / 401 をそのまま通す。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -146,7 +146,7 @@ describe("milestoneLifecycleButtons（途中目標のカード）", () => {
     const statuses: MilestoneStatus[] = ["proposed", "approved", "in_progress", "reached", "redesigned", "cancelled"];
     const pausable = statuses.filter((status) => milestoneLifecycleButtons({ status }).pause);
     expect(pausable).toEqual(["proposed", "approved", "in_progress"]);
-    // 案件と違い、達成・再設計の途中目標は中止もできない（taskd が 409。§3.84〜3.91 の「終端」の定義）。
+    // 案件と違い、達成・再設計の途中目標は中止もできない（celeris が 409。§3.84〜3.91 の「終端」の定義）。
     const cancellable = statuses.filter((status) => milestoneLifecycleButtons({ status }).cancel);
     expect(cancellable).toEqual(["proposed", "approved", "in_progress"]);
     expect(milestoneIsTerminal("reached")).toBe(true);

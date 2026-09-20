@@ -1,14 +1,14 @@
+import type { TreeFileView } from "~/celeris/types";
 import { binaryFileLabel, tooLargeFileLabel } from "~/lib/labels";
-import type { TreeFileView } from "~/taskd/types";
 
 /**
- * タスクの作業ツリーの閲覧（ADR-0043 D6、docs/taskd-api-v1.md §3.72〜3.73。Phase 52 / G16）で
+ * タスクの作業ツリーの閲覧（ADR-0043 D6、docs/celeris-api-v1.md §3.72〜3.73。Phase 52 / G16）で
  * 画面が使う純粋関数。DOM を描画する unit テストがこのリポジトリに無い（G10-U1）ので、
  * **表示の判断と文言はここに集めて** `test/unit/task-files.test.ts` で検証する
  * （`~/lib/artifact-view.ts` の `artifactStatusMessage` と同じ考え方）。
  *
- * 境界（`..` や作業ツリーの外に出るパス）を弾くのは taskd（403 `path_forbidden`）で、ここでは判定しない。
- * 一覧の並び（ディレクトリが先、あとは名前順）も taskd が決めたものをそのまま使う（§3.72）。
+ * 境界（`..` や作業ツリーの外に出るパス）を弾くのは celeris（403 `path_forbidden`）で、ここでは判定しない。
+ * 一覧の並び（ディレクトリが先、あとは名前順）も celeris が決めたものをそのまま使う（§3.72）。
  */
 
 /** パンくずの 1 つ（`path` はそのリポジトリの作業ツリーからの相対パス）。 */
@@ -44,7 +44,7 @@ export type FileBodyKind = "text" | "binary" | "too_large";
 
 export interface FileBody {
   kind: FileBodyKind;
-  /** 本文（`kind === "text"` のときだけ。taskd が `text` を返さなかったら空文字）。 */
+  /** 本文（`kind === "text"` のときだけ。celeris が `text` を返さなかったら空文字）。 */
   text: string | null;
   /** 本文を出さない理由（`kind === "text"` なら `null`）。 */
   message: string | null;

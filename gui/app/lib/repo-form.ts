@@ -1,13 +1,13 @@
-import type { ProjectRepo, WorkspaceSpec } from "~/taskd/types";
+import type { ProjectRepo, WorkspaceSpec } from "~/celeris/types";
 
 /**
- * 案件のリポジトリ（ADR-0043 D1、docs/taskd-api-v1.md §3.68〜3.71。Phase 52 / G16）のフォーム入出力。
+ * 案件のリポジトリ（ADR-0043 D1、docs/celeris-api-v1.md §3.68〜3.71。Phase 52 / G16）のフォーム入出力。
  * `~/lib/workspace-form.ts`（案件 1 つぶんの作業場所）の兄弟で、そちらは触らない。
- * `~/components/RepoFields.tsx`（入力欄）と `~/taskd/repos-admin.server.ts`（`RepoCreateBody` /
+ * `~/components/RepoFields.tsx`（入力欄）と `~/celeris/repos-admin.server.ts`（`RepoCreateBody` /
  * `RepoPatchBody` の組み立て）が共有する純粋関数をここに置く。
  *
- * GUI 側では検証しない（`~/taskd/projects-admin.server.ts` と同じ規律）: 空のパス・知らないクラスタ・
- * 不正な slug もそのまま taskd に送り、422 `validation` / 409 `repo_in_use` の文言をそのまま出す。
+ * GUI 側では検証しない（`~/celeris/projects-admin.server.ts` と同じ規律）: 空のパス・知らないクラスタ・
+ * 不正な slug もそのまま celeris に送り、422 `validation` / 409 `repo_in_use` の文言をそのまま出す。
  */
 
 /** 置き場所の 2 択（「手元」＝ `WorkspaceSpec::Local` ／「クラスタ」＝ `Remote`）。 */
@@ -16,7 +16,7 @@ export type RepoPlace = "local" | "remote";
 /** 入力欄 1 組ぶんの生の値（`~/components/RepoFields.tsx` の `name` と 1:1）。空欄は `null`。 */
 export interface RepoFormValues {
   name: string | null;
-  /** `""` / `"auto"` は「taskd に決めさせる」（`kind` を送らない）。 */
+  /** `""` / `"auto"` は「celeris に決めさせる」（`kind` を送らない）。 */
   kind: string | null;
   place: string | null;
   path: string | null;
@@ -32,7 +32,7 @@ export function repoPlaceOf(location: WorkspaceSpec | null | undefined): RepoPla
 
 /**
  * `place` / `path` / `cluster` から `WorkspaceSpec` を組む（`RepoCreateBody.location` は必須なので
- * 常に 1 つ返す）。`remote` 以外（未選択を含む）は `local` 扱い。値の妥当性は taskd が決める。
+ * 常に 1 つ返す）。`remote` 以外（未選択を含む）は `local` 扱い。値の妥当性は celeris が決める。
  */
 export function repoLocationFrom(values: Pick<RepoFormValues, "place" | "path" | "cluster">): WorkspaceSpec {
   const path = values.path ?? "";
@@ -48,7 +48,7 @@ export function repoLocationText(location: WorkspaceSpec): string {
 }
 
 /**
- * 並びは taskd が決めたもの（primary が先頭、あとは作った順。§3.68）をそのまま使う。
+ * 並びは celeris が決めたもの（primary が先頭、あとは作った順。§3.68）をそのまま使う。
  * GUI では並べ替えない。primary の 1 件だけを取り出したいときのための小さな補助。
  */
 export function primaryRepo(repos: readonly ProjectRepo[] | undefined): ProjectRepo | null {

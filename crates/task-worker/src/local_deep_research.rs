@@ -3,9 +3,9 @@
 //! Local Deep Research（LDR）は `paperqa`（ADR-0027 D3）と同じ「調査エンジンを包む」形。LDR には
 //! 一発実行の CLI が無く（`ldr-web`/`ldr-mcp` は常駐プロセス）、プログラム的な API
 //! （`local_deep_research.api.{quick_summary,detailed_research,generate_report}`）だけがある。
-//! そのため taskd 側が実行用の Python スクリプトを持ち（`include_str!`）、run ごとに
+//! そのため celeris 側が実行用の Python スクリプトを持ち（`include_str!`）、run ごとに
 //! `runs/<run_id>/ldr_run.py` として書き出して `<command> <その場所> <run_dir>/ldr_input.json` で起動する。
-//! taskd の外に置くファイルは venv（`command` が指す python）だけで、スクリプト自体は taskd のバイナリと
+//! celeris の外に置くファイルは venv（`command` が指す python）だけで、スクリプト自体は celeris のバイナリと
 //! 一緒に版が進む。
 //!
 //! ワーカープロトコル（`artifacts/result.json`）は PaperQA2 アダプタと同じく**アダプタが代わりに書く**
@@ -37,7 +37,7 @@ const SUMMARY_MAX_CHARS: usize = 1500;
 /// `progress:` 行を `progress` に転送するときの 1 行あたりの上限。
 const PROGRESS_LINE_MAX_CHARS: usize = 500;
 /// ランナーの最終行の目印（ADR-0029 D1）。
-const RESULT_PREFIX: &str = "TASKD_RESULT ";
+const RESULT_PREFIX: &str = "CELERIS_RESULT ";
 /// `progress:` 行の目印。
 const PROGRESS_PREFIX: &str = "progress:";
 
@@ -62,7 +62,7 @@ impl LdrMode {
 }
 
 /// `[adapters.local_deep_research.evidence]`（ADR-0031 D2）: 決定的な証拠ゲートの閾値。ハーネス
-/// （このアダプタ）が `TASKD_RESULT` の `counts` を見て機械的に判定する（LLM に判断させない）。
+/// （このアダプタ）が `CELERIS_RESULT` の `counts` を見て機械的に判定する（LLM に判断させない）。
 /// `0` を書けばその項目は見ない。全部 0 なら従来どおり（ゲート無し）の挙動になる（受け入れ条件 3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,10 +105,10 @@ fn default_min_domains() -> u32 {
     2
 }
 
-/// `[adapters.local_deep_research]`（taskd.toml, ADR-0029 D1）。`[[providers]] adapter =
+/// `[adapters.local_deep_research]`（config.toml, ADR-0029 D1）。`[[providers]] adapter =
 /// "local-deep-research"` の行ごとに `model`（= `settings` の `llm.model` を上書き）と `env` を上書きできる
 /// （`paperqa`/`acp` と同じ作り）。行の `settings` の上書きは無い（`ProviderConfig.settings` は `paperqa` 専用
-/// のフィールドで、LDR では再利用しない。taskd 側の実装判断）。
+/// のフィールドで、LDR では再利用しない。celeris 側の実装判断）。
 #[derive(Debug, Clone)]
 pub struct LdrConfig {
     /// 起動するコマンド（LDR を入れた venv の python）。
@@ -174,7 +174,7 @@ impl WorkerAdapter for LdrAdapter {
     }
 
     /// 他のアダプタ（`paperqa`/`claude_code`/`codex`）と同じ規則: `extra` は `config.env` の末尾に足すので、
-    /// 同名キーは `extra` が勝つ（taskd の環境 < アダプタの環境 < `with_env` の追加分）。
+    /// 同名キーは `extra` が勝つ（celeris の環境 < アダプタの環境 < `with_env` の追加分）。
     fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
         let mut config = self.config.clone();
         config.env.extend(extra.iter().cloned());
@@ -328,7 +328,7 @@ async fn run_ldr(
         match outcome {
             LineOutcome::Eof => break,
             LineOutcome::TooLong => {
-                // ランナーの出力形式は taskd が定義したものではないので寛容に無視する（paperqa と同じ考え方）。
+                // ランナーの出力形式は celeris が定義したものではないので寛容に無視する（paperqa と同じ考え方）。
                 sink.heartbeat();
                 last_activity = Instant::now();
                 warn!("run {run_id}: discarding overlong line from the local-deep-research runner");
@@ -348,7 +348,7 @@ async fn run_ldr(
                 } else if let Some(rest) = trimmed.strip_prefix(RESULT_PREFIX) {
                     match serde_json::from_str::<serde_json::Value>(rest) {
                         Ok(value) => task_result = Some(value),
-                        Err(e) => warn!("run {run_id}: could not parse TASKD_RESULT line: {e}"),
+                        Err(e) => warn!("run {run_id}: could not parse CELERIS_RESULT line: {e}"),
                     }
                 }
             }
@@ -397,7 +397,7 @@ async fn run_ldr(
         let pf = classify_provider_failure(&classify_text);
         (
             Terminal::Error {
-                message: "local-deep-research runner did not print a TASKD_RESULT line".to_string(),
+                message: "local-deep-research runner did not print a CELERIS_RESULT line".to_string(),
                 retryable: true,
             },
             pf,
@@ -434,7 +434,7 @@ async fn run_ldr(
             }
         }
 
-        // ADR-0031 D2: 決定的な証拠ゲート。`TASKD_RESULT` の `counts` を見る（古いランナー/スタブで
+        // ADR-0031 D2: 決定的な証拠ゲート。`CELERIS_RESULT` の `counts` を見る（古いランナー/スタブで
         // 無ければ全 0 扱い＝閾値を全部 0 にしないと落ちる）。LLM には判断させない。
         let counts = value.get("counts");
         let count_of = |key: &str| -> u32 {
@@ -593,13 +593,13 @@ mod tests {
         r#"{"queries": 1, "search_results": 5, "sources": 3, "sources_cited": 2, "unique_domains": 3}"#;
 
     /// スタブは argv[2]（`ldr_input.json` のパス）に成功時の `report.md`/`sources.json`/`research.json` を
-    /// 書き、progress と `TASKD_RESULT`（`counts` 込み）を出す（実際のランナーの動きを最小限まねる。ADR-0031 D1）。
-    /// `counts_json` が `None` なら `TASKD_RESULT` に `counts` を含めない（古いランナー/スタブの再現）。
+    /// 書き、progress と `CELERIS_RESULT`（`counts` 込み）を出す（実際のランナーの動きを最小限まねる。ADR-0031 D1）。
+    /// `counts_json` が `None` なら `CELERIS_RESULT` に `counts` を含めない（古いランナー/スタブの再現）。
     fn script_with_counts(counts_json: Option<&str>) -> String {
         let counts = counts_json.unwrap_or(r#"{"queries": 0, "search_results": 0, "sources": 0, "sources_cited": 0, "unique_domains": 0}"#);
         let result_line = match counts_json {
-            Some(counts) => format!(r#"TASKD_RESULT {{"summary": "found X and Y with sources", "sources": 3, "counts": {counts}}}"#),
-            None => r#"TASKD_RESULT {"summary": "found X and Y with sources", "sources": 3}"#.to_string(),
+            Some(counts) => format!(r#"CELERIS_RESULT {{"summary": "found X and Y with sources", "sources": 3, "counts": {counts}}}"#),
+            None => r#"CELERIS_RESULT {"summary": "found X and Y with sources", "sources": 3}"#.to_string(),
         };
         format!(
             r#"input="$2"
@@ -735,9 +735,9 @@ echo '{result_line}'
     }
 
     #[tokio::test]
-    async fn missing_taskd_result_line_is_retryable_error() {
+    async fn missing_celeris_result_line_is_retryable_error() {
         let dir = tempfile::tempdir().unwrap();
-        // report.md は書くが TASKD_RESULT を出さずに終わる。
+        // report.md は書くが CELERIS_RESULT を出さずに終わる。
         let config = stub_ldr(
             dir.path(),
             "mkdir -p artifacts && echo hi > artifacts/report.md\necho 'progress: working'\n",
@@ -749,7 +749,7 @@ echo '{result_line}'
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
                 assert!(retryable);
-                assert!(message.contains("TASKD_RESULT"), "{message}");
+                assert!(message.contains("CELERIS_RESULT"), "{message}");
             }
             other => panic!("expected error, got {other:?}"),
         }
@@ -761,7 +761,7 @@ echo '{result_line}'
         let dir = tempfile::tempdir().unwrap();
         let config = stub_ldr(
             dir.path(),
-            "mkdir -p artifacts && : > artifacts/report.md\necho 'TASKD_RESULT {\"summary\": \"x\", \"sources\": 0}'\n",
+            "mkdir -p artifacts && : > artifacts/report.md\necho 'CELERIS_RESULT {\"summary\": \"x\", \"sources\": 0}'\n",
         );
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -872,7 +872,7 @@ while true; do sleep 0.1; done
             dir.path(),
             "cp \"$2\" \"$(dirname \"$0\")/seen_input.json\"\n\
              mkdir -p artifacts && echo hi > artifacts/report.md\n\
-             echo 'TASKD_RESULT {\"summary\": \"ok\", \"sources\": 0}'\n",
+             echo 'CELERIS_RESULT {\"summary\": \"ok\", \"sources\": 0}'\n",
         );
         config.mode = LdrMode::Detailed;
         config.iterations = Some(3);
@@ -884,7 +884,7 @@ while true; do sleep 0.1; done
         ];
         config.model = Some("qwen3.8-27b".to_string());
         // このテストは入力 JSON の組み立てを見るだけで、証拠ゲート（ADR-0031 D2）とは無関係なので無効にする
-        // （スタブの TASKD_RESULT に counts が無い）。
+        // （スタブの CELERIS_RESULT に counts が無い）。
         config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -916,7 +916,7 @@ while true; do sleep 0.1; done
             dir.path(),
             "cp \"$2\" \"$(dirname \"$0\")/seen_input.json\"\n\
              mkdir -p artifacts && echo hi > artifacts/report.md\n\
-             echo 'TASKD_RESULT {\"summary\": \"ok\", \"sources\": 0}'\n",
+             echo 'CELERIS_RESULT {\"summary\": \"ok\", \"sources\": 0}'\n",
         );
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -938,13 +938,13 @@ while true; do sleep 0.1; done
             &format!(
                 "printf '%s' \"$OPENAI_BASE_URL\" > {out}\n\
                  mkdir -p artifacts && echo hi > artifacts/report.md\n\
-                 echo 'TASKD_RESULT {{\"summary\": \"ok\", \"sources\": 0}}'\n",
+                 echo 'CELERIS_RESULT {{\"summary\": \"ok\", \"sources\": 0}}'\n",
                 out = out_file.display()
             ),
         );
         config.env.push(("OPENAI_BASE_URL".to_string(), "http://old:1".to_string()));
         // このテストは環境変数の上書きを見るだけで、証拠ゲート（ADR-0031 D2）とは無関係なので無効にする
-        // （スタブの TASKD_RESULT に counts が無い）。
+        // （スタブの CELERIS_RESULT に counts が無い）。
         config.evidence = EvidenceThresholds { min_search_results: 0, min_sources: 0, min_cited: 0, min_domains: 0 };
         let base = LdrAdapter::new(config);
         let with_env = base
@@ -1363,7 +1363,7 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
         assert!(dir.path().join("artifacts/result.json").exists());
     }
 
-    /// `TASKD_RESULT` に `counts` が無い（古いランナー/スタブ）場合は全 0 扱いになるので、既定の閾値
+    /// `CELERIS_RESULT` に `counts` が無い（古いランナー/スタブ）場合は全 0 扱いになるので、既定の閾値
     /// （全部 0 より大きい）では落ちる。
     #[tokio::test]
     async fn gate_missing_counts_is_treated_as_all_zero_and_fails_with_default_thresholds() {
@@ -1596,7 +1596,7 @@ with tempfile.TemporaryDirectory() as d:
     with open(input_path, "w") as f:
         json.dump(payload, f)
     sys.argv = ["local_deep_research_run.py", input_path]
-    # `main()` prints its own progress/`TASKD_RESULT` lines to stdout; swallow those so
+    # `main()` prints its own progress/`CELERIS_RESULT` lines to stdout; swallow those so
     # only the checker's own JSON summary line reaches the Rust test's stdout capture.
     with contextlib.redirect_stdout(io.StringIO()):
         rc = mod.main()

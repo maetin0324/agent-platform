@@ -1,7 +1,7 @@
-//! ADR-0040 D4（Phase 47）: taskd の「インスタンスの役割」。`daemon_instances` の 1 行 = 1 プロセス。
+//! ADR-0040 D4（Phase 47）: celeris の「インスタンスの役割」。`daemon_instances` の 1 行 = 1 プロセス。
 //!
 //! ここにあるのは**型と行の変換だけ**で、役割を決める規則（誰が active になるか、いつ drain するか）は
-//! taskd 側（`taskd::instance`）にある。判断は決定的で、LLM もワーカーも関与しない（DESIGN 原則 1〜4）。
+//! celeris 側（`celeris::instance`）にある。判断は決定的で、LLM もワーカーも関与しない（DESIGN 原則 1〜4）。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -133,7 +133,7 @@ impl Default for SharedRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DaemonInstance {
     pub instance_id: String,
-    /// `--release <sha12>` / `TASKD_RELEASE` / `"dev"`。
+    /// `--release <sha12>` / `CELERIS_RELEASE` / `"dev"`。
     pub release: String,
     pub pid: u32,
     pub role: InstanceRole,

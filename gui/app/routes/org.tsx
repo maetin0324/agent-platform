@@ -8,6 +8,30 @@ import {
   useFetcher,
   useSearchParams,
 } from "react-router";
+import type { OrgOpOutcome } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { CelerisError, type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { formString } from "~/celeris/forms";
+import {
+  buildOrgCreateInput,
+  buildOrgPatchInput,
+  createOrgNode,
+  deleteOrgNode,
+  patchOrgNode,
+} from "~/celeris/org-admin.server";
+import type {
+  ConfigView,
+  MemoryView,
+  OrgKind,
+  OrgList,
+  OrgNode,
+  Project,
+  ProjectList,
+  StandingRule,
+  StandingRuleList,
+  TaskList,
+  TaskSummary,
+} from "~/celeris/types";
 import { OrgActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
@@ -22,38 +46,14 @@ import { orgKindMark, taskStatusLabel } from "~/lib/labels";
 import { buildOrgTree, countWorkload, type OrgTreeNode, tasksByAssignee, type Workload } from "~/lib/org-tree";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
-import { TaskdBanner } from "~/root";
-import type { OrgOpOutcome } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { TaskdError, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { formString } from "~/taskd/forms";
-import {
-  buildOrgCreateInput,
-  buildOrgPatchInput,
-  createOrgNode,
-  deleteOrgNode,
-  patchOrgNode,
-} from "~/taskd/org-admin.server";
-import type {
-  ConfigView,
-  MemoryView,
-  OrgKind,
-  OrgList,
-  OrgNode,
-  Project,
-  ProjectList,
-  StandingRule,
-  StandingRuleList,
-  TaskList,
-  TaskSummary,
-} from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/org";
 
 /**
  * `/org`（組織の木、SPEC §3.2、ADR-0033 D1、docs/gui/api.md §3.42〜3.45）。
  * `GET /org` は木にしない（API は position 順の平らな配列）ので、`parent_id` から GUI 側で組む
  * （`~/lib/org-tree.ts`）。「抱えている仕事の数」は `GET /tasks`（`TaskSummary.assignee`、Phase 27 で追加。
- * taskd-requests.md R3 が解決済み）を 1 回呼んで数える（`app/routes/tasks.new.tsx` と同じ `limit=500` の
+ * celeris-requests.md R3 が解決済み）を 1 回呼んで数える（`app/routes/tasks.new.tsx` と同じ `limit=500` の
  * 「全件を 1 回で」パターン）。対話用タスク（`TaskSummary.conversation`）は数えない（GUI-R3）。
  * G13a では `assignee` が `TaskSummary` に無かったため `GET /projects/{id}` を案件数ぶん束ねる N+1 で
  * 代替していたが、その代替はやめた。
@@ -74,7 +74,7 @@ export interface OrgData {
   memoryUnavailable: boolean;
 }
 
-export async function loadOrg(client: TaskdClient, request: Request): Promise<OrgData> {
+export async function loadOrg(client: CelerisClient, request: Request): Promise<OrgData> {
   const url = new URL(request.url);
   const selected = url.searchParams.get("selected");
   // 記憶の「この案件の引き出し」を見るための案件（`?project=`）。空文字は「選んでいない」。
@@ -101,7 +101,7 @@ export async function loadOrg(client: TaskdClient, request: Request): Promise<Or
           .then((memory) => ({ memory, unavailable: false }))
           .catch((e) => ({
             memory: null,
-            unavailable: e instanceof TaskdError && e.status === 409 && e.code === "memory_unavailable",
+            unavailable: e instanceof CelerisError && e.status === 409 && e.code === "memory_unavailable",
           }))
       : Promise.resolve({ memory: null, unavailable: false }),
   ]);
@@ -122,9 +122,9 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<OrgData> {
   try {
-    return await loadOrg(getTaskdClient(), request);
+    return await loadOrg(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -136,7 +136,7 @@ export function meta(_: Route.MetaArgs) {
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
-  const client = getTaskdClient();
+  const client = getCelerisClient();
   const id = formString(form, "id") ?? "";
 
   let outcome: OrgOpOutcome;
@@ -495,7 +495,7 @@ function OrgNodeDetail({
         <div>
           <p className={labelClass}>抱えている仕事</p>
           {/* 対話用タスク（`conversation`）は含まない（GUI-R3、Phase 27。SPEC「タスクは裏方」）。
-              `TaskSummary` には `project_id` が無いため、案件名は添えられない（taskd-requests.md R3）。 */}
+              `TaskSummary` には `project_id` が無いため、案件名は添えられない（celeris-requests.md R3）。 */}
           {tasks.length === 0 ? (
             <p className={cn(hintClass, "mt-1")}>今のところありません。</p>
           ) : (
@@ -520,7 +520,7 @@ function OrgNodeDetail({
           <p className={labelClass}>覚えていること（案件をまたぐ）</p>
           {memoryUnavailable ? (
             <p className={cn(hintClass, "mt-1")} data-testid="org-node-memory-unavailable">
-              記憶の置き場所が設定されていません（taskd の <code>[memory]</code> を設定すると、この担当が
+              記憶の置き場所が設定されていません（celeris の <code>[memory]</code> を設定すると、この担当が
               案件をまたいで覚えたことをここで読めます）。
             </p>
           ) : memory === null ? (
@@ -581,7 +581,7 @@ function OrgNodeDetail({
 
         <div>
           <p className={labelClass}>この担当への永続の認可</p>
-          {/* SPEC §3.6「永続の認可は文字で記録してエージェントに注入する」。ADR-0033 D5、docs/taskd-api-v1.md
+          {/* SPEC §3.6「永続の認可は文字で記録してエージェントに注入する」。ADR-0033 D5、docs/celeris-api-v1.md
               §3.58「node を書けば全員向け + そのノード向け」。追加・削除は `/approvals` から行う。 */}
           {standingRules.length === 0 ? (
             <p className={cn(hintClass, "mt-1")}>今のところありません。</p>
@@ -754,11 +754,11 @@ function OrgNodeDetail({
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

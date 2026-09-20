@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { WorkspaceSpec } from "~/celeris/types";
 import { readWorkspaceFromForm, workspaceKindOf, workspaceSummaryText } from "~/lib/workspace-form";
-import type { WorkspaceSpec } from "~/taskd/types";
 
 /**
  * 案件の作業場所（ADR-0039 D1、Phase G13k）のフォーム入出力の純粋関数。
- * `~/components/WorkspaceFields.tsx` / `~/taskd/projects-admin.server.ts` / `~/taskd/conversation.server.ts`
+ * `~/components/WorkspaceFields.tsx` / `~/celeris/projects-admin.server.ts` / `~/celeris/conversation.server.ts`
  * が共有する読み手・表示のロジックをここでまとめて検証する。
  */
 
@@ -46,7 +46,7 @@ describe("readWorkspaceFromForm", () => {
     ).toEqual({ kind: "remote", cluster: "pegasus", path: "/work/NBB/rmaeda/workspace/rust/benchfs" });
   });
 
-  it("空のパス・知らない cluster も検証せずそのまま組む（taskd の 422 に委ねる）", () => {
+  it("空のパス・知らない cluster も検証せずそのまま組む（celeris の 422 に委ねる）", () => {
     expect(readWorkspaceFromForm(form([["workspace_kind", "remote"]]))).toEqual({
       kind: "remote",
       cluster: "",

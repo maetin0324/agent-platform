@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TaskdClient } from "~/taskd/client.server";
+import { CelerisClient } from "~/celeris/client.server";
 import {
   buildProviderCreateInput,
   buildProviderPatchInput,
@@ -8,16 +8,16 @@ import {
   deleteProvider,
   parseEnvText,
   patchProvider,
-} from "~/taskd/providers-admin.server";
-import type { ProviderCheckResponse, ProviderConfigView1, ReloadResult } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+} from "~/celeris/providers-admin.server";
+import type { ProviderCheckResponse, ProviderConfigView1, ReloadResult } from "~/celeris/types";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -66,7 +66,7 @@ describe("buildProviderCreateInput", () => {
     });
   });
 
-  it("omits optional fields when blank (taskd applies its own defaults)", () => {
+  it("omits optional fields when blank (celeris applies its own defaults)", () => {
     const form = new FormData();
     form.set("id", "x");
     form.set("adapter", "fake");

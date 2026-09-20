@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { conversationTaskIds, conversationTrouble, projectTitleFromText, replyArrived } from "~/lib/conversation";
-import { TaskdClient } from "~/taskd/client.server";
+import { CelerisClient } from "~/celeris/client.server";
 import {
   buildMessagePostBody,
   loadConversation,
   runConversationAction,
   sendMessage,
   startProjectFromMessage,
-} from "~/taskd/conversation.server";
+} from "~/celeris/conversation.server";
 import type {
   AttentionItem,
   Inbox,
@@ -17,20 +16,21 @@ import type {
   OrgList,
   Project,
   ProjectList,
-} from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+} from "~/celeris/types";
+import { conversationTaskIds, conversationTrouble, projectTitleFromText, replyArrived } from "~/lib/conversation";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * 秘書・各ノードとの対話（Phase G13b-2、ADR-0033 D4、docs/taskd-api-v1.md §3.54〜3.55）。
- * 実 taskd は起動せず、プロセス内の偽 taskd（`test/mock-taskd/server.ts`）だけを見る。
+ * 秘書・各ノードとの対話（Phase G13b-2、ADR-0033 D4、docs/celeris-api-v1.md §3.54〜3.55）。
+ * 実 celeris は起動せず、プロセス内の偽 celeris（`test/mock-celeris/server.ts`）だけを見る。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -318,7 +318,7 @@ describe("startProjectFromMessage（秘書に話しかけて新しい案件に�
     expect(outcome).toEqual({ ok: true, op: "new_project", project: project() });
     const posted = mock.requests.find((r) => r.method === "POST");
     expect(JSON.parse(posted?.body ?? "{}")).toEqual({ title: projectTitleFromText(text), request: text });
-    // 案件を作ると taskd が秘書の最初の返事を起こす（ADR-0033 D4）。GUI からは続けて話しかけない。
+    // 案件を作ると celeris が秘書の最初の返事を起こす（ADR-0033 D4）。GUI からは続けて話しかけない。
     expect(mock.requests.some((r) => r.url.endsWith("/messages"))).toBe(false);
   });
 
@@ -470,7 +470,7 @@ describe("conversationTrouble / conversationTaskIds", () => {
     expect(conversationTrouble([], ["01JTASK"])).toBeNull();
   });
 
-  it("run の失敗は taskd の reason をそのまま出す", () => {
+  it("run の失敗は celeris の reason をそのまま出す", () => {
     const failed: AttentionItem = {
       type: "failed",
       at: "2026-09-17T00:00:00Z",

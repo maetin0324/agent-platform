@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { CelerisError } from "~/celeris/errors";
+import type { ArtifactList, CommentList, EventsPage, TaskDetail, Timeline, TreeView } from "~/celeris/types";
 import { loadTaskDetail } from "~/routes/tasks.$id";
-import { TaskdClient } from "~/taskd/client.server";
-import { TaskdError } from "~/taskd/errors";
-import type { ArtifactList, CommentList, EventsPage, TaskDetail, Timeline, TreeView } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -199,7 +199,7 @@ describe("loadTaskDetail", () => {
     expect(eventsReq?.url).toBe("/api/v1/tasks/T1/events?types=transitioned");
   });
 
-  it("throws TaskdError with status 404 and code task_not_found when the task does not exist", async () => {
+  it("throws CelerisError with status 404 and code task_not_found when the task does not exist", async () => {
     for (const path of ["", "/events", "/artifacts", "/timeline", "/comments"]) {
       mock.on("GET", `/api/v1/tasks/MISSING${path}`, (_req, res) => {
         sendProblem(res, { status: 404, code: "task_not_found", detail: "task MISSING not found" });
@@ -213,9 +213,9 @@ describe("loadTaskDetail", () => {
       error = e;
     }
 
-    expect(error).toBeInstanceOf(TaskdError);
-    const taskdError = error as TaskdError;
-    expect(taskdError.status).toBe(404);
-    expect(taskdError.code).toBe("task_not_found");
+    expect(error).toBeInstanceOf(CelerisError);
+    const celerisError = error as CelerisError;
+    expect(celerisError.status).toBe(404);
+    expect(celerisError.code).toBe("task_not_found");
   });
 });

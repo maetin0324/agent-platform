@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { EventsPage } from "~/taskd/types";
+import type { EventsPage } from "~/celeris/types";
 import { expect, test } from "./test";
 
 /**
@@ -10,32 +10,32 @@ import { expect, test } from "./test";
  * **秘書に投げる → 返事 → 案件 → 報告 → 認可 → 成果物**。
  *
  * **必ず別ポートで動かす**（`playwright.config.ts` の注意書き参照）。既定の 7700 / 7710 は人が使っている
- * 運用中の GUI / taskd なので、この spec は使い捨ての taskd（`scripts/taskd.sh fixture org`。fake アダプタ、
+ * 運用中の GUI / celeris なので、この spec は使い捨ての celeris（`scripts/celeris.sh fixture org`。fake アダプタ、
  * `config/org.example.toml` の組織）を別ポートに立てて使う:
  *
  *   cd gui
- *   scripts/taskd.sh build
- *   TASKD_API_LISTEN=127.0.0.1:17971 scripts/taskd.sh fixture org   # 先に作る（GUI が起動時にトークンを読むため）
- *   TASKD_GUI_BIND=127.0.0.1:17901 TASKD_API_URL=http://127.0.0.1:17971 TASKD_API_LISTEN=127.0.0.1:17971 \
- *     TASKD_API_TOKEN_FILE="$(pwd)/.run/org/api.token" \
+ *   scripts/celeris.sh build
+ *   CELERIS_API_LISTEN=127.0.0.1:17971 scripts/celeris.sh fixture org   # 先に作る（GUI が起動時にトークンを読むため）
+ *   CELERIS_GUI_BIND=127.0.0.1:17901 CELERIS_API_URL=http://127.0.0.1:17971 CELERIS_API_LISTEN=127.0.0.1:17971 \
+ *     CELERIS_API_TOKEN_FILE="$(pwd)/.run/org/api.token" \
  *     pnpm exec playwright test e2e/g13.spec.ts
  *
  * fixture の作り直し・起動・停止はこのファイルが行う（`fixture org` → `start org` → 最後に `stop org`）。
  * `fixture org` はトークンを作り直さない（同じ値を保つ）ので、GUI が起動時に読んだトークンのまま通る。
- * LLM は呼ばない（fake ワーカー `test/taskd/fixtures/org-worker.sh` が決定的に返す）。
+ * LLM は呼ばない（fake ワーカー `test/celeris/fixtures/org-worker.sh` が決定的に返す）。
  */
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:17971";
-const RUN_ROOT = process.env.TASKD_RUN_ROOT ?? path.join(REPO_ROOT, ".run");
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_LISTEN = process.env.CELERIS_API_LISTEN ?? "127.0.0.1:17971";
+const RUN_ROOT = process.env.CELERIS_RUN_ROOT ?? path.join(REPO_ROOT, ".run");
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, {
+  return execFileSync(CELERIS_SH, args, {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   }).toString();
 }
 
@@ -44,7 +44,7 @@ function token(): string {
 }
 
 async function api<T>(method: "GET" | "POST", pathAndQuery: string, body?: unknown): Promise<T> {
-  const response = await fetch(`http://${TASKD_API_LISTEN}/api/v1${pathAndQuery}`, {
+  const response = await fetch(`http://${CELERIS_API_LISTEN}/api/v1${pathAndQuery}`, {
     method,
     headers: {
       Authorization: `Bearer ${token()}`,
@@ -52,7 +52,7 @@ async function api<T>(method: "GET" | "POST", pathAndQuery: string, body?: unkno
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(`taskd ${method} ${pathAndQuery} responded ${response.status}`);
+  if (!response.ok) throw new Error(`celeris ${method} ${pathAndQuery} responded ${response.status}`);
   return (await response.json()) as T;
 }
 
@@ -173,7 +173,7 @@ test.describe("Phase G13f-1: 秘書 → 案件 → 報告 → 認可 → 成果�
     await expect(list).toContainText("担当: 論文執筆課");
     // 承認待ち・レビューのような裏方のタスクは木にも一覧にも出ない（`support`。Phase 29）。
     await expect(list).not.toContainText("Approval needed");
-    // 案件は「提案中」から「進行中」になる（taskd が変える）。
+    // 案件は「提案中」から「進行中」になる（celeris が変える）。
     await expect(page.getByTestId("project-status")).toHaveText("進行中");
   });
 
@@ -251,8 +251,8 @@ test.describe("Phase G13f-1: 秘書 → 案件 → 報告 → 認可 → 成果�
     await expect(row.getByTestId("report-project-link")).toHaveAttribute("href", `/projects/${projectId}`);
     await expect(row.getByTestId("report-talk-link")).toBeVisible();
     await expect(row.getByTestId("report-artifacts-link")).toHaveAttribute("href", `/artifacts?project=${projectId}`);
-    // 内情の説明（taskd に転送するのは…）は画面から消えている。
-    await expect(page.getByTestId("reports-filter-form")).not.toContainText("taskd");
+    // 内情の説明（celeris に転送するのは…）は画面から消えている。
+    await expect(page.getByTestId("reports-filter-form")).not.toContainText("celeris");
   });
 
   test("認可は同じ文面をまとめて 1 枚にし、答えると履歴に移る", async ({ page }) => {
@@ -287,7 +287,7 @@ test.describe("Phase G13f-1: 秘書 → 案件 → 報告 → 認可 → 成果�
 
     const flash = page.locator('[data-testid="flash"][data-flash-kind="error"]');
     await expect(flash).toBeVisible();
-    // taskd の tick（200ms）ごとに SSE の daemon イベントが届くので、3 秒待っても消えないことを見る。
+    // celeris の tick（200ms）ごとに SSE の daemon イベントが届くので、3 秒待っても消えないことを見る。
     await page.waitForTimeout(3_000);
     await expect(flash).toBeVisible();
   });

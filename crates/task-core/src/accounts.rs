@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// アカウントプールのアダプタの種類（ADR-0025 D1）。`(adapter, id)` でアカウントを識別する。
 ///
-/// task-core に置くのは、task-dispatch / task-worker / task-api / taskd のいずれからも参照できる
+/// task-core に置くのは、task-dispatch / task-worker / task-api / celeris のいずれからも参照できる
 /// 基底クレートだからで、依存を増やさない（ADR-0025 の指示）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -82,7 +82,7 @@ pub struct RateLimitObservation {
     /// `rate_limit_info.resetsAt`（`status` が指す枠のリセット時刻、Unix 秒）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<i64>,
-    /// 観測した時刻（Unix 秒。taskd の壁時計）
+    /// 観測した時刻（Unix 秒。celeris の壁時計）
     pub observed_at: i64,
 }
 

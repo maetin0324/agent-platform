@@ -1,6 +1,6 @@
 //! ADR-0044 D2（Phase 53）: タスク単位のコメント。
 //!
-//! `progress`（`Event::WorkerProgress`）と違って**残る**記録で、人・組織の「人」・taskd 自身の 3 者が書く。
+//! `progress`（`Event::WorkerProgress`）と違って**残る**記録で、人・組織の「人」・celeris 自身の 3 者が書く。
 //! 純粋なデータ定義だけを置く（表の SQL は `store.rs`、効き方の判断は `task-ops::comment`）。
 
 use schemars::JsonSchema;
@@ -48,7 +48,7 @@ pub enum CommentAuthorKind {
     Human,
     /// 組織の「人」（ワーカーの `{"type":"comment"}` 行、または秘書・lead が委譲先に書いたもの）。
     Node,
-    /// taskd 自身（決定的な記録）。
+    /// celeris 自身（決定的な記録）。
     System,
 }
 

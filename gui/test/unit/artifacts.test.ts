@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ArtifactView, OrgNode, ProjectTaskView, WorkspaceSpec } from "~/celeris/types";
 import {
   artifactRelativeTime,
   buildProjectArtifactRows,
@@ -8,7 +9,6 @@ import {
   type TaskArtifactBundle,
   workspacePlace,
 } from "~/lib/artifacts";
-import type { ArtifactView, OrgNode, ProjectTaskView, WorkspaceSpec } from "~/taskd/types";
 
 const artifact = (over: Partial<ArtifactView> = {}): ArtifactView => ({
   idx: 0,

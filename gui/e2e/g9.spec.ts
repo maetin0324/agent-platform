@@ -3,29 +3,29 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "./test";
 
-// docs/adr/0025-codex-accounts-in-the-pool.md（taskd 側）D5/D6、gui/docs/adr/0012 D3 の拡張。
+// docs/adr/0025-codex-accounts-in-the-pool.md（celeris 側）D5/D6、gui/docs/adr/0012 D3 の拡張。
 // codex アカウント（デバイス認証: URL + user_code をこの画面に出すだけで、コードは画面に貼り戻さない）を、
-// e2e/g8.spec.ts と同じ `scripts/taskd.sh fixture accounts`（claude-code / codex 両方のスタブを持つ）に対して確認する。
+// e2e/g8.spec.ts と同じ `scripts/celeris.sh fixture accounts`（claude-code / codex 両方のスタブを持つ）に対して確認する。
 //
-// このファイルも人間の本番 taskd/GUI（127.0.0.1:7710 / 0.0.0.0:7700）と衝突しないポートを使う想定
+// このファイルも人間の本番 celeris/GUI（127.0.0.1:7710 / 0.0.0.0:7700）と衝突しないポートを使う想定
 // （e2e/g8.spec.ts のコメントと同じ手順）:
 //
 //   cd gui
-//   TASKD_API_LISTEN=127.0.0.1:7810 scripts/taskd.sh fixture accounts
-//   TASKD_GUI_BIND=127.0.0.1:7800 TASKD_API_URL=http://127.0.0.1:7810 TASKD_API_LISTEN=127.0.0.1:7810 \
-//     TASKD_API_TOKEN_FILE="$(pwd)/.run/accounts/api.token" \
+//   CELERIS_API_LISTEN=127.0.0.1:7810 scripts/celeris.sh fixture accounts
+//   CELERIS_GUI_BIND=127.0.0.1:7800 CELERIS_API_URL=http://127.0.0.1:7810 CELERIS_API_LISTEN=127.0.0.1:7810 \
+//     CELERIS_API_TOKEN_FILE="$(pwd)/.run/accounts/api.token" \
 //     pnpm exec playwright test e2e/g9.spec.ts
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7810";
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_LISTEN = process.env.CELERIS_API_LISTEN ?? "127.0.0.1:7810";
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, {
+  return execFileSync(CELERIS_SH, args, {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   }).toString();
 }
 

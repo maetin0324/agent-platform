@@ -1,6 +1,6 @@
 # クラスタ用の ~/.ssh/config の雛形（ADR-0018 D2 / D6）。fern03 には設定済み（pegasus / sirius）。
 #
-# pegasus / sirius は 2 要素認証なので、接続を張るのは人。taskd は「張られている接続を借りる」だけで、
+# pegasus / sirius は 2 要素認証なので、接続を張るのは人。celeris は「張られている接続を借りる」だけで、
 # 対話的な認証は行わない（常に BatchMode=yes）。そのため ControlMaster による多重化が前提になる。
 #
 # 使い方:
@@ -8,8 +8,8 @@
 #   2. scripts/cluster-login.sh pegasus   # ここで 2 要素認証を通す（1 回だけ）
 #   3. scripts/cluster-check.sh pegasus /path/to/work   # 接続と前提（rsync・共有 FS など）を確認する
 #
-# ControlPersist は taskd が使う間つながったままになるよう長めにする（手元の作業用に 10 秒などにしている場合、
-# taskd を動かすホストでは別の値にする）。期限が切れたら taskd はそのクラスタを cooldown にし、
+# ControlPersist は celeris が使う間つながったままになるよう長めにする（手元の作業用に 10 秒などにしている場合、
+# celeris を動かすホストでは別の値にする）。期限が切れたら celeris はそのクラスタを cooldown にし、
 # GUI の「注意」に「ログインし直してください」と出す（ADR-0018 D2）。
 
 Host pegasus

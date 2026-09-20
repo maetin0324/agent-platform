@@ -1,0 +1,30 @@
+[Unit]
+Description=celeris-gui (Web GUI BFF over celeris HTTP API v1)
+# celeris 本体の systemd unit 名は環境ごとに異なる。実際の unit 名に置き換えること（例: celeris.service）。
+After=network.target celeris.service
+Wants=celeris.service
+
+[Service]
+Type=simple
+User=celeris
+WorkingDirectory=/opt/celeris-gui
+Environment=CELERIS_API_URL=http://127.0.0.1:7710
+Environment=CELERIS_API_TOKEN_FILE=/etc/celeris/api.token
+Environment=CELERIS_GUI_BIND=127.0.0.1:7700
+# 非 loopback で公開する場合は CELERIS_GUI_PASSWORD_FILE と（任意で）CELERIS_GUI_SESSION_SECRET_FILE / CELERIS_GUI_ALLOWED_HOSTS も設定する。
+# Environment=CELERIS_GUI_PASSWORD_FILE=/etc/celeris/gui-password
+# Environment=CELERIS_GUI_SESSION_SECRET_FILE=/etc/celeris/gui-session-secret
+# Environment=CELERIS_GUI_ALLOWED_HOSTS=gui.example.internal
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=2
+
+# ハードニング
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/celeris-gui
+
+[Install]
+WantedBy=multi-user.target

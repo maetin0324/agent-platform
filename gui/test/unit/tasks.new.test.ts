@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { createTask } from "~/celeris/route-actions.server";
+import type { ConfigView, Task, TaskList } from "~/celeris/types";
 import { buildCriteria, buildDependsOn, buildNewTaskSpec, loadNewTask } from "~/routes/tasks.new";
-import { TaskdClient } from "~/taskd/client.server";
-import { createTask } from "~/taskd/route-actions.server";
-import type { ConfigView, Task, TaskList } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-// docs/adr/0005 D5: フォームは NewTaskSpec と 1:1、空欄は省く、検証は taskd。
+// docs/adr/0005 D5: フォームは NewTaskSpec と 1:1、空欄は省く、検証は celeris。
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -26,8 +26,8 @@ function form(entries: [string, string][]): FormData {
 }
 
 const config = {
-  config_path: "/tmp/taskd.toml",
-  db: "/tmp/taskd.sqlite3",
+  config_path: "/tmp/config.toml",
+  db: "/tmp/celeris.sqlite3",
   workspace_root: "/tmp/ws",
   tick_ms: 200,
   max_concurrency: 2,
@@ -69,7 +69,7 @@ describe("buildCriteria", () => {
     ]);
   });
 
-  it("returns [] when every row is blank (taskd then answers 422)", () => {
+  it("returns [] when every row is blank (celeris then answers 422)", () => {
     expect(
       buildCriteria(
         form([
@@ -172,7 +172,7 @@ describe("buildNewTaskSpec", () => {
     expect(spec.role).toBeUndefined();
   });
 
-  it("genre: sets spec.genre when filled, any free-text id is accepted (taskd validates, ADR-0027 D1)", () => {
+  it("genre: sets spec.genre when filled, any free-text id is accepted (celeris validates, ADR-0027 D1)", () => {
     const spec = buildNewTaskSpec(
       form([
         ["title", "t"],
@@ -227,7 +227,7 @@ describe("createTask / loadNewTask", () => {
     expect(JSON.parse(mock.requests.at(-1)?.body ?? "")).toEqual(spec);
   });
 
-  it("422 with field acceptance → CreateFailure with taskd's wording under fields.acceptance", async () => {
+  it("422 with field acceptance → CreateFailure with celeris's wording under fields.acceptance", async () => {
     const message =
       "at least one acceptance criterion is required (--accept, --check-cmd, --check-artifact, or --check-reviewer)";
     mock.on("POST", "/api/v1/tasks", (_req, res) =>
@@ -297,7 +297,7 @@ describe("createTask / loadNewTask", () => {
     expect(data.config.genres).toEqual(configWithGenres.genres);
   });
 
-  it("422 unknown genre surfaces taskd's wording verbatim (no `field`, ADR-0027 D1)", async () => {
+  it("422 unknown genre surfaces celeris's wording verbatim (no `field`, ADR-0027 D1)", async () => {
     const message = 'unknown genre: "no-such-genre"';
     mock.on("POST", "/api/v1/tasks", (_req, res) =>
       sendProblem(res, {
@@ -321,7 +321,7 @@ describe("createTask / loadNewTask", () => {
     expect(result.error.fields.genre).toBeUndefined();
   });
 
-  it("422 role not in genre's roles surfaces taskd's wording verbatim (ADR-0027 D1)", async () => {
+  it("422 role not in genre's roles surfaces celeris's wording verbatim (ADR-0027 D1)", async () => {
     const message = 'role "novelty-skeptic" is not one of genre "coding"\'s roles';
     mock.on("POST", "/api/v1/tasks", (_req, res) =>
       sendProblem(res, {

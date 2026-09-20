@@ -265,7 +265,7 @@ fn docs_target(
                     created: false,
                 });
             }
-            // リモートのリポジトリ（ADR-0018 / 0019）は taskd からファイルが見えないので、この Phase では未対応。
+            // リモートのリポジトリ（ADR-0018 / 0019）は celeris からファイルが見えないので、この Phase では未対応。
             (WorkspaceSpec::Remote { cluster, .. }, _) => {
                 return Err(docs_unavailable(format!(
                     "主なリポジトリ {} はリモート（{cluster}）です。文書はまだ手元のリポジトリだけです",

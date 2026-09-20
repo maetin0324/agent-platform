@@ -11,7 +11,7 @@
 //! - `git -C <path> worktree add -b <branch_prefix><task_id> <dir> <base>`（再試行では作り直さず使い回す）
 //! - 終端で `git status --porcelain` が空なら `git -C <path> worktree remove <dir>`
 //!
-//! **taskd はコミットしない**（ADR-0019 D2）。ブランチも消さない。元のリポジトリの作業ツリーには触らない
+//! **celeris はコミットしない**（ADR-0019 D2）。ブランチも消さない。元のリポジトリの作業ツリーには触らない
 //! （ADR-0019 D3）。
 
 use std::path::{Path, PathBuf};
@@ -23,13 +23,13 @@ use crate::workspace::WorkspaceError;
 pub const WORKTREE_DIR_NAME: &str = "tree";
 
 /// ローカルの worktree のブランチ接頭辞の既定（ADR-0042 D3 でこの基盤の名前 Celeris に合わせた。
-/// Phase 49 までは ADR-0019 のクラスタ側と同じ `taskd/` だった）。`[workspace] worktree_branch_prefix` で変えられる。
-/// **クラスタ側**（ADR-0019 の `WorktreeSettings::branch_prefix`）は `taskd/` のまま（既存のクラスタに
-/// 残っているブランチの名前を変えないため）。
+/// Phase 49 までは ADR-0019 のクラスタ側と同じ旧名だった）。`[workspace] worktree_branch_prefix` で変えられる。
+/// **クラスタ側**（ADR-0019 の `WorktreeSettings::branch_prefix`）も ADR-0045 D1 の全面改名で `celeris/` に
+/// 揃えた。クラスタに残っている旧名のブランチと worktree ディレクトリは使われなくなるだけで、celeris は消さない。
 pub const DEFAULT_BRANCH_PREFIX: &str = "celeris/";
 
 /// `git worktree add` の直列化に使う錠（`workspace_root` 直下。元のリポジトリには置かない）。
-const LOCK_FILE: &str = ".taskd-worktree.lock";
+const LOCK_FILE: &str = ".celeris-worktree.lock";
 
 /// base をどこから取ったか（前置きに書く。ADR-0041 D1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,11 +71,11 @@ impl BaseRef {
 pub struct LocalWorktree {
     /// 元のリポジトリ（`WorkspaceSpec::Local.path`）。ここには書かない。
     pub repo: PathBuf,
-    /// taskd が持つタスクのディレクトリ（`<workspace_root>/<task_id>`）。`runs/` `inputs/` `artifacts/` はここ。
+    /// celeris が持つタスクのディレクトリ（`<workspace_root>/<task_id>`）。`runs/` `inputs/` `artifacts/` はここ。
     pub task_dir: PathBuf,
     /// 作業ツリー（`<task_dir>/tree`）。ワーカーのカレントディレクトリになる。
     pub dir: PathBuf,
-    /// ブランチ（`<branch_prefix><task_id>`）。taskd は作るだけで、消さない。
+    /// ブランチ（`<branch_prefix><task_id>`）。celeris は作るだけで、消さない。
     pub branch: String,
     /// 切り出した base。
     pub base: BaseRef,
@@ -100,7 +100,7 @@ impl LocalWorktree {
             return Ok(());
         }
         // 同じリポジトリに複数のタスクが同時に worktree を作ることがある（`max_concurrency > 1`）。
-        // git の worktree 管理はリポジトリで共有なので、taskd 側の錠で直列化する。
+        // git の worktree 管理はリポジトリで共有なので、celeris 側の錠で直列化する。
         let _lock = WorktreeLock::acquire(self.task_dir.parent().unwrap_or(&self.task_dir));
         // 手で消された作業ツリーの登録が残っていると `worktree add` が「既に登録済み」で失敗する。
         let _ = git(&self.repo, &["worktree", "prune"]);
@@ -285,7 +285,7 @@ fn git(dir: &Path, args: &[&str]) -> Option<GitOutput> {
     })
 }
 
-/// `workspace_root/.taskd-worktree.lock` の flock（取れなければ錠なしで進む。止めない）。
+/// `workspace_root/.celeris-worktree.lock` の flock（取れなければ錠なしで進む。止めない）。
 struct WorktreeLock(#[allow(dead_code)] Option<nix::fcntl::Flock<std::fs::File>>);
 
 impl WorktreeLock {

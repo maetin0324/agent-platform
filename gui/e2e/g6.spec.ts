@@ -5,17 +5,17 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "./test";
 
 // Phase G6 の受け入れ条件（docs/DESIGN.md §10 Phase G6）。
-// `scripts/taskd.sh fixture basic && scripts/taskd.sh start basic` で作った既知の DB に対して検証する
-// （`/help` 自身は loader を持たないので taskd の内容には依存しないが、`/help` 内のリンク先の画面は taskd を要る）。
-// 受け入れ条件 2 の「受信箱が空のとき」だけは `dev`（他の spec が taskctl でタスクを足さない、常に空の instance）に対して検証する。
+// `scripts/celeris.sh fixture basic && scripts/celeris.sh start basic` で作った既知の DB に対して検証する
+// （`/help` 自身は loader を持たないので celeris の内容には依存しないが、`/help` 内のリンク先の画面は celeris を要る）。
+// 受け入れ条件 2 の「受信箱が空のとき」だけは `dev`（他の spec が celerisctl でタスクを足さない、常に空の instance）に対して検証する。
 // このファイルは `basic` を起動したまま終える。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
+  return execFileSync(CELERIS_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
 }
 
 const HELP_SECTIONS = [

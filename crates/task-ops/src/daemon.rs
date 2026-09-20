@@ -181,7 +181,7 @@ pub struct ProviderLive {
     /// 実行中の run と Reviewer run の合計。
     pub in_use: u32,
     /// ADR-0022 D2: 直近の疎通確認（`POST /providers/{id}/check`）の結果。**メモリだけに持つ観測値**で、
-    /// taskd を再起動すると消える（イベントにも DB にも残さない）。一度も確認していなければ `None`。
+    /// celeris を再起動すると消える（イベントにも DB にも残さない）。一度も確認していなければ `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check: Option<ProviderCheckView>,
     /// ADR-0024 D2: `[accounts]` のプールから選ぶか。古いスナップショットには無いので既定 `false`。
@@ -215,7 +215,7 @@ pub struct ClusterLive {
     /// 多重接続が無くて cooldown 中なら、その終わり（RFC 3339）。
     pub cooldown_until: Option<String>,
     /// ADR-0032 D1: `"manual"` / `"publickey"` / `"totp"`。古いスナップショットには無いので既定は `"manual"`
-    /// （`taskd::config::ClusterConfig.auth` と同じ既定）。
+    /// （`celeris::config::ClusterConfig.auth` と同じ既定）。
     #[serde(default = "default_cluster_live_auth")]
     pub auth: String,
     /// ADR-0032 D4: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中か。古いスナップショットには無いので既定は `false`。

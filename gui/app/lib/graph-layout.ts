@@ -1,13 +1,13 @@
 import dagre from "@dagrejs/dagre";
 import type { Edge, Node } from "@xyflow/react";
-import type { Graph, GraphNode, Status } from "~/taskd/types";
+import type { Graph, GraphNode, Status } from "~/celeris/types";
 
 /**
  * `/graph` の描画用レイアウト（docs/adr/0006-g3-decisions.md D5）。
  * dagre には depends_on の辺だけを渡してフラットに層状配置し（compound グラフにはしない。親子と依存が両方
  * 絡む compound レイアウトは dagre の挙動が読みにくく、G3（light）の範囲を超えるため）、
  * 親子（`parent_id`）は配置後に子のバウンディングボックスから group ノードを合成する。
- * 色・枠の意味づけは taskd の `Status` / `TaskKind` をそのまま使い、GUI 側で新しい分類は作らない。
+ * 色・枠の意味づけは celeris の `Status` / `TaskKind` をそのまま使い、GUI 側で新しい分類は作らない。
  */
 
 const GROUP_PADDING = 28;
@@ -138,7 +138,7 @@ export interface LayoutResult {
   edges: Edge[];
 }
 
-/** `layoutGraph` に渡す、taskd のスナップショット由来の印（ADR-0023 D3）。 */
+/** `layoutGraph` に渡す、celeris のスナップショット由来の印（ADR-0023 D3）。 */
 export interface LayoutMarks {
   /** `DaemonSnapshot.awaiting_children`（委譲した子を待っている親）。 */
   awaitingChildren?: string[];
@@ -228,7 +228,7 @@ export function layoutGraph(graph: Graph, marks: LayoutMarks = {}): LayoutResult
       parentId: groupRect ? `group-${node.parent_id}` : undefined,
       extent: groupRect ? "parent" : undefined,
       // 役割（案件の仕事の木では担当の名前）はテキストのラベルとして最終行に出す（色分けはしない。
-      // docs/DESIGN.md §10 Phase G7、taskd-requests R2）。「部下待ち」は taskd のスナップショットの値を
+      // docs/DESIGN.md §10 Phase G7、celeris-requests R2）。「部下待ち」は celeris のスナップショットの値を
       // そのまま出す（ADR-0023 D3。GUI 側で判定しない）。
       data: { label: box.label },
       // 角丸・細い枠・左に status 色の帯（モダンな見た目）。kind=plan は枠を太くする意味づけを維持する

@@ -1,25 +1,25 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { loadTaskFiles, readTaskFilesQuery } from "~/celeris/task-files";
 import { binaryFileLabel, fileSizeLabel, tooLargeFileLabel, treeEntryKindLabel } from "~/lib/labels";
 import { fileBody, isJsonPath, parentPath, pickTreeFileViewer, taskFilesHref, treeBreadcrumbs } from "~/lib/task-files";
-import { TaskdClient } from "~/taskd/client.server";
-import { loadTaskFiles, readTaskFilesQuery } from "~/taskd/task-files";
-import { treeFileView, treeView } from "../mock-taskd/fixtures";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { treeFileView, treeView } from "../mock-celeris/fixtures";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * タスクの作業ツリーの閲覧（ADR-0043 D6、docs/taskd-api-v1.md §3.72〜3.73。Phase 52 / G16）。
+ * タスクの作業ツリーの閲覧（ADR-0043 D6、docs/celeris-api-v1.md §3.72〜3.73。Phase 52 / G16）。
  * DOM を描画する unit テストが無い（G10-U1）ので、表示の判断は `~/lib/task-files.ts` の純粋関数、
- * 取得は `~/taskd/task-files.ts` の loader で見る。
+ * 取得は `~/celeris/task-files.ts` の loader で見る。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -137,7 +137,7 @@ describe("readTaskFilesQuery", () => {
 });
 
 describe("loadTaskFiles (GET /tasks/{id}/tree, §3.72)", () => {
-  it("一覧: taskd の並び（ディレクトリが先）とリポジトリの一覧をそのまま返す", async () => {
+  it("一覧: celeris の並び（ディレクトリが先）とリポジトリの一覧をそのまま返す", async () => {
     const tree = treeView();
     mock.on("GET", "/api/v1/tasks/t1/tree", (_req, res) => sendJson(res, 200, tree));
 
@@ -149,8 +149,8 @@ describe("loadTaskFiles (GET /tasks/{id}/tree, §3.72)", () => {
     expect(result.file).toBeNull();
     expect(result.fileError).toBeNull();
     expect(result.filePath).toBeNull();
-    // repo / path を省略したら taskd に渡さない（先頭のリポジトリ・根は taskd が決める）。
-    const url = new URL(mock.requests[0].url, "http://mock-taskd.invalid");
+    // repo / path を省略したら celeris に渡さない（先頭のリポジトリ・根は celeris が決める）。
+    const url = new URL(mock.requests[0].url, "http://mock-celeris.invalid");
     expect(url.searchParams.has("repo")).toBe(false);
     expect(url.searchParams.has("path")).toBe(false);
   });
@@ -160,7 +160,7 @@ describe("loadTaskFiles (GET /tasks/{id}/tree, §3.72)", () => {
 
     await loadTaskFiles(client, "t1", { repo: "data", path: "src" });
 
-    const url = new URL(mock.requests[0].url, "http://mock-taskd.invalid");
+    const url = new URL(mock.requests[0].url, "http://mock-celeris.invalid");
     expect(url.searchParams.get("repo")).toBe("data");
     expect(url.searchParams.get("path")).toBe("src");
   });
@@ -175,7 +175,7 @@ describe("loadTaskFiles (GET /tasks/{id}/tree, §3.72)", () => {
     expect(result.file?.text).toContain("# benchfs");
     expect(result.fileError).toBeNull();
     const fileReq = mock.requests.find((r) => r.url.startsWith("/api/v1/tasks/t1/tree/file"));
-    const url = new URL(fileReq?.url ?? "", "http://mock-taskd.invalid");
+    const url = new URL(fileReq?.url ?? "", "http://mock-celeris.invalid");
     expect(url.searchParams.get("repo")).toBe("benchfs");
     expect(url.searchParams.get("path")).toBe("README.md");
   });
@@ -193,7 +193,7 @@ describe("loadTaskFiles (GET /tasks/{id}/tree, §3.72)", () => {
     expect(fileBody(result.file as NonNullable<typeof result.file>).message).toBe(binaryFileLabel(2048));
   });
 
-  it("403 path_forbidden は一覧を出したまま taskd の文言を fileError に載せる", async () => {
+  it("403 path_forbidden は一覧を出したまま celeris の文言を fileError に載せる", async () => {
     mock.on("GET", "/api/v1/tasks/t1/tree", (_req, res) => sendJson(res, 200, treeView()));
     mock.on("GET", "/api/v1/tasks/t1/tree/file", (_req, res) =>
       sendProblem(res, {
@@ -235,9 +235,9 @@ describe("画面の作り（ソースの確認。G10-U1 の制約）", () => {
     expect(component).toContain("export function TaskFiles");
   });
 
-  it("クライアントから taskd を呼ばない（fetch も TASKD_API_URL も無い）", () => {
+  it("クライアントから celeris を呼ばない（fetch も CELERIS_API_URL も無い）", () => {
     expect(component).not.toContain("fetch(");
-    expect(component).not.toContain("TASKD_API_URL");
+    expect(component).not.toContain("CELERIS_API_URL");
   });
 
   it("読み取りだけ（ルートに action が無い）", () => {

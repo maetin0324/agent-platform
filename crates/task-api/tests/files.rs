@@ -1,5 +1,5 @@
 //! api.md §8.7（ファイル）: パス検査（`../x`・絶対パス・外への symlink・不正な run_id → 403）、404、Range / offset、
-//! Content-Type の閉じた表、`download`、`X-Taskd-Sha256(-Current)`、成果物一覧。
+//! Content-Type の閉じた表、`download`、`X-Celeris-Sha256(-Current)`、成果物一覧。
 
 mod common;
 
@@ -64,10 +64,10 @@ async fn run_logs_are_served_with_closed_content_types() {
     assert_eq!(stdout.body, b"0123456789");
     assert_eq!(stdout.header("content-type"), Some("text/plain; charset=utf-8"));
     assert_eq!(stdout.header("content-disposition"), Some("inline; filename=\"stdout.jsonl\"; filename*=UTF-8''stdout.jsonl"));
-    assert_eq!(stdout.header("x-taskd-size"), Some("10"));
+    assert_eq!(stdout.header("x-celeris-size"), Some("10"));
     assert_eq!(stdout.header("content-length"), Some("10"));
     assert_eq!(stdout.header("x-content-type-options"), Some("nosniff"));
-    assert_eq!(stdout.header("x-taskd-sha256"), None);
+    assert_eq!(stdout.header("x-celeris-sha256"), None);
 
     let stderr = send(&app, get(&format!("/api/v1/tasks/{}/runs/{run_id}/stderr", task.id))).await;
     assert_eq!(stderr.status, 200);
@@ -195,7 +195,7 @@ async fn artifact_paths_escaping_the_workspace_are_forbidden_but_listed() {
 /// ADR-0036 D4: 共有 workspace のタスクの成果物は `.taskd/artifacts/<task_id>/…` という workspace 相対の
 /// パスで記録される。GUI の読み取り API（`GET /tasks/{id}/artifacts/{idx}` と一覧）はそのまま読めること。
 #[tokio::test]
-async fn per_task_artifact_paths_under_dot_taskd_are_served() {
+async fn per_task_artifact_paths_under_dot_celeris_are_served() {
     let Fixture { env, task, run_id } = fixture();
     let app = env.router();
     let rel = format!(".taskd/artifacts/{}/report.md", task.id);
@@ -226,7 +226,7 @@ async fn range_and_offset_requests_follow_the_spec() {
     assert_eq!(partial.body, b"2345");
     assert_eq!(partial.header("content-range"), Some("bytes 2-5/10"));
     assert_eq!(partial.header("content-length"), Some("4"));
-    assert_eq!(partial.header("x-taskd-size"), Some("10"));
+    assert_eq!(partial.header("x-celeris-size"), Some("10"));
     assert_eq!(partial.header("accept-ranges"), Some("bytes"));
 
     let suffix = send(&app, get_with(&path, &[("range", "bytes=-3")])).await;
@@ -238,7 +238,7 @@ async fn range_and_offset_requests_follow_the_spec() {
         let resp = send(&app, get_with(&path, &[("range", range)])).await;
         assert_problem(&resp, 416, "range_not_satisfiable");
         assert_eq!(resp.header("content-range"), Some("bytes */10"), "{range}");
-        assert_eq!(resp.header("x-taskd-size"), Some("10"));
+        assert_eq!(resp.header("x-celeris-size"), Some("10"));
     }
 
     let offset = send(&app, get(&format!("{path}?offset=4"))).await;
@@ -248,7 +248,7 @@ async fn range_and_offset_requests_follow_the_spec() {
     let at_end = send(&app, get(&format!("{path}?offset=10"))).await;
     assert_eq!(at_end.status, 200);
     assert!(at_end.body.is_empty());
-    assert_eq!(at_end.header("x-taskd-size"), Some("10"));
+    assert_eq!(at_end.header("x-celeris-size"), Some("10"));
     let past_end = send(&app, get(&format!("{path}?offset=11"))).await;
     assert_problem(&past_end, 416, "range_not_satisfiable");
 
@@ -259,7 +259,7 @@ async fn range_and_offset_requests_follow_the_spec() {
     let stdout = env.workspace(&task).join("runs").join(&run_id).join("stdout.jsonl");
     std::fs::write(&stdout, b"0123456789abc").expect("append");
     let tail = send(&app, get(&format!("{path}?offset=10"))).await;
-    assert_eq!((tail.body.as_slice(), tail.header("x-taskd-size")), (b"abc".as_slice(), Some("13")));
+    assert_eq!((tail.body.as_slice(), tail.header("x-celeris-size")), (b"abc".as_slice(), Some("13")));
 }
 
 #[tokio::test]
@@ -308,18 +308,18 @@ async fn sha256_current_changes_when_the_artifact_is_modified() {
     let path = format!("/api/v1/tasks/{}/artifacts/0", task.id);
 
     let before = send(&app, get(&path)).await;
-    assert_eq!(before.header("x-taskd-sha256"), Some(recorded.as_str()));
-    assert_eq!(before.header("x-taskd-sha256-current"), Some(recorded.as_str()));
+    assert_eq!(before.header("x-celeris-sha256"), Some(recorded.as_str()));
+    assert_eq!(before.header("x-celeris-sha256-current"), Some(recorded.as_str()));
 
     std::fs::write(&file, b"{\"ns\":2}").expect("modify");
     let after = send(&app, get(&path)).await;
-    assert_eq!(after.header("x-taskd-sha256"), Some(recorded.as_str()));
-    assert_eq!(after.header("x-taskd-sha256-current"), Some(sha256(b"{\"ns\":2}").as_str()));
+    assert_eq!(after.header("x-celeris-sha256"), Some(recorded.as_str()));
+    assert_eq!(after.header("x-celeris-sha256-current"), Some(sha256(b"{\"ns\":2}").as_str()));
 
     // Range 付きでもハッシュはファイル全体。
     let ranged = send(&app, get_with(&path, &[("range", "bytes=0-0")])).await;
     assert_eq!(ranged.status, 206);
-    assert_eq!(ranged.header("x-taskd-sha256-current"), Some(sha256(b"{\"ns\":2}").as_str()));
+    assert_eq!(ranged.header("x-celeris-sha256-current"), Some(sha256(b"{\"ns\":2}").as_str()));
 
     let list = send(&app, get(&format!("/api/v1/tasks/{}/artifacts", task.id))).await.json();
     assert_eq!(list["items"][0]["sha256_matches"], false);

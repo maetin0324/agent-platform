@@ -1,4 +1,10 @@
 import { data, redirect, useFetcher } from "react-router";
+import type { CreateFailure } from "~/celeris/action-types";
+import type { CelerisClient } from "~/celeris/client.server";
+import { getCelerisClient } from "~/celeris/client.server";
+import { celerisErrorResponse } from "~/celeris/errors";
+import { createPlan } from "~/celeris/route-actions.server";
+import type { ConfigView, NewPlanSpec, Tier } from "~/celeris/types";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -6,31 +12,25 @@ import { hintClass, inputClass, labelClass, selectClass, textareaClass } from "~
 import { Icon } from "~/components/ui/Icon";
 import { Alert, PageHeader } from "~/components/ui/misc";
 import { cn } from "~/lib/utils";
-import type { CreateFailure } from "~/taskd/action-types";
-import type { TaskdClient } from "~/taskd/client.server";
-import { getTaskdClient } from "~/taskd/client.server";
-import { taskdErrorResponse } from "~/taskd/errors";
-import { createPlan } from "~/taskd/route-actions.server";
-import type { ConfigView, NewPlanSpec, Tier } from "~/taskd/types";
 import type { Route } from "./+types/plans.new";
 
 /**
  * `/plans/new`（Plan 作成、docs/DESIGN.md §4.4）。`NewPlanSpec` と 1:1 のフォームを
- * `POST /plans` にそのまま送る。検証は taskd（task-ops）が行い、422 の文言をそのまま表示する
- * （docs/taskd-api-v1.md §3.14）。`GET /config` の `plan_auto_accept` を説明として出す。
+ * `POST /plans` にそのまま送る。検証は celeris（task-ops）が行い、422 の文言をそのまま表示する
+ * （docs/celeris-api-v1.md §3.14）。`GET /config` の `plan_auto_accept` を説明として出す。
  */
 
 const TIERS: Tier[] = ["frontier", "standard", "cheap"];
 
 /** `GET /config`（`ConfigView`）を取る。エラーは呼び出し側で `Response` に変換する。 */
-export async function loadNewPlan(client: TaskdClient, request: Request): Promise<ConfigView> {
+export async function loadNewPlan(client: CelerisClient, request: Request): Promise<ConfigView> {
   return client.get<ConfigView>("/config", { signal: request.signal });
 }
 
 /**
- * フォームから `NewPlanSpec` を組み立てる（pure）。空欄は本文から省き taskd の既定を使う
+ * フォームから `NewPlanSpec` を組み立てる（pure）。空欄は本文から省き celeris の既定を使う
  * （`deny_unknown_fields` なので `NewPlanSpec` に無いキーは入れない）。`goal` は必須フィールドなので
- * 空でも `""` として送り、taskd の 422 文言をそのまま出す。
+ * 空でも `""` として送り、celeris の 422 文言をそのまま出す。
  */
 export function buildNewPlanSpec(form: FormData): NewPlanSpec {
   const goal = form.get("goal");
@@ -71,9 +71,9 @@ export function buildNewPlanSpec(form: FormData): NewPlanSpec {
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ConfigView> {
   try {
-    return await loadNewPlan(getTaskdClient(), request);
+    return await loadNewPlan(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -84,7 +84,7 @@ export function meta(_: Route.MetaArgs) {
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const spec = buildNewPlanSpec(form);
-  const outcome = await createPlan(getTaskdClient(), spec, request.signal);
+  const outcome = await createPlan(getCelerisClient(), spec, request.signal);
   if (outcome.ok) return redirect(`/tasks/${outcome.task.id}`);
   return data({ ok: false, error: outcome.error } satisfies CreateFailure, { status: outcome.error.status });
 }
@@ -101,7 +101,7 @@ export default function NewPlanPage({ loaderData }: Route.ComponentProps) {
       <PageHeader
         icon="sparkles"
         title="Plan 作成"
-        description="NewPlanSpec を taskd に送信します。Plan は taskd が子タスクに分解します。"
+        description="NewPlanSpec を celeris に送信します。Plan は celeris が子タスクに分解します。"
       />
 
       <Alert tone={config.plan_auto_accept ? "success" : "info"} data-testid="plan-auto-accept">
@@ -121,7 +121,7 @@ export default function NewPlanPage({ loaderData }: Route.ComponentProps) {
                 goal
               </label>
               <textarea id="goal" name="goal" rows={4} className={cn(textareaClass, "mt-1.5 w-full")} />
-              <p className={cn(hintClass, "mt-1")}>taskd が分解する Plan 全体の目的。</p>
+              <p className={cn(hintClass, "mt-1")}>celeris が分解する Plan 全体の目的。</p>
               <FieldErrors error={error} field="goal" />
             </div>
 

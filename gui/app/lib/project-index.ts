@@ -1,4 +1,4 @@
-import type { Milestone, ProjectDetail, TaskId } from "~/taskd/types";
+import type { Milestone, ProjectDetail, TaskId } from "~/celeris/types";
 
 /**
  * 裏方のタスク（`/tasks`、`/tasks/:id`）から**案件・担当・途中目標**へ戻れるようにするための索引
@@ -6,8 +6,8 @@ import type { Milestone, ProjectDetail, TaskId } from "~/taskd/types";
  *
  * `TaskSummary` には `project_id` / `milestone_id` が無い（`Task` にはある）ため、一覧では
  * `GET /projects` + 各案件の `GET /projects/{id}` の `tasks[]` から「どのタスクがどの案件・どの途中目標か」を
- * 引ける表を作る。判断はしていない（taskd が返した対応をそのまま写すだけ）。
- * taskd 側に `TaskSummary.project_id` が入ったら、この索引は不要になる（`docs/taskd-requests.md` R3 のメモ）。
+ * 引ける表を作る。判断はしていない（celeris が返した対応をそのまま写すだけ）。
+ * celeris 側に `TaskSummary.project_id` が入ったら、この索引は不要になる（`docs/celeris-requests.md` R3 のメモ）。
  */
 
 export interface TaskPlacement {

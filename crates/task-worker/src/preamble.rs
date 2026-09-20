@@ -83,7 +83,7 @@ fn comments_section(context: &RunContext) -> String {
                 Some(id) => id.clone(),
                 None => "担当".to_string(),
             },
-            task_core::CommentAuthorKind::System => "taskd".to_string(),
+            task_core::CommentAuthorKind::System => "celeris".to_string(),
         };
         out.push_str(&format!("- [{}] {}: {}\n", comment.at, who, one_line(&comment.body)));
     }
@@ -185,7 +185,7 @@ pub fn workspace_note(spec: &task_core::WorkspaceSpec) -> String {
         }
         task_core::WorkspaceSpec::Remote { cluster, path } => format!(
             "この案件のコードはクラスタ {cluster} の `{}` にある。いまのカレントディレクトリはその写しで、\
-             taskd が run の前後で同期する。",
+             celeris が run の前後で同期する。",
             path.display()
         ),
     }
@@ -258,7 +258,7 @@ pub fn repos_note(repos: &[RepoNote]) -> String {
     ));
     if repos.iter().any(|r| r.git) {
         out.push_str(
-            "git のリポジトリでは taskd が用意したブランチにコミットせよ。`main` に直接コミットするな。\
+            "git のリポジトリでは celeris が用意したブランチにコミットせよ。`main` に直接コミットするな。\
              `git checkout` でブランチを変えるな。\n",
         );
     }
@@ -350,7 +350,7 @@ fn workspace_section(context: &RunContext) -> String {
         "## 作業場所 (where this project's code lives)\n\
          {note}\n\
          編集はこの run の作業ディレクトリ（カレントディレクトリ）で行うこと。**別のホストの作業ツリーへ \
-         `ssh` で直接書き込んではいけない**（同期は taskd が行う。検証・計測だけをリモートで実行する。\
+         `ssh` で直接書き込んではいけない**（同期は celeris が行う。検証・計測だけをリモートで実行する。\
          SPEC §3.7「手元で編集してリモートで検証」）。\n\n"
     )
 }
@@ -442,7 +442,7 @@ fn milestone_review_section(context: &RunContext) -> String {
 
 /// 節 7 の追記（Phase 41 / ADR-0038 D1）: 途中目標レビューの対話 run にだけ足す指示。
 /// 「結果 → 達成の可否 → 次の提案 → 判断を仰ぎたい点」を書かせ、次の途中目標は結果ファイルの
-/// `milestone_proposal` にも書かせる（taskd はそこだけを決定的に読む）。
+/// `milestone_proposal` にも書かせる（celeris はそこだけを決定的に読む）。
 fn milestone_review_instructions(review: &MilestoneReviewContext) -> String {
     format!(
         "## 途中目標の判定をお願いする返事です (milestone review)\n\

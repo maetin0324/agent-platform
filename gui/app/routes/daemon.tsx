@@ -1,5 +1,10 @@
 import type { ReactNode } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
+import type { ReplayOutcome } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { runReplay } from "~/celeris/route-actions.server";
+import type { ConfigView, DaemonView } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
@@ -9,12 +14,7 @@ import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, DataList, EmptyState, Mono, PageHeader, SectionTitle, StatCard } from "~/components/ui/misc";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
-import { TaskdBanner } from "~/root";
-import type { ReplayOutcome } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { runReplay } from "~/taskd/route-actions.server";
-import type { ConfigView, DaemonView } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/daemon";
 
 /**
@@ -29,7 +29,7 @@ export interface DaemonData {
 }
 
 /** `GET /daemon` と `GET /config` を並列に呼ぶ。応答はそのまま返す（派生値は計算しない）。 */
-export async function loadDaemon(client: TaskdClient, request: Request): Promise<DaemonData> {
+export async function loadDaemon(client: CelerisClient, request: Request): Promise<DaemonData> {
   const [daemon, config] = await Promise.all([
     client.get<DaemonView>("/daemon", { signal: request.signal }),
     client.get<ConfigView>("/config", { signal: request.signal }),
@@ -42,9 +42,9 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<DaemonData> {
   try {
-    return await loadDaemon(getTaskdClient(), request);
+    return await loadDaemon(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -58,7 +58,7 @@ export async function action({ request }: Route.ActionArgs) {
   if (intent !== "replay") {
     throw data({ error: "unknown intent" }, { status: 400 });
   }
-  const outcome = await runReplay(getTaskdClient(), request.signal);
+  const outcome = await runReplay(getCelerisClient(), request.signal);
   return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
 }
 
@@ -405,16 +405,16 @@ function SubSection({
 }
 
 /**
- * loader が `taskdErrorResponse` で投げた `Response` を判別する（docs/adr/0004-g1-decisions.md D6、
- * `app/routes/tasks.$id.tsx` と同じ方針）。taskd 停止中はバナー、それ以外は status と detail を出す。
+ * loader が `celerisErrorResponse` で投げた `Response` を判別する（docs/adr/0004-g1-decisions.md D6、
+ * `app/routes/tasks.$id.tsx` と同じ方針）。celeris 停止中はバナー、それ以外は status と detail を出す。
  */
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

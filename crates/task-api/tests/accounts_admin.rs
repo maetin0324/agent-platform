@@ -1,5 +1,5 @@
 //! ADR-0024（Phase 13）: Claude アカウントのプール。`check`/`login`/`login/code`/`DELETE .../login` は
-//! taskd 側の実行（`AdminRequest` 経由）が要るので、ここでは task-api だけで完結する部分だけを確認する:
+//! celeris 側の実行（`AdminRequest` 経由）が要るので、ここでは task-api だけで完結する部分だけを確認する:
 //! 認証ガード（管理系はすべて token 必須）、ディレクトリ操作（作成・削除）、`GET /accounts` のマージ
 //! （ディレクトリのスキャン + スナップショット + 集計）、プロバイダの `account_pool` の往復。
 //! 実際の確認・ログイン中継は `tests/e2e/tests/account_pool_scenarios.rs` で実バイナリを使って検証する。
@@ -34,9 +34,9 @@ fn env_with_accounts_root() -> (TestEnv, tempfile::TempDir, std::path::PathBuf) 
     (env, tmp, root)
 }
 
-/// S2+S8: `DELETE /accounts/{id}` は taskd 側（`AdminRequest::AccountRemove`）へ委譲される。ここでは実際の
-/// taskd の代わりに、同じ fs 操作（`.removed/<id>-<unix>` への move）と `in_use` の判定を行うダブルを立てる
-/// （taskd 側の本物の実装とその単体テストは `crates/taskd/src/accounts_admin.rs`）。`in_use` はこのダブルが
+/// S2+S8: `DELETE /accounts/{id}` は celeris 側（`AdminRequest::AccountRemove`）へ委譲される。ここでは実際の
+/// celeris の代わりに、同じ fs 操作（`.removed/<id>-<unix>` への move）と `in_use` の判定を行うダブルを立てる
+/// （celeris 側の本物の実装とその単体テストは `crates/celeris/src/accounts_admin.rs`）。`in_use` はこのダブルが
 /// 見る集合で、ディスパッチャの `account_in_use` の代わり。
 fn spawn_account_remove_double(root: std::path::PathBuf, in_use: Arc<StdMutex<HashSet<String>>>) -> mpsc::Sender<AdminRequest> {
     let (tx, mut rx) = mpsc::channel::<AdminRequest>(8);
@@ -175,8 +175,8 @@ async fn create_account_makes_a_directory_and_rejects_duplicates_and_bad_ids() {
     assert_problem(&resp, 409, "account_exists");
 }
 
-/// `DELETE /accounts/{id}` は taskd 側（`AdminRequest::AccountRemove`）へ委譲され、ディレクトリを
-/// `.removed/<id>-<unix>` へ移す（S2+S8）。無ければ 404。`admin_tx` が無い（taskd に届かない）構成は
+/// `DELETE /accounts/{id}` は celeris 側（`AdminRequest::AccountRemove`）へ委譲され、ディレクトリを
+/// `.removed/<id>-<unix>` へ移す（S2+S8）。無ければ 404。`admin_tx` が無い（celeris に届かない）構成は
 /// 409 `accounts_unavailable`。
 #[tokio::test]
 async fn delete_account_moves_the_directory_to_removed_and_missing_is_404() {
@@ -199,7 +199,7 @@ async fn delete_account_moves_the_directory_to_removed_and_missing_is_404() {
     assert!(moved.join(".credentials.json").is_file(), "credentials are not deleted, just moved");
 }
 
-/// `[accounts]` はあるが `admin_tx`（taskd への経路）が無い構成は 409 `accounts_unavailable`（taskd 側で
+/// `[accounts]` はあるが `admin_tx`（celeris への経路）が無い構成は 409 `accounts_unavailable`（celeris 側で
 /// 実行するしかない操作なので、届かなければ「使えない」）。
 #[tokio::test]
 async fn delete_account_without_admin_tx_is_accounts_unavailable() {
@@ -213,7 +213,7 @@ async fn delete_account_without_admin_tx_is_accounts_unavailable() {
     assert!(root.join("acct-b").exists());
 }
 
-/// `in_use > 0`（taskd 側のディスパッチャの権威ある値）のアカウントは削除できない（S2+S8）。
+/// `in_use > 0`（celeris 側のディスパッチャの権威ある値）のアカウントは削除できない（S2+S8）。
 #[tokio::test]
 async fn delete_account_in_use_is_conflict() {
     let (env, _tmp, root, in_use) = env_with_accounts_root_and_remove_double();
@@ -312,19 +312,19 @@ async fn list_accounts_merges_filesystem_snapshot_and_stats() {
     assert_eq!(b["stats"]["output_tokens"], json!(4));
 }
 
-/// S6: taskd 側が `AccountAdminError::Unavailable` を返したら 409 `accounts_unavailable`（500 `internal` では
-/// ない）。`taskd` が `[accounts]` 消滅などの理由でその場で断ったケースを模す。
+/// S6: celeris 側が `AccountAdminError::Unavailable` を返したら 409 `accounts_unavailable`（500 `internal` では
+/// ない）。`celeris` が `[accounts]` 消滅などの理由でその場で断ったケースを模す。
 #[tokio::test]
 async fn account_admin_unavailable_error_maps_to_409_not_500() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("claude-accounts");
     std::fs::create_dir_all(root.join("a")).unwrap();
-    // taskd 側のダブル: 何を要求されても Unavailable で応える。
+    // celeris 側のダブル: 何を要求されても Unavailable で応える。
     let (admin_tx, mut admin_rx) = mpsc::channel::<AdminRequest>(4);
     tokio::spawn(async move {
         while let Some(req) = admin_rx.recv().await {
             if let AdminRequest::AccountCheck { reply, .. } = req {
-                let _ = reply.send(Err(AccountAdminError::Unavailable("taskd could not do this right now".into())));
+                let _ = reply.send(Err(AccountAdminError::Unavailable("celeris could not do this right now".into())));
             }
         }
     });
@@ -537,7 +537,7 @@ async fn create_account_with_codex_adapter_without_codex_dir_is_unavailable() {
     assert_problem(&resp, 409, "accounts_unavailable");
 }
 
-/// `?adapter=codex` on the management endpoints is forwarded to taskd via `AdminRequest` (ADR-0025 D6).
+/// `?adapter=codex` on the management endpoints is forwarded to celeris via `AdminRequest` (ADR-0025 D6).
 /// The double below records which adapter each request carried.
 #[tokio::test]
 async fn management_endpoints_forward_the_adapter_query_parameter() {

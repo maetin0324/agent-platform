@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { ProjectTaskView } from "~/celeris/types";
 import { milestoneDecisionNoteRequired, milestoneDecisionValid, milestoneIsStalled } from "~/lib/milestone-review";
-import type { ProjectTaskView } from "~/taskd/types";
 
 /**
  * `~/lib/milestone-review.ts` の純粋関数（ADR-0038、Phase 41 / G13j）。
- * `milestoneIsStalled` は taskd 側の決定的な判定（`crates/taskd/src/milestone_review.rs::ready_milestones`）
+ * `milestoneIsStalled` は celeris 側の決定的な判定（`crates/celeris/src/milestone_review.rs::ready_milestones`）
  * と同じ条件（裏方を除く、その途中目標のタスクだけ、動いているものが無く done が 1 件以上）。
  */
 

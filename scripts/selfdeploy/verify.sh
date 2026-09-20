@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/selfdeploy/verify.sh [--dry-run] <sha12> — ADR-0040 D3 の「検証（staging）」段。
 #
-#   本番 DB の `sqlite3 .backup` スナップショットに対して、新リリースの taskd を **verify モード**で
+#   本番 DB の `sqlite3 .backup` スナップショットに対して、新リリースの celeris を **verify モード**で
 #   127.0.0.1:7711 に起こし、
 #     1. 起動と health.schema_version == 新バイナリの SCHEMA_VERSION
 #     2. **件数一致（ADR-0041 D2）**: 同じスナップショットの**マイグレーション前**（`.backup` 直後に
@@ -11,15 +11,15 @@
 #        本番と比べると当たり前にずれて偽陰性になる。ADR-0041 §1-2）
 #     3. 主要 GET が 200 かつ JSON（inbox / org/<node>/memory / notify / clusters / providers / config）
 #     4. 新リリースの GUI を 127.0.0.1:7701 に起こして主要ページが 200
-#     5. N-1 互換: `current` の旧 taskd を、**新バイナリがマイグレーションした後の**同じスナップショットに
+#     5. N-1 互換: `current` の旧デーモンを、**新バイナリがマイグレーションした後の**同じスナップショットに
 #        対して 127.0.0.1:7712 に起こし、1〜3 と同じ検査（件数はスナップショットと比べる。
 #        落ちたら live_ok = false）
 #     6. **煙試験（ADR-0041 D5）**: staging に `POST /tasks {genre: "smoke", role: "smoke"}` して承認し、
 #        60 秒以内に `done` になること、`worker_started` / `worker_finished(done…)` の event があること、
 #        （`assignee` を付けられたときは）その run の報告が `GET /reports` に出ることを確かめる。
-#        verify の taskd は `genre = "smoke"` だけを dispatch し、役割・分野・プロバイダはすべて
+#        verify の celeris は `genre = "smoke"` だけを dispatch し、役割・分野・プロバイダはすべて
 #        **偽のアダプタ**の組み込み（LLM は呼ばない）。**検査 5 の後**に行う（検査 2 / 5 の件数を動かさない）
-#   を行い、`~/taskd/releases/<sha12>/verify.json` を書く。`ok` は 1〜4 と 6 が全部真のとき。
+#   を行い、`$CELERIS_STATE_DIR/releases/<sha12>/verify.json` を書く。`ok` は 1〜4 と 6 が全部真のとき。
 #
 #   **直列化（ADR-0041 D2）**: `$SD_STAGING/.lock` を `flock` で取る（待ちの上限
 #   `SD_VERIFY_LOCK_WAIT`、既定 1800 秒）。取れなければ exit 75（EX_TEMPFAIL）。
@@ -71,7 +71,7 @@ command -v curl >/dev/null 2>&1 || sd_die "curl not found"
 
 REL="$(sd_release_dir "$SHA12")"
 [ -d "$REL" ] || sd_die "no such release: $REL (run release.sh first)"
-[ -x "$REL/bin/taskd" ] || sd_die "missing $REL/bin/taskd"
+[ -x "$REL/bin/celeris" ] || sd_die "missing $REL/bin/celeris"
 [ -f "$REL/gui/server.js" ] || sd_die "missing $REL/gui/server.js"
 [ -f "$SD_CONFIG" ] || sd_die "missing $SD_CONFIG"
 [ -r "$SD_DB" ] || sd_die "cannot read $SD_DB"
@@ -167,9 +167,9 @@ sd_log "staging lock acquired: $SD_STAGING/.lock"
 
 # ---- staging を作り直してスナップショットを取る ----------------------------
 
-sd_require_port_free "$SD_STAGING_API_PORT" "staging taskd"
+sd_require_port_free "$SD_STAGING_API_PORT" "staging celeris"
 sd_require_port_free "$SD_STAGING_GUI_PORT" "staging gui"
-sd_require_port_free "$SD_STAGING_OLD_API_PORT" "staging N-1 taskd"
+sd_require_port_free "$SD_STAGING_OLD_API_PORT" "staging N-1 celeris"
 
 # `.lock` 以外を消す（`rm -rf "$SD_STAGING"` だとロックしている実体ごと消えてしまう）。
 find "$SD_STAGING" -mindepth 1 -maxdepth 1 ! -name '.lock' -exec rm -rf {} +
@@ -194,17 +194,25 @@ sd_log "snapshot counts: tasks=$(sd_json_get "$SNAP_JSON" tasks) projects=$(sd_j
 head -c 32 /dev/urandom | base64 | tr -d '\n' >"$ST_TOKEN"
 chmod 600 "$ST_TOKEN"
 
-NEW_CMD=("$REL/bin/taskd" --config "$SD_CONFIG" --mode verify --db "$SNAP"
+NEW_CMD=("$REL/bin/celeris" --config "$SD_CONFIG" --mode verify --db "$SNAP"
   --listen "127.0.0.1:$SD_STAGING_API_PORT" --workspace-root "$SD_STAGING/workspaces"
   --token-file "$ST_TOKEN" --release "$SHA12")
-GUI_ENV=(TASKD_API_URL="http://127.0.0.1:$SD_STAGING_API_PORT"
-  TASKD_API_TOKEN_FILE="$ST_TOKEN"
-  TASKD_GUI_BIND="127.0.0.1:$SD_STAGING_GUI_PORT"
-  TASKD_GUI_RELEASE="$SHA12"
+GUI_ENV=(CELERIS_API_URL="http://127.0.0.1:$SD_STAGING_API_PORT"
+  CELERIS_API_TOKEN_FILE="$ST_TOKEN"
+  CELERIS_GUI_BIND="127.0.0.1:$SD_STAGING_GUI_PORT"
+  CELERIS_GUI_RELEASE="$SHA12"
   NODE_ENV=production)
+# ADR-0045: `current` は改名前のリリース（`bin/taskd`）のことがある（初回の移行）。
+# 新しい名前を先に見て、無ければ旧名を使う。**ここだけが旧名を知っている**。
+OLD_BIN=""
+if [ -n "$CUR" ]; then
+  for cand in "$SD_CURRENT/bin/celeris" "$SD_CURRENT/bin/taskd"; do
+    if [ -x "$cand" ]; then OLD_BIN="$cand"; break; fi
+  done
+fi
 OLD_CMD=()
-if [ -n "$CUR" ] && [ -x "$SD_CURRENT/bin/taskd" ]; then
-  OLD_CMD=("$SD_CURRENT/bin/taskd" --config "$SD_CONFIG" --mode verify --db "$SNAP"
+if [ -n "$OLD_BIN" ]; then
+  OLD_CMD=("$OLD_BIN" --config "$SD_CONFIG" --mode verify --db "$SNAP"
     --listen "127.0.0.1:$SD_STAGING_OLD_API_PORT" --workspace-root "$SD_STAGING/workspaces-n1"
     --token-file "$ST_TOKEN" --release "$CUR")
 fi
@@ -218,7 +226,7 @@ snapshot          : $SNAP (schema_version=$SNAP_SCHEMA, tasks=$SNAP_TASKS)
 snapshot counts   : $SNAP_JSON（マイグレーション前。検査 2 はこれと staging API を比べる）
 staging lock      : $SD_STAGING/.lock（取得済み。待ちの上限 ${SD_VERIFY_LOCK_WAIT}s）
 staging token     : $ST_TOKEN
-ports free        : $SD_STAGING_API_PORT (taskd) / $SD_STAGING_GUI_PORT (gui) / $SD_STAGING_OLD_API_PORT (N-1)
+ports free        : $SD_STAGING_API_PORT (celeris) / $SD_STAGING_GUI_PORT (gui) / $SD_STAGING_OLD_API_PORT (N-1)
 current           : ${CUR:-<none>}  -> live_ok は $( [ -n "$CUR" ] && echo "N-1 の結果しだい" || echo "false（current が無い）" )
 production API    : 叩かない（ADR-0041 D2。件数は同じスナップショットの前後で比べる）
 
@@ -499,7 +507,7 @@ COUNT_KEYS="tasks tasks_total projects milestones org approvals approvals_decide
 
 # ---- 1. 新リリースを verify モードで起こす ---------------------------------
 
-NEW_LOG="$SD_STAGING/logs/taskd-new.log"
+NEW_LOG="$SD_STAGING/logs/celeris-new.log"
 sd_log "starting: ${NEW_CMD[*]}"
 "${NEW_CMD[@]}" >"$NEW_LOG" 2>&1 &
 NEW_PID=$!
@@ -645,7 +653,7 @@ fi
 # ---- 5. N-1 互換（live_ok） -------------------------------------------------
 
 LIVE_OK=false
-OLD_LOG="$SD_STAGING/logs/taskd-old.log"
+OLD_LOG="$SD_STAGING/logs/celeris-old.log"
 if [ ${#OLD_CMD[@]} -eq 0 ]; then
   record 5 n-1-compat false "no \`current\` release (first migration): live_ok = false"
 elif [ "$OK1" != true ]; then
@@ -678,12 +686,12 @@ else
     fi
     if [ "$OLD_SCHEMA" = "$NEW_SCHEMA" ] && [ -z "$BAD5" ] && [ -z "$DIFF5" ]; then
       LIVE_OK=true
-      record 5 n-1-compat true "old taskd ($CUR) reads the migrated snapshot: schema_version=$OLD_SCHEMA, counts match the pre-migration snapshot, main GETs 200"
+      record 5 n-1-compat true "old celeris ($CUR) reads the migrated snapshot: schema_version=$OLD_SCHEMA, counts match the pre-migration snapshot, main GETs 200"
     else
-      record 5 n-1-compat false "old taskd ($CUR) is not compatible: schema=$OLD_SCHEMA(want $NEW_SCHEMA) gets:$BAD5 counts:$DIFF5"
+      record 5 n-1-compat false "old celeris ($CUR) is not compatible: schema=$OLD_SCHEMA(want $NEW_SCHEMA) gets:$BAD5 counts:$DIFF5"
     fi
   else
-    record 5 n-1-compat false "old taskd ($CUR) did not become healthy on $OLD_BASE within 60s (SchemaTooNew?); see $OLD_LOG ($(tail -n 3 "$OLD_LOG" | tr '\n' ' '))"
+    record 5 n-1-compat false "old celeris ($CUR) did not become healthy on $OLD_BASE within 60s (SchemaTooNew?); see $OLD_LOG ($(tail -n 3 "$OLD_LOG" | tr '\n' ' '))"
   fi
 fi
 

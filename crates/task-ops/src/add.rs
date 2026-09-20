@@ -1,12 +1,12 @@
-//! `taskctl add` の判断と検証 — DESIGN.md §5.9 / ADR-0004 D4 / ADR-0010 D4（P-17, P-19, ADR-0013 D7）。
+//! `celerisctl add` の判断と検証 — DESIGN.md §5.9 / ADR-0004 D4 / ADR-0010 D4（P-17, P-19, ADR-0013 D7）。
 //!
 //! `NewTaskSpec` から `Task` を組み立て、`TaskStore::create_task` で `insert` + `Event::Created`
 //! を単一トランザクションとして書き込む（ADR-0010 D2）。初期 `status` は ADR-0002 D4 のとおり
 //! `kind == Approval` なら `Ready`、それ以外は `Draft`。
 //!
-//! `acceptance` の並び順は呼び出し側（`taskctl` の CLI 引数写像）の責務。ここでは渡された順を
+//! `acceptance` の並び順は呼び出し側（`celerisctl` の CLI 引数写像）の責務。ここでは渡された順を
 //! そのまま使う。条件のテキスト規則: `Command` は `` `<cmd>` exits 0 ``、`ArtifactExists` は
-//! `artifact <name> exists`（現在の `taskctl add` と同じ）。
+//! `artifact <name> exists`（現在の `celerisctl add` と同じ）。
 //!
 //! `depends_on` に渡した各 ID は、存在しないか `failed`/`cancelled` ならエラーにし、
 //! 何も挿入しない（挿入した瞬間に後続が永久に進まない状態を作らないため）。
@@ -26,7 +26,7 @@ use time::OffsetDateTime;
 
 use crate::error::OpsError;
 
-/// 受け入れ条件 1 件の指定。現在の `taskctl add` の `--accept`/`--check-cmd`/
+/// 受け入れ条件 1 件の指定。現在の `celerisctl add` の `--accept`/`--check-cmd`/
 /// `--check-artifact`/`--check-reviewer` に対応する。API の `POST /tasks` の `acceptance[]` でもある（`docs/gui/api.md` §3.4）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -68,8 +68,8 @@ impl CriterionSpec {
     }
 }
 
-/// `taskctl add` から組み立てる新規タスクの指定。API の `POST /tasks` の本文でもある（`docs/gui/api.md` §3.4）。
-/// 省略時の既定は `taskctl add` と同じ。
+/// `celerisctl add` から組み立てる新規タスクの指定。API の `POST /tasks` の本文でもある（`docs/gui/api.md` §3.4）。
+/// 省略時の既定は `celerisctl add` と同じ。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewTaskSpec {
@@ -82,7 +82,7 @@ pub struct NewTaskSpec {
     #[serde(default)]
     pub tier: Option<Tier>,
     /// ADR-0044 D3: `"P1"` のようなラベルでも `20` のような整数でも書ける。**省略時は P2**
-    /// （= `task_core::DEFAULT_PRIORITY` = 10）。`taskctl add` は `--priority` の既定 0 を明示して渡すので
+    /// （= `task_core::DEFAULT_PRIORITY` = 10）。`celerisctl add` は `--priority` の既定 0 を明示して渡すので
     /// 従来どおり。
     #[serde(default)]
     pub priority: Option<PriorityInput>,
@@ -141,7 +141,7 @@ pub struct NewTaskSpec {
     #[serde(default)]
     pub category: Option<task_core::TaskCategory>,
     /// ADR-0044 D1: 初期状態。`draft` か `ready` だけ（それ以外は 422）。**省略時は呼び出し側の既定**
-    /// （`taskctl add` と委譲・計画の経路は従来どおり `draft`、`POST /tasks` は `ready`。人は Go を出す
+    /// （`celerisctl add` と委譲・計画の経路は従来どおり `draft`、`POST /tasks` は `ready`。人は Go を出す
     /// 側なので draft を挟まない）。`kind = approval` は従来どおり常に `ready`。
     #[serde(default)]
     pub status: Option<Status>,
@@ -221,7 +221,7 @@ fn resolve_repos(
         .map(|r| vec![task_core::RepoRef::of(r)])
         .unwrap_or_default())
 }
-/// 全体の既定（`taskctl add` と API で共通）。
+/// 全体の既定（`celerisctl add` と API で共通）。
 pub const DEFAULT_TIER: Tier = Tier::Standard;
 pub const DEFAULT_MAX_TURNS: u32 = 10;
 pub const DEFAULT_MAX_WALL_SECS: u64 = 600;
@@ -298,7 +298,7 @@ pub fn create_task(store: &dyn TaskStore, spec: NewTaskSpec, now: OffsetDateTime
 /// `default_role` の既定 → 全体の既定の順で埋めてから挿入する。`spec.role` が `roles` に無くてもエラーに
 /// しない（役割名は自由記述。既定と指示文が無いだけ）。`genres` が空でなければ、知らない `genre` や
 /// `genre` + `role` の不整合（`role` がその分野の `roles` に無い）はエラーにする（`genres` が空の設定
-/// では検証しない。taskctl の `--config` 無しはこちらに当たる）。
+/// では検証しない。celerisctl の `--config` 無しはこちらに当たる）。
 pub fn create_task_with_roles(
     store: &dyn TaskStore,
     spec: NewTaskSpec,
@@ -401,13 +401,13 @@ fn build_task(
     // ADR-0044 D3（Phase 53）: ラベルの検証（小文字 `[a-z0-9-]`、最大 8 個、重複は畳む）。
     let labels = task_core::normalize_labels(&spec.labels).map_err(OpsError::Validation)?;
     let category = spec.category.unwrap_or_default();
-    // ADR-0044 D3: 省略時は P2（`taskctl add` は `--priority` の既定 0 を明示して渡す）。
+    // ADR-0044 D3: 省略時は P2（`celerisctl add` は `--priority` の既定 0 を明示して渡す）。
     let priority = spec
         .priority
         .map(PriorityInput::to_i32)
         .unwrap_or(task_core::DEFAULT_PRIORITY);
 
-    // ADR-0014 D3（P-G16）: 空白だけの title / objective と、存在しない親を拒否する（taskctl add も同じ関数を通る）。
+    // ADR-0014 D3（P-G16）: 空白だけの title / objective と、存在しない親を拒否する（celerisctl add も同じ関数を通る）。
     if spec.title.trim().is_empty() {
         return Err(OpsError::Validation("title must not be blank".to_string()));
     }
@@ -872,7 +872,7 @@ mod tests {
 
     /// ADR-0027 D1: `genres` が設定されているとき、知らない `genre` はエラー、`genre` + `role` の
     /// 不整合（`role` がその分野の `roles` に無い）もエラー（何も挿入しない）。`genres` が空の設定
-    /// （`--config` 無しの `taskctl add`）では検証しない。
+    /// （`--config` 無しの `celerisctl add`）では検証しない。
     #[test]
     fn create_task_with_roles_rejects_unknown_genre_and_role_genre_mismatch_only_when_genres_configured() {
         let store = SqliteStore::open_in_memory().expect("open store");

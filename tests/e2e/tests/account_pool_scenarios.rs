@@ -1,4 +1,4 @@
-//! ADR-0024（Phase 13）: Claude アカウントのプールを、実バイナリ `taskd`（`[api]` 有効）とスタブの
+//! ADR-0024（Phase 13）: Claude アカウントのプールを、実バイナリ `celeris`（`[api]` 有効）とスタブの
 //! `claude` コマンド（`sh` スクリプト）で再現する。接続先は 127.0.0.1 だけで、外部ネットワークに出ない。
 //!
 //! 受け入れ条件 1〜4（ADR-0024）:
@@ -6,7 +6,7 @@
 //!    ワーカーの `CLAUDE_SECURESTORAGE_CONFIG_DIR` が一致する
 //! 2. 片方が throttled で終わると、そのアカウントだけが cooldown になり、次の run はもう片方に行く。
 //!    プロバイダは cooldown にならない（`docs/gui/api.md` の cooldown 一覧が空のまま）
-//! 3. `rate_limit_event` が run の途中で `AccountBook` と `GET /accounts` に反映され、taskd を再起動しても残る
+//! 3. `rate_limit_event` が run の途中で `AccountBook` と `GET /accounts` に反映され、celeris を再起動しても残る
 //! 4. `POST /accounts` → `login` → `login/code` → `logged_in: true` がスタブの `claude auth login` で通る。
 //!    管理系はトークン無しで 401
 
@@ -150,7 +150,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n'
     }
 
     fn write_config(&self, claude: &Path, token: Option<&str>, extra_provider: &str) -> PathBuf {
-        let path = self.root.join("taskd.toml");
+        let path = self.root.join("config.toml");
         let token_line = if let Some(token) = token {
             std::fs::write(self.root.join("api.token"), token).unwrap();
             "token_file = \"api.token\"\n"
@@ -158,7 +158,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n'
             ""
         };
         let text = format!(
-            r#"db = "taskd.sqlite3"
+            r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 50
 max_concurrency = 4
@@ -201,16 +201,16 @@ account_pool = true
         dir.to_string_lossy().into_owned()
     }
 
-    fn taskctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("taskctl")).arg("--db").arg(self.root.join("taskd.sqlite3")).args(args).output().unwrap();
+    fn celerisctl(&self, args: &[&str]) -> String {
+        let out = Command::new(bin("celerisctl")).arg("--db").arg(self.root.join("celeris.sqlite3")).args(args).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "taskctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
         stdout
     }
 
     fn add(&self, title: &str) -> String {
         let ws = self.workspace(&format!("ws-{title}"));
-        self.taskctl(&[
+        self.celerisctl(&[
             "add",
             "--title",
             title,
@@ -225,10 +225,10 @@ account_pool = true
         .to_string()
     }
 
-    fn start_taskd(&self, config: &Path) -> Proc {
+    fn start_celeris(&self, config: &Path) -> Proc {
         static STARTS: AtomicUsize = AtomicUsize::new(0);
-        let log = self.root.join(format!("taskd-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
-        let child = Command::new(bin("taskd"))
+        let log = self.root.join(format!("celeris-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
+        let child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--log-format", "text"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -241,7 +241,7 @@ account_pool = true
     fn wait_api(&self, daemon: &mut Proc) {
         let ok = wait_until(Duration::from_secs(20), || {
             if let Ok(Some(status)) = daemon.child.try_wait() {
-                panic!("taskd exited early with {status}\n{}", daemon.log_text());
+                panic!("celeris exited early with {status}\n{}", daemon.log_text());
             }
             self.request("GET", "/health", None, &[]).status == 200
         });
@@ -307,12 +307,12 @@ account_pool = true
     }
 
     fn replay_is_consistent(&self) {
-        let out = self.taskctl(&["replay"]);
+        let out = self.celerisctl(&["replay"]);
         assert!(out.contains("replay: 0 mismatches"), "{out}");
     }
 
     fn worker_started_account(&self, task_id: &str) -> Option<String> {
-        let store = task_core::SqliteStore::open(&self.root.join("taskd.sqlite3")).unwrap();
+        let store = task_core::SqliteStore::open(&self.root.join("celeris.sqlite3")).unwrap();
         task_core::TaskStore::events_for(&store, task_id.parse().unwrap())
             .unwrap()
             .into_iter()
@@ -323,7 +323,7 @@ account_pool = true
     }
 
     fn task_status(&self, task_id: &str) -> task_core::Status {
-        let store = task_core::SqliteStore::open(&self.root.join("taskd.sqlite3")).unwrap();
+        let store = task_core::SqliteStore::open(&self.root.join("celeris.sqlite3")).unwrap();
         task_core::TaskStore::get(&store, task_id.parse().unwrap()).unwrap().unwrap().status
     }
 }
@@ -338,13 +338,13 @@ fn account_selection_follows_headroom_and_survives_restart_and_throttle_only_coo
     env.account("a", Some(0.9));
     env.account("b", Some(0.2));
     let config = env.write_config(&claude, None, "");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     let env_ref = &env;
     env_ref.wait_api(&mut daemon);
 
     // 1 回目は観測値が無いので id 昇順のタイブレークで "a" に行く。
     let t1 = env.add("t1");
-    env.taskctl(&["approve", &t1]);
+    env.celerisctl(&["approve", &t1]);
     assert!(
         wait_until(Duration::from_secs(10), || env.task_status(&t1) == task_core::Status::Done),
         "t1 never completed"
@@ -353,7 +353,7 @@ fn account_selection_follows_headroom_and_survives_restart_and_throttle_only_coo
 
     // "a" は util 0.9 の観測値がついた。"b" はまだ観測値が無い（score 1.0）ので次はそちらへ行く。
     let t2 = env.add("t2");
-    env.taskctl(&["approve", &t2]);
+    env.celerisctl(&["approve", &t2]);
     assert!(
         wait_until(Duration::from_secs(10), || env.task_status(&t2) == task_core::Status::Done),
         "t2 never completed"
@@ -362,7 +362,7 @@ fn account_selection_follows_headroom_and_survives_restart_and_throttle_only_coo
 
     // どちらも観測値がついた今、以後は残量の多い "b" に行き続ける。
     let t3 = env.add("t3");
-    env.taskctl(&["approve", &t3]);
+    env.celerisctl(&["approve", &t3]);
     assert!(
         wait_until(Duration::from_secs(10), || env.task_status(&t3) == task_core::Status::Done),
         "t3 never completed"
@@ -382,7 +382,7 @@ fn account_selection_follows_headroom_and_survives_restart_and_throttle_only_coo
 
     // 再起動しても観測値は残る（受け入れ 3 後半、AccountBook の永続化）。
     drop(daemon);
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
     let accounts_after_restart = env.get("/accounts").json();
     let items = accounts_after_restart["items"].as_array().unwrap();
@@ -425,11 +425,11 @@ exec "{claude}" "$@"
         std::fs::set_permissions(&claude_conditional, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let config = env.write_config(&claude_conditional, None, "");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
 
     let t1 = env.add("throttle1");
-    env.taskctl(&["approve", &t1]);
+    env.celerisctl(&["approve", &t1]);
     assert!(
         wait_until(Duration::from_secs(10), || env.worker_started_account(&t1).is_some()),
         "t1 was never dispatched"
@@ -448,7 +448,7 @@ exec "{claude}" "$@"
 
     // 次のタスクは cooldown 中の "a" を避けて "b" に行く。
     let t2 = env.add("throttle2");
-    env.taskctl(&["approve", &t2]);
+    env.celerisctl(&["approve", &t2]);
     assert!(
         wait_until(Duration::from_secs(10), || env.worker_started_account(&t2).is_some()),
         "t2 was never dispatched"
@@ -466,7 +466,7 @@ fn http_login_flow_ends_with_logged_in_true_and_management_requires_a_token() {
         let env = Env::new();
         let claude = env.write_claude_stub();
         let config = env.write_config(&claude, None, "");
-        let mut daemon = env.start_taskd(&config);
+        let mut daemon = env.start_celeris(&config);
         env.wait_api(&mut daemon);
 
         assert_eq!(env.get("/accounts").status, 200);
@@ -477,7 +477,7 @@ fn http_login_flow_ends_with_logged_in_true_and_management_requires_a_token() {
     let env = Env::new();
     let claude = env.write_claude_stub();
     let config = env.write_config(&claude, Some("s3cret-admin-token"), "");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     let mut env = env;
     env.wait_api(&mut daemon);
     env.token = Some("s3cret-admin-token".into());

@@ -26,7 +26,7 @@ let passwordFile: string;
 let secretFile: string;
 
 beforeAll(() => {
-  dir = mkdtempSync(path.join(tmpdir(), "taskd-gui-auth-"));
+  dir = mkdtempSync(path.join(tmpdir(), "celeris-gui-auth-"));
   passwordFile = path.join(dir, "password");
   secretFile = path.join(dir, "secret");
   writeFileSync(passwordFile, "  hunter2\n");
@@ -43,7 +43,7 @@ afterEach(() => {
 
 function cfg(overrides: Partial<AuthConfig> = {}): AuthConfig {
   return {
-    ...readAuthConfig({ TASKD_GUI_PASSWORD_FILE: passwordFile, TASKD_GUI_SESSION_SECRET_FILE: secretFile }),
+    ...readAuthConfig({ CELERIS_GUI_PASSWORD_FILE: passwordFile, CELERIS_GUI_SESSION_SECRET_FILE: secretFile }),
     ...overrides,
   };
 }
@@ -56,23 +56,23 @@ describe("readAuthConfig", () => {
     expect(c.secretFromFile).toBe(false);
   });
 
-  it("rejects a non-loopback bind without TASKD_GUI_PASSWORD_FILE", () => {
-    expect(() => readAuthConfig({ TASKD_GUI_BIND: "0.0.0.0:7700" })).toThrow(AuthConfigError);
-    expect(() => readAuthConfig({ TASKD_GUI_BIND: "0.0.0.0:7700" })).toThrow(/TASKD_GUI_PASSWORD_FILE is required/);
+  it("rejects a non-loopback bind without CELERIS_GUI_PASSWORD_FILE", () => {
+    expect(() => readAuthConfig({ CELERIS_GUI_BIND: "0.0.0.0:7700" })).toThrow(AuthConfigError);
+    expect(() => readAuthConfig({ CELERIS_GUI_BIND: "0.0.0.0:7700" })).toThrow(/CELERIS_GUI_PASSWORD_FILE is required/);
   });
 
   it("enables auth on a non-loopback bind with a password file, and on loopback when the file is explicit", () => {
-    expect(readAuthConfig({ TASKD_GUI_BIND: "0.0.0.0:7700", TASKD_GUI_PASSWORD_FILE: passwordFile }).enabled).toBe(
+    expect(readAuthConfig({ CELERIS_GUI_BIND: "0.0.0.0:7700", CELERIS_GUI_PASSWORD_FILE: passwordFile }).enabled).toBe(
       true,
     );
-    expect(readAuthConfig({ TASKD_GUI_PASSWORD_FILE: passwordFile }).enabled).toBe(true);
+    expect(readAuthConfig({ CELERIS_GUI_PASSWORD_FILE: passwordFile }).enabled).toBe(true);
   });
 
   it("rejects an unreadable or empty password file", () => {
-    expect(() => readAuthConfig({ TASKD_GUI_PASSWORD_FILE: path.join(dir, "missing") })).toThrow(/cannot read/);
+    expect(() => readAuthConfig({ CELERIS_GUI_PASSWORD_FILE: path.join(dir, "missing") })).toThrow(/cannot read/);
     const empty = path.join(dir, "empty");
     writeFileSync(empty, " \n");
-    expect(() => readAuthConfig({ TASKD_GUI_PASSWORD_FILE: empty })).toThrow(/is empty/);
+    expect(() => readAuthConfig({ CELERIS_GUI_PASSWORD_FILE: empty })).toThrow(/is empty/);
   });
 
   it("reads the session secret from a file when given", () => {
@@ -107,7 +107,7 @@ describe("session cookie", () => {
   it("issues HttpOnly; SameSite=Strict; Path=/ (Secure only on https) and accepts its own cookie", async () => {
     const c = cfg();
     const set = await issueSessionCookie(c, req());
-    expect(set).toMatch(/^__taskd_gui_session=/);
+    expect(set).toMatch(/^__celeris_gui_session=/);
     expect(set).toMatch(/HttpOnly/);
     expect(set).toMatch(/SameSite=Strict/);
     expect(set).toMatch(/Path=\//);
@@ -122,7 +122,7 @@ describe("session cookie", () => {
     const cookie = (await issueSessionCookie(c, req())).split(";")[0];
     expect(await hasValidSession(c, req())).toBe(false);
     expect(await hasValidSession(c, req(`${cookie}x`))).toBe(false);
-    expect(await hasValidSession(c, req("__taskd_gui_session=garbage"))).toBe(false);
+    expect(await hasValidSession(c, req("__celeris_gui_session=garbage"))).toBe(false);
     expect(await hasValidSession(cfg({ secret: "another-secret" }), req(cookie))).toBe(false);
     const old = (await issueSessionCookie(c, req(), Date.now() - (SESSION_MAX_AGE_SECONDS + 5) * 1000)).split(";")[0];
     expect(await hasValidSession(c, req(old))).toBe(false);
@@ -130,7 +130,7 @@ describe("session cookie", () => {
 
   it("clears the cookie with Max-Age=0", async () => {
     const set = await clearSessionCookie(cfg(), req());
-    expect(set).toMatch(/^__taskd_gui_session=/);
+    expect(set).toMatch(/^__celeris_gui_session=/);
     expect(set).toMatch(/Max-Age=0/);
   });
 });

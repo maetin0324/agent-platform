@@ -1,6 +1,6 @@
 //! `paperqa` アダプタ（DESIGN §5.4, ADR-0027 D3、ADR-0035 で「取得」の段を追加）。
 //!
-//! PaperQA2（`pqa` CLI）は taskd のワーカープロトコルもストリーム型の進捗形式も話さない、
+//! PaperQA2（`pqa` CLI）は celeris のワーカープロトコルもストリーム型の進捗形式も話さない、
 //! ただの調査エンジンである。**アダプタ自身が** ADR-0006 D3 の結果ファイル規約（`artifacts/result.json`）を
 //! 代わりに書き、`Terminal::Done`/`Terminal::Error` を合成する。委譲（`delegate.json`）は扱わない
 //! （ADR-0027 D3: 「委譲はしない」）。生存監視（wall-clock・無出力タイムアウト・SIGTERM→SIGKILL）は
@@ -42,7 +42,7 @@ use crate::subprocess::{
 /// run ごとに `runs/<run_id>/paperqa_acquire.py` として書き出す取得ランナー（ADR-0035 D1）。
 const ACQUIRE_SCRIPT: &str = include_str!("paperqa_acquire.py");
 /// 取得ランナーの最終行の目印（ADR-0035 D1）。
-const ACQUIRE_RESULT_PREFIX: &str = "TASKD_ACQUIRE ";
+const ACQUIRE_RESULT_PREFIX: &str = "CELERIS_ACQUIRE ";
 /// 取得ランナーの進捗行の目印。
 const PROGRESS_PREFIX: &str = "progress:";
 /// `artifacts/result.json` の `summary` の上限（ADR-0027 D3）。
@@ -179,7 +179,7 @@ fn default_min_cited() -> u32 {
     2
 }
 
-/// `[adapters.paperqa]`（taskd.toml, ADR-0027 D3）。`[[providers]] adapter = "paperqa"` の行ごとに
+/// `[adapters.paperqa]`（config.toml, ADR-0027 D3）。`[[providers]] adapter = "paperqa"` の行ごとに
 /// `settings` / `env` / `model` を上書きできる（ADR-0026 D2 と同じ作り）。
 #[derive(Debug, Clone)]
 pub struct PaperQaConfig {
@@ -538,7 +538,7 @@ pub struct Candidate {
     pub source_engine: String,
 }
 
-/// 取得の段の結果（`TASKD_ACQUIRE` の中身）。
+/// 取得の段の結果（`CELERIS_ACQUIRE` の中身）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct AcquireCounts {
     candidates: u32,
@@ -626,7 +626,7 @@ async fn stream_child(
         match outcome {
             LineOutcome::Eof => break,
             LineOutcome::TooLong => {
-                // pqa / ランナーのフォーマットは taskd が定義したものではないので寛容に無視する
+                // pqa / ランナーのフォーマットは celeris が定義したものではないので寛容に無視する
                 // （claude_code と同じ考え方）。
                 sink.heartbeat();
                 last_activity = Instant::now();
@@ -785,7 +785,7 @@ async fn run_acquire(
                             pdfs: number("pdfs"),
                         });
                     }
-                    Err(e) => warn!("run {run_id}: could not parse TASKD_ACQUIRE line: {e}"),
+                    Err(e) => warn!("run {run_id}: could not parse CELERIS_ACQUIRE line: {e}"),
                 }
             }
         },
@@ -1112,7 +1112,7 @@ async fn run_paperqa(
         if let Err(e) = tokio::fs::write(artifacts_dir.join("answer.md"), &answer_md).await {
             warn!("run {run_id}: could not write artifacts/answer.md: {e}");
         }
-        // 書いたものは taskd にも知らせる（run の成果物一覧と `Check::ArtifactExists` の解決に使われる）。
+        // 書いたものは celeris にも知らせる（run の成果物一覧と `Check::ArtifactExists` の解決に使われる）。
         // 他のアダプタではワーカー自身が `artifact` メッセージで申告するが、pqa は申告しないのでアダプタが行う。
         // ADR-0035 D3: ゲートに落ちても成果物は残す（人が読めるように）ので、申告はゲートより前に行う。
         // ADR-0036 D4: 申告する `path` は workspace 相対のまま（`artifacts_dir` 基準で組む）。
@@ -1419,7 +1419,7 @@ mod tests {
     ]"#;
 
     /// 取得ランナーのスタブ本体。`papers.json` / `sources.json`（`cited` は全部 false）を書き、
-    /// progress と `TASKD_ACQUIRE` を出す（実物のランナーの動きを最小限まねる）。
+    /// progress と `CELERIS_ACQUIRE` を出す（実物のランナーの動きを最小限まねる）。
     fn acquire_stub_script(candidates: u32, pdfs: u32) -> String {
         format!(
             r#"input="$2"
@@ -1439,7 +1439,7 @@ cands = json.load(open(sys.argv[1]))
 out = [{{"url": c["url"], "title": c["title"], "engine": c["source_engine"], "cited": False}} for c in cands]
 json.dump(out, open(sys.argv[2], "w"), indent=2)
 PY
-echo 'TASKD_ACQUIRE {{"candidates": {candidates}, "pdfs": {pdfs}, "engines": {{"arxiv": 1, "openalex": 2}}}}'
+echo 'CELERIS_ACQUIRE {{"candidates": {candidates}, "pdfs": {pdfs}, "engines": {{"arxiv": 1, "openalex": 2}}}}'
 "#
         )
     }
@@ -1883,10 +1883,10 @@ while true; do sleep 0.1; done
     #[test]
     fn acquire_python_defaults_to_the_sibling_of_the_pqa_command() {
         let mut config = PaperQaConfig {
-            command: "/home/u/taskd/paperqa/.venv/bin/pqa".to_string(),
+            command: "/home/u/celeris/paperqa/.venv/bin/pqa".to_string(),
             ..PaperQaConfig::default()
         };
-        assert_eq!(acquire_python(&config), "/home/u/taskd/paperqa/.venv/bin/python3");
+        assert_eq!(acquire_python(&config), "/home/u/celeris/paperqa/.venv/bin/python3");
         config.command = "pqa".to_string();
         assert_eq!(acquire_python(&config), "python3");
         config.acquire.command = Some("/usr/bin/python3.12".to_string());
@@ -2066,7 +2066,7 @@ while true; do sleep 0.1; done
         let config = stub_pqa_with_acquire(
             dir.path(),
             "cat >/dev/null\necho 'Answer: I could not find any relevant work.'\n",
-            "echo 'progress: arxiv: 0 result(s)'\necho 'TASKD_ACQUIRE {\"candidates\": 0, \"pdfs\": 0, \"engines\": {}}'\n",
+            "echo 'progress: arxiv: 0 result(s)'\necho 'CELERIS_ACQUIRE {\"candidates\": 0, \"pdfs\": 0, \"engines\": {}}'\n",
         );
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -2193,7 +2193,7 @@ while true; do sleep 0.1; done
     }
 
     /// ADR-0035 §4.1: 本物の API を叩かずに（`--fixture`）、重複排除・上限・案件ごとの corpus・
-    /// `papers.json` / `sources.json` の形・`TASKD_ACQUIRE` を確認する。
+    /// `papers.json` / `sources.json` の形・`CELERIS_ACQUIRE` を確認する。
     #[test]
     fn runner_acquires_from_fixtures_with_dedup_limits_and_the_project_corpus() {
         if !python3_available() {
@@ -2231,7 +2231,7 @@ while true; do sleep 0.1; done
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert!(stdout.contains("progress: arxiv: 2 result(s)"), "{stdout}");
 
-        let result_line = stdout.lines().find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX)).expect("TASKD_ACQUIRE");
+        let result_line = stdout.lines().find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX)).expect("CELERIS_ACQUIRE");
         let counts: serde_json::Value =
             serde_json::from_str(result_line.trim_start_matches(ACQUIRE_RESULT_PREFIX)).unwrap();
         // 5 件返ってきたうち、DOI 一致とタイトル一致の 2 件が畳まれて 3 件。
@@ -2656,7 +2656,7 @@ print(json.dumps(out))
     }
 
     fn acquire_counts(stdout: &str) -> serde_json::Value {
-        let line = stdout.lines().find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX)).expect("TASKD_ACQUIRE");
+        let line = stdout.lines().find(|l| l.starts_with(ACQUIRE_RESULT_PREFIX)).expect("CELERIS_ACQUIRE");
         serde_json::from_str(line.trim_start_matches(ACQUIRE_RESULT_PREFIX)).expect("valid JSON")
     }
 

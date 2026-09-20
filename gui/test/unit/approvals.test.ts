@@ -1,21 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  approvalGroupNodeNames,
-  approvalNodeName,
-  approvalProjectName,
-  approvalsPendingCount,
-  groupApprovals,
-  standingRuleTargetName,
-} from "~/lib/approvals";
-import { loadApprovals } from "~/routes/approvals";
-import {
   buildApprovalDecideInput,
   buildStandingRuleCreateInput,
   createStandingRule,
   decideApproval,
   deleteStandingRule,
-} from "~/taskd/approvals-admin.server";
-import { TaskdClient } from "~/taskd/client.server";
+} from "~/celeris/approvals-admin.server";
+import { CelerisClient } from "~/celeris/client.server";
 import type {
   Approval,
   ApprovalDecideResult,
@@ -27,15 +18,24 @@ import type {
   ProjectList,
   StandingRule,
   StandingRuleList,
-} from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+} from "~/celeris/types";
+import {
+  approvalGroupNodeNames,
+  approvalNodeName,
+  approvalProjectName,
+  approvalsPendingCount,
+  groupApprovals,
+  standingRuleTargetName,
+} from "~/lib/approvals";
+import { loadApprovals } from "~/routes/approvals";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -106,7 +106,7 @@ describe("approvalProjectName / approvalNodeName / standingRuleTargetName (~/lib
   });
 });
 
-describe("approvalsPendingCount (DaemonSnapshot.approvals_pending, docs/taskd-api-v1.md §3.20 の追加)", () => {
+describe("approvalsPendingCount (DaemonSnapshot.approvals_pending, docs/celeris-api-v1.md §3.20 の追加)", () => {
   it("daemon が無ければ 0", () => {
     expect(approvalsPendingCount(null)).toBe(0);
     expect(approvalsPendingCount(undefined)).toBe(0);
@@ -127,14 +127,14 @@ describe("approvalsPendingCount (DaemonSnapshot.approvals_pending, docs/taskd-ap
   });
 });
 
-describe("loadApprovals (docs/taskd-api-v1.md §3.56。pending=true / pending=false の 2 回呼び)", () => {
-  it("GET /approvals?pending=true と ?pending=false を 1 回ずつ呼ぶ（Phase 27。taskd-requests.md R5 解決済み）", async () => {
-    // Phase 27 で taskd 側が pending=false を「決定済みだけ」に絞り込むよう直したため、GUI 側の
+describe("loadApprovals (docs/celeris-api-v1.md §3.56。pending=true / pending=false の 2 回呼び)", () => {
+  it("GET /approvals?pending=true と ?pending=false を 1 回ずつ呼ぶ（Phase 27。celeris-requests.md R5 解決済み）", async () => {
+    // Phase 27 で celeris 側が pending=false を「決定済みだけ」に絞り込むよう直したため、GUI 側の
     // splitApprovals（decision の有無でフィルタ無し 1 回取得を分ける、G13d の回避策）は不要になった。
     const a1 = approval("a1");
     const a2 = approval("a2", { decision: "once", answer: "cluster-a", decided_at: "2026-09-17T01:00:00Z" });
     mock.on("GET", "/api/v1/approvals", (req, res) => {
-      const url = new URL(req.url ?? "", "http://mock-taskd.invalid");
+      const url = new URL(req.url ?? "", "http://mock-celeris.invalid");
       const pending = url.searchParams.get("pending");
       if (pending === "true") return sendJson(res, 200, { items: [a1] } satisfies ApprovalList);
       if (pending === "false") return sendJson(res, 200, { items: [a2] } satisfies ApprovalList);
@@ -212,7 +212,7 @@ describe("buildApprovalDecideInput", () => {
   });
 });
 
-describe("decideApproval (docs/taskd-api-v1.md §3.57. POST /approvals/{id}/decide, 管理系)", () => {
+describe("decideApproval (docs/celeris-api-v1.md §3.57. POST /approvals/{id}/decide, 管理系)", () => {
   it("once — 既存の質問に答える経路で再開する", async () => {
     const result: ApprovalDecideResult = {
       approval: approval("a1", { decision: "once", answer: "cluster-a" }),
@@ -299,7 +299,7 @@ describe("buildStandingRuleCreateInput", () => {
   });
 });
 
-describe("createStandingRule / deleteStandingRule (docs/taskd-api-v1.md §3.59〜3.60, 管理系)", () => {
+describe("createStandingRule / deleteStandingRule (docs/celeris-api-v1.md §3.59〜3.60, 管理系)", () => {
   it("POST /standing-rules — success", async () => {
     const rule = standingRule("s1", { node_id: "coding-poc" });
     mock.on("POST", "/api/v1/standing-rules", (_req, res) => sendJson(res, 201, rule));
@@ -348,7 +348,7 @@ describe("createStandingRule / deleteStandingRule (docs/taskd-api-v1.md §3.59�
 
 /**
  * 同じ文面の未決の要求は 1 枚にまとめる（Phase G13f-1、監査 8）。文面の同一性は前後の空白を落とした
- * 完全一致だけ（言い換えの解釈はしない）。並びは taskd が返した順（新しい順）を保つ。
+ * 完全一致だけ（言い換えの解釈はしない）。並びは celeris が返した順（新しい順）を保つ。
  */
 describe("groupApprovals", () => {
   it("同じ文面をまとめ、最初の 1 件を代表にする", () => {

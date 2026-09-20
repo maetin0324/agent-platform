@@ -72,7 +72,7 @@ impl TaskRepo {
 /// 1 タスク分の作業場所（ADR-0043 D2）。ディスパッチャが dispatch のたびに組み立てる純粋なデータ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskWorkspaces {
-    /// taskd が持つタスクのディレクトリ（`<workspace_root>/<task_id>`）。`runs/` `inputs/` `artifacts/` はここ。
+    /// celeris が持つタスクのディレクトリ（`<workspace_root>/<task_id>`）。`runs/` `inputs/` `artifacts/` はここ。
     pub task_dir: PathBuf,
     /// 使うリポジトリ。**先頭がワーカーのカレントディレクトリ**になる。
     pub repos: Vec<TaskRepo>,

@@ -1,14 +1,14 @@
 import { Link } from "react-router";
+import type { ProjectIntegrationItem } from "~/celeris/types";
 import { Badge, StatusBadge } from "~/components/ui/badge";
 import { Card, CardBody } from "~/components/ui/card";
 import { EmptyState, Mono } from "~/components/ui/misc";
 import { integrationMethodLabel, integrationStateLabel } from "~/lib/labels";
 import { integrationStateTone } from "~/lib/task-changes";
-import type { ProjectIntegrationItem } from "~/taskd/types";
 
 /**
- * 案件の「PR と取り込み」節（ADR-0043 D5、taskd Phase 54 / G18。`GET /projects/{id}/integrations`）。
- * タスク × リポジトリごとに**最新の 1 件**を新しい順で taskd が返すので、並べ替えも集計もしない。
+ * 案件の「PR と取り込み」節（ADR-0043 D5、celeris Phase 54 / G18。`GET /projects/{id}/integrations`）。
+ * タスク × リポジトリごとに**最新の 1 件**を新しい順で celeris が返すので、並べ替えも集計もしない。
  * 操作はここには置かない（取り込みはタスクの `/tasks/:id/changes` で行う。ここは「いまどうなっているか」だけ）。
  */
 export interface ProjectIntegrationsProps {

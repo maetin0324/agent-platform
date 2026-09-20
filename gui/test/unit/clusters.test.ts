@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { cancelClusterConnect, startClusterConnect, submitClusterConnectCode } from "~/celeris/clusters-admin.server";
+import type { ClusterConnectResult, ClusterConnectStart, Clusters } from "~/celeris/types";
 import { clusterConnectPanelState, loadClusters } from "~/routes/clusters";
-import { TaskdClient } from "~/taskd/client.server";
-import { cancelClusterConnect, startClusterConnect, submitClusterConnectCode } from "~/taskd/clusters-admin.server";
-import type { ClusterConnectResult, ClusterConnectStart, Clusters } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -75,19 +75,19 @@ describe("loadClusters", () => {
     expect(result.clusters.items[1]).toMatchObject({ auth: "totp", connect_pending: true });
   });
 
-  it("rejects when taskd is not reachable (loader converts this to a Response)", async () => {
-    const closed = await startMockTaskd();
+  it("rejects when celeris is not reachable (loader converts this to a Response)", async () => {
+    const closed = await startMockCeleris();
     const baseUrl = closed.baseUrl;
     await closed.close();
-    const unreachable = new TaskdClient({ baseUrl, timeoutMs: 1000 });
+    const unreachable = new CelerisClient({ baseUrl, timeoutMs: 1000 });
 
     await expect(loadClusters(unreachable, new Request("http://gui.invalid/clusters"))).rejects.toBeTruthy();
   });
 });
 
 /**
- * クラスタへの接続の中継（ADR-0032、docs/taskd-api-v1.md §3.39〜3.41）。`accounts-admin.test.ts` と同じ流儀:
- * taskd の応答をそのまま素通しし、エラーは `ActionError` として返す（例外にしない）。`POST /reload` は
+ * クラスタへの接続の中継（ADR-0032、docs/celeris-api-v1.md §3.39〜3.41）。`accounts-admin.test.ts` と同じ流儀:
+ * celeris の応答をそのまま素通しし、エラーは `ActionError` として返す（例外にしない）。`POST /reload` は
  * 一切呼ばない（接続を張っても設定は変わらないため。`secrets-admin.test.ts` の reload 呼び出しとの対比）。
  */
 describe("startClusterConnect", () => {
@@ -165,7 +165,7 @@ describe("startClusterConnect", () => {
 });
 
 describe("submitClusterConnectCode", () => {
-  it("does not swallow ok: false (a rejected code is still a 200 with ok: false, per taskd 3.40)", async () => {
+  it("does not swallow ok: false (a rejected code is still a 200 with ok: false, per celeris 3.40)", async () => {
     const result_: ClusterConnectResult = { ok: false, detail: "verification failed" };
     mock.on("POST", "/api/v1/clusters/gpu-b/connect/code", (_req, res, body) => {
       expect(JSON.parse(body)).toEqual({ code: "000000" });

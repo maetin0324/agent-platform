@@ -1,4 +1,4 @@
-// taskd-gui の Node サーバ（docs/DESIGN.md §9、docs/adr/0002 D5）。
+// celeris-gui の Node サーバ（docs/DESIGN.md §9、docs/adr/0002 D5）。
 // 環境変数を検証 → build/client を配信（/assets は immutable）→ React Router のハンドラ。失敗は exit 2。
 // ログは stderr に JSON 1 行 / 要求（パス・status・所要。本文・トークンは出さない）。
 import { isIP } from "node:net";
@@ -9,17 +9,17 @@ const DEVELOPMENT = process.env.NODE_ENV === "development";
 
 /** @param {string} msg @returns {never} */
 function fatal(msg) {
-  process.stderr.write(`taskd-gui: ${msg}\n`);
+  process.stderr.write(`celeris-gui: ${msg}\n`);
   process.exit(2);
 }
 
 /** `host:port` / `[v6]:port` を分ける。 @param {string} bind */
 function parseBind(bind) {
   const m = /^(?:\[([^\]]+)\]|([^:]+)):(\d{1,5})$/.exec(bind.trim());
-  if (!m) fatal(`TASKD_GUI_BIND must be host:port (got "${bind}")`);
+  if (!m) fatal(`CELERIS_GUI_BIND must be host:port (got "${bind}")`);
   const host = m[1] ?? m[2];
   const port = Number(m[3]);
-  if (!(port > 0 && port < 65536)) fatal(`TASKD_GUI_BIND has an invalid port: ${bind}`);
+  if (!(port > 0 && port < 65536)) fatal(`CELERIS_GUI_BIND has an invalid port: ${bind}`);
   return { host, port };
 }
 
@@ -32,7 +32,7 @@ function isLoopback(host) {
   return false;
 }
 
-const bind = parseBind(process.env.TASKD_GUI_BIND ?? "127.0.0.1:7700");
+const bind = parseBind(process.env.CELERIS_GUI_BIND ?? "127.0.0.1:7700");
 const { readFileSync } = await import("node:fs");
 /** ファイルを読んで trim した 1 行を返す。読めない・空なら exit 2。 @param {string} path @param {string} what */
 function readSecretFile(path, what) {
@@ -46,23 +46,23 @@ function readSecretFile(path, what) {
 }
 // 非 loopback へ bind するときはパスワード認証が必須（docs/DESIGN.md §8.2、docs/adr/0008 D1/D2）。
 // パスワードファイルが明示されていれば loopback でも認証を要求する。値はここでは保持しない（app/auth.server.ts が読む）。
-const passwordFile = process.env.TASKD_GUI_PASSWORD_FILE;
+const passwordFile = process.env.CELERIS_GUI_PASSWORD_FILE;
 if (!isLoopback(bind.host) && !passwordFile) {
   fatal(
-    `TASKD_GUI_BIND=${bind.host}:${bind.port} is not a loopback address; TASKD_GUI_PASSWORD_FILE is required for non-loopback bind`,
+    `CELERIS_GUI_BIND=${bind.host}:${bind.port} is not a loopback address; CELERIS_GUI_PASSWORD_FILE is required for non-loopback bind`,
   );
 }
-if (passwordFile) readSecretFile(passwordFile, "TASKD_GUI_PASSWORD_FILE");
-if (process.env.TASKD_GUI_SESSION_SECRET_FILE) {
-  readSecretFile(process.env.TASKD_GUI_SESSION_SECRET_FILE, "TASKD_GUI_SESSION_SECRET_FILE");
+if (passwordFile) readSecretFile(passwordFile, "CELERIS_GUI_PASSWORD_FILE");
+if (process.env.CELERIS_GUI_SESSION_SECRET_FILE) {
+  readSecretFile(process.env.CELERIS_GUI_SESSION_SECRET_FILE, "CELERIS_GUI_SESSION_SECRET_FILE");
 }
-const taskdApiUrl = process.env.TASKD_API_URL ?? "http://127.0.0.1:7710";
+const celerisApiUrl = process.env.CELERIS_API_URL ?? "http://127.0.0.1:7710";
 try {
-  new URL(taskdApiUrl);
+  new URL(celerisApiUrl);
 } catch {
-  fatal(`TASKD_API_URL is not a URL: ${taskdApiUrl}`);
+  fatal(`CELERIS_API_URL is not a URL: ${celerisApiUrl}`);
 }
-if (process.env.TASKD_API_TOKEN_FILE) readSecretFile(process.env.TASKD_API_TOKEN_FILE, "TASKD_API_TOKEN_FILE");
+if (process.env.CELERIS_API_TOKEN_FILE) readSecretFile(process.env.CELERIS_API_TOKEN_FILE, "CELERIS_API_TOKEN_FILE");
 
 const app = express();
 app.disable("x-powered-by");
@@ -70,7 +70,7 @@ app.set("trust proxy", false);
 
 // Express 層の Host 検査と既定ヘッダ（docs/DESIGN.md §8.2、docs/adr/0008 D15）。React Router の root middleware は
 // 一致したルートにしか効かないので、静的アセット（`/assets`, `build/client`）とアダプタ層の応答にもここで掛ける。
-// 許可リストは app/config.server.ts と同じ規則（loopback 名 + バインドのホスト + TASKD_GUI_ALLOWED_HOSTS）。
+// 許可リストは app/config.server.ts と同じ規則（loopback 名 + バインドのホスト + CELERIS_GUI_ALLOWED_HOSTS）。
 /** @param {string} h */
 const hostWithoutPort = (h) => {
   const v = h.trim().toLowerCase();
@@ -79,7 +79,7 @@ const hostWithoutPort = (h) => {
   return c === -1 ? v : v.slice(0, c);
 };
 const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", "::1", bind.host.toLowerCase()]);
-for (const h of (process.env.TASKD_GUI_ALLOWED_HOSTS ?? "").split(",")) {
+for (const h of (process.env.CELERIS_GUI_ALLOWED_HOSTS ?? "").split(",")) {
   const v = hostWithoutPort(h);
   if (v) allowedHosts.add(v);
 }
@@ -142,7 +142,7 @@ if (DEVELOPMENT) {
 // bind でき、カーネルが振り分ける。旧は `/healthz` が新しい release を返したら止める。
 const server = app.listen({ port: bind.port, host: bind.host, reusePort: true }, () => {
   process.stderr.write(
-    `taskd-gui: listening on http://${bind.host}:${bind.port} (release ${process.env.TASKD_GUI_RELEASE ?? "dev"}, taskd API ${taskdApiUrl}, auth ${passwordFile ? "password" : "none (loopback)"}, token ${process.env.TASKD_API_TOKEN_FILE ? "yes" : "no"})\n`,
+    `celeris-gui: listening on http://${bind.host}:${bind.port} (release ${process.env.CELERIS_GUI_RELEASE ?? "dev"}, celeris API ${celerisApiUrl}, auth ${passwordFile ? "password" : "none (loopback)"}, token ${process.env.CELERIS_API_TOKEN_FILE ? "yes" : "no"})\n`,
   );
 });
 for (const sig of ["SIGINT", "SIGTERM"]) {

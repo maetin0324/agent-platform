@@ -1,5 +1,11 @@
 import { useId, useState } from "react";
 import { data, Form, isRouteErrorResponse, Link, redirect, useFetcher } from "react-router";
+import type { CreateFailure } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { createProject, readProjectCreateInput } from "~/celeris/projects-admin.server";
+import { createRepo, readExtraRepoCreateBodies } from "~/celeris/repos-admin.server";
+import type { Clusters, ClusterView, Project, ProjectDetail, ProjectList, ProjectStatus } from "~/celeris/types";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { RepoFields } from "~/components/RepoFields";
@@ -26,13 +32,7 @@ import { WorkspaceFields } from "~/components/WorkspaceFields";
 import { ARCHIVED_BADGE_LABEL, projectStatusLabel, SHOW_ARCHIVED_LABEL } from "~/lib/labels";
 import { archivedQuery, projectIsArchived, readArchivedParam } from "~/lib/lifecycle";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import { TaskdBanner } from "~/root";
-import type { CreateFailure } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { createProject, readProjectCreateInput } from "~/taskd/projects-admin.server";
-import { createRepo, readExtraRepoCreateBodies } from "~/taskd/repos-admin.server";
-import type { Clusters, ClusterView, Project, ProjectDetail, ProjectList, ProjectStatus } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/projects";
 
 /**
@@ -49,7 +49,7 @@ export interface ProjectRow {
 
 export interface ProjectsData {
   rows: ProjectRow[];
-  /** 作業場所（`GET /clusters`）の選択肢（ADR-0039 D1、Phase G13k）。taskd に届かないときは空。 */
+  /** 作業場所（`GET /clusters`）の選択肢（ADR-0039 D1、Phase G13k）。celeris に届かないときは空。 */
   clusters: ClusterView[];
   /**
    * アーカイブされた案件も出しているか（`?archived=1`。ADR-0044 D6、Phase 55 / G19）。
@@ -58,9 +58,9 @@ export interface ProjectsData {
   showArchived: boolean;
 }
 
-export async function loadProjects(client: TaskdClient, request: Request): Promise<ProjectsData> {
+export async function loadProjects(client: CelerisClient, request: Request): Promise<ProjectsData> {
   // ADR-0044 D6: `GET /projects` はアーカイブされた案件を**既定で隠す**。見たいときだけ `archived=1` を送る
-  // （隠す・出すの判断は taskd。GUI 側で `archived_at` を見て絞り直さない）。
+  // （隠す・出すの判断は celeris。GUI 側で `archived_at` を見て絞り直さない）。
   const showArchived = readArchivedParam(new URL(request.url).searchParams);
   const [list, clusters] = await Promise.all([
     client.get<ProjectList>("/projects", { query: { archived: archivedQuery(showArchived) }, signal: request.signal }),
@@ -87,9 +87,9 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ProjectsData> {
   try {
-    return await loadProjects(getTaskdClient(), request);
+    return await loadProjects(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -100,7 +100,7 @@ export function meta(_: Route.MetaArgs) {
 /**
  * 作成の失敗（`CreateFailure`）に、**案件だけは作れた**ときの id を添えたもの（ADR-0043 D1、Phase G16）。
  * 「追加のリポジトリ」は案件を作ってから 1 行ずつ `POST /projects/{id}/repos` するので、案件が 201 の
- * あとにリポジトリで 422 / 409 になることがある。そのときは案件へのリンクを添えて taskd の文言を出す。
+ * あとにリポジトリで 422 / 409 になることがある。そのときは案件へのリンクを添えて celeris の文言を出す。
  */
 export interface ProjectCreateFailure extends CreateFailure {
   projectId?: string;
@@ -110,11 +110,11 @@ export interface ProjectCreateFailure extends CreateFailure {
  * `POST /projects`。成功したら詳細へ移る（`/tasks/new` と同じ作り）。
  * 従来の単一の `workspace` フォームはそのまま（`readProjectCreateInput`）。ADR-0043 D1 の
  * 「追加のリポジトリ」がある場合だけ、201 のあとに `POST /projects/{id}/repos` を行ごとに送る
- * （`POST /projects` は 1 つの作業場所しか受けないため。docs/taskd-api-v1.md §3.46 / §3.69）。
+ * （`POST /projects` は 1 つの作業場所しか受けないため。docs/celeris-api-v1.md §3.46 / §3.69）。
  */
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
-  const client = getTaskdClient();
+  const client = getCelerisClient();
   const result = await createProject(client, readProjectCreateInput(form), request.signal);
   if (!result.ok) return data(result satisfies CreateFailure, { status: result.error.status });
   for (const body of readExtraRepoCreateBodies(form)) {
@@ -163,7 +163,7 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
           案件一覧
         </SectionTitle>
         {/* アーカイブの表示（ADR-0044 D6、Phase 55 / G19）。URL がそのまま状態になるよう GET のフォームで
-            `archived=1` を付け外しする（リンクとして共有できる）。絞り込み自体は taskd が行う。 */}
+            `archived=1` を付け外しする（リンクとして共有できる）。絞り込み自体は celeris が行う。 */}
         <Form method="get" className="flex flex-wrap items-center gap-2" data-testid="projects-archived-form">
           <label className={chipLabelClass}>
             <input
@@ -310,7 +310,7 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
 }
 
 /**
- * 「追加のリポジトリ」（ADR-0043 D1、docs/taskd-api-v1.md §3.69。Phase G16）。
+ * 「追加のリポジトリ」（ADR-0043 D1、docs/celeris-api-v1.md §3.69。Phase G16）。
  * 上の `WorkspaceFields`（従来どおりの単一の `workspace`）が**主なリポジトリ**になり、ここに足した行は
  * 案件を作ったあとに 1 行ずつ `POST /projects/{id}/repos` される（読み手は `readExtraRepoCreateBodies`）。
  * 行を足しただけでパスを書かなかったものは送られない。既定では 1 行も出さない（従来の画面と同じ見た目）。
@@ -374,11 +374,11 @@ function ExtraRepoRows({
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

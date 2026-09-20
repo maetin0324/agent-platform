@@ -1,23 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TaskdClient } from "~/taskd/client.server";
-import { buildProjectTaskSpec, buildTaskEdit, commentOnTask, editTask, reopenTask } from "~/taskd/tasks-admin.server";
-import type { CommentEffect } from "~/taskd/types";
-import { commentResult, editResult, taskComment } from "../mock-taskd/fixtures";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { CelerisClient } from "~/celeris/client.server";
+import { buildProjectTaskSpec, buildTaskEdit, commentOnTask, editTask, reopenTask } from "~/celeris/tasks-admin.server";
+import type { CommentEffect } from "~/celeris/types";
+import { commentResult, editResult, taskComment } from "../mock-celeris/fixtures";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
  * ADR-0044 D1 / D2（Phase 53）: `PATCH /tasks/{id}`・`POST /tasks/{id}/comments`・
  * `POST /tasks/{id}/reopen`・案件からの `POST /tasks`。
- * **GUI は検証しない**ので、ここで見るのは「フォーム → 本文の写し」と「taskd のエラーをそのまま返すこと」。
+ * **GUI は検証しない**ので、ここで見るのは「フォーム → 本文の写し」と「celeris のエラーをそのまま返すこと」。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 const ID = "01BOARDTASK00000000000001";
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -113,7 +113,7 @@ describe("buildTaskEdit（ADR-0044 D1）", () => {
 });
 
 describe("editTask（PATCH /tasks/{id}）", () => {
-  it("本文をそのまま送り、taskd の `fields`（実際に変わった項目）を返す", async () => {
+  it("本文をそのまま送り、celeris の `fields`（実際に変わった項目）を返す", async () => {
     mock.on("PATCH", `/api/v1/tasks/${ID}`, (_req, res, body) => {
       expect(JSON.parse(body)).toEqual({ priority: "P0", expected_status: "ready" });
       sendJson(res, 200, editResult(["priority"], { priority: 30 }));
@@ -147,7 +147,7 @@ describe("editTask（PATCH /tasks/{id}）", () => {
     expect(outcome.error.detail).toBe("cannot edit a done task");
   });
 
-  it("422 の `errors[]` は欄ごとの文言として返す（ラベルの形は taskd が決める）", async () => {
+  it("422 の `errors[]` は欄ごとの文言として返す（ラベルの形は celeris が決める）", async () => {
     mock.on("PATCH", `/api/v1/tasks/${ID}`, (_req, res) => {
       sendProblem(res, {
         status: 422,
@@ -195,7 +195,7 @@ describe("commentOnTask（POST /tasks/{id}/comments。ADR-0044 D2 の表）", ()
     });
   }
 
-  it("空のコメントは taskd が 422 を返し、その文言をそのまま返す（GUI は弾かない）", async () => {
+  it("空のコメントは celeris が 422 を返し、その文言をそのまま返す（GUI は弾かない）", async () => {
     mock.on("POST", `/api/v1/tasks/${ID}/comments`, (_req, res, body) => {
       expect(JSON.parse(body)).toEqual({ body: "" });
       sendProblem(res, {
@@ -290,7 +290,7 @@ describe("buildProjectTaskSpec（案件・途中目標の「タスクを追加�
     expect("status" in spec).toBe(false);
   });
 
-  it("途中目標カードからは milestone_id も入る。空欄は送らない（taskd の既定に任せる）", () => {
+  it("途中目標カードからは milestone_id も入る。空欄は送らない（celeris の既定に任せる）", () => {
     const spec = buildProjectTaskSpec(
       form([
         ["title", "t"],
@@ -311,7 +311,7 @@ describe("buildProjectTaskSpec（案件・途中目標の「タスクを追加�
     expect("assignee" in spec).toBe(false);
   });
 
-  it("受け入れ条件が空なら空配列で送る（taskd が 422 を返す。GUI では弾かない）", () => {
+  it("受け入れ条件が空なら空配列で送る（celeris が 422 を返す。GUI では弾かない）", () => {
     const spec = buildProjectTaskSpec(
       form([
         ["title", ""],

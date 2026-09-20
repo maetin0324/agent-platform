@@ -44,7 +44,7 @@ pub enum SecretFileError {
     },
 }
 
-/// `dir` を 0700 で作る（ADR-0030 D1）。taskd 本体は `Config::ensure_secrets_dir` で先に作るが、
+/// `dir` を 0700 で作る（ADR-0030 D1）。celeris 本体は `Config::ensure_secrets_dir` で先に作るが、
 /// そこを通らない経路（運用中にディレクトリが消えた等）でも 0755 にならないようにここでも権限を付ける。
 fn create_secrets_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]

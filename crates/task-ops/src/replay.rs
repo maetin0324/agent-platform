@@ -1,6 +1,6 @@
-//! `taskctl replay` の再構築ロジック — DESIGN.md §4.3 / §5.9, ADR-0002「結果」節, ADR-0004 D6
+//! `celerisctl replay` の再構築ロジック — DESIGN.md §4.3 / §5.9, ADR-0002「結果」節, ADR-0004 D6
 //! （ADR-0013 D7）。`events` から `tasks` を再構築し、実際の `tasks` テーブルと突き合わせる。
-//! `taskctl` は出力整形と exit code だけを持つ。
+//! `celerisctl` は出力整形と exit code だけを持つ。
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -336,7 +336,7 @@ mod tests {
         let stored = store.get(task.id).expect("get").expect("some");
         assert_eq!((stored.status, stored.attempts), (Status::Ready, 0));
 
-        // `taskctl replay` は不一致を報告しない。
+        // `celerisctl replay` は不一致を報告しない。
         let events = store.events_for(task.id).expect("events_for");
         assert_eq!(replay_status_and_attempts(&events), Some((Status::Ready, 0)));
         let report = replay(&store).expect("replay");

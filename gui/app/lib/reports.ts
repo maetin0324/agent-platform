@@ -1,10 +1,10 @@
+import type { Query } from "~/celeris/client.server";
+import type { OrgNode, Project, Report, ReportKind, ReportsLive } from "~/celeris/types";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
-import type { Query } from "~/taskd/client.server";
-import type { OrgNode, Project, Report, ReportKind, ReportsLive } from "~/taskd/types";
 
 /**
  * 「報告の流れ」（SPEC §3.5・§4 の 4、ADR-0033 D3、ADR-0034）の純粋関数。
- * taskd への問い合わせ（loader/action）やコンポーネントから使う。DOM を描画する unit テストは
+ * celeris への問い合わせ（loader/action）やコンポーネントから使う。DOM を描画する unit テストは
  * このリポジトリに無い（G10-U1）ため、判断・計算はここに集めて純粋関数としてテストする。
  */
 
@@ -12,7 +12,7 @@ export type ReportsUnreadFilter = "unread" | "all";
 
 /**
  * `GET /reports` のクエリを組む（docs/gui/api.md §3.50）。**`kind` はここに含めない**:
- * taskd の `GET /reports` は `project` / `node` / `level` / `unread` / `limit` しか受け付けず、
+ * celeris の `GET /reports` は `project` / `node` / `level` / `unread` / `limit` しか受け付けず、
  * 「知らないクエリキーは 400」（§3.50）なので、kind の絞り込みは GUI 側で（`filterReportsByKind`）行う。
  * `level` を省略すると「秘書レベルの未読」（既定）にならないため、URL に `level` が無いときは `0` を送る
  * （§3.50「level=0&unread=true が秘書レベルの未読（GUI の『報告の流れ』の既定）」）。
@@ -76,11 +76,11 @@ export function reportsNotificationKey(reportsLive: Pick<ReportsLive, "unread_se
 }
 
 /**
- * ブラウザ通知を今出すべきか（GUI 側の判断）。`notify_now` は taskd が決定的に決める（ADR-0034 D6）ので、
- * GUI はそれに従うだけ（SPEC §3.5「GUI は notify_now に従うだけ」）。ただし taskd 側は
+ * ブラウザ通知を今出すべきか（GUI 側の判断）。`notify_now` は celeris が決定的に決める（ADR-0034 D6）ので、
+ * GUI はそれに従うだけ（SPEC §3.5「GUI は notify_now に従うだけ」）。ただし celeris 側は
  * 「bad_news の未読があれば notify_now は常に true」（2 時間の間隔を待たない）ため、同じ状態のまま
  * SSE の daemon イベントで再検証されるたびに鳴らし続けないよう、**GUI 側だけ**で
- * 「未読の件数の組が前回と同じなら鳴らさない」という重複排除を足す（判断が必要だった点。taskd には無い規約）。
+ * 「未読の件数の組が前回と同じなら鳴らさない」という重複排除を足す（判断が必要だった点。celeris には無い規約）。
  */
 export function shouldFireNotification(
   reportsLive: ReportsLive | null | undefined,

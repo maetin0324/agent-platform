@@ -7,8 +7,8 @@
 //!   応答の `script_from`）。
 //!
 //! task-api はファイルシステムの規約（`manifest.json` / `gate.json` / `verify.json` / `current` の
-//! symlink）を知らない。読み書きは taskd 側（`taskd::releases`）が `ReleaseSource` として渡す
-//! （`reload` / `check` / `notify/test` が `AdminRequest` で taskd に委譲するのと同じ境界。
+//! symlink）を知らない。読み書きは celeris 側（`celeris::releases`）が `ReleaseSource` として渡す
+//! （`reload` / `check` / `notify/test` が `AdminRequest` で celeris に委譲するのと同じ境界。
 //! こちらは同期の読み取りなのでチャネルではなくトレイトにした）。
 //!
 //! **昇格を自動で呼ぶ経路は作らない**（ADR-0040 D5: 昇格は人が押す。この API か shell だけ）。
@@ -47,7 +47,7 @@ pub enum ReleasePromoteError {
     Unavailable(String),
 }
 
-/// taskd が渡す「リリースのディレクトリ」。**決定的で、LLM もワーカーも関与しない**。
+/// celeris が渡す「リリースのディレクトリ」。**決定的で、LLM もワーカーも関与しない**。
 pub trait ReleaseSource: Send + Sync + 'static {
     /// `releases_dir` を読む（失敗しても落ちない。読めなかったリリースは `problem` 付きで出る）。
     fn list(&self) -> ReleasesFs;
@@ -55,10 +55,10 @@ pub trait ReleaseSource: Send + Sync + 'static {
     fn promote(&self, sha12: &str) -> Result<ReleasePromoteAccepted, ReleasePromoteError>;
 
     /// ADR-0044 D5（Phase 53）: `repo` の `branch` にだけ載っているコミットの sha（新しい順、最大
-    /// `BRANCH_COMMITS_LIMIT` 件）。タスクのブランチ（`celeris/<task_id>` / `taskd/<task_id>`）の
+    /// `BRANCH_COMMITS_LIMIT` 件）。タスクのブランチ（`celeris/<task_id>` / `celeris/<task_id>`）の
     /// コミットが、どのリリースの `changes.json` に入ったかを照合するために使う。
     ///
-    /// **git を起こすのは taskd 側の実装**（task-api はプロセスを起こさない）。git が無い・リポジトリが
+    /// **git を起こすのは celeris 側の実装**（task-api はプロセスを起こさない）。git が無い・リポジトリが
     /// 無い・そのブランチが無い・base が分からないときは空を返す（タイムラインからリリースが消えるだけ）。
     /// 既定は空（git を起こさない実装・テスト用）。
     fn branch_commits(&self, _repo: &std::path::Path, _branch: &str, _base: Option<&str>) -> Vec<String> {
@@ -111,7 +111,7 @@ pub(crate) async fn promote(
     require_admin(&state, &headers)?;
     let Some(source) = state.inner.releases.clone() else {
         return Err(ApiProblem::release_not_promotable(
-            "the [selfdeploy] section is not configured in taskd.toml",
+            "the [selfdeploy] section is not configured in config.toml",
         ));
     };
     let requested = sha12.clone();

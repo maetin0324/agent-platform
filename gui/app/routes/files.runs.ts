@@ -1,24 +1,24 @@
 import type { LoaderFunctionArgs } from "react-router";
-import type { TaskdClient } from "~/taskd/client.server";
-import { getTaskdClient } from "~/taskd/client.server";
-import { taskdErrorResponse } from "~/taskd/errors";
+import type { CelerisClient } from "~/celeris/client.server";
+import { getCelerisClient } from "~/celeris/client.server";
+import { celerisErrorResponse } from "~/celeris/errors";
 
 /**
- * `/files/tasks/:id/runs/:runId/:name`（docs/DESIGN.md §6.2 resource `files`、docs/taskd-api-v1.md §3.7〜§3.9）。
- * resource route（コンポーネントを持たない）。taskd の `GET /tasks/{id}/runs/{run_id}/{name}` をそのまま中継する。
+ * `/files/tasks/:id/runs/:runId/:name`（docs/DESIGN.md §6.2 resource `files`、docs/celeris-api-v1.md §3.7〜§3.9）。
+ * resource route（コンポーネントを持たない）。celeris の `GET /tasks/{id}/runs/{run_id}/{name}` をそのまま中継する。
  * バイト列は一切加工しない（docs/DESIGN.md §8.3）。
  */
 
-/** taskd から中継してよいヘッダのみ（許可リスト。DESIGN §8.3「本体は resource route が…そのまま中継する」に沿う）。 */
+/** celeris から中継してよいヘッダのみ（許可リスト。DESIGN §8.3「本体は resource route が…そのまま中継する」に沿う）。 */
 const RELAYED_HEADERS = [
   "content-type",
   "content-disposition",
   "content-length",
   "content-range",
   "accept-ranges",
-  "x-taskd-sha256",
-  "x-taskd-sha256-current",
-  "x-taskd-size",
+  "x-celeris-sha256",
+  "x-celeris-sha256-current",
+  "x-celeris-size",
 ] as const;
 
 function relayHeaders(upstream: Response): Headers {
@@ -27,13 +27,13 @@ function relayHeaders(upstream: Response): Headers {
     const value = upstream.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
-  // taskd も付けているはずだが、GUI 側でも能動的な型を決して返さない防御を保つ（docs/DESIGN.md §8.3）。
+  // celeris も付けているはずだが、GUI 側でも能動的な型を決して返さない防御を保つ（docs/DESIGN.md §8.3）。
   headers.set("x-content-type-options", "nosniff");
   return headers;
 }
 
 export async function relayRunFile(
-  client: TaskdClient,
+  client: CelerisClient,
   taskId: string,
   runId: string,
   name: string,
@@ -53,7 +53,7 @@ export async function relayRunFile(
       signal: request.signal,
     });
   } catch (e) {
-    return taskdErrorResponse(e);
+    return celerisErrorResponse(e);
   }
 
   return new Response(upstream.body, { status: upstream.status, headers: relayHeaders(upstream) });
@@ -61,5 +61,5 @@ export async function relayRunFile(
 
 export async function loader({ params, request }: LoaderFunctionArgs): Promise<Response> {
   const { id, runId, name } = params as { id: string; runId: string; name: string };
-  return relayRunFile(getTaskdClient(), id, runId, name, request);
+  return relayRunFile(getCelerisClient(), id, runId, name, request);
 }

@@ -2,7 +2,7 @@
 //!
 //! `claude_account.rs` と対になる、codex 版の薄いラッパ。`WorkerAdapter` / ディスパッチャとは独立に、
 //! `codex` CLI を直接起動する（アカウント選択・`AccountBook` の更新・cooldown の判断はしない。それは
-//! taskd/task-dispatch 側の責務。ADR-0025 D3/D4/D5）。
+//! celeris/task-dispatch 側の責務。ADR-0025 D3/D4/D5）。
 //!
 //! `AccountCheck` / `AccountCheckResult` / `LoginOutcome` / `LoginResult` はアダプタに依存しない語彙なので
 //! `claude_account` のものをそのまま再利用する。
@@ -62,7 +62,7 @@ pub async fn check_account_codex(
 }
 
 async fn run_check(command: &str, account_dir: &Path, base_env: &[(String, String)]) -> AccountCheck {
-    let cwd = std::env::temp_dir().join(format!("taskd-codex-check-{}", task_core::TaskId::new()));
+    let cwd = std::env::temp_dir().join(format!("celeris-codex-check-{}", task_core::TaskId::new()));
     if let Err(e) = tokio::fs::create_dir_all(&cwd).await {
         return AccountCheck {
             result: AccountCheckResult::SpawnFailed,
@@ -567,7 +567,7 @@ sleep 30
     }
 
     /// ADR-0025 D5: `try_finished` はブロックせず、まだ実行中なら `None`、終了していれば結果を返す
-    /// （tick ごとのポーリング用。taskd の実装がこちらを使う）。
+    /// （tick ごとのポーリング用。celeris の実装がこちらを使う）。
     #[tokio::test]
     async fn try_finished_polls_without_blocking() {
         let dir = tempfile::tempdir().unwrap();

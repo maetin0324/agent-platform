@@ -1,5 +1,11 @@
 import { type ReactNode, useEffect } from "react";
 import { data, type FetcherWithComponents, Link, useFetcher, useNavigate } from "react-router";
+import type { RetryOutcome, TransitionOutcome } from "~/celeris/action-types";
+import type { CelerisClient } from "~/celeris/client.server";
+import { getCelerisClient } from "~/celeris/client.server";
+import { celerisErrorResponse, isCelerisUnavailable } from "~/celeris/errors";
+import { runInboxAction } from "~/celeris/route-actions.server";
+import type { ApprovalItem, AttentionItem, DraftGroup, Inbox, QuestionItem } from "~/celeris/types";
 import { RetryFlash, TransitionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Button } from "~/components/ui/button";
@@ -8,12 +14,6 @@ import { Icon, type IconName } from "~/components/ui/Icon";
 import { Alert, EmptyState, PageHeader, SectionTitle, StatCard } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import type { RetryOutcome, TransitionOutcome } from "~/taskd/action-types";
-import type { TaskdClient } from "~/taskd/client.server";
-import { getTaskdClient } from "~/taskd/client.server";
-import { isTaskdUnavailable, taskdErrorResponse } from "~/taskd/errors";
-import { runInboxAction } from "~/taskd/route-actions.server";
-import type { ApprovalItem, AttentionItem, DraftGroup, Inbox, QuestionItem } from "~/taskd/types";
 import type { Route } from "./+types/inbox";
 
 export function meta(_: Route.MetaArgs) {
@@ -21,18 +21,18 @@ export function meta(_: Route.MetaArgs) {
 }
 
 /**
- * `GET /inbox` をそのまま返す（派生値は taskd 側で計算済み。GUI は再計算しない）。`/inbox` は root と同じく
- * taskd 停止中も 200 で返す契約（docs/DESIGN.md §10 Phase G0 受け入れ条件 4、docs/adr/0003 D4）があるため、
- * `TaskdUnavailable` はここで catch して `null` にする（root のバナーが既に状況を伝えている）。
- * それ以外の `TaskdError` 等は `Response` に変換して投げる（G1 の他の子ルートと同じ、docs/adr/0004 D6）。
- * `TaskdClient` を引数に取ることでテスト可能にする（`app/taskd/health.server.ts` の `loadHealth` と同じ形）。
+ * `GET /inbox` をそのまま返す（派生値は celeris 側で計算済み。GUI は再計算しない）。`/inbox` は root と同じく
+ * celeris 停止中も 200 で返す契約（docs/DESIGN.md §10 Phase G0 受け入れ条件 4、docs/adr/0003 D4）があるため、
+ * `CelerisUnavailable` はここで catch して `null` にする（root のバナーが既に状況を伝えている）。
+ * それ以外の `CelerisError` 等は `Response` に変換して投げる（G1 の他の子ルートと同じ、docs/adr/0004 D6）。
+ * `CelerisClient` を引数に取ることでテスト可能にする（`app/celeris/health.server.ts` の `loadHealth` と同じ形）。
  */
-export async function loadInbox(client: TaskdClient, request: Request): Promise<Inbox | null> {
+export async function loadInbox(client: CelerisClient, request: Request): Promise<Inbox | null> {
   try {
     return await client.get<Inbox>("/inbox", { signal: request.signal });
   } catch (e) {
-    if (isTaskdUnavailable(e)) return null;
-    throw taskdErrorResponse(e);
+    if (isCelerisUnavailable(e)) return null;
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -44,19 +44,19 @@ export async function loadInbox(client: TaskdClient, request: Request): Promise<
 export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<Inbox | null> {
-  return loadInbox(getTaskdClient(), request);
+  return loadInbox(getCelerisClient(), request);
 }
 
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
-  const outcomes = await runInboxAction(getTaskdClient(), form, request.signal);
+  const outcomes = await runInboxAction(getCelerisClient(), form, request.signal);
   const status = outcomes.every((o) => o.ok) ? 200 : (outcomes.find((o) => !o.ok)?.error.status ?? 500);
   return data(outcomes, { status });
 }
 
 /**
  * 操作の結果は **fetcher** に載せる（Phase G13f-1、監査 H1）。ナビゲーション方式の `<Form>` + `actionData` だと、
- * SSE の `daemon` イベント（taskd は tick ごとに無条件で流す）で root が再検証されるたびに `actionData` が
+ * SSE の `daemon` イベント（celeris は tick ごとに無条件で流す）で root が再検証されるたびに `actionData` が
  * 消え、失敗の表示が 0.3 秒で消えてしまう。fetcher の `data` は再検証では消えない。
  */
 type InboxFetcher = FetcherWithComponents<TransitionOutcome[] | undefined>;
@@ -79,7 +79,7 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
   if (!inbox) {
     return (
       <Alert tone="danger" icon="wifiOff" data-testid="inbox-unavailable">
-        taskd に接続できないため受信箱を表示できません。
+        celeris に接続できないため受信箱を表示できません。
       </Alert>
     );
   }

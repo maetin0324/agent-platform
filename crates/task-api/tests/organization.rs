@@ -370,7 +370,7 @@ async fn projects_and_milestones_round_trip_through_the_api() {
 }
 
 /// ADR-0039 D1（Phase 43）: 案件の作業場所を `POST` / `PATCH` で受け、`GET` で返す。
-/// `[[clusters]]` に無いクラスタは 422、`Local` の `~` は taskd の `$HOME` で展開して保存する。
+/// `[[clusters]]` に無いクラスタは 422、`Local` の `~` は celeris の `$HOME` で展開して保存する。
 #[tokio::test]
 async fn a_project_can_carry_the_workspace_where_its_code_lives() {
     let env = env_with_token();

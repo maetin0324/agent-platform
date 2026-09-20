@@ -1,4 +1,4 @@
-//! ADR-0017（Phase 11）: `POST/PATCH/DELETE /providers...` のファイル書き込み部分（`reload`/`check` は taskd 側の
+//! ADR-0017（Phase 11）: `POST/PATCH/DELETE /providers...` のファイル書き込み部分（`reload`/`check` は celeris 側の
 //! 実行が要るので `tests/e2e/tests/provider_admin_scenarios.rs` で実バイナリを使って検証する）。
 //! ここでは task-api だけで完結する部分 — 認証・検証・409/404・**id のパストラバーサル防止**（監査で発見した穴の回帰テスト）
 //! ・変更系すべてへの `Origin` 拒否（同じく監査で発見した穴の回帰テスト）を確認する。

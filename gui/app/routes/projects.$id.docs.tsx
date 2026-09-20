@@ -1,5 +1,12 @@
 import { useMemo, useState } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
+import type { DocsOpOutcome } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { type DocsData, loadDocs, readDocsQuery } from "~/celeris/docs";
+import { deleteDocPage, initDocs, putDocPage, readDocPagePutBody } from "~/celeris/docs-admin.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { formString } from "~/celeris/forms";
+import type { DocCommit, ProjectDetail } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge } from "~/components/ui/badge";
@@ -26,28 +33,21 @@ import {
   DOCS_TRUNCATED_LABEL,
   docsErrorHint,
 } from "~/lib/labels";
-import { TaskdBanner } from "~/root";
-import type { DocsOpOutcome } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type DocsData, loadDocs, readDocsQuery } from "~/taskd/docs";
-import { deleteDocPage, initDocs, putDocPage, readDocPagePutBody } from "~/taskd/docs-admin.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { formString } from "~/taskd/forms";
-import type { DocCommit, ProjectDetail } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/projects.$id.docs";
 
 /**
- * `/projects/:id/docs`（案件の「文書」。ADR-0044 D7、docs/taskd-api-v1.md §3.92〜3.97。Phase 57 / G20）。
+ * `/projects/:id/docs`（案件の「文書」。ADR-0044 D7、docs/celeris-api-v1.md §3.92〜3.97。Phase 57 / G20）。
  *
- * **正本は git**（taskd が主なリポジトリの `docs/**.md` を読み書きする）。GUI は文書を持たず、
- * 描画に使う HTML も taskd が返すが、`dangerouslySetInnerHTML` は使わない規律（gui/CLAUDE.md）に
+ * **正本は git**（celeris が主なリポジトリの `docs/**.md` を読み書きする）。GUI は文書を持たず、
+ * 描画に使う HTML も celeris が返すが、`dangerouslySetInnerHTML` は使わない規律（gui/CLAUDE.md）に
  * 従って画面では `react-markdown` で描く（生 HTML は文字として出る）。`celeris:task/<id>` と
  * `[[相対パス.md]]` は `~/lib/docs.ts` の純粋関数でリンクに開く。
  *
  * 変更（用意する・保存・削除）は全部**管理系**で、衝突（409 `etag_mismatch` /
- * `default_branch_busy`）は taskd が決めたものをそのまま出す（GUI では判定しない）。
+ * `default_branch_busy`）は celeris が決めたものをそのまま出す（GUI では判定しない）。
  */
-export async function loadProjectDocs(client: TaskdClient, id: string, request: Request): Promise<DocsData> {
+export async function loadProjectDocs(client: CelerisClient, id: string, request: Request): Promise<DocsData> {
   const detail = await client.get<ProjectDetail>(`/projects/${encodeURIComponent(id)}`, {
     signal: request.signal,
   });
@@ -56,16 +56,16 @@ export async function loadProjectDocs(client: TaskdClient, id: string, request: 
 
 export async function loader({ params, request }: Route.LoaderArgs): Promise<DocsData> {
   try {
-    return await loadProjectDocs(getTaskdClient(), params.id, request);
+    return await loadProjectDocs(getCelerisClient(), params.id, request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
 export async function action({ params, request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
-  const client = getTaskdClient();
+  const client = getCelerisClient();
 
   let outcome: DocsOpOutcome;
   switch (intent) {
@@ -494,7 +494,7 @@ function PageEditor({
               </p>
             </div>
             <div className="space-y-1">
-              <span className={labelClass}>プレビュー（保存すると taskd が描き直します）</span>
+              <span className={labelClass}>プレビュー（保存すると celeris が描き直します）</span>
               <MarkdownViewer content={prepareDocBody(body, projectId, "", target)} />
             </div>
           </div>
@@ -545,11 +545,11 @@ function DocHistory({ history }: { history: DocCommit[] }) {
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const problem = error.data as TaskdRouteErrorData;
+    const problem = error.data as CelerisRouteErrorData;
     if (problem.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={problem.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={problem.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

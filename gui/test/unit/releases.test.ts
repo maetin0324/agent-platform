@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { promoteRelease } from "~/celeris/releases-admin.server";
+import type { ReleaseItem, Releases } from "~/celeris/types";
 import { instanceRoleLabel } from "~/lib/labels";
 import {
   changesSummaryText,
@@ -23,23 +26,20 @@ import {
   typedShaMatches,
 } from "~/lib/releases";
 import { loadReleases } from "~/routes/releases";
-import { TaskdClient } from "~/taskd/client.server";
-import { promoteRelease } from "~/taskd/releases-admin.server";
-import type { ReleaseItem, Releases } from "~/taskd/types";
-import { defaultReleasePromoteAccepted, defaultReleases, releaseChanges, releaseItem } from "../mock-taskd/fixtures";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { defaultReleasePromoteAccepted, defaultReleases, releaseChanges, releaseItem } from "../mock-celeris/fixtures";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * 「リリース」画面（`/releases`、Phase G14。ADR-0040 D6、docs/taskd-api-v1.md §3.66〜3.67）。
+ * 「リリース」画面（`/releases`、Phase G14。ADR-0040 D6、docs/celeris-api-v1.md §3.66〜3.67）。
  *
  * - `~/lib/releases.ts` の純粋関数（検証状態の出し分け、昇格できるかどうか、引き継ぎの進行の一行）
- * - `loadReleases`（`GET /releases` をそのまま返す。並びは taskd の順を崩さない）
+ * - `loadReleases`（`GET /releases` をそのまま返す。並びは celeris の順を崩さない）
  * - `promoteRelease`（202 / 404 / 409 / 401 を `{ok:false, error}` として返す）
  *
- * 外部ネットワークには出ない（`test/mock-taskd/server.ts` の loopback サーバだけ）。
+ * 外部ネットワークには出ない（`test/mock-celeris/server.ts` の loopback サーバだけ）。
  */
 
-/** `test/mock-taskd/fixtures.ts` の既定を上書きする短縮形。 */
+/** `test/mock-celeris/fixtures.ts` の既定を上書きする短縮形。 */
 const item = (overrides: Partial<ReleaseItem> = {}): ReleaseItem => releaseItem(overrides);
 const releasesView: Releases = defaultReleases;
 
@@ -82,7 +82,7 @@ describe("releaseVerifyState / ラベル（ADR-0040 D3）", () => {
   });
 });
 
-describe("promoteAvailability（taskd の 409 と同じ理由で先回りして止める）", () => {
+describe("promoteAvailability（celeris の 409 と同じ理由で先回りして止める）", () => {
   it("検証済みで current でも昇格中でもなければ押せる", () => {
     expect(promoteAvailability(item())).toEqual({ canPromote: true, reason: null });
   });
@@ -134,20 +134,20 @@ describe("昇格の前に何が変わるか（ADR-0041 D4。Phase G15）", () =>
     expect(changesSummaryText(item({ changes: releaseChanges({ base: null }) }))).toContain("起点なし");
   });
 
-  it("sensitive が空でなければ赤いバッジの文言が出る（判定は taskd 側の結果を読むだけ）", () => {
+  it("sensitive が空でなければ赤いバッジの文言が出る（判定は celeris 側の結果を読むだけ）", () => {
     const safe = item({ changes: releaseChanges() });
     expect(hasSensitiveChanges(safe)).toBe(false);
     expect(sensitiveBadgeText(safe)).toBeNull();
 
     const risky = item({
-      changes: releaseChanges({ sensitive: ["scripts/selfdeploy/verify.sh", "crates/taskd/src/releases.rs"] }),
+      changes: releaseChanges({ sensitive: ["scripts/selfdeploy/verify.sh", "crates/celeris/src/releases.rs"] }),
     });
     expect(hasSensitiveChanges(risky)).toBe(true);
     expect(sensitiveBadgeText(risky)).toBe("安全に関わる変更 2 件");
   });
 
   it("安全に関わる変更があるときだけ sha12 の入力を求め、一致するまで押せない", () => {
-    const risky = item({ sha12: "abcdef123456", changes: releaseChanges({ sensitive: ["config/taskd.toml"] }) });
+    const risky = item({ sha12: "abcdef123456", changes: releaseChanges({ sensitive: ["config/config.toml"] }) });
     expect(promoteNeedsTypedSha(risky)).toBe(true);
     expect(typedShaMatches(risky, "")).toBe(false);
     expect(typedShaMatches(risky, "abcdef12345")).toBe(false);
@@ -201,7 +201,7 @@ describe("引き継ぎの進行（ADR-0040 D4）", () => {
       instances: [
         { ...releasesView.instances[0], role: "draining" },
         {
-          instance_id: "01MOCKTASKDINSTANCE00002",
+          instance_id: "01MOCKCELERISINSTANCE00002",
           release: "bbbbbbbbbbbb",
           pid: 222,
           role: "active",
@@ -228,12 +228,12 @@ describe("引き継ぎの進行（ADR-0040 D4）", () => {
   });
 });
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 afterEach(async () => {
   await mock.close();
@@ -257,11 +257,11 @@ describe("loadReleases", () => {
     expect(handoffInFlight(result.releases)).toBe(false);
   });
 
-  it("taskd に繋がらなければ loader が Response に変換できるよう reject する", async () => {
-    const closed = await startMockTaskd();
+  it("celeris に繋がらなければ loader が Response に変換できるよう reject する", async () => {
+    const closed = await startMockCeleris();
     const baseUrl = closed.baseUrl;
     await closed.close();
-    const unreachable = new TaskdClient({ baseUrl, timeoutMs: 1000 });
+    const unreachable = new CelerisClient({ baseUrl, timeoutMs: 1000 });
     await expect(loadReleases(unreachable, new Request("http://gui.invalid/releases"))).rejects.toBeTruthy();
   });
 });

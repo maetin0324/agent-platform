@@ -1,11 +1,11 @@
-import type { DocItem } from "~/taskd/types";
+import type { DocItem } from "~/celeris/types";
 
 /**
- * 「文書」タブ（ADR-0044 D7、docs/taskd-api-v1.md §3.92〜3.97。Phase 57 / G20）の**純粋な**表示ロジック。
+ * 「文書」タブ（ADR-0044 D7、docs/celeris-api-v1.md §3.92〜3.97。Phase 57 / G20）の**純粋な**表示ロジック。
  *
- * taskd が返すもの（`root` / `path` / `html` / `etag`）は一切作り直さない。ここでやるのは
+ * celeris が返すもの（`root` / `path` / `html` / `etag`）は一切作り直さない。ここでやるのは
  * 「フォルダごとに畳んで並べる」「相対リンクを GUI の URL に開く」「昇格の既定のパスを作る」だけで、
- * 判定（衝突・権限・存在）は全部 taskd 側にある。
+ * 判定（衝突・権限・存在）は全部 celeris 側にある。
  */
 
 /** ツリーの 1 行（フォルダかページ）。`depth` は字下げの段数。 */
@@ -21,7 +21,7 @@ export interface DocTreeNode {
 
 /**
  * 平らなページの一覧を、フォルダの見出し付きの並びにする（文書の根の下だけを見る）。
- * 並びは taskd が返した順（= パスの昇順）のまま。フォルダは**最初にそのフォルダのページが出たところ**に挟む。
+ * 並びは celeris が返した順（= パスの昇順）のまま。フォルダは**最初にそのフォルダのページが出たところ**に挟む。
  */
 export function docTree(items: DocItem[], root: string): DocTreeNode[] {
   const prefix = root && root !== "." ? `${root}/` : "";
@@ -84,7 +84,7 @@ export function resolveDocPath(root: string, from: string, link: string): string
 /**
  * ページの Markdown を描く前の書き換え（ADR-0044 D7）:
  *
- * - front matter（先頭の `---` … `---`）を落とす（題名・タグ・タスクは taskd が構造で返している）
+ * - front matter（先頭の `---` … `---`）を落とす（題名・タグ・タスクは celeris が構造で返している）
  * - `celeris:task/<ULID>` → `/tasks/<ULID>`
  * - `[[relative/path.md]]` / `[[relative/path.md|題名]]` → 「文書」タブへのリンク
  *

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TaskdClient } from "~/taskd/client.server";
+import { CelerisClient } from "~/celeris/client.server";
 import {
   createRepo,
   deleteRepo,
@@ -9,22 +9,22 @@ import {
   readRepoCreateBody,
   readRepoPatchBody,
   setPrimaryRepo,
-} from "~/taskd/repos-admin.server";
-import { defaultRepoList, projectRepo } from "../mock-taskd/fixtures";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+} from "~/celeris/repos-admin.server";
+import { defaultRepoList, projectRepo } from "../mock-celeris/fixtures";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * 案件のリポジトリ（ADR-0043 D1、docs/taskd-api-v1.md §3.68〜3.71。Phase 52 / G16）。
+ * 案件のリポジトリ（ADR-0043 D1、docs/celeris-api-v1.md §3.68〜3.71。Phase 52 / G16）。
  * フォームの読み手（`RepoCreateBody` / `RepoPatchBody`）と 5 本の中継を検証する。
- * GUI 側では検証しないので、空の値・知らないクラスタ・使用中の削除は taskd の 409 / 422 をそのまま返す。
+ * GUI 側では検証しないので、空の値・知らないクラスタ・使用中の削除は celeris の 409 / 422 をそのまま返す。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -53,7 +53,7 @@ describe("readRepoCreateBody（§3.69 の要求本文）", () => {
     ).toEqual({ location: { kind: "local", path: "~/workspace/rust/benchfs" } });
   });
 
-  it("空欄はキーごと送らない（`name` を省略すると taskd がパスの末尾から slug を作る）", () => {
+  it("空欄はキーごと送らない（`name` を省略すると celeris がパスの末尾から slug を作る）", () => {
     const body = readRepoCreateBody(form([["repo_path", "~/workspace/rust/benchfs"]]));
     expect(Object.keys(body)).toEqual(["location"]);
     expect("name" in body).toBe(false);
@@ -62,7 +62,7 @@ describe("readRepoCreateBody（§3.69 の要求本文）", () => {
     expect("default_branch" in body).toBe(false);
   });
 
-  it("kind = auto は「taskd に決めさせる」なのでキーを送らない（RepoKind に auto は無い）", () => {
+  it("kind = auto は「celeris に決めさせる」なのでキーを送らない（RepoKind に auto は無い）", () => {
     const body = readRepoCreateBody(
       form([
         ["repo_kind", "auto"],
@@ -107,7 +107,7 @@ describe("readRepoCreateBody（§3.69 の要求本文）", () => {
     });
   });
 
-  it("空のパス・知らないクラスタも検証せずそのまま組む（taskd の 422 に委ねる）", () => {
+  it("空のパス・知らないクラスタも検証せずそのまま組む（celeris の 422 に委ねる）", () => {
     expect(readRepoCreateBody(form([["repo_place", "remote"]]))).toEqual({
       location: { kind: "remote", cluster: "", path: "" },
     });
@@ -206,7 +206,7 @@ describe("readExtraRepoCreateBodies（/projects の「追加のリポジトリ�
 });
 
 describe("listRepos (GET /projects/{id}/repos, §3.68)", () => {
-  it("taskd の並び（primary が先頭）をそのまま返す", async () => {
+  it("celeris の並び（primary が先頭）をそのまま返す", async () => {
     mock.on("GET", "/api/v1/projects/p1/repos", (_req, res) => sendJson(res, 200, defaultRepoList));
     const list = await listRepos(client, "p1");
     expect(list.items).toHaveLength(2);
@@ -226,7 +226,7 @@ describe("createRepo (POST /projects/{id}/repos, §3.69)", () => {
     expect(outcome).toEqual({ ok: true, op: "repo_create", repo: created });
   });
 
-  it("422 validation（不正な名前）は例外にせず taskd の文言のまま返す", async () => {
+  it("422 validation（不正な名前）は例外にせず celeris の文言のまま返す", async () => {
     mock.on("POST", "/api/v1/projects/p1/repos", (_req, res) =>
       sendProblem(res, {
         status: 422,
@@ -297,7 +297,7 @@ describe("deleteRepo (DELETE /repos/{id}, §3.71)", () => {
     expect(outcome).toEqual({ ok: true, op: "repo_delete", repoId: "01MOCKREPO0000000000000002" });
   });
 
-  it("409 repo_in_use（未終端のタスクが使っている）は taskd の文言のまま返す", async () => {
+  it("409 repo_in_use（未終端のタスクが使っている）は celeris の文言のまま返す", async () => {
     mock.on("DELETE", "/api/v1/repos/01MOCKREPO0000000000000001", (_req, res) =>
       sendProblem(res, {
         status: 409,

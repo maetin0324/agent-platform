@@ -1,5 +1,5 @@
 //! ADR-0018: `SshWorkspace` を **localhost への ssh** で確かめる（外部ネットワークに出ない）。
-//! `taskd-localhost` への多重接続が無い環境では確認できないので、その場合は skip する（失敗させない）。
+//! `celeris-localhost` への多重接続が無い環境では確認できないので、その場合は skip する（失敗させない）。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -8,7 +8,7 @@ use task_core::{ArtifactRef, Budget, Check, Criterion, Status, Task, TaskId, Tas
 use task_worker::{SshSettings, SshWorkspace, SyncMode, Workspace};
 use time::OffsetDateTime;
 
-const HOST: &str = "taskd-localhost";
+const HOST: &str = "celeris-localhost";
 
 fn task(dir: &std::path::Path) -> Task {
     let now = OffsetDateTime::now_utc();
@@ -110,7 +110,7 @@ async fn pushes_runs_and_pulls_over_ssh() {
     assert_eq!(r.exit, Some(3), "{r:?}");
 }
 
-/// ADR-0018 D4: `delete_on_push = true`（taskd 専用の作業ディレクトリ向け）のときだけ、手元に無いものを消す。
+/// ADR-0018 D4: `delete_on_push = true`（celeris 専用の作業ディレクトリ向け）のときだけ、手元に無いものを消す。
 #[tokio::test]
 async fn push_deletes_only_when_asked() {
     let local = tempfile::tempdir().unwrap();
@@ -157,7 +157,7 @@ async fn writes_remote_exec_helper_that_runs_on_the_cluster() {
 async fn missing_control_master_is_unreachable() {
     let local = tempfile::tempdir().unwrap();
     let mut s = settings(PathBuf::from("/nonexistent"));
-    s.host = "taskd-no-such-host-for-tests".into();
+    s.host = "celeris-no-such-host-for-tests".into();
     let ws = SshWorkspace::new(local.path(), s);
     assert!(!ws.control_master_alive().await, "多重接続は無い");
     let err = ws.exec("true", Duration::from_secs(10)).await.expect_err("unreachable");
@@ -172,7 +172,7 @@ async fn sync_none_does_not_rsync_and_uses_the_same_directory() {
     let mut s = settings(local.path().to_path_buf());
     s.sync = SyncMode::None;
     // rsync が呼ばれたら失敗する（存在しないコマンド）。
-    s.rsync_command = vec!["taskd-rsync-must-not-run".to_string()];
+    s.rsync_command = vec!["celeris-rsync-must-not-run".to_string()];
     let ws = SshWorkspace::new(local.path(), s);
     if !available(&ws).await {
         return;
@@ -195,7 +195,7 @@ async fn sync_none_does_not_rsync_and_uses_the_same_directory() {
     assert_eq!(artifacts.len(), 1, "{artifacts:?}");
 }
 
-/// P-46: 同期の両方向で、taskd の管理用ディレクトリ（`runs/` など）はやり取りしない。
+/// P-46: 同期の両方向で、celeris の管理用ディレクトリ（`runs/` など）はやり取りしない。
 #[tokio::test]
 async fn management_directories_are_never_synced() {
     let local = tempfile::tempdir().unwrap();
@@ -237,8 +237,8 @@ async fn worktree_sync_only_brings_tracked_files() {
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     };
     git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.email", "taskd@example.com"]);
-    git(&["config", "user.name", "taskd"]);
+    git(&["config", "user.email", "celeris@example.com"]);
+    git(&["config", "user.name", "celeris"]);
     git(&["add", "src/main.rs"]);
     git(&["commit", "-q", "-m", "initial"]);
 
@@ -256,21 +256,21 @@ async fn worktree_sync_only_brings_tracked_files() {
     assert!(local.path().join("src/main.rs").exists(), "追跡ファイルは写しに来る");
     assert!(!local.path().join("huge-data.bin").exists(), "未追跡のデータは持ち込まれない");
 
-    // worktree はブランチ taskd/<task_id> で、元のプロジェクトとは別ディレクトリ。
-    let wt = project.join(".taskd-worktrees/01TESTWORKTREE0000000000AA");
+    // worktree はブランチ celeris/<task_id> で、元のプロジェクトとは別ディレクトリ。
+    let wt = project.join(".celeris-worktrees/01TESTWORKTREE0000000000AA");
     assert!(wt.join("src/main.rs").exists(), "worktree が切られている");
     let branch = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&wt)
         .output()
         .unwrap();
-    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "taskd/01TESTWORKTREE0000000000AA");
+    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "celeris/01TESTWORKTREE0000000000AA");
 
     // 手元の編集は worktree に push され、コマンドは worktree の中で走る。元のプロジェクトは変わらない。
     std::fs::write(local.path().join("src/main.rs"), "fn main() { println!(\"edited\") }\n").unwrap();
     let r = ws.exec("grep -c edited src/main.rs && pwd", Duration::from_secs(60)).await.expect("exec");
     assert_eq!(r.exit, Some(0), "{r:?}");
-    assert!(r.stdout_tail.contains(".taskd-worktrees"), "worktree の中で実行される: {r:?}");
+    assert!(r.stdout_tail.contains(".celeris-worktrees"), "worktree の中で実行される: {r:?}");
     assert_eq!(
         std::fs::read_to_string(project.join("src/main.rs")).unwrap(),
         "fn main() { println!(\"hi\") }\n",
@@ -310,8 +310,8 @@ async fn two_tasks_can_create_worktrees_of_the_same_repository_at_once() {
     std::fs::write(project.join("f.txt"), "v1\n").unwrap();
     for args in [
         vec!["init", "-q", "-b", "main"],
-        vec!["config", "user.email", "taskd@example.com"],
-        vec!["config", "user.name", "taskd"],
+        vec!["config", "user.email", "celeris@example.com"],
+        vec!["config", "user.name", "celeris"],
         vec!["add", "f.txt"],
         vec!["commit", "-q", "-m", "initial"],
     ] {

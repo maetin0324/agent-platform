@@ -1,13 +1,13 @@
+import type { NotificationKind, NotifyRecent } from "~/celeris/types";
 import type { Tone } from "~/components/ui/tone";
-import type { NotificationKind, NotifyRecent } from "~/taskd/types";
 
 /**
- * Discord への通知（ADR-0037、Phase 39、docs/taskd-api-v1.md §3.64〜3.65）の純粋関数。
+ * Discord への通知（ADR-0037、Phase 39、docs/celeris-api-v1.md §3.64〜3.65）の純粋関数。
  * `/reports`（報告の流れ）の画面から使う。DOM を描画する unit テストが無い（G10-U1）ため、
  * 判断・計算はここに集めて純粋関数としてテストする（`~/lib/reports.ts` と同じ方針）。
  */
 
-/** taskd の `error` 文言（`crates/taskd/src/notify.rs` の `NOT_CONFIGURED` 定数）。GUI 側の文言に畳む。 */
+/** celeris の `error` 文言（`crates/celeris/src/notify.rs` の `NOT_CONFIGURED` 定数）。GUI 側の文言に畳む。 */
 export const NOTIFY_NOT_CONFIGURED_ERROR = "discord webhook is not configured";
 
 /** 5 種の知らせ（ADR-0037 D1）を SPEC の言葉で。 */

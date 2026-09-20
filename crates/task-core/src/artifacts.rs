@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::model::Task;
 
-/// 共有 workspace の成果物ディレクトリの接頭辞（ADR-0018 D1: `.taskd/` は taskd の管理用で、
+/// 共有 workspace の成果物ディレクトリの接頭辞（ADR-0018 D1: `.taskd/` は celeris の管理用で、
 /// クラスタ同期の両方向から除外されている）。
 pub const SHARED_ARTIFACTS_PREFIX: &str = ".taskd/artifacts";
 

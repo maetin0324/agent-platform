@@ -7,7 +7,7 @@ pub mod artifacts;
 /// ADR-0044 D2（Phase 53）: タスク単位のコメント。
 pub mod comment;
 pub mod delegate;
-/// ADR-0040 D4（Phase 47）: taskd のインスタンスの役割（`daemon_instances`）。
+/// ADR-0040 D4（Phase 47）: celeris のインスタンスの役割（`daemon_instances`）。
 pub mod instance;
 /// ADR-0043 D5（Phase 54）: 変更の取り込みの記録（`task_integrations`）。
 pub mod integrations;

@@ -24,7 +24,7 @@ if ! ssh -M -N -f "$host"; then
 fi
 
 if ssh -o BatchMode=yes -O check "$host" 2>/dev/null; then
-  echo "== 接続を張りました（$host）。ControlPersist の間は taskd がこの接続を借ります。"
+  echo "== 接続を張りました（$host）。ControlPersist の間は celeris がこの接続を借ります。"
   echo "   確認: scripts/cluster-check.sh $host"
 else
   echo "接続は張れましたが -O check が失敗しました。ControlPath の設定を確認してください。" >&2

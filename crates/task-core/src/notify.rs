@@ -1,14 +1,14 @@
 //! 通知の台帳（ADR-0037。migration 0008 / 0009）。「人の判断が要る」出来事を **1 回だけ** 知らせるための、
 //! `(kind, key)` の重複排除だけを持つ小さな表。
 //!
-//! ここにあるのは型と SQL だけで、**何を知らせるかの判定は taskd（`taskd::notify`）にあり、
+//! ここにあるのは型と SQL だけで、**何を知らせるかの判定は celeris（`celeris::notify`）にあり、
 //! 送信（HTTP）もそこにある**。task-core はネットワークに出ない（ADR-0001 D2 / DESIGN 原則 1）。
 //!
 //! `store.rs` は `TaskStore` の supertrait として `NotificationStore` を要求するだけ
 //! （`report.rs` / `approval.rs` と同じ形）。
 //!
 //! `project_id`（migration 0009。ADR-0037 D6 / GUI 依頼 G13i-P1）: GUI が `milestone_ready` /
-//! `secretary_reply` から案件へリンクを張れるように、判定（`taskd::notify::scan`）が候補を作った
+//! `secretary_reply` から案件へリンクを張れるように、判定（`celeris::notify::scan`）が候補を作った
 //! 時点で分かっている案件 id をそのまま台帳に書く。応答時に途中目標から逆引きしない
 //! （安い方: 書き込み時に 1 回決めるだけで済む）。
 
@@ -173,7 +173,7 @@ pub trait NotificationStore: Send + Sync {
     /// - `ok = None`: 失敗したがまだ諦めない（`attempts += 1`、`error` を記録、`ok` は NULL のまま）。
     /// - `ok = Some(false)`: 諦めた（`ok = 0`、`error` を記録、`attempts` は増やさない）。
     ///
-    /// 「何回で諦めるか」は呼び出し側（taskd）の方針で、ここは言われたとおりに書くだけ。
+    /// 「何回で諦めるか」は呼び出し側（celeris）の方針で、ここは言われたとおりに書くだけ。
     /// 無い id は `Ok(false)`。
     fn notification_mark(
         &self,

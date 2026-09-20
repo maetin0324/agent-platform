@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TaskdClient } from "~/taskd/client.server";
-import { deleteSecret, listSecrets, putSecret, readSecretId, readSecretValue } from "~/taskd/secrets-admin.server";
-import type { ReloadResult, SecretList, SecretPutResult } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { CelerisClient } from "~/celeris/client.server";
+import { deleteSecret, listSecrets, putSecret, readSecretId, readSecretValue } from "~/celeris/secrets-admin.server";
+import type { ReloadResult, SecretList, SecretPutResult } from "~/celeris/types";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -31,7 +31,7 @@ describe("readSecretId / readSecretValue", () => {
 describe("listSecrets", () => {
   it("passes GET /secrets through verbatim, including entries with updated_at/fingerprint null (未設定)", async () => {
     const list: SecretList = {
-      dir: "/home/u/taskd/secrets",
+      dir: "/home/u/celeris/secrets",
       items: [
         {
           id: "tavily",
@@ -52,7 +52,7 @@ describe("listSecrets", () => {
     const result = await listSecrets(client);
 
     expect(result).toEqual(list);
-    // 値はどこにも含まれない（GUI 側で作らない、taskd の応答をそのまま渡すだけ）。
+    // 値はどこにも含まれない（GUI 側で作らない、celeris の応答をそのまま渡すだけ）。
     expect(JSON.stringify(result)).not.toMatch(/tvly-|value/i);
   });
 

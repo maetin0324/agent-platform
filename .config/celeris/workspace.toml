@@ -3,7 +3,7 @@
 
 [workspace]
 name = "agent-platform"
-description = "Celeris（taskd / taskctl / GUI）本体。Rust のワークスペース + gui/ の Remix アプリ"
+description = "Celeris（celeris / celerisctl / GUI）本体。Rust のワークスペース + gui/ の Remix アプリ"
 
 [run]
 # ホスト実行のまま（コンテナ実行は ADR-0043 A3 の工事。この Phase では読むだけ）。

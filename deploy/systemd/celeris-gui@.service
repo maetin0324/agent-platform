@@ -1,0 +1,29 @@
+[Unit]
+# celeris-gui（ADR-0040 D4、ADR-0045 D1/D2）。`%i` は リリースの sha12。
+# `~/.local/celeris/releases/<sha12>/gui/` から動く。環境はいまの本番と同じ値（名前だけ CELERIS_* に変わる）。
+# インストール: scripts/selfdeploy/install-units.sh（~/.config/systemd/user/ に置いて daemon-reload）
+Description=celeris-gui (release %i)
+After=network.target celeris@%i.service
+Wants=celeris@%i.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/celeris/releases/%i/gui
+# PATH: systemd の user unit は ~/.local/bin（claude, codex）・~/.cargo/bin（cargo）・corepack（pnpm）を知らない。
+# ワーカーとその子（実装者の cargo test など）はこの PATH を継ぐ（2026-09-19 実機: claude の spawn に失敗）。
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/lib/node_modules/corepack/shims:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/node server.js
+Environment=NODE_ENV=production
+Environment=CELERIS_GUI_BIND=0.0.0.0:7700
+Environment=CELERIS_API_URL=http://127.0.0.1:7710
+Environment=CELERIS_API_TOKEN_FILE=%h/.config/celeris/api.token
+Environment=CELERIS_GUI_ALLOWED_HOSTS=192.168.1.103,home-dev
+Environment=CELERIS_GUI_SESSION_SECRET_FILE=%h/.config/celeris/gui.session-secret
+Environment=CELERIS_GUI_PASSWORD_FILE=%h/.config/celeris/gui.password
+Environment=CELERIS_GUI_RELEASE=%i
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

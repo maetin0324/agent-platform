@@ -879,7 +879,7 @@
       ]
     },
     "WorkspaceSpec": {
-      "description": "DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。\ntaskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。",
+      "description": "DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。\nceleris はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。",
       "oneOf": [
         {
           "properties": {

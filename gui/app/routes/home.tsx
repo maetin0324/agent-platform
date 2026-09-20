@@ -6,7 +6,7 @@ import type { Route } from "./+types/home";
  * SPEC §4 の 1「秘書との対話 — 案件を投げる、状況を聞く、方針を変える」が人の入口で、
  * 受信箱（裏方の語彙: 承認待ち・draft・注意）は裏方の区画（`/inbox`）に残す。
  *
- * taskd には問い合わせない（リダイレクトするだけ。認証と Host 検査は root の middleware が済ませている）。
+ * celeris には問い合わせない（リダイレクトするだけ。認証と Host 検査は root の middleware が済ませている）。
  */
 export function loader(_: Route.LoaderArgs) {
   return redirect("/org/secretary");

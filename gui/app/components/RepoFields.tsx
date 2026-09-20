@@ -1,21 +1,21 @@
 import { useState } from "react";
+import type { ActionError } from "~/celeris/action-types";
+import type { ClusterView } from "~/celeris/types";
 import { FieldErrors } from "~/components/Flash";
 import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
 import { REPO_KIND_AUTO_LABEL, repoKindLabel, repoRunLabel } from "~/lib/labels";
 import type { RepoPlace } from "~/lib/repo-form";
-import type { ActionError } from "~/taskd/action-types";
-import type { ClusterView } from "~/taskd/types";
 
 /**
- * 案件のリポジトリ（ADR-0043 D1、docs/taskd-api-v1.md §3.69〜3.70。Phase 52 / G16）の入力欄。
+ * 案件のリポジトリ（ADR-0043 D1、docs/celeris-api-v1.md §3.69〜3.70。Phase 52 / G16）の入力欄。
  * `~/components/WorkspaceFields.tsx`（案件 1 つぶんの作業場所）の兄弟で、そちらは触らない
  * （`/projects` の従来の `workspace` フォームは今までどおり動く）。
  *
- * 読み手は `~/taskd/repos-admin.server.ts`（`repoCreateBodyFrom` / `repoPatchBodyFrom`）。
+ * 読み手は `~/celeris/repos-admin.server.ts`（`repoCreateBodyFrom` / `repoPatchBodyFrom`）。
  * **入力欄は常に全部描く**（クラスタの選択は `hidden` で隠すだけ）。`/projects` の「追加のリポジトリ」は
  * この組を繰り返して `form.getAll()` で列ごとに読むので、行ごとに欄が欠けると並びがずれるため。
  *
- * GUI 側では検証しない: 空のパス・知らないクラスタ・不正な slug もそのまま送り、taskd の 422 の文言を
+ * GUI 側では検証しない: 空のパス・知らないクラスタ・不正な slug もそのまま送り、celeris の 422 の文言を
  * `FieldErrors` / `ErrorFlash` でそのまま出す。
  */
 export interface RepoFieldsDefaults {
@@ -140,7 +140,7 @@ export function RepoFields({
         />
         <p className={hintClass}>
           {place === "local"
-            ? "普段のパス（SPEC §2.1）。~ から始めれば taskd の $HOME で展開して保存されます。"
+            ? "普段のパス（SPEC §2.1）。~ から始めれば celeris の $HOME で展開して保存されます。"
             : "クラスタ側の作業ディレクトリ。"}
         </p>
         <FieldErrors error={error} field="location.path" />
@@ -155,7 +155,7 @@ export function RepoFields({
           type="text"
           data-testid="repo-default-branch"
           defaultValue={defaults.defaultBranch ?? ""}
-          placeholder="空なら taskd が検出（origin/HEAD → main → master）"
+          placeholder="空なら celeris が検出（origin/HEAD → main → master）"
           className={`${inputClass} mt-1.5 w-full`}
         />
         <FieldErrors error={error} field="default_branch" />

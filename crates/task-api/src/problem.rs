@@ -13,7 +13,7 @@ use task_ops::OpsError;
 
 use crate::types::{Problem, ValidationError};
 
-pub(crate) const X_TASKD_SIZE: HeaderName = HeaderName::from_static("x-taskd-size");
+pub(crate) const X_CELERIS_SIZE: HeaderName = HeaderName::from_static("x-celeris-size");
 const PROBLEM_CONTENT_TYPE: &str = "application/problem+json";
 
 #[derive(Debug, Clone)]
@@ -71,7 +71,7 @@ impl ApiProblem {
     pub(crate) fn unauthorized() -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "a valid bearer token is required").with_header(
             header::WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer realm=\"taskd\""),
+            HeaderValue::from_static("Bearer realm=\"celeris\""),
         )
     }
 
@@ -122,7 +122,7 @@ impl ApiProblem {
         Self::new(
             StatusCode::CONFLICT,
             "providers_admin_unavailable",
-            "the [api] provider admin endpoints require `providers_include` to be configured in taskd.toml",
+            "the [api] provider admin endpoints require `providers_include` to be configured in config.toml",
         )
     }
 
@@ -149,7 +149,7 @@ impl ApiProblem {
         Self::new(
             StatusCode::CONFLICT,
             "accounts_unavailable",
-            "the [accounts] section is not configured in taskd.toml",
+            "the [accounts] section is not configured in config.toml",
         )
     }
 
@@ -187,7 +187,7 @@ impl ApiProblem {
         Self::new(
             StatusCode::CONFLICT,
             "secrets_unavailable",
-            "the [secrets] section is not configured in taskd.toml",
+            "the [secrets] section is not configured in config.toml",
         )
     }
 
@@ -273,12 +273,12 @@ impl ApiProblem {
         Self::new(
             StatusCode::CONFLICT,
             "memory_unavailable",
-            "the [memory] section is not configured in taskd.toml",
+            "the [memory] section is not configured in config.toml",
         )
     }
 
     /// ADR-0037 D4（Phase 39）: Discord の webhook がまだ登録されていない（`[secrets]` 自体が無い、
-    /// `[notify] discord_webhook_secret` の秘密が無い、taskd が管理系を受けていない）。
+    /// `[notify] discord_webhook_secret` の秘密が無い、celeris が管理系を受けていない）。
     /// **URL も秘密のパスも文面に入れない**。
     pub(crate) fn notify_unavailable(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, "notify_unavailable", detail)
@@ -341,7 +341,7 @@ impl ApiProblem {
             "range_not_satisfiable",
             format!("requested range is not satisfiable for a file of {size} bytes"),
         )
-        .with_header(X_TASKD_SIZE, HeaderValue::from(size));
+        .with_header(X_CELERIS_SIZE, HeaderValue::from(size));
         match HeaderValue::from_str(&format!("bytes */{size}")) {
             Ok(value) => problem.with_header(header::CONTENT_RANGE, value),
             Err(_) => problem,
@@ -387,12 +387,12 @@ impl ApiProblem {
     /// `instance` を `request_id` にして `application/problem+json` の応答を作る。
     pub(crate) fn render(self, request_id: &str) -> Response {
         let problem = Problem {
-            r#type: format!("urn:taskd:problem:{}", self.code),
+            r#type: format!("urn:celeris:problem:{}", self.code),
             title: self.code.replace('_', " "),
             status: self.status.as_u16(),
             detail: self.detail,
             code: self.code.to_string(),
-            instance: format!("urn:taskd:request:{request_id}"),
+            instance: format!("urn:celeris:request:{request_id}"),
             extra: self.extra,
         };
         let body = serde_json::to_vec(&problem).unwrap_or_else(|_| b"{}".to_vec());

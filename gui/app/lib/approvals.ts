@@ -1,7 +1,7 @@
-import type { Approval, DaemonView, OrgNode, Project, StandingRule } from "~/taskd/types";
+import type { Approval, DaemonView, OrgNode, Project, StandingRule } from "~/celeris/types";
 
 /**
- * 「認可」（SPEC §3.6・§4 の 5、ADR-0033 D5、docs/taskd-api-v1.md §3.56〜3.60）の純粋関数。
+ * 「認可」（SPEC §3.6・§4 の 5、ADR-0033 D5、docs/celeris-api-v1.md §3.56〜3.60）の純粋関数。
  * `/approvals` の loader / コンポーネントから使う（`~/lib/reports.ts` と同じ作り: 判断・計算はここに集めて
  * 純粋関数としてテストする。DOM を描画する unit テストはこのリポジトリに無い。G10-U1）。
  */
@@ -34,7 +34,7 @@ export interface ApprovalGroup {
 /**
  * 未決の要求を**同じ文面**でまとめる（監査 8「同一文面の未決要求はまとめて 1 枚にし『N 件』と出す」）。
  * 文面の同一性は前後の空白を落とした完全一致だけで判断する（言い換えの解釈はしない。GUI は判断を作らない）。
- * 並びは taskd が返した順（新しい順）を保ち、同じ文面の最初の 1 件の位置にまとめる。
+ * 並びは celeris が返した順（新しい順）を保ち、同じ文面の最初の 1 件の位置にまとめる。
  */
 export function groupApprovals(items: readonly Approval[]): ApprovalGroup[] {
   const groups: ApprovalGroup[] = [];

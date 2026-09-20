@@ -101,7 +101,7 @@ pub struct TestEnv {
     pub workspace_root: PathBuf,
     /// ADR-0044 D7（Phase 57）: 既定の文書リポジトリを作る場所（`~/workspace` の代わり）。
     pub docs_repo_root: PathBuf,
-    /// テストが書き込みに使う別接続（taskctl / ディスパッチャ相当）。
+    /// テストが書き込みに使う別接続（celerisctl / ディスパッチャ相当）。
     pub store: SqliteStore,
     pub state: ApiState,
     pub daemon_tx: watch::Sender<Option<DaemonSnapshot>>,
@@ -114,7 +114,7 @@ impl TestEnv {
 
     pub fn with(options: EnvOptions) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("taskd.db");
+        let db_path = dir.path().join("celeris.db");
         let workspace_root = dir.path().join("workspaces");
         std::fs::create_dir_all(&workspace_root).expect("workspace root");
         let store = SqliteStore::open(&db_path).expect("open store");
@@ -173,9 +173,9 @@ pub fn view_context(workspace_root: &std::path::Path) -> ViewContext {
 
 pub fn config_view() -> ConfigView {
     ConfigView {
-        config_path: "/etc/taskd/taskd.toml".into(),
-        db: "/var/lib/taskd/taskd.db".into(),
-        workspace_root: "/var/lib/taskd/workspaces".into(),
+        config_path: "/etc/celeris/config.toml".into(),
+        db: "/var/lib/celeris/celeris.db".into(),
+        workspace_root: "/var/lib/celeris/workspaces".into(),
         tick_ms: 2000,
         max_concurrency: 4,
         lease_grace_secs: 60,
@@ -265,7 +265,7 @@ pub fn settings(
         roles: options.roles,
         genres: options.genres,
         conversation_genre: options.conversation_genre,
-        taskd_version: "0.9.0-test".into(),
+        celeris_version: "0.9.0-test".into(),
         instance_id: "01J9ZX5T3K8Q7W6V5R4P3N2M1H".into(),
         started_at: "2026-09-14T00:00:00Z".into(),
         providers_dir: options.providers_dir,
@@ -560,9 +560,9 @@ pub fn assert_problem(resp: &Resp, status: u16, code: &str) -> Value {
     let problem = resp.json();
     assert_eq!(problem["code"], code, "{problem}");
     assert_eq!(problem["status"], status);
-    assert_eq!(problem["type"], format!("urn:taskd:problem:{code}"));
+    assert_eq!(problem["type"], format!("urn:celeris:problem:{code}"));
     let request_id = resp.header("x-request-id").expect("x-request-id");
-    assert_eq!(problem["instance"], format!("urn:taskd:request:{request_id}"));
+    assert_eq!(problem["instance"], format!("urn:celeris:request:{request_id}"));
     assert!(problem["title"].is_string() && problem["detail"].is_string());
     problem
 }

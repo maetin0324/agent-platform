@@ -1,6 +1,6 @@
 import { defineConfig } from "vitest/config";
 
-// 単体テスト。実 taskd は使わず、test/mock-taskd/（プロセス内 HTTP サーバ）だけで動く。外部ネットワークに出ない。
+// 単体テスト。実 celeris は使わず、test/mock-celeris/（プロセス内 HTTP サーバ）だけで動く。外部ネットワークに出ない。
 export default defineConfig({
   resolve: {
     tsconfigPaths: true,

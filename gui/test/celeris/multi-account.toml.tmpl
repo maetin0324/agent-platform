@@ -1,0 +1,43 @@
+# scripts/celeris.sh fixture multi-account 用の config.toml（docs/adr/0007 D1/D4）。
+# cooldown はプロセス内メモリのみなので、この fixture は DB を作らず設定だけを用意する。
+# スロットルを起こす celerisctl add/approve は e2e/g4.spec.ts が起動後の生きたプロセスに対して行う。
+db = "celeris.sqlite3"
+workspace_root = "workspaces"
+tick_ms = 200
+max_concurrency = 2
+lease_grace_secs = 60
+idle_timeout_secs = 30
+kill_grace_secs = 1
+review_timeout_secs = 30
+error_cooldown_secs = 300
+retry_backoff_base_secs = 0
+retry_backoff_max_secs = 0
+max_requeues = 5
+
+[plan]
+auto_accept = false
+
+[reviewer]
+tier = "standard"
+
+[api]
+listen = "@API_LISTEN@"
+
+[adapters.fake]
+command = ["sh", "@RUN_DIR@/fake-worker.sh"]
+
+[[providers]]
+id = "acct-a"
+adapter = "fake"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 1
+model = "model-a"
+env = { ACCOUNT = "a" }
+
+[[providers]]
+id = "acct-b"
+adapter = "fake"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 1
+model = "model-b"
+env = { ACCOUNT = "b" }

@@ -1,14 +1,14 @@
+import type { MilestoneDecideBody, MilestoneId, ProjectTaskView } from "~/celeris/types";
 import { isSupportTask } from "~/lib/work-tree";
-import type { MilestoneDecideBody, MilestoneId, ProjectTaskView } from "~/taskd/types";
 
 /**
  * 途中目標のレビューの対話（ADR-0038、Phase 41 / G13j）の純粋な判定・補助。
- * taskd 側の決定的な判定（`crates/taskd/src/milestone_review.rs::ready_milestones`）と
+ * celeris 側の決定的な判定（`crates/celeris/src/milestone_review.rs::ready_milestones`）と
  * 同じ条件（裏方を除く、その途中目標のタスクだけを見る）を GUI 側でも使う。
  * ここには HTTP も React も持ち込まない（`~/lib/conversation.ts` と同じ方針）。
  */
 
-/** taskd が「動いている」とみなす状態（ADR-0037 D5）。 */
+/** celeris が「動いている」とみなす状態（ADR-0037 D5）。 */
 const ACTIVE_STATUSES: ReadonlySet<ProjectTaskView["status"]> = new Set(["ready", "running", "reviewing", "blocked"]);
 
 /** その途中目標に属する「仕事」だけ（裏方の対話・レビュー run 等は除く）。 */
@@ -17,7 +17,7 @@ export function milestoneWorkTasks(tasks: readonly ProjectTaskView[], milestoneI
 }
 
 /**
- * 途中目標が「止まっている」（taskd の `milestone_ready` と同じ条件: 動いているものが無く、
+ * 途中目標が「止まっている」（celeris の `milestone_ready` と同じ条件: 動いているものが無く、
  * done が 1 件以上）か。秘書のレビューの返事（`review`）がまだ無いときに
  * 「秘書が結果をまとめています」を出すかどうかの判定に使う。
  */
@@ -28,7 +28,7 @@ export function milestoneIsStalled(tasks: readonly ProjectTaskView[], milestoneI
   return own.some((t) => t.status === "done");
 }
 
-/** `discuss` / `ng` は自由記述が必須（ADR-0038 D2。空なら taskd が 422 にする前に GUI 側で赤くする）。 */
+/** `discuss` / `ng` は自由記述が必須（ADR-0038 D2。空なら celeris が 422 にする前に GUI 側で赤くする）。 */
 export function milestoneDecisionNoteRequired(decision: MilestoneDecideBody["decision"]): boolean {
   return decision === "discuss" || decision === "ng";
 }

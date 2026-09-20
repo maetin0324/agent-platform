@@ -1,4 +1,4 @@
-//! DESIGN §6 Phase 11 の受け入れ 1〜6（ADR-0017: GUI からのアカウント管理）を、実バイナリ `taskd`（`[api]` 有効、
+//! DESIGN §6 Phase 11 の受け入れ 1〜6（ADR-0017: GUI からのアカウント管理）を、実バイナリ `celeris`（`[api]` 有効、
 //! `providers_include` 有効）と fake ワーカー（`sh` スクリプト）と `curl` で再現する。接続先は 127.0.0.1 だけで、
 //! 外部ネットワークに出ない。
 //!
@@ -103,7 +103,7 @@ impl Env {
     /// `extra` は `[[providers]]`（inline）以外に足す設定本文（`providers_include` 等）。`token` が `Some` なら
     /// `[api] token_file` を書く。
     fn write_config(&self, script: &Path, token: Option<&str>, extra: &str) -> PathBuf {
-        let path = self.root.join("taskd.toml");
+        let path = self.root.join("config.toml");
         let token_line = if let Some(token) = token {
             std::fs::write(self.root.join("api.token"), token).unwrap();
             "token_file = \"api.token\"\n"
@@ -111,7 +111,7 @@ impl Env {
             ""
         };
         let text = format!(
-            r#"db = "taskd.sqlite3"
+            r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 50
 max_concurrency = 4
@@ -151,23 +151,23 @@ model = "fake"
         dir.to_string_lossy().into_owned()
     }
 
-    fn taskctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("taskctl")).arg("--db").arg(self.root.join("taskd.sqlite3")).args(args).output().unwrap();
+    fn celerisctl(&self, args: &[&str]) -> String {
+        let out = Command::new(bin("celerisctl")).arg("--db").arg(self.root.join("celeris.sqlite3")).args(args).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "taskctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
         stdout
     }
 
     fn add(&self, args: &[&str]) -> String {
         let mut full = vec!["add", "--objective", "phase 11 provider admin scenario"];
         full.extend_from_slice(args);
-        self.taskctl(&full).trim().to_string()
+        self.celerisctl(&full).trim().to_string()
     }
 
-    fn start_taskd(&self, config: &Path) -> Proc {
+    fn start_celeris(&self, config: &Path) -> Proc {
         static STARTS: AtomicUsize = AtomicUsize::new(0);
-        let log = self.root.join(format!("taskd-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
-        let child = Command::new(bin("taskd"))
+        let log = self.root.join(format!("celeris-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
+        let child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--log-format", "text"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -180,7 +180,7 @@ model = "fake"
     fn wait_api(&self, daemon: &mut Proc) {
         let ok = wait_until(Duration::from_secs(20), || {
             if let Ok(Some(status)) = daemon.child.try_wait() {
-                panic!("taskd exited early with {status}\n{}", daemon.log_text());
+                panic!("celeris exited early with {status}\n{}", daemon.log_text());
             }
             self.request("GET", "/health", None, &[]).status == 200
         });
@@ -247,7 +247,7 @@ model = "fake"
     }
 
     fn replay_is_consistent(&self) {
-        let out = self.taskctl(&["replay"]);
+        let out = self.celerisctl(&["replay"]);
         assert!(out.contains("replay: 0 mismatches"), "{out}");
     }
 }
@@ -259,7 +259,7 @@ fn admin_endpoints_require_token_even_without_token_file_on_loopback() {
     let env = Env::new();
     let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
     let config = env.write_config(&script, None, "");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
 
     assert_eq!(env.get("/providers").status, 200);
@@ -291,7 +291,7 @@ else
 fi"#,
     );
     let config = env.write_config(&script, Some("s3cret-admin-token"), "providers_include = \"providers.d/*.toml\"");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     let mut env = env;
     env.token = Some("s3cret-admin-token".into());
     env.wait_api(&mut daemon);
@@ -354,7 +354,7 @@ fi"#,
     // 実行中の run（acct-a 側）は影響を受けない。
     let ws_slow = env.workspace("ws-slow");
     let slow = env.add(&["--title", "slow", "--check-cmd", "true", "--workspace", &ws_slow]);
-    env.taskctl(&["approve", &slow]);
+    env.celerisctl(&["approve", &slow]);
     assert!(
         wait_until(Duration::from_secs(10), || env.get("/daemon").json()["snapshot"]["in_flight"]
             .as_array()
@@ -373,16 +373,16 @@ fi"#,
 
     let ws_quick = env.workspace("ws-quick");
     let quick = env.add(&["--title", "quick", "--check-cmd", "true", "--workspace", &ws_quick]);
-    env.taskctl(&["approve", &quick]);
+    env.celerisctl(&["approve", &quick]);
     let quick_dispatched_to_b = wait_until(Duration::from_secs(10), || {
-        let store = task_core::SqliteStore::open(&env.root.join("taskd.sqlite3")).unwrap();
+        let store = task_core::SqliteStore::open(&env.root.join("celeris.sqlite3")).unwrap();
         task_core::TaskStore::events_for(&store, quick.parse().unwrap())
             .unwrap()
             .iter()
             .any(|(_, e)| matches!(e, task_core::Event::WorkerStarted { provider, .. } if provider.as_deref() == Some("acct-b")))
     });
     if !quick_dispatched_to_b {
-        let store = task_core::SqliteStore::open(&env.root.join("taskd.sqlite3")).unwrap();
+        let store = task_core::SqliteStore::open(&env.root.join("celeris.sqlite3")).unwrap();
         let task = task_core::TaskStore::get(&store, quick.parse().unwrap()).unwrap().unwrap();
         let events = task_core::TaskStore::events_for(&store, quick.parse().unwrap()).unwrap();
         panic!(
@@ -396,13 +396,13 @@ fi"#,
     // acct-a の run はそのまま完了する（reload / 新アカウント追加の影響を受けない）。
     assert!(
         wait_until(Duration::from_secs(20), || {
-            let store = task_core::SqliteStore::open(&env.root.join("taskd.sqlite3")).unwrap();
+            let store = task_core::SqliteStore::open(&env.root.join("celeris.sqlite3")).unwrap();
             task_core::TaskStore::get(&store, slow.parse().unwrap()).unwrap().unwrap().status == task_core::Status::Done
         }),
         "slow task on acct-a never completed"
     );
     {
-        let store = task_core::SqliteStore::open(&env.root.join("taskd.sqlite3")).unwrap();
+        let store = task_core::SqliteStore::open(&env.root.join("celeris.sqlite3")).unwrap();
         let events = task_core::TaskStore::events_for(&store, slow.parse().unwrap()).unwrap();
         assert!(events.iter().any(|(_, e)| matches!(e, task_core::Event::WorkerStarted { provider, .. } if provider.as_deref() == Some("acct-a"))));
     }
@@ -431,14 +431,14 @@ fn reload_clears_provider_cooldown() {
 echo '{"type":"error","message":"429 rate limited","retryable":true,"provider_failure":{"kind":"throttled","retry_after_secs":120}}'"#,
     );
     let config = env.write_config(&script, Some("s3cret-admin-token"), "providers_include = \"providers.d/*.toml\"");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     let mut env = env;
     env.token = Some("s3cret-admin-token".into());
     env.wait_api(&mut daemon);
 
     let ws = env.workspace("ws-throttle");
     let task = env.add(&["--title", "t", "--check-cmd", "true", "--max-retries", "0", "--workspace", &ws]);
-    env.taskctl(&["approve", &task]);
+    env.celerisctl(&["approve", &task]);
 
     let cooling = wait_until(Duration::from_secs(10), || {
         env.get("/providers").json()["items"]

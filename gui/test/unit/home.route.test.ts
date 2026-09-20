@@ -5,7 +5,7 @@ import { loader } from "~/routes/home";
 
 /**
  * 最初の画面は秘書（Phase G13f-1、監査 2）。受信箱は裏方の `/inbox` に残す。
- * `loader` は taskd に問い合わせず、`/org/secretary` へリダイレクトするだけ。
+ * `loader` は celeris に問い合わせず、`/org/secretary` へリダイレクトするだけ。
  */
 describe("/（最初の画面）", () => {
   it("秘書へリダイレクトする", () => {

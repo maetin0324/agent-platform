@@ -1,4 +1,19 @@
 import { data, Form, isRouteErrorResponse, Link, useFetcher, useSearchParams } from "react-router";
+import type { TaskEditOutcome } from "~/celeris/action-types";
+import type { CelerisClient } from "~/celeris/client.server";
+import { getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { formString } from "~/celeris/forms";
+import { buildTaskEdit, editTask } from "~/celeris/tasks-admin.server";
+import type {
+  MilestoneView,
+  OrgList,
+  OrgNode,
+  ProjectDetail,
+  ProjectList,
+  TaskList,
+  TaskSummary,
+} from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge, StatusBadge } from "~/components/ui/badge";
@@ -32,14 +47,7 @@ import { milestoneIsPaused, projectIsPaused } from "~/lib/lifecycle";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { isSupportTask } from "~/lib/work-tree";
-import { TaskdBanner } from "~/root";
-import type { TaskEditOutcome } from "~/taskd/action-types";
-import type { TaskdClient } from "~/taskd/client.server";
-import { getTaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { formString } from "~/taskd/forms";
-import { buildTaskEdit, editTask } from "~/taskd/tasks-admin.server";
-import type { MilestoneView, OrgList, OrgNode, ProjectDetail, ProjectList, TaskList, TaskSummary } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/board";
 
 /**
@@ -66,9 +74,9 @@ export interface BoardData {
 
 /**
  * `/board` の loader 本体。検索パラメータを `BoardFilter` に読み、`GET /tasks` のクエリへ写す
- * （`app/routes/tasks.tsx` の `loadTasks` と同じ形。`TaskdClient` を引数に取ってテスト可能にする）。
+ * （`app/routes/tasks.tsx` の `loadTasks` と同じ形。`CelerisClient` を引数に取ってテスト可能にする）。
  */
-export async function loadBoard(client: TaskdClient, request: Request): Promise<BoardData> {
+export async function loadBoard(client: CelerisClient, request: Request): Promise<BoardData> {
   const params = new URL(request.url).searchParams;
   const filter = parseBoardFilter(params);
   const [tasks, projects, org] = await Promise.all([
@@ -91,9 +99,9 @@ export async function loadBoard(client: TaskdClient, request: Request): Promise<
 
 export async function loader({ request }: Route.LoaderArgs): Promise<BoardData> {
   try {
-    return await loadBoard(getTaskdClient(), request);
+    return await loadBoard(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -110,7 +118,7 @@ export async function action({ request }: Route.ActionArgs) {
   if (form.get("intent") !== "edit" || !taskId) {
     throw data({ error: "unknown intent" }, { status: 400 });
   }
-  const outcome = await editTask(getTaskdClient(), taskId, buildTaskEdit(form), request.signal);
+  const outcome = await editTask(getCelerisClient(), taskId, buildTaskEdit(form), request.signal);
   return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
 }
 
@@ -119,8 +127,8 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
   const [searchParams] = useSearchParams();
   const filter = parseBoardFilter(searchParams);
   // 裏方のタスク（`TaskSummary.support`: 対話・報告のまとめ・承認待ち・レビュー）は既定で隠す
-  // （SPEC「タスクは裏方」/ ADR-0033 D8。`/tasks` と同じ扱い）。判定は taskd の `support` をそのまま使い、
-  // `show_support=1` は表示の切り替えだけ（`GET /tasks` には送らない。taskd に絞り込みが無い）。
+  // （SPEC「タスクは裏方」/ ADR-0033 D8。`/tasks` と同じ扱い）。判定は celeris の `support` をそのまま使い、
+  // `show_support=1` は表示の切り替えだけ（`GET /tasks` には送らない。celeris に絞り込みが無い）。
   const showSupport = searchParams.get("show_support") === "1";
   const visibleItems = showSupport ? tasks.items : tasks.items.filter((t) => !isSupportTask(t));
   const columns = groupByColumn(visibleItems);
@@ -128,7 +136,7 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
   const milestoneNames = Object.fromEntries(milestones.map((m) => [m.id, `#${m.seq} ${m.title}`]));
   const truncated = tasks.items.length >= BOARD_LIMIT;
   // ADR-0044 D6（Phase 55 / G19）: 止まっている案件・途中目標を選んでいるときは、
-  // 「新しい仕事は始まらない」ことをボードの上で言う（状態は taskd が返したものをそのまま読む）。
+  // 「新しい仕事は始まらない」ことをボードの上で言う（状態は celeris が返したものをそのまま読む）。
   const selectedProject = filter.project ? projects.items.find((p) => p.id === filter.project) : undefined;
   const selectedMilestone = filter.milestone ? milestones.find((m) => m.id === filter.milestone) : undefined;
 
@@ -315,7 +323,7 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
 
             <div className="flex flex-wrap items-center gap-2">
               {/* 裏方のタスク（対話の返事・報告のまとめ・承認待ち・レビュー）は既定で隠す。
-                  taskd には絞り込みが無いので、表示だけを `TaskSummary.support` で切り替える。 */}
+                  celeris には絞り込みが無いので、表示だけを `TaskSummary.support` で切り替える。 */}
               <label className={chipLabelClass}>
                 <input
                   type="checkbox"
@@ -427,7 +435,7 @@ function BoardCard({
 }) {
   const fetcher = useFetcher<TaskEditOutcome>({ key: `board-edit-${item.id}` });
   const busy = fetcher.state !== "idle";
-  // 終端のタスクは taskd が 409 を返す（ADR-0044 D1）ので、行内編集そのものを出さない。
+  // 終端のタスクは celeris が 409 を返す（ADR-0044 D1）ので、行内編集そのものを出さない。
   const editable = item.actions.includes("edit");
   const priority = summaryPriorityLabel(item);
 
@@ -534,11 +542,11 @@ function BoardCard({
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const errorData = error.data as TaskdRouteErrorData;
+    const errorData = error.data as CelerisRouteErrorData;
     if (errorData.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={errorData.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={errorData.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

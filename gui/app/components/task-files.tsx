@@ -1,4 +1,6 @@
 import { Link } from "react-router";
+import type { ActionError } from "~/celeris/action-types";
+import type { TreeFileView, TreeView } from "~/celeris/types";
 import { CodeViewer } from "~/components/CodeViewer";
 import { ErrorFlash } from "~/components/Flash";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
@@ -9,18 +11,16 @@ import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, Mono } from "~/components/ui/misc";
 import { fileSizeLabel, repoKindLabel, treeEntryKindLabel } from "~/lib/labels";
 import { fileBody, isJsonPath, parentPath, pickTreeFileViewer, taskFilesHref, treeBreadcrumbs } from "~/lib/task-files";
-import type { ActionError } from "~/taskd/action-types";
-import type { TreeFileView, TreeView } from "~/taskd/types";
 
 /**
- * タスクの作業ツリーの閲覧（ADR-0043 D6、docs/taskd-api-v1.md §3.72〜3.73。Phase 52 / G16）。
+ * タスクの作業ツリーの閲覧（ADR-0043 D6、docs/celeris-api-v1.md §3.72〜3.73。Phase 52 / G16）。
  * リポジトリの選択・パンくず・一覧・選んだファイルの本文を 1 つにまとめた**自己完結の部品**で、
  * どこに載せても 1 行で済むようにしてある（いまは `~/routes/tasks.$id.files.tsx`。
  * ADR-0044 B1 のタブの殻ができたらそこへ移す）。
  *
- * 移動はすべて `<Link>`（`?repo=&path=&file=`）で、クライアントから taskd を呼ぶコードは無い。
- * 並び（ディレクトリが先、あとは名前順）は taskd が決めたものをそのまま出す。
- * 403 / 404 は taskd の文言をそのまま出す（`ErrorFlash`）。
+ * 移動はすべて `<Link>`（`?repo=&path=&file=`）で、クライアントから celeris を呼ぶコードは無い。
+ * 並び（ディレクトリが先、あとは名前順）は celeris が決めたものをそのまま出す。
+ * 403 / 404 は celeris の文言をそのまま出す（`ErrorFlash`）。
  */
 export interface TaskFilesProps {
   taskId: string;

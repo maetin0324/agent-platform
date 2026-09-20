@@ -1,16 +1,16 @@
+import type { DaemonInstance, ReleaseCommit, ReleaseItem, ReleaseRunning, Releases } from "~/celeris/types";
 import type { Tone } from "~/components/ui/tone";
 import { instanceRoleLabel, sensitiveChangesLabel, staleChangesLabel } from "~/lib/labels";
-import type { DaemonInstance, ReleaseCommit, ReleaseItem, ReleaseRunning, Releases } from "~/taskd/types";
 
 /**
- * 「リリース」画面（`/releases`、Phase G14。ADR-0040 D6、docs/taskd-api-v1.md §3.66〜3.67）の純粋関数。
+ * 「リリース」画面（`/releases`、Phase G14。ADR-0040 D6、docs/celeris-api-v1.md §3.66〜3.67）の純粋関数。
  *
  * この画面には DOM の unit テストが無い（G10-U1）ので、**表示の判断は全部ここに集めて**
  * `gui/test/unit/releases.test.ts` で試す（`~/lib/reports.ts` / `clusterConnectPanelState` と同じ方針）。
  *
- * GUI は判断をしない: 昇格できるかどうかの本当の判定は taskd と `promote.sh` が持っていて
+ * GUI は判断をしない: 昇格できるかどうかの本当の判定は celeris と `promote.sh` が持っていて
  * （`verify.json.ok` が真でなければ拒否。`--force` は無い。ADR-0040 D2）、ここはその結果を
- * **先回りして同じ理由で灰色にするだけ**。押せてしまっても taskd が 409 で断る。
+ * **先回りして同じ理由で灰色にするだけ**。押せてしまっても celeris が 409 で断る。
  */
 
 /** `ReleaseItem.verify` の 4 通り（ADR-0040 D3）。 */
@@ -59,7 +59,7 @@ export function releasePositionLabel(item: Pick<ReleaseItem, "is_current" | "is_
 
 /**
  * 「昇格」ボタンを出すか・押せるか。`reason` が `null` のときだけ押せる。
- * 判定の順は taskd（`taskd::releases::start_promote`）と同じにしてあるので、文言もほぼ同じになる。
+ * 判定の順は celeris（`celeris::releases::start_promote`）と同じにしてあるので、文言もほぼ同じになる。
  */
 export function promoteAvailability(item: ReleaseItem): { canPromote: boolean; reason: string | null } {
   if (item.is_current) return { canPromote: false, reason: "いま動いているリリースです" };
@@ -78,7 +78,7 @@ export function promoteConfirmText(item: ReleaseItem): string {
   const how =
     releaseVerifyState(item) === "ok_live"
       ? "動いている仕事を止めずに引き継ぎます（旧は手元の run を見終わってから終わります）"
-      : "taskd と GUI をいったん停止してから起動し直します（数十秒、API と画面が止まります）";
+      : "celeris と GUI をいったん停止してから起動し直します（数十秒、API と画面が止まります）";
   return `${item.sha12} に昇格します。${how}。よろしいですか？`;
 }
 
@@ -87,7 +87,7 @@ export function promoteConfirmText(item: ReleaseItem): string {
 /**
  * **安全に関わる変更**（`changes.sensitive`）を含むか。
  *
- * 判定は taskd の外（`scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS`）で済んでいて、
+ * 判定は celeris の外（`scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS`）で済んでいて、
  * GUI は**その結果が空かどうかを見るだけ**（パターンを GUI 側に写さない。判断を 2 か所に置かない）。
  */
 export function hasSensitiveChanges(item: Pick<ReleaseItem, "changes">): boolean {

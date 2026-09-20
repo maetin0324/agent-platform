@@ -1,4 +1,15 @@
 import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher } from "react-router";
+import type { ClusterConnectOutcome } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import {
+  cancelClusterConnect,
+  readClusterConnectCode,
+  readClusterId,
+  startClusterConnect,
+  submitClusterConnectCode,
+} from "~/celeris/clusters-admin.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import type { Clusters, ClusterView } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
@@ -9,31 +20,20 @@ import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import { TaskdBanner } from "~/root";
-import type { ClusterConnectOutcome } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import {
-  cancelClusterConnect,
-  readClusterConnectCode,
-  readClusterId,
-  startClusterConnect,
-  submitClusterConnectCode,
-} from "~/taskd/clusters-admin.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import type { Clusters, ClusterView } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/clusters";
 
 /**
  * `/clusters`（クラスタ画面、docs/DESIGN.md §10 Phase G7、接続は ADR-0032 / Phase 22）の loader が返すデータ。
  * `Clusters.items[]`（`ClusterView`）をそのまま表にする。cooldown の残り秒数、`auth`、`connect_pending` は
- * taskd がすでに計算済みなので、GUI 側で再計算しない。
+ * celeris がすでに計算済みなので、GUI 側で再計算しない。
  */
 export interface ClustersData {
   clusters: Clusters;
 }
 
 /** `GET /clusters` を呼ぶ。応答はそのまま返す（派生の集計はしない）。 */
-export async function loadClusters(client: TaskdClient, request: Request): Promise<ClustersData> {
+export async function loadClusters(client: CelerisClient, request: Request): Promise<ClustersData> {
   const clusters = await client.get<Clusters>("/clusters", { signal: request.signal });
   return { clusters };
 }
@@ -43,9 +43,9 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ClustersData> {
   try {
-    return await loadClusters(getTaskdClient(), request);
+    return await loadClusters(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -56,12 +56,12 @@ export function meta(_: Route.MetaArgs) {
 /**
  * クラスタへの接続の中継（ADR-0032 D5/D6）。`clusters-admin.server.ts` に判断ロジックは無く、
  * フォームの `intent` を対応する呼び出しに写すだけ。**`POST /reload` は呼ばない**（接続を張っても
- * `taskd.toml` の設定は変わらないので不要。プロバイダ・秘密の管理とはここが違う）。
+ * `config.toml` の設定は変わらないので不要。プロバイダ・秘密の管理とはここが違う）。
  */
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
-  const client = getTaskdClient();
+  const client = getCelerisClient();
   const id = readClusterId(form);
 
   let outcome: ClusterConnectOutcome;
@@ -141,10 +141,10 @@ export function clusterConnectPanelState(input: {
   // このタブで「検証コードが要る」接続をちょうど開始し、まだコードの送信結果が付いていないときだけ
   // プロンプト・入力欄を出す。コード送信が済んだら閉じ、もう一度「接続」からやり直す（D4 手順 5）。
   const showCodeForm = input.auth === "totp" && notConnected && input.needsCode && !input.hasCodeResult;
-  // `connect_pending` は taskd 側のセッションの有無（このタブに限らない）。このタブで開始したのでなければ
+  // `connect_pending` は celeris 側のセッションの有無（このタブに限らない）。このタブで開始したのでなければ
   // プロンプト文字列を持てない（D5: プロンプトは `POST` の応答にしか載らない）ので、通知だけ出す。
   const showPendingElsewhere = input.connectPending && !showCodeForm && notConnected;
-  // **進行中でも接続ボタンは出す**。taskd は `connect` を受けると古いセッションを畳んでから張り直すので、
+  // **進行中でも接続ボタンは出す**。celeris は `connect` を受けると古いセッションを畳んでから張り直すので、
   // 押し直せば入力欄に戻れる（`/accounts` のログインと同じ扱い）。ここを `!showPendingElsewhere` にすると、
   // 画面を開き直しただけで「進行中」から抜け出せなくなる。
   const showConnectButton = notConnected && input.auth !== "manual" && !showCodeForm;
@@ -174,7 +174,7 @@ function ClusterCard({
   const cancelError = own && !own.ok && own.op === "connect_cancel" ? own.error : undefined;
 
   // このタブで「検証コードが要る」接続をちょうど開始し、まだコードの送信結果が付いていない状態のときだけ
-  // プロンプト・入力欄を出す。コード送信が失敗しても taskd 側でセッションは終わる（ADR-0032 D4 手順 5）ので、
+  // プロンプト・入力欄を出す。コード送信が失敗しても celeris 側でセッションは終わる（ADR-0032 D4 手順 5）ので、
   // `codeResult` が付いたらこのパネルは閉じ、もう一度「接続」を押すところからやり直す。
   const { showCodeForm, showPendingElsewhere, showConnectButton } = clusterConnectPanelState({
     connected: item.connected,
@@ -356,16 +356,16 @@ function ClusterCard({
 }
 
 /**
- * loader が `taskdErrorResponse` で投げた `Response` を判別する（docs/adr/0004-g1-decisions.md D6、
- * `app/routes/providers.tsx` と同じ方針）。taskd 停止中はバナー、それ以外は status と detail を出す。
+ * loader が `celerisErrorResponse` で投げた `Response` を判別する（docs/adr/0004-g1-decisions.md D6、
+ * `app/routes/providers.tsx` と同じ方針）。celeris 停止中はバナー、それ以外は status と detail を出す。
  */
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

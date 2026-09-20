@@ -15,7 +15,7 @@ import { taskStatusLabel } from "~/lib/labels";
  * 案件を横断した成果物一覧の部品（SPEC §2.2「調査結果の文書と見るべき関連研究へのリンクがまとまって読める」）。
  * `/artifacts` と `/projects/:id` の「成果物」節で共有する（`~/components/ReportsList.tsx` と同じ作り。
  * G13b-1 の依頼どおり）。本体は「開く」を押したときだけ `/files/tasks/:id/artifacts/:idx` を fetch し
- * （`~/routes/tasks.$id.tsx::ArtifactRow` と同じ規則。taskd が返した実際の `Content-Type` でビューアを選ぶ）、
+ * （`~/routes/tasks.$id.tsx::ArtifactRow` と同じ規則。celeris が返した実際の `Content-Type` でビューアを選ぶ）、
  * Markdown はその場で描画、`sources.json`（名前で判定。中身の形は
  * docs/adr/0031-web-research-evidence-gate.md）はリンク集、それ以外の JSON は整形表示。
  */

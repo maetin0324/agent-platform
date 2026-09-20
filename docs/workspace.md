@@ -46,7 +46,7 @@ deliverables = "."                                # コード以外の成果物�
 
 | 節 | 項目 | 既定 | いつ使われるか |
 |---|---|---|---|
-| `[workspace]` | `name` | 無し | 人がリポジトリを案件に登録するときの名前の候補（現状 taskd は読むだけ。GUI が使う） |
+| `[workspace]` | `name` | 無し | 人がリポジトリを案件に登録するときの名前の候補（現状 celeris は読むだけ。GUI が使う） |
 | `[workspace]` | `description` | 無し | **計画 run**（「この案件のリポジトリ」の一覧）と、タスクの前置きの「作業場所」 |
 | `[run]` | `mode` | `"host"` | `"container"` ならこのリポジトリを使うタスクの run は**コンテナの中**（§7。Phase 56） |
 | `[container]` | `image` / `dockerfile` / `mounts` / `env` | 無し | `mode = "container"` のときのイメージ・追加マウント・環境変数（§7） |
@@ -65,7 +65,7 @@ deliverables = "."                                # コード以外の成果物�
 - `benchfs` → `/home/rmaeda/.local/celeris/workspaces/01J…/repos/benchfs`（worktree、ブランチ `celeris/01J…`、base `9602b596826c`（main）） — ad-hoc FS のベンチマーク（Rust）
 - `data` → `/home/rmaeda/.local/celeris/workspaces/01J…/repos/data`（ディレクトリ。読み書き可。git ではない）
 カレントディレクトリは `/home/rmaeda/.local/celeris/workspaces/01J…/repos/benchfs`。編集はこの作業場所の中だけで行い、元のリポジトリには直接書くな。
-git のリポジトリでは taskd が用意したブランチにコミットせよ。`main` に直接コミットするな。`git checkout` でブランチを変えるな。
+git のリポジトリでは celeris が用意したブランチにコミットせよ。`main` に直接コミットするな。`git checkout` でブランチを変えるな。
 `benchfs` のこのリポジトリの検査コマンド: `cargo test --workspace` / `cargo clippy --workspace -- -D warnings`
 コード以外の成果物（図・表・原稿）は `/home/rmaeda/.local/celeris/workspaces/01J…/repos/benchfs/`、文書は `…/repos/benchfs/docs` の下に置け。`artifacts/` は run の中間物・ログ・機械向けの `result.json` だけで、人が読む成果物を置く場所ではない。
 文書は `…/repos/benchfs/docs/` に Markdown で書く（題名は 1 行目の `# `。タスクとの紐付けは front matter の `tasks: [<このタスクの id>]`）。既定のブランチに直接コミットせず、上のブランチに置け（人が取り込む）。
@@ -81,7 +81,7 @@ git のリポジトリでは taskd が用意したブランチにコミットせ
 ```toml
 [workspace]
 name = "agent-platform"
-description = "Celeris（taskd / taskctl / GUI）本体。Rust のワークスペース + gui/ の Remix アプリ"
+description = "Celeris（celeris / celerisctl / GUI）本体。Rust のワークスペース + gui/ の Remix アプリ"
 
 [run]
 mode = "host"
@@ -206,7 +206,7 @@ env = { CARGO_TARGET_DIR = "/w/.cargo-target" }
 | 環境変数 | `HOME=<task_dir>` → アダプタの env → `[container] env`（後勝ち） | ホームは**マウントしない**ので、書ける HOME をタスクのディレクトリに置く |
 | 目印 | `--label celeris.task=<task_id>` | 取り残したコンテナをラベルで消せるように |
 
-**見せないもの**: ホームディレクトリ、`~/taskd`、`~/.local/celeris` の根。必要なものだけを同じパスで渡す。
+**見せないもの**: ホームディレクトリ、`~/.local/celeris`、`~/.local/celeris` の根。必要なものだけを同じパスで渡す。
 
 ### 7.3 イメージ
 
@@ -233,7 +233,7 @@ env = { CARGO_TARGET_DIR = "/w/.cargo-target" }
 
 ### 7.5 runtime が使えないとき
 
-`[containers] runtime`（既定 `auto` = podman → docker）を taskd が起動時に 1 度だけ `<runtime> info` で
+`[containers] runtime`（既定 `auto` = podman → docker）を celeris が起動時に 1 度だけ `<runtime> info` で
 確かめる。結果は `GET /api/v1/daemon` の `containers` とログに出る。**どれも使えなければ、コンテナが要る
 タスクは run を始めずに `blocked` になり**、人に質問が積まれる:
 

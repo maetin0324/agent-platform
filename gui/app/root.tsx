@@ -24,13 +24,13 @@ import { cn } from "~/lib/utils";
 import { version as guiVersion } from "../package.json";
 import type { Route } from "./+types/root";
 import "./app.css";
-import { useTaskdStream } from "~/hooks/useTaskdStream";
+import { getCelerisClient } from "~/celeris/client.server";
+import { CelerisError, type CelerisRouteErrorData } from "~/celeris/errors";
+import { loadHealth } from "~/celeris/health.server";
+import type { DaemonView, InboxCounts, ReportsLive } from "~/celeris/types";
+import { useCelerisStream } from "~/hooks/useCelerisStream";
 import { csrfCheck, hostCheck, securityHeaders } from "~/middleware/security.server";
 import { useNonce } from "~/nonce";
-import { getTaskdClient } from "~/taskd/client.server";
-import { TaskdError, type TaskdRouteErrorData } from "~/taskd/errors";
-import { loadHealth } from "~/taskd/health.server";
-import type { DaemonView, InboxCounts, ReportsLive } from "~/taskd/types";
 
 // 全ルートに効くサーバ middleware（docs/DESIGN.md §8.2）。順序: Host 検査 → 認証（docs/adr/0008 D1）→ CSRF 検査（変更系のみ）→ nonce とヘッダ。
 export const middleware: Route.MiddlewareFunction[] = [hostCheck, authCheck, csrfCheck, securityHeaders];
@@ -40,8 +40,8 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const session = context.get(sessionContext);
-  const client = getTaskdClient();
-  // 未認証（= /login を描画中）は taskd を呼ばない。ログイン前に taskd の版や接続先を出さない（docs/adr/0008 D5）
+  const client = getCelerisClient();
+  // 未認証（= /login を描画中）は celeris を呼ばない。ログイン前に celeris の版や接続先を出さない（docs/adr/0008 D5）
   if (!session.authenticated) {
     return {
       health: null,
@@ -52,29 +52,29 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       approvalsPending: 0,
       session,
       // 接続先も出さない（hydration payload にも載せない）
-      gui: { version: guiVersion, taskdApiUrl: "" },
+      gui: { version: guiVersion, celerisApiUrl: "" },
     };
   }
   const state = await loadHealth(client, request.signal);
   // タイトルバーの承認待ちバッジ用（docs/DESIGN.md §4.1, §6.2, ADR-0004 D1）。
   // `/`（inbox ルート）が別途 `GET /inbox` を全項目のために呼ぶので、ここでは counts だけを使う。
-  // taskd に届かない・エラーのときは badge を出さないだけにする（health のバナーが既に状況を伝える）。
+  // celeris に届かない・エラーのときは badge を出さないだけにする（health のバナーが既に状況を伝える）。
   let counts: InboxCounts | null = null;
   // 「報告」ナビのバッジと、ブラウザ通知の判定（ADR-0033 D3、ADR-0034 D6）。`DaemonSnapshot.reports` は
   // API が応答を組むときに埋める唯一のフィールドなので、SSE の `daemon` イベントで root が再検証されるたびに
-  // ここで拾い直す（`useTaskdStream` が `task.event`/`daemon`/`reset` のいずれでも root を revalidate する）。
+  // ここで拾い直す（`useCelerisStream` が `task.event`/`daemon`/`reset` のいずれでも root を revalidate する）。
   let reportsLive: ReportsLive | null = null;
-  // 「認可」ナビのバッジ（ADR-0033 D5、docs/taskd-api-v1.md §3.20 の追加。`DaemonSnapshot.approvals_pending`
-  // も `reports` と同じく API が応答を組むときに埋める）。taskd に届かないときは 0（バッジを出さない）。
+  // 「認可」ナビのバッジ（ADR-0033 D5、docs/celeris-api-v1.md §3.20 の追加。`DaemonSnapshot.approvals_pending`
+  // も `reports` と同じく API が応答を組むときに埋める）。celeris に届かないときは 0（バッジを出さない）。
   let approvalsPending = 0;
   if (!state.unavailable && state.health) {
     try {
       counts = (await client.get<{ counts: InboxCounts }>("/inbox", { signal: request.signal })).counts;
     } catch (e) {
       counts = null;
-      // `GET /health` は taskd 側で無認証なので、トークンが無い・違うことに最初に気づくのはここ（docs/adr/0008 D6）。
+      // `GET /health` は celeris 側で無認証なので、トークンが無い・違うことに最初に気づくのはここ（docs/adr/0008 D6）。
       // 401 だけはバナーで知らせる（他は子ルートの ErrorBoundary が個別に出す）。
-      if (e instanceof TaskdError && e.status === 401) state.problem = `${e.status} ${e.code}`;
+      if (e instanceof CelerisError && e.status === 401) state.problem = `${e.status} ${e.code}`;
     }
     try {
       const daemon = await client.get<DaemonView>("/daemon", { signal: request.signal });
@@ -93,7 +93,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     reportsLive,
     approvalsPending,
     session,
-    gui: { version: guiVersion, taskdApiUrl: client.baseUrl },
+    gui: { version: guiVersion, celerisApiUrl: client.baseUrl },
   };
 }
 
@@ -125,7 +125,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
   const disconnected = unavailable || health === null;
   const showBanner = disconnected || problem !== null;
 
-  // taskd 停止中は 5 秒ごとに root だけ再検証し、復旧したらバナーを消す（§6.5）
+  // celeris 停止中は 5 秒ごとに root だけ再検証し、復旧したらバナーを消す（§6.5）
   useEffect(() => {
     if (!disconnected) return;
     const id = setInterval(() => {
@@ -135,7 +135,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
   }, [disconnected, revalidator]);
 
   // SSE（`/events`）を root で 1 本だけ張り、`task.event` / `daemon` / `reset` を受けたらルートを再検証する（docs/DESIGN.md §6.3, ADR-0004 D2）。
-  useTaskdStream({ enabled: session.authenticated });
+  useCelerisStream({ enabled: session.authenticated });
 
   // 未認証（/login）: ナビゲーションもフッタも出さない（docs/adr/0008 D5）
   if (!session.authenticated) {
@@ -154,12 +154,12 @@ export default function App({ loaderData }: Route.ComponentProps) {
         reportsLive={reportsLive}
         approvalsPending={approvalsPending}
         connected={!disconnected && problem === null}
-        taskdVersion={health?.taskd_version ?? null}
+        celerisVersion={health?.celeris_version ?? null}
         logoutEnabled={session.enabled}
       />
       <div className="flex min-w-0 flex-col">
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
-          {showBanner && <TaskdBanner taskdApiUrl={gui.taskdApiUrl} problem={problem} />}
+          {showBanner && <CelerisBanner celerisApiUrl={gui.celerisApiUrl} problem={problem} />}
           <div className="animate-fade-in">
             <Outlet />
           </div>
@@ -172,7 +172,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
             <span className="font-medium text-fg-muted">Celeris {gui.version}</span>
             {health && (
               <>
-                <span aria-hidden="true">·</span>taskd {health.taskd_version} · api_version {health.api_version} ·
+                <span aria-hidden="true">·</span>celeris {health.celeris_version} · api_version {health.api_version} ·
                 schema_version {health.schema_version}
               </>
             )}
@@ -183,9 +183,9 @@ export default function App({ loaderData }: Route.ComponentProps) {
               data-testid="health"
             >
               <div>
-                <dt className="text-fg-subtle">taskd_version</dt>
-                <dd className="font-mono text-fg-muted" data-testid="taskd_version">
-                  {health.taskd_version}
+                <dt className="text-fg-subtle">celeris_version</dt>
+                <dd className="font-mono text-fg-muted" data-testid="celeris_version">
+                  {health.celeris_version}
                 </dd>
               </div>
               <div>
@@ -273,14 +273,14 @@ function Sidebar({
   reportsLive,
   connected,
   approvalsPending,
-  taskdVersion,
+  celerisVersion,
   logoutEnabled,
 }: {
   approvals: number;
   reportsLive: ReportsLive | null;
   approvalsPending: number;
   connected: boolean;
-  taskdVersion: string | null;
+  celerisVersion: string | null;
   logoutEnabled: boolean;
 }) {
   const { pathname } = useLocation();
@@ -372,7 +372,7 @@ function Sidebar({
 
         {/* 接続状態とログアウト。同じ要素を 2 つ描かない（data-testid の重複を避ける。docs/adr/0011 D3）ので、狭い画面では order で右上へ寄せる */}
         <div className="order-2 ml-auto flex items-center gap-2 px-4 pt-3 lg:order-none lg:ml-0 lg:mt-4 lg:block lg:space-y-2 lg:border-t lg:border-border lg:px-1 lg:pt-4">
-          <ConnectionPill connected={connected} taskdVersion={taskdVersion} />
+          <ConnectionPill connected={connected} celerisVersion={celerisVersion} />
           {logoutEnabled && (
             <Form method="post" action="/logout">
               <button
@@ -393,11 +393,11 @@ function Sidebar({
 
 function ConnectionPill({
   connected,
-  taskdVersion,
+  celerisVersion,
   className,
 }: {
   connected: boolean;
-  taskdVersion: string | null;
+  celerisVersion: string | null;
   className?: string;
 }) {
   return (
@@ -414,29 +414,31 @@ function ConnectionPill({
           connected ? "bg-success text-success animate-pulse-dot" : "bg-danger text-danger",
         )}
       />
-      <span className="font-medium text-fg">{connected ? "taskd 接続中" : "taskd 未接続"}</span>
-      {connected && taskdVersion && (
-        <span className="ml-auto hidden font-mono text-fg-subtle sm:inline">v{taskdVersion}</span>
+      <span className="font-medium text-fg">{connected ? "celeris 接続中" : "celeris 未接続"}</span>
+      {connected && celerisVersion && (
+        <span className="ml-auto hidden font-mono text-fg-subtle sm:inline">v{celerisVersion}</span>
       )}
     </div>
   );
 }
 
-export function TaskdBanner({ taskdApiUrl, problem }: { taskdApiUrl: string; problem: string | null }) {
+export function CelerisBanner({ celerisApiUrl, problem }: { celerisApiUrl: string; problem: string | null }) {
   return (
     <Alert
       role="alert"
-      data-testid="taskd-banner"
+      data-testid="celeris-banner"
       tone="danger"
       icon={problem ? "lock" : "wifiOff"}
       className="mb-6"
-      title={problem ? `taskd が要求を拒否しました（${taskdApiUrl}）` : `taskd に接続できません（${taskdApiUrl}）`}
+      title={
+        problem ? `celeris が要求を拒否しました（${celerisApiUrl}）` : `celeris に接続できません（${celerisApiUrl}）`
+      }
     >
       <p>
         {problem
-          ? `taskd の応答: ${problem}。TASKD_API_TOKEN_FILE が taskd の token_file と一致しているか確認してください。`
-          : "taskd が起動しているか、TASKD_API_URL を確認してください。5 秒ごとに再接続を試みます。"}
-        操作はできません。taskctl は従来どおり使えます。
+          ? `celeris の応答: ${problem}。CELERIS_API_TOKEN_FILE が celeris の token_file と一致しているか確認してください。`
+          : "celeris が起動しているか、CELERIS_API_URL を確認してください。5 秒ごとに再接続を試みます。"}
+        操作はできません。celerisctl は従来どおり使えます。
       </p>
     </Alert>
   );
@@ -444,25 +446,25 @@ export function TaskdBanner({ taskdApiUrl, problem }: { taskdApiUrl: string; pro
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   const rootData = useRouteLoaderData("root") as Route.ComponentProps["loaderData"] | undefined;
-  // `/tasks` 等の子ルートが taskd のエラーを `Response` として投げてここまで来たとき（`taskdErrorResponse`、
+  // `/tasks` 等の子ルートが celeris のエラーを `Response` として投げてここまで来たとき（`celerisErrorResponse`、
   // docs/adr/0004 D6）、汎用のエラー画面ではなく `/` と同じバナー等を出す（`/` 自身は inbox.tsx が catch する
   // のでここには来ない）。本番ビルドは素の Error を渡す前に汎用 500 へサニタイズするため、`Response` 以外は
   // 判別できない（= 本当に予期しないエラーとして扱ってよい）。
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="mx-auto max-w-3xl p-4 pt-16">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }
-    // taskd の 401（トークン無し・不一致）は接続不可と同じ形のバナーで知らせる（docs/adr/0008 D6）
+    // celeris の 401（トークン無し・不一致）は接続不可と同じ形のバナーで知らせる（docs/adr/0008 D6）
     if (data.status === 401) {
       return (
         <main className="mx-auto max-w-3xl p-4 pt-16">
-          <TaskdBanner
-            taskdApiUrl={rootData?.gui.taskdApiUrl ?? ""}
+          <CelerisBanner
+            celerisApiUrl={rootData?.gui.celerisApiUrl ?? ""}
             problem={`${data.status} ${data.code ?? "unauthorized"}`}
           />
         </main>

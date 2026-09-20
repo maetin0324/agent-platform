@@ -1,21 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import type { ConfigView, Milestone, ProjectDetail, ProjectList, TaskList } from "~/celeris/types";
 import { buildTaskPlacements, milestoneTitle } from "~/lib/project-index";
 import { loadTasksPage } from "~/routes/tasks";
-import { TaskdClient } from "~/taskd/client.server";
-import type { ConfigView, Milestone, ProjectDetail, ProjectList, TaskList } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
  * 裏方のタスクから案件・途中目標へ戻る索引（Phase G13f-1、監査 M2）。
  * `TaskSummary` に `project_id` が無いので、案件の詳細から「どのタスクがどの案件か」を引く。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {

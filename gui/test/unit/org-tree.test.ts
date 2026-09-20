@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { OrgNode, TaskSummary } from "~/celeris/types";
 import { buildOrgTree, countWorkload, tasksByAssignee } from "~/lib/org-tree";
-import type { OrgNode, TaskSummary } from "~/taskd/types";
 
 /**
  * `buildOrgTree` / `countWorkload` / `tasksByAssignee`（`/org` の loader が使う純粋関数）のテスト。

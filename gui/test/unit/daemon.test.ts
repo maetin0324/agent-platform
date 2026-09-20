@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { runReplay } from "~/celeris/route-actions.server";
+import type { ConfigView, DaemonView, ReplayReport } from "~/celeris/types";
 import { loadDaemon } from "~/routes/daemon";
-import { TaskdClient } from "~/taskd/client.server";
-import { runReplay } from "~/taskd/route-actions.server";
-import type { ConfigView, DaemonView, ReplayReport } from "~/taskd/types";
-import { type MockTaskd, sendJson, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -18,8 +18,8 @@ afterEach(async () => {
 });
 
 const configView: ConfigView = {
-  config_path: "/tmp/taskd.toml",
-  db: "/tmp/taskd.sqlite3",
+  config_path: "/tmp/config.toml",
+  db: "/tmp/celeris.sqlite3",
   workspace_root: "/tmp/workspaces",
   tick_ms: 200,
   max_concurrency: 4,
@@ -108,12 +108,12 @@ describe("runReplay", () => {
       });
       res.end(
         JSON.stringify({
-          type: "urn:taskd:problem:replay_in_progress",
+          type: "urn:celeris:problem:replay_in_progress",
           title: "replay in progress",
           status: 503,
           detail: "another replay is already running",
           code: "replay_in_progress",
-          instance: "urn:taskd:request:01MREPLAYINPROGRESS0001",
+          instance: "urn:celeris:request:01MREPLAYINPROGRESS0001",
         }),
       );
     });
@@ -126,11 +126,11 @@ describe("runReplay", () => {
     expect(outcome.error.code).toBe("replay_in_progress");
   });
 
-  it("returns ok:false with code unavailable when taskd is not reachable", async () => {
-    const closed = await startMockTaskd();
+  it("returns ok:false with code unavailable when celeris is not reachable", async () => {
+    const closed = await startMockCeleris();
     const baseUrl = closed.baseUrl;
     await closed.close();
-    const unreachable = new TaskdClient({ baseUrl, timeoutMs: 1000 });
+    const unreachable = new CelerisClient({ baseUrl, timeoutMs: 1000 });
 
     const outcome = await runReplay(unreachable);
 

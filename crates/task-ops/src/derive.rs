@@ -1,8 +1,8 @@
 //! `events` からの派生ビュー（DESIGN.md §5.2/§5.9, ADR-0010 D3/D5/D6/D7, ADR-0011, ADR-0013 D7）。
 //!
-//! 元は `task-dispatch::dispatcher` と `taskctl` の `commands/gate.rs` にあった純粋関数をそのまま移した。
+//! 元は `task-dispatch::dispatcher` と `celerisctl` の `commands/gate.rs` にあった純粋関数をそのまま移した。
 //! `task-core` の型だけを使う（`task_worker::{PriorReview, Answer}` は使わない。ワーカープロトコルの
-//! 型への写像は呼び出し側 — `task-dispatch` の dispatcher や `taskctl` の `worker.rs` — で行う）。
+//! 型への写像は呼び出し側 — `task-dispatch` の dispatcher や `celerisctl` の `worker.rs` — で行う）。
 
 use std::collections::HashMap;
 use std::time::Duration;

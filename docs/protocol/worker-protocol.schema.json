@@ -143,7 +143,7 @@
           "type": "array"
         },
         "branch": {
-          "description": "ADR-0041 D1: 子が worktree で作業したときのブランチ（`taskd/<child_id>`）。\n親はこのブランチを merge して子の成果を統合する（統合は LLM の仕事。taskd はコミットしない）。",
+          "description": "ADR-0041 D1: 子が worktree で作業したときのブランチ（`celeris/<child_id>`）。\n親はこのブランチを merge して子の成果を統合する（統合は LLM の仕事。celeris はコミットしない）。",
           "type": [
             "string",
             "null"
@@ -201,7 +201,7 @@
         },
         {
           "const": "system",
-          "description": "taskd 自身（決定的な記録）。",
+          "description": "celeris 自身（決定的な記録）。",
           "type": "string"
         }
       ]
@@ -870,7 +870,7 @@
       "description": "`run.context`。未知フィールドは無視する（前方互換）。",
       "properties": {
         "answers": {
-          "description": "`taskctl answer` で与えられた回答の履歴（時系列）。無ければ省略（ADR-0010 D3）。",
+          "description": "`celerisctl answer` で与えられた回答の履歴（時系列）。無ければ省略（ADR-0010 D3）。",
           "items": {
             "$ref": "#/$defs/Answer"
           },
@@ -1315,7 +1315,7 @@
       "type": "object"
     },
     "WorkerMessage": {
-      "description": "ワーカー → taskd のメッセージ。`done` / `error` / `question` は終端（ADR-0003 D3）。",
+      "description": "ワーカー → celeris のメッセージ。`done` / `error` / `question` は終端（ADR-0003 D3）。",
       "oneOf": [
         {
           "properties": {
@@ -1351,7 +1351,7 @@
           "type": "object"
         },
         {
-          "description": "ADR-0016 D2: 実行中の委譲の提案（任意回、非終端）。taskd は検証を通ったものだけ子タスクとして挿入し、\n拒否した提案は理由を `WorkerProgress` に残す。run は失敗しない。",
+          "description": "ADR-0016 D2: 実行中の委譲の提案（任意回、非終端）。celeris は検証を通ったものだけ子タスクとして挿入し、\n拒否した提案は理由を `WorkerProgress` に残す。run は失敗しない。",
           "properties": {
             "tasks": {
               "items": {
@@ -1495,7 +1495,7 @@
       ]
     },
     "WorkspaceSpec": {
-      "description": "DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。\ntaskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。",
+      "description": "DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。\nceleris はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。",
       "oneOf": [
         {
           "properties": {
@@ -1547,7 +1547,7 @@
       ]
     },
     "run": {
-      "description": "taskd → ワーカーの `run` メッセージ（1 行）。`{\"type\":\"run\", ...}`。",
+      "description": "celeris → ワーカーの `run` メッセージ（1 行）。`{\"type\":\"run\", ...}`。",
       "properties": {
         "artifacts_dir": {
           "description": "絶対パス。この run の成果物と結果ファイル（`result.json`）の置き場（ADR-0036 D1）。\nworkspace を自分で所有するタスクは `<workspace>/artifacts`、親から継いだタスク（plan / delegate の子）は\n`<workspace>/.taskd/artifacts/<task_id>`。決めるのはディスパッチャで、アダプタはここに書くだけ。",

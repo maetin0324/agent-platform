@@ -3,7 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AxeBuilder } from "@axe-core/playwright";
-import type { TaskList } from "~/taskd/types";
+import type { TaskList } from "~/celeris/types";
 import { expect, test } from "./test";
 
 // `axe-core` は `@axe-core/playwright` の推移的依存で、この pnpm workspace では phantom dependency に
@@ -13,32 +13,32 @@ type AxeResults = Awaited<ReturnType<AxeBuilder["analyze"]>>;
 
 // Phase G5 の受け入れ条件 3（CSP ヘッダ、CSP 違反 0 件は `./test` の auto fixture が担う）・
 // 受け入れ条件 4（`@axe-core/playwright` の critical / serious が 0 件。docs/adr/0008-g5-decisions.md D8）。
-// `scripts/taskd.sh fixture basic && start basic` の実 taskd に対して検証する。moderate / minor の
+// `scripts/celeris.sh fixture basic && start basic` の実 celeris に対して検証する。moderate / minor の
 // violation はゲートにせず `test.info().annotations` に記録するだけにする。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
 
-const TASKD_API_URL = new URL(process.env.TASKD_API_URL ?? "http://127.0.0.1:7710");
-const TASKD_API_HOST = TASKD_API_URL.hostname;
-const TASKD_API_PORT = Number(TASKD_API_URL.port || "80");
+const CELERIS_API_URL = new URL(process.env.CELERIS_API_URL ?? "http://127.0.0.1:7710");
+const CELERIS_API_HOST = CELERIS_API_URL.hostname;
+const CELERIS_API_PORT = Number(CELERIS_API_URL.port || "80");
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
+  return execFileSync(CELERIS_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
 }
 
 function apiGet<T>(pathAndQuery: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: TASKD_API_HOST, port: TASKD_API_PORT, path: `/api/v1${pathAndQuery}`, method: "GET", agent: false },
+      { host: CELERIS_API_HOST, port: CELERIS_API_PORT, path: `/api/v1${pathAndQuery}`, method: "GET", agent: false },
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
           const status = res.statusCode ?? 0;
           if (status < 200 || status >= 300) {
-            reject(new Error(`taskd ${pathAndQuery} responded ${status}`));
+            reject(new Error(`celeris ${pathAndQuery} responded ${status}`));
             return;
           }
           try {

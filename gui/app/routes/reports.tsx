@@ -8,6 +8,12 @@ import {
   useFetcher,
   useSearchParams,
 } from "react-router";
+import type { ActionError, NotifyTestOutcome, ReportOpOutcome } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { CelerisError, type CelerisRouteErrorData, celerisErrorResponse, isCelerisUnavailable } from "~/celeris/errors";
+import { sendNotifyTest } from "~/celeris/notify-admin.server";
+import { markReportsNotified, markReportsRead } from "~/celeris/reports-admin.server";
+import type { NotifyView, OrgList, OrgNode, Project, ProjectList, ReportKind, ReportList } from "~/celeris/types";
 import { ErrorFlash, NotifyTestFlash, ReportActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { NotificationsEnableButton } from "~/components/NotificationsEnable";
@@ -21,24 +27,18 @@ import { Alert, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/
 import { notifyKindLabel, notifyResultLabel, notifyResultTone, notifyTargetHref } from "~/lib/notify";
 import { buildReportsQuery, filterReportsByKind } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import { TaskdBanner } from "~/root";
-import type { ActionError, NotifyTestOutcome, ReportOpOutcome } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { isTaskdUnavailable, TaskdError, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { sendNotifyTest } from "~/taskd/notify-admin.server";
-import { markReportsNotified, markReportsRead } from "~/taskd/reports-admin.server";
-import type { NotifyView, OrgList, OrgNode, Project, ProjectList, ReportKind, ReportList } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/reports";
 
 /**
  * `/reports`（報告の流れ、SPEC §3.5・§4 の 4、ADR-0033 D3、ADR-0034、docs/gui/api.md §3.50〜3.53）。
  * 既定は秘書レベル（`level=0`）の未読を新しい順に、1 件 1 行で流し見できる密度で出す
  * （`GET /reports` 自体が新しい順を返す。docs/gui/api.md §3.50「新しい順（created_at 降順）」）。
- * `kind` の絞り込みは taskd 側 API に無いので GUI 側だけで行う（`~/lib/reports.ts` のコメント参照）。
- * 案件名・担当ノード名は `GET /projects` / `GET /org` から解決する（taskd 側に判断値を作らせない）。
+ * `kind` の絞り込みは celeris 側 API に無いので GUI 側だけで行う（`~/lib/reports.ts` のコメント参照）。
+ * 案件名・担当ノード名は `GET /projects` / `GET /org` から解決する（celeris 側に判断値を作らせない）。
  *
- * Discord への通知（ADR-0037、Phase 39、docs/taskd-api-v1.md §3.64〜3.65）の設定・テスト送信・直近の送信も
- * この画面の「通知」節に足す（ブラウザ通知の節はそのまま）。`GET /notify` は管理系ではないが taskd に届かない
+ * Discord への通知（ADR-0037、Phase 39、docs/celeris-api-v1.md §3.64〜3.65）の設定・テスト送信・直近の送信も
+ * この画面の「通知」節に足す（ブラウザ通知の節はそのまま）。`GET /notify` は管理系ではないが celeris に届かない
  * こともあるため、`GET /secrets`（`app/routes/accounts.tsx`）と同じ形で `notifyError` に落として画面全体は
  * 壊さない。
  */
@@ -53,29 +53,29 @@ export interface ReportsData {
 }
 
 /**
- * `TaskdError` / `TaskdUnavailable`（`GET /notify` の失敗）を `ActionError` にする。`loadReports` はテストから
+ * `CelerisError` / `CelerisUnavailable`（`GET /notify` の失敗）を `ActionError` にする。`loadReports` はテストから
  * loader を介さず直接呼ばれるため、`actions.server.ts` の `toActionError` をそのまま使うと「loader/action 以外の
  * export から `.server` モジュールを参照できない」制約に触れる（`app/routes/accounts.tsx` の `secretsListError`
  * と同じ理由・同じ複製）。
  */
 function notifyViewError(e: unknown): ActionError {
-  if (isTaskdUnavailable(e)) {
+  if (isCelerisUnavailable(e)) {
     return {
       status: 503,
       code: "unavailable",
-      detail: `taskd に接続できません（${e.baseUrl}）`,
+      detail: `celeris に接続できません（${e.baseUrl}）`,
       conflict: false,
       fields: {},
       messages: [],
     };
   }
-  if (e instanceof TaskdError) {
+  if (e instanceof CelerisError) {
     return { status: e.status, code: e.code, detail: e.detail, conflict: e.status === 409, fields: {}, messages: [] };
   }
   throw e;
 }
 
-export async function loadReports(client: TaskdClient, request: Request): Promise<ReportsData> {
+export async function loadReports(client: CelerisClient, request: Request): Promise<ReportsData> {
   const searchParams = new URL(request.url).searchParams;
   const query = buildReportsQuery(searchParams);
   const [reports, projects, org] = await Promise.all([
@@ -104,9 +104,9 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ReportsData> {
   try {
-    return await loadReports(getTaskdClient(), request);
+    return await loadReports(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -122,7 +122,7 @@ export function meta(_: Route.MetaArgs) {
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
-  const client = getTaskdClient();
+  const client = getCelerisClient();
 
   let outcome: ReportOpOutcome | NotifyTestOutcome;
   switch (intent) {
@@ -317,8 +317,8 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
 }
 
 /**
- * Discord への通知の区画（ADR-0037、Phase 39、docs/taskd-api-v1.md §3.64〜3.65）。ブラウザ通知の節はそのまま
- * （`NotificationsEnableButton`）で、ここは taskd の tick が決定的に判定・送信する 5 種
+ * Discord への通知の区画（ADR-0037、Phase 39、docs/celeris-api-v1.md §3.64〜3.65）。ブラウザ通知の節はそのまま
+ * （`NotificationsEnableButton`）で、ここは celeris の tick が決定的に判定・送信する 5 種
  * （`~/lib/notify.ts` の `NOTIFY_KIND_LABEL`）の設定・テスト送信・直近 10 件を出す。
  */
 function DiscordSection({
@@ -415,11 +415,11 @@ function DiscordSection({
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

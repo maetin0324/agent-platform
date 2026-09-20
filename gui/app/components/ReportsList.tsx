@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { Link, useFetcher } from "react-router";
+import type { ReportOpOutcome } from "~/celeris/action-types";
+import type { OrgNode, Project, Report, ReportDetail, ReportKind } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge } from "~/components/ui/badge";
@@ -8,8 +10,6 @@ import { Icon } from "~/components/ui/Icon";
 import type { Tone } from "~/components/ui/tone";
 import { relativeTimeLabel, reportNodeName, reportProjectName } from "~/lib/reports";
 import { cn } from "~/lib/utils";
-import type { ReportOpOutcome } from "~/taskd/action-types";
-import type { OrgNode, Project, Report, ReportDetail, ReportKind } from "~/taskd/types";
 
 /**
  * 報告 1 件の行（SPEC §3.5・§4 の 4「高速で流し見」、ADR-0033 D3）。`/reports`（報告の流れ）と

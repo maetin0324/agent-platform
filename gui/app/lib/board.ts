@@ -1,12 +1,12 @@
-import type { Status, TaskSummary } from "~/taskd/types";
+import type { Status, TaskSummary } from "~/celeris/types";
 
 /**
  * ボード（`/board`）の純粋なヘルパー（ADR-0044 D3 / D4）。
  *
- * ここにあるのは **taskd が決めた対応をそのまま写す表** と、**URL ↔ フィルタの読み書き**だけ。
+ * ここにあるのは **celeris が決めた対応をそのまま写す表** と、**URL ↔ フィルタの読み書き**だけ。
  * 判断（どの状態からどこへ動けるか、どの run を起こすか）は一切しない。
  * 優先度の対応（P0 = 30 / P1 = 20 / P2 = 10 / P3 = 0、丸めは `>= 30 → P0`…）は
- * taskd の `task_core::PRIORITY_LABELS` / `priority_label` と同じ規則。API は `priority_label` を
+ * celeris の `task_core::PRIORITY_LABELS` / `priority_label` と同じ規則。API は `priority_label` を
  * 返すので画面はラベルだけを扱えばよいが、**並べ替えのために整数が要る**ので写しを置く
  * （`docs/adr/0044-task-management.md` D3）。
  */
@@ -18,7 +18,7 @@ export type PriorityLabel = (typeof PRIORITY_LABELS)[number];
 /** ADR-0044 D3: ラベル → `Task.priority`（`i32`）。 */
 export const PRIORITY_VALUES: Record<PriorityLabel, number> = { P0: 30, P1: 20, P2: 10, P3: 0 };
 
-/** 既定の優先度（taskd の `task_core::DEFAULT_PRIORITY` = 10 = P2）。 */
+/** 既定の優先度（celeris の `task_core::DEFAULT_PRIORITY` = 10 = P2）。 */
 export const DEFAULT_PRIORITY = PRIORITY_VALUES.P2;
 
 export function isPriorityLabel(v: unknown): v is PriorityLabel {
@@ -27,7 +27,7 @@ export function isPriorityLabel(v: unknown): v is PriorityLabel {
 
 /**
  * ラベル（`"P1"`）を `Task.priority` の整数に写す。知らない値は既定（P2 = 10）。
- * taskd の `priority_from_label` と同じ（大文字小文字は区別しない）。
+ * celeris の `priority_from_label` と同じ（大文字小文字は区別しない）。
  */
 export function priorityValue(label: string): number {
   const upper = label.trim().toUpperCase();
@@ -35,9 +35,9 @@ export function priorityValue(label: string): number {
 }
 
 /**
- * `Task.priority`（`i32`）を P0〜P3 に丸める。taskd の `priority_label` と**同じ境界**
+ * `Task.priority`（`i32`）を P0〜P3 に丸める。celeris の `priority_label` と**同じ境界**
  * （30 以上 = P0、20 以上 = P1、10 以上 = P2、それ未満 = P3）。
- * 一覧・詳細は taskd が返す `priority_label` をそのまま出すので、これを使うのは
+ * 一覧・詳細は celeris が返す `priority_label` をそのまま出すので、これを使うのは
  * `priority_label` が無い古い応答の保険と、並べ替え前の正規化だけ。
  */
 export function priorityLabelOf(priority: number): PriorityLabel {
@@ -47,7 +47,7 @@ export function priorityLabelOf(priority: number): PriorityLabel {
   return "P3";
 }
 
-/** 行（`TaskSummary`）の優先度ラベル。taskd の `priority_label` があればそれを使う。 */
+/** 行（`TaskSummary`）の優先度ラベル。celeris の `priority_label` があればそれを使う。 */
 export function summaryPriorityLabel(item: Pick<TaskSummary, "priority" | "priority_label">): PriorityLabel {
   return isPriorityLabel(item.priority_label) ? item.priority_label : priorityLabelOf(item.priority);
 }
@@ -68,7 +68,7 @@ const COLUMN_OF_STATUS: Record<string, BoardColumnId> = Object.fromEntries(
   BOARD_COLUMNS.flatMap((col) => col.statuses.map((s) => [s, col.id] as const)),
 );
 
-/** 状態 → 列。知らない状態（将来 taskd が足したもの）は `null`（どの列にも出さない）。 */
+/** 状態 → 列。知らない状態（将来 celeris が足したもの）は `null`（どの列にも出さない）。 */
 export function boardColumnOf(status: Status | string): BoardColumnId | null {
   return COLUMN_OF_STATUS[status] ?? null;
 }
@@ -169,8 +169,8 @@ export function boardFilterToParams(filter: BoardFilter): URLSearchParams {
 }
 
 /**
- * `BoardFilter` → `TaskdClient.get` の `query`（`GET /tasks`。ADR-0044 D4）。
- * 値はそのまま転送する（GUI 側で検証しない。知らない値は taskd が 400 を返し、その文言を画面に出す）。
+ * `BoardFilter` → `CelerisClient.get` の `query`（`GET /tasks`。ADR-0044 D4）。
+ * 値はそのまま転送する（GUI 側で検証しない。知らない値は celeris が 400 を返し、その文言を画面に出す）。
  */
 export function boardFilterToQuery(filter: BoardFilter): Record<string, string | string[] | undefined> {
   return {
@@ -191,7 +191,7 @@ export function boardFilterIsEmpty(filter: BoardFilter): boolean {
 }
 
 /**
- * ADR-0044 D3 のラベルの形（小文字・`[a-z0-9-]`）。**検証の正は taskd**（422 の文言をそのまま出す）で、
+ * ADR-0044 D3 のラベルの形（小文字・`[a-z0-9-]`）。**検証の正は celeris**（422 の文言をそのまま出す）で、
  * ここは入力補助（チップを足す前に弾いてやり直させる）にだけ使う。
  */
 const LABEL_RE = /^[a-z0-9-]+$/;

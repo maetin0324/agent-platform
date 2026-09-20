@@ -97,7 +97,7 @@ pub enum WorkspaceMode {
 }
 
 /// DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
-/// taskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
+/// celeris はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkspaceSpec {
@@ -126,7 +126,7 @@ impl WorkspaceSpec {
     }
 
     /// ADR-0039 D5: `Local` の `~` / `~/…` を `home` で展開した複製。`Remote` の `~` は**クラスタ側の home**
-    /// なので触らない（taskd には展開できない）。`home` が無い、`~` で始まらないときはそのまま。
+    /// なので触らない（celeris には展開できない）。`home` が無い、`~` で始まらないときはそのまま。
     pub fn with_home_expanded(&self, home: Option<&std::path::Path>) -> WorkspaceSpec {
         match self {
             WorkspaceSpec::Local { path, mode } => WorkspaceSpec::Local {
@@ -139,7 +139,7 @@ impl WorkspaceSpec {
 }
 
 /// ADR-0039 D5: 先頭の `~`（単独か `~/…`）を `home` に置き換える。それ以外は何もしない（純粋関数）。
-/// `~user` のような別ユーザ指定は展開しない（taskd はその home を知らない）。
+/// `~user` のような別ユーザ指定は展開しない（celeris はその home を知らない）。
 pub fn expand_home(path: &std::path::Path, home: Option<&std::path::Path>) -> PathBuf {
     let Some(home) = home else { return path.to_path_buf() };
     let raw = path.to_string_lossy();
@@ -372,7 +372,7 @@ pub struct Task {
 }
 
 /// ADR-0016 D1: `[[roles]]` の 1 行。役割ごとの既定（タスクの値 > 役割の既定 > 全体の既定）とプロンプトに前置きする指示文。
-/// 純粋なデータ。taskd の設定から写し、task-ops（作成時の既定）とディスパッチャ（run 時の指示文）が使う。
+/// 純粋なデータ。celeris の設定から写し、task-ops（作成時の既定）とディスパッチャ（run 時の指示文）が使う。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RoleSpec {
     pub id: String,
@@ -398,7 +398,7 @@ impl RoleSpec {
 
 /// ADR-0027 D1: `[[genres]]` の 1 行。分野の説明・既定の役割・分野に属する役割の一覧。
 /// 分野そのものにはアダプタを持たせない（D2: `default_role` が指す役割が持つ）。
-/// 純粋なデータ。taskd の設定から写し、task-ops（作成時の既定・検証）とディスパッチャ（run 時のプロンプト）が使う。
+/// 純粋なデータ。celeris の設定から写し、task-ops（作成時の既定・検証）とディスパッチャ（run 時のプロンプト）が使う。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GenreSpec {
     pub id: String,
@@ -406,7 +406,7 @@ pub struct GenreSpec {
     /// ADR-0028 D1: この分野で「できること」の自由記述の一覧（固定 enum にしない）。空なら出力にも出さない。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
-    /// ADR-0028 D1: この分野に投げるときに用意すべきものの目安（自由記述。taskd は中身を検査しない）。
+    /// ADR-0028 D1: この分野に投げるときに用意すべきものの目安（自由記述。celeris は中身を検査しない）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_artifacts: Vec<String>,
     /// ADR-0028 D1: この分野から戻ってくるものの目安（自由記述）。

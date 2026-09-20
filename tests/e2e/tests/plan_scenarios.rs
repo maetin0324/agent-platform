@@ -1,10 +1,10 @@
 //! DESIGN §6 Phase 5 の受け入れ条件（ADR-0007）。fake ワーカー（`sh` スクリプト）と実バイナリ
-//! `taskctl` / `taskd` だけで動き、ネットワークに出ない。
+//! `celerisctl` / `celeris` だけで動き、ネットワークに出ない。
 //!
-//! 1. `taskctl plan "<大目標>"` → `taskctl approve` → `taskd` がプランナー（fake）を走らせ、`artifacts/plan.json` から
-//!    4 個の子タスクを `draft` で生成する（`plan.auto_accept = false`）。子は人間が `taskctl approve` するまで
-//!    dispatch されない。承認後に `taskd` を再実行すると全て `done`（うち 1 つは `Reviewer` 条件を fake の
-//!    レビュー run で判定）。`taskctl replay` 差分ゼロ。
+//! 1. `celerisctl plan "<大目標>"` → `celerisctl approve` → `celeris` がプランナー（fake）を走らせ、`artifacts/plan.json` から
+//!    4 個の子タスクを `draft` で生成する（`plan.auto_accept = false`）。子は人間が `celerisctl approve` するまで
+//!    dispatch されない。承認後に `celeris` を再実行すると全て `done`（うち 1 つは `Reviewer` 条件を fake の
+//!    レビュー run で判定）。`celerisctl replay` 差分ゼロ。
 //! 2. 1 回目の `plan.json` が不正（依存が範囲外）→ `review_fail` → 2 回目の run の `prior_review` に理由が渡り、
 //!    正しい plan を書いて `done`（`max_retries = 1`）。
 
@@ -34,7 +34,7 @@ impl Env {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        let db = root.join("taskd.sqlite3");
+        let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
         Self { _tmp: tmp, root, db, store }
     }
@@ -46,9 +46,9 @@ impl Env {
     }
 
     fn write_config(&self, max_concurrency: usize, script: &Path) -> PathBuf {
-        let path = self.root.join("taskd.toml");
+        let path = self.root.join("config.toml");
         let text = format!(
-            r#"db = "taskd.sqlite3"
+            r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 50
 max_concurrency = {max_concurrency}
@@ -77,8 +77,8 @@ model = "fake"
         path
     }
 
-    fn taskctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("taskctl"))
+    fn celerisctl(&self, args: &[&str]) -> String {
+        let out = Command::new(bin("celerisctl"))
             .arg("--db")
             .arg(&self.db)
             .args(args)
@@ -87,15 +87,15 @@ model = "fake"
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(
             out.status.success(),
-            "taskctl {args:?} failed: {stdout}{}",
+            "celerisctl {args:?} failed: {stdout}{}",
             String::from_utf8_lossy(&out.stderr)
         );
         stdout
     }
 
-    fn run_taskd(&self, config: &Path, timeout: Duration) -> String {
-        let log = self.root.join("taskd.log");
-        let mut child = Command::new(bin("taskd"))
+    fn run_celeris(&self, config: &Path, timeout: Duration) -> String {
+        let log = self.root.join("celeris.log");
+        let mut child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--until-idle", "--max-ticks", "2000", "--log-format", "text"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -106,20 +106,20 @@ model = "fake"
         loop {
             if let Some(status) = child.try_wait().unwrap() {
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                assert!(status.success(), "taskd exited with {status}\n{text}");
+                assert!(status.success(), "celeris exited with {status}\n{text}");
                 return text;
             }
             if start.elapsed() > timeout {
                 let _ = child.kill();
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                panic!("taskd did not reach idle within {timeout:?}\n{text}");
+                panic!("celeris did not reach idle within {timeout:?}\n{text}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
     }
 
     fn replay_is_consistent(&self) {
-        let out = self.taskctl(&["replay"]);
+        let out = self.celerisctl(&["replay"]);
         assert!(out.contains("replay: 0 mismatches"), "{out}");
     }
 
@@ -219,7 +219,7 @@ const GOAL: &str = "examples/hello-crate に CLI 引数パースを追加し、�
 
 /// シナリオ 1: plan → approve → 子 4 件が draft → 人間承認 → 全て done。
 #[test]
-fn taskctl_plan_generates_children_that_complete_after_human_approval() {
+fn celerisctl_plan_generates_children_that_complete_after_human_approval() {
     let env = Env::new();
     let plan_source = env.root.join("plan-source.json");
     std::fs::write(&plan_source, PLAN_JSON).unwrap();
@@ -228,9 +228,9 @@ fn taskctl_plan_generates_children_that_complete_after_human_approval() {
     let dir = env.root.join("workspaces").join("hello-crate");
     std::fs::create_dir_all(&dir).unwrap();
 
-    // taskctl plan "<大目標>" → Plan タスク（draft、Frontier、acceptance 空）。
+    // celerisctl plan "<大目標>" → Plan タスク（draft、Frontier、acceptance 空）。
     let id: TaskId = env
-        .taskctl(&["plan", GOAL, "--workspace", dir.to_str().unwrap()])
+        .celerisctl(&["plan", GOAL, "--workspace", dir.to_str().unwrap()])
         .trim()
         .parse()
         .unwrap();
@@ -242,9 +242,9 @@ fn taskctl_plan_generates_children_that_complete_after_human_approval() {
     assert_eq!(plan.worker_hint.tier, Tier::Frontier);
     assert_eq!(plan.budget.max_retries, 1);
 
-    // taskctl approve → ready。taskd がプランナーを走らせ、子を draft で挿入して plan は done。
-    assert_eq!(env.taskctl(&["approve", &id.to_string()]).trim(), "Ready");
-    let log1 = env.run_taskd(&config, Duration::from_secs(60));
+    // celerisctl approve → ready。celeris がプランナーを走らせ、子を draft で挿入して plan は done。
+    assert_eq!(env.celerisctl(&["approve", &id.to_string()]).trim(), "Ready");
+    let log1 = env.run_celeris(&config, Duration::from_secs(60));
     let plan = env.task(id);
     assert_eq!(plan.status, Status::Done, "{log1}");
     assert_eq!(plan.attempts, 0);
@@ -294,17 +294,17 @@ fn taskctl_plan_generates_children_that_complete_after_human_approval() {
     // ADR-0028 D3: `tier` を指定していない子は、役割・分野の既定も無ければ親（Plan）の tier を継ぐ
     // （委譲と同じ規則。以前は独立した既定 `Standard` だった）。
     assert_eq!(by_title("A").worker_hint.tier, Tier::Frontier);
-    let ls = env.taskctl(&["ls", "--status", "draft"]);
+    let ls = env.celerisctl(&["ls", "--status", "draft"]);
     assert_eq!(ls.lines().count(), 4, "{ls}");
-    let tree = env.taskctl(&["ls", "--tree"]);
+    let tree = env.celerisctl(&["ls", "--tree"]);
     assert!(tree.contains(&id.to_string()));
     assert!(tree.lines().filter(|l| l.starts_with("  ")).count() >= 4, "{tree}");
 
-    // 人間が子を承認 → taskd 再実行 → 全て done。
+    // 人間が子を承認 → celeris 再実行 → 全て done。
     for c in &children {
-        assert_eq!(env.taskctl(&["approve", &c.id.to_string()]).trim(), "Ready");
+        assert_eq!(env.celerisctl(&["approve", &c.id.to_string()]).trim(), "Ready");
     }
-    let log2 = env.run_taskd(&config, Duration::from_secs(60));
+    let log2 = env.run_celeris(&config, Duration::from_secs(60));
     for c in &children {
         let t = env.task(c.id);
         assert_eq!(t.status, Status::Done, "{}: {:?}\n{log2}", c.title, env.transitions(c.id));
@@ -376,12 +376,12 @@ fn invalid_plan_is_retried_once_with_prior_review() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let id: TaskId = env
-        .taskctl(&["plan", "retry goal", "--workspace", dir.to_str().unwrap()])
+        .celerisctl(&["plan", "retry goal", "--workspace", dir.to_str().unwrap()])
         .trim()
         .parse()
         .unwrap();
-    env.taskctl(&["approve", &id.to_string()]);
-    let log = env.run_taskd(&config, Duration::from_secs(60));
+    env.celerisctl(&["approve", &id.to_string()]);
+    let log = env.run_celeris(&config, Duration::from_secs(60));
 
     let plan = env.task(id);
     assert_eq!(plan.status, Status::Done, "{log}");

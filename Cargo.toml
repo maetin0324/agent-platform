@@ -6,8 +6,8 @@ members = [
     "crates/task-api",
     "crates/task-worker",
     "crates/task-dispatch",
-    "crates/taskd",
-    "crates/taskctl",
+    "crates/celeris",
+    "crates/celerisctl",
     "tests/e2e",
 ]
 exclude = ["examples/hello-crate"]

@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
 import { relayArtifactFile } from "~/routes/files.artifacts";
 import { relayRunFile } from "~/routes/files.runs";
-import { TaskdClient } from "~/taskd/client.server";
-import { type MockTaskd, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 describe("relayRunFile", () => {
-  it("relays content-type and body from taskd's run file response", async () => {
+  it("relays content-type and body from celeris's run file response", async () => {
     mock.on("GET", "/api/v1/tasks/T1/runs/R1/stdout", (_req, res) => {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
       res.end("line1\nline2\n");
@@ -37,7 +37,7 @@ describe("relayRunFile", () => {
     expect(await res.text()).toBe("line1\nline2\n");
   });
 
-  it("forwards the Range header to taskd", async () => {
+  it("forwards the Range header to celeris", async () => {
     mock.on("GET", "/api/v1/tasks/T1/runs/R1/stdout", (_req, res) => {
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("abcde");
@@ -55,7 +55,7 @@ describe("relayRunFile", () => {
     expect(req?.headers.range).toBe("bytes=0-4");
   });
 
-  it("forwards ?offset= and ?download= as query parameters to taskd", async () => {
+  it("forwards ?offset= and ?download= as query parameters to celeris", async () => {
     mock.on("GET", "/api/v1/tasks/T1/runs/R1/stdout", (_req, res) => {
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("abcde");
@@ -74,7 +74,7 @@ describe("relayRunFile", () => {
     expect(req?.url).toContain("download=1");
   });
 
-  it("returns taskd's 403 path_forbidden without throwing", async () => {
+  it("returns celeris's 403 path_forbidden without throwing", async () => {
     mock.on("GET", "/api/v1/tasks/T1/runs/R1/stdout", (_req, res) => {
       sendProblem(res, { status: 403, code: "path_forbidden", detail: "path escapes run directory" });
     });
@@ -90,9 +90,9 @@ describe("relayRunFile", () => {
     expect(res.status).toBe(403);
   });
 
-  it("returns 503 (not an unhandled throw) when taskd is unreachable", async () => {
-    const closed = await startMockTaskd();
-    const unreachableClient = new TaskdClient({ baseUrl: closed.baseUrl, timeoutMs: 500 });
+  it("returns 503 (not an unhandled throw) when celeris is unreachable", async () => {
+    const closed = await startMockCeleris();
+    const unreachableClient = new CelerisClient({ baseUrl: closed.baseUrl, timeoutMs: 500 });
     await closed.close();
 
     const res = await relayRunFile(
@@ -108,7 +108,7 @@ describe("relayRunFile", () => {
 });
 
 describe("relayArtifactFile", () => {
-  it("relays content-type and body from taskd's artifact response", async () => {
+  it("relays content-type and body from celeris's artifact response", async () => {
     mock.on("GET", "/api/v1/tasks/T1/artifacts/0", (_req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end('{"a":1}');
@@ -126,12 +126,12 @@ describe("relayArtifactFile", () => {
     expect(await res.text()).toBe('{"a":1}');
   });
 
-  it("relays the X-Taskd-Sha256 header", async () => {
+  it("relays the X-Celeris-Sha256 header", async () => {
     mock.on("GET", "/api/v1/tasks/T1/artifacts/0", (_req, res) => {
       res.writeHead(200, {
         "content-type": "text/markdown",
-        "x-taskd-sha256": "deadbeef",
-        "x-taskd-sha256-current": "deadbeef",
+        "x-celeris-sha256": "deadbeef",
+        "x-celeris-sha256-current": "deadbeef",
       });
       res.end("# hello");
     });
@@ -143,13 +143,13 @@ describe("relayArtifactFile", () => {
       new Request("http://gui.invalid/files/tasks/T1/artifacts/0"),
     );
 
-    expect(res.headers.get("x-taskd-sha256")).toBe("deadbeef");
-    expect(res.headers.get("x-taskd-sha256-current")).toBe("deadbeef");
+    expect(res.headers.get("x-celeris-sha256")).toBe("deadbeef");
+    expect(res.headers.get("x-celeris-sha256-current")).toBe("deadbeef");
   });
 
-  it("returns 503 (not an unhandled throw) when taskd is unreachable", async () => {
-    const closed = await startMockTaskd();
-    const unreachableClient = new TaskdClient({ baseUrl: closed.baseUrl, timeoutMs: 500 });
+  it("returns 503 (not an unhandled throw) when celeris is unreachable", async () => {
+    const closed = await startMockCeleris();
+    const unreachableClient = new CelerisClient({ baseUrl: closed.baseUrl, timeoutMs: 500 });
     await closed.close();
 
     const res = await relayArtifactFile(

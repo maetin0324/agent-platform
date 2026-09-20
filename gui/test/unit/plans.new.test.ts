@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { createPlan } from "~/celeris/route-actions.server";
+import type { Task } from "~/celeris/types";
 import { buildNewPlanSpec, loadNewPlan } from "~/routes/plans.new";
-import { TaskdClient } from "~/taskd/client.server";
-import { createPlan } from "~/taskd/route-actions.server";
-import type { Task } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-// docs/adr/0005 D5: Plan フォームは NewPlanSpec と 1:1。goal は空でも送り taskd の 422 文言を出す。
+// docs/adr/0005 D5: Plan フォームは NewPlanSpec と 1:1。goal は空でも送り celeris の 422 文言を出す。
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -65,7 +65,7 @@ describe("createPlan / loadNewPlan", () => {
     expect(JSON.parse(mock.requests.at(-1)?.body ?? "")).toEqual({ goal: "g" });
   });
 
-  it("422 goal must not be blank → fields.goal with taskd's wording", async () => {
+  it("422 goal must not be blank → fields.goal with celeris's wording", async () => {
     mock.on("POST", "/api/v1/plans", (_req, res) =>
       sendProblem(res, {
         status: 422,

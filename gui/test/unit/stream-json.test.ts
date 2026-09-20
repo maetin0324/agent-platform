@@ -59,7 +59,7 @@ describe("classifyStreamJsonLine — codex", () => {
   });
 });
 
-describe("classifyStreamJsonLine — fake worker (taskd 独自プロトコル)", () => {
+describe("classifyStreamJsonLine — fake worker (celeris 独自プロトコル)", () => {
   const lines = readLines("fake.jsonl");
 
   it("classifies every line as raw", () => {

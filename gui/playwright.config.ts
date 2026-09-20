@@ -1,24 +1,24 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// 結合テスト。scripts/taskd.sh が起動した実 taskd（fake ワーカー、既定 127.0.0.1:7710）に対して、
+// 結合テスト。scripts/celeris.sh が起動した実 celeris（fake ワーカー、既定 127.0.0.1:7710）に対して、
 // pnpm build 済みの server.js（既定 127.0.0.1:7700）を Playwright が起動して行う。全て loopback。
 //
-// **注意（Phase G13f-1）: 既定の 7700 / 7710 は人が普段使っている運用中の GUI / taskd を掴む。**
+// **注意（Phase G13f-1）: 既定の 7700 / 7710 は人が普段使っている運用中の GUI / celeris を掴む。**
 // e2e を回すときは必ず別ポートを環境変数で指定すること（運用中のデータベースやタスクに触らないため）:
 //
 //   cd gui
-//   TASKD_API_LISTEN=127.0.0.1:17971 scripts/taskd.sh build
-//   TASKD_GUI_BIND=127.0.0.1:17901 TASKD_API_URL=http://127.0.0.1:17971 TASKD_API_LISTEN=127.0.0.1:17971 \
-//     TASKD_API_TOKEN_FILE="$(pwd)/.run/org/api.token" \
+//   CELERIS_API_LISTEN=127.0.0.1:17971 scripts/celeris.sh build
+//   CELERIS_GUI_BIND=127.0.0.1:17901 CELERIS_API_URL=http://127.0.0.1:17971 CELERIS_API_LISTEN=127.0.0.1:17971 \
+//     CELERIS_API_TOKEN_FILE="$(pwd)/.run/org/api.token" \
 //     pnpm exec playwright test e2e/g13.spec.ts
 //
-// - `TASKD_GUI_BIND`: この設定が起動する GUI の待ち受け（`baseURL` もこれに追従する）。
-// - `TASKD_API_URL`: GUI から見た taskd の場所。
-// - `TASKD_API_LISTEN`: `scripts/taskd.sh` が起動する taskd の待ち受け（spec 側が使う）。
-// - `TASKD_API_TOKEN_FILE`: 管理系 API（案件の作成・対話・認可など）に要るトークン。
+// - `CELERIS_GUI_BIND`: この設定が起動する GUI の待ち受け（`baseURL` もこれに追従する）。
+// - `CELERIS_API_URL`: GUI から見た celeris の場所。
+// - `CELERIS_API_LISTEN`: `scripts/celeris.sh` が起動する celeris の待ち受け（spec 側が使う）。
+// - `CELERIS_API_TOKEN_FILE`: 管理系 API（案件の作成・対話・認可など）に要るトークン。
 //   `webServer.env` は `process.env` に**上書きで足される**ので、ここに書かない環境変数もそのまま GUI に渡る。
-const GUI_BIND = process.env.TASKD_GUI_BIND ?? "127.0.0.1:7700";
-const TASKD_API_URL = process.env.TASKD_API_URL ?? "http://127.0.0.1:7710";
+const GUI_BIND = process.env.CELERIS_GUI_BIND ?? "127.0.0.1:7700";
+const CELERIS_API_URL = process.env.CELERIS_API_URL ?? "http://127.0.0.1:7710";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -38,8 +38,8 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 120_000,
     env: {
-      TASKD_API_URL,
-      TASKD_GUI_BIND: GUI_BIND,
+      CELERIS_API_URL,
+      CELERIS_GUI_BIND: GUI_BIND,
     },
   },
 });

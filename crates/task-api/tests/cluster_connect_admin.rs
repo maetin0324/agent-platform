@@ -1,5 +1,5 @@
 //! ADR-0032 D5（クラスタ接続の管理 API 3 本）: `POST /clusters/{id}/connect`、
-//! `POST /clusters/{id}/connect/code`、`DELETE /clusters/{id}/connect`。実際の ssh 起動は taskd 側
+//! `POST /clusters/{id}/connect/code`、`DELETE /clusters/{id}/connect`。実際の ssh 起動は celeris 側
 //! （`AdminRequest::ClusterConnect*`）が行うので、ここでは task-api だけで完結する部分を確認する:
 //! 認証ガード（管理系はすべて token 必須。`token_file` 未設定でも 401）、未知の cluster id の 404、
 //! `ClusterAdminError` → HTTP の写像、コードの検証（空・空白・制御文字は 422 で `admin_tx` に届かない）、
@@ -102,7 +102,7 @@ async fn management_routes_require_a_token_even_when_token_file_is_not_configure
 }
 
 /// 未知の cluster id はすべて 404 `cluster_not_found`（`admin_tx` は無くても判定できる: `[[clusters]]`
-/// に無い id は taskd に問い合わせる前に弾く）。
+/// に無い id は celeris に問い合わせる前に弾く）。
 #[tokio::test]
 async fn unknown_cluster_id_is_404_on_all_three_endpoints() {
     let env = TestEnv::with(EnvOptions { token: Some(TOKEN.into()), ..Default::default() });
@@ -165,8 +165,8 @@ async fn connect_code_maps_not_started_to_409() {
     assert_problem(&resp, 409, "cluster_connect_not_started");
 }
 
-/// taskd 側が `ClusterAdminError::InvalidCode` を返した場合も 422 `validation`（task-api 自身のローカルな
-/// trim/制御文字チェックを通った、形式上は妥当なコードが taskd 側で拒否されたケース）。
+/// celeris 側が `ClusterAdminError::InvalidCode` を返した場合も 422 `validation`（task-api 自身のローカルな
+/// trim/制御文字チェックを通った、形式上は妥当なコードが celeris 側で拒否されたケース）。
 #[tokio::test]
 async fn connect_code_maps_admin_invalid_code_to_422() {
     let admin_tx = spawn_code_double(Err(ClusterAdminError::InvalidCode));
@@ -345,8 +345,8 @@ async fn disconnect_maps_failed_to_502() {
     assert_problem(&resp, 502, "cluster_connect_failed");
 }
 
-/// `admin_tx` が配線されていない構成（`[api]` はあるが taskd への経路が無い）では、既知の id でも
-/// 内部エラーとして扱う（accounts/providers の `reload`/`check` と同じ、taskd が受け取れない場合の扱い）。
+/// `admin_tx` が配線されていない構成（`[api]` はあるが celeris への経路が無い）では、既知の id でも
+/// 内部エラーとして扱う（accounts/providers の `reload`/`check` と同じ、celeris が受け取れない場合の扱い）。
 #[tokio::test]
 async fn connect_without_admin_tx_does_not_panic() {
     let env = TestEnv::with(EnvOptions { token: Some(TOKEN.into()), ..Default::default() });

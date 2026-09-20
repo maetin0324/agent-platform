@@ -1,15 +1,4 @@
 import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher } from "react-router";
-import { AccountActionFlash, ErrorFlash, SecretActionFlash } from "~/components/Flash";
-import { HelpLink } from "~/components/HelpLink";
-import { Badge } from "~/components/ui/badge";
-import { Button } from "~/components/ui/button";
-import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
-import { Icon } from "~/components/ui/Icon";
-import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
-import { TONE_SOLID_BG, type Tone } from "~/components/ui/tone";
-import { formatDuration, secondsBetween } from "~/lib/time-delta";
-import { TaskdBanner } from "~/root";
 import {
   cancelAccountLogin,
   checkAccount,
@@ -20,16 +9,27 @@ import {
   readLoginCode,
   startAccountLogin,
   submitAccountLoginCode,
-} from "~/taskd/accounts-admin.server";
-import type { AccountAdapter, AccountOpOutcome, ActionError, SecretActionResult } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { isTaskdUnavailable, TaskdError, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { deleteSecret, putSecret, readSecretId, readSecretValue } from "~/taskd/secrets-admin.server";
-import type { AccountList, AccountView, SecretList, SecretView } from "~/taskd/types";
+} from "~/celeris/accounts-admin.server";
+import type { AccountAdapter, AccountOpOutcome, ActionError, SecretActionResult } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { CelerisError, type CelerisRouteErrorData, celerisErrorResponse, isCelerisUnavailable } from "~/celeris/errors";
+import { deleteSecret, putSecret, readSecretId, readSecretValue } from "~/celeris/secrets-admin.server";
+import type { AccountList, AccountView, SecretList, SecretView } from "~/celeris/types";
+import { AccountActionFlash, ErrorFlash, SecretActionFlash } from "~/components/Flash";
+import { HelpLink } from "~/components/HelpLink";
+import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
+import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
+import { Icon } from "~/components/ui/Icon";
+import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { TONE_SOLID_BG, type Tone } from "~/components/ui/tone";
+import { formatDuration, secondsBetween } from "~/lib/time-delta";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/accounts";
 
 /**
- * `/accounts`（Claude アカウントのプール、ADR-GUI-0012 D3、docs/taskd-api-v1.md §3.29）。
+ * `/accounts`（Claude アカウントのプール、ADR-GUI-0012 D3、docs/celeris-api-v1.md §3.29）。
  * `GET /accounts` をそのまま描く。値の再計算（スコアやリセット判定）はしない。
  * `observed_at` の相対時刻表示・cooldown/resets_at の残り時間だけは表示のための変換として行う
  * （`/providers` の cooldown 残り時間と同じ扱い、docs/adr/0007 D3）。
@@ -44,29 +44,29 @@ export interface AccountsData {
 }
 
 /**
- * `TaskdError` / `TaskdUnavailable`（`GET /secrets` の 401 等）を `ActionError` にする。`actions.server.ts` の
+ * `CelerisError` / `CelerisUnavailable`（`GET /secrets` の 401 等）を `ActionError` にする。`actions.server.ts` の
  * `toActionError` と同じ変換だが、`loadAccounts` はテストから loader を介さず直接呼ばれるため、サーバ専用
  * モジュールを `loader`/`action` 以外の export から参照できない制約（React Router の dot-server 除去）を避けて
  * ここに複製する（`GET /secrets` が返すのは 401/409/503 のみで `errors[]` を持たないので fields/messages は空でよい）。
  */
 function secretsListError(e: unknown): ActionError {
-  if (isTaskdUnavailable(e)) {
+  if (isCelerisUnavailable(e)) {
     return {
       status: 503,
       code: "unavailable",
-      detail: `taskd に接続できません（${e.baseUrl}）`,
+      detail: `celeris に接続できません（${e.baseUrl}）`,
       conflict: false,
       fields: {},
       messages: [],
     };
   }
-  if (e instanceof TaskdError) {
+  if (e instanceof CelerisError) {
     return { status: e.status, code: e.code, detail: e.detail, conflict: e.status === 409, fields: {}, messages: [] };
   }
   throw e;
 }
 
-export async function loadAccounts(client: TaskdClient, request: Request): Promise<AccountsData> {
+export async function loadAccounts(client: CelerisClient, request: Request): Promise<AccountsData> {
   const accounts = await client.get<AccountList>("/accounts", { signal: request.signal });
   let secrets: SecretList | null = null;
   let secretsError: ActionError | null = null;
@@ -80,9 +80,9 @@ export async function loadAccounts(client: TaskdClient, request: Request): Promi
 
 export async function loader({ request }: Route.LoaderArgs): Promise<AccountsData> {
   try {
-    return await loadAccounts(getTaskdClient(), request);
+    return await loadAccounts(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -98,7 +98,7 @@ export function meta(_: Route.MetaArgs) {
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
-  const client = getTaskdClient();
+  const client = getCelerisClient();
 
   if (intent === "secret_put" || intent === "secret_delete") {
     const secretId = readSecretId(form);
@@ -162,7 +162,7 @@ const ADAPTER_TONE: Record<AccountAdapter, Tone> = { "claude-code": "info", code
 
 /**
  * `roots`（ADR-0025 D6）から、根ディレクトリが設定されているアダプタだけを `claude-code` → `codex` の順で返す。
- * `roots` が無い（古い taskd）場合は `root`（claude-code の別名）だけにフォールバックする。
+ * `roots` が無い（古い celeris）場合は `root`（claude-code の別名）だけにフォールバックする。
  */
 function configuredAdapters(accounts: AccountList): { adapter: AccountAdapter; root: string }[] {
   const claudeRoot = accounts.roots?.["claude-code"] ?? accounts.root ?? null;
@@ -179,8 +179,8 @@ function accountAdapter(item: AccountView): AccountAdapter {
 
 export default function AccountsPage({ loaderData }: Route.ComponentProps) {
   const { accounts, secrets, secretsError, fetchedAt } = loaderData;
-  // taskd の SSE（daemon tick）による自動再検証のたびに `<Form>` の actionData は消える（React Router の仕様、
-  // `app/hooks/useTaskdStream.ts`）。ログイン URL は「もう一度出せない」ものなので特に影響が大きい: 1 つの
+  // celeris の SSE（daemon tick）による自動再検証のたびに `<Form>` の actionData は消える（React Router の仕様、
+  // `app/hooks/useCelerisStream.ts`）。ログイン URL は「もう一度出せない」ものなので特に影響が大きい: 1 つの
   // `useFetcher()` にまとめ、その `fetcher.data` を表示する（fetcher の状態は revalidate() の影響を受けない）。
   const fetcher = useFetcher<AccountOpOutcome>();
   const submitting = fetcher.state !== "idle";
@@ -208,7 +208,7 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
         if (configured.length === 0) {
           return (
             <EmptyState icon="users" title="[accounts] が設定されていません">
-              taskd.toml に <Mono>[accounts]</Mono> セクションを足すとプールが使えます（<Mono>claude_dir</Mono>・
+              config.toml に <Mono>[accounts]</Mono> セクションを足すとプールが使えます（<Mono>claude_dir</Mono>・
               <Mono>codex_dir</Mono> のどちらか、または両方）。例:
               <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2 p-3 text-left text-xs">
                 {'[accounts]\nclaude_dir = "claude-accounts"\ncodex_dir = "codex-accounts"'}
@@ -466,7 +466,7 @@ function AccountCard({
           </fetcher.Form>
 
           {/* 進行中でも、この画面に出せる URL / コードが無い（開き直した等）ならやり直せるようにする。
-              コードは taskd も保存しないので、失ったら開始し直すしかない（前のコードは無効になる）。 */}
+              コードは celeris も保存しないので、失ったら開始し直すしかない（前のコードは無効になる）。 */}
           {(!showLoginPanel || !loginStart) && (
             <fetcher.Form method="post">
               <input type="hidden" name="intent" value="login_start" />
@@ -542,7 +542,7 @@ function AccountCard({
                   </div>
                 )}
                 <p className="text-sm text-fg-muted">
-                  入力が終わると taskd が自動的に検知し、この画面も自動で更新されます（最大 15
+                  入力が終わると celeris が自動的に検知し、この画面も自動で更新されます（最大 15
                   分待ちます）。ここにコードを貼り付ける必要はありません。
                 </p>
               </>
@@ -687,7 +687,7 @@ function SecretsSection({
         <ErrorFlash error={secretsError} />
       ) : !secrets || secrets.dir == null ? (
         <EmptyState icon="lock" title="[secrets] が設定されていません">
-          taskd.toml に <Mono>[secrets]</Mono> セクションを足すと、GUI から API キー（Tavily / Exa 等）を預かれます。
+          config.toml に <Mono>[secrets]</Mono> セクションを足すと、GUI から API キー（Tavily / Exa 等）を預かれます。
           例:
           <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2 p-3 text-left text-xs">
             {'[secrets]\ndir = "secrets"'}
@@ -696,7 +696,7 @@ function SecretsSection({
       ) : (
         <>
           <Alert tone="warning" title="セキュリティ上の注意">
-            値は taskd を動かしているホストに 0600 のファイルとして保存されます。
+            値は celeris を動かしているホストに 0600 のファイルとして保存されます。
             <strong className="font-semibold">保存すると値は二度と表示されません</strong>
             （更新・削除だけができます）。値は平文 HTTP を通ります（ADR-0030
             D4）。信頼できるネットワークでだけ使ってください。
@@ -892,15 +892,15 @@ function SecretCard({
 }
 
 /**
- * loader が `taskdErrorResponse` で投げた `Response` を判別する（`/providers` と同じ方針）。
+ * loader が `celerisErrorResponse` で投げた `Response` を判別する（`/providers` と同じ方針）。
  */
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const errorData = error.data as TaskdRouteErrorData;
+    const errorData = error.data as CelerisRouteErrorData;
     if (errorData.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={errorData.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={errorData.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

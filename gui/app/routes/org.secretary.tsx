@@ -1,11 +1,11 @@
 import { data, isRouteErrorResponse, redirect } from "react-router";
+import { getCelerisClient } from "~/celeris/client.server";
+import { loadConversation, runConversationAction } from "~/celeris/conversation.server";
+import { type CelerisRouteErrorData, celerisErrorResponse, isCelerisUnavailable } from "~/celeris/errors";
 import { Conversation } from "~/components/Conversation";
 import { type ConversationData, SECRETARY_NODE_ID } from "~/lib/conversation";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import { TaskdBanner } from "~/root";
-import { getTaskdClient } from "~/taskd/client.server";
-import { loadConversation, runConversationAction } from "~/taskd/conversation.server";
-import { isTaskdUnavailable, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/org.secretary";
 
 /**
@@ -13,18 +13,18 @@ import type { Route } from "./+types/org.secretary";
  * ADR-0033 D4）。`/org/:id` と同じ中継・同じ部品で、相手が `secretary` に固定されている点だけが違う
  * （ナビの「秘書」がここを指す。`/org/:id` より静的なルートが優先される）。
  *
- * `/` はここへ 302 する最初の画面（`routes/home.tsx`、Phase G13f-1）なので、taskd 停止中も 200 で開く契約
- * （docs/DESIGN.md §10 Phase G0 受け入れ条件 4）はここが引き継ぐ（Phase G13g）。root が taskd の状態を
- * 独自に検査してバナーを出す（`app/root.tsx`）ので、ここでは taskd に届かないときだけ捕まえて「対話は
- * まだ何も無い」状態として描く（他の画面が `TaskdUnavailable` を投げて 5xx にする作法とは分ける。
+ * `/` はここへ 302 する最初の画面（`routes/home.tsx`、Phase G13f-1）なので、celeris 停止中も 200 で開く契約
+ * （docs/DESIGN.md §10 Phase G0 受け入れ条件 4）はここが引き継ぐ（Phase G13g）。root が celeris の状態を
+ * 独自に検査してバナーを出す（`app/root.tsx`）ので、ここでは celeris に届かないときだけ捕まえて「対話は
+ * まだ何も無い」状態として描く（他の画面が `CelerisUnavailable` を投げて 5xx にする作法とは分ける。
  * `routes/inbox.tsx` の `loadInbox` と同じ考え方）。
  */
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ConversationData> {
   try {
-    return await loadConversation(getTaskdClient(), SECRETARY_NODE_ID, request);
+    return await loadConversation(getCelerisClient(), SECRETARY_NODE_ID, request);
   } catch (e) {
-    if (isTaskdUnavailable(e)) {
+    if (isCelerisUnavailable(e)) {
       return {
         nodeId: SECRETARY_NODE_ID,
         node: null,
@@ -35,7 +35,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<Conversatio
         clusters: [],
       };
     }
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -52,7 +52,7 @@ export function meta(_: Route.MetaArgs) {
  */
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
-  const outcome = await runConversationAction(getTaskdClient(), SECRETARY_NODE_ID, form, request.signal);
+  const outcome = await runConversationAction(getCelerisClient(), SECRETARY_NODE_ID, form, request.signal);
   if (outcome.ok && outcome.op === "new_project") {
     return redirect(`/org/secretary?project=${encodeURIComponent(outcome.project.id)}&waiting=1`);
   }
@@ -65,11 +65,11 @@ export default function SecretaryPage({ loaderData }: Route.ComponentProps) {
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const errorData = error.data as TaskdRouteErrorData;
+    const errorData = error.data as CelerisRouteErrorData;
     if (errorData.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={errorData.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={errorData.baseUrl ?? ""} problem={null} />
         </main>
       );
     }
@@ -80,7 +80,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
         </h1>
         <p className="mt-2 text-sm text-fg-muted">
           {errorData.status === 404
-            ? "組織にまだ秘書（id: secretary）がいません。「組織」の画面で秘書を作るか、taskd の org_include（config/org.example.toml）で種蒔きしてください。"
+            ? "組織にまだ秘書（id: secretary）がいません。「組織」の画面で秘書を作るか、celeris の org_include（config/org.example.toml）で種蒔きしてください。"
             : errorData.detail}
         </p>
       </main>

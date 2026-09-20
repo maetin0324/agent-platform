@@ -1378,7 +1378,7 @@
       "properties": {
         "auth": {
           "default": "manual",
-          "description": "ADR-0032 D1: `\"manual\"` / `\"publickey\"` / `\"totp\"`。古いスナップショットには無いので既定は `\"manual\"`\n（`taskd::config::ClusterConfig.auth` と同じ既定）。",
+          "description": "ADR-0032 D1: `\"manual\"` / `\"publickey\"` / `\"totp\"`。古いスナップショットには無いので既定は `\"manual\"`\n（`celeris::config::ClusterConfig.auth` と同じ既定）。",
           "type": "string"
         },
         "concurrency": {
@@ -1549,7 +1549,7 @@
         },
         {
           "const": "system",
-          "description": "taskd 自身（決定的な記録）。",
+          "description": "celeris 自身（決定的な記録）。",
           "type": "string"
         }
       ]
@@ -1644,7 +1644,7 @@
       "type": "object"
     },
     "ConfigView": {
-      "description": "`GET /config`: `taskd.toml` の要約。env の値・トークンは含めない。taskd が起動時に作る。",
+      "description": "`GET /config`: `config.toml` の要約。env の値・トークンは含めない。celeris が起動時に作る。",
       "properties": {
         "api": {
           "$ref": "#/$defs/ApiConfigView"
@@ -1869,7 +1869,7 @@
       "type": "object"
     },
     "CriterionSpec": {
-      "description": "受け入れ条件 1 件の指定。現在の `taskctl add` の `--accept`/`--check-cmd`/\n`--check-artifact`/`--check-reviewer` に対応する。API の `POST /tasks` の `acceptance[]` でもある（`docs/gui/api.md` §3.4）。",
+      "description": "受け入れ条件 1 件の指定。現在の `celerisctl add` の `--accept`/`--check-cmd`/\n`--check-artifact`/`--check-reviewer` に対応する。API の `POST /tasks` の `acceptance[]` でもある（`docs/gui/api.md` §3.4）。",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -2020,7 +2020,7 @@
           "type": "integer"
         },
         "release": {
-          "description": "`--release <sha12>` / `TASKD_RELEASE` / `\"dev\"`。",
+          "description": "`--release <sha12>` / `CELERIS_RELEASE` / `\"dev\"`。",
           "type": "string"
         },
         "role": {
@@ -3375,6 +3375,9 @@
           "description": "常に `\"1\"`。",
           "type": "string"
         },
+        "celeris_version": {
+          "type": "string"
+        },
         "db": {
           "$ref": "#/$defs/DbInfo"
         },
@@ -3389,7 +3392,7 @@
           "type": "string"
         },
         "release": {
-          "description": "ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `TASKD_RELEASE` / `\"dev\"`）。",
+          "description": "ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `CELERIS_RELEASE` / `\"dev\"`）。",
           "type": "string"
         },
         "role": {
@@ -3404,15 +3407,12 @@
         },
         "started_at": {
           "type": "string"
-        },
-        "taskd_version": {
-          "type": "string"
         }
       },
       "required": [
         "api_version",
         "schema_version",
-        "taskd_version",
+        "celeris_version",
         "instance_id",
         "started_at",
         "now",
@@ -4186,7 +4186,7 @@
     },
     "NewPlanSpec": {
       "additionalProperties": false,
-      "description": "`taskctl plan` から組み立てる新規 Plan タスクの指定。API の `POST /plans` の本文でもある（`docs/gui/api.md` §3.14）。",
+      "description": "`celerisctl plan` から組み立てる新規 Plan タスクの指定。API の `POST /plans` の本文でもある（`docs/gui/api.md` §3.14）。",
       "properties": {
         "goal": {
           "description": "大目標。1行目の先頭80文字が `title` になる。",
@@ -4234,7 +4234,7 @@
     },
     "NewTaskSpec": {
       "additionalProperties": false,
-      "description": "`taskctl add` から組み立てる新規タスクの指定。API の `POST /tasks` の本文でもある（`docs/gui/api.md` §3.4）。\n省略時の既定は `taskctl add` と同じ。",
+      "description": "`celerisctl add` から組み立てる新規タスクの指定。API の `POST /tasks` の本文でもある（`docs/gui/api.md` §3.4）。\n省略時の既定は `celerisctl add` と同じ。",
       "properties": {
         "acceptance": {
           "items": {
@@ -4372,7 +4372,7 @@
             }
           ],
           "default": null,
-          "description": "ADR-0044 D3: `\"P1\"` のようなラベルでも `20` のような整数でも書ける。**省略時は P2**\n（= `task_core::DEFAULT_PRIORITY` = 10）。`taskctl add` は `--priority` の既定 0 を明示して渡すので\n従来どおり。"
+          "description": "ADR-0044 D3: `\"P1\"` のようなラベルでも `20` のような整数でも書ける。**省略時は P2**\n（= `task_core::DEFAULT_PRIORITY` = 10）。`celerisctl add` は `--priority` の既定 0 を明示して渡すので\n従来どおり。"
         },
         "project_id": {
           "anyOf": [
@@ -4412,7 +4412,7 @@
             }
           ],
           "default": null,
-          "description": "ADR-0044 D1: 初期状態。`draft` か `ready` だけ（それ以外は 422）。**省略時は呼び出し側の既定**\n（`taskctl add` と委譲・計画の経路は従来どおり `draft`、`POST /tasks` は `ready`。人は Go を出す\n側なので draft を挟まない）。`kind = approval` は従来どおり常に `ready`。"
+          "description": "ADR-0044 D1: 初期状態。`draft` か `ready` だけ（それ以外は 422）。**省略時は呼び出し側の既定**\n（`celerisctl add` と委譲・計画の経路は従来どおり `draft`、`POST /tasks` は `ready`。人は Go を出す\n側なので draft を挟まない）。`kind = approval` は従来どおり常に `ready`。"
         },
         "tier": {
           "anyOf": [
@@ -4823,7 +4823,7 @@
           "type": "string"
         },
         "instance": {
-          "description": "`urn:taskd:request:<X-Request-Id>`。",
+          "description": "`urn:celeris:request:<X-Request-Id>`。",
           "type": "string"
         },
         "status": {
@@ -4836,7 +4836,7 @@
           "type": "string"
         },
         "type": {
-          "description": "`urn:taskd:problem:<code>`。",
+          "description": "`urn:celeris:problem:<code>`。",
           "type": "string"
         }
       },
@@ -4938,7 +4938,7 @@
               "type": "null"
             }
           ],
-          "description": "ADR-0039 D1: この案件の作業場所（任意）。`{\"kind\":\"local\",\"path\":\"~/workspace/rust/pluvio-poc\"}` か\n`{\"kind\":\"remote\",\"cluster\":\"pegasus\",\"path\":\"/work/.../benchfs\"}`。`~` は taskd の `$HOME` で\n展開して保存する（`Local` のみ）。知らない `cluster` は 422。"
+          "description": "ADR-0039 D1: この案件の作業場所（任意）。`{\"kind\":\"local\",\"path\":\"~/workspace/rust/pluvio-poc\"}` か\n`{\"kind\":\"remote\",\"cluster\":\"pegasus\",\"path\":\"/work/.../benchfs\"}`。`~` は celeris の `$HOME` で\n展開して保存する（`Local` のみ）。知らない `cluster` は 422。"
         }
       },
       "required": [
@@ -5434,7 +5434,7 @@
               "type": "null"
             }
           ],
-          "description": "ADR-0022 D2: 直近の疎通確認（`POST /providers/{id}/check`）の結果。**メモリだけに持つ観測値**で、\ntaskd を再起動すると消える（イベントにも DB にも残さない）。一度も確認していなければ `None`。"
+          "description": "ADR-0022 D2: 直近の疎通確認（`POST /providers/{id}/check`）の結果。**メモリだけに持つ観測値**で、\nceleris を再起動すると消える（イベントにも DB にも残さない）。一度も確認していなければ `None`。"
         },
         "model": {
           "description": "実効モデル（空なら `None`）。",
@@ -5578,7 +5578,7 @@
               "type": "null"
             }
           ],
-          "description": "ADR-0022 D2: 直近の `POST /providers/{id}/check` の結果（`{at, result}`）。まだ確認していない、\nまたは taskd を再起動した後は `null`（メモリだけに持つ観測値）。"
+          "description": "ADR-0022 D2: 直近の `POST /providers/{id}/check` の結果（`{at, result}`）。まだ確認していない、\nまたは celeris を再起動した後は `null`（メモリだけに持つ観測値）。"
         },
         "model": {
           "type": [
@@ -5900,7 +5900,7 @@
           "type": "string"
         },
         "release": {
-          "description": "`--release <sha12>` / `TASKD_RELEASE` / `\"dev\"`。",
+          "description": "`--release <sha12>` / `CELERIS_RELEASE` / `\"dev\"`。",
           "type": "string"
         },
         "role": {
@@ -6164,7 +6164,7 @@
         },
         "location": {
           "$ref": "#/$defs/WorkspaceSpec",
-          "description": "`{\"kind\":\"local\",\"path\":\"~/workspace/benchfs\"}` か\n`{\"kind\":\"remote\",\"cluster\":\"pegasus\",\"path\":\"/work/.../benchfs\"}`。\n`Local` の `~` は taskd の `$HOME` で展開して保存する。知らない `cluster` は 422。"
+          "description": "`{\"kind\":\"local\",\"path\":\"~/workspace/benchfs\"}` か\n`{\"kind\":\"remote\",\"cluster\":\"pegasus\",\"path\":\"/work/.../benchfs\"}`。\n`Local` の `~` は celeris の `$HOME` で展開して保存する。知らない `cluster` は 422。"
         },
         "name": {
           "description": "案件の中で一意の slug。省略すると `location` のディレクトリ名から作る。",
@@ -7325,7 +7325,7 @@
       "type": "object"
     },
     "TaskDetail": {
-      "description": "`taskctl show --json` と `GET /api/v1/tasks/{id}` の本体。",
+      "description": "`celerisctl show --json` と `GET /api/v1/tasks/{id}` の本体。",
       "properties": {
         "actions": {
           "items": {
@@ -8019,7 +8019,7 @@
           "type": "object"
         },
         {
-          "description": "コメント（人・組織の「人」・taskd）。",
+          "description": "コメント（人・組織の「人」・celeris）。",
           "properties": {
             "at": {
               "type": "string"
@@ -8490,7 +8490,7 @@
       ]
     },
     "WorkspaceSpec": {
-      "description": "DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。\ntaskd はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。",
+      "description": "DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。\nceleris はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。",
       "oneOf": [
         {
           "properties": {
@@ -8542,10 +8542,10 @@
       ]
     },
     "WorktreeView": {
-      "description": "ADR-0019 D2: クラスタ側の worktree（taskd はここだけを触り、commit はしない）。",
+      "description": "ADR-0019 D2: クラスタ側の worktree（celeris はここだけを触り、commit はしない）。",
       "properties": {
         "branch": {
-          "description": "worktree のブランチ（`taskd/<task_id>`）。taskd は commit しないので、変更は作業ツリーに残る。",
+          "description": "worktree のブランチ（`celeris/<task_id>`）。celeris は commit しないので、変更は作業ツリーに残る。",
           "type": "string"
         },
         "dir": {

@@ -1,5 +1,5 @@
 //! 実クラスタ（pegasus / sirius）での確認。既定では走らせない（`#[ignore]`）。
-//! 実行: `TASKD_CLUSTER_HOST=pegasus TASKD_CLUSTER_WORKDIR=/work/NBB/rmaeda/taskd-test \
+//! 実行: `CELERIS_CLUSTER_HOST=pegasus CELERIS_CLUSTER_WORKDIR=/work/NBB/rmaeda/celeris-test \
 //!        cargo test -p task-worker --test ssh_cluster_manual -- --ignored --nocapture`
 //! 事前に `scripts/cluster-login.sh <host>` で多重接続を張っておくこと（2 要素認証は人が通す）。
 
@@ -44,10 +44,10 @@ fn task(dir: &std::path::Path) -> Task {
 }
 
 #[tokio::test]
-#[ignore = "実クラスタが要る（TASKD_CLUSTER_HOST / TASKD_CLUSTER_WORKDIR と多重接続）"]
+#[ignore = "実クラスタが要る（CELERIS_CLUSTER_HOST / CELERIS_CLUSTER_WORKDIR と多重接続）"]
 async fn cluster_round_trip() {
-    let host = std::env::var("TASKD_CLUSTER_HOST").expect("TASKD_CLUSTER_HOST");
-    let workdir = std::env::var("TASKD_CLUSTER_WORKDIR").expect("TASKD_CLUSTER_WORKDIR");
+    let host = std::env::var("CELERIS_CLUSTER_HOST").expect("CELERIS_CLUSTER_HOST");
+    let workdir = std::env::var("CELERIS_CLUSTER_WORKDIR").expect("CELERIS_CLUSTER_WORKDIR");
     let local = tempfile::tempdir().unwrap();
     let remote_dir = PathBuf::from(&workdir).join(format!("smoke-{}", TaskId::new()));
     let mut settings = SshSettings::new(host.clone(), host.clone(), remote_dir.clone());
@@ -87,15 +87,15 @@ async fn cluster_round_trip() {
 /// ADR-0019: 実クラスタの既存リポジトリ（既定 benchfs）で `sync = "worktree"` を確かめる。
 /// 実行:
 /// ```sh
-/// TASKD_CLUSTER_HOST=pegasus TASKD_CLUSTER_PROJECT=/work/NBB/rmaeda/workspace/rust/benchfs \
+/// CELERIS_CLUSTER_HOST=pegasus CELERIS_CLUSTER_PROJECT=/work/NBB/rmaeda/workspace/rust/benchfs \
 ///   cargo test -p task-worker --test ssh_cluster_manual -- --ignored --nocapture worktree
 /// ```
 /// 後片付け（`git worktree remove`）はテストの最後に行う（ADR-0019 D2 の運用では人が行うが、確認用の worktree は残さない）。
 #[tokio::test]
-#[ignore = "実クラスタが要る（TASKD_CLUSTER_HOST / TASKD_CLUSTER_PROJECT と多重接続）"]
+#[ignore = "実クラスタが要る（CELERIS_CLUSTER_HOST / CELERIS_CLUSTER_PROJECT と多重接続）"]
 async fn cluster_worktree_brings_only_the_sparse_paths() {
-    let host = std::env::var("TASKD_CLUSTER_HOST").expect("TASKD_CLUSTER_HOST");
-    let project = PathBuf::from(std::env::var("TASKD_CLUSTER_PROJECT").expect("TASKD_CLUSTER_PROJECT"));
+    let host = std::env::var("CELERIS_CLUSTER_HOST").expect("CELERIS_CLUSTER_HOST");
+    let project = PathBuf::from(std::env::var("CELERIS_CLUSTER_PROJECT").expect("CELERIS_CLUSTER_PROJECT"));
     let local = tempfile::tempdir().unwrap();
     let task_id = TaskId::new();
 
@@ -126,7 +126,7 @@ async fn cluster_worktree_brings_only_the_sparse_paths() {
     let r = ws.exec("pwd && git rev-parse --abbrev-ref HEAD", Duration::from_secs(120)).await.expect("exec");
     println!("remote pwd/branch:\n{}", r.stdout_tail);
     assert_eq!(r.exit, Some(0), "{r:?}");
-    assert!(r.stdout_tail.contains(&format!("taskd/{task_id}")), "ブランチは taskd/<task_id>: {r:?}");
+    assert!(r.stdout_tail.contains(&format!("celeris/{task_id}")), "ブランチは celeris/<task_id>: {r:?}");
 
     // 後片付け: 確認用の worktree とブランチを消す（本番の運用では人が行う。ADR-0019 D2）。
     let wt = settings.worktree_dir();
@@ -136,7 +136,7 @@ async fn cluster_worktree_brings_only_the_sparse_paths() {
             "BatchMode=yes",
             &host,
             &format!(
-                "git -C {} worktree remove --force {} && git -C {} branch -D taskd/{}",
+                "git -C {} worktree remove --force {} && git -C {} branch -D celeris/{}",
                 project.display(),
                 wt.display(),
                 project.display(),

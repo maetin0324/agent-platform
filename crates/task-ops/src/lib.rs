@@ -1,4 +1,4 @@
-//! `task-ops`: `taskctl` の approve/reject/answer/cancel/add/plan/replay の判断と検証、および
+//! `task-ops`: `celerisctl` の approve/reject/answer/cancel/add/plan/replay の判断と検証、および
 //! イベントからの派生ビュー（質問文・answers・prior_review・連続 requeue・バックオフ・Human check の
 //! Approval 子の対応など）を 1 か所にまとめる（ADR-0013 D7）。`task-api`（Phase 9b）からも同じ関数を
 //! 呼べるようにするための下ごしらえ。

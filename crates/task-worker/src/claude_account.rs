@@ -1,8 +1,8 @@
 //! Claude アカウントの確認（ADR-0024 D6）とログイン中継（D7）。
 //!
 //! `WorkerAdapter` / ディスパッチャとは独立した、`claude` CLI を直接起動する薄いラッパ。ここは
-//! taskd（呼び出し側。デーモンの HTTP ハンドラや `taskctl`）が使う低レベル操作だけを提供し、アカウント選択・
-//! `AccountBook` の更新・cooldown の判断は一切行わない（それは taskd/task-dispatch 側の責務。ADR-0024 D3/D4）。
+//! celeris（呼び出し側。デーモンの HTTP ハンドラや `celerisctl`）が使う低レベル操作だけを提供し、アカウント選択・
+//! `AccountBook` の更新・cooldown の判断は一切行わない（それは celeris/task-dispatch 側の責務。ADR-0024 D3/D4）。
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -84,7 +84,7 @@ impl Drop for TempCwdGuard {
 }
 
 async fn run_check(command: &str, account_dir: &Path, model: &str, base_env: &[(String, String)]) -> AccountCheck {
-    let cwd = std::env::temp_dir().join(format!("taskd-account-check-{}", task_core::TaskId::new()));
+    let cwd = std::env::temp_dir().join(format!("celeris-account-check-{}", task_core::TaskId::new()));
     if let Err(e) = tokio::fs::create_dir_all(&cwd).await {
         return AccountCheck {
             result: AccountCheckResult::SpawnFailed,
@@ -266,7 +266,7 @@ pub enum LoginError {
 }
 
 /// ADR-0024 D7: `claude auth login` を子プロセスとして起動し、URL の表示とコードの受け渡しだけを中継する
-/// （OAuth は実装しない）。進行中のセッションは taskd 側で `HashMap<AccountId, Mutex<LoginSession>>` のように
+/// （OAuth は実装しない）。進行中のセッションは celeris 側で `HashMap<AccountId, Mutex<LoginSession>>` のように
 /// 1 アカウントごとに 1 つだけ保持することを想定する。
 pub struct LoginSession {
     pub url: String,
@@ -438,7 +438,7 @@ impl LoginSession {
         LoginResult { result: if ok { LoginOutcome::Ok } else { LoginOutcome::Failed }, detail }
     }
 
-    /// 進行中のログインを止める（ADR-0024 D7: `DELETE /accounts/{id}/login` / 10 分での打ち切り / taskd 終了時）。
+    /// 進行中のログインを止める（ADR-0024 D7: `DELETE /accounts/{id}/login` / 10 分での打ち切り / celeris 終了時）。
     /// N4: プロセスグループごと kill する（`claude auth login` の孫プロセスも一緒に止める）。
     pub fn cancel(mut self) {
         if let Some(child) = self.child.take() {

@@ -1,14 +1,14 @@
-//! DESIGN §6 Phase 10 の受け入れ条件（ADR-0016）。実バイナリ `taskctl` / `taskd`（`[api]` 有効）と fake ワーカー
+//! DESIGN §6 Phase 10 の受け入れ条件（ADR-0016）。実バイナリ `celerisctl` / `celeris`（`[api]` 有効）と fake ワーカー
 //! （`sh` スクリプト）と `curl` だけで動き、外部ネットワークに出ない。
 //!
-//! 1. `[[roles]]` の既定（tier / max_turns）が `taskctl add --role lead --config` で効き、`WorkerStarted.task_role` から役割が追える。
+//! 1. `[[roles]]` の既定（tier / max_turns）が `celerisctl add --role lead --config` で効き、`WorkerStarted.task_role` から役割が追える。
 //!    役割の指示文は `context.role.instructions` としてワーカーに届く（fake が progress に書き戻す）。
 //! 2. fake が `delegate` で 4 件提案 → 検証を通った 2 件だけが子として挿入され `Event::Delegated` が残る。空欄・自己参照は拒否され、
 //!    理由が `WorkerProgress` に残り、親は失敗しない。
 //! 3. 子が全て終端になるまで親は `reviewing` のまま。`--aggregate` の親は最後に 1 回だけ集約 run をして `artifacts/summary.md` が
 //!    暗黙の条件で判定される。`--aggregate` 無しの親は run を増やさず `done`。
-//! 5. `taskctl show --json` と `GET /api/v1/tasks/{id}` に `role` と `delegated` が出る。
-//! 6. `taskctl replay` の差分ゼロ。
+//! 5. `celerisctl show --json` と `GET /api/v1/tasks/{id}` に `role` と `delegated` が出る。
+//! 6. `celerisctl replay` の差分ゼロ。
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -74,7 +74,7 @@ impl Env {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        let db = root.join("taskd.sqlite3");
+        let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
         Self { _tmp: tmp, root, db, store, port: free_port() }
     }
@@ -91,9 +91,9 @@ impl Env {
 
     /// `extra_delegation` は `[delegation]` に足す行（ADR-0021 D4 の `on_child_failure` など）。
     fn write_config_with(&self, script: &Path, extra_delegation: &str) -> PathBuf {
-        let path = self.root.join("taskd.toml");
+        let path = self.root.join("config.toml");
         let text = format!(
-            r#"db = "taskd.sqlite3"
+            r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 50
 max_concurrency = 3
@@ -142,16 +142,16 @@ model = "fake"
         path
     }
 
-    fn taskctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("taskctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
+    fn celerisctl(&self, args: &[&str]) -> String {
+        let out = Command::new(bin("celerisctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "taskctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
         stdout
     }
 
-    fn start_taskd(&self, config: &Path) -> Proc {
-        let log = self.root.join("taskd.log");
-        let child = Command::new(bin("taskd"))
+    fn start_celeris(&self, config: &Path) -> Proc {
+        let log = self.root.join("celeris.log");
+        let child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--log-format", "text"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -207,7 +207,7 @@ model = "fake"
     }
 
     fn replay_is_consistent(&self) {
-        let out = self.taskctl(&["replay"]);
+        let out = self.celerisctl(&["replay"]);
         assert!(out.contains("replay: 0 mismatches"), "{out}");
     }
 }
@@ -274,7 +274,7 @@ fn lead_delegates_children_waits_for_them_and_aggregates_once() {
 
     // 1. --role lead --config: tier / max_turns は役割の既定、max_wall_secs は全体の既定。
     let id: TaskId = env
-        .taskctl(&[
+        .celerisctl(&[
             "add",
             "--config",
             config.to_str().unwrap(),
@@ -299,9 +299,9 @@ fn lead_delegates_children_waits_for_them_and_aggregates_once() {
     assert_eq!(lead.worker_hint.tier, Tier::Frontier, "role default");
     assert_eq!(lead.budget.max_turns, 40, "role default");
     assert_eq!(lead.budget.max_wall_secs, 600, "global default");
-    assert_eq!(env.taskctl(&["approve", &id.to_string()]).trim(), "Ready");
+    assert_eq!(env.celerisctl(&["approve", &id.to_string()]).trim(), "Ready");
 
-    let daemon = env.start_taskd(&config);
+    let daemon = env.start_celeris(&config);
     wait_done(&env, &daemon, id);
     let lead = env.task(id);
     assert_eq!(lead.status, Status::Done, "{}", daemon.log_text());
@@ -364,8 +364,8 @@ fn lead_delegates_children_waits_for_them_and_aggregates_once() {
     );
     assert!(dir.join("artifacts/summary.md").is_file());
 
-    // 5. taskctl show --json と GET /tasks/{id} の role / delegated。
-    let shown: Value = serde_json::from_str(env.taskctl(&["show", "--json", &id.to_string()]).trim()).unwrap();
+    // 5. celerisctl show --json と GET /tasks/{id} の role / delegated。
+    let shown: Value = serde_json::from_str(env.celerisctl(&["show", "--json", &id.to_string()]).trim()).unwrap();
     assert_eq!(shown["role"], "lead", "{shown}");
     assert_eq!(shown["task"]["aggregate"], true);
     assert_eq!(shown["delegated"].as_array().map(Vec::len), Some(1), "{shown}");
@@ -396,7 +396,7 @@ fn non_aggregate_lead_completes_after_children_without_another_run() {
     let dir = env.root.join("workspaces").join("lead2");
     std::fs::create_dir_all(&dir).unwrap();
     let id: TaskId = env
-        .taskctl(&[
+        .celerisctl(&[
             "add",
             "--config",
             config.to_str().unwrap(),
@@ -415,9 +415,9 @@ fn non_aggregate_lead_completes_after_children_without_another_run() {
         .parse()
         .unwrap();
     assert!(!env.task(id).aggregate);
-    env.taskctl(&["approve", &id.to_string()]);
+    env.celerisctl(&["approve", &id.to_string()]);
 
-    let daemon = env.start_taskd(&config);
+    let daemon = env.start_celeris(&config);
     // 親の run と判定が終わっても、子が終わるまで reviewing のまま。
     let saw_waiting = wait_until(Duration::from_secs(30), || {
         let parent = env.task(id);
@@ -510,7 +510,7 @@ fn a_failed_child_makes_the_parent_retry_instead_of_inheriting_the_failure() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let id: TaskId = env
-        .taskctl(&[
+        .celerisctl(&[
             "add", "--config", config.to_str().unwrap(), "--role", "lead", "--aggregate",
             "--max-retries", "1",
             "--title", "lead with a failing child",
@@ -521,9 +521,9 @@ fn a_failed_child_makes_the_parent_retry_instead_of_inheriting_the_failure() {
         .trim()
         .parse()
         .unwrap();
-    env.taskctl(&["approve", &id.to_string()]);
+    env.celerisctl(&["approve", &id.to_string()]);
 
-    let daemon = env.start_taskd(&config);
+    let daemon = env.start_celeris(&config);
     wait_done(&env, &daemon, id);
     drop(daemon);
 
@@ -568,7 +568,7 @@ fn a_failed_child_makes_the_parent_retry_instead_of_inheriting_the_failure() {
 }
 
 /// ADR-0021 D1/D2: やり直せない（`max_retries = 0`）なら、親は `failed` ではなく `blocked` になり、
-/// 受信箱に質問が出る。人が `taskctl answer` すると再開する。
+/// 受信箱に質問が出る。人が `celerisctl answer` すると再開する。
 #[test]
 fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
     let env = Env::new();
@@ -578,7 +578,7 @@ fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let id: TaskId = env
-        .taskctl(&[
+        .celerisctl(&[
             "add", "--config", config.to_str().unwrap(), "--role", "lead", "--aggregate",
             "--max-retries", "0",
             "--title", "lead that cannot retry",
@@ -589,9 +589,9 @@ fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
         .trim()
         .parse()
         .unwrap();
-    env.taskctl(&["approve", &id.to_string()]);
+    env.celerisctl(&["approve", &id.to_string()]);
 
-    let daemon = env.start_taskd(&config);
+    let daemon = env.start_celeris(&config);
     let blocked = wait_until(Duration::from_secs(60), || env.task(id).status == Status::Blocked);
     assert!(blocked, "親は人の判断待ちになる\n{}", daemon.log_text());
 
@@ -607,7 +607,7 @@ fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
     });
     let question = question.expect("QuestionRaised");
     assert!(question.contains("impl-broken"), "{question}");
-    assert!(question.contains(&format!("taskctl answer {id}")), "{question}");
+    assert!(question.contains(&format!("celerisctl answer {id}")), "{question}");
 
     let (status, inbox) = env.get("/inbox");
     assert_eq!(status, 200);
@@ -620,7 +620,7 @@ fn when_the_parent_cannot_retry_it_asks_a_human_instead_of_failing() {
     assert!(item["asked_at"].is_string(), "{item}");
 
     // 人が答えると再開し、代わりの子を立てて完了する（失敗のまま終わらない）。
-    env.taskctl(&["answer", &id.to_string(), "impl-broken は別の分け方でやり直して"]);
+    env.celerisctl(&["answer", &id.to_string(), "impl-broken は別の分け方でやり直して"]);
     wait_done(&env, &daemon, id);
     drop(daemon);
 
@@ -665,7 +665,7 @@ rm -f "$RUN"
     std::fs::create_dir_all(&dir).unwrap();
 
     let id: TaskId = env
-        .taskctl(&[
+        .celerisctl(&[
             "add", "--config", config.to_str().unwrap(), "--role", "lead", "--aggregate",
             "--title", "lead that ignores child failures",
             "--objective", "delegate one unit that fails",
@@ -675,9 +675,9 @@ rm -f "$RUN"
         .trim()
         .parse()
         .unwrap();
-    env.taskctl(&["approve", &id.to_string()]);
+    env.celerisctl(&["approve", &id.to_string()]);
 
-    let daemon = env.start_taskd(&config);
+    let daemon = env.start_celeris(&config);
     wait_done(&env, &daemon, id);
     drop(daemon);
 

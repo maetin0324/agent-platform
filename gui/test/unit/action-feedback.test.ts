@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
  * 監査 H1 の回帰テスト: **操作の失敗が 0.3 秒で消えない**こと。
  *
  * 原因は「ナビゲーション方式の `<Form method="post">` + `actionData`」で、SSE の `daemon` イベント
- * （taskd が tick ごとに無条件で流す）を受けた `revalidator.revalidate()` のたびに `actionData` が捨てられる。
+ * （celeris が tick ごとに無条件で流す）を受けた `revalidator.revalidate()` のたびに `actionData` が捨てられる。
  * 直し方は fetcher 方式（`useFetcher` の `data` は再検証では消えない）に寄せること。
  *
  * ここでは DOM を描画せず、**変更系のフォームを持つルートが `actionData` を使っていない**ことを

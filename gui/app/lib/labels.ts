@@ -1,4 +1,3 @@
-import type { BoardColumnId } from "~/lib/board";
 import type {
   CommentAuthorKind,
   CommentEffect,
@@ -15,12 +14,13 @@ import type {
   Status,
   TaskCategory,
   Tier,
-} from "~/taskd/types";
+} from "~/celeris/types";
+import type { BoardColumnId } from "~/lib/board";
 
 /**
  * 業務の 6 画面（SPEC §4: 秘書・組織・案件・報告・認可・成果物）で使う日本語の言葉（Phase G13f-1、監査 5）。
  * 画面には API のフィールド名（`request` / `status` / `node_id` …）や英語の状態値を出さず、ここの言葉だけを出す。
- * 裏方の画面（`/tasks` 等）は taskd の値をそのまま出す従来どおりの扱いなので、ここは使わなくてよい。
+ * 裏方の画面（`/tasks` 等）は celeris の値をそのまま出す従来どおりの扱いなので、ここは使わなくてよい。
  *
  * 呼び方の統一（監査 5）: 組織のノード = **担当**（「ノード」「人」とは呼ばない。help の説明文だけ
  * 「人（担当）」と一度言い換える）。案件は「案件」のまま。
@@ -59,7 +59,7 @@ export function milestoneStatusLabel(status: MilestoneStatus | string): string {
 
 /**
  * タスクの状態（`Status`）の日本語。裏方の言葉（draft / ready …）をそのまま業務の画面に出さないため
- * （taskd の値は変えない。表示だけ）。
+ * （celeris の値は変えない。表示だけ）。
  */
 const TASK_STATUS_LABEL: Record<Status, string> = {
   draft: "下書き",
@@ -98,7 +98,7 @@ export function decisionLabel(decision: Decision | string): string {
 }
 
 /**
- * taskd のインスタンスの役割（ADR-0040 D4）。「リリース」画面（`/releases`、Phase G14）は裏方だが、
+ * celeris のインスタンスの役割（ADR-0040 D4）。「リリース」画面（`/releases`、Phase G14）は裏方だが、
  * 引き継ぎの進行は人が読むところなので日本語にする（`active` / `standby` / … のままは出さない）。
  */
 const INSTANCE_ROLE_LABEL: Record<InstanceRole, string> = {
@@ -114,7 +114,7 @@ export function instanceRoleLabel(role: InstanceRole | string): string {
 
 /**
  * 昇格の前に見せる差分（ADR-0041 D4。Phase G15）。**どのパスが「安全に関わる」かは
- * taskd 側（`scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS`）が決める**ので、
+ * celeris 側（`scripts/selfdeploy/lib.sh` の `SD_SENSITIVE_PATTERNS`）が決める**ので、
  * ここにあるのは言葉だけ。
  */
 export function sensitiveChangesLabel(count: number): string {
@@ -129,10 +129,10 @@ export function staleChangesLabel(base: string | null): string {
 }
 
 /**
- * 案件のリポジトリ（ADR-0043 D1、docs/taskd-api-v1.md §3.68〜3.71。Phase 52 / G16）。
- * 値（`git` / `dir` / `auto` / `host` / `container` / `worktree` / `rsync` / `none`）は taskd のものを
+ * 案件のリポジトリ（ADR-0043 D1、docs/celeris-api-v1.md §3.68〜3.71。Phase 52 / G16）。
+ * 値（`git` / `dir` / `auto` / `host` / `container` / `worktree` / `rsync` / `none`）は celeris のものを
  * そのまま送り返すだけで、画面に出す言葉だけをここに集める。知らない値は素のまま出す
- * （taskd が値を増やしても壊れない）。
+ * （celeris が値を増やしても壊れない）。
  */
 const REPO_KIND_LABEL: Record<RepoKind, string> = {
   git: "git",
@@ -154,7 +154,7 @@ export function repoRunLabel(run: RepoRun | string): string {
   return REPO_RUN_LABEL[run as RepoRun] ?? run;
 }
 
-/** リモートのリポジトリの持ち込み方（ADR-0043 D7。`none` は taskd が 422 にする）。 */
+/** リモートのリポジトリの持ち込み方（ADR-0043 D7。`none` は celeris が 422 にする）。 */
 const REPO_SYNC_LABEL: Record<RepoSync, string> = {
   worktree: "worktree",
   rsync: "rsync",
@@ -175,8 +175,8 @@ export const SET_PRIMARY_REPO_LABEL = "主にする";
 export const REPO_KIND_AUTO_LABEL = "自動（.git があれば git）";
 
 /**
- * タスクの作業ツリー（ADR-0043 D6、docs/taskd-api-v1.md §3.72）の一覧の種類。
- * `kind` は taskd が決めた `dir` / `file` / `other` をそのまま受ける（GUI で再判定しない）。
+ * タスクの作業ツリー（ADR-0043 D6、docs/celeris-api-v1.md §3.72）の一覧の種類。
+ * `kind` は celeris が決めた `dir` / `file` / `other` をそのまま受ける（GUI で再判定しない）。
  */
 const TREE_ENTRY_KIND_LABEL: Record<string, string> = {
   dir: "ディレクトリ",
@@ -188,7 +188,7 @@ export function treeEntryKindLabel(kind: string): string {
   return TREE_ENTRY_KIND_LABEL[kind] ?? kind;
 }
 
-/** バイト数の表示（`size` は taskd が返した値そのまま。1024 進で小数 1 桁まで）。 */
+/** バイト数の表示（`size` は celeris が返した値そのまま。1024 進で小数 1 桁まで）。 */
 export function fileSizeLabel(size: number): string {
   const units = ["B", "KiB", "MiB", "GiB"];
   let value = size;
@@ -283,7 +283,7 @@ export function tierLabel(tier: Tier | string): string {
 const COMMENT_AUTHOR_LABEL: Record<CommentAuthorKind, string> = {
   human: "あなた",
   node: ASSIGNEE_WORD,
-  system: "taskd",
+  system: "celeris",
 };
 
 export function commentAuthorLabel(kind: CommentAuthorKind | string): string {
@@ -366,9 +366,9 @@ export function parseTaskTab(value: string | null | undefined): TaskTab {
 }
 
 /**
- * 変更の取り込み（ADR-0043 D5、taskd Phase 54 / G18）。`merge` / `pr` / `discard` と
- * `done` / `open` / `merged` / `closed` / `conflict` / `failed` は taskd の値をそのまま送り返すだけで、
- * 画面に出す言葉だけをここに集める。知らない値は素のまま出す（taskd が値を増やしても壊れない）。
+ * 変更の取り込み（ADR-0043 D5、celeris Phase 54 / G18）。`merge` / `pr` / `discard` と
+ * `done` / `open` / `merged` / `closed` / `conflict` / `failed` は celeris の値をそのまま送り返すだけで、
+ * 画面に出す言葉だけをここに集める。知らない値は素のまま出す（celeris が値を増やしても壊れない）。
  */
 const INTEGRATION_METHOD_LABEL: Record<IntegrationMethod, string> = {
   merge: "取り込み",
@@ -395,7 +395,7 @@ export function integrationStateLabel(state: IntegrationState | string): string 
 
 /**
  * 変わったファイルの `status`（`ChangedFile.status`）。`?` は git の管理外（未追跡）。
- * 文字は taskd が決めたものをそのまま受ける（GUI で再判定しない）。
+ * 文字は celeris が決めたものをそのまま受ける（GUI で再判定しない）。
  */
 const CHANGED_FILE_STATUS_LABEL: Record<string, string> = {
   A: "追加",
@@ -409,7 +409,7 @@ export function changedFileStatusLabel(status: string): string {
   return CHANGED_FILE_STATUS_LABEL[status] ?? status;
 }
 
-/** 「main に取り込む」ボタン（取り込む先は taskd が返した `default_branch`。`main` とは限らない）。 */
+/** 「main に取り込む」ボタン（取り込む先は celeris が返した `default_branch`。`main` とは限らない）。 */
 export function integrateMergeLabel(defaultBranch: string): string {
   return `${defaultBranch} に取り込む`;
 }
@@ -429,7 +429,7 @@ export const CHANGES_MISSING_LABEL = "取り込み済み・中止済み（作業
 export const DIFF_TRUNCATED_LABEL = "途中で切りました（200 KiB）";
 
 /**
- * 文書（ADR-0044 D7、taskd Phase 57 / G20。**正本は git**）。ページの中身も履歴も taskd が返すものを
+ * 文書（ADR-0044 D7、celeris Phase 57 / G20。**正本は git**）。ページの中身も履歴も celeris が返すものを
  * そのまま出し、ここには画面の言葉だけを置く。
  */
 export const DOCS_TAB_LABEL = "文書";
@@ -453,7 +453,7 @@ export const PROMOTE_TO_DOC_SUBMIT_LABEL = "昇格する";
 export const PROMOTE_OVERWRITE_LABEL = "既にあるページを上書きする";
 
 /**
- * 文書の変更が弾かれた理由（taskd の `code`）を人の言葉にする。`detail` は別に出すので、
+ * 文書の変更が弾かれた理由（celeris の `code`）を人の言葉にする。`detail` は別に出すので、
  * ここは「次に何をすればよいか」だけ。知らない `code` は `null`（`detail` だけ出す）。
  */
 export function docsErrorHint(code: string): string | null {
@@ -482,9 +482,9 @@ export function prUnavailableReason(origin: boolean, gh: boolean): string | null
 }
 
 /**
- * 中止・一時停止・アーカイブ（ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.91。Phase 55 / G19）。
+ * 中止・一時停止・アーカイブ（ADR-0044 D6、docs/celeris-api-v1.md §3.84〜3.91。Phase 55 / G19）。
  * どれも**人が押す操作**なので、英語の操作名（`cancel` / `pause` / `archive`）は画面に出さない。
- * 「できるかどうか」は `~/lib/lifecycle.ts`（表示の判定だけ）と taskd（409 `invalid_transition`）が決める。
+ * 「できるかどうか」は `~/lib/lifecycle.ts`（表示の判定だけ）と celeris（409 `invalid_transition`）が決める。
  */
 export const PAUSE_LABEL = "一時停止";
 export const RESUME_LABEL = "再開";
@@ -536,7 +536,7 @@ export const PROJECT_ARCHIVED_BANNER = "この案件はアーカイブされて�
 
 /**
  * 中止で連鎖して止まったものの件数（`ProjectLifecycle.cancelled_tasks` /
- * `cancelled_milestones`、`MilestoneLifecycle.cancelled_tasks`）。**数えるのは taskd が返した配列**で、
+ * `cancelled_milestones`、`MilestoneLifecycle.cancelled_tasks`）。**数えるのは celeris が返した配列**で、
  * GUI 側では連鎖を計算し直さない。
  */
 export function cancelledCountLabel(tasks: number, milestones?: number): string {

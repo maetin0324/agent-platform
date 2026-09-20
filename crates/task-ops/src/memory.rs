@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn paths_match_the_documented_layout() {
-        let dir = PathBuf::from("/var/lib/taskd/memory");
+        let dir = PathBuf::from("/var/lib/celeris/memory");
         assert_eq!(notes_path(&dir, "secretary"), dir.join("secretary/notes.md"));
         assert_eq!(
             project_path(&dir, "secretary", "P1"),

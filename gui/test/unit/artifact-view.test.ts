@@ -29,7 +29,7 @@ describe("isJson", () => {
   });
 });
 
-// docs/DESIGN.md §10 Phase G3 受け入れ条件 5: mock-taskd が 403 path_forbidden 相当（ArtifactList の
+// docs/DESIGN.md §10 Phase G3 受け入れ条件 5: mock-celeris が 403 path_forbidden 相当（ArtifactList の
 // forbidden:true）を返したとき、画面が「アクセスできません（path_forbidden）」を表示する文言の出所。
 describe("artifactStatusMessage", () => {
   it("forbidden な成果物は「アクセスできません（path_forbidden）」", () => {

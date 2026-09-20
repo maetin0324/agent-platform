@@ -1,6 +1,4 @@
 import { Link } from "react-router";
-import { Alert } from "~/components/ui/misc";
-import { cancelledCountLabel, commentEffectMessage, taskFieldLabel } from "~/lib/labels";
 import type {
   AccountOpOutcome,
   ActionError,
@@ -18,12 +16,14 @@ import type {
   TaskEditOutcome,
   TaskReopenOutcome,
   TransitionOutcome,
-} from "~/taskd/action-types";
+} from "~/celeris/action-types";
+import { Alert } from "~/components/ui/misc";
+import { cancelledCountLabel, commentEffectMessage, taskFieldLabel } from "~/lib/labels";
 
 /**
  * action の結果表示（docs/DESIGN.md §6.3 の 2「`TransitionResult` を flash に載せる」、docs/adr/0005 D2）。
  * クッキーのセッションは使わず、action が返した data（`actionData` / `fetcher.data`）をそのまま描く。
- * 409 は「状態が変わりました」（loader の再検証で画面は最新になる）、422 は taskd の文言そのまま。
+ * 409 は「状態が変わりました」（loader の再検証で画面は最新になる）、422 は celeris の文言そのまま。
  */
 export function TransitionFlash({ outcome }: { outcome: TransitionOutcome | undefined | null }) {
   if (!outcome) return null;
@@ -94,7 +94,7 @@ export function RetryFlash({ outcome }: { outcome: RetryOutcome | undefined | nu
 }
 
 /**
- * タスクの編集の結果（ADR-0044 D1、Phase 53）。**taskd が返した `fields`（実際に変わった項目）**を
+ * タスクの編集の結果（ADR-0044 D1、Phase 53）。**celeris が返した `fields`（実際に変わった項目）**を
  * そのまま出す。`running` / `reviewing` のタスクは走っている run を止めないので、その旨を添える
  * （止めたいときはコメント（D2）か取り消し）。
  */
@@ -200,7 +200,7 @@ export function ErrorFlash({ error }: { error: ActionError | undefined | null })
       <p data-testid="flash-detail">{error.detail}</p>
       {error.code === "unauthorized" && (
         <p data-testid="flash-unauthorized-hint">
-          管理系 API はトークンが必須です（ADR-GUI-0012 D1）。<code>TASKD_API_TOKEN_FILE</code> を taskd の{" "}
+          管理系 API はトークンが必須です（ADR-GUI-0012 D1）。<code>CELERIS_API_TOKEN_FILE</code> を celeris の{" "}
           <code>[api] token_file</code> と同じ内容にして GUI を再起動してください。
         </p>
       )}
@@ -273,7 +273,7 @@ export function AccountActionFlash({ outcome }: { outcome: AccountOpOutcome | un
   if (!outcome) return null;
   if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
   if (outcome.op === "login_start") return null; // URL とコード入力欄は画面側が描く
-  // login_code は HTTP としては 200（taskd の 3.34）だが、result.result が "failed"（誤ったコード等）のことがある。
+  // login_code は HTTP としては 200（celeris の 3.34）だが、result.result が "failed"（誤ったコード等）のことがある。
   // その場合だけ見た目も失敗（danger）にする（ADR-GUI-0012 D3: 誤ったコードは失敗として表示）。
   const loginFailed = outcome.op === "login_code" && outcome.result.result !== "ok";
   return (
@@ -432,7 +432,7 @@ export function ProjectActionFlash({ outcome }: { outcome: ProjectOpOutcome | un
       </Alert>
     );
   }
-  // 中止・一時停止・アーカイブ（ADR-0044 D6、Phase 55 / G19）。中止のときだけ、**taskd が返した**
+  // 中止・一時停止・アーカイブ（ADR-0044 D6、Phase 55 / G19）。中止のときだけ、**celeris が返した**
   // `cancelled_tasks` / `cancelled_milestones` の件数を添える（連鎖は GUI で数え直さない）。
   if (LIFECYCLE_OPS.includes(outcome.op) && "lifecycle" in outcome) {
     const { lifecycle } = outcome;
@@ -526,9 +526,9 @@ export function ReportActionFlash({ outcome }: { outcome: ReportOpOutcome | unde
 }
 
 /**
- * Discord のテスト送信の結果（ADR-0037 D4、docs/taskd-api-v1.md §3.65）。`outcome.ok` は action（HTTP）が
+ * Discord のテスト送信の結果（ADR-0037 D4、docs/celeris-api-v1.md §3.65）。`outcome.ok` は action（HTTP）が
  * 成功したかどうかで、成功していても `result.ok` が `false`（送り先が 404 を返した等）はありうる。
- * `detail` は種別だけの短い文（URL・ホスト名は含まない。taskd 側の規律）。
+ * `detail` は種別だけの短い文（URL・ホスト名は含まない。celeris 側の規律）。
  */
 export function NotifyTestFlash({ outcome }: { outcome: NotifyTestOutcome | undefined | null }) {
   if (!outcome) return null;
@@ -553,7 +553,7 @@ export function NotifyTestFlash({ outcome }: { outcome: NotifyTestOutcome | unde
 /**
  * 「リリース」画面（`/releases`、Phase G14。ADR-0040 D6）の昇格の結果。202 は
  * 「`promote.sh` を起こした」だけで、**切り替えが終わったわけではない**ことを必ず書く
- * （旧 taskd はこのあと `draining` になって手元の run を見終わってから終わる。ADR-0040 D4）。
+ * （旧 celeris はこのあと `draining` になって手元の run を見終わってから終わる。ADR-0040 D4）。
  */
 export function ReleasePromoteFlash({ outcome }: { outcome: ReleasePromoteOutcome | undefined | null }) {
   if (!outcome) return null;
@@ -601,7 +601,7 @@ export function ApprovalActionFlash({ outcome }: { outcome: ApprovalOpOutcome | 
 
 const STANDING_RULE_OP_LABEL: Record<string, string> = { create: "追加", delete: "削除" };
 
-/** 「永続の認可」の追加・削除の結果（ADR-0033 D5、docs/taskd-api-v1.md §3.59〜3.60）。 */
+/** 「永続の認可」の追加・削除の結果（ADR-0033 D5、docs/celeris-api-v1.md §3.59〜3.60）。 */
 export function StandingRuleActionFlash({ outcome }: { outcome: StandingRuleOpOutcome | undefined | null }) {
   if (!outcome) return null;
   if (!outcome.ok) return <ErrorFlash error={outcome.error} />;

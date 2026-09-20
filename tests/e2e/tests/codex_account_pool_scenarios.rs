@@ -1,4 +1,4 @@
-//! ADR-0025（Phase 14）: codex アカウントのプールを、実バイナリ `taskd`（`[api]` 有効）とスタブの `codex`
+//! ADR-0025（Phase 14）: codex アカウントのプールを、実バイナリ `celeris`（`[api]` 有効）とスタブの `codex`
 //! コマンド（`sh` スクリプト）で再現する。`tests/e2e/tests/account_pool_scenarios.rs`（claude-code, ADR-0024）
 //! の codex 版。接続先は 127.0.0.1 だけで、外部ネットワークに出ない。
 //!
@@ -156,7 +156,7 @@ esac
     }
 
     fn write_config(&self, codex: &Path, token: Option<&str>) -> PathBuf {
-        let path = self.root.join("taskd.toml");
+        let path = self.root.join("config.toml");
         let token_line = if let Some(token) = token {
             std::fs::write(self.root.join("api.token"), token).unwrap();
             "token_file = \"api.token\"\n"
@@ -164,7 +164,7 @@ esac
             ""
         };
         let text = format!(
-            r#"db = "taskd.sqlite3"
+            r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 50
 max_concurrency = 4
@@ -205,16 +205,16 @@ account_pool = true
         dir.to_string_lossy().into_owned()
     }
 
-    fn taskctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("taskctl")).arg("--db").arg(self.root.join("taskd.sqlite3")).args(args).output().unwrap();
+    fn celerisctl(&self, args: &[&str]) -> String {
+        let out = Command::new(bin("celerisctl")).arg("--db").arg(self.root.join("celeris.sqlite3")).args(args).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "taskctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
         stdout
     }
 
     fn add(&self, title: &str) -> String {
         let ws = self.workspace(&format!("ws-{title}"));
-        self.taskctl(&[
+        self.celerisctl(&[
             "add",
             "--title",
             title,
@@ -229,10 +229,10 @@ account_pool = true
         .to_string()
     }
 
-    fn start_taskd(&self, config: &Path) -> Proc {
+    fn start_celeris(&self, config: &Path) -> Proc {
         static STARTS: AtomicUsize = AtomicUsize::new(0);
-        let log = self.root.join(format!("taskd-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
-        let child = Command::new(bin("taskd"))
+        let log = self.root.join(format!("celeris-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
+        let child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--log-format", "text"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -245,7 +245,7 @@ account_pool = true
     fn wait_api(&self, daemon: &mut Proc) {
         let ok = wait_until(Duration::from_secs(20), || {
             if let Ok(Some(status)) = daemon.child.try_wait() {
-                panic!("taskd exited early with {status}\n{}", daemon.log_text());
+                panic!("celeris exited early with {status}\n{}", daemon.log_text());
             }
             self.request("GET", "/health", None, &[]).status == 200
         });
@@ -311,12 +311,12 @@ account_pool = true
     }
 
     fn replay_is_consistent(&self) {
-        let out = self.taskctl(&["replay"]);
+        let out = self.celerisctl(&["replay"]);
         assert!(out.contains("replay: 0 mismatches"), "{out}");
     }
 
     fn worker_started(&self, task_id: &str) -> Option<(String, Option<String>)> {
-        let store = task_core::SqliteStore::open(&self.root.join("taskd.sqlite3")).unwrap();
+        let store = task_core::SqliteStore::open(&self.root.join("celeris.sqlite3")).unwrap();
         task_core::TaskStore::events_for(&store, task_id.parse().unwrap())
             .unwrap()
             .into_iter()
@@ -327,7 +327,7 @@ account_pool = true
     }
 
     fn task_status(&self, task_id: &str) -> task_core::Status {
-        let store = task_core::SqliteStore::open(&self.root.join("taskd.sqlite3")).unwrap();
+        let store = task_core::SqliteStore::open(&self.root.join("celeris.sqlite3")).unwrap();
         task_core::TaskStore::get(&store, task_id.parse().unwrap()).unwrap().unwrap().status
     }
 }
@@ -342,12 +342,12 @@ fn codex_account_selection_follows_headroom_and_sets_codex_home_and_records_rate
     env.account("a", Some(0.9));
     env.account("b", Some(0.2));
     let config = env.write_config(&codex, None);
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
 
     // 1 回目は観測値が無いので id 昇順のタイブレークで "a" に行く。
     let t1 = env.add("t1");
-    env.taskctl(&["approve", &t1]);
+    env.celerisctl(&["approve", &t1]);
     assert!(wait_until(Duration::from_secs(10), || env.task_status(&t1) == task_core::Status::Done), "t1 never completed");
     let (adapter1, account1) = env.worker_started(&t1).expect("worker started");
     assert_eq!(adapter1, "codex");
@@ -355,7 +355,7 @@ fn codex_account_selection_follows_headroom_and_sets_codex_home_and_records_rate
 
     // "a" は util 0.9 の観測値がついた。"b" はまだ観測値が無い（score 1.0）ので次はそちらへ行く。
     let t2 = env.add("t2");
-    env.taskctl(&["approve", &t2]);
+    env.celerisctl(&["approve", &t2]);
     assert!(wait_until(Duration::from_secs(10), || env.task_status(&t2) == task_core::Status::Done), "t2 never completed");
     assert_eq!(env.worker_started(&t2).and_then(|(_, a)| a).as_deref(), Some("b"));
 
@@ -374,7 +374,7 @@ fn codex_account_selection_follows_headroom_and_sets_codex_home_and_records_rate
 
     // 再起動しても観測値は残る。
     drop(daemon);
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
     let accounts_after_restart = env.get("/accounts").json();
     let items = accounts_after_restart["items"].as_array().unwrap();
@@ -392,7 +392,7 @@ fn codex_device_login_flow_completes_without_login_code_and_logs_no_secrets() {
     let env = Env::new();
     let codex = env.write_codex_stub();
     let config = env.write_config(&codex, Some("s3cret-admin-token"));
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     let mut env = env;
     env.wait_api(&mut daemon);
     env.token = Some("s3cret-admin-token".into());
@@ -414,7 +414,7 @@ fn codex_device_login_flow_completes_without_login_code_and_logs_no_secrets() {
     env.post("/accounts/c/login/code?adapter=codex", json!({"code": "x"}))
         .assert_problem(409, "login_code_not_supported");
 
-    // taskd のポーリングが完了を検知するまで待つ（人が別デバイスで入力し終わった、のスタブ側の代わり:
+    // celeris のポーリングが完了を検知するまで待つ（人が別デバイスで入力し終わった、のスタブ側の代わり:
     // スタブは待たずに自分で auth.json を書いて exit 0 する）。
     let logged_in = wait_until(Duration::from_secs(10), || {
         env.get("/accounts").json()["items"]

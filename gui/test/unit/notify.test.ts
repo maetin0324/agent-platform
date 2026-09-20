@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { NotificationKind, NotifyRecent } from "~/celeris/types";
 import {
   NOTIFY_NOT_CONFIGURED_ERROR,
   notifyKindLabel,
@@ -6,7 +7,6 @@ import {
   notifyResultTone,
   notifyTargetHref,
 } from "~/lib/notify";
-import type { NotificationKind, NotifyRecent } from "~/taskd/types";
 
 /**
  * Discord への通知（ADR-0037、Phase 39）の純粋関数（`~/lib/notify.ts`）。DOM を描画する unit テストが無い
@@ -29,7 +29,7 @@ describe("notifyKindLabel (ADR-0037 D1、SPEC の言葉で)", () => {
     }
   });
 
-  it("知らない kind はそのまま返す（taskd が種を増やしても壊れない）", () => {
+  it("知らない kind はそのまま返す（celeris が種を増やしても壊れない）", () => {
     expect(notifyKindLabel("something_new" as NotificationKind)).toBe("something_new");
   });
 });
@@ -92,7 +92,7 @@ describe("notifyTargetHref (対象へのリンク)", () => {
     expect(notifyTargetHref({ kind: "secretary_reply", key: "p1" })).toBe("/projects/p1");
   });
 
-  it("milestone_ready は project_id が無ければ null（古い記録・GET /milestones/{id} が taskd に無いため）", () => {
+  it("milestone_ready は project_id が無ければ null（古い記録・GET /milestones/{id} が celeris に無いため）", () => {
     expect(notifyTargetHref({ kind: "milestone_ready", key: "m1" })).toBeNull();
   });
 

@@ -4,7 +4,7 @@ import { getGuiConfig, hostWithoutPort } from "~/config.server";
 import { nonceContext } from "~/context";
 
 /**
- * ブラウザ ↔ taskd-gui の境界（docs/DESIGN.md §8.2）。
+ * ブラウザ ↔ celeris-gui の境界（docs/DESIGN.md §8.2）。
  * 1. `Host` を許可リストで検査（DNS rebinding 対策）。外れれば 400 で止める（loader は走らない）
  * 2. 変更系の要求を CSRF 検査（`Origin` / `Sec-Fetch-Site`）。違えば 403（action は走らない）
  * 3. 要求ごとに CSP の nonce を作り context に置く
@@ -24,7 +24,7 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
  * - `Origin` があれば自分のオリジン（`request.url` の origin = 受けた `Host` から組み立てたもの）と一致すること
  * - `Sec-Fetch-Site` があれば `same-origin` / `none` であること
  * を要求する。違反なら理由の文字列を返す（純粋関数。単体テスト用）。どちらのヘッダも無い要求（curl 等）は通す
- * （taskd 自身も `Origin` 付きの POST を 403 にするので、ブラウザ経由の偽装は二重に止まる）。
+ * （celeris 自身も `Origin` 付きの POST を 403 にするので、ブラウザ経由の偽装は二重に止まる）。
  */
 export function csrfViolation(request: Request): string | null {
   if (SAFE_METHODS.has(request.method.toUpperCase())) return null;

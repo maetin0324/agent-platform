@@ -42,7 +42,7 @@ async fn hello_then_created_event_arrives_within_two_seconds() {
     assert!(hello.data["daemon"].is_null());
     assert!(hello.data["now"].is_string());
 
-    // `taskctl add` 相当（別接続で task-ops を通して作る）。
+    // `celerisctl add` 相当（別接続で task-ops を通して作る）。
     let spec: task_ops::add::NewTaskSpec = serde_json::from_value(serde_json::json!({
         "title": "sse probe", "objective": "x", "acceptance": [{"type": "human", "text": "y"}]
     }))
@@ -303,7 +303,7 @@ async fn serve_binds_the_configured_address_and_reports_bind_errors() {
     let stopped = tokio::time::timeout(Duration::from_secs(5), task_api::serve(settings.clone(), rx.clone(), async {})).await;
     assert!(matches!(stopped, Ok(Ok(()))), "{stopped:?}");
 
-    settings.db_path = env.dir.path().join("missing-dir").join("taskd.db");
+    settings.db_path = env.dir.path().join("missing-dir").join("celeris.db");
     let err = task_api::serve(settings, rx, async {}).await;
     assert!(matches!(err, Err(task_api::ApiError::Store(_))), "{err:?}");
 }

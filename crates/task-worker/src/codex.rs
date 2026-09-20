@@ -1,6 +1,6 @@
 //! `codex` アダプタ（DESIGN §5.4, ADR-0008 D3）。
 //!
-//! `codex exec --json` は taskd 独自のワーカープロトコルを話さない。`--json` が吐く JSON Lines
+//! `codex exec --json` は celeris 独自のワーカープロトコルを話さない。`--json` が吐く JSON Lines
 //! （`thread.started` → `item.*`（進捗）→ `turn.completed`/`turn.failed`）を読み、`claude-code`
 //! （ADR-0006）と同じ「結果ファイル規約」（`artifacts/result.json`）で `RunOutcome` を合成する。
 //! プロンプト組み立ては `claude_code::build_prompt` をそのまま再利用する（ADR-0008 D3: kind 別の
@@ -27,7 +27,7 @@ use crate::subprocess::{
     LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, read_tail, write_result_json,
 };
 
-/// `[adapters.codex]`（taskd.toml, ADR-0008 D4）。
+/// `[adapters.codex]`（config.toml, ADR-0008 D4）。
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
     /// 起動するコマンド名／パス。既定 `"codex"`。
@@ -100,7 +100,7 @@ impl WorkerAdapter for CodexAdapter {
     }
 }
 
-/// 壁時計の Unix 秒（ADR-0025 D3: 観測時刻は taskd の壁時計。`codex_account` からも使う）。
+/// 壁時計の Unix 秒（ADR-0025 D3: 観測時刻は celeris の壁時計。`codex_account` からも使う）。
 pub(crate) fn now_unix_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

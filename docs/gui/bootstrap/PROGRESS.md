@@ -1,6 +1,6 @@
-# taskd-gui 進捗
+# celeris-gui 進捗
 
-設計は `docs/DESIGN.md`（§10 にフェーズと受け入れ条件）、taskd の API は `docs/taskd-api-v1.md`。各フェーズの完了時にこのファイルへ `## Phase G<N> — DONE` の節を追加する。
+設計は `docs/DESIGN.md`（§10 にフェーズと受け入れ条件）、celeris の API は `docs/celeris-api-v1.md`。各フェーズの完了時にこのファイルへ `## Phase G<N> — DONE` の節を追加する。
 `run-gphases.sh` はこのファイルの `## Phase G<N> — DONE` / `BLOCKED` / `PARTIAL` を見て進む。
 
 ## 現在地
@@ -14,17 +14,17 @@
 | G4 | プロバイダとデーモン | 未着手 | — |
 | G5 | 認証・配布・仕上げ | 未着手 | — |
 
-前提: taskd（`$TASKD_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
+前提: celeris（`$CELERIS_REPO`、既定 `../agent-platform`）の Phase 9a / 9b（`docs/adr/0013`）が完了していること。G0 の受け入れ条件 2 で確認する。
 
 ## 引き継ぎ（前のフェーズから）
 
 （なし）
 
-## 提案（`docs/DESIGN.md` / `docs/taskd-api-v1.md` への変更提案。採否は人間）
+## 提案（`docs/DESIGN.md` / `docs/celeris-api-v1.md` への変更提案。採否は人間）
 
 （なし）
 
-## taskd への依頼（`docs/taskd-requests.md` の要約）
+## celeris への依頼（`docs/celeris-requests.md` の要約）
 
 （なし）
 
@@ -42,12 +42,12 @@
 
 ### 共通条件
 - `pnpm lint` / `pnpm typecheck` / `pnpm test`（N passed）/ `pnpm build` / `pnpm e2e`（N passed）
-- `pnpm gen:types && git diff --exit-code app/taskd/types.ts` 差分ゼロ
+- `pnpm gen:types && git diff --exit-code app/celeris/types.ts` 差分ゼロ
 
 ### 監査結果
 - auditor の判定と、指摘への対応
 
 ### 未解決事項
 ### 提案
-### taskd への依頼
+### celeris への依頼
 ```

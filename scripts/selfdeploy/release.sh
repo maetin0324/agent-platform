@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # scripts/selfdeploy/release.sh <git-ref> — ADR-0040 D1/D2 の「リリース」段。
 #
-#   作業チェックアウトとは別の detached worktree（~/taskd/releases/.build/<sha12>）で
+#   作業チェックアウトとは別の detached の作業ツリー（$CELERIS_STATE_DIR/releases/.build/<sha12>）で
 #   cargo test → clippy → build --release → GUI pnpm install/typecheck/test/build を順に回し、
-#   全部 exit 0 のときだけ ~/taskd/releases/<sha12>/ を作る。
+#   全部 exit 0 のときだけ $CELERIS_STATE_DIR/releases/<sha12>/ を作る。
 #   1 つでも非 0 なら**リリースを作らず**、.build/<sha12>/gate.json だけ残す。
 #
 # 本番には一切触れない（プロセスも DB も config も）。人でもワーカーでも実行してよい（D5）。
@@ -20,7 +20,8 @@ usage: release.sh <git-ref>
   <git-ref>  ビルドする commit（ブランチ名 / タグ / sha。`HEAD` も可）
 
 env:
-  TASKD_HOME  既定 ~/taskd
+  CELERIS_CONFIG_DIR  既定 ~/.config/celeris（config.toml と秘密）
+  CELERIS_STATE_DIR   既定 ~/.local/celeris（releases / backups / staging …）
   SD_REPO     既定 ~/workspace/agent-platform（git worktree を生やす元のリポジトリ）
 EOF
   exit 2
@@ -121,7 +122,7 @@ write_gate_json() {
 
 run_step cargo-test "$BUILD" -- cargo test --workspace
 run_step cargo-clippy "$BUILD" -- cargo clippy --workspace -- -D warnings
-run_step cargo-build "$BUILD" -- cargo build --release -p taskd -p taskctl
+run_step cargo-build "$BUILD" -- cargo build --release -p celeris -p celerisctl
 run_step pnpm-install "$BUILD/gui" -- pnpm install --frozen-lockfile
 run_step pnpm-typecheck "$BUILD/gui" -- pnpm typecheck
 run_step pnpm-test "$BUILD/gui" -- pnpm test
@@ -140,7 +141,7 @@ STAGE="$REL.partial"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/gui"
 
-for b in taskd taskctl; do
+for b in celeris celerisctl; do
   [ -x "$SD_CARGO_TARGET/release/$b" ] || sd_die "built binary missing: $SD_CARGO_TARGET/release/$b"
   cp -p "$SD_CARGO_TARGET/release/$b" "$STAGE/bin/$b"
 done
@@ -158,10 +159,10 @@ sd_log "gui: pnpm install --prod --frozen-lockfile in $STAGE/gui"
 
 SCHEMA_VERSION="$(sd_schema_version_of_tree "$BUILD")" \
   || sd_die "cannot parse SCHEMA_VERSION from crates/task-core/src/store.rs at $SHA12"
-# `taskd` の版は Cargo.toml から読む（バイナリを起こさない。`--version` は無い）。
-TASKD_VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$BUILD/crates/taskd/Cargo.toml" | head -n 1)"
-if [ -z "$TASKD_VERSION" ]; then
-  TASKD_VERSION="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$BUILD/Cargo.toml" | head -n 1)"
+# `celeris` の版は Cargo.toml から読む（バイナリを起こさない。`--version` は無い）。
+CELERIS_VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$BUILD/crates/celeris/Cargo.toml" | head -n 1)"
+if [ -z "$CELERIS_VERSION" ]; then
+  CELERIS_VERSION="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$BUILD/Cargo.toml" | head -n 1)"
 fi
 GUI_VERSION="$(sd_json_get "$STAGE/gui/package.json" version || true)"
 
@@ -174,7 +175,7 @@ GUI_VERSION="$(sd_json_get "$STAGE/gui/package.json" version || true)"
   printf '  "built_by": %s,\n' "$(sd_json_str "${USER:-unknown}@$(hostname)")"
   printf '  "profile": "release",\n'
   printf '  "schema_version": %s,\n' "$SCHEMA_VERSION"
-  printf '  "taskd_version": %s,\n' "$(sd_json_str "$TASKD_VERSION")"
+  printf '  "celeris_version": %s,\n' "$(sd_json_str "$CELERIS_VERSION")"
   printf '  "gui_version": %s,\n' "$(sd_json_str "$GUI_VERSION")"
   printf '  "gate_ok": true\n'
   printf '}\n'
@@ -244,7 +245,7 @@ write_changes_json "$STAGE/changes.json"
 # `POST /releases/{sha12}/promote` は **リリースの中の** `scripts/promote.sh` を起こすので、
 # 作業チェックアウトが無くても（別のブランチにいても）昇格できる。実行ビットは `cp -p` で保つ。
 # `lib.sh` は `dirname "${BASH_SOURCE[0]}"` から自分の隣を読むだけなので、ここから source しても動く
-# （場所は全部 `TASKD_HOME` 基準。`SD_REPO` を使うのは `release.sh` の git 操作だけ）。
+# （場所は全部 `CELERIS_CONFIG_DIR` / `CELERIS_STATE_DIR` 基準。`SD_REPO` を使うのは `release.sh` だけ）。
 mkdir -p "$STAGE/scripts"
 for sh in "$BUILD"/scripts/selfdeploy/*.sh; do
   [ -f "$sh" ] || continue

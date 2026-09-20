@@ -146,7 +146,7 @@ pub fn kill_tree_with(run_id: &str, grace: Duration, container: Option<Arc<dyn C
     // 呼ばれる）。pid の再利用は理論上あり得るが、`killpg` は「その pgid のグループ長」にしか届かず、
     // Linux の pid は上限まで順に配られるので `grace`（既定 10 秒）の間に一周することはない。
     std::thread::Builder::new()
-        .name("taskd-killpg".to_string())
+        .name("celeris-killpg".to_string())
         .spawn(move || {
             std::thread::sleep(grace);
             if let Some(pgid) = pgid {

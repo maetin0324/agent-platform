@@ -1,4 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { loadDocs, readDocsQuery } from "~/celeris/docs";
+import {
+  deleteDocPage,
+  initDocs,
+  promoteArtifact,
+  putDocPage,
+  readArtifactPromoteBody,
+  readDocPagePutBody,
+} from "~/celeris/docs-admin.server";
 import {
   defaultPromotePath,
   docsHref,
@@ -12,30 +22,20 @@ import {
   stripFrontMatter,
 } from "~/lib/docs";
 import { DOCS_TAB_LABEL, docsErrorHint, timelineKindLabel } from "~/lib/labels";
-import { TaskdClient } from "~/taskd/client.server";
-import { loadDocs, readDocsQuery } from "~/taskd/docs";
-import {
-  deleteDocPage,
-  initDocs,
-  promoteArtifact,
-  putDocPage,
-  readArtifactPromoteBody,
-  readDocPagePutBody,
-} from "~/taskd/docs-admin.server";
-import { docPage, docPageResult, docsInitResult, docsTree } from "../mock-taskd/fixtures";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+import { docPage, docPageResult, docsInitResult, docsTree } from "../mock-celeris/fixtures";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * 文書（ADR-0044 D7、taskd Phase 57 / G20。**正本は git**）。DOM を描画する unit テストが無い（G10-U1）ので、
- * 表示の判断は `~/lib/docs.ts` / `~/lib/labels.ts` の純粋関数、取得と送信は `~/taskd/docs*.ts` で見る。
+ * 文書（ADR-0044 D7、celeris Phase 57 / G20。**正本は git**）。DOM を描画する unit テストが無い（G10-U1）ので、
+ * 表示の判断は `~/lib/docs.ts` / `~/lib/labels.ts` の純粋関数、取得と送信は `~/celeris/docs*.ts` で見る。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -136,7 +136,7 @@ describe("言葉", () => {
   });
 });
 
-describe("taskd の中継", () => {
+describe("celeris の中継", () => {
   it("ツリーと選んだページを読む（`?q=` はそのまま渡す）", async () => {
     mock.on("GET", "/api/v1/projects/01P/docs", (_req, res) => sendJson(res, 200, docsTree()));
     mock.on("GET", "/api/v1/projects/01P/docs/page", (_req, res) => sendJson(res, 200, docPage()));

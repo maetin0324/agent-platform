@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Form, Link, useFetcher, useRevalidator, useSearchParams } from "react-router";
+import type { ConversationOpOutcome } from "~/celeris/action-types";
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
@@ -19,12 +20,11 @@ import {
   SECRETARY_NODE_ID,
 } from "~/lib/conversation";
 import { cn } from "~/lib/utils";
-import type { ConversationOpOutcome } from "~/taskd/action-types";
 
 /**
  * 「人」との対話（SPEC §3.4「組織の木を見て誰に言うかを決め、その担当に直接言う。相手は人なので、
  * 先週の議論の続きとして話せる」、§4 の 1「秘書との対話」と 2。ADR-0033 D4、
- * docs/taskd-api-v1.md §3.54〜3.55）。`/org/secretary` と `/org/:id` が同じ部品を使う。
+ * docs/celeris-api-v1.md §3.54〜3.55）。`/org/secretary` と `/org/:id` が同じ部品を使う。
  *
  * 送信は 202（`{message_id, task_id}`）で、返事は同期では返らない。だから送ったあとは「考え中」を出し、
  * `GET /org/{id}/messages` を {@link CONVERSATION_POLL_MS} ごとに引き直して、送った発言より後ろに
@@ -77,7 +77,7 @@ export function Conversation({ data }: { data: ConversationData }) {
   }, [fetcher.data]);
 
   // 返事を作れない状態（経路なし・run の失敗）が `GET /inbox` の `attention` に出ていたら、待つのをやめる
-  //（監査 M1。理由は taskd の値をそのまま出す。`~/lib/conversation.ts::conversationTrouble`）。
+  //（監査 M1。理由は celeris の値をそのまま出す。`~/lib/conversation.ts::conversationTrouble`）。
   const trouble = conversationTrouble(attention, [...conversationTaskIds(messages), waiting?.taskId]);
 
   // 返事が入ったら止める（ポーリングの終了条件）。返事が作れない状態になったときも止める。

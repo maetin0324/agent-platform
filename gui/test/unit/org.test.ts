@@ -1,22 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadOrg } from "~/routes/org";
-import { TaskdClient } from "~/taskd/client.server";
+import { CelerisClient } from "~/celeris/client.server";
 import {
   buildOrgCreateInput,
   buildOrgPatchInput,
   createOrgNode,
   deleteOrgNode,
   patchOrgNode,
-} from "~/taskd/org-admin.server";
-import type { MemoryView, OrgList, OrgNode, StandingRuleList, TaskList } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+} from "~/celeris/org-admin.server";
+import type { MemoryView, OrgList, OrgNode, StandingRuleList, TaskList } from "~/celeris/types";
+import { loadOrg } from "~/routes/org";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -251,7 +251,7 @@ describe("loadOrg", () => {
 });
 
 /**
- * 記憶（SPEC §3.2「記憶は案件をまたぐ」。ADR-0033 D6、docs/taskd-api-v1.md §3.62、監査 M4）。
+ * 記憶（SPEC §3.2「記憶は案件をまたぐ」。ADR-0033 D6、docs/celeris-api-v1.md §3.62、監査 M4）。
  * 読み取り専用。`[memory]` 未設定は 409 `memory_unavailable` で、その旨だけを画面に出す。
  */
 describe("loadOrg と記憶（GET /org/{id}/memory）", () => {
@@ -277,9 +277,9 @@ describe("loadOrg と記憶（GET /org/{id}/memory）", () => {
     baseMocks();
     const memory: MemoryView = {
       notes: "- 2026-09-17: pegasus は pjsub で投げる\n",
-      notes_path: "/var/lib/taskd/memory/coding-poc/notes.md",
+      notes_path: "/var/lib/celeris/memory/coding-poc/notes.md",
       project: "- 2026-09-17: Pluvio は非同期ランタイム基盤\n",
-      project_path: "/var/lib/taskd/memory/coding-poc/projects/p1.md",
+      project_path: "/var/lib/celeris/memory/coding-poc/projects/p1.md",
     };
     mock.on("GET", "/api/v1/org/coding-poc/memory", (_req, res) => sendJson(res, 200, memory));
 
@@ -312,7 +312,7 @@ describe("loadOrg と記憶（GET /org/{id}/memory）", () => {
   });
 });
 
-describe("createOrgNode / patchOrgNode / deleteOrgNode (ADR-0033 D1, docs/taskd-api-v1.md §3.43〜3.45)", () => {
+describe("createOrgNode / patchOrgNode / deleteOrgNode (ADR-0033 D1, docs/celeris-api-v1.md §3.43〜3.45)", () => {
   it("POST /org — success", async () => {
     const node = orgNode("coding-poc", { parent_id: "coding" });
     mock.on("POST", "/api/v1/org", (_req, res) => sendJson(res, 201, node));
@@ -361,10 +361,10 @@ describe("createOrgNode / patchOrgNode / deleteOrgNode (ADR-0033 D1, docs/taskd-
     expect(result.ok).toBe(false);
   });
 
-  it("DELETE /org/{id} — success (taskd sends 204 with an empty body, not 200 {})", async () => {
+  it("DELETE /org/{id} — success (celeris sends 204 with an empty body, not 200 {})", async () => {
     // `crates/task-api/src/handlers.rs::delete_org_node` は `StatusCode::NO_CONTENT.into_response()`
     // （本文なし）を返す。`res.json()` はそれを空文字列として解析に失敗するので、
-    // `TaskdClient.delete` は 204 を特別扱いする必要がある（`~/taskd/client.server.ts`）。
+    // `CelerisClient.delete` は 204 を特別扱いする必要がある（`~/celeris/client.server.ts`）。
     mock.on("DELETE", "/api/v1/org/coding-poc", (_req, res) => {
       res.writeHead(204);
       res.end();

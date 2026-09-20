@@ -1,25 +1,25 @@
 import { data, isRouteErrorResponse, redirect } from "react-router";
+import { getCelerisClient } from "~/celeris/client.server";
+import { loadConversation, runConversationAction } from "~/celeris/conversation.server";
+import { type CelerisRouteErrorData, celerisErrorResponse, isCelerisUnavailable } from "~/celeris/errors";
 import { Conversation } from "~/components/Conversation";
 import type { ConversationData } from "~/lib/conversation";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import { TaskdBanner } from "~/root";
-import { getTaskdClient } from "~/taskd/client.server";
-import { loadConversation, runConversationAction } from "~/taskd/conversation.server";
-import { isTaskdUnavailable, type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/org.$id";
 
 /**
  * `/org/:id`（組織の木から選んだ「人」との対話。SPEC §3.4、ADR-0033 D4、
- * docs/taskd-api-v1.md §3.54〜3.55）。秘書は `/org/secretary`（同じ部品・同じ中継を使う別ルート、
- * Phase G13g で taskd 停止中も 200 にした）。ここも同じ作法にそろえる: taskd に届かないときは
+ * docs/celeris-api-v1.md §3.54〜3.55）。秘書は `/org/secretary`（同じ部品・同じ中継を使う別ルート、
+ * Phase G13g で celeris 停止中も 200 にした）。ここも同じ作法にそろえる: celeris に届かないときは
  * 捕まえて「対話はまだ何も無い」状態として描く（root が独自にバナーを出す）。
  */
 
 export async function loader({ params, request }: Route.LoaderArgs): Promise<ConversationData> {
   try {
-    return await loadConversation(getTaskdClient(), params.id, request);
+    return await loadConversation(getCelerisClient(), params.id, request);
   } catch (e) {
-    if (isTaskdUnavailable(e)) {
+    if (isCelerisUnavailable(e)) {
       return {
         nodeId: params.id,
         node: null,
@@ -30,7 +30,7 @@ export async function loader({ params, request }: Route.LoaderArgs): Promise<Con
         clusters: [],
       };
     }
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -46,7 +46,7 @@ export function meta({ params }: Route.MetaArgs) {
  */
 export async function action({ params, request }: Route.ActionArgs) {
   const form = await request.formData();
-  const outcome = await runConversationAction(getTaskdClient(), params.id, form, request.signal);
+  const outcome = await runConversationAction(getCelerisClient(), params.id, form, request.signal);
   if (outcome.ok && outcome.op === "new_project") {
     return redirect(
       `/org/${encodeURIComponent(params.id)}?project=${encodeURIComponent(outcome.project.id)}&waiting=1`,
@@ -61,11 +61,11 @@ export default function OrgConversationPage({ loaderData }: Route.ComponentProps
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const errorData = error.data as TaskdRouteErrorData;
+    const errorData = error.data as CelerisRouteErrorData;
     if (errorData.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={errorData.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={errorData.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

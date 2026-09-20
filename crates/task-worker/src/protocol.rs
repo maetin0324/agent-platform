@@ -152,8 +152,8 @@ pub struct ChildSummary {
     /// 子のワークスペース（絶対パス。集約 run が成果物を読むため）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
-    /// ADR-0041 D1: 子が worktree で作業したときのブランチ（`taskd/<child_id>`）。
-    /// 親はこのブランチを merge して子の成果を統合する（統合は LLM の仕事。taskd はコミットしない）。
+    /// ADR-0041 D1: 子が worktree で作業したときのブランチ（`celeris/<child_id>`）。
+    /// 親はこのブランチを merge して子の成果を統合する（統合は LLM の仕事。celeris はコミットしない）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
 }
@@ -287,7 +287,7 @@ impl From<&task_core::OrgNode> for OrgNodeContext {
 pub struct RunContext {
     pub prior_review: Vec<PriorReview>,
     pub inputs: Vec<ArtifactRef>,
-    /// `taskctl answer` で与えられた回答の履歴（時系列）。無ければ省略（ADR-0010 D3）。
+    /// `celerisctl answer` で与えられた回答の履歴（時系列）。無ければ省略（ADR-0010 D3）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answers: Vec<Answer>,
     /// `Reviewer` check の run でのみ `Some`（ADR-0007 D5）。
@@ -418,7 +418,7 @@ pub struct ReviewOutput {
     pub verdicts: Vec<ReviewVerdictOut>,
 }
 
-/// taskd → ワーカーの `run` メッセージ（1 行）。`{"type":"run", ...}`。
+/// celeris → ワーカーの `run` メッセージ（1 行）。`{"type":"run", ...}`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename = "run")]
 pub struct RunRequest {
@@ -482,7 +482,7 @@ pub struct Evidence {
     pub stdout_tail: Option<String>,
 }
 
-/// ワーカー → taskd のメッセージ。`done` / `error` / `question` は終端（ADR-0003 D3）。
+/// ワーカー → celeris のメッセージ。`done` / `error` / `question` は終端（ADR-0003 D3）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerMessage {
@@ -495,7 +495,7 @@ pub enum WorkerMessage {
     Comment {
         body: String,
     },
-    /// ADR-0016 D2: 実行中の委譲の提案（任意回、非終端）。taskd は検証を通ったものだけ子タスクとして挿入し、
+    /// ADR-0016 D2: 実行中の委譲の提案（任意回、非終端）。celeris は検証を通ったものだけ子タスクとして挿入し、
     /// 拒否した提案は理由を `WorkerProgress` に残す。run は失敗しない。
     Delegate {
         tasks: Vec<DelegateTask>,

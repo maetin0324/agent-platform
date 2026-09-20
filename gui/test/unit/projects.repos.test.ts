@@ -1,16 +1,16 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import type { OrgList, Project, ProjectDetail } from "~/celeris/types";
 import { PRIMARY_REPO_MARK, repoKindLabel, repoRunLabel, repoSyncLabel } from "~/lib/labels";
 import { primaryRepo, repoLocationText, repoPlaceOf } from "~/lib/repo-form";
 import { loadProjectDetail } from "~/routes/projects.$id";
-import { TaskdClient } from "~/taskd/client.server";
-import type { OrgList, Project, ProjectDetail } from "~/taskd/types";
-import { projectRepo } from "../mock-taskd/fixtures";
-import { type MockTaskd, sendJson, startMockTaskd } from "../mock-taskd/server";
+import { projectRepo } from "../mock-celeris/fixtures";
+import { type MockCeleris, sendJson, startMockCeleris } from "../mock-celeris/server";
 
 /**
- * 案件の「リポジトリ」節（ADR-0043 D1、docs/taskd-api-v1.md §3.68〜3.71。Phase 52 / G16）。
+ * 案件の「リポジトリ」節（ADR-0043 D1、docs/celeris-api-v1.md §3.68〜3.71。Phase 52 / G16）。
  * DOM を描画する unit テストがこのリポジトリに無い（G10-U1）ので、
  * (1) loader が `ProjectDetail.repos` をそのまま通すこと、
  * (2) 行に出す文言・初期値を決める純粋関数、
@@ -18,12 +18,12 @@ import { type MockTaskd, sendJson, startMockTaskd } from "../mock-taskd/server";
  * の 3 つで見る。
  */
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -41,7 +41,7 @@ const project = (over: Partial<Project> = {}): Project => ({
 });
 
 describe("loadProjectDetail の repos（§3.47 / ADR-0043 D1）", () => {
-  it("ProjectDetail.repos を並べ替えずそのまま通す（primary が先頭なのは taskd が決める）", async () => {
+  it("ProjectDetail.repos を並べ替えずそのまま通す（primary が先頭なのは celeris が決める）", async () => {
     const repos = [
       projectRepo(),
       projectRepo({
@@ -133,7 +133,7 @@ describe("/projects/:id が「リポジトリ」節を持つ", () => {
     });
   }
 
-  it("並べ替えず taskd の順で出す（ソート関数を呼ばない）", () => {
+  it("並べ替えず celeris の順で出す（ソート関数を呼ばない）", () => {
     expect(route).not.toMatch(/repos[^\n]*\.sort\(/);
   });
 });

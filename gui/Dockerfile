@@ -1,14 +1,14 @@
-# taskd-gui (docs/DESIGN.md §9)。docker build はこの開発環境では実行しない
+# celeris-gui (docs/DESIGN.md §9)。docker build はこの開発環境では実行しない
 # （registry へのアクセスが要るため。docs/adr/0008 D10）。
 #
 # 使い方（任意。§9「コンテナ」）:
-#   docker build -t taskd-gui .
+#   docker build -t celeris-gui .
 #   docker run --network host \
-#     -e TASKD_API_URL=http://127.0.0.1:7710 \
-#     -e TASKD_API_TOKEN_FILE=/run/secrets/taskd-api-token \
-#     -v /path/to/token:/run/secrets/taskd-api-token:ro \
-#     taskd-gui
-# --network host を使わない場合は TASKD_API_URL でホストの taskd を指す（例: http://host.docker.internal:7710）。
+#     -e CELERIS_API_URL=http://127.0.0.1:7710 \
+#     -e CELERIS_API_TOKEN_FILE=/run/secrets/celeris-api-token \
+#     -v /path/to/token:/run/secrets/celeris-api-token:ro \
+#     celeris-gui
+# --network host を使わない場合は CELERIS_API_URL でホストの celeris を指す（例: http://host.docker.internal:7710）。
 
 FROM node:24-slim AS builder
 WORKDIR /app
@@ -28,8 +28,8 @@ COPY --from=builder /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
 RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 
 # コンテナ内でのバインドは常に非 loopback（0.0.0.0）扱いになるため、
-# TASKD_GUI_PASSWORD_FILE（と、必要なら TASKD_GUI_SESSION_SECRET_FILE）を必ず渡すこと。
-ENV TASKD_GUI_BIND=0.0.0.0:7700
+# CELERIS_GUI_PASSWORD_FILE（と、必要なら CELERIS_GUI_SESSION_SECRET_FILE）を必ず渡すこと。
+ENV CELERIS_GUI_BIND=0.0.0.0:7700
 EXPOSE 7700
 
 USER node

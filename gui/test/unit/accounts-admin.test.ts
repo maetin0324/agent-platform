@@ -9,17 +9,17 @@ import {
   readLoginCode,
   startAccountLogin,
   submitAccountLoginCode,
-} from "~/taskd/accounts-admin.server";
-import { TaskdClient } from "~/taskd/client.server";
-import type { AccountCheckResponse, AccountLoginResult, AccountLoginStart, AccountView } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+} from "~/celeris/accounts-admin.server";
+import { CelerisClient } from "~/celeris/client.server";
+import type { AccountCheckResponse, AccountLoginResult, AccountLoginStart, AccountView } from "~/celeris/types";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -38,7 +38,7 @@ describe("readAccountId / readAccountAdapter / readLoginCode", () => {
     expect(readLoginCode(form)).toBe("good-code");
   });
 
-  it("reads adapter=codex; anything else falls back to claude-code (taskd's own default, ADR-0025 D6)", () => {
+  it("reads adapter=codex; anything else falls back to claude-code (celeris's own default, ADR-0025 D6)", () => {
     const form = new FormData();
     form.set("adapter", "codex");
     expect(readAccountAdapter(form)).toBe("codex");

@@ -1,0 +1,26 @@
+# Phase 6 ドッグフーディング用の設定例（ADR-0008）。相対パスはこのファイルのあるディレクトリ基準。
+# 使い方は docs/PROGRESS.md の Phase 6 節「人間による確認待ち」を参照。
+db = "../celeris-phase6-demo.sqlite3"
+workspace_root = "../workspaces"
+tick_ms = 2000
+max_concurrency = 1
+lease_grace_secs = 60
+idle_timeout_secs = 120           # codex も無出力（考え中）が長く続きうるので余裕を持たせる
+kill_grace_secs = 10
+review_timeout_secs = 600
+error_cooldown_secs = 300
+
+[plan]
+auto_accept = false
+
+[adapters.codex]
+# command = "codex"                   # PATH 上の codex を使うなら省略可
+# extra_args = []                     # サンドボックス／承認モードのフラグはここで指定する（ADR-0008 D3）
+# model = "gpt-5-codex"                # 省略時は codex の既定モデル
+
+[[providers]]
+id = "codex-local"
+adapter = "codex"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 1
+model = "gpt-5-codex"              # ADR-0012 D1: 空でなければ --model に使う（空なら [adapters.codex].model）

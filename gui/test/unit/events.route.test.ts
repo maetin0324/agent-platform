@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
 import { relayEvents } from "~/routes/events";
-import { TaskdClient } from "~/taskd/client.server";
-import { type MockTaskd, sendProblem, sendSseHello, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendProblem, sendSseHello, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -54,7 +54,7 @@ describe("relayEvents", () => {
     expect(req?.url).toContain("task_id=XXXX");
   });
 
-  it("relays taskd's non-2xx status (e.g. 503 too_many_streams) instead of throwing (docs/DESIGN.md §6.4)", async () => {
+  it("relays celeris's non-2xx status (e.g. 503 too_many_streams) instead of throwing (docs/DESIGN.md §6.4)", async () => {
     mock.on("GET", "/api/v1/stream", (_req, res) => {
       sendProblem(res, { status: 503, code: "too_many_streams", detail: "too many SSE connections" });
     });
@@ -64,9 +64,9 @@ describe("relayEvents", () => {
     expect(res.status).toBe(503);
   });
 
-  it("returns 503 (not an unhandled throw) when taskd is unreachable", async () => {
-    const closed = await startMockTaskd();
-    const unreachableClient = new TaskdClient({ baseUrl: closed.baseUrl, timeoutMs: 500 });
+  it("returns 503 (not an unhandled throw) when celeris is unreachable", async () => {
+    const closed = await startMockCeleris();
+    const unreachableClient = new CelerisClient({ baseUrl: closed.baseUrl, timeoutMs: 500 });
     await closed.close();
 
     const res = await relayEvents(unreachableClient, new Request("http://gui.invalid/events"));

@@ -1,13 +1,13 @@
+import type { ChangedFile, DiffStat, IntegrationState } from "~/celeris/types";
 import type { Tone } from "~/components/ui/tone";
-import type { ChangedFile, DiffStat, IntegrationState } from "~/taskd/types";
 
 /**
- * 変更の取り込み（ADR-0043 D5、taskd Phase 54 / G18）で画面が使う純粋関数。
+ * 変更の取り込み（ADR-0043 D5、celeris Phase 54 / G18）で画面が使う純粋関数。
  * DOM を描画する unit テストがこのリポジトリに無い（G10-U1）ので、**表示の判断と組み立てはここに集めて**
  * `test/unit/task-changes.test.ts` で検証する（`~/lib/task-files.ts` と同じ考え方）。
  *
- * 判断そのものは taskd 側にある: どのファイルが変わったか（`status`）、何コミット進んでいるか（`ahead`）、
- * PR を作れるか（`origin` / `gh`）、`main` が編集中か（409 `default_branch_busy`）は全部 taskd が決める。
+ * 判断そのものは celeris 側にある: どのファイルが変わったか（`status`）、何コミット進んでいるか（`ahead`）、
+ * PR を作れるか（`origin` / `gh`）、`main` が編集中か（409 `default_branch_busy`）は全部 celeris が決める。
  * ここでやるのは「返ってきた値を読みやすく並べる」ことだけで、再計算も再判定もしない。
  */
 
@@ -88,7 +88,7 @@ export function fileDeltaChip(file: ChangedFile): string {
 
 /**
  * ファイルの `status`（`A` / `M` / `D` / `?` / `T`）の色。知らない文字は中立
- * （taskd が文字を増やしても壊れない。言葉は `~/lib/labels.ts`）。
+ * （celeris が文字を増やしても壊れない。言葉は `~/lib/labels.ts`）。
  */
 const CHANGED_FILE_STATUS_TONE: Record<string, Tone> = {
   A: "success",

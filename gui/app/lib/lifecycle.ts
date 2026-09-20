@@ -1,12 +1,12 @@
-import type { MilestoneStatus, ProjectStatus } from "~/taskd/types";
+import type { MilestoneStatus, ProjectStatus } from "~/celeris/types";
 
 /**
- * 案件・途中目標の中止・一時停止・アーカイブ（ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.91。Phase 55 / G19）。
+ * 案件・途中目標の中止・一時停止・アーカイブ（ADR-0044 D6、docs/celeris-api-v1.md §3.84〜3.91。Phase 55 / G19）。
  *
- * **どの操作ができるかを決めるのは taskd**（できない操作は 409 `invalid_transition`）。ここにあるのは
- * 「押せないボタンを最初から出さない」ための表示の判定だけで、押されたら常に taskd に送り、409 の文言を
+ * **どの操作ができるかを決めるのは celeris**（できない操作は 409 `invalid_transition`）。ここにあるのは
+ * 「押せないボタンを最初から出さない」ための表示の判定だけで、押されたら常に celeris に送り、409 の文言を
  * そのまま出す（GUI 側で状態機械を作り直さない。CLAUDE.md の「仕様外の挙動に頼らない」）。
- * 判定の根拠は docs/taskd-api-v1.md §3.84〜3.91 の表と「いまの状態でできない操作」の 4 行:
+ * 判定の根拠は docs/celeris-api-v1.md §3.84〜3.91 の表と「いまの状態でできない操作」の 4 行:
  * 中止済みの `cancel` / 終端・一時停止中の `pause` / `paused` でないものの `resume` / 非終端の案件の `archive`。
  */
 
@@ -40,7 +40,7 @@ export interface ProjectLifecycleButtons {
   pause: boolean;
   /** 「再開」: `paused` のときだけ。 */
   resume: boolean;
-  /** 「中止（確認付き）」: 中止済み以外。`done` の案件も taskd は受ける。 */
+  /** 「中止（確認付き）」: 中止済み以外。`done` の案件も celeris は受ける。 */
   cancel: boolean;
   /** 「アーカイブ（確認付き）」: まだアーカイブされていないとき（押せるかは `archiveEnabled`）。 */
   archive: boolean;
@@ -77,8 +77,8 @@ export interface MilestoneLifecycleButtons {
   resume: boolean;
   /**
    * 「中止（確認付き）」: **終端でないときだけ**。案件と違い、途中目標は達成（`reached`）・
-   * 再設計（`redesigned`）・中止済みのどれも taskd が 409 で断る
-   * （docs/taskd-api-v1.md §3.84〜3.91 の「終端は…途中目標が `reached` / `redesigned` / `cancelled`」）。
+   * 再設計（`redesigned`）・中止済みのどれも celeris が 409 で断る
+   * （docs/celeris-api-v1.md §3.84〜3.91 の「終端は…途中目標が `reached` / `redesigned` / `cancelled`」）。
    */
   cancel: boolean;
 }
@@ -109,7 +109,7 @@ export function readArchivedParam(params: URLSearchParams): boolean {
 
 /**
  * `GET /projects` / `GET /tasks` に渡す `archived`。隠すのが既定なので、**表示するときだけ** `1` を送る
- * （送らなければ taskd の既定＝隠す）。
+ * （送らなければ celeris の既定＝隠す）。
  */
 export function archivedQuery(showArchived: boolean): "1" | undefined {
   return showArchived ? "1" : undefined;

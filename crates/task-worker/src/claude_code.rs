@@ -1,6 +1,6 @@
 //! `claude-code` アダプタ（DESIGN §5.4, ADR-0003 D7, ADR-0006）。
 //!
-//! `claude` CLI は taskd 独自のワーカープロトコルを話さない。`--output-format stream-json` が吐く
+//! `claude` CLI は celeris 独自のワーカープロトコルを話さない。`--output-format stream-json` が吐く
 //! Claude Code 自身のイベント（`system`/`assistant`/`user`/`result`）を読み、結果ファイル規約
 //! （ADR-0006 D3: `artifacts/result.json`）と `result` メッセージ（D4）から `RunOutcome` を合成する。
 //! 生存監視（wall-clock・無出力タイムアウト・SIGTERM→SIGKILL）は `subprocess.rs` の低レベル部分を再利用する。
@@ -25,14 +25,14 @@ use crate::subprocess::{
     LineOutcome, MAX_LINE_BYTES, kill_now, reap_after_terminal, read_line_limited, read_tail, write_result_json,
 };
 
-/// `[adapters.claude_code]`（taskd.toml, ADR-0006 D6）。
+/// `[adapters.claude_code]`（config.toml, ADR-0006 D6）。
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeConfig {
     /// 起動するコマンド名／パス。既定 `"claude"`。
     pub command: String,
     /// 末尾に追加する引数。
     pub extra_args: Vec<String>,
-    /// `--permission-mode`。既定 `"bypassPermissions"`（ADR-0006 D6: taskd は許可プロンプトに応答できない）。
+    /// `--permission-mode`。既定 `"bypassPermissions"`（ADR-0006 D6: celeris は許可プロンプトに応答できない）。
     pub permission_mode: String,
     /// `--model`（省略時は claude の既定モデル）。
     pub model: Option<String>,
@@ -234,7 +234,7 @@ fn harness_artifacts_section_for_plan(context: &RunContext) -> String {
     }
     out.push_str(
         "受け入れ条件（`artifact_exists`）にはこの名前だけを使うこと。上に無い名前のファイルを要求しても、\n\
-         その担当は書けない（条件は taskd が落とし、警告が残る）。**内容の要求は `objective` に書き、\n\
+         その担当は書けない（条件は celeris が落とし、警告が残る）。**内容の要求は `objective` に書き、\n\
          レビュアー条件（`{\"type\":\"reviewer\"}`）で判定させること**（「X を Y に書け」ではなく\n\
          「答えに X を含めよ」）。\n\n",
     );
@@ -386,7 +386,7 @@ fn delegation_instructions(artifacts: &str) -> String {
          \"depends_on\":[<index into this array, or an existing task id>]}}]}}`. \
          `check` may also be \
          `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, `{{\"type\":\"reviewer\"}}`, or `{{\"type\":\"human\"}}`. \
-         taskd will validate this after this run ends and insert whatever proposals pass validation as child \
+         celeris will validate this after this run ends and insert whatever proposals pass validation as child \
          tasks (how many are accepted per run is limited by configuration; any rejected proposal has its \
          reason recorded as an event you cannot see, but a human can). A task cannot list its own parent or \
          itself in `depends_on`. This task will not be considered done until any children you delegated have \
@@ -417,7 +417,7 @@ fn workspace_section_for_plan(context: &RunContext) -> String {
         "## 子タスクの作業場所 (the workspace child tasks inherit)\n\
          {note}\n\
          コードを扱う仕事はこの場所で行われ、分解した子タスクはこの作業場所をそのまま継ぐ。担当に \
-         `ssh` でリモートの作業ツリーへ直接書かせてはいけない（同期は taskd が行う）。**別の場所**\
+         `ssh` でリモートの作業ツリーへ直接書かせてはいけない（同期は celeris が行う）。**別の場所**\
          （別のリポジトリ・別のクラスタ）で作業させたい子にだけ、`workspace` に \
          `{{\"kind\":\"local\",\"path\":\"...\"}}` か \
          `{{\"kind\":\"remote\",\"cluster\":\"...\",\"path\":\"...\"}}` を書け。\n\n"
@@ -748,7 +748,7 @@ async fn run_claude_code(
         match outcome {
             LineOutcome::Eof => break,
             LineOutcome::TooLong => {
-                // claude 自身のフォーマットは taskd が定義したものではないため、寛容に無視する（ADR-0006 D5）。
+                // claude 自身のフォーマットは celeris が定義したものではないため、寛容に無視する（ADR-0006 D5）。
                 sink.heartbeat();
                 last_activity = Instant::now();
                 warn!("run {run_id}: discarding overlong line from claude stdout");
@@ -816,7 +816,7 @@ async fn run_claude_code(
     })
 }
 
-/// 壁時計の Unix 秒（ADR-0024 D4: 観測時刻は taskd の壁時計）。`claude_account` の確認・ログイン中継からも使う。
+/// 壁時計の Unix 秒（ADR-0024 D4: 観測時刻は celeris の壁時計）。`claude_account` の確認・ログイン中継からも使う。
 pub(crate) fn now_unix_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

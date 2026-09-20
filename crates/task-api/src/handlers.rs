@@ -734,7 +734,7 @@ async fn health(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
         &Health {
             api_version: API_VERSION.to_string(),
             schema_version,
-            taskd_version: inner.taskd_version.clone(),
+            celeris_version: inner.celeris_version.clone(),
             instance_id: inner.instance_id.clone(),
             started_at: inner.started_at.clone(),
             now: now_rfc3339(),
@@ -914,7 +914,7 @@ async fn create_task(
     }
     // ADR-0016 M3 / ADR-0027 D1: 省略された tier / adapter / 予算は `[[roles]]` の既定 → `[[genres]]` の
     // `default_role` の既定 → 全体の既定で埋める。API は常に完全な設定を持つので、`genres` が設定されて
-    // いれば知らない `genre` / `genre` と `role` の不整合は常に検証する（taskctl の「`--config` 無し」の
+    // いれば知らない `genre` / `genre` と `role` の不整合は常に検証する（celerisctl の「`--config` 無し」の
     // 緩さはここには無い）。
     let roles = state.inner.roles.clone();
     let genres = state.inner.genres.clone();
@@ -1627,7 +1627,7 @@ async fn reload(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw)
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx.send(AdminRequest::Reload { reply: reply_tx }).await.is_err() {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
@@ -1635,7 +1635,7 @@ async fn reload(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw)
             Ok(json_response(StatusCode::OK, &ReloadResult { reloaded: true }))
         }
         Ok(Ok(Err(message))) => Err(ApiProblem::bad_request(format!("invalid config: {message}"))),
-        Ok(Err(_)) => Err(ApiProblem::internal("taskd dropped the reload request")),
+        Ok(Err(_)) => Err(ApiProblem::internal("celeris dropped the reload request")),
         Err(_) => Err(ApiProblem::internal("reload timed out")),
     }
 }
@@ -1658,11 +1658,11 @@ async fn check_provider(
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the check request")),
+        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the check request")),
         Err(_) => return Err(ApiProblem::internal("check timed out")),
     };
     match outcome {
@@ -1751,7 +1751,7 @@ async fn accounts(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
 }
 
 /// 3.30 `POST /accounts`: ディレクトリを 0700 で作る。task-api 自身は `Dispatcher`/`AccountBook` に触れない
-/// （次の選択のタイミングで taskd がディレクトリを見つける。ADR-0024 D1）。`adapter`（既定 `claude-code`）が
+/// （次の選択のタイミングで celeris がディレクトリを見つける。ADR-0024 D1）。`adapter`（既定 `claude-code`）が
 /// 指す根ディレクトリが設定されていなければ 409（ADR-0025 D6）。
 async fn create_account(State(state): State<ApiState>, headers: HeaderMap, RawQuery(raw): RawQuery, body: Body) -> ApiResult {
     no_query(&raw)?;
@@ -1803,10 +1803,10 @@ async fn create_account(State(state): State<ApiState>, headers: HeaderMap, RawQu
     Ok(response)
 }
 
-/// 3.31 `DELETE /accounts/{id}`: taskd 側へ委譲する（S2+S8）。`<root>/.removed/<id>-<unix秒>/` へ移す
+/// 3.31 `DELETE /accounts/{id}`: celeris 側へ委譲する（S2+S8）。`<root>/.removed/<id>-<unix秒>/` へ移す
 /// （認証ファイルは消さない）。task-api 自身はファイルを動かさない: スナップショットの `in_use` はポーリング
 /// 間隔だけ古くなりうる（レース）ので、`account_in_use`（running/reviewing を直接見る、ディスパッチャの
-/// 権威ある値）を持つ taskd 側でチェックしてから移動する。`?adapter=`（省略時 claude-code。ADR-0025 D6）。
+/// 権威ある値）を持つ celeris 側でチェックしてから移動する。`?adapter=`（省略時 claude-code。ADR-0025 D6）。
 async fn delete_account(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -1828,7 +1828,7 @@ async fn delete_account(
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
@@ -1836,7 +1836,7 @@ async fn delete_account(
             Ok(json_response(StatusCode::OK, &serde_json::json!({})))
         }
         Ok(Ok(Err(e))) => Err(account_admin_error(&id, e)),
-        Ok(Err(_)) => Err(ApiProblem::internal("taskd dropped the account remove request")),
+        Ok(Err(_)) => Err(ApiProblem::internal("celeris dropped the account remove request")),
         Err(_) => Err(ApiProblem::internal("account remove timed out")),
     }
 }
@@ -1844,7 +1844,7 @@ async fn delete_account(
 fn account_admin_error(id: &str, err: AccountAdminError) -> ApiProblem {
     match err {
         AccountAdminError::NotFound => ApiProblem::account_not_found(id),
-        // S6: taskd 側の都合で完了できなかった（`[accounts]` 未設定・チャネルが閉じている等）のは
+        // S6: celeris 側の都合で完了できなかった（`[accounts]` 未設定・チャネルが閉じている等）のは
         // サーバの内部エラーではなく、GUI が「アカウント管理は使えない」と表示すべき状態。
         AccountAdminError::Unavailable(_) => ApiProblem::accounts_unavailable(),
         AccountAdminError::LoginNotStarted => ApiProblem::login_not_started(),
@@ -1854,7 +1854,7 @@ fn account_admin_error(id: &str, err: AccountAdminError) -> ApiProblem {
     }
 }
 
-/// 3.32 `POST /accounts/{id}/check`（ADR-0024 D6, ADR-0025 D4）: taskd 側で実行する（task-api はプロセスを
+/// 3.32 `POST /accounts/{id}/check`（ADR-0024 D6, ADR-0025 D4）: celeris 側で実行する（task-api はプロセスを
 /// 起動しない）。`?adapter=`（省略時 claude-code）。
 async fn check_account(
     State(state): State<ApiState>,
@@ -1877,11 +1877,11 @@ async fn check_account(
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(70), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the check request")),
+        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the check request")),
         Err(_) => return Err(ApiProblem::internal("check timed out")),
     };
     match outcome {
@@ -1927,11 +1927,11 @@ async fn start_account_login(
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(20), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the login request")),
+        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the login request")),
         Err(_) => return Err(ApiProblem::internal("login start timed out")),
     };
     match outcome {
@@ -1990,11 +1990,11 @@ async fn submit_account_login_code(
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the login code request")),
+        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the login code request")),
         Err(_) => return Err(ApiProblem::internal("login code timed out")),
     };
     match outcome {
@@ -2035,7 +2035,7 @@ async fn cancel_account_login(
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
@@ -2043,7 +2043,7 @@ async fn cancel_account_login(
             Ok(json_response(StatusCode::OK, &serde_json::json!({})))
         }
         Ok(Ok(Err(e))) => Err(account_admin_error(&id, e)),
-        Ok(Err(_)) => Err(ApiProblem::internal("taskd dropped the login cancel request")),
+        Ok(Err(_)) => Err(ApiProblem::internal("celeris dropped the login cancel request")),
         Err(_) => Err(ApiProblem::internal("login cancel timed out")),
     }
 }
@@ -2109,7 +2109,7 @@ fn cluster_admin_error(id: &str, err: ClusterAdminError) -> ApiProblem {
     }
 }
 
-/// `POST /clusters/{id}/connect`（ADR-0032 D5）: taskd 側で ssh の子プロセスを張る／借りる。
+/// `POST /clusters/{id}/connect`（ADR-0032 D5）: celeris 側で ssh の子プロセスを張る／借りる。
 /// プロンプト文字列はログには出さない（ユーザ名・ホスト名が入るため）。
 async fn start_cluster_connect(
     State(state): State<ApiState>,
@@ -2122,7 +2122,7 @@ async fn start_cluster_connect(
     require_active(&state)?;
     require_known_cluster(&state, &id)?;
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
@@ -2130,11 +2130,11 @@ async fn start_cluster_connect(
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the cluster connect request")),
+        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the cluster connect request")),
         Err(_) => return Err(ApiProblem::internal("cluster connect timed out")),
     };
     match outcome {
@@ -2175,7 +2175,7 @@ async fn submit_cluster_connect_code(
         return Err(ApiProblem::cluster_connect_code_invalid());
     }
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
@@ -2183,11 +2183,11 @@ async fn submit_cluster_connect_code(
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(40), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the cluster connect code request")),
+        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the cluster connect code request")),
         Err(_) => return Err(ApiProblem::internal("cluster connect code timed out")),
     };
     match outcome {
@@ -2211,7 +2211,7 @@ async fn cancel_cluster_connect(
     require_active(&state)?;
     require_known_cluster(&state, &id)?;
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx
@@ -2219,7 +2219,7 @@ async fn cancel_cluster_connect(
         .await
         .is_err()
     {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
         Ok(Ok(Ok(()))) => {
@@ -2227,7 +2227,7 @@ async fn cancel_cluster_connect(
             Ok(json_response(StatusCode::OK, &serde_json::json!({})))
         }
         Ok(Ok(Err(e))) => Err(cluster_admin_error(&id, e)),
-        Ok(Err(_)) => Err(ApiProblem::internal("taskd dropped the cluster disconnect request")),
+        Ok(Err(_)) => Err(ApiProblem::internal("celeris dropped the cluster disconnect request")),
         Err(_) => Err(ApiProblem::internal("cluster disconnect timed out")),
     }
 }
@@ -2388,7 +2388,7 @@ mod tests {
             // この単体テストのルータにもトークンを持たせる（下の要求は Bearer を付ける）。
             token: Some(REPLAY_TEST_TOKEN.to_string()),
             allowed_hosts: vec![],
-            db_path: dir.join("taskd.db"),
+            db_path: dir.join("celeris.db"),
             busy_timeout: Duration::from_millis(5000),
             view: ViewContext {
                 workspace_root: dir.join("ws"),
@@ -2430,7 +2430,7 @@ mod tests {
             roles: vec![],
             genres: vec![],
             conversation_genre: task_core::CONVERSATION_GENRE.to_string(),
-            taskd_version: "test".into(),
+            celeris_version: "test".into(),
             instance_id: "01J00000000000000000000000".into(),
             started_at: "2026-09-14T00:00:00Z".into(),
             providers_dir: None,

@@ -60,14 +60,14 @@ pub(crate) struct Inner {
     pub(crate) genres: Vec<task_core::GenreSpec>,
     /// Phase 30（ADR-0033 D4 追記）: 対話は常にこの分野で走る（ノードの `genre` は使わない）。
     pub(crate) conversation_genre: String,
-    pub(crate) taskd_version: String,
+    pub(crate) celeris_version: String,
     pub(crate) providers_dir: Option<std::path::PathBuf>,
     pub(crate) admin_tx: Option<tokio::sync::mpsc::Sender<crate::admin::AdminRequest>>,
     pub(crate) accounts_roots: HashMap<AccountAdapter, std::path::PathBuf>,
     pub(crate) max_runs_per_account: usize,
     /// ADR-0030 D1: `[secrets] dir`。`None` なら管理系は 409 `secrets_unavailable`。
     pub(crate) secrets_dir: Option<std::path::PathBuf>,
-    /// ADR-0030 D3: 秘密 id → `used_by`（taskd が設定から渡す）。
+    /// ADR-0030 D3: 秘密 id → `used_by`（celeris が設定から渡す）。
     pub(crate) secret_usage: HashMap<String, Vec<crate::types::SecretUse>>,
     /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory] dir`。`None` なら `GET /org/{id}/memory` は 409。
     pub(crate) memory_dir: Option<std::path::PathBuf>,
@@ -75,7 +75,7 @@ pub(crate) struct Inner {
     pub(crate) notify_secret_id: String,
     /// ADR-0037 D3: `[notify] gui_base_url`。
     pub(crate) notify_gui_base_url: Option<String>,
-    /// ADR-0040 D6（Phase 48）: `[selfdeploy] releases_dir` を読む係（taskd が渡す）。`None` なら
+    /// ADR-0040 D6（Phase 48）: `[selfdeploy] releases_dir` を読む係（celeris が渡す）。`None` なら
     /// `GET /releases` は空、`POST /releases/{sha12}/promote` は 409。
     pub(crate) releases: Option<crate::releases::SharedReleaseSource>,
     /// ADR-0040 D4（Phase 47）: `GET /health` の `release` / `mode` と、管理 API の 503 に使う役割。
@@ -122,7 +122,7 @@ impl ApiState {
             roles: settings.roles,
             genres: settings.genres,
             conversation_genre: settings.conversation_genre,
-            taskd_version: settings.taskd_version,
+            celeris_version: settings.celeris_version,
             providers_dir: settings.providers_dir,
             admin_tx: settings.admin_tx,
             accounts_roots: settings.accounts_roots,
@@ -171,7 +171,7 @@ impl ApiState {
         self.inner.streams.load(Ordering::SeqCst)
     }
 
-    /// 全 SSE 接続を閉じる（taskd の停止時。`serve` は shutdown で呼ぶ）。以後の購読もすぐ閉じる。
+    /// 全 SSE 接続を閉じる（celeris の停止時。`serve` は shutdown で呼ぶ）。以後の購読もすぐ閉じる。
     pub fn close_streams(&self) {
         self.inner.shutdown.send_replace(true);
     }

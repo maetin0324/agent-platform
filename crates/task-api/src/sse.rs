@@ -3,7 +3,7 @@
 //! 接続ごとに購読ループを 1 つ動かす（購読者が 0 ならポーリングも無い）。ループは `events_since(cursor, 1000)` を
 //! `poll_interval` ごとに呼んで `task.event` を送り、`watch` の変化で `daemon`、`heartbeat_interval` ごとに `heartbeat` を送る。
 //! クライアントが切断すると（応答本体が捨てられて送信路が閉じ）、ループはすぐに終わって接続枠を返す。
-//! taskd の停止時は `ApiState::close_streams` で全ループが終わり、接続が閉じる。
+//! celeris の停止時は `ApiState::close_streams` で全ループが終わり、接続が閉じる。
 
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;

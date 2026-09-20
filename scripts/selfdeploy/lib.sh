@@ -1,35 +1,59 @@
 #!/usr/bin/env bash
-# scripts/selfdeploy/lib.sh — release / verify / promote / rollback / status で共有する道具
-# （ADR-0040 D1/D2）。単体では何もしない。`source` して使う。
+# scripts/selfdeploy/lib.sh — release / verify / promote / rollback / status / migrate で共有する道具
+# （ADR-0040 D1/D2、ADR-0045 D2）。単体では何もしない。`source` して使う。
+#
+# 置き場（ADR-0045 D2。XDG 流に設定と状態を分ける）:
+#   $CELERIS_CONFIG_DIR（既定 ~/.config/celeris） 設定と秘密: config.toml org.toml providers.d/ api.token
+#                                                 gui.password gui.session-secret secrets/
+#   $CELERIS_STATE_DIR （既定 ~/.local/celeris）  状態: celeris.sqlite3 releases/ backups/ staging/
+#                                                 workspaces/ memory/ logs/ tools/ current previous
 #
 # 触ってよい場所（ADR-0040 D1、安全規則）:
-#   $SD_RELEASES ($TASKD_HOME/releases) / $SD_STAGING ($TASKD_HOME/staging) / $SD_BACKUPS ($TASKD_HOME/backups)
-#   と、昇格のときだけ $SD_CURRENT / $SD_PREVIOUS の symlink。
-# 触ってはいけない場所: $TASKD_HOME/taskd.toml（編集しない）、$TASKD_HOME/taskd.sqlite3（`sqlite3 .backup` と
-#   `mode=ro` で読むだけ）、本番のポート 127.0.0.1:7710 と 0.0.0.0:7700（bind しない）。
+#   $SD_RELEASES / $SD_STAGING / $SD_BACKUPS と、昇格のときだけ $SD_CURRENT / $SD_PREVIOUS の symlink。
+# 触ってはいけない場所: $SD_CONFIG（編集しない。`migrate-to-celeris.sh` だけが移行のときに 1 度書く）、
+#   $SD_DB（`sqlite3 .backup` と `mode=ro` で読むだけ）、本番のポート 127.0.0.1:7710 と 0.0.0.0:7700（bind しない）。
 
 # shellcheck shell=bash
 
 # ---- 場所 ------------------------------------------------------------------
 
-TASKD_HOME="${TASKD_HOME:-$HOME/taskd}"
-# `SD_REPO` を要るのは `release.sh`（git worktree を生やす）だけ。`verify.sh` / `promote.sh` /
-# `rollback.sh` / `status.sh` は `TASKD_HOME` の下だけを見るので、作業チェックアウトが無くても動く。
+CELERIS_CONFIG_DIR="${CELERIS_CONFIG_DIR:-$HOME/.config/celeris}"
+CELERIS_STATE_DIR="${CELERIS_STATE_DIR:-$HOME/.local/celeris}"
+# `SD_REPO` を要るのは `release.sh`（作業ツリーを生やす）だけ。`verify.sh` / `promote.sh` /
+# `rollback.sh` / `status.sh` は上の 2 つの下だけを見るので、作業チェックアウトが無くても動く。
 # ADR-0040 D6（Phase 48）: `release.sh` がこの一式を `<release>/scripts/` に写すので、
 # `promote.sh` はリリースの中から（`POST /releases/{sha12}/promote` 経由で）起きることがある。
 # そのときも `lib.sh` は `dirname "${BASH_SOURCE[0]}"` で自分の隣を読むだけなので、場所に依らない。
 SD_REPO="${SD_REPO:-$HOME/workspace/agent-platform}"
 
-SD_RELEASES="$TASKD_HOME/releases"
+SD_RELEASES="$CELERIS_STATE_DIR/releases"
 SD_BUILD_ROOT="$SD_RELEASES/.build"
 SD_CARGO_TARGET="$SD_RELEASES/.cargo-target"
-SD_STAGING="$TASKD_HOME/staging"
-SD_BACKUPS="$TASKD_HOME/backups"
-SD_CURRENT="$TASKD_HOME/current"
-SD_PREVIOUS="$TASKD_HOME/previous"
-SD_CONFIG="$TASKD_HOME/taskd.toml"
-SD_DB="$TASKD_HOME/taskd.sqlite3"
-SD_API_TOKEN_FILE="$TASKD_HOME/api.token"
+SD_STAGING="$CELERIS_STATE_DIR/staging"
+SD_BACKUPS="$CELERIS_STATE_DIR/backups"
+SD_CURRENT="$CELERIS_STATE_DIR/current"
+SD_PREVIOUS="$CELERIS_STATE_DIR/previous"
+# 設定ファイル。`CELERIS_CONFIG` が立っていればそれが勝つ（移行のあいだ `verify.sh` に
+# **旧い名前の**設定ファイルを読ませるため。ADR-0045 D3 の段取り 1）。
+SD_CONFIG="${CELERIS_CONFIG:-$CELERIS_CONFIG_DIR/config.toml}"
+SD_API_TOKEN_FILE="$CELERIS_CONFIG_DIR/api.token"
+
+# DB は**設定ファイルの `db =` から読む**（ADR-0045 D2）。`CELERIS_DB` が立っていればそれが勝つ
+# （移行のあいだ `verify.sh` に旧 DB を見せるため）。設定が無い／`db` を書いていないときは
+# celeris 本体と同じ既定（$CELERIS_STATE_DIR/celeris.sqlite3）。
+sd_db_from_config() {
+  local v
+  [ -f "$SD_CONFIG" ] || { printf '%s' "$CELERIS_STATE_DIR/celeris.sqlite3"; return 0; }
+  # 最初の節（`[...]`）より前の、トップレベルの `db = "..."` だけを見る。
+  v="$(sed -n '/^[[:space:]]*\[/q; s/^[[:space:]]*db[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$SD_CONFIG" | head -n 1)"
+  if [ -z "$v" ]; then printf '%s' "$CELERIS_STATE_DIR/celeris.sqlite3"; return 0; fi
+  case "$v" in
+    "~/"*) printf '%s/%s' "$HOME" "${v#"~/"}" ;;
+    /*) printf '%s' "$v" ;;
+    *) printf '%s/%s' "$(dirname "$SD_CONFIG")" "$v" ;;   # 相対は設定ファイルのディレクトリ基準
+  esac
+}
+SD_DB="${CELERIS_DB:-$(sd_db_from_config)}"
 
 # 本番のポート。ここに bind してはいけない（読むだけ）。
 SD_PROD_API="http://127.0.0.1:7710"
@@ -407,8 +431,8 @@ sd_lock_or_tempfail() {
 SD_SENSITIVE_PATTERNS=(
   "scripts/selfdeploy/"
   "deploy/"
-  "crates/taskd/src/instance.rs"
-  "crates/taskd/src/releases.rs"
+  "crates/celeris/src/instance.rs"
+  "crates/celeris/src/releases.rs"
   "crates/task-api/src/releases.rs"
   "crates/task-core/migrations/"
   "CLAUDE.md"

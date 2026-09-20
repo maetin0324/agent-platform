@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { createProject, patchProjectWorkspace, readProjectCreateInput } from "~/celeris/projects-admin.server";
+import type { Clusters, Project, ProjectDetail, ProjectList } from "~/celeris/types";
 import { loadProjects } from "~/routes/projects";
-import { TaskdClient } from "~/taskd/client.server";
-import { createProject, patchProjectWorkspace, readProjectCreateInput } from "~/taskd/projects-admin.server";
-import type { Clusters, Project, ProjectDetail, ProjectList } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, serveProjectList, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, sendProblem, serveProjectList, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -28,7 +28,7 @@ const project = (id: string, over: Partial<Project> = {}): Project => ({
 });
 
 describe("readProjectCreateInput", () => {
-  it("reads title/request from a FormData (sent as-is, taskd validates)", () => {
+  it("reads title/request from a FormData (sent as-is, celeris validates)", () => {
     const form = new FormData();
     form.set("title", "Pluvio の新テーマ");
     form.set("request", "Pluvio を基盤に用いた新たな研究テーマの模索、検証");
@@ -38,7 +38,7 @@ describe("readProjectCreateInput", () => {
     });
   });
 
-  it("blank fields stay blank (GUI does not validate; taskd's 422 is what the user sees)", () => {
+  it("blank fields stay blank (GUI does not validate; celeris's 422 is what the user sees)", () => {
     expect(readProjectCreateInput(new FormData())).toEqual({ title: "", request: "" });
   });
 
@@ -80,7 +80,7 @@ describe("readProjectCreateInput", () => {
 });
 
 /** ADR-0039 D1（Phase G13k）: 作成時に送る `workspace` の本文 3 種（3.46 の要求本文どおり）。 */
-describe("createProject の workspace 本文（3 種、docs/taskd-api-v1.md §3.46）", () => {
+describe("createProject の workspace 本文（3 種、docs/celeris-api-v1.md §3.46）", () => {
   it("undecided: workspace キーを送らない", async () => {
     mock.on("POST", "/api/v1/projects", (_req, res, body) => {
       expect(JSON.parse(body)).toEqual({ title: "t", request: "r" });
@@ -305,10 +305,10 @@ describe("loadProjects", () => {
   });
 
   /**
-   * アーカイブ（ADR-0044 D6、Phase 55 / G19）。隠す・出すの判断は taskd なので、GUI は
-   * **`?archived=1` を付けるかどうか**だけを決める（既定は付けない = taskd が隠す）。
+   * アーカイブ（ADR-0044 D6、Phase 55 / G19）。隠す・出すの判断は celeris なので、GUI は
+   * **`?archived=1` を付けるかどうか**だけを決める（既定は付けない = celeris が隠す）。
    */
-  it("既定では archived を送らない（taskd がアーカイブ済みを隠す）", async () => {
+  it("既定では archived を送らない（celeris がアーカイブ済みを隠す）", async () => {
     serveProjectList(mock, { archived: [project("p9", { archived_at: "2026-09-19T12:00:00Z" })] });
     mock.on("GET", "/api/v1/projects/p1", (_req, res) =>
       sendJson(res, 200, { project: project("p1"), milestones: [], tasks: [] } satisfies ProjectDetail),
@@ -320,7 +320,7 @@ describe("loadProjects", () => {
     expect(result.rows.map((r) => r.project.id)).toEqual(["p1"]);
     const url = new URL(
       mock.requests.find((r) => r.url.startsWith("/api/v1/projects?"))?.url ?? "/api/v1/projects",
-      "http://mock-taskd.invalid",
+      "http://mock-celeris.invalid",
     );
     expect(url.searchParams.has("archived")).toBe(false);
   });
@@ -339,13 +339,13 @@ describe("loadProjects", () => {
     expect(result.rows.map((r) => r.project.id)).toEqual(["p1", "p9"]);
     const url = new URL(
       mock.requests.find((r) => r.url.startsWith("/api/v1/projects?"))?.url ?? "",
-      "http://mock-taskd.invalid",
+      "http://mock-celeris.invalid",
     );
     expect(url.searchParams.get("archived")).toBe("1");
   });
 });
 
-describe("createProject (POST /projects, docs/taskd-api-v1.md §3.46)", () => {
+describe("createProject (POST /projects, docs/celeris-api-v1.md §3.46)", () => {
   it("success — 作られた案件は必ず status = proposed", async () => {
     const created = project("p1", { status: "proposed" });
     mock.on("POST", "/api/v1/projects", (_req, res) => sendJson(res, 201, created));

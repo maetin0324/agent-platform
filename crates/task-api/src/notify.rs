@@ -5,7 +5,7 @@
 //!
 //! **webhook の URL は応答にも問題詳細にも出さない**（ADR-0030 D3 の秘密の規律そのまま）。
 //! 出すのは「設定済みかどうか」と `fingerprint`（値の sha256 の先頭 8 桁）だけ。
-//! 送信そのものは HTTP クライアントを持つ taskd へ `AdminRequest::NotifyTest` で委譲する
+//! 送信そのものは HTTP クライアントを持つ celeris へ `AdminRequest::NotifyTest` で委譲する
 //! （task-api はネットワークに出ない。`reload` / `check` と同じ形）。
 
 use axum::extract::{RawQuery, State};
@@ -142,16 +142,16 @@ pub(crate) async fn test(
     }
     let Some(admin_tx) = state.inner.admin_tx.clone() else {
         return Err(ApiProblem::notify_unavailable(
-            "taskd is not accepting admin requests, so the test cannot be sent",
+            "celeris is not accepting admin requests, so the test cannot be sent",
         ));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if admin_tx.send(AdminRequest::NotifyTest { reply: reply_tx }).await.is_err() {
-        return Err(ApiProblem::internal("taskd is not accepting admin requests"));
+        return Err(ApiProblem::internal("celeris is not accepting admin requests"));
     }
     let outcome = match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => return Err(ApiProblem::internal("taskd dropped the notify test request")),
+        Ok(Err(_)) => return Err(ApiProblem::internal("celeris dropped the notify test request")),
         Err(_) => return Err(ApiProblem::internal("the notify test timed out")),
     };
     match outcome {

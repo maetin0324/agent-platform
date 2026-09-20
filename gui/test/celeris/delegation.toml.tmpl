@@ -1,0 +1,44 @@
+# scripts/celeris.sh fixture delegation 用の config.toml（docs/DESIGN.md §10 Phase G7、ADR-0016）。
+# [[roles]] は id だけで十分（tier/adapter/予算は省略時の既定に委ねる、celeris の config.rs の検証どおり）。
+db = "celeris.sqlite3"
+workspace_root = "workspaces"
+tick_ms = 200
+max_concurrency = 2
+lease_grace_secs = 60
+idle_timeout_secs = 30
+kill_grace_secs = 1
+review_timeout_secs = 30
+error_cooldown_secs = 300
+retry_backoff_base_secs = 0
+retry_backoff_max_secs = 0
+max_requeues = 5
+
+[plan]
+auto_accept = false
+
+[reviewer]
+tier = "standard"
+
+[api]
+listen = "@API_LISTEN@"
+
+[adapters.fake]
+command = ["sh", "@RUN_DIR@/fake-worker.sh"]
+
+[[providers]]
+id = "fake-local"
+adapter = "fake"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 2
+model = "fake"
+
+[[roles]]
+id = "lead"
+
+[[roles]]
+id = "implementer"
+
+[delegation]
+max_delegate_per_run = 8
+max_tree_depth = 5
+max_tree_runs = 100

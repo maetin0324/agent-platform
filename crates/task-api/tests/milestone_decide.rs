@@ -296,7 +296,7 @@ async fn the_project_view_carries_the_review_reply_and_the_proposal() {
     assert!(card.get("proposal").is_none(), "{card}");
     assert_eq!(card["title"], "隣接領域の動向調査", "Milestone のフィールドは平らに出る");
 
-    // taskd の tick がするのと同じこと: レビューの対話 → 返事 → 提案。
+    // celeris の tick がするのと同じこと: レビューの対話 → 返事 → 提案。
     let project = env
         .store
         .project_get(project_id.parse().expect("project id"))

@@ -1,5 +1,10 @@
 import { useEffect, useId, useState } from "react";
 import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher, useRevalidator } from "react-router";
+import type { ReleasePromoteOutcome } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { promoteRelease, readReleaseSha12 } from "~/celeris/releases-admin.server";
+import type { ReleaseItem, Releases } from "~/celeris/types";
 import { ReleasePromoteFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
@@ -29,19 +34,14 @@ import {
   typedShaMatches,
 } from "~/lib/releases";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
-import { TaskdBanner } from "~/root";
-import type { ReleasePromoteOutcome } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { promoteRelease, readReleaseSha12 } from "~/taskd/releases-admin.server";
-import type { ReleaseItem, Releases } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/releases";
 
 /**
- * `/releases`（リリース画面、Phase G14。ADR-0040 D6、docs/taskd-api-v1.md §3.66〜3.67）の
+ * `/releases`（リリース画面、Phase G14。ADR-0040 D6、docs/celeris-api-v1.md §3.66〜3.67）の
  * loader が返すデータ。
  *
- * `GET /releases` の応答をそのまま渡す（並び・`is_current` / `promoting` は taskd が計算済みなので、
+ * `GET /releases` の応答をそのまま渡す（並び・`is_current` / `promoting` は celeris が計算済みなので、
  * GUI 側で再計算しない）。表示の判断は `~/lib/releases.ts` の純粋関数に寄せてある。
  */
 export interface ReleasesData {
@@ -50,7 +50,7 @@ export interface ReleasesData {
 }
 
 /** `GET /releases` を呼ぶ。応答はそのまま返す（派生の集計はしない）。 */
-export async function loadReleases(client: TaskdClient, request: Request): Promise<ReleasesData> {
+export async function loadReleases(client: CelerisClient, request: Request): Promise<ReleasesData> {
   const releases = await client.get<Releases>("/releases", { signal: request.signal });
   return { releases, fetchedAt: new Date().toISOString() };
 }
@@ -61,9 +61,9 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ReleasesData> {
   try {
-    return await loadReleases(getTaskdClient(), request);
+    return await loadReleases(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -81,7 +81,7 @@ export async function action({ request }: Route.ActionArgs) {
   if (intent !== "release_promote") {
     throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
   }
-  const outcome = await promoteRelease(getTaskdClient(), readReleaseSha12(form), request.signal);
+  const outcome = await promoteRelease(getCelerisClient(), readReleaseSha12(form), request.signal);
   return data(outcome, { status: outcome.ok ? 202 : outcome.error.status });
 }
 
@@ -435,16 +435,16 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
 }
 
 /**
- * loader が `taskdErrorResponse` で投げた `Response` を判別する（`app/routes/clusters.tsx` と同じ方針）。
- * taskd 停止中はバナー、それ以外は status と detail を出す。
+ * loader が `celerisErrorResponse` で投げた `Response` を判別する（`app/routes/clusters.tsx` と同じ方針）。
+ * celeris 停止中はバナー、それ以外は status と detail を出す。
  */
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

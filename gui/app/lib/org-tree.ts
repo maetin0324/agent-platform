@@ -1,5 +1,5 @@
+import type { OrgNode, Status, TaskSummary } from "~/celeris/types";
 import { isSupportTask } from "~/lib/work-tree";
-import type { OrgNode, Status, TaskSummary } from "~/taskd/types";
 
 /**
  * 組織の木（SPEC §3.2、ADR-0033 D1）を `parent_id` から組む純粋関数。API（`GET /org`）は木にしない
@@ -81,7 +81,7 @@ export interface Workload {
  *
  * `GET /tasks` の `TaskSummary.assignee`（Phase 27 で追加）を直接数える。G13a では `assignee` が
  * `TaskSummary` に無かったため `GET /projects/{id}` を案件数ぶん束ねて代替していたが、
- * その N+1 呼び出しはやめた（taskd-requests.md R3 が解決済み）。
+ * その N+1 呼び出しはやめた（celeris-requests.md R3 が解決済み）。
  */
 export function countWorkload(tasks: TaskSummary[]): Map<string, Workload> {
   const counts = new Map<string, Workload>();

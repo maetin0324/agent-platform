@@ -59,7 +59,7 @@ pub const SCHEMA_VERSION: u32 = 15;
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
 pub struct StoreOptions {
-    /// `PRAGMA busy_timeout`。複数接続（ディスパッチャ・API・taskctl）が同じファイルを
+    /// `PRAGMA busy_timeout`。複数接続（ディスパッチャ・API・celerisctl）が同じファイルを
     /// 開くときにロック待ちする時間。既定は 5000 ms。
     pub busy_timeout: StdDuration,
 }
@@ -156,7 +156,7 @@ pub struct ListFilter {
     /// ADR-0044 D4: 優先度（P0〜P3 を `i32` に写したもの）。複数指定は IN。
     pub priorities: Vec<i32>,
     /// ADR-0044 D4: `text_contains` を**コメント本文にも**広げる（`GET /tasks?q=`）。
-    /// `false` なら従来どおり title / objective だけ（`taskctl` の既存の挙動）。
+    /// `false` なら従来どおり title / objective だけ（`celerisctl` の既存の挙動）。
     pub text_includes_comments: bool,
     // ---- ADR-0044 D4（Phase 53）: ここまで ----
     /// ADR-0044 D6（Phase 55）: **アーカイブされた案件のタスクを隠す**（`GET /tasks` の既定。
@@ -672,10 +672,10 @@ pub trait TaskStore:
     /// ADR-0044 D2: そのタスクのコメントを古い順（`created_at`、同時刻は `id` 昇順）で返す。
     fn comments_for(&self, task_id: TaskId) -> Result<Vec<TaskComment>, StoreError>;
 
-    // ---- ADR-0040 D4（Phase 47）: taskd のインスタンスの役割（`daemon_instances`）----
+    // ---- ADR-0040 D4（Phase 47）: celeris のインスタンスの役割（`daemon_instances`）----
     //
     // ここにあるのは「行を読み書きする」だけの操作で、役割を決める規則（誰が active になるか、いつ
-    // drain するか）は taskd 側（`taskd::instance`）にある。`verify` のインスタンスはこの表に触れない。
+    // drain するか）は celeris 側（`celeris::instance`）にある。`verify` のインスタンスはこの表に触れない。
 
     /// 自分の行を作る（既にあれば上書きする＝同じ `instance_id` で起動し直したとき）。
     /// `handoff_requested_at` / `drained_at` は NULL に戻る。
@@ -711,7 +711,7 @@ pub struct SqliteStore {
 /// （決定的。LLM は使わない）。
 ///
 /// - `Local` — `<path>/.git` があれば `git`（ディレクトリでも worktree の gitfile でもよい）、無ければ `dir`
-/// - `Remote` — `git`。クラスタ側のファイルシステムは taskd からは見えないが、ADR-0018 / ADR-0019 の
+/// - `Remote` — `git`。クラスタ側のファイルシステムは celeris からは見えないが、ADR-0018 / ADR-0019 の
 ///   リモートの作業場所は git リポジトリを前提にした同期をするため。違えば人が `PATCH /repos/{id}` で直す
 pub fn detect_repo_kind(location: &WorkspaceSpec) -> RepoKind {
     match location {
@@ -1841,7 +1841,7 @@ impl TaskStore for SqliteStore {
 
     fn append_event(&self, task_id: TaskId, event: &Event) -> Result<u64, StoreError> {
         let mut conn = self.lock()?;
-        // seq の採番（SELECT）と INSERT を 1 つの IMMEDIATE トランザクションにする。別接続（taskctl / API）が同じタスクに
+        // seq の採番（SELECT）と INSERT を 1 つの IMMEDIATE トランザクションにする。別接続（celerisctl / API）が同じタスクに
         // 追記しても seq が衝突せず、書き込みロックは busy_timeout で待つ（Phase 9 監査）。
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let seq = Self::append_event_tx(&tx, task_id, event)?;
@@ -1976,7 +1976,7 @@ impl TaskStore for SqliteStore {
 
     fn release_lease(&self, task_id: TaskId, worker_run_id: &str) -> Result<(), StoreError> {
         let mut conn = self.lock()?;
-        // 読んだ json を書き戻すので、間に別接続（taskctl / API）の書き込みが挟まらないよう IMMEDIATE で囲む（Phase 9 監査）。
+        // 読んだ json を書き戻すので、間に別接続（celerisctl / API）の書き込みが挟まらないよう IMMEDIATE で囲む（Phase 9 監査）。
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let current: Option<(Option<String>, String)> = tx
@@ -4365,7 +4365,7 @@ mod tests {
         assert_eq!(mode.to_lowercase(), "wal");
     }
 
-    /// Phase 9 監査（受け入れ 2）: 2 つの接続（ディスパッチャと taskctl / API 相当）が、読んでから書くトランザクションを
+    /// Phase 9 監査（受け入れ 2）: 2 つの接続（ディスパッチャと celerisctl / API 相当）が、読んでから書くトランザクションを
     /// 同じファイルに並走させても `database is locked` にならない。DEFERRED だと読み取り後の書き込みへの格上げが
     /// busy_timeout を待たずに SQLITE_BUSY で失敗するため、書き込みトランザクションは IMMEDIATE で始める。
     #[test]

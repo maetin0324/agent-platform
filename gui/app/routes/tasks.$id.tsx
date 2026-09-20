@@ -1,5 +1,40 @@
 import { useEffect, useState } from "react";
 import { data, Form, isRouteErrorResponse, Link, useFetcher, useNavigate, useSearchParams } from "react-router";
+import type {
+  ActionError,
+  DocsOpOutcome,
+  RetryOutcome,
+  TaskCommentOutcome,
+  TaskEditOutcome,
+  TaskReopenOutcome,
+  TransitionOutcome,
+} from "~/celeris/action-types";
+import { retryData, transitionData } from "~/celeris/actions.server";
+import type { CelerisClient } from "~/celeris/client.server";
+import { getCelerisClient } from "~/celeris/client.server";
+import { promoteArtifact, readArtifactPromoteBody } from "~/celeris/docs-admin.server";
+import { type CelerisRouteErrorData, celerisErrorResponse, toActionError } from "~/celeris/errors";
+import { runRetryAction, runTaskAction } from "~/celeris/route-actions.server";
+import { loadTaskChanges, readTaskChangesQuery, type TaskChangesData } from "~/celeris/task-changes";
+import { loadTaskFiles, readTaskFilesQuery, type TaskFilesData } from "~/celeris/task-files";
+import { buildTaskEdit, commentOnTask, editTask, reopenTask } from "~/celeris/tasks-admin.server";
+import type {
+  Action,
+  ArtifactList,
+  ArtifactView,
+  CommentList,
+  Event,
+  EventsPage,
+  MilestoneView,
+  OrgList,
+  OrgNode,
+  ProjectDetail,
+  TaskComment,
+  TaskDetail,
+  TaskRef,
+  Timeline,
+  TimelineItem,
+} from "~/celeris/types";
 import { CodeViewer } from "~/components/CodeViewer";
 import {
   ErrorFlash,
@@ -61,46 +96,11 @@ import {
 import { milestoneTitle } from "~/lib/project-index";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
-import { TaskdBanner } from "~/root";
-import type {
-  ActionError,
-  DocsOpOutcome,
-  RetryOutcome,
-  TaskCommentOutcome,
-  TaskEditOutcome,
-  TaskReopenOutcome,
-  TransitionOutcome,
-} from "~/taskd/action-types";
-import { retryData, transitionData } from "~/taskd/actions.server";
-import type { TaskdClient } from "~/taskd/client.server";
-import { getTaskdClient } from "~/taskd/client.server";
-import { promoteArtifact, readArtifactPromoteBody } from "~/taskd/docs-admin.server";
-import { type TaskdRouteErrorData, taskdErrorResponse, toActionError } from "~/taskd/errors";
-import { runRetryAction, runTaskAction } from "~/taskd/route-actions.server";
-import { loadTaskChanges, readTaskChangesQuery, type TaskChangesData } from "~/taskd/task-changes";
-import { loadTaskFiles, readTaskFilesQuery, type TaskFilesData } from "~/taskd/task-files";
-import { buildTaskEdit, commentOnTask, editTask, reopenTask } from "~/taskd/tasks-admin.server";
-import type {
-  Action,
-  ArtifactList,
-  ArtifactView,
-  CommentList,
-  Event,
-  EventsPage,
-  MilestoneView,
-  OrgList,
-  OrgNode,
-  ProjectDetail,
-  TaskComment,
-  TaskDetail,
-  TaskRef,
-  Timeline,
-  TimelineItem,
-} from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/tasks.$id";
 
 /**
- * `docs/taskd-api-v1.md` §3.6 の `types` フィルタの選択肢。`Event` の `type` タグと同じ。
+ * `docs/celeris-api-v1.md` §3.6 の `types` フィルタの選択肢。`Event` の `type` タグと同じ。
  */
 const EVENT_TYPES: Event["type"][] = [
   "created",
@@ -168,14 +168,14 @@ export interface TaskDetailData {
    * ADR-0043 D6 + ADR-0044 D5（Phase 52 + 53 のマージ）: 「ファイル」タブの中身。
    * **`?tab=files` のときだけ**引く（他のタブで毎回 `GET /tasks/{id}/tree` を叩かないため）。
    * 作業ツリーが無いタスク（404 `file_not_found`）やリポジトリを使わないタスクでは `error` に
-   * taskd の文言が入り、タブはその文言だけを出す（ページ全体は落とさない）。
+   * celeris の文言が入り、タブはその文言だけを出す（ページ全体は落とさない）。
    */
   files: { data: TaskFilesData; error: null } | { data: null; error: ActionError } | null;
   /**
    * ADR-0043 D5 + ADR-0044 D5（Phase 53 + 54 のマージ）: 「変更」タブの中身。
    * **`?tab=changes` のときだけ**引く（`GET /tasks/{id}/changes` はリポジトリごとに git を数回起こすので、
-   * 他のタブを見ているあいだは走らせない。taskd 側の U54-1）。ブランチも作業ツリーも無いタスクや
-   * リポジトリを使わないタスクでは `error` に taskd の文言が入り、タブはその文言だけを出す。
+   * 他のタブを見ているあいだは走らせない。celeris 側の U54-1）。ブランチも作業ツリーも無いタスクや
+   * リポジトリを使わないタスクでは `error` に celeris の文言が入り、タブはその文言だけを出す。
    */
   changes: { data: TaskChangesData; error: null } | { data: null; error: ActionError } | null;
   /** どの案件・どの途中目標・誰の仕事か（監査 M2「裏方から戻れる」）。分からなければ null。 */
@@ -191,19 +191,19 @@ export interface TaskDetailData {
 /**
  * `/tasks/:id`（タスク詳細、docs/DESIGN.md §4.3。ADR-0044 D5 でタブになった）の loader 本体。
  * `GET /tasks/{id}`・`GET /tasks/{id}/events`・`GET /tasks/{id}/artifacts`・`GET /tasks/{id}/timeline`・
- * `GET /tasks/{id}/comments` を並列に呼び、応答をそのまま返す（派生値は taskd 側で計算済み。GUI は再計算しない）。
- * taskd 停止中・タスクが無い（404 `task_not_found`）等は呼び出し側（`loader`）が `Response` に変換して投げる
+ * `GET /tasks/{id}/comments` を並列に呼び、応答をそのまま返す（派生値は celeris 側で計算済み。GUI は再計算しない）。
+ * celeris 停止中・タスクが無い（404 `task_not_found`）等は呼び出し側（`loader`）が `Response` に変換して投げる
  * （docs/adr/0004-g1-decisions.md D6。本番ビルドは素の Error を ErrorBoundary に渡す前に汎用 500 へ
- * サニタイズするため、`Response` として投げないと taskd 停止中でもバナーではなく 500 になってしまう）。
+ * サニタイズするため、`Response` として投げないと celeris 停止中でもバナーではなく 500 になってしまう）。
  * 生ログ本体は `/tasks/:id/runs/:runId`（別ルート）、DAG は `/graph`（docs/adr/0006-g3-decisions.md D4）。
  *
  * `GET /org` と案件の詳細は**編集フォームの選択肢**（ADR-0044 D1: 担当・途中目標のプルダウン）にも使うので、
  * 担当や案件が未設定でも常に引く（落ちたら選択肢が空になるだけ。画面は出す）。
  */
-export async function loadTaskDetail(client: TaskdClient, taskId: string, request: Request): Promise<TaskDetailData> {
+export async function loadTaskDetail(client: CelerisClient, taskId: string, request: Request): Promise<TaskDetailData> {
   const url = new URL(request.url);
   // フォームは `types` チェックボックスごとに 1 つずつ付ける（`?types=a&types=b`）。
-  // taskd 側はカンマ区切りの単一パラメータを期待する（docs/taskd-api-v1.md §3.6）ので、ここで結合する。
+  // celeris 側はカンマ区切りの単一パラメータを期待する（docs/celeris-api-v1.md §3.6）ので、ここで結合する。
   const types = url.searchParams.getAll("types");
   const [detail, events, artifacts, timeline, comments] = await Promise.all([
     client.get<TaskDetail>(`/tasks/${taskId}`, { signal: request.signal }),
@@ -278,15 +278,15 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ params, request }: Route.LoaderArgs): Promise<TaskDetailData> {
   try {
-    return await loadTaskDetail(getTaskdClient(), params.id, request);
+    return await loadTaskDetail(getCelerisClient(), params.id, request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
 export async function action({ request, params }: Route.ActionArgs) {
   const form = await request.formData();
-  const client = getTaskdClient();
+  const client = getCelerisClient();
   const intent = form.get("intent");
   // Phase 31: `retry` は `approve`/`reject`/`answer`/`cancel`（`TransitionInput`）とは語彙も応答の形も別
   // （新しいタスクを作る。`RetryOutcome`）なので、共通の `readTransitionForm` に渡す前に分岐する。
@@ -679,7 +679,7 @@ function OverviewTab({
         </Card>
       </section>
 
-      {/* ADR-0044 D1（Phase 53）: 人がタスクを細かく直せる。終端のタスクは taskd が 409 を返すので出さない。 */}
+      {/* ADR-0044 D1（Phase 53）: 人がタスクを細かく直せる。終端のタスクは celeris が 409 を返すので出さない。 */}
       {detail.actions.includes("edit") && (
         <TaskEditSection key={task.updated_at} detail={detail} org={org} milestones={milestones} />
       )}
@@ -1174,7 +1174,7 @@ function splitIds(text: string): string[] {
 
 /**
  * タスクの編集フォーム（ADR-0044 D1、Phase 53）。**GUI 側では検証しない**のが原則だが、ラベルの形
- * （小文字・`[a-z0-9-]`・最大 8 個）だけはチップを足すときの入力補助として弾く（正は taskd の 422）。
+ * （小文字・`[a-z0-9-]`・最大 8 個）だけはチップを足すときの入力補助として弾く（正は celeris の 422）。
  * `running` / `reviewing` でも編集できる（走っている run は止まらず、次の run から効く）。
  */
 function TaskEditSection({
@@ -1616,7 +1616,7 @@ function TimelineTab({
 }
 
 /**
- * タイムラインの 1 件の安定した key（`kind` ごとに taskd が持つ一意の値を使う。添字は使わない:
+ * タイムラインの 1 件の安定した key（`kind` ごとに celeris が持つ一意の値を使う。添字は使わない:
  * SSE の再検証で先頭に項目が増えると並びがずれるため）。
  */
 function timelineItemKey(item: TimelineItem): string {
@@ -1823,8 +1823,8 @@ function TaskRefList({ label, testId, refs }: { label: string; testId: string; r
 
 /**
  * 成果物 1 件の行（docs/adr/0006-g3-decisions.md D3/D4）。本体は「開く」を押したときだけ
- * `/files/tasks/:id/artifacts/:idx` を fetch し、taskd が返した実際の `Content-Type` でビューアを選ぶ
- * （拡張子からの推測はしない。taskd の値をそのまま使う）。403（`forbidden`）は一覧の `ArtifactView.forbidden`
+ * `/files/tasks/:id/artifacts/:idx` を fetch し、celeris が返した実際の `Content-Type` でビューアを選ぶ
+ * （拡張子からの推測はしない。celeris の値をそのまま使う）。403（`forbidden`）は一覧の `ArtifactView.forbidden`
  * だけで判定し、本体を取りに行かない。
  */
 function ArtifactRow({
@@ -1847,7 +1847,7 @@ function ArtifactRow({
   const href = `/files/tasks/${taskId}/artifacts/${artifact.idx}`;
   const canOpen = artifact.exists && !artifact.forbidden;
   const statusMessage = artifactStatusMessage(artifact);
-  // ADR-0044 D7: 昇格できるのは Markdown の成果物だけ（判定は名前だけ。中身は taskd が読む）。
+  // ADR-0044 D7: 昇格できるのは Markdown の成果物だけ（判定は名前だけ。中身は celeris が読む）。
   const canPromote = canOpen && projectId !== null && isMarkdownName(artifact.artifact.name);
 
   useEffect(() => {
@@ -1951,8 +1951,8 @@ function ArtifactRow({
 }
 
 /**
- * 成果物を案件の文書に昇格する（ADR-0044 D7、docs/taskd-api-v1.md §3.97。**管理系**。Phase 57 / G20）。
- * 宛先のパスは人が決める（既定は `docs/<種類>/<題名の slug>.md`）。宛先が既にあれば taskd が
+ * 成果物を案件の文書に昇格する（ADR-0044 D7、docs/celeris-api-v1.md §3.97。**管理系**。Phase 57 / G20）。
+ * 宛先のパスは人が決める（既定は `docs/<種類>/<題名の slug>.md`）。宛先が既にあれば celeris が
  * 409 `page_exists` を返すので、そのときだけ「上書きする」を選び直す（GUI では判定しない）。
  */
 function PromoteToDoc({
@@ -2032,17 +2032,17 @@ function PromoteToDoc({
 }
 
 /**
- * loader が `taskdErrorResponse` で投げた `Response` を `isRouteErrorResponse` で判別する
- * （docs/adr/0004-g1-decisions.md D6）。taskd 停止中はこのルート自身が root と同じバナーを出し
+ * loader が `celerisErrorResponse` で投げた `Response` を `isRouteErrorResponse` で判別する
+ * （docs/adr/0004-g1-decisions.md D6）。celeris 停止中はこのルート自身が root と同じバナーを出し
  * （200 にはならないが 500 でもない。§6.5「500 にしない」）、404 は「タスクが見つかりません」にする。
  */
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

@@ -7,7 +7,7 @@
 //! ```
 //!
 //! ここは**ファイルを読んで文字列を取り出すだけ**で、`ReportKind` への写し替え（固定表）は
-//! `task-dispatch` 側が行う。判断（この結果が提案に値するか）は taskd ではしない（DESIGN 原則 1）。
+//! `task-dispatch` 側が行う。判断（この結果が提案に値するか）は celeris ではしない（DESIGN 原則 1）。
 //! `memory`（ADR-0033 D6）と同じ流儀: 無い・JSON でない・形が違うときは `None`（run は失敗させない）。
 
 use std::path::Path;
@@ -41,7 +41,7 @@ pub fn report_kind_from_result_json(text: &str) -> Option<String> {
 /// {"summary": "…", "evidence": [], "milestone_proposal": {"title": "…", "description": "…"}}
 /// ```
 ///
-/// ここも**ファイルを読んで文字列を取り出すだけ**で、`milestones` に行を作るのは taskd 側（決定的）。
+/// ここも**ファイルを読んで文字列を取り出すだけ**で、`milestones` に行を作るのは celeris 側（決定的）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct MilestoneProposal {
     pub title: String,

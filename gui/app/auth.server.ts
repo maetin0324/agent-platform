@@ -5,15 +5,15 @@ import { createContext, createCookie, type MiddlewareFunction, redirect } from "
 import { hostWithoutPort } from "~/config.server";
 
 /**
- * ブラウザ ↔ taskd-gui のパスワード認証とセッションクッキー（docs/DESIGN.md §8.2、docs/adr/0008 D1〜D5）。
- * - 認証が有効になるのは、`TASKD_GUI_BIND` が非 loopback のとき（`TASKD_GUI_PASSWORD_FILE` 必須）か、
- *   `TASKD_GUI_PASSWORD_FILE` が明示されているとき（loopback でも opt-in）。既定の loopback は認証無し
+ * ブラウザ ↔ celeris-gui のパスワード認証とセッションクッキー（docs/DESIGN.md §8.2、docs/adr/0008 D1〜D5）。
+ * - 認証が有効になるのは、`CELERIS_GUI_BIND` が非 loopback のとき（`CELERIS_GUI_PASSWORD_FILE` 必須）か、
+ *   `CELERIS_GUI_PASSWORD_FILE` が明示されているとき（loopback でも opt-in）。既定の loopback は認証無し
  * - パスワードは SHA-256 ダイジェスト同士を `timingSafeEqual` で比較（定数時間）。失敗は 1 秒待つ
  * - セッションは HMAC 署名付きクッキー（react-router の `createCookie`）。サーバ側にセッション表は持たない
- * - 署名鍵は `TASKD_GUI_SESSION_SECRET_FILE`、無ければプロセスごとの乱数（再起動でログアウト）
+ * - 署名鍵は `CELERIS_GUI_SESSION_SECRET_FILE`、無ければプロセスごとの乱数（再起動でログアウト）
  */
 
-export const SESSION_COOKIE_NAME = "__taskd_gui_session";
+export const SESSION_COOKIE_NAME = "__celeris_gui_session";
 export const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
 /** パスワード失敗時に待つ時間（総当たりの抑止。docs/DESIGN.md §8.2） */
 export const FAILED_LOGIN_DELAY_MS = 1_000;
@@ -64,18 +64,18 @@ function readTrimmedFile(path: string, what: string): string {
  * 環境変数から認証設定を読む。`server.js` の起動時検証と同じ規則（非 loopback でパスワードファイルが無ければ例外）。
  */
 export function readAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig {
-  const bindHost = hostWithoutPort(env.TASKD_GUI_BIND ?? "127.0.0.1:7700");
+  const bindHost = hostWithoutPort(env.CELERIS_GUI_BIND ?? "127.0.0.1:7700");
   const nonLoopback = !isLoopbackHost(bindHost);
-  const passwordFile = env.TASKD_GUI_PASSWORD_FILE;
+  const passwordFile = env.CELERIS_GUI_PASSWORD_FILE;
   if (nonLoopback && !passwordFile) {
     throw new AuthConfigError(
-      `TASKD_GUI_BIND=${bindHost} is not a loopback address; TASKD_GUI_PASSWORD_FILE is required for non-loopback bind`,
+      `CELERIS_GUI_BIND=${bindHost} is not a loopback address; CELERIS_GUI_PASSWORD_FILE is required for non-loopback bind`,
     );
   }
-  const passwordDigest = passwordFile ? digest(readTrimmedFile(passwordFile, "TASKD_GUI_PASSWORD_FILE")) : null;
-  const secretFile = env.TASKD_GUI_SESSION_SECRET_FILE;
+  const passwordDigest = passwordFile ? digest(readTrimmedFile(passwordFile, "CELERIS_GUI_PASSWORD_FILE")) : null;
+  const secretFile = env.CELERIS_GUI_SESSION_SECRET_FILE;
   const secret = secretFile
-    ? readTrimmedFile(secretFile, "TASKD_GUI_SESSION_SECRET_FILE")
+    ? readTrimmedFile(secretFile, "CELERIS_GUI_SESSION_SECRET_FILE")
     : randomBytes(32).toString("base64");
   return { enabled: passwordDigest !== null, nonLoopback, passwordDigest, secret, secretFromFile: !!secretFile };
 }

@@ -6,20 +6,20 @@ import {
   readTransitionForm,
   toActionError,
   transitionData,
-} from "~/taskd/actions.server";
-import { TaskdClient } from "~/taskd/client.server";
-import { TaskdError, TaskdUnavailable } from "~/taskd/errors";
-import type { TransitionResult } from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+} from "~/celeris/actions.server";
+import { CelerisClient } from "~/celeris/client.server";
+import { CelerisError, CelerisUnavailable } from "~/celeris/errors";
+import type { TransitionResult } from "~/celeris/types";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-// docs/adr/0005 D2 / D3: action の共通処理。フォーム → taskd の本文の写し、taskd のエラー → ActionError。
+// docs/adr/0005 D2 / D3: action の共通処理。フォーム → celeris の本文の写し、celeris のエラー → ActionError。
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -111,7 +111,7 @@ describe("applyTransition", () => {
     expect(outcome.ok && outcome.result.cascaded).toEqual(cascaded);
   });
 
-  it("409 conflict → ok:false with conflict:true and taskd's detail verbatim", async () => {
+  it("409 conflict → ok:false with conflict:true and celeris's detail verbatim", async () => {
     mock.on("POST", "/api/v1/tasks/T1/approve", (_req, res) =>
       sendProblem(res, {
         status: 409,
@@ -162,30 +162,30 @@ describe("applyTransition", () => {
     expect(outcome.error.messages).toEqual(["answer must not be blank", "unfielded"]);
   });
 
-  it("taskd down → ok:false with code unavailable / status 503", async () => {
+  it("celeris down → ok:false with code unavailable / status 503", async () => {
     await mock.close();
     const outcome = await applyTransition(client, "T1", { intent: "cancel" });
     expect(!outcome.ok && outcome.error).toMatchObject({ status: 503, code: "unavailable", conflict: false });
-    mock = await startMockTaskd(); // afterEach が close できるように
+    mock = await startMockCeleris(); // afterEach が close できるように
   });
 });
 
 describe("toActionError / transitionData", () => {
-  it("re-throws errors that are not taskd errors", () => {
+  it("re-throws errors that are not celeris errors", () => {
     expect(() => toActionError(new Error("bug"))).toThrow("bug");
   });
 
-  it("TaskdUnavailable mentions the base URL", () => {
-    const err = toActionError(new TaskdUnavailable("http://127.0.0.1:1"));
+  it("CelerisUnavailable mentions the base URL", () => {
+    const err = toActionError(new CelerisUnavailable("http://127.0.0.1:1"));
     expect(err.detail).toContain("http://127.0.0.1:1");
   });
 
-  it("TaskdError without errors[] yields empty fields", () => {
-    const err = toActionError(new TaskdError({ status: 404, code: "task_not_found", detail: "task X not found" }));
+  it("CelerisError without errors[] yields empty fields", () => {
+    const err = toActionError(new CelerisError({ status: 404, code: "task_not_found", detail: "task X not found" }));
     expect(err).toMatchObject({ status: 404, code: "task_not_found", fields: {}, messages: [] });
   });
 
-  it("transitionData uses 200 on success and the taskd status on failure", () => {
+  it("transitionData uses 200 on success and the celeris status on failure", () => {
     const success = transitionData({ ok: true, intent: "approve", taskId: "T1", result: ok });
     const failure = transitionData({
       ok: false,

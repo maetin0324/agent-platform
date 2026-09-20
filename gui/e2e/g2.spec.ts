@@ -2,56 +2,56 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
-import type { EventRow, EventsPage, Task, TaskDetail, TaskList } from "~/taskd/types";
+import type { EventRow, EventsPage, Task, TaskDetail, TaskList } from "~/celeris/types";
 import { expect, test } from "./test";
 
 // Phase G2 の受け入れ条件 1〜8（docs/DESIGN.md §10 Phase G2、docs/adr/0005 D7）。
-// `scripts/taskd.sh fixture basic && scripts/taskd.sh start basic` の実 taskd（fake ワーカー並走）に対して検証する。
+// `scripts/celeris.sh fixture basic && scripts/celeris.sh start basic` の実 celeris（fake ワーカー並走）に対して検証する。
 // G1 の e2e が `basic` に sse probe 等を足しているので、beforeAll で作り直す。
 //
 // 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
-// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
+// `CELERIS_GUI_BIND` / `CELERIS_API_URL` / `CELERIS_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7710";
-const TASKD_API_URL = process.env.TASKD_API_URL ?? `http://${TASKD_API_LISTEN}`;
-const GUI_URL = `http://${process.env.TASKD_GUI_BIND ?? "127.0.0.1:7700"}`;
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_LISTEN = process.env.CELERIS_API_LISTEN ?? "127.0.0.1:7710";
+const CELERIS_API_URL = process.env.CELERIS_API_URL ?? `http://${CELERIS_API_LISTEN}`;
+const GUI_URL = `http://${process.env.CELERIS_GUI_BIND ?? "127.0.0.1:7700"}`;
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, {
+  return execFileSync(CELERIS_SH, args, {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   }).toString();
 }
 
-function taskctl(...args: string[]): string {
-  return execFileSync(TASKD_SH, ["taskctl", "basic", ...args], {
+function celerisctl(...args: string[]): string {
+  return execFileSync(CELERIS_SH, ["celerisctl", "basic", ...args], {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   })
     .toString()
     .trim();
 }
 
 async function apiGet<T>(pathAndQuery: string): Promise<T> {
-  const res = await fetch(`${TASKD_API_URL}/api/v1${pathAndQuery}`);
-  if (!res.ok) throw new Error(`taskd ${pathAndQuery} responded ${res.status}`);
+  const res = await fetch(`${CELERIS_API_URL}/api/v1${pathAndQuery}`);
+  if (!res.ok) throw new Error(`celeris ${pathAndQuery} responded ${res.status}`);
   return (await res.json()) as T;
 }
 
-/** テスト準備用に taskd へ直接 POST する（Node の fetch は Origin を送らないので通る。GUI の経路ではない）。 */
+/** テスト準備用に celeris へ直接 POST する（Node の fetch は Origin を送らないので通る。GUI の経路ではない）。 */
 async function apiPost<T>(pathname: string, body: unknown): Promise<T> {
-  const res = await fetch(`${TASKD_API_URL}/api/v1${pathname}`, {
+  const res = await fetch(`${CELERIS_API_URL}/api/v1${pathname}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`taskd POST ${pathname} responded ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`celeris POST ${pathname} responded ${res.status}: ${await res.text()}`);
   return (await res.json()) as T;
 }
 
@@ -110,10 +110,10 @@ test.describe("受け入れ条件 1: 受信箱で Approval を note 付きで承
     await expect(item).toContainText("Approval needed:");
     await item.getByTestId("approval-note").fill("looks good from the GUI");
     // POST の成否は応答そのもので確認する（`toHaveAttribute`/`toHaveText` で `flash` を待たない）。
-    // root は taskd の SSE（`daemon`。tick_ms=200 で無条件に届く。docs/DESIGN.md §6.3、G1-U1）のたびに
+    // root は celeris の SSE（`daemon`。tick_ms=200 で無条件に届く。docs/DESIGN.md §6.3、G1-U1）のたびに
     // 再検証し、承認直後は `/inbox` の `approvals` からこの項目が消える（G13f-U4 と同じ「決めたものに
     // 移ると成功表示も一緒に消える」レース）。この環境では 200ms 以内に消えるのが常態で、`flash` の
-    // DOM を安定して観測できない（Phase G13g で判明）。承認の中身は taskd 側の記録（下記）で検証する。
+    // DOM を安定して観測できない（Phase G13g で判明）。承認の中身は celeris 側の記録（下記）で検証する。
     const [response] = await Promise.all([
       // React Router のデータ要求は `/inbox.data` に POST される（`action="/inbox"` の `fetcher.Form`）。
       page.waitForResponse((res) => res.url().includes("/inbox.data") && res.request().method() === "POST"),
@@ -122,21 +122,21 @@ test.describe("受け入れ条件 1: 受信箱で Approval を note 付きで承
     expect(response.status()).toBe(200);
     await expect(page.getByTestId("approval-item")).toHaveCount(0);
 
-    // taskd 側の記録
+    // celeris 側の記録
     expect(await statusOf(approvalId ?? "")).toBe("done");
     const decided = (await eventsOf(approvalId ?? "")).find((r) => r.event.type === "approval_decided");
     expect(decided).toBeTruthy();
     expect(decided?.event).toMatchObject({ type: "approval_decided", approved: true, note: "looks good from the GUI" });
 
     // 親がリロード無しで done になる（fake ワーカーの他条件は pass 済み）。仕様に時間の上限は無い。
-    // 直接 API では 0.5 秒だが、e2e 中に taskd の tick が 10〜25 秒止まる現象を観測している（docs/taskd-requests.md R1）ので
+    // 直接 API では 0.5 秒だが、e2e 中に celeris の tick が 10〜25 秒止まる現象を観測している（docs/celeris-requests.md R1）ので
     // 待ちは 60 秒にし、実測値を注記に残す。
     const t0 = Date.now();
     await expect(watcher.getByTestId("task-status")).toHaveText("done", { timeout: 60_000 });
     test.info().annotations.push({ type: "parent-done-after-ms", description: String(Date.now() - t0) });
     expect(await statusOf(humanId)).toBe("done");
 
-    expect(taskctl("replay")).toContain("0 mismatches");
+    expect(celerisctl("replay")).toContain("0 mismatches");
     await watcher.close();
     await page.close();
   });
@@ -210,7 +210,7 @@ test.describe("受け入れ条件 3: blocked のタスクに回答", () => {
 test.describe("受け入れ条件 4: 後続を持つ ready タスクを cancel", () => {
   test("flash に cascaded の後続 id が出て、後続が cancelled（reason dependency_failed）", async ({ page }) => {
     // draft のまま置く依存先 → それに依存する ready（依存未完了なのでワーカーに拾われない）→ その後続 ready
-    const blocker = taskctl(
+    const blocker = celerisctl(
       "add",
       "--title",
       "Blocker-G2",
@@ -221,7 +221,7 @@ test.describe("受け入れ条件 4: 後続を持つ ready タスクを cancel",
       "--workspace",
       "ws-g2-blocker",
     );
-    const target = taskctl(
+    const target = celerisctl(
       "add",
       "--title",
       "Cancel-Target-G2",
@@ -234,8 +234,8 @@ test.describe("受け入れ条件 4: 後続を持つ ready タスクを cancel",
       "--workspace",
       "ws-g2-target",
     );
-    taskctl("approve", target);
-    const downstream = taskctl(
+    celerisctl("approve", target);
+    const downstream = celerisctl(
       "add",
       "--title",
       "Downstream-G2",
@@ -248,7 +248,7 @@ test.describe("受け入れ条件 4: 後続を持つ ready タスクを cancel",
       "--workspace",
       "ws-g2-downstream",
     );
-    taskctl("approve", downstream);
+    celerisctl("approve", downstream);
     expect(await statusOf(target)).toBe("ready");
     expect(await statusOf(downstream)).toBe("ready");
 
@@ -337,7 +337,7 @@ test.describe("受け入れ条件 6: Plan フォーム", () => {
 test.describe("受け入れ条件 7: CSRF", () => {
   test("Origin: http://evil.example の POST は 403 で、状態は不変", async () => {
     // 条件 4 の生成物に依存しない（Playwright はテスト失敗後にワーカーを再起動して beforeAll を再実行し fixture を作り直す）
-    const blocker = taskctl(
+    const blocker = celerisctl(
       "add",
       "--title",
       "CSRF-Target-G2",
@@ -403,8 +403,8 @@ test.describe("受け入れ条件 8: デーモン画面の replay", () => {
     await page.getByTestId("replay-button").click();
     const result = page.getByTestId("replay-result");
     await expect(result).toContainText("0 mismatches");
-    const expected = taskctl("replay");
-    // taskctl replay: "replay: 0 mismatches across N tasks"
+    const expected = celerisctl("replay");
+    // celerisctl replay: "replay: 0 mismatches across N tasks"
     expect(expected).toContain("0 mismatches");
     const tasks = /across (\d+) tasks/.exec(expected)?.[1];
     await expect(result).toContainText(`0 mismatches across ${tasks} tasks`);

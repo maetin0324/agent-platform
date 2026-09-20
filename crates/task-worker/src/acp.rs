@@ -11,13 +11,13 @@
 //! - プロセス生成に `async-process` / `blocking`（別スレッドプール経由の同期呼び出し）を使っており、
 //!   本クレートが一貫して使っている `tokio::process::Command`（`process_group(0)` / `kill_on_drop` /
 //!   `subprocess.rs` の `send_signal_to_group` によるプロセスグループ単位のシグナル送信）と噛み合わない。
-//!   taskd 側でプロセスの生死とシグナルを直接握っておく必要がある（ADR-0003 D4 の生存監視）ため、
+//!   celeris 側でプロセスの生死とシグナルを直接握っておく必要がある（ADR-0003 D4 の生存監視）ため、
 //!   SDK 側にプロセス起動を委ねる `AcpAgent::from_str` 系の入口は使いにくい。
 //! - SDK の `Client::builder()...connect_with(...)` は「コネクション全体を 1 つの async ブロックに
 //!   閉じ込める」設計で、`claude_code.rs`/`codex.rs` が使っている「1 行読むたびに wall-clock / idle
 //!   タイムアウトを判定してから次を読む」ループ（`subprocess::read_line_limited` + `tokio::time::timeout`）
 //!   や、受信した生の行をそのまま `runs/<run_id>/stdout.jsonl` にミラーする既存の作法にはめ込みにくい。
-//! - ワーカー → taskd 方向は結局「1 行 1 JSON」を読むだけなので、`serde_json::Value` を手で組み立てる
+//! - ワーカー → celeris 方向は結局「1 行 1 JSON」を読むだけなので、`serde_json::Value` を手で組み立てる
 //!   方が本クレートの他のアダプタ（`claude_code.rs`/`codex.rs` も CLI 独自の JSON Lines を手でパースして
 //!   いる）と一貫する。
 //!
@@ -55,7 +55,7 @@ pub enum AcpPermission {
     Deny,
 }
 
-/// `[adapters.acp]` / `[[providers]]` 行の上書き分（taskd.toml, ADR-0026 D2）。
+/// `[adapters.acp]` / `[[providers]]` 行の上書き分（config.toml, ADR-0026 D2）。
 #[derive(Debug, Clone)]
 pub struct AcpConfig {
     /// 起動する ACP エージェントの実行ファイル。既定 `"opencode"`。
@@ -225,7 +225,7 @@ async fn pump_one_line(
     match read_line_limited(reader, MAX_LINE_BYTES).await? {
         LineOutcome::Eof => Ok(Pumped::Eof),
         LineOutcome::TooLong => {
-            // ACP エージェント自身のフォーマットは taskd が定義したものではないため寛容に扱う
+            // ACP エージェント自身のフォーマットは celeris が定義したものではないため寛容に扱う
             // （ADR-0006 D5 と同じ方針）。
             sink.heartbeat();
             warn!("run {run_id}: discarding overlong line from acp agent stdout");

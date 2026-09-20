@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import type { AccountList } from "~/celeris/types";
 import { loadAccounts } from "~/routes/accounts";
-import { TaskdClient } from "~/taskd/client.server";
-import type { AccountList } from "~/taskd/types";
-import { type MockTaskd, sendJson, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -17,14 +17,14 @@ afterEach(async () => {
 });
 
 const accountsView: AccountList = {
-  root: "/home/u/taskd/claude-accounts",
-  roots: { "claude-code": "/home/u/taskd/claude-accounts", codex: "/home/u/taskd/codex-accounts" },
+  root: "/home/u/celeris/claude-accounts",
+  roots: { "claude-code": "/home/u/celeris/claude-accounts", codex: "/home/u/celeris/codex-accounts" },
   max_runs_per_account: 2,
   items: [
     {
       id: "a",
       adapter: "claude-code",
-      dir: "/home/u/taskd/claude-accounts/a",
+      dir: "/home/u/celeris/claude-accounts/a",
       logged_in: true,
       in_use: 1,
       usage: {
@@ -44,7 +44,7 @@ const accountsView: AccountList = {
     {
       id: "c",
       adapter: "codex",
-      dir: "/home/u/taskd/codex-accounts/c",
+      dir: "/home/u/celeris/codex-accounts/c",
       logged_in: false,
       in_use: 0,
       usage: null,
@@ -79,11 +79,11 @@ describe("loadAccounts", () => {
     expect(result.accounts.items).toEqual([]);
   });
 
-  it("rejects when taskd is not reachable (loader converts this to a Response)", async () => {
-    const closed = await startMockTaskd();
+  it("rejects when celeris is not reachable (loader converts this to a Response)", async () => {
+    const closed = await startMockCeleris();
     const baseUrl = closed.baseUrl;
     await closed.close();
-    const unreachable = new TaskdClient({ baseUrl, timeoutMs: 1000 });
+    const unreachable = new CelerisClient({ baseUrl, timeoutMs: 1000 });
 
     await expect(loadAccounts(unreachable, new Request("http://gui.invalid/accounts"))).rejects.toBeTruthy();
   });

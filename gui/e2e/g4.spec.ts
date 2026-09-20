@@ -2,44 +2,44 @@ import { execFileSync } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Inbox, TaskDetail, TaskList } from "~/taskd/types";
+import type { Inbox, TaskDetail, TaskList } from "~/celeris/types";
 import { expect, test } from "./test";
 
 // Phase G4 の受け入れ条件 1〜4（docs/DESIGN.md §10 Phase G4、docs/adr/0007-g4-decisions.md）。
 // `multi-account` は cooldown がプロセス内メモリのみで DB から再構築できないため（ADR-0007 D1）、
-// フィクスチャの構築（taskctl add/approve でスロットルを起こす）を、このファイルの中で
+// フィクスチャの構築（celerisctl add/approve でスロットルを起こす）を、このファイルの中で
 // `start multi-account` した生きたプロセスに対して直接行う。他の条件は `basic` / `unroutable` を使う。
 //
-// このファイルは他の e2e ファイルより頻繁に taskd を stop/start して別名のインスタンスへ切り替える
+// このファイルは他の e2e ファイルより頻繁に celeris を stop/start して別名のインスタンスへ切り替える
 // （multi-account → basic → unroutable → basic …）。Node の `fetch` は既定でコネクションを
 // keep-alive で使い回すため、直前の stop で消えたソケットへの再利用が「SocketError: other side
 // closed」を起こすことがある（実測）。`apiGet` は `node:http` を `agent: false` で直接使い、
 // 呼び出しごとに新しいソケットを張ることでこれを避ける（e2e/g0.spec.ts の `getWithHost` と同じ方針）。
 //
 // 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
-// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
+// `CELERIS_GUI_BIND` / `CELERIS_API_URL` / `CELERIS_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7710";
-const [TASKD_API_HOST, TASKD_API_PORT_STR] = TASKD_API_LISTEN.split(":");
-const TASKD_API_PORT = Number(TASKD_API_PORT_STR);
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_LISTEN = process.env.CELERIS_API_LISTEN ?? "127.0.0.1:7710";
+const [CELERIS_API_HOST, CELERIS_API_PORT_STR] = CELERIS_API_LISTEN.split(":");
+const CELERIS_API_PORT = Number(CELERIS_API_PORT_STR);
 const INSTANCE_NAMES = ["dev", "basic", "multi-account", "unroutable"] as const;
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, {
+  return execFileSync(CELERIS_SH, args, {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   }).toString();
 }
 
-function taskctl(name: string, ...args: string[]): string {
-  return execFileSync(TASKD_SH, ["taskctl", name, ...args], {
+function celerisctl(name: string, ...args: string[]): string {
+  return execFileSync(CELERIS_SH, ["celerisctl", name, ...args], {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   })
     .toString()
     .trim();
@@ -58,14 +58,14 @@ function stopAll(): void {
 function apiGet<T>(pathAndQuery: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: TASKD_API_HOST, port: TASKD_API_PORT, path: `/api/v1${pathAndQuery}`, method: "GET", agent: false },
+      { host: CELERIS_API_HOST, port: CELERIS_API_PORT, path: `/api/v1${pathAndQuery}`, method: "GET", agent: false },
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
           const status = res.statusCode ?? 0;
           if (status < 200 || status >= 300) {
-            reject(new Error(`taskd ${pathAndQuery} responded ${status}`));
+            reject(new Error(`celeris ${pathAndQuery} responded ${status}`));
             return;
           }
           try {
@@ -101,7 +101,7 @@ test.describe("受け入れ条件 1: プロバイダ画面（multi-account）", 
     stopAll();
     sh("fixture", "multi-account");
     sh("start", "multi-account");
-    fallbackId = taskctl(
+    fallbackId = celerisctl(
       "multi-account",
       "add",
       "--title",
@@ -115,9 +115,9 @@ test.describe("受け入れ条件 1: プロバイダ画面（multi-account）", 
       "--workspace",
       "ws-fallback",
     );
-    taskctl("multi-account", "approve", fallbackId);
-    // 単体では 1 秒未満で done になるが、他の e2e ファイルで観測されている taskd の間欠停止
-    // （docs/taskd-requests.md R1、G2-U1）に当たると数十秒 tick が止まることがあるため、
+    celerisctl("multi-account", "approve", fallbackId);
+    // 単体では 1 秒未満で done になるが、他の e2e ファイルで観測されている celeris の間欠停止
+    // （docs/celeris-requests.md R1、G2-U1）に当たると数十秒 tick が止まることがあるため、
     // G2/G3 の e2e と同じ方針で上限を 60 秒にする。
     await waitForStatus(fallbackId, "done", 60_000);
   });
@@ -237,32 +237,32 @@ test.describe("受け入れ条件 3: 停止/復旧バナーと SSE の再接続"
     const eventsConnected = page.waitForResponse((res) => res.url().endsWith("/events") && res.status() === 200);
     await page.goto("/tasks");
     await eventsConnected;
-    await expect(page.getByTestId("taskd-banner")).toHaveCount(0);
+    await expect(page.getByTestId("celeris-banner")).toHaveCount(0);
 
     // root は既に「切断」を検知していない限り再検証しない（app/root.tsx）ので、次の操作（ここではナビゲーション）が
     // 停止を検知する最初の機会になる。G0 の e2e（e2e/g0.spec.ts）と同じ規約。
     sh("stop", "basic");
     const stoppedAt = Date.now();
     await page.reload();
-    await expect(page.getByTestId("taskd-banner")).toBeVisible();
-    await expect(page.getByTestId("taskd-banner")).toContainText("taskd に接続できません");
+    await expect(page.getByTestId("celeris-banner")).toBeVisible();
+    await expect(page.getByTestId("celeris-banner")).toContainText("celeris に接続できません");
     expect(Date.now() - stoppedAt).toBeLessThan(5_000);
 
-    // /daemon・/providers は自身の ErrorBoundary でも TaskdBanner を出すため、root のものと合わせて
+    // /daemon・/providers は自身の ErrorBoundary でも CelerisBanner を出すため、root のものと合わせて
     // 2 つ描画されうる（ADR-0007 D8。どちらも同じ文言なので `.first()` で見る）。
     await page.goto("/daemon");
-    await expect(page.getByTestId("taskd-banner").first()).toBeVisible();
+    await expect(page.getByTestId("celeris-banner").first()).toBeVisible();
     await page.goto("/providers");
-    await expect(page.getByTestId("taskd-banner").first()).toBeVisible();
+    await expect(page.getByTestId("celeris-banner").first()).toBeVisible();
 
     const reconnected = page.waitForResponse((res) => res.url().endsWith("/events") && res.status() === 200);
     sh("start", "basic");
     await page.goto("/tasks");
     await reconnected;
-    await expect(page.getByTestId("taskd-banner")).toBeHidden({ timeout: 5_000 });
+    await expect(page.getByTestId("celeris-banner")).toBeHidden({ timeout: 5_000 });
 
     await expect(page.getByText("Reconnect-Check")).toHaveCount(0);
-    taskctl(
+    celerisctl(
       "basic",
       "add",
       "--title",
@@ -290,7 +290,7 @@ test.describe("受け入れ条件 4: 実行中 run の in_flight 表示", () => 
   });
 
   test("20 秒ワーカー実行中は in_flight に task/run_id/provider/経過時間が出て、終了後に消える", async ({ page }) => {
-    const id = taskctl(
+    const id = celerisctl(
       "basic",
       "add",
       "--title",
@@ -302,7 +302,7 @@ test.describe("受け入れ条件 4: 実行中 run の in_flight 表示", () => 
       "--workspace",
       "ws-h",
     );
-    taskctl("basic", "approve", id);
+    celerisctl("basic", "approve", id);
 
     await expect
       .poll(async () => (await apiGet<{ runs: { run_id: string }[] }>(`/tasks/${id}/runs`)).runs.length, {
@@ -319,7 +319,7 @@ test.describe("受け入れ条件 4: 実行中 run の in_flight 表示", () => 
     const elapsed = await row.getByTestId("in-flight-elapsed").textContent();
     expect(elapsed).toMatch(/\d/);
 
-    // 20 秒 sleep に加え、taskd の間欠停止（G2-U1）の余地を見て 60 秒にする。
+    // 20 秒 sleep に加え、celeris の間欠停止（G2-U1）の余地を見て 60 秒にする。
     await waitForStatus(id, "done", 60_000);
     await page.reload();
     await expect(page.locator(`[data-testid="in-flight-row"][data-task-id="${id}"]`)).toHaveCount(0);

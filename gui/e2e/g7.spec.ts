@@ -3,7 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AxeBuilder } from "@axe-core/playwright";
-import type { TaskDetail, TaskList } from "~/taskd/types";
+import type { TaskDetail, TaskList } from "~/celeris/types";
 import { expect, test } from "./test";
 
 // Phase G7 の受け入れ条件 1〜6（docs/DESIGN.md §10 Phase G7、docs/adr/0010-g7-decisions.md）。
@@ -12,21 +12,21 @@ import { expect, test } from "./test";
 // このファイルではなく `pnpm` の各コマンドと `docs/PROGRESS.md` の証拠で扱う。
 //
 // 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
-// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
+// `CELERIS_GUI_BIND` / `CELERIS_API_URL` / `CELERIS_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7710";
-const [TASKD_API_HOST, TASKD_API_PORT_STR] = TASKD_API_LISTEN.split(":");
-const TASKD_API_PORT = Number(TASKD_API_PORT_STR);
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_LISTEN = process.env.CELERIS_API_LISTEN ?? "127.0.0.1:7710";
+const [CELERIS_API_HOST, CELERIS_API_PORT_STR] = CELERIS_API_LISTEN.split(":");
+const CELERIS_API_PORT = Number(CELERIS_API_PORT_STR);
 const INSTANCE_NAMES = ["dev", "basic", "clusters", "delegation"] as const;
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, {
+  return execFileSync(CELERIS_SH, args, {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   }).toString();
 }
 
@@ -43,14 +43,14 @@ function stopAll(): void {
 function apiGet<T>(pathAndQuery: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: TASKD_API_HOST, port: TASKD_API_PORT, path: `/api/v1${pathAndQuery}`, method: "GET", agent: false },
+      { host: CELERIS_API_HOST, port: CELERIS_API_PORT, path: `/api/v1${pathAndQuery}`, method: "GET", agent: false },
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
           const status = res.statusCode ?? 0;
           if (status < 200 || status >= 300) {
-            reject(new Error(`taskd ${pathAndQuery} responded ${status}`));
+            reject(new Error(`celeris ${pathAndQuery} responded ${status}`));
             return;
           }
           try {
@@ -95,15 +95,15 @@ test.describe("受け入れ条件 1・2・3・6: /clusters、受信箱の cluste
     await expect(rows).toHaveCount(2);
 
     const local = page.locator('[data-testid="cluster-row"][data-cluster-id="local"]');
-    await expect(local.getByTestId("cluster-host")).toHaveText("taskd-localhost");
+    await expect(local.getByTestId("cluster-host")).toHaveText("celeris-localhost");
     await expect(local.getByTestId("cluster-connected")).toHaveText("connected");
     await expect(local.getByTestId("cluster-login-hint")).toHaveCount(0);
 
     const offline = page.locator('[data-testid="cluster-row"][data-cluster-id="offline"]');
-    await expect(offline.getByTestId("cluster-host")).toHaveText("taskd-no-such-host-for-tests");
+    await expect(offline.getByTestId("cluster-host")).toHaveText("celeris-no-such-host-for-tests");
     await expect(offline.getByTestId("cluster-connected")).toHaveText("disconnected");
     await expect(offline.getByTestId("cluster-login-hint")).toContainText(
-      "scripts/cluster-login.sh taskd-no-such-host-for-tests",
+      "scripts/cluster-login.sh celeris-no-such-host-for-tests",
     );
   });
 
@@ -164,7 +164,7 @@ test.describe("受け入れ条件 4・5: 委譲のあるタスクの詳細、作
     await expect(page.getByTestId("task-title")).toHaveText("Delegated-Child-1");
   });
 
-  test("一覧の行と DAG のノードに役割のラベルが出る（taskd-requests R2 対応後）", async ({ page }) => {
+  test("一覧の行と DAG のノードに役割のラベルが出る（celeris-requests R2 対応後）", async ({ page }) => {
     // 一覧: TaskSummary.role をそのまま出す（追加の GET /tasks/{id} は呼ばない）。
     await page.goto("/tasks?q=Lead-Delegator");
     const leadRow = page.getByTestId("task-row").filter({ hasText: "Lead-Delegator" });

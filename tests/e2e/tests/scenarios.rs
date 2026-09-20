@@ -1,5 +1,5 @@
 //! DESIGN §6 Phase 3 の受け入れ 3 シナリオ（ADR-0005 D8）。fake ワーカー（`sh` スクリプト）と
-//! 実バイナリ `taskd` だけで動き、ネットワークに出ない。
+//! 実バイナリ `celeris` だけで動き、ネットワークに出ない。
 //!
 //! 1. 3 タスク（うち 1 つは依存あり）を並列度 2 で処理し、全て `done`
 //! 2. `Command` チェックが失敗したタスクが 1 回リトライされ 2 回目で `done`
@@ -17,7 +17,7 @@ use task_core::{
 use time::OffsetDateTime;
 
 /// `target/debug/<name>`（テスト実行ファイルの 2 つ上）。`cargo test --workspace` で
-/// `crates/taskd/tests` と `crates/taskctl/tests` の統合テストがバイナリのビルドを強制する。
+/// `crates/celeris/tests` と `crates/celerisctl/tests` の統合テストがバイナリのビルドを強制する。
 fn bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let debug_dir = exe.parent().unwrap().parent().unwrap();
@@ -37,7 +37,7 @@ impl Env {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        let db = root.join("taskd.sqlite3");
+        let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
         Self { _tmp: tmp, root, db, store }
     }
@@ -49,9 +49,9 @@ impl Env {
     }
 
     fn write_config(&self, max_concurrency: usize, script: &Path, extra: &str) -> PathBuf {
-        let path = self.root.join("taskd.toml");
+        let path = self.root.join("config.toml");
         let text = format!(
-            r#"db = "taskd.sqlite3"
+            r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 50
 max_concurrency = {max_concurrency}
@@ -83,7 +83,7 @@ model = "fake"
         dir
     }
 
-    /// `taskctl add` → `approve` と同じ経路（insert + Created、Accept）で ready にする。
+    /// `celerisctl add` → `approve` と同じ経路（insert + Created、Accept）で ready にする。
     fn add_ready_task(&self, title: &str, dir: &Path, checks: Vec<Check>, depends_on: Vec<TaskId>, max_retries: u32) -> TaskId {
         let now = OffsetDateTime::now_utc();
         let task = Task {
@@ -121,9 +121,9 @@ model = "fake"
         task.id
     }
 
-    fn run_taskd(&self, config: &Path, timeout: Duration) -> String {
-        let log = self.root.join("taskd.log");
-        let mut child = Command::new(bin("taskd"))
+    fn run_celeris(&self, config: &Path, timeout: Duration) -> String {
+        let log = self.root.join("celeris.log");
+        let mut child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--until-idle", "--max-ticks", "2000", "--log-format", "text"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -134,25 +134,25 @@ model = "fake"
         loop {
             if let Some(status) = child.try_wait().unwrap() {
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                assert!(status.success(), "taskd exited with {status}\n{text}");
+                assert!(status.success(), "celeris exited with {status}\n{text}");
                 return text;
             }
             if start.elapsed() > timeout {
                 let _ = child.kill();
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                panic!("taskd did not reach idle within {timeout:?}\n{text}");
+                panic!("celeris did not reach idle within {timeout:?}\n{text}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
     }
 
     fn replay_is_consistent(&self) {
-        let out = Command::new(bin("taskctl"))
+        let out = Command::new(bin("celerisctl"))
             .args(["--db", self.db.to_str().unwrap(), "replay"])
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "taskctl replay failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "celerisctl replay failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
         assert!(stdout.contains("replay: 0 mismatches"), "{stdout}");
     }
 
@@ -202,7 +202,7 @@ echo '{{"type":"done","summary":"fake finished","evidence":[{{"criterion":0,"com
     let b = env.add_ready_task("B", &env.workspace_for("b"), checks(), vec![], 0);
     let c = env.add_ready_task("C", &env.workspace_for("c"), checks(), vec![a], 0);
 
-    let log = env.run_taskd(&config, Duration::from_secs(60));
+    let log = env.run_celeris(&config, Duration::from_secs(60));
 
     for id in [a, b, c] {
         let t = env.task(id);
@@ -268,7 +268,7 @@ echo '{"type":"done","summary":"attempt '"$N"'","evidence":[{"criterion":0,"comm
     let dir = env.workspace_for("retry");
     let id = env.add_ready_task("retry", &dir, vec![Check::Command { cmd: "test -f ok.txt".into(), expect_exit: 0 }], vec![], 1);
 
-    let log = env.run_taskd(&config, Duration::from_secs(60));
+    let log = env.run_celeris(&config, Duration::from_secs(60));
 
     let t = env.task(id);
     assert_eq!(t.status, Status::Done, "{log}");
@@ -317,7 +317,7 @@ fn expired_lease_is_reclaimed_and_task_completes() {
     let script = env.write_script(r#"cat >/dev/null; echo '{"type":"done","summary":"ok","evidence":[]}'"#);
     let config = env.write_config(1, &script, "");
     let dir = env.workspace_for("stale");
-    // 前世代の taskd が落ちた状態を再現: running + 期限切れリース。
+    // 前世代の celeris が落ちた状態を再現: running + 期限切れリース。
     let now = OffsetDateTime::now_utc();
     let task = Task {
         repos: Vec::new(),
@@ -351,7 +351,7 @@ fn expired_lease_is_reclaimed_and_task_completes() {
     env.store.insert(&task).unwrap();
     env.store.append_event(task.id, &Event::Created { task: Box::new(task.clone()) }).unwrap();
 
-    let log = env.run_taskd(&config, Duration::from_secs(60));
+    let log = env.run_celeris(&config, Duration::from_secs(60));
 
     let t = env.task(task.id);
     assert_eq!(t.status, Status::Done, "{log}");
@@ -381,7 +381,7 @@ fn worker_crash_without_terminal_message_fails_after_retries() {
     let config = env.write_config(1, &script, "");
     let dir = env.workspace_for("crash");
     let id = env.add_ready_task("crash", &dir, vec![Check::Command { cmd: "true".into(), expect_exit: 0 }], vec![], 1);
-    let log = env.run_taskd(&config, Duration::from_secs(60));
+    let log = env.run_celeris(&config, Duration::from_secs(60));
     let t = env.task(id);
     assert_eq!(t.status, Status::Failed, "{log}");
     assert_eq!(t.attempts, 2);

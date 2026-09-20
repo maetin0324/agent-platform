@@ -1,7 +1,7 @@
 //! `task-ops` 全体で使うエラー型（ADR-0013 D7）。
 //!
-//! `Display` は現在の `taskctl` の各コマンドのエラー文面をそのまま保つ（挙動を変えない）。
-//! `taskctl` 側は `OpsError` を `CliError` に写し、stderr の文面と exit code を変えない。
+//! `Display` は現在の `celerisctl` の各コマンドのエラー文面をそのまま保つ（挙動を変えない）。
+//! `celerisctl` 側は `OpsError` を `CliError` に写し、stderr の文面と exit code を変えない。
 
 use task_core::{MilestoneId, ProjectId, Status, StoreError, TaskId};
 

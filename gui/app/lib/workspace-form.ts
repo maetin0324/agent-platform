@@ -1,12 +1,12 @@
-import { formString } from "~/taskd/forms";
-import type { WorkspaceSpec } from "~/taskd/types";
+import { formString } from "~/celeris/forms";
+import type { WorkspaceSpec } from "~/celeris/types";
 
 /**
- * 案件の作業場所（ADR-0039 D1、docs/taskd-api-v1.md §3.46〜3.48。Phase G13k）のフォーム入出力。
+ * 案件の作業場所（ADR-0039 D1、docs/celeris-api-v1.md §3.46〜3.48。Phase G13k）のフォーム入出力。
  * `/projects` の新規フォーム、秘書の「新しい案件として」（`~/components/Conversation.tsx`）、
  * `/projects/:id` の編集カードが共有する（`~/components/WorkspaceFields.tsx` と対になる純粋関数）。
- * GUI 側では検証しない: 空の `path` / 知らない `cluster` もそのまま taskd に送り、422 の文言
- * （`errors[].field = "workspace.cluster"`）をそのまま出す（`~/taskd/projects-admin.server.ts` と同じ規律）。
+ * GUI 側では検証しない: 空の `path` / 知らない `cluster` もそのまま celeris に送り、422 の文言
+ * （`errors[].field = "workspace.cluster"`）をそのまま出す（`~/celeris/projects-admin.server.ts` と同じ規律）。
  */
 
 /** 3 択（「まだ決めない」／「手元」／「クラスタ」）。`WorkspaceSpec` が無ければ `undecided`。 */

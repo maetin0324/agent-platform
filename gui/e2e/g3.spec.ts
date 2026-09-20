@@ -4,33 +4,33 @@ import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
-import type { TaskDetail, TaskList } from "~/taskd/types";
+import type { TaskDetail, TaskList } from "~/celeris/types";
 import { expect, test } from "./test";
 
 // Phase G3 の受け入れ条件 1・3・4・6・7（docs/DESIGN.md §10 Phase G3、docs/adr/0006-g3-decisions.md D6）。
-// 条件 2（stream-json の整形）と条件 5（mock-taskd の 403）は Playwright ではなく `pnpm test`
+// 条件 2（stream-json の整形）と条件 5（mock-celeris の 403）は Playwright ではなく `pnpm test`
 // （test/unit/stream-json.test.ts、test/unit/files.route.test.ts、test/unit/artifact-view.test.ts）で確認する
-// （DESIGN 本文が「実 taskd での細工 DB は taskd 側のテストに任せる」と明記しているため）。
-// `scripts/taskd.sh fixture basic && scripts/taskd.sh start basic` の実 taskd（fake ワーカー並走）に対して検証する。
+// （DESIGN 本文が「実 celeris での細工 DB は celeris 側のテストに任せる」と明記しているため）。
+// `scripts/celeris.sh fixture basic && scripts/celeris.sh start basic` の実 celeris（fake ワーカー並走）に対して検証する。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_URL = "http://127.0.0.1:7710";
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_URL = "http://127.0.0.1:7710";
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
+  return execFileSync(CELERIS_SH, args, { cwd: REPO_ROOT, stdio: "pipe" }).toString();
 }
 
-function taskctl(...args: string[]): string {
-  return execFileSync(TASKD_SH, ["taskctl", "basic", ...args], { cwd: REPO_ROOT, stdio: "pipe" })
+function celerisctl(...args: string[]): string {
+  return execFileSync(CELERIS_SH, ["celerisctl", "basic", ...args], { cwd: REPO_ROOT, stdio: "pipe" })
     .toString()
     .trim();
 }
 
 async function apiGet<T>(pathAndQuery: string): Promise<T> {
-  const res = await fetch(`${TASKD_API_URL}/api/v1${pathAndQuery}`);
-  if (!res.ok) throw new Error(`taskd ${pathAndQuery} responded ${res.status}`);
+  const res = await fetch(`${CELERIS_API_URL}/api/v1${pathAndQuery}`);
+  if (!res.ok) throw new Error(`celeris ${pathAndQuery} responded ${res.status}`);
   return (await res.json()) as T;
 }
 
@@ -130,11 +130,11 @@ test.describe("受け入れ条件 3: 成果物ビューア", () => {
 
     expect(dialogFired).toBe(false);
 
-    // 保存: ダウンロードしたファイルの sha256 が X-Taskd-Sha256 と一致する（data.json、idx=1）。
+    // 保存: ダウンロードしたファイルの sha256 が X-Celeris-Sha256 と一致する（data.json、idx=1）。
     const href = await jsonItem.getByTestId("artifact-download").getAttribute("href");
     expect(href).toBeTruthy();
     const headRes = await page.request.get(href as string);
-    const expectedSha = headRes.headers()["x-taskd-sha256"];
+    const expectedSha = headRes.headers()["x-celeris-sha256"];
     expect(expectedSha).toBeTruthy();
 
     const downloadPromise = page.waitForEvent("download");
@@ -208,7 +208,7 @@ test.describe("受け入れ条件 6: DAG", () => {
 
 test.describe("受け入れ条件 7: 実行中の run の追尾", () => {
   test("10 秒かけて progress を 5 回出す run を開くと、リロード無しで行が増える", async ({ page }) => {
-    const id = taskctl(
+    const id = celerisctl(
       "add",
       "--title",
       "Slow-F",
@@ -219,7 +219,7 @@ test.describe("受け入れ条件 7: 実行中の run の追尾", () => {
       "--workspace",
       "ws-f",
     );
-    taskctl("approve", id);
+    celerisctl("approve", id);
 
     // WorkerStarted が記録され run が現れるまで待つ（次 tick、200ms 間隔）。
     let runId: string | undefined;
@@ -237,11 +237,11 @@ test.describe("受け入れ条件 7: 実行中の run の追尾", () => {
       .toBeGreaterThan(initialCount);
 
     // 最終的に done まで進む（後片付けと合わせて replay の健全性も確認）。仕様に時間の上限は無い。
-    // 直接は 10 秒強のはずだが、e2e 中に taskd の tick が止まる現象（docs/taskd-requests.md R1、G2-U1）を
+    // 直接は 10 秒強のはずだが、e2e 中に celeris の tick が止まる現象（docs/celeris-requests.md R1、G2-U1）を
     // 踏まえ 60 秒にする（G2 の受け入れ条件 1 と同じ方針）。
     await expect
       .poll(async () => (await apiGet<TaskDetail>(`/tasks/${id}`)).task.status, { timeout: 60_000, intervals: [1_000] })
       .toBe("done");
-    expect(taskctl("replay")).toContain("0 mismatches");
+    expect(celerisctl("replay")).toContain("0 mismatches");
   });
 });

@@ -34,7 +34,7 @@ import {
 } from "~/lib/labels";
 
 /**
- * 業務の 6 画面に出す日本語（Phase G13f-1、監査 5）。taskd の値は変えず、表示だけを写す。
+ * 業務の 6 画面に出す日本語（Phase G13f-1、監査 5）。celeris の値は変えず、表示だけを写す。
  * 知らない値が来たらそのまま出す（画面を壊さない）。
  */
 describe("labels", () => {
@@ -115,7 +115,7 @@ describe("タスク管理の言葉（ADR-0044）", () => {
   it("コメントの書き手（D2）", () => {
     expect(commentAuthorLabel("human")).toBe("あなた");
     expect(commentAuthorLabel("node")).toBe("担当");
-    expect(commentAuthorLabel("system")).toBe("taskd");
+    expect(commentAuthorLabel("system")).toBe("celeris");
   });
 
   it("コメントの効き方（D2 の表）は何が起きたかを必ず言う", () => {
@@ -177,7 +177,7 @@ describe("タスク管理の言葉（ADR-0044）", () => {
     expect(projectArchiveConfirmText("Pluvio")).toContain("アーカイブを表示");
   });
 
-  it("連鎖で中止された件数（taskd が返した配列の長さをそのまま出す）", () => {
+  it("連鎖で中止された件数（celeris が返した配列の長さをそのまま出す）", () => {
     expect(cancelledCountLabel(3, 1)).toBe("仕事 3 件・途中目標 1 件を中止しました");
     expect(cancelledCountLabel(0)).toBe("仕事 0 件を中止しました");
   });

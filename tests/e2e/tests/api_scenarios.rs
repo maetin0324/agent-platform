@@ -1,9 +1,9 @@
-//! DESIGN §6 Phase 9 の受け入れ 4〜8（ADR-0013、`docs/gui/api.md`）のうち、実バイナリ `taskd`（`[api]` 有効）/ `taskctl` と
+//! DESIGN §6 Phase 9 の受け入れ 4〜8（ADR-0013、`docs/gui/api.md`）のうち、実バイナリ `celeris`（`[api]` 有効）/ `celerisctl` と
 //! fake ワーカー（`sh` スクリプト）と `curl` で再現するもの。接続先は 127.0.0.1 だけで、外部ネットワークに出ない。
 //!
 //! 4. `[api]` が無ければリッスンしない。有効なら `/health` が `api_version` と `schema_version` を返す
 //! 5. approve / reject / answer / cancel / タスク作成 / plan が状態機械を通る。無効な遷移と `expected_status` の不一致は 409（problem+json）
-//! 6. SSE 購読中の `taskctl add` が 2 秒以内に `Created` として届き、`Last-Event-ID` での再接続で取りこぼさない
+//! 6. SSE 購読中の `celerisctl add` が 2 秒以内に `Created` として届き、`Last-Event-ID` での再接続で取りこぼさない
 //! 7. レート制限シナリオで `/daemon` に実行中の run と cooldown が現れ、`ProviderThrottled` がイベントに残る
 //! 8. loopback 以外で `token_file` 無しは設定エラー、許可されない `Host` は 400、ワークスペース外の成果物は 403、`env` の値は応答に出ない
 
@@ -25,7 +25,7 @@ fn bin(name: &str) -> PathBuf {
     path
 }
 
-/// OS に空きポートを選ばせて閉じる（taskd が bind するまでの僅かな競合は許容する）。
+/// OS に空きポートを選ばせて閉じる（celeris が bind するまでの僅かな競合は許容する）。
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
@@ -41,7 +41,7 @@ fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     cond()
 }
 
-/// drop で kill する子プロセス（taskd / SSE の curl）。
+/// drop で kill する子プロセス（celeris / SSE の curl）。
 struct Proc {
     child: Child,
     log: PathBuf,
@@ -105,7 +105,7 @@ impl Env {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        let db = root.join("taskd.sqlite3");
+        let db = root.join("celeris.sqlite3");
         let store = Arc::new(SqliteStore::open(&db).unwrap());
         Self { _tmp: tmp, root, db, store, port: free_port(), token: None }
     }
@@ -118,10 +118,10 @@ impl Env {
 
     /// `api` は `[api]` 節の本体（空なら節を書かない）。`provider_env` は `[[providers]]` の `env` の TOML インライン表。
     fn write_config(&self, script: &Path, api: &str, provider_env: &str) -> PathBuf {
-        let path = self.root.join("taskd.toml");
+        let path = self.root.join("config.toml");
         let api_section = if api.is_empty() { String::new() } else { format!("[api]\n{api}\n") };
         let text = format!(
-            r#"db = "taskd.sqlite3"
+            r#"db = "celeris.sqlite3"
 workspace_root = "workspaces"
 tick_ms = 50
 max_concurrency = 2
@@ -170,23 +170,23 @@ env = {provider_env}
         dir.to_string_lossy().into_owned()
     }
 
-    fn taskctl(&self, args: &[&str]) -> String {
-        let out = Command::new(bin("taskctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
+    fn celerisctl(&self, args: &[&str]) -> String {
+        let out = Command::new(bin("celerisctl")).arg("--db").arg(&self.db).args(args).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(out.status.success(), "taskctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "celerisctl {args:?} failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
         stdout
     }
 
     fn add(&self, args: &[&str]) -> TaskId {
         let mut full = vec!["add", "--objective", "phase 9 api scenario"];
         full.extend_from_slice(args);
-        self.taskctl(&full).trim().parse().unwrap()
+        self.celerisctl(&full).trim().parse().unwrap()
     }
 
-    fn start_taskd(&self, config: &Path) -> Proc {
+    fn start_celeris(&self, config: &Path) -> Proc {
         static STARTS: AtomicUsize = AtomicUsize::new(0);
-        let log = self.root.join(format!("taskd-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
-        let child = Command::new(bin("taskd"))
+        let log = self.root.join(format!("celeris-{}.log", STARTS.fetch_add(1, Ordering::Relaxed)));
+        let child = Command::new(bin("celeris"))
             .args(["--config", config.to_str().unwrap(), "--log-format", "text"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -200,7 +200,7 @@ env = {provider_env}
     fn wait_api(&self, daemon: &mut Proc) {
         let ok = wait_until(Duration::from_secs(20), || {
             if let Ok(Some(status)) = daemon.child.try_wait() {
-                panic!("taskd exited early with {status}\n{}", daemon.log_text());
+                panic!("celeris exited early with {status}\n{}", daemon.log_text());
             }
             self.request("GET", "/health", None, &[]).status == 200
         });
@@ -257,7 +257,7 @@ env = {provider_env}
     }
 
     fn replay_is_consistent(&self) {
-        let out = self.taskctl(&["replay"]);
+        let out = self.celerisctl(&["replay"]);
         assert!(out.contains("replay: 0 mismatches"), "{out}");
     }
 }
@@ -295,14 +295,14 @@ fn api_is_off_by_default_and_health_reports_versions_when_enabled() {
     let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
 
     let config = env.write_config(&script, "", "");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     std::thread::sleep(Duration::from_millis(800));
-    assert!(daemon.child.try_wait().unwrap().is_none(), "taskd should keep running\n{}", daemon.log_text());
+    assert!(daemon.child.try_wait().unwrap().is_none(), "celeris should keep running\n{}", daemon.log_text());
     assert_eq!(env.get("/health").status, 0, "nothing listens without [api]");
     drop(daemon);
 
     let config = env.write_config(&script, &env.api_listen(), "");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
     let health = env.get("/health");
     assert_eq!(health.status, 200, "{}", health.body);
@@ -336,7 +336,7 @@ esac"#,
     // ADR-0044 Phase 53 追記（Phase 55）: 変更系はトークンが要る。
     let api = env.api_listen_with_token();
     let config = env.write_config(&script, &api, "");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
     let ws = env.workspace("ws-q");
 
@@ -442,7 +442,7 @@ esac"#,
     env.post(&format!("/tasks/{draft}/cancel"), json!({})).assert_problem(409, "invalid_transition");
     env.post(&format!("/tasks/{}/cancel", TaskId::new()), json!({})).assert_problem(404, "task_not_found");
 
-    // plan（taskctl plan 相当）。
+    // plan（celerisctl plan 相当）。
     let plan = env.post("/plans", json!({"goal": "split the work\nsecond line"}));
     assert_eq!(plan.status, 201, "{}", plan.body);
     let plan = plan.json();
@@ -460,13 +460,13 @@ esac"#,
     env.replay_is_consistent();
 }
 
-/// 受け入れ 6: SSE 購読中の `taskctl add` が 2 秒以内に届き、`Last-Event-ID` で再接続しても取りこぼさない。
+/// 受け入れ 6: SSE 購読中の `celerisctl add` が 2 秒以内に届き、`Last-Event-ID` で再接続しても取りこぼさない。
 #[test]
 fn sse_delivers_created_quickly_and_resumes_from_last_event_id() {
     let env = Env::new();
     let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
     let config = env.write_config(&script, &env.api_listen(), "");
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
 
     let subscribe = |name: &str, last_event_id: Option<u64>| {
@@ -506,7 +506,7 @@ fn sse_delivers_created_quickly_and_resumes_from_last_event_id() {
 
     // 切断中に起きたことを、Last-Event-ID からの再接続で全て受け取る。
     let t2 = env.add(&["--title", "sse two", "--check-cmd", "true"]);
-    env.taskctl(&["approve", &t1.to_string()]);
+    env.celerisctl(&["approve", &t1.to_string()]);
     let second = subscribe("sse-2.txt", Some(last_seen));
     assert!(wait_until(Duration::from_secs(5), || created_id(&second, t2).is_some()), "missed Created: {}", second.log_text());
     assert!(
@@ -546,10 +546,10 @@ fi"#,
     let slow = env.add(&["--title", "slow", "--check-cmd", "true", "--workspace", &ws_slow]);
     let throttled = env.add(&["--title", "throttled", "--check-cmd", "true", "--max-retries", "0", "--workspace", &ws_throttle]);
 
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
     // 先に slow を走らせてから、同じプロバイダで throttled を走らせる（先に cooldown に入ると slow が dispatch されない）。
-    env.taskctl(&["approve", &slow.to_string()]);
+    env.celerisctl(&["approve", &slow.to_string()]);
     let in_flight_has_slow = |snap: &Value| {
         snap["in_flight"].as_array().is_some_and(|v| {
             v.iter().any(|r| r["task_id"] == slow.to_string() && r["kind"] == "worker" && r["provider"] == "fake-local")
@@ -560,7 +560,7 @@ fi"#,
         "slow run never appeared in /daemon: {}",
         env.get("/daemon").body
     );
-    env.taskctl(&["approve", &throttled.to_string()]);
+    env.celerisctl(&["approve", &throttled.to_string()]);
 
     let mut snap = Value::Null;
     let seen = wait_until(Duration::from_secs(5), || {
@@ -594,8 +594,8 @@ fn api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values()
 
     // loopback 以外で token_file 無し → 設定エラー（exit 2）。
     let config = env.write_config(&script, &format!("listen = \"0.0.0.0:{}\"", env.port), "");
-    let mut bad = env.start_taskd(&config);
-    assert!(wait_until(Duration::from_secs(10), || bad.child.try_wait().unwrap().is_some()), "taskd must refuse the config");
+    let mut bad = env.start_celeris(&config);
+    assert!(wait_until(Duration::from_secs(10), || bad.child.try_wait().unwrap().is_some()), "celeris must refuse the config");
     assert_eq!(bad.child.wait().unwrap().code(), Some(2));
     assert!(bad.log_text().contains("token_file is required"), "{}", bad.log_text());
     drop(bad);
@@ -603,7 +603,7 @@ fn api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values()
     std::fs::write(env.root.join("api.token"), "  tok-9f8e7d\n").unwrap();
     let api = format!("{}\ntoken_file = \"api.token\"", env.api_listen());
     let config = env.write_config(&script, &api, r#"{ SECRET_TOKEN = "s3cr3t-provider-value" }"#);
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
 
     // Bearer。
@@ -658,10 +658,10 @@ fn api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values()
     env.replay_is_consistent();
 }
 
-/// 受け入れ 2（Phase 9 監査の再現手順）: 速い tick で動く taskd に、別プロセスの `taskctl` と API から書き込み続けても、
-/// どちらにも `database is locked` が出ず taskd も落ちない（書き込みトランザクションは IMMEDIATE + busy_timeout）。
+/// 受け入れ 2（Phase 9 監査の再現手順）: 速い tick で動く celeris に、別プロセスの `celerisctl` と API から書き込み続けても、
+/// どちらにも `database is locked` が出ず celeris も落ちない（書き込みトランザクションは IMMEDIATE + busy_timeout）。
 #[test]
-fn writes_from_taskctl_and_api_while_taskd_ticks_fast_never_hit_database_is_locked() {
+fn writes_from_celerisctl_and_api_while_celeris_ticks_fast_never_hit_database_is_locked() {
     let mut env = Env::new();
     let script = env.write_script("cat >/dev/null\necho '{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}'");
     // ADR-0044 Phase 53 追記（Phase 55）: `POST /tasks` は管理系になったのでトークンを持たせる。
@@ -669,14 +669,14 @@ fn writes_from_taskctl_and_api_while_taskd_ticks_fast_never_hit_database_is_lock
     let config = env.write_config(&script, &api, "");
     let text = std::fs::read_to_string(&config).unwrap().replace("tick_ms = 50", "tick_ms = 20");
     std::fs::write(&config, text).unwrap();
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
     let ws = env.workspace("ws-lock");
 
     let mut ids = Vec::new();
     for i in 0..150 {
         let id = env.add(&["--title", &format!("cli {i}"), "--check-cmd", "true", "--workspace", &ws]);
-        env.taskctl(&["approve", &id.to_string()]);
+        env.celerisctl(&["approve", &id.to_string()]);
         ids.push(id);
         if i % 5 == 0 {
             let r = env.post(
@@ -689,14 +689,14 @@ fn writes_from_taskctl_and_api_while_taskd_ticks_fast_never_hit_database_is_lock
             assert_eq!(created["status"], "ready", "{created}");
             ids.push(id_of(&created));
         }
-        assert!(daemon.child.try_wait().unwrap().is_none(), "taskd exited at iteration {i}\n{}", daemon.log_text());
+        assert!(daemon.child.try_wait().unwrap().is_none(), "celeris exited at iteration {i}\n{}", daemon.log_text());
     }
     assert!(
         wait_until(Duration::from_secs(120), || ids.iter().all(|id| env.task(*id).status == Status::Done)),
         "not all tasks finished\n{}",
         daemon.log_text()
     );
-    assert!(daemon.child.try_wait().unwrap().is_none(), "taskd must still be running\n{}", daemon.log_text());
+    assert!(daemon.child.try_wait().unwrap().is_none(), "celeris must still be running\n{}", daemon.log_text());
     assert!(!daemon.log_text().contains("database is locked"), "{}", daemon.log_text());
     env.replay_is_consistent();
 }
@@ -710,16 +710,16 @@ fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
     let config = env.write_config(&script, &env.api_listen(), "");
     let mut text = std::fs::read_to_string(&config).unwrap();
     text.push_str(
-        "\n[[clusters]]\nid = \"offline\"\nhost = \"taskd-no-such-host-for-tests\"\nconcurrency = 1\n\
+        "\n[[clusters]]\nid = \"offline\"\nhost = \"celeris-no-such-host-for-tests\"\nconcurrency = 1\n\
          setup = [\"true\"]\nenv = { SECRET_CLUSTER_VALUE = \"cluster-s3cr3t-value\" }\nrsync_excludes = [\".git/\"]\n",
     );
     std::fs::write(&config, text).unwrap();
     let remote = env.workspace("remote-project");
     let id = env.add(&["--title", "offline work", "--check-cmd", "true", "--cluster", "offline", "--workspace", &remote]);
 
-    let mut daemon = env.start_taskd(&config);
+    let mut daemon = env.start_celeris(&config);
     env.wait_api(&mut daemon);
-    env.taskctl(&["approve", &id.to_string()]);
+    env.celerisctl(&["approve", &id.to_string()]);
 
     // 8. /clusters: 設定 + 接続の有無 + cooldown。env の値は出ない。
     let mut clusters = Value::Null;
@@ -730,7 +730,7 @@ fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
     assert!(seen, "the offline cluster never entered cooldown: {clusters}");
     let c = &clusters["items"][0];
     assert_eq!(c["id"], "offline", "{clusters}");
-    assert_eq!(c["host"], "taskd-no-such-host-for-tests");
+    assert_eq!(c["host"], "celeris-no-such-host-for-tests");
     assert_eq!(c["connected"], false);
     assert_eq!(c["in_use"], 0);
     assert_eq!(c["concurrency"], 1);
@@ -747,7 +747,7 @@ fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
     assert_eq!(config_view.json()["clusters"][0]["has_setup"], true, "{}", config_view.body);
     let snap = env.get("/daemon").json()["snapshot"].clone();
     assert_eq!(snap["clusters"][0]["connected"], false, "{snap}");
-    assert_eq!(snap["clusters"][0]["host"], "taskd-no-such-host-for-tests", "{snap}");
+    assert_eq!(snap["clusters"][0]["host"], "celeris-no-such-host-for-tests", "{snap}");
 
     // 9. 受信箱の注意: クラスタごとに 1 件、host と対象タスク数。
     let inbox = env.get("/inbox").json();
@@ -757,12 +757,12 @@ fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
     // ADR-0018 M8: 人のログイン待ちは経路なし（unroutable）ではないので、同じタスクが 2 件に出ない。
     assert!(!attention.iter().any(|a| a["type"] == "unroutable"), "{inbox}");
     assert_eq!(items[0]["cluster"], "offline");
-    assert_eq!(items[0]["host"], "taskd-no-such-host-for-tests");
+    assert_eq!(items[0]["host"], "celeris-no-such-host-for-tests");
     assert_eq!(items[0]["tasks"], 1);
     assert!(items[0]["at"].is_string(), "{inbox}");
     assert_eq!(inbox["counts"]["attention"].as_u64().unwrap() as usize, attention.len());
 
-    // 11. 詳細にクラスタが出る（API と `taskctl show --json` の両方）。`workspace_dir` は手元の写し。
+    // 11. 詳細にクラスタが出る（API と `celerisctl show --json` の両方）。`workspace_dir` は手元の写し。
     let detail = env.get(&format!("/tasks/{id}")).json();
     assert_eq!(detail["cluster"], "offline", "{detail}");
     assert_eq!(
@@ -771,7 +771,7 @@ fn clusters_endpoint_inbox_attention_and_task_detail_show_an_offline_cluster() {
         "{detail}"
     );
     assert_eq!(detail["task"]["workspace"]["path"], remote, "{detail}");
-    let show: Value = serde_json::from_str(env.taskctl(&["show", "--json", &id.to_string()]).trim()).unwrap();
+    let show: Value = serde_json::from_str(env.celerisctl(&["show", "--json", &id.to_string()]).trim()).unwrap();
     assert_eq!(show["cluster"], "offline", "{show}");
 
     // タスクは ready のまま（attempts も消費しない）。

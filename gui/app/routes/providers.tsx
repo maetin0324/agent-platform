@@ -1,4 +1,17 @@
 import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher } from "react-router";
+import type { ProviderActionResult } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { formString } from "~/celeris/forms";
+import {
+  buildProviderCreateInput,
+  buildProviderPatchInput,
+  checkProvider,
+  createProvider,
+  deleteProvider,
+  patchProvider,
+} from "~/celeris/providers-admin.server";
+import type { Providers, ProviderView, Tier } from "~/celeris/types";
 import { ProviderActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
@@ -18,26 +31,13 @@ import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/c
 import type { Tone } from "~/components/ui/tone";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
-import { TaskdBanner } from "~/root";
-import type { ProviderActionResult } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { formString } from "~/taskd/forms";
-import {
-  buildProviderCreateInput,
-  buildProviderPatchInput,
-  checkProvider,
-  createProvider,
-  deleteProvider,
-  patchProvider,
-} from "~/taskd/providers-admin.server";
-import type { Providers, ProviderView, Tier } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/providers";
 
 /**
  * `/providers`（プロバイダ画面、docs/DESIGN.md §4.5、ADR-GUI-0012 D2）の loader が返すデータ。
  * `Providers.items[]`（`ProviderView`）をそのまま表にする（docs/adr/0007 D7）。
- * cooldown の残り時間だけは taskd が値を返さないので、BFF 自身がリクエスト前後に取った
+ * cooldown の残り時間だけは celeris が値を返さないので、BFF 自身がリクエスト前後に取った
  * `fetchedAt`（ISO 文字列）を基準に画面側で減算する（docs/adr/0007 D3）。
  */
 export interface ProvidersData {
@@ -46,7 +46,7 @@ export interface ProvidersData {
 }
 
 /** `GET /providers` を呼ぶ。応答はそのまま返す（派生の集計はしない）。 */
-export async function loadProviders(client: TaskdClient, request: Request): Promise<ProvidersData> {
+export async function loadProviders(client: CelerisClient, request: Request): Promise<ProvidersData> {
   const providers = await client.get<Providers>("/providers", { signal: request.signal });
   const fetchedAt = new Date().toISOString();
   return { providers, fetchedAt };
@@ -57,9 +57,9 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ProvidersData> {
   try {
-    return await loadProviders(getTaskdClient(), request);
+    return await loadProviders(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -74,7 +74,7 @@ export function meta(_: Route.MetaArgs) {
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
-  const client = getTaskdClient();
+  const client = getCelerisClient();
   let result: ProviderActionResult;
   switch (intent) {
     case "create":
@@ -103,7 +103,7 @@ export const ADAPTER_OPTIONS = ["fake", "claude-code", "codex", "acp", "paperqa"
 
 export default function ProvidersPage({ loaderData }: Route.ComponentProps) {
   const { providers, fetchedAt } = loaderData;
-  // taskd の SSE（daemon tick）で自動再検証が走るたびに loader の再取得が起きる（`useTaskdStream`）。
+  // celeris の SSE（daemon tick）で自動再検証が走るたびに loader の再取得が起きる（`useCelerisStream`）。
   // 通常の `<Form>` の `actionData` はその再検証のたびに消えてしまう（React Router の仕様）ので、
   // 追加・編集・削除・疎通確認は 1 つの `useFetcher()` にまとめ、その `fetcher.data` を表示する
   // （fetcher の状態は revalidate() の影響を受けない。ADR-GUI-0012 D2）。
@@ -312,7 +312,7 @@ function ProviderCard({
         </dl>
 
         {/* ADR-0022 D2: 直近の疎通確認。手動で `POST /providers/{id}/check` を叩いたときだけ入り、
-            taskd を再起動すると消える（メモリ上の観測値）。 */}
+            celeris を再起動すると消える（メモリ上の観測値）。 */}
         <Alert
           tone={item.last_check ? (item.last_check.result === "ok" ? "success" : "danger") : "neutral"}
           title="最後の疎通確認"
@@ -460,16 +460,16 @@ function ProviderCard({
 }
 
 /**
- * loader が `taskdErrorResponse` で投げた `Response` を判別する（docs/adr/0004-g1-decisions.md D6、
- * `app/routes/daemon.tsx` と同じ方針）。taskd 停止中はバナー、それ以外は status と detail を出す。
+ * loader が `celerisErrorResponse` で投げた `Response` を判別する（docs/adr/0004-g1-decisions.md D6、
+ * `app/routes/daemon.tsx` と同じ方針）。celeris 停止中はバナー、それ以外は status と detail を出す。
  */
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

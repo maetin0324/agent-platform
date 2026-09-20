@@ -7,7 +7,7 @@
 //!
 //! 通知の判定（`notify_now`）は `task_core::report::notify_now` の決定的な関数で、ここは値を組むだけ。
 //! `last_notified_at` は DB に列が無い（migration を足さない）ので、**API プロセスのメモリ**に持つ
-//! 観測値として扱う（taskd を再起動すると「まだ通知していない」状態に戻る）。
+//! 観測値として扱う（celeris を再起動すると「まだ通知していない」状態に戻る）。
 
 use axum::body::Body;
 use axum::extract::{RawQuery, State};

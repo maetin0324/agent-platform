@@ -1,6 +1,6 @@
 //! ADR-0027 D1（Phase 16 の受け入れ 1）: `POST /tasks` の `genre` の検証（422）と正常系、`GET /tasks?genre=`
 //! の絞り込み、`GET /config` の `genres[]`。API は常に完全な設定を持つので、`[[genres]]` が 1 件でも
-//! あれば知らない `genre` / `genre` と `role` の不整合は常に 422（taskctl の「`--config` 無し」の緩さは無い）。
+//! あれば知らない `genre` / `genre` と `role` の不整合は常に 422（celerisctl の「`--config` 無し」の緩さは無い）。
 
 mod common;
 
@@ -136,7 +136,7 @@ async fn list_tasks_filters_by_genre() {
     assert!(!ids.contains(&plain["id"].as_str().unwrap()));
 }
 
-/// `GET /config` に `genres[]` が出る（taskd 側の要約と同じ形）。
+/// `GET /config` に `genres[]` が出る（celeris 側の要約と同じ形）。
 #[tokio::test]
 async fn config_shows_genres() {
     let env = env_with_coding_genre();
@@ -145,9 +145,9 @@ async fn config_shows_genres() {
     let resp = send(&app, get_admin("/api/v1/config")).await;
     assert_eq!(resp.status, 200, "{}", resp.text());
     let config = resp.json();
-    // ADR-0027 D1: `config_view()` のテストヘルパの固定値（`GET /config` は taskd 起動時に作った
-    // `ConfigView` をそのまま返すので、`EnvOptions.genres` とは独立: taskd 側の実装は
-    // `crates/taskd/src/lib.rs` の `config_view` を見ること）。
+    // ADR-0027 D1: `config_view()` のテストヘルパの固定値（`GET /config` は celeris 起動時に作った
+    // `ConfigView` をそのまま返すので、`EnvOptions.genres` とは独立: celeris 側の実装は
+    // `crates/celeris/src/lib.rs` の `config_view` を見ること）。
     assert_eq!(
         config["genres"],
         json!([{

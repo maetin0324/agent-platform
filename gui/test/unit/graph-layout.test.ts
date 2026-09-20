@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { Graph, GraphNode } from "~/celeris/types";
 import { layoutGraph, nodeBox, textWidthEm, wrapLabelLines } from "~/lib/graph-layout";
-import type { Graph, GraphNode } from "~/taskd/types";
 
 /**
- * `layoutGraph` は純粋関数（DOM に依存しない）。ここで見るのは、taskd の応答をそのまま写しているか
+ * `layoutGraph` は純粋関数（DOM に依存しない）。ここで見るのは、celeris の応答をそのまま写しているか
  * （役割ラベル、親子のグルーピング、辺の取捨）だけで、座標そのものは dagre に任せる。
  */
 
@@ -38,7 +38,7 @@ describe("layoutGraph", () => {
     expect(labelOf(result, "01PLAIN")).toBe("No-Role");
   });
 
-  it("role が無い（古い taskd の）応答でもタイトルだけで描ける", () => {
+  it("role が無い（古い celeris の）応答でもタイトルだけで描ける", () => {
     const withoutRole = { id: "01OLD", title: "Old", status: "ready", kind: "execute" } as GraphNode;
     const result = layoutGraph({ nodes: [withoutRole], edges: [] });
     expect(labelOf(result, "01OLD")).toBe("Old");

@@ -1,12 +1,8 @@
 import { data, isRouteErrorResponse, Link } from "react-router";
-import { TaskChanges } from "~/components/task-changes";
-import { Icon } from "~/components/ui/Icon";
-import { Alert, PageHeader } from "~/components/ui/misc";
-import { TaskdBanner } from "~/root";
-import type { IntegrateOutcome } from "~/taskd/action-types";
-import { getTaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { formString } from "~/taskd/forms";
+import type { IntegrateOutcome } from "~/celeris/action-types";
+import { getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { formString } from "~/celeris/forms";
 import {
   integrateChange,
   loadTaskChanges,
@@ -14,24 +10,28 @@ import {
   readIntegrateBody,
   readTaskChangesQuery,
   type TaskChangesData,
-} from "~/taskd/task-changes";
+} from "~/celeris/task-changes";
+import { TaskChanges } from "~/components/task-changes";
+import { Icon } from "~/components/ui/Icon";
+import { Alert, PageHeader } from "~/components/ui/misc";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/tasks.$id.changes";
 
 /**
- * `/tasks/:id/changes`（変更の取り込み。ADR-0043 D5、taskd Phase 54 / G18）。
+ * `/tasks/:id/changes`（変更の取り込み。ADR-0043 D5、celeris Phase 54 / G18）。
  * `/tasks/:id/files` と同じ**兄弟のルート**で、中身は全部 `~/components/task-changes.tsx`
  * （自己完結の部品）に入れてある。同じ部品は `/tasks/:id?tab=changes`（ADR-0044 D5 の「変更」タブ）
  * にも載っているが、**このルートは残す**: 差分の `<Link>`（`?repo=&file=`）と取り込みの `fetcher` の
  * 送り先がここで、`ErrorBoundary` の経路も持つ（「ファイル」タブと `/tasks/:id/files` と同じ作り）。
  *
  * 読み取り（一覧・差分）は `?repo=&file=` のリンクで loader を走らせ、取り込み（**管理系。人だけ**）は
- * この `action` の 2 つの intent に流す。判断はすべて taskd 側なので、ここは form → 要求の写しだけ。
+ * この `action` の 2 つの intent に流す。判断はすべて celeris 側なので、ここは form → 要求の写しだけ。
  */
 export async function loader({ params, request }: Route.LoaderArgs): Promise<TaskChangesData> {
   try {
-    return await loadTaskChanges(getTaskdClient(), params.id, readTaskChangesQuery(request), request.signal);
+    return await loadTaskChanges(getCelerisClient(), params.id, readTaskChangesQuery(request), request.signal);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -39,7 +39,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
   const repo = formString(form, "repo") ?? "";
-  const client = getTaskdClient();
+  const client = getCelerisClient();
 
   let outcome: IntegrateOutcome;
   switch (intent) {
@@ -47,7 +47,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     case "integrate":
       outcome = await integrateChange(client, params.id, repo, readIntegrateBody(form), request.signal);
       break;
-    // 開いている PR を Celeris から merge する（方法は taskd の `[github] merge_method`）。
+    // 開いている PR を Celeris から merge する（方法は celeris の `[github] merge_method`）。
     case "pr_merge":
       outcome = await mergePullRequest(client, params.id, repo, request.signal);
       break;
@@ -58,7 +58,7 @@ export async function action({ params, request }: Route.ActionArgs) {
 }
 
 export function meta(_: Route.MetaArgs) {
-  return [{ title: "変更の取り込み - taskd-gui" }];
+  return [{ title: "変更の取り込み - celeris-gui" }];
 }
 
 export default function TaskChangesPage({ loaderData }: Route.ComponentProps) {
@@ -90,11 +90,11 @@ export default function TaskChangesPage({ loaderData }: Route.ComponentProps) {
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const problem = error.data as TaskdRouteErrorData;
+    const problem = error.data as CelerisRouteErrorData;
     if (problem.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={problem.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={problem.baseUrl ?? ""} problem={null} />
         </main>
       );
     }
@@ -103,7 +103,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
         <h1 className="text-xl font-semibold text-fg">
           {problem.status === 404 ? "取り込める変更がありません" : `エラー ${problem.status}`}
         </h1>
-        {/* taskd の文言をそのまま出す（404 `file_not_found` / `task_not_found`）。 */}
+        {/* celeris の文言をそのまま出す（404 `file_not_found` / `task_not_found`）。 */}
         <Alert tone="danger">{problem.detail}</Alert>
       </main>
     );

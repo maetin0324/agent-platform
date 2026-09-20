@@ -1,4 +1,4 @@
-# agent-platform / taskd
+# agent-platform / Celeris
 
 ## 最初に読むもの（毎セッション）
 1. `docs/DESIGN.md` — 実装方針。ここに書かれた設計原則とPhase順は変更しない

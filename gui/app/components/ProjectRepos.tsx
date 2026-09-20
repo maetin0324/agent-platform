@@ -1,4 +1,6 @@
 import { useFetcher } from "react-router";
+import type { ProjectOpOutcome } from "~/celeris/action-types";
+import type { ClusterView, ProjectRepo } from "~/celeris/types";
 import { ProjectActionFlash } from "~/components/Flash";
 import { RepoFields } from "~/components/RepoFields";
 import { Badge } from "~/components/ui/badge";
@@ -8,17 +10,15 @@ import { Icon } from "~/components/ui/Icon";
 import { DataItem, EmptyState } from "~/components/ui/misc";
 import { PRIMARY_REPO_MARK, repoKindLabel, repoRunLabel, repoSyncLabel, SET_PRIMARY_REPO_LABEL } from "~/lib/labels";
 import { repoLocationText, repoPlaceOf } from "~/lib/repo-form";
-import type { ProjectOpOutcome } from "~/taskd/action-types";
-import type { ClusterView, ProjectRepo } from "~/taskd/types";
 
 /**
- * 案件の「リポジトリ」節（ADR-0043 D1、docs/taskd-api-v1.md §3.68〜3.71。Phase 52 / G16）。
+ * 案件の「リポジトリ」節（ADR-0043 D1、docs/celeris-api-v1.md §3.68〜3.71。Phase 52 / G16）。
  * 案件は複数のリポジトリを持ち、`is_primary` の 1 件が「主なリポジトリ」で、`Project.workspace` は
  * その `location` の写し（上の「作業場所」カードと同じものを指す）。
  *
  * 操作は 4 つ（追加・変更・主にする・削除）で、どれも `/projects/:id` の `action` の intent に流すだけ。
  * 結果は**行ごとの `useFetcher`** に載せる（SSE の再検証で消えないため。監査 H1 / Phase G14 と同じ作り）。
- * GUI 側では検証しない: 409 `repo_in_use` / 422 `validation` は taskd の文言をそのまま出す。
+ * GUI 側では検証しない: 409 `repo_in_use` / 422 `validation` は celeris の文言をそのまま出す。
  */
 export interface ProjectReposProps {
   projectId: string;
@@ -172,7 +172,7 @@ function RepoRow({ repo, clusters }: { repo: ProjectRepo; clusters: readonly Clu
               data-testid="project-repo-delete"
               onClick={(e) => {
                 // 確認は 1 回だけ。ブラウザ以外（テスト・SSR）では `confirm` が無いので、あるときだけ聞く
-                // （`~/routes/releases.tsx` の「昇格」と同じ作り）。使用中かどうかは taskd が 409 で決める。
+                // （`~/routes/releases.tsx` の「昇格」と同じ作り）。使用中かどうかは celeris が 409 で決める。
                 if (typeof window !== "undefined" && typeof window.confirm === "function") {
                   if (!window.confirm(`リポジトリ「${repo.name}」を案件から外します。よろしいですか？`)) {
                     e.preventDefault();

@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadProjectDetail } from "~/routes/projects.$id";
-import { TaskdClient } from "~/taskd/client.server";
+import { CelerisClient } from "~/celeris/client.server";
 import {
   createMilestone,
   decideMilestone,
   patchMilestoneStatus,
   patchProjectStatus,
   startProjectPlan,
-} from "~/taskd/projects-admin.server";
+} from "~/celeris/projects-admin.server";
 import type {
   ArtifactList,
   Milestone,
@@ -19,15 +18,16 @@ import type {
   Report,
   ReportList,
   TaskDetail,
-} from "~/taskd/types";
-import { type MockTaskd, sendJson, sendProblem, startMockTaskd } from "../mock-taskd/server";
+} from "~/celeris/types";
+import { loadProjectDetail } from "~/routes/projects.$id";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -161,7 +161,7 @@ describe("loadProjectDetail", () => {
     expect(result.reports).toEqual(reportsResponse);
     expect(typeof result.fetchedAt).toBe("string");
     const req = mock.requests.find((r) => r.url.startsWith("/api/v1/reports"));
-    const url = new URL(req?.url ?? "", "http://mock-taskd.invalid");
+    const url = new URL(req?.url ?? "", "http://mock-celeris.invalid");
     expect(url.searchParams.get("project")).toBe("p1");
     expect(url.searchParams.has("level")).toBe(false);
     expect(url.searchParams.has("unread")).toBe(false);
@@ -471,7 +471,7 @@ describe("patchMilestoneStatus (PATCH /milestones/{id})", () => {
 });
 
 /**
- * 「この方針で進める」（`POST /projects/{id}/plan`。**管理系**、202 `{task_id}`。docs/taskd-api-v1.md §3.61、
+ * 「この方針で進める」（`POST /projects/{id}/plan`。**管理系**、202 `{task_id}`。docs/celeris-api-v1.md §3.61、
  * 監査 H3）。GUI 側では判断しない: 選んだ途中目標と一言をそのまま送り、202 の `task_id` を画面へ渡すだけ。
  */
 describe("startProjectPlan (POST /projects/{id}/plan)", () => {
@@ -522,7 +522,7 @@ describe("startProjectPlan (POST /projects/{id}/plan)", () => {
 });
 
 /**
- * 途中目標の判定（`POST /milestones/{id}/decide`。**管理系**、202。ADR-0038 D2、docs/taskd-api-v1.md §3.63、
+ * 途中目標の判定（`POST /milestones/{id}/decide`。**管理系**、202。ADR-0038 D2、docs/celeris-api-v1.md §3.63、
  * Phase 41 / G13j）。GUI 側は 3 値を解釈しない: フォームの `decision`/`note` をそのまま送るだけ。
  */
 describe("decideMilestone (POST /milestones/{id}/decide)", () => {

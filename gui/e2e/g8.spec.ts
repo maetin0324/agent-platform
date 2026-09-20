@@ -4,35 +4,35 @@ import { fileURLToPath } from "node:url";
 import { expect, test } from "./test";
 
 // gui/docs/adr/0012-provider-and-account-management.md D2〜D4。プロバイダ管理・アカウントのプール画面を、
-// `[api] token_file` + `providers_include` + `[accounts]` 付きの taskd（`scripts/taskd.sh fixture accounts`）に対して確認する。
+// `[api] token_file` + `providers_include` + `[accounts]` 付きの celeris（`scripts/celeris.sh fixture accounts`）に対して確認する。
 //
-// このファイルは人間の本番 taskd/GUI（127.0.0.1:7710 / 0.0.0.0:7700）と衝突しないポートを使う。実行前に
-// 1 回だけ fixture を作り（トークンファイルが生成される）、その絶対パスを `TASKD_API_TOKEN_FILE` として
+// このファイルは人間の本番 celeris/GUI（127.0.0.1:7710 / 0.0.0.0:7700）と衝突しないポートを使う。実行前に
+// 1 回だけ fixture を作り（トークンファイルが生成される）、その絶対パスを `CELERIS_API_TOKEN_FILE` として
 // Playwright の webServer（`playwright.config.ts`）に渡す。`env` を指定していない webServer も
 // 呼び出し元の `process.env` をそのまま引き継ぐ（Playwright の既定動作。実測で確認済み）ので、
 // `playwright.config.ts` 自体は変更しない。管理系 API はトークンを起動時に 1 回読むのではなく
-// 最初のリクエストで遅延して読む（`app/taskd/client.server.ts` の `getTaskdClient()`）ので、
-// トークンファイルの中身は webServer の起動後（この spec の `beforeAll` が taskd を起動した後）でよい:
+// 最初のリクエストで遅延して読む（`app/celeris/client.server.ts` の `getCelerisClient()`）ので、
+// トークンファイルの中身は webServer の起動後（この spec の `beforeAll` が celeris を起動した後）でよい:
 //
 //   cd gui
-//   TASKD_API_LISTEN=127.0.0.1:7810 scripts/taskd.sh fixture accounts
-//   TASKD_GUI_BIND=127.0.0.1:7800 TASKD_API_URL=http://127.0.0.1:7810 TASKD_API_LISTEN=127.0.0.1:7810 \
-//     TASKD_API_TOKEN_FILE="$(pwd)/.run/accounts/api.token" \
+//   CELERIS_API_LISTEN=127.0.0.1:7810 scripts/celeris.sh fixture accounts
+//   CELERIS_GUI_BIND=127.0.0.1:7800 CELERIS_API_URL=http://127.0.0.1:7810 CELERIS_API_LISTEN=127.0.0.1:7810 \
+//     CELERIS_API_TOKEN_FILE="$(pwd)/.run/accounts/api.token" \
 //     pnpm exec playwright test e2e/g8.spec.ts
 //
-// （`fixture` はファイルを用意するだけで taskd プロセスは起動しない。起動はこの spec の `beforeAll` が行う。
+// （`fixture` はファイルを用意するだけで celeris プロセスは起動しない。起動はこの spec の `beforeAll` が行う。
 // multi-account / auth と同じ理由、docs/adr/0007 D1。）
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_LISTEN = process.env.TASKD_API_LISTEN ?? "127.0.0.1:7810";
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_LISTEN = process.env.CELERIS_API_LISTEN ?? "127.0.0.1:7810";
 
 function sh(...args: string[]): string {
-  return execFileSync(TASKD_SH, args, {
+  return execFileSync(CELERIS_SH, args, {
     cwd: REPO_ROOT,
     stdio: "pipe",
-    env: { ...process.env, TASKD_API_LISTEN },
+    env: { ...process.env, CELERIS_API_LISTEN },
   }).toString();
 }
 
@@ -63,8 +63,8 @@ test.describe("受け入れ条件: プロバイダ管理とアカウントのプ
     await addForm.locator("#add-account-pool").check();
     await page.getByTestId("provider-add-submit").click();
 
-    // taskd の SSE（`daemon` イベント、fixture は tick_ms=200）を受けて自動で再検証が走ると action の
-    // actionData（flash）は次のナビゲーションで消える（`app/hooks/useTaskdStream.ts`）ので、複数の
+    // celeris の SSE（`daemon` イベント、fixture は tick_ms=200）を受けて自動で再検証が走ると action の
+    // actionData（flash）は次のナビゲーションで消える（`app/hooks/useCelerisStream.ts`）ので、複数の
     // testid にまたがる文言は 1 回の `expect` で（間に retry の間隔を置かずに）まとめて確認する。
     await expect(page.getByTestId("provider-action-flash")).toContainText(/追加[\s\S]*反映しました/);
 

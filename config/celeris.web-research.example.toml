@@ -1,0 +1,156 @@
+# `web-research` 分野（ADR-0029）を使った、Web・OSS・製品・仕様の調査（Local Deep Research）の設定例。
+# `related-research`/`literature`（PaperQA2、ADR-0027、config/celeris.research.example.toml）とは分けたまま。
+# 相対パスはこのファイルのあるディレクトリ基準。コピーして書き換えて使うこと
+# （`celerisctl ... --config <このファイルのコピー>`）。
+#
+# 前提:
+#   - `uv` の隔離環境などに local-deep-research（`ldr-web`/`ldr-mcp` は使わず、プログラム的な API だけを
+#     使う）を入れた venv があること（例 `~/.local/celeris/ldr/.venv`）。一発実行の CLI は無いので、`command` には
+#     その venv の python 実行ファイルそのものを指す（`crates/task-worker/src/local_deep_research_run.py`
+#     を celeris が `<python> <スクリプト> <入力 JSON>` の形で起動する。ADR-0029 D1）。
+#   - LLM はトンネル越しのローカル Qwen 等（OpenAI 互換エンドポイント）に向ける。`settings` の
+#     `llm.provider`/`llm.openai_endpoint.url`/`llm.openai_endpoint.api_key`/`llm.model` で指定する
+#     （`api_key` は使われないダミーでよい）。
+#   - 検索エンジン（`search.tool`）はホストの事情に強く左右される（実機確認: このホストでは一般的な
+#     Web エンジンが軒並み塞がれていた — mojeek は 403、SearXNG 経由の duckduckgo は CAPTCHA、brave は
+#     レート制限、qwant はアクセス拒否、google/wikipedia の web エンジンは 0 件。SearXNG 単体で
+#     `engines = ["bing"]` に絞ると結果は返るが無関係なノイズだった）。**鍵無しで確実に動いたのは
+#     `search.tool = "wikipedia"`**（実機確認: 出典 3 件、引用付きの要約が返った）ので、これを既定にする。
+#     エンジンの選択は `settings` の 1 行を変えるだけで、アダプタ自体は検索エンジンに依存しない。
+#     代替（コメントアウト、必要なものだけ有効にする）:
+#       - このホストの SearXNG（`http://127.0.0.1:8888`）で他のエンジンを有効にする。
+#         LDR は既定でプライベート/loopback の SearXNG URL を拒否するので、使うなら
+#         `env` に `LDR_SEARCH_ALLOW_PRIVATE_ENGINE_URLS = "true"` を足すこと。
+#       - 鍵付きの検索 API（Brave / Tavily / Serper 等）を `settings` に足す。
+#       - 分野特化のエンジン（`github` / `stackexchange` / `openalex` / `arxiv` 等）に絞る。
+#   - `settings` の値は TOML の型を混ぜず全て文字列で書く。数値・真偽値・JSON 配列/オブジェクト
+#     （`engines = "[\"bing\"]"` のような形）に見えるものはランナー（Python）側で変換する（ADR-0029 D1/D3）。
+#   - 鍵付きの検索 API（Tavily / Exa 等）を使う場合は ADR-0030（GUI から API キーを預かる）を見ること。
+#     鍵の値は**このファイルには書かない**。`[secrets]` の下にファイルとして置き、GUI の「アカウント」
+#     画面（または管理 API `PUT /secrets/{id}`）から入力する。
+#   - 検索経路の方針（ADR-0031 D4。コードは変えず、`search.tool`/`settings`/`env_from_secrets` の設定だけで
+#     切り替える）:
+#       1. 鍵が届いたら **Tavily を一般 Web 検索の既定**にする（`search.tool = "tavily"` +
+#          `LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY`。上の `env_from_secrets` の行を有効にする）。
+#       2. **Exa** を意味検索として併用してよい（`LDR_SEARCH_ENGINE_WEB_EXA_API_KEY`）。
+#       3. `github` / `openalex` / `arxiv` のような専門検索は分野の目的に合わせて個別に足す
+#          （鍵不要か、それぞれの鍵で済む。一般 Web 検索の代わりにはしない）。
+#       4. **SearXNG は一般 Web 検索の主経路にしない**。使うなら、安定して動くと確認したサイト固有の
+#          エンジンだけに絞る（`engines = [...]` で個別に指定。実機確認: エンジンを絞らないとノイズが出る）。
+#       5. 鍵が無い間の既定は **`wikipedia`**（鍵不要で必ず動く。下の `[adapters.local_deep_research.settings]`
+#          の既定値）。
+#
+# 受け入れの判断は二段構え（ADR-0031 D3）: 1) このファイルの `[adapters.local_deep_research.evidence]`
+# （ハーネスの決定的ゲート＝「証拠が足りているか」）、2) `--check-reviewer`（「問いに答えているか」）。
+# `web-research` の受け入れ条件には **`--check-artifact report.md` だけでなく `--check-reviewer` も必ず
+# 付けること**（`celerisctl task create --genre web-research ... --check-artifact report.md --check-reviewer`）。
+
+db = "../celeris-web-research-demo.sqlite3"
+workspace_root = "../workspaces"
+tick_ms = 2000
+max_concurrency = 2
+lease_grace_secs = 60
+idle_timeout_secs = 300
+kill_grace_secs = 10
+review_timeout_secs = 600
+error_cooldown_secs = 300
+
+[plan]
+auto_accept = false
+
+# ADR-0030 D1: GUI から預かる秘密（API キー等）の置き場所。1 秘密 = 1 ファイル（id = ファイル名、
+# 0600）。相対なら（他のパス設定と同じく）このファイルのあるディレクトリ基準。書かなければこの機能は
+# 無効（管理 API は 409 `secrets_unavailable`）。
+[secrets]
+dir = "secrets"
+
+# `[adapters.local_deep_research]` は共通設定（ADR-0029 D1）。行ごとの上書きは `model`（`settings` の
+# `llm.model` を上書き）と `env` だけ（`paperqa`/`acp` と同じ作り）。
+[adapters.local_deep_research]
+command = "/home/u/celeris/ldr/.venv/bin/python"
+mode = "quick"
+iterations = 2
+questions_per_iteration = 2
+# `RES_OPTIONS = "single-request"`: glibc に A と AAAA を**順番に**問い合わせさせる。
+# 実機（2026-09-17）で判明した罠 — ルータの DNS が A/AAAA の並行送信を取りこぼすと、プロセスで
+# 最初の名前解決だけが必ず 5.01 秒かかる。LDR の DNS ピン留めは 5 秒で fail-closed するため、
+# **全検索エンジンが例外を握りつぶして「0 件」を返す**（鍵の問題に見えるが鍵は関係ない）。
+# LDR は run ごとに新しいプロセスなので毎回この 1 回目に当たる。同じ症状（どのエンジンでも 0 件、
+# `curl` では成功）なら、まず `python -c "import socket,time;t=time.time();
+# socket.getaddrinfo('api.tavily.com',None,socket.AF_UNSPEC,socket.SOCK_STREAM,0,0);print(time.time()-t)"`
+# を**新しいプロセスで**測ること。5 秒台ならこれ。
+# LDR がプライベート/loopback の SearXNG URL を使うときは `LDR_SEARCH_ALLOW_PRIVATE_ENGINE_URLS`
+# もここに足す（上のコメント参照）。
+env = { RES_OPTIONS = "single-request" }
+# ADR-0030 D2: Tavily / Exa のような鍵付き検索エンジンを使う場合の環境変数名 → 秘密 id の対応
+# （値は書かない。`celerisctl`/GUI で `PUT /secrets/tavily` 等に入れる）。LDR は `LDR_` + 設定キーを
+# 大文字化し `.` を `_` にした環境変数で上書きできる（実機確認、ADR-0030 文脈）ので、
+# `search.engine.web.tavily.api_key` / `search.engine.web.exa.api_key` はそれぞれ次の名前になる。
+# 既定の `search.tool = "wikipedia"`（鍵不要）ではこの対応は使われないので、鍵を用意するまではコメントの
+# ままでよい（`env_from_secrets` の秘密が見つからなくても設定エラーにはならない。ADR-0030 D2）。
+# env_from_secrets = { LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY = "tavily", LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
+
+[adapters.local_deep_research.settings]
+"llm.provider" = "openai_endpoint"
+"llm.openai_endpoint.url" = "http://127.0.0.1:18000/v1"
+"llm.openai_endpoint.api_key" = "unused"
+"llm.model" = "qwen3.8-27b"
+"search.tool" = "tavily"
+# SearXNG に切り替える場合の代替（このホストでは `engines` を絞らないとノイズが出る。上のコメント参照）:
+# "search.tool" = "searxng"
+# "search.engine.web.searxng.default_params.instance_url" = "http://127.0.0.1:8888"
+# "search.engine.web.searxng.default_params.max_results" = "5"
+# "search.engine.web.searxng.default_params.engines" = "[\"bing\"]"
+
+# ADR-0031 D2: 決定的な証拠ゲート。ランナーが機械的に集計した `counts`（LLM は関与しない）をハーネス
+# （このアダプタ）が見て、満たさなければ retryable な Error にする（`report.md`/`sources.json`/
+# `research.json` は消さずに残す）。`0` を書けばその項目は見ない。全部 0 にすると従来どおり（ゲート無し）
+# の挙動に戻る。下の値は既定（省略しても同じ）だが、このファイルでは明示しておく。
+[adapters.local_deep_research.evidence]
+# 検索が返した件数の合計（重複排除前）。0 件なら「検索経路の問題」を示す専用メッセージで落ちる。
+min_search_results = 5
+# 実際に証拠として集まった出典の数（URL で重複排除した後）。
+min_sources = 3
+# 報告が `[n]` で引用した出典の数。
+min_cited = 2
+# 出典の異なるドメイン数（同一ドメインのソースばかりでは通らない）。
+min_domains = 2
+
+[[providers]]
+id = "ldr-qwen"
+adapter = "local-deep-research"
+tiers = ["cheap"]
+concurrency = 1
+# 空でなければ `settings` の `llm.model` を上書きする（ADR-0029 D1）。空なら `[adapters.local_deep_research].settings` のまま。
+model = "qwen3.8-27b"
+
+[[providers]]
+id = "local-fake"
+adapter = "fake"
+tiers = ["standard", "cheap"]
+concurrency = 2
+
+# Web 調査の役割（ADR-0029 D2）。役割名は自由記述で、下の [[genres]] の roles に含めれば分野に属する。
+[[roles]]
+id = "web-scout"
+adapter = "local-deep-research"
+tier = "cheap"
+instructions = "あなたは Web 調査担当。問いに対して、出典 URL 付きで分かったことと分からなかったことを書く。"
+
+# 分野（ADR-0027 D1、ADR-0029 D2）。`related-research`/`literature`（PaperQA2）とは分けたまま。
+# 親（Planner/lead）は ADR-0028 の manifest（`capabilities`/`input_artifacts`/`output_artifacts`）を見て、
+# 論文の確認は `literature`、実装・製品・仕様の確認は `web-research` に投げる。
+[[genres]]
+id = "web-research"
+description = "Web・OSS・製品・仕様・技術報告の調査（論文以外）"
+capabilities = ["Web 検索（SearXNG）", "OSS 実装・製品・仕様の確認", "複数ソースの突き合わせ"]
+input_artifacts = ["question"]
+output_artifacts = ["report.md: 出典付きの調査報告（これが答え）", "sources.json: 出典と引用の有無", "research.json: 検索の記録（クエリと件数）"]
+default_role = "web-scout"
+roles = ["web-scout"]
+
+[delegation]
+max_delegate_per_run = 8
+max_tree_depth = 5
+max_tree_runs = 100
+on_child_failure = "retry_then_ask"

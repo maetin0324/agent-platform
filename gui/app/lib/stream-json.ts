@@ -1,8 +1,8 @@
 /**
  * `stdout.jsonl`（各 run のワーカー標準出力）の 1 行を、表示上の見出し分けのためだけに分類する純粋関数。
  * docs/adr/0006 D2: claude-code（`crates/task-worker/src/claude_code.rs`）と codex（`crates/task-worker/src/codex.rs`）の
- * `handle_line` を読解して型だけ揃えたもので、taskd 側の分類規則やリトライ可否・成否の意味づけを再実装するのではない。
- * `is_error` 等は taskd が付けた値をそのまま見せるだけ。taskd 独自ワーカープロトコル（fake ワーカーの `progress`/`done` 等）は
+ * `handle_line` を読解して型だけ揃えたもので、celeris 側の分類規則やリトライ可否・成否の意味づけを再実装するのではない。
+ * `is_error` 等は celeris が付けた値をそのまま見せるだけ。celeris 独自ワーカープロトコル（fake ワーカーの `progress`/`done` 等）は
  * claude-code/codex のどちらでもないため全て `raw` になる。
  */
 
@@ -99,7 +99,7 @@ function classifyCodex(value: Record<string, unknown>, line: string): FormattedL
 
 /**
  * `stdout.jsonl` の 1 行を分類する。claude-code / codex のどちらの形式にも当てはまらない行
- * （不正な JSON、`type` の無い行、未知の `type`、taskd 独自ワーカープロトコルの行）は全て `raw`。
+ * （不正な JSON、`type` の無い行、未知の `type`、celeris 独自ワーカープロトコルの行）は全て `raw`。
  */
 export function classifyStreamJsonLine(line: string): FormattedLine {
   let parsed: unknown;

@@ -1,5 +1,12 @@
 import { useRef, useState } from "react";
 import { data, redirect, useFetcher } from "react-router";
+import type { CreateFailure } from "~/celeris/action-types";
+import type { CelerisClient } from "~/celeris/client.server";
+import { getCelerisClient } from "~/celeris/client.server";
+import { celerisErrorResponse } from "~/celeris/errors";
+import { formString } from "~/celeris/forms";
+import { createTask } from "~/celeris/route-actions.server";
+import type { ConfigView, CriterionSpec, NewTaskSpec, TaskList } from "~/celeris/types";
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { StatusBadge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -16,19 +23,12 @@ import {
 import { Icon } from "~/components/ui/Icon";
 import { EmptyState, PageHeader } from "~/components/ui/misc";
 import { cn } from "~/lib/utils";
-import type { CreateFailure } from "~/taskd/action-types";
-import type { TaskdClient } from "~/taskd/client.server";
-import { getTaskdClient } from "~/taskd/client.server";
-import { taskdErrorResponse } from "~/taskd/errors";
-import { formString } from "~/taskd/forms";
-import { createTask } from "~/taskd/route-actions.server";
-import type { ConfigView, CriterionSpec, NewTaskSpec, TaskList } from "~/taskd/types";
 import type { Route } from "./+types/tasks.new";
 
 /**
  * `/tasks/new`（タスク作成、docs/DESIGN.md §4.4）。フォームは `NewTaskSpec` と 1:1。
- * 検証は taskd（task-ops）が行い、422 の `errors[]` をそのままフィールドの下に出す
- * （docs/taskd-api-v1.md §1.5, §3.4）。GUI 側の検証はしない。
+ * 検証は celeris（task-ops）が行い、422 の `errors[]` をそのままフィールドの下に出す
+ * （docs/celeris-api-v1.md §1.5, §3.4）。GUI 側の検証はしない。
  */
 
 const KIND_OPTIONS: { value: NonNullable<NewTaskSpec["kind"]>; label: string }[] = [
@@ -58,10 +58,10 @@ export interface NewTaskData {
 
 /**
  * `GET /tasks`（`limit=500`, `order=created_desc`）で depends_on / parent の候補一覧を、
- * `GET /config` で `workspace_root` 等の表示用の設定を取る（並列）。`TaskdClient` を引数に取ることで
+ * `GET /config` で `workspace_root` 等の表示用の設定を取る（並列）。`CelerisClient` を引数に取ることで
  * テスト可能にする（`app/routes/tasks.tsx` の `loadTasks` と同じ形）。
  */
-export async function loadNewTask(client: TaskdClient, request: Request): Promise<NewTaskData> {
+export async function loadNewTask(client: CelerisClient, request: Request): Promise<NewTaskData> {
   const [candidates, config] = await Promise.all([
     client.get<TaskList>("/tasks", { query: { limit: 500, order: "created_desc" }, signal: request.signal }),
     client.get<ConfigView>("/config", { signal: request.signal }),
@@ -71,9 +71,9 @@ export async function loadNewTask(client: TaskdClient, request: Request): Promis
 
 export async function loader({ request }: Route.LoaderArgs): Promise<NewTaskData> {
   try {
-    return await loadNewTask(getTaskdClient(), request);
+    return await loadNewTask(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -87,7 +87,7 @@ function rawString(form: FormData, name: string): string {
   return typeof v === "string" ? v : "";
 }
 
-/** 数値欄。空・非数値なら `undefined`（省略。taskd の既定を使う）。 */
+/** 数値欄。空・非数値なら `undefined`（省略。celeris の既定を使う）。 */
 function numberField(form: FormData, name: string): number | undefined {
   const v = formString(form, name);
   if (v === null) return undefined;
@@ -97,7 +97,7 @@ function numberField(form: FormData, name: string): number | undefined {
 
 /**
  * 受け入れ条件ビルダーの行を `criterion_type[i]` / `criterion_value[i]`（`form.getAll` で index を揃える）
- * から組み立てる。値が空白だけの行は送らない（全行空なら `acceptance: []` になり taskd が 422 を返す）。
+ * から組み立てる。値が空白だけの行は送らない（全行空なら `acceptance: []` になり celeris が 422 を返す）。
  */
 export function buildCriteria(form: FormData): CriterionSpec[] {
   const types = form.getAll("criterion_type").map((v) => String(v));
@@ -145,8 +145,8 @@ export function buildDependsOn(form: FormData): string[] {
 
 /**
  * フォーム全体を `NewTaskSpec` にする（純関数、テスト可能）。空の欄は本文から省く
- * （taskd の既定を使う。docs/taskd-api-v1.md §3.4）。`title` / `objective` は空でも必須フィールドとして送り、
- * taskd の 422 文言をそのまま出す（`required` 属性は付けない）。
+ * （celeris の既定を使う。docs/celeris-api-v1.md §3.4）。`title` / `objective` は空でも必須フィールドとして送り、
+ * celeris の 422 文言をそのまま出す（`required` 属性は付けない）。
  */
 export function buildNewTaskSpec(form: FormData): NewTaskSpec {
   const spec: NewTaskSpec = {
@@ -199,7 +199,7 @@ export function buildNewTaskSpec(form: FormData): NewTaskSpec {
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const spec = buildNewTaskSpec(form);
-  const result = await createTask(getTaskdClient(), spec, request.signal);
+  const result = await createTask(getCelerisClient(), spec, request.signal);
   if (result.ok) {
     return redirect(`/tasks/${result.task.id}`);
   }
@@ -223,7 +223,7 @@ export default function NewTaskPage({ loaderData }: Route.ComponentProps) {
   const [rows, setRows] = useState<CriterionRow[]>(() => [{ id: 0, type: "human", value: "" }]);
 
   // 分野（genre、ADR-0027 D1）を選ぶと、その分野の description と所属する role を表示する
-  // （role 欄そのものは自由記述のまま。taskd 側が検証する。ADR-0005 D5）。
+  // （role 欄そのものは自由記述のまま。celeris 側が検証する。ADR-0005 D5）。
   const genres = config.genres ?? [];
   const [selectedGenreId, setSelectedGenreId] = useState("");
   const selectedGenre = genres.find((g) => g.id === selectedGenreId);
@@ -250,7 +250,7 @@ export default function NewTaskPage({ loaderData }: Route.ComponentProps) {
       <PageHeader
         icon="plus"
         title="タスク作成"
-        description="NewTaskSpec を taskd にそのまま送信します。入力の検証は taskd 側で行われます。"
+        description="NewTaskSpec を celeris にそのまま送信します。入力の検証は celeris 側で行われます。"
       />
       <ErrorFlash error={error} />
 
@@ -279,7 +279,7 @@ export default function NewTaskPage({ loaderData }: Route.ComponentProps) {
         </Card>
 
         <Card>
-          <CardHeader icon="checkCircle" title="受け入れ条件" description="taskd が完了を判定する条件（1 つ以上）" />
+          <CardHeader icon="checkCircle" title="受け入れ条件" description="celeris が完了を判定する条件（1 つ以上）" />
           <CardBody className="space-y-3">
             <fieldset className="space-y-2">
               <legend className="sr-only">受け入れ条件</legend>

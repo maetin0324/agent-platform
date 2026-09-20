@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { OrgNode, ProjectTaskView } from "~/celeris/types";
 import { isSupportTask, projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
-import type { OrgNode, ProjectTaskView } from "~/taskd/types";
 
 /**
  * `projectTasksToGraph`（案件の「仕事の木」を `/graph` と同じ `layoutGraph` に渡せる `Graph` に写す）のテスト。

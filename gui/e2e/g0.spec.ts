@@ -2,36 +2,36 @@ import { execFileSync } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Health } from "~/taskd/types";
+import type { Health } from "~/celeris/types";
 import { expect, test } from "./test";
 
-// Phase G0 作業単位 B（結合テスト）。docs/DESIGN.md §10 Phase G0 の受け入れ条件 4・5 を実 taskd（scripts/taskd.sh start dev）に対して検証する。
-// このテストは taskd を `dev` として起動したまま終える（try/finally で保証する）。
+// Phase G0 作業単位 B（結合テスト）。docs/DESIGN.md §10 Phase G0 の受け入れ条件 4・5 を実 celeris（scripts/celeris.sh start dev）に対して検証する。
+// このテストは celeris を `dev` として起動したまま終える（try/finally で保証する）。
 //
 // 既定は運用中の 7700 / 7710 と同じ値になる。`playwright.config.ts` の注意書きどおり、実行時は必ず
-// `TASKD_GUI_BIND` / `TASKD_API_URL` / `TASKD_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
-// `TASKD_API_LISTEN` は `scripts/taskd.sh`（execFileSync が継承する環境変数）がそのまま読む。
+// `CELERIS_GUI_BIND` / `CELERIS_API_URL` / `CELERIS_API_LISTEN` を別ポートへ上書きすること（Phase G13g）。
+// `CELERIS_API_LISTEN` は `scripts/celeris.sh`（execFileSync が継承する環境変数）がそのまま読む。
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_URL = process.env.TASKD_API_URL ?? "http://127.0.0.1:7710";
-const GUI_BIND = process.env.TASKD_GUI_BIND ?? "127.0.0.1:7700";
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_URL = process.env.CELERIS_API_URL ?? "http://127.0.0.1:7710";
+const GUI_BIND = process.env.CELERIS_GUI_BIND ?? "127.0.0.1:7700";
 const [GUI_HOST, GUI_PORT_STR] = GUI_BIND.split(":");
 const GUI_PORT = Number(GUI_PORT_STR);
 
-async function fetchTaskdHealth(): Promise<Health> {
-  const res = await fetch(`${TASKD_API_URL}/api/v1/health`);
-  if (!res.ok) throw new Error(`taskd health responded ${res.status}`);
+async function fetchCelerisHealth(): Promise<Health> {
+  const res = await fetch(`${CELERIS_API_URL}/api/v1/health`);
+  if (!res.ok) throw new Error(`celeris health responded ${res.status}`);
   return (await res.json()) as Health;
 }
 
 function stopDev(): void {
-  execFileSync(TASKD_SH, ["stop", "dev"], { cwd: REPO_ROOT, stdio: "pipe" });
+  execFileSync(CELERIS_SH, ["stop", "dev"], { cwd: REPO_ROOT, stdio: "pipe" });
 }
 
 function startDev(): void {
-  execFileSync(TASKD_SH, ["start", "dev"], { cwd: REPO_ROOT, stdio: "pipe" });
+  execFileSync(CELERIS_SH, ["start", "dev"], { cwd: REPO_ROOT, stdio: "pipe" });
 }
 
 test.beforeAll(() => {
@@ -39,7 +39,7 @@ test.beforeAll(() => {
   // 受け入れ条件 4 の停止 / 復旧も検証できない。既知のインスタンスを全て止めてから `dev` を起動する。
   for (const name of ["basic", "multi-account", "unroutable", "auth", "clusters", "delegation"]) {
     try {
-      execFileSync(TASKD_SH, ["stop", name], { cwd: REPO_ROOT, stdio: "pipe" });
+      execFileSync(CELERIS_SH, ["stop", name], { cwd: REPO_ROOT, stdio: "pipe" });
     } catch {
       // 動いていなければ何もしない
     }
@@ -73,14 +73,14 @@ function getWithHost(hostHeader: string): Promise<{ status: number; body: string
   });
 }
 
-test.describe("Phase G0 受け入れ条件 4（前半）: taskd の状態表示", () => {
-  test("/ に実 taskd の health が表示され、バナーは出ない", async ({ page }) => {
-    const expected = await fetchTaskdHealth();
+test.describe("Phase G0 受け入れ条件 4（前半）: celeris の状態表示", () => {
+  test("/ に実 celeris の health が表示され、バナーは出ない", async ({ page }) => {
+    const expected = await fetchCelerisHealth();
 
     await page.goto("/");
 
-    await expect(page.getByTestId("taskd_version")).toHaveText(expected.taskd_version);
-    await expect(page.getByTestId("taskd_version")).not.toHaveText("");
+    await expect(page.getByTestId("celeris_version")).toHaveText(expected.celeris_version);
+    await expect(page.getByTestId("celeris_version")).not.toHaveText("");
     await expect(page.getByTestId("api_version")).toHaveText("1");
     expect(expected.api_version).toBe("1");
     await expect(page.getByTestId("schema_version")).toHaveText(String(expected.schema_version));
@@ -90,12 +90,12 @@ test.describe("Phase G0 受け入れ条件 4（前半）: taskd の状態表示"
     const footer = page.getByTestId("footer");
     await expect(footer).toContainText("api_version 1");
 
-    await expect(page.getByTestId("taskd-banner")).toHaveCount(0);
+    await expect(page.getByTestId("celeris-banner")).toHaveCount(0);
   });
 });
 
-test.describe("Phase G0 受け入れ条件 4（後半）: taskd 停止中のバナーと復旧", () => {
-  test("taskd 停止中は /org/secretary（`/` の遷移先）が 200 でバナー表示、復旧するとリロード無しでバナーが消える", async ({
+test.describe("Phase G0 受け入れ条件 4（後半）: celeris 停止中のバナーと復旧", () => {
+  test("celeris 停止中は /org/secretary（`/` の遷移先）が 200 でバナー表示、復旧するとリロード無しでバナーが消える", async ({
     page,
   }) => {
     try {
@@ -106,9 +106,9 @@ test.describe("Phase G0 受け入れ条件 4（後半）: taskd 停止中のバ�
       const response = await page.goto("/org/secretary");
       expect(response?.status()).toBe(200);
 
-      const banner = page.getByTestId("taskd-banner");
+      const banner = page.getByTestId("celeris-banner");
       await expect(banner).toBeVisible();
-      await expect(banner).toContainText("taskd に接続できません");
+      await expect(banner).toContainText("celeris に接続できません");
 
       // 例外ページ（root の ErrorBoundary）になっていないことを確認する（本文全体で判定する）
       const body = page.locator("body");
@@ -116,10 +116,10 @@ test.describe("Phase G0 受け入れ条件 4（後半）: taskd 停止中のバ�
 
       startDev();
 
-      // root は taskd 停止中 5 秒ごとに再検証する（app/root.tsx）。ページの reload はしない。
+      // root は celeris 停止中 5 秒ごとに再検証する（app/root.tsx）。ページの reload はしない。
       await expect(banner).toBeHidden({ timeout: 15_000 });
     } finally {
-      // 何が起きても taskd dev は起動した状態で終える
+      // 何が起きても celeris dev は起動した状態で終える
       startDev();
     }
   });
@@ -141,9 +141,9 @@ test.describe("/healthz", () => {
     expect(res.status()).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(body.name).toBe("taskd-gui");
+    expect(body.name).toBe("celeris-gui");
     expect(typeof body.version).toBe("string");
-    // ADR-0040 D4（Phase 46）: 昇格で使う `release`。TASKD_GUI_RELEASE が無ければ "dev"。
+    // ADR-0040 D4（Phase 46）: 昇格で使う `release`。CELERIS_GUI_RELEASE が無ければ "dev"。
     expect(typeof body.release).toBe("string");
   });
 });

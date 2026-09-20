@@ -10,21 +10,21 @@ import { expect, test } from "./test";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(dirname, "..");
-const TASKD_SH = path.join(REPO_ROOT, "scripts/taskd.sh");
-const TASKD_API_URL = process.env.TASKD_API_URL ?? "http://127.0.0.1:7710";
+const CELERIS_SH = path.join(REPO_ROOT, "scripts/celeris.sh");
+const CELERIS_API_URL = process.env.CELERIS_API_URL ?? "http://127.0.0.1:7710";
 const RELEASE_PORT = 7703;
 
 const pkg = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { version: string };
 const VERSION = pkg.version;
-const STAGE_NAME = `taskd-gui-${VERSION}`;
+const STAGE_NAME = `celeris-gui-${VERSION}`;
 const TARBALL = path.join(REPO_ROOT, "dist", `${STAGE_NAME}.tar.gz`);
 
 let extractDir: string | undefined;
 let server: ChildProcess | undefined;
 
-async function taskdIsUp(): Promise<boolean> {
+async function celerisIsUp(): Promise<boolean> {
   try {
-    const res = await fetch(`${TASKD_API_URL}/api/v1/health`);
+    const res = await fetch(`${CELERIS_API_URL}/api/v1/health`);
     return res.ok;
   } catch {
     return false;
@@ -36,13 +36,13 @@ test.beforeAll(async () => {
   // 数千ファイルの整合性検証に数十秒〜1分以上かかることがある）を直列に行うため、既定の 60s では足りない。
   test.setTimeout(480_000);
 
-  // このスモークは taskd に接続できなくても `/` が 200 を返す設計だが、可能なら実 taskd を立てておく
-  // （taskd が居ない環境での偶然の成功と区別するため）。失敗しても続行する。
-  if (!(await taskdIsUp())) {
+  // このスモークは celeris に接続できなくても `/` が 200 を返す設計だが、可能なら実 celeris を立てておく
+  // （celeris が居ない環境での偶然の成功と区別するため）。失敗しても続行する。
+  if (!(await celerisIsUp())) {
     try {
-      execFileSync(TASKD_SH, ["start", "dev"], { cwd: REPO_ROOT, stdio: "pipe" });
+      execFileSync(CELERIS_SH, ["start", "dev"], { cwd: REPO_ROOT, stdio: "pipe" });
     } catch {
-      // 起動できなくても続行する（受け入れ条件はこの taskd の有無に依存しない）
+      // 起動できなくても続行する（受け入れ条件はこの celeris の有無に依存しない）
     }
   }
 
@@ -69,8 +69,8 @@ test.beforeAll(async () => {
     cwd: stageDir,
     env: {
       ...process.env,
-      TASKD_GUI_BIND: `127.0.0.1:${RELEASE_PORT}`,
-      TASKD_API_URL,
+      CELERIS_GUI_BIND: `127.0.0.1:${RELEASE_PORT}`,
+      CELERIS_API_URL,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

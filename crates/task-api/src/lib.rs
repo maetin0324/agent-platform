@@ -1,4 +1,4 @@
-//! `task-api`: taskd の HTTP API v1（`docs/gui/api.md`、ADR-0013 D2〜D4 / D8 / D11）。
+//! `task-api`: celeris の HTTP API v1（`docs/gui/api.md`、ADR-0013 D2〜D4 / D8 / D11）。
 //!
 //! - `/api/v1` 配下の 26 エンドポイント。JSON で応答し、エラーは `application/problem+json`、通知は SSE。
 //! - ハンドラは協調判断をしない。読み取りはストアのクエリと `task-ops` のビュー、状態変更は `task-ops` 経由だけ。
@@ -106,10 +106,10 @@ pub const STREAM_RESET_THRESHOLD: u64 = 10_000;
 pub const STREAM_BATCH: usize = 1_000;
 /// 変更系の要求本文の上限（api.md §1.2）。
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
-/// `X-Taskd-Sha256-Current` / `sha256_current` を計算する最大ファイルサイズ（api.md §3.8）。
+/// `X-Celeris-Sha256-Current` / `sha256_current` を計算する最大ファイルサイズ（api.md §3.8）。
 pub const SHA256_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// taskd が API を起動するときに渡す設定（`[api]` と、ビュー・`GET /config` に必要な値）。
+/// celeris が API を起動するときに渡す設定（`[api]` と、ビュー・`GET /config` に必要な値）。
 #[derive(Clone)]
 pub struct ApiSettings {
     pub listen: SocketAddr,
@@ -130,7 +130,7 @@ pub struct ApiSettings {
     /// Phase 30（ADR-0033 D4 追記）: 対話は常にこの分野で走る（ノードの `genre` は使わない）。
     /// `[conversation] genre`（既定 `task_core::CONVERSATION_GENRE = "secretary"`）。
     pub conversation_genre: String,
-    pub taskd_version: String,
+    pub celeris_version: String,
     /// ディスパッチャのスナップショットと同じ値。
     pub instance_id: String,
     /// RFC 3339。
@@ -138,7 +138,7 @@ pub struct ApiSettings {
     /// ADR-0017 M1: `providers.d/<id>.toml` の書き込み先。`providers_include` が未設定なら `None`
     /// （そのときは管理系の作成/変更/削除が使えない）。
     pub providers_dir: Option<PathBuf>,
-    /// ADR-0017 M2: `reload` / `check` を taskd（ワーカー起動ができる側）へ委譲するチャネル。`None` なら両方使えない。
+    /// ADR-0017 M2: `reload` / `check` を celeris（ワーカー起動ができる側）へ委譲するチャネル。`None` なら両方使えない。
     pub admin_tx: Option<mpsc::Sender<AdminRequest>>,
     /// ADR-0024 D1 / ADR-0025 D1/D6: アダプタごとの `[accounts]` の根ディレクトリの絶対パス（設定されている
     /// アダプタだけキーを持つ）。`[accounts]` が無ければ空（そのときは `GET /accounts` が
@@ -149,7 +149,7 @@ pub struct ApiSettings {
     /// ADR-0030 D1: `[secrets] dir` の絶対パス。`None` なら秘密の管理系は 409 `secrets_unavailable`。
     pub secrets_dir: Option<PathBuf>,
     /// ADR-0030 D3: 秘密 id → それを使っている adapter/provider の `env_from_secrets`（`GET /secrets` の
-    /// `used_by`）。taskd が設定から導いて渡す（task-api は再計算しない）。
+    /// `used_by`）。celeris が設定から導いて渡す（task-api は再計算しない）。
     pub secret_usage: HashMap<String, Vec<types::SecretUse>>,
     /// ADR-0033 D6（GUI 監査対応 Phase 29）: `[memory] dir` の絶対パス。`None` なら `GET /org/{id}/memory`
     /// は 409 `memory_unavailable`。
@@ -159,10 +159,10 @@ pub struct ApiSettings {
     pub notify_secret_id: String,
     /// ADR-0037 D3: `[notify] gui_base_url`（文面のリンクの根。無ければリンク無し）。
     pub notify_gui_base_url: Option<String>,
-    /// ADR-0040 D6（Phase 48）: `[selfdeploy] releases_dir` を読む係（taskd が渡す。task-api は
+    /// ADR-0040 D6（Phase 48）: `[selfdeploy] releases_dir` を読む係（celeris が渡す。task-api は
     /// リリースのファイル規約を知らない）。`None` なら `GET /releases` は空、昇格は 409。
     pub releases: Option<SharedReleaseSource>,
-    /// ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `TASKD_RELEASE` / `"dev"`）。
+    /// ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `CELERIS_RELEASE` / `"dev"`）。
     /// `GET /health` の `release`。
     pub release: String,
     /// ADR-0040 D3: `--mode`（`normal` / `verify`）。`GET /health` の `mode`。
@@ -174,11 +174,11 @@ pub struct ApiSettings {
     /// ADR-0043 D5（Phase 54）: `[github]`（`gh` の場所と「Celeris で merge」の方法）。
     pub github: GithubSettings,
     /// ADR-0044 D7（Phase 57）: 既定の文書リポジトリを作る場所の根（SPEC §5 の `~/workspace`）。
-    /// taskd が `$HOME` を展開して渡す。`None` なら文書リポジトリを作れない（409 `docs_unavailable`）。
+    /// celeris が `$HOME` を展開して渡す。`None` なら文書リポジトリを作れない（409 `docs_unavailable`）。
     pub docs_repo_root: Option<PathBuf>,
 }
 
-/// ADR-0043 D5（Phase 54）: `[github]` の写し。taskd が設定から渡す（task-api は TOML を読まない）。
+/// ADR-0043 D5（Phase 54）: `[github]` の写し。celeris が設定から渡す（task-api は TOML を読まない）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubSettings {
     /// `gh` CLI の場所（PATH にあれば `"gh"`）。
@@ -209,7 +209,7 @@ impl std::fmt::Debug for ApiSettings {
             .field("roles", &self.roles)
             .field("genres", &self.genres)
             .field("conversation_genre", &self.conversation_genre)
-            .field("taskd_version", &self.taskd_version)
+            .field("celeris_version", &self.celeris_version)
             .field("instance_id", &self.instance_id)
             .field("started_at", &self.started_at)
             .field("providers_dir", &self.providers_dir)
@@ -276,7 +276,7 @@ pub async fn serve_with_listener(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), ApiError> {
     if let Ok(addr) = listener.local_addr() {
-        tracing::info!(%addr, "taskd API listening");
+        tracing::info!(%addr, "celeris API listening");
     }
     let app = router(state.clone());
     axum::serve(listener, app)

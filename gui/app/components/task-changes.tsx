@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { Link, useFetcher } from "react-router";
+import type { ActionError, IntegrateOutcome } from "~/celeris/action-types";
+import type { ChangeDiffView, ChangesView, RepoChangesView, TaskIntegration } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -31,11 +33,9 @@ import {
   statChip,
   taskChangesHref,
 } from "~/lib/task-changes";
-import type { ActionError, IntegrateOutcome } from "~/taskd/action-types";
-import type { ChangeDiffView, ChangesView, RepoChangesView, TaskIntegration } from "~/taskd/types";
 
 /**
- * タスクの変更の取り込み（ADR-0043 D5、taskd Phase 54 / G18）。
+ * タスクの変更の取り込み（ADR-0043 D5、celeris Phase 54 / G18）。
  * リポジトリごとに「どこから・どこまで・何が変わったか」を出し、人が **merge / PR / 捨てる** を選ぶ。
  * 作業ツリーの閲覧（`~/components/task-files.tsx`）と同じ**自己完結の部品**で、どこに載せても 1 行で済む。
  * いまは `/tasks/:id` の「変更」タブ（ADR-0044 D5 の `?tab=changes`）と、兄弟のルート
@@ -43,11 +43,11 @@ import type { ChangeDiffView, ChangesView, RepoChangesView, TaskIntegration } fr
  *
  * 差分の切り替えは `<Link>`（`?repo=&file=`）で loader を走らせ、取り込みは
  * `/tasks/:id/changes` の `action` に出す `useFetcher`（**リポジトリごとに 1 つ**。SSE の再検証で
- * 結果が消えないため。監査 H1 / Phase G14 / `ProjectRepos.tsx` と同じ）。クライアントから taskd を
+ * 結果が消えないため。監査 H1 / Phase G14 / `ProjectRepos.tsx` と同じ）。クライアントから celeris を
  * 呼ぶコードは無い。
  *
- * 判断はすべて taskd 側（ADR-0043 D5）: 409「main が編集中」も、PR を作れるか（`origin` / `gh`）も、
- * 衝突して「衝突の解消: …」タスクができたことも、taskd が返した値と文言をそのまま出す。
+ * 判断はすべて celeris 側（ADR-0043 D5）: 409「main が編集中」も、PR を作れるか（`origin` / `gh`）も、
+ * 衝突して「衝突の解消: …」タスクができたことも、celeris が返した値と文言をそのまま出す。
  */
 export interface TaskChangesProps {
   taskId: string;
@@ -212,7 +212,7 @@ function RepoChangesCard({
           ) : (
             <>
               {/* 409 `default_branch_busy`（「main が編集中」）。`ErrorFlash` は 409 を一律
-                  「状態が変わりました」と読むので、taskd の文言と次にやることをここで別に出す。 */}
+                  「状態が変わりました」と読むので、celeris の文言と次にやることをここで別に出す。 */}
               {fetcher.data.error.code === "default_branch_busy" && (
                 <Alert tone="warning" data-testid="task-changes-busy">
                   <p className="font-semibold">{fetcher.data.error.detail}</p>
@@ -322,7 +322,7 @@ function RepoChangesCard({
 }
 
 /**
- * PR の記録（`integration.method === "pr"`）。状態・番号・URL は taskd が `gh` から取ったものをそのまま出す。
+ * PR の記録（`integration.method === "pr"`）。状態・番号・URL は celeris が `gh` から取ったものをそのまま出す。
  * 「Celeris で merge」は開いている PR のときだけ（`state === "open"`）。方法は `[github] merge_method`。
  */
 function IntegrationCard({

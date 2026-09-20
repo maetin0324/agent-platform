@@ -19,12 +19,12 @@ use task_ops::view::RunFiles;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::SHA256_MAX_BYTES;
-use crate::problem::{ApiProblem, X_TASKD_SIZE};
+use crate::problem::{ApiProblem, X_CELERIS_SIZE};
 use crate::query::QueryParams;
 use crate::types::ArtifactView;
 
-const X_TASKD_SHA256: HeaderName = HeaderName::from_static("x-taskd-sha256");
-const X_TASKD_SHA256_CURRENT: HeaderName = HeaderName::from_static("x-taskd-sha256-current");
+const X_CELERIS_SHA256: HeaderName = HeaderName::from_static("x-celeris-sha256");
+const X_CELERIS_SHA256_CURRENT: HeaderName = HeaderName::from_static("x-celeris-sha256-current");
 const CHUNK_BYTES: usize = 64 * 1024;
 /// 受信箱の evidence のために読む `result.json` の上限。
 const RESULT_JSON_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -436,7 +436,7 @@ pub(crate) struct FileTarget {
     pub(crate) current_sha256: Option<String>,
 }
 
-/// 本体をストリーミングで返す。`X-Taskd-Size` は常に、成果物は `X-Taskd-Sha256(-Current)` も付ける。
+/// 本体をストリーミングで返す。`X-Celeris-Size` は常に、成果物は `X-Celeris-Sha256(-Current)` も付ける。
 pub(crate) async fn respond_file(target: FileTarget, request: &FileRequest) -> Result<Response, ApiProblem> {
     let slice = plan_slice(request, target.size)?;
     let body = if slice.len == 0 {
@@ -464,7 +464,7 @@ pub(crate) async fn respond_file(target: FileTarget, request: &FileRequest) -> R
     }
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(slice.len));
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    headers.insert(X_TASKD_SIZE, HeaderValue::from(target.size));
+    headers.insert(X_CELERIS_SIZE, HeaderValue::from(target.size));
     if slice.partial {
         let end = slice.start + slice.len - 1;
         if let Ok(value) = HeaderValue::from_str(&format!("bytes {}-{end}/{}", slice.start, target.size)) {
@@ -472,10 +472,10 @@ pub(crate) async fn respond_file(target: FileTarget, request: &FileRequest) -> R
         }
     }
     if let Some(value) = target.recorded_sha256.as_deref().and_then(|s| HeaderValue::from_str(s).ok()) {
-        headers.insert(X_TASKD_SHA256, value);
+        headers.insert(X_CELERIS_SHA256, value);
     }
     if let Some(value) = target.current_sha256.as_deref().and_then(|s| HeaderValue::from_str(s).ok()) {
-        headers.insert(X_TASKD_SHA256_CURRENT, value);
+        headers.insert(X_CELERIS_SHA256_CURRENT, value);
     }
     Ok(response)
 }

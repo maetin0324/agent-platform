@@ -27,23 +27,23 @@ pub enum SyncMode {
 /// ADR-0019 D1: worktree の設定。`SyncMode::Worktree` のときだけ使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeSettings {
-    /// worktree を置く親ディレクトリ（既定は `<project>/.taskd-worktrees`）。
+    /// worktree を置く親ディレクトリ（既定は `<project>/.celeris-worktrees`）。
     pub root: Option<PathBuf>,
     /// 切り出す元（既定 `HEAD`）。
     pub base: String,
     /// sparse-checkout で残すパス（空なら全追跡ファイル）。
     pub paths: Vec<String>,
-    /// ブランチ名の接頭辞（既定 `taskd/`）。
+    /// ブランチ名の接頭辞（既定 `celeris/`）。
     pub branch_prefix: String,
 }
 
 impl Default for WorktreeSettings {
     fn default() -> Self {
-        Self { root: None, base: "HEAD".to_string(), paths: Vec::new(), branch_prefix: "taskd/".to_string() }
+        Self { root: None, base: "HEAD".to_string(), paths: Vec::new(), branch_prefix: "celeris/".to_string() }
     }
 }
 
-/// 同期の両方向で常に除外するもの（P-46）。taskd が写しに作る管理用のディレクトリで、
+/// 同期の両方向で常に除外するもの（P-46）。celeris が写しに作る管理用のディレクトリで、
 /// クラスタ側の既存プロジェクトに持ち込まないし、`--delete` 付きの pull で手元から消してもいけない。
 /// `artifacts/` は**除外しない**（成果物はクラスタで作られることがあり、受け入れ条件の照合に要る）。
 pub const SYNC_ALWAYS_EXCLUDED: [&str; 3] = [".taskd/", "runs/", "inputs/"];
@@ -67,7 +67,7 @@ pub struct SshSettings {
     /// タスク ID（worktree のディレクトリ名とブランチ名に使う。ADR-0019 D2）。
     pub task_id: String,
     /// push（手元 → クラスタ）で、手元に無いファイルをクラスタ側から消すか（ADR-0018 D4）。
-    /// **既定は false**。既存プロジェクトを指すタスクでファイルを失わないため。taskd 専用の作業ディレクトリなら true にしてよい。
+    /// **既定は false**。既存プロジェクトを指すタスクでファイルを失わないため。celeris 専用の作業ディレクトリなら true にしてよい。
     pub delete_on_push: bool,
     /// `exec` の前に push、後に pull するか（既定 true）。判定コマンドが手元の編集を見て、
     /// その結果の成果物が手元に戻るようにするため（ADR-0018 D4）。
@@ -107,13 +107,13 @@ impl SshSettings {
         }
     }
 
-    /// worktree のパス（`worktree_root`/`<task_id>`。既定の root は `<project>/.taskd-worktrees`）。
+    /// worktree のパス（`worktree_root`/`<task_id>`。既定の root は `<project>/.celeris-worktrees`）。
     pub fn worktree_dir(&self) -> PathBuf {
-        let root = self.worktree.root.clone().unwrap_or_else(|| self.remote_dir.join(".taskd-worktrees"));
+        let root = self.worktree.root.clone().unwrap_or_else(|| self.remote_dir.join(".celeris-worktrees"));
         root.join(&self.task_id)
     }
 
-    /// worktree のブランチ名（ADR-0019 D2: taskd は commit しない。人が見てから扱う）。
+    /// worktree のブランチ名（ADR-0019 D2: celeris は commit しない。人が見てから扱う）。
     pub fn worktree_branch(&self) -> String {
         format!("{}{}", self.worktree.branch_prefix, self.task_id)
     }
@@ -149,12 +149,12 @@ impl SshWorkspace {
         self.settings.effective_remote_dir()
     }
 
-    /// worktree のパス（`worktree_root`/`<task_id>`。既定の root は `<project>/.taskd-worktrees`）。
+    /// worktree のパス（`worktree_root`/`<task_id>`。既定の root は `<project>/.celeris-worktrees`）。
     fn worktree_dir(&self) -> PathBuf {
         self.settings.worktree_dir()
     }
 
-    /// worktree のブランチ名（ADR-0019 D2: taskd は commit しない。人が見てから扱う）。
+    /// worktree のブランチ名（ADR-0019 D2: celeris は commit しない。人が見てから扱う）。
     pub fn worktree_branch(&self) -> String {
         self.settings.worktree_branch()
     }
@@ -191,7 +191,7 @@ impl SshWorkspace {
              cd {project} 2>/dev/null || {{ echo \"no such directory: {project}\" >&2; exit 66; }}\n\
              gitdir=$(git rev-parse --git-common-dir 2>/dev/null) || {{ echo \"not a git repository\" >&2; exit 65; }}\n\
              if command -v flock >/dev/null 2>&1; then\n\
-               exec 9>\"$gitdir/taskd-worktree.lock\"\n\
+               exec 9>\"$gitdir/celeris-worktree.lock\"\n\
                flock 9\n\
              fi\n\
              {inner}",
@@ -221,7 +221,7 @@ impl SshWorkspace {
         args
     }
 
-    /// 人が張った多重接続があるか（ADR-0018 D2）。無ければ taskd は何もできない。
+    /// 人が張った多重接続があるか（ADR-0018 D2）。無ければ celeris は何もできない。
     pub async fn control_master_alive(&self) -> bool {
         let mut args = self.ssh_base();
         args.push("-O".into());
@@ -308,7 +308,7 @@ impl SshWorkspace {
         }
         args.push("-e".into());
         args.push(self.ssh_base().join(" "));
-        // P-46: taskd の管理用ディレクトリ（ラッパ・run のログ・入力）はクラスタへ送らない。
+        // P-46: celeris の管理用ディレクトリ（ラッパ・run のログ・入力）はクラスタへ送らない。
         for pattern in SYNC_ALWAYS_EXCLUDED {
             args.push("--exclude".into());
             args.push(pattern.into());
@@ -323,7 +323,7 @@ impl SshWorkspace {
     }
 
     /// クラスタ → 手元の写し（run の前と、判定の後。ADR-0018 D4）。
-    /// 写しは taskd が作り直してよいので、こちらは `--delete` してよい。
+    /// 写しは celeris が作り直してよいので、こちらは `--delete` してよい。
     pub async fn pull(&self) -> Result<(), WorkspaceError> {
         if self.settings.sync == SyncMode::None {
             return Ok(());
@@ -381,7 +381,7 @@ impl SshWorkspace {
         }
         let script = format!(
             "#!/bin/sh\n\
-             # taskd が run ごとに作るラッパ（ADR-0018 D3）。クラスタ {cluster} でコマンドを実行する。\n\
+             # celeris が run ごとに作るラッパ（ADR-0018 D3）。クラスタ {cluster} でコマンドを実行する。\n\
              # 使い方: .taskd/remote-exec <コマンド ...>\n\
              set -u\n\
              if [ $# -eq 0 ]; then echo \"usage: $0 <command...>\" >&2; exit 2; fi\n\
@@ -409,7 +409,7 @@ impl SshWorkspace {
 /// ワーカーが従うかは保証しない（受け入れ条件はクラスタ側で判定されるので、手元だけで済ませた仕事は条件で落ちる）。
 pub fn remote_exec_instructions(settings: &SshSettings) -> String {
     let base = format!(
-        "\n\n[taskd] このタスクの正はクラスタ `{cluster}`（ssh host `{host}`）の `{dir}` です。手元の作業ディレクトリはその写しで、\
+        "\n\n[celeris] このタスクの正はクラスタ `{cluster}`（ssh host `{host}`）の `{dir}` です。手元の作業ディレクトリはその写しで、\
          run の後にクラスタへ同期され、受け入れ条件のコマンドはクラスタ側で実行されます。\
          重い処理・クラスタ上のデータやモジュールを使う処理は `.taskd/remote-exec <コマンド ...>` で実行してください\
          （クラスタの作業ディレクトリで実行され、終了コードと出力がそのまま返ります）。",

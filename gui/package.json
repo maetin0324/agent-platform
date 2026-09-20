@@ -1,9 +1,9 @@
 {
-  "name": "taskd-gui",
+  "name": "celeris-gui",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Web GUI for taskd (BFF over taskd HTTP API v1)",
+  "description": "Web GUI for celeris (BFF over celeris HTTP API v1)",
   "packageManager": "pnpm@11.27.0",
   "engines": {
     "node": ">=24.0.0"

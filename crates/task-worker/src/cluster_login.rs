@@ -1,7 +1,7 @@
 //! クラスタへの接続を GUI から張る（ADR-0032）。
 //!
 //! `SshWorkspace`（`ssh.rs`）は「人が張った ControlMaster を借りる」だけだった（ADR-0018 D2）。
-//! ここではその借り先を taskd 自身が用意する: `ssh -M -N` の子プロセスを taskd が**保持し続ける**ことで
+//! ここではその借り先を celeris 自身が用意する: `ssh -M -N` の子プロセスを celeris が**保持し続ける**ことで
 //! master を張る（`-f` は使わない。`ControlPersist` に依存しないため。ADR-0032 D2）。
 //!
 //! - `auth = "publickey"`（`interactive = false`）: `BatchMode=yes` で鍵だけの接続を試みる。
@@ -26,7 +26,7 @@ use crate::subprocess::send_signal_to_group;
 /// `-O check` をポーリングする間隔（ADR-0032 §1「実機で確かめた事実」: `-O check` は即座に返る）。
 const CHECK_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// taskd が保持する ssh master。Drop でプロセスグループごと落とす。
+/// celeris が保持する ssh master。Drop でプロセスグループごと落とす。
 pub struct ClusterMaster {
     child: Child,
 }
@@ -192,7 +192,7 @@ impl std::error::Error for ClusterConnectError {}
 
 /// 接続を開始する（ADR-0032 D2/D3/D4）。
 ///
-/// 1. 既に人（または以前の taskd）が張った master が生きていれば、何もせず `Connected(None)`。
+/// 1. 既に人（または以前の celeris）が張った master が生きていれば、何もせず `Connected(None)`。
 /// 2. `interactive == false`（`auth = "publickey"`）: `BatchMode=yes` で `ssh -M -N` を張り、
 ///    `connect_timeout` 以内に `-O check` が通れば `Connected(Some(master))`。
 /// 3. `interactive == true`（`auth = "totp"`）: `SSH_ASKPASS` を使って `ssh -M -N` を張り、
@@ -309,8 +309,8 @@ async fn start_totp(
         ("SSH_ASKPASS".to_string(), askpass.to_string_lossy().into_owned()),
         ("SSH_ASKPASS_REQUIRE".to_string(), "force".to_string()),
         ("DISPLAY".to_string(), String::new()),
-        ("TASKD_PROMPT_FIFO".to_string(), prompt_fifo.to_string_lossy().into_owned()),
-        ("TASKD_CODE_FIFO".to_string(), code_fifo.to_string_lossy().into_owned()),
+        ("CELERIS_PROMPT_FIFO".to_string(), prompt_fifo.to_string_lossy().into_owned()),
+        ("CELERIS_CODE_FIFO".to_string(), code_fifo.to_string_lossy().into_owned()),
     ];
 
     let (child, stderr_buf, err_task) = match spawn_master(program, &args, &envs) {
@@ -459,7 +459,7 @@ async fn check_master(ssh_command: &[String], host: &str) -> bool {
 
 /// 0700 の一時ディレクトリを作る（ADR-0032 D4）。
 fn make_secure_tempdir() -> std::io::Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("taskd-cluster-connect-{}", task_core::TaskId::new()));
+    let dir = std::env::temp_dir().join(format!("celeris-cluster-connect-{}", task_core::TaskId::new()));
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     Ok(dir)
 }
@@ -475,7 +475,7 @@ fn make_fifo(path: &Path) -> Result<(), ClusterConnectError> {
 /// askpass スクリプト（ADR-0032 §1「実機で確かめた事実」で検証済みの中身と等価）。
 fn write_askpass_script(dir: &Path) -> Result<PathBuf, ClusterConnectError> {
     let path = dir.join("askpass.sh");
-    let script = "#!/bin/sh\nprintf '%s' \"$1\" > \"$TASKD_PROMPT_FIFO\"\ncat \"$TASKD_CODE_FIFO\"\n";
+    let script = "#!/bin/sh\nprintf '%s' \"$1\" > \"$CELERIS_PROMPT_FIFO\"\ncat \"$CELERIS_CODE_FIFO\"\n";
     std::fs::write(&path, script).map_err(|e| ClusterConnectError::Spawn(format!("askpass script: {e}")))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| ClusterConnectError::Spawn(format!("askpass permissions: {e}")))?;

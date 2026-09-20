@@ -1,5 +1,5 @@
 /**
- * `sha256` 不一致の警告。`ArtifactView.sha256_matches` は taskd が計算済みの値をそのまま見せるだけで、GUI は再計算しない。
+ * `sha256` 不一致の警告。`ArtifactView.sha256_matches` は celeris が計算済みの値をそのまま見せるだけで、GUI は再計算しない。
  * `matches` が `true` または `null`（未計算・存在しない）のときは何も表示しない（`null` を警告として扱わない）。
  */
 export function Sha256Badge({

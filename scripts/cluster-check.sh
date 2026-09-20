@@ -12,7 +12,7 @@ fi
 
 echo "== 多重接続"
 if ssh -o BatchMode=yes -O check "$host" 2>&1; then
-  echo "   ok（taskd はこの接続を借りられます）"
+  echo "   ok（celeris はこの接続を借りられます）"
 else
   echo "   ありません。先に scripts/cluster-login.sh $host を実行してください。" >&2
   exit 1
@@ -50,14 +50,14 @@ fi
 
 echo "== 手元とクラスタでファイルが共有されているか"
 # 手元で印を書き、リモートから同じ内容が見えるかで判定する（見えれば sync = "none" が使える）。
-marker="taskd-shared-fs-probe-$$-$(date +%s)"
+marker="celeris-shared-fs-probe-$$-$(date +%s)"
 probe_dir="${workdir:-$HOME}"
 if [ -n "$workdir" ]; then
   # リモートの作業ディレクトリと同じパスが手元にもあるか（共有 FS なら同じパスで見えるのが普通）
   if [ -d "$workdir" ] && [ -w "$workdir" ]; then
-    echo "$marker" > "$workdir/.taskd-shared-probe"
-    run "grep -q '$marker' '$workdir/.taskd-shared-probe' 2>/dev/null && echo '共有されています（sync = \"none\" を使えます）' || echo '共有されていません（sync = \"none\" は使えません。上の git の判定に従ってください）'"
-    rm -f "$workdir/.taskd-shared-probe"
+    echo "$marker" > "$workdir/.celeris-shared-probe"
+    run "grep -q '$marker' '$workdir/.celeris-shared-probe' 2>/dev/null && echo '共有されています（sync = \"none\" を使えます）' || echo '共有されていません（sync = \"none\" は使えません。上の git の判定に従ってください）'"
+    rm -f "$workdir/.celeris-shared-probe"
   else
     echo "   $workdir は手元に無い（または書けない）ので共有されていません（sync = \"none\" は使えません。上の git の判定に従ってください）"
   fi
@@ -69,5 +69,5 @@ echo "== ファイルシステム（手元とリモート）"
 printf "   手元    : "; df -PT "$HOME" 2>/dev/null | tail -1
 printf "   リモート: "; run "df -PT '${workdir:-\$HOME}' 2>/dev/null | tail -1"
 
-echo "== まとめ: 上の結果を taskd.toml の [[clusters]] に書きます"
+echo "== まとめ: 上の結果を config.toml の [[clusters]] に書きます"
 echo "   host / concurrency / sync（worktree なら worktree_paths も）/ setup（module load や PATH）"

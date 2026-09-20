@@ -33,7 +33,7 @@ pub const COMPACTION_ROLE: &str = "report-compressor";
 /// （人が見る「仕事の木」の本体）。
 ///
 /// Phase 42（実機 2026-09-18）: 計画 run（`kind = plan`）は裏方。人が見る仕事の木にも
-/// `ready_milestones`（`crate::report::support_kind` を使う taskd 側）の件数にも入れない。
+/// `ready_milestones`（`crate::report::support_kind` を使う celeris 側）の件数にも入れない。
 /// 入れたままだと、途中目標を分解した直後（計画 run が `done`、子は全部 `draft`）に
 /// 「動いているものが無く done が 1 件以上」が成立し、人がまだ何も判定していないのに
 /// 途中目標のレビューが再び起きてしまう。

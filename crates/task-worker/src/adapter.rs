@@ -90,15 +90,15 @@ pub trait EventSink: Send + Sync {
     /// （ADR-0010 D7, P-7）。既定は何もしない。
     fn heartbeat(&self) {}
     /// `delegate` メッセージ（LLM アダプタでは `artifacts/delegate.json`）の提案（ADR-0016 D2）。ディスパッチャが検証して
-    /// 子タスクを挿入する。既定は何もしない（`taskctl worker run` など DB を変えない文脈）。
+    /// 子タスクを挿入する。既定は何もしない（`celerisctl worker run` など DB を変えない文脈）。
     fn delegate(&self, _tasks: &[task_core::DelegateTask]) {}
     /// ADR-0044 D2（Phase 53）: `{"type":"comment","body":"…"}`（任意回、非終端）。ディスパッチャは
-    /// `task_comments` に `author_kind = node` で残す。既定は何もしない（`taskctl worker run` など
+    /// `task_comments` に `author_kind = node` で残す。既定は何もしない（`celerisctl worker run` など
     /// DB を変えない文脈）。
     fn comment(&self, _body: &str) {}
     /// claude-code アダプタが stream-json の `rate_limit_event` を解析するたびに呼ぶ（ADR-0024 D4）。
     /// ディスパッチャはプールのアカウントで走っている run のシンクから、この値を `AccountBook` に記録する。
-    /// 既定は何もしない（`fake` アダプタや `taskctl worker run` の観測用途など）。
+    /// 既定は何もしない（`fake` アダプタや `celerisctl worker run` の観測用途など）。
     fn rate_limit(&self, _obs: RateLimitObservation) {}
 }
 
@@ -124,7 +124,7 @@ pub trait WorkerAdapter: Send + Sync {
         sink: &dyn EventSink,
     ) -> Result<RunOutcome, AdapterError>;
 
-    /// `extra` を環境の末尾に重ねた複製を返す（ADR-0024 D2: taskd の環境 < アダプタの環境 < プロバイダの環境 <
+    /// `extra` を環境の末尾に重ねた複製を返す（ADR-0024 D2: celeris の環境 < アダプタの環境 < プロバイダの環境 <
     /// アカウント）。プール（`account_pool = true`）で選んだアカウントの `CLAUDE_SECURESTORAGE_CONFIG_DIR` を
     /// 足すために使う。既定は `None`（この経路をサポートしないアダプタ）。
     fn with_env(&self, _extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {

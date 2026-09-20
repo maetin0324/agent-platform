@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runner embedded in the taskd `paperqa` adapter (ADR-0035 D1 / D5).
+"""Runner embedded in the celeris `paperqa` adapter (ADR-0035 D1 / D5).
 
 Before PaperQA2 can answer anything it needs papers. This runner is the
 "go and find the papers" stage:
@@ -23,7 +23,7 @@ Contract with the adapter (crates/task-worker/src/paperqa.rs):
                      of the network (no HTTP request is made at all)
   stdout             one message per line: "progress: <text>" while
                      running, and exactly one final line
-                     "TASKD_ACQUIRE {"candidates": n, "pdfs": m,
+                     "CELERIS_ACQUIRE {"candidates": n, "pdfs": m,
                                      "engines": {"arxiv": a, "openalex": b},
                                      "queries": q, "excluded": x,
                                      "query_source": "llm"|"fallback"}"
@@ -83,7 +83,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
-USER_AGENT = "taskd-paperqa-acquire/1.0 (deterministic literature acquisition for taskd)"
+USER_AGENT = "celeris-paperqa-acquire/1.0 (deterministic literature acquisition for celeris)"
 
 ARXIV_ENDPOINT = "https://export.arxiv.org/api/query"
 OPENALEX_ENDPOINT = "https://api.openalex.org/works"
@@ -973,7 +973,7 @@ def main():
     write_json(payload["sources_path"], sources)
     if payload.get("queries_path"):
         write_json(payload["queries_path"], plan)
-    print("TASKD_ACQUIRE " + json.dumps(counts))
+    print("CELERIS_ACQUIRE " + json.dumps(counts))
     return 0
 
 

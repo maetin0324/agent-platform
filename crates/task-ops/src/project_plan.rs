@@ -26,7 +26,7 @@ pub const PLAN_HISTORY_LIMIT: usize = 20;
 /// `goal` の 1 行目から `title` を切り出す上限（`task_ops::plan::create_plan` と同じ）。
 const TITLE_MAX_CHARS: usize = 80;
 
-/// 分解を起こす Plan タスクの既定の道具立て（旧 `taskctl plan` の既定と同じ。ADR-0007 D6）。
+/// 分解を起こす Plan タスクの既定の道具立て（旧 `celerisctl plan` の既定と同じ。ADR-0007 D6）。
 /// `assignee`（秘書）の分野・役割の既定より**先に**効かせる（考える仕事なので予算を絞りたくない）。
 const PLAN_TIER: Tier = Tier::Frontier;
 const PLAN_MAX_TURNS: u32 = 30;

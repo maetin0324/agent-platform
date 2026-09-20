@@ -2,8 +2,8 @@ import { Background, Controls, type NodeMouseHandler, ReactFlow } from "@xyflow/
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
+import type { Graph } from "~/celeris/types";
 import { layoutGraph } from "~/lib/graph-layout";
-import type { Graph } from "~/taskd/types";
 
 /**
  * 案件の「仕事の木」（SPEC §3.3）。`/graph`（`app/routes/graph.tsx`）と同じ `layoutGraph` を使い、

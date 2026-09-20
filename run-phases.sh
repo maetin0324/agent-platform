@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# taskd 自動進行ランナー。Phase ごとに新しい claude -p セッションで /goal を回す。
+# celeris 自動進行ランナー。Phase ごとに新しい claude -p セッションで /goal を回す。
 # 使い方: tmux 内で  ./run-phases.sh            （Phase 1〜6）
 #                   PHASES="12 10 11" ./run-phases.sh （Phase 12 の残り → 10 → 11）
 #                   PHASES="3 4" ./run-phases.sh （一部だけ）

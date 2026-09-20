@@ -1,17 +1,17 @@
-import type { Graph, OrgNode, ProjectTaskView, TaskSummary } from "~/taskd/types";
+import type { Graph, OrgNode, ProjectTaskView, TaskSummary } from "~/celeris/types";
 
 /**
  * 案件の「仕事の木」（SPEC §3.3、ADR-0033 D2）を、既存の DAG 描画部品（`~/lib/graph-layout.ts` の
  * `layoutGraph`）に渡せる `Graph` に写す純粋関数。DAG は既存どおり `parent_id` / `depends_on`
  * （`GET /projects/{id}` の `tasks` は `GET /graph` と同じ辺の作り方。docs/gui/api.md §3.47）。
- * `role` フィールドには `assignee` の**組織ノードの名前**を入れる（taskd の役割ではなく表示用の流用。
+ * `role` フィールドには `assignee` の**組織ノードの名前**を入れる（celeris の役割ではなく表示用の流用。
  * `layoutGraph` は `role` をラベルの最終行にそのまま出すだけで、意味の解釈はしない）。
  *
- * **裏方のタスクは木から完全に外す**（SPEC「タスクは裏方」/ ADR-0033 D8）。判定は taskd の
+ * **裏方のタスクは木から完全に外す**（SPEC「タスクは裏方」/ ADR-0033 D8）。判定は celeris の
  * `support`（`"conversation"` | `"compaction"` | `"approval"` | `"review"` | `null`。Phase 29 で追加、
  * `task_core::support_kind` の決定的な値）をそのまま使う。GUI 側で `role` や `title` から推測しない
  * （G13f-1 では `role = "report-compressor"` で代用していた。Phase 29 でこの印に置き換えた）。
- * `support` を持たない古い taskd の応答にも効くよう、`conversation` の真偽値も併せて見る。
+ * `support` を持たない古い celeris の応答にも効くよう、`conversation` の真偽値も併せて見る。
  *
  * 外したタスクを指す `parent_id` / `depends_on` は、既存の「存在しないタスクを指す辺・親は `layoutGraph`
  * 側が捨てる／親なしのグループとして描く」という前提にそのまま乗せる（新しい判断ロジックを足さない）。

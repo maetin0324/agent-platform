@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import { CelerisUnavailable } from "~/celeris/errors";
+import type { ConfigView, TaskList } from "~/celeris/types";
 import { loadTasks, loadTasksPage } from "~/routes/tasks";
-import { TaskdClient } from "~/taskd/client.server";
-import { TaskdUnavailable } from "~/taskd/errors";
-import type { ConfigView, TaskList } from "~/taskd/types";
-import { type MockTaskd, sendJson, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 const sampleTaskList: TaskList = {
   items: [
@@ -42,8 +42,8 @@ const sampleTaskList: TaskList = {
 };
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -112,7 +112,7 @@ describe("loadTasks", () => {
     expect(req?.url).toBe("/api/v1/tasks");
   });
 
-  // ADR-0044 D6（Phase 55 / G19）: アーカイブされた案件のタスクは taskd が既定で隠す。
+  // ADR-0044 D6（Phase 55 / G19）: アーカイブされた案件のタスクは celeris が既定で隠す。
   // GUI は `?archived=1` を素通しするだけ（絞り込みを GUI で再実装しない）。
   it("forwards archived=1 when present (ADR-0044 D6) and omits it otherwise", async () => {
     mock.on("GET", "/api/v1/tasks", (_req, res) => {
@@ -126,7 +126,7 @@ describe("loadTasks", () => {
     expect(mock.requests.at(-1)?.url).toBe("/api/v1/tasks");
   });
 
-  it("returns the TaskList response from taskd unmodified (no added/removed fields)", async () => {
+  it("returns the TaskList response from celeris unmodified (no added/removed fields)", async () => {
     mock.on("GET", "/api/v1/tasks", (_req, res) => {
       sendJson(res, 200, sampleTaskList);
     });
@@ -136,11 +136,11 @@ describe("loadTasks", () => {
     expect(result).toEqual(sampleTaskList);
   });
 
-  it("throws TaskdUnavailable when taskd is unreachable", async () => {
-    const closed = await startMockTaskd();
+  it("throws CelerisUnavailable when celeris is unreachable", async () => {
+    const closed = await startMockCeleris();
     const baseUrl = closed.baseUrl;
     await closed.close();
-    const unreachable = new TaskdClient({ baseUrl, timeoutMs: 1000 });
+    const unreachable = new CelerisClient({ baseUrl, timeoutMs: 1000 });
 
     let error: unknown;
     try {
@@ -149,14 +149,14 @@ describe("loadTasks", () => {
       error = e;
     }
 
-    expect(error).toBeInstanceOf(TaskdUnavailable);
+    expect(error).toBeInstanceOf(CelerisUnavailable);
   });
 });
 
 describe("loadTasksPage", () => {
   const config = {
-    config_path: "/tmp/taskd.toml",
-    db: "/tmp/taskd.sqlite3",
+    config_path: "/tmp/config.toml",
+    db: "/tmp/celeris.sqlite3",
     workspace_root: "/tmp/ws",
     tick_ms: 200,
     max_concurrency: 2,
@@ -196,7 +196,7 @@ describe("loadTasksPage", () => {
     expect(mock.requests.some((r) => r.method === "GET" && r.url === "/api/v1/config")).toBe(true);
   });
 
-  it("falls back to an empty genres[] when taskd has no [[genres]] configured", async () => {
+  it("falls back to an empty genres[] when celeris has no [[genres]] configured", async () => {
     const { genres: _genres, ...configWithoutGenres } = config;
     mock.on("GET", "/api/v1/tasks", (_req, res) => sendJson(res, 200, sampleTaskList));
     mock.on("GET", "/api/v1/config", (_req, res) => sendJson(res, 200, configWithoutGenres));

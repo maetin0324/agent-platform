@@ -16,12 +16,12 @@ pub struct Health {
     pub api_version: String,
     /// `schema_migrations` の最大版数。
     pub schema_version: u32,
-    pub taskd_version: String,
+    pub celeris_version: String,
     pub instance_id: String,
     pub started_at: String,
     pub now: String,
     pub db: DbInfo,
-    /// ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `TASKD_RELEASE` / `"dev"`）。
+    /// ADR-0040 D4（Phase 47）: このプロセスのリリース（`--release <sha12>` / `CELERIS_RELEASE` / `"dev"`）。
     pub release: String,
     /// ADR-0040 D3: `normal` または `verify`（`--mode`）。
     pub mode: String,
@@ -39,13 +39,13 @@ pub struct DbInfo {
 /// RFC 9457 の problem details（`application/problem+json`）。`extra` は `code` ごとの付加フィールド。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Problem {
-    /// `urn:taskd:problem:<code>`。
+    /// `urn:celeris:problem:<code>`。
     pub r#type: String,
     pub title: String,
     pub status: u16,
     pub detail: String,
     pub code: String,
-    /// `urn:taskd:request:<X-Request-Id>`。
+    /// `urn:celeris:request:<X-Request-Id>`。
     pub instance: String,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -111,7 +111,7 @@ pub enum TimelineItem {
         seq: u64,
         event: task_core::Event,
     },
-    /// コメント（人・組織の「人」・taskd）。
+    /// コメント（人・組織の「人」・celeris）。
     Comment { at: String, comment: task_core::TaskComment },
     /// 認可（ADR-0033 D5）。`decided_at` があれば決まった時刻、無ければ聞いた時刻。
     Approval {
@@ -250,7 +250,7 @@ pub struct ProviderView {
     /// スナップショットが無い、または cooldown 中でなければ `null`。
     pub cooldown: Option<CooldownView>,
     /// ADR-0022 D2: 直近の `POST /providers/{id}/check` の結果（`{at, result}`）。まだ確認していない、
-    /// または taskd を再起動した後は `null`（メモリだけに持つ観測値）。
+    /// または celeris を再起動した後は `null`（メモリだけに持つ観測値）。
     pub last_check: Option<task_ops::daemon::ProviderCheckView>,
     pub stats: ProviderStats,
     /// ADR-0024 D2: `[accounts]` のプールから選ぶか（既定 `false`）。
@@ -292,7 +292,7 @@ pub struct DaemonView {
     pub snapshot: Option<DaemonSnapshot>,
 }
 
-/// `GET /config`: `taskd.toml` の要約。env の値・トークンは含めない。taskd が起動時に作る。
+/// `GET /config`: `config.toml` の要約。env の値・トークンは含めない。celeris が起動時に作る。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigView {
     pub config_path: String,
@@ -754,7 +754,7 @@ pub struct ProjectCreateBody {
     pub title: String,
     pub request: String,
     /// ADR-0039 D1: この案件の作業場所（任意）。`{"kind":"local","path":"~/workspace/rust/pluvio-poc"}` か
-    /// `{"kind":"remote","cluster":"pegasus","path":"/work/.../benchfs"}`。`~` は taskd の `$HOME` で
+    /// `{"kind":"remote","cluster":"pegasus","path":"/work/.../benchfs"}`。`~` は celeris の `$HOME` で
     /// 展開して保存する（`Local` のみ）。知らない `cluster` は 422。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<task_core::WorkspaceSpec>,
@@ -871,7 +871,7 @@ pub struct Releases {
 /// `GET /releases` の `running`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ReleaseRunning {
-    /// `--release <sha12>` / `TASKD_RELEASE` / `"dev"`。
+    /// `--release <sha12>` / `CELERIS_RELEASE` / `"dev"`。
     pub release: String,
     /// `active` / `standby` / `draining` / `verify`。
     pub role: String,
@@ -989,7 +989,7 @@ pub struct RepoCreateBody {
     pub kind: Option<task_core::RepoKind>,
     /// `{"kind":"local","path":"~/workspace/benchfs"}` か
     /// `{"kind":"remote","cluster":"pegasus","path":"/work/.../benchfs"}`。
-    /// `Local` の `~` は taskd の `$HOME` で展開して保存する。知らない `cluster` は 422。
+    /// `Local` の `~` は celeris の `$HOME` で展開して保存する。知らない `cluster` は 422。
     pub location: task_core::WorkspaceSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,

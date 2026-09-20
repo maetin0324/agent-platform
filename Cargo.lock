@@ -211,6 +211,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "celeris"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "socket2 0.5.10",
+ "task-api",
+ "task-core",
+ "task-dispatch",
+ "task-ops",
+ "task-worker",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
+
+[[package]]
+name = "celerisctl"
+version = "0.1.0"
+dependencies = [
+ "celeris",
+ "clap",
+ "serde_json",
+ "task-core",
+ "task-dispatch",
+ "task-ops",
+ "task-worker",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1866,47 +1907,6 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "taskctl"
-version = "0.1.0"
-dependencies = [
- "clap",
- "serde_json",
- "task-core",
- "task-dispatch",
- "task-ops",
- "task-worker",
- "taskd",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
-]
-
-[[package]]
-name = "taskd"
-version = "0.1.0"
-dependencies = [
- "clap",
- "reqwest",
- "serde",
- "serde_json",
- "socket2 0.5.10",
- "task-api",
- "task-core",
- "task-dispatch",
- "task-ops",
- "task-worker",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "ulid",
 ]
 
 [[package]]

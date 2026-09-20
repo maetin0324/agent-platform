@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { isRouteErrorResponse, Link } from "react-router";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import type { RunList, RunSummary } from "~/celeris/types";
 import { CodeViewer } from "~/components/CodeViewer";
 import { Badge } from "~/components/ui/badge";
 import { buttonClass } from "~/components/ui/button";
@@ -7,15 +10,12 @@ import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { Icon } from "~/components/ui/Icon";
 import { Alert } from "~/components/ui/misc";
 import { classifyStreamJsonLine, type FormattedLine } from "~/lib/stream-json";
-import { TaskdBanner } from "~/root";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import type { RunList, RunSummary } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/tasks.$id.runs.$runId";
 
 /**
  * `/tasks/:id/runs/:runId`（生ログ、docs/DESIGN.md §4.3「生ログ」、§6.2、docs/adr/0006-g3-decisions.md D4）。
- * 本体（ファイルの中身）は `GET /tasks/{id}/runs` の要約と一緒に loader が taskd から取り、SSR で最初の表示を作る
+ * 本体（ファイルの中身）は `GET /tasks/{id}/runs` の要約と一緒に loader が celeris から取り、SSR で最初の表示を作る
  * （初回表示のためだけに追加のラウンドトリップを増やさない）。実行中の run の追尾は画面側が `/files/...` を
  * `?offset=` 付きで 1 秒ごとに叩く（DESIGN §4.3）。
  */
@@ -31,7 +31,7 @@ export interface RunDetailData {
   prompt: string | null;
 }
 
-async function readFileText(client: TaskdClient, path: string, signal: AbortSignal): Promise<string | null> {
+async function readFileText(client: CelerisClient, path: string, signal: AbortSignal): Promise<string | null> {
   try {
     const res = await client.file(path, { signal });
     return await res.text();
@@ -41,7 +41,7 @@ async function readFileText(client: TaskdClient, path: string, signal: AbortSign
 }
 
 export async function loadRunDetail(
-  client: TaskdClient,
+  client: CelerisClient,
   taskId: string,
   runId: string,
   request: Request,
@@ -49,8 +49,8 @@ export async function loadRunDetail(
   const runs = await client.get<RunList>(`/tasks/${taskId}/runs`, { signal: request.signal });
   const run = runs.runs.find((r) => r.run_id === runId);
   if (!run) {
-    const data: TaskdRouteErrorData = {
-      kind: "taskd_error",
+    const data: CelerisRouteErrorData = {
+      kind: "celeris_error",
       status: 404,
       code: "run_not_found",
       detail: `run ${runId} not found`,
@@ -75,9 +75,9 @@ export function meta(_: Route.MetaArgs) {
 
 export async function loader({ params, request }: Route.LoaderArgs): Promise<RunDetailData> {
   try {
-    return await loadRunDetail(getTaskdClient(), params.id, params.runId, request);
+    return await loadRunDetail(getCelerisClient(), params.id, params.runId, request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -308,11 +308,11 @@ export default function RunDetailPage({ loaderData }: Route.ComponentProps) {
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

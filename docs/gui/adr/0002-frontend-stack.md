@@ -8,7 +8,7 @@
 
 - 人間の決定: **React + Remix**。初版（React 19 + Vite SPA + TanStack Router/Query、Rust の単一バイナリに埋め込み）は React の選定だけが残り、
   フレームワークと配布形態は Remix 前提で組み直す。
-- 境界（ADR-GUI-0001）: ブラウザは taskd を直接呼ばない。`taskd-gui` のサーバ（BFF）が taskd の HTTP API v1 を呼ぶ。
+- 境界（ADR-GUI-0001）: ブラウザは celeris を直接呼ばない。`celeris-gui` のサーバ（BFF）が celeris の HTTP API v1 を呼ぶ。
 - 2026 年 9 月時点で「React ベースの Remix」が何を指すかは自明でないため、一次情報で確認した（§2）。
 - 実装と保守の多くを Claude Code に任せる（`run-gphases.sh` で G フェーズを自律進行）。学習データの多さと規約の明確さを重視する。
 - npm のサプライチェーン事故（2025-09 Shai-Hulud、2026-08 再発）を前提に、pnpm の `minimumReleaseAge` 7 日（H8）と依存の少なさに配慮する。
@@ -57,24 +57,24 @@ React Router v8 framework mode を指す。
 
 ### D2. SSR にする（SPA mode は採らない）
 
-- SPA mode（`ssr: false`）は「サーバの loader / action が無い」モードで、データ取得は `clientLoader` = ブラウザから直接になる。ブラウザが taskd を呼ばない（ADR-GUI-0001 D1）ためには
+- SPA mode（`ssr: false`）は「サーバの loader / action が無い」モードで、データ取得は `clientLoader` = ブラウザから直接になる。ブラウザが celeris を呼ばない（ADR-GUI-0001 D1）ためには
   BFF に別の API 層を自作することになり、framework mode を採る意味が無くなる。
-- SSR なら **サーバ側 `loader` / `action` がそのまま BFF**。taskd のトークンはサーバにしか無い。クライアント遷移時も loader はサーバで実行される（`.data` 要求）。
+- SSR なら **サーバ側 `loader` / `action` がそのまま BFF**。celeris のトークンはサーバにしか無い。クライアント遷移時も loader はサーバで実行される（`.data` 要求）。
 - 出典: SPA mode の仕様（https://reactrouter.com/how-to/spa "Regular loaders and actions don't run on a server in SPA mode"）、データ取得（https://reactrouter.com/start/framework/data-loading "Automatically removed from client bundles (safe for server-only APIs)"）。
 
 ### D3. データ取得と更新: loader / action だけ。**クライアントのキャッシュライブラリ（TanStack Query）は入れない**
 
-- 読み取り: 各ルートの `loader` が `TaskdClient`（サーバ専用モジュール `app/taskd/client.server.ts`）で taskd を呼び、`loaderData` として描画する。
-- 更新: `<Form method="post">` / `useFetcher()` → `action` → taskd の `POST`。action 完了後は React Router がそのページの loader を**自動で再検証**する（キャッシュの手動無効化が要らない）。
+- 読み取り: 各ルートの `loader` が `CelerisClient`（サーバ専用モジュール `app/celeris/client.server.ts`）で celeris を呼び、`loaderData` として描画する。
+- 更新: `<Form method="post">` / `useFetcher()` → `action` → celeris の `POST`。action 完了後は React Router がそのページの loader を**自動で再検証**する（キャッシュの手動無効化が要らない）。
 - リアルタイム: resource route `/events`（D4）から `EventSource` で `task.event` / `daemon` を受け、`useRevalidator().revalidate()` を 250 ms でデバウンスして呼ぶ。
-  イベント本体から状態を組み立てない（真実は taskd）。
+  イベント本体から状態を組み立てない（真実は celeris）。
 - 一覧の絞り込み・ページングは URL の検索パラメータ（`?status=…&cursor=…`）に持ち、loader が読む。
 - TanStack Router / Query は不要になる（ルータは React Router、サーバ状態は loader）。`@tanstack/react-virtual` だけ残す（仮想スクロールは React 汎用）。
 - 出典: https://reactrouter.com/start/framework/data-loading（`useRevalidator` / `shouldRevalidate`）、https://reactrouter.com/how-to/resource-routes 。
 
 ### D4. SSE の中継は resource route
 
-`app/routes/events.ts`（default export 無し、`loader` のみ）が taskd の `GET /api/v1/stream` を `fetch` し、`Last-Event-ID` と `?task_id=` を転送して
+`app/routes/events.ts`（default export 無し、`loader` のみ）が celeris の `GET /api/v1/stream` を `fetch` し、`Last-Event-ID` と `?task_id=` を転送して
 `Response(body, {headers: {"Content-Type": "text/event-stream"}})` で**そのまま流す**（`request.signal` で上流を閉じる）。
 出典: resource routes の仕様（"return a Response … Content-Type: text/event-stream"）。
 
@@ -89,7 +89,7 @@ React Router v8 framework mode を指す。
 | 形態 | 決め |
 |---|---|
 | 必須 | Node **24 LTS**（`v24.21.0`、2026-09-07。React Router 8 の最低 22.22.0 を満たす。Node 22 は Maintenance LTS）。`pnpm build` の `build/`（`build/server/index.js` + `build/client/`）+ `server.js` + `package.json` / `pnpm-lock.yaml`。`pnpm install --prod --frozen-lockfile` → `node server.js` |
-| リリース物 | `taskd-gui-<ver>.tar.gz`（上記一式）。systemd の unit 例（`Environment=TASKD_API_URL=… TASKD_API_TOKEN_FILE=…`、`ExecStart=node server.js`） |
+| リリース物 | `celeris-gui-<ver>.tar.gz`（上記一式）。systemd の unit 例（`Environment=CELERIS_API_URL=… CELERIS_API_TOKEN_FILE=…`、`ExecStart=node server.js`） |
 | 任意 | コンテナ（`Dockerfile`、`node:24-slim`） |
 | 実験 | **Node SEA**（single executable applications）: Node 26.8.2 のドキュメントで Stability 1.1（Active development）、ESM の main と assets の同梱に対応（https://nodejs.org/api/single-executable-applications.html ）。サーバ側を 1 ファイルにバンドル（依存ごと）してから `node --build-sea` する必要があり、React Router の SSR ビルドとの相性は未検証。G5 の「できれば」項目に留め、失敗しても G5 の完了を妨げない |
 
@@ -105,15 +105,15 @@ React Router v8 framework mode を指す。
 | 仮想スクロール | `@tanstack/react-virtual` | 3.14.13 | |
 | コード / ログ / JSON | CodeMirror 6（`@codemirror/view` 6.43.11、`@codemirror/state` 6.7.4、`lang-json` 6.0.2、`lang-markdown` 6.5.2）読み取り専用 | | クライアント専用。Monaco は不採用（サイズ） |
 | Markdown | `react-markdown` 10.1.0 + `remark-gfm` 4.0.1 | | HTML パススルー無し（LLM 生成物） |
-| SSE | ブラウザ標準 `EventSource`（薄いフック `useTaskdStream`） | | |
+| SSE | ブラウザ標準 `EventSource`（薄いフック `useCelerisStream`） | | |
 
 ### D8. テスト
 
 | 層 | 道具 | 方針 |
 |---|---|---|
-| 単体・コンポーネント | Vitest 5.0.x + `@testing-library/react` 16.3.x + `createRoutesStub`（`react-router` 同梱） | loader / action は**関数として**テストし、`TaskdClient` を差し替える。ルート部品は `createRoutesStub` で描画（https://reactrouter.com/start/framework/testing ） |
-| taskd API のモック | `test/mock-taskd/`: Node の `http.createServer` で `api-v1` の固定応答（`test/fixtures/api/*.json`）と SSE を返す**プロセス内サーバ**。loopback のみ | 単体テストは実 taskd 無しで動く。固定応答は G1 で実 taskd から `curl` で採取してコミットし、`pnpm gen:types` の型で検証する |
-| 結合（実 taskd） | Playwright 1.63.x（chromium のみ）+ `scripts/taskd.sh`（`$TASKD_REPO` を `cargo build -p taskd -p taskctl`、fake ワーカー + `[api]` の `taskd.toml` で起動）+ `scripts/fixture.sh`（`taskctl` と `taskd --until-idle` で既知の DB を作る） | 受け入れ条件はこれで示す。全て loopback |
+| 単体・コンポーネント | Vitest 5.0.x + `@testing-library/react` 16.3.x + `createRoutesStub`（`react-router` 同梱） | loader / action は**関数として**テストし、`CelerisClient` を差し替える。ルート部品は `createRoutesStub` で描画（https://reactrouter.com/start/framework/testing ） |
+| celeris API のモック | `test/mock-celeris/`: Node の `http.createServer` で `api-v1` の固定応答（`test/fixtures/api/*.json`）と SSE を返す**プロセス内サーバ**。loopback のみ | 単体テストは実 celeris 無しで動く。固定応答は G1 で実 celeris から `curl` で採取してコミットし、`pnpm gen:types` の型で検証する |
+| 結合（実 celeris） | Playwright 1.63.x（chromium のみ）+ `scripts/celeris.sh`（`$CELERIS_REPO` を `cargo build -p celeris -p celerisctl`、fake ワーカー + `[api]` の `config.toml` で起動）+ `scripts/fixture.sh`（`celerisctl` と `celeris --until-idle` で既知の DB を作る） | 受け入れ条件はこれで示す。全て loopback |
 | a11y | `@axe-core/playwright` 4.13.0（MPL-2.0。テスト専用依存） | G5 でクリティカル 0 |
 | 外部ネットワーク | テストは出ない。例外は `pnpm install`（パッケージ取得）と `pnpm exec playwright install chromium`（ブラウザ取得）の 2 つだけ | |
 
@@ -125,8 +125,8 @@ React Router v8 framework mode を指す。
 | TypeScript | **7.0.x**（Go 実装、2026-07-08）。`@react-router/dev` の peer が `^7` を含む。`react-router typegen` か `tsc` が 7 で動かなければ **6.0.x（JS 実装の最終系列、6.0.3 = 2026-04-16）** に下げてよい（G0 で判断し PROGRESS に記録） |
 | パッケージ管理 | **pnpm 11.x**（`latest-11` = 11.26.0、2026-09-06）。pnpm 12（12.0.0 = 2026-08-26）は公開 3 か月後に検討。設定: `minimumReleaseAge = 10080`（7 日、H8）、`strictDepBuilds`、`allowBuilds` 許可リスト、CI は `--frozen-lockfile`。`package.json` の `packageManager` で版を固定 |
 | 版の固定 | `package.json` は完全固定（`^` 無し）。更新は月 1 回まとめて。メジャー更新は公開から 3 か月以上経ってから。RC / next / canary は使わない |
-| 型生成 | `json-schema-to-typescript` 16.0.0（`pnpm gen:types`）。生成物 `app/taskd/types.ts` をコミット、CI で差分ゼロ |
-| 実行時検証 | 入れない（zod 等）。契約は taskd の schema。BFF は taskd の応答を信頼する |
+| 型生成 | `json-schema-to-typescript` 16.0.0（`pnpm gen:types`）。生成物 `app/celeris/types.ts` をコミット、CI で差分ゼロ |
+| 実行時検証 | 入れない（zod 等）。契約は celeris の schema。BFF は celeris の応答を信頼する |
 
 ## 4. 人間に確認すべき点（2026-09-14 確認済み: 全て本 ADR の案どおり）
 

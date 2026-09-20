@@ -2,6 +2,9 @@ import { Background, Controls, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
 import { Form, isRouteErrorResponse, useSearchParams } from "react-router";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import type { DaemonView, Graph } from "~/celeris/types";
 import { HelpLink } from "~/components/HelpLink";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody } from "~/components/ui/card";
@@ -10,15 +13,12 @@ import { Icon } from "~/components/ui/Icon";
 import { PageHeader } from "~/components/ui/misc";
 import { layoutGraph } from "~/lib/graph-layout";
 import { cn } from "~/lib/utils";
-import { TaskdBanner } from "~/root";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import type { DaemonView, Graph } from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/graph";
 
 /**
  * `/graph`（DAG、docs/DESIGN.md §4.2, §6.2, docs/adr/0006-g3-decisions.md D5）。
- * `GET /graph` をそのまま返す（レイアウト・色分けは表示のためだけで、taskd の判断値は増やさない）。
+ * `GET /graph` をそのまま返す（レイアウト・色分けは表示のためだけで、celeris の判断値は増やさない）。
  * ADR-0023 D3: 「部下待ち」は `GET /daemon` の `awaiting_children` をそのまま使う（GUI 側で状態を組み立て直さない）。
  */
 export interface GraphData {
@@ -26,7 +26,7 @@ export interface GraphData {
   awaitingChildren: string[];
 }
 
-export async function loadGraph(client: TaskdClient, request: Request): Promise<GraphData> {
+export async function loadGraph(client: CelerisClient, request: Request): Promise<GraphData> {
   const url = new URL(request.url);
   const root = url.searchParams.get("root");
   const depth = url.searchParams.get("depth");
@@ -52,9 +52,9 @@ export function meta(_: Route.MetaArgs) {
 
 export async function loader({ request }: Route.LoaderArgs): Promise<GraphData> {
   try {
-    return await loadGraph(getTaskdClient(), request);
+    return await loadGraph(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -141,11 +141,11 @@ export default function GraphPage({ loaderData }: Route.ComponentProps) {
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

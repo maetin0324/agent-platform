@@ -1,14 +1,14 @@
 //! ローカルの作業場所の置き場（ADR-0041 D1）。
 //!
 //! `WorkspaceSpec::Local` の `mode = worktree`（既定）で、`path` が git リポジトリのときだけ、
-//! taskd はタスクごとに `git worktree` を切る。そのとき **run の足回り**（`runs/`, `inputs/`,
+//! celeris はタスクごとに `git worktree` を切る。そのとき **run の足回り**（`runs/`, `inputs/`,
 //! `artifacts/`）は worktree の外、`<workspace_root>/<task_id>/` に置き、作業ツリーそのものは
 //! `<workspace_root>/<task_id>/tree` になる。作業ツリーの中に `runs/` を作ると
 //! `git status --porcelain` が常に汚れ、終端で worktree を消せなくなるため。
 //!
 //! ここは「どこを見ればよいか」を 1 か所に決める純粋な関数（+ 目印ファイルの有無だけを見る）。
 //! ディスパッチャは dispatch の時点で `git rev-parse` まで見て決め、その結果を目印
-//! （`<task_dir>/worktree.json`）として残す。API・`taskctl` はその目印だけを見る
+//! （`<task_dir>/worktree.json`）として残す。API・`celerisctl` はその目印だけを見る
 //! （git を起こさない。worktree を消した後も `runs/` と `artifacts/` が引けるように、目印は消さない）。
 
 use std::path::{Path, PathBuf};

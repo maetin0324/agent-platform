@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CelerisClient } from "~/celeris/client.server";
+import type { Providers } from "~/celeris/types";
 import { ADAPTER_OPTIONS, loadProviders } from "~/routes/providers";
-import { TaskdClient } from "~/taskd/client.server";
-import type { Providers } from "~/taskd/types";
-import { type MockTaskd, sendJson, startMockTaskd } from "../mock-taskd/server";
+import { type MockCeleris, sendJson, startMockCeleris } from "../mock-celeris/server";
 
-let mock: MockTaskd;
-let client: TaskdClient;
+let mock: MockCeleris;
+let client: CelerisClient;
 
 beforeEach(async () => {
-  mock = await startMockTaskd();
-  client = new TaskdClient({ baseUrl: mock.baseUrl });
+  mock = await startMockCeleris();
+  client = new CelerisClient({ baseUrl: mock.baseUrl });
 });
 
 afterEach(async () => {
@@ -97,11 +97,11 @@ describe("loadProviders", () => {
     expect(fetchedAtMs).toBeLessThanOrEqual(after);
   });
 
-  it("rejects when taskd is not reachable (loader converts this to a Response)", async () => {
-    const closed = await startMockTaskd();
+  it("rejects when celeris is not reachable (loader converts this to a Response)", async () => {
+    const closed = await startMockCeleris();
     const baseUrl = closed.baseUrl;
     await closed.close();
-    const unreachable = new TaskdClient({ baseUrl, timeoutMs: 1000 });
+    const unreachable = new CelerisClient({ baseUrl, timeoutMs: 1000 });
 
     await expect(loadProviders(unreachable, new Request("http://gui.invalid/providers"))).rejects.toBeTruthy();
   });

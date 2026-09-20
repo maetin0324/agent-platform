@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Status, TaskSummary } from "~/celeris/types";
 import {
   BOARD_COLUMNS,
   type BoardColumnId,
@@ -17,11 +18,10 @@ import {
   priorityValue,
   summaryPriorityLabel,
 } from "~/lib/board";
-import type { Status, TaskSummary } from "~/taskd/types";
-import { taskSummary } from "../mock-taskd/fixtures";
+import { taskSummary } from "../mock-celeris/fixtures";
 
 /**
- * ボードの純粋なヘルパー（ADR-0044 D3 / D4）。優先度の対応と丸めの境界は taskd の
+ * ボードの純粋なヘルパー（ADR-0044 D3 / D4）。優先度の対応と丸めの境界は celeris の
  * `task_core::PRIORITY_LABELS` / `priority_label` と同じでなければならない（GUI は並べ替えにだけ使う）。
  */
 describe("優先度の対応（ADR-0044 D3）", () => {
@@ -38,7 +38,7 @@ describe("優先度の対応（ADR-0044 D3）", () => {
     expect(DEFAULT_PRIORITY).toBe(PRIORITY_VALUES.P2);
   });
 
-  it("整数 → ラベル（taskd と同じ境界: >=30 → P0、>=20 → P1、>=10 → P2、それ未満 → P3）", () => {
+  it("整数 → ラベル（celeris と同じ境界: >=30 → P0、>=20 → P1、>=10 → P2、それ未満 → P3）", () => {
     expect(priorityLabelOf(30)).toBe("P0");
     expect(priorityLabelOf(31)).toBe("P0");
     expect(priorityLabelOf(29)).toBe("P1");
@@ -56,7 +56,7 @@ describe("優先度の対応（ADR-0044 D3）", () => {
     }
   });
 
-  it("行は taskd の `priority_label` を優先し、無い・知らない値のときだけ丸める", () => {
+  it("行は celeris の `priority_label` を優先し、無い・知らない値のときだけ丸める", () => {
     expect(summaryPriorityLabel({ priority: 0, priority_label: "P0" })).toBe("P0");
     expect(summaryPriorityLabel({ priority: 25, priority_label: "unknown" })).toBe("P1");
   });
@@ -192,7 +192,7 @@ describe("フィルタの読み書き（ADR-0044 D4）", () => {
   });
 });
 
-describe("ラベルの形（ADR-0044 D3。正は taskd。ここは入力補助）", () => {
+describe("ラベルの形（ADR-0044 D3。正は celeris。ここは入力補助）", () => {
   it("小文字の英数字とハイフンだけを通す", () => {
     expect(isValidLabel("pluvio")).toBe(true);
     expect(isValidLabel("a-1")).toBe(true);

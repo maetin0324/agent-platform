@@ -1,5 +1,53 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher, useNavigate } from "react-router";
+import type { ProjectOpOutcome, RetryOutcome, TransitionOutcome } from "~/celeris/action-types";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { formString } from "~/celeris/forms";
+import {
+  archiveProject,
+  cancelMilestone,
+  cancelProject,
+  createMilestone,
+  decideMilestone,
+  patchMilestoneStatus,
+  patchProjectStatus,
+  patchProjectWorkspace,
+  pauseMilestone,
+  pauseProject,
+  resumeMilestone,
+  resumeProject,
+  startProjectPlan,
+  unarchiveProject,
+} from "~/celeris/projects-admin.server";
+import {
+  createRepo,
+  deleteRepo,
+  patchRepo,
+  readRepoCreateBody,
+  readRepoPatchBody,
+  setPrimaryRepo,
+} from "~/celeris/repos-admin.server";
+import { createTask } from "~/celeris/route-actions.server";
+import { buildProjectTaskSpec } from "~/celeris/tasks-admin.server";
+import type {
+  ArtifactList,
+  Clusters,
+  ClusterView,
+  MilestoneDecideBody,
+  MilestoneStatus,
+  MilestoneView,
+  OrgList,
+  OrgNode,
+  ProjectDetail,
+  ProjectIntegrationItem,
+  ProjectIntegrations as ProjectIntegrationsView,
+  ProjectStatus,
+  ProjectTaskView,
+  ReportList,
+  TaskDetail,
+  TaskId,
+} from "~/celeris/types";
 import { ArtifactsList } from "~/components/ArtifactsList";
 import { ErrorFlash, FieldErrors, ProjectActionFlash, RetryFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
@@ -63,55 +111,7 @@ import { milestoneDecisionValid, milestoneIsStalled } from "~/lib/milestone-revi
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
 import { readWorkspaceFromForm, workspaceKindOf, workspaceSummaryText } from "~/lib/workspace-form";
-import { TaskdBanner } from "~/root";
-import type { ProjectOpOutcome, RetryOutcome, TransitionOutcome } from "~/taskd/action-types";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { formString } from "~/taskd/forms";
-import {
-  archiveProject,
-  cancelMilestone,
-  cancelProject,
-  createMilestone,
-  decideMilestone,
-  patchMilestoneStatus,
-  patchProjectStatus,
-  patchProjectWorkspace,
-  pauseMilestone,
-  pauseProject,
-  resumeMilestone,
-  resumeProject,
-  startProjectPlan,
-  unarchiveProject,
-} from "~/taskd/projects-admin.server";
-import {
-  createRepo,
-  deleteRepo,
-  patchRepo,
-  readRepoCreateBody,
-  readRepoPatchBody,
-  setPrimaryRepo,
-} from "~/taskd/repos-admin.server";
-import { createTask } from "~/taskd/route-actions.server";
-import { buildProjectTaskSpec } from "~/taskd/tasks-admin.server";
-import type {
-  ArtifactList,
-  Clusters,
-  ClusterView,
-  MilestoneDecideBody,
-  MilestoneStatus,
-  MilestoneView,
-  OrgList,
-  OrgNode,
-  ProjectDetail,
-  ProjectIntegrationItem,
-  ProjectIntegrations as ProjectIntegrationsView,
-  ProjectStatus,
-  ProjectTaskView,
-  ReportList,
-  TaskDetail,
-  TaskId,
-} from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/projects.$id";
 
 /**
@@ -120,12 +120,12 @@ import type { Route } from "./+types/projects.$id";
  * 「仕事の木」は `GET /projects/{id}` の `tasks`（`ProjectTaskView`、`parent_id` / `depends_on` は既存の DAG
  * と同じ辺の作り方）を `/graph` と同じ `layoutGraph`（`~/components/WorkTree.tsx`）で描く。
  * 各ノードには `assignee` の組織ノードの名前を出す（`GET /org` と突き合わせる。組織のノード名を出すだけで、
- * taskd 側の判断値は増やさない）。
+ * celeris 側の判断値は増やさない）。
  * 「報告」タブは `GET /reports?project=<id>`（**全レベル**。`level` を付けない。`/reports` の既定は秘書
  * レベルの未読だけだが、案件詳細ではこの案件のすべての段の報告を見せる。G13b-1 の依頼どおり）を
  * `/reports` と同じ `ReportsList` で出す。
  * 「成果物」節は `~/routes/artifacts.tsx`（横断一覧）と同じ組み立て（`~/lib/artifacts.ts::buildProjectArtifactRows`。
- * taskd への問い合わせ自体は各 loader に閉じる私的ヘルパー。下記コメント参照）で、この案件のタスクぶんだけを
+ * celeris への問い合わせ自体は各 loader に閉じる私的ヘルパー。下記コメント参照）で、この案件のタスクぶんだけを
  * `~/components/ArtifactsList.tsx` で出す（G13b-1 の「報告」タブと同じ作り）。
  */
 
@@ -135,11 +135,11 @@ export interface ProjectDetailData {
   reports: ReportList;
   artifactRows: ProjectArtifactRow[];
   fetchedAt: string;
-  /** 作業場所の編集フォームの選択肢（`GET /clusters`。ADR-0039 D1、Phase G13k）。taskd に届かないときは空。 */
+  /** 作業場所の編集フォームの選択肢（`GET /clusters`。ADR-0039 D1、Phase G13k）。celeris に届かないときは空。 */
   clusters: ClusterView[];
   /**
    * 「PR と取り込み」節（`GET /projects/{id}/integrations`。ADR-0043 D5、Phase 54 / G18）。
-   * タスク × リポジトリごとに最新の 1 件を taskd が新しい順で返す。落ちても案件の詳細自体は出す。
+   * タスク × リポジトリごとに最新の 1 件を celeris が新しい順で返す。落ちても案件の詳細自体は出す。
    */
   integrations: ProjectIntegrationItem[];
 }
@@ -150,7 +150,7 @@ export interface ProjectDetailData {
  * `loader`/`action` 等に限られるため、公開関数から `.server.ts` モジュールを参照しない。重複はこの小ささでは許容する）。
  */
 async function loadTaskArtifactBundles(
-  client: TaskdClient,
+  client: CelerisClient,
   taskIds: readonly TaskId[],
   signal: AbortSignal | undefined,
 ): Promise<Map<TaskId, TaskArtifactBundle>> {
@@ -174,7 +174,11 @@ async function loadTaskArtifactBundles(
   return new Map(entries);
 }
 
-export async function loadProjectDetail(client: TaskdClient, id: string, request: Request): Promise<ProjectDetailData> {
+export async function loadProjectDetail(
+  client: CelerisClient,
+  id: string,
+  request: Request,
+): Promise<ProjectDetailData> {
   const [detail, org, reports, clusters, integrations] = await Promise.all([
     client.get<ProjectDetail>(`/projects/${encodeURIComponent(id)}`, { signal: request.signal }),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
@@ -210,9 +214,9 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ params, request }: Route.LoaderArgs): Promise<ProjectDetailData> {
   try {
-    return await loadProjectDetail(getTaskdClient(), params.id, request);
+    return await loadProjectDetail(getCelerisClient(), params.id, request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -223,7 +227,7 @@ export function meta(_: Route.MetaArgs) {
 export async function action({ request, params }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
-  const client = getTaskdClient();
+  const client = getCelerisClient();
 
   let outcome: ProjectOpOutcome;
   switch (intent) {
@@ -260,8 +264,8 @@ export async function action({ request, params }: Route.ActionArgs) {
     case "project_workspace_clear":
       outcome = await patchProjectWorkspace(client, params.id, null, request.signal);
       break;
-    // 案件のリポジトリ（ADR-0043 D1、docs/taskd-api-v1.md §3.69〜3.71。Phase 52 / G16）。
-    // どれもフォームの値を対応する要求に写すだけで、GUI 側では検証しない（409 / 422 は taskd の文言）。
+    // 案件のリポジトリ（ADR-0043 D1、docs/celeris-api-v1.md §3.69〜3.71。Phase 52 / G16）。
+    // どれもフォームの値を対応する要求に写すだけで、GUI 側では検証しない（409 / 422 は celeris の文言）。
     case "repo_create":
       outcome = await createRepo(client, params.id, readRepoCreateBody(form), request.signal);
       break;
@@ -281,8 +285,8 @@ export async function action({ request, params }: Route.ActionArgs) {
       outcome = created.ok ? { ok: true, op: "task_create", task: created.task } : { ...created, op: "task_create" };
       break;
     }
-    // 中止・一時停止・アーカイブ（ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.91。Phase 55 / G19）。
-    // どれも本文は `{}` で、できるかどうかは taskd が決める（409 `invalid_transition` はそのまま出す）。
+    // 中止・一時停止・アーカイブ（ADR-0044 D6、docs/celeris-api-v1.md §3.84〜3.91。Phase 55 / G19）。
+    // どれも本文は `{}` で、できるかどうかは celeris が決める（409 `invalid_transition` はそのまま出す）。
     case "project_cancel":
       outcome = await cancelProject(client, params.id, request.signal);
       break;
@@ -339,7 +343,7 @@ const MILESTONE_STATUS_TONE: Record<MilestoneStatus, Tone> = {
 export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) {
   const { detail, org, reports, artifactRows, fetchedAt, clusters, integrations } = loaderData;
   const { project, milestones, tasks } = detail;
-  // ADR-0043 D1（Phase 52 / G16）: 並びは taskd が決めたもの（primary が先頭）をそのまま使う。
+  // ADR-0043 D1（Phase 52 / G16）: 並びは celeris が決めたもの（primary が先頭）をそのまま使う。
   const repos = detail.repos ?? [];
   const fetcher = useFetcher<ProjectOpOutcome>();
   const submitting = fetcher.state !== "idle";
@@ -521,7 +525,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
 
       {/* ADR-0043 D1（Phase 52 / G16）: 案件は「リポジトリ」を複数持つ（論文とコード、git ではない
           データの置き場）。`is_primary` の 1 件が上の「作業場所」と同じものを指す。並び・primary の
-          付け替え・削除できるかどうかは taskd が決めるので、ここは表示と中継だけ。 */}
+          付け替え・削除できるかどうかは celeris が決めるので、ここは表示と中継だけ。 */}
       <section aria-labelledby="project-repos-heading" data-testid="project-repos-section" className="space-y-4">
         <SectionTitle icon="database" id="project-repos-heading" count={repos.length}>
           リポジトリ
@@ -530,7 +534,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
       </section>
 
       {/* PR と取り込み（ADR-0043 D5、Phase 54 / G18）。タスク × リポジトリごとに最新の 1 件を
-          taskd が新しい順で返すので、並べ替えも集計もしない。操作はタスクの「変更」で行う。 */}
+          celeris が新しい順で返すので、並べ替えも集計もしない。操作はタスクの「変更」で行う。 */}
       <section
         aria-labelledby="project-integrations-heading"
         data-testid="project-integrations-section"
@@ -670,8 +674,8 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         </Card>
       </section>
 
-      {/* 「この方針で進める」（監査 H3、docs/taskd-api-v1.md §3.61）。押すと秘書に分解の仕事が 1 件立ち、
-          仕事の木が増えていく。案件が「提案中」でも押せる（taskd が「進行中」にする）。 */}
+      {/* 「この方針で進める」（監査 H3、docs/celeris-api-v1.md §3.61）。押すと秘書に分解の仕事が 1 件立ち、
+          仕事の木が増えていく。案件が「提案中」でも押せる（celeris が「進行中」にする）。 */}
       <section aria-labelledby="project-plan-heading" className="space-y-4">
         <SectionTitle icon="sparkles" id="project-plan-heading">
           この方針で進める
@@ -831,11 +835,11 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
 
 /**
  * 案件のヘッダの「一時停止／再開」「中止（確認付き）」「アーカイブ／アーカイブ解除（確認付き）」
- * （ADR-0044 D6、docs/taskd-api-v1.md §3.84〜3.88。Phase 55 / G19）。
+ * （ADR-0044 D6、docs/celeris-api-v1.md §3.84〜3.88。Phase 55 / G19）。
  *
  * 確認は `~/components/task-changes.tsx` の「捨てる（確認）」と同じ 2 段の fetcher フォーム
  * （`window.confirm` ではなく画面の中に出す。テストからも押せる）。
- * **押せるかどうかの最終判断は taskd**（409 `invalid_transition`）。ここは
+ * **押せるかどうかの最終判断は celeris**（409 `invalid_transition`）。ここは
  * `~/lib/lifecycle.ts::projectLifecycleButtons` で「その状態で意味のあるボタン」だけを出すだけで、
  * アーカイブは終端でなくても消さずに `disabled` にして理由を添える（何をすれば押せるかが分かるように）。
  */
@@ -1021,7 +1025,7 @@ function MilestoneLifecycleActions({ milestone }: { milestone: MilestoneView }) 
  * （`milestoneId` を渡すとその途中目標に属するタスクになる）。
  *
  * **人が作ったタスクは待機中（ready）で始まる**（`POST /tasks` の既定。人は Go を出す側なので
- * draft を挟まない）。検証は taskd（題名・目的・受け入れ条件が空なら 422）に任せ、その文言をそのまま出す。
+ * draft を挟まない）。検証は celeris（題名・目的・受け入れ条件が空なら 422）に任せ、その文言をそのまま出す。
  */
 function AddTaskForm({
   projectId,
@@ -1098,7 +1102,7 @@ function AddTaskForm({
                 data-testid={`${testId}-assignee`}
                 className={`${selectClass} mt-1.5`}
               >
-                <option value="">（taskd に任せる）</option>
+                <option value="">（celeris に任せる）</option>
                 {org.map((node) => (
                   <option key={node.id} value={node.id}>
                     {node.name}
@@ -1372,11 +1376,11 @@ function WorkTreeTaskRow({
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const data = error.data as TaskdRouteErrorData;
+    const data = error.data as CelerisRouteErrorData;
     if (data.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={data.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

@@ -12,7 +12,7 @@ import type { Route } from "./+types/help";
 
 /**
  * `/help`（使い方ページ、docs/DESIGN.md §10 Phase G6）。
- * taskd に問い合わせない静的なページ（loader 無し）。内容は `docs/taskd-api-v1.md` と
+ * celeris に問い合わせない静的なページ（loader 無し）。内容は `docs/celeris-api-v1.md` と
  * `docs/DESIGN.md` の範囲だけに留める（仕様に無い機能は書かない）。
  */
 export function meta(_: Route.MetaArgs) {
@@ -27,8 +27,8 @@ const STATUS_ROWS: { status: string; meaning: string; canDo: string }[] = [
   },
   {
     status: "ready",
-    meaning: "実行待ち（taskd が拾う）。kind=approval の ready は「人間の承認待ち」。",
-    canDo: "kind=approval なら承認／却下、それ以外は取り消しのみ（実行開始は taskd が行う）",
+    meaning: "実行待ち（celeris が拾う）。kind=approval の ready は「人間の承認待ち」。",
+    canDo: "kind=approval なら承認／却下、それ以外は取り消しのみ（実行開始は celeris が行う）",
   },
   { status: "running", meaning: "ワーカーが実行中。", canDo: "取り消しのみ（待つ）" },
   {
@@ -39,7 +39,7 @@ const STATUS_ROWS: { status: string; meaning: string; canDo: string }[] = [
   },
   {
     status: "reviewing",
-    meaning: "受け入れ条件を taskd（またはレビュー run）が判定中。",
+    meaning: "受け入れ条件を celeris（またはレビュー run）が判定中。",
     canDo: "取り消しのみ（待つ）",
   },
   { status: "done", meaning: "受け入れ条件を全て満たして完了。", canDo: "（終端。操作なし）" },
@@ -54,7 +54,7 @@ const STATUS_ROWS: { status: string; meaning: string; canDo: string }[] = [
 const GLOSSARY: { term: string; text: string }[] = [
   {
     term: "タスク",
-    text: "taskd が管理する作業単位。kind は execute / plan / approval / review、status で進行状況を表す。",
+    text: "celeris が管理する作業単位。kind は execute / plan / approval / review、status で進行状況を表す。",
   },
   {
     term: "run",
@@ -64,7 +64,7 @@ const GLOSSARY: { term: string; text: string }[] = [
     term: "プロバイダ（アカウント）",
     text: "ワーカーを起動する AI プロバイダの実行アカウント設定（tier・同時実行数・モデル）。",
   },
-  { term: "リース", text: "running 中のタスクに taskd が与える実行権限の期限。切れると requeue に回る。" },
+  { term: "リース", text: "running 中のタスクに celeris が与える実行権限の期限。切れると requeue に回る。" },
   { term: "requeue", text: "run が失敗する・リースが切れるなどでタスクが再び実行待ちに戻ること。" },
   {
     term: "cooldown",
@@ -76,7 +76,7 @@ const GLOSSARY: { term: string; text: string }[] = [
   },
   {
     term: "API キー",
-    text: "検索エンジン等（例: web-research 分野が使う Tavily・Exa の検索 API キー）をワーカーの環境変数に流し込むために taskd が預かる秘密。[secrets] dir 配下に 1 秘密 1 ファイル（0600）で保存され、値は保存後 GUI にも API 応答にも二度と表示されない。/accounts の「API キー」節から追加・更新・削除でき、保存・削除のたびに reload が走って設定（env_from_secrets）に反映される。",
+    text: "検索エンジン等（例: web-research 分野が使う Tavily・Exa の検索 API キー）をワーカーの環境変数に流し込むために celeris が預かる秘密。[secrets] dir 配下に 1 秘密 1 ファイル（0600）で保存され、値は保存後 GUI にも API 応答にも二度と表示されない。/accounts の「API キー」節から追加・更新・削除でき、保存・削除のたびに reload が走って設定（env_from_secrets）に反映される。",
   },
   {
     term: "Plan",
@@ -85,7 +85,7 @@ const GLOSSARY: { term: string; text: string }[] = [
   { term: "Approval", text: "人間の承認を待つための子タスク（kind=approval）。承認／却下で親の判定が決まる。" },
   {
     term: "成果物",
-    text: "ワーカーが taskd に明示的に登録したファイル（ディスクを自動スキャンして拾うことはしない）。SPEC §2.2「調査の案件を投げる — 終わったとき、GUI から調査結果の文書と見るべき関連研究へのリンクがまとまって読める」。/artifacts で案件を横断して一覧でき、Markdown（report.md 等）はその場で描画、sources.json はリンク集（url・title・引用の有無）として、その他の JSON は整形表示する。コードの置き場所（タスクの workspace）は SPEC §3.7「コードは ~/workspace/… のリポジトリ」どおり、リンクではなくコピー用のパス表示（ローカルなら vscode で開くリンクも添える）。",
+    text: "ワーカーが celeris に明示的に登録したファイル（ディスクを自動スキャンして拾うことはしない）。SPEC §2.2「調査の案件を投げる — 終わったとき、GUI から調査結果の文書と見るべき関連研究へのリンクがまとまって読める」。/artifacts で案件を横断して一覧でき、Markdown（report.md 等）はその場で描画、sources.json はリンク集（url・title・引用の有無）として、その他の JSON は整形表示する。コードの置き場所（タスクの workspace）は SPEC §3.7「コードは ~/workspace/… のリポジトリ」どおり、リンクではなくコピー用のパス表示（ローカルなら vscode で開くリンクも添える）。",
   },
   {
     term: "分野（genre）",
@@ -93,7 +93,7 @@ const GLOSSARY: { term: string; text: string }[] = [
   },
   {
     term: "接続方式（auth）",
-    text: "クラスタ（[[clusters]]）ごとに設定する、接続の張り方。manual（既定）は taskd が自分では接続を張らず、人が手元で scripts/cluster-login.sh を実行する。publickey は鍵だけで入れるクラスタで、クラスタ画面の「接続」ボタンを押すだけで taskd が張る（ディスパッチャが自動でも試みる）。totp は publickey の後に検証コード（2 要素認証）が要るクラスタで、「接続」→ 表示されたプロンプトを見て検証コードを入力 →「送信」。コードはその場で ssh に渡すだけで taskd には保存されず、ログにも画面にも残らない。",
+    text: "クラスタ（[[clusters]]）ごとに設定する、接続の張り方。manual（既定）は celeris が自分では接続を張らず、人が手元で scripts/cluster-login.sh を実行する。publickey は鍵だけで入れるクラスタで、クラスタ画面の「接続」ボタンを押すだけで celeris が張る（ディスパッチャが自動でも試みる）。totp は publickey の後に検証コード（2 要素認証）が要るクラスタで、「接続」→ 表示されたプロンプトを見て検証コードを入力 →「送信」。コードはその場で ssh に渡すだけで celeris には保存されず、ログにも画面にも残らない。",
   },
   {
     term: "組織",
@@ -259,7 +259,7 @@ const SCREENS: { href: string | null; icon: IconName; title: string; text: strin
     href: "/daemon",
     icon: "activity",
     title: "デーモン",
-    text: "taskd 本体の状態（pid・tick・実行中の run・承認待ち・経路なしのタスク）と replay を見る画面。taskd 自体の様子を確認したいときに開く。",
+    text: "celeris 本体の状態（pid・tick・実行中の run・承認待ち・経路なしのタスク）と replay を見る画面。celeris 自体の様子を確認したいときに開く。",
   },
 ];
 
@@ -308,13 +308,13 @@ export default function HelpPage() {
             ）
           </li>
           <li>人間が承認する（draft を受け入れる。kind=approval のタスクは承認／却下で判定する）</li>
-          <li>taskd がワーカーを起動する（人間は何もしない。順番・タイミングは taskd が決める）</li>
-          <li>taskd が受け入れ条件を自分で判定する（ワーカーの自己申告は信じない。再実行して確かめる）</li>
+          <li>celeris がワーカーを起動する（人間は何もしない。順番・タイミングは celeris が決める）</li>
+          <li>celeris が受け入れ条件を自分で判定する（ワーカーの自己申告は信じない。再実行して確かめる）</li>
           <li>条件を満たせば done。満たせなければ requeue して再試行するか failed になる</li>
         </ol>
         <p className="mt-3 text-sm text-fg-muted">
           人間が触るのは<strong className="font-semibold text-fg">承認・回答・取り消し</strong>だけ。何をいつ動かすかは
-          taskd が決める。
+          celeris が決める。
         </p>
       </Section>
 
@@ -349,7 +349,7 @@ export default function HelpPage() {
       >
         <p className="text-sm text-fg-muted">
           タスクの受け入れ条件（acceptance）は 4 種類。
-          <strong className="font-semibold text-fg">判定は taskd が自分で再実行して確かめる</strong>
+          <strong className="font-semibold text-fg">判定は celeris が自分で再実行して確かめる</strong>
           （ワーカーが「テストを通した」と言っても、それだけでは信じない）。
         </p>
         <dl className="mt-3 space-y-3 text-sm">
@@ -373,7 +373,7 @@ export default function HelpPage() {
               </code>
             </dt>
             <dd className="mt-1 text-fg-muted">
-              指定した名前の成果物が taskd に登録されていれば通る。 例:{" "}
+              指定した名前の成果物が celeris に登録されていれば通る。 例:{" "}
               <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-xs">
                 {'{"type":"artifact_exists","name":"bench.json"}'}
               </code>
@@ -452,16 +452,16 @@ export default function HelpPage() {
       <Section id="trouble" icon="help" tone="warning" heading="困ったとき" testId="help-trouble-section">
         <dl className="divide-y divide-border text-sm">
           <div className="py-3 first:pt-0">
-            <dt className="font-semibold text-fg">taskd が止まっている</dt>
+            <dt className="font-semibold text-fg">celeris が止まっている</dt>
             <dd className="mt-0.5 text-fg-muted">
-              画面上部に「taskd に接続できません」という赤い帯が出て操作できなくなる。5
-              秒ごとに自動で再接続を試みるので、taskd を起動すれば自動で消える。
+              画面上部に「celeris に接続できません」という赤い帯が出て操作できなくなる。5
+              秒ごとに自動で再接続を試みるので、celeris を起動すれば自動で消える。
             </dd>
           </div>
           <div className="py-3">
             <dt className="font-semibold text-fg">401</dt>
             <dd className="mt-0.5 text-fg-muted">
-              taskd への認証（トークン）が無い・違う場合はバナーで知らせる。GUI
+              celeris への認証（トークン）が無い・違う場合はバナーで知らせる。GUI
               自身のログインが切れている場合、通常のページはログイン画面に 戻るが、SSE や成果物の取得はその場で 401
               になる。
             </dd>
@@ -470,7 +470,7 @@ export default function HelpPage() {
             <dt className="font-semibold text-fg">401（プロバイダ・アカウントの追加/編集/削除）</dt>
             <dd className="mt-0.5 text-fg-muted">
               管理系 API（プロバイダ・アカウントの追加/編集/削除、reload）はトークンが必須。
-              <code>TASKD_API_TOKEN_FILE</code> を taskd の <code>[api] token_file</code> と同じ内容にして GUI
+              <code>CELERIS_API_TOKEN_FILE</code> を celeris の <code>[api] token_file</code> と同じ内容にして GUI
               を再起動する。
             </dd>
           </div>
@@ -489,7 +489,7 @@ export default function HelpPage() {
           <div className="py-3">
             <dt className="font-semibold text-fg">422</dt>
             <dd className="mt-0.5 text-fg-muted">
-              入力内容が taskd の検証に落ちた。フォームの該当欄の下にメッセージが出る。
+              入力内容が celeris の検証に落ちた。フォームの該当欄の下にメッセージが出る。
             </dd>
           </div>
           <div className="py-3">
@@ -500,10 +500,10 @@ export default function HelpPage() {
             </dd>
           </div>
           <div className="py-3 last:pb-0">
-            <dt className="font-semibold text-fg">docs/taskd-requests.md に書く場面</dt>
+            <dt className="font-semibold text-fg">docs/celeris-requests.md に書く場面</dt>
             <dd className="mt-0.5 text-fg-muted">
-              taskd の応答が `docs/taskd-api-v1.md` の記載と違う、または足りないと分かったとき、GUI
-              側の開発者がそこに現象と証拠を記録して taskd 側に依頼する（GUI では回避しない）。
+              celeris の応答が `docs/celeris-api-v1.md` の記載と違う、または足りないと分かったとき、GUI
+              側の開発者がそこに現象と証拠を記録して celeris 側に依頼する（GUI では回避しない）。
             </dd>
           </div>
         </dl>

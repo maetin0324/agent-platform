@@ -1,6 +1,10 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState } from "react";
 import { Form, Link, useFetcher, useSearchParams } from "react-router";
+import type { CelerisClient } from "~/celeris/client.server";
+import { getCelerisClient } from "~/celeris/client.server";
+import { celerisErrorResponse } from "~/celeris/errors";
+import type { ConfigView, OrgList, ProjectDetail, ProjectList, Status, TaskList, TaskSummary } from "~/celeris/types";
 import { HelpLink } from "~/components/HelpLink";
 import { KindBadge, RoleLabel, StatusBadge, statusTone } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -12,15 +16,11 @@ import { TONE_SOFT, TONE_SOLID_BG } from "~/components/ui/tone";
 import { buildTaskPlacements, type TaskPlacement } from "~/lib/project-index";
 import { cn } from "~/lib/utils";
 import { isSupportTask } from "~/lib/work-tree";
-import type { TaskdClient } from "~/taskd/client.server";
-import { getTaskdClient } from "~/taskd/client.server";
-import { taskdErrorResponse } from "~/taskd/errors";
-import type { ConfigView, OrgList, ProjectDetail, ProjectList, Status, TaskList, TaskSummary } from "~/taskd/types";
 import type { Route } from "./+types/tasks";
 
 /**
  * `/tasks`（一覧、docs/DESIGN.md §4.2）。`GET /tasks` の応答をそのまま使う（フィルタ・並び替え・ページングは
- * taskd に丸投げ。GUI は再計算しない）。taskd 停止中・エラーは `Response` に変換して投げ、root の
+ * celeris に丸投げ。GUI は再計算しない）。celeris 停止中・エラーは `Response` に変換して投げ、root の
  * ErrorBoundary がバナー等を出す（docs/adr/0003 D4、docs/adr/0004 D6）。
  */
 
@@ -36,10 +36,10 @@ const ROW_HEIGHT_PX = 56;
 const SCROLL_HEIGHT_PX = 480;
 
 /**
- * `request.url` の検索パラメータを `GET /tasks` のクエリにそのまま転送する（docs/taskd-api-v1.md §3.3）。
- * `TaskdClient` を引数に取ることでテスト可能にする（`app/taskd/health.server.ts` の `loadHealth` と同じ形）。
+ * `request.url` の検索パラメータを `GET /tasks` のクエリにそのまま転送する（docs/celeris-api-v1.md §3.3）。
+ * `CelerisClient` を引数に取ることでテスト可能にする（`app/celeris/health.server.ts` の `loadHealth` と同じ形）。
  */
-export async function loadTasks(client: TaskdClient, request: Request): Promise<TaskList> {
+export async function loadTasks(client: CelerisClient, request: Request): Promise<TaskList> {
   const params = new URL(request.url).searchParams;
   return client.get<TaskList>("/tasks", {
     query: {
@@ -50,7 +50,7 @@ export async function loadTasks(client: TaskdClient, request: Request): Promise<
       root_only: params.get("root_only") ?? undefined,
       q: params.get("q") ?? undefined,
       // ADR-0044 D6（Phase 55 / G19）: アーカイブされた案件のタスクは既定で隠れる。`?archived=1` で見える
-      // （隠す・出すの判断は taskd。GUI 側で絞り直さない）。
+      // （隠す・出すの判断は celeris。GUI 側で絞り直さない）。
       archived: params.get("archived") ?? undefined,
       order: params.get("order") ?? undefined,
       limit: params.get("limit") ?? undefined,
@@ -76,13 +76,13 @@ export interface TasksData {
  */
 /**
  * 裏方のタスクから案件・途中目標へ戻るための索引（監査 M2）。`TaskSummary` に `project_id` が無いので
- * `GET /projects` + 各案件の `GET /projects/{id}` を束ねる（`app/routes/artifacts.tsx` と同じく、taskd への
+ * `GET /projects` + 各案件の `GET /projects/{id}` を束ねる（`app/routes/artifacts.tsx` と同じく、celeris への
  * 問い合わせは loader に閉じた私的ヘルパーにする。公開関数から `.server.ts` を参照するとクライアント
  * バンドルからのサーバコード除去に引っかかるため）。**落ちても一覧は出す**（索引が空になるだけ）。
- * taskd 側に `TaskSummary.project_id` が入ったら、この束ねはやめられる（`docs/taskd-requests.md` R3）。
+ * celeris 側に `TaskSummary.project_id` が入ったら、この束ねはやめられる（`docs/celeris-requests.md` R3）。
  */
 async function loadTaskPlacements(
-  client: TaskdClient,
+  client: CelerisClient,
   signal: AbortSignal | undefined,
 ): Promise<Record<string, TaskPlacement>> {
   try {
@@ -100,7 +100,7 @@ async function loadTaskPlacements(
   }
 }
 
-export async function loadTasksPage(client: TaskdClient, request: Request): Promise<TasksData> {
+export async function loadTasksPage(client: CelerisClient, request: Request): Promise<TasksData> {
   const [tasks, config, placements, org] = await Promise.all([
     loadTasks(client, request),
     client.get<ConfigView>("/config", { signal: request.signal }),
@@ -113,9 +113,9 @@ export async function loadTasksPage(client: TaskdClient, request: Request): Prom
 
 export async function loader({ request }: Route.LoaderArgs): Promise<TasksData> {
   try {
-    return await loadTasksPage(getTaskdClient(), request);
+    return await loadTasksPage(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -134,15 +134,15 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
 
   // 裏方のタスク（`TaskSummary.support`: 対話・報告のまとめ・承認待ち・レビュー。Phase 29）は既定で隠す
   // （SPEC「タスクは裏方」/ ADR-0033 D8）。`show_support=1` はここだけの表示切り替えで、`GET /tasks` には
-  // 送らない（taskd に絞り込みは無い。`loadTasks` が転送するクエリの一覧に含めていないので taskd 側には
+  // 送らない（celeris に絞り込みは無い。`loadTasks` が転送するクエリの一覧に含めていないので celeris 側には
   // 届かない）。ページングは裏方を含めた元の `items` に対して行い、表示だけをこの真偽値でフィルタする。
   const showSupport = searchParams.get("show_support") === "1";
   const visibleItems = showSupport ? items : items.filter((item) => !isSupportTask(item));
 
   // フィルタ・並び順が変わって loader が新しい初期ページを返したら、蓄積分をリセットする。
-  // `taskList` は SSE（`useTaskdStream`、root で 1 本）による再検証のたびに新しい参照になるが、
+  // `taskList` は SSE（`useCelerisStream`、root で 1 本）による再検証のたびに新しい参照になるが、
   // 中身（1 ページ目の id 列と next_cursor）が同じなら「さらに読む」で蓄積した分を消してはいけない
-  // （そうしないと、taskd が動き続ける限り定期的に再検証が走り、蓄積したページが失われ続けてしまう）。
+  // （そうしないと、celeris が動き続ける限り定期的に再検証が走り、蓄積したページが失われ続けてしまう）。
   const firstPageKey = `${taskList.items.map((item) => item.id).join(",")}|${taskList.next_cursor ?? ""}`;
   const lastAppliedKey = useRef<string | null>(null);
   useEffect(() => {
@@ -200,7 +200,7 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="taskd に登録されたタスクを状態・種別・キーワードで絞り込んで確認します（GET /tasks をそのまま表示）。"
+        description="celeris に登録されたタスクを状態・種別・キーワードで絞り込んで確認します（GET /tasks をそのまま表示）。"
       />
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -318,7 +318,7 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                 </select>
               </label>
               {/* 裏方のタスク（対話の返事・報告のまとめ・承認待ち・レビュー）は既定で隠す（SPEC「タスクは裏方」）。
-                  taskd には絞り込みが無いので、表示だけを GUI 側で `TaskSummary.support` で切り替える。 */}
+                  celeris には絞り込みが無いので、表示だけを GUI 側で `TaskSummary.support` で切り替える。 */}
               <label className={chipLabelClass}>
                 <input
                   type="checkbox"
@@ -390,7 +390,7 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                     <span className="w-20 shrink-0">
                       <KindBadge kind={item.kind} />
                     </span>
-                    {/* 役割（ADR-0016 D1、taskd-requests R2）。色分けはせずテキストのラベルだけ。役割なしは空欄。 */}
+                    {/* 役割（ADR-0016 D1、celeris-requests R2）。色分けはせずテキストのラベルだけ。役割なしは空欄。 */}
                     <span className="w-20 shrink-0 truncate" data-testid="task-role" title={item.role ?? ""}>
                       {item.role ? <RoleLabel role={item.role} /> : ""}
                     </span>

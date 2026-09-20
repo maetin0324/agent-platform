@@ -40,11 +40,11 @@ PREV="$(sd_previous_sha)"
 CUR="$(sd_current_sha)"
 [ -n "$PREV" ] || sd_die "no \`previous\` release to roll back to ($SD_PREVIOUS)"
 PREV_DIR="$(sd_release_dir "$PREV")"
-[ -x "$PREV_DIR/bin/taskd" ] || sd_die "missing $PREV_DIR/bin/taskd"
+[ -x "$PREV_DIR/bin/celeris" ] || sd_die "missing $PREV_DIR/bin/celeris"
 PREV_SCHEMA="$(sd_json_get "$PREV_DIR/manifest.json" schema_version)" \
   || sd_die "$PREV_DIR/manifest.json has no schema_version"
 
-# DB の版数: 動いている taskd の health を優先し、駄目なら sqlite3 で直接読む（read-only）。
+# DB の版数: 動いている celeris の health を優先し、駄目なら sqlite3 で直接読む（read-only）。
 DB_SCHEMA=""
 if [ "$(sd_http_status "$SD_PROD_API/api/v1/health")" = 200 ]; then
   tmp="$(mktemp)"
@@ -84,9 +84,9 @@ sqlite3 "file:$SD_DB?mode=ro" ".backup '$PRE_ROLLBACK'" || sd_die "sqlite3 .back
 
 stop_unit_or_pid() {
   local sha="$1" pid argv i matched skip
-  if [ -n "$sha" ] && systemctl --user is-active --quiet "taskd@$sha"; then
-    sd_log "systemctl --user stop taskd@$sha"
-    systemctl --user stop "taskd@$sha" || sd_die "failed to stop taskd@$sha"
+  if [ -n "$sha" ] && systemctl --user is-active --quiet "celeris@$sha"; then
+    sd_log "systemctl --user stop celeris@$sha"
+    systemctl --user stop "celeris@$sha" || sd_die "failed to stop celeris@$sha"
     return 0
   fi
   for pid in /proc/[0-9]*; do
@@ -96,7 +96,7 @@ stop_unit_or_pid() {
     argv=()
     mapfile -d '' -t argv <"/proc/$pid/cmdline" 2>/dev/null || continue
     if [ "${#argv[@]}" -lt 3 ]; then continue; fi
-    if [ "$(basename -- "${argv[0]}")" != taskd ]; then continue; fi
+    if [ "$(basename -- "${argv[0]}")" != celeris ]; then continue; fi
     skip=false
     for i in "${argv[@]}"; do
       case "$i" in --mode | --db | --listen | --workspace-root | --token-file) skip=true ;; esac
@@ -107,50 +107,50 @@ stop_unit_or_pid() {
       if [ "${argv[$i]}" = "--config" ] && [ "${argv[$((i + 1))]}" = "$SD_CONFIG" ]; then matched=true; fi
     done
     if [ "$matched" != true ]; then continue; fi
-    sd_log "SIGTERM taskd pid=$pid"
+    sd_log "SIGTERM celeris pid=$pid"
     kill -TERM "$pid" || true
     local waited=0
     while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
       sleep 1
       waited=$((waited + 1))
     done
-    if kill -0 "$pid" 2>/dev/null; then sd_die "taskd pid $pid did not exit"; fi
+    if kill -0 "$pid" 2>/dev/null; then sd_die "celeris pid $pid did not exit"; fi
     return 0
   done
-  sd_log "no running taskd found"
+  sd_log "no running celeris found"
 }
 
 stop_unit_or_pid "$CUR"
-if [ -n "$CUR" ] && systemctl --user is-active --quiet "taskd-gui@$CUR"; then
-  sd_log "systemctl --user stop taskd-gui@$CUR"
-  systemctl --user stop "taskd-gui@$CUR" || sd_log "warning: stop taskd-gui@$CUR failed"
+if [ -n "$CUR" ] && systemctl --user is-active --quiet "celeris-gui@$CUR"; then
+  sd_log "systemctl --user stop celeris-gui@$CUR"
+  systemctl --user stop "celeris-gui@$CUR" || sd_log "warning: stop celeris-gui@$CUR failed"
 fi
 
 sd_log "restoring $SRC over $SD_DB (and dropping -wal / -shm)"
 cp -p "$SRC" "$SD_DB"
 rm -f "$SD_DB-wal" "$SD_DB-shm"
 
-sd_log "systemctl --user start taskd@$PREV"
-systemctl --user start "taskd@$PREV" || sd_die "failed to start taskd@$PREV (the DB was restored from $SRC)"
+sd_log "systemctl --user start celeris@$PREV"
+systemctl --user start "celeris@$PREV" || sd_die "failed to start celeris@$PREV (the DB was restored from $SRC)"
 if ! sd_wait_http_200 "$SD_PROD_API/api/v1/health" 60; then
-  sd_die "taskd@$PREV did not become healthy within 60s (the DB was restored from $SRC; $PRE_ROLLBACK holds the DB as it was before this rollback)"
+  sd_die "celeris@$PREV did not become healthy within 60s (the DB was restored from $SRC; $PRE_ROLLBACK holds the DB as it was before this rollback)"
 fi
 tmp="$(mktemp)"
 sd_http_get "$SD_PROD_API/api/v1/health" >"$tmp" || true
 GOT="$(sd_json_get "$tmp" schema_version || echo '?')"
 rm -f "$tmp"
-sd_log "taskd@$PREV is healthy: schema_version=$GOT (previous SCHEMA_VERSION=$PREV_SCHEMA)"
+sd_log "celeris@$PREV is healthy: schema_version=$GOT (previous SCHEMA_VERSION=$PREV_SCHEMA)"
 
-systemctl --user enable "taskd@$PREV" || sd_log "warning: enable taskd@$PREV failed"
+systemctl --user enable "celeris@$PREV" || sd_log "warning: enable celeris@$PREV failed"
 if [ -n "$CUR" ]; then
-  systemctl --user disable "taskd@$CUR" || sd_log "warning: disable taskd@$CUR failed"
+  systemctl --user disable "celeris@$CUR" || sd_log "warning: disable celeris@$CUR failed"
 fi
-systemctl --user start "taskd-gui@$PREV" || sd_die "taskd is back on $PREV but taskd-gui@$PREV did not start"
+systemctl --user start "celeris-gui@$PREV" || sd_die "celeris is back on $PREV but celeris-gui@$PREV did not start"
 sd_wait_http_200 "http://127.0.0.1:$SD_PROD_GUI_PORT/healthz" 60 \
   || sd_log "warning: the GUI did not answer /healthz within 60s"
-systemctl --user enable "taskd-gui@$PREV" || sd_log "warning: enable taskd-gui@$PREV failed"
+systemctl --user enable "celeris-gui@$PREV" || sd_log "warning: enable celeris-gui@$PREV failed"
 if [ -n "$CUR" ]; then
-  systemctl --user disable "taskd-gui@$CUR" || sd_log "warning: disable taskd-gui@$CUR failed"
+  systemctl --user disable "celeris-gui@$CUR" || sd_log "warning: disable celeris-gui@$CUR failed"
 fi
 
 if [ -n "$CUR" ] && [ -d "$(sd_release_dir "$CUR")" ]; then

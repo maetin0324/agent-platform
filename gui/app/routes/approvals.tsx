@@ -1,4 +1,25 @@
 import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
+import type { ApprovalOpOutcome, StandingRuleOpOutcome } from "~/celeris/action-types";
+import {
+  buildApprovalDecideInput,
+  buildStandingRuleCreateInput,
+  createStandingRule,
+  decideApproval,
+  deleteStandingRule,
+} from "~/celeris/approvals-admin.server";
+import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
+import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
+import { formString } from "~/celeris/forms";
+import type {
+  Approval,
+  ApprovalList,
+  OrgList,
+  OrgNode,
+  Project,
+  ProjectList,
+  StandingRule,
+  StandingRuleList,
+} from "~/celeris/types";
 import { ApprovalActionFlash, StandingRuleActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
@@ -20,41 +41,20 @@ import { decisionLabel } from "~/lib/labels";
 import { relativeTimeLabel } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
-import { TaskdBanner } from "~/root";
-import type { ApprovalOpOutcome, StandingRuleOpOutcome } from "~/taskd/action-types";
-import {
-  buildApprovalDecideInput,
-  buildStandingRuleCreateInput,
-  createStandingRule,
-  decideApproval,
-  deleteStandingRule,
-} from "~/taskd/approvals-admin.server";
-import { getTaskdClient, type TaskdClient } from "~/taskd/client.server";
-import { type TaskdRouteErrorData, taskdErrorResponse } from "~/taskd/errors";
-import { formString } from "~/taskd/forms";
-import type {
-  Approval,
-  ApprovalList,
-  OrgList,
-  OrgNode,
-  Project,
-  ProjectList,
-  StandingRule,
-  StandingRuleList,
-} from "~/taskd/types";
+import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/approvals";
 
 /**
  * `/approvals`（認可の要求 + 永続の認可の一覧と編集、SPEC §3.6・§4 の 5、ADR-0033 D5、
- * docs/taskd-api-v1.md §3.56〜3.60。Phase G13d、taskd 側 Phase 26 に追従）。
+ * docs/celeris-api-v1.md §3.56〜3.60。Phase G13d、celeris 側 Phase 26 に追従）。
  * 上に**未決の要求**、下に**決めたもの**の履歴、さらに下に**永続の認可の一覧と編集**
  * （`GET/POST/DELETE /standing-rules`）。案件名・ノード名は `GET /projects` / `GET /org` から解決する
- * （taskd 側に判断値を作らせない。`~/lib/approvals.ts`）。
- * **`GET /approvals?pending=true` / `?pending=false` の 2 回呼び**（Phase 27 で taskd 側が
- * `pending=false` を「決定済みだけ」に絞り込むよう直した。`docs/taskd-requests.md` R5 解決済み）。
+ * （celeris 側に判断値を作らせない。`~/lib/approvals.ts`）。
+ * **`GET /approvals?pending=true` / `?pending=false` の 2 回呼び**（Phase 27 で celeris 側が
+ * `pending=false` を「決定済みだけ」に絞り込むよう直した。`docs/celeris-requests.md` R5 解決済み）。
  * G13d では実機で `pending=false` が絞り込まないことを確認し、フィルタ無しの 1 回取得 + GUI 側
- * `splitApprovals`（`Approval.decision` の有無で分ける）で回避していたが、taskd 側の絞り込みに戻した
- * （クエリの絞り込みを taskd に任せる方が本来の設計。`splitApprovals` は不要になったので削除した）。
+ * `splitApprovals`（`Approval.decision` の有無で分ける）で回避していたが、celeris 側の絞り込みに戻した
+ * （クエリの絞り込みを celeris に任せる方が本来の設計。`splitApprovals` は不要になったので削除した）。
  */
 
 export interface ApprovalsData {
@@ -66,7 +66,7 @@ export interface ApprovalsData {
   fetchedAt: string;
 }
 
-export async function loadApprovals(client: TaskdClient, request: Request): Promise<ApprovalsData> {
+export async function loadApprovals(client: CelerisClient, request: Request): Promise<ApprovalsData> {
   const [pendingList, decidedList, org, projects, standingRules] = await Promise.all([
     client.get<ApprovalList>("/approvals", { query: { pending: true }, signal: request.signal }),
     client.get<ApprovalList>("/approvals", { query: { pending: false }, signal: request.signal }),
@@ -88,9 +88,9 @@ export const shouldRevalidate = revalidateAfterActionErrors;
 
 export async function loader({ request }: Route.LoaderArgs): Promise<ApprovalsData> {
   try {
-    return await loadApprovals(getTaskdClient(), request);
+    return await loadApprovals(getCelerisClient(), request);
   } catch (e) {
-    throw taskdErrorResponse(e);
+    throw celerisErrorResponse(e);
   }
 }
 
@@ -99,14 +99,14 @@ export function meta(_: Route.MetaArgs) {
 }
 
 /**
- * 3 つの intent（すべて管理系。ADR-0033 D5）。GUI 側では判断しない: フォームの値をそのまま taskd に送るだけ。
+ * 3 つの intent（すべて管理系。ADR-0033 D5）。GUI 側では判断しない: フォームの値をそのまま celeris に送るだけ。
  * `approval_decide` は 3 つのボタン（`name="decision"`）のどれが押されたかで `once`/`standing`/`denied` が決まる
  * （`app/routes/tasks.$id.tsx` の approve/reject と違い、`answer` の欄を 1 つに共有するため 1 つの `<Form>` にした）。
  */
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
-  const client = getTaskdClient();
+  const client = getCelerisClient();
 
   switch (intent) {
     case "approval_decide": {
@@ -492,11 +492,11 @@ function StandingRuleRow({ rule, org }: { rule: StandingRule; org: OrgNode[] }) 
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error) && error.data && typeof error.data === "object" && "kind" in error.data) {
-    const errorData = error.data as TaskdRouteErrorData;
+    const errorData = error.data as CelerisRouteErrorData;
     if (errorData.kind === "unavailable") {
       return (
         <main className="p-4">
-          <TaskdBanner taskdApiUrl={errorData.baseUrl ?? ""} problem={null} />
+          <CelerisBanner celerisApiUrl={errorData.baseUrl ?? ""} problem={null} />
         </main>
       );
     }

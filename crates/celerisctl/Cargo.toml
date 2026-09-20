@@ -1,0 +1,23 @@
+[package]
+name = "celerisctl"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "celerisctl"
+path = "src/main.rs"
+
+[dependencies]
+task-core = { path = "../task-core" }
+task-ops = { path = "../task-ops" }
+task-worker = { path = "../task-worker" }
+task-dispatch = { path = "../task-dispatch" }
+celeris = { path = "../celeris" }
+clap = { version = "4", features = ["derive", "env"] }
+time = { version = "0.3", features = ["formatting"] }
+thiserror = "2"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "signal"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/selfdeploy/status.sh — ADR-0040 D2。いまの current / previous、リリース一覧（gate と verify の
-# 要約）、本番 taskd（127.0.0.1:7710）と GUI（127.0.0.1:7700）の health、`daemon_instances`（D4）を
+# 要約）、本番 celeris（127.0.0.1:7710）と GUI（127.0.0.1:7700）の health、`daemon_instances`（D4）を
 # JSON 1 つで出す。**読むだけ**（誰が実行してもよい）。
 set -euo pipefail
 
@@ -43,7 +43,7 @@ if [ "$(sd_http_status "http://127.0.0.1:$SD_PROD_GUI_PORT/healthz")" = 200 ]; t
   GUI_HEALTH_JSON="$(sd_http_get "http://127.0.0.1:$SD_PROD_GUI_PORT/healthz" || echo null)"
 fi
 
-export SD_RELEASES SD_CURRENT SD_PREVIOUS TASKD_HOME SD_BACKUPS
+export SD_RELEASES SD_CURRENT SD_PREVIOUS CELERIS_CONFIG_DIR CELERIS_STATE_DIR SD_BACKUPS
 export SD_STATUS_AT="$(sd_ts)"
 export SD_STATUS_HEALTH="$HEALTH_JSON"
 export SD_STATUS_GUI_HEALTH="$GUI_HEALTH_JSON"
@@ -135,7 +135,7 @@ if os.path.isdir(releases_dir):
             "ref": manifest.get("ref"),
             "built_at": manifest.get("built_at"),
             "schema_version": manifest.get("schema_version"),
-            "taskd_version": manifest.get("taskd_version"),
+            "celeris_version": manifest.get("celeris_version"),
             "gate": {
                 "ok": bool(gate.get("ok")),
                 "failed_step": gate.get("failed_step") or None,
@@ -150,14 +150,15 @@ if os.path.isdir(releases_dir):
             },
             "is_current": name == current,
             "is_previous": name == previous,
-            "has_bin": os.path.isfile(os.path.join(d, "bin", "taskd")),
+            "has_bin": os.path.isfile(os.path.join(d, "bin", "celeris")),
         })
 
 items.sort(key=lambda i: (i["built_at"] or ""), reverse=True)
 
 out = {
     "at": os.environ.get("SD_STATUS_AT"),
-    "taskd_home": os.environ.get("TASKD_HOME"),
+    "config_dir": os.environ.get("CELERIS_CONFIG_DIR"),
+    "state_dir": os.environ.get("CELERIS_STATE_DIR"),
     "current": current,
     "previous": previous,
     "health": parse_env_json("SD_STATUS_HEALTH"),

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# 実 taskd（`scripts/taskd.sh fixture basic && scripts/taskd.sh start basic`）から
+# 実 celeris（`scripts/celeris.sh fixture basic && scripts/celeris.sh start basic`）から
 # `test/fixtures/api/*.json` を採取する（docs/DESIGN.md §10 Phase G1）。
-# 型の検証は `test/fixtures/api-types.check.ts` を `pnpm typecheck` に含めることで行う（taskd の crate には依存しない）。
+# 型の検証は `test/fixtures/api-types.check.ts` を `pnpm typecheck` に含めることで行う（celeris の crate には依存しない）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/test/fixtures/api"
-BASE="${TASKD_API_URL:-http://127.0.0.1:7710}/api/v1"
+BASE="${CELERIS_API_URL:-http://127.0.0.1:7710}/api/v1"
 mkdir -p "$OUT"
 
 fetch() { curl -sf "$BASE$1" | python3 -m json.tool; }

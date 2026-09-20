@@ -1,0 +1,48 @@
+# fixture accounts（gui/docs/adr/0012-provider-and-account-management.md D4、e2e/g8.spec.ts・g9.spec.ts）:
+# 管理系 API（トークン必須）+ providers_include（プロバイダの追加/編集/削除）+ [accounts]（claude-code / codex 両方の
+# アカウントのプール、ADR-0025）。通常タスク用のワーカーは fake（adapters.fake）のままでよい。claude-code / codex は
+# e2e が GUI から作る account_pool プロバイダ用にそれぞれスタブの `claude` / `codex` を指す。
+# 相対パスは設定ファイルのあるディレクトリ（.run/accounts/）基準。@RUN_DIR@ / @API_LISTEN@ は celeris.sh が置換する。
+db = "celeris.sqlite3"
+workspace_root = "workspaces"
+tick_ms = 200
+max_concurrency = 2
+lease_grace_secs = 60
+idle_timeout_secs = 30
+kill_grace_secs = 1
+review_timeout_secs = 30
+error_cooldown_secs = 300
+retry_backoff_base_secs = 0
+retry_backoff_max_secs = 0
+max_requeues = 5
+providers_include = "providers.d/*.toml"
+
+[plan]
+auto_accept = false
+
+[reviewer]
+tier = "standard"
+
+[api]
+token_file = "api.token"
+listen = "@API_LISTEN@"
+
+[accounts]
+claude_dir = "claude-accounts"
+codex_dir = "codex-accounts"
+
+[adapters.fake]
+command = ["sh", "@RUN_DIR@/fake-worker.sh"]
+
+[adapters.claude_code]
+command = "@RUN_DIR@/claude-stub.sh"
+
+[adapters.codex]
+command = "@RUN_DIR@/codex-stub.sh"
+
+[[providers]]
+id = "fake-local"
+adapter = "fake"
+tiers = ["frontier", "standard", "cheap"]
+concurrency = 2
+model = "fake"

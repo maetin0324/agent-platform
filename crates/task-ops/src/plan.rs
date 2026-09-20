@@ -1,4 +1,4 @@
-//! `taskctl plan` の判断 — DESIGN.md §5.9 / ADR-0007 D6 / ADR-0010 D4（P-19, ADR-0013 D7）。
+//! `celerisctl plan` の判断 — DESIGN.md §5.9 / ADR-0007 D6 / ADR-0010 D4（P-19, ADR-0013 D7）。
 //!
 //! 大目標を表す文字列 1 つから根の `Plan` タスクを組み立て、`TaskStore::create_task` で
 //! `insert` + `Event::Created` を単一トランザクションとして書き込む（ADR-0010 D2）。
@@ -18,7 +18,7 @@ use crate::error::OpsError;
 
 const TITLE_MAX_CHARS: usize = 80;
 
-/// `taskctl plan` から組み立てる新規 Plan タスクの指定。API の `POST /plans` の本文でもある（`docs/gui/api.md` §3.14）。
+/// `celerisctl plan` から組み立てる新規 Plan タスクの指定。API の `POST /plans` の本文でもある（`docs/gui/api.md` §3.14）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewPlanSpec {

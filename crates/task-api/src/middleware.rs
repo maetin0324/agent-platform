@@ -244,13 +244,13 @@ mod tests {
         let listen: SocketAddr = "10.0.0.5:7710".parse().unwrap_or_else(|e| panic!("{e}"));
         let hosts = allowed_host_list(
             listen,
-            &["Taskd.Lab.Example".to_string(), "::1".to_string(), "fe80::1".to_string()],
+            &["Celeris.Lab.Example".to_string(), "::1".to_string(), "fe80::1".to_string()],
         );
         assert!(hosts.contains(&"localhost".to_string()));
         assert!(hosts.contains(&"127.0.0.1".to_string()));
         assert!(hosts.contains(&"[::1]".to_string()));
         assert!(hosts.contains(&"10.0.0.5".to_string()));
-        assert!(hosts.contains(&"taskd.lab.example".to_string()));
+        assert!(hosts.contains(&"celeris.lab.example".to_string()));
         assert!(hosts.contains(&"[fe80::1]".to_string()));
         assert_eq!(hosts.iter().filter(|h| *h == "[::1]").count(), 1);
     }
